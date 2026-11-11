@@ -31,7 +31,6 @@ struct Effect {
 class Effects {
 public:
     void Add(const Effect &One) { Live.push_back(One); }
-    void Clear() { Live.clear(); }
     // Whatever has run its time is dropped.
     void Prune(std::uint64_t Now);
     bool Busy() const { return !Live.empty(); }

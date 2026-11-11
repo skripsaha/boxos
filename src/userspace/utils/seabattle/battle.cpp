@@ -75,6 +75,7 @@ void BattlePage::Aimed()
 void BattlePage::Fire(int Row, int Col)
 {
     Before = Game().Aimed().Waters;
+    Counted = std::array<Stats, 2>{Game().At(0).Record, Game().At(1).Record};
     Last = Game().Fire(Row, Col);
     const GridView &At = Target();
     const GridView &From = PersonShoots() ? Place.Own : Place.Aim;
@@ -128,6 +129,7 @@ void BattlePage::Impacted()
 void BattlePage::Settle()
 {
     Before.reset();
+    Counted.reset();
     Said = Spoken(Last);
     const char *Word = Last.Shot.Result == Outcome::Miss ? "miss" : (Last.Shot.Result == Outcome::Hit ? "hit" : "SUNK");
     Calls.push_back(std::format("{} {}", CellName(Last.Row, Last.Col), Word));

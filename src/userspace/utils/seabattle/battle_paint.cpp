@@ -22,11 +22,21 @@ constexpr int GuideShare = 22;
 
 }  // namespace
 
+const Board &BattlePage::WatersOf(int Side) const
+{
+    return Before && Side == 1 - Game().Current() ? *Before : Game().At(Side).Waters;
+}
+
+const Stats &BattlePage::FiguresOf(int Side) const
+{
+    return Counted ? (*Counted)[static_cast<std::size_t>(Side)] : Game().At(Side).Record;
+}
+
 BoardScene BattlePage::SceneOf(bool Enemy) const
 {
     const GridView &At = Enemy ? Place.Aim : Place.Own;
     const bool      Fired = Enemy == PersonShoots();
-    const Board    &Waters = Fired && Before ? *Before : Game().At(Enemy ? 1 - Viewer : Viewer).Waters;
+    const Board    &Waters = WatersOf(Enemy ? 1 - Viewer : Viewer);
     BoardScene      Scene{.Waters = Waters, .At = At, .Shown = Ctx.Chosen, .Ms = Ctx.Now, .Text = Ctx.Text(), .ShowShips = !Enemy};
     if (!Fired) return Scene;
     if (Before) {
@@ -109,17 +119,17 @@ void BattlePage::PaintFigures(tui::Frame &Out) const
     const Look &Shown = Ctx.Chosen;
     const std::int32_t Row = Out.Size().Height - 3;
     // The streak is left out where the line would not fit beside the other player's.
-    const auto Figures = [&](const Player &One, bool Streak) {
-        std::string Line = std::format("{}  shots {}  hits {}  {}%", One.Name, One.Record.Shots, One.Record.Hits, One.Record.AccuracyPercent());
-        return Streak ? Line + std::format("  streak {}", One.Record.Streak) : Line;
+    const auto Figures = [&](int Side, bool Streak) {
+        const Stats &Held = FiguresOf(Side);
+        std::string  Line = std::format("{}  shots {}  hits {}  {}%", Game().At(Side).Name, Held.Shots, Held.Hits, Held.AccuracyPercent());
+        return Streak ? Line + std::format("  streak {}", Held.Streak) : Line;
     };
     Out.Fill(core::Rect{0, Row, Out.Size().Width, 1}, ' ', {Shown.Text, Shown.Bars});
-    const Player &Mine = Game().At(Viewer), &Theirs = Game().At(1 - Viewer);
     const std::int32_t Left = std::max(0, Place.Aim.Frame().X - 2);
     const std::int32_t Room = Out.Size().Width / 2 - Left - 1;
-    const bool Streak = static_cast<std::int32_t>(std::max(tui::CellsOf(Figures(Mine, true)), tui::CellsOf(Figures(Theirs, true)))) <= Room;
-    tui::PutText(Out, core::Point{Left, Row}, Figures(Mine, Streak), Room, Game().Current() == Viewer ? Shown.Title : Shown.Text, Shown.Bars);
-    const std::string Other = Figures(Theirs, Streak);
+    const bool Streak = static_cast<std::int32_t>(std::max(tui::CellsOf(Figures(Viewer, true)), tui::CellsOf(Figures(1 - Viewer, true)))) <= Room;
+    tui::PutText(Out, core::Point{Left, Row}, Figures(Viewer, Streak), Room, Game().Current() == Viewer ? Shown.Title : Shown.Text, Shown.Bars);
+    const std::string Other = Figures(1 - Viewer, Streak);
     const auto        Wide = std::min(Room, static_cast<std::int32_t>(tui::CellsOf(Other)));
     tui::PutText(Out, core::Point{Out.Size().Width - Wide - Left, Row}, Other, Wide, Game().Current() != Viewer ? Shown.Title : Shown.Text, Shown.Bars);
 }
@@ -145,14 +155,17 @@ void BattlePage::Words(tui::Frame &Out)
         : std::format("turn {}: {} to fire", Game().TurnNumber(), Game().Shooting().Name);
     PaintBar(Out, Shown, "SEA BATTLE", Note);
     const bool Aiming = Now == Phase::Aim && PersonShoots();
-    LabelBoard(Out, Shown, Place.Aim, std::format("{}'s waters", Theirs.Name), Aiming ? CursorRow : -1, Aiming ? CursorCol : -1);
-    LabelBoard(Out, Shown, Place.Own, std::format("{}'s fleet", Mine.Name));
-    PaintRoster(Out, Theirs.Waters, Place.Aim, false);
-    PaintRoster(Out, Mine.Waters, Place.Own, true);
+    const auto Afloat = [&](int Side) {
+        return std::format("{} of {} ships afloat", WatersOf(Side).Afloat(), WatersOf(Side).Ships().size());
+    };
+    LabelBoard(Out, Shown, Place.Aim, std::format("{}'s waters", Theirs.Name), Aiming ? CursorRow : -1, Aiming ? CursorCol : -1, Afloat(1 - Viewer));
+    LabelBoard(Out, Shown, Place.Own, std::format("{}'s fleet", Mine.Name), -1, -1, Afloat(Viewer));
+    PaintRoster(Out, WatersOf(1 - Viewer), Place.Aim, false);
+    PaintRoster(Out, WatersOf(Viewer), Place.Own, true);
     PaintFigures(Out);
     PaintSaid(Out, Size.Height - 2, Said, SaidGood ? Shown.Text : Shown.Bad, Shown.Bars);
     if (Aiming) PaintHints(Out, Shown, {{"\xE2\x86\x95\xE2\x86\x94", "aim", 1}, {"enter", "fire", 0, true}, {Spelled(Shown, KeyHelp), "keys", 2}, {"esc", "leave", 3}});
-    else if (Now == Phase::Hold) PaintHints(Out, Shown, {{"enter", "pass the screen now", 0}, {"esc", "leave", 1}});
+    else if (Now == Phase::Hold) PaintHints(Out, Shown, {{"enter", Game().VsComputer() ? "go on" : "pass the screen now", 0}, {"esc", "leave", 1}});
     else PaintHints(Out, Shown, {{"esc", "leave", 0}});
     if (Help) PaintHelp(Out);
     Leaving.Paint(Out, Shown);

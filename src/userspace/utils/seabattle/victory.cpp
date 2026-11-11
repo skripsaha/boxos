@@ -37,12 +37,12 @@ constexpr std::array<Choice, 4> Choices = {{{"Rematch", PageId::Place, true}, {"
 // A pennant on a pole, its cloth in three bands, rippling from the pole outwards.
 void PaintFlag(Canvas &Out, int X, int Y, std::uint64_t Ms, std::array<Color, 3> Bands, bool Right)
 {
-    const int Wide = 15, High = 6;
-    Out.Fill(X, Y - 1, 1, High + 5, Rgb(0x8A, 0x6A, 0x44));
+    const int Wide = 20, High = 4;
+    Out.Fill(X, Y - 1, 1, High + 1, Rgb(0xC8, 0xA8, 0x60));
     for (int Across = 0; Across < Wide; Across++) {
         const float Ripple = Wave(static_cast<float>(Across) * 0.085f - static_cast<float>(Ms % 1800) / 1800.0f);
-        const float Lift = Ripple * 1.4f * static_cast<float>(Across) / static_cast<float>(Wide);
-        const int   Tip = High - Across * High / (2 * Wide);
+        const float Lift = Ripple * 1.0f * static_cast<float>(Across) / static_cast<float>(Wide);
+        const int   Tip = High - Across * 2 / Wide;
         for (int Down = 0; Down < Tip; Down++) {
             const Color Cloth = Bands[static_cast<std::size_t>(Down * 3 / High)];
             const int   Column = Right ? X + 1 + Across : X - 1 - Across;
@@ -129,8 +129,8 @@ void VictoryPage::Pixels(Canvas &Out)
     PaintBoard(Out, SceneOf(1));
     const std::array<Color, 3> Bands = {Ctx.Chosen.Fire, Rgb(0xF4, 0xF4, 0xF4), Ctx.Chosen.Title};
     const int                  Middle = Out.Width / 2;
-    PaintFlag(Out, Middle - 34, 3, Ctx.Now, Bands, true);
-    PaintFlag(Out, Middle + 34, 3, Ctx.Now + 700, Bands, false);
+    PaintFlag(Out, Middle - 30, 3, Ctx.Now, Bands, false);
+    PaintFlag(Out, Middle + 30, 3, Ctx.Now + 700, Bands, true);
     Fx.DrawPixels(Out, Ctx.Now);
 }
 

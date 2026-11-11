@@ -37,7 +37,9 @@ void PaintBoard(Canvas &Out, const BoardScene &Scene);
 void ShapeBoard(painter::tui::FineCanvas &Out, const BoardScene &Scene);
 // The frame, the letters over the columns and the numbers beside the rows, and the title over them.
 // A column and a row given are marked as the one the cursor is on.
-void LabelBoard(painter::tui::Frame &Out, const Look &Shown, const GridView &At, std::string_view Title, int Row = -1, int Col = -1);
+// Foot, when given, is set in the frame's bottom edge.
+void LabelBoard(painter::tui::Frame &Out, const Look &Shown, const GridView &At, std::string_view Title, int Row = -1, int Col = -1,
+                std::string_view Foot = {});
 
 }  // namespace seabattle
 

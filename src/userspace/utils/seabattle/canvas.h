@@ -41,7 +41,6 @@ public:
         if (Inside(X, Y)) Put(X, Y, Added(Read(X, Y), Red, Green, Blue));
     }
     void Fill(int X, int Y, int Wide, int High, Color Ink);
-    void Line(int X0, int Y0, int X1, int Y1, Color Ink);
     // A soft round light added over what is there: Strength 0..256 at the middle, none at Radius.
     void Glow(float X, float Y, float Radius, Color Ink, int Strength);
 

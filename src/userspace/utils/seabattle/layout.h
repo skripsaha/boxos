@@ -38,8 +38,6 @@ Arena ArenaFor(painter::core::Size Glass, int Size);
 GridView PlacementFor(painter::core::Size Glass, int Size);
 // Two boards of the same size side by side, with room beneath them for the figures.
 Arena RevealFor(painter::core::Size Glass, int Size);
-// A board of Cell pixels a cell whose frame's top left is the text cell (Column, Row).
-GridView Placed(int Column, int Row, int Cell, int Size);
 
 }  // namespace seabattle
 

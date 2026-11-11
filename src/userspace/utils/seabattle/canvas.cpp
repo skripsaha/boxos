@@ -1,8 +1,6 @@
-/* canvas.cpp — the canvas's rectangles, lines and glows. */
+/* canvas.cpp — the canvas's rectangles and glows. */
 
 #include "canvas.h"
-
-#include <cstdlib>
 
 namespace seabattle {
 
@@ -12,16 +10,6 @@ void Canvas::Fill(int X, int Y, int Wide, int High, Color Ink)
     const int Top = std::max(0, Y), Bottom = std::min(Height, Y + High);
     for (int Row = Top; Row < Bottom; Row++)
         for (int Column = Left; Column < Right; Column++) Put(Column, Row, Ink);
-}
-
-void Canvas::Line(int X0, int Y0, int X1, int Y1, Color Ink)
-{
-    const int Steps = std::max(std::abs(X1 - X0), std::abs(Y1 - Y0));
-    for (int Step = 0; Step <= Steps; Step++) {
-        const float T = Steps == 0 ? 0.0f : static_cast<float>(Step) / static_cast<float>(Steps);
-        Put(X0 + static_cast<int>(std::lround(static_cast<float>(X1 - X0) * T)),
-            Y0 + static_cast<int>(std::lround(static_cast<float>(Y1 - Y0) * T)), Ink);
-    }
 }
 
 void Canvas::Glow(float X, float Y, float Radius, Color Ink, int Strength)

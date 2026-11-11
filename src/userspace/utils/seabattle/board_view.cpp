@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <format>
 #include <span>
 #include <string>
 
@@ -165,10 +166,14 @@ void ShapeBoard(tui::FineCanvas &Out, const BoardScene &Scene)
     }
 }
 
-void LabelBoard(tui::Frame &Out, const Look &Shown, const GridView &At, std::string_view Title, int Row, int Col)
+void LabelBoard(tui::Frame &Out, const Look &Shown, const GridView &At, std::string_view Title, int Row, int Col, std::string_view Foot)
 {
     const core::Rect Box = At.Frame();
     PaintFrame(Out, Box, Mixed(Shown.Title, Shown.Bars, 0.45f), Shown.Bars);
+    if (!Foot.empty()) {
+        const std::int32_t Wide = std::min(static_cast<std::int32_t>(tui::CellsOf(Foot)), Box.Width - 6);
+        tui::PutText(Out, core::Point{Box.X + 2, Box.Y + Box.Height - 1}, std::format(" {} ", Foot), Wide + 2, Shown.Quiet, Shown.Bars);
+    }
     const std::int32_t TitleRow = Box.Y - 2, LetterRow = Box.Y - 1;
     Out.Fill(core::Rect{Box.X - 2, TitleRow, Box.Width + 2, 1}, ' ', {Shown.Text, Shown.Bars});
     tui::PutText(Out, core::Point{Box.X, TitleRow}, Title, Box.Width, Shown.Title, Shown.Bars);

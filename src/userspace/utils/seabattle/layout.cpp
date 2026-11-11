@@ -26,11 +26,6 @@ int Fitting(int Rows, int Foot, int Size) { return std::clamp((Rows - TopRows - 
 
 }  // namespace
 
-GridView Placed(int Column, int Row, int Cell, int Size)
-{
-    return GridView{Column + 1, (Row + 1) * 2, Cell, Size};
-}
-
 Arena ArenaFor(painter::core::Size Glass, int Size)
 {
     const auto Smaller = [](int Cell) { return std::max(2, Cell * 3 / 4); };

@@ -6,6 +6,7 @@
 #ifndef SEABATTLE_BATTLE_H
 #define SEABATTLE_BATTLE_H
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -50,7 +51,10 @@ private:
     void   Move(int Down, int Across);
     std::string Spoken(const Report &Result) const;
 
-    // battle_paint.cpp: the picture.
+    // battle_paint.cpp: the picture. Until a shot has fallen, what it did is not yet shown: not on the
+    // waters, not in the fleets afloat, not in the figures.
+    const Board &WatersOf(int Side) const;
+    const Stats &FiguresOf(int Side) const;
     BoardScene SceneOf(bool Enemy) const;
     void PaintCursor(Canvas &Out) const;
     void PaintRoster(painter::tui::Frame &Out, const Board &Waters, const GridView &At, bool Own) const;
@@ -66,6 +70,7 @@ private:
     int                  CursorCol = 0;
     Report               Last;
     std::optional<Board> Before;       // the waters shot at, as they were before the shot, until it has fallen
+    std::optional<std::array<Stats, 2>> Counted;   // and the figures of both players
     Effects              Fx;
     std::string          Said;
     bool                 SaidGood = true;

@@ -12,8 +12,6 @@ namespace seabattle {
 enum class FleetKind { Classic, Skirmish, Armada, Duel };
 
 inline constexpr int FleetKindCount = 4;
-inline constexpr int LeastGrid = 6;
-inline constexpr int MostGrid = 12;
 inline constexpr int LongestShip = 5;
 
 struct Rules {
