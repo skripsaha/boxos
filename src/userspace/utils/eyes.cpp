@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -31,6 +32,8 @@
 #include "box/form.h"
 #include "box/life.h"
 #include "box/print.h"
+#include "box/settings.h"
+#include "box/cxx/settings.h"
 
 #include "painter/core/color.h"
 #include "painter/tui/glyph.h"
@@ -38,6 +41,13 @@
 
 BOX_FORM("takes optional words \"where they stand: top, bottom, left, right or middle; bottom right if none\"\n");
 BOX_LIFE("stays");
+BOX_SETTINGS("size number from 50 to 250 percent default 100 \"how large the eyes are\"\n"
+             "speed number from 20 to 300 percent default 100 \"how quickly they glance about\"\n"
+             "blink number from 20 to 400 percent or off default 100 \"how often they blink; off keeps them open\"\n"
+             "iris one-of random blue green brown hazel slate violet default random \"the colour of the irises; random takes one of them each run\"\n"
+             "eyeball color default #F4F4F4 \"the white of the eyes: its rim is a shade of it\"\n"
+             "pupil color default #0E0E10 \"the pupils\"\n"
+             "lid color default #3C3C44 \"the lids and, shut, their edge\"\n");
 
 namespace {
 
@@ -48,7 +58,8 @@ constexpr std::uint32_t StillMs  = 250;
 constexpr float         Pi       = 3.14159265f;
 
 /* Eye colours, light on the black of the console: every one keeps its family
- * on a sixteen-colour console too. */
+ * on a sixteen-colour console too. The rim of the white and the edge of a lid
+ * follow the colours the person sets, as these do their defaults. */
 const PainterColor Sclera    = PainterColor::Rgb(0xF4, 0xF4, 0xF4);
 const PainterColor ScleraRim = PainterColor::Rgb(0xB8, 0xB8, 0xC0);
 const PainterColor Pupil     = PainterColor::Rgb(0x0E, 0x0E, 0x10);
@@ -58,6 +69,8 @@ const PainterColor LidEdge   = PainterColor::Rgb(0x18, 0x18, 0x1C);
 const PainterColor Empty     = painter::core::Colors::Black;
 const PainterColor Irises[]  = {PainterColor::Rgb(0x2E, 0x6C, 0xD0), PainterColor::Rgb(0x2E, 0x9A, 0x5A), PainterColor::Rgb(0x8A, 0x52, 0x22),
                          PainterColor::Rgb(0x9A, 0x80, 0x30), PainterColor::Rgb(0x60, 0x78, 0x90), PainterColor::Rgb(0x8A, 0x40, 0xB0)};
+const char *const  IrisNames[] = {"blue", "green", "brown", "hazel", "slate", "violet"};
+constexpr std::size_t IrisCount = sizeof(Irises) / sizeof(Irises[0]);
 
 void Say(std::string_view Text)
 {
@@ -81,6 +94,55 @@ float Between(float Low, float High)
     return Low + (High - Low) * Unit();
 }
 
+/* What the person set, read again whenever the file is saved. Iris is the one
+ * asked for, or -1 for one drawn each run; Blink is how often, 0 never. */
+struct Chosen {
+    float        Size  = 1.0f;
+    float        Speed = 1.0f;
+    float        Blink = 1.0f;
+    int          Iris  = -1;
+    PainterColor Eyeball = Sclera, Dark = Pupil, Shade = Lid;
+};
+
+Chosen ReadChosen()
+{
+    using box::settings;
+    int Iris = -1;
+    std::string Name = settings::choice("iris");
+    for (std::size_t At = 0; At < IrisCount; At++)
+        if (Name == IrisNames[At]) Iris = static_cast<int>(At);
+    return Chosen{.Size    = static_cast<float>(settings::number("size")) / 100.0f,
+                   .Speed   = static_cast<float>(settings::number("speed")) / 100.0f,
+                   .Blink   = static_cast<float>(settings::number("blink")) / 100.0f,
+                   .Iris    = Iris,
+                   .Eyeball = PainterColor::FromRaw(settings::color("eyeball")),
+                   .Dark    = PainterColor::FromRaw(settings::color("pupil")),
+                   .Shade   = PainterColor::FromRaw(settings::color("lid"))};
+}
+
+std::uint8_t Moved(std::uint8_t Base, std::uint8_t Was, std::uint8_t Now)
+{
+    return static_cast<std::uint8_t>(std::clamp(Base + Now - Was, 0, 255));
+}
+
+/* A colour moved the way a default colour was moved to the one set. */
+PainterColor Followed(PainterColor Base, PainterColor Was, PainterColor Now)
+{
+    return PainterColor::Rgb(Moved(Base.Red(), Was.Red(), Now.Red()), Moved(Base.Green(), Was.Green(), Now.Green()),
+                             Moved(Base.Blue(), Was.Blue(), Now.Blue()));
+}
+
+/* The colours the eyes are drawn in. */
+struct Inks {
+    PainterColor Eyeball, Rim, Pupil, Iris, Lid, LidEdge;
+};
+
+Inks MakeInks(const Chosen &Set, PainterColor Drawn)
+{
+    return Inks{Set.Eyeball, Followed(ScleraRim, Sclera, Set.Eyeball), Set.Dark,
+                Set.Iris >= 0 ? Irises[Set.Iris] : Drawn, Set.Shade, Followed(LidEdge, Lid, Set.Shade)};
+}
+
 /* Where an eye looks, -1..1 each way, and how shut it is, 0..1. */
 struct Look {
     float X = 0, Y = 0;
@@ -96,8 +158,9 @@ public:
     /* Time passing; true while anything moves. */
     bool Step(float Seconds);
     const Look &Eye(int Which) const { return Now[Which]; }
+    void Tune(const Chosen &Set) { Pace = Set.Speed; Blinks = Set.Blink; }
 
-    PainterColor Iris = Irises[0];
+    PainterColor Iris = Irises[0];   /* the one drawn this run, for when none is asked for */
 
 private:
     void Next();
@@ -106,6 +169,7 @@ private:
     Look  Now[2];
     float GoalX = 0, GoalY = 0;
     Act   Doing = Act::Hold;
+    float Pace = 1.0f, Blinks = 1.0f;
     float Left  = 1.0f;     /* seconds left of what is being done */
     float Spent = 0;
     float ToBlink = 3.0f;
@@ -116,7 +180,7 @@ private:
 void Pair::Begin()
 {
     Seed = cpu_rdtsc() | 1;
-    Iris = Irises[static_cast<std::size_t>(Unit() * (sizeof(Irises) / sizeof(Irises[0])))];
+    Iris = Irises[static_cast<std::size_t>(Unit() * IrisCount)];
     Next();
 }
 
@@ -153,8 +217,9 @@ float Pair::BlinkShut(float Since, float Length) const
 
 bool Pair::Step(float Seconds)
 {
-    Left  -= Seconds;
-    Spent += Seconds;
+    float Lived = Seconds * Pace;
+    Left  -= Lived;
+    Spent += Lived;
     if (Left <= 0) Next();
 
     float Goal[2][2];
@@ -185,7 +250,7 @@ bool Pair::Step(float Seconds)
 
     /* Eyes jump to where they look and settle: a saccade, not a slide. */
     bool  Moving = false;
-    float Pull   = std::min(1.0f, Seconds * (Doing == Act::Roll ? 20.0f : 14.0f));
+    float Pull   = std::min(1.0f, Lived * (Doing == Act::Roll ? 20.0f : 14.0f));
     for (int Which = 0; Which < 2; Which++) {
         float Dx = Goal[Which][0] - Now[Which].X, Dy = Goal[Which][1] - Now[Which].Y;
         if (Dx * Dx + Dy * Dy > 1e-4f) Moving = true;
@@ -195,10 +260,10 @@ bool Pair::Step(float Seconds)
 
     constexpr float BlinkLength = 0.18f;
     ToBlink -= Seconds;
-    if (Blinking < 0 && ToBlink <= 0) {
+    if (Blinks > 0 && Blinking < 0 && ToBlink <= 0) {
         Blinking = 0;
         Winking  = Unit() < 0.08f ? static_cast<int>(Unit() * 2) : -1;
-        ToBlink  = Between(2.0f, 6.5f);
+        ToBlink  = Between(2.0f, 6.5f) / Blinks;
     }
     for (Look &One : Now) One.Shut = 0;
     if (Blinking >= 0) {
@@ -217,20 +282,26 @@ bool Pair::Step(float Seconds)
  * rim, the iris with a darker ring, the pupil, a glint, and the lids. */
 class EyePicture {
 public:
-    void Size(int Scale)
+    /* The pair at Share of its size on a glass of that many cells: on a small
+     * glass a little bigger than the proportions, or the pupil is a line; never
+     * so large as not to stand on the glass. */
+    void Size(painter::core::Size Glass, float Share)
     {
-        EyeW   = Scale > 1 ? 10 * Scale : 12;   /* a small eye is a little bigger, or its pupil is a line */
-        EyeH   = Scale > 1 ? 12 * Scale : 14;
-        Gap    = 2 * Scale;
+        bool  Large = Glass.Height >= 40 && Glass.Width >= 120;
+        float WideOf = Large ? 20.0f : 12.0f, HighOf = Large ? 24.0f : 14.0f, GapOf = Large ? 4.0f : 2.0f;
+        Share  = std::min({Share, (Glass.Width - 4) / (WideOf * 2 + GapOf), (Glass.Height * 2 - 6) / HighOf});
+        EyeW   = std::max(4, static_cast<int>(std::lround(WideOf * Share)));
+        EyeH   = std::max(5, static_cast<int>(std::lround(HighOf * Share)));
+        Gap    = std::max(1, static_cast<int>(std::lround(GapOf * Share)));
         Width  = EyeW * 2 + Gap;
         Height = EyeH;
         Dots.assign(static_cast<std::size_t>(Width) * Height, Empty);
     }
 
-    void Draw(const Pair &Eyes)
+    void Draw(const Pair &Eyes, const Inks &Ink)
     {
         std::fill(Dots.begin(), Dots.end(), Empty);
-        for (int Which = 0; Which < 2; Which++) DrawEye(Which * (EyeW + Gap), Eyes.Eye(Which), Eyes.Iris);
+        for (int Which = 0; Which < 2; Which++) DrawEye(Which * (EyeW + Gap), Eyes.Eye(Which), Ink);
     }
 
     PainterColor At(int X, int Y) const
@@ -241,13 +312,13 @@ public:
     int Width = 0, Height = 0;
 
 private:
-    void DrawEye(int Left, const Look &Eye, PainterColor Iris);
+    void DrawEye(int Left, const Look &Eye, const Inks &Ink);
 
     int                EyeW = 10, EyeH = 12, Gap = 2;
     std::vector<PainterColor> Dots;
 };
 
-void EyePicture::DrawEye(int Left, const Look &Eye, PainterColor Iris)
+void EyePicture::DrawEye(int Left, const Look &Eye, const Inks &Colours)
 {
     float Rx = EyeW / 2.0f, Ry = EyeH / 2.0f;
     float Cx = Left + Rx, Cy = Ry;
@@ -264,12 +335,12 @@ void EyePicture::DrawEye(int Left, const Look &Eye, PainterColor Iris)
             PainterColor Ink;
             if (Py < LidTop || Py > LidLow) {
                 bool Rim = Py >= LidTop - 1.0f && Py < LidTop;
-                Ink = Eye.Shut > 0.02f && Rim ? LidEdge : Lid;
+                Ink = Eye.Shut > 0.02f && Rim ? Colours.LidEdge : Colours.Lid;
             } else {
                 float Dx = Px - Ix, Dy = Py - Iy, Far = std::sqrt(Dx * Dx + Dy * Dy);
-                if (Far <= Rp) Ink = Pupil;
-                else if (Far <= Ri) Ink = Far > Ri - 1.0f ? PainterColor::Mix(Iris, painter::core::Colors::Black, 110) : Iris;
-                else Ink = PainterColor::Mix(Sclera, ScleraRim, static_cast<std::uint8_t>(std::clamp(Edge * Edge * 255.0f, 0.0f, 255.0f)));
+                if (Far <= Rp) Ink = Colours.Pupil;
+                else if (Far <= Ri) Ink = Far > Ri - 1.0f ? PainterColor::Mix(Colours.Iris, painter::core::Colors::Black, 110) : Colours.Iris;
+                else Ink = PainterColor::Mix(Colours.Eyeball, Colours.Rim, static_cast<std::uint8_t>(std::clamp(Edge * Edge * 255.0f, 0.0f, 255.0f)));
                 float Gx = Px - (Ix - Rp * 0.6f), Gy = Py - (Iy - Rp * 0.6f);
                 if (Far <= Ri && Gx * Gx + Gy * Gy <= std::max(0.6f, Rp * Rp * 0.18f)) Ink = Glint;
             }
@@ -346,26 +417,40 @@ int main()
     }
     painter::tui::Surface Screen = std::move(*Opened);
     painter::core::Size Dimensions = Screen.Size();
-    EyePicture Picture;
-    Picture.Size(Dimensions.Height >= 40 && Dimensions.Width >= 120 ? 2 : 1);
-    Place At = Where(Words, Count, Dimensions.Width, Dimensions.Height, Picture.Width, (Picture.Height + 1) / 2);
-
-    std::expected<painter::tui::Frame, box::error> Created =
-        painter::tui::Frame::Create({Picture.Width, (Picture.Height + 1) / 2});
-    if (!Created) return 1;
-    painter::tui::Frame Overlay = std::move(*Created);
-    Pair Eyes;
+    Chosen     Set = ReadChosen();
+    EyePicture  Picture;
+    Place       At;
+    std::optional<painter::tui::Frame> Overlay;
+    Pair        Eyes;
     Eyes.Begin();
+    Eyes.Tune(Set);
+
+    /* The picture at the size set, its place on the glass and a frame to fit it. */
+    auto Fit = [&] {
+        Picture.Size(Dimensions, Set.Size);
+        At = Where(Words, Count, Dimensions.Width, Dimensions.Height, Picture.Width, (Picture.Height + 1) / 2);
+        std::expected<painter::tui::Frame, box::error> Created =
+            painter::tui::Frame::Create({Picture.Width, (Picture.Height + 1) / 2});
+        if (Created) Overlay.emplace(std::move(*Created));
+        return Created.has_value();
+    };
+    if (!Fit()) return 1;
+    box::settings::watch Watch;
 
     // Painted until they can be no more — the display gone, or the eyes
     // ended: nothing but their end stops them.
     std::uint64_t Last = clock_uptime_us();
     for (;;) {
+        if (Watch.changed()) {
+            Set = ReadChosen();
+            Eyes.Tune(Set);
+            if (!Fit()) break;
+        }
         std::uint64_t Now    = clock_uptime_us();
         bool          Moving = Eyes.Step(std::min(0.5f, static_cast<float>(Now - Last) / 1e6f));
         Last = Now;
-        Picture.Draw(Eyes);
-        if (!Paint(Picture, Screen, Overlay, At)) break;
+        Picture.Draw(Eyes, MakeInks(Set, Eyes.Iris));
+        if (!Paint(Picture, Screen, *Overlay, At)) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(Moving ? MovingMs : StillMs));
     }
     (void)Screen.Close();
