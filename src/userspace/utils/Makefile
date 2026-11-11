@@ -484,7 +484,7 @@ $(sort $(EDIT_OBJS) $(READ_OBJS) $(CASINO_OBJS) $(SEABATTLE_OBJS)): CXXFLAGS += 
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
--include $(wildcard *.d $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.d $(EDIT_DIR)/*.d $(READ_DIR)/*.d $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.d $(GARDEN_DIR)/*.d $(MEMMAP_DIR)/*.d $(WIZARD_DIR)/*.d $(RANDOM_DIR)/*.d $(SAND_DIR)/*.d $(FOREST_DIR)/*.d $(COINFLIP_DIR)/*.d $(DICE_DIR)/*.d $(ORBITS_DIR)/*.d $(CASINO_DIR)/*.d)
+-include $(wildcard *.d $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.d $(EDIT_DIR)/*.d $(READ_DIR)/*.d $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.d $(GARDEN_DIR)/*.d $(MEMMAP_DIR)/*.d $(WIZARD_DIR)/*.d $(RANDOM_DIR)/*.d $(SAND_DIR)/*.d $(FOREST_DIR)/*.d $(COINFLIP_DIR)/*.d $(DICE_DIR)/*.d $(ORBITS_DIR)/*.d $(CASINO_DIR)/*.d $(SEABATTLE_DIR)/*.d)
 
 $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 	@mkdir -p $(dir $@)
@@ -492,4 +492,4 @@ $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 
 clean:
 	rm -f *.o *.d *.elf inside/*.o inside/*.d $(ASSEMBLE_DIR)/*.o $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.o $(KIN_DIR)/*.d $(EDIT_DIR)/*.o $(EDIT_DIR)/*.d $(READ_DIR)/*.o $(READ_DIR)/*.d \
-	      $(TASKBOARD_DIR)/*.o $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.o $(SCRATCHPAD_DIR)/*.d $(GARDEN_DIR)/*.o $(GARDEN_DIR)/*.d $(MEMMAP_DIR)/*.o $(MEMMAP_DIR)/*.d $(WIZARD_DIR)/*.o $(WIZARD_DIR)/*.d $(RANDOM_DIR)/*.o $(RANDOM_DIR)/*.d $(SAND_DIR)/*.o $(SAND_DIR)/*.d $(FOREST_DIR)/*.o $(FOREST_DIR)/*.d $(COINFLIP_DIR)/*.o $(COINFLIP_DIR)/*.d $(DICE_DIR)/*.o $(DICE_DIR)/*.d $(ORBITS_DIR)/*.o $(ORBITS_DIR)/*.d $(CASINO_DIR)/*.o $(CASINO_DIR)/*.d
+	      $(TASKBOARD_DIR)/*.o $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.o $(SCRATCHPAD_DIR)/*.d $(GARDEN_DIR)/*.o $(GARDEN_DIR)/*.d $(MEMMAP_DIR)/*.o $(MEMMAP_DIR)/*.d $(WIZARD_DIR)/*.o $(WIZARD_DIR)/*.d $(RANDOM_DIR)/*.o $(RANDOM_DIR)/*.d $(SAND_DIR)/*.o $(SAND_DIR)/*.d $(FOREST_DIR)/*.o $(FOREST_DIR)/*.d $(COINFLIP_DIR)/*.o $(COINFLIP_DIR)/*.d $(DICE_DIR)/*.o $(DICE_DIR)/*.d $(ORBITS_DIR)/*.o $(ORBITS_DIR)/*.d $(CASINO_DIR)/*.o $(CASINO_DIR)/*.d $(SEABATTLE_DIR)/*.o $(SEABATTLE_DIR)/*.d
