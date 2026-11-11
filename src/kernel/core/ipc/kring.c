@@ -19,7 +19,6 @@
 #include "chit.h"       /* ChitKeep — an answer redeems the chit left for it */
 #include "klib.h"
 #include "vmm.h"
-#include "pmm.h"
 #include "process.h"
 #include "nightwatch.h"   /* a core mid-delivery is not an idle core */
 #include "result.h"
@@ -29,6 +28,7 @@
 #include "boxos_magic.h"
 #include "amp.h"
 #include "scheduler.h"   /* sched_ring_home — one transition, one bell */
+#include "system_deck.h" /* cabin_heap_take_back — an owed deposit goes with its record */
 
 void KRingPocketInitAt(PocketRing *hdr, uint64_t slots_base, uint32_t slot_count_max)
 {
@@ -633,31 +633,6 @@ static void result_owed_slip_locked(process_t *proc, uint32_t depth)
     if (rr) __atomic_store_n(&rr->hdr.owed, (uint64_t)depth, __ATOMIC_RELEASE);
 }
 
-/* Give back the cabin-heap deposit an undeliverable answer was carrying.
- *
- * cabin_heap_deposit (system_deck.c) bump-allocates the VA and maps one fresh
- * frame per page, so the release is the exact inverse: translate, unmap, free
- * the frame. The VA itself is not reclaimed — buf_heap_next only ever goes
- * forward — and that is deliberate: a reused deposit address would alias a
- * payload the guest may still be reading through an older Result. The frames
- * are what cost RAM, and the frames come back.
- *
- * A zero data_addr means the send carried no payload; there is nothing to
- * release and nothing to say about it. */
-static void result_owed_deposit_release(process_t *target, const Result *r)
-{
-    if (!target || !target->cabin || !r || r->data_addr == 0 || r->data_length == 0)
-        return;
-
-    uint32_t pages = (r->data_length + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
-    for (uint32_t i = 0; i < pages; i++) {
-        uintptr_t va   = (uintptr_t)r->data_addr + (uintptr_t)i * PMM_PAGE_SIZE;
-        uintptr_t phys = vmm_virt_to_phys(target->cabin->vmm, va);
-        vmm_unmap_page(target->cabin->vmm, va);
-        if (phys) pmm_free((void *)(phys & ~(uintptr_t)(PMM_PAGE_SIZE - 1)), 1);
-    }
-}
-
 /* Take the answer onto the queue's tail. False only when kmalloc refuses — the
  * one case that is a real loss, and the caller still owns the deposit then. */
 static bool result_owed_append(process_t *proc, const Result *r)
@@ -749,11 +724,14 @@ void ResultOwedRelease(process_t *proc)
 
     while (n) {
         ResultOwed *next = n->next;
-        /* The deposit goes with the answer. For a main strand the cabin's
-         * address space is about to be torn down and would have reclaimed it
-         * anyway; for a spawned strand the cabin outlives it, and these frames
-         * would be the leak nobody ever comes back for. */
-        result_owed_deposit_release(proc, &n->r);
+        /* The deposit a message or a question was lent in goes with it. For a
+         * main strand the cabin's address space is about to be torn down and
+         * would have reclaimed it anyway; for a spawned strand the cabin
+         * outlives it, and these frames would be the leak nobody ever comes
+         * back for. */
+        uint32_t kind = KCTX_KIND(n->r.context);
+        if ((kind == KCTX_IPC || kind == KCTX_ASK) && n->r.data_addr && n->r.data_length)
+            (void)cabin_heap_take_back(proc, n->r.data_addr, n->r.data_length);
         kfree(n);
         n = next;
     }

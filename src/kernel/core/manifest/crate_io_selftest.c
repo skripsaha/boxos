@@ -170,6 +170,7 @@ void NonContigPagesTeardown(NonContigPages *m)
     if (m->guard_frame) pmm_free(m->guard_frame, 1);
     if (m->vmm)         vmm_destroy_context(m->vmm);
     if (m->proc)        kfree(m->proc);
+    if (m->cabin)       kfree(m->cabin->deposit_held);
     if (m->cabin)       kfree(m->cabin);
 
     memset(m, 0, sizeof(*m));
@@ -339,7 +340,7 @@ static bool run_ipc_k(NonContigPages *sender, NonContigPages *target, unsigned k
 
     /* ---- END-TO-END — drive the converted ipc_copy_to_heap and read the
      * delivered payload back through the target page tables. The function
-     * allocates + maps its own target frames at buf_heap_next; a correct
+     * allocates + maps its own target frames in the deposit window; a correct
      * page-walk delivers the full A+B payload. -------------------------- */
     uint64_t tvaddr = ipc_copy_to_heap(sender->proc, target->proc, src_va, n);
     if (tvaddr == 0) FAILK("ipc e2e: ipc_copy_to_heap returned 0", k);
@@ -354,15 +355,10 @@ static bool run_ipc_k(NonContigPages *sender, NonContigPages *target, unsigned k
     if (!all_bytes(sender->guard, VMM_PAGE_SIZE, CRATE_IO_POISON))
         FAILK("ipc e2e: sender guard disturbed", k);
 
-    /* Free the frames ipc_copy_to_heap mapped into the target so each k
-     * iteration leaves no live mapping or leaked frame behind. */
-    uint32_t pages = (n + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
-    for (uint32_t i = 0; i < pages; i++) {
-        uintptr_t va   = tvaddr + (uintptr_t)i * PMM_PAGE_SIZE;
-        uintptr_t phys = vmm_virt_to_phys(target->vmm, va);
-        vmm_unmap_page(target->vmm, va);
-        if (phys) pmm_free((void *)phys, 1);
-    }
+    /* Give the deposit back so each k iteration leaves no live mapping or
+     * leaked frame behind, and the next one is lent the same place. */
+    if (cabin_heap_take_back(target->proc, tvaddr, n) != OK)
+        FAILK("ipc e2e: the deposit was not taken back", k);
 
     return true;
 }
@@ -401,9 +397,9 @@ error_t CrateIoSelfTest(void)
         kprintf("[CRATE-IO] SELFTEST FAIL: IPC target mapping setup\n");
         return ERR_INTERNAL;
     }
-    /* ipc_copy_to_heap maps fresh payload pages at the target's buf_heap
-     * cursor; seat it clear of the A|B|guard window. */
-    target.cabin->buf_heap_next = (uint64_t)target.base_va + CRATE_IO_IPC_HEAP_OFF;
+    /* ipc_copy_to_heap maps fresh payload pages in the target's deposit
+     * window; seat it clear of the A|B|guard window. */
+    target.cabin->aslr_buf_heap_base = (uint64_t)target.base_va + CRATE_IO_IPC_HEAP_OFF;
 
     bool ipc_ok = true;
     for (size_t i = 0; i < sizeof(CRATE_IO_K) / sizeof(CRATE_IO_K[0]); i++) {

@@ -23,6 +23,7 @@
 #include "manifest_exec.h"
 #include "boxos_crate.h"
 #include "op_registry.h"
+#include "system_deck.h"  /* cabin_heap_place / cabin_heap_lend — the deposit window */
 
 /* ────────────────────────────────────────────────────────────────────────
  * Four-level bucket radix over the 32-bit tag_id space, a byte a level.
@@ -257,30 +258,21 @@ bool TouchHasAnyListeners(void)
 }
 
 /* ────────────────────────────────────────────────────────────────────────
- * Per-target payload page allocator.
+ * Per-target payload pages.
  * touch_emit_payload writes a Touch record + payload into the target's
- * cabin buffer-heap and returns the user vaddr. One page per record is
- * the conservative path that the multi-core stress suite passes — packing
- * records into shared pages tripped vmm_map_page faults under MPSC.
+ * deposit window (system_deck.c) and returns the user vaddr. One page per
+ * record at least is the conservative path that the multi-core stress suite
+ * passes — packing records into shared pages tripped vmm_map_page faults
+ * under MPSC. The record names its own payload's address, so the places are
+ * taken first and lent only once written.
  * ──────────────────────────────────────────────────────────────────────── */
 static uint64_t touch_emit_payload(process_t *target, TouchTag tag_id,
                                    uint16_t flags, uint32_t source_pid,
                                    const void *kpayload, uint32_t plen)
 {
-    uint64_t total = sizeof(Touch) + plen;
-    uint32_t pages = (uint32_t)((total + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE);
-    uint64_t bytes = (uint64_t)pages * PMM_PAGE_SIZE;
-    uint64_t vaddr = __atomic_fetch_add(&target->cabin->buf_heap_next, bytes,
-                                        __ATOMIC_ACQ_REL);
-
-    for (uint32_t i = 0; i < pages; i++) {
-        void *page = pmm_alloc(1);
-        if (!page) return 0;
-        uint64_t va = vaddr + (i * PMM_PAGE_SIZE);
-        vmm_map_result_t r = vmm_map_page(target->cabin->vmm, va,
-                                          (uint64_t)page, VMM_FLAGS_USER_RW);
-        if (!r.success) { pmm_free(page, 1); return 0; }
-    }
+    uint32_t total = (uint32_t)sizeof(Touch) + plen;
+    uint64_t vaddr = cabin_heap_place(target, total);
+    if (!vaddr) return 0;
 
     /* Write the record through the page-walked primitive rather than
      * single-page-translating the whole `total` range. pmm_alloc hands out
@@ -299,14 +291,13 @@ static uint64_t touch_emit_payload(process_t *target, TouchTag tag_id,
         .timestamp_tsc = rdtsc(),
         .reserved      = 0,
     };
-    if (vmm_user_buf_commit_out(target->cabin->vmm, vaddr,
-                                &hdr, sizeof(Touch)) != OK)
-        return 0;
-    if (plen > 0 && kpayload &&
-        vmm_user_buf_commit_out(target->cabin->vmm, vaddr + sizeof(Touch),
-                                kpayload, plen) != OK)
-        return 0;
-    return vaddr;
+    bool written = vmm_user_buf_commit_out(target->cabin->vmm, vaddr,
+                                           &hdr, sizeof(Touch)) == OK &&
+                   (plen == 0 || !kpayload ||
+                    vmm_user_buf_commit_out(target->cabin->vmm, vaddr + sizeof(Touch),
+                                            kpayload, plen) == OK);
+    cabin_heap_lend(target, vaddr, total, written);
+    return written ? vaddr : 0;
 }
 
 /* ────────────────────────────────────────────────────────────────────────

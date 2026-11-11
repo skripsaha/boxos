@@ -112,11 +112,12 @@
 #define SYSTEM_OP_TAG_REMOVE        0x21
 #define SYSTEM_OP_TAG_CHECK         0x22
 
-/* ─── Route / broadcast / question (0x40 – 0x43) ──────────────────── */
+/* ─── Route / broadcast / question (0x40 – 0x44) ──────────────────── */
 #define SYSTEM_OP_ROUTE             0x40
 #define SYSTEM_OP_ROUTE_TAG         0x41
 #define SYSTEM_OP_ASK               0x42  /* (tag) in: question, out: answer — one answer, or the carrier's end */
-#define SYSTEM_OP_ANSWER            0x43  /* (u32 asker pid)(u32 asker cookie) in: answer */
+#define SYSTEM_OP_ANSWER            0x43  /* (u32 asker pid)(u32 asker cookie) in: answer — the question's bytes go with it */
+#define SYSTEM_OP_GIVE_BACK         0x44  /* (u64 addr)(u32 length): a message's bytes, read, given back */
 
 /* ─── Diagnostics (0x50) ───────────────────────────────────────────── */
 #define SYSTEM_OP_PERF_DUMP         0x50

@@ -107,6 +107,21 @@ int answer(const Result *question, const void *bytes, uint32_t len)
     return rc == OK ? OK : box_fail(rc);
 }
 
+int give_back(const Result *message)
+{
+    if (!message || KCTX_KIND(message->context) != KCTX_IPC) return -ERR_INVALID_ARGUMENT;
+    if (message->data_addr == 0 || message->data_length == 0)   return OK;
+
+    uint64_t addr   = message->data_addr;
+    uint32_t length = message->data_length;
+    uint8_t  params[12];
+    memcpy(params, &addr, sizeof(addr));
+    memcpy(params + 8, &length, sizeof(length));
+    int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_GIVE_BACK, params, sizeof(params),
+                     NULL, 0, NULL, 0, NULL, BOX_ANSWER_GUARANTEED, NULL);
+    return rc == OK ? OK : box_fail(rc);
+}
+
 bool receive(Result* out) {
     if (!out) return false;
     return result_pop_ipc(out);

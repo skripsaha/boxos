@@ -97,7 +97,22 @@ typedef struct cabin_t
     uint64_t aslr_heap_base;
     uint64_t aslr_stack_top;    /* main stack: its reserve below it, as its program was prepared */
     uint64_t aslr_buf_heap_base;
-    uint64_t buf_heap_next;
+
+    /* The deposit window, from aslr_buf_heap_base up: where the kernel lends
+     * the program the bytes of each message and question it receives, a page
+     * at least apiece (system_deck.c). One bit a page in each map:
+     * deposit_held — the place is taken, lent or being mapped or unmapped by
+     * the kernel; deposit_lent — the program holds it and may give it back.
+     * Both deposit_words long, in one kmalloc'd block, grown by doubling; no
+     * free place lies below deposit_low. All guarded by deposit_lock, a leaf:
+     * nothing is mapped, freed or allocated under it. A place given back is
+     * taken again before the window grows, so the window and its page tables
+     * are as large as the most the program ever held at once. */
+    uint64_t   *deposit_held;
+    uint64_t   *deposit_lent;
+    uint32_t    deposit_words;
+    uint32_t    deposit_low;
+    spinlock_t  deposit_lock;
 
     uint32_t spawner_pid;
     /* Generation of spawner_pid captured at spawn time. A bare pid is not a

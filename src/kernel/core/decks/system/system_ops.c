@@ -132,24 +132,6 @@ static bool push_ipc_result(process_t *target,
     return KResultPushOrOwe(target, &r);
 }
 
-/* Give back a deposit whose message was not taken. The inverse of
- * cabin_heap_deposit (system_deck.c): one frame per page, translated, unmapped
- * and freed. The bump-allocated VA is deliberately NOT reclaimed — buf_heap_next
- * only goes forward, and a reused deposit address would alias a payload the
- * guest may still be reading through an older Result. */
-static void ipc_deposit_release(process_t *target, uint64_t addr, uint32_t length)
-{
-    if (!target || !target->cabin || addr == 0 || length == 0) return;
-
-    uint32_t pages = (length + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE;
-    for (uint32_t i = 0; i < pages; i++) {
-        uintptr_t va   = (uintptr_t)addr + (uintptr_t)i * PMM_PAGE_SIZE;
-        uintptr_t phys = vmm_virt_to_phys(target->cabin->vmm, va);
-        vmm_unmap_page(target->cabin->vmm, va);
-        if (phys) pmm_free((void *)(phys & ~(uintptr_t)(PMM_PAGE_SIZE - 1)), 1);
-    }
-}
-
 /* =========================================================================
  *  IPC
  * ========================================================================= */
@@ -194,7 +176,7 @@ static int SysRoute(const ManifestOp *op, Crate *crates, uint16_t crate_count,
      * not what ran out. The deposit goes back rather than being abandoned in a
      * cabin nobody will ever point at it from. */
     if (rc == OK && !push_ipc_result(target, ctx->proc->pid, target_addr, length)) {
-        ipc_deposit_release(target, target_addr, length);
+        (void)cabin_heap_take_back(target, target_addr, length);
         rc = ERR_NO_MEMORY;
     }
 
@@ -300,7 +282,7 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
         } else {
             /* Same leak, same fix: this subscriber's copy of the payload is
              * already in its cabin heap and nothing will ever name it again. */
-            ipc_deposit_release(target, target_addr, length);
+            (void)cabin_heap_take_back(target, target_addr, length);
         }
         process_ref_dec(target);
     }
@@ -463,6 +445,8 @@ static int SysAsk(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     q->answer_box   = op->out_crate;
     q->crates       = crates;
     q->crates_uaddr = ctx->crates_uaddr;
+    q->deposit        = deposit;
+    q->deposit_length = length;
     process_ref_inc(ctx->proc);   /* QuestionSettle's to give back */
 
     /* From here the crates are the question's and every outcome reaches the
@@ -478,7 +462,7 @@ static int SysAsk(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     spin_lock(&carrier->gone_lock);
     if (__atomic_load_n(&carrier->touch_cleaned, __ATOMIC_ACQUIRE)) {
         spin_unlock(&carrier->gone_lock);
-        ipc_deposit_release(carrier, deposit, length);
+        (void)cabin_heap_take_back(carrier, deposit, length);
         QuestionSettle(q, ERR_PROCESS_NOT_FOUND, NULL, 0);
         process_ref_dec(carrier);
         return ERR_WOULD_BLOCK;
@@ -504,7 +488,7 @@ static int SysAsk(const ManifestOp *op, Crate *crates, uint16_t crate_count,
             if (*at == q) { taken = q; *at = q->next; break; }
         }
         spin_unlock(&carrier->gone_lock);
-        ipc_deposit_release(carrier, deposit, length);
+        (void)cabin_heap_take_back(carrier, deposit, length);
         if (taken) QuestionSettle(taken, ERR_NO_MEMORY, NULL, 0);
     }
 
@@ -537,6 +521,11 @@ static int SysAnswer(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     spin_unlock(&me->gone_lock);
     if (!q) return ERR_INVALID_STATE;   /* answered already, or never asked */
 
+    /* The question's words go with its answer, whatever the answer is: the
+     * carrier read them to answer, and an answer is the last it hears of the
+     * question. */
+    (void)cabin_heap_take_back(me, q->deposit, q->deposit_length);
+
     if (__atomic_load_n(&q->asker->touch_cleaned, __ATOMIC_ACQUIRE)) {
         QuestionSettle(q, ERR_PROCESS_NOT_FOUND, NULL, 0);
         return ERR_PROCESS_NOT_FOUND;
@@ -561,6 +550,26 @@ static int SysAnswer(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     error_t rc = QuestionSettle(q, OK, answer, length);
     if (answer) kfree(answer);
     return rc;
+}
+
+/* system.give_back — (u64 addr)(u32 length): the bytes of a message the
+ * program has read, given back. Their pages go back to the machine and their
+ * place to the next message. Only what is lent to the program now is taken —
+ * a question's bytes go with its answer, and a place given back twice is given
+ * back once; anything else is ERR_INVALID_ADDRESS, and nothing is taken. */
+static int SysGiveBack(const ManifestOp *op, Crate *crates, uint16_t crate_count,
+                       const OpContext *ctx)
+{
+    (void)crates;
+    (void)crate_count;
+    if (!ctx || !ctx->proc)  return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 12) return ERR_INVALID_ARGUMENT;
+
+    uint64_t addr;
+    uint32_t length;
+    memcpy(&addr,   op->params,     sizeof(uint64_t));
+    memcpy(&length, op->params + 8, sizeof(uint32_t));
+    return cabin_heap_take_back(ctx->proc, addr, length);
 }
 
 /* =========================================================================
@@ -2653,6 +2662,8 @@ error_t SystemDeckRegister(void)
         { SYSTEM_OP_ROUTE_TAG,    SysBroadcast,   OP_AUTH_APP,    "system.broadcast"  },
         { SYSTEM_OP_ASK,          SysAsk,         OP_AUTH_APP,    "system.ask"        },
         { SYSTEM_OP_ANSWER,       SysAnswer,      OP_AUTH_APP,    "system.answer"     },
+        /* Open: whoever was told something may give its bytes back. */
+        { SYSTEM_OP_GIVE_BACK,    SysGiveBack,    OP_AUTH_NONE,   "system.give_back"  },
         /* Process lifecycle: spawn/exec are utility+; info/kill/exit are open
          * (kill of pid==0 is self-exit, used by every process). */
         { SYSTEM_OP_PROC_SPAWN,   SysProcSpawn,   OP_AUTH_UTILITY,"system.proc.spawn" },

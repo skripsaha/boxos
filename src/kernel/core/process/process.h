@@ -71,6 +71,8 @@ typedef struct Question {
     uint16_t          answer_box;    /* index of the answer crate, CRATE_INDEX_NONE if none */
     Crate            *crates;        /* the asker's staged crates, owned until settled */
     uint64_t          crates_uaddr;
+    uint64_t          deposit;       /* where the carrier was lent the question's bytes: */
+    uint32_t          deposit_length;/*   taken back with its answer (system_deck.c) */
     struct Question  *next;
 } Question;
 

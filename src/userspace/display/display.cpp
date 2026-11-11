@@ -495,10 +495,15 @@ bool IpcStep()
         // The ring's and the lanes' bells are Results with no data: they
         // woke the sleep, and that was all they were for.
         if (Entry.data_addr == 0 || Entry.data_length == 0 || Entry.sender_pid == 0) continue;
-        if (KCTX_KIND(Entry.context) == KCTX_ASK)
+        // A question's bytes go with its answer; a message's are given back
+        // once heard — every frame of every layer is one, for as long as the
+        // machine runs.
+        if (KCTX_KIND(Entry.context) == KCTX_ASK) {
             HearQuestion(Entry);
-        else
+        } else {
             HearMessage(Entry);
+            (void)give_back(&Entry);
+        }
     }
     return Did;
 }

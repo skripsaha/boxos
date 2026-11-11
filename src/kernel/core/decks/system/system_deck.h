@@ -19,17 +19,31 @@ typedef struct Question Question;
 #define EFI_INFO_BLOB_SIZE        128u
 #define EFI_INFO_VERSION          1u
 
-/* Allocate target->buf_heap pages, copy `length` bytes from sender's heap
- * to target's heap. Returns target user vaddr or 0 on failure. Used by the
- * Manifest-native system.route / system.broadcast ops. */
+/* The deposit window (system_deck.c, cabin.h deposit_*): what the kernel
+ * lends a program to read, in whole pages of its own. */
+
+/* Places for `length` bytes in the target's window, mapped and the kernel's
+ * to write; 0 when there is no room. cabin_heap_lend settles them. */
+uint64_t cabin_heap_place(process_t *target, uint32_t length);
+
+/* The places cabin_heap_place gave, written: lent to the program, which may
+ * give them back from now on — or, when the writing failed, let go at once. */
+void cabin_heap_lend(process_t *target, uint64_t addr, uint32_t length, bool written);
+
+/* A deposit given back: unmapped, its frames back to the machine, its places
+ * free for the next. ERR_INVALID_ADDRESS, and nothing taken, unless every
+ * page from addr for length bytes is lent to the program now. */
+error_t cabin_heap_take_back(process_t *target, uint64_t addr, uint32_t length);
+
+/* `length` bytes of a KERNEL buffer lent to the target: its user vaddr, or 0
+ * on failure. What system.proc.exec uses to hand a cabin Luggage too long for
+ * its CabinInfo page, and system.ask a question. */
+uint64_t cabin_heap_deposit(process_t *target, const void *kbuf, uint32_t length);
+
+/* The same from the sender's memory: what system.route and system.broadcast
+ * lend each receiver. */
 uint64_t ipc_copy_to_heap(process_t *sender, process_t *target,
                           uint64_t src_addr, uint32_t length);
-
-/* The second half of the same: allocate target->buf_heap pages and copy
- * `length` bytes from a KERNEL buffer into them. Returns the target user
- * vaddr or 0 on failure. What system.proc.exec uses to hand a cabin Luggage
- * too long for its CabinInfo page. */
-uint64_t cabin_heap_deposit(process_t *target, const void *kbuf, uint32_t length);
 
 /* Settle one question (system_ops.c, system.ask): the answer into the asker's
  * answer box, or rc in its place, and the asker answered. Touches the asker's

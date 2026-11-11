@@ -4944,7 +4944,7 @@ void Phase20()
         for (int i = 0; i < 12; i++) {
             std::optional<box::message> mm = box::receive_for(800);
             if (!mm) break;
-            if (mm->from() == static_cast<std::uint32_t>(child)) { m = *mm; break; }
+            if (mm->from() == static_cast<std::uint32_t>(child)) { m = std::move(*mm); break; }
         }
     }
     Check(static_cast<bool>(m), "phase20 co_await next_message delivers a message");

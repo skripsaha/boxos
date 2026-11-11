@@ -19,6 +19,10 @@
 // an empty or kernel-origin record (data_addr 0 / length 0) — that validation is
 // what makes the receive path memory-safe (a raw unguarded data_addr read is the
 // classic cross-cabin fault). This is a box:: extension, not part of std.
+//
+// A message's bytes are lent to the program (box/ipc.h give_back), and a
+// box::message holds them: it gives them back when it ends, so it moves and is
+// never copied. A question it holds is given back by its answer instead.
 #ifndef BOXCXX_BOX_MESSAGE_H
 #define BOXCXX_BOX_MESSAGE_H
 
@@ -30,6 +34,7 @@
 #include <span>
 #include <string_view>
 #include <type_traits>
+#include <utility>
 
 #include "box/ipc.h"           // send / broadcast / receive / receive_wait + Result
 #include "box/cpu.h"           // cpu_rdtsc / cpu_ms_to_tsc (box::call deadline math)
@@ -42,9 +47,27 @@ namespace box {
 class message {
     Result r_{};
 
+    void give_back_() noexcept
+    {
+        if (KCTX_KIND(r_.context) == KCTX_IPC && r_.data_addr != 0) (void)::give_back(&r_);
+    }
+
 public:
     message() noexcept = default;
     explicit message(const Result &r) noexcept : r_(r) {}
+    message(message &&other) noexcept : r_(other.r_) { other.r_ = Result{}; }
+    message &operator=(message &&other) noexcept
+    {
+        if (this != &other) {
+            give_back_();
+            r_       = other.r_;
+            other.r_ = Result{};
+        }
+        return *this;
+    }
+    message(const message &)            = delete;
+    message &operator=(const message &) = delete;
+    ~message() { give_back_(); }
 
     // A genuine IPC delivery carries a non-zero sender pid (kernel-origin records
     // carry pid 0 and are never returned as messages).
@@ -264,7 +287,7 @@ inline task<result<message>> call(std::uint32_t pid, const void *data, std::uint
         timeout_ms ? cpu_rdtsc() + cpu_ms_to_tsc(static_cast<std::uint64_t>(timeout_ms)) : 0;
     std::optional<message> __m = co_await __call_awaiter{__deadline};
     if (!__m) co_return std::unexpected(error{errc::timeout});
-    co_return *__m;
+    co_return std::move(*__m);
 }
 // Typed request overload. `req` is taken BY VALUE — it is copied into the
 // coroutine frame, so it stays alive across the suspension even when the task is
@@ -288,7 +311,7 @@ inline task<result<message>> call(std::uint32_t pid, Req req,
         timeout_ms ? cpu_rdtsc() + cpu_ms_to_tsc(static_cast<std::uint64_t>(timeout_ms)) : 0;
     std::optional<message> __m = co_await __call_awaiter{__deadline};
     if (!__m) co_return std::unexpected(error{errc::timeout});
-    co_return *__m;
+    co_return std::move(*__m);
 }
 
 // ── co_await box::result_any() -> box::any_result ───────────────────────────
@@ -301,30 +324,32 @@ inline task<result<message>> call(std::uint32_t pid, Req req,
 // the caller to demux. This is EVENTS, not failures: it never yields a
 // box::error (a box::message reply path is where failures surface).
 class any_result {
-    Result r_{};
+    message m_;   // the record; a message's bytes are held, and given back, by it
 
 public:
     any_result() noexcept = default;
-    explicit any_result(const Result &r) noexcept : r_(r) {}
+    explicit any_result(const Result &r) noexcept : m_(r) {}
 
     // A genuine record arrived (vs a spurious resume on a drained ring): a zero
     // record carries no context, no sender and no payload.
     bool valid() const noexcept
     {
-        return r_.context != KCTX_NONE || r_.sender_pid != 0 || r_.data_addr != 0;
+        const Result &r = m_.raw();
+        return r.context != KCTX_NONE || r.sender_pid != 0 || r.data_addr != 0;
     }
     explicit operator bool() const noexcept { return valid(); }
 
     // Demux faces — exactly one is meaningful per record.
-    bool          is_ipc() const noexcept { return r_.sender_pid != 0; }
-    bool          is_kernel() const noexcept { return r_.sender_pid == 0; }
-    std::uint32_t context() const noexcept { return r_.context; }      // KCTX_*
-    std::uint32_t error_code() const noexcept { return r_.error_code; }
+    bool          is_ipc() const noexcept { return m_.raw().sender_pid != 0; }
+    bool          is_kernel() const noexcept { return m_.raw().sender_pid == 0; }
+    std::uint32_t context() const noexcept { return m_.raw().context; }      // KCTX_*
+    std::uint32_t error_code() const noexcept { return m_.raw().error_code; }
 
     // The IPC face — an EMPTY (invalid) message when this is a kernel record;
-    // reuses box::message's cross-cabin data_addr guard verbatim.
-    message       as_message() const noexcept { return message(r_); }
-    const Result &raw() const noexcept { return r_; }
+    // reuses box::message's cross-cabin data_addr guard verbatim. The record is
+    // handed over with it: this any_result is empty after.
+    message       as_message() noexcept { return std::move(m_); }
+    const Result &raw() const noexcept { return m_.raw(); }
 };
 
 // co_await box::result_any() — suspends on the current box::executor (Result

@@ -94,6 +94,7 @@ static void hold_give_back(SouvenirHold *hold, const uint8_t *taken)
 {
     for (size_t i = 0; i < hold->Count; i++) {
         if (!taken || !taken[i]) result_restash(&hold->Held[i]);
+        else                     (void)give_back(&hold->Held[i]);
     }
     free(hold->Held);
     hold->Held = NULL;

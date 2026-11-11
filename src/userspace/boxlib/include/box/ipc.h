@@ -26,7 +26,8 @@ int ask(const char *tag, const void *question, uint32_t len,
 /* A question arrives through receive() as a Result of kind KCTX_ASK
  * (boxos_kctx.h): sender_pid is the asker, and its payload is AskFrom — who
  * asked and in which program, the kernel's word — followed by the question.
- * Answer it once with this; the asker gets `bytes` as its reply.
+ * Answer it once with this; the asker gets `bytes` as its reply. The
+ * question's bytes go with the answer, whatever it says: read them first.
  *   -ERR_INVALID_STATE      the question is not this strand's to answer, or is
  *                           answered already
  *   -ERR_PROCESS_NOT_FOUND  the asker is dead: the answer went nowhere, and
@@ -35,6 +36,14 @@ int answer(const Result *question, const void *bytes, uint32_t len);
 
 bool receive(Result* out);
 bool receive_wait(Result* out, uint32_t timeout_ms);
+
+/* A message's bytes are lent: the kernel put them in pages of this program's
+ * own, and they stay until it gives them back — once read, with this, or at
+ * its end. A program that lives long gives back every message it reads, or
+ * holds a page for each. A question is given back by its answer, and is
+ * refused here (-ERR_INVALID_ARGUMENT); so is a message given back already
+ * (-ERR_INVALID_ADDRESS). A message with no bytes has nothing to give. */
+int give_back(const Result *message);
 /* A program's arguments are not a message: they are its Luggage, in its cabin
  * from the first instruction — see box/luggage.h. */
 

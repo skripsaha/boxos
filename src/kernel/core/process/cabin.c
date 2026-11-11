@@ -170,7 +170,7 @@ cabin_t *cabin_create(uint32_t pid, const char *tags)
     cabin->aslr_stack_top     = VMM_USER_STACK_TOP - aslr.stack_offset;
     cabin->aslr_heap_base     = CABIN_HEAP_BASE + aslr.heap_offset;
     cabin->aslr_buf_heap_base = CABIN_BUF_HEAP_START + aslr.buf_heap_offset;
-    cabin->buf_heap_next      = cabin->aslr_buf_heap_base;
+    spinlock_init(&cabin->deposit_lock);
 
     if (cabin_wear_tags(cabin, tags) != OK)
     {
@@ -230,6 +230,11 @@ void cabin_destroy(cabin_t *cabin)
 
     kfree(cabin->hammock_free);
     cabin->hammock_free = NULL;
+
+    /* The deposit book; the pages it lent go with the address space below. */
+    kfree(cabin->deposit_held);
+    cabin->deposit_held = cabin->deposit_lent = NULL;
+    cabin->deposit_words = 0;
 
     ImageThreadLetGo(&cabin->thread);
 
