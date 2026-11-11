@@ -498,8 +498,10 @@ setting_refuses life_in_struc $'struc point\nlife stays\nendstruc' \
     "life_in_struc.asm:6:1: life stands outside struc and istruc: it is the program's, not a layout's"
 
 # A life that comes to the linker from another assembler is read too: a box
-# with a word nobody who starts it would hear is not made.
-program badlife $' nop\n.section .boxos.life,"a"\n.ascii "life 1\\nstays\\nlonely\\n"'
+# with a word nobody who starts it would hear is not made. Back in .text after
+# it, as badsettings: what program() writes after the body is code, and in the
+# life it would be bytes of a line nobody wrote, read as it happens to fall.
+program badlife $' nop\n.section .boxos.life,"a"\n.ascii "life 1\\nstays\\nlonely\\n"\n.text'
 said=$("$STAND" link "$ENTRY" "$WORK/badlife.o" "$ARCHIVE" "$WORK/badlife.box" 2>&1)
 if [ $? = 1 ] && [ "$said" = "the program's life, line 3: no word of how a program lives — task, stays, serves or rise" ]; then
     ok life_read_at_link
