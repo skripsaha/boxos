@@ -16,6 +16,11 @@ struct Point {
     friend constexpr bool operator==(Point, Point) noexcept = default;
 };
 
+struct PointF {
+    float X = 0.0f;
+    float Y = 0.0f;
+};
+
 struct Size {
     std::int32_t Width  = 0;
     std::int32_t Height = 0;

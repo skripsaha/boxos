@@ -8,6 +8,7 @@ inline constexpr char LowerHalf  = static_cast<char>(0xDC);
 inline constexpr char Full       = static_cast<char>(0xDB);
 inline constexpr char LightShade = static_cast<char>(0xB0);
 inline constexpr char MidShade   = static_cast<char>(0xB1);
+inline constexpr char DenseShade = static_cast<char>(0xB2);
 inline constexpr char Dot        = static_cast<char>(0xFA);
 inline constexpr char Bullet     = static_cast<char>(0x07);
 inline constexpr char Tick       = static_cast<char>(0xFB);

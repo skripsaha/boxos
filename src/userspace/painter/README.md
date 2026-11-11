@@ -59,6 +59,39 @@ of what is composited into it, and what replaces a rectangle replaces the
 caret in it. Only `ConsoleSurface` has a cursor of its own: the point where the
 console goes on once the layer is part of its text.
 
+## Glass and finer edges
+
+The display says what its glass is, and `Stage::Glass()` (also `Surface` and
+`ConsoleSurface`, and `Frame::Glass()` for the frame a `Stage` owns) gives
+`GlassKind::Text` for a text page of 16 colours or `GlassKind::Pixels` for a
+framebuffer. Both draw the same cells; the kind says what a cell may look
+like, so a program asks it and does not guess from the screen's size. Painter
+does not draw pixels for it: `painter::tui` is cells, half-blocks and CP437
+glyphs, and real pixels belong to `painter::gui`.
+
+`PutPixel` has one pixel across a cell and two down. `FineCanvas`
+(`painter/tui/fine_canvas.h`) is the opt-in finer way to draw shapes on a
+`Frame`: each cell is two sub-pixels across and two down, and a shape
+(`Disc`, `Ellipse`, `Ring`, `Rounded`, `Line`, `Polygon`, `Fill`, or `Cover`
+for any shape given as a distance) is placed in `PutPixel`'s units and
+blended into each sub-pixel by how much of it the shape covers. Every cell a
+shape reaches is then settled by `ResolveQuad` (`painter/tui/subcell.h`),
+which picks the glyph and the two colours that reproduce the four sub-pixels
+with the least colour error:
+
+- one colour (a space), the upper half, or the left half, of two mean colours;
+- on pixels also the shades, by the font's own picture of them: a diagonal of
+  two colours is the half shade, and one sub-pixel against three is dust of
+  its colour over the others. A shade is a texture, so its error is raised
+  by how far apart its two colours lie, and it is chosen only where a split
+  cannot say the cell as well;
+- on a text page only the first, for sixteen colours turn a dither into noise.
+
+A canvas keeps no state: a cell the shape misses is not touched, one it
+reaches becomes opaque, and shapes drawn over one another are laid in order.
+`FineCanvas` and `PutPixel` coexist on one frame, and an existing program is
+unchanged.
+
 ## Layering
 
 ```text
