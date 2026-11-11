@@ -3,7 +3,6 @@
 #include "canvas.h"
 
 #include <algorithm>
-#include <cmath>
 
 #include "trig.h"
 
@@ -14,12 +13,6 @@ namespace {
 std::uint8_t Weight(float Cover)
 {
     return static_cast<std::uint8_t>(std::clamp(Cover, 0.0f, 1.0f) * 255.0f + 0.5f);
-}
-
-// How much of a pixel whose center is Beyond past an edge lies inside it.
-float Inside(float Beyond)
-{
-    return std::clamp(0.5f - Beyond, 0.0f, 1.0f);
 }
 
 }  // namespace
@@ -57,86 +50,27 @@ void Canvas::Fill(std::int32_t X, std::int32_t Y, std::int32_t Across, std::int3
 
 void Canvas::Disc(float Across, float Down, float Radius, Color Ink, float Opacity)
 {
-    const std::int32_t Left = std::max(static_cast<std::int32_t>(Across - Radius - 1), 0);
-    const std::int32_t Top = std::max(static_cast<std::int32_t>(Down - Radius - 1), 0);
-    const std::int32_t Right = std::min(static_cast<std::int32_t>(Across + Radius + 2), Wide());
-    const std::int32_t Bottom = std::min(static_cast<std::int32_t>(Down + Radius + 2), High());
-    for (std::int32_t Row = Top; Row < Bottom; Row++) {
-        for (std::int32_t Col = Left; Col < Right; Col++) {
-            const float Across2 = Col + 0.5f - Across, Down2 = Row + 0.5f - Down;
-            Plot(Col, Row, Ink, Inside(std::sqrt(Across2 * Across2 + Down2 * Down2) - Radius) * Opacity);
-        }
-    }
+    Fine.Disc(Across, Down, Radius, Ink, Opacity);
 }
 
 void Canvas::Ellipse(float Across, float Down, float ReachAcross, float ReachDown, Color Ink, float Opacity)
 {
-    const std::int32_t Left = std::max(static_cast<std::int32_t>(Across - ReachAcross - 1), 0);
-    const std::int32_t Top = std::max(static_cast<std::int32_t>(Down - ReachDown - 1), 0);
-    const std::int32_t Right = std::min(static_cast<std::int32_t>(Across + ReachAcross + 2), Wide());
-    const std::int32_t Bottom = std::min(static_cast<std::int32_t>(Down + ReachDown + 2), High());
-    const float Reach = std::max(std::min(ReachAcross, ReachDown), 0.5f);
-    for (std::int32_t Row = Top; Row < Bottom; Row++) {
-        for (std::int32_t Col = Left; Col < Right; Col++) {
-            const float Over = (Col + 0.5f - Across) / std::max(ReachAcross, 0.5f);
-            const float Under = (Row + 0.5f - Down) / std::max(ReachDown, 0.5f);
-            Plot(Col, Row, Ink, Inside((std::sqrt(Over * Over + Under * Under) - 1.0f) * Reach) * Opacity);
-        }
-    }
+    Fine.Ellipse(Across, Down, ReachAcross, ReachDown, Ink, Opacity);
 }
 
 void Canvas::Ring(float Across, float Down, float Outer, float Inner, Color Ink)
 {
-    const std::int32_t Left = std::max(static_cast<std::int32_t>(Across - Outer - 1), 0);
-    const std::int32_t Top = std::max(static_cast<std::int32_t>(Down - Outer - 1), 0);
-    const std::int32_t Right = std::min(static_cast<std::int32_t>(Across + Outer + 2), Wide());
-    const std::int32_t Bottom = std::min(static_cast<std::int32_t>(Down + Outer + 2), High());
-    for (std::int32_t Row = Top; Row < Bottom; Row++) {
-        for (std::int32_t Col = Left; Col < Right; Col++) {
-            const float Across2 = Col + 0.5f - Across, Down2 = Row + 0.5f - Down;
-            const float Far     = std::sqrt(Across2 * Across2 + Down2 * Down2);
-            Plot(Col, Row, Ink, std::min(Inside(Far - Outer), Inside(Inner - Far)));
-        }
-    }
+    Fine.Ring(Across, Down, Outer, Inner, Ink);
 }
 
 void Canvas::Rounded(float Left, float Top, float Across, float Down, float Radius, Color Ink, float Opacity)
 {
-    const float HalfAcross = Across / 2.0f, HalfDown = Down / 2.0f;
-    const float MiddleAcross = Left + HalfAcross, MiddleDown = Top + HalfDown;
-    const std::int32_t From = std::max(static_cast<std::int32_t>(std::floor(Left)) - 1, 0);
-    const std::int32_t Up = std::max(static_cast<std::int32_t>(std::floor(Top)) - 1, 0);
-    const std::int32_t To = std::min(static_cast<std::int32_t>(std::ceil(Left + Across)) + 1, Wide());
-    const std::int32_t Bottom = std::min(static_cast<std::int32_t>(std::ceil(Top + Down)) + 1, High());
-    for (std::int32_t Row = Up; Row < Bottom; Row++) {
-        for (std::int32_t Col = From; Col < To; Col++) {
-            const float OverAcross = std::fabs(Col + 0.5f - MiddleAcross) - (HalfAcross - Radius);
-            const float OverDown   = std::fabs(Row + 0.5f - MiddleDown) - (HalfDown - Radius);
-            const float Beyond = std::sqrt(std::max(OverAcross, 0.0f) * std::max(OverAcross, 0.0f) +
-                                           std::max(OverDown, 0.0f) * std::max(OverDown, 0.0f)) +
-                                 std::min(std::max(OverAcross, OverDown), 0.0f) - Radius;
-            Plot(Col, Row, Ink, Inside(Beyond) * Opacity);
-        }
-    }
+    Fine.Rounded(Left, Top, Across, Down, Radius, Ink, Opacity);
 }
 
 void Canvas::Line(float FromAcross, float FromDown, float ToAcross, float ToDown, float Thick, Color Ink)
 {
-    const float Along = ToAcross - FromAcross, Down = ToDown - FromDown;
-    const float Length2 = Along * Along + Down * Down;
-    const float Half = Thick / 2.0f;
-    const std::int32_t Left = std::max(static_cast<std::int32_t>(std::min(FromAcross, ToAcross) - Half - 1), 0);
-    const std::int32_t Top = std::max(static_cast<std::int32_t>(std::min(FromDown, ToDown) - Half - 1), 0);
-    const std::int32_t Right = std::min(static_cast<std::int32_t>(std::max(FromAcross, ToAcross) + Half + 2), Wide());
-    const std::int32_t Bottom = std::min(static_cast<std::int32_t>(std::max(FromDown, ToDown) + Half + 2), High());
-    for (std::int32_t Row = Top; Row < Bottom; Row++) {
-        for (std::int32_t Col = Left; Col < Right; Col++) {
-            const float PointAcross = Col + 0.5f - FromAcross, PointDown = Row + 0.5f - FromDown;
-            const float Reach = Length2 > 0 ? std::clamp((PointAcross * Along + PointDown * Down) / Length2, 0.0f, 1.0f) : 0.0f;
-            const float OffAcross = PointAcross - Reach * Along, OffDown = PointDown - Reach * Down;
-            Plot(Col, Row, Ink, Inside(std::sqrt(OffAcross * OffAcross + OffDown * OffDown) - Half));
-        }
-    }
+    Fine.Line({FromAcross, FromDown}, {ToAcross, ToDown}, Thick, Ink);
 }
 
 void Canvas::Chip(float Across, float Down, float Radius, Color Body)

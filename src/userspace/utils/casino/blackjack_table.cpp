@@ -1,7 +1,8 @@
 /* blackjack_table.cpp — the table itself: the felt with its curved edge and
  * wooden rail, the printing on it, the shoe, the discard tray and the
- * betting circle (blackjack.h). Every edge is settled cell by cell on the
- * glyph of the font that matches it best, so none is a staircase of blocks. */
+ * betting circle (blackjack.h). The edge, the arc and the ring are Painter's
+ * FineCanvas shapes, each cell settled on the glyph of the font that shows
+ * it best, so none is a staircase of blocks. */
 
 #include <algorithm>
 #include <array>
@@ -12,6 +13,7 @@
 #include "chips.h"
 #include "common.h"
 #include "ornament.h"
+#include "painter/tui/fine_canvas.h"
 #include "painter/tui/glyph.h"
 
 namespace casino {
@@ -20,7 +22,7 @@ namespace {
 
 namespace tui = painter::tui;
 
-enum Zone : int { Beyond = 0, Wood = 1, Felt = 2 };
+constexpr int RailBands = 4;
 
 // How far a point is outside the table's edge, in pixels, negative inside:
 // straight sides above the middle of the arc, a half ellipse below it.
@@ -38,17 +40,18 @@ void CenterText(tui::Frame &Out, std::int32_t Middle, std::int32_t Row, std::str
 }
 
 // A line along y = Base - Lift (x / Half)^2 over Half logical pixels either
-// side of Middle, drawn to the fraction of a pixel, with a gap of Gap pixels
-// in the middle for words.
-void ArcLine(Canvas &Draw, float Middle, float Base, float Half, float Gap, float Lift, Color Ink)
+// side of Middle, 1.1 thick, with a gap of Gap pixels in the middle for words.
+void ArcLine(tui::FineCanvas &Fine, float Middle, float Base, float Half, float Gap, float Lift, Color Ink)
 {
-    float FromAcross = Middle - Half, FromDown = Base - Lift;
-    for (float Off = -Half + 0.5f; Off <= Half; Off += 0.5f) {
-        const float Across = Middle + Off, Down = Base - Lift * Off * Off / (Half * Half);
-        if (std::fabs(Off) > Gap && std::fabs(Off - 0.5f) > Gap) Draw.Line(FromAcross, FromDown, Across, Down, 1.1f, Ink);
-        FromAcross = Across;
-        FromDown   = Down;
-    }
+    const float Thick = 1.1f;
+    Fine.Cover(tui::FineCanvas::Reaching(Middle - Half - 1.0f, Base - Lift - 1.0f, Middle + Half + 1.0f, Base + 1.0f), Ink,
+               [&](float X, float Y) {
+                   const float Off   = X - Middle;
+                   const float Curve = Base - Lift * Off * Off / (Half * Half);
+                   const float Slope = -2.0f * Lift * Off / (Half * Half);
+                   const float Along = std::fabs(Y - Curve) / std::sqrt(1.0f + Slope * Slope) - Thick / 2.0f;
+                   return std::max({Along, std::fabs(Off) - Half, Gap - std::fabs(Off)});
+               });
 }
 
 }  // namespace
@@ -56,40 +59,20 @@ void ArcLine(Canvas &Draw, float Middle, float Base, float Half, float Gap, floa
 void Blackjack::PaintFelt(tui::Frame &Out, const Layout &Where) const
 {
     const Look &Shown = Ctx.Shown;
-    Cloth(Out, painter::core::Rect{0, 1, Where.Cols, Where.Bottom}, Shown.Felt);
+    const painter::core::Rect Table{0, 1, Where.Cols, Where.Bottom};
+    Cloth(Out, Table, Shown.Felt);
     const float Middle = static_cast<float>(Where.Cols) / 2.0f;
     const auto  Edge   = [&](float X, float Y) { return Outside(X - Middle, Y - Where.ArcMiddle, Where.ArcAcross, Where.ArcDepth); };
-    for (std::int32_t Row = 1; Row <= Where.Bottom; Row++) {
-        for (std::int32_t Col = 0; Col < Where.Cols; Col++) {
-            const float Here = Edge(static_cast<float>(Col) + 0.5f, static_cast<float>(2 * Row) + 1.0f);
-            if (Here < -(Where.RailWide + 2.0f)) continue;
-            std::array<int, 3>           Counts{};
-            std::array<std::uint8_t, 128> Zones{};
-            for (int Y = 0; Y < 16; Y++)
-                for (int X = 0; X < 8; X++) {
-                    const float D = Edge(static_cast<float>(Col) + (static_cast<float>(X) + 0.5f) / 8.0f, static_cast<float>(2 * Row) + (static_cast<float>(Y) + 0.5f) / 8.0f);
-                    const int   Z = D > 0.0f ? Beyond : D > -Where.RailWide ? Wood : Felt;
-                    Zones[static_cast<std::size_t>(Y * 8 + X)] = static_cast<std::uint8_t>(Z);
-                    Counts[static_cast<std::size_t>(Z)]++;
-                }
-            const float Reach = std::clamp(-Here / Where.RailWide, 0.0f, 1.0f);
-            const std::array<Color, 3> Inks = {Shown.Page, Shade(Shown.Rail, 1.1f - 0.35f * Reach), Out.Read({Col, Row}).Background};
-            int First = 0, Second = -1;
-            for (int Z = 1; Z < 3; Z++) if (Counts[static_cast<std::size_t>(Z)] > Counts[static_cast<std::size_t>(First)]) First = Z;
-            for (int Z = 0; Z < 3; Z++) if (Z != First && Counts[static_cast<std::size_t>(Z)] > 0 && (Second < 0 || Counts[static_cast<std::size_t>(Z)] > Counts[static_cast<std::size_t>(Second)])) Second = Z;
-            if (Second < 0) {
-                if (First != Felt) Out.Put({Col, Row}, ' ', tui::TextStyle{Inks[static_cast<std::size_t>(First)], Inks[static_cast<std::size_t>(First)]});
-                continue;
-            }
-            std::array<std::uint8_t, 16> Mask{};
-            for (int Y = 0; Y < 16; Y++)
-                for (int X = 0; X < 8; X++) {
-                    const int Z = Zones[static_cast<std::size_t>(Y * 8 + X)];
-                    if (Z == First || (Z != Second && std::abs(Z - First) < std::abs(Z - Second))) Mask[static_cast<std::size_t>(Y)] |= static_cast<std::uint8_t>(0x80 >> X);
-                }
-            Settle(Out, {Col, Row}, Inks[static_cast<std::size_t>(First)], Inks[static_cast<std::size_t>(Second)], Mask, !Hard(Out));
-        }
+    tui::FineCanvas Fine(Out);
+    // The rail is laid from its inner edge outward, each band a shade
+    // lighter and reaching from its depth to beyond the table, and the page
+    // over everything outside the table's edge.
+    for (int Band = RailBands - 1; Band >= 0; Band--) {
+        const float Depth = Where.RailWide * static_cast<float>(Band + 1) / static_cast<float>(RailBands);
+        const float Reach = (static_cast<float>(Band) + 0.5f) / static_cast<float>(RailBands);
+        Fine.Cover(Table, Shade(Shown.Rail, 1.1f - 0.35f * Reach), [&](float X, float Y) { return -Edge(X, Y) - Depth; });
     }
+    Fine.Cover(Table, Shown.Page, [&](float X, float Y) { return -Edge(X, Y); });
 }
 
 void Blackjack::PaintPrinting(tui::Frame &Out, const Layout &Where) const
@@ -98,18 +81,17 @@ void Blackjack::PaintPrinting(tui::Frame &Out, const Layout &Where) const
     const BlackjackRules &Rule  = Shown.Blackjack;
     const std::int32_t   Middle = Where.Cols / 2;
     const Color          Print1 = Shade(Shown.Gold, 0.85f), Print2 = Shade(Shown.Text, 0.7f), Line = Shade(Shown.Gold, 0.9f);
-    CenterText(Out, Middle, Where.TextTop, "BLACKJACK PAYS 3 TO 2", Print1);
-    CenterText(Out, Middle, Where.TextTop + 1, Rule.HitSoft17 ? "DEALER HITS SOFT 17" : "DEALER STANDS ON ALL 17s", Print2);
-    std::int32_t Row = Where.TextTop + 2;
-    if (Where.TextRows >= 4) {
-        CenterText(Out, Middle, Row, std::format("{} {}  SPLIT UP TO {} HANDS", Rule.Decks, Rule.Decks == 1 ? "DECK" : "DECKS", Rule.MaxHands), Print2);
-        Row++;
-    }
+    const bool           Counted = Where.TextRows >= 4;
+    const std::int32_t   Row = Where.TextTop + (Counted ? 3 : 2);
     const std::string_view Words = Rule.Insurance ? "INSURANCE PAYS 2 TO 1" : "NO INSURANCE";
     const float            Half  = static_cast<float>(std::min(Where.Cols * 36 / 100, Where.Cols / 2 - 8 - static_cast<std::int32_t>(Where.RailWide)));
-    Canvas                 Draw(Out, Hard(Out));
-    ArcLine(Draw, static_cast<float>(Middle), static_cast<float>(Row * 2 + 1), Half, static_cast<float>(Words.size()) / 2.0f + 1.0f,
+    tui::FineCanvas        Fine(Out);
+    ArcLine(Fine, static_cast<float>(Middle), static_cast<float>(Row * 2 + 1), Half, static_cast<float>(Words.size()) / 2.0f + 1.0f,
             Where.Rows >= 46 ? 7.0f : 4.0f, Line);
+    CenterText(Out, Middle, Where.TextTop, "BLACKJACK PAYS 3 TO 2", Print1);
+    CenterText(Out, Middle, Where.TextTop + 1, Rule.HitSoft17 ? "DEALER HITS SOFT 17" : "DEALER STANDS ON ALL 17s", Print2);
+    if (Counted)
+        CenterText(Out, Middle, Where.TextTop + 2, std::format("{} {}  SPLIT UP TO {} HANDS", Rule.Decks, Rule.Decks == 1 ? "DECK" : "DECKS", Rule.MaxHands), Print2);
     CenterText(Out, Middle, Row, Words, Print1);
 }
 

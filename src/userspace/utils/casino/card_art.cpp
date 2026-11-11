@@ -11,6 +11,7 @@
 
 #include "canvas.h"
 #include "ornament.h"
+#include "painter/tui/fine_canvas.h"
 #include "painter/tui/glyph.h"
 
 namespace casino {
@@ -27,8 +28,9 @@ constexpr float SpaceHigh = 100.0f;
 constexpr float Rounding  = 7.0f;
 constexpr int   Samples   = 3;
 
-// The corner of a card at rest, in pixels of the glass.
-constexpr float CornerReach = 5.0f;
+// The corner of a card at rest: five pixels of the glass, in the units of
+// the canvas, where a cell is eight across.
+constexpr float CornerRadius = 5.0f / 8.0f;
 
 const Color Skin = Color::Rgb(0xE8, 0xB8, 0x90);
 
@@ -157,24 +159,7 @@ void Put(tui::Frame &Out, std::int32_t Col, std::int32_t Row, char Glyph, Color 
     Out.Put({Col, Row}, Glyph, tui::TextStyle{Ink, Paper});
 }
 
-// The corners of a face rounded, to the pixel, and the shadow it casts to the
-// right and below, as thin as a half cell.
-void Shape(tui::Frame &Out, const Look &Shown, painter::core::Point At, CardSize Size, const std::array<Color, 4> &Under)
-{
-    const Color Paper = Shown.CardFace;
-    const auto  Round = [&](std::int32_t Col, std::int32_t Row, bool Left, bool Top, Color Beneath) {
-        FitCell(Out, {Col, Row}, Paper, Beneath, [&](float X, float Y) {
-            const float Across = Left ? CornerReach - X : X - (8.0f - CornerReach);
-            const float Down   = Top ? CornerReach - Y : Y - (16.0f - CornerReach);
-            return Across <= 0.0f || Down <= 0.0f || Across * Across + Down * Down <= CornerReach * CornerReach;
-        }, !Hard(Out));
-    };
-    Round(At.X, At.Y, true, true, Under[0]);
-    Round(At.X + Size.Cols - 1, At.Y, false, true, Under[1]);
-    Round(At.X, At.Y + Size.Rows - 1, true, false, Under[2]);
-    Round(At.X + Size.Cols - 1, At.Y + Size.Rows - 1, false, false, Under[3]);
-}
-
+// The shadow a card casts to the right and below, as thin as a half cell.
 void Shadow(tui::Frame &Out, const Look &Shown, painter::core::Point At, CardSize Size)
 {
     const auto Cast = [&](std::int32_t Col, std::int32_t Row, char Glyph) {
@@ -306,12 +291,9 @@ void PaintCard(tui::Frame &Out, const Look &Shown, const Card *Face, painter::co
         Body(Pixels, Shown, true, static_cast<float>(At.X), static_cast<float>(At.Y * 2), static_cast<float>(Size.Wide()), static_cast<float>(Size.High()));
         return;
     }
-    const std::array<Color, 4> Under = {Out.Read(At).Background, Out.Read({At.X + Size.Cols - 1, At.Y}).Background,
-                                        Out.Read({At.X, At.Y + Size.Rows - 1}).Background,
-                                        Out.Read({At.X + Size.Cols - 1, At.Y + Size.Rows - 1}).Background};
     if (!Hard(Out)) Shadow(Out, Shown, At, Size);
-    Out.Fill(painter::core::Rect{At.X, At.Y, Size.Cols, Size.Rows}, ' ', tui::TextStyle{Shown.CardFace, Shown.CardFace});
-    Shape(Out, Shown, At, Size, Under);
+    tui::FineCanvas(Out).Rounded(static_cast<float>(At.X), static_cast<float>(At.Y * 2), static_cast<float>(Size.Cols),
+                                 static_cast<float>(Size.Rows * 2), CornerRadius, Shown.CardFace);
     if (IsCourt(*Face)) {
         if (Size.Rows >= 9) Portrait(Out, Shown, *Face, At, Size);
         else Plaque(Out, Shown, *Face, At, Size);

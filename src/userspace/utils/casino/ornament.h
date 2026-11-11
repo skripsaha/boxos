@@ -5,7 +5,6 @@
 #ifndef CASINO_ORNAMENT_H
 #define CASINO_ORNAMENT_H
 
-#include <array>
 #include <cstdint>
 #include <span>
 #include <string>
@@ -49,26 +48,6 @@ void Print(painter::tui::Frame &Out, painter::core::Point At, std::string_view W
 
 // A thin rule of Length cells from At, across or down, over what is there.
 void Rule(painter::tui::Frame &Out, painter::core::Point At, std::int32_t Length, bool Down, Color Ink);
-
-// A cell where two colors meet, drawn with the glyph of the font whose picture
-// is nearest to the shape: Mask holds a row of 8 pixels in each byte, the most
-// significant bit the leftmost, a set bit where the pixel is In. Dither false
-// keeps to the blocks and the halves above and below, where the 16 colors of
-// the text console would turn the shades and thin strokes into noise.
-void Settle(painter::tui::Frame &Out, painter::core::Point At, Color In, Color Outside, const std::array<std::uint8_t, 16> &Mask,
-            bool Dither = true);
-
-// The same for a shape given as Covers(X, Y), true where the point of the cell
-// (X across from 0 to 8, Y down from 0 to 16, in the pixels of the glass) is In.
-template <class Shape>
-void FitCell(painter::tui::Frame &Out, painter::core::Point At, Color In, Color Outside, Shape Covers, bool Dither = true)
-{
-    std::array<std::uint8_t, 16> Mask{};
-    for (int Y = 0; Y < 16; Y++)
-        for (int X = 0; X < 8; X++)
-            if (Covers(static_cast<float>(X) + 0.5f, static_cast<float>(Y) + 0.5f)) Mask[static_cast<std::size_t>(Y)] |= static_cast<std::uint8_t>(0x80 >> X);
-    Settle(Out, At, In, Outside, Mask, Dither);
-}
 
 // How light a color is, 0 to 255.
 std::int32_t Lightness(Color Ink);

@@ -1,6 +1,8 @@
 /* canvas.h — the casino's pixels: a Frame seen as square pixels, two to a
- * text cell, with the shapes the tables are drawn from. Edges are softened by
- * how much of a pixel a shape covers. */
+ * text cell, with the shapes the tables are drawn from. The shapes are
+ * Painter's FineCanvas: an edge is settled on the glyph of the font that
+ * shows it best, half a cell across, and the pixels are for what is drawn
+ * point by point. */
 #ifndef CASINO_CANVAS_H
 #define CASINO_CANVAS_H
 
@@ -8,6 +10,7 @@
 #include <string_view>
 
 #include "painter/core/color.h"
+#include "painter/tui/fine_canvas.h"
 #include "painter/tui/frame.h"
 
 namespace casino {
@@ -26,9 +29,9 @@ inline bool Hard(const painter::tui::Frame &Out)
 
 class Canvas {
 public:
-    explicit Canvas(painter::tui::Frame &Target, bool Crisp = false) : Out(Target), Edged(Crisp) {}
+    explicit Canvas(painter::tui::Frame &Target, bool Crisp = false) : Out(Target), Fine(Target), Edged(Crisp) {}
 
-    // Whether edges are softened and shadows soft: false on the text console.
+    // Whether shadows are soft and the pixels plotted blend: false on the text console.
     bool Smooth() const { return !Edged; }
 
     std::int32_t Wide() const { return Out.Size().Width; }
@@ -53,8 +56,9 @@ public:
     static bool         Inked(char Letter, std::int32_t Col, std::int32_t Row);
 
 private:
-    painter::tui::Frame &Out;
-    bool                 Edged;
+    painter::tui::Frame     &Out;
+    painter::tui::FineCanvas Fine;
+    bool                     Edged;
 };
 
 }  // namespace casino

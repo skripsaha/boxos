@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <vector>
 
-#include "boxos_font.h"
 #include "common.h"
 #include "painter/tui/glyph.h"
 #include "painter/tui/text.h"
@@ -16,10 +15,6 @@ namespace {
 
 namespace tui    = painter::tui;
 namespace Glyphs = painter::tui::Glyphs;
-
-// The glyphs a cell may be drawn with where two colors meet: blocks, halves,
-// the shades, and the thin rules.
-constexpr unsigned char Shapes[] = {0x20, 0xB0, 0xB1, 0xB2, 0xDB, 0xDF, 0xDC, 0xDD, 0xDE, 0xC4, 0xB3};
 
 std::int32_t Cells(std::string_view Words)
 {
@@ -53,45 +48,6 @@ void Dim(tui::Frame &Out, painter::core::Rect Area, float Factor)
 }
 
 }  // namespace
-
-void Settle(tui::Frame &Out, painter::core::Point At, Color In, Color Outside, const std::array<std::uint8_t, 16> &Mask, bool Dither)
-{
-    const auto Density = [](const std::uint8_t *Rows, std::array<int, 8> &Blocks) {
-        Blocks.fill(0);
-        for (std::size_t Row = 0; Row < 16; Row++)
-            for (int Col = 0; Col < 8; Col++)
-                if ((Rows[Row] >> (7 - Col)) & 1) Blocks[(Row / 4) * 2 + static_cast<std::size_t>(Col / 4)]++;
-    };
-    std::array<int, 8> Wanted;
-    Density(Mask.data(), Wanted);
-    int Total = 0;
-    for (const int Count : Wanted) Total += Count;
-    if (Total == 0) return;
-    int           Best  = 1 << 20;
-    unsigned char Glyph = 0x20;
-    bool          Swap  = false;
-    for (const unsigned char Shape : Shapes) {
-        if (!Dither && ((Shape >= 0xB0 && Shape <= 0xB2) || Shape == 0xDD || Shape == 0xDE || Shape == 0xC4 || Shape == 0xB3)) continue;
-        std::array<int, 8> Have;
-        Density(BoxFontGlyphs[Shape], Have);
-        int Plain = 0, Flipped = 0;
-        for (std::size_t Block = 0; Block < 8; Block++) {
-            Plain += (Have[Block] - Wanted[Block]) * (Have[Block] - Wanted[Block]);
-            Flipped += (16 - Have[Block] - Wanted[Block]) * (16 - Have[Block] - Wanted[Block]);
-        }
-        if (Plain < Best) {
-            Best  = Plain;
-            Glyph = Shape;
-            Swap  = false;
-        }
-        if (Flipped < Best) {
-            Best  = Flipped;
-            Glyph = Shape;
-            Swap  = true;
-        }
-    }
-    Out.Put(At, static_cast<char>(Glyph), Swap ? tui::TextStyle{Outside, In} : tui::TextStyle{In, Outside});
-}
 
 std::int32_t Lightness(Color Ink)
 {
