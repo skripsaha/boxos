@@ -68,7 +68,7 @@ ASSEMBLE_ENTRY_BLOB = $(ASSEMBLE_DIR)/entry_blob.o
 UTILS = create show files tag untag name trash delete assemble \
         me info say reboot bye defrag escheat fsck ipc_test memtag hw \
         timezone logsave lastsaid usetest faretest luggagetest rollcall handset headcount \
-        playtime lavalamp finish taskcenter hexer stringview \
+        playtime lavalamp finish taskboard hexer stringview \
         calculate difference copy typer flame checksum passport aquarium \
         nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab \
         edit seek retag read inside settings
@@ -153,12 +153,17 @@ timezone.elf: $(BOXLIB_START) timezone.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.
 	@# a megabyte of a 24 MB image.
 	@x86_64-elf-objcopy --strip-all $@
 
-taskcenter.elf: $(BOXLIB_START) taskcenter.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) taskcenter.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+# The board is C++ in parts of its own directory, each named for what it is.
+TASKBOARD_DIR  = taskboard
+TASKBOARD_OBJS = $(addprefix $(TASKBOARD_DIR)/,taskboard.o board.o paint.o graph.o look.o machine.o programs.o \
+                                               history.o journal.o)
+
+taskboard.elf: $(BOXLIB_START) $(TASKBOARD_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(TASKBOARD_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 # hexer and stringview are C++ in parts: each names its own objects, links
-# libboxcxx.a before libbox.a, and is stripped like taskcenter.
+# libboxcxx.a before libbox.a, and is stripped like taskboard.
 HEXER_OBJS      = hexer.o hexer_bytes.o hexer_paint.o hexer_list.o
 STRINGVIEW_OBJS = stringview.o stringview_sift.o stringview_paint.o
 
@@ -347,11 +352,12 @@ $(sort $(EDIT_OBJS) $(READ_OBJS)): CXXFLAGS += -I.
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
--include $(wildcard *.d $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.d $(EDIT_DIR)/*.d $(READ_DIR)/*.d)
+-include $(wildcard *.d $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.d $(EDIT_DIR)/*.d $(READ_DIR)/*.d $(TASKBOARD_DIR)/*.d)
 
 $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 	@mkdir -p $(dir $@)
 	nasm -f elf64 $< -o $@
 
 clean:
-	rm -f *.o *.d *.elf inside/*.o inside/*.d $(ASSEMBLE_DIR)/*.o $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.o $(KIN_DIR)/*.d $(EDIT_DIR)/*.o $(EDIT_DIR)/*.d $(READ_DIR)/*.o $(READ_DIR)/*.d
+	rm -f *.o *.d *.elf inside/*.o inside/*.d $(ASSEMBLE_DIR)/*.o $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.o $(KIN_DIR)/*.d $(EDIT_DIR)/*.o $(EDIT_DIR)/*.d $(READ_DIR)/*.o $(READ_DIR)/*.d \
+	      $(TASKBOARD_DIR)/*.o $(TASKBOARD_DIR)/*.d

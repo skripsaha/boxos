@@ -833,7 +833,7 @@ UTILS_DIR = $(USERSPACE_DIR)/utils
 UTIL_NAMES = create show files tag untag name trash delete assemble \
              me info say reboot bye defrag escheat fsck ipc_test memtag hw \
              timezone logsave lastsaid usetest faretest luggagetest headcount \
-             playtime lavalamp finish taskcenter hexer stringview \
+             playtime lavalamp finish taskboard hexer stringview \
              calculate difference copy typer flame checksum passport aquarium \
              nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab \
              edit seek retag read rollcall handset inside settings
@@ -1543,7 +1543,7 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/playtime.elf "utility,fun" \
 	$(UTILS_DIR)/lavalamp.elf "utility,fun" \
 	$(UTILS_DIR)/finish.elf   "utility,system" \
-	$(UTILS_DIR)/taskcenter.elf "utility" \
+	$(UTILS_DIR)/taskboard.elf "utility,system" \
 	$(UTILS_DIR)/calculate.elf "utility" \
 	$(UTILS_DIR)/difference.elf "utility,storage" \
 	$(UTILS_DIR)/copy.elf "utility,storage" \
