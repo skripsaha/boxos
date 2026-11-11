@@ -28,6 +28,26 @@ struct Look {
     Color         Cool;              // a load's color: light,
     Color         Warm;              //   halfway,
     Color         Hot;               //   full
+    Color         Page;              // behind the panels
+    Color         Panel;             // inside a panel
+    Color         Bars;              // the lines at the top and the bottom
+    Color         Frame;             // a panel's frame
+    Color         Title;             // titles, and the chosen program's name
+    Color         Text;
+    Color         Quiet;             // what is said quietly
+    Color         Chosen;            // behind the chosen program
+    Color         Marked;            // a marked program's mark
+    Color         OnScreen;          // where a program is and how it lives,
+    Color         Behind;            //   as programs.h Living
+    Color         Keeper;
+    Color         OnItsOwn;
+    Color         Serving;
+    Color         Task;
+    Color         Started;           // the journal's lines, as journal.h Happened
+    Color         Ended;
+    Color         Fell;
+    Color         Raised;
+    Color         Itself;            //   what the board itself did
     SortBy        Sort;
     GroupBy       Group;
     bool          Strands;           // every program's strands shown under it
