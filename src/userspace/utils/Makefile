@@ -71,7 +71,7 @@ UTILS = create show files tag untag name trash delete assemble \
         playtime lavalamp finish taskboard hexer stringview \
         calculate difference copy typer flame checksum passport aquarium \
         nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab \
-        edit seek retag read inside settings
+        edit seek retag read inside settings scratchpad
 
 .PHONY: all clean
 
@@ -160,6 +160,14 @@ TASKBOARD_OBJS = $(addprefix $(TASKBOARD_DIR)/,taskboard.o board.o paint.o graph
 
 taskboard.elf: $(BOXLIB_START) $(TASKBOARD_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(TASKBOARD_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+# The scratchpad is C++ in parts of its own directory, each named for what it is.
+SCRATCHPAD_DIR  = scratchpad
+SCRATCHPAD_OBJS = $(addprefix $(SCRATCHPAD_DIR)/,scratchpad.o pad.o paint.o look.o notes.o text.o)
+
+scratchpad.elf: $(BOXLIB_START) $(SCRATCHPAD_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(SCRATCHPAD_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 # hexer and stringview are C++ in parts: each names its own objects, links
@@ -352,7 +360,7 @@ $(sort $(EDIT_OBJS) $(READ_OBJS)): CXXFLAGS += -I.
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
--include $(wildcard *.d $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.d $(EDIT_DIR)/*.d $(READ_DIR)/*.d $(TASKBOARD_DIR)/*.d)
+-include $(wildcard *.d $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.d $(EDIT_DIR)/*.d $(READ_DIR)/*.d $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.d)
 
 $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 	@mkdir -p $(dir $@)
@@ -360,4 +368,4 @@ $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 
 clean:
 	rm -f *.o *.d *.elf inside/*.o inside/*.d $(ASSEMBLE_DIR)/*.o $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.o $(KIN_DIR)/*.d $(EDIT_DIR)/*.o $(EDIT_DIR)/*.d $(READ_DIR)/*.o $(READ_DIR)/*.d \
-	      $(TASKBOARD_DIR)/*.o $(TASKBOARD_DIR)/*.d
+	      $(TASKBOARD_DIR)/*.o $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.o $(SCRATCHPAD_DIR)/*.d

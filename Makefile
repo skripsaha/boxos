@@ -836,7 +836,7 @@ UTIL_NAMES = create show files tag untag name trash delete assemble \
              playtime lavalamp finish taskboard hexer stringview \
              calculate difference copy typer flame checksum passport aquarium \
              nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab \
-             edit seek retag read rollcall handset inside settings
+             edit seek retag read rollcall handset inside settings scratchpad
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
 # ==== FINAL BINARIES ====
@@ -1544,6 +1544,7 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/lavalamp.elf "utility,fun" \
 	$(UTILS_DIR)/finish.elf   "utility,system" \
 	$(UTILS_DIR)/taskboard.elf "utility,system" \
+	$(UTILS_DIR)/scratchpad.elf "utility,text" \
 	$(UTILS_DIR)/calculate.elf "utility" \
 	$(UTILS_DIR)/difference.elf "utility,storage" \
 	$(UTILS_DIR)/copy.elf "utility,storage" \
