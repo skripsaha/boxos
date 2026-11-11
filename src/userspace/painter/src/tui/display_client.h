@@ -30,6 +30,7 @@ public:
 
     core::Size Size() const noexcept { return {Bounds.Width, Bounds.Height}; }
     bool IsOpen() const noexcept { return Opened; }
+    GlassKind Glass() const noexcept { return Kind; }
     // Where the console's caret stood when the layer opened — after
     // everything this strand printed before opening it.
     core::Point Cursor() const noexcept { return ConsoleCursor; }
@@ -51,6 +52,7 @@ private:
     std::uint32_t DisplayPid = 0;
     std::uint32_t LayerId = 0;
     core::Point ConsoleCursor;
+    GlassKind Kind = GlassKind::Pixels;
     box::bay<std::byte> Shared;
     DisplayLayerSharedHeader *Header = nullptr;
     std::uint64_t NextSequence = 0;

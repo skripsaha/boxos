@@ -55,6 +55,11 @@ core::Size ConsoleSurface::Size() const noexcept
     return State ? State->Canvas.Size() : core::Size{};
 }
 
+GlassKind ConsoleSurface::Glass() const noexcept
+{
+    return State ? State->Canvas.Glass() : GlassKind::Pixels;
+}
+
 bool ConsoleSurface::IsOpen() const noexcept
 {
     return State && State->Canvas.IsOpen();

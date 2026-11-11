@@ -22,6 +22,15 @@ struct TextStyle {
     core::Color Background = core::Colors::Black;
 };
 
+/* What the glass is that a frame will be shown on, as the display says it
+ * (box/display.h DisplayGlassKind): a text page of 16 colours, or a
+ * framebuffer. Both draw the same cells; only what a cell can look like
+ * differs, so a program that softens edges asks it. */
+enum class GlassKind : std::uint8_t {
+    Text   = DISPLAY_GLASS_TEXT,
+    Pixels = DISPLAY_GLASS_PIXELS,
+};
+
 enum class Visibility : std::uint8_t {
     Transparent,
     Opaque,
@@ -67,6 +76,11 @@ public:
 
     core::Size Size() const noexcept { return Bounds; }
     std::int32_t PixelHeight() const noexcept;
+
+    /* The glass this frame is for. A Stage gives its frame the glass it holds;
+     * a frame made on its own is for pixels until it is told otherwise. */
+    GlassKind Glass() const noexcept { return Kind; }
+    void      SetGlass(GlassKind Value) noexcept { Kind = Value; }
 
     /* Clear writes an opaque background. ClearTransparent leaves every cell
      * transparent when this frame is passed to an overlay replacement. */
@@ -115,6 +129,7 @@ private:
     core::Size                 Bounds;
     std::vector<Cell>          Cells;
     std::optional<core::Point> CaretAt;
+    GlassKind                  Kind = GlassKind::Pixels;
 };
 
 }  // namespace painter::tui

@@ -109,7 +109,7 @@ void Tower::Paint()
     Dust.Draw(Picture);
     DrawShelf();
 
-    if (Where.Cols <= 80) ForTextPage(Picture);
+    if (Screen.Glass() == tui::GlassKind::Text) ForTextPage(Picture);
     tui::Frame &Out = Screen.FrameBuffer();
     Out.PutPixels(Picture.All());
     PaintBar(Out);

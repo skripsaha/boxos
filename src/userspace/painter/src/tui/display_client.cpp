@@ -40,6 +40,7 @@ DisplayLayer::DisplayLayer(core::Rect BoundsValue, const DisplayLayerOpenReply &
     : Bounds(BoundsValue), DisplayPid(Reply.display_pid), LayerId(Reply.layer_id),
       ConsoleCursor{static_cast<std::int32_t>(Reply.cursor_x),
                     static_cast<std::int32_t>(Reply.cursor_y)},
+      Kind(static_cast<GlassKind>(Reply.glass)),
       Shared(std::move(SharedValue)),
       Header(reinterpret_cast<DisplayLayerSharedHeader *>(Shared.data())), Opened(true)
 {
@@ -96,6 +97,8 @@ std::expected<DisplayLayer, StageError> DisplayLayer::Open(std::int32_t LeastCol
     if (Got != sizeof(Reply) || Reply.command != DISP_CMD_LAYER_OPEN)
         return Refused(box::error{box::errc::corrupted});
     if (Reply.error != 0) return Refused(box::error{static_cast<error_t>(Reply.error)});
+    if (Reply.glass != DISPLAY_GLASS_TEXT && Reply.glass != DISPLAY_GLASS_PIXELS)
+        return Refused(box::error{box::errc::corrupted});
     if (Reply.display_pid == 0 || Reply.layer_id == 0 ||
         std::memchr(Reply.bay_tag, '\0', sizeof(Reply.bay_tag)) == nullptr)
         return Refused(box::error{box::errc::corrupted});
@@ -118,7 +121,7 @@ std::expected<DisplayLayer, StageError> DisplayLayer::Open(std::int32_t LeastCol
 
 DisplayLayer::DisplayLayer(DisplayLayer &&Other) noexcept
     : Bounds(Other.Bounds), DisplayPid(Other.DisplayPid), LayerId(Other.LayerId),
-      ConsoleCursor(Other.ConsoleCursor), Shared(std::move(Other.Shared)), Header(Other.Header),
+      ConsoleCursor(Other.ConsoleCursor), Kind(Other.Kind), Shared(std::move(Other.Shared)), Header(Other.Header),
       NextSequence(Other.NextSequence), Opened(Other.Opened)
 {
     Other.Header = nullptr;
@@ -133,6 +136,7 @@ DisplayLayer &DisplayLayer::operator=(DisplayLayer &&Other) noexcept
     DisplayPid = Other.DisplayPid;
     LayerId = Other.LayerId;
     ConsoleCursor = Other.ConsoleCursor;
+    Kind = Other.Kind;
     Shared = std::move(Other.Shared);
     Header = Other.Header;
     NextSequence = Other.NextSequence;

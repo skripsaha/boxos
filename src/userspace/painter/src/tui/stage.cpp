@@ -53,6 +53,7 @@ std::expected<Stage, StageError> Stage::Open(std::int32_t LeastCols, std::int32_
     box::result<Frame> Created = Frame::Create(Actual);
     if (!Created)
         return std::unexpected(StageError{StageErrorKind::FrameUnavailable, Created.error(), Actual, Required});
+    Created->SetGlass(Layer->Glass());
 
     std::expected<Keyboard, StageError> Ear = Keyboard::Open();
     if (!Ear) return std::unexpected(Ear.error());
@@ -85,6 +86,11 @@ Stage::~Stage()
 core::Size Stage::Size() const noexcept
 {
     return State ? State->Layer.Size() : core::Size{};
+}
+
+GlassKind Stage::Glass() const noexcept
+{
+    return State ? State->Layer.Glass() : GlassKind::Pixels;
 }
 
 bool Stage::IsOpen() const noexcept

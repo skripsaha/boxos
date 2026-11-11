@@ -58,6 +58,11 @@ core::Size Surface::Size() const noexcept
     return State ? State->Canvas.Size() : core::Size{};
 }
 
+GlassKind Surface::Glass() const noexcept
+{
+    return State ? State->Canvas.Glass() : GlassKind::Pixels;
+}
+
 bool Surface::IsOpen() const noexcept
 {
     return State && State->Canvas.IsOpen();

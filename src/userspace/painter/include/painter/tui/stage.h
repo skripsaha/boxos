@@ -94,6 +94,8 @@ public:
 
     core::Size Size() const noexcept;
     bool       IsOpen() const noexcept;
+    // Whether the glass is a text page or pixels, as the display holds it.
+    GlassKind  Glass() const noexcept;
 
     Frame &FrameBuffer() noexcept;
     const Frame &FrameBuffer() const noexcept;

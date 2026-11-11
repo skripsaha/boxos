@@ -17,11 +17,11 @@ using Color = painter::core::Color;
 // The color toward black (Factor under 1) or toward white (over 1).
 Color Shade(Color Ink, float Factor);
 
-// Whether the glass is the text console's: its 16 colors turn every softened
+// Whether the display says the glass is the text console's: its 16 colors turn every softened
 // edge into noise, so what is new is drawn there with hard edges and no shadows.
 inline bool Hard(const painter::tui::Frame &Out)
 {
-    return Out.Size().Height < 34;
+    return Out.Glass() == painter::tui::GlassKind::Text;
 }
 
 class Canvas {

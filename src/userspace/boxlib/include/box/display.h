@@ -514,6 +514,15 @@ typedef enum {
     DISPLAY_LAYER_NOTICE  = 3,
 } DisplayLayerRole;
 
+/* What the glass is, said in every answer to an open: a text page of 16
+ * colours, or a framebuffer. Text is 80x25 cells of the page's own font; on
+ * pixels a cell is the 8x16 font's. A program that draws with more than the
+ * cell grid asks this, and does not guess it from the size. */
+typedef enum {
+    DISPLAY_GLASS_TEXT   = 1,
+    DISPLAY_GLASS_PIXELS = 2,
+} DisplayGlassKind;
+
 typedef enum {
     DISPLAY_LAYER_FREE    = 0,
     DISPLAY_LAYER_WRITING = 1,
@@ -535,7 +544,8 @@ typedef struct PACKED {
 
 typedef struct PACKED {
     uint8_t  command;         /* DISP_CMD_LAYER_OPEN */
-    uint8_t  reserved[3];
+    uint8_t  glass;           /* DisplayGlassKind; given with an error as well */
+    uint8_t  reserved[2];
     int32_t  error;           /* error_t; the rest is meaningful only with 0 */
     uint32_t layer_id;
     uint32_t display_pid;     /* where FRAME and CLOSE go */

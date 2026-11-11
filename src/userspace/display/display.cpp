@@ -210,7 +210,8 @@ bool AnswerWaiting()
         if (!LanesDrawnTo(Waiting.Asked.sender_pid, Waiting.From.generation, Waiting.Mark)) break;
 
         if (Waiting.Command == DISP_CMD_LAYER_OPEN) {
-            LayersOpen(Waiting.Asked, Waiting.From, Waiting.Open, *g_model);
+            LayersOpen(Waiting.Asked, Waiting.From, Waiting.Open, *g_model,
+                       g_easel->Pixels() ? DISPLAY_GLASS_PIXELS : DISPLAY_GLASS_TEXT);
         } else {
             std::expected<LayerCommit, error_t> Taken =
                 LayersCommit(Waiting.Asked.sender_pid, Waiting.From.generation, Waiting.Commit,

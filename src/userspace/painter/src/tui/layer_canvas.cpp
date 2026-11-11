@@ -104,6 +104,11 @@ core::Size LayerCanvas::Size() const noexcept
     return State ? State->Layer.Size() : core::Size{};
 }
 
+GlassKind LayerCanvas::Glass() const noexcept
+{
+    return State ? State->Layer.Glass() : GlassKind::Pixels;
+}
+
 bool LayerCanvas::IsOpen() const noexcept
 {
     return State && State->Opened;
