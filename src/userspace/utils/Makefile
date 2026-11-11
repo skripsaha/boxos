@@ -71,7 +71,7 @@ UTILS = create show files tag untag name trash delete assemble \
         playtime lavalamp finish taskboard memmap hexer stringview \
         calculate difference copy typer flame checksum passport aquarium \
         nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits \
-        edit seek retag read inside settings scratchpad garden gardener random sand coinflip dice
+        edit seek retag read inside settings scratchpad garden gardener random sand coinflip dice casino
 
 .PHONY: all clean
 
@@ -437,8 +437,19 @@ read.elf: $(BOXLIB_START) $(READ_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_D
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(READ_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
+# The casino is C++ in parts of its own directory; it keeps its chips with keep.o.
+CASINO_DIR  = casino
+CASINO_OBJS = $(addprefix $(CASINO_DIR)/,casino.o desk.o look.o luck.o purse.o canvas.o canvas_text.o common.o shower.o \
+                                         wheel.o bets.o board.o roulette.o roulette_paint.o reels.o faces.o slots.o \
+                                         slots_paint.o wheel_plate.o) \
+              keep.o
+
+casino.elf: $(BOXLIB_START) $(CASINO_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(CASINO_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
 # The family's parts are named from the utilities' root: "kin/look.h".
-$(sort $(EDIT_OBJS) $(READ_OBJS)): CXXFLAGS += -I.
+$(sort $(EDIT_OBJS) $(READ_OBJS) $(CASINO_OBJS)): CXXFLAGS += -I.
 
 # -MMD -MP: header dependencies, so a header edit rebuilds what read it.
 # See boxcxx/Makefile for what their absence cost.
@@ -448,7 +459,7 @@ $(sort $(EDIT_OBJS) $(READ_OBJS)): CXXFLAGS += -I.
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
--include $(wildcard *.d $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.d $(EDIT_DIR)/*.d $(READ_DIR)/*.d $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.d $(GARDEN_DIR)/*.d $(MEMMAP_DIR)/*.d $(WIZARD_DIR)/*.d $(RANDOM_DIR)/*.d $(SAND_DIR)/*.d $(FOREST_DIR)/*.d $(COINFLIP_DIR)/*.d $(DICE_DIR)/*.d $(ORBITS_DIR)/*.d)
+-include $(wildcard *.d $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.d $(EDIT_DIR)/*.d $(READ_DIR)/*.d $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.d $(GARDEN_DIR)/*.d $(MEMMAP_DIR)/*.d $(WIZARD_DIR)/*.d $(RANDOM_DIR)/*.d $(SAND_DIR)/*.d $(FOREST_DIR)/*.d $(COINFLIP_DIR)/*.d $(DICE_DIR)/*.d $(ORBITS_DIR)/*.d $(CASINO_DIR)/*.d)
 
 $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 	@mkdir -p $(dir $@)
@@ -456,4 +467,4 @@ $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 
 clean:
 	rm -f *.o *.d *.elf inside/*.o inside/*.d $(ASSEMBLE_DIR)/*.o $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.o $(KIN_DIR)/*.d $(EDIT_DIR)/*.o $(EDIT_DIR)/*.d $(READ_DIR)/*.o $(READ_DIR)/*.d \
-	      $(TASKBOARD_DIR)/*.o $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.o $(SCRATCHPAD_DIR)/*.d $(GARDEN_DIR)/*.o $(GARDEN_DIR)/*.d $(MEMMAP_DIR)/*.o $(MEMMAP_DIR)/*.d $(WIZARD_DIR)/*.o $(WIZARD_DIR)/*.d $(RANDOM_DIR)/*.o $(RANDOM_DIR)/*.d $(SAND_DIR)/*.o $(SAND_DIR)/*.d $(FOREST_DIR)/*.o $(FOREST_DIR)/*.d $(COINFLIP_DIR)/*.o $(COINFLIP_DIR)/*.d $(DICE_DIR)/*.o $(DICE_DIR)/*.d $(ORBITS_DIR)/*.o $(ORBITS_DIR)/*.d
+	      $(TASKBOARD_DIR)/*.o $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.o $(SCRATCHPAD_DIR)/*.d $(GARDEN_DIR)/*.o $(GARDEN_DIR)/*.d $(MEMMAP_DIR)/*.o $(MEMMAP_DIR)/*.d $(WIZARD_DIR)/*.o $(WIZARD_DIR)/*.d $(RANDOM_DIR)/*.o $(RANDOM_DIR)/*.d $(SAND_DIR)/*.o $(SAND_DIR)/*.d $(FOREST_DIR)/*.o $(FOREST_DIR)/*.d $(COINFLIP_DIR)/*.o $(COINFLIP_DIR)/*.d $(DICE_DIR)/*.o $(DICE_DIR)/*.d $(ORBITS_DIR)/*.o $(ORBITS_DIR)/*.d $(CASINO_DIR)/*.o $(CASINO_DIR)/*.d
