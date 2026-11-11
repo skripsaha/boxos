@@ -71,7 +71,7 @@ UTILS = create show files tag untag name trash delete assemble \
         playtime lavalamp finish taskboard memmap hexer stringview \
         calculate difference copy typer flame checksum passport aquarium \
         nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits \
-        edit seek retag read inside settings scratchpad garden gardener random sand coinflip dice casino seabattle whale
+        edit seek retag read inside settings scratchpad garden gardener random sand coinflip dice casino seabattle whale hangman
 
 .PHONY: all clean
 
@@ -482,6 +482,20 @@ $(WHALE_DIR)/figure.o $(WHALE_DIR)/picture.o: CXXFLAGS += -O2
 
 whale.elf: $(BOXLIB_START) $(WHALE_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(WHALE_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+
+# Hangman is C++ in parts of its own directory; it keeps its ledger with keep.o.
+HANGMAN_DIR  = hangman
+HANGMAN_OBJS = $(addprefix $(HANGMAN_DIR)/,hangman.o game.o play.o look.o luck.o words.o round.o ledger.o board.o slots.o panels.o scene.o \
+                                           lettering.o backdrop.o tones.o gallows.o flurry.o) \
+               keep.o
+
+# The pictures work out every pixel of every frame: built -O2, as the wizard's are.
+$(addprefix $(HANGMAN_DIR)/,backdrop.o gallows.o flurry.o scene.o tones.o board.o slots.o lettering.o): CXXFLAGS += -O2
+
+$(HANGMAN_OBJS): CXXFLAGS += -I.
+
+hangman.elf: $(BOXLIB_START) $(HANGMAN_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(HANGMAN_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 # The family's parts are named from the utilities' root: "kin/look.h".
@@ -495,7 +509,7 @@ $(sort $(EDIT_OBJS) $(READ_OBJS) $(CASINO_OBJS) $(SEABATTLE_OBJS)): CXXFLAGS += 
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
--include $(wildcard *.d $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.d $(EDIT_DIR)/*.d $(READ_DIR)/*.d $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.d $(GARDEN_DIR)/*.d $(MEMMAP_DIR)/*.d $(WIZARD_DIR)/*.d $(RANDOM_DIR)/*.d $(SAND_DIR)/*.d $(FOREST_DIR)/*.d $(COINFLIP_DIR)/*.d $(DICE_DIR)/*.d $(ORBITS_DIR)/*.d $(CASINO_DIR)/*.d $(SEABATTLE_DIR)/*.d $(WHALE_DIR)/*.d)
+-include $(wildcard *.d $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.d $(EDIT_DIR)/*.d $(READ_DIR)/*.d $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.d $(GARDEN_DIR)/*.d $(MEMMAP_DIR)/*.d $(WIZARD_DIR)/*.d $(RANDOM_DIR)/*.d $(SAND_DIR)/*.d $(FOREST_DIR)/*.d $(COINFLIP_DIR)/*.d $(DICE_DIR)/*.d $(ORBITS_DIR)/*.d $(CASINO_DIR)/*.d $(SEABATTLE_DIR)/*.d $(WHALE_DIR)/*.d $(HANGMAN_DIR)/*.d)
 
 $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 	@mkdir -p $(dir $@)
@@ -503,4 +517,4 @@ $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 
 clean:
 	rm -f *.o *.d *.elf inside/*.o inside/*.d $(ASSEMBLE_DIR)/*.o $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.o $(KIN_DIR)/*.d $(EDIT_DIR)/*.o $(EDIT_DIR)/*.d $(READ_DIR)/*.o $(READ_DIR)/*.d \
-	      $(TASKBOARD_DIR)/*.o $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.o $(SCRATCHPAD_DIR)/*.d $(GARDEN_DIR)/*.o $(GARDEN_DIR)/*.d $(MEMMAP_DIR)/*.o $(MEMMAP_DIR)/*.d $(WIZARD_DIR)/*.o $(WIZARD_DIR)/*.d $(RANDOM_DIR)/*.o $(RANDOM_DIR)/*.d $(SAND_DIR)/*.o $(SAND_DIR)/*.d $(FOREST_DIR)/*.o $(FOREST_DIR)/*.d $(COINFLIP_DIR)/*.o $(COINFLIP_DIR)/*.d $(DICE_DIR)/*.o $(DICE_DIR)/*.d $(ORBITS_DIR)/*.o $(ORBITS_DIR)/*.d $(CASINO_DIR)/*.o $(CASINO_DIR)/*.d $(SEABATTLE_DIR)/*.o $(SEABATTLE_DIR)/*.d $(WHALE_DIR)/*.o $(WHALE_DIR)/*.d
+	      $(TASKBOARD_DIR)/*.o $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.o $(SCRATCHPAD_DIR)/*.d $(GARDEN_DIR)/*.o $(GARDEN_DIR)/*.d $(MEMMAP_DIR)/*.o $(MEMMAP_DIR)/*.d $(WIZARD_DIR)/*.o $(WIZARD_DIR)/*.d $(RANDOM_DIR)/*.o $(RANDOM_DIR)/*.d $(SAND_DIR)/*.o $(SAND_DIR)/*.d $(FOREST_DIR)/*.o $(FOREST_DIR)/*.d $(COINFLIP_DIR)/*.o $(COINFLIP_DIR)/*.d $(DICE_DIR)/*.o $(DICE_DIR)/*.d $(ORBITS_DIR)/*.o $(ORBITS_DIR)/*.d $(CASINO_DIR)/*.o $(CASINO_DIR)/*.d $(SEABATTLE_DIR)/*.o $(SEABATTLE_DIR)/*.d $(WHALE_DIR)/*.o $(WHALE_DIR)/*.d $(HANGMAN_DIR)/*.o $(HANGMAN_DIR)/*.d
