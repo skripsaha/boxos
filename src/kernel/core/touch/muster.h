@@ -76,6 +76,7 @@
     X("acpi:sleep:s2")                  \
     X("acpi:sleep:s3")                  \
     X("acpi:sleep:s4")                  \
+    X("alarm")                          \
     X("aml:ready")                      \
     X("apei:generic:error")             \
     X("apei:ghes:ready")                \

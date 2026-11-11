@@ -929,6 +929,10 @@ void process_destroy(process_t *proc)
      * to a strand that is gone, so the deadline goes with it. */
     TouchQueueDisarm(&proc->park_wake);
 
+    /* So does its alarm: an alarm ends with its strand. */
+    __atomic_store_n(&proc->alarm_moment, 0, __ATOMIC_RELEASE);
+    TouchQueueDisarm(&proc->alarm_node);
+
     /* And a change of its own it left unsettled is not left to Lull. */
     TagFSInkerLeaves(proc);
 

@@ -20,6 +20,7 @@
 #include "scheduler.h"   /* sched_ring_home — one transition, one bell */
 #include "baton.h"       /* the deadline rides the process's own baton */
 #include "sync_ops.h"    /* SyncTimeoutDeliver */
+#include "alarm_ops.h"   /* AlarmFire */
 
 static TouchQueueNode *g_head;
 static spinlock_t      g_lock;
@@ -103,6 +104,23 @@ void TouchQueueArmWake(process_t *target, uint64_t fire_tick, uint32_t owes_resu
         process_ref_dec(target);    /* the node already held one */
 }
 
+void TouchQueueArmAlarm(process_t *target, uint64_t fire_tick)
+{
+    TouchQueueNode *n = &target->alarm_node;
+
+    /* The reference the armed node holds, taken before the node can be seen,
+     * as the wake's is. */
+    process_ref_inc(target);
+    spin_lock(&g_lock);
+    bool was_armed       = n->armed;
+    n->kind              = TOUCH_QUEUE_ALARM;
+    n->u.alarm.target    = target;
+    touch_queue_link(n, fire_tick);
+    spin_unlock(&g_lock);
+    if (was_armed)
+        process_ref_dec(target);    /* the node already held one */
+}
+
 void TouchQueueArmCall(TouchQueueNode *n, void (*call)(void), uint64_t fire_tick)
 {
     spin_lock(&g_lock);
@@ -116,7 +134,11 @@ void TouchQueueDisarm(TouchQueueNode *n)
 {
     spin_lock(&g_lock);
     bool       was_armed = touch_queue_unlink(n);
-    process_t *held      = (was_armed && n->kind == TOUCH_QUEUE_WAKE) ? n->u.wake.target : NULL;
+    process_t *held      = NULL;
+    if (was_armed && n->kind == TOUCH_QUEUE_WAKE)
+        held = n->u.wake.target;
+    else if (was_armed && n->kind == TOUCH_QUEUE_ALARM)
+        held = n->u.alarm.target;
     spin_unlock(&g_lock);
     if (held)
         process_ref_dec(held);
@@ -236,6 +258,10 @@ void TouchQueueTick(uint64_t now)
             touch_queue_fire_wake(n->fired.wake.target, n->fired.wake.owes_result,
                                   n->fired.wake.park_seq);
             process_ref_dec(n->fired.wake.target);
+            break;
+        case TOUCH_QUEUE_ALARM:
+            AlarmFire(n->fired.alarm.target);
+            process_ref_dec(n->fired.alarm.target);
             break;
         case TOUCH_QUEUE_CALL:
             n->fired.call();

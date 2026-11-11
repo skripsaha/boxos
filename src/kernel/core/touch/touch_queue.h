@@ -13,20 +13,23 @@
  * its owner, a delayed publish's is made by its sender, who hears the refusal
  * when there is no memory for it — so arming cannot fail.
  *
- * Three kinds:
+ * Four kinds:
  *   PUBLISH  a delayed Touch: published at the tick and freed by the queue,
  *            which owns it from its arm (TouchQueuePublishNode made it);
  *   WAKE     a timed park's deadline, embedded in the process (park_wake);
  *            armed, it holds a reference on the process until it fires or is
  *            disarmed;
+ *   ALARM    a strand's alarm, embedded in the process (alarm_node); armed, it
+ *            holds a reference on the process as a WAKE does. Its fire is the
+ *            alarm's delivery (alarm_ops.c);
  *   CALL     a function of the armer's, called by the tick itself, for a waiter
  *            whose next move is due at a time rather than at an event of its
  *            own — the Settle's Lull, which wakes its committer's core. In the
  *            interrupt: it allocates nothing, waits for nothing and takes no
  *            lock but an IRQ-safe one.
  *
- * A WAKE or CALL node armed again while it waits moves to the new tick: one
- * node, one deadline.
+ * A WAKE, ALARM or CALL node armed again while it waits moves to the new tick:
+ * one node, one deadline.
  */
 
 struct process_t;
@@ -35,6 +38,7 @@ typedef enum {
     TOUCH_QUEUE_PUBLISH = 0,
     TOUCH_QUEUE_WAKE    = 1,
     TOUCH_QUEUE_CALL    = 2,
+    TOUCH_QUEUE_ALARM   = 3,
 } TouchQueueKind;
 
 /* What a node's fire does, by its kind. */
@@ -51,6 +55,9 @@ typedef union {
         uint32_t          owes_result;
         uint32_t          park_seq;
     } wake;
+    struct {
+        struct process_t *target;
+    } alarm;
     void (*call)(void);
 } TouchQueueFire;
 
@@ -96,10 +103,15 @@ void TouchQueueArm(TouchQueueNode *n, uint64_t fire_tick);
 void TouchQueueArmWake(struct process_t *target, uint64_t fire_tick,
                        uint32_t owes_result, uint32_t park_seq);
 
+/* The alarm of `target`, in the node the process carries (process_t.alarm_node),
+ * fired at `fire_tick`: it holds a reference on the process until it fires or is
+ * disarmed. Armed again while it waits, it moves to the new tick. */
+void TouchQueueArmAlarm(struct process_t *target, uint64_t fire_tick);
+
 /* `call` called by the tick at `fire_tick`, carried by the caller's node `n`. */
 void TouchQueueArmCall(TouchQueueNode *n, void (*call)(void), uint64_t fire_tick);
 
-/* A WAKE or CALL node taken out of the queue unfired; nothing when it is not
+/* A WAKE, ALARM or CALL node taken out of the queue unfired; nothing when it is not
  * armed. */
 void TouchQueueDisarm(TouchQueueNode *n);
 

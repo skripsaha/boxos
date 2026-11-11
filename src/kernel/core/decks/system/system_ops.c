@@ -59,6 +59,7 @@ extern uint64_t cpu_get_tsc_freq_khz(void);
 #include "cpuid.h"
 #include "fpu.h"   /* g_user_fsbase_used — TLS FS-base context-switch gate */
 #include "sync_ops.h"
+#include "alarm_ops.h"
 #include "cabin.h"          /* cabin_t.vmm — for StrandPool bind virt->phys walk */
 #include "cabin_info.h"     /* CabinInfo — where a child's Luggage is written */
 #include "cabin_layout.h"   /* CABIN_USER_VA_CANONICAL_END — bind VA range check */
@@ -2746,6 +2747,9 @@ error_t SystemDeckRegister(void)
 
     error_t sync_rc = SyncOpsRegister();
     if (sync_rc != OK) return sync_rc;
+
+    error_t alarm_rc = AlarmOpsRegister();
+    if (alarm_rc != OK) return alarm_rc;
 
     error_t turnin_rc = TurnInOpsRegister();
     if (turnin_rc != OK) return turnin_rc;

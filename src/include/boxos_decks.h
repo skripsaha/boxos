@@ -290,6 +290,27 @@
  * another program (any strand of it) or, with target 0, the caller's own. */
 #define SYSTEM_OP_STRAND_EXIT       0xC8  /* () — the calling strand ends; nothing comes back to it */
 
+/* ─── Alarm — time, as an event ──────────────────────────────────────── */
+/* A strand that must be woken at a moment cannot sleep on the moment: its
+ * wait is for ANYTHING addressed to it (Turn In), and Turn In has no deadline
+ * for the honest reason that a guessed one is a wake with nothing to do. So
+ * the moment itself is made an arrival: at it, the kernel puts an ordinary
+ * Touch — tag "alarm", an AlarmEvent carrying the moment it was set for — in
+ * the TouchRing of the strand that set it, and that moves the cursor Turn In
+ * already watches.
+ *
+ * One alarm per strand: setting again replaces the one pending, moving to 0
+ * takes it back, and neither a replaced nor a cancelled alarm is delivered
+ * once this op has run (an event already in the ring stays there, and says
+ * which moment it was for). The moment is uptime in milliseconds, the
+ * ClockBoard's own — a moment already past is delivered at the next tick; the
+ * kernel's tick is its resolution. An alarm ends with its strand.
+ *
+ * It answers nothing, like Turn In and Bell: the arrival is the answer, and a
+ * reply per frame to a strand that sets one per frame would be a delivery of
+ * its own. There is nothing to refuse. */
+#define SYSTEM_OP_ALARM             0xC9  /* (u64 moment_ms; 0 = none) — answers nothing */
+
 /* ============================================================================
  *  Storage deck opcodes — SINGLE SOURCE OF TRUTH, like the system deck above.
  *  Read by the kernel handler table (decks/storage/storage_ops.c) and by the

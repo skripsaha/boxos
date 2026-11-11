@@ -432,6 +432,17 @@ typedef struct process_t
      * while the last one's wake still waits moves it to its own tick. */
     TouchQueueNode    park_wake;
 
+    /* The strand's alarm (alarm_ops.c): the moment it is set for, in ms of
+     * uptime, 0 when none — the one word that says whether an alarm is
+     * pending, claimed by whoever delivers it. Its node waits in the touch
+     * queue, carried here so setting an alarm cannot fail for want of memory,
+     * and the baton is the pass from the tick to a K-Core, where the Touch is
+     * delivered; alarm_passed is its gate, as deadline_passed is the park's. */
+    volatile uint64_t alarm_moment;
+    TouchQueueNode    alarm_node;
+    Baton             alarm_baton;
+    volatile uint8_t  alarm_passed;
+
     /* The newest change of a volume this strand's own calls made — the place
      * of their newest Ink, which tells a mount before this one apart
      * (TagFSNoteInker). A strand that ends with it unsettled on the mounted

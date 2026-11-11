@@ -35,6 +35,10 @@ extern "C" {
  *
  * A strand that also reads a Brook must hang its bells out before the last look
  * — see box/brook.h. The rings are the only thing the kernel can see arriving.
+ *
+ * Time is one of the things that arrive, and that is how a strand that must be
+ * woken at a moment gets there without a deadline on its sleep: it sets an
+ * alarm (box/alarm.h), and at the moment the kernel puts a Touch in its ring.
  */
 
 typedef struct {
