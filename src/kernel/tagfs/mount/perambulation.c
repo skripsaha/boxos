@@ -61,7 +61,8 @@ static bool PerambulationNot(const char* why)
 
 /*
  * The newest slot the medium holds VALID — by the mount's own rule
- * (spine_read.h): its eight sectors one SLOT unit where it lies and its
+ * (spine_read.h; newest as every reader of a book orders them, volume_spine.h
+ * SpineSlotNewer): its eight sectors one SLOT unit where it lies and its
  * stream parsing — is the newest this kernel left: by its seq the one it
  * knows written; or, in a slot held unsure (binder.h: a write of it refused,
  * it may hold either Tally), byte for byte a unit this kernel sealed into it
@@ -74,6 +75,7 @@ static bool PerambulationSlot(uint8_t seat, uint64_t base, uint8_t* buf)
 {
     const VolumeFrame* f     = &g_book.frame;
     uint64_t           found = 0, known = 0;
+    uint32_t           found_at = 0;
     for (uint32_t i = 0; i < g_binder.ring; i++)
         if (g_binder.slot[i].holds && !g_binder.slot[i].unsure && g_binder.slot[i].seq > known)
             known = g_binder.slot[i].seq;
@@ -86,9 +88,10 @@ static bool PerambulationSlot(uint8_t seat, uint64_t base, uint8_t* buf)
         SpineSlotLetGo(&slot);
         if (rc != OK)
             return PerambulationNot("memory would not hold a slot of it to judge it");
-        if (slot.state == SPINE_SLOT_VALID && slot.seq > found) {
-            found = slot.seq;
-            own   = slot.seq == known || BinderSlotSealed(i, buf);
+        if (slot.state == SPINE_SLOT_VALID && SpineSlotNewer(slot.seq, i, found, found_at)) {
+            found    = slot.seq;
+            found_at = i;
+            own      = slot.seq == known || BinderSlotSealed(i, buf);
         }
     }
     s_said.slot = found;

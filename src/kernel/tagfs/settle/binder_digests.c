@@ -33,7 +33,7 @@
 // ----------------------------------------------------------------------------
 
 /* A leaf being read: its runs put in, until an element does not read — the
- * Tally before's reads find nothing of the leaf past it (tally_read.c,
+ * Tally before's reads find nothing of the leaf past it (volume_tally.h,
  * TallyDigestIn), and a whole Tally lays none of its blocks: said, as the
  * reads and a whole Tally say it, and the leaf laid anew without them — and
  * whether no copy of it reads. */

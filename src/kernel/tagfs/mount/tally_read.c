@@ -305,35 +305,6 @@ static uint32_t TallyDigestLeafOf(const TallyDigestTable* t, uint64_t block)
     return !p->has_hi || block < p->hi.k1 ? lo - 1u : UINT32_MAX;
 }
 
-/* The element of a leaf's stream that holds `block`, its digest in *digest:
- * 1 found, 0 not named, -1 an element on the way does not read. */
-static int TallyDigestIn(const uint8_t* s, uint32_t room, uint64_t block, uint64_t* digest)
-{
-    NodeHead       h;
-    TallyKey       prev, key;
-    uint32_t       at = 0, body, len;
-    uint64_t       n;
-    const uint8_t* d;
-
-    if (NodeHeadGet(s, room, &at, &h) == TALLY_BODY_BROKEN)
-        return -1;
-    prev = h.first;
-    for (uint64_t i = 0; i < h.items; i++) {
-        if (!TallyItemGet(s, room, &at, TALLY_DIGESTS, prev, &key, &body, &len))
-            return -1;
-        prev = key;
-        if (key.k1 > block)
-            return 0;
-        if (TallyDigestsGet(s + body, len, &n, &d) == TALLY_BODY_BROKEN)
-            return -1;
-        if (block - key.k1 < n) {
-            *digest = TallyDigestAt(d, block - key.k1);
-            return 1;
-        }
-    }
-    return 0;
-}
-
 /* What is said of a leaf, once each: its rot, a copy of it that did not hold. */
 #define TALLY_DIGEST_SAID_ROT   1u
 #define TALLY_DIGEST_SAID_MEND  2u

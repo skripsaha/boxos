@@ -22,7 +22,7 @@
 
 /* The volume every sector here belongs to: 00 01 .. 0F, the uuid the golden
  * sector is defined over (volume_book.h, BOOK_GOLDEN_SECTOR_CRC). */
-static void BookTestUuid(uint8_t uuid[16])
+void BookTestUuid(uint8_t uuid[16])
 {
     for (uint32_t i = 0; i < 16; i++) uuid[i] = (uint8_t)i;
 }
@@ -735,7 +735,7 @@ out:
 
 /* The golden slot's stream (volume_tally.h's rule) into `stream`, where its
  * seven records begin into `starts`; the stream's length. */
-static uint32_t TallyTestGoldenSlot(uint8_t *stream, uint32_t *starts)
+uint32_t TallyTestGoldenSlot(uint8_t *stream, uint32_t *starts)
 {
     static const uint64_t files[2] = { 2048, 2304 }, tags[2] = { 2049, 2305 }, digests[2] = { 1500, 1756 };
     SpineHead   head   = { .tally_seq = 5, .stitch_seq = 9, .stitch_clasp = 0xC0FFEE11u,

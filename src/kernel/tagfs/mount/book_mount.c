@@ -129,13 +129,6 @@ error_t MountBookGround(uint8_t seat, const DeedCopy* head, uint64_t ground_sect
 // The slot stood on (§1.4, §4.5 п.2)
 // ----------------------------------------------------------------------------
 
-/* Whether `tree` is one this reader reads as it is written — not one a reader
- * counts again from the rest (MAP, SHARED, or a root that says so). */
-static bool BookTreeAuthoritative(const SpineRoot* r)
-{
-    return r->tree >= TALLY_FILES && r->tree <= TALLY_DIGESTS && !(r->flags & TALLY_ROOT_DERIVED);
-}
-
 error_t BookSlotReads(const SpineSlot* s, char* why, size_t room)
 {
     char* words = kmalloc(512);
@@ -143,7 +136,7 @@ error_t BookSlotReads(const SpineSlot* s, char* why, size_t room)
         return ERR_NO_MEMORY;
     error_t rc = OK;
     for (uint32_t i = 0; i < s->roots && rc == OK; i++) {
-        if (!BookTreeAuthoritative(&s->root[i]))
+        if (!SpineTreeAuthoritative(&s->root[i]))
             continue;
         rc = TallyRootReads(s->root[i].tree, &s->root[i], words, 512);
         if (rc == ERR_TAGFS_CORRUPTED)
@@ -153,8 +146,10 @@ error_t BookSlotReads(const SpineSlot* s, char* why, size_t room)
     return rc;
 }
 
-/* The newest slot that holds and names a Tally whose roots read: each passed
- * over said. OK, or the refusal. */
+/* The newest slot that holds and names a Tally whose roots read — the slots in
+ * the order every reader of a book tries them (spine_read.c, SpineKeep), and
+ * the roots every reader holds them to (volume_spine.h, SpineTreeAuthoritative)
+ * — each passed over said. OK, or the refusal. */
 static error_t BookStand(const char** what)
 {
     char why[256];
@@ -279,13 +274,13 @@ static error_t BookTree(const SpineRoot* root)
 
     g_book.laid_tree = root->tree;
 
-    if (!derived && !BookTreeAuthoritative(root)) {
+    if (!derived && !SpineTreeAuthoritative(root)) {
         ksnprintf(words, sizeof(words), "slot %u names a tree of kind %llu this reader does not know, and "
                   "not one to derive — written by a kernel that knows more", g_book.stood->index,
                   (unsigned long long)root->tree);
         TagFSUnderGlass(words);
     }
-    if (!BookTreeAuthoritative(root)) {
+    if (!SpineTreeAuthoritative(root)) {
         sink.rotten = BookQuietRot;
         sink.said   = false;
         return TallyRead(root->tree, root, false, &sink);

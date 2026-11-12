@@ -15,6 +15,14 @@
 #include "volume_deed.h"
 #include "volume_ledger.h"
 
+/* And the book a format-v2 volume keeps (spec_v2 §9.2, §16.7 п.2): its
+ * letters, the Tally's nodes, the Spine's slots and the one rule a slot is
+ * chosen by, the ribbon's stitches, and the digest a block is held to — the
+ * text the kernel and mkfs read it by, not a copy of it. */
+#include "volume_spine.h"
+#include "volume_ribbon.h"
+#include "volume_digest.h"
+
 /* =========================================================================
  * Constants (must match tagfs.h / create_tagfs_v1.h)
  * ========================================================================= */

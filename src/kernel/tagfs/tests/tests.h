@@ -111,6 +111,7 @@ typedef struct {
     SUITE(cow)             \
     SUITE(boxhash)         \
     SUITE(book)            \
+    SUITE(book_judge)      \
     SUITE(ribbon)          \
     SUITE(integrity)       \
     SUITE(use_context)     \
@@ -261,6 +262,13 @@ int TestHandleRead(TagFSFileHandle* handle, void* buffer, uint32_t capacity);
  * would not open. The handle is closed on every path. */
 int TestFileWrite(uint64_t file_id, const void* data, uint32_t bytes);
 int TestFileRead(uint64_t file_id, void* buffer, uint32_t capacity);
+
+/* The book suite's volume, 00 01 .. 0F, and its golden slot's stream
+ * (volume_tally.h, TALLY_GOLDEN_SLOT_CRC) into `stream`, where its seven
+ * records begin into `starts`: the stream's length (book_tests.c) — the slot
+ * the judge's suite holds its decisions on (book_judge_tests.c). */
+void     BookTestUuid(uint8_t uuid[16]);
+uint32_t TallyTestGoldenSlot(uint8_t* stream, uint32_t* starts);
 
 void fill_random(void* buffer, uint32_t size);
 void fill_pattern(void* buffer, uint32_t size, uint8_t pattern);

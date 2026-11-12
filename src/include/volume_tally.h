@@ -621,6 +621,40 @@ static inline uint64_t TallyDigestAt(const uint8_t *digests, uint64_t i)
     return TallyLe(digests + i * 8u, 8);
 }
 
+/*
+ * The element of a DIGESTS leaf's stream of `room` bytes that names `block`,
+ * its digest in *digest: 1 found, 0 named by none, -1 the NodeHead or an
+ * element on the way does not read. The elements are walked in key order and
+ * the walk ends at the first past the block — so an element past it that does
+ * not read is no answer about the block. That the stream is a DIGESTS leaf,
+ * and the leaf of the block's range, is the reader's to hold first, as it
+ * reads the node (§16.3 п.2): the kernel's reads of a block (tally_read.c,
+ * TallyDigestFind), and the UEFI loader's of its kernel's blocks to come
+ * (§16.7 п.6, Attest).
+ */
+static inline int TallyDigestIn(const uint8_t *s, uint32_t room, uint64_t block, uint64_t *digest)
+{
+    NodeHead       h;
+    TallyKey       prev, key;
+    uint32_t       at = 0, body, len;
+    uint64_t       n;
+    const uint8_t *d;
+
+    if (NodeHeadGet(s, room, &at, &h) == TALLY_BODY_BROKEN) return -1;
+    prev = h.first;
+    for (uint64_t i = 0; i < h.items; i++) {
+        if (!TallyItemGet(s, room, &at, TALLY_DIGESTS, prev, &key, &body, &len)) return -1;
+        prev = key;
+        if (key.k1 > block) return 0;
+        if (TallyDigestsGet(s + body, len, &n, &d) == TALLY_BODY_BROKEN) return -1;
+        if (block - key.k1 < n) {
+            *digest = TallyDigestAt(d, block - key.k1);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* An inner node's item (level >= 1): count · BookPtr of the child — count
  * the leaf elements under it (FILES: its headers, i.e. files), so a rotten
  * range is said with how many it lost (§2.9). The pointer as BookPtrPut

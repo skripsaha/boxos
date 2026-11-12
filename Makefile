@@ -888,7 +888,9 @@ UEFI_ESP_IMG = $(BUILDDIR)/esp.img
 # change to the loader.
 TAGBOOT_SRC    = src/boot/uefi/tagboot.c src/boot/uefi/tagboot_deed.c
 TAGBOOT_HDRS   = src/boot/uefi/tagboot.h src/boot/uefi/uefi.h src/boot/uefi/tagfs_boot.h \
-                 src/include/volume_deed.h src/include/volume_ledger.h
+                 src/include/volume_deed.h src/include/volume_ledger.h src/include/volume_book.h \
+                 src/include/volume_tally.h src/include/volume_spine.h src/include/volume_ribbon.h \
+                 src/include/volume_digest.h
 TAGBOOT_JUMP   = src/boot/uefi/tagboot_jump.asm
 TAGBOOT_LD     = src/boot/uefi/tagboot.ld
 TAGBOOT_EFI    = $(BUILDDIR)/BOOTX64.EFI
