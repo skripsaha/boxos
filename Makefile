@@ -1684,6 +1684,19 @@ $(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_B
 	fi; \
 	printf '  %s\n' "$$LAST"; \
 	printf '%s\n' "$$VERDICT" | sed -n 's/^check: \(the kernel in this tree would NOT mount this volume: .*\)/  WARNING: \1/p'
+	@# A format-v2 volume's loader holds the kernel to the book before the jump
+	@# (tagboot_attest.c, tagboot_succession.c). The oracle reads the image as
+	@# the loader will, so a kernel the book does not attest fails the build
+	@# here — not at the first UEFI boot of the image.
+	@if [ "$(VOLUME_FORMAT)" = v2 ]; then \
+		BOOT=$$(python3 tools/volume-read.py $@ boot 2>&1); \
+		if ! printf '%s\n' "$$BOOT" | grep -q 'is attested by the book'; then \
+			printf '%s\n' "$$BOOT"; \
+			echo "ERROR: tools/volume-read.py boot finds no kernel the book of $@ attests — TagBoot would not jump into it as made"; \
+			exit 1; \
+		fi; \
+		printf '  %s\n' "$$(printf '%s\n' "$$BOOT" | tail -1)"; \
+	fi
 	@echo "Disk image created: $(IMAGE)"
 
 # There is no floppy image and no ISO here any more.

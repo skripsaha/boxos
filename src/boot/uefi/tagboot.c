@@ -414,8 +414,7 @@ static EFI_BLOCK_IO_PROTOCOL *g_block_io = NULL;
 /* Where the volume being read begins on the medium, in 512-byte sectors. The
  * one absolute address this loader holds, and it is discovered, never assumed.
  * Every ReadSectors below is counted from it. */
-static uint64_t g_ground_start   = 0;
-static uint64_t g_ground_sectors = 0;
+static uint64_t g_ground_start = 0;
 
 #define MBR_TABLE_OFFSET     446U
 #define MBR_ENTRY_BYTES      16U
@@ -675,8 +674,7 @@ static int BlockIoProbeVolume(EFI_BLOCK_IO_PROTOCOL *bio)
     uint64_t start = 0, sectors = 0;
     if (!FindGroundOn(bio, g_deed_block, &start, &sectors)) return 0;
 
-    g_ground_start   = start;
-    g_ground_sectors = sectors;
+    g_ground_start = start;
     return 1;
 }
 
@@ -1142,7 +1140,9 @@ static uint32_t LedgerSeals(SettleMark seals[VOLUME_LEDGER_COPIES])
         if (!intact[c] || !LedgerHas(led, VOLUME_LEDGER_SEAL_END) || led->mark.settle == 0 ||
             led->mark.settle != led->seq)
             break;
-        seals[found++] = led->mark;
+        /* Copied by the loader's own MemCopy: a struct assigned whole is a memcpy
+         * clang makes up on the PE path, and nothing defines one here (-z defs). */
+        MemCopy(&seals[found++], &led->mark, sizeof(led->mark));
     }
     return found;
 }
