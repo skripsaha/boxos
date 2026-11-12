@@ -402,6 +402,22 @@
 #define STORAGE_TAG_LIST_HEAD       8u      /* [u32 delivered][u32 next] */
 #define STORAGE_TAG_LISTED_HEAD     8u      /* a record before its text */
 #define STORAGE_TAG_LISTED_SYSTEM   0x01u   /* flags: a tag the system keeps */
+/* obj.conjugate — Conjugate, a duplicate laid on the blocks it duplicates
+ * (spec_v2 §8.2, §16.7 пп.8–9): `count` blocks of file `fid` from its block
+ * `at`, each held byte for byte to the block of file `onto` from its block
+ * `onto_at` it is laid on, named by a run SHARED on that file's ground — its
+ * own let go, its bytes, size and times as they were. Every block alike or
+ * none laid. params = [u64 fid][u64 at][u64 onto][u64 onto_at][u64 count].
+ * out_crate = [u64 blocks laid][u64 the block of `fid` a refusal met][u64 why]:
+ * why 0 laid, 1 the cabin wears neither system nor god, 2 a file the system
+ * keeps or the kernel's, 3 a file wearing dedup:off, 4 the blocks asked are
+ * not `fid`'s plain ground or not `onto`'s, 5 a block with no digest the book
+ * holds, 6 the digests differ, 7 the digests agree and the bytes differ, 8 a
+ * file changed meanwhile, 9 the volume's own refusal — the error says it. Only
+ * a cabin wearing system or god (ERR_ACCESS_DENIED at the gate,
+ * ERR_PERMISSION_DENIED past it); refused on a format-v1 volume
+ * (ERR_UNSUPPORTED). */
+#define STORAGE_OBJ_CONJUGATE       0x28
 /* snap.info — structured per-snapshot record by id. params = [u32 snap_id].
  * out_crate = [u32 id][u64 parent_file_id][u64 created_time][u32 file_count]
  *             [u64 total_size][u8 flags][char name[32]]. Gives the name-by-id

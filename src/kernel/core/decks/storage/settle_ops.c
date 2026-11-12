@@ -47,6 +47,7 @@
 #include "ink.h"
 #include "use_memory.h"
 #include "escheat.h"
+#include "conjugate.h"
 #include "async/write_job.h"   /* StorageCallWarrant */
 #include "helm.h"        /* HelmReady — an op waited for room is asked again at a service point */
 #include "amp.h"
@@ -253,6 +254,25 @@ int ObjEscheat(const ManifestOp *op, Crate *crates, uint16_t crate_count, const 
     (void)crate_count;
     error_t rc = TagFSEscheat(StorageCallWarrant(ctx), &said);
     if (rc == OK && op->out_crate != CRATE_INDEX_NONE)
+        (void)crate_write(&crates[op->out_crate], ctx, &said, sizeof(said));
+    return rc;
+}
+
+/* OBJ_CONJUGATE: the act asked with the cabin's warrant as it stands now — the
+ * verdict into the out crate, a refusal's as much as the blocks laid. The
+ * ribbon's room on its way is no answer: nothing was laid, and the act is
+ * asked again — compared again — after the cycle's end. */
+int ObjConjugate(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx)
+{
+    ConjugateAsk  ask;
+    ConjugateSaid said;
+    if (op->param_size < sizeof(ask))
+        return ERR_INVALID_ARGUMENT;
+    memcpy(&ask, op->params, sizeof(ask));
+    error_t rc = TagFSConjugate(StorageCallWarrant(ctx), &ask, &said);
+    if (rc == ERR_WOULD_BLOCK && said.why == CONJUGATE_REFUSED)
+        return SettleOpForRoom(op, crates, crate_count, ctx, ask.fid);
+    if (op->out_crate != CRATE_INDEX_NONE)
         (void)crate_write(&crates[op->out_crate], ctx, &said, sizeof(said));
     return rc;
 }

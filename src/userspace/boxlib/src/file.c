@@ -705,3 +705,11 @@ int escheat(EscheatAnswer* said)
                      BOX_ANSWER_GUARANTEED, NULL);
     return box_fail(rc);
 }
+
+int conjugate(file_id_t fid, uint64_t at, file_id_t onto, uint64_t onto_at, uint64_t count, ConjugateAnswer* said)
+{
+    uint64_t params[5] = { (uint64_t)fid, at, (uint64_t)onto, onto_at, count };
+    int      rc        = MfCall1(DECK_STORAGE, STORAGE_OBJ_CONJUGATE, params, sizeof(params), NULL, 0, said,
+                                 sizeof(*said), NULL, BOX_ANSWER_GUARANTEED, NULL);
+    return box_fail(rc);
+}

@@ -1103,6 +1103,8 @@ error_t StorageDeckRegister(void)
         { STORAGE_OBJ_WRITE_SETTLED, ObjWriteSettled, OP_AUTH_APP, "storage.write.settled" },
         /* Escheat lets a rotten range's files and blocks go for good: system. */
         { STORAGE_OBJ_ESCHEAT,  ObjEscheat,      OP_AUTH_SYSTEM, "storage.escheat" },
+        /* Conjugate says whether one file holds another's bytes: system. */
+        { STORAGE_OBJ_CONJUGATE, ObjConjugate,   OP_AUTH_SYSTEM, "storage.conjugate" },
     };
 
     for (size_t i = 0; i < sizeof(table) / sizeof(table[0]); i++) {

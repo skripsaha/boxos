@@ -211,6 +211,25 @@ typedef struct {
 } EscheatAnswer;
 int escheat(EscheatAnswer* said);
 
+/*
+ * conjugate() — Conjugate: `count` blocks of file `fid` from its block `at`
+ * laid on the blocks of file `onto` from its block `onto_at` that hold them
+ * byte for byte (storage.conjugate) — named by a run SHARED on that file's
+ * ground, `fid`'s own blocks let go: the volume holds the bytes once, and both
+ * files read what they read before. Every block alike or none laid. Only a
+ * program wearing system or god may ask (ERR_ACCESS_DENIED,
+ * ERR_PERMISSION_DENIED); a file wearing dedup:off is neither laid nor laid
+ * on, a file the system keeps is never laid, and the kernel's file neither.
+ * The verdict comes back in *said whatever the answer — `why` as
+ * boxos_decks.h names it for obj.conjugate.
+ */
+typedef struct {
+    uint64_t blocks;     /* blocks of `fid` laid: `count`, or 0 */
+    uint64_t at;         /* the block of `fid` a refusal met */
+    uint64_t why;        /* 0 laid, or why not (boxos_decks.h, STORAGE_OBJ_CONJUGATE) */
+} ConjugateAnswer;
+int conjugate(file_id_t fid, uint64_t at, file_id_t onto, uint64_t onto_at, uint64_t count, ConjugateAnswer* said);
+
 #ifdef __cplusplus
 }
 #endif

@@ -1,7 +1,7 @@
 #include "stand_stitch.h"
 #include "stand_fresh.h"
 #include "stand_binder.h"
-#include "../ink/ink.h"
+#include "../dedup/conjugate.h"
 #include "../ink/fallow.h"
 #include "../ink/commonhold.h"
 #include "../mount/book_mount.h"
@@ -19,9 +19,8 @@
 // as memory held it, and the census finds no two owners where one DATA run and
 // SHARED runs meet. How many name a block is memory's alone (Commonhold),
 // derived by every mount: a block leaves no owner's hands while one names it,
-// and rests in Fallow once — when its last owner lets it go. No writer lays a
-// SHARED run yet (that is Dedup's), so the stand lays one through the Ink a
-// writer will use (InkBookShareStand).
+// and rests in Fallow once — when its last owner lets it go. The run SHARED is
+// laid by Dedup's act (Conjugate, dedup/conjugate.h).
 // ============================================================================
 
 #define STAND_SHARE_BLOCKS  3u
@@ -50,6 +49,8 @@ static TestResult TestStandCommonholdOwners(void)
     TestResult      verdict = TEST_PASS;
     StandBinder     b;
     StandFreshModel m;
+    ConjugateSaid   said;
+    ConjugateAsk    ask;
     uint64_t        a = 0, f = 0, a0 = 0, b0 = 0, resting = 0, flags = 0, fresh = 0;
     const char*     aside = StandBinderAside(&b);
 
@@ -62,7 +63,8 @@ static TestResult TestStandCommonholdOwners(void)
     TEST_ASSERT(StandBlockOf(a, 0, &a0) && StandBlockOf(f, 0, &b0) && a0 != b0, "each on its own ground");
 
     resting = FallowBlocks();
-    TEST_ASSERT_OK(InkBookShareStand(f, 0, a0, 1), "B's block 0 is laid SHARED on A's block 0, as Dedup lays it");
+    ask     = (ConjugateAsk){ .fid = f, .at = 0, .onto = a, .onto_at = 0, .count = 1 };
+    TEST_ASSERT_OK(TagFSConjugate(INK_WARRANTED, &ask, &said), "B's block 0 is laid SHARED on A's block 0 by the act");
     TEST_ASSERT_EQ(CommonholdOwners(a0), 2, "A's block 0 has two owners");
     TEST_ASSERT_EQ(FallowBlocks(), resting + 1u, "and B's own block 0 rests: the one block the share let go");
     TEST_ASSERT(StandBlockOf(f, 0, &b0) && b0 == a0, "B's block 0 is A's");
