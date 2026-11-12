@@ -21,6 +21,7 @@ be able to damage it. The only files it writes are the ones it is told to
                                        [--tear W:MASK]... (--out IMG | --check [--json]
                                        [--digests MEMO] [--digests-out MEMO])
     tools/volume-read.py DEVICE cut LOG --against FINAL
+    tools/volume-read.py DEVICE boot
     tools/volume-read.py IMAGE  self-test [--emit CASE --out IMG]
 
 `list` and `get` show the files the mounted kernel would show: each at the
@@ -32,8 +33,11 @@ and a simulation of what the next mount decides (exit 0 consistent, 1 not,
 derived from the names that take a block. `cut` reads a QEMU blklogwrites log
 of this DEVICE and builds any crash state out of it; the cuts of one record
 share a memo of the block digests a book's census takes (bookcensus.py
-DigestMemoWrite). `self-test` plants every rule's damage into an overlay over
-IMAGE and checks that each is caught.
+DigestMemoWrite). `boot` says what the UEFI loader makes of a format-v2
+volume's kernel before it jumps: the slot its book stands on, and whether the
+blocks BOOT names match the digests its Tally keeps (bootread.py, the oracle of
+tools/tagboot_stand.c). `self-test` plants every rule's damage into an overlay
+over IMAGE and checks that each is caught.
 
 DEVICE is a raw device or an image file:
 
@@ -393,6 +397,20 @@ def CmdBound(args, medium):
     return 0 if not wrong else 1
 
 
+def CmdBoot(args, medium):
+    """What the loader's Lectern says of the volume's kernel, line by line
+    (bootread.py): 0 when it says a verdict, 2 when the volume does not read."""
+    from volumeread.bootread import BootRead
+    try:
+        lines, _says = BootRead(medium, args.start)
+    except (Unreadable, IOError) as e:
+        print(f"boot: unreadable — {e}")
+        return 2
+    for line in lines:
+        print(f"boot: {line}")
+    return 0
+
+
 def CmdSelfTest(args, medium):
     from volumeread import selftest
     if args.emit:
@@ -441,6 +459,7 @@ def Main():
     cut.add_argument("--digests", metavar="MEMO", help="a book's block digests a check of the same run took")
     cut.add_argument("--digests-out", metavar="MEMO", help="the block digests this check took, kept")
     sub.add_parser("bound", parents=[start], help="the newest Tally held to the one rule of binding")
+    sub.add_parser("boot", parents=[start], help="the kernel BOOT names, held to the book as the UEFI loader holds it")
     st = sub.add_parser("self-test", parents=[start], help="every census rule, planted and caught")
     st.add_argument("--emit", metavar="CASE")
     st.add_argument("--out", metavar="IMG")
@@ -465,6 +484,8 @@ def Main():
         return CmdCut(args, medium)
     if args.command == "bound":
         return CmdBound(args, medium)
+    if args.command == "boot":
+        return CmdBoot(args, medium)
     return CmdSelfTest(args, medium)
 
 
