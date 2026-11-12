@@ -19,6 +19,12 @@ int ObjWriteSettled(const ManifestOp *op, Crate *crates, uint16_t crate_count,
  * [u64 tails lost][u64 DIGESTS ranges known to read in no copy, laid anew of the data]. */
 int ObjEscheat(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx);
 
+/* OBJ_CONJUGATE — Conjugate (tagfs/dedup/conjugate.h), only for a cabin wearing
+ * system or god: params = [u64 fid][u64 at][u64 onto][u64 onto_at][u64 count],
+ * out_crate = [u64 blocks laid][u64 block a refusal met][u64 why]. Room on its
+ * way on the ribbon is waited for, and the act asked again (SettleOpForRoom). */
+int ObjConjugate(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx);
+
 /* A program's `use`, told to the volume: `said` is the `saying`-th word of the
  * Use Context. `out` (optional, one byte) is 1 once the volume remembers
  * exactly it. OK with the byte written now, or ERR_WOULD_BLOCK with the caller

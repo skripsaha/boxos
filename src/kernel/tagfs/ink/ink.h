@@ -142,14 +142,43 @@ error_t InkQuitclaim(uint64_t fid, InkWarrant warrant, InkReceipt* out);
  */
 void    InkGleanLocked(uint64_t fid, const RecordWhere* from, const uint8_t* packed);
 
-#ifdef CONFIG_VOLUME_TESTS
-/* The stand's lever for a block in common (ink_share_stand.c), until Dedup
- * lays one: `count` blocks of book file `fid` from its block `at` laid SHARED
- * on the ground from `start`, which another live file's DATA names — the
- * file's own blocks let go, one owner more on the shared ones (commonhold.h).
- * OK, or the refusal with nothing changed. */
-error_t InkBookShareStand(uint64_t fid, uint64_t at, uint64_t start, uint32_t count);
-#endif
+/*
+ * Conjugate's Ink (ink_conjugate.c; the act is dedup/conjugate.h): book file
+ * `fid`'s blocks [at, at + count) — `dup`, its DATA ground there, in the
+ * file's order — replaced in its record by `onto`, the ground the target file
+ * `onto_fid` names over as many blocks, every Strip of it SHARED: a Shaped of
+ * one splice, the file's size and times as they were. Before the lock the
+ * record, the Fallow node of the ground let go and the room Commonhold's
+ * change takes; under it the file held to the record the act compared (`cur`,
+ * sitting at `was`) and the target to the Ink of the one it compared
+ * (`onto_gen`) — the guards the act asked of both stand only while neither
+ * changed — then the record put in the mirror and its Jot in the Docket, one
+ * owner off every block let go, which rests when that leaves none, and one
+ * owner more on every block shared (commonhold.h). OK and the receipt;
+ * ERR_BUSY, nothing changed, when either file changed since the act compared
+ * it, ERR_FILE_NOT_FOUND when either was given up; or the volume's refusal —
+ * ERR_DEVICE_NOT_READY, ERR_TAGFS_READ_ONLY, the ribbon's room
+ * (ERR_WOULD_BLOCK while it can come), ERR_NO_MEMORY.
+ */
+typedef struct {
+    uint64_t          fid;
+    const FileRecord* cur;
+    RecordWhere       was;
+    uint64_t          at;
+    uint64_t          count;
+    const Strip*      dup;
+    uint32_t          ndup;
+    const Strip*      onto;
+    uint32_t          nonto;
+    uint64_t          onto_fid;
+    uint64_t          onto_gen;
+} InkConjugation;
+
+error_t InkConjugate(const InkConjugation* c, InkReceipt* out);
+
+/* Whether the volume takes a change not begun yet (ink.c): OK, or why not —
+ * a medium that left, one that refuses writes, a stopping machine's halt. */
+error_t InkVolumeBegins(void);
 
 /* Under the state lock: the newest Ink's gen, and the flush need its data
  * holds — the one a cycle's first flush must be issued past. */

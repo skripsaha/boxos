@@ -45,11 +45,11 @@ uint64_t InkGenNextLocked(void);
 void     InkGenLaidLocked(uint64_t gen);
 void     InkDataNeedRaiseLocked(uint64_t need);
 
-/* Whether the volume takes a change at all, asked in both halves; whether it
- * takes one not begun yet, asked in the first. And the guard's answer for a
- * file's change, `boot` whether it touches the kernel's blocks (ink.h). */
+/* Whether the volume takes a change at all, asked in both halves (whether it
+ * takes one not begun yet, asked in the first, is ink.h's InkVolumeBegins).
+ * And the guard's answer for a file's change, `boot` whether it touches the
+ * kernel's blocks (ink.h). */
 error_t  InkVolumeTakes(void);
-error_t  InkVolumeBegins(void);
 error_t  InkGuardSays(uint64_t fid, bool boot, const uint32_t* tags, uint32_t tag_count, InkWarrant warrant);
 
 /* The record of format v1, built before the lock: memory's copy and the
