@@ -36,6 +36,7 @@
 #include "box/cxx/settings.h"
 
 #include "painter/core/color.h"
+#include "painter/core/coverage.h"
 #include "painter/tui/glyph.h"
 #include "painter/tui/surface.h"
 
@@ -279,7 +280,9 @@ bool Pair::Step(float Seconds)
 }
 
 /* The pixels of the pair, each eye an ellipse: the white shaded toward its
- * rim, the iris with a darker ring, the pupil, a glint, and the lids. */
+ * rim, the iris with a darker ring, the pupil, a glint, and the lids. Every
+ * edge, the eye's own and those within it, is as soft as the share of a pixel
+ * each side covers. */
 class EyePicture {
 public:
     /* The pair at Share of its size on a glass of that many cells: on a small
@@ -318,33 +321,41 @@ private:
     std::vector<PainterColor> Dots;
 };
 
+/* Over laid at Share of a pixel. */
+PainterColor Laid(PainterColor Under, PainterColor Over, float Share)
+{
+    return PainterColor::Mix(Under, Over, static_cast<std::uint8_t>(std::clamp(Share, 0.0f, 1.0f) * 255.0f + 0.5f));
+}
+
 void EyePicture::DrawEye(int Left, const Look &Eye, const Inks &Colours)
 {
+    using painter::core::InsideShare;
     float Rx = EyeW / 2.0f, Ry = EyeH / 2.0f;
     float Cx = Left + Rx, Cy = Ry;
     /* A shade under round numbers, so no lone pixel sticks out at the four points of a circle. */
     float Ri = Rx * 0.5f - 0.3f, Rp = std::max(1.5f, Ri * 0.5f);
     float Ix = Cx + Eye.X * (Rx - Ri - 0.5f), Iy = Cy + Eye.Y * (Ry - Ri - 0.5f);
     float LidTop = Cy - Ry + Eye.Shut * Ry * 1.1f, LidLow = Cy + Ry - Eye.Shut * Ry * 0.9f;
+    float Glow = std::max(0.6f, Rp * Rp * 0.18f);
 
     for (int Y = 0; Y < EyeH; Y++) {
         for (int X = Left; X < Left + EyeW; X++) {
             float Px = X + 0.5f, Py = Y + 0.5f;
             float Ex = (Px - Cx) / Rx, Ey = (Py - Cy) / Ry, Edge = Ex * Ex + Ey * Ey;
-            if (Edge > 1.0f) continue;
-            PainterColor Ink;
-            if (Py < LidTop || Py > LidLow) {
-                bool Rim = Py >= LidTop - 1.0f && Py < LidTop;
-                Ink = Eye.Shut > 0.02f && Rim ? Colours.LidEdge : Colours.Lid;
-            } else {
-                float Dx = Px - Ix, Dy = Py - Iy, Far = std::sqrt(Dx * Dx + Dy * Dy);
-                if (Far <= Rp) Ink = Colours.Pupil;
-                else if (Far <= Ri) Ink = Far > Ri - 1.0f ? PainterColor::Mix(Colours.Iris, painter::core::Colors::Black, 110) : Colours.Iris;
-                else Ink = PainterColor::Mix(Colours.Eyeball, Colours.Rim, static_cast<std::uint8_t>(std::clamp(Edge * Edge * 255.0f, 0.0f, 255.0f)));
-                float Gx = Px - (Ix - Rp * 0.6f), Gy = Py - (Iy - Rp * 0.6f);
-                if (Far <= Ri && Gx * Gx + Gy * Gy <= std::max(0.6f, Rp * Rp * 0.18f)) Ink = Glint;
-            }
-            Dots[static_cast<std::size_t>(Y) * Width + X] = Ink;
+            float Cover = InsideShare((std::sqrt(Edge) - 1.0f) * std::min(Rx, Ry));
+            if (Cover <= 0.0f) continue;
+
+            float Dx = Px - Ix, Dy = Py - Iy, Far = std::sqrt(Dx * Dx + Dy * Dy);
+            PainterColor Ink = PainterColor::Mix(Colours.Eyeball, Colours.Rim, static_cast<std::uint8_t>(std::clamp(Edge * Edge * 255.0f, 0.0f, 255.0f)));
+            Ink = Laid(Ink, Far > Ri - 1.0f ? PainterColor::Mix(Colours.Iris, painter::core::Colors::Black, 110) : Colours.Iris, InsideShare(Far - Ri));
+            Ink = Laid(Ink, Colours.Pupil, InsideShare(Far - Rp));
+            float Gx = Px - (Ix - Rp * 0.6f), Gy = Py - (Iy - Rp * 0.6f);
+            if (Far <= Ri) Ink = Laid(Ink, Glint, InsideShare(std::sqrt(Gx * Gx + Gy * Gy) - std::sqrt(Glow)));
+
+            bool Rim = Py >= LidTop - 1.0f && Py < LidTop;
+            Ink = Laid(Ink, Eye.Shut > 0.02f && Rim ? Colours.LidEdge : Colours.Lid, InsideShare(Py - LidTop));
+            Ink = Laid(Ink, Colours.Lid, InsideShare(LidLow - Py));
+            Dots[static_cast<std::size_t>(Y) * Width + X] = Ink.WithOpacity(static_cast<std::uint8_t>(Cover * 255.0f + 0.5f));
         }
     }
 }

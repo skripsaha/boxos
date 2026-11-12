@@ -33,6 +33,7 @@
 #include "box/cxx/settings.h"
 
 #include "painter/core/color.h"
+#include "painter/core/coverage.h"
 #include "painter/tui/glyph.h"
 #include "painter/tui/surface.h"
 
@@ -63,6 +64,10 @@ const PainterColor Sclera    = PainterColor::Rgb(0xFF, 0xF4, 0xD6);
 const PainterColor Pupil     = PainterColor::Rgb(0x14, 0x1A, 0x30);
 const PainterColor Glint     = painter::core::Colors::White;
 const PainterColor Shadow    = PainterColor::Rgb(0x24, 0x26, 0x30);
+/* The shadow on the ground: this much of 255 opaque, and fading out over this
+ * many pixels at its edge. */
+constexpr std::uint8_t ShadowOpacity = 150;
+constexpr float        ShadowSoft    = 1.5f;
 const PainterColor SandLight = PainterColor::Rgb(0xE6, 0xCC, 0x92);
 const PainterColor SandDark  = PainterColor::Rgb(0xB8, 0x9A, 0x60);
 const PainterColor BubbleRim = PainterColor::Rgb(0xBF, 0xE6, 0xF2);
@@ -142,7 +147,9 @@ Ramp Flat(PainterColor Ink)
 
 /* The pixels of the sprite. Shapes are given in units and drawn as lit
  * solids: the light comes from the upper left, the tone is the nearest of the
- * ramp's five, and every shape has a line of one pixel around it. */
+ * ramp's five, and every shape has a line of one pixel around it. A pixel on a
+ * shape's edge is as opaque as the share of it the shape covers, so the edge is
+ * soft, and what is drawn later goes over what is drawn before. */
 class Pixmap {
 public:
     void Size(float Zoom)
@@ -165,6 +172,7 @@ public:
     void Oval(float Cx, float Cy, float Rx, float Ry, const Ramp &Ink);
     void Round(Spot From, Spot To, float RadiusFrom, float RadiusTo, const Ramp &Ink);
     void Ring(float Cx, float Cy, float Radius, PainterColor Ink);
+    void Cast(float Cx, float Cy, float Rx, float Ry, PainterColor Ink, std::uint8_t Opacity);
     void Dot(float X, float Y, PainterColor Ink) { Put(Whole(X * Scale), Whole(Y * Scale), Ink); }
 
     int Width = 0, Height = 0;
@@ -175,7 +183,9 @@ private:
     void Put(int X, int Y, PainterColor Ink)
     {
         Y += Shift;
-        if (X >= 0 && X < Width && Y >= 0 && Y < Height) Dots[static_cast<std::size_t>(Y) * Width + X] = Ink;
+        if (X < 0 || X >= Width || Y < 0 || Y >= Height) return;
+        PainterColor &Here = Dots[static_cast<std::size_t>(Y) * Width + X];
+        Here               = Ink.IsTranslucent() ? PainterColor::Mix(Here, Ink, 255) : Ink;
     }
 
     void Plot(int X, int Y, float Beyond, float Nx, float Ny, const Ramp &Ink);
@@ -185,17 +195,22 @@ private:
     int                       Shift = 0;
 };
 
+/* The share of the pixel whose middle lies Beyond the shape's edge, in pixels,
+ * that is within the shape, and that is within the line round it, which is
+ * the pixel's width outside the edge. */
 void Pixmap::Plot(int X, int Y, float Beyond, float Nx, float Ny, const Ramp &Ink)
 {
-    if (Beyond > 1.0f) return;
-    if (Beyond > 0.0f) {
-        Put(X, Y, Ink.Outline);
-        return;
+    const float Fill = painter::core::InsideShare(Beyond);
+    const float Line = painter::core::BandShare(Beyond, 0.0f, 1.0f);
+    if (Fill + Line <= 0.0f) return;
+    PainterColor Shown = Ink.Outline;
+    if (Fill > 0.0f) {
+        float Flat = std::min(1.0f, Nx * Nx + Ny * Ny);
+        float Lit  = std::clamp(-0.5f * Nx - 0.6f * Ny + 0.62f * std::sqrt(1.0f - Flat), 0.0f, 1.0f);
+        int   Band = Lit < 0.25f ? 0 : Lit < 0.5f ? 1 : Lit < 0.75f ? 2 : Lit < 0.9f ? 3 : 4;
+        Shown      = PainterColor::Mix(Ink.Outline, Ink.Tone[Band], static_cast<std::uint8_t>(Fill / (Fill + Line) * 255.0f + 0.5f));
     }
-    float Flat = std::min(1.0f, Nx * Nx + Ny * Ny);
-    float Lit  = std::clamp(-0.5f * Nx - 0.6f * Ny + 0.62f * std::sqrt(1.0f - Flat), 0.0f, 1.0f);
-    int   Band = Lit < 0.25f ? 0 : Lit < 0.5f ? 1 : Lit < 0.75f ? 2 : Lit < 0.9f ? 3 : 4;
-    Put(X, Y, Ink.Tone[Band]);
+    Put(X, Y, Shown.WithOpacity(static_cast<std::uint8_t>(std::min(Fill + Line, 1.0f) * 255.0f + 0.5f)));
 }
 
 void Pixmap::Oval(float Cx, float Cy, float Rx, float Ry, const Ramp &Ink)
@@ -230,15 +245,35 @@ void Pixmap::Round(Spot From, Spot To, float RadiusFrom, float RadiusTo, const R
     }
 }
 
+/* A line of the pixel's width round a circle, as opaque as the pixel's share it covers. */
 void Pixmap::Ring(float Cx, float Cy, float Radius, PainterColor Ink)
 {
+    constexpr float Half = 0.6f;
     Cx *= Scale;
     Cy *= Scale;
     Radius = std::max(1.2f, Radius * Scale);
     for (int Y = Whole(Cy - Radius - 1); Y <= Whole(Cy + Radius + 1); Y++) {
         for (int X = Whole(Cx - Radius - 1); X <= Whole(Cx + Radius + 1); X++) {
-            float Far = std::sqrt((X + 0.5f - Cx) * (X + 0.5f - Cx) + (Y + 0.5f - Cy) * (Y + 0.5f - Cy));
-            if (std::fabs(Far - Radius) < 0.6f) Put(X, Y, Ink);
+            float Far   = std::sqrt((X + 0.5f - Cx) * (X + 0.5f - Cx) + (Y + 0.5f - Cy) * (Y + 0.5f - Cy)) - Radius;
+            float Share = painter::core::BandShare(Far, -Half, Half);
+            if (Share > 0.0f) Put(X, Y, Ink.WithOpacity(static_cast<std::uint8_t>(Share * 255.0f + 0.5f)));
+        }
+    }
+}
+
+/* An ellipse of one colour at Opacity that fades out over ShadowSoft pixels at its edge. */
+void Pixmap::Cast(float Cx, float Cy, float Rx, float Ry, PainterColor Ink, std::uint8_t Opacity)
+{
+    Cx *= Scale;
+    Cy *= Scale;
+    Rx *= Scale;
+    Ry *= Scale;
+    for (int Y = Whole(Cy - Ry - 1); Y <= Whole(Cy + Ry + 1); Y++) {
+        for (int X = Whole(Cx - Rx - 1); X <= Whole(Cx + Rx + 1); X++) {
+            float Ex = (X + 0.5f - Cx) / Rx, Ey = (Y + 0.5f - Cy) / Ry;
+            float Beyond = (std::sqrt(Ex * Ex + Ey * Ey) - 1.0f) * std::min(Rx, Ry);
+            float Share  = painter::core::InsideShare(Beyond / ShadowSoft);
+            if (Share > 0.0f) Put(X, Y, Ink.WithOpacity(static_cast<std::uint8_t>(Share * Opacity + 0.5f)));
         }
     }
 }
@@ -622,7 +657,7 @@ void Draw(Pixmap &Art, const Palette &Ink, const Crab &Creature, int Shift, bool
 {
     Art.Clear(Shift);
     const Pose &Now = Creature.Now;
-    if (Shadowed) Art.Oval(MiddleX, GroundY + 0.4f, 17.0f, 2.2f, Flat(Shadow));
+    if (Shadowed) Art.Cast(MiddleX, GroundY + 0.4f, 17.0f, 2.2f, Shadow, ShadowOpacity);
     DrawLegs(Art, Ink, Now);
     DrawArms(Art, Ink, Now);
     DrawEye(Art, Ink, Now, -1.0f);

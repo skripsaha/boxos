@@ -62,8 +62,9 @@ float Cover(float Far, Vec Toward, bool Whole)
     return Whole ? (Share >= 0.5f ? 1.0f : 0.0f) : Share;
 }
 
-/* Over a see-through Under, Color::Mix takes the nearer of the two, so an edge
- * sub-pixel is Over where Share is half or more and see-through otherwise. */
+/* Over covers Share of a sub-pixel: over a see-through Under it is Over at that
+ * opacity, which the display blends with what lies beneath, and over a colour
+ * the mix of the two. */
 Color Lay(Color Under, Color Over, float Share)
 {
     if (Share <= 0.0f) return Under;
@@ -79,8 +80,8 @@ public:
     {
     }
 
-    /* The colour at Point, see-through where Duppo does not cover it, and
-     * whether Duppo is there at all. */
+    /* The colour at Point, translucent where Duppo covers part of it and
+     * see-through where it covers none, and whether Duppo is there at all. */
     Color At(Vec Point, bool &Reached) const;
 
 private:
@@ -143,11 +144,13 @@ Color Sampler::At(Vec Point, bool &Reached) const
     return Ink;
 }
 
+/* The ball's colour with the eye on it, all whole, laid over Under by the share
+ * of the sample the ball covers: the eye is on the ball, so it takes no more of
+ * an edge than the ball does. */
 Color Sampler::Sphere(Vec Local, float Share, Color Under) const
 {
     const Vec Seen = Logo::Body.Center + Local;
-    Under          = Lay(Under, Logo::BodyColor(Hues, Seen), Share);
-    return Eyes(Local, Seen, Under);
+    return Lay(Under, Eyes(Local, Seen, Logo::BodyColor(Hues, Seen)), Share);
 }
 
 /* The eye lies on the ball's front as the logo draws it, and the ball is turned

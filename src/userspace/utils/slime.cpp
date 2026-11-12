@@ -37,6 +37,7 @@
 #include "box/cxx/settings.h"
 
 #include "painter/core/color.h"
+#include "painter/core/coverage.h"
 #include "painter/tui/glyph.h"
 #include "painter/tui/surface.h"
 
@@ -63,6 +64,11 @@ const PainterColor Sclera  = PainterColor::Rgb(0xF6, 0xF8, 0xD8);
 const PainterColor Pupil   = PainterColor::Rgb(0x13, 0x20, 0x0A);
 const PainterColor Gloss   = PainterColor::Rgb(0xF4, 0xFF, 0xE0);
 const PainterColor Shadow  = PainterColor::Rgb(0x16, 0x1E, 0x1A);
+
+/* The shadow on the ground: this much of 255 opaque, and fading out over this
+ * many pixels at its edge. */
+constexpr std::uint8_t ShadowOpacity = 150;
+constexpr float        ShadowSoft    = 1.5f;
 
 void Say(std::string_view Text)
 {
@@ -144,7 +150,9 @@ int Band(float Nx, float Ny)
 
 /* The pixels of the box that holds the slime, placed on the glass by its
  * upper left; every shape is given in pixels of the glass, which are square:
- * a column across and half a row down. */
+ * a column across and half a row down. A pixel on a shape's edge is as opaque
+ * as the share of it the shape covers, so the edge is soft, and what is drawn
+ * later goes over what is drawn before. */
 class Pixmap {
 public:
     void Place(int Left, int Top, int Wide, int High)
@@ -162,10 +170,25 @@ public:
     {
         X -= Across;
         Y -= Down;
-        if (X >= 0 && X < Width && Y >= 0 && Y < Height) Dots[static_cast<std::size_t>(Y) * Width + X] = Ink;
+        if (X < 0 || X >= Width || Y < 0 || Y >= Height) return;
+        PainterColor &Here = Dots[static_cast<std::size_t>(Y) * Width + X];
+        Here               = Ink.IsTranslucent() ? PainterColor::Mix(Here, Ink, 255) : Ink;
+    }
+
+    /* The pixel whose middle lies Beyond a shape's edge, in pixels: Inside
+     * where the shape covers it, Line where the line of a pixel's width round
+     * the shape does, as opaque as the two cover it together. */
+    void Edge(int X, int Y, float Beyond, PainterColor Line, PainterColor Inside)
+    {
+        const float Fill = painter::core::InsideShare(Beyond);
+        const float Rim  = painter::core::BandShare(Beyond, 0.0f, 1.0f);
+        if (Fill + Rim <= 0.0f) return;
+        const PainterColor Shown = PainterColor::Mix(Line, Inside, static_cast<std::uint8_t>(Fill / (Fill + Rim) * 255.0f + 0.5f));
+        Put(X, Y, Shown.WithOpacity(static_cast<std::uint8_t>(std::min(Fill + Rim, 1.0f) * 255.0f + 0.5f)));
     }
 
     void Oval(float Cx, float Cy, float Rx, float Ry, const Ramp &Ink);
+    void Cast(float Cx, float Cy, float Rx, float Ry, PainterColor Ink, std::uint8_t Opacity);
 
     int Width = 0, Height = 0;
 
@@ -185,8 +208,21 @@ void Pixmap::Oval(float Cx, float Cy, float Rx, float Ry, const Ramp &Ink)
         for (int X = Whole(Cx - Rx - 1); X <= Whole(Cx + Rx + 1); X++) {
             float Ex = (X + 0.5f - Cx) / Rx, Ey = (Y + 0.5f - Cy) / Ry;
             float Beyond = (std::sqrt(Ex * Ex + Ey * Ey) - 1.0f) * std::min(Rx, Ry);
-            if (Beyond > 1.0f) continue;
-            Put(X, Y, Beyond > 0.0f ? Ink.Outline : Ink.Tone[Band(Ex, Ey)]);
+            if (Beyond > 1.5f) continue;
+            Edge(X, Y, Beyond, Ink.Outline, Ink.Tone[Band(Ex, Ey)]);
+        }
+    }
+}
+
+/* An ellipse of one colour at Opacity that fades out over ShadowSoft pixels at its edge. */
+void Pixmap::Cast(float Cx, float Cy, float Rx, float Ry, PainterColor Ink, std::uint8_t Opacity)
+{
+    for (int Y = Whole(Cy - Ry - 1); Y <= Whole(Cy + Ry + 1); Y++) {
+        for (int X = Whole(Cx - Rx - 1); X <= Whole(Cx + Rx + 1); X++) {
+            float Ex = (X + 0.5f - Cx) / Rx, Ey = (Y + 0.5f - Cy) / Ry;
+            float Beyond = (std::sqrt(Ex * Ex + Ey * Ey) - 1.0f) * std::min(Rx, Ry);
+            float Share  = painter::core::InsideShare(Beyond / ShadowSoft);
+            if (Share > 0.0f) Put(X, Y, Ink.WithOpacity(static_cast<std::uint8_t>(Share * Opacity + 0.5f)));
         }
     }
 }
@@ -431,8 +467,8 @@ void DrawBody(Pixmap &Art, const Ramp &Ink, const Figure &Shape)
                 Far = (Cube + 2.0f) / 3.0f;   /* the cube root, near enough to the edge */
             }
             float Beyond = (Far - 1.0f) * Edge;
-            if (Beyond > 1.0f) continue;
-            Art.Put(X, Y, Beyond > 0.0f ? Ink.Outline : Jelly(Ink, Ex, Ey, Far));
+            if (Beyond > 1.5f) continue;
+            Art.Edge(X, Y, Beyond, Ink.Outline, Beyond < 0.5f ? Jelly(Ink, Ex, Ey, Far) : Ink.Outline);
         }
         float Next = Wave * Cos + Turn * Sin;
         Turn = Turn * Cos - Wave * Sin;
@@ -484,7 +520,7 @@ void Draw(Pixmap &Art, const Palette &Ink, const Slime &Creature, float Zoom, bo
     float Height = Creature.Air;
     if (Shadowed) {
         float Shade = Creature.Round * 0.46f * (1.0f - std::min(0.5f, Height / (Creature.Round * 1.2f)));
-        Art.Oval(Creature.Foot.X, Creature.Foot.Y + 0.5f, Shade, std::max(1.0f, Shade * 0.16f), Flat(Shadow));
+        Art.Cast(Creature.Foot.X, Creature.Foot.Y + 0.5f, Shade, std::max(1.0f, Shade * 0.16f), Shadow, ShadowOpacity);
     }
     Figure Shape{Creature.Foot.X, Creature.Foot.Y - Height, Creature.Wide() * 0.5f, Creature.High() * 0.5f, Creature.Ripple, Creature.Phase};
     DrawBody(Art, Ink.Body, Shape);

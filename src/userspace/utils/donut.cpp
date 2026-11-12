@@ -17,6 +17,7 @@
  * size are the person's (settings donut), changed while it turns. */
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -64,6 +65,23 @@ constexpr float Minor = 0.43f;
 /* Samples to a pixel along the ring and the tube, with the nearest part of
  * the torus drawn a third larger than its middle by perspective. */
 constexpr float Density = 2.6f;
+/* What a sample covers of the picture: a square of this much each side, in
+ * pixels, a little more than the gap between neighbours at the nearest part,
+ * so the samples tile the torus and leave no hole. A pixel is counted as
+ * Grain by Grain sub-samples, of which a sample covers those its square
+ * touches: how many the torus covers is how opaque the pixel is. */
+constexpr float Footprint = 0.3f;
+constexpr int Grain = 4;
+
+/* The sub-samples along one side of a pixel that the span From to To, in that
+ * pixel's own units, touches, as bits. */
+unsigned Touched(float From, float To) {
+    unsigned Bits = 0;
+    for (int Sub = 0; Sub < Grain; Sub++)
+        if (From < static_cast<float>(Sub + 1) / Grain && To > static_cast<float>(Sub) / Grain)
+            Bits |= 1u << Sub;
+    return Bits;
+}
 
 /* What the person set, read again whenever the file is saved. */
 struct Look {
@@ -135,6 +153,7 @@ class DonutPicture {
     DonutPicture(int Width, int Height, painter::tui::Frame Canvas)
         : Width(Width), Height(Height), PixelHeight(Height * 2),
           Depth(static_cast<std::size_t>(Width) * PixelHeight),
+          Reached(Depth.size()), Surface(Depth.size()),
           Canvas(std::move(Canvas)) {
         const float Size = static_cast<float>(std::min(Width, PixelHeight)) * DonutScale;
         const int Rings = std::clamp(static_cast<int>(2.0f * Pi * (Major + Minor) * Size * Density), 96, 480);
@@ -160,6 +179,7 @@ class DonutPicture {
         Canvas.ClearTransparent();
         std::fill(Depth.begin(), Depth.end(),
                   std::numeric_limits<float>::lowest());
+        std::fill(Reached.begin(), Reached.end(), 0u);
 
         const float Ca = std::cos(A);
         const float Sa = std::sin(A);
@@ -196,33 +216,60 @@ class DonutPicture {
                 const float Nxy = Nx * Cb + Nzx * Sb;
 
                 const float Perspective = Camera / (Camera - Zy);
-                const int PixelX =
-                    static_cast<int>(Width * 0.5f + Xy * Scale * Perspective);
-                const int PixelY = static_cast<int>(PixelHeight * 0.5f -
-                                                    Yx * Scale * Perspective);
-                if (PixelX < 0 || PixelX >= Width || PixelY < 0 ||
-                    PixelY >= PixelHeight)
-                    continue;
-
-                const std::size_t At =
-                    static_cast<std::size_t>(PixelY) * Width + PixelX;
-                if (Zy <= Depth[At])
-                    continue;
-                Depth[At] = Zy;
-
                 const float Light =
                     0.18f +
                     std::max(0.0f, Nxy * 0.25f - Nyx * 0.35f + Nzy * 0.9f) *
                         0.82f;
-                Canvas.PutPixel({PixelX, PixelY}, Ink(Sv, Light));
+                Splat(Width * 0.5f + Xy * Scale * Perspective,
+                      PixelHeight * 0.5f - Yx * Scale * Perspective, Zy, Ink(Sv, Light));
             }
         }
+        Settle();
         return true;
     }
 
     painter::tui::Frame &Frame() { return Canvas; }
 
   private:
+    /* A sample at X, Y (in pixels, a pixel being a unit square from its
+     * corner) and Z, in Ink: it marks the sub-samples of every pixel its
+     * square touches, and is the colour of those where it is nearest. */
+    void Splat(float X, float Y, float Z, PainterColor Colour) {
+        const int Left = static_cast<int>(std::floor(X - Footprint));
+        const int Right = static_cast<int>(std::floor(X + Footprint));
+        const int Top = static_cast<int>(std::floor(Y - Footprint));
+        const int Bottom = static_cast<int>(std::floor(Y + Footprint));
+        for (int Row = std::max(Top, 0); Row <= std::min(Bottom, PixelHeight - 1); Row++) {
+            const unsigned Rows = Touched(Y - Footprint - Row, Y + Footprint - Row);
+            for (int Col = std::max(Left, 0); Col <= std::min(Right, Width - 1); Col++) {
+                const unsigned Cols = Touched(X - Footprint - Col, X + Footprint - Col);
+                const std::size_t At = static_cast<std::size_t>(Row) * Width + Col;
+                for (int Sub = 0; Sub < Grain; Sub++)
+                    if (Rows & (1u << Sub))
+                        Reached[At] |= Cols << (Sub * Grain);
+                if (Z > Depth[At]) {
+                    Depth[At] = Z;
+                    Surface[At] = Colour;
+                }
+            }
+        }
+    }
+
+    /* The pixels the torus reaches, each as opaque as its sub-samples are
+     * covered: an edge is soft, and what lies beyond it blends into it. */
+    void Settle() {
+        for (int Row = 0; Row < PixelHeight; Row++) {
+            for (int Col = 0; Col < Width; Col++) {
+                const std::size_t At = static_cast<std::size_t>(Row) * Width + Col;
+                if (Reached[At] == 0)
+                    continue;
+                const int Covered = std::popcount(Reached[At]);
+                constexpr int Whole = Grain * Grain;
+                Canvas.PutPixel({Col, Row}, Surface[At].WithOpacity(static_cast<std::uint8_t>((Covered * 255 + Whole / 2) / Whole)));
+            }
+        }
+    }
+
     PainterColor Ink(float V, float Light) const {
         const float Wrapped = std::clamp((V + 1.0f) * 0.5f, 0.0f, 1.0f);
         const PainterColor Base = PainterColor::Mix(
@@ -239,6 +286,8 @@ class DonutPicture {
     int Height;
     int PixelHeight;
     std::vector<float> Depth;
+    std::vector<std::uint32_t> Reached;
+    std::vector<PainterColor> Surface;
     painter::tui::Frame Canvas;
 };
 

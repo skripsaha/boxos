@@ -1,6 +1,8 @@
 /* picture.h — the whale on the glass: its pixels worked out where it is, made
  * into cells two pixels tall, and laid in a frame whose every other cell is
- * transparent, so only the whale's own cells are painted over the screen. */
+ * transparent, so only the whale's own cells are painted over the screen. A
+ * pixel on its edge is as opaque as the share of it the whale covers, so the
+ * edge is soft and blends into whatever lies beneath. */
 #ifndef WHALE_PICTURE_H
 #define WHALE_PICTURE_H
 
@@ -32,12 +34,17 @@ private:
     void Clear(painter::core::Rect Area);
     painter::core::Rect Paint(painter::core::Rect Pixels);
     void Edge(painter::core::Rect Pixels);
+    bool OnEdge(std::int32_t X, std::int32_t Y) const;
+    void Soft(std::int32_t X, std::int32_t Y);
+    painter::core::Rect Soften(painter::core::Rect Pixels);
     void Lay(painter::core::Rect Area, painter::tui::Frame &Overlay) const;
     void Sprinkle(const Swimmer &Whale, painter::tui::Frame &Overlay);
 
     painter::core::Size                 Cells;
     std::vector<painter::core::Color>   Dots;
     std::vector<Part>                   Parts;
+    std::vector<std::uint8_t>           Shares;   /* how opaque, of 255, each pixel the whale has is */
+    std::vector<std::size_t>            Rim;
     Figure                              Body;
     bool                                Outlined = true;
     painter::core::Rect                 Shown;

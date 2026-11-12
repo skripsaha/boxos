@@ -3,11 +3,11 @@
  * shading, and settled by Painter on the glyph and two colours that show them
  * best. The eye is a picture laid on the ball and turned with it, so it
  * narrows toward the edge and goes round it; the little bubbles lie before or
- * behind the ball by their depth, sample by sample. Within the figure an edge
- * between discs is softened by the share of a sub-pixel each takes; the figure's
- * own edge is not, for what lies beyond it is not known: a sub-pixel the figure
- * covers by half or more is its colour, and any other is see-through.
- * The cells it misses are transparent, so the screen goes on beneath it. */
+ * behind the ball by their depth, sample by sample. An edge, within the figure
+ * and its own, is softened by the share of a sub-pixel each disc takes; at the
+ * figure's edge that share is an opacity, for what lies beyond it is not known,
+ * and the display blends it with whatever lies beneath. The cells it misses
+ * are transparent, so the screen goes on beneath it. */
 #ifndef DUPPO_PICTURE_H
 #define DUPPO_PICTURE_H
 
