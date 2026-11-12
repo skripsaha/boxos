@@ -5,6 +5,7 @@
 #include "../ink/fallow.h"
 #include "../settle/settle.h"
 #include "../settle/binder.h"
+#include "../dedup/dedup.h"
 #include "../integrity/integrity.h"
 #include "boardroom.h"
 #include "write_job.h"   /* WriteJobSeatRunsAsync — the road a program's write takes */
@@ -562,7 +563,8 @@ static void TestSeekLag(void)
  * anything is counted, and a test that left one standing has failed. So is
  * the wall's wait on a Tally held down (BinderStandNoRoomWait): left standing,
  * every test after would meet a full volume's wall with no Tally written for
- * room, and none would say so.
+ * room, and none would say so. So is Dedup's pass let go (DedupHold): left
+ * so, it would lay the files of every test after on one another's blocks.
  */
 static bool TestLeftAFaultArmed(const TestCase* test)
 {
@@ -570,13 +572,14 @@ static bool TestLeftAFaultArmed(const TestCase* test)
     bool block   = BlockFailDisarm();
     bool heap    = HeapFailDisarm();
     bool wall    = BinderStandNoRoomWait(false);
+    bool dedup   = !DedupHold(true);
     bool protect = BlockFailProtects(tagfs_get_seat());
     if (protect)
         BlockFailProtect(tagfs_get_seat(), false);
-    if (!block && !heap && !wall && !protect)
+    if (!block && !heap && !wall && !dedup && !protect)
         return false;
 
-    const char* left[4];
+    const char* left[5];
     uint32_t    n = 0;
     if (block)
         left[n++] = "BLOCKFAIL";
@@ -584,6 +587,8 @@ static bool TestLeftAFaultArmed(const TestCase* test)
         left[n++] = "HEAPFAIL";
     if (wall)
         left[n++] = "the wall's wait on a Tally held down";
+    if (dedup)
+        left[n++] = "Dedup's pass after a Tally let go";
     if (protect)
         left[n++] = "a protected medium";
     char   said[160];
@@ -712,8 +717,12 @@ error_t TagFS_RunAllTests(TestStats* stats)
         registered += g_suites[s]->count;
 
     /* No cycle begins on its own while the tests run: each meets the cycles
-     * it drives, and a fault it arms is met by one of them (settle.h). */
+     * it drives, and a fault it arms is met by one of them (settle.h). Nor
+     * does Dedup's pass after a Tally (dedup.h): a pass on another core would
+     * lay one test's files on another's blocks under it — a test of Dedup lets
+     * it go and holds it again. */
     SettleCadenceHold(true);
+    (void)DedupHold(true);
     for (uint32_t s = 0; s < ARRAY_SIZE(g_suites); s++) {
         const TestSuite* suite = g_suites[s];
         for (uint32_t i = 0; i < suite->count; i++) {
@@ -751,6 +760,7 @@ error_t TagFS_RunAllTests(TestStats* stats)
             TestRun(test, registered, stats);
         }
     }
+    (void)DedupHold(false);
     SettleCadenceHold(false);
 
     /* Said with kprintf: "37 run, 35 passed" tells nobody which 37, and a

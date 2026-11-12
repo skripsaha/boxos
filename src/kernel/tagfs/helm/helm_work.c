@@ -232,42 +232,36 @@ error_t HelmSpan(TagFSFileHandle *handle, uint64_t size, uint64_t *out_was)
 // Defrag
 // ----------------------------------------------------------------------------
 
-/* Whether the runs are one run on the medium, each beginning where the one
- * before it ends. */
-static bool HelmRunsAreOne(const Strip *runs, uint32_t count)
-{
-    for (uint32_t i = 0; i < count; i++)
-        if (runs[i].kind != STRIP_DATA || (i && runs[i].start != runs[i - 1].start + runs[i - 1].count))
-            return false;
-    return true;
-}
-
 void HelmDefragLetGo(HelmDefragging *d)
 {
     PlotRelease(&d->plot);
     memset(d, 0, sizeof(*d));
 }
 
-/* The defrag's first window: the file's record loaded and its ground past
- * its size cut off, and — unless it lies in one run already, which is inked
- * only when the cut freed ground — the run it is gathered into taken. Room on
- * its way leaves nothing of it held: the next turn loads afresh. */
+/* The defrag's first window, and the first again past each stretch it
+ * gathered: the file's record loaded and its ground past its size cut off,
+ * and — unless every stretch of its own runs lies in one run already, which
+ * is inked only when the cut freed ground — the run its first scattered
+ * stretch is gathered into taken, near where that stretch begins. Room on its
+ * way leaves nothing of it held: the next turn loads afresh. */
 static error_t HelmDefragBegin(TagFSFileHandle *handle, HelmDefragging *d, bool *out_ended)
 {
-    Plot   *plot = &d->plot;
-    error_t rc   = HelmPlotLoad(handle, plot);
+    Plot    *plot  = &d->plot;
+    error_t  rc    = HelmPlotLoad(handle, plot);
+    uint32_t first = 0, last = 0;
     d->loaded = true;
     if (rc == OK)
         rc = PlotWindowWhole(plot);     /* a book's Plot holds the whole file for a move of every run */
     if (rc == OK)
         rc = PlotTrimTo(plot, plot->size / TAGFS_BLOCK_SIZE + (plot->size % TAGFS_BLOCK_SIZE != 0));
-    if (rc == OK && HelmRunsAreOne(plot->runs, plot->run_count)) {
+    if (rc == OK && !PlotStretchScattered(plot, &first, &last)) {
         InkReceipt inked;
         if (plot->freed_count > 0)
             rc = TagFSInkPlot(plot, INK_MAKES_SPARES, &inked);
         *out_ended = rc == OK;
     } else if (rc == OK) {
-        rc = PlotGatherBegin(plot, 0, plot->runs[0].start, &d->gather);
+        uint64_t hint = StripOnGround(plot->runs[first].kind) ? plot->runs[first].start : plot->runs[0].start;
+        rc = PlotGatherBegin(plot, 0, hint, &d->gather);
     }
     if (rc == ERR_WOULD_BLOCK)
         HelmDefragLetGo(d);
@@ -275,16 +269,20 @@ static error_t HelmDefragBegin(TagFSFileHandle *handle, HelmDefragging *d, bool 
 }
 
 /*
- * Defrag is a gather of every extent (PlotGather, shed 0) under the file's
- * Helm, so no write and no span of the file runs beside it (D7-defrag): the
- * blocks are copied into one run taken through the block map near where the
- * file begins — a window a step, the holder free to give its core back between
- * two (R24) — made durable, and named by one inked record, and only then does
- * the old ground come to rest in Fallow. Ground the record named past the
- * file's size goes with it. A file the system keeps is not moved (PlotGather,
- * B10). A delete beside it cannot bring the file back (CR-9): the next window
- * finds the file given up, or its Quitclaim leaves no record for this Ink to
- * lay the gathered run over, and the run goes back.
+ * Defrag is a gather of every stretch of the file's own runs (PlotGather,
+ * shed 0) under the file's Helm, so no write and no span of the file runs
+ * beside it (D7-defrag): a stretch's blocks are copied into one run taken
+ * through the block map near where it begins — a window a step, the holder
+ * free to give its core back between two (R24) — made durable, and named by
+ * one inked record, and only then does the old ground come to rest in Fallow;
+ * the defrag ends with the Ink that leaves no stretch scattered, and the
+ * window after any other loads the file afresh for the next. A run SHARED lies where Dedup laid it, on blocks
+ * other files name too (plot.h): it parts two stretches and is never moved.
+ * Ground the record named past the file's size goes with the first. A file
+ * the system keeps is not moved (PlotGather, B10). A delete beside it cannot
+ * bring the file back (CR-9): the next window finds the file given up, or its
+ * Quitclaim leaves no record for this Ink to lay the gathered run over, and
+ * the run goes back.
  */
 error_t HelmDefragWindow(TagFSFileHandle *handle, HelmDefragging *d, bool *out_ended)
 {
@@ -301,8 +299,11 @@ error_t HelmDefragWindow(TagFSFileHandle *handle, HelmDefragging *d, bool *out_e
     error_t rc   = PlotGatherStep(&d->plot, &d->gather, &laid);
     if (rc == OK && laid) {
         InkReceipt inked;
+        uint32_t   first = 0, last = 0;
         rc         = TagFSInkPlot(&d->plot, INK_MAKES_SPARES, &inked);
-        *out_ended = rc == OK;
+        *out_ended = rc == OK && !PlotStretchScattered(&d->plot, &first, &last);
+        if (rc == OK && !*out_ended)
+            HelmDefragLetGo(d);     /* the next window loads the file again for its next stretch */
     }
     return rc;
 }

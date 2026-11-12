@@ -38,7 +38,8 @@
 # chains, and the heirloom: a volume kernel N laid down and wrote, read and
 # written by this kernel and read back by N (bindery.sh, N b9962f55 unless
 # HEIRLOOM_FROM names another). Then framerefuse, bookboot (the kernel BOOT
-# names held to the book by TagBoot before the jump), Concordance (every test
+# names held to the book by TagBoot before the jump), dedup (a copy laid on its
+# original by the pass after a Tally), Concordance (every test
 # written for format v1 names its book's analog), `formats`, and volume-read's
 # self-test over the image each format lays. No gate leans on the format the
 # build makes when nobody names one: `tools/gates.sh --formats` holds every
@@ -86,7 +87,7 @@ GATES_LOGCHECK="healthy unattended byname quill quillmut census lockrankmut repl
                 stand standusb mkfs crewcrash fare faremut"
 GATES_POWERCUT="selftest noanchor noanchormut nextfid hog halt race overwrite logger tipin sessions
                 replug machineb spared undonecut engross firstflushmut lastflushmut booknextfidmut stitchmut"
-GATES_OTHER="framerefuse bookboot concordance formats volread_selftest boxasm format form recipe elf box pack inside settings"
+GATES_OTHER="framerefuse bookboot dedup concordance formats volread_selftest boxasm format form recipe elf box pack inside settings"
 GATES_LONG="loggerhour loggerhourmut"
 BACKLIST_LOGCHECK="census censusmut stand standusb standmut abba abbamut"
 BACKLIST_POWERCUT="settlecut chaingrow nextfid nextfidmut poolmut flushmut"

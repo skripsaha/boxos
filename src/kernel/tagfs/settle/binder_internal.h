@@ -237,11 +237,14 @@ error_t     BinderTallyDone(BinderRun* r);
 /* binder_glean.c: Glean of the Tally-Quires at a Tally's DONE (§4.8) — the
  * emptiest Quire the new slot names a node in outside the pair, its nodes to
  * be laid again by the next Tally, once they come to GLEAN_SLACK times the
- * live. binder_proof.c: both copies of as many leaves checked longest ago as a
+ * live; and Glean's Dedup step (§8.2, §16.7 п.9), the ground the Tally took in
+ * handed to Dedup's pass — asked by the DONE before the Gloss lets go of the
+ * digests that ground holds. binder_proof.c: both copies of as many leaves checked longest ago as a
  * Tally laid in laid, read at its DONE, a copy that does not hold putting its
  * leaf's keys into DogEar (§16.5 п.18); where the sweep stands and the Quire
  * Glean chose last, let go with the mount. The Settle's holder's, with no TagFS lock held. */
 void        BinderGleanAt(const BinderRun* r);
+void        BinderGleanDedup(const BinderRun* r);
 void        BinderGleanLetGo(void);
 void        BinderProofAt(const BinderRun* r);
 void        BinderProofLetGo(void);

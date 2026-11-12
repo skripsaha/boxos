@@ -166,6 +166,7 @@ typedef struct {
     VOLUME_TESTS_ONLY(SUITE(stand_parity)) \
     VOLUME_TESTS_ONLY(SUITE(stand_commonhold)) \
     VOLUME_TESTS_ONLY(SUITE(stand_conjugate)) \
+    VOLUME_TESTS_ONLY(SUITE(stand_dedup)) \
     /* the walk ends here; a new suite's line goes above */
 
 #define TEST_SUITE_DECLARED(name) extern const TestSuite g_##name##_suite;

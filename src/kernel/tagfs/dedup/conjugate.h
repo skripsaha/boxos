@@ -53,6 +53,10 @@
  *                    locked, ERR_READ_FAILED, ERR_NO_MEMORY, the ribbon's room
  *                    (ERR_WOULD_BLOCK while it can come) and the rest an Ink
  *                    answers
+ *   ConjugateLay     the act as Dedup's pass asks it (dedup.h): the kernel's
+ *                    own, with the warrant, answered as TagFSConjugate answers
+ *                    and not said act by act — the pass says what it laid and
+ *                    why an act was refused in its own line
  *   ConjugateStandBetween  the stand's: `between` run once, by the next act,
  *                    after its comparison and before its Ink, with no TagFS
  *                    lock held
@@ -86,6 +90,7 @@ typedef struct {
 } ConjugateSaid;
 
 error_t TagFSConjugate(InkWarrant warrant, const ConjugateAsk* ask, ConjugateSaid* out);
+error_t ConjugateLay(const ConjugateAsk* ask, ConjugateSaid* out);
 
 #ifdef CONFIG_VOLUME_TESTS
 void    ConjugateStandBetween(void (*between)(void* ctx), void* ctx);
