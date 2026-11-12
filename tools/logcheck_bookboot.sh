@@ -9,21 +9,27 @@
 # thousand lines.
 
 # ---------------------------------------------------------------------------
-# bookboot: TagBoot jumps into the kernel BOOT names only when the book says
-# its blocks are the ones it keeps the digests of
+# bookboot: TagBoot jumps only into a kernel the book says its blocks are the
+# ones it keeps the digests of — BOOT's first, then the kernels the book names
+# by tag (spec_v2 §16.7 пп.3–6)
 #
 # First on the host, no machine: the Lectern TagBoot links, built for the host
 # (tools/tagboot_stand.sh), says of the image and of every landing of
 # self-test's group A what volume-read's `boot` says by its own code — the slot
-# stood on, the nodes read past a copy that did not hold, and the verdict.
-# Then the image as `make` lays it, booted through OVMF: TagBoot says the
-# kernel is attested by the book, every block of it, and the kernel comes up
-# to its Hub. Then landing A7: one byte of the zeros past the kernel's end in
-# its last block flipped — the kernel's bytes as they were, so a loader that
-# did not hold the block to the book would load it and the kernel would come
-# up as on any boot (the BSS it zeroes begins where its bytes end); the digest
-# mkfs took of the block, zeros and all, no longer matches. TagBoot has to name
-# the block, stop, and never jump: no line of the kernel's.
+# stood on, the nodes read past a copy that did not hold, the ribbon, every
+# kernel tried and its verdict. Then the image as `make` lays it, booted
+# through OVMF: TagBoot says the kernel is attested by the book, every block of
+# it, and the kernel comes up to its Hub. Then landing A7: one byte of the zeros
+# past the kernel's end in its last block flipped — the kernel's bytes as they
+# were, so a loader that did not hold the block to the book would load it and
+# the kernel would come up as on any boot (the BSS it zeroes begins where its
+# bytes end); the digest mkfs took of the block, zeros and all, no longer
+# matches, and no other kernel lies on the volume. TagBoot has to name the
+# block, stop with every kernel it tried, and never jump: no line of the
+# kernel's. Then landing A9: a second kernel the book names by the tag boot,
+# bound in the Tally beside build/kernel.bin, and a byte of BOOT's code
+# flipped: TagBoot names BOOT's block, loads the second kernel in its place,
+# attests it, and the machine comes up to its Hub on it.
 # ---------------------------------------------------------------------------
 
 # bookboot_boot LEG IMG WAIT — IMG booted through OVMF until WAIT (an
@@ -80,7 +86,7 @@ run_bookboot() {
     tools/tagboot_stand.sh build/boxos.img >"$SCRATCH/bookboot.stand" 2>&1
     rc=$?
     sed 's/^/  /' "$SCRATCH/bookboot.stand"
-    [ $rc = 0 ] && grep -qE "^tagboot: 9 passed, 0 failed" "$SCRATCH/bookboot.stand"
+    [ $rc = 0 ] && grep -qE "^tagboot: 14 passed, 0 failed" "$SCRATCH/bookboot.stand"
     chk $? "bookboot: the Lectern built on the host says what volume-read boot says, on the image and every landing of group A ($(tail -1 "$SCRATCH/bookboot.stand"))"
 
     # The image as built.
@@ -111,19 +117,45 @@ run_bookboot() {
     untouched=$(bookboot_untouched "$img")
     case "$untouched" in same*) true ;; *) false ;; esac
     chk $? "bookboot (A7): the kernel's own bytes are build/kernel.bin's, and past them its last block is not as mkfs laid it ($untouched)"
-    said=$(python3 tools/volume-read.py "$img" boot 2>&1 | tail -1)
+    python3 tools/volume-read.py "$img" boot >"$SCRATCH/bookboot.A7.boot" 2>&1
+    said=$(grep -E "^boot: the kernel the deed names does not match the book: " "$SCRATCH/bookboot.A7.boot" | head -1)
     last=$(echo "$said" | sed -nE 's/^boot: the kernel the deed names does not match the book: block ([0-9]+) \(volume block ([0-9]+)\)$/\1/p')
     vblock=$(echo "$said" | sed -nE 's/^boot: the kernel the deed names does not match the book: block ([0-9]+) \(volume block ([0-9]+)\)$/\2/p')
-    [ -n "$last" ] && [ "$last" = $(( ${blocks:-0} - 1 )) ]
-    chk $? "bookboot (A7): volume-read says the kernel does not match the book at its last block ($said)"
+    stop=$(tail -1 "$SCRATCH/bookboot.A7.boot" | sed 's/^boot: //')
+    [ -n "$last" ] && [ "$last" = $(( ${blocks:-0} - 1 )) ] && case "$stop" in "no kernel on this volume may be jumped into: "*) true ;; *) false ;; esac
+    chk $? "bookboot (A7): volume-read says the kernel does not match the book at its last block, and no kernel may be jumped into ($said; $stop)"
     if bookboot_boot tail "$img" "BoxOS Hub|TAGBOOT FATAL"; then
         L="$SCRATCH/serial.bookboot.tail.log"
         grep -aqF "TagBoot: the kernel the deed names does not match the book: block ${last:-?} (volume block ${vblock:-?})" "$L"
         chk $? "bookboot (A7): TagBoot names the block — $(grep -a 'TagBoot: the kernel the deed names' "$L" | tr -d '\r' | head -1)"
-        grep -aqF "[TAGBOOT FATAL] the kernel the deed names does not match the book: block ${last:-?} (volume block ${vblock:-?})" "$L"
-        chk $? "bookboot (A7): and stops with it — $(grep -a 'TAGBOOT FATAL' "$L" | tr -d '\r' | head -1)"
+        grep -aqF "[TAGBOOT FATAL] ${stop:-?}" "$L"
+        chk $? "bookboot (A7): and stops with every kernel it tried — $(grep -a 'TAGBOOT FATAL' "$L" | tr -d '\r' | head -1)"
         ! grep -aqE "TagBoot: kernel header OK|TagBoot: exiting boot services|\[Deed\] seat|BoxOS Hub" "$L"
         chk $? "bookboot (A7): it never jumps: no line of the kernel's"
+    fi
+
+    # Landing A9: a second kernel tagged boot in the Tally, BOOT's code flipped.
+    rm -f "$img"
+    if ! python3 tools/volume-read.py build/boxos.img self-test --emit A9 --out "$img" \
+            >"$SCRATCH/bookboot.emit" 2>&1; then
+        bad "bookboot (A9): self-test would not write the landing out: $(tail -1 "$SCRATCH/bookboot.emit")"
+        return
+    fi
+    python3 tools/volume-read.py "$img" boot >"$SCRATCH/bookboot.A9.boot" 2>&1
+    said=$(grep -E "^boot: the kernel the deed names does not match the book: " "$SCRATCH/bookboot.A9.boot" | head -1 | sed 's/^boot: //')
+    spare=$(tail -1 "$SCRATCH/bookboot.A9.boot" | sed -nE 's/^boot: (kernel fid [0-9]+ is attested by the book: [0-9]+ block\(s\))$/\1/p')
+    [ -n "$said" ] && [ -n "$spare" ]
+    chk $? "bookboot (A9): volume-read says BOOT's kernel does not match the book and the second kernel is attested (${said:-none}; ${spare:-none})"
+    if bookboot_boot spare "$img" "BoxOS Hub|TAGBOOT FATAL"; then
+        L="$SCRATCH/serial.bookboot.spare.log"
+        grep -aqF "TagBoot: ${said:-?}" "$L"
+        chk $? "bookboot (A9): TagBoot names BOOT's block — $(grep -a 'TagBoot: the kernel the deed names' "$L" | tr -d '\r' | head -1)"
+        grep -aqF "TagBoot: ${spare:-?}" "$L"
+        chk $? "bookboot (A9): and attests the kernel the book names by tag — $(grep -aE 'TagBoot: kernel fid [0-9]+ is attested' "$L" | tr -d '\r' | head -1)"
+        grep -aq "TagBoot: kernel header OK" "$L" && grep -aq "BoxOS Hub" "$L"
+        chk $? "bookboot (A9): and jumps into it — the kernel comes up to its Hub"
+        ! grep -aqE "PANIC|\[EXCEPTION\]|\[TAGBOOT FATAL\]" "$L"
+        chk $? "bookboot (A9): no panic, no fault"
     fi
     rm -f "$img"
 }
