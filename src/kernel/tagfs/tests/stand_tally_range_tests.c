@@ -149,8 +149,11 @@ TestResult TestStandTallyRottenLeafLocked(void)
                                                "reads it again");
     MountBookStandSaid(&said);
     TEST_ASSERT_EQ(said.rotten, 1, "with one rotten range of FILES");
-    TEST_ASSERT(said.locked > 0, "whose files are locked");
-    TEST_ASSERT(TagFSFileLocked(fid), "the leaf's first file among them");
+    /* Its files are locked by the range itself (TagFSFileLocked asks it); the
+     * mount's count of files locked by name (said.locked) holds only a file
+     * the leaf's edge cuts, which an image whose rotten leaf opens on a
+     * header has none of. */
+    TEST_ASSERT(TagFSFileLocked(fid), "whose files are locked, the leaf's first file among them");
     TEST_ASSERT(tagfs_open(fid, TAGFS_HANDLE_READ) == NULL, "and no open of it is handed out");
     TEST_ASSERT(said.held > 0, "and the blocks they named are held");
 out:
