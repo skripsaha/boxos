@@ -373,6 +373,18 @@ static bool StitchToll(const StitchSnap* s, uint64_t runs, uint64_t fresh)
 {
     if (!fresh)
         return false;
+#ifdef CONFIG_TAGFS_TOLL_SPARES
+    /* A kernel built TOLL=spare (Makefile): every flush spared but the
+     * halt's, said once, so a PowerCut chain's record holds a cut that kept
+     * a stitch and lost data it names whatever pace its host keeps. */
+    static bool said;
+    if (!said && !(s->flags & STITCH_CLEAN)) {
+        said = true;
+        kprintf("[TagFS] TOLL=spare: a stitch that names fresh data is begun before the flush of that data, as "
+                "every one but the halt's is on this kernel\n");
+    }
+    return (s->flags & STITCH_CLEAN) != 0;
+#endif
     if ((s->flags & STITCH_CLEAN) || !s->pace.rate)
         return true;
     if (fresh > UINT64_MAX / ((uint64_t)TAGFS_BLOCK_SIZE * 1000000ull))

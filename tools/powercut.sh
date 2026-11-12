@@ -170,19 +170,34 @@ pc_clone() {   # pc_clone FROM TO — a copy-on-write clone where the filesystem
 # the scenario's machine boots with (stand.sh, strict_key): every disk a
 # scenario boots is a clone of this image and carries its kernel.
 pc_build() {
-    local rc strict
+    local rc strict toll
     strict=$(strict_key ${PC_KEYS[@]+"${PC_KEYS[@]}"})
-    build "$strict"
+    toll=$(pc_toll "$PC_NAME")
+    pc_make "$strict" "$toll" || return 1
     tools/buildplate verify build/boxos.img --root . >"$SCRATCH/plate.txt" 2>&1; rc=$?
     if [ "$rc" = 3 ]; then
         rm -f build/kernel.bin
-        build "$strict"
+        pc_make "$strict" "$toll" || return 1
         tools/buildplate verify build/boxos.img --root . >"$SCRATCH/plate.txt" 2>&1; rc=$?
     fi
     [ "$rc" = "$1" ] && return 0
     # The plate's own two numbers say which: a tree that changed under the
     # build (a file edited while this ran) or an image that is not this tree.
     harness "powercut: the image's plate answers $rc where $1 was due, so nothing says it is this tree: $(grep -a 'tree ' "$SCRATCH/plate.txt" | sed 's/^ *//' | tr '\n' ';')"
+    return 1
+}
+
+# pc_make STRICT TOLL — the scenario's kernel built: plain but for its STRICT,
+# or with the key of its toll as well (pc_toll, powercut_book.sh), which the
+# tree records so the plain kernel is built back after (stand.sh
+# build_with_key, buildkey_restore).
+pc_make() {
+    if [ -z "$2" ]; then
+        build "$1"
+        return 0
+    fi
+    build_with_key "$1" "$2" && return 0
+    harness "$PC_NAME: $2 does not build: $(tail -3 "$SCRATCH/build.log" | tr '\n' ' ')"
     return 1
 }
 
@@ -731,6 +746,7 @@ run_scenario() {   # run_scenario NAME KEYS... — build, run, judge, say
     fi
     make run-stop >/dev/null 2>&1
     pc_lockrank
+    [ -z "$(pc_toll "$name")" ] || buildkey_restore || bad "$PC_NAME: the plain kernel could not be built back"
 }
 
 # settlecut — the second oracle. A kernel built SETTLECUT=<point> stops the

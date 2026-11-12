@@ -226,6 +226,7 @@ pc_logged_lines() {
 # owners, and both mounts are the ones predicted.
 pc_sessions() {
     pc_logged_lines "$PC_LOG_LINES" || return 1
+    pc_tolled
     pc_chain_first session
     pc_judge --verify "logger:pc-l.log:$PC_LOG_LINES:log" --verify chain:laid
 }
@@ -239,14 +240,32 @@ pc_chain_first() {
     pc_chain "$1" "$id" "$epoch" "$keep" "$tear" - -
 }
 
+# The scenarios whose chain boots a cut that kept a stitch and lost data it
+# names (C3, pc_chain_first): built TOLL=spare (Makefile), so their record
+# holds such cuts whatever pace a loaded host lets the medium keep — the toll's
+# own judgment is pc_spared's to hold, and the stand's stand_toll_* tests'.
+PC_TOLLED="sessions undonecut"
+
+# pc_toll NAME — the key NAME's kernel is built with for its toll, or nothing.
+pc_toll() { case " $PC_TOLLED " in *" $1 "*) echo TOLL=spare ;; esac; }
+
+# pc_tolled — the record's TOLL=spare kernel said, at its first stitch that
+# names fresh data, that it is begun before the flush of that data.
+pc_tolled() {
+    tr -d '\r' <"$PC_DIR/run.serial.log" | grep -aqE '^\[TagFS\] TOLL=spare: a stitch that names fresh data is begun before'
+    chk $? "$PC_NAME: the record's kernel begins every stitch that names fresh data before its flush (TOLL=spare), as it says"
+}
+
 # run_cut NAME POINT [KEYS...] — scenario NAME on a kernel built
-# SETTLECUT=POINT (settle_cut.c): the base, the record and every cut carry it,
-# and the plain kernel is built back after.
+# SETTLECUT=POINT (settle_cut.c), and TOLL=spare where pc_toll names it: the
+# base, the record and every cut carry it, and the plain kernel is built back
+# after.
 run_cut() {
     local name=$1 point=$2 PC_LIES=off
     shift 2
     pc_begin "$name" "$@"
-    if ! build_with_key "$(strict_key "$@")" SETTLECUT="$point"; then
+    # shellcheck disable=SC2046
+    if ! build_with_key "$(strict_key "$@")" SETTLECUT="$point" $(pc_toll "$name"); then
         bad "$PC_NAME: SETTLECUT=$point does not build: $(tail -3 "$SCRATCH/build.log" | tr '\n' ' ')"
         return
     fi
@@ -295,6 +314,7 @@ pc_spared() {
 # lays the verdict down — and booted again: the same verdict, no block let go.
 pc_undonecut() {
     pc_logged_lines "$PC_LOG_LINES" || return 1
+    pc_tolled
     pc_chain_first cut
     pc_judge --verify "logger:pc-l.log:$PC_LOG_LINES:log" --verify chain:cut
 }

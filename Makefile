@@ -583,6 +583,27 @@ endif
 
 SETTLECUT_MARK = $(BUILDDIR)/.settlecut.$(if $(SETTLECUT),at-$(SETTLECUT),unset)
 
+# ── TOLL=spare ─────────────────────────────────────────────────────────────
+#
+# Every format-v2 stitch that names fresh data, the halt's CLEAN one apart, is
+# begun before the flush of that data whatever its toll would judge (sewing.c
+# StitchToll), so the mount reads every block of it back against its digest
+# (spec_v2 §3.3). A lever of PowerCut's chains (tools/powercut_book.sh,
+# PC_TOLLED): their record must hold a cut that kept a stitch and lost data it
+# names (C3), and the toll judges by the pace the medium's reads keep and the
+# last cycle's length — a loaded host can have it pay every flush of a run, and
+# the chain then has nothing to boot. The toll's own judgment is held where it
+# is asked of a kernel built plain: pc_spared and the stand's stand_toll_*.
+TOLL ?=
+ifneq ($(TOLL),)
+ifneq ($(TOLL),spare)
+$(error TOLL=$(TOLL) names no toll — spare (every stitch that names fresh data begun before its flush))
+endif
+CFLAGS += -DCONFIG_TAGFS_TOLL_SPARES=1
+endif
+
+TOLL_MARK = $(BUILDDIR)/.toll.$(if $(TOLL),$(TOLL),unset)
+
 # ── SEEKLAG=<us> ───────────────────────────────────────────────────────────
 #
 # A seek the stand's medium does not make: from the first startup test that
@@ -721,6 +742,7 @@ BUILD_KEYS_SET := $(strip \
   $(if $(filter on,$(HOLDGROUND)),HOLDGROUND=on,) \
   $(if $(filter on,$(RETURNFAIL)),RETURNFAIL=on,) \
   $(if $(SETTLECUT),SETTLECUT=$(SETTLECUT),) \
+  $(if $(TOLL),TOLL=$(TOLL),) \
   $(if $(SEEKLAG),SEEKLAG=$(SEEKLAG),) \
   $(if $(filter off,$(STARTUP_TESTS)),STARTUP_TESTS=off,) \
   $(if $(filter on,$(ENUMSILENCE)),ENUMSILENCE=on,) \
@@ -1097,6 +1119,10 @@ $(SETTLECUT_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.settlecut.*
 	@touch $@
 
+$(TOLL_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.toll.*
+	@touch $@
+
 $(SEEKLAG_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.seeklag.*
 	@touch $@
@@ -1151,7 +1177,7 @@ BUILD_KEY_MARKS := $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) \
                    $(SETTLECUT_MARK) $(IOMMU_MARK) $(INTX_MARK) $(DEBUG_MARK) \
                    $(BRINGUP_MARK) $(WEDGETEST_MARK) $(ENUMSILENCE_MARK) \
                    $(STRICT_MARK) $(SEEKLAG_MARK) $(STARTUP_TESTS_MARK) \
-                   $(PANICSTOP_MARK)
+                   $(PANICSTOP_MARK) $(TOLL_MARK)
 
 $(BUILDDIR)/kernel/drivers/usb/%.o: $(SRCDIR)/kernel/drivers/usb/%.c $(BUILD_KEY_MARKS) | $(BUILDDIR)
 	@echo "Compiling USB driver $<..."
