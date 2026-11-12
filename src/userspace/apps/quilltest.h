@@ -126,4 +126,7 @@ QuillVerdict QuillBookLog(const char *const *args);
 QuillVerdict QuillBookLogger(const char *const *args);
 QuillVerdict QuillBookEscheat(const char *const *args);
 
+/* A file and its copy for the pass after each Tally, quilltest_dedup.c. */
+QuillVerdict QuillBookDedup(const char *const *args);
+
 #endif /* QUILLTEST_H */

@@ -785,6 +785,11 @@ static const QuillCase g_cases[] = {
       "let go (act)",
       "act: DESTRUCTIVE — the files of every rotten range lost for good, the blocks held for them let go; "
       "refused: nothing", false },
+    { "dedup", "NAME [MIB]", 2, 1, QuillBookDedup,
+      "on a book: with MIB, are NAME-a.d and NAME-b.d of MIB mebibytes of the same bytes each written in ONE write "
+      "and anchored, every byte of both read back — a copy for the pass after each Tally to lay on its original; "
+      "without, are both found and every byte of both the one written",
+      "with MIB: NAME-a.d and NAME-b.d, every earlier file of those names given up first; without, nothing", false },
     { "abba", "NAME TAGS EDGE", 3, 0, QUILL_THROWAWAY(QuillAbba),
       "does a machine of many cores come back while TAGS new tags and file ids past EDGE, where "
       "the file table takes its next block, grow the registry and the table, and three cabins of "

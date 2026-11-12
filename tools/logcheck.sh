@@ -103,6 +103,8 @@ STAND_NAME=logcheck
 . "$(dirname "$0")/logcheck_framerefuse.sh"
 # The bookboot scenario: tools/logcheck_bookboot.sh.
 . "$(dirname "$0")/logcheck_bookboot.sh"
+# The dedup scenario: tools/logcheck_dedup.sh.
+. "$(dirname "$0")/logcheck_dedup.sh"
 # The mkfs scenario: tools/logcheck_mkfs.sh.
 . "$(dirname "$0")/logcheck_mkfs.sh"
 # The book's census and the stand's road on a book: tools/logcheck_book.sh,
@@ -8881,7 +8883,7 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 50 (healthy says how) and
-# the 396 of the stand's own fifty-one suites: stand 28, stand_lock 4,
+# the 401 of the stand's own fifty-two suites: stand 28, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 9,
 # stand_plot 10, stand_index 6, stand_ink 6, stand_helm 7, stand_port 2,
 # stand_use 3, stand_use_chain 4, stand_seal 8, stand_settle 14, stand_glean 9,
@@ -8893,11 +8895,11 @@ STAND_HELD="
 # stand_endpaper 6, stand_errata 8, stand_toll 5, stand_dog_ear 9,
 # stand_slip 14, stand_away 14, stand_tip_in 10, stand_slip_promise 5,
 # stand_book_glean 2, stand_escheat 7, stand_parity 2, stand_book_room 11,
-# stand_commonhold 1, stand_conjugate 5. Counted off the code,
+# stand_commonhold 1, stand_conjugate 5, stand_dedup 5. Counted off the code,
 # not a run (K9): a suite that drops out of the walk is a test that stopped
 # covering anything, and the count is where that shows. How many of them pass
 # and how many stand aside is the road's — said, not pinned.
-STAND_RUN=446
+STAND_RUN=451
 
 # What a VOLUME_TESTS kernel says of a record memory holds that is not the
 # file a format-v1 Ink packed (plot_conveyance.c, PackV1Agrees and
@@ -12182,6 +12184,7 @@ case "${1:-both}" in
     badpool)  run_badpool ;;
     framerefuse) run_framerefuse ;;
     bookboot) run_bookboot ;;
+    dedup)    run_dedup ;;
     mkfs)     run_mkfs ;;
     uefi)     run_uefi ;;
     footing)  run_footing ;;
