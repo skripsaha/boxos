@@ -16,13 +16,13 @@ using Color = painter::core::Color;
 /* The colours Duppo is drawn in, worked from the three the person sets: the
  * deep plum and the lip round the eye follow the body, the ring's shaded edge
  * follows the ring, and the pupil's glow and rim are lighter shades of it. At
- * the defaults they are the SVG's own. Fringe is the dark an edge cell is
- * mixed with where the bubble covers only part of it. */
+ * the defaults they are the SVG's own. Haze is the dark a little bubble is
+ * mixed with where it lies behind the ball. */
 struct Palette {
     Color Light, Deep, Lip;
     Color Ring, RingEdge;
     Color Glow, Core, PupilEdge;
-    Color Fringe;
+    Color Haze;
 
     static Palette Make(Color Body, Color Ring, Color Pupil);
 };

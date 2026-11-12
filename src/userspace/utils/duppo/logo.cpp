@@ -17,7 +17,7 @@ constexpr Color RingEdgeDefault = Color::Rgb(0x8B, 0x60, 0x77);
 /* How much white the pupil's glow and its rim are mixed with: #3B and #29 over black. */
 constexpr std::uint8_t GlowShare   = 0x3B;
 constexpr std::uint8_t EdgeShare   = 0x29;
-constexpr std::uint8_t FringeShare = 205;
+constexpr std::uint8_t HazeShare   = 205;
 
 std::uint8_t Moved(std::uint8_t Base, std::uint8_t Was, std::uint8_t Now)
 {
@@ -90,7 +90,7 @@ Palette Palette::Make(Color Body, Color RingSet, Color Pupil)
                    .Glow      = Color::Mix(Pupil, painter::core::Colors::White, GlowShare),
                    .Core      = Pupil,
                    .PupilEdge = Color::Mix(Pupil, painter::core::Colors::White, EdgeShare),
-                   .Fringe    = Color::Mix(Deep, painter::core::Colors::Black, FringeShare)};
+                   .Haze      = Color::Mix(Deep, painter::core::Colors::Black, HazeShare)};
 }
 
 namespace Logo {

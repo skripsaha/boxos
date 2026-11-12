@@ -58,7 +58,7 @@ constexpr float         Pi       = 3.14159265f;
 constexpr int           FirstRow = 3;      /* the clock and its load are above */
 constexpr float         SlickLife = 6.0f;  /* seconds a slick takes to dry */
 
-const PainterColor Empty   = painter::core::Colors::Black;
+const PainterColor Empty   = PainterColor::Through();
 const PainterColor Sclera  = PainterColor::Rgb(0xF6, 0xF8, 0xD8);
 const PainterColor Pupil   = PainterColor::Rgb(0x13, 0x20, 0x0A);
 const PainterColor Gloss   = PainterColor::Rgb(0xF4, 0xFF, 0xE0);
@@ -522,9 +522,7 @@ box::status Paint(const Pixmap &Art, painter::tui::Surface &Screen, painter::tui
         for (int X = 0; X < Art.Width; X++) {
             PainterColor Top = Art.At(X, Row * 2), Low = Art.At(X, Row * 2 + 1);
             if (Top == Empty && Low == Empty) continue;
-            char Glyph = Top == Empty ? painter::tui::Glyphs::LowerHalf : painter::tui::Glyphs::UpperHalf;
-            Glass.Put({Cells.X + X, Cells.Y + Row},
-                      painter::tui::Cell{Glyph, Top == Empty ? Low : Top, Top == Empty ? Empty : Low});
+            Glass.Put({Cells.X + X, Cells.Y + Row}, painter::tui::Cell{painter::tui::Glyphs::UpperHalf, Top, Low});
         }
     }
     return Screen.Composite({Cells.X, Cells.Y}, Glass, Cells);

@@ -15,8 +15,7 @@
 
 namespace whale {
 
-/* The dark of the water in the whale's edge, and in the half of a cell its edge
- * leaves empty. */
+/* The dark of the water in the whale's edge. */
 inline constexpr painter::core::Color Outline = painter::core::Color::Rgb(0x07, 0x12, 0x30);
 
 /* The whale's colours, all worked from two the person names: the back and the

@@ -41,7 +41,6 @@ void Picture::Dress(const Hues &Colours, bool Edged)
 {
     Body.Wear(Colours);
     Outlined = Edged;
-    Dark     = Edged ? Outline : painter::core::Colors::Black;
 }
 
 painter::core::Rect Picture::Draw(const Swimmer &Whale, painter::tui::Frame &Overlay)
@@ -121,15 +120,15 @@ void Picture::Edge(Rect Pixels)
 }
 
 /* Two pixels to a cell, the upper and the lower; the half of a cell the whale
- * leaves empty is the dark of its edge, or the console's black without an edge. */
+ * leaves empty is see-through, so whatever lies beneath shows there. */
 void Picture::Lay(Rect Area, painter::tui::Frame &Overlay) const
 {
     for (std::int32_t Row = Area.Y; Row < Area.Y + Area.Height; Row++) {
         for (std::int32_t Col = Area.X; Col < Area.X + Area.Width; Col++) {
             std::size_t Upper = static_cast<std::size_t>(Row * 2) * Cells.Width + Col, Lower = Upper + Cells.Width;
             if (Parts[Upper] == Part::None && Parts[Lower] == Part::None) continue;
-            Color Top = Parts[Upper] == Part::None ? Dark : Dots[Upper];
-            Color Low = Parts[Lower] == Part::None ? Dark : Dots[Lower];
+            Color Top = Parts[Upper] == Part::None ? Color::Through() : Dots[Upper];
+            Color Low = Parts[Lower] == Part::None ? Color::Through() : Dots[Lower];
             Overlay.Put({Col, Row}, Cell{painter::tui::Glyphs::UpperHalf, Top, Low});
         }
     }

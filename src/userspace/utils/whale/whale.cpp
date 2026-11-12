@@ -45,7 +45,7 @@ BOX_SETTINGS("speed number from 20 to 300 percent default 100 \"how fast the wha
              "size number from 50 to 200 percent default 100 \"how large the whale is\"\n"
              "back color default #1E4A98 \"the whale's back: its fins and flukes are shades of it\"\n"
              "belly color default #C4DEF2 \"the whale's belly: its flank leans between the back and this\"\n"
-             "outline on-or-off default on \"a dark line round the whale, and dark in the empty half of its edge cells\"\n"
+             "outline on-or-off default on \"a dark line round the whale, on its own edge\"\n"
              "spout on-or-off default on \"now and then it blows a spout\"\n"
              "bubbles on-or-off default on \"its tail leaves bubbles\"\n");
 

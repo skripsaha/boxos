@@ -66,7 +66,7 @@ const PainterColor Pupil     = PainterColor::Rgb(0x0E, 0x0E, 0x10);
 const PainterColor Glint     = painter::core::Colors::White;
 const PainterColor Lid       = PainterColor::Rgb(0x3C, 0x3C, 0x44);
 const PainterColor LidEdge   = PainterColor::Rgb(0x18, 0x18, 0x1C);
-const PainterColor Empty     = painter::core::Colors::Black;
+const PainterColor Empty     = PainterColor::Through();
 const PainterColor Irises[]  = {PainterColor::Rgb(0x2E, 0x6C, 0xD0), PainterColor::Rgb(0x2E, 0x9A, 0x5A), PainterColor::Rgb(0x8A, 0x52, 0x22),
                          PainterColor::Rgb(0x9A, 0x80, 0x30), PainterColor::Rgb(0x60, 0x78, 0x90), PainterColor::Rgb(0x8A, 0x40, 0xB0)};
 const char *const  IrisNames[] = {"blue", "green", "brown", "hazel", "slate", "violet"};
@@ -391,10 +391,8 @@ box::status Paint(const EyePicture &Picture, painter::tui::Surface &Screen,
     int Rows = (Picture.Height + 1) / 2;
     for (int Row = 0; Row < Rows; Row++) {
         for (int X = 0; X < Picture.Width; X++) {
-            PainterColor Top = X < Picture.Width ? Picture.At(X, Row * 2) : Empty;
-            PainterColor Low = X < Picture.Width ? Picture.At(X, Row * 2 + 1) : Empty;
-            bool  Inked = X < Picture.Width && (Top != Empty || Low != Empty);
-            if (Inked)
+            PainterColor Top = Picture.At(X, Row * 2), Low = Picture.At(X, Row * 2 + 1);
+            if (Top != Empty || Low != Empty)
                 Frame.Put({X, Row}, painter::tui::Cell{painter::tui::Glyphs::UpperHalf, Top, Low});
         }
     }

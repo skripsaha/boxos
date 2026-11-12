@@ -20,8 +20,8 @@ class Picture {
 public:
     explicit Picture(painter::core::Size Cells);
 
-    /* Its colours, and whether it has a dark line round it and in the empty
-     * half of its edge cells, or none and the console's black there. */
+    /* Its colours, and whether it has a dark line round it, drawn on its own
+     * edge pixels. */
     void Dress(const Hues &Colours, bool Edged);
 
     /* The whale and its drops drawn into Overlay, which is as large as the
@@ -40,7 +40,6 @@ private:
     std::vector<Part>                   Parts;
     Figure                              Body;
     bool                                Outlined = true;
-    painter::core::Color                Dark     = Outline;
     painter::core::Rect                 Shown;
     painter::core::Rect                 Reached;
 };

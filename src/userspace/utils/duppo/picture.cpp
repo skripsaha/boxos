@@ -37,7 +37,7 @@ constexpr float EyeAway  = 0.05f;
 constexpr float EyeLimb  = 0.98f;
 constexpr float Squarest = 0.3f;
 
-/* A bubble that lies behind the ball is mixed with the fringe, at most this much of 255. */
+/* A bubble that lies behind the ball is mixed with the haze, at most this much of 255. */
 constexpr float FarHaze = 90.0f;
 
 Rect Joined(Rect A, Rect B)
@@ -62,6 +62,8 @@ float Cover(float Far, Vec Toward, bool Whole)
     return Whole ? (Share >= 0.5f ? 1.0f : 0.0f) : Share;
 }
 
+/* Over a see-through Under, Color::Mix takes the nearer of the two, so an edge
+ * sub-pixel is Over where Share is half or more and see-through otherwise. */
 Color Lay(Color Under, Color Over, float Share)
 {
     if (Share <= 0.0f) return Under;
@@ -77,7 +79,8 @@ public:
     {
     }
 
-    /* The colour at Point over the fringe, and whether Duppo is there at all. */
+    /* The colour at Point, see-through where Duppo does not cover it, and
+     * whether Duppo is there at all. */
     Color At(Vec Point, bool &Reached) const;
 
 private:
@@ -135,7 +138,7 @@ Color Sampler::At(Vec Point, bool &Reached) const
     for (int Next = 1; Next < Count; Next++)
         for (int Back = Next; Back > 0 && Layers[Back].Depth < Layers[Back - 1].Depth; Back--) std::swap(Layers[Back], Layers[Back - 1]);
 
-    Color Ink = Hues.Fringe;
+    Color Ink = Color::Through();
     for (int At = 0; At < Count; At++) Ink = Layers[At].Which < 0 ? Sphere(Layers[At].Local, Layers[At].Share, Ink) : Little(Layers[At], Ink);
     return Ink;
 }
@@ -207,12 +210,12 @@ Color Sampler::Lids(Vec Tex, Vec Seen, float SocketFar, float Scale, Color Under
 }
 
 /* A little bubble, in the colours of the logo's own for it, dimmed toward the
- * fringe where it lies behind the ball. */
+ * haze where it lies behind the ball. */
 Color Sampler::Little(const Layer &Hit, Color Under) const
 {
     Color Hue = Logo::MoonColor(Hues, Hit.Which, Logo::Moons[Hit.Which].Center + Hit.Local);
     const float Behind = -Moons.Moons[Hit.Which].Depth / (Logo::Body.Radius * Body.Scale);
-    if (Behind > 0.0f) Hue = Color::Mix(Hue, Hues.Fringe, static_cast<std::uint8_t>(std::min(Behind, 1.0f) * FarHaze));
+    if (Behind > 0.0f) Hue = Color::Mix(Hue, Hues.Haze, static_cast<std::uint8_t>(std::min(Behind, 1.0f) * FarHaze));
     return Lay(Under, Hue, Hit.Share);
 }
 

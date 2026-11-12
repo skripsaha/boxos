@@ -58,7 +58,7 @@ constexpr float GroundY    = 41.5f;
 constexpr float MiddleX    = 28.0f;
 constexpr int   FirstRow   = 3;   /* the clock and its load are above */
 
-const PainterColor Empty     = painter::core::Colors::Black;
+const PainterColor Empty     = PainterColor::Through();
 const PainterColor Sclera    = PainterColor::Rgb(0xFF, 0xF4, 0xD6);
 const PainterColor Pupil     = PainterColor::Rgb(0x14, 0x1A, 0x30);
 const PainterColor Glint     = painter::core::Colors::White;
@@ -643,8 +643,7 @@ box::status Paint(const Pixmap &Art, painter::tui::Surface &Screen, painter::tui
         for (int X = 0; X < Art.Width; X++) {
             PainterColor Top = Art.At(X, Row * 2), Low = Art.At(X, Row * 2 + 1);
             if (Top == Empty && Low == Empty) continue;
-            char Glyph = Top == Empty ? painter::tui::Glyphs::LowerHalf : painter::tui::Glyphs::UpperHalf;
-            Frame.Put({X, Row}, painter::tui::Cell{Glyph, Top == Empty ? Low : Top, Top == Empty ? Empty : Low});
+            Frame.Put({X, Row}, painter::tui::Cell{painter::tui::Glyphs::UpperHalf, Top, Low});
         }
     }
     return Screen.Composite(At, Frame);
