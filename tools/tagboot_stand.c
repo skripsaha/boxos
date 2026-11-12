@@ -1,22 +1,25 @@
 /*
- * tagboot_stand — the UEFI loader's Lectern built on the host, the very file
- * TagBoot links (src/boot/uefi/tagboot_lectern.c), reading an image file the
- * way TagBoot reads its medium: the Deed at the ground's head, the kernel BOOT
- * names loaded block by block, and the book asked whether those blocks are
- * the ones its Tally keeps the digests of (spec_v2 §16.7 пп.2, 4, 6).
+ * tagboot_stand — the UEFI loader's Lectern built on the host, the very files
+ * TagBoot links (src/boot/uefi/tagboot_lectern*.c, tagboot_succession.c),
+ * reading an image file the way TagBoot reads its medium: the Deed at the
+ * ground's head, then the kernel BOOT names and, when it is not attested, the
+ * kernels the book names by tag, each placed, held to its header and to the
+ * digests the book keeps of it, the first attested jumped into (spec_v2 §16.7
+ * пп.2–6).
  *
  *     build/tagboot_stand IMAGE GROUND_START
  *
  * Every line it prints is what TagBoot says of the volume, "boot: " before it
  * where TagBoot puts "TagBoot: ", and the same lines `volume-read IMAGE boot`
- * prints by its own code (tools/volumeread/bootread.py): the two are held to
- * each other byte for byte on every landing of self-test's group A
- * (tools/tagboot_stand.sh) — the agreement the shared headers alone do not
- * give, for the loop that walks the book is the loader's own (§16.7 п.2, F1).
+ * prints by its own code (tools/volumeread/bootread.py, bootbook.py): the two
+ * are held to each other byte for byte on every landing of self-test's group
+ * A (tools/tagboot_stand.sh) — the agreement the shared headers alone do not
+ * give, for the loops that walk the book are the loader's own (§16.7 п.2, F1).
  *
  * Where the ground is is not the Lectern's question, and TagBoot answers it
  * off the partition table before the Lectern is asked (tagboot.c,
- * FindGroundOn): the caller says it here, as volume-read found it.
+ * FindGroundOn): the caller says it here, as volume-read found it. Where a
+ * kernel is placed is TagBoot's 0x100000 and the heap here.
  */
 
 #include <stdint.h>
@@ -25,8 +28,6 @@
 #include <string.h>
 
 #include "tagboot_lectern.h"
-
-#define WHO "the kernel the deed names"
 
 typedef struct {
     FILE    *image;
@@ -88,32 +89,18 @@ static const uint8_t *StandStamp(const uint8_t *deed, uint16_t kind, uint16_t *b
     return NULL;
 }
 
-/* The kernel's blocks, loaded as TagBoot loads them (tagboot.c,
- * TagFsLoadKernel): as many as its bytes take, every one BOOT names when it
- * names no bytes. 0 when its bytes overrun its blocks, said. */
-static uint64_t StandLoaded(const VolumeBoot *boot)
-{
-    uint64_t have = (uint64_t)boot->kernel_blocks * VOLUME_BLOCK_BYTES;
-    if (boot->kernel_bytes > have) {
-        printf("boot: the kernel is said to be %u bytes and its blocks hold %llu\n", boot->kernel_bytes,
-               (unsigned long long)have);
-        return 0;
-    }
-    if (boot->kernel_bytes == 0)
-        return boot->kernel_blocks;
-    return (boot->kernel_bytes + VOLUME_BLOCK_BYTES - 1u) / VOLUME_BLOCK_BYTES;
-}
-
 /* The Deed taken up as TagBoot takes it (tagboot_deed.c, DeedTakeUp): the
- * desk's volume and FRAME, and BOOT. 0 with nothing for the Lectern to read,
- * said in TagBoot's words. */
-static int StandDeed(const uint8_t *deed, LecternDesk *desk, VolumeBoot *boot)
+ * desk's volume, FRAME and atom, and BOOT — *named 0 when it names no kernel.
+ * 0 with nothing for the Lectern to read, said in TagBoot's words. */
+static int StandDeed(const uint8_t *deed, LecternDesk *desk, VolumeBoot *boot, int *named)
 {
-    uint16_t       bytes = 0, frame_bytes = 0;
+    uint16_t       bytes = 0, frame_bytes = 0, geo_bytes = 0;
     const uint8_t *layout = StandStamp(deed, VOLUME_STAMP_LAYOUT, &bytes);
     const uint8_t *frame  = StandStamp(deed, VOLUME_STAMP_FRAME, &frame_bytes);
     const uint8_t *stamp  = StandStamp(deed, VOLUME_STAMP_BOOT, &bytes);
+    const uint8_t *geo    = StandStamp(deed, VOLUME_STAMP_GEOMETRY, &geo_bytes);
     VolumeDeed     d;
+    VolumeGeometry g;
     const char    *note = NULL, *why;
 
     memcpy(&d, deed, sizeof(d));
@@ -127,14 +114,15 @@ static int StandDeed(const uint8_t *deed, LecternDesk *desk, VolumeBoot *boot)
         return 0;
     }
     memset(boot, 0, sizeof(*boot));
+    memset(&g, 0, sizeof(g));
     if (stamp && bytes >= sizeof(VolumeBoot))
         memcpy(boot, stamp, sizeof(*boot));
-    if (!boot->kernel_block || !boot->kernel_blocks) {
-        printf("boot: this volume's deed names no kernel\n");
-        return 0;
-    }
+    if (geo && geo_bytes >= sizeof(VolumeGeometry))
+        memcpy(&g, geo, sizeof(g));
+    *named = boot->kernel_block && boot->kernel_blocks;
     memcpy(&desk->frame, frame, sizeof(desk->frame));
-    desk->block_end = d.tail_sector / VOLUME_BLOCK_SECTORS;
+    desk->block_end   = d.tail_sector / VOLUME_BLOCK_SECTORS;
+    desk->atom_blocks = BookAtomOf(g.physical_bytes, 0, 0) / VOLUME_BLOCK_BYTES;
     return 1;
 }
 
@@ -144,7 +132,8 @@ int main(int argc, char **argv)
     StandMedium    m;
     LecternDesk    desk;
     VolumeBoot     boot;
-    AttestVerdict  verdict;
+    LecternKernel  kernel;
+    int            named = 0;
 
     if (argc != 3) {
         fprintf(stderr, "usage: %s IMAGE GROUND_START\n", argv[0]);
@@ -160,27 +149,20 @@ int main(int argc, char **argv)
         return 2;
     }
     memcpy(uuid, ((const VolumeDeed *)(const void *)deed)->uuid, sizeof(uuid));
-    desk.ctx  = &m;
-    desk.read = StandRead;
-    desk.take = StandTake;
-    desk.give = StandGive;
-    desk.say  = StandSay;
-    desk.uuid = uuid;
-    if (!StandDeed(deed, &desk, &boot))
-        return 0;
-    uint64_t blocks = StandLoaded(&boot);
-    if (!blocks)
-        return 0;
-    uint8_t *image = (uint8_t *)malloc(blocks * VOLUME_BLOCK_BYTES);
-    if (!image || !StandRead(&m, (uint64_t)boot.kernel_block * VOLUME_BLOCK_SECTORS,
-                             (uint32_t)(blocks * VOLUME_BLOCK_SECTORS), image)) {
-        printf("boot: the kernel's blocks will not load\n");
-        return 2;
+    memset(&desk, 0, sizeof(desk));
+    desk.ctx     = &m;
+    desk.read    = StandRead;
+    desk.take    = StandTake;
+    desk.give    = StandGive;
+    desk.say     = StandSay;
+    desk.place   = StandTake;
+    desk.unplace = StandGive;
+    desk.uuid    = uuid;
+    if (StandDeed(deed, &desk, &boot, &named)) {
+        LecternSuccession(&desk, named ? &boot : NULL, &kernel);
+        if (kernel.image)
+            desk.unplace(&m, kernel.image, kernel.blocks * VOLUME_BLOCK_BYTES);
     }
-    printf("boot: the deed names the kernel at volume block %u, %llu block(s) for its %u byte(s)\n",
-           boot.kernel_block, (unsigned long long)blocks, boot.kernel_bytes);
-    LecternAttest(&desk, WHO, boot.kernel_block, blocks, image, &verdict);
-    free(image);
     fclose(m.image);
     return 0;
 }

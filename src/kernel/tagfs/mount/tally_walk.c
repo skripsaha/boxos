@@ -11,13 +11,6 @@
  * walk takes and the DIGESTS leaves it names.
  */
 
-static int TallyKeyCmp(TallyKey a, TallyKey b)
-{
-    if (a.k1 != b.k1)
-        return a.k1 < b.k1 ? -1 : 1;
-    return a.k2 < b.k2 ? -1 : a.k2 > b.k2;
-}
-
 /* A key as the book's lines write it: k1, or (k1, k2). */
 static void TallyKeySay(uint64_t tree, TallyKey k, char* out, size_t room)
 {
@@ -39,77 +32,71 @@ void TallyNodeLetGo(TallyNode* n)
     n->nstarts = 0;
 }
 
-/* The NodeHead that opens the stream, and the bytes past what this reader
- * knows of it. False when it is no NodeHead. */
-static bool TallyNodeHead(const uint8_t* s, uint32_t room, uint32_t* at, TallyNode* n)
+/* Why a copy's stream does not hold as a node of place `p`, in the words of
+ * tally.py's NodeRead, for what TallyNodeJudge found. */
+static void TallyNodeRefused(const TallyPlace* p, const TallyNodeJudged* j, int says, uint32_t end, char* why,
+                             size_t room)
 {
-    uint64_t tag;
-    uint32_t p = 0, body, len;
-    int      head = NodeHeadGet(s, room, at, &n->head);
-    if (head == TALLY_BODY_BROKEN)
-        return false;
-    BookEntryNext(s, room, &p, &tag, &body, &len);
-    n->head_longer = head == TALLY_BODY_LONGER ? len - NodeHeadBodyBytes(&n->head) : 0;
-    return true;
+    char k[48], lo[48], hi[48];
+    switch (says) {
+    case TALLY_NODE_HEADLESS:
+        ksnprintf(why, room, "it does not parse: it opens with no NodeHead");
+        break;
+    case TALLY_NODE_COUNTED:
+        ksnprintf(why, room, "it does not parse: it counts %llu items in %u bytes", (unsigned long long)j->head.items,
+                  end);
+        break;
+    case TALLY_NODE_RUNS_PAST:
+        ksnprintf(why, room, "it does not parse: item %llu runs past the node", (unsigned long long)j->nth);
+        break;
+    case TALLY_NODE_FALLS:
+        ksnprintf(why, room, "it does not parse: the keys do not rise at item %llu", (unsigned long long)j->nth);
+        break;
+    case TALLY_NODE_TRAILED:
+        ksnprintf(why, room, "it does not parse: a byte other than PAD follows its last item");
+        break;
+    default:
+        TallyKeySay(j->head.tree, j->key, k, sizeof(k));
+        TallyKeySay(j->head.tree, p->lo, lo, sizeof(lo));
+        TallyKeySay(j->head.tree, p->hi, hi, sizeof(hi));
+        ksnprintf(why, room, "its keys run outside [%s, %s), the range its parent gives it — %s first",
+                  p->has_lo ? lo : "None", p->has_hi ? hi : "the end", k);
+        break;
+    }
 }
 
 /*
- * A copy's stream as a node at place `p`: a NodeHead, its items each whole
- * in the stream with keys that rise from its first key, nothing but PAD after
- * the last — tally.py NodeParse's rule — and every key inside [lo, hi), the
- * range its parent gives it (§16.3 п.2). OK, or ERR_TAGFS_CORRUPTED with why
- * the copy does not hold; ERR_NO_MEMORY.
+ * A copy's stream as a node at place `p`, by the one rule every reader of a
+ * node keeps (volume_tally.h, TallyNodeJudge): OK with its head, the bytes of
+ * the head past what this reader knows, and where each of its records begins;
+ * or ERR_TAGFS_CORRUPTED with why the copy does not hold; ERR_NO_MEMORY.
  */
 static error_t TallyNodeParse(const TallyPlace* p, TallyNode* n, char* why, size_t room)
 {
-    const uint8_t* s   = n->unit.stream;
-    uint32_t       end = n->unit.count * BOOK_PAYLOAD_BYTES, at = 0, body, len;
-    TallyKey       prev, key;
-    char           k[48], lo[48], hi[48];
+    const uint8_t*  s     = n->unit.stream;
+    uint32_t        end   = n->unit.count * BOOK_PAYLOAD_BYTES, at = 0, body, len;
+    TallyRange      range = { p->lo, p->hi, p->has_lo, p->has_hi };
+    TallyNodeJudged j;
+    TallyKey        prev, key;
+    uint64_t        tag;
+    int             says = TallyNodeJudge(s, end, &range, &j);
 
-    if (!TallyNodeHead(s, end, &at, n)) {
-        ksnprintf(why, room, "it does not parse: it opens with no NodeHead");
+    if (says != TALLY_NODE_HOLDS) {
+        TallyNodeRefused(p, &j, says, end, why, room);
         return ERR_TAGFS_CORRUPTED;
     }
-    n->items_at = at;
-    if (n->head.items > end) {
-        ksnprintf(why, room, "it does not parse: it counts %llu items in %u bytes",
-                  (unsigned long long)n->head.items, end);
-        return ERR_TAGFS_CORRUPTED;
-    }
+    n->head     = j.head;
+    n->items_at = j.items_at;
+    BookEntryNext(s, end, &at, &tag, &body, &len);
+    n->head_longer = len - NodeHeadBodyBytes(&n->head);
     if (!(n->starts = kmalloc(sizeof(uint32_t) * (n->head.items + 1u))))
         return ERR_NO_MEMORY;
     n->starts[n->nstarts++] = 0;
     prev = n->head.first;
     for (uint64_t i = 0; i < n->head.items; i++) {
         n->starts[n->nstarts++] = at;
-        if (!TallyItemGet(s, end, &at, n->head.tree, prev, &key, &body, &len)) {
-            ksnprintf(why, room, "it does not parse: item %llu runs past the node", (unsigned long long)i);
-            return ERR_TAGFS_CORRUPTED;
-        }
-        if ((i && TallyKeyCmp(key, prev) <= 0) || TallyKeyCmp(key, n->head.first) < 0) {
-            ksnprintf(why, room, "it does not parse: the keys do not rise at item %llu", (unsigned long long)i);
-            return ERR_TAGFS_CORRUPTED;
-        }
-        prev = key;
-    }
-    if (at < end && s[at] != 0) {
-        ksnprintf(why, room, "it does not parse: a byte other than PAD follows its last item");
-        return ERR_TAGFS_CORRUPTED;
-    }
-    at   = n->items_at;
-    prev = n->head.first;
-    for (uint64_t i = 0; i < n->head.items; i++) {
         TallyItemGet(s, end, &at, n->head.tree, prev, &key, &body, &len);
         prev = key;
-        if ((p->has_lo && TallyKeyCmp(key, p->lo) < 0) || (p->has_hi && TallyKeyCmp(key, p->hi) >= 0)) {
-            TallyKeySay(n->head.tree, key, k, sizeof(k));
-            TallyKeySay(n->head.tree, p->lo, lo, sizeof(lo));
-            TallyKeySay(n->head.tree, p->hi, hi, sizeof(hi));
-            ksnprintf(why, room, "its keys run outside [%s, %s), the range its parent gives it — %s first",
-                      p->has_lo ? lo : "None", p->has_hi ? hi : "the end", k);
-            return ERR_TAGFS_CORRUPTED;
-        }
     }
     return OK;
 }

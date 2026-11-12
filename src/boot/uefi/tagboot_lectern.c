@@ -1,47 +1,35 @@
 /*
  * TagBoot's Lectern — a format-v2 volume's book read the way the kernel's
- * mount stands on it, and Attest: the kernel's blocks held to the digests the
+ * mount stands on it, and Attest: a kernel's blocks held to the digests the
  * book keeps of them before the loader jumps (tagboot_lectern.h).
  *
- * What it holds at once is a few nodes: the slot being tried, and the path
- * down the DIGESTS tree to the leaf that names the block in hand — one rung a
- * level, each rung kept while the blocks in hand stay in its range. The
- * kernel's blocks lie in a row, so every node on their paths is read once,
- * and a copy of it that did not hold is said once.
+ * What it holds at once is a few nodes: the slot stood on, and the path down
+ * the DIGESTS tree to the leaf that names the block in hand — one rung a
+ * level, each rung kept while the blocks in hand stay in its range. A
+ * kernel's blocks lie in rows, so every node on their paths is read once, and
+ * a copy of a node that did not hold is said once, whichever kernel's block
+ * reached it.
  */
 
-/* The loader's integer types are uefi.h's (it builds -nostdinc, with no
- * <stdint.h>); the host stand's are the host's. */
-#if __STDC_HOSTED__
-#include <stdint.h>
-#else
-#include "uefi.h"
-#endif
-
-#include "tagboot_lectern.h"
+#include "tagboot_lectern_book.h"
 
 /* ------------------------------------------------------------------------- */
-/* Lines, and bytes, with no library under them                              */
+/* Lines, memory and bytes, with no library under them                       */
 /* ------------------------------------------------------------------------- */
 
-typedef struct {
-    char     text[LECTERN_LINE_BYTES];
-    uint32_t at;
-} LecternLine;
-
-static void LineStart(LecternLine *l)
+void LineStart(LecternLine *l)
 {
     l->at      = 0;
     l->text[0] = '\0';
 }
 
-static void LinePut(LecternLine *l, const char *s)
+void LinePut(LecternLine *l, const char *s)
 {
     while (*s && l->at + 1u < LECTERN_LINE_BYTES) l->text[l->at++] = *s++;
     l->text[l->at] = '\0';
 }
 
-static void LineNum(LecternLine *l, uint64_t v)
+void LineNum(LecternLine *l, uint64_t v)
 {
     char     digits[20];
     uint32_t n = 0;
@@ -53,15 +41,98 @@ static void LineNum(LecternLine *l, uint64_t v)
     l->text[l->at] = '\0';
 }
 
-static void LineSay(const LecternDesk *d, const LecternLine *l)
+const char *LecternLabelName(uint32_t i)
 {
-    d->say(d->ctx, l->text);
+    static const char *const names[LECTERN_LABELS] = { "kernel", "god", "boot", "system" };
+    return names[i];
 }
 
-static void LecternZero(void *p, uint64_t n)
+void LecternSay(const LecternBook *b, const LecternLine *l)
 {
-    volatile uint8_t *b = (volatile uint8_t *)p;     /* never turned into a call to a memset the loader has not */
-    while (n--) *b++ = 0;
+    b->desk->say(b->desk->ctx, l->text);
+}
+
+/* Bytes moved and cleared through volatile pointers: never turned into a call
+ * to a memcpy or memset the loader has not (its image links with -z defs). */
+void LecternZero(void *p, uint64_t n)
+{
+    volatile uint8_t *to = (volatile uint8_t *)p;
+    while (n--) *to++ = 0;
+}
+
+void LecternCopy(void *to, const void *from, uint64_t n)
+{
+    volatile uint8_t *t = (volatile uint8_t *)to;
+    const uint8_t    *f = (const uint8_t *)from;
+    while (n--) *t++ = *f++;
+}
+
+void *LecternTake(LecternBook *b, uint64_t bytes)
+{
+    void *room = b->starved ? (void *)0 : b->desk->take(b->desk->ctx, bytes);
+    if (!room) b->starved = 1;
+    return room;
+}
+
+void LecternGive(const LecternBook *b, void *room, uint64_t bytes)
+{
+    if (room) b->desk->give(b->desk->ctx, (uint8_t *)room, bytes);
+}
+
+/* Room in the array *at of `n` elements of `size` for one more, twice the room
+ * each time it runs out: 1, or 0 no room (the array as it was). */
+int LecternGrow(LecternBook *b, void **at, uint64_t n, uint64_t *cap, uint64_t size)
+{
+    uint64_t more = *cap ? *cap * 2u : 8u;
+    void    *to;
+    if (n < *cap) return 1;
+    if (more > ~(uint64_t)0 / size || !(to = LecternTake(b, more * size))) {
+        b->starved = 1;
+        return 0;
+    }
+    if (n) LecternCopy(to, *at, n * size);
+    LecternGive(b, *at, *cap * size);
+    *at  = to;
+    *cap = more;
+    return 1;
+}
+
+static uint64_t ListAt(const uint64_t *list, uint64_t n, uint64_t v)
+{
+    uint64_t lo = 0, hi = n;
+    while (lo < hi) {
+        uint64_t mid = lo + (hi - lo) / 2u;
+        if (list[mid] < v) lo = mid + 1u;
+        else hi = mid;
+    }
+    return lo;
+}
+
+int LecternListHas(const uint64_t *list, uint64_t n, uint64_t v)
+{
+    uint64_t at = ListAt(list, n, v);
+    return at < n && list[at] == v;
+}
+
+/* `v` into a rising list, once: 1, or 0 no room. */
+int LecternListAdd(LecternBook *b, uint64_t **list, uint64_t *n, uint64_t *cap, uint64_t v)
+{
+    uint64_t at = ListAt(*list, *n, v);
+    if (at < *n && (*list)[at] == v) return 1;
+    if (!LecternGrow(b, (void **)list, *n, cap, sizeof(uint64_t))) return 0;
+    for (uint64_t i = *n; i > at; i--) (*list)[i] = (*list)[i - 1u];
+    (*list)[at] = v;
+    (*n)++;
+    return 1;
+}
+
+void LecternSectors(LecternBook *b, uint64_t vlba, uint32_t sectors, uint8_t *into)
+{
+    const LecternDesk *d = b->desk;
+    if (d->read(d->ctx, vlba, sectors, into)) return;
+    for (uint32_t k = 0; k < sectors; k++)
+        if (!d->read(d->ctx, vlba + k, 1, into + (uint64_t)k * BOOK_SECTOR_BYTES))
+            LecternZero(into + (uint64_t)k * BOOK_SECTOR_BYTES, BOOK_SECTOR_BYTES);
 }
 
 static int LecternZeros(const uint8_t *p, uint64_t n)
@@ -69,64 +140,6 @@ static int LecternZeros(const uint8_t *p, uint64_t n)
     for (uint64_t i = 0; i < n; i++)
         if (p[i]) return 0;
     return 1;
-}
-
-/* ------------------------------------------------------------------------- */
-/* What is held while the book is read                                       */
-/* ------------------------------------------------------------------------- */
-
-/* Keys [lo, hi) of a tree — no lo from its start, no hi to its end. */
-typedef struct {
-    TallyKey lo, hi;
-    int      has_lo, has_hi;
-} LecternRange;
-
-/* A node read whole: its unit in `room` (`bytes` the desk gave), its stream
- * laid over the room's front (`stream` bytes), its head, where its items
- * begin. */
-typedef struct {
-    uint8_t *room;
-    uint64_t bytes;
-    uint32_t stream;
-    NodeHead head;
-    uint32_t items_at;
-} LecternNode;
-
-/* A rung of the path down DIGESTS: the node held at its level, or the range at
- * its level no copy of whose node holds. */
-typedef struct {
-    LecternNode  node;      /* node.room NULL: no node held */
-    LecternRange range;
-    int          rotten;
-} LecternRung;
-
-typedef struct {
-    const LecternDesk *desk;
-    LecternRung       *rungs;          /* rungs[level], 0 the leaves, `top` the root; NULL: no DIGESTS */
-    uint64_t           top;
-    uint64_t           lane;           /* the digests' seed: lane 0 of the volume's uuid */
-    BookPtr            root_ptr;       /* the DIGESTS root's pointer, while the slot it is in is held */
-    uint32_t           root_failed;    /* its copies that did not hold */
-} LecternBook;
-
-static const char *const g_tree_names[] = {
-    "", "FILES", "TAGS", "USE", "BOOKMARKS", "LIEN", "DIGESTS",
-};
-
-static int KeyBefore(TallyKey a, TallyKey b)
-{
-    return a.k1 < b.k1 || (a.k1 == b.k1 && a.k2 < b.k2);
-}
-
-static int RangeHolds(const LecternRange *r, TallyKey key)
-{
-    return !(r->has_lo && KeyBefore(key, r->lo)) && !(r->has_hi && !KeyBefore(key, r->hi));
-}
-
-static void NodeGive(const LecternDesk *d, LecternNode *n)
-{
-    if (n->room) d->give(d->ctx, n->room, n->bytes);
-    n->room = (uint8_t *)0;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -144,13 +157,14 @@ typedef enum { UNIT_HOLDS, UNIT_BLANK, UNIT_TORN, UNIT_NO_ROOM } LecternUnitSays
  * what a slot never written is; TORN any other, the medium refusing them too.
  * Neither keeps the room. NO_ROOM when the desk gives none.
  */
-static LecternUnitSays LecternUnit(const LecternDesk *d, uint64_t block, uint64_t blocks, uint32_t kind,
-                                   uint64_t seq, uint8_t **room, BookSectorHead *head)
+static LecternUnitSays LecternUnit(LecternBook *b, uint64_t block, uint64_t blocks, uint32_t kind, uint64_t seq,
+                                   uint8_t **room, BookSectorHead *head)
 {
-    uint64_t        bytes   = blocks * VOLUME_BLOCK_BYTES;
-    uint32_t        sectors = (uint32_t)(blocks * VOLUME_BLOCK_SECTORS);
-    uint8_t        *r       = d->take(d->ctx, bytes);
-    LecternUnitSays says    = UNIT_TORN;
+    const LecternDesk *d       = b->desk;
+    uint64_t           bytes   = blocks * VOLUME_BLOCK_BYTES;
+    uint32_t           sectors = (uint32_t)(blocks * VOLUME_BLOCK_SECTORS);
+    uint8_t           *r       = (uint8_t *)LecternTake(b, bytes);
+    LecternUnitSays    says    = UNIT_TORN;
 
     *room = (uint8_t *)0;
     if (!r) return UNIT_NO_ROOM;
@@ -162,7 +176,7 @@ static LecternUnitSays LecternUnit(const LecternDesk *d, uint64_t block, uint64_
             says = UNIT_HOLDS;
     }
     if (says != UNIT_HOLDS) {
-        d->give(d->ctx, r, bytes);
+        LecternGive(b, r, bytes);
         return says;
     }
     BookUnitStream(r, sectors, r);
@@ -170,77 +184,35 @@ static LecternUnitSays LecternUnit(const LecternDesk *d, uint64_t block, uint64_
     return UNIT_HOLDS;
 }
 
-/*
- * Does a copy's stream hold as a node of the range `r` — a NodeHead; its items
- * each whole, their keys rising from its first key; nothing but PAD past the
- * last; every key inside the range its parent gives it? The kernel's rule
- * (mount/tally_walk.c, TallyNodeParse) and volume-read's (tally.py,
- * NodeParse): a loader that held a node another kernel refuses would stand on
- * another slot than the kernel's mount, and hold the kernel's blocks to the
- * digests of another Tally.
- */
-static int LecternNodeHolds(LecternNode *n, const LecternRange *r)
+void LecternNodeGive(const LecternBook *b, LecternNode *n)
 {
-    const uint8_t *s   = n->room;
-    uint32_t       end = n->stream, at = 0, body, len;
-    TallyKey       prev, key;
-
-    if (NodeHeadGet(s, end, &at, &n->head) == TALLY_BODY_BROKEN || n->head.items > end) return 0;
-    n->items_at = at;
-    prev        = n->head.first;
-    for (uint64_t i = 0; i < n->head.items; i++) {
-        if (!TallyItemGet(s, end, &at, n->head.tree, prev, &key, &body, &len)) return 0;
-        if ((i && !KeyBefore(prev, key)) || KeyBefore(key, n->head.first) || !RangeHolds(r, key)) return 0;
-        prev = key;
-    }
-    return at >= end || s[at] == 0;
+    LecternGive(b, n->room, n->bytes);
+    n->room = (uint8_t *)0;
 }
 
-typedef enum { NODE_READ, NODE_ROTTEN, NODE_NO_ROOM } LecternNodeSays;
-
-/*
- * The node `ptr` names into *n, from the first of its copies that holds as a
- * node of the range `r` (§2.5): a copy below the far copy of the Deed, its
- * blocks one SHEET unit sealed at the pointer's seq — a write that never
- * landed leaves the old node there with a sum that still holds — and its
- * stream a node of the range. READ, the copies before it that did not hold in
- * *failed; ROTTEN when none holds; NO_ROOM when the desk gives none, or the
- * node's stream is longer than this reader counts (u32).
- */
-static LecternNodeSays LecternNodeRead(const LecternBook *b, const BookPtr *ptr, const LecternRange *r,
-                                       LecternNode *n, uint32_t *failed)
+static const char *TreeName(uint64_t tree)
 {
-    const LecternDesk *d  = b->desk;
-    uint32_t           at = 0;
-    BookSectorHead     head;
-
-    *failed = 0;
-    if (ptr->sheets > 0xFFFFFFFFu / TALLY_SHEET_PAYLOAD) return NODE_NO_ROOM;
-    for (uint64_t k = 0; k < ptr->copies; k++, (*failed)++) {
-        uint64_t block = 0;
-        at += BookVarintGet(ptr->blocks + at, ptr->blocks_bytes - at, &block);
-        if (block >= d->block_end || ptr->sheets > d->block_end - block) continue;
-        LecternUnitSays u = LecternUnit(d, block, ptr->sheets, BOOK_UNIT_SHEET, ptr->seq, &n->room, &head);
-        if (u == UNIT_NO_ROOM) return NODE_NO_ROOM;
-        if (u != UNIT_HOLDS) continue;
-        n->bytes  = ptr->sheets * VOLUME_BLOCK_BYTES;
-        n->stream = (uint32_t)(ptr->sheets * TALLY_SHEET_PAYLOAD);
-        if (LecternNodeHolds(n, r)) return NODE_READ;
-        NodeGive(d, n);
-    }
-    return NODE_ROTTEN;
+    static const char *const names[] = { "", "FILES", "TAGS", "USE", "BOOKMARKS", "LIEN", "DIGESTS" };
+    return tree <= TALLY_DIGESTS ? names[tree] : "";
 }
 
-/* "the DIGESTS node of level L at block(s) a/b: N of its copies do not hold —
- * copy N+1 is read": what a node read past a copy that did not hold says —
- * the next Tally the kernel writes lays it again (§2.5). */
-static void LecternCopiesSay(const LecternBook *b, uint64_t level, const BookPtr *ptr, uint32_t failed)
+/* "the T node of level L at block(s) a/b: N of its copies do not hold — copy
+ * N+1 is read": what a node read past a copy that did not hold says — the
+ * next Tally the kernel writes lays it again (§2.5) — once a node. */
+void LecternCopiesSay(LecternBook *b, uint64_t tree, uint64_t level, const BookPtr *ptr, uint32_t failed)
 {
     LecternLine l;
-    uint32_t    at = 0;
+    uint32_t    at    = 0;
+    uint64_t    first = 0;
 
+    BookVarintGet(ptr->blocks, ptr->blocks_bytes, &first);
+    if (!failed || LecternListHas(b->said, b->nsaid, first) ||
+        !LecternListAdd(b, &b->said, &b->nsaid, &b->capsaid, first))
+        return;
     LineStart(&l);
-    LinePut(&l, "the DIGESTS node of level ");
+    LinePut(&l, "the ");
+    LinePut(&l, TreeName(tree));
+    LinePut(&l, " node of level ");
     LineNum(&l, level);
     LinePut(&l, " at block(s) ");
     for (uint64_t k = 0; k < ptr->copies; k++) {
@@ -254,7 +226,52 @@ static void LecternCopiesSay(const LecternBook *b, uint64_t level, const BookPtr
     LinePut(&l, " of its copies do not hold — copy ");
     LineNum(&l, failed + 1u);
     LinePut(&l, " is read");
-    LineSay(b->desk, &l);
+    LecternSay(b, &l);
+}
+
+/*
+ * A copy is the node when it lies below the far copy of the Deed, its blocks
+ * are one SHEET unit sealed at the pointer's seq — a write that never landed
+ * leaves the old node there with a sum that still holds — and its stream holds
+ * as a node of its range by the one rule (volume_tally.h, TallyNodeJudge). The
+ * first that is, of the tree and level asked, is read; one of another tree or
+ * level is the range rotten, as the kernel's walk takes it (tally_walk.c) and
+ * volume-read's (tally.py TreeRead). The copies before it that did not hold
+ * in *failed. The node too long for this reader to count (u32) is no room.
+ */
+LecternNodeSays LecternNodeRead(LecternBook *b, uint64_t tree, uint64_t level, const BookPtr *ptr,
+                                const TallyRange *r, LecternNode *n, uint32_t *failed)
+{
+    uint64_t        end = b->desk->block_end;
+    uint32_t        at  = 0;
+    BookSectorHead  head;
+    TallyNodeJudged j;
+
+    *failed = 0;
+    if (ptr->sheets > 0xFFFFFFFFu / TALLY_SHEET_PAYLOAD) return NODE_NO_ROOM;
+    for (uint64_t k = 0; k < ptr->copies; k++, (*failed)++) {
+        uint64_t block = 0;
+        at += BookVarintGet(ptr->blocks + at, ptr->blocks_bytes - at, &block);
+        if (block >= end || ptr->sheets > end - block) continue;
+        LecternUnitSays u = LecternUnit(b, block, ptr->sheets, BOOK_UNIT_SHEET, ptr->seq, &n->room, &head);
+        if (u == UNIT_NO_ROOM) return NODE_NO_ROOM;
+        if (u != UNIT_HOLDS) continue;
+        n->bytes  = ptr->sheets * VOLUME_BLOCK_BYTES;
+        n->stream = (uint32_t)(ptr->sheets * TALLY_SHEET_PAYLOAD);
+        n->seq    = ptr->seq;
+        if (TallyNodeJudge(n->room, n->stream, r, &j) != TALLY_NODE_HOLDS) {
+            LecternNodeGive(b, n);
+            continue;
+        }
+        n->head     = j.head;
+        n->items_at = j.items_at;
+        if (n->head.tree != tree || n->head.level != level) {
+            LecternNodeGive(b, n);
+            return NODE_ROTTEN;
+        }
+        return NODE_READ;
+    }
+    return NODE_ROTTEN;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -277,12 +294,12 @@ static int LecternSlotWhole(const uint8_t *stream)
 /* Slot `index` read and judged: HOLDS with its stream in *room and its seq in
  * *seq when its sectors are one SLOT unit and its stream is whole; BLANK;
  * TORN, said in the kernel's words; NO_ROOM. */
-static LecternUnitSays LecternSlot(const LecternBook *b, uint32_t index, uint8_t **room, uint64_t *seq)
+static LecternUnitSays LecternSlot(LecternBook *b, uint32_t index, uint8_t **room, uint64_t *seq)
 {
     const LecternDesk *d     = b->desk;
     uint64_t           block = d->frame.spine_block + (uint64_t)index * d->frame.spine_stride;
     BookSectorHead     head;
-    LecternUnitSays    u = LecternUnit(d, block, 1, BOOK_UNIT_SLOT, 0, room, &head);
+    LecternUnitSays    u = LecternUnit(b, block, 1, BOOK_UNIT_SLOT, 0, room, &head);
     LecternLine        l;
 
     if (u == UNIT_HOLDS && LecternSlotWhole(*room)) {
@@ -290,7 +307,7 @@ static LecternUnitSays LecternSlot(const LecternBook *b, uint32_t index, uint8_t
         return UNIT_HOLDS;
     }
     if (u == UNIT_HOLDS) {
-        d->give(d->ctx, *room, VOLUME_BLOCK_BYTES);
+        LecternGive(b, *room, VOLUME_BLOCK_BYTES);
         *room = (uint8_t *)0;
         u     = UNIT_TORN;
     }
@@ -301,7 +318,7 @@ static LecternUnitSays LecternSlot(const LecternBook *b, uint32_t index, uint8_t
         LinePut(&l, " at block ");
         LineNum(&l, block);
         LinePut(&l, " does not hold — the book is read off another");
-        LineSay(d, &l);
+        LecternSay(b, &l);
     }
     return u;
 }
@@ -309,21 +326,18 @@ static LecternUnitSays LecternSlot(const LecternBook *b, uint32_t index, uint8_t
 /* The DIGESTS root, read, made the top of the path: rungs for its level and
  * every one below. 0 when the desk gives no room for them, the root given
  * back. */
-static int LecternTop(LecternBook *b, const SpineRoot *root, LecternNode *node, uint32_t failed)
+static int LecternTop(LecternBook *b, const SpineRoot *root, LecternNode *node)
 {
-    const LecternDesk *d = b->desk;
-    uint64_t           n = root->level + 1u;
+    uint64_t n = root->level + 1u;
 
     if (!n || n > ~(uint64_t)0 / sizeof(LecternRung) ||
-        !(b->rungs = (LecternRung *)(void *)d->take(d->ctx, n * sizeof(LecternRung)))) {
-        NodeGive(d, node);
+        !(b->rungs = (LecternRung *)LecternTake(b, n * sizeof(LecternRung)))) {
+        LecternNodeGive(b, node);
         return 0;
     }
     LecternZero(b->rungs, n * sizeof(LecternRung));
     b->top                = root->level;
     b->rungs[b->top].node = *node;
-    b->root_ptr           = root->ptr;
-    b->root_failed        = failed;
     return 1;
 }
 
@@ -331,14 +345,14 @@ static int LecternTop(LecternBook *b, const SpineRoot *root, LecternNode *node, 
 static void LecternPathGive(LecternBook *b)
 {
     if (!b->rungs) return;
-    for (uint64_t l = 0; l <= b->top; l++) NodeGive(b->desk, &b->rungs[l].node);
-    b->desk->give(b->desk->ctx, (uint8_t *)(void *)b->rungs, (b->top + 1u) * sizeof(LecternRung));
+    for (uint64_t l = 0; l <= b->top; l++) LecternNodeGive(b, &b->rungs[l].node);
+    LecternGive(b, b->rungs, (b->top + 1u) * sizeof(LecternRung));
     b->rungs = (LecternRung *)0;
 }
 
 /* "slot i (seq S) names a Tally that does not read: its T root will not read
  * — the next slot is read" (book_mount.c, BookStand). */
-static void LecternFallSay(const LecternDesk *d, uint32_t index, uint64_t seq, uint64_t tree)
+static void LecternFallSay(const LecternBook *b, uint32_t index, uint64_t seq, uint64_t tree)
 {
     LecternLine l;
     LineStart(&l);
@@ -347,91 +361,99 @@ static void LecternFallSay(const LecternDesk *d, uint32_t index, uint64_t seq, u
     LinePut(&l, " (seq ");
     LineNum(&l, seq);
     LinePut(&l, ") names a Tally that does not read: its ");
-    LinePut(&l, g_tree_names[tree]);
+    LinePut(&l, TreeName(tree));
     LinePut(&l, " root will not read — the next slot is read");
-    LineSay(d, &l);
+    LecternSay(b, &l);
 }
 
 /*
  * Whether the Tally a whole slot's `stream` names reads — every authoritative
  * root (SpineTreeAuthoritative) in some copy, the node there of the tree and
  * level the root says (book_mount.c BookSlotReads, tally_walk.c
- * TallyRootReads) — the DIGESTS root kept as the path's top when it does: 1;
- * 0 said; -1 no room.
+ * TallyRootReads) — its roots, head and ribbon kept, the DIGESTS root as the
+ * path's top and its copies that did not hold in *digests, when it does: 1;
+ * 0 said; -1 no room. Nothing is said of a copy of a root here: a slot passed
+ * over is no book read, and FILES and TAGS are said as they are walked.
  */
-static int LecternTallyReads(LecternBook *b, uint32_t index, uint64_t seq, const uint8_t *stream)
+static int LecternTallyReads(LecternBook *b, uint32_t index, uint64_t seq, const uint8_t *stream,
+                             uint32_t *digests)
 {
-    const LecternDesk *d    = b->desk;
-    LecternRange       none = { { 0, 0 }, { 0, 0 }, 0, 0 };
-    LecternNode        node;
-    SpineWalk          w;
-    SpineSays          says;
-    uint32_t           failed;
+    TallyRange  none = { { 0, 0 }, { 0, 0 }, 0, 0 };
+    LecternNode node;
+    SpineWalk   w;
+    SpineSays   says;
+    uint32_t    failed;
 
     LecternZero(&w, sizeof(w));
     LecternZero(&node, sizeof(node));
+    b->rooted = 0;
     do {
         says = SpineSlotStep(stream, TALLY_SHEET_PAYLOAD, &w);
         if ((says != SPINE_SAYS_RECORD && says != SPINE_SAYS_LONGER) || w.kind != SPINE_ROOT ||
             !SpineTreeAuthoritative(&w.root))
             continue;
-        LecternNodeSays n = LecternNodeRead(b, &w.root.ptr, &none, &node, &failed);
-        if (n == NODE_READ && (node.head.tree != w.root.tree || node.head.level != w.root.level)) {
-            NodeGive(d, &node);
-            n = NODE_ROTTEN;
-        }
+        LecternNodeSays n = LecternNodeRead(b, w.root.tree, w.root.level, &w.root.ptr, &none, &node, &failed);
         if (n != NODE_READ) {
             LecternPathGive(b);
             if (n == NODE_NO_ROOM) return -1;
-            LecternFallSay(d, index, seq, w.root.tree);
+            LecternFallSay(b, index, seq, w.root.tree);
             return 0;
         }
+        b->roots[w.root.tree] = w.root;
+        b->rooted |= 1u << w.root.tree;
         if (w.root.tree != TALLY_DIGESTS)
-            NodeGive(d, &node);
-        else if (!LecternTop(b, &w.root, &node, failed))
+            LecternNodeGive(b, &node);
+        else if (!LecternTop(b, &w.root, &node))
             return -1;
+        else
+            *digests = failed;
     } while (!SpineSaysTorn(says) && says != SPINE_SAYS_WHOLE);
+    b->head   = w.head;
+    b->ribbon = w.ribbon;
     return 1;
 }
 
 /* Slot `index` (seq `seq`) tried: read again, and its Tally's roots: 1 stood
- * on, said with the DIGESTS root's copies that did not hold; 0 passed over,
- * said; -1 no room. */
+ * on, said with the DIGESTS root's copies that did not hold, its stream kept;
+ * 0 passed over, said; -1 no room. */
 static int LecternTry(LecternBook *b, uint32_t index, uint64_t seq)
 {
-    const LecternDesk *d    = b->desk;
-    uint8_t           *room = (uint8_t *)0;
-    uint64_t           again = 0;
-    LecternUnitSays    u    = LecternSlot(b, index, &room, &again);
-    LecternLine        l;
-    int                rc;
+    uint8_t        *room  = (uint8_t *)0;
+    uint64_t        again = 0;
+    uint32_t        digests = 0;
+    LecternUnitSays u     = LecternSlot(b, index, &room, &again);
+    LecternLine     l;
+    int             rc;
 
     if (u == UNIT_NO_ROOM) return -1;
     if (u != UNIT_HOLDS) return 0;
-    rc = again == seq ? LecternTallyReads(b, index, seq, room) : 0;
-    if (rc == 1) {
-        LineStart(&l);
-        LinePut(&l, "the book stands on slot ");
-        LineNum(&l, index);
-        LinePut(&l, " (seq ");
-        LineNum(&l, seq);
-        LinePut(&l, ")");
-        LineSay(d, &l);
-        if (b->rungs && b->root_failed) LecternCopiesSay(b, b->top, &b->root_ptr, b->root_failed);
+    rc = again == seq ? LecternTallyReads(b, index, seq, room, &digests) : 0;
+    if (rc != 1) {
+        LecternGive(b, room, VOLUME_BLOCK_BYTES);
+        return rc;
     }
-    d->give(d->ctx, room, VOLUME_BLOCK_BYTES);
-    return rc;
+    LineStart(&l);
+    LinePut(&l, "the book stands on slot ");
+    LineNum(&l, index);
+    LinePut(&l, " (seq ");
+    LineNum(&l, seq);
+    LinePut(&l, ")");
+    b->stood      = 1;
+    b->slot_room  = room;
+    b->slot_index = index;
+    b->slot_seq   = seq;
+    LecternSay(b, &l);
+    if (b->rungs) LecternCopiesSay(b, TALLY_DIGESTS, b->top, &b->roots[TALLY_DIGESTS].ptr, digests);
+    return 1;
 }
 
 /* The slots judged in the ring's order, those that hold tried newest first
- * (SpineSlotNewer), the first whose Tally reads stood on: 1; 0 with why none
- * is in *why; -1 no room. */
-static int LecternStand(LecternBook *b, LecternLine *why)
+ * (SpineSlotNewer), the first whose Tally reads stood on. */
+int LecternStand(LecternBook *b)
 {
-    const LecternDesk *d     = b->desk;
-    uint32_t           slots = d->frame.spine_slots, held = 0;
-    uint64_t          *seqs  = (uint64_t *)(void *)d->take(d->ctx, (uint64_t)slots * sizeof(uint64_t));
-    int                rc    = 0;
+    uint32_t  slots = b->desk->frame.spine_slots, held = 0;
+    uint64_t *seqs  = (uint64_t *)LecternTake(b, (uint64_t)slots * sizeof(uint64_t));
+    int       rc    = 0;
 
     if (!seqs) return -1;
     for (uint32_t i = 0; i < slots && rc == 0; i++) {
@@ -441,26 +463,28 @@ static int LecternStand(LecternBook *b, LecternLine *why)
         if (u == UNIT_NO_ROOM) rc = -1;
         if (u == UNIT_HOLDS) {
             held++;
-            d->give(d->ctx, room, VOLUME_BLOCK_BYTES);
+            LecternGive(b, room, VOLUME_BLOCK_BYTES);
         }
     }
+    LineStart(&b->why);
     if (rc == 0 && held == 0) {
-        LinePut(why, "none of the ");
-        LineNum(why, slots);
-        LinePut(why, " slots of its Spine holds");
+        LinePut(&b->why, "none of the ");
+        LineNum(&b->why, slots);
+        LinePut(&b->why, " slots of its Spine holds");
     }
     while (rc == 0 && held > 0) {
         uint32_t best = slots;
         for (uint32_t j = 0; j < slots; j++)
             if (seqs[j] && (best == slots || SpineSlotNewer(seqs[j], j, seqs[best], best))) best = j;
         if (best == slots) {
-            LinePut(why, "no slot that holds names a Tally that reads");
+            LinePut(&b->why, "no slot that holds names a Tally that reads");
             break;
         }
         rc         = LecternTry(b, best, seqs[best]);
         seqs[best] = 0;
     }
-    d->give(d->ctx, (uint8_t *)(void *)seqs, (uint64_t)slots * sizeof(uint64_t));
+    if (rc < 0) LinePut(&b->why, "this loader was given no room to read its book");
+    LecternGive(b, seqs, (uint64_t)slots * sizeof(uint64_t));
     return rc;
 }
 
@@ -473,7 +497,7 @@ typedef enum { DIGEST_NAMED, DIGEST_UNNAMED, DIGEST_ROTTEN, DIGEST_NO_ROOM } Lec
 static int RungCovers(const LecternRung *r, uint64_t v)
 {
     TallyKey key = { v, 0 };
-    return (r->node.room || r->rotten) && RangeHolds(&r->range, key);
+    return (r->node.room || r->rotten) && TallyRangeHolds(&r->range, key);
 }
 
 /*
@@ -487,15 +511,14 @@ static int RungCovers(const LecternRung *r, uint64_t v)
  */
 static LecternDigestSays LecternDescend(LecternBook *b, uint64_t level, uint64_t v)
 {
-    const LecternDesk *d   = b->desk;
-    LecternNode       *n   = &b->rungs[level].node;
-    LecternRung       *kid = &b->rungs[level - 1u];
-    LecternRange       r   = b->rungs[level].range;
-    uint32_t           at = n->items_at, body, len, kbody = 0, klen = 0, failed;
-    TallyKey           prev = n->head.first, key;
-    int                chosen = 0;
-    BookPtr            ptr;
-    uint64_t           count;
+    LecternNode *n   = &b->rungs[level].node;
+    LecternRung *kid = &b->rungs[level - 1u];
+    TallyRange   r   = b->rungs[level].range;
+    uint32_t     at = n->items_at, body, len, kbody = 0, klen = 0;
+    TallyKey     prev = n->head.first, key;
+    int          chosen = 0;
+    BookPtr      ptr;
+    uint64_t     count;
 
     for (uint64_t i = 0; i < n->head.items; i++) {
         TallyItemGet(n->room, n->stream, &at, TALLY_DIGESTS, prev, &key, &body, &len);
@@ -513,19 +536,17 @@ static LecternDigestSays LecternDescend(LecternBook *b, uint64_t level, uint64_t
     }
     if (!chosen) return DIGEST_UNNAMED;
     for (uint64_t l = 0; l < level; l++) {
-        NodeGive(d, &b->rungs[l].node);
+        LecternNodeGive(b, &b->rungs[l].node);
         b->rungs[l].rotten = 0;
     }
     kid->range  = r;
     kid->rotten = 1;
     if (TallyInnerGet(n->room + kbody, klen, &count, &ptr) == TALLY_BODY_BROKEN) return DIGEST_NAMED;
-    LecternNodeSays s = LecternNodeRead(b, &ptr, &r, &kid->node, &failed);
+    uint32_t        failed;
+    LecternNodeSays s = LecternNodeRead(b, TALLY_DIGESTS, level - 1u, &ptr, &r, &kid->node, &failed);
     if (s == NODE_NO_ROOM) return DIGEST_NO_ROOM;
-    if (s == NODE_READ && (kid->node.head.tree != TALLY_DIGESTS || kid->node.head.level != level - 1u))
-        NodeGive(d, &kid->node);
-    else if (s == NODE_READ)
-        kid->rotten = 0;
-    if (!kid->rotten && failed) LecternCopiesSay(b, level - 1u, &ptr, failed);
+    kid->rotten = s != NODE_READ;
+    if (!kid->rotten) LecternCopiesSay(b, TALLY_DIGESTS, level - 1u, &ptr, failed);
     return DIGEST_NAMED;
 }
 
@@ -533,7 +554,7 @@ static LecternDigestSays LecternDescend(LecternBook *b, uint64_t level, uint64_t
  * lowest rung whose range holds `v`, walked down from there to the leaf, the
  * leaf's elements walked in key order (volume_tally.h, TallyDigestIn).
  * ROTTEN with the range that does not read in *rot. */
-static LecternDigestSays LecternDigestOf(LecternBook *b, uint64_t v, uint64_t *digest, LecternRange *rot)
+static LecternDigestSays LecternDigestOf(LecternBook *b, uint64_t v, uint64_t *digest, TallyRange *rot)
 {
     uint64_t l = 0;
 
@@ -558,7 +579,7 @@ static LecternDigestSays LecternDigestOf(LecternBook *b, uint64_t v, uint64_t *d
 /* ------------------------------------------------------------------------- */
 
 /* Why the kernel's block `k` (volume block `v`) is held to nothing. */
-static void LecternWhy(LecternLine *why, LecternDigestSays s, uint64_t k, uint64_t v, const LecternRange *rot)
+static void LecternWhy(LecternLine *why, LecternDigestSays s, uint64_t k, uint64_t v, const TallyRange *rot)
 {
     if (s == DIGEST_NO_ROOM) {
         LinePut(why, "this loader was given no room to read its book");
@@ -580,66 +601,97 @@ static void LecternWhy(LecternLine *why, LecternDigestSays s, uint64_t k, uint64
     LinePut(why, "), which does not read");
 }
 
-/* The kernel's blocks in order, each held to its digest: BROKEN at the first
- * that does not match, *v->block it; else UNCHECKED with the first block held
- * to nothing, why in *why; else HELD. */
-static AttestSays LecternBlocks(LecternBook *b, uint64_t first, uint64_t blocks, const uint8_t *image,
-                                LecternLine *why, AttestVerdict *v)
+/* One block's verdict: 1 matches, 0 held to nothing (why said into *why the
+ * first time), -1 does not match, -2 no room. */
+static int LecternBlockHeld(LecternBook *b, uint64_t k, uint64_t v, const uint8_t *data, int overlay,
+                            LecternLine *why)
 {
-    AttestSays says = ATTEST_HELD;
+    uint64_t          digest = 0;
+    TallyRange        rot;
+    LecternDigestSays s = DIGEST_NAMED;
 
-    for (uint64_t k = 0; k < blocks; k++) {
-        uint64_t          digest = 0;
-        LecternRange      rot;
-        LecternZero(&rot, sizeof(rot));
-        LecternDigestSays s = LecternDigestOf(b, first + k, &digest, &rot);
-        if (s == DIGEST_NAMED && WyHash64(image + k * VOLUME_BLOCK_BYTES, VOLUME_BLOCK_BYTES, b->lane) != digest) {
-            v->block = k;
-            return ATTEST_BROKEN;
+    LecternZero(&rot, sizeof(rot));
+    if (!overlay || !LecternOverlaid(b, v, &digest)) s = LecternDigestOf(b, v, &digest, &rot);
+    if (s == DIGEST_NAMED) return WyHash64(data, VOLUME_BLOCK_BYTES, b->lane) == digest ? 1 : -1;
+    if (!why->at) LecternWhy(why, s, k, v, &rot);
+    return s == DIGEST_NO_ROOM ? -2 : 0;
+}
+
+/* The kernel's blocks in file order, each held to its digest — a hole holds
+ * the zeros its run names: BROKEN at the first that does not match, the block
+ * in *k and *v; else UNCHECKED with the first held to nothing, why in *why;
+ * else HELD. */
+static AttestSays LecternBlocks(LecternBook *b, const LecternRun *runs, uint64_t nruns, uint64_t blocks,
+                                const uint8_t *image, int overlay, LecternLine *why, uint64_t *k, uint64_t *v)
+{
+    uint64_t at = 0;
+
+    for (uint64_t r = 0; r < nruns && at < blocks; r++) {
+        for (uint64_t i = 0; i < runs[r].count && at < blocks; i++, at++) {
+            if (runs[r].hole) continue;
+            int held = LecternBlockHeld(b, at, runs[r].start + i, image + at * VOLUME_BLOCK_BYTES, overlay, why);
+            if (held == -1) {
+                *k = at;
+                *v = runs[r].start + i;
+                return ATTEST_BROKEN;
+            }
+            if (held == -2) return ATTEST_UNCHECKED;
         }
-        if (s == DIGEST_NAMED || says == ATTEST_UNCHECKED) continue;
-        says     = ATTEST_UNCHECKED;
-        v->block = k;
-        LecternWhy(why, s, k, first + k, &rot);
-        if (s == DIGEST_NO_ROOM) break;
     }
+    return why->at ? ATTEST_UNCHECKED : ATTEST_HELD;
+}
+
+AttestSays LecternAttest(LecternBook *b, const char *who, const LecternRun *runs, uint64_t nruns,
+                         uint64_t blocks, const uint8_t *image, int overlay, LecternLine *verdict)
+{
+    LecternLine why;
+    uint64_t    k = 0, v = 0;
+    AttestSays  says;
+
+    LineStart(&why);
+    if (b->stood)
+        says = LecternBlocks(b, runs, nruns, blocks, image, overlay, &why, &k, &v);
+    else {
+        says = ATTEST_UNCHECKED;
+        LinePut(&why, b->why.text);
+    }
+    LineStart(verdict);
+    LinePut(verdict, who);
+    if (says == ATTEST_HELD) {
+        LinePut(verdict, " is attested by the book: ");
+        LineNum(verdict, blocks);
+        LinePut(verdict, " block(s)");
+    } else if (says == ATTEST_BROKEN) {
+        LinePut(verdict, " does not match the book: block ");
+        LineNum(verdict, k);
+        LinePut(verdict, " (volume block ");
+        LineNum(verdict, v);
+        LinePut(verdict, ")");
+    } else {
+        LinePut(verdict, " is not attested: ");
+        LinePut(verdict, why.text);
+    }
+    LecternSay(b, verdict);
     return says;
 }
 
-void LecternAttest(const LecternDesk *desk, const char *who, uint64_t first, uint64_t blocks,
-                   const uint8_t *image, AttestVerdict *verdict)
+/* ------------------------------------------------------------------------- */
+/* Everything given back                                                     */
+/* ------------------------------------------------------------------------- */
+
+void LecternClose(LecternBook *b)
 {
-    LecternBook b;
-    LecternLine why, l;
-    uint64_t    lanes[4];
-
-    LecternZero(&b, sizeof(b));
-    b.desk = desk;
-    WySeedLanes(desk->uuid, 16u, lanes);
-    b.lane = lanes[0];
-    LineStart(&why);
-    verdict->block = 0;
-    int stood = LecternStand(&b, &why);
-    if (stood < 0) LinePut(&why, "this loader was given no room to read its book");
-    verdict->says = stood == 1 ? LecternBlocks(&b, first, blocks, image, &why, verdict) : ATTEST_UNCHECKED;
-    LecternPathGive(&b);
-
-    LineStart(&l);
-    LinePut(&l, who);
-    if (verdict->says == ATTEST_HELD) {
-        LinePut(&l, " is attested by the book: ");
-        LineNum(&l, blocks);
-        LinePut(&l, " block(s)");
-    } else if (verdict->says == ATTEST_BROKEN) {
-        LinePut(&l, " does not match the book: block ");
-        LineNum(&l, verdict->block);
-        LinePut(&l, " (volume block ");
-        LineNum(&l, first + verdict->block);
-        LinePut(&l, ")");
-    } else {
-        LinePut(&l, " is not attested: ");
-        LinePut(&l, why.text);
-    }
-    for (uint32_t i = 0; i <= l.at; i++) verdict->line[i] = l.text[i];
-    LineSay(desk, &l);
+    LecternPathGive(b);
+    for (uint64_t i = 0; i < b->nstitches; i++) LecternStitchGive(b, b->stitches[i]);
+    for (uint64_t i = 0; i < b->nfiles; i++) LecternFileGive(b, &b->files[i]);
+    LecternGive(b, b->stitches, b->capstitches * sizeof(LecternStitch *));
+    LecternGive(b, b->files, b->capfiles * sizeof(LecternFile));
+    LecternGive(b, b->said, b->capsaid * sizeof(uint64_t));
+    LecternGive(b, b->skip, b->capskip * sizeof(LecternSkip));
+    LecternGive(b, b->refused, b->caprefused * sizeof(uint64_t));
+    LecternGive(b, b->interest, b->capinterest * sizeof(uint64_t));
+    LecternGive(b, b->rotten, b->caprotten * sizeof(TallyRange));
+    LecternGive(b, b->overlay, b->capoverlay * sizeof(LecternDigest));
+    LecternGive(b, b->slot_room, VOLUME_BLOCK_BYTES);
+    LecternZero(b, sizeof(*b));
 }

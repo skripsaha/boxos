@@ -5,12 +5,15 @@
  *   1. Locate Block IO on boot device via loaded image device handle
  *   2. Read the medium's partition table for the ground claimed for BoxOS,
  *      and the Deed at the head of it
- *   3. Take the kernel's place from the Deed's boot stamp; a Deed without one
- *      has the tag registry + metadata pool searched, "god" → "boot" →
- *      "system", each file at its newest record.
- *   4. Allocate pages at 0x100000 and load kernel binary; on a format-v2
- *      volume hold each block of it to the digest its book keeps, and never
- *      jump into one that does not match (tagboot_attest.c)
+ *   3. Format v1: take the kernel's place from the Deed's boot stamp; a Deed
+ *      without one has the tag registry + metadata pool searched, "god" →
+ *      "boot" → "system", each file at its newest record.
+ *   4. Format v1: allocate pages at 0x100000 and load the kernel binary.
+ *      Format v2: the Succession (tagboot_attest.c, tagboot_succession.c) —
+ *      the kernel BOOT names, then the kernels the book names by tag, each
+ *      placed at 0x100000 and held to the digests the book keeps of its
+ *      blocks; the first attested is the one jumped into, one that does not
+ *      match never is
  *   5. Query GOP framebuffer; record address and parameters
  *   6. Get UEFI memory map; convert to e820_entry_t format at 0x500
  *   7. Allocate 32 KB for page tables after kernel_end + guard page
@@ -59,13 +62,11 @@ static __attribute__((noinline)) void PhysWrite16(uint64_t addr, uint16_t val)
  * loop over uncontrolled memory. */
 #define EFI_CFG_TABLE_MAX_ENTRIES  256U
 
-#define KERNEL_LOAD_ADDR      0x100000ULL
-
-/* Bootloader & kernel agree on this header layout. Bumped when the
- * kernel-side header (src/kernel/entry/kernel_entry.asm) changes shape.
- * Mismatch → bootloader refuses to launch the kernel. */
-#define KERNEL_HEADER_VERSION 1U
-#define KERNEL_MAX_SIZE       0x2000000ULL  /* 32 MB */
+/* KERNEL_LOAD_ADDR is tagboot.h's; KERNEL_HEADER_VERSION — the header layout
+ * bootloader and kernel agree on, bumped when src/kernel/entry/
+ * kernel_entry.asm changes its shape, a mismatch refused — and
+ * KERNEL_MAX_SIZE are the Lectern's (tagboot_lectern.h), which holds every
+ * kernel of a format-v2 volume to them before it is jumped into. */
 #define BOOT_INFO_ADDR        0xA000ULL
 
 /* Same block, same address, third file to say so. The build passes the value
@@ -315,7 +316,7 @@ void Print(const char *msg)
     }
 }
 
-static void PrintHex64(uint64_t v)
+void PrintHex64(uint64_t v)
 {
     char buf[19];
     buf[0]  = '0'; buf[1] = 'x';
@@ -493,7 +494,11 @@ static EFI_STATUS ReadMediumSectors(EFI_BLOCK_IO_PROTOCOL *bio,
                                 (UINTN)count_512 * 512, buffer);
     }
 
-    static uint8_t align_buf[8192];
+    /* A whole physical block bounced through here, aligned to the 4096 every
+     * medium BoxOS meets asks of a buffer at the most (EFI_BLOCK_IO_MEDIA
+     * IoAlign, UEFI 2.10 §13.9: 0 or 1 any, else a power of two) — read_blocks
+     * refuses a buffer off its IoAlign with EFI_INVALID_PARAMETER. */
+    static uint8_t align_buf[8192] __attribute__((aligned(4096)));
     if (bsz > sizeof(align_buf)) return EFI_UNSUPPORTED;
 
     uint8_t *out = (uint8_t *)buffer;
@@ -3036,6 +3041,57 @@ static void CheckEfiLoadAddress(void)
  * (image_handle in RCX, st in RDX).  Without EFIAPI the gcc-compiled function
  * reads System V registers RDI/RSI instead → garbage pointers → instant crash.
  */
+/*
+ * The kernel of a format-v1 volume: the Deed first, the tag search second.
+ *
+ * The Deed names one file — the kernel this volume was made with — and its
+ * checksum covers that answer. The tag search answers "the oldest file whose
+ * newest record carries 'god', 'boot' or 'system'", which is a different
+ * question: on this image the shell and the display daemon carry 'system'
+ * too. So the exact answer is asked for first, and the search is what happens
+ * when a volume's Deed carries no boot stamp — an older volume, or one made by
+ * something that did not know to write one. Loaded at KERNEL_LOAD_ADDR: its
+ * size in bytes.
+ */
+static uint64_t KernelByDeedOrTags(void)
+{
+    if (TagFsBootStamp(&g_kernel_place)) {
+        Print("TagBoot: the deed names the kernel\r\n");
+    } else if (!TagFsFindKernelByTags(&g_kernel_place)) {
+        Panic("kernel not found — this deed names none and no file carries a boot tag");
+    }
+
+    Print("TagBoot: kernel at volume block ");
+    PrintDec(g_kernel_place.runs[0].first);
+    Print(" (");
+    PrintDec(g_kernel_place.blocks);
+    Print(" blocks in ");
+    PrintDec(g_kernel_place.run_count);
+    Print(" run(s))\r\n");
+
+    /* Defensive bound: the blocks come out of the Deed or out of a record on
+     * the medium, and a corrupted or malicious volume could say anything; cap
+     * at the same limit stage2 uses (KERNEL_MAX_SIZE / TAGFS_BLOCK_SIZE).
+     * Derived rather than literal so KERNEL_MAX_SIZE bumps don't desync
+     * between paths. */
+    const uint64_t kernel_max_blocks = KERNEL_MAX_SIZE / TAGFS_BLOCK_SIZE;
+    if (g_kernel_place.blocks == 0 || g_kernel_place.blocks > kernel_max_blocks) {
+        Print("TagBoot: FATAL — kernel_block_count out of range: ");
+        PrintDec(g_kernel_place.blocks);
+        Print("\r\n");
+        Panic("TagFS metadata reports invalid kernel block count");
+    }
+
+    Print("TagBoot: loading kernel to 0x100000...\r\n");
+    uint64_t loaded_bytes = TagFsLoadKernel(&g_kernel_place);
+    if (loaded_bytes == 0) Panic("kernel load failed");
+
+    Print("TagBoot: kernel loaded (");
+    PrintDec(loaded_bytes);
+    Print(" bytes)\r\n");
+    return loaded_bytes;
+}
+
 EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
 {
     /* Raw COM1 byte BEFORE touching any UEFI pointer — confirms we were called. */
@@ -3118,68 +3174,20 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     status = DeedTakeUp(g_deed_block, g_ground_start);
     if (EFI_ERROR(status)) Panic("the volume's deed cannot be read by this loader");
 
-    /* ----- 3. Find kernel file ----- */
-
-    /*
-     * The Deed first, the tag search second.
+    /* ----- 3. Find kernel file, 4. load it ----- *
      *
-     * The Deed names one file — the kernel this volume was made with — and its
-     * checksum covers that answer. The tag search answers "the oldest file
-     * whose newest record carries 'god', 'boot' or 'system'", which is a
-     * different question: on this image the shell and the display daemon
-     * carry 'system' too.
-     *
-     * So the exact answer is asked for first, and the search is what happens
-     * when a volume's Deed carries no boot stamp — an older volume, or one
-     * made by something that did not know to write one — of format v1 only:
-     * the search reads LAYOUT's registry and pool (tagboot.h, g_have_frame).
-     */
-    if (TagFsBootStamp(&g_kernel_place)) {
-        Print("TagBoot: the deed names the kernel\r\n");
-    } else if (g_have_frame) {
-        Panic("this volume's deed names no kernel");
-    } else if (!TagFsFindKernelByTags(&g_kernel_place)) {
-        Panic("kernel not found — this deed names none and no file carries a boot tag");
-    }
-
-    Print("TagBoot: kernel at volume block ");
-    PrintDec(g_kernel_place.runs[0].first);
-    Print(" (");
-    PrintDec(g_kernel_place.blocks);
-    Print(" blocks in ");
-    PrintDec(g_kernel_place.run_count);
-    Print(" run(s))\r\n");
-
-    /* Defensive bound: the blocks come out of the Deed or out of a record on
-     * the medium, and a corrupted or malicious volume could say anything; cap
-     * at the same limit stage2 uses (KERNEL_MAX_SIZE / TAGFS_BLOCK_SIZE).
-     * Derived rather than literal so KERNEL_MAX_SIZE bumps don't desync
-     * between paths. */
-    const uint64_t kernel_max_blocks = KERNEL_MAX_SIZE / TAGFS_BLOCK_SIZE;
-    if (g_kernel_place.blocks == 0 || g_kernel_place.blocks > kernel_max_blocks) {
-        Print("TagBoot: FATAL — kernel_block_count out of range: ");
-        PrintDec(g_kernel_place.blocks);
-        Print("\r\n");
-        Panic("TagFS metadata reports invalid kernel block count");
-    }
-
-    /* ----- 4. Load kernel ----- */
-    Print("TagBoot: loading kernel to 0x100000...\r\n");
-    uint64_t loaded_bytes = TagFsLoadKernel(&g_kernel_place);
-    if (loaded_bytes == 0) Panic("kernel load failed");
-
-    Print("TagBoot: kernel loaded (");
-    PrintDec(loaded_bytes);
-    Print(" bytes)\r\n");
-
-    /* A format-v2 volume's book keeps the digest of every block of the kernel:
-     * each block loaded is held to it before anything of the kernel is read,
-     * and one that does not match is never jumped into (tagboot_attest.c). */
+     * A format-v2 volume's kernel is chosen by the Succession: the kernel BOOT
+     * names held to the book first, then the kernels the book names by tag,
+     * each placed at KERNEL_LOAD_ADDR and held to the digests the book keeps of
+     * its blocks — one that does not match is never jumped into, and when none
+     * may be, the loader stops with every kernel it tried and why
+     * (tagboot_attest.c, tagboot_succession.c). */
+    uint64_t loaded_bytes = 0;
     if (g_have_frame) {
-        const char *broken = AttestBootKernel(g_bs, ReadSectors, g_kernel_place.runs[0].first,
-                                              (loaded_bytes + TAGFS_BLOCK_SIZE - 1) / TAGFS_BLOCK_SIZE,
-                                              (const uint8_t *)(uintptr_t)KERNEL_LOAD_ADDR);
-        if (broken) Panic(broken);
+        const char *stop = SuccessionTake(g_bs, ReadSectors, &loaded_bytes, &g_kernel_alloc_end);
+        if (stop) Panic(stop);
+    } else {
+        loaded_bytes = KernelByDeedOrTags();
     }
 
     /* Validate kernel header magic — 'KERNEL' at byte offset 2.

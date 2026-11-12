@@ -33,9 +33,10 @@ and a simulation of what the next mount decides (exit 0 consistent, 1 not,
 derived from the names that take a block. `cut` reads a QEMU blklogwrites log
 of this DEVICE and builds any crash state out of it; the cuts of one record
 share a memo of the block digests a book's census takes (bookcensus.py
-DigestMemoWrite). `boot` says what the UEFI loader makes of a format-v2
-volume's kernel before it jumps: the slot its book stands on, and whether the
-blocks BOOT names match the digests its Tally keeps (bootread.py, the oracle of
+DigestMemoWrite). `boot` says which kernel the UEFI loader jumps into on a
+format-v2 volume, and why: the slot its book stands on, whether the blocks BOOT
+names match the digests its Tally keeps, and, when they do not, each kernel
+the book names by tag in turn (bootread.py, bootbook.py, the oracle of
 tools/tagboot_stand.c). `self-test` plants every rule's damage into an overlay
 over IMAGE and checks that each is caught.
 
@@ -398,7 +399,7 @@ def CmdBound(args, medium):
 
 
 def CmdBoot(args, medium):
-    """What the loader's Lectern says of the volume's kernel, line by line
+    """What the loader's Lectern says of the volume's kernels, line by line
     (bootread.py): 0 when it says a verdict, 2 when the volume does not read."""
     from volumeread.bootread import BootRead
     try:

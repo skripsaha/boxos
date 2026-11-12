@@ -12,10 +12,12 @@
 #                         refused in so many words, and not one write lands
 #                         in its ground
 #   logcheck.sh bookboot  the kernel a format-v2 volume's BOOT names, held by
-#                         TagBoot to the book's digests before the jump: the
+#                         TagBoot to the book's digests before the jump, and
+#                         the kernels the book names by tag after it: the
 #                         Lectern on the host against volume-read boot, the
-#                         image attested through OVMF, and a byte past the
-#                         kernel's end flipped — named, and no jump
+#                         image attested through OVMF, a byte past the
+#                         kernel's end flipped — named, and no jump — and a
+#                         second kernel tagged boot jumped into in its place
 #   logcheck.sh mkfs      no boot: the image `make VOLUME_FORMAT=v2` lays held to
 #                         volume-read — its self-test over mkfs's own book, its
 #                         files, its ground — and create_tagfs on grounds past
