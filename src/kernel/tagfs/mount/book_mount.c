@@ -8,6 +8,7 @@
 #include "ground_census.h"
 #include "../block_map/block_map_derived.h"
 #include "../integrity/gloss.h"
+#include "../dedup/dedup.h"
 #include "../file_map/file_map.h"
 #include "../tag_registry/tag_registry.h"
 #include "../use_memory/use_memory.h"
@@ -652,6 +653,7 @@ void MountBookLetGo(void)
     RibbonWalkLetGo(g_book.ribbon);
     RibbonCursorLetGo();
     BinderMountReset();
+    DedupLetGo();
     GlossLetGo();
     CommonholdLetGoAll();
     TallyDigestsLetGo();

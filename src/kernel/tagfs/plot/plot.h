@@ -257,7 +257,15 @@ error_t  PlotExtendZero(Plot *p, uint64_t size);
  * of all such: one run of exactly that many is taken near `hint`, the blocks
  * are copied into it and flushed, and the Plot names the run instead. The
  * ground left comes to rest once a record that no longer names it is inked.
- * `shed` 0 asks for every run of the file in one (defrag).
+ * `shed` 0 asks for a stretch of the file's own runs in one (defrag): the
+ * first that does not lie in one run already, or the first of all.
+ *
+ * ‼ A RUN SHARED IS NEVER GATHERED (spec_v2 §8.2). Its blocks are another
+ * file's too, laid there by Dedup (dedup/dedup.h): copied into the file's own
+ * run they would hold the bytes twice again, the saving undone. So no window
+ * reaches across a run SHARED — the file's own runs between two are a
+ * stretch, gathered on its own — and a run SHARED makes no file one to
+ * defragment (PlotStretchScattered).
  *
  * Only ground the loaded record named is moved, never a Stake — and never a
  * block of a file the system keeps (B10): one wearing system, boot or god, or
@@ -286,6 +294,11 @@ typedef struct {
     uint32_t within;    /* ... and its block */
     bool     laid;      /* the Plot names the run */
 } PlotGathering;
+
+/* The first stretch of the file's own runs — runs in a row, none SHARED —
+ * that does not lie in one run of ground already: [*first, *last]. False when
+ * every stretch does: nothing of the file is a defrag's to move. */
+bool     PlotStretchScattered(const Plot *p, uint32_t *first, uint32_t *last);
 
 error_t  PlotGather(Plot *p, uint64_t shed, uint64_t hint);
 error_t  PlotGatherBegin(Plot *p, uint64_t shed, uint64_t hint, PlotGathering *g);

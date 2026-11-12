@@ -168,6 +168,20 @@ error_t TallyDigestsRottenNext(uint32_t* leaf, error_t (*rot)(void* ctx, const T
 bool    TallyDigestLeafAt(uint32_t index, TallyPlace* out, bool* rotten);
 uint32_t TallyDigestLeaves(void);
 
+/* The leaf of the DIGESTS the reads stand on whose range holds `block` — or,
+ * none holding it, the first whose range begins past it — read off the medium
+ * as a read of a digest reads it, with no TagFS lock held: each element's run
+ * of digested blocks from `block` on handed to `run` (its first block, how
+ * many, their digests little-endian, TallyDigestAt) in key order, an element
+ * that does not read ending the hand; *next the block past the leaf's range —
+ * UINT64_MAX past the book's last leaf, or with no leaf at or past `block` —
+ * and *sheets the Sheets the leaf takes. A leaf no copy of which reads hands
+ * nothing, said once as a read says it. OK, or memory's or the medium's
+ * refusal. Dedup's walk of the book (dedup/dedup.h), from any core, inside
+ * the door. */
+typedef void (*TallyDigestsRun)(void* ctx, uint64_t start, uint64_t n, const uint8_t* digests);
+error_t TallyDigestsFrom(uint64_t block, TallyDigestsRun run, void* ctx, uint64_t* next, uint64_t* sheets);
+
 /* How many ranges of the DIGESTS the reads stand on are known to read in no
  * copy — a leaf, or an inner node's whole range — named so by the mount's
  * walk, or found so by a read since: each one Escheat lays anew of the data.

@@ -462,6 +462,72 @@ uint32_t TallyDigestLeaves(void)
     return s_tables[__atomic_load_n(&s_table_at, __ATOMIC_ACQUIRE)].count;
 }
 
+/* The leaf of table `t` whose range holds `block`, or else the first whose
+ * range begins past it — t->count when none does. */
+static uint32_t TallyDigestLeafFrom(const TallyDigestTable* t, uint64_t block)
+{
+    uint32_t lo = 0, hi = t->count;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2u;
+        if (!t->leaves[mid].place.has_lo || t->leaves[mid].place.lo.k1 <= block)
+            lo = mid + 1u;
+        else
+            hi = mid;
+    }
+    if (lo > 0 && (!t->leaves[lo - 1u].place.has_hi || block < t->leaves[lo - 1u].place.hi.k1))
+        return lo - 1u;
+    return lo;
+}
+
+/* A leaf's elements from block `from` on, each run of digested blocks handed
+ * to `run`: an element that does not read ends the hand — the blocks past it
+ * carry no digest this leaf can give. */
+static void TallyDigestsHand(const uint8_t* s, uint32_t room, uint64_t from, TallyDigestsRun run, void* ctx)
+{
+    NodeHead       h;
+    TallyKey       prev, key;
+    uint32_t       at = 0, body, len;
+    uint64_t       n, skip;
+    const uint8_t* d;
+    if (NodeHeadGet(s, room, &at, &h) == TALLY_BODY_BROKEN)
+        return;
+    prev = h.first;
+    for (uint64_t i = 0; i < h.items && TallyItemGet(s, room, &at, TALLY_DIGESTS, prev, &key, &body, &len); i++) {
+        prev = key;
+        if (TallyDigestsGet(s + body, len, &n, &d) == TALLY_BODY_BROKEN)
+            return;
+        if (n == 0 || key.k1 + n <= from)
+            continue;
+        skip = key.k1 < from ? from - key.k1 : 0;
+        run(ctx, key.k1 + skip, n - skip, d + skip * 8u);
+    }
+}
+
+error_t TallyDigestsFrom(uint64_t block, TallyDigestsRun run, void* ctx, uint64_t* next, uint64_t* sheets)
+{
+    TallyDigestTable* t    = TallyDigestEnter();
+    uint32_t          leaf = TallyDigestLeafFrom(t, block);
+    error_t           rc   = OK;
+    *next   = UINT64_MAX;
+    *sheets = 0;
+    if (leaf < t->count) {
+        const TallyPlace* p    = &t->leaves[leaf].place;
+        uint8_t*          s    = NULL;
+        uint32_t          room = 0;
+        *next   = p->has_hi ? p->hi.k1 : UINT64_MAX;
+        *sheets = p->ptr.sheets;
+        if (t->leaves[leaf].rotten)
+            TallyDigestRotSay(t, leaf, "a node above it does not read");
+        else
+            rc = TallyDigestLeafRead(t, leaf, &s, &room);
+        if (rc == OK && s)
+            TallyDigestsHand(s, room, block, run, ctx);
+        kfree(s);
+    }
+    TallyDigestLeave(t);
+    return rc;
+}
+
 uint32_t TallyDigestsRotKnown(void)
 {
     TallyDigestTable* t = TallyDigestEnter();

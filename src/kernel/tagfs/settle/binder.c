@@ -8,6 +8,7 @@
 #include "../scribe/scribe.h"
 #include "../settle_cut/settle_cut.h"
 #include "../helm/engross.h"
+#include "../dedup/dedup.h"
 #include "loose_leaves.h"
 #include "../../../kernel/drivers/timer/rtc.h"
 
@@ -544,6 +545,7 @@ void BinderWeigh(void)
     __atomic_store_n(&g_binder.may_not, why, __ATOMIC_RELEASE);
     BinderTurnGivesPublish();
     BinderGroundHeldPublish();
+    DedupWeigh();      /* a pass of Dedup's that waits for the ribbon's room goes on */
     bool owed = due || __atomic_load_n(&g_binder.demanded, __ATOMIC_ACQUIRE);
     if (owed && why == s_off_chain && g_binder.said != why) {
         g_binder.said = why;

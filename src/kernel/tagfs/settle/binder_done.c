@@ -199,6 +199,7 @@ error_t BinderTallyDone(BinderRun* r)
     g_binder.slot[r->slot].rest_until = old.rest ? old.rest_until : SettledCycles() + FallowLag();
     BinderSlotsOwnPublish();
     BinderSlotLetGo(&old);
+    BinderGleanDedup(r);
     if (r->captured && !DogEarHeldLost())
         GlossCaptured(w);
     else if (r->captured)

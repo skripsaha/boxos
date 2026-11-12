@@ -475,7 +475,8 @@ static void ConjugateSays(const ConjugateAsk* ask, const ConjugateSaid* said, er
             (unsigned)rc, s_why[said->why], block);
 }
 
-error_t TagFSConjugate(InkWarrant warrant, const ConjugateAsk* ask, ConjugateSaid* out)
+/* The act, asked with `warrant`, said by its caller. */
+static error_t ConjugateAsked(InkWarrant warrant, const ConjugateAsk* ask, ConjugateSaid* out)
 {
     ConjugateAct a   = { .ask = ask, .at = ask->at, .rc = OK };
     ConjugateWhy why = CONJUGATE_REFUSED;
@@ -494,7 +495,17 @@ error_t TagFSConjugate(InkWarrant warrant, const ConjugateAsk* ask, ConjugateSai
     }
     out->why = why;
     out->at  = a.at;
-    error_t rc = ConjugateErrorOf(why, a.rc);
+    return ConjugateErrorOf(why, a.rc);
+}
+
+error_t TagFSConjugate(InkWarrant warrant, const ConjugateAsk* ask, ConjugateSaid* out)
+{
+    error_t rc = ConjugateAsked(warrant, ask, out);
     ConjugateSays(ask, out, rc);
     return rc;
+}
+
+error_t ConjugateLay(const ConjugateAsk* ask, ConjugateSaid* out)
+{
+    return ConjugateAsked(INK_WARRANTED, ask, out);
 }

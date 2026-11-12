@@ -58,33 +58,63 @@ static error_t PlotGatherKept(const Plot *p, const uint32_t *tags, uint32_t coun
     return ERR_PERMISSION_DENIED;
 }
 
+/* The stretch of the file's own runs from run `from` on — the first run not
+ * SHARED there and the runs in a row after it none of which is: [*first,
+ * *last], and whether it lies in one run of ground. False past the last. */
+static bool PlotStretchFrom(const Plot *p, uint32_t from, uint32_t *first, uint32_t *last, bool *one)
+{
+    uint32_t i = from;
+    while (i < p->run_count && p->runs[i].kind == STRIP_SHARED)
+        i++;
+    if (i == p->run_count)
+        return false;
+    *first = *last = i;
+    *one   = p->runs[i].kind == STRIP_DATA;
+    while (*last + 1u < p->run_count && p->runs[*last + 1u].kind != STRIP_SHARED) {
+        const Strip *r = &p->runs[++*last];
+        *one = *one && r->kind == STRIP_DATA && r->start == p->runs[*last - 1u].start + p->runs[*last - 1u].count;
+    }
+    return true;
+}
+
+bool PlotStretchScattered(const Plot *p, uint32_t *first, uint32_t *last)
+{
+    bool one = true;
+    for (uint32_t from = 0; PlotStretchFrom(p, from, first, last, &one); from = *last + 1u)
+        if (!one)
+            return true;
+    return false;
+}
+
 /* The window [*first, *last] of runs the loaded record named that sheds at
- * least `shed` extents with the fewest blocks — no more than one Strip counts;
- * `shed` 0 wants every run. */
+ * least `shed` extents with the fewest blocks — no more than one Strip counts,
+ * none of them SHARED; `shed` 0 wants a stretch whole: the first scattered,
+ * or the first of all. */
 static bool PlotChooseWindow(const Plot *p, uint64_t shed, uint32_t *first, uint32_t *last,
                              uint64_t *blocks)
 {
     uint64_t best = UINT64_MAX;
     uint64_t base = 0;
+    bool     one  = true;
 
     if (shed == 0) {
-        uint64_t all = 0;
-        for (uint32_t i = 0; i < p->run_count; i++)
-            all += p->runs[i].count;
-        if (all > p->blocks_before || all > UINT32_MAX || p->run_count == 0)
+        uint64_t all = 0, end = 0;
+        if (!PlotStretchScattered(p, first, last) && !PlotStretchFrom(p, 0, first, last, &one))
             return false;
-        *first  = 0;
-        *last   = p->run_count - 1;
+        for (uint32_t i = 0; i <= *last; i++)
+            end += p->runs[i].count;
+        for (uint32_t i = *first; i <= *last; i++)
+            all += p->runs[i].count;
         *blocks = all;
-        return true;
+        return end <= p->blocks_before && all <= UINT32_MAX;
     }
 
     for (uint32_t i = 0; i < p->run_count; base += p->runs[i].count, i++) {
         uint64_t sum = 0, end = base, extents = 0;
         for (uint32_t j = i; j < p->run_count; j++) {
             end += p->runs[j].count;
-            if (end > p->blocks_before)
-                break;                          /* only ground the record named moves */
+            if (end > p->blocks_before || p->runs[j].kind == STRIP_SHARED)
+                break;                          /* only ground the record named moves, and its own */
             sum += p->runs[j].count;
             if (sum >= best || sum > UINT32_MAX)
                 break;                          /* ... into one run, as long as a Strip counts */
