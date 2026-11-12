@@ -41,6 +41,7 @@ from .selftest_book_tip_in import TipInCases
 from .selftest_book_escheat import EscheatCases, LockedCases
 from .selftest_book_facsimile import FacsimileRuleCases, FacsimileReplayCases, BootSlipCases
 from .selftest_book_memo import MemoCases
+from .selftest_book_boot import BootCases
 
 # ---------------------------------------------------------------------------
 # Running
@@ -55,7 +56,7 @@ def BookCases(bt):
                   RecordCases, MachineRecordCases, RecordRuleCases, RibbonEndCases, RibbonBranchCases,
                   RibbonFurtherCases, RibbonLossCases, RibbonCases, RibbonShapeCases, RibbonBoundCases, ErrataCases,
                   TipInCases, EscheatCases, LockedCases, FacsimileRuleCases, FacsimileReplayCases, BootSlipCases,
-                  MemoCases):
+                  MemoCases, BootCases):
         try:
             cases += group(bt)
         except Unreadable as e:
