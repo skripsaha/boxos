@@ -13,7 +13,8 @@
 # ring empty, a byte of the kernel's code flipped and a byte of the zeros past
 # its end; a second kernel tagged boot bound in the Tally or born on the ribbon
 # with BOOT's flipped, the ribbon torn past its birth, an Undone of its Born, a
-# Shaped of it whose base does not hold — and on each, and on IMAGE as it is,
+# Shaped of it whose base does not hold, its stitch at the start of the
+# next_quire, its stitch closed and damaged — and on each, and on IMAGE as it is,
 # what the stand says (tools/tagboot_stand.c) must be what `volume-read boot`
 # says: the slots passed over, the slot stood on, every node read past a copy
 # that did not hold, the ribbon and its records, each kernel tried and its
@@ -28,7 +29,7 @@ TREE=$(cd "$(dirname "$0")/.." && pwd)
 cd "$TREE" || exit 2
 CC_HOST=${CC_HOST:-cc}
 IMG=${1:-build/boxos.img}
-LANDINGS="A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12 A13"
+LANDINGS="A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12 A13 A14 A15"
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/tagboot_stand.XXXXXX") || exit 2
 trap 'rm -rf "$WORK"' EXIT

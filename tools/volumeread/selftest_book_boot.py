@@ -11,7 +11,10 @@ stops. Then a second kernel the book names by the tag `boot`, BOOT's flipped:
 bound into the Tally, or born on the ribbon past it — attested in BOOT's
 place; the ribbon torn past its birth, the tear not applied; an Undone of its
 Born — no such kernel, the loader stops; a Shaped of it whose base does not
-hold — passed over, the kernel as it was born. Each a fork of the base
+hold — passed over, the kernel as it was born; its stitch at the start of
+the ribbon's next_quire (rule (б)); its stitch closed and damaged, a sector
+of it lost and a stitch after it naming it (rule (в)) — the spare attested by
+what of its Born reads. Each a fork of the base
 selftest_book.py lays, the census's words for it, and the verdict bootread.py
 says — which the host stand (tools/tagboot_stand.sh) then holds the Lectern
 itself to, line for line, on every one of them written out by --emit; and
@@ -161,12 +164,15 @@ def BootCases(bt):
         binder.BindWrite(o, g, bound[1])
         Flip(o, middle, 100)
 
-    def Ribbon(after=()):
-        """The spare born on the ribbon in a stitch of its own, then `after`
-        (o, pen, the stitch it was born in) — BOOT's code flipped."""
+    def Ribbon(after=(), hop=False):
+        """The spare born on the ribbon in a stitch of its own — `hop`, at the
+        start of the next_quire — then `after` (o, pen, the stitch it was born
+        in); BOOT's code flipped."""
         def Plant(o):
             sp.Lay(bt, o)
             pen = bt.Pen(o)
+            if hop:
+                pen.Hop()
             born = pen.Sew(sp.Records(), flags=stitch.DATA_FLUSHED)
             for step in after:
                 step(o, pen, born)
@@ -190,6 +196,12 @@ def BootCases(bt):
         pen.Sew([stitch.Shaped(fid=sp.fid, base=2, size=sp.size, mtime_ns=1,
                                splices=[(0, 1, [stitch.Data(sp.junk, 1)])],
                                digests=[bookread.Integrity(junk, bt.lanes)])], flags=stitch.DATA_FLUSHED)
+
+    def Damaged(o, pen, born):
+        """A stitch after the spare's, and the last sector of the spare's
+        spoilt: what lies before it reads by `lead`."""
+        pen.Sew([stitch.UseContext(b"after")], flags=stitch.DATA_FLUSHED)
+        bt.Rot(o, born.vlbas[-1])
 
     rotten = ("no slot that holds names a Tally that reads" if root.level == 0 else
               "its block 0 (volume block %u) lies in the DIGESTS range of blocks [%u, %s), which does not read"
@@ -253,4 +265,14 @@ def BootCases(bt):
                   lambda c: "stitch 4's Shaped of fid %u does not fit the file: its base names the file at 2 and the "
                   "file stands at 3 — the file stays as it last matched" % sp.fid in Verdict(c) and
                   Verdict(c)[-1] == spare)]),
+        Case("A14 the spare's stitch at the start of the ribbon's next_quire", Ribbon(hop=True),
+             must={"DIGEST_MISMATCH"}, checks=[
+                 ("rule (б) sews it on, and the spare, fid %u, is attested" % sp.fid,
+                  lambda c: "the ribbon past slot 0's Tally: 1 stitch(es) sewn on, seq 3 to 3" in Verdict(c) and
+                  Verdict(c)[-1] == spare)]),
+        Case("A15 the spare's stitch closed and damaged", Ribbon([Damaged]), must={"DIGEST_MISMATCH", "STITCH_TORN"},
+             checks=[("rule (в) sews it on with the stitch after it, and the spare, fid %u, is attested by what of "
+                      "its Born reads" % sp.fid,
+                      lambda c: "the ribbon past slot 0's Tally: 2 stitch(es) sewn on, seq 3 to 4" in Verdict(c) and
+                      Verdict(c)[-1] == spare)]),
     ]

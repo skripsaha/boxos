@@ -86,7 +86,7 @@ run_bookboot() {
     tools/tagboot_stand.sh build/boxos.img >"$SCRATCH/bookboot.stand" 2>&1
     rc=$?
     sed 's/^/  /' "$SCRATCH/bookboot.stand"
-    [ $rc = 0 ] && grep -qE "^tagboot: 14 passed, 0 failed" "$SCRATCH/bookboot.stand"
+    [ $rc = 0 ] && grep -qE "^tagboot: 16 passed, 0 failed" "$SCRATCH/bookboot.stand"
     chk $? "bookboot: the Lectern built on the host says what volume-read boot says, on the image and every landing of group A ($(tail -1 "$SCRATCH/bookboot.stand"))"
 
     # The image as built.
