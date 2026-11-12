@@ -32,7 +32,7 @@ from .ondisk import BLOCK, SECTORS_PER_BLOCK
 from .stitch import MEDIUM_LIED
 from .tally import (DIGESTS, FILES, NODE_HEAD, SHEET_PAYLOAD, SPINE_MEDIUM_LIED, TAGS, TREE_NAMES, USE, Node,
                     Root, Rotten, Slot, Tally, DigestsEncode, FileHeadEncode, InnerEncode, ItemBytes, KeyFull,
-                    NodeSectors, NodeStream, ParcelEncode, SlotBlock, SlotSectors, TagEncode)
+                    NodeSectors, NodeStream, ParcelEncode, RunShared, SlotBlock, SlotSectors, TagEncode)
 
 PARCEL_STRIPS_MOST = 128             # volume_tally.h PARCEL_STRIPS_MOST
 
@@ -433,15 +433,16 @@ def Circle(medium, mount):
 
 def _RunsKey(fs):
     """A file's runs as the book says them, whatever Parcels they were cut
-    into: a hole's length, or ground from its start with its birth — runs
-    that go on one another of one kind and one birth taken as one."""
+    into: a hole's length, or ground from its start with its birth and
+    whether it is SHARED — runs that go on one another of one kind and one
+    birth taken as one."""
     out = []
     for r in fs.runs:
-        birth = 0 if r.hole else r.birth
-        if out and out[-1][0] == r.hole and out[-1][3] == birth and (r.hole or out[-1][1] + out[-1][2] == r.start):
+        birth, kind = 0 if r.hole else r.birth, 1 if r.hole else 2 if RunShared(r) else 0
+        if out and out[-1][0] == kind and out[-1][3] == birth and (r.hole or out[-1][1] + out[-1][2] == r.start):
             out[-1][2] += r.count
             continue
-        out.append([r.hole, 0 if r.hole else r.start, r.count, birth])
+        out.append([kind, 0 if r.hole else r.start, r.count, birth])
     return out
 
 

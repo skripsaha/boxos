@@ -30,10 +30,13 @@
  * blocks held for what rotted (a rotten range's files, locked — their own
  * class, never an orphan, given to no one until an explicit act lets them
  * go), and the ground the ribbon let go, lying fallow until the Quire it was
- * let go in is left behind (M-1). A bookmark's ground (§4.6: the nodes of its
- * trees, the runs under its Lien) is no owner's here: this kernel does not
- * read it, so a book whose Tally names a bookmark has its free blocks not
- * counted at all (book_ground.c).
+ * let go in is left behind (M-1). A file's run that carries SHARED (§8.2) is
+ * not exclusive: it lies over the one DATA run that names its block, or over
+ * none once that owner has gone, beside other SHARED runs — on any other
+ * owner's ground it is two owners of one block. A bookmark's ground (§4.6:
+ * the nodes of its trees, the runs under its Lien) is no owner's here: this
+ * kernel does not read it, so a book whose Tally names a bookmark has its
+ * free blocks not counted at all (book_ground.c).
  *
  * What a snapshot an earlier kernel took kept is no owner's: nothing reads a
  * format-v1 snapshot, so those blocks are orphans (cow.h).
@@ -53,7 +56,8 @@
     X(GROUND_RIBBON,          "ribbon",          1, 2)            \
     X(GROUND_FAR_DEED,        "far_deed",        1, 2)            \
     X(GROUND_HELD,            "held",            1, 2)            \
-    X(GROUND_FALLOW,          "fallow",          1, 2)
+    X(GROUND_FALLOW,          "fallow",          1, 2)            \
+    X(GROUND_SHARED,          "shared",          0, 2)
 
 typedef enum {
 #define GROUND_OWNER_ID(id, name, exclusive, formats) id,

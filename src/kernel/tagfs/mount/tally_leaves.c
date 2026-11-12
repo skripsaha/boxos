@@ -22,7 +22,7 @@
  * and _Rest), so the two readers lock the same files and give the same
  * reasons the volume may only be read: a body longer than this reader knows,
  * a tag RETIRED, past the last id this kernel gives or wider than it holds a
- * tag, a run carrying an extension.
+ * tag, a run carrying an extension but SHARED alone (RibbonRunCarried).
  */
 
 /* What a body this reader read to its known end leaves over, said: written by
@@ -193,9 +193,10 @@ static bool BookFileRun(BookFile* f, const TallyRun* r)
         if (start >= end)
             return true;
     }
+    uint32_t kind = r->hole ? STRIP_HOLE : RibbonRunCarried(r) == RUN_CARRIED_SHARED ? STRIP_SHARED : STRIP_DATA;
     for (uint64_t left = end - start; left;) {
         uint32_t n = left > UINT32_MAX ? UINT32_MAX : (uint32_t)left;
-        Strip    s = { r->hole ? 0 : start, n, r->hole ? STRIP_HOLE : STRIP_DATA, r->birth };
+        Strip    s = { r->hole ? 0 : start, n, kind, r->birth };
         if (!BookFileStrip(f, &s))
             return false;
         start += r->hole ? 0 : n;
@@ -325,7 +326,7 @@ static error_t BookFileParcel(BookFile* f, uint64_t first, const uint8_t* body, 
     for (uint64_t i = 0; i < n; i++) {
         TallyRun r;
         TallyRunGet(body, len, &at, &cursor, seq, &r);
-        f->ext |= r.ext != NULL;
+        f->ext |= RibbonRunCarried(&r) == RUN_CARRIED_NOT;
         if (!BookFileRun(f, &r))
             return ERR_NO_MEMORY;
     }
@@ -442,7 +443,7 @@ static error_t BookFileLock(BookFile* f, const char* why)
 {
     error_t rc = BookLockedByName(f->fid, why);
     for (uint32_t i = 0; rc == OK && i < f->nstrips; i++)
-        if (f->strips[i].kind == STRIP_DATA)
+        if (StripOnGround(f->strips[i].kind))
             BookGroundHoldRun(f->strips[i].start, f->strips[i].count);
     if (rc == OK)
         BookFileKept(f);

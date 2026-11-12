@@ -1,4 +1,5 @@
 #include "book_mount.h"
+#include "../ink/commonhold.h"
 #include "facsimile.h"
 #include "foxing.h"
 #include "../settle/binder.h"
@@ -652,6 +653,7 @@ void MountBookLetGo(void)
     RibbonCursorLetGo();
     BinderMountReset();
     GlossLetGo();
+    CommonholdLetGoAll();
     TallyDigestsLetGo();
     BlockMapDerivedLetGo();
     memset(&g_book, 0, sizeof(g_book));

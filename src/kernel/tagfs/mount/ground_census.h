@@ -50,7 +50,11 @@ error_t GroundCensusRun(BlockMapOrphanFn orphan, BlockMapCensusCount* out);
 /*
  * A format-v2 volume's census, which keeps no bitmap to hold the claims
  * against (spec_v2 §4.6): every block an owner names is taken, and the only
- * finding is a block two owners name — said where they meet, as above. The
+ * finding is a block two owners name — said where they meet, as above; a run
+ * SHARED (GROUND_SHARED) is no second owner beside its block's DATA run or
+ * another run SHARED, and is one on any other owner's ground (§8.2). Before
+ * the cut below, how many name each block a run SHARED names is counted into
+ * Commonhold (ink/commonhold.h, ground_shares.c). The
  * GROUND_FALLOW claims are the ground the ribbon let go (M-1); fallow is what
  * of them no other owner but the held names, *fallow their blocks. The
  * GROUND_HELD claims are what may be held for what rotted; held is what of
@@ -98,6 +102,10 @@ void    GroundCensusNamed(uint64_t start, uint64_t count);
  * ground behind the volume is no one's before it is taken
  * (mount/book_grow.c), as a format-v1 volume's bitmap past its data run is. */
 uint64_t GroundCensusReach(void);
+
+/* The blocks a format-v2 volume's census said two owners name (GroundCensusBook),
+ * since Begin. */
+uint64_t GroundCensusDoubled(void);
 
 /* The claims let go. */
 void    GroundCensusEnd(void);

@@ -66,7 +66,7 @@ static bool SpliceKept(const SpliceSide* o, const SpliceSide* n)
         return false;
     uint64_t off = n->pos - o->pos;
     return off + n->s.count <= o->s.count && n->s.kind == o->s.kind && n->s.birth == o->s.birth &&
-           (n->s.kind != STRIP_DATA || n->s.start == o->s.start + off);
+           (!StripOnGround(n->s.kind) || n->s.start == o->s.start + off);
 }
 
 /* Both walks at the first Strip of one Parcel at one block: the Parcel passed

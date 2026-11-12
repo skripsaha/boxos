@@ -369,7 +369,7 @@ error_t PlotTrimTo(Plot *p, uint64_t keep_blocks)
         /* A hole owns no ground — its start names no block — so a cut into
          * one lets nothing go (plot_window.c, PlotRestake, passes it over
          * alike). */
-        error_t  rc   = last->kind == STRIP_DATA ? PlotLetGo(p, last->start + last->count - cut, cut) : OK;
+        error_t  rc   = StripOnGround(last->kind) ? PlotLetGo(p, last->start + last->count - cut, cut) : OK;
         if (rc != OK)
             return rc;
         last = &p->runs[p->run_count - 1];

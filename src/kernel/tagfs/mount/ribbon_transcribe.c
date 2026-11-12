@@ -433,7 +433,7 @@ static error_t RibbonFileLaid(RibbonReplay* rp, RibbonStaged* s)
     FileMapStake stake = { .count = 0 };
     error_t      rc    = RibbonTagsMoved(old, s->rec, s->fid, true);
     memset(&where, 0, sizeof(where));
-    DogEarFileChanged(s->fid, old, s->rec);       /* changed since the Tally the mount stands on */
+    DogEarFileChanged(s->fid, old, s->rec, UINT64_MAX);    /* changed since the Tally the mount stands on */
     if (rc == OK)
         rc = RibbonTagsMoved(s->rec, old, s->fid, false);
     if (rc == OK && s->rec) {
@@ -600,7 +600,9 @@ static uint32_t RibbonOutside(const FileRecord* rec, char* out, size_t room)
     return n;
 }
 
-/* Whether a DATA run of `rec` meets one of another live file's. */
+/* Whether a DATA run of `rec` meets one of another live file's — a run
+ * SHARED on either side names ground another may name too, and holds none
+ * from the other (§8.2; bookmount.py _Settle, Owned). */
 static bool RibbonOnOthers(const FileRecord* rec)
 {
     TagFSState* fs   = tagfs_get_state();
@@ -617,8 +619,8 @@ static bool RibbonOnOthers(const FileRecord* rec)
             StripWalkBegin(other, &a);
             while (!meet && StripWalkNextGround(&a, &x)) {
                 StripWalkBegin(rec, &b);
-                while (!meet && StripWalkNextGround(&b, &y))
-                    meet = x.start < y.start + y.count && y.start < x.start + x.count;
+                while (!meet && x.kind == STRIP_DATA && StripWalkNextGround(&b, &y))
+                    meet = y.kind == STRIP_DATA && x.start < y.start + y.count && y.start < x.start + x.count;
             }
             FileRecordRelease(other);
             if (meet)
@@ -647,7 +649,7 @@ static error_t RibbonOutsideLocked(RibbonWalk* w, uint64_t fid)
 }
 
 /* What of a file the replay leaves standing this kernel cannot carry on: a
- * run with an extension, flags past 32 bits. Slips on its last block it
+ * run with an extension but SHARED alone, flags past 32 bits. Slips on its last block it
  * carries on (§16.5 п.13) — counted, true, for the Tally that may not take
  * its slice before they are laid in a block (LooseLeaves). */
 static bool RibbonCarriedSaid(const RibbonReplay* rp, uint64_t fid)

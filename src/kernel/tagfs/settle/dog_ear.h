@@ -52,8 +52,16 @@ void     DogEarPut(uint64_t tree, TallyKey lo, TallyKey hi);
  * its header and every Parcel of either record not shared with the other at
  * one place of the file, the whole id for a file born or given up; and every
  * window of DIGEST_ITEM_MOST blocks whose ground one of the two names and the
- * other does not. By the Settle's holder or the mount, with no TagFS lock. */
-void     DogEarFileChanged(uint64_t fid, const FileRecord* was, const FileRecord* now);
+ * other does not — the ground it let go gone but what another owner held at
+ * the slice of Ink `slice`, the last its stitch carries (ink/commonhold.h): a
+ * block in common keeps its digest while an owner lives. By the Settle's
+ * holder or the mount (`slice` UINT64_MAX), with no TagFS lock. */
+void     DogEarFileChanged(uint64_t fid, const FileRecord* was, const FileRecord* now, uint64_t slice);
+
+/* The mount's, its census counted (ground_shares.c): every block in common
+ * an owner holds born, and not gone — the replay before the count put it gone
+ * where one owner of it let it go. */
+void     DogEarCommonheld(void);
 
 /* The leaf at `at` of `tree`, a copy of which did not hold: its range. */
 void     DogEarMended(uint64_t tree, const TallyPlace* at);

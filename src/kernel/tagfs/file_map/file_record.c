@@ -161,8 +161,10 @@ uint64_t StripsAsGround(Strip* s, uint64_t count)
     return n;
 }
 
-/* The ground `took` names that `gave` does not, as DATA Strips in a new array:
- * what the splices freed. Both lists are put in order of their first block. */
+/* The ground `took` names that `gave` does not, in a new array, each piece of
+ * the kind it was taken out as — DATA, or SHARED, which its last owner alone
+ * lets go (ink/commonhold.h): what the splices freed. Both lists are put in
+ * order of their first block. */
 static error_t GroundLess(TractGround* took, TractGround* gave, Strip** out, uint64_t* nout)
 {
     *out  = NULL;
@@ -188,12 +190,12 @@ static error_t GroundLess(TractGround* took, TractGround* gave, Strip** out, uin
         for (uint64_t g = first; g < gave->count && gave->strip[g].start < end && at < end; g++) {
             uint64_t from = gave->strip[g].start, to = from + gave->strip[g].count;
             if (from > at)
-                freed[n++] = (Strip){ .start = at, .count = (uint32_t)(from - at), .kind = STRIP_DATA };
+                freed[n++] = (Strip){ .start = at, .count = (uint32_t)(from - at), .kind = took->strip[t].kind };
             if (to > at)
                 at = to;
         }
         if (at < end)
-            freed[n++] = (Strip){ .start = at, .count = (uint32_t)(end - at), .kind = STRIP_DATA };
+            freed[n++] = (Strip){ .start = at, .count = (uint32_t)(end - at), .kind = took->strip[t].kind };
     }
     if (n == 0)
         kfree(freed);
@@ -203,11 +205,11 @@ static error_t GroundLess(TractGround* took, TractGround* gave, Strip** out, uin
     return OK;
 }
 
-/* The DATA Strips of a splice's insert, added to `gave`. */
+/* The Strips of ground a splice puts in, DATA and SHARED, added to `gave`. */
 static error_t GroundOfInsert(TractGround* gave, const BookSplice* sp)
 {
     for (uint64_t k = 0; k < sp->ninsert; k++)
-        if (sp->insert[k].kind == STRIP_DATA && TractGroundAdd(gave, &sp->insert[k]) != OK)
+        if (StripOnGround(sp->insert[k].kind) && TractGroundAdd(gave, &sp->insert[k]) != OK)
             return ERR_NO_MEMORY;
     return OK;
 }
@@ -319,7 +321,7 @@ bool FileRecordFind(const FileRecord* rec, uint64_t k, FileSpot* out)
         uint64_t     off = at - (lo ? end[lo - 1u] : 0);
         out->kind  = s->kind;
         out->left  = (uint32_t)(s->count - off - 1u);
-        out->block = s->kind == STRIP_DATA ? s->start + off : 0;
+        out->block = StripOnGround(s->kind) ? s->start + off : 0;
     }
 #ifdef CONFIG_VOLUME_TESTS
     __atomic_add_fetch(&((FileRecord*)rec)->find_steps, steps, __ATOMIC_RELAXED);
@@ -403,7 +405,7 @@ bool StripWalkParcel(StripWalk* w, const Strip** strips, uint32_t* count)
 bool StripWalkNextGround(StripWalk* w, Strip* out)
 {
     while (StripWalkNext(w, out))
-        if (out->kind == STRIP_DATA)
+        if (StripOnGround(out->kind))
             return true;
     return false;
 }

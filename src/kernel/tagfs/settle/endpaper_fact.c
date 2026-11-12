@@ -697,7 +697,7 @@ static void StoodFile(uint64_t fid, const FileRecord* rec, uint64_t grid)
     SinceFile(&s_since, fid, NULL, 0, rec, rec->gen, grid);
     StripWalkBegin(rec, &w);
     while (StripWalkNextGround(&w, &s))
-        if (s.birth > s_since.seq)
+        if (s.kind == STRIP_DATA && s.birth > s_since.seq)     /* a run SHARED lays no element of DIGESTS */
             SinceGround(&s_since, s.start, s.count, s_laid.digests_last);
 }
 

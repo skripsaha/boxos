@@ -67,7 +67,7 @@ bool StandBlockOf(uint64_t file_id, uint64_t k, uint64_t* out_block)
     if (!tagfs_enter())
         return false;
     FileRecord* rec   = FileMapRecordHold(tagfs_get_state()->files, file_id, NULL);
-    bool        found = rec && FileRecordFind(rec, k, &spot) && spot.kind == STRIP_DATA;
+    bool        found = rec && FileRecordFind(rec, k, &spot) && StripOnGround(spot.kind);
     if (found)
         *out_block = spot.block;
     FileRecordRelease(rec);

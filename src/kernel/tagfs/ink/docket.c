@@ -252,7 +252,7 @@ error_t DocketBirths(const DocketTaken* t, uint64_t seq, uint64_t* fid_most)
             Strip     s;
             StripWalkBegin(j->now, &w);
             while (rc == OK && StripWalkNextGround(&w, &s))
-                rc = BirthsNoted(&s, 1, seq);
+                rc = s.kind == STRIP_SHARED ? BirthsSharedNoted(j->fid, &s, 1, seq) : BirthsNoted(&s, 1, seq);
         } else if (j->nsplices) {
             /* A Shaped carried, whatever the Jot's kind: a Labeled after a
              * write merges to one (JotMerged) and still lays its Shaped
@@ -261,6 +261,8 @@ error_t DocketBirths(const DocketTaken* t, uint64_t seq, uint64_t* fid_most)
             for (uint64_t i = 0; i < j->nsplices; i++)
                 n += j->splices[i].ninsert;
             rc = BirthsNoted(j->inserted, n, seq);
+            if (rc == OK)
+                rc = BirthsSharedNoted(j->fid, j->inserted, n, seq);
         }
     }
     return rc;
@@ -274,7 +276,7 @@ error_t DocketBirths(const DocketTaken* t, uint64_t seq, uint64_t* fid_most)
  * (a record's tag and length take STITCH_RECORD_HEAD_MOST, sewing.h). */
 #define JOT_VARINT_MOST       10u
 #define JOT_ID_MOST           5u
-#define JOT_RUN_MOST          15u    /* head 5, start 10: no extension is written here */
+#define JOT_RUN_MOST          18u    /* head 5, start 10, a run SHARED's list of extensions 3 (RibbonSharedList) */
 
 /* The body of a Born of `now` at the most: its fields, its runs, a digest a
  * block of them, and the empty Slip. */
@@ -368,7 +370,8 @@ static void JotMeasured(const Jot* j, uint64_t* records, uint64_t* bytes, uint64
 
 /* The runs of fresh data the records of `j` will name, and their blocks:
  * every DATA Strip of a Born, every DATA Strip a Shaped's splices put in —
- * the ones DocketLay lays with a digest each (JotRunPut). */
+ * the ones DocketLay lays with a digest each (JotRunPut); a run SHARED names
+ * ground written before it, and is none of them (§2.7). */
 static void JotFresh(const Jot* j, uint64_t* runs, uint64_t* fresh)
 {
     Strip     s;
@@ -376,7 +379,7 @@ static void JotFresh(const Jot* j, uint64_t* runs, uint64_t* fresh)
     if (j->kind == JOT_BORN) {
         StripWalkBegin(j->now, &w);
         while (StripWalkNext(&w, &s))
-            if (s.kind != STRIP_HOLE) {
+            if (s.kind == STRIP_DATA) {
                 (*runs)++;
                 *fresh += s.count;
             }
@@ -386,7 +389,7 @@ static void JotFresh(const Jot* j, uint64_t* runs, uint64_t* fresh)
         return;
     for (uint64_t i = 0; i < j->nsplices; i++)
         for (uint64_t k = 0; k < j->splices[i].ninsert; k++)
-            if (j->splices[i].insert[k].kind != STRIP_HOLE) {
+            if (j->splices[i].insert[k].kind == STRIP_DATA) {
                 (*runs)++;
                 *fresh += j->splices[i].insert[k].count;
             }
@@ -465,12 +468,16 @@ static RibbonSlip JotSlipPut(const Jot* j, JotApart* a)
 
 /* `s` laid as a run of the ribbon's form, and the digests the Gloss holds for
  * its blocks after the ones laid — a block the Gloss does not name is a
- * defect of the writer, said, and laid as no digest a block of data has. */
+ * defect of the writer, said, and laid as no digest a block of data has. A
+ * run SHARED is laid with its extension and no digest: its blocks are held to
+ * the one digest their ground carries (§2.8). */
 static void JotRunPut(JotApart* a, const Strip* s, uint64_t fid)
 {
     TallyRun r = { .start = s->start, .count = s->count, .birth = 0, .hole = s->kind == STRIP_HOLE };
+    if (s->kind == STRIP_SHARED)
+        r.ext = RibbonSharedList(&r.ext_len);
     a->runs_bytes += RibbonRunPut(a->runs + a->runs_bytes, &r, &a->cursor);
-    if (r.hole)
+    if (r.hole || s->kind == STRIP_SHARED)
         return;
     if (!GlossCopy(s->start, s->count, a->digests + a->ndigests * 8u)) {
 #if CONFIG_STRICT

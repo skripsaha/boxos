@@ -13,9 +13,10 @@
  * them.
  */
 
-/* A run in the Tally's form with no extension, at the most: its head, its
- * start's distance and its birth_delta, each a varint at its widest. */
-#define TALLY_RUN_PUT_MOST  30u
+/* A run in the Tally's form at the most: its head, its start's distance and
+ * its birth_delta, each a varint at its widest, and a run SHARED's list of
+ * extensions (RibbonSharedList), the one this kernel writes. */
+#define TALLY_RUN_PUT_MOST  33u
 
 // ----------------------------------------------------------------------------
 // Keys
@@ -126,10 +127,13 @@ static error_t FileHeadItem(BinderWork* w, const BinderFile* f, BinderItem* it)
 }
 
 /* A run's birth: its own, or — born of this mount's writing — the seq of the
- * stitch that put it in (births.c). 0 when nobody knows it. */
-static uint64_t RunBirth(const Strip* s)
+ * stitch that put it in (births.c; a run SHARED of file `fid`'s own,
+ * births_shared.c). 0 when nobody knows it. */
+static uint64_t RunBirth(uint64_t fid, const Strip* s)
 {
-    return s->birth ? s->birth : BirthsOf(s->start);
+    if (s->birth)
+        return s->birth;
+    return s->kind == STRIP_SHARED ? BirthsSharedOf(fid, s->start) : BirthsOf(s->start);
 }
 
 /* The Parcel `strips` of file `f`, (fid, 1 + b) — b the file block it begins
@@ -144,7 +148,9 @@ static error_t ParcelItem(BinderWork* w, const BinderFile* f, const Strip* strip
     for (uint32_t i = 0; i < n; i++) {
         TallyRun r = { .start = strips[i].start, .count = strips[i].count, .birth = 0,
                        .hole = strips[i].kind == STRIP_HOLE, .ext_len = 0, .ext = NULL };
-        if (!r.hole && (r.birth = RunBirth(&strips[i])) == 0) {
+        if (strips[i].kind == STRIP_SHARED)
+            r.ext = RibbonSharedList(&r.ext_len);
+        if (!r.hole && (r.birth = RunBirth(f->fid, &strips[i])) == 0) {
             kprintf("[TagFS] DEFECT: the run of fid %llu at block %llu (%llu blocks) has no birth this mount "
                     "knows — no Tally is written over a birth it would make up\n", (unsigned long long)f->fid,
                     (unsigned long long)r.start, (unsigned long long)r.count);

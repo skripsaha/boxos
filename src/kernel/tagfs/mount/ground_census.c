@@ -1,4 +1,4 @@
-#include "ground_census.h"
+#include "ground_census_internal.h"
 #include "../block_map/block_map_derived.h"
 
 /*
@@ -7,14 +7,6 @@
  * run that crosses the window's end is carried into the next, so every run is
  * looked at once for every window it lies in and never for any other.
  */
-
-typedef struct {
-    uint64_t start;
-    uint64_t who;
-    uint32_t count;
-    uint32_t owner;
-    uint32_t namer;     /* the Spine slot that gives it, + 1; 0 when no slot does */
-} GroundRun;
 
 static const bool g_owner_alone[GROUND_OWNER_KINDS] = {
 #define GROUND_OWNER_ALONE(id, name, exclusive, formats) [id] = (exclusive) != 0,
@@ -28,6 +20,7 @@ static uint32_t   s_count;
 static uint32_t   s_cap;
 static bool       s_refused;       /* a claim found no memory: the census decides nothing */
 static uint64_t   s_reach;         /* past the farthest block an owner but the far Deed names */
+static uint64_t   s_doubled;       /* blocks a book's census said two owners name */
 
 /* The sweep: the next run not yet met, and the runs a window before this one
  * carried over its end. */
@@ -187,10 +180,16 @@ static void RunsOneName(void)
     s_count = kept;
 }
 
+/* Whether an owner of kind `owner` is a file's — its DATA, or a run SHARED. */
+static bool OwnerIsFile(uint32_t owner)
+{
+    return owner == GROUND_FILE || owner == GROUND_SHARED;
+}
+
 /* An owner as the lines name it: a file by its id, any other by its kind. */
 static void OwnerSay(uint32_t owner, uint64_t who, char* out, size_t room)
 {
-    if (owner == GROUND_FILE)
+    if (OwnerIsFile(owner))
         ksnprintf(out, room, "file %llu", (unsigned long long)who);
     else
         ksnprintf(out, room, "the %s", GroundOwnerName((GroundOwner)owner));
@@ -271,6 +270,7 @@ static void MeetingSay(const GroundMeeting* m, uint32_t* named, uint32_t* more)
         return;
     }
     (*named)++;
+    s_doubled += m->end - m->start;
     OwnerSay(m->owner[0], m->who[0], a, sizeof(a));
     OwnerSay(m->owner[1], m->who[1], b, sizeof(b));
     kprintf("[TagFS FSCK] data block %llu is named by %s and %s at once, %llu block(s) from it — the "
@@ -280,62 +280,107 @@ static void MeetingSay(const GroundMeeting* m, uint32_t* named, uint32_t* more)
 }
 
 /* Run r meeting run `at` on [r's start, reach): the pair in one order, a
- * file's who kept and any other owner's let go — as the lines name them. */
+ * file's who kept and any other owner's let go — as the lines name them, a
+ * file's DATA and its runs SHARED one owner. */
 static GroundMeeting MeetingOf(const GroundRun* at, const GroundRun* r, uint64_t reach)
 {
     uint64_t      end = r->start + r->count < reach ? r->start + r->count : reach;
-    uint64_t      wa  = at->owner == GROUND_FILE ? at->who : 0, wb = r->owner == GROUND_FILE ? r->who : 0;
-    bool          swap = at->owner > r->owner || (at->owner == r->owner && wa > wb);
-    GroundMeeting m   = { r->start, end, { swap ? wb : wa, swap ? wa : wb },
-                          { swap ? r->owner : at->owner, swap ? at->owner : r->owner } };
+    uint64_t      wa  = OwnerIsFile(at->owner) ? at->who : 0, wb = OwnerIsFile(r->owner) ? r->who : 0;
+    uint32_t      oa  = OwnerIsFile(at->owner) ? GROUND_FILE : at->owner;
+    uint32_t      ob  = OwnerIsFile(r->owner) ? GROUND_FILE : r->owner;
+    bool          swap = oa > ob || (oa == ob && wa > wb);
+    GroundMeeting m   = { r->start, end, { swap ? wb : wa, swap ? wa : wb }, { swap ? ob : oa, swap ? oa : ob } };
     return m;
 }
 
+/* The meetings said so far, joined pair by pair while they go on without a
+ * gap: they come in order of where they begin, so one that ends before the
+ * next begins is said then. */
+typedef struct {
+    GroundMeeting* open;
+    uint32_t       nopen;
+    uint32_t       named;
+    uint32_t       more;
+} GroundMeetings;
+
+static void MeetingJoined(GroundMeetings* g, GroundMeeting m)
+{
+    uint32_t kept = 0, k;
+    for (k = 0; k < g->nopen; k++) {
+        if (g->open[k].end < m.start)
+            MeetingSay(&g->open[k], &g->named, &g->more);
+        else
+            g->open[kept++] = g->open[k];
+    }
+    g->nopen = kept;
+    for (k = 0; k < g->nopen && !MeetingSamePair(&g->open[k], &m); k++)
+        ;
+    if (k < g->nopen)
+        g->open[k].end = m.end > g->open[k].end ? m.end : g->open[k].end;
+    else
+        g->open[g->nopen++] = m;
+}
+
+/* The furthest a sweep's runs of one class reached, and the run that did. */
+typedef struct {
+    uint64_t reach;
+    uint32_t run;
+    bool     have;
+} GroundReach;
+
+static void ReachMoved(GroundReach* r, uint32_t i, uint64_t end)
+{
+    if (!r->have || end > r->reach) {
+        r->reach = end;
+        r->run   = i;
+        r->have  = true;
+    }
+}
+
+/*
+ * Two owners of one block, swept once in order of where the claims begin:
+ * every exclusive run that begins inside the furthest exclusive run before
+ * it; and — ‼ A RUN SHARED NAMES A FILE'S GROUND, NEVER ANOTHER OWNER'S (§8.2)
+ * — a run SHARED that begins inside the furthest exclusive run of another
+ * kind than a file's before it, and such a run that begins inside the
+ * furthest run SHARED before it: a run SHARED lies over the one DATA run of
+ * its block, or over none, beside other runs SHARED, and on a node, a Quire,
+ * a slot, the front or the far Deed it is two owners of one block
+ * (bookcensus.py _Sweep, GroundClaim.Allows). Room for one meeting a claim.
+ */
 static void RunsSayDoublesBook(void)
 {
-    GroundMeeting* open  = kmalloc(sizeof(GroundMeeting) * (s_count ? s_count : 1u));
-    uint64_t       reach = 0;
-    uint32_t       reach_run = 0, nopen = 0, named = 0, more = 0;
-    bool           have  = false;
+    GroundMeetings g  = { kmalloc(sizeof(GroundMeeting) * (s_count ? 2u * s_count : 1u)), 0, 0, 0 };
+    GroundReach    ex = { 0, 0, false }, other = { 0, 0, false }, shared = { 0, 0, false };
 
-    if (!open) {
+    if (!g.open) {
         kprintf("[TagFS FSCK] no memory to join the blocks two owners name into runs — each is named as "
                 "its run meets another\n");
         RunsSayDoubles();
         return;
     }
     for (uint32_t i = 0; i < s_count; i++) {
-        const GroundRun* r = &s_runs[i];
-        if (!g_owner_alone[r->owner])
-            continue;
-        if (have && r->start < reach) {
-            GroundMeeting m    = MeetingOf(&s_runs[reach_run], r, reach);
-            uint32_t      kept = 0, k;
-            for (k = 0; k < nopen; k++) {
-                if (open[k].end < m.start)
-                    MeetingSay(&open[k], &named, &more);
-                else
-                    open[kept++] = open[k];
-            }
-            nopen = kept;
-            for (k = 0; k < nopen && !MeetingSamePair(&open[k], &m); k++)
-                ;
-            if (k < nopen)
-                open[k].end = m.end > open[k].end ? m.end : open[k].end;
-            else
-                open[nopen++] = m;
-        }
-        if (!have || r->start + r->count > reach) {
-            reach     = r->start + r->count;
-            reach_run = i;
-            have      = true;
-        }
+        const GroundRun* r     = &s_runs[i];
+        uint64_t         end   = r->start + r->count;
+        bool             alone = g_owner_alone[r->owner], foreign = alone && r->owner != GROUND_FILE;
+        if (alone && ex.have && r->start < ex.reach)
+            MeetingJoined(&g, MeetingOf(&s_runs[ex.run], r, ex.reach));
+        if (r->owner == GROUND_SHARED && other.have && r->start < other.reach)
+            MeetingJoined(&g, MeetingOf(&s_runs[other.run], r, other.reach));
+        if (foreign && shared.have && r->start < shared.reach)
+            MeetingJoined(&g, MeetingOf(&s_runs[shared.run], r, shared.reach));
+        if (alone)
+            ReachMoved(&ex, i, end);
+        if (foreign)
+            ReachMoved(&other, i, end);
+        if (r->owner == GROUND_SHARED)
+            ReachMoved(&shared, i, end);
     }
-    for (uint32_t k = 0; k < nopen; k++)
-        MeetingSay(&open[k], &named, &more);
-    if (more)
-        kprintf("[TagFS FSCK] and %u more run(s) of blocks named by two owners at once\n", more);
-    kfree(open);
+    for (uint32_t k = 0; k < g.nopen; k++)
+        MeetingSay(&g.open[k], &g.named, &g.more);
+    if (g.more)
+        kprintf("[TagFS FSCK] and %u more run(s) of blocks named by two owners at once\n", g.more);
+    kfree(g.open);
 }
 
 /* Bits [from, to) of a window's map set. */
@@ -411,7 +456,8 @@ error_t GroundCensusRun(BlockMapOrphanFn orphan, BlockMapCensusCount* out)
 }
 
 /* The claims of `want` — or, for GROUND_OWNER_KINDS, every exclusive one but
- * the held and `apart` — sorted, as the claims are, and laid end to end with
+ * the held and `apart`, and every run SHARED: an owner, though not alone
+ * (ground_owner.h) — sorted, as the claims are, and laid end to end with
  * no two overlapping, into a new array (*n of them): a run that meets the one
  * before is joined to it while the join still counts in a u32, and one that
  * overlaps begins where it ends. NULL with no memory. */
@@ -426,7 +472,7 @@ static GroundRun* RunsMerged(GroundOwner want, GroundOwner apart, uint32_t* n)
         uint64_t         from = r->start, end = r->start + r->count;
         if (want != GROUND_OWNER_KINDS ? r->owner != (uint32_t)want
                                        : (r->owner == GROUND_HELD || r->owner == (uint32_t)apart ||
-                                          !g_owner_alone[r->owner]))
+                                          (!g_owner_alone[r->owner] && r->owner != GROUND_SHARED)))
             continue;
         GroundRun* last = *n ? &out[*n - 1u] : NULL;
         if (last) {
@@ -677,10 +723,16 @@ error_t GroundCensusBook(uint64_t* held, uint64_t* fallow, bool derive, const ch
     *what   = "there is no memory to hold its census";
     if (s_refused)
         return ERR_NO_MEMORY;
+    /* How many name each block in common, counted before the cut below
+     * takes from the held what a run SHARED names (ground_shares.c). */
+    error_t rc = GroundSharesCounted();
+    if (rc != OK)
+        return rc;
     /* The ground the ribbon let go is a name's only where no living owner is
      * (M-1), and what is held for a rot only where no owner at all is — the
-     * fallow ground among them (bookcensus.py _Claims, Owned). */
-    error_t rc = RunsOwnerLess(GROUND_FALLOW, GROUND_FALLOW, fallow);
+     * fallow ground among them, a run SHARED among the owners (bookcensus.py
+     * _Claims, Owned). */
+    rc = RunsOwnerLess(GROUND_FALLOW, GROUND_FALLOW, fallow);
     if (rc == OK)
         rc = RunsOwnerLess(GROUND_HELD, GROUND_HELD, held);
     if (rc != OK)
@@ -713,6 +765,17 @@ uint64_t GroundCensusReach(void)
     return s_reach;
 }
 
+uint64_t GroundCensusDoubled(void)
+{
+    return s_doubled;
+}
+
+GroundRun* GroundCensusRuns(uint32_t* n)
+{
+    *n = s_count;
+    return s_runs;
+}
+
 void GroundCensusEnd(void)
 {
     kfree(s_runs);
@@ -723,6 +786,7 @@ void GroundCensusEnd(void)
     s_cap           = 0;
     s_refused       = false;
     s_reach         = 0;
+    s_doubled       = 0;
     s_next          = 0;
     s_carried_count = 0;
 }

@@ -466,8 +466,10 @@ void IntegrityForget(uint64_t start, uint32_t count) {
  * the next Tally, and a later write of the block stands over the Tally's.
  *
  * Every block of format v2 is written with its digest (§2.8: a Born or a
- * Shaped carries them; SHARED ground puts the volume under glass), and 0 is
- * a digest like any other — "not known" is format v1's word, not this one's.
+ * Shaped carries them), and a run SHARED reads the block's one digest, as the
+ * DATA run that wrote it does (§8.2) — a block, not a run, is what a digest
+ * names; and 0 is a digest like any other — "not known" is format v1's word,
+ * not this one's.
  * So a block no element names is refused as one whose digest does not match
  * (volume-read's census says the same of it: bookcensus.py _Digests); only
  * a block whose DIGESTS leaf rots reads unchecked, as §4.5 п.3 has it, said

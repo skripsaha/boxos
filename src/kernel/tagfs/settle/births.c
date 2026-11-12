@@ -238,6 +238,7 @@ error_t BirthsNoted(const Strip* strips, uint64_t count, uint64_t seq)
 
 void BirthsLetGo(void)
 {
+    BirthsSharedLetGo();
     BirthsTrim();
     for (uint32_t i = 0; i < s_chunks; i++)
         kfree(s_chunk[i]);

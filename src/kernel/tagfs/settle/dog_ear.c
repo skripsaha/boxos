@@ -1,5 +1,6 @@
 #include "dog_ear.h"
 #include "../lock_rank/lock_rank.h"
+#include "../ink/commonhold.h"
 #include "binder.h"
 
 /*
@@ -335,6 +336,7 @@ typedef struct {
     bool        refused;
     bool        went;       /* a key of the state may have gone: the file given up, or ground of it let go
                              * that may leave a leaf of DIGESTS with none (LeafMayEmpty) */
+    uint64_t    slice;      /* the last Ink the change's stitch carries (commonhold.h) */
 } DogEarChange;
 
 static void SpanNoted(DogEarChange* c, bool digests, TallyKey lo, TallyKey hi)
@@ -360,11 +362,12 @@ static void SpanNoted(DogEarChange* c, bool digests, TallyKey lo, TallyKey hi)
     (*list)[(*n)++] = (DogEarSpan){ lo, hi };
 }
 
-/* The DATA Strips of `s` (`count`) onto side `side`'s ground. */
+/* The Strips of ground of `s` (`count`) — DATA and SHARED — onto side
+ * `side`'s ground. */
 static void GroundNoted(DogEarChange* c, uint32_t side, const Strip* s, uint64_t count)
 {
     for (uint64_t i = 0; i < count && !c->refused; i++) {
-        if (s[i].kind != STRIP_DATA)
+        if (!StripOnGround(s[i].kind))
             continue;
         if (c->nground[side] == c->capground[side]) {
             uint64_t room = c->capground[side] ? c->capground[side] * 2u : 64u;
@@ -398,6 +401,26 @@ static void WindowsNoted(DogEarChange* c, uint64_t start, uint64_t end)
     TallyKey lo, hi;
     WindowsOf(start, end, &lo, &hi);
     SpanNoted(c, true, lo, hi);
+}
+
+/* The replay a mount made asked no count of owners — the census counts them
+ * after it (ground_shares.c) — so the ground it put gone may be a block in
+ * common another owner still names, and a block born since the slice and let
+ * go by one of its owners came out of `born`: every block in common an owner
+ * holds now is born and not gone, and its digest is found where a born
+ * block's is (§16.5 п.16). The mount's, the door shut. */
+void DogEarCommonheld(void)
+{
+    uint64_t         n = 0;
+    const CommonRun* r = CommonholdRuns(&n);
+    for (uint64_t i = 0; i < n; i++) {
+        uint64_t end = r[i].start + r[i].count;
+        if (r[i].owners &&
+            (!GroundCut(&s_delta_held.gone, r[i].start, end, NULL) || !GroundAdd(&s_delta_held.born, r[i].start, end))) {
+            Lose();
+            return;
+        }
+    }
 }
 
 void DogEarGroundChanged(uint64_t start, uint64_t count)
@@ -471,6 +494,29 @@ static bool LeafMayEmpty(const Strip* b, uint64_t nb, uint64_t start, uint64_t e
     return !(at < nb && b[at].start < hi) && !GroundIn(s_delta_held.born.run, s_delta_held.born.n, lo, hi);
 }
 
+/*
+ * Ground [start, end) the file let go: its windows noted, and — ‼ A BLOCK
+ * ANOTHER OWNER HELD AT THE STITCH'S SLICE IS NOT GONE (§8.2, §8.1: a block
+ * keeps its one element while an owner lives) — what of it no owner held at
+ * the slice of the change's stitch gone (commonhold.h, CommonholdOwnedAt):
+ * the next Tally keeps the digest of a block in common its other owners
+ * still name, and lets it go with the last. `b` (`nb`) the file's ground
+ * after the change.
+ */
+static void GoneNoted(DogEarChange* c, uint64_t start, uint64_t end, const Strip* b, uint64_t nb)
+{
+    uint64_t at = start, lo = 0, hi = 0;
+    WindowsNoted(c, start, end);
+    while (at < end && !c->refused) {
+        uint64_t from  = at;
+        uint64_t stop  = CommonholdOwnedAt(&at, end, c->slice, &lo, &hi) ? lo : end;
+        if (stop > from) {
+            c->refused |= !DeltaMoved(&s_delta_held, from, stop, true);
+            c->went    |= LeafMayEmpty(b, nb, from, stop);
+        }
+    }
+}
+
 /* The ground one side names and the other does not, as windows: both sides
  * laid as ground first — in order, the runs that meet joined. */
 static void GroundDiffered(DogEarChange* c)
@@ -495,9 +541,7 @@ static void GroundDiffered(DogEarChange* c)
         uint64_t be = j < nb ? b[j].start + b[j].count : UINT64_MAX;
         if (as < bs) {
             x = ae < bs ? ae : bs;
-            WindowsNoted(c, as, x);
-            c->refused |= !DeltaMoved(&s_delta_held, as, x, true);
-            c->went    |= LeafMayEmpty(b, nb, as, x);
+            GoneNoted(c, as, x, b, nb);
         } else if (bs < as) {
             x = be < as ? be : as;
             WindowsNoted(c, bs, x);
@@ -577,7 +621,7 @@ static void ParcelsChanged(DogEarChange* c, uint64_t fid, const FileRecord* was,
         SpanNoted(c, false, open, end);
 }
 
-/* Every DATA Strip of `rec`, onto side `side`. */
+/* Every Strip of ground of `rec`, onto side `side`. */
 static void RecordGround(DogEarChange* c, uint32_t side, const FileRecord* rec)
 {
     StripWalk w;
@@ -587,11 +631,12 @@ static void RecordGround(DogEarChange* c, uint32_t side, const FileRecord* rec)
         GroundNoted(c, side, &s, 1);
 }
 
-void DogEarFileChanged(uint64_t fid, const FileRecord* was, const FileRecord* now)
+void DogEarFileChanged(uint64_t fid, const FileRecord* was, const FileRecord* now, uint64_t slice)
 {
     DogEarChange c;
     TallyKey     end = fid == UINT64_MAX ? DOG_EAR_END : (TallyKey){ fid + 1u, 0 };
     memset(&c, 0, sizeof(c));
+    c.slice = slice;
     if (__atomic_load_n(&s_held.lost, __ATOMIC_ACQUIRE))
         return;
     c.went = was && !now;

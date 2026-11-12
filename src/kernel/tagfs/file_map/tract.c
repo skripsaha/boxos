@@ -292,7 +292,7 @@ error_t TractOfStrips(const Strip* strips, uint64_t count, const Tract** out)
     uint64_t     n       = 0;
     *out = NULL;
     for (uint64_t i = 0; i < count; i++)
-        if (strips[i].count == 0 || strips[i].kind > STRIP_HOLE)
+        if (strips[i].count == 0 || strips[i].kind > STRIP_SHARED)
             return ERR_INVALID_ARGUMENT;
     error_t rc = ParcelsCut(strips, count, &parcels, &n);
     return rc == OK ? TractRise(parcels, n, 0, out) : rc;
@@ -316,7 +316,7 @@ error_t TractOfParcels(const Strip* strips, uint64_t count, const uint32_t* cut,
     *out   = NULL;
     *recut = false;
     for (uint64_t i = 0; i < count; i++)
-        if (strips[i].count == 0 || strips[i].kind > STRIP_HOLE)
+        if (strips[i].count == 0 || strips[i].kind > STRIP_SHARED)
             return ERR_INVALID_ARGUMENT;
     for (uint64_t i = 0; i < ncut; i++) {
         if (cut[i] == 0)
@@ -460,12 +460,13 @@ error_t TractGroundAdd(TractGround* g, const Strip* s)
     return OK;
 }
 
-/* `len` blocks of Strip `s` from its `off`-th: a DATA piece begins where its
- * blocks do; a hole names no block, and keeps the start it had. */
+/* `len` blocks of Strip `s` from its `off`-th: a piece of ground, DATA or
+ * SHARED, begins where its blocks do; a hole names no block, and keeps the
+ * start it had. */
 static Strip StripPiece(const Strip* s, uint64_t off, uint64_t len)
 {
     Strip p = *s;
-    if (s->kind == STRIP_DATA)
+    if (StripOnGround(s->kind))
         p.start = s->start + off;
     p.count = (uint32_t)len;
     return p;
@@ -487,8 +488,8 @@ static void ParcelKeep(SpliceWork* w, const Parcel* p, uint64_t pstart, uint64_t
     }
 }
 
-/* The DATA ground of Parcel `p`, which begins at block `pstart`, lying in
- * [lo, hi) of the file: added to `took`. */
+/* The ground of Parcel `p`, which begins at block `pstart`, lying in [lo, hi)
+ * of the file — DATA and SHARED, each piece its kind: added to `took`. */
 static error_t ParcelTook(const Parcel* p, uint64_t pstart, uint64_t lo, uint64_t hi,
                           TractGround* took)
 {
@@ -496,7 +497,7 @@ static error_t ParcelTook(const Parcel* p, uint64_t pstart, uint64_t lo, uint64_
     for (uint32_t i = 0; i < p->count; i++) {
         uint64_t a = pstart + (i ? end[i - 1u] : 0), b = pstart + end[i];
         uint64_t x = a > lo ? a : lo, y = b < hi ? b : hi;
-        if (x < y && p->strip[i].kind == STRIP_DATA) {
+        if (x < y && StripOnGround(p->strip[i].kind)) {
             Strip piece = StripPiece(&p->strip[i], x - a, y - x);
             if (TractGroundAdd(took, &piece) != OK)
                 return ERR_NO_MEMORY;
@@ -650,7 +651,7 @@ error_t TractSplice(const Tract* root, const BookSplice* sp, const Tract** out, 
     uint64_t blocks = TractBlocks(root), put = 0;
     *out = NULL;
     for (uint64_t i = 0; i < sp->ninsert; i++) {
-        if (sp->insert[i].count == 0 || sp->insert[i].kind > STRIP_HOLE ||
+        if (sp->insert[i].count == 0 || sp->insert[i].kind > STRIP_SHARED ||
             put > UINT64_MAX - sp->insert[i].count)
             return ERR_INVALID_ARGUMENT;
         put += sp->insert[i].count;

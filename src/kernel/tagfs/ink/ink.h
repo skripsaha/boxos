@@ -142,6 +142,15 @@ error_t InkQuitclaim(uint64_t fid, InkWarrant warrant, InkReceipt* out);
  */
 void    InkGleanLocked(uint64_t fid, const RecordWhere* from, const uint8_t* packed);
 
+#ifdef CONFIG_VOLUME_TESTS
+/* The stand's lever for a block in common (ink_share_stand.c), until Dedup
+ * lays one: `count` blocks of book file `fid` from its block `at` laid SHARED
+ * on the ground from `start`, which another live file's DATA names — the
+ * file's own blocks let go, one owner more on the shared ones (commonhold.h).
+ * OK, or the refusal with nothing changed. */
+error_t InkBookShareStand(uint64_t fid, uint64_t at, uint64_t start, uint32_t count);
+#endif
+
 /* Under the state lock: the newest Ink's gen, and the flush need its data
  * holds — the one a cycle's first flush must be issued past. */
 uint64_t InkedGen(void);

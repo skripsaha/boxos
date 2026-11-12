@@ -100,9 +100,10 @@ _Static_assert(TALLY_SHEET_PAYLOAD == VOLUME_BLOCK_SECTORS * BOOK_PAYLOAD_BYTES,
  * as they go (file_map/tract.c CutPieces, CutLength) — by the kernel, mkfs and
  * volume-read's binder alike, so the same file is the same Parcels whoever
  * wrote it. Why 128: a DATA run in the Tally's form takes at most 5 + 10 + 10
- * bytes (head, zigzag start, birth_delta), so ~155 fit a Sheet's room whatever
- * the numbers grow to (§2.9): a Parcel of memory is one Parcel of the medium,
- * and no writer ever has to cut one at the Sheet.
+ * bytes (head, zigzag start, birth_delta), and a run SHARED 3 more (its list
+ * of extensions, §8.2), so ~139 fit a Sheet's room whatever the numbers grow
+ * to (§2.9): a Parcel of memory is one Parcel of the medium, and no writer
+ * ever has to cut one at the Sheet.
  */
 #define PARCEL_STRIPS_MOST  128u
 

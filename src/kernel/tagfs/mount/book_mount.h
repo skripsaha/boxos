@@ -103,6 +103,7 @@ typedef struct {
     uint64_t flags;         /* the StitchHead flags of the last stitch sewn on; 0 when none is */
     bool     lied;          /* the medium is shown not to have kept what it confirmed */
     uint64_t fallow;        /* blocks the ribbon let go, lying fallow */
+    uint64_t doubles;       /* blocks the census found two owners name at once */
     uint64_t checked;       /* blocks of fresh data the newest stitches' check read and held to their digests */
     uint64_t check_us;      /* and the microseconds that check took */
     uint32_t ribbon[RIBBON_CODES];  /* the ribbon's lines, by code */

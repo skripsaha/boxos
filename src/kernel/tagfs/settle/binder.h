@@ -328,12 +328,23 @@ error_t     BinderRotten(uint64_t tree, const TallyPlace* at);
  *
  * The Settle's holder alone writes and reads it — the stitch's S6, Fallow's
  * gives at a cycle's DONE, the Tally — so it takes no lock.
+ *
+ * A run SHARED lies on ground its DATA owner was born on before it, so its
+ * birth is kept apart, by its file and its ground (births_shared.c):
+ *
+ *   BirthsSharedNoted  the SHARED Strips of file `fid` put in by stitch `seq`
+ *   BirthsSharedOf     the seq that put in `fid`'s run SHARED on `block`, 0
+ *                      when none did
+ *   BirthsSharedLetGo  all of it, with the volume (BirthsLetGo)
  */
 error_t     BirthsNoted(const Strip* strips, uint64_t count, uint64_t seq);
 uint64_t    BirthsOf(uint64_t block);
 void        BirthsForget(uint64_t start, uint64_t count);
 void        BirthsTrim(void);
 void        BirthsLetGo(void);
+error_t     BirthsSharedNoted(uint64_t fid, const Strip* strips, uint64_t count, uint64_t seq);
+uint64_t    BirthsSharedOf(uint64_t fid, uint64_t block);
+void        BirthsSharedLetGo(void);
 
 /* --- the Binder's own files (binder*.c) alone --------------------------- */
 

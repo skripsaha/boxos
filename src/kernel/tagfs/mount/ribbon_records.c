@@ -43,15 +43,16 @@ static error_t RibbonRunsSeen(RibbonStage* st, const uint8_t* runs, uint32_t byt
     return OK;
 }
 
-/* Whether a run of the record carries an extension: its file is kept to be
- * said (§8: CODEC, SHARED, COPY are carried on by a writer that knows them). */
+/* Whether a run of the record carries an extension this reader does not
+ * carry on: its file is kept to be said (§8: CODEC, COPY, a SHARED it cannot
+ * read as SHARED — RibbonRunCarried). */
 static bool RibbonRunsExt(const uint8_t* runs, uint32_t bytes, uint64_t n, uint64_t cursor, uint64_t seq)
 {
     uint32_t at = 0;
     for (uint64_t i = 0; i < n; i++) {
         TallyRun r;
         RibbonRunGet(runs, bytes, &at, &cursor, seq, &r);
-        if (r.ext)
+        if (RibbonRunCarried(&r) == RUN_CARRIED_NOT)
             return true;
     }
     return false;
@@ -67,11 +68,11 @@ static uint64_t RibbonStripsInto(const uint8_t* runs, uint32_t bytes, uint64_t n
     for (uint64_t i = 0; i < n; i++) {
         TallyRun r;
         RibbonRunGet(runs, bytes, &at, &cursor, seq, &r);
+        uint32_t kind = r.hole ? STRIP_HOLE : RibbonRunCarried(&r) == RUN_CARRIED_SHARED ? STRIP_SHARED : STRIP_DATA;
         for (uint64_t left = r.count, start = r.start; left;) {
             uint32_t k = left > UINT32_MAX ? UINT32_MAX : (uint32_t)left;
             if (out)
-                out[count] = (Strip){ .start = r.hole ? 0 : start, .count = k,
-                                      .kind = r.hole ? STRIP_HOLE : STRIP_DATA, .birth = seq };
+                out[count] = (Strip){ .start = r.hole ? 0 : start, .count = k, .kind = kind, .birth = seq };
             count++;
             start += r.hole ? 0 : k;
             left  -= k;
@@ -651,8 +652,11 @@ static error_t RibbonLabeledApplied(RibbonReplay* rp, RibbonStage* st, const Rib
     return rc;
 }
 
-/* Quitclaim (§2.8, §3.7): the file at its base, gone; every DATA block of it
- * let go to the Fallow of the mount (M-1). Its id is never given again. */
+/* Quitclaim (§2.8, §3.7): the file at its base, gone; every block of its
+ * ground let go to the Fallow of the mount (M-1) — a block SHARED there too,
+ * which the census keeps for any owner left naming it (ground_census.c,
+ * RunsOwnerLess), so it lies fallow once, when the last has gone (§8.2). Its
+ * id is never given again. */
 static error_t RibbonQuitclaimApplied(RibbonReplay* rp, RibbonStage* st, const RibbonRecord* r)
 {
     uint64_t    fid = 0, base = 0;
