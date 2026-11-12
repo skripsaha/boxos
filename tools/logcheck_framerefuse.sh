@@ -133,7 +133,7 @@ framerefuse_book_said() {
     local leg=$1 L=$2
     grep -qE "MOUNTED — [0-9]+ file" "$L"
     chk $? "framerefuse ($leg): the book is mounted ($(grep -oE 'MOUNTED — [0-9]+ file\(s\)' "$L" | head -1))"
-    grep -aqE "^Context set\r?$" "$L"
+    grep -aqE "^(\[[0-9]+\] )?Context set\r?$" "$L"
     chk $? "framerefuse ($leg): the new Use Context is remembered by the volume — a stitch of its cycle"
     grep -aqE "\[ANCHOR\] WROTE\+ANCHORED" "$L"
     chk $? "framerefuse ($leg): and the file anchor_test makes is written and anchored on the book ($(grep -a '\[ANCHOR\]' "$L" | tail -1 | tr -d '\r'))"
