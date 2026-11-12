@@ -1450,7 +1450,7 @@ $(TESTBIN_EMPTY):
 # and the image is made again — without it, `make VOLUME_FORMAT=v2` on a built
 # tree would say nothing and leave a v1 image behind, and `make` after it a
 # v2 one.
-VOLUME_FORMAT_DEFAULT = v1
+VOLUME_FORMAT_DEFAULT = v2
 VOLUME_FORMAT ?= $(VOLUME_FORMAT_DEFAULT)
 ifeq ($(filter v1 v2,$(VOLUME_FORMAT)),)
 $(error VOLUME_FORMAT=$(VOLUME_FORMAT): a volume is made in format v1 or format v2)

@@ -2,8 +2,8 @@
 or one kind of damage planted in it, and what the book's census and mount must
 say of it.
 
-The image self-test is handed is format v1 (mkfs lays v1 by default until the
-plan's step 2.4), so the book is laid here first, over the image in memory, as
+An image self-test is handed in format v1 (`make VOLUME_FORMAT=v1`; mkfs lays
+v2 by default since step 2.4) has the book laid here first, over it in memory, as
 `create_tagfs --frame-only` and then a binder would lay it: the Deed made
 again with FRAME in place of LAYOUT, the front grains blank, every live file
 of the v1 image in a row from the data run's first block with the kernel first
