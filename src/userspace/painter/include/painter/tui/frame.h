@@ -102,8 +102,9 @@ public:
     /* Pixel coordinates are two rows per text cell. Drawing a pixel makes the
      * containing cell an upper-half glyph and changes only the selected half;
      * in a cell never painted before on a transparent frame, the other half
-     * stays see-through. A blend toward a see-through half is whole or nothing
-     * (Color::Mix): there is no colour to mix with what is unknown. */
+     * stays see-through. A blend over a see-through half is the ink at that
+     * weight as its opacity, over a translucent one the two composed
+     * (Color::Mix); an Ink with an opacity is put as it is. */
     bool PutPixel(core::Point Pixel, core::Color Ink);
     bool BlendPixel(core::Point Pixel, core::Color Ink, std::uint8_t Weight);
     bool PutPixels(std::span<const core::Color> Pixels);

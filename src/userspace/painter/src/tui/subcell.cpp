@@ -58,47 +58,57 @@ int Distance(Rgb A, Rgb B)
     return 2 * Red * Red + 4 * Green * Green + 3 * Blue * Blue;
 }
 
+/* The share of a sub-pixel's colour that is seen, of 255. */
+int OpacityOf(core::Color Ink)
+{
+    return Ink.Opacity();
+}
+
+constexpr int Whole = 255;
+
+/* How much a difference of opacity is worth against one of colour: a
+ * sub-pixel shown see-through where it is whole is as far off as a colour
+ * about a third of the way across the cube. */
+constexpr int OpacityWeight = 6;
+
+/* The mean of a group of places weighted by how opaque each is: a
+ * see-through place has no colour to give. There must be one that is seen. */
 Rgb MeanOf(const Quad &Wanted, int Places)
 {
-    int Red = 0, Green = 0, Blue = 0, Count = 0;
+    int Red = 0, Green = 0, Blue = 0, Seen = 0;
     for (std::size_t Place = 0; Place < Wanted.size(); Place++) {
         if ((Places & (1 << Place)) == 0) continue;
-        Red += Wanted[Place].Red();
-        Green += Wanted[Place].Green();
-        Blue += Wanted[Place].Blue();
-        Count++;
+        const int Share = OpacityOf(Wanted[Place]);
+        Red += Wanted[Place].Red() * Share;
+        Green += Wanted[Place].Green() * Share;
+        Blue += Wanted[Place].Blue() * Share;
+        Seen += Share;
     }
-    return {(Red + Count / 2) / Count, (Green + Count / 2) / Count, (Blue + Count / 2) / Count};
+    return {(Red + Seen / 2) / Seen, (Green + Seen / 2) / Seen, (Blue + Seen / 2) / Seen};
 }
 
-core::Color Ink(Rgb Value)
+core::Color Ink(Rgb Value, int Opacity)
 {
     const auto Byte = [](int Part) { return static_cast<std::uint8_t>(std::clamp(Part, 0, 255)); };
-    return core::Color::Rgb(Byte(Value.Red), Byte(Value.Green), Byte(Value.Blue));
+    return core::Color::Rgb(Byte(Value.Red), Byte(Value.Green), Byte(Value.Blue)).WithOpacity(static_cast<std::uint8_t>(Opacity));
 }
 
-/* A cell chosen for four sub-pixels: its error against the real ones, and how
- * many see-through ones it has had to give a colour to. */
+/* A cell chosen for four sub-pixels, and its error against them. */
 struct Fit {
     Cell Look;
-    int  Error  = 0;
-    int  Filled = 0;
+    int  Error = 0;
 };
 
-/* The places of a quad that are see-through. */
-int BareOf(const Quad &Wanted)
-{
-    int Bare = 0;
-    for (std::size_t Place = 0; Place < Wanted.size(); Place++)
-        if (Wanted[Place].IsThrough()) Bare |= 1 << Place;
-    return Bare;
-}
-
-int ErrorOver(const Quad &Wanted, int Places, Rgb Shown)
+/* What a group of places shown in Shown at Opacity is off by: for each, its
+ * colour's distance as far as both are seen, and its opacity's difference. */
+int ErrorOver(const Quad &Wanted, int Places, Rgb Shown, int Opacity)
 {
     int Error = 0;
-    for (std::size_t Place = 0; Place < Wanted.size(); Place++)
-        if ((Places & (1 << Place)) != 0) Error += Distance(Of(Wanted[Place]), Shown);
+    for (std::size_t Place = 0; Place < Wanted.size(); Place++) {
+        if ((Places & (1 << Place)) == 0) continue;
+        const int Wants = OpacityOf(Wanted[Place]);
+        Error += Distance(Of(Wanted[Place]), Shown) * std::min(Wants, Opacity) / Whole + OpacityWeight * (Wants - Opacity) * (Wants - Opacity);
+    }
     return Error;
 }
 
@@ -113,7 +123,7 @@ Rgb Shown(const Quad &Wanted, int Places, bool Pure)
     Rgb  Best = Mean;
     int  Nearest = -1, Common = 0;
     for (std::size_t Place = 0; Place < Wanted.size(); Place++) {
-        if ((Places & (1 << Place)) == 0) continue;
+        if ((Places & (1 << Place)) == 0 || OpacityOf(Wanted[Place]) == 0) continue;
         const Rgb Here = Of(Wanted[Place]);
         int       Same = 0;
         for (const core::Color Other : Wanted) Same += Other == Wanted[Place] ? 1 : 0;
@@ -127,34 +137,38 @@ Rgb Shown(const Quad &Wanted, int Places, bool Pure)
     return Best;
 }
 
-/* A group of places drawn in one colour: that of its real sub-pixels, or
- * see-through when it has none. The see-through ones among them take the
- * colour, and are counted as filled. */
+/* A group of places drawn in one colour at the mean of their opacities, or
+ * see-through when none of them is seen at all. */
 struct Side {
     core::Color Colour;
-    int         Error  = 0;
-    int         Filled = 0;
+    int         Error = 0;
 };
 
-Side SideOf(const Quad &Wanted, int Places, int Bare, bool Pure)
+Side SideOf(const Quad &Wanted, int Places, bool Pure)
 {
-    const int Real = Places & ~Bare;
-    if (Real == 0) return {core::Color::Through()};
-    const Rgb Colour = Shown(Wanted, Real, Pure);
-    return {Ink(Colour), ErrorOver(Wanted, Real, Colour), std::popcount(static_cast<unsigned>(Places & Bare))};
+    int Seen = 0, Count = 0;
+    for (std::size_t Place = 0; Place < Wanted.size(); Place++) {
+        if ((Places & (1 << Place)) == 0) continue;
+        Seen += OpacityOf(Wanted[Place]);
+        Count++;
+    }
+    if (Seen == 0) return {core::Color::Through()};
+    const int Opacity = (Seen + Count / 2) / Count;
+    const Rgb Colour  = Shown(Wanted, Places, Pure);
+    return {Ink(Colour, Opacity), ErrorOver(Wanted, Places, Colour, Opacity)};
 }
 
-Fit OneColour(const Quad &Wanted, int Bare, bool Pure)
+Fit OneColour(const Quad &Wanted, bool Pure)
 {
-    const Side Only = SideOf(Wanted, All, Bare, Pure);
-    return {Cell{' ', Only.Colour, Only.Colour}, Only.Error, Only.Filled};
+    const Side Only = SideOf(Wanted, All, Pure);
+    return {Cell{' ', Only.Colour, Only.Colour}, Only.Error};
 }
 
 /* The places in Places drawn in the foreground, the rest in the background. */
-Fit Split(const Quad &Wanted, int Places, char Glyph, int Bare, bool Pure)
+Fit Split(const Quad &Wanted, int Places, char Glyph, bool Pure)
 {
-    const Side Front = SideOf(Wanted, Places, Bare, Pure), Back = SideOf(Wanted, All & ~Places, Bare, Pure);
-    return {Cell{Glyph, Front.Colour, Back.Colour}, Front.Error + Back.Error, Front.Filled + Back.Filled};
+    const Side Front = SideOf(Wanted, Places, Pure), Back = SideOf(Wanted, All & ~Places, Pure);
+    return {Cell{Glyph, Front.Colour, Back.Colour}, Front.Error + Back.Error};
 }
 
 /* What a shade costs, a dither being seen however alike its colours: a part
@@ -173,8 +187,8 @@ int Texture(Rgb Front, Rgb Back, int Ink)
 Fit Checker(const Quad &Wanted, Shade Half, int Places)
 {
     const Rgb Front = MeanOf(Wanted, Places), Back = MeanOf(Wanted, All & ~Places);
-    const int Error = ErrorOver(Wanted, Places, Front) + ErrorOver(Wanted, All & ~Places, Back) + Texture(Front, Back, Half.Ink);
-    return {Cell{Half.Glyph, Ink(Front), Ink(Back)}, Error};
+    const int Error = ErrorOver(Wanted, Places, Front, Whole) + ErrorOver(Wanted, All & ~Places, Back, Whole) + Texture(Front, Back, Half.Ink);
+    return {Cell{Half.Glyph, Ink(Front, Whole), Ink(Back, Whole)}, Error};
 }
 
 /* The colour that, shown Share parts in CellInk of the way from Rest, is Want. */
@@ -203,14 +217,18 @@ Fit Dust(const Quad &Wanted, Shade Sprinkle, std::size_t Lone)
     const Rgb  Dusted   = Clamped(Beyond(Rest, Want, Share));
     const Rgb  Shown    = {Rest.Red + (Dusted.Red - Rest.Red) * Share / CellInk, Rest.Green + (Dusted.Green - Rest.Green) * Share / CellInk,
                            Rest.Blue + (Dusted.Blue - Rest.Blue) * Share / CellInk};
-    const int  Error    = ErrorOver(Wanted, All & ~(1 << Lone), Rest) + Distance(Want, Shown) + Texture(Rest, Dusted, Sprinkle.Ink);
-    return {Majority ? Cell{Sprinkle.Glyph, Ink(Rest), Ink(Dusted)} : Cell{Sprinkle.Glyph, Ink(Dusted), Ink(Rest)}, Error};
+    const int  Error    = ErrorOver(Wanted, All & ~(1 << Lone), Rest, Whole) + Distance(Want, Shown) + Texture(Rest, Dusted, Sprinkle.Ink);
+    return {Majority ? Cell{Sprinkle.Glyph, Ink(Rest, Whole), Ink(Dusted, Whole)} : Cell{Sprinkle.Glyph, Ink(Dusted, Whole), Ink(Rest, Whole)}, Error};
 }
 
-/* Fewer see-through sub-pixels given a colour comes first, then the error. */
 void Consider(Fit &Best, const Fit &Candidate)
 {
-    if (Candidate.Filled < Best.Filled || (Candidate.Filled == Best.Filled && Candidate.Error < Best.Error)) Best = Candidate;
+    if (Candidate.Error < Best.Error) Best = Candidate;
+}
+
+bool AllWhole(const Quad &Wanted)
+{
+    return std::all_of(Wanted.begin(), Wanted.end(), [](core::Color Place) { return OpacityOf(Place) == Whole; });
 }
 
 }  // namespace
@@ -240,11 +258,10 @@ Cell ResolveQuad(const Quad &Wanted, GlassKind Glass) noexcept
     if (Wanted[1] == Wanted[0] && Wanted[2] == Wanted[0] && Wanted[3] == Wanted[0])
         return Cell{' ', Wanted[0], Wanted[0]};
     const bool Pure = Glass == GlassKind::Text;
-    const int  Bare = BareOf(Wanted);
-    Fit Best = Split(Wanted, (1 << QuadPlace::TopLeft) | (1 << QuadPlace::TopRight), Glyphs::UpperHalf, Bare, Pure);
-    Consider(Best, Split(Wanted, (1 << QuadPlace::TopLeft) | (1 << QuadPlace::BottomLeft), Glyphs::LeftHalf, Bare, Pure));
-    Consider(Best, OneColour(Wanted, Bare, Pure));
-    if (Pure || Bare != 0) return Best.Look;
+    Fit Best = Split(Wanted, (1 << QuadPlace::TopLeft) | (1 << QuadPlace::TopRight), Glyphs::UpperHalf, Pure);
+    Consider(Best, Split(Wanted, (1 << QuadPlace::TopLeft) | (1 << QuadPlace::BottomLeft), Glyphs::LeftHalf, Pure));
+    Consider(Best, OneColour(Wanted, Pure));
+    if (Pure || !AllWhole(Wanted)) return Best.Look;
 
     for (std::size_t Index = 0; Index < ShadeCount; Index++) {
         const Shade One = ShadeAt(Index);
