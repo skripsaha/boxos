@@ -82,7 +82,8 @@ class Lectern:
                 continue
             self.lines.append("the book stands on slot %u (seq %u)" % (s.index, s.seq))
             self.lanes = bookread.SeedLanes(g.uuid)
-            tree = t.trees.get(tally.DIGESTS)
+            root = s.roots.get(tally.DIGESTS)
+            tree = t.trees[tally.DIGESTS] if root and not root.flags & tally.ROOT_DERIVED else None
             if tree is not None:
                 self._Enter(tree.nodes[0])
             return tree

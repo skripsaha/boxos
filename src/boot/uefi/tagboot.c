@@ -3170,6 +3170,16 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     PrintDec(loaded_bytes);
     Print(" bytes)\r\n");
 
+    /* A format-v2 volume's book keeps the digest of every block of the kernel:
+     * each block loaded is held to it before anything of the kernel is read,
+     * and one that does not match is never jumped into (tagboot_attest.c). */
+    if (g_have_frame) {
+        const char *broken = AttestBootKernel(g_bs, ReadSectors, g_kernel_place.runs[0].first,
+                                              (loaded_bytes + TAGFS_BLOCK_SIZE - 1) / TAGFS_BLOCK_SIZE,
+                                              (const uint8_t *)(uintptr_t)KERNEL_LOAD_ADDR);
+        if (broken) Panic(broken);
+    }
+
     /* Validate kernel header magic — 'KERNEL' at byte offset 2.
      * Kernel header layout:
      *   +0  2 bytes  jmp short .past_header

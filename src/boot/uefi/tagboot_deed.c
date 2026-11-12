@@ -22,6 +22,7 @@ int          g_have_frame = 0;
 VolumeBoot   g_boot;
 int          g_have_boot = 0;
 uint8_t      g_volume_uuid[16];
+uint64_t     g_volume_end = 0;
 
 /* Walk the stamps for one kind. Returns a pointer into `raw`, or NULL. */
 static const void *DeedStampOf(const uint8_t *raw, uint16_t kind, uint16_t *out_bytes)
@@ -115,6 +116,7 @@ static EFI_STATUS DeedTakeFrame(const uint8_t *raw, const VolumeDeed *deed,
         Print("TagBoot: this deed's BOOT names blocks outside its data run\r\n");
         return EFI_UNSUPPORTED;
     }
+    g_volume_end = run_end;
     g_have_frame = 1;
     return EFI_SUCCESS;
 }
