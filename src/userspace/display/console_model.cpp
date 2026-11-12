@@ -355,14 +355,29 @@ void ConsoleModel::Draw(const ConsoleRun &Run)
     }
 }
 
+bool ShownOver(const TextCell &Layered, const TextCell &Beneath, std::uint32_t Page, TextCell &Shown) noexcept
+{
+    const bool FrontThrough = Layered.fg == COLOR_THROUGH;
+    const bool BackThrough = Layered.bg == COLOR_THROUGH;
+    if (FrontThrough && BackThrough) {
+        Shown = Beneath;
+        return false;
+    }
+    const std::uint32_t Seen = (Beneath.bg >> 24) ? Page : Beneath.bg;
+    Shown = Layered;
+    if (FrontThrough) Shown.fg = Seen;
+    if (BackThrough) Shown.bg = Seen;
+    return true;
+}
+
 void ConsoleModel::CommitLayer(std::int32_t X, std::int32_t Y, std::uint32_t Width,
                                std::uint32_t Height,
                                std::span<const DisplayLayerCell> Cells,
-                               std::uint32_t ScrollRows,
+                               std::uint32_t Page, std::uint32_t ScrollRows,
                                std::uint32_t CursorX, std::uint32_t CursorY,
                                bool CursorVisible)
 {
-    const auto Fold = [&] { Folded(X, Y, Width, Height, Cells, ScrollRows, CursorX, CursorY, CursorVisible); };
+    const auto Fold = [&] { Folded(X, Y, Width, Height, Cells, Page, ScrollRows, CursorX, CursorY, CursorVisible); };
     if (Holds(0)) {
         AsAnother(0, false, Fold);
         return;
@@ -372,7 +387,7 @@ void ConsoleModel::CommitLayer(std::int32_t X, std::int32_t Y, std::uint32_t Wid
 }
 
 void ConsoleModel::Folded(std::int32_t X, std::int32_t Y, std::uint32_t Width, std::uint32_t Height,
-                          std::span<const DisplayLayerCell> Cells, std::uint32_t ScrollRows,
+                          std::span<const DisplayLayerCell> Cells, std::uint32_t Page, std::uint32_t ScrollRows,
                           std::uint32_t CursorX, std::uint32_t CursorY, bool CursorVisible)
 {
     for (std::uint32_t Row = 0; Row < ScrollRows; Row++) Scroll();
@@ -383,8 +398,10 @@ void ConsoleModel::Folded(std::int32_t X, std::int32_t Y, std::uint32_t Width, s
         for (std::uint32_t Col = 0; Col < Width; Col++) {
             const DisplayLayerCell &Cell = Cells[static_cast<std::size_t>(Row) * Width + Col];
             if (!Cell.Opaque) continue;
-            Surface[static_cast<std::size_t>(Y + static_cast<std::int32_t>(Row)) * WidthValue +
-                    X + static_cast<std::int32_t>(Col)] = Cell.Cell;
+            TextCell &Beneath = Surface[static_cast<std::size_t>(Y + static_cast<std::int32_t>(Row)) * WidthValue +
+                                        X + static_cast<std::int32_t>(Col)];
+            TextCell Shown;
+            if (ShownOver(Cell.Cell, Beneath, Page, Shown)) Beneath = Shown;
         }
     }
 

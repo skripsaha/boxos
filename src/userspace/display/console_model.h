@@ -8,6 +8,14 @@
 
 #include "box/display.h"
 
+// What a layer's cell shows over the cell beneath it: its own colours, with
+// each COLOR_THROUGH one replaced by the background of the cell beneath, as a
+// triple — Page where that is the screen's own, for COLOR_DEFAULT in a
+// foreground would be drawn as the text colour. False when both are through
+// and the layer's cell covers nothing: Shown is then the cell beneath,
+// untouched.
+bool ShownOver(const TextCell &Layered, const TextCell &Beneath, std::uint32_t Page, TextCell &Shown) noexcept;
+
 class ConsoleModel {
 public:
     ConsoleModel(std::uint32_t Width, std::uint32_t Height);
@@ -45,10 +53,11 @@ public:
     // then the opaque cells laid over it, then the caret where the layer
     // shows one. The region lies on this console, Cells is Width x Height,
     // ScrollRows is at most Height() and the caret inside the region — the
-    // layer was checked before it was handed over (LayersCommit).
+    // layer was checked before it was handed over (LayersCommit). Page is the
+    // screen's page colour, what a see-through cell over the page shows.
     void CommitLayer(std::int32_t X, std::int32_t Y, std::uint32_t Width,
                      std::uint32_t Height, std::span<const DisplayLayerCell> Cells,
-                     std::uint32_t ScrollRows,
+                     std::uint32_t Page, std::uint32_t ScrollRows,
                      std::uint32_t CursorX, std::uint32_t CursorY,
                      bool CursorVisible);
 
@@ -62,7 +71,7 @@ private:
     void Lay(const TextCell &Cell);
     void Draw(const ConsoleRun &Run);
     void Folded(std::int32_t X, std::int32_t Y, std::uint32_t Width, std::uint32_t Height,
-                std::span<const DisplayLayerCell> Cells, std::uint32_t ScrollRows,
+                std::span<const DisplayLayerCell> Cells, std::uint32_t Page, std::uint32_t ScrollRows,
                 std::uint32_t CursorX, std::uint32_t CursorY, bool CursorVisible);
     void Clear(std::uint32_t Foreground, std::uint32_t Background);
     void Step(std::int32_t Delta);

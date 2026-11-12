@@ -28,6 +28,10 @@ extern "C" {
  *                   colour, bg its page colour, as the display draws them
  *                   (light gray on black until the person chooses others).
  *   COLOR_INHERIT   "keep currently set background" (use as bg only).
+ *   COLOR_THROUGH   "see through to what is beneath" — a layer's cell only
+ *                   (box/display.h): the display shows, in its place, the
+ *                   background of the cell beneath the layer's; both of a
+ *                   cell's colours so, and the cell beneath shows unchanged.
  */
 
 typedef uint32_t Color;

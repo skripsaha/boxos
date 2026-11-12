@@ -56,10 +56,11 @@ bool LayersDropProcess(std::uint32_t Pid, std::uint32_t Generation) noexcept;
 bool LayersStep() noexcept;
 
 // The model's text with every layer laid over it, each cell with its mark, and
-// the caret. A caret is part of the picture it stands in — the console's, or a
-// layer's that shows one — and a layer above it covers it as it covers the
-// cell it stands on.
-void LayersCompose(const ConsoleModel &Model, std::vector<GlassCell> &Composed,
+// the caret. Page is the screen's page colour, which a see-through cell over
+// the page shows (ShownOver). A caret is part of the picture it stands in —
+// the console's, or a layer's that shows one — and a layer above it covers it
+// as it covers the cell it stands on.
+void LayersCompose(const ConsoleModel &Model, std::uint32_t Page, std::vector<GlassCell> &Composed,
                    Caret &At) noexcept;
 
 #endif

@@ -190,7 +190,7 @@ void Present()
     if (!g_dirty) return;
     g_dirty = false;
     Caret At;
-    LayersCompose(*g_model, g_composed, At);
+    LayersCompose(*g_model, g_easel->PageColor(), g_composed, At);
     if (!EffectsOn()) {
         g_easel->Present(g_composed, At);
         return;
@@ -219,7 +219,7 @@ bool AnswerWaiting()
             if (Taken) {
                 Utter(Taken->Text, [&] {
                     g_model->CommitLayer(Taken->X, Taken->Y, Taken->Width, Taken->Height,
-                                         Taken->Cells, Taken->ScrollRows, Taken->CursorX,
+                                         Taken->Cells, g_easel->PageColor(), Taken->ScrollRows, Taken->CursorX,
                                          Taken->CursorY, Taken->CursorVisible);
                 });
                 g_dirty = true;

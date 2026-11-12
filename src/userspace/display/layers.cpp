@@ -390,7 +390,7 @@ bool LayersStep() noexcept
     return Changed;
 }
 
-void LayersCompose(const ConsoleModel &Model, std::vector<GlassCell> &Composed, Caret &At) noexcept
+void LayersCompose(const ConsoleModel &Model, std::uint32_t Page, std::vector<GlassCell> &Composed, Caret &At) noexcept
 {
     const std::vector<TextCell> &Base = Model.Cells();
     for (std::size_t Index = 0; Index < Base.size(); Index++) Composed[Index] = GlassCell{Base[Index]};
@@ -428,8 +428,11 @@ void LayersCompose(const ConsoleModel &Model, std::vector<GlassCell> &Composed, 
                 const std::uint32_t ScreenX = static_cast<std::uint32_t>(Layer.X) + Col;
                 const std::uint32_t ScreenY = static_cast<std::uint32_t>(Layer.Y) + Row;
                 const bool Marked = Cell.Mark == DISPLAY_CELL_MARK_UNDER || Cell.Mark == DISPLAY_CELL_MARK_BAR;
-                Composed[static_cast<std::size_t>(ScreenY) * Width + ScreenX] =
-                    Marked ? GlassCell{Cell.Cell, Cell.MarkColor, Cell.Mark} : GlassCell{Cell.Cell};
+                GlassCell &Beneath = Composed[static_cast<std::size_t>(ScreenY) * Width + ScreenX];
+                TextCell Shown;
+                const bool Covers = ShownOver(Cell.Cell, Beneath.Cell, Page, Shown);
+                if (Marked) Beneath = GlassCell{Shown, Cell.MarkColor, Cell.Mark};
+                else if (Covers) Beneath = GlassCell{Shown};
             }
         }
         if (Layer.CursorVisible) {

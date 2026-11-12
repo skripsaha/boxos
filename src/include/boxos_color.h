@@ -18,6 +18,12 @@
  *                  holds (light gray on black until the keeper of the programs
  *                  in front says others, box/display.h DISP_CMD_PAGE)
  *   COLOR_INHERIT  "keep what is set" (accepted as bg)
+ *   COLOR_THROUGH  "see through to what is beneath here" — only in a layer's
+ *                  cell (box/display.h): the display draws the colour of the
+ *                  cell beneath the layer's, its background, in its place, and
+ *                  a cell whose fg and bg are both COLOR_THROUGH shows the cell
+ *                  beneath as it is. It is how a figure whose edge cuts a cell
+ *                  leaves the rest of the cell to what lies under it
  * On the wire — a console frame, a layer's cell — a colour is a real triple or
  * COLOR_DEFAULT (BoxColorOnWire), and only the display, at the glass, turns
  * COLOR_DEFAULT into the colour it stands for.
@@ -45,6 +51,7 @@
 
 #define COLOR_DEFAULT  ((uint32_t)0xFE000000u)
 #define COLOR_INHERIT  ((uint32_t)0xFF000000u)
+#define COLOR_THROUGH  ((uint32_t)0xFD000000u)
 
 /* ───── IBM VGA 16-colour palette (#RRGGBB per index) ───── */
 
