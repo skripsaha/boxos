@@ -87,9 +87,14 @@ static bool StandTallyLeafBelowRoot(TallyPlace* leaf, uint64_t* fid, bool* below
  * as it lies, a Glean's Tallies are laid and then one over every slot and one
  * more, nothing changed, so each after the first names every leaf as it lies;
  * the volume mounted again past them, its walk names their nodes. Both copies
- * of the leaf made unreadable, the mount comes up with the range rotten; the
- * sectors reading again, it comes up whole — and the ring, its ground and the
- * ribbon go back as the test found them.
+ * of the leaf made unreadable, the mount comes up with the range rotten,
+ * having asked the medium for each copy once — its run, refused, then each
+ * sector alone (book_unit.c BookUnitBySector): the older slots name the leaf
+ * where it lies, and Facsimile's look in each takes the answer the walk had
+ * (mount/foxing.c), where it read both copies again in every slot of the ring,
+ * a drive's recovery of every sector paid three times over. The sectors
+ * reading again, it comes up whole — and the ring, its ground and the ribbon
+ * go back as the test found them.
  */
 TestResult TestStandTallyRottenLeafLocked(void)
 {
@@ -102,6 +107,7 @@ TestResult TestStandTallyRottenLeafLocked(void)
     MountBookSaid      said;
     bool               down = false, below = false, found = false, kept = false;
     uint64_t           fid  = 0, sectors = 0;
+    uint32_t           asked = 0;
     FileRecord*        rec  = NULL;
 
     if (aside)
@@ -134,9 +140,13 @@ TestResult TestStandTallyRottenLeafLocked(void)
                 "both copies of the leaf will not read");
     StandTallyArrive();
     TagFSStandHoldAgain();
-    down = false;
+    down  = false;
+    asked = BlockFailSeen();
 
     TEST_ASSERT(tagfs_get_state()->initialized, "the volume mounts all the same");
+    TEST_ASSERT_EQ(asked, 2u * (1u + sectors), "each copy of the leaf asked of the medium once: its run, then "
+                                               "each sector alone — no older slot that names the leaf where it lies "
+                                               "reads it again");
     MountBookStandSaid(&said);
     TEST_ASSERT_EQ(said.rotten, 1, "with one rotten range of FILES");
     TEST_ASSERT(said.locked > 0, "whose files are locked");
