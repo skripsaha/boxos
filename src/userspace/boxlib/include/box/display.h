@@ -612,8 +612,10 @@ typedef enum {
 } DisplayCellMark;
 
 typedef struct {
-    TextCell Cell;            /* fg and bg: #RRGGBB, COLOR_DEFAULT, or COLOR_THROUGH: the
-                                 background of whatever lies beneath the cell */
+    TextCell Cell;            /* fg and bg: #RRGGBB, COLOR_DEFAULT, COLOR_THROUGH (the
+                                 background of whatever lies beneath the cell), or a
+                                 translucent colour: #RRGGBB at an opacity over it
+                                 (top byte 0x80..0xBF, boxos_color.h) */
     uint32_t MarkColor;       /* #RRGGBB, or COLOR_DEFAULT: the screen's text colour */
     uint8_t  Opaque;
     uint8_t  Mark;            /* DisplayCellMark; another is none */

@@ -357,16 +357,18 @@ void ConsoleModel::Draw(const ConsoleRun &Run)
 
 bool ShownOver(const TextCell &Layered, const TextCell &Beneath, std::uint32_t Page, TextCell &Shown) noexcept
 {
-    const bool FrontThrough = Layered.fg == COLOR_THROUGH;
-    const bool BackThrough = Layered.bg == COLOR_THROUGH;
-    if (FrontThrough && BackThrough) {
+    if (BoxColorOpacity(Layered.fg) == 0 && BoxColorOpacity(Layered.bg) == 0) {
         Shown = Beneath;
         return false;
     }
     const std::uint32_t Seen = (Beneath.bg >> 24) ? Page : Beneath.bg;
+    const auto Resolved = [Seen](std::uint32_t Colour) {
+        if (Colour == COLOR_THROUGH) return Seen;
+        return BoxColorIsTranslucent(Colour) ? BoxColorBlendOver(Colour, Seen) : Colour;
+    };
     Shown = Layered;
-    if (FrontThrough) Shown.fg = Seen;
-    if (BackThrough) Shown.bg = Seen;
+    Shown.fg = Resolved(Layered.fg);
+    Shown.bg = Resolved(Layered.bg);
     return true;
 }
 

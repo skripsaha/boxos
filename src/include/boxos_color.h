@@ -24,6 +24,14 @@
  *                  a cell whose fg and bg are both COLOR_THROUGH shows the cell
  *                  beneath as it is. It is how a figure whose edge cuts a cell
  *                  leaves the rest of the cell to what lies under it
+ *   top byte 0x80..0xBF  "this triple at an opacity over what is beneath" — a
+ *                  layer's cell only, as COLOR_THROUGH: the low 24 bits are
+ *                  #RRGGBB and the byte is 0x80 + n, n = 0..63 steps of
+ *                  opacity (n/63). The display blends it with the background
+ *                  of the cell beneath, as COLOR_THROUGH is resolved, into a
+ *                  plain triple (BoxColorBlendOver), so no glass ever sees one.
+ *                  n = 0 is COLOR_THROUGH, n = 63 the plain triple; the
+ *                  helpers below make neither of them in this form
  * On the wire — a console frame, a layer's cell — a colour is a real triple or
  * COLOR_DEFAULT (BoxColorOnWire), and only the display, at the glass, turns
  * COLOR_DEFAULT into the colour it stands for.
@@ -53,6 +61,48 @@
 #define COLOR_INHERIT  ((uint32_t)0xFF000000u)
 #define COLOR_THROUGH  ((uint32_t)0xFD000000u)
 
+#define COLOR_TRANSLUCENT_BASE   ((uint32_t)0x80u)
+#define COLOR_OPACITY_STEPS      ((uint32_t)63u)
+
+/* ───── A colour at an opacity ───── */
+
+static inline int BoxColorIsTranslucent(uint32_t c)
+{
+    uint32_t top = c >> 24;
+    return top >= COLOR_TRANSLUCENT_BASE && top <= COLOR_TRANSLUCENT_BASE + COLOR_OPACITY_STEPS;
+}
+
+/* How opaque a colour is, 0..COLOR_OPACITY_STEPS: a plain triple and any
+ * sentinel but COLOR_THROUGH are whole, COLOR_THROUGH is none. */
+static inline uint32_t BoxColorOpacity(uint32_t c)
+{
+    if (BoxColorIsTranslucent(c)) return (c >> 24) - COLOR_TRANSLUCENT_BASE;
+    return c == COLOR_THROUGH ? 0u : COLOR_OPACITY_STEPS;
+}
+
+/* The triple at Steps of opacity: none is COLOR_THROUGH, whole the plain
+ * triple, anything between the encoded colour. */
+static inline uint32_t BoxColorTranslucent(uint32_t rgb, uint32_t steps)
+{
+    if (steps == 0u) return COLOR_THROUGH;
+    if (steps >= COLOR_OPACITY_STEPS) return rgb & 0x00FFFFFFu;
+    return ((COLOR_TRANSLUCENT_BASE + steps) << 24) | (rgb & 0x00FFFFFFu);
+}
+
+/* A translucent colour laid over a plain triple, as the plain triple that is
+ * seen: each channel from the beneath one toward the colour's by its opacity,
+ * rounded to nearest. */
+static inline uint32_t BoxColorBlendOver(uint32_t translucent, uint32_t beneath)
+{
+    uint32_t steps = BoxColorOpacity(translucent);
+    uint32_t out = 0;
+    for (uint32_t shift = 0; shift < 24u; shift += 8u) {
+        uint32_t over = (translucent >> shift) & 0xFFu, under = (beneath >> shift) & 0xFFu;
+        out |= ((under * (COLOR_OPACITY_STEPS - steps) + over * steps + COLOR_OPACITY_STEPS / 2u) / COLOR_OPACITY_STEPS) << shift;
+    }
+    return out;
+}
+
 /* ───── IBM VGA 16-colour palette (#RRGGBB per index) ───── */
 
 static inline uint32_t BoxVgaPaletteRgb(uint8_t idx)
@@ -80,8 +130,10 @@ static inline uint32_t BoxVgaPaletteRgb(uint8_t idx)
 
 /* ───── A colour on the wire ───── */
 
-/* A real triple as it is; any sentinel (any non-zero high byte) as
- * COLOR_DEFAULT — the display's to draw. */
+/* A real triple as it is; any sentinel or translucent colour (any non-zero
+ * high byte) as COLOR_DEFAULT — the display's to draw. A layer's cell is
+ * not on this wire: it carries COLOR_THROUGH and translucent colours as they
+ * are, and the display resolves them. */
 static inline uint32_t BoxColorOnWire(uint32_t c)
 {
     return (c >> 24) ? COLOR_DEFAULT : c;

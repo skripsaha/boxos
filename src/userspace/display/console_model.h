@@ -9,11 +9,13 @@
 #include "box/display.h"
 
 // What a layer's cell shows over the cell beneath it: its own colours, with
-// each COLOR_THROUGH one replaced by the background of the cell beneath, as a
-// triple — Page where that is the screen's own, for COLOR_DEFAULT in a
-// foreground would be drawn as the text colour. False when both are through
-// and the layer's cell covers nothing: Shown is then the cell beneath,
-// untouched.
+// each COLOR_THROUGH one replaced by the background of the cell beneath and
+// each translucent one blended with it (BoxColorBlendOver), as a triple — Page
+// where that is the screen's own, for COLOR_DEFAULT in a foreground would be
+// drawn as the text colour. No colour that leaves this is a sentinel of
+// transparency, so the glass never sees one. False when both are wholly
+// see-through and the layer's cell covers nothing: Shown is then the cell
+// beneath, untouched.
 bool ShownOver(const TextCell &Layered, const TextCell &Beneath, std::uint32_t Page, TextCell &Shown) noexcept;
 
 class ConsoleModel {

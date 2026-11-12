@@ -32,6 +32,10 @@ extern "C" {
  *                   (box/display.h): the display shows, in its place, the
  *                   background of the cell beneath the layer's; both of a
  *                   cell's colours so, and the cell beneath shows unchanged.
+ *   0x80..0xBF      top byte of a translucent colour — a layer's cell only: the
+ *                   #RRGGBB in the low 24 bits at (byte - 0x80) / 63 opacity
+ *                   over the background of the cell beneath, blended by the
+ *                   display into a plain triple (boxos_color.h).
  */
 
 typedef uint32_t Color;
