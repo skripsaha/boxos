@@ -798,10 +798,11 @@ class BookMount:
 
     def _Settle(self):
         """What the replay leaves the mount to decide: a file rolled back by
-        the rule of rot whose blocks another holds is locked (§3.9); a file
-        naming ground outside the data run is locked; runs carried with an
-        extension and flags past 32 bits are what this kernel cannot carry
-        on; a Slip it carries on (§16.5 п.13)."""
+        the rule of rot onto blocks another holds alone is locked (§3.9) — a
+        block one of the two names SHARED is no other's to hold (§8.2); a file
+        naming ground outside the data run is locked; a run with an extension
+        but SHARED alone and flags past 32 bits are what this kernel cannot
+        carry on; a Slip it carries on (§16.5 п.13)."""
         g = self.g
         for fid in sorted(self.files):
             fs = self.files[fid]
@@ -811,14 +812,14 @@ class BookMount:
                          "it is locked" % (fid, ondisk.RunsText(RunsNormal(out)), g.data_block, g.data_end))
                 self._Lock(fid, "it names ground outside the data run")
         for fid in sorted(self.mismatched & set(self.files)):
-            mine = RunsNormal(self.files[fid].Ground())
-            others = RunsNormal([r for f, fs in self.files.items() if f != fid for r in fs.Ground()])
+            mine = RunsNormal(self.files[fid].Owned())
+            others = RunsNormal([r for f, fs in self.files.items() if f != fid for r in fs.Owned()])
             if ondisk.RunsIntersect(mine, others):
                 for _why, fids in self._errata.values():
                     fids.discard(fid)
                 self._Lock(fid, "it is rolled back to blocks another file now holds (§3.9)")
         for fs in self.files.values():
-            if any(r.ext is not None for r in fs.runs):
+            if not all(tally.RunCarried(r) for r in fs.runs):
                 self.Glass("a run of fid %u carries an extension this kernel cannot carry on (CODEC, SHARED "
                            "or COPY, §8)" % fs.fid)
             if fs.flags >> 32:

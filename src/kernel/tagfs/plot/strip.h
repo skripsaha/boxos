@@ -15,9 +15,13 @@
  * UnpackV1 reads neighbouring extents back as one Strip.
  *
  * `kind` says what the blocks are. STRIP_DATA is ground holding the file's
- * bytes; STRIP_HOLE is blocks of the file that read as zeros and own no ground,
- * which format v2's records can say (spec_v2 §2.8) and format v1's cannot — so
- * every Strip of a v1 volume is STRIP_DATA, and PackV1 refuses any other.
+ * bytes, the file its one owner; STRIP_HOLE is blocks of the file that read as
+ * zeros and own no ground; STRIP_SHARED is ground holding the file's bytes
+ * that other files may name too (spec_v2 §8.2, a run that carries SHARED) —
+ * read as DATA is, never written in place, let go by the last of its owners
+ * (ink/commonhold.h). Format v2's records can say the two last (§2.8) and
+ * format v1's cannot — so every Strip of a v1 volume is STRIP_DATA, and PackV1
+ * refuses any other.
  * `birth` is the stitch that laid the run on a v2 volume; format v1 has no such
  * number, and its Strips carry 0.
  */
@@ -30,7 +34,15 @@ typedef struct {
 
 STATIC_ASSERT(sizeof(Strip) == 24, "Strip must be 24 bytes");
 
-#define STRIP_DATA  0u
-#define STRIP_HOLE  1u
+#define STRIP_DATA    0u
+#define STRIP_HOLE    1u
+#define STRIP_SHARED  2u
+
+/* Whether a Strip of `kind` lies on ground the file reads its bytes from —
+ * DATA or SHARED — and is no hole. */
+static inline bool StripOnGround(uint32_t kind)
+{
+    return kind == STRIP_DATA || kind == STRIP_SHARED;
+}
 
 #endif /* TAGFS_STRIP_H */

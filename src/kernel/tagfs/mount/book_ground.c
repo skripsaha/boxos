@@ -192,10 +192,11 @@ static void BookGroundFallow(void)
         BookClaim(GROUND_FALLOW, g_book.fallow[i].start, g_book.fallow[i].count, 0);
 }
 
-/* A run of the print (MirrorRuns): a hole, or DATA from `start`, `blocks`
- * long — the Strips that go on from one another are one. */
+/* A run of the print (MirrorRuns): a hole, or ground from `start` — DATA or
+ * SHARED, its Strip kind the byte — `blocks` long; the Strips of one kind
+ * that go on from one another are one. */
 typedef struct __attribute__((packed)) {
-    uint8_t  hole;
+    uint8_t  kind;
     uint64_t start;
     uint64_t blocks;
 } BookPrintRun;
@@ -203,8 +204,9 @@ typedef struct __attribute__((packed)) {
 /*
  * One live file into the print of what memory holds (tools/volumeread/
  * bookcensus.py MirrorPrint): le64 fid · le64 size · le32 name bytes · the
- * name · le32 tags · le32 each tag, rising · each run as u8 hole · le64 start
- * · le64 blocks, the Strips that go on from one another one run · le32 runs.
+ * name · le32 tags · le32 each tag, rising · each run as u8 kind (0 DATA,
+ * 1 a hole, 2 SHARED) · le64 start · le64 blocks, the Strips of one kind that
+ * go on from one another one run · le32 runs.
  */
 static uint32_t BookFilePrinted(uint32_t crc, const FileRecord* rec)
 {
@@ -223,8 +225,8 @@ static uint32_t BookFilePrinted(uint32_t crc, const FileRecord* rec)
     crc = KCrc32cContinue(crc, (const uint8_t*)rec->tags, sizeof(uint32_t) * ntags);
     StripWalkBegin(rec, &walk);
     for (bool more = StripWalkNext(&walk, &s);; more = StripWalkNext(&walk, &s)) {
-        uint8_t hole = more && s.kind == STRIP_HOLE;
-        if (more && run.blocks && run.hole == hole && (hole || run.start + run.blocks == s.start)) {
+        uint8_t kind = more ? (uint8_t)s.kind : 0;
+        if (more && run.blocks && run.kind == kind && (kind == STRIP_HOLE || run.start + run.blocks == s.start)) {
             run.blocks += s.count;
             continue;
         }
@@ -234,12 +236,13 @@ static uint32_t BookFilePrinted(uint32_t crc, const FileRecord* rec)
         }
         if (!more)
             break;
-        run = (BookPrintRun){ hole, hole ? 0 : s.start, s.count };
+        run = (BookPrintRun){ kind, kind == STRIP_HOLE ? 0 : s.start, s.count };
     }
     return KCrc32cContinue(crc, (const uint8_t*)&nruns, sizeof(nruns));
 }
 
-/* A live file's ground claimed, the file the loader reads the kernel by named
+/* A live file's ground claimed — its DATA alone, a run SHARED beside other
+ * owners (ground_owner.h) — the file the loader reads the kernel by named
  * once, so a change of a book's file asks the guard of its id and not of every
  * run it has (ink.c, InkMayChange), and the next tag past every tag it wears. */
 static void BookFileGround(uint64_t fid, const FileRecord* rec)
@@ -248,7 +251,7 @@ static void BookFileGround(uint64_t fid, const FileRecord* rec)
     Strip     run;
     StripWalkBegin(rec, &walk);
     while (StripWalkNextGround(&walk, &run)) {
-        GroundClaim(GROUND_FILE, run.start, run.count, fid);
+        GroundClaim(run.kind == STRIP_SHARED ? GROUND_SHARED : GROUND_FILE, run.start, run.count, fid);
         if (!g_book.boot_fid && InkTouchesBoot(&run, 1))
             g_book.boot_fid = fid;
     }
@@ -439,8 +442,10 @@ error_t BookGroundCensus(const char** what)
     if (rc == OK) {
         BookHeldKept();
         EscheatMounted();
+        DogEarCommonheld();
     }
-    g_book.reach = GroundCensusReach();
+    g_book.reach        = GroundCensusReach();
+    g_book.said.doubles = GroundCensusDoubled();
     GroundCensusEnd();
     if (rc != OK)
         return rc;

@@ -163,7 +163,7 @@ bool InkTouchesBoot(const Strip* runs, uint32_t count)
         return false;
     for (uint32_t i = 0; i < count; i++) {
         uint64_t a = runs[i].start, b = a + runs[i].count;
-        if (runs[i].kind == STRIP_DATA && a < end && b > first)    /* a hole lies on no block */
+        if (StripOnGround(runs[i].kind) && a < end && b > first)    /* a hole lies on no block */
             return true;
     }
     return false;

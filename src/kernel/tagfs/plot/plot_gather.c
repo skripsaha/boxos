@@ -291,7 +291,7 @@ static error_t PlotGatherLay(Plot *p, PlotGathering *g)
     uint32_t noted = p->freed_count;
     uint32_t count = g->last - g->first + 1;
     for (uint32_t i = g->first; i <= g->last && rc == OK; i++)
-        if (p->runs[i].kind == STRIP_DATA)    /* a hole owns no ground to let go */
+        if (StripOnGround(p->runs[i].kind))    /* a hole owns no ground to let go */
             rc = PlotLetGoLater(p, p->runs[i].start, p->runs[i].count);
     if (rc == OK)
         rc = PlotSplice(p, g->first, g->last, g->to, (uint32_t)g->blocks);

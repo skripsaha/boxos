@@ -142,7 +142,7 @@ error_t TagFSReadStream(TagFSFileHandle *h, const ReadSink *sink, uint64_t *out_
             chunk = (uint32_t)(size - done);
 
         if (done > 0 && spot.left > 0) {
-            spot.block += spot.kind == STRIP_DATA ? 1u : 0u;
+            spot.block += StripOnGround(spot.kind) ? 1u : 0u;
             spot.left--;
         } else if ((rc = ReadLocate(h, pos / TAGFS_BLOCK_SIZE, &spot)) != OK) {
             break;

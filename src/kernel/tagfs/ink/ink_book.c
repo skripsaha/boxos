@@ -196,7 +196,7 @@ error_t InkBookNew(const char* name, const uint32_t* tags, uint32_t count, uint6
 // ----------------------------------------------------------------------------
 
 static error_t InkBookQuitclaimLocked(uint64_t fid, const RecordWhere* was, const FileRecord* cur,
-                                      FallowNode* fallow, Jot* j, Jot** spent, InkReceipt* out)
+                                      FallowNode** fallow, Jot* j, Jot** spent, InkReceipt* out)
 {
     TagFSState* fs = InkState();
     error_t     rc = InkVolumeTakes();
@@ -206,7 +206,10 @@ static error_t InkBookQuitclaimLocked(uint64_t fid, const RecordWhere* was, cons
     FileRecord* still = FileMapRecordHold(fs->files, fid, &now);
     if (!still)
         return ERR_FILE_NOT_FOUND;
-    rc = now.gen != was->gen ? INK_AGAIN : RibbonClaim(DocketClaimOf(JOT_QUITCLAIM, cur, NULL), true);
+    if (now.gen != was->gen || (*fallow && !FallowNodeCommonRoom(*fallow)))
+        rc = INK_AGAIN;
+    else
+        rc = RibbonClaim(DocketClaimOf(JOT_QUITCLAIM, cur, NULL), true);
     if (rc != OK) {
         FileRecordRelease(still);
         return rc;
@@ -217,8 +220,10 @@ static error_t InkBookQuitclaimLocked(uint64_t fid, const RecordWhere* was, cons
     DocketPutLocked(j, spent);
     for (uint32_t i = 0; i < cur->tag_count; i++)
         TagBitmapLeave(fs->bitmap_index, cur->tags[i], fid);
-    if (fallow)
-        FallowAdd(fallow, gen);
+    if (*fallow && FallowNodeCommonheld(*fallow, gen)) {
+        FallowAdd(*fallow, gen);
+        *fallow = NULL;
+    }
     AllotmentRelease(fid);
     if (fs->ledger.total_files > 0)
         fs->ledger.total_files--;
@@ -236,7 +241,7 @@ error_t InkBookQuitclaim(uint64_t fid, const RecordWhere* was, const FileRecord*
     error_t     rc    = j ? OK : ERR_NO_MEMORY;
     if (rc == OK) {
         TagFSLockTake(&fs->lock);
-        rc = InkBookQuitclaimLocked(fid, was, cur, fallow, j, &spent, out);
+        rc = InkBookQuitclaimLocked(fid, was, cur, &fallow, j, &spent, out);
         TagFSLockDrop(&fs->lock);
         rc = RibbonClaimSay(rc);
     }
@@ -245,8 +250,8 @@ error_t InkBookQuitclaim(uint64_t fid, const RecordWhere* was, const FileRecord*
         TagBitmapShrink(fs->bitmap_index, &fs->lock, cur->tags, cur->tag_count, fid);
     } else {
         JotsLetGo(j);
-        FallowNodeLetGo(fallow);
     }
+    FallowNodeLetGo(fallow);    /* added, or left with no ground of its own to rest, or refused */
     JotsLetGo(spent);
     return rc;
 }
@@ -469,7 +474,8 @@ static error_t InkBookPlotLocked(const Plot* p, const RecordWhere* was, InkBookW
     FileRecord* still = FileMapRecordHold(fs->files, p->fid, &now);
     if (!still)
         return ERR_FILE_NOT_FOUND;
-    if (now.gen != was->gen || (w->joined && DocketTakes() != w->takes))
+    if (now.gen != was->gen || (w->joined && DocketTakes() != w->takes) ||
+        (w->fallow && !FallowNodeCommonRoom(w->fallow)))
         rc = INK_AGAIN;
     else
         rc = RibbonClaimHeld(InkBookPlotHeld(p), w->claim);
@@ -489,7 +495,7 @@ static error_t InkBookPlotLocked(const Plot* p, const RecordWhere* was, InkBookW
     EndpaperStakesGoneLocked(&p->stakes_counted);   /* its Jot and windows count them now */
     for (uint32_t i = 0; i < p->digest_count; i++)
         GlossPut(&w->gloss, p->digests[i].block, p->digests[i].digest);
-    if (w->fallow) {
+    if (w->fallow && FallowNodeCommonheld(w->fallow, gen)) {
         FallowAdd(w->fallow, gen);
         w->fallow = NULL;
     }

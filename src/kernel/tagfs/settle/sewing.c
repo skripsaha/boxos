@@ -1,4 +1,5 @@
 #include "sewing.h"
+#include "../ink/commonhold.h"
 #include "binder.h"
 #include "../ink/ink.h"
 #include "../ink/docket.h"
@@ -823,7 +824,7 @@ static void StitchDogEared(const StitchSnap* s)
 {
     for (const Jot* j = s->jots.first; j; j = j->next[0])
         if (j->carried)
-            DogEarFileChanged(j->fid, j->was, j->now);
+            DogEarFileChanged(j->fid, j->was, j->now, s->target);
     if (s->coined_hi > s->coined_lo)
         DogEarPut(TALLY_TAGS, (TallyKey){ s->coined_lo, 0 }, (TallyKey){ s->coined_hi, 0 });
     if (s->use_owed)
@@ -885,6 +886,7 @@ void StitchRunEnd(error_t rc)
         uint64_t fid_most = 0;
         error_t  births   = DocketBirths(&s->jots, s->seq, &fid_most);
         StitchDogEared(s);
+        CommonholdSettled(s->target);   /* past DogEar: the blocks the stitch's Inks left with no owner, gone */
         LooseLeavesSettled(&s->jots);
         BinderStitchSettled(s->seq, s->useful, fid_most, births);
         EndpaperGrew(&s->jots, s->seq);

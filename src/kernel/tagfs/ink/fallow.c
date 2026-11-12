@@ -1,4 +1,5 @@
 #include "fallow.h"
+#include "commonhold.h"
 #include "../integrity/integrity.h"
 #include "../helm/helm.h"
 #include "../settle/settle.h"
@@ -67,16 +68,32 @@ static FallowNode* NodeAlloc(uint32_t room, FallowKind kind, uint64_t fid)
     return n;
 }
 
+/* The room a node of `ground` runs of `runs` (`count`) takes once Commonhold
+ * cuts them, that cut's room asked of Commonhold: 0 with no memory — or for a
+ * room past what a node counts, said. */
+static uint32_t NodeRoomCut(const Strip* runs, uint64_t count, uint64_t ground, uint64_t fid)
+{
+    uint64_t pieces = 0, splits = 0;
+    CommonholdCuts(runs, count, &pieces, &splits);
+    if (ground + pieces > UINT32_MAX) {
+        kprintf("[TagFS] file %llu: its %llu runs of ground are more than a node of Fallow counts — the change "
+                "that gives them up is refused\n", (unsigned long long)fid, (unsigned long long)(ground + pieces));
+        return 0;
+    }
+    return CommonholdRoomFor(splits) == OK ? (uint32_t)(ground + pieces) : 0;
+}
+
 /* Only ground comes to rest: a hole (STRIP_HOLE) names no block, and a node
  * that kept one would give the allocator whatever its start reads as. */
 FallowNode* FallowNodeMake(const Strip* runs, uint32_t count, FallowKind kind, uint64_t fid)
 {
     uint32_t ground = 0;
     for (uint32_t i = 0; i < count; i++)
-        ground += runs[i].kind == STRIP_DATA;
-    FallowNode* n = NodeAlloc(ground, kind, fid);
+        ground += StripOnGround(runs[i].kind);
+    uint32_t    room = ground ? NodeRoomCut(runs, count, ground, fid) : 0;
+    FallowNode* n    = ground && !room ? NULL : NodeAlloc(room, kind, fid);
     for (uint32_t i = 0; n && i < count; i++)
-        if (runs[i].kind == STRIP_DATA)
+        if (StripOnGround(runs[i].kind))
             n->runs[n->count++] = runs[i];
     return n;
 }
@@ -105,8 +122,52 @@ error_t FallowNodeOfRecord(const FileRecord* rec, FallowKind kind, FallowNode** 
     StripWalkBegin(rec, &walk);
     while (n->count < n->room && StripWalkNextGround(&walk, &run))
         n->runs[n->count++] = run;
+    /* Laid again with the room Commonhold's cut takes only where its blocks
+     * meet a block more than one names. */
+    if (!FallowNodeCommonRoom(n)) {
+        FallowNode* cut = FallowNodeMake(n->runs, n->count, kind, rec->file_id);
+        kfree(n);
+        n = cut;
+    }
     *out = n;
-    return OK;
+    return n ? OK : ERR_NO_MEMORY;
+}
+
+/* Under the state lock: whether the node and Commonhold have the room the cut
+ * of the node's ground takes as Commonhold stands now. */
+bool FallowNodeCommonRoom(const FallowNode* node)
+{
+    uint64_t pieces = 0, splits = 0;
+    CommonholdCuts(node->runs, node->count, &pieces, &splits);
+    return node->count + pieces <= node->room && CommonholdRoomHolds(splits);
+}
+
+/* A block the change lets go, after the node's last run — joined to it where
+ * it goes on from it. */
+static void NodeFreed(void* ctx, uint64_t start, uint64_t count)
+{
+    FallowNode* n    = ctx;
+    Strip*      last = n->count ? &n->runs[n->count - 1u] : NULL;
+    if (last && last->start + last->count == start && last->count + count <= UINT32_MAX)
+        last->count += (uint32_t)count;
+    else
+        n->runs[n->count++] = (Strip){ .start = start, .count = (uint32_t)count, .kind = STRIP_DATA };
+}
+
+/* The node's runs moved to the end of its room and read from there, the
+ * blocks they let go written from its first: the room held
+ * (FallowNodeCommonRoom) is the most the cut adds, so the runs written never
+ * reach a run not yet read. */
+uint32_t FallowNodeCommonheld(FallowNode* node, uint64_t gen)
+{
+    uint32_t in = node->count, tail = node->room - in;
+    memmove(&node->runs[tail], &node->runs[0], sizeof(Strip) * in);
+    node->count = 0;
+    for (uint32_t i = 0; i < in; i++) {
+        Strip run = node->runs[tail + i];
+        CommonholdLetGoLocked(run.start, run.count, run.kind, gen, NodeFreed, node);
+    }
+    return node->count;
 }
 
 FallowNode* FallowNodeRoom(uint32_t blocks, FallowKind kind)

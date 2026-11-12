@@ -113,14 +113,17 @@ def KernelLostSaid(said):
 
 
 def MirrorRuns(runs):
-    """A file's runs as the print names them: each run that goes on from the
-    one before it — two holes, or DATA where the last ended — one with it."""
+    """A file's runs as the print names them, each by its kind — 0 DATA, 1 a
+    hole, 2 SHARED (book_ground.c BookFilePrinted): each run that goes on from
+    the one before it — two holes, or ground of one kind where the last
+    ended — one with it."""
     out = []
     for r in runs:
-        if out and out[-1][0] == r.hole and (r.hole or out[-1][1] + out[-1][2] == r.start):
+        kind = 1 if r.hole else 2 if tally.RunShared(r) else 0
+        if out and out[-1][0] == kind and (r.hole or out[-1][1] + out[-1][2] == r.start):
             out[-1][2] += r.count
         else:
-            out.append([r.hole, 0 if r.hole else r.start, r.count])
+            out.append([kind, 0 if r.hole else r.start, r.count])
     return out
 
 
@@ -129,7 +132,7 @@ def MirrorPrint(files):
     BookMirrorPrint) — CRC32C over each in the order of its fid: le64 fid ·
     le64 size · le32 name bytes · the name · le32 tags · le32 each tag id
     the kernel holds (to TAGFS_MAX_TAG_ID), rising · each run (MirrorRuns)
-    as u8 hole · le64 start · le64 blocks · le32 runs."""
+    as u8 kind · le64 start · le64 blocks · le32 runs."""
     out = bytearray()
     for fid in sorted(files):
         fs = files[fid]
@@ -313,7 +316,12 @@ class BookCensus:
         quires = [(q[0], q[1], 0, stood) for q in (m.ribbon.quires if m.ribbon else [])] + m.older_quires
         self.Named("ribbon", "the ribbon's Quires", quires)
         for fid in sorted(m.files):
-            self.Named("file", self.Label(fid), [(s, n, fid, None) for s, n in m.files[fid].Ground()])
+            self.Named("file", self.Label(fid), [(s, n, fid, None) for s, n in m.files[fid].Owned()])
+        # A run SHARED owns beside the block's DATA owner, or alone once it
+        # has gone, and beside other runs SHARED — of its own file too: never
+        # two owners of a block but with an owner of another kind (§8.2).
+        for fid in sorted(m.files):
+            self.Claim("shared", self.Label(fid), m.files[fid].Shared())
         # What lies past the volume's last block is no one's to hold: a run a
         # record named there is cut at the volume's end (ribbon_transcribe.c
         # RibbonStageFallow).

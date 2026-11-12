@@ -123,7 +123,7 @@ static bool StripsLayAlike(const Strip *a, uint64_t na, const Strip *b, uint64_t
     while (i < na && j < nb) {
         uint64_t len = a[i].count - ia < b[j].count - jb ? a[i].count - ia : b[j].count - jb;
         if (a[i].kind != b[j].kind ||
-            (a[i].kind == STRIP_DATA && a[i].start + ia != b[j].start + jb))
+            (StripOnGround(a[i].kind) && a[i].start + ia != b[j].start + jb))
             return false;
         ia += len;
         jb += len;

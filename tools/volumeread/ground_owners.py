@@ -25,6 +25,7 @@ BOOK_OWNERS = (
     ("far_deed", True),   # GROUND_FAR_DEED
     ("held", True),   # GROUND_HELD
     ("fallow", True),   # GROUND_FALLOW
+    ("shared", False),   # GROUND_SHARED
 )
 
 GROUND_OWNER_ALONE = dict(GROUND_OWNERS)

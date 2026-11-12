@@ -68,7 +68,8 @@ static error_t AwayProofJot(AwayProofRead* a, const FileRecord* was, const FileR
         Strip     s;
         StripWalkBegin(now, &w);
         while (rc == OK && StripWalkNextGround(&w, &s))
-            rc = AwayProofRun(a, s.start, s.count);
+            if (s.kind == STRIP_DATA)       /* a run SHARED names ground no stitch since wrote */
+                rc = AwayProofRun(a, s.start, s.count);
         return rc;
     }
     BookSplice* sp     = NULL;

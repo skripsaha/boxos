@@ -103,9 +103,9 @@ typedef struct FileRecord {
 #endif
 } FileRecord;
 
-/* Where block k of a file lies: what the Strip holding it is (STRIP_DATA or
- * STRIP_HOLE), the block on the medium (0 for a hole, which owns none), and
- * how many of the Strip's blocks follow it. */
+/* Where block k of a file lies: what the Strip holding it is (STRIP_DATA,
+ * STRIP_HOLE or STRIP_SHARED), the block on the medium (0 for a hole, which
+ * owns none), and how many of the Strip's blocks follow it. */
 typedef struct {
     uint32_t kind;
     uint32_t left;
@@ -163,9 +163,9 @@ FileRecord* FileRecordRelabel(const FileRecord* old, const char* name, const uin
  * block), ERR_NO_MEMORY — and nothing built either way.
  *
  * *freed, when it is asked for (freed not NULL), is the ground the old record
- * named and the new one does not — DATA ground taken out by a splice and not
- * put back by another — as Strips in a new array the caller frees, *nfreed of
- * them. A hole owns no ground and is never in it.
+ * named and the new one does not — ground taken out by a splice and not put
+ * back by another, each Strip DATA or SHARED as it was named — in a new array
+ * the caller frees, *nfreed of them. A hole owns no ground and is never in it.
  */
 error_t     FileRecordSplice(const FileRecord* old, const BookSplice* sp, uint64_t count,
                              uint64_t size, uint64_t mtime, FileRecord** out,
@@ -202,11 +202,13 @@ bool        StripWalkAt(const FileRecord* rec, uint64_t k, StripWalk* w, uint64_
 bool        StripWalkParcel(StripWalk* w, const Strip** strips, uint32_t* count);
 
 /* ‼ THE ONE WALK OF A RECORD'S GROUND. The next Strip of the walk that lies on
- * ground — STRIP_DATA; every hole on the way passed over, for a hole owns no
- * block whatever its start reads as — and false once there is none. Every walk
- * that claims a file's blocks, gives them back, forgets their digests, guards
- * them or counts their seeks walks this one, so no such walk can take a hole
- * for ground. */
+ * ground — STRIP_DATA or STRIP_SHARED (StripOnGround); every hole on the way
+ * passed over, for a hole owns no block whatever its start reads as — and
+ * false once there is none. Every walk that claims a file's blocks, gives them
+ * back, forgets their digests, guards them or counts their seeks walks this
+ * one, so no such walk can take a hole for ground; one that claims or gives
+ * back asks the Strip's kind, for a SHARED block is let go by its last owner
+ * alone (ink/commonhold.h). */
 bool        StripWalkNextGround(StripWalk* w, Strip* out);
 
 /* Every Strip of the record, in order, in a new array the caller frees: the
@@ -215,8 +217,9 @@ bool        StripWalkNextGround(StripWalk* w, Strip* out);
  * none gives NULL and 0. */
 error_t     FileRecordFlatten(const FileRecord* rec, Strip** out, uint32_t* count);
 
-/* `count` DATA Strips laid as the ground they name, in place: in order of
- * their first block, those that meet joined into one — how many are left.
+/* `count` Strips of ground laid as the ground they name, in place, each DATA
+ * whatever its kind: in order of their first block, those that meet joined
+ * into one — how many are left.
  * Two lists of the same ground, in whatever order and cut, come out the same
  * (a join stops short of a u32 count of blocks, which no volume of format v1
  * reaches). */

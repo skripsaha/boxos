@@ -203,7 +203,7 @@ static bool PlotWindowSpot(const Plot *p, uint64_t k, FileSpot *out)
                 uint64_t off = k - base;
                 out->kind  = p->runs[i].kind;
                 out->left  = (uint32_t)(p->runs[i].count - off - 1u);
-                out->block = p->runs[i].kind == STRIP_DATA ? p->runs[i].start + off : 0;
+                out->block = StripOnGround(p->runs[i].kind) ? p->runs[i].start + off : 0;
                 return true;
             }
             base += p->runs[i].count;
@@ -240,7 +240,7 @@ static uint64_t PlotContinues(const Plot *p, uint64_t k)
         return 0;
     if (PlotFreshSpot(p, k - 1u, &block, &left))
         return block + 1u;
-    if (!PlotWindowSpot(p, k - 1u, &spot) || spot.kind != STRIP_DATA)
+    if (!PlotWindowSpot(p, k - 1u, &spot) || !StripOnGround(spot.kind))
         return 0;
     return spot.block + 1u;
 }
@@ -429,7 +429,7 @@ static PlotFill PlotWindowFill(const Plot *p, uint64_t k, uint32_t offset, uint3
     PlotFill fill = PlotFillFor(p, k, offset, bytes);
     if (fill != PLOT_FILL_READ)
         return fill;
-    if (!PlotWindowSpot(p, k, &spot) || spot.kind != STRIP_DATA)
+    if (!PlotWindowSpot(p, k, &spot) || !StripOnGround(spot.kind))
         return PLOT_FILL_FRESH;
     *from = spot.block;
     return PLOT_FILL_READ;
@@ -498,7 +498,7 @@ static Strip PlotPiece(const Strip *s, uint64_t off, uint64_t len)
 {
     Strip piece = *s;
     piece.count = (uint32_t)len;
-    if (s->kind == STRIP_DATA)
+    if (StripOnGround(s->kind))
         piece.start = s->start + off;
     return piece;
 }
@@ -549,7 +549,7 @@ static error_t PlotRestake(Plot *p, uint64_t k, uint64_t n)
             placed = true;
         }
         uint64_t cut_lo = a > lo ? a : lo, cut_hi = b < hi ? b : hi;
-        if (r->kind == STRIP_DATA)
+        if (StripOnGround(r->kind))
             rc = PlotLetGo(p, r->start + (cut_lo - lo), (uint32_t)(cut_hi - cut_lo));
         if (hi > b)
             out[m++] = PlotPiece(r, b - lo, hi - b);
@@ -647,7 +647,7 @@ error_t PlotWindowTail(Plot *p, uint64_t k, uint32_t tail)
         rc = PlotWindowRoomAsked(p);
     if (rc == OK && !(buf = kmalloc(PLOT_BLOCK)))
         rc = ERR_NO_MEMORY;
-    if (rc == OK && spot.kind != STRIP_DATA)
+    if (rc == OK && !StripOnGround(spot.kind))
         memset(buf, 0, PLOT_BLOCK);
     else if (rc == OK && (rc = tagfs_read_block(spot.block, buf)) != OK)
         kprintf("[TagFS] file %llu: its last block %llu answered %u to its read, so it is not laid again with "
@@ -681,7 +681,7 @@ static bool PlotWindowTailOwed(const Plot *p, uint64_t size)
         return false;
     if (TailSlipOn(p->rec, had - 1u) && PlotWindowBlocksFor(size) > had)
         return true;
-    return p->size % PLOT_BLOCK && spot.kind == STRIP_DATA;
+    return p->size % PLOT_BLOCK && StripOnGround(spot.kind);
 }
 
 error_t PlotWindowGrow(Plot *p, uint64_t size)

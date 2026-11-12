@@ -231,6 +231,45 @@ static inline int RibbonRunDigests(const TallyRun *r, uint64_t *n)
     return 1;
 }
 
+/*
+ * Whether a reader of this book carries run `r` on (§8.2): RUN_CARRIED_PLAIN
+ * for one with no extension; RUN_CARRIED_SHARED for a DATA run whose every
+ * extension is SHARED with an empty body — one at least — ground another run
+ * may name too; RUN_CARRIED_NOT for any other — a hole with an extension,
+ * CODEC, COPY, a kind this reader does not know, a SHARED with a body, a list
+ * that does not walk: a newer writer's, and the volume is only read. One rule
+ * with volume-read (tools/volumeread/tally.py, RunCarried).
+ */
+#define RUN_CARRIED_NOT     0
+#define RUN_CARRIED_PLAIN   1
+#define RUN_CARRIED_SHARED  2
+
+static inline int RibbonRunCarried(const TallyRun *r)
+{
+    uint32_t at = 0, from = 0, n = 0;
+    uint64_t tag = 0;
+    int      got, named = 0;
+    if (!r->ext)
+        return RUN_CARRIED_PLAIN;
+    if (r->hole)
+        return RUN_CARRIED_NOT;
+    while ((got = BookEntryNext(r->ext, r->ext_len, &at, &tag, &from, &n)) > 0) {
+        if (tag >> 1 != RUN_EXT_SHARED || n)
+            return RUN_CARRIED_NOT;
+        named = 1;
+    }
+    return got == 0 && named ? RUN_CARRIED_SHARED : RUN_CARRIED_NOT;
+}
+
+/* The list of extensions a writer gives a run SHARED, *len bytes: SHARED
+ * alone, its body empty. */
+static inline const uint8_t *RibbonSharedList(uint32_t *len)
+{
+    static const uint8_t list[2] = { RUN_EXT_SHARED << 1, 0 };
+    *len = sizeof(list);
+    return list;
+}
+
 /* The fresh blocks a run names (Clasp.fresh, §2.7): a DATA run's, unless it
  * is SHARED. Its extensions were walked when the record was read. */
 static inline uint64_t RibbonRunFresh(const TallyRun *r)

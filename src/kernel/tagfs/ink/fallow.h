@@ -93,16 +93,33 @@ typedef enum {
 
 typedef struct FallowNode FallowNode;
 
-/* A node for `count` runs of file `fid` (0 for a Ledger freer's), taken with
- * no TagFS lock held: NULL when there is no memory. */
+/* A node for the ground of `count` runs of file `fid` (0 for a Ledger
+ * freer's) — DATA and SHARED, a hole passed over — taken with no TagFS lock
+ * held, with the room the blocks of it more than one names may cut it into,
+ * and that room asked of Commonhold too (FallowNodeCommonheld): NULL when
+ * there is no memory. */
 FallowNode* FallowNodeMake(const Strip* runs, uint32_t count, FallowKind kind, uint64_t fid);
 
-/* A node for the ground the record `rec` names, of its file — every DATA
- * Strip, walked where the record holds them (file_record.h,
- * StripWalkNextGround), never laid flat — taken with no TagFS lock held: OK,
- * with *out NULL for a record that names no ground; ERR_NO_MEMORY, nothing
- * made. */
+/* A node for the ground the record `rec` names, of its file — every Strip of
+ * ground, walked where the record holds them (file_record.h,
+ * StripWalkNextGround), never laid flat — taken with no TagFS lock held, its
+ * room as FallowNodeMake's: OK, with *out NULL for a record that names no
+ * ground; ERR_NO_MEMORY, nothing made. */
 error_t     FallowNodeOfRecord(const struct FileRecord* rec, FallowKind kind, FallowNode** out);
+
+/*
+ * ‼ A BLOCK MORE THAN ONE NAMES RESTS WHEN ITS LAST OWNER LETS IT GO (spec_v2
+ * §8.2, ink/commonhold.h). A book's Ink, under the state lock and before the
+ * change is put in, asks whether the node and Commonhold have the room the
+ * cut of its ground takes as Commonhold stands now (FallowNodeCommonRoom) —
+ * the Ink goes round when they do not; once its gen is given, the node's runs
+ * are cut to the blocks the change lets go — one owner off each block in
+ * common, a block another owner still names kept from it — the runs it is
+ * left with counted (FallowNodeCommonheld): a node left with none is added to
+ * nothing and let go by its Ink.
+ */
+bool        FallowNodeCommonRoom(const FallowNode* node);
+uint32_t    FallowNodeCommonheld(FallowNode* node, uint64_t gen);
 
 /* A node with room for `blocks` blocks and none in it yet, for a freer that
  * learns its ground under the state lock (Glean): NULL when there is no

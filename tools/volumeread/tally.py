@@ -71,6 +71,32 @@ class Run:
             (other.hole, other.start, other.count, other.birth, other.ext)
 
 
+def RunCarried(r):
+    """Whether this reader carries run `r` on (volume_ribbon.h,
+    RibbonRunCarried): one with no extension, or a DATA run whose every
+    extension is SHARED with an empty body — one at least. A hole with any,
+    CODEC, COPY, a kind this reader does not know, a SHARED with a body or a
+    list that does not walk is a newer writer's, and the volume is only read."""
+    if r.ext is None:
+        return True
+    if r.hole:
+        return False
+    at, named = 0, False
+    while True:
+        state, tag, _body, n, at = EntryNext(r.ext, at)
+        if state <= 0:
+            return state == 0 and named
+        if tag >> 1 != EXT_SHARED or n:
+            return False
+        named = True
+
+
+def RunShared(r):
+    """Whether run `r` names ground other runs may name too (§8.2): SHARED,
+    as this reader carries it on."""
+    return r.ext is not None and RunCarried(r)
+
+
 class FileState:
     """A file as the book holds it: its header, its runs and — read off a
     Tally — the Parcels they were cut into; `slips` the Slip overlays laid
@@ -95,6 +121,14 @@ class FileState:
 
     def Ground(self):
         return [(r.start, r.count) for r in self.runs if not r.hole]
+
+    def Owned(self):
+        """The ground the file owns alone: its DATA runs not SHARED."""
+        return [(r.start, r.count) for r in self.runs if not r.hole and not RunShared(r)]
+
+    def Shared(self):
+        """The ground it names beside other owners (§8.2)."""
+        return [(r.start, r.count) for r in self.runs if RunShared(r)]
 
 
 class TagState:
@@ -791,7 +825,7 @@ class Tally:
                                           0, 0, None, "its element does not read: %s" % e))
         for fs in c.files.values():
             for r in fs.runs:
-                if r.ext is not None:
+                if not RunCarried(r):
                     self.glass.append("a run of fid %u carries an extension this kernel cannot carry "
                                       "on (CODEC, SHARED or COPY, §8)" % fs.fid)
                     break
