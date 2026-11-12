@@ -35,6 +35,7 @@
 #include "box/print.h"
 #include "box/settings.h"
 #include "box/cxx/settings.h"
+#include "box/cxx/timing.h"
 
 #include "painter/core/color.h"
 #include "painter/core/coverage.h"
@@ -48,14 +49,14 @@ BOX_SETTINGS("speed number from 20 to 300 percent default 100 \"how fast the sli
              "color color default #9FD724 \"the slime's body\"\n"
              "trail on-or-off default on \"a wet slick where the slime lands\"\n"
              "shadow on-or-off default on \"a dark shadow on the ground under the slime\"\n"
-             "smooth on-or-off default off \"the slime's edge fades into what lies beneath; off keeps every edge pixel whole or none\"\n");
+             "smooth on-or-off default off \"the slime's edge fades into what lies beneath; off keeps every edge pixel whole or none\"\n"
+             "fps number from 5 to 60 frames default 20 \"how many frames a second the slime is drawn; more is smoother, the moving is as fast\"\n");
 
 namespace {
 
 using PainterColor = painter::core::Color;
 
-constexpr std::uint32_t ActiveMs = 50;
-constexpr std::uint32_t RestMs   = 125;
+constexpr std::chrono::microseconds RestInterval{125000};
 constexpr float         Pi       = 3.14159265f;
 constexpr int           FirstRow = 3;      /* the clock and its load are above */
 constexpr float         SlickLife = 6.0f;  /* seconds a slick takes to dry */
@@ -106,6 +107,7 @@ struct Look {
     bool         Trail = true;
     bool         Shadowed = true;
     bool         Smooth   = false;
+    unsigned     Fps      = 20;
 };
 
 Look ReadLook()
@@ -116,7 +118,8 @@ Look ReadLook()
                 .Body  = PainterColor::FromRaw(settings::color("color")),
                 .Trail = settings::on("trail"),
                 .Shadowed = settings::on("shadow"),
-                .Smooth   = settings::on("smooth")};
+                .Smooth   = settings::on("smooth"),
+                .Fps      = static_cast<unsigned>(settings::number("fps"))};
 }
 
 /* Five tones from shadow to highlight, and the line around a shape. */
@@ -603,6 +606,7 @@ int main()
     // Painted until it can be no more — the display gone, or the slime
     // ended: nothing but its end stops it.
     std::uint64_t Last = clock_uptime_us();
+    box::pacer Pace;
     for (;;) {
         if (Watch.changed()) {
             Set  = ReadLook();
@@ -619,7 +623,8 @@ int main()
         Art.Smooth = Set.Smooth;
         Draw(Art, Ink, Creature, Zoom, Set.Shadowed);
         if (!Paint(Art, Screen, Glass, Box)) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(Moving ? ActiveMs : RestMs));
+        const std::chrono::microseconds Interval = box::pacer::interval(Set.Fps);
+        std::this_thread::sleep_for(Pace.wait(Moving ? Interval : std::max(Interval, RestInterval)));
     }
     (void)Screen.Close();
     return 1;

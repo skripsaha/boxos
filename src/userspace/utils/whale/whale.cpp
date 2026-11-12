@@ -32,6 +32,7 @@
 #include "box/print.h"
 #include "box/settings.h"
 #include "box/cxx/settings.h"
+#include "box/cxx/timing.h"
 
 #include "painter/tui/frame.h"
 #include "painter/tui/surface.h"
@@ -48,11 +49,10 @@ BOX_SETTINGS("speed number from 20 to 300 percent default 100 \"how fast the wha
              "outline on-or-off default on \"a dark line round the whale, on its own edge\"\n"
              "smooth on-or-off default off \"the whale's edge fades into what lies beneath; off keeps every edge pixel whole or none\"\n"
              "spout on-or-off default on \"now and then it blows a spout\"\n"
-             "bubbles on-or-off default on \"its tail leaves bubbles\"\n");
+             "bubbles on-or-off default on \"its tail leaves bubbles\"\n"
+             "fps number from 5 to 60 frames default 20 \"how many frames a second the whale is drawn; more is smoother, the swimming is as fast\"\n");
 
 namespace {
-
-constexpr std::uint32_t FrameMs = 50;
 
 /* What the person set, read again whenever the file is saved. */
 struct Look {
@@ -60,6 +60,7 @@ struct Look {
     float                Size;
     painter::core::Color Back, Belly;
     bool                 Outline, Smooth, Spout, Bubbles;
+    unsigned             Fps;
 };
 
 Look ReadLook()
@@ -72,7 +73,8 @@ Look ReadLook()
                 .Outline = settings::on("outline"),
                 .Smooth  = settings::on("smooth"),
                 .Spout   = settings::on("spout"),
-                .Bubbles = settings::on("bubbles")};
+                .Bubbles = settings::on("bubbles"),
+                .Fps     = static_cast<unsigned>(settings::number("fps"))};
 }
 
 void Apply(const Look &Set, whale::Swimmer &Whale, whale::Picture &Picture)
@@ -117,6 +119,7 @@ int main()
     // Painted until it can be no more — the display gone, or the whale
     // ended: nothing but its end stops it.
     std::uint64_t Last = clock_uptime_us();
+    box::pacer Pace;
     for (;;) {
         if (Watch.changed()) {
             Set = ReadLook();
@@ -128,7 +131,7 @@ int main()
         Last = Now;
         painter::core::Rect Changed = Picture.Draw(Whale, Overlay);
         if (!Changed.Empty() && !Screen.Composite({Changed.X, Changed.Y}, Overlay, Changed)) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(FrameMs));
+        std::this_thread::sleep_for(Pace.wait(box::pacer::interval(Set.Fps)));
     }
     (void)Screen.Close();
     return 1;

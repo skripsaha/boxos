@@ -8,6 +8,8 @@
 //   box::stopwatch — monotonic elapsed-time measurement: elapsed() / reset().
 //   box::throttle  — a rate limiter: try_fire() succeeds at most once per
 //                    interval (the first call fires).
+//   box::pacer     — a steady frame rate: wait() says how long to sleep so each
+//                    frame starts one interval after the previous one started.
 //
 // This is a box:: extension, not part of std. All time comes from
 // std::chrono::steady_clock, so the resolution and monotonicity are exactly
@@ -84,6 +86,33 @@ public:
     }
     // Re-arm so the next try_fire() fires immediately.
     void reset() noexcept { fired_ = false; }
+};
+
+// ── box::pacer — frames at a steady rate, each scheduled from the last start ──
+class pacer {
+    std::chrono::steady_clock::time_point start_{std::chrono::steady_clock::now()};
+
+public:
+    // The time one frame takes at `frames_per_second` (at least one).
+    static std::chrono::microseconds interval(unsigned frames_per_second) noexcept
+    {
+        return std::chrono::microseconds(1000000 / (frames_per_second ? frames_per_second : 1));
+    }
+    // Call once a frame, after drawing it: how long to sleep before the next
+    // frame starts, `interval` after this one started. A frame that overran
+    // gets zero and the schedule begins again from now, so the frames that
+    // were missed are not caught up in a burst.
+    std::chrono::microseconds wait(std::chrono::microseconds interval) noexcept
+    {
+        const auto due = start_ + interval;
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= due) {
+            start_ = now;
+            return std::chrono::microseconds(0);
+        }
+        start_ = due;
+        return std::chrono::duration_cast<std::chrono::microseconds>(due - now);
+    }
 };
 
 }  // namespace box

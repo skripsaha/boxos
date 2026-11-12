@@ -36,6 +36,7 @@
 #include "box/print.h"
 #include "box/settings.h"
 #include "box/cxx/settings.h"
+#include "box/cxx/timing.h"
 
 #include "painter/tui/frame.h"
 #include "painter/tui/surface.h"
@@ -55,11 +56,10 @@ BOX_SETTINGS("speed number from 20 to 300 percent default 100 \"how fast Duppo d
              "pupil color default #000000 \"the pupil: its glow and its rim are lighter shades of it\"\n"
              "satellites number from 0 to 3 default 3 \"how many little bubbles keep close to Duppo; 0 leaves the bubble alone\"\n"
              "blink number from 20 to 400 percent or off default 100 \"how often Duppo blinks; off keeps the eye open\"\n"
-             "smooth on-or-off default on \"Duppo's edge fades into what lies beneath; off keeps every edge whole or none\"\n");
+             "smooth on-or-off default on \"Duppo's edge fades into what lies beneath; off keeps every edge whole or none\"\n"
+             "fps number from 5 to 60 frames default 25 \"how many frames a second Duppo is drawn; more is smoother, the drifting is as fast\"\n");
 
 namespace {
-
-constexpr std::uint32_t FrameMs = 40;
 
 /* How large Duppo is at the usual size: the glass units one unit of the logo takes. */
 constexpr float UsualSize = 0.8f;
@@ -72,6 +72,7 @@ struct Look {
     int                  Satellites;
     float                Blink;
     bool                 Smooth;
+    unsigned             Fps;
 };
 
 Look ReadLook()
@@ -84,7 +85,8 @@ Look ReadLook()
                 .Pupil      = painter::core::Color::FromRaw(settings::color("pupil")),
                 .Satellites = static_cast<int>(settings::number("satellites")),
                 .Blink      = static_cast<float>(settings::number("blink")) / 100.0f,
-                .Smooth     = settings::on("smooth")};
+                .Smooth     = settings::on("smooth"),
+                .Fps        = static_cast<unsigned>(settings::number("fps"))};
 }
 
 float SizeOf(const Look &Set, painter::core::Size Glass)
@@ -140,6 +142,7 @@ int main()
     // Painted until it can be no more — the display gone, or Duppo
     // ended: nothing but its end stops it.
     std::uint64_t Last = clock_uptime_us();
+    box::pacer Pace;
     for (;;) {
         if (Watch.changed()) {
             Set = ReadLook();
@@ -159,7 +162,7 @@ int main()
         Moons.Step(Seconds, Body.Center, Body.Scale, Turning);
         painter::core::Rect Changed = Picture.Draw(Body, Eye, Turning, Moons, Overlay);
         if (!Changed.Empty() && !Screen.Composite({Changed.X, Changed.Y}, Overlay, Changed)) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(FrameMs));
+        std::this_thread::sleep_for(Pace.wait(box::pacer::interval(Set.Fps)));
     }
     (void)Screen.Close();
     return 1;

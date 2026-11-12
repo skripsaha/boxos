@@ -31,6 +31,7 @@
 #include "box/print.h"
 #include "box/settings.h"
 #include "box/cxx/settings.h"
+#include "box/cxx/timing.h"
 
 #include "painter/core/color.h"
 #include "painter/core/coverage.h"
@@ -43,14 +44,14 @@ BOX_SETTINGS("speed number from 20 to 300 percent default 100 \"how fast the cra
              "size number from 40 to 250 percent default 100 \"how large the crab is\"\n"
              "color color default #D8453B \"the crab's shell\"\n"
              "shadow on-or-off default on \"a dark shadow on the ground under the crab\"\n"
-             "smooth on-or-off default off \"the crab's edge fades into what lies beneath; off keeps every edge pixel whole or none\"\n");
+             "smooth on-or-off default off \"the crab's edge fades into what lies beneath; off keeps every edge pixel whole or none\"\n"
+             "fps number from 5 to 60 frames default 20 \"how many frames a second the crab is drawn; more is smoother, the moving is as fast\"\n");
 
 namespace {
 
 using PainterColor = painter::core::Color;
 
-constexpr std::uint32_t ActiveMs = 50;
-constexpr std::uint32_t RestMs   = 100;
+constexpr std::chrono::microseconds RestInterval{100000};
 constexpr float         Pi       = 3.14159265f;
 
 /* The sprite is drawn in units: 56 across, 44 down, the ground at 41.5. */
@@ -116,6 +117,7 @@ struct Look {
     PainterColor Shell = PainterColor::Rgb(0xD8, 0x45, 0x3B);
     bool         Shadowed = true;
     bool         Smooth   = false;
+    unsigned     Fps      = 20;
 };
 
 Look ReadLook()
@@ -125,7 +127,8 @@ Look ReadLook()
                 .Size  = static_cast<float>(settings::number("size")) / 100.0f,
                 .Shell = PainterColor::FromRaw(settings::color("color")),
                 .Shadowed = settings::on("shadow"),
-                .Smooth   = settings::on("smooth")};
+                .Smooth   = settings::on("smooth"),
+                .Fps      = static_cast<unsigned>(settings::number("fps"))};
 }
 
 /* Five tones from shadow to highlight, and the line around a shape. */
@@ -725,6 +728,7 @@ int main()
     // Painted until it can be no more — the display gone, or the crab
     // ended: nothing but its end stops it.
     std::uint64_t Last = clock_uptime_us();
+    box::pacer Pace;
     for (;;) {
         if (Watch.changed()) {
             Set = ReadLook();
@@ -744,7 +748,8 @@ int main()
         Art.Smooth = Set.Smooth;
         Draw(Art, Ink, Creature, Top & 1, Set.Shadowed);
         if (!Paint(Art, Screen, Overlay, {static_cast<int>(std::lround(Creature.Where.X)), Top >> 1})) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(Moving ? ActiveMs : RestMs));
+        const std::chrono::microseconds Interval = box::pacer::interval(Set.Fps);
+        std::this_thread::sleep_for(Pace.wait(Moving ? Interval : std::max(Interval, RestInterval)));
     }
     (void)Screen.Close();
     return 1;

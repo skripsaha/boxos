@@ -34,6 +34,7 @@
 #include "box/print.h"
 #include "box/settings.h"
 #include "box/cxx/settings.h"
+#include "box/cxx/timing.h"
 
 #include "painter/core/color.h"
 #include "painter/core/coverage.h"
@@ -49,14 +50,14 @@ BOX_SETTINGS("size number from 50 to 250 percent default 100 \"how large the eye
              "eyeball color default #F4F4F4 \"the white of the eyes: its rim is a shade of it\"\n"
              "pupil color default #0E0E10 \"the pupils\"\n"
              "lid color default #3C3C44 \"the lids and, shut, their edge\"\n"
-             "smooth on-or-off default off \"every edge fades into what lies beneath and into its neighbour; off keeps each edge pixel whole or none\"\n");
+             "smooth on-or-off default off \"every edge fades into what lies beneath and into its neighbour; off keeps each edge pixel whole or none\"\n"
+             "fps number from 5 to 60 frames default 30 \"how many frames a second the eyes are drawn; more is smoother, the glancing is as quick\"\n");
 
 namespace {
 
 using PainterColor = painter::core::Color;
 
-constexpr std::uint32_t MovingMs = 33;
-constexpr std::uint32_t StillMs  = 250;
+constexpr std::chrono::microseconds RestInterval{250000};
 constexpr float         Pi       = 3.14159265f;
 
 /* Eye colours, light on the black of the console: every one keeps its family
@@ -105,6 +106,7 @@ struct Chosen {
     int          Iris  = -1;
     PainterColor Eyeball = Sclera, Dark = Pupil, Shade = Lid;
     bool         Smooth = false;
+    unsigned     Fps    = 30;
 };
 
 Chosen ReadChosen()
@@ -121,7 +123,8 @@ Chosen ReadChosen()
                    .Eyeball = PainterColor::FromRaw(settings::color("eyeball")),
                    .Dark    = PainterColor::FromRaw(settings::color("pupil")),
                    .Shade   = PainterColor::FromRaw(settings::color("lid")),
-                   .Smooth  = settings::on("smooth")};
+                   .Smooth  = settings::on("smooth"),
+                   .Fps     = static_cast<unsigned>(settings::number("fps"))};
 }
 
 std::uint8_t Moved(std::uint8_t Base, std::uint8_t Was, std::uint8_t Now)
@@ -455,6 +458,7 @@ int main()
     // Painted until they can be no more — the display gone, or the eyes
     // ended: nothing but their end stops them.
     std::uint64_t Last = clock_uptime_us();
+    box::pacer Pace;
     for (;;) {
         if (Watch.changed()) {
             Set = ReadChosen();
@@ -467,7 +471,8 @@ int main()
         Picture.Smooth = Set.Smooth;
         Picture.Draw(Eyes, MakeInks(Set, Eyes.Iris));
         if (!Paint(Picture, Screen, *Overlay, At)) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(Moving ? MovingMs : StillMs));
+        const std::chrono::microseconds Interval = box::pacer::interval(Set.Fps);
+        std::this_thread::sleep_for(Pace.wait(Moving ? Interval : std::max(Interval, RestInterval)));
     }
     (void)Screen.Close();
     return 1;

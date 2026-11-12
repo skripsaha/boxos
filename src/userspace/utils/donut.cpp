@@ -36,6 +36,7 @@
 #include "box/print.h"
 #include "box/settings.h"
 #include "box/cxx/settings.h"
+#include "box/cxx/timing.h"
 
 #include "painter/core/color.h"
 #include "painter/tui/frame.h"
@@ -47,7 +48,8 @@ BOX_LIFE("stays");
 BOX_SETTINGS("speed number from 20 to 300 percent default 100 \"how fast the donut turns\"\n"
              "size number from 40 to 200 percent default 100 \"how large the donut is\"\n"
              "color color default #FFFFFF \"the donut's light side: its far side is a shade of it\"\n"
-             "smooth on-or-off default off \"the donut's edge fades into what lies beneath; off keeps every edge pixel whole or none\"\n");
+             "smooth on-or-off default off \"the donut's edge fades into what lies beneath; off keeps every edge pixel whole or none\"\n"
+             "fps number from 5 to 60 frames default 30 \"how many frames a second the donut is drawn; more is smoother, the turning is as fast\"\n");
 
 namespace {
 
@@ -60,7 +62,6 @@ constexpr PainterColor Black = painter::core::Colors::Black;
 constexpr int DonutZoneMaxWidth = 42;
 constexpr int DonutZoneMaxHeight = 24;
 constexpr float DonutScale = 0.28f;
-constexpr std::uint32_t TurningMs = 50;
 constexpr float Major = 1.0f;
 constexpr float Minor = 0.43f;
 /* Samples to a pixel along the ring and the tube, with the nearest part of
@@ -91,6 +92,7 @@ struct Look {
     float Size = 1.0f;
     PainterColor Light = painter::core::Colors::White;
     bool Smooth = false;
+    unsigned Fps = 30;
 };
 
 Look ReadLook() {
@@ -98,7 +100,8 @@ Look ReadLook() {
     return Look{.Speed = static_cast<float>(settings::number("speed")) / 100.0f,
                 .Size = static_cast<float>(settings::number("size")) / 100.0f,
                 .Light = PainterColor::FromRaw(settings::color("color")),
-                .Smooth = settings::on("smooth")};
+                .Smooth = settings::on("smooth"),
+                .Fps = static_cast<unsigned>(settings::number("fps"))};
 }
 
 void Say(std::string_view Text) {
@@ -344,6 +347,7 @@ int main() {
     // Turning until it can no more — the display gone, or the donut ended:
     // nothing but its end stops it.
     std::uint64_t Last = clock_uptime_us();
+    box::pacer Pace;
     float A = 0.0f;
     float B = 0.0f;
     for (;;) {
@@ -368,7 +372,7 @@ int main() {
         Picture->Draw(A, B);
         if (!Screen.Clear() || !Screen.Composite({At.Col, At.Row}, Picture->Frame()))
             break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(TurningMs));
+        std::this_thread::sleep_for(Pace.wait(box::pacer::interval(Set.Fps)));
     }
     (void)Screen.Close();
     return 1;
