@@ -9,7 +9,11 @@
  * so an edge is a half, a block or a shade and not a staircase of whole
  * cells. Every cell a shape reaches is settled at once, as opaque, and one
  * the shape misses is not touched: a canvas keeps no state, and shapes drawn
- * one over another are laid in order, each over the cells as they are. Text
+ * one over another are laid in order, each over the cells as they are. Over a
+ * see-through sub-pixel — one nothing has painted on a transparent frame — a
+ * shape's ink is laid whole where its share is half or more, and not at all
+ * otherwise: an edge toward an unknown background cannot be softened, and what
+ * the shape leaves is left see-through (Color::Through). Text
  * is part of the cells too, and where a shape reaches over it, it is gone:
  * the shapes go first and the words after.
  *

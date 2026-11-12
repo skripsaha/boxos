@@ -54,9 +54,11 @@ struct Cell {
     CellMark    Mark       = CellMark::None;
     core::Color MarkColor  = core::Colors::LightGray;
 
+    /* A cell that shows nothing: its colours are see-through, so a pixel put
+     * into it leaves the other half of the cell to what lies beneath. */
     static constexpr Cell TransparentCell() noexcept
     {
-        return {' ', core::Colors::LightGray, core::Colors::Black, Visibility::Transparent};
+        return {' ', core::Color::Through(), core::Color::Through(), Visibility::Transparent};
     }
 
     bool IsTransparent() const noexcept { return VisibilityMode == Visibility::Transparent; }
@@ -98,7 +100,10 @@ public:
     std::size_t Centre(std::int32_t Row, std::string_view Text, TextStyle Style = {});
 
     /* Pixel coordinates are two rows per text cell. Drawing a pixel makes the
-     * containing cell an upper-half glyph and changes only the selected half. */
+     * containing cell an upper-half glyph and changes only the selected half;
+     * in a cell never painted before on a transparent frame, the other half
+     * stays see-through. A blend toward a see-through half is whole or nothing
+     * (Color::Mix): there is no colour to mix with what is unknown. */
     bool PutPixel(core::Point Pixel, core::Color Ink);
     bool BlendPixel(core::Point Pixel, core::Color Ink, std::uint8_t Weight);
     bool PutPixels(std::span<const core::Color> Pixels);

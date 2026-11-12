@@ -77,10 +77,22 @@ core::Color Ink(Rgb Value)
     return core::Color::Rgb(Byte(Value.Red), Byte(Value.Green), Byte(Value.Blue));
 }
 
+/* A cell chosen for four sub-pixels: its error against the real ones, and how
+ * many see-through ones it has had to give a colour to. */
 struct Fit {
     Cell Look;
-    int  Error = 0;
+    int  Error  = 0;
+    int  Filled = 0;
 };
+
+/* The places of a quad that are see-through. */
+int BareOf(const Quad &Wanted)
+{
+    int Bare = 0;
+    for (std::size_t Place = 0; Place < Wanted.size(); Place++)
+        if (Wanted[Place].IsThrough()) Bare |= 1 << Place;
+    return Bare;
+}
 
 int ErrorOver(const Quad &Wanted, int Places, Rgb Shown)
 {
@@ -115,17 +127,34 @@ Rgb Shown(const Quad &Wanted, int Places, bool Pure)
     return Best;
 }
 
-Fit OneColour(const Quad &Wanted, bool Pure)
+/* A group of places drawn in one colour: that of its real sub-pixels, or
+ * see-through when it has none. The see-through ones among them take the
+ * colour, and are counted as filled. */
+struct Side {
+    core::Color Colour;
+    int         Error  = 0;
+    int         Filled = 0;
+};
+
+Side SideOf(const Quad &Wanted, int Places, int Bare, bool Pure)
 {
-    const Rgb Only = Shown(Wanted, All, Pure);
-    return {Cell{' ', Ink(Only), Ink(Only)}, ErrorOver(Wanted, All, Only)};
+    const int Real = Places & ~Bare;
+    if (Real == 0) return {core::Color::Through()};
+    const Rgb Colour = Shown(Wanted, Real, Pure);
+    return {Ink(Colour), ErrorOver(Wanted, Real, Colour), std::popcount(static_cast<unsigned>(Places & Bare))};
+}
+
+Fit OneColour(const Quad &Wanted, int Bare, bool Pure)
+{
+    const Side Only = SideOf(Wanted, All, Bare, Pure);
+    return {Cell{' ', Only.Colour, Only.Colour}, Only.Error, Only.Filled};
 }
 
 /* The places in Places drawn in the foreground, the rest in the background. */
-Fit Split(const Quad &Wanted, int Places, char Glyph, bool Pure)
+Fit Split(const Quad &Wanted, int Places, char Glyph, int Bare, bool Pure)
 {
-    const Rgb Front = Shown(Wanted, Places, Pure), Back = Shown(Wanted, All & ~Places, Pure);
-    return {Cell{Glyph, Ink(Front), Ink(Back)}, ErrorOver(Wanted, Places, Front) + ErrorOver(Wanted, All & ~Places, Back)};
+    const Side Front = SideOf(Wanted, Places, Bare, Pure), Back = SideOf(Wanted, All & ~Places, Bare, Pure);
+    return {Cell{Glyph, Front.Colour, Back.Colour}, Front.Error + Back.Error, Front.Filled + Back.Filled};
 }
 
 /* What a shade costs, a dither being seen however alike its colours: a part
@@ -178,9 +207,10 @@ Fit Dust(const Quad &Wanted, Shade Sprinkle, std::size_t Lone)
     return {Majority ? Cell{Sprinkle.Glyph, Ink(Rest), Ink(Dusted)} : Cell{Sprinkle.Glyph, Ink(Dusted), Ink(Rest)}, Error};
 }
 
+/* Fewer see-through sub-pixels given a colour comes first, then the error. */
 void Consider(Fit &Best, const Fit &Candidate)
 {
-    if (Candidate.Error < Best.Error) Best = Candidate;
+    if (Candidate.Filled < Best.Filled || (Candidate.Filled == Best.Filled && Candidate.Error < Best.Error)) Best = Candidate;
 }
 
 }  // namespace
@@ -210,10 +240,11 @@ Cell ResolveQuad(const Quad &Wanted, GlassKind Glass) noexcept
     if (Wanted[1] == Wanted[0] && Wanted[2] == Wanted[0] && Wanted[3] == Wanted[0])
         return Cell{' ', Wanted[0], Wanted[0]};
     const bool Pure = Glass == GlassKind::Text;
-    Fit Best = Split(Wanted, (1 << QuadPlace::TopLeft) | (1 << QuadPlace::TopRight), Glyphs::UpperHalf, Pure);
-    Consider(Best, Split(Wanted, (1 << QuadPlace::TopLeft) | (1 << QuadPlace::BottomLeft), Glyphs::LeftHalf, Pure));
-    Consider(Best, OneColour(Wanted, Pure));
-    if (Pure) return Best.Look;
+    const int  Bare = BareOf(Wanted);
+    Fit Best = Split(Wanted, (1 << QuadPlace::TopLeft) | (1 << QuadPlace::TopRight), Glyphs::UpperHalf, Bare, Pure);
+    Consider(Best, Split(Wanted, (1 << QuadPlace::TopLeft) | (1 << QuadPlace::BottomLeft), Glyphs::LeftHalf, Bare, Pure));
+    Consider(Best, OneColour(Wanted, Bare, Pure));
+    if (Pure || Bare != 0) return Best.Look;
 
     for (std::size_t Index = 0; Index < ShadeCount; Index++) {
         const Shade One = ShadeAt(Index);

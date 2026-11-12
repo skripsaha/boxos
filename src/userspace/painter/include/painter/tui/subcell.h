@@ -28,7 +28,8 @@ inline constexpr std::size_t BottomRight = 3;
 
 /* The sub-pixels a cell shows: exactly for a space, the blocks and the halves,
  * the shade's mix of its two colours for a shade, and the background for any
- * other glyph, whose strokes four sub-pixels cannot hold. */
+ * other glyph, whose strokes four sub-pixels cannot hold. A colour of the
+ * cell that is see-through is a sub-pixel see-through. */
 Quad QuadOf(const Cell &Shown) noexcept;
 
 /* The opaque cell whose picture is nearest to Wanted. The candidates are the
@@ -38,7 +39,14 @@ Quad QuadOf(const Cell &Shown) noexcept;
  * texture, so its error is raised by how far its two colours lie apart. The
  * candidate of least error is chosen, a split before one colour when equal.
  * A text page has sixteen colours and a dither there is only noise, so it has
- * no shades, and its colours are those of the sub-pixels, never their mixes. */
+ * no shades, and its colours are those of the sub-pixels, never their mixes.
+ *
+ * A sub-pixel may be see-through (Color::Through): a part of the picture no
+ * shape reached. A cell with some such is never a shade, which would paint
+ * them all; it is the split — upper half or left half — that leaves the most
+ * of them see-through, a side of nothing but see-through sub-pixels being
+ * see-through whole, and the colour of a side the mean of its real ones. A
+ * lone see-through sub-pixel among three real ones is given their colour. */
 Cell ResolveQuad(const Quad &Wanted, GlassKind Glass) noexcept;
 
 }  // namespace painter::tui

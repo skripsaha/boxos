@@ -23,8 +23,15 @@ public:
     // The screen's own colour: as a background the page colour the display
     // draws, as ink its text colour. It follows what the person sets for the
     // screen, and a Color of any other kind never equals it.
-    static constexpr Color Screen() noexcept { return Color(COLOR_DEFAULT, ScreenTag{}); }
+    static constexpr Color Screen() noexcept { return Color(COLOR_DEFAULT, SentinelTag{}); }
     constexpr bool         IsScreen() const noexcept { return Value == COLOR_DEFAULT; }
+
+    // See-through: whatever lies beneath the cell, in this place. It is for a
+    // surface that leaves part of a cell unpainted — the display draws it as
+    // the background of the cell below (COLOR_THROUGH), so the unpainted half
+    // of an edge cell is neither black nor any colour of the program's.
+    static constexpr Color Through() noexcept { return Color(COLOR_THROUGH, SentinelTag{}); }
+    constexpr bool         IsThrough() const noexcept { return Value == COLOR_THROUGH; }
 
     constexpr std::uint32_t Raw() const noexcept { return Value; }
     constexpr std::uint8_t  Red() const noexcept { return static_cast<std::uint8_t>((Value >> 16) & 0xFFu); }
@@ -32,20 +39,21 @@ public:
     constexpr std::uint8_t  Blue() const noexcept { return static_cast<std::uint8_t>(Value & 0xFFu); }
 
     // The colour from A toward B by Weight of 255 — boxlib's one blend. The
-    // screen's own colour has no triple to blend: it is whichever end is nearer.
+    // screen's own colour and see-through have no triple to blend: the result is
+    // whichever end is nearer, so a real colour is never mixed with an unknown.
     static Color Mix(Color A, Color B, std::uint8_t Weight) noexcept
     {
-        if (A.IsScreen() || B.IsScreen()) return Weight < 128 ? A : B;
+        if (A.IsScreen() || B.IsScreen() || A.IsThrough() || B.IsThrough()) return Weight < 128 ? A : B;
         return FromRaw(color_mix(A.Raw(), B.Raw(), Weight));
     }
 
     friend constexpr bool operator==(Color, Color) noexcept = default;
 
 private:
-    struct ScreenTag {};
+    struct SentinelTag {};
 
     explicit constexpr Color(std::uint32_t Raw) noexcept : Value(Raw & 0x00FFFFFFu) {}
-    constexpr Color(std::uint32_t Sentinel, ScreenTag) noexcept : Value(Sentinel) {}
+    constexpr Color(std::uint32_t Sentinel, SentinelTag) noexcept : Value(Sentinel) {}
 
     std::uint32_t Value = 0;
 };
