@@ -3,9 +3,11 @@
 
 /*
  * The Spine's slots, read and judged (spine_read.h). A slot's stream is read
- * by the one codec every reader and writer of a slot keeps (volume_tally.h);
- * what is judged here is the slot's shape — which records, in which order,
- * how many of each — the rule volume-read's tally.py SlotParse keeps too.
+ * by the one codec every reader and writer of a slot keeps (volume_tally.h),
+ * and its shape — which records, in which order, how many of each — judged
+ * by the one rule every reader of a slot keeps (volume_spine.h), the UEFI
+ * loader's and volume-read's tally.py SlotParse too; what is kept here is
+ * what the kernel says of it.
  */
 
 /* A reason the slot gives that the volume may only be read, kept to be said
@@ -28,98 +30,56 @@ static bool SpineSlotGlass(SpineSlot* s, const char* why)
     return true;
 }
 
-/* The bytes of a known record's body this reader knows — what is past them
- * was written by a kernel that knows more. */
-static uint32_t SpineKnownBytes(const SpineSlot* s, uint64_t kind, const uint8_t* b, uint32_t len)
-{
-    switch (kind) {
-    case SPINE_HEAD:
-        return TallyVarintBytes(s->head.tally_seq) + TallyVarintBytes(s->head.stitch_seq) + 4u +
-               TallyVarintBytes(s->head.made_ns);
-    case SPINE_ROOT: {
-        const SpineRoot* r = &s->root[s->roots - 1u];
-        uint32_t n = TallyVarintBytes(r->tree) + TallyVarintBytes(r->flags) + TallyVarintBytes(r->level) +
-                     TallyVarintBytes(r->items);
-        BookPtr ptr;
-        return n + BookPtrGet(b + n, len - n, &ptr);
-    }
-    case SPINE_RIBBON:
-        return TallyVarintBytes(s->ribbon.at) + TallyVarintBytes(s->ribbon.quire_block) +
-               TallyVarintBytes(s->ribbon.quire_blocks) + TallyVarintBytes(s->ribbon.next_block) +
-               TallyVarintBytes(s->ribbon.next_blocks);
-    case SPINE_COUNTS:
-        return TallyVarintBytes(s->counts.next_fid) + TallyVarintBytes(s->counts.next_tag) +
-               TallyVarintBytes(s->counts.next_bookmark);
-    default:
-        return TallyVarintBytes(s->flags);
-    }
-}
-
-/* One known record's body into the slot: TALLY_BODY_* as the codec reads it. */
-static int SpineRecordRead(SpineSlot* s, uint64_t kind, const uint8_t* b, uint32_t len)
-{
-    switch (kind) {
-    case SPINE_HEAD:   return SpineHeadGet(b, len, &s->head);
-    case SPINE_ROOT:   return SpineRootGet(b, len, &s->root[s->roots++]);
-    case SPINE_RIBBON: return SpineRibbonGet(b, len, &s->ribbon);
-    case SPINE_COUNTS: return SpineCountsGet(b, len, &s->counts);
-    default:           return SpineFlagsGet(b, len, &s->flags);
-    }
-}
-
 /*
- * One record of the slot's stream, the `nth`: OK, or ERR_TAGFS_CORRUPTED with
- * why the slot is torn, or ERR_NO_MEMORY. `seen` holds a bit for each kind
- * met. SpineHead first; a second SpineHead, SpineRibbon or SpineCounts, or a
- * second root of one tree, is no slot a writer writes; SpineFlags may come
- * again, the last one standing.
+ * One step's answer into the slot (volume_spine.h, SpineSlotStep), in the
+ * words the slot's lines have always said it: a reason the volume may only be
+ * read kept with it, a reason it is torn said into s->why. OK, or
+ * ERR_TAGFS_CORRUPTED for a torn slot, or ERR_NO_MEMORY.
  */
-static error_t SpineRecord(SpineSlot* s, uint32_t nth, uint64_t tag, const uint8_t* b, uint32_t len,
-                           uint32_t* seen)
+static error_t SpineSaid(SpineSlot* s, SpineSays says, const SpineWalk* w)
 {
-    char     words[160];
-    uint64_t kind = tag >> 1;
+    char               words[160];
+    unsigned long long kind = (unsigned long long)w->kind;
 
-    if (nth == 0 && kind != SPINE_HEAD) {
-        ksnprintf(s->why, sizeof(s->why), "its stream does not parse: its first record is of kind %llu, "
-                  "not SpineHead", (unsigned long long)kind);
-        return ERR_TAGFS_CORRUPTED;
-    }
-    if (kind < SPINE_HEAD || kind > SPINE_FLAGS) {
-        if (tag & 1u)
-            return OK;
+    switch (says) {
+    case SPINE_SAYS_RECORD:
+    case SPINE_SAYS_WHOLE:
+        return OK;
+    case SPINE_SAYS_UNKNOWN:
         ksnprintf(words, sizeof(words), "slot %u carries a record of kind %llu this reader does not "
-                  "know and may not step over — written by a kernel that knows more", s->index,
-                  (unsigned long long)kind);
+                  "know and may not step over — written by a kernel that knows more", s->index, kind);
         return SpineSlotGlass(s, words) ? OK : ERR_NO_MEMORY;
-    }
-    if (kind != SPINE_FLAGS && kind != SPINE_ROOT && (*seen & (1u << kind))) {
-        ksnprintf(s->why, sizeof(s->why), "its stream does not parse: it carries a second record of "
-                  "kind %llu", (unsigned long long)kind);
-        return ERR_TAGFS_CORRUPTED;
-    }
-    *seen |= 1u << kind;
-    int read = SpineRecordRead(s, kind, b, len);
-    if (read == TALLY_BODY_BROKEN) {
-        ksnprintf(s->why, sizeof(s->why), "its stream does not parse: its record of kind %llu does not "
-                  "read", (unsigned long long)kind);
-        return ERR_TAGFS_CORRUPTED;
-    }
-    for (uint32_t r = 0; kind == SPINE_ROOT && r + 1u < s->roots; r++) {
-        if (s->root[r].tree == s->root[s->roots - 1u].tree) {
-            ksnprintf(s->why, sizeof(s->why), "its stream does not parse: it names a root of tree %llu "
-                      "twice", (unsigned long long)s->root[r].tree);
-            return ERR_TAGFS_CORRUPTED;
-        }
-    }
-    if (read == TALLY_BODY_LONGER) {
+    case SPINE_SAYS_LONGER:
         ksnprintf(words, sizeof(words), "slot %u's record of kind %llu is %u byte(s) longer than this "
-                  "reader knows — written by a kernel that knows more", s->index,
-                  (unsigned long long)kind, len - SpineKnownBytes(s, kind, b, len));
-        if (!SpineSlotGlass(s, words))
-            return ERR_NO_MEMORY;
+                  "reader knows — written by a kernel that knows more", s->index, kind, w->longer);
+        return SpineSlotGlass(s, words) ? OK : ERR_NO_MEMORY;
+    case SPINE_SAYS_NOT_HEAD:
+        ksnprintf(s->why, sizeof(s->why), "its stream does not parse: its first record is of kind %llu, "
+                  "not SpineHead", kind);
+        break;
+    case SPINE_SAYS_SECOND:
+        ksnprintf(s->why, sizeof(s->why), "its stream does not parse: it carries a second record of "
+                  "kind %llu", kind);
+        break;
+    case SPINE_SAYS_BROKEN:
+        ksnprintf(s->why, sizeof(s->why), "its stream does not parse: its record of kind %llu does not "
+                  "read", kind);
+        break;
+    case SPINE_SAYS_TREE_TWICE:
+        ksnprintf(s->why, sizeof(s->why), "its stream does not parse: it names a root of tree %llu "
+                  "twice", (unsigned long long)w->root.tree);
+        break;
+    case SPINE_SAYS_RUNS_PAST:
+        ksnprintf(s->why, sizeof(s->why), "its stream does not parse: a record at byte %u runs past "
+                  "the slot", w->at);
+        break;
+    case SPINE_SAYS_NO_RIBBON:
+    case SPINE_SAYS_NO_COUNTS:
+        ksnprintf(s->why, sizeof(s->why), "its stream does not parse: it carries no %s",
+                  says == SPINE_SAYS_NO_RIBBON ? "SpineRibbon" : "SpineCounts");
+        break;
     }
-    return OK;
+    return ERR_TAGFS_CORRUPTED;
 }
 
 /* The roots a slot's stream carries, counted before they are read: as many
@@ -133,35 +93,35 @@ static uint32_t SpineRootsNamed(const uint8_t* stream, uint32_t room)
     return n;
 }
 
-/* The slot's stream, record by record, and the leads of its sectors held to
- * where its records begin. */
+/* The slot's stream, record by record (volume_spine.h), what it says read into
+ * the slot, and the leads of its sectors held to where its records begin. */
 static error_t SpineParse(SpineSlot* s, const BookUnit* u)
 {
-    uint32_t  room   = u->count * BOOK_PAYLOAD_BYTES, at = 0, body, len, seen = 0, nth = 0;
+    uint32_t  room   = u->count * BOOK_PAYLOAD_BYTES;
     uint32_t* starts = kmalloc(sizeof(uint32_t) * (room / 2u + 1u));   /* a record is 2 bytes at least */
     uint32_t  roots  = SpineRootsNamed(u->stream, room);
     error_t   rc     = OK;
-    uint64_t  tag;
-    int       step;
+    SpineWalk w;
+    SpineSays says;
 
     if (!starts || (roots && !(s->root = kmalloc(sizeof(SpineRoot) * roots)))) {
         kfree(starts);
         return ERR_NO_MEMORY;
     }
-    while (starts[nth] = at, (step = BookEntryNext(u->stream, room, &at, &tag, &body, &len)) == 1)
-        if ((rc = SpineRecord(s, nth++, tag, u->stream + body, len, &seen)) != OK)
-            break;
-    if (rc == OK && step < 0) {
-        ksnprintf(s->why, sizeof(s->why), "its stream does not parse: a record at byte %u runs past "
-                  "the slot", at);
-        rc = ERR_TAGFS_CORRUPTED;
-    } else if (rc == OK && (!(seen & (1u << SPINE_RIBBON)) || !(seen & (1u << SPINE_COUNTS)))) {
-        ksnprintf(s->why, sizeof(s->why), "its stream does not parse: it carries no %s",
-                  !(seen & (1u << SPINE_RIBBON)) ? "SpineRibbon" : "SpineCounts");
-        rc = ERR_TAGFS_CORRUPTED;
-    }
+    memset(&w, 0, sizeof(w));
+    do {
+        starts[w.nth] = w.at;
+        says          = SpineSlotStep(u->stream, room, &w);
+        if ((says == SPINE_SAYS_RECORD || says == SPINE_SAYS_LONGER) && w.kind == SPINE_ROOT)
+            s->root[s->roots++] = w.root;
+        rc = SpineSaid(s, says, &w);
+    } while (rc == OK && says != SPINE_SAYS_WHOLE);
+    s->head   = w.head;
+    s->ribbon = w.ribbon;
+    s->counts = w.counts;
+    s->flags  = w.flags;
     uint32_t named = 0, given = 0;
-    uint32_t k     = rc == OK ? BookUnitLeadWrong(u, starts, nth, &named, &given) : u->count;
+    uint32_t k     = rc == OK ? BookUnitLeadWrong(u, starts, w.nth, &named, &given) : u->count;
     if (k < u->count)
         ksnprintf(s->shape, sizeof(s->shape), "slot %u: sector %u names lead %u where its records give "
                   "it %u (§2.1)", s->index, k, named, given);
@@ -236,15 +196,16 @@ void SpineLetGo(SpineSlot* slots, uint32_t count)
     kfree(slots);
 }
 
-/* A VALID slot kept among the others, newest first: by seq, and a tie by
- * index — the order the mount tries them in. False with no memory. */
+/* A VALID slot kept among the others in the order the mount tries them in —
+ * every reader of a book's (volume_spine.h, SpineSlotNewer): newest first, by
+ * seq, and a tie by index. False with no memory. */
 static bool SpineKeep(SpineSlot** valid, uint32_t* n, const SpineSlot* s)
 {
     SpineSlot* more = kmalloc(sizeof(SpineSlot) * (*n + 1u));
     if (!more)
         return false;
     uint32_t at = 0;
-    while (at < *n && (*valid)[at].seq >= s->seq)
+    while (at < *n && !SpineSlotNewer(s->seq, s->index, (*valid)[at].seq, (*valid)[at].index))
         at++;
     if (at)
         memcpy(more, *valid, sizeof(SpineSlot) * at);
