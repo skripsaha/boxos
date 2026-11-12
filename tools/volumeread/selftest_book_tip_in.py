@@ -214,12 +214,13 @@ def _FilesEmptied(c):
 
 
 def _FilesEndInside(c):
-    """The first leaf of FILES ends inside a file — its upper key that file's
-    and not its header: every file below that one given up, the leaf keeps the
+    """The leaf of FILES before the last ends inside a file — its upper key
+    that file's Parcel and not its header, as Padded lays it whatever the
+    leaves before: every file below that one given up, the leaf keeps the
     file's keys it holds, and costs its Sheets."""
-    leaf, hi = _Leaves(c, tally.FILES)[0]
+    leaf, hi = _Leaves(c, tally.FILES)[-2]
     if hi is None or hi[1] == 0:
-        return False                         # Padded's first leaf ends at a header: nothing to hold here
+        return False                         # red unless Padded's leaf before the last ends inside a file
     files = c.mount.files
     after = {fid: fs for fid, fs in files.items() if fid >= hi[0]}
     return hi[0] in files and _LeafAlone(c, tally.FILES, _Span(leaf, hi), after, (), True)

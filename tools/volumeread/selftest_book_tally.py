@@ -433,10 +433,33 @@ def TreeShapeCases(bt):
     ]
 
 
+ELEMENT_ROOM = 64                 # bytes free in the target's leaf of FILES the element landings need
+
+
+def ElementTarget(bt):
+    """The file the element landings aim at, and its leaf of FILES: the
+    smallest live file whose leaf has ELEMENT_ROOM bytes free. A landing here
+    lays an item of the target's again in place, and B7c's two runs past 2^62
+    in place of a one-block file's Parcel grow its leaf by 28 bytes — the most
+    of any. A book's leaves are laid as full as their items go, so the
+    smallest file alone (bt.S) may sit in a leaf with fewer bytes free than
+    that; which file has room is the image's, never a reason to refuse."""
+    leaves = [n for n in bt.plan.nodes if n.tree == tally.FILES and n.level == 0]
+    free = {}
+    for n in leaves:
+        stream, _starts = binder.NodeStream(n.tree, n.level, list(n.items))
+        free[id(n)] = n.sheets * tally.SHEET_PAYLOAD - len(stream)
+    for fs in sorted((fs for fs in bt.content.files.values() if fs.Blocks() >= 1 and fs.fid != bt.c0.boot_fid
+                      and fs is not bt.L), key=lambda fs: (fs.Blocks(), fs.fid)):
+        leaf = next((n for n in leaves if any(k == (fs.fid, 1) for k, _b in n.items)), None)
+        if leaf is not None and free[id(leaf)] >= ELEMENT_ROOM:
+            return fs, leaf
+    raise Unreadable("no file but the largest has %u bytes free in its leaf of FILES for the element landings"
+                     % ELEMENT_ROOM)
+
+
 def ElementCases(bt):
-    S, L = bt.S, bt.L
-    sleaf = next(n for n in bt.plan.nodes if n.tree == tally.FILES and n.level == 0 and
-                 any(k == (S.fid, 1) for k, _b in n.items))
+    (S, sleaf), L = ElementTarget(bt), bt.L
     run = S.runs[0]
 
     def Parcel(o, runs, key=(S.fid, 1)):
