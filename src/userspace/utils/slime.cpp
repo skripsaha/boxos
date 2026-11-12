@@ -47,7 +47,8 @@ BOX_SETTINGS("speed number from 20 to 300 percent default 100 \"how fast the sli
              "size number from 40 to 250 percent default 100 \"how large the slime is\"\n"
              "color color default #9FD724 \"the slime's body\"\n"
              "trail on-or-off default on \"a wet slick where the slime lands\"\n"
-             "shadow on-or-off default on \"a dark shadow on the ground under the slime\"\n");
+             "shadow on-or-off default on \"a dark shadow on the ground under the slime\"\n"
+             "smooth on-or-off default off \"the slime's edge fades into what lies beneath; off keeps every edge pixel whole or none\"\n");
 
 namespace {
 
@@ -104,6 +105,7 @@ struct Look {
     PainterColor Body  = PainterColor::Rgb(0x9F, 0xD7, 0x24);
     bool         Trail = true;
     bool         Shadowed = true;
+    bool         Smooth   = false;
 };
 
 Look ReadLook()
@@ -113,7 +115,8 @@ Look ReadLook()
                 .Size  = static_cast<float>(settings::number("size")) / 100.0f,
                 .Body  = PainterColor::FromRaw(settings::color("color")),
                 .Trail = settings::on("trail"),
-                .Shadowed = settings::on("shadow")};
+                .Shadowed = settings::on("shadow"),
+                .Smooth   = settings::on("smooth")};
 }
 
 /* Five tones from shadow to highlight, and the line around a shape. */
@@ -152,7 +155,8 @@ int Band(float Nx, float Ny)
  * upper left; every shape is given in pixels of the glass, which are square:
  * a column across and half a row down. A pixel on a shape's edge is as opaque
  * as the share of it the shape covers, so the edge is soft, and what is drawn
- * later goes over what is drawn before. */
+ * later goes over what is drawn before; unless it is set crisp, when each such
+ * pixel is whole or none. */
 class Pixmap {
 public:
     void Place(int Left, int Top, int Wide, int High)
@@ -180,8 +184,8 @@ public:
      * the shape does, as opaque as the two cover it together. */
     void Edge(int X, int Y, float Beyond, PainterColor Line, PainterColor Inside)
     {
-        const float Fill = painter::core::InsideShare(Beyond);
-        const float Rim  = painter::core::BandShare(Beyond, 0.0f, 1.0f);
+        const float Fill = painter::core::Snapped(painter::core::InsideShare(Beyond), Smooth);
+        const float Rim  = painter::core::Snapped(painter::core::BandShare(Beyond, 0.0f, 1.0f), Smooth);
         if (Fill + Rim <= 0.0f) return;
         const PainterColor Shown = PainterColor::Mix(Line, Inside, static_cast<std::uint8_t>(Fill / (Fill + Rim) * 255.0f + 0.5f));
         Put(X, Y, Shown.WithOpacity(static_cast<std::uint8_t>(std::min(Fill + Rim, 1.0f) * 255.0f + 0.5f)));
@@ -190,7 +194,8 @@ public:
     void Oval(float Cx, float Cy, float Rx, float Ry, const Ramp &Ink);
     void Cast(float Cx, float Cy, float Rx, float Ry, PainterColor Ink, std::uint8_t Opacity);
 
-    int Width = 0, Height = 0;
+    int  Width = 0, Height = 0;
+    bool Smooth = false;
 
 private:
     std::vector<PainterColor> Dots;
@@ -520,7 +525,8 @@ void Draw(Pixmap &Art, const Palette &Ink, const Slime &Creature, float Zoom, bo
     float Height = Creature.Air;
     if (Shadowed) {
         float Shade = Creature.Round * 0.46f * (1.0f - std::min(0.5f, Height / (Creature.Round * 1.2f)));
-        Art.Cast(Creature.Foot.X, Creature.Foot.Y + 0.5f, Shade, std::max(1.0f, Shade * 0.16f), Shadow, ShadowOpacity);
+        if (Art.Smooth) Art.Cast(Creature.Foot.X, Creature.Foot.Y + 0.5f, Shade, std::max(1.0f, Shade * 0.16f), Shadow, ShadowOpacity);
+        else Art.Oval(Creature.Foot.X, Creature.Foot.Y + 0.5f, Shade, std::max(1.0f, Shade * 0.16f), Flat(Shadow));
     }
     Figure Shape{Creature.Foot.X, Creature.Foot.Y - Height, Creature.Wide() * 0.5f, Creature.High() * 0.5f, Creature.Ripple, Creature.Phase};
     DrawBody(Art, Ink.Body, Shape);
@@ -610,6 +616,7 @@ int main()
         Last = Now;
         Reach Box = Holding(Creature, Dimensions.Width, Dimensions.Height);
         Art.Place(Box.Left, Box.Top, Box.Right - Box.Left, Box.Bottom - Box.Top);
+        Art.Smooth = Set.Smooth;
         Draw(Art, Ink, Creature, Zoom, Set.Shadowed);
         if (!Paint(Art, Screen, Glass, Box)) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(Moving ? ActiveMs : RestMs));

@@ -42,7 +42,8 @@ BOX_LIFE("stays");
 BOX_SETTINGS("speed number from 20 to 300 percent default 100 \"how fast the crab walks and works\"\n"
              "size number from 40 to 250 percent default 100 \"how large the crab is\"\n"
              "color color default #D8453B \"the crab's shell\"\n"
-             "shadow on-or-off default on \"a dark shadow on the ground under the crab\"\n");
+             "shadow on-or-off default on \"a dark shadow on the ground under the crab\"\n"
+             "smooth on-or-off default off \"the crab's edge fades into what lies beneath; off keeps every edge pixel whole or none\"\n");
 
 namespace {
 
@@ -114,6 +115,7 @@ struct Look {
     float        Size  = 1.0f;
     PainterColor Shell = PainterColor::Rgb(0xD8, 0x45, 0x3B);
     bool         Shadowed = true;
+    bool         Smooth   = false;
 };
 
 Look ReadLook()
@@ -122,7 +124,8 @@ Look ReadLook()
     return Look{.Speed = static_cast<float>(settings::number("speed")) / 100.0f,
                 .Size  = static_cast<float>(settings::number("size")) / 100.0f,
                 .Shell = PainterColor::FromRaw(settings::color("color")),
-                .Shadowed = settings::on("shadow")};
+                .Shadowed = settings::on("shadow"),
+                .Smooth   = settings::on("smooth")};
 }
 
 /* Five tones from shadow to highlight, and the line around a shape. */
@@ -149,7 +152,8 @@ Ramp Flat(PainterColor Ink)
  * solids: the light comes from the upper left, the tone is the nearest of the
  * ramp's five, and every shape has a line of one pixel around it. A pixel on a
  * shape's edge is as opaque as the share of it the shape covers, so the edge is
- * soft, and what is drawn later goes over what is drawn before. */
+ * soft, and what is drawn later goes over what is drawn before; unless it is
+ * set crisp, when each such pixel is whole or none. */
 class Pixmap {
 public:
     void Size(float Zoom)
@@ -175,7 +179,8 @@ public:
     void Cast(float Cx, float Cy, float Rx, float Ry, PainterColor Ink, std::uint8_t Opacity);
     void Dot(float X, float Y, PainterColor Ink) { Put(Whole(X * Scale), Whole(Y * Scale), Ink); }
 
-    int Width = 0, Height = 0;
+    int  Width = 0, Height = 0;
+    bool Smooth = false;
 
 private:
     static int Whole(float Value) { return static_cast<int>(std::floor(Value)); }
@@ -200,8 +205,8 @@ private:
  * the pixel's width outside the edge. */
 void Pixmap::Plot(int X, int Y, float Beyond, float Nx, float Ny, const Ramp &Ink)
 {
-    const float Fill = painter::core::InsideShare(Beyond);
-    const float Line = painter::core::BandShare(Beyond, 0.0f, 1.0f);
+    const float Fill = painter::core::Snapped(painter::core::InsideShare(Beyond), Smooth);
+    const float Line = painter::core::Snapped(painter::core::BandShare(Beyond, 0.0f, 1.0f), Smooth);
     if (Fill + Line <= 0.0f) return;
     PainterColor Shown = Ink.Outline;
     if (Fill > 0.0f) {
@@ -255,7 +260,7 @@ void Pixmap::Ring(float Cx, float Cy, float Radius, PainterColor Ink)
     for (int Y = Whole(Cy - Radius - 1); Y <= Whole(Cy + Radius + 1); Y++) {
         for (int X = Whole(Cx - Radius - 1); X <= Whole(Cx + Radius + 1); X++) {
             float Far   = std::sqrt((X + 0.5f - Cx) * (X + 0.5f - Cx) + (Y + 0.5f - Cy) * (Y + 0.5f - Cy)) - Radius;
-            float Share = painter::core::BandShare(Far, -Half, Half);
+            float Share = painter::core::Snapped(painter::core::BandShare(Far, -Half, Half), Smooth);
             if (Share > 0.0f) Put(X, Y, Ink.WithOpacity(static_cast<std::uint8_t>(Share * 255.0f + 0.5f)));
         }
     }
@@ -657,7 +662,8 @@ void Draw(Pixmap &Art, const Palette &Ink, const Crab &Creature, int Shift, bool
 {
     Art.Clear(Shift);
     const Pose &Now = Creature.Now;
-    if (Shadowed) Art.Cast(MiddleX, GroundY + 0.4f, 17.0f, 2.2f, Shadow, ShadowOpacity);
+    if (Shadowed && Art.Smooth) Art.Cast(MiddleX, GroundY + 0.4f, 17.0f, 2.2f, Shadow, ShadowOpacity);
+    else if (Shadowed) Art.Oval(MiddleX, GroundY + 0.4f, 17.0f, 2.2f, Flat(Shadow));
     DrawLegs(Art, Ink, Now);
     DrawArms(Art, Ink, Now);
     DrawEye(Art, Ink, Now, -1.0f);
@@ -735,6 +741,7 @@ int main()
         bool          Moving = Creature.Step(std::min(0.5f, static_cast<float>(Now - Last) / 1e6f));
         Last = Now;
         int Top = static_cast<int>(std::lround(Creature.Where.Y * 2.0f));
+        Art.Smooth = Set.Smooth;
         Draw(Art, Ink, Creature, Top & 1, Set.Shadowed);
         if (!Paint(Art, Screen, Overlay, {static_cast<int>(std::lround(Creature.Where.X)), Top >> 1})) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(Moving ? ActiveMs : RestMs));

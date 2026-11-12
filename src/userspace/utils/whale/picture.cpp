@@ -43,10 +43,11 @@ Picture::Picture(painter::core::Size Glass)
 {
 }
 
-void Picture::Dress(const Hues &Colours, bool Edged)
+void Picture::Dress(const Hues &Colours, bool Edged, bool Smooth)
 {
     Body.Wear(Colours);
     Outlined = Edged;
+    Softened = Smooth;
 }
 
 painter::core::Rect Picture::Draw(const Swimmer &Whale, painter::tui::Frame &Overlay)
@@ -61,7 +62,7 @@ painter::core::Rect Picture::Draw(const Swimmer &Whale, painter::tui::Frame &Ove
 
     Pixels = Paint(Pixels);
     if (Outlined) Edge(Pixels);
-    Pixels = Soften(Pixels);
+    if (Softened) Pixels = Soften(Pixels);
     Reached = {Pixels.X, Pixels.Y / 2, Pixels.Width, Pixels.Height / 2};
     Lay(Reached, Overlay);
     Sprinkle(Whale, Overlay);

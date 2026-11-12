@@ -48,7 +48,8 @@ BOX_SETTINGS("size number from 50 to 250 percent default 100 \"how large the eye
              "iris one-of random blue green brown hazel slate violet default random \"the colour of the irises; random takes one of them each run\"\n"
              "eyeball color default #F4F4F4 \"the white of the eyes: its rim is a shade of it\"\n"
              "pupil color default #0E0E10 \"the pupils\"\n"
-             "lid color default #3C3C44 \"the lids and, shut, their edge\"\n");
+             "lid color default #3C3C44 \"the lids and, shut, their edge\"\n"
+             "smooth on-or-off default off \"every edge fades into what lies beneath and into its neighbour; off keeps each edge pixel whole or none\"\n");
 
 namespace {
 
@@ -103,6 +104,7 @@ struct Chosen {
     float        Blink = 1.0f;
     int          Iris  = -1;
     PainterColor Eyeball = Sclera, Dark = Pupil, Shade = Lid;
+    bool         Smooth = false;
 };
 
 Chosen ReadChosen()
@@ -118,7 +120,8 @@ Chosen ReadChosen()
                    .Iris    = Iris,
                    .Eyeball = PainterColor::FromRaw(settings::color("eyeball")),
                    .Dark    = PainterColor::FromRaw(settings::color("pupil")),
-                   .Shade   = PainterColor::FromRaw(settings::color("lid"))};
+                   .Shade   = PainterColor::FromRaw(settings::color("lid")),
+                   .Smooth  = settings::on("smooth")};
 }
 
 std::uint8_t Moved(std::uint8_t Base, std::uint8_t Was, std::uint8_t Now)
@@ -282,7 +285,7 @@ bool Pair::Step(float Seconds)
 /* The pixels of the pair, each eye an ellipse: the white shaded toward its
  * rim, the iris with a darker ring, the pupil, a glint, and the lids. Every
  * edge, the eye's own and those within it, is as soft as the share of a pixel
- * each side covers. */
+ * each side covers, unless it is set crisp, when each is whole or none. */
 class EyePicture {
 public:
     /* The pair at Share of its size on a glass of that many cells: on a small
@@ -312,7 +315,8 @@ public:
         return Y < Height ? Dots[static_cast<std::size_t>(Y) * Width + X] : Empty;
     }
 
-    int Width = 0, Height = 0;
+    int  Width = 0, Height = 0;
+    bool Smooth = false;
 
 private:
     void DrawEye(int Left, const Look &Eye, const Inks &Ink);
@@ -329,7 +333,9 @@ PainterColor Laid(PainterColor Under, PainterColor Over, float Share)
 
 void EyePicture::DrawEye(int Left, const Look &Eye, const Inks &Colours)
 {
-    using painter::core::InsideShare;
+    auto InsideShare = [this](float Beyond) {
+        return painter::core::Snapped(painter::core::InsideShare(Beyond), Smooth);
+    };
     float Rx = EyeW / 2.0f, Ry = EyeH / 2.0f;
     float Cx = Left + Rx, Cy = Ry;
     /* A shade under round numbers, so no lone pixel sticks out at the four points of a circle. */
@@ -458,6 +464,7 @@ int main()
         std::uint64_t Now    = clock_uptime_us();
         bool          Moving = Eyes.Step(std::min(0.5f, static_cast<float>(Now - Last) / 1e6f));
         Last = Now;
+        Picture.Smooth = Set.Smooth;
         Picture.Draw(Eyes, MakeInks(Set, Eyes.Iris));
         if (!Paint(Picture, Screen, *Overlay, At)) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(Moving ? MovingMs : StillMs));

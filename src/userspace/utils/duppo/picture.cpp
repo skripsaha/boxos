@@ -51,7 +51,8 @@ Rect Joined(Rect A, Rect B)
 
 /* How much of a sub-pixel a shape covers, from how far outside it the
  * sub-pixel's middle lies, the sub-pixel's width counted along Toward, the
- * way out. On a text page, whose sixteen colours have no mixes, whole or none. */
+ * way out. On a text page, whose sixteen colours have no mixes, or when the
+ * person set the edge crisp, whole or none. */
 float Cover(float Far, Vec Toward, bool Whole)
 {
     if (Far > SubDown) return 0.0f;
@@ -246,7 +247,7 @@ Rect Picture::Draw(const Flight &Body, const Face &Eye, const Spin &Turning, con
 {
     Overlay.Fill(Shown, painter::tui::Cell::TransparentCell());
 
-    const bool    Whole = Overlay.Glass() == painter::tui::GlassKind::Text;
+    const bool    Whole = !Softened || Overlay.Glass() == painter::tui::GlassKind::Text;
     const Sampler Seen(Body, Eye, Turning, Moons, Colours, Whole);
     const Rect    Reached = Reach(Body, Moons, {0, 1, Cells.Width, Cells.Height - 1});
 

@@ -54,7 +54,8 @@ BOX_SETTINGS("speed number from 20 to 300 percent default 100 \"how fast Duppo d
              "ring color default #FFE2F0 \"the pale ring round the pupil: its shaded edge follows it\"\n"
              "pupil color default #000000 \"the pupil: its glow and its rim are lighter shades of it\"\n"
              "satellites number from 0 to 3 default 3 \"how many little bubbles keep close to Duppo; 0 leaves the bubble alone\"\n"
-             "blink number from 20 to 400 percent or off default 100 \"how often Duppo blinks; off keeps the eye open\"\n");
+             "blink number from 20 to 400 percent or off default 100 \"how often Duppo blinks; off keeps the eye open\"\n"
+             "smooth on-or-off default on \"Duppo's edge fades into what lies beneath; off keeps every edge whole or none\"\n");
 
 namespace {
 
@@ -70,6 +71,7 @@ struct Look {
     painter::core::Color Body, Ring, Pupil;
     int                  Satellites;
     float                Blink;
+    bool                 Smooth;
 };
 
 Look ReadLook()
@@ -81,7 +83,8 @@ Look ReadLook()
                 .Ring       = painter::core::Color::FromRaw(settings::color("ring")),
                 .Pupil      = painter::core::Color::FromRaw(settings::color("pupil")),
                 .Satellites = static_cast<int>(settings::number("satellites")),
-                .Blink      = static_cast<float>(settings::number("blink")) / 100.0f};
+                .Blink      = static_cast<float>(settings::number("blink")) / 100.0f,
+                .Smooth     = settings::on("smooth")};
 }
 
 float SizeOf(const Look &Set, painter::core::Size Glass)
@@ -128,7 +131,7 @@ int main()
     Eye.Tune(Set.Speed, Set.Blink);
     Turning.Tune(Set.Speed);
     Moons.Tune(Set.Speed, Set.Satellites);
-    Picture.Dress(duppo::Palette::Make(Set.Body, Set.Ring, Set.Pupil));
+    Picture.Dress(duppo::Palette::Make(Set.Body, Set.Ring, Set.Pupil), Set.Smooth);
     Body.Begin(Glass, SizeOf(Set, Glass), Dice);
     Eye.Begin(Glass);
     Moons.Begin(Body.Center, Body.Scale);
@@ -144,7 +147,7 @@ int main()
             Eye.Tune(Set.Speed, Set.Blink);
             Turning.Tune(Set.Speed);
             Moons.Tune(Set.Speed, Set.Satellites);
-            Picture.Dress(duppo::Palette::Make(Set.Body, Set.Ring, Set.Pupil));
+            Picture.Dress(duppo::Palette::Make(Set.Body, Set.Ring, Set.Pupil), Set.Smooth);
             Body.Fit(SizeOf(Set, Glass));
         }
         std::uint64_t Now = clock_uptime_us();

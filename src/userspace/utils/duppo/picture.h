@@ -26,7 +26,13 @@ class Picture {
 public:
     explicit Picture(painter::core::Size Cells) : Cells(Cells) {}
 
-    void Dress(const Palette &Hues) { Colours = Hues; }
+    /* Its colours, and whether its edge is soft; if not, every edge sub-pixel
+     * is whole or none, as on a text page. */
+    void Dress(const Palette &Hues, bool Smooth)
+    {
+        Colours  = Hues;
+        Softened = Smooth;
+    }
 
     /* Duppo drawn into Overlay, which is as large as the glass; the cells that
      * changed since the last time, to composite. */
@@ -36,6 +42,7 @@ public:
 private:
     painter::core::Size Cells;
     Palette             Colours;
+    bool                Softened = true;
     painter::core::Rect Shown;
 };
 

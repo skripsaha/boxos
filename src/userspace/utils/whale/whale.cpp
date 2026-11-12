@@ -46,6 +46,7 @@ BOX_SETTINGS("speed number from 20 to 300 percent default 100 \"how fast the wha
              "back color default #1E4A98 \"the whale's back: its fins and flukes are shades of it\"\n"
              "belly color default #C4DEF2 \"the whale's belly: its flank leans between the back and this\"\n"
              "outline on-or-off default on \"a dark line round the whale, on its own edge\"\n"
+             "smooth on-or-off default off \"the whale's edge fades into what lies beneath; off keeps every edge pixel whole or none\"\n"
              "spout on-or-off default on \"now and then it blows a spout\"\n"
              "bubbles on-or-off default on \"its tail leaves bubbles\"\n");
 
@@ -58,7 +59,7 @@ struct Look {
     float                Speed;
     float                Size;
     painter::core::Color Back, Belly;
-    bool                 Outline, Spout, Bubbles;
+    bool                 Outline, Smooth, Spout, Bubbles;
 };
 
 Look ReadLook()
@@ -69,6 +70,7 @@ Look ReadLook()
                 .Back    = painter::core::Color::FromRaw(settings::color("back")),
                 .Belly   = painter::core::Color::FromRaw(settings::color("belly")),
                 .Outline = settings::on("outline"),
+                .Smooth  = settings::on("smooth"),
                 .Spout   = settings::on("spout"),
                 .Bubbles = settings::on("bubbles")};
 }
@@ -76,7 +78,7 @@ Look ReadLook()
 void Apply(const Look &Set, whale::Swimmer &Whale, whale::Picture &Picture)
 {
     Whale.Tune(Set.Speed, Set.Spout, Set.Bubbles);
-    Picture.Dress(whale::Dress(Set.Back, Set.Belly), Set.Outline);
+    Picture.Dress(whale::Dress(Set.Back, Set.Belly), Set.Outline, Set.Smooth);
 }
 
 void Say(std::string_view Text)

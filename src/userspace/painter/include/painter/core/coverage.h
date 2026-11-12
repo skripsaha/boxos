@@ -23,6 +23,14 @@ inline float BandShare(float Beyond, float Near, float Far) noexcept
     return std::clamp(std::min(Beyond + 0.5f, Far) - std::max(Beyond - 0.5f, Near), 0.0f, 1.0f);
 }
 
+// A share as the program shows it: as it is when the edge is Smooth, and when
+// it is not, whole where the shape covers half the pixel or more and none
+// otherwise.
+inline float Snapped(float Share, bool Smooth) noexcept
+{
+    return Smooth || Share <= 0.0f ? Share : (Share >= 0.5f ? 1.0f : 0.0f);
+}
+
 }  // namespace painter::core
 
 #endif  // PAINTER_CORE_COVERAGE_H

@@ -2,7 +2,8 @@
  * into cells two pixels tall, and laid in a frame whose every other cell is
  * transparent, so only the whale's own cells are painted over the screen. A
  * pixel on its edge is as opaque as the share of it the whale covers, so the
- * edge is soft and blends into whatever lies beneath. */
+ * edge is soft and blends into whatever lies beneath, unless it is set to be
+ * crisp. */
 #ifndef WHALE_PICTURE_H
 #define WHALE_PICTURE_H
 
@@ -22,9 +23,10 @@ class Picture {
 public:
     explicit Picture(painter::core::Size Cells);
 
-    /* Its colours, and whether it has a dark line round it, drawn on its own
-     * edge pixels. */
-    void Dress(const Hues &Colours, bool Edged);
+    /* Its colours, whether it has a dark line round it, drawn on its own edge
+     * pixels, and whether its edge is soft; if not, every pixel is whole or
+     * none. */
+    void Dress(const Hues &Colours, bool Edged, bool Smooth);
 
     /* The whale and its drops drawn into Overlay, which is as large as the
      * glass; the cells that changed since the last time, to composite. */
@@ -47,6 +49,7 @@ private:
     std::vector<std::size_t>            Rim;
     Figure                              Body;
     bool                                Outlined = true;
+    bool                                Softened = false;
     painter::core::Rect                 Shown;
     painter::core::Rect                 Reached;
 };

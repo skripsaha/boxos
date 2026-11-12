@@ -46,7 +46,8 @@ BOX_FORM("takes optional words \"where it stands: top, bottom, left, right or "
 BOX_LIFE("stays");
 BOX_SETTINGS("speed number from 20 to 300 percent default 100 \"how fast the donut turns\"\n"
              "size number from 40 to 200 percent default 100 \"how large the donut is\"\n"
-             "color color default #FFFFFF \"the donut's light side: its far side is a shade of it\"\n");
+             "color color default #FFFFFF \"the donut's light side: its far side is a shade of it\"\n"
+             "smooth on-or-off default off \"the donut's edge fades into what lies beneath; off keeps every edge pixel whole or none\"\n");
 
 namespace {
 
@@ -72,6 +73,7 @@ constexpr float Density = 2.6f;
  * touches: how many the torus covers is how opaque the pixel is. */
 constexpr float Footprint = 0.3f;
 constexpr int Grain = 4;
+constexpr unsigned WholeSide = (1u << Grain) - 1;
 
 /* The sub-samples along one side of a pixel that the span From to To, in that
  * pixel's own units, touches, as bits. */
@@ -88,13 +90,15 @@ struct Look {
     float Speed = 1.0f;
     float Size = 1.0f;
     PainterColor Light = painter::core::Colors::White;
+    bool Smooth = false;
 };
 
 Look ReadLook() {
     using box::settings;
     return Look{.Speed = static_cast<float>(settings::number("speed")) / 100.0f,
                 .Size = static_cast<float>(settings::number("size")) / 100.0f,
-                .Light = PainterColor::FromRaw(settings::color("color"))};
+                .Light = PainterColor::FromRaw(settings::color("color")),
+                .Smooth = settings::on("smooth")};
 }
 
 void Say(std::string_view Text) {
@@ -230,19 +234,23 @@ class DonutPicture {
 
     painter::tui::Frame &Frame() { return Canvas; }
 
+    void Smooth(bool On) { Soft = On; }
+
   private:
     /* A sample at X, Y (in pixels, a pixel being a unit square from its
      * corner) and Z, in Ink: it marks the sub-samples of every pixel its
-     * square touches, and is the colour of those where it is nearest. */
+     * square touches, and is the colour of those where it is nearest. For a
+     * crisp edge the sample is a point that marks its one pixel whole. */
     void Splat(float X, float Y, float Z, PainterColor Colour) {
-        const int Left = static_cast<int>(std::floor(X - Footprint));
-        const int Right = static_cast<int>(std::floor(X + Footprint));
-        const int Top = static_cast<int>(std::floor(Y - Footprint));
-        const int Bottom = static_cast<int>(std::floor(Y + Footprint));
+        const float Reach = Soft ? Footprint : 0.0f;
+        const int Left = static_cast<int>(std::floor(X - Reach));
+        const int Right = static_cast<int>(std::floor(X + Reach));
+        const int Top = static_cast<int>(std::floor(Y - Reach));
+        const int Bottom = static_cast<int>(std::floor(Y + Reach));
         for (int Row = std::max(Top, 0); Row <= std::min(Bottom, PixelHeight - 1); Row++) {
-            const unsigned Rows = Touched(Y - Footprint - Row, Y + Footprint - Row);
+            const unsigned Rows = Soft ? Touched(Y - Reach - Row, Y + Reach - Row) : WholeSide;
             for (int Col = std::max(Left, 0); Col <= std::min(Right, Width - 1); Col++) {
-                const unsigned Cols = Touched(X - Footprint - Col, X + Footprint - Col);
+                const unsigned Cols = Soft ? Touched(X - Reach - Col, X + Reach - Col) : WholeSide;
                 const std::size_t At = static_cast<std::size_t>(Row) * Width + Col;
                 for (int Sub = 0; Sub < Grain; Sub++)
                     if (Rows & (1u << Sub))
@@ -288,6 +296,7 @@ class DonutPicture {
     std::vector<float> Depth;
     std::vector<std::uint32_t> Reached;
     std::vector<PainterColor> Surface;
+    bool Soft = false;
     painter::tui::Frame Canvas;
 };
 
@@ -329,6 +338,7 @@ int main() {
     }
     auto Picture = std::make_unique<DonutPicture>(Area.Width, Area.Height, std::move(*Created));
     Picture->Colour(Set.Light);
+    Picture->Smooth(Set.Smooth);
     box::settings::watch Watch;
 
     // Turning until it can no more — the display gone, or the donut ended:
@@ -347,6 +357,7 @@ int main() {
             At = Where(Words, Count, Dimensions.Width, Dimensions.Height, Fresh.Width, Fresh.Height);
             Picture = std::make_unique<DonutPicture>(Fresh.Width, Fresh.Height, std::move(*Resized));
             Picture->Colour(Set.Light);
+            Picture->Smooth(Set.Smooth);
         }
         const std::uint64_t Now = clock_uptime_us();
         const float Seconds =
