@@ -23,6 +23,7 @@ VolumeBoot   g_boot;
 int          g_have_boot = 0;
 uint8_t      g_volume_uuid[16];
 uint64_t     g_volume_end = 0;
+uint64_t     g_volume_atom_blocks = 1;
 
 /* Walk the stamps for one kind. Returns a pointer into `raw`, or NULL. */
 static const void *DeedStampOf(const uint8_t *raw, uint16_t kind, uint16_t *out_bytes)
@@ -74,8 +75,8 @@ static EFI_STATUS DeedTakeLayout(const VolumeDeed *deed, const void *layout, uin
  * bytes — then the FRAME, by the one rule (volume_deed.h, VolumeFrameCheck).
  * A FRAME that holds and still has something to say is said, as the kernel
  * says it. Then BOOT has to name blocks inside the data run, which runs to the
- * far copy of the Deed: the kernel's blocks are all this loader takes from a
- * format-v2 volume until it reads the book.
+ * far copy of the Deed; and the volume's atom is kept, for the Quires of the
+ * ribbon its book is read along begin on one (tagboot_lectern_ribbon.c).
  */
 static EFI_STATUS DeedTakeFrame(const uint8_t *raw, const VolumeDeed *deed,
                                 const void *frame, uint16_t bytes)
@@ -116,8 +117,9 @@ static EFI_STATUS DeedTakeFrame(const uint8_t *raw, const VolumeDeed *deed,
         Print("TagBoot: this deed's BOOT names blocks outside its data run\r\n");
         return EFI_UNSUPPORTED;
     }
-    g_volume_end = run_end;
-    g_have_frame = 1;
+    g_volume_end         = run_end;
+    g_volume_atom_blocks = BookAtomOf(geo->physical_bytes, 0, 0) / VOLUME_BLOCK_BYTES;
+    g_have_frame         = 1;
     return EFI_SUCCESS;
 }
 

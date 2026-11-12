@@ -370,6 +370,85 @@ static inline int NodeHeadGet(const uint8_t *s, uint32_t room, uint32_t *at, Nod
 }
 
 /* ------------------------------------------------------------------------- */
+/* A node's stream judged whole (§2.9, §16.3 п.2)                            */
+/* ------------------------------------------------------------------------- */
+
+/* Keys [lo, hi) of a tree — no lo from its start, no hi to its end: the range
+ * an inner node's separators give a child. */
+typedef struct {
+    TallyKey lo, hi;
+    int      has_lo, has_hi;
+} TallyRange;
+
+static inline int TallyKeyBefore(TallyKey a, TallyKey b)
+{
+    return a.k1 < b.k1 || (a.k1 == b.k1 && a.k2 < b.k2);
+}
+
+static inline int TallyRangeHolds(const TallyRange *r, TallyKey key)
+{
+    return !(r->has_lo && TallyKeyBefore(key, r->lo)) && !(r->has_hi && !TallyKeyBefore(key, r->hi));
+}
+
+/* What TallyNodeJudge finds, the first rule broken in this order. */
+#define TALLY_NODE_HOLDS      0
+#define TALLY_NODE_HEADLESS   1   /* it opens with no NodeHead                         */
+#define TALLY_NODE_COUNTED    2   /* it counts more items than it has bytes            */
+#define TALLY_NODE_RUNS_PAST  3   /* item `nth` runs past the node                     */
+#define TALLY_NODE_FALLS      4   /* the keys do not rise at item `nth`                */
+#define TALLY_NODE_TRAILED    5   /* a byte other than PAD follows its last item       */
+#define TALLY_NODE_OUTSIDE    6   /* item `nth`'s key, `key`, lies outside the range   */
+
+typedef struct {
+    NodeHead head;
+    uint32_t items_at;   /* where its first item begins */
+    uint64_t nth;
+    TallyKey key;
+} TallyNodeJudged;
+
+/*
+ * ‼ ONE RULE FOR WHETHER A COPY OF A NODE HOLDS (§16.7 п.2). A copy's stream
+ * of `room` bytes holds as a node of the range `r` its parent gives it when it
+ * opens with a NodeHead counting no more items than it has bytes; every item
+ * is whole in the stream, each key above the one before it and none below the
+ * first key; nothing but PAD follows the last; and every key lies inside the
+ * range. The kernel's mount reads a node by it (mount/tally_walk.c,
+ * TallyNodeParse) and so does the UEFI loader's Lectern (tagboot_lectern.c):
+ * a loader that held a node another kernel refuses would stand on another
+ * slot than the kernel's mount, and hold the kernel's blocks to the digests of
+ * another Tally. volume-read keeps the same rule by its own code (tally.py
+ * NodeRead, NodeParse). The rules of the stream are held over every item
+ * before any key is held to the range, the order the reasons are said in.
+ */
+static inline int TallyNodeJudge(const uint8_t *s, uint32_t room, const TallyRange *r, TallyNodeJudged *j)
+{
+    uint32_t at = 0, body, len;
+    TallyKey prev, key;
+
+    if (NodeHeadGet(s, room, &at, &j->head) == TALLY_BODY_BROKEN) return TALLY_NODE_HEADLESS;
+    j->items_at = at;
+    if (j->head.items > room) return TALLY_NODE_COUNTED;
+    prev = j->head.first;
+    for (j->nth = 0; j->nth < j->head.items; j->nth++) {
+        if (!TallyItemGet(s, room, &at, j->head.tree, prev, &key, &body, &len)) return TALLY_NODE_RUNS_PAST;
+        if ((j->nth && !TallyKeyBefore(prev, key)) || TallyKeyBefore(key, j->head.first)) return TALLY_NODE_FALLS;
+        prev = key;
+    }
+    if (at < room && s[at] != 0) return TALLY_NODE_TRAILED;
+    at   = j->items_at;
+    prev = j->head.first;
+    for (j->nth = 0; j->nth < j->head.items; j->nth++) {
+        TallyItemGet(s, room, &at, j->head.tree, prev, &key, &body, &len);
+        prev = key;
+        if (!TallyRangeHolds(r, key)) {
+            j->key = key;
+            return TALLY_NODE_OUTSIDE;
+        }
+    }
+    return TALLY_NODE_HOLDS;
+}
+
+/* ------------------------------------------------------------------------- */
 /* FILES: a file's header (part 0) and its Parcels (part 1 + b)              */
 /* ------------------------------------------------------------------------- */
 

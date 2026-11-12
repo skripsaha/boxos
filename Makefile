@@ -887,9 +887,11 @@ UEFI_ESP_IMG = $(BUILDDIR)/esp.img
 # The loader's files, and every header any of them reads: a change to one is a
 # change to the loader.
 TAGBOOT_SRC    = src/boot/uefi/tagboot.c src/boot/uefi/tagboot_deed.c src/boot/uefi/tagboot_attest.c \
-                 src/boot/uefi/tagboot_lectern.c
+                 src/boot/uefi/tagboot_lectern.c src/boot/uefi/tagboot_lectern_tree.c \
+                 src/boot/uefi/tagboot_lectern_ribbon.c src/boot/uefi/tagboot_lectern_replay.c \
+                 src/boot/uefi/tagboot_succession.c
 TAGBOOT_HDRS   = src/boot/uefi/tagboot.h src/boot/uefi/uefi.h src/boot/uefi/tagfs_boot.h \
-                 src/boot/uefi/tagboot_lectern.h \
+                 src/boot/uefi/tagboot_lectern.h src/boot/uefi/tagboot_lectern_book.h \
                  src/include/volume_deed.h src/include/volume_ledger.h src/include/volume_book.h \
                  src/include/volume_tally.h src/include/volume_spine.h src/include/volume_ribbon.h \
                  src/include/volume_digest.h
@@ -1735,12 +1737,18 @@ $(TAGBOOT_OBJ): $(BUILDDIR)/%.o: src/boot/uefi/%.c $(TAGBOOT_HDRS) | $(BUILDDIR)
 	@echo "Building TagBoot UEFI object $@ (gcc ELF)..."
 	@$(UEFI_CC) $(UEFI_CFLAGS_GCC) -c $< -o $@
 
+# ‼ -z defs: no symbol of the loader is left for anyone to resolve at load. It
+# has no loader under it and links no library, so a call the compiler made up
+# on its own — a memcpy for a struct copied, a memset for a loop it saw
+# through — is a symbol nothing will ever define, and an EFI image that calls
+# address 0 the first time that path runs. The link refuses it here instead.
 $(TAGBOOT_SO): $(TAGBOOT_OBJ) $(TAGBOOT_JUMP_OBJ) $(TAGBOOT_LD) | $(BUILDDIR)
 	@echo "Linking TagBoot ELF shared object..."
 	@$(LD) \
 		-nostdlib \
 		-shared \
 		-Bsymbolic \
+		-z defs \
 		-T $(TAGBOOT_LD) \
 		-o $@ $(TAGBOOT_OBJ) $(TAGBOOT_JUMP_OBJ)
 
