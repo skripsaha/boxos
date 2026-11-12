@@ -489,7 +489,6 @@ def ElementCases(bt):
         bt.Reitem(o, lleaf, lambda items: [(k, tally.ParcelEncode(runs, bt.plan.seq)) if k == (L.fid, 1)
                                            else (k, b) for k, b in items])
 
-    shared = tally.Run(False, run.start, run.count, run.birth, ext=bookread.EntryPut(tally.EXT_SHARED, b""))
     return [
         Case("B7 a Parcel with a hole before it", lambda o: Parcel(o, S.runs, key=(S.fid, 2)),
              must={"PARCEL_GAP", "HELD_BLOCKS"}, checks=[
@@ -537,10 +536,59 @@ def ElementCases(bt):
              must={"DIGEST_MISMATCH"}, checks=[
                  ("%s's block %u does not match its digest" % (Label(S), run.start),
                   lambda c: Found(c, "DIGEST_MISMATCH", Label(S), "%u+1" % run.start))]),
-        Case("B12 a run carries SHARED", lambda o: Parcel(o, [shared]), must={"UNDER_GLASS"}, checks=[
-            ("the volume is read only: a run's extension this kernel cannot carry on",
-             lambda c: Glass(c, "extension")),
-            ("%s still reads" % Label(S), lambda c: c.Sha256(S.fid) == bt.c0.Sha256(S.fid))]),
+    ] + SharedCases(bt, S, Parcel)
+
+
+def SharedCases(bt, S, Parcel):
+    """A run that carries SHARED (§8.2): ground it names that other runs may
+    name too. Its file reads through it as through DATA, its blocks held to
+    the block's one digest; the census takes it for an owner beside the one
+    DATA run of the block, or alone when the DATA owner has gone — never on a
+    node of the book, and never on ground no one ever wrote, which has no
+    digest to hold a read to. A run whose list of extensions names anything
+    but one empty SHARED is not carried on."""
+    run, L = S.runs[0], bt.L
+    head = min(S.size, BLOCK)
+
+    def Shared(start, ext=None):
+        """S's runs, its first block a run of one SHARED block at `start`."""
+        one = tally.Run(False, start, 1, run.birth, ext=bookread.EntryPut(tally.EXT_SHARED, b"") if ext is None
+                        else ext)
+        rest = [tally.Run(False, run.start + 1, run.count - 1, run.birth)] if run.count > 1 else []
+        return lambda o: Parcel(o, [one] + rest + S.runs[1:])
+
+    node = next(x for x in bt.plan.nodes if x.tree == tally.TAGS).blocks[0]
+    mounts = ("and the kernel of this tree mounts it, not under glass, two owners of a block said nowhere",
+              lambda c: c.kernel["mounts"] is True and c.kernel["glass"] == 0 and c.kernel["double"] == [])
+    return [
+        Case("B12 a run carries SHARED, its file the one owner of its ground", Shared(run.start), checks=[
+            ("the volume is not put under glass: SHARED is carried on", lambda c: not c.mount.glass),
+            ("%s still reads, and nothing is said" % Label(S),
+             lambda c: c.Sha256(S.fid) == bt.c0.Sha256(S.fid) and not c.findings),
+            ("its first block is claimed as shared by it",
+             lambda c: any(x.kind == "shared" and x.runs == [(run.start, 1)] for x in c.claims)), mounts]),
+        Case("B12b a run SHARED over the DATA of another live file", Shared(L.runs[0].start), checks=[
+            ("nothing is said: one DATA owner and one shared on the block", lambda c: not c.findings),
+            ("%s reads the block of %s it shares, and its own past it" % (Label(S), Label(L)),
+             lambda c: c.Content(S.fid)[:head] == bt.c0.Content(L.fid)[:head] and
+             c.Content(S.fid)[head:] == bt.c0.Content(S.fid)[head:]),
+            ("its own first block is no one's now",
+             lambda c: not any(s <= run.start < s + k for x in c.claims for s, k in x.runs)), mounts]),
+        Case("B12c a run SHARED on ground no one wrote", Shared(bt.F), must={"DIGEST_MISMATCH"}, checks=[
+            ("%s's block carries no digest: a read of it is refused" % Label(S),
+             lambda c: Found(c, "DIGEST_MISMATCH", Label(S), "%u+1" % bt.F, "carry no digest")),
+            ("and no two owners of a block are said", lambda c: not Found(c, "DOUBLE_OWNER")), mounts]),
+        Case("B12d a run SHARED on a node of the Tally", Shared(node), must={"DOUBLE_OWNER", "DIGEST_MISMATCH"},
+             checks=[("the block is said to be %s's and the Tallies' nodes' at once, and carries no digest"
+                      % Label(S), lambda c: Found(c, "DOUBLE_OWNER", Label(S), "the Tallies' nodes")),
+                     ("and the kernel of this tree names that block", lambda c: [node, 1] in c.kernel["double"])]),
+        Case("B12e a run SHARED and CODEC", Shared(run.start, bookread.EntryPut(tally.EXT_SHARED, b"") +
+                                                 bookread.EntryPut(tally.EXT_CODEC, b"\x01\x01")),
+             must={"UNDER_GLASS"}, checks=[("the volume is read only: a run's extension this kernel cannot carry on",
+                                            lambda c: Glass(c, "extension"))]),
+        Case("B12f a run SHARED with a body", Shared(run.start, bookread.EntryPut(tally.EXT_SHARED, b"\x00")),
+             must={"UNDER_GLASS"}, checks=[("the volume is read only: SHARED's body is empty in this reader's book",
+                                            lambda c: Glass(c, "extension"))]),
     ]
 
 

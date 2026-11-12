@@ -80,6 +80,22 @@ def RecordCases(bt):
         bt.Pen(o).Sew([Born(bt.F, f1, d[:1], b"a"), Born(bt.F + 1, f2, d[1:], b"b"),
                        stitch.Quitclaim(fid=f2, base=0)], flags=stitch.DATA_FLUSHED)
 
+    def Shared(both):
+        """f1 born on a block and f2 born SHARED on it, then f1 quitclaimed —
+        and, `both`, f2 after it: the block is f2's while f2 lives, and lies
+        fallow once when its last owner goes (§8.2)."""
+        def Plant(o):
+            d = bt.Fresh(o, 0, 1, 4)
+            sharer = stitch.Born(fid=f2, flags=ondisk.FILE_ACTIVE, size=BLOCK, created_ns=1, modified_ns=1,
+                                 name=b"sharer", tags=(), digests=[],
+                                 runs=[stitch.Data(bt.F, 1, bookread.EntryPut(tally.EXT_SHARED, b""))])
+            gone = [stitch.Quitclaim(fid=f1, base=0)] + ([stitch.Quitclaim(fid=f2, base=0)] if both else [])
+            bt.Pen(o).Sew([Born(bt.F, f1, d, b"owner"), sharer] + gone, flags=stitch.DATA_FLUSHED)
+        return Plant
+
+    def Fallow(c):
+        return [x.runs for x in c.claims if x.kind == "fallow"]
+
     def Unlanded(o, torn):
         """A Born whose block holds what its digest does not name, in a stitch
         sewn without DATA_FLUSHED — and, `torn`, a stitch after it torn."""
@@ -147,6 +163,19 @@ def RecordCases(bt):
                      ("and nothing is said", lambda c: not c.findings),
                      ("%u is never given again: the next file id is %u" % (f2, f3),
                       lambda c: c.mount.counts["next_fid"] == f3)]),
+        Case("B28s a block shared, its DATA owner quitclaimed", Shared(False), checks=[
+            ("%u is gone and %u lives, the block its own: it lies fallow for no one" % (f1, f2),
+             lambda c: f1 not in c.mount.files and f2 in c.mount.files and not Fallow(c) and
+             any(x.kind == "shared" and x.runs == [(bt.F, 1)] for x in c.claims)),
+            ("%u reads the block's bytes, held to its one digest, and nothing is said" % f2,
+             lambda c: c.Content(f2) == bt.Pattern(4) and not c.findings),
+            ("and the kernel of this tree mounts it, not under glass",
+             lambda c: c.kernel["mounts"] is True and c.kernel["glass"] == 0 and c.kernel["fallow"] == 0)]),
+        Case("B28t a block shared, both its owners quitclaimed", Shared(True), checks=[
+            ("the block lies fallow once (M-1)", lambda c: not c.mount.files.get(f2) and Fallow(c) == [[(bt.F, 1)]]),
+            ("and nothing is said", lambda c: not c.findings),
+            ("and the kernel of this tree mounts it, the block fallow once",
+             lambda c: c.kernel["mounts"] is True and c.kernel["glass"] == 0 and c.kernel["fallow"] == 1)]),
     ]
 
 
