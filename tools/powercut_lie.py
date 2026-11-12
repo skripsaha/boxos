@@ -307,14 +307,21 @@ def SeqRuns(text):
 
 def Counted(run, m, last, line):
     """What a Blot medium's line of what settled is lost owes (C17), '' when
-    it is said: its count the seqs it names; every stitch of the record past
-    the census's last, below the largest it holds whole, that the medium does
-    not hold whole named — and none it does; and the largest seq found the
-    largest of a stitch it holds a sector of past that last."""
+    it is said: its count the seqs it names; every stitch past the census's
+    last, below the largest it holds whole, that the medium does not hold
+    whole named — and none it does; and the largest seq found the largest of
+    a stitch it holds a sector of past that last. A stitch is one that
+    settled: the honest medium of the same cut sews it (Honest). An attempt
+    the medium refused, whose seq the next attempt's took over (M-6, §3.2),
+    is in the record and settled nothing — the stitch after it names the one
+    before it — so it is no loss to say."""
     count, largest = LOST_COUNT.search(line), LARGEST.search(line)
     if not count or not largest:
         return "says what settled is lost without its count or the largest seq found: %s" % line[:120]
     seqs, held, of = Held(run, m)
+    honest = Honest(run, m)
+    if honest and "error" not in honest:
+        seqs &= {seq for seq, _lbas in honest["book"].get("sewn", [])}
     whole = {seq for seq, lbas in held.items() if len(lbas) >= of[seq]}
     named, cut = SeqRuns(count.group(2))
     top = max(seq for seq in whole if seq > last)
