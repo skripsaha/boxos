@@ -66,7 +66,7 @@ static int FrameOnlyDeed(FILE* disk, uint32_t role, uint64_t vsector,
 }
 
 /* Each file's size and blocks, and where it goes: from `from`, in a row, the
- * kernel first. The index of the kernel, or -1 when none is tagged; the first
+ * kernel first. The index of the kernel, or -1 when none is given the role; the first
  * block past the last file in *end. 0, or -1 having said why. */
 static int FrameOnlyPlace(FileInfo* files, int file_count, char* argv[], int first,
                           uint64_t from, int* kernel, uint64_t* end) {
@@ -87,9 +87,9 @@ static int FrameOnlyPlace(FileInfo* files, int file_count, char* argv[], int fir
 
         const char* base = strrchr(files[i].filepath, '/');
         if (parse_tags(argv[first + i * 2 + 1], base ? base + 1 : files[i].filepath,
-                       &files[i].tag_ids, &files[i].tag_count) != 0)
+                       &files[i].tag_ids, &files[i].tag_count, &files[i].role) != 0)
             return -1;
-        if (KernelTagged(files[i].tag_ids, files[i].tag_count)) *kernel = i;
+        if (files[i].role == TALLY_FILE_ROLE_KERNEL) *kernel = i;
     }
 
     uint64_t next = from;
@@ -170,7 +170,7 @@ int FrameOnlyMake(const char* disk_path, int file_count, char* argv[], int first
         boot.kernel_blocks = files[kernel].block_count;
         boot.kernel_bytes  = (uint32_t)files[kernel].file_size;
     } else {
-        printf("  WARNING: nothing here is tagged 'kernel' — this volume carries "
+        printf("  WARNING: nothing here is given the role @kernel — this volume carries "
                "no kernel and no loader will boot from it\n");
     }
     VolumePacked packed = PackedStamp(file_count, argv, first,
@@ -241,7 +241,7 @@ typedef struct {
     uint64_t    volume_blocks;
     BindFile*   files;
     int         count;
-    int         kernel;        /* the file wearing `kernel` placed first, or -1 */
+    int         kernel;        /* the file in the kernel's role, placed first, or -1 */
     uint64_t    end;           /* the first block past the files */
     uint64_t*   digests;       /* a block's, from frame.data_block to `end` */
     uint8_t     uuid[16];
@@ -257,7 +257,7 @@ static int V2IdOrder(const void* a, const void* b) {
 }
 
 /* One file's size and tags — rising, as the book writes them (§2.9) — and
- * whether it wears `kernel`. 0, or -1 having said why. */
+ * the role it is kept in. 0, or -1 having said why. */
 static int V2FileOf(BindFile* f, uint64_t fid, const char* path, const char* tags) {
     uint32_t* ids = NULL;
     uint32_t  n   = 0;
@@ -279,8 +279,7 @@ static int V2FileOf(BindFile* f, uint64_t fid, const char* path, const char* tag
     f->fid    = fid;
     f->size   = (uint64_t)size;
     f->blocks = (f->size + TAGFS_BLOCK_SIZE - 1u) / TAGFS_BLOCK_SIZE;
-    if (parse_tags(tags, f->name, &ids, &n) != 0) return -1;
-    f->kernel = KernelTagged(ids, n);
+    if (parse_tags(tags, f->name, &ids, &n, &f->role) != 0) return -1;
     qsort(ids, n, sizeof(uint32_t), V2IdOrder);
     f->tags  = ids;
     f->ntags = n;
@@ -296,7 +295,7 @@ static int V2Place(V2Bind* v, char* argv[], int first) {
     for (int i = 0; i < v->count; i++) {
         if (V2FileOf(&v->files[i], (uint64_t)i + 1u, argv[first + i * 2], argv[first + i * 2 + 1]) != 0)
             return -1;
-        if (v->files[i].kernel) v->kernel = i;
+        if (v->files[i].role == TALLY_FILE_ROLE_KERNEL) v->kernel = i;
     }
     uint64_t next = v->frame.data_block;
     for (int pass = 0; pass < 2; pass++) {
@@ -385,7 +384,7 @@ static int V2FileLeaves(V2Bind* v) {
         uint8_t*        ids  = BindBody(l, 10u * (uint64_t)f->ntags);
         uint8_t*        body = BindBody(l, 80u + strlen(f->name) + 10u * (uint64_t)f->ntags);
         if (!ids || !body) return -1;
-        TallyFileHead h = { .gen = V2_SEQ_TALLY, .flags = TALLY_FILE_ACTIVE, .size = f->size,
+        TallyFileHead h = { .gen = V2_SEQ_TALLY, .flags = TALLY_FILE_ACTIVE | f->role, .size = f->size,
                             .created_ns = ns, .modified_ns = ns, .name = (const uint8_t*)f->name,
                             .name_len = strlen(f->name), .ntags = f->ntags, .tags = ids };
         h.tags_bytes = TallyIdsPut(ids, f->tags, f->ntags);
@@ -507,7 +506,7 @@ static int V2WriteBook(V2Bind* v, char* argv[], int first) {
         boot.kernel_blocks = (uint32_t)v->files[v->kernel].blocks;
         boot.kernel_bytes  = (uint32_t)v->files[v->kernel].size;
     } else {
-        printf("  WARNING: nothing here is tagged 'kernel' — this volume carries "
+        printf("  WARNING: nothing here is given the role @kernel — this volume carries "
                "no kernel and no loader will boot from it\n");
     }
     VolumePacked packed = PackedStamp(v->count, argv, first,

@@ -14,10 +14,10 @@
  * the answer go with the pass.
  *
  * ‼ ANY NAME OF A BLOCK BARS IT AS ITS FILE IS BARRED (§16.7 п.8). A file the
- * system keeps, the kernel the Deed points the loader at, a file the mount
+ * system keeps in a role, the kernel the Deed points the loader at, a file the mount
  * locked: every block one of them names is
  * neither laid nor laid on, whoever else names it too — nothing is laid on a
- * block in common with a file the system keeps, nor on a block of the kernel's
+ * block in common with a file the system keeps in a role, nor on a block of the kernel's
  * BOOT run. A copy is laid from its plain ground alone: a block under a Slip,
  * or of a file whose runs touch BOOT, is laid on nothing (Conjugate refuses
  * both, conjugate.c ConjugateGuards) — and passed over here, before any act.
@@ -56,7 +56,7 @@ error_t DedupOwnersBegin(DedupOwners* w, const DedupMember* m, uint64_t n)
 /* What bars every block the file names, whatever its runs. */
 static uint32_t FileBars(const FileRecord* rec)
 {
-    if (InkWearsGuarded(rec->tags, rec->tag_count) || rec->file_id == g_book.boot_fid ||
+    if (InkFileKept(rec->flags) || rec->file_id == g_book.boot_fid ||
         BookFileLocked(rec->file_id))
         return DEDUP_BAR_ONTO | DEDUP_BAR_COPY;
     return 0;

@@ -93,8 +93,7 @@ error_t PlotLoad(Plot *p, uint64_t fid, InkWarrant warrant)
      * loader reads by its blocks, or a volume whose medium left, to every
      * call: refused here, before a byte of the call moves. A book's file is
      * known for the kernel's by its id (ink.c). */
-    return InkMayChange(fid, p->meta.tag_ids, p->meta.tag_count, p->runs, p->run_count,
-                        warrant);
+    return InkMayChange(fid, p->meta.flags, p->runs, p->run_count, warrant);
 }
 
 int PlotGiveBack(const Plot *p, uint64_t start, uint32_t count)

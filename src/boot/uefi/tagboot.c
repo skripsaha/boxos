@@ -6,11 +6,11 @@
  *   2. Read the medium's partition table for the ground claimed for BoxOS,
  *      and the Deed at the head of it
  *   3. Format v1: take the kernel's place from the Deed's boot stamp; a Deed
- *      without one has the tag registry + metadata pool searched, "god" →
- *      "boot" → "system", each file at its newest record.
+ *      without one has the metadata pool searched for the role of a file's
+ *      record, kernel → boot → system, each file at its newest record.
  *   4. Format v1: allocate pages at 0x100000 and load the kernel binary.
  *      Format v2: the Succession (tagboot_attest.c, tagboot_succession.c) —
- *      the kernel BOOT names, then the kernels the book names by tag, each
+ *      the kernel BOOT names, then the kernels the book names by role, each
  *      placed at 0x100000 and held to the digests the book keeps of its
  *      blocks; the first attested is the one jumped into, one that does not
  *      match never is
@@ -227,13 +227,6 @@ static int MemEqual(const void *a, const void *b, size_t n)
 static int GuidEqual(const EFI_GUID *a, const EFI_GUID *b)
 {
     return MemEqual(a, b, sizeof(EFI_GUID));
-}
-
-static size_t StrLen8(const char *s)
-{
-    size_t n = 0;
-    while (s[n]) n++;
-    return n;
 }
 
 /* StrEqual8: currently unused — kept for future diagnostic use */
@@ -783,11 +776,11 @@ static EFI_STATUS ReadDataBlock(uint32_t block, void *buf)
 }
 
 /* =========================================================================
- * TagFS: tag-based kernel lookup
+ * TagFS: kernel lookup by the role of a file
  *
- * Asked only when the Deed names no kernel (TagBootMain). The registry gives
- * the tags' ids, and the metadata pool is then read the way the kernel's
- * mount reads it (metadata_pool/meta_pool_mount.c, PoolMount):
+ * Asked only when the Deed names no kernel (TagBootMain). The metadata pool is
+ * read the way the kernel's mount reads it (metadata_pool/meta_pool_mount.c,
+ * PoolMount):
  *
  *   - from the chain_first of the seal the newest copy of the Ledger carries,
  *     and no further than its `to` — what lies past it is a cycle that did not
@@ -804,10 +797,11 @@ static EFI_STATUS ReadDataBlock(uint32_t block, void *buf)
  *     before the pool took only appends, and is nobody's.
  *
  * The file taken is read through every extent its newest record names.
- * Priority: "god" → "boot" → "system", and among the files whose newest
- * record carries a tag, the one with the lowest file id — the oldest, which
- * stays the oldest however often any of them is written, where "the first
- * record in the pool" moves every time one is.
+ * Priority: the role its newest record's flags carry, kernel → boot → system,
+ * and among the files of one role the one with the lowest file id — the
+ * oldest, which stays the oldest however often any of them is written, where
+ * "the first record in the pool" moves every time one is. A file's tags are
+ * its user's, and none is read here.
  *
  * No chain is walked further than the data run is long: a chain of distinct
  * blocks inside it cannot be longer, so that many blocks is a circle — the
@@ -815,9 +809,17 @@ static EFI_STATUS ReadDataBlock(uint32_t block, void *buf)
  * stood here, and a volume grown past them hid whatever lay behind them.
  * ========================================================================= */
 
-/* The tags a kernel is looked for by, in the order they are asked. */
-static const char *const g_boot_tags[] = { "god", "boot", "system" };
-#define BOOT_TAG_COUNT ((uint32_t)(sizeof(g_boot_tags) / sizeof(g_boot_tags[0])))
+/* The roles a kernel is looked for by, in the order they are asked, and what
+ * the loader says of each. */
+static const struct {
+    uint32_t    role;
+    const char *name;
+} g_boot_roles[] = {
+    { TALLY_FILE_ROLE_KERNEL, "kernel" },
+    { TALLY_FILE_ROLE_BOOT,   "boot" },
+    { TALLY_FILE_ROLE_SYSTEM, "system" },
+};
+#define BOOT_ROLE_COUNT ((uint32_t)(sizeof(g_boot_roles) / sizeof(g_boot_roles[0])))
 
 /* The most extents one record carries: a record never crosses its block. */
 #define RECORD_EXTENTS_MOST \
@@ -876,81 +878,6 @@ static int ChainMayRead(const char *chain, uint32_t block, uint32_t walked)
     return 1;
 }
 
-/* Read tag registry block chain; return tag_id for (key, NULL) label tag.
- * Returns TAGFS_INVALID_TAG_ID if not found. */
-static uint32_t TagRegistryFindLabel(const char *key)
-{
-    /* The Deed states the registry in blocks of the whole volume; the chain
-     * inside it runs in blocks of the data run, which is what a block number
-     * on disk always means. */
-    uint32_t block_idx = g_layout.tag_registry_block - g_layout.data_block;
-    size_t   key_len    = StrLen8(key);
-
-    static TagBootRegistryBlock reg_blk;
-
-    for (uint32_t walked = 0;; walked++) {
-        if (!ChainMayRead("tag registry", block_idx, walked)) break;
-        if (EFI_ERROR(ReadDataBlock(block_idx, &reg_blk))) {
-            ChainStoppedAt("tag registry", "would not read", block_idx, walked);
-            break;
-        }
-        if (reg_blk.magic != TAGFS_REGISTRY_MAGIC) {
-            ChainStoppedAt("tag registry", "runs into a block that is not one", block_idx,
-                           walked);
-            break;
-        }
-
-        uint32_t used = reg_blk.used_bytes;
-        if (used > TAGFS_REGISTRY_DATA_SIZE) used = TAGFS_REGISTRY_DATA_SIZE;
-
-        uint32_t pos = 0;
-        for (uint16_t i = 0; i < reg_blk.entry_count && pos < used; i++) {
-            if (pos + 6 > used) break;
-
-            uint8_t  *p         = reg_blk.data + pos;
-            uint32_t  tag_id = 0;
-            uint8_t   flags;
-            uint8_t   this_key_len;
-            uint16_t  this_val_len;
-
-            MemCopy(&tag_id,        p + TAG_RECORD_ID_OFF,     2);
-            flags        = p[TAG_RECORD_FLAGS_OFF];
-            this_key_len = p[TAG_RECORD_KEYLEN_OFF];
-            MemCopy(&this_val_len,  p + TAG_RECORD_VALLEN_OFF, 2);
-
-            uint32_t record_size = 6 + this_key_len + this_val_len;
-            if (pos + record_size > used) break;
-
-            /*
-             * A label tag is one with no value. It is NOT "flags == 0":
-             * bit 0 says the tag carries a value, bit 1 says the kernel
-             * considers it one of its own (TAGFS_TAG_FLAG_SYSTEM), and the
-             * kernel stamps that second bit onto the reserved vocabulary the
-             * first time it writes the registry back.
-             *
-             * So a volume straight from mkfs matched here and the same volume
-             * after one boot did not — the tags this loader looks for ("god",
-             * "boot", "system") are exactly the ones that get stamped. The
-             * search quietly stopped working the moment the machine had run
-             * once, and fell through to the boot hints that used to sit in the
-             * superblock. Nothing broke, so nothing said anything.
-             */
-            if ((flags & TAGFS_TAG_FLAG_HAS_VALUE) == 0 && this_val_len == 0 &&
-                this_key_len == (uint8_t)key_len &&
-                MemEqual(p + TAG_RECORD_KEY_OFF, key, key_len)) {
-                return tag_id;
-            }
-
-            pos += record_size;
-        }
-
-        if (reg_blk.next_block == 0) break;
-        block_idx = reg_blk.next_block;
-    }
-
-    return TAGFS_INVALID_TAG_ID;
-}
-
 /* CRC-16/CCITT-FALSE, the sum a metadata record carries (crypto.c,
  * KCrc16Continue), carried on over the pieces it is taken in. */
 static uint16_t Crc16Continue(uint16_t crc, const uint8_t *data, uint32_t len)
@@ -989,37 +916,28 @@ static int PoolRecordWhole(const uint8_t *r, uint32_t room)
            (uint32_t)extents * sizeof(TagBootFileExtent) + name <= len;
 }
 
-/* Which of the boot tags a whole record says its file wears: bit i for
- * ids[i]. None for a Quitclaim, a trashed file, or one naming no block — its
- * newest record says there is nothing there to boot. */
-static uint32_t PoolRecordCarries(const uint8_t *r, const uint32_t ids[BOOT_TAG_COUNT])
+/* The role a whole record puts its file in: TALLY_FILE_ROLE_*, or 0 for a
+ * Quitclaim, a trashed file, or one naming no block — its newest record says
+ * there is nothing there to boot. */
+static uint32_t PoolRecordRole(const uint8_t *r)
 {
     uint32_t flags;
-    uint16_t tags, extents;
+    uint16_t extents;
     MemCopy(&flags,   r + META_RECORD_FLAGS_OFF,    4);
-    MemCopy(&tags,    r + META_RECORD_TAGCOUNT_OFF, 2);
     MemCopy(&extents, r + META_RECORD_EXTCOUNT_OFF, 2);
     if (!(flags & TAGFS_FILE_ACTIVE) || (flags & TAGFS_FILE_TRASHED) || extents == 0)
         return 0;
-
-    uint32_t carries = 0;
-    for (uint16_t t = 0; t < tags; t++) {
-        uint32_t tid = 0;
-        MemCopy(&tid, r + META_RECORD_VARDATA_OFF + (uint32_t)t * 2U, 2);
-        for (uint32_t i = 0; i < BOOT_TAG_COUNT; i++)
-            if (ids[i] != TAGFS_INVALID_TAG_ID && tid == ids[i]) carries |= 1U << i;
-    }
-    return carries;
+    return flags & TALLY_FILE_ROLE_MASK;
 }
 
-/* A file some record of the pool showed wearing a boot tag, and where its
- * NEWEST record is: a block of the data run and a byte of its payload.
- * `carries` is what that newest record says (PoolRecordCarries). */
+/* A file some record of the pool showed kept in a role, and where its NEWEST
+ * record is: a block of the data run and a byte of its payload. `role` is what
+ * that newest record says (PoolRecordRole). */
 typedef struct {
     uint32_t fid;
     uint32_t block;
     uint32_t at;
-    uint32_t carries;
+    uint32_t role;
 } BootCandidate;
 
 /* Kept sorted by file id, in memory asked of the firmware as it grows. */
@@ -1055,7 +973,7 @@ static int BootCandidatesGrow(BootCandidates *set)
         PrintDec((uint64_t)cap * sizeof(BootCandidate));
         Print(" bytes to hold the ");
         PrintDec((uint64_t)set->count + 1);
-        Print(" files the metadata pool shows wearing a boot tag\r\n");
+        Print(" files the metadata pool shows kept in a role\r\n");
         return 0;
     }
     if (set->count) MemCopy(grown, set->slot, (size_t)set->count * sizeof(BootCandidate));
@@ -1066,25 +984,25 @@ static int BootCandidatesGrow(BootCandidates *set)
 }
 
 /* A whole record of `fid`, newer than any of its records seen before it: it is
- * where the file is now. A file no record has shown wearing a boot tag is no
+ * where the file is now. A file no record has shown kept in a role is no
  * candidate, and costs nothing. */
 static int BootCandidateSee(BootCandidates *set, uint32_t fid, uint32_t block,
-                            uint32_t at, uint32_t carries)
+                            uint32_t at, uint32_t role)
 {
     uint32_t i = BootCandidateAt(set, fid);
     if (i < set->count && set->slot[i].fid == fid) {
         set->slot[i].block   = block;
         set->slot[i].at      = at;
-        set->slot[i].carries = carries;
+        set->slot[i].role  = role;
         return 1;
     }
-    if (!carries) return 1;
+    if (!role) return 1;
     if (!BootCandidatesGrow(set)) return 0;
     for (uint32_t j = set->count; j > i; j--) set->slot[j] = set->slot[j - 1];
     set->slot[i].fid     = fid;
     set->slot[i].block   = block;
     set->slot[i].at      = at;
-    set->slot[i].carries = carries;
+    set->slot[i].role  = role;
     set->count++;
     return 1;
 }
@@ -1148,13 +1066,12 @@ static uint32_t LedgerSeals(SettleMark seals[VOLUME_LEDGER_COPIES])
 }
 
 /*
- * One walk of the pool by `span`: every file some record showed wearing a boot
- * tag ends up in `set` at its newest record of the span. 0 when the span
+ * One walk of the pool by `span`: every file some record showed kept in a role
+ * ends up in `set` at its newest record of the span. 0 when the span
  * could not be read to its end — then which record of a file is its newest is
  * not known, and no kernel is taken from it.
  */
-static int PoolWalkForBootFiles(const uint32_t ids[BOOT_TAG_COUNT], const PoolSpan *span,
-                                BootCandidates *set)
+static int PoolWalkForBootFiles(const PoolSpan *span, BootCandidates *set)
 {
     uint32_t block_idx = span->first;
     uint32_t passed    = 0;   /* records of a file that fail their own sum */
@@ -1194,8 +1111,7 @@ static int PoolWalkForBootFiles(const uint32_t ids[BOOT_TAG_COUNT], const PoolSp
             if (fid != 0) {
                 if (!PoolRecordWhole(r, TAGFS_MPOOL_DATA_SIZE - pos))
                     passed++;
-                else if (!BootCandidateSee(set, fid, block_idx, pos,
-                                           PoolRecordCarries(r, ids)))
+                else if (!BootCandidateSee(set, fid, block_idx, pos, PoolRecordRole(r)))
                     return 0;
             }
             pos += record_len;
@@ -1225,19 +1141,19 @@ static int PoolWalkForBootFiles(const uint32_t ids[BOOT_TAG_COUNT], const PoolSp
 /* The walks in the order the kernel's mount would stand on them: the newest
  * seal, the one before it, the whole chain. 1 once one of them was read to its
  * end. */
-static int PoolWalkBySeals(const uint32_t ids[BOOT_TAG_COUNT], BootCandidates *set)
+static int PoolWalkBySeals(BootCandidates *set)
 {
     SettleMark seals[VOLUME_LEDGER_COPIES];
     uint32_t   n = LedgerSeals(seals);
     for (uint32_t i = 0; i < n; i++) {
         PoolSpan span = { 1, seals[i].chain_first, seals[i].pool_to_block,
                           seals[i].pool_to_bytes };
-        if (PoolWalkForBootFiles(ids, &span, set)) return 1;
+        if (PoolWalkForBootFiles(&span, set)) return 1;
         Print("TagBoot: the pool does not bear a seal of the Ledger out — the walk is "
               "made again\r\n");
     }
     PoolSpan whole = { 0, g_layout.metadata_pool_block - g_layout.data_block, 0, 0 };
-    return PoolWalkForBootFiles(ids, &whole, set);
+    return PoolWalkForBootFiles(&whole, set);
 }
 
 /* The record a candidate names, read again and taken apart into the runs of
@@ -1291,37 +1207,22 @@ static int KernelPlaceFromRecord(const BootCandidate *c, KernelPlace *out)
     return 1;
 }
 
-/* Try each tag in priority order; return 1 on success. */
-static int TagFsFindKernelByTags(KernelPlace *out)
+/* Try each role in priority order; return 1 on success. */
+static int TagFsFindKernelByRole(KernelPlace *out)
 {
-    uint32_t ids[BOOT_TAG_COUNT];
-    int      named = 0;
-
-    for (uint32_t i = 0; i < BOOT_TAG_COUNT; i++) {
-        ids[i] = TagRegistryFindLabel(g_boot_tags[i]);
-        if (ids[i] == TAGFS_INVALID_TAG_ID) continue;
-        named = 1;
-        Print("TagBoot: searching for tag '");
-        Print(g_boot_tags[i]);
-        Print("' (id=");
-        PrintDec(ids[i]);
-        Print(")\r\n");
-    }
-    if (!named) return 0;
-
-    BootCandidates set  = { NULL, 0, 0 };
+    BootCandidates set   = { NULL, 0, 0 };
     int            found = 0;
-    if (PoolWalkBySeals(ids, &set)) {
-        for (uint32_t i = 0; i < BOOT_TAG_COUNT && !found; i++) {
+    if (PoolWalkBySeals(&set)) {
+        for (uint32_t i = 0; i < BOOT_ROLE_COUNT && !found; i++) {
             for (uint32_t c = 0; c < set.count && !found; c++) {
-                if (!(set.slot[c].carries & (1U << i))) continue;
+                if (set.slot[c].role != g_boot_roles[i].role) continue;
                 found = KernelPlaceFromRecord(&set.slot[c], out);
                 if (!found) continue;
-                Print("TagBoot: kernel found via tag '");
-                Print(g_boot_tags[i]);
+                Print("TagBoot: kernel found by role '");
+                Print(g_boot_roles[i].name);
                 Print("': file id ");
                 PrintDec(set.slot[c].fid);
-                Print(", the oldest file whose newest record wears it\r\n");
+                Print(", the oldest file whose newest record is kept in it\r\n");
             }
         }
     }
@@ -3042,13 +2943,13 @@ static void CheckEfiLoadAddress(void)
  * reads System V registers RDI/RSI instead → garbage pointers → instant crash.
  */
 /*
- * The kernel of a format-v1 volume: the Deed first, the tag search second.
+ * The kernel of a format-v1 volume: the Deed first, the search by role second.
  *
  * The Deed names one file — the kernel this volume was made with — and its
- * checksum covers that answer. The tag search answers "the oldest file whose
- * newest record carries 'god', 'boot' or 'system'", which is a different
- * question: on this image the shell and the display daemon carry 'system'
- * too. So the exact answer is asked for first, and the search is what happens
+ * checksum covers that answer. The search answers "the oldest file whose
+ * newest record is kept in the role of kernel, else boot, else system", which
+ * is a different question: on this image the shell and the display daemon are
+ * kept in the system's role too. So the exact answer is asked for first, and the search is what happens
  * when a volume's Deed carries no boot stamp — an older volume, or one made by
  * something that did not know to write one. Loaded at KERNEL_LOAD_ADDR: its
  * size in bytes.
@@ -3057,8 +2958,8 @@ static uint64_t KernelByDeedOrTags(void)
 {
     if (TagFsBootStamp(&g_kernel_place)) {
         Print("TagBoot: the deed names the kernel\r\n");
-    } else if (!TagFsFindKernelByTags(&g_kernel_place)) {
-        Panic("kernel not found — this deed names none and no file carries a boot tag");
+    } else if (!TagFsFindKernelByRole(&g_kernel_place)) {
+        Panic("kernel not found — this deed names none and no file is kept in a role of the loader");
     }
 
     Print("TagBoot: kernel at volume block ");
@@ -3177,7 +3078,7 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     /* ----- 3. Find kernel file, 4. load it ----- *
      *
      * A format-v2 volume's kernel is chosen by the Succession: the kernel BOOT
-     * names held to the book first, then the kernels the book names by tag,
+     * names held to the book first, then the kernels the book names by role,
      * each placed at KERNEL_LOAD_ADDR and held to the digests the book keeps of
      * its blocks — one that does not match is never jumped into, and when none
      * may be, the loader stops with every kernel it tried and why

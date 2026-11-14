@@ -24,8 +24,8 @@
  *
  * ‼ DEDUP FOR EVERY FILE BUT THOSE IT MAY NOT TOUCH (§16.7 п.8). No tag of a
  * file's asks it out: its tags are its user's words, never a switch of the
- * kernel's. A file the system keeps — a tag of key system, boot or god — is
- * never laid,
+ * kernel's. A file the system keeps — one its record puts in a role (system, boot
+ * or kernel) — is never laid,
  * warrant or none: a loader and the plate's check read such a file's blocks
  * as they lie. And the kernel the Deed points the loader at is neither laid
  * nor laid on: its blocks are no other file's.
@@ -66,7 +66,7 @@
 typedef enum {
     CONJUGATE_LAID = 0,     /* laid — and, inside the act, nothing refused it yet */
     CONJUGATE_UNWARRANTED,  /* the cabin asking wears neither system nor god */
-    CONJUGATE_KEPT,         /* the duplicate is a file the system keeps, or either is the kernel's */
+    CONJUGATE_KEPT,         /* the duplicate is a file the system keeps in a role, or either is the kernel's */
     CONJUGATE_UNSHAPED,     /* the blocks asked are not the duplicate's plain ground, or not the target's */
     CONJUGATE_UNDIGESTED,   /* a block the book holds no digest for, or one that does not hold it */
     CONJUGATE_DIFFERS,      /* the digests of a pair differ */

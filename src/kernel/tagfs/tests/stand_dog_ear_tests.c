@@ -452,9 +452,9 @@ static TestResult TestStandDogEarReplayed(void)
     TEST_ASSERT(StandFreshWrite(&m, data, 6u * TAGFS_BLOCK_SIZE, 3u * TAGFS_BLOCK_SIZE, 33) == 3 * TAGFS_BLOCK_SIZE &&
                 TagFSSettle() == OK, "the data grown, settled");
     renamed = first + STAND_DOG_EAR_MANY / 2u;
-    TEST_ASSERT(tagfs_rename_file(renamed, "dogear-renamed.txt", INK_UNWARRANTED) == 0 && TagFSSettle() == OK,
+    TEST_ASSERT(tagfs_rename_file(renamed, "dogear-renamed.txt") == 0 && TagFSSettle() == OK,
                 "a file in the middle renamed, settled");
-    TEST_ASSERT(tagfs_tag_intern("dogear:replayed", &tag) == OK && tagfs_add_tag(first, tag, INK_UNWARRANTED) == 0 &&
+    TEST_ASSERT(tagfs_tag_intern("dogear:replayed", &tag) == OK && tagfs_add_tag(first, tag) == 0 &&
                 TagFSSettle() == OK, "a tag coined and given the first file, settled");
     gone = first + STAND_DOG_EAR_MANY - 1u;
     TEST_ASSERT(tagfs_delete_file(gone, INK_UNWARRANTED) == 0 && TagFSSettle() == OK, "the last file given up, settled");
@@ -530,7 +530,7 @@ static TestResult TestStandDogEarStitched(void)
     TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
     TEST_ASSERT_EQ(tagfs_create_file("dogear-stitched.txt", NULL, 0, &fid), 0, "a file is made");
     TEST_ASSERT(TagFSSettle() == OK && BinderRunWhole() == OK, "settled, and a Tally of it written");
-    TEST_ASSERT(tagfs_tag_intern("dogear:stitched", &tag) == OK && tagfs_add_tag(fid, tag, INK_UNWARRANTED) == 0 &&
+    TEST_ASSERT(tagfs_tag_intern("dogear:stitched", &tag) == OK && tagfs_add_tag(fid, tag) == 0 &&
                 TagFSSettle() == OK, "a tag coined and given the file, settled — the volume not mounted between");
     TEST_ASSERT(StandStitchSay("dogear: stitched", 16, 1, &kept) == OK && kept, "a word said, settled");
     TEST_ASSERT(StandDogEarHolds(TALLY_TAGS, (TallyKey){ tag, 0 }) && StandDogEarHolds(TALLY_USE, (TallyKey){ 0, 0 }) &&

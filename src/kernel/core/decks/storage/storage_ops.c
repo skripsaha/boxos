@@ -295,7 +295,7 @@ static int ObjWrite(const ManifestOp *op,
 
 /* -------------------------------------------------------------------------
  * OBJ_DELETE — the file given up (a Quitclaim). A file the system keeps —
- * wearing system, boot or god — is refused ERR_PERMISSION_DENIED to a program
+ * its record puts it in a role (system, boot or kernel) — is refused ERR_PERMISSION_DENIED to a program
  * whose cabin holds no warrant, the kernel the loader reads by its blocks to
  * every program, by the volume's own guard (InkMayChange); and so is every
  * delete once the medium left: the answer is the volume's. A delete whose
@@ -359,8 +359,8 @@ static int ObjSpan(const ManifestOp *op,
 
 /* -------------------------------------------------------------------------
  * OBJ_RENAME — params carry the new name inline. The old name's tag comes
- * off with the old name, so a name whose tag is of key system, boot or god
- * is changed only with the warrant, as an untag of that tag is.
+ * off with the old name, and the new name's goes on: tags like any other,
+ * asking no warrant.
  * ------------------------------------------------------------------------- */
 
 static int ObjRename(const ManifestOp *op,
@@ -384,7 +384,7 @@ static int ObjRename(const ManifestOp *op,
      * take the room a write in flight claimed (RT-19) among them. Room on its
      * way — the name's tag for the registry, a Spare for the tail — is waited
      * for (SettleOpForRoom). */
-    int rc = tagfs_rename_file(file_id, name, StorageCallWarrant(ctx));
+    int rc = tagfs_rename_file(file_id, name);
     if (-rc == ERR_WOULD_BLOCK)
         return SettleOpForRoom(op, crates, crate_count, ctx, file_id);
     return rc == 0 ? OK : -rc;
@@ -868,11 +868,9 @@ static error_t storage_one_tag(const ManifestOp *op, Crate *crates, const OpCont
 }
 
 /* STORAGE_TAG_SET  params:[u64 file_id]  in_crate: "key" or "key:value" —
- * the file wears exactly that tag, or the call is refused. A tag of key
- * system, boot or god goes on any file only for a cabin with the warrant
- * (ERR_PERMISSION_DENIED otherwise): it makes the file one the system keeps,
- * which its owner could no longer change; any other tag goes on any file,
- * one the system keeps among them. Room on its way — a new tag's block of the
+ * the file wears exactly that tag, or the call is refused. Any tag goes on
+ * any file, whatever its key: a file's tags are its user's, and none makes a
+ * file one the system keeps. Room on its way — a new tag's block of the
  * registry, a Spare for the tail — is waited for (SettleOpForRoom). */
 static int ObjTagSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                      const OpContext *ctx)
@@ -883,7 +881,7 @@ static int ObjTagSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     TagSpelling tag;
     error_t     rc = storage_one_tag(op, crates, ctx, &text, &tag);
     if (rc != OK) return rc;
-    rc = tagfs_add_tag_string(param_u64(op, 0), &tag, StorageCallWarrant(ctx));
+    rc = tagfs_add_tag_string(param_u64(op, 0), &tag);
     crate_buf_free(text);
     if (rc == ERR_WOULD_BLOCK)
         return SettleOpForRoom(op, crates, crate_count, ctx, param_u64(op, 0));
@@ -893,8 +891,7 @@ static int ObjTagSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 /* STORAGE_TAG_UNSET  params:[u64 file_id]  in_crate: "key" — every tag of the
  * key — or "key:value" — that tag alone. The answer is the volume's own: a
  * tag the file does not wear (ERR_TAGFS_TAG_NOT_FOUND), a file that is not
- * there, a tag of key system, boot or god and a cabin with no warrant
- * (ERR_PERMISSION_DENIED), a medium that left — never folded into one code a
+ * there, a medium that left — never folded into one code a
  * program cannot tell its own mistake by. */
 static int ObjTagUnset(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
@@ -905,7 +902,7 @@ static int ObjTagUnset(const ManifestOp *op, Crate *crates, uint16_t crate_count
     TagSpelling tag;
     error_t     rc = storage_one_tag(op, crates, ctx, &text, &tag);
     if (rc != OK) return rc;
-    int removed = tagfs_remove_tag_string(param_u64(op, 0), &tag, StorageCallWarrant(ctx));
+    int removed = tagfs_remove_tag_string(param_u64(op, 0), &tag);
     crate_buf_free(text);
     if (-removed == ERR_WOULD_BLOCK)
         return SettleOpForRoom(op, crates, crate_count, ctx, param_u64(op, 0));

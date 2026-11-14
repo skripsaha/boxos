@@ -72,7 +72,7 @@ static bool StandDocketPlainFile(uint64_t* fid)
         for (uint32_t i = 0; i < n; i++) {
             FileRecord* rec   = FileMapRecordHold(fs->files, ids[i], NULL);
             bool        plain = rec && rec->blocks && !InkRecordTouchesBoot(rec) &&
-                                !InkWearsGuarded(rec->tags, rec->tag_count);
+                                !InkFileKept(rec->flags);
             FileRecordRelease(rec);
             if (plain) {
                 *fid = ids[i];
@@ -153,13 +153,13 @@ static TestResult TestStandDocketEachChangeMountsAgain(void)
         return test_steps_aside(aside);
     TEST_ASSERT(TagSpell("docket:x", 8u, &tag) == OK, "a tag is spelled");
     TEST_ASSERT_EQ(tagfs_create_file("docket-a.txt", NULL, 0, &fid), 0, "a file is made on the book");
-    TEST_ASSERT_OK(tagfs_add_tag_string(fid, &tag, INK_UNWARRANTED), "and tagged with a tag new to the volume");
+    TEST_ASSERT_OK(tagfs_add_tag_string(fid, &tag), "and tagged with a tag new to the volume");
     TEST_ASSERT(StandDocketSettledAndBack(), "its cycle settles, and the volume mounts again");
     TEST_ASSERT(StandDocketHolds(fid, "docket-a.txt", &tag, true), "holding the file, its name's tag and the tag");
-    TEST_ASSERT_EQ(tagfs_rename_file(fid, "docket-b.txt", INK_UNWARRANTED), 0, "the file is renamed");
+    TEST_ASSERT_EQ(tagfs_rename_file(fid, "docket-b.txt"), 0, "the file is renamed");
     TEST_ASSERT(StandDocketSettledAndBack() && StandDocketHolds(fid, "docket-b.txt", &tag, true),
                 "and mounted again it holds the new name and its tag, the tag kept");
-    TEST_ASSERT_EQ(tagfs_remove_tag_string(fid, &tag, INK_UNWARRANTED), 0, "the tag is taken off");
+    TEST_ASSERT_EQ(tagfs_remove_tag_string(fid, &tag), 0, "the tag is taken off");
     TEST_ASSERT(StandDocketSettledAndBack() && StandDocketHolds(fid, "docket-b.txt", &tag, false),
                 "and mounted again the file wears it no more");
     TEST_ASSERT_EQ(tagfs_delete_file(fid, INK_UNWARRANTED), 0, "the file is given up");
@@ -191,14 +191,14 @@ static TestResult TestStandDocketMerges(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT_EQ(tagfs_create_file("docket-first.txt", NULL, 0, &kept), 0, "a file is made");
-    TEST_ASSERT_EQ(tagfs_rename_file(kept, "docket-kept.txt", INK_UNWARRANTED), 0, "and renamed before a cycle");
+    TEST_ASSERT_EQ(tagfs_rename_file(kept, "docket-kept.txt"), 0, "and renamed before a cycle");
     TEST_ASSERT_OK(TagFSSettle(), "the cycle settles");
     TEST_ASSERT(StandDocketCarries(RIBBON_BORN) == 1 && StandDocketCarries(RIBBON_LABELED) == 0,
                 "its stitch carries one Born — of the last name — and no Labeled");
     TEST_ASSERT_EQ(tagfs_create_file("docket-gone.txt", NULL, 0, &gone), 0, "a file is made");
     TEST_ASSERT_EQ(tagfs_delete_file(gone, INK_UNWARRANTED), 0, "and given up before a cycle named it");
-    TEST_ASSERT_EQ(tagfs_rename_file(kept, "docket-once.txt", INK_UNWARRANTED), 0, "the settled file is renamed");
-    TEST_ASSERT_EQ(tagfs_rename_file(kept, "docket-last.txt", INK_UNWARRANTED), 0, "and renamed again");
+    TEST_ASSERT_EQ(tagfs_rename_file(kept, "docket-once.txt"), 0, "the settled file is renamed");
+    TEST_ASSERT_EQ(tagfs_rename_file(kept, "docket-last.txt"), 0, "and renamed again");
     TEST_ASSERT_OK(TagFSSettle(), "the cycle settles");
     TEST_ASSERT(StandDocketCarries(RIBBON_BORN) == 0 && StandDocketCarries(RIBBON_QUITCLAIM) == 0,
                 "its stitch carries no record of the file born and given up");
@@ -775,7 +775,7 @@ static bool StandDocketGuardedFile(uint64_t* fid)
     while ((n = FileMapRows(fs->files, from, ids, 16)) > 0) {
         for (uint32_t i = 0; i < n; i++) {
             FileRecord* rec     = FileMapRecordHold(fs->files, ids[i], NULL);
-            bool        guarded = rec && InkWearsGuarded(rec->tags, rec->tag_count);
+            bool        guarded = rec && InkFileKept(rec->flags);
             FileRecordRelease(rec);
             if (guarded) {
                 *fid = ids[i];
@@ -802,12 +802,11 @@ static TestResult TestStandDocketWarrant(void)
                    "it is not given up by a call with no warrant");
     TEST_ASSERT_EQ(tagfs_create_file("warrant.txt", NULL, 0, &fid), 0, "a file is made");
     TEST_ASSERT(TagSpell("system:docket", 13u, &tag) == OK, "a tag of key system is spelled");
-    TEST_ASSERT_EQ(tagfs_add_tag_string(fid, &tag, INK_UNWARRANTED), ERR_PERMISSION_DENIED,
-                   "and is not put on by a call with no warrant");
+    TEST_ASSERT_OK(tagfs_add_tag_string(fid, &tag), "and is put on by any call: a file's tags are its user's");
     TEST_ASSERT(StandDocketSettledAndBack(), "the cycle settles, and the volume mounts again");
     TEST_ASSERT(StandDocketLive(kept), "with the kept file");
     FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
-    TEST_ASSERT(rec && !InkWearsGuarded(rec->tags, rec->tag_count), "and the new one wearing no tag the system keeps");
+    TEST_ASSERT(rec && !InkFileKept(rec->flags), "and the new one kept in no role, whatever it wears");
     FileRecordRelease(rec);
 out:
     STAND_STITCH_PUT_BACK(&s);

@@ -271,7 +271,7 @@ public:
     // and gives its blocks back; longer reads as zeros from the old size on,
     // never another file's bytes. A write grows a file only at its end — one
     // past it lands in the error arm — so this is how a gap is made. Refused
-    // on a "system"/"boot" file (permission_denied), like remove(). The
+    // on a file the system keeps in a role (permission_denied), like remove(). The
     // change is published on every tag of the file.
     box::status span(std::uint64_t n)
     {

@@ -4,8 +4,7 @@
  *
  * Each of these harms the volume past files of its own: sequential and
  * interleave leak blocks on the synchronous path of HEAD, fidhistory spends
- * fifty thousand file ids for good, and systemtag deletes the kernel the
- * volume boots. quilltest is on every volume and wears `system`, so these
+ * fifty thousand file ids for good. quilltest is on every volume and wears `system`, so these
  * are compiled only into a quilltest built with VOLUME_TESTS=on — the key
  * that already means a throwaway image — and in any other build the table in
  * quilltest.c answers each with one FAIL that says so. See quilltest.c for
@@ -40,17 +39,6 @@ static int64_t QuillWriteChunk(file_id_t fid, uint32_t seed, uint64_t off)
 {
     QuillFill(g_chunk, seed, off, QUILL_CHUNK);
     return fwrite(fid, off, g_chunk, QUILL_CHUNK);
-}
-
-static bool QuillWears(file_id_t fid, const char *key)
-{
-    file_info_t info;
-    if (file_info(fid, &info) != 0)
-        return false;
-    for (uint8_t t = 0; t < info.tag_count; t++)
-        if (strcmp(info.tags[t].key, key) == 0)
-            return true;
-    return false;
 }
 
 /* The byte at which a file holding one extent per block is refused: its
@@ -280,83 +268,6 @@ QuillVerdict QuillFidHistory(const char *const *args)
            "before and after; anchored — the next mount says what they cost\n",
            spent, first, last, before);
     return QUILL_PENDING;
-}
-
-/* =========================================================================
- *  systemtag — the tag that guards the kernel, taken off by a program
- * ========================================================================= */
-
-/* LINE run the way the shell runs a program — in a cabin of its own, wearing
- * its own file's tags and none of this one's — and waited for: its exit
- * code in *code, and 0 when the start and the wait were both answered. */
-static int QuillRunProgram(const char *line, int32_t *code)
-{
-    uint32_t gen = 0;
-    int pid = proc_exec_gen(line, NULL, &gen);
-    return pid > 0 ? process_gone((uint32_t)pid, gen, code) : pid;
-}
-
-/* Asked by the shell's own tools — untag, trash, delete — which wear utility
- * and storage and not system. The defect is that ANY program may do this;
- * asked by this program, which wears system, a fix that weighed the asker's
- * authority would hide it. The trash is emptied with `delete trashed`, started
- * by this program and not by the shell: nobody stands at its screen to say
- * yes (box/form.h form_person_here), so it deletes nothing and says so — the
- * volume's own guard on a file the system keeps is the stand's
- * (stand_warrant_tests.c). A kernel still on the volume afterwards is given
- * back what the tools took, out of the trash and wearing its guard, before
- * anything is reported. */
-QuillVerdict QuillSystemTag(const char *const *args)
-{
-    (void)args;
-    file_id_t ids[4];
-    int n = QuillFindEverywhere("kernel.bin", ids, 4);
-    if (n != 1) {
-        printf("[QUILL] systemtag: FAIL — the volume has %d file(s) called kernel.bin; this "
-               "case asks about exactly one\n", n);
-        return QUILL_FAIL;
-    }
-    file_id_t kid = ids[0];
-    if (!QuillWears(kid, "system")) {
-        printf("[QUILL] systemtag: FAIL — kernel.bin (file %lu) does not wear the system tag, "
-               "so there is nothing to take off\n", kid);
-        return QUILL_FAIL;
-    }
-
-    int32_t ucode = -1, tcode = -1, dcode = -1;
-    int  urc = QuillRunProgram("untag kernel.bin system", &ucode);
-    int  trc = QuillRunProgram("trash kernel.bin", &tcode);
-    int  drc = QuillRunProgram("delete trashed", &dcode);
-    file_info_t info;
-    int  irc     = file_info(kid, &info);
-    bool present = irc == 0;
-    bool wears   = present && QuillWears(kid, "system");
-    int  out     = present && QuillWears(kid, "trashed") ? tag_remove(kid, "trashed") : 0;
-    int  back    = present && !wears ? tag_add(kid, "system") : 0;
-    int  arc     = anchor(0);
-    bool ran     = urc == 0 && trc == 0 && drc == 0;
-
-    if (ran && arc == 0 && out == 0 && ucode != 0 && tcode == 0 && dcode != 0 && present &&
-        wears) {
-        printf("[QUILL] systemtag: PASS — kernel.bin (file %lu) kept its system tag against "
-               "untag (exit %d), and its place in the trash against delete trashed, which with "
-               "nobody at its screen to say yes deleted nothing (exit %d), programs that do not "
-               "wear system; it is still on the volume, out of the trash again\n", kid, ucode, dcode);
-        return QUILL_PASS;
-    }
-    if (ran && arc == 0 && ucode == 0) {
-        printf("[QUILL] systemtag: DEFECT — kernel.bin (file %lu) gave up its system tag to "
-               "untag, a program that does not wear system (exit 0) — the guard on the kernel "
-               "this volume boots is gone; %s\n", kid,
-               present ? "it was given back" : "the file is gone from the volume");
-        return QUILL_DEFECT;
-    }
-    printf("[QUILL] systemtag: FAIL — kernel.bin (file %lu): untag answered %d (exit %d), trash "
-           "%d (exit %d), delete %d (exit %d); it is %s the volume%s (out of the trash: %d, "
-           "system put back: %d, anchor %d)\n", kid, urc, ucode, trc, tcode, drc, dcode,
-           present ? "still on" : "gone from",
-           present ? (wears ? " and wears system" : " without system") : "", out, back, arc);
-    return QUILL_FAIL;
 }
 
 #endif /* CONFIG_VOLUME_TESTS */

@@ -30,8 +30,8 @@
  * asked of the mirror itself, the live files walked a few a turn
  * (dedup_owners.c): no map of block to owner is kept.
  *
- * ‼ WHAT IT NEVER TOUCHES (§16.7 п.8). A file the system keeps (system, boot,
- * god), the kernel the Deed points the loader at, a file the mount locked,
+ * ‼ WHAT IT NEVER TOUCHES (§16.7 п.8). A file the system keeps in a role (system,
+ * boot, kernel), the kernel the Deed points the loader at, a file the mount locked,
  * and every block one of them names, are neither
  * laid nor laid on; a copy is laid only from its plain ground (DATA, no Slip
  * over it). Each is passed over before an act is asked: the pass asks nothing

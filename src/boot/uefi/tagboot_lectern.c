@@ -41,12 +41,6 @@ void LineNum(LecternLine *l, uint64_t v)
     l->text[l->at] = '\0';
 }
 
-const char *LecternLabelName(uint32_t i)
-{
-    static const char *const names[LECTERN_LABELS] = { "kernel", "god", "boot", "system" };
-    return names[i];
-}
-
 void LecternSay(const LecternBook *b, const LecternLine *l)
 {
     b->desk->say(b->desk->ctx, l->text);

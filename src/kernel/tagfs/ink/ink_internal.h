@@ -50,7 +50,7 @@ void     InkDataNeedRaiseLocked(uint64_t need);
  * And the guard's answer for a file's change, `boot` whether it touches the
  * kernel's blocks (ink.h). */
 error_t  InkVolumeTakes(void);
-error_t  InkGuardSays(uint64_t fid, bool boot, const uint32_t* tags, uint32_t tag_count, InkWarrant warrant);
+error_t  InkGuardSays(uint64_t fid, bool boot, uint32_t flags, InkWarrant warrant);
 
 /* The record of format v1, built before the lock: memory's copy and the
  * medium's packed bytes (ink_v1.c). */

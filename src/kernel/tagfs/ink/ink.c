@@ -132,18 +132,6 @@ uint64_t InkGenOf(uint64_t fid)
 // The guards (RT-09, RT-13)
 // ----------------------------------------------------------------------------
 
-/* Whether a tag's key is one the system keeps: system, boot, god — by the key,
- * so system:foo is the system's as much as system is. */
-static bool InkTagGuarded(uint32_t tag_id)
-{
-    TagSpelling tag = { 0 };
-    if (tag_id == TAGFS_INVALID_TAG_ID ||
-        !TagRegistrySpelling(InkState()->registry, tag_id, &tag, NULL))
-        return false;
-    return TagSpanIs("system", tag.key, tag.key_len) || TagSpanIs("boot", tag.key, tag.key_len) ||
-           TagSpanIs("god", tag.key, tag.key_len);
-}
-
 /* The kernel's blocks as a record names them — [*first, *end) — or false when
  * the Deed points the loader at none of them. */
 static bool InkBootSpan(uint64_t* first, uint64_t* end)
@@ -179,14 +167,6 @@ bool InkRecordTouchesBoot(const FileRecord* rec)
     StripWalkBegin(rec, &walk);
     while (StripWalkNextGround(&walk, &run))
         if (run.start < end && run.start + run.count > first)
-            return true;
-    return false;
-}
-
-bool InkWearsGuarded(const uint32_t* tags, uint32_t count)
-{
-    for (uint32_t i = 0; i < count; i++)
-        if (InkTagGuarded(tags[i]))
             return true;
     return false;
 }
@@ -253,21 +233,21 @@ void InkBookHeldLetGo(uint64_t held)
 }
 
 /* The guard's answer, `boot` the answer to whether the change touches the
- * kernel's blocks: those are refused to every call; a file the system keeps,
- * to a call with no warrant. */
-error_t InkGuardSays(uint64_t fid, bool boot, const uint32_t* tags, uint32_t tag_count,
-                     InkWarrant warrant)
+ * kernel's blocks: those are refused to every call; a file the system keeps
+ * in a role (its record's flags, never its tags), to a call with no warrant. */
+error_t InkGuardSays(uint64_t fid, bool boot, uint32_t flags, InkWarrant warrant)
 {
     error_t rc = InkVolumeTakes();
     if (rc != OK)
         return rc;
-    if (boot || (warrant != INK_WARRANTED && InkWearsGuarded(tags, tag_count))) {
+    if (boot || (warrant != INK_WARRANTED && InkFileKept(flags))) {
         if (boot)
             kprintf("[TagFS] file %llu holds the kernel the Deed points the loader at — it is "
                     "changed by no call, warrant or none\n", fid);
         else
-            kprintf("[TagFS] file %llu wears system, boot or god, and the call that would change "
-                    "it carries no warrant — it is not changed\n", fid);
+            kprintf("[TagFS] file %llu is the system's — a system, boot or kernel file in its "
+                    "record — and the call that would change it carries no warrant — it is not "
+                    "changed\n", fid);
         return ERR_PERMISSION_DENIED;
     }
     return OK;
@@ -278,22 +258,21 @@ error_t InkGuardSays(uint64_t fid, bool boot, const uint32_t* tags, uint32_t tag
  * of its file's runs, not all of them: the file the loader reads the kernel by
  * is known by its id, named when the mount laid every file's ground
  * (book_ground.c, BookFilesLaid). */
-static error_t InkGuard(uint64_t fid, const uint32_t* tags, uint32_t tag_count,
-                        const Strip* runs, uint32_t run_count,
+static error_t InkGuard(uint64_t fid, uint32_t flags, const Strip* runs, uint32_t run_count,
                         const Strip* freed, uint32_t freed_count, InkWarrant warrant)
 {
     bool boot = (InkState()->format == DEED_FORMAT_V2 && fid == g_book.boot_fid) ||
                 InkTouchesBoot(runs, run_count) || InkTouchesBoot(freed, freed_count);
-    return InkGuardSays(fid, boot, tags, tag_count, warrant);
+    return InkGuardSays(fid, boot, flags, warrant);
 }
 
-error_t InkMayChange(uint64_t fid, const uint32_t* tags, uint32_t tag_count,
-                     const Strip* runs, uint32_t run_count, InkWarrant warrant)
+error_t InkMayChange(uint64_t fid, uint32_t flags, const Strip* runs, uint32_t run_count,
+                     InkWarrant warrant)
 {
     error_t rc = InkVolumeBegins();
     if (rc != OK)
         return rc;
-    return InkGuard(fid, tags, tag_count, runs, run_count, NULL, 0, warrant);
+    return InkGuard(fid, flags, runs, run_count, NULL, 0, warrant);
 }
 
 // ----------------------------------------------------------------------------
@@ -319,13 +298,13 @@ static bool InkPlotLazy(const Plot* p, const FileRecord* cur, uint64_t now_us, b
            now_us - cur->small_append_us < (p->book ? SETTLE_WINDOW_US : SettleLullUs());
 }
 
-/* The tags the Plot was loaded with are the ones asked, with the warrant it
- * was loaded with: a file that came to wear a guarded tag after the load had
+/* The flags the Plot was loaded with are the ones asked, with the warrant it
+ * was loaded with: a file that came to be kept in a role after the load had
  * its bytes laid already, and refusing the record now would take back its
  * size, not its bytes. */
 error_t TagFSInkPlot(Plot* p, InkSpares spares, InkReceipt* out)
 {
-    error_t rc = InkGuard(p->fid, p->meta.tag_ids, p->meta.tag_count, p->runs, p->run_count,
+    error_t rc = InkGuard(p->fid, p->meta.flags, p->runs, p->run_count,
                           p->freed, p->freed_count, p->warrant);
     if (rc != OK)
         return rc;
@@ -440,9 +419,13 @@ static bool InkFieldsTags(const FileRecord* cur, const char* name, uint32_t add,
     return true;
 }
 
-/* One round of InkFields: OK, a final refusal, or INK_AGAIN / ERR_WOULD_BLOCK. */
+/* The role InkFieldsOnce leaves a record in when it is asked for none. */
+#define INK_ROLE_AS_IS UINT32_MAX
+
+/* One round of InkFields: OK, a final refusal, or INK_AGAIN / ERR_WOULD_BLOCK.
+ * `role` is the one the record is to be kept in, or INK_ROLE_AS_IS. */
 static error_t InkFieldsOnce(uint64_t fid, const char* name, uint32_t add, uint32_t drop,
-                             InkWarrant warrant, InkReceipt* out)
+                             uint32_t role, InkReceipt* out)
 {
     TagFSState* fs = InkState();
     RecordWhere was;
@@ -460,9 +443,10 @@ static error_t InkFieldsOnce(uint64_t fid, const char* name, uint32_t add, uint3
         FileRecordRelease(cur);
         return ERR_NO_MEMORY;
     }
+    uint32_t flags = role == INK_ROLE_AS_IS ? cur->flags : (cur->flags & ~TAGFS_FILE_ROLE_MASK) | role;
     TagFSMetadata meta = {
         .file_id       = fid,
-        .flags         = cur->flags,
+        .flags         = flags,
         .size          = cur->size,
         .created_time  = cur->created_time,
         .modified_time = cur->modified_time,
@@ -470,18 +454,13 @@ static error_t InkFieldsOnce(uint64_t fid, const char* name, uint32_t add, uint3
         .tag_ids       = f.tags,
         .tag_count     = f.count,
     };
-    for (uint32_t i = 0; i < f.drops && i < 2 && rc == OK; i++)
-        if (warrant != INK_WARRANTED && InkTagGuarded(f.dropped[i]))
-            rc = ERR_PERMISSION_DENIED;
-    if (rc == OK && f.adds && warrant != INK_WARRANTED && InkTagGuarded(add))
-        rc = ERR_PERMISSION_DENIED;
-    if (rc == OK && !name && !f.adds && f.drops == 0) {
+    if (rc == OK && !name && !f.adds && f.drops == 0 && flags == cur->flags) {
         rc      = drop != TAGFS_INVALID_TAG_ID ? ERR_TAGFS_TAG_NOT_FOUND : OK;
         out->gen = was.gen;
         goto out;
     }
     if (rc == OK && fs->format == DEED_FORMAT_V2) {
-        rc = InkBookFields(fid, cur, &was, &f, meta.filename, add, cur->flags, out);
+        rc = InkBookFields(fid, cur, &was, &f, meta.filename, add, flags, out);
         goto out;
     }
     /* The room format v1 judges first, on the extents the record names, as it
@@ -495,7 +474,7 @@ static error_t InkFieldsOnce(uint64_t fid, const char* name, uint32_t add, uint3
         meta.extent_count = nruns;
         rc = InkRecordMake(&meta, &r);
     }
-    if (rc == OK && !(r.rec = FileRecordRelabel(cur, meta.filename, f.tags, f.count, cur->flags)))
+    if (rc == OK && !(r.rec = FileRecordRelabel(cur, meta.filename, f.tags, f.count, flags)))
         rc = ERR_NO_MEMORY;
 #if CONFIG_STRICT || defined(CONFIG_VOLUME_TESTS)
     if (rc == OK)
@@ -513,10 +492,7 @@ static error_t InkFieldsOnce(uint64_t fid, const char* name, uint32_t add, uint3
         }
     }
 out:
-    if (rc == ERR_PERMISSION_DENIED)
-        kprintf("[TagFS] file %llu: a tag of key system, boot or god goes on it or comes off it "
-                "only with the warrant, and this call carries none\n", fid);
-    else if (rc == ERR_TAGFS_RECORD_FULL)
+    if (rc == ERR_TAGFS_RECORD_FULL)
         kprintf("[TagFS] file %llu: its record has no room for this name or tag beside the extents "
                 "it names and those a write in flight will name — refused\n", fid);
     TagBitmapStakeLetGo(stake);
@@ -527,27 +503,25 @@ out:
     return rc;
 }
 
-error_t InkFieldsLaid(uint64_t fid, const char* name, uint32_t add, uint32_t drop, InkWarrant warrant,
-                      InkReceipt* out)
+error_t InkFields(uint64_t fid, const char* name, uint32_t add, uint32_t drop, InkReceipt* out)
 {
     error_t rc;
     do {
-        rc = InkFieldsOnce(fid, name, add, drop, warrant, out);
+        rc = InkFieldsOnce(fid, name, add, drop, INK_ROLE_AS_IS, out);
     } while (rc != OK && InkGoesRound(&rc, INK_MAKES_SPARES));
     return rc;
 }
 
-/* A file the loader reads by its blocks keeps no tail in Slips (§9.1): on a
- * book, a tag of key system, boot or god goes on with the tail laid in its
- * block first, under the file's Helm. Unwarranted, the change is refused as
- * it always was, and lays nothing. */
-error_t InkFields(uint64_t fid, const char* name, uint32_t add, uint32_t drop, InkWarrant warrant,
-                  InkReceipt* out)
+#ifdef CONFIG_VOLUME_TESTS
+error_t InkRoleLaid(uint64_t fid, uint32_t role, InkReceipt* out)
 {
-    if (InkState()->format == DEED_FORMAT_V2 && warrant == INK_WARRANTED && InkTagGuarded(add))
-        return EngrossGuarded(fid, name, add, drop, out);
-    return InkFieldsLaid(fid, name, add, drop, warrant, out);
+    error_t rc;
+    do {
+        rc = InkFieldsOnce(fid, NULL, TAGFS_INVALID_TAG_ID, TAGFS_INVALID_TAG_ID, role, out);
+    } while (rc != OK && InkGoesRound(&rc, INK_MAKES_SPARES));
+    return rc;
 }
+#endif
 
 static error_t InkUndoneOnce(uint64_t fid, InkReceipt* out)
 {
@@ -666,7 +640,7 @@ static error_t InkQuitclaimOnce(uint64_t fid, InkWarrant warrant, InkReceipt* ou
     InkRecord   r      = { 0 };
     error_t     rc     = InkVolumeBegins();
     if (rc == OK)
-        rc = InkGuardSays(fid, InkRecordTouchesBoot(cur), cur->tags, cur->tag_count, warrant);
+        rc = InkGuardSays(fid, InkRecordTouchesBoot(cur), cur->flags, warrant);
     if (rc == OK)
         rc = FallowNodeOfRecord(cur, FALLOW_BY_RECORD, &fallow);
     if (rc == OK && fs->format == DEED_FORMAT_V2) {

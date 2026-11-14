@@ -92,9 +92,8 @@ error_t  PlotWindowTail(Plot *p, uint64_t k, uint32_t tail);
  * The Slip of a write (plot_slip.c, spec_v2 §3.7, §16.5 п.13-15):
  *   PlotSlipBegin   the choice, at PlotWindowBegin: a write that lies wholly in
  *                   the file's last block as it leaves it, leaves that block
- *                   short of full, keeps the Slips one span, of a file that
- *                   wears no system, boot or god and is not the loader's
- *                   kernel, while no Tally is owed, with a block promised
+ *                   short of full, keeps the Slips one span, of a file
+ *                   kept in no role and not the loader's kernel, while no Tally is owed, with a block promised
  *                   to its tail (AllotmentPromise) — rides a Slip: no ground
  *                   taken, a hole put in for a new last block, *chosen; any
  *                   other lays blocks, and the heap that refuses the Slip its

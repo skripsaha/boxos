@@ -25,7 +25,7 @@
  * And where it may not: a write that would leave the Slips two spans (the
  * change a stitch lays is one span of bytes memory holds, never a gap over a
  * DATA block it would have to read); a file the loader reads by its blocks —
- * one wearing system, boot or god, or the kernel the Deed points it at (§9.1)
+ * one kept in a role by its record, or the kernel the Deed points it at (§9.1)
  * — whose tail must be in its block; and while a Tally is owed, which takes
  * no slice while a Slip lies (§16.5 п.14): the writer lays its block, the
  * Slips under it folded in, and so lays its own tail in a block (Engross by
@@ -56,7 +56,7 @@
  * that began in a block before it, which does not lie in the last alone. */
 static bool PlotSlipBarred(const Plot *p)
 {
-    return !p->rec || p->part || p->fid == g_book.boot_fid || InkWearsGuarded(p->meta.tag_ids, p->meta.tag_count) ||
+    return !p->rec || p->part || p->fid == g_book.boot_fid || InkFileKept(p->meta.flags) ||
            BinderEngrossOwed();
 }
 

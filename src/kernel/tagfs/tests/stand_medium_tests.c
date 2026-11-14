@@ -231,7 +231,7 @@ static TestResult StandBookOpen(StandBook* b, const char* name)
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0xB0u);
     TEST_ASSERT(StandMakeFile(name, g_test_buffer, TAGFS_BLOCK_SIZE, &b->file_id),
                 "a file is made and written");
-    TEST_ASSERT_OK(tagfs_add_tag_string(b->file_id, StandBookTag(), INK_UNWARRANTED),
+    TEST_ASSERT_OK(tagfs_add_tag_string(b->file_id, StandBookTag()),
                    "it wears stand_book");
     b->tag = TagRegistryLookup(tagfs_get_state()->registry, StandBookTag());
     TEST_ASSERT_OK(TagFSSettle(), "and a cycle settles it, every write it saw kept");
@@ -249,7 +249,7 @@ static TestResult StandBookOpen(StandBook* b, const char* name)
         HelmLetGo(b->waiting->ofe, &s_waiting.waiter);
     TEST_ASSERT(!mine, "and the waiter is queued");
 
-    TEST_ASSERT_EQ(tagfs_remove_tag(b->file_id, b->tag, INK_UNWARRANTED), 0,
+    TEST_ASSERT_EQ(tagfs_remove_tag(b->file_id, b->tag), 0,
                    "stand_book comes off — a change that writes nothing");
     b->gen       = InkedGen();
     b->unsettled = InkedGen() - SettledGen();
@@ -271,7 +271,7 @@ static TestResult StandBookLeaves(StandBook* b)
 
     TagFSStandMediumLeaves();
     TEST_ASSERT(TagFSMediumLeft(), "the medium is said to have left");
-    TEST_ASSERT_EQ(InkFields(b->file_id, NULL, b->tag, TAGFS_INVALID_TAG_ID, INK_UNWARRANTED, &receipt),
+    TEST_ASSERT_EQ(InkFields(b->file_id, NULL, b->tag, TAGFS_INVALID_TAG_ID, &receipt),
                    ERR_DEVICE_NOT_READY, "a new Ink is refused ERR_DEVICE_NOT_READY");
     HelmLetGo(b->holder->ofe, &s_holder);
     b->holding = false;

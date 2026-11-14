@@ -174,8 +174,8 @@ static process_t *autostart_consider(uint64_t file_id, bool again)
     }
 
     /* The file's keys, whole: a process started from it wears every one
-     * (TagFSKeyList), never the ones that fitted a buffer. */
-    char *tags = TagFSKeyList(meta.tag_ids, meta.tag_count);
+     * (TagFSProgramKeys), never the ones that fitted a buffer. */
+    char *tags = TagFSProgramKeys(meta.tag_ids, meta.tag_count, meta.flags);
     if (!tags) {
         kprintf("[AUTOSTART] Skip '%s': no memory for its tags\n", meta.filename);
         tagfs_metadata_free(&meta);

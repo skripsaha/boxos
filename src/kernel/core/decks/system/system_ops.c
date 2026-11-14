@@ -1341,7 +1341,7 @@ static bool tag_list_holds(const char *list, const TagSpelling *tag)
     }
 }
 
-/* The child's tags: the file's keys (TagFSKeyList) with the caller's augment —
+/* The child's tags: the file's keys (TagFSProgramKeys) with the caller's augment —
  * the `aug_len` bytes at `augment`, a comma list — folded in. Per tag: one
  * whose KEY is reserved is refused (ERR_ACCESS_DENIED: no escalation), one
  * that does not spell is refused with the spelling's code, one already there
@@ -1474,7 +1474,7 @@ static bool SysExecCandidate(uint64_t file_id, char **out_tags)
         if (strcmp(key, "app") == 0 || strcmp(key, "utility") == 0) has_exec_tag = true;
     }
     if (has_exec_tag)
-        *out_tags = TagFSKeyList(meta.tag_ids, meta.tag_count);
+        *out_tags = TagFSProgramKeys(meta.tag_ids, meta.tag_count, meta.flags);
     tagfs_metadata_free(&meta);
     return has_exec_tag;
 }

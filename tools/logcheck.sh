@@ -9952,7 +9952,7 @@ STAND_HELD_EOF
 #           extents; a book's runs of ground, past the run a cycle its
 #           record keeps on each)
 #   boot 2  usememory's second half, when the first said PENDING; fidhistory
-#   boot 3  systemtag; then the host lists the volume again: is kernel.bin on it
+#   boot 3  nothing run: the mount fidhistory's cost is read from
 #
 # on a throwaway image given a gigabyte more ground, so that once the steps
 # land no case is refused for want of space — built VOLUME_TESTS=on, the one
@@ -10062,11 +10062,11 @@ quill_run() {
     wait_for_quiet 3
 }
 
-# quill_session TAG — the three boots, their logs and the two listings, on a
+# quill_session TAG — the three boots, their logs and the listing, on a
 # tree built VOLUME_TESTS=on (the caller puts the plain one back).
 quill_session() {
     local tag=$1 grown c
-    rm -f "$SCRATCH/serial.quill.$tag"[123].log "$SCRATCH/quill.$tag.list"[13]
+    rm -f "$SCRATCH/serial.quill.$tag"[123].log "$SCRATCH/quill.$tag.list1"
     quill_keys || return 1
     rm -f build/boxos.img
     if ! build_with_key VOLUME_TESTS=on "$(strict_key ${QUILL_KEYS[@]+"${QUILL_KEYS[@]}"})"; then
@@ -10098,14 +10098,12 @@ quill_session() {
     quill_keep "${tag}2"
 
     quill_boot "${tag}3" || return 1
-    quill_run systemtag
     quill_keep "${tag}3"
-    python3 tools/volume-read.py build/boxos.img list >"$SCRATCH/quill.$tag.list3" 2>&1
     return 0
 }
 
 # quill_judge TAG BIG SEQ WEAVE USE_BYTES USE_TAGS FIDS — what the three logs
-# and the two listings show, one line per finding into $SCRATCH/quill.TAG.verdict:
+# and the listing show, one line per finding into $SCRATCH/quill.TAG.verdict:
 #   check<TAB>ok|bad<TAB>sentence            the stand itself
 #   selftest<TAB>passed|failed|missing<TAB>line
 #   case<TAB>NAME<TAB>defect|behaves|fail<TAB>what
@@ -10129,7 +10127,7 @@ def text(path):
         return ""
 
 logs = [text("%s/serial.quill.%s%d.log" % (scratch, tag, i)) for i in (1, 2, 3)]
-lists = [text("%s/quill.%s.list%d" % (scratch, tag, i)) for i in (1, 3)]
+lists = [text("%s/quill.%s.list1" % (scratch, tag))]
 
 def out(*fields):
     print("\t".join(str(f) for f in fields))
@@ -10365,28 +10363,9 @@ def fidhistory():
         return "behaves", what
     return "fail", what + " — neither HEAD's arrays sized by every id nor an index of the living"
 
-def systemtag():
-    word, rest = verdict(logs[2], "systemtag")
-    listed = len(re.findall(r"^ +\S+ +\d+ bytes +\d+ (?:extent|run)\(s\)", lists[1], re.M))
-    present = host(lists[1], "kernel.bin") is not None
-    m = re.match(r"kernel\.bin \(file (\d+)\) gave up its system tag to untag, a program that does not wear "
-                 r"system \(exit 0\)", rest)
-    if word == "DEFECT" and m and listed:
-        return "defect", "kernel.bin (file %s) gave up its system tag to untag, a program that does not wear " \
-                         "system; the host lists %d files, kernel.bin %s" \
-                         % (m.group(1), listed, "among them" if present else "not among them")
-    p = re.match(r"kernel\.bin \(file (\d+)\) kept its system tag against untag \(exit (\d+)\), and its place "
-                 r"in the trash against delete trashed, which with nobody at its screen to say yes deleted "
-                 r"nothing \(exit (\d+)\), programs that do not wear system", rest)
-    if word == "PASS" and p and present and p.group(2) != "0" and p.group(3) != "0":
-        return "behaves", "kernel.bin (file %s) refused untag (exit %s) and stayed through delete trashed, which " \
-                          "with nobody to say yes deleted nothing (exit %s), and the host still lists it" % p.groups()
-    return "fail", "%s; the host lists %d files, kernel.bin %s" % (said(logs[2], "systemtag"), listed,
-                                                                 "among them" if present else "not among them")
-
 for name, judge in (("longquery", longquery), ("bigwrite", bigwrite), ("sequential", sequential),
                     ("interleave", interleave), ("coldread", coldread), ("coldwrite", coldwrite),
-                    ("usememory", usememory), ("fidhistory", fidhistory), ("systemtag", systemtag)):
+                    ("usememory", usememory), ("fidhistory", fidhistory)):
     seen, what = judge()
     out("case", name, seen, what)
 QUILL_EOF
@@ -10398,7 +10377,7 @@ QUILL_EOF
 # The path a case's writes took: the boot it ran on, and its cores.
 quill_path() {
     local boot=1
-    case "$2" in fidhistory) boot=2 ;; systemtag) boot=3 ;; esac
+    case "$2" in fidhistory) boot=2 ;; esac
     stand_path "$SCRATCH/serial.quill.$1$boot.log" "$(quill_cores)"
 }
 
@@ -10438,11 +10417,9 @@ run_quill() {
 #
 # longquery's fix is the tree's own since step 1.1b, and bigwrite, sequential
 # and interleave are the tree's own since step 1.3 — each must behave with
-# nothing put in. Two fixes that used to be emulated here are the tree's own
-# as well, and so they are taken OUT, and their oracle must see the defect
-# come back: the Ink guard (step 1.4, ink.c) — down, untag takes the system
-# tag off kernel.bin (systemtag); the Use Context's
-# chain (step 1.6B, use_memory.c) — never staked, a context of 1000 bytes is
+# nothing put in. One fix that used to be emulated here is the tree's own
+# as well, and so it is taken OUT, and its oracle must see the defect come
+# back: the Use Context's chain (step 1.6B, use_memory.c) — never staked, a context of 1000 bytes is
 # carried by nothing and the volume does not remember it (usememory). A book
 # carries the word in its stitch, not on a chain, so its stitch takes it out
 # too (sewing.c StitchBuild): a word with bytes finds no room on the ribbon,
@@ -10457,18 +10434,11 @@ run_quill() {
 # without the other. And first, with no machine at all, caveat_judge's three
 # answers in their approved words.
 quill_mutants_on() {
-    mutate src/kernel/tagfs/ink/ink.c
     mutate src/kernel/tagfs/use_memory/use_memory.c
     mutate src/kernel/tagfs/settle/sewing.c
     mutate src/userspace/apps/quilltest_throwaway.c
     python3 - <<'EOF2'
 for p, a, b in (
-    ("src/kernel/tagfs/ink/ink.c",
-     "        if (warrant != INK_WARRANTED && InkTagGuarded(f.dropped[i]))\n",
-     "        if (0 && warrant != INK_WARRANTED && InkTagGuarded(f.dropped[i]))   /* logcheck mutation: the guard is down, a guarded tag comes off */\n"),
-    ("src/kernel/tagfs/ink/ink.c",
-     "    if (boot || (warrant != INK_WARRANTED && InkWearsGuarded(tags, tag_count))) {\n",
-     "    if (0 && (boot || (warrant != INK_WARRANTED && InkWearsGuarded(tags, tag_count)))) {   /* logcheck mutation: the guard is down, the kernel's file changes */\n"),
     ("src/kernel/tagfs/use_memory/use_memory.c",
      "    error_t rc   = UseChainStake(s_cycle.need, &s_cycle.chain, &s_cycle.got);\n",
      "    error_t rc   = ERR_TAGFS_NO_SPACE;   /* logcheck mutation: no chain is staked, a Use Context rides on nothing */\n"),
@@ -10482,7 +10452,6 @@ for p, a, b in (
     assert s.count(a) == 1, "quillmut anchor missing in %s: %s" % (p, a.strip().splitlines()[0])
     open(p, "w").write(s.replace(a, b, 1))
 EOF2
-    mut_done src/kernel/tagfs/ink/ink.c "logcheck mutation" 2
     mut_done src/kernel/tagfs/use_memory/use_memory.c "logcheck mutation" 1
     mut_done src/kernel/tagfs/settle/sewing.c "logcheck mutation" 1
     mut_done src/userspace/apps/quilltest_throwaway.c "logcheck mutation" 1
@@ -10587,7 +10556,6 @@ run_quillmut() {
                           fidhistory)            want="fail:[0-9]+ files were live before and [0-9]+ after" ;;
                           coldread)              want="fail:a read of [0-9]+ bytes into memory this program never touched answered -[0-9]+ \(error [0-9]+\); 0 of the bytes" ;;
                           coldwrite)             want="fail:a write of [0-9]+ bytes out of memory this program never touched answered -[0-9]+ \(error [0-9]+\); the file holds 0 bytes" ;;
-                          systemtag)             want="defect:kernel\.bin \(file [0-9]+\) gave up its system tag to untag, a program that does not wear system" ;;
                           usememory)             want="defect:a Use Context of 1000 bytes in 91 tags was set and the volume did not remember it" ;;
                           *)                     want="behaves:" ;;
                       esac

@@ -37,8 +37,11 @@ static int Usage(const char* self)
     fprintf(stderr, "Makes a BoxOS volume on the run of this image claimed for\n");
     fprintf(stderr, "BoxOS by its partition table (MBR type 0x7F, or the BoxOS\n");
     fprintf(stderr, "type GUID in a GPT), in the format named — always named.\n");
-    fprintf(stderr, "Nothing outside that run is touched. The file whose name\n");
-    fprintf(stderr, "stems to 'kernel' is the one the Deed points a loader at.\n");
+    fprintf(stderr, "Nothing outside that run is touched. A file's tags are its\n");
+    fprintf(stderr, "user's words; what the system keeps a file as is its role,\n");
+    fprintf(stderr, "named first in the tag string: \"@system\", \"@boot\" or\n");
+    fprintf(stderr, "\"@kernel\" (\"@system utility,fun\"). The file in the role\n");
+    fprintf(stderr, "@kernel is the one the Deed points a loader at.\n");
     return 1;
 }
 

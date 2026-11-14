@@ -105,7 +105,7 @@ static int V1PackPlace(V1Pack* p, char* argv[], int first) {
         if (fi->block_count == 0) fi->block_count = 1;
         fi->start_block = p->next_block;
 
-        if (parse_tags(tags_str, fi->filename, &fi->tag_ids, &fi->tag_count) != 0) return -1;
+        if (parse_tags(tags_str, fi->filename, &fi->tag_ids, &fi->tag_count, &fi->role) != 0) return -1;
         /* Judged here, before the volume's first write: a record that no pool
          * block holds was refused only once the registry and the data were
          * already on the medium. */
@@ -117,7 +117,7 @@ static int V1PackPlace(V1Pack* p, char* argv[], int first) {
             return -1;
         }
 
-        if (KernelTagged(fi->tag_ids, fi->tag_count)) p->kernel_file_index = i;
+        if (fi->role == TALLY_FILE_ROLE_KERNEL) p->kernel_file_index = i;
 
         if (p->next_block + fi->block_count > p->total_blocks) {
             fprintf(stderr, "Not enough blocks: need %u more, only %u total\n",
@@ -462,7 +462,7 @@ static int V1PackDeed(V1Pack* p, char* argv[], int first) {
         printf("  Boot:          kernel at volume block %u (%u blocks, %u bytes)\n",
                boot.kernel_block, boot.kernel_blocks, boot.kernel_bytes);
     } else {
-        printf("  WARNING: nothing here is tagged 'kernel' — this volume carries "
+        printf("  WARNING: nothing here is given the role @kernel — this volume carries "
                "no kernel and no loader will boot from it\n");
     }
 

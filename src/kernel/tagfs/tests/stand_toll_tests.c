@@ -81,7 +81,7 @@ static TestResult TestStandTollBothWays(void)
     TEST_ASSERT(StandStitchRemount() && StandFreshHolds(&m, fid), "mounted again, the file holds them");
     MountBookStandSaid(&said);
     TEST_ASSERT_EQ(said.checked, 2, "the mount read both back and held them to their digests");
-    TEST_ASSERT_EQ(tagfs_rename_file(fid, "toll-named.bin", INK_UNWARRANTED), 0, "the file is renamed");
+    TEST_ASSERT_EQ(tagfs_rename_file(fid, "toll-named.bin"), 0, "the file is renamed");
     TEST_ASSERT_EQ(StandTollFlushes(s.seat, &rc), 1, "a stitch naming no fresh data pays the one flush");
     TEST_ASSERT(rc == OK && StandFreshLastStitch(&flags, &fresh) && (flags & STITCH_DATA_FLUSHED) && fresh == 0,
                 "and says DATA_FLUSHED: there is nothing to check");

@@ -104,7 +104,7 @@ int file_rename(file_id_t file_id, const char* new_filename);
  * flags STORAGE_SPAN_GROW (box/types.h): grown to `size` only if it is
  * shorter, never cut — the way to make room for a write past the end without
  * cutting back what another writer added meanwhile; 0 for exactly `size`.
- * Refused on "system"/"boot" files (-ERR_PERMISSION_DENIED), like delete; a
+ * Refused on a file the system keeps in a role (-ERR_PERMISSION_DENIED), like delete; a
  * growth past every block the volume could give, -ERR_TAGFS_NO_SPACE.
  * Returns 0 or a negative -error_t.
  *

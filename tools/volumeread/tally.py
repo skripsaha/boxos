@@ -891,7 +891,10 @@ def TallyCheck(defines):
                   (SPINE_COUNTS, "SPINE_COUNTS"), (SPINE_FLAGS, "SPINE_FLAGS"),
                   (SPINE_MEDIUM_LIED, "SPINE_MEDIUM_LIED"), (NODE_HEAD, "NODE_HEAD"), (RUN_HOLE, "RUN_HOLE"),
                   (RUN_EXT, "RUN_EXT"), (TAG_HAS_VALUE, "TALLY_TAG_HAS_VALUE"), (TAG_RETIRED, "TALLY_TAG_RETIRED"),
-                  (ondisk.FILE_ACTIVE, "TALLY_FILE_ACTIVE"), (SHEET_PAYLOAD, "TALLY_SHEET_PAYLOAD")):
+                  (ondisk.FILE_ACTIVE, "TALLY_FILE_ACTIVE"),
+                  (ondisk.FILE_UNDONE, "TALLY_FILE_UNDONE"), (ondisk.FILE_ROLE_MASK, "TALLY_FILE_ROLE_MASK"),
+                  (ondisk.FILE_ROLE_SYSTEM, "TALLY_FILE_ROLE_SYSTEM"), (ondisk.FILE_ROLE_BOOT, "TALLY_FILE_ROLE_BOOT"),
+                  (ondisk.FILE_ROLE_KERNEL, "TALLY_FILE_ROLE_KERNEL"), (SHEET_PAYLOAD, "TALLY_SHEET_PAYLOAD")):
         n += 1
         if defines.get(c) != py:
             wrong.append("%s: volume_tally.h says %r and tally.py %r" % (c, defines.get(c), py))
