@@ -166,9 +166,12 @@ int StandDeckAsk(uint16_t opcode, const void* params, uint16_t param_size, const
  * middle one in the run of the block before it, one command for both. The
  * block before it meets no plan; the
  * first read of the middle one meets the plan once and is served; the second
- * is refused at that block; an overwrite of the block is a write and is not
- * counted; the third read is served again, because the plan fires once; and
- * once the plan is down, nothing is counted at all. */
+ * is refused at that block; a write of the block is a write and is not
+ * counted — the Boardroom's own, of the bytes the block holds, which meets the
+ * plan's sectors on every format, and the file's overwrite, which a book lays
+ * on fresh ground; the third read is served again, because the plan fires
+ * once; and once the plan is down, nothing is counted at all — not a read of
+ * the block itself, nor of the file. */
 static TestResult TestStandBlockFailReadsTheNth(void)
 {
     TestResult  verdict = TEST_PASS;
@@ -201,11 +204,15 @@ static TestResult TestStandBlockFailReadsTheNth(void)
     TEST_ASSERT_EQ(BlockFailSeen(), 2, "at the second meeting");
     TEST_ASSERT(BlockFailFired(), "and the plan says it fired");
 
+    TEST_ASSERT_OK(BoardroomWrite(seat, tagfs_block_to_sector(middle), TAGFS_BLOCK_SECTORS,
+                                  g_test_buffer + TAGFS_BLOCK_SIZE, NULL),
+                   "the block is written again as it holds, by the Boardroom's door");
+    TEST_ASSERT_EQ(BlockFailSeen(), 2, "a write is not a read, and is not counted");
     TestFillAt(g_test_buffer + TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 0x52, TAGFS_BLOCK_SIZE);
     TEST_ASSERT_EQ(StandWriteAt(file_id, TAGFS_BLOCK_SIZE, g_test_buffer + TAGFS_BLOCK_SIZE,
                                 TAGFS_BLOCK_SIZE),
                    TAGFS_BLOCK_SIZE, "the middle block is overwritten whole");
-    TEST_ASSERT_EQ(BlockFailSeen(), 2, "a write is not a read, and is not counted");
+    TEST_ASSERT_EQ(BlockFailSeen(), 2, "and the file's overwrite is not counted either");
 
     TEST_ASSERT_OK(tagfs_read_block(middle, g_test_output),
                    "the third read is served — the plan refuses once");
@@ -213,8 +220,9 @@ static TestResult TestStandBlockFailReadsTheNth(void)
 
     TEST_ASSERT(BlockFailDisarm(), "the plan stood until it was taken down");
     armed = false;
+    TEST_ASSERT_OK(tagfs_read_block(middle, g_test_output), "the block is read with the plan down");
     TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, 3 * TAGFS_BLOCK_SIZE), 3 * TAGFS_BLOCK_SIZE,
-                   "a read of the file with the plan down is whole");
+                   "and so is the file, whole");
     TEST_ASSERT_EQ(BlockFailSeen(), 3, "and meets no plan");
     TEST_ASSERT_EQ(TestFirstDifference(g_test_output, g_test_buffer, 3 * TAGFS_BLOCK_SIZE),
                    3 * TAGFS_BLOCK_SIZE, "and the file holds what was written");

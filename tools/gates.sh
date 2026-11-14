@@ -84,7 +84,7 @@ set -u
 
 GATES_LOGCHECK="healthy unattended byname quill quillmut census lockrankmut replug holdground returnfail
                 turns turnsmut cores replugwrite latelaunchmut haltcycle halthog halthogmut panicstop panicstopmut fullvolume roombackmut
-                stand standusb mkfs crewcrash fare faremut"
+                stand standusb standmut mkfs crewcrash fare faremut"
 GATES_POWERCUT="selftest noanchor noanchormut nextfid hog halt race overwrite logger tipin sessions
                 replug machineb spared undonecut engross dedup firstflushmut lastflushmut booknextfidmut stitchmut"
 GATES_OTHER="framerefuse bookboot dedup concordance formats volread_selftest boxasm format form recipe elf box pack inside settings"
