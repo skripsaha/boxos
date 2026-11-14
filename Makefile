@@ -858,7 +858,7 @@ UTIL_NAMES = create show files tag untag name trash delete assemble \
              playtime lavalamp finish taskboard memmap hexer stringview \
              calculate difference copy typer flame checksum passport aquarium \
              nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits \
-             edit seek retag read rollcall handset inside settings scratchpad garden gardener random sand coinflip dice casino seabattle whale hangman duppo
+             edit seek retag read rollcall handset inside settings autostart scratchpad garden gardener random sand coinflip dice casino seabattle whale hangman duppo
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
 # ==== FINAL BINARIES ====
@@ -1477,8 +1477,8 @@ $(VOLUME_FORMAT_MARK): | $(BUILDDIR)
 # to disagree.
 VOLUME_CONTENT = \
 	$(KERNEL_BIN)   "system" \
-	$(DISPLAY_BIN)  "display,system,utility,autostart" \
-	$(HUB_BIN)      "utility,system,app,autostart" \
+	$(DISPLAY_BIN)  "display,system,utility" \
+	$(HUB_BIN)      "utility,system,app" \
 	$(PROCA_BIN)    "app" \
 	$(PROCB_BIN)    "app" \
 	$(TODAY_BIN)    "app,utility" \
@@ -1505,8 +1505,8 @@ VOLUME_CONTENT = \
 	$(BROOKSTRAND_BIN)   "app,utility,test" \
 	$(BROOKEXEC_BIN)     "app,utility,test,cxx" \
 	$(CURRENTEXEC_BIN)   "app,utility,test,cxx" \
-	$(CLOCK_BIN)         "app,utility,clock,autostart" \
-	$(PULSE_BIN)         "app,utility,system,autostart" \
+	$(CLOCK_BIN)         "app,utility,clock" \
+	$(PULSE_BIN)         "app,utility,system" \
 	$(CALENDAR_BIN)      "app,utility,calendar" \
 	$(BONSAI_BIN)        "app,utility,fun" \
 	$(BIGCLOCK_BIN)      "app,utility,clock" \
@@ -1539,6 +1539,7 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/info.elf    "utility,storage" \
 	$(UTILS_DIR)/inside.elf  "utility,storage" \
 	$(UTILS_DIR)/settings.elf "utility,storage" \
+	$(UTILS_DIR)/autostart.elf "utility,system" \
 	$(UTILS_DIR)/say.elf     "utility" \
 	$(UTILS_DIR)/reboot.elf  "utility,system" \
 	$(UTILS_DIR)/bye.elf     "utility,system" \
@@ -1601,7 +1602,7 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/tumbleweed.elf "utility,fun" \
 	$(UTILS_DIR)/crab.elf      "utility,fun" \
 	$(UTILS_DIR)/garden.elf    "utility,fun" \
-	$(UTILS_DIR)/gardener.elf  "utility,system,gardener,autostart" \
+	$(UTILS_DIR)/gardener.elf  "utility,system,gardener" \
 	$(UTILS_DIR)/wizard.elf    "utility,fun,game" \
 	$(UTILS_DIR)/random.elf    "utility,fun" \
 	$(UTILS_DIR)/sand.elf "utility,fun,game" \

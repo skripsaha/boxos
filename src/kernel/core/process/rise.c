@@ -123,7 +123,7 @@ static void RiseRun(void *ctx)
             unwatched = r;
             kprintf("[RISE] '%s' is not raised again: %s\n", r->name,
                     proc ? "its box no longer says rise"
-                         : "its file no longer asks to be started, or could not be");
+                         : "its file is gone, or could not be started");
         }
         spin_unlock(&g_lock);
         kfree(unwatched);

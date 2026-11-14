@@ -36,6 +36,8 @@
 #include "vmm.h"
 #include "pmm.h"
 #include "process.h"
+#include "autostart.h"  /* AutostartStartedBy — what autostart.box starts is the system's */
+#include "rise.h"       /* RiseWatch */
 #include "pid_allocator.h"  /* pid_generation — own-child authority defeats pid-reuse */
 #include "tagfs.h"
 #include "write_job.h"      /* the defrag is a WriteJob: it holds the file's Helm */
@@ -1629,6 +1631,13 @@ static int SysProcExecImage(const ManifestOp *op, Crate *crates, const OpContext
      * the out-crate below both use these locals, never new_proc, post-WORKING. */
     uint32_t child_pid = new_proc->pid;
     uint32_t child_gen = new_proc->generation;
+
+    /* A program autostart.box starts from the person's list is started on the
+     * system's behalf: one whose box says rise is watched before it runs, as
+     * the programs the kernel itself starts are (rise.h). A person's start
+     * through the hub is the person's own and is never raised. */
+    if (AutostartStartedBy(ctx->proc))
+        RiseWatch(new_proc, found_id, meta->filename);
 
     SpawnedSay(child_pid, child_gen, ctx->proc);
 
