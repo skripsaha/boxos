@@ -8510,34 +8510,6 @@ run_footing() {
 # the rules no boot plants — TUSE, Spare, BOOT, the grounds, the constants
 # held against the headers.
 
-census_qemu_io() {
-    local d="$SCRATCH/census-io"
-    if ! command -v qemu-io >/dev/null 2>&1; then
-        harness "census: qemu-io is not on this desk, so no real blklogwrites log can be made"
-        return
-    fi
-    rm -rf "$d"; mkdir -p "$d"
-    dd if=/dev/zero of="$d/base.img" bs=1048576 count=2 2>/dev/null
-    cp "$d/base.img" "$d/run.img"
-    : > "$d/io.log"
-    qemu-io --image-opts "driver=blklogwrites,file.driver=file,file.filename=$d/run.img,log.driver=file,log.filename=$d/io.log,log-sector-size=512" \
-        -c 'write -P 0xa1 0 4k' -c 'flush' -c 'write -P 0xb2 8k 1k' \
-        -c 'write -f -P 0xc3 16k 512' -c 'write -z 32k 4k' >"$d/qemu-io.out" 2>&1 \
-        || { harness "census: qemu-io would not write through blklogwrites: $(tail -1 "$d/qemu-io.out")"; return; }
-
-    local said
-    said=$(python3 tools/volume-read.py "$d/base.img" cut "$d/io.log" --against "$d/run.img" 2>&1)
-    chk $? "census: $said"
-
-    local epochs
-    epochs=$(python3 tools/volume-read.py "$d/base.img" cut "$d/io.log" --count --json 2>&1 \
-             | python3 -c 'import json,sys; print(json.load(sys.stdin)["epochs"])' 2>&1)
-    case "$epochs" in
-        "[1, 2, 1"*) ok "census: qemu-io's log splits into epochs $epochs — write, flush, write + FUA write, zeroes" ;;
-        *)           bad "census: qemu-io's log splits into epochs $epochs, not [1, 2, 1, ...]" ;;
-    esac
-}
-
 # census_selftest — volume-read's self-test, every case, on a fresh image.
 census_selftest() {
     local rc said counts

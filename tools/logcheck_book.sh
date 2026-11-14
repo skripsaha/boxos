@@ -1013,15 +1013,49 @@ census_book_some() {
     census_book "${some[@]}"
 }
 
-# census_book_all — the book's half of the census: its landings, the book the
-# kernel writes read back by both readers, its Tallies, cut and rotten, and
-# Escheat (logcheck_book.sh, logcheck_book_circle.sh, logcheck_bind.sh,
-# logcheck_escheat.sh).
+# census_qemu_io — a real blklogwrites log, written by qemu-io through QEMU's
+# own driver (a write, a flush, a write and a FUA write, zeroes), read back by
+# volume-read's `cut` and replayed onto its base byte for byte, its epochs
+# counted: the reader of every record PowerCut cuts, held to the writer it
+# reads and not to a log it built itself (self-test's L1-L5).
+census_qemu_io() {
+    local d="$SCRATCH/census-io"
+    if ! command -v qemu-io >/dev/null 2>&1; then
+        harness "census: qemu-io is not on this desk, so no real blklogwrites log can be made"
+        return
+    fi
+    rm -rf "$d"; mkdir -p "$d"
+    dd if=/dev/zero of="$d/base.img" bs=1048576 count=2 2>/dev/null
+    cp "$d/base.img" "$d/run.img"
+    : > "$d/io.log"
+    qemu-io --image-opts "driver=blklogwrites,file.driver=file,file.filename=$d/run.img,log.driver=file,log.filename=$d/io.log,log-sector-size=512" \
+        -c 'write -P 0xa1 0 4k' -c 'flush' -c 'write -P 0xb2 8k 1k' \
+        -c 'write -f -P 0xc3 16k 512' -c 'write -z 32k 4k' >"$d/qemu-io.out" 2>&1 \
+        || { harness "census: qemu-io would not write through blklogwrites: $(tail -1 "$d/qemu-io.out")"; return; }
+
+    local said
+    said=$(python3 tools/volume-read.py "$d/base.img" cut "$d/io.log" --against "$d/run.img" 2>&1)
+    chk $? "census: $said"
+
+    local epochs
+    epochs=$(python3 tools/volume-read.py "$d/base.img" cut "$d/io.log" --count --json 2>&1 \
+             | python3 -c 'import json,sys; print(json.load(sys.stdin)["epochs"])' 2>&1)
+    case "$epochs" in
+        "[1, 2, 1"*) ok "census: qemu-io's log splits into epochs $epochs — write, flush, write + FUA write, zeroes" ;;
+        *)           bad "census: qemu-io's log splits into epochs $epochs, not [1, 2, 1, ...]" ;;
+    esac
+}
+
+# census_book_all — the book's half of the census: a real blklogwrites log read
+# back (census_qemu_io), its landings, the book the kernel writes read back by
+# both readers, its Tallies, cut and rotten, and Escheat (logcheck_book.sh,
+# logcheck_book_circle.sh, logcheck_bind.sh, logcheck_escheat.sh).
 census_book_all() {
     if [ -n "${CENSUS_LANDINGS:-}" ]; then
         census_book_some
         return
     fi
+    census_qemu_io
     census_book $CENSUS_BOOK_LANDINGS
     book_circle
     book_big
