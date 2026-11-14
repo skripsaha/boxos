@@ -6,7 +6,9 @@
 struct process_t;
 
 /* The file of the program that reads the person's list from its Settings and
- * starts each program on it — the third of the system's start set. */
+ * starts each program on it — the third of the system's start set. It starts
+ * the list only for being started by the system (no spawner in its cabin); run
+ * by a person it shows and changes the list. */
 #define AUTOSTART_PROGRAM "autostart.box"
 
 /*

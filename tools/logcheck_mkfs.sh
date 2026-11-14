@@ -51,6 +51,10 @@ MKFS_CLEAN="check: consistent — 0 damage, 0 leak, 0 note"
 #   formula IMG          the ground IMG stands on against §16.2 п.23 over its
 #                        own book
 #   wide|v1ids|v1record|keywide WORK   the cargo's widths (above)
+#   roles WORK           a format-v2 volume of the kernel, a system box, a plain
+#                        box and a text a person tagged system, boot, god and
+#                        kernel: each file's role in its record is what its
+#                        box says, and the kernel is the file --kernel names
 mkfs_py() {
     python3 - "$@" <<'PY'
 import binascii, hashlib, os, struct, subprocess, sys, uuid
@@ -165,8 +169,29 @@ def Wide(work):
     os.remove(img)
 
 
+def Roles(work):
+    """No tag gives a file a role: the volume keeps the kernel in the file --kernel names, a
+    box in the role its own part `role` says, and every other file ordinary — the text
+    wears the words system, boot, god and kernel and is kept as an ordinary file."""
+    img, text = os.path.join(work, "roles.img"), os.path.join(work, "words.txt")
+    with open(text, "w") as f:
+        f.write("a text a person tagged with the words of the system's roles\n")
+    Ground(img, 524288)
+    kept = {"kernel.bin": ondisk.FILE_ROLE_MASK, "hub.box": ondisk.FILE_ROLE_SYSTEM, "clock.box": 0, "words.txt": 0}
+    rc, out = Mkfs("--v2", "--kernel", "build/kernel.bin", img, "build/kernel.bin", "", "build/box/hub.box", "",
+                   "build/box/clock.box", "", text, "system,boot,god,kernel,app,utility")
+    roles = {}
+    if rc == 0:
+        mount = BookCensus(medium.Medium(img)).mount
+        roles = {fs.name.decode(): fs.flags & ondisk.FILE_ROLE_MASK for fs in mount.files.values()}
+    print("MKFS roles made=%u kept=%u %s" % (rc == 0, roles == kept, " ".join("%s=%u" % r for r in sorted(roles.items()))))
+    os.remove(img)
+
+
 def Leg(leg, a):
-    if leg == "ground":
+    if leg == "roles":
+        Roles(a[0])
+    elif leg == "ground":
         Ground(a[0], int(a[1]))
     elif leg == "files":
         one, two = GroundCensus(medium.Medium(a[0])), BookCensus(medium.Medium(a[1]))
@@ -288,6 +313,15 @@ mkfs_tags() {
     echo "$said" | grep -v ' refused=1 untouched=1 ' | sed 's/^/    /'
 }
 
+# mkfs_roles WORK — what the volume keeps a file as comes from the kernel the
+# maker is told and from the box, and from no tag.
+mkfs_roles() {
+    local said
+    said=$(mkfs_py roles "$1")
+    echo "$said" | grep -qE '^MKFS roles made=1 kept=1 '
+    chk $? "mkfs: the kernel is the file --kernel names, a box says its own role, and a text tagged system, boot, god and kernel stays ordinary (${said#MKFS roles })"
+}
+
 run_mkfs() {
     echo "== mkfs: what create_tagfs lays down, held on the host to the format's second reader =="
     local work="$SCRATCH/mkfs" format
@@ -303,6 +337,7 @@ run_mkfs() {
     mkfs_image "$work"
     mkfs_grounds "$work"
     mkfs_tags "$work"
+    mkfs_roles "$work"
     buildkey_restore
     # The v1 build above was plain: the tree is put back in the run's format
     # whether or not a keyed build came after it. The deed names the format

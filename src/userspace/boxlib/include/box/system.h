@@ -124,6 +124,14 @@ int proc_exec_gen(const char* line, const char* tags, uint32_t* out_gen);
 int proc_exec_file(file_id_t program, const void* luggage, size_t length,
                    const char* tags, uint32_t* generation);
 
+/* Whether the system itself started this program — the machine's start set,
+ * from the kernel at boot or a volume's arrival — and no program did: its
+ * cabin names no spawner. The kernel writes that and no program can: a program
+ * started by the hub, by another program, by anything with a pid, is never
+ * started by the system. For a program that does one thing when the machine
+ * brings it up and another when a person runs it (autostart). */
+bool started_by_system(void);
+
 /* Wait until the incarnation (pid, generation) is gone, then report how it
  * ended in *out_exit (proc_exit.h: >= 0 the code it passed to exit(), -1
  * killed, -2 crashed). out_exit may be NULL.

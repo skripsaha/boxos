@@ -303,7 +303,8 @@ static int TagTake(char* token, const char* whose, uint32_t* ids, uint32_t* coun
 }
 
 /*
- * A file's role (RoleOf) and its tags: its name's stem first, then a
+ * A file's role (RoleOf) and its tags — of the file at `path`, however it is
+ * named in the volume — its name's stem first, then a
  * comma-separated list like "memory,fun", each once. The tags are the
  * file's user's words and decide nothing; the role comes from the kernel
  * file named and from the file's box. 0, or -1 having said why.
@@ -316,26 +317,26 @@ static int TagTake(char* token, const char* whose, uint32_t* ids, uint32_t* coun
  * format v2 has no such width), and how wide one can be the kernel's
  * (TAG_KEY_WIDTH, TAG_TEXT_ROOM).
  */
-int parse_tags(const char* tag_string, const char* filename, uint32_t** out_ids, uint32_t* out_count,
+int parse_tags(const char* tag_string, const char* path, uint32_t** out_ids, uint32_t* out_count,
                uint32_t* out_role) {
-    if (RoleOf(filename, out_role) != 0) return -1;
+    if (RoleOf(path, out_role) != 0) return -1;
     uint32_t  room  = 2;   /* the stem, and one more tag than there are commas */
     uint32_t  count = 0;
     for (const char* c = tag_string; *c; c++) room += *c == ',';
-    char*     stem  = StemOf(filename);
+    char*     stem  = StemOf(path);
     char*     list  = strdup(tag_string);
     uint32_t* ids   = malloc(sizeof(uint32_t) * room);
     int       taken = stem && list && ids;
-    if (!taken) fprintf(stderr, "%s: no memory for its tags\n", filename);
+    if (!taken) fprintf(stderr, "%s: no memory for its tags\n", path);
 
     /* The stem is a key whole, never split at ':' (tag_spelling.h, TagSpellKey). */
     if (taken && stem[0] != '\0') {
-        taken = intern_tag(stem, NULL, filename, &ids[0]) == 0;
+        taken = intern_tag(stem, NULL, path, &ids[0]) == 0;
         count = taken ? 1u : 0u;
     }
     for (char* token = taken ? strtok(list, ",") : NULL; token; token = strtok(NULL, ",")) {
         while (*token == ' ') token++;
-        if (TagTake(token, filename, ids, &count) != 0) {
+        if (TagTake(token, path, ids, &count) != 0) {
             taken = 0;
             break;
         }

@@ -17,8 +17,12 @@
  * their files and never by what anyone has labelled them with: the display
  * (it holds the screen), the hub (the person's prompt) and autostart.box,
  * which reads the person's list of programs from its Settings and starts
- * each of them itself. A file's tags are only the person's words for finding
- * it; nothing is started because of one.
+ * each of them itself — when it is started here. It is told so by no word the
+ * kernel passes: the program the kernel starts has no spawner in its cabin, as
+ * none started by a person or a program has none (started_by_system in
+ * box/system.h), so the same autostart.box run from the hub shows and changes
+ * the list and starts nothing. A file's tags are only the person's words for
+ * finding it; nothing is started because of one.
  *
  * It used to be a hundred and ninety lines in the middle of kernel_main,
  * executed once, at a moment chosen by where it happened to sit in the boot.

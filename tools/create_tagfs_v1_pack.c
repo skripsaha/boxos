@@ -105,7 +105,7 @@ static int V1PackPlace(V1Pack* p, char* argv[], int first) {
         if (fi->block_count == 0) fi->block_count = 1;
         fi->start_block = p->next_block;
 
-        if (parse_tags(tags_str, fi->filename, &fi->tag_ids, &fi->tag_count, &fi->role) != 0) return -1;
+        if (parse_tags(tags_str, fi->filepath, &fi->tag_ids, &fi->tag_count, &fi->role) != 0) return -1;
         /* Judged here, before the volume's first write: a record that no pool
          * block holds was refused only once the registry and the data were
          * already on the medium. */

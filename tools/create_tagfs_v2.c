@@ -85,8 +85,7 @@ static int FrameOnlyPlace(FileInfo* files, int file_count, char* argv[], int fir
         if (files[i].block_count == 0) files[i].block_count = 1;
         fclose(f);
 
-        const char* base = strrchr(files[i].filepath, '/');
-        if (parse_tags(argv[first + i * 2 + 1], base ? base + 1 : files[i].filepath,
+        if (parse_tags(argv[first + i * 2 + 1], files[i].filepath,
                        &files[i].tag_ids, &files[i].tag_count, &files[i].role) != 0)
             return -1;
         if (files[i].role == TALLY_FILE_ROLE_KERNEL) *kernel = i;
@@ -279,7 +278,7 @@ static int V2FileOf(BindFile* f, uint64_t fid, const char* path, const char* tag
     f->fid    = fid;
     f->size   = (uint64_t)size;
     f->blocks = (f->size + TAGFS_BLOCK_SIZE - 1u) / TAGFS_BLOCK_SIZE;
-    if (parse_tags(tags, f->name, &ids, &n, &f->role) != 0) return -1;
+    if (parse_tags(tags, f->path, &ids, &n, &f->role) != 0) return -1;
     qsort(ids, n, sizeof(uint32_t), V2IdOrder);
     f->tags  = ids;
     f->ntags = n;

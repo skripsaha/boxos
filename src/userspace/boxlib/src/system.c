@@ -266,6 +266,11 @@ int proc_exec_gen(const char *line, const char *tags, uint32_t *out_gen)
     return pid;
 }
 
+bool started_by_system(void)
+{
+    return cabin_info()->spawner_pid == 0;
+}
+
 int proc_exec_file(file_id_t program, const void *luggage, size_t length,
                    const char *tags, uint32_t *generation)
 {
