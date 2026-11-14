@@ -1,5 +1,4 @@
 #include "mount.h"
-#include "../settle/binder.h"
 #include "away.h"
 #include "ground_census.h"
 #include "../tag_registry/tag_registry.h"
@@ -14,7 +13,6 @@
 #include "../use_memory/use_memory.h"
 #include "../glean/glean.h"
 #include "../scribe/scribe.h"
-#include "errata.h"
 
 /*
  * The mount's read of the volume (mount.h). Everything here runs with the
@@ -606,11 +604,6 @@ error_t MountReadVolume(const char** what)
 
 void MountAfterDoor(void)
 {
-    /* A book whose mount holds a verdict asks for the session's first cycle
-     * at once: it lays the verdict down (mount/errata.h, §3.5). After the
-     * cadence was reset for this mount, which forgets every demand. */
-    if (tagfs_get_state()->format == DEED_FORMAT_V2)
-        ErrataAsk();
     if (tagfs_get_state()->format != DEED_FORMAT_V1)
         return;
 
@@ -654,48 +647,6 @@ void MountAfterDoor(void)
 
 void MountPromise(void)
 {
-    /*
-     * A format-v2 volume (book_mount.h): under glass it is read and nothing of
-     * it is written, and promises only that. Otherwise this kernel's writer
-     * lays stitches of files, their data on fresh ground, names and memory on
-     * its ribbon (settle/sewing.h), and a whole Tally of it once the ribbon
-     * holds what one costs (settle/binder.h): the next mount reads that Tally
-     * and the ribbon past it;
-     * and a medium that leaves and comes back as it was left is taken up, what
-     * no stitch settled going with the next cycle — read again from its book
-     * otherwise, what no stitch settled then lost (§3.8, §16.5 п.10,
-     * perambulation.h). Under glass nothing is written, and nothing waits:
-     * a medium that comes back is read again.
-     */
-    if (tagfs_get_state()->format == DEED_FORMAT_V2 && TagFSIsUnderGlass()) {
-        kprintf("[TagFS] what this volume promises: it is read as its book holds it and nothing of it is "
-                "written — a change is refused (ERR_TAGFS_READ_ONLY); a medium that leaves and comes back "
-                "is read again from its book\n");
-        return;
-    }
-    if (tagfs_get_state()->format == DEED_FORMAT_V2) {
-        kprintf("[TagFS] what this volume promises: its book takes files made, written, named, tagged and given "
-                "up, the names of tags and the memory of its Use Context, a stitch on its ribbon a Settle cycle — a "
-                "change is a stitch kept by its cycle's flush within %llu ms, and a name given goes with the next "
-                "stitch sewn; a file's bytes go on fresh ground, flushed before the stitch that names them, so a "
-                "block written over reads its old bytes or its new ones, never a mix; an `anchor` is answered once "
-                "a stitch of this mount carrying what it waits for is kept; a medium that leaves and comes back is "
-                "taken up as it was left — its ribbon and newest slot as this kernel left them, every block written "
-                "since the last kept flush read back as written — and read again from its book otherwise, what no "
-                "stitch settled then lost (ERR_TAGFS_NOT_LANDED where a block did not land)\n",
-                (unsigned long long)(SETTLE_WINDOW_US / 1000u));
-        if (BinderNoTallies())
-            kprintf("[TagFS] no Tally of the book is written by this mount: %s — the ribbon is read whole at the "
-                    "next mount, none of its Quires comes back before it, and once they run out files, names, tags "
-                    "and words are refused (ERR_TAGFS_NO_SPACE)\n", BinderNoTallies());
-        else
-            kprintf("[TagFS] a whole Tally of the book is written once the ribbon past the newest slot holds as "
-                    "many useful bytes as one costs (TALLY_SLACK %u), and when the ribbon runs out: the next mount "
-                    "reads the newest slot's Tally and the ribbon past it, and the ground the slots let go of comes "
-                    "back\n", TALLY_SLACK);
-        return;
-    }
-
     /*
      * ‼ AND WHAT THAT MOUNT PROMISES, SAID ONCE, IN PLAIN WORDS — the difference
      * between before and after an anchor included (RT-06/07): until then a

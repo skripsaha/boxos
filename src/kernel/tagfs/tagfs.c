@@ -31,6 +31,7 @@
 #include "mount/perambulation.h"
 #include "mount/hold_ground.h"
 #include "mount/book_mount.h"
+#include "mount/errata.h"
 #include "read/read.h"
 #include "run/run.h"
 #include "../../kernel/drivers/timer/rtc.h"
@@ -2191,7 +2192,14 @@ error_t tagfs_init(void) {
     __atomic_add_fetch(&g_mount_epoch, 1, __ATOMIC_ACQ_REL);
     __atomic_store_n(&g_door, VOLUME_UP, __ATOMIC_RELEASE);
 
-    MountAfterDoor();
+    /* A book whose mount holds a verdict asks for the session's first cycle
+     * at once: it lays the verdict down (mount/errata.h, §3.5). After the
+     * cadence was reset for this mount, which forgets every demand. Format v1
+     * brings its integrity map up (mount/mount.h). */
+    if (g_state.format == DEED_FORMAT_V2)
+        ErrataAsk();
+    else
+        MountAfterDoor();
 
     /*
      * ‼ THE SENTENCE THAT WAS MISSING, AND ITS ABSENCE IS THE WHOLE STORY.
@@ -2234,7 +2242,10 @@ error_t tagfs_init(void) {
             g_state.ledger.next_file_id - 1,
             (unsigned long long)g_state.ledger.total_files);
 
-    MountPromise();
+    if (g_state.format == DEED_FORMAT_V2)
+        MountBookPromise();
+    else
+        MountPromise();
 
     SettleCutSayArmed();            /* nothing at all unless SETTLECUT=<point> */
     TagFSHoldGroundOpenFile();      /* nothing at all unless HOLDGROUND=on */

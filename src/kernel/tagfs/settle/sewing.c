@@ -261,7 +261,7 @@ static void StitchTake(StitchSnap* s)
  * mark of a file that lives. Every cycle until one settles carries the verdict (a
  * stitch that settled without it would leave the next mount to replay what
  * it undoes, H-1), so it is the first cycle that begins — asked at the door's
- * opening (mount.c, ErrataAsk) — that marks them, and a cycle refused before
+ * opening (tagfs.c, ErrataAsk) — that marks them, and a cycle refused before
  * the last of them marks the rest in the next. Off the heap's reserve, which
  * is the steps' own: a refusal of the moment — the heap (SETTLE_PARK_HEAP), the
  * ribbon's room (tried a window on), a volume taking no change now — refuses
