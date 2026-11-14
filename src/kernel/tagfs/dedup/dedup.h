@@ -30,12 +30,13 @@
  * asked of the mirror itself, the live files walked a few a turn
  * (dedup_owners.c): no map of block to owner is kept.
  *
- * ‼ WHAT IT NEVER TOUCHES (§16.7 п.8). A file wearing dedup:off, a file the
- * system keeps (system, boot, god), the kernel the Deed points the loader at,
- * a file the mount locked, and every block one of them names, are neither
+ * ‼ WHAT IT NEVER TOUCHES (§16.7 п.8). A file the system keeps (system, boot,
+ * god), the kernel the Deed points the loader at, a file the mount locked,
+ * and every block one of them names, are neither
  * laid nor laid on; a copy is laid only from its plain ground (DATA, no Slip
  * over it). Each is passed over before an act is asked: the pass asks nothing
- * it knows will be refused.
+ * it knows will be refused. No tag of a file asks it out of Dedup: a file's
+ * tags are its user's words, and the user never thinks of the kernel.
  *
  * ‼ A SERIES OR NOTHING. A copy is laid only as a series: DEDUP_SERIES_LEAST
  * blocks of it in a row in its file on as many of one original in a row in

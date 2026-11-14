@@ -410,10 +410,10 @@
  * none laid. params = [u64 fid][u64 at][u64 onto][u64 onto_at][u64 count].
  * out_crate = [u64 blocks laid][u64 the block of `fid` a refusal met][u64 why]:
  * why 0 laid, 1 the cabin wears neither system nor god, 2 a file the system
- * keeps or the kernel's, 3 a file wearing dedup:off, 4 the blocks asked are
- * not `fid`'s plain ground or not `onto`'s, 5 a block with no digest the book
- * holds, 6 the digests differ, 7 the digests agree and the bytes differ, 8 a
- * file changed meanwhile, 9 the volume's own refusal — the error says it. Only
+ * keeps or the kernel's, 3 the blocks asked are not `fid`'s plain ground or
+ * not `onto`'s, 4 a block with no digest the book holds, 5 the digests differ,
+ * 6 the digests agree and the bytes differ, 7 a file changed meanwhile, 8 the
+ * volume's own refusal — the error says it. Only
  * a cabin wearing system or god (ERR_ACCESS_DENIED at the gate,
  * ERR_PERMISSION_DENIED past it); refused on a format-v1 volume
  * (ERR_UNSUPPORTED). */

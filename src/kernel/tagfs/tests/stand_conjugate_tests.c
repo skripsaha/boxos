@@ -22,8 +22,8 @@
 // block named as memory holds it. The act is decided at the Ink: a file
 // changed between the comparison and the Ink — the duplicate or the target —
 // refuses it, and so do blocks that differ, by their digests or, where the
-// digests agree, by their bytes; a file wearing dedup:off, a file the system
-// keeps and the kernel the loader reads by its blocks are never laid, and a
+// digests agree, by their bytes; a file the system keeps and the kernel the
+// loader reads by its blocks are never laid, and a
 // cabin wearing neither system nor god never asks. Every refusal leaves
 // everything as it was: the duplicate on its own blocks, nothing resting, no
 // block in common.
@@ -92,10 +92,10 @@ static bool StandConjugateDigest(uint64_t block, uint64_t* digest)
     return GlossFind(block, digest) || TallyDigestFind(block, digest, &refused) == TALLY_DIGEST_NAMED;
 }
 
-static const TagSpelling s_dedup_off = { .key = "dedup", .value = "off", .key_len = 5, .value_len = 3 };
+static const TagSpelling s_note = { .key = "note", .key_len = 4 };
 
-/* What the meddler does between the act's comparison and its Ink: puts
- * dedup:off on `fid` (`write` false) or writes its block 0 anew with the
+/* What the meddler does between the act's comparison and its Ink: puts a
+ * user's tag on `fid` (`write` false) or writes its block 0 anew with the
  * model's bytes, its very own — the answer in `rc`. */
 typedef struct {
     uint64_t               fid;
@@ -108,7 +108,7 @@ static void StandConjugateMeddles(void* ctx)
 {
     StandConjugateMeddle* w = ctx;
     if (!w->write)
-        w->rc = tagfs_add_tag_string(w->fid, &s_dedup_off, INK_UNWARRANTED);
+        w->rc = tagfs_add_tag_string(w->fid, &s_note, INK_UNWARRANTED);
     else
         w->rc = StandWriteAt(w->fid, 0, w->m->bytes, TAGFS_BLOCK_SIZE) == (int)TAGFS_BLOCK_SIZE ? OK : ERR_WRITE_FAILED;
 }
@@ -190,14 +190,14 @@ static TestResult TestStandConjugateChanged(void)
     w = (StandConjugateMeddle){ .fid = f, .write = false, .rc = ERR_UNKNOWN };
     ConjugateStandBetween(StandConjugateMeddles, &w);
     rc = TagFSConjugate(INK_WARRANTED, &ask, &said);
-    TEST_ASSERT_OK(w.rc, "dedup:off goes on B between the act's comparison and its Ink");
+    TEST_ASSERT_OK(w.rc, "a tag of the user's goes on B between the act's comparison and its Ink");
     TEST_ASSERT_EQ(rc, ERR_BUSY, "the act is refused: B is not the file it compared");
     TEST_ASSERT_EQ(said.why, CONJUGATE_CHANGED, "and says so");
     TEST_ASSERT(StandConjugateUntouched(f, mine, theirs, 2u, resting),
                 "nothing is touched: B on its own blocks, nothing rests, no block in common");
-    TEST_ASSERT(tagfs_has_tag(f, tagfs_tag_lookup("dedup:off")), "B wears the tag the change put on");
+    TEST_ASSERT(tagfs_has_tag(f, tagfs_tag_lookup("note")), "B wears the tag the change put on");
     TEST_ASSERT(StandFreshHolds(&m, f) && StandFreshHolds(&m, a), "both read their bytes");
-    TEST_ASSERT_OK(tagfs_remove_tag_string(f, &s_dedup_off, INK_UNWARRANTED), "the tag comes off B");
+    TEST_ASSERT_OK(tagfs_remove_tag_string(f, &s_note, INK_UNWARRANTED), "the tag comes off B");
 
     w = (StandConjugateMeddle){ .fid = a, .m = &m, .write = true, .rc = ERR_UNKNOWN };
     ConjugateStandBetween(StandConjugateMeddles, &w);
@@ -279,10 +279,10 @@ out:
 }
 
 // ----------------------------------------------------------------------------
-// Declined: dedup:off, and a cabin with no warrant
+// Unwarranted: a cabin wearing neither system nor god
 // ----------------------------------------------------------------------------
 
-static TestResult TestStandConjugateDeclined(void)
+static TestResult TestStandConjugateUnwarranted(void)
 {
     TestResult      verdict = TEST_PASS;
     StandFreshModel m;
@@ -304,19 +304,7 @@ static TestResult TestStandConjugateDeclined(void)
     TEST_ASSERT_EQ(said.why, CONJUGATE_UNWARRANTED, "and told so");
     TEST_ASSERT(StandConjugateUntouched(f, mine, theirs, 1u, resting), "nothing is touched");
 
-    TEST_ASSERT_OK(tagfs_add_tag_string(f, &s_dedup_off, INK_UNWARRANTED), "B wears dedup:off");
-    TEST_ASSERT_EQ(TagFSConjugate(INK_WARRANTED, &ask, &said), ERR_PERMISSION_DENIED, "B is never laid");
-    TEST_ASSERT_EQ(said.why, CONJUGATE_DECLINED, "for the tag it wears");
-    TEST_ASSERT(StandConjugateUntouched(f, mine, theirs, 1u, resting), "nothing is touched");
-    TEST_ASSERT_OK(tagfs_remove_tag_string(f, &s_dedup_off, INK_UNWARRANTED), "the tag comes off B");
-
-    TEST_ASSERT_OK(tagfs_add_tag_string(a, &s_dedup_off, INK_UNWARRANTED), "A wears dedup:off");
-    TEST_ASSERT_EQ(TagFSConjugate(INK_WARRANTED, &ask, &said), ERR_PERMISSION_DENIED, "nothing is laid on A");
-    TEST_ASSERT_EQ(said.why, CONJUGATE_DECLINED, "for the tag it wears");
-    TEST_ASSERT(StandConjugateUntouched(f, mine, theirs, 1u, resting), "nothing is touched");
-    TEST_ASSERT_OK(tagfs_remove_tag_string(a, &s_dedup_off, INK_UNWARRANTED), "the tag comes off A");
-
-    TEST_ASSERT_OK(TagFSConjugate(INK_WARRANTED, &ask, &said), "and with neither wearing it, B is laid on A");
+    TEST_ASSERT_OK(TagFSConjugate(INK_WARRANTED, &ask, &said), "and with the warrant, B is laid on A");
     TEST_ASSERT(said.why == CONJUGATE_LAID && StandConjugateOnto(f, theirs, 1u), "B's block is A's");
     TEST_ASSERT(StandFreshHolds(&m, f) && StandFreshHolds(&m, a), "both read their bytes");
 out:
@@ -395,7 +383,7 @@ static const TestCase g_stand_conjugate_tests[] = {
       .format = DEED_FORMAT_V2 },
     { .name = "stand_conjugate_differs", .func = TestStandConjugateDiffers, .reach = TEST_WRITES_TO_VOLUME,
       .format = DEED_FORMAT_V2 },
-    { .name = "stand_conjugate_declined", .func = TestStandConjugateDeclined, .reach = TEST_WRITES_TO_VOLUME,
+    { .name = "stand_conjugate_unwarranted", .func = TestStandConjugateUnwarranted, .reach = TEST_WRITES_TO_VOLUME,
       .format = DEED_FORMAT_V2 },
     { .name = "stand_conjugate_kept", .func = TestStandConjugateKept, .reach = TEST_WRITES_TO_VOLUME,
       .format = DEED_FORMAT_V2 },

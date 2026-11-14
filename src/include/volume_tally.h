@@ -78,6 +78,7 @@
  * a header that is not ACTIVE does not read (§16.3 п.7), and a RETIRED tag
  * carries no text (§6.4). The rest of their bits are carried as they are. */
 #define TALLY_FILE_ACTIVE    1u
+#define TALLY_FILE_UNDONE    16u     /* rolled back by a mount's verdict (§2.8) — the system's word, never a tag */
 #define TALLY_TAG_HAS_VALUE  1u
 #define TALLY_TAG_RETIRED    2u
 

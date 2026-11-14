@@ -22,9 +22,10 @@
  * InkConjugate): a file changed between the two, by a name, a tag, a write of
  * the target, refuses the act with nothing changed.
  *
- * ‼ DEDUP FOR EVERY FILE BUT THOSE IT MAY NOT TOUCH (§16.7 п.8). A file that
- * wears dedup:off is neither laid nor laid on: its blocks are its own. A file
- * the system keeps — a tag of key system, boot or god — is never laid,
+ * ‼ DEDUP FOR EVERY FILE BUT THOSE IT MAY NOT TOUCH (§16.7 п.8). No tag of a
+ * file's asks it out: its tags are its user's words, never a switch of the
+ * kernel's. A file the system keeps — a tag of key system, boot or god — is
+ * never laid,
  * warrant or none: a loader and the plate's check read such a file's blocks
  * as they lie. And the kernel the Deed points the loader at is neither laid
  * nor laid on: its blocks are no other file's.
@@ -44,8 +45,8 @@
  *   TagFSConjugate   asked from any core with no TagFS lock, inside or out
  *                    of the door: OK and the blocks laid, or the refusal,
  *                    nothing changed, its reason in `why` — the error by the
- *                    reason: ERR_PERMISSION_DENIED (UNWARRANTED, KEPT,
- *                    DECLINED), ERR_INVALID_ARGUMENT (UNSHAPED, DIFFERS,
+ *                    reason: ERR_PERMISSION_DENIED (UNWARRANTED, KEPT),
+ *                    ERR_INVALID_ARGUMENT (UNSHAPED, DIFFERS,
  *                    COLLIDES), ERR_CHECKSUM (UNDIGESTED), ERR_BUSY (CHANGED),
  *                    and the volume's own refusal (REFUSED): ERR_UNSUPPORTED
  *                    on format v1, ERR_FILE_NOT_FOUND, ERR_BUSY for a Helm
@@ -66,7 +67,6 @@ typedef enum {
     CONJUGATE_LAID = 0,     /* laid — and, inside the act, nothing refused it yet */
     CONJUGATE_UNWARRANTED,  /* the cabin asking wears neither system nor god */
     CONJUGATE_KEPT,         /* the duplicate is a file the system keeps, or either is the kernel's */
-    CONJUGATE_DECLINED,     /* either wears dedup:off */
     CONJUGATE_UNSHAPED,     /* the blocks asked are not the duplicate's plain ground, or not the target's */
     CONJUGATE_UNDIGESTED,   /* a block the book holds no digest for, or one that does not hold it */
     CONJUGATE_DIFFERS,      /* the digests of a pair differ */

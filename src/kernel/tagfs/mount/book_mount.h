@@ -252,9 +252,9 @@ typedef struct {
     BookErratum*   errata;       /* the mount's verdict, in order of seq and why (errata.h) */
     uint32_t       nerrata;
     uint32_t       caperrata;
-    uint64_t*      wear;         /* the files it rolls back, rising, each once: settle:undone owed them */
-    uint32_t       nwear;
-    uint32_t       worn;         /* of them, the ones the Ink of the tag is done for */
+    uint64_t*      mark;         /* the files it rolls back, rising, each once: the mark in their records owed them */
+    uint32_t       nmark;
+    uint32_t       marked;       /* of them, the ones the Ink of the mark is done for */
 } BookMount;
 
 extern BookMount g_book;

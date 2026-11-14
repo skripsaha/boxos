@@ -83,7 +83,6 @@ typedef struct {
     DedupOwner* owner;              /* by block, one each */
     uint64_t    n;
     uint64_t    from;               /* the next file id the walk asks the map for; UINT64_MAX once done */
-    uint32_t    off_tag;            /* the id of dedup:off, or TAGFS_INVALID_TAG_ID */
 } DedupOwners;
 
 /*

@@ -16,10 +16,11 @@
  * stitch undone, why, the files it rolls back, rising) — and the first stitch
  * of the session carries an Undone of each, right after its StitchHead,
  * before any other record, with its seq_back reckoned from that attempt's own
- * seq (sewing.c). Each file the verdict rolls back and that lives wears
- * settle:undone, put on by an ordinary Ink as that cycle begins, so the stitch
- * that lays the verdict down lays the tag down with it and a program finds
- * every file whose last write did not land by a query by the tag (M-10). A
+ * seq (sewing.c). Each file the verdict rolls back and that lives is marked
+ * so in its record (TAGFS_FILE_UNDONE) by an ordinary Ink as that cycle
+ * begins, so the stitch that lays the verdict down lays the mark down with it
+ * (M-10) — the system's own word on the file, never a tag: a file's tags are
+ * its user's. A
  * file born in a stitch undone is not: there is no file, its id is burned
  * (§16.5 п.7). A file the rule of rot rolls back onto ground another file
  * holds is locked, as ever — the next mount locks it again by the same rule —
@@ -29,7 +30,7 @@
  * (MountBookLetGo): a mount of the same medium again finds the same stitch
  * newest and comes to the same verdict, so no Undone is ever laid twice. From
  * the door's opening it is the Settle's holder's alone: read as its stitches
- * are built, worn as its first cycle begins, let go once the stitch that
+ * are built, marked as its first cycle begins, let go once the stitch that
  * carried it settles; a cycle refused keeps it for the next.
  */
 
@@ -37,7 +38,7 @@
  * entry a stitch, its why the first found — ERR_NO_MEMORY. A file that leaves
  * the verdict (locked instead). And the replay done: the list put in order by
  * stitch, each file once a stitch, the
- * files the tag is owed listed and the verdict said — ERR_NO_MEMORY, which
+ * files the mark is owed listed and the verdict said — ERR_NO_MEMORY, which
  * refuses the mount as any replay short of memory does. */
 error_t  ErrataAdd(uint64_t seq, uint64_t why, uint64_t fid);
 void     ErrataLeaves(uint64_t fid);
@@ -51,15 +52,15 @@ bool     ErrataHeld(void);
  * medium that came back as it was left with the verdict not yet laid. */
 void     ErrataAsk(void);
 
-/* By the Settle's holder as its cycle begins, no lock held: settle:undone put
- * on each living file the verdict rolls back, by an ordinary Ink, so the
- * stitch that lays the verdict down lays the tag with it. OK once every one
- * wears it, or is no file. A refusal of the moment — the heap (ERR_NO_MEMORY,
+/* By the Settle's holder as its cycle begins, no lock held: each living file
+ * the verdict rolls back marked so in its record (ink.h, InkUndone), so the
+ * stitch that lays the verdict down lays the mark with it. OK once every one
+ * bears it, or is no file. A refusal of the moment — the heap (ERR_NO_MEMORY,
  * the cycle waits for pages), the ribbon's room (ERR_TAGFS_NO_SPACE, tried a
  * window on), a volume that takes no change now — refuses the cycle, and the
- * next puts the rest on: never left out. Only a file that can never take the
- * tag goes without, said by its id. */
-error_t  ErrataWorn(void);
+ * next marks the rest: never left out. Only a file that can never take the
+ * mark goes without, said by its id. */
+error_t  ErrataMarked(void);
 
 /* The Undones the verdict lays: how many, their bytes at the most with their
  * heads, and the longest body. */

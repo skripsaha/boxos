@@ -8897,11 +8897,11 @@ STAND_HELD="
 # stand_endpaper 6, stand_errata 8, stand_toll 5, stand_dog_ear 9,
 # stand_slip 14, stand_away 14, stand_tip_in 10, stand_slip_promise 5,
 # stand_book_glean 2, stand_escheat 7, stand_parity 2, stand_book_room 11,
-# stand_commonhold 1, stand_conjugate 5, stand_dedup 7. Counted off the code,
+# stand_commonhold 1, stand_conjugate 5, stand_dedup 6. Counted off the code,
 # not a run (K9): a suite that drops out of the walk is a test that stopped
 # covering anything, and the count is where that shows. How many of them pass
 # and how many stand aside is the road's — said, not pinned.
-STAND_RUN=453
+STAND_RUN=452
 
 # What a VOLUME_TESTS kernel says of a record memory holds that is not the
 # file a format-v1 Ink packed (plot_conveyance.c, PackV1Agrees and

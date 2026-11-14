@@ -5,13 +5,12 @@
 #include "volume_ribbon.h"
 #include "../settle/settle.h"
 #include "../settle/sewing.h"
+#include "../ink/ink.h"
 
 /* The most a varint takes, and an Undone's fields before its fids: seq_back,
  * why and the count. */
 #define ERRATA_VARINT_MOST  10u
 #define ERRATA_FIELDS       3u
-
-static const TagSpelling s_undone_tag = { .key = "settle", .key_len = 6, .value = "undone", .value_len = 6 };
 
 /* One Undone a stitch undone (§2.8): a stitch both reasons undo is undone once,
  * for the first found — the check of the data comes before the replay
@@ -67,15 +66,15 @@ error_t ErrataClosed(void)
         BookErratum* e = &g_book.errata[i];
         RibbonListSorted(e->fids, &e->nfids);
         for (uint32_t k = 0; k < e->nfids; k++)
-            if (!RibbonListAdd(&g_book.wear, &g_book.nwear, &cap, e->fids[k]))
+            if (!RibbonListAdd(&g_book.mark, &g_book.nmark, &cap, e->fids[k]))
                 return ERR_NO_MEMORY;
     }
-    RibbonListSorted(g_book.wear, &g_book.nwear);
-    g_book.worn = 0;
+    RibbonListSorted(g_book.mark, &g_book.nmark);
+    g_book.marked = 0;
     if (g_book.nerrata)
         kprintf("[TagFS] the mount's verdict rolls back %u file(s) of %u stitch(es): held for the first stitch of the "
-                "session that settles — an Undone of each, and settle:undone on each file that lives (§2.8)\n",
-                g_book.nwear, g_book.nerrata);
+                "session that settles — an Undone of each, and each file that lives marked rolled back in its record (§2.8)\n",
+                g_book.nmark, g_book.nerrata);
     return OK;
 }
 
@@ -93,37 +92,37 @@ void ErrataAsk(void)
 }
 
 /*
- * Whether the tag's refusal is the moment's, not the file's: the heap, the
+ * Whether the mark's refusal is the moment's, not the file's: the heap, the
  * ribbon's room, or a volume that takes no change now — a stopping machine's
  * (the halt's own cycle Inks its verdict all the same, ink.c InkVolumeBegins),
  * one gone, one only read, a door shut behind it. The cycle is refused for
- * it and the tag put on again by the next: the Undone is never laid without
- * it. What the file itself refuses for good — a warrant it asks, a record
- * with no room for one more tag — no cycle ever changes.
+ * it and the mark made again by the next: the Undone is never laid without
+ * it. What the file itself refuses for good no cycle ever changes.
  */
-static bool ErrataWornLater(error_t rc)
+static bool ErrataMarkedLater(error_t rc)
 {
     return rc == ERR_NO_MEMORY || rc == ERR_WOULD_BLOCK || rc == ERR_TAGFS_NO_SPACE ||
            rc == ERR_DEVICE_NOT_READY || rc == ERR_TAGFS_READ_ONLY || rc == ERR_TAGFS_NOT_INITIALIZED;
 }
 
-error_t ErrataWorn(void)
+error_t ErrataMarked(void)
 {
-    while (g_book.worn < g_book.nwear) {
-        uint64_t fid = g_book.wear[g_book.worn];
-        error_t  rc  = tagfs_add_tag_string(fid, &s_undone_tag, INK_UNWARRANTED);
+    while (g_book.marked < g_book.nmark) {
+        uint64_t   fid = g_book.mark[g_book.marked];
+        InkReceipt receipt;
+        error_t    rc  = InkUndone(fid, &receipt);
         /* The ribbon's room comes back only by a cycle that settles, and on a
          * book no park can name it: a cycle refused for it is tried again a
          * window on (cadence.c, CadenceRunEnded). */
         if (rc == ERR_WOULD_BLOCK)
             rc = ERR_TAGFS_NO_SPACE;
-        if (ErrataWornLater(rc))
+        if (ErrataMarkedLater(rc))
             return rc;
         if (rc != OK && rc != ERR_FILE_NOT_FOUND)
-            kprintf("[TagFS] file %llu, rolled back by the mount's verdict, can never take settle:undone (error %u): "
-                    "its Undone is laid without it, and the mount's line names the file\n",
+            kprintf("[TagFS] file %llu, rolled back by the mount's verdict, can never be marked so in its record "
+                    "(error %u): its Undone is laid without the mark, and the mount's line names the file\n",
                     (unsigned long long)fid, (unsigned)rc);
-        g_book.worn++;
+        g_book.marked++;
     }
     return OK;
 }
@@ -170,7 +169,7 @@ void ErrataSettled(uint64_t seq)
     if (!ErrataHeld())
         return;
     kprintf("[TagFS] stitch %llu settled the mount's verdict: %u Undone(s), %u file(s) rolled back — the book's "
-            "now, and memory lets it go\n", (unsigned long long)seq, g_book.nerrata, g_book.nwear);
+            "now, and memory lets it go\n", (unsigned long long)seq, g_book.nerrata, g_book.nmark);
     ErrataLetGo();
 }
 
@@ -179,11 +178,11 @@ void ErrataLetGo(void)
     for (uint32_t i = 0; i < g_book.nerrata; i++)
         kfree(g_book.errata[i].fids);
     kfree(g_book.errata);
-    kfree(g_book.wear);
+    kfree(g_book.mark);
     g_book.errata    = NULL;
     __atomic_store_n(&g_book.nerrata, 0u, __ATOMIC_RELEASE);
     g_book.caperrata = 0;
-    g_book.wear      = NULL;
-    g_book.nwear     = 0;
-    g_book.worn      = 0;
+    g_book.mark      = NULL;
+    g_book.nmark     = 0;
+    g_book.marked      = 0;
 }

@@ -82,12 +82,12 @@ static error_t InkBookFieldsLocked(uint64_t fid, const RecordWhere* was, const I
 }
 
 error_t InkBookFields(uint64_t fid, FileRecord* cur, const RecordWhere* was, const InkFieldsPlan* f,
-                      const char* name, uint32_t add, InkReceipt* out)
+                      const char* name, uint32_t add, uint32_t flags, InkReceipt* out)
 {
     TagFSState*     fs    = InkState();
     TagBitmapStake* stake = NULL;
     Jot*            spent = NULL;
-    FileRecord*     rec   = FileRecordRelabel(cur, name, f->tags, f->count, cur->flags);
+    FileRecord*     rec   = FileRecordRelabel(cur, name, f->tags, f->count, flags);
     Jot*            j     = rec ? JotMake(JOT_LABELED, fid, NULL, NULL) : NULL;
     error_t         rc    = j ? OK : ERR_NO_MEMORY;
     if (rc == OK && f->adds)

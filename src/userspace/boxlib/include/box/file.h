@@ -218,8 +218,8 @@ int escheat(EscheatAnswer* said);
  * ground, `fid`'s own blocks let go: the volume holds the bytes once, and both
  * files read what they read before. Every block alike or none laid. Only a
  * program wearing system or god may ask (ERR_ACCESS_DENIED,
- * ERR_PERMISSION_DENIED); a file wearing dedup:off is neither laid nor laid
- * on, a file the system keeps is never laid, and the kernel's file neither.
+ * ERR_PERMISSION_DENIED); a file the system keeps is never laid, and the
+ * kernel's file neither laid nor laid on.
  * The verdict comes back in *said whatever the answer — `why` as
  * boxos_decks.h names it for obj.conjugate.
  */

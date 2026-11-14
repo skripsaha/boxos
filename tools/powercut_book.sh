@@ -219,11 +219,11 @@ pc_logged_lines() {
 # sessions — C16: the logger's run, and the first of its cuts whose stitch
 # landed and some of its data did not (C3, a stitch whose toll spared the
 # flush of its data) booted: its mount rolls the file back, the session's first
-# stitch lays the verdict down (an Undone, the tag settle:undone), the session
+# stitch lays the verdict down (an Undone, each file marked so in its record), the session
 # goes on past the Quire it lies in and the lag, so the ground the verdict let
 # go matures, and writes a file of data on ground that has, the power button;
 # the census of what that session left shows the file rolled back as it was
-# and wearing settle:undone, nothing rolled back again, no block of two
+# and marked so in its record, nothing rolled back again, no block of two
 # owners, and both mounts are the ones predicted.
 pc_sessions() {
     pc_logged_lines "$PC_LOG_LINES" || return 1

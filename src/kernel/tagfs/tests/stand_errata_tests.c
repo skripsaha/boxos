@@ -30,14 +30,13 @@
 // on a mount before any cycle ran (C16, the cut before the Undone settled).
 // Then the session's first cycle runs, and its stitch is held to the law: an
 // Undone of each stitch undone right after its StitchHead, before any other
-// record, and every file rolled back wearing settle:undone, which a query by
-// the tag finds; mounted again on it, the verdict is the Undone's and the
-// state the same (C16, the Undone settled). Everything laid is put back.
+// record, and every file rolled back marked so in its record — never a tag:
+// a file's tags are its user's; mounted again on it, the verdict is the
+// Undone's and the state the same (C16, the Undone settled). Everything laid
+// is put back.
 // ============================================================================
 
 #define STAND_ERRATA_WIDE_FID  ((1ull << 32) + 5u)
-
-static const TagSpelling s_undone_tag = { .key = "settle", .key_len = 6, .value = "undone", .value_len = 6 };
 
 /* A Shaped of `fid` over its gen `base` stitches back, its one block put in
  * at `block` with `digest` — the digest its data would have, or not. */
@@ -65,22 +64,14 @@ static uint64_t StandErrataBlock(uint64_t fid)
     return StandBlockOf(fid, 0, &block) ? block : 0;
 }
 
-/* Whether file `fid` wears settle:undone, and a query by the tag finds it. */
-static bool StandErrataWears(uint64_t fid)
+/* Whether file `fid`'s record bears the verdict's mark, TAGFS_FILE_UNDONE. */
+static bool StandErrataMarked(uint64_t fid)
 {
-    TagFSState* fs = tagfs_get_state();
-    uint32_t    id = TagRegistryLookup(fs->registry, &s_undone_tag);
-    uint64_t    found[8];
-    TagFSPage   page;
-    if (id == TAGFS_INVALID_TAG_ID || !TagBitmapHas(fs->bitmap_index, id, fid))
-        return false;
-    memset(&page, 0, sizeof(page));
-    if (TagBitmapQueryPage(fs->bitmap_index, &id, 1, NULL, 0, NULL, 0, 0, found, 8, false, &page) != 0)
-        return false;
-    for (uint32_t i = 0; i < page.delivered; i++)
-        if (found[i] == fid)
-            return true;
-    return false;
+    FileRecord* rec  = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    bool        mark = rec && (rec->flags & TAGFS_FILE_UNDONE);
+    if (rec)
+        FileRecordRelease(rec);
+    return mark;
 }
 
 /* The `k`-th record of the stitch the session's first cycle sewed, read as an
@@ -137,7 +128,7 @@ static bool StandErrataCarries(const RibbonUnit* u, uint64_t seq, uint64_t why, 
  * do not hold — its data never landed. Mounted, F stands as stitch top+1
  * left it, the second block neither a file's nor free, the volume written on;
  * mounted again before any cycle, the same. The first cycle carries the
- * Undone, and F settle:undone; mounted on it, the same F — said by the
+ * Undone, and F marked; mounted on it, the same F — said by the
  * Undone now, the newest stitch no longer the one undone. */
 static TestResult TestStandErrataNotLanded(void)
 {
@@ -174,15 +165,15 @@ static TestResult TestStandErrataNotLanded(void)
     TEST_ASSERT(StandErrataFirstCycle(&w, &u), "the session's first cycle settles");
     TEST_ASSERT(StandErrataCarries(u, w.top + 2u, UNDONE_NOT_LANDED, w.fid),
                 "its stitch carries the Undone of the stitch undone, why 1, first — before any Coined");
-    TEST_ASSERT(StandErrataWears(w.fid), "and the file rolled back wears settle:undone, found by the tag");
+    TEST_ASSERT(StandErrataMarked(w.fid), "and the file rolled back is marked so in its record");
     RibbonUnitLetGo(u);
     u = NULL;
     TEST_ASSERT(TagFSStandLetGo() && StandRibbonUp(), "the volume mounts on the Undone");
     MountBookStandSaid(&said);
     TEST_ASSERT(said.ribbon[RIBBON_CODE_UNDONE] == 1 && said.ribbon[RIBBON_CODE_NOT_LANDED] == 0,
                 "the Undone is the verdict now; no data is checked again");
-    TEST_ASSERT(!TagFSIsUnderGlass() && StandErrataBlock(w.fid) == w.free && StandErrataWears(w.fid),
-                "the file stands where it stood, wearing settle:undone, the volume written on");
+    TEST_ASSERT(!TagFSIsUnderGlass() && StandErrataBlock(w.fid) == w.free && StandErrataMarked(w.fid),
+                "the file stands where it stood, marked rolled back, the volume written on");
 out:
     RibbonUnitLetGo(u);
     if (!StandRibbonPutBack(&w))
@@ -258,7 +249,7 @@ static TestResult TestStandErrataAsked(void)
     TEST_ASSERT(moved && !StandErrataCycling(), "and the cycle sewed a stitch and ended");
     TEST_ASSERT(StandStitchRead(&u) && StandErrataCarries(u, w.top + 2u, UNDONE_NOT_LANDED, w.fid),
                 "the session's first, carrying the verdict");
-    TEST_ASSERT(StandErrataWears(w.fid), "and the file rolled back wears settle:undone");
+    TEST_ASSERT(StandErrataMarked(w.fid), "and the file rolled back is marked so in its record");
 out:
     if (let_go)
         SettleCadenceHold(true);
@@ -351,7 +342,7 @@ static TestResult TestStandErrataRot(void)
     TEST_ASSERT_EQ(StandErrataBlock(w.fid), w.free, "the file stays as it last matched");
     TEST_ASSERT(StandErrataFirstCycle(&w, &u), "the session's first cycle settles");
     TEST_ASSERT(StandErrataCarries(u, w.top + 2u, UNDONE_ROT, w.fid), "its stitch carries the Undone, why 2, first");
-    TEST_ASSERT(StandErrataWears(w.fid), "and the file wears settle:undone");
+    TEST_ASSERT(StandErrataMarked(w.fid), "and the file is marked so in its record");
     RibbonUnitLetGo(u);
     u = NULL;
     TEST_ASSERT(TagFSStandLetGo() && StandRibbonUp(), "the volume mounts on the Undone");
@@ -419,8 +410,8 @@ static TestResult TestStandErrataRotLate(void)
     MountBookStandSaid(&said);
     TEST_ASSERT(said.ribbon[RIBBON_CODE_UNDONE] == 1 && said.ribbon[RIBBON_CODE_BASE_MISMATCH] == 0,
                 "both records of the file are passed over by the Undone");
-    TEST_ASSERT(!TagFSIsUnderGlass() && StandErrataBlock(w.fid) == w.free && StandErrataWears(w.fid),
-                "and the file stands where the first mount left it, wearing settle:undone");
+    TEST_ASSERT(!TagFSIsUnderGlass() && StandErrataBlock(w.fid) == w.free && StandErrataMarked(w.fid),
+                "and the file stands where the first mount left it, marked rolled back");
 out:
     RibbonUnitLetGo(u);
     if (!StandRibbonPutBack(&w))
@@ -526,7 +517,7 @@ out:
 
 /* The verdict's first cycle where the mount gave the ribbon no next_quire
  * (RibbonNextGivenAtMount, refused): the cycle asks for one at its TAKE before
- * the verdict's settle:undone claims room past it (StitchRunStep) — so the
+ * the verdict's mark claims room past it (StitchRunStep) — so the
  * first cycle settles, carrying the Undone, and is not refused for want of
  * room a window on, every cycle after the same. */
 static TestResult TestStandErrataNextRefused(void)
@@ -573,7 +564,7 @@ static TestResult TestStandErrataNextRefused(void)
                 "the session's first cycle settles: it asks for a next_quire before the tag claims room past it");
     TEST_ASSERT(StandErrataCarries(u, w.top + 2u, UNDONE_NOT_LANDED, w.fid),
                 "its stitch carries the Undone of the stitch undone, first");
-    TEST_ASSERT(StandErrataWears(w.fid), "and the file rolled back wears settle:undone");
+    TEST_ASSERT(StandErrataMarked(w.fid), "and the file rolled back is marked so in its record");
 out:
     if (armed)
         (void)RibbonStandNextRefused(false);

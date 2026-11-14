@@ -204,9 +204,10 @@ bool     SettleMediumLied(void);
 //
 // A frequent small writer — small appends to one file, each smaller than what
 // settling it costs the medium, again before a Lull has passed (on a book,
-// before the window has: its cycles come at most one a window) — or one whose
-// file wears settle:lazy, does not start cycles by Lull: its changes wait for
-// the window or a demand.
+// before the window has: its cycles come at most one a window) — does not
+// start cycles by Lull: its changes wait for the window or a demand. It is
+// told by what it does, never by a word on its file: a file's tags are its
+// user's.
 // ============================================================================
 
 #define SETTLE_SHARE      5u                  /* percent of the medium's time */
@@ -223,8 +224,8 @@ typedef enum {
 } SettleDemandKind;
 
 /* An Ink was made (after its lock was dropped): the window's clock starts for
- * it, and the committer is woken. `lazy`: a frequent small writer's, or its
- * file wears settle:lazy — it does not start a cycle by Lull. */
+ * it, and the committer is woken. `lazy`: a frequent small writer's — it does
+ * not start a cycle by Lull. */
 void     SettleInked(uint64_t gen, bool lazy);
 
 /* A demand: the next cycle begins at the committer's next service point, with
@@ -276,13 +277,13 @@ void     SettleCadenceHold(bool hold);
 /*
  * Format v2's writer (settle/sewing.c). StitchBookRefused: no Quire took a
  * stitch's write — the volume may only be read until it is mounted again, part
- * of what TagFSReadOnly answers (M-6). StitchWearsVerdict: this core is the
- * Settle's holder putting settle:undone on the files of the mount's verdict,
+ * of what TagFSReadOnly answers (M-6). StitchMarksVerdict: this core is the
+ * Settle's holder marking the files of the mount's verdict in their records,
  * before its cycle's snapshot — Inks of the cycle itself, which a stopping
  * machine's halt does not refuse (ink.c, InkVolumeBegins).
  */
 bool     StitchBookRefused(void);
-bool     StitchWearsVerdict(void);
+bool     StitchMarksVerdict(void);
 
 /* A part of format v1's cycle — the pool's Spares, Glean, the Ledger's write —
  * reached on a book: a defect of the road there, which the cycle's dispatch by

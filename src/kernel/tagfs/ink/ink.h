@@ -119,6 +119,13 @@ error_t InkFieldsLaid(uint64_t fid, const char* name, uint32_t add, uint32_t dro
 error_t InkFields(uint64_t fid, const char* name, uint32_t add, uint32_t drop, InkWarrant warrant,
                   InkReceipt* out);
 
+/* A book's file rolled back by the mount's verdict (mount/errata.h): its
+ * record marked TAGFS_FILE_UNDONE by an ordinary Ink, its name and tags as
+ * they are — the system's own word on the file, never one of its tags. OK, and
+ * OK with no Ink for one marked already; ERR_UNSUPPORTED on format v1, or the
+ * refusal an Ink of a file's fields answers. */
+error_t InkUndone(uint64_t fid, InkReceipt* out);
+
 /* A new file named `name`, wearing the `count` tags in `tags` (the name's
  * first, no two alike). OK and its id, or the refusal with no file made and no
  * trace of one — the id it would have taken is taken by the next. */

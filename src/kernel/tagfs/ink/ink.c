@@ -206,12 +206,12 @@ error_t InkVolumeTakes(void)
 /* Whether the volume takes a change not begun yet: none once a stopping
  * machine's halt shut it (TagFSShutForHalt). Asked in the first half alone — a
  * change begun before the shut is the halt's to settle, and a write's bytes may
- * already stand in place. The settle:undone a mount's verdict owes is put on by
+ * already stand in place. The mark a mount's verdict owes its files is made by
  * the cycle itself before its snapshot, on the core that holds it — on that
- * cycle's books, a halt's too (sewing.c, StitchWorn). */
+ * cycle's books, a halt's too (sewing.c, StitchMarked). */
 error_t InkVolumeBegins(void)
 {
-    if (SettleHalting() && !StitchWearsVerdict())
+    if (SettleHalting() && !StitchMarksVerdict())
         return ERR_DEVICE_NOT_READY;
     return InkVolumeTakes();
 }
@@ -300,20 +300,6 @@ error_t InkMayChange(uint64_t fid, const uint32_t* tags, uint32_t tag_count,
 // A Plot's size and extents
 // ----------------------------------------------------------------------------
 
-/* Whether the file wears settle:lazy — its program's own word that its changes
- * wait for the window. */
-static bool InkWearsLazy(const FileRecord* cur)
-{
-    TagSpelling lazy = { .key = "settle", .key_len = 6, .value = "lazy", .value_len = 4 };
-    uint32_t    id   = TagRegistryLookup(InkState()->registry, &lazy);
-    if (id == TAGFS_INVALID_TAG_ID)
-        return false;
-    for (uint32_t i = 0; i < cur->tag_count; i++)
-        if (cur->tags[i] == id)
-            return true;
-    return false;
-}
-
 /*
  * Whether a write is a frequent small writer's (settle.h), told by what it
  * does: it grew the file by data that cost the medium less time than the last
@@ -329,8 +315,6 @@ static bool InkPlotLazy(const Plot* p, const FileRecord* cur, uint64_t now_us, b
 {
     uint64_t d = SettleLastDUs();
     *small = p->size > p->size_before && d != 0 && p->data_us < d;
-    if (InkWearsLazy(cur))
-        return true;
     return *small && cur->small_append_us != 0 && now_us > cur->small_append_us &&
            now_us - cur->small_append_us < (p->book ? SETTLE_WINDOW_US : SettleLullUs());
 }
@@ -497,7 +481,7 @@ static error_t InkFieldsOnce(uint64_t fid, const char* name, uint32_t add, uint3
         goto out;
     }
     if (rc == OK && fs->format == DEED_FORMAT_V2) {
-        rc = InkBookFields(fid, cur, &was, &f, meta.filename, add, out);
+        rc = InkBookFields(fid, cur, &was, &f, meta.filename, add, cur->flags, out);
         goto out;
     }
     /* The room format v1 judges first, on the extents the record names, as it
@@ -563,6 +547,37 @@ error_t InkFields(uint64_t fid, const char* name, uint32_t add, uint32_t drop, I
     if (InkState()->format == DEED_FORMAT_V2 && warrant == INK_WARRANTED && InkTagGuarded(add))
         return EngrossGuarded(fid, name, add, drop, out);
     return InkFieldsLaid(fid, name, add, drop, warrant, out);
+}
+
+static error_t InkUndoneOnce(uint64_t fid, InkReceipt* out)
+{
+    RecordWhere   was;
+    InkFieldsPlan f = { 0 };
+    FileRecord*   cur = FileMapRecordHold(InkState()->files, fid, &was);
+    if (!cur)
+        return ERR_FILE_NOT_FOUND;
+    error_t rc = InkVolumeBegins();
+    if (rc == OK && (cur->flags & TAGFS_FILE_UNDONE))
+        out->gen = was.gen;
+    else if (rc == OK && !InkFieldsTags(cur, NULL, TAGFS_INVALID_TAG_ID, TAGFS_INVALID_TAG_ID, &f))
+        rc = ERR_NO_MEMORY;
+    else if (rc == OK)
+        rc = InkBookFields(fid, cur, &was, &f, cur->name, TAGFS_INVALID_TAG_ID, cur->flags | TAGFS_FILE_UNDONE,
+                           out);
+    kfree(f.tags);
+    FileRecordRelease(cur);
+    return rc;
+}
+
+error_t InkUndone(uint64_t fid, InkReceipt* out)
+{
+    if (InkState()->format != DEED_FORMAT_V2)
+        return ERR_UNSUPPORTED;
+    error_t rc;
+    do {
+        rc = InkUndoneOnce(fid, out);
+    } while (rc != OK && InkGoesRound(&rc, INK_MAKES_SPARES));
+    return rc;
 }
 
 // ----------------------------------------------------------------------------

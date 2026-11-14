@@ -293,7 +293,6 @@ static const char* const s_why[] = {
     [CONJUGATE_LAID]        = "laid",
     [CONJUGATE_UNWARRANTED] = "unwarranted",
     [CONJUGATE_KEPT]        = "kept",
-    [CONJUGATE_DECLINED]    = "dedup:off",
     [CONJUGATE_UNSHAPED]    = "not plain ground",
     [CONJUGATE_UNDIGESTED]  = "no digest that holds",
     [CONJUGATE_DIFFERS]     = "digests that differ",
@@ -318,9 +317,9 @@ static void DedupPassSay(void)
         ksnprintf(walk, sizeof(walk), ", stopped there for this pass (error %u)", (unsigned)s_pass.walk_rc);
     kprintf("[TagFS] Dedup after Tally %llu: %llu block(s) written since the Tally before weighed; %llu matched to "
             "one written beside it and %llu to one the book's DIGESTS names; %llu block(s) laid on the blocks they "
-            "duplicate, %llu in series shorter than %u left as they are, %llu passed over (a file kept or wearing "
-            "dedup:off, a copy in its original's own file, a block no file names), %llu refused%s; the walk of "
-            "DIGESTS at block %llu%s, %llu block(s) kept in Commonplace\n",
+            "duplicate, %llu in series shorter than %u left as they are, %llu passed over (a file the system keeps, "
+            "a copy in its original's own file, a block no file names), %llu refused%s; the walk of DIGESTS at "
+            "block %llu%s, %llu block(s) kept in Commonplace\n",
             (unsigned long long)s_pass.tally, (unsigned long long)s->weighed, (unsigned long long)s->among, (unsigned long long)s->book,
             (unsigned long long)s->laid, (unsigned long long)s->scant, DEDUP_SERIES_LEAST, (unsigned long long)s->passed,
             (unsigned long long)s->refused, why, (unsigned long long)s_cursor, walk, (unsigned long long)CommonplaceCount());
