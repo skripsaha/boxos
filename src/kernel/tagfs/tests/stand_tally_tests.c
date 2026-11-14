@@ -22,6 +22,8 @@
 #include "block_fail.h"
 #include "cpu_calibrate.h"
 #include "atomics.h"
+#include "touch.h"
+#include "logbook.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -39,7 +41,7 @@
 // rotten range — mounted, its files locked, its blocks held (C19:
 // stand_tally_range_tests.c); every road that would change a file is refused
 // before a byte, and every door below the glass of a volume under it; a rotten data block is refused on the three roads a read
-// takes, and a block with no digest as one that does not match; a medium that
+// takes, and published once on the integrity tag; a block with no digest as one that does not match; a medium that
 // leaves and comes back has its book read again, with nothing read to judge
 // it; and the live files are the records, with no table to agree with. And BLOCKFAIL's plan of bad sectors in
 // two places at once, which C19 asks of it, for any format. And the block map derived from the owners'
@@ -501,6 +503,94 @@ out:
 }
 
 // ----------------------------------------------------------------------------
+// A rotten data block, published on the integrity tag once
+// ----------------------------------------------------------------------------
+
+/* What an ear on the integrity tag heard of one block. */
+typedef struct {
+    uint64_t block;
+    uint32_t heard;
+} StandTallyRotEar;
+
+static StandTallyRotEar s_tally_rot_ear;
+
+/* Records only: it runs inside the publish, with the publisher's locks. */
+static void StandTallyRotHeard(TouchTag tag_id, const void* payload, uint32_t plen, uint32_t source_pid, void* ctx)
+{
+    StandTallyRotEar* ear = (StandTallyRotEar*)ctx;
+    uint32_t          block;
+    (void)tag_id;
+    (void)source_pid;
+    if (!payload || plen < sizeof(block))
+        return;
+    memcpy(&block, payload, sizeof(block));
+    if (block == ear->block)
+        __atomic_add_fetch(&ear->heard, 1u, __ATOMIC_RELAXED);
+}
+
+/*
+ * A rotten block of a book is published on the "integrity" tag, once a mount:
+ * an ear on the tag a program asks for by name (TouchTagResolve, the door
+ * SysTouchIntern gives it) hears the block a read refused, and not again when
+ * it is read again; and the tag is an occurrence of the kernel's Logbook, no
+ * name the book's registry was given to carry. The third block of the run, so
+ * no rot named before in this mount (stand_tally_rot_three_paths rots the
+ * second) answers for it. Red before: a book's mount never named the tag, and
+ * the refused read said "published on the integrity tag" with nothing
+ * published.
+ */
+static TestResult TestStandTallyRotPublished(void)
+{
+    TestResult  verdict = TEST_PASS;
+    uint8_t     seat    = tagfs_get_seat();
+    uint64_t    base    = tagfs_get_volume_base();
+    const char* aside   = StandTallyAside();
+    uint64_t    fid = 0, first = 0, vlba = 0;
+    uint8_t*    was     = g_test_buffer;
+    uint8_t*    rot     = g_test_buffer + TAGFS_SECTOR_SIZE;
+    bool        rotten  = false;
+    TouchTag    full = TOUCH_TAG_INVALID, bare = TOUCH_TAG_INVALID;
+    TouchWatch* ear     = NULL;
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandTallyRunOfThree(&fid, &first), "a file of three blocks in one run");
+    TEST_ASSERT_OK(TouchTagResolve("integrity", sizeof("integrity") - 1u, &full, &bare),
+                   "the integrity tag is had by name, as a program asks for it");
+    memset(&s_tally_rot_ear, 0, sizeof(s_tally_rot_ear));
+    s_tally_rot_ear.block = first + 2u;
+    ear = TouchWatchSet(bare, StandTallyRotHeard, &s_tally_rot_ear);
+    TEST_ASSERT(ear != NULL, "an ear on it");
+
+    vlba = (first + 2u) * TAGFS_BLOCK_SECTORS;
+    TEST_ASSERT(StandTallySector(seat, base, vlba, was, false), "the file's third block is read");
+    memcpy(rot, was, TAGFS_SECTOR_SIZE);
+    rot[29] ^= 0x5A;
+    TEST_ASSERT(StandTallySector(seat, base, vlba, rot, true), "and rots on the medium");
+    rotten = true;
+    tagfs_readahead_invalidate(first + 2u);
+
+    TEST_ASSERT_EQ(StandTallyReadAt(fid, 2u * TAGFS_BLOCK_SIZE, 100), ERR_CHECKSUM,
+                   "a read of the rotten block is refused");
+    TestEvidence("times the rotten block was published on the integrity tag, of 1", s_tally_rot_ear.heard);
+    TEST_ASSERT_EQ(s_tally_rot_ear.heard, 1, "and the block is published on the integrity tag");
+    TEST_ASSERT_EQ(StandTallyReadAt(fid, 2u * TAGFS_BLOCK_SIZE, 100), ERR_CHECKSUM,
+                   "a read of it again is refused again");
+    TEST_ASSERT_EQ(s_tally_rot_ear.heard, 1, "and not published again: this mount named it already");
+    TEST_ASSERT(TouchTagIsKernel(bare), "the tag is the kernel's Logbook's, not a name of the book's registry");
+out:
+    if (ear)
+        TouchWatchClear(ear);
+    if (rotten) {
+        if (!StandTallySector(seat, base, vlba, was, true))
+            verdict = TestFailedAt(__FILE__, __LINE__, "the rotten sector would not take its bytes "
+                                   "back (vlba, 0)", (int64_t)vlba, 0);
+        tagfs_readahead_invalidate(first + 2u);
+    }
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
 // A block no DIGESTS element names is refused, as the census says
 // ----------------------------------------------------------------------------
 
@@ -903,6 +993,8 @@ static const TestCase g_stand_tally_tests[] = {
     { .name = "stand_tally_writes_refused", .func = TestStandTallyWritesRefused,
       .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V2 },
     { .name = "stand_tally_rot_three_paths", .func = TestStandTallyRotThreePaths,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_tally_rot_published", .func = TestStandTallyRotPublished,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_tally_undigested_refused", .func = TestStandTallyUndigestedRefused,
       .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V2 },

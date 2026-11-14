@@ -25,7 +25,8 @@
 // mount a waiter is answered only once a stitch of this mount settled under
 // its flush (X2-3); a tag given an id is laid down as a Coined and is the same
 // id at the next mount; a Use Context the person changes is laid down once,
-// and the same word again lays nothing; the halt's last stitch says CLEAN; a
+// the same word again lays nothing, and a word with no room on the ribbon
+// leaves the volume holding none (09-08); the halt's last stitch says CLEAN; a
 // write the medium refuses is taken again with a new seq at the start of the
 // next_quire (C25, M-6), and where no Quire is left to go on in the volume
 // may only be read, its waiters told so; the ribbon does not eat the ground a
@@ -488,6 +489,57 @@ out:
 }
 
 // ----------------------------------------------------------------------------
+// A word with no room: the word the volume held is forgotten (09-08)
+// ----------------------------------------------------------------------------
+
+/*
+ * The owner's rule (09-08): better to forget than to remember a word the
+ * person no longer says. A word whose stitch would fill the rest of its Quire
+ * and all of the next finds no room on the ribbon: it is refused
+ * ERR_TAGFS_NO_SPACE, and the stitch laid without it carries an empty
+ * UseContext in its place — the volume holds no word from then on, and the
+ * mount after brings the old one back from neither the ribbon nor the Tally.
+ * Red before: the volume kept the word it held, in memory and on the medium.
+ */
+static TestResult TestStandStitchUseForgotten(void)
+{
+    TestResult   verdict = TEST_PASS;
+    StandStitch  s;
+    RibbonCursor l;
+    RibbonUnit*  u    = NULL;
+    UseText*     held = NULL;
+    bool         kept = false;
+    uint8_t      body[16];
+    const char*  aside = StandStitchAside(&s);
+    static const char said[] = "old,word";
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT_OK(StandStitchSay(said, sizeof(said) - 1u, 1, &kept), "a Use Context is said to the volume");
+    TEST_ASSERT(kept, "and the volume holds it");
+    RibbonCursorStand(&l);
+    uint64_t room = l.quire.blocks * TAGFS_BLOCK_SECTORS - l.off + l.next.blocks * TAGFS_BLOCK_SECTORS;
+    TEST_ASSERT_EQ(StandStitchSayFilling(room, 'n', 2, &kept), ERR_TAGFS_NO_SPACE,
+                   "a word whose stitch would fill the rest of its Quire and all of the next is refused");
+    TEST_ASSERT(!kept, "and not remembered");
+    held = tagfs_recall_use_context(NULL);
+    TEST_ASSERT(held == NULL, "the volume forgets the word it held rather than remember one no longer said");
+    TEST_ASSERT(StandStitchRead(&u), "the stitch the refused word's cycle sewed reads back whole");
+    uint32_t len = TallyUsePut(body, NULL, 0);
+    TEST_ASSERT(StandStitchCarries(u, RIBBON_USE_CONTEXT, body, len), "and carries an empty UseContext in its place");
+    RibbonUnitLetGo(u);
+    u = NULL;
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
+    held = tagfs_recall_use_context(NULL);
+    TEST_ASSERT(held == NULL, "and recalls no word: the one it forgot does not come back");
+out:
+    UseTextDrop(held);
+    RibbonUnitLetGo(u);
+    STAND_STITCH_PUT_BACK(&s);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
 // M-6: no Quire takes the write — the volume may only be read, its waiters
 // told; the attempt torn on the medium is the ribbon's torn tail (§3.2, §3.9)
 // ----------------------------------------------------------------------------
@@ -593,9 +645,15 @@ static TestResult TestStandStitchRibbonRunsOut(void)
     TEST_ASSERT(now.out, "and said aloud");
     TEST_ASSERT(!SettleParked(), "and the cadence is not parked for room nothing on a book asks for");
     uint64_t saying = 0, ticket = 0;
-    UseTextDrop(tagfs_recall_use_context(&saying));
-    TEST_ASSERT_EQ(UseMemorySay(NULL, saying + 1u, &ticket), USE_SAID_OWED,
-                   "a word the volume does not hold is said, as a process's `use` says it");
+    UseText* memory = tagfs_recall_use_context(&saying);
+    bool     forgot = memory == NULL;
+    UseTextDrop(memory);
+    TEST_ASSERT(forgot, "the word the ribbon refused left the volume holding none: the one it held is forgotten "
+                "(09-08)");
+    UseText* word = UseTextMake("z", 1);
+    UseSaid  told = word ? UseMemorySay(word, saying + 1u, &ticket) : USE_SAID_SUPERSEDED;
+    UseTextDrop(word);
+    TEST_ASSERT_EQ(told, USE_SAID_OWED, "a word the volume does not hold is said, as a process's `use` says it");
     SettleWaitLinkCycle(&waiter.w, StandStitchAnswered);
     TEST_ASSERT_OK(TagFSSettleAsCadence(), "the cycle the cadence runs for its waiter lays its stitch without the "
                    "word, in the rest kept");
@@ -603,8 +661,8 @@ static TestResult TestStandStitchRibbonRunsOut(void)
     TEST_ASSERT(UseMemoryRefused(ticket), "the word is refused: no claim held room for it, and none comes");
     TEST_ASSERT(!now.next.blocks, "the ribbon names no next_quire");
     TEST_ASSERT(fs->ledger.free_blocks >= keep, "and the ground a Tally needs is left free");
-    UseText* memory = tagfs_recall_use_context(NULL);
-    rc = StandStitchSay(memory ? memory->text : NULL, memory ? memory->bytes : 0, k + 1u, &kept);
+    memory = tagfs_recall_use_context(NULL);
+    rc     = StandStitchSay(memory ? memory->text : NULL, memory ? memory->bytes : 0, k + 1u, &kept);
     UseTextDrop(memory);
     TEST_ASSERT_OK(rc, "the word the volume holds, said again, is answered: it is what the volume holds");
     TEST_ASSERT(kept && !TagFSReadOnly(), "and the volume holds it, still taking what its rest holds");
@@ -815,6 +873,8 @@ static const TestCase g_stand_stitch_tests[] = {
     { .name = "stand_stitch_answers_after_flush", .func = TestStandStitchAnswersAfterFlush,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_stitch_use_context", .func = TestStandStitchUseContext,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_stitch_use_forgotten", .func = TestStandStitchUseForgotten,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_stitch_coined", .func = TestStandStitchCoined,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },

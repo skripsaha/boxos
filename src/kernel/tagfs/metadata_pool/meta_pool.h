@@ -138,8 +138,6 @@ void     PoolClaimGround(uint32_t deed_head);
  * from before whatever took the volume down. With the door shut. */
 void     meta_pool_shutdown(void);
 
-void     tagfs_metadata_free(TagFSMetadata* meta);
-
 // ----------------------------------------------------------------------------
 // The mirror, and where a record sits
 // ----------------------------------------------------------------------------

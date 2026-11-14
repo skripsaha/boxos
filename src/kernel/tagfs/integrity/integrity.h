@@ -76,6 +76,12 @@ error_t  IntegrityFlush(void);
 bool     IntegrityIsInitialized(void);
 uint32_t IntegrityErrorCount(void);  // bit-rot detections this session
 
+// The rot this mount names begun afresh, each rotten block said once and
+// published on `tag` (TAGFS_INVALID_TAG_ID: said in the log only) — by
+// IntegrityInit on format v1, by the book's mount on format v2. With no TagFS
+// lock held; IntegrityShutdown ends it.
+void     IntegrityRotBegin(uint32_t tag);
+
 // The mount's census: the map's own run, which no file names, claimed.
 void     IntegrityClaimGround(void);
 

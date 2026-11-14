@@ -69,6 +69,10 @@ void    MountBookGrow(uint8_t seat);
  * is sewn past the Tally, or there is no memory. */
 error_t MountReadBook(const char** what);
 
+/* What the book promises its files, said once in plain words after the door —
+ * under glass, that nothing of it is written. Then the volume MOUNTED. */
+void    MountBookPromise(void);
+
 /* Everything the book's mount keeps, let go — the volume let go of. */
 void    MountBookLetGo(void);
 

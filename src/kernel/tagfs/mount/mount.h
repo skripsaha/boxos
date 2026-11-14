@@ -42,9 +42,9 @@
  * refusal says (mount_refused), which also takes down what came up. */
 error_t MountReadVolume(const char** what);
 
-/* What the mount promises the volume's files, said once in plain words — and,
- * on format v1, the Spares a delete stands on laid and the mount's own writes
- * flushed. After the door, the volume MOUNTED. */
+/* What a format-v1 volume promises its files, said once in plain words, the
+ * Spares a delete stands on laid and the mount's own writes flushed. After the
+ * door, the volume MOUNTED. A book's is MountBookPromise (book_mount.h). */
 void    MountPromise(void);
 
 /* A format-v1 volume standing on the Deed `head`, of ground the partition

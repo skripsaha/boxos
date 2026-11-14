@@ -199,7 +199,7 @@ static const TestCase g_integrity_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "the integrity report ring holds 64 — a 65th rotten block "
                        "is caught and never reported",
-      .format = DEED_FORMAT_V1, .analog = "stand_tally_rot_three_paths" },
+      .format = DEED_FORMAT_V1, .analog = "stand_tally_rot_published" },
 };
 
 const TestSuite g_integrity_suite = {

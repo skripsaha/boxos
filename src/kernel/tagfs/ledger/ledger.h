@@ -78,8 +78,8 @@ UseText            *LedgerCopyInherited(uint32_t copy);
  * copy that is not intact is the newest. */
 void     LedgerStandOn(uint32_t copy);
 
-/* The volume is let go of: the copies read and what it remembered go with it,
- * and the next one is read, not assumed. */
+/* The volume is let go of: the copies read and what they said of the volume
+ * go with it, and the next one is read, not assumed. */
 void     LedgerLetGo(void);
 
 /*

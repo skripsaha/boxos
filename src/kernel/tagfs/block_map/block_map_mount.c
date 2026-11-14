@@ -262,7 +262,6 @@ error_t BlockMapCensus(BlockMapOwnsFn owns, BlockMapOrphanFn orphan, void *ctx,
 
 void BlockMapUnmount(void)
 {
-    AllotmentDropAll();
     kfree(g_map.win);
     kfree(g_map.work);
     kfree(g_map.work_words);

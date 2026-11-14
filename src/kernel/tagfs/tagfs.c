@@ -9,6 +9,7 @@
 #include "file_table/file_table.h"
 #include "metadata_pool/meta_pool.h"
 #include "use_context.h"
+#include "use_memory/use_memory.h"
 #include "error.h"
 #include "ahci_sync.h"
 #include "ahci.h"
@@ -31,6 +32,7 @@
 #include "mount/perambulation.h"
 #include "mount/hold_ground.h"
 #include "mount/book_mount.h"
+#include "mount/errata.h"
 #include "read/read.h"
 #include "run/run.h"
 #include "../../kernel/drivers/timer/rtc.h"
@@ -2191,7 +2193,14 @@ error_t tagfs_init(void) {
     __atomic_add_fetch(&g_mount_epoch, 1, __ATOMIC_ACQ_REL);
     __atomic_store_n(&g_door, VOLUME_UP, __ATOMIC_RELEASE);
 
-    MountAfterDoor();
+    /* A book whose mount holds a verdict asks for the session's first cycle
+     * at once: it lays the verdict down (mount/errata.h, §3.5). After the
+     * cadence was reset for this mount, which forgets every demand. Format v1
+     * brings its integrity map up (mount/mount.h). */
+    if (g_state.format == DEED_FORMAT_V2)
+        ErrataAsk();
+    else
+        MountAfterDoor();
 
     /*
      * ‼ THE SENTENCE THAT WAS MISSING, AND ITS ABSENCE IS THE WHOLE STORY.
@@ -2234,7 +2243,10 @@ error_t tagfs_init(void) {
             g_state.ledger.next_file_id - 1,
             (unsigned long long)g_state.ledger.total_files);
 
-    MountPromise();
+    if (g_state.format == DEED_FORMAT_V2)
+        MountBookPromise();
+    else
+        MountPromise();
 
     SettleCutSayArmed();            /* nothing at all unless SETTLECUT=<point> */
     TagFSHoldGroundOpenFile();      /* nothing at all unless HOLDGROUND=on */
@@ -2275,9 +2287,10 @@ static void tagfs_clear_the_ground(void)
      * one after — its verdicts are stale before the book is freed. */
     UseContextUnbind();
 
-    /* What this volume remembered goes with it; the next one is read, not
-     * assumed. */
+    /* What this volume remembered goes with it — the Use Context's memory of
+     * it too; the next one is read, not assumed. */
     LedgerLetGo();
+    UseMemoryLetGo();
 
     if (g_state.registry) {
         tag_registry_destroy(g_state.registry);
@@ -2296,6 +2309,7 @@ static void tagfs_clear_the_ground(void)
     FileMapDestroy(g_state.files);
     g_state.files = NULL;
 
+    AllotmentDropAll();
     BlockMapUnmount();
 
     if (g_state.braid) {
@@ -2789,6 +2803,15 @@ static int tagfs_get_metadata_inside(uint64_t file_id, TagFSMetadata *out)
     return copied;
 }
 
+void tagfs_metadata_free(TagFSMetadata *meta)
+{
+    if (meta->filename) { kfree(meta->filename); meta->filename = NULL; }
+    if (meta->tag_ids)  { kfree(meta->tag_ids);  meta->tag_ids  = NULL; }
+    if (meta->extents)  { kfree(meta->extents);  meta->extents  = NULL; }
+    meta->tag_count    = 0;
+    meta->extent_count = 0;
+}
+
 TagFSState *tagfs_get_state(void)
 {
     return &g_state;
@@ -2889,6 +2912,22 @@ bool TagFSTagMatches(uint32_t tag_id, const TagSpelling *pattern)
     bool matches = TagFSTagSpelling(tag_id, &tag, NULL) && TagPatternMatches(pattern, &tag);
     tagfs_leave();
     return matches;
+}
+
+// ----------------------------------------------------------------------------
+// Snapshots
+// ----------------------------------------------------------------------------
+
+/* Said once a boot: the refusal itself is every caller's, on every request. */
+static bool g_refusal_said;
+
+error_t TagFS_SnapshotRefused(const char *asked)
+{
+    if (!__atomic_exchange_n(&g_refusal_said, true, __ATOMIC_ACQ_REL))
+        kprintf("[TagFS] %s is refused: snapshots arrive with format v2 — on format v1 a "
+                "snapshot could be taken but never read, so every request for one is "
+                "answered ERR_UNSUPPORTED\n", asked ? asked : "a snapshot request");
+    return ERR_UNSUPPORTED;
 }
 
 // ----------------------------------------------------------------------------

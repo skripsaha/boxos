@@ -1,5 +1,5 @@
 #include "block_map_derived.h"
-#include "block_map_internal.h"   /* AllotmentTakeBackLocked — a window given back before the ribbon is refused */
+#include "block_map.h"            /* AllotmentTakeBackLocked — a window given back before the ribbon is refused */
 #include "../tagfs.h"
 #include "../ink/fallow.h"    /* FallowBarsRun — ground a Tally still names, kept from the ribbon's Quire */
 #include "amp.h"           /* amp_get_core_index — the stand's HEAPFAIL on the builder's core */

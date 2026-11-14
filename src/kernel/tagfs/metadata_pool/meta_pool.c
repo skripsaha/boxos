@@ -195,15 +195,6 @@ void PoolClaimGround(uint32_t deed_head)
         GroundClaim(GROUND_POOL, deed_head, 1, 0);
 }
 
-void tagfs_metadata_free(TagFSMetadata* meta)
-{
-    if (meta->filename) { kfree(meta->filename); meta->filename = NULL; }
-    if (meta->tag_ids)  { kfree(meta->tag_ids);  meta->tag_ids  = NULL; }
-    if (meta->extents)  { kfree(meta->extents);  meta->extents  = NULL; }
-    meta->tag_count    = 0;
-    meta->extent_count = 0;
-}
-
 // ---------------------------------------------------------------------------
 // The mirror
 // ---------------------------------------------------------------------------

@@ -48,7 +48,6 @@
 #include "read_job.h"  /* a read through the port, and the sink its bytes land in */
 #include "ata.h"
 #include "touch.h"
-#include "cow.h"
 #include "plot.h"     /* PlotFind, PlotSource — the write's bytes where they are */
 #include "settle_ops.h"  /* anchor, obj.write.settled — the waits for the Settle */
 
@@ -1087,7 +1086,7 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
  *
  * All four are answered ERR_UNSUPPORTED on a format-v1 volume, whatever their
  * params: a snapshot there could be taken and never read, and snapshots arrive
- * with format v2 (TagFS_SnapshotRefused, cow.h). The four stay on the wire so a
+ * with format v2 (TagFS_SnapshotRefused, tagfs.h). The four stay on the wire so a
  * program that asks is told why, not met with an operation nobody knows.
  * ------------------------------------------------------------------------- */
 

@@ -503,7 +503,6 @@ error_t LedgerImageWrite(const SettleMark *mark)
 void LedgerLetGo(void)
 {
     LedgerReadForget();
-    UseMemoryLetGo();
     TagFSLockTake(&g_ledger_lock);
     s_left_settled.known = false;
     s_left_tried.known   = false;

@@ -128,8 +128,6 @@ typedef struct {
 
 extern BlockMapState g_map;
 
-TagFSLock    *MapLock(void);
-
 /* The window's sector when it is in memory and still, else NULL. */
 BlockMapPage *MapReady(uint32_t w);
 
@@ -290,8 +288,6 @@ uint64_t      MapMayHaveLocked(void);
 /* ---- what growing files keep in hand (allotment.c) --------------------- */
 
 void          AllotmentOverlay(uint32_t w, uint8_t *view);
-bool          AllotmentTakeBackLocked(uint64_t keep_fid);
 uint64_t      AllotmentKeptLocked(void);
-void          AllotmentDropAll(void);
 
 #endif /* TAGFS_BLOCK_MAP_INTERNAL_H */

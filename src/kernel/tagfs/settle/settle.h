@@ -141,7 +141,7 @@ bool     TagFSStandSettleBegin(void);
 /* The next cycle's seat rings seat:ready once, as a driver's recovery would
  * while the cycle runs — noted, and said later by the room's pass: just before
  * the cycle takes the count a refusal of it is judged by (`before_its_count`),
- * or right after its S0. For the stand. */
+ * or right after its S0 — a book's TAKE. For the stand. */
 void     TagFSStandSettleRings(bool before_its_count);
 
 /* The next cycle's block map answers `code` once its own writes are done —

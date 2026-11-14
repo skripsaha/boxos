@@ -347,8 +347,8 @@ static void SettleSparesMake(void)
 
 #ifdef CONFIG_VOLUME_TESTS
 /* The stand's turns of the next cycle: its seat rings right before it takes its
- * count, or right after its S0; its block map answers a refusal of the stand's
- * choosing. */
+ * count, or right after its S0 — a book's TAKE (sewing.c); its block map
+ * answers a refusal of the stand's choosing. */
 enum { SETTLE_STAND_RINGS_BEFORE = 1, SETTLE_STAND_RINGS_AFTER };
 static volatile uint8_t s_stand_rings;
 static volatile error_t s_stand_refusal;
@@ -367,12 +367,12 @@ void TagFSStandSettleRefuses(error_t code)
 }
 
 /* seat:ready noted of the volume's seat, as a driver's recovery notes it while
- * a cycle runs — `when` the stand chose: just before the cycle takes the count
+ * a cycle runs — when the stand chose: just before the cycle takes the count
  * its refusal is judged by, or after, before anything it decides. Noted, not
  * said: the room's pass says it later. */
-static void SettleStandRingsHere(uint8_t when)
+void SettleStandRingsHere(bool before_its_count)
 {
-    uint8_t chosen = when;
+    uint8_t chosen = before_its_count ? SETTLE_STAND_RINGS_BEFORE : SETTLE_STAND_RINGS_AFTER;
     if (!__atomic_compare_exchange_n(&s_stand_rings, &chosen, 0u, false,
                                      __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return;
@@ -401,13 +401,13 @@ static void SettleTakeStep(SettleSnap* snap)
         SettleSparesMake();
     UseMemoryStake();
 #ifdef CONFIG_VOLUME_TESTS
-    SettleStandRingsHere(SETTLE_STAND_RINGS_BEFORE);
+    SettleStandRingsHere(true);
 #endif
     SettleWaitersRunBegins();
     SettleTake(snap, s_run.why, CadenceRunBegins());
     s_run.s0_us = SettleNowUs();
 #ifdef CONFIG_VOLUME_TESTS
-    SettleStandRingsHere(SETTLE_STAND_RINGS_AFTER);
+    SettleStandRingsHere(false);
 #endif
 }
 
