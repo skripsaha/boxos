@@ -6,6 +6,7 @@
 #include "../settle/settle.h"
 #include "../settle/binder.h"
 #include "../dedup/dedup.h"
+#include "../keep/keep.h"
 #include "../integrity/integrity.h"
 #include "boardroom.h"
 #include "write_job.h"   /* WriteJobSeatRunsAsync — the road a program's write takes */
@@ -720,9 +721,13 @@ error_t TagFS_RunAllTests(TestStats* stats)
      * it drives, and a fault it arms is met by one of them (settle.h). Nor
      * does Dedup's pass after a Tally (dedup.h): a pass on another core would
      * lay one test's files on another's blocks under it — a test of Dedup lets
-     * it go and holds it again. */
+     * it go and holds it again. Nor does the Keep service look at the kept
+     * files (keep.h): a look under way on another core is a caller inside the
+     * door when a test lets the volume go and mounts it again, and the volume
+     * waits for it to leave. */
     SettleCadenceHold(true);
     (void)DedupHold(true);
+    (void)KeepHold(true);
     for (uint32_t s = 0; s < ARRAY_SIZE(g_suites); s++) {
         const TestSuite* suite = g_suites[s];
         for (uint32_t i = 0; i < suite->count; i++) {
@@ -760,6 +765,7 @@ error_t TagFS_RunAllTests(TestStats* stats)
             TestRun(test, registered, stats);
         }
     }
+    (void)KeepHold(false);
     (void)DedupHold(false);
     SettleCadenceHold(false);
 
