@@ -468,6 +468,9 @@ static bool DedupLayStep(void)
     } else {
         s_pass.said.refused += n;
         s_pass.why[said.why <= CONJUGATE_REFUSED ? said.why : CONJUGATE_REFUSED] += n;
+        if (rc == ERR_BUSY)
+            for (uint64_t k = 0; k < n; k++)
+                CommonplaceKeep(p[k].digest, p[k].block, s_walked);
     }
     s_pass.ask += n;
     return true;
