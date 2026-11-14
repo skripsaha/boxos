@@ -127,6 +127,7 @@ static error_t BookFileHead(BookFile* f, const uint8_t* body, uint32_t len)
     f->meta.size          = h.size;
     f->meta.created_time  = h.created_ns;
     f->meta.modified_time = h.modified_ns;
+    f->meta.keep_until    = h.keep_ns;
     f->head = true;
     return OK;
 }
@@ -469,6 +470,8 @@ error_t BookFileLockLive(uint64_t fid, const char* why)
         BookGroundHoldRun(run.start, run.count);
     for (uint32_t t = 0; rc == OK && t < rec->tag_count; t++)
         TagBitmapLeave(fs->bitmap_index, rec->tags[t], fid);
+    if (rec->flags & TAGFS_FILE_DELETED)
+        TagBitmapLeave(fs->bitmap_index, TAGFS_DELETED_MEMBERS, fid);
     FileRecordRelease(rec);
     if (rc == OK) {
         FileMapDrop(fs->files, fid, &was);
@@ -501,6 +504,8 @@ static error_t BookFileLive(BookFile* f)
     for (uint32_t t = 0; t < f->meta.tag_count; t++)
         if (tag_bitmap_set(fs->bitmap_index, f->meta.tag_ids[t], f->fid) != 0)
             return ERR_NO_MEMORY;
+    if ((f->meta.flags & TAGFS_FILE_DELETED) && tag_bitmap_set(fs->bitmap_index, TAGFS_DELETED_MEMBERS, f->fid) != 0)
+        return ERR_NO_MEMORY;
     char words[160];
     if (f->ext) {
         ksnprintf(words, sizeof(words), "a run of fid %llu carries an extension this kernel cannot carry "
@@ -653,6 +658,8 @@ void BookFacsimileUndone(uint64_t lo, uint64_t hi)
                 continue;
             for (uint32_t t = 0; t < rec->tag_count; t++)
                 TagBitmapLeave(fs->bitmap_index, rec->tags[t], ids[i]);
+            if (rec->flags & TAGFS_FILE_DELETED)
+                TagBitmapLeave(fs->bitmap_index, TAGFS_DELETED_MEMBERS, ids[i]);
             FileRecordRelease(rec);
             FileMapDrop(fs->files, ids[i], &was);
             g_book.files--;

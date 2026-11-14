@@ -115,6 +115,7 @@ typedef struct {
     uint64_t    size;
     uint64_t    created_time;
     uint64_t    modified_time;
+    uint64_t    keep_until;      /* with TAGFS_FILE_DELETED: when the volume lets the file go */
     char*       filename;
     uint32_t*   tag_ids;
     uint32_t    tag_count;

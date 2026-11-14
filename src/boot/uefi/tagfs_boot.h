@@ -43,7 +43,6 @@
  * format that will disagree with itself. */
 
 #define TAGFS_FILE_ACTIVE        (1U << 0)
-#define TAGFS_FILE_TRASHED       (1U << 1)
 
 #define TAGFS_MPOOL_DATA_SIZE     4080
 #define TAGFS_FTABLE_PER_BLOCK    510

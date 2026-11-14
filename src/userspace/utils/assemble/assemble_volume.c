@@ -53,7 +53,7 @@ static int VolumeFind(BoxAsmFiles *Files, const char *Name, const char *Tags, ui
             strcat(Ask, ",");
         strcat(Ask, Tags);
     }
-    Count = query_all_everywhere(Ask, "trashed", &Found);
+    Count = query_all_everywhere(Ask, NULL, &Found);
     free(Ask);
     if (Count < 0)
         return Count;

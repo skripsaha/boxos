@@ -30,7 +30,7 @@ KIND_NAMES = {STITCH_HEAD: "StitchHead", CLASP: "Clasp", UNDONE: "Undone", BORN:
 DATA_FLUSHED, CLEAN, MEDIUM_LIED = 1, 2, 4
 
 # Labeled.what (§2.8)
-LABEL_NAME, LABEL_FLAGS, LABEL_TAGS = 1, 2, 4
+LABEL_NAME, LABEL_FLAGS, LABEL_TAGS, LABEL_KEEP = 1, 2, 4, 8
 
 # The longest stream of a stitch a reader holds: its offsets are 32 bits
 # (volume_ribbon.h RIBBON_STREAM_MOST).
@@ -100,10 +100,11 @@ def Shaped(fid, base, size, mtime_ns, splices, digests, slip=None):
     return Record(SHAPED, b"".join(out) + _Digests(digests) + _Slip(slip))
 
 
-def Labeled(fid, base, name=None, flags=None, add=(), drop=()):
+def Labeled(fid, base, name=None, flags=None, add=(), drop=(), keep=None):
+    """keep is the deletion's one verb: the nanoseconds a file is kept until, or 0 to bring it back."""
     V = VarintPut
     what = (LABEL_NAME if name is not None else 0) | (LABEL_FLAGS if flags is not None else 0) | \
-        (LABEL_TAGS if add or drop else 0)
+        (LABEL_TAGS if add or drop else 0) | (LABEL_KEEP if keep is not None else 0)
     out = V(fid) + V(base) + V(what)
     if name is not None:
         out += V(len(name)) + name
@@ -111,6 +112,8 @@ def Labeled(fid, base, name=None, flags=None, add=(), drop=()):
         out += V(flags[0]) + V(flags[1])
     if what & LABEL_TAGS:
         out += IdsPut(sorted(add)) + IdsPut(sorted(drop))
+    if what & LABEL_KEEP:
+        out += V(keep)
     return Record(LABELED, out)
 
 
@@ -194,6 +197,8 @@ def RecordDecode(kind, body, seq):
     c, d = Cursor(body), {}
     if kind == BORN:
         d.update(fid=c.V(), flags=c.V(), size=c.V(), created_ns=c.V())
+        if d["flags"] & ondisk.FILE_DELETED:
+            raise Short("its Born is deleted — a file is born whole, and a Labeled KEEP deletes it")
         d["modified_ns"] = d["created_ns"] + c.Z()
         d["name"] = c.Take(c.V())
         d["tags"] = c.Ids()
@@ -215,6 +220,9 @@ def RecordDecode(kind, body, seq):
         d["name"] = c.Take(c.V()) if d["what"] & LABEL_NAME else None
         d["flags"] = (c.V(), c.V()) if d["what"] & LABEL_FLAGS else None
         d["add"], d["drop"] = (c.Ids(), c.Ids()) if d["what"] & LABEL_TAGS else ([], [])
+        d["keep"] = c.V() if d["what"] & LABEL_KEEP else None
+        if d["flags"] and (d["flags"][0] | d["flags"][1]) & ondisk.FILE_DELETED:
+            raise Short("its Labeled names the deleted bit in FLAGS — the bit is KEEP's to put on and take off")
     elif kind == QUITCLAIM:
         d.update(fid=c.V(), base=c.V())
     elif kind == COINED:
@@ -604,7 +612,7 @@ RIBBON_NUMBERS = (
     ("RIBBON_COINED", COINED), ("RIBBON_USE_CONTEXT", USE_CONTEXT), ("RIBBON_FROZEN", FROZEN),
     ("RIBBON_THAWED", THAWED), ("RIBBON_KINDS_KNOWN", max(KIND_NAMES)), ("STITCH_DATA_FLUSHED", DATA_FLUSHED),
     ("STITCH_CLEAN", CLEAN), ("STITCH_MEDIUM_LIED", MEDIUM_LIED), ("LABEL_NAME", LABEL_NAME),
-    ("LABEL_FLAGS", LABEL_FLAGS), ("LABEL_TAGS", LABEL_TAGS), ("RUN_EXT_CODEC", tally.EXT_CODEC),
+    ("LABEL_FLAGS", LABEL_FLAGS), ("LABEL_TAGS", LABEL_TAGS), ("LABEL_KEEP", LABEL_KEEP), ("RUN_EXT_CODEC", tally.EXT_CODEC),
     ("RUN_EXT_SHARED", tally.EXT_SHARED), ("RUN_EXT_COPY", tally.EXT_COPY), ("UNDONE_NOT_LANDED", 1),
     ("UNDONE_ROT", 2), ("RIBBON_STREAM_MOST", STREAM_MOST))
 

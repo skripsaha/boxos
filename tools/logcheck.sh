@@ -1233,28 +1233,28 @@ mce:migration:completed apei:memory:error apei:ghes:ready"
 # not a run's (K9): a build without VOLUME_TESTS walks the ten suites of
 # tests.h TEST_SUITES not
 # under VOLUME_TESTS_ONLY — core 3, stress 2, braid 3, cow 1, boxhash 6,
-# book 15, book_judge 5, ribbon 6, integrity 3, use_context 6 TestCases, 50
+# book 15, book_judge 5, ribbon 7, integrity 3, use_context 6 TestCases, 51
 # run; the 11 whose reach is TEST_WRITES_TO_VOLUME are skipped (tests.c,
-# g_volume_tests_allowed), and the 39 that only read pass — none of them
+# g_volume_tests_allowed), and the 40 that only read pass — none of them
 # stands aside on this stand's fresh image, whose first file wears a tag
 # (use_context_narrows). On a book the 6 written for format v1's records
 # stand aside first (tests.c, TestCase.format): tagfs_deed, which only
-# reads, and 5 of the 11 writers — so 38 reads pass, and 6 + 6 are
+# reads, and 5 of the 11 writers — so 39 reads pass, and 6 + 6 are
 # skipped. A test added or taken out moves this line in the same commit.
 healthy_startup_tests() {
     local L=$1
     grep -qE "TagFS: [0-9]+ run, [0-9]+ passed, 0 failed" "$L"; chk $? "TagFS startup tests: 0 failed"
-    local said want="TagFS: 50 run, 39 passed, 0 failed, 11 skipped, 0 held under a caveat"
-    local told="39 reads passed and 11 writes stood down"
+    local said want="TagFS: 51 run, 40 passed, 0 failed, 11 skipped, 0 held under a caveat"
+    local told="40 reads passed and 11 writes stood down"
     if [ "$(stand_format)" = v2 ]; then
-        want="TagFS: 50 run, 38 passed, 0 failed, 12 skipped, 0 held under a caveat"
-        told="38 reads passed, 6 written for format v1 stood aside and 6 writes stood down"
+        want="TagFS: 51 run, 39 passed, 0 failed, 12 skipped, 0 held under a caveat"
+        told="39 reads passed, 6 written for format v1 stood aside and 6 writes stood down"
         grep -aq "^\[TESTS\] 6 test(s) stood aside: this volume is format v2" "$L"
         chk $? "TagFS startup tests: on a book the 6 written for format v1's records stand aside"
     fi
     said=$(stand_summary "$L")
     [ "$said" = "$want" ]
-    chk $? "TagFS startup tests: the 50 this tree registers ran, $told (${said:-no summary})"
+    chk $? "TagFS startup tests: the 51 this tree registers ran, $told (${said:-no summary})"
 }
 
 run_healthy() {
@@ -7496,7 +7496,7 @@ run_headcountmut() {
 # the string and leave the tag, so a renamed file answered to its old name and
 # not its new one. The scenario creates a file, renames it, and asks the volume
 # by tag and by name; then trashes it and empties the trash with delete,
-# which asks for the trashed files by their tag (a plain listing leaves them
+# which asks for the files kept deleted (a plain listing leaves them
 # out on purpose) and goes only on a yes.
 #
 # Then a second file is trashed and deleted BY NAME: the shell's look-up, like
@@ -7564,7 +7564,7 @@ byname_judge() {
         && ok "$name: not found by its old name" \
         || bad "$name: 'info alpha.txt' still finds the renamed file"
     sed -n '/~ delete trashed/,/~ files beta/p' "$L" | grep -q "^Deleted 1 file$" \
-        && ok "$name: delete found the trashed file by its tag, and deleted it on a yes" \
+        && ok "$name: delete found the file kept deleted, and deleted it on a yes" \
         || bad "$name: 'delete trashed' did not delete the one trashed file ($(sed -n '/~ delete trashed/,/~ files beta/p' "$L" | grep -m1 -E '^(Deleted|Nothing|The trash)' || echo 'no answer'))"
     sed -n '/~ trash gamma.txt/,/~ delete gamma.txt/p' "$L" | grep -q "^gamma.txt moved to the trash"
     chk $? "$name: gamma.txt went to the trash ($(sed -n '/~ trash gamma.txt/,/~ delete gamma.txt/p' "$L" | grep -m1 -E '^(gamma.txt moved|Could not)' || echo 'no answer'))"
@@ -8897,11 +8897,11 @@ STAND_HELD="
 # stand_endpaper 6, stand_errata 8, stand_toll 5, stand_dog_ear 9,
 # stand_slip 14, stand_away 14, stand_tip_in 10, stand_slip_promise 5,
 # stand_book_glean 2, stand_escheat 7, stand_parity 2, stand_book_room 11,
-# stand_commonhold 1, stand_conjugate 5, stand_dedup 6. Counted off the code,
+# stand_commonhold 1, stand_conjugate 5, stand_dedup 6, stand_keep 5. Counted off the code,
 # not a run (K9): a suite that drops out of the walk is a test that stopped
 # covering anything, and the count is where that shows. How many of them pass
 # and how many stand aside is the road's — said, not pinned.
-STAND_RUN=452
+STAND_RUN=457
 
 # What a VOLUME_TESTS kernel says of a record memory holds that is not the
 # file a format-v1 Ink packed (plot_conveyance.c, PackV1Agrees and

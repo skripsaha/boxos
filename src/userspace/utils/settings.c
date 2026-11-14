@@ -72,7 +72,7 @@ static int find_program(const char *word, file_id_t *out)
     }
     memcpy(stem, word, length);
     stem[length] = '\0';
-    int n = query_all_everywhere(stem, "trashed", &ids);
+    int n = query_all_everywhere(stem, NULL, &ids);
     for (int i = 0; i < n; i++) {
         FileMetadata metadata;
         if (FileMetadataRead(ids[i], &metadata) != 0) continue;

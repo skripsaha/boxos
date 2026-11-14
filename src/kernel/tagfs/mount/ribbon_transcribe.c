@@ -404,7 +404,8 @@ uint64_t RibbonFlagsOf(const RibbonReplay* rp, const RibbonStage* st, const File
 // ----------------------------------------------------------------------------
 
 /* The tags `rec` wears that `other` does not — NULL wearing none — each out
- * of (`leave`) or into the tag index. ERR_NO_MEMORY. */
+ * of (`leave`) or into the tag index, and the set of the deleted files too
+ * when `rec` is kept deleted and `other` is not. ERR_NO_MEMORY. */
 static error_t RibbonTagsMoved(const FileRecord* rec, const FileRecord* other, uint64_t fid, bool leave)
 {
     TagFSState* fs = tagfs_get_state();
@@ -417,6 +418,12 @@ static error_t RibbonTagsMoved(const FileRecord* rec, const FileRecord* other, u
         if (leave)
             TagBitmapLeave(fs->bitmap_index, rec->tags[i], fid);
         else if (tag_bitmap_set(fs->bitmap_index, rec->tags[i], fid) != 0)
+            return ERR_NO_MEMORY;
+    }
+    if (rec && (rec->flags & TAGFS_FILE_DELETED) && !(other && (other->flags & TAGFS_FILE_DELETED))) {
+        if (leave)
+            TagBitmapLeave(fs->bitmap_index, TAGFS_DELETED_MEMBERS, fid);
+        else if (tag_bitmap_set(fs->bitmap_index, TAGFS_DELETED_MEMBERS, fid) != 0)
             return ERR_NO_MEMORY;
     }
     return OK;

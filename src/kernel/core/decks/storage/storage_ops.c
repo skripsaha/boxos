@@ -317,6 +317,35 @@ static int ObjDelete(const ManifestOp *op,
 }
 
 /* -------------------------------------------------------------------------
+ * OBJ_KEEP — params = [u64 file_id][u64 term seconds]: the file deleted for a
+ * term, or given up at once for a term of 0 (tagfs_keep_file). Guarded as
+ * OBJ_DELETE is, by the volume's own guard and the caller's warrant; a
+ * give-up that finds no Spare waits for the cycle that makes one and is asked
+ * again, as OBJ_DELETE's does. OBJ_RESTORE — params = [u64 file_id]: the file
+ * brought back until its term ends (tagfs_restore_file).
+ * ------------------------------------------------------------------------- */
+
+static int ObjKeep(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx)
+{
+    if (op->param_size < 16) return ERR_INVALID_ARGUMENT;
+
+    int rc = tagfs_keep_file(param_u64(op, 0), param_u64(op, 8), StorageCallWarrant(ctx));
+    if (-rc == ERR_WOULD_BLOCK)
+        return SettleOpForRoom(op, crates, crate_count, ctx, param_u64(op, 0));
+    return rc == 0 ? OK : -rc;
+}
+
+static int ObjRestore(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx)
+{
+    (void)crates;
+    (void)crate_count;
+    if (op->param_size < 8) return ERR_INVALID_ARGUMENT;
+
+    int rc = tagfs_restore_file(param_u64(op, 0), StorageCallWarrant(ctx));
+    return rc == 0 ? OK : -rc;
+}
+
+/* -------------------------------------------------------------------------
  * OBJ_SPAN — params = [u64 file_id][u64 size][u32 flags]: the file made
  * exactly `size` bytes long (HelmSpanWindow). Shorter cuts the tail; longer
  * reads as zeros from the old size on, grown a window at a time. With
@@ -395,7 +424,7 @@ static int ObjRename(const ManifestOp *op,
  *
  * Every tag goes out whole, however long: its key and value are copied
  * straight out of the volume's registry into the answer. What a file is —
- * trashed, hidden, anything — is the tags it wears; the answer has no flags.
+ * hidden, anything — is the tags it wears; the answer has no flags.
  *
  * Layout written into out_crate (little-endian):
  *   [u64 file_id]
@@ -467,7 +496,7 @@ static int ObjGetInfo(const ManifestOp *op,
 
     /* The answer's tag count is u16 on the wire; a record holds no more. */
     uint16_t tag_count = (uint16_t)md.tag_count;
-    uint64_t need = 8u + 8u + 2u + 2u + filename_len;
+    uint64_t need = 8u + 8u + 2u + 2u + filename_len + 8u;
     for (uint32_t i = 0; i < tag_count; i++)
         need = info_tag_record(NULL, need, md.tag_ids[i]);
 
@@ -480,8 +509,9 @@ static int ObjGetInfo(const ManifestOp *op,
 
     uint64_t pos = 0;
     if (rc == OK) {
-        /* What a file is — trashed, hidden, anything else — is the tags it
-         * wears, and only they say it: the answer carries no bits beside them. */
+        /* What a file is — hidden, a note, anything else — is the tags it
+         * wears, and only they say it: the answer carries no bits beside them
+         * but one the volume's own word, the time a deleted file is kept until. */
         memcpy(kp + pos, &file_id,    8); pos += 8;   /* the id asked: the record's own */
         memcpy(kp + pos, &md.size,    8); pos += 8;
         memcpy(kp + pos, &tag_count,  2); pos += 2;
@@ -489,6 +519,9 @@ static int ObjGetInfo(const ManifestOp *op,
         if (filename_len) { memcpy(kp + pos, md.filename, filename_len); pos += filename_len; }
         for (uint32_t i = 0; i < tag_count; i++)
             pos = info_tag_record(kp, pos, md.tag_ids[i]);
+        /* The last eight bytes: when a deleted file is let go, 0 for one that is not. */
+        const uint64_t kept_until = (md.flags & TAGFS_FILE_DELETED) ? md.keep_until : 0;
+        memcpy(kp + pos, &kept_until, 8); pos += 8;
     }
     tagfs_leave();
     tagfs_metadata_free(&md);
@@ -513,11 +546,12 @@ static int ObjGetInfo(const ManifestOp *op,
  * The scope byte of storage.query / storage.create (boxos_decks.h): inside the
  * Use Context unless the caller said everywhere. Absent means inside.
  */
-static error_t storage_scope_of(const ManifestOp *op, size_t at, uint8_t *out_scope)
+static error_t storage_scope_of(const ManifestOp *op, size_t at, bool deleted_too, uint8_t *out_scope)
 {
     uint8_t scope = STORAGE_SCOPE_USE;
     if (op->param_size > at) scope = op->params[at];
-    if (scope != STORAGE_SCOPE_USE && scope != STORAGE_SCOPE_EVERYWHERE)
+    if (scope != STORAGE_SCOPE_USE && scope != STORAGE_SCOPE_EVERYWHERE &&
+        !(deleted_too && scope == STORAGE_SCOPE_DELETED))
         return ERR_INVALID_ARGUMENT;
     *out_scope = scope;
     return OK;
@@ -640,7 +674,7 @@ static error_t storage_crate_text(const ManifestOp *op, Crate *crates, const OpC
  * is delivered too.
  */
 static error_t storage_query_into(const TagSpelling *tags, uint32_t count, const TagSpelling *without,
-                                  uint32_t without_count, const Crate *out, const OpContext *ctx,
+                                  uint32_t without_count, bool kept, const Crate *out, const OpContext *ctx,
                                   uint32_t hdr[2])
 {
     uint64_t room_ids = (out->capacity - 8) / sizeof(uint64_t);
@@ -654,7 +688,8 @@ static error_t storage_query_into(const TagSpelling *tags, uint32_t count, const
     for (;;) {
         uint32_t  room = most - hdr[0] < STORAGE_QUERY_PIECE ? most - hdr[0] : STORAGE_QUERY_PIECE;
         TagFSPage page;
-        rc = TagFSQueryPage(tags, count, without, without_count, from, piece, room, first, &page);
+        rc = kept ? TagFSQueryKeptPage(tags, count, without, without_count, from, piece, room, first, &page)
+                  : TagFSQueryPage(tags, count, without, without_count, from, piece, room, first, &page);
         if (rc != OK) break;
         if (first) hdr[1] = page.total;
         first = false;
@@ -680,8 +715,10 @@ static error_t storage_query_into(const TagSpelling *tags, uint32_t count, const
  *                    STORAGE_SCOPE_EVERYWHERE; after the scope, a comma list
  *                    of tags no file of the answer wears ("key:..." any tag of
  *                    the key). The volume sets aside nothing of its own
- *                    accord: trashed, hidden and every other tag are left out
- *                    when the asker names them, and only then.
+ *                    accord but the files it keeps deleted (obj.keep), which
+ *                    no scope but STORAGE_SCOPE_DELETED meets — that scope
+ *                    asks for them alone, over the whole volume; every tag is
+ *                    left out when the asker names it, and only then.
  *                    in_crate (optional): comma-separated tag string
  *                    out_crate: [u32 delivered][u32 total][u64 file_ids[delivered]]
  *                    `total` is how many files match; `delivered` is how many
@@ -702,7 +739,7 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (out->capacity < 8) return ERR_BUFFER_TOO_SMALL;
 
     uint8_t scope;
-    error_t src_rc = storage_scope_of(op, 0, &scope);
+    error_t src_rc = storage_scope_of(op, 0, true, &scope);
     if (src_rc != OK) return src_rc;
 
     TagFSState *state = tagfs_get_state();
@@ -735,7 +772,7 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     }
 
     uint32_t hdr[2] = { 0, 0 };   /* delivered, total */
-    rc = storage_query_into(tags, total, without, without_count, out, ctx, hdr);
+    rc = storage_query_into(tags, total, without, without_count, scope == STORAGE_SCOPE_DELETED, out, ctx, hdr);
     kfree(tags);
     kfree(without);
     UseListDrop(use);
@@ -771,7 +808,7 @@ static int ObjTagList(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (out->capacity < STORAGE_TAG_LIST_HEAD) return ERR_BUFFER_TOO_SMALL;
 
     uint8_t scope;
-    error_t rc = storage_scope_of(op, 4, &scope);
+    error_t rc = storage_scope_of(op, 4, false, &scope);
     if (rc != OK) return rc;
 
     TagFSState *state = tagfs_get_state();
@@ -986,7 +1023,7 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (op->param_size < 1) return ERR_INVALID_ARGUMENT;
 
     uint8_t scope;
-    error_t rc = storage_scope_of(op, 32, &scope);
+    error_t rc = storage_scope_of(op, 32, false, &scope);
     if (rc != OK) return rc;
 
     /* The name runs to its NUL inside the 32-byte field, or fills it. */
@@ -1089,6 +1126,8 @@ error_t StorageDeckRegister(void)
         { STORAGE_OBJ_WRITE,    ObjWrite,        OP_AUTH_APP, "storage.write"    },
         { STORAGE_OBJ_CREATE,   ObjCreate,       OP_AUTH_APP, "storage.create"   },
         { STORAGE_OBJ_DELETE,   ObjDelete,       OP_AUTH_APP, "storage.delete"   },
+        { STORAGE_OBJ_KEEP,     ObjKeep,         OP_AUTH_APP, "storage.keep"     },
+        { STORAGE_OBJ_RESTORE,  ObjRestore,      OP_AUTH_APP, "storage.restore"  },
         { STORAGE_OBJ_SPAN,     ObjSpan,         OP_AUTH_APP, "storage.span"     },
         { STORAGE_OBJ_RENAME,   ObjRename,       OP_AUTH_APP, "storage.rename"   },
         /* Snapshots: app+, refused on format v1. */

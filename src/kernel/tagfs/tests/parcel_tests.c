@@ -367,7 +367,7 @@ static TestResult TestParcelRelabel(void)
 
     TEST_ASSERT(ParcelHeldTake(&h), "room for the test's Strips");
     TEST_ASSERT(ParcelFile(&h, PARCEL_FILE_STRIPS, 0) != NULL, "the file of 1000 Strips is built");
-    h.next = FileRecordRelabel(h.rec, s_parcel_other, tags, 2, TAGFS_FILE_ACTIVE);
+    h.next = FileRecordRelabel(h.rec, s_parcel_other, tags, 2, TAGFS_FILE_ACTIVE, 0);
     TEST_ASSERT(h.next != NULL, "a new name and two tags make a new record");
     TEST_ASSERT(h.next->tract == h.rec->tract, "which names the same Tract, nothing of it copied");
     TEST_ASSERT(h.next->tag_count == 2 && h.next->tags[1] == 23 &&

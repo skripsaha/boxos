@@ -278,7 +278,7 @@ static int Outside(const LecternBook *b, const LecternFile *f)
     return 0;
 }
 
-/* The files followed that are kept in a role, in the order they are tried,
+/* The files followed that are kept in a role and not kept deleted, in the order they are tried,
  * into `out` (room for every file followed): role by role — kernel, boot,
  * system — the newest gen first and of one gen the larger fid, each once — a
  * file naming ground outside the data run is the mount's to lock, and no
@@ -291,7 +291,9 @@ static uint64_t Order(LecternBook *b, LecternFile **out)
         uint64_t from = n;
         for (uint64_t f = 0; f < b->nfiles; f++) {
             LecternFile *file = &b->files[f];
-            if (file->gone || LecternRoleOf(file->flags) != roles[i] || Outside(b, file)) continue;
+            if (file->gone || (file->flags & TALLY_FILE_DELETED) || LecternRoleOf(file->flags) != roles[i] ||
+                Outside(b, file))
+                continue;
             uint64_t at = n++;
             for (; at > from && (out[at - 1u]->gen < file->gen ||
                                  (out[at - 1u]->gen == file->gen && out[at - 1u]->fid < file->fid));

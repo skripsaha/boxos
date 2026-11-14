@@ -4726,7 +4726,7 @@ void Phase18()
 
     // ── query → range + std::views composition ─────────────────────────
     {
-        std::vector<file> results = box::tagfs::query("cxx:phase18", "trashed,hidden");
+        std::vector<file> results = box::tagfs::query("cxx:phase18", "hidden");
         Check(!results.empty(), "phase18 query by tag finds the file");
         int cnt = 0;
         for (const file &x :
@@ -4739,7 +4739,7 @@ void Phase18()
 
     // ── find by name (TagFS names are not unique → check membership) ─────
     {
-        std::vector<box::tagfs::record> named = box::tagfs::find_all("cxx:tagfs:renamed", "trashed,hidden");
+        std::vector<box::tagfs::record> named = box::tagfs::find_all("cxx:tagfs:renamed", "hidden");
         bool                            mine  = false;
         for (const box::tagfs::record &x : named)
             if (x.id() == f.id()) { mine = true; break; }
@@ -4775,7 +4775,7 @@ void Phase19()
 
     // Availability probe + leftover cleanup (the disk persists across matrix
     // configs, so a crashed prior run could leave p19 files behind).
-    for (file f : box::tagfs::query("p19:probe", "trashed,hidden")) (void)f.remove();
+    for (file f : box::tagfs::query("p19:probe", "hidden")) (void)f.remove();
 
     box::result<file> created_a = box::tagfs::create("cxx:p19:alpha", {"p19ctx:alpha", "p19:probe"});
     if (!created_a) {
@@ -4814,13 +4814,13 @@ void Phase19()
         Check(box::use::active() == !before.empty(),
               "phase19 use::active agrees with use::current");
 
-        std::vector<file> everywhere = box::tagfs::query_everywhere("p19:probe", "trashed,hidden");
-        std::vector<file> inside     = box::tagfs::query("p19:probe", "trashed,hidden");
+        std::vector<file> everywhere = box::tagfs::query_everywhere("p19:probe", "hidden");
+        std::vector<file> inside     = box::tagfs::query("p19:probe", "hidden");
         Check(results_have(everywhere, fa.id()) && results_have(everywhere, fb.id()),
               "phase19 query_everywhere sees both probe files whatever the context");
         Check(inside.size() <= everywhere.size(),
               "phase19 a query inside the context never sees more than everywhere");
-        Check(box::tagfs::all_everywhere("trashed,hidden").size() >= box::tagfs::all("trashed,hidden").size(),
+        Check(box::tagfs::all_everywhere("hidden").size() >= box::tagfs::all("hidden").size(),
               "phase19 all_everywhere is never less than all");
     }
 
@@ -8659,7 +8659,7 @@ void Phase45()
     {
         box::result<box::tagfs::file> probe =
             box::tagfs::create("cxx:p45:probe", {"cxx:phase45"});
-        box::result<box::tagfs::record> nf = box::tagfs::find("__no_such_file_zzz__", "trashed,hidden");
+        box::result<box::tagfs::record> nf = box::tagfs::find("__no_such_file_zzz__", "hidden");
         Check(!nf.has_value() && static_cast<bool>(nf.error()),
               "phase45 tagfs::find(missing) error arm carries a non-ok cause");
         if (probe.has_value()) {
@@ -10463,7 +10463,7 @@ void Phase55()
 
     // Leftover cleanup — the disk persists across matrix configs, so a crashed
     // prior run could leave p55 files behind.
-    for (auto f : box::tagfs::query("p55", "trashed,hidden")) (void)f.remove();
+    for (auto f : box::tagfs::query("p55", "hidden")) (void)f.remove();
 
     box::result<file> made = box::tagfs::create("p55:recA", {"p55"});
     if (!made) {
@@ -10475,7 +10475,7 @@ void Phase55()
         file_id_t A = made->id();
 
         // (1) record — a metadata snapshot that does NOT re-read the kernel ──
-        box::result<record> r = box::tagfs::find("p55:recA", "trashed,hidden");
+        box::result<record> r = box::tagfs::find("p55:recA", "hidden");
         Check(r && r->name() == "p55:recA", "phase55 find() hands back a record snapshot");
         // Mutate behind the record's back through a separate live handle.
         Check(box::tagfs::file(A).rename("p55:recB").has_value(),
@@ -10485,7 +10485,7 @@ void Phase55()
         Check(r && r->live().name() == "p55:recB", "phase55 record.live() is always-fresh");
         Check(r && r->reread().has_value() && r->name() == "p55:recB",
               "phase55 reread re-snapshots");
-        std::vector<file> q = box::tagfs::query("p55", "trashed,hidden");
+        std::vector<file> q = box::tagfs::query("p55", "hidden");
         Check(!q.empty(), "phase55 query still hands back live file handles");
 
         // (2) typed-tag round-trip ──────────────────────────────────────────
@@ -10526,7 +10526,7 @@ void Phase55()
             for (int i = 0; i < N; ++i)
                 if (box::tagfs::create("p55:multi", {"p55"})) ++created;
             if (created == N) {
-                std::size_t got = box::tagfs::find_all("p55:multi", "trashed,hidden").size();
+                std::size_t got = box::tagfs::find_all("p55:multi", "hidden").size();
                 Check(got == static_cast<std::size_t>(N),
                       "phase55 find_all returns all 10 same-named files (heap buffer > old 8-cap)");
             } else {
@@ -10536,7 +10536,7 @@ void Phase55()
         }
 
         // Cleanup the p55 files now the storage round-trips are done.
-        for (auto f2 : box::tagfs::query("p55", "trashed,hidden")) (void)f2.remove();
+        for (auto f2 : box::tagfs::query("p55", "hidden")) (void)f2.remove();
     }
 
     printf("[CXX] PASS phase55: box::tagfs::record (captured snapshot vs live/reread) "
@@ -10553,7 +10553,7 @@ void Phase56()
     // carries an explicit "p56" tag purely so query() finds it for the sweep
     // (also covers a crash between the add and the final sweep).
     auto sweep = [] {
-        for (auto victim : box::tagfs::query("p56", "trashed,hidden"))
+        for (auto victim : box::tagfs::query("p56", "hidden"))
             (void)victim.remove();
     };
     sweep();
@@ -11008,7 +11008,7 @@ void Phase59()
     // Availability probe — create (or reopen) a scratch file.
     box::result<box::tagfs::file> ff = box::tagfs::create("ferrytest");
     if (!ff) {
-        box::result<box::tagfs::record> rec = box::tagfs::find("ferrytest", "trashed,hidden");
+        box::result<box::tagfs::record> rec = box::tagfs::find("ferrytest", "hidden");
         if (rec) ff = rec->live();
     }
     if (!ff) {
@@ -42516,7 +42516,7 @@ void P36Erase(const char *name)
 {
     file_id_t   ids[4];
     file_info_t infos[4];
-    int n = ::find_file_by_name(name, "trashed,hidden", ids, infos, 4);
+    int n = ::find_file_by_name(name, "hidden", ids, infos, 4);
     if (n > 4) n = 4;
     for (int i = 0; i < n; ++i) ::file_delete(ids[i]);
 }
@@ -42525,7 +42525,7 @@ long long P36Size(const char *name)
 {
     file_id_t   ids[1];
     file_info_t infos[1];
-    if (::find_file_by_name(name, "trashed,hidden", ids, infos, 1) <= 0) return -1;
+    if (::find_file_by_name(name, "hidden", ids, infos, 1) <= 0) return -1;
     return (long long)infos[0].size;
 }
 
@@ -42533,7 +42533,7 @@ std::string P36Read(const char *name)
 {
     file_id_t   ids[1];
     file_info_t infos[1];
-    if (::find_file_by_name(name, "trashed,hidden", ids, infos, 1) <= 0) return std::string();
+    if (::find_file_by_name(name, "hidden", ids, infos, 1) <= 0) return std::string();
     std::string s;
     s.resize((std::size_t)infos[0].size);
     if (!s.empty()) ::fread(ids[0], 0, s.data(), s.size());
@@ -48141,10 +48141,10 @@ void Phase211()
         // the whole point of fopen mapping to a "file:" Current.
         file_id_t     ids[1];
         file_info_t   infos[1];
-        Check(::find_file_by_name("cstdio-probe", "trashed,hidden", ids, infos, 1) > 0,
+        Check(::find_file_by_name("cstdio-probe", "hidden", ids, infos, 1) > 0,
               "phase211 the file fopen made is a TagFS file the system can see");
         Check(std::remove("cstdio-probe") == 0, "phase211 remove");
-        Check(::find_file_by_name("cstdio-probe", "trashed,hidden", ids, infos, 1) <= 0,
+        Check(::find_file_by_name("cstdio-probe", "hidden", ids, infos, 1) <= 0,
               "phase211 and it is gone afterwards");
     }
 
@@ -54377,7 +54377,7 @@ const char *const kTag = "clock:zone";
 
 box::result<box::tagfs::file> SettingFile()
 {
-    auto files = box::tagfs::query(kTag, "trashed,hidden");
+    auto files = box::tagfs::query(kTag, "hidden");
     if (files.empty()) return std::unexpected(box::error{box::errc::tagfs_file_not_found});
     return files.front();
 }
@@ -54533,7 +54533,7 @@ const char *const kTag = "clock:tzdb";
 
 box::result<box::tagfs::file> DoorFile()
 {
-    auto files = box::tagfs::query(kTag, "trashed,hidden");
+    auto files = box::tagfs::query(kTag, "hidden");
     if (files.empty()) return std::unexpected(box::error{box::errc::tagfs_file_not_found});
     return files.front();
 }

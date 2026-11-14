@@ -175,7 +175,7 @@ string trimmed(const char *p, size_t n)
 // current_zone() hands back a pointer the caller keeps.
 string configured_zone()
 {
-    auto files = box::tagfs::query(kZoneTag, "trashed");
+    auto files = box::tagfs::query(kZoneTag, nullptr);
     if (files.empty()) return kZoneFallback;
 
     char buf[64] = {};
@@ -192,7 +192,7 @@ string configured_zone()
 // database in reach is the one already loaded.
 vector<unsigned char> door_blob()
 {
-    auto files = box::tagfs::query(kTzdbTag, "trashed");
+    auto files = box::tagfs::query(kTzdbTag, nullptr);
     if (files.empty()) return {};
 
     const uint64_t n = files.front().size();

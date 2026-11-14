@@ -58,7 +58,7 @@ std::vector<file_id_t> ProgramsNamed(const std::vector<std::string> &Named)
     std::vector<file_id_t> Files;
     for (const char *Tag : {"utility", "app"}) {
         file_id_t *Ids   = nullptr;
-        const int  Count = query_all_everywhere(Tag, "trashed", &Ids);
+        const int  Count = query_all_everywhere(Tag, nullptr, &Ids);
         for (int At = 0; At < Count; At++) {
             FileMetadata Metadata;
             if (FileMetadataRead(Ids[At], &Metadata) != 0) continue;

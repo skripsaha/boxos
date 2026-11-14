@@ -295,7 +295,7 @@ static uint64_t JotBodyMostOf(JotKind kind, const FileRecord* was, const FileRec
         return JotBornMost(now);
     case JOT_LABELED:
     case JOT_SHAPED:
-        return 6u * JOT_VARINT_MOST + now->name_len + JOT_ID_MOST * ((uint64_t)now->tag_count + was->tag_count);
+        return 7u * JOT_VARINT_MOST + now->name_len + JOT_ID_MOST * ((uint64_t)now->tag_count + was->tag_count);
     case JOT_QUITCLAIM:
         return 2u * JOT_VARINT_MOST;
     default:
@@ -359,6 +359,8 @@ static void JotMeasured(const Jot* j, uint64_t* records, uint64_t* bytes, uint64
         most[0] += JotSlipMost(j->slip_len);
     if ((j->kind == JOT_LABELED || j->kind == JOT_SHAPED) && JotShapes(j))
         most[1] = JotShapedMost(j) + JotSlipMost(j->slip_len);
+    else if (j->kind == JOT_BORN && (j->now->flags & TAGFS_FILE_DELETED))
+        most[1] = JotBodyMostOf(JOT_LABELED, j->now, j->now);
     for (uint32_t k = 0; k < 2u; k++) {
         if (!most[k])
             continue;
@@ -505,7 +507,7 @@ static uint32_t JotBornPut(const Jot* j, uint8_t* body, uint32_t* scratch, uint8
     while (StripWalkNext(&w, &s))
         JotRunPut(a, &s, j->fid);
     RibbonBorn b = {
-        .fid = j->fid, .flags = f->flags, .size = f->size, .created_ns = f->created_time,
+        .fid = j->fid, .flags = f->flags & ~(uint32_t)TAGFS_FILE_DELETED, .size = f->size, .created_ns = f->created_time,
         .modified_ns = f->modified_time, .name = (const uint8_t*)f->name, .name_len = f->name_len,
         .ntags = n, .tags = ids, .tags_bytes = TallyIdsPut(ids, scratch, n), .nruns = f->strip_count,
         .runs = a->runs, .runs_bytes = a->runs_bytes, .ndigests = a->ndigests, .digests = a->digests,
@@ -540,7 +542,8 @@ static uint32_t JotShapedPut(const Jot* j, uint64_t seq, uint8_t* body, JotApart
 }
 
 /* A Labeled of what differs between `was` and `now` — the name, the flags set
- * and cleared, the tags put on and taken off — over the file at `base`, or 0
+ * and cleared (never the deleted bit: the term says that, KEEP), the tags put
+ * on and taken off, the time the file is kept deleted until — over the file at `base`, or 0
  * when nothing does. */
 static uint32_t JotLabeledPut(const Jot* j, uint64_t base, uint8_t* body, uint32_t* scratch, uint8_t* ids)
 {
@@ -559,10 +562,14 @@ static uint32_t JotLabeledPut(const Jot* j, uint64_t base, uint8_t* body, uint32
         l.name     = (const uint8_t*)now->name;
         l.name_len = now->name_len;
     }
-    l.set   = now->flags & ~was->flags;
-    l.clear = was->flags & ~now->flags;
+    l.set   = now->flags & ~was->flags & ~(uint32_t)TAGFS_FILE_DELETED;
+    l.clear = was->flags & ~now->flags & ~(uint32_t)TAGFS_FILE_DELETED;
     if (l.set || l.clear)
         l.what |= LABEL_FLAGS;
+    if (was->keep_until != now->keep_until) {
+        l.what   |= LABEL_KEEP;
+        l.keep_ns = now->keep_until;
+    }
     if (na || nd) {
         l.what      |= LABEL_TAGS;
         l.nadd       = na;
@@ -621,6 +628,10 @@ error_t DocketLay(DocketTaken* t, uint64_t seq, uint32_t tags, uint8_t* out, uin
         if (j->kind == JOT_BORN) {
             JotRecordPut(out, at, starts, n, RIBBON_BORN, body, JotBornPut(j, body, scratch, ids, &a));
             j->carried = true;
+            if (j->now->flags & TAGFS_FILE_DELETED) {
+                RibbonLabeled kept = { .fid = j->fid, .what = LABEL_KEEP, .keep_ns = j->now->keep_until };
+                JotRecordPut(out, at, starts, n, RIBBON_LABELED, body, RibbonLabeledBodyPut(body, &kept));
+            }
         } else if (j->kind == JOT_LABELED || j->kind == JOT_SHAPED) {
             JotChangedPut(j, seq, out, at, body, scratch, ids, &a, starts, n);
         } else if (j->kind == JOT_QUITCLAIM) {

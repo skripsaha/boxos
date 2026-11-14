@@ -3,6 +3,7 @@
 #include "../scribe/scribe.h"
 #include "../ink/ink.h"
 #include "../ink/fallow.h"
+#include "../keep/keep.h"
 #include "../metadata_pool/meta_pool.h"
 #include "../file_table/file_table.h"
 #include "../tag_registry/tag_registry.h"
@@ -142,6 +143,7 @@ void SettleMountReset(void)
 {
     SettleWaitersMountReset();
     CadenceMountReset();
+    KeepMountReset();
     s_given = 0;
     __atomic_store_n(&s_settled_gen, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&s_cycles, 0, __ATOMIC_RELEASE);

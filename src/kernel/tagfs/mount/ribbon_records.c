@@ -592,6 +592,7 @@ static error_t RibbonLabelTags(RibbonReplay* rp, RibbonStage* st, const RibbonLa
 static error_t RibbonLabelRecord(RibbonReplay* rp, RibbonStage* st, const RibbonLabeled* d, const FileRecord* now)
 {
     uint64_t  flags = RibbonFlagsOf(rp, st, now);
+    uint64_t  keep  = now->keep_until;
     uint32_t  n     = 0;
     bool      fits  = true;
     char*     name  = NULL;
@@ -603,6 +604,10 @@ static error_t RibbonLabelRecord(RibbonReplay* rp, RibbonStage* st, const Ribbon
                          (unsigned long long)d->fid);
             return OK;
         }
+    }
+    if (d->what & LABEL_KEEP) {
+        keep  = d->keep_ns;
+        flags = keep ? flags | TALLY_FILE_DELETED : flags & ~(uint64_t)TALLY_FILE_DELETED;
     }
     tags = kmalloc(sizeof(uint32_t) * (now->tag_count + d->nadd + 1u));
     name = kmalloc((d->what & LABEL_NAME ? d->name_len : now->name_len) + 1u);
@@ -618,7 +623,7 @@ static error_t RibbonLabelRecord(RibbonReplay* rp, RibbonStage* st, const Ribbon
         else
             memcpy(name, now->name, now->name_len);
         name[d->what & LABEL_NAME ? d->name_len : now->name_len] = '\0';
-        FileRecord* rec = FileRecordRelabel(now, name, tags, n, (uint32_t)flags);
+        FileRecord* rec = FileRecordRelabel(now, name, tags, n, (uint32_t)flags, keep);
         if (!rec || RibbonHighSet(st, d->fid, (uint32_t)(flags >> 32)) != OK) {
             FileRecordRelease(rec);
             rc = ERR_NO_MEMORY;

@@ -29,7 +29,7 @@ int settings_say(BoxSettings *out, const char *text);
 int settings_refuse(BoxSettings *out, const char *why);
 
 /* The person's file of the program `program`: found everywhere on the volume
- * by its name, <program>.settings, trashed ones passed over, with two the one
+ * by its name, <program>.settings, deleted ones not met, with two the one
  * tagged settings; *file 0 when there is none. *saying, when not NULL, is a
  * sentence to add to the problems (two files of that name), the caller's to
  * free. Returns 0 or a negative -error_t. */

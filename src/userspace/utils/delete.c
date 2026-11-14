@@ -15,8 +15,8 @@
  * taken back.
  *
  * A name the shell found no file for among those in use comes as a word, and
- * is looked for in the trash: the shell's look-up, like a listing, leaves the
- * trash out.
+ * is looked for among the files kept deleted: the shell's look-up, like a
+ * listing, does not meet them.
  *
  * Its exit: 0 when everything asked for went, or the person said no; 1 when
  * something could not go, or nobody was there to be asked.
@@ -102,9 +102,9 @@ static void show_going(const Going *going)
     for (size_t i = 0; i < going->Count; i++) {
         FileMetadata metadata;
         bool         read = FileMetadataRead(going->Ids[i], &metadata) == 0;
-        bool         trashed = read && FileMetadataWears(&metadata, "trashed");
+        bool         kept    = read && metadata.KeptUntil != 0;
         bool         program = read && (FileMetadataWears(&metadata, "app") || FileMetadataWears(&metadata, "utility"));
-        out += !trashed;
+        out += !kept;
         programs += program;
         if (i < SHOWN_FILES) {
             printf("  %s  ", read && metadata.Filename ? metadata.Filename : "a file with no name");
@@ -194,7 +194,7 @@ int main(void)
     for (size_t i = 0; i < thing_count && whole; i++) whole = going_add(&going, things[i]);
 
     file_id_t *trashed = NULL;
-    int        total   = word_count ? query_all("trashed", NULL, &trashed) : 0;
+    int        total   = word_count ? query_all_deleted(NULL, NULL, &trashed) : 0;
     if (total < 0) {
         println("delete: the trash could not be looked in");
         whole = false;

@@ -272,6 +272,8 @@ error_t InkMayChange(uint64_t fid, uint32_t flags, const Strip* runs, uint32_t r
     error_t rc = InkVolumeBegins();
     if (rc != OK)
         return rc;
+    if (flags & TAGFS_FILE_DELETED)
+        return ERR_FILE_NOT_FOUND;
     return InkGuard(fid, flags, runs, run_count, NULL, 0, warrant);
 }
 
@@ -439,6 +441,8 @@ static error_t InkFieldsOnce(uint64_t fid, const char* name, uint32_t add, uint3
     Strip*          runs  = NULL;
     uint32_t        nruns = 0;
     error_t         rc    = InkVolumeBegins();
+    if (rc == OK && (cur->flags & TAGFS_FILE_DELETED))
+        rc = ERR_FILE_NOT_FOUND;
     if (!InkFieldsTags(cur, name, add, drop, &f)) {
         FileRecordRelease(cur);
         return ERR_NO_MEMORY;
@@ -460,7 +464,7 @@ static error_t InkFieldsOnce(uint64_t fid, const char* name, uint32_t add, uint3
         goto out;
     }
     if (rc == OK && fs->format == DEED_FORMAT_V2) {
-        rc = InkBookFields(fid, cur, &was, &f, meta.filename, add, flags, out);
+        rc = InkBookFields(fid, cur, &was, &f, meta.filename, add, flags, cur->keep_until, out);
         goto out;
     }
     /* The room format v1 judges first, on the extents the record names, as it
@@ -474,7 +478,7 @@ static error_t InkFieldsOnce(uint64_t fid, const char* name, uint32_t add, uint3
         meta.extent_count = nruns;
         rc = InkRecordMake(&meta, &r);
     }
-    if (rc == OK && !(r.rec = FileRecordRelabel(cur, meta.filename, f.tags, f.count, flags)))
+    if (rc == OK && !(r.rec = FileRecordRelabel(cur, meta.filename, f.tags, f.count, flags, 0)))
         rc = ERR_NO_MEMORY;
 #if CONFIG_STRICT || defined(CONFIG_VOLUME_TESTS)
     if (rc == OK)
@@ -537,7 +541,7 @@ static error_t InkUndoneOnce(uint64_t fid, InkReceipt* out)
         rc = ERR_NO_MEMORY;
     else if (rc == OK)
         rc = InkBookFields(fid, cur, &was, &f, cur->name, TAGFS_INVALID_TAG_ID, cur->flags | TAGFS_FILE_UNDONE,
-                           out);
+                           cur->keep_until, out);
     kfree(f.tags);
     FileRecordRelease(cur);
     return rc;
@@ -550,6 +554,57 @@ error_t InkUndone(uint64_t fid, InkReceipt* out)
     error_t rc;
     do {
         rc = InkUndoneOnce(fid, out);
+    } while (rc != OK && InkGoesRound(&rc, INK_MAKES_SPARES));
+    return rc;
+}
+
+/*
+ * One round of InkKeep: the file's record made the deleted one kept until
+ * `until` — or, for 0, made the one of a file that is not. The tags are the
+ * ones it wears; the tag index's set of the deleted files takes the file in or
+ * lets it go in the same locked step as the record (InkBookFieldsLocked, a tag
+ * added or dropped). A call that changes nothing is OK with no Ink.
+ */
+static error_t InkKeepOnce(uint64_t fid, uint64_t until, InkWarrant warrant, InkReceipt* out)
+{
+    RecordWhere   was;
+    InkFieldsPlan f = { 0 };
+    FileRecord*   cur = FileMapRecordHold(InkState()->files, fid, &was);
+    if (!cur)
+        return ERR_FILE_NOT_FOUND;
+    bool     kept  = cur->flags & TAGFS_FILE_DELETED;
+    uint32_t flags = until ? cur->flags | TAGFS_FILE_DELETED : cur->flags & ~(uint32_t)TAGFS_FILE_DELETED;
+    error_t  rc    = InkVolumeBegins();
+    if (rc == OK)
+        rc = InkGuardSays(fid, InkRecordTouchesBoot(cur), cur->flags, warrant);
+    if (rc != OK)
+        goto out;
+    if (kept == (until != 0) && cur->keep_until == until) {
+        out->gen = was.gen;
+        goto out;
+    }
+    if (!InkFieldsTags(cur, NULL, TAGFS_INVALID_TAG_ID, TAGFS_INVALID_TAG_ID, &f)) {
+        rc = ERR_NO_MEMORY;
+        goto out;
+    }
+    if (until && !kept)
+        f.adds = true;
+    else if (!until)
+        f.dropped[f.drops++] = TAGFS_DELETED_MEMBERS;
+    rc = InkBookFields(fid, cur, &was, &f, cur->name, TAGFS_DELETED_MEMBERS, flags, until, out);
+out:
+    kfree(f.tags);
+    FileRecordRelease(cur);
+    return rc;
+}
+
+error_t InkKeep(uint64_t fid, uint64_t until, InkWarrant warrant, InkReceipt* out)
+{
+    if (InkState()->format != DEED_FORMAT_V2)
+        return ERR_UNSUPPORTED;
+    error_t rc;
+    do {
+        rc = InkKeepOnce(fid, until, warrant, out);
     } while (rc != OK && InkGoesRound(&rc, INK_MAKES_SPARES));
     return rc;
 }

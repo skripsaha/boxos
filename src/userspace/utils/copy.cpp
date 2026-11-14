@@ -11,8 +11,8 @@
  * in as every file made now does, and the source is not touched. A name is
  * not given to two files: the shell would have to ask "which one" every time
  * it was said. A name that one file wears already is the person's to settle:
- * the old file goes to the trash, where it can be had back, and the copy
- * takes its name.
+ * the old file is deleted and kept for the term the hub's trash-days says,
+ * where it can be had back, and the copy takes its name.
  *
  * Room is asked for first, the whole size at once, so a volume without room
  * says so before a byte is copied. A copy that fails part way is erased and
@@ -32,6 +32,8 @@
 #include "box/form.h"
 #include "box/print.h"
 #include "box/time.h"
+
+#include "trash_term.h"
 
 BOX_FORM("takes thing \"the file to copy\"\n"
          "takes into \"the copy's name\"\n"
@@ -178,7 +180,7 @@ NameSettled SettleTakenName(std::string_view NewName)
     NameSettled Settled;
     std::string Name(NewName);
     file_id_t   Found[2];
-    int         Count = find_file_by_name(Name.c_str(), "trashed", Found, nullptr, 2);
+    int         Count = find_file_by_name(Name.c_str(), nullptr, Found, nullptr, 2);
     if (Count < 0) {
         Settled.Refusal = std::format("could not look for a file called {}: {}", NewName, Why(Count));
         return Settled;
@@ -323,12 +325,16 @@ std::string FillCopy(file_id_t Source, file_id_t Copy, std::uint64_t Size, std::
     }
 }
 
+/* How long the old file is set aside while the copy is made, whatever term
+ * the person chose: with the term 0 it could not be had back if the copy fails. */
+constexpr std::uint64_t SetAsideSeconds = 86400;
+
 /* The old file back out of the trash after a copy that was not made: what is
  * said of it, or empty when no file was replaced. */
 std::string TakeBack(file_id_t Old, std::string_view Name)
 {
     if (Old == 0) return {};
-    int Back = tag_remove(Old, "trashed");
+    int Back = file_restore(Old);
     if (Back == 0) return std::format(" The old {} is back, as it was.", Name);
     return std::format(" The old {} could not be taken out of the trash ({}): it is there under that name.",
                        Name, Why(Back));
@@ -385,8 +391,9 @@ int CopyFile(file_id_t Source, std::string_view NewName)
      * then, with nothing yet to take back. */
     std::vector<std::uint8_t> Buffer(Size > ChunkBytes ? ChunkBytes : static_cast<std::size_t>(Size));
 
+    const std::uint64_t Term = TrashTermSeconds();
     if (Old != 0) {
-        int Trashed = tag_add(Old, "trashed");
+        int Trashed = file_keep(Old, Term != 0 ? Term : SetAsideSeconds);
         if (Trashed != 0) {
             Say(std::format("copy: nothing was copied: the old {} could not be put in the trash: {}",
                             NewName, Why(Trashed)));
@@ -409,7 +416,10 @@ int CopyFile(file_id_t Source, std::string_view NewName)
     }
 
     souvenir_things(&Copy, 1);
-    ReportCopied(SourceName, NewName, Size, Carried, Old != 0);
+    /* A term of 0 gives the old file up at once: it was only set aside so the
+     * copy could fail and leave it. Where it cannot go, it stays in the trash. */
+    const bool InTrash = Old != 0 && (Term != 0 || file_delete(Old) != 0);
+    ReportCopied(SourceName, NewName, Size, Carried, InTrash);
     return 0;
 }
 

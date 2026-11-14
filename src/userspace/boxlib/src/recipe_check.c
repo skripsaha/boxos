@@ -44,9 +44,9 @@ static int state_of(const BoxRecipeFile *file, uint8_t *piece, uint8_t *state)
     }
     if (rc != 0) return rc;
     uint64_t size    = metadata.Size;
-    bool     trashed = FileMetadataWears(&metadata, "trashed");
+    bool     deleted = metadata.KeptUntil != 0;
     FileMetadataRelease(&metadata);
-    if (trashed) {
+    if (deleted) {
         *state = RECIPE_GONE;
         return 0;
     }

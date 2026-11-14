@@ -16,9 +16,8 @@
  * files of each; nothing is changed until the person says yes. The new tag
  * goes on before the old one comes off — save where the volume can take the
  * old one off only with others of its key (Apply) — so a refusal halfway
- * leaves a file wearing both, never neither. The volume's own keys — name,
- * trashed and the
- * others the volume keeps for itself — are not changed this way. The files
+ * leaves a file wearing both, never neither. The volume's own keys — name and
+ * the others the volume keeps for itself — are not changed this way. The files
  * changed are given back: `retag project:new project:old them` takes it back.
  */
 
@@ -191,7 +190,7 @@ std::optional<Plan> PlanFor(file_id_t File, const Change &Asked)
     One.File        = File;
     One.Name        = Facts.Filename ? Facts.Filename : "";
     One.Wears       = TagsOf(Facts.Tags ? Facts.Tags : "");
-    const bool Gone = FileMetadataWears(&Facts, "trashed");
+    const bool Gone = Facts.KeptUntil != 0;
     FileMetadataRelease(&Facts);
     if (Gone) return std::nullopt;
 
@@ -362,7 +361,7 @@ int Retag(const std::vector<std::string> &Words, std::vector<file_id_t> Where, b
     } else {
         const std::string Text  = From->Spelled();
         file_id_t        *Ids   = nullptr;
-        const int         Count = query_all(Text.c_str(), "trashed", &Ids);
+        const int         Count = query_all(Text.c_str(), nullptr, &Ids);
         if (Count < 0) {
             Say(std::format("retag: the volume would not say which files wear {}: {}\n", Text, Why(Count)));
             return 1;

@@ -33,6 +33,12 @@
  * book can carry may be less (TAGFS_V1_TAG_ID_MOST), and its registry issues
  * no id past that. */
 #define TAGFS_MAX_TAG_ID            0x7FFFFFFEu
+/* The one id past them: no tag's, never in the registry nor in a file's tags,
+ * but the tag index's own set of the files that are deleted and kept
+ * (TAGFS_FILE_DELETED) — held beside the tags' members so that every query,
+ * which already sets members aside, sets these aside by default and asks for
+ * them alone when it is asked to (query/query.c). */
+#define TAGFS_DELETED_MEMBERS       0x7FFFFFFFu
 
 // TagRegistryEntry.flags bits.
 //   HAS_VALUE — entry carries a value (bit 0; persisted, value-presence).
@@ -48,6 +54,15 @@
  * file's record, put there by the Ink the verdict's first cycle makes
  * (mount/errata.h) — never a tag: a file's tags are its user's. */
 #define TAGFS_FILE_UNDONE           (1 << 4)
+/* Deleted, and kept until the time its record names (FileRecord.keep_until):
+ * the volume's queries do not see it, and it can be brought back until then;
+ * when the time passes the volume lets it go by itself, its blocks to Fallow
+ * (keep/keep.h). Bit 7, after the role's two: put on by InkKeep and taken off
+ * by InkRestore, never by a flag a caller names, and never a tag — what a
+ * person calls the trash is the volume's word on the file, not a label he
+ * wears. Bit 7 is the Labeled's KEEP verb in the ribbon and the header's
+ * keep_ns in the Tally (volume_ribbon.h, volume_tally.h). */
+#define TAGFS_FILE_DELETED          (1 << 7)
 /* The file's ROLE — what the system keeps it as — is bits 5 and 6 of its
  * record's flags, a number of two bits: 0 an ordinary file, 1 a system file,
  * 2 a boot file, 3 the kernel. Set by the image builder (tools/
@@ -66,8 +81,9 @@
 #define TAGFS_FILE_ROLE_SYSTEM      (1 << 5)
 #define TAGFS_FILE_ROLE_BOOT        (1 << 6)
 #define TAGFS_FILE_ROLE_KERNEL      96
-/* Bits 1 and 2 named trashed and hidden once, which are tags a file wears and
- * never bits of its record: no kernel set them, and none reads them. Bit 3 is
+/* Bits 1 and 2 named trashed and hidden once, which were tags a file wore and
+ * never bits of its record: no kernel set them, and none reads them (the trash
+ * is bit 7 now, and no tag of a file says anything to the system). Bit 3 is
  * spent on v1: kernels before Quill step 1.1 took it for copy-on-write, so it
  * is never set and never trusted. */
 
