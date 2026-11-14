@@ -1023,6 +1023,7 @@ $(TAGFS_TOOL): tools/create_tagfs.c tools/create_tagfs_ground.c tools/create_tag
                $(SRCDIR)/include/volume_digest.h \
                $(SRCDIR)/include/deed_pen.h $(SRCDIR)/include/buildplate_format.h \
                $(SRCDIR)/include/boxos_magic.h \
+               $(SRCDIR)/include/box_format.h $(SRCDIR)/include/box_reader.h \
                $(TAGFS_OS_SIGNATURE) | $(BUILDDIR)
 	@echo "Compiling TagFS tool for $(UNAME_S) ($(UNAME_M))..."
 	@$(CC_HOST) -I$(SRCDIR)/include -o $@ $(filter %.c,$^) -Wall -Wextra
@@ -1477,15 +1478,15 @@ $(VOLUME_FORMAT_MARK): | $(BUILDDIR)
 # to disagree.
 #
 # A file's tags are its user's words and the system reads none of them. What the
-# system keeps a file as is its role, a word of its own in front of the tags:
-# "@kernel" for the kernel (the one the Deed points the loader at), "@system" for
-# the programs the machine runs on; a file with none is ordinary. What a file IS
-# is what it holds — a box is a program — and what a program may do is what its
-# box asks for (PACK_ASKS below), so no tag here says either.
+# system keeps a file as is its role, and it is not said here: the kernel is the
+# file create_tagfs is told by --kernel (the one the Deed points the loader at),
+# and a program of the machine says so in its own box (PACK_SYSTEM below). What
+# a file IS is what it holds — a box is a program — and what a program may do is
+# what its box asks for (PACK_ASKS below), so no tag here says either.
 VOLUME_CONTENT = \
-	$(KERNEL_BIN)   "@kernel" \
-	$(DISPLAY_BIN)  "@system display" \
-	$(HUB_BIN)      "@system" \
+	$(KERNEL_BIN)   "" \
+	$(DISPLAY_BIN)  "display" \
+	$(HUB_BIN)      "" \
 	$(PROCA_BIN)    "" \
 	$(PROCB_BIN)    "" \
 	$(TODAY_BIN)    "" \
@@ -1513,7 +1514,7 @@ VOLUME_CONTENT = \
 	$(BROOKEXEC_BIN)     "test,cxx" \
 	$(CURRENTEXEC_BIN)   "test,cxx" \
 	$(CLOCK_BIN)         "clock" \
-	$(PULSE_BIN)         "@system" \
+	$(PULSE_BIN)         "" \
 	$(CALENDAR_BIN)      "calendar" \
 	$(BONSAI_BIN)        "fun" \
 	$(BIGCLOCK_BIN)      "clock" \
@@ -1526,7 +1527,7 @@ VOLUME_CONTENT = \
 	$(PRINT_STRESS_BIN)  "test" \
 	$(QUIETPRINT_BIN)    "test" \
 	$(EXITPATHS_BIN)     "test,cxx" \
-	$(QUILLTEST_BIN)     "@system test" \
+	$(QUILLTEST_BIN)     "test" \
 	$(UTILS_DIR)/create.elf  "storage" \
 	$(UTILS_DIR)/show.elf    "storage" \
 	$(UTILS_DIR)/hexer.elf   "storage" \
@@ -1546,14 +1547,14 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/info.elf    "storage" \
 	$(UTILS_DIR)/inside.elf  "storage" \
 	$(UTILS_DIR)/settings.elf "storage" \
-	$(UTILS_DIR)/autostart.elf "@system" \
+	$(UTILS_DIR)/autostart.elf "" \
 	$(UTILS_DIR)/say.elf     "" \
-	$(UTILS_DIR)/reboot.elf  "@system" \
-	$(UTILS_DIR)/bye.elf     "@system" \
+	$(UTILS_DIR)/reboot.elf  "" \
+	$(UTILS_DIR)/bye.elf     "" \
 	$(UTILS_DIR)/defrag.elf  "storage" \
-	$(UTILS_DIR)/escheat.elf "@system storage" \
+	$(UTILS_DIR)/escheat.elf "storage" \
 	$(UTILS_DIR)/fsck.elf    "storage" \
-	$(UTILS_DIR)/timezone.elf "@system clock" \
+	$(UTILS_DIR)/timezone.elf "clock" \
 	$(USERSPACE_DIR)/hello.txt   "message,text" \
 	$(USERSPACE_DIR)/hello.asm   "code,asm,example" \
 	$(USERSPACE_DIR)/countdown.asm "code,asm,example" \
@@ -1570,29 +1571,29 @@ VOLUME_CONTENT = \
 	$(USERSPACE_DIR)/guide.md    "guide,text" \
 	$(TESTBIN_EMPTY)         "binary,test:forerror,emptyfile" \
 	$(UTILS_DIR)/ipc_test.elf "" \
-	$(UTILS_DIR)/memtag.elf  "@system memory" \
-	$(UTILS_DIR)/hw.elf      "@system hardware" \
-	$(UTILS_DIR)/usetest.elf "@system test" \
-	$(UTILS_DIR)/faretest.elf "@system test" \
+	$(UTILS_DIR)/memtag.elf  "memory" \
+	$(UTILS_DIR)/hw.elf      "hardware" \
+	$(UTILS_DIR)/usetest.elf "test" \
+	$(UTILS_DIR)/faretest.elf "test" \
 	$(UTILS_DIR)/luggagetest.elf "test" \
-	$(UTILS_DIR)/logsave.elf "@system log" \
-	$(UTILS_DIR)/lastsaid.elf "@system log" \
+	$(UTILS_DIR)/logsave.elf "log" \
+	$(UTILS_DIR)/lastsaid.elf "log" \
 	$(UTILS_DIR)/rollcall.elf "test" \
 	$(UTILS_DIR)/handset.elf "test" \
 	$(UTILS_DIR)/headcount.elf "test" \
 	$(UTILS_DIR)/playtime.elf "fun" \
 	$(UTILS_DIR)/lavalamp.elf "fun" \
-	$(UTILS_DIR)/finish.elf   "@system" \
-	$(UTILS_DIR)/taskboard.elf "@system" \
+	$(UTILS_DIR)/finish.elf   "" \
+	$(UTILS_DIR)/taskboard.elf "" \
 	$(UTILS_DIR)/scratchpad.elf "text" \
-	$(UTILS_DIR)/memmap.elf "@system memory" \
+	$(UTILS_DIR)/memmap.elf "memory" \
 	$(UTILS_DIR)/calculate.elf "" \
 	$(UTILS_DIR)/difference.elf "storage" \
 	$(UTILS_DIR)/copy.elf "storage" \
 	$(UTILS_DIR)/typer.elf "fun" \
 	$(UTILS_DIR)/flame.elf "fun" \
 	$(UTILS_DIR)/checksum.elf "storage" \
-	$(UTILS_DIR)/passport.elf "@system" \
+	$(UTILS_DIR)/passport.elf "" \
 	$(UTILS_DIR)/aquarium.elf "fun" \
 	$(UTILS_DIR)/nyancat.elf "fun" \
 	$(UTILS_DIR)/fireworks.elf "fun" \
@@ -1609,7 +1610,7 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/tumbleweed.elf "fun" \
 	$(UTILS_DIR)/crab.elf      "fun" \
 	$(UTILS_DIR)/garden.elf    "fun" \
-	$(UTILS_DIR)/gardener.elf  "@system gardener" \
+	$(UTILS_DIR)/gardener.elf  "gardener" \
 	$(UTILS_DIR)/wizard.elf    "fun,game" \
 	$(UTILS_DIR)/random.elf    "fun" \
 	$(UTILS_DIR)/sand.elf "fun,game" \
@@ -1638,19 +1639,28 @@ VOLUME_LAID  = $(foreach word,$(VOLUME_CONTENT),$(if $(filter %.elf,$(word)),$(c
 # what every program has — a file's tags are not read. Every program of the tree
 # asks for `utility` (to start programs, read the log, flush the disks) but those
 # named in PACK_ASKS_NOTHING — the two that only talk to their spawner — which
-# ask for nothing. `system` is not asked for: it is the role of a file (@system).
+# ask for nothing. `system` is not asked for: a box does not ask to be the
+# system's, it says it is (the part `role`), and only create_tagfs, laying
+# these boxes on the volume it makes, reads that.
 PACK_ASKS_NOTHING = proca procb
 PackAsks = $(if $(filter $(basename $(notdir $(1))),$(PACK_ASKS_NOTHING)),,--ask utility)
+
+# ‼ WHAT A PROGRAM IS TO THE MACHINE is said in its box too (the part `role`,
+# tools/pack --role): the programs the machine runs on say `system`, and the
+# volume maker, which trusts what it has itself just packed, keeps them in that
+# role. The rest are ordinary.
+PACK_SYSTEM = display hub pulse quilltest autostart reboot bye escheat timezone memtag hw usetest faretest logsave lastsaid finish taskboard memmap passport gardener
+PackRole = $(if $(filter $(basename $(notdir $(1))),$(PACK_SYSTEM)),--role system)
 
 define BoxRule
 $(call Box,$(1)): $(1) $(PACK_TOOL)
 	@mkdir -p $$(dir $$@)
-	@$(PACK_TOOL) $(call PackAsks,$(1)) $(1) $$@
+	@$(PACK_TOOL) $(call PackAsks,$(1)) $(call PackRole,$(1)) $(1) $$@
 endef
 $(foreach elf,$(VOLUME_ELFS),$(eval $(call BoxRule,$(elf))))
 
 $(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(HUB_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(COW_TEST_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(PULSE_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TAGFS_TOOL) $(VOLUME_FORMAT_MARK)
-	@GROUND=$$($(TAGFS_TOOL) --ground $(VOLUME_FORMAT_FLAG) $(VOLUME_LAID)); \
+	@GROUND=$$($(TAGFS_TOOL) --ground $(VOLUME_FORMAT_FLAG) --kernel $(KERNEL_BIN) $(VOLUME_LAID)); \
 	ESP_RAW=$$(( ( $$(stat -f%z $(UEFI_ESP_IMG) 2>/dev/null || stat -c%s $(UEFI_ESP_IMG)) + 511 ) / 512 )); \
 	ESP=$$(( ( $$ESP_RAW + $(MEDIUM_GRAIN_SECTORS) - 1 ) / $(MEDIUM_GRAIN_SECTORS) * $(MEDIUM_GRAIN_SECTORS) )); \
 	START=$$(( $(ESP_START_SECTOR) + $$ESP )); \
@@ -1668,7 +1678,7 @@ $(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_B
 	    $$START,$$GROUND,7f,boot \
 	    $(ESP_START_SECTOR),$$ESP,ef
 	@echo "  Making the volume on it, format $(VOLUME_FORMAT)..."
-	@$(TAGFS_TOOL) $(VOLUME_FORMAT_FLAG) $@ $(VOLUME_LAID)
+	@$(TAGFS_TOOL) $(VOLUME_FORMAT_FLAG) --kernel $(KERNEL_BIN) $@ $(VOLUME_LAID)
 	@# ‼ AND WHAT IT WROTE IS READ BACK BEFORE ANYTHING BOOTS IT.
 	@#
 	@# volume-read is the format's second reader, written apart from the tool

@@ -462,7 +462,7 @@ static int V1PackDeed(V1Pack* p, char* argv[], int first) {
         printf("  Boot:          kernel at volume block %u (%u blocks, %u bytes)\n",
                boot.kernel_block, boot.kernel_blocks, boot.kernel_bytes);
     } else {
-        printf("  WARNING: nothing here is given the role @kernel — this volume carries "
+        printf("  WARNING: no file here is the kernel (--kernel names it) — this volume carries "
                "no kernel and no loader will boot from it\n");
     }
 

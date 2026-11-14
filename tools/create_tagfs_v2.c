@@ -170,7 +170,7 @@ int FrameOnlyMake(const char* disk_path, int file_count, char* argv[], int first
         boot.kernel_blocks = files[kernel].block_count;
         boot.kernel_bytes  = (uint32_t)files[kernel].file_size;
     } else {
-        printf("  WARNING: nothing here is given the role @kernel — this volume carries "
+        printf("  WARNING: no file here is the kernel (--kernel names it) — this volume carries "
                "no kernel and no loader will boot from it\n");
     }
     VolumePacked packed = PackedStamp(file_count, argv, first,
@@ -506,7 +506,7 @@ static int V2WriteBook(V2Bind* v, char* argv[], int first) {
         boot.kernel_blocks = (uint32_t)v->files[v->kernel].blocks;
         boot.kernel_bytes  = (uint32_t)v->files[v->kernel].size;
     } else {
-        printf("  WARNING: nothing here is given the role @kernel — this volume carries "
+        printf("  WARNING: no file here is the kernel (--kernel names it) — this volume carries "
                "no kernel and no loader will boot from it\n");
     }
     VolumePacked packed = PackedStamp(v->count, argv, first,

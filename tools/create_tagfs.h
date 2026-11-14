@@ -95,6 +95,7 @@ VolumeGeometry DeedGeometry(void);
 void         seed_reserved_tags(uint32_t id_most);
 int          parse_tags(const char* tag_string, const char* filename,
                         uint32_t** out_ids, uint32_t* out_count, uint32_t* out_role);
+void         CargoNameKernel(const char* path);
 VolumePacked PackedStamp(int file_count, char* argv[], int first,
                          const char* kernel_path);
 void         CargoRelease(void);

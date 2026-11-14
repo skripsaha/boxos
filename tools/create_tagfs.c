@@ -15,11 +15,19 @@
  * This file is the modes and nothing else; what each of them writes is in the
  * files create_tagfs.h names.
  *
- * Usage: create_tagfs --v1 <disk_image> [<file> <tags>] ...
- *        create_tagfs --v2 <disk_image> [<file> <tags>] ...
- *        create_tagfs --ground --v1 [<file> <tags>] ...
- *        create_tagfs --ground --v2 [<file> <tags>] ...
- *        create_tagfs --frame-only <disk_image> [<file> <tags>] ...
+ * Usage: create_tagfs --v1 [--kernel <file>] <disk_image> [<file> <tags>] ...
+ *        create_tagfs --v2 [--kernel <file>] <disk_image> [<file> <tags>] ...
+ *        create_tagfs --ground --v1 [--kernel <file>] [<file> <tags>] ...
+ *        create_tagfs --ground --v2 [--kernel <file>] [<file> <tags>] ...
+ *        create_tagfs --frame-only [--kernel <file>] <disk_image> [<file> <tags>] ...
+ *
+ * ‼ THE TAGS ARE THE FILE'S USER'S WORDS, AND THE ROLE IS NOT ONE OF THEM.
+ * What the volume keeps a file as — the kernel, a program of the system, one
+ * a loader may boot with — is never in the list of tags. The kernel is the
+ * file --kernel names, which must be one of the files given; a program says
+ * what it is in its own box (the part `role`, tools/pack --role), and this
+ * tool, which lays the boxes it has just packed, trusts it. Nothing running
+ * on the volume grants a role from a box, and no tag ever did.
  *
  * The format is always named: a tool that made one format when none was named
  * would make that one for every caller that relied on it, whichever the build
@@ -30,18 +38,30 @@
 
 static int Usage(const char* self)
 {
-    fprintf(stderr, "Usage: %s --v1|--v2 <disk_image> [<file> <tags>] ...\n", self);
-    fprintf(stderr, "       %s --ground --v1|--v2 [<file> <tags>] ...\n", self);
-    fprintf(stderr, "       %s --frame-only <disk_image> [<file> <tags>] ...\n", self);
+    fprintf(stderr, "Usage: %s --v1|--v2 [--kernel <file>] <disk_image> [<file> <tags>] ...\n", self);
+    fprintf(stderr, "       %s --ground --v1|--v2 [--kernel <file>] [<file> <tags>] ...\n", self);
+    fprintf(stderr, "       %s --frame-only [--kernel <file>] <disk_image> [<file> <tags>] ...\n", self);
     fprintf(stderr, "\n");
     fprintf(stderr, "Makes a BoxOS volume on the run of this image claimed for\n");
     fprintf(stderr, "BoxOS by its partition table (MBR type 0x7F, or the BoxOS\n");
     fprintf(stderr, "type GUID in a GPT), in the format named — always named.\n");
     fprintf(stderr, "Nothing outside that run is touched. A file's tags are its\n");
-    fprintf(stderr, "user's words; what the system keeps a file as is its role,\n");
-    fprintf(stderr, "named first in the tag string: \"@system\", \"@boot\" or\n");
-    fprintf(stderr, "\"@kernel\" (\"@system utility,fun\"). The file in the role\n");
-    fprintf(stderr, "@kernel is the one the Deed points a loader at.\n");
+    fprintf(stderr, "user's words; what the system keeps a file as is its role:\n");
+    fprintf(stderr, "the kernel is the file --kernel names (the one the Deed\n");
+    fprintf(stderr, "points a loader at), a program says its own in its box.\n");
+    return 1;
+}
+
+/* The option --kernel <file> at argv[at], taken out of the arguments when it
+ * is there: the file is named to the cargo, and the arguments after it move
+ * up. False when the option has no file after it. */
+static int KernelOptionTake(int* argc, char* argv[], int at)
+{
+    if (*argc <= at || strcmp(argv[at], "--kernel") != 0) return 1;
+    if (*argc < at + 2) return 0;
+    CargoNameKernel(argv[at + 1]);
+    for (int i = at; i + 2 < *argc + 1; i++) argv[i] = argv[i + 2];
+    *argc -= 2;
     return 1;
 }
 
@@ -55,17 +75,19 @@ int main(int argc, char* argv[]) {
     /* --ground answers a question about a file list and touches no medium. */
     if (argc >= 2 && strcmp(argv[1], "--ground") == 0) {
         int format = argc >= 3 ? FormatNamed(argv[2]) : 0;
-        if (!format || (argc - 3) % 2 != 0)
+        if (!format || !KernelOptionTake(&argc, argv, 3) || (argc - 3) % 2 != 0)
             return Usage(argv[0]);
         return format == 2 ? V2GroundSay((argc - 3) / 2, argv, 3) : say_the_ground((argc - 3) / 2, argv, 3);
     }
 
     /* --frame-only lays a format-v2 Deed over files and writes no book. */
-    if (argc >= 3 && strcmp(argv[1], "--frame-only") == 0 && (argc - 3) % 2 == 0)
+    if (argc >= 3 && strcmp(argv[1], "--frame-only") == 0) {
+        if (!KernelOptionTake(&argc, argv, 2) || argc < 3 || (argc - 3) % 2 != 0) return Usage(argv[0]);
         return FrameOnlyMake(argv[2], (argc - 3) / 2, argv, 3);
+    }
 
     int format = argc >= 3 ? FormatNamed(argv[1]) : 0;
-    if (!format || (argc - 3) % 2 != 0)
+    if (!format || !KernelOptionTake(&argc, argv, 2) || argc < 3 || (argc - 3) % 2 != 0)
         return Usage(argv[0]);
     return format == 2 ? V2BindMake(argv[2], (argc - 3) / 2, argv, 3) : V1PackMake(argv[2], (argc - 3) / 2, argv, 3);
 }

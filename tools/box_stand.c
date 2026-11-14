@@ -871,6 +871,41 @@ static BoxVerdict AsksOf(const char *text, BoxAsks *asks, uint64_t *unknown)
     return verdict;
 }
 
+/* The role a box says of itself, read from `text` held in a buffer of exactly its length. */
+static BoxVerdict RoleOf(const char *text, BoxRole *role, uint64_t *unknown)
+{
+    uint8_t   *exact   = malloc(strlen(text) ? strlen(text) : 1);
+    memcpy(exact, text, strlen(text));
+    BoxVerdict verdict = BoxRoleRead(exact, strlen(text), role, unknown);
+    free(exact);
+    return verdict;
+}
+
+static void TestRole(void)
+{
+    BoxRole  role;
+    uint64_t unknown;
+    Check(RoleOf("role 1\nsystem\n", &role, &unknown) == BOX_OK && role == BOX_ROLE_SYSTEM && unknown == 0,
+          "role: system");
+    Check(RoleOf("role 1\nboot", &role, &unknown) == BOX_OK && role == BOX_ROLE_BOOT && unknown == 0,
+          "role: boot, the last newline left off");
+    Check(RoleOf("role 1\n\n   system   \n", &role, &unknown) == BOX_OK && role == BOX_ROLE_SYSTEM,
+          "role: blank lines and blanks around the word are nothing");
+    Check(RoleOf("role 1\nkernel\n", &role, &unknown) == BOX_OK && role == BOX_ROLE_ORDINARY && unknown == 2,
+          "role: a word this reader does not know is passed over and named — kernel is no role a box can say");
+    Check(RoleOf("role 1\n", &role, &unknown) == BOX_TEXT_LAYOUT && role == BOX_ROLE_ORDINARY,
+          "role: no word at all");
+    Check(RoleOf("role 1\nsystem boot\n", &role, &unknown) == BOX_TEXT_LAYOUT && role == BOX_ROLE_ORDINARY,
+          "role: two words in a line");
+    Check(RoleOf("role 1\nsystem\nboot\n", &role, &unknown) == BOX_TEXT_LAYOUT && role == BOX_ROLE_ORDINARY,
+          "role: two lines, and a role that is neither");
+    Check(RoleOf("role 2\nsystem\n", &role, &unknown) == BOX_TEXT_LAYOUT, "role: another version");
+    Check(RoleOf("asks 1\nsystem\n", &role, &unknown) == BOX_TEXT_LAYOUT && role == BOX_ROLE_ORDINARY,
+          "role: a part of another kind is refused, and says nothing");
+    Check(RoleOf("role 1\nsystem\n", &role, NULL) == BOX_OK && role == BOX_ROLE_SYSTEM,
+          "role: read without asking what it passed over");
+}
+
 static void TestAsks(void)
 {
     BoxAsks  asks;
@@ -949,6 +984,7 @@ int main(void)
     TestTextSize();
     TestLife();
     TestAsks();
+    TestRole();
     TestWritten();
     TestTexts();
 

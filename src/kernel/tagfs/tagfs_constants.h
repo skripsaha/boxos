@@ -66,9 +66,12 @@
 /* The file's ROLE — what the system keeps it as — is bits 5 and 6 of its
  * record's flags, a number of two bits: 0 an ordinary file, 1 a system file,
  * 2 a boot file, 3 the kernel. Set by the image builder (tools/
- * create_tagfs_cargo.c) as it lays the volume, and by no call a program or a
- * person makes: a file's tags are its user's, and no tag says what the system
- * does with a file. A file in any role but the ordinary is changed, truncated,
+ * create_tagfs_cargo.c) as it lays the volume — the kernel is the file it is
+ * told is the kernel (--kernel), a system or boot program is one whose own
+ * box says so (the part `role`, box_reader.h BoxRoleRead), which the builder
+ * trusts because it lays the boxes it has just packed — and by no call a
+ * program or a person makes: a file's tags are its user's, and no tag says
+ * what the system does with a file. A file in any role but the ordinary is changed, truncated,
  * given up and moved by no call without the system's warrant (ink.c), is laid
  * by neither Dedup nor Conjugate on another's blocks nor another's on its own
  * (dedup_owners.c, conjugate.c), and — the kernel's role first, then the boot's,

@@ -1,11 +1,18 @@
 /*
  * pack — a program as the tree links it, an ELF, made a box (src/include/box_format.h).
  *
- *     tools/pack [--ask WORD]... PROGRAM.elf PROGRAM.box
+ *     tools/pack [--ask WORD]... [--role WORD] PROGRAM.elf PROGRAM.box
  *
  * What a program may do is what its box asks for (the part `asks`, box_reader.h
  * BoxAsksRead), and the program's maker says it: each --ask is one word the box
  * asks for — utility or network. A box packed with none asks for nothing.
+ *
+ * What a program is to the machine it is laid on is what its box says of itself
+ * (the part `role`, BoxRoleRead): --role system for a program the machine runs
+ * on, boot for one a loader may take. Only whoever lays a volume reads it and
+ * trusts it — tools/create_tagfs, which makes the volume from boxes it has just
+ * packed — and nothing running reads it for a grant. A box packed with no role
+ * is an ordinary program.
  *
  * The ELF stays on the build machine, for the debugger; the box is what goes
  * on the volume. What goes where:
@@ -23,6 +30,7 @@
  *   .boxos.life        life     the text, each word known
  *   .boxos.recipe      recipe   the text, its C string's zeros dropped
  *   --ask WORD         asks     the words, a line each after `asks 1`
+ *   --role WORD        role     the one word, after `role 1`
  *
  * An executable linked at a fixed address (ET_EXEC) keeps its addresses: its
  * box has no fixups and is loaded where it was linked. A static PIE (ET_DYN)
@@ -431,6 +439,22 @@ static size_t WriteAsks(char *text, size_t room, char **words, int count)
     return used;
 }
 
+/* The part `role` for the word the program's maker said, in `text`: a word the
+ * reader does not know would be passed over and the program laid ordinary, so
+ * it is refused here, where the maker can mend it. Returns its size. */
+static size_t WriteRole(char *text, size_t room, const char *word)
+{
+    int used = snprintf(text, room, "role 1\n%s\n", word);
+    if (used < 0 || (size_t)used >= room) Refuse("it says a role that is no word of one");
+
+    BoxRole    role;
+    uint64_t   unknown;
+    BoxVerdict verdict = BoxRoleRead((const uint8_t *)text, (uint64_t)used, &role, &unknown);
+    if (verdict != BOX_OK || unknown != 0 || role == BOX_ROLE_ORDINARY)
+        Refuse("it says a role nobody who lays a volume knows: system or boot");
+    return (size_t)used;
+}
+
 static void Add(BoxPenPart *parts, uint32_t *count, const char *name, const uint8_t *bytes, uint64_t size,
                 uint64_t memory, uint64_t place, uint32_t flags)
 {
@@ -465,14 +489,22 @@ static uint8_t *ReadWhole(const char *path, uint64_t *size)
 
 int main(int argc, char **argv)
 {
-    char *words[8];
-    int   word_count = 0, at = 1;
-    while (at + 1 < argc && strcmp(argv[at], "--ask") == 0 && word_count < 8) {
-        words[word_count++] = argv[at + 1];
+    char       *words[8];
+    const char *role_word = NULL;
+    int         word_count = 0, at = 1;
+    while (at + 1 < argc && word_count < 8 && (strcmp(argv[at], "--ask") == 0 || strcmp(argv[at], "--role") == 0)) {
+        if (argv[at][2] == 'a') {
+            words[word_count++] = argv[at + 1];
+        } else if (role_word) {
+            fprintf(stderr, "pack: a program has one role\n");
+            return 2;
+        } else {
+            role_word = argv[at + 1];
+        }
         at += 2;
     }
     if (argc - at != 2) {
-        fprintf(stderr, "usage: pack [--ask WORD]... PROGRAM.elf PROGRAM.box\n");
+        fprintf(stderr, "usage: pack [--ask WORD]... [--role WORD] PROGRAM.elf PROGRAM.box\n");
         return 2;
     }
     const char *elf_path = argv[at], *box_path = argv[at + 1];
@@ -565,6 +597,12 @@ int main(int argc, char **argv)
     if (word_count > 0) {
         size_t asks_size = WriteAsks(asks_text, sizeof(asks_text), words, word_count);
         Add(parts, &count, "asks", (const uint8_t *)asks_text, asks_size, asks_size, 0, 0);
+    }
+
+    char role_text[32];
+    if (role_word) {
+        size_t role_size = WriteRole(role_text, sizeof(role_text), role_word);
+        Add(parts, &count, "role", (const uint8_t *)role_text, role_size, role_size, 0, 0);
     }
 
     BoxHostHash state  = { 0 };
