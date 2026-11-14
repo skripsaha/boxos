@@ -20,17 +20,19 @@ kernel's own lines against this package's prediction.
 The book of format v2 has landings of its own (selftest_book.py): over the
 book laid on the v1 image's files, or over a format-v2 image's own book, when
 that is what self-test is handed — no case of format v1 has a volume to run
-on then, and X2, which only they hear, is said not held.
+on then (selftest_cases.py runs them, on a format-v1 image alone), and X2
+holds ground_owners.py to the header with no owner of format v1 to hear. The
+medium under the book is the book's to answer for: the ground the kernel
+finds on it, the sectors it will not give, no Deed at all, and the cut logic
+on a log built over it (selftest_book_medium.py).
 """
 
 from .medium import OverlayMedium, StandOnDeed, Unreadable
-from .census import GroundCensus
 from .ground_owners import GROUND_OWNERS
-from .selftest_plants import Targets, PlantNoDeed
-from .selftest_cases import Cases, Judge, Kinds, FrameCases, LogCases
 from .selftest_headers import ConstantsCheck, OwnersCheck, AlphabetCheck
 from .bookcensus import BOOK_OWNERS, BookCensus
-from .selftest_book import BookTargets
+from .selftest_book import BookTargets, Judge
+from .selftest_book_medium import GroundCases, LogCases, NoDeed, UnreadCases
 from .selftest_book_tally import (Pristine, Circles, SpineCases, RangeCases, TreeShapeCases, ElementCases,
                                   SlotRootCases)
 from .selftest_book_ribbon import (RecordCases, MachineRecordCases, RecordRuleCases, RibbonEndCases,
@@ -57,7 +59,7 @@ def BookCases(bt):
                   RecordCases, MachineRecordCases, RecordRuleCases, RibbonEndCases, RibbonBranchCases,
                   RibbonFurtherCases, RibbonLossCases, RibbonCases, RibbonShapeCases, RibbonBoundCases, ErrataCases,
                   TipInCases, EscheatCases, LockedCases, FacsimileRuleCases, FacsimileReplayCases, BootSlipCases,
-                  MemoCases, BootCases, KeepCases):
+                  MemoCases, BootCases, KeepCases, GroundCases, UnreadCases):
         try:
             cases += group(bt)
         except Unreadable as e:
@@ -89,6 +91,8 @@ def BookRun(t=None, medium=None):
         except (Unreadable, IOError, ValueError) as e:
             ok, said = False, "NOT so: %s" % e
         out.append((case.name, ok, said))
+    for name, ok, said in [NoDeed(bt)] + LogCases(bt):
+        out.append((name, ok, "%s — %s" % (said, "as expected" if ok else "NOT so")))
     return out, heard
 
 
@@ -116,20 +120,6 @@ def BookOwnersCheck(heard):
     return ["no landing's census heard %s claim a block" % ", ".join(unheard)] if unheard else []
 
 
-def Start(medium):
-    try:
-        c0 = GroundCensus(medium)
-    except (Unreadable, IOError) as e:
-        print("self-test: the image handed to self-test is unreadable — %s" % e)
-        return None
-    if c0.Verdict() != "consistent":
-        print("self-test: the image handed to self-test is not consistent to begin with:")
-        for line in c0.HumanLines():
-            print("self-test:   " + line)
-        return None
-    return Targets(c0)
-
-
 def Book(medium):
     """Is the image's volume one of format v2? Then its own book is the base
     the landings stand on, and no case of format v1 has a volume to run on."""
@@ -151,30 +141,6 @@ class Count:
         print("self-test: " + line)
 
 
-def V1Cases(t, medium, count):
-    """Every case of format v1 over the image; the owner kinds heard."""
-    heard = set()
-    for case in Cases(t):
-        over = OverlayMedium(medium)
-        case.plant(over)
-        census = GroundCensus(over)
-        ok, codes, wrong = Judge(case, census)
-        heard |= Kinds(census)
-        count.Say(ok, "%s — flagged %s — %s" % (case.name, ", ".join(codes) or "nothing",
-                                                 "as expected" if ok else "; ".join(wrong)))
-    over = OverlayMedium(medium)
-    PlantNoDeed(t, over)
-    try:
-        GroundCensus(over)
-        ok, said = False, "the census read a volume with no deed at either end"
-    except Unreadable as e:
-        ok, said = True, "unreadable: %s" % e
-    count.Say(ok, "C16 no deed — %s — %s" % (said, "as expected" if ok else "expected unreadable"))
-    for name, ok, said in FrameCases(t, medium) + LogCases(t, medium):
-        count.Say(ok, "%s — %s — %s" % (name, said, "as expected" if ok else "NOT so"))
-    return heard
-
-
 def BookCasesRun(count, t=None, medium=None):
     book, owners = BookRun(t, medium)
     for name, ok, said in book:
@@ -187,19 +153,19 @@ def BookCasesRun(count, t=None, medium=None):
 
 
 def Headers(src, heard, count):
-    """X1, X2 (when the cases of format v1 ran: `heard` not None) and X3; False
-    when the source tree is not beside the tool."""
+    """X1, X2 — and the owners format v1's cases heard, when they ran: `heard`
+    not None — and X3; False when the source tree is not beside the tool."""
     wrong, n = ConstantsCheck(src)
     if wrong is None:
         print("self-test: X1 constants — %s" % n)
         return False
     count.Say(not wrong, "X1 constants — %u constants and struct fields held against the headers — %s"
               % (n, "as expected" if not wrong else "; ".join(wrong)))
+    wrong = OwnersCheck(src, heard)
     if heard is None:
-        print("self-test: X2 ground owners — not held: the owners of format v1 are heard only by its cases, "
-              "and none runs on a format-v2 image")
+        count.Say(not wrong, "X2 ground owners — ground_owners.py is what tools/gen_ground_owners.py writes of "
+                  "the header's owners — %s" % ("as expected" if not wrong else "; ".join(wrong)))
     else:
-        wrong = OwnersCheck(src, heard)
         count.Say(not wrong, "X2 ground owners — the %u owners ground_owners.py lists are the header's, and "
                   "each is heard in a case — %s" % (len(GROUND_OWNERS), "as expected" if not wrong
                                                    else "; ".join(wrong)))
@@ -218,6 +184,7 @@ def Run(medium, src):
         print("self-test: a format-v2 image — the book's landings stand on its own book")
         BookCasesRun(count, medium=medium)
     else:
+        from .selftest_cases import Start, V1Cases
         t = Start(medium)
         if t is None:
             return 2
@@ -233,10 +200,14 @@ def Run(medium, src):
 
 def Emit(medium, device, name, out):
     book = Book(medium)
-    t = None if book else Start(medium)
-    if t is None and not book:
-        return 2
-    wanted = [] if book else [c for c in Cases(t) if c.name == name or c.name.split()[0] == name]
+    t, v1 = None, []
+    if not book:
+        from .selftest_cases import Cases, Start
+        t = Start(medium)
+        if t is None:
+            return 2
+        v1 = Cases(t)
+    wanted = [c for c in v1 if c.name == name or c.name.split()[0] == name]
     try:
         if wanted:
             over = OverlayMedium(medium)
@@ -247,7 +218,7 @@ def Emit(medium, device, name, out):
             said, landed, refused = BookEmit(t, name, out, medium if book else None)
             if said is None:
                 print("self-test: no case %r; the cases are %s%s" % (name, ", ".join(
-                    ([] if book else [c.name.split()[0] for c in Cases(t)]) + landed),
+                    [c.name.split()[0] for c in v1] + landed),
                     "".join("; the image gives %s nothing to aim at — %s" % (group, why)
                             for group, why in refused)))
                 return 2

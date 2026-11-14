@@ -188,10 +188,12 @@ def _StructsCheck(text, d, Eq):
 # ---------------------------------------------------------------------------
 
 
-def OwnersCheck(src, heard):
+def OwnersCheck(src, heard=None):
     """What is wrong with ground_owners.py: not what tools/gen_ground_owners.py
-    writes out of src/include/ground_owner.h today, or an owner the header
-    names that no case's census heard claim a block."""
+    writes out of src/include/ground_owner.h today, or — with `heard`, the
+    owners format v1's cases heard — an owner of format v1's census that no
+    case's census heard claim a block. A book's owners are held to its
+    landings by selftest.BookOwnersCheck."""
     gen = os.path.join(os.path.dirname(src), "tools", "gen_ground_owners.py")
     spec = importlib.util.spec_from_file_location("gen_ground_owners", gen)
     module = importlib.util.module_from_spec(spec)
@@ -201,7 +203,7 @@ def OwnersCheck(src, heard):
         if fh.read() != module.Text(module.Owners()):
             wrong.append("%s is stale against %s — run tools/gen_ground_owners.py"
                          % (module.OUT, module.HEADER))
-    unheard = [name for name, _alone in GROUND_OWNERS if name not in heard]
+    unheard = [name for name, _alone in GROUND_OWNERS if heard is not None and name not in heard]
     if unheard:
         wrong.append("no case's census heard %s claim a block" % ", ".join(unheard))
     return wrong

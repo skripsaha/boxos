@@ -25,8 +25,7 @@ from .bootread import WHO, BootRead, Loaded
 from .bookground import BookGround
 from .medium import Unreadable
 from .ondisk import BLOCK, SECTOR, SECTORS_PER_BLOCK
-from .selftest_book import LANDING_ROOM
-from .selftest_cases import Case
+from .selftest_book import LANDING_ROOM, Case
 
 STOPS = "no kernel on this volume may be jumped into: "
 

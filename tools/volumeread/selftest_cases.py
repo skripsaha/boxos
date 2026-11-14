@@ -1,7 +1,8 @@
 """selftest_cases — every case of volume-read's self-test on a format-v1 image:
 a plant (selftest_plants.py), the codes it must raise and the facts about the
 census and the mount that must hold; the Deeds a reader of v1 must refuse; the
-cut logic on a log built in memory."""
+cut logic on a log built in memory; and the run of them over the image
+(Start, V1Cases), which selftest.py asks of a format-v1 image alone."""
 
 import struct
 
@@ -9,14 +10,16 @@ from . import ondisk
 from .ondisk import SECTOR, BLOCK, SECTORS_PER_BLOCK, RunsNormal, RunsSubtract
 from .medium import OverlayMedium, Unreadable
 from .census import GroundCensus
+from .selftest_book import Case, Judge
 from . import blklog
+from .selftest_book_medium import PlantGpt, PlantMbrEntry, SyntheticLog
 from .selftest_plants import (LEDGER_AT, LastRecord, LedgerField, NoSeal, PlantAppend, PlantBadSector,
-                              PlantBitmapAway, PlantBoot, PlantFellBack, PlantFrame, PlantGlean, PlantGpt,
-                              PlantHeadTorn, PlantLink, PlantManifest, PlantMbrEntry, PlantMissing,
+                              PlantBitmapAway, PlantBoot, PlantFellBack, PlantFrame, PlantGlean,
+                              PlantHeadTorn, PlantLink, PlantManifest, PlantMissing,
                               PlantOlderClosed, PlantOrphan, PlantQuitclaimLanded, PlantRefusedRead,
                               PlantRegistryAppend, PlantRegistrySplit, PlantRetire, PlantRewritten,
                               PlantRotten, PlantRottenSettled, PlantSpare, PlantTornTail, PlantUseChain,
-                              Quitclaim, Reconcile, RecordOf, Reseal)
+                              Quitclaim, Reconcile, RecordOf, Reseal, PlantNoDeed, Targets)
 
 
 def FrameCases(t, medium):
@@ -82,15 +85,6 @@ def Runs(c, code):
 
 def Kinds(c):
     return {x.kind for x in c.claims}
-
-
-class Case:
-    """A plant, the codes it must raise, the other damage or leak codes it may
-    raise, and the facts about the census and the mount that must hold."""
-
-    def __init__(self, name, plant, must=(), may=(), checks=()):
-        self.name, self.plant = name, plant
-        self.must, self.may, self.checks = set(must), set(may), list(checks)
 
 
 # More than the 32 runs of each kind the kernel's mount names one by one
@@ -570,32 +564,32 @@ def ReadCases(t, x):
 
 def GroundCases(t):
     return [
-        Case("G1 MBR type", lambda o: PlantMbrEntry(t, o, kind=0x83), must={"GROUND_REFUSED"}, checks=[
+        Case("G1 MBR type", lambda o: PlantMbrEntry(o, kind=0x83), must={"GROUND_REFUSED"}, checks=[
             ("the kernel refuses at the ground", lambda c: c.kernel.step == "ground"),
             ("the refusal names the types it found", lambda c: "0:0x83" in c.kernel.refusal),
             ("check exits 1", lambda c: c.ExitCode() == 1)]),
-        Case("G2 MBR past the end", lambda o: PlantMbrEntry(t, o, extra=1), must={"GROUND_REFUSED"}, checks=[
+        Case("G2 MBR past the end", lambda o: PlantMbrEntry(o, extra=1), must={"GROUND_REFUSED"}, checks=[
             ("the kernel does not use an entry past the medium",
              lambda c: c.kernel.step == "ground" and "not using it" in c.kernel.refusal)]),
-        Case("G3 GPT", lambda o: PlantGpt(t, o), checks=[
+        Case("G3 GPT", lambda o: PlantGpt(o, t.base), checks=[
             ("the kernel stands on GPT entry 0", lambda c: c.f.stand.kernels and
              c.f.stand.how == "GPT entry 0 (BoxOS type)" and c.kernel.refusal is None)]),
-        Case("G4 GPT primary array", lambda o: PlantGpt(t, o, primary="array"), checks=[
+        Case("G4 GPT primary array", lambda o: PlantGpt(o, t.base, primary="array"), checks=[
             ("the kernel stands on the far copy's entry",
              lambda c: c.f.stand.kernels and "from the copy at the far end" in c.f.stand.how and
              c.kernel.refusal is None)]),
-        Case("G5 GPT primary gone", lambda o: PlantGpt(t, o, primary="gone"), checks=[
+        Case("G5 GPT primary gone", lambda o: PlantGpt(o, t.base, primary="gone"), checks=[
             ("the kernel stands on the far copy's entry",
              lambda c: c.f.stand.kernels and "from the copy at the far end" in c.f.stand.how and
              c.kernel.refusal is None)]),
-        Case("G6 GPT both arrays", lambda o: PlantGpt(t, o, primary="array", backup="array"),
+        Case("G6 GPT both arrays", lambda o: PlantGpt(o, t.base, primary="array", backup="array"),
              must={"GROUND_REFUSED"}, checks=[
                  ("the kernel reads neither copy", lambda c: c.kernel.step == "ground" and
                   "neither copy of its GPT" in c.kernel.refusal)]),
-        Case("G7 GPT ends first", lambda o: PlantGpt(t, o, ends=t.base - 1), must={"GROUND_REFUSED"}, checks=[
+        Case("G7 GPT ends first", lambda o: PlantGpt(o, t.base, ends=t.base - 1), must={"GROUND_REFUSED"}, checks=[
             ("the kernel skips an entry that ends before it begins",
              lambda c: c.kernel.step == "ground" and "ends before it begins" in c.kernel.refusal)]),
-        Case("G8 GPT of 1024", lambda o: PlantGpt(t, o, count=1024), checks=[
+        Case("G8 GPT of 1024", lambda o: PlantGpt(o, t.base, count=1024), checks=[
             ("the kernel reads a table of 1024 entries", lambda c: c.f.stand.kernels and
              c.kernel.refusal is None)]),
         Case("G9 bitmap away", lambda o: PlantBitmapAway(t, o), must={"BITMAP_UNREADABLE", "REGION_OVERLAP"},
@@ -619,41 +613,9 @@ def LinkCase(t, label, name, said):
                      lambda c: c.f.chains[name][:len(before)] == before)])
 
 
-def Judge(case, census):
-    """(ok, flagged codes, what went wrong)."""
-    codes = {x.code for x in census.findings}
-    bad = {x.code for x in census.findings if x.severity in ("damage", "leak")}
-    wrong = []
-    if not case.must <= codes:
-        wrong.append("missing %s" % ", ".join(sorted(case.must - codes)))
-    extra = bad - case.must - case.may
-    if extra:
-        wrong.append("unexpected %s" % ", ".join(sorted(extra)))
-    for what, check in case.checks:
-        try:
-            held = check(census)
-        except (KeyError, IndexError, TypeError, AttributeError):
-            held = False
-        if not held:
-            wrong.append("not so: " + what)
-    return not wrong, sorted(codes), wrong
-
-
 # ---------------------------------------------------------------------------
 # L1-L5: the cut logic, on a log built in memory
 # ---------------------------------------------------------------------------
-
-
-def SyntheticLog(entries, super_entries):
-    """A blklogwrites log (blklogwrites.c:38-50, 497-509): the super, then per
-    entry a header sector followed by its data sectors."""
-    out = bytearray(blklog.LOG_SUPER.pack(blklog.LOG_MAGIC, blklog.LOG_VERSION,
-                                          super_entries, SECTOR).ljust(SECTOR, b"\0"))
-    for lba, flags, data in entries:
-        n = len(data) // SECTOR
-        out += blklog.LOG_ENTRY.pack(lba, n if flags != blklog.LOG_FLUSH else 0, flags, 0).ljust(SECTOR, b"\0")
-        out += data
-    return bytes(out)
 
 
 def LogCases(t, medium):
@@ -714,3 +676,46 @@ def LogCases(t, medium):
          "super 2 against 7 read; a zero header stops at %u entries; bad flags stop at %u"
          % (stop.entries, flagged.entries)),
     ]
+
+
+# ---------------------------------------------------------------------------
+# Running them over a format-v1 image
+# ---------------------------------------------------------------------------
+
+
+def Start(medium):
+    try:
+        c0 = GroundCensus(medium)
+    except (Unreadable, IOError) as e:
+        print("self-test: the image handed to self-test is unreadable — %s" % e)
+        return None
+    if c0.Verdict() != "consistent":
+        print("self-test: the image handed to self-test is not consistent to begin with:")
+        for line in c0.HumanLines():
+            print("self-test:   " + line)
+        return None
+    return Targets(c0)
+
+
+def V1Cases(t, medium, count):
+    """Every case of format v1 over the image; the owner kinds heard."""
+    heard = set()
+    for case in Cases(t):
+        over = OverlayMedium(medium)
+        case.plant(over)
+        census = GroundCensus(over)
+        ok, codes, wrong = Judge(case, census)
+        heard |= Kinds(census)
+        count.Say(ok, "%s — flagged %s — %s" % (case.name, ", ".join(codes) or "nothing",
+                                                 "as expected" if ok else "; ".join(wrong)))
+    over = OverlayMedium(medium)
+    PlantNoDeed(t, over)
+    try:
+        GroundCensus(over)
+        ok, said = False, "the census read a volume with no deed at either end"
+    except Unreadable as e:
+        ok, said = True, "unreadable: %s" % e
+    count.Say(ok, "C16 no deed — %s — %s" % (said, "as expected" if ok else "expected unreadable"))
+    for name, ok, said in FrameCases(t, medium) + LogCases(t, medium):
+        count.Say(ok, "%s — %s — %s" % (name, said, "as expected" if ok else "NOT so"))
+    return heard

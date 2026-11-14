@@ -9,8 +9,7 @@ from . import bookread, ondisk, stitch, tally
 from .bookground import BookGround
 from .medium import Unreadable
 from .ondisk import BLOCK, SECTORS_PER_BLOCK, RunsNormal
-from .selftest_book import Born, Errata, Found, Glass, Label
-from .selftest_cases import Case
+from .selftest_book import Born, Case, Errata, Found, Glass, Label
 
 
 def RibbonLossCases(bt):

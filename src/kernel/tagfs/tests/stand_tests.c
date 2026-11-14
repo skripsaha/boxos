@@ -166,9 +166,12 @@ int StandDeckAsk(uint16_t opcode, const void* params, uint16_t param_size, const
  * middle one in the run of the block before it, one command for both. The
  * block before it meets no plan; the
  * first read of the middle one meets the plan once and is served; the second
- * is refused at that block; an overwrite of the block is a write and is not
- * counted; the third read is served again, because the plan fires once; and
- * once the plan is down, nothing is counted at all. */
+ * is refused at that block; a write of the block is a write and is not
+ * counted — the Boardroom's own, of the bytes the block holds, which meets the
+ * plan's sectors on every format, and the file's overwrite, which a book lays
+ * on fresh ground; the third read is served again, because the plan fires
+ * once; and once the plan is down, nothing is counted at all — not a read of
+ * the block itself, nor of the file. */
 static TestResult TestStandBlockFailReadsTheNth(void)
 {
     TestResult  verdict = TEST_PASS;
@@ -201,11 +204,15 @@ static TestResult TestStandBlockFailReadsTheNth(void)
     TEST_ASSERT_EQ(BlockFailSeen(), 2, "at the second meeting");
     TEST_ASSERT(BlockFailFired(), "and the plan says it fired");
 
+    TEST_ASSERT_OK(BoardroomWrite(seat, tagfs_block_to_sector(middle), TAGFS_BLOCK_SECTORS,
+                                  g_test_buffer + TAGFS_BLOCK_SIZE, NULL),
+                   "the block is written again as it holds, by the Boardroom's door");
+    TEST_ASSERT_EQ(BlockFailSeen(), 2, "a write is not a read, and is not counted");
     TestFillAt(g_test_buffer + TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 0x52, TAGFS_BLOCK_SIZE);
     TEST_ASSERT_EQ(StandWriteAt(file_id, TAGFS_BLOCK_SIZE, g_test_buffer + TAGFS_BLOCK_SIZE,
                                 TAGFS_BLOCK_SIZE),
                    TAGFS_BLOCK_SIZE, "the middle block is overwritten whole");
-    TEST_ASSERT_EQ(BlockFailSeen(), 2, "a write is not a read, and is not counted");
+    TEST_ASSERT_EQ(BlockFailSeen(), 2, "and the file's overwrite is not counted either");
 
     TEST_ASSERT_OK(tagfs_read_block(middle, g_test_output),
                    "the third read is served — the plan refuses once");
@@ -213,8 +220,9 @@ static TestResult TestStandBlockFailReadsTheNth(void)
 
     TEST_ASSERT(BlockFailDisarm(), "the plan stood until it was taken down");
     armed = false;
+    TEST_ASSERT_OK(tagfs_read_block(middle, g_test_output), "the block is read with the plan down");
     TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, 3 * TAGFS_BLOCK_SIZE), 3 * TAGFS_BLOCK_SIZE,
-                   "a read of the file with the plan down is whole");
+                   "and so is the file, whole");
     TEST_ASSERT_EQ(BlockFailSeen(), 3, "and meets no plan");
     TEST_ASSERT_EQ(TestFirstDifference(g_test_output, g_test_buffer, 3 * TAGFS_BLOCK_SIZE),
                    3 * TAGFS_BLOCK_SIZE, "and the file holds what was written");
@@ -226,18 +234,23 @@ out:
     return verdict;
 }
 
-/* A refused write is refused before the driver is called, so the block keeps
- * what it held: the file's write answers -1, and the block reads back as it
- * was. Read straight off the medium first, past the digest a read through
- * TagFS checks it against: a refused write that landed anyway would be a
- * digest mismatch there, refused before anything was compared — and what
- * this asks is what the medium holds. */
+/* A refused write is refused before the driver is called, so the medium keeps
+ * what it held. The write is the Boardroom's own — the door every write of
+ * TagFS reaches the medium by, on either format — of a block of a file the
+ * test made, in place: the plan refuses it, the medium is read straight back
+ * past the digest a read through TagFS checks it against (a refused write
+ * that landed anyway would be a digest mismatch there, refused before
+ * anything was compared — and what this asks is what the medium holds), and
+ * the file still reads under the digest of what it held. Where the file lies
+ * is its volume's to choose; that the medium never sees a refused command is
+ * BLOCKFAIL's, and the same on every format. */
 static TestResult TestStandBlockFailWriteNeverLands(void)
 {
     TestResult  verdict = TEST_PASS;
     uint8_t     seat    = tagfs_get_seat();
     uint64_t    file_id = 0;
     uint64_t    block   = 0;
+    uint32_t    landed  = 0;
     bool        armed   = false;
     const char* aside   = StandStepsAsideFor();
 
@@ -252,15 +265,17 @@ static TestResult TestStandBlockFailWriteNeverLands(void)
     TestFillAt(g_test_output, TAGFS_BLOCK_SIZE, 0x54, 0);
     BlockFailArm(seat, BLOCK_FAIL_WRITE, tagfs_block_to_sector(block), TAGFS_BLOCK_SECTORS, 1);
     armed = true;
-    int wrote = TestFileWrite(file_id, g_test_output, TAGFS_BLOCK_SIZE);
+    int wrote = BoardroomWrite(seat, tagfs_block_to_sector(block), TAGFS_BLOCK_SECTORS, g_test_output,
+                               &landed);
     bool fired = BlockFailFired();
     uint32_t seen = BlockFailSeen();
     BlockFailDisarm();
     armed = false;
 
-    TEST_ASSERT(fired, "the overwrite of the block was the write refused");
+    TEST_ASSERT(fired, "the write over the block was the one refused");
     TEST_ASSERT_EQ(seen, 1, "and the only one that met the plan");
-    TEST_ASSERT_EQ(wrote, -1, "the file's write answers the refusal");
+    TEST_ASSERT(wrote != 0, "the Boardroom answers the refusal");
+    TEST_ASSERT_EQ(landed, 0, "and counts no sector of it landed");
     TEST_ASSERT_OK(BoardroomRead(seat, tagfs_block_to_sector(block), TAGFS_BLOCK_SECTORS,
                                  g_test_output), "the block is read off the medium");
     TEST_ASSERT_EQ(TestFirstDifference(g_test_output, g_test_buffer, TAGFS_BLOCK_SIZE),
@@ -835,8 +850,7 @@ static const TestCase g_stand_tests[] = {
     { .name = "stand_blockfail_reads_the_nth",    .func = TestStandBlockFailReadsTheNth,
       .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_blockfail_write_never_lands", .func = TestStandBlockFailWriteNeverLands,
-      .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V1, .analog = "stand_fresh_refused_names_nothing" },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_blockfail_flush_refused",    .func = TestStandBlockFailFlushRefused,
       .reach = TEST_READS_ONLY },
     { .name = "stand_blockfail_async_read",       .func = TestStandBlockFailAsyncRead,

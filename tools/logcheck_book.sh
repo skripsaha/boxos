@@ -433,8 +433,8 @@ census_book() {
 #                                                                             command stands it down
 #   stand_run_refused_inside_fresh_through_the_port 0       0       1     1   the same, through the port
 #   the rows above                                54       54      58    51
-#   every other test the book runs                61       61      61    61   the same on every leg (below)
-#   total                                        115      115     119   112
+#   every other test the book runs                62       62      62    62   the same on every leg (below)
+#   total                                        116      116     120   113
 #   stand_stitch_refused_everywhere,               N        N       N     N   every attempt, as many as its line says
 #   stand_slip_engross_cut
 #   stand_stitch_retry_runs_out                    N        N       N     N   a stitch and every atom of the next: its line
@@ -445,9 +445,9 @@ census_book() {
 # Every test of the tree runs on a book, the neutral ones among them (spec_v2
 # §16.5 п.22). A test whose refusals differ from one leg to another is a row
 # above, so each column differs from the next by its rows alone; the rest —
-# 61, the same on every leg — is the refusals of the tests the rows do not
+# 62, the same on every leg — is the refusals of the tests the rows do not
 # name: stand_medium_mount_bad_sector_waits 54, and one each of
-# stand_blockfail_reads_the_nth, stand_rmw_read_refused,
+# stand_blockfail_reads_the_nth, stand_blockfail_write_never_lands, stand_rmw_read_refused,
 # stand_medium_mount_resets_the_seat,
 # stand_medium_mount_rings_in_its_own_breath,
 # stand_helm_write_refused_part_way, stand_escheat_retried and
@@ -458,12 +458,12 @@ census_book() {
 # stand_escheat_tail_helm_held 3 on one boot and 2 on the next — and the
 # judge takes it off (STAND_BOOK_REFUSED, STAND_BOOK_RACED). A test that
 # comes to refuse otherwise on a leg is a row of its own.
-STAND_BOOK_BLOCKFAILS=115
-STAND_BOOK_PADDED_BLOCKFAILS=115
-STAND_BOOK_UEFI_BLOCKFAILS=119
+STAND_BOOK_BLOCKFAILS=116
+STAND_BOOK_PADDED_BLOCKFAILS=116
+STAND_BOOK_UEFI_BLOCKFAILS=120
 # The book on a USB stick (stand_book_usb): the usb column — the stick is no
 # AHCI port for stand_roadstead_refusal_rings_once to refuse on.
-STAND_BOOK_USB_BLOCKFAILS=112
+STAND_BOOK_USB_BLOCKFAILS=113
 STAND_BOOK_HALT='^\[HALT\] Storage sync complete'
 # C13 (stand_docket_closed_damaged): sector 1 of a stitch the kernel sewed will
 # not read at the next mount — the line names it and the record bytes it took.
@@ -473,7 +473,7 @@ STAND_BOOK_RACED='^\[TESTS\] [a-z_]+: BLOCKFAIL answered ([0-9]+) command\(s\) o
 STAND_BOOK_PROMISE='^\[TagFS\] what this volume promises: its book takes files made, written, named, tagged and given up, the names of tags and the memory of its Use Context'
 STAND_BOOK_TALLY='^\[TagFS\] a whole Tally of the book is written once the ribbon past the newest slot holds as many useful bytes as one costs'
 # The book's tests: every TestCase of format v2 the registry holds (tests.h
-# TEST_SUITES, read by tools/concordance.py — counted off the code, not a run),
+# TEST_SUITES, read by stand_book_tests — counted off the code, not a run),
 # and every neutral one registered in a file beside them — a book suite's own,
 # written for any format — each run on every leg but where it stands down by
 # its own words, named here
@@ -508,13 +508,39 @@ stand_read_hole_refused_through_port|a read on this seat stands in its call: one
 stand_read_holes_through_port|a read on this seat stands in its call: one core, or a seat that answers only a read somebody stands over"
 
 # stand_book_tests — every test of format v2 the registry holds, and every
-# neutral one in a file that registers one of them, by name.
+# neutral one in a file that registers one of them, by name: the TestCases of
+# the arrays the suites tests.h TEST_SUITES walks name, read off the source.
 stand_book_tests() {
-    python3 -c 'import sys; sys.path.insert(0, "tools"); import concordance as c
-cases, _ = c.Cases(".")
-book = {w.split(":")[0] for n, (w, f, a) in cases.items() if f == "V2"}
-print(" ".join(sorted(n for n, (w, f, a) in cases.items()
-                      if f == "V2" or (f == "NONE" and w.split(":")[0] in book))))'
+    python3 - <<'STAND_BOOK_TESTS_EOF'
+import os, re
+tdir = os.path.join("src", "kernel", "tagfs", "tests")
+listed = re.search(r"#define\s+TEST_SUITES\(SUITE\)(.*?)/\*\s*the walk ends here",
+                   open(os.path.join(tdir, "tests.h")).read(), re.S)
+suites, arrays, cases = {}, {}, []
+for fname in sorted(os.listdir(tdir)):
+    if not fname.endswith(".c"):
+        continue
+    text = open(os.path.join(tdir, fname)).read()
+    for m in re.finditer(r"const\s+TestSuite\s+g_(\w+)_suite\s*=\s*\{(.*?)\};", text, re.S):
+        ref = re.search(r"\b(g_\w+)\b", m.group(2))
+        if ref:
+            suites[m.group(1)] = ref.group(1)
+    for m in re.finditer(r"TestCase\s+(\w+)\s*\[\s*\]\s*=\s*\{", text):
+        at, depth = text.index("{", m.end() - 1), 0
+        for end in range(at, len(text)):
+            depth += {"{": 1, "}": -1}.get(text[end], 0)
+            if depth == 0:
+                break
+        arrays[m.group(1)] = (fname, text[at:end + 1])
+for suite in re.findall(r"SUITE\((\w+)\)", listed.group(1)) if listed else []:
+    if suites.get(suite) in arrays:
+        fname, body = arrays[suites[suite]]
+        for c in re.finditer(r'\{\s*\.name\s*=\s*"([^"]+)"(.*?)\}', body, re.S):
+            fmt = re.search(r"\.format\s*=\s*DEED_FORMAT_(V1|V2|NONE)", c.group(2))
+            cases.append((c.group(1), fname, fmt.group(1) if fmt else "NONE"))
+book = {fname for _name, fname, fmt in cases if fmt == "V2"}
+print(" ".join(sorted(name for name, fname, fmt in cases if fmt == "V2" or (fmt == "NONE" and fname in book))))
+STAND_BOOK_TESTS_EOF
 }
 STAND_BOOK_PORT_ASIDE='^\[TESTS\] stand_(tally_rot_three_paths|ribbon_slip_three_roads): the port.s road stands aside — '
 STAND_BOOK_RIBBON_LAID='[TESTS] stand_ribbon: stitches laid past the Tally'
@@ -987,15 +1013,49 @@ census_book_some() {
     census_book "${some[@]}"
 }
 
-# census_book_all — the book's half of the census: its landings, the book the
-# kernel writes read back by both readers, its Tallies, cut and rotten, and
-# Escheat (logcheck_book.sh, logcheck_book_circle.sh, logcheck_bind.sh,
-# logcheck_escheat.sh).
+# census_qemu_io — a real blklogwrites log, written by qemu-io through QEMU's
+# own driver (a write, a flush, a write and a FUA write, zeroes), read back by
+# volume-read's `cut` and replayed onto its base byte for byte, its epochs
+# counted: the reader of every record PowerCut cuts, held to the writer it
+# reads and not to a log it built itself (self-test's L1-L5).
+census_qemu_io() {
+    local d="$SCRATCH/census-io"
+    if ! command -v qemu-io >/dev/null 2>&1; then
+        harness "census: qemu-io is not on this desk, so no real blklogwrites log can be made"
+        return
+    fi
+    rm -rf "$d"; mkdir -p "$d"
+    dd if=/dev/zero of="$d/base.img" bs=1048576 count=2 2>/dev/null
+    cp "$d/base.img" "$d/run.img"
+    : > "$d/io.log"
+    qemu-io --image-opts "driver=blklogwrites,file.driver=file,file.filename=$d/run.img,log.driver=file,log.filename=$d/io.log,log-sector-size=512" \
+        -c 'write -P 0xa1 0 4k' -c 'flush' -c 'write -P 0xb2 8k 1k' \
+        -c 'write -f -P 0xc3 16k 512' -c 'write -z 32k 4k' >"$d/qemu-io.out" 2>&1 \
+        || { harness "census: qemu-io would not write through blklogwrites: $(tail -1 "$d/qemu-io.out")"; return; }
+
+    local said
+    said=$(python3 tools/volume-read.py "$d/base.img" cut "$d/io.log" --against "$d/run.img" 2>&1)
+    chk $? "census: $said"
+
+    local epochs
+    epochs=$(python3 tools/volume-read.py "$d/base.img" cut "$d/io.log" --count --json 2>&1 \
+             | python3 -c 'import json,sys; print(json.load(sys.stdin)["epochs"])' 2>&1)
+    case "$epochs" in
+        "[1, 2, 1"*) ok "census: qemu-io's log splits into epochs $epochs — write, flush, write + FUA write, zeroes" ;;
+        *)           bad "census: qemu-io's log splits into epochs $epochs, not [1, 2, 1, ...]" ;;
+    esac
+}
+
+# census_book_all — the book's half of the census: a real blklogwrites log read
+# back (census_qemu_io), its landings, the book the kernel writes read back by
+# both readers, its Tallies, cut and rotten, and Escheat (logcheck_book.sh,
+# logcheck_book_circle.sh, logcheck_bind.sh, logcheck_escheat.sh).
 census_book_all() {
     if [ -n "${CENSUS_LANDINGS:-}" ]; then
         census_book_some
         return
     fi
+    census_qemu_io
     census_book $CENSUS_BOOK_LANDINGS
     book_circle
     book_big

@@ -34,10 +34,64 @@ import struct
 
 from . import bookread, stitch, tally
 from .bookmount import BookMount, Blocks
-from .census import SEVERITY, Finding, GroundClaim, Sweep
 from .bookground import BookGround
 from .ground_owners import BOOK_OWNERS, BOOK_OWNER_ALONE
 from .ondisk import BLOCK, SECTORS_PER_BLOCK, RunsCount, RunsIntersect, RunsNormal, RunsSubtract, RunsText
+
+SEVERITY = ("damage", "leak", "note")        # exit 1 on any damage or leak
+
+
+class Finding:
+    """One statement about the volume: a stable code, a severity, one sentence
+    with the runtime numbers in it, and the blocks it is about as runs."""
+
+    __slots__ = ("code", "severity", "text", "runs")
+
+    def __init__(self, code, severity, text, runs=()):
+        self.code, self.severity, self.text, self.runs = code, severity, text, list(runs)
+
+
+class GroundClaim:
+    """One owner's claim on the data run. An alias (the BOOT run) is not
+    exclusive: it may coincide with its partner — the one file it is — and
+    with nothing else; with no partner found, with any file."""
+
+    __slots__ = ("kind", "label", "runs", "exclusive", "partner")
+
+    def __init__(self, kind, label, runs, exclusive=True, partner=None):
+        self.kind, self.label, self.runs = kind, label, RunsNormal(runs)
+        self.exclusive, self.partner = exclusive, partner
+
+    def Allows(self, other):
+        if self.partner is not None:
+            return other.label == self.partner
+        return other.kind == "file"
+
+
+# ---------------------------------------------------------------------------
+# Who owns what, piece by piece
+# ---------------------------------------------------------------------------
+
+
+def Sweep(claims):
+    """[(start, count, [claims])]: the data run cut where the set of claims
+    changes, keeping the pieces that somebody claims."""
+    events = []
+    for c in claims:
+        for s, n in c.runs:
+            events.append((s, 1, c))
+            events.append((s + n, -1, c))
+    events.sort(key=lambda e: (e[0], e[1]))
+    active, segs, prev = {}, [], None
+    for pos, delta, c in events:
+        if prev is not None and pos > prev and active:
+            segs.append((prev, pos - prev, list(active)))
+        active[c] = active.get(c, 0) + delta
+        if not active[c]:
+            del active[c]
+        prev = pos
+    return segs
+
 
 # A block's digest by its bytes: the check is the same, the WyHash of a block
 # met before is not taken again (every landing of the self-test reads the
@@ -147,7 +201,9 @@ def MirrorPrint(files):
 def KernelBook(g, m, held, free, fallow):
     """What the kernel of this tree makes of a format-v2 volume, in the
     numbers its own lines carry (mount/book_mount.c): refused — and in which
-    words — or mounted, for how many reasons only to be read (the book's own,
+    words: first a book on ground the kernel's own survey of the medium does
+    not take, which is no volume it mounts at all (tagfs.c volume_take_ground,
+    GroundSurvey) — or mounted, for how many reasons only to be read (the book's own,
     and a Tally that names a bookmark, whose ground no writer of this kernel
     takes without its map; or a ribbon whose end the walk does not know, which
     no writer goes on from), standing on which slot, with how many
@@ -173,6 +229,9 @@ def KernelBook(g, m, held, free, fallow):
     before the ribbon is replayed, and how many stitches (`lied_check`);
     and what its mirror holds when the mount is done — the print of its live
     files (MirrorPrint) and of its Use Context, and the bytes of the latter."""
+    st = g.stand
+    if not st.kernels:
+        return {"mounts": False, "refusal": "%s, and this volume was found at %s" % (st.kernel_why, st.how)}
     if g.block_bytes != BLOCK:
         return {"mounts": False, "refusal": "laid out in %u-byte blocks" % g.block_bytes}
     if g.frame_why:

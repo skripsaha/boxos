@@ -38,6 +38,40 @@ LANDING_ROOM = PADDING            # blocks the landings' files take at most: PAD
 
 
 # ---------------------------------------------------------------------------
+# A landing, and how its census is held to it
+# ---------------------------------------------------------------------------
+
+
+class Case:
+    """A plant, the codes it must raise, the other damage or leak codes it may
+    raise, and the facts about the census and the mount that must hold."""
+
+    def __init__(self, name, plant, must=(), may=(), checks=()):
+        self.name, self.plant = name, plant
+        self.must, self.may, self.checks = set(must), set(may), list(checks)
+
+
+def Judge(case, census):
+    """(ok, flagged codes, what went wrong)."""
+    codes = {x.code for x in census.findings}
+    bad = {x.code for x in census.findings if x.severity in ("damage", "leak")}
+    wrong = []
+    if not case.must <= codes:
+        wrong.append("missing %s" % ", ".join(sorted(case.must - codes)))
+    extra = bad - case.must - case.may
+    if extra:
+        wrong.append("unexpected %s" % ", ".join(sorted(extra)))
+    for what, check in case.checks:
+        try:
+            held = check(census)
+        except (KeyError, IndexError, TypeError, AttributeError):
+            held = False
+        if not held:
+            wrong.append("not so: " + what)
+    return not wrong, sorted(codes), wrong
+
+
+# ---------------------------------------------------------------------------
 # The base: the v1 image's files, laid as format v2 lays them, and bound
 # ---------------------------------------------------------------------------
 

@@ -16,8 +16,7 @@ names again, finds nothing more to undo; and a stitch undone for both
 reasons is undone once (§2.8: one Undone a stitch undone)."""
 
 from . import stitch
-from .selftest_book import Born, Found
-from .selftest_cases import Case
+from .selftest_book import Born, Case, Found
 
 # An Undone of the stitch one back, why 1, over fids 5 and 2^32 + 7: the bytes
 # the kernel's ribbon suite lays with its own codec (tests/ribbon_tests.c).

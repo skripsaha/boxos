@@ -66,7 +66,6 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from volumeread import ondisk                                   # noqa: E402
-from volumeread.mount import Volume                             # noqa: E402
 from volumeread.medium import (FormatVerdict, Medium, Unreadable,  # noqa: E402
                                find_ground, find_the_stick, permission_advice,
                                read_deed)
@@ -124,6 +123,7 @@ def CmdFiles(args, medium):
     if verdict:
         sys.exit(verdict)
 
+    from volumeread.mount import Volume
     vol = Volume(medium, ground, deed)
     if vol.ledger() is None:
         print("[volume-read] neither ledger copy is readable, so the kernel would not "
@@ -248,10 +248,10 @@ def AnyCensus(medium, start):
     """The census of the volume's own format: the book's for format v2,
     GroundCensus for v1 (which refuses every other Deed as it always has)."""
     from volumeread.bookcensus import BookCensus
-    from volumeread.census import GroundCensus
     from volumeread.medium import StandOnDeed
     if StandOnDeed(medium, start).format == "v2":
         return BookCensus(medium, start)
+    from volumeread.census import GroundCensus
     return GroundCensus(medium, start)
 
 

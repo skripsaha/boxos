@@ -122,9 +122,9 @@ STAND_NAME=logcheck
 # growglass): tools/logcheck_book_grow.sh.
 . "$(dirname "$0")/logcheck_book_grow.sh"
 # A book's stick leaving while a write is in flight (replugwrite on
-# VOLUME_FORMAT=v2), and a stick the host moved on while it was out, by its
-# format (moved_on_host, moved_on_said: replug, holdground, returnfail):
-# tools/logcheck_book_replug.sh.
+# VOLUME_FORMAT=v2), and a book's newest Spine slot moved on by the host while
+# the stick was out (slot_moved_on_host — moved_on_host's for a book: replug,
+# holdground, returnfail): tools/logcheck_book_replug.sh.
 . "$(dirname "$0")/logcheck_book_replug.sh"
 # A logger of a line a second on a book (loggerhour): tools/logcheck_book_logger.sh.
 . "$(dirname "$0")/logcheck_book_logger.sh"
@@ -466,6 +466,23 @@ if (stands is None or stands["copy"] != dst or stands["seq"] != seq or not stand
 print("  (the stick's Ledger moved on the host: copy %u at seq %u, copy %u now seq %u, "
       "sealed as that cycle)" % (src, newest["seq"], dst, seq))
 PY
+}
+
+# moved_on_host IMG — the stick moved on by the host while it was out, as its
+# format moves (stand_format): format v1's Ledger (ledger_moved_on_host), a
+# book's newest Spine slot (slot_moved_on_host, logcheck_book_replug.sh).
+moved_on_host() {
+    if [ "$(stand_format)" = v2 ]; then slot_moved_on_host "$1"; else ledger_moved_on_host "$1"; fi
+}
+
+# The line the kernel says of a stick in seat 1 that came back moved on, its
+# book given up (away.c, AWAY_OTHER) — by the stick's format.
+moved_on_said() {
+    if [ "$(stand_format)" = v2 ]; then
+        echo "came back in seat 1 not as this kernel left its book"
+    else
+        echo "came back in seat 1 with a Ledger or a Deed this kernel did not leave on it"
+    fi
 }
 
 run_latearrival() {
@@ -8493,34 +8510,6 @@ run_footing() {
 # the rules no boot plants — TUSE, Spare, BOOT, the grounds, the constants
 # held against the headers.
 
-census_qemu_io() {
-    local d="$SCRATCH/census-io"
-    if ! command -v qemu-io >/dev/null 2>&1; then
-        harness "census: qemu-io is not on this desk, so no real blklogwrites log can be made"
-        return
-    fi
-    rm -rf "$d"; mkdir -p "$d"
-    dd if=/dev/zero of="$d/base.img" bs=1048576 count=2 2>/dev/null
-    cp "$d/base.img" "$d/run.img"
-    : > "$d/io.log"
-    qemu-io --image-opts "driver=blklogwrites,file.driver=file,file.filename=$d/run.img,log.driver=file,log.filename=$d/io.log,log-sector-size=512" \
-        -c 'write -P 0xa1 0 4k' -c 'flush' -c 'write -P 0xb2 8k 1k' \
-        -c 'write -f -P 0xc3 16k 512' -c 'write -z 32k 4k' >"$d/qemu-io.out" 2>&1 \
-        || { harness "census: qemu-io would not write through blklogwrites: $(tail -1 "$d/qemu-io.out")"; return; }
-
-    local said
-    said=$(python3 tools/volume-read.py "$d/base.img" cut "$d/io.log" --against "$d/run.img" 2>&1)
-    chk $? "census: $said"
-
-    local epochs
-    epochs=$(python3 tools/volume-read.py "$d/base.img" cut "$d/io.log" --count --json 2>&1 \
-             | python3 -c 'import json,sys; print(json.load(sys.stdin)["epochs"])' 2>&1)
-    case "$epochs" in
-        "[1, 2, 1"*) ok "census: qemu-io's log splits into epochs $epochs — write, flush, write + FUA write, zeroes" ;;
-        *)           bad "census: qemu-io's log splits into epochs $epochs, not [1, 2, 1, ...]" ;;
-    esac
-}
-
 # census_selftest — volume-read's self-test, every case, on a fresh image.
 census_selftest() {
     local rc said counts
@@ -8886,23 +8875,23 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 51 (healthy says how) and
-# the 411 of the stand's own fifty-three suites: stand 28, stand_lock 4,
+# the 414 of the stand's own fifty-three suites: stand 28, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 9,
 # stand_plot 10, stand_index 6, stand_ink 6, stand_helm 7, stand_port 2,
 # stand_use 3, stand_use_chain 4, stand_seal 8, stand_settle 16, stand_glean 9,
 # stand_snapshot 1, stand_read 9, stand_run 6, stand_medium 19,
 # stand_warrant 8, stand_room 7, stand_integrity 2, frame 2, width 7,
 # parcel 13, tract 1, record_splices 4, stand_tally 16, stand_ribbon 8,
-# stand_stitch 13, stand_stitch_edge 12, stand_docket 14, stand_fresh 7,
+# stand_stitch 14, stand_stitch_edge 12, stand_docket 14, stand_fresh 7,
 # stand_fresh_ground 5, stand_fresh_change 5, stand_binder 13,
 # stand_endpaper 6, stand_errata 8, stand_toll 5, stand_dog_ear 9,
 # stand_slip 14, stand_away 14, stand_tip_in 10, stand_slip_promise 5,
-# stand_book_glean 2, stand_escheat 7, stand_parity 2, stand_book_room 11,
+# stand_book_glean 2, stand_escheat 7, stand_parity 2, stand_book_room 13,
 # stand_commonhold 1, stand_conjugate 5, stand_dedup 6, stand_keep 5. Counted off the code,
 # not a run (K9): a suite that drops out of the walk is a test that stopped
 # covering anything, and the count is where that shows. How many of them pass
 # and how many stand aside is the road's — said, not pinned.
-STAND_RUN=462
+STAND_RUN=465
 
 # What a VOLUME_TESTS kernel says of a record memory holds that is not the
 # file a format-v1 Ink packed (plot_conveyance.c, PackV1Agrees and
@@ -9281,25 +9270,32 @@ run_standusb() {
 # this core holds waited for like any other, a drain core that runs no baton
 # while it waits, and a Give that never lets the scheduler go. And a caveat a
 # step has lifted stays worth its test only while the test would see the
-# defect come back: the legacy-IDE DMA wait's `sti`, the Ledger
-# written, and the integrity map paged in, under their own locks again, the
-# file table's growth as step 1.1 found it — a new block linked with no
+# defect come back: the legacy-IDE DMA wait's `sti`. And room on its way
+# (R6): the border every answer passes letting ERR_WOULD_BLOCK through.
+# Mutations whose tests do not meet each other's share a boot; each is judged
+# by its own test's own line, number and all.
+#
+# All of that is format-free and asked on the volume this run makes — a book
+# (`standmut`, among the gates) or format v1 (`v1_standmut`, the Backlist):
+# each group's tests run on either, the test that catches a run refused
+# inside one command the format's own (stand_run_refused_inside_fresh on a
+# book, stand_run_refused_inside_a_run on format v1). Format v1's run adds the
+# groups whose every test holds format v1's own structures (standmut_v1): the
+# Ledger written, and the integrity map paged in, under their own locks again,
+# the file table's growth as step 1.1 found it — a new block linked with no
 # stamp and no flush behind the link, the memory for the link asked only
 # after the block was taken — and the tag registry linking before it stamps,
 # writing under its lock, sharing its mark with a registry beside it, loading
 # what it cannot hold, handing out its own array, and forgetting the block a
-# refused pass took. And room on its way, waited for and never answered (R6):
-# the border every answer passes letting ERR_WOULD_BLOCK through, the Settle's
-# own holder refused its own cycle, a job that runs the cycles in its caller's
-# call, a caller in the kernel answered the word, an op waited for answered
-# without being asked again — and, on a STRICT kernel through the port, a
-# W_SPARE that answers the allocator's word, which the border stops the
-# machine on. And the mirror's check after every Ink of format v1 — memory's
-# record held to the one v1 packed — broken three ways, one per kind of Ink:
-# a Plot's last splice not conveyed, a rename's record saying another time, a
-# new file's carrying a flag the packed one does not. Mutations whose tests do
-# not meet each other's share a boot; each is judged by its own test's own
-# line, number and all.
+# refused pass took; the rest of room on its way — the Settle's own holder
+# refused its own cycle, a job that runs the cycles in its caller's call, a
+# caller in the kernel answered the word, an op waited for answered without
+# being asked again — and, on a STRICT kernel through the port, a W_SPARE that
+# answers the allocator's word, which the border stops the machine on; and the
+# mirror's check after every Ink of format v1 (ink_v1.c) — memory's record
+# held to the one v1 packed — broken three ways, one per kind of Ink: a Plot's
+# last splice not conveyed, a rename's record saying another time, a new
+# file's carrying a flag the packed one does not.
 #
 # And the runner is only worth believing if it cannot be made to pass what it
 # should fail. A failed assertion must say where, and what it saw — shown by
@@ -9308,8 +9304,10 @@ run_standusb() {
 # caveated test saw lets every fix in go by as held, with no "lifted early"
 # at all. And a test that takes a block and never gives it back — what CR-12
 # was, a copy of the literal block 1 its test took for a snapshot — must be
-# caught twice: by the runner's count as it runs, and by the next boot's roll
-# call as an orphan.
+# caught by the runner's count as it runs; and on format v1, whose bitmap
+# keeps what was taken, by the next boot's roll call as an orphan too (a
+# book's map is derived from its names, and a block nothing names is free at
+# the next mount by design).
 # ---------------------------------------------------------------------------
 
 # stand_mut_boot TAG KEYS... — build what the tree now is under VOLUME_TESTS,
@@ -9363,7 +9361,8 @@ stand_mech_on() {
         table)     marks="src/kernel/tagfs/file_table/file_table.c:4" ;;
         registry)     marks="src/kernel/tagfs/tag_registry/tag_registry.c:4 src/kernel/tagfs/tag_registry/tag_registry_load.c:2" ;;
         registrykeep) marks="src/kernel/tagfs/tag_registry/tag_registry.c:1" ;;
-        room)     marks="src/kernel/core/ipc/chit.c:1 src/kernel/tagfs/settle/settle.c:1 src/kernel/core/decks/storage/async/write_job.c:1 src/kernel/core/decks/storage/settle_ops.c:2" ;;
+        room)     marks="src/kernel/core/ipc/chit.c:1" ;;
+        roomwait) marks="src/kernel/tagfs/settle/settle.c:1 src/kernel/core/decks/storage/async/write_job.c:1 src/kernel/core/decks/storage/settle_ops.c:2" ;;
         roomport) marks="src/kernel/core/decks/storage/async/write_job_port.c:1" ;;
         mirror)   marks="src/kernel/tagfs/plot/plot_conveyance.c:1 src/kernel/tagfs/file_map/file_record.c:1 src/kernel/tagfs/ink/ink.c:1" ;;
     esac
@@ -9373,9 +9372,9 @@ import sys
 group = sys.argv[1]
 M = "logcheck mutation"
 forced = ("src/kernel/tagfs/tests/core_tests.c",
-          "    TEST_ASSERT(fs->ledger.free_blocks > 0, \"Free blocks should be > 0\");\n",
-          "    TEST_ASSERT(fs->ledger.free_blocks == 0,   /* " + M + ": an assertion forced to fail */\n"
-          "                \"Free blocks should be > 0\");\n")
+          "    TEST_ASSERT(file_id > 0, \"File ID should be > 0\");\n",
+          "    TEST_ASSERT(file_id == 0,   /* " + M + ": an assertion forced to fail */\n"
+          "                \"File ID should be > 0\");\n")
 edits = {
  "range": [
   ("src/kernel/core/boardroom/block_fail.c",
@@ -9558,6 +9557,8 @@ edits = {
   ("src/kernel/core/ipc/chit.c",
    "    if (rc != ERR_WOULD_BLOCK)\n        return rc;\n",
    "    return rc;   /* " + M + ": the border lets ERR_WOULD_BLOCK through */\n"),
+ ],
+ "roomwait": [
   ("src/kernel/tagfs/settle/settle.c",
    "    if (LockRankAnyHeldHere() || BatonRunningHere() || (ScribeAnyHeldHere() && !own)) {\n",
    "    (void)own;   /* " + M + ": the Settle's own holder may not wait for its own cycle */\n"
@@ -9629,26 +9630,27 @@ stand_mech_off() {
 }
 
 # stand_leak_on — a test that takes a block and never gives it back, the way
-# CR-12's test left the copy it took for a snapshot: the cow suite's test,
-# with one block taken at its start and nothing done with it.
+# CR-12's test left the copy it took for a snapshot: the core suite's test of
+# a file made, which every build runs on either format, with one block taken
+# at its start and nothing done with it.
 stand_leak_on() {
-    mutate src/kernel/tagfs/tests/snapshot_tests.c
+    mutate src/kernel/tagfs/tests/core_tests.c
     python3 - <<'EOF'
-p = "src/kernel/tagfs/tests/snapshot_tests.c"
+p = "src/kernel/tagfs/tests/core_tests.c"
 s = open(p).read()
-a = "    uint8_t*      now       = g_test_buffer + COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE;\n\n    TEST_ASSERT_EQ(tagfs_create_file(\"cow-test\", NULL, 0, &file_id), 0, \"a file is created\");\n"
+a = "    uint32_t   tag_ids[2] = {1, 2};\n\n    TEST_ASSERT_EQ(tagfs_create_file(\"test_file\", tag_ids, 2, &file_id), 0,\n"
 assert s.count(a) == 1, "stand leak anchor missing"
 open(p, "w").write(s.replace(a,
-    "    uint8_t*      now       = g_test_buffer + COW_SPAN_BLOCKS * TAGFS_BLOCK_SIZE;\n"
-    "    uint64_t      leaked;   /* logcheck mutation: a block taken and never given back */\n"
+    "    uint32_t   tag_ids[2] = {1, 2};\n"
+    "    uint64_t   leaked;   /* logcheck mutation: a block taken and never given back */\n"
     "\n"
     "    TEST_ASSERT_EQ(tagfs_alloc_blocks(1, &leaked), 0, \"a block is taken\");\n"
-    "    TEST_ASSERT_EQ(tagfs_create_file(\"cow-test\", NULL, 0, &file_id), 0, \"a file is created\");\n", 1))
+    "    TEST_ASSERT_EQ(tagfs_create_file(\"test_file\", tag_ids, 2, &file_id), 0,\n", 1))
 EOF
-    mut_done src/kernel/tagfs/tests/snapshot_tests.c "logcheck mutation" 1
+    mut_done src/kernel/tagfs/tests/core_tests.c "logcheck mutation" 1
 }
 stand_leak_off() {
-    restore src/kernel/tagfs/tests/snapshot_tests.c
+    restore src/kernel/tagfs/tests/core_tests.c
 }
 
 # stand_red TAG WHAT ERE — a line the mutated boot must carry.
@@ -9659,8 +9661,8 @@ stand_red() {
 }
 
 run_standmut() {
-    echo "== standmut: every stand test, and every fault it stands on, can go red =="
-    local L name step held lifted roads count said n before after img
+    echo "== standmut: every stand test, and every fault it stands on, can go red, on a volume of format $(stand_format) =="
+    local L name step held lifted roads count said n before after inside
 
     # ── the real fixes: every caveat must be lifted early, and fail ────────
     # On the legacy channel, so the rows written for the bios road are asked.
@@ -9705,7 +9707,7 @@ STAND_HELD_EOF
         stand_red standmut_range "a test that leaves its fault armed is taken down by the runner, and failed" \
             'stand_blockfail_flush_refused failed: it left BLOCKFAIL armed — taken down by the runner before anything else could meet it'
         stand_red standmut_range "a failed assertion says where it failed and what it saw" \
-            'tagfs_deed failed at src/kernel/tagfs/tests/core_tests\.c:[0-9]+: Free blocks should be > 0 \(0, 1\)'
+            'tagfs_create_file failed at src/kernel/tagfs/tests/core_tests\.c:[0-9]+: File ID should be > 0 \(0, 1\)'
     fi
     stand_mech_off
 
@@ -9753,13 +9755,17 @@ STAND_HELD_EOF
     # refused at its k-th block answers none of the k-1 before it, on both
     # roads — an AHCI port takes 32 blocks a command, so k is 17 and the
     # sixteen before it are 65536 bytes. On q35: the legacy channel takes one
-    # block a command, and a run there has no inside to refuse.
+    # block a command, and a run there has no inside to refuse. The run is the
+    # format's: one a book's write takes on fresh ground, or one format v1
+    # writes over where it lies.
+    inside=stand_run_refused_inside_a_run
+    [ "$(stand_format)" = v2 ] && inside=stand_run_refused_inside_fresh
     stand_mech_on inside
     if stand_mut_boot standmut_inside UEFI=on STRICT=on CORES=4 MEM=4G; then
         stand_red standmut_inside "a BLOCKFAIL that holds nothing before the sector answers a run refused inside as refused whole" \
-            'stand_run_refused_inside_a_run failed at [^:]+:[0-9]+: exactly the k-1 blocks of the run before the refused one \(0, 65536\)'
+            "$inside failed at [^:]+:[0-9]+: exactly the k-1 blocks of the run before the refused one \\(0, 65536\\)"
         stand_red standmut_inside "and through the port the same" \
-            'stand_run_refused_inside_a_run_through_the_port failed at [^:]+:[0-9]+: exactly the k-1 blocks of the run before the refused one \(0, 65536\)'
+            "${inside}_through_the_port failed at [^:]+:[0-9]+: exactly the k-1 blocks of the run before the refused one \\(0, 65536\\)"
     fi
     stand_mech_off
 
@@ -9771,18 +9777,6 @@ STAND_HELD_EOF
             'stand_lockrank_names_the_medium failed at [^:]+:[0-9]+: a read that holds no TagFS lock is not witnessed, interrupts off or not \(1, 0\)'
         stand_red standmut_lockrank "an order never checked takes a state-rank lock under a leaf and says nothing" \
             'stand_lockrank_names_the_order failed at [^:]+:[0-9]+: a state-rank lock taken under a leaf, twice, is out of order twice \(0, 2\)'
-    fi
-    stand_mech_off
-
-    # Step 1.1 lifted the caveats of the Ledger's write and of the map's
-    # paging: each put back under its own lock, the test says the defect it
-    # stands for is back, with the number it saw.
-    stand_mech_on underlock
-    if stand_mut_boot standmut_underlock CORES=4 MEM=4G; then
-        stand_red standmut_underlock "the Ledger written under its lock again is the defect back" \
-            'stand_ledger_writes_outside_its_lock failed: the defect it stands for is back — .* \(Ledger writes of one that crossed the medium holding the Ledger.s lock 1\)'
-        stand_red standmut_underlock "the map paged in under its lock again is the defect back" \
-            'stand_integrity_pages_outside_its_lock failed: the defect it stands for is back — .* \(17-page runs of block writes whose map paging crossed the medium under a lock 1\)'
     fi
     stand_mech_off
 
@@ -9828,6 +9822,69 @@ STAND_HELD_EOF
     fi
     stand_mech_off
 
+    # Room on its way (R6), on the legacy channel, where the border's own test
+    # is asked — a STRICT kernel stands it down.
+    stand_mech_on room
+    if stand_mut_boot standmut_room CORES=4 MEM=4G; then
+        stand_red standmut_room "a border that lets ERR_WOULD_BLOCK through hands a program the word its boxlib drops" \
+            'stand_room_never_an_answer failed: the defect it stands for is back — .* \(answers of ERR_WOULD_BLOCK the border let through to a program 1\)'
+    fi
+    stand_mech_off
+
+    # ── a test that leaks a block: caught as it runs, and on format v1 by the
+    # next roll call
+    stand_leak_on
+    if stand_mut_boot standmut_leak CORES=4 MEM=4G; then
+        L="$SCRATCH/serial.standmut_leak.log"
+        before=$(grep -aoE 'tagfs_create_file failed: it left residue — [0-9]+ block\(s\) in use outside the volume.s own chains before it and [0-9]+ after' "$L" | grep -oE '[0-9]+' | head -1)
+        after=$(grep -aoE 'tagfs_create_file failed: it left residue — [0-9]+ block\(s\) in use outside the volume.s own chains before it and [0-9]+ after' "$L" | grep -oE '[0-9]+' | tail -1)
+        [ -n "$before" ] && [ "$after" = "$((before + 1))" ]
+        chk $? "standmut: a test that takes a block and never gives it back is counted by the runner — ${before:-no} block(s) before it, ${after:-no} after"
+        [ "$(stand_format)" = v1 ] && standmut_leak_again
+    fi
+    stand_leak_off
+
+    [ "$(stand_format)" = v1 ] && standmut_v1
+    buildkey_restore
+}
+
+# standmut_leak_again — the leaking boot's volume booted again on format v1,
+# whose bitmap kept the block the test took: its roll call names it an orphan.
+standmut_leak_again() {
+    local img
+    if grep -aq '^\[HALT\] Storage sync complete' "$L"; then
+        img="$SCRATCH/stand.leak.img"
+        cp -c build/boxos.img "$img" 2>/dev/null || cp build/boxos.img "$img"
+        stand_boot standmut_leak_again BOOTDISK="$img" CORES=4 MEM=4G
+        if [ $? != 2 ]; then
+            stand_red standmut_leak_again "and the next boot's roll call finds the block it left as an orphan" \
+                '\[TagFS FSCK\] Bitmap mismatch: 1 orphan, 0 missing'
+            stand_red standmut_leak_again "named by where it is" \
+                '\[TagFS FSCK\] orphan run at data block [0-9]+, 1 block\(s\)'
+        fi
+        rm -f "$img"
+    else
+        bad "standmut: the leaking boot never said its halt's sync wrote the volume, so the next roll call would judge nothing"
+    fi
+}
+
+# standmut_v1 — the groups of format v1's own structures (above): the Ledger
+# and the integrity map under their locks, the file table's and the tag
+# registry's growth, the waits for room of format v1's own tests, W_SPARE,
+# and the mirror of v1's Ink.
+standmut_v1() {
+    # Step 1.1 lifted the caveats of the Ledger's write and of the map's
+    # paging: each put back under its own lock, the test says the defect it
+    # stands for is back, with the number it saw.
+    stand_mech_on underlock
+    if stand_mut_boot standmut_underlock CORES=4 MEM=4G; then
+        stand_red standmut_underlock "the Ledger written under its lock again is the defect back" \
+            'stand_ledger_writes_outside_its_lock failed: the defect it stands for is back — .* \(Ledger writes of one that crossed the medium holding the Ledger.s lock 1\)'
+        stand_red standmut_underlock "the map paged in under its lock again is the defect back" \
+            'stand_integrity_pages_outside_its_lock failed: the defect it stands for is back — .* \(17-page runs of block writes whose map paging crossed the medium under a lock 1\)'
+    fi
+    stand_mech_off
+
     # The file table's growth as step 1.1 found it: both of the defects it
     # lifted are back, and each test that stands for one says so, number and all.
     stand_mech_on table
@@ -9866,20 +9923,17 @@ STAND_HELD_EOF
     fi
     stand_mech_off
 
-    # Room on its way (R6), on the legacy channel, where the border's own test
-    # is asked — a STRICT kernel stands it down — and every wait for room but
-    # the port's is.
-    stand_mech_on room
-    if stand_mut_boot standmut_room CORES=4 MEM=4G; then
-        stand_red standmut_room "a border that lets ERR_WOULD_BLOCK through hands a program the word its boxlib drops" \
-            'stand_room_never_an_answer failed: the defect it stands for is back — .* \(answers of ERR_WOULD_BLOCK the border let through to a program 1\)'
-        stand_red standmut_room "the Settle's own holder refused its own cycle answers a write in the kernel the word" \
+    # The rest of room on its way, on the legacy channel, where every wait for
+    # room but the port's is asked: each caught by a test of format v1's own.
+    stand_mech_on roomwait
+    if stand_mut_boot standmut_roomwait CORES=4 MEM=4G; then
+        stand_red standmut_roomwait "the Settle's own holder refused its own cycle answers a write in the kernel the word" \
             'stand_room_kernel_write_between_the_steps failed at [^ ]+: a write in the kernel on that core .* \(9, 0\)'
-        stand_red standmut_room "a job that runs the cycles in its caller's call is answered before any cycle ends" \
+        stand_red standmut_roomwait "a job that runs the cycles in its caller's call is answered before any cycle ends" \
             'stand_room_job_between_the_steps failed at [^ ]+: it waits for the cycle.s end as a waiter of the Settle, unanswered \(0, 1\)'
-        stand_red standmut_room "a caller in the kernel answered the word is told ERR_WOULD_BLOCK" \
+        stand_red standmut_roomwait "a caller in the kernel answered the word is told ERR_WOULD_BLOCK" \
             'stand_room_create_grows_the_registry failed at [^ ]+: a create whose name grows the registry .* \(9, 0\)'
-        stand_red standmut_room "an op waited for and answered without being asked again made nothing" \
+        stand_red standmut_roomwait "an op waited for and answered without being asked again made nothing" \
             'stand_room_create_parked failed at [^ ]+: and says the new file.s id \(0, 1\)'
     fi
     stand_mech_off
@@ -9908,33 +9962,6 @@ STAND_HELD_EOF
             '\[TagFS\] DEFECT: the record memory holds of file [0-9]+ is not the one format v1 packed — its flags'
     fi
     stand_mech_off
-
-    # ── a test that leaks a block: caught as it runs, and by the next roll call
-    stand_leak_on
-    if stand_mut_boot standmut_leak CORES=4 MEM=4G; then
-        L="$SCRATCH/serial.standmut_leak.log"
-        before=$(grep -aoE 'cow_moves_only_the_block_written failed: it left residue — [0-9]+ block\(s\) in use outside the volume.s own chains before it and [0-9]+ after' "$L" | grep -oE '[0-9]+' | head -1)
-        after=$(grep -aoE 'cow_moves_only_the_block_written failed: it left residue — [0-9]+ block\(s\) in use outside the volume.s own chains before it and [0-9]+ after' "$L" | grep -oE '[0-9]+' | tail -1)
-        [ -n "$before" ] && [ "$after" = "$((before + 1))" ]
-        chk $? "standmut: a test that takes a block and never gives it back is counted by the runner — ${before:-no} block(s) before it, ${after:-no} after"
-        if grep -aq '^\[HALT\] Storage sync complete' "$L"; then
-            img="$SCRATCH/stand.leak.img"
-            cp -c build/boxos.img "$img" 2>/dev/null || cp build/boxos.img "$img"
-            stand_boot standmut_leak_again BOOTDISK="$img" CORES=4 MEM=4G
-            if [ $? != 2 ]; then
-                stand_red standmut_leak_again "and the next boot's roll call finds the block it left as an orphan" \
-                    '\[TagFS FSCK\] Bitmap mismatch: 1 orphan, 0 missing'
-                stand_red standmut_leak_again "named by where it is" \
-                    '\[TagFS FSCK\] orphan run at data block [0-9]+, 1 block\(s\)'
-            fi
-            rm -f "$img"
-        else
-            bad "standmut: the leaking boot never said its halt's sync wrote the volume, so the next roll call would judge nothing"
-        fi
-    fi
-    stand_leak_off
-
-    buildkey_restore
 }
 
 # ===========================================================================

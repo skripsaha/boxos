@@ -17,9 +17,9 @@
 # itself. So the self-test is run here over the image `make VOLUME_FORMAT=v2`
 # lays — all its files, for the landings that fork a tree need items enough in
 # it (on a volume of a few files two of them answer NOT so) — and every file on
-# it is held to the same file on the v1 image of the same tree, and its ground
-# to the formula --ground --v2 answers by (§16.2 п.23), the working room a v1
-# volume is given included.
+# it is held to the file the build laid there, read off the source the Makefile
+# names (VOLUME_LAID), and its ground to the formula --ground --v2 answers by
+# (§16.2 п.23), the working room a v1 volume is given included.
 #
 # Then what no image of the build can show, each on a sparse ground of its own:
 # a ground past 16 TiB, which --v2 takes and format v1 refuses; a ground the
@@ -46,8 +46,10 @@ MKFS_CLEAN="check: consistent — 0 damage, 0 leak, 0 note"
 #   ground IMG SECTORS   a sparse image: a protective MBR and a GPT whose one
 #                        entry is a BoxOS partition of SECTORS sectors from
 #                        sector 2048 (the type GUID ground.c reads)
-#   files V1 V2          every file of V1 (format v1) against V2 (format v2),
-#                        by fid: name and bytes
+#   files IMG LAID       every file of IMG against the source files LAID lists
+#                        (VOLUME_LAID: a path, then its tags, a line each), by
+#                        name — a source's file name — and bytes, none missing
+#                        and none more
 #   formula IMG          the ground IMG stands on against §16.2 п.23 over its
 #                        own book
 #   wide|v1ids|v1record|keywide WORK   the cargo's widths (above)
@@ -62,7 +64,6 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, "tools")
 from volumeread import binder, medium, ondisk
 from volumeread.bookcensus import BookCensus
-from volumeread.census import GroundCensus
 
 TOOL, START = "tools/create_tagfs", 2048
 
@@ -194,12 +195,16 @@ def Leg(leg, a):
     elif leg == "ground":
         Ground(a[0], int(a[1]))
     elif leg == "files":
-        one, two = GroundCensus(medium.Medium(a[0])), BookCensus(medium.Medium(a[1]))
-        have = {fid: (fs.name.decode(), two.Sha256(fid)) for fid, fs in two.mount.files.items()}
-        want = {fid: (e["record"].name if isinstance(e["record"].name, str) else e["record"].name.decode(),
-                      one.Sha256(e["record"])) for fid, e in one.files.items() if e["state"] == "live"}
-        differ = sorted(fid for fid in set(have) | set(want) if have.get(fid) != want.get(fid))
-        print("MKFS files=%u same=%u differ=%s" % (len(want), len(want) - len(differ), differ[:5] or "none"))
+        c = BookCensus(medium.Medium(a[0]))
+        have = {fs.name.decode("utf-8", "replace"): c.Sha256(fid) for fid, fs in c.mount.files.items()}
+        laid = open(a[1]).read().split("\n")[:-1][0::2]
+        want = {}
+        for path in laid:
+            with open(path, "rb") as f:
+                want[os.path.basename(path)] = hashlib.sha256(f.read()).hexdigest()
+        differ = sorted(n for n in set(have) | set(want) if have.get(n) != want.get(n))
+        differ += ["two sources named alike"] if len(want) != len(laid) else []
+        print("MKFS files=%u same=%u differ=%s" % (len(laid), len(laid) - len(differ), differ[:5] or "none"))
     elif leg == "formula":
         c = BookCensus(medium.Medium(a[0]))
         p, g = binder.ReadPlan(c.mount.tally), c.g
@@ -232,8 +237,15 @@ Leg(sys.argv[1], sys.argv[2:])
 PY
 }
 
+# mkfs_laid — the files the build lays on the volume, as the Makefile names
+# them (VOLUME_LAID): each source's path, then its tags, a line each.
+mkfs_laid() {
+    printf 'mkfs-volume-laid:\n\t@printf "%%s\\n" $(VOLUME_LAID)\n' |
+        command make --no-print-directory -s -f Makefile -f - mkfs-volume-laid
+}
+
 # mkfs_image WORK — `make VOLUME_FORMAT=v2`, and the image it lays held to the
-# v1 image of the same tree (WORK/v1.img), to §16.2 п.23 and to self-test.
+# source files it was laid from, to §16.2 п.23 and to self-test.
 mkfs_image() {
     local work=$1 said line
     if ! build_with_key VOLUME_FORMAT=v2; then
@@ -248,9 +260,10 @@ mkfs_image() {
     chk $? "mkfs: and the build says what the census says of this tree's kernel (${line:-it would mount it})"
     python3 tools/volume-read.py build/boxos.img deed | grep -q '^format      : v2'
     chk $? "mkfs: build/boxos.img is format v2"
-    said=$(mkfs_py files "$work/v1.img" build/boxos.img)
-    echo "$said" | grep -qE '^MKFS files=([0-9]+) same=\1 differ=none$'
-    chk $? "mkfs: every file on it is the file the v1 image of this tree carries, name and bytes (${said#MKFS })"
+    mkfs_laid >"$work/laid" 2>&1
+    said=$(mkfs_py files build/boxos.img "$work/laid" 2>&1 | tail -1)
+    echo "$said" | grep -qE '^MKFS files=([1-9][0-9]*) same=\1 differ=none$'
+    chk $? "mkfs: every file on it is the source file the build laid there, name and bytes, none missing and none more (${said#MKFS })"
     said=$(mkfs_py formula build/boxos.img)
     echo "$said" | grep -qE '^MKFS formula=([0-9]+) ground=\1 '
     chk $? "mkfs: its ground is what --ground --v2 answers by §16.2 п.23 over the book it lays (${said#MKFS })"
@@ -326,14 +339,14 @@ run_mkfs() {
     echo "== mkfs: what create_tagfs lays down, held on the host to the format's second reader =="
     local work="$SCRATCH/mkfs" format
     format=$(stand_format)
-    # The v1 image is built as v1 by name: the format the run asks — the gate's
-    # VOLUME_FORMAT, or the Makefile's when nobody names one — is the one the
-    # tree is put back in, and neither is format v1 for certain.
+    # A v1 image is built first, as v1 by name, so that the format the run asks
+    # — the gate's VOLUME_FORMAT, or the Makefile's when nobody names one — must
+    # be laid again after it: the format's marker, held last.
     STAND_FORMAT=v1 build
     rm -rf "$work"
     mkdir -p "$work"
     python3 tools/volume-read.py build/boxos.img deed | grep -q '^format      : v1' \
-        && cp build/boxos.img "$work/v1.img" || { harness "mkfs: could not keep a v1 image"; return; }
+        || { harness "mkfs: make asked for format v1 by name laid no v1 image"; return; }
     mkfs_image "$work"
     mkfs_grounds "$work"
     mkfs_tags "$work"

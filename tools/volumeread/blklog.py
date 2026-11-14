@@ -36,7 +36,6 @@ import struct
 from . import ondisk
 from .ondisk import SECTOR, SECTORS_PER_BLOCK, BLOCK
 from .medium import OverlayMedium, StandOnDeed, Unreadable, GroundCandidates
-from .census import GroundCensus
 from .bookcensus import BookCensus
 from .blklog_book import BOOK_KINDS, BookSectors
 
@@ -358,7 +357,11 @@ class Classifier:
         if self.census is None:
             v2 = self.stand is not None and self.stand.format == "v2"
             try:
-                self.census = (BookCensus if v2 else GroundCensus)(self.over, self.forced_start)
+                if v2:
+                    self.census = BookCensus(self.over, self.forced_start)
+                else:
+                    from .census import GroundCensus    # format v1's, asked of a v1 volume alone
+                    self.census = GroundCensus(self.over, self.forced_start)
             except (Unreadable, IOError):
                 self.census = False
             if self.census and not v2:
