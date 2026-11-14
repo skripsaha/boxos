@@ -121,6 +121,36 @@ static bool elf_image(const uint8_t *first, uint64_t look, uint64_t file_size)
 
 /* ---- which kind ---------------------------------------------------------- */
 
+/* What the file is, by its first bytes: its size, its first bytes in `first`
+ * (`look` of them) and the kind they say. 0, or why the file could not be read. */
+static int kind_of(file_id_t file, uint64_t *file_size, uint8_t first[8], uint64_t *look, ProgramKind *kind)
+{
+    FileMetadata metadata;
+    int rc = FileMetadataRead(file, &metadata);
+    if (rc != 0) return rc;
+    *file_size = metadata.Size;
+    FileMetadataRelease(&metadata);
+
+    static const uint8_t box_magic[8] = { BOX_MAGIC_0, BOX_MAGIC_1, BOX_MAGIC_2, BOX_MAGIC_3,
+                                          BOX_MAGIC_4, BOX_MAGIC_5, BOX_MAGIC_6, BOX_MAGIC_7 };
+    *look = *file_size < 8 ? *file_size : 8;
+    rc = read_exact(file, 0, first, (size_t)*look);
+    if (rc != 0) return rc;
+
+    if (*look == 8 && memcmp(first, box_magic, 8) == 0) *kind = PROGRAM_BOX;
+    else if (elf_image(first, *look, *file_size)) *kind = PROGRAM_ELF;
+    else *kind = PROGRAM_NONE;
+    return 0;
+}
+
+int program_kind(file_id_t file, ProgramKind *kind)
+{
+    uint64_t size, look;
+    uint8_t  first[8];
+    *kind = PROGRAM_NONE;
+    return kind_of(file, &size, first, &look, kind);
+}
+
 int program_part_read(file_id_t file, const char *name, size_t limit, char **bytes, size_t *size,
                       ProgramKind *kind)
 {
@@ -129,26 +159,15 @@ int program_part_read(file_id_t file, const char *name, size_t limit, char **byt
     *bytes = NULL;
     *size  = 0;
 
-    FileMetadata metadata;
-    int rc = FileMetadataRead(file, &metadata);
+    uint64_t    file_size, look;
+    uint8_t     first[8];
+    ProgramKind found;
+    int         rc = kind_of(file, &file_size, first, &look, &found);
     if (rc != 0) return rc;
-    uint64_t file_size = metadata.Size;
-    FileMetadataRelease(&metadata);
+    if (kind) *kind = found;
 
-    static const uint8_t box_magic[8] = { BOX_MAGIC_0, BOX_MAGIC_1, BOX_MAGIC_2, BOX_MAGIC_3,
-                                          BOX_MAGIC_4, BOX_MAGIC_5, BOX_MAGIC_6, BOX_MAGIC_7 };
-    uint8_t  first[8];
-    uint64_t look = file_size < sizeof(first) ? file_size : sizeof(first);
-    rc = read_exact(file, 0, first, (size_t)look);
-    if (rc != 0) return rc;
-
-    if (look == sizeof(first) && memcmp(first, box_magic, sizeof(first)) == 0) {
-        if (kind) *kind = PROGRAM_BOX;
-        return box_part_read(file, file_size, name, limit, bytes, size);
-    }
-
-    if (!elf_image(first, look, file_size)) return 0;
-    if (kind) *kind = PROGRAM_ELF;
+    if (found == PROGRAM_BOX) return box_part_read(file, file_size, name, limit, bytes, size);
+    if (found == PROGRAM_NONE) return 0;
     const char *section = elf_section_of(name);
     return section ? image_section_read(file, section, limit, bytes, size, NULL) : 0;
 }

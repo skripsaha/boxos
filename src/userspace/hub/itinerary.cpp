@@ -58,11 +58,14 @@ int ReadWhole(file_id_t File, std::string &Out)
     return Out.find('\0') == std::string::npos ? 0 : -ERR_INVALID_ARGUMENT;
 }
 
-// The lines cut where they end; the leading takes and gives lines (blank
-// lines among them passed over) are the Form, every line after them a step.
+// The lines cut where they end, the header line the file begins with left
+// out; the leading takes and gives lines (blank lines among them passed over)
+// are the Form, every line after them a step.
 void Split(std::string_view Whole, Text &Out)
 {
     bool InForm = true;
+    const std::size_t HeaderEnd = Whole.find('\n');
+    Whole.remove_prefix(HeaderEnd == std::string_view::npos ? Whole.size() : HeaderEnd + 1);
     while (!Whole.empty()) {
         const std::size_t End  = Whole.find('\n');
         std::string_view  Line = Whole.substr(0, End);

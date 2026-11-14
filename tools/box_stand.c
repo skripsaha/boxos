@@ -862,6 +862,42 @@ static void TestLife(void)
           "life: read without asking what it passed over");
 }
 
+/* What a program asks for, read from `text` held in a buffer of exactly its length. */
+static BoxVerdict AsksOf(const char *text, BoxAsks *asks, uint64_t *unknown)
+{
+    uint8_t   *exact   = Exact((const uint8_t *)text, strlen(text));
+    BoxVerdict verdict = BoxAsksRead(exact, strlen(text), asks, unknown);
+    free(exact);
+    return verdict;
+}
+
+static void TestAsks(void)
+{
+    BoxAsks  asks;
+    uint64_t unknown = 9;
+    Check(AsksOf("asks 1\n", &asks, &unknown) == BOX_OK && !asks.Utility && !asks.Network && unknown == 0,
+          "asks: one that asks for nothing is granted nothing");
+    Check(AsksOf("asks 1\nask utility\n", &asks, &unknown) == BOX_OK && asks.Utility && !asks.Network,
+          "asks: utility");
+    Check(AsksOf("asks 1\nask network to fetch updates\nask utility to start programs", &asks, &unknown) == BOX_OK &&
+              asks.Utility && asks.Network,
+          "asks: both, with their reasons, the last newline left off");
+    Check(AsksOf("asks 1\n\n   ask   utility   \n", &asks, &unknown) == BOX_OK && asks.Utility,
+          "asks: blank lines and blanks around the words are nothing");
+    Check(AsksOf("asks 1\nask utility\nask utility\n", &asks, &unknown) == BOX_TEXT_LAYOUT,
+          "asks: one ask said twice");
+    Check(AsksOf("asks 1\nutility\n", &asks, &unknown) == BOX_TEXT_LAYOUT, "asks: a line without ask");
+    Check(AsksOf("asks 1\nask\n", &asks, &unknown) == BOX_TEXT_LAYOUT, "asks: ask of nothing");
+    Check(AsksOf("asks 1\nask system\nask utility\nask god\n", &asks, &unknown) == BOX_OK && asks.Utility &&
+              !asks.Network && unknown == 2,
+          "asks: system is not a word a box can ask, passed over and named, never granted");
+    Check(AsksOf("asks 2\nask utility\n", &asks, &unknown) == BOX_TEXT_LAYOUT, "asks: another version");
+    Check(AsksOf("life 1\nask utility\n", &asks, &unknown) == BOX_TEXT_LAYOUT && !asks.Utility,
+          "asks: a part of another kind is refused, and asks for nothing");
+    Check(AsksOf("asks 1\nask network\n", &asks, NULL) == BOX_OK && asks.Network,
+          "asks: read without asking what it passed over");
+}
+
 static void TestTexts(void)
 {
     const char *fallback = BoxVerdictText(BOX_VERDICT_COUNT);
@@ -912,6 +948,7 @@ int main(void)
     TestTextParts();
     TestTextSize();
     TestLife();
+    TestAsks();
     TestWritten();
     TestTexts();
 

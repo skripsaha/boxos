@@ -45,21 +45,18 @@ std::optional<std::vector<file_id_t>> KeptOf(const Start &What, bool Collected, 
 }
 
 // The name a running program goes by: its file's stem, which it wears among
-// its tags — the first of them that names a program on the volume. Looked for
-// among those a hub starts, that wear app or utility.
+// its keys (the kernel gives every program `app` and the stem of its file's
+// name) — the first of them that names a program on the volume.
 std::string NameOf(const Which &Program)
 {
-    std::string Tags;
-    for (const char *Kind : {"app", "utility"}) {
-        ProcMate     *Mates = nullptr;
-        std::uint32_t Total = 0;
-        const int     Delivered = proc_crew(Kind, &Mates, &Total);
-        for (int I = 0; I < Delivered && Tags.empty(); I++)
-            if (Mates[I].pid == Program.Pid && Mates[I].generation == Program.Generation && Mates[I].tags)
-                Tags = Mates[I].tags;
-        free(Mates);
-        if (!Tags.empty()) break;
-    }
+    std::string   Tags;
+    ProcMate     *Mates     = nullptr;
+    std::uint32_t Total     = 0;
+    const int     Delivered = proc_crew("app", &Mates, &Total);
+    for (int I = 0; I < Delivered && Tags.empty(); I++)
+        if (Mates[I].pid == Program.Pid && Mates[I].generation == Program.Generation && Mates[I].tags)
+            Tags = Mates[I].tags;
+    free(Mates);
     std::vector<std::string> Stems;
     programs::EachCommand([&](file_id_t, std::string_view FileName) {
         Stems.emplace_back(FileName.substr(0, programs::StemLength(FileName)));

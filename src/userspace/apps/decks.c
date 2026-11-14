@@ -113,7 +113,7 @@ static bool test_sys_tag_check(void)
 {
     bool has = false;
     if (proc_tag_check("app", &has) != 0) return false;
-    /* decks.elf is tagged "app,utility" → must have "app". */
+    /* Every program is an app: it wears the key whatever its file is tagged. */
     return has;
 }
 

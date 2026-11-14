@@ -1,6 +1,7 @@
 #include "autostart.h"
 #include "process.h"
 #include "rise.h"
+#include "program_keys.h"
 #include "tagfs.h"
 #include "touch.h"
 #include "logbook.h"
@@ -208,11 +209,9 @@ static process_t *autostart_consider(uint64_t file_id, bool again)
         return NULL;
     }
 
-    /* The file's keys, whole: a process started from it wears every one
-     * (TagFSProgramKeys), never the ones that fitted a buffer. */
-    char *tags = TagFSProgramKeys(meta.tag_ids, meta.tag_count, meta.flags);
+    char *tags = ProgramKeys(meta.filename, meta.flags);
     if (!tags) {
-        kprintf("[AUTOSTART] Skip '%s': no memory for its tags\n", meta.filename);
+        kprintf("[AUTOSTART] Skip '%s': no memory for its keys\n", meta.filename);
         tagfs_metadata_free(&meta);
         return NULL;
     }

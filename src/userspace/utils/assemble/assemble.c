@@ -86,28 +86,17 @@ static int AppendTags(char *Buffer, size_t Capacity, size_t *Used,
     return 0;
 }
 
-/* The source's tags, then the ones the command names. The shell starts only
- * a file that wears app or utility, so a program that would wear neither is
- * given app and the command says so; *AddedApp reports it. */
+/* The source's tags, then the ones the command names: the person's own words
+ * for finding the program, and nothing the system reads — the box is what
+ * makes it a program. */
 static int AppendExplicitTags(AssembleRequest *Request)
 {
     size_t Index;
-    int HasApp = AssembleTagsHaveKey(Request->Tags, "app");
-    int HasUtility = AssembleTagsHaveKey(Request->Tags, "utility");
 
-    Request->AddedApp = 0;
     for (Index = 0; Index < Request->TagWordCount; Index++) {
-        const char *Tag = Request->TagWords[Index];
-
-        if (AppendTags(Request->Tags, sizeof(Request->Tags), &Request->TagLength, Tag) != 0)
+        if (AppendTags(Request->Tags, sizeof(Request->Tags), &Request->TagLength,
+                       Request->TagWords[Index]) != 0)
             return -ERR_INVALID_ARGUMENT;
-        if (AssembleTagsHaveKey(Tag, "app")) HasApp = 1;
-        if (AssembleTagsHaveKey(Tag, "utility")) HasUtility = 1;
-    }
-    if (!HasApp && !HasUtility) {
-        if (AppendTags(Request->Tags, sizeof(Request->Tags), &Request->TagLength, "app") != 0)
-            return -ERR_INVALID_ARGUMENT;
-        Request->AddedApp = 1;
     }
     return 0;
 }

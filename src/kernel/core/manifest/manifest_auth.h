@@ -19,6 +19,11 @@
  * "system" tag passes any check; "utility" passes APP+UTILITY; "app" passes
  * APP only.
  *
+ * Where a process's keys come from: the system role of its file ("system"), what
+ * its box asks for ("utility", "network": the `asks` part, box_reader.h) and
+ * "app" for every program (program_keys.h) — never the tags of the file, which
+ * are its user's words and decide nothing here.
+ *
  * Special tags:
  *   "god"     — passes everything regardless of level
  *   "stopped" — fails everything (process frozen)

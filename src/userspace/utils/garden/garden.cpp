@@ -30,6 +30,7 @@
 #include "box/file.h"
 #include "box/form.h"
 #include "box/print.h"
+#include "box/program_part.h"
 #include "painter/tui/stage.h"
 
 #include "view.h"
@@ -51,29 +52,29 @@ void Say(std::string_view Text)
     print_to_screen(Line.c_str());
 }
 
-// The program files of the plants Named: a program is a file that wears
-// utility or app, called by the name without its extension.
+// The program files of the plants Named: a program is a file that holds a box
+// or an ELF image, called by the name without its extension.
 std::vector<file_id_t> ProgramsNamed(const std::vector<std::string> &Named)
 {
     std::vector<file_id_t> Files;
-    for (const char *Tag : {"utility", "app"}) {
+    for (const std::string &Plant : Named) {
         file_id_t *Ids   = nullptr;
-        const int  Count = query_all_everywhere(Tag, "trashed", &Ids);
+        const int  Count = query_all_everywhere(Plant.c_str(), "trashed", &Ids);
         for (int At = 0; At < Count; At++) {
+            ProgramKind Kind = PROGRAM_NONE;
+            if (program_kind(Ids[At], &Kind) != 0 || Kind == PROGRAM_NONE) continue;
             FileMetadata Metadata;
             if (FileMetadataRead(Ids[At], &Metadata) != 0) continue;
             std::string Name = Metadata.Filename ? Metadata.Filename : "";
             FileMetadataRelease(&Metadata);
             if (const std::size_t Dot = Name.rfind('.'); Dot != std::string::npos && Dot > 0) Name.resize(Dot);
-            if (std::find(Named.begin(), Named.end(), Name) != Named.end() &&
-                std::find(Files.begin(), Files.end(), Ids[At]) == Files.end())
+            if (Name == Plant && std::find(Files.begin(), Files.end(), Ids[At]) == Files.end())
                 Files.push_back(Ids[At]);
         }
         free(Ids);
     }
     return Files;
 }
-
 }  // namespace
 
 int main()

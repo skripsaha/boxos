@@ -2861,24 +2861,6 @@ bool TagFSTagSpelling(uint32_t tag_id, TagSpelling *out, bool *is_system)
     return g_state.registry && TagRegistrySpelling(g_state.registry, tag_id, out, is_system);
 }
 
-bool tagfs_tag_key(uint32_t tag_id, char *out, size_t out_size)
-{
-    if (!out || out_size == 0)
-        return false;
-    out[0] = '\0';
-    if (!tagfs_enter())
-        return false;
-
-    TagSpelling tag;
-    bool said = TagFSTagSpelling(tag_id, &tag, NULL) && tag.key_len < out_size;
-    if (said) {
-        memcpy(out, tag.key, tag.key_len);
-        out[tag.key_len] = '\0';
-    }
-    tagfs_leave();
-    return said;
-}
-
 size_t tagfs_tag_text(uint32_t tag_id, char *out, size_t out_size)
 {
     if (out && out_size)
@@ -2905,69 +2887,6 @@ bool TagFSTagMatches(uint32_t tag_id, const TagSpelling *pattern)
     bool matches = TagFSTagSpelling(tag_id, &tag, NULL) && TagPatternMatches(pattern, &tag);
     tagfs_leave();
     return matches;
-}
-
-/* The keys a file's tags carry into a process started from it that the file
- * does not give: system and god are the authority of a cabin, and a file is
- * its user's to tag with any word — only the record's role gives the system's
- * (TagFSProgramKeys). */
-static bool KeyIsAuthority(const TagSpelling *tag)
-{
-    return TagSpanIs("system", tag->key, tag->key_len) || TagSpanIs("god", tag->key, tag->key_len);
-}
-
-char *TagFSProgramKeys(const uint32_t *tag_ids, uint32_t count, uint32_t flags)
-{
-    static const char system_key[] = "system";
-    bool              system_role  = (flags & TAGFS_FILE_ROLE_MASK) == TAGFS_FILE_ROLE_SYSTEM;
-    if (!tagfs_enter())
-        return NULL;
-
-    TagSpelling tag;
-    size_t      need = 1 + (system_role ? sizeof(system_key) : 0);
-    for (uint32_t i = 0; i < count; i++)
-        if (TagFSTagSpelling(tag_ids[i], &tag, NULL) && !KeyIsAuthority(&tag))
-            need += tag.key_len + 1;
-
-    char *list = kmalloc(need);
-    if (list) {
-        size_t at = 0;
-        for (uint32_t i = 0; i < count; i++) {
-            if (!TagFSTagSpelling(tag_ids[i], &tag, NULL) || KeyIsAuthority(&tag))
-                continue;
-            /* A tag another core interned after the count above is not in
-             * what was measured, and is left out rather than written past
-             * the end of it. */
-            if (at + (at ? 1u : 0u) + tag.key_len >= need - (system_role ? sizeof(system_key) : 0))
-                continue;
-            if (at)
-                list[at++] = ',';
-            memcpy(list + at, tag.key, tag.key_len);
-            at += tag.key_len;
-        }
-        if (system_role) {
-            if (at)
-                list[at++] = ',';
-            memcpy(list + at, system_key, sizeof(system_key) - 1);
-            at += sizeof(system_key) - 1;
-        }
-        list[at] = '\0';
-    }
-    tagfs_leave();
-    return list;
-}
-
-bool TagFSKeyAmong(const uint32_t *tag_ids, uint32_t count, const char *key)
-{
-    if (!key || !tagfs_enter())
-        return false;
-
-    TagSpelling tag;
-    bool        found = false;
-    for (uint32_t i = 0; i < count && !found; i++)
-        found = TagFSTagSpelling(tag_ids[i], &tag, NULL) && TagSpanIs(key, tag.key, tag.key_len);
-    tagfs_leave();
-    return found;
 }
 
 // ----------------------------------------------------------------------------
