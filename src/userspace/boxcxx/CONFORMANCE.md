@@ -4905,7 +4905,7 @@ for them.
 | Events | `touch.h`, `reflex.h`, `system_touch.h` | Tag-multicast event subscription (REST / REACT / INTERRUPT) — the kernel wakes you; nothing polls. |
 | Execution | `strand.h`, `executor.h`, `ferry.h`, `timing.h`, `timeouts.h` | In-cabin execution contexts, a cooperative executor, `co_await`-able async file I/O. |
 | Memory | `heap.h`, `bay.h`, `bay_memory_resource.h`, `memtag.h`, `pku.h`, `hw.h` | Tagged allocation and accounting, cross-cabin shared memory, tagged-RAM introspection, protection keys, LAM/TME. |
-| Storage | `tagfs.h` | Tag-addressed files: query by tags, RAII contexts and snapshots, anchor events. |
+| Storage | `tagfs.h` | Tag-addressed files: query by tags, RAII contexts, anchor events. |
 | Clipboard | `clipboard.h` | The machine's list of what was copied: clips under numbers never given twice, newest first, taken by number, never let go on their own; terms for secrets (a count of whole takes, the putter's lifetime). |
 | Time | `clock.h` | Which reckoning of time the machine keeps: validate a zone name against the database, store it under `clock:zone`, announce the change. Reading it is `std::chrono::current_zone()`; only the writing half needed a name. |
 | Messaging | `message.h`, `brook.h` | Process-to-process messages and ordered SPSC streams. |

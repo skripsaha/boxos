@@ -131,7 +131,6 @@ typedef struct {
     VOLUME_TESTS_ONLY(SUITE(stand_seal)) \
     VOLUME_TESTS_ONLY(SUITE(stand_settle)) \
     VOLUME_TESTS_ONLY(SUITE(stand_glean)) \
-    VOLUME_TESTS_ONLY(SUITE(stand_snapshot)) \
     VOLUME_TESTS_ONLY(SUITE(stand_read)) \
     VOLUME_TESTS_ONLY(SUITE(stand_run)) \
     VOLUME_TESTS_ONLY(SUITE(stand_medium)) \

@@ -14,8 +14,7 @@
 // which the file moved onto (new): a dense array of CRC-protected records,
 // `count` of them live, behind a head and its copy.
 //
-// Nothing appends to it any more. A format-v1 volume refuses every snapshot
-// request (TagFS_SnapshotRefused), and no write copies a block for one, so the
+// Nothing appends to it any more: no write copies a block for a snapshot, so the
 // book is only ever READ, once, by the mount that names the snapshots an
 // earlier kernel left (CowNameStanding). It goes with format v2, whose
 // snapshots are bookmarks that need no log.

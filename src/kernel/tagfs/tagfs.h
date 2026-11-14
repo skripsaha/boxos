@@ -879,10 +879,6 @@ bool     TagFSTagMatches(uint32_t tag_id, const TagSpelling* pattern);
  * only once the last caller is out. */
 bool     TagFSTagSpelling(uint32_t tag_id, TagSpelling* out, bool* is_system);
 
-/* The answer every snapshot request gets — create, delete, list or info,
- * named in `asked`: ERR_UNSUPPORTED, said once a boot. */
-error_t  TagFS_SnapshotRefused(const char* asked);
-
 // Accessor Functions
 // ============================================================================
 

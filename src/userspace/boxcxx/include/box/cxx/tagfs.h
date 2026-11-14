@@ -44,10 +44,7 @@
 //     the same of the whole volume, the context left out.
 //
 //   * box::tagfs::on_anchor() — a box::touch subscription that delivers
-//     durability (anchor) events, read through box::tagfs::anchor_event. There
-//     is no snapshot handle: a format-v1 volume answers every snapshot request
-//     unsupported (::snap_create and its kin say so), and snapshots arrive
-//     with format v2.
+//     durability (anchor) events, read through box::tagfs::anchor_event.
 //
 // This is a box:: extension, not part of std. The byte-stream bridge resolves by
 // the file's NAME through the "file:" Current scheme; for I/O bound precisely to

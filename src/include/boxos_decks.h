@@ -357,12 +357,6 @@
  * what another writer added since it looked. */
 #define STORAGE_OBJ_SPAN            0x0B
 #define STORAGE_SPAN_GROW           (1u << 0)
-/* The four snapshot operations (0x20-0x22, 0x24) are answered ERR_UNSUPPORTED
- * on a format-v1 volume, whatever their params; snapshots arrive with format
- * v2. Their shapes are kept below as the wire they were. */
-#define STORAGE_SNAP_CREATE         0x20
-#define STORAGE_SNAP_DELETE         0x21
-#define STORAGE_SNAP_LIST           0x22
 /* anchor — durability + tag-event fan-out. params = [u64 file_id].
  * Answered once every change made before it is settled and lies in a block
  * the volume never writes again; the caller waits behind its Chit, never
@@ -438,11 +432,6 @@
  * when the volume holds no such file or its term has ended; OK, changing
  * nothing, for a file that is not deleted. */
 #define STORAGE_OBJ_RESTORE         0x2A
-/* snap.info — structured per-snapshot record by id. params = [u32 snap_id].
- * out_crate = [u32 id][u64 parent_file_id][u64 created_time][u32 file_count]
- *             [u64 total_size][u8 flags][char name[32]]. Gives the name-by-id
- * lookup SNAP_LIST (ids only) lacks, enabling deterministic snapshot cleanup. */
-#define STORAGE_SNAP_INFO           0x24
 
 /* The scope byte storage.query and storage.create carry in their params.
  *

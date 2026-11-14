@@ -159,27 +159,6 @@ int tag_list_everywhere(const char *without, TagListed **out, size_t *count);
 int find_file_by_name(const char* filename, const char* without, file_id_t* file_ids,
                       file_info_t* out_infos, size_t max);
 
-/* Snapshots. On a format-v1 volume every one of these four answers
- * -ERR_UNSUPPORTED and fills in nothing: a snapshot there could be taken and
- * never read, and snapshots arrive with format v2. The kernel says so once a
- * boot, naming the request. */
-int snap_create(const char *name, file_id_t file_id, uint32_t *out_snap_id);
-int snap_delete(uint32_t snap_id);
-int snap_list(uint32_t *out_ids, uint32_t max_ids, uint32_t *out_count);
-
-/* A snapshot's record, as snap_info would fill it. */
-typedef struct {
-    uint32_t id;
-    file_id_t parent_file_id;
-    uint64_t created_time;
-    uint32_t file_count;
-    uint64_t total_size;
-    uint8_t  flags;
-    char     name[32];
-} snap_info_t;
-
-int snap_info(uint32_t snap_id, snap_info_t *out);
-
 /*
  * anchor() — durability primitive. Returns once every change made before it
  * is on the medium, in a place the volume never writes again, behind a kept
