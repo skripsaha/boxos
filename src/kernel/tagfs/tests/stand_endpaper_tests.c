@@ -147,7 +147,7 @@ static TestResult TestStandEndpaperLabeledCarries(void)
     StandEndpaperOf(&settled, "with the file settled");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, TAGFS_BLOCK_SIZE, STAND_ENDPAPER_BLOCKS * TAGFS_BLOCK_SIZE, 12u),
                    (int)(STAND_ENDPAPER_BLOCKS * TAGFS_BLOCK_SIZE), "more of it written");
-    TEST_ASSERT_EQ(tagfs_rename_file(fid, "endpaper-lab.txt", INK_UNWARRANTED), 0,
+    TEST_ASSERT_EQ(tagfs_rename_file(fid, "endpaper-lab.txt"), 0,
                    "and the file renamed in the same cycle: its Jot a Labeled, a Shaped in it");
     TEST_ASSERT_OK(TagFSSettle(), "the stitch carrying both settles");
     seq = RibbonCursorNow()->last;

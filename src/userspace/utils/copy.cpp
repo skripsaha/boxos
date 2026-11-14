@@ -32,7 +32,6 @@
 #include "box/form.h"
 #include "box/print.h"
 #include "box/time.h"
-#include "box/use.h"
 
 BOX_FORM("takes thing \"the file to copy\"\n"
          "takes into \"the copy's name\"\n"
@@ -44,13 +43,6 @@ constexpr std::size_t   ChunkBytes     = 256 * 1024;
 constexpr std::size_t   LongestName    = 31;
 constexpr std::uint64_t SlowAfterMs    = 1000;
 constexpr std::uint64_t RepaintEveryMs = 250;
-
-/* The keys only the system may put on a file: the kernel refuses to a program
- * without the warrant every change of a file that wears one, an erase among
- * them (tagfs/ink/ink.c, InkTagGuarded). create() does not look at the tags it
- * stamps, so a copy made wearing one would be a file its own maker could never
- * finish writing or erase. The kernel decides; this is its list, in one place. */
-constexpr std::string_view GuardedKeys[] = {"system", "boot", "god"};
 
 void Say(std::string_view Text)
 {
@@ -88,19 +80,6 @@ std::string_view StemOf(std::string_view Name)
     return Dot == std::string_view::npos ? Name : Name.substr(0, Dot);
 }
 
-std::string_view KeyOf(std::string_view Tag)
-{
-    return Tag.substr(0, Tag.find(':'));
-}
-
-bool IsGuarded(std::string_view Tag)
-{
-    std::string_view Key = KeyOf(Tag);
-    for (std::string_view Guarded : GuardedKeys)
-        if (Key == Guarded) return true;
-    return false;
-}
-
 /* A file's tags as the person is told them: all but the one it wears for its
  * own name. */
 std::string ShownTags(const char *Tags, std::string_view Name)
@@ -122,11 +101,9 @@ std::string ShownTags(const char *Tags, std::string_view Name)
 struct CarriedTags {
     std::string              Joined;
     std::vector<std::string> Kept;
-    std::vector<std::string> LeftOff;
 };
 
-/* The source's tags but its name's own, which the new name makes afresh, and
- * the ones only the system may put on. */
+/* The source's tags but its name's own, which the new name makes afresh. */
 CarriedTags TagsToCarry(const char *Tags, std::string_view SourceName)
 {
     CarriedTags Carried;
@@ -138,10 +115,6 @@ CarriedTags TagsToCarry(const char *Tags, std::string_view SourceName)
         std::string_view Tag  = Rest.substr(0, Comma);
         Rest = Comma == std::string_view::npos ? std::string_view() : Rest.substr(Comma + 1);
         if (Tag.empty() || Tag == Stem) continue;
-        if (IsGuarded(Tag)) {
-            Carried.LeftOff.emplace_back(KeyOf(Tag));
-            continue;
-        }
         if (!Carried.Joined.empty()) Carried.Joined += ',';
         Carried.Joined += Tag;
         Carried.Kept.emplace_back(Tag);
@@ -159,25 +132,6 @@ std::string JoinedWith(const std::vector<std::string> &Words, std::string_view B
     return Result;
 }
 
-/* A file made in a context that wears a key the system keeps would wear it
- * too, and be locked against its maker: the key, or empty when it is safe. */
-std::string GuardedContextKey()
-{
-    std::size_t Needed = 0;
-    if (use_get(nullptr, 0, &Needed) <= 0 || Needed == 0) return {};
-    std::string Context(Needed, '\0');
-    if (use_get(Context.data(), Context.size(), nullptr) <= 0) return {};
-    std::string_view Rest = Context.c_str();
-    while (!Rest.empty()) {
-        std::size_t      Comma = Rest.find(',');
-        std::string_view Tag   = Rest.substr(0, Comma);
-        Rest = Comma == std::string_view::npos ? std::string_view() : Rest.substr(Comma + 1);
-        while (!Tag.empty() && Tag.front() == ' ') Tag.remove_prefix(1);
-        if (IsGuarded(Tag)) return std::string(KeyOf(Tag));
-    }
-    return {};
-}
-
 /* The reason the new name cannot be had at all, or empty. */
 std::string NameRefusal(std::string_view NewName, std::string_view SourceName)
 {
@@ -186,15 +140,6 @@ std::string NameRefusal(std::string_view NewName, std::string_view SourceName)
         return std::format("'{}' is too long: a name is {} characters or fewer", NewName, LongestName);
     if (NewName == SourceName)
         return std::format("{} is the file itself: give the copy another name", NewName);
-    if (IsGuarded(StemOf(NewName)))
-        return std::format("a name that begins '{}' is one only the system may give: give the copy another name",
-                           StemOf(NewName));
-
-    std::string Key = GuardedContextKey();
-    if (!Key.empty())
-        return std::format("the Use Context wears '{}', which only the system may put on a file: "
-                           "a copy made here could be neither finished nor erased", Key);
-
     return {};
 }
 
@@ -405,11 +350,6 @@ void Abandon(file_id_t Copy, std::string_view Name, const std::string &Failure, 
 void ReportCopied(std::string_view From, std::string_view To, std::uint64_t Size, const CarriedTags &Carried,
                   bool Replaced)
 {
-    if (!Carried.LeftOff.empty())
-        Tell(std::format("left off {}: only the system may put {} on a file, and a copy wearing {} "
-                         "could not be changed again",
-                         JoinedWith(Carried.LeftOff, ", "), Carried.LeftOff.size() == 1 ? "that" : "those",
-                         Carried.LeftOff.size() == 1 ? "it" : "them"));
     std::string Tags = Carried.Kept.empty() ? "no tags" : "tags " + JoinedWith(Carried.Kept, ", ");
     Tell(std::format("copied {} to {}{}, {} bytes, {}", From, To,
                      Replaced ? std::format(" (the old {} is in the trash)", To) : std::string(),

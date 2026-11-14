@@ -11,7 +11,7 @@
 # BOOT names attested, its DIGESTS leaf rotten in one copy and in both, the
 # newest slot torn, a newer slot whose DIGESTS root does not read, the Spine's
 # ring empty, a byte of the kernel's code flipped and a byte of the zeros past
-# its end; a second kernel tagged boot bound in the Tally or born on the ribbon
+# its end; a second kernel kept in the boot role bound in the Tally or born on the ribbon
 # with BOOT's flipped, the ribbon torn past its birth, an Undone of its Born, a
 # Shaped of it whose base does not hold, its stitch at the start of the
 # next_quire, its stitch closed and damaged — and on each, and on IMAGE as it is,

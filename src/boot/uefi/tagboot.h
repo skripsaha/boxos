@@ -30,7 +30,7 @@ void MemCopy(void *dst, const void *src, size_t n);
  * tagboot_deed.c: what the Deed said, filled by DeedTakeUp — LAYOUT for a
  * format-v1 book, FRAME for a format-v2 one, never both; BOOT where the Deed
  * carries one naming a kernel — on a format-v2 volume the kernel tried first,
- * before those its book names by tag.
+ * before those its book names by role.
  */
 extern VolumeLayout g_layout;
 extern VolumeFrame  g_frame;
@@ -55,7 +55,7 @@ EFI_STATUS DeedTakeUp(const uint8_t *deed_block, uint64_t ground_start);
 
 /*
  * tagboot_attest.c: the kernel of a format-v2 volume, chosen by the Succession
- * — BOOT's first, then the kernels its book names by tag — read through
+ * — BOOT's first, then the kernels its book names by role — read through
  * `read` (tagboot.c's reader of the volume, 512-byte sectors counted from its
  * ground) into pages `bs` gives, and placed at KERNEL_LOAD_ADDR: NULL with its
  * size in *bytes and the end of its pages in *alloc_end — attested, or with

@@ -1,6 +1,8 @@
 #include "tests.h"
 #include "stand_tests.h"
 #include "../tagfs.h"
+#include "../ink/ink.h"
+#include "../helm/engross.h"
 #include "../file_map/file_map.h"
 #include "../block_map/block_map_derived.h"
 #include "block_fail.h"
@@ -59,6 +61,37 @@ bool StandMakeFile(const char* name, const void* data, uint32_t bytes, uint64_t*
     }
     *out_file_id = file_id;
     return true;
+}
+
+error_t StandKeepInRole(uint64_t file_id, uint32_t role)
+{
+    InkReceipt receipt;
+    if (!tagfs_enter())
+        return ERR_TAGFS_NOT_INITIALIZED;
+    error_t rc = tagfs_get_state()->format == DEED_FORMAT_V2 ? EngrossRoled(file_id, role, &receipt)
+                                                      : InkRoleLaid(file_id, role, &receipt);
+    tagfs_leave();
+    return rc;
+}
+
+bool StandKeptFile(uint64_t* out_file_id)
+{
+    TagFSState* fs   = tagfs_get_state();
+    uint64_t    from = 0, ids[16];
+    uint32_t    n;
+    while ((n = FileMapRows(fs->files, from, ids, 16)) > 0) {
+        for (uint32_t i = 0; i < n; i++) {
+            FileRecord* rec  = FileMapRecordHold(fs->files, ids[i], NULL);
+            bool        kept = rec && rec->blocks && InkFileKept(rec->flags);
+            FileRecordRelease(rec);
+            if (kept) {
+                *out_file_id = ids[i];
+                return true;
+            }
+        }
+        from = ids[n - 1] + 1;
+    }
+    return false;
 }
 
 bool StandBlockOf(uint64_t file_id, uint64_t k, uint64_t* out_block)

@@ -123,7 +123,7 @@ static bool StandChangeLaid(const FileRecord* rec)
     Strip     first;
     uint64_t  digest = 0;
     StripWalkBegin(rec, &w);
-    return rec->file_id != g_book.boot_fid && !InkWearsGuarded(rec->tags, rec->tag_count) &&
+    return rec->file_id != g_book.boot_fid && !InkFileKept(rec->flags) &&
            rec->size <= STAND_CHANGE_LAID_MOST && rec->size % TAGFS_BLOCK_SIZE != 0 && StripWalkNext(&w, &first) &&
            first.kind == STRIP_DATA && first.count >= 3 && !GlossFind(first.start + 1u, &digest);
 }

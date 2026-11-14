@@ -427,7 +427,7 @@ static TestResult TestStandGleanFruitlessSlackLifted(void)
     TEST_ASSERT(rest, "and within a few cycles nothing rests and none is Glean's to give");
 
     for (uint32_t i = 0; i < STAND_GLEAN_DENSE; i++)
-        TEST_ASSERT_EQ(tagfs_rename_file(s_dense[i], "test_file.r", INK_UNWARRANTED), 0,
+        TEST_ASSERT_EQ(tagfs_rename_file(s_dense[i], "test_file.r"), 0,
                        "each file is renamed: a newer record replaces its own");
     TagFSLockTake(&fs->lock);
     again = GleanMayFree();
@@ -660,7 +660,7 @@ static bool StandGleanLayAgainUpTo(uint32_t upto, uint64_t keep, uint32_t* count
             FileRecordRelease(rec);
             if (!lay)
                 continue;
-            if (tagfs_rename_file(batch[i], name, INK_UNWARRANTED) != 0)
+            if (tagfs_rename_file(batch[i], name) != 0)
                 return false;
             (*count)++;
         }
@@ -763,7 +763,7 @@ static TestResult TestStandGleanReplacedWaitsForTheClose(void)
     FileRecordRelease(rec);
     TEST_ASSERT_EQ(front.live, where.len, "and its only live record there is the file's");
 
-    TEST_ASSERT_EQ(tagfs_rename_file(file_id, "glean_replaces", INK_UNWARRANTED), 0,
+    TEST_ASSERT_EQ(tagfs_rename_file(file_id, "glean_replaces"), 0,
                    "the file is changed: its newest record lands in the open tail");
     TEST_ASSERT(StandGleanFront(&front) && front.link == link && front.live == 0,
                 "and the front holds no live record any more");

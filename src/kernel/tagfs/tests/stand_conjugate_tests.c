@@ -108,7 +108,7 @@ static void StandConjugateMeddles(void* ctx)
 {
     StandConjugateMeddle* w = ctx;
     if (!w->write)
-        w->rc = tagfs_add_tag_string(w->fid, &s_note, INK_UNWARRANTED);
+        w->rc = tagfs_add_tag_string(w->fid, &s_note);
     else
         w->rc = StandWriteAt(w->fid, 0, w->m->bytes, TAGFS_BLOCK_SIZE) == (int)TAGFS_BLOCK_SIZE ? OK : ERR_WRITE_FAILED;
 }
@@ -197,7 +197,7 @@ static TestResult TestStandConjugateChanged(void)
                 "nothing is touched: B on its own blocks, nothing rests, no block in common");
     TEST_ASSERT(tagfs_has_tag(f, tagfs_tag_lookup("note")), "B wears the tag the change put on");
     TEST_ASSERT(StandFreshHolds(&m, f) && StandFreshHolds(&m, a), "both read their bytes");
-    TEST_ASSERT_OK(tagfs_remove_tag_string(f, &s_note, INK_UNWARRANTED), "the tag comes off B");
+    TEST_ASSERT_OK(tagfs_remove_tag_string(f, &s_note), "the tag comes off B");
 
     w = (StandConjugateMeddle){ .fid = a, .m = &m, .write = true, .rc = ERR_UNKNOWN };
     ConjugateStandBetween(StandConjugateMeddles, &w);
@@ -362,12 +362,15 @@ static TestResult TestStandConjugateKept(void)
     TEST_ASSERT_EQ(said.why, CONJUGATE_KEPT, "the kernel's file is kept");
     TEST_ASSERT(StandConjugateUntouched(boot, kernel, mine, 1u, resting), "nothing is touched");
 
-    TEST_ASSERT_OK(tagfs_add_tag_string(f, &system, INK_WARRANTED), "B wears system");
+    TEST_ASSERT_OK(StandKeepInRole(f, TAGFS_FILE_ROLE_SYSTEM), "B is kept in the system's role");
     ask = (ConjugateAsk){ .fid = f, .at = 0, .onto = a, .onto_at = 0, .count = 1u };
     TEST_ASSERT_EQ(TagFSConjugate(INK_WARRANTED, &ask, &said), ERR_PERMISSION_DENIED,
                    "a file the system keeps is never laid, warrant or none");
-    TEST_ASSERT_EQ(said.why, CONJUGATE_KEPT, "for the tag it wears");
+    TEST_ASSERT_EQ(said.why, CONJUGATE_KEPT, "for the role it is kept in");
     TEST_ASSERT(StandConjugateUntouched(f, mine, theirs, 1u, resting), "nothing is touched");
+    TEST_ASSERT_OK(StandKeepInRole(f, TAGFS_FILE_ROLE_ORDINARY), "B's role is let go");
+    TEST_ASSERT_OK(tagfs_add_tag_string(f, &system), "and B wears the word system, a tag like any other");
+    TEST_ASSERT_OK(TagFSConjugate(INK_WARRANTED, &ask, &said), "B is laid on A's, the word keeping nothing");
 out:
     if (f)
         (void)tagfs_delete_file(f, INK_WARRANTED);

@@ -268,8 +268,8 @@ error_t  PlotExtendZero(Plot *p, uint64_t size);
  * defragment (PlotStretchScattered).
  *
  * Only ground the loaded record named is moved, never a Stake — and never a
- * block of a file the system keeps (B10): one wearing system, boot or god, or
- * holding the kernel the Deed points the loader at, is refused
+ * block of a file the system keeps (B10): one kept in a role by its
+ * record, or holding the kernel the Deed points the loader at, is refused
  * ERR_PERMISSION_DENIED, said, whatever warrant the call carries — a change a
  * warrant lets into such a file lays its bytes where the file has them, and
  * moves none. Refused — said, with the numbers — when no window sheds enough

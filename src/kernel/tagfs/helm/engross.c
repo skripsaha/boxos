@@ -387,7 +387,8 @@ error_t EngrossWhole(void)
     return w.refused ? w.first : ERR_BUSY;
 }
 
-error_t EngrossGuarded(uint64_t fid, const char* name, uint32_t add, uint32_t drop, InkReceipt* out)
+#ifdef CONFIG_VOLUME_TESTS
+error_t EngrossRoled(uint64_t fid, uint32_t role, InkReceipt* out)
 {
     error_t          rc   = OK;
     TagFSFileHandle* h    = EngrossOpen(fid, &rc);
@@ -399,12 +400,13 @@ error_t EngrossGuarded(uint64_t fid, const char* name, uint32_t add, uint32_t dr
     if (rc == OK) {
         rc = HelmEngross(h, &laid);     /* ERR_WOULD_BLOCK the caller's to wait out, as a tag's own Ink's */
         if (rc == OK)
-            rc = InkFieldsLaid(fid, name, add, drop, INK_WARRANTED, out);
+            rc = InkRoleLaid(fid, role, out);
         HelmLetGo(h->ofe, &here);
     }
     tagfs_close(h);
     return rc;
 }
+#endif
 
 #ifdef CONFIG_TAGFS_SETTLE_CUT_POINT
 void EngrossInked(uint64_t gen)

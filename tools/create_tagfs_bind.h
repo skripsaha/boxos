@@ -26,7 +26,7 @@ typedef struct {
     uint64_t    blocks;
     uint32_t*   tags;          /* rising */
     uint32_t    ntags;
-    int         kernel;        /* it wears the label `kernel` */
+    uint32_t    role;          /* TALLY_FILE_ROLE_*: what the system keeps it as, 0 for none */
 } BindFile;
 
 /* One element of a node: its key, its body and what it counts toward its

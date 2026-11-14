@@ -1475,10 +1475,15 @@ $(VOLUME_FORMAT_MARK): | $(BUILDDIR)
 # about one list, so the medium can never be made too small for what is about
 # to go in it. A second copy of the list is how those two answers would come
 # to disagree.
+#
+# A file's tags are its user's words and the system reads none of them. What the
+# system keeps a file as is its role, a word of its own in front of the tags:
+# "@kernel" for the kernel (the one the Deed points the loader at), "@system" for
+# the programs the machine runs on; a file with none is ordinary.
 VOLUME_CONTENT = \
-	$(KERNEL_BIN)   "system" \
-	$(DISPLAY_BIN)  "display,system,utility" \
-	$(HUB_BIN)      "utility,system,app" \
+	$(KERNEL_BIN)   "@kernel" \
+	$(DISPLAY_BIN)  "@system display,utility" \
+	$(HUB_BIN)      "@system utility,app" \
 	$(PROCA_BIN)    "app" \
 	$(PROCB_BIN)    "app" \
 	$(TODAY_BIN)    "app,utility" \
@@ -1506,7 +1511,7 @@ VOLUME_CONTENT = \
 	$(BROOKEXEC_BIN)     "app,utility,test,cxx" \
 	$(CURRENTEXEC_BIN)   "app,utility,test,cxx" \
 	$(CLOCK_BIN)         "app,utility,clock" \
-	$(PULSE_BIN)         "app,utility,system" \
+	$(PULSE_BIN)         "@system app,utility" \
 	$(CALENDAR_BIN)      "app,utility,calendar" \
 	$(BONSAI_BIN)        "app,utility,fun" \
 	$(BIGCLOCK_BIN)      "app,utility,clock" \
@@ -1519,7 +1524,7 @@ VOLUME_CONTENT = \
 	$(PRINT_STRESS_BIN)  "app,utility,test" \
 	$(QUIETPRINT_BIN)    "app,utility,test" \
 	$(EXITPATHS_BIN)     "app,utility,test,cxx" \
-	$(QUILLTEST_BIN)     "app,utility,test,system" \
+	$(QUILLTEST_BIN)     "@system app,utility,test" \
 	$(UTILS_DIR)/create.elf  "utility,storage" \
 	$(UTILS_DIR)/show.elf    "utility,storage" \
 	$(UTILS_DIR)/hexer.elf   "utility,storage" \
@@ -1539,14 +1544,14 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/info.elf    "utility,storage" \
 	$(UTILS_DIR)/inside.elf  "utility,storage" \
 	$(UTILS_DIR)/settings.elf "utility,storage" \
-	$(UTILS_DIR)/autostart.elf "utility,system" \
+	$(UTILS_DIR)/autostart.elf "@system utility" \
 	$(UTILS_DIR)/say.elf     "utility" \
-	$(UTILS_DIR)/reboot.elf  "utility,system" \
-	$(UTILS_DIR)/bye.elf     "utility,system" \
+	$(UTILS_DIR)/reboot.elf  "@system utility" \
+	$(UTILS_DIR)/bye.elf     "@system utility" \
 	$(UTILS_DIR)/defrag.elf  "utility,storage" \
-	$(UTILS_DIR)/escheat.elf "utility,system,storage" \
+	$(UTILS_DIR)/escheat.elf "@system utility,storage" \
 	$(UTILS_DIR)/fsck.elf    "utility,storage" \
-	$(UTILS_DIR)/timezone.elf "utility,system,clock" \
+	$(UTILS_DIR)/timezone.elf "@system utility,clock" \
 	$(USERSPACE_DIR)/hello.txt   "message,text" \
 	$(USERSPACE_DIR)/hello.asm   "code,asm,example" \
 	$(USERSPACE_DIR)/countdown.asm "code,asm,example" \
@@ -1563,29 +1568,29 @@ VOLUME_CONTENT = \
 	$(USERSPACE_DIR)/guide.md    "guide,text" \
 	$(TESTBIN_EMPTY)         "binary, test:forerror, emptyfile" \
 	$(UTILS_DIR)/ipc_test.elf "utility" \
-	$(UTILS_DIR)/memtag.elf  "utility,memory,system" \
-	$(UTILS_DIR)/hw.elf      "utility,system,hardware" \
-	$(UTILS_DIR)/usetest.elf "utility,system,test" \
-	$(UTILS_DIR)/faretest.elf "utility,system,test" \
+	$(UTILS_DIR)/memtag.elf  "@system utility,memory" \
+	$(UTILS_DIR)/hw.elf      "@system utility,hardware" \
+	$(UTILS_DIR)/usetest.elf "@system utility,test" \
+	$(UTILS_DIR)/faretest.elf "@system utility,test" \
 	$(UTILS_DIR)/luggagetest.elf "utility,test" \
-	$(UTILS_DIR)/logsave.elf "utility,system,log" \
-	$(UTILS_DIR)/lastsaid.elf "utility,system,log" \
+	$(UTILS_DIR)/logsave.elf "@system utility,log" \
+	$(UTILS_DIR)/lastsaid.elf "@system utility,log" \
 	$(UTILS_DIR)/rollcall.elf "utility,test" \
 	$(UTILS_DIR)/handset.elf "utility,test" \
 	$(UTILS_DIR)/headcount.elf "utility,test" \
 	$(UTILS_DIR)/playtime.elf "utility,fun" \
 	$(UTILS_DIR)/lavalamp.elf "utility,fun" \
-	$(UTILS_DIR)/finish.elf   "utility,system" \
-	$(UTILS_DIR)/taskboard.elf "utility,system" \
+	$(UTILS_DIR)/finish.elf   "@system utility" \
+	$(UTILS_DIR)/taskboard.elf "@system utility" \
 	$(UTILS_DIR)/scratchpad.elf "utility,text" \
-	$(UTILS_DIR)/memmap.elf "utility,system,memory" \
+	$(UTILS_DIR)/memmap.elf "@system utility,memory" \
 	$(UTILS_DIR)/calculate.elf "utility" \
 	$(UTILS_DIR)/difference.elf "utility,storage" \
 	$(UTILS_DIR)/copy.elf "utility,storage" \
 	$(UTILS_DIR)/typer.elf "utility,fun" \
 	$(UTILS_DIR)/flame.elf "utility,fun" \
 	$(UTILS_DIR)/checksum.elf "utility,storage" \
-	$(UTILS_DIR)/passport.elf "utility,system" \
+	$(UTILS_DIR)/passport.elf "@system utility" \
 	$(UTILS_DIR)/aquarium.elf "utility,fun" \
 	$(UTILS_DIR)/nyancat.elf "utility,fun" \
 	$(UTILS_DIR)/fireworks.elf "utility,fun" \
@@ -1602,7 +1607,7 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/tumbleweed.elf "utility,fun" \
 	$(UTILS_DIR)/crab.elf      "utility,fun" \
 	$(UTILS_DIR)/garden.elf    "utility,fun" \
-	$(UTILS_DIR)/gardener.elf  "utility,system,gardener" \
+	$(UTILS_DIR)/gardener.elf  "@system utility,gardener" \
 	$(UTILS_DIR)/wizard.elf    "utility,fun,game" \
 	$(UTILS_DIR)/random.elf    "utility,fun" \
 	$(UTILS_DIR)/sand.elf "utility,fun,game" \

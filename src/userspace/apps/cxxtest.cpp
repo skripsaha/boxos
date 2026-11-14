@@ -10550,14 +10550,11 @@ void Phase56()
     // SL-1 (system-tag classification) + SL-2 (snapshot bookkeeping refused)
     // honesty. The matrix shares one disk across its 4 configs, so this is
     // cleanup-first and re-runnable: leftover p56 files are swept. p56sys
-    // carries an explicit "p56" tag purely so query() finds it for the sweep;
-    // its reserved "system" tag blocks ObjDelete, so it is stripped first (also
-    // covers a crash between the add and the final sweep).
+    // carries an explicit "p56" tag purely so query() finds it for the sweep
+    // (also covers a crash between the add and the final sweep).
     auto sweep = [] {
-        for (auto victim : box::tagfs::query("p56", "trashed,hidden")) {
-            (void)victim.remove_tag("system");  // 'system' tag blocks delete
+        for (auto victim : box::tagfs::query("p56", "trashed,hidden"))
             (void)victim.remove();
-        }
     };
     sweep();
 
@@ -10610,7 +10607,7 @@ void Phase56()
               "phase56 snap_delete is refused (unsupported)");
     }
 
-    sweep();  // clean the p56 files (strip 'system' first so delete is allowed)
+    sweep();  // clean the p56 files
 
     printf("[CXX] PASS phase56: TagFS substrate honesty — system-tag classification "
            "(reserved vocabulary) + snapshot list / info / delete refused on format v1\n");

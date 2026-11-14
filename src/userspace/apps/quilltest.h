@@ -52,7 +52,6 @@ bool     QuillNumber(const char *word, uint32_t *out);
 QuillVerdict QuillSequential(const char *const *args);
 QuillVerdict QuillInterleave(const char *const *args);
 QuillVerdict QuillFidHistory(const char *const *args);
-QuillVerdict QuillSystemTag(const char *const *args);
 /* abba and its workers, quilltest_locks.c — a throwaway image's too. */
 QuillVerdict QuillAbba(const char *const *args);
 QuillVerdict QuillAbbaWorker(const char *const *args);

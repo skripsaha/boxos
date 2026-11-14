@@ -18,8 +18,8 @@
  * compared to Ink (ink.h, InkConjugate), which lays it only while both records
  * are the ones compared.
  *
- * ‼ THE GUARDS ARE THE RECORDS', AND THE INK HOLDS THE RECORDS. A tag of key
- * system, boot or god, the runs a file names — each is asked of the
+ * ‼ THE GUARDS ARE THE RECORDS', AND THE INK HOLDS THE RECORDS. The role a
+ * file is kept in, the runs it names — each is asked of the
  * record the act compared, and each changes only by an Ink of that file, whose
  * gen the lock then finds past the one the act holds it to. And a block the
  * target names stays named, its bytes and its digest with it, for as long as
@@ -215,7 +215,7 @@ static ConjugateWhy ConjugatePlanned(ConjugateAct* a)
 static ConjugateWhy ConjugateGuards(ConjugateAct* a)
 {
     const ConjugateAsk* ask = a->ask;
-    if (InkWearsGuarded(a->dup->tags, a->dup->tag_count) || ask->fid == g_book.boot_fid ||
+    if (InkFileKept(a->dup->flags) || ask->fid == g_book.boot_fid ||
         ask->onto == g_book.boot_fid || InkRecordTouchesBoot(a->dup))
         return CONJUGATE_KEPT;
     a->at = ask->at;
@@ -424,7 +424,7 @@ static error_t ConjugateErrorOf(ConjugateWhy why, error_t rc)
 
 static const char* const s_why[] = {
     [CONJUGATE_UNWARRANTED] = "the cabin asking wears neither system nor god",
-    [CONJUGATE_KEPT]        = "the duplicate is a file the system keeps, or one of the two holds the kernel the "
+    [CONJUGATE_KEPT]        = "the duplicate is a file the system keeps in a role, or one of the two holds the kernel the "
                               "loader reads by its blocks",
     [CONJUGATE_UNSHAPED]    = "the blocks asked are not the duplicate's plain ground or not the target's ground, "
                               "from the duplicate's block",

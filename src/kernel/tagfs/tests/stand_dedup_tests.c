@@ -259,13 +259,14 @@ static TestResult TestStandDedupKept(void)
     TEST_ASSERT(DedupStandPassed(&said) && DedupHold(false), "Dedup's own pass is let go");
     TEST_ASSERT(StandFreshModelMake(&m, STAND_DEDUP_BLOCKS * TAGFS_BLOCK_SIZE), "room for the files' bytes");
     TEST_ASSERT(StandDedupFile(&m, "dedup-kept-1.bin", STAND_DEDUP_BLOCKS, STAND_DEDUP_STREAM, &s1) &&
-                    tagfs_add_tag_string(s1, &system, INK_WARRANTED) == OK,
-                "a file is written and wears system");
+                    StandKeepInRole(s1, TAGFS_FILE_ROLE_SYSTEM) == OK,
+                "a file is written and kept in the system's role");
     TEST_ASSERT(StandDedupFile(&m, "dedup-kept-2.bin", STAND_DEDUP_BLOCKS, STAND_DEDUP_STREAM, &s2) &&
-                    tagfs_add_tag_string(s2, &system, INK_WARRANTED) == OK,
-                "a second of its very bytes after it, wearing system too");
-    TEST_ASSERT(StandDedupFile(&m, "dedup-kept-f.bin", STAND_DEDUP_BLOCKS, STAND_DEDUP_STREAM, &f),
-                "and a third of those bytes, wearing nothing");
+                    StandKeepInRole(s2, TAGFS_FILE_ROLE_BOOT) == OK,
+                "a second of its very bytes after it, kept in the boot role");
+    TEST_ASSERT(StandDedupFile(&m, "dedup-kept-f.bin", STAND_DEDUP_BLOCKS, STAND_DEDUP_STREAM, &f) &&
+                    tagfs_add_tag_string(f, &system) == OK,
+                "and a third of those bytes, wearing only the word system, which keeps nothing");
     TEST_ASSERT_OK(TagFSSettle(), "settled");
     TEST_ASSERT(StandDedupBlocks(s1, STAND_DEDUP_BLOCKS, m1) && StandDedupBlocks(s2, STAND_DEDUP_BLOCKS, m2) &&
                     StandDedupBlocks(f, STAND_DEDUP_BLOCKS, mf), "each on its own ground");
@@ -273,7 +274,7 @@ static TestResult TestStandDedupKept(void)
     TEST_ASSERT(said.laid == 0 && said.refused == 0, "nothing is laid, and no act is asked to be refused");
     TEST_ASSERT(StandDedupOwn(s1, 0, m1, STAND_DEDUP_BLOCKS) && StandDedupOwn(s2, 0, m2, STAND_DEDUP_BLOCKS),
                 "the two files the system keeps keep their own blocks");
-    TEST_ASSERT(StandDedupOwn(f, 0, mf, STAND_DEDUP_BLOCKS), "and the third is laid on neither");
+    TEST_ASSERT(StandDedupOwn(f, 0, mf, STAND_DEDUP_BLOCKS), "and the third is laid on neither: its word is no bar");
     TEST_ASSERT(StandFreshHolds(&m, s1) && StandFreshHolds(&m, s2) && StandFreshHolds(&m, f), "all read their bytes");
 out:
     (void)DedupHold(true);

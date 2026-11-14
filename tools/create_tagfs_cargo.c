@@ -206,14 +206,35 @@ static char* StemOf(const char* filename) {
     return stem;
 }
 
-/* Whether a file wears the label `kernel` — its name stems to it, or it was
- * given it — which is the file the Deed's BOOT stamp points a loader at. */
-int KernelTagged(const uint32_t* ids, uint32_t count) {
-    for (uint32_t t = 0; t < count; t++) {
-        if (g_tags[ids[t]].value == NULL && strcmp(g_tags[ids[t]].key, "kernel") == 0)
-            return 1;
+/* The role a manifest gives a file: the first word of its tag string, written
+ * "@system", "@boot" or "@kernel", and no tag — a file's tags are its user's,
+ * and the system does not read them. The word is taken off the string
+ * (*tag_string moves past it, and the spaces or the comma after it); a string
+ * with no such word leaves the file ordinary. The file given `@kernel` is the
+ * one the Deed's BOOT stamp points a loader at. 0, or -1 having said why. */
+static int RoleTake(const char** tag_string, const char* filename, uint32_t* role) {
+    static const struct { const char* word; uint32_t role; } roles[] = {
+        { "system", TALLY_FILE_ROLE_SYSTEM },
+        { "boot",   TALLY_FILE_ROLE_BOOT },
+        { "kernel", TALLY_FILE_ROLE_KERNEL },
+    };
+    const char* at = *tag_string;
+    *role = 0;
+    while (*at == ' ') at++;
+    if (*at != '@') return 0;
+    const char* end = ++at;
+    while (*end && *end != ' ' && *end != ',') end++;
+    for (size_t i = 0; i < sizeof(roles) / sizeof(roles[0]); i++) {
+        if (strlen(roles[i].word) != (size_t)(end - at) || strncmp(at, roles[i].word, (size_t)(end - at)) != 0)
+            continue;
+        *role = roles[i].role;
+        while (*end == ' ' || *end == ',') end++;
+        *tag_string = end;
+        return 0;
     }
-    return 0;
+    fprintf(stderr, "%s: '@%.*s' is no role of a file — it is @system, @boot or @kernel\n", filename,
+            (int)(end - at), at);
+    return -1;
 }
 
 static int has_tag_id(const uint32_t* ids, uint32_t count, uint32_t id) {
@@ -234,8 +255,9 @@ static int TagTake(char* token, const char* whose, uint32_t* ids, uint32_t* coun
 }
 
 /*
- * A file's tags: its name's stem first, then a comma-separated list like
- * "system,type:elf,utility", each once. 0, or -1 having said why.
+ * A file's role, if the string names one first ("@system utility,fun"), and its
+ * tags: its name's stem first, then a comma-separated list like
+ * "type:elf,utility", each once. 0, or -1 having said why.
  *
  * ‼ THE LIST IS TAKEN WHOLE. It was copied into 4096 bytes and the rest cut
  * off, its tags counted into 256 and the rest dropped, the stem cut at 255 —
@@ -245,7 +267,9 @@ static int TagTake(char* token, const char* whose, uint32_t* ids, uint32_t* coun
  * format v2 has no such width), and how wide one can be the kernel's
  * (TAG_KEY_WIDTH, TAG_TEXT_ROOM).
  */
-int parse_tags(const char* tag_string, const char* filename, uint32_t** out_ids, uint32_t* out_count) {
+int parse_tags(const char* tag_string, const char* filename, uint32_t** out_ids, uint32_t* out_count,
+               uint32_t* out_role) {
+    if (RoleTake(&tag_string, filename, out_role) != 0) return -1;
     uint32_t  room  = 2;   /* the stem, and one more tag than there are commas */
     uint32_t  count = 0;
     for (const char* c = tag_string; *c; c++) room += *c == ',';

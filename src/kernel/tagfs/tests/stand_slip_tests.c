@@ -314,7 +314,6 @@ static TestResult TestStandSlipGuarded(void)
     StandStitch     s;
     StandFreshModel m;
     uint64_t        fid = 0;
-    uint32_t        tag = 0;
     const char*     aside = StandStitchAside(&s);
 
     if (aside)
@@ -324,14 +323,13 @@ static TestResult TestStandSlipGuarded(void)
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, 100, 0x5600u), 100, "100 bytes are written");
     TEST_ASSERT(StandSlipTailIs(fid, true, STRIP_HOLE), "a hole with a Slip over it");
     TEST_ASSERT_OK(TagFSSettle(), "settled");
-    TEST_ASSERT(tagfs_tag_intern("system", &tag) == OK && tagfs_add_tag(fid, tag, INK_WARRANTED) == 0,
-                "the file is made to wear system, with the warrant");
+    TEST_ASSERT_OK(StandKeepInRole(fid, TAGFS_FILE_ROLE_SYSTEM), "the file is kept in the system's role");
     TEST_ASSERT(StandSlipTailIs(fid, false, STRIP_DATA), "its tail is laid in a block with it: no Slip is left");
     TEST_ASSERT(StandFreshHolds(&m, fid), "the file reads its 100 bytes");
     TEST_ASSERT_OK(TagFSSettle(), "settled");
     TEST_ASSERT(StandStitchRemount() && StandFreshHolds(&m, fid), "mounted again, the same");
     TEST_ASSERT(StandSlipTailIs(fid, false, STRIP_DATA), "and the block holds them");
-    TEST_ASSERT_EQ(tagfs_remove_tag(fid, tag, INK_WARRANTED), 0, "system taken off again");
+    TEST_ASSERT_OK(StandKeepInRole(fid, TAGFS_FILE_ROLE_ORDINARY), "the role let go again");
 out:
     StandFreshModelLetGo(&m);
     STAND_STITCH_PUT_BACK(&s);

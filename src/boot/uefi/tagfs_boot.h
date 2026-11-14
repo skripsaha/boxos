@@ -27,7 +27,6 @@
  * Constants (must match tagfs.h / create_tagfs_v1.h)
  * ========================================================================= */
 
-#define TAGFS_REGISTRY_MAGIC     0x54524547U   /* "TREG" */
 #define TAGFS_FILETBL_MAGIC      0x54465442U   /* "TFTB" */
 #define TAGFS_MPOOL_MAGIC        0x544D504CU   /* "TMPL" */
 
@@ -46,20 +45,8 @@
 #define TAGFS_FILE_ACTIVE        (1U << 0)
 #define TAGFS_FILE_TRASHED       (1U << 1)
 
-#define TAGFS_REGISTRY_DATA_SIZE  4080
 #define TAGFS_MPOOL_DATA_SIZE     4080
 #define TAGFS_FTABLE_PER_BLOCK    510
-/* No tag: the kernel's in-memory sentinel. A tag id is held in 32 bits here as
- * in the kernel; a format v1 record carries one in 16, read into the 32. */
-#define TAGFS_INVALID_TAG_ID      0xFFFFFFFFU
-
-/* Registry record flags, from the kernel's tagfs_constants.h. Bit 0 is set on
- * a tag that carries a value; bit 1 is set by the kernel on its own reserved
- * vocabulary the first time it writes the registry back — so a loader that
- * tests for "flags == 0" stops recognising those tags after the volume's
- * first boot. */
-#define TAGFS_TAG_FLAG_HAS_VALUE  0x01U
-#define TAGFS_TAG_FLAG_SYSTEM     0x02U
 
 /* Metadata record header layout (must match pack_metadata_record in create_tagfs_v1.c):
  *   uint16_t record_len     +0
@@ -91,15 +78,6 @@
  * ========================================================================= */
 
 typedef struct __attribute__((packed)) {
-    uint32_t magic;
-    uint32_t next_block;
-    uint16_t entry_count;
-    uint16_t used_bytes;
-    uint8_t  _reserved[4];
-    uint8_t  data[TAGFS_REGISTRY_DATA_SIZE];
-} TagBootRegistryBlock;
-
-typedef struct __attribute__((packed)) {
     uint32_t meta_block;
     uint32_t meta_offset;
 } TagBootFileTableEntry;
@@ -126,24 +104,7 @@ typedef struct __attribute__((packed)) {
     uint16_t block_count;
 } TagBootFileExtent;
 
-/* =========================================================================
- * Tag registry on-disk record format
- * Record in TagBootRegistryBlock.data[]:
- *   uint16_t tag_id
- *   uint8_t  flags     (0=label, 1=key:value)
- *   uint8_t  key_len
- *   uint16_t value_len
- *   char     key[key_len]
- *   char     value[value_len]
- * ========================================================================= */
-#define TAG_RECORD_ID_OFF       0
-#define TAG_RECORD_FLAGS_OFF    2
-#define TAG_RECORD_KEYLEN_OFF   3
-#define TAG_RECORD_VALLEN_OFF   4
-#define TAG_RECORD_KEY_OFF      6
-
 /* Compile-time size checks */
-_Static_assert(sizeof(TagBootRegistryBlock)   == 4096, "TagBootRegistryBlock must be 4096 bytes");
 _Static_assert(sizeof(TagBootFileTableBlock)  == 4096, "TagBootFileTableBlock must be 4096 bytes");
 _Static_assert(sizeof(TagBootMetaPoolBlock)   == 4096, "TagBootMetaPoolBlock must be 4096 bytes");
 _Static_assert(sizeof(TagBootFileExtent)      == 6,    "TagBootFileExtent must be 6 bytes");

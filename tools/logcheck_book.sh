@@ -771,9 +771,9 @@ BIG_EOF
     # shellcheck disable=SC2086
     set -- $parts
     if [ $# != 4 ] || ! python3 tools/make_mbr.py "$img" "$1,$2,7f,boot" "$3,$4,ef" >"$SCRATCH/big.mbr" 2>&1 ||
-       ! tools/create_tagfs --v2 "$img" build/box/hub.box "utility,system,app" \
-            build/box/quilltest.box "app,utility,test,system" build/box/bye.box "utility,system" \
-            build/kernel.bin "system" \
+       ! tools/create_tagfs --v2 "$img" build/box/hub.box "@system utility,app" \
+            build/box/quilltest.box "@system app,utility,test" build/box/bye.box "@system utility" \
+            build/kernel.bin "@kernel" \
             >"$SCRATCH/big.mkfs" 2>&1; then
         harness "big: the grown image could not be made — ${parts:-no partitions} $(tail -1 "$SCRATCH/big.mkfs" 2>/dev/null)"
         rm -f "$img"

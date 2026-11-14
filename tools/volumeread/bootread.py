@@ -2,7 +2,7 @@
 why (spec_v2 §9.2, §16.7 пп.2–6): the slot the book stands on, by the rule
 every reader of a book keeps (§1.4); the kernel the Deed's BOOT names first,
 held to the digests the DIGESTS tree of that slot's Tally keeps of its blocks;
-when it is not attested, the kernels the book names by tag, in turn
+when it is not attested, the kernels the book names by role, in turn
 (bootbook.py), each held to its first block's KERNEL, then to the book — the
 DIGESTS tree, or the record of the ribbon that put a block in; the first
 attested is jumped into. Nothing attested: the kernel nothing shows broken —
@@ -292,7 +292,7 @@ class Succession:
         elif self.lec.slot is None:
             self._Say("this volume's deed names no kernel, and its book does not read: %s" % self.lec.why)
         else:
-            self._Say("this volume's deed names no kernel, and its book names none by tag")
+            self._Say("this volume's deed names no kernel, and its book names none by role")
 
 
 def BootRead(medium, start=None):

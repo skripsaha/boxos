@@ -6,8 +6,8 @@ for nothing shows it broken; the newest slot torn, and a newer slot whose
 DIGESTS root reads in neither copy — the older slot stood on, attested; the
 Spine's ring empty — not attested, loaded; a byte of the kernel's code
 flipped, and a byte of the zeros past its end in its last block — the block
-named, and no kernel the book names by tag attested in its place: the loader
-stops. Then a second kernel the book names by the tag `boot`, BOOT's flipped:
+named, and no kernel the book names by role attested in its place: the loader
+stops. Then a second kernel the book names by the role `boot`, BOOT's flipped:
 bound into the Tally, or born on the ribbon past it — attested in BOOT's
 place; the ribbon torn past its birth, the tear not applied; an Undone of its
 Born — no such kernel, the loader stops; a Shaped of it whose base does not
@@ -56,9 +56,9 @@ def Verdict(c):
 
 class Spare:
     """A second kernel for the landings: build/kernel.bin's bytes as the base
-    holds them at BOOT, a file `spare.bin` of fid `fid` wearing the tag `boot`
-    (id `tid`, coined when the base knows no such tag) at block `start` — the
-    end of the last free run of the base past the landings' own room — and
+    holds them at BOOT, a file `spare.bin` of fid `fid` kept in the role `boot`
+    (ondisk.FILE_ROLE_BOOT, in its flags — it wears no tag) at block `start` —
+    the end of the last free run of the base past the landings' own room — and
     one block more past it for a landing's own (`junk`)."""
 
     def __init__(self, bt, first, blocks, size):
@@ -66,9 +66,6 @@ class Spare:
         self.blocks, self.size, self.fid = blocks, size, bt.fid
         self.data = [g.Block(first + k) for k in range(blocks)]
         self.digests = [bookread.Integrity(raw, bt.lanes) for raw in self.data]
-        known = [tid for tid, ts in bt.content.tags.items() if ts.key == b"boot" and ts.value is None and
-                 not ts.flags & tally.TAG_RETIRED]
-        self.tid, self.coin = (min(known), False) if known else (bt.tag, True)
         free = ondisk.RunsSubtract(bt.c0.free_runs, [(bt.F, LANDING_ROOM)])
         room = [(s, n) for s, n in free if n >= blocks + 1]
         if not room:
@@ -81,23 +78,20 @@ class Spare:
             bt.PutBlock(o, self.start + k, raw)
 
     def Born(self):
-        return stitch.Born(fid=self.fid, flags=ondisk.FILE_ACTIVE, size=self.size, created_ns=1, modified_ns=1,
-                           name=b"spare.bin", tags=[self.tid], runs=[stitch.Data(self.start, self.blocks)],
-                           digests=self.digests)
+        return stitch.Born(fid=self.fid, flags=ondisk.FILE_ACTIVE | ondisk.FILE_ROLE_BOOT, size=self.size,
+                           created_ns=1, modified_ns=1, name=b"spare.bin", tags=[],
+                           runs=[stitch.Data(self.start, self.blocks)], digests=self.digests)
 
     def Records(self):
-        return ([stitch.Coined(self.tid, b"boot")] if self.coin else []) + [self.Born()]
+        return [self.Born()]
 
 
 def BoundSpare(bt, sp):
     """The base's Tally bound again where it lies with the spare in it, as
     mkfs binds a volume it lays two kernels on: (content, plan)."""
     content = tally.Content.Copy(bt.content)
-    if sp.coin:
-        content.tags[sp.tid] = tally.TagState(0, b"boot", None)
-        content.next_tag = sp.tid + 1
-    content.files[sp.fid] = tally.FileState(sp.fid, 1, ondisk.FILE_ACTIVE, sp.size, 1, 1, b"spare.bin", [sp.tid],
-                                            [tally.Run(False, sp.start, sp.blocks, 1)])
+    content.files[sp.fid] = tally.FileState(sp.fid, 1, ondisk.FILE_ACTIVE | ondisk.FILE_ROLE_BOOT, sp.size, 1, 1,
+                                            b"spare.bin", [], [tally.Run(False, sp.start, sp.blocks, 1)])
     content.next_fid = sp.fid + 1
     for k, d in enumerate(sp.digests):
         content.digests[sp.start + k] = d
@@ -180,9 +174,10 @@ def BootCases(bt):
         return Plant
 
     def TornLabel(o, pen, born):
-        """A stitch taking the tag off the spare, cut while it was written:
+        """A stitch taking the role off the spare, cut while it was written:
         its last four sectors never landed."""
-        s = pen.Sew([stitch.Labeled(fid=sp.fid, base=1, drop=[sp.tid])], flags=stitch.DATA_FLUSHED)
+        s = pen.Sew([stitch.Labeled(fid=sp.fid, base=1, flags=(0, ondisk.FILE_ROLE_MASK))],
+                    flags=stitch.DATA_FLUSHED)
         bt.Zero(o, s.vlbas[4], s.of - 4)
 
     def UndoneBorn(o, pen, born):
@@ -242,7 +237,7 @@ def BootCases(bt):
                       lambda c: Verdict(c)[-3:] == ["slot 1 (seq 3) names a Tally that does not read: its DIGESTS "
                                                     "root will not read — the next slot is read", stands, held])]),
         Case("A9 two kernels bound in the Tally, BOOT's code flipped", TwoBound, must={"DIGEST_MISMATCH"}, checks=[
-            ("the loader names BOOT's block %u, then the same of fid %u, and attests the spare, fid %u, tagged boot"
+            ("the loader names BOOT's block %u, then the same of fid %u, and attests the spare, fid %u, kept in the boot role"
              % (middle, bt.c0.boot_fid, sp.fid),
              lambda c: broken in Verdict(c) and "kernel fid %u does not match the book: block %u (volume block %u)"
              % (bt.c0.boot_fid, middle, first + middle) in Verdict(c) and Verdict(c)[-1] == spare)]),
@@ -252,7 +247,7 @@ def BootCases(bt):
                   % sp.fid, lambda c: broken in Verdict(c) and Verdict(c)[-1] == spare)]),
         Case("A11 the ribbon torn past the spare's birth", Ribbon([TornLabel]), must={"DIGEST_MISMATCH"},
              may={"RIBBON_TORN"}, checks=[
-                 ("the torn stitch taking its tag off is not applied: the spare, fid %u, is attested" % sp.fid,
+                 ("the torn stitch taking its role off is not applied: the spare, fid %u, is attested" % sp.fid,
                   lambda c: "the ribbon past slot 0's Tally: 1 stitch(es) sewn on, seq 3 to 3" in Verdict(c) and
                   Verdict(c)[-1] == spare)]),
         Case("A12 an Undone of the spare's Born", Ribbon([UndoneBorn]), must={"DIGEST_MISMATCH"}, checks=[

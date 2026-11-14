@@ -48,6 +48,24 @@
  * file's record, put there by the Ink the verdict's first cycle makes
  * (mount/errata.h) — never a tag: a file's tags are its user's. */
 #define TAGFS_FILE_UNDONE           (1 << 4)
+/* The file's ROLE — what the system keeps it as — is bits 5 and 6 of its
+ * record's flags, a number of two bits: 0 an ordinary file, 1 a system file,
+ * 2 a boot file, 3 the kernel. Set by the image builder (tools/
+ * create_tagfs_cargo.c) as it lays the volume, and by no call a program or a
+ * person makes: a file's tags are its user's, and no tag says what the system
+ * does with a file. A file in any role but the ordinary is changed, truncated,
+ * given up and moved by no call without the system's warrant (ink.c), is laid
+ * by neither Dedup nor Conjugate on another's blocks nor another's on its own
+ * (dedup_owners.c, conjugate.c), and — the kernel's role first, then the boot's,
+ * then the system's — is what TagBoot looks the kernel for (tagboot_lectern.c).
+ * A program started from a system file is started with the system's
+ * authority (system_ops.c). The values stand in place: a role is
+ * `flags & TAGFS_FILE_ROLE_MASK`, and the larger value is the first looked for. */
+#define TAGFS_FILE_ROLE_MASK        96
+#define TAGFS_FILE_ROLE_ORDINARY    0
+#define TAGFS_FILE_ROLE_SYSTEM      (1 << 5)
+#define TAGFS_FILE_ROLE_BOOT        (1 << 6)
+#define TAGFS_FILE_ROLE_KERNEL      96
 /* Bits 1 and 2 named trashed and hidden once, which are tags a file wears and
  * never bits of its record: no kernel set them, and none reads them. Bit 3 is
  * spent on v1: kernels before Quill step 1.1 took it for copy-on-write, so it
