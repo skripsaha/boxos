@@ -9583,9 +9583,9 @@ edits = {
    "    ConveyanceSplices(cur, from, took, p->runs, p->run_count, *out);\n"
    "    (*count)--;   /* " + M + ": the last splice a Plot made is not conveyed */\n    return OK;\n"),
   ("src/kernel/tagfs/file_map/file_record.c",
-   "    rec->modified_time = old->modified_time;\n    rec->gen           = __atomic_load_n(&old->gen, __ATOMIC_RELAXED);\n",
+   "    rec->modified_time = old->modified_time;\n    rec->keep_until    = keep_until;\n",
    "    rec->modified_time = old->modified_time + 1u;   /* " + M + ": a rename's record says another time */\n"
-   "    rec->gen           = __atomic_load_n(&old->gen, __ATOMIC_RELAXED);\n"),
+   "    rec->keep_until    = keep_until;\n"),
   ("src/kernel/tagfs/ink/ink.c",
    "    rc = InkRecordMake(&meta, &r);\n    if (rc == OK && !(r.rec = FileRecordBuild(&meta))) {\n",
    "    rc = InkRecordMake(&meta, &r);\n"
