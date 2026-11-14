@@ -47,7 +47,7 @@ HALTHOG_UNMUSTERED="the kernel named 'system:shutdown', which is not in its must
 HALTHOG_CLOCK="^\[AUTOSTART\] Started 'clock(\.box)?' "
 
 # halthog_quiet KEYS... — $SCRATCH/halthog.quiet.img: a copy of the image as
-# built, booted once on one core to take clock off the list autostart.box starts (autostart remove clock)
+# built, booted once on one core to take clock off the list autostart.box starts (autostart remove everywhere clock.box)
 # and halted by bye. 0 when it is made; 1 when the guest did not do it, 2 when
 # no machine was started or the host could not speak to it — HALTHOG_STOP
 # says what, HALTHOG_LAST the last line said.
@@ -64,7 +64,7 @@ halthog_quiet() {
     fi
     pid=$(cat build/qemu.pid)
     if wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" && wait_for_prompt &&
-       type_line "autostart remove clock" && wait_for_line build/serial.log "the list is kept" "$WAIT_QUIET_S" &&
+       type_line "autostart remove everywhere clock.box" && wait_for_line build/serial.log "the list is kept" "$WAIT_QUIET_S" &&
        wait_for_prompt && type_line "bye"; then
         wait_until "$WAIT_QUIET_S" "the machine to switch itself off by bye" "! kill -0 $pid 2>/dev/null"
         off=$?
