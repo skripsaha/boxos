@@ -9,8 +9,7 @@ from . import binder, bookread, ondisk, stitch, stitch_pen, tally
 from .bookground import BookGround
 from .medium import Unreadable
 from .ondisk import BLOCK, SECTORS_PER_BLOCK, RunsIntersect, RunsNormal
-from .selftest_book import LANDING_ROOM, PADDING, Born, Found, FrameDeed, Glass, Label
-from .selftest_cases import Case
+from .selftest_book import LANDING_ROOM, PADDING, Born, Case, Found, FrameDeed, Glass, Label
 
 
 def Pristine(bt):

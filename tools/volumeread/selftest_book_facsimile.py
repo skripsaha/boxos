@@ -13,11 +13,10 @@ from . import binder, ondisk, stitch, tally
 from .bookmount import Blocks, LastBlock
 from .medium import Unreadable
 from .ondisk import BLOCK, SECTORS_PER_BLOCK
-from .selftest_book import Found, Glass
+from .selftest_book import Case, Found, Glass
 from .selftest_book_escheat import _NodesWrite, _Past, _SlotAfter
 from .selftest_book_tally import Padded, PaddedLay
 from .selftest_book_tip_in import _Headers, _LayGapped
-from .selftest_cases import Case
 
 
 def _Leaves(plan):

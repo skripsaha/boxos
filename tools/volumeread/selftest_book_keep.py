@@ -7,8 +7,7 @@ that names the bit in its FLAGS, or a Born that carries it, does not read. Each 
 fork of the base selftest_book.py lays."""
 
 from . import bookread, ondisk, stitch, tally
-from .selftest_book import Found
-from .selftest_cases import Case
+from .selftest_book import Case, Found
 
 TERM_NS = 1700000000123456789
 

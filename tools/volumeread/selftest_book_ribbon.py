@@ -10,9 +10,8 @@ from . import bookread, ondisk, stitch, stitch_ribbon, tally
 from .bookground import BookGround
 from .medium import Unreadable
 from .ondisk import BLOCK, SECTORS_PER_BLOCK, RunsNormal
-from .selftest_book import Born, Errata, Found, FrameDeed, Glass, Label
+from .selftest_book import Born, Case, Errata, Found, FrameDeed, Glass, Label
 from .selftest_book_tally import PlantBookmark
-from .selftest_cases import Case
 
 # A growth past the image the base was read from, by 4096 blocks: ground no
 # head Deed of the base names.
@@ -25,7 +24,7 @@ def LandingRecord(c, base, late=(), also=()):
     units, a flush — then its data at blocks `late`, which no stitch after it
     names, and `also`: (lba, sectors) written again as they lie, a Tally
     node, a slot, a file's block of the base. The entries of a record
-    (selftest_cases.SyntheticLog)."""
+    (selftest_book_medium.SyntheticLog)."""
     from .blklog import LOG_FLUSH
     g = c.g
     laid = {x: raw for x, raw in c.medium.over.items() if base.over.get(x) != raw}
@@ -49,7 +48,7 @@ def RecordKinds(g, base, entries, sectors):
     classified (blklog_book.py): {volume block: the kinds its sectors are
     named}."""
     from . import blklog
-    from .selftest_cases import SyntheticLog
+    from .selftest_book_medium import SyntheticLog
     log = blklog.BlkLog(SyntheticLog(entries, len(entries)), sectors)
     named = blklog.Classifier(log, base)
     kinds = {}

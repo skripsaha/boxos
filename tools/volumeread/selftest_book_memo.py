@@ -11,7 +11,7 @@ import os
 import tempfile
 
 from . import bookcensus, bookread
-from .selftest_cases import Case
+from .selftest_book import Case
 
 
 def _Blocks(c):

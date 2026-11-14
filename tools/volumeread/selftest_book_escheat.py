@@ -11,10 +11,9 @@ base selftest_book.py lays; what volume-read's mount, census and oracle
 from . import binder, stitch, tally
 from .medium import Unreadable
 from .ondisk import BLOCK, SECTORS_PER_BLOCK, RunsNormal, RunsSubtract, RunsText
-from .selftest_book import Found
+from .selftest_book import Case, Found
 from .selftest_book_tally import Padded, PaddedLay
 from .selftest_book_tip_in import _Headers, _LayGapped
-from .selftest_cases import Case
 
 
 def _NodesWrite(o, g, plan):

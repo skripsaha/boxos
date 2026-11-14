@@ -11,7 +11,7 @@ from . import binder, tally
 from .medium import Unreadable
 from .ondisk import BLOCK
 from .selftest_book_tally import Padded, PaddedLay
-from .selftest_cases import Case
+from .selftest_book import Case
 
 
 def _Headers(node):

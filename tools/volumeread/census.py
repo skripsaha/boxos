@@ -26,68 +26,200 @@ import struct
 from . import ondisk
 from .ondisk import (SECTOR, BLOCK, SECTORS_PER_BLOCK, REGISTRY_MAGIC,
                      FILETBL_MAGIC, MPOOL_MAGIC, TUSE_MAGIC, COW_MANIFEST_MAGIC,
-                     FILE_ACTIVE, LEDGER_COPIES,
+                     FILE_ACTIVE, LEDGER_COPIES, DISKBOOK_TYPE_REDIRECT,
                      REGISTRY_DATA, REGISTRY_RECORD, FTABLE_PER_BLOCK,
-                     RunsNormal, RunsIntersect, RunsSubtract,
+                     RunsFromBits, RunsNormal, RunsIntersect, RunsSubtract,
                      RunsCount, RunsText)
-from .medium import VolumeFacts
-from .mount import Label
+from .medium import FormatVerdict, MediumError, StandOnDeed, Unreadable
+from .mount import Label, MountModel
+from .bookcensus import SEVERITY, Finding, GroundClaim, Sweep
 from .ground_owners import GROUND_OWNER_ALONE
 from .census_claims import CensusClaims
 
-SEVERITY = ("damage", "leak", "note")        # exit 1 on any damage or leak
-
-
-class Finding:
-    """One statement about the volume: a stable code, a severity, one sentence
-    with the runtime numbers in it, and the blocks it is about as runs."""
-
-    __slots__ = ("code", "severity", "text", "runs")
-
-    def __init__(self, code, severity, text, runs=()):
-        self.code, self.severity, self.text, self.runs = code, severity, text, list(runs)
-
-
-class GroundClaim:
-    """One owner's claim on the data run. An alias (the BOOT run) is not
-    exclusive: it may coincide with its partner — the one file it is — and
-    with nothing else; with no partner found, with any file."""
-
-    __slots__ = ("kind", "label", "runs", "exclusive", "partner")
-
-    def __init__(self, kind, label, runs, exclusive=True, partner=None):
-        self.kind, self.label, self.runs = kind, label, RunsNormal(runs)
-        self.exclusive, self.partner = exclusive, partner
-
-    def Allows(self, other):
-        if self.partner is not None:
-            return other.label == self.partner
-        return other.kind == "file"
-
-
 # ---------------------------------------------------------------------------
-# Who owns what, piece by piece
+# VolumeFacts — the volume read once, the way the mount reads it
 # ---------------------------------------------------------------------------
 
 
-def Sweep(claims):
-    """[(start, count, [claims])]: the data run cut where the set of claims
-    changes, keeping the pieces that somebody claims."""
-    events = []
-    for c in claims:
-        for s, n in c.runs:
-            events.append((s, 1, c))
-            events.append((s + n, -1, c))
-    events.sort(key=lambda e: (e[0], e[1]))
-    active, segs, prev = {}, [], None
-    for pos, delta, c in events:
-        if prev is not None and pos > prev and active:
-            segs.append((prev, pos - prev, list(active)))
-        active[c] = active.get(c, 0) + delta
-        if not active[c]:
-            del active[c]
-        prev = pos
-    return segs
+class VolumeFacts:
+    """Everything read off the medium, once, with nothing judged yet."""
+
+    def __init__(self, medium, forced_start):
+        self.medium = medium
+        self.stand = StandOnDeed(medium, forced_start)
+        if self.stand.format != "v1":
+            raise Unreadable(FormatVerdict(self.stand.deed))
+        self.base = self.stand.start
+        self.deed = self.stand.deed
+        self.layout = dict(self.deed["layout"])
+        self.geometry = self.deed["geometry"]
+        self._cache = {}
+        self.bad = set()          # volume blocks a read met a sector the medium cannot read in
+        self.region = self._ReadBitmapRegion()
+        self.growth, self.growth_why = self._PredictGrowth()
+        if self.growth:
+            self.layout.update(total_blocks=self.growth["blocks"],
+                               data_blocks=self.growth["data_blocks"])
+        self.D = self.layout["data_blocks"]
+        self.bits = bytes(self.region[:(self.D + 7) // 8]).ljust((self.D + 7) // 8, b"\0")
+        self.used = RunsFromBits(self.bits, self.D)
+        self._ReadLedger()
+        self._Mount()
+        self._ReadDiskBook()
+        self._ReadCow()
+
+    # --- reading ---------------------------------------------------------
+
+    def vread(self, vblock, sectors=SECTORS_PER_BLOCK):
+        try:
+            return self.medium.sectors(self.base + vblock * SECTORS_PER_BLOCK, sectors)
+        except MediumError:
+            self.bad.add(vblock)
+            return None
+        except IOError:
+            return None
+
+    def read_block(self, b):
+        """A block of the data run, or None where the medium ends. Unbounded
+        by the run on purpose: tagfs_read_block bounds nothing (tagfs.c)."""
+        if b not in self._cache:
+            self._cache[b] = self.vread(self.layout["data_block"] + b)
+        return self._cache[b]
+
+    def bad_block(self, b):
+        """Whether data-run block `b`, read already, would not read because
+        the medium answered a sector of it cannot be read — what it holds —
+        rather than refusing the read (meta_pool_mount.c WalkBadSector)."""
+        return self.layout["data_block"] + b in self.bad
+
+    def _ReadBitmapRegion(self):
+        lay = self.layout
+        raw = self.vread(lay["block_bitmap_block"], lay["block_bitmap_blocks"] * SECTORS_PER_BLOCK)
+        return raw if raw is not None else b""
+
+    def _PredictGrowth(self):
+        """volume_take_more_ground (tagfs.c), up to its commit. None and a
+        sentence when nothing is taken — and nothing is on ground the kernel
+        does not stand on."""
+        st, deed, lay = self.stand, self.deed, self.layout
+        if st.stood_on != "head" or not st.kernels:
+            return None, None
+        if st.sectors is None:
+            return None, "the ground's length is not known here, so growth is not predicted"
+        have = deed["sectors"]
+        if st.sectors <= have + SECTORS_PER_BLOCK:
+            return None, None
+        medium = self.medium.SizeSectors()
+        if medium is None:
+            return None, ("there is ground behind this volume and the medium's own "
+                          "length is not known here, so growth is not predicted")
+        if self.base + st.sectors > medium:
+            return None, None
+        vol_want = st.sectors // SECTORS_PER_BLOCK
+        if vol_want <= lay["data_block"] + 1:
+            return None, None
+        data_want = vol_want - lay["data_block"] - 1
+        cover = lay["block_bitmap_blocks"] * BLOCK * 8
+        clamped = data_want > cover
+        if clamped:
+            data_want, vol_want = cover, lay["data_block"] + cover + 1
+        if data_want <= lay["data_blocks"] or vol_want > 0xFFFFFFFF:
+            return None, None
+        ahead = RunsIntersect(RunsFromBits(self.region, len(self.region) * 8),
+                              [(lay["data_blocks"], data_want - lay["data_blocks"])])
+        if ahead or len(self.region) * 8 < data_want:
+            return None, None
+        return {"from_sectors": have, "to_sectors": vol_want * SECTORS_PER_BLOCK,
+                "blocks": vol_want, "data_blocks": data_want,
+                "more": data_want - lay["data_blocks"], "clamped": clamped,
+                "new_tail": (vol_want - 1) * SECTORS_PER_BLOCK,
+                "old_tail": deed["tail_sector"]}, None
+
+    def _ReadLedger(self):
+        self.ledgers = []
+        for c in range(LEDGER_COPIES):
+            raw = self.vread(self.layout["state_block"] + c, 1)
+            if raw is None:
+                d = ondisk.ReadLedgerCopy(b"", c)
+                d["why"] = "could not be read off the medium"
+            else:
+                d = ondisk.ReadLedgerCopy(raw, c)
+            # The Use Context's chain the copy names, read as the mount reads it
+            # (use_memory_mount.c UseMemoryJudge).
+            chain = d.get("use_chain")
+            d["use_chain_read"] = (ondisk.ReadUseChain(self.read_block, chain, self.D)
+                                   if d["ok"] and chain and chain["first"] else None)
+            self.ledgers.append(d)
+
+    def _ReadDiskBook(self):
+        db = self.layout["disk_book_block"]
+        records_sector = (db + 2) * SECTORS_PER_BLOCK
+        heads = [self.vread(db + i, 1) for i in (0, 1)]
+        self.diskbook = [ondisk.ReadDiskBookHead(h, records_sector) if h else None
+                         for h in heads]
+        # DiskBookReplay (disk_book.c DiskBookHeadTaken): the first copy of the
+        # head that is whole and describes the book the kernel knows; with none,
+        # the first whole one, to say why it is not taken.
+        whole = [h for h in self.diskbook if h is not None and h["valid"]]
+        taken = [h for h in whole if h["acceptable"]]
+        self.book = taken[0] if taken else (whole[0] if whole else None)
+        self.book_ok = bool(taken)
+        self.book_records = []
+        if self.book_ok:
+            for i in range(self.book["count"]):
+                sector = records_sector + i * ondisk.DISKBOOK_SECTORS_PER_ENTRY
+                try:
+                    raw = self.medium.sectors(self.base + sector, ondisk.DISKBOOK_SECTORS_PER_ENTRY)
+                except IOError:
+                    break                        # replay stops at a failed read (disk_book.c DiskBookReplay)
+                self.book_records.append(ondisk.ReadDiskBookEntry(raw))
+
+    def _ReadCow(self):
+        self.manifests, self.snapshots = [], set()
+        led = self.ledger or {}
+        # The manifest the Ledger the mount stands on names (cow.c
+        # CowClaimGround); its backup was never allocated by any kernel, and
+        # the kernel does not read it.
+        b = led.get("cow_manifest_block", 0)
+        if b:
+            raw = self.read_block(b)
+            m = ondisk.ReadManifest(raw) if raw is not None else None
+            self.manifests.append(("cow_manifest_block", b, m))
+            if m is not None and m["ok"]:
+                self.snapshots = {e["snapshot_id"] for e in m["entries"]}
+        # DiskBookReplay (disk_book.c) into the snapshots the manifest names; a
+        # book the mount does not take has nothing to replay.
+        self.redirects, self.stray = [], []
+        for e in self.book_records:
+            if not e["valid"] or e["type"] != DISKBOOK_TYPE_REDIRECT:
+                continue
+            if e["old_block"] == 0 or e["new_block"] == 0:
+                continue
+            item = (e["snapshot_id"], e["old_block"], e["new_block"])
+            (self.redirects if e["snapshot_id"] in self.snapshots else self.stray).append(item)
+
+    def _Mount(self):
+        """The mount's read of the volume (mount.MountModel), and what the
+        census reads off it: the chains as the mount walks them, the pool's
+        span and the records in it, the table's rows, and the Ledger copy the
+        volume stands on — carrying the next file id the mount derives."""
+        m = self.mount = MountModel(self.read_block, self.layout, self.ledgers, self.deed["boot"],
+                                    self.bad_block)
+        self.refused = m.Refused()
+        self.chains = {"registry": list(m.registry["blocks"]), "table": list(m.table["links"]),
+                       "pool": list(m.pool["chain"])}
+        self.registry = [(b, {"records": recs}) for b, recs in m.registry["taken"]]
+        self.pool = [(b, ondisk.ReadPoolBlock(raw, upto), raw) for b, raw, upto in m.pool["spans"]]
+        self.records = list(m.pool["records"])
+        self.newest = {}
+        for r in self.records:
+            if r.fid and r.unpack_ok:
+                self.newest[r.fid] = r
+        self.rows = dict(m.table["rows"])
+        self.ledger = None
+        if m.stood is not None:
+            self.ledger = dict(m.stood)
+            self.ledger["next_file_id"] = m.next_file_id
 
 
 # ---------------------------------------------------------------------------
