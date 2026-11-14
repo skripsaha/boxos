@@ -471,9 +471,8 @@ inline box::result<file> create(const char *name, const char *tagspec = "")
 // ── tag query → range of files ──────────────────────────────────────────
 // tagspec == nullptr lists every file; `without` (a comma list, nullptr for
 // none) the tags no file of the answer wears. The volume sets aside nothing of
-// its own accord — hidden is a tag like any other, and a deleted file is not
-// met at all (query_deleted) — so the asker says
-// what it leaves out (box/file.h). Compose richer (non-tag) predicates over the
+// its own accord, and a deleted file is not met at all (query_deleted); the
+// asker says what it leaves out (box/file.h). Compose richer (non-tag) predicates over the
 // result with std::views. Every match: the kernel says how many
 // there are and boxlib sizes the list to that (query_all), so no file is
 // past the end of the answer.

@@ -275,7 +275,7 @@ int Seek(const std::vector<std::string> &Words, std::vector<file_id_t> Where, bo
         Place = "among " + Plural(Where.size(), "file given", "files given");
     } else {
         file_id_t *Ids   = nullptr;
-        const int  Count = query_all(nullptr, "hidden", &Ids);
+        const int  Count = query_all(nullptr, nullptr, &Ids);
         if (Count < 0) {
             Print("seek: the volume would not say what files it has\n");
             return 1;

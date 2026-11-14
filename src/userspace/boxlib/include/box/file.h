@@ -69,8 +69,7 @@ int64_t create_everywhere(const char* filename, const char* tags);
  * none of `without` (a comma list too; NULL or "" sets nothing aside). The
  * volume sets aside no file of its own accord but the deleted ones — which
  * these never meet; query_deleted is the one question that does — so each
- * asker says what else it leaves out: a listing for the person "hidden" until
- * the person names it.
+ * asker says what else, if anything, it leaves out.
  *
  * query writes up to max_files ids and returns how many it wrote. A caller
  * that wants every match asks query_all: it learns the count from the kernel,

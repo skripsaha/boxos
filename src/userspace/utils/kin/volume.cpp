@@ -144,7 +144,7 @@ std::optional<std::string> Retag(file_id_t File, const std::vector<std::string> 
 std::expected<std::vector<file_id_t>, std::string> FilesSeen(Scope Looking)
 {
     file_id_t *Ids   = nullptr;
-    const int  Count = Looking == Scope::InContext ? query_all(nullptr, "hidden", &Ids) : query_all_everywhere(nullptr, "hidden", &Ids);
+    const int  Count = Looking == Scope::InContext ? query_all(nullptr, nullptr, &Ids) : query_all_everywhere(nullptr, nullptr, &Ids);
     if (Count < 0) return std::unexpected(std::format("the volume would not say what files it has: {}", Why(Count)));
     std::vector<file_id_t> Seen(Ids, Ids + Count);
     free(Ids);
@@ -154,7 +154,7 @@ std::expected<std::vector<file_id_t>, std::string> FilesSeen(Scope Looking)
 std::vector<box::tagfs::tag_count> TagsWorn(Scope Looking)
 {
     std::vector<box::tagfs::tag_count> Worn =
-        Looking == Scope::InContext ? box::tagfs::tags("hidden") : box::tagfs::tags_everywhere("hidden");
+        Looking == Scope::InContext ? box::tagfs::tags(nullptr) : box::tagfs::tags_everywhere(nullptr);
     std::stable_sort(Worn.begin(), Worn.end(), [](const box::tagfs::tag_count &A, const box::tagfs::tag_count &B) {
         return A.files != B.files ? A.files > B.files : Spelled(A.what) < Spelled(B.what);
     });

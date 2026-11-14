@@ -214,7 +214,7 @@ QuillVerdict QuillFidHistory(const char *const *args)
 {
     (void)args;
     file_id_t *ids = NULL;
-    int before = query_all_everywhere(NULL, "hidden", &ids);
+    int before = query_all_everywhere(NULL, NULL, &ids);
     free(ids);
     if (before < 0) {
         printf("[QUILL] fidhistory: FAIL — counting the live files answered %d\n", before);
@@ -255,7 +255,7 @@ QuillVerdict QuillFidHistory(const char *const *args)
                    spent, QUILL_FID_CYCLES, last);
     }
     int arc = anchor(0);
-    int after = query_all_everywhere(NULL, "hidden", &ids);
+    int after = query_all_everywhere(NULL, NULL, &ids);
     free(ids);
 
     if (broke != 0 || arc != 0 || after != before) {

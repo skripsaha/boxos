@@ -195,7 +195,7 @@ int QuillFindEverywhere(const char *name, file_id_t *ids, int max)
     QuillStem(name, stem, sizeof(stem));
 
     file_id_t *all = NULL;
-    int n = query_all_everywhere(stem, "hidden", &all);
+    int n = query_all_everywhere(stem, NULL, &all);
     if (n < 0)
         return n;
 
@@ -259,14 +259,14 @@ static QuillVerdict QuillLongQuery(const char *const *args)
     static char tag[QUILL_LONG_TAG_BYTES + 1];
     file_id_t  *ids = NULL;
 
-    int all = query_all_everywhere(NULL, "hidden", &ids);
+    int all = query_all_everywhere(NULL, NULL, &ids);
     free(ids);
     if (all <= 0) {
         printf("[QUILL] longquery: FAIL — a query for every file answered %d, so there is "
                "nothing to compare with\n", all);
         return QUILL_FAIL;
     }
-    int none = query_all_everywhere("quillnosuchtag", "hidden", &ids);
+    int none = query_all_everywhere("quillnosuchtag", NULL, &ids);
     free(ids);
     if (none != 0) {
         printf("[QUILL] longquery: FAIL — a query for quillnosuchtag, a tag no file wears, "
@@ -276,7 +276,7 @@ static QuillVerdict QuillLongQuery(const char *const *args)
 
     memset(tag, 'q', QUILL_LONG_TAG_BYTES);
     tag[QUILL_LONG_TAG_BYTES] = '\0';
-    int got = query_all_everywhere(tag, "hidden", &ids);
+    int got = query_all_everywhere(tag, NULL, &ids);
     free(ids);
 
     if (got == all) {

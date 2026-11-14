@@ -140,7 +140,7 @@ _Static_assert(TALLY_SHEET_PAYLOAD == VOLUME_BLOCK_SECTORS * BOOK_PAYLOAD_BYTES,
  *   (1, 0)  header: gen 1, flags ACTIVE, size 5000, created_ns
  *           1700000000000000000, modified 7 ns later, name "golden", tags 3, 5, 300
  *   (1, 1)  Parcel: DATA 1024 for 2 blocks, born at 1
- *   (2, 0)  header: gen 9, flags ACTIVE | HIDDEN (5), size 0, created_ns 1,
+ *   (2, 0)  header: gen 9, flags ACTIVE | bit 2 (5), a bit no kernel sets, size 0, created_ns 1,
  *           modified_ns 0, name "", no tags
  *   (3, 0)  header: gen 1, flags ACTIVE, size 9000, created_ns 2, modified_ns 2,
  *           name "three", tag 0

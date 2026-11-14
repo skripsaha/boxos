@@ -151,12 +151,12 @@ private:
     bool BySize = true;
 };
 
-/* The files given, or the Use Context's; each with its tags, the hidden left out. */
+/* The files given, or the Use Context's; each with its tags. */
 std::optional<std::string> Map::Gather(const file_id_t *Given, std::size_t Count)
 {
     file_id_t *Owned = nullptr;
     if (Count == 0) {
-        int Found = query_all(nullptr, "hidden", &Owned);
+        int Found = query_all(nullptr, nullptr, &Owned);
         if (Found < 0) return std::format("the volume would not list its files (error {})", -Found);
         Given = Owned;
         Count = static_cast<std::size_t>(Found);

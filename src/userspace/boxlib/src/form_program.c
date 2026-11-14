@@ -86,8 +86,7 @@ static bool called(file_id_t id, const char *name)
 }
 
 /* A name the person typed means a file in use: a deleted one is
- * not it. A hidden file is reached by its name all the same — hidden keeps it
- * out of what is listed, not out of reach. */
+ * not it. */
 static int lookup_find(BoxFormLookup *lookup, const char *name, bool everywhere, file_id_t **ids)
 {
     char       stem[STEM_MAX + 1];
@@ -110,20 +109,20 @@ static int lookup_find(BoxFormLookup *lookup, const char *name, bool everywhere,
     return kept;
 }
 
-/* `all` lists what there is: the hidden are not among it. */
+/* `all` lists what there is: every file in use, the deleted aside. */
 static int lookup_all(BoxFormLookup *lookup, bool everywhere, file_id_t **ids, bool *bounded)
 {
     *ids = NULL;
     if (everywhere) {
         *bounded = false;
-        return query_all_everywhere(NULL, "hidden", ids);
+        return query_all_everywhere(NULL, NULL, ids);
     }
 
     char   tags[256];
     size_t needed = 0;
     int    tag_count = use_get(tags, sizeof(tags), &needed);
     *bounded = tag_count > 0 || needed > 1;
-    return query_all(NULL, "hidden", ids);
+    return query_all(NULL, NULL, ids);
 }
 
 void form_lookup_volume(BoxFormLookup *lookup)

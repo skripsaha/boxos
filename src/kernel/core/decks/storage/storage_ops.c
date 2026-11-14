@@ -424,7 +424,7 @@ static int ObjRename(const ManifestOp *op,
  *
  * Every tag goes out whole, however long: its key and value are copied
  * straight out of the volume's registry into the answer. What a file is —
- * hidden, anything — is the tags it wears; the answer has no flags.
+ * a note, anything — is the tags it wears; the answer has no flags.
  *
  * Layout written into out_crate (little-endian):
  *   [u64 file_id]
@@ -509,7 +509,7 @@ static int ObjGetInfo(const ManifestOp *op,
 
     uint64_t pos = 0;
     if (rc == OK) {
-        /* What a file is — hidden, a note, anything else — is the tags it
+        /* What a file is — a note, anything else — is the tags it
          * wears, and only they say it: the answer carries no bits beside them
          * but one the volume's own word, the time a deleted file is kept until. */
         memcpy(kp + pos, &file_id,    8); pos += 8;   /* the id asked: the record's own */

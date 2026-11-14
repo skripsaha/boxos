@@ -12,23 +12,6 @@ BOX_FORM("takes optional words \"the tags to look for\"\n"
  * pushes its tags along. */
 #define FILES_NAME_COLUMN 32u
 
-/* A word that is a tag of the key `key`, bare or with a value. */
-static bool names_key(const char *word, const char *key)
-{
-    size_t length = strlen(key);
-    return strncmp(word, key, length) == 0 && (word[length] == '\0' || word[length] == ':');
-}
-
-/* What the listing leaves out: the hidden files, until the person names the
- * tag hidden among those looked for. The volume leaves out nothing of its own
- * accord; this is the listing's own word. */
-static const char *set_aside(const char *const *words, size_t word_count)
-{
-    for (size_t i = 0; i < word_count; i++)
-        if (names_key(words[i], "hidden")) return NULL;
-    return "hidden";
-}
-
 int main(void)
 {
     const char *const *words;
@@ -68,8 +51,7 @@ int main(void)
     /* Every file that answers, however many: the kernel says how many there
      * are and the list is sized to that. */
     file_id_t *s_file_ids = NULL;
-    const char *without = set_aside(words, word_count);
-    int count = query_all(query_tags && *query_tags ? query_tags : NULL, without, &s_file_ids);
+    int count = query_all(query_tags && *query_tags ? query_tags : NULL, NULL, &s_file_ids);
     free(query_tags);
 
     if (count < 0)
