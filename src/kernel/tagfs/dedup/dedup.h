@@ -37,6 +37,16 @@
  * over it). Each is passed over before an act is asked: the pass asks nothing
  * it knows will be refused.
  *
+ * ‼ A SERIES OR NOTHING. A copy is laid only as a series: DEDUP_SERIES_LEAST
+ * blocks of it in a row in its file on as many of one original in a row in
+ * the original's — a shorter one is left as it is, and so is a block alone,
+ * so no file is cut into runs SHARED of a block or two to save as much (a
+ * block of zeros has thousands of twins and no original worth a seek). And a
+ * file is never laid on itself: what repeats inside one file is its own
+ * shape, and a file laid on its own blocks only reads them out of order.
+ * No act leaves a run of a series behind it shorter than a series, where the
+ * series is long enough to share out between its acts.
+ *
  * ‼ A SERVICE OF THE HELM, A STEP A TURN (helm.h), as Engross is (engross.h):
  * a turn of a service point takes the candidates in, or reads one leaf of
  * DIGESTS, or walks a few files, or asks one act, and gives its core back. An
@@ -58,6 +68,8 @@
  *                 door shut
  */
 
+#define DEDUP_SERIES_LEAST  16u     /* blocks of a copy in a row the pass lays, and no fewer */
+
 void DedupGleanAt(uint64_t tally, uint64_t sheets);
 void DedupWeigh(void);
 bool DedupHold(bool held);
@@ -66,7 +78,8 @@ void DedupLetGo(void);
 /* What passes said, summed: the passes ended, the blocks they weighed, the
  * copies laid on an original that was itself written since the Tally before
  * (`among`) or that the walk of DIGESTS read (`book`), the blocks laid, the
- * blocks an act refused, and the blocks passed over before any act. */
+ * blocks an act refused, the blocks passed over before any act, and the
+ * copies of a series shorter than DEDUP_SERIES_LEAST left as they are. */
 typedef struct {
     uint64_t passes;
     uint64_t weighed;
@@ -75,6 +88,7 @@ typedef struct {
     uint64_t laid;
     uint64_t refused;
     uint64_t passed;
+    uint64_t scant;
 } DedupSaid;
 
 #ifdef CONFIG_VOLUME_TESTS

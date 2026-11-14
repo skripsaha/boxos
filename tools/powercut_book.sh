@@ -39,10 +39,11 @@ pc_book() {
             run_scenario overwrite; run_scenario overwrite UEFI=on STRICT=on CORES=4 MEM=4G
             run_scenario logger; run_scenario tipin STRICT=on CORES=4 MEM=4G
             run_cut spared spared; run_scenario sessions; run_cut undonecut undone; run_cut engross engross
+            run_scenario dedup
             run_replug replug CORES=4 MEM=4G; run_replug machineb
             run_firstflushmut; run_lastflushmut; run_booknextfidmut; run_stitchmut
             return 0 ;;
-        v2:overwrite|v2:logger|v2:tipin|v2:sessions)
+        v2:overwrite|v2:logger|v2:tipin|v2:sessions|v2:dedup)
             run_scenario "$@"; return 0 ;;
         v2:replug)     shift; run_replug replug "$@"; return 0 ;;
         v2:machineb)   shift; run_replug machineb "$@"; return 0 ;;
@@ -327,6 +328,69 @@ pc_engross() {
     pc_logged_cut || return 1
     pc_boots final
     pc_judge --verify engross --verify "lines:pc-l.log:$PC_CUT_LINES"
+}
+
+# dedup — §8.2, §16.7 пп.7–9: on a base whose ribbon a logger brought close to
+# the Tally it owes (pc_dedup_base), quilltest dedup writes pc-a.d of
+# PC_DEDUP_MIB mebibytes and pc-b.d of its very bytes, each in one write and
+# anchored; rounds of a logger's lines, each anchored, follow until the pass
+# after that Tally says it laid the copy on the original — an act at a time,
+# among the logger's stitches — then a second logger's anchors settle what it
+# laid, and the power goes. Every cut — before the pass, between its acts,
+# after them — shows the copy on its own blocks or on the original's at the
+# same place, block for block, both files whole after the flush their write
+# stood behind (powercut_judge_book.py Dedup) and as one state a flush left
+# them in (Whole), no block two owners' (the census); the run's end shows the
+# copy laid whole. The first cut that shows it laid in part and the first that
+# shows it laid whole are booted beside the final state, and both files read
+# back on each. Each round's log file holds the same lines as the one before:
+# their blocks match too, and are left as they are — series shorter than 16.
+PC_DEDUP_MIB=${PC_DEDUP_MIB:-1}
+PC_DEDUP_BASE_LINES=${PC_DEDUP_BASE_LINES:-320}
+PC_DEDUP_LINES=${PC_DEDUP_LINES:-30}
+PC_DEDUP_ROUNDS=${PC_DEDUP_ROUNDS:-10}
+PC_DEDUP_SAID='^\[TagFS\] Dedup after Tally [0-9]+: .* [1-9][0-9]* block\(s\) laid on the blocks they duplicate'
+
+# pc_dedup_base — the base, booted once more and a logger's
+# PC_DEDUP_BASE_LINES lines laid on it, each anchored, then switched off by
+# its power button and judged again: the ribbon past its Tally holds most of
+# the useful bytes the next Tally is owed at (settle/binder.c TallyDue; a
+# mount takes them back off the ribbon, binder_slots.c), so the recorded run
+# reaches that Tally a few rounds of lines after the copy, and its cuts stay
+# as few as a logger's of PowerCut's own.
+pc_dedup_base() {
+    local pid
+    pc_base || return 1
+    pc_boot "$PC_DIR/base.img" || { bad "$PC_NAME: the base never reached a shell the second time"; return 1; }
+    type_line "quilltest log pb $PC_DEDUP_BASE_LINES" &&
+        wait_for_line -E build/serial.log '\[QUILL\] log: (PASS|FAIL) — ' "$WAIT_QUIET_SLOW_S" &&
+        grep -aqE '\[QUILL\] log: PASS' build/serial.log && wait_for_quiet "$BOOT_BURST_QUIET_S" ||
+        { bad "$PC_NAME: the base's logger did not lay its $PC_DEDUP_BASE_LINES lines: $(grep -aoE '\[QUILL\] log: [A-Z]+ — [^,]*' build/serial.log | tail -1)"; return 1; }
+    pid=$(cat build/qemu.pid)
+    mon_raw system_powerdown && pc_gone "$pid" || { bad "$PC_NAME: the base would not switch off by its power button"; return 1; }
+    cp build/serial.log "$PC_DIR/base.serial.log"
+    python3 "$VR" "$PC_DIR/base.img" check --json >"$PC_DIR/base.check.json" ||
+        { bad "$PC_NAME: the base is not consistent after its logger"; return 1; }
+    echo "base: booted again, a logger's $PC_DEDUP_BASE_LINES lines laid on it ($(grep -acE '^\[TagFS\] Tally [0-9]+ is written' "$PC_DIR/base.serial.log") Tally(ies) written meanwhile), switched off by its power button; check says consistent" >>"$PC_DIR/facts.txt"
+}
+
+pc_dedup() {
+    local mark r=0
+    pc_dedup_base && pc_logged || return 1
+    pc_step dedup "quilltest dedup pc $PC_DEDUP_MIB" '\[QUILL\] dedup: (PASS|FAIL) — ' || return 1
+    pc_said dedup
+    mark=$(wc -l < build/serial.log)
+    while [ $r -lt "$PC_DEDUP_ROUNDS" ] && ! tail -n +$((mark + 1)) build/serial.log | grep -aqE "$PC_DEDUP_SAID"; do
+        r=$((r + 1))
+        pc_step "log$r" "quilltest log p$r $PC_DEDUP_LINES" '\[QUILL\] log: (PASS|FAIL) — ' || return 1
+    done
+    wait_for_line -E build/serial.log "$PC_DEDUP_SAID" "$WAIT_QUIET_S" $((mark + 1))
+    chk $? "$PC_NAME: the pass after the Tally $r round(s) of $PC_DEDUP_LINES lines brought lays the copy on its original ($(tail -n +$((mark + 1)) build/serial.log | tr -d '\r' | grep -aoE '\[TagFS\] Dedup after Tally [0-9]+: .* refused' | head -1 | cut -c1-260))"
+    pc_step settle "quilltest log pd 2" '\[QUILL\] log: (PASS|FAIL) — ' || return 1
+    pc_cut_power && pc_record || return 1
+    PC_ASK_CMD="quilltest dedup pc"; PC_ASK_ACK='\[QUILL\] dedup: (PASS|FAIL)'; PC_FINAL_CMD=""
+    pc_boots dedup:pc-a.d:pc-b.d
+    pc_judge --verify dedup:pc-a.d:pc-b.d
 }
 
 # ---------------------------------------------------------------------------

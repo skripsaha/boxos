@@ -48,7 +48,11 @@
 # HEIRLOOM_FORMAT=v2 makes the heirloom a book: commit N's volume laid down
 # with VOLUME_FORMAT=v2 and this tree's disk too — kernel N's book read and
 # written by kernel N+1, and back (receipt (а) of step 2.3: the kernel of 2.3j
-# and the next). Unset, format v1 — named to every make of the run, commit N's
+# and the next). On a book kernel N+1 also lays a copy on its original: two
+# files of one content written by N's own programs, and the Tally a logger
+# owes, after which N+1's Dedup lays the second on the first (spec_v2 §8.2) —
+# so the way back meets runs SHARED, and a kernel N from before Dedup stands
+# the book under glass for them (receipt (d) of Dedup, commit 09a3321b). Unset, format v1 — named to every make of the run, commit N's
 # and this tree's alike, never left to the format a build makes when nobody
 # names one (spec_v2 §16.5 п.22): commit b9962f55's volume, the last kernel's
 # before the book, is receipt (в) — the frozen path read on.
@@ -79,6 +83,26 @@ HEIRLOOM_IMG="$SCRATCH/heirloom.img"         # the volume kernel N writes
 HEIRLOOM_BOOT="$SCRATCH/heirloom.boot.img"   # this tree's disk, kernel N+1 on it
 HEIRLOOM_MARK="logcheck mutation: the boarding pass names the heirloom volume"
 HEIRLOOM_PERSIST="_persist_test"             # what `persist write` names its file
+
+# The state the volume's own programs write on every session — the shell's
+# history, the gardener's plants: each machine's session writes them again,
+# so they are held to their ids, never to their bytes.
+HEIRLOOM_SESSION_FILES="history garden.plants"
+
+# The copy kernel N+1 lays on a book (heirloom_copies): two files of one
+# mebibyte written by kernel N's quilltest big — whose bytes are a function of
+# their place alone (quilltest_book.c QuillBigByte), so the second is the first
+# again and no two blocks inside one are alike — and rounds of a logger's
+# lines, each anchored, owing the Tally after which Dedup lays the second on
+# the first: about 400 lines on a volume as mkfs laid it, rounds so the shell
+# answers between them and the machine never goes quiet for long.
+HEIRLOOM_COPY_A=hla                          # quilltest big NAME makes NAME-b.d
+HEIRLOOM_COPY_B=hlb
+HEIRLOOM_COPY_LOG=hl                         # quilltest log NAME makes NAME-l.log, one a round
+HEIRLOOM_COPY_BLOCKS=256
+HEIRLOOM_COPY_LINES=${HEIRLOOM_COPY_LINES:-100}
+HEIRLOOM_COPY_ROUNDS=${HEIRLOOM_COPY_ROUNDS:-6}
+HEIRLOOM_DEDUP_SAID='\[TagFS\] Dedup after Tally [0-9]+: .* [1-9][0-9]* block\(s\) laid on the blocks they duplicate'
 
 # Commit N's worktree is the run's own: it goes when the run does, whichever
 # way the run ends. `worktree remove --force` takes its registration with it,
@@ -160,7 +184,8 @@ PASS_EOF
 # the kernel will count; heirloom.NAME.slipped, on a book, the id of every file
 # whose last block carries a Slip, one a line — no file at all when the census
 # gave no account of Slips (format v1, or no census read), so an account never
-# taken is not read as one that found none.
+# taken is not read as one that found none; heirloom.NAME.shared, on a book,
+# the id of every file a run of which is SHARED, one a line, the same way.
 heirloom_census() {
     python3 tools/volume-read.py "$1" check --json >"$SCRATCH/heirloom.$2.json" 2>&1
     local rc=$?
@@ -184,17 +209,64 @@ if isinstance(slipped, list):
         out.writelines("%s\n" % s["fid"] for s in slipped)
 elif os.path.exists(sys.argv[2] + ".slipped"):
     os.remove(sys.argv[2] + ".slipped")
+if d.get("format") == "v2":
+    with open(sys.argv[2] + ".shared", "w") as out:
+        out.writelines("%s\n" % f["fid"] for f in sorted(d.get("files", []), key=lambda f: f["fid"])
+                       if f.get("visible") and any(r[0] == "shared" for r in f.get("runs", [])))
+elif os.path.exists(sys.argv[2] + ".shared"):
+    os.remove(sys.argv[2] + ".shared")
 PY
     return $rc
 }
 
-# heirloom_slipped NAME — the ids heirloom.NAME.slipped holds, in a row; "none"
-# when census NAME found no Slip, "unread" when it gave no account of them.
-heirloom_slipped() {
-    [ -f "$SCRATCH/heirloom.$1.slipped" ] || { echo unread; return; }
+# heirloom_ids NAME WHAT — the ids heirloom.NAME.WHAT (slipped, shared) holds,
+# in a row; "none" when census NAME found none, "unread" when it gave no
+# account of them.
+heirloom_ids() {
+    [ -f "$SCRATCH/heirloom.$1.$2" ] || { echo unread; return; }
     local ids
-    ids=$(paste -sd' ' - < "$SCRATCH/heirloom.$1.slipped")
+    ids=$(paste -sd' ' - < "$SCRATCH/heirloom.$1.$2")
     echo "${ids:-none}"
+}
+
+# heirloom_copies — kernel N+1 lays a copy on the heirloom: it is a book, and
+# kernel N's quilltest — the programs run on the heirloom are N's — carries
+# `big` and `log` to write one with.
+heirloom_copies() {
+    [ "$HEIRLOOM_FORMAT" = v2 ] &&
+        git -C "$ROOT" grep -qF '{ "big", "NAME [MIB]"' "$HEIRLOOM_FROM" -- src/userspace/apps/quilltest.c &&
+        git -C "$ROOT" grep -qF '{ "log", "NAME LINES"' "$HEIRLOOM_FROM" -- src/userspace/apps/quilltest.c
+}
+
+# heirloom_laid LOG — kernel N+1's Dedup laid the copy on its original: its
+# pass says in LOG it laid every block of it, and the census of the heirloom it
+# left finds the copy on the original's blocks, block for block, by runs
+# SHARED, and the original on its own.
+heirloom_laid() {
+    local laid found
+    laid=$(grep -aoE "$HEIRLOOM_DEDUP_SAID" "$1" | grep -oE '[0-9]+ block\(s\) laid' | awk '{ n += $1 } END { print n + 0 }')
+    [ "$laid" = "$HEIRLOOM_COPY_BLOCKS" ]
+    chk $? "heirloom: kernel N+1's Dedup laid $HEIRLOOM_COPY_B-b.d on $HEIRLOOM_COPY_A-b.d — $laid of $HEIRLOOM_COPY_BLOCKS block(s) laid ($(grep -aoE '\[TagFS\] Dedup after Tally [0-9]+: [^;]*' "$1" | head -1))"
+    found=$(python3 - "$SCRATCH/heirloom.n1.json" "$HEIRLOOM_COPY_A-b.d" "$HEIRLOOM_COPY_B-b.d" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except ValueError:
+    d = {}
+files = {f.get("name"): f for f in d.get("files", []) if f.get("visible")}
+
+def Lies(f):
+    return [(k, s + i) for k, s, c, *_ in (f or {}).get("runs", []) if k != "hole" for i in range(c)]
+
+la, lb = Lies(files.get(sys.argv[2])), Lies(files.get(sys.argv[3]))
+ka, kb = sorted({k for k, _x in la}), sorted({k for k, _x in lb})
+held = la and [x for _k, x in la] == [x for _k, x in lb] and ka == ["data"] and kb == ["shared"]
+print("%s %u block(s) of the original, %u of the copy, %u at the same place; the original's runs %s, the copy's %s"
+      % ("ok" if held else "bad", len(la), len(lb), sum(1 for x, y in zip(la, lb) if x[1] == y[1]), ka, kb))
+PY
+)
+    [ "${found%% *}" = ok ]
+    chk $? "heirloom: the census of the heirloom kernel N+1 left finds the copy on the original's blocks, block for block, by runs SHARED — ${found#* }"
 }
 
 # The shell's prompt is read from the LINES, never from the last two bytes of
@@ -246,7 +318,9 @@ heirloom_type() {
 
 # heirloom_machine TAG DISK STICK CMD... — boot DISK (with STICK on USB, when
 # one is named), wait for a volume to be mounted and its shell to stand at the
-# prompt, type each CMD, halt through `bye`, and keep the log as
+# prompt, type each CMD, wait for the line HEIRLOOM_BEFORE_BYE names when it
+# names one (what a program asked goes on after it answered; whether the line
+# came is the caller's to judge), halt through `bye`, and keep the log as
 # serial.heirloom_TAG.log. 0 when the halt came to one of its ends
 # (STAND_HALT_ENDS), whichever — its sync written, under glass, the medium
 # taking what it was given without the volume's records, or the volume not
@@ -276,6 +350,8 @@ heirloom_machine() {
             from=$(wc -l < build/serial.log)
             heirloom_type "$cmd" "$from" && heirloom_prompt "$(heirloom_echo "$cmd" "$from")" || { ran=1; break; }
         done
+        [ $ran = 0 ] && [ -n "${HEIRLOOM_BEFORE_BYE:-}" ] &&
+            wait_for_line -E build/serial.log "$HEIRLOOM_BEFORE_BYE" "$WAIT_QUIET_S"
         from=$(wc -l < build/serial.log)
         if [ $ran = 0 ] && ! { heirloom_type "bye" "$from" &&
                                wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S"; }; then
@@ -336,6 +412,14 @@ heirloom_untouched() {
 # heirloom_fid LOG WORD — the file id persist's WORD line in LOG names: WROTE,
 # the file it made; found, the file it read back. Empty when it said neither.
 heirloom_fid() { grep -aoE "\[PERSIST\] $2 fid=[0-9]+" "$1" | head -1 | grep -oE '[0-9]+$'; }
+
+# heirloom_kept NAME ERE — the files census NAME shows but those whose line
+# ERE matches, each as "name fid sha256" — the session's own files
+# (HEIRLOOM_SESSION_FILES) as "name fid" alone.
+heirloom_kept() {
+    grep -vE "$2" "$SCRATCH/heirloom.$1.files" | awk -v own=" $HEIRLOOM_SESSION_FILES " \
+        'index(own, " " $1 " ") { print $1, $2; next } { print }'
+}
 
 # heirloom_persist NAME — the ids of every persist file census NAME shows, in a
 # row; "none" when it shows none.
@@ -425,7 +509,7 @@ heirloom_unwritten() {
 
 # Kernel N+1 is handed the heirloom on a stick, reads it, and writes on it.
 heirloom_handed() {
-    local L="$SCRATCH/serial.heirloom_n1.log" rc count tree seat own kept found handed
+    local L="$SCRATCH/serial.heirloom_n1.log" rc count tree seat own kept found handed said="" mine cmds r
     echo "-- kernel N+1: this tree, its boarding pass naming the heirloom $HEIRLOOM_UUID --"
     heirloom_pass_on "$HEIRLOOM_UUID"
     STAND_FORMAT=$HEIRLOOM_FORMAT build
@@ -436,10 +520,20 @@ heirloom_handed() {
     fi
     count=$(cat "$SCRATCH/heirloom.n.count")
     own=$(deed_uuid "$HEIRLOOM_BOOT") || own=""
+    cmds=("persist verify" "persist write")
+    if heirloom_copies; then
+        cmds+=("quilltest big $HEIRLOOM_COPY_A 1" "quilltest big $HEIRLOOM_COPY_B 1")
+        for r in $(seq 1 "$HEIRLOOM_COPY_ROUNDS"); do
+            cmds+=("quilltest log $HEIRLOOM_COPY_LOG$r $HEIRLOOM_COPY_LINES")
+        done
+        said=$HEIRLOOM_DEDUP_SAID
+    elif [ "$HEIRLOOM_FORMAT" = v2 ]; then
+        echo "  (kernel N+1 lays no copy on the heirloom: kernel N's quilltest, commit $HEIRLOOM_FROM, has no big and log to write one with)"
+    fi
 
     heirloom_untouched "the host, between the machines,"
     handed=$(heirloom_sha)
-    STAND_FORMAT=$HEIRLOOM_FORMAT heirloom_machine n1 "$HEIRLOOM_BOOT" "$HEIRLOOM_IMG" "persist verify" "persist write"; rc=$?
+    STAND_FORMAT=$HEIRLOOM_FORMAT HEIRLOOM_BEFORE_BYE=$said heirloom_machine n1 "$HEIRLOOM_BOOT" "$HEIRLOOM_IMG" "${cmds[@]}"; rc=$?
     heirloom_pass_off
     [ $rc = 2 ] && return 1
     heirloom_let_go "kernel N+1"
@@ -468,10 +562,11 @@ heirloom_handed() {
     heirloom_untouched "the host's census after $HEIRLOOM_LEFT_BY"
     [ -n "$HEIRLOOM_N1_FID" ] && [ "$(heirloom_persist n1)" = "$HEIRLOOM_N1_FID" ]
     chk $? "heirloom: and it carries the file kernel N+1 wrote, and only it — $HEIRLOOM_PERSIST fid(s) $(heirloom_persist n1), kernel N+1's ${HEIRLOOM_N1_FID:-unread}"
-    kept=$(diff <(grep -v "^$HEIRLOOM_PERSIST " "$SCRATCH/heirloom.n.files") \
-                <(grep -v "^$HEIRLOOM_PERSIST " "$SCRATCH/heirloom.n1.files") | grep -c '^[<>]')
+    [ -z "$said" ] || heirloom_laid "$L"
+    mine="^($HEIRLOOM_PERSIST|$HEIRLOOM_COPY_A-b\.d|$HEIRLOOM_COPY_B-b\.d|$HEIRLOOM_COPY_LOG[0-9]+-l\.log) "
+    kept=$(diff <(heirloom_kept n "$mine") <(heirloom_kept n1 "$mine") | grep -c '^[<>]')
     [ "$kept" = 0 ]
-    chk $? "heirloom: every file kernel N left is there under its id, byte for byte, but the one kernel N+1 wrote again ($kept line(s) differ)"
+    chk $? "heirloom: every file kernel N left is there under its id, byte for byte, but the ones kernel N+1 wrote and the session's own ($HEIRLOOM_SESSION_FILES, by id) ($kept line(s) differ)"
 }
 
 # Kernel N boots the heirloom kernel N+1 left, and reads what N+1 wrote — then
@@ -516,9 +611,9 @@ heirloom_back() {
     heirloom_census "$HEIRLOOM_IMG" back
     chk $? "heirloom: the heirloom kernel N left the second time is consistent (volume-read check)"
     heirloom_untouched "the host's census after $HEIRLOOM_LEFT_BY"
-    kept=$(diff "$SCRATCH/heirloom.n1.files" "$SCRATCH/heirloom.back.files" | grep -c '^[<>]')
+    kept=$(diff <(heirloom_kept n1 '^$') <(heirloom_kept back '^$') | grep -c '^[<>]')
     [ "$kept" = 0 ]
-    chk $? "heirloom: every file kernel N+1 left is there under its id, byte for byte, once kernel N has been on it ($kept line(s) differ)"
+    chk $? "heirloom: every file kernel N+1 left is there under its id, byte for byte — the session's own ($HEIRLOOM_SESSION_FILES) by id — once kernel N has been on it ($kept line(s) differ)"
 }
 
 # heirloom_back_glass LOG RC WHY LEFT — kernel N, the way back (its LOG, its
@@ -531,8 +626,11 @@ heirloom_back() {
 # reads, and the sentence is the one N chose for it. A Slip in fid X's last
 # block (ribbon_transcribe.c, RibbonCarriedSaid) is N+1's when the census of
 # the heirloom N+1 left finds one there and the census of the volume N left
-# found none; a reason no census here gives an account of is a FAIL — the
-# glass not shown to be N+1's doing — until the receipt is taught to hold it.
+# found none; so is a run of fid X carrying an extension (tally_leaves.c and
+# ribbon_transcribe.c of a kernel from before Dedup) when the census after
+# N+1 finds a run SHARED in fid X and the one after N found none; a reason no
+# census here gives an account of is a FAIL — the glass not shown to be N+1's
+# doing — until the receipt is taught to hold it.
 #
 # And under glass nothing is written, measured three ways: the halt says it
 # wrote nothing; no door that writes was reached (a STRICT kernel N panics at
@@ -540,18 +638,23 @@ heirloom_back() {
 # sha256 is still LEFT, the one kernel N+1 left, taken before the host read a
 # byte of it.
 heirloom_back_glass() {
-    local why fid doors
+    local why fid ext doors
     while IFS= read -r why; do
         [ -n "$why" ] || continue
         fid=$(printf '%s\n' "$why" | sed -nE "s/^fid ([0-9]+)'s last block carries a Slip( .*)?$/\1/p")
+        ext=$(printf '%s\n' "$why" | sed -nE "s/^a run of fid ([0-9]+) carries an extension this kernel cannot carry on( .*)?$/\1/p")
         if [ "$HEIRLOOM_FORMAT" != v2 ]; then
             bad "heirloom: kernel N stood the volume kernel N+1 left under glass, and format v1's path is frozen — a v1 volume this tree wrote is one kernel N carries on — $why"
-        elif [ -z "$fid" ]; then
-            bad "heirloom: kernel N stood the book kernel N+1 left under glass for what no census here gives an account of — not shown to be kernel N+1's doing — $why"
-        else
+        elif [ -n "$fid" ]; then
             [ -f "$SCRATCH/heirloom.n.slipped" ] && grep -qx "$fid" "$SCRATCH/heirloom.n1.slipped" 2>/dev/null &&
                 ! grep -qx "$fid" "$SCRATCH/heirloom.n.slipped"
-            chk $? "heirloom: kernel N stood the book under glass for the Slip kernel N+1 laid in fid $fid's last block, which the volume kernel N left did not carry (spec_v2 §16.1 п.2; Slips in fid(s) $(heirloom_slipped n1) after N+1, $(heirloom_slipped n) after N) — $why"
+            chk $? "heirloom: kernel N stood the book under glass for the Slip kernel N+1 laid in fid $fid's last block, which the volume kernel N left did not carry (spec_v2 §16.1 п.2; Slips in fid(s) $(heirloom_ids n1 slipped) after N+1, $(heirloom_ids n slipped) after N) — $why"
+        elif [ -n "$ext" ]; then
+            [ -f "$SCRATCH/heirloom.n.shared" ] && grep -qx "$ext" "$SCRATCH/heirloom.n1.shared" 2>/dev/null &&
+                ! grep -qx "$ext" "$SCRATCH/heirloom.n.shared"
+            chk $? "heirloom: kernel N stood the book under glass for the run SHARED kernel N+1's Dedup laid in fid $ext, which the volume kernel N left did not carry (spec_v2 §8.2, §16.1 п.2; runs SHARED in fid(s) $(heirloom_ids n1 shared) after N+1, $(heirloom_ids n shared) after N) — $why"
+        else
+            bad "heirloom: kernel N stood the book kernel N+1 left under glass for what no census here gives an account of — not shown to be kernel N+1's doing — $why"
         fi
     done <<< "$3"
     [ "$2" = 0 ] && grep -aqE '^\[HALT\] the volume on seat [0-9]+ stands under glass: this kernel wrote nothing to it' "$1"

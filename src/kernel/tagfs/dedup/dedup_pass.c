@@ -209,8 +209,8 @@ static const DedupMember* DedupOriginal(const DedupMember* g, uint64_t count, co
 }
 
 /* A digest's members held to their owners: every block of Commonplace but the
- * original, its file's plain ground nothing bars being laid, a copy laid on
- * the original; the rest passed over. */
+ * original, its file's plain ground nothing bars being laid and its file not
+ * the original's, a copy laid on the original; the rest passed over. */
 static void DedupGroupPaired(const DedupMember* g, uint64_t count)
 {
     const DedupOwner*  to = NULL;
@@ -219,7 +219,7 @@ static void DedupGroupPaired(const DedupMember* g, uint64_t count)
         const DedupOwner* o = DedupOwnerOf(&s_pass.owners, g[k].block);
         if (&g[k] == t || g[k].old)
             continue;
-        if (!t || !o || o->kind != STRIP_DATA || (o->bars & DEDUP_BAR_COPY)) {
+        if (!t || !o || o->kind != STRIP_DATA || (o->bars & DEDUP_BAR_COPY) || o->fid == to->fid) {
             s_pass.said.passed++;
             continue;
         }
@@ -233,8 +233,41 @@ static void DedupGroupPaired(const DedupMember* g, uint64_t count)
     }
 }
 
+/* Whether pair `q` goes on the series pair `p` ends: the copy's next block of
+ * its file laid on the original's next block of its own. */
+static bool DedupPairFollows(const DedupPair* p, const DedupPair* q)
+{
+    return q->fid == p->fid && q->at == p->at + 1u && q->onto == p->onto && q->onto_at == p->onto_at + 1u;
+}
+
+/* The pairs of the series that begins at pair `first`. */
+static uint64_t DedupSeriesFrom(uint64_t first)
+{
+    uint64_t n = 1;
+    while (first + n < s_pass.npair && DedupPairFollows(&s_pass.pair[first + n - 1u], &s_pass.pair[first + n]))
+        n++;
+    return n;
+}
+
+/* Every series shorter than DEDUP_SERIES_LEAST left as it is (dedup.h): its
+ * pairs out, counted. */
+static void DedupSeriesKept(void)
+{
+    uint64_t kept = 0;
+    for (uint64_t i = 0, n = 0; i < s_pass.npair; i += n) {
+        n = DedupSeriesFrom(i);
+        if (n < DEDUP_SERIES_LEAST) {
+            s_pass.said.scant += n;
+            continue;
+        }
+        memmove(&s_pass.pair[kept], &s_pass.pair[i], sizeof(DedupPair) * n);
+        kept += n;
+    }
+    s_pass.npair = kept;
+}
+
 /* Every copy paired with its original, in the order of the copies' files and
- * their blocks: false with no memory. */
+ * their blocks, and only those of a series kept: false with no memory. */
 static bool DedupPairsMade(void)
 {
     const DedupMember* m = s_pass.member;
@@ -248,6 +281,7 @@ static bool DedupPairsMade(void)
         DedupGroupPaired(&m[i], j - i);
     }
     KSort(s_pass.pair, s_pass.npair, sizeof(DedupPair), PairOrder, NULL);
+    DedupSeriesKept();
     return true;
 }
 
@@ -284,11 +318,12 @@ static void DedupPassSay(void)
         ksnprintf(walk, sizeof(walk), ", stopped there for this pass (error %u)", (unsigned)s_pass.walk_rc);
     kprintf("[TagFS] Dedup after Tally %llu: %llu block(s) written since the Tally before weighed; %llu matched to "
             "one written beside it and %llu to one the book's DIGESTS names; %llu block(s) laid on the blocks they "
-            "duplicate, %llu passed over (a file kept or wearing dedup:off, a block no file names), %llu refused%s; "
-            "the walk of DIGESTS at block %llu%s, %llu block(s) kept in Commonplace\n",
+            "duplicate, %llu in series shorter than %u left as they are, %llu passed over (a file kept or wearing "
+            "dedup:off, a copy in its original's own file, a block no file names), %llu refused%s; the walk of "
+            "DIGESTS at block %llu%s, %llu block(s) kept in Commonplace\n",
             (unsigned long long)s_pass.tally, (unsigned long long)s->weighed, (unsigned long long)s->among, (unsigned long long)s->book,
-            (unsigned long long)s->laid, (unsigned long long)s->passed, (unsigned long long)s->refused, why,
-            (unsigned long long)s_cursor, walk, (unsigned long long)CommonplaceCount());
+            (unsigned long long)s->laid, (unsigned long long)s->scant, DEDUP_SERIES_LEAST, (unsigned long long)s->passed,
+            (unsigned long long)s->refused, why, (unsigned long long)s_cursor, walk, (unsigned long long)CommonplaceCount());
 }
 
 /* The pass ended: Commonplace past what it laid and what the walk went round
@@ -398,23 +433,17 @@ static bool DedupOwnersTurn(void)
     return true;
 }
 
-/* How many pairs from `first` one act lays: the copy's blocks one after
- * another in its file on the original's one after another in its own, as many
- * as the seat takes in one command — a file laid on itself on blocks outside
- * the range. */
+/* How many pairs from `first` one act lays: of the series they begin, as many
+ * as the seat takes in one command — fewer where the rest would then be
+ * shorter than a series and the series can give both their share. */
 static uint64_t DedupAskRun(uint64_t first)
 {
-    const DedupPair* p    = &s_pass.pair[first];
-    uint64_t         most = TagFSRunBlocks(), n = 1;
-    while (first + n < s_pass.npair && n < most) {
-        const DedupPair* q = &s_pass.pair[first + n];
-        if (q->fid != p->fid || q->at != p->at + n || q->onto != p->onto || q->onto_at != p->onto_at + n)
-            break;
-        if (p->fid == p->onto && p->at + n + 1u > p->onto_at && p->onto_at + n + 1u > p->at)
-            break;
-        n++;
-    }
-    return n;
+    uint64_t rest = DedupSeriesFrom(first), most = TagFSRunBlocks();
+    if (rest <= most)
+        return rest;
+    if (rest - most < DEDUP_SERIES_LEAST && rest >= 2u * DEDUP_SERIES_LEAST)
+        return rest - DEDUP_SERIES_LEAST;
+    return most;
 }
 
 /* One act: the copies of the next run laid on their original. The ribbon's

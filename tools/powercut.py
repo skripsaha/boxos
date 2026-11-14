@@ -16,7 +16,7 @@ it had made durable:
     powercut.py checks PLAN BASE LOG BASECHECK [--jobs N] [--lies] [--digests MEMO] > CUTS
     powercut.py lies LIST > LIES
     powercut.py lieboots DIR --sample N --seed HEX > LIEBOOTS
-    powercut.py boots DIR --picks final|prefixes:STEP --sample N --seed HEX [--by-kind] > BOOTS
+    powercut.py boots DIR --picks final|prefixes:STEP|dedup:A:B --sample N --seed HEX [--by-kind] > BOOTS
     powercut.py judge DIR --path PATH [--caveat KEY=NAME]... [--verify KIND] [--hogged] [--waited S]
                       [--by-kind]
     powercut.py settlecut DIR --path PATH [--caveat KEY=NAME]...
@@ -328,6 +328,11 @@ def Compact(cid, rc, out, err, base_files, base_names):
             "base_changed": changed,
             "new_files": [[f["fid"], f.get("name"), f["state"], f["visible"], f.get("size"), f.get("sha256")]
                           for f in d["files"] if (f["fid"], f.get("name")) not in base_names]})
+    if out["format"] == "v2":
+        # Where the files the base did not have lie, run by run — a book's file
+        # may share its ground with another's (powercut_judge_book.py Dedup).
+        out["new_runs"] = [[f["fid"], [r[:3] for r in f.get("runs", [])]] for f in d["files"]
+                           if f["visible"] and (f["fid"], f.get("name")) not in base_names]
     return out
 
 
@@ -602,6 +607,10 @@ def CmdBoots(a):
         Add(run.final, "the final state")
     elif a.picks.startswith("prefixes:"):
         for cid, why in PrefixPicks(run, a.picks[len("prefixes:"):]):
+            Add(cid, why)
+    elif a.picks.startswith("dedup:"):
+        import powercut_judge_book
+        for cid, why in powercut_judge_book.DedupPicks(run, a.picks[len("dedup:"):]):
             Add(cid, why)
     for s in run.steps:
         f = run.AckFlush(s) if s["durable"] else None

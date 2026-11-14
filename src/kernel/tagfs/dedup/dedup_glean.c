@@ -241,6 +241,7 @@ void DedupPassSaid(const DedupSaid* said)
     s_stand.laid    += said->laid;
     s_stand.refused += said->refused;
     s_stand.passed  += said->passed;
+    s_stand.scant   += said->scant;
     TagFSLockDrop(&s_lock);
 }
 

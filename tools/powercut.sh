@@ -498,7 +498,7 @@ pc_caveats() {
     [ "$PC_FORMAT" = v2 ] || for code in $codes; do echo "code:$code=$base:$code"; done
     # A book's own oracles, each with the defect it stands for (stand_caveat.sh).
     [ "$PC_FORMAT" = v1 ] || printf '%s\n' files:whole=book:whole order=book:order lines:pc-l.log=book:lines \
-        slip:blocks=book:slip tipin=book:tipin spared=book:spared engross=book:engross chain=book:chain \
+        slip:blocks=book:slip tipin=book:tipin spared=book:spared engross=book:engross chain=book:chain dedup=book:dedup \
         blot:owners=book:owners smudge:owners=book:owners blot:proven=book:lost smudge:said=book:lost \
         smudge:wiped=book:wiped blot:boots=book:boots smudge:boots=book:boots
     # On a fixed medium a book's ribbon keeps the medium's own atom, and a
@@ -984,7 +984,7 @@ case "${1:-}" in
     *)
         echo "usage: [VOLUME_FORMAT=v2] $0 noanchor|nextfid|hog|halt|race|settlecut|chaingrow [MACHINE KEYS...]"
         echo "       [VOLUME_FORMAT=v2] $0 noanchormut|nextfidmut|poolmut|flushmut|selftest|all"
-        echo "       VOLUME_FORMAT=v2 $0 overwrite|logger|tipin|spared|sessions|undonecut|engross|replug|machineb [MACHINE KEYS...]"
+        echo "       VOLUME_FORMAT=v2 $0 overwrite|logger|tipin|spared|sessions|undonecut|engross|dedup|replug|machineb [MACHINE KEYS...]"
         echo "       VOLUME_FORMAT=v2 $0 firstflushmut|lastflushmut|booknextfidmut|stitchmut"
         exit 2 ;;
 esac

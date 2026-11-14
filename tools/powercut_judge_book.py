@@ -20,6 +20,9 @@ the run that Judge reads.
     SlipBlocks  C21: a logger's tail rides its stitches as a Slip — the file
                 takes a block of data as its lines fill one, and once more for
                 the Engross a Tally owes, never one a line.
+    Dedup       §8.2: the power in the middle of the pass that lays a copy on
+                its original — every cut shows the copy on its own blocks or
+                on the original's, block for block, and never elsewhere.
 """
 
 import hashlib
@@ -309,3 +312,109 @@ def Undone(d, cid, r1, r2):
              if now.get(fid) != was.get(fid)]
     return wrong + ["fid %d rolled back does not wear settle:undone (%s)" % (fid, tags.get(fid)) for fid in sorted(fids)
                     if "settle:undone" not in tags.get(fid, [])]
+
+
+# ---------------------------------------------------------------------------
+# Dedup: the power in the middle of the pass that lays a copy on its original
+# ---------------------------------------------------------------------------
+
+
+def Lies(r, name):
+    """Where a cut's file NAME, one the base did not have, lies — [(kind,
+    block)] in the file's order, holes left out — or None when the cut shows
+    no such file."""
+    fid = next((f[0] for f in r.get("files", []) if f[1] == name), None)
+    runs = next((x[1] for x in r.get("new_runs", []) if x[0] == fid), None)
+    if fid is None or runs is None:
+        return None
+    return [(kind, start + i) for kind, start, count in runs if kind != "hole" for i in range(count)]
+
+
+def DedupStates(run, arg):
+    """Every mountable cut of the run in plan order, as (id, state, what it
+    shows otherwise or None), for original A and copy B (`A:B`, their names):
+    `none` while B is not whole, then `own`, `part` or `laid` as none, some or
+    all of B's blocks lie on A's at the same place. A lies on its own ground in
+    every cut; B's own blocks are where the first cut that shows it whole on
+    its own puts them, and B never lies anywhere else."""
+    a, b = arg.split(":")
+    rows, own = [], None
+    for cid in Mountable(run):
+        la, lb = Lies(run.results[cid], a), Lies(run.results[cid], b)
+        if lb and la is None:
+            rows.append((cid, "none", "%s shows and %s does not" % (b, a)))
+            continue
+        if not lb or len(lb) < len(la):
+            rows.append((cid, "none", None))
+            continue
+        if own is None and all(k == "data" for k, _x in lb):
+            own = [x for _k, x in lb]
+        wrong = []
+        if any(k != "data" for k, _x in la):
+            wrong.append("%s lies otherwise than on its own ground: %s" % (a, sorted({k for k, _x in la})))
+        if len(lb) != len(la):
+            wrong.append("%s has %d block(s) and %s %d" % (b, len(lb), a, len(la)))
+        elsewhere = [i for i, (k, x) in enumerate(lb[:len(la)]) if not (
+            (k == "shared" and x == la[i][1]) or (k == "data" and own is not None and x == own[i]))]
+        if elsewhere:
+            i = elsewhere[0]
+            wrong.append("%d of %s's blocks lie on neither its own nor %s's at the same place, first block %d of "
+                         "it on %d (%s)" % (len(elsewhere), b, a, i, lb[i][1], lb[i][0]))
+        laid = sum(1 for k, _x in lb if k == "shared")
+        rows.append((cid, "own" if laid == 0 else "laid" if laid == len(lb) else "part",
+                     "; ".join(wrong) or None))
+    return rows
+
+
+def DedupPicks(run, arg):
+    """For powercut.py boots: the final state, and the first cut that shows
+    the copy laid in part and the first that shows it laid whole."""
+    yield run.final, "the final state"
+    rows = DedupStates(run, arg)
+    for state, what in (("part", "laid on its original in part"), ("laid", "laid on its original whole")):
+        cid = next((c for c, s, _w in rows if s == state), None)
+        if cid is not None:
+            yield cid, "the first cut that shows the copy " + what
+
+
+def Dedup(j, arg):
+    """`--verify dedup:A:B` — §8.2, §16.7: the pass after a Tally lays copy B
+    on original A an act at a time, among a logger's stitches, and the power
+    goes after it. Every mountable cut shows B on its own blocks or on A's at
+    the same place, block for block, and A on its own (DedupStates); both
+    whole in every cut after the flush the write of B stood behind; B laid
+    whole where the run ended; some cut on its own before the pass; and every
+    booted cut that shows B laid, in part or whole, reads both back."""
+    run, (a, b) = j.run, arg.split(":")
+    rows = DedupStates(run, arg)
+    wrong = ["%s (%s): %s" % (cid, run.Kept(cid), why) for cid, _s, why in rows if why]
+    count = {k: sum(1 for _c, s, _w in rows if s == k) for k in ("none", "own", "part", "laid")}
+    step = run.Step("dedup")
+    flush = run.AckFlush(step) if step else None
+    if flush is None:
+        wrong.append("the write of %s and %s has no flush behind its acknowledgement" % (a, b))
+    else:
+        floor = run.closes[flush]
+        late = [cid for cid, s, _w in rows if s == "none" and
+                (run.cut[cid]["epoch"] > floor or cid == run.Canon("e%d-all" % floor))]
+        if late:
+            wrong.append("%d cut(s) after the flush %s's write stood behind show it not whole, first %s (%s)"
+                         % (len(late), b, late[0], run.Kept(late[0])))
+    final = next((s for cid, s, _w in rows if cid == run.final), "not mountable")
+    if final != "laid":
+        wrong.append("where the run ended %s is %s, not laid whole on %s" % (b, final, a))
+    if not count["own"]:
+        wrong.append("no cut shows %s whole on its own blocks before the pass" % b)
+    logs = {cid: os.path.join(run.dir, "boots", cid + ".serial.log") for cid, _s, _w in rows}
+    booted = [(cid, s, re.search(r"\[QUILL\] dedup: PASS — ", Log(logs[cid])))
+              for cid, s, _w in rows if s in ("part", "laid") and os.path.exists(logs[cid])]
+    wrong += ["%s (%s), %s laid %s, booted: both files did not read back" % (cid, run.Kept(cid), b,
+              "in part" if s == "part" else "whole") for cid, s, ok in booted if not ok]
+    if not any(s == "laid" for _c, s, _ok in booted):
+        wrong.append("no cut that shows %s laid whole was booted" % b)
+    j.Out("dedup", "fail" if wrong else "behaves", "%s — %s" % (
+        "; ".join(wrong[:3]), "%d mountable cut(s)" % len(rows)) if wrong else
+        "of %d mountable cuts, %d show %s not yet whole, %d on its own blocks, %d laid on %s's in part and %d whole, "
+        "every block of it on its own or on %s's at the same place; both whole after the flush its write stood "
+        "behind; %d booted cut(s) that show it laid read both back"
+        % (len(rows), count["none"], b, count["own"], count["part"], a, count["laid"], a, len(booted)))

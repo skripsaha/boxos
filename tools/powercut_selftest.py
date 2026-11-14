@@ -807,6 +807,8 @@ def BookRowTests(pc, Want, Synthetic):
          "tipin owes a Tally the kernel laid in among the nodes of the one before: whole ones alone fail (%s)"
          % said)
     ChainTests(pc, Want, Synthetic, pjb)
+    DedupTests(pc, Want, Synthetic, pjb)
+    BaseAgainTests(pc, Want, Synthetic)
     for sev, want in (("note", "behaves"), ("damage", "fail")):
         j = Judged(pc, shape, lambda cid: Book([[1, "a", 3, "aa"]], [("RIBBON_TORN", sev, "seq 3 past it is torn")]))
         got = Said(j.Boundaries).get("boundaries", ("",))[0]
@@ -850,3 +852,68 @@ def ChainTests(pc, Want, Synthetic, pjb):
     got = Chain(tags=())
     Want(got[0] == "fail" and "settle:undone" in got[1],
          "fid 1 rolled back without settle:undone fails it (%s)" % (got,))
+
+
+
+def DedupTests(pc, Want, Synthetic, pjb):
+    """§8.2: the copy B (fid 6) of A (fid 5) on its own blocks, laid in part,
+    laid whole — every cut held to its own blocks or A's at the same place."""
+    shape = Synthetic([[1, (1, None, "stitch")], [(1, None, "stitch")], [(1, None, "stitch")], [1]])
+    own, part, laid = [["data", 200, 4]], [["shared", 100, 2], ["data", 202, 2]], [["shared", 100, 4]]
+
+    def Cut(states):
+        def One(cid):
+            k, whole = int(cid[1:cid.index("-")]), cid.endswith("-all")
+            runs = states[k] if whole or k == 3 else states[k - 1] if k else None
+            files = [[1, "a", 3, "aa"], [5, "pc-a.d", 16384, "ab"]] + ([[6, "pc-b.d", 16384, "ab"]] if runs else [])
+            return dict(Book(files), new_runs=[[5, [["data", 100, 4]]]] + ([[6, runs]] if runs else []))
+        return One
+
+    def Dedup(states, read=True):
+        j = Judged(pc, shape, Cut(states))
+        j.run.steps = [{"step": "dedup", "cmd": "c", "before": 0, "ack": 3, "quiet": 3, "line": "", "durable": None}]
+        boots = os.path.join(j.run.dir, "boots")
+        os.makedirs(boots)
+        for cid, _why in pjb.DedupPicks(j.run, "pc-a.d:pc-b.d"):
+            with open(os.path.join(boots, cid + ".serial.log"), "w") as fh:
+                fh.write("[QUILL] dedup: %s — both read back\n" % ("PASS" if read else "FAIL"))
+        return Said(pjb.Dedup, j, "pc-a.d:pc-b.d").get("dedup", ("", ""))
+
+    got = Dedup([own, part, laid, laid])
+    Want(got[0] == "behaves" and "1 laid on pc-a.d's in part" in got[1],
+         "§8.2: B on its own blocks, then laid in part, then whole, every block on its own or A's (%s)" % (got,))
+    got = Dedup([own, [["shared", 100, 2], ["data", 300, 2]], laid, laid])
+    Want(got[0] == "fail" and "neither its own" in got[1], "a cut with B's block on neither fails it (%s)" % (got,))
+    got = Dedup([own, part, part, own])
+    Want(got[0] == "fail" and "not laid whole" in got[1], "B not laid whole where the run ended fails it (%s)" % (got,))
+    got = Dedup([own, None, laid, laid])
+    Want(got[0] == "fail" and "not whole" in got[1],
+         "a cut after the flush B's write stood behind that shows B absent fails it (%s)" % (got,))
+    got = Dedup([own, part, laid, laid], read=False)
+    Want(got[0] == "fail" and "did not read back" in got[1],
+         "a booted cut that shows B laid and does not read both back fails it (%s)" % (got,))
+
+
+def BaseAgainTests(pc, Want, Synthetic):
+    """d0 on a book: a file of the base (fid 1) the run writes again is held to
+    the states its flushes left, never absent nor another."""
+    shape = Synthetic([[1, (1, None, "stitch")], [1, (1, None, "stitch")], [1]])
+
+    def BaseFiles(odd):
+        def One(cid):
+            k = int(cid[1:cid.index("-")])
+            if k == 0 or cid.startswith("e1-") and cid != "e1-all" and not cid.endswith("-s1"):
+                return Book([[1, "a", 3, "aa"]])
+            got = odd if cid == "e1-s1" and odd else [1, "a", 4, "bb"]
+            changed = ["fid 1 a gone"] if got == "gone" else ["fid 1 a is %d bytes, sha256 %s" % (got[2], got[3])]
+            return dict(Book([] if got == "gone" else [got]), base_changed=changed)
+        return Said(Judged(pc, shape, One).BaseFiles).get("d0", ("", ""))
+
+    got = BaseFiles(None)
+    Want(got[0] == "behaves" and "fid(s) 1 of the base the run wrote again" in got[1],
+         "d0: a file of the base the run wrote again, shown as its flushes left it, is no loss (%s)" % (got,))
+    got = BaseFiles([1, "a", 5, "cc"])
+    Want(got[0] == "fail" and "e1-s1" in got[1],
+         "d0: a file of the base shown as no flush of the run left it fails (%s)" % (got,))
+    got = BaseFiles("gone")
+    Want(got[0] == "fail" and "gone" in got[1], "d0: a file of the base gone from a cut fails (%s)" % (got,))

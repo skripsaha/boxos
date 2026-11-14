@@ -97,17 +97,32 @@ class Judge:
         return "stitch" if self.base.get("format") == "v2" else "ledger"
 
     def BaseFiles(self):
-        """No cut the kernel mounts loses or changes a file the base held. A cut
-        it refuses to mount holds no file of anybody's, and every refusal is a
-        damage code of its own (GROUND_REFUSED … CHAIN_REFUSED), judged there."""
+        """No cut the kernel mounts loses or changes a file the base held — on a
+        book, but as the run's own writes changed it: a file of the base the
+        session itself writes again (the shell's history, a program's state,
+        on a base a session was run on) may show in a cut as one state a flush
+        of the run left it in, never absent and never another. A cut the
+        kernel refuses to mount holds no file of anybody's, and every refusal
+        is a damage code of its own (GROUND_REFUSED … CHAIN_REFUSED), judged
+        there."""
         run = self.run
         judged = [c["id"] for c in run.canon if run.Judged(c["id"])]
         mounted = [cid for cid in judged if run.results[cid]["mounts"]]
-        lost = [(cid, run.results[cid]["base_changed"]) for cid in mounted
-                if run.results[cid]["base_changed"]]
+        rewrote = self.RewroteBase()
+        lost, again = [], set()
+        for cid in mounted:
+            changed = run.results[cid]["base_changed"]
+            mine = {fid for fid in (int(x.split()[1]) for x in changed) if rewrote(cid, fid)}
+            again |= mine
+            others = [x for x in changed if int(x.split()[1]) not in mine]
+            if others:
+                lost.append((cid, others))
         count = sum(1 for f in self.base["files"] if f["visible"])
         refused = len(judged) - len(mounted)
         rest = "; the %d cut(s) the kernel refuses to mount are their codes'" % refused if refused else ""
+        if again:
+            rest += "; fid(s) %s of the base the run wrote again, shown as a flush of it left them" % (
+                " ".join(str(f) for f in sorted(again)))
         if lost:
             cid, ch = lost[0]
             self.Out("d0", "fail", "%d of %d mountable cuts lost or changed a file the base held, e.g. "
@@ -116,6 +131,21 @@ class Judge:
         else:
             self.Out("d0", "behaves", "all %d files of the base are in every one of %d mountable cuts, "
                      "byte for byte%s" % (count, len(mounted), rest))
+
+    def RewroteBase(self):
+        """Whether a cut shows a file of the base, `fid`, as a state a flush of
+        the run left it in other than the base's own — a book's file the run
+        wrote again (powercut_judge_book.States); never on format v1."""
+        if self.base.get("format") != "v2":
+            return lambda cid, fid: False
+        import powercut_judge_book as book
+        states, _n = book.States(self)
+        base = {f["fid"]: (f.get("name"), f.get("size"), f.get("sha256")) for f in self.base["files"] if f["visible"]}
+
+        def Rewrote(cid, fid):
+            got = book.View(self.run.results[cid]).get(fid)
+            return got is not None and got != base.get(fid) and got in states.get(fid, ())
+        return Rewrote
 
     def Durable(self):
         run = self.run
@@ -285,13 +315,13 @@ class Judge:
             return self.Reissue(arg)
         if what == "grown":
             return self.Grown()
-        if what in ("logger", "lines", "tipin", "spared", "engross", "chain"):
+        if what in ("logger", "lines", "tipin", "spared", "engross", "chain", "dedup"):
             import powercut_judge_book as book
             name, _sep, most = arg.partition(":")
             return {"logger": lambda: book.Logger(self, arg), "lines": lambda: book.Lines(self, name, int(most or 0)),
                     "tipin": lambda: book.Tipin(self),
                     "spared": lambda: book.Spared(self), "engross": lambda: book.Engross(self),
-                    "chain": lambda: book.Chain(self, arg)}[what]()
+                    "chain": lambda: book.Chain(self, arg), "dedup": lambda: book.Dedup(self, arg)}[what]()
         final = self.Final()
         if final is None:
             return self.Out("verify", "fail", "the final state was not booted")

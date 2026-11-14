@@ -290,6 +290,7 @@ caveat_row_book() {
         book:spared)  echo "|a stitch whose toll spared its data's flush and lost data it names is taken as though the data were there (C3)" ;;
         book:engross) echo "|a tail engrossed into a block before its stitch is named by somebody when the power goes first (C22)" ;;
         book:chain)   echo "|the verdict a mount lays down on a book is not laid by the session's first stitch, or a block it rolled back is given twice (C16)" ;;
+        book:dedup)   echo "|a power cut in the middle of the pass that lays a copy on its original leaves the copy on neither its own blocks nor the original's, or either file not as its write left it (§8.2)" ;;
         book:owners)  echo "|a medium that lost writes a kept flush stood behind leaves a book with two owners of one block (C6, C17)" ;;
         book:lost)    echo "|a medium lost what a stitch named, the evidence on it, and the book says nothing (C5, C13, C17, C18)" ;;
         book:wiped)   echo "|a medium that spoils the page around a stitch in flight wipes a settled stitch whole with nothing past it, and the book cannot say what settled is lost (C18)" ;;
