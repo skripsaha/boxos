@@ -201,7 +201,9 @@ def MirrorPrint(files):
 def KernelBook(g, m, held, free, fallow):
     """What the kernel of this tree makes of a format-v2 volume, in the
     numbers its own lines carry (mount/book_mount.c): refused — and in which
-    words — or mounted, for how many reasons only to be read (the book's own,
+    words: first a book on ground the kernel's own survey of the medium does
+    not take, which is no volume it mounts at all (tagfs.c volume_take_ground,
+    GroundSurvey) — or mounted, for how many reasons only to be read (the book's own,
     and a Tally that names a bookmark, whose ground no writer of this kernel
     takes without its map; or a ribbon whose end the walk does not know, which
     no writer goes on from), standing on which slot, with how many
@@ -227,6 +229,9 @@ def KernelBook(g, m, held, free, fallow):
     before the ribbon is replayed, and how many stitches (`lied_check`);
     and what its mirror holds when the mount is done — the print of its live
     files (MirrorPrint) and of its Use Context, and the bytes of the latter."""
+    st = g.stand
+    if not st.kernels:
+        return {"mounts": False, "refusal": "%s, and this volume was found at %s" % (st.kernel_why, st.how)}
     if g.block_bytes != BLOCK:
         return {"mounts": False, "refusal": "laid out in %u-byte blocks" % g.block_bytes}
     if g.frame_why:

@@ -20,8 +20,11 @@ kernel's own lines against this package's prediction.
 The book of format v2 has landings of its own (selftest_book.py): over the
 book laid on the v1 image's files, or over a format-v2 image's own book, when
 that is what self-test is handed — no case of format v1 has a volume to run
-on then (selftest_cases.py runs them, on a format-v1 image alone), and X2,
-which only they hear, is said not held.
+on then (selftest_cases.py runs them, on a format-v1 image alone), and X2
+holds ground_owners.py to the header with no owner of format v1 to hear. The
+medium under the book is the book's to answer for: the ground the kernel
+finds on it, the sectors it will not give, no Deed at all, and the cut logic
+on a log built over it (selftest_book_medium.py).
 """
 
 from .medium import OverlayMedium, StandOnDeed, Unreadable
@@ -29,6 +32,7 @@ from .ground_owners import GROUND_OWNERS
 from .selftest_headers import ConstantsCheck, OwnersCheck, AlphabetCheck
 from .bookcensus import BOOK_OWNERS, BookCensus
 from .selftest_book import BookTargets, Judge
+from .selftest_book_medium import GroundCases, LogCases, NoDeed, UnreadCases
 from .selftest_book_tally import (Pristine, Circles, SpineCases, RangeCases, TreeShapeCases, ElementCases,
                                   SlotRootCases)
 from .selftest_book_ribbon import (RecordCases, MachineRecordCases, RecordRuleCases, RibbonEndCases,
@@ -55,7 +59,7 @@ def BookCases(bt):
                   RecordCases, MachineRecordCases, RecordRuleCases, RibbonEndCases, RibbonBranchCases,
                   RibbonFurtherCases, RibbonLossCases, RibbonCases, RibbonShapeCases, RibbonBoundCases, ErrataCases,
                   TipInCases, EscheatCases, LockedCases, FacsimileRuleCases, FacsimileReplayCases, BootSlipCases,
-                  MemoCases, BootCases, KeepCases):
+                  MemoCases, BootCases, KeepCases, GroundCases, UnreadCases):
         try:
             cases += group(bt)
         except Unreadable as e:
@@ -87,6 +91,8 @@ def BookRun(t=None, medium=None):
         except (Unreadable, IOError, ValueError) as e:
             ok, said = False, "NOT so: %s" % e
         out.append((case.name, ok, said))
+    for name, ok, said in [NoDeed(bt)] + LogCases(bt):
+        out.append((name, ok, "%s — %s" % (said, "as expected" if ok else "NOT so")))
     return out, heard
 
 
@@ -147,19 +153,19 @@ def BookCasesRun(count, t=None, medium=None):
 
 
 def Headers(src, heard, count):
-    """X1, X2 (when the cases of format v1 ran: `heard` not None) and X3; False
-    when the source tree is not beside the tool."""
+    """X1, X2 — and the owners format v1's cases heard, when they ran: `heard`
+    not None — and X3; False when the source tree is not beside the tool."""
     wrong, n = ConstantsCheck(src)
     if wrong is None:
         print("self-test: X1 constants — %s" % n)
         return False
     count.Say(not wrong, "X1 constants — %u constants and struct fields held against the headers — %s"
               % (n, "as expected" if not wrong else "; ".join(wrong)))
+    wrong = OwnersCheck(src, heard)
     if heard is None:
-        print("self-test: X2 ground owners — not held: the owners of format v1 are heard only by its cases, "
-              "and none runs on a format-v2 image")
+        count.Say(not wrong, "X2 ground owners — ground_owners.py is what tools/gen_ground_owners.py writes of "
+                  "the header's owners — %s" % ("as expected" if not wrong else "; ".join(wrong)))
     else:
-        wrong = OwnersCheck(src, heard)
         count.Say(not wrong, "X2 ground owners — the %u owners ground_owners.py lists are the header's, and "
                   "each is heard in a case — %s" % (len(GROUND_OWNERS), "as expected" if not wrong
                                                    else "; ".join(wrong)))
