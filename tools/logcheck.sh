@@ -122,9 +122,9 @@ STAND_NAME=logcheck
 # growglass): tools/logcheck_book_grow.sh.
 . "$(dirname "$0")/logcheck_book_grow.sh"
 # A book's stick leaving while a write is in flight (replugwrite on
-# VOLUME_FORMAT=v2), and a stick the host moved on while it was out, by its
-# format (moved_on_host, moved_on_said: replug, holdground, returnfail):
-# tools/logcheck_book_replug.sh.
+# VOLUME_FORMAT=v2), and a book's newest Spine slot moved on by the host while
+# the stick was out (slot_moved_on_host — moved_on_host's for a book: replug,
+# holdground, returnfail): tools/logcheck_book_replug.sh.
 . "$(dirname "$0")/logcheck_book_replug.sh"
 # A logger of a line a second on a book (loggerhour): tools/logcheck_book_logger.sh.
 . "$(dirname "$0")/logcheck_book_logger.sh"
@@ -466,6 +466,23 @@ if (stands is None or stands["copy"] != dst or stands["seq"] != seq or not stand
 print("  (the stick's Ledger moved on the host: copy %u at seq %u, copy %u now seq %u, "
       "sealed as that cycle)" % (src, newest["seq"], dst, seq))
 PY
+}
+
+# moved_on_host IMG — the stick moved on by the host while it was out, as its
+# format moves (stand_format): format v1's Ledger (ledger_moved_on_host), a
+# book's newest Spine slot (slot_moved_on_host, logcheck_book_replug.sh).
+moved_on_host() {
+    if [ "$(stand_format)" = v2 ]; then slot_moved_on_host "$1"; else ledger_moved_on_host "$1"; fi
+}
+
+# The line the kernel says of a stick in seat 1 that came back moved on, its
+# book given up (away.c, AWAY_OTHER) — by the stick's format.
+moved_on_said() {
+    if [ "$(stand_format)" = v2 ]; then
+        echo "came back in seat 1 not as this kernel left its book"
+    else
+        echo "came back in seat 1 with a Ledger or a Deed this kernel did not leave on it"
+    fi
 }
 
 run_latearrival() {

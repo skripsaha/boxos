@@ -473,7 +473,7 @@ STAND_BOOK_RACED='^\[TESTS\] [a-z_]+: BLOCKFAIL answered ([0-9]+) command\(s\) o
 STAND_BOOK_PROMISE='^\[TagFS\] what this volume promises: its book takes files made, written, named, tagged and given up, the names of tags and the memory of its Use Context'
 STAND_BOOK_TALLY='^\[TagFS\] a whole Tally of the book is written once the ribbon past the newest slot holds as many useful bytes as one costs'
 # The book's tests: every TestCase of format v2 the registry holds (tests.h
-# TEST_SUITES, read by tools/concordance.py — counted off the code, not a run),
+# TEST_SUITES, read by stand_book_tests — counted off the code, not a run),
 # and every neutral one registered in a file beside them — a book suite's own,
 # written for any format — each run on every leg but where it stands down by
 # its own words, named here
@@ -508,13 +508,39 @@ stand_read_hole_refused_through_port|a read on this seat stands in its call: one
 stand_read_holes_through_port|a read on this seat stands in its call: one core, or a seat that answers only a read somebody stands over"
 
 # stand_book_tests — every test of format v2 the registry holds, and every
-# neutral one in a file that registers one of them, by name.
+# neutral one in a file that registers one of them, by name: the TestCases of
+# the arrays the suites tests.h TEST_SUITES walks name, read off the source.
 stand_book_tests() {
-    python3 -c 'import sys; sys.path.insert(0, "tools"); import concordance as c
-cases, _ = c.Cases(".")
-book = {w.split(":")[0] for n, (w, f, a) in cases.items() if f == "V2"}
-print(" ".join(sorted(n for n, (w, f, a) in cases.items()
-                      if f == "V2" or (f == "NONE" and w.split(":")[0] in book))))'
+    python3 - <<'STAND_BOOK_TESTS_EOF'
+import os, re
+tdir = os.path.join("src", "kernel", "tagfs", "tests")
+listed = re.search(r"#define\s+TEST_SUITES\(SUITE\)(.*?)/\*\s*the walk ends here",
+                   open(os.path.join(tdir, "tests.h")).read(), re.S)
+suites, arrays, cases = {}, {}, []
+for fname in sorted(os.listdir(tdir)):
+    if not fname.endswith(".c"):
+        continue
+    text = open(os.path.join(tdir, fname)).read()
+    for m in re.finditer(r"const\s+TestSuite\s+g_(\w+)_suite\s*=\s*\{(.*?)\};", text, re.S):
+        ref = re.search(r"\b(g_\w+)\b", m.group(2))
+        if ref:
+            suites[m.group(1)] = ref.group(1)
+    for m in re.finditer(r"TestCase\s+(\w+)\s*\[\s*\]\s*=\s*\{", text):
+        at, depth = text.index("{", m.end() - 1), 0
+        for end in range(at, len(text)):
+            depth += {"{": 1, "}": -1}.get(text[end], 0)
+            if depth == 0:
+                break
+        arrays[m.group(1)] = (fname, text[at:end + 1])
+for suite in re.findall(r"SUITE\((\w+)\)", listed.group(1)) if listed else []:
+    if suites.get(suite) in arrays:
+        fname, body = arrays[suites[suite]]
+        for c in re.finditer(r'\{\s*\.name\s*=\s*"([^"]+)"(.*?)\}', body, re.S):
+            fmt = re.search(r"\.format\s*=\s*DEED_FORMAT_(V1|V2|NONE)", c.group(2))
+            cases.append((c.group(1), fname, fmt.group(1) if fmt else "NONE"))
+book = {fname for _name, fname, fmt in cases if fmt == "V2"}
+print(" ".join(sorted(name for name, fname, fmt in cases if fmt == "V2" or (fmt == "NONE" and fname in book))))
+STAND_BOOK_TESTS_EOF
 }
 STAND_BOOK_PORT_ASIDE='^\[TESTS\] stand_(tally_rot_three_paths|ribbon_slip_three_roads): the port.s road stands aside — '
 STAND_BOOK_RIBBON_LAID='[TESTS] stand_ribbon: stitches laid past the Tally'
