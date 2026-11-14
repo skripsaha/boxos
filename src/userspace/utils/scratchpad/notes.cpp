@@ -14,6 +14,8 @@
 #include "box/program_part.h"
 #include "box/time.h"
 
+#include "../trash_term.h"
+
 namespace scratchpad {
 
 namespace {
@@ -94,7 +96,7 @@ std::string NameFrom(const NoteText &Text)
 std::string Unused(const std::string &Name)
 {
     std::string Try = Name;
-    for (int Number = 2; find_file_by_name(Try.c_str(), "trashed", nullptr, nullptr, 0) > 0; Number++)
+    for (int Number = 2; find_file_by_name(Try.c_str(), nullptr, nullptr, nullptr, 0) > 0; Number++)
         Try = std::format("{}-{}", Name, Number);
     return Try;
 }
@@ -227,7 +229,7 @@ std::optional<std::string> Note::Save()
 std::optional<std::string> Note::Trash()
 {
     if (Held == 0) return std::nullopt;
-    if (const int Code = tag_add(Held, "trashed"); Code != 0)
+    if (const int Code = file_keep(Held, TrashTermSeconds()); Code != 0)
         return Refused(std::format("{} could not be moved to the trash", Called), Code);
     return std::nullopt;
 }
@@ -235,7 +237,7 @@ std::optional<std::string> Note::Trash()
 std::expected<std::vector<file_id_t>, std::string> AllNotes()
 {
     file_id_t *Ids   = nullptr;
-    const int  Count = query_all_everywhere(NoteTag, "trashed", &Ids);
+    const int  Count = query_all_everywhere(NoteTag, nullptr, &Ids);
     if (Count < 0) return std::unexpected(Refused("the volume would not list the notes", Count));
     // The program that wears the word as its own name is no note.
     std::vector<file_id_t> Found;

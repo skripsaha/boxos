@@ -621,6 +621,16 @@ error_t TagFSCreateFits(const char* filename, const TagSpelling* tags, uint32_t 
  * Deed points the loader at is given up by nobody. A rename asks none: its
  * name's tag is a tag like any other. */
 int  tagfs_delete_file(uint64_t file_id, InkWarrant warrant);
+/* A file deleted for a term (keep/keep.h): kept `term_seconds` from now, no
+ * query meeting it, and let go by the volume when the term ends — or, for a
+ * term of 0, given up at once, as tagfs_delete_file does. The term is the
+ * caller's: the volume has none of its own. A file the system keeps is
+ * deleted only with the warrant, as it is given up. -ERR_UNSUPPORTED on
+ * format v1 for a term above 0. tagfs_restore_file brings a deleted file back
+ * until its term ends (-ERR_FILE_NOT_FOUND after, or for a file the volume
+ * does not hold), and is no change to a file that is not deleted. */
+int  tagfs_keep_file(uint64_t file_id, uint64_t term_seconds, InkWarrant warrant);
+int  tagfs_restore_file(uint64_t file_id, InkWarrant warrant);
 int  tagfs_rename_file(uint64_t file_id, const char* new_filename);
 
 /*
@@ -671,7 +681,9 @@ bool tagfs_key_is_reserved(const char *key, size_t key_len);
  * ("key:..." is any tag of the key, in either list) — a question of no tags is
  * every file but those `without` names, and of neither every file,
  * TagFSListPage. Every tag is a tag like any other: which files are set aside
- * is the asker's to say, and the volume leaves out none of its own accord.
+ * is the asker's to say. The one files the volume leaves out of its own accord
+ * are those it keeps deleted (TAGFS_FILE_DELETED): a question never meets one,
+ * and TagFSQueryKeptPage is the question that asks for them alone.
  * From file id `from` on, up to `room` ids into `out`; the page says where the
  * rest begin and, when `want_total`, how many match from `from` on. OK, or the
  * refusal: ERR_TAGFS_NOT_INITIALIZED with no volume, ERR_NO_MEMORY when the
@@ -682,6 +694,11 @@ error_t  TagFSQueryPage(const TagSpelling* tags, uint32_t count, const TagSpelli
                         bool want_total, TagFSPage* page);
 error_t  TagFSListPage(uint64_t from, uint64_t* out, uint32_t room, bool want_total,
                        TagFSPage* page);
+/* The same question asked of the files kept deleted alone: those that wear all
+ * of `tags` and none of `without`, a question of neither every one of them. */
+error_t  TagFSQueryKeptPage(const TagSpelling* tags, uint32_t count, const TagSpelling* without,
+                            uint32_t without_count, uint64_t from, uint64_t* out, uint32_t room,
+                            bool want_total, TagFSPage* page);
 /*
  * The tags files wear, a page at a time and in the order of their numbers
  * (query/query.c): from the tag numbered `from` on, every tag at least one

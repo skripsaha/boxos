@@ -76,7 +76,7 @@ static void ReleaseCandidates(AssembleCandidate *List, int Count)
 static int GatherCandidates(const AssembleRequest *Request,
                             AssembleCandidate **OutList, int *OutCount)
 {
-    int Count = find_file_by_name(Request->OutputName, "trashed", NULL, NULL, 0);
+    int Count = find_file_by_name(Request->OutputName, NULL, NULL, NULL, 0);
     file_id_t *Ids;
     AssembleCandidate *List;
     int Found;
@@ -90,7 +90,7 @@ static int GatherCandidates(const AssembleRequest *Request,
     Ids = (file_id_t *)malloc((size_t)Count * sizeof(file_id_t));
     if (!Ids)
         return -ERR_NO_MEMORY;
-    Found = find_file_by_name(Request->OutputName, "trashed", Ids, NULL, (size_t)Count);
+    Found = find_file_by_name(Request->OutputName, NULL, Ids, NULL, (size_t)Count);
     if (Found < 0) {
         free(Ids);
         return Found;

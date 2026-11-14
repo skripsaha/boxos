@@ -917,15 +917,16 @@ static int PoolRecordWhole(const uint8_t *r, uint32_t room)
 }
 
 /* The role a whole record puts its file in: TALLY_FILE_ROLE_*, or 0 for a
- * Quitclaim, a trashed file, or one naming no block — its newest record says
- * there is nothing there to boot. */
+ * Quitclaim or one naming no block — its newest record says there is nothing
+ * there to boot. A record of format v1 has no room to say a file is kept
+ * deleted: deleting for a term is a book's (TALLY_FILE_DELETED). */
 static uint32_t PoolRecordRole(const uint8_t *r)
 {
     uint32_t flags;
     uint16_t extents;
     MemCopy(&flags,   r + META_RECORD_FLAGS_OFF,    4);
     MemCopy(&extents, r + META_RECORD_EXTCOUNT_OFF, 2);
-    if (!(flags & TAGFS_FILE_ACTIVE) || (flags & TAGFS_FILE_TRASHED) || extents == 0)
+    if (!(flags & TAGFS_FILE_ACTIVE) || extents == 0)
         return 0;
     return flags & TALLY_FILE_ROLE_MASK;
 }

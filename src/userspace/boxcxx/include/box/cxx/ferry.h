@@ -6,7 +6,7 @@
 // can be in flight at once; each co_await resumes its own coroutine when THAT
 // op's completion lands, in whatever order the disk retires them.
 //
-//   box::tagfs::file f = *box::tagfs::find("log", "trashed")->live();
+//   box::tagfs::file f = *box::tagfs::find("log", nullptr)->live();
 //   std::byte a[512], b[512];
 //   box::ferry r0 = f.read_async(0,   a);            // submitted now, in flight
 //   box::ferry r1 = f.read_async(512, b);            // both in flight

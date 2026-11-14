@@ -73,7 +73,7 @@ inline std::string trimmed(const char *p, std::size_t n)
 // command say so instead of hiding it. Empty when nothing has been set.
 inline std::string zone_setting()
 {
-    auto files = box::tagfs::query(zone_tag, "trashed");
+    auto files = box::tagfs::query(zone_tag, nullptr);
     if (files.empty()) return {};
 
     char buf[zone_name_max + 1] = {};
@@ -100,7 +100,7 @@ inline box::status set_zone(std::string_view name)
     // it resolves to and the setting never has to be resolved twice.
     const std::string canonical(tz->name());
 
-    auto files = box::tagfs::query(zone_tag, "trashed");
+    auto files = box::tagfs::query(zone_tag, nullptr);
     box::result<box::tagfs::file> f =
         files.empty() ? box::tagfs::create(zone_file, zone_tag)
                       : box::result<box::tagfs::file>(files.front());

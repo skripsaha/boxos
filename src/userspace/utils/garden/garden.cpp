@@ -59,7 +59,7 @@ std::vector<file_id_t> ProgramsNamed(const std::vector<std::string> &Named)
     std::vector<file_id_t> Files;
     for (const std::string &Plant : Named) {
         file_id_t *Ids   = nullptr;
-        const int  Count = query_all_everywhere(Plant.c_str(), "trashed", &Ids);
+        const int  Count = query_all_everywhere(Plant.c_str(), nullptr, &Ids);
         for (int At = 0; At < Count; At++) {
             ProgramKind Kind = PROGRAM_NONE;
             if (program_kind(Ids[At], &Kind) != 0 || Kind == PROGRAM_NONE) continue;

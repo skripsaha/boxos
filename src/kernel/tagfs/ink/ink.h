@@ -132,6 +132,17 @@ error_t InkRoleLaid(uint64_t fid, uint32_t role, InkReceipt* out);
  * refusal an Ink of a file's fields answers. */
 error_t InkUndone(uint64_t fid, InkReceipt* out);
 
+/* A book's file deleted and kept — the record marked TAGFS_FILE_DELETED, the
+ * time it is kept until, `until` (a book's nanoseconds), in the record beside
+ * it — by an ordinary Ink, its name and tags as they are; or, for `until` 0,
+ * brought back: the mark and the time taken off. Deleting a deleted file moves
+ * its term. The guard of a change asks the warrant, as a delete does: a file
+ * the system keeps is not deleted without one. OK — and OK with no Ink for a
+ * call that changes nothing — or the refusal; ERR_UNSUPPORTED on format v1
+ * (its record has no room for the time). Only the system lets a kept file go
+ * at its term (keep/keep.h): InkQuitclaim, as ever. */
+error_t InkKeep(uint64_t fid, uint64_t until, InkWarrant warrant, InkReceipt* out);
+
 /* A new file named `name`, wearing the `count` tags in `tags` (the name's
  * first, no two alike). OK and its id, or the refusal with no file made and no
  * trace of one — the id it would have taken is taken by the next. */

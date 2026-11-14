@@ -24,7 +24,7 @@ public:
     Pad(painter::tui::Stage Screen, std::vector<Note> Opened);
     // Until the person leaves, or the pad is asked to finish.
     void Run();
-    // The files of the notes that have one and were not trashed: what it gives back.
+    // The files of the notes that have one and were not deleted: what it gives back.
     std::vector<file_id_t> Given() const;
     // What was saved and what was left as it was, in a sentence; empty when
     // nothing was.

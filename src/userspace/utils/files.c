@@ -19,20 +19,21 @@ static bool names_key(const char *word, const char *key)
     return strncmp(word, key, length) == 0 && (word[length] == '\0' || word[length] == ':');
 }
 
-/* What the listing leaves out: the files in the trash and the hidden ones —
- * each until the person names it among the tags looked for. The volume leaves
- * out nothing of its own accord; this is the listing's own word. */
+/* What the listing leaves out: the hidden files, until the person names the
+ * tag hidden among those looked for. The volume leaves out nothing of its own
+ * accord; this is the listing's own word. */
 static const char *set_aside(const char *const *words, size_t word_count)
 {
-    bool trashed = false, hidden = false;
-    for (size_t i = 0; i < word_count; i++) {
-        trashed |= names_key(words[i], "trashed");
-        hidden  |= names_key(words[i], "hidden");
-    }
-    if (trashed && hidden) return NULL;
-    if (trashed) return "hidden";
-    if (hidden) return "trashed";
-    return "trashed,hidden";
+    for (size_t i = 0; i < word_count; i++)
+        if (names_key(words[i], "hidden")) return NULL;
+    return "hidden";
+}
+
+/* The word trashed asks for the files kept deleted instead of the ones in use;
+ * it is no tag, and the other words go on being the tags looked for. */
+static bool is_trash_word(const char *word)
+{
+    return strcmp(word, "trashed") == 0;
 }
 
 int main(void)
@@ -46,9 +47,11 @@ int main(void)
         return 1;
     }
 
-    /* Every word is a tag; joined with commas into a list sized to what was
+    /* Every word but trashed is a tag; joined with commas into a list sized to what was
      * typed, so no tag is ever dropped. */
     char *query_tags = NULL;
+    bool  in_trash   = false;
+    for (size_t i = 0; i < word_count; i++) in_trash |= is_trash_word(words[i]);
     if (word_count > 0)
     {
         size_t total = 0;
@@ -63,8 +66,9 @@ int main(void)
         size_t pos = 0;
         for (size_t i = 0; i < word_count; i++)
         {
+            if (is_trash_word(words[i])) continue;
             size_t len = strlen(words[i]);
-            if (i > 0) query_tags[pos++] = ',';
+            if (pos > 0) query_tags[pos++] = ',';
             memcpy(query_tags + pos, words[i], len);
             pos += len;
         }
@@ -74,7 +78,9 @@ int main(void)
     /* Every file that answers, however many: the kernel says how many there
      * are and the list is sized to that. */
     file_id_t *s_file_ids = NULL;
-    int count = query_all(query_tags, set_aside(words, word_count), &s_file_ids);
+    const char *without = set_aside(words, word_count);
+    int count = in_trash ? query_all_deleted(query_tags && *query_tags ? query_tags : NULL, without, &s_file_ids)
+                         : query_all(query_tags && *query_tags ? query_tags : NULL, without, &s_file_ids);
     free(query_tags);
 
     if (count < 0)

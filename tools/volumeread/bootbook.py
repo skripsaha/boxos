@@ -24,7 +24,7 @@ its digest when the kernel that names it is attested."""
 from . import ondisk, stitch, tally
 from .bookmount import Blocks, BookMount, LastBlock, Mismatch, Splice
 from .bookread import Short
-from .stitch import BORN, LABELED, QUITCLAIM, SHAPED, UNDONE, KIND_NAMES, LABEL_FLAGS
+from .stitch import BORN, LABELED, QUITCLAIM, SHAPED, UNDONE, KIND_NAMES, LABEL_FLAGS, LABEL_KEEP
 from .stitch_ribbon import Ribbon
 
 # The roles a kernel is looked for by, in the order they are asked (§16.7 п.3).
@@ -218,6 +218,9 @@ class BootBook:
             if kind == LABELED:
                 if d["what"] & LABEL_FLAGS:
                     fs.flags = (fs.flags | d["flags"][0]) & ~d["flags"][1]
+                if d["what"] & LABEL_KEEP:
+                    fs.keep_ns = d["keep"]
+                    fs.flags = fs.flags | ondisk.FILE_DELETED if d["keep"] else fs.flags & ~ondisk.FILE_DELETED
                 return fs
             before = LastBlock(old)
             for at, remove, runs in Absolute(d["splices"]):

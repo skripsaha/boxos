@@ -1,4 +1,6 @@
 #include "ink.h"
+#include "../keep/keep.h"
+#include "../file_map/file_map.h"
 #include "../tag_registry/tag_registry.h"
 
 /*
@@ -196,6 +198,34 @@ int tagfs_delete_file(uint64_t file_id, InkWarrant warrant)
         return -(int)ERR_TAGFS_NOT_INITIALIZED;
     InkReceipt receipt;
     error_t    rc = InkQuitclaim(file_id, warrant, &receipt);
+    tagfs_leave();
+    return rc == OK ? 0 : -(int)rc;
+}
+
+int tagfs_keep_file(uint64_t file_id, uint64_t term_seconds, InkWarrant warrant)
+{
+    if (!tagfs_enter())
+        return -(int)ERR_TAGFS_NOT_INITIALIZED;
+    InkReceipt receipt;
+    error_t    rc = term_seconds ? InkKeep(file_id, KeepUntil(term_seconds), warrant, &receipt)
+                                 : InkQuitclaim(file_id, warrant, &receipt);
+    tagfs_leave();
+    return rc == OK ? 0 : -(int)rc;
+}
+
+int tagfs_restore_file(uint64_t file_id, InkWarrant warrant)
+{
+    if (!tagfs_enter())
+        return -(int)ERR_TAGFS_NOT_INITIALIZED;
+    InkReceipt  receipt;
+    FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, file_id, NULL);
+    error_t     rc  = !rec ? ERR_FILE_NOT_FOUND : OK;
+    if (rc == OK && (rec->flags & TAGFS_FILE_DELETED) && rec->keep_until <= KeepNowNs())
+        rc = ERR_FILE_NOT_FOUND;
+    if (rec)
+        FileRecordRelease(rec);
+    if (rc == OK)
+        rc = InkKeep(file_id, 0, warrant, &receipt);
     tagfs_leave();
     return rc == OK ? 0 : -(int)rc;
 }

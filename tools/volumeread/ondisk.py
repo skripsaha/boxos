@@ -168,6 +168,7 @@ META_RECORD = Fields("<HIIQQQHHHH",     # tagfs_boot.h:53-67; plot/plot_pack.c P
 FILE_ACTIVE = 1                         # tagfs_constants.h TAGFS_FILE_ACTIVE; bits 1-3 are named by no kernel
 FILE_LAID_BIT = 1 << 2                  # a header flag no kernel names, kept as laid (book_tests.c BOOK_TEST_LAID_BIT)
 FILE_UNDONE = 1 << 4                    # tagfs_constants.h TAGFS_FILE_UNDONE: rolled back by a mount's verdict
+FILE_DELETED = 1 << 7                   # tagfs_constants.h TAGFS_FILE_DELETED: deleted, kept until the keep_ns of its header
 FILE_ROLE_MASK = 96                     # tagfs_constants.h TAGFS_FILE_ROLE_MASK: bits 5-6, what the system keeps the file as
 FILE_ROLE_SYSTEM = 1 << 5               # TAGFS_FILE_ROLE_SYSTEM
 FILE_ROLE_BOOT = 1 << 6                 # TAGFS_FILE_ROLE_BOOT

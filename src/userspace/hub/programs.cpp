@@ -85,7 +85,7 @@ std::size_t StemLength(std::string_view FileName)
 void EachCommand(const std::function<void(file_id_t, std::string_view)> &Visit)
 {
     file_id_t *Ids   = nullptr;
-    const int  Count = query_all_everywhere(nullptr, "trashed", &Ids);
+    const int  Count = query_all_everywhere(nullptr, nullptr, &Ids);
     for (file_id_t File : volume::Taken(Ids, Count)) {
         const std::expected<volume::Record, int> Held = volume::Record::Of(File);
         if (Held && !Held->Name().empty() && CommandFile(*Held)) Visit(File, Held->Name());
@@ -95,7 +95,7 @@ void EachCommand(const std::function<void(file_id_t, std::string_view)> &Visit)
 Picked Pick(const Look &Shown, std::string_view Name)
 {
     file_id_t *Ids   = nullptr;
-    const int  Total = query_all_everywhere(std::string(Name).c_str(), "trashed", &Ids);
+    const int  Total = query_all_everywhere(std::string(Name).c_str(), nullptr, &Ids);
     if (Total < 0) return std::unexpected(Total);
 
     // A name whose files the volume will not show — its medium gone — is

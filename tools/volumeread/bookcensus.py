@@ -550,7 +550,7 @@ class BookCensus:
     def _FileJson(self, fid, state):
         fs = self.mount.files[fid]
         return {"fid": fid, "state": state, "name": fs.name.decode("utf-8", "replace"), "size": fs.size,
-                "gen": fs.gen, "flags": fs.flags, "tags": list(fs.tags),
+                "gen": fs.gen, "flags": fs.flags, "keep_ns": fs.keep_ns, "tags": list(fs.tags),
                 "tag_text": [self.mount.tags[t].Text().decode("utf-8", "replace") for t in fs.tags if t in self.mount.tags],
                 "runs": [["hole" if r.hole else "shared" if tally.RunShared(r) else "data", r.start, r.count, r.birth]
                          for r in fs.runs],

@@ -64,6 +64,7 @@
 #define LABEL_NAME   1u
 #define LABEL_FLAGS  2u
 #define LABEL_TAGS   4u
+#define LABEL_KEEP   8u   /* the file's deletion, and the time it is kept until (0: brought back) */
 
 /* The extensions a run may carry (§8), a TLV list after its head: CODEC's body
  * is the codec and the blocks it stores; SHARED names ground another owns. */
@@ -583,6 +584,8 @@ static inline int RibbonBornGet(const uint8_t *b, uint32_t len, uint64_t seq, Ri
         !TallyTakeBytes(b, len, &at, r->name_len, &r->name) ||
         !RibbonIdsTake(b, len, &at, &r->ntags, &r->tags, &r->tags_bytes) || !TallyTake(b, len, &at, &r->nruns))
         return TALLY_BODY_BROKEN;
+    if (r->flags & TALLY_FILE_DELETED)
+        return TALLY_BODY_BROKEN;           /* a file is born whole, never deleted: Labeled KEEP deletes it */
     r->modified_ns = r->created_ns + (uint64_t)BookUnzigzag(z);
     from    = at;
     r->runs = b + from;
@@ -688,10 +691,18 @@ static inline int RibbonShapedGet(const uint8_t *b, uint32_t len, uint64_t seq, 
 }
 
 /*
- * Labeled — a file's name, flags or tags: fid · base · what · [name] · [set ·
- * clear] · [add (count, rising) · drop (count, rising)]. A bit of `what` this
- * reader does not know carries no field: it is a writer's, and changes
- * nothing here.
+ * Labeled — a file's name, flags, tags or deletion: fid · base · what · [name]
+ * · [set · clear] · [add (count, rising) · drop (count, rising)] · [keep_ns].
+ * A bit of `what` this reader does not know carries no field: it is a
+ * writer's, and a reader that finds bytes left past the fields it knows takes
+ * the record for a newer writer's (TALLY_BODY_LONGER) and does not apply the
+ * stitch.
+ *
+ * KEEP is the one verb of deletion, and TALLY_FILE_DELETED is never a bit of
+ * `set` or `clear` — a Labeled that names it there does not read: keep_ns
+ * above 0 deletes the file, kept until that time (a file deleted already has
+ * its term moved), and keep_ns 0 brings it back. The bit in the file's flags
+ * is what the verb leaves, put there by the one reader and the other alike.
  */
 typedef struct {
     uint64_t       fid;
@@ -707,6 +718,7 @@ typedef struct {
     uint64_t       ndrop;
     const uint8_t *drop;
     uint32_t       drop_bytes;
+    uint64_t       keep_ns;      /* with LABEL_KEEP */
 } RibbonLabeled;
 
 static inline uint32_t RibbonLabeledBodyPut(uint8_t *out, const RibbonLabeled *r)
@@ -728,6 +740,8 @@ static inline uint32_t RibbonLabeledBodyPut(uint8_t *out, const RibbonLabeled *r
         at += BookVarintPut(out + at, r->ndrop);
         at += TallyBytesPut(out + at, r->drop, r->drop_bytes);
     }
+    if (r->what & LABEL_KEEP)
+        at += BookVarintPut(out + at, r->keep_ns);
     return at;
 }
 
@@ -735,7 +749,7 @@ static inline int RibbonLabeledGet(const uint8_t *b, uint32_t len, RibbonLabeled
 {
     uint32_t at = 0;
     r->name = r->add = r->drop = (const uint8_t *)0;
-    r->name_len = r->set = r->clear = r->nadd = r->ndrop = 0;
+    r->name_len = r->set = r->clear = r->nadd = r->ndrop = r->keep_ns = 0;
     r->add_bytes = r->drop_bytes = 0;
     if (!TallyTake(b, len, &at, &r->fid) || !TallyTake(b, len, &at, &r->base) || !TallyTake(b, len, &at, &r->what))
         return TALLY_BODY_BROKEN;
@@ -746,6 +760,9 @@ static inline int RibbonLabeledGet(const uint8_t *b, uint32_t len, RibbonLabeled
         return TALLY_BODY_BROKEN;
     if ((r->what & LABEL_TAGS) && (!RibbonIdsTake(b, len, &at, &r->nadd, &r->add, &r->add_bytes) ||
                                    !RibbonIdsTake(b, len, &at, &r->ndrop, &r->drop, &r->drop_bytes)))
+        return TALLY_BODY_BROKEN;
+    if (((r->what & LABEL_FLAGS) && ((r->set | r->clear) & TALLY_FILE_DELETED)) ||
+        ((r->what & LABEL_KEEP) && !TallyTake(b, len, &at, &r->keep_ns)))
         return TALLY_BODY_BROKEN;
     *used = at;
     return TallyBodyEnd(at, len);

@@ -74,7 +74,7 @@ static int child_role(uint32_t my_pid)
 
     file_id_t  fids[4];
     file_info_t infos[4];
-    int found = find_file_by_name(WC_NAME, "trashed,hidden", fids, infos, 4);
+    int found = find_file_by_name(WC_NAME, "hidden", fids, infos, 4);
     if (found <= 0) {
         kdbg_print("[WC child %u] file not found", my_pid);
         return 1;

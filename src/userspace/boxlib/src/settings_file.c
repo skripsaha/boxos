@@ -62,7 +62,7 @@ int settings_file_find(const char *program, file_id_t *file, char **saying)
     /* Every file wears the stem of its name as a tag: clock.settings wears
      * clock. A settings file in the trash says nothing: the person set it
      * aside. */
-    int count = query_all_everywhere(program, "trashed", &ids);
+    int count = query_all_everywhere(program, NULL, &ids);
     if (count < 0) return count;
     for (int i = 0; i < count; i++) {
         bool tagged;

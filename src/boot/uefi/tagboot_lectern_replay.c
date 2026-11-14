@@ -530,11 +530,15 @@ static int BornApplied(LecternBook *b, LecternHand *h, const LecternStitch *u, c
 }
 
 /* A Labeled: its flags set and cleared, as the record says — the role among
- * them. Its name and tags are not the loader's. */
+ * them — and the deleted bit its KEEP verb puts on or takes off: a file kept
+ * deleted is no kernel for the loader to start (tagboot_succession.c). Its
+ * name and tags are not the loader's. */
 static int LabeledApplied(LecternHand *h, const LecternRead *d)
 {
     const RibbonLabeled *r = &d->labeled;
     if (r->what & LABEL_FLAGS) h->f.flags = (h->f.flags | r->set) & ~r->clear;
+    if (r->what & LABEL_KEEP)
+        h->f.flags = r->keep_ns ? h->f.flags | TALLY_FILE_DELETED : h->f.flags & ~(uint64_t)TALLY_FILE_DELETED;
     return 1;
 }
 
