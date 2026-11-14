@@ -376,6 +376,142 @@ out:
     return verdict;
 }
 
+/* Why a test of a book's cycle stands aside here, or NULL. */
+static const char* StandSettleBookAside(void)
+{
+    if (tagfs_get_state()->format != DEED_FORMAT_V2)
+        return "the volume is not format v2: its cycle lays no stitch";
+    return StandStepsAsideFor();
+}
+
+/*
+ * R2 on a book (Z01-2, Z10-1, Z10-6, F01-4). A write a book's medium refuses
+ * is taken again on the ribbon (M-6), but a medium that says it is not ready
+ * refuses the cycle (sewing.c, StitchRefused): the stand answers the stitch's
+ * making so. It declares nothing, and the waiter stays in its Chit. A bell
+ * the seat rang just before the stitch's TAKE took its count answered a
+ * refusal before it, and is no event of this one, however late the room says
+ * it. With the cadence let go, no second cycle begins before the seat says
+ * seat:ready — watched for two Lulls and a tick, within which a cycle a waiter
+ * asks for begins at once when nothing parks it. The seat then says
+ * seat:ready, and the next cycle answers the waiter OK. Red with no bell rung
+ * at the stitch's TAKE (TagFSStandSettleRings, sewing.c): the cycle's seat
+ * never rings.
+ */
+static TestResult TestStandSettleStitchRefusalWaitsForTheBell(void)
+{
+    TestResult               verdict = TEST_PASS;
+    uint8_t                  seat    = tagfs_get_seat();
+    uint64_t                 file_id = 0;
+    bool                     let_go  = false;
+    static StandSettleWaiter waiter;
+    const char*              aside   = StandSettleBookAside();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    memset(&waiter, 0, sizeof(waiter));
+    TEST_ASSERT_OK(TagFSSettle(), "the volume owes nothing to begin with");
+    fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x6Du);
+    TEST_ASSERT(StandMakeFile("settle_stitch_refused", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+                "a file is made and written");
+    SettleWaitLink(&waiter.w, InkedGen(), StandSettleAnswered);
+
+    uint32_t rang = BoardroomSeatReadyGen(seat);
+    TagFSStandSettleRefuses(ERR_DEVICE_NOT_READY);
+    TagFSStandSettleRings(true);
+    TEST_ASSERT_EQ(TagFSSettleAsCadence(), ERR_DEVICE_NOT_READY,
+                   "the cycle is refused as a medium that is not ready refuses it");
+    TEST_ASSERT_EQ(BoardroomSeatReadyGen(seat), rang + 1u,
+                   "its seat rang seat:ready just before the stitch's TAKE took its count");
+    TEST_ASSERT(!waiter.answered, "the waiter stays in its Chit: no code of a step is its answer");
+    TEST_ASSERT(SettleParked(), "the cadence waits for the refusal's event");
+    BoardroomAttendIfPending();
+    TEST_ASSERT(SettleParked(), "and a bell rung before the cycle took its count, said after, "
+                "is not that event");
+
+    uint64_t steps = SettleStepsTaken();
+    SettleCadenceHold(false);
+    let_go = true;
+    uint64_t watch = 2u * SettleLullUs() + 1000000ull / SCHEDULER_DEFAULT_TICK_HZ;
+    uint64_t began = StandNowUs();
+    while (StandNowUs() - began < watch)
+        StandSettleTurn();
+    TestEvidence("steps of cycles begun before the event, of 0", SettleStepsTaken() - steps);
+    TEST_ASSERT_EQ(SettleStepsTaken(), steps, "the cadence began no second cycle before the event");
+    TEST_ASSERT(!waiter.answered, "and the waiter is still in its Chit");
+
+    /* Nightwatch's look, as the tick takes it a window later, and the look
+     * after: a park its waiters have waited on longer than the window is said
+     * once. No tick runs while the tests do. */
+    SettleWatchLook(StandNowUs() + SETTLE_WINDOW_US + 1u);
+    SettleWatchLook(StandNowUs() + SETTLE_WINDOW_US + 2u);
+    BatonPump(amp_get_core_index());
+
+    BoardroomNoteSeatReady(BoardroomSeatKind(seat), BoardroomSeatIndex(seat));
+    BoardroomAttendIfPending();
+    TEST_ASSERT(!SettleParked(), "the seat says seat:ready, which lifts the park");
+    began = StandNowUs();
+    while (!waiter.answered && StandNowUs() - began < 2u * SETTLE_WINDOW_US)
+        StandSettleTurn();
+    TEST_ASSERT(waiter.answered, "the next cycle answered the waiter");
+    TEST_ASSERT_OK(waiter.rc, "with OK");
+out:
+    TagFSStandSettleRefuses(OK);
+    if (let_go)
+        SettleCadenceHold(true);
+    if (!waiter.answered)
+        (void)SettleWaitUnlink(&waiter.w);
+    StandSettleLetGo(file_id);
+    return verdict;
+}
+
+/*
+ * X1-4 on a book. seat:ready that comes while a cycle runs — after the
+ * stitch's TAKE took the count its refusal is judged by, before the refusal is
+ * decided — is never lost: the cycle refused as a medium that is not ready
+ * refuses it parks on nothing, and the next one may go at once. Red with no
+ * bell rung at the stitch's TAKE (TagFSStandSettleRings, sewing.c): the
+ * cycle's seat never rings, and the refusal parks.
+ */
+static TestResult TestStandSettleStitchRingDuringTheCycle(void)
+{
+    TestResult               verdict = TEST_PASS;
+    uint8_t                  seat    = tagfs_get_seat();
+    uint64_t                 file_id = 0;
+    static StandSettleWaiter waiter;
+    const char*              aside   = StandSettleBookAside();
+
+    if (aside)
+        return test_steps_aside(aside);
+
+    memset(&waiter, 0, sizeof(waiter));
+    TEST_ASSERT_OK(TagFSSettle(), "the volume owes nothing to begin with");
+    fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x7Du);
+    TEST_ASSERT(StandMakeFile("settle_stitch_rings", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+                "a file is made and written");
+    SettleWaitLink(&waiter.w, InkedGen(), StandSettleAnswered);
+
+    uint32_t rang = BoardroomSeatReadyGen(seat);
+    TagFSStandSettleRefuses(ERR_DEVICE_NOT_READY);
+    TagFSStandSettleRings(false);
+    TEST_ASSERT_EQ(TagFSSettleAsCadence(), ERR_DEVICE_NOT_READY,
+                   "the cycle is refused as a medium that is not ready refuses it");
+    TEST_ASSERT_EQ(BoardroomSeatReadyGen(seat), rang + 1u,
+                   "and its seat rang seat:ready while it ran, after the stitch's TAKE");
+    TEST_ASSERT(!waiter.answered, "the waiter stays in its Chit");
+    TEST_ASSERT(!SettleParked(), "the refusal parks on nothing: its event has come already");
+    TEST_ASSERT_OK(TagFSSettleAsCadence(), "the next cycle goes, and settles");
+    TEST_ASSERT(waiter.answered, "and answers the waiter");
+    TEST_ASSERT_OK(waiter.rc, "OK");
+out:
+    TagFSStandSettleRefuses(OK);
+    if (!waiter.answered)
+        (void)SettleWaitUnlink(&waiter.w);
+    StandSettleLetGo(file_id);
+    return verdict;
+}
+
 /* Pages the stand holds while a cycle is refused for want of memory, and gives
  * back as the machine's memory coming back. */
 #define STAND_SETTLE_HEAP_PAGES  16u
@@ -940,6 +1076,11 @@ static const TestCase g_stand_settle_tests[] = {
     { .name = "stand_settle_ring_during_the_cycle", .func = TestStandSettleRingDuringTheCycle,
       .reach = TEST_WRITES_TO_VOLUME,
       .format = DEED_FORMAT_V1, .analog = "stand_stitch_retry_atom" },
+    { .name = "stand_settle_stitch_refusal_waits_for_the_bell",
+      .func = TestStandSettleStitchRefusalWaitsForTheBell, .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V2 },
+    { .name = "stand_settle_stitch_ring_during_the_cycle", .func = TestStandSettleStitchRingDuringTheCycle,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_settle_refusal_waits_for_its_own_event",
       .func = TestStandSettleRefusalWaitsForItsOwnEvent, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_settle_table_refusal_is_the_mediums",

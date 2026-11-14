@@ -60,6 +60,12 @@ uint64_t SettleNowUs(void);
 /* settle.c: `rc`, or — when it is OK — the refusal the stand chose for the
  * next cycle, once (TagFSStandSettleRefuses). */
 error_t  SettleStandRefusalHere(error_t rc);
+
+/* settle.c: the volume's seat rings seat:ready here, once, when the stand
+ * chose this turn of the cycle (TagFSStandSettleRings): just before the cycle
+ * takes the count its refusal is judged by, or right after its S0 — a book's
+ * TAKE. */
+void     SettleStandRingsHere(bool before_its_count);
 #endif
 
 /* settle.c: a cycle of either format settled — every Ink up to `target`, as

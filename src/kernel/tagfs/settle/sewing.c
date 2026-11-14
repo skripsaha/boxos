@@ -218,6 +218,9 @@ static void StitchTake(StitchSnap* s)
     TagFSState* fs = tagfs_get_state();
     uint32_t    coined = 0;
     uint64_t    text   = 0;
+#ifdef CONFIG_VOLUME_TESTS
+    SettleStandRingsHere(true);
+#endif
     SettleWaitersRunBegins();
     uint32_t demands = CadenceRunBegins();
     bool     room    = s->why == SETTLE_FOR_ROOM || (demands & SETTLE_DEMAND_ROOM);
@@ -251,6 +254,9 @@ static void StitchTake(StitchSnap* s)
     ReadPaceTake(&s->pace);
     s->made_ns = rtc_get_unix64() * 1000000000ull;
     SETTLE_CUT_CYCLE(s->target);
+#ifdef CONFIG_VOLUME_TESTS
+    SettleStandRingsHere(false);
+#endif
 }
 
 /*
