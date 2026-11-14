@@ -7,6 +7,7 @@
 #include "read_job.h"      /* ReadJobSubmit, and the stand's own answer record */
 #include "block_fail.h"    /* BLOCKFAIL that refuses nothing — a count of the reads of a block */
 #include "touch.h"
+#include "boardroom.h"
 #include "cpu_calibrate.h"
 
 #ifdef CONFIG_VOLUME_TESTS
@@ -453,43 +454,78 @@ out:
 
 // ----------------------------------------------------------------------------
 // A partial write over a rotten block is refused; a whole one is not (RT-22)
+//
+// The block rots on the medium behind its digest's back — a byte flipped by
+// the Boardroom's own doors, the same on either format — and a read of it
+// says so. Sixteen bytes written into it, which would read the rest of the
+// block and lay a fresh digest over the rot, are refused; a write of the whole
+// block reads nothing of it and is taken. Where the whole block lands is the
+// volume's to choose: over the old one, or on fresh ground (a book, §3.1). A
+// block the file no longer names is given its own bytes back, so no rot the
+// test made is left on the medium either way.
 // ----------------------------------------------------------------------------
+
+/* `bytes` laid on `block` of the medium by the Boardroom's door, behind every
+ * digest's back. */
+static bool StandReadBlockPut(uint64_t block, const uint8_t* bytes)
+{
+    return BoardroomWrite(tagfs_get_seat(), tagfs_block_to_sector(block), TAGFS_BLOCK_SECTORS, bytes,
+                          NULL) == 0;
+}
 
 static TestResult TestStandReadRmwRefusesRot(void)
 {
-    TestResult  verdict = TEST_PASS;
-    uint64_t    file_id = 0;
-    uint64_t    first   = 0;
-    bool        rotten  = false;
-    uint8_t*    was     = g_test_buffer;
-    uint8_t*    whole   = g_test_buffer + TAGFS_BLOCK_SIZE;
-    const char* aside   = StandStepsAsideFor();
+    TestResult       verdict = TEST_PASS;
+    uint8_t          seat    = tagfs_get_seat();
+    uint64_t         file_id = 0;
+    uint64_t         first   = 0, now = 0, got = 0;
+    bool             rotten  = false;
+    uint8_t*         was     = g_test_buffer;
+    uint8_t*         rot     = g_test_buffer + TAGFS_BLOCK_SIZE;
+    uint8_t*         whole   = g_test_buffer + 2 * TAGFS_BLOCK_SIZE;
+    TagFSFileHandle* handle  = NULL;
+    const char*      aside   = StandStepsAsideFor();
 
     if (aside)
         return test_steps_aside(aside);
-    if (!IntegrityIsInitialized())
-        return test_steps_aside("verify-on-read is not armed on this volume, so no rot "
-                                "can be caught");
 
     TEST_ASSERT(StandReadMakeRun(1, 0x76, &file_id, &first), "a one-block file is made");
-    TEST_ASSERT(StandReadRot(first, was), "its block rots on the medium, behind the map's back");
+    TEST_ASSERT_OK(BoardroomRead(seat, tagfs_block_to_sector(first), TAGFS_BLOCK_SECTORS, was),
+                   "its block is read off the medium");
+    memcpy(rot, was, TAGFS_BLOCK_SIZE);
+    rot[100] ^= 0xFF;
+    TEST_ASSERT(StandReadBlockPut(first, rot), "and rots there, behind its digest's back");
     rotten = true;
+    tagfs_readahead_invalidate(first);
+    handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
+    TEST_ASSERT(handle != NULL, "the file is opened to read");
+    TEST_ASSERT_EQ(tagfs_read(handle, g_test_output, TAGFS_BLOCK_SIZE, &got), ERR_CHECKSUM,
+                   "a read of the block answers that it does not hold what was written");
+    tagfs_close(handle);
+    handle = NULL;
 
     TEST_ASSERT(StandWriteAt(file_id, 100, "sixteen bytes...", 16) < 0,
                 "sixteen bytes laid over the rotten block are refused");
     TestFillAt(whole, TAGFS_BLOCK_SIZE, 0x77, 0);
     TEST_ASSERT_EQ(StandWriteAt(file_id, 0, whole, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
                    "a write that covers the block whole is taken: it reads nothing of it");
+    TEST_ASSERT(StandBlockOf(file_id, 0, &now), "the file's block is found again");
+    if (now != first)
+        TEST_ASSERT(StandReadBlockPut(first, was), "the block the file left is given its own bytes back");
     rotten = false;
     TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
-                   "and the block reads again");
+                   "and the file's block reads again");
     TEST_ASSERT_EQ(TestFirstDifference(g_test_output, whole, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
                    "holding what the whole write left");
 out:
-    if (rotten && tagfs_write_block(first, was) != OK)
-        verdict = TestFailedAt(__FILE__, __LINE__,
-                               "the rotten block would not take its bytes back — the map and "
-                               "the medium disagree over it (block, 0)", first, 0);
+    tagfs_close(handle);
+    if (rotten) {
+        if (!StandReadBlockPut(first, was))
+            verdict = TestFailedAt(__FILE__, __LINE__,
+                                   "the rotten block would not take its bytes back — the medium and "
+                                   "its digest disagree over it (block, 0)", first, 0);
+        tagfs_readahead_invalidate(first);
+    }
     if (file_id)
         tagfs_delete_file(file_id, INK_UNWARRANTED);
     return verdict;
@@ -675,8 +711,7 @@ static const TestCase g_stand_read_tests[] = {
     { .name = "stand_read_rmw_refuses_rot", .func = TestStandReadRmwRefusesRot,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a partial write over a rotten block lays its bytes over the rot and "
-                       "writes it back under a fresh digest, so the rot is the file's for good",
-      .format = DEED_FORMAT_V1, .analog = "stand_tally_rot_three_paths" },
+                       "writes it back under a fresh digest, so the rot is the file's for good" },
 };
 
 const TestSuite g_stand_read_suite = {

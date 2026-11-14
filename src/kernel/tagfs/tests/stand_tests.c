@@ -226,18 +226,23 @@ out:
     return verdict;
 }
 
-/* A refused write is refused before the driver is called, so the block keeps
- * what it held: the file's write answers -1, and the block reads back as it
- * was. Read straight off the medium first, past the digest a read through
- * TagFS checks it against: a refused write that landed anyway would be a
- * digest mismatch there, refused before anything was compared — and what
- * this asks is what the medium holds. */
+/* A refused write is refused before the driver is called, so the medium keeps
+ * what it held. The write is the Boardroom's own — the door every write of
+ * TagFS reaches the medium by, on either format — of a block of a file the
+ * test made, in place: the plan refuses it, the medium is read straight back
+ * past the digest a read through TagFS checks it against (a refused write
+ * that landed anyway would be a digest mismatch there, refused before
+ * anything was compared — and what this asks is what the medium holds), and
+ * the file still reads under the digest of what it held. Where the file lies
+ * is its volume's to choose; that the medium never sees a refused command is
+ * BLOCKFAIL's, and the same on every format. */
 static TestResult TestStandBlockFailWriteNeverLands(void)
 {
     TestResult  verdict = TEST_PASS;
     uint8_t     seat    = tagfs_get_seat();
     uint64_t    file_id = 0;
     uint64_t    block   = 0;
+    uint32_t    landed  = 0;
     bool        armed   = false;
     const char* aside   = StandStepsAsideFor();
 
@@ -252,15 +257,17 @@ static TestResult TestStandBlockFailWriteNeverLands(void)
     TestFillAt(g_test_output, TAGFS_BLOCK_SIZE, 0x54, 0);
     BlockFailArm(seat, BLOCK_FAIL_WRITE, tagfs_block_to_sector(block), TAGFS_BLOCK_SECTORS, 1);
     armed = true;
-    int wrote = TestFileWrite(file_id, g_test_output, TAGFS_BLOCK_SIZE);
+    int wrote = BoardroomWrite(seat, tagfs_block_to_sector(block), TAGFS_BLOCK_SECTORS, g_test_output,
+                               &landed);
     bool fired = BlockFailFired();
     uint32_t seen = BlockFailSeen();
     BlockFailDisarm();
     armed = false;
 
-    TEST_ASSERT(fired, "the overwrite of the block was the write refused");
+    TEST_ASSERT(fired, "the write over the block was the one refused");
     TEST_ASSERT_EQ(seen, 1, "and the only one that met the plan");
-    TEST_ASSERT_EQ(wrote, -1, "the file's write answers the refusal");
+    TEST_ASSERT(wrote != 0, "the Boardroom answers the refusal");
+    TEST_ASSERT_EQ(landed, 0, "and counts no sector of it landed");
     TEST_ASSERT_OK(BoardroomRead(seat, tagfs_block_to_sector(block), TAGFS_BLOCK_SECTORS,
                                  g_test_output), "the block is read off the medium");
     TEST_ASSERT_EQ(TestFirstDifference(g_test_output, g_test_buffer, TAGFS_BLOCK_SIZE),
@@ -835,8 +842,7 @@ static const TestCase g_stand_tests[] = {
     { .name = "stand_blockfail_reads_the_nth",    .func = TestStandBlockFailReadsTheNth,
       .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_blockfail_write_never_lands", .func = TestStandBlockFailWriteNeverLands,
-      .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V1, .analog = "stand_fresh_refused_names_nothing" },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_blockfail_flush_refused",    .func = TestStandBlockFailFlushRefused,
       .reach = TEST_READS_ONLY },
     { .name = "stand_blockfail_async_read",       .func = TestStandBlockFailAsyncRead,
