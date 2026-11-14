@@ -1041,6 +1041,28 @@ void process_destroy(process_t *proc)
     process_ref_dec(proc);
 }
 
+/* The authority a program's box asks for (ImageLoaded.Asks), worn as the keys
+ * it is: the box's own word is what a cabin's keys come from here, never the
+ * tags of the file it was read from. */
+static error_t process_wear_asked(process_t *proc, uint32_t asked)
+{
+    static const struct { uint32_t Bit; const char *Key; } keys[] = {
+        { AUTH_TAG_UTILITY, "utility" },
+        { AUTH_TAG_NETWORK, "network" },
+    };
+    for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        if (!(asked & keys[i].Bit))
+            continue;
+        error_t rc = process_add_tag(proc, keys[i].Key);
+        if (rc != OK) {
+            kprintf("[PROCESS] ERROR: PID %u could not be given the '%s' its box asks for\n",
+                    proc->pid, keys[i].Key);
+            return rc;
+        }
+    }
+    return OK;
+}
+
 error_t process_load_binary(process_t *proc, const ImageSource *source, const char *name)
 {
     if (!proc || !proc->cabin || !source || source->Bytes == 0 || !name)
@@ -1123,6 +1145,10 @@ error_t process_load_binary(process_t *proc, const ImageSource *source, const ch
 
     proc->cabin->code_size = (size_t)source->Bytes;
     proc->cabin->rise      = loaded.Rise;
+
+    error_t worn = process_wear_asked(proc, loaded.Asks);
+    if (worn != OK)
+        return worn;
     proc->context.rip = entry_point;
     proc->context.rsp = stack_top;
 

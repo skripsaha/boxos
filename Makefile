@@ -1479,79 +1479,81 @@ $(VOLUME_FORMAT_MARK): | $(BUILDDIR)
 # A file's tags are its user's words and the system reads none of them. What the
 # system keeps a file as is its role, a word of its own in front of the tags:
 # "@kernel" for the kernel (the one the Deed points the loader at), "@system" for
-# the programs the machine runs on; a file with none is ordinary.
+# the programs the machine runs on; a file with none is ordinary. What a file IS
+# is what it holds — a box is a program — and what a program may do is what its
+# box asks for (PACK_ASKS below), so no tag here says either.
 VOLUME_CONTENT = \
 	$(KERNEL_BIN)   "@kernel" \
-	$(DISPLAY_BIN)  "@system display,utility" \
-	$(HUB_BIN)      "@system utility,app" \
-	$(PROCA_BIN)    "app" \
-	$(PROCB_BIN)    "app" \
-	$(TODAY_BIN)    "app,utility" \
-	$(MEMTEST_BIN)  "app,utility" \
-	$(MTEST_BIN)    "utility,memory" \
-	$(CHAIN_BIN)    "app,utility" \
-	$(DECKS_BIN)    "app,utility" \
-	$(BENCH_BIN)         "app,utility,bench" \
-	$(TOUCH_TEST_BIN)    "app,utility,test" \
-	$(TOUCH_STRESS_BIN)  "app,utility,test" \
-	$(LIFECYCLE_BIN)     "app,utility,test" \
-	$(PERSIST_BIN)       "app,utility,test" \
-	$(WRITE_STRESS_BIN)  "app,utility,test" \
-	$(WRITE_CONC_BIN)    "app,utility,test" \
-	$(WRITE_OBS_BIN)     "app,utility,test" \
-	$(COW_TEST_BIN)      "app,utility,test" \
-	$(ANCHOR_TEST_BIN)   "app,utility,test" \
-	$(BAY_TEST_BIN)      "app,utility,test" \
-	$(BROOK_TEST_BIN)    "app,utility,test" \
-	$(CURRENT_TEST_BIN)  "app,utility,test" \
-	$(HTEST_BIN)         "app,utility,test" \
-	$(CXXTEST_BIN)       "app,utility,test,cxx" \
-	$(STRANDTEST_BIN)    "app,utility,test" \
-	$(BROOKSTRAND_BIN)   "app,utility,test" \
-	$(BROOKEXEC_BIN)     "app,utility,test,cxx" \
-	$(CURRENTEXEC_BIN)   "app,utility,test,cxx" \
-	$(CLOCK_BIN)         "app,utility,clock" \
-	$(PULSE_BIN)         "@system app,utility" \
-	$(CALENDAR_BIN)      "app,utility,calendar" \
-	$(BONSAI_BIN)        "app,utility,fun" \
-	$(BIGCLOCK_BIN)      "app,utility,clock" \
-	$(SNAKE_BIN)         "app,utility,game,fun" \
-	$(HACKER_BIN)        "app,utility,fun" \
-	$(PIPES_BIN)         "app,utility,fun" \
-	$(WORDLE_BIN)        "app,utility,game,fun" \
-	$(STRANDPARK_BIN)    "app,utility,test" \
-	$(CHILDSPIN_BIN)     "app,utility,test" \
-	$(PRINT_STRESS_BIN)  "app,utility,test" \
-	$(QUIETPRINT_BIN)    "app,utility,test" \
-	$(EXITPATHS_BIN)     "app,utility,test,cxx" \
-	$(QUILLTEST_BIN)     "@system app,utility,test" \
-	$(UTILS_DIR)/create.elf  "utility,storage" \
-	$(UTILS_DIR)/show.elf    "utility,storage" \
-	$(UTILS_DIR)/hexer.elf   "utility,storage" \
-	$(UTILS_DIR)/edit.elf    "utility,storage" \
-	$(UTILS_DIR)/seek.elf    "utility,storage" \
-	$(UTILS_DIR)/retag.elf   "utility,storage" \
-	$(UTILS_DIR)/read.elf    "utility,storage" \
-	$(UTILS_DIR)/stringview.elf "utility,storage" \
-	$(UTILS_DIR)/files.elf   "utility,storage" \
-	$(UTILS_DIR)/tag.elf     "utility,storage" \
-	$(UTILS_DIR)/untag.elf   "utility,storage" \
-	$(UTILS_DIR)/name.elf    "utility,storage" \
-	$(UTILS_DIR)/trash.elf   "utility,storage" \
-	$(UTILS_DIR)/delete.elf  "utility,storage" \
-	$(UTILS_DIR)/assemble.elf "utility,toolchain" \
-	$(UTILS_DIR)/me.elf      "utility" \
-	$(UTILS_DIR)/info.elf    "utility,storage" \
-	$(UTILS_DIR)/inside.elf  "utility,storage" \
-	$(UTILS_DIR)/settings.elf "utility,storage" \
-	$(UTILS_DIR)/autostart.elf "@system utility" \
-	$(UTILS_DIR)/say.elf     "utility" \
-	$(UTILS_DIR)/reboot.elf  "@system utility" \
-	$(UTILS_DIR)/bye.elf     "@system utility" \
-	$(UTILS_DIR)/defrag.elf  "utility,storage" \
-	$(UTILS_DIR)/escheat.elf "@system utility,storage" \
-	$(UTILS_DIR)/fsck.elf    "utility,storage" \
-	$(UTILS_DIR)/timezone.elf "@system utility,clock" \
+	$(DISPLAY_BIN)  "@system display" \
+	$(HUB_BIN)      "@system" \
+	$(PROCA_BIN)    "" \
+	$(PROCB_BIN)    "" \
+	$(TODAY_BIN)    "" \
+	$(MEMTEST_BIN)  "" \
+	$(MTEST_BIN)    "memory" \
+	$(CHAIN_BIN)    "" \
+	$(DECKS_BIN)    "" \
+	$(BENCH_BIN)         "bench" \
+	$(TOUCH_TEST_BIN)    "test" \
+	$(TOUCH_STRESS_BIN)  "test" \
+	$(LIFECYCLE_BIN)     "test" \
+	$(PERSIST_BIN)       "test" \
+	$(WRITE_STRESS_BIN)  "test" \
+	$(WRITE_CONC_BIN)    "test" \
+	$(WRITE_OBS_BIN)     "test" \
+	$(COW_TEST_BIN)      "test" \
+	$(ANCHOR_TEST_BIN)   "test" \
+	$(BAY_TEST_BIN)      "test" \
+	$(BROOK_TEST_BIN)    "test" \
+	$(CURRENT_TEST_BIN)  "test" \
+	$(HTEST_BIN)         "test" \
+	$(CXXTEST_BIN)       "test,cxx" \
+	$(STRANDTEST_BIN)    "test" \
+	$(BROOKSTRAND_BIN)   "test" \
+	$(BROOKEXEC_BIN)     "test,cxx" \
+	$(CURRENTEXEC_BIN)   "test,cxx" \
+	$(CLOCK_BIN)         "clock" \
+	$(PULSE_BIN)         "@system" \
+	$(CALENDAR_BIN)      "calendar" \
+	$(BONSAI_BIN)        "fun" \
+	$(BIGCLOCK_BIN)      "clock" \
+	$(SNAKE_BIN)         "game,fun" \
+	$(HACKER_BIN)        "fun" \
+	$(PIPES_BIN)         "fun" \
+	$(WORDLE_BIN)        "game,fun" \
+	$(STRANDPARK_BIN)    "test" \
+	$(CHILDSPIN_BIN)     "test" \
+	$(PRINT_STRESS_BIN)  "test" \
+	$(QUIETPRINT_BIN)    "test" \
+	$(EXITPATHS_BIN)     "test,cxx" \
+	$(QUILLTEST_BIN)     "@system test" \
+	$(UTILS_DIR)/create.elf  "storage" \
+	$(UTILS_DIR)/show.elf    "storage" \
+	$(UTILS_DIR)/hexer.elf   "storage" \
+	$(UTILS_DIR)/edit.elf    "storage" \
+	$(UTILS_DIR)/seek.elf    "storage" \
+	$(UTILS_DIR)/retag.elf   "storage" \
+	$(UTILS_DIR)/read.elf    "storage" \
+	$(UTILS_DIR)/stringview.elf "storage" \
+	$(UTILS_DIR)/files.elf   "storage" \
+	$(UTILS_DIR)/tag.elf     "storage" \
+	$(UTILS_DIR)/untag.elf   "storage" \
+	$(UTILS_DIR)/name.elf    "storage" \
+	$(UTILS_DIR)/trash.elf   "storage" \
+	$(UTILS_DIR)/delete.elf  "storage" \
+	$(UTILS_DIR)/assemble.elf "toolchain" \
+	$(UTILS_DIR)/me.elf      "" \
+	$(UTILS_DIR)/info.elf    "storage" \
+	$(UTILS_DIR)/inside.elf  "storage" \
+	$(UTILS_DIR)/settings.elf "storage" \
+	$(UTILS_DIR)/autostart.elf "@system" \
+	$(UTILS_DIR)/say.elf     "" \
+	$(UTILS_DIR)/reboot.elf  "@system" \
+	$(UTILS_DIR)/bye.elf     "@system" \
+	$(UTILS_DIR)/defrag.elf  "storage" \
+	$(UTILS_DIR)/escheat.elf "@system storage" \
+	$(UTILS_DIR)/fsck.elf    "storage" \
+	$(UTILS_DIR)/timezone.elf "@system clock" \
 	$(USERSPACE_DIR)/hello.txt   "message,text" \
 	$(USERSPACE_DIR)/hello.asm   "code,asm,example" \
 	$(USERSPACE_DIR)/countdown.asm "code,asm,example" \
@@ -1562,64 +1564,64 @@ VOLUME_CONTENT = \
 	$(USERSPACE_DIR)/planets.inc "code,asm,example" \
 	$(USERSPACE_DIR)/lines.inc "code,asm,asmlib" \
 	$(USERSPACE_DIR)/lines_core.inc "code,asm,asmlib" \
-	$(USERSPACE_DIR)/tidy "itinerary,example" \
-	$(USERSPACE_DIR)/try "itinerary,example" \
+	$(USERSPACE_DIR)/tidy "example" \
+	$(USERSPACE_DIR)/try "example" \
 	$(USERSPACE_DIR)/file.txt    "file,info,message,text" \
 	$(USERSPACE_DIR)/guide.md    "guide,text" \
-	$(TESTBIN_EMPTY)         "binary, test:forerror, emptyfile" \
-	$(UTILS_DIR)/ipc_test.elf "utility" \
-	$(UTILS_DIR)/memtag.elf  "@system utility,memory" \
-	$(UTILS_DIR)/hw.elf      "@system utility,hardware" \
-	$(UTILS_DIR)/usetest.elf "@system utility,test" \
-	$(UTILS_DIR)/faretest.elf "@system utility,test" \
-	$(UTILS_DIR)/luggagetest.elf "utility,test" \
-	$(UTILS_DIR)/logsave.elf "@system utility,log" \
-	$(UTILS_DIR)/lastsaid.elf "@system utility,log" \
-	$(UTILS_DIR)/rollcall.elf "utility,test" \
-	$(UTILS_DIR)/handset.elf "utility,test" \
-	$(UTILS_DIR)/headcount.elf "utility,test" \
-	$(UTILS_DIR)/playtime.elf "utility,fun" \
-	$(UTILS_DIR)/lavalamp.elf "utility,fun" \
-	$(UTILS_DIR)/finish.elf   "@system utility" \
-	$(UTILS_DIR)/taskboard.elf "@system utility" \
-	$(UTILS_DIR)/scratchpad.elf "utility,text" \
-	$(UTILS_DIR)/memmap.elf "@system utility,memory" \
-	$(UTILS_DIR)/calculate.elf "utility" \
-	$(UTILS_DIR)/difference.elf "utility,storage" \
-	$(UTILS_DIR)/copy.elf "utility,storage" \
-	$(UTILS_DIR)/typer.elf "utility,fun" \
-	$(UTILS_DIR)/flame.elf "utility,fun" \
-	$(UTILS_DIR)/checksum.elf "utility,storage" \
-	$(UTILS_DIR)/passport.elf "@system utility" \
-	$(UTILS_DIR)/aquarium.elf "utility,fun" \
-	$(UTILS_DIR)/nyancat.elf "utility,fun" \
-	$(UTILS_DIR)/fireworks.elf "utility,fun" \
-	$(UTILS_DIR)/2048.elf "utility,game,fun" \
-	$(UTILS_DIR)/tetris.elf "utility,game,fun" \
-	$(UTILS_DIR)/todo.elf "utility" \
-	$(UTILS_DIR)/tagmap.elf "utility,storage" \
-	$(UTILS_DIR)/mandelbrot.elf "utility,fun" \
-	$(UTILS_DIR)/qr.elf "utility" \
-	$(UTILS_DIR)/minesweeper.elf "utility,game,fun" \
-	$(UTILS_DIR)/eyes.elf "utility,fun" \
-	$(UTILS_DIR)/donut.elf "utility,fun" \
-	$(UTILS_DIR)/slime.elf "utility,fun" \
-	$(UTILS_DIR)/tumbleweed.elf "utility,fun" \
-	$(UTILS_DIR)/crab.elf      "utility,fun" \
-	$(UTILS_DIR)/garden.elf    "utility,fun" \
-	$(UTILS_DIR)/gardener.elf  "@system utility,gardener" \
-	$(UTILS_DIR)/wizard.elf    "utility,fun,game" \
-	$(UTILS_DIR)/random.elf    "utility,fun" \
-	$(UTILS_DIR)/sand.elf "utility,fun,game" \
-	$(UTILS_DIR)/forest.elf    "utility,fun" \
-	$(UTILS_DIR)/coinflip.elf  "utility,fun,game" \
-	$(UTILS_DIR)/dice.elf      "utility,fun,game" \
-	$(UTILS_DIR)/orbits.elf    "utility,fun" \
-	$(UTILS_DIR)/casino.elf "utility,fun,game" \
-	$(UTILS_DIR)/seabattle.elf "utility,fun,game" \
-	$(UTILS_DIR)/whale.elf "utility,fun" \
-	$(UTILS_DIR)/hangman.elf   "utility,fun,game" \
-	$(UTILS_DIR)/duppo.elf     "utility,fun"
+	$(TESTBIN_EMPTY)         "binary,test:forerror,emptyfile" \
+	$(UTILS_DIR)/ipc_test.elf "" \
+	$(UTILS_DIR)/memtag.elf  "@system memory" \
+	$(UTILS_DIR)/hw.elf      "@system hardware" \
+	$(UTILS_DIR)/usetest.elf "@system test" \
+	$(UTILS_DIR)/faretest.elf "@system test" \
+	$(UTILS_DIR)/luggagetest.elf "test" \
+	$(UTILS_DIR)/logsave.elf "@system log" \
+	$(UTILS_DIR)/lastsaid.elf "@system log" \
+	$(UTILS_DIR)/rollcall.elf "test" \
+	$(UTILS_DIR)/handset.elf "test" \
+	$(UTILS_DIR)/headcount.elf "test" \
+	$(UTILS_DIR)/playtime.elf "fun" \
+	$(UTILS_DIR)/lavalamp.elf "fun" \
+	$(UTILS_DIR)/finish.elf   "@system" \
+	$(UTILS_DIR)/taskboard.elf "@system" \
+	$(UTILS_DIR)/scratchpad.elf "text" \
+	$(UTILS_DIR)/memmap.elf "@system memory" \
+	$(UTILS_DIR)/calculate.elf "" \
+	$(UTILS_DIR)/difference.elf "storage" \
+	$(UTILS_DIR)/copy.elf "storage" \
+	$(UTILS_DIR)/typer.elf "fun" \
+	$(UTILS_DIR)/flame.elf "fun" \
+	$(UTILS_DIR)/checksum.elf "storage" \
+	$(UTILS_DIR)/passport.elf "@system" \
+	$(UTILS_DIR)/aquarium.elf "fun" \
+	$(UTILS_DIR)/nyancat.elf "fun" \
+	$(UTILS_DIR)/fireworks.elf "fun" \
+	$(UTILS_DIR)/2048.elf "game,fun" \
+	$(UTILS_DIR)/tetris.elf "game,fun" \
+	$(UTILS_DIR)/todo.elf "" \
+	$(UTILS_DIR)/tagmap.elf "storage" \
+	$(UTILS_DIR)/mandelbrot.elf "fun" \
+	$(UTILS_DIR)/qr.elf "" \
+	$(UTILS_DIR)/minesweeper.elf "game,fun" \
+	$(UTILS_DIR)/eyes.elf "fun" \
+	$(UTILS_DIR)/donut.elf "fun" \
+	$(UTILS_DIR)/slime.elf "fun" \
+	$(UTILS_DIR)/tumbleweed.elf "fun" \
+	$(UTILS_DIR)/crab.elf      "fun" \
+	$(UTILS_DIR)/garden.elf    "fun" \
+	$(UTILS_DIR)/gardener.elf  "@system gardener" \
+	$(UTILS_DIR)/wizard.elf    "fun,game" \
+	$(UTILS_DIR)/random.elf    "fun" \
+	$(UTILS_DIR)/sand.elf "fun,game" \
+	$(UTILS_DIR)/forest.elf    "fun" \
+	$(UTILS_DIR)/coinflip.elf  "fun,game" \
+	$(UTILS_DIR)/dice.elf      "fun,game" \
+	$(UTILS_DIR)/orbits.elf    "fun" \
+	$(UTILS_DIR)/casino.elf "fun,game" \
+	$(UTILS_DIR)/seabattle.elf "fun,game" \
+	$(UTILS_DIR)/whale.elf "fun" \
+	$(UTILS_DIR)/hangman.elf   "fun,game" \
+	$(UTILS_DIR)/duppo.elf     "fun"
 
 # ‼ EVERY PROGRAM ON THE VOLUME IS A BOX. VOLUME_CONTENT names the programs as
 # the tree links them; each ELF there goes onto the volume as the box tools/pack
@@ -1631,10 +1633,19 @@ VOLUME_ELFS  = $(filter %.elf,$(VOLUME_CONTENT))
 VOLUME_BOXES = $(foreach elf,$(VOLUME_ELFS),$(call Box,$(elf)))
 VOLUME_LAID  = $(foreach word,$(VOLUME_CONTENT),$(if $(filter %.elf,$(word)),$(call Box,$(word)),$(word)))
 
+# ‼ WHAT A PROGRAM ASKS FOR is said in its box (the part `asks`, box_reader.h),
+# by whoever makes the box, and is all the authority a program is given beyond
+# what every program has — a file's tags are not read. Every program of the tree
+# asks for `utility` (to start programs, read the log, flush the disks) but those
+# named in PACK_ASKS_NOTHING — the two that only talk to their spawner — which
+# ask for nothing. `system` is not asked for: it is the role of a file (@system).
+PACK_ASKS_NOTHING = proca procb
+PackAsks = $(if $(filter $(basename $(notdir $(1))),$(PACK_ASKS_NOTHING)),,--ask utility)
+
 define BoxRule
 $(call Box,$(1)): $(1) $(PACK_TOOL)
 	@mkdir -p $$(dir $$@)
-	@$(PACK_TOOL) $(1) $$@
+	@$(PACK_TOOL) $(call PackAsks,$(1)) $(1) $$@
 endef
 $(foreach elf,$(VOLUME_ELFS),$(eval $(call BoxRule,$(elf))))
 

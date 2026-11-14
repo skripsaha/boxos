@@ -2,6 +2,7 @@
 #include "box_reader.h"
 #include "box_needs.h"
 #include "box_loaded.h"
+#include "auth_tags.h"
 #include "nameplate_format.h"
 #include "cabin_layout.h"
 #include "kernel_config.h"
@@ -665,6 +666,17 @@ error_t BoxLoad(vmm_context_t *vmm, const ImageSource *source, const char *name,
             rc = BoxRefuse(&load, verdict, &part);
         if (rc == OK)
             loaded->Rise = life.Rise != 0;
+        BoxLetGo(&held);
+    }
+    /* What it asks to be allowed (box_reader.h); what it does not ask it is not
+     * given, and `system` is not its to ask. */
+    if (rc == OK && BoxPartOfKind(&load.Table, BOX_KIND_ASKS, &part)) {
+        BoxAsks asks;
+        rc = BoxHoldPart(&load, &part, &held);
+        if (rc == OK && (verdict = BoxAsksRead(held.Bytes, part.Size, &asks, NULL)) != BOX_OK)
+            rc = BoxRefuse(&load, verdict, &part);
+        if (rc == OK)
+            loaded->Asks = (asks.Utility ? AUTH_TAG_UTILITY : 0u) | (asks.Network ? AUTH_TAG_NETWORK : 0u);
         BoxLetGo(&held);
     }
     if (rc == OK && BoxPartOfKind(&load.Table, BOX_KIND_DOORS, &part)) {

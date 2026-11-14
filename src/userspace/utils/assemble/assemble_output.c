@@ -21,13 +21,6 @@ static int TagBlank(char C)
     return C == ' ' || C == '\t';
 }
 
-int AssembleTagsHaveKey(const char *Tags, const char *Key)
-{
-    BoxAsmTag Wanted = { Key, strlen(Key), NULL, 0 };
-
-    return BoxAsmTagsHold(Tags, &Wanted, 1);
-}
-
 static int WearsEvery(const char *Worn, const char *Wanted)
 {
     BoxAsmTag Tag;
@@ -332,8 +325,7 @@ static int ReplaceProgram(const AssembleRequest *Request, const BoxAsmBlob *Imag
     return Rc;
 }
 
-/* What was made, the tags it wears, and app when it is new to the program:
- * a program put in place of one that wore app was given nothing. */
+/* What was made, and the tags it wears. */
 static void SayPublished(const AssembleRequest *Request, file_id_t FileId,
                          const AssembleCandidate *Replaced)
 {
@@ -346,9 +338,6 @@ static void SayPublished(const AssembleRequest *Request, file_id_t FileId,
         printf("tags: %s\n", Metadata.Tags ? Metadata.Tags : "(none)");
         FileMetadataRelease(&Metadata);
     }
-    if (Request->AddedApp &&
-        !(Replaced && AssembleTagsHaveKey(Replaced->Metadata.Tags, "app")))
-        println("added app: without app or utility the hub cannot start it");
 }
 
 /* A program made again by its Recipe takes its own place: no name is looked

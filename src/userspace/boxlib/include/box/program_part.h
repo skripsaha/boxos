@@ -29,6 +29,11 @@ typedef enum {
     PROGRAM_BOX,
 } ProgramKind;
 
+/* What the file is: *Kind a box, an ELF image or no program, told by the file's
+ * first bytes alone — nothing of what it is called or tagged. 0, or why it
+ * could not be read. */
+int program_kind(file_id_t file, ProgramKind *kind);
+
 /* The part called Name of the program File. 1: found, *Bytes a heap copy with
  * a NUL after it (NULL when the part is empty), *Size its size. 0: the program
  * has no such part, or the file is no program. Negative: a program that cannot

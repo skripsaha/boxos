@@ -233,5 +233,34 @@ refuse "a text file" "$LIB/user.ld" "not an ELF file"
 patch src/userspace/utils/hw.elf "$WORK/badform.elf" badform || harness "could not break hw's Form (badform)"
 refuse "a Form that is no text" "$WORK/badform.elf" "is not text as a box keeps its part form"
 
+# ── what a program asks for: the box says it, and pack refuses what no one reads ──
+if "$WORK/pack" --ask utility --ask network "$WORK/small_rela.elf" "$WORK/asked.box" 2> "$WORK/ask.err" &&
+   grep -qF "$(printf 'asks 1\nask utility\nask network\n')" "$WORK/asked.box"; then
+    passed=$((passed + 1))
+else
+    echo "FAIL pack did not put the asks in the box: $(cat "$WORK/ask.err")"
+    failed=$((failed + 1))
+fi
+if "$WORK/pack" "$WORK/small_rela.elf" "$WORK/plain.box" 2> "$WORK/ask.err" && ! grep -qF 'asks 1' "$WORK/plain.box"; then
+    passed=$((passed + 1))
+else
+    echo "FAIL a box packed with no --ask asks for something: $(cat "$WORK/ask.err")"
+    failed=$((failed + 1))
+fi
+refuse_ask() {   # refuse_ask LABEL WORDS WORD...
+    local label=$1 said=$2; shift 2
+    if "$WORK/pack" "$@" "$WORK/small_rela.elf" "$WORK/refused.box" 2> "$WORK/refuse.err"; then
+        echo "FAIL pack took $label"
+        failed=$((failed + 1))
+    elif grep -qF "$said" "$WORK/refuse.err"; then
+        passed=$((passed + 1))
+    else
+        echo "FAIL pack refused $label, but said: $(cat "$WORK/refuse.err")"
+        failed=$((failed + 1))
+    fi
+}
+refuse_ask "an ask for system" "nobody who starts a program knows" --ask system
+refuse_ask "an ask twice" "the same thing twice" --ask utility --ask utility
+
 echo "pack: $passed passed, $failed failed — $(( ${#pairs[@]} / 2 )) programs packed"
 [ "$failed" -eq 0 ]

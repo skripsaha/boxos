@@ -19,7 +19,6 @@ typedef struct {
     char        OutputName[64];
     char        Tags[2048];
     size_t      TagLength;
-    int         AddedApp;
     char       *SourceBytes;
     size_t      SourceSize;
 } AssembleRequest;
@@ -38,9 +37,6 @@ int AssembleRecipe(const char *Context, char **Text, size_t *Length);
  * whole build looks in, taken once so a context said meanwhile moves none of
  * it. Returns 0 or a negative -error_t. */
 int AssembleTakeContext(char **Out);
-
-/* Whether the comma list wears a tag with this key, with or without a value. */
-int AssembleTagsHaveKey(const char *Tags, const char *Key);
 
 /* The built image put on the volume as the program the request names: the
  * one it replaces found by name and tags, asked about when more than one

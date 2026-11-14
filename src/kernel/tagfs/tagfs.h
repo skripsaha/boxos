@@ -846,11 +846,6 @@ uint32_t TagFSLookupSpelling(const TagSpelling* tag);
 error_t  tagfs_tag_intern(const char* tag, uint32_t* out_id);
 error_t  TagFSInternSpelling(const TagSpelling* tag, uint32_t* out_id);
 
-/* The key of a tag id — "app" out of "app:editor" — copied whole into `out`,
- * or not at all: false when the volume has no such tag or the key would not
- * fit, never a shorter key. */
-bool     tagfs_tag_key (uint32_t tag_id, char* out, size_t out_size);
-
 /* The whole text of a tag id — "app:editor" — and its length. It is written
  * into `out` only when it fits whole, NUL and all, and `out` is left empty
  * otherwise, so a caller is never handed a shorter tag than the one it asked
@@ -862,19 +857,6 @@ size_t   tagfs_tag_text(uint32_t tag_id, char* out, size_t out_size);
  * place in the volume's registry. */
 bool     TagFSTagMatches(uint32_t tag_id, const TagSpelling* pattern);
 
-/* What a process started from a file wears: the keys of the file's `count`
- * tags, comma-joined in a heap string the caller kfree's, whole however long —
- * but for the keys system and god, which a file's tags never give: a file is
- * its user's to tag with any word, and a program is given the system's
- * authority only by its record, whose `flags` carry the role
- * (TAGFS_FILE_ROLE_SYSTEM adds the key system). An id the volume does not know
- * is passed over. NULL when there is no memory, or no volume. */
-char*    TagFSProgramKeys(const uint32_t* tag_ids, uint32_t count, uint32_t flags);
-
-/* Whether one of `count` tags has the key `key` — "raw" is the key of "raw" and
- * of "raw:anything" — read in place in the volume's registry. False when none
- * has, and when there is no volume. */
-bool     TagFSKeyAmong(const uint32_t* tag_ids, uint32_t count, const char* key);
 
 /* A tag's key and value as spans into the volume's registry, and whether the
  * volume calls the tag its own — no copy, for a caller that is INSIDE THE

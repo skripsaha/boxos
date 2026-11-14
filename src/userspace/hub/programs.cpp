@@ -1,17 +1,22 @@
-/* programs.cpp — the files that are programs, and the one a name means. */
+/* programs.cpp — the files that are programs, and the one a name means.
+ *
+ * What a file is comes from what it holds, never from the tags its person
+ * gave it: a program holds a box or an ELF image (box/program_part.h), an
+ * Itinerary begins with its header line (itinerary.h). */
 
 #include "programs.h"
 
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 #include "box/error.h"
 #include "box/file.h"
 #include "box/form.h"
+#include "box/program_part.h"
 
 #include "asking.h"
 #include "hub.h"
+#include "itinerary.h"
 #include "say.h"
 #include "tags.h"
 #include "volume.h"
@@ -22,12 +27,16 @@ namespace {
 
 bool ProgramFile(const volume::Record &File)
 {
-    return tags::Wears(File.Tags(), "app") || tags::Wears(File.Tags(), "utility");
+    ProgramKind Kind = PROGRAM_NONE;
+    return program_kind(File.Id(), &Kind) == 0 && Kind != PROGRAM_NONE;
 }
 
 bool ItineraryFile(const volume::Record &File)
 {
-    return tags::Wears(File.Tags(), "itinerary");
+    constexpr std::string_view Header = itinerary::Header;
+    const std::expected<std::string, int> Head = volume::Read(File.Id(), 0, Header.size() + 1);
+    return Head && Head->size() == Header.size() + 1 && std::string_view(*Head).starts_with(Header) &&
+           (Head->back() == '\n' || Head->back() == '\r');
 }
 
 bool CommandFile(const volume::Record &File)
@@ -75,15 +84,11 @@ std::size_t StemLength(std::string_view FileName)
 
 void EachCommand(const std::function<void(file_id_t, std::string_view)> &Visit)
 {
-    std::unordered_set<file_id_t> Seen;
-    for (const char *Tag : {"app", "utility", "itinerary"}) {
-        file_id_t *Ids = nullptr;
-        const int  Count = query_all_everywhere(Tag, "trashed", &Ids);
-        for (file_id_t File : volume::Taken(Ids, Count)) {
-            if (!Seen.insert(File).second) continue;
-            const std::expected<volume::Record, int> Held = volume::Record::Of(File);
-            if (Held && CommandFile(*Held) && !Held->Name().empty()) Visit(File, Held->Name());
-        }
+    file_id_t *Ids   = nullptr;
+    const int  Count = query_all_everywhere(nullptr, "trashed", &Ids);
+    for (file_id_t File : volume::Taken(Ids, Count)) {
+        const std::expected<volume::Record, int> Held = volume::Record::Of(File);
+        if (Held && !Held->Name().empty() && CommandFile(*Held)) Visit(File, Held->Name());
     }
 }
 
@@ -152,7 +157,7 @@ Picked PickThing(Hub &Self, std::string_view Thing)
 
     Picked Program = ChooseOne(Self.Shown, Thing, Found);
     if (Program && !IsProgram(*Program) && !IsItinerary(*Program)) {
-        Say("run: {} is not a program: it wears neither app, utility nor itinerary\n", Thing);
+        Say("run: {} is neither a program nor an itinerary\n", Thing);
         return std::unexpected(Said);
     }
     return Program;

@@ -27,6 +27,7 @@
 #include "box/form.h"
 #include "box/memory.h"
 #include "box/print.h"
+#include "box/program_part.h"
 #include "box/string.h"
 #include "box/system.h"
 
@@ -103,7 +104,8 @@ static void show_going(const Going *going)
         FileMetadata metadata;
         bool         read = FileMetadataRead(going->Ids[i], &metadata) == 0;
         bool         trashed = read && FileMetadataWears(&metadata, "trashed");
-        bool         program = read && (FileMetadataWears(&metadata, "app") || FileMetadataWears(&metadata, "utility"));
+        ProgramKind  kind    = PROGRAM_NONE;
+        bool         program = read && program_kind(going->Ids[i], &kind) == 0 && kind != PROGRAM_NONE;
         out += !trashed;
         programs += program;
         if (i < SHOWN_FILES) {

@@ -942,6 +942,59 @@ static inline BoxVerdict BoxLifeRead(const uint8_t *bytes, uint64_t size, BoxLif
     return BOX_OK;
 }
 
+/* ── asks ────────────────────────────────────────────────────────────────── *
+ *
+ * What a program asks to be allowed, a line each after "asks 1":
+ *
+ *   ask utility [why]   to start other programs, to read the machine's log,
+ *                       to flush a disk and to defragment a file
+ *   ask network [why]   to use the network
+ *
+ * The why is words for the person and is not read. What a program does not ask
+ * it is not given: a box with no `asks` part may use storage and the other
+ * things every program may, and nothing more. `system` is never asked: it is
+ * the role of a file on the volume (TAGFS_FILE_ROLE_SYSTEM), and a box cannot
+ * say it of itself. A line of an ask this reader does not know is passed over
+ * and is not granted; *unknown says the first, as BoxLifeRead's does.
+ */
+
+typedef struct {
+    uint8_t Utility;
+    uint8_t Network;
+} BoxAsks;
+
+static inline BoxVerdict BoxAsksRead(const uint8_t *bytes, uint64_t size, BoxAsks *out, uint64_t *unknown)
+{
+    BoxText    text;
+    BoxVerdict verdict = BoxTextBegin(bytes, size, BOX_KIND_ASKS, &text);
+    out->Utility = 0;
+    out->Network = 0;
+    if (unknown) *unknown = 0;
+    if (verdict != BOX_OK) return verdict;
+
+    const uint8_t *line, *word = NULL;
+    uint64_t       length, word_length = 0;
+    while (BoxTextLine(&text, &line, &length)) {
+        uint64_t at = 0;
+        if (!BoxTextWord(line, length, &at, &word, &word_length) || !BoxSpanIs(word, word_length, "ask"))
+            return BOX_TEXT_LAYOUT;
+        if (!BoxTextWord(line, length, &at, &word, &word_length)) return BOX_TEXT_LAYOUT;
+        uint8_t *asked = BoxSpanIs(word, word_length, "utility") ? &out->Utility
+                       : BoxSpanIs(word, word_length, "network") ? &out->Network : NULL;
+        if (!asked) {
+            if (unknown && *unknown == 0) {
+                uint64_t number = 1;
+                for (const uint8_t *at_byte = bytes; at_byte < line; at_byte++) number += *at_byte == '\n';
+                *unknown = number;
+            }
+            continue;
+        }
+        if (*asked) return BOX_TEXT_LAYOUT;
+        *asked = 1;
+    }
+    return BOX_OK;
+}
+
 /* ── words for a refusal ─────────────────────────────────────────────────── */
 
 /* The reason a verdict refuses, said so it follows "is not started: "; a

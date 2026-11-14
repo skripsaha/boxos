@@ -1,7 +1,11 @@
 /*
  * pack — a program as the tree links it, an ELF, made a box (src/include/box_format.h).
  *
- *     tools/pack PROGRAM.elf PROGRAM.box
+ *     tools/pack [--ask WORD]... PROGRAM.elf PROGRAM.box
+ *
+ * What a program may do is what its box asks for (the part `asks`, box_reader.h
+ * BoxAsksRead), and the program's maker says it: each --ask is one word the box
+ * asks for — utility or network. A box packed with none asks for nothing.
  *
  * The ELF stays on the build machine, for the debugger; the box is what goes
  * on the volume. What goes where:
@@ -18,6 +22,7 @@
  *   .boxos.settings    settings loaded at start, read-only; the text, every setting read
  *   .boxos.life        life     the text, each word known
  *   .boxos.recipe      recipe   the text, its C string's zeros dropped
+ *   --ask WORD         asks     the words, a line each after `asks 1`
  *
  * An executable linked at a fixed address (ET_EXEC) keeps its addresses: its
  * box has no fixups and is loaded where it was linked. A static PIE (ET_DYN)
@@ -401,6 +406,31 @@ static void CheckLife(const uint8_t *bytes, uint64_t size)
     }
 }
 
+/* The part `asks` for the words the program's maker said, in `text` — a word
+ * nobody who starts it knows, or one said twice, is refused at the build and
+ * not passed over: it asks for what it would never be given. */
+static size_t WriteAsks(char *text, size_t room, char **words, int count)
+{
+    size_t used = (size_t)snprintf(text, room, "asks 1\n");
+    for (int i = 0; i < count; i++) {
+        int more = snprintf(text + used, room - used, "ask %s\n", words[i]);
+        if (more < 0 || (size_t)more >= room - used) Refuse("it asks for more than a box can say");
+        used += (size_t)more;
+    }
+
+    BoxAsks  asks;
+    uint64_t unknown;
+    if (BoxAsksRead((const uint8_t *)text, used, &asks, &unknown) != BOX_OK)
+        Refuse("it asks for the same thing twice, or for a word that is no word");
+    if (unknown != 0) {
+        char why[200];
+        snprintf(why, sizeof(why), "it asks for a word nobody who starts a program knows (line %llu): utility or network",
+                 (unsigned long long)unknown);
+        Refuse(why);
+    }
+    return used;
+}
+
 static void Add(BoxPenPart *parts, uint32_t *count, const char *name, const uint8_t *bytes, uint64_t size,
                 uint64_t memory, uint64_t place, uint32_t flags)
 {
@@ -435,15 +465,22 @@ static uint8_t *ReadWhole(const char *path, uint64_t *size)
 
 int main(int argc, char **argv)
 {
-    if (argc != 3) {
-        fprintf(stderr, "usage: pack PROGRAM.elf PROGRAM.box\n");
+    char *words[8];
+    int   word_count = 0, at = 1;
+    while (at + 1 < argc && strcmp(argv[at], "--ask") == 0 && word_count < 8) {
+        words[word_count++] = argv[at + 1];
+        at += 2;
+    }
+    if (argc - at != 2) {
+        fprintf(stderr, "usage: pack [--ask WORD]... PROGRAM.elf PROGRAM.box\n");
         return 2;
     }
-    g_path = argv[1];
+    const char *elf_path = argv[at], *box_path = argv[at + 1];
+    g_path = elf_path;
     if (!BoxHostHashTrue()) Refuse("the host's SHA-256 is not FIPS 180-4's");
 
-    Elf elf = { argv[1], NULL, 0 };
-    elf.File = ReadWhole(argv[1], &elf.Size);
+    Elf elf = { elf_path, NULL, 0 };
+    elf.File = ReadWhole(elf_path, &elf.Size);
     if (!elf.File) Refuse("cannot be read");
     if (elf.Size < 64 || memcmp(elf.File, "\x7F" "ELF", 4) != 0) Refuse("it is not an ELF file");
     if (elf.File[4] != 2 || elf.File[5] != 1) Refuse("it is not a 64-bit little-endian ELF");
@@ -524,6 +561,12 @@ int main(int argc, char **argv)
         Add(parts, &count, carried[i].Part, bytes, size, size, 0, carried[i].Flags);
     }
 
+    char asks_text[128];
+    if (word_count > 0) {
+        size_t asks_size = WriteAsks(asks_text, sizeof(asks_text), words, word_count);
+        Add(parts, &count, "asks", (const uint8_t *)asks_text, asks_size, asks_size, 0, 0);
+    }
+
     BoxHostHash state  = { 0 };
     BoxHasher   hasher = BoxHostHasher(&state);
     uint64_t    bytes;
@@ -541,9 +584,9 @@ int main(int argc, char **argv)
         Refuse(why);
     }
 
-    FILE *out = fopen(argv[2], "wb");
+    FILE *out = fopen(box_path, "wb");
     if (!out || fwrite(box, 1, bytes, out) != bytes || fclose(out) != 0) {
-        g_path = argv[2];
+        g_path = box_path;
         Refuse("cannot be written");
     }
 
