@@ -377,33 +377,3 @@ bool UseMemoryMediumLied(void)
 {
     return g_use_memory.lied;
 }
-
-void UseMemoryLetGo(void)
-{
-    UseMemoryState *g = &g_use_memory;
-    UseTextDrop(g->said);
-    UseTextDrop(g->memory);
-    UseChainForget(&g->settled);
-    UseChainForget(&g->pending);
-    for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++)
-        kfree(g->named[c].first);
-    for (uint32_t i = 0; i < g->loose_count; i++)
-        UseChainForget(&g->loose[i]);
-    kfree(g->orphans);
-    memset(g, 0, sizeof(*g));
-}
-
-error_t UseMemoryRecall(const uint8_t *text, uint64_t len)
-{
-    UseMemoryState *g    = &g_use_memory;
-    UseText        *said = len ? UseTextMake((const char *)text, (size_t)len) : NULL;
-    if (len && !said)
-        return ERR_NO_MEMORY;
-    TagFSLockTake(UseMemoryLock());
-    UseText *gone = g->memory;
-    g->memory     = said;
-    g->landed     = true;
-    TagFSLockDrop(UseMemoryLock());
-    UseTextDrop(gone);
-    return OK;
-}

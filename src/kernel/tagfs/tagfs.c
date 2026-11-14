@@ -9,6 +9,7 @@
 #include "file_table/file_table.h"
 #include "metadata_pool/meta_pool.h"
 #include "use_context.h"
+#include "use_memory/use_memory.h"
 #include "error.h"
 #include "ahci_sync.h"
 #include "ahci.h"
@@ -2286,9 +2287,10 @@ static void tagfs_clear_the_ground(void)
      * one after — its verdicts are stale before the book is freed. */
     UseContextUnbind();
 
-    /* What this volume remembered goes with it; the next one is read, not
-     * assumed. */
+    /* What this volume remembered goes with it — the Use Context's memory of
+     * it too; the next one is read, not assumed. */
     LedgerLetGo();
+    UseMemoryLetGo();
 
     if (g_state.registry) {
         tag_registry_destroy(g_state.registry);
