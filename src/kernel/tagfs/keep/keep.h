@@ -47,6 +47,12 @@ uint32_t KeepSweepNow(uint64_t now_ns);
 /* The service: a sweep, at most one at a time and at most one a KEEP_LOOK_US. */
 void KeepServe(void);
 
+/* The stand's hold on the service: no look is begun while held, and a look
+ * under way is waited out, so no caller of the service stands inside the door
+ * when a test lets the volume go and mounts it again. Returns whether it was
+ * held. */
+bool KeepHold(bool held);
+
 /* A mount's start: the next look is the first thing the volume does. */
 void KeepMountReset(void);
 

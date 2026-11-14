@@ -3,10 +3,12 @@
 #include "../ink/ink.h"
 #include "../settle/settle_internal.h"
 #include "rtc.h"
+#include "atomics.h"
 
 #define KEEP_PAGE  64u
 
 static volatile uint32_t s_busy;
+static volatile uint32_t s_held;
 static volatile uint64_t s_next_us;
 
 uint64_t KeepNowNs(void)
@@ -62,7 +64,7 @@ void KeepServe(void)
     if (__atomic_exchange_n(&s_busy, 1u, __ATOMIC_ACQUIRE))
         return;
     __atomic_store_n(&s_next_us, SettleNowUs() + KEEP_LOOK_US, __ATOMIC_RELEASE);
-    if (tagfs_enter()) {
+    if (!__atomic_load_n(&s_held, __ATOMIC_ACQUIRE) && tagfs_enter()) {
         (void)KeepSweepNow(KeepNowNs());
         tagfs_leave();
     }
@@ -72,4 +74,13 @@ void KeepServe(void)
 void KeepMountReset(void)
 {
     __atomic_store_n(&s_next_us, 0, __ATOMIC_RELEASE);
+}
+
+bool KeepHold(bool held)
+{
+    bool was = __atomic_exchange_n(&s_held, held ? 1u : 0u, __ATOMIC_ACQ_REL) != 0;
+    if (held)
+        while (__atomic_load_n(&s_busy, __ATOMIC_ACQUIRE))
+            cpu_pause();
+    return was;
 }
