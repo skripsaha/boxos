@@ -261,8 +261,8 @@ static TestResult TestStandStitchRunsOnLeaves(void)
                    "nothing and the one that gives its next_quire");
     RibbonCursorStand(&now);
     TEST_ASSERT(!kept && RibbonQuireSame(&now.quire, &l.quire) && now.off == l.off + 2u * l.atom,
-                "each cycle laid its stitch without the word — an atom each — and the volume keeps the word it "
-                "holds");
+                "each cycle laid its stitch without the word — an atom each — and the volume forgot the word it "
+                "held");
     room -= 2u * l.atom;
     TEST_ASSERT_OK(StandStitchSayFilling(room - 2u * l.atom, 'm', 4, &kept), "one that leaves two atoms is laid down");
     RibbonCursorStand(&now);

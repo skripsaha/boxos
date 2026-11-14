@@ -52,7 +52,8 @@
  *   LAST_FLUSH   S5: the cycle's one flush that must be kept
  *   DONE         S6: the cursor past it; under the state lock, the target
  *                settled — and the Use Context with it, or the word it had no
- *                room for refused — the freers it carried named by its seq,
+ *                room for refused and the one the book held forgotten — the
+ *                freers it carried named by its seq,
  *                the Quires it left told to Fallow and what ripened given
  *                back; then the tags it laid down the book's, the files it
  *                carried given its seq, and the flight over; then its waiters
@@ -109,6 +110,7 @@ typedef struct {
     UseText*    use;          /* that word, held; NULL says none */
     uint64_t    use_ticket;
     bool        use_out;      /* the word had no room on the ribbon: the stitch is laid without it */
+    bool        use_forgot;   /* ... and forgets the word the book held: an empty UseContext in its place */
     DocketTaken jots;         /* the files' changes up to the target, by fid */
     uint64_t    claimed;      /* the ribbon's bytes their Inks claimed, taken (RibbonClaimTaken) */
     uint64_t    flight;       /* the sectors TAKE counted it in flight at the most (StitchFlight) */
@@ -296,7 +298,7 @@ static error_t StitchMarked(StitchSnap* s)
 /* What the stitch carries, measured: its records, the bytes they take at the
  * most and the body of the longest. */
 typedef struct {
-    UseText* use;          /* the word written, when it differs from what the book holds */
+    UseText* use;          /* the word written, when it differs from what the book holds; NULL: none */
     bool     use_written;
     uint32_t coined;       /* the Coineds of them */
     uint32_t jot_tags;     /* the most tags one file's two records wear */
@@ -319,10 +321,10 @@ static bool StitchCoinedTag(uint32_t id, TallyTag* t)
 }
 
 /* The records measured: the Undones of the mount's verdict while it is held,
- * every tag given an id since the last stitch settled, and the word owed when
- * the book does not hold it already (§7: the same text is written never
- * again), and the files' — ERR_NO_MEMORY for no room for how their runs
- * changed. */
+ * every tag given an id since the last stitch settled, and the word owed — or
+ * none, the book's forgotten — when the book does not hold it already (§7: the
+ * same text is written never again), and the files' — ERR_NO_MEMORY for no
+ * room for how their runs changed. */
 static error_t StitchMeasure(StitchSnap* s, StitchLoad* l)
 {
     memset(l, 0, sizeof(*l));
@@ -340,14 +342,15 @@ static error_t StitchMeasure(StitchSnap* s, StitchLoad* l)
         l->bytes += STITCH_RECORD_HEAD_MOST + body;
         l->body   = body > l->body ? body : l->body;
     }
-    if (s->use_owed) {
+    UseText* word = s->use_owed ? s->use : NULL;
+    if (s->use_owed || s->use_forgot) {
         UseText* memory = tagfs_recall_use_context(NULL);
-        l->use_written  = !UseTextSame(memory, s->use);
+        l->use_written  = !UseTextSame(memory, word);
         UseTextDrop(memory);
     }
     if (l->use_written) {
-        uint64_t body = STITCH_USE_MOST - STITCH_RECORD_HEAD_MOST + (s->use ? s->use->bytes : 0u);
-        l->use     = s->use;
+        uint64_t body = STITCH_USE_MOST - STITCH_RECORD_HEAD_MOST + (word ? word->bytes : 0u);
+        l->use     = word;
         l->records++;
         l->bytes  += STITCH_RECORD_HEAD_MOST + body;
         l->body    = body > l->body ? body : l->body;
@@ -518,7 +521,10 @@ static void StitchTryKept(StitchSnap* s, bool past)
 }
 
 /* The stitch measured, given its place and its seq, laid and sealed — the
- * heap's, never a frame's; *word whether it carries the person's word. */
+ * heap's, never a frame's; *word whether it carries a UseContext. A word of
+ * text is the one thing no claim held room for; an empty one — the word none,
+ * or the book's forgotten — gives up what the book held, as a delete does, and
+ * takes the room what frees takes (RibbonRoom's `promised`). */
 static error_t StitchLay(StitchSnap* s, bool* word)
 {
     StitchLoad l;
@@ -545,7 +551,7 @@ static error_t StitchLay(StitchSnap* s, bool* word)
         s->useful = len;
         s->of     = (uint32_t)RibbonStitchOf(len);
         StitchHeldToFlight(s);
-        rc    = RibbonRoom(s->of, !l.use_written, &s->at, &s->hop);
+        rc    = RibbonRoom(s->of, !l.use_written || !l.use || !l.use->bytes, &s->at, &s->hop);
     }
     if (rc == OK && !(s->laid = RibbonTryMake(s->of)))
         rc = ERR_NO_MEMORY;
@@ -565,13 +571,20 @@ static error_t StitchLay(StitchSnap* s, bool* word)
 
 /*
  * ‼ A WORD WITH NO ROOM IS LEFT OUT, NEVER WHAT WAS CLAIMED WITH IT (§3.6,
- * P21). The person's word is the one thing a stitch carries that no claim held
- * room for; refused room, it is the word that goes — the stitch is laid again
- * without it, with a new seq, and the files' changes and tags it carries land
- * — and once that stitch settles the word is answered as refused
- * (UseMemoryStitchRefused): the one who said it hears ERR_TAGFS_NO_SPACE, and
- * the volume keeps the word it holds. Refused with no word aboard, the cycle
- * is: ERR_TAGFS_NO_SPACE, said by the ribbon.
+ * P21) — AND THE WORD THE BOOK HELD IS FORGOTTEN WITH IT (the owner's rule,
+ * 09-08: better to forget than to remember a word the person no longer says).
+ * The person's word is the one thing a stitch carries that no claim held room
+ * for; refused room, it is the word that goes — the stitch is laid again
+ * without it, with a new seq, an empty UseContext in its place, and the files'
+ * changes and tags it carries land — and once that stitch settles the word is
+ * answered as refused and the book holds none (UseMemoryStitchRefused): the
+ * one who said it hears ERR_TAGFS_NO_SPACE, and no mount after brings the old
+ * word back. An empty UseContext gives up what the book held, as a delete
+ * does, and takes the room kept for what frees; only where not even it fits
+ * — a stitch an atom longer for it, the rest of the Quire spent to the atom
+ * by what was claimed — is the stitch laid without either, the old word kept
+ * on the medium and in memory alike, said. Refused with no word aboard, the
+ * cycle is: ERR_TAGFS_NO_SPACE, said by the ribbon.
  */
 static error_t StitchBuild(StitchSnap* s)
 {
@@ -579,11 +592,24 @@ static error_t StitchBuild(StitchSnap* s)
     error_t rc   = StitchLay(s, &word);
     if (rc != ERR_TAGFS_NO_SPACE || !word)
         return rc;
-    kprintf("[TagFS] the word the person said, %llu byte(s), finds no room on the ribbon: the stitch is laid "
-            "without it, and the volume keeps the word it holds (ERR_TAGFS_NO_SPACE to the one who said it)\n",
-            (unsigned long long)(s->use ? s->use->bytes : 0u));
-    s->use_owed = false;
-    s->use_out  = true;
+    uint64_t bytes = s->use ? s->use->bytes : 0u;
+    if (s->use_owed && bytes) {
+        kprintf("[TagFS] the word the person said, %llu byte(s), finds no room on the ribbon: the stitch is laid "
+                "without it, and the volume forgets the word it held rather than remember one the person no "
+                "longer says (ERR_TAGFS_NO_SPACE to the one who said it)\n", (unsigned long long)bytes);
+        s->use_owed   = false;
+        s->use_out    = true;
+        s->use_forgot = true;
+        rc = StitchLay(s, &word);
+        if (rc != ERR_TAGFS_NO_SPACE || !word)
+            return rc;
+    }
+    kprintf("[TagFS] the word the person said, %llu byte(s), finds no room on the ribbon, nor does the volume's "
+            "forgetting the word it holds: the stitch is laid without either, and the volume keeps that word "
+            "(ERR_TAGFS_NO_SPACE to the one who said it)\n", (unsigned long long)bytes);
+    s->use_owed   = false;
+    s->use_out    = true;
+    s->use_forgot = false;
     return StitchLay(s, &word);
 }
 
@@ -825,7 +851,8 @@ const char* StitchRunStage(void)
 
 /* What the settled stitch changed of the book's trees, into DogEar (dog_ear.h):
  * every file it carried a record of, the tags it coined, the Use Context when
- * it carried one — what the next Tally lays anew of the state it leaves. */
+ * it carried one or forgot the book's — what the next Tally lays anew of the
+ * state it leaves. */
 static void StitchDogEared(const StitchSnap* s)
 {
     for (const Jot* j = s->jots.first; j; j = j->next[0])
@@ -833,7 +860,7 @@ static void StitchDogEared(const StitchSnap* s)
             DogEarFileChanged(j->fid, j->was, j->now, s->target);
     if (s->coined_hi > s->coined_lo)
         DogEarPut(TALLY_TAGS, (TallyKey){ s->coined_lo, 0 }, (TallyKey){ s->coined_hi, 0 });
-    if (s->use_owed)
+    if (s->use_owed || s->use_forgot)
         DogEarPut(TALLY_USE, (TallyKey){ 0, 0 }, (TallyKey){ 1, 0 });
 }
 
@@ -841,7 +868,8 @@ static void StitchDogEared(const StitchSnap* s)
  * while the flight still stands, so a claim is judged by too little room —
  * then, under the state lock, the target settled, the word the stitch carried
  * — or the one the book held already — the volume's, or the word it left out
- * refused, the freers it carried named by its seq, the Quires it left told to
+ * refused and the book's forgotten where it said so, the freers it carried
+ * named by its seq, the Quires it left told to
  * Fallow and what ripened given back; then, with no lock, the tags it laid
  * down the book's, the files it carried given its seq, and a next_quire asked
  * ahead of need where it went on into one. Refused, the Docket it took is
@@ -873,7 +901,7 @@ void StitchRunEnd(error_t rc)
             gone   = UseMemoryStitchSettled(s->use, s->use_ticket);
             s->use = NULL;
         } else if (s->use_out) {
-            UseMemoryStitchRefused(s->use_ticket);
+            gone = UseMemoryStitchRefused(s->use_ticket, s->use_forgot);
         }
         FallowStitchSettled(s->target, s->seq, s->cycle);
         FallowQuireLeft(left);

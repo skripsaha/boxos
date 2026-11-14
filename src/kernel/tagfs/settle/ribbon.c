@@ -489,9 +489,11 @@ static void RibbonOutSaid(void)
  * next_quire once ground comes back. One that filled the Quire whole would end
  * where no reader can say what comes next (RibbonPlaceOn: the next_quire it
  * would hop to is not named yet), and the mount would stand the volume under
- * glass with every stitch sewn after it unread. A word the person said is the
- * one thing a stitch carries that no claim held room for (`promised` false):
- * refused here, it is left out of the stitch (sewing.c).
+ * glass with every stitch sewn after it unread. A word of text the person said
+ * is the one thing a stitch carries that no claim held room for (`promised`
+ * false): refused here, it is left out of the stitch, and the empty UseContext
+ * laid in its place — the volume forgetting the word it held, which gives up
+ * as a delete does — is promised (sewing.c).
  */
 uint64_t RibbonStitchOf(uint64_t len)
 {

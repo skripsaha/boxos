@@ -8886,14 +8886,14 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 51 (healthy says how) and
-# the 410 of the stand's own fifty-three suites: stand 28, stand_lock 4,
+# the 411 of the stand's own fifty-three suites: stand 28, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 9,
 # stand_plot 10, stand_index 6, stand_ink 6, stand_helm 7, stand_port 2,
 # stand_use 3, stand_use_chain 4, stand_seal 8, stand_settle 16, stand_glean 9,
 # stand_snapshot 1, stand_read 9, stand_run 6, stand_medium 19,
 # stand_warrant 8, stand_room 7, stand_integrity 2, frame 2, width 7,
 # parcel 13, tract 1, record_splices 4, stand_tally 16, stand_ribbon 8,
-# stand_stitch 12, stand_stitch_edge 12, stand_docket 14, stand_fresh 7,
+# stand_stitch 13, stand_stitch_edge 12, stand_docket 14, stand_fresh 7,
 # stand_fresh_ground 5, stand_fresh_change 5, stand_binder 13,
 # stand_endpaper 6, stand_errata 8, stand_toll 5, stand_dog_ear 9,
 # stand_slip 14, stand_away 14, stand_tip_in 10, stand_slip_promise 5,
@@ -8902,7 +8902,7 @@ STAND_HELD="
 # not a run (K9): a suite that drops out of the walk is a test that stopped
 # covering anything, and the count is where that shows. How many of them pass
 # and how many stand aside is the road's — said, not pinned.
-STAND_RUN=461
+STAND_RUN=462
 
 # What a VOLUME_TESTS kernel says of a record memory holds that is not the
 # file a format-v1 Ink packed (plot_conveyance.c, PackV1Agrees and

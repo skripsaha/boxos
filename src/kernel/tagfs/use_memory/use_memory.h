@@ -148,10 +148,13 @@ void     UseMemoryCycleOver(error_t rc);
  * before is handed back to be dropped once the lock is let go. Refused, at
  * DONE under the state lock, when the stitch had no room for the word and was
  * laid without it: the demand is answered as refused, the word no longer owed
- * where no later one stands, and the volume keeps the word it holds. */
+ * where no later one stands, and — `forgot`, the stitch laid an empty
+ * UseContext in its place — the volume holds no word, the one it held handed
+ * back to be dropped (the owner's rule, 09-08); without, it keeps that word,
+ * and NULL is handed back. */
 bool     UseMemoryStitchTake(UseText **said, uint64_t *ticket);
 UseText *UseMemoryStitchSettled(UseText *said, uint64_t ticket);
-void     UseMemoryStitchRefused(uint64_t ticket);
+UseText *UseMemoryStitchRefused(uint64_t ticket, bool forgot);
 
 /* Under the state lock (Fallow's release): whether a copy of the Ledger may
  * name the chain whose first link is `first`. */

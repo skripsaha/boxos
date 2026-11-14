@@ -218,7 +218,7 @@ error_t tagfs_remember_use_context(UseText *said, uint64_t saying, bool *remembe
 
     /* A demand on the one writer: a cycle that began after it carries it —
      * or, on a book whose ribbon has no room for it, lays its stitch without
-     * it and refuses it (settle/sewing.c). */
+     * it, forgets the word the volume held and refuses it (settle/sewing.c). */
     error_t rc = TagFSSettle();
     if (rc == OK && UseMemoryRefused(ticket))
         rc = ERR_TAGFS_NO_SPACE;
@@ -252,9 +252,15 @@ bool UseMemoryStitchTake(UseText **said, uint64_t *ticket)
     return true;
 }
 
-void UseMemoryStitchRefused(uint64_t ticket)
+UseText *UseMemoryStitchRefused(uint64_t ticket, bool forgot)
 {
-    UseMemoryState *g = &g_use_memory;
+    UseMemoryState *g    = &g_use_memory;
+    UseText        *gone = NULL;
+    if (forgot) {
+        gone      = g->memory;
+        g->memory = NULL;
+        g->landed = true;
+    }
     if (g->ticket == ticket) {
         g->owed  = false;
         g->carry = false;
@@ -262,6 +268,7 @@ void UseMemoryStitchRefused(uint64_t ticket)
     if (ticket > g->answered)
         g->answered = ticket;
     g->refused = ticket;
+    return gone;
 }
 
 UseText *UseMemoryStitchSettled(UseText *said, uint64_t ticket)

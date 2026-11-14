@@ -140,7 +140,8 @@ void     RibbonNextGivenAtMount(void);
  *                     the rest and the next_quire, less the two atoms of it a
  *                     stitch that runs on into it leaves, do not hold it, or,
  *                     with no next_quire, it carries what no claim held room
- *                     for — the person's word: not `promised` — or leaves
+ *                     for — the person's word of text: not `promised`; an
+ *                     empty one gives up as a delete does — or leaves
  *                     less than an atom after it (§3.6), said; with no
  *                     next_quire a stitch of what was claimed (`promised` —
  *                     freeing records, or none, among it) or a retry goes in
