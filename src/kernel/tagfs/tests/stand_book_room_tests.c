@@ -13,6 +13,8 @@
 #include "../plot/plot.h"
 #include "../settle/binder.h"
 #include "stand_tests.h"
+#include "write_job.h"
+#include "cpu_calibrate.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -27,7 +29,9 @@
 // was written — for ground a delete gave back in this session and for the
 // ground the mount found the ribbon let go alike (stand_book_room_quire_tests.c).
 // A defrag gathers its file into one run it is handed whole, wherever the
-// file's own window lies. At a
+// file's own window lies; asked as a program asks it, it gives its core back
+// between its windows and is answered where the machine turns; and a file the
+// system keeps it gathers not at all, warrant or none (B10). At a
 // full volume's wall the reserve holds a write's ground from its take, each
 // slot's own in whole Quires until the free has it, and a write short of room
 // only by the measure of growth waits on the Tally that makes it exact
@@ -119,6 +123,149 @@ out:
     tagfs_close(handle);
     if (fid)
         (void)tagfs_delete_file(fid, INK_UNWARRANTED);
+    StandFreshModelLetGo(&m);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+// A defrag asked as a program asks it, and a file the system keeps
+// ----------------------------------------------------------------------------
+
+#define STAND_BOOK_ROOM_JOB_MS 20000u      /* the test's own bound on a job it turns by hand */
+
+static WriteJobStandAnswer s_room_answer;
+
+/* A file of STAND_BOOK_ROOM_GATHER blocks of the model's stream lying in many
+ * runs, laid as the gather above lays its own: written whole and settled,
+ * every other block written over on fresh ground, the window the versions
+ * left let go and the first block written over, settled. Its runs in *runs;
+ * *fid is the caller's to give up whatever the answer. */
+static bool StandBookRoomScattered(StandFreshModel* m, const char* name, uint64_t* fid, uint64_t* runs)
+{
+    const uint32_t B = TAGFS_BLOCK_SIZE;
+    uint64_t       start = 0;
+    uint32_t       window = 0;
+    if (tagfs_create_file(name, NULL, 0, fid) != 0)
+        return false;
+    if (StandFreshWrite(m, *fid, 0, STAND_BOOK_ROOM_GATHER * B, 0x31u) != (int)(STAND_BOOK_ROOM_GATHER * B) ||
+        TagFSSettle() != OK)
+        return false;
+    for (uint32_t k = 1; k < STAND_BOOK_ROOM_GATHER; k += 2u)
+        if (StandFreshWrite(m, *fid, (uint64_t)k * B, B, 0x40u + k) != (int)B)
+            return false;
+    TagFSLockTake(&tagfs_get_state()->lock);
+    AllotmentRelease(*fid);
+    TagFSLockDrop(&tagfs_get_state()->lock);
+    if (AllotmentHeld(*fid, &start, &window))
+        return false;
+    if (StandFreshWrite(m, *fid, 0, B, 0x40u) != (int)B || TagFSSettle() != OK)
+        return false;
+    return StandFreshPrint(*fid, runs) && *runs > 1u;
+}
+
+/* A defrag of the file asked as the deck asks it, with `warrant`, by a caller
+ * in the kernel standing in its call: the job's answer. */
+static int StandBookRoomDefrag(uint64_t fid, InkWarrant warrant)
+{
+    WriteJobAsk ask;
+    memset(&ask, 0, sizeof(ask));
+    ask.kind    = WRITE_JOB_DEFRAG;
+    ask.file_id = fid;
+    ask.warrant = warrant;
+    return WriteJobSubmit(&ask, NULL, NULL);
+}
+
+/* The machine turned by hand until the job answered the stand's record — its
+ * windows run at the service point here or on another core — or the bound. */
+static bool StandBookRoomAnswered(void)
+{
+    uint8_t  seat  = tagfs_get_seat();
+    uint64_t bound = rdtsc() + cpu_ms_to_tsc(STAND_BOOK_ROOM_JOB_MS);
+    while (!__atomic_load_n(&s_room_answer.answered, __ATOMIC_ACQUIRE)) {
+        if (rdtsc() >= bound)
+            return false;
+        StandPortTurn(seat);
+        cpu_pause();
+    }
+    return true;
+}
+
+/*
+ * R24 on a book: a defrag a program asks for goes a window at a time, its
+ * holder giving the core back between two of them, the Helm kept — it is
+ * answered where the machine turns, and the file lies in one run, whole.
+ */
+static TestResult TestStandBookRoomDefragGivesTheCoreBack(void)
+{
+    TestResult      verdict = TEST_PASS;
+    StandFreshModel m;
+    WriteJobAsk     ask;
+    uint64_t        fid = 0, runs = 0;
+    bool            pending = false;
+    const char*     aside   = StandStepsAsideFor();
+    memset(&m, 0, sizeof(m));
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandFreshModelMake(&m, STAND_BOOK_ROOM_GATHER * TAGFS_BLOCK_SIZE), "room for the file");
+    TEST_ASSERT(StandBookRoomScattered(&m, "book-defrag-job.bin", &fid, &runs), "a file lies in many runs");
+    TestEvidence("runs the file lies in", runs);
+
+    memset(&ask, 0, sizeof(ask));
+    memset(&s_room_answer, 0, sizeof(s_room_answer));
+    ask.kind    = WRITE_JOB_DEFRAG;
+    ask.file_id = fid;
+    ask.stand   = &s_room_answer;
+    int asked   = WriteJobSubmit(&ask, NULL, NULL);
+    pending     = asked == ERR_WOULD_BLOCK;
+    TEST_ASSERT_EQ(asked, ERR_WOULD_BLOCK, "its defrag gave its core back after its first window");
+    TEST_ASSERT(StandBookRoomAnswered(), "and is answered where the machine turns");
+    pending = false;
+    TEST_ASSERT_OK(s_room_answer.rc, "OK");
+    TEST_ASSERT(StandFreshPrint(fid, &runs) && runs == 1u, "the file lies in one run");
+    TEST_ASSERT(StandFreshHolds(&m, fid), "and reads back whole");
+out:
+    if (pending && !StandBookRoomAnswered())
+        fid = 0;          /* the job still holds the file's Helm: the file is left to it */
+    if (fid)
+        (void)tagfs_delete_file(fid, INK_UNWARRANTED);
+    StandFreshModelLetGo(&m);
+    return verdict;
+}
+
+/*
+ * B10 on a book: a file the system keeps is never moved to gather its runs.
+ * A defrag with no warrant is refused at the Helm; one with the warrant
+ * passes it and is refused by the gather (plot_gather.c, PlotGatherKept), the
+ * runs as they were. With the role let go the same defrag gathers the file
+ * into one run — so the refusal was the file's being the system's, and
+ * nothing else.
+ */
+static TestResult TestStandBookRoomKeptFileNotGathered(void)
+{
+    TestResult      verdict = TEST_PASS;
+    StandFreshModel m;
+    uint64_t        fid = 0, runs = 0, now = 0;
+    const char*     aside = StandStepsAsideFor();
+    memset(&m, 0, sizeof(m));
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandFreshModelMake(&m, STAND_BOOK_ROOM_GATHER * TAGFS_BLOCK_SIZE), "room for the file");
+    TEST_ASSERT(StandBookRoomScattered(&m, "book-kept.bin", &fid, &runs), "a file lies in many runs");
+    TEST_ASSERT_OK(StandKeepInRole(fid, TAGFS_FILE_ROLE_SYSTEM), "it is kept in the system's role");
+
+    TEST_ASSERT_EQ(StandBookRoomDefrag(fid, INK_UNWARRANTED), ERR_PERMISSION_DENIED,
+                   "a defrag with no warrant is refused");
+    TEST_ASSERT_EQ(StandBookRoomDefrag(fid, INK_WARRANTED), ERR_PERMISSION_DENIED,
+                   "and one with the warrant: its blocks are not moved");
+    TEST_ASSERT(StandFreshPrint(fid, &now) && now == runs, "the file lies in the runs it lay in");
+
+    TEST_ASSERT_OK(StandKeepInRole(fid, TAGFS_FILE_ROLE_ORDINARY), "the role is let go");
+    TEST_ASSERT_OK(StandBookRoomDefrag(fid, INK_UNWARRANTED), "and the same defrag is taken");
+    TEST_ASSERT(StandFreshPrint(fid, &now) && now == 1u, "the file lies in one run");
+    TEST_ASSERT(StandFreshHolds(&m, fid), "and reads back whole");
+out:
+    if (fid)
+        (void)tagfs_delete_file(fid, INK_WARRANTED);
     StandFreshModelLetGo(&m);
     return verdict;
 }
@@ -792,6 +939,10 @@ static const TestCase g_stand_book_room_tests[] = {
     { .name = "stand_book_room_next_quire_clear", .func = TestStandBookRoomNextQuireClear,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_book_room_gather_one_run", .func = TestStandBookRoomGatherOneRun,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_book_room_defrag_gives_the_core_back", .func = TestStandBookRoomDefragGivesTheCoreBack,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_book_room_kept_file_not_gathered", .func = TestStandBookRoomKeptFileNotGathered,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_book_room_stakes_counted", .func = TestStandBookRoomStakesCounted,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },

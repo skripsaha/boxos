@@ -25,7 +25,8 @@
 // mount a waiter is answered only once a stitch of this mount settled under
 // its flush (X2-3); a tag given an id is laid down as a Coined and is the same
 // id at the next mount; a Use Context the person changes is laid down once,
-// and the same word again lays nothing; the halt's last stitch says CLEAN; a
+// the same word again lays nothing, and of two sayings that race to the
+// volume the later stands; the halt's last stitch says CLEAN; a
 // write the medium refuses is taken again with a new seq at the start of the
 // next_quire (C25, M-6), and where no Quire is left to go on in the volume
 // may only be read, its waiters told so; the ribbon does not eat the ground a
@@ -323,6 +324,63 @@ static TestResult TestStandStitchUseContext(void)
 out:
     RibbonUnitLetGo(u);
     BlockFailDisarm();
+    STAND_STITCH_PUT_BACK(&s);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+// Of two sayings that race to the volume, the later stands (step 1.5b)
+//
+// The volume remembers a word by its saying (use_memory.c, UseMemorySay): a
+// word remembered after it under an earlier saying — the slower of two
+// rememberings, of the word the machine said first — is superseded and kept
+// nowhere: not in memory, not in a stitch, not at the next mount.
+// ----------------------------------------------------------------------------
+
+static TestResult TestStandStitchUseLaterWordStands(void)
+{
+    static const char quiet[] = "use:test:quiet";
+    static const char night[] = "use:test:night,use:test:orders,use:test:north,use:test:long";
+
+    TestResult  verdict = TEST_PASS;
+    StandStitch s;
+    RibbonUnit* u      = NULL;
+    UseText*    early  = NULL;
+    UseText*    back   = NULL;
+    uint64_t    saying = 0;
+    bool        kept   = false;
+    uint8_t     body[128];
+    const char* aside  = StandStitchAside(&s);
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT_OK(StandStitchSay(night, sizeof(night) - 1u, 1, &kept), "the long word is told to the volume");
+    TEST_ASSERT(kept, "and the volume holds it");
+    UseTextDrop(tagfs_recall_use_context(&saying));
+    early = UseTextMake(quiet, sizeof(quiet) - 1u);
+    TEST_ASSERT(early != NULL, "room for the short word");
+    TEST_ASSERT_OK(tagfs_remember_use_context(early, saying - 1u, &kept),
+                   "the short word, said before it, is remembered last");
+    TEST_ASSERT(!kept, "and is not kept: the later saying stands");
+    back = tagfs_recall_use_context(NULL);
+    TestEvidence("bytes the volume holds after the earlier, shorter word landed last", back ? back->bytes : 0);
+    TEST_ASSERT(back && back->bytes == sizeof(night) - 1u && memcmp(back->text, night, back->bytes) == 0,
+                "the volume holds the long word, whole");
+    UseTextDrop(back);
+    back = NULL;
+    TEST_ASSERT(StandStitchRead(&u), "the last stitch reads back whole");
+    uint32_t len = TallyUsePut(body, (const uint8_t*)night, sizeof(night) - 1u);
+    TEST_ASSERT(StandStitchCarries(u, RIBBON_USE_CONTEXT, body, len), "and carries the long word, as UseContext");
+    RibbonUnitLetGo(u);
+    u = NULL;
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
+    back = tagfs_recall_use_context(NULL);
+    TEST_ASSERT(back && back->bytes == sizeof(night) - 1u && memcmp(back->text, night, back->bytes) == 0,
+                "and recalls the long word, whole");
+out:
+    UseTextDrop(back);
+    UseTextDrop(early);
+    RibbonUnitLetGo(u);
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
 }
@@ -815,6 +873,8 @@ static const TestCase g_stand_stitch_tests[] = {
     { .name = "stand_stitch_answers_after_flush", .func = TestStandStitchAnswersAfterFlush,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_stitch_use_context", .func = TestStandStitchUseContext,
+      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+    { .name = "stand_stitch_use_later_word_stands", .func = TestStandStitchUseLaterWordStands,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
     { .name = "stand_stitch_coined", .func = TestStandStitchCoined,
       .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },

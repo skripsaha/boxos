@@ -889,7 +889,7 @@ static const TestCase g_stand_plot_tests[] = {
       .format = DEED_FORMAT_V1, .analog = "stand_fresh_change_given_up_between" },
     { .name  = "stand_plot_jobs_give_the_core_back", .func = TestStandPlotJobsGiveTheCoreBack,
       .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V1, .analog = "stand_fresh_ground_big_write" },
+      .format = DEED_FORMAT_V1, .analog = "stand_book_room_defrag_gives_the_core_back" },
     { .name  = "stand_plot_span_past_the_volume", .func = TestStandPlotSpanPastTheVolume,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a span past every block the volume could give took the volume's free "

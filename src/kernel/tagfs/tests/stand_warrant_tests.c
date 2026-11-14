@@ -575,7 +575,7 @@ static const TestCase g_stand_warrant_tests[] = {
       .func  = TestStandWarrantRefusedBeforeMemory, .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_warrant_kept_file_not_gathered",
       .func  = TestStandWarrantKeptFileNotGathered, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V1, .analog = "stand_warrant_write_and_span" },
+      .format = DEED_FORMAT_V1, .analog = "stand_book_room_kept_file_not_gathered" },
     { .name  = "stand_warrant_deck_reads_the_cabin", .func = TestStandWarrantDeckReadsTheCabin,
       .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_warrant_any_tag_put_on", .func = TestStandWarrantAnyTagPutOn,
