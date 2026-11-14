@@ -5,6 +5,7 @@
 #include "stand_fresh.h"
 #include "../dedup/conjugate.h"
 #include "../dedup/dedup.h"
+#include "../file_map/file_map.h"
 #include "../ink/ink.h"
 #include "../ink/commonhold.h"
 #include "../mount/book_mount.h"
@@ -23,6 +24,10 @@
 // holds it. A file wearing dedup:off, a file the system keeps, and the kernel
 // the loader reads by its blocks are neither laid nor laid on — passed over
 // before any act is asked, so the pass refuses nothing it could have known.
+// Only a series is laid — 16 blocks of a copy in a row on as many of one
+// original in a row — and never a file on itself. A run SHARED splits a file
+// into stretches of its own: defrag gathers each, and the fragmentation score
+// counts gaps inside them alone.
 // The runner holds the pass down while the tests run (DedupHold), as it holds
 // the cadence: each test here lets it go and holds it again.
 // ============================================================================
@@ -51,24 +56,37 @@ static bool StandDedupBlocks(uint64_t fid, uint32_t n, uint64_t* out)
     return true;
 }
 
-/* Whether the file's first `n` blocks are `onto`, each named by two. */
-static bool StandDedupOnto(uint64_t fid, const uint64_t* onto, uint32_t n)
+/* Whether the file's blocks [from, from + n) are `onto`'s, each named by two. */
+static bool StandDedupOnto(uint64_t fid, uint32_t from, const uint64_t* onto, uint32_t n)
 {
     uint64_t block = 0;
-    for (uint32_t k = 0; k < n; k++)
+    for (uint32_t k = from; k < from + n; k++)
         if (!StandBlockOf(fid, k, &block) || block != onto[k] || CommonholdOwners(block) != 2u)
             return false;
     return true;
 }
 
-/* Whether the file's first `n` blocks are still `mine`, its own alone. */
-static bool StandDedupOwn(uint64_t fid, const uint64_t* mine, uint32_t n)
+/* Whether the file's blocks [from, from + n) are still `mine`'s, its own alone. */
+static bool StandDedupOwn(uint64_t fid, uint32_t from, const uint64_t* mine, uint32_t n)
 {
     uint64_t block = 0;
-    for (uint32_t k = 0; k < n; k++)
+    for (uint32_t k = from; k < from + n; k++)
         if (!StandBlockOf(fid, k, &block) || block != mine[k] || CommonholdOwners(block) != 0)
             return false;
     return true;
+}
+
+/* The file's blocks [to, to + n) written with the model's bytes of [from,
+ * from + n): the file holds a stretch of itself twice. */
+static bool StandDedupEcho(StandFreshModel* m, uint64_t fid, uint32_t from, uint32_t to, uint32_t n)
+{
+    uint64_t at = (uint64_t)to * TAGFS_BLOCK_SIZE, bytes = (uint64_t)n * TAGFS_BLOCK_SIZE;
+    if (at + bytes > m->room)
+        return false;
+    memcpy(m->bytes + at, m->bytes + (uint64_t)from * TAGFS_BLOCK_SIZE, bytes);
+    if (at + bytes > m->size)
+        m->size = at + bytes;
+    return StandWriteAt(fid, at, m->bytes + at, (uint32_t)bytes) == (int)bytes;
 }
 
 /* Whether none of the `n` blocks is in use. */
@@ -98,6 +116,7 @@ static error_t StandDedupTallies(uint32_t n, DedupSaid* said)
         said->laid    += one.laid;
         said->refused += one.refused;
         said->passed  += one.passed;
+        said->scant   += one.scant;
     }
     return rc;
 }
@@ -134,7 +153,7 @@ static TestResult TestStandDedupCopy(void)
     TEST_ASSERT_EQ(said.laid, STAND_DEDUP_BLOCKS, "the pass lays every block of B on A's");
     TEST_ASSERT_EQ(said.refused, 0, "and no act it asked is refused");
     TEST_ASSERT(said.among >= STAND_DEDUP_BLOCKS, "matched among the blocks written since the Tally before");
-    TEST_ASSERT(StandDedupOnto(f, theirs, STAND_DEDUP_BLOCKS), "B's blocks are A's, each named by two: A is older");
+    TEST_ASSERT(StandDedupOnto(f, 0, theirs, STAND_DEDUP_BLOCKS), "B's blocks are A's, each named by two: A is older");
     TEST_ASSERT(StandFreshHolds(&m, f) && StandFreshHolds(&m, a), "both read their bytes, every one");
     TEST_ASSERT_OK(TagFSSettle(), "the pass's changes settled");
     TEST_ASSERT_OK(StandBookRoom(), "room is asked for: the ribbon leaves its Quire, the lag's stitches past it");
@@ -145,7 +164,7 @@ static TestResult TestStandDedupCopy(void)
     MountBookStandSaid(&mounted);
     TEST_ASSERT(mounted.doubles == 0 && !TagFSIsUnderGlass(),
                 "the census finds no block two owners name, and the volume is written on");
-    TEST_ASSERT(StandDedupOnto(f, theirs, STAND_DEDUP_BLOCKS), "B's blocks are A's still, two owners on each");
+    TEST_ASSERT(StandDedupOnto(f, 0, theirs, STAND_DEDUP_BLOCKS), "B's blocks are A's still, two owners on each");
 out:
     (void)DedupHold(true);
     if (f)
@@ -203,7 +222,7 @@ static TestResult TestStandDedupOld(void)
     TestEvidence("blocks of B laid on A", laid);
     TEST_ASSERT_EQ(laid, STAND_DEDUP_OLD, "the walk of the book's DIGESTS reaches A, and B is laid on it");
     TEST_ASSERT(book >= STAND_DEDUP_OLD, "matched to blocks the walk read off the book's DIGESTS");
-    TEST_ASSERT(StandDedupOnto(f, theirs, STAND_DEDUP_OLD), "B's blocks are A's, each named by two");
+    TEST_ASSERT(StandDedupOnto(f, 0, theirs, STAND_DEDUP_OLD), "B's blocks are A's, each named by two");
     TEST_ASSERT(StandFreshHolds(&m, f) && StandFreshHolds(&m, a), "both read their bytes");
     TEST_ASSERT_OK(TagFSSettle(), "the pass's changes settled");
     TEST_ASSERT_OK(StandBookRoom(), "room is asked for");
@@ -258,9 +277,9 @@ static TestResult TestStandDedupDeclined(void)
                 "each on its own ground");
     TEST_ASSERT_OK(StandDedupTallies(1u, &said), "a Tally, and the pass after it");
     TEST_ASSERT(said.laid == 0 && said.refused == 0, "nothing is laid, and no act is asked to be refused");
-    TEST_ASSERT(StandDedupOwn(a, ma, STAND_DEDUP_BLOCKS) && StandDedupOwn(f, mf, STAND_DEDUP_BLOCKS),
+    TEST_ASSERT(StandDedupOwn(a, 0, ma, STAND_DEDUP_BLOCKS) && StandDedupOwn(f, 0, mf, STAND_DEDUP_BLOCKS),
                 "nothing is laid on A, which wears dedup:off, and B keeps its own blocks");
-    TEST_ASSERT(StandDedupOwn(c, mc, STAND_DEDUP_BLOCKS) && StandDedupOwn(e, me, STAND_DEDUP_BLOCKS),
+    TEST_ASSERT(StandDedupOwn(c, 0, mc, STAND_DEDUP_BLOCKS) && StandDedupOwn(e, 0, me, STAND_DEDUP_BLOCKS),
                 "E, which wears dedup:off, is not laid on C");
     TEST_ASSERT(StandFreshHolds(&m, a) && StandFreshHolds(&m, f) && StandFreshHolds(&n, c) && StandFreshHolds(&n, e),
                 "all four read their bytes");
@@ -313,9 +332,9 @@ static TestResult TestStandDedupKept(void)
                     StandDedupBlocks(f, STAND_DEDUP_BLOCKS, mf), "each on its own ground");
     TEST_ASSERT_OK(StandDedupTallies(1u, &said), "a Tally, and the pass after it");
     TEST_ASSERT(said.laid == 0 && said.refused == 0, "nothing is laid, and no act is asked to be refused");
-    TEST_ASSERT(StandDedupOwn(s1, m1, STAND_DEDUP_BLOCKS) && StandDedupOwn(s2, m2, STAND_DEDUP_BLOCKS),
+    TEST_ASSERT(StandDedupOwn(s1, 0, m1, STAND_DEDUP_BLOCKS) && StandDedupOwn(s2, 0, m2, STAND_DEDUP_BLOCKS),
                 "the two files the system keeps keep their own blocks");
-    TEST_ASSERT(StandDedupOwn(f, mf, STAND_DEDUP_BLOCKS), "and the third is laid on neither");
+    TEST_ASSERT(StandDedupOwn(f, 0, mf, STAND_DEDUP_BLOCKS), "and the third is laid on neither");
     TEST_ASSERT(StandFreshHolds(&m, s1) && StandFreshHolds(&m, s2) && StandFreshHolds(&m, f), "all read their bytes");
 out:
     (void)DedupHold(true);
@@ -326,6 +345,80 @@ out:
     if (s1)
         (void)tagfs_delete_file(s1, INK_WARRANTED);
     StandFreshModelLetGo(&m);
+    STAND_BINDER_PUT_BACK(b);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+// A series: only 16 blocks laid on as many in a row, never a file on itself
+// ----------------------------------------------------------------------------
+
+#define STAND_DEDUP_SERIES  40u      /* B: blocks 0 to 23 A's bytes, block 24 its own, blocks 25 to 39 A's again */
+#define STAND_DEDUP_BREAK   24u
+#define STAND_DEDUP_ECHO    16u      /* C: blocks 16 to 31 its blocks 0 to 15 again */
+#define STAND_DEDUP_SELF    0xded2u
+
+static TestResult TestStandDedupSeries(void)
+{
+    TestResult      verdict = TEST_PASS;
+    StandBinder*    b       = &s_dedup_binder;
+    StandFreshModel ma, mb, mc;
+    DedupSaid       said;
+    uint64_t        a = 0, f = 0, c = 0;
+    uint64_t*       theirs = kmalloc(sizeof(uint64_t) * (2u * STAND_DEDUP_SERIES + 2u * STAND_DEDUP_ECHO));
+    uint64_t*       mine   = theirs ? theirs + STAND_DEDUP_SERIES : NULL;
+    uint64_t*       self   = theirs ? mine + STAND_DEDUP_SERIES : NULL;
+    const char*     aside  = StandBinderAside(b);
+
+    memset(&ma, 0, sizeof(ma));
+    memset(&mb, 0, sizeof(mb));
+    memset(&mc, 0, sizeof(mc));
+    if (aside) {
+        kfree(theirs);
+        return test_steps_aside(aside);
+    }
+    TEST_ASSERT(theirs != NULL, "room for the files' blocks");
+    TEST_ASSERT(DedupStandPassed(&said) && DedupHold(false), "Dedup's own pass is let go");
+    TEST_ASSERT(StandFreshModelMake(&ma, STAND_DEDUP_SERIES * TAGFS_BLOCK_SIZE) &&
+                    StandFreshModelMake(&mb, STAND_DEDUP_SERIES * TAGFS_BLOCK_SIZE) &&
+                    StandFreshModelMake(&mc, 2u * STAND_DEDUP_ECHO * TAGFS_BLOCK_SIZE), "room for the files' bytes");
+    TEST_ASSERT(StandDedupFile(&ma, "dedup-series-a.bin", STAND_DEDUP_SERIES, STAND_DEDUP_STREAM, &a),
+                "file A is made and written");
+    TEST_ASSERT(StandDedupFile(&mb, "dedup-series-b.bin", STAND_DEDUP_SERIES, STAND_DEDUP_STREAM, &f) &&
+                    StandFreshWrite(&mb, f, (uint64_t)STAND_DEDUP_BREAK * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE,
+                                    STAND_DEDUP_OTHER) == (int)TAGFS_BLOCK_SIZE,
+                "file B of A's very bytes but its block 24: a series of 24 blocks A holds, and one of 15");
+    TEST_ASSERT(StandDedupFile(&mc, "dedup-series-c.bin", STAND_DEDUP_ECHO, STAND_DEDUP_SELF, &c) &&
+                    StandDedupEcho(&mc, c, 0, STAND_DEDUP_ECHO, STAND_DEDUP_ECHO),
+                "and file C, whose blocks 16 to 31 are its blocks 0 to 15 again");
+    TEST_ASSERT_OK(TagFSSettle(), "settled");
+    TEST_ASSERT(StandDedupBlocks(a, STAND_DEDUP_SERIES, theirs) && StandDedupBlocks(f, STAND_DEDUP_SERIES, mine) &&
+                    StandDedupBlocks(c, 2u * STAND_DEDUP_ECHO, self), "each on its own ground");
+    TEST_ASSERT_OK(StandDedupTallies(1u, &said), "a Tally, and the pass Glean runs after it");
+    TestEvidence("blocks laid", said.laid);
+    TEST_ASSERT_EQ(said.laid, STAND_DEDUP_BREAK, "the pass lays B's series of 24 on A's");
+    TEST_ASSERT_EQ(said.scant, STAND_DEDUP_SERIES - STAND_DEDUP_BREAK - 1u,
+                   "and leaves B's series of 15 as it is: shorter than 16 blocks in a row");
+    TEST_ASSERT_EQ(said.refused, 0, "no act it asked is refused");
+    TEST_ASSERT(said.passed >= STAND_DEDUP_ECHO, "C's second stretch is passed over: a file is never laid on itself");
+    TEST_ASSERT(StandDedupOnto(f, 0, theirs, STAND_DEDUP_BREAK), "B's blocks 0 to 23 are A's, each named by two");
+    TEST_ASSERT(StandDedupOwn(f, STAND_DEDUP_BREAK, mine, STAND_DEDUP_SERIES - STAND_DEDUP_BREAK),
+                "B's blocks 24 to 39 are its own still");
+    TEST_ASSERT(StandDedupOwn(c, 0, self, 2u * STAND_DEDUP_ECHO), "and C keeps every block of its own");
+    TEST_ASSERT(StandFreshHolds(&ma, a) && StandFreshHolds(&mb, f) && StandFreshHolds(&mc, c),
+                "all three read their bytes");
+out:
+    (void)DedupHold(true);
+    if (c)
+        (void)tagfs_delete_file(c, INK_UNWARRANTED);
+    if (f)
+        (void)tagfs_delete_file(f, INK_UNWARRANTED);
+    if (a)
+        (void)tagfs_delete_file(a, INK_UNWARRANTED);
+    kfree(theirs);
+    StandFreshModelLetGo(&mc);
+    StandFreshModelLetGo(&mb);
+    StandFreshModelLetGo(&ma);
     STAND_BINDER_PUT_BACK(b);
     return verdict;
 }
@@ -382,6 +475,52 @@ out:
     return verdict;
 }
 
+// ----------------------------------------------------------------------------
+// The fragmentation score: a step onto shared ground or off it is no gap
+// ----------------------------------------------------------------------------
+
+#define STAND_DEDUP_FRAG  48u        /* B's blocks 16 to 31 laid on A's: a stretch of its own each side */
+
+static TestResult TestStandDedupFrag(void)
+{
+    TestResult      verdict = TEST_PASS;
+    StandFreshModel m;
+    ConjugateSaid   csaid;
+    ConjugateAsk    ask;
+    FileRecord*     rec  = NULL;
+    uint64_t        a = 0, f = 0, steps = 0, own = 0, onto[STAND_DEDUP_FRAG], mine[STAND_DEDUP_FRAG];
+    uint32_t        gaps = 0;
+
+    memset(&m, 0, sizeof(m));
+    TEST_ASSERT(StandFreshModelMake(&m, STAND_DEDUP_FRAG * TAGFS_BLOCK_SIZE), "room for the files' bytes");
+    TEST_ASSERT(StandDedupFile(&m, "dedup-frag-a.bin", STAND_DEDUP_FRAG, STAND_DEDUP_STREAM, &a) &&
+                    StandDedupFile(&m, "dedup-frag-b.bin", STAND_DEDUP_FRAG, STAND_DEDUP_STREAM, &f),
+                "two files of one content are made");
+    TEST_ASSERT_OK(TagFSSettle(), "settled");
+    ask = (ConjugateAsk){ .fid = f, .at = 16, .onto = a, .onto_at = 16, .count = 16 };
+    TEST_ASSERT_OK(TagFSConjugate(INK_WARRANTED, &ask, &csaid), "B's blocks 16 to 31 are laid on A's");
+    TEST_ASSERT(StandDedupBlocks(a, STAND_DEDUP_FRAG, onto) && StandDedupBlocks(f, STAND_DEDUP_FRAG, mine) &&
+                    StandDedupOnto(f, 16, onto, 16), "B's blocks 16 to 31 are A's, named by two");
+    for (uint32_t k = 1; k < STAND_DEDUP_FRAG; k++)
+        if ((k < 16u || k > 32u) && mine[k] != mine[k - 1u] + 1u)
+            own++;
+    rec = FileMapRecordHold(tagfs_get_state()->files, f, NULL);
+    TEST_ASSERT(rec != NULL, "B's record is held");
+    TagFSFragOfRecord(rec, &gaps, &steps);
+    TestEvidence("gaps between B's own blocks", own);
+    TEST_ASSERT_EQ(gaps, own, "a gap is counted between B's own blocks alone: the step onto A's and off them is none");
+    TEST_ASSERT_EQ(steps, 30u, "over the steps of its two stretches of its own, 15 each");
+out:
+    if (rec)
+        FileRecordRelease(rec);
+    if (f)
+        (void)tagfs_delete_file(f, INK_UNWARRANTED);
+    if (a)
+        (void)tagfs_delete_file(a, INK_UNWARRANTED);
+    StandFreshModelLetGo(&m);
+    return verdict;
+}
+
 static const TestCase g_stand_dedup_tests[] = {
     { .name = "stand_dedup_copy", .func = TestStandDedupCopy, .reach = TEST_WRITES_TO_VOLUME,
       .format = DEED_FORMAT_V2 },
@@ -391,7 +530,11 @@ static const TestCase g_stand_dedup_tests[] = {
       .format = DEED_FORMAT_V2 },
     { .name = "stand_dedup_kept", .func = TestStandDedupKept, .reach = TEST_WRITES_TO_VOLUME,
       .format = DEED_FORMAT_V2 },
+    { .name = "stand_dedup_series", .func = TestStandDedupSeries, .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V2 },
     { .name = "stand_dedup_defrag", .func = TestStandDedupDefrag, .reach = TEST_WRITES_TO_VOLUME,
+      .format = DEED_FORMAT_V2 },
+    { .name = "stand_dedup_frag", .func = TestStandDedupFrag, .reach = TEST_WRITES_TO_VOLUME,
       .format = DEED_FORMAT_V2 },
 };
 
