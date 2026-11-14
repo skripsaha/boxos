@@ -126,14 +126,13 @@ bool     MapLayRunHolds(uint64_t block);
 error_t  MapLayBegin(uint32_t count, uint32_t entries, uint32_t old_first, uint32_t old_count);
 void     MapLayLetGo(void);
 
-/* The rotten blocks a mount names (integrity_rot.c): begun at IntegrityInit on
- * the "integrity" tag (TAGFS_INVALID_TAG_ID: named in the log only), a
- * mismatch IntegrityVerify found named — said and published once per rot —
- * and ended at IntegrityShutdown, saying how many were named and how many
- * more the set had no room for. A block written again or given back is
- * forgotten (IntegrityUpdate, IntegrityForget): rot in what it holds next is
- * named again. Name and Forget are called with no TagFS lock held. */
-void     IntegrityRotBegin(uint32_t tag);
+/* The rotten blocks a mount names (integrity_rot.c): begun by the mount
+ * (IntegrityRotBegin, integrity.h), a mismatch IntegrityVerify found named —
+ * said and published once per rot — and ended at IntegrityShutdown, saying
+ * how many were named and how many more the set had no room for. A block
+ * written again or given back is forgotten (IntegrityUpdate, IntegrityForget):
+ * rot in what it holds next is named again. Name and Forget are called with
+ * no TagFS lock held. */
 void     IntegrityRotName(uint64_t block, uint64_t stored, uint64_t read);
 /* A block of a format-v2 volume no DIGESTS element names, named as rot is:
  * said and published once (IntegrityVerify's road on such a volume). */

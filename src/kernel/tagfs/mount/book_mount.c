@@ -8,6 +8,7 @@
 #include "ground_census.h"
 #include "../block_map/block_map_derived.h"
 #include "../integrity/gloss.h"
+#include "../integrity/integrity.h"
 #include "../dedup/dedup.h"
 #include "../file_map/file_map.h"
 #include "../tag_registry/tag_registry.h"
@@ -20,6 +21,7 @@
 #include "crypto.h"
 #include "errata.h"
 #include "read_pace.h"
+#include "logbook.h"
 
 /*
  * A format-v2 volume's mount (book_mount.h): the ground, the Spine, the slot
@@ -457,6 +459,11 @@ error_t MountReadBook(const char** what)
     BookSeqSeenForget();
     BinderMountReset();
     FoxingBegin();
+    /* Rot is named from here on, each block once for this mount, on the
+     * "integrity" tag of the kernel's Logbook: a rotten block is an occurrence
+     * the kernel saw, never a name the volume's registry is given to carry
+     * (logbook.h) — and so it is published under glass too. */
+    IntegrityRotBegin(TouchLogbookIntern("integrity"));
     error_t rc = BookMemory(what);
     if (rc == OK)
         rc = BookSpine(what);
