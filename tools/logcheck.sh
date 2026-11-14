@@ -13,11 +13,11 @@
 #                         in its ground
 #   logcheck.sh bookboot  the kernel a format-v2 volume's BOOT names, held by
 #                         TagBoot to the book's digests before the jump, and
-#                         the kernels the book names by tag after it: the
+#                         the kernels the book names by role after it: the
 #                         Lectern on the host against volume-read boot, the
 #                         image attested through OVMF, a byte past the
 #                         kernel's end flipped — named, and no jump — and a
-#                         second kernel tagged boot jumped into in its place
+#                         second kernel kept in the boot role jumped into in its place
 #   logcheck.sh mkfs      no boot: the image `make VOLUME_FORMAT=v2` lays held to
 #                         volume-read — its self-test over mkfs's own book, its
 #                         files, its ground — and create_tagfs on grounds past
@@ -1233,28 +1233,28 @@ mce:migration:completed apei:memory:error apei:ghes:ready"
 # not a run's (K9): a build without VOLUME_TESTS walks the ten suites of
 # tests.h TEST_SUITES not
 # under VOLUME_TESTS_ONLY — core 3, stress 2, braid 3, cow 1, boxhash 6,
-# book 15, book_judge 5, ribbon 6, integrity 3, use_context 6 TestCases, 50
+# book 15, book_judge 5, ribbon 7, integrity 3, use_context 6 TestCases, 51
 # run; the 11 whose reach is TEST_WRITES_TO_VOLUME are skipped (tests.c,
-# g_volume_tests_allowed), and the 39 that only read pass — none of them
+# g_volume_tests_allowed), and the 40 that only read pass — none of them
 # stands aside on this stand's fresh image, whose first file wears a tag
 # (use_context_narrows). On a book the 6 written for format v1's records
 # stand aside first (tests.c, TestCase.format): tagfs_deed, which only
-# reads, and 5 of the 11 writers — so 38 reads pass, and 6 + 6 are
+# reads, and 5 of the 11 writers — so 39 reads pass, and 6 + 6 are
 # skipped. A test added or taken out moves this line in the same commit.
 healthy_startup_tests() {
     local L=$1
     grep -qE "TagFS: [0-9]+ run, [0-9]+ passed, 0 failed" "$L"; chk $? "TagFS startup tests: 0 failed"
-    local said want="TagFS: 50 run, 39 passed, 0 failed, 11 skipped, 0 held under a caveat"
-    local told="39 reads passed and 11 writes stood down"
+    local said want="TagFS: 51 run, 40 passed, 0 failed, 11 skipped, 0 held under a caveat"
+    local told="40 reads passed and 11 writes stood down"
     if [ "$(stand_format)" = v2 ]; then
-        want="TagFS: 50 run, 38 passed, 0 failed, 12 skipped, 0 held under a caveat"
-        told="38 reads passed, 6 written for format v1 stood aside and 6 writes stood down"
+        want="TagFS: 51 run, 39 passed, 0 failed, 12 skipped, 0 held under a caveat"
+        told="39 reads passed, 6 written for format v1 stood aside and 6 writes stood down"
         grep -aq "^\[TESTS\] 6 test(s) stood aside: this volume is format v2" "$L"
         chk $? "TagFS startup tests: on a book the 6 written for format v1's records stand aside"
     fi
     said=$(stand_summary "$L")
     [ "$said" = "$want" ]
-    chk $? "TagFS startup tests: the 50 this tree registers ran, $told (${said:-no summary})"
+    chk $? "TagFS startup tests: the 51 this tree registers ran, $told (${said:-no summary})"
 }
 
 run_healthy() {
@@ -2658,13 +2658,11 @@ run_mountfail() {
 
     # ── and the machine can actually USE it, which is the whole point ────────
     #
-    # Autostart reads its files off the volume. A machine whose volume did not
-    # come back says "No autostart files found" and falls back to the embedded
-    # shell — which is exactly what the board did, with a stick in the socket.
+    # The start set is read off the volume. A machine whose volume did not
+    # come back starts none of it — which is exactly what the board did, with a
+    # stick in the socket.
     grep -q "\[AUTOSTART\] Started 'hub.box'" "$L"
     chk $? "hub.box is found on the volume and started"
-    ! grep -q "No autostart files found" "$L"
-    chk $? "and the machine does not fall back to the shell built into it"
 
     grep -q "CPU features" "$L"
     chk $? "an external utility off the volume runs"
@@ -7496,8 +7494,8 @@ run_headcountmut() {
 # the string and leave the tag, so a renamed file answered to its old name and
 # not its new one. The scenario creates a file, renames it, and asks the volume
 # by tag and by name; then trashes it and empties the trash with delete,
-# which asks for the trashed files by their tag (a plain listing leaves them
-# out on purpose) and goes only on a yes.
+# which takes what `trash list` gave (a plain listing leaves the files kept
+# deleted out on purpose) and goes only on a yes.
 #
 # Then a second file is trashed and deleted BY NAME: the shell's look-up, like
 # a listing, leaves the trash out, so the name comes to delete as a word and
@@ -7521,8 +7519,8 @@ byname_session() {
     # A command, and the answer typed once delete asks for it: "CMD|ANSWER".
     local entry cmd answer asked
     for entry in "create alpha.txt" "name alpha.txt beta.txt" "files beta" "files alpha" \
-                 "info beta.txt" "info alpha.txt" "trash beta.txt" "delete trashed|yes" "files beta" \
-                 "create gamma.txt" "trash gamma.txt" "delete gamma.txt|yes" "files trashed" \
+                 "info beta.txt" "info alpha.txt" "trash beta.txt" "trash list" "delete them|yes" "files beta" \
+                 "create gamma.txt" "trash gamma.txt" "delete gamma.txt|yes" "trash list" \
                  "create delta.txt" "delete delta.txt|no" "delete nosuch.txt"; do
         cmd=${entry%%|*}
         answer=${entry#"$cmd"}; answer=${answer#|}
@@ -7563,17 +7561,20 @@ byname_judge() {
     sed -n '/~ info alpha.txt/,/~ trash beta.txt/p' "$L" | grep -q "there is no alpha.txt here" \
         && ok "$name: not found by its old name" \
         || bad "$name: 'info alpha.txt' still finds the renamed file"
-    sed -n '/~ delete trashed/,/~ files beta/p' "$L" | grep -q "^Deleted 1 file$" \
-        && ok "$name: delete found the trashed file by its tag, and deleted it on a yes" \
-        || bad "$name: 'delete trashed' did not delete the one trashed file ($(sed -n '/~ delete trashed/,/~ files beta/p' "$L" | grep -m1 -E '^(Deleted|Nothing|The trash)' || echo 'no answer'))"
+    sed -n '/~ trash list/,/~ delete them/p' "$L" | grep -q "^beta.txt  "
+    chk $? "$name: trash list showed the file kept deleted"
+    sed -n '/~ delete them/,/~ files beta/p' "$L" | grep -q "^Deleted 1 file$" \
+        && ok "$name: delete them took the file kept deleted that trash list gave, and deleted it on a yes" \
+        || bad "$name: 'delete them' did not delete the one trashed file ($(sed -n '/~ delete them/,/~ files beta/p' "$L" | grep -m1 -E '^(Deleted|Nothing|The trash)' || echo 'no answer'))"
     sed -n '/~ trash gamma.txt/,/~ delete gamma.txt/p' "$L" | grep -q "^gamma.txt moved to the trash"
     chk $? "$name: gamma.txt went to the trash ($(sed -n '/~ trash gamma.txt/,/~ delete gamma.txt/p' "$L" | grep -m1 -E '^(gamma.txt moved|Could not)' || echo 'no answer'))"
     local section
-    section=$(sed -n '/~ delete gamma.txt/,/~ files trashed/p' "$L")
+    section=$(sed -n '/~ delete gamma.txt/,/~ trash list/p' "$L")
     echo "$section" | grep -q "^  gamma\.txt  " && echo "$section" | grep -q "^Deleted 1 file$"
     chk $? "$name: delete by name found the trashed file in the trash, showed it, and deleted it on a yes ($(echo "$section" | grep -m1 -E '^(Deleted|Nothing|There is no)' || echo 'no answer'))"
-    sed -n '/~ files trashed/,/~ create delta.txt/p' "$L" | grep -q "No files found"
-    chk $? "$name: and the trash is empty after it ($(sed -n '/~ files trashed/,/~ create delta.txt/p' "$L" | grep -m1 -E '^(No files found|gamma\.txt)' || echo 'no answer'))"
+    section=$(sed -n '/~ delete gamma.txt/,/~ create delta.txt/p' "$L" | sed -n '/~ trash list/,$p')
+    echo "$section" | grep -q "^The trash is empty$"
+    chk $? "$name: and the trash is empty after it ($(echo "$section" | grep -m1 -E '^(The trash is empty|gamma\.txt)' || echo 'no answer'))"
     section=$(sed -n '/~ delete delta.txt/,/~ delete nosuch.txt/p' "$L")
     echo "$section" | grep -q "does not go to the trash" && echo "$section" | grep -q "^Nothing was deleted$"
     chk $? "$name: a file out of the trash is shown with the warning that it is gone for good, and kept on a no ($(echo "$section" | grep -m1 -E '^(Deleted|Nothing|There is no)' || echo 'no answer'))"
@@ -8884,8 +8885,8 @@ STAND_HELD="
 "
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
-# suite in tests.h TEST_SUITES — the plain build's 50 (healthy says how) and
-# the 401 of the stand's own fifty-two suites: stand 28, stand_lock 4,
+# suite in tests.h TEST_SUITES — the plain build's 51 (healthy says how) and
+# the 407 of the stand's own fifty-three suites: stand 28, stand_lock 4,
 # stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 9,
 # stand_plot 10, stand_index 6, stand_ink 6, stand_helm 7, stand_port 2,
 # stand_use 3, stand_use_chain 4, stand_seal 8, stand_settle 14, stand_glean 9,
@@ -8897,11 +8898,11 @@ STAND_HELD="
 # stand_endpaper 6, stand_errata 8, stand_toll 5, stand_dog_ear 9,
 # stand_slip 14, stand_away 14, stand_tip_in 10, stand_slip_promise 5,
 # stand_book_glean 2, stand_escheat 7, stand_parity 2, stand_book_room 11,
-# stand_commonhold 1, stand_conjugate 5, stand_dedup 7. Counted off the code,
+# stand_commonhold 1, stand_conjugate 5, stand_dedup 6, stand_keep 5. Counted off the code,
 # not a run (K9): a suite that drops out of the walk is a test that stopped
 # covering anything, and the count is where that shows. How many of them pass
 # and how many stand aside is the road's — said, not pinned.
-STAND_RUN=453
+STAND_RUN=458
 
 # What a VOLUME_TESTS kernel says of a record memory holds that is not the
 # file a format-v1 Ink packed (plot_conveyance.c, PackV1Agrees and
@@ -9582,9 +9583,9 @@ edits = {
    "    ConveyanceSplices(cur, from, took, p->runs, p->run_count, *out);\n"
    "    (*count)--;   /* " + M + ": the last splice a Plot made is not conveyed */\n    return OK;\n"),
   ("src/kernel/tagfs/file_map/file_record.c",
-   "    rec->modified_time = old->modified_time;\n    rec->gen           = __atomic_load_n(&old->gen, __ATOMIC_RELAXED);\n",
+   "    rec->modified_time = old->modified_time;\n    rec->keep_until    = keep_until;\n",
    "    rec->modified_time = old->modified_time + 1u;   /* " + M + ": a rename's record says another time */\n"
-   "    rec->gen           = __atomic_load_n(&old->gen, __ATOMIC_RELAXED);\n"),
+   "    rec->keep_until    = keep_until;\n"),
   ("src/kernel/tagfs/ink/ink.c",
    "    rc = InkRecordMake(&meta, &r);\n    if (rc == OK && !(r.rec = FileRecordBuild(&meta))) {\n",
    "    rc = InkRecordMake(&meta, &r);\n"
@@ -9952,7 +9953,7 @@ STAND_HELD_EOF
 #           extents; a book's runs of ground, past the run a cycle its
 #           record keeps on each)
 #   boot 2  usememory's second half, when the first said PENDING; fidhistory
-#   boot 3  systemtag; then the host lists the volume again: is kernel.bin on it
+#   boot 3  nothing run: the mount fidhistory's cost is read from
 #
 # on a throwaway image given a gigabyte more ground, so that once the steps
 # land no case is refused for want of space — built VOLUME_TESTS=on, the one
@@ -10062,11 +10063,11 @@ quill_run() {
     wait_for_quiet 3
 }
 
-# quill_session TAG — the three boots, their logs and the two listings, on a
+# quill_session TAG — the three boots, their logs and the listing, on a
 # tree built VOLUME_TESTS=on (the caller puts the plain one back).
 quill_session() {
     local tag=$1 grown c
-    rm -f "$SCRATCH/serial.quill.$tag"[123].log "$SCRATCH/quill.$tag.list"[13]
+    rm -f "$SCRATCH/serial.quill.$tag"[123].log "$SCRATCH/quill.$tag.list1"
     quill_keys || return 1
     rm -f build/boxos.img
     if ! build_with_key VOLUME_TESTS=on "$(strict_key ${QUILL_KEYS[@]+"${QUILL_KEYS[@]}"})"; then
@@ -10098,14 +10099,12 @@ quill_session() {
     quill_keep "${tag}2"
 
     quill_boot "${tag}3" || return 1
-    quill_run systemtag
     quill_keep "${tag}3"
-    python3 tools/volume-read.py build/boxos.img list >"$SCRATCH/quill.$tag.list3" 2>&1
     return 0
 }
 
 # quill_judge TAG BIG SEQ WEAVE USE_BYTES USE_TAGS FIDS — what the three logs
-# and the two listings show, one line per finding into $SCRATCH/quill.TAG.verdict:
+# and the listing show, one line per finding into $SCRATCH/quill.TAG.verdict:
 #   check<TAB>ok|bad<TAB>sentence            the stand itself
 #   selftest<TAB>passed|failed|missing<TAB>line
 #   case<TAB>NAME<TAB>defect|behaves|fail<TAB>what
@@ -10129,7 +10128,7 @@ def text(path):
         return ""
 
 logs = [text("%s/serial.quill.%s%d.log" % (scratch, tag, i)) for i in (1, 2, 3)]
-lists = [text("%s/quill.%s.list%d" % (scratch, tag, i)) for i in (1, 3)]
+lists = [text("%s/quill.%s.list1" % (scratch, tag))]
 
 def out(*fields):
     print("\t".join(str(f) for f in fields))
@@ -10365,28 +10364,9 @@ def fidhistory():
         return "behaves", what
     return "fail", what + " — neither HEAD's arrays sized by every id nor an index of the living"
 
-def systemtag():
-    word, rest = verdict(logs[2], "systemtag")
-    listed = len(re.findall(r"^ +\S+ +\d+ bytes +\d+ (?:extent|run)\(s\)", lists[1], re.M))
-    present = host(lists[1], "kernel.bin") is not None
-    m = re.match(r"kernel\.bin \(file (\d+)\) gave up its system tag to untag, a program that does not wear "
-                 r"system \(exit 0\)", rest)
-    if word == "DEFECT" and m and listed:
-        return "defect", "kernel.bin (file %s) gave up its system tag to untag, a program that does not wear " \
-                         "system; the host lists %d files, kernel.bin %s" \
-                         % (m.group(1), listed, "among them" if present else "not among them")
-    p = re.match(r"kernel\.bin \(file (\d+)\) kept its system tag against untag \(exit (\d+)\), and its place "
-                 r"in the trash against delete trashed, which with nobody at its screen to say yes deleted "
-                 r"nothing \(exit (\d+)\), programs that do not wear system", rest)
-    if word == "PASS" and p and present and p.group(2) != "0" and p.group(3) != "0":
-        return "behaves", "kernel.bin (file %s) refused untag (exit %s) and stayed through delete trashed, which " \
-                          "with nobody to say yes deleted nothing (exit %s), and the host still lists it" % p.groups()
-    return "fail", "%s; the host lists %d files, kernel.bin %s" % (said(logs[2], "systemtag"), listed,
-                                                                 "among them" if present else "not among them")
-
 for name, judge in (("longquery", longquery), ("bigwrite", bigwrite), ("sequential", sequential),
                     ("interleave", interleave), ("coldread", coldread), ("coldwrite", coldwrite),
-                    ("usememory", usememory), ("fidhistory", fidhistory), ("systemtag", systemtag)):
+                    ("usememory", usememory), ("fidhistory", fidhistory)):
     seen, what = judge()
     out("case", name, seen, what)
 QUILL_EOF
@@ -10398,7 +10378,7 @@ QUILL_EOF
 # The path a case's writes took: the boot it ran on, and its cores.
 quill_path() {
     local boot=1
-    case "$2" in fidhistory) boot=2 ;; systemtag) boot=3 ;; esac
+    case "$2" in fidhistory) boot=2 ;; esac
     stand_path "$SCRATCH/serial.quill.$1$boot.log" "$(quill_cores)"
 }
 
@@ -10438,11 +10418,9 @@ run_quill() {
 #
 # longquery's fix is the tree's own since step 1.1b, and bigwrite, sequential
 # and interleave are the tree's own since step 1.3 — each must behave with
-# nothing put in. Two fixes that used to be emulated here are the tree's own
-# as well, and so they are taken OUT, and their oracle must see the defect
-# come back: the Ink guard (step 1.4, ink.c) — down, untag takes the system
-# tag off kernel.bin (systemtag); the Use Context's
-# chain (step 1.6B, use_memory.c) — never staked, a context of 1000 bytes is
+# nothing put in. One fix that used to be emulated here is the tree's own
+# as well, and so it is taken OUT, and its oracle must see the defect come
+# back: the Use Context's chain (step 1.6B, use_memory.c) — never staked, a context of 1000 bytes is
 # carried by nothing and the volume does not remember it (usememory). A book
 # carries the word in its stitch, not on a chain, so its stitch takes it out
 # too (sewing.c StitchBuild): a word with bytes finds no room on the ribbon,
@@ -10457,18 +10435,11 @@ run_quill() {
 # without the other. And first, with no machine at all, caveat_judge's three
 # answers in their approved words.
 quill_mutants_on() {
-    mutate src/kernel/tagfs/ink/ink.c
     mutate src/kernel/tagfs/use_memory/use_memory.c
     mutate src/kernel/tagfs/settle/sewing.c
     mutate src/userspace/apps/quilltest_throwaway.c
     python3 - <<'EOF2'
 for p, a, b in (
-    ("src/kernel/tagfs/ink/ink.c",
-     "        if (warrant != INK_WARRANTED && InkTagGuarded(f.dropped[i]))\n",
-     "        if (0 && warrant != INK_WARRANTED && InkTagGuarded(f.dropped[i]))   /* logcheck mutation: the guard is down, a guarded tag comes off */\n"),
-    ("src/kernel/tagfs/ink/ink.c",
-     "    if (boot || (warrant != INK_WARRANTED && InkWearsGuarded(tags, tag_count))) {\n",
-     "    if (0 && (boot || (warrant != INK_WARRANTED && InkWearsGuarded(tags, tag_count)))) {   /* logcheck mutation: the guard is down, the kernel's file changes */\n"),
     ("src/kernel/tagfs/use_memory/use_memory.c",
      "    error_t rc   = UseChainStake(s_cycle.need, &s_cycle.chain, &s_cycle.got);\n",
      "    error_t rc   = ERR_TAGFS_NO_SPACE;   /* logcheck mutation: no chain is staked, a Use Context rides on nothing */\n"),
@@ -10482,7 +10453,6 @@ for p, a, b in (
     assert s.count(a) == 1, "quillmut anchor missing in %s: %s" % (p, a.strip().splitlines()[0])
     open(p, "w").write(s.replace(a, b, 1))
 EOF2
-    mut_done src/kernel/tagfs/ink/ink.c "logcheck mutation" 2
     mut_done src/kernel/tagfs/use_memory/use_memory.c "logcheck mutation" 1
     mut_done src/kernel/tagfs/settle/sewing.c "logcheck mutation" 1
     mut_done src/userspace/apps/quilltest_throwaway.c "logcheck mutation" 1
@@ -10587,7 +10557,6 @@ run_quillmut() {
                           fidhistory)            want="fail:[0-9]+ files were live before and [0-9]+ after" ;;
                           coldread)              want="fail:a read of [0-9]+ bytes into memory this program never touched answered -[0-9]+ \(error [0-9]+\); 0 of the bytes" ;;
                           coldwrite)             want="fail:a write of [0-9]+ bytes out of memory this program never touched answered -[0-9]+ \(error [0-9]+\); the file holds 0 bytes" ;;
-                          systemtag)             want="defect:kernel\.bin \(file [0-9]+\) gave up its system tag to untag, a program that does not wear system" ;;
                           usememory)             want="defect:a Use Context of 1000 bytes in 91 tags was set and the volume did not remember it" ;;
                           *)                     want="behaves:" ;;
                       esac

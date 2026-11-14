@@ -440,7 +440,7 @@ uint64_t pack_metadata_record(uint8_t* buf, const FileInfo* fi) {
     /* file_id */
     memcpy(buf + pos, &fi->file_id, 4);           pos += 4;
     /* flags */
-    uint32_t flags = TAGFS_FILE_ACTIVE;
+    uint32_t flags = TAGFS_FILE_ACTIVE | fi->role;
     memcpy(buf + pos, &flags, 4);                 pos += 4;
     /* size */
     memcpy(buf + pos, &fi->file_size, 8);         pos += 8;
@@ -548,7 +548,8 @@ int say_the_ground(int pair_count, char* argv[], int first) {
     for (int i = 0; i < pair_count; i++) {
         uint32_t* ids   = NULL;
         uint32_t  count = 0;
-        if (parse_tags(argv[first + i * 2 + 1], argv[first + i * 2], &ids, &count) != 0) return 1;
+        uint32_t  role  = 0;
+        if (parse_tags(argv[first + i * 2 + 1], argv[first + i * 2], &ids, &count, &role) != 0) return 1;
         free(ids);
     }
     {

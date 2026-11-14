@@ -632,7 +632,7 @@ static TestResult TestStandHelmRecordRoomClaimed(void)
     TEST_ASSERT(PlotRunRoom(&now) >= plot.runs_before,
                 "the name fits beside the extents the record names now");
 
-    TEST_ASSERT_EQ(tagfs_rename_file(file_id, name, INK_UNWARRANTED), -(int)ERR_TAGFS_RECORD_FULL,
+    TEST_ASSERT_EQ(tagfs_rename_file(file_id, name), -(int)ERR_TAGFS_RECORD_FULL,
                    "and is refused: it would take the room the write in flight claimed");
 
     PlotSource src  = { .kernel = g_test_buffer + 2 * B, .bytes = B };
@@ -674,9 +674,9 @@ out:
 // or boot — and so did the plot's gather, and the Ink, each its own way. The
 // guard is the volume's now, in one place (InkMayChange): a program's write
 // into such a file is refused when its job loads the file, before a byte
-// moves, and so is a span. A file of the volume that wears system is written
-// with the bytes it already holds, so nothing could change even if the guard
-// let it through — but nothing reaches the medium at all.
+// moves, and so is a span. A file of the volume kept in a role is written with
+// the bytes it already holds, so nothing could change even if the guard let it
+// through — but nothing reaches the medium at all.
 // ----------------------------------------------------------------------------
 
 static TestResult TestStandHelmGuardedFileRefused(void)
@@ -685,18 +685,14 @@ static TestResult TestStandHelmGuardedFileRefused(void)
     uint64_t    file_id  = 0;
     uint64_t    block    = 0;
     bool        armed    = false;
-    TagSpelling system   = TagSpellingOfKey("system");
     uint64_t    stats[2] = { UINT64_MAX, UINT64_MAX };
-    TagFSPage   page;
     const char *aside    = StandStepsAsideFor();
 
     if (aside)
         return test_steps_aside(aside);
 
-    TEST_ASSERT_OK(TagFSQueryPage(&system, 1, NULL, 0, 1, &file_id, 1, false, &page),
-                   "the volume is asked for a file that wears system");
-    if (page.delivered == 0)
-        return test_steps_aside("no file of this volume wears system");
+    if (!StandKeptFile(&file_id))
+        return test_steps_aside("no file of this volume is kept in a role");
 
     TagFSMetadata meta;
     memset(&meta, 0, sizeof(meta));

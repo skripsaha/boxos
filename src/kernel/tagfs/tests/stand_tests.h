@@ -135,6 +135,16 @@ void StandSettleTurn(void);
  * left behind — when either step did not answer in full. */
 bool StandMakeFile(const char* name, const void* data, uint32_t bytes, uint64_t* out_file_id);
 
+/* The file kept in `role` (TAGFS_FILE_ROLE_*; TAGFS_FILE_ROLE_ORDINARY lets it
+ * go), as the image builder keeps a file — the stand's own way, since no call
+ * a program makes puts a role on a file (ink.h, InkRoleLaid; on a book the tail
+ * is laid in its block first, EngrossRoled). OK, or the refusal. */
+error_t StandKeepInRole(uint64_t file_id, uint32_t role);
+
+/* The first file of the volume whose record keeps it in a role and names a
+ * block — the image's own system files. False when there is none. */
+bool StandKeptFile(uint64_t* out_file_id);
+
 /* The data-run block that holds the k-th block of the file, read off its
  * record — never off the block itself, which would put it in the read-ahead
  * cache a read fault must not be answered from. */

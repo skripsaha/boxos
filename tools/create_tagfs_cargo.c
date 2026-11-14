@@ -10,6 +10,8 @@
 #include "create_tagfs.h"
 #include "buildplate_format.h"   /* the verdict this volume copies out of the kernel it packs */
 #include "tagfs_reserved.h"      /* shared reserved-tag vocabulary (-I src/include) */
+#include <stdbool.h>
+#include "box_reader.h"          /* the box a program is, read for its role (-I src/include) */
 
 TagEntry* g_tags       = NULL;
 uint32_t  g_tag_count  = 0;
@@ -206,13 +208,80 @@ static char* StemOf(const char* filename) {
     return stem;
 }
 
-/* Whether a file wears the label `kernel` — its name stems to it, or it was
- * given it — which is the file the Deed's BOOT stamp points a loader at. */
-int KernelTagged(const uint32_t* ids, uint32_t count) {
-    for (uint32_t t = 0; t < count; t++) {
-        if (g_tags[ids[t]].value == NULL && strcmp(g_tags[ids[t]].key, "kernel") == 0)
-            return 1;
+/* The file the volume's maker named as the kernel (--kernel): the one the
+ * Deed's BOOT stamp points a loader at. NULL when none was named. */
+static const char* g_kernel_file = NULL;
+
+void CargoNameKernel(const char* path) {
+    g_kernel_file = path;
+}
+
+/* The box's part `role`, read from the file `filename` when it is a box: its
+ * first bytes are a box's, the table and names hold, and the part is written
+ * as a role is (box_reader.h BoxRoleRead). A file that is not a box — the
+ * kernel, a text, an ELF — says no role. 0 with *role set, or -1 having said
+ * why. The seal and the hashes are not checked here: the builder lays boxes
+ * it has just packed, and the kernel holds every box to them when it starts it. */
+static int BoxRoleOf(const char* filename, BoxRole* role) {
+    *role = BOX_ROLE_ORDINARY;
+    FILE* file = fopen(filename, "rb");
+    if (!file) { fprintf(stderr, "%s: cannot be opened\n", filename); return -1; }
+
+    int       rc      = -1;
+    uint8_t*  prefix  = NULL;
+    uint8_t*  part_at = NULL;
+    uint8_t   head_bytes[BOX_HEADER_BYTES];
+    size_t    have    = fread(head_bytes, 1, sizeof(head_bytes), file);
+    long      length  = fseek(file, 0, SEEK_END) == 0 ? ftell(file) : -1;
+    BoxHead   head;
+    BoxTable  table;
+    BoxPart   part;
+    BoxVerdict verdict = length < 0 ? BOX_TRUNCATED : BoxReadHead(head_bytes, have, (uint64_t)length, &head);
+
+    if (verdict == BOX_NOT_BOX) { rc = 0; goto done; }
+    if (verdict == BOX_OK) {
+        prefix = malloc(head.PrefixBytes);
+        if (!prefix || fseek(file, 0, SEEK_SET) != 0 || fread(prefix, 1, head.PrefixBytes, file) != head.PrefixBytes)
+            verdict = BOX_TRUNCATED;
+        else
+            verdict = BoxRead(prefix, head.PrefixBytes, &head, &table);
     }
+    if (verdict != BOX_OK) {
+        fprintf(stderr, "%s: it is a box that would not be read: %s\n", filename, BoxVerdictText(verdict));
+        goto done;
+    }
+    if (!BoxPartOfKind(&table, BOX_KIND_ROLE, &part)) { rc = 0; goto done; }
+
+    part_at = malloc(part.Size ? part.Size : 1);
+    if (!part_at || fseek(file, (long)part.Offset, SEEK_SET) != 0 || fread(part_at, 1, part.Size, file) != part.Size) {
+        fprintf(stderr, "%s: its role part cannot be read\n", filename);
+        goto done;
+    }
+    uint64_t unknown;
+    if (BoxRoleRead(part_at, part.Size, role, &unknown) != BOX_OK || unknown != 0) {
+        fprintf(stderr, "%s: its role is not written as one: system or boot, one word\n", filename);
+        goto done;
+    }
+    rc = 0;
+done:
+    free(part_at);
+    free(prefix);
+    fclose(file);
+    return rc;
+}
+
+/* What the volume keeps `filename` as, TALLY_FILE_ROLE_*: the kernel for the
+ * file --kernel named, otherwise what its own box says it is (system, boot),
+ * otherwise ordinary. No tag of the file is read. 0, or -1 having said why. */
+static int RoleOf(const char* filename, uint32_t* role) {
+    *role = 0;
+    if (g_kernel_file && strcmp(filename, g_kernel_file) == 0) {
+        *role = TALLY_FILE_ROLE_KERNEL;
+        return 0;
+    }
+    BoxRole said;
+    if (BoxRoleOf(filename, &said) != 0) return -1;
+    *role = said == BOX_ROLE_SYSTEM ? TALLY_FILE_ROLE_SYSTEM : said == BOX_ROLE_BOOT ? TALLY_FILE_ROLE_BOOT : 0;
     return 0;
 }
 
@@ -234,8 +303,11 @@ static int TagTake(char* token, const char* whose, uint32_t* ids, uint32_t* coun
 }
 
 /*
- * A file's tags: its name's stem first, then a comma-separated list like
- * "system,type:elf,utility", each once. 0, or -1 having said why.
+ * A file's role (RoleOf) and its tags — of the file at `path`, however it is
+ * named in the volume — its name's stem first, then a
+ * comma-separated list like "memory,fun", each once. The tags are the
+ * file's user's words and decide nothing; the role comes from the kernel
+ * file named and from the file's box. 0, or -1 having said why.
  *
  * ‼ THE LIST IS TAKEN WHOLE. It was copied into 4096 bytes and the rest cut
  * off, its tags counted into 256 and the rest dropped, the stem cut at 255 —
@@ -245,24 +317,26 @@ static int TagTake(char* token, const char* whose, uint32_t* ids, uint32_t* coun
  * format v2 has no such width), and how wide one can be the kernel's
  * (TAG_KEY_WIDTH, TAG_TEXT_ROOM).
  */
-int parse_tags(const char* tag_string, const char* filename, uint32_t** out_ids, uint32_t* out_count) {
+int parse_tags(const char* tag_string, const char* path, uint32_t** out_ids, uint32_t* out_count,
+               uint32_t* out_role) {
+    if (RoleOf(path, out_role) != 0) return -1;
     uint32_t  room  = 2;   /* the stem, and one more tag than there are commas */
     uint32_t  count = 0;
     for (const char* c = tag_string; *c; c++) room += *c == ',';
-    char*     stem  = StemOf(filename);
+    char*     stem  = StemOf(path);
     char*     list  = strdup(tag_string);
     uint32_t* ids   = malloc(sizeof(uint32_t) * room);
     int       taken = stem && list && ids;
-    if (!taken) fprintf(stderr, "%s: no memory for its tags\n", filename);
+    if (!taken) fprintf(stderr, "%s: no memory for its tags\n", path);
 
     /* The stem is a key whole, never split at ':' (tag_spelling.h, TagSpellKey). */
     if (taken && stem[0] != '\0') {
-        taken = intern_tag(stem, NULL, filename, &ids[0]) == 0;
+        taken = intern_tag(stem, NULL, path, &ids[0]) == 0;
         count = taken ? 1u : 0u;
     }
     for (char* token = taken ? strtok(list, ",") : NULL; token; token = strtok(NULL, ",")) {
         while (*token == ' ') token++;
-        if (TagTake(token, filename, ids, &count) != 0) {
+        if (TagTake(token, path, ids, &count) != 0) {
             taken = 0;
             break;
         }

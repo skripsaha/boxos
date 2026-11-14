@@ -284,6 +284,16 @@ int query_all_everywhere(const char *tags, const char *without, file_id_t **out_
     return query_all_scoped(tags, without, out_ids, STORAGE_SCOPE_EVERYWHERE);
 }
 
+int query_deleted(const char *tags, const char *without, file_id_t *file_ids, size_t max_files)
+{
+    return query_scoped(tags, without, file_ids, max_files, STORAGE_SCOPE_DELETED, NULL);
+}
+
+int query_all_deleted(const char *tags, const char *without, file_id_t **out_ids)
+{
+    return query_all_scoped(tags, without, out_ids, STORAGE_SCOPE_DELETED);
+}
+
 /* =========================================================================
  *  FILE_INFO — parse the variable-length blob ObjGetInfo writes.
  *
@@ -387,6 +397,8 @@ int file_info(file_id_t file_id, file_info_t *info)
         }
         pos += kl + vl;
     }
+    if (out_actual >= pos + 8u)
+        memcpy(&info->deleted_until, out + out_actual - 8u, 8);
     return 0;
 }
 
@@ -537,6 +549,25 @@ int tag_remove(file_id_t file_id, const char *key)
                      &file_id, sizeof(file_id),
                      key, (uint32_t)kl,
                      NULL, 0, NULL,
+                     BOX_ANSWER_GUARANTEED, NULL);
+    return box_fail(rc);
+}
+
+int file_keep(file_id_t file_id, uint64_t term_seconds)
+{
+    uint64_t params[2] = { file_id, term_seconds };
+    int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_KEEP,
+                     params, sizeof(params),
+                     NULL, 0, NULL, 0, NULL,
+                     BOX_ANSWER_GUARANTEED, NULL);
+    return box_fail(rc);
+}
+
+int file_restore(file_id_t file_id)
+{
+    int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_RESTORE,
+                     &file_id, sizeof(file_id),
+                     NULL, 0, NULL, 0, NULL,
                      BOX_ANSWER_GUARANTEED, NULL);
     return box_fail(rc);
 }

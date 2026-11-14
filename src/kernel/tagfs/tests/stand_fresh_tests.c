@@ -351,7 +351,7 @@ static TestResult TestStandFreshFlushesFirst(void)
     TEST_ASSERT_EQ(BlockFailSeen(), 2, "paying two flushes: the data's before the stitch, and the one after it");
     TEST_ASSERT(StandFreshLastStitch(&flags, &fresh) && (flags & STITCH_DATA_FLUSHED) && fresh == 2,
                 "its stitch says DATA_FLUSHED, and its Clasp the two fresh blocks it names");
-    TEST_ASSERT_EQ(tagfs_rename_file(fid, "fresh-flush-named.bin", INK_UNWARRANTED), 0, "the file is renamed");
+    TEST_ASSERT_EQ(tagfs_rename_file(fid, "fresh-flush-named.bin"), 0, "the file is renamed");
     BlockFailArm(s.seat, BLOCK_FAIL_FLUSH, 0, 0, BLOCK_FAIL_NEVER);
     TEST_ASSERT_OK(TagFSSettle(), "the cycle that names the rename settles");
     TEST_ASSERT_EQ(BlockFailSeen(), 1, "paying the one flush after its stitch: it names no fresh data");

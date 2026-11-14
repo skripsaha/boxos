@@ -20,6 +20,7 @@ typedef struct {
     uint8_t tag_count;
     char filename[32];
     tag_t tags[5];
+    uint64_t deleted_until;   // the wall clock's nanoseconds a deleted file is kept until; 0 for one that is not
 } file_info_t;
 
 /* Full metadata for tools that must preserve a file exactly.  file_info_t is
@@ -35,6 +36,7 @@ typedef struct {
     uint16_t  TagCount;
     char     *Filename;
     char     *Tags;
+    uint64_t  KeptUntil;      /* the wall clock's nanoseconds a deleted file is kept until; 0 for one that is not */
 } FileMetadata;
 
 /* Read the complete self-describing metadata record.  The response buffer is
@@ -45,7 +47,10 @@ int FileMetadataRead(file_id_t FileId, FileMetadata *Out);
 void FileMetadataRelease(FileMetadata *Metadata);
 
 /* Whether the file wears a tag whose key is `Key`, bare or with a value:
- * "trashed", "settings", "log:file". What a file is, the tags it wears say. */
+ * "note", "log:file". A tag is the person's own label for finding a file, and
+ * this is for a program that finds the files its person labelled for it (the
+ * notes finding notes); what a file IS — a program, a settings file, kept by
+ * the system — is never read from its tags. */
 bool FileMetadataWears(const FileMetadata *Metadata, const char *Key);
 
 /*
@@ -62,10 +67,9 @@ int64_t create(const char* filename, const char* tags);
 int64_t create_everywhere(const char* filename, const char* tags);
 /* The files that wear every tag of `tags` (every file, for NULL or "") and
  * none of `without` (a comma list too; NULL or "" sets nothing aside). The
- * volume sets aside no file of its own accord — trashed and hidden are tags
- * like any other — so each asker says what it leaves out: a listing for the
- * person "trashed,hidden" until the person names them, a name looked up to
- * act on "trashed".
+ * volume sets aside no file of its own accord but the deleted ones — which
+ * these never meet; query_deleted is the one question that does — so each
+ * asker says what else, if anything, it leaves out.
  *
  * query writes up to max_files ids and returns how many it wrote. A caller
  * that wants every match asks query_all: it learns the count from the kernel,
@@ -75,6 +79,10 @@ int query(const char* tags, const char* without, file_id_t* file_ids, size_t max
 int query_everywhere(const char* tags, const char* without, file_id_t* file_ids, size_t max_files);
 int query_all(const char* tags, const char* without, file_id_t** out_ids);
 int query_all_everywhere(const char* tags, const char* without, file_id_t** out_ids);
+/* The same question asked of the files kept deleted (file_keep) alone, over the
+ * whole volume — the Use Context left out. */
+int query_deleted(const char* tags, const char* without, file_id_t* file_ids, size_t max_files);
+int query_all_deleted(const char* tags, const char* without, file_id_t** out_ids);
 int file_info(file_id_t file_id, file_info_t* info);
 /* Return the byte count transferred (0..4 GiB, short-transfer: a request > 4 GiB
  * is capped to one syscall — loop for more), or a negative -error_t on failure.
@@ -95,6 +103,16 @@ int file_delete(file_id_t file_id) asm("delete");
 #else
 int delete(file_id_t file_id);
 #endif
+/* A file deleted for a term: no query meets it, it can be brought back by
+ * file_restore until the term ends, and the volume lets it go by itself then.
+ * The term is the caller's — in seconds, from now — and the volume has none of
+ * its own; 0 gives the file up at once, as `delete` does. Guarded as `delete`
+ * is: a file the system keeps is refused (-ERR_PERMISSION_DENIED); -ERR_UNSUPPORTED
+ * on a format-v1 volume for a term above 0. Whoever deletes warns the person
+ * first, if he is to be warned. file_restore: the file found again, its name
+ * and tags as they were (-ERR_FILE_NOT_FOUND once its term has ended). */
+int file_keep(file_id_t file_id, uint64_t term_seconds);
+int file_restore(file_id_t file_id);
 int file_rename(file_id_t file_id, const char* new_filename);
 
 /* The file made exactly `size` bytes long. Shorter: the tail is cut and its
@@ -104,7 +122,7 @@ int file_rename(file_id_t file_id, const char* new_filename);
  * flags STORAGE_SPAN_GROW (box/types.h): grown to `size` only if it is
  * shorter, never cut — the way to make room for a write past the end without
  * cutting back what another writer added meanwhile; 0 for exactly `size`.
- * Refused on "system"/"boot" files (-ERR_PERMISSION_DENIED), like delete; a
+ * Refused on a file the system keeps in a role (-ERR_PERMISSION_DENIED), like delete; a
  * growth past every block the volume could give, -ERR_TAGFS_NO_SPACE.
  * Returns 0 or a negative -error_t.
  *
@@ -218,8 +236,8 @@ int escheat(EscheatAnswer* said);
  * ground, `fid`'s own blocks let go: the volume holds the bytes once, and both
  * files read what they read before. Every block alike or none laid. Only a
  * program wearing system or god may ask (ERR_ACCESS_DENIED,
- * ERR_PERMISSION_DENIED); a file wearing dedup:off is neither laid nor laid
- * on, a file the system keeps is never laid, and the kernel's file neither.
+ * ERR_PERMISSION_DENIED); a file the system keeps is never laid, and the
+ * kernel's file neither laid nor laid on.
  * The verdict comes back in *said whatever the answer — `why` as
  * boxos_decks.h names it for obj.conjugate.
  */

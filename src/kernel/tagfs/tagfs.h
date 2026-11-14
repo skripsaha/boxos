@@ -616,12 +616,22 @@ error_t TagFSCreateFits(const char* filename, const TagSpelling* tags, uint32_t 
                         uint32_t* out_worn);
 
 /* The file given up, or renamed — its old name's tag off, the new one's on.
- * 0, or a negative -ERR_*: a file the system keeps is given up only with the
- * warrant, and so is a tag of key system, boot or god its rename would take
- * off or put on (-ERR_PERMISSION_DENIED); the file holding the kernel the Deed
- * points the loader at is given up by nobody. */
+ * 0, or a negative -ERR_*: a file the system keeps in a role is given up only
+ * with the warrant (-ERR_PERMISSION_DENIED); the file holding the kernel the
+ * Deed points the loader at is given up by nobody. A rename asks none: its
+ * name's tag is a tag like any other. */
 int  tagfs_delete_file(uint64_t file_id, InkWarrant warrant);
-int  tagfs_rename_file(uint64_t file_id, const char* new_filename, InkWarrant warrant);
+/* A file deleted for a term (keep/keep.h): kept `term_seconds` from now, no
+ * query meeting it, and let go by the volume when the term ends — or, for a
+ * term of 0, given up at once, as tagfs_delete_file does. The term is the
+ * caller's: the volume has none of its own. A file the system keeps is
+ * deleted only with the warrant, as it is given up. -ERR_UNSUPPORTED on
+ * format v1 for a term above 0. tagfs_restore_file brings a deleted file back
+ * until its term ends (-ERR_FILE_NOT_FOUND after, or for a file the volume
+ * does not hold), and is no change to a file that is not deleted. */
+int  tagfs_keep_file(uint64_t file_id, uint64_t term_seconds, InkWarrant warrant);
+int  tagfs_restore_file(uint64_t file_id, InkWarrant warrant);
+int  tagfs_rename_file(uint64_t file_id, const char* new_filename);
 
 /*
  * The three changes of a file's extents — a write, span and defrag — are made
@@ -643,27 +653,25 @@ int  tagfs_rename_file(uint64_t file_id, const char* new_filename, InkWarrant wa
  * ERR_TAGFS_NO_SPACE before it takes one. */
 error_t tagfs_span_file(uint64_t file_id, uint64_t size);
 
-/* A tag put on a file, or taken off: 0, or the Ink's refusal as -ERR_*. A tag
- * of key system, boot or god goes on or comes off only with the warrant. */
-int  tagfs_add_tag(uint64_t file_id, uint32_t tag_id, InkWarrant warrant);
-int  tagfs_remove_tag(uint64_t file_id, uint32_t tag_id, InkWarrant warrant);
+/* A tag put on a file, or taken off: 0, or the Ink's refusal as -ERR_*. No
+ * tag asks a warrant: a file's tags are its user's. */
+int  tagfs_add_tag(uint64_t file_id, uint32_t tag_id);
+int  tagfs_remove_tag(uint64_t file_id, uint32_t tag_id);
 bool tagfs_has_tag(uint64_t file_id, uint32_t tag_id);
 
 /* The tag a spelling names, interned and put on the file, both inside one
  * mounting of the volume: OK, or the real refusal — the registry's (the tag
  * too long, the registry full), or the Ink's: ERR_FILE_NOT_FOUND,
- * ERR_PERMISSION_DENIED for a tag of key system, boot or god without the
- * warrant, ERR_TAGFS_RECORD_FULL, ERR_DEVICE_NOT_READY, ERR_TAGFS_READ_ONLY,
+ * ERR_TAGFS_RECORD_FULL, ERR_DEVICE_NOT_READY, ERR_TAGFS_READ_ONLY,
  * ERR_NO_MEMORY, a Spare's refusal; ERR_TAGFS_NOT_INITIALIZED with no volume. */
-error_t tagfs_add_tag_string(uint64_t file_id, const TagSpelling* tag, InkWarrant warrant);
+error_t tagfs_add_tag_string(uint64_t file_id, const TagSpelling* tag);
 /* What the spelling names comes off the file: that tag when it has a value,
  * every tag of its key when it is bare. 0 once one of them came off, or a
  * negative -ERR_*: -ERR_TAGFS_TAG_NOT_FOUND when the file wore none of them,
  * -ERR_FILE_NOT_FOUND when there is no such file, or the first refusal of
- * taking one off — -ERR_PERMISSION_DENIED for a tag of key system, boot or god
- * without the warrant, -ERR_DEVICE_NOT_READY, -ERR_TAGFS_READ_ONLY,
+ * taking one off — -ERR_DEVICE_NOT_READY, -ERR_TAGFS_READ_ONLY,
  * -ERR_NO_MEMORY, or a Spare's refusal. */
-int  tagfs_remove_tag_string(uint64_t file_id, const TagSpelling* tag, InkWarrant warrant);
+int  tagfs_remove_tag_string(uint64_t file_id, const TagSpelling* tag);
 
 bool tagfs_key_is_reserved(const char *key, size_t key_len);
 
@@ -673,7 +681,9 @@ bool tagfs_key_is_reserved(const char *key, size_t key_len);
  * ("key:..." is any tag of the key, in either list) — a question of no tags is
  * every file but those `without` names, and of neither every file,
  * TagFSListPage. Every tag is a tag like any other: which files are set aside
- * is the asker's to say, and the volume leaves out none of its own accord.
+ * is the asker's to say. The one files the volume leaves out of its own accord
+ * are those it keeps deleted (TAGFS_FILE_DELETED): a question never meets one,
+ * and TagFSQueryKeptPage is the question that asks for them alone.
  * From file id `from` on, up to `room` ids into `out`; the page says where the
  * rest begin and, when `want_total`, how many match from `from` on. OK, or the
  * refusal: ERR_TAGFS_NOT_INITIALIZED with no volume, ERR_NO_MEMORY when the
@@ -684,6 +694,11 @@ error_t  TagFSQueryPage(const TagSpelling* tags, uint32_t count, const TagSpelli
                         bool want_total, TagFSPage* page);
 error_t  TagFSListPage(uint64_t from, uint64_t* out, uint32_t room, bool want_total,
                        TagFSPage* page);
+/* The same question asked of the files kept deleted alone: those that wear all
+ * of `tags` and none of `without`, a question of neither every one of them. */
+error_t  TagFSQueryKeptPage(const TagSpelling* tags, uint32_t count, const TagSpelling* without,
+                            uint32_t without_count, uint64_t from, uint64_t* out, uint32_t room,
+                            bool want_total, TagFSPage* page);
 /*
  * The tags files wear, a page at a time and in the order of their numbers
  * (query/query.c): from the tag numbered `from` on, every tag at least one
@@ -764,8 +779,8 @@ VolumeLayout* TagFSLayout(void);
 
 /* The file laid in one run, taken near where it begins, its record naming the
  * run in as few extents as a record can say it. OK, or the refusal: the file
- * is left where it was. A file the system keeps — wearing system, boot or god,
- * or holding the kernel the Deed points at — is not moved, warrant or none
+ * is left where it was. A file the system keeps — in a role by its record, or
+ * holding the kernel the Deed points at — is not moved, warrant or none
  * (plot.h, PlotGather): ERR_PERMISSION_DENIED. */
 error_t  tagfs_defrag_file(uint64_t file_id);
 /* How fragmented the volume's files are: the share, in percent, of the steps
@@ -848,11 +863,6 @@ uint32_t TagFSLookupSpelling(const TagSpelling* tag);
 error_t  tagfs_tag_intern(const char* tag, uint32_t* out_id);
 error_t  TagFSInternSpelling(const TagSpelling* tag, uint32_t* out_id);
 
-/* The key of a tag id — "app" out of "app:editor" — copied whole into `out`,
- * or not at all: false when the volume has no such tag or the key would not
- * fit, never a shorter key. */
-bool     tagfs_tag_key (uint32_t tag_id, char* out, size_t out_size);
-
 /* The whole text of a tag id — "app:editor" — and its length. It is written
  * into `out` only when it fits whole, NUL and all, and `out` is left empty
  * otherwise, so a caller is never handed a shorter tag than the one it asked
@@ -864,16 +874,6 @@ size_t   tagfs_tag_text(uint32_t tag_id, char* out, size_t out_size);
  * place in the volume's registry. */
 bool     TagFSTagMatches(uint32_t tag_id, const TagSpelling* pattern);
 
-/* The keys of `count` tags, comma-joined in a heap string the caller kfree's,
- * whole however long — what a process started from a file wears (it is given
- * the keys, as it always was). An id the volume does not know is passed over.
- * NULL when there is no memory, or no volume. */
-char*    TagFSKeyList(const uint32_t* tag_ids, uint32_t count);
-
-/* Whether one of `count` tags has the key `key` — "raw" is the key of "raw" and
- * of "raw:anything" — read in place in the volume's registry. False when none
- * has, and when there is no volume. */
-bool     TagFSKeyAmong(const uint32_t* tag_ids, uint32_t count, const char* key);
 
 /* A tag's key and value as spans into the volume's registry, and whether the
  * volume calls the tag its own — no copy, for a caller that is INSIDE THE

@@ -1,7 +1,7 @@
 /*
- * The Lectern's walk of a tree's leaves in key order — TAGS for the ids of the
- * labels a kernel is looked for by, FILES for the files that wear one
- * (spec_v2 §16.7 п.3) — and the files it follows, kept by fid.
+ * The Lectern's walk of a tree's leaves in key order — FILES, for the files
+ * the system keeps in a role (spec_v2 §16.7 п.3) — and the files it follows,
+ * kept by fid.
  *
  * A walk holds one node a level: the path from the root to the leaf in hand,
  * each node read from the first copy that holds as a node of the range its
@@ -118,62 +118,6 @@ static int LecternWalk(LecternBook *b, uint64_t tree, const LecternLeaves *v)
 }
 
 /* ------------------------------------------------------------------------- */
-/* TAGS: the labels                                                          */
-/* ------------------------------------------------------------------------- */
-
-/* Tag `id`, if it is a label — its key one of LecternLabelName's, with no
- * value and not retired — whose id is not known yet: known from here. */
-void LecternLabelTake(LecternBook *b, uint64_t id, const TallyTag *t)
-{
-    if (t->flags & (TALLY_TAG_HAS_VALUE | TALLY_TAG_RETIRED)) return;
-    for (uint32_t i = 0; i < LECTERN_LABELS; i++) {
-        const char *name = LecternLabelName(i);
-        uint64_t    n    = 0;
-        while (name[n]) n++;
-        if (t->key_len != n || (b->labeled & (1u << i))) continue;
-        uint64_t k = 0;
-        while (k < n && t->key[k] == (uint8_t)name[k]) k++;
-        if (k == n) {
-            b->label[i] = id;
-            b->labeled |= 1u << i;
-        }
-    }
-}
-
-static int TagSeen(LecternBook *b, void *ctx, TallyKey key, const uint8_t *body, uint32_t len, uint64_t seq)
-{
-    TallyTag t;
-    (void)ctx;
-    (void)seq;
-    if (TallyTagGet(body, len, &t) != TALLY_BODY_BROKEN) LecternLabelTake(b, key.k1, &t);
-    return 1;
-}
-
-static int TagLost(LecternBook *b, void *ctx, const TallyRange *r)
-{
-    (void)b;
-    (void)ctx;
-    (void)r;
-    return 1;
-}
-
-int LecternLabels(LecternBook *b)
-{
-    LecternLeaves v = { TagSeen, TagLost, (void *)0 };
-    return LecternWalk(b, TALLY_TAGS, &v);
-}
-
-int LecternFileLabeled(const LecternBook *b, const uint64_t *tags, uint64_t ntags, uint32_t *which)
-{
-    uint32_t worn = 0;
-    for (uint32_t i = 0; i < LECTERN_LABELS; i++)
-        for (uint64_t k = 0; (b->labeled & (1u << i)) && k < ntags; k++)
-            if (tags[k] == b->label[i]) worn |= 1u << i;
-    if (which) *which = worn;
-    return worn != 0;
-}
-
-/* ------------------------------------------------------------------------- */
 /* The files followed, by fid                                                */
 /* ------------------------------------------------------------------------- */
 
@@ -196,10 +140,8 @@ LecternFile *LecternFileOf(LecternBook *b, uint64_t fid)
 
 void LecternFileGive(const LecternBook *b, LecternFile *f)
 {
-    LecternGive(b, f->tags, f->captags * sizeof(uint64_t));
     LecternGive(b, f->runs, f->capruns * sizeof(LecternRun));
     LecternGive(b, f->tail, LECTERN_TAIL_BYTES);
-    f->tags = (uint64_t *)0;
     f->runs = (LecternRun *)0;
     f->tail = (uint8_t *)0;
 }
@@ -222,26 +164,22 @@ int LecternFilePut(LecternBook *b, const LecternFile *f)
 int LecternFileCopy(LecternBook *b, LecternFile *to, const LecternFile *from)
 {
     *to         = *from;
-    to->tags    = (uint64_t *)0;
     to->runs    = (LecternRun *)0;
     to->tail    = (uint8_t *)0;
-    to->captags = from->ntags ? from->ntags : 1u;
     to->capruns = from->nruns ? from->nruns : 1u;
-    to->tags    = (uint64_t *)LecternTake(b, to->captags * sizeof(uint64_t));
     to->runs    = (LecternRun *)LecternTake(b, to->capruns * sizeof(LecternRun));
     if (from->tail) to->tail = (uint8_t *)LecternTake(b, LECTERN_TAIL_BYTES);
-    if (!to->tags || !to->runs || (from->tail && !to->tail)) {
+    if (!to->runs || (from->tail && !to->tail)) {
         LecternFileGive(b, to);
         return 0;
     }
-    LecternCopy(to->tags, from->tags, from->ntags * sizeof(uint64_t));
     LecternCopy(to->runs, from->runs, from->nruns * sizeof(LecternRun));
     if (from->tail) LecternCopy(to->tail, from->tail, LECTERN_TAIL_BYTES);
     return 1;
 }
 
 /* ------------------------------------------------------------------------- */
-/* FILES: the files that wear a label                                        */
+/* FILES: the files kept in a role                                           */
 /* ------------------------------------------------------------------------- */
 
 typedef enum { FILE_UNSEEN, FILE_FOLLOWED, FILE_PASSED } LecternFileState;
@@ -268,12 +206,11 @@ static int FileDone(LecternBook *b, LecternFilesWalk *w)
     return kept;
 }
 
-/* A file's header: followed when it wears a label or the ribbon gives it one. */
+/* A file's header: followed when its flags put it in a role or the ribbon
+ * gives it one. */
 static int FileHead(LecternBook *b, LecternFilesWalk *w, uint64_t fid, const uint8_t *body, uint32_t len)
 {
     TallyFileHead h;
-    uint32_t      at = 0;
-    uint64_t      id = 0;
 
     w->state = FILE_PASSED;
     if (TallyFileHeadGet(body, len, &h) == TALLY_BODY_BROKEN) return 1;
@@ -281,14 +218,8 @@ static int FileHead(LecternBook *b, LecternFilesWalk *w, uint64_t fid, const uin
     w->f.fid     = fid;
     w->f.gen     = h.gen;
     w->f.size    = h.size;
-    w->f.captags = h.ntags ? h.ntags : 1u;
-    if (!(w->f.tags = (uint64_t *)LecternTake(b, w->f.captags * sizeof(uint64_t)))) return 0;
-    for (uint64_t k = 0; k < h.ntags; k++) {
-        TallyIdNext(h.tags, h.tags_bytes, &at, &id, k == 0);
-        w->f.tags[w->f.ntags++] = id;
-    }
-    if (!LecternFileLabeled(b, w->f.tags, w->f.ntags, (uint32_t *)0) &&
-        !LecternListHas(b->interest, b->ninterest, fid)) {
+    w->f.flags   = h.flags;
+    if (!LecternRoleOf(w->f.flags) && !LecternListHas(b->interest, b->ninterest, fid)) {
         LecternFileGive(b, &w->f);
         return 1;
     }

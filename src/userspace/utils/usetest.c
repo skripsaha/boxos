@@ -80,13 +80,13 @@ int main(void)
     int n;
 
     /* Inside: the stamped file is visible, the unstamped one is behind the walls. */
-    n = query(NULL, "trashed,hidden", ids, 256);
+    n = query(NULL, NULL, ids, 256);
     if (n < 0) { verdict = fail("query inside", n); goto restore; }
     if (!has_id(ids, n, (file_id_t)inside_id)) { verdict = fail("a file created inside is not seen inside", 0); goto restore; }
     if (has_id(ids, n, (file_id_t)out_id))      { verdict = fail("a file created everywhere is seen inside", 0); goto restore; }
 
     /* Everywhere: both. */
-    n = query_everywhere(NULL, "trashed,hidden", ids, 256);
+    n = query_everywhere(NULL, NULL, ids, 256);
     if (n < 0) { verdict = fail("query everywhere", n); goto restore; }
     if (!has_id(ids, n, (file_id_t)inside_id) || !has_id(ids, n, (file_id_t)out_id)) {
         verdict = fail("query everywhere does not see both files", 0);
@@ -94,7 +94,7 @@ int main(void)
     }
 
     /* The stamp is a real tag: asked for by name, everywhere, only the stamped file answers. */
-    n = query_everywhere(PROBE_TAG, "trashed,hidden", ids, 256);
+    n = query_everywhere(PROBE_TAG, NULL, ids, 256);
     if (n < 0) { verdict = fail("query everywhere by the context tag", n); goto restore; }
     if (!has_id(ids, n, (file_id_t)inside_id) || has_id(ids, n, (file_id_t)out_id)) {
         verdict = fail("the context tag was not stamped on exactly the inside file", 0);
@@ -105,7 +105,7 @@ int main(void)
     rc = use_clear(&remembered);
     if (rc == 0 && !remembered) { verdict = fail("the volume did not remember the clear", 0); goto restore; }
     if (rc < 0) { verdict = fail("use_clear", rc); goto restore; }
-    n = query(NULL, "trashed,hidden", ids, 256);
+    n = query(NULL, NULL, ids, 256);
     if (n < 0) { verdict = fail("query after clear", n); goto restore; }
     if (!has_id(ids, n, (file_id_t)inside_id) || !has_id(ids, n, (file_id_t)out_id)) {
         verdict = fail("after use_clear both files should be visible", 0);

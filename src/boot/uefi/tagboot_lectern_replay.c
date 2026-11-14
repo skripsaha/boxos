@@ -1,8 +1,8 @@
 /*
  * The Lectern's replay of the ribbon (spec_v2 §16.7 п.5, §4.5 п.5 pass 2,
  * §3.7): the stitches sewn on (tagboot_lectern_ribbon.c), their records
- * replayed for the files the Lectern follows — those that wear a label, or
- * that the ribbon gives one — and the digests every record puts in.
+ * replayed for the files the Lectern follows — those kept in a role, or that
+ * the ribbon puts in one — and the digests every record puts in.
  *
  * The rules are the kernel's (mount/ribbon_transcribe.c, ribbon_records.c)
  * and volume-read's (bookmount.py _Undone, _Stitch, _File), narrowed to what
@@ -177,7 +177,7 @@ static int Sewn(const LecternBook *b, uint64_t seq)
 }
 
 /* ------------------------------------------------------------------------- */
-/* Before the files: the labels the ribbon coins, the files it labels        */
+/* Before the files: the files the ribbon puts in a role                     */
 /* ------------------------------------------------------------------------- */
 
 void LecternBefore(LecternBook *b)
@@ -187,21 +187,12 @@ void LecternBefore(LecternBook *b)
         for (uint32_t i = 0; i < u->nrecords; i++) {
             const LecternRecord *r = &u->records[i];
             LecternRead          d;
-            if (r->kind != RIBBON_COINED && r->kind != RIBBON_LABELED) continue;
+            if (r->kind != RIBBON_LABELED) continue;
             RecordRead(u, r, &d);
             if (d.read == TALLY_BODY_BROKEN) continue;
-            if (r->kind == RIBBON_COINED) {
-                LecternLabelTake(b, d.id, &d.tag);
-                continue;
-            }
-            uint32_t at = 0;
-            uint64_t id = 0;
-            for (uint64_t k = 0; (d.labeled.what & LABEL_TAGS) && k < d.labeled.nadd; k++) {
-                TallyIdNext(d.labeled.add, d.labeled.add_bytes, &at, &id, k == 0);
-                if (LecternFileLabeled(b, &id, 1, (uint32_t *)0) &&
-                    !LecternListAdd(b, &b->interest, &b->ninterest, &b->capinterest, d.fid))
-                    return;
-            }
+            if ((d.labeled.what & LABEL_FLAGS) && LecternRoleOf(d.labeled.set) &&
+                !LecternListAdd(b, &b->interest, &b->ninterest, &b->capinterest, d.fid))
+                return;
         }
     }
 }
@@ -516,24 +507,17 @@ static int BornApplied(LecternBook *b, LecternHand *h, const LecternStitch *u, c
 {
     LecternRunList runs = { b, (LecternRun *)0, 0, 0 };
     LecternFile    f;
-    uint32_t       at = 0;
-    uint64_t       id = 0;
 
     if (h->alive) return 1;
     LecternZero(&f, sizeof(f));
-    f.fid     = d->fid;
-    f.gen     = u->seq;
-    f.size    = d->born.size;
-    f.captags = d->born.ntags ? d->born.ntags : 1u;
-    if (!(f.tags = (uint64_t *)LecternTake(b, f.captags * sizeof(uint64_t))) ||
-        !RunsPut(u, RIBBON_BORN, d, RunTaken, &runs)) {
+    f.fid   = d->fid;
+    f.gen   = u->seq;
+    f.size  = d->born.size;
+    f.flags = d->born.flags;
+    if (!RunsPut(u, RIBBON_BORN, d, RunTaken, &runs)) {
         LecternGive(b, runs.runs, runs.cap * sizeof(LecternRun));
         LecternFileGive(b, &f);
         return -1;
-    }
-    for (uint64_t k = 0; k < d->born.ntags; k++) {
-        TallyIdNext(d->born.tags, d->born.tags_bytes, &at, &id, k == 0);
-        f.tags[f.ntags++] = id;
     }
     f.runs    = runs.runs;
     f.nruns   = runs.n;
@@ -545,53 +529,16 @@ static int BornApplied(LecternBook *b, LecternHand *h, const LecternStitch *u, c
     return TailLay(b, &h->f, &d->born.slip, why);
 }
 
-/* Whether every id of a rising list (count, `bytes` of them) is worn (`worn`
- * 1) or none is (`worn` 0). */
-static int IdsWorn(const LecternFile *f, const uint8_t *ids, uint32_t bytes, uint64_t n, int worn)
-{
-    uint32_t at = 0;
-    uint64_t id = 0;
-    for (uint64_t k = 0; k < n; k++) {
-        TallyIdNext(ids, bytes, &at, &id, k == 0);
-        if (LecternListHas(f->tags, f->ntags, id) != worn) return 0;
-    }
-    return 1;
-}
-
-/* A Labeled: its tags put on and taken off — none already worn put on, none
- * not worn taken off. Its name and flags are not the loader's. */
-static int LabeledApplied(LecternBook *b, LecternHand *h, const LecternRead *d, LecternLine *why)
+/* A Labeled: its flags set and cleared, as the record says — the role among
+ * them — and the deleted bit its KEEP verb puts on or takes off: a file kept
+ * deleted is no kernel for the loader to start (tagboot_succession.c). Its
+ * name and tags are not the loader's. */
+static int LabeledApplied(LecternHand *h, const LecternRead *d)
 {
     const RibbonLabeled *r = &d->labeled;
-    uint64_t            *tags, n = h->f.ntags, id = 0, cap;
-    uint32_t             at = 0;
-
-    if (!(r->what & LABEL_TAGS)) return 1;
-    if (!IdsWorn(&h->f, r->add, r->add_bytes, r->nadd, 0) || !IdsWorn(&h->f, r->drop, r->drop_bytes, r->ndrop, 1)) {
-        LinePut(why, "it puts on a tag already worn or takes off one not worn");
-        return 0;
-    }
-    cap = n + r->nadd ? n + r->nadd : 1u;
-    if (!(tags = (uint64_t *)LecternTake(b, cap * sizeof(uint64_t)))) return -1;
-    LecternCopy(tags, h->f.tags, n * sizeof(uint64_t));
-    for (uint64_t k = 0; k < r->nadd; k++) {
-        uint64_t i = n++;
-        TallyIdNext(r->add, r->add_bytes, &at, &id, k == 0);
-        for (; i > 0 && tags[i - 1u] > id; i--) tags[i] = tags[i - 1u];
-        tags[i] = id;
-    }
-    at = 0;
-    for (uint64_t k = 0; k < r->ndrop; k++) {
-        uint64_t kept = 0;
-        TallyIdNext(r->drop, r->drop_bytes, &at, &id, k == 0);
-        for (uint64_t i = 0; i < n; i++)
-            if (tags[i] != id) tags[kept++] = tags[i];
-        n = kept;
-    }
-    LecternGive(b, h->f.tags, h->f.captags * sizeof(uint64_t));
-    h->f.tags    = tags;
-    h->f.ntags   = n;
-    h->f.captags = cap;
+    if (r->what & LABEL_FLAGS) h->f.flags = (h->f.flags | r->set) & ~r->clear;
+    if (r->what & LABEL_KEEP)
+        h->f.flags = r->keep_ns ? h->f.flags | TALLY_FILE_DELETED : h->f.flags & ~(uint64_t)TALLY_FILE_DELETED;
     return 1;
 }
 
@@ -648,7 +595,7 @@ static int Applied(LecternBook *b, LecternHand *h, const LecternStitch *u, uint6
         h->alive = 0;
         return 1;
     }
-    return kind == RIBBON_LABELED ? LabeledApplied(b, h, d, why) : ShapedApplied(b, h, u, d, why);
+    return kind == RIBBON_LABELED ? LabeledApplied(h, d) : ShapedApplied(b, h, u, d, why);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -661,8 +608,8 @@ typedef struct {
 } LecternHands;
 
 /* The file in hand for record `d` of kind `kind` — taken up the first time:
- * a file followed as the Lectern holds it, or one a Born of which wears a
- * label or the ribbon labels. NULL with *none for a file not followed; NULL
+ * a file followed as the Lectern holds it, or one a Born of which is kept in
+ * a role or the ribbon puts in one. NULL with *none for a file not followed; NULL
  * with no room. */
 static LecternHand *HandOf(LecternBook *b, LecternHands *hs, uint64_t kind, const LecternRead *d, int *none)
 {
@@ -678,14 +625,8 @@ static LecternHand *HandOf(LecternBook *b, LecternHands *hs, uint64_t kind, cons
         h.alive = !held->gone;
         if (h.alive && !LecternFileCopy(b, &h.f, held)) return (LecternHand *)0;
     } else {
-        uint32_t at = 0;
-        uint64_t id = 0;
-        int      labeled = 0;
-        for (uint64_t k = 0; kind == RIBBON_BORN && k < d->born.ntags && !labeled; k++) {
-            TallyIdNext(d->born.tags, d->born.tags_bytes, &at, &id, k == 0);
-            labeled = LecternFileLabeled(b, &id, 1, (uint32_t *)0);
-        }
-        if (kind != RIBBON_BORN || (!labeled && !LecternListHas(b->interest, b->ninterest, d->fid))) {
+        if (kind != RIBBON_BORN ||
+            (!LecternRoleOf(d->born.flags) && !LecternListHas(b->interest, b->ninterest, d->fid))) {
             *none = 1;
             return (LecternHand *)0;
         }
@@ -727,7 +668,7 @@ static int HandsLaid(LecternBook *b, LecternHands *hs)
     int ok = 1;
     for (uint64_t i = 0; i < hs->n; i++) {
         LecternHand *h    = &hs->at[i];
-        LecternFile  gone = { h->fid, 0, 0, (uint64_t *)0, 0, 0, (LecternRun *)0, 0, 0, (uint8_t *)0, 1 };
+        LecternFile  gone = { h->fid, 0, 0, 0, (LecternRun *)0, 0, 0, (uint8_t *)0, 1 };
         LecternFile *held = LecternFileOf(b, h->fid);
         if (h->failed || !h->alive) {
             LecternFileGive(b, &h->f);

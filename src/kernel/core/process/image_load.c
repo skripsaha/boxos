@@ -160,10 +160,30 @@ static error_t ImageLoadElf(vmm_context_t *vmm, const ImageSource *source, const
 
 /* ── which kind ──────────────────────────────────────────────────────────── */
 
-error_t ImageLoad(vmm_context_t *vmm, const ImageSource *source, const char *name, ImageLoaded *loaded)
+typedef enum { IMAGE_NO_PROGRAM, IMAGE_BOX, IMAGE_ELF } ImageKind;
+
+/* What `look` bytes of an image's start, in `head`, say it is. */
+static ImageKind ImageKindOf(const uint8_t *head, uint64_t look)
 {
     static const uint8_t box_magic[8] = { BOX_MAGIC_0, BOX_MAGIC_1, BOX_MAGIC_2, BOX_MAGIC_3,
                                           BOX_MAGIC_4, BOX_MAGIC_5, BOX_MAGIC_6, BOX_MAGIC_7 };
+    if (look == 8 && memcmp(head, box_magic, 8) == 0)
+        return IMAGE_BOX;
+    if (look >= 4 && head[0] == 0x7F && head[1] == 'E' && head[2] == 'L' && head[3] == 'F')
+        return IMAGE_ELF;
+    return IMAGE_NO_PROGRAM;
+}
+
+bool ImageIsProgram(const ImageSource *source, const char *name)
+{
+    uint8_t  head[8] = { 0 };
+    uint64_t look    = source->Bytes < sizeof(head) ? source->Bytes : sizeof(head);
+    return ImageSourceRead(source, 0, head, look, name) == OK &&
+           ImageKindOf(head, look) != IMAGE_NO_PROGRAM;
+}
+
+error_t ImageLoad(vmm_context_t *vmm, const ImageSource *source, const char *name, ImageLoaded *loaded)
+{
     uint8_t  head[8] = { 0 };
     uint64_t look    = source->Bytes < sizeof(head) ? source->Bytes : sizeof(head);
 
@@ -176,17 +196,16 @@ error_t ImageLoad(vmm_context_t *vmm, const ImageSource *source, const char *nam
     loaded->ThreadPointer  = 0;
     loaded->StackReserve   = CONFIG_USER_STACK_RESERVE;
     loaded->Rise           = false;
+    loaded->Asks           = 0;
 
     error_t rc = ImageSourceRead(source, 0, head, look, name);
     if (rc != OK)
         return rc;
 
-    bool is_box = look == 8 && memcmp(head, box_magic, 8) == 0;
-    bool is_elf = look >= 4 && head[0] == 0x7F && head[1] == 'E' && head[2] == 'L' && head[3] == 'F';
-
-    if (is_box)
+    ImageKind kind = ImageKindOf(head, look);
+    if (kind == IMAGE_BOX)
         return BoxLoad(vmm, source, name, loaded);
-    if (is_elf)
+    if (kind == IMAGE_ELF)
         return ImageLoadElf(vmm, source, name, loaded);
 
     kprintf("[IMAGE] '%s' is not started: it is no program this system knows — neither a box "

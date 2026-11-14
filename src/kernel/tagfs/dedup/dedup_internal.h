@@ -39,6 +39,10 @@ typedef struct {
  *   CommonplaceAt      the `i`-th entry, i < CommonplaceCount()
  *   CommonplaceStrike  the entry of `block` under `digest` goes at the next
  *                      retire: laid
+ *   CommonplaceKeep    the entry of `block` under `digest` comes in anew at
+ *                      walk position `since`: a block whose act was refused
+ *                      for a moment — its file held by a writer — has the
+ *                      book to go round again before it goes
  *   CommonplaceRetire  every entry that went, and every one the walk went
  *                      round the book past (`walked` - since >= `lap`), out;
  *                      the pass's marks cleared
@@ -50,6 +54,7 @@ CommonplaceEntry* CommonplaceGroup(uint64_t digest, uint64_t* count);
 CommonplaceEntry* CommonplaceAt(uint64_t i);
 uint64_t          CommonplaceCount(void);
 void              CommonplaceStrike(uint64_t digest, uint64_t block);
+void              CommonplaceKeep(uint64_t digest, uint64_t block, uint64_t since);
 void              CommonplaceRetire(uint64_t walked, uint64_t lap);
 void              CommonplaceLetGo(void);
 
@@ -83,7 +88,6 @@ typedef struct {
     DedupOwner* owner;              /* by block, one each */
     uint64_t    n;
     uint64_t    from;               /* the next file id the walk asks the map for; UINT64_MAX once done */
-    uint32_t    off_tag;            /* the id of dedup:off, or TAGFS_INVALID_TAG_ID */
 } DedupOwners;
 
 /*

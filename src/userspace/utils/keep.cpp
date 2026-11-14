@@ -22,7 +22,7 @@ std::string Refused(std::string_view What, std::int64_t Code)
 int Find(const Keep &File, file_id_t &Id)
 {
     file_id_t *Ids   = nullptr;
-    int        Count = query_all_everywhere(File.Tags, "trashed", &Ids);
+    int        Count = query_all_everywhere(File.Tags, nullptr, &Ids);
     int        Found = Count < 0 ? Count : 0;
     for (int At = 0; At < Count && Found == 0; At++) {
         FileMetadata Metadata;

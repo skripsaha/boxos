@@ -27,8 +27,37 @@
 DEDUP_MIB=16
 DEDUP_BLOCKS=$((DEDUP_MIB * 256))
 DEDUP_LINES=1500
+DEDUP_ROUNDS=8
 DEDUP_SAID='^\[TagFS\] Dedup after Tally [0-9]+: '
 DEDUP_LAID='[0-9]+ block\(s\) laid on the blocks they duplicate'
+
+# dedup_laid LOG — the blocks the passes in LOG say they laid, all of them.
+dedup_laid() {
+    grep -aE "$DEDUP_SAID" "$1" | grep -aoE "$DEDUP_LAID" | awk '{ n += $1 } END { print n + 0 }'
+}
+
+# dedup_logger — loggers' rounds, each its own file, until the passes say the
+# copy's every block is laid. Where a Tally falls among the copy's blocks is
+# the ribbon's fill when the copy begins (the size of a Tally against the
+# stitches sewn since), so a copy may be taken by two Tallies: the pass after
+# the first lays the blocks it found beside the original, and the pass after
+# the next finds the rest by the book's DIGESTS, as many Sheets a pass as that
+# Tally laid blocks of its own. The logger is what makes the Tallies, and each
+# round of it pays one pass as many Sheets as it wrote blocks. 0 when a round
+# ended with the copy laid, 1 when the guest said no log, 2 when DEDUP_ROUNDS
+# rounds did not lay it.
+dedup_logger() {
+    local round=1
+    while [ $round -le $DEDUP_ROUNDS ]; do
+        type_line "quilltest log dedup$round $DEDUP_LINES" &&
+            wait_for_line -E build/serial.log "\\[QUILL\\] log: (PASS|FAIL) — dedup$round-l.log|\\[QUILL\\] log: FAIL" "$WAIT_QUIET_SLOW_S" &&
+            wait_for_prompt || return 1
+        wait_for_quiet 5 build/serial.log
+        [ "$(dedup_laid build/serial.log)" -ge "$DEDUP_BLOCKS" ] && return 0
+        round=$((round + 1))
+    done
+    return 2
+}
 
 run_dedup() {
     local name=dedup img="$SCRATCH/dedup.img" before="$SCRATCH/dedup.before.json" json="$SCRATCH/census.dedup.json"
@@ -46,9 +75,7 @@ run_dedup() {
     wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" && wait_for_prompt &&
         type_line "quilltest dedup dedup $DEDUP_MIB" &&
         wait_for_line -E build/serial.log '\[QUILL\] dedup: (PASS|FAIL)' "$WAIT_QUIET_SLOW_S" && wait_for_prompt &&
-        type_line "quilltest log dedup $DEDUP_LINES" &&
-        wait_for_line -E build/serial.log '\[QUILL\] log: ' "$WAIT_QUIET_SLOW_S" && wait_for_prompt &&
-        wait_for_line -E build/serial.log "$DEDUP_SAID" "$WAIT_QUIET_S" &&
+        dedup_logger &&
         type_line "quilltest dedup dedup" &&
         wait_for_line -E build/serial.log '\[QUILL\] dedup: (PASS|FAIL) — [^ ]+ \(fid [0-9]+\) and [^ ]+ \(fid [0-9]+\) found' \
             "$WAIT_QUIET_SLOW_S" && wait_for_prompt &&
@@ -57,9 +84,9 @@ run_dedup() {
     sleep 1
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$w"
-    grep -aqE '\[QUILL\] dedup: written — ' "$w" && grep -aqE '\[QUILL\] log: PASS' "$w"
-    chk $? "dedup: the guest writes a file of $DEDUP_MIB MiB and its copy, and a logger's $DEDUP_LINES lines ($(grep -aoE '\[QUILL\] (dedup|log): [a-zA-Z]+' "$w" | head -2 | tr '\n' ' '))"
-    laid=$(grep -aE "$DEDUP_SAID" "$w" | grep -aoE "$DEDUP_LAID" | awk '{ n += $1 } END { print n + 0 }')
+    grep -aqE '\[QUILL\] dedup: written — ' "$w" && grep -aqE '\[QUILL\] log: PASS' "$w" && ! grep -aqE '\[QUILL\] log: FAIL' "$w"
+    chk $? "dedup: the guest writes a file of $DEDUP_MIB MiB and its copy, and a logger's lines, $(grep -ac '\[QUILL\] log: PASS' "$w") round(s) of $DEDUP_LINES ($(grep -aoE '\[QUILL\] (dedup|log): [a-zA-Z]+' "$w" | head -2 | tr '\n' ' '))"
+    laid=$(dedup_laid "$w")
     [ "$laid" = "$DEDUP_BLOCKS" ]
     chk $? "dedup: the pass after the Tally lays the copy's $DEDUP_BLOCKS blocks on the original's — $laid laid ($(grep -aE "$DEDUP_SAID" "$w" | tr -d '\r' | head -1 | cut -c1-260))"
     grep -aqE '\[QUILL\] dedup: PASS — [^ ]+ \(fid [0-9]+\) and [^ ]+ \(fid [0-9]+\) found' "$w"

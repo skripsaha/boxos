@@ -19,7 +19,7 @@
 //     box::result<T> / box::status (info / read_at / write_at / read_object /
 //     write_object return result; add_tag / remove_tag / rename / remove /
 //     anchor return status), instead of collapsing it to bool / -1 / nullopt.
-//     The derived accessors (name / size / flags / tags / has_tag / trashed)
+//     The derived accessors (name / size / flags / tags / has_tag)
 //     stay plain values: they read info() once and report a sensible neutral on
 //     the error arm. bytes(role) stays a stream (an open channel, not a scalar).
 //
@@ -34,7 +34,7 @@
 //     only. A record reads its captured fields with zero syscalls; reach a live
 //     handle for mutations or a fresh read through record::live(). Richer
 //     predicates compose over either result with std::views:
-//         for (auto& f : box::tagfs::query("video:cam0", "trashed")
+//         for (auto& f : box::tagfs::query("video:cam0", nullptr)
 //                        | std::views::filter([](auto& f){ return f.size() > 0; }))
 //
 //   * The Use Context (box/cxx/use.h) is the user's, one per machine, and
@@ -271,7 +271,7 @@ public:
     // and gives its blocks back; longer reads as zeros from the old size on,
     // never another file's bytes. A write grows a file only at its end — one
     // past it lands in the error arm — so this is how a gap is made. Refused
-    // on a "system"/"boot" file (permission_denied), like remove(). The
+    // on a file the system keeps in a role (permission_denied), like remove(). The
     // change is published on every tag of the file.
     box::status span(std::uint64_t n)
     {
@@ -471,9 +471,9 @@ inline box::result<file> create(const char *name, const char *tagspec = "")
 // ── tag query → range of files ──────────────────────────────────────────
 // tagspec == nullptr lists every file; `without` (a comma list, nullptr for
 // none) the tags no file of the answer wears. The volume sets aside nothing of
-// its own accord — trashed and hidden are tags like any other — so the asker
-// says what it leaves out (box/file.h). Compose richer (non-tag) predicates
-// over the result with std::views. Every match: the kernel says how many
+// its own accord, and a deleted file is not met at all (query_deleted); the
+// asker says what it leaves out (box/file.h). Compose richer (non-tag) predicates over the
+// result with std::views. Every match: the kernel says how many
 // there are and boxlib sizes the list to that (query_all), so no file is
 // past the end of the answer.
 namespace _detail {

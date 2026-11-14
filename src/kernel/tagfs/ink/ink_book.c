@@ -82,12 +82,13 @@ static error_t InkBookFieldsLocked(uint64_t fid, const RecordWhere* was, const I
 }
 
 error_t InkBookFields(uint64_t fid, FileRecord* cur, const RecordWhere* was, const InkFieldsPlan* f,
-                      const char* name, uint32_t add, InkReceipt* out)
+                      const char* name, uint32_t add, uint32_t flags, uint64_t keep_until,
+                      InkReceipt* out)
 {
     TagFSState*     fs    = InkState();
     TagBitmapStake* stake = NULL;
     Jot*            spent = NULL;
-    FileRecord*     rec   = FileRecordRelabel(cur, name, f->tags, f->count, cur->flags);
+    FileRecord*     rec   = FileRecordRelabel(cur, name, f->tags, f->count, flags, keep_until);
     Jot*            j     = rec ? JotMake(JOT_LABELED, fid, NULL, NULL) : NULL;
     error_t         rc    = j ? OK : ERR_NO_MEMORY;
     if (rc == OK && f->adds)
@@ -220,6 +221,8 @@ static error_t InkBookQuitclaimLocked(uint64_t fid, const RecordWhere* was, cons
     DocketPutLocked(j, spent);
     for (uint32_t i = 0; i < cur->tag_count; i++)
         TagBitmapLeave(fs->bitmap_index, cur->tags[i], fid);
+    if (cur->flags & TAGFS_FILE_DELETED)
+        TagBitmapLeave(fs->bitmap_index, TAGFS_DELETED_MEMBERS, fid);
     if (*fallow && FallowNodeCommonheld(*fallow, gen)) {
         FallowAdd(*fallow, gen);
         *fallow = NULL;
@@ -248,6 +251,10 @@ error_t InkBookQuitclaim(uint64_t fid, const RecordWhere* was, const FileRecord*
     if (rc == OK) {
         SettleInked(out->gen, false);
         TagBitmapShrink(fs->bitmap_index, &fs->lock, cur->tags, cur->tag_count, fid);
+        if (cur->flags & TAGFS_FILE_DELETED) {
+            const uint32_t members = TAGFS_DELETED_MEMBERS;
+            TagBitmapShrink(fs->bitmap_index, &fs->lock, &members, 1, fid);
+        }
     } else {
         JotsLetGo(j);
     }

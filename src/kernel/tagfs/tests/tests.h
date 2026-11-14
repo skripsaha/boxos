@@ -155,6 +155,7 @@ typedef struct {
     VOLUME_TESTS_ONLY(SUITE(stand_endpaper)) \
     VOLUME_TESTS_ONLY(SUITE(stand_book_room)) \
     VOLUME_TESTS_ONLY(SUITE(stand_errata)) \
+    VOLUME_TESTS_ONLY(SUITE(stand_keep)) \
     VOLUME_TESTS_ONLY(SUITE(stand_toll)) \
     VOLUME_TESTS_ONLY(SUITE(stand_dog_ear)) \
     VOLUME_TESTS_ONLY(SUITE(stand_slip)) \

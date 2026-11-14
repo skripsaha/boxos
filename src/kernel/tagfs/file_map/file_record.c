@@ -78,6 +78,7 @@ static FileRecord* RecordOf(const TagFSMetadata* meta, const Tract* tract, error
     rec->size          = meta->size;
     rec->created_time  = meta->created_time;
     rec->modified_time = meta->modified_time;
+    rec->keep_until    = meta->keep_until;
     RecordRuns(rec, tract);
     return rec;
 }
@@ -98,7 +99,7 @@ FileRecord* FileRecordBuildCut(const TagFSMetadata* meta, const uint32_t* cut, u
 }
 
 FileRecord* FileRecordRelabel(const FileRecord* old, const char* name, const uint32_t* tags,
-                              uint32_t tag_count, uint32_t flags)
+                              uint32_t tag_count, uint32_t flags, uint64_t keep_until)
 {
     FileRecord* rec = RecordHeader(name, tags, tag_count);
     if (!rec)
@@ -108,6 +109,7 @@ FileRecord* FileRecordRelabel(const FileRecord* old, const char* name, const uin
     rec->size          = old->size;
     rec->created_time  = old->created_time;
     rec->modified_time = old->modified_time;
+    rec->keep_until    = keep_until;
     rec->gen           = __atomic_load_n(&old->gen, __ATOMIC_RELAXED);
     rec->slip          = TailSlipHold(old->slip);
     TractHold(old->tract);
@@ -278,6 +280,7 @@ error_t FileRecordSplice(const FileRecord* old, const BookSplice* sp, uint64_t c
     rec->size          = size;
     rec->created_time  = old->created_time;
     rec->modified_time = mtime;
+    rec->keep_until    = old->keep_until;
     rec->gen           = old->gen;
     RecordRuns(rec, root);
     /* The Slips go on only by their one rule — the replay's and the Ink's
@@ -451,6 +454,7 @@ int FileRecordCopyOut(const FileRecord* rec, TagFSMetadata* out)
     out->size          = rec->size;
     out->created_time  = rec->created_time;
     out->modified_time = rec->modified_time;
+    out->keep_until    = rec->keep_until;
 
     if (rec->tag_count) {
         out->tag_ids = kmalloc(sizeof(uint32_t) * rec->tag_count);

@@ -4,7 +4,7 @@
 #include "../integrity/integrity.h"
 #include "../file_map/file_map.h"
 #include "../file_map/tail_slip.h"
-#include "../ink/ink.h"   /* InkWearsGuarded, InkTouchesBoot — the files whose blocks stay put */
+#include "../ink/ink.h"   /* InkFileKept, InkTouchesBoot — the files whose blocks stay put */
 #include "../block_map/block_map.h"
 #include "../settle/sewing.h"
 #include "../mount/away.h"   /* AwayDepartures — what a book's write is held to at its Ink */
@@ -46,13 +46,13 @@ static uint64_t PlotRunExtents(uint64_t blocks)
 }
 
 /* B10, whatever the warrant: a warrant lets a call change a file the system
- * keeps, and never moves that file's blocks. Asked with the tags the file
- * wears and the runs the Plot names. */
-static error_t PlotGatherKept(const Plot *p, const uint32_t *tags, uint32_t count)
+ * keeps, and never moves that file's blocks. Asked with the flags the file's
+ * record carries and the runs the Plot names. */
+static error_t PlotGatherKept(const Plot *p, uint32_t flags)
 {
-    if (!InkWearsGuarded(tags, count) && !InkTouchesBoot(p->runs, p->run_count))
+    if (!InkFileKept(flags) && !InkTouchesBoot(p->runs, p->run_count))
         return OK;
-    kprintf("[TagFS] file %llu is one the system keeps — it wears system, boot or god, or "
+    kprintf("[TagFS] file %llu is one the system keeps — its record puts it in a role, or "
             "holds the kernel the Deed points the loader at — and its blocks are not "
             "moved\n", p->fid);
     return ERR_PERMISSION_DENIED;
@@ -185,7 +185,7 @@ error_t PlotGatherBegin(Plot *p, uint64_t shed, uint64_t hint, PlotGathering *g)
     memset(g, 0, sizeof(*g));
     error_t rc = PlotWindowWhole(p);
     if (rc == OK)
-        rc = PlotGatherKept(p, p->meta.tag_ids, p->meta.tag_count);
+        rc = PlotGatherKept(p, p->meta.flags);
     if (rc != OK)
         return rc;
 
@@ -298,8 +298,8 @@ static error_t PlotGatherWindow(Plot *p, PlotGathering *g)
 
 /* Every block copied: the copy made durable before any record can name it
  * there — so it owes a cycle no flush — B10 asked again of the record as it
- * is now, since a tag of those keys put on while the copy went on keeps the
- * file's blocks where they lie as much as one it wore at the load, and the
+ * is now, since a role put on while the copy went on keeps the file's blocks
+ * where they lie as much as one it held at the load, and the
  * Plot made to name the run. */
 static error_t PlotGatherLay(Plot *p, PlotGathering *g)
 {
@@ -309,7 +309,7 @@ static error_t PlotGatherLay(Plot *p, PlotGathering *g)
 
     FileRecord *now = FileMapRecordHold(tagfs_get_state()->files, p->fid, NULL);
     if (now) {
-        rc = PlotGatherKept(p, now->tags, now->tag_count);
+        rc = PlotGatherKept(p, now->flags);
         FileRecordRelease(now);
         if (rc != OK)
             return rc;

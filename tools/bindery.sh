@@ -84,11 +84,6 @@ HEIRLOOM_BOOT="$SCRATCH/heirloom.boot.img"   # this tree's disk, kernel N+1 on i
 HEIRLOOM_MARK="logcheck mutation: the boarding pass names the heirloom volume"
 HEIRLOOM_PERSIST="_persist_test"             # what `persist write` names its file
 
-# The state the volume's own programs write on every session — the shell's
-# history, the gardener's plants: each machine's session writes them again,
-# so they are held to their ids, never to their bytes.
-HEIRLOOM_SESSION_FILES="history garden.plants"
-
 # The copy kernel N+1 lays on a book (heirloom_copies): two files of one
 # mebibyte written by kernel N's quilltest big — whose bytes are a function of
 # their place alone (quilltest_book.c QuillBigByte), so the second is the first
@@ -180,7 +175,7 @@ PASS_EOF
 
 # heirloom_census IMG NAME — volume-read's census of IMG: its exit status;
 # heirloom.NAME.files, every file the next mount would show — its name, its
-# file id and its sha256; heirloom.NAME.count, how many files the census says
+# file id, its sha256 and its gen; heirloom.NAME.count, how many files the census says
 # the kernel will count; heirloom.NAME.slipped, on a book, the id of every file
 # whose last block carries a Slip, one a line — no file at all when the census
 # gave no account of Slips (format v1, or no census read), so an account never
@@ -198,7 +193,7 @@ except ValueError:
 with open(sys.argv[2] + ".files", "w") as out:
     for f in sorted(d.get("files", []), key=lambda f: f["name"]):
         if f.get("visible"):
-            out.write("%s %s %s\n" % (f["name"], f["fid"], f.get("sha256")))
+            out.write("%s %s %s %s\n" % (f["name"], f["fid"], f.get("sha256"), f.get("gen")))
 k = d.get("kernel") or {}
 says = (k.get("says") or {}).get("files") if d.get("format") != "v2" else k.get("files")
 with open(sys.argv[2] + ".count", "w") as out:
@@ -413,12 +408,20 @@ heirloom_untouched() {
 # the file it made; found, the file it read back. Empty when it said neither.
 heirloom_fid() { grep -aoE "\[PERSIST\] $2 fid=[0-9]+" "$1" | head -1 | grep -oE '[0-9]+$'; }
 
-# heirloom_kept NAME ERE — the files census NAME shows but those whose line
-# ERE matches, each as "name fid sha256" — the session's own files
-# (HEIRLOOM_SESSION_FILES) as "name fid" alone.
-heirloom_kept() {
-    grep -vE "$2" "$SCRATCH/heirloom.$1.files" | awk -v own=" $HEIRLOOM_SESSION_FILES " \
-        'index(own, " " $1 " ") { print $1, $2; next } { print }'
+# heirloom_lost BEFORE AFTER ERE — the files census BEFORE shows, but those
+# whose line ERE matches, that census AFTER does not show as the same file:
+# gone, under another id, or with other bytes and no newer gen. Bytes a
+# machine wrote — a program's own state, written again each session — come
+# with a gen of their own; bytes a kernel misread do not. One a line, nothing
+# when every one holds.
+heirloom_lost() {
+    awk -v skip="$3" '
+        NR == FNR { if ($0 !~ skip) { fid[$1] = $2; sha[$1] = $3; gen[$1] = $4 } next }
+        ($1 in fid) { seen[$1] = 1
+                      if ($2 != fid[$1]) print $1 " under fid " $2 ", was " fid[$1]
+                      else if ($3 != sha[$1] && $4 + 0 <= gen[$1] + 0) print $1 " other bytes at gen " $4 }
+        END { for (n in fid) if (!(n in seen)) print n " gone" }' \
+        "$SCRATCH/heirloom.$1.files" "$SCRATCH/heirloom.$2.files"
 }
 
 # heirloom_persist NAME — the ids of every persist file census NAME shows, in a
@@ -564,9 +567,9 @@ heirloom_handed() {
     chk $? "heirloom: and it carries the file kernel N+1 wrote, and only it — $HEIRLOOM_PERSIST fid(s) $(heirloom_persist n1), kernel N+1's ${HEIRLOOM_N1_FID:-unread}"
     [ -z "$said" ] || heirloom_laid "$L"
     mine="^($HEIRLOOM_PERSIST|$HEIRLOOM_COPY_A-b\.d|$HEIRLOOM_COPY_B-b\.d|$HEIRLOOM_COPY_LOG[0-9]+-l\.log) "
-    kept=$(diff <(heirloom_kept n "$mine") <(heirloom_kept n1 "$mine") | grep -c '^[<>]')
-    [ "$kept" = 0 ]
-    chk $? "heirloom: every file kernel N left is there under its id, byte for byte, but the ones kernel N+1 wrote and the session's own ($HEIRLOOM_SESSION_FILES, by id) ($kept line(s) differ)"
+    kept=$(heirloom_lost n n1 "$mine")
+    [ -z "$kept" ]
+    chk $? "heirloom: every file kernel N left is there under its id, its bytes changed only with a newer gen — written, never misread — but the ones kernel N+1 wrote (${kept:-none otherwise})"
 }
 
 # Kernel N boots the heirloom kernel N+1 left, and reads what N+1 wrote — then
@@ -611,9 +614,9 @@ heirloom_back() {
     heirloom_census "$HEIRLOOM_IMG" back
     chk $? "heirloom: the heirloom kernel N left the second time is consistent (volume-read check)"
     heirloom_untouched "the host's census after $HEIRLOOM_LEFT_BY"
-    kept=$(diff <(heirloom_kept n1 '^$') <(heirloom_kept back '^$') | grep -c '^[<>]')
-    [ "$kept" = 0 ]
-    chk $? "heirloom: every file kernel N+1 left is there under its id, byte for byte — the session's own ($HEIRLOOM_SESSION_FILES) by id — once kernel N has been on it ($kept line(s) differ)"
+    kept=$(heirloom_lost n1 back '^$')
+    [ -z "$kept" ]
+    chk $? "heirloom: every file kernel N+1 left is there under its id once kernel N has been on it, its bytes changed only with a newer gen (${kept:-none otherwise})"
 }
 
 # heirloom_back_glass LOG RC WHY LEFT — kernel N, the way back (its LOG, its

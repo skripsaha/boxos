@@ -25,6 +25,7 @@
 #include "ink/fallow.h"
 #include "settle/settle.h"
 #include "helm/helm.h"
+#include "keep/keep.h"
 #include "mount/mount.h"
 #include "mount/away.h"
 #include "mount/perambulation.h"
@@ -1868,9 +1869,12 @@ error_t tagfs_write_block(uint64_t block, const void *buffer)
 // The reserved vocabulary
 // ----------------------------------------------------------------------------
 
-// The reserved-key vocabulary. A tag is "system" iff it is the bare (value=NULL)
-// registry entry for one of these keys; a value-bearing tag like "system:foo" is
-// a distinct entry and stays a user tag. Mirrors the format-time intern order
+// The reserved-key vocabulary: the words a running program's cabin is given its
+// authority by (auth_tags.h) and the vocabulary's own. A registry tag carries
+// TAGFS_TAG_FLAG_SYSTEM iff it is the bare (value=NULL) entry for one of these
+// keys; a value-bearing tag like "system:foo" is a distinct entry and stays a
+// user tag. None of these is a file's role: that is its record's, and a file
+// wearing the word system is only a file its user called so. Mirrors the format-time intern order
 // (deterministic ids 0-11) and is re-stamped at every mount below. Built from
 // the same tagfs_reserved.h source as the format-seed, so the list cannot drift.
 static const char *const TagFsReservedKeys[] = {
@@ -2486,6 +2490,7 @@ void TagFSServiceIfPending(void)
 {
     HelmRunReady();
     SettleServiceIfPending();
+    KeepServe();
     tagfs_attend_owed_arrival();
     tagfs_ask_for_the_mount_again();
 
@@ -2858,24 +2863,6 @@ bool TagFSTagSpelling(uint32_t tag_id, TagSpelling *out, bool *is_system)
     return g_state.registry && TagRegistrySpelling(g_state.registry, tag_id, out, is_system);
 }
 
-bool tagfs_tag_key(uint32_t tag_id, char *out, size_t out_size)
-{
-    if (!out || out_size == 0)
-        return false;
-    out[0] = '\0';
-    if (!tagfs_enter())
-        return false;
-
-    TagSpelling tag;
-    bool said = TagFSTagSpelling(tag_id, &tag, NULL) && tag.key_len < out_size;
-    if (said) {
-        memcpy(out, tag.key, tag.key_len);
-        out[tag.key_len] = '\0';
-    }
-    tagfs_leave();
-    return said;
-}
-
 size_t tagfs_tag_text(uint32_t tag_id, char *out, size_t out_size)
 {
     if (out && out_size)
@@ -2902,52 +2889,6 @@ bool TagFSTagMatches(uint32_t tag_id, const TagSpelling *pattern)
     bool matches = TagFSTagSpelling(tag_id, &tag, NULL) && TagPatternMatches(pattern, &tag);
     tagfs_leave();
     return matches;
-}
-
-char *TagFSKeyList(const uint32_t *tag_ids, uint32_t count)
-{
-    if (!tagfs_enter())
-        return NULL;
-
-    TagSpelling tag;
-    size_t      need = 1;
-    for (uint32_t i = 0; i < count; i++)
-        if (TagFSTagSpelling(tag_ids[i], &tag, NULL))
-            need += tag.key_len + 1;
-
-    char *list = kmalloc(need);
-    if (list) {
-        size_t at = 0;
-        for (uint32_t i = 0; i < count; i++) {
-            if (!TagFSTagSpelling(tag_ids[i], &tag, NULL))
-                continue;
-            /* A tag another core interned after the count above is not in
-             * what was measured, and is left out rather than written past
-             * the end of it. */
-            if (at + (at ? 1u : 0u) + tag.key_len >= need)
-                continue;
-            if (at)
-                list[at++] = ',';
-            memcpy(list + at, tag.key, tag.key_len);
-            at += tag.key_len;
-        }
-        list[at] = '\0';
-    }
-    tagfs_leave();
-    return list;
-}
-
-bool TagFSKeyAmong(const uint32_t *tag_ids, uint32_t count, const char *key)
-{
-    if (!key || !tagfs_enter())
-        return false;
-
-    TagSpelling tag;
-    bool        found = false;
-    for (uint32_t i = 0; i < count && !found; i++)
-        found = TagFSTagSpelling(tag_ids[i], &tag, NULL) && TagSpanIs(key, tag.key, tag.key_len);
-    tagfs_leave();
-    return found;
 }
 
 // ----------------------------------------------------------------------------

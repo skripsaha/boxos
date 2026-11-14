@@ -49,11 +49,12 @@ struct TagFSFileHandle;
 
 /*
  * Whether a change carries the warrant to open a file the system keeps — one
- * wearing a tag whose key is system, boot or god (ink.h, the one guard). The
+ * whose record puts it in a role — system, boot or kernel (ink.h, the one
+ * guard). The
  * deck that takes a program's call sets it, from the authority the program's
  * cabin holds: system or god warrants, nothing else does. It rides to the
  * guard in the handle and in the job, and in the calls the deck makes itself
- * (a delete, an untag, a rename). A caller in the kernel carries none. No
+ * (a delete). A caller in the kernel carries none. No
  * warrant reaches the blocks the Deed points the loader at.
  */
 typedef enum {
@@ -114,6 +115,7 @@ typedef struct {
     uint64_t    size;
     uint64_t    created_time;
     uint64_t    modified_time;
+    uint64_t    keep_until;      /* with TAGFS_FILE_DELETED: when the volume lets the file go */
     char*       filename;
     uint32_t*   tag_ids;
     uint32_t    tag_count;

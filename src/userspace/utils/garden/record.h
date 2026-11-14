@@ -19,7 +19,7 @@ struct Plant {
     std::uint32_t Starts = 0;
     std::uint64_t Planted = 0;     // unix seconds of the first start heard
     std::uint64_t Last = 0;        // and of the latest
-    bool          System = false;  // its file wears "system": the machine's own
+    bool          System = false;  // its cabin wears "system": the machine's own
 };
 
 struct Record {

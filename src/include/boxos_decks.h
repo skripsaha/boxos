@@ -77,7 +77,8 @@
 /* proc.exec.file — proc.exec for one file, named by its id. params =
  * [u64 file id][caller-tag augment]; in_crate = the Luggage bytes alone (none:
  * no luggage); out_crate and auth as proc.exec. The file must be what a name
- * would have started — active, wearing app or utility — else ERR_FILE_NOT_FOUND. */
+ * would have started — active, not deleted, a box or an ELF image by its first
+ * bytes (no tag of the file is asked) — else ERR_FILE_NOT_FOUND. */
 #define SYSTEM_OP_PROC_EXEC_FILE    0x0C
 #define SYSTEM_OP_INFO              0x07
 #define SYSTEM_OP_TLS_FSBASE        0x0A  /* set caller's FS base (its own thread pointer) */
@@ -339,6 +340,10 @@
 #define STORAGE_OBJ_CREATE          0x07
 #define STORAGE_OBJ_DELETE          0x08
 #define STORAGE_OBJ_RENAME          0x09
+/* obj.getinfo — params = [u64 fid]; out_crate = [u64 fid][u64 size][u16 tags]
+ * [u16 name_len][name][tag records]…[u64 kept_until]: the last eight bytes are
+ * the time, in nanoseconds of the wall clock, at which the volume lets a
+ * deleted file go (obj.keep), 0 for a file that is not deleted. */
 #define STORAGE_OBJ_GET_INFO        0x0A
 /* obj.span — a file made exactly `size` bytes long. params =
  * [u64 file_id][u64 size][u32 flags], the flags word optional (0). Shorter:
@@ -410,14 +415,29 @@
  * none laid. params = [u64 fid][u64 at][u64 onto][u64 onto_at][u64 count].
  * out_crate = [u64 blocks laid][u64 the block of `fid` a refusal met][u64 why]:
  * why 0 laid, 1 the cabin wears neither system nor god, 2 a file the system
- * keeps or the kernel's, 3 a file wearing dedup:off, 4 the blocks asked are
- * not `fid`'s plain ground or not `onto`'s, 5 a block with no digest the book
- * holds, 6 the digests differ, 7 the digests agree and the bytes differ, 8 a
- * file changed meanwhile, 9 the volume's own refusal — the error says it. Only
+ * keeps or the kernel's, 3 the blocks asked are not `fid`'s plain ground or
+ * not `onto`'s, 4 a block with no digest the book holds, 5 the digests differ,
+ * 6 the digests agree and the bytes differ, 7 a file changed meanwhile, 8 the
+ * volume's own refusal — the error says it. Only
  * a cabin wearing system or god (ERR_ACCESS_DENIED at the gate,
  * ERR_PERMISSION_DENIED past it); refused on a format-v1 volume
  * (ERR_UNSUPPORTED). */
 #define STORAGE_OBJ_CONJUGATE       0x28
+/* obj.keep — a file deleted for a term: params = [u64 fid][u64 term seconds].
+ * No query meets the file from now on, it can be brought back by obj.restore
+ * until the term ends, and the volume lets it go by itself then (tagfs/keep/
+ * keep.h). The term is the caller's — a program passes what its person
+ * chose — and a term of 0 is the file given up at once, as obj.delete does.
+ * Guarded as obj.delete is, by the same one guard and the same warrant (a
+ * file the system keeps is refused, ERR_PERMISSION_DENIED); ERR_UNSUPPORTED on
+ * a format-v1 volume for a term above 0. Deleting a deleted file moves its
+ * term. */
+#define STORAGE_OBJ_KEEP            0x29
+/* obj.restore — a deleted file brought back: params = [u64 fid]. The file is
+ * found by queries again, its tags and name as they were. ERR_FILE_NOT_FOUND
+ * when the volume holds no such file or its term has ended; OK, changing
+ * nothing, for a file that is not deleted. */
+#define STORAGE_OBJ_RESTORE         0x2A
 /* snap.info — structured per-snapshot record by id. params = [u32 snap_id].
  * out_crate = [u32 id][u64 parent_file_id][u64 created_time][u32 file_count]
  *             [u64 total_size][u8 flags][char name[32]]. Gives the name-by-id
@@ -431,9 +451,15 @@
  * project AND year:2026, and a new file is stamped code and cpp along with
  * whatever tags it was given. EVERYWHERE asks the same thing of the whole
  * volume, the context left out. query: params = [u8 scope], absent = USE.
- * create: params = [char filename[32]][u8 scope], a 32-byte params = USE. */
+ * create: params = [char filename[32]][u8 scope], a 32-byte params = USE.
+ *
+ * DELETED asks storage.query for the files kept deleted (obj.keep) alone —
+ * the whole volume's, the Use Context left out, and only those: the one
+ * explicit question that sees them. It is no scope for storage.create or
+ * storage.tag.list. */
 #define STORAGE_SCOPE_USE           0
 #define STORAGE_SCOPE_EVERYWHERE    1
+#define STORAGE_SCOPE_DELETED       2
 
 /* ============================================================================
  *  Hardware deck opcodes — the same single source, for the kernel's handler

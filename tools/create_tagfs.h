@@ -22,6 +22,7 @@
 
 #include "volume_deed.h"     /* the title; types come from <stdint.h> above    */
 #include "deed_pen.h"        /* and the one pen it is written with              */
+#include "volume_tally.h"    /* TALLY_FILE_ROLE_*, the role a file is kept in    */
 
 #define TAGFS_BLOCK_SIZE       VOLUME_BLOCK_BYTES
 #define TAGFS_SECTOR_BYTES     VOLUME_DEED_SECTOR_BYTES
@@ -58,6 +59,7 @@ typedef struct {
     uint32_t    block_count;
     uint32_t*   tag_ids;
     uint32_t    tag_count;
+    uint32_t    role;        /* TALLY_FILE_ROLE_*: what the system keeps it as; 0 for an ordinary file */
 } FileInfo;
 
 /* ====================================================================
@@ -91,9 +93,9 @@ VolumeGeometry DeedGeometry(void);
 #define TAG_TEXT_ROOM   4074u
 
 void         seed_reserved_tags(uint32_t id_most);
-int          parse_tags(const char* tag_string, const char* filename,
-                        uint32_t** out_ids, uint32_t* out_count);
-int          KernelTagged(const uint32_t* ids, uint32_t count);
+int          parse_tags(const char* tag_string, const char* path,
+                        uint32_t** out_ids, uint32_t* out_count, uint32_t* out_role);
+void         CargoNameKernel(const char* path);
 VolumePacked PackedStamp(int file_count, char* argv[], int first,
                          const char* kernel_path);
 void         CargoRelease(void);

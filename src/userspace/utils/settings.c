@@ -34,6 +34,7 @@
 #include "box/settings.h"
 #include "box/string.h"
 #include "box/system.h"
+#include "box/program_part.h"
 #include "box/use.h"
 #include "settings_pen.h"
 
@@ -41,18 +42,12 @@ BOX_FORM("takes name program \"the program\"\n"
          "takes optional text \"a setting by its path — [tags] before it for a context — and what it becomes; "
          "default for as it came\"\n");
 
-/* Whether the file is a program the shell can start: it wears app or utility. */
-static bool runnable(const FileMetadata *metadata)
+/* Whether the file is a program the shell can start: it holds a box or an ELF
+ * image, whatever it wears. */
+static bool runnable(file_id_t file)
 {
-    for (const char *at = metadata->Tags; at && *at;) {
-        const char *end = strchr(at, ',');
-        size_t      length = end ? (size_t)(end - at) : strlen(at);
-        if ((length >= 3 && memcmp(at, "app", 3) == 0 && (length == 3 || at[3] == ':')) ||
-            (length >= 7 && memcmp(at, "utility", 7) == 0 && (length == 7 || at[7] == ':')))
-            return true;
-        at = end ? end + 1 : NULL;
-    }
-    return false;
+    ProgramKind kind;
+    return program_kind(file, &kind) == 0 && kind != PROGRAM_NONE;
 }
 
 /* The program a word names: by its whole file name, or as the shell names a
@@ -72,7 +67,7 @@ static int find_program(const char *word, file_id_t *out)
     }
     memcpy(stem, word, length);
     stem[length] = '\0';
-    int n = query_all_everywhere(stem, "trashed", &ids);
+    int n = query_all_everywhere(stem, NULL, &ids);
     for (int i = 0; i < n; i++) {
         FileMetadata metadata;
         if (FileMetadataRead(ids[i], &metadata) != 0) continue;
@@ -81,7 +76,7 @@ static int find_program(const char *word, file_id_t *out)
         size_t      its_length = its_dot ? (size_t)(its_dot - name) : strlen(name);
         bool        named = dot ? strcmp(name, word) == 0
                                 : its_length == length && memcmp(name, stem, length) == 0;
-        if (named && runnable(&metadata) &&
+        if (named && runnable(ids[i]) &&
             count < (int)(sizeof(found) / sizeof(found[0])))
             found[count++] = ids[i];
         FileMetadataRelease(&metadata);

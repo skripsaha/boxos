@@ -287,8 +287,8 @@ static TestResult TestStandAsidePastTag63(void)
     for (uint32_t i = 0; i < 3; i++)
         TEST_ASSERT(StandMakeFile(names[i], NULL, 0, &files[i]), "a file of the test's own");
     const TagSpelling trashed = TagSpellingOfKey("trashed");
-    TEST_ASSERT_EQ(tagfs_add_tag(files[0], high, INK_UNWARRANTED), 0, "the first wears the tag");
-    TEST_ASSERT_OK(tagfs_add_tag_string(files[2], &trashed, INK_UNWARRANTED), "the third wears trashed");
+    TEST_ASSERT_EQ(tagfs_add_tag(files[0], high), 0, "the first wears the tag");
+    TEST_ASSERT_OK(tagfs_add_tag_string(files[2], &trashed), "the third wears trashed");
 
     TagSpelling named[3], aside;
     for (uint32_t i = 0; i < 3; i++)
@@ -421,7 +421,7 @@ static TestResult TestStandTagSetWearsWhatItWasGiven(void)
 
     len = StandTagText("stand_info", 'i', STAND_VALUE_BYTES);
     TEST_ASSERT_OK(TagSpell(s_text, len, &spelled), "a tag with a 300-byte value spells");
-    TEST_ASSERT_OK(tagfs_add_tag_string(file_id, &spelled, INK_UNWARRANTED),
+    TEST_ASSERT_OK(tagfs_add_tag_string(file_id, &spelled),
                    "and is put on the file");
     TEST_ASSERT(StandInfoHasWhole(file_id, s_text), "and its info carries all 300 bytes of it");
 out:

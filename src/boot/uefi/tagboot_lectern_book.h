@@ -8,8 +8,8 @@
  *   tagboot_lectern.c         memory and lines; a unit and a node read off
  *                             the medium; the slot stood on; the DIGESTS tree
  *                             walked down to a block's digest; Attest
- *   tagboot_lectern_tree.c    a tree's leaves walked in key order: the labels
- *                             of TAGS, the files of FILES that wear one
+ *   tagboot_lectern_tree.c    a tree's leaves walked in key order: the files
+ *                             of FILES kept in a role
  *   tagboot_lectern_ribbon.c  the stitches past the slot's `at`, sewn on by
  *                             rules (а)/(б)/(б′)/(в)
  *   tagboot_lectern_replay.c  their records replayed for the files followed,
@@ -41,10 +41,14 @@ void LineStart(LecternLine *l);
 void LinePut(LecternLine *l, const char *s);
 void LineNum(LecternLine *l, uint64_t v);
 
-/* The labels a kernel is looked for by, in the order they are asked (§16.7
- * п.3): kernel, god, boot, system. */
-#define LECTERN_LABELS 4u
-const char *LecternLabelName(uint32_t i);
+/* The role of a file, from its flags: TALLY_FILE_ROLE_KERNEL, _BOOT, _SYSTEM,
+ * or 0 for a file the system keeps in none — a file's tags are its user's,
+ * and the loader reads none of them. A kernel is looked for in the order of
+ * the roles, the larger first (§16.7 п.3). */
+static inline uint64_t LecternRoleOf(uint64_t flags)
+{
+    return flags & TALLY_FILE_ROLE_MASK;
+}
 
 /* ------------------------------------------------------------------------- */
 /* What the book is read into                                                */
@@ -81,16 +85,15 @@ typedef struct {
     int      carried;
 } LecternRun;
 
-/* A file the Lectern follows: its gen, size and tags (rising), its runs, and
- * the Slips laid on its last block — `tail` NULL for none, else a block of
- * their bytes and a block's bits more saying which are laid. `gone` a file
- * followed that a Quitclaim took. */
+/* A file the Lectern follows: its gen, size and flags, its runs, and the
+ * Slips laid on its last block — `tail` NULL for none, else a block of their
+ * bytes and a block's bits more saying which are laid. `gone` a file followed
+ * that a Quitclaim took. */
 typedef struct {
     uint64_t    fid;
     uint64_t    gen;
     uint64_t    size;
-    uint64_t   *tags;
-    uint64_t    ntags, captags;
+    uint64_t    flags;
     LecternRun *runs;
     uint64_t    nruns, capruns;
     uint8_t    *tail;
@@ -177,9 +180,6 @@ typedef struct {
     /* The nodes said read past a copy that did not hold, by their first block. */
     uint64_t          *said;
     uint64_t           nsaid, capsaid;
-    /* The labels' ids. */
-    uint64_t           label[LECTERN_LABELS];
-    uint32_t           labeled;       /* a bit of each label whose id is known */
     /* The ribbon. */
     LecternStitch    **stitches;
     uint64_t           nstitches, capstitches;
@@ -187,7 +187,7 @@ typedef struct {
     uint64_t           nskip, capskip;
     uint64_t          *refused;       /* the stitches not applied */
     uint64_t           nrefused, caprefused;
-    uint64_t          *interest;      /* files a Labeled gives a label to */
+    uint64_t          *interest;      /* files a Labeled puts in a role */
     uint64_t           ninterest, capinterest;
     /* The files followed, by fid, rising; the rotten ranges of FILES. */
     LecternFile       *files;
@@ -240,16 +240,9 @@ void    LecternClose(LecternBook *b);
 /* tagboot_lectern_tree.c                                                    */
 /* ------------------------------------------------------------------------- */
 
-/* The labels TAGS names; the files FILES holds that wear one or that the
- * ribbon gives one (b->interest). 1, or 0 no room. */
-int     LecternLabels(LecternBook *b);
+/* The files FILES holds that are kept in a role or that the ribbon puts in
+ * one (b->interest). 1, or 0 no room. */
 int     LecternFiles(LecternBook *b);
-
-/* Tag `id`, when it is a label whose id is not known yet, known from here. */
-void    LecternLabelTake(LecternBook *b, uint64_t id, const TallyTag *t);
-
-/* Whether a file wears a label whose id is known — which, a bit each. */
-int     LecternFileLabeled(const LecternBook *b, const uint64_t *tags, uint64_t ntags, uint32_t *which);
 
 LecternFile *LecternFileOf(LecternBook *b, uint64_t fid);
 /* A file put into its place by fid (*f taken over); 0 no room. */
@@ -271,7 +264,7 @@ void    LecternStitchGive(const LecternBook *b, LecternStitch *u);
 /* tagboot_lectern_replay.c                                                  */
 /* ------------------------------------------------------------------------- */
 
-/* Before the files: the labels the ribbon coins and the files it labels. */
+/* Before the files: the files the ribbon puts in a role. */
 void    LecternBefore(LecternBook *b);
 /* The Undones, then each stitch's records for the files followed. 1, or 0. */
 int     LecternReplay(LecternBook *b);

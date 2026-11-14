@@ -116,6 +116,7 @@ look "a box with a part of every kind" "$WORK/full.box" 0 \
     "kept compressed: what it says is not read here" \
     "of a later version of its kind than this reader knows" \
     "of a kind this reader does not know" \
+    "role                    14 bytes, holds to its hash" "system" \
     "— the table and its names hold to it" \
     "whole: the seal holds, every part holds to its hash, and only zeros lie between them"
 

@@ -1,14 +1,13 @@
-"""bootbook — the kernels a format-v2 volume's book names by tag, as the UEFI
+"""bootbook — the kernels a format-v2 volume's book names by role, as the UEFI
 loader finds them once the kernel its Deed names is not attested (spec_v2
-§16.7 пп.3, 5; §9.2 п.2): the ids of the labels `kernel`, `god`, `boot` and
-`system` in TAGS — a key with no value, what mkfs gives a file by the stem of
-its name — and on the ribbon past the slot the book stands on; every file of
-FILES wearing one; the stitches past the slot's `at`, sewn on by rules
-(а)/(б)/(б′)/(в) (stitch_ribbon.Ribbon, its direct scan left out: a loader
-writes nothing and needs no next seq), and their records replayed narrowly —
-the files that wear a label or are given one on the ribbon alone, each record
-held to its base, an Undone passing over what it names; and the digest of
-every block a record of the ribbon puts in.
+§16.7 пп.3, 5; §9.2 п.2): the role of a file is bits 5 and 6 of its flags
+(ondisk.FILE_ROLE_*) — kernel, boot or system, never a tag, a file's tags being
+its user's; every file of FILES kept in one; the stitches past the slot's `at`,
+sewn on by rules (а)/(б)/(б′)/(в) (stitch_ribbon.Ribbon, its direct scan left
+out: a loader writes nothing and needs no next seq), and their records
+replayed narrowly — the files kept in a role or put in one on the ribbon
+alone, each record held to its base, an Undone passing over what it names; and
+the digest of every block a record of the ribbon puts in.
 
 The loader's Lectern does the same by its own code (src/boot/uefi/
 tagboot_lectern_tree.c, _ribbon.c, _replay.c), and the host stand holds the
@@ -16,31 +15,27 @@ two to one answer line for line (tools/tagboot_stand.sh).
 
 What the loader leaves to the kernel's mount, where the mount alone can
 judge it (the narrowing, said here once): a file's records are replayed only
-for the files it follows, so a Born of a fid it does not follow, the tags a
-record puts on and no Coined names, and a Labeled's name and flags are not
+for the files it follows, so a Born of a fid it does not follow, and a Labeled's name and tags are not
 weighed; a next_quire is not held against the ground of the book and the
 files; and the data of the newest stitch is not held to its digests before
 the replay (§4.5 п.6) — a block that did not land is one that does not match
 its digest when the kernel that names it is attested."""
 
-from . import stitch, tally
+from . import ondisk, stitch, tally
 from .bookmount import Blocks, BookMount, LastBlock, Mismatch, Splice
 from .bookread import Short
-from .stitch import BORN, LABELED, QUITCLAIM, SHAPED, UNDONE, COINED, KIND_NAMES, LABEL_TAGS
+from .stitch import BORN, LABELED, QUITCLAIM, SHAPED, UNDONE, KIND_NAMES, LABEL_FLAGS, LABEL_KEEP
 from .stitch_ribbon import Ribbon
 
-# The labels a kernel is looked for by, in the order they are asked (§16.7 п.3).
-LABELS = (b"kernel", b"god", b"boot", b"system")
+# The roles a kernel is looked for by, in the order they are asked (§16.7 п.3).
+ROLES = (ondisk.FILE_ROLE_KERNEL, ondisk.FILE_ROLE_BOOT, ondisk.FILE_ROLE_SYSTEM)
 
 FILE_KINDS = (BORN, SHAPED, LABELED, QUITCLAIM)
 
 
-def Label(ts):
-    """The label a tag is — its key, when it carries no value and is not
-    retired — or None."""
-    if ts.flags & (tally.TAG_HAS_VALUE | tally.TAG_RETIRED) or ts.key not in LABELS:
-        return None
-    return ts.key
+def Role(flags):
+    """The role a file's flags put it in, or 0 for none."""
+    return flags & ondisk.FILE_ROLE_MASK
 
 
 def Absolute(splices):
@@ -58,31 +53,22 @@ def Inserted(kind, d):
 
 class BootBook:
     """What the loader reads of the book past the Tally of `slot` (`t` read),
-    each line said into `say`: `labels` {name: id}, `files` {fid: FileState}
-    the files it follows as the ribbon leaves them, `overlay` {block: digest}
-    of the blocks the ribbon put in, and `candidates` — the files wearing a
-    label in the order they are tried."""
+    each line said into `say`: `files` {fid: FileState} the files it follows as
+    the ribbon leaves them, `overlay` {block: digest} of the blocks the ribbon
+    put in, and `candidates` — the files kept in a role in the order they are
+    tried."""
 
     def __init__(self, g, slot, t, say):
         self.g, self.slot, self.t, self.say = g, slot, t, say
-        self._Copies(tally.TAGS)
-        self.labels = {}
-        for tid, ts in sorted(t.content.tags.items()):
-            if Label(ts) is not None and Label(ts) not in self.labels:
-                self.labels[Label(ts)] = tid
         self.ribbon = Ribbon(g, slot, (), scan=False)
         seqs = [u.seq for u in self.ribbon.stitches]
         say("the ribbon past slot %u's Tally: %s" % (slot.index, "%u stitch(es) sewn on, seq %u to %u" % (
             len(seqs), seqs[0], seqs[-1]) if seqs else "no stitch sewn on"))
         self.interest = set()
         self._Before()
-        say("the kernel is looked for by its tags: %s" % ", ".join(
-            "%s (%s)" % (name.decode(), "id %u" % self.labels[name] if name in self.labels else "none")
-            for name in LABELS))
-        ids = set(self.labels.values())
         self._Copies(tally.FILES)
         self.files = {fid: fs.Copy() for fid, fs in t.content.files.items()
-                      if ids & set(fs.tags) or fid in self.interest}
+                      if Role(fs.flags) or fid in self.interest}
         self.followed = set(self.files)
         self.skip, self.refused = {}, set()
         self._Undone()
@@ -101,23 +87,20 @@ class BootBook:
                          % (tally.TREE_NAMES[tree], n.level, "/".join(str(b) for b in n.blocks), n.copy,
                             n.copy + 1))
 
-    # --- before the files: the labels the ribbon coins, the files it labels --
+    # --- before the files: the files the ribbon puts in a role ---------------
 
     def _Before(self):
-        """Every Coined of a label not yet known, and every file a Labeled
-        gives a label already known, in the order of the ribbon — followed
-        from the Tally on, whatever its records come to."""
+        """Every file a Labeled puts in a role, in the order of the ribbon —
+        followed from the Tally on, whatever its records come to."""
         for u in self.ribbon.stitches:
             for kind, _ign, body, _at in u.records:
-                if kind not in (COINED, LABELED):
+                if kind != LABELED:
                     continue
                 try:
                     d = stitch.RecordDecode(kind, body, u.seq)
                 except Short:
                     continue
-                if kind == COINED and Label(d["tag"]) is not None and Label(d["tag"]) not in self.labels:
-                    self.labels[Label(d["tag"])] = d["tid"]
-                elif kind == LABELED and d["what"] & LABEL_TAGS and set(d["add"]) & set(self.labels.values()):
+                if d["what"] & LABEL_FLAGS and Role(d["flags"][0]):
                     self.interest.add(d["fid"])
 
     # --- pass 1: the Undones (bookmount.BookMount._Undone) ----------------------
@@ -187,7 +170,7 @@ class BootBook:
         if why:
             self._Refuse(u, why)
             return
-        ids, skip, now = set(self.labels.values()), self.skip.setdefault(u.seq, set()), {}
+        skip, now = self.skip.setdefault(u.seq, set()), {}
         for kind, _ign, body, _at in u.records:
             if kind not in FILE_KINDS:
                 continue
@@ -196,7 +179,7 @@ class BootBook:
             if fid in skip:
                 continue
             if fid not in self.followed:
-                if kind != BORN or not (ids & set(d["tags"]) or fid in self.interest):
+                if kind != BORN or not (Role(d["flags"]) or fid in self.interest):
                     continue
                 self.followed.add(fid)
             old = now[fid] if fid in now else self.files.get(fid)
@@ -233,11 +216,11 @@ class BootBook:
             if kind == QUITCLAIM:
                 return None
             if kind == LABELED:
-                if d["what"] & LABEL_TAGS:
-                    worn = set(fs.tags)
-                    if any(x in worn for x in d["add"]) or any(x not in worn for x in d["drop"]):
-                        raise Mismatch("it puts on a tag already worn or takes off one not worn")
-                    fs.tags = sorted((worn | set(d["add"])) - set(d["drop"]))
+                if d["what"] & LABEL_FLAGS:
+                    fs.flags = (fs.flags | d["flags"][0]) & ~d["flags"][1]
+                if d["what"] & LABEL_KEEP:
+                    fs.keep_ns = d["keep"]
+                    fs.flags = fs.flags | ondisk.FILE_DELETED if d["keep"] else fs.flags & ~ondisk.FILE_DELETED
                 return fs
             before = LastBlock(old)
             for at, remove, runs in Absolute(d["splices"]):
@@ -272,19 +255,14 @@ class BootBook:
                 self.overlay.update(zip(blocks, d["digests"]))
 
     def _Order(self):
-        """The files followed that wear a label, label by label in the order
-        they are asked, the newest gen first and of one gen the larger fid —
-        each once; a file naming ground outside the data run is the mount's
-        to lock, and no kernel."""
-        g, out, seen = self.g, [], set()
-        for name in LABELS:
-            tid = self.labels.get(name)
-            if tid is None:
-                continue
-            group = [fs for fs in self.files.values() if tid in fs.tags and fs.fid not in seen and
+        """The files followed that are kept in a role, role by role in the
+        order they are asked, the newest gen first and of one gen the larger
+        fid — each once; a file naming ground outside the data run is the
+        mount's to lock, and no kernel."""
+        g, out = self.g, []
+        for role in ROLES:
+            group = [fs for fs in self.files.values() if Role(fs.flags) == role and
                      not any(not r.hole and (r.start < g.data_block or r.start + r.count > g.data_end)
                              for r in fs.runs)]
-            for fs in sorted(group, key=lambda f: (-f.gen, -f.fid)):
-                out.append(fs)
-                seen.add(fs.fid)
+            out.extend(sorted(group, key=lambda f: (-f.gen, -f.fid)))
         return out

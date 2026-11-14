@@ -767,7 +767,7 @@ def BookRowTests(pc, Want, Synthetic):
     """A book's oracles held to their rows: a logger's file never fewer lines
     than the flush before left (C21); a Tally laid in said by the kernel
     (C7–C10); the chain's two boots judged, and the file the verdict rolled
-    back wearing settle:undone (C16); a torn tail a retry leaves past the
+    back marked so in its record (C16); a torn tail a retry leaves past the
     ribbon's end no boundary not stood (C14)."""
     try:
         import powercut_judge_book as pjb
@@ -822,7 +822,7 @@ def ChainTests(pc, Want, Synthetic, pjb):
                "match its digest): its record is rolled back by its splice — ERR_TAGFS_NOT_LANDED")]
     mount = "[TagFS] 9 data blocks, 5 free, 1 files\n[TagFS] the volume is MOUNTED — 1 file(s)\nBoxOS Hub\n"
 
-    def Chain(second=mount, tags=("settle:undone",)):
+    def Chain(second=mount, flags=17):
         j = Judged(pc, shape, lambda cid: Book([[1, "a", 3, "aa"]], landed if cid == "e1-s1" else []))
         boots = os.path.join(j.run.dir, "boots")
         os.makedirs(boots)
@@ -834,7 +834,7 @@ def ChainTests(pc, Want, Synthetic, pjb):
                           "tally": {"seq": 4}, "under_glass": [],
                           "ribbon": {"stitches": [], "torn": [], "lied": False}},
                  "files": [{"fid": 1, "state": "live", "name": "a", "size": 3, "sha256": "aa", "visible": True,
-                            "tag_text": list(tags)}]}
+                            "flags": flags}]}
         for name, text in (("e1-s1.serial.log", mount), ("e1-s1.again.serial.log", second),
                            ("e1-s1.after.check.json", json.dumps(after))):
             with open(os.path.join(boots, name), "w") as fh:
@@ -842,16 +842,16 @@ def ChainTests(pc, Want, Synthetic, pjb):
         return Said(pjb.Chain, j, "laid").get("chain", ("", ""))
 
     got = Chain()
-    Want(got[0] == "behaves", "C16: both boots mount as predicted, fid 1 rolled back wears settle:undone, no "
+    Want(got[0] == "behaves", "C16: both boots mount as predicted, fid 1 rolled back marked so in its record, no "
          "block of two owners, nothing NOT_LANDED again (%s)" % (got,))
     got = Chain(second="[TagFS] 9 data blocks, 5 free, 1 files\nKERNEL PANIC\n")
     Want(got[0] == "fail" and "second" in got[1], "the second mount panicking fails the chain (%s)" % (got,))
     got = Chain(second=mount.replace("5 free", "6 free"))
     Want(got[0] == "fail" and "second boot" in got[1],
          "the second mount saying other counts than the census of what the first left fails it (%s)" % (got,))
-    got = Chain(tags=())
-    Want(got[0] == "fail" and "settle:undone" in got[1],
-         "fid 1 rolled back without settle:undone fails it (%s)" % (got,))
+    got = Chain(flags=1)
+    Want(got[0] == "fail" and "verdict's mark" in got[1],
+         "fid 1 rolled back without the verdict's mark in its record fails it (%s)" % (got,))
 
 
 

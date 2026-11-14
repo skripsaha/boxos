@@ -13,11 +13,12 @@
  * authoritative roots all read stood on. The kernel the Deed's BOOT names is
  * tried first, its blocks held to the DIGESTS tree of that slot's Tally with
  * no walk of FILES (§9.2 п.2). When it is not attested, the kernels the book
- * names by tag (§16.7 п.3): the labels kernel, god, boot and system out of
- * TAGS; the stitches past the slot's `at`, sewn on by rules (а)/(б)/(б′)/(в),
- * the records of the files that wear a label replayed narrowly, each held to
- * its base, an Undone passing over what it names (§16.7 п.5); and every file
- * of FILES wearing one, label by label, the newest gen first. Each kernel is
+ * names by role (§16.7 п.3): the stitches past the slot's `at`, sewn on by
+ * rules (а)/(б)/(б′)/(в), the records of the files kept in a role — the role
+ * is bits of a file's flags, never a tag — replayed narrowly, each held to its
+ * base, an Undone passing over what it names (§16.7 п.5); and every file of
+ * FILES kept in one, role by role — kernel, boot, system — the newest gen
+ * first. Each kernel is
  * held to its header (KERNEL at byte 2, the version at byte 8), placed where
  * it is jumped into, and its every block held to its digest — the record of
  * the ribbon that put it in, or DIGESTS: the first attested is jumped into;
@@ -34,7 +35,7 @@
  * (tools/volumeread/bootread.py, bootbook.py) is what TagBoot does. The loops
  * that walk the book are the loader's own: the kernel's mount reads on a heap
  * and holds every file in memory, and a loader needs a few nodes and the
- * files that wear a label (§16.7 п.2, F1); the decisions — a slot's shape,
+ * files kept in a role (§16.7 п.2, F1); the decisions — a slot's shape,
  * the order of slots, the trees that must read, whether a node holds, the
  * element that names a block, every record's codec — are the shared
  * headers', as the kernel takes them.
@@ -108,7 +109,7 @@ typedef struct {
 /*
  * The kernel the loader jumps into on the volume the desk reads: BOOT's first
  * (`boot` NULL when the Deed names none), then the kernels the book names by
- * tag — every line said as it is read and every kernel's verdict as it is
+ * role — every line said as it is read and every kernel's verdict as it is
  * found, the choice last.
  */
 void LecternSuccession(const LecternDesk *desk, const VolumeBoot *boot, LecternKernel *kernel);

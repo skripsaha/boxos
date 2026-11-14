@@ -36,6 +36,9 @@
 #include "vmm.h"
 #include "pmm.h"
 #include "process.h"
+#include "program_keys.h"   /* ProgramKeys — what a child of a file wears */
+#include "autostart.h"  /* AutostartStartedBy — what autostart.box starts is the system's */
+#include "rise.h"       /* RiseWatch */
 #include "pid_allocator.h"  /* pid_generation — own-child authority defeats pid-reuse */
 #include "tagfs.h"
 #include "write_job.h"      /* the defrag is a WriteJob: it holds the file's Helm */
@@ -1341,11 +1344,11 @@ static bool tag_list_holds(const char *list, const TagSpelling *tag)
     }
 }
 
-/* The child's tags: the file's keys (TagFSKeyList) with the caller's augment —
+/* The child's tags: the program's keys (ProgramKeys) with the caller's augment —
  * the `aug_len` bytes at `augment`, a comma list — folded in. Per tag: one
  * whose KEY is reserved is refused (ERR_ACCESS_DENIED: no escalation), one
  * that does not spell is refused with the spelling's code, one already there
- * is kept once; the file's tags are never the casualty (trusted, first).
+ * is kept once; the program's own keys are never the casualty (trusted, first).
  * *out is the caller's to kfree. */
 static error_t proc_exec_merge_augment(const char *file_tags, const char *augment,
                                        size_t aug_len, char **out)
@@ -1408,12 +1411,9 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
                             const TagSpelling *name,
                             const uint8_t *luggage, uint32_t luggage_len);
 static int SysProcExecFound(const ManifestOp *op, Crate *crates, const OpContext *ctx,
-                            uint64_t found_id, const char *child_tags,
+                            uint64_t found_id,
+                            const char *augment, size_t aug_len,
                             const uint8_t *luggage, uint32_t luggage_len);
-static int SysProcExecAugmented(const ManifestOp *op, Crate *crates, const OpContext *ctx,
-                                uint64_t found_id, char *found_tags,
-                                const char *augment, size_t aug_len,
-                                const uint8_t *luggage, uint32_t luggage_len);
 
 /* SYSTEM_OP_PROC_EXEC
  *   in_crate: [program name][NUL][luggage bytes…] — the name the program is
@@ -1460,23 +1460,25 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
     return rc;
 }
 
-/* Whether the file is a program — ACTIVE, and wearing app or utility — and
- * then its keys, whole (NULL in *out_tags when there was no memory for them). */
-static bool SysExecCandidate(uint64_t file_id, char **out_tags)
+/* Whether the file is a program: ACTIVE and not deleted, and its bytes are a
+ * box or an ELF image (ImageIsProgram) — what it is comes from the file
+ * itself, and none of its tags is asked. */
+static bool SysExecCandidate(uint64_t file_id)
 {
     TagFSMetadata meta;
     if (tagfs_get_metadata(file_id, &meta) != 0) return false;
 
-    bool has_exec_tag = false;
-    for (uint32_t t = 0; (meta.flags & TAGFS_FILE_ACTIVE) && t < meta.tag_count; t++) {
-        char key[128];
-        if (!tagfs_tag_key(meta.tag_ids[t], key, sizeof(key))) continue;
-        if (strcmp(key, "app") == 0 || strcmp(key, "utility") == 0) has_exec_tag = true;
+    bool program = false;
+    if ((meta.flags & TAGFS_FILE_ACTIVE) && !(meta.flags & TAGFS_FILE_DELETED) && meta.size != 0) {
+        TagFSFileHandle *fh = tagfs_open(file_id, TAGFS_HANDLE_READ);
+        if (fh) {
+            ImageSource source = { meta.size, fh, NULL, file_id };
+            program = ImageIsProgram(&source, meta.filename);
+            tagfs_close(fh);
+        }
     }
-    if (has_exec_tag)
-        *out_tags = TagFSKeyList(meta.tag_ids, meta.tag_count);
     tagfs_metadata_free(&meta);
-    return has_exec_tag;
+    return program;
 }
 
 static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext *ctx,
@@ -1489,53 +1491,30 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
     const char *augment = (const char *)op->params;
     size_t      aug_len = op->param_size;
 
-    /* Locate the file by tag-name + executable tag: every file that carries
-     * the name as a tag, asked of the index a page at a time until one is a
-     * program. What stood here first was a scan of the first 256 files of the
+    /* Locate the file by its name: every file that carries the name as a tag,
+     * asked of the index a page at a time until one is a program. What stood here first was a scan of the first 256 files of the
      * volume, so the 257th program was "not found" — and nothing said so; and
      * then one array as long as every id the volume had ever issued. A program
-     * the person set aside in the trash is not started by its name: the
-     * launcher's own word, asked of the volume as its question. */
-    const TagSpelling aside = TagSpellingOfKey("trashed");
+     * the person has deleted is not started by its name: no question meets a
+     * file kept deleted (the volume's own state of its record, not a tag),
+     * and SysExecCandidate asks the record again. */
     uint64_t          page_ids[32];
     TagFSPage         page;
     uint64_t          from       = 1;
     uint64_t          found_id   = 0;
-    char             *found_tags = NULL;
     do {
-        error_t asked = TagFSQueryPage(name, 1, &aside, 1, from, page_ids, ARRAY_SIZE(page_ids), false, &page);
+        error_t asked = TagFSQueryPage(name, 1, NULL, 0, from, page_ids, ARRAY_SIZE(page_ids), false, &page);
         if (asked == ERR_TAGFS_NOT_INITIALIZED) return ERR_FILE_NOT_FOUND;
         if (asked != OK) return asked;
         for (uint32_t i = 0; i < page.delivered && found_id == 0; i++) {
-            if (SysExecCandidate(page_ids[i], &found_tags))
+            if (SysExecCandidate(page_ids[i]))
                 found_id = page_ids[i];
         }
         from = page.next;
     } while (found_id == 0 && from != 0);
 
     if (found_id == 0) return ERR_FILE_NOT_FOUND;
-    return SysProcExecAugmented(op, crates, ctx, found_id, found_tags,
-                                augment, aug_len, luggage, luggage_len);
-}
-
-/* A found program's keys (`found_tags`, taken over and freed here — NULL when
- * there was no memory for them) with the caller's augment folded in, then the
- * program started. The merge comes BEFORE any binary I/O, so a reserved or
- * unspellable augment costs zero disk reads and never spawns an orphan. */
-static int SysProcExecAugmented(const ManifestOp *op, Crate *crates, const OpContext *ctx,
-                                uint64_t found_id, char *found_tags,
-                                const char *augment, size_t aug_len,
-                                const uint8_t *luggage, uint32_t luggage_len)
-{
-    if (!found_tags) return ERR_NO_MEMORY;
-
-    char   *child_tags = NULL;
-    error_t arc = proc_exec_merge_augment(found_tags, augment, aug_len, &child_tags);
-    kfree(found_tags);
-    if (arc != OK) return arc;
-    int rc = SysProcExecFound(op, crates, ctx, found_id, child_tags, luggage, luggage_len);
-    kfree(child_tags);
-    return rc;
+    return SysProcExecFound(op, crates, ctx, found_id, augment, aug_len, luggage, luggage_len);
 }
 
 /* SYSTEM_OP_PROC_EXEC_FILE
@@ -1544,9 +1523,9 @@ static int SysProcExecAugmented(const ManifestOp *op, Crate *crates, const OpCon
  *             NUL; they may hold NULs. No crate starts it with no luggage.
  *   out_crate (optional): as SYSTEM_OP_PROC_EXEC
  * Starts that very file, not whichever one the name picks first. It must be
- * what a name would have started — ACTIVE and wearing app or utility; a file
+ * what a name would have started — ACTIVE, and a box or an ELF image; a file
  * that is not (no such id, deleted, data) is ERR_FILE_NOT_FOUND, the answer
- * for a name that is no program. Tags, Luggage and answer are SysProcExecFound's. */
+ * for a name that is no program. Keys, Luggage and answer are SysProcExecFound's. */
 static int SysProcExecFile(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                            const OpContext *ctx)
 {
@@ -1571,14 +1550,13 @@ static int SysProcExecFile(const ManifestOp *op, Crate *crates, uint16_t crate_c
         }
     }
 
-    char *found_tags = NULL;
-    int   rc;
-    if (!SysExecCandidate(file_id, &found_tags))
+    int rc;
+    if (!SysExecCandidate(file_id))
         rc = ERR_FILE_NOT_FOUND;
     else
-        rc = SysProcExecAugmented(op, crates, ctx, file_id, found_tags,
-                                  (const char *)op->params + sizeof(file_id),
-                                  op->param_size - sizeof(file_id), raw, luggage_len);
+        rc = SysProcExecFound(op, crates, ctx, file_id,
+                              (const char *)op->params + sizeof(file_id),
+                              op->param_size - sizeof(file_id), raw, luggage_len);
     if (raw) crate_buf_free(raw);
     return rc;
 }
@@ -1630,6 +1608,13 @@ static int SysProcExecImage(const ManifestOp *op, Crate *crates, const OpContext
     uint32_t child_pid = new_proc->pid;
     uint32_t child_gen = new_proc->generation;
 
+    /* A program autostart.box starts from the person's list is started on the
+     * system's behalf: one whose box says rise is watched before it runs, as
+     * the programs the kernel itself starts are (rise.h). A person's start
+     * through the hub is the person's own and is never raised. */
+    if (AutostartStartedBy(ctx->proc))
+        RiseWatch(new_proc, found_id, meta->filename);
+
     SpawnedSay(child_pid, child_gen, ctx->proc);
 
     __sync_synchronize();
@@ -1650,16 +1635,33 @@ static int SysProcExecImage(const ManifestOp *op, Crate *crates, const OpContext
     return OK;
 }
 
-/* The found program read in, made a process wearing `child_tags`, given its
- * Luggage and started. Its metadata is held throughout: the file's name is what
- * the loader calls it. */
+/* The found program started: its keys (ProgramKeys — its file's name and
+ * role, never its tags) with the caller's augment folded in, then the file read
+ * in, made a process wearing them, given its Luggage and started. The merge
+ * comes BEFORE any binary I/O, so a reserved or unspellable augment costs zero
+ * disk reads and never spawns an orphan. The file's metadata is held
+ * throughout: its name is what the loader calls it. */
 static int SysProcExecFound(const ManifestOp *op, Crate *crates, const OpContext *ctx,
-                            uint64_t found_id, const char *child_tags,
+                            uint64_t found_id,
+                            const char *augment, size_t aug_len,
                             const uint8_t *luggage, uint32_t luggage_len)
 {
     TagFSMetadata meta;
     if (tagfs_get_metadata(found_id, &meta) != 0) return ERR_FILE_NOT_FOUND;
-    int rc = SysProcExecImage(op, crates, ctx, found_id, &meta, child_tags, luggage, luggage_len);
+
+    char *keys = ProgramKeys(meta.filename, meta.flags);
+    if (!keys) {
+        tagfs_metadata_free(&meta);
+        return ERR_NO_MEMORY;
+    }
+    char   *child_tags = NULL;
+    error_t arc = proc_exec_merge_augment(keys, augment, aug_len, &child_tags);
+    kfree(keys);
+    int rc = arc;
+    if (arc == OK) {
+        rc = SysProcExecImage(op, crates, ctx, found_id, &meta, child_tags, luggage, luggage_len);
+        kfree(child_tags);
+    }
     tagfs_metadata_free(&meta);
     return rc;
 }

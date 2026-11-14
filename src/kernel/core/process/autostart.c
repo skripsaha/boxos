@@ -1,8 +1,8 @@
 #include "autostart.h"
 #include "process.h"
 #include "rise.h"
+#include "program_keys.h"
 #include "tagfs.h"
-#include "tag_registry/tag_registry.h"
 #include "touch.h"
 #include "logbook.h"
 #include "pmm.h"
@@ -11,18 +11,33 @@
 #include "kernel_config.h"
 
 /*
- * Autostart — the programs the volume asks for, whenever the volume turns up.
+ * Autostart — the system's start set, whenever the volume turns up.
  *
- * This used to be a hundred and ninety lines in the middle of kernel_main,
+ * The system starts three programs of its own and no others, named here by
+ * their files and never by what anyone has labelled them with: the display
+ * (it holds the screen), the hub (the person's prompt) and autostart.box,
+ * which reads the person's list of programs from its Settings and starts
+ * each of them itself — when it is started here. It is told so by no word the
+ * kernel passes: the program the kernel starts has no spawner in its cabin, as
+ * none started by a person or a program has none (started_by_system in
+ * box/system.h), so the same autostart.box run from the hub shows and changes
+ * the list and starts nothing. A file's tags are only the person's words for
+ * finding it; nothing is started because of one.
+ *
+ * It used to be a hundred and ninety lines in the middle of kernel_main,
  * executed once, at a moment chosen by where it happened to sit in the boot.
  * A machine whose medium finished enumerating a second later came up with
- * nothing on it and stayed that way: the files were there, readable, tagged
- * autostart, and nobody ever looked again.
+ * nothing on it and stayed that way: the files were there, readable, and
+ * nobody ever looked again.
  *
  * So it is a function, and it runs when a volume is mounted rather than when
  * the boot reaches a particular line. Twice at most: once from the boot, and
  * once more if the boot found no volume and one arrived afterwards.
  */
+
+/* The start set, in the order it is started: the display first, so the
+ * programs after it find the screen held. */
+static const char *const g_start_set[] = { "display.box", "hub.box", AUTOSTART_PROGRAM };
 
 /* Whether a volume's programs have ever been launched. One-shot: a volume that
  * leaves and comes back does not start second copies of everything, because
@@ -41,23 +56,49 @@ void AutostartNoteVolumeLaunched(void)
     __atomic_store_n(&g_volume_launched, 1u, __ATOMIC_RELEASE);
 }
 
-/* A file the system starts: it wears autostart and a program's tag, and is
- * not in the trash. The walk's question leaves the trash out already; a file
- * started again (AutostartAgain) is held to the same word here. */
-static bool autostart_wanted(const TagFSMetadata *meta)
+/* The cabin of autostart.box as started by the system — its pid and
+ * generation packed into one word, 0 while there is none: what the programs
+ * it starts on the system's behalf are told by (AutostartStartedBy). */
+static volatile uint64_t g_launcher = 0;
+
+static uint64_t autostart_pack(const process_t *proc)
 {
-    bool has_autostart = false;
-    bool has_exec_tag  = false;
-    bool trashed       = false;
-    for (uint32_t t = 0; t < meta->tag_count; t++) {
-        char key[128];
-        if (!tagfs_tag_key(meta->tag_ids[t], key, sizeof(key))) continue;
-        if (strcmp(key, "autostart") == 0) has_autostart = true;
-        if (strcmp(key, "app") == 0 || strcmp(key, "utility") == 0)
-            has_exec_tag = true;
-        if (strcmp(key, "trashed") == 0) trashed = true;
-    }
-    return has_autostart && has_exec_tag && !trashed;
+    return ((uint64_t)proc->generation << 32) | proc->pid;
+}
+
+bool AutostartStartedBy(const process_t *spawner)
+{
+    uint64_t launcher = __atomic_load_n(&g_launcher, __ATOMIC_ACQUIRE);
+    return launcher != 0 && spawner && autostart_pack(spawner) == launcher;
+}
+
+/* The live file named `name` — the first of them, by file id — or 0 when the
+ * volume holds none. Asked of the volume by the stem of the name, the label
+ * every file is made with, and held to the whole name here. */
+static uint64_t autostart_find(const char *name)
+{
+    const char *dot    = strrchr(name, '.');
+    size_t      length = dot ? (size_t)(dot - name) : strlen(name);
+    TagSpelling stem;
+    if (TagSpellKey(name, length, &stem) != OK) return 0;
+
+    uint64_t  file_ids[32];
+    TagFSPage page;
+    uint64_t  from = 1;
+    do {
+        if (TagFSQueryPage(&stem, 1, NULL, 0, from, file_ids, ARRAY_SIZE(file_ids), false, &page) != OK)
+            return 0;
+        for (uint32_t i = 0; i < page.delivered; i++) {
+            TagFSMetadata meta;
+            if (tagfs_get_metadata(file_ids[i], &meta) != 0) continue;
+            bool found = (meta.flags & TAGFS_FILE_ACTIVE) && !(meta.flags & TAGFS_FILE_DELETED) &&
+                         strcmp(meta.filename, name) == 0;
+            tagfs_metadata_free(&meta);
+            if (found) return file_ids[i];
+        }
+        from = page.next;
+    } while (from != 0);
+    return 0;
 }
 
 /* Read one file out of the volume and turn it into a process. Returns the
@@ -157,9 +198,9 @@ static void AutostartLetRun(AutostartHeld *held)
     held->count = held->room = 0;
 }
 
-/* One file of the volume made into a process when it asks to be: the process,
- * loaded, not yet let run and referenced for the walk — its caller lets it run
- * and gives the reference back — or NULL when it does not ask or could not be
+/* One file of the volume made into a process: the process, loaded, not yet
+ * let run and referenced for the walk — its caller lets it run and gives the
+ * reference back — or NULL when it is no longer a live file or could not be
  * started (said by the launch). The reference is taken before the line names
  * the PID: a kill by that PID cannot free what the walk still holds. A program
  * whose box says rise is watched from here, before it runs (rise.h); `again`
@@ -168,16 +209,14 @@ static process_t *autostart_consider(uint64_t file_id, bool again)
 {
     TagFSMetadata meta;
     if (tagfs_get_metadata(file_id, &meta) != 0) return NULL;
-    if (!(meta.flags & TAGFS_FILE_ACTIVE) || !autostart_wanted(&meta)) {
+    if (!(meta.flags & TAGFS_FILE_ACTIVE) || (meta.flags & TAGFS_FILE_DELETED)) {
         tagfs_metadata_free(&meta);
         return NULL;
     }
 
-    /* The file's keys, whole: a process started from it wears every one
-     * (TagFSKeyList), never the ones that fitted a buffer. */
-    char *tags = TagFSKeyList(meta.tag_ids, meta.tag_count);
+    char *tags = ProgramKeys(meta.filename, meta.flags);
     if (!tags) {
-        kprintf("[AUTOSTART] Skip '%s': no memory for its tags\n", meta.filename);
+        kprintf("[AUTOSTART] Skip '%s': no memory for its keys\n", meta.filename);
         tagfs_metadata_free(&meta);
         return NULL;
     }
@@ -186,6 +225,8 @@ static process_t *autostart_consider(uint64_t file_id, bool again)
     if (proc) {
         process_ref_inc(proc);
         RiseWatch(proc, file_id, meta.filename);
+        if (strcmp(meta.filename, AUTOSTART_PROGRAM) == 0)
+            __atomic_store_n(&g_launcher, autostart_pack(proc), __ATOMIC_RELEASE);
         kprintf(again ? "[RISE] '%s' raised again (PID %u, tags: %s)\n"
                       : "[AUTOSTART] Started '%s' (PID %u, tags: %s)\n",
                 meta.filename, proc->pid, tags);
@@ -195,47 +236,36 @@ static process_t *autostart_consider(uint64_t file_id, bool again)
     return proc;
 }
 
-/* Every file the volume tags to start, made into a process: with `held` NULL
- * the boot's — the state set directly, the sweep after the boot's last line
+/* Every program of the start set, made into a process: with `held` NULL the
+ * boot's — the state set directly, the sweep after the boot's last line
  * enqueuing it, exactly as it always was — else the late launch's, held. How
- * many were started. */
+ * many were started. A program the volume does not hold is said, by name. */
 static int AutostartWalk(process_t **out_first, AutostartHeld *held)
 {
     if (out_first) *out_first = NULL;
 
     if (!AutostartVolumeHere()) return 0;
 
-    /* Every file that wears autostart, a page at a time: what stood here was
-     * one array as long as the Ledger's count of files — or 1024 when it said
-     * none — and the files past it were never asked whether they start. A
-     * file the person set aside in the trash is not started: that is this
-     * launcher's own word, put to the volume as its question — the volume
-     * leaves out no file of its own accord. */
-    const TagSpelling wanted   = { "autostart", "...", 9, 3 };   /* any tag of the key, as autostart_wanted reads it */
-    const TagSpelling aside    = TagSpellingOfKey("trashed");
-    uint64_t          file_ids[32];
-    TagFSPage         page;
-    uint64_t          from     = 1;
-    int               launched = 0;
-    do {
-        if (TagFSQueryPage(&wanted, 1, &aside, 1, from, file_ids, ARRAY_SIZE(file_ids), false, &page) != OK)
-            break;
-        for (uint32_t i = 0; i < page.delivered; i++) {
-            process_t *proc = autostart_consider(file_ids[i], false);
-            if (!proc) continue;
-            launched++;
-            if (out_first && !*out_first) *out_first = proc;
-            if (!held) {
-                proc->state = PROC_WORKING;
-                process_ref_dec(proc);
-            } else if (!AutostartHold(held, proc)) {
-                kprintf("[AUTOSTART] no memory to hold PID %u back until the launch is said "
-                        "— it runs at once\n", proc->pid);
-                AutostartLetRunOne(proc);
-            }
+    int launched = 0;
+    for (size_t i = 0; i < ARRAY_SIZE(g_start_set); i++) {
+        uint64_t file_id = autostart_find(g_start_set[i]);
+        if (file_id == 0) {
+            kprintf("[AUTOSTART] Skip '%s': the volume holds no such file\n", g_start_set[i]);
+            continue;
         }
-        from = page.next;
-    } while (from != 0);
+        process_t *proc = autostart_consider(file_id, false);
+        if (!proc) continue;
+        launched++;
+        if (out_first && !*out_first) *out_first = proc;
+        if (!held) {
+            proc->state = PROC_WORKING;
+            process_ref_dec(proc);
+        } else if (!AutostartHold(held, proc)) {
+            kprintf("[AUTOSTART] no memory to hold PID %u back until the launch is said "
+                    "— it runs at once\n", proc->pid);
+            AutostartLetRunOne(proc);
+        }
+    }
 
     return launched;
 }

@@ -103,6 +103,7 @@ int main(int argc, char **argv)
     Text("about", "about 1\nname Stand\n", 0, BOX_PART_VERSION);
     Text("about:ru", "about 1\nname Stand\n", BOX_FLAG_COMPRESSED, BOX_PART_VERSION);
     Text("works", "works 2\nsomething later\n", 0, 2);
+    Text("role", "role 1\nsystem\n", 0, BOX_PART_VERSION);
     Text("paint:brushes", "brushes", 0, BOX_PART_VERSION);
     if (!Write(argv[1], "full.box")) {
         fprintf(stderr, "inside_stand: full.box was not written\n");

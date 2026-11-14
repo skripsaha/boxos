@@ -21,9 +21,9 @@
 // (Conjugate). The copy is laid on the original, the older of the two, and
 // its own blocks go back: the volume holds the bytes once, both files read
 // them, the census of the mount after it finds every block named as memory
-// holds it. A file wearing dedup:off, a file the system keeps, and the kernel
-// the loader reads by its blocks are neither laid nor laid on — passed over
-// before any act is asked, so the pass refuses nothing it could have known.
+// holds it. A file the system keeps, and the kernel the loader reads by its
+// blocks, are neither laid nor laid on — passed over before any act is asked,
+// so the pass refuses nothing it could have known.
 // Only a series is laid — 16 blocks of a copy in a row on as many of one
 // original in a row — and never a file on itself. A run SHARED splits a file
 // into stretches of its own: defrag gathers each, and the fragmentation score
@@ -120,8 +120,6 @@ static error_t StandDedupTallies(uint32_t n, DedupSaid* said)
     }
     return rc;
 }
-
-static const TagSpelling s_dedup_off = { .key = "dedup", .value = "off", .key_len = 5, .value_len = 3 };
 
 // ----------------------------------------------------------------------------
 // A copy written beside its original: laid on it by the pass after the Tally
@@ -241,65 +239,6 @@ out:
 }
 
 // ----------------------------------------------------------------------------
-// Declined: dedup:off, on the original or on the copy
-// ----------------------------------------------------------------------------
-
-static TestResult TestStandDedupDeclined(void)
-{
-    TestResult      verdict = TEST_PASS;
-    StandBinder*    b       = &s_dedup_binder;
-    StandFreshModel m, n;
-    DedupSaid       said;
-    uint64_t        a = 0, f = 0, c = 0, e = 0;
-    uint64_t        ma[STAND_DEDUP_BLOCKS], mf[STAND_DEDUP_BLOCKS], mc[STAND_DEDUP_BLOCKS], me[STAND_DEDUP_BLOCKS];
-    const char*     aside = StandBinderAside(b);
-
-    memset(&m, 0, sizeof(m));
-    memset(&n, 0, sizeof(n));
-    if (aside)
-        return test_steps_aside(aside);
-    TEST_ASSERT(DedupStandPassed(&said) && DedupHold(false), "Dedup's own pass is let go");
-    TEST_ASSERT(StandFreshModelMake(&m, STAND_DEDUP_BLOCKS * TAGFS_BLOCK_SIZE) &&
-                    StandFreshModelMake(&n, STAND_DEDUP_BLOCKS * TAGFS_BLOCK_SIZE), "room for the files' bytes");
-    TEST_ASSERT(StandDedupFile(&m, "dedup-off-a.bin", STAND_DEDUP_BLOCKS, STAND_DEDUP_STREAM, &a) &&
-                    tagfs_add_tag_string(a, &s_dedup_off, INK_UNWARRANTED) == OK,
-                "file A is written and wears dedup:off");
-    TEST_ASSERT(StandDedupFile(&m, "dedup-off-b.bin", STAND_DEDUP_BLOCKS, STAND_DEDUP_STREAM, &f),
-                "file B is written with A's very bytes after it");
-    TEST_ASSERT(StandDedupFile(&n, "dedup-off-c.bin", STAND_DEDUP_BLOCKS, STAND_DEDUP_OTHER, &c),
-                "file C is written with bytes of its own");
-    TEST_ASSERT(StandDedupFile(&n, "dedup-off-e.bin", STAND_DEDUP_BLOCKS, STAND_DEDUP_OTHER, &e) &&
-                    tagfs_add_tag_string(e, &s_dedup_off, INK_UNWARRANTED) == OK,
-                "and file E with C's very bytes after it, wearing dedup:off");
-    TEST_ASSERT_OK(TagFSSettle(), "settled");
-    TEST_ASSERT(StandDedupBlocks(a, STAND_DEDUP_BLOCKS, ma) && StandDedupBlocks(f, STAND_DEDUP_BLOCKS, mf) &&
-                    StandDedupBlocks(c, STAND_DEDUP_BLOCKS, mc) && StandDedupBlocks(e, STAND_DEDUP_BLOCKS, me),
-                "each on its own ground");
-    TEST_ASSERT_OK(StandDedupTallies(1u, &said), "a Tally, and the pass after it");
-    TEST_ASSERT(said.laid == 0 && said.refused == 0, "nothing is laid, and no act is asked to be refused");
-    TEST_ASSERT(StandDedupOwn(a, 0, ma, STAND_DEDUP_BLOCKS) && StandDedupOwn(f, 0, mf, STAND_DEDUP_BLOCKS),
-                "nothing is laid on A, which wears dedup:off, and B keeps its own blocks");
-    TEST_ASSERT(StandDedupOwn(c, 0, mc, STAND_DEDUP_BLOCKS) && StandDedupOwn(e, 0, me, STAND_DEDUP_BLOCKS),
-                "E, which wears dedup:off, is not laid on C");
-    TEST_ASSERT(StandFreshHolds(&m, a) && StandFreshHolds(&m, f) && StandFreshHolds(&n, c) && StandFreshHolds(&n, e),
-                "all four read their bytes");
-out:
-    (void)DedupHold(true);
-    if (e)
-        (void)tagfs_delete_file(e, INK_UNWARRANTED);
-    if (c)
-        (void)tagfs_delete_file(c, INK_UNWARRANTED);
-    if (f)
-        (void)tagfs_delete_file(f, INK_UNWARRANTED);
-    if (a)
-        (void)tagfs_delete_file(a, INK_UNWARRANTED);
-    StandFreshModelLetGo(&n);
-    StandFreshModelLetGo(&m);
-    STAND_BINDER_PUT_BACK(b);
-    return verdict;
-}
-
-// ----------------------------------------------------------------------------
 // Kept: files the system keeps are neither laid nor laid on
 // ----------------------------------------------------------------------------
 
@@ -320,13 +259,14 @@ static TestResult TestStandDedupKept(void)
     TEST_ASSERT(DedupStandPassed(&said) && DedupHold(false), "Dedup's own pass is let go");
     TEST_ASSERT(StandFreshModelMake(&m, STAND_DEDUP_BLOCKS * TAGFS_BLOCK_SIZE), "room for the files' bytes");
     TEST_ASSERT(StandDedupFile(&m, "dedup-kept-1.bin", STAND_DEDUP_BLOCKS, STAND_DEDUP_STREAM, &s1) &&
-                    tagfs_add_tag_string(s1, &system, INK_WARRANTED) == OK,
-                "a file is written and wears system");
+                    StandKeepInRole(s1, TAGFS_FILE_ROLE_SYSTEM) == OK,
+                "a file is written and kept in the system's role");
     TEST_ASSERT(StandDedupFile(&m, "dedup-kept-2.bin", STAND_DEDUP_BLOCKS, STAND_DEDUP_STREAM, &s2) &&
-                    tagfs_add_tag_string(s2, &system, INK_WARRANTED) == OK,
-                "a second of its very bytes after it, wearing system too");
-    TEST_ASSERT(StandDedupFile(&m, "dedup-kept-f.bin", STAND_DEDUP_BLOCKS, STAND_DEDUP_STREAM, &f),
-                "and a third of those bytes, wearing nothing");
+                    StandKeepInRole(s2, TAGFS_FILE_ROLE_BOOT) == OK,
+                "a second of its very bytes after it, kept in the boot role");
+    TEST_ASSERT(StandDedupFile(&m, "dedup-kept-f.bin", STAND_DEDUP_BLOCKS, STAND_DEDUP_STREAM, &f) &&
+                    tagfs_add_tag_string(f, &system) == OK,
+                "and a third of those bytes, wearing only the word system, which keeps nothing");
     TEST_ASSERT_OK(TagFSSettle(), "settled");
     TEST_ASSERT(StandDedupBlocks(s1, STAND_DEDUP_BLOCKS, m1) && StandDedupBlocks(s2, STAND_DEDUP_BLOCKS, m2) &&
                     StandDedupBlocks(f, STAND_DEDUP_BLOCKS, mf), "each on its own ground");
@@ -334,7 +274,7 @@ static TestResult TestStandDedupKept(void)
     TEST_ASSERT(said.laid == 0 && said.refused == 0, "nothing is laid, and no act is asked to be refused");
     TEST_ASSERT(StandDedupOwn(s1, 0, m1, STAND_DEDUP_BLOCKS) && StandDedupOwn(s2, 0, m2, STAND_DEDUP_BLOCKS),
                 "the two files the system keeps keep their own blocks");
-    TEST_ASSERT(StandDedupOwn(f, 0, mf, STAND_DEDUP_BLOCKS), "and the third is laid on neither");
+    TEST_ASSERT(StandDedupOwn(f, 0, mf, STAND_DEDUP_BLOCKS), "and the third is laid on neither: its word is no bar");
     TEST_ASSERT(StandFreshHolds(&m, s1) && StandFreshHolds(&m, s2) && StandFreshHolds(&m, f), "all read their bytes");
 out:
     (void)DedupHold(true);
@@ -525,8 +465,6 @@ static const TestCase g_stand_dedup_tests[] = {
     { .name = "stand_dedup_copy", .func = TestStandDedupCopy, .reach = TEST_WRITES_TO_VOLUME,
       .format = DEED_FORMAT_V2 },
     { .name = "stand_dedup_old", .func = TestStandDedupOld, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V2 },
-    { .name = "stand_dedup_declined", .func = TestStandDedupDeclined, .reach = TEST_WRITES_TO_VOLUME,
       .format = DEED_FORMAT_V2 },
     { .name = "stand_dedup_kept", .func = TestStandDedupKept, .reach = TEST_WRITES_TO_VOLUME,
       .format = DEED_FORMAT_V2 },

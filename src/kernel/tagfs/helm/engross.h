@@ -16,9 +16,10 @@
  * Helm is free; the cycle that carries those Inks settles them, and the Tally
  * goes after it. A file whose Helm a writer holds is left to the writer: no
  * Slip is given while a Tally is owed (plot_slip.c), so its next write lays
- * the block, its tail folded in. And a file of a book comes to wear system,
- * boot or god with its tail in its block (EngrossGuarded): the loader reads
- * such a file by its blocks (§9.1).
+ * the block, its tail folded in. And a file of a book is kept in a role with
+ * its tail in its block: the loader reads such a file by its blocks (§9.1), and
+ * the image builder lays one so — the stand's way of putting a role on a file
+ * the volume holds is EngrossRoled.
  */
 
 /* The service asked: listed on the Helm's service points once, the walk of
@@ -47,14 +48,15 @@ uint32_t EngrossRefusedNow(void);
  * the volume takes no write. Inside the volume's door. */
 error_t EngrossWhole(void);
 
-/* The change of InkFields that puts a tag of key system, boot or god on file
- * `fid` of a book — warranted — made under the file's Helm, taken now, with
- * its tail laid in its block first: two Inks the Helm holds together, so no
- * write lays a Slip between them and the file never wears the tag with one.
- * OK, ERR_BUSY (said) while a writer holds the Helm, or the refusal of either
- * Ink — ERR_WOULD_BLOCK among them while the ribbon's room is on its way, which
- * the caller waits out as it does a tag's own Ink's. Inside the volume's door. */
-error_t EngrossGuarded(uint64_t fid, const char* name, uint32_t add, uint32_t drop, InkReceipt* out);
+#ifdef CONFIG_VOLUME_TESTS
+/* The stand's InkRoleLaid for file `fid` of a book, made under the file's Helm,
+ * taken now, with its tail laid in its block first: two Inks the Helm holds
+ * together, so no write lays a Slip between them and the file never wears its
+ * role with one. OK, ERR_BUSY (said) while a writer holds the Helm, or the
+ * refusal of either Ink — ERR_WOULD_BLOCK among them while the ribbon's room is
+ * on its way, which the caller waits out. Inside the volume's door. */
+error_t EngrossRoled(uint64_t fid, uint32_t role, InkReceipt* out);
+#endif
 
 #ifdef CONFIG_TAGFS_SETTLE_CUT_POINT
 /* The Ink of an Engross laid at `gen` — by that Ink, under the state lock, so

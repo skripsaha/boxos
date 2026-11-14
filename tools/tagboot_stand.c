@@ -3,7 +3,7 @@
  * TagBoot links (src/boot/uefi/tagboot_lectern*.c, tagboot_succession.c),
  * reading an image file the way TagBoot reads its medium: the Deed at the
  * ground's head, then the kernel BOOT names and, when it is not attested, the
- * kernels the book names by tag, each placed, held to its header and to the
+ * kernels the book names by role, each placed, held to its header and to the
  * digests the book keeps of it, the first attested jumped into (spec_v2 §16.7
  * пп.2–6).
  *

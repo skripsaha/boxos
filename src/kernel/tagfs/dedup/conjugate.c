@@ -18,8 +18,8 @@
  * compared to Ink (ink.h, InkConjugate), which lays it only while both records
  * are the ones compared.
  *
- * ‼ THE GUARDS ARE THE RECORDS', AND THE INK HOLDS THE RECORDS. dedup:off, a
- * tag of key system, boot or god, the runs a file names — each is asked of the
+ * ‼ THE GUARDS ARE THE RECORDS', AND THE INK HOLDS THE RECORDS. The role a
+ * file is kept in, the runs it names — each is asked of the
  * record the act compared, and each changes only by an Ink of that file, whose
  * gen the lock then finds past the one the act holds it to. And a block the
  * target names stays named, its bytes and its digest with it, for as long as
@@ -210,27 +210,14 @@ static ConjugateWhy ConjugatePlanned(ConjugateAct* a)
 // The guards
 // ----------------------------------------------------------------------------
 
-/* Whether the record wears dedup:off. */
-static bool ConjugateDeclines(const FileRecord* rec)
-{
-    TagSpelling off = { .key = "dedup", .key_len = 5, .value = "off", .value_len = 3 };
-    uint32_t    id  = TagRegistryLookup(tagfs_get_state()->registry, &off);
-    for (uint32_t i = 0; id != TAGFS_INVALID_TAG_ID && i < rec->tag_count; i++)
-        if (rec->tags[i] == id)
-            return true;
-    return false;
-}
-
-/* The guards the records answer before a block is read: KEPT, DECLINED,
- * UNSHAPED (*at the duplicate's block) or LAID. */
+/* The guards the records answer before a block is read: KEPT, UNSHAPED (*at
+ * the duplicate's block) or LAID. */
 static ConjugateWhy ConjugateGuards(ConjugateAct* a)
 {
     const ConjugateAsk* ask = a->ask;
-    if (InkWearsGuarded(a->dup->tags, a->dup->tag_count) || ask->fid == g_book.boot_fid ||
+    if (InkFileKept(a->dup->flags) || ask->fid == g_book.boot_fid ||
         ask->onto == g_book.boot_fid || InkRecordTouchesBoot(a->dup))
         return CONJUGATE_KEPT;
-    if (ConjugateDeclines(a->dup) || ConjugateDeclines(a->onto))
-        return CONJUGATE_DECLINED;
     a->at = ask->at;
     if (ask->at > a->dup->blocks || ask->count > a->dup->blocks - ask->at || ask->onto_at > a->onto->blocks ||
         ask->count > a->onto->blocks - ask->onto_at)
@@ -421,7 +408,6 @@ static error_t ConjugateErrorOf(ConjugateWhy why, error_t rc)
         return OK;
     case CONJUGATE_UNWARRANTED:
     case CONJUGATE_KEPT:
-    case CONJUGATE_DECLINED:
         return ERR_PERMISSION_DENIED;
     case CONJUGATE_UNSHAPED:
     case CONJUGATE_DIFFERS:
@@ -438,9 +424,8 @@ static error_t ConjugateErrorOf(ConjugateWhy why, error_t rc)
 
 static const char* const s_why[] = {
     [CONJUGATE_UNWARRANTED] = "the cabin asking wears neither system nor god",
-    [CONJUGATE_KEPT]        = "the duplicate is a file the system keeps, or one of the two holds the kernel the "
+    [CONJUGATE_KEPT]        = "the duplicate is a file the system keeps in a role, or one of the two holds the kernel the "
                               "loader reads by its blocks",
-    [CONJUGATE_DECLINED]    = "one of the two wears dedup:off",
     [CONJUGATE_UNSHAPED]    = "the blocks asked are not the duplicate's plain ground or not the target's ground, "
                               "from the duplicate's block",
     [CONJUGATE_UNDIGESTED]  = "the book holds no digest of a block, or the target's does not hold it — the "

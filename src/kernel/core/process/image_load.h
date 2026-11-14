@@ -58,8 +58,10 @@ typedef struct {
  * the image (0 when the image keeps nothing per strand), the reserve its
  * main stack is prepared: what a box's hints ask, held between
  * CONFIG_USER_STACK_RESERVE_MIN and _MAX, CONFIG_USER_STACK_RESERVE otherwise —
- * and whether its life part says `rise` (rise.h): false for an image that is
- * no box, or says nothing of how it lives. */
+ * whether its life part says `rise` (rise.h): false for an image that is
+ * no box, or says nothing of how it lives — and the authority its asks part
+ * asks for, as the AuthTagBit of each word (auth_tags.h): 0 for an image that
+ * is no box, or asks for nothing. */
 typedef struct {
     uintptr_t   Entry;
     uintptr_t   NameplateVa;
@@ -70,7 +72,13 @@ typedef struct {
     uintptr_t   ThreadPointer;
     uint64_t    StackReserve;
     bool        Rise;
+    uint32_t    Asks;
 } ImageLoaded;
+
+/* Whether the image begins as a box or as an ELF — the two kinds this kernel
+ * starts, told by their first bytes alone. Nothing about the file's tags
+ * says what it is. `name` is what a refusal to read it is said by. */
+bool ImageIsProgram(const ImageSource *source, const char *name);
 
 /* `count` bytes of the image from `offset` into `into`, whole or a refusal
  * said with the image's `name`. */

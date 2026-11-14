@@ -126,6 +126,7 @@ typedef enum {
     BOX_KIND_ICON,          /* icon:N — an N by N picture */
     BOX_KIND_WORKS,         /* text: which files it works with, by their tags */
     BOX_KIND_ASKS,          /* text: what it asks to be allowed, and why */
+    BOX_KIND_ROLE,          /* text: what the volume's maker keeps the file as — system or boot */
     BOX_KIND_COUNT
 } BoxKind;
 

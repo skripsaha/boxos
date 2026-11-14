@@ -1,11 +1,14 @@
 /* itinerary.h — an Itinerary: steps of the hub kept in a file, run by name.
  *
- * A text file that wears `itinerary`. Its first lines are its Form — `takes`
- * and `gives`, as a program's — and every line after them is a step, run as
- * if it were typed. The person starts it as any program, by name: the words
+ * A text file whose first line is `itinerary 1`, the way every text part of a
+ * box begins with its kind and version (box_format.h) — what it holds says it
+ * is one, and the tags it wears say nothing. The lines after that are its Form
+ * — `takes` and `gives`, as a program's — and every line after those is a
+ * step, run as if it were typed. The person starts it as any program, by name: the words
  * are sorted into its Form, asking what must be asked, and the steps run one
  * after another.
  *
+ *     itinerary 1
  *     takes things files "the files to tidy"
  *     takes words label "the tag they get"
  *     gives things
@@ -58,6 +61,9 @@ private:
 };
 
 namespace itinerary {
+
+// The line an Itinerary's file begins with.
+inline constexpr std::string_view Header = "itinerary 1";
 
 // The Itinerary in File run: its Form filled from Line (the words after its
 // name, as typed), asking what it must, then its steps one after another. Who

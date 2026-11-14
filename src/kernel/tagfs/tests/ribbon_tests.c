@@ -385,6 +385,51 @@ out:
     return verdict;
 }
 
+/* A file's deletion (§2.8, volume_ribbon.h): the Labeled's KEEP verb, its term
+ * a field after the tags, and the header that carries it in the Tally; the
+ * deleted bit is KEEP's alone — in a Labeled's FLAGS or a Born's it does not
+ * read — and a header that is deleted names a term. */
+static TestResult TestRibbonKeep(void)
+{
+    TestResult    verdict = TEST_PASS;
+    uint8_t       body[64], head[64], tags[1] = { 0 };
+    RibbonLabeled put = { .fid = 9, .base = 3, .what = LABEL_KEEP, .keep_ns = 1700000000123456789ull }, got;
+    TallyFileHead h   = { .gen = 4, .flags = TALLY_FILE_ACTIVE | TALLY_FILE_DELETED, .size = 7, .created_ns = 5,
+                          .modified_ns = 6, .name = (const uint8_t*)"kept", .name_len = 4, .ntags = 0,
+                          .tags = tags, .tags_bytes = 0, .keep_ns = 1700000000123456789ull }, back;
+    uint32_t      len, used;
+    len = RibbonLabeledBodyPut(body, &put);
+    TEST_ASSERT_EQ(RibbonLabeledGet(body, len, &got, &used), TALLY_BODY_KNOWN, "a Labeled with KEEP reads");
+    TEST_ASSERT(got.what == LABEL_KEEP && got.keep_ns == put.keep_ns && got.fid == 9 && got.base == 3,
+                "its term is the one written");
+    put.keep_ns = 0;
+    len = RibbonLabeledBodyPut(body, &put);
+    TEST_ASSERT(RibbonLabeledGet(body, len, &got, &used) == TALLY_BODY_KNOWN && got.keep_ns == 0,
+                "a term of 0 brings the file back");
+    TEST_ASSERT_EQ(RibbonLabeledGet(body, len - 1u, &got, &used), TALLY_BODY_BROKEN, "KEEP cut short does not read");
+    put.what = LABEL_FLAGS;
+    put.set  = TALLY_FILE_DELETED;
+    len = RibbonLabeledBodyPut(body, &put);
+    TEST_ASSERT_EQ(RibbonLabeledGet(body, len, &got, &used), TALLY_BODY_BROKEN, "the deleted bit in FLAGS' set does not read");
+    put.set   = 0;
+    put.clear = TALLY_FILE_DELETED;
+    len = RibbonLabeledBodyPut(body, &put);
+    TEST_ASSERT_EQ(RibbonLabeledGet(body, len, &got, &used), TALLY_BODY_BROKEN, "nor in its clear");
+    len = TallyFileHeadPut(head, &h);
+    TEST_ASSERT_EQ(TallyFileHeadGet(head, len, &back), TALLY_BODY_KNOWN, "a deleted header reads");
+    TEST_ASSERT(back.keep_ns == h.keep_ns && back.flags == h.flags && back.name_len == 4, "with its term");
+    TEST_ASSERT_EQ(TallyFileHeadGet(head, len - 1u, &back), TALLY_BODY_BROKEN, "its term cut short does not read");
+    h.keep_ns = 0;
+    len = TallyFileHeadPut(head, &h);
+    TEST_ASSERT_EQ(TallyFileHeadGet(head, len, &back), TALLY_BODY_BROKEN, "a deleted header with no term does not read");
+    h.flags = TALLY_FILE_ACTIVE;
+    len = TallyFileHeadPut(head, &h);
+    TEST_ASSERT(TallyFileHeadGet(head, len, &back) == TALLY_BODY_KNOWN && back.keep_ns == 0,
+                "a header that is not deleted carries no term");
+out:
+    return verdict;
+}
+
 static const TestCase g_ribbon_tests[] = {
     { .name = "golden_stitch",   .func = TestRibbonGoldenStitch,  .reach = TEST_READS_ONLY },
     { .name = "records_cut",     .func = TestRibbonRecordsCut,    .reach = TEST_READS_ONLY },
@@ -392,6 +437,7 @@ static const TestCase g_ribbon_tests[] = {
     { .name = "runs_and_shape",  .func = TestRibbonRunsAndShape,  .reach = TEST_READS_ONLY },
     { .name = "unit_names",      .func = TestRibbonUnitNames,     .reach = TEST_READS_ONLY },
     { .name = "undone_wide",     .func = TestRibbonUndoneWide,    .reach = TEST_READS_ONLY },
+    { .name = "keep",            .func = TestRibbonKeep,          .reach = TEST_READS_ONLY },
 };
 
 const TestSuite g_ribbon_suite = {

@@ -51,8 +51,8 @@ extern "C" {
  * many, the one written last; when none does, what is set everywhere holds.
  *
  * The file is found by the program's name everywhere on the volume, not only
- * in the Use Context; with two of that name, the one tagged settings is read,
- * and that is said. A line the person wrote wrong never stops the program:
+ * in the Use Context; with two of that name, the first made is read,
+ * and that is said; no tag of the file is asked. A line the person wrote wrong never stops the program:
  * the setting keeps its value, and the line is named among the problems —
  * "clock.settings, line 3: hours wants one of 24, 12; 24 is kept",
  * "clock.settings, line 4: clock has no setting digts — did you mean
@@ -188,7 +188,7 @@ void settings_wants(const BoxSetting *setting, char *out, size_t capacity);
 int settings_check(BoxSettings *settings, const char *path, const char *value);
 
 /* The person's file changed by one setting and saved whole, made when there
- * is none (tagged settings) — `value` taken as it is, held to the declaration
+ * is none — `value` taken as it is, held to the declaration
  * first; in the block of the context `tags` (apart by blanks or commas), or
  * everywhere for NULL or "". On a refusal *why is the sentence that says why
  * ("hours wants one of 24, 12"), valid until the next call on `settings`.

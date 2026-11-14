@@ -190,12 +190,12 @@ framerefuse_leg() {
     local rec="$SCRATCH/framerefuse.$leg.record" L="$SCRATCH/serial.framerefuse.$leg.log" pid verdict uuid
     local anchor=""
     # A book the machine mounts carries the program that asks it to anchor.
-    [ -n "$mounts" ] && anchor="build/box/anchor_test.box app,utility,test"
+    [ -n "$mounts" ] && anchor="build/box/anchor_test.box test"
     rm -f "$img" "$before" "$rec" "$L"
     cp build/boxos.img "$img" || { harness "framerefuse ($leg): could not copy build/boxos.img"; return; }
     # shellcheck disable=SC2086
-    if ! tools/create_tagfs "$mode" "$img" build/box/hub.box "utility,system,app,autostart" $anchor \
-            "$kernel" "system" >"$SCRATCH/framerefuse.$leg.mkfs.log" 2>&1; then
+    if ! tools/create_tagfs "$mode" --kernel "$kernel" "$img" build/box/hub.box "" $anchor \
+            "$kernel" "" >"$SCRATCH/framerefuse.$leg.mkfs.log" 2>&1; then
         bad "framerefuse ($leg): create_tagfs $mode would not make the image: $(tail -1 "$SCRATCH/framerefuse.$leg.mkfs.log")"
         return
     fi
@@ -371,8 +371,8 @@ framerefuse_tagboot() {
     local L="$SCRATCH/serial.framerefuse.tagboot.$1.log" pid same
     rm -f "$img" "$before" "$L"
     cp build/boxos.img "$img" || { harness "framerefuse ($leg): could not copy build/boxos.img"; return; }
-    if ! tools/create_tagfs --frame-only "$img" build/box/hub.box "utility,system,app,autostart" \
-            build/kernel.bin "system" >"$SCRATCH/framerefuse.tagboot.mkfs.log" 2>&1; then
+    if ! tools/create_tagfs --frame-only --kernel build/kernel.bin "$img" build/box/hub.box "" \
+            build/kernel.bin "" >"$SCRATCH/framerefuse.tagboot.mkfs.log" 2>&1; then
         bad "framerefuse ($leg): create_tagfs --frame-only would not make the image: $(tail -1 "$SCRATCH/framerefuse.tagboot.mkfs.log")"
         return
     fi

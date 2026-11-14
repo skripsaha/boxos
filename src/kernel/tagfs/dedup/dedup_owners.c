@@ -13,11 +13,11 @@
  * that needs one asks the mirror for the blocks it matched alone, and lets
  * the answer go with the pass.
  *
- * ‼ ANY NAME OF A BLOCK BARS IT AS ITS FILE IS BARRED (§16.7 п.8). A file
- * wearing dedup:off, a file the system keeps, the kernel the Deed points the
- * loader at, a file the mount locked: every block one of them names is
+ * ‼ ANY NAME OF A BLOCK BARS IT AS ITS FILE IS BARRED (§16.7 п.8). A file the
+ * system keeps in a role, the kernel the Deed points the loader at, a file the mount
+ * locked: every block one of them names is
  * neither laid nor laid on, whoever else names it too — nothing is laid on a
- * block in common with a file the system keeps, nor on a block of the kernel's
+ * block in common with a file the system keeps in a role, nor on a block of the kernel's
  * BOOT run. A copy is laid from its plain ground alone: a block under a Slip,
  * or of a file whose runs touch BOOT, is laid on nothing (Conjugate refuses
  * both, conjugate.c ConjugateGuards) — and passed over here, before any act.
@@ -35,8 +35,7 @@ static int OwnerByBlock(const void* a, const void* b, void* ctx)
 
 error_t DedupOwnersBegin(DedupOwners* w, const DedupMember* m, uint64_t n)
 {
-    TagSpelling off = { .key = "dedup", .key_len = 5, .value = "off", .value_len = 3 };
-    uint64_t    k   = 0;
+    uint64_t k = 0;
     memset(w, 0, sizeof(*w));
     if (n > UINT64_MAX / sizeof(DedupOwner))
         return ERR_NO_MEMORY;
@@ -49,21 +48,17 @@ error_t DedupOwnersBegin(DedupOwners* w, const DedupMember* m, uint64_t n)
     for (uint64_t i = 0; i < n; i++)
         if (k == 0 || w->owner[k - 1u].block != w->owner[i].block)
             w->owner[k++] = w->owner[i];
-    w->n       = k;
-    w->from    = k ? 0 : UINT64_MAX;
-    w->off_tag = TagRegistryLookup(tagfs_get_state()->registry, &off);
+    w->n    = k;
+    w->from = k ? 0 : UINT64_MAX;
     return OK;
 }
 
 /* What bars every block the file names, whatever its runs. */
-static uint32_t FileBars(const DedupOwners* w, const FileRecord* rec)
+static uint32_t FileBars(const FileRecord* rec)
 {
-    if (InkWearsGuarded(rec->tags, rec->tag_count) || rec->file_id == g_book.boot_fid ||
+    if (InkFileKept(rec->flags) || rec->file_id == g_book.boot_fid ||
         BookFileLocked(rec->file_id))
         return DEDUP_BAR_ONTO | DEDUP_BAR_COPY;
-    for (uint32_t i = 0; w->off_tag != TAGFS_INVALID_TAG_ID && i < rec->tag_count; i++)
-        if (rec->tags[i] == w->off_tag)
-            return DEDUP_BAR_ONTO | DEDUP_BAR_COPY;
     return 0;
 }
 
@@ -116,7 +111,7 @@ static void OwnersOfFile(DedupOwners* w, uint64_t fid)
     if (!rec)
         return;
     if (rec->flags & TAGFS_FILE_ACTIVE) {
-        uint32_t bars = FileBars(w, rec);
+        uint32_t bars = FileBars(rec);
         StripWalkBegin(rec, &walk);
         while (StripWalkNext(&walk, &s)) {
             if (StripOnGround(s.kind))

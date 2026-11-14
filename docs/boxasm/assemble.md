@@ -30,8 +30,8 @@ gives things
 - **The program** is the name after `->`; without one it is the source's
   name with `.asm` replaced by `.elf`.
 - **The tags** the program wears are the source's own, then the words of the
-  command. When it would wear neither `app` nor `utility`, `assemble` adds
-  `app` and says so: the shell starts nothing else.
+  command: the person's own words for finding it. What makes the file a
+  program is what it holds, a box, and no tag is read for it.
 - What it **gives** back is the program file, so a command that follows can
   take it as `it`.
 
@@ -39,8 +39,7 @@ Its output, when all goes well:
 
 ```text
 assembled countdown.asm -> countdown.elf
-tags: countdown,code,asm,example,app
-added app: without app or utility the shell cannot start it
+tags: countdown,code,asm,example
 ```
 
 ## Errors and warnings
@@ -67,16 +66,16 @@ text`, and the build goes on.
 
 Assembling again replaces the program. The file of that name wearing every
 tag the new one will wear is put out of the way once the new one is written
-whole, and its other tags (`favorite`, `autostart`) pass to the new one.
+whole, and its other tags (`favorite`, `fun`) pass to the new one.
 When that is not one file, `assemble` asks:
 
 ```text
-there is another hello.elf, tags hello,code,asm,app
+there is another hello.elf, tags hello,code,asm
 replace it? (yes, or no to make a new one beside it)
 
 hello.elf could mean any of these:
-  1: tags hello,code,asm,example,app
-  2: tags hello,code,asm,test,app
+  1: tags hello,code,asm,example
+  2: tags hello,code,asm,test
 which one does the program replace? (a number, or new)
 ```
 

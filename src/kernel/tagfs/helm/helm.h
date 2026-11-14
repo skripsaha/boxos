@@ -19,9 +19,7 @@
  * kernel that cannot be parked is refused rather than left spinning.
  *
  * Who holds no Helm: a read, which walks the record its open copied; a name
- * or a tag, whose Ink never touches the extents — but for a tag of key system,
- * boot or god put on a book's file, which goes on under the Helm with the
- * file's tail laid in its block first (engross.h); and a delete, whose Quitclaim
+ * or a tag, whose Ink never touches the extents; and a delete, whose Quitclaim
  * marks the file `vacated` — the holder answers ERR_FILE_NOT_FOUND at its own
  * Ink, and its Stakes go back.
  *

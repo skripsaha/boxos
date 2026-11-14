@@ -1,8 +1,8 @@
 /* delete — files gone for good, after a look at what goes and a yes.
  *
  *   delete notes.txt              that file
- *   delete them                   what the last command gave
- *   delete trashed                everything in the trash
+ *   delete them                   what the last command gave: after `trash list`,
+ *                                 everything in the trash
  *   delete old.txt                a file in the trash, by its name
  *
  * Any file, in the trash or out of it. What goes is shown first — each file's
@@ -15,8 +15,8 @@
  * taken back.
  *
  * A name the shell found no file for among those in use comes as a word, and
- * is looked for in the trash: the shell's look-up, like a listing, leaves the
- * trash out.
+ * is looked for among the files kept deleted: the shell's look-up, like a
+ * listing, does not meet them.
  *
  * Its exit: 0 when everything asked for went, or the person said no; 1 when
  * something could not go, or nobody was there to be asked.
@@ -27,11 +27,12 @@
 #include "box/form.h"
 #include "box/memory.h"
 #include "box/print.h"
+#include "box/program_part.h"
 #include "box/string.h"
 #include "box/system.h"
 
 BOX_FORM("takes optional things \"the files to delete\"\n"
-         "takes optional words \"trashed for everything in the trash, or the name of a file in it\"\n");
+         "takes optional words \"the name of a file in the trash\"\n");
 
 /* How many files are shown before the rest are counted. */
 #define SHOWN_FILES 12u
@@ -78,7 +79,7 @@ static bool from_trash(Going *going, const file_id_t *trashed, int total, const 
         return false;
     }
     if (count > 1) {
-        printf("%s is in the trash %d times; delete trashed takes them all\n", name, count);
+        printf("%s is in the trash %d times; trash list shows them, and delete them takes them all\n", name, count);
         return false;
     }
     if (!going_add(going, found)) {
@@ -102,9 +103,10 @@ static void show_going(const Going *going)
     for (size_t i = 0; i < going->Count; i++) {
         FileMetadata metadata;
         bool         read = FileMetadataRead(going->Ids[i], &metadata) == 0;
-        bool         trashed = read && FileMetadataWears(&metadata, "trashed");
-        bool         program = read && (FileMetadataWears(&metadata, "app") || FileMetadataWears(&metadata, "utility"));
-        out += !trashed;
+        bool         kept    = read && metadata.KeptUntil != 0;
+        ProgramKind  kind    = PROGRAM_NONE;
+        bool         program = read && program_kind(going->Ids[i], &kind) == 0 && kind != PROGRAM_NONE;
+        out += !kept;
         programs += program;
         if (i < SHOWN_FILES) {
             printf("  %s  ", read && metadata.Filename ? metadata.Filename : "a file with no name");
@@ -184,7 +186,7 @@ int main(void)
         return 1;
     }
     if (thing_count == 0 && word_count == 0) {
-        println("delete: say which files — their names, them, or trashed for everything in the trash");
+        println("delete: say which files — their names, or them (trash list gives what is in the trash)");
         exit(1);
         return 1;
     }
@@ -194,19 +196,14 @@ int main(void)
     for (size_t i = 0; i < thing_count && whole; i++) whole = going_add(&going, things[i]);
 
     file_id_t *trashed = NULL;
-    int        total   = word_count ? query_all("trashed", NULL, &trashed) : 0;
+    int        total   = word_count ? query_all_deleted(NULL, NULL, &trashed) : 0;
     if (total < 0) {
         println("delete: the trash could not be looked in");
         whole = false;
         total = 0;
     }
     for (size_t i = 0; i < word_count; i++) {
-        if (strcmp(words[i], "trashed") == 0) {
-            if (total == 0) println("The trash is empty");
-            for (int t = 0; t < total && whole; t++) whole = going_add(&going, trashed[t]);
-        } else {
-            whole &= from_trash(&going, trashed, total, words[i]);
-        }
+        whole &= from_trash(&going, trashed, total, words[i]);
     }
     free(trashed);
 

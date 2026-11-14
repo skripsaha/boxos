@@ -217,7 +217,7 @@ static inline const char *BoxKindWord(BoxKind kind)
 {
     static const char *const words[BOX_KIND_COUNT] = {
         "", "code", "const", "data", "fixups", "doors", "thread", "names", "signature",
-        "needs", "hints", "life", "form", "settings", "recipe", "about", "icon", "works", "asks"
+        "needs", "hints", "life", "form", "settings", "recipe", "about", "icon", "works", "asks", "role"
     };
     return (unsigned)kind < BOX_KIND_COUNT ? words[kind] : "";
 }
@@ -938,6 +938,116 @@ static inline BoxVerdict BoxLifeRead(const uint8_t *bytes, uint64_t size, BoxLif
             said_kind = true;
             out->Kind = (uint8_t)kind;
         }
+    }
+    return BOX_OK;
+}
+
+/* ── asks ────────────────────────────────────────────────────────────────── *
+ *
+ * What a program asks to be allowed, a line each after "asks 1":
+ *
+ *   ask utility [why]   to start other programs, to read the machine's log,
+ *                       to flush a disk and to defragment a file
+ *   ask network [why]   to use the network
+ *
+ * The why is words for the person and is not read. What a program does not ask
+ * it is not given: a box with no `asks` part may use storage and the other
+ * things every program may, and nothing more. `system` is never asked: it is
+ * the role of a file on the volume (TAGFS_FILE_ROLE_SYSTEM), which a box does
+ * not get by asking — it says what it is in its `role` part (below), and only
+ * whoever lays the volume reads that. A line of an ask this reader does not
+ * know is passed over and is not granted; *unknown says the first, as
+ * BoxLifeRead's does.
+ */
+
+typedef struct {
+    uint8_t Utility;
+    uint8_t Network;
+} BoxAsks;
+
+static inline BoxVerdict BoxAsksRead(const uint8_t *bytes, uint64_t size, BoxAsks *out, uint64_t *unknown)
+{
+    BoxText    text;
+    BoxVerdict verdict = BoxTextBegin(bytes, size, BOX_KIND_ASKS, &text);
+    out->Utility = 0;
+    out->Network = 0;
+    if (unknown) *unknown = 0;
+    if (verdict != BOX_OK) return verdict;
+
+    const uint8_t *line, *word = NULL;
+    uint64_t       length, word_length = 0;
+    while (BoxTextLine(&text, &line, &length)) {
+        uint64_t at = 0;
+        if (!BoxTextWord(line, length, &at, &word, &word_length) || !BoxSpanIs(word, word_length, "ask"))
+            return BOX_TEXT_LAYOUT;
+        if (!BoxTextWord(line, length, &at, &word, &word_length)) return BOX_TEXT_LAYOUT;
+        uint8_t *asked = BoxSpanIs(word, word_length, "utility") ? &out->Utility
+                       : BoxSpanIs(word, word_length, "network") ? &out->Network : NULL;
+        if (!asked) {
+            if (unknown && *unknown == 0) {
+                uint64_t number = 1;
+                for (const uint8_t *at_byte = bytes; at_byte < line; at_byte++) number += *at_byte == '\n';
+                *unknown = number;
+            }
+            continue;
+        }
+        if (*asked) return BOX_TEXT_LAYOUT;
+        *asked = 1;
+    }
+    return BOX_OK;
+}
+
+/* ── role ────────────────────────────────────────────────────────────────── *
+ *
+ * What the program is to the machine it is laid on, said by the box's maker
+ * in one line after "role 1":
+ *
+ *   system    a program the machine runs on: the display, the hub, the
+ *             programs that start, stop and mend it
+ *   boot      a program a loader may take to start the machine with, after
+ *             the kernel
+ *
+ * It is said for the one who lays a volume — the image builder, and one day
+ * an installer that asks the person — and is read by nobody at runtime: a
+ * cabin is given nothing for it. A volume's maker that trusts it puts the file
+ * in the role in its record (TAGFS_FILE_ROLE_*); a box that carries the part
+ * and is copied onto a volume by a person is no more trusted than one that
+ * does not, and no tag of a file ever said it. A word this reader does not
+ * know is passed over — the file is ordinary — and *unknown says its line; a
+ * box with no `role` part is ordinary, and ordinary is never less safe than a
+ * role.
+ */
+
+typedef enum {
+    BOX_ROLE_ORDINARY = 0,
+    BOX_ROLE_SYSTEM,
+    BOX_ROLE_BOOT
+} BoxRole;
+
+static inline BoxVerdict BoxRoleRead(const uint8_t *bytes, uint64_t size, BoxRole *out, uint64_t *unknown)
+{
+    BoxText    text;
+    BoxVerdict verdict = BoxTextBegin(bytes, size, BOX_KIND_ROLE, &text);
+    *out = BOX_ROLE_ORDINARY;
+    if (unknown) *unknown = 0;
+    if (verdict != BOX_OK) return verdict;
+
+    const uint8_t *line, *word = NULL;
+    uint64_t       length, word_length = 0, at = 0;
+    if (!BoxTextLine(&text, &line, &length) || BoxTextWordCount(line, length) != 1) return BOX_TEXT_LAYOUT;
+    BoxTextWord(line, length, &at, &word, &word_length);
+    if (BoxSpanIs(word, word_length, "system")) {
+        *out = BOX_ROLE_SYSTEM;
+    } else if (BoxSpanIs(word, word_length, "boot")) {
+        *out = BOX_ROLE_BOOT;
+    } else if (unknown) {
+        uint64_t number = 1;
+        for (const uint8_t *at_byte = bytes; at_byte < line; at_byte++) number += *at_byte == '\n';
+        *unknown = number;
+    }
+    if (BoxTextLine(&text, &line, &length)) {
+        *out = BOX_ROLE_ORDINARY;
+        return BOX_TEXT_LAYOUT;
     }
     return BOX_OK;
 }

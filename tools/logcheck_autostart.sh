@@ -12,16 +12,12 @@
 # logcheck.sh's. Its own file for the reason logcheck_mkfs.sh has one:
 # logcheck.sh is twelve thousand lines.
 
-# autostart_wears LOG FILE TAG — the AUTOSTART line of FILE (a pattern) names
-# TAG among the tags its process wears, where the format keeps it: format v1
-# keeps a file's tags as create_tagfs gave them, its name's stem first, so it
-# is held first there, as it always was; a book keeps them by ascending id
-# (spec_v2 §2.8, Born), the well-known tags before the stem — `display.box`
-# wears `system,utility,autostart,display` off a book — so it is held among.
+# autostart_wears LOG FILE KEY — the AUTOSTART line of FILE (a pattern) names
+# KEY among the keys its process wears: `app`, the stem of the file's name and,
+# for a file of the system's role, `system` (ProgramKeys), the same on every
+# format of the volume — the file's own tags are not among them.
 autostart_wears() {
-    local at='([^)]*,)?' end='[,)]'
-    [ "$(stand_format)" = v1 ] && { at=''; end=','; }
-    grep -qE "\[AUTOSTART\] Started '$2' \(PID [0-9]+, tags: $at$3$end" "$1"
+    grep -qE "\[AUTOSTART\] Started '$2' \(PID [0-9]+, tags: ([^)]*,)?$3[,)]" "$1"
 }
 
 # replugwrite_spoke_after LOG — the volume's hub greeted after the kernel said

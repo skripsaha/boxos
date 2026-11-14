@@ -50,7 +50,7 @@ void     InkDataNeedRaiseLocked(uint64_t need);
  * And the guard's answer for a file's change, `boot` whether it touches the
  * kernel's blocks (ink.h). */
 error_t  InkVolumeTakes(void);
-error_t  InkGuardSays(uint64_t fid, bool boot, const uint32_t* tags, uint32_t tag_count, InkWarrant warrant);
+error_t  InkGuardSays(uint64_t fid, bool boot, uint32_t flags, InkWarrant warrant);
 
 /* The record of format v1, built before the lock: memory's copy and the
  * medium's packed bytes (ink_v1.c). */
@@ -103,7 +103,8 @@ error_t  InkQuitclaimLocked(uint64_t fid, const RecordWhere* was, const FileReco
  * changed between the halves.
  */
 error_t  InkBookFields(uint64_t fid, FileRecord* cur, const RecordWhere* was, const InkFieldsPlan* f,
-                       const char* name, uint32_t add, InkReceipt* out);
+                       const char* name, uint32_t add, uint32_t flags, uint64_t keep_until,
+                       InkReceipt* out);
 error_t  InkBookNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t* out_fid, InkReceipt* out);
 error_t  InkBookQuitclaim(uint64_t fid, const RecordWhere* was, const FileRecord* cur, FallowNode* fallow,
                           InkReceipt* out);

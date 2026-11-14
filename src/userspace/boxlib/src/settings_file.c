@@ -35,13 +35,12 @@ int settings_program_name(file_id_t program, char out[32])
     return 0;
 }
 
-/* Whether the file is called `name`, and wears the tag settings. */
-static bool file_called(file_id_t file, const char *name, bool *tagged)
+/* Whether the file is called `name`. */
+static bool file_called(file_id_t file, const char *name)
 {
     FileMetadata metadata;
     if (FileMetadataRead(file, &metadata) != 0) return false;
     bool called = metadata.Filename && strcmp(metadata.Filename, name) == 0;
-    *tagged = called && FileMetadataWears(&metadata, "settings");
     FileMetadataRelease(&metadata);
     return called;
 }
@@ -50,8 +49,8 @@ int settings_file_find(const char *program, file_id_t *file, char **saying)
 {
     char       name[32];
     file_id_t *ids = NULL;
-    file_id_t  first = 0, tagged_one = 0;
-    int        called = 0, tagged_count = 0;
+    file_id_t  first = 0;
+    int        called = 0;
 
     *file = 0;
     if (saying) *saying = NULL;
@@ -62,21 +61,19 @@ int settings_file_find(const char *program, file_id_t *file, char **saying)
     /* Every file wears the stem of its name as a tag: clock.settings wears
      * clock. A settings file in the trash says nothing: the person set it
      * aside. */
-    int count = query_all_everywhere(program, "trashed", &ids);
+    int count = query_all_everywhere(program, NULL, &ids);
     if (count < 0) return count;
     for (int i = 0; i < count; i++) {
-        bool tagged;
-        if (!file_called(ids[i], name, &tagged)) continue;
+        if (!file_called(ids[i], name)) continue;
         if (called++ == 0 || ids[i] < first) first = ids[i];
-        if (tagged && (tagged_count++ == 0 || ids[i] < tagged_one)) tagged_one = ids[i];
     }
     free(ids);
     if (called == 0) return 0;
-    *file = tagged_count == 1 ? tagged_one : first;
+    *file = first;
     if (called > 1 && saying) {
         char text[SETTINGS_SAYING_MAX];
-        snprintf(text, sizeof(text), "%d files are called %s; #%llu%s is read", called, name,
-                 (unsigned long long)*file, tagged_count == 1 ? ", tagged settings," : "");
+        snprintf(text, sizeof(text), "%d files are called %s; #%llu, the first made, is read", called, name,
+                 (unsigned long long)*file);
         *saying = malloc(strlen(text) + 1);
         if (*saying) memcpy(*saying, text, strlen(text) + 1);
     }
@@ -224,7 +221,7 @@ static int change_file(BoxSettings *settings, const SettingsChangeAsked *change)
     if (settings->File == 0) {
         char    file_name[32];
         snprintf(file_name, sizeof(file_name), "%s.settings", settings->Program);
-        int64_t made = create_everywhere(file_name, "settings");
+        int64_t made = create_everywhere(file_name, NULL);
         if (made < 0) {
             free(bytes);
             return (int)made;

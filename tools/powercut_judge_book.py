@@ -33,6 +33,7 @@ import subprocess
 import sys
 
 from powercut import RecordBytes
+from volumeread import ondisk
 
 LOG_LINE = 48                   # apps/quilltest_book.c QUILL_LOG_LINE
 BLOCK_SECTORS = 8               # a 4 KiB block in 512-byte sectors
@@ -267,7 +268,7 @@ def Chain(j, variant):
     did not, booted, its session run and its power button pressed, and booted
     again (powercut_book.sh pc_chain) — both boots as TwoBoots holds them.
     `laid`: the verdict settles and the session goes on past it — each file it
-    rolled back as it was rolled back and wearing settle:undone, nothing rolled
+    rolled back as it was rolled back and marked so in its record, nothing rolled
     back again, no block of two owners. `cut`: the machine stopped before the
     verdict's stitch — the census of what it left gives the same verdict again
     and lets go of no block."""
@@ -299,19 +300,20 @@ def Chain(j, variant):
 
 def Undone(d, cid, r1, r2):
     """C16: each file the first mount rolled back (r1's NOT_LANDED) is, in
-    what the session left, the state the verdict rolled it back to, and wears
-    settle:undone — what went otherwise."""
+    what the session left, the state the verdict rolled it back to, and its
+    record bears the verdict's mark (FILE_UNDONE) — never a tag: a file's tags
+    are its user's — what went otherwise."""
     fids = {int(m.group(1)) for f in r1["findings"] if f[0] == "NOT_LANDED" for m in [ROLLED_BACK.search(f[2])] if m}
     raw = json.loads(Log(os.path.join(d, "boots", cid + ".after.check.json")))
-    tags = {f["fid"]: f.get("tag_text", []) for f in raw.get("files", []) if f.get("visible")}
+    flags = {f["fid"]: f.get("flags", 0) for f in raw.get("files", []) if f.get("visible")}
     if not fids:
         return ["the first mount's NOT_LANDED names no fid it rolled back: %s" % [f[2][:80] for f in r1["findings"]
                                                                                 if f[0] == "NOT_LANDED"]]
     was, now = View(r1), View(r2)
     wrong = ["fid %d rolled back is %s in what the session left" % (fid, now.get(fid)) for fid in sorted(fids)
              if now.get(fid) != was.get(fid)]
-    return wrong + ["fid %d rolled back does not wear settle:undone (%s)" % (fid, tags.get(fid)) for fid in sorted(fids)
-                    if "settle:undone" not in tags.get(fid, [])]
+    return wrong + ["fid %d rolled back does not bear the verdict's mark in its record (flags %s)" % (fid, flags.get(fid))
+                    for fid in sorted(fids) if not flags.get(fid, 0) & ondisk.FILE_UNDONE]
 
 
 # ---------------------------------------------------------------------------

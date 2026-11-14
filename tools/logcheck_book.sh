@@ -349,8 +349,11 @@ census_book() {
 # The image is made in format v2 (VOLUME_FORMAT=v2) under VOLUME_TESTS=on and
 # booted three times. BIOS, four cores, its seat an ATA disk; then the padded
 # landing of it (self-test --emit B4p: the image's files and forty more, whose
-# FILES tree is a root over two leaves) the same way, for the one test that
-# needs a leaf below a root to rot (stand_tally_rotten_leaf_locked) — planted
+# FILES tree is a root over two leaves) the same way — the image's own files
+# take a root over two leaves since it holds more than a leaf's worth, so the
+# test that needs a leaf below a root to rot (stand_tally_rotten_leaf_locked)
+# runs on every leg, and a tree that came back to one leaf stands it down
+# there, which a row of STAND_BOOK_ASIDE would say — planted
 # before the first boot, over the image as it was made: the boot's tests leave
 # its files as they found them, not its Tally and ribbon, and on the book they
 # left the grown Tally's next_quire falls on the free run the landing's files
@@ -368,8 +371,7 @@ census_book() {
 #
 # Judged: the STAND_RUN tests this tree registers walked, nothing failed,
 # nothing held; every book test ran — none stood down but on the legs
-# STAND_BOOK_ASIDE names, by its own words, and the leaf on an image whose
-# FILES is one leaf; the port's road of the rotten block taken
+# STAND_BOOK_ASIDE names, by its own words; the port's road of the rotten block taken
 # on the AHCI port and said to stand aside on the ATA disk, never skipped in
 # silence; the lines that say what the volume promises and that no Tally is
 # written, and the one refusal of a change to a file; a block with no digest
@@ -404,7 +406,7 @@ census_book() {
 #   stand_medium_no_medium_flush_refused           0        0       0     1   a USB disk's flush, its medium gone
 #   stand_medium_sync_cache_remembered             0        0       0     3   a USB disk's flush: the command
 #                                                                             refused, then its medium gone twice
-#   stand_tally_rotten_leaf_locked                 0       18       0     0   both copies of the leaf below the
+#   stand_tally_rotten_leaf_locked                18       18      18    18   both copies of the leaf below the
 #                                                                             root, the run then each sector (9),
 #                                                                             read by the mount once: the walk of
 #                                                                             the slot it stands on — every slot
@@ -430,9 +432,9 @@ census_book() {
 #                                                                             takes: a seat of one block a
 #                                                                             command stands it down
 #   stand_run_refused_inside_fresh_through_the_port 0       0       1     1   the same, through the port
-#   the rows above                                36       54      40    33
+#   the rows above                                54       54      58    51
 #   every other test the book runs                61       61      61    61   the same on every leg (below)
-#   total                                         97      115     101    94
+#   total                                        115      115     119   112
 #   stand_stitch_refused_everywhere,               N        N       N     N   every attempt, as many as its line says
 #   stand_slip_engross_cut
 #   stand_stitch_retry_runs_out                    N        N       N     N   a stitch and every atom of the next: its line
@@ -456,14 +458,12 @@ census_book() {
 # stand_escheat_tail_helm_held 3 on one boot and 2 on the next — and the
 # judge takes it off (STAND_BOOK_REFUSED, STAND_BOOK_RACED). A test that
 # comes to refuse otherwise on a leg is a row of its own.
-STAND_BOOK_BLOCKFAILS=97
+STAND_BOOK_BLOCKFAILS=115
 STAND_BOOK_PADDED_BLOCKFAILS=115
-STAND_BOOK_UEFI_BLOCKFAILS=101
-# The book on a USB stick (stand_book_usb): the usb column — its seat's reads
-# go through the port as on UEFI, so stand_tally_rotten_leaf_locked stands
-# down there and refuses nothing, and the stick is no AHCI port for
-# stand_roadstead_refusal_rings_once to refuse on.
-STAND_BOOK_USB_BLOCKFAILS=94
+STAND_BOOK_UEFI_BLOCKFAILS=119
+# The book on a USB stick (stand_book_usb): the usb column — the stick is no
+# AHCI port for stand_roadstead_refusal_rings_once to refuse on.
+STAND_BOOK_USB_BLOCKFAILS=112
 STAND_BOOK_HALT='^\[HALT\] Storage sync complete'
 # C13 (stand_docket_closed_damaged): sector 1 of a stitch the kernel sewed will
 # not read at the next mount — the line names it and the record bytes it took.
@@ -485,8 +485,7 @@ STAND_BOOK_TALLY='^\[TagFS\] a whole Tally of the book is written once the ribbo
 # only a read somebody stands over (stand_read_tests.c, StandReadPortAside:
 # ReadJobSeatRunsAsync) and moves every byte of a write by the processor
 # (stand_port_tests.c, StandPortAside: the seat's kind), said in the words
-# STAND_BOOK_ASIDE_WORDS holds them to; stand_tally_rotten_leaf_locked is
-# each leg's ASIDE.
+# STAND_BOOK_ASIDE_WORDS holds them to.
 STAND_BOOK_ASIDE="stand_stitch_page_atom:stand_book,stand_book_padded,stand_book_uefi
 stand_stitch_page_atom_hop:stand_book,stand_book_padded,stand_book_uefi
 stand_stitch_page_inside:stand_book,stand_book_padded,stand_book_uefi
@@ -558,12 +557,17 @@ stand_book_defects() {
         $0 ~ ENVIRON["DEFECT"] { if (pulled && $0 ~ ENVIRON["DRAWN"] && drawn++ == 0) next; print }' "$1"
 }
 
-# stand_book_census IMG — "DATA FREE FILES" volume-read's census predicts a
-# kernel mounting IMG derives, or nothing.
+# stand_book_census IMG [NEXTFID] — "DATA FREE FILES" volume-read's census
+# predicts a kernel mounting IMG derives, or nothing. With NEXTFID the files
+# are those of fid below it: the program the halt waits for — hub's history,
+# gardener's plants — makes files and rewrites others after the tests' last
+# mount, and the next file id that mount said is where its book ends.
 stand_book_census() {
     python3 tools/volume-read.py "$1" check --json 2>/dev/null | python3 -c 'import json, sys
-k = json.load(sys.stdin)["kernel"]
-print("%s %s %s" % (k["data_blocks"], k["free"], k["files"]))' 2>/dev/null
+d = json.load(sys.stdin)
+k = d["kernel"]
+later = sum(1 for f in d["files"] if f["fid"] >= int(sys.argv[1])) if len(sys.argv) > 1 else 0
+print("%s %s %s" % (k["data_blocks"], k["free"], k["files"] - later))' ${2:+"$2"} 2>/dev/null
 }
 
 # stand_book_judge TAG WHAT BLOCKFAILS ASIDE PORT IMG BOOTED — one boot of a
@@ -647,16 +651,23 @@ stand_book_judge() {
     got=$(grep -acE "$STAND_BOOK_MAP_PAST" "$L")
     [ "$got" = 1 ] && grep -aqE "$STAND_BOOK_MAP_COUNT" "$L"
     chk $? "stand: $what — past the 32 named, the rest are said to be counted once, when they begin ($got), and their count (the stand's 2 + 40 less 32) when the map is let go"
-    want=$(stand_book_census "$img")
     got=$(awk -v laid="$STAND_BOOK_RIBBON_LAID" -v back="$STAND_BOOK_RIBBON_BACK" \
               -v sewing="$STAND_BOOK_STITCH_LAID" -v sewn_back="$STAND_BOOK_STITCH_BACK" \
               'index($0, laid) == 1 || index($0, sewing) == 1 { sewn = 1 }
                index($0, back) == 1 || index($0, sewn_back) == 1 { sewn = 0 } !sewn' "$L" |
-          grep -aE '^\[TagFS\] [0-9]+ data blocks, [0-9]+ free, [0-9]+ files' |
-          sed -E 's/^\[TagFS\] ([0-9]+) data blocks, ([0-9]+) free, ([0-9]+) files.*/\1 \2 \3/')
+          grep -aE '^\[TagFS\] (the next file id [0-9]+,|[0-9]+ data blocks, [0-9]+ free, [0-9]+ files)' |
+          sed -E 's/^\[TagFS\] the next file id ([0-9]+),.*/next \1/;
+                  s/^\[TagFS\] ([0-9]+) data blocks, ([0-9]+) free, ([0-9]+) files.*/\1 \2 \3/' |
+          awk '$1 == "next" { fid = $2; next } { print $1, $2, $3, fid }')
     last=$(echo "$got" | tail -1)
-    [ -n "$booted" ] && [ "$(echo "$got" | head -1)" = "$booted" ] && [ -n "$want" ] && [ "$last" = "$want" ]
-    chk $? "stand: $what — the boot's mount derives the data blocks, free and files volume-read's census predicts of the image booted, and the last mount those it predicts of the image the halt left ($(echo "$got" | head -1), predicted ${booted:-nothing}; $last, predicted ${want:-nothing})"
+    want=$(stand_book_census "$img" "${last##* }")
+    last=${last% *}
+    local w_data w_free w_files l_data l_free l_files
+    read -r w_data w_free w_files <<<"$want"
+    read -r l_data l_free l_files <<<"$last"
+    [ -n "$booted" ] && [ "$(echo "$got" | head -1 | sed 's/ [0-9]*$//')" = "$booted" ] && [ -n "$want" ] && [ -n "$last" ] &&
+        [ "$w_data" = "$l_data" ] && [ "$w_files" = "$l_files" ] && [ "$w_free" -le "$l_free" ]
+    chk $? "stand: $what — the boot's mount derives the data blocks, free and files volume-read's census predicts of the image booted, and the last mount the data blocks and the files of its book (fid below its next) that it predicts of the image the halt left, with no more free than the image has left (halt: $(echo "$got" | head -1 | sed 's/ [0-9]*$//'), predicted ${booted:-nothing}; $last, predicted ${want:-nothing})"
 }
 
 # stand_book — the book's three boots (above).
@@ -677,7 +688,7 @@ stand_book() {
     planted=$?
     stand_boot stand_book CORES=4 MEM=4G
     [ $? = 2 ] || stand_book_judge stand_book "the book, BIOS 4c" "$STAND_BOOK_BLOCKFAILS" \
-        stand_tally_rotten_leaf_locked aside build/boxos.img "$booted"
+        "" aside build/boxos.img "$booted"
     if [ "$planted" = 0 ]; then
         booted=$(stand_book_census "$img")
         stand_boot stand_book_padded BOOTDISK="$img" CORES=4 MEM=4G
@@ -691,7 +702,7 @@ stand_book() {
         booted=$(stand_book_census build/boxos.img)
         stand_boot stand_book_uefi UEFI=on STRICT=on CORES=4 MEM=4G
         [ $? = 2 ] || stand_book_judge stand_book_uefi "the book, UEFI 4c on an AHCI port, STRICT" \
-            "$STAND_BOOK_UEFI_BLOCKFAILS" stand_tally_rotten_leaf_locked taken build/boxos.img "$booted"
+            "$STAND_BOOK_UEFI_BLOCKFAILS" "" taken build/boxos.img "$booted"
     else
         echo "BUILD FAILED (VOLUME_TESTS=on STRICT=on VOLUME_FORMAT=v2) — tail:"; tail -25 "$SCRATCH/build.log"
         bad "stand: the book — VOLUME_TESTS=on STRICT=on VOLUME_FORMAT=v2 does not build"
@@ -771,9 +782,9 @@ BIG_EOF
     # shellcheck disable=SC2086
     set -- $parts
     if [ $# != 4 ] || ! python3 tools/make_mbr.py "$img" "$1,$2,7f,boot" "$3,$4,ef" >"$SCRATCH/big.mbr" 2>&1 ||
-       ! tools/create_tagfs --v2 "$img" build/box/hub.box "utility,system,app,autostart" \
-            build/box/quilltest.box "app,utility,test,system" build/box/bye.box "utility,system" \
-            build/kernel.bin "system" \
+       ! tools/create_tagfs --v2 --kernel build/kernel.bin "$img" build/box/hub.box "" \
+            build/box/quilltest.box "test" build/box/bye.box "" \
+            build/kernel.bin "" \
             >"$SCRATCH/big.mkfs" 2>&1; then
         harness "big: the grown image could not be made — ${parts:-no partitions} $(tail -1 "$SCRATCH/big.mkfs" 2>/dev/null)"
         rm -f "$img"

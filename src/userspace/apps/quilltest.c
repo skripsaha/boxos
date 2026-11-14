@@ -48,9 +48,9 @@
  * quilltest is on every volume, and it wears `system`. sequential and
  * interleave leak blocks on the synchronous path of HEAD, fidhistory spends
  * fifty thousand file ids for good, usememory interns its 91 tags in the
- * volume's registry for good, systemtag deletes the kernel the volume boots,
- * and abba interns hundreds of tags and spends file ids past a block of the
- * file table for good (with abbaworker, the workers it starts). Those seven
+ * volume's registry for good, and abba interns hundreds of tags and spends
+ * file ids past a block of the file table for good (with abbaworker, the
+ * workers it starts). Those six
  * are compiled only into a quilltest built with VOLUME_TESTS=on — the key
  * that already means a throwaway image, and that builds the kernel's own
  * writing tests — and anywhere else each answers one FAIL saying so. The
@@ -195,7 +195,7 @@ int QuillFindEverywhere(const char *name, file_id_t *ids, int max)
     QuillStem(name, stem, sizeof(stem));
 
     file_id_t *all = NULL;
-    int n = query_all_everywhere(stem, "trashed,hidden", &all);
+    int n = query_all_everywhere(stem, NULL, &all);
     if (n < 0)
         return n;
 
@@ -259,14 +259,14 @@ static QuillVerdict QuillLongQuery(const char *const *args)
     static char tag[QUILL_LONG_TAG_BYTES + 1];
     file_id_t  *ids = NULL;
 
-    int all = query_all_everywhere(NULL, "trashed,hidden", &ids);
+    int all = query_all_everywhere(NULL, NULL, &ids);
     free(ids);
     if (all <= 0) {
         printf("[QUILL] longquery: FAIL — a query for every file answered %d, so there is "
                "nothing to compare with\n", all);
         return QUILL_FAIL;
     }
-    int none = query_all_everywhere("quillnosuchtag", "trashed,hidden", &ids);
+    int none = query_all_everywhere("quillnosuchtag", NULL, &ids);
     free(ids);
     if (none != 0) {
         printf("[QUILL] longquery: FAIL — a query for quillnosuchtag, a tag no file wears, "
@@ -276,7 +276,7 @@ static QuillVerdict QuillLongQuery(const char *const *args)
 
     memset(tag, 'q', QUILL_LONG_TAG_BYTES);
     tag[QUILL_LONG_TAG_BYTES] = '\0';
-    int got = query_all_everywhere(tag, "trashed,hidden", &ids);
+    int got = query_all_everywhere(tag, NULL, &ids);
     free(ids);
 
     if (got == all) {
@@ -677,10 +677,6 @@ static const QuillCase g_cases[] = {
     { "fidhistory", "", 0, 0, QUILL_THROWAWAY(QuillFidHistory),
       "what 50000 file ids spent on deleted files cost the next mount",
       "50000 file ids spent for good, and their dead records in the pool", true },
-    { "systemtag", "", 0, 0, QUILL_THROWAWAY(QuillSystemTag),
-      "may programs that do not wear system — untag, trash, delete — take the system tag off "
-      "kernel.bin and delete it",
-      "DESTRUCTIVE: where the answer is yes, kernel.bin loses its guard; it is given back before the verdict", true },
     { "hog", "", 0, 0, QuillHog, "nothing: it computes without end",
       "a cabin spinning until the machine stops; never returns", false },
     { "settle", "NAME", 1, 0, QuillSettle,

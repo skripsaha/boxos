@@ -40,6 +40,8 @@ BOX_SETTINGS("greeting on-or-off default on \"the line the hub says when it star
              "suggestions on-or-off default on \"lay what the line could go on to be, dim, past the cursor\"\n"
              "hints on-or-off default on \"Tab with nothing suggested says what the command still needs\"\n"
              "did-you-mean on-or-off default on \"say the names close to a command that is not there\"\n"
+             "trash-days number from 0 to 3650 days default 30 "
+             "\"how many days a deleted file is kept before it goes by itself; 0 gives it up at once\"\n"
              "history on-or-off default on \"keep every line typed in the file history\"\n"
              "    up one-of context-first all default context-first "
              "\"which lines Up brings back first: those typed in this Use Context, or all of them\"\n"

@@ -45,17 +45,17 @@
  *
  * ‼ A FILE THE SYSTEM KEEPS IS CHANGED ONLY WITH THE WARRANT, AND WHAT THE
  * LOADER READS BY ITS BLOCKS BY NOBODY (RT-09); THIS IS THE ONE PLACE THAT
- * SAYS SO. A file wearing a tag whose key is system, boot or god — system:foo
- * as much as system — has its extents changed, is given up, and has one of
- * those tags taken off only by a call that carries the warrant (InkWarrant,
- * tagfs.h: its program's cabin holds system or god); and only such a call puts
- * one of those tags on a file, any file — put on by anybody, it would lock the
- * file away from its own owner. Any other tag goes on any file, one the system
- * keeps among them, warrant or none. A file holding the kernel
- * the Deed points the loader at is changed by no call at all, warrant or none.
- * Either refusal is ERR_PERMISSION_DENIED, said. A write, a span and a defrag
- * ask the same guard when they load the file (PlotLoad), before a byte of
- * theirs moves; nobody above the volume asks it again.
+ * SAYS SO. A file whose record puts it in a role — system, boot or kernel
+ * (TAGFS_FILE_ROLE_*, bits of its flags) — has its extents changed and is given
+ * up only by a call that carries the warrant (InkWarrant, tagfs.h: its
+ * program's cabin holds system or god). The role is the record's and no
+ * tag's: a file's tags are its user's, whatever their keys, and any tag goes
+ * on or comes off any file, one the system keeps among them, warrant or none.
+ * A file holding the kernel the Deed points the loader at is changed by no
+ * call at all, warrant or none. Either refusal is ERR_PERMISSION_DENIED, said.
+ * A write, a span and a defrag ask the same guard when they load the file
+ * (PlotLoad), before a byte of theirs moves; nobody above the volume asks it
+ * again.
  *
  * ‼ AND NOTHING CHANGES A VOLUME WHOSE MEDIUM LEFT (RT-13). From the moment the
  * volume sees its medium gone every Ink is refused ERR_DEVICE_NOT_READY, and
@@ -108,16 +108,40 @@ void    InkRoomLetGo(Plot* p);
 /* A file's name and tags. `name` non-NULL renames it, and the name's tag
  * moves with it: the tag of the name it had comes off, `add` (the new name's,
  * already interned) goes on first. Otherwise `add` goes on and `drop` comes
- * off (TAGFS_INVALID_TAG_ID for neither). A tag of key system, boot or god
- * goes on — a name's tag too — or comes off only with the warrant; on a book,
- * one put on a file goes on with the file's tail laid in its block, under its
- * Helm (helm/engross.h, EngrossGuarded): ERR_BUSY, said, while a writer holds
- * it. OK — a change that changes nothing is OK with no Ink — or the refusal.
- * InkFieldsLaid is the change itself, guard or no guard: Engross's own. */
-error_t InkFieldsLaid(uint64_t fid, const char* name, uint32_t add, uint32_t drop, InkWarrant warrant,
-                      InkReceipt* out);
-error_t InkFields(uint64_t fid, const char* name, uint32_t add, uint32_t drop, InkWarrant warrant,
-                  InkReceipt* out);
+ * off (TAGFS_INVALID_TAG_ID for neither). No tag asks a warrant, whatever its
+ * key: a file's tags are its user's, and what the system keeps a file as is
+ * its record's role (TAGFS_FILE_ROLE_*), which no tag puts on or takes off.
+ * OK — a change that changes nothing is OK with no Ink — or the refusal. */
+error_t InkFields(uint64_t fid, const char* name, uint32_t add, uint32_t drop, InkReceipt* out);
+
+#ifdef CONFIG_VOLUME_TESTS
+/* The stand's way to keep a file in a role, as the image builder lays one
+ * (tools/create_tagfs_cargo.c): the record's role bits become `role`
+ * (TAGFS_FILE_ROLE_*) by an ordinary Ink, the tags as they are. On a book the
+ * tail is laid in the file's block first, under its Helm (helm/engross.h,
+ * EngrossRoled), as the loader reads a file of a role by its blocks and no
+ * write lays a Slip on one (plot_slip.c). No program asks it: the system has
+ * no call that puts a role on a file the volume already holds. */
+error_t InkRoleLaid(uint64_t fid, uint32_t role, InkReceipt* out);
+#endif
+
+/* A book's file rolled back by the mount's verdict (mount/errata.h): its
+ * record marked TAGFS_FILE_UNDONE by an ordinary Ink, its name and tags as
+ * they are — the system's own word on the file, never one of its tags. OK, and
+ * OK with no Ink for one marked already; ERR_UNSUPPORTED on format v1, or the
+ * refusal an Ink of a file's fields answers. */
+error_t InkUndone(uint64_t fid, InkReceipt* out);
+
+/* A book's file deleted and kept — the record marked TAGFS_FILE_DELETED, the
+ * time it is kept until, `until` (a book's nanoseconds), in the record beside
+ * it — by an ordinary Ink, its name and tags as they are; or, for `until` 0,
+ * brought back: the mark and the time taken off. Deleting a deleted file moves
+ * its term. The guard of a change asks the warrant, as a delete does: a file
+ * the system keeps is not deleted without one. OK — and OK with no Ink for a
+ * call that changes nothing — or the refusal; ERR_UNSUPPORTED on format v1
+ * (its record has no room for the time). Only the system lets a kept file go
+ * at its term (keep/keep.h): InkQuitclaim, as ever. */
+error_t InkKeep(uint64_t fid, uint64_t until, InkWarrant warrant, InkReceipt* out);
 
 /* A new file named `name`, wearing the `count` tags in `tags` (the name's
  * first, no two alike). OK and its id, or the refusal with no file made and no
@@ -231,21 +255,24 @@ error_t InkNameTagIntern(const char* name, uint32_t* out_tag);
 /* The tag a name gives, when the registry already has it; else invalid. */
 uint32_t InkNameTagLookup(const char* name);
 
-/* The one guard of a change to a file (see above), asked with the tags the file
- * wears, the runs it names and the caller's warrant: OK, ERR_DEVICE_NOT_READY
- * once the medium left or a stopping machine's halt shut the volume to changes
- * not begun (TagFSShutForHalt), ERR_TAGFS_READ_ONLY once it refused a write as
- * protected, or ERR_PERMISSION_DENIED — said — for a file the system keeps and
- * a caller with no warrant, and for the kernel the loader reads by its blocks
- * and any caller. */
-error_t  InkMayChange(uint64_t fid, const uint32_t* tags, uint32_t tag_count,
-                      const Strip* runs, uint32_t run_count, InkWarrant warrant);
+/* The one guard of a change to a file (see above), asked with the flags the
+ * file's record carries, the runs it names and the caller's warrant: OK,
+ * ERR_DEVICE_NOT_READY once the medium left or a stopping machine's halt shut
+ * the volume to changes not begun (TagFSShutForHalt), ERR_TAGFS_READ_ONLY once
+ * it refused a write as protected, or ERR_PERMISSION_DENIED — said — for a file
+ * the system keeps in a role and a caller with no warrant, and for the kernel
+ * the loader reads by its blocks and any caller. */
+error_t  InkMayChange(uint64_t fid, uint32_t flags, const Strip* runs, uint32_t run_count,
+                      InkWarrant warrant);
 
 /* The guard's two questions on their own, for a mover of blocks that asks them
- * whatever the warrant (PlotGather): whether any of the tags has the key
- * system, boot or god, and whether any of the runs holds a block of the kernel
- * the Deed points the loader at. */
-bool     InkWearsGuarded(const uint32_t* tags, uint32_t count);
+ * whatever the warrant (PlotGather): whether the record's flags put the file in
+ * a role the system keeps — system, boot or kernel — and whether any of the
+ * runs holds a block of the kernel the Deed points the loader at. */
+static inline bool InkFileKept(uint32_t flags)
+{
+    return (flags & TAGFS_FILE_ROLE_MASK) != TAGFS_FILE_ROLE_ORDINARY;
+}
 bool     InkTouchesBoot(const Strip* runs, uint32_t count);
 
 /* The second question asked of a file's record where it holds its runs —

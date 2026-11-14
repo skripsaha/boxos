@@ -67,6 +67,9 @@ typedef struct FileRecord {
     uint64_t           size;
     uint64_t           created_time;
     uint64_t           modified_time;
+    /* With TAGFS_FILE_DELETED, the time — a book's nanoseconds, as created_time
+     * is — until which the file is kept deleted; 0 for a file that is not. */
+    uint64_t           keep_until;
     /* When the Ink that made this record was a small append — its data cost
      * the medium less than a Settle cycle does — in the cadence's
      * microseconds; 0 for any other change. Memory only: the cadence asks it
@@ -146,11 +149,11 @@ FileRecord* FileRecordBuild(const TagFSMetadata* meta);
  * of them, as a Tally laid them (tract.h TractOfParcels): a book's mount. */
 FileRecord* FileRecordBuildCut(const TagFSMetadata* meta, const uint32_t* cut, uint64_t ncut, bool* recut);
 
-/* A record with a new header — `name`, `tags`, `flags` — and every one of the
+/* A record with a new header — `name`, `tags`, `flags`, `keep_until` — and every one of the
  * old record's runs, shared rather than copied; its times, size and file id
  * the old one's. NULL when there is no memory. */
 FileRecord* FileRecordRelabel(const FileRecord* old, const char* name, const uint32_t* tags,
-                              uint32_t tag_count, uint32_t flags);
+                              uint32_t tag_count, uint32_t flags, uint64_t keep_until);
 
 /*
  * The old record with `count` splices applied, its size `size` and its

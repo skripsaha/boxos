@@ -15,6 +15,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include "box/clock.h"
 #include "box/core/cabin.h"
@@ -42,17 +43,36 @@ bool Another()
     return false;
 }
 
-// The file the program (Pid, Generation) was started from; 0 when it is gone
-// already, or was made from bytes.
-file_id_t FileOf(std::uint32_t Pid, std::uint32_t Generation)
+// A program aboard: the file it was started from, 0 when it is gone already or
+// was made from bytes, and whether its cabin wears system — which the system
+// gives a program started from a file it keeps in its own role; a file's tags
+// give none.
+struct Aboard {
+    file_id_t File   = 0;
+    bool      System = false;
+};
+
+bool CabinWearsSystem(std::string_view Tags)
+{
+    while (!Tags.empty()) {
+        const std::size_t Comma = Tags.find(',');
+        if (Tags.substr(0, Comma) == "system") return true;
+        if (Comma == std::string_view::npos) break;
+        Tags.remove_prefix(Comma + 1);
+    }
+    return false;
+}
+
+Aboard AboardOf(std::uint32_t Pid, std::uint32_t Generation)
 {
     RosterProgram *Raw   = nullptr;
     const int      Count = proc_roster(&Raw, nullptr);
-    if (Count < 0) return 0;
+    if (Count < 0) return {};
     const std::unique_ptr<RosterProgram, void (*)(void *)> Held(Raw, free);
     for (int At = 0; At < Count; At++)
-        if (Raw[At].pid == Pid && Raw[At].generation == Generation) return Raw[At].program_file;
-    return 0;
+        if (Raw[At].pid == Pid && Raw[At].generation == Generation)
+            return {Raw[At].program_file, Raw[At].tags && CabinWearsSystem(Raw[At].tags)};
+    return {};
 }
 
 struct Named {
@@ -64,10 +84,10 @@ struct Named {
 // extension; nothing when it is already gone, or was made from bytes.
 std::optional<Named> NameOf(std::uint32_t Pid, std::uint32_t Generation)
 {
-    const file_id_t File = FileOf(Pid, Generation);
+    const Aboard    Program = AboardOf(Pid, Generation);
     FileMetadata    Metadata;
-    if (File == 0 || FileMetadataRead(File, &Metadata) != 0) return std::nullopt;
-    Named Found{Metadata.Filename ? Metadata.Filename : "", FileMetadataWears(&Metadata, "system")};
+    if (Program.File == 0 || FileMetadataRead(Program.File, &Metadata) != 0) return std::nullopt;
+    Named Found{Metadata.Filename ? Metadata.Filename : "", Program.System};
     FileMetadataRelease(&Metadata);
     if (const std::size_t Dot = Found.Name.rfind('.'); Dot != std::string::npos && Dot > 0) Found.Name.resize(Dot);
     if (Found.Name.empty()) return std::nullopt;

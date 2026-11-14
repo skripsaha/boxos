@@ -36,7 +36,7 @@ stand_book_usb() {
     STAND_FORMAT=v2 stand_boot stand_book_usb BOOTDISK="$boot" USB=on CORES=4 MEM=4G QEMUEXTRA="$extra"; rc=$?
     if [ "$rc" != 2 ]; then
         stand_book_judge stand_book_usb "the book on a USB stick, BIOS 4c" "$STAND_BOOK_USB_BLOCKFAILS" \
-            stand_tally_rotten_leaf_locked taken "$stick" "$booted"
+            "" taken "$stick" "$booted"
         grep -aqE "^\[TESTS\] the tests that write go through seat [0-9]+ \($STANDUSB_SEAT\)" \
             "$SCRATCH/serial.stand_book_usb.log"
         chk $? "stand: the book on a USB stick — the writes' road is the stick's seat: $(grep -aoE 'go through seat [0-9]+ \([^)]*\)' "$SCRATCH/serial.stand_book_usb.log" | head -1)"

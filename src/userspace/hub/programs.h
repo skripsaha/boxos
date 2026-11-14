@@ -1,9 +1,10 @@
 /* programs.h — find the program a name or a thing means.
  *
  * The rule is the kernel's (SysExecCandidate): a file counts as a program when
- * it wears app or utility. The hub holds the files that wear the name to the
- * same rule before it asks the kernel to start one, so what it lists is
- * exactly what would start. A file that wears itinerary is a command too: the
+ * its bytes are a box or an ELF image — what it holds, not the tags it wears.
+ * The hub holds the files that carry the name to the same rule before it asks
+ * the kernel to start one, so what it lists is exactly what would start. A
+ * file that begins as an Itinerary does (itinerary.h) is a command too: the
  * hub runs its steps itself. */
 #ifndef HUB_PROGRAMS_H
 #define HUB_PROGRAMS_H
@@ -45,7 +46,8 @@ inline constexpr int Said = 1;
 using Picked = std::expected<file_id_t, int>;
 
 // The program a command's name means: the files wearing the tag NAME that are
-// programs or Itineraries. One is taken; of several the person is asked
+// programs or Itineraries (the name is how the person finds a file; whether it
+// is one is what it holds). One is taken; of several the person is asked
 // which, as Shown says; none is -ERR_FILE_NOT_FOUND.
 Picked Pick(const Look &Shown, std::string_view Name);
 

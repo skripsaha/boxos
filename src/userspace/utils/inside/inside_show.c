@@ -155,7 +155,8 @@ static bool KindIsText(BoxKind kind)
 {
     return kind == BOX_KIND_NEEDS || kind == BOX_KIND_HINTS || kind == BOX_KIND_LIFE ||
            kind == BOX_KIND_FORM || kind == BOX_KIND_SETTINGS || kind == BOX_KIND_RECIPE ||
-           kind == BOX_KIND_ABOUT || kind == BOX_KIND_WORKS || kind == BOX_KIND_ASKS;
+           kind == BOX_KIND_ABOUT || kind == BOX_KIND_WORKS || kind == BOX_KIND_ASKS ||
+           kind == BOX_KIND_ROLE;
 }
 
 static void SayLoadable(const InsideFile *file, const BoxPart *part)

@@ -171,11 +171,11 @@ bool StitchBookRefused(void)
 }
 
 /* The core putting the verdict's tags on, + 1; 0 while none is. */
-static volatile uint32_t s_wearing;
+static volatile uint32_t s_marking;
 
-bool StitchWearsVerdict(void)
+bool StitchMarksVerdict(void)
 {
-    return __atomic_load_n(&s_wearing, __ATOMIC_ACQUIRE) == (uint32_t)amp_get_core_index() + 1u;
+    return __atomic_load_n(&s_marking, __ATOMIC_ACQUIRE) == (uint32_t)amp_get_core_index() + 1u;
 }
 
 // ----------------------------------------------------------------------------
@@ -200,7 +200,7 @@ static void StitchCloseForRoom(StitchSnap* s, bool awaits)
 }
 
 /* The sectors the stitch TAKE took can take at the most: its claims — the
- * Labeleds of settle:undone the verdict's files wear among them — the Undones
+ * Labeleds of the mark the verdict's files bear among them — the Undones
  * of the mount's verdict, the Coineds of the tags given ids since the last
  * stitch settled — `coined` of them, `text` bytes of keys and values, every
  * one in its range — the word owed, and what every stitch carries. */
@@ -254,32 +254,32 @@ static void StitchTake(StitchSnap* s)
 }
 
 /*
- * ‼ THE TAG GOES DOWN WITH THE VERDICT (§16.5 п.6, M-10). Each file the
- * mount's verdict rolls back wears settle:undone, put on by an ordinary Ink
- * before the snapshot of the cycle that lays the verdict down — so the one
- * stitch carries both, and no mount finds the Undone without the tag of a file
- * that can wear one. Every cycle until one settles carries the verdict (a
+ * ‼ THE MARK GOES DOWN WITH THE VERDICT (§16.5 п.6, M-10). Each file the
+ * mount's verdict rolls back is marked so in its record (TAGFS_FILE_UNDONE) by
+ * an ordinary Ink before the snapshot of the cycle that lays the verdict down —
+ * so the one stitch carries both, and no mount finds the Undone without the
+ * mark of a file that lives. Every cycle until one settles carries the verdict (a
  * stitch that settled without it would leave the next mount to replay what
  * it undoes, H-1), so it is the first cycle that begins — asked at the door's
- * opening (mount.c, ErrataAsk) — that puts them on, and a cycle refused before
- * the last of them puts the rest on in the next. Off the heap's reserve, which
+ * opening (mount.c, ErrataAsk) — that marks them, and a cycle refused before
+ * the last of them marks the rest in the next. Off the heap's reserve, which
  * is the steps' own: a refusal of the moment — the heap (SETTLE_PARK_HEAP), the
  * ribbon's room (tried a window on), a volume taking no change now — refuses
- * the cycle, never laying the verdict without them (errata.h, ErrataWorn). A
+ * the cycle, never laying the verdict without them (errata.h, ErrataMarked). A
  * stopping machine's halt refuses every change not begun; these are its own
- * cycle's, made before its snapshot, and pass (StitchWearsVerdict).
+ * cycle's, made before its snapshot, and pass (StitchMarksVerdict).
  */
-static error_t StitchWorn(StitchSnap* s)
+static error_t StitchMarked(StitchSnap* s)
 {
     if (!ErrataHeld())
         return OK;
     KHeapScope was = KHeapScopeEnter(KHEAP_CHARGE_KERNEL, 0);
-    __atomic_store_n(&s_wearing, (uint32_t)amp_get_core_index() + 1u, __ATOMIC_RELEASE);
-    error_t    rc  = ErrataWorn();
-    __atomic_store_n(&s_wearing, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&s_marking, (uint32_t)amp_get_core_index() + 1u, __ATOMIC_RELEASE);
+    error_t    rc  = ErrataMarked();
+    __atomic_store_n(&s_marking, 0u, __ATOMIC_RELEASE);
     KHeapScopeLeave(was);
     if (rc != OK)
-        s->stage = "the settle:undone the mount's verdict owes its files";
+        s->stage = "the mark the mount's verdict owes its files";
     return rc;
 }
 
@@ -726,7 +726,7 @@ error_t StitchRunStep(bool* done)
          * a freeing one refused, the cycle with them, and the next cycle's the
          * same, were it given only past them. */
         RibbonNextGiven();
-        rc = StitchWorn(s);
+        rc = StitchMarked(s);
         if (rc != OK)
             break;
         StitchTake(s);

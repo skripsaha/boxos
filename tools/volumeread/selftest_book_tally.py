@@ -436,6 +436,17 @@ def TreeShapeCases(bt):
 ELEMENT_ROOM = 64                 # bytes free in the target's leaf of FILES the element landings need
 
 
+def FilesLeaves(bt):
+    """The leaves of FILES the book is laid in, and the bytes each has free in
+    its Sheets."""
+    leaves = [n for n in bt.plan.nodes if n.tree == tally.FILES and n.level == 0]
+    free = {}
+    for n in leaves:
+        stream, _starts = binder.NodeStream(n.tree, n.level, list(n.items))
+        free[id(n)] = n.sheets * tally.SHEET_PAYLOAD - len(stream)
+    return leaves, free
+
+
 def ElementTarget(bt):
     """The file the element landings aim at, and its leaf of FILES: the
     smallest live file whose leaf has ELEMENT_ROOM bytes free. A landing here
@@ -444,17 +455,31 @@ def ElementTarget(bt):
     of any. A book's leaves are laid as full as their items go, so the
     smallest file alone (bt.S) may sit in a leaf with fewer bytes free than
     that; which file has room is the image's, never a reason to refuse."""
-    leaves = [n for n in bt.plan.nodes if n.tree == tally.FILES and n.level == 0]
-    free = {}
-    for n in leaves:
-        stream, _starts = binder.NodeStream(n.tree, n.level, list(n.items))
-        free[id(n)] = n.sheets * tally.SHEET_PAYLOAD - len(stream)
+    leaves, free = FilesLeaves(bt)
     for fs in sorted((fs for fs in bt.content.files.values() if fs.Blocks() >= 1 and fs.fid != bt.c0.boot_fid
                       and fs is not bt.L), key=lambda fs: (fs.Blocks(), fs.fid)):
         leaf = next((n for n in leaves if any(k == (fs.fid, 1) for k, _b in n.items)), None)
         if leaf is not None and free[id(leaf)] >= ELEMENT_ROOM:
             return fs, leaf
     raise Unreadable("no file but the largest has %u bytes free in its leaf of FILES for the element landings"
+                     % ELEMENT_ROOM)
+
+
+def MeetTarget(bt):
+    """The file whose one run B45 cuts in two that meet on a block, and its
+    leaf of FILES: the largest live file of one run of at least two blocks
+    whose leaf has ELEMENT_ROOM bytes free — the second run is written in the
+    Parcel's place, and the leaf is as full as its items go, so the largest
+    file (bt.L) can sit in a leaf with no room for it (a book of more files
+    than the first images had did). Which file has room is the image's, never
+    a reason to refuse."""
+    leaves, free = FilesLeaves(bt)
+    for fs in sorted((fs for fs in bt.content.files.values() if fs.fid != bt.c0.boot_fid and len(fs.runs) == 1 and
+                      not fs.runs[0].hole and fs.runs[0].count >= 2), key=lambda fs: (-fs.Blocks(), fs.fid)):
+        leaf = next((n for n in leaves if any(k == (fs.fid, 1) for k, _b in n.items)), None)
+        if leaf is not None and free[id(leaf)] >= ELEMENT_ROOM:
+            return fs, leaf
+    raise Unreadable("no file of one run of two blocks or more has %u bytes free in its leaf of FILES for B45"
                      % ELEMENT_ROOM)
 
 
@@ -475,18 +500,17 @@ def ElementCases(bt):
         bt.Reitem(o, sleaf, lambda items: [(k, tally.FileHeadEncode(wide)) if k == (S.fid, 0) else (k, b)
                                            for k, b in items])
 
-    lleaf = next(n for n in bt.plan.nodes if n.tree == tally.FILES and n.level == 0 and
-                 any(k == (L.fid, 1) for k, _b in n.items))
-    lrun = L.runs[0]
-    half = max(1, lrun.count // 2)
+    M, mleaf = MeetTarget(bt)
+    mrun = M.runs[0]
+    half = max(1, mrun.count // 2)
 
     def SelfMeet(o):
-        """L's one run cut in two that meet on a block: [a, a + k) and
+        """M's one run cut in two that meet on a block: [a, a + k) and
         [a + k - 1, a + n - 1) — as many blocks as its size takes, its last
         block named by no one."""
-        runs = [tally.Run(False, lrun.start, half, lrun.birth),
-                tally.Run(False, lrun.start + half - 1, lrun.count - half, lrun.birth)]
-        bt.Reitem(o, lleaf, lambda items: [(k, tally.ParcelEncode(runs, bt.plan.seq)) if k == (L.fid, 1)
+        runs = [tally.Run(False, mrun.start, half, mrun.birth),
+                tally.Run(False, mrun.start + half - 1, mrun.count - half, mrun.birth)]
+        bt.Reitem(o, mleaf, lambda items: [(k, tally.ParcelEncode(runs, bt.plan.seq)) if k == (M.fid, 1)
                                            else (k, b) for k, b in items])
 
     return [
@@ -519,11 +543,11 @@ def ElementCases(bt):
                  ("the double names %s and %s" % (Label(S), Label(L)),
                   lambda c: Found(c, "DOUBLE_OWNER", Label(S), Label(L)))]),
         Case("B45 two runs of one file meet on a block", SelfMeet, must={"DOUBLE_OWNER"}, checks=[
-            ("the block both of %s's runs name is said to have two owners, %s twice" % (Label(L), Label(L)),
-             lambda c: any(x.code == "DOUBLE_OWNER" and x.runs == [(lrun.start + half - 1, 1)] and
-                           x.text.count(Label(L)) == 2 for x in c.findings)),
+            ("the block both of %s's runs name is said to have two owners, %s twice" % (Label(M), Label(M)),
+             lambda c: any(x.code == "DOUBLE_OWNER" and x.runs == [(mrun.start + half - 1, 1)] and
+                           x.text.count(Label(M)) == 2 for x in c.findings)),
             ("and the kernel of this tree names that block, and how many",
-             lambda c: c.kernel["double"] == [[lrun.start + half - 1, 1]])]),
+             lambda c: c.kernel["double"] == [[mrun.start + half - 1, 1]])]),
         Case("B9 a FILES header one byte longer than known", Longer, must={"UNDER_GLASS"}, checks=[
             ("the volume is read only: written by a kernel that knows more",
              lambda c: Glass(c, "knows more", "FILES")),

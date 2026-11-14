@@ -3,15 +3,16 @@
  * volume (spec_v2 §16.7 пп.3, 4; §9.2 пп.2–4): the kernel the Deed's BOOT
  * names first, held to the DIGESTS tree of the slot the book stands on with
  * no walk of FILES; when it is not attested, the kernels the book names by
- * tag (tagboot_lectern_tree.c, _ribbon.c, _replay.c), label by label in the
- * order they are asked — kernel, god, boot, system — the newest gen first and
- * of one gen the larger fid, each once.
+ * role of their files (tagboot_lectern_tree.c, _ribbon.c, _replay.c), role by
+ * role in the order they are asked — kernel, boot, system — the newest gen
+ * first and of one gen the larger fid, each once. A file's tags are its
+ * user's and no part of the choice.
  *
  * A kernel is tried as it would be jumped into: what of it may be loaded — no
  * run of an extension this loader does not read (CODEC, COPY), its bytes
  * neither none nor more than KERNEL_MAX_SIZE; its first block as it loads,
  * the Slips of the ribbon laid when it is the last, held to the header the
- * kernel opens with — cheap, and the end of most files that wear `system`;
+ * kernel opens with — cheap, and the end of most files kept in the system's role;
  * then its blocks placed where it is jumped into and held to the book as the
  * medium gives them (Attest) — a Slip's bytes are held by the sums of the
  * stitch that carries them (§2.8) — the digest the ribbon's record of a block
@@ -48,7 +49,7 @@ typedef struct {
     LecternRun       boot_run;
     LecternCandidate boot;
     int              boot_unchecked;
-    LecternFile     *put_off;    /* the first kernel by tag the book could not vouch for */
+    LecternFile     *put_off;    /* the first kernel by role the book could not vouch for */
 } LecternChoice;
 
 static uint64_t BlocksOf(uint64_t bytes)
@@ -66,7 +67,7 @@ static void Kept(LecternChoice *s, const LecternLine *l)
         LecternCopy(&s->tried[s->ntried++], l, sizeof(*l));
 }
 
-/* A kernel the book names by tag, to try: "kernel fid N". */
+/* A kernel the book names by role, to try: "kernel fid N". */
 static void ByTagCandidate(LecternCandidate *c, const LecternFile *f)
 {
     LecternZero(c, sizeof(*c));
@@ -277,21 +278,22 @@ static int Outside(const LecternBook *b, const LecternFile *f)
     return 0;
 }
 
-/* The files followed that wear a label, in the order they are tried, into
- * `out` (room for every file followed): label by label, the newest gen first
- * and of one gen the larger fid, each once — a file naming ground outside
- * the data run is the mount's to lock, and no kernel. Their count. */
+/* The files followed that are kept in a role and not kept deleted, in the order they are tried,
+ * into `out` (room for every file followed): role by role — kernel, boot,
+ * system — the newest gen first and of one gen the larger fid, each once — a
+ * file naming ground outside the data run is the mount's to lock, and no
+ * kernel. Their count. */
 static uint64_t Order(LecternBook *b, LecternFile **out)
 {
+    static const uint64_t roles[] = { TALLY_FILE_ROLE_KERNEL, TALLY_FILE_ROLE_BOOT, TALLY_FILE_ROLE_SYSTEM };
     uint64_t n = 0;
-    for (uint32_t i = 0; i < LECTERN_LABELS; i++) {
+    for (uint32_t i = 0; i < sizeof(roles) / sizeof(roles[0]); i++) {
         uint64_t from = n;
         for (uint64_t f = 0; f < b->nfiles; f++) {
             LecternFile *file = &b->files[f];
-            uint32_t     worn = 0, listed = 0;
-            LecternFileLabeled(b, file->tags, file->ntags, &worn);
-            for (uint64_t k = 0; k < n && !listed; k++) listed = out[k] == file;
-            if (file->gone || !(worn & (1u << i)) || listed || Outside(b, file)) continue;
+            if (file->gone || (file->flags & TALLY_FILE_DELETED) || LecternRoleOf(file->flags) != roles[i] ||
+                Outside(b, file))
+                continue;
             uint64_t at = n++;
             for (; at > from && (out[at - 1u]->gen < file->gen ||
                                  (out[at - 1u]->gen == file->gen && out[at - 1u]->fid < file->fid));
@@ -301,23 +303,6 @@ static uint64_t Order(LecternBook *b, LecternFile **out)
         }
     }
     return n;
-}
-
-/* "the kernel is looked for by its tags: kernel (id 12), god (none), ...". */
-static void LabelsSaid(LecternBook *b)
-{
-    LecternLine l;
-    LineStart(&l);
-    LinePut(&l, "the kernel is looked for by its tags: ");
-    for (uint32_t i = 0; i < LECTERN_LABELS; i++) {
-        int known = (b->labeled & (1u << i)) != 0;
-        LinePut(&l, i ? ", " : "");
-        LinePut(&l, LecternLabelName(i));
-        LinePut(&l, known ? " (id " : " (none)");
-        if (known) LineNum(&l, b->label[i]);
-        if (known) LinePut(&l, ")");
-    }
-    LecternSay(b, &l);
 }
 
 /* "the ribbon past slot i's Tally: N stitch(es) sewn on, seq a to b" — or no
@@ -342,19 +327,17 @@ static void RibbonSaid(LecternBook *b)
 }
 
 /* What the book names past its Tally, in the order volume-read's bootbook.py
- * says it: the labels of TAGS, the ribbon, the labels it coins and the files
- * it labels, the files of FILES that wear one, and the ribbon's records
- * replayed for them. 1, or 0 no room. */
+ * says it: the ribbon, the files it puts in a role, the files of FILES kept in
+ * one, and the ribbon's records replayed for them. 1, or 0 no room. */
 static int BookRead(LecternBook *b)
 {
-    if (!LecternLabels(b) || !LecternSew(b)) return 0;
+    if (!LecternSew(b)) return 0;
     RibbonSaid(b);
     LecternBefore(b);
-    LabelsSaid(b);
     return !b->starved && LecternFiles(b) && LecternReplay(b);
 }
 
-/* The kernels the book names by tag, tried in turn, the ribbon's digests of
+/* The kernels the book names by role, tried in turn, the ribbon's digests of
  * their blocks gathered first: TRY_HELD when one is jumped into, the first
  * put off kept; TRY_UNPLACED when none can be placed; else TRY_REFUSED. */
 static LecternTried ByTag(LecternChoice *s)
@@ -434,7 +417,7 @@ static void Stopped(LecternChoice *s, int unplaced)
         LinePut(&stop, "this volume's deed names no kernel, and its book does not read: ");
         LinePut(&stop, b->why.text);
     } else {
-        LinePut(&stop, "this volume's deed names no kernel, and its book names none by tag");
+        LinePut(&stop, "this volume's deed names no kernel, and its book names none by role");
     }
     LecternSay(b, &stop);
     for (uint32_t i = 0; i <= stop.at; i++) s->kernel->line[i] = stop.text[i];
