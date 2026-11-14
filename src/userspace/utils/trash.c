@@ -9,8 +9,37 @@
 #include "trash_term.h"
 
 BOX_FORM("takes optional things \"the files to put in the trash\"\n"
-         "takes optional words \"restore, then the names of the files in the trash to bring back\"\n"
+         "takes optional words \"list for the files in the trash, or restore and then the names of those to bring back\"\n"
          "gives things\n");
+
+/* list: the files kept deleted, each with its name and size, given back as
+ * `them` for the next command (delete them, to give them up for good). Exit 0. */
+static int list_trash(void) {
+    file_id_t *kept  = NULL;
+    int        total = query_all_deleted(NULL, NULL, &kept);
+    if (total < 0) {
+        println("The trash could not be looked in");
+        return 1;
+    }
+    if (total == 0) {
+        println("The trash is empty");
+        return 0;
+    }
+
+    println("In the trash:");
+    size_t listed = 0;
+    for (int i = 0; i < total; i++) {
+        FileMetadata metadata;
+        if (FileMetadataRead(kept[i], &metadata) != 0) continue;
+        printf("%s  %llu bytes\n", metadata.Filename ? metadata.Filename : "(no name)",
+               (unsigned long long)metadata.Size);
+        FileMetadataRelease(&metadata);
+        kept[listed++] = kept[i];
+    }
+    souvenir_things(kept, listed);
+    free(kept);
+    return 0;
+}
 
 /* restore: each name looked for among the files kept deleted, and the one
  * called so brought back. Says what it could not. Exit 0 when all came back. */
@@ -58,9 +87,14 @@ int main(void) {
         return 1;
     }
     if (word_count > 0) {
-        int failed = strcmp(words[0], "restore") != 0 || word_count == 1 || file_count > 0;
-        if (failed) println("trash: files to put in the trash, or restore and the names of files in it");
-        else failed = restore_named(words + 1, word_count - 1);
+        int failed;
+        if (strcmp(words[0], "list") == 0 && word_count == 1 && file_count == 0) {
+            failed = list_trash();
+        } else {
+            failed = strcmp(words[0], "restore") != 0 || word_count == 1 || file_count > 0;
+            if (failed) println("trash: files to put in the trash, list, or restore and the names of files in it");
+            else failed = restore_named(words + 1, word_count - 1);
+        }
         exit(failed);
         return failed;
     }

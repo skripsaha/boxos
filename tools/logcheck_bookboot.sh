@@ -11,7 +11,7 @@
 # ---------------------------------------------------------------------------
 # bookboot: TagBoot jumps only into a kernel the book says its blocks are the
 # ones it keeps the digests of — BOOT's first, then the kernels the book names
-# by tag (spec_v2 §16.7 пп.3–6)
+# by role (spec_v2 §16.7 пп.3–6)
 #
 # First on the host, no machine: the Lectern TagBoot links, built for the host
 # (tools/tagboot_stand.sh), says of the image and of every landing of
@@ -134,7 +134,7 @@ run_bookboot() {
         chk $? "bookboot (A7): it never jumps: no line of the kernel's"
     fi
 
-    # Landing A9: a second kernel tagged boot in the Tally, BOOT's code flipped.
+    # Landing A9: a second kernel kept in the boot role in the Tally, BOOT's code flipped.
     rm -f "$img"
     if ! python3 tools/volume-read.py build/boxos.img self-test --emit A9 --out "$img" \
             >"$SCRATCH/bookboot.emit" 2>&1; then
@@ -151,7 +151,7 @@ run_bookboot() {
         grep -aqF "TagBoot: ${said:-?}" "$L"
         chk $? "bookboot (A9): TagBoot names BOOT's block — $(grep -a 'TagBoot: the kernel the deed names' "$L" | tr -d '\r' | head -1)"
         grep -aqF "TagBoot: ${spare:-?}" "$L"
-        chk $? "bookboot (A9): and attests the kernel the book names by tag — $(grep -aE 'TagBoot: kernel fid [0-9]+ is attested' "$L" | tr -d '\r' | head -1)"
+        chk $? "bookboot (A9): and attests the kernel the book names by role — $(grep -aE 'TagBoot: kernel fid [0-9]+ is attested' "$L" | tr -d '\r' | head -1)"
         grep -aq "TagBoot: kernel header OK" "$L" && grep -aq "BoxOS Hub" "$L"
         chk $? "bookboot (A9): and jumps into it — the kernel comes up to its Hub"
         ! grep -aqE "PANIC|\[EXCEPTION\]|\[TAGBOOT FATAL\]" "$L"

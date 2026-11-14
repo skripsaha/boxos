@@ -77,7 +77,8 @@
 /* proc.exec.file — proc.exec for one file, named by its id. params =
  * [u64 file id][caller-tag augment]; in_crate = the Luggage bytes alone (none:
  * no luggage); out_crate and auth as proc.exec. The file must be what a name
- * would have started — active, wearing app or utility — else ERR_FILE_NOT_FOUND. */
+ * would have started — active, not deleted, a box or an ELF image by its first
+ * bytes (no tag of the file is asked) — else ERR_FILE_NOT_FOUND. */
 #define SYSTEM_OP_PROC_EXEC_FILE    0x0C
 #define SYSTEM_OP_INFO              0x07
 #define SYSTEM_OP_TLS_FSBASE        0x0A  /* set caller's FS base (its own thread pointer) */

@@ -47,7 +47,10 @@ int FileMetadataRead(file_id_t FileId, FileMetadata *Out);
 void FileMetadataRelease(FileMetadata *Metadata);
 
 /* Whether the file wears a tag whose key is `Key`, bare or with a value:
- * "settings", "log:file". What a file is, the tags it wears say. */
+ * "note", "log:file". A tag is the person's own label for finding a file, and
+ * this is for a program that finds the files its person labelled for it (the
+ * notes finding notes); what a file IS — a program, a settings file, kept by
+ * the system — is never read from its tags. */
 bool FileMetadataWears(const FileMetadata *Metadata, const char *Key);
 
 /*

@@ -13,11 +13,11 @@
 #                         in its ground
 #   logcheck.sh bookboot  the kernel a format-v2 volume's BOOT names, held by
 #                         TagBoot to the book's digests before the jump, and
-#                         the kernels the book names by tag after it: the
+#                         the kernels the book names by role after it: the
 #                         Lectern on the host against volume-read boot, the
 #                         image attested through OVMF, a byte past the
 #                         kernel's end flipped — named, and no jump — and a
-#                         second kernel tagged boot jumped into in its place
+#                         second kernel kept in the boot role jumped into in its place
 #   logcheck.sh mkfs      no boot: the image `make VOLUME_FORMAT=v2` lays held to
 #                         volume-read — its self-test over mkfs's own book, its
 #                         files, its ground — and create_tagfs on grounds past
@@ -2658,13 +2658,11 @@ run_mountfail() {
 
     # ── and the machine can actually USE it, which is the whole point ────────
     #
-    # Autostart reads its files off the volume. A machine whose volume did not
-    # come back says "No autostart files found" and falls back to the embedded
-    # shell — which is exactly what the board did, with a stick in the socket.
+    # The start set is read off the volume. A machine whose volume did not
+    # come back starts none of it — which is exactly what the board did, with a
+    # stick in the socket.
     grep -q "\[AUTOSTART\] Started 'hub.box'" "$L"
     chk $? "hub.box is found on the volume and started"
-    ! grep -q "No autostart files found" "$L"
-    chk $? "and the machine does not fall back to the shell built into it"
 
     grep -q "CPU features" "$L"
     chk $? "an external utility off the volume runs"
@@ -7496,8 +7494,8 @@ run_headcountmut() {
 # the string and leave the tag, so a renamed file answered to its old name and
 # not its new one. The scenario creates a file, renames it, and asks the volume
 # by tag and by name; then trashes it and empties the trash with delete,
-# which asks for the files kept deleted (a plain listing leaves them
-# out on purpose) and goes only on a yes.
+# which takes what `trash list` gave (a plain listing leaves the files kept
+# deleted out on purpose) and goes only on a yes.
 #
 # Then a second file is trashed and deleted BY NAME: the shell's look-up, like
 # a listing, leaves the trash out, so the name comes to delete as a word and
@@ -7521,8 +7519,8 @@ byname_session() {
     # A command, and the answer typed once delete asks for it: "CMD|ANSWER".
     local entry cmd answer asked
     for entry in "create alpha.txt" "name alpha.txt beta.txt" "files beta" "files alpha" \
-                 "info beta.txt" "info alpha.txt" "trash beta.txt" "delete trashed|yes" "files beta" \
-                 "create gamma.txt" "trash gamma.txt" "delete gamma.txt|yes" "files trashed" \
+                 "info beta.txt" "info alpha.txt" "trash beta.txt" "trash list" "delete them|yes" "files beta" \
+                 "create gamma.txt" "trash gamma.txt" "delete gamma.txt|yes" "trash list" \
                  "create delta.txt" "delete delta.txt|no" "delete nosuch.txt"; do
         cmd=${entry%%|*}
         answer=${entry#"$cmd"}; answer=${answer#|}
@@ -7563,17 +7561,20 @@ byname_judge() {
     sed -n '/~ info alpha.txt/,/~ trash beta.txt/p' "$L" | grep -q "there is no alpha.txt here" \
         && ok "$name: not found by its old name" \
         || bad "$name: 'info alpha.txt' still finds the renamed file"
-    sed -n '/~ delete trashed/,/~ files beta/p' "$L" | grep -q "^Deleted 1 file$" \
-        && ok "$name: delete found the file kept deleted, and deleted it on a yes" \
-        || bad "$name: 'delete trashed' did not delete the one trashed file ($(sed -n '/~ delete trashed/,/~ files beta/p' "$L" | grep -m1 -E '^(Deleted|Nothing|The trash)' || echo 'no answer'))"
+    sed -n '/~ trash list/,/~ delete them/p' "$L" | grep -q "^beta.txt  "
+    chk $? "$name: trash list showed the file kept deleted"
+    sed -n '/~ delete them/,/~ files beta/p' "$L" | grep -q "^Deleted 1 file$" \
+        && ok "$name: delete them took the file kept deleted that trash list gave, and deleted it on a yes" \
+        || bad "$name: 'delete them' did not delete the one trashed file ($(sed -n '/~ delete them/,/~ files beta/p' "$L" | grep -m1 -E '^(Deleted|Nothing|The trash)' || echo 'no answer'))"
     sed -n '/~ trash gamma.txt/,/~ delete gamma.txt/p' "$L" | grep -q "^gamma.txt moved to the trash"
     chk $? "$name: gamma.txt went to the trash ($(sed -n '/~ trash gamma.txt/,/~ delete gamma.txt/p' "$L" | grep -m1 -E '^(gamma.txt moved|Could not)' || echo 'no answer'))"
     local section
-    section=$(sed -n '/~ delete gamma.txt/,/~ files trashed/p' "$L")
+    section=$(sed -n '/~ delete gamma.txt/,/~ trash list/p' "$L")
     echo "$section" | grep -q "^  gamma\.txt  " && echo "$section" | grep -q "^Deleted 1 file$"
     chk $? "$name: delete by name found the trashed file in the trash, showed it, and deleted it on a yes ($(echo "$section" | grep -m1 -E '^(Deleted|Nothing|There is no)' || echo 'no answer'))"
-    sed -n '/~ files trashed/,/~ create delta.txt/p' "$L" | grep -q "No files found"
-    chk $? "$name: and the trash is empty after it ($(sed -n '/~ files trashed/,/~ create delta.txt/p' "$L" | grep -m1 -E '^(No files found|gamma\.txt)' || echo 'no answer'))"
+    section=$(sed -n '/~ delete gamma.txt/,/~ create delta.txt/p' "$L" | sed -n '/~ trash list/,$p')
+    echo "$section" | grep -q "^The trash is empty$"
+    chk $? "$name: and the trash is empty after it ($(echo "$section" | grep -m1 -E '^(The trash is empty|gamma\.txt)' || echo 'no answer'))"
     section=$(sed -n '/~ delete delta.txt/,/~ delete nosuch.txt/p' "$L")
     echo "$section" | grep -q "does not go to the trash" && echo "$section" | grep -q "^Nothing was deleted$"
     chk $? "$name: a file out of the trash is shown with the warning that it is gone for good, and kept on a no ($(echo "$section" | grep -m1 -E '^(Deleted|Nothing|There is no)' || echo 'no answer'))"

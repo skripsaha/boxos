@@ -1,8 +1,8 @@
 /* delete — files gone for good, after a look at what goes and a yes.
  *
  *   delete notes.txt              that file
- *   delete them                   what the last command gave
- *   delete trashed                everything in the trash
+ *   delete them                   what the last command gave: after `trash list`,
+ *                                 everything in the trash
  *   delete old.txt                a file in the trash, by its name
  *
  * Any file, in the trash or out of it. What goes is shown first — each file's
@@ -32,7 +32,7 @@
 #include "box/system.h"
 
 BOX_FORM("takes optional things \"the files to delete\"\n"
-         "takes optional words \"trashed for everything in the trash, or the name of a file in it\"\n");
+         "takes optional words \"the name of a file in the trash\"\n");
 
 /* How many files are shown before the rest are counted. */
 #define SHOWN_FILES 12u
@@ -79,7 +79,7 @@ static bool from_trash(Going *going, const file_id_t *trashed, int total, const 
         return false;
     }
     if (count > 1) {
-        printf("%s is in the trash %d times; delete trashed takes them all\n", name, count);
+        printf("%s is in the trash %d times; trash list shows them, and delete them takes them all\n", name, count);
         return false;
     }
     if (!going_add(going, found)) {
@@ -186,7 +186,7 @@ int main(void)
         return 1;
     }
     if (thing_count == 0 && word_count == 0) {
-        println("delete: say which files — their names, them, or trashed for everything in the trash");
+        println("delete: say which files — their names, or them (trash list gives what is in the trash)");
         exit(1);
         return 1;
     }
@@ -203,12 +203,7 @@ int main(void)
         total = 0;
     }
     for (size_t i = 0; i < word_count; i++) {
-        if (strcmp(words[i], "trashed") == 0) {
-            if (total == 0) println("The trash is empty");
-            for (int t = 0; t < total && whole; t++) whole = going_add(&going, trashed[t]);
-        } else {
-            whole &= from_trash(&going, trashed, total, words[i]);
-        }
+        whole &= from_trash(&going, trashed, total, words[i]);
     }
     free(trashed);
 

@@ -91,7 +91,8 @@ static uint64_t autostart_find(const char *name)
         for (uint32_t i = 0; i < page.delivered; i++) {
             TagFSMetadata meta;
             if (tagfs_get_metadata(file_ids[i], &meta) != 0) continue;
-            bool found = (meta.flags & TAGFS_FILE_ACTIVE) && strcmp(meta.filename, name) == 0;
+            bool found = (meta.flags & TAGFS_FILE_ACTIVE) && !(meta.flags & TAGFS_FILE_DELETED) &&
+                         strcmp(meta.filename, name) == 0;
             tagfs_metadata_free(&meta);
             if (found) return file_ids[i];
         }
@@ -208,7 +209,7 @@ static process_t *autostart_consider(uint64_t file_id, bool again)
 {
     TagFSMetadata meta;
     if (tagfs_get_metadata(file_id, &meta) != 0) return NULL;
-    if (!(meta.flags & TAGFS_FILE_ACTIVE)) {
+    if (!(meta.flags & TAGFS_FILE_ACTIVE) || (meta.flags & TAGFS_FILE_DELETED)) {
         tagfs_metadata_free(&meta);
         return NULL;
     }
