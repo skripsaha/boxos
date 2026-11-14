@@ -88,12 +88,22 @@ orig, copy = files.get("dedup-a.d"), files.get("dedup-b.d")
 if not orig or not copy:
     print("bad volume-read finds no dedup-a.d and dedup-b.d: %s" % sorted(files)[:8])
     sys.exit(0)
+def order(runs):
+    return [s + i for kind, s, c, *_ in runs if kind != "hole" for i in range(c)]
+
+def kinds(runs):
+    return sorted({kind for kind, *_ in runs})
+
 ob, cb = blocks(orig["runs"]), blocks(copy["runs"])
+oq, cq = order(orig["runs"]), order(copy["runs"])
 shared = {s + i for c in b["census"]["claims"] if c["kind"] == "shared" for s, k in c["runs"] for i in range(k)}
 print(("ok " if b.get("verdict") == "consistent" else "bad ") + "volume-read finds the book %s" % b.get("verdict"))
-print(("ok " if len(ob) == n and cb == ob and cb <= shared else "bad ") +
-      "the copy lies on the original's blocks, every one, by runs SHARED: %u block(s) of the original, %u of the "
-      "copy, %u in common, %u of them named by a run SHARED" % (len(ob), len(cb), len(ob & cb), len(cb & shared)))
+print(("ok " if len(oq) == n and cq == oq and kinds(copy["runs"]) == ["shared"] and kinds(orig["runs"]) == ["data"]
+       and cb <= shared else "bad ") +
+      "the copy lies on the original's blocks, block for block, by runs SHARED: %u block(s) of the original, %u of "
+      "the copy, %u at the same place in both, the copy's runs %s and the original's %s, %u of the copy's blocks "
+      "claimed shared" % (len(oq), len(cq), sum(1 for x, y in zip(oq, cq) if x == y), kinds(copy["runs"]),
+                          kinds(orig["runs"]), len(cb & shared)))
 old = {f["fid"] for f in a["files"]}
 new = set().union(*[blocks(f["runs"]) for f in b["files"] if f["fid"] not in old and f["name"] != "dedup-b.d"])
 g0, g1 = ground(a), ground(b)

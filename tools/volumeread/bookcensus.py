@@ -552,7 +552,8 @@ class BookCensus:
         return {"fid": fid, "state": state, "name": fs.name.decode("utf-8", "replace"), "size": fs.size,
                 "gen": fs.gen, "flags": fs.flags, "tags": list(fs.tags),
                 "tag_text": [self.mount.tags[t].Text().decode("utf-8", "replace") for t in fs.tags if t in self.mount.tags],
-                "runs": [["hole" if r.hole else "data", r.start, r.count, r.birth] for r in fs.runs],
+                "runs": [["hole" if r.hole else "shared" if tally.RunShared(r) else "data", r.start, r.count, r.birth]
+                         for r in fs.runs],
                 "extents": [list(x) for x in fs.Ground()], "slips": len(fs.slips), "visible": True,
                 "sha256": self.Sha256(fid)}
 

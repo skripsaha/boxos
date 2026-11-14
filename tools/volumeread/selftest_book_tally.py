@@ -566,7 +566,11 @@ def SharedCases(bt, S, Parcel):
             ("%s still reads, and nothing is said" % Label(S),
              lambda c: c.Sha256(S.fid) == bt.c0.Sha256(S.fid) and not c.findings),
             ("its first block is claimed as shared by it",
-             lambda c: any(x.kind == "shared" and x.runs == [(run.start, 1)] for x in c.claims)), mounts]),
+             lambda c: any(x.kind == "shared" and x.runs == [(run.start, 1)] for x in c.claims)),
+            ("and the files the census prints name that run shared and the rest as they were",
+             lambda c: [r[0] for r in next(f for f in c.Json()["files"] if f["fid"] == S.fid)["runs"]] ==
+             ["shared"] + ["hole" if r.hole else "data" for r in ([run] if run.count > 1 else []) + S.runs[1:]]),
+            mounts]),
         Case("B12b a run SHARED over the DATA of another live file", Shared(L.runs[0].start), checks=[
             ("nothing is said: one DATA owner and one shared on the block", lambda c: not c.findings),
             ("%s reads the block of %s it shares, and its own past it" % (Label(S), Label(L)),

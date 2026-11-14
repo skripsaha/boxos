@@ -337,25 +337,33 @@ typedef struct {
     uint64_t steps;
 } FragCount;
 
-/* A file's ground, Strip by Strip in its order: a gap is a DATA Strip that does
- * not begin where the DATA Strip before it ended — a hole lies on no ground, so
- * the walk of ground passes over it, and a read crosses it with no seek. */
+/* A file's own ground, Strip by Strip in its order: a gap is a DATA Strip that
+ * does not begin where the DATA Strip before it ended — a hole lies on no
+ * ground, so the walk of ground passes over it, and a read crosses it with no
+ * seek. A SHARED Strip lies where the original it was laid on lies (dedup.h):
+ * the seek onto it and off it is what sharing costs, and no defrag takes it
+ * back (plot.h, PlotStretchScattered) — so it ends a stretch of the file's
+ * own runs, and gaps and steps are counted inside the stretches alone. */
 static void FragAdd(FragCount* frag, const FileRecord* rec)
 {
     if (!(rec->flags & TAGFS_FILE_ACTIVE))
         return;
     StripWalk walk;
     Strip     run;
-    uint64_t  blocks = 0, end = 0;
+    uint64_t  blocks = 0, end = 0;     /* of the stretch under way */
     StripWalkBegin(rec, &walk);
     while (StripWalkNextGround(&walk, &run)) {
+        if (run.kind == STRIP_SHARED) {
+            frag->steps += blocks > 1 ? blocks - 1 : 0;
+            blocks = 0;
+            continue;
+        }
         if (blocks > 0 && run.start != end)
             frag->gaps++;
         blocks += run.count;
         end     = run.start + run.count;
     }
-    if (blocks > 1)
-        frag->steps += blocks - 1;
+    frag->steps += blocks > 1 ? blocks - 1 : 0;
     frag->files++;
 }
 
