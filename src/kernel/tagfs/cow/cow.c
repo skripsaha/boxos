@@ -3,18 +3,6 @@
 #include "../disk_book/disk_book.h"
 #include "../tagfs.h"
 
-/* Said once a boot: the refusal itself is every caller's, on every request. */
-static bool g_refusal_said;
-
-error_t TagFS_SnapshotRefused(const char *asked)
-{
-    if (!__atomic_exchange_n(&g_refusal_said, true, __ATOMIC_ACQ_REL))
-        kprintf("[TagFS] %s is refused: snapshots arrive with format v2 — on format v1 a "
-                "snapshot could be taken but never read, so every request for one is "
-                "answered ERR_UNSUPPORTED\n", asked ? asked : "a snapshot request");
-    return ERR_UNSUPPORTED;
-}
-
 // ----------------------------------------------------------------------------
 // The snapshots an earlier kernel left, read at mount
 // ----------------------------------------------------------------------------

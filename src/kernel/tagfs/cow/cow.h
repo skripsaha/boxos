@@ -55,9 +55,6 @@ typedef struct __packed {
 
 STATIC_ASSERT(sizeof(CowManifest) == 4096, "CowManifest must be 4096 bytes");
 
-/* The answer every snapshot request gets on this format — create, delete,
- * list or info, named in `asked`: ERR_UNSUPPORTED, said once a boot. */
-error_t TagFS_SnapshotRefused(const char *asked);
 
 /* One snapshot an earlier kernel left, as read: what its manifest entry says
  * of it, and every block its redirects say it kept, each once. */

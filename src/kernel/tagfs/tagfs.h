@@ -413,10 +413,6 @@ int  file_table_update(uint64_t file_id, uint32_t meta_block, uint32_t meta_offs
 int  file_table_delete(uint64_t file_id);
 error_t file_table_flush(void);
 
-/* What tagfs_get_metadata filled in, let go. The pool itself is
- * metadata_pool/meta_pool.h's. */
-void     tagfs_metadata_free(TagFSMetadata* meta);
-
 // ----------------------------------------------------------------------------
 // Main TagFS API
 // ----------------------------------------------------------------------------
@@ -769,6 +765,8 @@ int64_t  TagFSAllocatorRederive(void);
 #endif
 
 int         tagfs_get_metadata(uint64_t file_id, TagFSMetadata* out);
+/* What tagfs_get_metadata filled in, let go. */
+void        tagfs_metadata_free(TagFSMetadata* meta);
 TagFSState* tagfs_get_state(void);
 
 /* The mounted volume's LAYOUT, for the code of format v1 that walks what it
@@ -881,8 +879,9 @@ bool     TagFSTagMatches(uint32_t tag_id, const TagSpelling* pattern);
  * only once the last caller is out. */
 bool     TagFSTagSpelling(uint32_t tag_id, TagSpelling* out, bool* is_system);
 
-// Snapshots: a format-v1 volume answers every request for one ERR_UNSUPPORTED
-// (TagFS_SnapshotRefused, tagfs/cow/cow.h); they arrive with format v2.
+/* The answer every snapshot request gets — create, delete, list or info,
+ * named in `asked`: ERR_UNSUPPORTED, said once a boot. */
+error_t  TagFS_SnapshotRefused(const char* asked);
 
 // Accessor Functions
 // ============================================================================

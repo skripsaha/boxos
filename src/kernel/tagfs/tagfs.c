@@ -2803,6 +2803,15 @@ static int tagfs_get_metadata_inside(uint64_t file_id, TagFSMetadata *out)
     return copied;
 }
 
+void tagfs_metadata_free(TagFSMetadata *meta)
+{
+    if (meta->filename) { kfree(meta->filename); meta->filename = NULL; }
+    if (meta->tag_ids)  { kfree(meta->tag_ids);  meta->tag_ids  = NULL; }
+    if (meta->extents)  { kfree(meta->extents);  meta->extents  = NULL; }
+    meta->tag_count    = 0;
+    meta->extent_count = 0;
+}
+
 TagFSState *tagfs_get_state(void)
 {
     return &g_state;
@@ -2903,6 +2912,22 @@ bool TagFSTagMatches(uint32_t tag_id, const TagSpelling *pattern)
     bool matches = TagFSTagSpelling(tag_id, &tag, NULL) && TagPatternMatches(pattern, &tag);
     tagfs_leave();
     return matches;
+}
+
+// ----------------------------------------------------------------------------
+// Snapshots
+// ----------------------------------------------------------------------------
+
+/* Said once a boot: the refusal itself is every caller's, on every request. */
+static bool g_refusal_said;
+
+error_t TagFS_SnapshotRefused(const char *asked)
+{
+    if (!__atomic_exchange_n(&g_refusal_said, true, __ATOMIC_ACQ_REL))
+        kprintf("[TagFS] %s is refused: snapshots arrive with format v2 — on format v1 a "
+                "snapshot could be taken but never read, so every request for one is "
+                "answered ERR_UNSUPPORTED\n", asked ? asked : "a snapshot request");
+    return ERR_UNSUPPORTED;
 }
 
 // ----------------------------------------------------------------------------
