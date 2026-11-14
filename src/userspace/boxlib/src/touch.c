@@ -486,7 +486,7 @@ int touch_await(TouchTag tag, Touch *out, uint32_t timeout_ms)
      * deadline, and a foreign event only costs a stash place and a park. */
     uint8_t mbuf[200];
     ManifestBuilder mb;
-    uint8_t params[8];
+    uint8_t params[16];
     memcpy(params, &tag, sizeof(TouchTag));
 
     /* ONE deadline for the whole call, taken before the first park. A park
@@ -524,16 +524,26 @@ int touch_await(TouchTag tag, Touch *out, uint32_t timeout_ms)
         /* SYSTEM_OP_TOUCH_AWAIT — this both ensures the REST claim and parks
          * the strand in PROC_WAITING with the kernel timeout; KTouchPush flips
          * it back to PROC_WORKING the moment a slot is published into its
-         * TouchRing. params: [u32 tag][u32 timeout_ms]. Zero goes through as
-         * zero: the kernel arms no timer for it and the park lasts until an
-         * event is published (it used to be turned into 30 s here, so a strand
-         * that asked to wait forever was woken every half minute for nothing —
-         * and a lost wakeup was blanketed instead of being seen, which
-         * Nightwatch does now: TOUCH UNDELIVERED). */
+         * TouchRing. params: [u32 tag][u32 timeout_ms][u64 taken]. Zero goes
+         * through as zero: the kernel arms no timer for it and the park lasts
+         * until an event is published (it used to be turned into 30 s here, so
+         * a strand that asked to wait forever was woken every half minute for
+         * nothing — and a lost wakeup was blanketed instead of being seen,
+         * which Nightwatch does now: TOUCH UNDELIVERED).
+         *
+         * `taken` is how far this strand had taken its ring when it decided to
+         * sleep. The op is not handled at once, and the wait below goes on
+         * meanwhile: an event that lands before the handler is taken here and
+         * the strand goes on. The kernel parks it only while its ring still
+         * stands where it stood at the decision — anything taken since means
+         * the strand is no longer waiting (touch_ops.c, SysTouchAwait). */
+        TouchRing *rr    = touch_ring();
+        uint64_t   taken = rr ? __atomic_load_n(&rr->hdr.head, __ATOMIC_RELAXED) : 0;
         memcpy(params + 4, &left, sizeof(uint32_t));
+        memcpy(params + 8, &taken, sizeof(uint64_t));
         if (ManifestBuilderInit(&mb, mbuf, sizeof(mbuf)) != 0) return -ERR_INVALID_ARGS;
         if (ManifestBuilderAddOp(&mb, DECK_SYSTEM, SYSTEM_OP_TOUCH_AWAIT, 0,
-                                 CRATE_INDEX_NONE, CRATE_INDEX_NONE, params, 8) != 0)
+                                 CRATE_INDEX_NONE, CRATE_INDEX_NONE, params, sizeof(params)) != 0)
             return -ERR_INVALID_ARGS;
         if (ManifestBuilderFinalize(&mb) != 0) return -ERR_INVALID_ARGS;
         int push_rc = ManifestSubmitNoWait((Manifest *)mbuf, NULL, 0, 0);

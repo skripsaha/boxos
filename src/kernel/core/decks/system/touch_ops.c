@@ -225,7 +225,8 @@ static int SysTouchSend(const ManifestOp *op, Crate *crates,
 }
 
 /* SYSTEM_OP_TOUCH_AWAIT
- *   params: [u32 tag_id][u32 timeout_ms] (8 bytes)
+ *   params: [u32 tag_id][u32 timeout_ms][u64 taken] (16 bytes) — `taken` is
+ *   the caller's ring head when it decided to sleep (boxlib touch.c)
  *
  * Ensures a REST claim on tag_id, applies LEVEL synthetic-touch sync,
  * arms a TouchQueueArmWake timeout, parks the caller (PROC_WAITING).
@@ -236,12 +237,14 @@ static int SysTouchAwait(const ManifestOp *op, Crate *crates,
 {
     (void)crates; (void)crate_count;
     if (!ctx || !ctx->proc) return ERR_INVALID_ARGUMENT;
-    if (op->param_size < 8) return ERR_INVALID_ARGUMENT;
+    if (op->param_size < 16) return ERR_INVALID_ARGUMENT;
 
     TouchTag tag;
     uint32_t timeout_ms;
+    uint64_t taken;
     memcpy(&tag,        op->params,     sizeof(TouchTag));
     memcpy(&timeout_ms, op->params + 4, sizeof(uint32_t));
+    memcpy(&taken,      op->params + 8, sizeof(uint64_t));
     if (tag == TOUCH_TAG_INVALID) return ERR_INVALID_ARGUMENT;
 
     /* Ensure a REST claim exists. */
@@ -333,6 +336,18 @@ static int SysTouchAwait(const ManifestOp *op, Crate *crates,
      * tail bump is a lock xadd, a full barrier); the sleeper does. One mfence
      * per park.
      *
+     * ‼ AND A RING THAT LOOKS EMPTY IS NOT A STRAND THAT IS WAITING. The
+     * re-check above sees only what is still in the ring. An event that landed
+     * in the window and was ALREADY TAKEN by the caller's wait in userspace
+     * leaves tail == head, the strand has gone on past touch_await, and parking
+     * it here put it to sleep with nothing left to wake it. MEASURED: the hub's
+     * prompt parked for keeper:settled, its keeping strand said it, and the
+     * prompt never woke — 6 boots in 80, UEFI 4 cores, two K-Cores handling
+     * the send and the await at once; every CPU idle, the shell never shown.
+     * So the caller says how far it had taken its ring when it decided to
+     * sleep (`taken`), and a head that has moved since means it is no longer
+     * waiting — the futex rule, as addr_park keeps it.
+     *
      * ERR_WOULD_BLOCK is returned in both branches, and nothing is pushed
      * for it — see the note below on why. */
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
@@ -341,8 +356,8 @@ static int SysTouchAwait(const ManifestOp *op, Crate *crates,
         TouchRing *rr = (TouchRing *)vmm_phys_to_virt(ctx->proc->touch_ring_phys);
         if (rr) {
             uint64_t tail = __atomic_load_n(&rr->hdr.tail, __ATOMIC_ACQUIRE);
-            uint64_t head = __atomic_load_n(&rr->hdr.head, __ATOMIC_RELAXED);
-            if (tail != head) {
+            uint64_t head = __atomic_load_n(&rr->hdr.head, __ATOMIC_ACQUIRE);
+            if (tail != head || head != taken) {
                 process_set_state(ctx->proc, PROC_WORKING);
             }
         }
