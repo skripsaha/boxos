@@ -120,26 +120,6 @@ void InkGleanLocked(uint64_t fid, const RecordWhere* from, const uint8_t* packed
     InkGenLaidLocked(gen);
 }
 
-// ----------------------------------------------------------------------------
-// A Spare, when an Ink had none
-// ----------------------------------------------------------------------------
-
-/* What the loops below do with an answer that is not final: INK_AGAIN goes
- * round again; ERR_WOULD_BLOCK does too, once a Spare is made. A Spare the
- * volume has no ground for while a Settle cycle would give some back is the
- * Ink's ERR_WOULD_BLOCK, nothing changed: its caller waits for the cycle its
- * own way (helm.h, settle_ops.h) — no cycle is run beneath an Ink. A book has
- * no Spare: its ERR_WOULD_BLOCK is the caller's to wait on as it comes. */
-bool InkGoesRound(error_t* rc, InkSpares spares)
-{
-    if (*rc == INK_AGAIN)
-        return true;
-    if (*rc != ERR_WOULD_BLOCK || spares != INK_MAKES_SPARES || InkState()->format == DEED_FORMAT_V2)
-        return false;
-    *rc = PoolSpareMake();
-    return *rc == OK;
-}
-
 /* The record the Plot commits — the file's fields as `cur` has them, the
  * Plot's size and runs, and the time it was written — in both copies: the
  * medium's packed from the Plot's runs, as format v1 always packed them, and

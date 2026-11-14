@@ -79,7 +79,7 @@ typedef struct {
 } InkNewStakes;
 
 /* An answer that is not final, gone round: INK_AGAIN always; ERR_WOULD_BLOCK on
- * format v1, once a Spare is made (ink_v1.c). */
+ * format v1, once a Spare is made (ink.c). */
 bool     InkGoesRound(error_t* rc, InkSpares spares);
 
 /* Format v1's second halves (ink_v1.c), under the state lock. */

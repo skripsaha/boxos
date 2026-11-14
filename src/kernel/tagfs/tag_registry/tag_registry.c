@@ -897,6 +897,30 @@ error_t TagRegistryFlushFor(TagRegistry* reg, uint32_t id) {
     return rc != OK ? rc : ERR_TAGFS_METADATA_ERROR;
 }
 
+/*
+ * ‼ THE NUMBERS MOVE, AND NOTHING IS SIZED BY THEM.
+ *
+ * next_id moves past the ids the records of the pool wear that a rolled-back
+ * registry no longer names. It used to bound a table indexed by id, which had
+ * to grow to cover the numbers before they moved, or every reader of an id
+ * past its end read the heap's next block (Z08-1). The id's hash holds only
+ * the entries there are, so an id no tag has is found absent at any height,
+ * and moving the numbers takes nothing. Never past what the registry's book
+ * can carry (reg->id_most).
+ */
+void TagRegistryNumbersFrom(TagRegistry* reg, uint32_t next) {
+    TagFSLockTake(&reg->lock);
+    if (next > reg->id_most + 1u)
+        next = reg->id_most + 1u;
+    if (next > reg->next_id) {
+        reg->next_id      = next;
+        reg->written_next = next;
+    }
+    reg->coined_next = reg->next_id;
+    reg->coined_text = 0;
+    TagFSLockDrop(&reg->lock);
+}
+
 void TagRegistryCoinedRange(TagRegistry* reg, uint32_t* lo, uint32_t* hi) {
     TagFSLockTake(&reg->lock);
     *lo = reg->coined_next;

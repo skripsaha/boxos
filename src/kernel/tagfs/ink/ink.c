@@ -278,6 +278,27 @@ error_t InkMayChange(uint64_t fid, uint32_t flags, const Strip* runs, uint32_t r
 }
 
 // ----------------------------------------------------------------------------
+// An answer that is not final
+// ----------------------------------------------------------------------------
+
+/* What the loops below do with an answer that is not final: INK_AGAIN goes
+ * round again; ERR_WOULD_BLOCK does too on format v1, once a Spare is made. A
+ * Spare the volume has no ground for while a Settle cycle would give some back
+ * is the Ink's ERR_WOULD_BLOCK, nothing changed: its caller waits for the
+ * cycle its own way (helm.h, settle_ops.h) — no cycle is run beneath an Ink. A
+ * book has no Spare: its ERR_WOULD_BLOCK is the caller's to wait on as it
+ * comes. */
+bool InkGoesRound(error_t* rc, InkSpares spares)
+{
+    if (*rc == INK_AGAIN)
+        return true;
+    if (*rc != ERR_WOULD_BLOCK || spares != INK_MAKES_SPARES || InkState()->format == DEED_FORMAT_V2)
+        return false;
+    *rc = PoolSpareMake();
+    return *rc == OK;
+}
+
+// ----------------------------------------------------------------------------
 // A Plot's size and extents
 // ----------------------------------------------------------------------------
 
