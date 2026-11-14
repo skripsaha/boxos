@@ -3,6 +3,7 @@
 
 #include "../../../lib/kernel/ktypes.h"
 #include "../../core/error/error.h"
+#include "../lock_rank/lock_rank.h"
 
 /*
  * The block map — which blocks of the data run are taken, and the allocator
@@ -231,6 +232,18 @@ error_t TagFSTakeRun(uint32_t want, uint64_t hint, uint64_t *start, uint32_t *go
 error_t AllotmentTake(uint64_t fid, uint32_t want, uint64_t file_blocks, uint64_t hint,
                       uint64_t *start, uint32_t *got);
 void    AllotmentRelease(uint64_t fid);
+
+/*
+ * MapLock: the lock the windows — and the map — are read and changed under,
+ * the volume's state lock.
+ * AllotmentTakeBackLocked, under it: every window but file `keep_fid`'s taken
+ * back for a take short of room, said — whether there was one.
+ * AllotmentDropAll: every window let go of with the volume, the door shut —
+ * nothing given back, nothing written.
+ */
+TagFSLock *MapLock(void);
+bool       AllotmentTakeBackLocked(uint64_t keep_fid);
+void       AllotmentDropAll(void);
 
 /*
  * A book's data (spec_v2 §3.1): its map is derived from the names that own its

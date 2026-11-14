@@ -12,11 +12,6 @@
 
 BlockMapState g_map;
 
-TagFSLock *MapLock(void)
-{
-    return &tagfs_get_state()->lock;
-}
-
 BlockMapPage *MapReady(uint32_t w)
 {
     uint8_t slot = g_map.win[w].slot;

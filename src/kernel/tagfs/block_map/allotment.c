@@ -108,6 +108,11 @@ static bool AllotmentOnBook(void)
     return tagfs_get_state()->format == DEED_FORMAT_V2;
 }
 
+TagFSLock *MapLock(void)
+{
+    return &tagfs_get_state()->lock;
+}
+
 bool AllotmentTakeBackLocked(uint64_t keep_fid)
 {
     uint32_t files  = 0;

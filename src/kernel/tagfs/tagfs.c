@@ -2309,6 +2309,7 @@ static void tagfs_clear_the_ground(void)
     FileMapDestroy(g_state.files);
     g_state.files = NULL;
 
+    AllotmentDropAll();
     BlockMapUnmount();
 
     if (g_state.braid) {
