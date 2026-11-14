@@ -132,6 +132,13 @@ void CommonplaceStrike(uint64_t digest, uint64_t block)
             s_entry[i].mark |= COMMONPLACE_GONE;
 }
 
+void CommonplaceKeep(uint64_t digest, uint64_t block, uint64_t since)
+{
+    for (uint64_t i = DigestFrom(digest); i < s_n && s_entry[i].digest == digest; i++)
+        if (s_entry[i].block == block)
+            s_entry[i].since = since;
+}
+
 void CommonplaceRetire(uint64_t walked, uint64_t lap)
 {
     uint64_t k = 0;
