@@ -1049,11 +1049,8 @@ void kernel_main(void)
     kprintf("Starting userspace...\n");
     kprintf("\n");
 
-    // ============================================================
-    // AUTOSTART: Query TagFS for files tagged "autostart" and
-    // spawn them automatically, as specified in the BoxOS tag spec.
-    // ============================================================
-    /* The volume's own programs. Extracted from here into autostart.c, because
+    /* The system's start set — display.box, hub.box, autostart.box — by name.
+     * Extracted from here into autostart.c, because
      * it was a hundred and ninety lines executed once at whatever moment this
      * line happened to be reached — and a machine whose medium finished
      * enumerating a second later came up empty and stayed that way. */
@@ -1061,13 +1058,13 @@ void kernel_main(void)
     RiseInit();
     int autostart_count = AutostartLaunchFromVolume(&initial_proc);
 
-    /* Nothing is started in its place: with no program from a volume the
-     * machine waits, saying for what, on the Emergency Screen. A volume that
-     * comes starts its own (AutostartWatchVolume). */
+    /* Nothing is started in its place: with none of the start set on a volume
+     * the machine waits, saying for what, on the Emergency Screen. A volume
+     * that comes starts its own (AutostartWatchVolume). */
     if (!initial_proc)
     {
         if (AutostartVolumeHere())
-            kprintf("[AUTOSTART] the volume asks for no program at start; a volume that arrives "
+            kprintf("[AUTOSTART] the volume holds none of the start set; a volume that arrives "
                     "later starts its own\n");
         else
             kprintf("[AUTOSTART] no volume is here yet — its programs start when it arrives\n");

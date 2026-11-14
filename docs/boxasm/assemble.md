@@ -67,7 +67,7 @@ text`, and the build goes on.
 
 Assembling again replaces the program. The file of that name wearing every
 tag the new one will wear is put out of the way once the new one is written
-whole, and its other tags (`favorite`, `autostart`) pass to the new one.
+whole, and its other tags (`favorite`, `fun`) pass to the new one.
 When that is not one file, `assemble` asks:
 
 ```text

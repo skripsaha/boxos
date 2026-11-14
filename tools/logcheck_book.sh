@@ -771,7 +771,7 @@ BIG_EOF
     # shellcheck disable=SC2086
     set -- $parts
     if [ $# != 4 ] || ! python3 tools/make_mbr.py "$img" "$1,$2,7f,boot" "$3,$4,ef" >"$SCRATCH/big.mbr" 2>&1 ||
-       ! tools/create_tagfs --v2 "$img" build/box/hub.box "utility,system,app,autostart" \
+       ! tools/create_tagfs --v2 "$img" build/box/hub.box "utility,system,app" \
             build/box/quilltest.box "app,utility,test,system" build/box/bye.box "utility,system" \
             build/kernel.bin "system" \
             >"$SCRATCH/big.mkfs" 2>&1; then

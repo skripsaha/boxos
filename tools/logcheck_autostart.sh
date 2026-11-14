@@ -17,7 +17,7 @@
 # keeps a file's tags as create_tagfs gave them, its name's stem first, so it
 # is held first there, as it always was; a book keeps them by ascending id
 # (spec_v2 §2.8, Born), the well-known tags before the stem — `display.box`
-# wears `system,utility,autostart,display` off a book — so it is held among.
+# wears `system,utility,display` off a book — so it is held among.
 autostart_wears() {
     local at='([^)]*,)?' end='[,)]'
     [ "$(stand_format)" = v1 ] && { at=''; end=','; }

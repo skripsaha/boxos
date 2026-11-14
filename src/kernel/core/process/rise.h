@@ -7,11 +7,10 @@
  * Rise — a program that falls, raised again by the system.
  *
  * A program whose box says `rise` (its life part, box_reader.h) and that the
- * system started — the autostart of a volume, or a rise before it — is watched
- * from its start. When it falls (proc_exit.h: PROC_EXIT_CRASHED, or
- * PROC_EXIT_STACK_OVERFLOW) it is raised again from its file the way the
- * autostart starts it — the file still wearing autostart and a program's tag,
- * and not in the trash — after a pause: 1 s, twice the last for every fall in
+ * system started — the start set of a volume, a program autostart.box started
+ * from the person's list, or a rise before it — is watched from its start.
+ * When it falls (proc_exit.h: PROC_EXIT_CRASHED, or PROC_EXIT_STACK_OVERFLOW)
+ * it is raised again from its file, still a live file, after a pause: 1 s, twice the last for every fall in
  * a row, 16 s at most; a program that ran a minute before it fell starts over
  * at 1 s. Three falls in a row, each within 10 s of its start, and it is let
  * be: raised again it would only fall again. An end that is no fall — an

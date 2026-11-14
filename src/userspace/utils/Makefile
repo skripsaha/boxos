@@ -71,7 +71,7 @@ UTILS = create show files tag untag name trash delete assemble \
         playtime lavalamp finish taskboard memmap hexer stringview \
         calculate difference copy typer flame checksum passport aquarium \
         nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits \
-        edit seek retag read inside settings scratchpad garden gardener random sand coinflip dice casino seabattle whale hangman duppo
+        edit seek retag read inside settings autostart scratchpad garden gardener random sand coinflip dice casino seabattle whale hangman duppo
 
 .PHONY: all clean
 
