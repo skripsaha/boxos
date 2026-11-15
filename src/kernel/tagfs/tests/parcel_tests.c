@@ -653,9 +653,11 @@ static bool ParcelConveyed(ParcelHeld* h, Strip* runs, uint32_t nruns, Strip* ex
     Plot        p;
     BookSplice* sp = NULL;
     memset(&p, 0, sizeof(p));
-    p.fid       = 9;
-    p.runs      = runs;
-    p.run_count = nruns;
+    p.fid        = 9;
+    p.runs       = runs;
+    p.run_count  = nruns;
+    p.window_at  = 0;                /* the Plot's window is the whole record */
+    p.window_was = h->rec->blocks;
     *count = UINT64_MAX;
     FileRecordRelease(h->next);
     kfree(h->freed);
