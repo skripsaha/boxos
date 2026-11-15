@@ -1,5 +1,5 @@
 /*
- * TagBoot's Lectern — a format-v2 volume's book read the way the kernel's
+ * TagBoot's Lectern — a volume's book read the way the kernel's
  * mount stands on it, and Attest: a kernel's blocks held to the digests the
  * book keeps of them before the loader jumps (tagboot_lectern.h).
  *

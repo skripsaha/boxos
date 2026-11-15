@@ -1,6 +1,6 @@
 /*
- * The Lectern's replay of the ribbon (spec_v2 §16.7 п.5, §4.5 п.5 pass 2,
- * §3.7): the stitches sewn on (tagboot_lectern_ribbon.c), their records
+ * The Lectern's replay of the ribbon, as the mount's pass 2 replays it: the
+ * stitches sewn on (tagboot_lectern_ribbon.c), their records
  * replayed for the files the Lectern follows — those kept in a role, or that
  * the ribbon puts in one — and the digests every record puts in.
  *
