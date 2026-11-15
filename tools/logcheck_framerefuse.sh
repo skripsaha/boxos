@@ -283,7 +283,7 @@ framerefuse_after() {
     local leg=$1 L="$SCRATCH/serial.framerefuse.$1.log"
     ! grep -qF "$FRAMEREFUSE_NOFRAME_SAYS" "$L"
     chk $? "framerefuse ($leg): and not as a volume that says where nothing is"
-    grep -qE "^\[Deed\] seat [0-9]+: format v2 — a Spine ring of 3 slot\(s\) 256 block\(s\) apart from block 256, and its data run from block 1024" "$L"
+    grep -qE "^\[Deed\] seat [0-9]+: the book's frame — a Spine ring of 3 slot\(s\) 256 block\(s\) apart from block 256, and its data run from block 1024" "$L"
     chk $? "framerefuse ($leg): the deed is described with its FRAME"
     ! grep -q "carries the volume this machine is standing on" "$L"
     chk $? "framerefuse ($leg): the boot survey does not take the refused volume for the one the machine stands on"

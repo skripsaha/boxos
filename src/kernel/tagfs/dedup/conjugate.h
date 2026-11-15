@@ -4,12 +4,11 @@
 #include "../tagfs.h"
 
 /*
- * Conjugate — a duplicate laid on the blocks it duplicates (spec_v2 §8.2,
- * §16.7 пп.8–9): blocks of one file of a format-v2 volume that hold, byte for
- * byte, what blocks of another hold are named by a run SHARED on the other's
- * ground, and its own rest in Fallow and go back — the volume holds the bytes
- * once. The file's bytes, size and times are what they were; only where they
- * lie changes.
+ * Conjugate — a duplicate laid on the blocks it duplicates: blocks of one file
+ * of a volume that hold, byte for byte, what blocks of another hold are named
+ * by a run SHARED on the other's ground, and its own rest in Fallow and go
+ * back — the volume holds the bytes once. The file's bytes, size and times are
+ * what they were; only where they lie changes.
  *
  * ‼ THE BYTES DECIDE, NOT THE DIGESTS (§16.7 п.8, box_hash.h). Each pair of
  * blocks is held to the digests the book holds for them first — two that

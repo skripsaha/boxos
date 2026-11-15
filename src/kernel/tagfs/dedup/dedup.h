@@ -4,11 +4,10 @@
 #include "../tagfs.h"
 
 /*
- * Dedup — Glean's own step after each Tally of a format-v2 book (spec_v2 §8.2,
- * §16.7 пп.7–9): the blocks written since the Tally before, held to every
- * block the volume holds the same digest for, and each copy laid on its
- * original by Conjugate (conjugate.h), which holds every pair byte for byte —
- * equal digests are only a candidate.
+ * Dedup — Glean's own step after each Tally of the book: the blocks written
+ * since the Tally before, held to every block the volume holds the same digest
+ * for, and each copy laid on its original by Conjugate (conjugate.h), which
+ * holds every pair byte for byte — equal digests are only a candidate.
  *
  * ‼ WHERE IT LOOKS (§16.7 п.7). The ground the live files took since the Tally
  * before and still hold — DogEar's, as the Tally took it (dog_ear.h), the

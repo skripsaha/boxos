@@ -195,7 +195,7 @@ error_t  HelmDefragWindow(TagFSFileHandle* handle, HelmDefragging* d, bool* out_
 void     HelmDefragLetGo(HelmDefragging* d);
 error_t  HelmDefrag(TagFSFileHandle* handle);
 
-/* Engross by the holder of the file's Helm (helm_work.c, spec_v2 §16.5 п.14):
+/* Engross by the holder of the file's Helm (helm_work.c):
  * its tail, out of the Slips over its last block, laid in that block and
  * inked — through the Ink, as a defrag is. *out_laid whether there was one;
  * OK, or the refusal of the load, the Plot or the Ink — ERR_WOULD_BLOCK among

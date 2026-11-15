@@ -9,7 +9,7 @@
  * flags, size, times) and the file's runs, as the map of live files holds them
  * for every reader and every Ink (file_map.h).
  *
- * ‼ A CHANGE COPIES WHAT IT CHANGES, NOT THE FILE (spec_v2 §3.7, §2.9). The runs
+ * ‼ A CHANGE COPIES WHAT IT CHANGES, NOT THE FILE. The runs
  * used to be one flat array inside the record's one allocation, so renaming a
  * file, or writing one block of it, built a copy of every run it had — and so
  * did every open, every load and every look at its metadata. A file a disk
@@ -78,21 +78,19 @@ typedef struct FileRecord {
     uint64_t           strip_count;  /* the Strips of its runs, in the file's order */
     uint64_t           blocks;       /* the file's blocks they cover */
     const Tract*       tract;        /* the runs; NULL for a record that names none */
-    /* `gen` is the seq of the stitch that last changed the file (spec_v2
-     * §2.8) — a record of the ribbon applies only over the gen its base names
-     * — not the Ink number of RecordWhere.gen (§16.2 п.14). The one field of
-     * a header written after it is built:
-     * a record Ink makes on a book holds what it was made from — 0 for a
-     * file born — until the stitch that carries it settles, and then that
-     * stitch's seq — or its base's, when
-     * the stitch carried nothing for the file — written once by the Settle's
-     * holder (ink/docket.h, DocketSettled), whose next stitch's BUILD is the
-     * one reader that trusts it. An Ink on another core copies it into the
-     * record it makes of this one (FileRecordRelabel) while that write may
-     * land, so both are atomic; the copy is written over the same way before
-     * any BUILD reads it. `slip` is the bytes the Slips of the ribbon lay over
-     * the file's last block (tail_slip.h), shared by every record that keeps
-     * them; NULL for none. */
+    /* `gen` is the seq of the stitch that last changed the file — a record of
+     * the ribbon applies only over the gen its base names — not the Ink number
+     * of RecordWhere.gen (§16.2 п.14). The one field of a header written after
+     * it is built: a record Ink makes on a book holds what it was made from —
+     * 0 for a file born — until the stitch that carries it settles, and then
+     * that stitch's seq — or its base's, when the stitch carried nothing for
+     * the file — written once by the Settle's holder (ink/docket.h,
+     * DocketSettled), whose next stitch's BUILD is the one reader that trusts
+     * it. An Ink on another core copies it into the record it makes of this
+     * one (FileRecordRelabel) while that write may land, so both are atomic;
+     * the copy is written over the same way before any BUILD reads it. `slip`
+     * is the bytes the Slips of the ribbon lay over the file's last block
+     * (tail_slip.h), shared by every record that keeps them; NULL for none. */
     uint64_t           gen;
     const TailSlip*    slip;
     const uint32_t*    tags;         /* these two point into the header's allocation */
@@ -114,12 +112,12 @@ typedef struct {
 } FileSpot;
 
 /*
- * One splice of a file's runs, as a Shaped record of the book says it (spec_v2
- * §2.8 :538-552): `remove` blocks taken out from block `at` and `ninsert`
- * Strips put in their place. `at` is counted in the file as the splices before
- * this one have left it — a list of splices is in ascending order and none
- * overlaps another — so one function applies a change an Ink made and a
- * change the book says was made.
+ * One splice of a file's runs, as a Shaped record of the book says it:
+ * `remove` blocks taken out from block `at` and `ninsert` Strips put in their
+ * place. `at` is counted in the file as the splices before this one have left
+ * it — a list of splices is in ascending order and none overlaps another — so
+ * one function applies a change an Ink made and a change the book says was
+ * made.
  */
 typedef struct {
     uint64_t     at;

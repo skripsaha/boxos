@@ -46,7 +46,7 @@
 // File flags — dense until the first release; from it on, a bit once given is
 // never given again.
 #define TAGFS_FILE_ACTIVE           (1 << 0)
-/* Rolled back by a mount's verdict (spec_v2 §2.8, Undone): its last write did
+/* Rolled back by a mount's verdict (Undone): its last write did
  * not land, and it stands as it stood before. The system's own word in the
  * file's record, put there by the Ink the verdict's first cycle makes
  * (mount/errata.h) — never a tag: a file's tags are its user's. */

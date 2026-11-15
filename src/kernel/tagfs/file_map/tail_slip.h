@@ -4,8 +4,8 @@
 #include "file_record.h"
 
 /*
- * TailSlip — the bytes the Slips of a format-v2 volume's ribbon lay over a
- * file's last block (spec_v2 §2.8, H-7).
+ * TailSlip — the bytes the Slips of a volume's ribbon lay over a file's last
+ * block.
  *
  * A writer that adds a few bytes to a file whose last block is not full
  * carries them in the stitch, not in a block of fresh ground: `slip_off ·

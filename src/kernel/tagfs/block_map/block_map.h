@@ -10,7 +10,7 @@
  * that keeps a growing file's ground in hand.
  *
  * The map is derived from the names that own the volume's ground, never kept
- * on the medium (block_map_derived.h, spec_v2 §4.6). It is counted in WINDOWS
+ * on the medium (block_map_derived.h). It is counted in WINDOWS
  * of BLOCK_MAP_WINDOW_BLOCKS blocks, each summed in memory, so a volume of any
  * size costs its summary and the windows that are neither wholly taken nor
  * wholly free.
@@ -57,7 +57,7 @@ bool       AllotmentTakeBackLocked(uint64_t keep_fid);
 void       AllotmentDropAll(void);
 
 /*
- * A file's data (spec_v2 §3.1): a window lies on the derived map as free
+ * A file's data: a window lies on the derived map as free
  * ground no other file's take may have, nor the ribbon's Quire while another
  * run is free.
  *
@@ -93,7 +93,7 @@ bool     AllotmentOthersIn(uint64_t fid, uint64_t start, uint64_t count, uint64_
 uint64_t AllotmentBookTaken(void);
 
 /*
- * The block a Slip promises (allotment.c, spec_v2 §16.6 п.1): every file whose
+ * The block a Slip promises (allotment.c): every file whose
  * record holds Slips keeps one block of the free ground for the Engross that
  * lays its tail, and every take of a book's ground but the one that lays that
  * block leaves it free; that one has it whatever the book's reserve.

@@ -299,15 +299,15 @@ void DeedDescribe(uint8_t seat, const DeedCopy *copy)
                 seat, geo->block_bytes, geo->physical_bytes, geo->grain_bytes);
     }
 
-    /* Where a format-v2 book begins. Said here because this is the line a
-     * person reads to learn what is on a medium, and a volume this kernel
-     * refuses is still a volume somebody wants to know about. */
+    /* Where the book begins. Said here because this is the line a person reads
+     * to learn what is on a medium, and a volume this kernel refuses is still
+     * a volume somebody wants to know about. */
     const VolumeFrame *frame =
         (const VolumeFrame *)DeedStamp(copy, VOLUME_STAMP_FRAME, &bytes);
     if (frame && bytes >= sizeof(*frame)) {
-        kprintf("[Deed] seat %u: format v2 — a Spine ring of %u slot(s) %u "
-                "block(s) apart from block %llu, and its data run from block "
-                "%llu\n", seat, frame->spine_slots, frame->spine_stride,
+        kprintf("[Deed] seat %u: the book's frame — a Spine ring of %u "
+                "slot(s) %u block(s) apart from block %llu, and its data run "
+                "from block %llu\n", seat, frame->spine_slots, frame->spine_stride,
                 (unsigned long long)frame->spine_block,
                 (unsigned long long)frame->data_block);
     } else if (frame) {

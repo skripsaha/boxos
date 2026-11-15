@@ -9,7 +9,7 @@
  * Who names a block (dedup_internal.h): the live files walked in id order, a
  * few a turn, every run of each record held to the blocks asked — sorted, so
  * a run finds the first of them it covers in log n. No map of block to owner
- * is kept: a book derives one only at its mount (spec_v2 §4.6), so the pass
+ * is kept: a book derives one only at its mount, so the pass
  * that needs one asks the mirror for the blocks it matched alone, and lets
  * the answer go with the pass.
  *

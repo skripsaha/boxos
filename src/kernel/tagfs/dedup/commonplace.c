@@ -5,8 +5,7 @@
  * sorted by digest and then block — a digest's entries found in log n, the
  * walk's question for every block a leaf of DIGESTS names, and those of one
  * digest side by side, the pass's question of them among themselves. Never
- * written to the medium (spec_v2 §16.7 п.7: the tree on the medium is not
- * now). The service's alone; built a Tally's blocks at a time, the array
+ * written to the medium: no tree of it lies there. The service's alone; built a Tally's blocks at a time, the array
  * made anew at each take, so it holds what it holds and no more.
  */
 
