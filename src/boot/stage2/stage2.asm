@@ -86,14 +86,26 @@ BOOT_METHOD_BIOS      equ 0
 ; src/include/boarding_pass.h; the numbers below are that layout and the
 ; kernel's static assertions are the other half of the agreement.
 BOARDING_PASS_MAGIC   equ 0x53415042     ; "BPAS"
-BOARDING_PASS_VERSION equ 1
 BOARDING_PASS_BYTES   equ 512
-BOARDING_HDR_BYTES    equ 16
+BOARDING_HDR_BYTES    equ 12
+BOARDING_STAMP_HDR    equ 4
+BOARDING_VOLUME_BYTES equ 16
+BOARDING_MEDIUM_BYTES equ 4
+BOARDING_LOADER_BYTES equ 12
+BOARDING_SEAL_BYTES   equ 4
 BOARDING_STAMP_VOLUME equ 1
 BOARDING_STAMP_MEDIUM equ 2
 BOARDING_STAMP_LOADER equ 3
 BOARDING_STAMP_SEAL   equ 4
 BOARDING_FIRMWARE_BIOS equ 0
+; Where the four stamps go: one after another, every payload a whole number of
+; four-byte words, so none is padded and each place is the sum of the sizes
+; before it — never a literal of its own.
+BOARDING_AT_VOLUME    equ BOARDING_HDR_BYTES
+BOARDING_AT_MEDIUM    equ BOARDING_AT_VOLUME + BOARDING_STAMP_HDR + BOARDING_VOLUME_BYTES
+BOARDING_AT_LOADER    equ BOARDING_AT_MEDIUM + BOARDING_STAMP_HDR + BOARDING_MEDIUM_BYTES
+BOARDING_AT_SEAL      equ BOARDING_AT_LOADER + BOARDING_STAMP_HDR + BOARDING_LOADER_BYTES
+BOARDING_USED_BYTES   equ BOARDING_AT_SEAL + BOARDING_STAMP_HDR + BOARDING_SEAL_BYTES
 ; ---------------------------------------------------------------------------
 ; The Deed, by offset.
 ;
@@ -510,57 +522,53 @@ long_mode_start:
 write_boarding_pass:
     ; Header
     mov dword [BOARDING_PASS_ADDR],     BOARDING_PASS_MAGIC     ; +0  magic
-    mov word  [BOARDING_PASS_ADDR+4],   BOARDING_PASS_VERSION   ; +4  version
-    mov word  [BOARDING_PASS_ADDR+6],   BOARDING_HDR_BYTES      ; +6  header_bytes
-    mov word  [BOARDING_PASS_ADDR+8],   72                      ; +8  used_bytes
-    mov word  [BOARDING_PASS_ADDR+10],  BOARDING_PASS_BYTES     ; +10 capacity
-    mov word  [BOARDING_PASS_ADDR+12],  4                       ; +12 count
-    mov word  [BOARDING_PASS_ADDR+14],  0                       ; +14 reserved
+    mov word  [BOARDING_PASS_ADDR+4],   BOARDING_HDR_BYTES      ; +4  header_bytes
+    mov word  [BOARDING_PASS_ADDR+6],   BOARDING_USED_BYTES     ; +6  used_bytes
+    mov word  [BOARDING_PASS_ADDR+8],   BOARDING_PASS_BYTES     ; +8  capacity
+    mov word  [BOARDING_PASS_ADDR+10],  4                       ; +10 count
 
-    ; Stamp 1 at +16: the volume, sixteen bytes out of its Deed.
-    mov word  [BOARDING_PASS_ADDR+16],  BOARDING_STAMP_VOLUME
-    mov word  [BOARDING_PASS_ADDR+18],  16
+    ; Stamp 1: the volume, sixteen bytes out of its Deed.
+    mov word  [BOARDING_PASS_ADDR+BOARDING_AT_VOLUME],    BOARDING_STAMP_VOLUME
+    mov word  [BOARDING_PASS_ADDR+BOARDING_AT_VOLUME+2],  BOARDING_VOLUME_BYTES
     mov rax, [DEED_ADDR + DEED_OFF_UUID]
-    mov [BOARDING_PASS_ADDR+20], rax
+    mov [BOARDING_PASS_ADDR+BOARDING_AT_VOLUME+4], rax
     mov rax, [DEED_ADDR + DEED_OFF_UUID + 8]
-    mov [BOARDING_PASS_ADDR+28], rax
+    mov [BOARDING_PASS_ADDR+BOARDING_AT_VOLUME+12], rax
 
-    ; Stamp 2 at +36: the medium. The drive number is the one this loader
-    ; actually used, which is not always the one the firmware first offered —
-    ; there is a fallback to 0x80 above for firmware that hands out a handle it
-    ; then does not honour, and the kernel should be told which one worked.
-    mov word  [BOARDING_PASS_ADDR+36],  BOARDING_STAMP_MEDIUM
-    mov word  [BOARDING_PASS_ADDR+38],  4
-    mov byte  [BOARDING_PASS_ADDR+40],  BOARDING_FIRMWARE_BIOS
+    ; Stamp 2: the medium. The drive number is the one this loader actually
+    ; used, which is not always the one the firmware first offered — there is
+    ; a fallback to 0x80 above for firmware that hands out a handle it then
+    ; does not honour, and the kernel should be told which one worked.
+    mov word  [BOARDING_PASS_ADDR+BOARDING_AT_MEDIUM],    BOARDING_STAMP_MEDIUM
+    mov word  [BOARDING_PASS_ADDR+BOARDING_AT_MEDIUM+2],  BOARDING_MEDIUM_BYTES
+    mov byte  [BOARDING_PASS_ADDR+BOARDING_AT_MEDIUM+4],  BOARDING_FIRMWARE_BIOS
     mov al, [boot_drive_saved]
-    mov byte  [BOARDING_PASS_ADDR+41],  al
-    mov word  [BOARDING_PASS_ADDR+42],  0
+    mov byte  [BOARDING_PASS_ADDR+BOARDING_AT_MEDIUM+5],  al
+    mov word  [BOARDING_PASS_ADDR+BOARDING_AT_MEDIUM+6],  0
 
-    ; Stamp 3 at +44: who wrote this. On a board that boots through CSM one
-    ; week and UEFI the next, that is a real question with nothing on the
-    ; screen to answer it.
-    mov word  [BOARDING_PASS_ADDR+44],  BOARDING_STAMP_LOADER
-    mov word  [BOARDING_PASS_ADDR+46],  16
+    ; Stamp 3: who wrote this. On a board that boots through CSM one week and
+    ; UEFI the next, that is a real question with nothing on the screen to
+    ; answer it.
+    mov word  [BOARDING_PASS_ADDR+BOARDING_AT_LOADER],    BOARDING_STAMP_LOADER
+    mov word  [BOARDING_PASS_ADDR+BOARDING_AT_LOADER+2],  BOARDING_LOADER_BYTES
     mov rax, [boarding_loader_name]
-    mov [BOARDING_PASS_ADDR+48], rax
+    mov [BOARDING_PASS_ADDR+BOARDING_AT_LOADER+4], rax
     mov eax, [boarding_loader_name+8]
-    mov [BOARDING_PASS_ADDR+56], eax
-    mov word  [BOARDING_PASS_ADDR+60],  1                       ; major
-    mov word  [BOARDING_PASS_ADDR+62],  0                       ; minor
+    mov [BOARDING_PASS_ADDR+BOARDING_AT_LOADER+12], eax
 
-    ; Stamp 4 at +64: the seal, and it is last because it covers everything
-    ; ahead of it — the header, the three stamps, and its own kind/length pair.
-    ; The rule and the reasoning live in src/include/boarding_pass.h; what is
-    ; here is the same CRC-32 (ISO 3309) the Deed and the GPT are checked with.
+    ; Stamp 4: the seal, and it is last because it covers everything ahead of
+    ; it — the header, the three stamps, and its own kind/length pair. The rule
+    ; and the reasoning live in src/include/boarding_pass.h; what is here is
+    ; the same CRC-32 (ISO 3309) the Deed and the GPT are checked with.
     ;
     ; It cannot reuse crc32_chunk further down this file: that one addresses
     ; through ES:DI and belongs to the real-mode half, and this runs in long
-    ; mode. Sixty-eight bytes, once per boot.
-    mov word  [BOARDING_PASS_ADDR+64],  BOARDING_STAMP_SEAL
-    mov word  [BOARDING_PASS_ADDR+66],  4
+    ; mode. A few dozen bytes, once per boot.
+    mov word  [BOARDING_PASS_ADDR+BOARDING_AT_SEAL],      BOARDING_STAMP_SEAL
+    mov word  [BOARDING_PASS_ADDR+BOARDING_AT_SEAL+2],    BOARDING_SEAL_BYTES
 
     mov esi, BOARDING_PASS_ADDR
-    mov ecx, 68                         ; up to the seal's payload, not into it
+    mov ecx, BOARDING_AT_SEAL + BOARDING_STAMP_HDR   ; up to the seal's payload, not into it
     mov eax, 0xFFFFFFFF
 .seal_byte:
     movzx edx, byte [rsi]
@@ -577,7 +585,7 @@ write_boarding_pass:
     dec ecx
     jnz .seal_byte
     not eax
-    mov [BOARDING_PASS_ADDR+68], eax
+    mov [BOARDING_PASS_ADDR+BOARDING_AT_SEAL+4], eax
     ret
 
 

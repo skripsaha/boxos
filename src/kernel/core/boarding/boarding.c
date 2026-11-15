@@ -48,34 +48,15 @@ static bool pass_is_sound(const uint8_t* raw, unsigned* out_stamps,
         *out_sealed = false;
     }
 
+    /*
+     * A pass is known by its magic, and it carries no version: the header's
+     * fields keep their offsets and meanings, and `header_bytes` is what
+     * finds the first stamp, so a block written by a LATER loader is walkable
+     * by this kernel — the stamps it knows it reads, the ones it does not it
+     * steps over by their own stated length.
+     */
     if (h->magic != BOARDING_PASS_MAGIC) {
         return false;
-    }
-    /*
-     * The version guards the HEADER, and the header alone.
-     *
-     * The sixteen bytes are frozen — every field keeps its offset and its
-     * meaning for as long as there is a pass — and `header_bytes` is what
-     * finds the first stamp, so a block written by a LATER loader is walkable
-     * by this kernel: the stamps it knows it reads, the ones it does not it
-     * steps over by their own stated length. That is the arrangement the
-     * stamps exist for, and this test used to defeat it: any number it had
-     * not been compiled against threw away the whole pass, volume and all,
-     * and sent the Boardroom back to guessing by rule.
-     *
-     * Zero is the one number that cannot be a version: nothing that follows
-     * this contract writes it, so a block carrying it is not a pass whatever
-     * else it says.
-     */
-    if (h->version == 0) {
-        kprintf("[Boarding] the pass states version 0, which no loader "
-                "writes — ignoring it\n");
-        return false;
-    }
-    if (h->version > BOARDING_PASS_VERSION) {
-        kprintf("[Boarding] the pass is version %u and this kernel was built "
-                "for %u — reading the stamps it knows\n",
-                h->version, BOARDING_PASS_VERSION);
     }
     if (h->header_bytes < sizeof(BoardingPassHeader) ||
         h->capacity > BOARDING_PASS_BYTES ||
@@ -283,7 +264,7 @@ static void boarding_describe(unsigned stamps, bool sealed)
         char name[13];
         memcpy(name, l->name, 12);
         name[12] = '\0';
-        kprintf("[Boarding]   written by %s %u.%u\n", name, l->major, l->minor);
+        kprintf("[Boarding]   written by %s\n", name);
     }
 
     if (BoardingPassVolume(uuid)) {

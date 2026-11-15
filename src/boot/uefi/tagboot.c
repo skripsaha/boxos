@@ -33,9 +33,10 @@
  */
 
 #include "tagboot.h"
-/* The handoff block the kernel reads, by the structure it reads it by — the
- * one definition, shared, not a copy of it (boot_info.h). */
+/* The two blocks the kernel reads, by the structures it reads them by — the
+ * one definition of each, shared, not a copy of it. */
 #include "boot_info.h"
+#include "boarding_pass.h"
 
 /* =========================================================================
  * Boot constants — must match kernel contract
@@ -2032,13 +2033,8 @@ static EFI_STATUS SetupPageTables(uint64_t kernel_phys_end)
 }
 
 /* =========================================================================
- * The Boarding Pass — what this loader tells the kernel about its own arrival
- *
- * Mirrors src/include/boarding_pass.h. Duplicated rather than included for the
- * same reason BootInfoV4 above is: this is a freestanding UEFI application
- * built against its own headers, and the agreement is enforced by the build
- * passing the address in and by the kernel's own static assertions on the
- * layout — not by hoping two copies of a comment stay in step.
+ * The Boarding Pass — what this loader tells the kernel about its own arrival,
+ * written by the structures the kernel reads it by (boarding_pass.h).
  *
  * The stamp that matters is the volume. A kernel in long mode cannot ask the
  * firmware which device it was booted from, so without this the Boardroom
@@ -2046,34 +2042,6 @@ static EFI_STATUS SetupPageTables(uint64_t kernel_phys_end)
  * machine carrying BoxOS on an internal disk with a flash drive in a socket.
  * This loader knows the answer: it has the volume's Deed in hand.
  * ========================================================================= */
-#define BOARDING_PASS_ADDR      0xA600ULL
-#define BOARDING_PASS_BYTES     512U
-#define BOARDING_PASS_MAGIC     0x53415042U   /* "BPAS" */
-#define BOARDING_PASS_VERSION   1U
-#define BOARDING_HDR_BYTES      16U
-#define BOARDING_STAMP_VOLUME   1U
-#define BOARDING_STAMP_MEDIUM   2U
-#define BOARDING_STAMP_LOADER   3U
-#define BOARDING_STAMP_SEAL     4U
-#define BOARDING_FIRMWARE_UEFI  1U
-
-#ifdef BOARDING_PASS_ADDR_FROM_BUILD
-_Static_assert(BOARDING_PASS_ADDR == BOARDING_PASS_ADDR_FROM_BUILD,
-               "TagBoot writes the boarding pass somewhere the build does not "
-               "expect");
-#endif
-
-typedef struct __attribute__((packed)) {
-    uint32_t magic;
-    uint16_t version;
-    uint16_t header_bytes;
-    uint16_t used_bytes;
-    uint16_t capacity;
-    uint16_t count;
-    uint16_t reserved;
-} BoardingPassHeaderV1;
-
-_Static_assert(sizeof(BoardingPassHeaderV1) == 16, "boarding pass header is 16 bytes");
 
 /* Append one stamp. The kind and the length go down first, then the payload,
  * then the write cursor moves to the next four-byte boundary — which is the
@@ -2097,29 +2065,25 @@ static void WriteBoardingPass(void)
     uint8_t *base = (uint8_t *)(uintptr_t)BOARDING_PASS_ADDR;
     MemZero(base, BOARDING_PASS_BYTES);
 
-    uint16_t at = BOARDING_HDR_BYTES;
+    uint16_t at = sizeof(BoardingPassHeader);
     uint16_t count = 0;
 
     /* The volume this kernel was read out of, straight out of the Deed
      * this loader verified on the way in. */
     at = BoardingStamp(base, at, BOARDING_STAMP_VOLUME,
-                       g_volume_uuid, 16);
+                       g_volume_uuid, sizeof(BoardingVolume));
     count++;
 
     /* How it was reached. UEFI has no BIOS drive number, and saying 0xFF is
      * saying so rather than leaving a zero that reads as drive zero. */
-    struct __attribute__((packed)) {
-        uint8_t firmware; uint8_t bios_drive; uint16_t reserved;
-    } medium = { BOARDING_FIRMWARE_UEFI, 0xFF, 0 };
+    BoardingMedium medium = { BOARDING_FIRMWARE_UEFI, 0xFF, 0 };
     at = BoardingStamp(base, at, BOARDING_STAMP_MEDIUM, &medium, sizeof(medium));
     count++;
 
     /* Who wrote it. On a board that boots through CSM one week and UEFI the
      * next, that is a real question with nothing else on the screen to answer
      * it. */
-    struct __attribute__((packed)) {
-        char name[12]; uint16_t major; uint16_t minor;
-    } loader = { { 'T','a','g','B','o','o','t',0,0,0,0,0 }, 1, 0 };
+    BoardingLoader loader = { { 'T','a','g','B','o','o','t',0,0,0,0,0 } };
     at = BoardingStamp(base, at, BOARDING_STAMP_LOADER, &loader, sizeof(loader));
     count++;
 
@@ -2131,26 +2095,24 @@ static void WriteBoardingPass(void)
      * part of what it covers. So: reserve the stamp, finish the header with
      * the seal counted in, then sum.
      */
-    uint32_t sum = 0;
+    BoardingSeal seal = { 0 };
     uint16_t seal_at = at;
-    at = BoardingStamp(base, at, BOARDING_STAMP_SEAL, &sum, sizeof(sum));
+    at = BoardingStamp(base, at, BOARDING_STAMP_SEAL, &seal, sizeof(seal));
     count++;
 
-    BoardingPassHeaderV1 hdr;
+    BoardingPassHeader hdr;
     hdr.magic        = BOARDING_PASS_MAGIC;
-    hdr.version      = BOARDING_PASS_VERSION;
-    hdr.header_bytes = BOARDING_HDR_BYTES;
+    hdr.header_bytes = sizeof(BoardingPassHeader);
     hdr.used_bytes   = at;
     hdr.capacity     = BOARDING_PASS_BYTES;
     hdr.count        = count;
-    hdr.reserved     = 0;
     MemCopy(base, &hdr, sizeof(hdr));
 
     /* Every byte ahead of the seal's payload: the header, the stamps, and the
      * seal's own kind/length pair. Nothing sums itself. */
-    uint32_t covered = (uint32_t)seal_at + 4U;   /* past its kind/length */
-    sum = Crc32(base, covered);
-    MemCopy(base + covered, &sum, sizeof(sum));
+    uint32_t covered = (uint32_t)seal_at + sizeof(BoardingStampHeader);   /* past its kind/length */
+    seal.crc32 = Crc32(base, covered);
+    MemCopy(base + covered, &seal, sizeof(seal));
 }
 
 /* =========================================================================
