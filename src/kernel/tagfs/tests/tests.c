@@ -6,6 +6,7 @@
 #include "../settle/binder.h"
 #include "../dedup/dedup.h"
 #include "../keep/keep.h"
+#include "../mount/away.h"
 #include "../integrity/integrity.h"
 #include "boardroom.h"
 #include "write_job.h"   /* WriteJobSeatRunsAsync — the road a program's write takes */
@@ -509,7 +510,9 @@ static void TestSeekLag(void)
  * the wall's wait on a Tally held down (BinderStandNoRoomWait): left standing,
  * every test after would meet a full volume's wall with no Tally written for
  * room, and none would say so. So is Dedup's pass let go (DedupHold): left
- * so, it would lay the files of every test after on one another's blocks.
+ * so, it would lay the files of every test after on one another's blocks. So
+ * is a medium remembered as one that lied (TagFSStandLiedForget): the stand's
+ * volume is every test's, and every mount after would hold it to have lied.
  */
 static bool TestLeftAFaultArmed(const TestCase* test)
 {
@@ -518,13 +521,14 @@ static bool TestLeftAFaultArmed(const TestCase* test)
     bool heap    = HeapFailDisarm();
     bool wall    = BinderStandNoRoomWait(false);
     bool dedup   = !DedupHold(true);
+    bool lied    = TagFSStandLiedForget();
     bool protect = BlockFailProtects(tagfs_get_seat());
     if (protect)
         BlockFailProtect(tagfs_get_seat(), false);
-    if (!block && !heap && !wall && !dedup && !protect)
+    if (!block && !heap && !wall && !dedup && !lied && !protect)
         return false;
 
-    const char* left[5];
+    const char* left[6];
     uint32_t    n = 0;
     if (block)
         left[n++] = "BLOCKFAIL";
@@ -534,9 +538,11 @@ static bool TestLeftAFaultArmed(const TestCase* test)
         left[n++] = "the wall's wait on a Tally held down";
     if (dedup)
         left[n++] = "Dedup's pass after a Tally let go";
+    if (lied)
+        left[n++] = "a medium remembered as one that lied";
     if (protect)
         left[n++] = "a protected medium";
-    char   said[160];
+    char   said[224];
     size_t at = 0;
     for (uint32_t i = 0; i < n; i++)
         at += (size_t)ksnprintf(said + at, sizeof(said) - at, "%s%s",

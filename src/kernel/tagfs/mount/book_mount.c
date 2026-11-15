@@ -195,7 +195,9 @@ static void BookSlotSaid(const SpineSlot* s)
 /* The ribbon from the stood slot's `at`: pass 1, the data of its newest
  * stitch, pass 2 — and what the mount says of it in numbers; then the writer's
  * cursor laid where the walk ended (settle/sewing.h), or the reason no writer
- * goes on from there, under glass. */
+ * goes on from there, under glass. A medium a book given up this boot found
+ * lying (away.h, AwayLiedLearned) is held to have lied before pass 2 reads
+ * the data of the newest stitches, as one its own ribbon shows lying is. */
 static error_t BookRibbon(const char** what)
 {
     const char* glass = NULL;
@@ -206,6 +208,11 @@ static error_t BookRibbon(const char** what)
         return rc;
     }
     RibbonWalk* w = g_book.ribbon;
+    if (!w->lied && AwayLiedLearned(tagfs_get_state()->uuid)) {
+        w->lied = true;
+        kprintf("[TagFS] this volume's medium came back this boot holding less than a flush it said it kept "
+                "covered (its book was given up then): it is held to have lied\n");
+    }
     rc = RibbonTranscribe(w, what);
     if (rc != OK)
         return rc;

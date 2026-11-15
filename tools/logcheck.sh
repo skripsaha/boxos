@@ -8014,7 +8014,7 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 44 (healthy says how) and
-# the 322 of the stand's own forty-five suites: stand 25, stand_lock 1,
+# the 323 of the stand's own forty-five suites: stand 25, stand_lock 1,
 # stand_spelling 6, stand_roadstead 4, stand_plot 3, stand_index 6,
 # stand_helm 6, stand_port 1, stand_use 2, stand_settle 9, stand_read 6,
 # stand_run 4, stand_medium 13, stand_warrant 7, stand_room 1, frame 2,
@@ -8022,14 +8022,14 @@ STAND_HELD="
 # stand_ribbon 8, stand_stitch 14, stand_stitch_edge 12, stand_docket 14,
 # stand_fresh 7, stand_fresh_ground 5, stand_fresh_change 5, stand_binder 13,
 # stand_endpaper 6, stand_book_room 13, stand_errata 8, stand_keep 5,
-# stand_toll 4, stand_dog_ear 9, stand_slip 14, stand_away 14,
+# stand_toll 4, stand_dog_ear 9, stand_slip 14, stand_away 15,
 # stand_tip_in 10, stand_slip_promise 5, stand_book_glean 2, stand_escheat 7,
 # stand_parity 2, stand_commonhold 1, stand_conjugate 5, stand_dedup 6.
 # Counted off the code, not a run (K9): a suite that drops out of the walk is
 # a test that stopped covering anything, and the count is where that shows.
 # How many of them pass and how many stand down is the road's — said, not
 # pinned.
-STAND_RUN=366
+STAND_RUN=367
 
 # What a VOLUME_TESTS kernel says of a record that names a run of no blocks
 # (file_record.c, FileRecordBuild), and of a Tract about to stand taller than
