@@ -41,9 +41,9 @@ void SettleCutSayArmed(void)
     __atomic_store_n(&g_settle_anchor, 0, __ATOMIC_RELEASE);
     /* The verdict's stitch is the session's first, asked at the door's opening
      * before any program can anchor (tagfs.c, ErrataAsk) — so that point waits
-     * for no anchor, and says so in a sentence of its own: the anchored one is
-     * the sentence PowerCut's settlecut waits for (tools/powercut.sh,
-     * SC_ARMED_ERE), held word for word to this file by its selftest. */
+     * for no anchor, and says so in a sentence of its own: each is a sentence
+     * PowerCut's cuts at a point wait for (tools/powercut_book.sh,
+     * SC_ARMED_ERE). */
     if (CONFIG_TAGFS_SETTLE_CUT_POINT == SETTLE_CUT_POINT_UNDONE) {
         kprintf("[SETTLECUT] armed for the verdict: the first stitch to reach point %u of %u, "
                 "%s, stops this machine there, anchored or not\n",
