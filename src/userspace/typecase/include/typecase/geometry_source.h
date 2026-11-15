@@ -4,7 +4,8 @@
 /* Characters worked out for the cell instead of drawn from a font: the
  * lines of frames (U+2500..U+257F), the blocks and their shades
  * (U+2580..U+259F), the mosaics of quadrants, sextants and octants
- * (boxos_mosaic.h) and braille's dots (U+2800..U+28FF). A font draws them
+ * (boxos_mosaic.h), the wedges of Symbols for Legacy Computing
+ * (U+1FB3C..U+1FB6F) and braille's dots (U+2800..U+28FF). A font draws them
  * to its own em and the next cell's line meets this one's wherever the em
  * puts it; drawn to the cell, a line leaves every cell at the same pixels,
  * so frames close and blocks tile whatever the cell's shape.

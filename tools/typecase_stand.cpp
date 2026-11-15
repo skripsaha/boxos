@@ -172,7 +172,8 @@ void WritePng(const char *Path, const std::vector<std::uint8_t> &Grey, std::uint
 
 /* The lines of a sheet: a sample of text, or every character geometry
  * draws — frames built of neighbouring cells first, where a join that does
- * not meet shows, then the blocks, the mosaics, braille and every line. */
+ * not meet shows, then the blocks, the mosaics, the wedges, braille and every
+ * line. */
 std::vector<std::u32string> SheetLines(bool Geometry)
 {
     std::vector<std::u32string> Lines;
@@ -203,6 +204,7 @@ std::vector<std::u32string> SheetLines(bool Geometry)
     Range(0x2580, 0x259F, 32);
     Range(0x1FB00, 0x1FB3B, 30);
     Range(0x1CD00, 0x1CDE5, 58);
+    Range(0x1FB3C, 0x1FB6F, 26);
     Range(0x2800, 0x28FF, 64);
     Range(0x2500, 0x257F, 32);
     return Lines;

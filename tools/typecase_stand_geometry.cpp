@@ -4,11 +4,13 @@
  * so a frame closes cell to cell; every mosaic and its complement filling
  * the cell exactly once, sub-cell by sub-cell; the eighths on the octants'
  * edges; the shades a quarter, a half and three quarters; braille's dots
- * where they stand. */
+ * where they stand; each wedge the cell's side of its diagonal its name
+ * says, and with its complement the cell once. */
 
 #include <cstdint>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <string>
 #include <tuple>
@@ -79,6 +81,49 @@ std::vector<bool> Strokes(int Weight, std::int32_t Length, std::int32_t Light)
     return Out;
 }
 
+/* The wedges U+1FB3C..U+1FB67 as their Unicode names say: the corner the
+ * part holds, then the two ends of its diagonal, each a column in halves (0
+ * to 2) and a row in thirds (0 to 3) of the cell. */
+struct Wedge {
+    char32_t Character;
+    int      Corner[2], From[2], To[2];
+};
+
+std::vector<Wedge> Wedges()
+{
+    const char *Encoded =
+        "1FB3C030213 1FB3D030223 1FB3E030113 1FB3F030123 1FB40030013 1FB41230110 1FB42230120 1FB43230210 "
+        "1FB44230220 1FB45230310 1FB46230221 1FB47231322 1FB48230322 1FB49231321 1FB4A230321 1FB4B231320 "
+        "1FB4C031021 1FB4D030021 1FB4E031022 1FB4F030022 1FB50031023 1FB51030122 1FB52200213 1FB53200223 "
+        "1FB54200113 1FB55200123 1FB56200013 1FB57000110 1FB58000120 1FB59000210 1FB5A000220 1FB5B000310 "
+        "1FB5C000221 1FB5D001322 1FB5E000322 1FB5F001321 1FB60000321 1FB61001320 1FB62201021 1FB63200021 "
+        "1FB64201022 1FB65200022 1FB66201023 1FB67200122";
+    std::vector<Wedge> Out;
+    for (const char *At = Encoded; *At;) {
+        unsigned Code = 0;
+        Wedge    One{};
+        int      Used = 0;
+        if (std::sscanf(At, "%5x%1d%1d%1d%1d%1d%1d%n", &Code, &One.Corner[0], &One.Corner[1], &One.From[0],
+                        &One.From[1], &One.To[0], &One.To[1], &Used) != 7)
+            break;
+        One.Character = static_cast<char32_t>(Code);
+        Out.push_back(One);
+        At += Used;
+        while (*At == ' ') At++;
+    }
+    return Out;
+}
+
+/* How far, in pixels, the middle of pixel X, Y lies from the line A..B, on
+ * the side positive when it is the side of C. */
+float SideOf(float Ax, float Ay, float Bx, float By, float Cx, float Cy, std::int32_t X, std::int32_t Y)
+{
+    const float Dx = Bx - Ax, Dy = By - Ay, Length = std::hypot(Dx, Dy);
+    const auto  Cross = [&](float Px, float Py) { return Dx * (Py - Ay) - Dy * (Px - Ax); };
+    const float Here  = Cross(static_cast<float>(X) + 0.5f, static_cast<float>(Y) + 0.5f) / Length;
+    return Cross(Cx, Cy) >= 0 ? Here : -Here;
+}
+
 bool Whole(const typecase::GlyphImage &Image, const typecase::Size &At)
 {
     return Image.Left == 0 && Image.Top == -At.Baseline && Image.Width == At.Width && Image.Height == At.Height &&
@@ -98,6 +143,7 @@ void CheckGeometry(Tally &Count)
     std::vector<char32_t>    Every;
     for (char32_t Each = 0x2500; Each <= 0x259F; Each++) Every.push_back(Each);
     for (char32_t Each = 0x2800; Each <= 0x28FF; Each++) Every.push_back(Each);
+    for (char32_t Each = 0x1FB3C; Each <= 0x1FB6F; Each++) Every.push_back(Each);
     for (const BoxMosaicShape &Each : BoxMosaicShapes)
         if (Each.Character != U' ' && (Each.Character < 0x2580 || Each.Character > 0x259F)) Every.push_back(Each.Character);
 
@@ -110,7 +156,7 @@ void CheckGeometry(Tally &Count)
             Drawn = Drawn && Image && Whole(*Image, At);
         }
     Count.Check(Had && !Geometry.Has(U' ') && !Geometry.Has(U'A') && !Geometry.Has(U'☀'),
-                "geometry has its " + std::to_string(Every.size()) + " characters — frames, blocks, mosaics, braille "
+                "geometry has its " + std::to_string(Every.size()) + " characters — frames, blocks, mosaics, wedges, braille "
                 "— and no other, not the space");
     Count.Check(Drawn, "each drawn as the whole cell, at ten sizes from 5 by 10 to 24 by 48, odd ones among them");
 
@@ -207,6 +253,56 @@ void CheckGeometry(Tally &Count)
                          "end on");
     Count.Check(Shades, "the shades ink a quarter, a half and three quarters of the cell's pixels");
     Count.Check(Dots, "braille's 256 patterns: ink in the part of the cell of each dot raised, and in no other");
+
+    /* Each wedge inks the side of its diagonal its corner is on and nothing
+     * of the other, away from the diagonal by more than the pixel it may
+     * share; each triangle the part between its side and the middle. And a
+     * wedge with its complement — the 22 after it, a quarter's three
+     * quarters — shares every pixel to within the rounding of either. */
+    bool Sided = true, Paired = true;
+    for (const auto &[Wide, Tall] : Sizes) {
+        const typecase::Size At{0, Wide, Tall, Tall * 3 / 4};
+        const auto X = [&](int Column) { return static_cast<float>(EdgeOf(Column, 2, Wide)); };
+        const auto Y = [&](int Row) { return static_cast<float>(EdgeOf(Row, 3, Tall)); };
+        const auto Ink = [&](char32_t Character) { return Geometry.Draw(Character, At)->Coverage; };
+        for (const Wedge &Each : Wedges()) {
+            const auto Shown = Ink(Each.Character);
+            for (std::int32_t Py = 0; Py < Tall; Py++)
+                for (std::int32_t Px = 0; Px < Wide; Px++) {
+                    const float Side = SideOf(X(Each.From[0]), Y(Each.From[1]), X(Each.To[0]), Y(Each.To[1]),
+                                              X(Each.Corner[0]), Y(Each.Corner[1]), Px, Py);
+                    if (std::fabs(Side) < 0.75f) continue;
+                    Sided = Sided && Shown[static_cast<std::size_t>(Py * Wide + Px)] == (Side > 0 ? 255 : 0);
+                }
+        }
+        const float Mx = X(1), My = static_cast<float>(EdgeOf(1, 2, Tall)), Right = X(2), Foot = static_cast<float>(Tall);
+        const float Ends[4][4] = {{0, Foot, 0, 0}, {0, 0, Right, 0}, {Right, 0, Right, Foot}, {Right, Foot, 0, Foot}};
+        for (int Side = 0; Side < 4; Side++) {
+            const auto  Shown = Ink(static_cast<char32_t>(0x1FB6C + Side));
+            const float *End  = Ends[Side];
+            const float Cx = (End[0] + End[2]) / 2, Cy = (End[1] + End[3]) / 2;   // the middle of its side
+            for (std::int32_t Py = 0; Py < Tall; Py++)
+                for (std::int32_t Px = 0; Px < Wide; Px++) {
+                    const float One = SideOf(End[0], End[1], Mx, My, Cx, Cy, Px, Py);
+                    const float Two = SideOf(Mx, My, End[2], End[3], Cx, Cy, Px, Py);
+                    if (std::fabs(One) < 0.75f || std::fabs(Two) < 0.75f) continue;
+                    Sided = Sided && Shown[static_cast<std::size_t>(Py * Wide + Px)] == (One > 0 && Two > 0 ? 255 : 0);
+                }
+        }
+        const auto Pair = [&](char32_t One, char32_t Other) {
+            const auto A = Ink(One), B = Ink(Other);
+            for (std::size_t Here = 0; Here < A.size(); Here++)
+                Paired = Paired && std::abs(A[Here] + B[Here] - 255) <= 1;
+        };
+        for (char32_t Each = 0x1FB3C; Each <= 0x1FB51; Each++) Pair(Each, Each + 22);
+        for (char32_t Each = 0x1FB68; Each <= 0x1FB6B; Each++) Pair(Each, Each + 4);
+        if (!Sided || !Paired) std::printf("  wedges at %d by %d\n", Wide, Tall);
+    }
+    Count.Check(Sided, "each of the 44 wedges inks its corner's side of the diagonal its name says, and each of the "
+                       "4 triangles the part between its side and the middle — away from a diagonal by more than "
+                       "the pixel it may share, at every size");
+    Count.Check(Paired, "each wedge and its complement, each triangle and its three quarters, share every pixel of "
+                        "the cell to within a step of rounding");
 }
 
 }  // namespace stand

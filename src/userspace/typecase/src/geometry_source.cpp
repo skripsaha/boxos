@@ -9,6 +9,7 @@
 #include "box_lines.h"
 #include "boxos_mosaic.h"
 #include "cell_ink.h"
+#include "wedges.h"
 
 namespace typecase {
 
@@ -126,7 +127,7 @@ void DrawBraille(char32_t Character, CellInk &Ink, Rasterizer &Pen)
 bool GeometrySource::Has(char32_t Character) const
 {
     std::uint8_t Rows, Pattern;
-    return IsBoxLine(Character) || (Character >= BrailleFirst && Character <= BrailleLast) ||
+    return IsBoxLine(Character) || IsWedge(Character) || (Character >= BrailleFirst && Character <= BrailleLast) ||
            (Character >= LightShade && Character <= DenseShade) || EighthsOf(Character) ||
            MosaicShape(Character, Rows, Pattern);
 }
@@ -137,6 +138,7 @@ std::optional<GlyphImage> GeometrySource::Draw(char32_t Character, const Size &A
     CellInk      Ink(At.Width, At.Height);
     std::uint8_t Rows, Pattern;
     if (IsBoxLine(Character)) DrawBoxLine(Character, Ink, Pen);
+    else if (IsWedge(Character)) DrawWedge(Character, Ink, Pen);
     else if (Character >= BrailleFirst && Character <= BrailleLast) DrawBraille(Character, Ink, Pen);
     else if (Character >= LightShade && Character <= DenseShade) DrawShade(Character, Ink);
     else if (const Eighths *Of = EighthsOf(Character)) DrawEighths(*Of, Ink);
