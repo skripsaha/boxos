@@ -1211,9 +1211,21 @@ $(STAGE1_BIN): $(STAGE1_SRC) | $(BUILDDIR)
 	    rm -f $@; exit 1; \
 	fi
 
-$(STAGE2_BIN): $(STAGE2_SRC) | $(BUILDDIR)
+# The Deed's stamp kinds, as stage2 reads them: written out of their one owner,
+# src/include/volume_deed.h, by the C preprocessor, because an assembler cannot
+# read a C header. stage2 used to spell BOOT's kind for itself with nothing
+# holding it to the header; renumbered in one place and not the other, a BIOS
+# boot would have walked past the kernel's stamp and said the volume names none.
+STAGE2_STAMPS_INC = $(BUILDDIR)/volume_stamps.inc
+
+$(STAGE2_STAMPS_INC): $(SRCDIR)/include/volume_deed.h | $(BUILDDIR)
+	@$(CC) -E -dM -x c $< | sed -n 's/^#define \(VOLUME_STAMP_[A-Z_]*\) \([0-9][0-9]*\)$$/\1 equ \2/p' > $@
+	@grep -q '^VOLUME_STAMP_BOOT equ [0-9]' $@ || \
+	    { echo "ERROR: $< gives stage2 no VOLUME_STAMP_BOOT it can read as a number."; rm -f $@; exit 1; }
+
+$(STAGE2_BIN): $(STAGE2_SRC) $(STAGE2_STAMPS_INC) | $(BUILDDIR)
 	@echo "Building Stage2..."
-	@$(ASM) $(ASMFLAGS) $(ASM_LAYOUT) $< -o $@
+	@$(ASM) $(ASMFLAGS) $(ASM_LAYOUT) -I$(BUILDDIR)/ $< -o $@
 	@sz=$$(stat -f%z $@ 2>/dev/null || stat -c%s $@); \
 	max=$$(( $(STAGE2_SECTORS) * 512 )); \
 	if [ "$$sz" -gt "$$max" ]; then \

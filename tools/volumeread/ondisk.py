@@ -82,8 +82,8 @@ DEED_SECTORS = 8                        # deed_pen.h:62 DEED_PEN_SECTORS
 DEED_ROLE_HEAD, DEED_ROLE_TAIL = 1, 2   # volume_deed.h:106-107
 DEED_CRC_AT = 12                        # volume_deed.h:146 VolumeDeed.crc32
 STAMP_GEOMETRY = 1                      # volume_deed.h VOLUME_STAMP_GEOMETRY
-STAMP_BORN, STAMP_BOOT, STAMP_PACKED = 3, 4, 5  # volume_deed.h VOLUME_STAMP_BORN, _BOOT, _PACKED
-STAMP_FRAME = 6                         # volume_deed.h VOLUME_STAMP_FRAME
+STAMP_BORN, STAMP_BOOT, STAMP_PACKED = 2, 3, 4  # volume_deed.h VOLUME_STAMP_BORN, _BOOT, _PACKED
+STAMP_FRAME = 5                         # volume_deed.h VOLUME_STAMP_FRAME
 STAMP_HEADER = 4                        # volume_deed.h:161-164 VolumeStamp
 
 VOLUME_DEED = Fields("<8sHHI16sQQI",    # volume_deed.h:142-151

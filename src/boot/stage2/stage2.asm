@@ -124,7 +124,11 @@ DEED_SECTORS            equ 8
 DEED_BYTES              equ DEED_SECTORS * 512
 
 ; The one stamp this loader needs: where the kernel is, in the volume's blocks.
-VOLUME_STAMP_BOOT       equ 4
+; Its kind is not spelled here. The build writes the Deed's stamp kinds out of
+; src/include/volume_deed.h into volume_stamps.inc (Makefile), so a kind
+; renumbered there is the kind this loader looks for — never a BIOS boot that
+; finds no kernel, or reads another stamp's payload for BOOT's.
+%include "volume_stamps.inc"
 BOOT_KERNEL_BLOCK       equ 0
 BOOT_KERNEL_BLOCKS      equ 4
 BOOT_KERNEL_BYTES       equ 8
