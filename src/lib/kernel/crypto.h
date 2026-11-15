@@ -19,7 +19,7 @@ uint32_t KCrc32(const uint8_t *data, uint32_t len);
 uint32_t KCrc32Continue(uint32_t crc, const uint8_t *data, uint32_t len);
 
 // CRC32C (Castagnoli)
-// Used for: every sector of a format-v2 volume's book (src/include/volume_book.h)
+// Used for: every sector of a volume's book (src/include/volume_book.h)
 // By the crc32 instruction where every core has SSE4.2, by the book's own table
 // where one has not — the same sum either way.
 uint32_t KCrc32c(const uint8_t *data, uint32_t len);

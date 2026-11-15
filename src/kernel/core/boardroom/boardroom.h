@@ -231,8 +231,8 @@ uint32_t BoardroomSeatPhysicalBytes(uint8_t seat);
  * The grid a write to this seat's medium is cut to, in one answer: its
  * physical block in bytes (as BoardroomSeatPhysicalBytes, 0 when it would not
  * say) into *physical, and into *first_aligned the first of the room's
- * 512-byte sectors that begins one — L0, which a format-v2 volume's ground is
- * held to (spec_v2 §1.5): ATA's IDENTIFY word 209 or USB's LOWEST ALIGNED
+ * 512-byte sectors that begins one — L0, which a volume's ground is held
+ * to: ATA's IDENTIFY word 209 or USB's LOWEST ALIGNED
  * LBA, already turned into the room's sectors by the driver that read it. A
  * medium that says nothing of where its blocks begin begins them at sector 0.
  * Asked of the seats through their kind and index (boardroom_grid.c).

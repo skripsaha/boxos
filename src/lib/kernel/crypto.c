@@ -34,7 +34,7 @@ uint32_t KCrc32Continue(uint32_t crc, const uint8_t *data, uint32_t len)
 
 // ============================================================================
 // CRC32C (Castagnoli)
-// Used for: every sector of a format-v2 volume's book (volume_book.h)
+// Used for: every sector of a volume's book (volume_book.h)
 // ============================================================================
 
 uint32_t KCrc32c(const uint8_t *data, uint32_t len)

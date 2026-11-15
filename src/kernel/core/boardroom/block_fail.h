@@ -136,7 +136,7 @@ bool     BlockFailReadStrikes(uint8_t seat, uint64_t lba, uint32_t count, bool* 
 void     BlockFailProtect(uint8_t seat, bool on);
 bool     BlockFailProtects(uint8_t seat);
 
-/* A seek the stand's medium does not make (spec_v2 §3.3, M-13; the build key
+/* A seek the stand's medium does not make (M-13; the build key
  * SEEKLAG=): every read command on `seat` waits `us` microseconds before its
  * driver is handed it, as a disk's head travels before the first sector comes
  * — so what a read costs is the medium's own measure, and the mount's check of
@@ -152,8 +152,8 @@ void     BlockFailReadLagged(uint8_t seat);
 /* The pace the stand names for the volume's reads, in place of the one the
  * medium was seen to keep (read_pace.h): while it stands, the writer judges a
  * stitch's check by `rate` bytes a second and `seek_us` a seek — `rate` 0 for
- * no measure at all — so a test meets either answer of the hybrid (spec_v2
- * §3.3) on a medium as fast as QEMU's, whose own times drift (R11). Unpinned,
+ * no measure at all — so a test meets either answer of the hybrid on a
+ * medium as fast as QEMU's, whose own times drift (R11). Unpinned,
  * the medium's own measure is the writer's again. */
 void     BlockFailReadPace(bool pinned, uint64_t rate, uint64_t seek_us);
 

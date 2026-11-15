@@ -174,7 +174,7 @@ static bool w_alloc(WriteJob *j)
 
 /* Page i of the stretch made what a read of its block gives: zeros for a
  * block that held nothing of the file (`read` NULL), and the Slips over the
- * file's last block laid on it (format v2, tail_slip.h) — the block the write
+ * file's last block laid on it (tail_slip.h) — the block the write
  * lays carries them, and the record that names it lets them go. */
 static void WriteJobBase(WriteJob *j, uint32_t i, const uint8_t *read)
 {

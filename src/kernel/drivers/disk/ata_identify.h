@@ -16,8 +16,8 @@
  * next block at sector 8 - 1 = 7. So it is turned here, as Linux turns it
  * (ata_id_logical_sector_offset): with P/L logical sectors to a physical
  * block, the first sector that begins one is (P/L - offset) when the offset is
- * not 0, and 0 when it is — the L0 a volume's ground is held to (spec_v2
- * §1.5, §16.2 п.19): `(ground - L0) mod (atom / 512) == 0`.
+ * not 0, and 0 when it is — the L0 a volume's ground is held to:
+ * `(ground - L0) mod (atom / 512) == 0`.
  *
  * `logical` and `physical` are the sizes word 106 already gave, in bytes.
  * Answered in logical sectors, which on these two drivers are the room's

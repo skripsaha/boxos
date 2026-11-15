@@ -197,7 +197,7 @@ const char *LogKeepWriteBackName(void);
  *     seconds is a hardware override that cuts the rails, and RAM goes with
  *     them. On a wedged machine, press RESET, not power.
  *   - it does NOT survive firmware that retrains and scrubs memory on every
- *     start. That is why the header carries a magic and a version, and why a
+ *     start. That is why the header carries a magic and its own size, and why a
  *     window that does not check out is reported as absent rather than
  *     presented as a log.
  *

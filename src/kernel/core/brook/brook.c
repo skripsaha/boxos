@@ -72,7 +72,7 @@
 /* ─────────────────────────────────────────────────────────────────────
  * Page-class policy mirrors Bay. 4 KiB by default; 2 MiB when total
  * slot size ≥ 2 MiB AND a 2 MiB-aligned chunk can be carved. 1 GiB
- * pages are out of scope for v1 (BUDDY_MAX_ORDER caps order at 14).
+ * pages are not used (BUDDY_MAX_ORDER caps order at 14).
  *
  * NOTE: the header page is always exactly 1 × 4 KiB regardless of
  * page class — it carries only the 128 B BrookHeader plus padding.

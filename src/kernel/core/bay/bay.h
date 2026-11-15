@@ -32,7 +32,7 @@
  *
  * Page-class selection is implicit: ≥ 2 MB allocations try 2 MB pages
  * via PMM buddy order-9; smaller allocations use 4 KB pages. 1 GB pages
- * are not supported in v1 (BUDDY_MAX_ORDER=14 caps contiguous chunks at
+ * are not supported (BUDDY_MAX_ORDER=14 caps contiguous chunks at
  * 64 MB; a buddy upgrade in a future session would enable 1 GB).
  *
  * Bay sits at the same architectural tier as Touch — distinct semantic
