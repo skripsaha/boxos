@@ -23,14 +23,14 @@ static BoxPenPart g_parts[STAND_PARTS];
 static uint32_t   g_count;
 
 static void Part(const char *name, const void *bytes, uint64_t size, uint64_t memory, uint64_t place,
-                 uint32_t flags, uint16_t version)
+                 uint32_t flags)
 {
-    g_parts[g_count++] = (BoxPenPart){ name, (const uint8_t *)bytes, size, memory, place, flags, version };
+    g_parts[g_count++] = (BoxPenPart){ name, (const uint8_t *)bytes, size, memory, place, flags };
 }
 
-static void Text(const char *name, const char *text, uint32_t flags, uint16_t version)
+static void Text(const char *name, const char *text, uint32_t flags)
 {
-    Part(name, text, strlen(text), strlen(text), 0, flags, version);
+    Part(name, text, strlen(text), strlen(text), 0, flags);
 }
 
 static bool Write(const char *dir, const char *name)
@@ -80,18 +80,18 @@ int main(int argc, char **argv)
     memcpy(names + NAMEPLATE_NAMES_AT(2), "a\0b\0", 4);
 
     const uint32_t must = BOX_FLAG_MUST_UNDERSTAND;
-    Part("code", code, sizeof(code), sizeof(code), 0, must, BOX_PART_VERSION);
-    Part("data", data, sizeof(data), 0x1800, 0x1000, must, BOX_PART_VERSION);
-    Part("doors", doors, doors_bytes, doors_bytes, 0, must, BOX_PART_VERSION);
-    Part("thread", thread, thread_bytes, thread_bytes, 0, must, BOX_PART_VERSION);
-    Part("fixups", fixups, fixups_bytes, fixups_bytes, 0, must, BOX_PART_VERSION);
-    Part("names", names, sizeof(names), sizeof(names), 0, 0, BOX_PART_VERSION);
-    Text("needs", "needs 1\ncpu sse4.2\n", must, BOX_PART_VERSION);
-    Text("hints", "hints 1\nstack 1 MiB\n", 0, BOX_PART_VERSION);
-    Text("life", "life 1\nstays\nrise\nlonely\n", 0, BOX_PART_VERSION);
-    Text("form", "form 1\ntakes words \"what to say\"\n", BOX_FLAG_LOAD_AT_START, BOX_PART_VERSION);
+    Part("code", code, sizeof(code), sizeof(code), 0, must);
+    Part("data", data, sizeof(data), 0x1800, 0x1000, must);
+    Part("doors", doors, doors_bytes, doors_bytes, 0, must);
+    Part("thread", thread, thread_bytes, thread_bytes, 0, must);
+    Part("fixups", fixups, fixups_bytes, fixups_bytes, 0, must);
+    Part("names", names, sizeof(names), sizeof(names), 0, 0);
+    Text("needs", "needs\ncpu sse4.2\n", must);
+    Text("hints", "hints\nstack 1 MiB\n", 0);
+    Text("life", "life\nstays\nrise\nlonely\n", 0);
+    Text("form", "form\ntakes words \"what to say\"\n", BOX_FLAG_LOAD_AT_START);
     Text("settings",
-         "settings 1\n"
+         "settings\n"
          "hours one-of 24 12 default 24 \"how the hours are counted\"\n"
          "column \"the column\"\n"
          "  width number from -5 to 200 cells default 72 next-start \"how wide the column is\"\n"
@@ -99,12 +99,11 @@ int main(int argc, char **argv)
          "greeting text default \"\" \"what it says at start\"\n"
          "future gradient default x \"a kind of later\"\n"
          "  inner color default red \"inside a later kind\"\n",
-         BOX_FLAG_LOAD_AT_START, BOX_PART_VERSION);
-    Text("about", "about 1\nname Stand\n", 0, BOX_PART_VERSION);
-    Text("about:ru", "about 1\nname Stand\n", BOX_FLAG_COMPRESSED, BOX_PART_VERSION);
-    Text("works", "works 2\nsomething later\n", 0, 2);
-    Text("role", "role 1\nsystem\n", 0, BOX_PART_VERSION);
-    Text("paint:brushes", "brushes", 0, BOX_PART_VERSION);
+         BOX_FLAG_LOAD_AT_START);
+    Text("about", "about\nname Stand\n", 0);
+    Text("about:ru", "about\nname Stand\n", BOX_FLAG_COMPRESSED);
+    Text("role", "role\nsystem\n", 0);
+    Text("paint:brushes", "brushes", 0);
     if (!Write(argv[1], "full.box")) {
         fprintf(stderr, "inside_stand: full.box was not written\n");
         return 2;
@@ -123,32 +122,31 @@ int main(int argc, char **argv)
     BoxPenThread(8, NULL, 0, 8, one_thread, &one_thread_bytes);
     BoxPenFixups(&one_place, 1, one_fixup, &one_fixup_bytes);
     g_count = 0;
-    Part("code", code, sizeof(code), sizeof(code), 0, must, BOX_PART_VERSION);
-    Part("data", data, 8, 9, 0x1000, must, BOX_PART_VERSION);
-    Part("doors", doors, doors_bytes, doors_bytes, 0, must, BOX_PART_VERSION);
-    Part("thread", one_thread, one_thread_bytes, one_thread_bytes, 0, must, BOX_PART_VERSION);
-    Part("fixups", one_fixup, one_fixup_bytes, one_fixup_bytes, 0, must, BOX_PART_VERSION);
-    Part("names", one_name, sizeof(one_name), sizeof(one_name), 0, 0, BOX_PART_VERSION);
-    Part("paint:dot", data, 1, 1, 0, 0, BOX_PART_VERSION);
+    Part("code", code, sizeof(code), sizeof(code), 0, must);
+    Part("data", data, 8, 9, 0x1000, must);
+    Part("doors", doors, doors_bytes, doors_bytes, 0, must);
+    Part("thread", one_thread, one_thread_bytes, one_thread_bytes, 0, must);
+    Part("fixups", one_fixup, one_fixup_bytes, one_fixup_bytes, 0, must);
+    Part("names", one_name, sizeof(one_name), sizeof(one_name), 0, 0);
+    Part("paint:dot", data, 1, 1, 0, 0);
     if (!Write(argv[1], "single.box")) {
         fprintf(stderr, "inside_stand: single.box was not written\n");
         return 2;
     }
 
     g_count = 0;
-    Part("code", code, sizeof(code), sizeof(code), 0, must, BOX_PART_VERSION);
-    Part("doors", doors, doors_bytes, doors_bytes, 0, must, BOX_PART_VERSION);
-    Text("form", "form 1\ntakes\twords\n", BOX_FLAG_LOAD_AT_START, BOX_PART_VERSION);
+    Part("code", code, sizeof(code), sizeof(code), 0, must);
+    Part("doors", doors, doors_bytes, doors_bytes, 0, must);
+    Text("form", "form\ntakes\twords\n", BOX_FLAG_LOAD_AT_START);
     if (!Write(argv[1], "badform.box")) {
         fprintf(stderr, "inside_stand: badform.box was not written\n");
         return 2;
     }
 
     g_count = 0;
-    Part("code", code, sizeof(code), sizeof(code), 0, must, BOX_PART_VERSION);
-    Part("doors", doors, doors_bytes, doors_bytes, 0, must, BOX_PART_VERSION);
-    Text("settings", "settings 1\nprompt word \"what stands before\"\n", BOX_FLAG_LOAD_AT_START,
-         BOX_PART_VERSION);
+    Part("code", code, sizeof(code), sizeof(code), 0, must);
+    Part("doors", doors, doors_bytes, doors_bytes, 0, must);
+    Text("settings", "settings\nprompt word \"what stands before\"\n", BOX_FLAG_LOAD_AT_START);
     if (!Write(argv[1], "badsettings.box")) {
         fprintf(stderr, "inside_stand: badsettings.box was not written\n");
         return 2;

@@ -36,7 +36,7 @@ extern "C" {
  *
  * Lines, each ended by '\n':
  *
- *     form 1                                 first; the toolchain writes it
+ *     form                                   first; the toolchain writes it
  *     takes [optional] KIND [NAME] "what it is"   a field, in order
  *     gives things | text                    what the program gives back
  *
@@ -114,11 +114,11 @@ typedef enum {
     BOX_FORM_GIVES_TEXT
 } BoxFormGives;
 
-/* BOX_FORM(text): the program's Form, text as above without `form 1`. One
+/* BOX_FORM(text): the program's Form, text as above without `form`. One
  * per program. It lands in .boxos.form, read-only, beside .nameplate. */
 #define BOX_FORM(Text)                                                         \
     __attribute__((section(".boxos.form"), used, aligned(1)))                  \
-    static const char BoxFormDeclared[] = "form 1\n" Text
+    static const char BoxFormDeclared[] = "form\n" Text
 
 /* ---- What a program reads --------------------------------------------- */
 
@@ -180,7 +180,7 @@ typedef struct {
     uint8_t      Declared;     /* the program has a Form */
 } BoxForm;
 
-/* The Form from its text; text not starting with `form 1` is no Form. */
+/* The Form from its text; text not starting with the line `form` is no Form. */
 int  form_parse(const char *text, size_t length, BoxForm *out);
 /* The Form of a program on the volume, read from its file's .boxos.form
  * section (the headers and that section only). A program with none gets

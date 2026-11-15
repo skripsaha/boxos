@@ -1,6 +1,6 @@
 /* takes and gives: the Form a program shows the shell, as box/form.h defines
  * it. The directives are written in the text of the Form as they come, after
- * its first line, `form 1`; the object carries that text in .boxos.form. */
+ * its first line, `form`; the object carries that text in .boxos.form. */
 
 #include "boxasm_asm.h"
 
@@ -19,7 +19,7 @@ static const char *const BoxAsmFormGives[] = { "things", "text" };
 
 static int BoxAsmFormAppend(BoxAsmAssembler *Asm, const char *Text, size_t Length)
 {
-    if (Asm->Form.Text.Size == 0 && BoxAsmBufferAppend(&Asm->Form.Text, "form 1\n", 7u) != 0)
+    if (Asm->Form.Text.Size == 0 && BoxAsmBufferAppend(&Asm->Form.Text, "form\n", 5u) != 0)
         return -ERR_NO_MEMORY;
     return BoxAsmBufferAppend(&Asm->Form.Text, Text, Length);
 }

@@ -54,12 +54,9 @@
 #define BOX_MAGIC_6  0x1Au
 #define BOX_MAGIC_7  0x0Au
 
-#define BOX_VERSION        1u
-
 #define BOX_HEADER_BYTES   80u
 #define BOX_AT_MAGIC       0u    /* u8[8] */
-#define BOX_AT_VERSION     8u    /* u16 */
-#define BOX_AT_HEADER_SIZE 10u   /* u16: the header's length; this version writes 80 */
+#define BOX_AT_HEADER_SIZE 8u    /* u32: the header's length; this tree writes 80 */
 #define BOX_AT_PART_COUNT  12u   /* u32 */
 #define BOX_AT_TABLE       16u   /* u64: where the table starts */
 #define BOX_AT_NAMES       24u   /* u64: where the names start */
@@ -76,10 +73,9 @@
 #define BOX_ENTRY_MEMORY   16u   /* u64: how many it takes in memory */
 #define BOX_ENTRY_PLACE    24u   /* u64: a loadable part's offset from the image base */
 #define BOX_ENTRY_FLAGS    32u   /* u32: BOX_FLAG_* */
-#define BOX_ENTRY_VERSION  36u   /* u16: the version of the part's own layout */
-#define BOX_ENTRY_NAME_LEN 38u   /* u16 */
-#define BOX_ENTRY_NAME_AT  40u   /* u32: offset in the names */
-#define BOX_ENTRY_RESERVED 44u   /* u32: zero */
+#define BOX_ENTRY_NAME_AT  36u   /* u32: offset in the names */
+#define BOX_ENTRY_NAME_LEN 40u   /* u16 */
+#define BOX_ENTRY_RESERVED 42u   /* u8[6]: zero, up to the hash */
 #define BOX_ENTRY_HASH     48u   /* u8[32]: SHA-256 of the part's bytes in the file */
 #define BOX_HASH_BYTES     32u
 
@@ -107,14 +103,14 @@
 /* ── The standard's parts ────────────────────────────────────────────────── */
 
 typedef enum {
-    BOX_KIND_UNKNOWN = 0,   /* the program's own, or a standard this system predates */
+    BOX_KIND_UNKNOWN = 0,   /* the program's own, or a standard this system does not know */
     BOX_KIND_CODE,          /* machine code: R+X in memory; required */
     BOX_KIND_CONST,         /* read-only data: R */
     BOX_KIND_DATA,          /* data: R+W; memory past the file's bytes is zeros */
     BOX_KIND_FIXUPS,        /* where to add the base: the box can go anywhere */
     BOX_KIND_DOORS,         /* named ways in; `start` required */
     BOX_KIND_THREAD,        /* the template of each thread's local storage */
-    BOX_KIND_NAMES,         /* the program's names for its functions (Nameplate v1) */
+    BOX_KIND_NAMES,         /* the program's names for its functions (a Nameplate) */
     BOX_KIND_SIGNATURE,     /* an author's signature over the seal — not yet read */
     BOX_KIND_NEEDS,         /* text: what the program needs of the processor */
     BOX_KIND_HINTS,         /* text: what it usually needs; never a limit raised */
@@ -129,9 +125,6 @@ typedef enum {
     BOX_KIND_ROLE,          /* text: what the volume's maker keeps the file as — system or boot */
     BOX_KIND_COUNT
 } BoxKind;
-
-/* The version of each standard part's layout this system reads. */
-#define BOX_PART_VERSION    1u
 
 /* ── doors ───────────────────────────────────────────────────────────────── *
  *

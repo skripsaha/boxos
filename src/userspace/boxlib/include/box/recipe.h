@@ -21,7 +21,7 @@ extern "C" {
  * have the tool make it again — in the context it was made in — by handing it
  * the program: `assemble it`, `it` being the program.
  *
- *     recipe 1
+ *     recipe
  *     by assemble
  *     context demo
  *     from #41 <64 hex digits> planets.asm      the file the build began with
@@ -53,7 +53,7 @@ typedef struct {
 } BoxRecipe;
 
 /* The Recipe from its text: 0, or -ERR_INVALID_ARGUMENT for text that is no
- * Recipe one could follow (no `recipe 1` first, no `by`, no `context`, no
+ * Recipe one could follow (no `recipe` first, no `by`, no `context`, no
  * `from`, a line of a known kind spelled wrong) — nothing is kept then. */
 int  recipe_parse(const char *text, size_t length, BoxRecipe *out);
 /* The Recipe a program on the volume carries — a box's part `recipe`, an ELF

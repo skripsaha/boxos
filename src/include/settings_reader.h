@@ -15,7 +15,7 @@
  * put there by BOX_SETTINGS or BoxASM's `setting`. It is the one source of
  * what each setting is, takes and starts as.
  *
- *     settings 1
+ *     settings
  *     greeting on-or-off default on "the line said when the program starts"
  *     cursor "the mark where what you type goes"
  *         shape one-of block underline bar off default underline "its shape"
@@ -80,7 +80,6 @@
 #define SETTING_NAME_MAX      32u
 #define SETTINGS_DEPTH_MAX    8u
 #define SETTINGS_TAB_STOP     4u
-#define SETTINGS_VERSION_WORD "1"
 
 typedef enum {
     SETTING_GROUP = 0,          /* holds others, and has no value of its own */
@@ -129,7 +128,7 @@ typedef enum {
     SETTINGS_OK = 0,
     /* the declaration as a whole */
     SETTINGS_NOT_TEXT,          /* a byte below a blank but the newline, or DEL */
-    SETTINGS_NO_HEAD,           /* the first line is not "settings 1" */
+    SETTINGS_NO_HEAD,           /* the first line is not "settings" */
     /* where a line stands */
     SETTING_INDENT_BAD,         /* the declaration: indented unlike its siblings */
     SETTING_TOO_DEEP,           /* inside more than SETTINGS_DEPTH_MAX levels */
@@ -608,7 +607,7 @@ typedef struct {
 } SettingsDeclared;
 
 /* The declaration's `size` bytes at `bytes`, opened past its first line,
- * which must be "settings 1". */
+ * which must be "settings". */
 static inline SettingsVerdict SettingsDeclaredBegin(const uint8_t *bytes, uint64_t size, SettingsDeclared *out)
 {
     out->Bytes   = bytes;
@@ -629,9 +628,6 @@ static inline SettingsVerdict SettingsDeclaredBegin(const uint8_t *bytes, uint64
         at = 0;
         if (!SettingWord(line, &at, &word, &quoted, &verdict)) continue;
         if (quoted || !SettingSpanIs(word, "settings")) return SETTINGS_NO_HEAD;
-        if (!SettingWord(line, &at, &word, &quoted, &verdict) || quoted ||
-            !SettingSpanIs(word, SETTINGS_VERSION_WORD))
-            return SETTINGS_NO_HEAD;
         return SettingWord(line, &at, &word, &quoted, &verdict) ? SETTINGS_NO_HEAD : SETTINGS_OK;
     }
     return SETTINGS_NO_HEAD;
@@ -855,7 +851,7 @@ static inline const char *SettingsVerdictText(SettingsVerdict verdict)
     switch (verdict) {
     case SETTINGS_OK:                 return "it holds";
     case SETTINGS_NOT_TEXT:           return "is not text: it holds a byte below a blank other than a newline";
-    case SETTINGS_NO_HEAD:            return "does not begin with the line \"settings 1\"";
+    case SETTINGS_NO_HEAD:            return "does not begin with the line \"settings\"";
     case SETTING_INDENT_BAD:          return "is indented unlike the lines beside it";
     case SETTING_TOO_DEEP:            return "stands deeper than 8 levels of things inside things";
     case SETTING_INSIDE_UNTAKEN:      return "stands inside a line that is not taken";

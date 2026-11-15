@@ -36,8 +36,7 @@ typedef struct {
     uint64_t Address;      /* where the part is in memory */
     uint64_t Size;         /* its bytes there — for data, its zeros too */
     uint32_t NameAt;       /* its name, from the table's start */
-    uint16_t NameLength;
-    uint16_t Version;      /* the version of its kind it is written in */
+    uint32_t NameLength;
 } BoxLoadedPart;
 
 _Static_assert(sizeof(BoxLoadedHead) == 40, "the head of the table of loaded parts is 40 bytes");

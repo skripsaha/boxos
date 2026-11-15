@@ -29,8 +29,8 @@
  *   .boxos.settings    settings loaded at start, read-only; the text, every setting read
  *   .boxos.life        life     the text, each word known
  *   .boxos.recipe      recipe   the text, its C string's zeros dropped
- *   --ask WORD         asks     the words, a line each after `asks 1`
- *   --role WORD        role     the one word, after `role 1`
+ *   --ask WORD         asks     the words, a line each after `asks`
+ *   --role WORD        role     the one word, after `role`
  *
  * An executable linked at a fixed address (ET_EXEC) keeps its addresses: its
  * box has no fixups and is loaded where it was linked. A static PIE (ET_DYN)
@@ -383,7 +383,7 @@ static void CheckSettings(const uint8_t *bytes, uint64_t size)
     if (verdict == SETTINGS_NOT_TEXT)
         Refuse("its settings are not text: they hold a byte below a blank other than a newline");
     if (verdict != SETTINGS_OK)
-        Refuse("its settings do not begin with the line \"settings " SETTINGS_VERSION_WORD "\"");
+        Refuse("its settings do not begin with the line \"settings\"");
     while (SettingsDeclaredNext(&declared, &setting, &verdict)) {
         if (verdict == SETTINGS_OK) continue;
         if (setting.Name.Length > 0)
@@ -419,7 +419,7 @@ static void CheckLife(const uint8_t *bytes, uint64_t size)
  * not passed over: it asks for what it would never be given. */
 static size_t WriteAsks(char *text, size_t room, char **words, int count)
 {
-    size_t used = (size_t)snprintf(text, room, "asks 1\n");
+    size_t used = (size_t)snprintf(text, room, "asks\n");
     for (int i = 0; i < count; i++) {
         int more = snprintf(text + used, room - used, "ask %s\n", words[i]);
         if (more < 0 || (size_t)more >= room - used) Refuse("it asks for more than a box can say");
@@ -444,7 +444,7 @@ static size_t WriteAsks(char *text, size_t room, char **words, int count)
  * it is refused here, where the maker can mend it. Returns its size. */
 static size_t WriteRole(char *text, size_t room, const char *word)
 {
-    int used = snprintf(text, room, "role 1\n%s\n", word);
+    int used = snprintf(text, room, "role\n%s\n", word);
     if (used < 0 || (size_t)used >= room) Refuse("it says a role that is no word of one");
 
     BoxRole    role;
@@ -458,7 +458,7 @@ static size_t WriteRole(char *text, size_t room, const char *word)
 static void Add(BoxPenPart *parts, uint32_t *count, const char *name, const uint8_t *bytes, uint64_t size,
                 uint64_t memory, uint64_t place, uint32_t flags)
 {
-    parts[(*count)++] = (BoxPenPart){ name, bytes, size, memory, place, flags, BOX_PART_VERSION };
+    parts[(*count)++] = (BoxPenPart){ name, bytes, size, memory, place, flags };
 }
 
 static void AddLoadable(BoxPenPart *parts, uint32_t *count, const char *name, const Loadable *part)

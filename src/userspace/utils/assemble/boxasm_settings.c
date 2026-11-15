@@ -174,8 +174,7 @@ int BoxAsmParseProgramSetting(BoxAsmAssembler *Asm, BoxAsmLexer *Lexer, BoxAsmTo
                                Rest.At[Rest.Length - 1] == '\r'))
         Rest.Length--;
     if (Asm->Settings.Size == 0 &&
-        BoxAsmBufferAppend(&Asm->Settings, "settings " SETTINGS_VERSION_WORD "\n",
-                           sizeof("settings " SETTINGS_VERSION_WORD "\n") - 1u) != 0)
+        BoxAsmBufferAppend(&Asm->Settings, "settings\n", sizeof("settings\n") - 1u) != 0)
         return -ERR_NO_MEMORY;
 
     /* What holds it: the leading words that name, from the top down,

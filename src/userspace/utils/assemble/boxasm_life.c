@@ -5,7 +5,7 @@
  *
  * The words are the program's, not the assembler's: task, stays and serves,
  * one of them at most, and rise at most once. They go into the program's
- * .boxos.life a word a line after "life 1", and a word the one reader of life
+ * .boxos.life a word a line after "life", and a word the one reader of life
  * would pass over is refused here, where it was written, rather than lost on
  * the way to whoever starts the program. */
 
@@ -80,7 +80,7 @@ static int BoxAsmLifeWord(BoxAsmAssembler *Asm, const BoxAsmToken *Word, const c
         return BoxAsmLifeFail(Asm, Word, NULL, 0,
                               Kind ? "a program lives one way: it says task, stays or serves once"
                                    : "rise is said once");
-    if (Asm->Life.Size == 0 && BoxAsmBufferAppend(&Asm->Life, "life 1\n", 7u) != 0)
+    if (Asm->Life.Size == 0 && BoxAsmBufferAppend(&Asm->Life, "life\n", 5u) != 0)
         return -ERR_NO_MEMORY;
     if (BoxAsmBufferAppend(&Asm->Life, Said, Length) != 0 || BoxAsmBufferAppend(&Asm->Life, "\n", 1u) != 0)
         return -ERR_NO_MEMORY;

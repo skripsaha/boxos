@@ -43,8 +43,8 @@ static uint8_t *StandBox(const BoxPenPart *extra, uint32_t extra_count, uint64_t
     BoxPenDoors(&start, 1, doors, &doors_bytes);
 
     BoxPenPart parts[STAND_BOX_PARTS_MAX] = {
-        { "code", code, sizeof(code), sizeof(code), 0, BOX_FLAG_MUST_UNDERSTAND, BOX_PART_VERSION },
-        { "doors", doors, doors_bytes, doors_bytes, 0, BOX_FLAG_MUST_UNDERSTAND, BOX_PART_VERSION },
+        { "code", code, sizeof(code), sizeof(code), 0, BOX_FLAG_MUST_UNDERSTAND },
+        { "doors", doors, doors_bytes, doors_bytes, 0, BOX_FLAG_MUST_UNDERSTAND },
     };
     for (uint32_t i = 0; i < extra_count; i++) parts[2 + i] = extra[i];
 

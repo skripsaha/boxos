@@ -34,7 +34,7 @@ namespace {
 
 // The file read and cut: its Form, as form_parse reads one, and its steps.
 struct Text {
-    std::string              FormText = "form 1\n";
+    std::string              FormText = "form\n";
     std::vector<std::string> Steps;
 };
 

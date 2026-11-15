@@ -268,7 +268,7 @@ fi
 
 # ---- the Form: takes and gives ------------------------------------------------
 
-FORM_TEXT=$'form 1\ntakes optional things "the files"\ntakes words label "the tags they get"\ntakes into "where it goes"\ngives text\n'
+FORM_TEXT=$'form\ntakes optional things "the files"\ntakes words label "the tags they get"\ntakes into "where it goes"\ngives text\n'
 cat > "$WORK/form.asm" <<'EOF'
 section .text
 global main
@@ -325,7 +325,7 @@ for i in range(symtab[5] // 24):
         print(start == form[3], end == form[3] + form[5], end - start, repr(text))
 EOF
 )
-    if [ $form = with ] && [ "$got" = "True True 45 'form 1\ntakes things \"the files\"\ngives things\n'" ]; then ok form_symbols_with
+    if [ $form = with ] && [ "$got" = "True True 43 'form\ntakes things \"the files\"\ngives things\n'" ]; then ok form_symbols_with
     elif [ $form = without ] && [ "$got" = "True True 0 ''" ]; then ok form_symbols_without
     else fail "form_symbols_$form" "$got"; fi
 done
@@ -358,7 +358,7 @@ align 8
 global bounds
 bounds: dq __boxos_settings_start, __boxos_settings_end
 EOF
-SETTINGS_TEXT='settings 1
+SETTINGS_TEXT='settings
 hours one-of 24 12 default 24 "how the hours are counted"
 digits "the digits"
     width number from -5 to 200 cells default 72 next-start "how wide the column is"
@@ -433,7 +433,7 @@ setting_refuses setting_in_struc $'struc point\nsetting look word default x "how
 
 # A declaration that comes to the linker from another assembler is read too:
 # a box with a setting no program could have is not made.
-program badsettings $' nop\n.section .boxos.settings,"a"\n.ascii "settings 1\\nlook word \\"how it looks\\"\\n"\n.text'
+program badsettings $' nop\n.section .boxos.settings,"a"\n.ascii "settings\\nlook word \\"how it looks\\"\\n"\n.text'
 said=$("$STAND" link "$ENTRY" "$WORK/badsettings.o" "$ARCHIVE" "$WORK/badsettings.box" 2>&1)
 if [ $? = 1 ] && [ "$said" = "the program's settings, line 2: the setting look has no default" ]; then
     ok settings_read_at_link
@@ -455,7 +455,7 @@ fi
 
 # ---- the life: how the program lives -------------------------------------------
 
-# `life` words go into .boxos.life a word a line after "life 1", said on one
+# `life` words go into .boxos.life a word a line after "life", said on one
 # line or on several, a comment going with the rest of its line. In a box they
 # are the part life, which stays in the file: whoever starts the program reads
 # it, the program never does (the box's ELF twin is the witness).
@@ -470,7 +470,7 @@ main:
     xor edi, edi
     call exit
 EOF
-printf 'life 1\nserves\nrise\n' > "$WORK/life.want"
+printf 'life\nserves\nrise\n' > "$WORK/life.want"
 if "$STAND" assemble "$WORK/life.asm" "$WORK/life.o" 2> "$WORK/asm.err" &&
    x86_64-elf-objcopy -O binary --only-section=.boxos.life "$WORK/life.o" "$WORK/life.got" 2>/dev/null &&
    cmp -s "$WORK/life.got" "$WORK/life.want"; then
@@ -479,7 +479,7 @@ else
     fail life_section "$(cat "$WORK/asm.err" 2>/dev/null; diff "$WORK/life.got" "$WORK/life.want" 2>&1)"
 fi
 printf 'section .text\nglobal main\nmain:\n    ret\nlife stays rise\n' > "$WORK/lifeline.asm"
-printf 'life 1\nstays\nrise\n' > "$WORK/lifeline.want"
+printf 'life\nstays\nrise\n' > "$WORK/lifeline.want"
 if "$STAND" assemble "$WORK/lifeline.asm" "$WORK/lifeline.o" 2> "$WORK/asm.err" &&
    x86_64-elf-objcopy -O binary --only-section=.boxos.life "$WORK/lifeline.o" "$WORK/lifeline.got" 2>/dev/null &&
    cmp -s "$WORK/lifeline.got" "$WORK/lifeline.want"; then
@@ -501,7 +501,7 @@ setting_refuses life_in_struc $'struc point\nlife stays\nendstruc' \
 # with a word nobody who starts it would hear is not made. Back in .text after
 # it, as badsettings: what program() writes after the body is code, and in the
 # life it would be bytes of a line nobody wrote, read as it happens to fall.
-program badlife $' nop\n.section .boxos.life,"a"\n.ascii "life 1\\nstays\\nlonely\\n"\n.text'
+program badlife $' nop\n.section .boxos.life,"a"\n.ascii "life\\nstays\\nlonely\\n"\n.text'
 said=$("$STAND" link "$ENTRY" "$WORK/badlife.o" "$ARCHIVE" "$WORK/badlife.box" 2>&1)
 if [ $? = 1 ] && [ "$said" = "the program's life, line 3: no word of how a program lives — task, stays, serves or rise" ]; then
     ok life_read_at_link
@@ -515,7 +515,7 @@ fi
 # Recipe's bytes exactly, after both segments and mapped by none, and every
 # byte the loader loads — the segments, the entry, the loadable sections —
 # is the same in both.
-printf 'recipe 1\nby assemble\ncontext demo\nfrom #41 %s planets.asm\n' \
+printf 'recipe\nby assemble\ncontext demo\nfrom #41 %s planets.asm\n' \
     ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad > "$WORK/recipe.txt"
 if "$STAND" link "$ENTRY" "$WORK/hello.o" "$ARCHIVE" "$WORK/plain.elf" 2> "$WORK/link.err" &&
    "$STAND" link "$ENTRY" "$WORK/hello.o" "$ARCHIVE" "$WORK/recipe.elf" "recipe=$WORK/recipe.txt" \
@@ -587,7 +587,7 @@ count, table, names = struct.unpack_from('<IQQ', box, 12)
 parts = {}
 for i in range(count):
     offset, size, memory, place, flags = struct.unpack_from('<QQQQI', box, table + 80 * i)
-    length, at = struct.unpack_from('<HI', box, table + 80 * i + 38)
+    at, length = struct.unpack_from('<IH', box, table + 80 * i + 36)
     parts[box[names + at:names + at + length].decode()] = (box[offset:offset + size], memory, place, flags)
 known = {'code', 'const', 'data', 'doors', 'fixups', 'thread', 'names', 'form', 'settings', 'life', 'recipe'}
 if set(parts) - known: fail('parts nobody makes: %s' % sorted(set(parts) - known))
@@ -719,7 +719,8 @@ msg: .asciz "x"
 .balign 16
 tv: .long 7
 .section .boxos.form,"a"
-.ascii "form 1\ntakes words \"what\"\n"'
+.ascii "form\ntakes words \"what\"\n"
+.text'
 box_builds movable "$WORK/movable.o"
 if x86_64-elf-ld -nostdlib -static $REF_PLACE -T "$LD_SCRIPT" -o "$WORK/movable_ref.elf" "$ENTRY" \
        "$WORK/movable.o" "$ARCHIVE" &&

@@ -55,7 +55,7 @@ enum {
 };
 
 static const char g_declaration[] =
-    "settings 1\n"
+    "settings\n"
     "# a comment in the declaration\n"
     "greeting on-or-off default on next-start \"the line said at start\"\n"
     "cursor \"the mark where what you type goes\"\n"
@@ -137,14 +137,14 @@ static void TestDeclared(void)
           "a text holding a color, the last line unended");
 }
 
-/* The verdict on line 2 of "settings 1\n" + text. */
+/* The verdict on line 2 of "settings\n" + text. */
 static void LineVerdict(const char *line, SettingsVerdict want, const char *what)
 {
     char             text[512];
     SettingsDeclared declared;
     SettingsVerdict  verdict = SETTINGS_OK;
     Setting          setting;
-    snprintf(text, sizeof(text), "settings 1\n%s\n", line);
+    snprintf(text, sizeof(text), "settings\n%s\n", line);
     bool opened = SettingsDeclaredBegin((const uint8_t *)text, strlen(text), &declared) == SETTINGS_OK;
     bool read   = opened && SettingsDeclaredNext(&declared, &setting, &verdict);
     char label[600];
@@ -180,19 +180,18 @@ static void TestDeclaredWrong(void)
     struct { const char *text; SettingsVerdict want; const char *what; } heads[] = {
         { "", SETTINGS_NO_HEAD, "no bytes" },
         { "a word default b \"c\"\n", SETTINGS_NO_HEAD, "no head line" },
-        { "settings 2\n", SETTINGS_NO_HEAD, "a later version" },
-        { "settings 0\n", SETTINGS_NO_HEAD, "a version that never was" },
-        { "settings 1 more\n", SETTINGS_NO_HEAD, "words after the version" },
+        { "settings 1\n", SETTINGS_NO_HEAD, "a word after the head" },
+        { "settings more words\n", SETTINGS_NO_HEAD, "words after the head" },
         { "\"settings\" 2\n", SETTINGS_NO_HEAD, "a quoted head" },
-        { "settings 1\n\ta word default b \"c\"\n", SETTINGS_NOT_TEXT, "a tab: a declaration is indented in spaces" },
-        { "settings 1\r\n", SETTINGS_NOT_TEXT, "a CR" },
-        { "settings 1\na word default b \"c\x7f\"\n", SETTINGS_NOT_TEXT, "a DEL" },
+        { "settings\n\ta word default b \"c\"\n", SETTINGS_NOT_TEXT, "a tab: a declaration is indented in spaces" },
+        { "settings\r\n", SETTINGS_NOT_TEXT, "a CR" },
+        { "settings\na word default b \"c\x7f\"\n", SETTINGS_NOT_TEXT, "a DEL" },
     };
     for (unsigned i = 0; i < sizeof(heads) / sizeof(heads[0]); i++)
         Check(SettingsDeclaredBegin((const uint8_t *)heads[i].text, strlen(heads[i].text), &declared) ==
                   heads[i].want,
               heads[i].what);
-    Check(SettingsDeclaredBegin((const uint8_t *)"\n\n  settings 1\n", 15, &declared) == SETTINGS_OK,
+    Check(SettingsDeclaredBegin((const uint8_t *)"\n\n  settings\n", 13, &declared) == SETTINGS_OK,
           "blank lines and blanks before the head");
 
     LineVerdict("Prompt word default ~ \"x\"", SETTING_NAME_BAD, "a capital in the name");
@@ -251,33 +250,33 @@ static void TestDeclaredWrong(void)
     LineVerdict("p word default ~ next-start \"x\"", SETTINGS_OK, "next-start before the description");
 
     static const int twice[] = { SETTINGS_OK, SETTING_NAME_TWICE, -1 };
-    Verdicts("settings 1\np word default ~ \"x\"\np word default ~ \"y\"\n", twice,
+    Verdicts("settings\np word default ~ \"x\"\np word default ~ \"y\"\n", twice,
              "a name twice at the top: the first holds, the second is refused");
     static const int apart[] = { SETTINGS_OK, SETTINGS_OK, SETTINGS_OK, SETTINGS_OK, -1 };
-    Verdicts("settings 1\na \"x\"\n  c color default red \"x\"\nb \"y\"\n  c color default red \"y\"\n", apart,
+    Verdicts("settings\na \"x\"\n  c color default red \"x\"\nb \"y\"\n  c color default red \"y\"\n", apart,
              "one name inside two things: each holds");
     static const int twice_inside[] = { SETTINGS_OK, SETTINGS_OK, SETTING_NAME_TWICE, -1 };
-    Verdicts("settings 1\na \"x\"\n  c color default red \"x\"\n  c color default red \"y\"\n", twice_inside,
+    Verdicts("settings\na \"x\"\n  c color default red \"x\"\n  c color default red \"y\"\n", twice_inside,
              "a name twice inside one thing");
     static const int indent[] = { SETTINGS_OK, SETTINGS_OK, SETTING_INDENT_BAD, SETTING_INSIDE_UNTAKEN, -1 };
-    Verdicts("settings 1\na \"x\"\n    b word default ~ \"x\"\n  c word default ~ \"x\"\n      d word default ~ \"x\"\n",
+    Verdicts("settings\na \"x\"\n    b word default ~ \"x\"\n  c word default ~ \"x\"\n      d word default ~ \"x\"\n",
              indent, "a sibling indented unlike the first, and what is inside it");
     static const int top[] = { SETTINGS_OK, SETTING_INDENT_BAD, -1 };
-    Verdicts("settings 1\n a word default ~ \"x\"\nb word default ~ \"x\"\n", top,
+    Verdicts("settings\n a word default ~ \"x\"\nb word default ~ \"x\"\n", top,
              "the top's lines stand where the first stood");
     static const int untaken[] = { SETTING_KIND_UNKNOWN, SETTING_INSIDE_UNTAKEN, SETTING_INSIDE_UNTAKEN, SETTINGS_OK, -1 };
-    Verdicts("settings 1\na gradient \"x\"\n  b word default ~ \"x\"\n    c word default ~ \"x\"\nd word default ~ \"x\"\n",
+    Verdicts("settings\na gradient \"x\"\n  b word default ~ \"x\"\n    c word default ~ \"x\"\nd word default ~ \"x\"\n",
              untaken, "what is inside a line not taken is not taken, and the next at the top is");
     static const int deep[] = { SETTINGS_OK, SETTINGS_OK, SETTINGS_OK, SETTINGS_OK, SETTINGS_OK, SETTINGS_OK,
                                 SETTINGS_OK, SETTINGS_OK, SETTING_TOO_DEEP, SETTING_TOO_DEEP, SETTINGS_OK, -1 };
-    Verdicts("settings 1\na \"x\"\n b \"x\"\n  c \"x\"\n   d \"x\"\n    e \"x\"\n     f \"x\"\n      g \"x\"\n"
+    Verdicts("settings\na \"x\"\n b \"x\"\n  c \"x\"\n   d \"x\"\n    e \"x\"\n     f \"x\"\n      g \"x\"\n"
              "       h word default ~ \"x\"\n        i word default ~ \"x\"\n         j word default ~ \"x\"\n"
              "z word default ~ \"x\"\n",
              deep, "eight levels hold, the ninth and what is under it do not, the top again does");
     static const int holds[] = { SETTING_HOLDS_NOTHING, SETTINGS_OK, -1 };
-    Verdicts("settings 1\na \"x\"\nb word default ~ \"x\"\n", holds, "a thing with nothing indented under it");
+    Verdicts("settings\na \"x\"\nb word default ~ \"x\"\n", holds, "a thing with nothing indented under it");
     static const int with_value[] = { SETTINGS_OK, SETTINGS_OK, SETTINGS_OK, -1 };
-    Verdicts("settings 1\n# a comment\nsign word default ~ \"x\"\n  # a comment inside\n  color color default red "
+    Verdicts("settings\n# a comment\nsign word default ~ \"x\"\n  # a comment inside\n  color color default red "
              "\"x\"\n    size number from 1 to 3 default 1 \"x\"\n",
              with_value, "comments anywhere, and a setting with a value holding others two deep");
 }
@@ -524,7 +523,7 @@ static void TestKeys(void)
     SettingsDeclared declared;
     Setting          setting;
     SettingsVerdict  verdict = SETTINGS_OK;
-    const char      *text    = "settings 1\nstop key default ctrl+alt+q \"end the program on the screen\"\n";
+    const char      *text    = "settings\nstop key default ctrl+alt+q \"end the program on the screen\"\n";
     Check(SettingsDeclaredBegin((const uint8_t *)text, strlen(text), &declared) == SETTINGS_OK &&
               SettingsDeclaredNext(&declared, &setting, &verdict) && verdict == SETTINGS_OK &&
               setting.Kind == SETTING_KEY && Is(setting.Default, "ctrl+alt+q"),
@@ -877,7 +876,7 @@ static uint64_t Random(void)
 static uint64_t Shuffled(uint8_t *bytes, uint64_t room)
 {
     static const char *const pieces[] = {
-        "settings 1\n", "sign ", "cursor ", "shape ", "color ", "blink ", "title ", "word ", "number ", "from ",
+        "settings\n", "sign ", "cursor ", "shape ", "color ", "blink ", "title ", "word ", "number ", "from ",
         "to ", "-3 ", "200 ", "one-of ", "block ", "bar ", "default ", "\"", "next-start ", "#FFB020 ", "amber ",
         "text ", "on-or-off ", "on ", "off ", "or ", "ms ", "\n", " ", "    ", "\t", "\r\n", "#", "[", "]", "work ",
         ",", "x", "\x01", "\x7f", "\"\"", "\xc2\xbb", "\"what\" "

@@ -76,7 +76,7 @@ entries = []
 for i in range(count):
     e = table + 80 * i
     offset, size = struct.unpack_from('<QQ', b, e)
-    length, at = struct.unpack_from('<HI', b, e + 38)
+    at, length = struct.unpack_from('<IH', b, e + 36)
     entries.append((bytes(b[names + at:names + at + length]), offset, size))
 if kind == 'code':
     offset = next(o for n, o, s in entries if n == b'code')
@@ -94,7 +94,7 @@ PY
 }
 
 look "a box with a part of every kind" "$WORK/full.box" 0 \
-    "full.box: a box, format 1" \
+    "full.box: a box, " \
     "code                    32 bytes, holds to its hash, must be understood" \
     "at 0x0 from the base, run and read" \
     "at 0x1000 from the base, read and written, and 6120 bytes of zeros after it" \
@@ -114,9 +114,8 @@ look "a box with a part of every kind" "$WORK/full.box" 0 \
     "line 8: the setting inner stands inside a line that is not taken" \
     "takes words \"what to say\"" "holds to its hash, put into memory at start" \
     "kept compressed: what it says is not read here" \
-    "of a later version of its kind than this reader knows" \
     "of a kind this reader does not know" \
-    "role                    14 bytes, holds to its hash" "system" \
+    "role                    12 bytes, holds to its hash" "system" \
     "— the table and its names hold to it" \
     "whole: the seal holds, every part holds to its hash, and only zeros lie between them"
 

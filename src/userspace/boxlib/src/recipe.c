@@ -116,7 +116,7 @@ static int read_line(BoxRecipe *out, const char *line, size_t length, bool first
     const char *rest;
     size_t      rest_length;
 
-    if (first) return length == 8 && memcmp(line, "recipe 1", 8) == 0 ? 0 : -ERR_INVALID_ARGUMENT;
+    if (first) return length == 6 && memcmp(line, "recipe", 6) == 0 ? 0 : -ERR_INVALID_ARGUMENT;
     if (memchr(line, '\0', length)) return -ERR_INVALID_ARGUMENT;
     if (line_kind(line, length, "recipe", &rest, &rest_length)) return -ERR_INVALID_ARGUMENT;
     if (line_kind(line, length, "by", &rest, &rest_length))
@@ -249,7 +249,7 @@ int recipe_text(const BoxRecipe *recipe, char **text, size_t *length)
 
     RecipeText out = { NULL, 0, 0 };
     const char *context = recipe->Context ? recipe->Context : "";
-    int rc = put_text(&out, "recipe 1\nby ");
+    int rc = put_text(&out, "recipe\nby ");
     if (rc == 0) rc = put_text(&out, recipe->By);
     if (rc == 0) rc = put_text(&out, context[0] ? "\ncontext " : "\ncontext");
     if (rc == 0) rc = put_text(&out, context);
