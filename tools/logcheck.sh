@@ -8331,16 +8331,23 @@ stand_leak_on() {
     python3 - <<'EOF'
 p = "src/kernel/tagfs/tests/core_tests.c"
 s = open(p).read()
+inc = "#include \"../tagfs.h\"\n"
 a = "    uint32_t   tag_ids[2] = {1, 2};\n\n    TEST_ASSERT_EQ(tagfs_create_file(\"test_file\", tag_ids, 2, &file_id), 0,\n"
-assert s.count(a) == 1, "stand leak anchor missing"
+assert s.count(inc) == 1 and s.count(a) == 1, "stand leak anchor missing"
+s = s.replace(inc, inc +
+    "#include \"../block_map/block_map.h\"   /* logcheck mutation */\n"
+    "#include \"../settle/sewing.h\"         /* logcheck mutation */\n", 1)
+# A run handed out for a file id no file has: ground taken that nothing names
+# and nothing gives back.
 open(p, "w").write(s.replace(a,
     "    uint32_t   tag_ids[2] = {1, 2};\n"
     "    uint64_t   leaked;   /* logcheck mutation: a block taken and never given back */\n"
     "\n"
-    "    TEST_ASSERT_EQ(tagfs_alloc_blocks(1, &leaked), 0, \"a block is taken\");\n"
+    "    TEST_ASSERT_EQ(AllotmentTakeBookRun(1ull << 62, 1, 0, EndpaperDataKeeps(false), &leaked), 0,\n"
+    "                   \"a block is taken\");\n"
     "    TEST_ASSERT_EQ(tagfs_create_file(\"test_file\", tag_ids, 2, &file_id), 0,\n", 1))
 EOF
-    mut_done src/kernel/tagfs/tests/core_tests.c "logcheck mutation" 1
+    mut_done src/kernel/tagfs/tests/core_tests.c "logcheck mutation" 3
 }
 stand_leak_off() {
     restore src/kernel/tagfs/tests/core_tests.c
