@@ -64,10 +64,10 @@ DEBUG    ?= off
 STAGE2_SECTORS      = 16
 
 # Physical address of the boot_info handoff block. ONE number, four consumers:
-# src/boot/stage2/stage2.asm (BIOS loader writes it), src/boot/uefi/gangway.c
-# (UEFI loader writes it), src/kernel/entry/kernel_entry.asm (reads the boot
-# stack out of it before any C runs) and src/include/boot_info.h (the kernel
-# and Gangway both). It was spelled out separately in all four until
+# src/boot/stage2/stage2.asm (BIOS loader writes it), src/boot/uefi/
+# gangway_handoff.c (UEFI loader writes it), src/kernel/entry/kernel_entry.asm
+# (reads the boot stack out of it before any C runs) and src/include/boot_info.h
+# (the kernel and Gangway both). It was spelled out separately in all four until
 # 2026-08-23, when moving it turned up the copy in kernel_entry.asm — which
 # would have taken the kernel's stack pointer from whatever happened to be at
 # the old address. The header _Static_asserts against this value, so a drift
@@ -884,7 +884,11 @@ UEFI_ESP_IMG = $(BUILDDIR)/esp.img
 # ==== UEFI BOOTLOADER ====
 # The loader's files, and every header any of them reads: a change to one is a
 # change to the loader.
-GANGWAY_SRC    = src/boot/uefi/gangway.c src/boot/uefi/gangway_deed.c src/boot/uefi/gangway_attest.c \
+GANGWAY_SRC    = src/boot/uefi/gangway.c src/boot/uefi/gangway_bytes.c src/boot/uefi/gangway_console.c \
+                 src/boot/uefi/gangway_firmware.c src/boot/uefi/gangway_medium.c \
+                 src/boot/uefi/gangway_video.c src/boot/uefi/gangway_memory.c \
+                 src/boot/uefi/gangway_paging.c src/boot/uefi/gangway_handoff.c \
+                 src/boot/uefi/gangway_deed.c src/boot/uefi/gangway_attest.c \
                  src/boot/uefi/gangway_lectern.c src/boot/uefi/gangway_lectern_tree.c \
                  src/boot/uefi/gangway_lectern_ribbon.c src/boot/uefi/gangway_lectern_replay.c \
                  src/boot/uefi/gangway_succession.c

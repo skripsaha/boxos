@@ -122,7 +122,7 @@ MBR_TYPE_PROTECTIVE = 0xEE              # ground.c:27 GROUND_MBR_TYPE_PROTECTIVE
 GPT_ARRAY_MAX_BYTES = 128 * 1024        # ground.c:83 GPT_ARRAY_MAX_BYTES
 GPT_BLOCK_MAX_BYTES = 4096              # ground.c:122 GPT_BLOCK_MAX_BYTES
 GROUND_MAX_PER_MEDIUM = 8               # ground.h:42 GROUND_MAX_PER_MEDIUM
-BOXOS_TYPE_GUID = bytes([               # ground.c:19-22, gangway.c:451-454 — as on the medium
+BOXOS_TYPE_GUID = bytes([               # ground.c:19-22, gangway_medium.c — as on the medium
     0x9a, 0xe4, 0x8a, 0xcf, 0x6a, 0xd2, 0x59, 0x49,
     0x9a, 0x6f, 0x71, 0xc9, 0x32, 0xe0, 0xc9, 0xeb,
 ])

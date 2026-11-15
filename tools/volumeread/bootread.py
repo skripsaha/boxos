@@ -39,7 +39,7 @@ KERNEL_MAX_SIZE = 0x2000000
 def Loaded(boot):
     """(blocks, None): the blocks the loader loads of the kernel BOOT names —
     as many as its bytes take, every block it names when it names no bytes
-    (gangway.c TagFsLoadKernel) — or (None, why) when its bytes overrun them."""
+    (gangway_succession.c) — or (None, why) when its bytes overrun them."""
     have = boot["kernel_blocks"] * BLOCK
     if boot["kernel_bytes"] > have:
         return None, "it is said to be %u bytes and its blocks hold %u" % (boot["kernel_bytes"], have)

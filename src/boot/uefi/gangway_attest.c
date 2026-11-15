@@ -5,7 +5,7 @@
  *
  * The reading is the Lectern's, which knows nothing of UEFI; what is Gangway's
  * is its desk. The medium is read through the loader's own reader of the
- * volume (gangway.c, ReadSectors), into pages the firmware gives: Block IO
+ * volume (gangway_medium.c, ReadSectors), into pages the firmware gives: Block IO
  * reads into a buffer aligned to the medium's io_align (UEFI 2.10 §13.9,
  * EFI_BLOCK_IO_MEDIA.IoAlign — 0 or 1 any, else a power of two), and a page is
  * aligned to every io_align up to 4096, which is as far as any medium BoxOS
@@ -63,7 +63,7 @@ static void AttestSay(void *ctx, const char *line)
  * ‼ A refusal here is somebody else's range, and it is NOT freed.
  *
  * Nothing at KERNEL_LOAD_ADDR is this loader's when it is asked for —
- * ClaimHandoffPages (gangway.c) asks for 0x0000, 0x1000 and 0xA000 and nothing
+ * ClaimHandoffPages (gangway_memory.c) asks for 0x0000, 0x1000 and 0xA000 and nothing
  * else, and a kernel this desk placed before is unplaced before the next is
  * asked for — so there is nothing here to re-claim. EDK2's
  * CoreInternalFreePages performs no ownership check whatsoever: it finds the

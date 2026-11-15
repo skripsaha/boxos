@@ -2,14 +2,14 @@
  * Gangway — what a volume's Deed says.
  *
  * The Deed's block was read and checked while the device was being chosen
- * (gangway.c, FindGroundOn: its magic, its two lengths, its checksum and its
+ * (gangway_medium.c, FindGroundOn: its magic, its two lengths, its checksum and its
  * role, in the kernel's order). What is left is to walk its stamps for the
  * answers this loader needs: which volume it is, where its book's data begins
  * (FRAME), and — when the Deed carries one — where the kernel is (BOOT).
  *
  * A Deed that bears no FRAME lays out no book: an older volume, or one that is
  * not TagFS's. This loader boots only a book, so such a volume is not a
- * refusal to stop at but a medium to pass over (gangway.c, BlockIoProbeVolume).
+ * refusal to stop at but a medium to pass over (gangway_medium.c, BlockIoProbeVolume).
  */
 
 #include "gangway.h"

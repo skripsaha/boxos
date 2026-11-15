@@ -51,7 +51,7 @@ BOOT_STACK_SIZE       equ 0x10000      ; 64KB boot stack (stack grows downward)
 E820_COUNT_ADDR       equ 0x500
 E820_SIZE_ADDR        equ 0x502
 E820_MAP_ADDR         equ 0x504
-E820_MAX_ENTRIES      equ 128           ; must match E820_MAX_ENTRIES in e820.h and gangway.c
+E820_MAX_ENTRIES      equ 128           ; must match E820_MAX_ENTRIES in e820.h and gangway_memory.c
 E820_SEG              equ E820_COUNT_ADDR >> 4   ; 0x0050:0000 = 0x500
 ; Words to wipe before the firmware fills the map. It used to be a flat 1024,
 ; which covers 2048 bytes — but the map reaches 0x504 + 128*24 = 0x1104, so

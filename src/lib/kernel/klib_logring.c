@@ -241,7 +241,7 @@ static inline void keep_writeback_line(volatile void *at)
  * noinline and through a void* on purpose: GCC traces a cast-from-integer
  * pointer back to its origin, decides the object it points at has zero extent,
  * and fires -Warray-bounds on every access. The loaders hit the same wall and
- * answered it the same way (PhysWrite16 in gangway.c). The memory is real; the
+ * answered it the same way (PhysWrite16 in gangway_memory.c). The memory is real; the
  * compiler simply has no declaration for it. */
 static __attribute__((noinline)) void phys_read(uint64_t at, void *dst, unsigned n)
 {

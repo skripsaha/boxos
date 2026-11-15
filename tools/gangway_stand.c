@@ -16,7 +16,7 @@
  * give, for the loops that walk the book are the loader's own (§16.7 п.2, F1).
  *
  * Where the ground is is not the Lectern's question, and Gangway answers it
- * off the partition table before the Lectern is asked (gangway.c,
+ * off the partition table before the Lectern is asked (gangway_medium.c,
  * FindGroundOn): the caller says it here, as volume-read found it. Where a
  * kernel is placed is Gangway's 0x100000 and the heap here.
  */
