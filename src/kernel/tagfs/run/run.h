@@ -12,12 +12,12 @@
  * blocks that lie in one run on the medium go out that many at a time, so ten
  * megabytes on the stick are a hundred and sixty commands and not two thousand
  * five hundred and sixty. What stays a block's own is its digest: each block
- * of a run is checked against the one recorded when it was written, and has
- * its own recorded when it lands (integrity/integrity.h).
+ * a reader hands out is checked against the one the book holds for it
+ * (integrity/integrity.h), and a writer's blocks carry theirs into the record
+ * that names them.
  *
  * TagFSReadRun (tagfs.h) is this door's too. A single block's doors,
- * tagfs_read_block and tagfs_write_block, stay in tagfs.c beside the meta
- * doors the integrity map pages through (tagfs.c says why).
+ * tagfs_read_block and tagfs_write_block, stay in tagfs.c.
  */
 
 /* The blocks the volume's seat takes in one command: its answer, not a number

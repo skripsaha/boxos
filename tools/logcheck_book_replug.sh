@@ -1,15 +1,12 @@
-# logcheck_book_replug — replugwrite asked of a book: `VOLUME_FORMAT=v2
-# logcheck.sh replugwrite`, the stick leaving while a write is in flight and
+# logcheck_book_replug — replugwrite asked of a book: `logcheck.sh
+# replugwrite`, the stick leaving while a write is in flight and
 # writers wait for the file's Helm, on a format-v2 volume (spec_v2 §3.8,
 # §16.5 пп.10-12, C14, C20).
 #
 # SOURCED, NEVER RUN — by logcheck.sh, whose replugwrite rounds, answers,
 # chunks, census and medium judge it runs (replugwrite_round and the rest),
-# with the two things a book does otherwise named here: what `moved` does to
-# the stick on the host, and how a return is judged — REPLUGWRITE_MOVE,
-# REPLUGWRITE_MOVE_SAID and REPLUGWRITE_UP, which logcheck.sh asks in place of
-# format v1's own when they are set. Its own file so logcheck.sh grows by the
-# call and those three names alone.
+# with what is the book's own named here: what `moved` does to the stick on the
+# host (slot_moved_on_host) and how a return is judged (replugwritebook_up).
 #
 #   same   the stick comes back as it left. The book is taken up — its last
 #          stitch where it was sewn, nothing past it but this kernel's own
@@ -80,10 +77,6 @@ replugwritebook_up() {
 }
 
 run_replugwritebook() {
-    local STAND_FORMAT=v2    # every make of the scenario, run-bg's too, the book's format (stand.sh make)
-    local REPLUGWRITE_MOVE=slot_moved_on_host
-    local REPLUGWRITE_MOVE_SAID="the host laid a newer Spine slot on it while it was out"
-    local REPLUGWRITE_UP=replugwritebook_up
     echo "== replugwrite, a book: the stick of a format-v2 volume leaves while a write is in flight and writers wait for its Helm, and comes back as it left, then changed =="
     typer_selfcheck
     local r change name seed from rc last pid L="$SCRATCH/serial.replugwritebook.log"
@@ -140,7 +133,7 @@ REPLUGWRITEBOOK_ROUND
     ! grep -aqF 'this kernel reads such a volume again from its book' "$L"
     chk $? "replugwrite, a book: no return is read again for being a book's"
     python3 tools/volume-read.py "$SCRATCH/stick.img" check --json >"$SCRATCH/replugwritebook.check.json" 2>/dev/null
-    replugwrite_census "$SCRATCH/replugwritebook.check.json" "$L"
+    replugwrite_census "$SCRATCH/replugwritebook.check.json"
     replugwrite_medium "$SCRATCH/stick.img" "$REPLUGWRITE_ROUNDS" "$L"
     ! grep -aqE 'KERNEL PANIC|\[EXCEPTION\]|^\[NIGHTWATCH\] VERDICT: .* a defect' "$L"
     chk $? "replugwrite, a book: no panic, no exception, nothing owed proved unserved"

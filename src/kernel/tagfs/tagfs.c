@@ -6,8 +6,6 @@
 #include "tagfs_reserved.h"
 #include "tag_registry/tag_registry.h"
 #include "file_map/file_map.h"
-#include "file_table/file_table.h"
-#include "metadata_pool/meta_pool.h"
 #include "use_context.h"
 #include "use_memory/use_memory.h"
 #include "error.h"
@@ -16,7 +14,6 @@
 #include "touch.h"
 #include "ata.h"
 #include "amp.h"
-#include "cow/cow.h"
 #include "braid/braid.h"
 #include "integrity/integrity.h"
 #include "settle_cut/settle_cut.h"
@@ -27,7 +24,6 @@
 #include "settle/settle.h"
 #include "helm/helm.h"
 #include "keep/keep.h"
-#include "mount/mount.h"
 #include "mount/away.h"
 #include "mount/perambulation.h"
 #include "mount/hold_ground.h"
@@ -58,7 +54,7 @@ static TagFSState g_state = { .lock = TAGFS_LOCK_INIT("state", LOCK_RANK_STATE) 
  * query walking the tag index, a process being asked whether it carries a tag
  * — every one of them holding a pointer into exactly what tagfs_clear_the_ground
  * is about to hand back to the allocator: the registry, the tag index, the
- * block map, the file table, the metadata pool.
+ * block map, the book's memory.
  *
  * ‼ THE DEPARTURE'S LATCH DOES NOT COVER IT. g_medium_left makes every read
  * and every write refuse, which is what stops work that has not started. It
@@ -594,17 +590,14 @@ static error_t VolumeGroundRefused(DeedCopy *head, error_t why)
 {
     DeedRelease(head);
     VolumeTurnedAway();
-    g_state.format     = DEED_FORMAT_NONE;
-    g_state.block_base = 0;
     g_state.block_end  = 0;
     MountBookLetGo();
     TagFSUnderGlass(NULL);
     return why;
 }
 
-/* What every format's Deed says the same way: the grid the volume was laid out
- * for, where the loader finds the kernel, who the volume is and how far it
- * runs. Each cleared first: a volume whose Deed carries no grid or no BOOT is
+/* What the Deed says of the volume: the grid it was laid out for, where the
+ * loader finds the kernel, who the volume is and how far it runs. Each cleared first: a volume whose Deed carries no grid or no BOOT is
  * judged by what it says, never by a volume mounted before it in this boot. */
 static void VolumeTakeDeed(const DeedCopy *head)
 {
@@ -628,40 +621,6 @@ static void VolumeTakeDeed(const DeedCopy *head)
     if (born && bytes >= sizeof(*born))
         memcpy(g_state.volume_name, born->maker, sizeof(g_state.volume_name));
     g_state.volume_bytes = head->head.sectors * VOLUME_DEED_SECTOR_BYTES;
-}
-
-/*
- * A format-v1 volume's LAYOUT, and the data run it names as the block numbers
- * its records carry. DeedFormatRefused let through only a LAYOUT at least as
- * long as this kernel's.
- *
- * The layout has to fit inside the volume that states it. Everything that
- * follows turns these numbers into sector addresses without checking them
- * again, so a deed that says its data run ends past its own end would
- * otherwise be read into whatever is beyond the partition.
- */
-static error_t VolumeTakeLayout(uint8_t seat, const DeedCopy *head)
-{
-    uint16_t bytes = 0;
-    memcpy(&g_state.layout, DeedStamp(head, VOLUME_STAMP_LAYOUT, &bytes), sizeof(g_state.layout));
-
-    uint64_t blocks_in_volume = head->head.sectors / TAGFS_BLOCK_SECTORS;
-    if (g_state.layout.data_block == 0 ||
-        g_state.layout.data_blocks == 0 ||
-        (uint64_t)g_state.layout.data_block +
-        (uint64_t)g_state.layout.data_blocks > blocks_in_volume ||
-        (uint64_t)g_state.layout.state_block +
-        (uint64_t)g_state.layout.state_blocks > blocks_in_volume ||
-        g_state.layout.state_blocks < VOLUME_LEDGER_COPIES) {
-        kprintf("[TagFS] the deed on seat %u lays out %u data blocks at %u "
-                "inside a volume of %llu — that does not fit\n",
-                seat, g_state.layout.data_blocks, g_state.layout.data_block,
-                (unsigned long long)blocks_in_volume);
-        return ERR_TAGFS_CORRUPTED;
-    }
-    g_state.block_base = g_state.layout.data_block;
-    g_state.block_end  = g_state.layout.data_blocks;
-    return OK;
 }
 
 /*
@@ -747,20 +706,16 @@ static error_t volume_take_ground(uint8_t seat)
 
     DeedDescribe(seat, &head);
 
-    /* ‼ WHICH FORMAT ITS BOOK IS IN — asked before the mount's first write
-     * (volume_take_more_ground, below): a Deed this kernel cannot stand on is
-     * refused without a byte of the volume written. Then where the block
-     * numbers its records carry point: a format-v1 volume's LAYOUT, or a
-     * format-v2 volume's FRAME and the medium's grid under it (book_mount.h). */
-    DeedFormat format = DeedFormatOf(&head);
-    error_t    turned = DeedFormatRefused(seat, &head, format);
+    /* ‼ WHETHER IT IS A BOOK — asked before anything of the volume is read or
+     * written: a Deed this kernel cannot stand on is refused untouched. Then
+     * where the book is: its FRAME and the medium's grid under it
+     * (book_mount.h). */
+    error_t turned = DeedRefused(seat, &head);
     if (turned != OK)
         return VolumeGroundRefused(&head, turned);
 
     VolumeTakeDeed(&head);
-    g_state.format = format;
-    turned = format == DEED_FORMAT_V2 ? MountBookGround(seat, &head, ground_run)
-                                      : VolumeTakeLayout(seat, &head);
+    turned = MountBookGround(seat, &head, ground_run);
     if (turned != OK)
         return VolumeGroundRefused(&head, turned);
 
@@ -798,30 +753,6 @@ static error_t volume_take_ground(uint8_t seat)
     } else {
         kprintf("[TagFS] seat %u: the volume's grid and the medium's are the "
                 "same %u bytes\n", seat, medium_physical);
-    }
-
-    if (g_state.geometry.block_bytes != TAGFS_BLOCK_SIZE) {
-        kprintf("[TagFS] the volume on seat %u was laid out in %u-byte blocks "
-                "and this kernel speaks %u\n",
-                seat, g_state.geometry.block_bytes, TAGFS_BLOCK_SIZE);
-        return VolumeGroundRefused(&head, ERR_TAGFS_CORRUPTED);
-    }
-
-    /*
-     * ‼ HERE, AND NOT A LINE LATER.
-     *
-     * Growth belongs after every refusal that could still turn this volume
-     * away — a volume this kernel will not mount must not be written to — and
-     * before the far-copy check below, because growing MOVES the far copy and
-     * that check has to read it where it now is.
-     *
-     * A volume standing on its tail copy is not grown: its head is gone, and
-     * the head is the commit point. Nor is a format-v2 one here: a book grows
-     * by its prologue alone, after it is read and only by a mount that writes
-     * it (spec_v2 §16.1 п.4, book_mount.h MountBookGrow).
-     */
-    if (format == DEED_FORMAT_V1 && head.head.role == VOLUME_DEED_ROLE_HEAD) {
-        volume_take_more_ground(seat, ground_run, &head);
     }
 
     /*
@@ -991,9 +922,8 @@ static bool g_medium_left = false;
  * stick was copied from, a second stick carrying a copy of the same volume.
  * The return used to judge the first seat carrying the volume's identity, and
  * measured so (P0, replug): the stick came back in seat 1, and seat 0 — the
- * internal disk, which never moved — was judged in its place, its Ledger found
- * older than the one a cycle left on the stick, and the medium accused of
- * lying. Noted before the latch is set, so whoever reads the latch set reads
+ * internal disk, which never moved — was judged in its place, found older
+ * than what a cycle left on the stick, and the medium accused of lying. Noted before the latch is set, so whoever reads the latch set reads
  * what it opened on; 0 while no book is open.
  */
 static volatile uint32_t g_book_seatings = 0;
@@ -1316,10 +1246,11 @@ static error_t mount_attempt(void)
  *   note over g_book_seatings), because a medium that never left is not its
  *   return — and its Deed still says what the held one says;
  *
- *   and it is AS THIS KERNEL LEFT IT — its Ledger's seq and seal the ones a
- *   cycle left there, and every write the volume saw kept by a flush
- *   (AwayJudgeOn). Another BoxOS kernel that settled a cycle on it moved its
- *   Ledger. A host that changed its bytes and left the Ledger alone moved
+ *   and it is AS THIS KERNEL LEFT IT — the last stitch this kernel sewed
+ *   still where it was sewn, nothing sewn past it, and every block no stitch
+ *   settled read back as it was written (Perambulation, mount/
+ *   perambulation.h). Another BoxOS kernel that sewed a stitch on it moved its
+ *   ribbon. A host that changed its bytes and left the book alone moved
  *   nothing, and is not seen: the line that takes the book up says so.
  *
  * Both holding, the book is taken up where it stands. Anything else gives it
@@ -1444,16 +1375,6 @@ static bool volume_book_decided(uint8_t seat, uint32_t seating, uint64_t base,
     return volume_read_again(seat, seating);
 }
 
-/* How a return of the volume's medium is judged: a book by Perambulation,
- * format v1's Ledger when its Deed lays the volume out as the one held — and
- * anything else is another's. */
-static AwayVerdict VolumeReturnJudged(uint8_t seat, uint64_t base, bool same)
-{
-    if (g_state.format == DEED_FORMAT_V2)
-        return Perambulation(seat, base, same);
-    return same ? AwayJudgeOn(seat, base) : AWAY_OTHER;
-}
-
 static bool TagFSVolumeReturned(void)
 {
     if (!g_medium_left || !g_volume_uuid_known) {
@@ -1476,17 +1397,16 @@ static bool TagFSVolumeReturned(void)
         /*
          * ‼ A JUDGE ONE OF WHOSE READS THE MEDIUM REFUSED IS NO JUDGE.
          *
-         * Not only when no copy of the Ledger read (AWAY_UNREAD): a newest copy
-         * refused and the older one read is a Ledger older than the one a
-         * cycle settled — AWAY_OLDER, the book given up and the medium accused
-         * of lying from its next mount on, for one command a flash drive
-         * dropped. So any refusal of this seat while it was judged leaves the
-         * book open, waiting for the seat to answer again. The bell the copy
-         * read after the refused one rang says nothing of the refused one: the
-         * wait counts from the search's end, as a mount's does.
+         * A block of the book refused while it was walked is a ribbon that
+         * seems to end early, or a slot that seems another's — the book given
+         * up for one command a flash drive dropped. So any refusal of this
+         * seat while it was judged leaves the book open, waiting for the seat
+         * to answer again. The bell a read after the refused one rang says
+         * nothing of the refused one: the wait counts from the search's end,
+         * as a mount's does.
          */
         uint32_t    refusals = BoardroomSeatRefusals(seat);
-        AwayVerdict verdict  = VolumeReturnJudged(seat, base, same);
+        AwayVerdict verdict  = Perambulation(seat, base, same);
         if (BoardroomSeatRefusals(seat) == refusals)
             return volume_book_decided(seat, seating, base, verdict);
         g_search_unread = seat;
@@ -1524,9 +1444,9 @@ void TagFSStandMediumLeaves(void)
     (void)volume_latch(false);
 }
 
-AwayVerdict TagFSStandMediumReturns(const VolumeLedger *found)
+AwayVerdict TagFSStandMediumReturns(void)
 {
-    AwayVerdict verdict = found ? AwayJudge(found) : VolumeReturnJudged(g_tagfs_seat, g_volume_base, true);
+    AwayVerdict verdict = Perambulation(g_tagfs_seat, g_volume_base, true);
     if (verdict == AWAY_AS_LEFT) {
         volume_book_taken_up(g_tagfs_seat, g_tagfs_seating, g_volume_base);
         return verdict;
@@ -1739,36 +1659,15 @@ void tagfs_readahead_invalidate(uint64_t block)
  * A block a record names → a sector of the MEDIUM.
  *
  * The two coordinate systems meet here and nowhere else. What a file's
- * record and the volume's book carry is a block counted from `block_base`:
- * format v1's data run, which sits at LAYOUT's data_block inside the volume,
- * or format v2's whole volume, from 0 (TagFSState); and the volume on its
- * medium at the base. Every road a block takes to its seat asks here: a
- * block's doors below, a run's (run/run.c), the storage ops nobody stands
- * over, and Braid, which addresses other media that have no ground of their
- * own.
+ * record and the volume's book carry is a block of the volume, counted from
+ * 0 (TagFSState); and the volume sits on its medium at the base. Every road a
+ * block takes to its seat asks here: a block's doors below, a run's (run/
+ * run.c), the storage ops nobody stands over, and Braid, which addresses
+ * other media that have no ground of their own.
  */
 uint64_t tagfs_block_to_sector(uint64_t block)
 {
-    return g_volume_base + (g_state.block_base + block) * TAGFS_BLOCK_SECTORS;
-}
-
-/* The defect of asking a format-v2 volume for its LAYOUT, said once a mount
- * (by the mount's stamp): code of format v1 reached a volume that has none
- * (TagFSState). */
-static uint32_t g_layout_asked_mount = UINT32_MAX;
-
-VolumeLayout *TagFSLayout(void)
-{
-    if (g_state.format == DEED_FORMAT_V2 && g_layout_asked_mount != tagfs_mount_epoch()) {
-        g_layout_asked_mount = tagfs_mount_epoch();
-#if CONFIG_STRICT
-        panic("[TagFS] DEFECT: code of format v1 asked a format-v2 volume for its LAYOUT, "
-              "which it has none of");
-#endif
-        kprintf("[TagFS] DEFECT: code of format v1 asked a format-v2 volume for its LAYOUT, "
-                "which it has none of — it is answered with zeros, naming no block\n");
-    }
-    return &g_state.layout;
+    return g_volume_base + block * TAGFS_BLOCK_SECTORS;
 }
 
 /*
@@ -1776,37 +1675,24 @@ VolumeLayout *TagFSLayout(void)
  * the deepest way a request takes to the medium. A run of blocks goes through
  * run/run.c.
  *
- * ‼ TWO PAIRS, AND THE INTEGRITY MAP IS IN ONE OF THEM ONLY (RT-22). A file's
- * block has its digest recorded as it lands and checked as it is read back
- * (tagfs_read_block, tagfs_write_block). A block of the volume's own records
- * goes through the meta doors, which leave the map out: the map does not
- * cover them. Its own pages are such blocks, and a page written into a map
- * being laid used to record a digest of its own on the way — which pushed
- * another page out, which recorded another, as deep as the map has slots.
- * And the pool's blocks are written after the cycle wrote the map, so the
- * digest of a block closed in the cycle reached the medium only with the next
- * cycle's map: a stop before it left a stale digest under a block nobody
- * writes again, and Glean read it as rot for good.
- *
- * Through the Braid the volume is assembled in, when it is (TagFSState.braid,
- * which a v1 mount never names) and it takes the block, else the volume's own
- * medium. A read's bytes are checked against the digest recorded when the
- * block was written, and a mismatch is its answer (ERR_CHECKSUM), never thrown
- * away: the integrity map names the block and publishes it. A write that
- * landed has its digest recorded, and no read-ahead window hands out what the
- * block held. A refusal the medium's departure explains is
- * ERR_DEVICE_NOT_READY, in a read and in a write: the caller holds nothing a
- * broken disk would make it hold. A sector the medium says it cannot read is
- * ERR_BAD_SECTOR, and no refused read: it is the medium's answer about what
- * the block holds, for the reader to judge (the mount's by where the block
- * lies), and no seat:ready will change it.
+ * Through the Braid the volume is assembled in, when it is (TagFSState.braid)
+ * and it takes the block, else the volume's own medium. A read's bytes are
+ * checked against the digest the book holds for the block (integrity/
+ * integrity.h), and a mismatch is its answer (ERR_CHECKSUM), never thrown
+ * away: the block is named and published. A write that landed is noted
+ * (VolumeWriteSeen), and no read-ahead window hands out what the block held. A refusal the medium's departure explains is ERR_DEVICE_NOT_READY, in
+ * a read and in a write: the caller holds nothing a broken disk would make it
+ * hold. A sector the medium says it cannot read is ERR_BAD_SECTOR, and no
+ * refused read: it is the medium's answer about what the block holds, for the
+ * reader to judge (the mount's by where the block lies), and no seat:ready
+ * will change it.
  *
  * The departure is asked the way the volume's other doors ask it
  * (volume_not_here): a mounted volume's is latched and opens its book; a
  * mount's latches nothing — no volume is up to hold a book for — and is a
  * read the medium refused, which is what it is to the mount that met it.
  */
-error_t TagFSMetaBlockRead(uint64_t block, void *buffer)
+error_t tagfs_read_block(uint64_t block, void *buffer)
 {
     if (!buffer)
         return ERR_NULL_POINTER;
@@ -1828,17 +1714,17 @@ error_t TagFSMetaBlockRead(uint64_t block, void *buffer)
         TagFSNoteReadRefused();
         return volume_not_here() ? ERR_DEVICE_NOT_READY : ERR_READ_FAILED;
     }
-    return OK;
+    return IntegrityVerify(block, buffer) ? OK : ERR_CHECKSUM;
 }
 
-error_t TagFSMetaBlockWrite(uint64_t block, const void *buffer)
+error_t tagfs_write_block(uint64_t block, const void *buffer)
 {
     if (!buffer)
         return ERR_NULL_POINTER;
     if (volume_not_here())
         return ERR_DEVICE_NOT_READY;
     if (TagFSIsUnderGlass())
-        return TagFSGlassRefused("the metadata block door");
+        return TagFSGlassRefused("the block door");
 
     bool took = g_state.braid &&
                 BraidWriteBlock(g_state.braid, tagfs_block_to_sector(block), buffer, NULL) == OK;
@@ -1847,23 +1733,6 @@ error_t TagFSMetaBlockWrite(uint64_t block, const void *buffer)
         return volume_not_here() ? ERR_DEVICE_NOT_READY : ERR_WRITE_FAILED;
     VolumeWriteSeen();
     ReadAheadForgetBlock(block);
-    return OK;
-}
-
-error_t tagfs_read_block(uint64_t block, void *buffer)
-{
-    error_t got = TagFSMetaBlockRead(block, buffer);
-    if (got != OK)
-        return got;
-    return IntegrityVerify(block, buffer) ? OK : ERR_CHECKSUM;
-}
-
-error_t tagfs_write_block(uint64_t block, const void *buffer)
-{
-    error_t wrote = TagFSMetaBlockWrite(block, buffer);
-    if (wrote != OK)
-        return wrote;
-    IntegrityUpdate(block, buffer);
     return OK;
 }
 
@@ -1924,8 +1793,8 @@ static void tagfs_stamp_reserved_tags(void)
         return;
     TagRegistry *reg = fs->registry;
 
-    // Stamp the reserved vocabulary as system tags. Runs after tag_registry_load,
-    // so it self-heals over whatever flags the disk carried; mark_system sets no
+    // Stamp the reserved vocabulary as system tags. Runs after the book's TAGS
+    // are read, so it self-heals over whatever flags the disk carried; mark_system sets no
     // dirty flag, so this re-derivation never forces a write.
     for (size_t i = 0; i < sizeof(TagFsReservedKeys) / sizeof(TagFsReservedKeys[0]); i++) {
         TagSpelling reserved = TagSpellingOfKey(TagFsReservedKeys[i]);
@@ -2061,18 +1930,6 @@ error_t tagfs_init(void) {
         return ground_rc;
     }
 
-    /* --- And on format v1 the Ledger beside it: what is true of the volume
-     *     today; and the snapshots an earlier kernel left: the manifest the
-     *     Ledger names and the DiskBook's redirects into it, read, named, and
-     *     not kept. A format-v2 volume has neither: its book says it all (book_mount.h). */
-    if (g_state.format == DEED_FORMAT_V1) {
-        error_t ledger_rc = ledger_load();
-        if (ledger_rc != OK) {
-            return ledger_rc;
-        }
-        CowNameStanding();
-    }
-
     // --- Test Framework init ---
     if (TagFS_TestsInit() != OK) {
         return mount_refused("its test framework would not start",
@@ -2083,7 +1940,7 @@ error_t tagfs_init(void) {
      * ‼ THE FAILURE THAT COST A BOARD ITS FILESYSTEM, ON COMMAND.
      *
      * Every refusal from here down leaves the test framework standing — and
-     * once the DiskBook and CoW beside it — and until
+     * once a snapshot layer beside it — and until
      * tagfs_clear_the_ground existed nothing took them down. The NEXT mount
      * then died at TagFS_CowInit with ERR_ALREADY_INITIALIZED, and went on
      * dying there for the rest of the boot, saying nothing. Nothing in QEMU
@@ -2143,18 +2000,14 @@ error_t tagfs_init(void) {
     }
 #endif
 
-    /* --- What the volume's records say: format v1's registry, pool, table,
-     *     tag index and block map, standing on the copy of the Ledger whose
-     *     seal the medium bears out (mount/mount.h); or format v2's book
-     *     (mount/book_mount.h). */
+    /* --- What the volume's book says (mount/book_mount.h). */
     const char *what = NULL;
-    error_t     read = g_state.format == DEED_FORMAT_V2 ? MountReadBook(&what)
-                                                        : MountReadVolume(&what);
+    error_t     read = MountReadBook(&what);
     if (read != OK) {
         mount_refused(what, read);
         /* A book turned away for what it holds is not a volume stood on, as
          * one turned away at its Deed is not (VolumeGroundRefused). */
-        if (g_state.format == DEED_FORMAT_V2 && (read == ERR_TAGFS_CORRUPTED || read == ERR_UNSUPPORTED))
+        if (read == ERR_TAGFS_CORRUPTED || read == ERR_UNSUPPORTED)
             VolumeTurnedAway();
         return read;
     }
@@ -2162,7 +2015,7 @@ error_t tagfs_init(void) {
     tagfs_stamp_reserved_tags();
 
     /* Nothing is inked, nothing settled and nothing rests: every record the
-     * pool holds is on the medium. And nobody waits for a cycle: a volume let
+     * book holds is on the medium. And nobody waits for a cycle: a volume let
      * go of answered its waiters once the last caller was out of it
      * (tagfs_abandon), and none can wait on this one before its door opens. */
     if (SettleWaitersOwed()) {
@@ -2194,12 +2047,8 @@ error_t tagfs_init(void) {
 
     /* A book whose mount holds a verdict asks for the session's first cycle
      * at once: it lays the verdict down (mount/errata.h, §3.5). After the
-     * cadence was reset for this mount, which forgets every demand. Format v1
-     * brings its integrity map up (mount/mount.h). */
-    if (g_state.format == DEED_FORMAT_V2)
-        ErrataAsk();
-    else
-        MountAfterDoor();
+     * cadence was reset for this mount, which forgets every demand. */
+    ErrataAsk();
 
     /*
      * ‼ THE SENTENCE THAT WAS MISSING, AND ITS ABSENCE IS THE WHOLE STORY.
@@ -2217,7 +2066,7 @@ error_t tagfs_init(void) {
      * exactly one line that ends the question either way.
      */
     kprintf("[TagFS] the volume on seat %u is MOUNTED — %llu file(s)\n",
-            g_tagfs_seat, (unsigned long long)g_state.ledger.total_files);
+            g_tagfs_seat, (unsigned long long)g_state.total_files);
 
     /*
      * ‼ WHAT THIS MOUNT KEEPS ON THE KERNEL HEAP, AND FOR HOW MANY NAMES.
@@ -2236,16 +2085,13 @@ error_t tagfs_init(void) {
      * judges a slope over tens of thousands of ids and never one mount.
      */
     size_t heap_after_mount = KHeapLiveBytes();
-    kprintf("[TagFS] this mount keeps %zu bytes of kernel heap for %u file id(s) "
+    kprintf("[TagFS] this mount keeps %zu bytes of kernel heap for %llu file id(s) "
             "ever issued, %llu of them live\n",
             heap_after_mount > heap_before_mount ? heap_after_mount - heap_before_mount : 0,
-            g_state.ledger.next_file_id - 1,
-            (unsigned long long)g_state.ledger.total_files);
+            (unsigned long long)(g_book.next_fid - 1u),
+            (unsigned long long)g_state.total_files);
 
-    if (g_state.format == DEED_FORMAT_V2)
-        MountBookPromise();
-    else
-        MountPromise();
+    MountBookPromise();
 
     SettleCutSayArmed();            /* nothing at all unless SETTLECUT=<point> */
     TagFSHoldGroundOpenFile();      /* nothing at all unless HOLDGROUND=on */
@@ -2276,8 +2122,8 @@ error_t tagfs_init(void) {
  * ‼ NOT ONE BYTE IS WRITTEN. What is held in memory describes the volume as it
  * was BEFORE whatever went wrong, and the medium under the head may not even be
  * the same one any more. Only a Settle cycle writes the volume's records, and
- * every shutdown below only lets go of memory — the pool's tail and the ground
- * resting in Fallow included, which the next mount reads afresh.
+ * every shutdown below only lets go of memory — the ground resting in Fallow
+ * included, which the next mount reads afresh.
  */
 static void tagfs_clear_the_ground(void)
 {
@@ -2288,7 +2134,6 @@ static void tagfs_clear_the_ground(void)
 
     /* What this volume remembered goes with it — the Use Context's memory of
      * it too; the next one is read, not assumed. */
-    LedgerLetGo();
     UseMemoryLetGo();
 
     if (g_state.registry) {
@@ -2302,21 +2147,18 @@ static void tagfs_clear_the_ground(void)
         g_state.bitmap_index = NULL;
     }
 
-    file_table_shutdown();
-    meta_pool_shutdown();
     InkDropAll();
     FileMapDestroy(g_state.files);
     g_state.files = NULL;
 
     AllotmentDropAll();
-    BlockMapUnmount();
 
     if (g_state.braid) {
         BraidShutdown(g_state.braid);
         kfree(g_state.braid);
         g_state.braid = NULL;
     }
-    IntegrityShutdown();
+    IntegrityRotEnd();
     MountBookLetGo();
     TagFSUnderGlass(NULL);
     TagFS_TestsShutdown();
@@ -2544,11 +2386,11 @@ uint64_t tagfs_file_ceiling(void)
 {
     if (!tagfs_enter())
         return 0;
-    /* Under g_state.lock: create bumps next_file_id under it, and a lock-free
-     * read can see the value from before a create that has already returned
-     * to its caller. */
+    /* Under g_state.lock: a create moves the book's next file id under it,
+     * and a lock-free read can see the value from before a create that has
+     * already returned to its caller. */
     TagFSLockTake(&g_state.lock);
-    uint64_t ceiling = g_state.ledger.next_file_id;
+    uint64_t ceiling = g_book.next_fid;
     TagFSLockDrop(&g_state.lock);
     tagfs_leave();
     return ceiling;
@@ -2571,12 +2413,8 @@ TagFSFileHandle *tagfs_open(uint64_t file_id, uint32_t flags)
 
 static TagFSFileHandle *tagfs_open_inside(uint64_t file_id, uint32_t flags)
 {
-    /* A format-v1 file is named by its table's row; a format-v2 book keeps
-     * no table — its record is the file — and a file it holds locked opens
-     * for nobody (BookFileLocked). */
-    uint32_t meta_block, meta_offset;
-    if (BookFileLocked(file_id) ||
-        (g_state.format == DEED_FORMAT_V1 && file_table_lookup(file_id, &meta_block, &meta_offset) != 0))
+    /* A file the book holds locked opens for nobody (BookFileLocked). */
+    if (BookFileLocked(file_id))
         return NULL;
 
     /* An open that cannot join its file's Helm is refused (W-NULLOFE): a
@@ -2711,62 +2549,6 @@ error_t tagfs_span_file(uint64_t file_id, uint64_t size)
     }
     tagfs_leave();
     return rc;
-}
-
-// ----------------------------------------------------------------------------
-// Block allocator — the doors into the block map (block_map/)
-// ----------------------------------------------------------------------------
-
-static int tagfs_alloc_blocks_inside(uint32_t count, uint64_t *out_start_block);
-
-int tagfs_alloc_blocks(uint32_t count, uint64_t *out_start_block)
-{
-    if (!tagfs_enter())
-        return -1;
-    int rc = tagfs_alloc_blocks_inside(count, out_start_block);
-    tagfs_leave();
-    return rc;
-}
-
-/* ‼ BEFORE ANYTHING ON THE MEDIUM NAMES IT. Every caller of this function goes
- * on to name the block somewhere that outlives this boot — a Ledger field, a
- * chain's next pointer — and the take is owed to the medium until the next
- * Settle cycle's S1 writes its sector, which comes before the name that cycle
- * carries. A crash between the two leaves a block nobody claims, never a block
- * two owners claim (block_map.h, MapOwed). */
-static int tagfs_alloc_blocks_inside(uint32_t count, uint64_t *out_start_block)
-{
-    if (count == 0 || !out_start_block)
-        return -1;
-    return BlockMapTake(count, 0, out_start_block, __func__) == OK ? 0 : -1;
-}
-
-// Public version - acquires g_state.lock
-static int tagfs_free_blocks_inside(uint64_t start_block, uint32_t count);
-
-int tagfs_free_blocks(uint64_t start_block, uint32_t count)
-{
-    if (!tagfs_enter())
-        return -1;
-    int rc = tagfs_free_blocks_inside(start_block, count);
-    tagfs_leave();
-    return rc;
-}
-
-/* The sectors of the run are brought in first, with no lock held, so the give
- * under the lock is judged at once and its caller hears the answer; the edits
- * the lock made without a sector are laid on before this returns. */
-static int tagfs_free_blocks_inside(uint64_t start_block, uint32_t count)
-{
-    if (count == 0)
-        return 0;
-
-    BlockMapFetchRun(start_block, count, __func__);
-    TagFSLockTake(&g_state.lock);
-    error_t given = BlockMapGiveLocked(start_block, count);
-    TagFSLockDrop(&g_state.lock);
-    BlockMapSettle();
-    return given == OK ? 0 : -(int)given;
 }
 
 // ----------------------------------------------------------------------------

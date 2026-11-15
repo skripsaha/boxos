@@ -25,7 +25,7 @@ leaves the kernel not attested only when no block is found broken (§16.7 п.4).
 
 import struct
 
-from . import bookread, tally
+from . import bookread, ondisk, tally
 from .bookground import BookGround
 from .bookread import Short
 from .bootbook import BootBook
@@ -298,13 +298,11 @@ class Succession:
 def BootRead(medium, start=None):
     """(lines, verdict): what the loader says of the volume's kernels, line by
     line, and its verdict — "held", "unchecked", "broken" — or None where it
-    reads no book: a volume of format v1, or a Deed whose FRAME it refuses
+    reads no book: a Deed that bears no FRAME, or one whose FRAME it refuses
     (said in the lines)."""
     from .medium import StandOnDeed
-    st = StandOnDeed(medium, start)
-    if st.format != "v2":
-        return ["a format-v%s volume — the loader takes its kernel as it always has, held to no book"
-                % st.format[1:]], None
+    if ondisk.STAMP_FRAME not in StandOnDeed(medium, start).deed["stamps"]:
+        return ["this deed bears no FRAME, so its volume is no book — an older one, or not TagFS's"], None
     g = BookGround(medium, start)
     if g.frame_why:
         return ["this deed's FRAME does not hold: %s" % g.frame_why], None

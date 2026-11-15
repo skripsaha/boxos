@@ -4,12 +4,9 @@
 #include "../ink/ink.h"
 #include "../ink/fallow.h"
 #include "../block_map/block_map.h"
-#include "../file_table/file_table.h"
-#include "../metadata_pool/meta_pool.h"
 #include "../mount/away.h"
 #include "../settle/settle.h"
 #include "../helm/helm.h"
-#include "../ledger/ledger.h"
 #include "system_halt.h"
 #include "amp.h"
 #include "baton.h"
@@ -104,44 +101,6 @@ static void StandSettleAnswered(SettleWaiter* w, error_t rc)
 }
 
 /*
- * An anchor waits through its Chit and is answered by the cycle's S6 — not
- * before a cycle has settled its change and laid it in a block the volume never
- * writes again. The waiter stands linked while no cycle runs (the runner holds
- * the cadence), and the one cycle driven here answers it, OK.
- */
-static TestResult TestStandSettleAnchorThroughChit(void)
-{
-    TestResult               verdict = TEST_PASS;
-    uint64_t                 file_id = 0;
-    static StandSettleWaiter waiter;
-
-    memset(&waiter, 0, sizeof(waiter));
-    fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0xA5u);
-    TEST_ASSERT(StandMakeFile("settle_anchor_chit", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
-                "a file is made and written");
-    uint64_t gen = InkedGen();
-    TEST_ASSERT_EQ(SettleWaitNow(gen), ERR_WOULD_BLOCK, "its change waits for a cycle");
-
-    SettleWaitLink(&waiter.w, gen, StandSettleAnswered);
-    SettleServiceIfPending();
-    TEST_ASSERT(!waiter.answered, "no cycle ran, and nobody answered the waiter");
-
-    uint64_t cycles = SettledCycles();
-    TEST_ASSERT_OK(TagFSSettle(), "a cycle settles");
-    TEST_ASSERT(waiter.answered, "the cycle's S6 answered the waiter");
-    TEST_ASSERT_OK(waiter.rc, "with OK");
-    TEST_ASSERT_EQ(waiter.cycle, cycles + 1u, "and it was that cycle, the one after the link");
-    TEST_ASSERT(PoolClosedSettledGen() >= gen,
-                "the change lies in a closed block the volume never writes again");
-    TEST_ASSERT_OK(SettleWaitNow(gen), "a wait for it now is answered at once");
-out:
-    if (!waiter.answered)
-        (void)SettleWaitUnlink(&waiter.w);
-    StandSettleLetGo(file_id);
-    return verdict;
-}
-
-/*
  * RT-10. On one core the idle context is where a cycle runs, and a program that
  * never parks would never let it: a demand makes idle the debtor of the next
  * quantum until a cycle takes it up. Asked of the rule the scheduler asks from
@@ -211,17 +170,6 @@ out:
 // A refused cycle waits for its event (R2), and what each step's refusal is (R8)
 // ----------------------------------------------------------------------------
 
-/* The Ledger's copies, as sectors of the medium: a plan armed on them meets the
- * cycle at its S4, and only there. */
-static void StandSettleArmLedger(uint32_t nth)
-{
-    TagFSState* fs     = tagfs_get_state();
-    uint64_t    sector = tagfs_get_volume_base() +
-                         (uint64_t)fs->layout.state_block * TAGFS_BLOCK_SECTORS;
-    BlockFailArm(tagfs_get_seat(), BLOCK_FAIL_WRITE, sector,
-                 (uint64_t)VOLUME_LEDGER_COPIES * TAGFS_BLOCK_SECTORS, nth);
-}
-
 /* One turn of the machine, done by hand: the knock the tick would give, the
  * batons left on this core, the service point — the committer's own on one
  * core; on more, a K-Core's, which the knock wakes to look again. */
@@ -231,157 +179,6 @@ void StandSettleTurn(void)
     BatonPump(amp_get_core_index());
     SettleServiceIfPending();
     cpu_pause();
-}
-
-/*
- * R2 (Z01-2, Z10-1, Z10-6, F01-4). A cycle the medium refused — its Ledger
- * write — declares nothing, and the waiter stays in its Chit: no code of a
- * step is its answer. A bell the seat rang just before the cycle took its
- * count answered a refusal before it, and is no event of this one, however
- * late the room says it. With the cadence let go, no second cycle begins
- * before the seat says seat:ready — watched for two Lulls and a tick, within
- * which an eager change whose cycle is not parked begins it. The seat then
- * answers a command, which rings (B2), and the next cycle answers the waiter
- * OK. Red with the refusal of the medium parked on nothing: the cadence began
- * the refused cycle again at once, what the legacy channel did before the
- * bell; and red with the room's announcement counted as well as its bell.
- */
-static TestResult TestStandSettleRefusalWaitsForTheBell(void)
-{
-    TestResult               verdict = TEST_PASS;
-    uint8_t                  seat    = tagfs_get_seat();
-    uint64_t                 file_id = 0;
-    bool                     armed   = false;
-    bool                     let_go  = false;
-    static StandSettleWaiter waiter;
-    const char*              aside   = StandStepsAsideFor();
-
-    if (aside)
-        return test_steps_aside(aside);
-
-    memset(&waiter, 0, sizeof(waiter));
-    TEST_ASSERT_OK(TagFSSettle(), "the volume owes nothing to begin with");
-    fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x6Bu);
-    TEST_ASSERT(StandMakeFile("settle_refused", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
-                "a file is made and written");
-    SettleWaitLink(&waiter.w, InkedGen(), StandSettleAnswered);
-
-    StandSettleArmLedger(1);
-    armed = true;
-    TagFSStandSettleRings(true);
-    error_t refused = TagFSSettleAsCadence();
-    bool    fired   = BlockFailFired();
-    BlockFailDisarm();
-    armed = false;
-    TEST_ASSERT(fired, "the cycle's Ledger write was the one refused");
-    TEST_ASSERT(refused != OK, "and the cycle is refused");
-    TEST_ASSERT(!waiter.answered, "the waiter stays in its Chit: no code of a step is its answer");
-    TEST_ASSERT(SettleParked(), "the cadence waits for the refusal's event");
-    BoardroomAttendIfPending();
-    TEST_ASSERT(SettleParked(), "and a bell rung before the cycle took its count, said after, "
-                "is not that event");
-
-    /* Counted and never refused: a second cycle would write the Ledger. */
-    StandSettleArmLedger(BLOCK_FAIL_NEVER);
-    armed = true;
-    SettleCadenceHold(false);
-    let_go = true;
-    uint64_t watch = 2u * SettleLullUs() + 1000000ull / SCHEDULER_DEFAULT_TICK_HZ;
-    uint64_t began = StandNowUs();
-    while (StandNowUs() - began < watch)
-        StandSettleTurn();
-    uint32_t again = BlockFailSeen();
-    BlockFailDisarm();
-    armed = false;
-    TestEvidence("Ledger writes of cycles begun before the event, of 0", again);
-    TEST_ASSERT_EQ(again, 0, "the cadence began no second cycle before the event");
-    TEST_ASSERT(!waiter.answered, "and the waiter is still in its Chit");
-
-    /* Nightwatch's look, as the tick takes it a window later, and the look
-     * after: a park its waiters have waited on longer than the window is said
-     * once (the host counts the line). No tick runs while the tests do. */
-    SettleWatchLook(StandNowUs() + SETTLE_WINDOW_US + 1u);
-    SettleWatchLook(StandNowUs() + SETTLE_WINDOW_US + 2u);
-    BatonPump(amp_get_core_index());
-
-    TEST_ASSERT_OK(BoardroomRead(seat, tagfs_block_to_sector(0), TAGFS_BLOCK_SECTORS,
-                                 g_test_output), "the seat answers a command");
-    BoardroomAttendIfPending();
-    TEST_ASSERT(!SettleParked(), "and rings seat:ready, which lifts the park");
-    began = StandNowUs();
-    while (!waiter.answered && StandNowUs() - began < 2u * SETTLE_WINDOW_US)
-        StandSettleTurn();
-    TEST_ASSERT(waiter.answered, "the next cycle answered the waiter");
-    TEST_ASSERT_OK(waiter.rc, "with OK");
-out:
-    if (armed)
-        BlockFailDisarm();
-    if (let_go)
-        SettleCadenceHold(true);
-    if (!waiter.answered)
-        (void)SettleWaitUnlink(&waiter.w);
-    StandSettleLetGo(file_id);
-    return verdict;
-}
-
-/*
- * X1-4. seat:ready that comes while a cycle runs — after the cycle took the
- * count its refusal is judged by, before the refusal is decided — is never
- * lost: the refused cycle parks on nothing, and the next one may go at once.
- * Red with the count read when the refusal is decided, after its event: the
- * cadence would wait for a seat:ready that had already come and would not come
- * twice.
- */
-static TestResult TestStandSettleRingDuringTheCycle(void)
-{
-    TestResult               verdict = TEST_PASS;
-    uint8_t                  seat    = tagfs_get_seat();
-    uint64_t                 file_id = 0;
-    bool                     armed   = false;
-    static StandSettleWaiter waiter;
-    const char*              aside   = StandStepsAsideFor();
-
-    if (aside)
-        return test_steps_aside(aside);
-
-    memset(&waiter, 0, sizeof(waiter));
-    TEST_ASSERT_OK(TagFSSettle(), "the volume owes nothing to begin with");
-    fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x7Cu);
-    TEST_ASSERT(StandMakeFile("settle_rings", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
-                "a file is made and written");
-    SettleWaitLink(&waiter.w, InkedGen(), StandSettleAnswered);
-
-    uint32_t rang = BoardroomSeatReadyGen(seat);
-    StandSettleArmLedger(1);
-    armed = true;
-    TagFSStandSettleRings(false);
-    error_t refused = TagFSSettleAsCadence();
-    bool    fired   = BlockFailFired();
-    BlockFailDisarm();
-    armed = false;
-    TEST_ASSERT(fired && refused != OK, "the cycle is refused at its Ledger");
-    TEST_ASSERT_EQ(BoardroomSeatReadyGen(seat), rang + 1u,
-                   "and its seat rang seat:ready while it ran, after its S0");
-    TEST_ASSERT(!waiter.answered, "the waiter stays in its Chit");
-    TEST_ASSERT(!SettleParked(), "the refusal parks on nothing: its event has come already");
-    TEST_ASSERT_OK(TagFSSettleAsCadence(), "the next cycle goes, and settles");
-    TEST_ASSERT(waiter.answered, "and answers the waiter");
-    TEST_ASSERT_OK(waiter.rc, "OK");
-out:
-    if (armed)
-        BlockFailDisarm();
-    if (!waiter.answered)
-        (void)SettleWaitUnlink(&waiter.w);
-    StandSettleLetGo(file_id);
-    return verdict;
-}
-
-/* Why a test of a book's cycle stands aside here, or NULL. */
-static const char* StandSettleBookAside(void)
-{
-    if (tagfs_get_state()->format != DEED_FORMAT_V2)
-        return "the volume is not format v2: its cycle lays no stitch";
-    return StandStepsAsideFor();
 }
 
 /*
@@ -405,7 +202,7 @@ static TestResult TestStandSettleStitchRefusalWaitsForTheBell(void)
     uint64_t                 file_id = 0;
     bool                     let_go  = false;
     static StandSettleWaiter waiter;
-    const char*              aside   = StandSettleBookAside();
+    const char*              aside   = StandStepsAsideFor();
 
     if (aside)
         return test_steps_aside(aside);
@@ -480,7 +277,7 @@ static TestResult TestStandSettleStitchRingDuringTheCycle(void)
     uint8_t                  seat    = tagfs_get_seat();
     uint64_t                 file_id = 0;
     static StandSettleWaiter waiter;
-    const char*              aside   = StandSettleBookAside();
+    const char*              aside   = StandStepsAsideFor();
 
     if (aside)
         return test_steps_aside(aside);
@@ -578,169 +375,6 @@ out:
     return verdict;
 }
 
-/*
- * F01-4. A block of the file table the medium refused is the medium's answer —
- * the very code it gives a block write — and not a metadata error, which says
- * the volume is damaged. Measured on the same block with the same plan, before
- * the cycle meets it.
- */
-static TestResult TestStandSettleTableRefusalIsTheMediums(void)
-{
-    TestResult     verdict   = TEST_PASS;
-    uint8_t        seat      = tagfs_get_seat();
-    uint64_t       file_id   = 0;
-    uint32_t       row_block = 0;
-    FileTableEntry row       = { 0, 0 };
-    bool           armed     = false;
-    const char*    aside     = StandStepsAsideFor();
-
-    if (aside)
-        return test_steps_aside(aside);
-
-    TEST_ASSERT_EQ(tagfs_create_file("settle_table_refused", NULL, 0, &file_id), 0,
-                   "a file is created, so the table has a row to write");
-    TEST_ASSERT_OK(TagFSSettle(), "a cycle puts the file's row on the medium");
-    TEST_ASSERT(StandTableRowOnMedium(file_id, &row, &row_block),
-                "the block that carries the row is found on the medium");
-
-    BlockFailArm(seat, BLOCK_FAIL_WRITE, tagfs_block_to_sector(row_block), TAGFS_BLOCK_SECTORS, 1);
-    armed = true;
-    TEST_ASSERT_OK(TagFSMetaBlockRead(row_block, g_test_output), "the block is read as it stands");
-    error_t medium = TagFSMetaBlockWrite(row_block, g_test_output);
-    BlockFailDisarm();
-    armed = false;
-    TEST_ASSERT(medium != OK, "the medium's answer to a refused write of the block");
-
-    TagFSLockTake(&tagfs_get_state()->lock);
-    int marked = file_table_update(file_id, row.meta_block, row.meta_offset);
-    TagFSLockDrop(&tagfs_get_state()->lock);
-    TEST_ASSERT_EQ(marked, 0, "the row is owed to the medium again");
-    BlockFailArm(seat, BLOCK_FAIL_WRITE, tagfs_block_to_sector(row_block), TAGFS_BLOCK_SECTORS, 1);
-    armed = true;
-    error_t refused = TagFSSettle();
-    bool    fired   = BlockFailFired();
-    BlockFailDisarm();
-    armed = false;
-    TEST_ASSERT(fired, "the cycle's write of the row's block was the one refused");
-    TestEvidence("the cycle's answer, of the medium's", refused);
-    TEST_ASSERT_EQ(refused, medium, "the cycle answers what the medium answered");
-out:
-    if (armed)
-        BlockFailDisarm();
-    if (TagFSSettle() != OK && verdict == TEST_PASS)
-        verdict = TestFailedAt(__FILE__, __LINE__, "an unarmed cycle afterwards settles", 1, 0);
-    if (file_id)
-        (void)tagfs_delete_file(file_id, INK_UNWARRANTED);
-    (void)TagFSSettle();
-    return verdict;
-}
-
-/* Every free run of the volume, taken into a list that grows as it must, and
- * given back. */
-typedef struct {
-    uint64_t* at;
-    uint32_t* n;
-    uint32_t  count;
-    uint32_t  cap;
-} StandSettleRuns;
-
-static bool StandSettleTakeAll(StandSettleRuns* runs)
-{
-    uint32_t all   = tagfs_get_state()->layout.data_blocks;
-    uint64_t start = 0;
-    uint32_t got   = 0;
-    while (TagFSTakeRun(all, 0, &start, &got) == OK) {
-        if (runs->count == runs->cap) {
-            uint32_t  cap = runs->cap ? runs->cap * 2u : 64u;
-            uint64_t* at  = kmalloc(sizeof(uint64_t) * cap);
-            uint32_t* n   = kmalloc(sizeof(uint32_t) * cap);
-            if (!at || !n) {
-                kfree(at);
-                kfree(n);
-                (void)tagfs_free_blocks(start, got);
-                return false;
-            }
-            if (runs->count) {
-                memcpy(at, runs->at, sizeof(uint64_t) * runs->count);
-                memcpy(n, runs->n, sizeof(uint32_t) * runs->count);
-            }
-            kfree(runs->at);
-            kfree(runs->n);
-            runs->at  = at;
-            runs->n   = n;
-            runs->cap = cap;
-        }
-        runs->at[runs->count] = start;
-        runs->n[runs->count]  = got;
-        runs->count++;
-    }
-    return true;
-}
-
-static void StandSettleGiveAll(StandSettleRuns* runs)
-{
-    for (uint32_t i = 0; i < runs->count; i++)
-        (void)tagfs_free_blocks(runs->at[i], runs->n[i]);
-    kfree(runs->at);
-    kfree(runs->n);
-    memset(runs, 0, sizeof(*runs));
-}
-
-/*
- * Z13-4. The file table's chain needs a block, and the volume has none: the
- * cycle settles all the same — the rows past the chain wait in memory, and the
- * pool's records name them — and the cycle after the ground came back grows
- * the chain. Red before: the cycle was refused at the file table, and so was
- * every cycle after it — the ground a short volume waits for comes back only
- * when a cycle settles.
- */
-static TestResult TestStandSettleTableShortSettles(void)
-{
-    TestResult      verdict = TEST_PASS;
-    TagFSState*     fs      = tagfs_get_state();
-    StandChain      before  = { 0 };
-    StandChain      after   = { 0 };
-    StandSettleRuns runs    = { 0 };
-    uint32_t        row     = 0;
-    bool            named   = false;
-    const char*     aside   = StandStepsAsideFor();
-
-    if (aside)
-        return test_steps_aside(aside);
-
-    TEST_ASSERT(StandSettledBare(), "every change is on the medium, and nothing rests");
-    TEST_ASSERT(StandChainOnMedium(fs->layout.file_table_block, TAGFS_FILETBL_MAGIC, &before) &&
-                !before.broken, "the file table's chain on the medium is whole");
-    row = before.links * TAGFS_FTABLE_PER_BLOCK;
-    TagFSLockTake(&fs->lock);
-    named = file_table_update(row, 0, 0) == 0;
-    TagFSLockDrop(&fs->lock);
-    TEST_ASSERT(named, "a row past the chain makes the table need one more block");
-
-    TEST_ASSERT(StandSettleTakeAll(&runs), "every free block of the volume is taken");
-    error_t short_of_ground = TagFSSettle();
-    TestEvidence("the cycle's answer with no ground for the table, of OK", short_of_ground);
-    TEST_ASSERT_OK(short_of_ground, "the cycle settles without the block the rows need");
-    TEST_ASSERT(StandChainOnMedium(fs->layout.file_table_block, TAGFS_FILETBL_MAGIC, &after) &&
-                !after.broken, "the chain on the medium is whole");
-    TEST_ASSERT_EQ(after.links, before.links, "and as long as it was");
-
-    StandSettleGiveAll(&runs);
-    TEST_ASSERT_OK(TagFSSettle(), "with the ground back, the next cycle settles");
-    TEST_ASSERT(StandChainOnMedium(fs->layout.file_table_block, TAGFS_FILETBL_MAGIC, &after) &&
-                !after.broken, "the chain on the medium is whole");
-    TEST_ASSERT_EQ(after.links, before.links + 1u, "and one block longer, for the rows past it");
-out:
-    StandSettleGiveAll(&runs);
-    if (named) {
-        TagFSLockTake(&fs->lock);
-        (void)file_table_delete(row);
-        TagFSLockDrop(&fs->lock);
-    }
-    (void)TagFSSettle();
-    return verdict;
-}
-
 // ----------------------------------------------------------------------------
 // A program's debt is its own (R26)
 // ----------------------------------------------------------------------------
@@ -797,154 +431,6 @@ out:
 // ----------------------------------------------------------------------------
 // A stopping machine's last cycles leave no ground at rest (RT-12)
 // ----------------------------------------------------------------------------
-
-/*
- * Z09-4. A file deleted under a reader rests in Fallow for as long as the
- * reader is open — and a machine stops with its programs' handles open. The
- * halt's last cycles write that ground free in the map all the same, while
- * memory keeps it taken, so the reader still reads it and no other file is
- * handed it. Asked of the halt's own cycles (TagFSStandSettleForHalt), which
- * stop nothing here. Red before: the cycles ended with the block taken on the
- * medium and named by nothing, which the next mount's census keeps for good.
- */
-static TestResult TestStandSettleHaltLeavesNoViewedGround(void)
-{
-    TestResult       verdict = TEST_PASS;
-    uint64_t         file_id = 0;
-    uint64_t         block   = 0;
-    TagFSFileHandle* reader  = NULL;
-    bool             taken   = true;
-    const char*      aside   = StandStepsAsideFor();
-
-    if (aside)
-        return test_steps_aside(aside);
-
-    TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x4A17u, 0);
-    TEST_ASSERT(StandMakeFile("settle_halt_viewed", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
-                "a one-block file is made");
-    TEST_ASSERT(StandBlockOf(file_id, 0, &block), "its block is found");
-    TEST_ASSERT_OK(TagFSSettle(), "and settled");
-    reader = tagfs_open(file_id, TAGFS_HANDLE_READ);
-    TEST_ASSERT(reader, "a reader opens it");
-    TEST_ASSERT_EQ(tagfs_delete_file(file_id, INK_UNWARRANTED), 0, "the file is deleted under it");
-    file_id = 0;
-
-    TEST_ASSERT_OK(TagFSStandSettleForHalt(), "a stopping machine's last cycles run");
-    TEST_ASSERT(BlockMapMediumSays(block, &taken), "the map's sector is read off the medium");
-    TEST_ASSERT(StandBlockInUse(block), "memory still keeps the reader's block taken");
-    TEST_ASSERT_EQ(TestHandleRead(reader, g_test_output, TAGFS_BLOCK_SIZE), (int)TAGFS_BLOCK_SIZE,
-                   "the reader reads the file it opened");
-    TEST_ASSERT_EQ(TestFirstDifference(g_test_output, g_test_buffer, TAGFS_BLOCK_SIZE),
-                   TAGFS_BLOCK_SIZE, "byte for byte");
-
-    TestEvidence("blocks the halt's last cycles left taken on the medium for an open reader",
-                 taken ? 1u : 0u);
-    if (taken)
-        verdict = TEST_DEFECT;
-
-    /* Asked right after the cycle's last step: the next cycle makes the
-     * reserve the halt's cycles gave back again from the ground nearest the
-     * volume's start, which may be this very block. */
-    tagfs_close(reader);
-    reader = NULL;
-    TEST_ASSERT_OK(TagFSSettle(), "a Settle cycle after the reader let go");
-    TEST_ASSERT(!StandBlockInUse(block), "and the block goes back with it");
-out:
-    tagfs_close(reader);
-    StandSettleLetGo(file_id);
-    (void)TagFSSettle();
-    return verdict;
-}
-
-/* Whether the newest copy of the Ledger the medium holds is sealed clean: the
- * word the next mount takes (mount.c). False when no copy reads. */
-static bool StandSealedClean(bool* clean)
-{
-    VolumeLedger* led    = kmalloc(sizeof(VolumeLedger));
-    uint64_t      newest = 0;
-    bool          read   = false;
-    if (!led)
-        return false;
-    for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++) {
-        if (!tagfs_ledger_peek(c, led, NULL) || (read && led->seq <= newest))
-            continue;
-        newest = led->seq;
-        *clean = (led->mark.flags & SETTLE_CLEAN) != 0;
-        read   = true;
-    }
-    kfree(led);
-    return read;
-}
-
-/*
- * H1 (logcheck haltcycle; RT-12, RT-22). A write in place lays a block's new
- * bytes on the medium before the cycle after it writes their digest, and a
- * clean seal is the next mount's word that every digest on the medium stands.
- * So once the halt has shut the volume no change begins, and the halt's cycles
- * seal clean only with no change in flight — asked of those cycles
- * (TagFSStandSettleForHalt) with the volume shut as the halt shuts it
- * (TagFSStandShutForHalt), and a file's Helm held as a write in flight holds
- * it. Red before, measured on four cores: a program's write in place, begun
- * while the halt's cycles ran, landed after the last of them sealed the volume
- * clean, and the next mount refused the anchored file's block as rot
- * (ERR_CHECKSUM); and a cycle with a write in flight sealed clean.
- */
-static TestResult TestStandSettleHaltSealsWhatStands(void)
-{
-    TestResult       verdict = TEST_PASS;
-    uint64_t         file_id = 0;
-    uint64_t         block   = 0;
-    TagFSFileHandle* handle  = NULL;
-    HelmWaiter       helm;
-    PlotSource       source;
-    uint64_t         written = 0;
-    bool             held    = false;
-    bool             clean   = false;
-    const char*      aside   = StandStepsAsideFor();
-
-    if (aside)
-        return test_steps_aside(aside);
-
-    fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x61u);
-    TEST_ASSERT(StandMakeFile("settle_halt_seal", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
-                "a one-block file is made");
-    TEST_ASSERT(StandBlockOf(file_id, 0, &block), "its block is found");
-    TEST_ASSERT_OK(TagFSSettle(), "and settled");
-    handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
-    TEST_ASSERT(handle, "a writer opens it");
-
-    TagFSStandShutForHalt(true);
-    TEST_ASSERT_OK(HelmTakeNow(handle, &helm), "the writer holds its Helm, a write in flight");
-    held = true;
-    TestEvidence("changes in flight while the halt's cycles run", HelmOwed());
-    TEST_ASSERT_OK(TagFSStandSettleForHalt(), "the halt's cycles run");
-    TEST_ASSERT(StandSealedClean(&clean), "the newest copy of the Ledger reads");
-    TEST_ASSERT(!clean, "and is not sealed clean while a change is in flight");
-
-    HelmLetGo(handle->ofe, &helm);
-    held = false;
-    TEST_ASSERT_OK(TagFSStandSettleForHalt(), "the halt's cycles run again, nothing in flight");
-    TEST_ASSERT(StandSealedClean(&clean) && clean, "and seal the volume clean");
-
-    fill_pattern(g_test_output, 16, 0x62u);
-    memset(&source, 0, sizeof(source));
-    source.kernel  = g_test_output;
-    source.bytes   = 16;
-    handle->offset = 0;
-    error_t rc = tagfs_write(handle, &source, &written);
-    TestEvidence("bytes a write in place laid after the clean seal", written);
-    TEST_ASSERT_EQ(rc, ERR_DEVICE_NOT_READY, "a write begun after the shut is refused");
-    TEST_ASSERT_OK(tagfs_read_block(block, g_test_output), "the block reads against its digest");
-    TEST_ASSERT_EQ(TestFirstDifference(g_test_output, g_test_buffer, TAGFS_BLOCK_SIZE),
-                   TAGFS_BLOCK_SIZE, "and holds what the clean seal's digest covers, byte for byte");
-out:
-    if (held)
-        HelmLetGo(handle->ofe, &helm);
-    TagFSStandShutForHalt(false);
-    tagfs_close(handle);
-    StandSettleLetGo(file_id);
-    return verdict;
-}
 
 /*
  * H1 (logcheck haltcycle). The drain's measure, fed what the drain saw on four
@@ -1062,43 +548,19 @@ static const TestCase g_stand_settle_tests[] = {
     { .name = "stand_settle_without_anchor",     .func = TestStandSettleWithoutAnchor,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a file written without anchor has no name after a power cut" },
-    { .name = "stand_settle_anchor_through_chit", .func = TestStandSettleAnchorThroughChit,
-      .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V1, .analog = "stand_stitch_answers_after_flush" },
     { .name = "stand_settle_idle_owed",          .func = TestStandSettleIdleOwed,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "on one core under a CPU hog nothing settles a write before the power goes" },
     { .name = "stand_settle_write_protected",    .func = TestStandSettleWriteProtected,
       .reach = TEST_WRITES_TO_VOLUME },
-    { .name = "stand_settle_refusal_waits_for_the_bell",
-      .func = TestStandSettleRefusalWaitsForTheBell, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V1, .analog = "stand_settle_stitch_refusal_waits_for_the_bell" },
-    { .name = "stand_settle_ring_during_the_cycle", .func = TestStandSettleRingDuringTheCycle,
-      .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V1, .analog = "stand_settle_stitch_ring_during_the_cycle" },
     { .name = "stand_settle_stitch_refusal_waits_for_the_bell",
-      .func = TestStandSettleStitchRefusalWaitsForTheBell, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V2 },
+      .func = TestStandSettleStitchRefusalWaitsForTheBell, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_settle_stitch_ring_during_the_cycle", .func = TestStandSettleStitchRingDuringTheCycle,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_settle_refusal_waits_for_its_own_event",
       .func = TestStandSettleRefusalWaitsForItsOwnEvent, .reach = TEST_WRITES_TO_VOLUME },
-    { .name = "stand_settle_table_refusal_is_the_mediums",
-      .func = TestStandSettleTableRefusalIsTheMediums, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V1, .analog = "stand_stitch_refused_everywhere" },
-    { .name = "stand_settle_table_short_settles", .func = TestStandSettleTableShortSettles,
-      .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V1, .analog = "stand_slip_promise_tally" },
     { .name = "stand_settle_reader_owes_no_leave", .func = TestStandSettleReaderOwesNoLeave,
       .reach = TEST_WRITES_TO_VOLUME },
-    { .name = "stand_settle_halt_leaves_no_viewed_ground",
-      .func = TestStandSettleHaltLeavesNoViewedGround, .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_defect = "a clean shutdown with a reader open on a deleted file leaves its blocks "
-                       "taken on the medium and named by nothing, kept by the next mount for good",
-      .format = DEED_FORMAT_V1, .analog = "stand_stitch_halt_clean" },
-    { .name = "stand_settle_halt_seals_what_stands",
-      .func = TestStandSettleHaltSealsWhatStands, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V1, .analog = "stand_stitch_halt_clean" },
     { .name = "stand_halt_drain_counts_what_moves",
       .func = TestStandHaltDrainCountsWhatMoves, .reach = TEST_READS_ONLY },
     /* Last: it takes the volume down and mounts it again. */

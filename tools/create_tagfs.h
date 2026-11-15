@@ -3,12 +3,10 @@
  *
  * The tool is one program in parts: the modes (create_tagfs.c), the ground
  * and the I/O on it (create_tagfs_ground.c), the files and the tags they are
- * packed with (create_tagfs_cargo.c), the format-v1 writer
- * (create_tagfs_v1.h, create_tagfs_v1.c, create_tagfs_v1_pack.c), and format
- * v2's part (create_tagfs_v2.c) — --frame-only, a format-v2 Deed with no book
- * behind it, and --v2, a format-v2 volume with its book bound by
- * create_tagfs_bind.c (create_tagfs_bind.h). The format parts share nothing
- * with each other; everything they both stand on is named here, once.
+ * packed with (create_tagfs_cargo.c), and the writer (create_tagfs_v2.c) —
+ * --frame-only, a Deed with no book behind it, and the volume with its book
+ * bound by create_tagfs_bind.c (create_tagfs_bind.h). What the parts share is
+ * named here, once.
  */
 
 #ifndef CREATE_TAGFS_H
@@ -33,8 +31,12 @@
 #define GROUND_GRAIN_SECTORS         2048u
 
 /* The room a running machine works in, past what a volume is made to hold —
- * the same in either format (create_tagfs_v1.c says why it is a policy and
- * not a guess): sixty-four mebibytes, in the volume's own blocks. */
+ * logs, drafts, the files a test suite makes and deletes: sixty-four
+ * mebibytes, in the volume's own blocks. A policy, stated once, here, with its
+ * reason: a machine that cannot write is a machine that cannot be used, and
+ * the cost of being generous is sixty-four mebibytes on a medium that has
+ * gigabytes. The ground is what the tool answers (--ground), not a size a
+ * Makefile names: a ceiling discovered by what breaks under it is a trap. */
 #define GROUND_WORKING_ROOM_BLOCKS   ((64u * 1024u * 1024u) / TAGFS_BLOCK_SIZE)
 
 /* ====================================================================
@@ -80,19 +82,17 @@ VolumeGeometry DeedGeometry(void);
 /* ====================================================================
  * The cargo (create_tagfs_cargo.c)
  *
- * A tag the kernel can hold, whichever format its volume is in — the
- * widths of tag_spelling.h, which a host tool cannot include: a key of at
- * most TAG_KEY_WIDTH bytes, and a key and value together of at most
- * TAG_TEXT_ROOM, one registry record's room past its six bytes of head (the
- * ':' between them is not stored). A tag wider than these is refused by
- * the cargo, before the first write: format v1 would cut it (a u8 key_len),
- * and a format-v2 volume carrying it could only be read (tally.py TagGlass).
+ * A tag the kernel can hold — the widths of tag_spelling.h, which a host
+ * tool cannot include: a key of at most TAG_KEY_WIDTH bytes, and a key and
+ * value together of at most TAG_TEXT_ROOM (the ':' between them is not
+ * stored). A tag wider than these is refused by the cargo, before the first
+ * write: a volume carrying it could only be read (tally.py TagGlass).
  * ==================================================================== */
 
 #define TAG_KEY_WIDTH   255u
 #define TAG_TEXT_ROOM   4074u
 
-void         seed_reserved_tags(uint32_t id_most);
+void         seed_reserved_tags(void);
 int          parse_tags(const char* tag_string, const char* path,
                         uint32_t** out_ids, uint32_t* out_count, uint32_t* out_role);
 void         CargoNameKernel(const char* path);
@@ -101,14 +101,9 @@ VolumePacked PackedStamp(int file_count, char* argv[], int first,
 void         CargoRelease(void);
 
 /* ====================================================================
- * The format parts
+ * The writer (create_tagfs_v2.c) — --frame-only, the volume, and --ground
  * ==================================================================== */
 
-/* create_tagfs_v1.c, create_tagfs_v1_pack.c */
-int say_the_ground(int pair_count, char* argv[], int first);
-int V1PackMake(const char* disk_path, int file_count, char* argv[], int first);
-
-/* create_tagfs_v2.c — --frame-only, --v2 and --ground --v2 */
 int FrameOnlyMake(const char* disk_path, int file_count, char* argv[], int first);
 int V2BindMake(const char* disk_path, int file_count, char* argv[], int first);
 int V2GroundSay(int file_count, char* argv[], int first);

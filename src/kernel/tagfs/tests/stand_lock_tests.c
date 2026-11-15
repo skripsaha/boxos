@@ -1,7 +1,6 @@
 #include "tests.h"
 #include "stand_tests.h"
 #include "../tagfs.h"
-#include "../integrity/integrity.h"
 #include "block_fail.h"
 #include "boardroom.h"
 #include "ata_async.h"
@@ -29,133 +28,8 @@
 // on caches and on what the boot before this one left on the volume.
 // ============================================================================
 
-#define STAND_MAP_PAGE_BLOCKS 512u    /* blocks one page of the integrity map covers */
-#define STAND_MAP_PAGES       17u     /* one page more than the map keeps in memory */
 #define STAND_DMA_SECTORS     8u      /* one legacy-IDE DMA transfer (ATA_ASYNC_MAX_SECTORS) */
 #define STAND_RFLAGS_IF       (1u << 9)
-
-// ----------------------------------------------------------------------------
-// The registry's flush
-// ----------------------------------------------------------------------------
-
-static char s_flush_tag[32];
-static char s_flush_value[12];
-
-/* The first name of the "stand_flush:<k>" series the volume has never had. A
- * name is interned for good, so every boot of a stand volume takes the next
- * one. */
-static const char* StandFreshFlushTag(void)
-{
-    uint32_t k = 0;
-    do {
-        ksnprintf(s_flush_value, sizeof(s_flush_value), "%u", k++);
-        ksnprintf(s_flush_tag, sizeof(s_flush_tag), "stand_flush:%s", s_flush_value);
-    } while (tagfs_tag_lookup(s_flush_tag) != TAGFS_INVALID_TAG_ID);
-    return s_flush_tag;
-}
-
-/* One name the volume has never had, interned — which does not flush — and
- * then the registry flushed once. Whatever that flush writes crosses the
- * medium; the question is whether it does so with the registry's own lock
- * held, and the lock's own count answers it. The name read back off the
- * medium proves the flush was not an empty one. */
-static TestResult TestStandRegistryFlushHoldsNoLock(void)
-{
-    TestResult  verdict = TEST_PASS;
-    TagFSState* fs      = tagfs_get_state();
-
-    uint32_t fresh_id;
-    TEST_ASSERT(tagfs_tag_intern(StandFreshFlushTag(), &fresh_id) == OK,
-                "a name the volume never had is interned, and not yet flushed");
-    uint32_t witnessed = fs->registry->lock.Witnessed;
-    int      flushed   = tag_registry_flush(fs->registry);
-    uint32_t crossed   = fs->registry->lock.Witnessed - witnessed;
-    TEST_ASSERT_EQ(flushed, 0, "the registry's flush of it is taken");
-    TEST_ASSERT(StandRegistryHoldsOnMedium("stand_flush", s_flush_value),
-                "and the name is on the medium");
-
-    TestEvidence("registry flushes of one new name that crossed the medium holding the registry's lock",
-                 crossed ? 1 : 0);
-    if (crossed)
-        verdict = TEST_DEFECT;
-out:
-    return verdict;
-}
-
-// ----------------------------------------------------------------------------
-// The Ledger and the integrity map
-// ----------------------------------------------------------------------------
-
-/* One Ledger write, made by its one writer — a Settle cycle — and the medium's
- * newest copy read back to prove it was made. */
-static TestResult TestStandLedgerWritesOutsideItsLock(void)
-{
-    TestResult verdict   = TEST_PASS;
-    uint64_t   seq       = StandLedgerSeq();
-    uint32_t   witnessed = g_ledger_lock.Witnessed;
-    error_t    wrote     = TagFSSettle();
-    uint32_t   crossed   = g_ledger_lock.Witnessed - witnessed;
-
-    TEST_ASSERT(seq > 0, "a Ledger copy reads before the write");
-    TEST_ASSERT_OK(wrote, "a Settle cycle writes the Ledger");
-    TEST_ASSERT_EQ(StandLedgerSeq(), seq + 1, "and the medium's newest copy is the one it wrote");
-
-    TestEvidence("Ledger writes of one that crossed the medium holding the Ledger's lock",
-                 crossed ? 1 : 0);
-    if (crossed)
-        verdict = TEST_DEFECT;
-out:
-    return verdict;
-}
-
-/* One block written under each of seventeen pages of the integrity map — one
- * page more than the map keeps in memory, so at least one of them is paged
- * in off the medium, and the pages the writes dirty are paged back out as
- * others push them aside. A Settle cycle first leaves no page owed from before.
- *
- * The test holds no TagFS lock and a raw block write takes none but the
- * map's own on its way to the medium, so any door this core passes under a
- * lock between the first write and the last is the map paging under its
- * lock: this core's count answers the question, whatever lock the map's
- * paging is given later. */
-static TestResult TestStandIntegrityPagesOutsideItsLock(void)
-{
-    TestResult  verdict = TEST_PASS;
-    uint32_t    span    = (STAND_MAP_PAGES - 1) * STAND_MAP_PAGE_BLOCKS + 1;
-    uint64_t    first   = 0;
-    bool        taken   = false;
-    error_t     wrote   = OK;
-    const char* aside   = StandStepsAsideFor();
-
-    if (aside)
-        return test_steps_aside(aside);
-
-    TEST_ASSERT(IntegrityIsInitialized(), "the volume's integrity map is up");
-    TEST_ASSERT_OK(TagFSSettle(), "a Settle cycle first, so no page of the map is owed to the medium");
-    TEST_ASSERT_EQ(tagfs_alloc_blocks(span, &first), 0,
-                   "a run of blocks under seventeen pages of the map is taken");
-    taken = true;
-
-    TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x61, 0);
-    LockRankCount before = LockRankCountHere();
-    for (uint32_t k = 0; k < STAND_MAP_PAGES && wrote == OK; k++)
-        wrote = tagfs_write_block(first + k * STAND_MAP_PAGE_BLOCKS, g_test_buffer);
-    LockRankCount after = LockRankCountHere();
-    TEST_ASSERT_OK(wrote, "one block is written under every page");
-    for (uint32_t k = 0; k < STAND_MAP_PAGES; k++)
-        TEST_ASSERT(IntegrityVerify(first + k * STAND_MAP_PAGE_BLOCKS, g_test_buffer),
-                    "and the map holds each one's digest");
-
-    uint32_t crossed = after.Witnessed - before.Witnessed;
-    TestEvidence("17-page runs of block writes whose map paging crossed the medium under a lock",
-                 crossed ? 1 : 0);
-    if (crossed)
-        verdict = TEST_DEFECT;
-out:
-    if (taken)
-        tagfs_free_blocks(first, span);
-    return verdict;
-}
 
 // ----------------------------------------------------------------------------
 // A DMA wait under a caller with interrupts off
@@ -223,30 +97,10 @@ out:
 }
 
 // ============================================================================
-// The suite — none of these grows a chain on purpose, so they walk before the
-// ones that do (stand_chain_tests.c)
+// The suite
 // ============================================================================
 
 static const TestCase g_stand_lock_tests[] = {
-    { .name  = "stand_registry_flush_holds_no_lock", .func = TestStandRegistryFlushHoldsNoLock,
-      .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_defect = "the tag registry's flush holds its interrupts-off lock across every write "
-                       "it makes to the medium, so a core that needs a tag spins with interrupts "
-                       "off for as long as the medium takes",
-      .format = DEED_FORMAT_V1, .analog = "stand_parity_stitch_holds_no_lock" },
-    { .name  = "stand_ledger_writes_outside_its_lock", .func = TestStandLedgerWritesOutsideItsLock,
-      .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_defect = "the Ledger is written to the medium under its interrupts-off lock, so a "
-                       "core that needs the Ledger spins with interrupts off for as long as the "
-                       "medium takes",
-      .format = DEED_FORMAT_V1, .analog = "stand_parity_stitch_holds_no_lock" },
-    { .name  = "stand_integrity_pages_outside_its_lock", .func = TestStandIntegrityPagesOutsideItsLock,
-      .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_defect = "the integrity map pages itself in and out of the medium under its "
-                       "interrupts-off lock, from inside every block read and write, so every "
-                       "core that reads or writes a block spins with interrupts off for as long "
-                       "as the medium takes",
-      .format = DEED_FORMAT_V1, .analog = "stand_parity_stitch_holds_no_lock" },
     { .name  = "stand_dma_wait_keeps_the_callers_interrupts",
       .func  = TestStandDmaWaitKeepsTheCallersInterrupts,
       .reach = TEST_READS_ONLY,

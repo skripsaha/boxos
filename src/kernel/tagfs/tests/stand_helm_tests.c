@@ -246,7 +246,6 @@ static TestResult TestStandHelmDeleteKeepsReadersBlocks(void)
     uint64_t         file_id = 0;
     uint64_t         block   = 0;
     TagFSFileHandle *reader  = NULL;
-    bool             book    = tagfs_get_state()->format == DEED_FORMAT_V2;
     const char      *aside   = StandStepsAsideFor();
 
     if (aside)
@@ -266,8 +265,8 @@ static TestResult TestStandHelmDeleteKeepsReadersBlocks(void)
     uint64_t rested = 0;
     for (uint64_t c = 0; c <= FallowLag() + 1; c++, rested++)
         TEST_ASSERT_OK(TagFSSettle(), "a Settle cycle after the delete");
-    TEST_ASSERT(!book || StandBookRoom() == OK,
-                "on a book, room is asked for: the ribbon leaves the Quire whose stitch gave the file up");
+    TEST_ASSERT(StandBookRoom() == OK,
+                "room is asked for: the ribbon leaves the Quire whose stitch gave the file up");
     TEST_ASSERT(StandBlockInUse(block), "the reader's block still rests past the delete's cycles");
     TestEvidence("cycles the deleted file's block rested while a reader had it open", rested);
 
@@ -280,7 +279,7 @@ static TestResult TestStandHelmDeleteKeepsReadersBlocks(void)
     reader = NULL;
     for (uint64_t c = 0; c <= FallowLag(); c++)
         TEST_ASSERT_OK(TagFSSettle(), "a Settle cycle after the reader let go");
-    TEST_ASSERT(!book || StandBookRoom() == OK, "on a book, room is asked for again");
+    TEST_ASSERT(StandBookRoom() == OK, "room is asked for again");
     TEST_ASSERT(!StandBlockInUse(block), "and the block goes back once the reader let go");
 out:
     tagfs_close(reader);
@@ -356,7 +355,7 @@ static TestResult TestStandHelmDefragBesideDelete(void)
     loaded = true;
     uint64_t gathered = 0;
     if (plot.run_count > 1) {
-        TEST_ASSERT_OK(PlotGather(&plot, 0, 0), "and gathers every extent into one run");
+        TEST_ASSERT_OK(PlotGather(&plot, 0), "and gathers every extent into one run");
         gathered = 1;
     }
     TestEvidence("gathers the defrag had made when the delete landed", gathered);
@@ -364,7 +363,7 @@ static TestResult TestStandHelmDefragBesideDelete(void)
     TEST_ASSERT_EQ(tagfs_delete_file(file_id, INK_UNWARRANTED), 0,
                    "the delete lands while the defrag holds the Helm, and waits for nothing");
     InkReceipt inked;
-    TEST_ASSERT_EQ(TagFSInkPlot(&plot, INK_MAKES_SPARES, &inked), ERR_FILE_NOT_FOUND,
+    TEST_ASSERT_EQ(TagFSInkPlot(&plot, &inked), ERR_FILE_NOT_FOUND,
                    "the defrag's Ink finds no file to lay its record over");
     PlotRelease(&plot);
     loaded = false;
@@ -486,10 +485,10 @@ out:
 // carries the one contract: the reason, the bytes of the write the file's
 // inked record holds, and the size the file is. Here the read of a block the
 // second window overlays is refused: the first window and the whole block
-// before the refused one are the file's, the rest of it is as it was. On a
-// book a last block of 100 bytes is a Slip on the ribbon, laid in no block the
-// write could read, so there the file ends on a whole block: the write lays
-// 200 bytes over that block, and its copy reads the rest of it (§3.6).
+// before the refused one are the file's, the rest of it is as it was. A last
+// block of 100 bytes would be a Slip on the ribbon, laid in no block the write
+// could read, so the file ends on a whole block: the write lays 200 bytes over
+// that block, and its copy reads the rest of it (§3.6).
 // ----------------------------------------------------------------------------
 
 static TestResult TestStandHelmWriteRefusedPartWay(void)
@@ -503,8 +502,7 @@ static TestResult TestStandHelmWriteRefusedPartWay(void)
     bool           armed   = false;
     const uint32_t B       = TAGFS_BLOCK_SIZE;
     const uint64_t W       = HelmWindowBytes(0);
-    const bool     book    = tagfs_get_state()->format == DEED_FORMAT_V2;
-    const uint32_t made    = (uint32_t)(W + B + (book ? B : 100));   /* its last block: 100 bytes, or whole */
+    const uint32_t made    = (uint32_t)(W + B + B);   /* its last block whole */
     const uint32_t bytes   = (uint32_t)(W + B + 200);   /* ... and the write lays 200 over it */
     uint64_t       stats[2] = { UINT64_MAX, UINT64_MAX };
     const char    *aside   = StandStepsAsideFor();
@@ -519,7 +517,7 @@ static TestResult TestStandHelmWriteRefusedPartWay(void)
     TestFillAt(old, made, 0x4E1D0400u, 0);
     TestFillAt(data, bytes, 0x4E1D0401u, 0);
     TEST_ASSERT(StandMakeFile("test_file", old, made, &file_id),
-                "a file of a window, a block and 100 bytes — or a whole block, on a book — is made");
+                "a file of a window and two whole blocks is made");
     TEST_ASSERT(StandBlockOf(file_id, (uint32_t)(W / B) + 1, &block),
                 "the block the second window lays 200 bytes over is found");
 
@@ -577,95 +575,6 @@ out:
 // it — its record then names two extents — and a name that leaves room for one
 // is refused while the write is in flight; the write's Ink then succeeds.
 // ----------------------------------------------------------------------------
-
-static TestResult TestStandHelmRecordRoomClaimed(void)
-{
-    TestResult       verdict = TEST_PASS;
-    uint64_t         file_id = 0;
-    uint64_t         filler  = 0;
-    TagFSFileHandle *handle  = NULL;
-    bool             holding = false;
-    bool             loaded  = false;
-    char            *name    = NULL;
-    Plot             plot;
-    const uint32_t   B       = TAGFS_BLOCK_SIZE;
-    const char      *aside   = StandStepsAsideFor();
-
-    if (aside)
-        return test_steps_aside(aside);
-
-    TestFillAt(g_test_buffer, 3 * B, 0x4E1D0500u, 0);
-    TEST_ASSERT(StandMakeFile("test_file", g_test_buffer, B, &file_id), "a one-block file is made");
-    TEST_ASSERT(StandMakeFile("test_file", g_test_buffer + B, B, &filler), "and a filler after it");
-
-    handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE | TAGFS_HANDLE_APPEND);
-    TEST_ASSERT(handle, "the writer's handle opens");
-    memset(&s_first, 0, sizeof(s_first));
-    TEST_ASSERT(HelmAsk(handle->ofe, &s_first), "and it holds the file's Helm");
-    holding = true;
-    TEST_ASSERT_OK(PlotLoad(&plot, file_id, INK_UNWARRANTED), "the write loads the record under the Helm");
-    loaded    = true;
-    plot.helm = &handle->ofe->helm;
-
-    uint64_t at = 0;
-    TEST_ASSERT_OK(PlotBeginWrite(&plot, plot.size, false, B, &at),
-                   "and reserves a block to grow by, claiming the record's room");
-    uint64_t extents = PackV1Extents(plot.runs, plot.run_count);
-    if (extents <= plot.runs_before) {
-        verdict = test_steps_aside("the volume laid the block next to the file's, so its record "
-                                   "names no more extents and nothing is claimed");
-        goto out;
-    }
-    TestEvidence("extents the write in flight claimed room for", plot.claimed);
-    TEST_ASSERT_EQ(HelmClaimedRuns(file_id), extents, "the claim is its Helm's");
-
-    /* A name with no stem wears no tag, so the record is its name and its
-     * extents: this one leaves room for exactly the extents it names now. */
-    uint32_t name_bytes = TAGFS_MPOOL_DATA_SIZE - RECORD_HEADER_SIZE -
-                          (uint32_t)plot.runs_before * (uint32_t)sizeof(FileExtent);
-    name = kmalloc(name_bytes + 1);
-    TEST_ASSERT(name, "room for the long name");
-    memset(name, 'q', name_bytes);
-    name[0]          = '.';
-    name[name_bytes] = '\0';
-    TagFSMetadata now = { .filename = name };
-    TEST_ASSERT(PlotRunRoom(&now) >= plot.runs_before,
-                "the name fits beside the extents the record names now");
-
-    TEST_ASSERT_EQ(tagfs_rename_file(file_id, name), -(int)ERR_TAGFS_RECORD_FULL,
-                   "and is refused: it would take the room the write in flight claimed");
-
-    PlotSource src  = { .kernel = g_test_buffer + 2 * B, .bytes = B };
-    uint64_t   done = 0;
-    TEST_ASSERT_OK(PlotWriteBlocks(&plot, at, &src, &done), "the write's block lands");
-    TEST_ASSERT_OK(PlotEndWrite(&plot, at, done), "and is made ready to be the file's");
-    InkReceipt inked;
-    TEST_ASSERT_OK(TagFSInkPlot(&plot, INK_MAKES_SPARES, &inked),
-                   "the write's Ink is not refused: the room was its own");
-    TEST_ASSERT_EQ(HelmClaimedRuns(file_id), 0, "and once inked nothing is claimed");
-    PlotRelease(&plot);
-    loaded = false;
-    HelmLetGo(handle->ofe, &s_first);
-    holding = false;
-
-    memcpy(g_test_buffer + B, g_test_buffer + 2 * B, B);
-    TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, 2 * B), (int)(2 * B),
-                   "the file reads back both blocks");
-    TEST_ASSERT_EQ(TestFirstDifference(g_test_output, g_test_buffer, 2 * B), 2 * B,
-                   "the grown one among them");
-out:
-    if (loaded)
-        PlotRelease(&plot);
-    if (holding)
-        HelmLetGo(handle->ofe, &s_first);
-    tagfs_close(handle);
-    kfree(name);
-    if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
-    if (filler)
-        tagfs_delete_file(filler, INK_UNWARRANTED);
-    return verdict;
-}
 
 // ----------------------------------------------------------------------------
 // A file the loader reads by its blocks is refused by the volume's one guard
@@ -745,8 +654,6 @@ static const TestCase g_stand_helm_tests[] = {
     { .name  = "stand_helm_write_yields_between_windows",
       .func  = TestStandHelmWriteYieldsBetweenWindows, .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_helm_write_refused_part_way", .func = TestStandHelmWriteRefusedPartWay,
-      .reach = TEST_WRITES_TO_VOLUME },
-    { .name  = "stand_helm_record_room_claimed", .func = TestStandHelmRecordRoomClaimed,
       .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_helm_guarded_file_refused", .func = TestStandHelmGuardedFileRefused,
       .reach = TEST_WRITES_TO_VOLUME },

@@ -31,8 +31,7 @@ bool HelmRoomCameBack(error_t *rc)
  * the record — opened only to write, or onto a file of none — views the file
  * from this load on, not from its open: what a holder before it freed is not
  * this one's to keep resting. The Plot is the Helm's holder's, guarded with the
- * warrant the handle carries, and the room its extents need in the record is
- * claimed for that Helm (RT-19, PlotReserve). */
+ * warrant the handle carries. */
 static error_t HelmPlotLoad(TagFSFileHandle *handle, Plot *plot)
 {
     if (HelmVacated(handle->ofe)) {
@@ -74,8 +73,8 @@ static PlotSource HelmWindowOf(const PlotSource *src, uint64_t from, uint64_t at
 }
 
 /*
- * One window: the ground it needs reserved and the record's room claimed
- * before a byte moves, the blocks written by the one read-modify-write rule,
+ * One window: the ground it needs reserved before a byte moves, the blocks
+ * written by the one read-modify-write rule,
  * and what landed inked as one record (TagFSInkPlot). A window the medium stops
  * part way keeps what landed before the stop and says why; ground it took past
  * that goes back (CR-13), and a window that inks nothing gives back everything
@@ -108,7 +107,7 @@ static error_t HelmWriteWindowOnce(TagFSFileHandle *handle, const PlotSource *sr
         InkReceipt receipt;
         error_t    kept = PlotEndWrite(&plot, at, done);
         if (kept == OK)
-            kept = TagFSInkPlot(&plot, INK_MAKES_SPARES, &receipt);
+            kept = TagFSInkPlot(&plot, &receipt);
         if (kept != OK) {
             if (rc == OK)
                 rc = kept;
@@ -181,17 +180,15 @@ static error_t HelmSpanStep(Plot *plot, uint64_t size, bool grow_only, bool *out
         plot->size = size;
         *out_ended = true;
     } else {
-        uint64_t end = plot->size + HelmWindowBytes(plot->size);
-        if (end > size || end < plot->size || plot->book)
-            end = size;     /* a book's growth is a hole, written nowhere: one step */
+        /* A growth is a hole, written nowhere: one step. */
         rc = PlotRoomFor(plot, size);
         if (rc == OK)
-            rc = PlotExtendZero(plot, end);
-        *out_ended = end == size;
+            rc = PlotExtendZero(plot, size);
+        *out_ended = true;
     }
     InkReceipt inked;
     if (rc == OK)
-        rc = TagFSInkPlot(plot, INK_MAKES_SPARES, &inked);
+        rc = TagFSInkPlot(plot, &inked);
     return rc;
 }
 
@@ -257,11 +254,11 @@ static error_t HelmDefragBegin(TagFSFileHandle *handle, HelmDefragging *d, bool 
     if (rc == OK && !PlotStretchScattered(plot, &first, &last)) {
         InkReceipt inked;
         if (plot->freed_count > 0)
-            rc = TagFSInkPlot(plot, INK_MAKES_SPARES, &inked);
+            rc = TagFSInkPlot(plot, &inked);
         *out_ended = rc == OK;
     } else if (rc == OK) {
         uint64_t hint = StripOnGround(plot->runs[first].kind) ? plot->runs[first].start : plot->runs[0].start;
-        rc = PlotGatherBegin(plot, 0, hint, &d->gather);
+        rc = PlotGatherBegin(plot, hint, &d->gather);
     }
     if (rc == ERR_WOULD_BLOCK)
         HelmDefragLetGo(d);
@@ -300,7 +297,7 @@ error_t HelmDefragWindow(TagFSFileHandle *handle, HelmDefragging *d, bool *out_e
     if (rc == OK && laid) {
         InkReceipt inked;
         uint32_t   first = 0, last = 0;
-        rc         = TagFSInkPlot(&d->plot, INK_MAKES_SPARES, &inked);
+        rc         = TagFSInkPlot(&d->plot, &inked);
         *out_ended = rc == OK && !PlotStretchScattered(&d->plot, &first, &last);
         if (rc == OK && !*out_ended)
             HelmDefragLetGo(d);     /* the next window loads the file again for its next stretch */
@@ -342,7 +339,7 @@ error_t HelmEngross(TagFSFileHandle *handle, bool *out_laid)
         rc = PlotEngross(&plot, out_laid);
     if (rc == OK && *out_laid) {
         InkReceipt inked;
-        rc = TagFSInkPlot(&plot, INK_MAKES_SPARES, &inked);
+        rc = TagFSInkPlot(&plot, &inked);
     }
     PlotRelease(&plot);
     return rc;

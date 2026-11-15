@@ -1,28 +1,15 @@
-"""selftest_book — format v2's landings: a book laid over the image, one state
-or one kind of damage planted in it, and what the book's census and mount must
-say of it.
+"""selftest_book — the book's landings: one state or one kind of damage planted
+in the image's own book, and what the book's census and mount must say of it.
 
-An image self-test is handed in format v1 (`make VOLUME_FORMAT=v1`; mkfs lays
-v2 by default since step 2.4) has the book laid here first, over it in memory, as
-`create_tagfs --frame-only` and then a binder would lay it: the Deed made
-again with FRAME in place of LAYOUT, the front grains blank, every live file
-of the v1 image in a row from the data run's first block with the kernel first
-and its bytes copied there, and then the Tally of seq 1 in two Tally-Quires,
-slot 0 at seq 2, an empty ribbon Quire and its next_quire (binder.Bind) — the
-book of exactly the files the v1 image holds, which its census must find
-consistent with nothing to say (B0). Every landing is a fork of that overlay;
-the image file is never written. A format-v2 image handed to self-test is its
-own base.
-
-Between the files and the Tally the base keeps LANDING_ROOM blocks free — the
-landings' own files go there (F) — so where the Tally lands, and so whether a
-landing has room, does not hang on how many blocks the image's files happen
-to take. An image with no room for the files, that room and the book is
-refused in one sentence, never landed on.
+Every landing is a fork of an overlay of the image (the image file is never
+written), its Tally read back as the plan the landings aim at (BookTargets):
+the base its census must find consistent with nothing to say (B0). The
+landings' own files go in the first free run of LANDING_ROOM blocks past the
+Tally-Quires (F); an image with no such run is refused in one sentence, never
+landed on.
 
 `--emit CASE --out IMG` writes a landing out as a new image: the kernel that
-reads the book (step 2.3f) boots them and is held to this package's
-prediction, as the census scenario holds the v1 mount.
+reads the book boots them and is held to this package's prediction.
 """
 
 import struct
@@ -72,7 +59,7 @@ def Judge(case, census):
 
 
 # ---------------------------------------------------------------------------
-# The base: the v1 image's files, laid as format v2 lays them, and bound
+# The base: the image's own book
 # ---------------------------------------------------------------------------
 
 
@@ -95,84 +82,6 @@ def FrameDeed(deed, frame, boot, role, frame_bytes=ondisk.VOLUME_FRAME.size):
     return ondisk.DeedSeal((head + stamps).ljust(ondisk.DEED_SECTORS * SECTOR, b"\0"))
 
 
-def _InRow(c0):
-    """The live files in the order mkfs lays them: the BOOT file first, then
-    as the v1 image has them, by their first block."""
-    live = [e for e in c0.files.values() if e["state"] == "live"]
-    return sorted(live, key=lambda e: ("fid %u '%s'" % (e["fid"], e["record"].name) != c0.boot_file,
-                                       e["record"].extents_at_mount[0][0]
-                                       if e["record"].extents_at_mount else 0, e["fid"]))
-
-
-def _V1Bytes(f, rec, blocks):
-    """The first `blocks` blocks of a v1 file, read through its extents."""
-    out = []
-    for s, n in rec.extents_at_mount:
-        for b in range(s, s + n):
-            if len(out) == blocks:
-                return out
-            raw = f.vread(f.layout["data_block"] + b)
-            if raw is None:
-                raise Unreadable("block %u of %s will not read" % (b, rec.name))
-            out.append(raw)
-    if len(out) < blocks:
-        raise Unreadable("%s names fewer blocks than its size needs" % rec.name)
-    return out
-
-
-def BookBase(t):
-    """(overlay, content, plan): the book of the v1 image's files (see the
-    module's account). The data run from block 1024 = 256 * (1 + 3) on a
-    ground of 1 MiB grains: the Deed's grain and one grain to each of the
-    three Spine slots, the stride a grain (§1.2: grain_bytes / block_bytes,
-    the volume's own GEOMETRY)."""
-    c0 = t.c0
-    f, medium = c0.f, c0.medium
-    over = OverlayMedium(medium)
-    base, uuid = f.base, f.deed["uuid"]
-    grain = f.deed["geometry"]["grain_bytes"] // BLOCK
-    frame = dict(data_block=grain * (1 + ondisk.FRAME_SPINE_SLOTS), spine_block=grain,
-                 spine_slots=ondisk.FRAME_SPINE_SLOTS, spine_stride=grain)
-    need = sum(max(1, (e["record"].size + BLOCK - 1) // BLOCK) for e in _InRow(c0))
-    end = f.deed["tail_sector"] // SECTORS_PER_BLOCK
-    if frame["data_block"] + need + LANDING_ROOM > end:
-        raise ValueError("its files take %u blocks from block %u, and with the landings' %u the book's data "
-                         "run would reach block %u, past its end at block %u"
-                         % (need, frame["data_block"], LANDING_ROOM, frame["data_block"] + need + LANDING_ROOM,
-                            end))
-    over.Put(base + SECTORS_PER_BLOCK, bytes((frame["data_block"] - 1) * BLOCK))
-    lanes = bookread.SeedLanes(uuid)
-    content = tally.Content(made_ns=f.deed["born"]["created_unix"] * 10**9)
-    at, boot = frame["data_block"], None
-    for e in _InRow(c0):
-        rec = e["record"]
-        need = (rec.size + BLOCK - 1) // BLOCK
-        blocks = _V1Bytes(f, rec, need)
-        over.Put(base + at * SECTORS_PER_BLOCK, b"".join(blocks) + bytes(BLOCK * (need == 0)))
-        runs = [tally.Run(False, at, need, 1)] if need else []
-        content.files[e["fid"]] = tally.FileState(
-            e["fid"], gen=1, flags=rec.flags, size=rec.size, created_ns=rec.created * 10**9,
-            modified_ns=rec.modified * 10**9, name=rec.name.encode(), tags=sorted(set(rec.tags)),
-            runs=runs)
-        for i, raw in enumerate(blocks):
-            content.digests[at + i] = bookread.Integrity(raw, lanes)
-        if boot is None and "fid %u '%s'" % (e["fid"], rec.name) == c0.boot_file:
-            boot = (at, max(need, 1), rec.size, 0)
-        at += max(need, 1)
-    for tid, (key, value) in c0.by_id.items():
-        content.tags[tid] = tally.TagState(tally.TAG_HAS_VALUE if value is not None else 0, key, value)
-    content.next_fid = max(content.files) + 1
-    content.next_tag = max(content.tags) + 1 if content.tags else 0
-    content.next_bookmark = 1
-    boot = boot or (0, 0, 0, 0)
-    for role, vlba in ((ondisk.DEED_ROLE_HEAD, 0), (ondisk.DEED_ROLE_TAIL, f.deed["tail_sector"])):
-        over.Put(base + vlba, FrameDeed(f.deed, frame, boot, role))
-    ground = BookGround(over)
-    plan = binder.Bind(content, ground, after=at + LANDING_ROOM)
-    binder.BindWrite(over, ground, plan)
-    return over, content, plan
-
-
 class BookTargets:
     """What the landings aim at, off the base and its census (B0).
 
@@ -183,20 +92,15 @@ class BookTargets:
         where a landing's new files put their bytes; fid, tag — the next file
         id and tag id the book has not given.
 
-    The base is the book laid over a format-v1 image's files (`t`, its
-    Targets), or a format-v2 image's own (`medium`), its Tally read back as
-    the plan the landings aim at."""
+    The base is the image's own book (`medium`), its Tally read back as the
+    plan the landings aim at."""
 
-    def __init__(self, t=None, medium=None):
-        self.t = t
-        if t is not None:
-            self.base, self.content, self.plan = BookBase(t)
-        else:
-            self.base = OverlayMedium(medium)
-            m = BookCensus(self.base).mount
-            if m.tally is None:
-                raise Unreadable("the book of the image does not mount: %s" % m.refusal)
-            self.content, self.plan = m.tally.content, binder.ReadPlan(m.tally)
+    def __init__(self, medium):
+        self.base = OverlayMedium(medium)
+        m = BookCensus(self.base).mount
+        if m.tally is None:
+            raise Unreadable("the book of the image does not mount: %s" % m.refusal)
+        self.content, self.plan = m.tally.content, binder.ReadPlan(m.tally)
         self.c0 = BookCensus(self.base)
         self.ground = BookGround(self.base)
         self.lanes = bookread.SeedLanes(self.ground.uuid)

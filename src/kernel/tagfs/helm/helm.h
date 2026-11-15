@@ -89,11 +89,6 @@ void     HelmLetGo(OpenFileEntry* ofe, HelmWaiter* w);
 void     HelmBookGivenUp(uint64_t lost);
 void     HelmBookTakenUp(void);
 
-/* The extents the holder of the file's Helm claimed room for in its record
- * (RT-19, InkRoomClaim): 0 when the file is not open or nothing is claimed.
- * Under the volume's state lock, which the claim is made under. */
-uint32_t HelmClaimedRuns(uint64_t file_id);
-
 /* Whether a Quitclaim gave the file up since it was opened. */
 bool     HelmVacated(const OpenFileEntry* ofe);
 

@@ -2,13 +2,10 @@
 #include "boardroom.h"
 
 /*
- * What a volume of either format does to take the ground behind it
- * (ground_grow.h): the questions asked of the medium before anything is measured,
- * the Deed written at the new far end and then at the head, and the old far
- * copy erased. Format v1's growth (ground_v1.c) adds its bitmap's proof and
- * its LAYOUT; a book's (book_grow.c) the census's proof and its block map —
- * the protocol of the two copies is this one, so the two formats cannot come
- * to write their Deeds in two orders.
+ * What a volume does to take the ground behind it (ground_grow.h): the
+ * questions asked of the medium before anything is measured, the Deed written
+ * at the new far end and then at the head, and the old far copy erased. The
+ * census's proof and the block map are book_grow.c's.
  */
 
 bool GroundGrowRoom(uint8_t seat, uint64_t ground_sectors, uint64_t have)
@@ -118,18 +115,16 @@ void GroundGrowOldTailErased(uint8_t seat, uint64_t old_tail, uint8_t *blank)
      * there, lose the head, and the machine mounts on a stale deed believing
      * an old data run: block numbers handed out over files.
      */
-    if (blank) {
-        memset(blank, 0, DEED_PEN_BYTES);
-        if (tagfs_volume_write(old_tail, DEED_PEN_SECTORS, blank) == 0) {
-            kprintf("[TagFS] seat %u: the deed that used to sit at sector %llu "
-                    "is inside the data run now and has been erased\n",
-                    seat, (unsigned long long)old_tail);
-        } else {
-            kprintf("[TagFS] seat %u: the deed that used to sit at sector %llu "
-                    "is inside the data run now and would not erase — it will "
-                    "be written over by the first file that lands there\n",
-                    seat, (unsigned long long)old_tail);
-        }
+    memset(blank, 0, DEED_PEN_BYTES);
+    if (tagfs_volume_write(old_tail, DEED_PEN_SECTORS, blank) == 0) {
+        kprintf("[TagFS] seat %u: the deed that used to sit at sector %llu "
+                "is inside the data run now and has been erased\n",
+                seat, (unsigned long long)old_tail);
+    } else {
+        kprintf("[TagFS] seat %u: the deed that used to sit at sector %llu "
+                "is inside the data run now and would not erase — it will "
+                "be written over by the first file that lands there\n",
+                seat, (unsigned long long)old_tail);
     }
     /* The one flush on this path whose answer is deliberately dropped, and it
      * stays dropped. The volume was committed at the head-deed write; what is

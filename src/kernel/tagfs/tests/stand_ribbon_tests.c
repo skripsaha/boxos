@@ -160,7 +160,7 @@ static bool StandRibbonWhere(StandRibbon* w)
     w->seq          = c.last;
     w->clasp        = c.clasp;
     w->top          = c.given;
-    w->fid          = tagfs_get_state()->ledger.next_file_id;
+    w->fid          = g_book.next_fid;
     uint32_t windows = (uint32_t)((tagfs_get_state()->block_end + BLOCK_MAP_WINDOW_BLOCKS - 1u) /
                                   BLOCK_MAP_WINDOW_BLOCKS);
     for (uint32_t i = 0; i < windows; i++)
@@ -313,8 +313,6 @@ bool StandRibbonPutBack(StandRibbon* w)
 /* Why a test written for a book's ribbon stands aside here, or NULL. */
 const char* StandRibbonAside(StandRibbon* w)
 {
-    if (tagfs_get_state()->format != DEED_FORMAT_V2)
-        return "the volume is not format v2: there is no ribbon to sew";
     const char* aside = StandStepsAsideFor();
     if (aside)
         return aside;
@@ -521,7 +519,7 @@ static TestResult TestStandRibbonTornTail(void)
     TEST_ASSERT_EQ(said.ribbon[RIBBON_CODE_RIBBON_TORN], s_ribbon_before.ribbon[RIBBON_CODE_RIBBON_TORN] + 1u,
                    "the torn tail is said");
     TEST_ASSERT(StandRibbonLive(w.fid, NULL) && !StandRibbonLive(w.fid + 1u, NULL), "one file born, not two");
-    TEST_ASSERT(tagfs_get_state()->ledger.next_file_id >= w.fid + 2u, "and the torn one's id is not given again");
+    TEST_ASSERT(g_book.next_fid >= w.fid + 2u, "and the torn one's id is not given again");
 out:
     BlockFailDisarm();
     if (!StandRibbonPutBack(&w))
@@ -641,7 +639,7 @@ static TestResult TestStandRibbonDeadBranch(void)
                    "the second said a branch of another history");
     TEST_ASSERT(said.lied == s_ribbon_before.lied, "and no lie said of the medium the ribbon before it did not say");
     TEST_ASSERT(!StandRibbonLive(w.fid + 1u, NULL), "its file is not born");
-    TEST_ASSERT(tagfs_get_state()->ledger.next_file_id >= w.fid + 2u, "and its id is not given again");
+    TEST_ASSERT(g_book.next_fid >= w.fid + 2u, "and its id is not given again");
 out:
     if (!StandRibbonPutBack(&w))
         verdict = TestFailedAt(__FILE__, __LINE__, "what the test laid would not be put back (laid, 0)",
@@ -798,21 +796,21 @@ out:
 
 static const TestCase g_stand_ribbon_tests[] = {
     { .name = "stand_ribbon_slip_three_roads", .func = TestStandRibbonSlipThreeRoads,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_ribbon_torn_tail", .func = TestStandRibbonTornTail,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_ribbon_next_quire", .func = TestStandRibbonNextQuire,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_ribbon_closed_damaged", .func = TestStandRibbonClosedDamaged,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_ribbon_dead_branch", .func = TestStandRibbonDeadBranch,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_ribbon_undone", .func = TestStandRibbonUndone,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_ribbon_boot_slip", .func = TestStandRibbonBootSlip,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_ribbon_mount_next_refused", .func = TestStandRibbonMountNextRefused,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_ribbon_suite = {

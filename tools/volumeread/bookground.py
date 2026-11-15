@@ -1,9 +1,9 @@
-"""bookground — a format-v2 volume's ground as its book is read off it: where
-the volume stands, its uuid, its FRAME and what follows from it, and its
-sectors, each read once and judged as a sector of the book.
+"""bookground — a volume's ground as its book is read off it: where the
+volume stands, its uuid, its FRAME and what follows from it, and its sectors,
+each read once and judged as a sector of the book.
 
-The format-v1 reader in medium.py never sees a book; everything here is the
-book's (spec_v2 §1.2, §2.1), shared by the slots, the Tally and the ribbon.
+Everything here is the book's (spec_v2 §1.2, §2.1), shared by the slots, the
+Tally and the ribbon; where on the medium the volume stands is medium.py's.
 """
 
 from . import bookread, ondisk
@@ -12,7 +12,7 @@ from .ondisk import SECTOR, BLOCK, SECTORS_PER_BLOCK
 
 
 class BookGround:
-    """A format-v2 volume on a medium: where it stands, its uuid, its FRAME and
+    """A volume on a medium: where it stands, its uuid, its FRAME and
     what follows from it, and its sectors, each read once and judged as a
     sector of the book (volume_book.h BookSectorCheck) — every one that holds
     counted into `top_seq`, for the next seq is past everything the mount saw
@@ -20,8 +20,12 @@ class BookGround:
 
     def __init__(self, medium, forced_start=None):
         st = StandOnDeed(medium, forced_start)
-        if st.format != "v2":
-            raise Unreadable("the deed at sector %u is format %s, not a book" % (st.start, st.format))
+        # The FRAME is the kernel's first question too (deed.c, at the same
+        # point): a Deed that carries none says nothing of where anything is.
+        # Whether the FRAME it carries holds is said below (frame_why).
+        if ondisk.STAMP_FRAME not in st.deed["stamps"]:
+            raise Unreadable("the deed at sector %u does not say where anything is — it carries no FRAME, "
+                             "so its volume is no book this kernel reads" % st.start)
         self.medium, self.stand, self.deed = medium, st, st.deed
         self.base, self.uuid = st.start, st.deed["uuid"]
         self.frame_why, self.frame_note = ondisk.VolumeFrameCheck(st.deed)

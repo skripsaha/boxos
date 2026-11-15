@@ -21,8 +21,6 @@
  *   the record, once a window:
  *     W_LOG_META → W_INK → (more windows: yield the core → W_ALLOC)
  *                        → (the last one:                W_DONE)
- *     W_INK with no Spare to close the pool's tail onto:
- *              → W_SPARE → (yield to the answer) → W_SPARE_DONE → W_INK
  *
  * The bytes come out of the program's pages a block at a time, into the DMA
  * pages they go out of — never copied whole into the kernel heap first. The
@@ -39,19 +37,16 @@
 #include "tagfs.h"
 #include "helm.h"        /* the file's Helm, and HelmReady for a USB disk's steps */
 #include "ink.h"         /* TagFSInkPlot — the one way the file changes */
-#include "meta_pool.h"   /* PoolSpareBegin / Adopt / Drop — a Spare stamped through the port */
 #include "scribe.h"      /* VolumeFlushNeed, VolumeWriteSeen — what the landed blocks wait for */
 #include "integrity.h"
 #include "run.h"         /* TagFSDataCostLaid — what a file's bytes cost the medium */
 #include "tail_slip.h"   /* TailSlipOver — the Slips over a last block the write reads */
-#include "settle.h"      /* SettleV1OnBook — no Spare is stamped for a book */
 #include "away.h"        /* AwayDepartures — what a book's blocks are held to at their Ink */
 #include "cpu_calibrate.h"  /* a stretch's time on the medium, for the cadence */
 #include "klib.h"
 
 static void wjob_read_old_complete(uint8_t port, uint8_t slot, error_t status, void *ctx);
 static void wjob_block_complete(uint8_t port, uint8_t slot, error_t status, void *ctx);
-static void wjob_spare_complete(uint8_t port, uint8_t slot, error_t status, void *ctx);
 
 void wjob_continue(WriteJob *j)
 {
@@ -91,8 +86,8 @@ static bool wjob_stop(WriteJob *j, error_t cause)
 }
 
 /* The file's record loaded under the Helm, for the job's first window: the
- * Plot is the Helm holder's, and the room its extents need is claimed for it
- * (RT-19); where the write begins is asked of the growth rule once. */
+ * Plot is the Helm holder's; where the write begins is asked of the growth
+ * rule once. */
 static error_t wjob_load(WriteJob *j)
 {
     if (HelmVacated(j->handle->ofe))
@@ -145,8 +140,8 @@ static bool WriteJobSlip(WriteJob *j, uint64_t at, uint64_t window)
     return true;
 }
 
-/* W_ALLOC — the window's blocks reserved and the record's room claimed before
- * any byte of it moves; every window after the first goes on from where the
+/* W_ALLOC — the window's blocks reserved before any byte of it moves; every
+ * window after the first goes on from where the
  * last one's Ink left the Plot. Room on its way turns the job synchronous
  * (wjob_to_service). */
 static bool w_alloc(WriteJob *j)
@@ -251,8 +246,7 @@ static error_t wjob_submit(WriteJob *j, bool write, uint64_t block, uint32_t blo
 }
 
 /* The block the rest of the stretch's first or last block is read from — the
- * block itself on format v1, the old block it lay on on fresh ground (format
- * v2, plot_window.c). */
+ * old block it lay on, on fresh ground (plot_window.c). */
 static uint64_t WriteJobReadFrom(const WriteJob *j)
 {
     return j->st_reading == 0 ? j->st.from_first : j->st.from_last;
@@ -345,8 +339,8 @@ static bool w_block_submit(WriteJob *j)
 /* W_BLOCK_DONE — the port answered the stretch's write. The blocks that landed
  * — all of it, or on a refusal what the medium says it kept — are the
  * write's: no read-ahead window hands out what they held, and each has its
- * digest recorded, since the port wrote past the block door. A stop inside
- * the stretch ends the write after them. */
+ * digest kept by the window (PlotWindowLanded). A stop inside the stretch
+ * ends the write after them. */
 static bool w_block_done(WriteJob *j)
 {
     uint32_t staged = j->st_staged;
@@ -355,7 +349,6 @@ static bool w_block_done(WriteJob *j)
         landed = staged;
     for (uint32_t i = 0; i < landed; i++) {
         tagfs_readahead_invalidate(j->st.block + i);
-        IntegrityUpdate(j->st.block + i, wjob_page(j, i));
         if (PlotWindowLanded(&j->plot, j->if_departed, j->st.block + i, wjob_page(j, i), 1) != OK) {
             landed = i;      /* a block whose digest is not kept is no block of the file's */
             if (j->if_status == OK)
@@ -398,22 +391,18 @@ static bool w_log_meta(WriteJob *j)
     return true;
 }
 
-/* W_INK — the window's record the Plot builds, inked; with no Spare for the
- * pool's tail, one is stamped first (W_SPARE). A file given up meanwhile has
- * no record to ink over, and the answer is ERR_FILE_NOT_FOUND. With windows
+/* W_INK — the window's record the Plot builds, inked; room on its way — the
+ * cycle's — turns the job synchronous (wjob_to_service). A file given up
+ * meanwhile has no record to ink over, and the answer is ERR_FILE_NOT_FOUND. With windows
  * left, the job posts itself behind what its seat's continuations have waiting
  * before it reserves the next one. */
 static bool w_ink(WriteJob *j)
 {
     InkReceipt inked;
-    error_t    rc = TagFSInkPlot(&j->plot, INK_ASKS_SPARES, &inked);
-    if (rc == ERR_WOULD_BLOCK && j->plot.book) {
-        wjob_to_service(j);      /* a book has no Spare: the room on its way is the cycle's */
-        return false;
-    }
+    error_t    rc = TagFSInkPlot(&j->plot, &inked);
     if (rc == ERR_WOULD_BLOCK) {
-        wjob_to(j, W_SPARE);
-        return true;
+        wjob_to_service(j);
+        return false;
     }
     if (rc != OK) {
         wjob_finalize(j, rc);
@@ -428,63 +417,6 @@ static bool w_ink(WriteJob *j)
     wjob_to(j, W_ALLOC);
     wjob_continue(j);   /* the next window, after what its core has waiting */
     return false;
-}
-
-/* W_SPARE — a block taken for the pool and its empty stamp written through
- * the port, from the job's first DMA page like any block of the write. Room
- * on its way turns the job synchronous (wjob_to_service); a volume with no
- * block for it at all ends the job with the allocator's answer: nothing is
- * inked, and the ground the write took goes back. */
-static bool w_spare(WriteJob *j)
-{
-    if (SettleV1OnBook("a Spare stamped for an asynchronous write")) {
-        wjob_finalize(j, ERR_TAGFS_READ_ONLY);
-        return false;
-    }
-    error_t rc = PoolSpareBegin(&j->spare_block, &j->spare_image);
-    if (rc == ERR_WOULD_BLOCK) {
-        wjob_to_service(j);
-        return false;
-    }
-    if (rc != OK) {
-        kprintf("[Storage] write to file %llu: the pool has no Spare to take its record and "
-                "none could be made (error %u) — the write is refused, the file as it was\n",
-                j->file_id, (unsigned)rc);
-        wjob_finalize(j, rc);
-        return false;
-    }
-    memcpy(wjob_page(j, 0), j->spare_image, TAGFS_BLOCK_SIZE);
-    rc = wjob_submit(j, true, j->spare_block, 1, 0, wjob_spare_complete);
-    if (rc != OK) {
-        PoolSpareDrop(j->spare_block, j->spare_image);
-        j->spare_image = NULL;
-        wjob_finalize(j, rc);
-    }
-    return false;  /* parked until the answer */
-}
-
-/* W_SPARE_DONE — the stamp landed: the Spare is the pool's, and the job inks
- * again. */
-static bool w_spare_done(WriteJob *j)
-{
-    MetaPoolBlock *image = j->spare_image;
-    j->spare_image = NULL;
-    if (j->if_status != OK) {
-        kprintf("[Storage] write to file %llu: block %u would not take the stamp of a Spare "
-                "for the pool (error %u) — the write is refused, the file as it was\n",
-                j->file_id, j->spare_block, (unsigned)j->if_status);
-        PoolSpareDrop(j->spare_block, image);
-        wjob_finalize(j, j->if_status);
-        return false;
-    }
-    VolumeWriteSeen();
-    error_t rc = PoolSpareAdopt(j->spare_block, image, VolumeFlushNeed());
-    if (rc != OK) {
-        wjob_finalize(j, rc);
-        return false;
-    }
-    wjob_to(j, W_INK);
-    return true;
 }
 
 /* The job holds the volume's door from its making to its end, so the volume
@@ -507,8 +439,6 @@ void wjob_pump(void *job_)
             case W_BLOCK_DONE:    if (!w_block_done(j))    return; break;
             case W_LOG_META:      if (!w_log_meta(j))      return; break;
             case W_INK:           if (!w_ink(j))           return; break;
-            case W_SPARE:         if (!w_spare(j))         return; break;
-            case W_SPARE_DONE:    if (!w_spare_done(j))    return; break;
             case W_DONE:          wjob_finalize(j, j->stopped); return;
             case W_INIT:
             case W_HELM_WAIT:
@@ -539,12 +469,6 @@ static void wjob_block_complete(uint8_t port, uint8_t slot, error_t status, void
 {
     (void)port; (void)slot;
     wjob_answered((WriteJob *)ctx, status, W_BLOCK_DONE);
-}
-
-static void wjob_spare_complete(uint8_t port, uint8_t slot, error_t status, void *ctx)
-{
-    (void)port; (void)slot;
-    wjob_answered((WriteJob *)ctx, status, W_SPARE_DONE);
 }
 
 #ifdef CONFIG_VOLUME_TESTS

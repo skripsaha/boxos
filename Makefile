@@ -47,9 +47,9 @@ DEBUG    ?= off
 #                     carries needs, rounded up to the mebibyte
 #   after the ESP   : the BoxOS partition, LAST on the medium. Everything
 #                     inside it is the volume's own business and is counted
-#                     from HERE, not from sector 0: its Deed, its Ledger, its
-#                     DiskBook, its bitmap, its data. The kernel finds it by
-#                     reading this table, exactly as the tool that made it did.
+#                     from HERE, not from sector 0: its Deed, its book, its
+#                     data. The kernel finds it by reading this table, exactly
+#                     as the tool that made it did.
 #
 # Neither of the last two is a number in this file. The ESP is as long as its
 # own image; the volume is as long as its content plus the room a running
@@ -558,10 +558,9 @@ RETURNFAIL_MARK = $(BUILDDIR)/.returnfail.$(if $(filter on,$(RETURNFAIL)),on,off
 # states are PowerCut's (tools/powercut.sh, `tools/volume-read.py cut`), never
 # this key's. The points are named by the record ABOUT to be written:
 #
-#   registry pool table integrity bitmap ledger flush done usechain stitch
-#   tally slot (a format-v2 Tally: before its nodes' flush, inside its slot)
-#   spared (a format-v2 stitch its toll spared the flush of its data, before
-#   its last flush) undone (before the first atom of the stitch that lays a
+#   stitch flush done tally slot (a Tally: before its nodes' flush, inside its
+#   slot) spared (a stitch its toll spared the flush of its data, before its
+#   last flush) undone (before the first atom of the stitch that lays a
 #   mount's verdict down — that stitch, anchored or not) engross (before the
 #   first atom of the stitch that names a block an Engross laid, anchored or
 #   not)
@@ -889,9 +888,9 @@ TAGBOOT_SRC    = src/boot/uefi/tagboot.c src/boot/uefi/tagboot_deed.c src/boot/u
                  src/boot/uefi/tagboot_lectern.c src/boot/uefi/tagboot_lectern_tree.c \
                  src/boot/uefi/tagboot_lectern_ribbon.c src/boot/uefi/tagboot_lectern_replay.c \
                  src/boot/uefi/tagboot_succession.c
-TAGBOOT_HDRS   = src/boot/uefi/tagboot.h src/boot/uefi/uefi.h src/boot/uefi/tagfs_boot.h \
+TAGBOOT_HDRS   = src/boot/uefi/tagboot.h src/boot/uefi/uefi.h \
                  src/boot/uefi/tagboot_lectern.h src/boot/uefi/tagboot_lectern_book.h \
-                 src/include/volume_deed.h src/include/volume_ledger.h src/include/volume_book.h \
+                 src/include/volume_deed.h src/include/volume_book.h \
                  src/include/volume_tally.h src/include/volume_spine.h src/include/volume_ribbon.h \
                  src/include/volume_digest.h
 TAGBOOT_JUMP   = src/boot/uefi/tagboot_jump.asm
@@ -1013,11 +1012,10 @@ TAGFS_OS_SIGNATURE = $(BUILDDIR)/.tagfs_host_os.$(UNAME_S).$(UNAME_M)
 # ($(filter %.c,$^)): a .c that is not here is not in the tool either, and the
 # link says so instead of a stale part going on writing.
 $(TAGFS_TOOL): tools/create_tagfs.c tools/create_tagfs_ground.c tools/create_tagfs_cargo.c \
-               tools/create_tagfs_v1.c tools/create_tagfs_v1_pack.c tools/create_tagfs_v2.c \
-               tools/create_tagfs_bind.c \
-               tools/create_tagfs.h tools/create_tagfs_v1.h tools/create_tagfs_bind.h \
+               tools/create_tagfs_v2.c tools/create_tagfs_bind.c \
+               tools/create_tagfs.h tools/create_tagfs_bind.h \
                $(SRCDIR)/include/tagfs_reserved.h \
-               $(SRCDIR)/include/volume_deed.h $(SRCDIR)/include/volume_ledger.h \
+               $(SRCDIR)/include/volume_deed.h \
                $(SRCDIR)/include/volume_book.h $(SRCDIR)/include/volume_tally.h \
                $(SRCDIR)/include/volume_digest.h \
                $(SRCDIR)/include/deed_pen.h $(SRCDIR)/include/buildplate_format.h \
@@ -1442,32 +1440,6 @@ $(TESTBIN_EMPTY):
 	@mkdir -p $(@D)
 	@: > $@
 
-# ‼ THE FORMAT THE IMAGE'S VOLUME IS MADE IN — a key of the medium, not of the
-# kernel. `make VOLUME_FORMAT=v2` lays the volume with its book bound
-# (create_tagfs --v2, spec_v2 §9.3); `make VOLUME_FORMAT=v1` lays it as format
-# v1 always has. Left out, the format is VOLUME_FORMAT_DEFAULT — the one line
-# that says which format a build makes when nobody names one; create_tagfs is
-# always told the format by name, and every gate and every scenario of the
-# Backlist names its own (tools/gates.sh --formats). The kernel is the same
-# either way — it reads the Deed and finds out — so the key is not among
-# BUILD_KEY_MARKS and recompiles nothing. But it does
-# change the image, so it has a marker of its own, on the image alone: the
-# marker's NAME carries the format, a switch names a file that is not there,
-# and the image is made again — without it, `make VOLUME_FORMAT=v2` on a built
-# tree would say nothing and leave a v1 image behind, and `make` after it a
-# v2 one.
-VOLUME_FORMAT_DEFAULT = v2
-VOLUME_FORMAT ?= $(VOLUME_FORMAT_DEFAULT)
-ifeq ($(filter v1 v2,$(VOLUME_FORMAT)),)
-$(error VOLUME_FORMAT=$(VOLUME_FORMAT): a volume is made in format v1 or format v2)
-endif
-VOLUME_FORMAT_MARK = $(BUILDDIR)/.volume_format.$(VOLUME_FORMAT)
-VOLUME_FORMAT_FLAG = --$(VOLUME_FORMAT)
-
-$(VOLUME_FORMAT_MARK): | $(BUILDDIR)
-	@rm -f $(BUILDDIR)/.volume_format.*
-	@touch $@
-
 # ‼ WHAT GOES ON THE VOLUME — named once, and asked about twice.
 #
 # The image rule asks create_tagfs --ground how far the ground must run to
@@ -1657,8 +1629,8 @@ $(call Box,$(1)): $(1) $(PACK_TOOL)
 endef
 $(foreach elf,$(VOLUME_ELFS),$(eval $(call BoxRule,$(elf))))
 
-$(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(HUB_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(PULSE_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TAGFS_TOOL) $(VOLUME_FORMAT_MARK)
-	@GROUND=$$($(TAGFS_TOOL) --ground $(VOLUME_FORMAT_FLAG) --kernel $(KERNEL_BIN) $(VOLUME_LAID)); \
+$(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(HUB_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(PULSE_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TAGFS_TOOL)
+	@GROUND=$$($(TAGFS_TOOL) --ground --kernel $(KERNEL_BIN) $(VOLUME_LAID)); \
 	ESP_RAW=$$(( ( $$(stat -f%z $(UEFI_ESP_IMG) 2>/dev/null || stat -c%s $(UEFI_ESP_IMG)) + 511 ) / 512 )); \
 	ESP=$$(( ( $$ESP_RAW + $(MEDIUM_GRAIN_SECTORS) - 1 ) / $(MEDIUM_GRAIN_SECTORS) * $(MEDIUM_GRAIN_SECTORS) )); \
 	START=$$(( $(ESP_START_SECTOR) + $$ESP )); \
@@ -1675,8 +1647,8 @@ $(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_B
 	python3 tools/make_mbr.py $@ \
 	    $$START,$$GROUND,7f,boot \
 	    $(ESP_START_SECTOR),$$ESP,ef
-	@echo "  Making the volume on it, format $(VOLUME_FORMAT)..."
-	@$(TAGFS_TOOL) $(VOLUME_FORMAT_FLAG) --kernel $(KERNEL_BIN) $@ $(VOLUME_LAID)
+	@echo "  Making the volume on it..."
+	@$(TAGFS_TOOL) --kernel $(KERNEL_BIN) $@ $(VOLUME_LAID)
 	@# ‼ AND WHAT IT WROTE IS READ BACK BEFORE ANYTHING BOOTS IT.
 	@#
 	@# volume-read is the format's second reader, written apart from the tool
@@ -1687,14 +1659,12 @@ $(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_B
 	@# .DELETE_ON_ERROR takes it.
 	@#
 	@# ‼ A NOTE COUNTS TOO. check's exit status is 0 for "consistent", and
-	@# consistent means no damage and no leak (census.py Verdict): a note is
-	@# what a mount forgives on a volume that has lived — a torn ledger copy, a
-	@# drifted count it corrects (POOL_KEPT_DRIFT, LEDGER_FREE_DRIFT). A volume
-	@# that has not lived has nothing to forgive, so on one mkfs has just made
-	@# every note is the writer's mistake: a mkfs that forgets a pool block's
-	@# kept count is a note and exit 0. The bar is the census's own last line
-	@# with all three counts zero; a line that reads otherwise — a finding, or
-	@# the census saying it in other words — fails the build and is shown.
+	@# consistent means no damage and no leak (bookcensus.py): a note is what a
+	@# mount forgives on a volume that has lived. A volume that has not lived
+	@# has nothing to forgive, so on one mkfs has just made every note is the
+	@# writer's mistake. The bar is the census's own last line with all three
+	@# counts zero; a line that reads otherwise — a finding, or the census
+	@# saying it in other words — fails the build and is shown.
 	@#
 	@# A clean volume may still be one the kernel built beside it turns away —
 	@# a format this tree writes before its kernel reads it. The census says
@@ -1709,19 +1679,17 @@ $(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_B
 	fi; \
 	printf '  %s\n' "$$LAST"; \
 	printf '%s\n' "$$VERDICT" | sed -n 's/^check: \(the kernel in this tree would NOT mount this volume: .*\)/  WARNING: \1/p'
-	@# A format-v2 volume's loader holds the kernel to the book before the jump
+	@# The loader holds the kernel to the book before the jump
 	@# (tagboot_attest.c, tagboot_succession.c). The oracle reads the image as
 	@# the loader will, so a kernel the book does not attest fails the build
 	@# here — not at the first UEFI boot of the image.
-	@if [ "$(VOLUME_FORMAT)" = v2 ]; then \
-		BOOT=$$(python3 tools/volume-read.py $@ boot 2>&1); \
-		if ! printf '%s\n' "$$BOOT" | grep -q 'is attested by the book'; then \
-			printf '%s\n' "$$BOOT"; \
-			echo "ERROR: tools/volume-read.py boot finds no kernel the book of $@ attests — TagBoot would not jump into it as made"; \
-			exit 1; \
-		fi; \
-		printf '  %s\n' "$$(printf '%s\n' "$$BOOT" | tail -1)"; \
-	fi
+	@BOOT=$$(python3 tools/volume-read.py $@ boot 2>&1); \
+	if ! printf '%s\n' "$$BOOT" | grep -q 'is attested by the book'; then \
+		printf '%s\n' "$$BOOT"; \
+		echo "ERROR: tools/volume-read.py boot finds no kernel the book of $@ attests — TagBoot would not jump into it as made"; \
+		exit 1; \
+	fi; \
+	printf '  %s\n' "$$(printf '%s\n' "$$BOOT" | tail -1)"
 	@echo "Disk image created: $(IMAGE)"
 
 # There is no floppy image and no ISO here any more.
@@ -2468,10 +2436,6 @@ info:
 	@echo "  EMU=qemu      — (default) QEMU"
 	@echo "  EMU=bochs     — Bochs (per-instruction tracing, internal debugger)"
 	@echo ""
-	@echo "Image key:"
-	@echo "  VOLUME_FORMAT=v1|v2 — the format build/boxos.img's volume is made in ($(VOLUME_FORMAT_DEFAULT) by default);"
-	@echo "                        the build says when this tree's kernel would not mount it"
-	@echo ""
 	@echo "Run flags (shared):"
 	@echo "  DEBUG=on      — enable debug output (rebuilds with CONFIG_DEBUG_ENABLED=1)"
 	@echo "  GDB=on        — QEMU: pause for gdb (-s -S); Bochs: enable gdbstub on :1234"
@@ -2494,7 +2458,7 @@ info:
 	@echo "Test-stand build keys (never in a shipped build):"
 	@echo "  SETTLECUT=<point>  — the Settle cycle of the boot's first anchor stops the machine"
 	@echo "                       at <point>, as a power cut that kept the drive's cache would:"
-	@echo "                       registry|pool|table|integrity|bitmap|ledger|flush|done|usechain"
+	@echo "                       stitch|flush|done|tally|slot|spared|undone|engross"
 	@echo "                       (not with VOLUME_TESTS=on)"
 	@echo "  SEEKLAG=<us>       — every read on the volume's seat waits <us> microseconds, a seek"
 	@echo "                       the stand's medium does not make (only with VOLUME_TESTS=on)"

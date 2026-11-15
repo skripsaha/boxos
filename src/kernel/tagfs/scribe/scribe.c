@@ -1,7 +1,6 @@
 #include "scribe.h"
 #include "../tagfs.h"
 #include "../lock_rank/lock_rank.h"
-#include "../settle/settle.h"
 #include "amp.h"
 #include "atomics.h"
 #include "baton.h"
@@ -52,23 +51,11 @@ error_t VolumeFlushFor(uint64_t need)
     return tagfs_flush_cache();
 }
 
-static volatile uint64_t g_write_need;    /* the highest need a seen write named */
 static volatile uint64_t g_writes_seen;   /* every write seen, this boot */
 
 void VolumeWriteSeen(void)
 {
     __atomic_add_fetch(&g_writes_seen, 1u, __ATOMIC_RELEASE);
-    uint64_t need = VolumeFlushNeed();
-    uint64_t cur  = __atomic_load_n(&g_write_need, __ATOMIC_RELAXED);
-    while (cur < need &&
-           !__atomic_compare_exchange_n(&g_write_need, &cur, need, false,
-                                        __ATOMIC_RELEASE, __ATOMIC_RELAXED))
-        ;
-}
-
-bool VolumeWritesKept(void)
-{
-    return VolumeFlushKept(__atomic_load_n(&g_write_need, __ATOMIC_ACQUIRE));
 }
 
 uint64_t VolumeWritesAnswered(void)
@@ -135,7 +122,7 @@ static void ScribeOrderCheck(const Scribe *s, uint8_t core)
         if (__atomic_exchange_n(&g_scribe_order_said[rank][s->rank], (uint8_t)1,
                                 __ATOMIC_ACQ_REL) == 0)
             kprintf("[Scribe] %s asked for on core %u, which holds a Scribe of rank %u — "
-                    "out of order: Scribes nest the Settle, then the registry\n",
+                    "out of order: two Scribes of one rank never nest\n",
                     s->what, (unsigned)core, (unsigned)rank);
     }
 }
@@ -361,31 +348,4 @@ bool ScribeAnyHeldHere(void)
     bool     any   = ScribeAnyHeldOn(amp_get_core_index());
     ScribeIrqRestore(flags);
     return any;
-}
-
-// ----------------------------------------------------------------------------
-// Spare
-// ----------------------------------------------------------------------------
-
-error_t SpareStamp(uint32_t magic, void *image, uint32_t *out_block, uint64_t *out_need)
-{
-    if (SettleV1OnBook("a Spare's stamp"))
-        return ERR_UNSUPPORTED;
-    uint64_t block = 0;
-    error_t  took  = magic == TAGFS_MPOOL_MAGIC ? BlockMapTakeSpare(&block, __func__)
-                                                : BlockMapTake(1, 0, &block, __func__);
-    if (took != OK)
-        return took;
-
-    memset(image, 0, TAGFS_BLOCK_SIZE);
-    memcpy(image, &magic, sizeof(magic));
-    error_t wrote = TagFSMetaBlockWrite(block, image);
-    if (wrote != OK) {
-        tagfs_free_blocks(block, 1);
-        return wrote;
-    }
-
-    *out_block = (uint32_t)block;    /* a Spare is a link of a format v1 chain: a u32 block */
-    *out_need  = VolumeFlushNeed();
-    return OK;
 }

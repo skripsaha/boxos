@@ -211,12 +211,12 @@ static TestResult TestStandBinderNodeRefused(void)
     MountBookStandSaid(&said);
     BinderStand(&bs);
     stood = said.slot;
-    free  = tagfs_get_state()->ledger.free_blocks + bs.pair_left;
+    free  = tagfs_get_state()->free_blocks + bs.pair_left;
     BlockFailArm(b.s.seat, BLOCK_FAIL_WRITE, 0, 0, 1);
     TEST_ASSERT(BinderRunWhole() != OK, "the Tally whose first node the medium refuses is refused");
     BlockFailDisarm();
     BinderStand(&bs);
-    TEST_ASSERT_EQ(tagfs_get_state()->ledger.free_blocks + bs.pair_left, free,
+    TEST_ASSERT_EQ(tagfs_get_state()->free_blocks + bs.pair_left, free,
                    "and the ground its nodes took is given back — the pair of Tally-Quires it opened kept, nodes "
                    "nobody's, for the next Tally to go on in where they began");
     TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
@@ -287,20 +287,20 @@ static bool StandBinderCut(StandBinder* b, uint32_t how, StandBinderState* befor
     MountBookStandSaid(&said);
     BinderStand(&bs);
     *stood       = said.slot;
-    *free_before = tagfs_get_state()->ledger.free_blocks + bs.pair_left;
+    *free_before = tagfs_get_state()->free_blocks + bs.pair_left;
     cut->written = bs.next_slot;
     error_t rc   = StandBinderCutRun(b, how);
     if (how == 0 ? rc != ERR_IO_CANCELLED : rc == OK || rc == ERR_BUSY)
         return false;
     BinderStand(&bs);
-    cut->free = tagfs_get_state()->ledger.free_blocks + bs.pair_left;
+    cut->free = tagfs_get_state()->free_blocks + bs.pair_left;
     cut->next = bs.next_slot;
     if (!StandStitchRemount())
         return false;
     MountBookStandSaid(&said);
     BinderStand(&bs);
     *slot       = said.slot;
-    *free_after = tagfs_get_state()->ledger.free_blocks + bs.pair_left;
+    *free_after = tagfs_get_state()->free_blocks + bs.pair_left;
     StandBinderStateOf(after);
     return true;
 }
@@ -403,17 +403,17 @@ static TestResult TestStandBinderSlotUnsure(void)
     StandBinderStateOf(&before);
     BinderStand(&bs);
     torn  = bs.next_slot;
-    free0 = tagfs_get_state()->ledger.free_blocks;
+    free0 = tagfs_get_state()->free_blocks;
     error_t rc = StandBinderCutRun(&b, 1);
     TEST_ASSERT(rc != OK && rc != ERR_BUSY, "a Tally whose slot is torn is refused");
-    free1 = tagfs_get_state()->ledger.free_blocks;
+    free1 = tagfs_get_state()->free_blocks;
     TEST_ASSERT(free1 < free0, "and the ground it took stays held: the torn slot may name it");
     TEST_ASSERT_OK(TagFSSettle(), "a stitch settles, no mount between");
     BinderStand(&bs);
     TEST_ASSERT_EQ(bs.next_slot, torn, "the slot that may name either Tally is the one written over next");
     TEST_ASSERT_OK(StandBinderTallies(1u), "a Tally is written, the lag's stitches settled past it");
     TEST_ASSERT(StandBinderNewest(&index, &seq, &tally) && index == torn, "over the torn slot");
-    TEST_ASSERT(tagfs_get_state()->ledger.free_blocks >= free1,
+    TEST_ASSERT(tagfs_get_state()->free_blocks >= free1,
                 "and its DONE gave both pairs back — the torn Tally's and what the slot held before — for the one "
                 "it took");
     TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
@@ -608,7 +608,7 @@ static TestResult TestStandBinderGroundBack(void)
         return test_steps_aside(aside);
     TEST_ASSERT(StandStitchRemount(), "the volume mounted afresh");
     TEST_ASSERT_OK(TagFSSettle(), "a stitch of this mount settles");
-    free0 = tagfs_get_state()->ledger.free_blocks;
+    free0 = tagfs_get_state()->free_blocks;
     RibbonCursorStand(&c);
     quires0 = c.quires;
     for (uint32_t k = 0; k < 6u; k++)
@@ -623,7 +623,7 @@ static TestResult TestStandBinderGroundBack(void)
             TEST_ASSERT_OK(TagFSSettle(), "and stitches settle past it");
     }
     BinderStand(&said);
-    free1 = tagfs_get_state()->ledger.free_blocks;
+    free1 = tagfs_get_state()->free_blocks;
     TestEvidence("Quires of the ribbon the slots hold after four Tallies", said.ribbon_quires);
     TestEvidence("free blocks lost to the book after the Tallies", free0 > free1 ? free0 - free1 : 0);
     TEST_ASSERT(said.ribbon_quires <= 2u, "the slots hold no more than two Quires of the ribbon");
@@ -692,7 +692,7 @@ static error_t StandBinderFill(uint64_t fid)
     TestFillAt(g_test_buffer, sizeof(g_test_buffer), 47, 0);
     while (rc == OK) {
         rc = tagfs_write(h, &src, &written);
-        uint64_t room = tagfs_get_state()->ledger.free_blocks * TAGFS_BLOCK_SIZE;
+        uint64_t room = tagfs_get_state()->free_blocks * TAGFS_BLOCK_SIZE;
         uint64_t step = room < STAND_BINDER_FILL_SAY ? STAND_BINDER_FILL_SAY_WALL : STAND_BINDER_FILL_SAY;
         if (h->file_size >= said + step) {
             said = h->file_size - h->file_size % step;
@@ -717,7 +717,7 @@ static TestResult TestStandBinderFullBack(void)
         return test_steps_aside(aside);
     TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
     uint64_t q = RibbonCursorNow()->quire_blocks;
-    free0 = tagfs_get_state()->ledger.free_blocks;
+    free0 = tagfs_get_state()->free_blocks;
     TEST_ASSERT(StandBinderMake(STAND_BINDER_BIG_FILES / 2u, &first) == TEST_PASS, "half the files are made");
     TEST_ASSERT_OK(StandBinderTallies(1u), "a Tally of them is written");
     BinderStand(&said);
@@ -726,7 +726,7 @@ static TestResult TestStandBinderFullBack(void)
     TEST_ASSERT_EQ(tagfs_create_file("bind-fill.bin", NULL, 0, &fill), 0, "a file to fill the volume is made");
     TEST_ASSERT_EQ(StandBinderFill(fill), ERR_TAGFS_NO_SPACE, "and written until the volume refuses it");
     TEST_ASSERT_OK(TagFSSettle(), "every file and every byte settled");
-    TestEvidence("free blocks the full volume keeps for the book", tagfs_get_state()->ledger.free_blocks);
+    TestEvidence("free blocks the full volume keeps for the book", tagfs_get_state()->free_blocks);
     TEST_ASSERT_OK(StandBinderTallies(3u), "the volume full, a Tally is always possible: three in a row, over the "
                    "two slots that held nothing and the one that held the Tally the volume was made with");
     BinderStand(&said);
@@ -745,7 +745,7 @@ static TestResult TestStandBinderFullBack(void)
     TEST_ASSERT_OK(SettleForRoom(), "room is asked for: the ribbon leaves the Quire the deletes lie in");
     TEST_ASSERT_OK(StandBinderTallies(4u), "and Tallies of the emptied volume are written over the whole ring");
     BinderStand(&said);
-    uint64_t free1 = tagfs_get_state()->ledger.free_blocks;
+    uint64_t free1 = tagfs_get_state()->free_blocks;
     uint64_t ring  = 6u * ((said.tally_blocks + q - 1u) / q) * q;
     TestEvidence("free blocks the book keeps past the start, the volume emptied", free0 > free1 ? free0 - free1 : 0);
     TEST_ASSERT(said.tally_blocks < big && said.ribbon_quires <= 2u,
@@ -831,31 +831,31 @@ out:
 
 static const TestCase g_stand_binder_tests[] = {
     { .name = "stand_binder_whole", .func = TestStandBinderWhole,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_binder_node_refused", .func = TestStandBinderNodeRefused,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_binder_unslotted", .func = TestStandBinderUnslotted,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_binder_slot_torn", .func = TestStandBinderSlotTorn,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_binder_slot_flush_refused", .func = TestStandBinderSlotFlushRefused,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_binder_slot_unsure", .func = TestStandBinderSlotUnsure,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_binder_parcels", .func = TestStandBinderParcels,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_binder_heals", .func = TestStandBinderHeals,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_binder_rotten_named", .func = TestStandBinderRottenNamed,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_binder_slack", .func = TestStandBinderSlack,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_binder_ground_back", .func = TestStandBinderGroundBack,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_binder_full_back", .func = TestStandBinderFullBack,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_binder_standing_end", .func = TestStandBinderStandingEnd,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_binder_suite = {

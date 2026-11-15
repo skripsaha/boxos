@@ -20,9 +20,8 @@
 //   • BraidModeWeave: 3-way mirror (maximum safety)
 //
 // ‼ EVERY BRAID IS AN INSTANCE ITS OWNER HOLDS. There is no Braid of the
-// machine: the volume's is the one its mount assembled (TagFSState.braid —
-// format v1 names none, so a v1 volume has none and no block of it is ever
-// routed here), and a test builds its own. The one there used to be was shared
+// machine: the volume's is the one its mount assembled (TagFSState.braid),
+// and a test builds its own. The one there used to be was shared
 // by the startup tests and the volume's every read and write: the tests left it
 // initialised on every boot, so every block took its lock to be told "not
 // healthy", and between a test's second disk and its removal a healthy mirror

@@ -11,8 +11,6 @@
 
 typedef struct {
     FileRecord* record;      /* the pool's newest record of the file, or NULL */
-    uint32_t    row_block;   /* the file table's row; 0 is none */
-    uint32_t    row_offset;
     RecordWhere where;       /* where the record sits, and which Ink put it there */
 } FileMapEntry;
 
@@ -540,8 +538,7 @@ void FileMapDestroy(FileMap* map)
 }
 
 error_t FileMapRecordPut(FileMap* map, uint64_t fid, FileRecord* rec,
-                         const RecordWhere* where, uint32_t row_block, FileMapStake* stake,
-                         RecordWhere* was)
+                         const RecordWhere* where, FileMapStake* stake, RecordWhere* was)
 {
     FileMapEntry* e;
     memset(was, 0, sizeof(*was));
@@ -558,10 +555,6 @@ error_t FileMapRecordPut(FileMap* map, uint64_t fid, FileRecord* rec,
     map->record_bytes += rec->bytes;
     e->record = rec;
     e->where  = *where;
-    if (row_block) {
-        e->row_block  = row_block;
-        e->row_offset = where->offset;
-    }
     TagFSLockDrop(&map->lock);
     LeftoverFree(&left);
     return OK;
@@ -589,94 +582,6 @@ FileRecord* FileMapRecordHold(FileMap* map, uint64_t fid, RecordWhere* out)
     return rec;
 }
 
-void FileMapRecordMoved(FileMap* map, uint64_t fid, uint32_t link, uint32_t block,
-                        uint32_t from, uint32_t to)
-{
-    TagFSLockTake(&map->lock);
-    FileMapEntry* e = MapFind(map, fid);
-    if (e && e->record && e->where.link == link && e->where.offset == from) {
-        e->where.offset = (uint16_t)to;
-        if (e->row_block == block && e->row_offset == from)
-            e->row_offset = to;
-    }
-    TagFSLockDrop(&map->lock);
-}
-
-bool FileMapRecordAt(FileMap* map, uint64_t fid, uint32_t link, uint32_t offset)
-{
-    TagFSLockTake(&map->lock);
-    FileMapEntry* e  = MapFind(map, fid);
-    bool          at = e && e->record && e->where.link == link && e->where.offset == offset;
-    TagFSLockDrop(&map->lock);
-    return at;
-}
-
-bool FileMapRecordRelink(FileMap* map, uint64_t fid, const RecordWhere* from,
-                         const RecordWhere* to, uint32_t to_block)
-{
-    TagFSLockTake(&map->lock);
-    FileMapEntry* e     = MapFind(map, fid);
-    bool          moved = e && e->record && e->where.link == from->link &&
-                          e->where.offset == from->offset;
-    if (moved) {
-        uint64_t shape = e->where.shape;
-        e->where       = *to;
-        e->where.shape = shape;
-        if (e->row_block) {
-            e->row_block  = to_block;
-            e->row_offset = to->offset;
-        }
-    }
-    TagFSLockDrop(&map->lock);
-    return moved;
-}
-
-error_t FileMapRowSet(FileMap* map, uint64_t fid, uint32_t block, uint32_t offset)
-{
-    if (block == 0) {
-        FileMapRowClear(map, fid);
-        return OK;
-    }
-    FileMapStake  stake = { .count = 0 };
-    FileMapEntry* e;
-    error_t       rc = MapEntryHeld(map, fid, &stake, &e);
-    if (rc == OK) {
-        e->row_block  = block;
-        e->row_offset = offset;
-        TagFSLockDrop(&map->lock);
-    }
-    FileMapStakeLetGo(&stake);
-    return rc;
-}
-
-bool FileMapRowGet(FileMap* map, uint64_t fid, uint32_t* out_block, uint32_t* out_offset)
-{
-    TagFSLockTake(&map->lock);
-    FileMapEntry* e   = MapFind(map, fid);
-    bool          row = e && e->row_block;
-    if (row) {
-        *out_block  = e->row_block;
-        *out_offset = e->row_offset;
-    }
-    TagFSLockDrop(&map->lock);
-    return row;
-}
-
-void FileMapRowClear(FileMap* map, uint64_t fid)
-{
-    FileMapLeftover left = { NULL, NULL };
-    TagFSLockTake(&map->lock);
-    FileMapEntry* e = MapFind(map, fid);
-    if (e) {
-        e->row_block  = 0;
-        e->row_offset = 0;
-        if (!e->record)
-            MapRemove(map, fid, &left);
-    }
-    TagFSLockDrop(&map->lock);
-    LeftoverFree(&left);
-}
-
 void FileMapDrop(FileMap* map, uint64_t fid, RecordWhere* was)
 {
     FileMapLeftover left = { NULL, NULL };
@@ -692,44 +597,6 @@ void FileMapDrop(FileMap* map, uint64_t fid, RecordWhere* was)
     LeftoverFree(&left);
 }
 
-/* ‼ A ROW AND A RECORD DISAGREEING ON A FILE OF FORMAT V1 IS A DEFECT OF THE
- * MAP, said with the first such file — never taken as one of the live files or
- * passed over in silence: the two predicates of a live file were one until
- * the map stopped asking the row (file_map.h, FileMapRows). */
-static void MapRowsDisagree(uint32_t odd, uint64_t fid)
-{
-#if CONFIG_STRICT
-    panic("[TagFS] DEFECT: %u file(s) of the map of live files have a row and no record, or a "
-          "record and no row — file %llu the first", odd, fid);
-#endif
-    kprintf("[TagFS] DEFECT: %u file(s) of the map of live files have a row and no record, or a "
-            "record and no row — file %llu the first; a file with a record is the one taken as "
-            "live\n", odd, fid);
-}
-
-uint32_t FileMapRows(FileMap* map, uint64_t from, uint64_t* out, uint32_t room)
-{
-    uint32_t n = 0, pos = 0, odd = 0;
-    uint64_t odd_fid = 0;
-    /* A row is format v1's alone: a format-v2 book names its files in its
-     * Tally and keeps no table, so there a record with no row is every file. */
-    bool     rows = tagfs_get_state()->format == DEED_FORMAT_V1;
-    TagFSLockTake(&map->lock);
-    for (FileMapNode* leaf = MapFrom(map, from, &pos); leaf && n < room; leaf = leaf->next, pos = 0) {
-        for (; pos < leaf->count && n < room; pos++) {
-            const FileMapEntry* e = &leaf->u.entry[pos];
-            if (rows && (e->record != NULL) != (e->row_block != 0) && odd++ == 0)
-                odd_fid = leaf->key[pos];
-            if (e->record)
-                out[n++] = leaf->key[pos];
-        }
-    }
-    TagFSLockDrop(&map->lock);
-    if (odd)
-        MapRowsDisagree(odd, odd_fid);
-    return n;
-}
-
 uint32_t FileMapFiles(FileMap* map, uint64_t from, uint64_t* out, uint32_t room)
 {
     uint32_t n = 0, pos = 0;
@@ -739,24 +606,6 @@ uint32_t FileMapFiles(FileMap* map, uint64_t from, uint64_t* out, uint32_t room)
             out[n++] = leaf->key[pos];
     TagFSLockDrop(&map->lock);
     return n;
-}
-
-void FileMapRowsInto(FileMap* map, uint64_t first, uint32_t count, FileTableEntry* out)
-{
-    uint32_t pos = 0;
-    memset(out, 0, sizeof(FileTableEntry) * count);
-    TagFSLockTake(&map->lock);
-    for (FileMapNode* leaf = MapFrom(map, first, &pos); leaf; leaf = leaf->next, pos = 0) {
-        for (; pos < leaf->count; pos++) {
-            uint64_t k = leaf->key[pos] - first;
-            if (k >= count)
-                goto done;
-            out[k].meta_block  = leaf->u.entry[pos].row_block;
-            out[k].meta_offset = leaf->u.entry[pos].row_offset;
-        }
-    }
-done:
-    TagFSLockDrop(&map->lock);
 }
 
 uint32_t FileMapCount(FileMap* map)

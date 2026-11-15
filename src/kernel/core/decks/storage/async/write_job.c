@@ -13,8 +13,8 @@
  * ‼ A WRITE IS INKED A WINDOW AT A TIME (RT-16), ON EITHER ROAD. The window is
  * the run the medium takes in one command (HelmWindowBytes), and the part of
  * it that lies in one run on the medium goes out in that one command: its
- * ground is reserved and the record's room claimed before a byte of it moves
- * (RT-19), what landed of it is inked as one record (TagFSInkPlot), and
+ * ground is reserved before a byte of it moves, what landed of it is inked as
+ * one record (TagFSInkPlot), and
  * between two windows the job gives its core back while it keeps the Helm — a
  * synchronous job is listed for the next service point (HelmReady), its caller
  * parked, an asynchronous one posts itself behind what its seat's
@@ -56,15 +56,10 @@
  * (settle.h). A flush after every write was a SYNC CACHE per fwrite and proved
  * nothing about the record, which no cycle had written.
  *
- * ‼ A SPARE IS MADE THE ASYNCHRONOUS JOB'S OWN WAY. A continuation may not
- * stand over the medium, so an Ink with no Spare to close the tail onto answers
- * ERR_WOULD_BLOCK (INK_ASKS_SPARES) and the job stamps one through the port
- * like any block of its own (W_SPARE), hands it to the pool and inks again.
- *
  * ‼ ROOM ON ITS WAY IS WAITED FOR, NEVER ANSWERED (R6). A volume short of
  * ground a Settle cycle gives back answers ERR_WOULD_BLOCK, and nothing of
- * the turn that met it is done — a window, a span, a defrag, or the Spare a
- * window's record needs. A continuation cannot wait for a cycle: the job
+ * the turn that met it is done — a window, a span, a defrag, or the room on
+ * the ribbon a window's record needs. A continuation cannot wait for a cycle: the job
  * turns synchronous, from the last window inked. The synchronous job waits
  * for the next cycle's end with its Helm held and its caller parked
  * (SettleWaitLinkCycle), and takes the same turn again at a service point
@@ -78,9 +73,8 @@
  * drain core's batons (xhci_msd.c): its answer comes in one of them — and a
  * caller standing over the same disk on the drain core pumps those batons
  * while it waits, so the job's next step, pumped there, would run beneath
- * that caller. A step that stood over the disk itself there — a page of the
- * block map or of the integrity map brought in, a gather, ground given back
- * and its sector laid on — would moor behind the very caller that pumped it,
+ * that caller. A step that stood over the disk itself there — a leaf of the
+ * Tally brought in, a gather — would moor behind the very caller that pumped it,
  * and the drain core would wait on itself for ever. So on a USB disk the job
  * goes on at a service point (HelmReady), where standing over the medium is
  * allowed, and the port carries only its blocks.

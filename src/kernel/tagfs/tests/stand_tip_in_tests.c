@@ -461,7 +461,7 @@ static TestResult TestStandTipInEmptied(void)
     TEST_ASSERT(VolumeTallyTake(&ringed), "and counted again");
     TEST_ASSERT_EQ(ringed.held, found.held, "the ring filled leaves what is in use outside the book's own ground as "
                    "it was: a Quire of the Tallies the mount read no slot names any more goes back whole (§16.5 п.17)");
-    free0 = tagfs_get_state()->ledger.free_blocks;
+    free0 = tagfs_get_state()->free_blocks;
     held0 = StandTipInHeld();
     TEST_ASSERT(held0 != UINT64_MAX, "the slots' ground counted");
     for (uint32_t i = 0; i < STAND_TIP_IN_FILLED; i++) {
@@ -494,7 +494,7 @@ static TestResult TestStandTipInEmptied(void)
     TEST_ASSERT_OK(TagFSSettle(), "every delete settled");
     TEST_ASSERT_OK(SettleForRoom(), "room is asked for: the ribbon leaves the Quire the deletes lie in");
     TEST_ASSERT_OK(StandBinderTallies(4u), "and Tallies of the emptied volume laid in over the whole ring");
-    uint64_t free1 = tagfs_get_state()->ledger.free_blocks;
+    uint64_t free1 = tagfs_get_state()->free_blocks;
     uint64_t held1 = StandTipInHeld();
     TestEvidence("free blocks before the files and after them", free0);
     TestEvidence("free blocks after the files are given up", free1);
@@ -788,25 +788,25 @@ out:
 
 static const TestCase g_stand_tip_in_tests[] = {
     { .name = "stand_tip_in_parcel", .func = TestStandTipInParcel,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_tip_in_parcels_as_they_lie", .func = TestStandTipInParcelsAsTheyLie,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_tip_in_heals_files", .func = TestStandTipInHealsFiles,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_tip_in_heals_digests", .func = TestStandTipInHealsDigests,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_tip_in_emptied", .func = TestStandTipInEmptied,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_tip_in_quires_held", .func = TestStandTipInQuiresHeld,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_tip_in_rotten_past", .func = TestStandTipInRottenPast,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_tip_in_cost_lives", .func = TestStandTipInCostLives,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_tip_in_cost_files", .func = TestStandTipInCostFiles,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_tip_in_torn_down", .func = TestStandTipInTornDown,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_tip_in_suite = {

@@ -2,8 +2,6 @@
 #include "binder.h"
 #include "../scribe/scribe.h"
 #include "../ink/ink.h"
-#include "../metadata_pool/meta_pool.h"
-#include "../integrity/integrity.h"
 #include "../helm/helm.h"
 #include "amp.h"
 #include "baton.h"
@@ -237,11 +235,11 @@ void CadenceRunEnded(error_t rc, uint64_t busy_us, uint64_t s0_us, uint64_t targ
         __atomic_store_n(&s_owed_since_us, 0, __ATOMIC_SEQ_CST);
         if (InkedGen() > target)
             __atomic_store_n(&s_owed_since_us, s0_us, __ATOMIC_SEQ_CST);
-    } else if (rc == ERR_TAGFS_NO_SPACE && tagfs_get_state()->format == DEED_FORMAT_V2) {
-        /* A book's ribbon refused what the cycle carried, and no park waits
-         * on an event for it (settle_wait.c: nothing on a book asks for
-         * room): the window starts again from here, so the cadence tries it
-         * a window on — a waiter or a demand at once — and never in a loop. */
+    } else if (rc == ERR_TAGFS_NO_SPACE) {
+        /* The ribbon refused what the cycle carried, and no park waits on an
+         * event for it (settle_wait.c: nothing asks for room): the window
+         * starts again from here, so the cadence tries it a window on — a
+         * waiter or a demand at once — and never in a loop. */
         __atomic_store_n(&s_owed_since_us, now, __ATOMIC_SEQ_CST);
     }
     CadenceWake();
@@ -260,16 +258,14 @@ static CadenceVerdict CadenceDue(bool boundary, uint64_t now, uint64_t* at_us)
 {
     uint64_t settled = SettledGen();
     bool     waiters = SettleWaitersOwed();
-    bool     closed  = PoolClosedWaiting();
     uint32_t demand  = __atomic_load_n(&s_demand, __ATOMIC_ACQUIRE);
-    bool     laying  = IntegrityLayOwed();     /* a map laid by the cycles: owed like a change */
-    bool     owed    = InkedGen() > settled || laying;
+    bool     owed    = InkedGen() > settled;
 
-    if (!owed && !waiters && !closed && !demand)
+    if (!owed && !waiters && !demand)
         return CADENCE_REST;
     if (SettleParked() || __atomic_load_n(&s_held, __ATOMIC_ACQUIRE) > 0)
         return CADENCE_REST;
-    if (waiters || closed || demand)
+    if (waiters || demand)
         return CADENCE_NOW;
 
     uint64_t since     = __atomic_load_n(&s_owed_since_us, __ATOMIC_SEQ_CST);
@@ -279,7 +275,7 @@ static CadenceVerdict CadenceDue(bool boundary, uint64_t now, uint64_t* at_us)
     if (boundary)
         return CADENCE_REST;
 
-    bool     eager  = __atomic_load_n(&s_eager_gen, __ATOMIC_ACQUIRE) > settled || laying;
+    bool     eager  = __atomic_load_n(&s_eager_gen, __ATOMIC_ACQUIRE) > settled;
     uint64_t permit = __atomic_load_n(&s_last_end_us, __ATOMIC_ACQUIRE) + SettleLullUs();
     if (eager && now >= permit)
         return CADENCE_NOW;

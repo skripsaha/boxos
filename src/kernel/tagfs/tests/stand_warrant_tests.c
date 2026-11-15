@@ -107,7 +107,7 @@ static void StandBootOnto(uint64_t block)
     if (!s_boot_moved)
         s_boot_kept = fs->boot;
     s_boot_moved           = true;
-    fs->boot.kernel_block  = (uint32_t)(fs->layout.data_block + block);
+    fs->boot.kernel_block  = (uint32_t)block;
     fs->boot.kernel_blocks = 1;
 }
 
@@ -285,7 +285,7 @@ static TestResult TestStandWarrantBootRunRefusedToBoth(void)
     TEST_ASSERT_OK(TagFSQueryPage(&key, 1, NULL, 0, 1, &kernel, 1, false, &page), "the kernel is asked for");
     TEST_ASSERT_EQ(page.delivered, 1, "and found");
     TEST_ASSERT(StandBlockOf(kernel, 0, &block) &&
-                block == fs->boot.kernel_block - fs->layout.data_block,
+                block == fs->boot.kernel_block,
                 "its first block is the one the Deed names");
     TEST_ASSERT_EQ(TestFileRead(kernel, g_test_output, TAGFS_BLOCK_SIZE), (int)TAGFS_BLOCK_SIZE,
                    "the bytes it begins with are read");
@@ -309,7 +309,7 @@ static TestResult TestStandWarrantBootRunRefusedToBoth(void)
     loaded = true;
 
     StandBootOnto(first);
-    TEST_ASSERT_EQ(PlotGather(&plot, 0, 0), ERR_PERMISSION_DENIED,
+    TEST_ASSERT_EQ(PlotGather(&plot, 0), ERR_PERMISSION_DENIED,
                    "with the Deed pointed at it, its blocks are not gathered");
     PlotRelease(&plot);
     loaded = false;
@@ -403,55 +403,6 @@ out:
 // With the role let go, the same defrag gathers the file into one run — so the
 // refusal was the file's being the system's, and nothing else.
 // ----------------------------------------------------------------------------
-
-static TestResult TestStandWarrantKeptFileNotGathered(void)
-{
-    TestResult     verdict = TEST_PASS;
-    uint64_t       file_id = 0;
-    uint64_t       wall    = 0, block = 0;
-    bool           walled  = false;
-    uint64_t       size    = 0, first = 0;
-    uint32_t       extents = 0;
-    const uint32_t B       = TAGFS_BLOCK_SIZE;
-    const char*    aside   = StandStepsAsideFor();
-
-    if (aside)
-        return test_steps_aside(aside);
-
-    TestFillAt(g_test_buffer, 2 * B, 0x3A770400u, 0);
-    TEST_ASSERT(StandMakeFile("stand_warrant_g", g_test_buffer, B, &file_id),
-                "a one-block file of the test's own");
-    TEST_ASSERT(StandBlockOf(file_id, 0, &block), "its block is found");
-    TEST_ASSERT_OK(BlockMapTake(1, block + 1, &wall, __func__), "a block is taken beside it");
-    walled = true;
-    TEST_ASSERT_EQ(StandWriteAt(file_id, B, g_test_buffer + B, B), (int)B,
-                   "the file grows by a block");
-    TEST_ASSERT(StandShape(file_id, &size, &extents, &first) && extents == 2,
-                "and lies in two runs");
-    TEST_ASSERT_OK(StandKeepInRole(file_id, TAGFS_FILE_ROLE_SYSTEM), "it is kept in the system's role");
-
-    TEST_ASSERT_EQ(StandWarrantJob(WRITE_JOB_DEFRAG, file_id, INK_UNWARRANTED, NULL, 0, 0),
-                   ERR_PERMISSION_DENIED, "a defrag with no warrant is refused");
-    TEST_ASSERT_EQ(StandWarrantJob(WRITE_JOB_DEFRAG, file_id, INK_WARRANTED, NULL, 0, 0),
-                   ERR_PERMISSION_DENIED, "and one with the warrant: its blocks are not moved");
-    TEST_ASSERT(StandShape(file_id, &size, &extents, &first) && extents == 2 && first == block,
-                "the file lies where it lay");
-
-    TEST_ASSERT_OK(StandKeepInRole(file_id, TAGFS_FILE_ROLE_ORDINARY), "the role is let go");
-    TEST_ASSERT_OK(StandWarrantJob(WRITE_JOB_DEFRAG, file_id, INK_UNWARRANTED, NULL, 0, 0),
-                   "and the same defrag is taken");
-    TEST_ASSERT(StandShape(file_id, &size, &extents, &first) && extents == 1,
-                "the file lies in one run");
-    TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, 2 * B), (int)(2 * B), "it reads back");
-    TEST_ASSERT_EQ(TestFirstDifference(g_test_output, g_test_buffer, 2 * B), 2 * B,
-                   "whole, where it lies now");
-out:
-    if (walled)
-        (void)tagfs_free_blocks(wall, 1);
-    if (file_id)
-        tagfs_delete_file(file_id, INK_WARRANTED);
-    return verdict;
-}
 
 // ----------------------------------------------------------------------------
 // The deck reads the warrant off the cabin
@@ -573,9 +524,6 @@ static const TestCase g_stand_warrant_tests[] = {
       .func  = TestStandWarrantBootRunRefusedToBoth, .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_warrant_refused_before_memory",
       .func  = TestStandWarrantRefusedBeforeMemory, .reach = TEST_WRITES_TO_VOLUME },
-    { .name  = "stand_warrant_kept_file_not_gathered",
-      .func  = TestStandWarrantKeptFileNotGathered, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V1, .analog = "stand_book_room_kept_file_not_gathered" },
     { .name  = "stand_warrant_deck_reads_the_cabin", .func = TestStandWarrantDeckReadsTheCabin,
       .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_warrant_any_tag_put_on", .func = TestStandWarrantAnyTagPutOn,

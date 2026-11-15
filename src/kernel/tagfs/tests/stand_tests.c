@@ -68,8 +68,7 @@ error_t StandKeepInRole(uint64_t file_id, uint32_t role)
     InkReceipt receipt;
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc = tagfs_get_state()->format == DEED_FORMAT_V2 ? EngrossRoled(file_id, role, &receipt)
-                                                      : InkRoleLaid(file_id, role, &receipt);
+    error_t rc = EngrossRoled(file_id, role, &receipt);
     tagfs_leave();
     return rc;
 }
@@ -79,7 +78,7 @@ bool StandKeptFile(uint64_t* out_file_id)
     TagFSState* fs   = tagfs_get_state();
     uint64_t    from = 0, ids[16];
     uint32_t    n;
-    while ((n = FileMapRows(fs->files, from, ids, 16)) > 0) {
+    while ((n = FileMapFiles(fs->files, from, ids, 16)) > 0) {
         for (uint32_t i = 0; i < n; i++) {
             FileRecord* rec  = FileMapRecordHold(fs->files, ids[i], NULL);
             bool        kept = rec && rec->blocks && InkFileKept(rec->flags);
@@ -127,9 +126,7 @@ void StandBlockFailRaced(const char* suite)
 
 bool StandBlockInUse(uint64_t block)
 {
-    if (tagfs_get_state()->format == DEED_FORMAT_V2)
-        return !BlockMapDerivedIsFree(block);
-    return BlockMapIsTaken(block);
+    return !BlockMapDerivedIsFree(block);
 }
 
 /* Room for the widest params a program lays: a write's, a ferry's waybill after it. */
@@ -895,15 +892,6 @@ static const TestCase g_stand_tests[] = {
       .caveat_defect = "a create whose allocation is refused can answer OK and leave the "
                        "file out of its name's index, or leave a deleted file findable "
                        "by its name" },
-    { .name  = "stand_sync_owns_a_refused_write", .func = TestStandSyncOwnsARefusedWrite,
-      .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_defect = "a sync whose file-table write the medium refuses still writes "
-                       "the ledger and answers OK",
-      .format = DEED_FORMAT_V1, .analog = "stand_fresh_refused_names_nothing" },
-    { .name  = "stand_sync_owns_a_refused_flush", .func = TestStandSyncOwnsARefusedFlush,
-      .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_defect = "a sync whose cache flush the medium refuses still answers OK",
-      .format = DEED_FORMAT_V1, .analog = "stand_stitch_retry_flush" },
     { .name  = "stand_write_returns_its_ground", .func = TestStandWriteReturnsItsGround,
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a write whose metadata commit cannot get memory answers -1 and "
@@ -924,12 +912,6 @@ static const TestCase g_stand_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "an open whose open-file entry cannot get memory succeeds without "
                        "one, so its writes are serialised with nobody's" },
-    { .name  = "stand_frozen_block_freed_twice", .func = TestStandFrozenBlockFreedTwice,
-      .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_defect = "deleting a file whose block a snapshot still keeps gives the "
-                       "block back, and deleting the snapshot gives it back again, so "
-                       "the allocator counts it free twice",
-      .format = DEED_FORMAT_V1, .analog = "stand_tally_map_claim_named" },
 };
 
 const TestSuite g_stand_suite = {

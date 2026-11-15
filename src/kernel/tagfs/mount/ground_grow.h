@@ -1,15 +1,15 @@
 #ifndef TAGFS_MOUNT_GROUND_GROW_H
 #define TAGFS_MOUNT_GROUND_GROW_H
 
-#include "mount.h"
+#include "../tagfs.h"
+#include "../deed/deed.h"
 #include "deed_pen.h"
 
 /*
- * A volume taking the ground behind it — the part both formats share
- * (ground_grow.c). Format v1's growth stands on its bitmap and its LAYOUT
- * (ground_v1.c, volume_take_more_ground), a book's on its census and its
- * derived block map (book_grow.c, MountBookGrow); the questions asked of the
- * medium and the order the two copies of the Deed are written in are these.
+ * A volume taking the ground behind it — the medium's part (ground_grow.c).
+ * The growth stands on the census and the derived block map (book_grow.c,
+ * MountBookGrow); the questions asked of the medium and the order the two
+ * copies of the Deed are written in are these.
  *
  * ‼ THE ORDER IS THE CRASH SAFETY, and there is nothing else protecting it:
  * the far copy at the new end, read back; then the head, which is the commit.
@@ -32,10 +32,9 @@ bool GroundGrowDeedsWritten(uint8_t seat, DeedCopy *head, DeedPen *pen, const ui
                             uint64_t new_sectors, uint64_t new_tail);
 
 /* The far copy the growth left behind, inside the data run now: erased by
- * `blank`, DEED_PEN_BYTES of the caller's, and said either way. A NULL
- * `blank` erases nothing and says nothing — format v1's way when memory gave
- * no buffer, kept as it was; a book takes its buffer before the growth
- * commits, and grows not at all without it (book_grow.c). */
+ * `blank`, DEED_PEN_BYTES of the caller's, and said either way. The caller
+ * takes its buffer before the growth commits, and grows not at all without it
+ * (book_grow.c). */
 void GroundGrowOldTailErased(uint8_t seat, uint64_t old_tail, uint8_t *blank);
 
 #endif /* TAGFS_MOUNT_GROUND_GROW_H */

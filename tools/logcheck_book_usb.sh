@@ -1,6 +1,6 @@
 # logcheck_book_usb — the book's third road for tools/logcheck.sh: the startup
 # tests that write, on a format-v2 volume on a USB stick (stand_book, and
-# standusb with VOLUME_FORMAT=v2).
+# standusb).
 #
 # SOURCED, NEVER RUN — by logcheck.sh, after logcheck_book.sh, whose judge of
 # a book's boot (stand_book_judge) and numbers it uses; latearrival_on, the
@@ -13,16 +13,16 @@
 # and every test of the book writes through it — one command at a time, each
 # step a baton on the drain core, the flush answered with sense. Judged as the
 # book's other roads (stand_book_judge), its reads through the port; `again`,
-# the stick the boot left is booted once more and held as standusb holds a
-# second boot (stand_again): the suite ran again and nothing failed.
+# the stick the boot left is booted once more and held as a second boot
+# (stand_book_again): the suite ran again and nothing failed.
 stand_book_usb() {
     local boot="$SCRATCH/stand.book_usb.boot.img" stick="$SCRATCH/stand.book_usb.stick.img" rc extra booted
     rm -f "$boot" "$stick" "$SCRATCH"/serial.stand_book_usb.log "$SCRATCH"/serial.stand_book_usb_again.log build/boxos.img
     latearrival_on
-    if ! STAND_FORMAT=v2 build_with_key VOLUME_TESTS=on STRICT=off; then
-        echo "BUILD FAILED (VOLUME_TESTS=on VOLUME_FORMAT=v2, the internal disk declared not this machine's) — tail:"
+    if ! build_with_key VOLUME_TESTS=on STRICT=off; then
+        echo "BUILD FAILED (VOLUME_TESTS=on, the internal disk declared not this machine's) — tail:"
         tail -25 "$SCRATCH/build.log"
-        bad "stand: the book on a USB stick — VOLUME_TESTS=on VOLUME_FORMAT=v2 does not build"
+        bad "stand: the book on a USB stick — VOLUME_TESTS=on does not build"
         latearrival_off
         return
     fi
@@ -33,7 +33,7 @@ stand_book_usb() {
     fi
     booted=$(stand_book_census "$stick")
     extra="-drive if=none,id=stick,file=$stick,format=raw -device usb-storage,bus=xhci1.0,drive=stick,id=usbstick"
-    STAND_FORMAT=v2 stand_boot stand_book_usb BOOTDISK="$boot" USB=on CORES=4 MEM=4G QEMUEXTRA="$extra"; rc=$?
+    stand_boot stand_book_usb BOOTDISK="$boot" USB=on CORES=4 MEM=4G QEMUEXTRA="$extra"; rc=$?
     if [ "$rc" != 2 ]; then
         stand_book_judge stand_book_usb "the book on a USB stick, BIOS 4c" "$STAND_BOOK_USB_BLOCKFAILS" \
             "" taken "$stick" "$booted"
@@ -42,7 +42,7 @@ stand_book_usb() {
         chk $? "stand: the book on a USB stick — the writes' road is the stick's seat: $(grep -aoE 'go through seat [0-9]+ \([^)]*\)' "$SCRATCH/serial.stand_book_usb.log" | head -1)"
     fi
     if [ "${1:-}" = again ] && [ "$rc" = 0 ]; then
-        STAND_FORMAT=v2 stand_boot stand_book_usb_again BOOTDISK="$boot" USB=on CORES=4 MEM=4G QEMUEXTRA="$extra"
+        stand_boot stand_book_usb_again BOOTDISK="$boot" USB=on CORES=4 MEM=4G QEMUEXTRA="$extra"
         [ $? = 2 ] || stand_book_again stand_book_usb_again "the book on a USB stick, BIOS 4c"
     elif [ "${1:-}" = again ]; then
         bad "stand: the book on a USB stick, second boot — not judged: the first boot never said its halt's sync wrote the stick"
@@ -61,5 +61,5 @@ stand_book_again() {
     ! grep -aq 'KERNEL PANIC' "$L" && [ -z "$(stand_book_defects "$L")" ]
     chk $? "stand: $2, second boot — no panic, no defect of TagFS said but the one each lever of the stand draws ($(stand_book_defects "$L" | head -1 | cut -c1-120))"
     ! grep -aqE "$STAND_MIRROR_DEFECT" "$L"
-    chk $? "stand: $2, second boot — every live file of the map stood as its record"
+    chk $? "stand: $2, second boot — every record memory held named its runs, and every Tract stood within its fill"
 }

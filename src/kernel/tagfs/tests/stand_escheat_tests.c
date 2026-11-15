@@ -565,19 +565,19 @@ out:
 
 static const TestCase g_stand_escheat_tests[] = {
     { .name = "stand_escheat_warrant", .func = TestStandEscheatWarrant,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_escheat_tail", .func = TestStandEscheatTail,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_escheat_tail_helm_held", .func = TestStandEscheatTailHelmHeld,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_escheat_remounted", .func = TestStandEscheatRemounted,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_escheat_on_edge", .func = TestStandEscheatOnEdge,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_escheat_retried", .func = TestStandEscheatRetried,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_escheat_windows", .func = TestStandEscheatWindows,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_escheat_suite = {

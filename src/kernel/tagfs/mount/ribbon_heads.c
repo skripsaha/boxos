@@ -10,7 +10,7 @@
  * ends by its `of` (rule (а)) or at the start of the next_quire, naming the
  * Quire the last one ended in as the one it came from (rule (б)); on through
  * each next_quire a StitchHead names, the walk bounded by the data run's
- * length (meta_pool_mount.c:478-480). Nothing past a stitch's first sector is
+ * length. Nothing past a stitch's first sector is
  * read, nothing of a stitch is held past its step, and nothing is said.
  *
  * ‼ A HEAD IS NOT A STITCH. What reads of a StitchHead is its seq, the stitch

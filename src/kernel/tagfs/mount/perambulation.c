@@ -13,7 +13,7 @@
  * what this kernel left on it. Every read here is the Boardroom's, of `seat`
  * from `base`; a refusal of one leaves no verdict standing (s_refused): the
  * caller sees the seat refuse and keeps the book open until it answers again
- * (tagfs.c, TagFSVolumeReturned), as format v1's judge is kept.
+ * (tagfs.c, TagFSVolumeReturned).
  */
 
 #define PERAMBULATION_RUN 256u     /* sectors a read of the scan takes at once */

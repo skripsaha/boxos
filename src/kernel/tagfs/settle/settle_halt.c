@@ -5,8 +5,8 @@
 
 /*
  * The machine stopping (settle.h): the shut that lets no change begin, and
- * the halt's last cycles — format v1's until no ground rests, a book's until
- * every Ink settled, its last stitch saying CLEAN (§16.2 п.9).
+ * the halt's last cycles — until every Ink settled, the last stitch saying
+ * CLEAN (§16.2 п.9).
  */
 
 /* The halt's last cycle, for tagfs_shutdown. */
@@ -31,46 +31,18 @@ error_t SettleHaltAnswer(uint64_t* unsettled)
     return s_halt_ran ? s_halt_answer : ERR_TAGFS_METADATA_ERROR;
 }
 
-/* Whether the halt still owes the volume ground at rest: blocks Fallow holds
- * that the map still writes taken, or blocks the last cycle gave back that no
- * cycle has written the map of. */
-static bool SettleHaltOwesGround(void)
-{
-    TagFSState* fs = tagfs_get_state();
-    TagFSLockTake(&fs->lock);
-    bool resting = FallowBlocksMapTaken() > 0;
-    TagFSLockDrop(&fs->lock);
-    return resting || SettleGivenLast() > 0;
-}
-
 /*
- * ‼ NO CLEAN SHUTDOWN LEAVES GROUND AT REST. A block in Fallow is taken on the
- * medium and named by nothing, and the next mount's roll call keeps such a
- * block taken for good. So the last cycle is followed by the ones Fallow's
- * rule asks for — each settles, so both copies of the Ledger move past the
- * records that freed the ground — and by one more that writes the map giving
- * it back. Ground only an open handle still holds is written free by that one
- * too, and stays out of the allocator's hands while the handle reads it
- * (FallowViewedUnnamed). A Ledger freer the last cycle itself made — the Use
- * Context chain it replaced — is named by the next cycle's image and rests
- * FallowLag() cycles from there: at most 1 + 1 + FallowLag() + 1, fewer when
- * nothing rests.
- *
- * A book keeps no map on the medium, and a mount derives its ground from the
- * names alone (spec_v2 §4.6): nothing rests that a halt must write free. Its
- * cycles go on while an Ink is unsettled — one begun before the shut may be
- * inked while the first runs — each stitch CLEAN when no change is in flight
- * under it (HelmOwed), and the next mount reads the last one CLEAN.
+ * ‼ THE LAST STITCH IS CLEAN, AND NOTHING RESTS THAT A HALT MUST WRITE FREE.
+ * The book keeps no map on the medium, and a mount derives its ground from
+ * the names alone (spec_v2 §4.6). The cycles go on while an Ink is unsettled
+ * — one begun before the shut may be inked while the first runs — each stitch
+ * CLEAN when no change is in flight under it (HelmOwed), and the next mount
+ * reads the last one CLEAN.
  */
 static error_t SettleHaltCycles(void)
 {
     error_t rc = SettleAskedFor(SETTLE_FOR_HALT);
-    if (tagfs_get_state()->format == DEED_FORMAT_V2) {
-        for (uint64_t more = 0; rc == OK && more <= FallowLag() + 1u && InkedGen() > SettledGen(); more++)
-            rc = SettleAskedFor(SETTLE_FOR_HALT);
-        return rc;
-    }
-    for (uint64_t more = 0; rc == OK && more <= FallowLag() + 1u && SettleHaltOwesGround(); more++)
+    for (uint64_t more = 0; rc == OK && more <= FallowLag() + 1u && InkedGen() > SettledGen(); more++)
         rc = SettleAskedFor(SETTLE_FOR_HALT);
     return rc;
 }

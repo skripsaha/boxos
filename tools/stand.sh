@@ -75,32 +75,12 @@ chk()  { if [ "$1" = 0 ]; then ok "$2"; else bad "$2"; fi }
 # here is stamped exactly as `make` alone would stamp it. The verdict comes from
 # what the tree CONTAINS, never from this key. And it waits for the last
 # mutation stamp to pass first (mut_bump, below says why).
-#
-# STAND_FORMAT (v1 or v2) is the format of the volume every image is made in,
-# handed to make as its key (VOLUME_FORMAT, Makefile) by this one wrapper for
-# the same reason: a build and the run-bg after it that disagree about it pack
-# the image again between them. Unset, the Makefile's own default; a word on
-# the command line says otherwise for that one call.
 make() {
     mut_stamp_passed
     case " $* " in
         *" run-bg "*) strict_agrees "$@" || return 1 ;;
     esac
-    command make HARNESS=on ${STAND_FORMAT:+VOLUME_FORMAT=$STAND_FORMAT} "$@"
-}
-
-# stand_format — the format this run's volumes are made in: VOLUME_FORMAT when
-# the caller names one, else the one the Makefile makes when nobody does
-# (VOLUME_FORMAT_DEFAULT) — read from the Makefile, never written here, so a
-# scenario that asks the format and the make that builds its image can never
-# answer two formats: the default moves in one line, and a harness that kept a
-# default of its own would go on judging the other format's oracles over it.
-stand_format() {
-    if [ -n "${VOLUME_FORMAT:-}" ]; then
-        echo "$VOLUME_FORMAT"
-    else
-        sed -n 's/^VOLUME_FORMAT_DEFAULT = //p' "$ROOT/Makefile"
-    fi
+    command make HARNESS=on "$@"
 }
 
 # ===========================================================================
@@ -860,12 +840,12 @@ harness() {
 . "$ROOT/tools/stand_typer.sh"
 
 # The sixteen bytes themselves, read off a raw image, so a claim about which
-# volume something is stops being an assumption — read by the format's own
+# volume something is stops being an assumption — read by the volume's own
 # reader on the host (tools/volumeread): the ground the partition table names
 # and whose first sector is a Deed, the Deed checked whole against its own
-# checksum, and its identity. Of either format: the prologue is the same in
-# both. Says nothing and fails when there is no readable Deed there, which is
-# the honest answer for a copy that came out short or torn.
+# checksum, and its identity. Says nothing and fails when there is no readable
+# Deed there, which is the honest answer for a copy that came out short or
+# torn.
 deed_uuid() {
     python3 - "$1" <<'PY'
 import sys

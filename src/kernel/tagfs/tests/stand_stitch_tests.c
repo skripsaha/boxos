@@ -75,8 +75,6 @@ void StandStitchAnswered(SettleWaiter* w, error_t rc)
  */
 const char* StandStitchAside(StandStitch* s)
 {
-    if (tagfs_get_state()->format != DEED_FORMAT_V2)
-        return "the volume is not format v2: there is no ribbon to sew";
     const char* aside = StandStepsAsideFor();
     if (aside)
         return aside;
@@ -408,7 +406,7 @@ static TestResult TestStandStitchCoined(void)
     TEST_ASSERT_EQ(TagRegistryLookup(reg, &tag), TAGFS_INVALID_TAG_ID, "the volume does not know it");
     TEST_ASSERT_OK(TagRegistryIntern(reg, &tag, &tid), "it is given an id");
     BlockFailArm(s.seat, BLOCK_FAIL_WRITE, 0, 0, BLOCK_FAIL_NEVER);
-    TEST_ASSERT_OK(TagRegistryFlushFor(reg, tid), "the id is the registry's at once");
+    TEST_ASSERT_OK(TagRegistryIdGiven(reg, tid), "the id is the registry's at once");
     TEST_ASSERT_EQ(BlockFailSeen(), 0, "with not one write: a book's registry is laid down by the cycle");
     BlockFailDisarm();
     TEST_ASSERT_OK(TagFSSettle(), "a cycle settles");
@@ -692,7 +690,7 @@ static TestResult TestStandStitchRibbonRunsOut(void)
     memset(&waiter, 0, sizeof(waiter));
     uint64_t keep = EndpaperKeeps(s.at.quire_blocks);
     TEST_ASSERT(keep >= 2u * s.at.quire_blocks, "the Tally's reserve is two copies of at least one Quire");
-    TEST_ASSERT(fs->ledger.free_blocks > keep + s.at.quire_blocks, "the volume has more than that free");
+    TEST_ASSERT(fs->free_blocks > keep + s.at.quire_blocks, "the volume has more than that free");
     TEST_ASSERT(BlockMapDerivedStandShrink(keep + s.at.quire_blocks), "its free ground is cut to one Quire past it");
     held = true;
     for (; rc == OK && k < 10u + 3u * s.at.quire_blocks; k++)
@@ -718,7 +716,7 @@ static TestResult TestStandStitchRibbonRunsOut(void)
     TEST_ASSERT(waiter.answered && waiter.rc == OK, "and the waiter is answered");
     TEST_ASSERT(UseMemoryRefused(ticket), "the word is refused: no claim held room for it, and none comes");
     TEST_ASSERT(!now.next.blocks, "the ribbon names no next_quire");
-    TEST_ASSERT(fs->ledger.free_blocks >= keep, "and the ground a Tally needs is left free");
+    TEST_ASSERT(fs->free_blocks >= keep, "and the ground a Tally needs is left free");
     memory = tagfs_recall_use_context(NULL);
     rc     = StandStitchSay(memory ? memory->text : NULL, memory ? memory->bytes : 0, k + 1u, &kept);
     UseTextDrop(memory);
@@ -870,7 +868,7 @@ static TestResult TestStandStitchReplugKept(void)
     SettleWaitLinkCycle(&waiter.w, StandStitchAnswered);
     TagFSStandMediumLeaves();
     away = true;
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_AS_LEFT, "the medium leaves and comes back as it was left: "
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_AS_LEFT, "the medium leaves and comes back as it was left: "
                    "its book is taken up");
     away = false;
     TEST_ASSERT(!waiter.answered, "the word's waiter is told nothing yet: no change is lost");
@@ -884,7 +882,7 @@ out:
     UseTextDrop(t);
     UseTextDrop(before);
     if (away)
-        (void)TagFSStandMediumReturns(NULL);
+        (void)TagFSStandMediumReturns();
     if (!waiter.answered)
         (void)SettleWaitUnlink(&waiter.w);
     STAND_STITCH_PUT_BACK(&s);
@@ -929,31 +927,31 @@ out:
 
 static const TestCase g_stand_stitch_tests[] = {
     { .name = "stand_stitch_answers_after_flush", .func = TestStandStitchAnswersAfterFlush,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_stitch_use_context", .func = TestStandStitchUseContext,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_stitch_use_forgotten", .func = TestStandStitchUseForgotten,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_stitch_use_later_word_stands", .func = TestStandStitchUseLaterWordStands,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_stitch_coined", .func = TestStandStitchCoined,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_stitch_halt_clean", .func = TestStandStitchHaltClean,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_stitch_retry_atom", .func = TestStandStitchRetryAtom,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_stitch_retry_flush", .func = TestStandStitchRetryFlush,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_stitch_refused_everywhere", .func = TestStandStitchRefusedEverywhere,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_stitch_ribbon_runs_out", .func = TestStandStitchRibbonRunsOut,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_stitch_tally_cost", .func = TestStandStitchTallyCost,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_stitch_medium_lied", .func = TestStandStitchMediumLied,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_stitch_replug_kept", .func = TestStandStitchReplugKept,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_blockfail_refused_writes", .func = TestStandBlockFailRefusedWrites,
       .reach = TEST_READS_ONLY },
 };

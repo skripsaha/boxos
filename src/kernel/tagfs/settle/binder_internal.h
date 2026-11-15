@@ -234,6 +234,13 @@ error_t     BinderRotsTaken(BinderRun* r);
 error_t     BinderFreshGround(BinderRun* r);
 error_t     BinderTallyDone(BinderRun* r);
 
+/* ‼ GLEAN_SLACK IS A POLICY, NOT A DERIVATION. How many times the blocks of
+ * the live nodes the Tally-Quires may come to before Glean has the emptiest
+ * laid again: a point on the curve between a mount's time — which reads every
+ * Quire a slot names — and the write amplification every node laid again
+ * adds. Measured for, not argued (the stand, stand_book_glean_tests.c). */
+#define GLEAN_SLACK  2u
+
 /* binder_glean.c: Glean of the Tally-Quires at a Tally's DONE (§4.8) — the
  * emptiest Quire the new slot names a node in outside the pair, its nodes to
  * be laid again by the next Tally, once they come to GLEAN_SLACK times the

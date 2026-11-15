@@ -33,7 +33,7 @@ static bool StandCostGround(uint64_t lo, uint64_t hi)
 {
     FileMap* map = tagfs_get_state()->files;
     uint64_t fid = 0;
-    for (uint64_t from = 0; FileMapRows(map, from, &fid, 1) == 1; from = fid + 1u) {
+    for (uint64_t from = 0; FileMapFiles(map, from, &fid, 1) == 1; from = fid + 1u) {
         FileRecord* rec = FileMapRecordHold(map, fid, NULL);
         StripWalk   w;
         Strip       s;
@@ -57,7 +57,7 @@ static bool StandCostFiles(const TallyKey* lo, const TallyKey* hi)
 {
     FileMap* map = tagfs_get_state()->files;
     uint64_t fid = 0;
-    for (uint64_t from = lo ? lo->k1 : 0; FileMapRows(map, from, &fid, 1) == 1; from = fid + 1u) {
+    for (uint64_t from = lo ? lo->k1 : 0; FileMapFiles(map, from, &fid, 1) == 1; from = fid + 1u) {
         TallyKey head = { fid, 0 };
         if (hi && !TipInKeyLess(TALLY_FILES, head, *hi))
             return lo && lo->k1 == fid && lo->k2 > 0;

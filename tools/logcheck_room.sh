@@ -4,7 +4,7 @@
 # judge turned by a write that waits on no Tally (roombackmut).
 #
 # SOURCED, NEVER RUN — by logcheck.sh; ok, bad, chk, harness, build, mutate,
-# mut_done, restore, stand_format and SCRATCH are stand.sh's, fullvolume_leg,
+# mut_done, restore and SCRATCH are stand.sh's, fullvolume_leg,
 # FULLVOLUME_STRETCH and FULLVOLUME_MIB logcheck.sh's. Its own file for the
 # reason logcheck_mkfs.sh has one: logcheck.sh is twelve thousand lines.
 
@@ -135,8 +135,7 @@ fullvolume_roomback_book() {
 # fill at the first wall, whose refusal says the reserve measured from above
 # with no Tally waited for, and the GiB after the delete wherever the fill's
 # wall left it no margin — the very kernel §16.6 п.8 put the wait in, whose
-# GiB came 1280 blocks short of a volume that had them. A book's case: format
-# v1 has no Tally to wait on, and stands it down.
+# GiB came 1280 blocks short of a volume that had them.
 roomback_wait_on() {
     mutate src/kernel/tagfs/settle/binder.c
     python3 - <<'EOF'
@@ -153,10 +152,6 @@ EOF
 run_roombackmut() {
     echo "== roombackmut: a write at a full book's wall that waits on no Tally turns roomback's judge =="
     local L="$SCRATCH/serial.fullvolume.room.log" verdict
-    if [ "$(stand_format)" != v2 ]; then
-        ok "roombackmut: a book's case, and the image is format $(stand_format) — stood down"
-        return
-    fi
     roomback_wait_on
     build STRICT=on
     fullvolume_leg room "$FULLVOLUME_STRETCH" "quilltest roomback $FULLVOLUME_MIB" roomback

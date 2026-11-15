@@ -35,7 +35,7 @@
 // handle's view being no room a cycle brings; a stitch the kernel sewed, a
 // sector of it unreadable, is closed and damaged at the next mount; and a
 // medium that leaves and comes back loses the file no stitch settled; the
-// warrant guards a book's files as format v1's. Every test puts the ribbon
+// warrant guards a book's files. Every test puts the ribbon
 // back as it found it (stand_stitch.h) — and one whose wait for room may be
 // answered by a Tally the Spine's ring and the ground its slots hold too
 // (stand_binder.h): the Tally a wait writes is laid over a slot, which no
@@ -68,7 +68,7 @@ static bool StandDocketPlainFile(uint64_t* fid)
     TagFSState* fs   = tagfs_get_state();
     uint64_t    from = 0, ids[16];
     uint32_t    n;
-    while ((n = FileMapRows(fs->files, from, ids, 16)) > 0) {
+    while ((n = FileMapFiles(fs->files, from, ids, 16)) > 0) {
         for (uint32_t i = 0; i < n; i++) {
             FileRecord* rec   = FileMapRecordHold(fs->files, ids[i], NULL);
             bool        plain = rec && rec->blocks && !InkRecordTouchesBoot(rec) &&
@@ -333,13 +333,13 @@ static TestResult TestStandDocketGroundRests(void)
                 "its ground rests: the stitch that gave it up lies in a Quire the ribbon has not left");
     RibbonCursor was, now;
     RibbonCursorStand(&was);
-    uint64_t free = fs->ledger.free_blocks, rested = FallowBlocks();
+    uint64_t free = fs->free_blocks, rested = FallowBlocks();
     TEST_ASSERT_OK(StandDocketRoom(), "room is asked for");
     RibbonCursorStand(&now);
     TEST_ASSERT(RibbonQuireSame(&now.quire, &was.next) && now.sewn.off == 0,
                 "and the Quire is closed early: the ribbon went on at the start of its next_quire");
     uint64_t taken = now.next.blocks && !RibbonQuireSame(&now.next, &was.next) ? now.next.blocks : 0;
-    TEST_ASSERT(BlockMapDerivedIsFree(first) && fs->ledger.free_blocks + taken == free + rested,
+    TEST_ASSERT(BlockMapDerivedIsFree(first) && fs->free_blocks + taken == free + rested,
                 "the file's ground is free once the lag's stitches settled past it there — all of it, and all "
                 "else the Quire's stitches let go before the test, less the next_quire the ribbon was given in "
                 "the new Quire");
@@ -745,7 +745,7 @@ static TestResult TestStandDocketReplugKept(void)
     SettleWaitLink(&waiter.w, InkedGen(), StandStitchAnswered);
     TagFSStandMediumLeaves();
     away = true;
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_AS_LEFT, "the medium leaves and comes back as it was left: "
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_AS_LEFT, "the medium leaves and comes back as it was left: "
                    "its book is taken up, the file's bytes read back as written");
     away = false;
     TEST_ASSERT(!waiter.answered, "the file's waiter is told nothing yet: no change is lost");
@@ -755,7 +755,7 @@ static TestResult TestStandDocketReplugKept(void)
     TEST_ASSERT(StandDocketLive(fid) && StandBlockOf(fid, 1, &block), "and holds the file, both its blocks");
 out:
     if (away)
-        (void)TagFSStandMediumReturns(NULL);
+        (void)TagFSStandMediumReturns();
     if (!waiter.answered)
         (void)SettleWaitUnlink(&waiter.w);
     STAND_STITCH_PUT_BACK(&s);
@@ -763,7 +763,7 @@ out:
 }
 
 // ----------------------------------------------------------------------------
-// The warrant guards a book's files as it guards format v1's (RT-09)
+// The warrant guards a book's files (RT-09)
 // ----------------------------------------------------------------------------
 
 /* A file the maker laid on the book wearing a tag the system keeps: *fid. */
@@ -772,7 +772,7 @@ static bool StandDocketGuardedFile(uint64_t* fid)
     TagFSState* fs   = tagfs_get_state();
     uint64_t    from = 0, ids[16];
     uint32_t    n;
-    while ((n = FileMapRows(fs->files, from, ids, 16)) > 0) {
+    while ((n = FileMapFiles(fs->files, from, ids, 16)) > 0) {
         for (uint32_t i = 0; i < n; i++) {
             FileRecord* rec     = FileMapRecordHold(fs->files, ids[i], NULL);
             bool        guarded = rec && InkFileKept(rec->flags);
@@ -815,33 +815,33 @@ out:
 
 static const TestCase g_stand_docket_tests[] = {
     { .name = "stand_docket_each_change_mounts_again", .func = TestStandDocketEachChangeMountsAgain,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_docket_merges", .func = TestStandDocketMerges,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_docket_ground_rests", .func = TestStandDocketGroundRests,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_docket_mount_ground_rests", .func = TestStandDocketMountGroundRests,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_docket_claim_refused", .func = TestStandDocketClaimRefused,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_docket_room_past_flight", .func = TestStandDocketRoomPastFlight,
       .reach = TEST_READS_ONLY },
     { .name = "stand_docket_claim_across", .func = TestStandDocketClaimAcross,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_docket_handle_holds", .func = TestStandDocketHandleHolds,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_docket_lied_lag", .func = TestStandDocketLiedLag,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_docket_quitclaim_runs_on", .func = TestStandDocketQuitclaimRunsOn,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_docket_coined_counted", .func = TestStandDocketCoinedCounted,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_docket_closed_damaged", .func = TestStandDocketClosedDamaged,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_docket_replug_kept", .func = TestStandDocketReplugKept,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_docket_warrant", .func = TestStandDocketWarrant,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_docket_suite = {

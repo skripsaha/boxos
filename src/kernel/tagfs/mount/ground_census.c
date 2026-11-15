@@ -3,13 +3,12 @@
 
 /*
  * The census (ground_census.h). The claims are a list of runs, sorted once by
- * where they start, and swept a window at a time beside the medium's map: a
- * run that crosses the window's end is carried into the next, so every run is
- * looked at once for every window it lies in and never for any other.
+ * where they start, and walked in that order: two exclusive owners of one
+ * block are found where their runs meet.
  */
 
 static const bool g_owner_alone[GROUND_OWNER_KINDS] = {
-#define GROUND_OWNER_ALONE(id, name, exclusive, formats) [id] = (exclusive) != 0,
+#define GROUND_OWNER_ALONE(id, name, exclusive) [id] = (exclusive) != 0,
     GROUND_OWNERS(GROUND_OWNER_ALONE)
 #undef GROUND_OWNER_ALONE
 };
@@ -20,40 +19,18 @@ static uint32_t   s_count;
 static uint32_t   s_cap;
 static bool       s_refused;       /* a claim found no memory: the census decides nothing */
 static uint64_t   s_reach;         /* past the farthest block an owner but the far Deed names */
-static uint64_t   s_doubled;       /* blocks a book's census said two owners name */
+static uint64_t   s_doubled;       /* blocks the census said two owners name */
 
-/* The sweep: the next run not yet met, and the runs a window before this one
- * carried over its end. */
-static uint32_t   s_next;
-static uint32_t*  s_carried;
-static uint32_t   s_carried_count;
-
-/*
- * ‼ ON FORMAT v1 THE END OF THE GROUND IS THE END OF ITS DATA RUN, GROWN OR NOT.
- * A claim reaches block_end (ClaimEnd), which the LAYOUT gives at the Deed and
- * the growth moves with the data run it lengthens (ground_v1.c). Were the two
- * apart, every record naming the new ground would be cut from the census in
- * silence, and the block it names handed out again under it; a STRICT kernel
- * stops at that before the first claim.
- */
 void GroundCensusBegin(void)
 {
     GroundCensusEnd();
-#if CONFIG_STRICT
-    TagFSState* fs = tagfs_get_state();
-    if (fs->format == DEED_FORMAT_V1 && fs->block_end != TagFSLayout()->data_blocks)
-        panic("[TagFS] DEFECT: the census of a format-v1 volume would reach block %llu and its data run "
-              "is %u blocks", (unsigned long long)fs->block_end, TagFSLayout()->data_blocks);
-#endif
 }
 
-/* How far a claim reaches: the end of format v1's data run, which its bitmap
- * covers; all of a format-v2 volume, its far Deed's block among them — every
- * block of it is some owner's (ground_owner.h). */
+/* How far a claim reaches: all of the volume, its far Deed's block among them
+ * — every block of it is some owner's (ground_owner.h). */
 static uint64_t ClaimEnd(void)
 {
-    TagFSState* fs = tagfs_get_state();
-    return fs->format == DEED_FORMAT_V2 ? fs->volume_bytes / TAGFS_BLOCK_SIZE : fs->block_end;
+    return tagfs_get_state()->volume_bytes / TAGFS_BLOCK_SIZE;
 }
 
 static void GroundClaimAs(GroundOwner owner, uint64_t start, uint32_t count, uint64_t who, uint32_t namer)
@@ -70,13 +47,8 @@ static void GroundClaimAs(GroundOwner owner, uint64_t start, uint32_t count, uin
         uint32_t   cap  = s_cap ? s_cap * 2u : 64u;
         GroundRun* more = kmalloc(sizeof(GroundRun) * cap);
         if (!more) {
-            if (tagfs_get_state()->format == DEED_FORMAT_V2)
-                kprintf("[TagFS FSCK] no memory to hold the ground of %u owner run(s) — a book is "
-                        "not mounted on a census it could not take\n", s_count + 1);
-            else
-                kprintf("[TagFS FSCK] no memory to hold the ground of %u owner run(s) — this "
-                        "mount does not hold its block map against its owners, and takes "
-                        "nothing back that reads free\n", s_count + 1);
+            kprintf("[TagFS FSCK] no memory to hold the ground of %u owner run(s) — a book is "
+                    "not mounted on a census it could not take\n", s_count + 1);
             s_refused = true;
             return;
         }
@@ -381,78 +353,6 @@ static void RunsSayDoublesBook(void)
     if (g.more)
         kprintf("[TagFS FSCK] and %u more run(s) of blocks named by two owners at once\n", g.more);
     kfree(g.open);
-}
-
-/* Bits [from, to) of a window's map set. */
-static void BitsSet(uint8_t* bits, uint32_t from, uint32_t to)
-{
-    while (from < to && (from % 8u)) {
-        bits[from / 8u] |= (uint8_t)(1u << (from % 8u));
-        from++;
-    }
-    while (from + 8u <= to) {
-        bits[from / 8u] = 0xFFu;
-        from += 8u;
-    }
-    while (from < to) {
-        bits[from / 8u] |= (uint8_t)(1u << (from % 8u));
-        from++;
-    }
-}
-
-/* One run laid into window [base, base + W); true when it reaches past it. */
-static bool RunLay(const GroundRun* r, uint64_t base, uint8_t* bits)
-{
-    uint64_t end  = r->start + r->count;
-    uint64_t stop = base + BLOCK_MAP_WINDOW_BLOCKS;
-    uint64_t from = r->start > base ? r->start : base;
-    uint64_t to   = end < stop ? end : stop;
-    if (from < to)
-        BitsSet(bits, (uint32_t)(from - base), (uint32_t)(to - base));
-    return end > stop;
-}
-
-/* BlockMapOwnsFn: the windows come in order, and every run is met in the
- * window it starts in and carried while it reaches past one. */
-static void GroundOwns(uint32_t window, uint8_t* bits, void* ctx)
-{
-    (void)ctx;
-    uint64_t base = (uint64_t)window * BLOCK_MAP_WINDOW_BLOCKS;
-    uint64_t stop = base + BLOCK_MAP_WINDOW_BLOCKS;
-    memset(bits, 0, BLOCK_MAP_WINDOW_BLOCKS / 8u);
-
-    uint32_t kept = 0;
-    for (uint32_t i = 0; i < s_carried_count; i++)
-        if (RunLay(&s_runs[s_carried[i]], base, bits))
-            s_carried[kept++] = s_carried[i];
-    s_carried_count = kept;
-
-    for (; s_next < s_count && s_runs[s_next].start < stop; s_next++)
-        if (RunLay(&s_runs[s_next], base, bits))
-            s_carried[s_carried_count++] = s_next;
-}
-
-error_t GroundCensusRun(BlockMapOrphanFn orphan, BlockMapCensusCount* out)
-{
-    if (s_refused)
-        return BlockMapCensus(NULL, NULL, NULL, out);
-
-    /* A run is carried at most once at a time, so the carried list never
-     * holds more than there are runs. */
-    s_carried = s_count ? kmalloc(sizeof(uint32_t) * s_count) : NULL;
-    if (s_count && !s_carried) {
-        kprintf("[TagFS FSCK] no memory to sweep %u owner run(s) past the block map — this "
-                "mount does not hold its block map against its owners\n", s_count);
-        return BlockMapCensus(NULL, NULL, NULL, out);
-    }
-    RunsSort(false);
-    RunsSayDoubles();
-    s_next          = 0;
-    s_carried_count = 0;
-    error_t rc = BlockMapCensus(GroundOwns, orphan, NULL, out);
-    kfree(s_carried);
-    s_carried = NULL;
-    return rc;
 }
 
 /* The claims of `want` — or, for GROUND_OWNER_KINDS, every exclusive one but
@@ -779,14 +679,10 @@ GroundRun* GroundCensusRuns(uint32_t* n)
 void GroundCensusEnd(void)
 {
     kfree(s_runs);
-    kfree(s_carried);
-    s_runs          = NULL;
-    s_carried       = NULL;
-    s_count         = 0;
-    s_cap           = 0;
-    s_refused       = false;
-    s_reach         = 0;
-    s_doubled       = 0;
-    s_next          = 0;
-    s_carried_count = 0;
+    s_runs    = NULL;
+    s_count   = 0;
+    s_cap     = 0;
+    s_refused = false;
+    s_reach   = 0;
+    s_doubled = 0;
 }

@@ -164,15 +164,15 @@ out:
 
 static const TestCase g_stand_keep_tests[] = {
     { .name = "stand_keep_hides_from_queries", .func = TestStandKeepHidesFromQueries,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_keep_restore", .func = TestStandKeepRestore,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_keep_term_ends", .func = TestStandKeepTermEnds,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_keep_at_once", .func = TestStandKeepAtOnce,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_keep_survives_a_mount", .func = TestStandKeepSurvivesAMount,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_keep_suite = {

@@ -6,6 +6,7 @@
 #include "endpaper_fact.h"
 #include "../mount/tally_read.h"
 #include "../file_map/file_record.h"
+#include "../../core/use_context/use_context.h"
 
 /*
  * The Binder — the kernel's writer of a format-v2 volume's Tally (spec_v2

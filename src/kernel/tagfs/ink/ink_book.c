@@ -31,8 +31,7 @@
  *
  * ‼ A FILE ID IS GIVEN ONCE, AND NEVER PAST WHAT A PROGRAM HOLDS. The next one
  * is the mount's bound past every fid the book names (book_mount.c), counted
- * on in 64 bits here — the ids a format-v1 Ledger counts in 32 are not a book's
- * — and given no further than INT64_MAX: a program reads a file id back as a
+ * on in 64 bits here, and given no further than INT64_MAX: a program reads a file id back as a
  * signed 64-bit number (the storage deck's answers), so one past it is no id
  * any program could name.
  */
@@ -67,7 +66,7 @@ static error_t InkBookFieldsLocked(uint64_t fid, const RecordWhere* was, const I
     uint64_t     gen   = InkGenNextLocked();
     RecordWhere  where = { .gen = gen, .shape = now.shape }, gone;
     FileMapStake none  = { .count = 0 };
-    (void)FileMapRecordPut(fs->files, fid, *rec, &where, 0, &none, &gone);
+    (void)FileMapRecordPut(fs->files, fid, *rec, &where, &none, &gone);
     *rec   = NULL;
     j->was = still;
     j->now = FileMapRecordHold(fs->files, fid, NULL);
@@ -134,15 +133,14 @@ static error_t InkBookNewLocked(const uint32_t* tags, uint32_t count, FileRecord
     (*rec)->file_id = fid;
     uint64_t    gen   = InkGenNextLocked();
     RecordWhere where = { .gen = gen, .shape = gen }, gone;
-    (void)FileMapRecordPut(fs->files, fid, *rec, &where, 0, &st->map, &gone);
+    (void)FileMapRecordPut(fs->files, fid, *rec, &where, &st->map, &gone);
     *rec   = NULL;
     j->fid = fid;
     j->now = FileMapRecordHold(fs->files, fid, NULL);
     DocketPutLocked(j, spent);
     TagBitmapAddCovered(fs->bitmap_index, tags, count, fid);
-    g_book.next_fid         = fid + 1u;
-    fs->ledger.next_file_id = fid + 1u > UINT32_MAX ? UINT32_MAX : (uint32_t)(fid + 1u);
-    fs->ledger.total_files++;
+    g_book.next_fid = fid + 1u;
+    fs->total_files++;
     InkGenLaidLocked(gen);
     *out_fid = fid;
     out->gen = gen;
@@ -228,8 +226,8 @@ static error_t InkBookQuitclaimLocked(uint64_t fid, const RecordWhere* was, cons
         *fallow = NULL;
     }
     AllotmentRelease(fid);
-    if (fs->ledger.total_files > 0)
-        fs->ledger.total_files--;
+    if (fs->total_files > 0)
+        fs->total_files--;
     InkGenLaidLocked(gen);
     out->gen = gen;
     return OK;
@@ -493,7 +491,7 @@ static error_t InkBookPlotLocked(const Plot* p, const RecordWhere* was, InkBookW
     uint64_t     gen   = InkGenNextLocked();
     RecordWhere  where = { .gen = gen, .shape = gen };
     FileMapStake none  = { .count = 0 };
-    (void)FileMapRecordPut(fs->files, p->fid, w->rec, &where, 0, &none, &gone);
+    (void)FileMapRecordPut(fs->files, p->fid, w->rec, &where, &none, &gone);
     w->rec = NULL;
     j->was = still;
     j->now = FileMapRecordHold(fs->files, p->fid, NULL);
@@ -552,7 +550,6 @@ void InkBookPlotNext(Plot* p)
     p->window_at    = p->rec ? p->rec->blocks : p->blocks;
     p->blocks       = p->rec ? p->rec->blocks : p->blocks;
     p->blocks_before = p->blocks;
-    p->runs_before  = p->rec ? p->rec->strip_count : 0;
     p->digest_count = 0;
     p->ribbon_held  = 0;    /* the Ink took the hold for its claim */
     PlotSlipLetGo(p);       /* the record holds the write's Slip now, and the block promised to it */

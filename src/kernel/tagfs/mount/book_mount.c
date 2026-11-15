@@ -24,7 +24,7 @@
 #include "logbook.h"
 
 /*
- * A format-v2 volume's mount (book_mount.h): the ground, the Spine, the slot
+ * The volume's mount (book_mount.h): the ground, the Spine, the slot
  * stood on, the walk of its Tally, the census and the numbers given next.
  */
 
@@ -109,16 +109,12 @@ error_t MountBookGround(uint8_t seat, const DeedCopy* head, uint64_t ground_sect
 
     MountBookLetGo();
     ReadPaceWatch(seat);                             /* the mount's own reads: the medium's first measure */
-    memset(&fs->layout, 0, sizeof(fs->layout));      /* format v1's alone: never filled here */
-    memset(&fs->ledger, 0, sizeof(fs->ledger));      /* and its Ledger: only the numbers given next
-                                                      * (BookBounds) and the free count its block
-                                                      * map derives are kept in it — never a count
-                                                      * of a volume mounted before */
+    fs->free_blocks = 0;                             /* the counts its block map and its Tally derive, */
+    fs->total_files = 0;                             /* never a volume's mounted before */
     memcpy(&g_book.frame, frame, sizeof(VolumeFrame));
     g_book.data_end = head->head.tail_sector / VOLUME_BLOCK_SECTORS;
     g_book.ground   = ground_sectors;
     g_book.on_head  = head->head.role == VOLUME_DEED_ROLE_HEAD;
-    fs->block_base  = 0;
     fs->block_end   = g_book.data_end;
     if (bytes > sizeof(VolumeFrame)) {
         ksnprintf(words, sizeof(words), "its FRAME is %u bytes, longer than the %u this reader knows — "
@@ -356,8 +352,7 @@ static void BookBounds(void)
     g_book.next_fid         = fid;
     g_book.next_tag         = tag;
     g_book.next_bookmark    = bookmark;
-    fs->ledger.next_file_id = fid > UINT32_MAX ? UINT32_MAX : (uint32_t)fid;
-    fs->ledger.total_files  = g_book.files;
+    fs->total_files         = g_book.files;
     TagRegistryNumbersFrom(fs->registry, tag > (uint64_t)TAGFS_MAX_TAG_ID + 1u ? TAGFS_MAX_TAG_ID + 1u
                                                                              : (uint32_t)tag);
 }
@@ -366,8 +361,7 @@ static void BookBounds(void)
 // The whole read
 // ----------------------------------------------------------------------------
 
-/* What every format's mount fills: the registry, the map of live files, the
- * tag index. */
+/* What the mount fills: the registry, the map of live files, the tag index. */
 static error_t BookMemory(const char** what)
 {
     TagFSState* fs = tagfs_get_state();
@@ -442,7 +436,7 @@ static error_t BookSlotsHeld(const char** what)
 static void BookFreeSaid(void)
 {
     uint64_t data     = g_book.data_end - g_book.frame.data_block;
-    uint64_t free     = tagfs_get_state()->ledger.free_blocks;
+    uint64_t free     = tagfs_get_state()->free_blocks;
     uint64_t promised = FileMapSlips(tagfs_get_state()->files);
     free = free > promised ? free - promised : 0;
     if (promised == 0)
@@ -576,7 +570,7 @@ bool BookFileLocked(uint64_t fid)
 {
     /* A file Escheat let go is no file from its DONE on, as after the next
      * mount, whose Tally names it no more (settle/escheat.h). */
-    if (tagfs_get_state()->format != DEED_FORMAT_V2 || EscheatLost(fid))
+    if (EscheatLost(fid))
         return false;
     uint32_t lo = 0, hi = g_book.nlocked;
     while (lo < hi) {

@@ -11,8 +11,8 @@
 # machine something, and then the power goes — kill -9, which no guest code
 # outlives — or the machine is switched off by its power button. Every medium
 # a power cut could have left is then built on the host from the base and the
-# record (tools/volume-read.py, the one owner of both formats) and judged by
-# volume-read's GroundCensus, which also predicts what the next mount does; a
+# record (tools/volume-read.py) and judged by volume-read's census of the
+# book, which also predicts what the next mount does; a
 # chosen few are booted, and the kernel's own mount is held to that
 # prediction. The emulator cannot pull a plug. One run pulls it at every
 # flush, at every subset of the writes between two flushes (or, past ten
@@ -25,56 +25,38 @@
 #               final state booted and `persist verify` asked: the cadence
 #               settled the write (step 1.7 lifted the caveat).
 #   nextfid     anchor_test, then the power goes. Every prefix of the anchor's
-#               sync is booted and anchor_test asked again: no cut hands out an
-#               id its medium already shows (step 1.6 lifted the caveat).
+#               sync is booted and `persist write` asked — the cut that asks
+#               bears the anchor's file on its ribbon, and anchor_test would
+#               find it and make none: no cut hands out an id its medium
+#               already shows.
 #   hog         one core: quilltest settle (a write, not anchored, beside a
 #               hog); 5+D s later the power goes; `quilltest verify` (step 1.7
 #               lifted the caveat). And the design's "an anchor under the hog
 #               answers": `quilltest hogged anchor_test` on the booted state.
 #   halt        quilltest churn writes for ever; the power button. The machine
 #               must switch off, and what churn wrote is durable behind the
-#               halt's flush: a guard, whose census codes are held (below).
+#               halt's flush.
 #   race        quilltest race: 200 anchors against a churn, then the power
-#               button; the halt's oracles, and an anchored file lost by a
-#               later torn sync held under 1.4.
-#   settlecut   the second oracle: kernels built SETTLECUT=ledger and =done,
-#               each booted from a copy, anchor_test, the machine stopped
-#               inside the cycle that settles the anchor; volume-read's codes
-#               against PowerCut's cut at the same point of the same cycle.
-#   chaingrow   MP-D5: the base brought by rounds of quilltest crowd, each
-#               measured, to both edges — the file table one create short of
-#               its next block, the tag registry's last block room for one more
-#               tag — then `quilltest crowd` grows both chains and anchors, and
-#               the power goes. Its census is kept by kind, prefix and subset
-#               apart, and the first cut of every kind and every chain refused
-#               is booted.
-#   noanchormut nextfidmut poolmut flushmut
+#               button; the halt's oracles.
+#   overwrite logger tipin sessions dedup replug machineb spared undonecut
+#   engross     the book's own scenarios (powercut_book.sh).
+#   noanchormut firstflushmut lastflushmut booknextfidmut stitchmut
 #               the fix taken out or the fault put in on purpose: the cadence
-#               off (noanchor's verify), the mount's derived next file id off
-#               (nextfid's reissue), the durability or the ack must say the
-#               defect is back.
-#   selftest    the planner's arithmetic, settlecut's patterns against the
-#               sentences settle_cut.c prints, and a record forged by one byte
-#               that the record's self-check must refuse.
+#               off (noanchor's verify), a stitch's flushes, the next file id
+#               the ribbon bears, a stitch never written — the oracle must say
+#               the defect is back (powercut_mut.sh).
+#   selftest    the planner's arithmetic, the medium's words read off the
+#               kernel's source, and a record forged by one byte that the
+#               record's self-check must refuse.
 #
-# FORMAT v2 (VOLUME_FORMAT=v2): noanchor, nextfid, hog, halt, race and
-# noanchormut on a book — every image the run builds is one, its record named
-# by the book's units and its cuts judged by the book's census; the scenarios
-# of format v1's own machinery are refused by name (below). `all` runs the
-# book's set. nextfid's prefix boots are asked `persist write` there, not
-# anchor_test: the cut that asks bears the anchor's file on its ribbon, and
-# anchor_test would find it and make none. A book on a fixed medium (the
-# Boardroom's seat, stand_seat_kind) holds a smudge's wipe of the settled
-# stitches a spoilt page holds with nothing past them as the format's limit
-# (spec_v2 §16.6 п.5), and fails it on a removable one.
+# Every image the run builds is a book, its record named by the book's units
+# and its cuts judged by the book's census. A book on a fixed medium (the Boardroom's seat, stand_seat_kind) holds a smudge's wipe of
+# the settled stitches a spoilt page holds with nothing past them as the
+# format's limit (spec_v2 §16.6 п.5), and fails it on a removable one.
 #
-# Every census code a scenario was measured showing is its own caveat row —
-# (scenario, code), stand_caveat.sh — held under 1.6, the ORPHAN of an
-# unanchored create (noanchor, hog) and race's lost anchored file under 1.4
-# (the owner, 2026-09-27); chaingrow's are (scenario, prefix|subset, code),
-# a chain refused named by its chain; its refusals were held under 1.1, which
-# lifted them. A book is given its verify rows alone (stand_caveat.sh).
-# A caveated code no cut shows is lifted early only where its absence is
+# A scenario's verdicts are held under its verify row and the rows of a
+# book's own oracles alone (stand_caveat.sh); a census code no row names is a
+# FAIL until the owner assigns it a step. A caveated code no cut shows is lifted early only where its absence is
 # proof: every medium of its kind built — every subset, or for a prefix
 # code every prefix — and no writer left writing through the record.
 # Anywhere else it is said, and counts for nothing.
@@ -297,17 +279,15 @@ pc_logged() {
 }
 
 # pc_sign LOG — the run signed by the machine that wrote LOG: PC_PATH, the way
-# its writes went down (stand_path), and on a book PC_MEDIUM, the medium its
+# its writes went down (stand_path), and PC_MEDIUM, the medium its
 # volume was mounted on (stand_seat_kind), which decides whether a smudge's
 # wipe is the format's limit or a FAIL. A path it cannot read stops the
 # scenario, said: a verdict about a write is a verdict about one path. A
 # book's medium it cannot read is said too, and the run goes on unsigned —
-# the limit's row is not given, so a wipe stays a FAIL that names why. Format
-# v1 asks for no medium: nothing of v1's reads one.
+# the limit's row is not given, so a wipe stays a FAIL that names why.
 pc_sign() {
     PC_PATH=$(stand_path "$1" "$PC_CORES") ||
         { harness "$PC_NAME: the recorded boot names no way its writes go down — $PC_PATH"; return 1; }
-    [ "$PC_FORMAT" = v1 ] && return 0
     PC_MEDIUM=$(stand_seat_kind "$1") ||
         harness "$PC_NAME: the recorded boot's medium is not known, so a smudge's wipe is judged a FAIL and never the format's limit — $PC_MEDIUM"
     return 0
@@ -397,35 +377,32 @@ pc_switched_off() {   # QEMU, stopped by -no-shutdown, says so
 # pc_record — the record held against the disk it describes, then listed,
 # planned and every distinct medium in the plan judged by volume-read.
 pc_record() {
-    local said memo=()
+    local said
     if ! said=$(python3 "$VR" "$PC_DIR/base.img" cut "$PC_DIR/run.log" --against "$PC_DIR/run.img" 2>&1); then
         harness "$PC_NAME: the record does not account for the disk QEMU left — $said"
         return 1
     fi
     ok "$PC_NAME: the record accounts for the disk QEMU left — $said"
-    echo "machine: ${PC_KEYS[*]:-plain BIOS}, $PC_CORES core(s), a userspace write goes by $PC_PATH$([ "$PC_FORMAT" = v1 ] || echo ", the volume's medium as the Boardroom seats it: $PC_MEDIUM")" \
+    echo "machine: ${PC_KEYS[*]:-plain BIOS}, $PC_CORES core(s), a userspace write goes by $PC_PATH, the volume's medium as the Boardroom seats it: $PC_MEDIUM" \
         >>"$PC_DIR/facts.txt"
     python3 "$VR" "$PC_DIR/base.img" cut "$PC_DIR/run.log" --list --json >"$PC_DIR/list.json" || {
         harness "$PC_NAME: volume-read could not list the record"; return 1; }
-    if [ "$PC_FORMAT" = v2 ]; then
-        # A book's every block is an owner's or free: its record names each
-        # write by its heads, the stitch after it or its census (blklog_book.py).
-        said=$(python3 -c 'import json, sys; k = [t["kind"] for w in json.load(open(sys.argv[1]))["writes"]
+    # A book's every block is an owner's or free: its record names each write
+    # by its heads, the stitch after it or its census (blklog_book.py).
+    said=$(python3 -c 'import json, sys; k = [t["kind"] for w in json.load(open(sys.argv[1]))["writes"]
 for t in w["touches"]]; print(k.count("unowned"), k.count("free"))' "$PC_DIR/list.json")
-        [ "${said% *}" = 0 ]
-        chk $? "$PC_NAME: every write of the record on the book is named, or data on ground free as of its epoch (§3.4 L-8) — ${said% *} unowned, ${said#* } free"
-    fi
+    [ "${said% *}" = 0 ]
+    chk $? "$PC_NAME: every write of the record on the book is named, or data on ground free as of its epoch (§3.4 L-8) — ${said% *} unowned, ${said#* } free"
     PC_SEED=$(shasum -a 256 "$PC_DIR/run.log" | cut -c1-16)
     python3 "$PC" plan "$PC_DIR/list.json" --seed "$PC_SEED" --all-max "$PC_SUBSET_ALL_MAX" \
         --sample "$PC_SAMPLE_SUBSETS" --tear-all-max "$PC_TEAR_ALL_MAX" >"$PC_DIR/plan.json" || {
         harness "$PC_NAME: the plan could not be made"; return 1; }
     # A book's checks share the block digests they take (powercut.py checks
     # --digests): every cut of the run holds the base's files to theirs.
-    [ "$PC_FORMAT" = v1 ] || memo=(--digests "$PC_DIR/digests.json")
     python3 "$PC" checks "$PC_DIR/plan.json" "$PC_DIR/base.img" "$PC_DIR/run.log" \
-        "$PC_DIR/base.check.json" --jobs "$PC_CHECK_JOBS" ${memo[@]+"${memo[@]}"} >"$PC_DIR/cuts.jsonl" || {
+        "$PC_DIR/base.check.json" --jobs "$PC_CHECK_JOBS" --digests "$PC_DIR/digests.json" >"$PC_DIR/cuts.jsonl" || {
         harness "$PC_NAME: the checks could not be run"; return 1; }
-    [ "$PC_FORMAT" = v1 ] || pc_lies
+    pc_lies
 }
 
 # pc_ask CMD ACK_ERE — one question to a booted cut; its answer, or the
@@ -470,34 +447,15 @@ pc_boots() {
 }
 
 # pc_caveats NAME — the caveats a scenario's verdicts may be held under:
-# KEY=ROW, ROW a row of stand_caveat.sh's one table. Every census code the
-# scenario was measured showing is its own (scenario, code) row (the owner,
-# 2026-09-27); a code no row names is a FAIL until the owner assigns it a step.
+# KEY=ROW, ROW a row of stand_caveat.sh's one table — the verify rows of
+# noanchor and hog, and a book's own oracles, each with the defect it stands
+# for; a census code no row names is a FAIL until the owner assigns it a step.
 pc_caveats() {
-    local base code codes=""
     case "$1" in
-        noanchor|noanchormut) base=noanchor; echo "verify=noanchor"; codes="ORPHAN" ;;
-        hog)                  base=hog; echo "verify=hog"; codes="ORPHAN" ;;
-        nextfid|nextfidmut|poolmut|flushmut)
-            base=nextfid; [ "$PC_FORMAT" = v2 ] || echo "reissue=nextfid"
-            codes="FID_PAST_NEXT FILE_LOST MISSING ORPHAN SPARE_UNNAMED TAG_ABSENT UNNAMED_RECORD" ;;
-        halt)
-            base=halt
-            codes="CHAIN_REFUSED FID_PAST_NEXT FILE_LOST MISSING ORPHAN SPARE_UNNAMED TAG_ABSENT UNNAMED_RECORD" ;;
-        race)
-            base=race; [ "$PC_FORMAT" = v2 ] || echo "durable:_qt_churn@race=race:durable"
-            codes="CHAIN_REFUSED FID_PAST_NEXT FILE_LOST MISSING ORPHAN RECORD_SHAPE SPARE_UNNAMED TAG_ABSENT TAG_DUPLICATE UNNAMED_RECORD" ;;
-        settlecut) base=settlecut; codes="FID_PAST_NEXT ORPHAN SPARE_UNNAMED" ;;
-        chaingrow)
-            base=chaingrow
-            codes="prefix:CHAIN_REFUSED:registry prefix:CHAIN_REFUSED:table prefix:FID_PAST_NEXT prefix:ORPHAN
-                   prefix:SPARE_UNNAMED subset:CHAIN_REFUSED:registry subset:CHAIN_REFUSED:table
-                   subset:FID_PAST_NEXT subset:FILE_LOST subset:MISSING subset:ORPHAN subset:SPARE_UNNAMED
-                   subset:TAG_ABSENT" ;;
+        noanchor|noanchormut) echo "verify=noanchor" ;;
+        hog)                  echo "verify=hog" ;;
     esac
-    [ "$PC_FORMAT" = v2 ] || for code in $codes; do echo "code:$code=$base:$code"; done
-    # A book's own oracles, each with the defect it stands for (stand_caveat.sh).
-    [ "$PC_FORMAT" = v1 ] || printf '%s\n' files:whole=book:whole order=book:order lines:pc-l.log=book:lines \
+    printf '%s\n' files:whole=book:whole order=book:order lines:pc-l.log=book:lines \
         slip:blocks=book:slip tipin=book:tipin spared=book:spared engross=book:engross chain=book:chain dedup=book:dedup \
         blot:owners=book:owners smudge:owners=book:owners blot:proven=book:lost smudge:said=book:lost \
         smudge:wiped=book:wiped blot:boots=book:boots smudge:boots=book:boots
@@ -505,7 +463,7 @@ pc_caveats() {
     # smudge that wipes the settled stitches of a spoilt page whole with
     # nothing past them is the format's limit there (spec_v2 §16.6 п.5): held
     # by its own row, signed by the medium the recorded boot mounted (pc_sign).
-    [ "$PC_FORMAT" = v1 ] || [ "${PC_MEDIUM:-}" != fixed ] || echo smudge:wiped:fixed=book:wiped:fixed
+    [ "${PC_MEDIUM:-}" != fixed ] || echo smudge:wiped:fixed=book:wiped:fixed
     [ "$1" != machineb ] || echo lines:b-l.log=book:lines
 }
 
@@ -514,8 +472,8 @@ pc_caveats() {
 pc_judge() {
     local c args=()
     for c in $(pc_caveats "$PC_NAME"); do args+=(--caveat "$c"); done
-    [ "$PC_FORMAT" = v1 ] || args+=(--medium "$PC_MEDIUM")
-    [ "$PC_FORMAT" = v1 ] || pc_lie_boots
+    args+=(--medium "$PC_MEDIUM")
+    pc_lie_boots
     echo "took $(( $(date +%s) - PC_T0 )) s to judge; the report is $PC_DIR/report.txt" >>"$PC_DIR/facts.txt"
     python3 "$PC" judge "$PC_DIR" --path "$PC_PATH" ${args[@]+"${args[@]}"} "$@" >"$PC_DIR/verdicts.tsv" || {
         harness "$PC_NAME: the judge could not read this run"; return 1; }
@@ -567,13 +525,10 @@ pc_nextfid() {
     pc_step anchor_test anchor_test '\[ANCHOR\] WROTE\+ANCHORED fid=[0-9]+\.' "_anchor_test:anchor:1:1" \
         || return 1
     pc_cut_power && pc_record || return 1
-    PC_ASK_CMD="anchor_test"; PC_ASK_ACK='\[ANCHOR\] (PASS|WROTE|FAIL|create rc|fwrite rc|anchor rc|read rc)'
-    # A book's cut that asks the question bears the anchor's file on its
-    # ribbon, and anchor_test finds it there and makes none: the create is a
-    # file no medium of the run held (powercut_judge.py Reissue).
-    if [ "$PC_FORMAT" = v2 ]; then
-        PC_ASK_CMD="persist write"; PC_ASK_ACK='\[PERSIST\] (WROTE|FAIL|create failed|fwrite failed)'
-    fi
+    # A cut that asks the question bears the anchor's file on its ribbon, and
+    # anchor_test would find it there and make none: the create is a file no
+    # medium of the run held (powercut_judge.py Reissue).
+    PC_ASK_CMD="persist write"; PC_ASK_ACK='\[PERSIST\] (WROTE|FAIL|create failed|fwrite failed)'
     PC_FINAL_CMD=""
     pc_boots prefixes:anchor_test
     pc_judge --verify reissue:anchor_test
@@ -616,115 +571,6 @@ pc_race() {
     pc_judge --verify quill-floor:_qt_churn:halt --final-consistent
 }
 
-# chaingrow — MP-D5. The file table and the tag registry took a new block by
-# writing their last block's link to it before the block itself, the one in
-# its sync's flush and the other as the create of a new tag flushes it, until
-# step 1.1 grew both onto Spares — stamped, and the stamp behind a kept flush
-# of its own, before any link names them — which splits the sync's epochs. The
-# base is brought to both edges with quilltest crowd — the table one create
-# short of the row its blocks run out at, the registry's last block room for
-# PC_CROWD_ROOM more of crowd's tags — so the recorded run's few creates and
-# its anchor grow both chains, and every prefix of it is built.
-PC_CROWD_NAME_BYTES=15    # "crowd" and ten digits: quilltest_powercut.c QuillCrowdName
-PC_CROWD_ROOM=1
-# Rounds of crowd the base is given to stand at both edges (pc_edges). Each
-# round lands there unless the machine interned a tag of its own during it,
-# and each such tag is interned once — two were measured, a console lane's and
-# `anchor` — so a machine still short after this many is one that interns a
-# new tag every round, and that is said, not waited out.
-PC_CROWD_ROUNDS=${PC_CROWD_ROUNDS:-4}
-
-# pc_crowd CMD — one quilltest crowd on a machine that is not recorded, its
-# PASS required and said in the facts.
-pc_crowd() {
-    local mark said
-    mark=$(wc -l < build/serial.log)
-    type_line "$1" || { bad "$PC_NAME: the machine never took '$1'"; return 1; }
-    if ! wait_for_line -E build/serial.log '\[QUILL\] crowd: (PASS|FAIL) — ' "$WAIT_QUIET_S" $((mark + 1)); then
-        bad "$PC_NAME: '$1' never answered"; return 1
-    fi
-    said=$(tail -n +$((mark + 1)) build/serial.log | tr -d '\r' | grep -aoE '\[QUILL\] crowd: (PASS|FAIL) — .*' | head -1)
-    case "$said" in
-        *"crowd: PASS"*) echo "edges: \`$1\` — $said" >>"$PC_DIR/facts.txt" ;;
-        *) bad "$PC_NAME: $said"; return 1 ;;
-    esac
-    wait_for_quiet "$BOOT_BURST_QUIET_S"
-}
-
-# pc_crowded ROUND CMD... — the base booted, every CMD (a quilltest crowd) run
-# on it, switched off by its power button and judged again: consistent, or
-# nothing after it means anything.
-pc_crowded() {
-    local round=$1 cmd pid
-    shift
-    pc_boot "$PC_DIR/base.img" || {
-        bad "$PC_NAME: the base never reached a shell for crowd's round $round"; return 1; }
-    for cmd in "$@"; do pc_crowd "$cmd" || return 1; done
-    pid=$(cat build/qemu.pid)
-    mon_raw system_powerdown && pc_gone "$pid" || {
-        bad "$PC_NAME: the base would not switch off by its power button after crowd's round $round"; return 1; }
-    cp build/serial.log "$PC_DIR/crowd$round.serial.log"
-    python3 "$VR" "$PC_DIR/base.img" check --json >"$PC_DIR/base.check.json"
-    [ $? = 0 ] || { bad "$PC_NAME: the base is not consistent after crowd's round $round"; return 1; }
-}
-
-# pc_edges — the base brought to both edges and judged again. Sets CG_FROM and
-# CG_RUN: the first number and the count of the recorded run's files.
-#
-# ‼ MEASURED, NOT COUNTED, BECAUSE THE MACHINE INTERNS TAGS OF ITS OWN. A count
-# of crowd's files says where the registry should end up, and the machine
-# adds what it likes on the way: the first line crowd printed (at its 50th
-# file) put its console lane's tag `console:1` there, and `anchor` came after
-# the last of crowd's records — 27 bytes no file asked for, and the registry's
-# last block came out 193 records from its edge instead of one. So each round
-# is planned from the volume as check reads it (tools/powercut.py crowd), run,
-# switched off and read again, until the volume stands at both edges — or
-# PC_CROWD_ROUNDS rounds have not got it there, which is a machine this
-# harness cannot bring to the edges, said as such.
-pc_edges() {
-    local plan verdict fill again round=0 names=0 cmds
-    while :; do
-        plan=$(python3 "$PC" crowd "$PC_DIR/base.check.json" --name-bytes "$PC_CROWD_NAME_BYTES" \
-                   --room "$PC_CROWD_ROOM" --names "$names" 2>&1) || {
-            harness "$PC_NAME: $plan"; return 1; }
-        verdict=${plan%%"$TAB"*}; plan=${plan#*"$TAB"}
-        if [ "$verdict" = edges ]; then
-            CG_FROM=$names
-            CG_RUN=${plan%%"$TAB"*}
-            echo "edges: after $round round(s) of crowd, switched off by its power button, check says consistent; ${plan#*"$TAB"}" \
-                >>"$PC_DIR/facts.txt"
-            return 0
-        fi
-        fill=${plan%%"$TAB"*}; plan=${plan#*"$TAB"}
-        again=${plan%%"$TAB"*}; plan=${plan#*"$TAB"}
-        if [ "$round" -ge "$PC_CROWD_ROUNDS" ]; then
-            harness "$PC_NAME: the volume is not at both edges after $round round(s) of crowd: $plan"
-            return 1
-        fi
-        round=$((round + 1))
-        echo "edges: round $round — the base had $plan" >>"$PC_DIR/facts.txt"
-        cmds=()
-        [ "$fill" -gt 0 ] && cmds+=("quilltest crowd $fill $names")
-        [ "$again" -gt 0 ] && cmds+=("quilltest crowd $again 0")
-        pc_crowded "$round" ${cmds[@]+"${cmds[@]}"} || return 1
-        names=$((names + fill))
-    done
-}
-
-pc_chaingrow() {
-    local last
-    pc_base && pc_edges && pc_logged || return 1
-    last=$(printf 'crowd%010u' $((CG_FROM + CG_RUN - 1)))
-    pc_step crowd "quilltest crowd $CG_RUN $CG_FROM" '\[QUILL\] crowd: (PASS|FAIL) — ' "$last:empty:1:1" \
-        || return 1
-    grep -aq '\[QUILL\] crowd: PASS — made '"$CG_RUN"' files' build/serial.log
-    chk $? "$PC_NAME: $(tr -d '\r' <build/serial.log | grep -aoE '\[QUILL\] crowd: (PASS|FAIL) — [^;]*' | tail -1)"
-    pc_cut_power && pc_record || return 1
-    PC_ASK_CMD=""; PC_FINAL_CMD=""
-    pc_boots final --by-kind
-    pc_judge --by-kind --verify grown
-}
-
 # pc_lockrank — every [LockRank] line of this scenario's boots judged, each
 # place once however many of the boots named it (stand_caveat.sh).
 pc_lockrank() {
@@ -747,38 +593,6 @@ run_scenario() {   # run_scenario NAME KEYS... — build, run, judge, say
     make run-stop >/dev/null 2>&1
     pc_lockrank
     [ -z "$(pc_toll "$name")" ] || buildkey_restore || bad "$PC_NAME: the plain kernel could not be built back"
-}
-
-# settlecut — the second oracle. A kernel built SETTLECUT=<point> stops the
-# whole machine at that point of the cycle that settles the boot's first
-# anchor (src/kernel/tagfs/settle_cut), which leaves the medium a power cut
-# there would leave. Its answer must be PowerCut's answer for the same point
-# of the same cycle.
-#
-# The two sentences of settle_cut.c the scenario waits for, said once here for
-# sc_boot_cut and for the selftest that holds them against that file's text.
-SC_SETTLE_CUT_C=src/kernel/tagfs/settle_cut/settle_cut.c
-# A point no anchor's cycle reaches — the verdict's stitch, an Engross's —
-# says it is armed for it in a sentence of its own (settle_cut.c).
-SC_ARMED_ERE='^\[SETTLECUT\] armed( for the (verdict|Engross))?: the first (cycle|stitch) to reach point [0-9]+ of [0-9]+, .*, (with the change of the first anchor after this line in its snapshot stops this machine there|stops this machine there, anchored or not)$'
-SC_CUT_ERE='\[SETTLECUT\] the power went at point [0-9]+ of [0-9]+, .*, in cycle [0-9]+ of this boot, whose snapshot reaches Ink [0-9]+ of the anchor.s [0-9]+,'
-
-# sc_says — every sentence settle_cut.c prints, rendered as kprintf renders
-# it: "armed" or "cut", a tab and the line, each %u and %llu a number and a %s
-# the ledger point's words (SettleCutWhere). The literals of one kprintf are
-# joined as the compiler joins them.
-sc_says() {
-    python3 - "$SC_SETTLE_CUT_C" <<'EOF'
-import re, sys
-src = open(sys.argv[1]).read()
-where = dict(re.findall(r'\[SETTLE_CUT_POINT_(\w+)\]\s*=\s*"([^"]*)"', src))
-for call in re.findall(r'kprintf\(((?:\s*"(?:[^"\\]|\\.)*")+)', src):
-    line = "".join(re.findall(r'"((?:[^"\\]|\\.)*)"', call)).replace("\\n", "")
-    line = re.sub(r"%(?:ll)?u", "6", line).replace("%s", where.get("LEDGER", "?"))
-    for which, head in (("armed", "[SETTLECUT] armed"), ("cut", "[SETTLECUT] the power went ")):
-        if line.startswith(head):
-            print("%s\t%s" % (which, line))
-EOF
 }
 
 # medium_says DIR — the logs stand_seat_kind reads, in the kernel's own words:
@@ -805,124 +619,42 @@ for name, said in lines.items():
 EOF
 }
 
-# sc_boot_cut POINT — the POINT kernel's image, settled as PowerCut's base is:
-# booted once and switched off by its power button, its mount's writes and the
-# shutdown's cycle on the disk — no anchor was taken, so no cycle of that boot
-# stops. Then booted again, anchor_test, and the machine stops itself inside
-# the cycle that settles the anchor.
-sc_boot_cut() {
-    local pid mark img="$PC_DIR/$1.img"
-    if ! build_with_key SETTLECUT="$1" "$(strict_key ${PC_KEYS[@]+"${PC_KEYS[@]}"})"; then
-        bad "settlecut: SETTLECUT=$1 does not build: $(tail -3 "$SCRATCH/build.log" | tr '\n' ' ')"; return 1
-    fi
-    pc_clone build/boxos.img "$img"
-    pc_boot "$img" || { bad "settlecut: the SETTLECUT=$1 kernel never reached a shell"; return 1; }
-    pid=$(cat build/qemu.pid)
-    mon_raw system_powerdown && pc_gone "$pid" || {
-        bad "settlecut: the SETTLECUT=$1 kernel would not switch off by its power button"; return 1; }
-    pc_boot "$img" || { bad "settlecut: the settled SETTLECUT=$1 volume never reached a shell"; return 1; }
-    tr -d '\r' <build/serial.log | grep -aqE "$SC_ARMED_ERE"
-    chk $? "settlecut: $1 — $(grep -aoE '\[SETTLECUT\] armed: [^,]*' build/serial.log | head -1)"
-    mark=$(wc -l < build/serial.log)
-    type_line anchor_test || { bad "settlecut: the machine never took anchor_test"; return 1; }
-    if ! wait_for_line -E build/serial.log "$SC_CUT_ERE" "$WAIT_QUIET_S" $((mark + 1)); then
-        bad "settlecut: SETTLECUT=$1 never stopped the machine after anchor_test"; return 1
-    fi
-    ok "settlecut: $1 — $(tail -n +$((mark + 1)) build/serial.log | tr -d '\r' | grep -aoE "$SC_CUT_ERE" | sed 's/,$//')"
-    pid=$(cat build/qemu.pid); kill -9 "$pid"; pc_gone "$pid"
-    cp build/serial.log "$PC_DIR/$1.serial.log"
-    # 0 consistent and 1 inconsistent are both answers — the ledger point is
-    # inconsistent on HEAD — and the judge weighs them; 2 is a volume that
-    # would not read.
-    python3 "$VR" "$img" check --json >"$PC_DIR/$1.check.json"
-    [ $? -le 1 ] || { harness "settlecut: volume-read could not read the SETTLECUT=$1 volume"; return 1; }
-}
-
-pc_settlecut() {
-    local said again="$PC_DIR/done.again.serial.log"
-    pc_base && pc_logged || return 1
-    pc_step anchor_test anchor_test '\[ANCHOR\] WROTE\+ANCHORED fid=[0-9]+\.' "_anchor_test:anchor:1:1" || return 1
-    pc_cut_power || return 1
-    said=$(python3 "$VR" "$PC_DIR/base.img" cut "$PC_DIR/run.log" --against "$PC_DIR/run.img" 2>&1) || {
-        harness "settlecut: the record does not account for the disk QEMU left — $said"; return 1; }
-    python3 "$VR" "$PC_DIR/base.img" cut "$PC_DIR/run.log" --list --json >"$PC_DIR/list.json"
-    sc_boot_cut ledger && sc_boot_cut done || return 1
-    pc_boot "$PC_DIR/done.img" && pc_ask anchor_test '\[ANCHOR\] (PASS|WROTE|FAIL|read rc)'
-    make run-stop >/dev/null 2>&1
-    cp build/serial.log "$again"
-    grep -aqE '\[ANCHOR\] PASS — anchored write survived hard crash \(seq=1\)' "$again"
-    chk $? "settlecut: done — the file its sync finished survives a reboot: $(grep -aoE '\[ANCHOR\] [^.(]*' "$again" | head -1)"
-    buildkey_restore || bad "settlecut: the plain kernel could not be built back"
-    local c args=()
-    for c in $(pc_caveats settlecut); do args+=(--caveat "$c"); done
-    python3 "$PC" settlecut "$PC_DIR" --path "$PC_PATH" ${args[@]+"${args[@]}"} >"$PC_DIR/verdicts.tsv" || {
-        harness "settlecut: the judge could not read this run"; return 1; }
-}
-
-run_settlecut() {
-    pc_begin settlecut "$@"
-    pc_build 0 || return
-    if pc_settlecut; then
-        pc_say
-    else
-        bad "settlecut: the scenario stopped before it could be judged (logs in $PC_DIR)"
-    fi
-    make run-stop >/dev/null 2>&1
-}
-
-# selftest — the gate judging itself: the planner's arithmetic, settlecut's
-# patterns against settle_cut.c, then one real record that the self-check must
-# accept and, forged by one byte, refuse.
+# selftest — the gate judging itself: the planner's arithmetic, the medium's
+# words read off the kernel's source, then one real record that the
+# self-check must accept and, forged by one byte, refuse.
 run_selftest() {
-    local said says which line ere
+    local said
     pc_begin selftest
     python3 "$PC" selftest >"$PC_DIR/planner.txt" 2>&1
     chk $? "selftest: the planner's arithmetic — $(tail -1 "$PC_DIR/planner.txt")"
     grep -v '^  ok' "$PC_DIR/planner.txt" | grep -v '^selftest:' | sed 's/^/  /'
-    # settlecut waits for two of settle_cut.c's sentences: its patterns held
-    # against that file's own text, so a word changed on either side is a FAIL
-    # here, and not a scenario that waits a minute for a line nobody prints.
-    says=$(sc_says)
-    [ "$(printf '%s\n' "$says" | cut -f1 | sort -u | tr '\n' ' ')" = "armed cut " ]
-    chk $? "selftest: $SC_SETTLE_CUT_C prints the sentences of each kind settlecut waits for (found: $(printf '%s\n' "$says" | cut -f1 | tr '\n' ' '))"
-    while IFS="$TAB" read -r which line; do
-        case "$which" in armed) ere=$SC_ARMED_ERE ;; cut) ere=$SC_CUT_ERE ;; *) continue ;; esac
-        printf '%s\n' "$line" | grep -qE "$ere"
-        chk $? "selftest: settlecut's $which pattern matches the sentence $SC_SETTLE_CUT_C prints — $line"
-    done <<SAYS_EOF
-$says
-SAYS_EOF
     # A smudge's wipe is the format's limit on a fixed medium alone (spec_v2
     # §16.6 п.5): the medium read off the kernel's own words of the volume's
     # seat, as boardroom.c and tagfs.c print them (medium_says), and the
-    # limit's row given only to a book on one.
+    # limit's row given only to a volume on one.
     medium_says "$PC_DIR"
     chk $? "selftest: the Boardroom's seat line and the mount's line read off the kernel's source"
     said="$(stand_seat_kind "$PC_DIR/fixed.log"), $(stand_seat_kind "$PC_DIR/removable.log"), $(stand_seat_kind "$PC_DIR/planner.txt")"
     [ "$said" = "fixed, removable, no medium: $PC_DIR/planner.txt mounted no volume" ]
     chk $? "selftest: a volume's medium is fixed or removable as the Boardroom calls its seat ($said)"
-    [ "$(PC_FORMAT=v2 PC_MEDIUM=fixed pc_caveats halt | grep -cx 'smudge:wiped:fixed=book:wiped:fixed')" = 1 ] &&
-        [ "$(PC_FORMAT=v2 PC_MEDIUM=removable pc_caveats halt | grep -c '^smudge:wiped:fixed=')" = 0 ] &&
-        [ "$(PC_FORMAT=v1 PC_MEDIUM=fixed pc_caveats halt | grep -c '^smudge:')" = 0 ] &&
+    [ "$(PC_MEDIUM=fixed pc_caveats halt | grep -cx 'smudge:wiped:fixed=book:wiped:fixed')" = 1 ] &&
+        [ "$(PC_MEDIUM=removable pc_caveats halt | grep -c '^smudge:wiped:fixed=')" = 0 ] &&
         [ "$(caveat_step book:wiped:fixed)" = limit ]
-    chk $? "selftest: a smudge's wipe of the settled stitches of a spoilt page is held as the format's limit (row book:wiped:fixed, step '$(caveat_step book:wiped:fixed)') on a book on a fixed medium alone"
+    chk $? "selftest: a smudge's wipe of the settled stitches of a spoilt page is held as the format's limit (row book:wiped:fixed, step '$(caveat_step book:wiped:fixed)') on a fixed medium alone"
     # The run signed (pc_sign): a way down it cannot read stops the scenario,
-    # said; a book's medium it cannot read is said, and the run goes on with
-    # no limit's row; format v1 asks for no medium.
+    # said; a medium it cannot read is said, and the run goes on with no
+    # limit's row.
     sed 's/ATA primary master/NVMe 0 ns 1/' "$PC_DIR/fixed.log" >"$PC_DIR/nvme.log"
     grep -v '^\[Boardroom\]' "$PC_DIR/fixed.log" >"$PC_DIR/unseated.log"
-    said=$(PC_FORMAT=v1; pc_sign "$PC_DIR/nvme.log"; echo "rc=$? $PC_PATH|$PC_MEDIUM")
+    said=$(pc_sign "$PC_DIR/nvme.log"; echo "rc=$? $PC_PATH|$PC_MEDIUM")
     case "$said" in *HARNESS*"no path: seat 'NVMe 0 ns 1' is none this knows"*"rc=1 "*) true ;; *) false ;; esac
     chk $? "selftest: a run whose writes go down a way stand_path does not know stops, and says why ($(echo $said | tail -c 120))"
-    said=$(PC_FORMAT=v1; pc_sign "$PC_DIR/unseated.log"; echo "rc=$? $PC_PATH|$PC_MEDIUM")
-    [ "$said" = "rc=0 ATA sync|unknown" ]
-    chk $? "selftest: format v1 is signed by its way down alone, and asks no medium ($said)"
-    said=$(PC_FORMAT=v2; pc_sign "$PC_DIR/unseated.log"; echo "rc=$? $PC_PATH|$PC_MEDIUM")
+    said=$(pc_sign "$PC_DIR/unseated.log"; echo "rc=$? $PC_PATH|$PC_MEDIUM")
     case "$said" in *HARNESS*"medium is not known"*"rc=0 ATA sync|no medium: the Boardroom never named seat 0"*) true ;; *) false ;; esac
-    chk $? "selftest: a book whose medium the Boardroom never named is said, and its run goes on unsigned ($(echo $said | tail -c 120))"
-    said=$(PC_FORMAT=v2; pc_sign "$PC_DIR/fixed.log"; echo "rc=$? $PC_PATH|$PC_MEDIUM")
+    chk $? "selftest: a volume whose medium the Boardroom never named is said, and its run goes on unsigned ($(echo $said | tail -c 120))"
+    said=$(pc_sign "$PC_DIR/fixed.log"; echo "rc=$? $PC_PATH|$PC_MEDIUM")
     [ "$said" = "rc=0 ATA sync|fixed" ]
-    chk $? "selftest: a book on a fixed medium is signed by both ($said)"
+    chk $? "selftest: a volume on a fixed medium is signed by both ($said)"
     # A logger that answered before a departure came with a cycle in flight
     # (pc_logger_early): ended, or refused while its stick was away — C14 not
     # put; refused with its stick seated — the kernel's FAIL, with its line.
@@ -953,20 +685,20 @@ SAYS_EOF
 . "$(dirname "$0")/powercut_book.sh"
 
 pc_preflight
-PC_FORMAT=$(stand_format)
-case "$PC_FORMAT" in v1|v2) ;; *) echo "powercut: VOLUME_FORMAT=$PC_FORMAT names no format"; exit 2 ;; esac
-STAND_FORMAT=$PC_FORMAT
-if [ "$PC_FORMAT" = v2 ] && pc_book "$@"; then set -- done; fi
 case "${1:-}" in
-    done) ;;
-    noanchor|nextfid|hog|halt|race|chaingrow)
+    noanchor|nextfid|hog|halt|race|overwrite|logger|tipin|sessions|dedup)
         run_scenario "$@" ;;
-    settlecut)   shift; run_settlecut "$@" ;;
-    noanchormut) run_noanchormut ;;
-    nextfidmut)  run_nextfidmut ;;
-    poolmut)     run_poolmut ;;
-    flushmut)    run_flushmut ;;
-    selftest)    run_selftest ;;
+    replug)         shift; run_replug replug "$@" ;;
+    machineb)       shift; run_replug machineb "$@" ;;
+    spared)         shift; run_cut spared spared "$@" ;;
+    undonecut)      shift; run_cut undonecut undone "$@" ;;
+    engross)        shift; run_cut engross engross "$@" ;;
+    noanchormut)    run_noanchormut ;;
+    firstflushmut)  run_firstflushmut ;;
+    lastflushmut)   run_lastflushmut ;;
+    booknextfidmut) run_booknextfidmut ;;
+    stitchmut)      run_stitchmut ;;
+    selftest)       run_selftest ;;
     all)
         run_selftest
         for keys in "" "STRICT=on CORES=4 MEM=4G" "UEFI=on STRICT=on CORES=4 MEM=4G"; do
@@ -978,14 +710,17 @@ case "${1:-}" in
             # shellcheck disable=SC2086
             run_scenario halt $keys; run_scenario race $keys
         done
-        run_settlecut
-        run_scenario chaingrow
-        run_noanchormut; run_nextfidmut; run_poolmut; run_flushmut ;;
+        run_noanchormut
+        run_scenario overwrite; run_scenario overwrite UEFI=on STRICT=on CORES=4 MEM=4G
+        run_scenario logger; run_scenario tipin STRICT=on CORES=4 MEM=4G
+        run_cut spared spared; run_scenario sessions; run_cut undonecut undone; run_cut engross engross
+        run_scenario dedup
+        run_replug replug CORES=4 MEM=4G; run_replug machineb
+        run_firstflushmut; run_lastflushmut; run_booknextfidmut; run_stitchmut ;;
     *)
-        echo "usage: [VOLUME_FORMAT=v2] $0 noanchor|nextfid|hog|halt|race|settlecut|chaingrow [MACHINE KEYS...]"
-        echo "       [VOLUME_FORMAT=v2] $0 noanchormut|nextfidmut|poolmut|flushmut|selftest|all"
-        echo "       VOLUME_FORMAT=v2 $0 overwrite|logger|tipin|spared|sessions|undonecut|engross|dedup|replug|machineb [MACHINE KEYS...]"
-        echo "       VOLUME_FORMAT=v2 $0 firstflushmut|lastflushmut|booknextfidmut|stitchmut"
+        echo "usage: $0 noanchor|nextfid|hog|halt|race|overwrite|logger|tipin|sessions|dedup [MACHINE KEYS...]"
+        echo "       $0 replug|machineb|spared|undonecut|engross [MACHINE KEYS...]"
+        echo "       $0 noanchormut|firstflushmut|lastflushmut|booknextfidmut|stitchmut|selftest|all"
         exit 2 ;;
 esac
 

@@ -446,7 +446,7 @@ static error_t RibbonFileLaid(RibbonReplay* rp, RibbonStaged* s)
     if (rc == OK && s->rec) {
         rc = FileMapStakeFor(fs->files, s->fid, &stake);
         if (rc == OK)
-            rc = FileMapRecordPut(fs->files, s->fid, s->rec, &where, 0, &stake, &was);
+            rc = FileMapRecordPut(fs->files, s->fid, s->rec, &where, &stake, &was);
         else
             FileRecordRelease(s->rec);    /* no stake: the record is the stage's still, and let go here */
         FileMapStakeLetGo(&stake);
@@ -615,7 +615,7 @@ static bool RibbonOnOthers(const FileRecord* rec)
     TagFSState* fs   = tagfs_get_state();
     uint64_t    from = 0, ids[16];
     uint32_t    n;
-    while ((n = FileMapRows(fs->files, from, ids, 16)) > 0) {
+    while ((n = FileMapFiles(fs->files, from, ids, 16)) > 0) {
         for (uint32_t i = 0; i < n; i++) {
             FileRecord* other = ids[i] == rec->file_id ? NULL : FileMapRecordHold(fs->files, ids[i], NULL);
             StripWalk   a, b;

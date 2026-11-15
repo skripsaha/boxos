@@ -61,7 +61,6 @@ void PlotWindowLoad(Plot *p, FileRecord *rec)
     p->rec           = rec;
     p->blocks        = rec->blocks;
     p->blocks_before = rec->blocks;
-    p->runs_before   = rec->strip_count;
     p->window_at     = rec->blocks;
     p->window_was    = 0;
     p->windowed      = false;
@@ -185,8 +184,6 @@ error_t PlotWindowCover(Plot *p, uint64_t lo, uint64_t hi)
 
 error_t PlotWindowWhole(Plot *p)
 {
-    if (!p->book)
-        return OK;
     return PlotWindowCover(p, 0, p->rec ? p->rec->blocks : 0);
 }
 
@@ -475,7 +472,7 @@ bool PlotWindowStretchAt(const Plot *p, uint64_t pos, uint64_t left, uint32_t mo
 error_t PlotWindowLanded(Plot *p, uint64_t departed, uint64_t block, const uint8_t *data, uint32_t count)
 {
     BoxHashContext ctx;
-    if (!p->book || count == 0)
+    if (count == 0)
         return OK;
     if (!PlotRoom((void **)&p->digests, &p->digest_room, p->digest_count, (uint64_t)p->digest_count + count,
                   sizeof(PlotDigest)))
@@ -715,7 +712,7 @@ error_t PlotWindowRoomFor(const Plot *p, uint64_t end)
     uint64_t    keep = EndpaperDataKeeps(false);
     bool        own  = PlotLaysPromised(p, PlotWindowBlocksFor(p->size) - 1u, 1);
     TagFSLockTake(&fs->lock);
-    uint64_t may = AllotmentBookMay(fs->ledger.free_blocks + FallowBlocks(), keep, own);
+    uint64_t may = AllotmentBookMay(fs->free_blocks + FallowBlocks(), keep, own);
     TagFSLockDrop(&fs->lock);
     if (may >= need)
         return OK;

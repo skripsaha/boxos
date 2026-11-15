@@ -5,8 +5,8 @@
 #include "ground_owner.h"
 
 /*
- * The block map of a format-v2 volume — derived from its owners' names, never
- * read off the medium, never written to it (spec_v2 §4.6).
+ * The volume's block map — derived from its owners' names, never read off the
+ * medium, never written to it (spec_v2 §4.6).
  *
  * A book keeps no bitmap: which blocks are taken is what the owners name
  * (ground_owner.h), every claim the mount finds inserted here by the census
@@ -22,14 +22,10 @@
  * It covers the volume's blocks [0, end), `end` the far Deed's: the front and
  * the Spine's slots are claimed by their owners like any other ground, so
  * what reads free is the data run's — the free count of the volume
- * (TagFSState.ledger.free_blocks), which this map keeps as format v1's keeps
- * it. Format v1's map is another (block_map.h: the medium's bitmap and its
- * cache): a mount builds the one its volume's format has, and the other is
- * never up.
+ * (TagFSState.free_blocks), which this map keeps.
  *
  * Built by the mount with the door shut; read inside the door. Changed, once
- * it is up, under the volume's state lock — the lock format v1's map is changed
- * under (MapLock) — by the ribbon's door (BlockMapTakeQuire) and by Fallow's
+ * it is up, under the volume's state lock (MapLock) — by the ribbon's door (BlockMapTakeQuire) and by Fallow's
  * gives at a cycle's DONE (fallow.c) alone in this kernel: the page a change may
  * need for a window it leaves mixed is made before the lock
  * (BlockMapDerivedStock, BlockMapDerivedHold), and under it only put in place;

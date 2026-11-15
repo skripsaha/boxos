@@ -62,7 +62,7 @@ static void DedupTurn(HelmWaiter* w)
     bool more = false, entered = tagfs_enter();
     (void)w;
     if (entered) {
-        more = tagfs_get_state()->format == DEED_FORMAT_V2 && DedupPassTurn();
+        more = DedupPassTurn();
         tagfs_leave();
     }
     if (more) {

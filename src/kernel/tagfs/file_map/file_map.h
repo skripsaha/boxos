@@ -8,9 +8,9 @@
  * The files a mounted volume holds, by file id — and nothing at all for an id
  * no live file has.
  *
- * What memory knows about the files used to be three arrays indexed by file
- * id: the mirror of every record, where each record sat, and the file table's
- * rows — each as long as the highest id the volume ever issued. A volume that
+ * What memory knows about the files used to be arrays indexed by file id —
+ * the mirror of every record, and where each record sat — each as long as the
+ * highest id the volume ever issued. A volume that
  * had made and deleted a million files paid for a million slots on every mount
  * with a dozen files on it, and the mirror silently dropped any id past the
  * length it was given.
@@ -29,17 +29,10 @@
  * given back after it.
  */
 
-/* Where a file's newest record sits in the metadata pool, and which Ink put
- * it there: `link` is the pool chain's link, counted from the chain's head,
- * which a link keeps whatever is unlinked around it, `offset` the record's
- * byte in that link's block and `len` its length — a block's geometry, which
- * both fit in 16 bits. `gen` is the Ink that wrote the record and `shape` the
- * Ink that last gave the file its size and extents — both 0 for a record the
- * mount read, which every Ink since is newer than. */
+/* Which Ink put a file's newest record in memory: `gen` is the Ink that wrote
+ * the record and `shape` the Ink that last gave the file its size and extents
+ * — both 0 for a record the mount read, which every Ink since is newer than. */
 typedef struct {
-    uint32_t link;
-    uint16_t offset;
-    uint16_t len;
     uint64_t gen;
     uint64_t shape;
 } RecordWhere;
@@ -69,80 +62,34 @@ error_t  FileMapStakeFor(FileMap* map, uint64_t fid, FileMapStake* stake);
 void     FileMapStakeLetGo(FileMapStake* stake);
 
 /*
- * `rec` becomes the file's record, sitting where `where` says. The reference is
- * the map's from here on, and the record it replaces is let go — where that one
- * sat comes back in *was, a `len` of 0 when the file had none. The file is
+ * `rec` becomes the file's record, put by the Ink `where` says. The reference
+ * is the map's from here on, and the record it replaces is let go — which Ink
+ * put that one comes back in *was, zeros when the file had none. The file is
  * added when it is not in the map, from the stake; OK, or ERR_NO_MEMORY —
  * said — when the stake does not cover the insert and the heap refused the
  * difference, and then `rec` is let go and the map is as it was. A caller that
  * holds the volume's state lock checks FileMapNodesToAdd against its stake
  * first, so the put never reaches the heap under that lock.
- *
- * `row_block`, when it is not 0, is the block of the file table's row that
- * names the record, at the record's own offset: the row is set in the same
- * hold of the map's lock, so no walk of the live files (FileMapRows) ever
- * sees the file with a record and no row. 0 leaves the row as it is.
  */
 error_t  FileMapRecordPut(FileMap* map, uint64_t fid, FileRecord* rec,
-                          const RecordWhere* where, uint32_t row_block, FileMapStake* stake,
-                          RecordWhere* was);
+                          const RecordWhere* where, FileMapStake* stake, RecordWhere* was);
 
 /* How many nodes adding `fid` would take now; 0 when the file is in the map. */
 uint32_t FileMapNodesToAdd(FileMap* map, uint64_t fid);
 
 /* The file's record with a reference the caller lets go (FileRecordRelease),
- * and where it sits (out may be NULL); NULL when the map holds none. */
+ * and which Ink put it (out may be NULL); NULL when the map holds none. */
 FileRecord* FileMapRecordHold(FileMap* map, uint64_t fid, RecordWhere* out);
 
-/* The file's record moved inside its block, from byte `from` to byte `to` of
- * link `link`, block `block` — the pool closed a gap in its tail — and the
- * file's row with it when the row named the record there. Nothing changes
- * when the map has the file's record anywhere else. */
-void     FileMapRecordMoved(FileMap* map, uint64_t fid, uint32_t link, uint32_t block,
-                            uint32_t from, uint32_t to);
-
-/* Whether the file's record is the one at byte `offset` of link `link`. */
-bool     FileMapRecordAt(FileMap* map, uint64_t fid, uint32_t link, uint32_t offset);
-
-/* The file's record, found where `from` says, laid again where `to` says — in
- * block `to_block`, by Glean — the same record under a new place and Ink, its
- * shape kept; and the file's row with it. False, and nothing changed, when the
- * map has the file's record anywhere else. */
-bool     FileMapRecordRelink(FileMap* map, uint64_t fid, const RecordWhere* from,
-                             const RecordWhere* to, uint32_t to_block);
-
-/* The file table's row of a file. Set adds the file when it is not in the
- * map (ERR_NO_MEMORY, said, when there is no room); Get answers false for a
- * file with no row; Clear takes the row away, and the file with it when it has
- * no record either. */
-error_t  FileMapRowSet(FileMap* map, uint64_t fid, uint32_t block, uint32_t offset);
-bool     FileMapRowGet(FileMap* map, uint64_t fid, uint32_t* out_block, uint32_t* out_offset);
-void     FileMapRowClear(FileMap* map, uint64_t fid);
-
-/* The file out of the map, row and record both; where its record sat in *was
- * (may be NULL), a `len` of 0 when it had none. */
+/* The file out of the map; which Ink put its record in *was (may be NULL),
+ * zeros when it had none. */
 void     FileMapDrop(FileMap* map, uint64_t fid, RecordWhere* was);
 
-/* Up to `room` file ids from `from` on that have a record — the live files —
- * in id order: how many were written. A walk of them all asks again from one
- * past the last id it was given, so no lock is held across the walk and what
- * it does with each file may change the map.
- *
- * A live file is one memory holds a record of, whatever format the volume is
- * in. A volume of format v1 also names each live file in its table, so there
- * a row with no record, or a record with no row, is a defect of the map:
- * said, and stopped at in a STRICT kernel. A format-v2 book keeps no table,
- * and its files have records and no rows. */
-uint32_t FileMapRows(FileMap* map, uint64_t from, uint64_t* out, uint32_t room);
-
-/* Up to `room` file ids from `from` on that the map holds at all — a row, a
- * record or both — in id order: the mount's walk, which decides what each of
- * them is, asks this way. */
+/* Up to `room` file ids from `from` on — the live files, each of which the
+ * map holds a record of — in id order: how many were written. A walk of them
+ * all asks again from one past the last id it was given, so no lock is held
+ * across the walk and what it does with each file may change the map. */
 uint32_t FileMapFiles(FileMap* map, uint64_t from, uint64_t* out, uint32_t room);
-
-/* The rows of file ids first .. first+count-1 into `out`, a row of zeros for
- * an id with none — one block of the file table, as the medium holds it. */
-void     FileMapRowsInto(FileMap* map, uint64_t first, uint32_t count, FileTableEntry* out);
 
 /* The files in the map, and the bytes of kernel heap it holds for them: its
  * nodes and its records. */

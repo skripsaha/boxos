@@ -187,94 +187,9 @@ out:
     return verdict;
 }
 
-// ----------------------------------------------------------------------------
-// A block's write the medium refuses part way answers what the file holds
-//
-// W-ERR, on the port. The medium refuses the write of the second block of the
-// second window: the first window and the block before the refused one landed
-// and are inked, and the answer carries the refusal, those bytes and the size
-// the file still is — on a USB disk exactly as on an AHCI port. BLOCKFAIL is
-// asked at the seat's door for a command nobody stands over
-// (BoardroomWriteAsync), so the refused block's write never reaches the medium.
-// Format v1's: the write goes over the file's blocks where they lie, so the
-// block refused is one the test names before it; a book lays every write on
-// fresh ground, the run it takes named before it (its analog).
-// ----------------------------------------------------------------------------
-
-static TestResult TestStandPortWriteRefusedPartWay(void)
-{
-    TestResult     verdict = TEST_PASS;
-    uint8_t        seat    = tagfs_get_seat();
-    uint64_t       file_id = 0;
-    uint64_t       block   = 0;
-    uint8_t*       old     = NULL;
-    uint8_t*       data    = NULL;
-    uint8_t*       back    = NULL;
-    bool           armed   = false;
-    bool           asked   = false;
-    const uint32_t B       = TAGFS_BLOCK_SIZE;
-    const uint64_t W       = HelmWindowBytes(0);
-    const uint32_t bytes   = (uint32_t)(W + 2 * B);   /* a window, then two blocks */
-    const char*    aside   = StandPortAside(seat);
-
-    if (aside)
-        return test_steps_aside(aside);
-
-    old  = kmalloc(bytes);
-    data = kmalloc(bytes);
-    back = kmalloc(bytes);
-    TEST_ASSERT(old && data && back, "room for the file, the write and the read back");
-    TestFillAt(old, bytes, 0x4E1D0800u, 0);
-    TestFillAt(data, bytes, 0x4E1D0801u, 0);
-    TEST_ASSERT(StandMakeFile("test_file", old, bytes, &file_id),
-                "a file of a window and two blocks is made");
-    TEST_ASSERT(StandBlockOf(file_id, (uint32_t)(W / B) + 1, &block),
-                "the second block of the second window is found");
-    TEST_ASSERT(WriteJobSeatRunsAsync(seat), "a program's write on this seat goes through the port");
-
-    BlockFailArm(seat, BLOCK_FAIL_WRITE, tagfs_block_to_sector(block), TAGFS_BLOCK_SECTORS, 1);
-    armed = true;
-    asked = StandPortTaken(StandPortSubmit(file_id, data, bytes, 0, false));
-    TEST_ASSERT(asked, "the job is taken, its answer to come");
-    TEST_ASSERT(StandPortAnswered(seat, STAND_PORT_BOUND_MS), "and it answers");
-    asked = false;
-    bool fired = BlockFailFired();
-    BlockFailDisarm();
-    armed = false;
-
-    TEST_ASSERT(fired, "the write of that block was the one refused");
-    TEST_ASSERT(s_answer.through_port, "the job went through the port to its end");
-    TEST_ASSERT_EQ(s_answer.rc, ERR_IO, "the write answers the medium's refusal");
-    TestEvidence("bytes the refused write answered it left in the file", s_answer.written);
-    TEST_ASSERT_EQ(s_answer.written, W + B, "the first window and the block before the refused one");
-    TEST_ASSERT_EQ(s_answer.size, bytes, "and the size the file is");
-
-    TEST_ASSERT_EQ(TestFileRead(file_id, back, bytes), (int)bytes, "the file reads back");
-    TEST_ASSERT_EQ(TestFirstDifference(back, data, (uint32_t)(W + B)), (uint32_t)(W + B),
-                   "holding the bytes answered as written");
-    TEST_ASSERT_EQ(TestFirstDifference(back + W + B, old + W + B, B), B,
-                   "and the refused block as it was");
-out:
-    if (asked && !StandPortAnswered(seat, STAND_PORT_BOUND_MS)) {
-        data    = NULL;
-        file_id = 0;
-    }
-    if (armed)
-        BlockFailDisarm();
-    if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
-    kfree(old);
-    kfree(data);
-    kfree(back);
-    return verdict;
-}
-
 static const TestCase g_stand_port_tests[] = {
     { .name  = "stand_port_write_goes_through_the_port",
       .func  = TestStandPortWriteGoesThroughThePort, .reach = TEST_WRITES_TO_VOLUME },
-    { .name  = "stand_port_write_refused_part_way", .func = TestStandPortWriteRefusedPartWay,
-      .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V1, .analog = "stand_run_refused_inside_fresh_through_the_port" },
 };
 
 const TestSuite g_stand_port_suite = {

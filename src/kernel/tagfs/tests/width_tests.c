@@ -11,33 +11,20 @@
 #ifdef CONFIG_VOLUME_TESTS
 
 // ============================================================================
-// WIDTH — memory's widths against the narrower ones they are carried in
+// WIDTH — memory's widths against the narrower ones they once were carried in
 //
 // Memory counts a file's runs in Strips — a u64 first block, a u32 count — and
-// its id in a u64, the width a program holds it in too (box/types.h). A record
-// of format v1 carries a u32 first block, a u16 count and a u32 id. Where they
-// meet — PackV1 — a run is cut where the narrower width allows it and anything
-// else is refused, said, before a byte is written: never wrapped onto another
-// block's number or another file's. The records are packed into the test
-// buffer against a data run the test names; nothing touches a medium or the
-// volume's state. The storage deck is asked the way a program asks it.
+// its id in a u64, the width a program holds it in too (box/types.h). The
+// storage deck is asked the way a program asks it.
 //
-// A tag's id is a u32 in memory, a format v1 record's a u16 and v1's registry
-// issues none past 0x7FFE: a tag past 16 bits is its own tag to a record, the
-// index and Touch, a Logbook id (bit 31) is not a volume's, and a v1 volume is
-// refused the id it cannot carry. The index and the registry are the test's
-// own; the Touch ears are the test's, on ids no one else says anything on.
+// A tag's id is a u32 in memory: a tag past 16 bits is its own tag to a
+// record, the index and Touch, and a Logbook id (bit 31) is not a volume's.
+// The index and the registry are the test's own; the Touch ears are the
+// test's, on ids no one else says anything on.
 // ============================================================================
 
-#define WIDTH_RUN_START      100u           /* where the long Strip begins */
-#define WIDTH_RUN_BLOCKS     70000u         /* past the 0xFFFF blocks one extent of v1 counts */
+#define WIDTH_RUN_START      100u           /* where the record's Strip begins */
 #define WIDTH_FID            7u             /* the file id the records carry */
-#define WIDTH_UNWRITTEN      0xA5u          /* the record's room before a pack */
-#define WIDTH_EXTENTS_AT     36u            /* the record's u16 extent count (plot_pack.c) */
-
-/* A data run no block of format v1 reaches the end of: what the refusals below
- * are refused for is the record's width, never the volume's size. */
-#define WIDTH_RUN_PAST_V1    (1ull << 33)
 
 #define WIDTH_TAG_PAST_16    0x10007u      /* a tag id past 16 bits */
 #define WIDTH_TAG_BIT15      0x8009u       /* bit 15: a Logbook id to a kernel of 16-bit tags */
@@ -61,121 +48,6 @@ static TagFSMetadata WidthRecord(Strip* strips, uint32_t count, uint64_t fid)
     meta.extent_count = count;
     meta.filename     = s_width_name;
     return meta;
-}
-
-/* How many of the record room's bytes are not what they were before a pack. */
-static uint32_t WidthWritten(const uint8_t* room)
-{
-    uint32_t written = 0;
-    for (uint32_t i = 0; i < TAGFS_MPOOL_DATA_SIZE; i++)
-        written += room[i] != WIDTH_UNWRITTEN;
-    return written;
-}
-
-/*
- * A Strip of 70 000 blocks is packed as format v1 counts them: an extent of
- * 0xFFFF blocks and one of the 4465 after it, back to back — and read back as
- * the one Strip it was.
- */
-static TestResult TestWidthPackCutsLongStrip(void)
-{
-    TestResult    verdict = TEST_PASS;
-    Strip         strip   = { .start = WIDTH_RUN_START, .count = WIDTH_RUN_BLOCKS,
-                              .kind = STRIP_DATA, .birth = 0 };
-    TagFSMetadata meta    = WidthRecord(&strip, 1, WIDTH_FID);
-    TagFSMetadata back;
-    uint8_t*      rec     = g_test_output;
-    uint64_t      run     = (uint64_t)WIDTH_RUN_START + WIDTH_RUN_BLOCKS;
-    uint32_t      bytes   = 0;
-    uint16_t      extents = 0;
-    bool          dropped = true;
-    FileExtent    x[2];
-
-    memset(&back, 0, sizeof(back));
-    TEST_ASSERT_EQ(PackV1Extents(&strip, 1), 2, "the Strip is counted as two extents of v1");
-    TEST_ASSERT_OK(PackV1(&meta, run, rec, &bytes), "a record of 70000 blocks is packed");
-    TEST_ASSERT_EQ(bytes, RECORD_HEADER_SIZE + 2u * sizeof(FileExtent) + 1u,
-                   "as long as two extents and a one-byte name");
-    memcpy(&extents, rec + WIDTH_EXTENTS_AT, sizeof(extents));
-    memcpy(x, rec + RECORD_HEADER_SIZE, sizeof(x));
-    TEST_ASSERT_EQ(extents, 2, "the record says two extents");
-    TEST_ASSERT(x[0].start_block == WIDTH_RUN_START && x[0].block_count == 0xFFFFu,
-                "the first: 0xFFFF blocks from the Strip's first");
-    TEST_ASSERT(x[1].start_block == WIDTH_RUN_START + 0xFFFFu &&
-                x[1].block_count == WIDTH_RUN_BLOCKS - 0xFFFFu,
-                "the second: the 4465 blocks after them");
-
-    TEST_ASSERT_OK(UnpackV1(rec, bytes, run, &back, &dropped), "the record is read back");
-    TEST_ASSERT(!dropped, "naming its blocks");
-    TEST_ASSERT_EQ(back.file_id, WIDTH_FID, "as the file it was");
-    TEST_ASSERT_EQ(back.extent_count, 1, "its two extents joined into one Strip");
-    TEST_ASSERT(back.extents[0].start == WIDTH_RUN_START &&
-                back.extents[0].count == WIDTH_RUN_BLOCKS && back.extents[0].kind == STRIP_DATA,
-                "of all 70000 blocks");
-out:
-    tagfs_metadata_free(&back);
-    return verdict;
-}
-
-/* A record PackV1 must turn away, and the refusal it is turned away with. */
-typedef struct {
-    Strip    strip;
-    uint64_t fid;
-    error_t  refused;
-} WidthPastV1;
-
-static const WidthPastV1 s_width_past_v1[] = {
-    { { 1ull << 32, 1, STRIP_DATA, 0 },                   WIDTH_FID, ERR_TAGFS_RECORD_FULL },
-    { { 0xFFFFFFF0ull, 0x20, STRIP_DATA, 0 },             WIDTH_FID, ERR_TAGFS_RECORD_FULL },
-    { { WIDTH_RUN_START, 8, STRIP_HOLE, 0 },              WIDTH_FID, ERR_TAGFS_RECORD_FULL },
-    { { 0, 0xFFFFu * 1000u, STRIP_DATA, 0 },              WIDTH_FID, ERR_TAGFS_RECORD_FULL },
-    { { WIDTH_RUN_START, 8, STRIP_DATA, 0 }, (uint64_t)UINT32_MAX + 1u, ERR_TAGFS_FID_EXHAUSTED },
-};
-
-/*
- * What a record of format v1 cannot carry — a run from block 2^32, one that
- * crosses it, a hole, a run cut into more extents than a record holds, a file
- * id past 32 bits — is refused by PackV1 as what it is, and not a byte of the
- * record's room is written; nor is a packed record given an id past 32 bits.
- */
-static TestResult TestWidthPackRefusesPastV1(void)
-{
-    TestResult verdict = TEST_PASS;
-    uint8_t*   rec     = g_test_output;
-    uint32_t   cut     = 0;
-
-    for (uint32_t i = 0; i < ARRAY_SIZE(s_width_past_v1); i++) {
-        Strip         strip = s_width_past_v1[i].strip;
-        TagFSMetadata meta  = WidthRecord(&strip, 1, s_width_past_v1[i].fid);
-        uint32_t      bytes = 0;
-
-        memset(rec, WIDTH_UNWRITTEN, TAGFS_MPOOL_DATA_SIZE);
-        error_t rc = PackV1(&meta, WIDTH_RUN_PAST_V1, rec, &bytes);
-        if (rc == OK || bytes != 0 || WidthWritten(rec) != 0) {
-            cut++;
-            continue;
-        }
-        TEST_ASSERT_EQ(rc, s_width_past_v1[i].refused, "refused as what it cannot carry");
-    }
-
-    Strip         strip = { .start = WIDTH_RUN_START, .count = 8, .kind = STRIP_DATA, .birth = 0 };
-    TagFSMetadata meta  = WidthRecord(&strip, 1, WIDTH_FID);
-    uint32_t      bytes = 0;
-    TEST_ASSERT_OK(PackV1(&meta, WIDTH_RUN_PAST_V1, rec, &bytes), "a record v1 carries is packed");
-    memcpy(g_test_buffer, rec, bytes);
-    error_t refiled = PackV1Refile(rec, (uint64_t)UINT32_MAX + WIDTH_FID);
-    if (refiled == OK || memcmp(g_test_buffer, rec, bytes) != 0)
-        cut++;
-
-    TestEvidence("records past what format v1 carries packed, or written into before the "
-                 "refusal", cut);
-    if (cut) {
-        verdict = TEST_DEFECT;
-        goto out;
-    }
-    TEST_ASSERT_EQ(refiled, ERR_TAGFS_FID_EXHAUSTED, "an id past 32 bits is not refiled");
-out:
-    return verdict;
 }
 
 /* storage.getinfo of `fid`, its params as a program's file_info lays them,
@@ -229,9 +101,7 @@ out:
 /*
  * A tag id past 16 bits is its own tag, not the one its low 16 bits name: a
  * file's record in memory carries it whole and the index files the file under
- * it alone. A record of format v1 holds a tag in 16 bits and its registry
- * issues none past 0x7FFE: PackV1 refuses a record wearing one past that, not
- * a byte of its room written, and packs one wearing 0x7FFE itself.
+ * it alone.
  */
 static TestResult TestWidthTagPast16Bits(void)
 {
@@ -242,10 +112,8 @@ static TestResult TestWidthTagPast16Bits(void)
     TagFSMetadata   meta    = WidthRecord(&strip, 1, WIDTH_FID);
     TagBitmapIndex* idx     = tag_bitmap_create();
     FileRecord*     rec     = NULL;
-    uint8_t*        room    = g_test_output;
     uint64_t        found[2];
     TagFSPage       page;
-    uint32_t        bytes   = 0;
     uint32_t        cut     = 0;
 
     meta.tag_ids   = tags;
@@ -262,67 +130,12 @@ static TestResult TestWidthTagPast16Bits(void)
     TEST_ASSERT_EQ(TagBitmapQueryPage(idx, &low, 1, NULL, 0, NULL, 0, 1, found, 2, true, &page), 0,
                    "asked for the id the tag's low 16 bits name");
     cut += page.delivered;
-
-    for (uint32_t past = 0; past < 2; past++) {
-        tags[0] = past ? WIDTH_TAG_PAST_16 : TAGFS_V1_TAG_ID_MOST + 1u;
-        memset(room, WIDTH_UNWRITTEN, TAGFS_MPOOL_DATA_SIZE);
-        bytes = 0;
-        error_t rc = PackV1(&meta, WIDTH_RUN_PAST_V1, room, &bytes);
-        if (rc == OK || bytes != 0 || WidthWritten(room) != 0) {
-            cut++;
-            continue;
-        }
-        TEST_ASSERT_EQ(rc, ERR_TAGFS_RECORD_FULL, "a tag past format v1's is refused as what its record cannot carry");
-    }
-    TestEvidence("tag ids filed under their low 16 bits, or packed into a v1 record", cut);
-    if (cut) {
+    TestEvidence("tag ids filed under their low 16 bits", cut);
+    if (cut)
         verdict = TEST_DEFECT;
-        goto out;
-    }
-    tags[0] = TAGFS_V1_TAG_ID_MOST;
-    TEST_ASSERT_OK(PackV1(&meta, WIDTH_RUN_PAST_V1, room, &bytes), "and a record wearing 0x7FFE is packed");
 out:
     FileRecordRelease(rec);
     tag_bitmap_destroy(idx);
-    return verdict;
-}
-
-/*
- * The registry of a format v1 volume — the load sets its highest id to
- * 0x7FFE — issues 0x7FFE and refuses the tag after it, said, with no id given
- * and the tag not in it: never an id a v1 record would have to cut.
- */
-static TestResult TestWidthTagRegistryV1(void)
-{
-    TestResult   verdict = TEST_PASS;
-    TagRegistry* scratch = kmalloc(sizeof(TagRegistry));
-    bool         built   = false;
-    uint32_t     last    = TAGFS_INVALID_TAG_ID;
-    uint32_t     past    = TAGFS_INVALID_TAG_ID;
-    TagSpelling  a       = TagSpellingOfKey("width.v1.last");
-    TagSpelling  b       = TagSpellingOfKey("width.v1.past");
-
-    TEST_ASSERT(scratch != NULL, "memory for a registry of the test's own");
-    TEST_ASSERT_EQ(tag_registry_init(scratch), 0, "a registry of the test's own is built");
-    built = true;
-    scratch->id_most = TAGFS_V1_TAG_ID_MOST;   /* as tag_registry_load sets it for a v1 volume */
-    TagRegistryNumbersFrom(scratch, TAGFS_V1_TAG_ID_MOST);
-    TEST_ASSERT_OK(TagRegistryIntern(scratch, &a, &last), "the last id format v1 carries is issued");
-    TEST_ASSERT_EQ(last, TAGFS_V1_TAG_ID_MOST, "and it is 0x7FFE");
-
-    error_t rc = TagRegistryIntern(scratch, &b, &past);
-    TestEvidence("ids past 0x7FFE issued by the registry of a format v1 volume", rc == OK);
-    if (rc == OK) {
-        verdict = TEST_DEFECT;
-        goto out;
-    }
-    TEST_ASSERT_EQ(rc, ERR_TAGFS_REGISTRY_FULL, "the next tag is refused as a full registry");
-    TEST_ASSERT_EQ(past, TAGFS_INVALID_TAG_ID, "with no id given");
-    TEST_ASSERT_EQ(TagRegistryLookup(scratch, &b), TAGFS_INVALID_TAG_ID, "and the tag is not in it");
-out:
-    if (built)
-        tag_registry_destroy(scratch);
-    kfree(scratch);
     return verdict;
 }
 
@@ -442,24 +255,13 @@ out:
 }
 
 static const TestCase g_width_tests[] = {
-    { .name = "width_pack_cuts_long_strip", .func = TestWidthPackCutsLongStrip,
-      .reach = TEST_READS_ONLY },
-    { .name  = "width_pack_refuses_past_v1", .func = TestWidthPackRefusesPastV1,
-      .reach = TEST_READS_ONLY,
-      .caveat_defect = "a record past what format v1 carries — a block past 32 bits, a hole, more "
-                       "extents than a record holds, a file id past 32 bits — was packed cut, or "
-                       "its room written into before the refusal" },
     { .name  = "width_deck_carries_wide_fid", .func = TestWidthDeckCarriesWideFid,
       .reach = TEST_READS_ONLY,
       .caveat_defect = "a file id past 32 bits was read off the storage deck's wire cut to "
                        "another file's number" },
     { .name  = "width_tag_past_16_bits", .func = TestWidthTagPast16Bits,
       .reach = TEST_READS_ONLY,
-      .caveat_defect = "a tag id past 16 bits was filed as the tag its low 16 bits name, or "
-                       "packed into a record of format v1 that cannot carry it" },
-    { .name  = "width_tag_registry_v1", .func = TestWidthTagRegistryV1,
-      .reach = TEST_READS_ONLY,
-      .caveat_defect = "the registry of a format v1 volume issued a tag id past 0x7FFE" },
+      .caveat_defect = "a tag id past 16 bits was filed as the tag its low 16 bits name" },
     { .name  = "width_tag_index_costs_the_live", .func = TestWidthTagIndexCostsTheLive,
       .reach = TEST_READS_ONLY,
       .caveat_defect = "the index of who wears a tag cost the highest id issued, not the tags "

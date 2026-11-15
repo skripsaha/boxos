@@ -213,11 +213,11 @@ static TestResult TestStandChangeCutIntoHole(void)
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, TAGFS_BLOCK_SIZE, 21), TAGFS_BLOCK_SIZE, "a block is written");
     TEST_ASSERT_OK(StandFreshSpan(&m, fid, 10u * TAGFS_BLOCK_SIZE), "the file is grown across a hole of nine blocks");
     TEST_ASSERT(StandFreshSettledAndBack(&m, fid), "and settled");
-    free    = fs->ledger.free_blocks;
+    free    = fs->free_blocks;
     resting = FallowBlocks();
     TEST_ASSERT_OK(StandFreshSpan(&m, fid, 5u * TAGFS_BLOCK_SIZE), "the file is cut into its hole");
     TestEvidence("blocks a cut into a hole set to rest", FallowBlocks() - resting);
-    TEST_ASSERT(FallowBlocks() == resting && fs->ledger.free_blocks == free,
+    TEST_ASSERT(FallowBlocks() == resting && fs->free_blocks == free,
                 "and no block rests, nor came free: a hole owns no ground to give up");
     TEST_ASSERT(StandFreshSettledAndBack(&m, fid), "settled and mounted again, the file is five blocks, one of data");
     TEST_ASSERT_OK(StandFreshSpan(&m, fid, 0), "the file is cut to nothing");
@@ -289,10 +289,10 @@ static TestResult TestStandChangeGivenUpBetween(void)
     loaded = true;
     TEST_ASSERT_EQ(tagfs_delete_file(fid, INK_UNWARRANTED), 0, "the file is given up");
     InkBookPlotNext(&p);   /* as an Ink's next window holds the record again after it */
-    free = fs->ledger.free_blocks;
+    free = fs->free_blocks;
     TEST_ASSERT_EQ(PlotBeginWrite(&p, 0, true, TAGFS_BLOCK_SIZE, &at), ERR_FILE_NOT_FOUND,
                    "the Plot's next window is refused: the file is not found");
-    TEST_ASSERT_EQ(fs->ledger.free_blocks, free, "and no block was taken for it");
+    TEST_ASSERT_EQ(fs->free_blocks, free, "and no block was taken for it");
 out:
     if (loaded)
         PlotRelease(&p);
@@ -303,15 +303,15 @@ out:
 
 static const TestCase g_stand_fresh_change_tests[] = {
     { .name = "stand_fresh_change_names_only_new", .func = TestStandChangeNamesOnlyNew,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_fresh_change_laid_file", .func = TestStandChangeLaidFile,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_fresh_change_cut_into_hole", .func = TestStandChangeCutIntoHole,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_fresh_change_gloss_far", .func = TestStandChangeGlossFar,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_fresh_change_given_up_between", .func = TestStandChangeGivenUpBetween,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_fresh_change_suite = {

@@ -158,11 +158,11 @@ void    UseContextServiceIfPending(void);
 void    UseContextCabinChanged(void);
 
 /*
- * The volume remembers the context, in a chain of its own the Ledger names
+ * The volume remembers the context, carried by a stitch of its book
  * (tagfs/use_memory/use_memory.h) — say the current one to it. Done after
  * every set and clear, and when a volume comes up under a context the person
  * had already said. *remembered says whether the volume now holds exactly
- * this context: false with no volume up, no ground on it for the context, a
+ * this context: false with no volume up, no room on it for the context, a
  * medium that will not take the write, or a later word already said to it.
  * The context is set all the same — the person is told, never refused.
  */

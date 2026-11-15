@@ -10,16 +10,13 @@
 #include "../mount/away.h"   /* AwayDepartures — what a book's write is held to at its Ink */
 
 /*
- * PlotGather — a record out of room for extents gets it back by moving the
- * fewest blocks that give it (plot.h).
+ * PlotGather — a stretch of a file's runs laid in one run of ground: a defrag
+ * (plot.h).
  *
  * ‼ CONSECUTIVE RUNS, BECAUSE A RUN IS A PLACE IN THE FILE. Gathering runs
  * that are not neighbours in the file into one run on the medium saves
- * nothing: each still begins where the file's order puts it, so the record
- * still needs an extent for each. Only a window of neighbours laid in one run
- * becomes one Strip — as many extents as PackV1 cuts its length into — and
- * among the windows that shed enough, the one with the fewest blocks is the
- * cheapest to copy.
+ * nothing: each still begins where the file's order puts it. Only a window of
+ * neighbours laid in one run becomes one Strip.
  *
  * The new run is a Stake like any ground the call takes, so a write that goes
  * no further gives it back; the ground it leaves is the record's until a
@@ -31,19 +28,10 @@
  * its core back between two windows, the Helm kept. Nothing is named until the
  * last window is copied and made durable, so the move is one Ink, as before.
  *
- * On a book (format v2) the Plot's window is made the whole file first
- * (PlotWindowWhole): the gathered run is fresh ground like any write's, taken
+ * The Plot's window is made the whole file first (PlotWindowWhole): the gathered run is fresh ground like any write's, taken
  * whole or not at all, a hole of the file laid in it as zeros, and every block
  * of it named with its digest; no Strip the record names is grown into it.
  */
-
-/* How many extents of the record one run of `blocks` blocks takes — no more
- * blocks than a Strip counts. */
-static uint64_t PlotRunExtents(uint64_t blocks)
-{
-    Strip one = { .count = (uint32_t)blocks, .kind = STRIP_DATA };
-    return PackV1Extents(&one, 1);
-}
 
 /* B10, whatever the warrant: a warrant lets a call change a file the system
  * keeps, and never moves that file's blocks. Asked with the flags the file's
@@ -86,53 +74,25 @@ bool PlotStretchScattered(const Plot *p, uint32_t *first, uint32_t *last)
     return false;
 }
 
-/* The window [*first, *last] of runs the loaded record named that sheds at
- * least `shed` extents with the fewest blocks — no more than one Strip counts,
- * none of them SHARED; `shed` 0 wants a stretch whole: the first scattered,
- * or the first of all. */
-static bool PlotChooseWindow(const Plot *p, uint64_t shed, uint32_t *first, uint32_t *last,
-                             uint64_t *blocks)
+/* The stretch [*first, *last] of runs the loaded record named a defrag lays
+ * in one run — the first scattered, or the first of all — no more blocks than
+ * one Strip counts, none of them SHARED. */
+static bool PlotChooseWindow(const Plot *p, uint32_t *first, uint32_t *last, uint64_t *blocks)
 {
-    uint64_t best = UINT64_MAX;
-    uint64_t base = 0;
-    bool     one  = true;
-
-    if (shed == 0) {
-        uint64_t all = 0, end = 0;
-        if (!PlotStretchScattered(p, first, last) && !PlotStretchFrom(p, 0, first, last, &one))
-            return false;
-        for (uint32_t i = 0; i <= *last; i++)
-            end += p->runs[i].count;
-        for (uint32_t i = *first; i <= *last; i++)
-            all += p->runs[i].count;
-        *blocks = all;
-        return end <= p->blocks_before && all <= UINT32_MAX;
-    }
-
-    for (uint32_t i = 0; i < p->run_count; base += p->runs[i].count, i++) {
-        uint64_t sum = 0, end = base, extents = 0;
-        for (uint32_t j = i; j < p->run_count; j++) {
-            end += p->runs[j].count;
-            if (end > p->blocks_before || p->runs[j].kind == STRIP_SHARED)
-                break;                          /* only ground the record named moves, and its own */
-            sum += p->runs[j].count;
-            if (sum >= best || sum > UINT32_MAX)
-                break;                          /* ... into one run, as long as a Strip counts */
-            extents += PackV1Extents(&p->runs[j], 1);
-            if (extents >= PlotRunExtents(sum) + shed) {
-                best   = sum;
-                *first = i;
-                *last  = j;
-                break;
-            }
-        }
-    }
-    *blocks = best;
-    return best != UINT64_MAX;
+    uint64_t all = 0, end = 0;
+    bool     one = true;
+    if (!PlotStretchScattered(p, first, last) && !PlotStretchFrom(p, 0, first, last, &one))
+        return false;
+    for (uint32_t i = 0; i <= *last; i++)
+        end += p->runs[i].count;
+    for (uint32_t i = *first; i <= *last; i++)
+        all += p->runs[i].count;
+    *blocks = all;
+    return end <= p->blocks_before && all <= UINT32_MAX;
 }
 
 /* The runs with [first, last] replaced by the run [start, start + blocks) —
- * on a book, every other Strip as it was and the run one of its own. */
+ * every other Strip as it was and the run one of its own. */
 static error_t PlotSplice(Plot *p, uint32_t first, uint32_t last, uint64_t start, uint32_t blocks)
 {
     uint64_t room = (uint64_t)p->run_count + 1;
@@ -141,22 +101,11 @@ static error_t PlotSplice(Plot *p, uint32_t first, uint32_t last, uint64_t start
         return ERR_NO_MEMORY;
 
     uint32_t n = 0;
-    for (uint32_t i = 0; i < first; i++) {
-        if (p->book)
-            runs[n++] = p->runs[i];
-        else
-            PlotRunsPut(runs, &n, p->runs[i].start, p->runs[i].count);
-    }
-    if (p->book)
-        runs[n++] = (Strip){ .start = start, .count = blocks, .kind = STRIP_DATA };
-    else
-        PlotRunsPut(runs, &n, start, blocks);
-    for (uint32_t i = last + 1; i < p->run_count; i++) {
-        if (p->book)
-            runs[n++] = p->runs[i];
-        else
-            PlotRunsPut(runs, &n, p->runs[i].start, p->runs[i].count);
-    }
+    for (uint32_t i = 0; i < first; i++)
+        runs[n++] = p->runs[i];
+    runs[n++] = (Strip){ .start = start, .count = blocks, .kind = STRIP_DATA };
+    for (uint32_t i = last + 1; i < p->run_count; i++)
+        runs[n++] = p->runs[i];
 
     kfree(p->runs);
     p->runs      = runs;
@@ -165,14 +114,12 @@ static error_t PlotSplice(Plot *p, uint32_t first, uint32_t last, uint64_t start
     return OK;
 }
 
-/* One free run of exactly `blocks` near `hint` for the gather: on a book from
- * its derived map past the reserve it keeps, whole (AllotmentTakeBookRun),
- * what the run may add to the next Tally in the reserve before it is asked
+/* One free run of exactly `blocks` near `hint` for the gather: from the
+ * derived map past the reserve it keeps, whole (AllotmentTakeBookRun), what
+ * the run may add to the next Tally in the reserve before it is asked
  * (PlotStakesCount) — counted as a Stake once staked, none if refused. */
 static error_t PlotGatherTake(Plot *p, uint64_t blocks, uint64_t hint, uint64_t *start)
 {
-    if (!p->book)
-        return BlockMapTakeFor(p->fid, (uint32_t)blocks, hint, start, __func__);
     PlotStakesCount(p, blocks);
     error_t rc = AllotmentTakeBookRun(p->fid, (uint32_t)blocks, hint, EndpaperDataKeeps(true), start);
     if (rc != OK)
@@ -180,7 +127,7 @@ static error_t PlotGatherTake(Plot *p, uint64_t blocks, uint64_t hint, uint64_t 
     return rc;
 }
 
-error_t PlotGatherBegin(Plot *p, uint64_t shed, uint64_t hint, PlotGathering *g)
+error_t PlotGatherBegin(Plot *p, uint64_t hint, PlotGathering *g)
 {
     memset(g, 0, sizeof(*g));
     error_t rc = PlotWindowWhole(p);
@@ -191,17 +138,17 @@ error_t PlotGatherBegin(Plot *p, uint64_t shed, uint64_t hint, PlotGathering *g)
 
     uint32_t first = 0, last = 0;
     uint64_t blocks = 0;
-    if (!PlotChooseWindow(p, shed, &first, &last, &blocks)) {
-        kprintf("[TagFS] file %llu: no run of its %u extent(s) can be gathered to shed %llu of "
-                "them\n", p->fid, p->run_count, (unsigned long long)shed);
+    if (!PlotChooseWindow(p, &first, &last, &blocks)) {
+        kprintf("[TagFS] file %llu: no run of its %u extent(s) can be gathered\n", p->fid,
+                p->run_count);
         return ERR_TAGFS_RECORD_FULL;
     }
 
     uint64_t start = 0;
     rc = PlotGatherTake(p, blocks, hint, &start);
-    /* A book's take that waits — room on its way, a Tally that gives some back
+    /* A take that waits — room on its way, a Tally that gives some back
      * (allotment.c, AllotmentBookShort) — is no refusal, and says none. */
-    if (rc != OK && (!p->book || rc != ERR_WOULD_BLOCK))
+    if (rc != OK && rc != ERR_WOULD_BLOCK)
         kprintf("[TagFS] file %llu: gathering extents %u to %u of it needs one free run of %llu "
                 "block(s), and the volume has none that long\n", p->fid, first, last,
                 (unsigned long long)blocks);
@@ -213,9 +160,9 @@ error_t PlotGatherBegin(Plot *p, uint64_t shed, uint64_t hint, PlotGathering *g)
     PlotStakesCount(p, 0);
     if (rc != OK)
         return rc;
-    /* On a book the record the gather leaves is held its room on the ribbon
-     * before a block is copied (P21); the run goes back with the Plot. */
-    if (p->book && (rc = PlotWindowRoomAsked(p)) != OK)
+    /* The record the gather leaves is held its room on the ribbon before a
+     * block is copied (P21); the run goes back with the Plot. */
+    if ((rc = PlotWindowRoomAsked(p)) != OK)
         return rc;
     g->first  = first;
     g->last   = last;
@@ -272,8 +219,7 @@ static error_t PlotGatherWindow(Plot *p, PlotGathering *g)
             g->within = 0;
         }
     }
-    /* The file's last block goes with the Slips over it laid on it (format v2,
-     * tail_slip.h): the run's record lets them go with the block they lay on. */
+    /* The file's last block goes with the Slips over it laid on it (tail_slip.h): the run's record lets them go with the block they lay on. */
     uint64_t k = p->window_at;
     for (uint32_t i = 0; i < g->first; i++)
         k += p->runs[i].count;
@@ -348,11 +294,11 @@ error_t PlotGatherStep(Plot *p, PlotGathering *g, bool *out_laid)
     return rc;
 }
 
-error_t PlotGather(Plot *p, uint64_t shed, uint64_t hint)
+error_t PlotGather(Plot *p, uint64_t hint)
 {
     PlotGathering g;
     bool          laid = false;
-    error_t       rc   = PlotGatherBegin(p, shed, hint, &g);
+    error_t       rc   = PlotGatherBegin(p, hint, &g);
     while (rc == OK && !laid)
         rc = PlotGatherStep(p, &g, &laid);
     return rc;

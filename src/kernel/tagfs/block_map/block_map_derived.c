@@ -327,7 +327,7 @@ static error_t MapPut(GroundOwner owner, uint64_t who, uint64_t start, uint64_t 
     if (rc == OK && *met)
         MetSay(owner, who, start, end - start, *met, take);
     if (s_map.up)
-        tagfs_get_state()->ledger.free_blocks = s_map.free;
+        tagfs_get_state()->free_blocks = s_map.free;
     return rc;
 }
 
@@ -401,7 +401,7 @@ error_t BlockMapDerivedBuilt(const char** what)
         if (s_map.win[w].bits)
             s_map.win[w].longest = BitsLongest(s_map.win[w].bits);
     s_map.up = true;
-    tagfs_get_state()->ledger.free_blocks = s_map.free;
+    tagfs_get_state()->free_blocks = s_map.free;
     return OK;
 }
 
@@ -850,7 +850,7 @@ void BlockMapDerivedWidenPut(BlockMapWidening* w)
     }
     if (old_end % BLOCK_MAP_WINDOW_BLOCKS)
         WidenLastWindow(had - 1u, old_end, &page);
-    tagfs_get_state()->ledger.free_blocks = s_map.free;
+    tagfs_get_state()->free_blocks = s_map.free;
 #if CONFIG_STRICT
     WidenHeld(had - 1u, old_end);
 #endif
@@ -986,6 +986,6 @@ bool BlockMapDerivedStandHolds(uint64_t* free, uint32_t* mixed)
             holds = holds && (win->free == 0 || win->free == WindowBlocks(w)) && win->longest == win->free;
         }
     }
-    return holds && *free == s_map.free && *free == tagfs_get_state()->ledger.free_blocks;
+    return holds && *free == s_map.free && *free == tagfs_get_state()->free_blocks;
 }
 #endif

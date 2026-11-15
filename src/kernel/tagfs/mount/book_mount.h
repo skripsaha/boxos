@@ -8,11 +8,10 @@
 #include "../settle/endpaper_fact.h"
 
 /*
- * MountReadBook — a format-v2 volume's mount: its book read the way the spec
- * reads it (spec_v2 §4.5 пп.1–4, 8; §16.1 п.2–5), the Spine's slots and the
- * Tally of the newest one whose roots read, into the memory every format
- * shares — the map of live files, the registry, the tag index, the Use
- * Context — with every owner of every block claimed (§4.6) and the numbers
+ * MountReadBook — the volume's mount: its book read the way the spec reads it
+ * (spec_v2 §4.5 пп.1–4, 8; §16.1 п.2–5), the Spine's slots and the Tally of
+ * the newest one whose roots read, into memory — the map of live files, the
+ * registry, the tag index, the Use Context — with every owner of every block claimed (§4.6) and the numbers
  * the volume gives next past everything it showed.
  *
  * It reads the Tally and the ribbon of stitches sewn past it (§4.5 п.5,
@@ -27,7 +26,7 @@
  * Tally of it in time (settle/binder.h), named by a slot of the Spine.
  *
  * ‼ NOT A BYTE IS WRITTEN BY THE MOUNT, before the door or after it — no
- * Ledger, no Spare, no flush — but the one act a book's mount may make once
+ * stitch, no flush — but the one act a book's mount may make once
  * every verdict is in: taking the ground behind the volume, by a mount that
  * writes it (book_grow.c, §16.1 п.4). Two mounts of one volume that grows by
  * neither are one state (C12).
@@ -41,7 +40,7 @@
  * attending the mount; the maps it fills take their own leaf locks.
  */
 
-/* The ground of a format-v2 volume standing on the Deed `head`
+/* The ground of the volume standing on the Deed `head`
  * (volume_take_ground), of ground the partition table runs `ground_sectors`
  * long: its FRAME taken, block numbers counted from the volume's block 0 up
  * to its far Deed, and the verdicts the ground gives before a sector of the
@@ -56,8 +55,7 @@ error_t MountBookGround(uint8_t seat, const DeedCopy* head, uint64_t ground_sect
  * one stood on its far copy alone, nor one whose medium refuses writes as
  * protected; nor while the census cannot say the ground past its end is no
  * one's — a rotten FILES range may name it, an owner does. Then its far Deed
- * and its head are written for the longer volume, the format-v1 way
- * (ground_grow.h), the block map widened over the new ground and the data run
+ * and its head are written for the longer volume (ground_grow.h), the block map widened over the new ground and the data run
  * ended at the new far Deed. Said either way; nothing written unless all of
  * it can be (book_grow.c).
  */
@@ -81,9 +79,8 @@ void    MountBookLetGo(void);
  * header or its Parcels lost with a rotten range of the Tally, or written
  * against the book's own rules (spec_v2 §4.5 п.3, §2.9). Such a file opens
  * for nobody (ERR_TAGFS_CORRUPTED, as the storage deck answers it), its id is
- * never given again and the blocks it may name are held. False on a volume
- * of format v1, which locks none, when no volume is up, and for a file
- * Escheat let go — no file from then on.
+ * never given again and the blocks it may name are held. False when no
+ * volume is up, and for a file Escheat let go — no file from then on.
  *
  * What it reads is the mount's, let go of only with the volume's door shut
  * and nobody inside (tagfs_clear_the_ground): so it is asked inside the door.

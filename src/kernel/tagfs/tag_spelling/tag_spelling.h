@@ -24,19 +24,23 @@
  *   - blanks (space, tab) around a tag are not part of it;
  *   - the first ':' splits the key from the value, and "key:" is "key";
  *   - an empty key is no tag: ERR_TAGFS_INVALID_TAG;
- *   - the key is at most TAG_KEY_WIDTH bytes (a registry record's u8 key_len),
- *     and the key and the value together fit one registry record in one
- *     block: otherwise ERR_TAGFS_TAG_TOO_LONG;
+ *   - the key is at most TAG_KEY_WIDTH bytes (the book's u8 key_len), and the
+ *     key and the value together at most TAG_KEY_VALUE_WIDTH: otherwise
+ *     ERR_TAGFS_TAG_TOO_LONG;
  *   - in a list, tags are separated by ',' and a blank element is skipped.
  */
 
-#define TAG_KEY_WIDTH   255u
+#define TAG_KEY_WIDTH        255u
 
-/* The longest text of one tag: key, ':' and value, whole in one registry
- * record. A station that must copy one tag out of a program's memory judges
- * the text's whole length against it before it allocates, so blanks sent
- * around the tag count there. */
-#define TAG_TEXT_WIDTH  (TAGFS_REGISTRY_DATA_SIZE - TAGFS_REGISTRY_RECORD_HEAD + 1u)
+/* The bytes of one tag's key and value together — what every station, the
+ * book's TAGS and a stitch's Coined hold a tag to (mount/tally_leaves.c,
+ * settle/endpaper_fact.h). */
+#define TAG_KEY_VALUE_WIDTH  4074u
+
+/* The longest text of one tag: key, ':' and value. A station that must copy
+ * one tag out of a program's memory judges the text's whole length against it
+ * before it allocates, so blanks sent around the tag count there. */
+#define TAG_TEXT_WIDTH       (TAG_KEY_VALUE_WIDTH + 1u)
 
 typedef struct TagSpelling {
     const char *key;

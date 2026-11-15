@@ -1,5 +1,5 @@
 /*
- * TagBoot — the desk the Lectern chooses the kernel of a format-v2 volume at:
+ * TagBoot — the desk the Lectern chooses the volume's kernel at:
  * the kernel BOOT names, then the kernels its book names by role, each held to
  * the digests the book keeps of it before the jump (spec_v2 §16.7 пп.3–6;
  * tagboot_succession.c).
@@ -58,10 +58,28 @@ static void AttestSay(void *ctx, const char *line)
 
 /*
  * The pages a kernel of `bytes` is placed in, asked for at KERNEL_LOAD_ADDR.
- * A refusal is somebody else's range and is NOT freed — EDK2 frees with no
- * ownership check (tagboot.c, TagFsLoadKernel, says it whole): said, and no
- * kernel is placed. What this desk placed it hands back when the kernel there
- * is not the one, and only that.
+ * What this desk placed it hands back when the kernel there is not the one,
+ * and only that.
+ *
+ * ‼ A refusal here is somebody else's range, and it is NOT freed.
+ *
+ * Nothing at KERNEL_LOAD_ADDR is this loader's when it is asked for —
+ * ClaimHandoffPages (tagboot.c) asks for 0x0000, 0x1000 and 0xA000 and nothing
+ * else, and a kernel this desk placed before is unplaced before the next is
+ * asked for — so there is nothing here to re-claim. EDK2's
+ * CoreInternalFreePages performs no ownership check whatsoever: it finds the
+ * descriptor covering the address and calls CoreConvertPages(...,
+ * EfiConventionalMemory), so a free would hand up to KERNEL_MAX_SIZE of memory
+ * some firmware driver is holding back to the allocator and then write the
+ * kernel image over it. AllocatePages' own EFI_NOT_FOUND (UEFI 2.10 §7.2.1,
+ * "The requested pages could not be found") is exactly the answer EDK2 gives
+ * when the range IS held — "the pages to allocate have been allocated" — so no
+ * status code here distinguishes ours from theirs.
+ *
+ * Saying so and placing no kernel is the whole of the right answer: the
+ * Succession stops with a sentence on the screen, which is a boot that did not
+ * happen instead of a boot that corrupts firmware memory and fails somewhere
+ * else entirely.
  */
 static uint8_t *AttestPlace(void *ctx, uint64_t bytes)
 {

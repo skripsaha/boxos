@@ -1,12 +1,11 @@
-# logcheck_book_grow — a format-v2 volume taking the ground behind it, asked
-# of the kernel the way grow and growcut ask it of format v1 (logcheck.sh):
+# logcheck_book_grow — a format-v2 volume taking the ground behind it:
 #
-#   VOLUME_FORMAT=v2 logcheck.sh grow     a book on a bigger medium takes the
+#   logcheck.sh grow      a book on a bigger medium takes the
 #                         rest, after its mount has read it and before the door
 #                         — its data run ends at the new far Deed, its block
 #                         map counts the new ground free, volume-read reads the
 #                         grown book, and the next mount finds nothing to take
-#   VOLUME_FORMAT=v2 logcheck.sh growcut  C11 (spec_v2 §3.10): the power cut
+#   logcheck.sh growcut   C11 (spec_v2 §3.10): the power cut
 #                         between the far Deed's write and the head's — built
 #                         on the host from the record of the boot that grew,
 #                         not emulated — leaves a volume of its old size, read
@@ -23,9 +22,9 @@
 # grow_stretch, grow_stood_on, wait_for_line, chk, ok, bad, harness) is
 # stand.sh's or logcheck.sh's. Its own file for the reason logcheck_book.sh is.
 #
-# ‼ WHY growcut ON A BOOK IS CUT FROM A RECORD AND NOT ROLLED BACK. Format v1's
-# growcut lets the growth finish, boots on, and writes the old head back on the
-# host. A book's mount grows the volume before its door opens, and everything
+# ‼ WHY growcut ON A BOOK IS CUT FROM A RECORD AND NOT ROLLED BACK — letting
+# the growth finish, booting on and writing the old head back on the host. A
+# book's mount grows the volume before its door opens, and everything
 # the boot writes after it may land in the new ground — a Quire of ribbon, a
 # Tally — so a head rolled back under it leaves a book naming blocks past its
 # own end: a state no power cut makes. The record (POWERCUT=on) holds the
@@ -33,17 +32,16 @@
 # the head (ground_grow.c); the medium a cut between them leaves is the base
 # and every write before the head's epoch, built by volume-read's `cut`.
 
-GROW_BOOK_MORE=409600    # sectors the partition is stretched by: 200 MiB, the format-v1 scenarios' own
+GROW_BOOK_MORE=409600    # sectors the partition is stretched by: 200 MiB
 
-# grow_book_image NAME — a book built (VOLUME_FORMAT=v2, STRICT=on, the
-# caller's STAND_FORMAT v2), copied to $SCRATCH/NAME.img and its partition
-# stretched: "START COUNT" of the
-# stretched ground, nothing when it could not be made (said).
+# grow_book_image NAME — a book built (STRICT=on), copied to $SCRATCH/NAME.img
+# and its partition stretched: "START COUNT" of the stretched ground, nothing
+# when it could not be made (said).
 grow_book_image() {
     local img="$SCRATCH/$1.img" said
     rm -f build/boxos.img "$img"
-    if ! build_with_key VOLUME_FORMAT=v2 STRICT=on; then
-        bad "$1: make VOLUME_FORMAT=v2 STRICT=on does not build: $(grep -aE 'ERROR|error' "$SCRATCH/build.log" | tail -1)"
+    if ! build_with_key STRICT=on; then
+        bad "$1: make STRICT=on does not build: $(grep -aE 'ERROR|error' "$SCRATCH/build.log" | tail -1)"
         return 1
     fi
     cp build/boxos.img "$img" || { harness "$1: the book could not be copied to $img"; return 1; }
@@ -149,7 +147,6 @@ grow_book_after() {
 run_growbook() {
     echo "== grow, a book: a volume of format v2 on a bigger medium takes the ground behind it after its book is read =="
     local img="$SCRATCH/growbook.img" said start count before db
-    local STAND_FORMAT=v2    # every make of the scenario, run-bg's too, the book's format (stand.sh make)
     said=$(grow_book_image growbook) || { bad "growbook: no stretched book — ${said:-not built}"; buildkey_restore; return; }
     start=${said% *}; count=${said#* }
     before=$(grow_book_numbers "$img")
@@ -193,7 +190,6 @@ run_growcutbook() {
     echo "== growcut, a book: a growth cut between its far Deed and its head is a volume of its old size, and the next mount grows it (C11) =="
     local img="$SCRATCH/growcutbook.img" base="$SCRATCH/growcutbook.base.img" record="$SCRATCH/growcutbook.record"
     local cut="$SCRATCH/growcutbook.cut.img" said start count before tail epoch nums rc
-    local STAND_FORMAT=v2
     rm -f "$base" "$record" "$cut"
     said=$(grow_book_image growcutbook) || { bad "growcutbook: no stretched book — ${said:-not built}"; buildkey_restore; return; }
     start=${said% *}; count=${said#* }
@@ -320,7 +316,6 @@ grow_glass_fallow() {
 run_growglass() {
     echo "== growglass: a book on a bigger medium that may not take the ground behind it takes none of it =="
     local said
-    local STAND_FORMAT=v2
     said=$(grow_book_image growglass.base) || { bad "growglass: no stretched book — ${said:-not built}"; buildkey_restore; return; }
     grow_glass_frame "$SCRATCH/growglass.base.img"
     grow_glass_reach "$SCRATCH/growglass.base.img"

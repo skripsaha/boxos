@@ -52,16 +52,6 @@ typedef enum {
  * the caveat_step line in the commit of that step — caveat_defect stays, so a
  * defect that comes back after the lift is named in the line that fails it,
  * and the test itself does not change.
- *
- * format: the book the test is written for — DEED_FORMAT_V1 or
- * DEED_FORMAT_V2 — or DEED_FORMAT_NONE, left out, for any. A test stands
- * aside, counted and said by the runner, on a volume of the other format. A
- * test is written for format v1 only when what it holds is format v1's own —
- * its Ledger, chains, pool, Spares, integrity map — and then it names in
- * `analog` the test that holds a book to the same property, one the runner
- * walks and that runs on a book: tools/concordance.py holds every such name
- * to the tree (Concordance), so a property cannot stop being held on the
- * format the machine makes by a test quietly standing aside.
  */
 typedef struct {
     const char* name;
@@ -69,8 +59,6 @@ typedef struct {
     TestReach   reach;
     const char* caveat_step;
     const char* caveat_defect;
-    DeedFormat  format;
-    const char* analog;
 } TestCase;
 
 /* A suite: `const TestSuite g_<name>_suite`, defined in a file under tests/ (a
@@ -108,35 +96,26 @@ typedef struct {
     SUITE(core)            \
     SUITE(stress)          \
     SUITE(braid)           \
-    SUITE(cow)             \
     SUITE(boxhash)         \
     SUITE(book)            \
     SUITE(book_judge)      \
     SUITE(ribbon)          \
-    SUITE(integrity)       \
     SUITE(use_context)     \
     VOLUME_TESTS_ONLY(SUITE(stand)) \
     VOLUME_TESTS_ONLY(SUITE(stand_lock)) \
-    VOLUME_TESTS_ONLY(SUITE(stand_chain)) \
     VOLUME_TESTS_ONLY(SUITE(stand_spelling)) \
     VOLUME_TESTS_ONLY(SUITE(stand_roadstead)) \
-    VOLUME_TESTS_ONLY(SUITE(stand_map)) \
     VOLUME_TESTS_ONLY(SUITE(stand_plot)) \
     VOLUME_TESTS_ONLY(SUITE(stand_index)) \
-    VOLUME_TESTS_ONLY(SUITE(stand_ink)) \
     VOLUME_TESTS_ONLY(SUITE(stand_helm)) \
     VOLUME_TESTS_ONLY(SUITE(stand_port)) \
     VOLUME_TESTS_ONLY(SUITE(stand_use)) \
-    VOLUME_TESTS_ONLY(SUITE(stand_use_chain)) \
-    VOLUME_TESTS_ONLY(SUITE(stand_seal)) \
     VOLUME_TESTS_ONLY(SUITE(stand_settle)) \
-    VOLUME_TESTS_ONLY(SUITE(stand_glean)) \
     VOLUME_TESTS_ONLY(SUITE(stand_read)) \
     VOLUME_TESTS_ONLY(SUITE(stand_run)) \
     VOLUME_TESTS_ONLY(SUITE(stand_medium)) \
     VOLUME_TESTS_ONLY(SUITE(stand_warrant)) \
     VOLUME_TESTS_ONLY(SUITE(stand_room)) \
-    VOLUME_TESTS_ONLY(SUITE(stand_integrity)) \
     VOLUME_TESTS_ONLY(SUITE(frame)) \
     VOLUME_TESTS_ONLY(SUITE(width)) \
     VOLUME_TESTS_ONLY(SUITE(parcel)) \
@@ -187,7 +166,7 @@ TEST_SUITES(TEST_SUITE_DECLARED)
 // A failed assertion says so with kprintf — test, file:line, what should have
 // held, and the two values — and jumps to `out`. It used to be debug_printf and
 // a bare `return TEST_FAIL`: silent in every build that goes on a board, and
-// every file, block and snapshot the test held stayed on the volume.
+// every file and block the test held stayed on the volume.
 //
 // The two values are what was seen and what had to be seen; a truth that did
 // not hold prints (0, 1).
@@ -229,10 +208,9 @@ void TestEvidence(const char* words, uint64_t n);
 
 /* What a test that writes leaves behind, as the runner counts it before and
  * after every such test (tests.c, the residue guard): the files, and the
- * blocks in use outside the volume's own ground — format v1's chains, pool and
- * maps; a book's Tallies, ribbon and Fallow. On a book `held` is read across a
- * test only when no cycle settled within it (`cycles`): a Tally cut there
- * keeps nodes no slot names. A test whose defect IS a leak takes the same
+ * blocks in use outside the volume's own ground — the book's Tallies, ribbon
+ * and Fallow. `held` is read across a test only when no cycle settled within
+ * it (`cycles`): a Tally cut there keeps nodes no slot names. A test whose defect IS a leak takes the same
  * count, to measure what it leaked and to give back exactly that — so the
  * guard stays strict for everybody. */
 typedef struct {

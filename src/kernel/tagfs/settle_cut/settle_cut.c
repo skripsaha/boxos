@@ -9,20 +9,13 @@
 
 /* The Makefile hands the point over as SETTLE_CUT_POINT_<VALUE>; a value that
  * names no point is an undeclared identifier and never gets this far. */
-_Static_assert(CONFIG_TAGFS_SETTLE_CUT_POINT >= SETTLE_CUT_POINT_REGISTRY &&
+_Static_assert(CONFIG_TAGFS_SETTLE_CUT_POINT >= SETTLE_CUT_POINT_FLUSH &&
                CONFIG_TAGFS_SETTLE_CUT_POINT <= SETTLE_CUT_POINT_LAST,
                "SETTLECUT names no point of the Settle cycle");
 
 static const char *const SettleCutWhere[] = {
-    [SETTLE_CUT_POINT_REGISTRY]  = "before the tag registry is written",
-    [SETTLE_CUT_POINT_POOL]      = "before the metadata pool is written",
-    [SETTLE_CUT_POINT_TABLE]     = "before the file table is written",
-    [SETTLE_CUT_POINT_INTEGRITY] = "before the integrity map is written",
-    [SETTLE_CUT_POINT_BITMAP]    = "before the block bitmap is written",
-    [SETTLE_CUT_POINT_LEDGER]    = "before the ledger is written",
     [SETTLE_CUT_POINT_FLUSH]     = "before the medium's cache is flushed",
     [SETTLE_CUT_POINT_DONE]      = "after the cache flush, with the whole cycle on the medium",
-    [SETTLE_CUT_POINT_USECHAIN]  = "before the Use Context's chain is written",
     [SETTLE_CUT_POINT_STITCH]    = "before the stitch's last atom is written",
     [SETTLE_CUT_POINT_TALLY]     = "before a Tally's flush, its nodes written and no slot naming them",
     [SETTLE_CUT_POINT_SLOT]      = "before the second half of a Tally's slot is written",

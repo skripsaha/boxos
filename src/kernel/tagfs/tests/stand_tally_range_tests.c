@@ -29,7 +29,7 @@
 static uint64_t StandTallyLeafFirstFile(const TallyPlace* leaf)
 {
     uint64_t from = leaf->has_lo ? leaf->lo.k1 + (leaf->lo.k2 != 0 ? 1u : 0u) : 0, fid = 0;
-    if (FileMapRows(tagfs_get_state()->files, from, &fid, 1) != 1)
+    if (FileMapFiles(tagfs_get_state()->files, from, &fid, 1) != 1)
         return 0;
     if (leaf->has_hi && (fid > leaf->hi.k1 || (fid == leaf->hi.k1 && leaf->hi.k2 == 0)))
         return 0;

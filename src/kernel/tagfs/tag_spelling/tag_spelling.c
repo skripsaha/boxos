@@ -10,7 +10,7 @@ error_t TagSpellingFits(size_t key_len, size_t value_len)
 {
     if (key_len > TAG_KEY_WIDTH)
         return ERR_TAGFS_TAG_TOO_LONG;
-    if (value_len > TAGFS_REGISTRY_DATA_SIZE - TAGFS_REGISTRY_RECORD_HEAD - key_len)
+    if (value_len > TAG_KEY_VALUE_WIDTH - key_len)
         return ERR_TAGFS_TAG_TOO_LONG;
     return OK;
 }

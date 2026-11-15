@@ -64,8 +64,7 @@ error_t SpineSlotJudgeSectors(SpineSlot* slot, const uint8_t* sectors);
  * not read a sector of a slot is the medium's refusal too, noted as one
  * (ERR_READ_FAILED): that slot may be the one that holds, and a sector a
  * reset of the seat gives back is no verdict on the book — the mount is asked
- * again on the seat's answer, as format v1's is when its Ledger will not read
- * (tagfs.c, mount_attempt). */
+ * again on the seat's answer (tagfs.c, mount_attempt). */
 error_t SpineRead(const VolumeFrame* frame, SpineSlot** out, uint32_t* count, char* what, size_t room);
 
 /* A slot's memory, and a run of them, let go. */

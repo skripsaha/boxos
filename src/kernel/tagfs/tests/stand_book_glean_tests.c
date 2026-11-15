@@ -1,13 +1,13 @@
 #include "stand_binder.h"
 #include "stand_fresh.h"
 #include "../settle/binder.h"
+#include "../settle/binder_internal.h"
 #include "../settle/foliation.h"
 #include "../settle/settle.h"
 #include "../mount/book_mount.h"
 #include "../mount/tally_read.h"
 #include "../mount/ribbon.h"
 #include "../file_map/file_map.h"
-#include "../glean/glean.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -344,9 +344,9 @@ out:
 
 static const TestCase g_stand_book_glean_tests[] = {
     { .name = "stand_book_glean_quires", .func = TestStandBookGleanQuires,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_book_glean_copies", .func = TestStandBookGleanCopies,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_book_glean_suite = {

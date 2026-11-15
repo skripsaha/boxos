@@ -78,19 +78,12 @@ bool     VolumeFlushKept(uint64_t need);
 error_t  VolumeFlushFor(uint64_t need);
 
 /*
- * Every write of the volume whose completion was seen names, read after it,
- * the smallest flush that proves it — and whether a kept flush covers every
- * one of them is whether a medium that lost its power just now lost anything
- * the volume wrote: a cache the medium had not flushed goes with the power.
- * A medium that leaves and comes back is taken up as it was held only when
- * the answer is yes (mount/away.h). VolumeWriteSeen: after the completion of
- * a write of the volume, on either road; VolumeWritesKept: whether every write
- * seen so far is covered. VolumeWritesAnswered: how many were seen this boot —
- * a stopping machine's drain sees by it that a step of a Settle cycle or a
- * window of a write still takes the medium's answers (system_halt.c).
+ * VolumeWriteSeen: after the completion of a write of the volume, on either
+ * road. VolumeWritesAnswered: how many were seen this boot — a stopping
+ * machine's drain sees by it that a step of a Settle cycle or a window of a
+ * write still takes the medium's answers (system_halt.c).
  */
 void     VolumeWriteSeen(void);
-bool     VolumeWritesKept(void);
 uint64_t VolumeWritesAnswered(void);
 
 // ============================================================================
@@ -111,10 +104,10 @@ uint64_t VolumeWritesAnswered(void);
 //      TagFS lock.
 //   3. Take or wait for a Scribe with no TagFS lock held — a core spinning for
 //      a Scribe with interrupts off would never hear the completion the holder
-//      is waiting for — and nest Scribes only downward: the Settle, then the
-//      registry. The witness names a Scribe asked for under a TagFS lock
-//      ([LockRank] ... held across a wait for a Scribe), and a "[Scribe]" line
-//      names one asked for out of order; both let the work go on.
+//      is waiting for — and never nest two of one rank. The witness names a
+//      Scribe asked for under a TagFS lock ([LockRank] ... held across a wait
+//      for a Scribe), and a "[Scribe]" line names one asked for out of order;
+//      both let the work go on.
 //   4. A pass that fails keeps what it did not write owed in memory, so the
 //      next pass writes it again: a later pass covers every earlier ticket.
 //   5. A module's I/O buffer belongs to whoever holds its Scribe.
@@ -147,9 +140,8 @@ uint64_t VolumeWritesAnswered(void);
 // ============================================================================
 
 typedef enum {
-    SCRIBE_RANK_SETTLE   = 1,   /* the Settle cycle, the whole of it */
-    SCRIBE_RANK_REGISTRY = 2,   /* innermost */
-    SCRIBE_RANK_LAST     = SCRIBE_RANK_REGISTRY
+    SCRIBE_RANK_SETTLE = 1,     /* the Settle cycle, the whole of it */
+    SCRIBE_RANK_LAST   = SCRIBE_RANK_SETTLE
 } ScribeRank;
 
 typedef enum {
@@ -201,34 +193,5 @@ bool       ScribeAnyHeldHere(void);
  * continuations when it stands on the drain core. */
 ScribeTurn ScribeWaitFor(const volatile uint32_t *holder, bool (*settled)(const void *ctx),
                          const void *ctx);
-
-// ============================================================================
-// Spare — a block stamped before anything names it
-//
-// THE SPARE RULE. No next_block on the medium names a block until
-//   (1) the write of its stamp returned OK,
-//   (2) need = VolumeFlushNeed() was read after that, and
-//   (3) VolumeFlushFor(need) == OK.
-// A power cut may keep any subset of the writes since the last kept flush, so
-// a stamp written in the same flush epoch as the link to it may be lost while
-// the link survives: the next mount then follows the link into ground that
-// holds whatever it held. The stamp must be in an EARLIER epoch than the link,
-// and a kept flush between them is the only thing that says so.
-// ============================================================================
-
-/*
- * One block from the allocator, stamped with an empty header carrying `magic`
- * — next_block 0, nothing in it, the shape volume-read calls a Spare — written
- * from `image`, the caller's own TAGFS_BLOCK_SIZE buffer. OK: *out_block is
- * stamped on the medium and *out_need is the need its link must wait for. The
- * allocator's refusal as it is — ERR_TAGFS_NO_SPACE, or ERR_WOULD_BLOCK while
- * Fallow rests blocks a cycle would give back — and a refused write gives the
- * block back. A Spare of the pool's (TAGFS_MPOOL_MAGIC) is taken by the door
- * that may have the ground every other take leaves free for the pool's
- * reserve (BlockMapTakeSpare). Called inside the door with no TagFS lock held:
- * under the consumer's Scribe, or by an Ink's caller, whose file's Helm may be
- * held.
- */
-error_t SpareStamp(uint32_t magic, void *image, uint32_t *out_block, uint64_t *out_need);
 
 #endif /* TAGFS_SCRIBE_H */

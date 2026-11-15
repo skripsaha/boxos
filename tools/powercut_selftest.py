@@ -93,7 +93,6 @@ def SelfTest(pc):
 
     PlanTests(pc, Want, Plan)
     RecordTests(Want, Recorded)
-    CrowdTests(pc, Want)
     try:
         CompactTests(pc, Want)
         BookTests(pc, Want, Plan, Synthetic)
@@ -153,20 +152,16 @@ def PlanTests(pc, Want, Plan):
 
 def RecordTests(Want, Recorded):
     """A run of a record: the flush behind a step, Exhaustive, prefixes and subsets."""
-    ledger = (1, None, "ledger")
-    run = Recorded([[ledger], [1], [1]], 0, 4)
-    Want(run.AckFlush(run.steps[0]) == 2, "the flush behind a step is the first after its ledger, not a "
-         "writer's later one (%s)" % run.AckFlush(run.steps[0]))
-    run = Recorded([[1], [ledger]], 0, 3)
-    Want(run.AckFlush(run.steps[0]) is None, "a data writer's flush before the step's ledger stands behind "
-         "nothing of the step's (%s)" % run.AckFlush(run.steps[0]))
     run = Recorded([[1], [1]], 0, 3)
     Want(not run.CommitWrites(run.steps[0]) and run.AckFlush(run.steps[0]) is None,
-         "a step that wrote no ledger has no flush of its own")
+         "a step that wrote no stitch has no flush of its own")
     sewn = (1, None, "stitch")
     run = Recorded([[1, sewn], [1]], 0, 4)
-    Want(run.AckFlush(run.steps[0]) == 3, "on a book the flush behind a step is the first after its "
-         "stitch, the unit a cycle of format v2 commits by (%s)" % run.AckFlush(run.steps[0]))
+    Want(run.AckFlush(run.steps[0]) == 3, "the flush behind a step is the first after its stitch, the "
+         "unit a cycle commits by (%s)" % run.AckFlush(run.steps[0]))
+    run = Recorded([[1], [sewn]], 0, 3)
+    Want(run.AckFlush(run.steps[0]) is None, "a data writer's flush before the step's stitch stands behind "
+         "nothing of the step's (%s)" % run.AckFlush(run.steps[0]))
     Want(Recorded([[1, 1], [1]], 0, 3).Exhaustive() and not Recorded([[1] * 14], 0, 0).Exhaustive()
          and not Recorded([[40]], 0, 0).Exhaustive(),
          "a record is enumerated whole only with no subset and no torn prefix left out")
@@ -190,48 +185,12 @@ def RecordTests(Want, Recorded):
          % (run.Canon("e0-all"), run.kind.get("e0-s2")))
 
 
-def CrowdTests(pc, Want):
-    """crowd: the names a recorded run makes at the registry's and the table's edges."""
-    def Crowd(nfid, used, names=0):
-        check = {"ledger": {"standing_on": 0, "copies": [{"copy": 0, "next_file_id": nfid}]},
-                 "chains": {"registry": [0], "table": [1], "registry_tail_used": used,
-                            "registry_block_data": 4080, "registry_record_header": 6,
-                            "table_rows_per_block": 510}}
-        with tempfile.TemporaryDirectory() as d:
-            path = os.path.join(d, "check.json")
-            with open(path, "w") as fh:
-                json.dump(check, fh)
-            out = io.StringIO()
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-                rc = pc.CmdCrowd(argparse.Namespace(check=path, name_bytes=15, room=1, names=names))
-        said = out.getvalue().split("\t")
-        return rc, said[:2] if said[0] == "edges" else said[:3]
-
-    rc, said = Crowd(71, 1202)
-    Want(rc == 0 and said == ["more", "330", "108"],
-         "fid 71 and 1202 registry bytes: 330 new names and 108 made again — 438 ids, and 137 - 1 + "
-         "194 records leave room for one (%s %s)" % (rc, said))
-    rc, said = Crowd(509, 4053)
-    Want(rc == 0 and said == ["edges", "2"], "at both edges the recorded run makes 2 files (%s %s)"
-         % (rc, said))
-    Want(Crowd(508, 4053)[1][0] == "more" and Crowd(509, 4032)[1][0] == "more",
-         "one row or one record off either edge is not at both edges")
-    rc, said = Crowd(509, 12, names=326)
-    Want(rc == 0 and said == ["more", "192", "318"],
-         "a round the machine's own tags carried past the registry's edge — fid 509, 12 bytes in a "
-         "fresh block, 326 names made — goes on to the table's next block: 192 new names and 318 "
-         "made again (%s %s)" % (rc, said))
-    rc, said = Crowd(508, 4053, names=10)
-    Want(rc == 0 and said == ["more", "0", "1"],
-         "one row short with the registry at its edge: one name made again (%s %s)" % (rc, said))
-
-
 def CompactTests(pc, Want):
     # A book's `check --json` (bookcensus.py Json): its kernel has no fsck, and
     # a locked file is its fid, state and why alone — the shape volume-read
     # gives landing B4's fid 87.
     live = {"fid": 1, "state": "live", "name": "a", "size": 3, "sha256": "ab" * 32, "visible": True}
-    book = {"format": "v2", "verdict": "clean", "findings": [],
+    book = {"verdict": "clean", "findings": [],
             "kernel": {"mounts": True, "refusal": None, "data_blocks": 9, "free": 5, "files": 1,
                        "slot": 0, "locked": [87]},
             "book": {"slot": 0, "slots": [{"index": 0, "counts": {"next_fid": 120}}],
@@ -244,7 +203,7 @@ def CompactTests(pc, Want):
     except KeyError as e:
         got = {"error": "KeyError %s" % e}
     Want(got.get("new_files") == [[87, None, "locked", False, None, None]] and not got["base_changed"]
-         and "fsck" not in got and (got["next_file_id"], got["ledger_next"]) == (120, 120),
+         and "fsck" not in got and (got["next_file_id"], got["slot_next"]) == (120, 120),
          "a book's check, a locked file in it, compacts: no fsck, the locked fid new and nameless, "
          "the next fid against its slot's (%s)" % {x: got.get(x) for x in ("error", "new_files", "fsck")})
 
@@ -303,7 +262,7 @@ def Judged(pc, listing, results, lies=None, lie_results=None):
             for m in lies["media"]:
                 if m["same"] is None:
                     fh.write(json.dumps(dict(lie_results(m), id=m["id"])) + "\n")
-    base = {"format": "v2", "files": [{"fid": 1, "name": "a", "size": 3, "sha256": "aa", "visible": True,
+    base = {"files": [{"fid": 1, "name": "a", "size": 3, "sha256": "aa", "visible": True,
                                        "state": "live"}]}
     return powercut_judge.Judge(pc.Run(d), base, {}, "p", 0)
 
@@ -311,8 +270,8 @@ def Judged(pc, listing, results, lies=None, lie_results=None):
 def Book(files, findings=(), last=3, lied=False, sewn=()):
     """One cut of a book as Compact keeps it: every file as [fid, name, size, sha256]."""
     return {"rc": 0, "verdict": "inconsistent" if any(f[1] in ("damage", "leak") for f in findings)
-            else "consistent", "mounts": True, "refusal": None, "format": "v2",
-            "says": {"data_blocks": 9, "free": 5, "files": len(files)}, "next_file_id": 9, "ledger_next": 9,
+            else "consistent", "mounts": True, "refusal": None,
+            "says": {"data_blocks": 9, "free": 5, "files": len(files)}, "next_file_id": 9, "slot_next": 9,
             "refused": {}, "chains": {}, "findings": [list(f) for f in findings], "base_changed": [],
             "new_files": [], "files": [list(f) for f in files],
             "book": {"slot": 0, "tally": 1, "stitches": len(sewn), "torn": 0, "lied": lied, "glass": [],
@@ -321,7 +280,7 @@ def Book(files, findings=(), last=3, lied=False, sewn=()):
 
 def BookTests(pc, Want, Plan, Synthetic):
     """A book's matrix: a stitch torn at every sector it has (C2), the records
-    of a logger, and the oracles a book's run is held to beside format v1's."""
+    of a logger, and the oracles a book's run is held to."""
     e = Plan([[(40, None, "stitch")]])["epochs"][0]
     Want((e["tears"], e["tears_not_built"]) == (39, 0),
          "a stitch of 40 sectors, the epoch's last write, is torn after every one of them whatever "
@@ -453,15 +412,15 @@ def DurableTests(pc, Want, Synthetic):
          % (Durable(3850, 3850, [3700]),))
     Want(Durable(57, 57, lo=1)[0] == "behaves",
          "a churn stopped before its first word, the final state reading seq 57 back past a record of 2 entries "
-         "from 1: bounded by the medium, not by format v1's count of writes (%s)" % (Durable(57, 57, lo=1),))
+         "from 1: bounded by the medium, not by a count of writes (%s)" % (Durable(57, 57, lo=1),))
     Want(Durable(3740, 3739, [3700])[0] == "fail" and "3700..3739 allowed" in Durable(3740, 3739, [3700])[1],
          "a record past the newest the final state holds is no record the medium took: fails, and says the seqs "
          "it allowed (%s)" % (Durable(3740, 3739, [3700]),))
     Want(Durable(3699, 3739, [3700])[0] == "fail", "a record older than the floor the halt stood behind fails")
     most = 3700 + shape["entries"]
     Want(Durable(most, None)[0] == "behaves" and Durable(most + 1, None)[0] == "fail",
-         "with no final state read back, the record's count of entries past the floor bounds it, %u — format "
-         "v1's rule, where each record is a write of its own (%s, %s)"
+         "with no final state read back, the record's count of entries past the floor bounds it, %u "
+         "(%s, %s)"
          % (shape["entries"], Durable(most, None), Durable(most + 1, None)))
 
 
@@ -470,13 +429,11 @@ def ReissueTests(pc, Want, Synthetic):
     the cut that asks it bears the anchor's file on its ribbon ahead of the
     slot it stands on, and anchor_test finds the file there and creates none:
     the boot is asked for a file the medium never held (persist write), and
-    the id it is given is what the verdict reads. On format v1, anchor_test's
-    own create, as it always was."""
+    the id it is given is what the verdict reads."""
     shape = Synthetic([[(8, None, "stitch", "stitch seq 4, 8 sector(s)")], []])
 
-    def Reissue(log, fmt="v2"):
-        j = Judged(pc, shape, lambda cid: dict(Book([]), next_file_id=82, ledger_next=81))
-        j.base = dict(j.base, format=fmt)
+    def Reissue(log):
+        j = Judged(pc, shape, lambda cid: dict(Book([]), next_file_id=82, slot_next=81))
         j.run.steps = [{"step": "anchor_test", "line": "[ANCHOR] WROTE+ANCHORED fid=81.", "durable": None}]
         j.boots = [{"id": "e0-all", "why": "prefix through entry 1 (stitch); the boundary after the flush of "
                     "anchor_test", "log": log}]
@@ -491,8 +448,6 @@ def ReissueTests(pc, Want, Synthetic):
     Want(Reissue(found)[0] == "fail",
          "a book's boot that created nothing — anchor_test found its file — asked no question: no PASS for it "
          "(%s)" % (Reissue(found),))
-    Want(Reissue("[ANCHOR] WROTE+ANCHORED fid=81. Now kill QEMU and re-run.\n", "v1")[0] == "defect",
-         "format v1: anchor_test's own create given 81 below the 82 due is the reissue, as it was")
 
 
 def LieTests(pc, Want, Synthetic):
@@ -828,7 +783,7 @@ def ChainTests(pc, Want, Synthetic, pjb):
         os.makedirs(boots)
         with open(os.path.join(j.run.dir, "chain.txt"), "w") as fh:
             fh.write("e1-s1\t1\t0\t-\tthe first cut whose stitch landed and some of its data did not\n")
-        after = {"format": "v2", "verdict": "clean", "findings": [],
+        after = {"verdict": "clean", "findings": [],
                  "kernel": {"mounts": True, "refusal": None, "data_blocks": 9, "free": 5, "files": 1, "slot": 0},
                  "book": {"slot": 0, "slots": [{"index": 0, "counts": {"next_fid": 9}}], "counts": {"next_fid": 9},
                           "tally": {"seq": 4}, "under_glass": [],

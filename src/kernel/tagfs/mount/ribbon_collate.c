@@ -18,7 +18,7 @@
  * of another session, whatever seq it carries, does not fit (ZIL's GUID+SEQ
  * in a block's sum, zil.h:109-115). The walk is bounded twice: every stitch
  * taken has a larger seq than the last, and no more are taken than the data
- * run has blocks (`hops >= data_blocks`, meta_pool_mount.c:478-480).
+ * run has blocks (`hops >= data_blocks`).
  *
  * ‼ THE NEXT UNIT IS WHERE THE LAST ONE ENDS BY ITS WRITER'S ATOM (§16.2
  * п.11): `start + of`, never this mount's atom — a volume moved onto a medium
@@ -144,7 +144,7 @@ static bool RibbonGroundBuilt(RibbonWalk* w)
     uint32_t    n;
     if (w->ground_built)
         return true;
-    while ((n = FileMapRows(fs->files, from, ids, 16)) > 0) {
+    while ((n = FileMapFiles(fs->files, from, ids, 16)) > 0) {
         for (uint32_t i = 0; i < n; i++) {
             FileRecord* rec  = FileMapRecordHold(fs->files, ids[i], NULL);
             bool        room = true;

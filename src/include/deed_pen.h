@@ -97,8 +97,8 @@ static inline int DeedPenSame(const uint8_t *a, const uint8_t *b, uint32_t n)
 
 /*
  * CRC-32 (ISO 3309), the sum a Deed is checked with — and the same routine GPT
- * is specified in, so one implementation checks a partition table, a Deed and
- * a Ledger. Bitwise rather than table-driven: it runs over four kilobytes
+ * is specified in, so one implementation checks a partition table and a Deed.
+ * Bitwise rather than table-driven: it runs over four kilobytes
  * twice per volume in the tool and twice per mount in the kernel, and a 1 KiB
  * table in a header included everywhere is a worse trade than those cycles.
  */
@@ -281,7 +281,7 @@ static inline void DeedPenSetUuid(DeedPen *pen, const uint8_t uuid[16])
 }
 
 /* How far the volume's ground runs, and where inside it the far copy sits.
- * These two and the LAYOUT stamp are the whole of what growth changes. */
+ * These two are the whole of what growth changes in the Deed. */
 static inline void DeedPenSetGround(DeedPen *pen, uint64_t sectors,
                                     uint64_t tail_sector)
 {

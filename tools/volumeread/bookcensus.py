@@ -1,7 +1,7 @@
-"""bookcensus — the roll call of a format-v2 volume (spec_v2 §4.6): every
-owner of every block, set against the book's mount (bookmount.py).
+"""bookcensus — the roll call of a volume (spec_v2 §4.6): every owner of
+every block, set against the book's mount (bookmount.py).
 
-A format-v2 volume keeps no bitmap: which blocks are taken is derived from
+A volume keeps no bitmap: which blocks are taken is derived from
 the names that take them. So the census here is the derivation itself — the
 front of the volume before its data run, the Spine's slots, every node of the
 Tally of every slot that holds (every copy), the ribbon's Quires from the
@@ -23,7 +23,7 @@ writer could not carry on. The census scenario boots a landing and holds the
 kernel's own lines to that.
 
 The owners are the kernel's own list (src/include/ground_owner.h), generated
-into ground_owners.py: BOOK_OWNERS, those of format v2.
+into ground_owners.py: BOOK_OWNERS.
 """
 
 import hashlib
@@ -267,8 +267,8 @@ def KernelBook(g, m, held, free, fallow):
 
 
 class BookCensus:
-    """Every owner of every block of a format-v2 volume, its mount's findings,
-    and the account in the shape GroundCensus gives a format-v1 one."""
+    """Every owner of every block of a volume, its mount's findings, and the
+    account: the findings, what the kernel would make of it, every file."""
 
     def __init__(self, medium, forced_start=None):
         self.medium = medium
@@ -586,7 +586,6 @@ class BookCensus:
         files = [self._FileJson(fid, "live") for fid in sorted(m.files)] + \
             [dict(fid=fid, state="locked", why=why, visible=False) for fid, why in sorted(m.locked.items())]
         return {
-            "format": "v2",
             "medium": {"path": self.medium.path, "sectors": self.medium.SizeSectors()},
             "ground": {"start": st.start, "sectors": st.sectors, "how": st.how, "stood_on": st.stood_on,
                        "kernel_ground": bool(st.kernels)},

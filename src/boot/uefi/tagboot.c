@@ -5,15 +5,13 @@
  *   1. Locate Block IO on boot device via loaded image device handle
  *   2. Read the medium's partition table for the ground claimed for BoxOS,
  *      and the Deed at the head of it
- *   3. Format v1: take the kernel's place from the Deed's boot stamp; a Deed
- *      without one has the metadata pool searched for the role of a file's
- *      record, kernel → boot → system, each file at its newest record.
- *   4. Format v1: allocate pages at 0x100000 and load the kernel binary.
- *      Format v2: the Succession (tagboot_attest.c, tagboot_succession.c) —
- *      the kernel BOOT names, then the kernels the book names by role, each
- *      placed at 0x100000 and held to the digests the book keeps of its
- *      blocks; the first attested is the one jumped into, one that does not
- *      match never is
+ *   3. Take up what the Deed says (tagboot_deed.c): a volume whose Deed bears
+ *      no FRAME, or one that does not hold, is no book this loader boots, and
+ *      its medium is passed over for the next one
+ *   4. The Succession (tagboot_attest.c, tagboot_succession.c) — the kernel
+ *      BOOT names, then the kernels the book names by role, each placed at
+ *      0x100000 and held to the digests the book keeps of its blocks; the
+ *      first attested is the one jumped into, one that does not match never is
  *   5. Query GOP framebuffer; record address and parameters
  *   6. Get UEFI memory map; convert to e820_entry_t format at 0x500
  *   7. Allocate 32 KB for page tables after kernel_end + guard page
@@ -66,7 +64,7 @@ static __attribute__((noinline)) void PhysWrite16(uint64_t addr, uint16_t val)
  * bootloader and kernel agree on, bumped when src/kernel/entry/
  * kernel_entry.asm changes its shape, a mismatch refused — and
  * KERNEL_MAX_SIZE are the Lectern's (tagboot_lectern.h), which holds every
- * kernel of a format-v2 volume to them before it is jumped into. */
+ * kernel to them before it is jumped into. */
 #define BOOT_INFO_ADDR        0xA000ULL
 
 /* Same block, same address, third file to say so. The build passes the value
@@ -654,25 +652,57 @@ static int FindGroundOn(EFI_BLOCK_IO_PROTOCOL *bio, uint8_t *deed_out,
     return 0;
 }
 
-/* The block the chosen device's Deed was read into, kept so its stamps can be
- * walked after the device is settled. */
+/* The block a medium's Deed is read into while the medium is probed;
+ * DeedTakeUp copies out of it what the loader keeps. */
 static uint8_t g_deed_block[4096];
 
-/* Does this device carry a BoxOS volume? */
-static int BlockIoProbeVolume(EFI_BLOCK_IO_PROTOCOL *bio)
+/*
+ * A medium in words a person can find it by: the device this loader came from
+ * (`of` 0), or the one at `which` of the firmware's `of` Block IO handles —
+ * and its size, and whether it comes out.
+ */
+static void SayMedium(EFI_BLOCK_IO_PROTOCOL *bio, UINTN which, UINTN of)
+{
+    if (of == 0) {
+        Print("the device this loader came from");
+    } else {
+        Print("the medium at Block IO handle ");
+        PrintDec(which + 1);
+        Print(" of ");
+        PrintDec(of);
+    }
+    Print(" (");
+    PrintDec((((uint64_t)bio->media->last_block + 1) * bio->media->block_size) >> 20);
+    Print(bio->media->removable_media ? " MiB, removable)" : " MiB, fixed)");
+}
+
+/*
+ * Does this medium carry a book this loader boots? Its ground and Deed found
+ * (FindGroundOn), the Deed taken up (DeedTakeUp). A volume that is no book —
+ * an older volume, another system's data, a FRAME that does not hold — is said
+ * in one line naming the medium and passed over: one such disk in a machine is
+ * no reason not to boot the book on the next.
+ */
+static int BlockIoProbeVolume(EFI_BLOCK_IO_PROTOCOL *bio, UINTN which, UINTN of)
 {
     if (!bio || !bio->media) return 0;
     if (bio->media->block_size == 0 || !bio->media->media_present) return 0;
 
     uint64_t start = 0, sectors = 0;
     if (!FindGroundOn(bio, g_deed_block, &start, &sectors)) return 0;
+    if (EFI_ERROR(DeedTakeUp(g_deed_block, start))) {
+        Print("; passed over: ");
+        SayMedium(bio, which, of);
+        Print("\r\n");
+        return 0;
+    }
 
     g_ground_start = start;
     return 1;
 }
 
 /*
- * Find the BlockIO handle that contains the TagFS volume.
+ * Find the BlockIO handle whose volume is a book this loader boots.
  *
  * Strategy:
  *   1. Try the loaded-image device first (common case: booting from same disk
@@ -680,6 +710,8 @@ static int BlockIoProbeVolume(EFI_BLOCK_IO_PROTOCOL *bio)
  *   2. Scan every non-partition BlockIO handle, reading each one's partition
  *      table for BoxOS ground and each ground for a Deed (handles the QEMU
  *      two-drive setup and GPT/MBR alike).
+ * A medium whose volume is no book is passed over, said, and the scan goes on
+ * (BlockIoProbeVolume).
  *
  * The probe is safe: it reads a partition table and, at most, one 4 KiB block
  * from a disk that may have nothing of ours on it, and writes nothing.
@@ -689,6 +721,7 @@ static EFI_STATUS BlockIoFindDevice(EFI_HANDLE image_handle)
     EFI_GUID loaded_image_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
     EFI_GUID block_io_guid     = EFI_BLOCK_IO_PROTOCOL_GUID;
     EFI_LOADED_IMAGE_PROTOCOL *loaded_image = NULL;
+    EFI_HANDLE probed = NULL;
     EFI_STATUS status;
 
     Print("TagBoot: scanning for TagFS block device...\r\n");
@@ -698,19 +731,20 @@ static EFI_STATUS BlockIoFindDevice(EFI_HANDLE image_handle)
                                    (void **)&loaded_image);
     if (!EFI_ERROR(status) && loaded_image) {
         EFI_BLOCK_IO_PROTOCOL *bio = NULL;
+        probed = loaded_image->device_handle;
         status = g_bs->handle_protocol(loaded_image->device_handle,
                                        &block_io_guid,
                                        (void **)&bio);
-        if (!EFI_ERROR(status) && BlockIoProbeVolume(bio)) {
+        if (!EFI_ERROR(status) && BlockIoProbeVolume(bio, 0, 0)) {
             Print("TagBoot: the volume is on the device this loader came from\r\n");
             g_block_io = bio;
             return EFI_SUCCESS;
         }
     }
 
-    /* Loaded-image device does not carry TagFS.
+    /* The loaded-image device carries no book.
      * Enumerate all raw (non-partition) BlockIO handles and probe each. */
-    Print("TagBoot: loaded-image device has no TagFS, scanning all handles...\r\n");
+    Print("TagBoot: loaded-image device has no TagFS book, scanning all handles...\r\n");
 
     UINTN       handle_count = 0;
     EFI_HANDLE *handles      = NULL;
@@ -725,6 +759,8 @@ static EFI_STATUS BlockIoFindDevice(EFI_HANDLE image_handle)
 
     for (UINTN i = 0; i < handle_count; i++) {
         EFI_BLOCK_IO_PROTOCOL *bio = NULL;
+        /* Probed already, and said if it was passed over: once is enough. */
+        if (handles[i] == probed) continue;
         if (EFI_ERROR(g_bs->handle_protocol(handles[i], &block_io_guid, (void **)&bio)))
             continue;
         if (!bio || !bio->media)              continue;
@@ -741,7 +777,7 @@ static EFI_STATUS BlockIoFindDevice(EFI_HANDLE image_handle)
             if (!bio->media->media_present) continue;
         }
 
-        if (BlockIoProbeVolume(bio)) {
+        if (BlockIoProbeVolume(bio, i, handle_count)) {
             g_block_io = bio;
             found = EFI_SUCCESS;
             break;
@@ -751,7 +787,7 @@ static EFI_STATUS BlockIoFindDevice(EFI_HANDLE image_handle)
     g_bs->free_pool(handles);
 
     if (EFI_ERROR(found))
-        Print("TagBoot: no medium here carries a BoxOS volume with a readable deed\r\n");
+        Print("TagBoot: no medium here carries a book — a TagFS volume whose deed this loader reads and holds\r\n");
 
     return found;
 }
@@ -766,497 +802,12 @@ static EFI_STATUS ReadSectors(uint64_t vlba, uint32_t count_512, void *buffer)
     return ReadMediumSectors(g_block_io, g_ground_start + vlba, count_512, buffer);
 }
 
-/* One 4 KB block of the DATA RUN. What a file's metadata carries is a block
- * counted from the start of that run; where the run sits inside the volume is
- * the Deed's business. */
-static EFI_STATUS ReadDataBlock(uint32_t block, void *buf)
-{
-    uint64_t vlba = ((uint64_t)g_layout.data_block + block) * TAGFS_SECTORS_PER_BLOCK;
-    return ReadSectors(vlba, TAGFS_SECTORS_PER_BLOCK, buf);
-}
-
-/* =========================================================================
- * TagFS: kernel lookup by the role of a file
- *
- * Asked only when the Deed names no kernel (TagBootMain). The metadata pool is
- * read the way the kernel's mount reads it (metadata_pool/meta_pool_mount.c,
- * PoolMount):
- *
- *   - from the chain_first of the seal the newest copy of the Ledger carries,
- *     and no further than its `to` — what lies past it is a cycle that did not
- *     settle; a walk that cannot reach it is made again by the other copy's
- *     seal, and then whole from the Deed's head, as a kernel before the seal
- *     reads a volume whose newest copy carries none;
- *   - every record in chain order, and the NEWEST record of a file is the
- *     file — a file written again leaves its older records behind it;
- *   - a record without ACTIVE is a Quitclaim: the file is gone, whatever its
- *     older records say;
- *   - a record that fails its CRC16 is passed over, so the one before it
- *     stands;
- *   - a record whose file id is zero was retired in place by a kernel from
- *     before the pool took only appends, and is nobody's.
- *
- * The file taken is read through every extent its newest record names.
- * Priority: the role its newest record's flags carry, kernel → boot → system,
- * and among the files of one role the one with the lowest file id — the
- * oldest, which stays the oldest however often any of them is written, where
- * "the first record in the pool" moves every time one is. A file's tags are
- * its user's, and none is read here.
- *
- * No chain is walked further than the data run is long: a chain of distinct
- * blocks inside it cannot be longer, so that many blocks is a circle — the
- * kernel's own bound. Ceilings of 64 registry blocks and 256 pool blocks
- * stood here, and a volume grown past them hid whatever lay behind them.
- * ========================================================================= */
-
-/* The roles a kernel is looked for by, in the order they are asked, and what
- * the loader says of each. */
-static const struct {
-    uint32_t    role;
-    const char *name;
-} g_boot_roles[] = {
-    { TALLY_FILE_ROLE_KERNEL, "kernel" },
-    { TALLY_FILE_ROLE_BOOT,   "boot" },
-    { TALLY_FILE_ROLE_SYSTEM, "system" },
-};
-#define BOOT_ROLE_COUNT ((uint32_t)(sizeof(g_boot_roles) / sizeof(g_boot_roles[0])))
-
-/* The most extents one record carries: a record never crosses its block. */
-#define RECORD_EXTENTS_MOST \
-    ((TAGFS_MPOOL_DATA_SIZE - META_RECORD_VARDATA_OFF) / sizeof(TagBootFileExtent))
-
-/* A run of the kernel's blocks, counted in blocks of the whole volume. */
-typedef struct {
-    uint64_t first;
-    uint32_t count;
-} KernelRun;
-
-/* Where the kernel file is: its runs in file order, the blocks they hold,
- * and its size in bytes — 0 when whatever named it did not say. */
-typedef struct {
-    KernelRun runs[RECORD_EXTENTS_MOST];
-    uint32_t  run_count;
-    uint64_t  blocks;
-    uint64_t  bytes;
-} KernelPlace;
-
-static KernelPlace g_kernel_place;
-
-/* One pool block at a time: the walk's, then the chosen record's again. */
-static TagBootMetaPoolBlock g_pool_block;
-
-/* A chain that stopped anywhere but at a link of zero, said with numbers. */
-static void ChainStoppedAt(const char *chain, const char *why, uint32_t block,
-                           uint32_t walked)
-{
-    Print("TagBoot: the ");
-    Print(chain);
-    Print(" chain ");
-    Print(why);
-    Print(" at data block ");
-    PrintDec(block);
-    Print(", ");
-    PrintDec(walked);
-    Print(" block(s) in, in a data run of ");
-    PrintDec(g_layout.data_blocks);
-    Print(" blocks\r\n");
-}
-
-/* Where a chain's next block is to be read from, or 0 — said — when the walk
- * has to stop there: outside the data run, or as many blocks in as the run
- * holds, which only a circle reaches. */
-static int ChainMayRead(const char *chain, uint32_t block, uint32_t walked)
-{
-    if (block >= g_layout.data_blocks) {
-        ChainStoppedAt(chain, "leaves the data run", block, walked);
-        return 0;
-    }
-    if (walked >= g_layout.data_blocks) {
-        ChainStoppedAt(chain, "goes round in a circle", block, walked);
-        return 0;
-    }
-    return 1;
-}
-
-/* CRC-16/CCITT-FALSE, the sum a metadata record carries (crypto.c,
- * KCrc16Continue), carried on over the pieces it is taken in. */
-static uint16_t Crc16Continue(uint16_t crc, const uint8_t *data, uint32_t len)
-{
-    for (uint32_t i = 0; i < len; i++) {
-        crc ^= (uint16_t)((uint16_t)data[i] << 8);
-        for (int b = 0; b < 8; b++)
-            crc = (crc & 0x8000U) ? (uint16_t)((crc << 1) ^ 0x1021U) : (uint16_t)(crc << 1);
-    }
-    return crc;
-}
-
-/* Whether the record at `r`, `room` bytes before its block's payload ends, is
- * one the kernel reads (plot_pack.c, UnpackV1): a whole head long and inside
- * the room, its CRC16 over its own length with the sum's two bytes taken as
- * zeros, and the tags, extents and name its counts say inside that length. */
-static int PoolRecordWhole(const uint8_t *r, uint32_t room)
-{
-    static const uint8_t zeros[2] = { 0, 0 };
-    uint16_t len, stored, tags, extents, name;
-
-    MemCopy(&len, r + META_RECORD_LEN_OFF, 2);
-    if (len < META_RECORD_VARDATA_OFF || len > room) return 0;
-
-    MemCopy(&stored, r + META_RECORD_CRC_OFF, 2);
-    uint16_t crc = Crc16Continue(0xFFFFU, r, META_RECORD_CRC_OFF);
-    crc = Crc16Continue(crc, zeros, sizeof(zeros));
-    crc = Crc16Continue(crc, r + META_RECORD_CRC_OFF + 2,
-                        (uint32_t)len - META_RECORD_CRC_OFF - 2);
-    if (crc != stored) return 0;
-
-    MemCopy(&tags,    r + META_RECORD_TAGCOUNT_OFF, 2);
-    MemCopy(&extents, r + META_RECORD_EXTCOUNT_OFF, 2);
-    MemCopy(&name,    r + META_RECORD_NAMELEN_OFF,  2);
-    return (uint32_t)META_RECORD_VARDATA_OFF + (uint32_t)tags * 2U +
-           (uint32_t)extents * sizeof(TagBootFileExtent) + name <= len;
-}
-
-/* The role a whole record puts its file in: TALLY_FILE_ROLE_*, or 0 for a
- * Quitclaim or one naming no block — its newest record says there is nothing
- * there to boot. A record of format v1 has no room to say a file is kept
- * deleted: deleting for a term is a book's (TALLY_FILE_DELETED). */
-static uint32_t PoolRecordRole(const uint8_t *r)
-{
-    uint32_t flags;
-    uint16_t extents;
-    MemCopy(&flags,   r + META_RECORD_FLAGS_OFF,    4);
-    MemCopy(&extents, r + META_RECORD_EXTCOUNT_OFF, 2);
-    if (!(flags & TAGFS_FILE_ACTIVE) || extents == 0)
-        return 0;
-    return flags & TALLY_FILE_ROLE_MASK;
-}
-
-/* A file some record of the pool showed kept in a role, and where its NEWEST
- * record is: a block of the data run and a byte of its payload. `role` is what
- * that newest record says (PoolRecordRole). */
-typedef struct {
-    uint32_t fid;
-    uint32_t block;
-    uint32_t at;
-    uint32_t role;
-} BootCandidate;
-
-/* Kept sorted by file id, in memory asked of the firmware as it grows. */
-typedef struct {
-    BootCandidate *slot;
-    uint32_t       count;
-    uint32_t       cap;
-} BootCandidates;
-
-/* The slot of `fid`, or the one it would take. */
-static uint32_t BootCandidateAt(const BootCandidates *set, uint32_t fid)
-{
-    uint32_t lo = 0, hi = set->count;
-    while (lo < hi) {
-        uint32_t mid = lo + (hi - lo) / 2;
-        if (set->slot[mid].fid < fid) lo = mid + 1;
-        else                          hi = mid;
-    }
-    return lo;
-}
-
-/* Room for one more, twice the room asked for each time it runs out. */
-static int BootCandidatesGrow(BootCandidates *set)
-{
-    if (set->count < set->cap) return 1;
-
-    uint32_t       cap   = set->cap ? set->cap * 2U : 64U;
-    BootCandidate *grown = NULL;
-    if (cap <= set->cap ||
-        EFI_ERROR(g_bs->allocate_pool(EfiLoaderData, (UINTN)cap * sizeof(BootCandidate),
-                                      (void **)&grown))) {
-        Print("TagBoot: the firmware would not give ");
-        PrintDec((uint64_t)cap * sizeof(BootCandidate));
-        Print(" bytes to hold the ");
-        PrintDec((uint64_t)set->count + 1);
-        Print(" files the metadata pool shows kept in a role\r\n");
-        return 0;
-    }
-    if (set->count) MemCopy(grown, set->slot, (size_t)set->count * sizeof(BootCandidate));
-    if (set->slot) g_bs->free_pool(set->slot);
-    set->slot = grown;
-    set->cap  = cap;
-    return 1;
-}
-
-/* A whole record of `fid`, newer than any of its records seen before it: it is
- * where the file is now. A file no record has shown kept in a role is no
- * candidate, and costs nothing. */
-static int BootCandidateSee(BootCandidates *set, uint32_t fid, uint32_t block,
-                            uint32_t at, uint32_t role)
-{
-    uint32_t i = BootCandidateAt(set, fid);
-    if (i < set->count && set->slot[i].fid == fid) {
-        set->slot[i].block   = block;
-        set->slot[i].at      = at;
-        set->slot[i].role  = role;
-        return 1;
-    }
-    if (!role) return 1;
-    if (!BootCandidatesGrow(set)) return 0;
-    for (uint32_t j = set->count; j > i; j--) set->slot[j] = set->slot[j - 1];
-    set->slot[i].fid     = fid;
-    set->slot[i].block   = block;
-    set->slot[i].at      = at;
-    set->slot[i].role  = role;
-    set->count++;
-    return 1;
-}
-
-/* Where one walk of the pool begins and ends: a seal's span, or the whole chain
- * from the Deed's head (`sealed` 0). */
-typedef struct {
-    int      sealed;
-    uint32_t first;
-    uint32_t to_block;
-    uint32_t to_bytes;
-} PoolSpan;
-
-/*
- * The seals the Ledger's copies carry (volume_ledger.h), newest copy first —
- * none when the newest intact copy carries none of its own: a kernel before the
- * seal wrote it last, and its pool is read whole. How many were found.
- */
-static uint32_t LedgerSeals(SettleMark seals[VOLUME_LEDGER_COPIES])
-{
-    static const uint8_t magic[8] = {
-        VOLUME_LEDGER_MAGIC_0, VOLUME_LEDGER_MAGIC_1, VOLUME_LEDGER_MAGIC_2,
-        VOLUME_LEDGER_MAGIC_3, VOLUME_LEDGER_MAGIC_4, VOLUME_LEDGER_MAGIC_5,
-        VOLUME_LEDGER_MAGIC_6, VOLUME_LEDGER_MAGIC_7
-    };
-    VolumeLedger copies[VOLUME_LEDGER_COPIES];
-    int          intact[VOLUME_LEDGER_COPIES];
-    uint8_t      sector[TAGFS_SECTOR_SIZE];
-
-    for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++) {
-        intact[c] = 0;
-        uint64_t vlba = ((uint64_t)g_layout.state_block + c) * TAGFS_SECTORS_PER_BLOCK;
-        if (EFI_ERROR(ReadSectors(vlba, 1, sector))) continue;
-        VolumeLedger *led = &copies[c];
-        MemCopy(led, sector, sizeof(*led));
-        int same = 1;
-        for (uint32_t k = 0; k < 8; k++) same &= led->magic[k] == magic[k];
-        if (!same || led->bytes < VOLUME_LEDGER_REQUIRED_BYTES ||
-            led->bytes > TAGFS_SECTOR_SIZE)
-            continue;
-        MemZero(sector + __builtin_offsetof(VolumeLedger, crc32), 4);
-        if (Crc32(sector, led->bytes) != led->crc32) continue;
-        if (led->bytes < sizeof(*led))
-            MemZero((uint8_t *)led + led->bytes, sizeof(*led) - led->bytes);
-        intact[c] = 1;
-    }
-
-    uint32_t newest = intact[1] && (!intact[0] || copies[1].seq > copies[0].seq) ? 1 : 0;
-    uint32_t found  = 0;
-    for (uint32_t k = 0; k < VOLUME_LEDGER_COPIES; k++) {
-        uint32_t            c   = (newest + k) % VOLUME_LEDGER_COPIES;
-        const VolumeLedger *led = &copies[c];
-        if (!intact[c] || !LedgerHas(led, VOLUME_LEDGER_SEAL_END) || led->mark.settle == 0 ||
-            led->mark.settle != led->seq)
-            break;
-        /* Copied by the loader's own MemCopy: a struct assigned whole is a memcpy
-         * clang makes up on the PE path, and nothing defines one here (-z defs). */
-        MemCopy(&seals[found++], &led->mark, sizeof(led->mark));
-    }
-    return found;
-}
-
-/*
- * One walk of the pool by `span`: every file some record showed kept in a role
- * ends up in `set` at its newest record of the span. 0 when the span
- * could not be read to its end — then which record of a file is its newest is
- * not known, and no kernel is taken from it.
- */
-static int PoolWalkForBootFiles(const PoolSpan *span, BootCandidates *set)
-{
-    uint32_t block_idx = span->first;
-    uint32_t passed    = 0;   /* records of a file that fail their own sum */
-
-    set->count = 0;
-    for (uint32_t walked = 0;; walked++) {
-        if (!ChainMayRead("metadata pool", block_idx, walked)) return 0;
-        if (EFI_ERROR(ReadDataBlock(block_idx, &g_pool_block))) {
-            ChainStoppedAt("metadata pool", "would not read", block_idx, walked);
-            return 0;
-        }
-        if (g_pool_block.magic != TAGFS_MPOOL_MAGIC) {
-            ChainStoppedAt("metadata pool", "runs into a block that is not one", block_idx,
-                           walked);
-            return 0;
-        }
-
-        /* By length, as the kernel's mirror walks it: a length of zero, or one
-         * past the payload, ends the block; a record shorter than a head is
-         * stepped over and read as nobody's. The last byte of the payload has
-         * no room for a length, and is not read as one. The seal's open block
-         * is read no further than its `to`. */
-        int      last = span->sealed && block_idx == span->to_block;
-        uint32_t used = g_pool_block.used_bytes;
-        if (used > TAGFS_MPOOL_DATA_SIZE) used = TAGFS_MPOOL_DATA_SIZE;
-        if (last && used > span->to_bytes) used = span->to_bytes;
-        uint32_t pos = 0;
-        while (pos < used && pos + 2 <= TAGFS_MPOOL_DATA_SIZE) {
-            const uint8_t *r = g_pool_block.payload + pos;
-            uint16_t record_len;
-            MemCopy(&record_len, r + META_RECORD_LEN_OFF, 2);
-            if (record_len == 0 || record_len > used - pos) break;
-
-            uint32_t fid = 0;
-            if (record_len >= META_RECORD_VARDATA_OFF)
-                MemCopy(&fid, r + META_RECORD_FILE_ID_OFF, 4);
-            if (fid != 0) {
-                if (!PoolRecordWhole(r, TAGFS_MPOOL_DATA_SIZE - pos))
-                    passed++;
-                else if (!BootCandidateSee(set, fid, block_idx, pos, PoolRecordRole(r)))
-                    return 0;
-            }
-            pos += record_len;
-        }
-
-        if (last) break;
-        if (g_pool_block.next_block == 0) {
-            if (span->sealed) {
-                ChainStoppedAt("metadata pool", "ends before the block its seal names",
-                               block_idx, walked);
-                return 0;
-            }
-            break;
-        }
-        block_idx = g_pool_block.next_block;
-    }
-
-    if (passed) {
-        Print("TagBoot: ");
-        PrintDec(passed);
-        Print(" record(s) of the metadata pool fail their own checksum and are "
-              "passed over — each file's record before them stands\r\n");
-    }
-    return 1;
-}
-
-/* The walks in the order the kernel's mount would stand on them: the newest
- * seal, the one before it, the whole chain. 1 once one of them was read to its
- * end. */
-static int PoolWalkBySeals(BootCandidates *set)
-{
-    SettleMark seals[VOLUME_LEDGER_COPIES];
-    uint32_t   n = LedgerSeals(seals);
-    for (uint32_t i = 0; i < n; i++) {
-        PoolSpan span = { 1, seals[i].chain_first, seals[i].pool_to_block,
-                          seals[i].pool_to_bytes };
-        if (PoolWalkForBootFiles(&span, set)) return 1;
-        Print("TagBoot: the pool does not bear a seal of the Ledger out — the walk is "
-              "made again\r\n");
-    }
-    PoolSpan whole = { 0, g_layout.metadata_pool_block - g_layout.data_block, 0, 0 };
-    return PoolWalkForBootFiles(&whole, set);
-}
-
-/* The record a candidate names, read again and taken apart into the runs of
- * blocks the kernel file is made of. 0, said, when it no longer reads whole
- * or names a block outside the data run. */
-static int KernelPlaceFromRecord(const BootCandidate *c, KernelPlace *out)
-{
-    if (EFI_ERROR(ReadDataBlock(c->block, &g_pool_block)) ||
-        !PoolRecordWhole(g_pool_block.payload + c->at, TAGFS_MPOOL_DATA_SIZE - c->at)) {
-        Print("TagBoot: the newest record of file id ");
-        PrintDec(c->fid);
-        Print(", in data block ");
-        PrintDec(c->block);
-        Print(", does not read whole a second time\r\n");
-        return 0;
-    }
-
-    const uint8_t *r = g_pool_block.payload + c->at;
-    uint16_t tags, extents;
-    uint64_t size;
-    MemCopy(&size,    r + META_RECORD_SIZE_OFF,     8);
-    MemCopy(&tags,    r + META_RECORD_TAGCOUNT_OFF, 2);
-    MemCopy(&extents, r + META_RECORD_EXTCOUNT_OFF, 2);
-
-    const uint8_t *ext = r + META_RECORD_VARDATA_OFF + (uint32_t)tags * 2U;
-    out->blocks = 0;
-    for (uint16_t e = 0; e < extents; e++) {
-        TagBootFileExtent x;
-        MemCopy(&x, ext + (uint32_t)e * sizeof(x), sizeof(x));
-        if (x.block_count == 0 ||
-            (uint64_t)x.start_block + x.block_count > g_layout.data_blocks) {
-            Print("TagBoot: extent ");
-            PrintDec(e);
-            Print(" of file id ");
-            PrintDec(c->fid);
-            Print(" names blocks ");
-            PrintDec(x.start_block);
-            Print("+");
-            PrintDec(x.block_count);
-            Print(", not inside a data run of ");
-            PrintDec(g_layout.data_blocks);
-            Print(" blocks\r\n");
-            return 0;
-        }
-        out->runs[e].first = (uint64_t)g_layout.data_block + x.start_block;
-        out->runs[e].count = x.block_count;
-        out->blocks       += x.block_count;
-    }
-    out->run_count = extents;
-    out->bytes     = size;
-    return 1;
-}
-
-/* Try each role in priority order; return 1 on success. */
-static int TagFsFindKernelByRole(KernelPlace *out)
-{
-    BootCandidates set   = { NULL, 0, 0 };
-    int            found = 0;
-    if (PoolWalkBySeals(&set)) {
-        for (uint32_t i = 0; i < BOOT_ROLE_COUNT && !found; i++) {
-            for (uint32_t c = 0; c < set.count && !found; c++) {
-                if (set.slot[c].role != g_boot_roles[i].role) continue;
-                found = KernelPlaceFromRecord(&set.slot[c], out);
-                if (!found) continue;
-                Print("TagBoot: kernel found by role '");
-                Print(g_boot_roles[i].name);
-                Print("': file id ");
-                PrintDec(set.slot[c].fid);
-                Print(", the oldest file whose newest record is kept in it\r\n");
-            }
-        }
-    }
-    /* Pool memory left behind is one more descriptor in the map this loader
-     * is about to hand over. */
-    if (set.slot) g_bs->free_pool(set.slot);
-    return found;
-}
-
-/*
- * Where the Deed says the kernel is — in the volume's own blocks, so a loader
- * holding nothing but the Deed can turn it into a sector.
- *
- * This is the answer asked for first, and it is a better answer than the one
- * it replaced: the boot hints used to live in the superblock's reserved[] area
- * at offsets four files agreed on by comment.
- */
-static int TagFsBootStamp(KernelPlace *out)
-{
-    if (!g_have_boot) return 0;
-    out->runs[0].first = g_boot.kernel_block;
-    out->runs[0].count = g_boot.kernel_blocks;
-    out->run_count     = 1;
-    out->blocks        = g_boot.kernel_blocks;
-    out->bytes         = g_boot.kernel_bytes;
-    return 1;
-}
-
 /* =========================================================================
  * Kernel loading
  * ========================================================================= */
 
-/* Where the pages TagFsLoadKernel asked the firmware for END. Page-aligned by
+/* Where the pages the kernel was placed in END (tagboot_attest.c, AttestPlace,
+ * asked for them; SuccessionTake says where they end). Page-aligned by
  * construction, and the first address past it is the first one the loader has
  * NOT already reserved — which is where the BSS reservation has to begin, for
  * two reasons at once: AllocateAddress refuses an unaligned address outright
@@ -1265,94 +816,6 @@ static int TagFsBootStamp(KernelPlace *out)
  * loader already holds is a range that is allocated, which is the other thing
  * that answer means. */
 static uint64_t g_kernel_alloc_end = 0;
-
-/* Loads the kernel file to KERNEL_LOAD_ADDR, run after run, as far as its size
- * reaches; returns that size in bytes, or 0 on error. A size of zero is one
- * nobody stated, and then the blocks are the file. */
-static uint64_t TagFsLoadKernel(const KernelPlace *place)
-{
-    EFI_PHYSICAL_ADDRESS load_addr = KERNEL_LOAD_ADDR;
-    uint64_t total_bytes = place->blocks * TAGFS_BLOCK_SIZE;
-
-    if (total_bytes > KERNEL_MAX_SIZE) {
-        Print("TagBoot: kernel too large (");
-        PrintDec(total_bytes);
-        Print(" bytes)\r\n");
-        return 0;
-    }
-
-    /* A size past the blocks is a record whose extents do not reach its own
-     * end, and whatever lies past them is not the kernel. */
-    uint64_t file_size = place->bytes;
-    if (file_size > total_bytes) {
-        Print("TagBoot: the kernel is said to be ");
-        PrintDec(file_size);
-        Print(" bytes and its blocks hold ");
-        PrintDec(total_bytes);
-        Print("\r\n");
-        return 0;
-    }
-    if (file_size == 0)
-        file_size = total_bytes;
-    uint64_t want = (file_size + TAGFS_BLOCK_SIZE - 1) / TAGFS_BLOCK_SIZE;
-
-    UINTN pages = (UINTN)((want * TAGFS_BLOCK_SIZE + PAGE_4KB - 1) / PAGE_4KB);
-    EFI_STATUS status = g_bs->allocate_pages(AllocateAddress,
-                                             EfiLoaderData,
-                                             pages,
-                                             &load_addr);
-    if (EFI_ERROR(status)) {
-        /*
-         * ‼ A refusal here is somebody else's range, and it is NOT freed.
-         *
-         * This loader has never allocated 0x100000 at this point —
-         * ClaimHandoffPages asks for 0x0000, 0x1000 and 0xA000 and nothing
-         * else — so there is nothing here to re-claim. EDK2's
-         * CoreInternalFreePages performs no ownership check whatsoever: it
-         * finds the descriptor covering the address and calls
-         * CoreConvertPages(..., EfiConventionalMemory), so a free would hand
-         * up to KERNEL_MAX_SIZE of memory some firmware driver is holding
-         * back to the allocator and then write the kernel image over it.
-         * AllocatePages' own EFI_NOT_FOUND (UEFI 2.10 §7.2.1, "The requested
-         * pages could not be found") is exactly the answer EDK2 gives when
-         * the range IS held — "the pages to allocate have been allocated" —
-         * so no status code here distinguishes ours from theirs.
-         *
-         * Saying so and stopping is the whole of the right answer. The
-         * caller panics with a sentence on the screen, which is a boot that
-         * did not happen instead of a boot that corrupts firmware memory and
-         * fails somewhere else entirely.
-         */
-        Print("TagBoot: cannot allocate ");
-        PrintDec(pages);
-        Print(" pages at 0x100000 (status=");
-        PrintHex64((uint64_t)status);
-        Print(") — something already holds that range and it is not ours "
-              "to take back\r\n");
-        return 0;
-    }
-
-    g_kernel_alloc_end = KERNEL_LOAD_ADDR + (uint64_t)pages * PAGE_4KB;
-
-    uint8_t *dst  = (uint8_t *)(uintptr_t)KERNEL_LOAD_ADDR;
-    uint64_t done = 0;
-    for (uint32_t r = 0; r < place->run_count && done < want; r++) {
-        for (uint32_t k = 0; k < place->runs[r].count && done < want; k++, done++) {
-            uint64_t volume_block = place->runs[r].first + k;
-            status = ReadSectors(volume_block * TAGFS_SECTORS_PER_BLOCK,
-                                 TAGFS_SECTORS_PER_BLOCK,
-                                 dst + done * TAGFS_BLOCK_SIZE);
-            if (EFI_ERROR(status)) {
-                Print("TagBoot: disk read error at volume block ");
-                PrintDec(volume_block);
-                Print("\r\n");
-                return 0;
-            }
-        }
-    }
-
-    return file_size;
-}
 
 /* =========================================================================
  * GOP framebuffer
@@ -2943,57 +2406,6 @@ static void CheckEfiLoadAddress(void)
  * (image_handle in RCX, st in RDX).  Without EFIAPI the gcc-compiled function
  * reads System V registers RDI/RSI instead → garbage pointers → instant crash.
  */
-/*
- * The kernel of a format-v1 volume: the Deed first, the search by role second.
- *
- * The Deed names one file — the kernel this volume was made with — and its
- * checksum covers that answer. The search answers "the oldest file whose
- * newest record is kept in the role of kernel, else boot, else system", which
- * is a different question: on this image the shell and the display daemon are
- * kept in the system's role too. So the exact answer is asked for first, and the search is what happens
- * when a volume's Deed carries no boot stamp — an older volume, or one made by
- * something that did not know to write one. Loaded at KERNEL_LOAD_ADDR: its
- * size in bytes.
- */
-static uint64_t KernelByDeedOrTags(void)
-{
-    if (TagFsBootStamp(&g_kernel_place)) {
-        Print("TagBoot: the deed names the kernel\r\n");
-    } else if (!TagFsFindKernelByRole(&g_kernel_place)) {
-        Panic("kernel not found — this deed names none and no file is kept in a role of the loader");
-    }
-
-    Print("TagBoot: kernel at volume block ");
-    PrintDec(g_kernel_place.runs[0].first);
-    Print(" (");
-    PrintDec(g_kernel_place.blocks);
-    Print(" blocks in ");
-    PrintDec(g_kernel_place.run_count);
-    Print(" run(s))\r\n");
-
-    /* Defensive bound: the blocks come out of the Deed or out of a record on
-     * the medium, and a corrupted or malicious volume could say anything; cap
-     * at the same limit stage2 uses (KERNEL_MAX_SIZE / TAGFS_BLOCK_SIZE).
-     * Derived rather than literal so KERNEL_MAX_SIZE bumps don't desync
-     * between paths. */
-    const uint64_t kernel_max_blocks = KERNEL_MAX_SIZE / TAGFS_BLOCK_SIZE;
-    if (g_kernel_place.blocks == 0 || g_kernel_place.blocks > kernel_max_blocks) {
-        Print("TagBoot: FATAL — kernel_block_count out of range: ");
-        PrintDec(g_kernel_place.blocks);
-        Print("\r\n");
-        Panic("TagFS metadata reports invalid kernel block count");
-    }
-
-    Print("TagBoot: loading kernel to 0x100000...\r\n");
-    uint64_t loaded_bytes = TagFsLoadKernel(&g_kernel_place);
-    if (loaded_bytes == 0) Panic("kernel load failed");
-
-    Print("TagBoot: kernel loaded (");
-    PrintDec(loaded_bytes);
-    Print(" bytes)\r\n");
-    return loaded_bytes;
-}
-
 EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
 {
     /* Raw COM1 byte BEFORE touching any UEFI pointer — confirms we were called. */
@@ -3064,33 +2476,29 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
      * asked for memory by any of the steps below and answer with these. */
     ClaimHandoffPages();
 
-    /* ----- 1. Find Block IO ----- */
+    /* ----- 1. Find Block IO, 2. its ground and Deed, 3. a book ----- *
+     *
+     * The deed of every medium probed is taken up there and then, so a medium
+     * whose volume is no book is passed over for the next (BlockIoProbeVolume);
+     * the one found is a book, its Deed taken up. */
     Print("TagBoot: locating disk...\r\n");
     EFI_STATUS status = BlockIoFindDevice(image_handle);
-    if (EFI_ERROR(status)) Panic("no Block IO device found");
+    if (EFI_ERROR(status)) Panic("no medium carries a book this loader can boot");
     Print("TagBoot: disk found, block_size=");
     PrintDec(g_block_io->media->block_size);
     Print("\r\n");
 
-    /* ----- 2. Take up the deed the probe already read ----- */
-    status = DeedTakeUp(g_deed_block, g_ground_start);
-    if (EFI_ERROR(status)) Panic("the volume's deed cannot be read by this loader");
-
-    /* ----- 3. Find kernel file, 4. load it ----- *
+    /* ----- 4. Find the kernel and load it ----- *
      *
-     * A format-v2 volume's kernel is chosen by the Succession: the kernel BOOT
-     * names held to the book first, then the kernels the book names by role,
-     * each placed at KERNEL_LOAD_ADDR and held to the digests the book keeps of
-     * its blocks — one that does not match is never jumped into, and when none
-     * may be, the loader stops with every kernel it tried and why
+     * The volume's kernel is chosen by the Succession: the kernel BOOT names
+     * held to the book first, then the kernels the book names by role, each
+     * placed at KERNEL_LOAD_ADDR and held to the digests the book keeps of its
+     * blocks — one that does not match is never jumped into, and when none may
+     * be, the loader stops with every kernel it tried and why
      * (tagboot_attest.c, tagboot_succession.c). */
     uint64_t loaded_bytes = 0;
-    if (g_have_frame) {
-        const char *stop = SuccessionTake(g_bs, ReadSectors, &loaded_bytes, &g_kernel_alloc_end);
-        if (stop) Panic(stop);
-    } else {
-        loaded_bytes = KernelByDeedOrTags();
-    }
+    const char *stop = SuccessionTake(g_bs, ReadSectors, &loaded_bytes, &g_kernel_alloc_end);
+    if (stop) Panic(stop);
 
     /* Validate kernel header magic — 'KERNEL' at byte offset 2.
      * Kernel header layout:
@@ -3139,7 +2547,7 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
          * consulted at all (CoreInternalAllocatePages: `if (Type ==
          * AllocateAddress) { if ((*Memory & (Alignment - 1)) != 0) { return
          * EFI_NOT_FOUND; } }`). Rounding down would not have helped either: the
-         * page holding that byte is inside the range TagFsLoadKernel already
+         * page holding that byte is inside the range AttestPlace already
          * allocated, and asking for pages one already holds is the OTHER thing
          * EFI_NOT_FOUND means here. So the whole 2 MB window the kernel treats
          * as its BSS went unreserved on every UEFI boot, and the only trace was

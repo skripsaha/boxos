@@ -126,7 +126,7 @@ bool DedupOwnersStep(DedupOwners* w, uint32_t files)
 {
     uint64_t ids[DEDUP_OWNERS_LOOK];
     while (files > 0 && w->from != UINT64_MAX) {
-        uint32_t n = FileMapRows(tagfs_get_state()->files, w->from, ids,
+        uint32_t n = FileMapFiles(tagfs_get_state()->files, w->from, ids,
                                  files < DEDUP_OWNERS_LOOK ? files : DEDUP_OWNERS_LOOK);
         if (n == 0) {
             w->from = UINT64_MAX;

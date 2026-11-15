@@ -54,11 +54,11 @@ static bool StandIndexFill(FileMap* map, uint32_t step)
             FileRecordRelease(rec);
             return false;
         }
-        RecordWhere   where = { .link = 0, .offset = (uint16_t)(16 + k), .gen = 0, .shape = 0 };
+        RecordWhere   where = { .gen = 0, .shape = 0 };
         RecordWhere   was;
-        error_t       put = FileMapRecordPut(map, fid, rec, &where, 0, &stake, &was);
+        error_t       put = FileMapRecordPut(map, fid, rec, &where, &stake, &was);
         FileMapStakeLetGo(&stake);
-        if (put != OK || FileMapRowSet(map, fid, 3, 16 + k) != OK)
+        if (put != OK)
             return false;
     }
     return true;
@@ -85,7 +85,7 @@ static TestResult TestStandIndexMapCostsTheLive(void)
     TEST_ASSERT(far_bytes <= (size_t)STAND_INDEX_FILES * STAND_INDEX_PER_FILE,
                 "and no more than 256 bytes a live file, where a dense mirror paid for every id");
 
-    TEST_ASSERT_EQ(FileMapRows(far, 1, s_rows, ARRAY_SIZE(s_rows)), STAND_INDEX_FILES,
+    TEST_ASSERT_EQ(FileMapFiles(far, 1, s_rows, ARRAY_SIZE(s_rows)), STAND_INDEX_FILES,
                    "the rows are the 64 live files and nothing for the ids between them");
     for (uint32_t k = 0; k < STAND_INDEX_FILES; k++)
         TEST_ASSERT_EQ(s_rows[k], 1 + k * step, "in id order");
@@ -399,96 +399,87 @@ out:
 #define STAND_INDEX_FID_MUTANT 0xFFFFFFF0u   /* the design's mutant: sixteen ids before the end */
 #define STAND_INDEX_FID_ASKS   17u           /* every id left, and two asks past the last */
 
-/*
- * The issuer is asked on a copy of the Ledger whose counter stands at
- * 0xFFFFFFF0: fifteen ids come out, each the one after the last, the last
- * 0xFFFFFFFE, and every ask after that is refused without the counter moving
- * — a counter at 0, the one an earlier kernel let wrap, is refused too. Then
- * the volume's own create is asked with its counter at the end, and must
- * refuse the same way and make nothing. The fifteen are not made as files: a
- * file table row is placed by its id (file_table.c), and one at 0xFFFFFFF0
- * would ask the table's chain for eight million blocks at the next cycle. The
- * name has no stem, so the create interns no tag and writes nothing before it
- * reaches the counter, and the live counter is at the end for no longer than
- * that.
- */
-static TestResult TestStandIndexFidExhausted(void)
+// ----------------------------------------------------------------------------
+// What a registry hands out
+// ----------------------------------------------------------------------------
+
+#define STAND_GROUP_FIRST 9u    /* one more than a new key group's first array holds */
+
+static char     s_group_key[24];
+static char     s_group_tag[40];
+static uint32_t s_group_ids[2 * STAND_GROUP_FIRST];
+
+/* "stand_group<k>:<v>"; its key, "stand_group<k>", is left in s_group_key. */
+static const char* StandGroupTag(uint32_t k, uint32_t v)
 {
-    TestResult   verdict = TEST_PASS;
-    TagFSState*  fs      = tagfs_get_state();
-    VolumeLedger copy;
-    uint32_t     issued  = 0, refused = 0, never = 0;
-    uint64_t     fid = 0, last = 0;
-    uint32_t     saved   = 0, left_at = 0;
-    uint64_t     made = 0;
-    bool         moved   = false;
-    int          rc      = -1;
-    VolumeTally  before;
-    VolumeTally  after;
+    ksnprintf(s_group_key, sizeof(s_group_key), "stand_group%u", k);
+    ksnprintf(s_group_tag, sizeof(s_group_tag), "%s:%u", s_group_key, v);
+    return s_group_tag;
+}
 
-    memset(&copy, 0, sizeof(copy));
-    memset(&before, 0, sizeof(before));
-    memset(&after, 0, sizeof(after));
-    copy.next_file_id = STAND_INDEX_FID_MUTANT;
-    for (uint32_t ask = 0; ask < STAND_INDEX_FID_ASKS; ask++) {
-        error_t got = LedgerIssueFileId(&copy, &fid);
-        if (got != OK) {
-            TEST_ASSERT_EQ(got, ERR_TAGFS_FID_EXHAUSTED, "an issuer out of ids says so");
-            refused++;
-            continue;
-        }
-        if (fid == 0 || fid == UINT32_MAX || (issued && fid != last + 1u))
-            never++;
-        last = fid;
-        issued++;
-    }
-    TestEvidence("ids issued that must never be — zero, the one that wraps the counter, "
-                 "or one out of turn", never);
-    if (never) {
+/* The ids of every tag of one key, asked for by a query of `key:...`, are the
+ * caller's copy. The registry's own array of a key is freed by the key's next
+ * tag once it outgrows it — on any core, while a query reads — so an array
+ * the registry handed out would be read after it was freed. The copy is
+ * written over by the test, which the registry must not notice; then the key
+ * grows by nine, moving the registry's array, and the copy the test holds
+ * still says what it said. A key of the series no tag has yet is taken, since
+ * a tag is interned for good. */
+static TestResult TestStandRegistryKeyIdsAreCopies(void)
+{
+    TestResult  verdict = TEST_PASS;
+    TagFSState* fs      = tagfs_get_state();
+    TagIdList   copy    = { 0 };
+    TagIdList   again   = { 0 };
+    bool        ours    = true;
+    uint32_t    k       = 0;
+
+    while (tagfs_tag_lookup(StandGroupTag(k, 0)) != TAGFS_INVALID_TAG_ID)
+        k++;
+    for (uint32_t v = 0; v < STAND_GROUP_FIRST; v++)
+        TEST_ASSERT_OK(tagfs_tag_intern(StandGroupTag(k, v), &s_group_ids[v]),
+                       "a tag of a key no tag had is interned");
+    TEST_ASSERT_OK(TagRegistryKeyIds(fs->registry, s_group_key, strlen(s_group_key), &copy),
+                   "the key's ids are asked for");
+    TEST_ASSERT_EQ(copy.count, STAND_GROUP_FIRST, "and all of them come back");
+    TEST_ASSERT(memcmp(copy.ids, s_group_ids, sizeof(uint32_t) * STAND_GROUP_FIRST) == 0,
+                "in the order they were interned");
+
+    for (uint32_t v = 0; v < STAND_GROUP_FIRST; v++)
+        copy.ids[v] = TAGFS_INVALID_TAG_ID;
+    TEST_ASSERT_OK(TagRegistryKeyIds(fs->registry, s_group_key, strlen(s_group_key), &again),
+                   "the key's ids are asked for again");
+    bool shared = again.count != STAND_GROUP_FIRST ||
+                  memcmp(again.ids, s_group_ids, sizeof(uint32_t) * STAND_GROUP_FIRST) != 0;
+    TestEvidence("copies of a key's tag ids that were the registry's own array", shared);
+    if (shared) {
+        /* What the test wrote over was the registry's: put back, and freed by
+         * nobody but the registry. */
+        memcpy(copy.ids, s_group_ids, sizeof(uint32_t) * STAND_GROUP_FIRST);
+        ours    = false;
         verdict = TEST_DEFECT;
         goto out;
     }
-    TEST_ASSERT_EQ(issued, 15, "fifteen ids are issued from 0xFFFFFFF0");
-    TEST_ASSERT_EQ(last, UINT32_MAX - 1u, "the last of them 0xFFFFFFFE");
-    TEST_ASSERT_EQ(refused, 2, "and every ask after it is refused");
-    TEST_ASSERT_EQ(copy.next_file_id, UINT32_MAX, "with the counter left at the end");
-    copy.next_file_id = 0;
-    TEST_ASSERT_EQ(LedgerIssueFileId(&copy, &fid), ERR_TAGFS_FID_EXHAUSTED,
-                   "a counter an earlier kernel let wrap to 0 is refused too");
-    TEST_ASSERT_EQ(copy.next_file_id, 0, "and left where it was");
 
-    TEST_ASSERT(VolumeTallyTake(&before), "the volume is counted");
-    TagFSLockTake(&fs->lock);
-    saved                   = fs->ledger.next_file_id;
-    fs->ledger.next_file_id = UINT32_MAX;
-    moved                   = true;
-    TagFSLockDrop(&fs->lock);
-    rc = tagfs_create_file(".stand_fid", NULL, 0, &made);
-    TagFSLockTake(&fs->lock);
-    left_at                 = fs->ledger.next_file_id;
-    fs->ledger.next_file_id = saved;
-    moved                   = false;
-    TagFSLockDrop(&fs->lock);
-
-    TestEvidence("files made on a volume that had issued every id", rc == 0);
-    if (rc == 0) {
-        verdict = TEST_DEFECT;
-        goto out;
-    }
-    TEST_ASSERT_EQ(rc, -(int)ERR_TAGFS_FID_EXHAUSTED,
-                   "a create on a volume that has issued every id is refused as such");
-    TEST_ASSERT_EQ(left_at, UINT32_MAX, "and the volume's counter did not move");
-    TEST_ASSERT(VolumeTallyTake(&after), "the volume is counted again");
-    TEST_ASSERT_EQ(after.files, before.files, "no file was made");
-    TEST_ASSERT_EQ(after.held, before.held, "and no block was taken");
+    memcpy(copy.ids, s_group_ids, sizeof(uint32_t) * STAND_GROUP_FIRST);
+    kfree(again.ids);
+    again.ids = NULL;
+    for (uint32_t v = STAND_GROUP_FIRST; v < 2 * STAND_GROUP_FIRST; v++)
+        TEST_ASSERT_OK(tagfs_tag_intern(StandGroupTag(k, v), &s_group_ids[v]),
+                       "the key grows by nine more");
+    TEST_ASSERT(copy.count == STAND_GROUP_FIRST &&
+                memcmp(copy.ids, s_group_ids, sizeof(uint32_t) * STAND_GROUP_FIRST) == 0,
+                "and the copy taken before says what it said");
+    TEST_ASSERT_OK(TagRegistryKeyIds(fs->registry, s_group_key, strlen(s_group_key), &again),
+                   "a copy taken now");
+    TEST_ASSERT(again.count == 2 * STAND_GROUP_FIRST &&
+                memcmp(again.ids, s_group_ids, sizeof(uint32_t) * 2 * STAND_GROUP_FIRST) == 0,
+                "holds all eighteen, in order");
 out:
-    if (moved) {
-        TagFSLockTake(&fs->lock);
-        fs->ledger.next_file_id = saved;
-        TagFSLockDrop(&fs->lock);
+    if (ours) {
+        kfree(copy.ids);
+        kfree(again.ids);
     }
-    if (rc == 0)
-        tagfs_delete_file(made, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -514,11 +505,12 @@ static const TestCase g_stand_index_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a question of which files there are is answered into an array cut at a "
                        "ceiling, and the files past it are not there" },
-    { .name  = "stand_index_fid_exhausted", .func = TestStandIndexFidExhausted,
+    { .name  = "stand_registry_key_ids_are_copies",
+      .func  = TestStandRegistryKeyIdsAreCopies,
       .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_defect = "the 2^32-th create is given file id 0 and the one after it id 1, a "
-                       "file the volume already holds",
-      .format = DEED_FORMAT_V1, .analog = "stand_errata_wide_fid" },
+      .caveat_defect = "a key's tag ids were handed out as the registry's own array after its "
+                       "lock was let go, so the key's next tag could free it under a query still "
+                       "reading it" },
 };
 
 const TestSuite g_stand_index_suite = {

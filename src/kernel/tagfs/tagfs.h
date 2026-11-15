@@ -4,12 +4,10 @@
 #include "../../lib/kernel/ktypes.h"
 #include "../../lib/kernel/klib.h"
 #include "tagfs_constants.h"
-#include "plot/plot_width.h"
 #include "plot/strip.h"
 #include "../../include/boxos_magic.h"
 #include "../../include/boxos_limits.h"
 #include "../../include/volume_deed.h"
-#include "../../include/volume_ledger.h"
 #include "../core/error/error.h"
 #include "lock_rank/lock_rank.h"
 #include "scribe/scribe.h"
@@ -19,7 +17,6 @@
 // Include Submodule Headers (production implementations)
 // ============================================================================
 
-#include "ledger/ledger.h"
 #include "block_map/block_map.h"
 #include "deed/deed.h"
 #include "mount/under_glass.h"
@@ -37,80 +34,11 @@
  * holding the others in place by comment alone. A volume could exist in
  * exactly one place on any medium.
  *
- * Now the medium's partition table says where the ground is (ground.h), the
- * Deed at the head of that ground says what is on it (volume_deed.h), and the
- * Ledger beside it says what is true of it today (volume_ledger.h). Every
- * number in both is counted from the start of the volume, so the volume can
+ * Now the medium's partition table says where the ground is (ground.h), and
+ * the Deed at the head of that ground says what is on it (volume_deed.h).
+ * Every number the volume holds is counted from its start, so the volume can
  * be anywhere and can be moved.
  */
-
-// ============================================================================
-// On-Disk Structures
-// ============================================================================
-
-// Header: 4+4+2+2+4 = 16 bytes. data[4080] = 4096 total.
-// Entries are packed variable-length records in data[]:
-//   uint16_t tag_id | uint8_t flags | uint8_t key_len | uint16_t value_len
-//   char key[key_len] | char value[value_len]  (value absent if value_len==0)
-typedef struct __packed {
-    uint32_t magic;
-    uint32_t next_block;
-    uint16_t entry_count;
-    uint16_t used_bytes;
-    uint8_t  reserved[4];
-    uint8_t  data[TAGFS_REGISTRY_DATA_SIZE];
-} TagRegistryBlock;
-
-STATIC_ASSERT(sizeof(TagRegistryBlock) == 4096, "TagRegistryBlock must be 4096 bytes");
-
-typedef struct __packed {
-    uint32_t meta_block;
-    uint32_t meta_offset;
-} FileTableEntry;
-
-STATIC_ASSERT(sizeof(FileTableEntry) == 8, "FileTableEntry must be 8 bytes");
-
-// Header: 4+4+4+4 = 16 bytes. entries[510] * 8 = 4080. Total = 4096.
-typedef struct __packed {
-    uint32_t       magic;
-    uint32_t       next_block;
-    uint32_t       entry_count;
-    uint32_t       reserved;
-    FileTableEntry entries[TAGFS_FTABLE_PER_BLOCK];
-} FileTableBlock;
-
-STATIC_ASSERT(sizeof(FileTableBlock) == 4096, "FileTableBlock must be 4096 bytes");
-
-// Header: 4+4+2+2+2+2 = 16 bytes. payload[4080] = 4096 total.
-// Records are packed variable-length in payload[] — their widths and their
-// packing are Plot's (plot/plot_width.h, PackV1).
-//
-// `record_count` counts every record ever appended here; `kept` counts the ones
-// that carry a file id. The two words are a pair on purpose — Keep is already
-// this project's word for what is still held (Chit: Give / Due / Keep) — and a
-// kernel before the pool took only appends retired a record by zeroing its
-// file_id in place, so the two drifted apart as files were deleted. What a
-// block still holds of the live files is the map of live files' to say, not
-// the header's: Glean (glean/) lays those records again at the tail and takes
-// the block off the chain, and a file's row follows its record.
-//
-// It sits in two of the four bytes this header set aside and kept for nothing,
-// so the block is the same 4096 bytes it always was and mkfs, the kernel and
-// tools/volume-read.py all still find the payload at byte 16. The count is
-// never believed on its own: the mount walk scans the records and uses what it
-// counts, exactly as the free-block count is derived from the bitmap rather
-// than remembered. An old volume carries zero here and is not harmed by it.
-typedef struct __packed {
-    uint32_t magic;
-    uint32_t next_block;
-    uint16_t used_bytes;
-    uint16_t record_count;
-    uint16_t kept;
-    uint8_t  reserved[2];
-    uint8_t  payload[TAGFS_MPOOL_DATA_SIZE];
-} MetaPoolBlock;
-
-STATIC_ASSERT(sizeof(MetaPoolBlock) == 4096, "MetaPoolBlock must be 4096 bytes");
 
 // ----------------------------------------------------------------------------
 // In-Memory Structures: Tag Registry
@@ -153,10 +81,6 @@ typedef struct {
     uint32_t total_tags;
     uint64_t text_bytes;     /* the keys' and values' bytes of every tag held */
     uint32_t next_id;
-    /* The highest id the book this registry is written to can name: the
-     * kernel's TAGFS_MAX_TAG_ID, or format v1's TAGFS_V1_TAG_ID_MOST for one
-     * read off a v1 volume (tag_registry_load). No id past it is issued. */
-    uint32_t id_most;
 
     TagKeyGroup** key_buckets;
     uint32_t      key_bucket_count;
@@ -164,52 +88,11 @@ typedef struct {
 
     TagFSLock lock;
 
-    /*
-     * What the medium holds of this registry: the record of every id below
-     * written_next, in the chain that ends at tail_block. tail_image is what
-     * the next write of the tail puts there: after a load, the medium's tail
-     * cut to the records the walk read; after a refused write, the tail as it
-     * was before that write — which the refused write may have overwritten
-     * all the same. written_next is changed under `lock`; the rest belong to
-     * whoever holds `scribe` — one flush of this registry at a time — and to
-     * the load before anyone can see the registry.
-     *
-     * spare_block is the block the chain grows by next: stamped, proved on
-     * the medium by the flush carrying spare_need, and kept across a flush
-     * that failed until a link names it. 0 is none — block 0 is the chain's
-     * head and never a Spare. spare_image is the buffer it is written from.
-     */
-    uint32_t          written_next;
-    uint32_t          tail_block;
-    TagRegistryBlock* tail_image;
-    uint32_t          spare_block;
-    TagRegistryBlock* spare_image;
-    uint64_t          spare_need;
-    uint64_t          written_need;   /* the flush need of the records last written: a cycle's
-                                       * first flush covers it before any record names them */
-    bool              said_failing;   /* a refusal is said once, until a flush succeeds */
-    /* Format v2: every id below coined_next is in the book — its Tally's TAGS or a settled stitch's Coined —
-     * and a cycle lays the ones above down as Coineds (settle/sewing.c), coined_text bytes. Under `lock`. */
+    /* Every id below coined_next is in the book — its Tally's TAGS or a settled stitch's Coined — and a
+     * cycle lays the ones above down as Coineds (settle/sewing.c), coined_text bytes. Under `lock`. */
     uint32_t          coined_next;
     uint64_t          coined_text;    /* what the ribbon's room holds for them (settle/ribbon.c, RibbonHeld) */
     bool              said_full;      /* every id issued: said once, the first time a tag is refused */
-    Scribe            scribe;
-
-    /* What the medium's last block holds of the registry as the last write
-     * (or the load) left it — the block, the bytes of its records and their
-     * CRC32 — for the seal of a Settle cycle (volume_ledger.h). Under `lock`.
-     * `tail_owed`: the medium's last block holds other than tail_image (a
-     * load cut it back to what a seal bears out), and the next flush writes
-     * it whole even with nothing new; the Scribe's holder's. */
-    uint32_t          landed_block;
-    uint32_t          landed_bytes;
-    uint32_t          landed_crc;
-    bool              tail_owed;
-
-    /* The chain's blocks as the load read them, for the mount's census; let
-     * go once they are claimed (TagRegistryClaimGround). */
-    uint32_t*         chain_blocks;
-    uint32_t          chain_count;
 } TagRegistry;
 
 // ----------------------------------------------------------------------------
@@ -223,8 +106,8 @@ typedef struct {
 } TagIdList;
 
 /* Who wears each tag (tag_bitmap/tag_bitmap.c), and the files by id with the
- * file table's row and the pool's newest record of each (file_map/). Both hold
- * the live files and nothing for an id no live file has. */
+ * newest record of each (file_map/). Both hold the live files and nothing for
+ * an id no live file has. */
 typedef struct TagBitmapIndex TagBitmapIndex;
 typedef struct FileMap        FileMap;
 
@@ -248,46 +131,35 @@ typedef struct {
 /*
  * What the mounted volume is, split the way the medium splits it.
  *
- * `format` is the book its Deed says it is written in (deed.h, DeedFormatOf):
- * format v1's LAYOUT, Ledger and chains, or format v2's FRAME, Spine and
- * Tally. `geometry` comes out of the Deed and never changes while the volume
- * is mounted; on format v1 so does `layout`, and `ledger` is the part that
- * does, written back to the medium in two alternating copies
- * (volume_ledger.h). A format-v2 volume has neither: its LAYOUT is never
- * filled, and code of format v1 that asks for it on such a volume is a
- * defect, stopped at in a STRICT kernel (TagFSLayout).
+ * `geometry` comes out of the Deed and never changes while the volume is
+ * mounted; its book — FRAME, Spine and Tally — is the mount's (mount/
+ * book_mount.h). `free_blocks` and `total_files` are what the book says of it
+ * today, kept in step by every Ink and every claim of the block map; the next
+ * file id is the book's own (g_book.next_fid).
  *
- * ‼ WHERE A BLOCK NUMBER POINTS IS TWO NUMBERS, WHATEVER THE FORMAT
+ * ‼ A BLOCK NUMBER IS A BLOCK OF THE VOLUME
  *
- * A block number a file's record or the volume's book carries is counted
- * from `block_base`, in blocks of the volume, and runs up to `block_end`. On
- * format v1 that is its DATA RUN — `block_base` is LAYOUT's data_block and
- * `block_end` its data_blocks: everything TagFS v1 allocates is counted from
- * zero in it, because that is what its records carry and its bitmap indexes.
- * On format v2 every number the book or a file names is a block of the
- * VOLUME (volume_deed.h, VolumeFrame) — `block_base` is 0 and `block_end` is
- * where the volume's far Deed sits, the end of what a file may name. One
- * conversion applies them, and only one: tagfs_block_to_sector().
+ * Every number the book or a file's record names is a block of the VOLUME
+ * (volume_deed.h, VolumeFrame), up to `block_end` — where the volume's far
+ * Deed sits, the end of what a file may name. One conversion takes it to a
+ * sector of the medium, and only one: tagfs_block_to_sector().
  */
 typedef struct {
     uint8_t          uuid[16];      /* which volume this is */
     char             volume_name[16]; /* Deed's short maker/name, NUL-padded */
     uint64_t         volume_bytes;  /* whole mounted volume capacity */
-    DeedFormat       format;        /* the book the mounted volume is written in */
-    uint64_t         block_base;    /* the volume block a record's block 0 is */
-    uint64_t         block_end;     /* the first block, so counted, no record may name */
-    VolumeLayout     layout;        /* format v1: where its parts are, in volume blocks */
+    uint64_t         block_end;     /* the first block no record may name */
     VolumeGeometry   geometry;      /* what it was laid out for */
     VolumeBoot       boot;          /* where the loader finds the kernel; zero when the Deed says nothing */
-    VolumeLedger     ledger;        /* what is true of it today */
+    uint64_t         free_blocks;   /* blocks of the volume no owner holds */
+    uint64_t         total_files;   /* live files */
 
     TagRegistry*     registry;
     TagBitmapIndex*  bitmap_index;
     FileMap*         files;
 
     /* The Braid the volume is assembled in, which the mount names — the only
-     * thing that sends a block of the volume through Braid. Format v1 names
-     * no assembly, so a v1 volume has none (braid/braid.h). */
+     * thing that sends a block of the volume through Braid (braid/braid.h). */
     struct BraidState* braid;
 
     bool             initialized;
@@ -319,25 +191,6 @@ bool         TagRegistrySpelling(TagRegistry* reg, uint32_t tag_id, TagSpelling*
  * out->ids is the caller's to kfree, never the registry's own array. No such
  * key: NULL and 0. */
 error_t      TagRegistryKeyIds(TagRegistry* reg, const char* key, size_t key_len, TagIdList* out);
-
-/* Every tag interned before the call written to the medium; made durable by a
- * flush after it — the Settle cycle's first. OK at once, with no I/O, when
- * nothing is owed.
- * May wait for another core's flush of the same registry, so never under a
- * TagFS lock. */
-error_t      tag_registry_flush(TagRegistry* reg);
-
-/* The registry read off the medium from its head; the mount's, once. Refuses
- * — and says why — a chain it cannot walk or a registry it cannot hold whole,
- * and the code tells which: ERR_NO_MEMORY when the machine had no memory to
- * hold it, the read's own refusal when a block would not read, and
- * ERR_TAGFS_CORRUPTED when what the medium holds is no registry. Under a seal
- * (`newest`, and the copy before it, `older`; both NULL for a volume whose
- * newest Ledger carries none) it is read as far as the seal says, and a last
- * block that does not bear the seal out is rolled back to the blocks before it
- * (tag_registry.c). */
-error_t      tag_registry_load(TagRegistry* reg, uint32_t first_block,
-                               const SettleMark* newest, const SettleMark* older);
 
 // ----------------------------------------------------------------------------
 // Bitmap Index API
@@ -403,17 +256,6 @@ uint32_t        TagBitmapQueryHoldBound(uint32_t unless_count);
 #endif
 
 // ----------------------------------------------------------------------------
-// File Table API
-// ----------------------------------------------------------------------------
-
-error_t file_table_init(uint32_t first_block, bool sealed);
-void file_table_shutdown(void);
-int  file_table_lookup(uint64_t file_id, uint32_t* out_block, uint32_t* out_offset);
-int  file_table_update(uint64_t file_id, uint32_t meta_block, uint32_t meta_offset);
-int  file_table_delete(uint64_t file_id);
-error_t file_table_flush(void);
-
-// ----------------------------------------------------------------------------
 // Main TagFS API
 // ----------------------------------------------------------------------------
 
@@ -427,7 +269,7 @@ uint8_t  tagfs_get_seat(void);       /* Boardroom seat the volume lives on */
  * A volume can be taken down under a running machine — its medium leaves, and
  * what is held about it is dropped and read again — and everything the mount
  * allocated goes back to the allocator at that moment: the tag registry, the
- * tag index, the block map, the file table, the metadata pool. Nothing is
+ * tag index, the block map, the book's memory. Nothing is
  * freed while a caller is inside, and no caller gets in once the volume is on
  * its way out. False means there is no volume to be inside; every caller that
  * gets true MUST leave.
@@ -589,27 +431,16 @@ uint64_t tagfs_block_to_sector(uint64_t block);
 
 /* Each change of a file below answers -ERR_WOULD_BLOCK, nothing of it done —
  * an untag by text, nothing of what its text still names — while the volume
- * is short of ground a Settle cycle gives back: a block for the registry to
- * grow by, a Spare for the pool's tail. No cycle is run beneath the call: its
- * caller waits for one its own way and asks again (settle_ops.h,
- * SettleOpForRoom). */
+ * is short of room a Settle cycle gives back: room on the ribbon for the
+ * change's stitch. No cycle is run beneath the call: its caller waits for one
+ * its own way and asks again (settle_ops.h, SettleOpForRoom). */
 
 /* 0, or a negative -ERR_*: a name whose tag the registry refuses (too long,
  * the registry full) is refused with the registry's code, no file is made
- * without the tag its name gives it, a record wider than format v1 carries
- * is refused ERR_TAGFS_RECORD_FULL, and a volume that has issued every file id
- * it can is refused ERR_TAGFS_FID_EXHAUSTED (LedgerIssueFileId). */
+ * without the tag its name gives it, and a volume that has issued every file
+ * id it can is refused ERR_TAGFS_FID_EXHAUSTED (ink_book.c). */
 int  tagfs_create_file(const char* filename, const uint32_t* tag_ids, uint32_t tag_count,
                        uint64_t* out_file_id);
-
-/* Whether a file named `filename` wearing `tags` — each counted once, its
- * name's own tag with them — has a record format v1 can hold: OK, or
- * ERR_TAGFS_RECORD_FULL; the name's refusal (ERR_TAGFS_TAG_TOO_LONG), or
- * ERR_NO_MEMORY. Asked before a single tag is interned, so a create refused
- * for its width spends none of the volume's numbers. *out_worn (optional):
- * how many tags the record would list. */
-error_t TagFSCreateFits(const char* filename, const TagSpelling* tags, uint32_t count,
-                        uint32_t* out_worn);
 
 /* The file given up, or renamed — its old name's tag off, the new one's on.
  * 0, or a negative -ERR_*: a file the system keeps in a role is given up only
@@ -621,8 +452,7 @@ int  tagfs_delete_file(uint64_t file_id, InkWarrant warrant);
  * query meeting it, and let go by the volume when the term ends — or, for a
  * term of 0, given up at once, as tagfs_delete_file does. The term is the
  * caller's: the volume has none of its own. A file the system keeps is
- * deleted only with the warrant, as it is given up. -ERR_UNSUPPORTED on
- * format v1 for a term above 0. tagfs_restore_file brings a deleted file back
+ * deleted only with the warrant, as it is given up. tagfs_restore_file brings a deleted file back
  * until its term ends (-ERR_FILE_NOT_FOUND after, or for a file the volume
  * does not hold), and is no change to a file that is not deleted. */
 int  tagfs_keep_file(uint64_t file_id, uint64_t term_seconds, InkWarrant warrant);
@@ -658,15 +488,15 @@ bool tagfs_has_tag(uint64_t file_id, uint32_t tag_id);
 /* The tag a spelling names, interned and put on the file, both inside one
  * mounting of the volume: OK, or the real refusal — the registry's (the tag
  * too long, the registry full), or the Ink's: ERR_FILE_NOT_FOUND,
- * ERR_TAGFS_RECORD_FULL, ERR_DEVICE_NOT_READY, ERR_TAGFS_READ_ONLY,
- * ERR_NO_MEMORY, a Spare's refusal; ERR_TAGFS_NOT_INITIALIZED with no volume. */
+ * ERR_DEVICE_NOT_READY, ERR_TAGFS_READ_ONLY, ERR_NO_MEMORY;
+ * ERR_TAGFS_NOT_INITIALIZED with no volume. */
 error_t tagfs_add_tag_string(uint64_t file_id, const TagSpelling* tag);
 /* What the spelling names comes off the file: that tag when it has a value,
  * every tag of its key when it is bare. 0 once one of them came off, or a
  * negative -ERR_*: -ERR_TAGFS_TAG_NOT_FOUND when the file wore none of them,
  * -ERR_FILE_NOT_FOUND when there is no such file, or the first refusal of
- * taking one off — -ERR_DEVICE_NOT_READY, -ERR_TAGFS_READ_ONLY,
- * -ERR_NO_MEMORY, or a Spare's refusal. */
+ * taking one off — -ERR_DEVICE_NOT_READY, -ERR_TAGFS_READ_ONLY or
+ * -ERR_NO_MEMORY. */
 int  tagfs_remove_tag_string(uint64_t file_id, const TagSpelling* tag);
 
 bool tagfs_key_is_reserved(const char *key, size_t key_len);
@@ -749,31 +579,10 @@ struct PlotSource;
 error_t          tagfs_write(TagFSFileHandle* handle, const struct PlotSource* src,
                              uint64_t* out_written);
 
-/* One run of exactly `count` blocks, the lowest that is free: 0, or -1 when
- * there is none (block_map.h, BlockMapTake). */
-int      tagfs_alloc_blocks(uint32_t count, uint64_t* out_start_block);
-/* The run back: 0, or a negative -ERR_*. A run holding a block that is already
- * free is refused whole (-ERR_TAGFS_EXTENT_ERROR), said, and the map is left
- * as it is. */
-int      tagfs_free_blocks(uint64_t start_block, uint32_t count);
-
-#ifdef CONFIG_VOLUME_TESTS
-/* The free count derived again from the block map, as a mount derives it;
- * returns how far the Ledger's count had drifted from it. For a startup test
- * that watches a block be given back twice — see the definition. */
-int64_t  TagFSAllocatorRederive(void);
-#endif
-
 int         tagfs_get_metadata(uint64_t file_id, TagFSMetadata* out);
 /* What tagfs_get_metadata filled in, let go. */
 void        tagfs_metadata_free(TagFSMetadata* meta);
 TagFSState* tagfs_get_state(void);
-
-/* The mounted volume's LAYOUT, for the code of format v1 that walks what it
- * names. A volume of format v2 has none — its LAYOUT is never filled — and
- * code of format v1 asking for it there is a defect: said once a mount, and
- * stopped at in a STRICT kernel. */
-VolumeLayout* TagFSLayout(void);
 
 /* The file laid in one run, taken near where it begins, its record naming the
  * run in as few extents as a record can say it. OK, or the refusal: the file
@@ -790,8 +599,7 @@ uint32_t tagfs_get_fragmentation_score(uint32_t* out_files, uint32_t* out_gaps);
 #ifdef CONFIG_VOLUME_TESTS
 /* One record's share of that score, as the walk of the live files counts it:
  * the gaps a read of it seeks across, and the steps between its blocks of
- * ground — for the stand, whose records with holes no volume of format v1
- * holds. */
+ * ground — for the stand, which lays records with holes of its own. */
 void     TagFSFragOfRecord(const struct FileRecord* rec, uint32_t* gaps, uint64_t* steps);
 #endif
 
@@ -803,18 +611,11 @@ void     TagFSFragOfRecord(const struct FileRecord* rec, uint32_t* gaps, uint64_
 /* One block: OK, or the real refusal — ERR_DEVICE_NOT_READY once the medium
  * left, ERR_READ_FAILED when it would not give the block, ERR_BAD_SECTOR when
  * it answered that a sector of it cannot be read, ERR_CHECKSUM when
- * what it gave does not match the digest recorded when the block was written
+ * what it gave does not match the digest the book holds for the block
  * (integrity/integrity.h, which names the block and publishes it); a write
- * ERR_DEVICE_NOT_READY or ERR_WRITE_FAILED, its digest recorded once it lands. */
+ * ERR_DEVICE_NOT_READY, ERR_WRITE_FAILED, or ERR_TAGFS_READ_ONLY under glass. */
 error_t  tagfs_read_block(uint64_t block, void* buffer);
 error_t  tagfs_write_block(uint64_t block, const void* buffer);
-
-/* One block of the volume's own records — a chain's link, a stamp, the pool's
- * head or a block of it, a page of the integrity map — through the same doors
- * with the integrity map left out, which covers none of them (RT-22). The same
- * refusals, but never ERR_CHECKSUM. */
-error_t  TagFSMetaBlockRead(uint64_t block, void* buffer);
-error_t  TagFSMetaBlockWrite(uint64_t block, const void* buffer);
 
 /* `count` blocks from `first` on, in as few commands as the seat takes and
  * checked against nothing: for a reader that checks each block where it hands
@@ -833,9 +634,8 @@ void     tagfs_readahead_invalidate(uint64_t block);
  * Read one sector run of the mounted volume, counted from the start of its
  * ground rather than from the start of the medium.
  *
- * This is the door TagFS and everything under it uses to reach the medium —
- * the DiskBook included — and a block of the data run goes by
- * tagfs_block_to_sector. The base is applied in those two and nowhere else,
+ * This is the door TagFS and everything under it uses to reach the medium,
+ * and a block of the volume goes by tagfs_block_to_sector. The base is applied in those two and nowhere else,
  * which is what makes "no absolute addresses inside a volume" an invariant
  * instead of a convention.
  */

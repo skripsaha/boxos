@@ -3,25 +3,18 @@
 
 #include "../tagfs.h"
 #include "ground_owner.h"
-#include "../block_map/block_map.h"
+#include "../plot/strip.h"
 
 /*
- * GroundCensus — every owner of the data run, against the medium's map.
+ * GroundCensus — every owner of the volume's ground.
  *
  * The mount asks each owner in ground_owner.h for its ground and each answers
- * from what the mount already holds in memory — the chains it walked, the
- * files' records, the Ledger's fields, the Deed's BOOT run — so the census
- * reads nothing but the map itself. The claims are kept as runs, not as a map
- * of the data run: the memory is the owners', whatever the size of the
- * volume, and the medium's map passes a window at a time beside the owners'
- * bits for that window (BlockMapCensus).
- *
- * What it decides is owner decision 3's first half: a block an owner names and
- * the map calls free is taken again (missing — the repair only adds); a block
- * the map calls taken and no owner names is an orphan, REPORTED and kept
- * taken, until the census is shown to agree with tools/volume-read.py's on
- * the same image. Two exclusive owners of one block are said aloud — a lie of
- * the medium deeper than the Fallow lag covers, or a defect of a writer.
+ * from what the mount already holds in memory — the files' records, the
+ * Spine's slots and their Tallies, the ribbon's Quires, the Deed's BOOT run —
+ * so the census reads nothing. The claims are kept as runs, not as a map of
+ * the volume: the memory is the owners', whatever the size of the volume.
+ * Two exclusive owners of one block are said aloud — a lie of the medium
+ * deeper than the Fallow lag covers, or a defect of a writer.
  *
  * The mount's alone: one core, the door shut, from Begin to End.
  */
@@ -29,28 +22,19 @@
 void    GroundCensusBegin(void);
 
 /* `count` blocks from `start` are `owner`'s — `who` names which one of its
- * kind (a file id; 0 where the kind has one). Runs past the data run are cut
- * to it. Memory refused is remembered: the census then decides nothing. */
+ * kind (a file id; 0 where the kind has one). Runs past the volume are cut to
+ * it. Memory refused is remembered: the census then decides nothing. */
 void    GroundClaim(GroundOwner owner, uint64_t start, uint32_t count, uint64_t who);
 
-/* The same claim, made by a slot of a format-v2 volume's Spine — a node of the
+/* The same claim, made by a slot of the Spine — a node of the
  * Tally it names (`who` the node's seq), a Quire its ribbon goes on in (0):
  * one name two slots give alike is one owner (GroundCensusBook). */
 void    GroundClaimBySlot(GroundOwner owner, uint64_t start, uint32_t count, uint64_t who, uint32_t slot);
 
-/* The claims against the medium's map, a window at a time: the orphans and the
- * missing named — every orphan run handed to `orphan` when it is given — the
- * missing taken again in memory for the next cycle to write, the free count
- * derived; two owners of a block said. ERR_TAGFS_CORRUPTED when the map would
- * not read; ERR_NO_MEMORY when the repair could not be written down. When a
- * claim was refused memory, the map is only measured — said — and nothing is
- * taken again, and no orphan is named. */
-error_t GroundCensusRun(BlockMapOrphanFn orphan, BlockMapCensusCount* out);
-
 /*
- * A format-v2 volume's census, which keeps no bitmap to hold the claims
- * against (spec_v2 §4.6): every block an owner names is taken, and the only
- * finding is a block two owners name — said where they meet, as above; a run
+ * The census, which keeps no bitmap to hold the claims against (spec_v2
+ * §4.6): every block an owner names is taken, and the only finding is a block
+ * two owners name — said where they meet, as above; a run
  * SHARED (GROUND_SHARED) is no second owner beside its block's DATA run or
  * another run SHARED, and is one on any other owner's ground (§8.2). Before
  * the cut below, how many name each block a run SHARED names is counted into
@@ -91,20 +75,19 @@ bool    GroundClaimedBy(GroundOwner owner, uint64_t start, uint64_t count);
  * them at the most: how many there are. */
 uint64_t GroundClaimsOf(GroundOwner owner, Strip* out, uint64_t room);
 
-/* A run an owner names that its caller cuts to the data run before it
- * claims what is left — a locked file's run outside it, a held or fallow run
+/* A run an owner names that its caller cuts to the volume before it claims
+ * what is left — a locked file's run outside it, a held or fallow run
  * past it: counted in the reach as it is named, and claimed by no one. */
 void    GroundCensusNamed(uint64_t start, uint64_t count);
 
 /* Past the farthest block any owner but the far Deed named since Begin — as
  * it named it, a claim before it is cut to the volume and a run told by
- * GroundCensusNamed alike — 0 when none did: on a book, the proof that the
- * ground behind the volume is no one's before it is taken
- * (mount/book_grow.c), as a format-v1 volume's bitmap past its data run is. */
+ * GroundCensusNamed alike — 0 when none did: the proof that the ground
+ * behind the volume is no one's before it is taken (mount/book_grow.c). */
 uint64_t GroundCensusReach(void);
 
-/* The blocks a format-v2 volume's census said two owners name (GroundCensusBook),
- * since Begin. */
+/* The blocks the census said two owners name (GroundCensusBook), since
+ * Begin. */
 uint64_t GroundCensusDoubled(void);
 
 /* The claims let go. */

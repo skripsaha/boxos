@@ -132,8 +132,6 @@ const char* ErrorString(error_t err) {
             return "Metadata corrupted";
         case ERR_TAG_REGISTRY_FULL:
             return "Tag registry full";
-        case ERR_FILE_TABLE_CORRUPT:
-            return "File table corrupt";
         case ERR_METADATA_POOL_FULL:
             return "Metadata pool full";
         case ERR_BLOCK_ALLOC_FAILED:

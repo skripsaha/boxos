@@ -18,7 +18,7 @@
 #                         image attested through OVMF, a byte past the
 #                         kernel's end flipped — named, and no jump — and a
 #                         second kernel kept in the boot role jumped into in its place
-#   logcheck.sh mkfs      no boot: the image `make VOLUME_FORMAT=v2` lays held to
+#   logcheck.sh mkfs      no boot: the image `make` lays held to
 #                         volume-read — its self-test over mkfs's own book, its
 #                         files, its ground — and create_tagfs on grounds past
 #                         16 TiB, too small, and at the cargo's widths
@@ -35,20 +35,15 @@
 #                         which map it stood on, the EFI descriptor list is
 #                         on the record, and the Lifeline stays silent
 #   logcheck.sh census    the host's roll call (tools/volume-read.py check) and
-#                         the kernel's fsck name the same runs, counts and free
-#                         figure, and the same seal, on planted volumes; and a
-#                         qemu-io blklogwrites log replays onto its base byte
-#                         for byte
-#   logcheck.sh censusmut either half of that reconcile broken on purpose — the
-#                         kernel's pool walk, the census's retired-record rule —
-#                         must turn it red
+#                         the kernel's mount name the same book, on planted
+#                         books; and a qemu-io blklogwrites log replays onto
+#                         its base byte for byte
 #   logcheck.sh growglass a book under glass on a bigger medium takes no ground
-#                         and writes nothing; grow and growcut ask a book the
-#                         same with VOLUME_FORMAT=v2 (logcheck_book_grow.sh)
-#   logcheck.sh stand     the startup tests that write (VOLUME_TESTS=on), on the
-#                         legacy channel and on AHCI, each image booted twice:
-#                         0 failed, the caveats held with their numbers, the
-#                         faults fired where aimed, no Bitmap mismatch after
+#                         and writes nothing; grow and growcut grow a book
+#                         (logcheck_book_grow.sh)
+#   logcheck.sh stand     the startup tests that write (VOLUME_TESTS=on), on a
+#                         book on its roads to the medium: 0 failed, the
+#                         faults fired where aimed, the book left whole
 #   logcheck.sh standmut  each caveat's real fix put in must lift it early, and
 #                         each fault mechanism broken must fail its self-test;
 #                         a muted assertion, a judge that always holds and the
@@ -69,14 +64,6 @@
 #                         holds, a row whose step was lifted, a place named
 #                         twice, the table full and a self-deadlock — each a
 #                         FAIL — and a bare spinlock put into TagFS, found
-#   logcheck.sh abba      quilltest abba on UEFI STRICT 16c: the tag registry and
-#                         the file table grown while three other cabins rename,
-#                         create and tag; the run must reach its verdict (a stall
-#                         judged against its own pace), the chains must grow, and
-#                         the two order places are demanded as their rows say
-#   logcheck.sh abbamut   a block taken under the registry's lock at every flush,
-#                         its row's step lifted: abba's demand must say the
-#                         defect is back
 #   logcheck.sh writers   UEFI STRICT 16c: sixteen cabins each write and rewrite
 #                         a file of their own; halted and booted again, every
 #                         file is its last round byte for byte, on the medium
@@ -118,13 +105,13 @@ STAND_NAME=logcheck
 . "$(dirname "$0")/logcheck_book_usb.sh"
 . "$(dirname "$0")/logcheck_bind.sh"
 . "$(dirname "$0")/logcheck_escheat.sh"
-# A book taking the ground behind it (grow, growcut on VOLUME_FORMAT=v2;
-# growglass): tools/logcheck_book_grow.sh.
+# A book taking the ground behind it (grow, growcut, growglass):
+# tools/logcheck_book_grow.sh.
 . "$(dirname "$0")/logcheck_book_grow.sh"
-# A book's stick leaving while a write is in flight (replugwrite on
-# VOLUME_FORMAT=v2), and a book's newest Spine slot moved on by the host while
-# the stick was out (slot_moved_on_host — moved_on_host's for a book: replug,
-# holdground, returnfail): tools/logcheck_book_replug.sh.
+# A book's stick leaving while a write is in flight (replugwrite), and a
+# book's newest Spine slot moved on by the host while
+# the stick was out (slot_moved_on_host — replug, holdground, returnfail):
+# tools/logcheck_book_replug.sh.
 . "$(dirname "$0")/logcheck_book_replug.sh"
 # A logger of a line a second on a book (loggerhour): tools/logcheck_book_logger.sh.
 . "$(dirname "$0")/logcheck_book_logger.sh"
@@ -299,8 +286,7 @@ LATEARRIVAL_MARK="logcheck mutation: the internal disk is not this machine's"
 # there. A RETURN asks somewhere else — the open book looks for the volume
 # that left (volume_ground_on) — and the mutation used to stand there too:
 # every return was judged against the internal disk, a medium that never left,
-# measured so on 1.12 ("the volume came back in seat 0 with its Ledger as this
-# kernel left it", the stick sitting in seat 1). The kernel now judges only a
+# the stick sitting in seat 1. The kernel now judges only a
 # seat taken after the book opened (tagfs.c, g_book_seatings), and the
 # internal disk was seated at boot, so that half of the mutation is gone: a
 # return judged against the disk is the kernel's defect again, and red.
@@ -401,89 +387,10 @@ stick_from_boot_image() {
     return 0
 }
 
-# ── the stick's Ledger moved on while the stick was out of the machine ─────
-#
-# A medium that comes back is taken up with its open book only when its Ledger
-# is the one this kernel left on it — the seq, and the seal's {settle,
-# closed_crc32, tail_crc32} (tagfs/mount/away.h). Another BoxOS kernel that
-# settled a cycle on the stick meanwhile wrote the next seq into the OTHER copy
-# and sealed it as that cycle. This writes exactly that from the host, between
-# the pull and the push: the newest copy laid into the other slot, its seq one
-# higher, its seal naming that seq, its checksum made again — and nothing else.
-# No table, no pool, no block of any file: the volume it describes is the same
-# volume, and only the record of who settled it last has moved.
-#
-# ‼ ONLY THE LEDGER, AND ON PURPOSE. A host that changes a file's bytes and
-# leaves the Ledger alone moves no seq, and the kernel does not see it — it
-# says so itself, in the line that takes the book up — so that is not a change
-# this can stand for.
-#
-# The image is the host's while this runs: a drive added over HMP goes with its
-# device, so between the pull's `device_del` and the next `drive_add` nothing
-# in QEMU holds the file.
-ledger_moved_on_host() {
-    python3 - "$1" <<'PY'
-import struct, sys
-sys.dont_write_bytecode = True
-sys.path.insert(0, "tools")
-from volumeread import medium, ondisk
-
-path = sys.argv[1]
-stand = medium.StandOnDeed(medium.Medium(path), None)
-state = stand.deed["layout"]["state_block"]
-lba = [stand.start + (state + c) * ondisk.SECTORS_PER_BLOCK for c in range(ondisk.LEDGER_COPIES)]
-at = {name: off for name, off, _n in ondisk.VOLUME_LEDGER.Offsets()}
-settle_at = ondisk.LEDGER_SEAL_AT + dict((n, o) for n, o, _s in ondisk.SETTLE_MARK.Offsets())["settle"]
-
-with open(path, "r+b") as f:
-    def read(c):
-        f.seek(lba[c] * ondisk.SECTOR)
-        return f.read(ondisk.SECTOR)
-    was = [ondisk.ReadLedgerCopy(read(c), c) for c in range(ondisk.LEDGER_COPIES)]
-    newest = ondisk.LedgerChoice(was)
-    if newest is None:
-        sys.exit("ledger_moved_on_host: no copy of the stick's Ledger reads intact")
-    if not newest["sealed"]:
-        sys.exit("ledger_moved_on_host: the newest copy (seq %u) carries no seal — "
-                 "this kernel always seals, so the stick is not what it should be" % newest["seq"])
-    src = newest["copy"]
-    dst = (src + 1) % ondisk.LEDGER_COPIES
-    seq = newest["seq"] + 1
-    rec = bytearray(read(src))
-    struct.pack_into("<Q", rec, at["seq"], seq)
-    struct.pack_into("<Q", rec, settle_at, seq)
-    struct.pack_into("<I", rec, at["crc32"], 0)
-    struct.pack_into("<I", rec, at["crc32"], ondisk.Crc32(bytes(rec[:newest["bytes"]])))
-    f.seek(lba[dst] * ondisk.SECTOR)
-    f.write(rec)
-    f.flush()
-    now = [ondisk.ReadLedgerCopy(read(c), c) for c in range(ondisk.LEDGER_COPIES)]
-
-stands = ondisk.LedgerChoice(now)
-if (stands is None or stands["copy"] != dst or stands["seq"] != seq or not stands["sealed"]
-        or not now[src]["ok"] or now[src]["seq"] != newest["seq"]):
-    sys.exit("ledger_moved_on_host: the stick did not take the moved Ledger as written")
-print("  (the stick's Ledger moved on the host: copy %u at seq %u, copy %u now seq %u, "
-      "sealed as that cycle)" % (src, newest["seq"], dst, seq))
-PY
-}
-
-# moved_on_host IMG — the stick moved on by the host while it was out, as its
-# format moves (stand_format): format v1's Ledger (ledger_moved_on_host), a
-# book's newest Spine slot (slot_moved_on_host, logcheck_book_replug.sh).
-moved_on_host() {
-    if [ "$(stand_format)" = v2 ]; then slot_moved_on_host "$1"; else ledger_moved_on_host "$1"; fi
-}
-
-# The line the kernel says of a stick in seat 1 that came back moved on, its
-# book given up (away.c, AWAY_OTHER) — by the stick's format.
-moved_on_said() {
-    if [ "$(stand_format)" = v2 ]; then
-        echo "came back in seat 1 not as this kernel left its book"
-    else
-        echo "came back in seat 1 with a Ledger or a Deed this kernel did not leave on it"
-    fi
-}
+# The line the kernel says of a stick in seat 1 that came back moved on by the
+# host (slot_moved_on_host, logcheck_book_replug.sh), its book given up
+# (away.c, AWAY_OTHER).
+MOVED_ON_SAID="came back in seat 1 not as this kernel left its book"
 
 run_latearrival() {
     echo "== latearrival: the volume arrives after the boot gave up =="
@@ -573,18 +480,18 @@ run_latearrival() {
 # machine that boots from a stick, that is the machine gone until it is
 # switched off and on.
 #
-# ‼ SINCE 1.12 A RETURN IS JUDGED, AND THERE ARE TWO RETURNS HERE.
+# ‼ A RETURN IS JUDGED, AND THERE ARE TWO RETURNS HERE.
 #
 # A medium that leaves takes nothing down: the volume's book is held open, and
 # the return decides it (tagfs/mount/away.h). The SAME stick, as this kernel
-# left it — its Ledger's seq and seal the ones a cycle left there, every write
-# the volume saw kept by a flush — is TAKEN UP: no second mount, nothing read
-# again, the files it held still the files it holds. A stick whose Ledger moved
-# while it was away is not the book this kernel holds, and is GIVEN UP: the
-# volume is let go of and mounted from the medium as it now is. So the stick
-# goes out twice. The first time it comes back as it left; the second time the
-# host moves its Ledger on, as another BoxOS kernel settling a cycle on it
-# would (ledger_moved_on_host), and it must not be taken for the same book.
+# left it — its last stitch where it was sewn, its newest Spine slot the one it
+# knows — is TAKEN UP: no second mount, nothing read again, the files it held
+# still the files it holds. A stick whose book moved while it was away is not
+# the book this kernel holds, and is GIVEN UP: the volume is let go of and
+# mounted from the medium as it now is. So the stick goes out twice. The first
+# time it comes back as it left; the second time the host lays a newer Spine
+# slot on it, as another BoxOS kernel writing a Tally of it would
+# (slot_moved_on_host), and it must not be taken for the same book.
 #
 # The file that proves the first return is `anchor_test`'s, written and
 # anchored before the stick goes: anchored, so the volume's every write is
@@ -594,30 +501,10 @@ run_latearrival() {
 # writes and anchors it again: the volume reads, and it takes a write. The
 # second return is proved by the same file read off the volume mounted anew.
 #
-# ‼ RED ON 1.12, FOUR CHECKS, AND THE KERNEL IS WHY. The first return is never
-# taken up. The anchor's cycle ends by laying again the Spares a delete stands
-# on (SettleRunEnd, settle.c: PoolSpareRefill after the cycle's flush), and
-# every Spare is stamped on the medium — a write the volume saw complete that
-# no kept flush covers until the next cycle. VolumeWritesKept() answers no, the
-# stick that left exactly as it was is judged AWAY_IN_DOUBT, and its book is
-# given up and read again; a volume mounted and never written is judged the
-# same, by the mount's own refill (tagfs_init). Measured: with one flush after
-# that refill — not in the tree — this is 23 passed, 0 failed. The four are the
-# claim, so they stay red until the kernel keeps it.
-#
-# ‼ THE MUTATIONS IT EXISTS FOR, one per return, each measured on 1.12:
-#
-#   take the take-up out of volume_book_decided (tagfs.c: `if (verdict ==
-#      AWAY_AS_LEFT) { volume_book_taken_up(...); return true; }`) — every
-#      return is given up and read again, and the first one mounts a second
-#      time. MEASURED with the flush above: 19 passed, 4 failed — exactly the
-#      four the kernel reddens by itself today, so until it is mended this
-#      mutation and that defect read as one result;
-#   take `if (as == LEDGER_OTHER) return AWAY_OTHER;` out of AwayJudge
-#      (away.c) — the stick whose Ledger moved is taken up as the book this
-#      kernel holds, and nothing is read again. MEASURED: 17 passed, 6 failed
-#      (the doubt above still gives that book up, so its judgement and its
-#      order are what go red); with the flush, 18 passed, 5 failed.
+# ‼ THE MUTATION IT EXISTS FOR: take the take-up out of volume_book_decided
+# (tagfs.c: `if (verdict == AWAY_AS_LEFT) { volume_book_taken_up(...); ... }`)
+# — every return is given up and read again, and the first one mounts a second
+# time.
 #
 # Four cores, same as latearrival: the departure is taken down from the idle
 # and guide loops, and on one core neither of them runs.
@@ -693,12 +580,12 @@ run_replug() {
     sleep 2
     SECOND_LINES=$(wc -l < build/serial.log)
 
-    # ── the second return: the stick's Ledger moved while it was away ──────
+    # ── the second return: the stick's book moved while it was away ────────
     mon_raw "device_del usbstick"
     wait_for_line build/serial.log "the medium the volume lives on has left" "$WAIT_QUIET_S" $((SECOND_LINES + 1))
     sleep 2
     local MOVED=1
-    moved_on_host "$SCRATCH/stick.img" && MOVED=0
+    slot_moved_on_host "$SCRATCH/stick.img" && MOVED=0
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick"
@@ -767,17 +654,17 @@ run_replug() {
     grep -q "\[ANCHOR\] WROTE+ANCHORED" "$S"
     chk $? "and the volume takes a write and anchors it after the return"
 
-    # ── the second return: the stick's Ledger moved while it was away ──────
+    # ── the second return: the stick's book moved while it was away ────────
     [ "$MOVED" = 0 ]
-    chk $? "the host moved the stick's book on (its Ledger, or a book's Spine slot) while it was out"
-    grep -q "$(moved_on_said)" "$T"
+    chk $? "the host moved the stick's book on (a newer Spine slot) while it was out"
+    grep -q "$MOVED_ON_SAID" "$T"
     chk $? "the stick whose book moved was judged not to be the book this kernel holds"
     ! grep -q "the volume is back, in seat" "$T"
     chk $? "and was not taken up as that book"
     grep -q "\[TagFS\] the volume on seat 1 is MOUNTED" "$T"
     chk $? "the volume was mounted anew from the medium as it now is"
     local GIVEN_AT UP_AT READ_AT
-    GIVEN_AT=$(grep -n "$(moved_on_said)" "$T" | head -1 | cut -d: -f1)
+    GIVEN_AT=$(grep -n "$MOVED_ON_SAID" "$T" | head -1 | cut -d: -f1)
     UP_AT=$(grep -n "is MOUNTED" "$T" | head -1 | cut -d: -f1)
     READ_AT=$(grep -n "\[ANCHOR\] PASS" "$T" | head -1 | cut -d: -f1)
     [ -n "$GIVEN_AT" ] && [ -n "$UP_AT" ] && [ -n "$READ_AT" ] && \
@@ -819,13 +706,11 @@ run_replug() {
 # (USB, four cores, the stick the volume as in replug):
 #
 #   same   the stick comes back as it left. The book is taken up — every
-#          waiter handed the Helm, its write whole — or, a write the volume saw
-#          complete that no kept flush covered (the holder's last blocks), given
-#          up as AWAY_IN_DOUBT and the volume read again; any other verdict is a
-#          FAIL for a stick nobody touched;
-#   moved  the stick's Ledger is moved on from the host while it is out
-#          (ledger_moved_on_host): AWAY_OTHER, the book given up, and nothing of
-#          the old book reaches the changed medium — no waiter's byte on it.
+#          waiter handed the Helm, its write whole; any other verdict is a FAIL
+#          for a stick nobody touched (logcheck_book_replug.sh says why);
+#   moved  a newer Spine slot is laid on the stick from the host while it is
+#          out (slot_moved_on_host): AWAY_OTHER, the book given up, and nothing
+#          of the old book reaches the changed medium — no waiter's byte on it.
 #
 # Either way: the holder answers ERR_DEVICE_NOT_READY (203) with the bytes the
 # file holds of its write, every waiter is answered (a book given up: 203 and
@@ -836,11 +721,7 @@ run_replug() {
 # the file holds, and, taken up, each exactly that. After the second round the
 # machine halts through bye ("Storage sync complete"), volume-read finds the
 # stick consistent, reads both files off it and cuts them into the same chunks
-# awaycheck said, and finds no block of a waiter's stream anywhere on it. A
-# pull that takes a cycle's block map with it and not its Ledger leaves blocks
-# the map marks used and no settled record names: the ORPHAN PowerCut holds
-# under 1.6 (B1, stand_caveat.sh), held here too — only beside a cycle the
-# departure refused, and a FAIL anywhere else.
+# awaycheck said, and finds no block of a waiter's stream anywhere on it.
 #
 # ‼ THE MUTATIONS IT EXISTS FOR, MEASURED:
 #   HelmBookGivenUp answering nobody (helm.c: its walk taken out) — the
@@ -852,9 +733,6 @@ run_replug() {
 #      too) — the waiters are handed the Helm and their 4 MiB each go to a
 #      medium another kernel settled: 15 passed, 3 failed — the judgement, the
 #      waiters' answers, and 2048 blocks of their streams found on the stick.
-# Where a round's return is IN_DOUBT the book is given up whatever AwayJudge
-# makes of the Ledger, so taking `if (as == LEDGER_OTHER) return AWAY_OTHER;`
-# out of it reddens only the judgement line, as replug says.
 REPLUGWRITE_BPS=262144     # a quarter of a MiB a second: one writer's 4 MiB takes sixteen
 REPLUGWRITE_COUNT=3
 REPLUGWRITE_BYTES=4194304  # quilltest_away.c QUILL_AWAY_MIB
@@ -875,7 +753,7 @@ replugwrite_drive_gone() {   # QEMU has let go of the stick's drive, as its own 
 # taking a write since, the stick pulled, changed on the host for `moved`,
 # pushed back, away's verdict and the volume up again waited for, awaycheck
 # typed and answered. Leaves REPLUGWRITE_MOVED (0 when the host moved the
-# Ledger) and REPLUGWRITE_SILENT (what never came once the stick was back).
+# Spine) and REPLUGWRITE_SILENT (what never came once the stick was back).
 # Answers 1 when the round could not be put to the machine, 2 when it was and
 # the machine went quiet without what the return owes — the verdict, not the
 # harness.
@@ -902,7 +780,7 @@ replugwrite_round() {
     # only once nothing in it holds the file.
     replugwrite_drive_gone || return 1
     if [ "$change" = moved ]; then
-        "${REPLUGWRITE_MOVE:-ledger_moved_on_host}" "$SCRATCH/stick.img" && REPLUGWRITE_MOVED=0
+        slot_moved_on_host "$SCRATCH/stick.img" && REPLUGWRITE_MOVED=0
     fi
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw" || return 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick" || return 1
@@ -957,16 +835,10 @@ replugwrite_judge() {
     fi
     ok "replugwrite: $what — the write in the medium answered ERR_DEVICE_NOT_READY with the bytes the file holds of it: $(tr -d '\r' < "$L" | grep -aoE "write to file $fid refused \(error 203\): [0-9]+ of its [0-9]+ byte\(s\) are the file's" | head -1)"
     verdict=$(tr -d '\r' < "$L" | grep -aE '^\[TagFS\] (the volume is back, in seat|the volume came back in seat|another volume sits in seat)' | head -1)
-    case "${REPLUGWRITE_UP:-v1}:$change:$verdict" in
-        v1:same:*"the volume is back, in seat"*) up=taken ;;
-        v1:same:*"with its Ledger as this kernel left it"*"was never covered by a flush"*) up=given ;;
-        v1:moved:*"with a Ledger or a Deed this kernel did not leave on it"*) up=given ;;
-        v1:*) up="" ;;
-        *) up=$("$REPLUGWRITE_UP" "$change" "$verdict") ;;
-    esac
+    up=$(replugwritebook_up "$change" "$verdict")
     [ -n "$up" ]
     chk $? "replugwrite: $what — the return was judged as such a stick must be: ${verdict:-no verdict at all}"
-    [ "$change" = moved ] && { [ "$REPLUGWRITE_MOVED" = 0 ]; chk $? "replugwrite: $what — ${REPLUGWRITE_MOVE_SAID:-the host moved its Ledger on while it was out}"; }
+    [ "$change" = moved ] && { [ "$REPLUGWRITE_MOVED" = 0 ]; chk $? "replugwrite: $what — the host laid a newer Spine slot on it while it was out"; }
     if [ "$up" = given ]; then
         grep -aqE '^\[TagFS\] the volume on seat [0-9]+ is MOUNTED' "$L"
         chk $? "replugwrite: $what — the book given up, the volume was mounted again from the medium as it now is"
@@ -1087,22 +959,13 @@ REPLUGWRITE_EOF
     chk $rc "replugwrite: no block of a writer that waited through a book given up, or through the moved stick's return, or was answered that the file holds none of its write, is anywhere on the stick — $(tail -1 "$out")"
 }
 
-# replugwrite_census JSON LOG — volume-read's roll call of the stick the
-# machine left: consistent, or every finding a leak of ORPHAN blocks a pull
-# left by cutting a cycle between its map and its Ledger — held under its row
-# (stand_caveat.sh, B1) only when LOG shows a cycle the departure refused —
-# and anything else a FAIL with its words.
+# replugwrite_census JSON — volume-read's roll call of the stick the machine
+# left: consistent, and anything else a FAIL with its words.
 replugwrite_census() {
-    local json=$1 log=$2 kind text
+    local json=$1 kind text
     while IFS="$(printf '\t')" read -r kind text; do
         case "$kind" in
             consistent) ok "replugwrite: volume-read finds the stick consistent — $text" ;;
-            orphan)
-                if grep -aqE '^\[Settle\] the cycle that would have settled [0-9]+ change\(s\) was refused at ' "$log"; then
-                    caveat_judge replugwrite:ORPHAN defect "the stick after its returns: $text — a cycle the departure refused ($(tr -d '\r' < "$log" | grep -aoE 'the cycle that would have settled [0-9]+ change\(s\) was refused at [a-z ]+' | head -1))"
-                else
-                    bad "replugwrite: the stick after its returns holds an ORPHAN no refused cycle explains — $text"
-                fi ;;
             *) bad "replugwrite: volume-read finds the stick ${kind:-unread}: $text" ;;
         esac
     done <<REPLUGWRITE_CENSUS
@@ -1116,70 +979,9 @@ bad = [f for f in d.get("findings", []) if f.get("severity") != "note"]
 if not bad:
     print("consistent\t%s, %d note(s)" % (d.get("verdict"), len(d.get("findings", []))))
 for f in bad:
-    print("%s\t%s: %s" % ("orphan" if (f.get("code"), f.get("severity")) == ("ORPHAN", "leak") else f.get("severity"),
-                          f.get("code"), f.get("text")))
+    print("%s\t%s: %s" % (f.get("severity"), f.get("code"), f.get("text")))
 ' "$json")
 REPLUGWRITE_CENSUS
-}
-
-run_replugwrite() {
-    [ "$(stand_format)" = v2 ] && { run_replugwritebook; return; }
-    echo "== replugwrite: the stick leaves while a write is in flight and writers wait for its Helm, and comes back as it left, then changed =="
-    typer_selfcheck
-    local r change name seed from rc last pid L="$SCRATCH/serial.replugwrite.log"
-    REPLUGWRITE_ABSENT=""
-    latelaunch_on; build
-    make run-stop >/dev/null 2>&1
-    make run-bg USB=on CORES=4 MEM=4G >/dev/null 2>&1
-    stick_from_boot_image \
-        || { make run-stop >/dev/null 2>&1; latelaunch_off; return; }
-    wait_for_line build/serial.log "$NO_VOLUME_YET" "$WAIT_QUIET_S"
-    mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
-    sleep 1
-    mon_raw "device_add usb-storage,drive=stick,id=usbstick"
-    if ! wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"; then
-        make run-stop >/dev/null 2>&1; cp build/serial.log "$L"; latelaunch_off
-        harness "replugwrite: the stick never became this machine's volume"
-        return
-    fi
-    wait_for_quiet "$BOOT_BURST_QUIET_S"
-    latelaunch_held build/serial.log
-    chk $? "replugwrite: every program the late launch made is held, not let run, when the launch is said"
-    replugwrite_spoke_after build/serial.log
-    chk $? "replugwrite: the volume's hub speaks after the kernel says what it started — its greeting past the launch's line"
-    for r in $REPLUGWRITE_ROUNDS; do
-        IFS=: read -r change name seed <<REPLUGWRITE_ROUND
-$r
-REPLUGWRITE_ROUND
-        from=$(wc -l < build/serial.log)
-        replugwrite_round "$change" "$name" "$seed"; rc=$?
-        if [ "$rc" != 0 ]; then
-            make run-stop >/dev/null 2>&1; cp build/serial.log "$L"; latelaunch_off
-            last=$(tr -d '\r' < "$L" | grep -aE '^\[(QUILL|TagFS|Storage)\]' | tail -1 | cut -c1-160)
-            if [ "$rc" = 1 ]; then
-                harness "replugwrite: the $change round could not be put to the machine (last: $last)"
-            else
-                bad "replugwrite: the $change stick came back and the machine went quiet without $REPLUGWRITE_SILENT (last: $last)"
-            fi
-            return
-        fi
-        tail -n +$((from + 1)) build/serial.log > "$L.$name"
-        replugwrite_judge "$L.$name" "$change" "$name" "$seed"
-    done
-    from=$(wc -l < build/serial.log)
-    pid=$(cat build/qemu.pid)
-    type_line bye && wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S" $((from + 1))
-    wait_until "$WAIT_QUIET_S" "the machine to switch itself off" "! kill -0 $pid 2>/dev/null"
-    make run-stop >/dev/null 2>&1
-    cp build/serial.log "$L"
-    latelaunch_off
-    grep -aq '^\[HALT\] Storage sync complete' "$L"
-    chk $? "replugwrite: the machine halted through bye and its sync wrote the volume ($(grep -aE "$STAND_HALT_ENDS" "$L" | tr -d '\r' | tail -1 | cut -c1-100))"
-    python3 tools/volume-read.py "$SCRATCH/stick.img" check --json >"$SCRATCH/replugwrite.check.json" 2>/dev/null
-    replugwrite_census "$SCRATCH/replugwrite.check.json" "$L"
-    replugwrite_medium "$SCRATCH/stick.img" "$REPLUGWRITE_ROUNDS" "$L"
-    ! grep -aqE 'KERNEL PANIC|\[EXCEPTION\]|^\[NIGHTWATCH\] VERDICT: .* a defect' "$L"
-    chk $? "replugwrite: no panic, no exception, nothing owed proved unserved"
 }
 
 # ── nofsgsbase: a processor that cannot write its own TLS base ─────────────
@@ -1247,31 +1049,21 @@ mce:migration:completed apei:memory:error apei:ghes:ready"
 
 # healthy_startup_tests LOG — (6) of healthy: TagFS itself still healthy, and
 # every test it counts is one this tree registers. The numbers are the code's,
-# not a run's (K9): a build without VOLUME_TESTS walks the ten suites of
-# tests.h TEST_SUITES not
-# under VOLUME_TESTS_ONLY — core 3, stress 2, braid 3, cow 1, boxhash 6,
-# book 15, book_judge 5, ribbon 7, integrity 3, use_context 6 TestCases, 51
-# run; the 11 whose reach is TEST_WRITES_TO_VOLUME are skipped (tests.c,
-# g_volume_tests_allowed), and the 40 that only read pass — none of them
-# stands aside on this stand's fresh image, whose first file wears a tag
-# (use_context_narrows). On a book the 6 written for format v1's records
-# stand aside first (tests.c, TestCase.format): tagfs_deed, which only
-# reads, and 5 of the 11 writers — so 39 reads pass, and 6 + 6 are
-# skipped. A test added or taken out moves this line in the same commit.
+# not a run's (K9): a build without VOLUME_TESTS walks the eight suites of
+# tests.h TEST_SUITES not under VOLUME_TESTS_ONLY — core 2, stress 2,
+# braid 2, boxhash 6, book 15, book_judge 5, ribbon 7, use_context 5
+# TestCases, 44 run; the 5 whose reach is TEST_WRITES_TO_VOLUME are skipped
+# (tests.c, g_volume_tests_allowed), and the 39 that only read pass — on this
+# stand's fresh image, whose first file wears a tag (use_context_narrows). A
+# test added or taken out moves this line in the same commit.
 healthy_startup_tests() {
     local L=$1
     grep -qE "TagFS: [0-9]+ run, [0-9]+ passed, 0 failed" "$L"; chk $? "TagFS startup tests: 0 failed"
-    local said want="TagFS: 51 run, 40 passed, 0 failed, 11 skipped, 0 held under a caveat"
-    local told="40 reads passed and 11 writes stood down"
-    if [ "$(stand_format)" = v2 ]; then
-        want="TagFS: 51 run, 39 passed, 0 failed, 12 skipped, 0 held under a caveat"
-        told="39 reads passed, 6 written for format v1 stood aside and 6 writes stood down"
-        grep -aq "^\[TESTS\] 6 test(s) stood aside: this volume is format v2" "$L"
-        chk $? "TagFS startup tests: on a book the 6 written for format v1's records stand aside"
-    fi
+    local said want="TagFS: 44 run, 39 passed, 0 failed, 5 skipped, 0 held under a caveat"
+    local told="39 reads passed and 5 writes stood down"
     said=$(stand_summary "$L")
     [ "$said" = "$want" ]
-    chk $? "TagFS startup tests: the 51 this tree registers ran, $told (${said:-no summary})"
+    chk $? "TagFS startup tests: the 44 this tree registers ran, $told (${said:-no summary})"
 }
 
 run_healthy() {
@@ -1412,124 +1204,6 @@ run_healthy() {
     # table instead, where being unreachable does not matter.
     grep -q "endpoint-context self-test 15/15" "$L"
     chk $? "the endpoint-context fields agree with xHCI Table 6-45"
-}
-
-# ── a volume whose metadata will not read ────────────────────────────────
-#
-# The board failure this reproduces: a flash drive came up once with every
-# file on it, and the boot after that had none. The metadata pool had been
-# overwritten, and the mount met a block that was not a pool — which it
-# answered by "starting fresh" and returning success, silently, because the
-# line saying so was a debug_printf and those compile to nothing.
-#
-# A volume that reads as empty is a volume the next write finishes off. So the
-# rule is: metadata that cannot be read means the volume does NOT mount, the
-# machine says why, and nothing is written to the medium.
-#
-# The damage is done to the IMAGE, not to the code — the same way the deed
-# checks are proven. Nothing here depends on a mutation being installed.
-# ‼ THE IMAGE IS A BUILD PRODUCT, AND A MUTATED PRODUCT IS ANSWERED BY
-# DELETING IT. There is no marker to write into a disk image and the tree-wide
-# preflight cannot see one, so the only thing holding this straight is the
-# manifest and the trap — which is exactly what `mutate_product` puts it under.
-# Restoring it is `rm -f`: the next `build` makes it again from clean sources,
-# which is both cheaper and more honest than keeping a hundred and thirty
-# megabyte copy of something a Makefile can produce on demand.
-badpool_on() {
-    mutate_product build/boxos.img
-    # ‼ AN IMAGE CARRIES NO COMMENT, so there is no marker for `mut_done` to
-    # find and no preflight that could see this one left behind. The proof it
-    # can give is its own bytes — and the proof it used to give was not enough.
-    #
-    # THIS OFFSET WAS HARDWIRED AND IT ROTTED. It read
-    # `(2048 + 136 * 8) * 512` with a comment saying "the data run begins at
-    # volume block 134, the pool is data block 2". Then the volume moved onto
-    # its own ground and its parts moved with it: the pool now begins at volume
-    # block 647. The write landed on empty ground, the four bytes it reported
-    # replacing were 00000000 rather than a pool magic, and the only check on
-    # them was "they must not ALREADY be the corruption" — which empty ground
-    # passes. So the scenario booted a perfectly healthy volume, watched it
-    # mount, and reported that the kernel had failed to notice a corruption
-    # nobody had made. Two red checks for a year, both of them the stand's.
-    #
-    # So the offset is DERIVED from the image, and by the reader the format has
-    # on the host (tools/volumeread): the ground the kernel would stand on, the
-    # Deed there, and the block its LAYOUT says the metadata pool begins at. A
-    # parser of its own here was one more reader of the Deed kept in step with
-    # the format by hand, which the self-test's X1 never sees. And the guard is
-    # the real one: the four bytes must BE the pool magic before the write. A
-    # scenario that cannot find a pool says so and stops, instead of testing
-    # nothing in silence.
-    if ! python3 - <<'EOF'
-import sys
-sys.dont_write_bytecode = True
-sys.path.insert(0, "tools")
-from volumeread import medium, ondisk
-
-TMPL = ondisk.MPOOL_MAGIC.to_bytes(4, "little")
-BAD  = b"\xAA\xBB\xCC\xDD"
-
-try:
-    stand = medium.StandOnDeed(medium.Medium("build/boxos.img"), None)
-except medium.Unreadable as e:
-    sys.exit("logcheck: no deed in this image the kernel could stand on (%s) — "
-             "nothing here can say where the pool is" % e)
-if stand.format != "v1":
-    sys.exit("logcheck: this volume's book is format %s — there is no metadata pool "
-             "to corrupt" % stand.format)
-pool_block = stand.deed["layout"]["metadata_pool_block"]
-at = (stand.start + pool_block * ondisk.SECTORS_PER_BLOCK) * ondisk.SECTOR
-
-img = open("build/boxos.img", "r+b")
-img.seek(at)
-was = img.read(4)
-if was == BAD:
-    sys.exit("logcheck: that offset ALREADY holds the corruption — this image is not clean")
-if was != TMPL:
-    sys.exit("logcheck: volume block %d holds %s, not a metadata pool — the "
-             "scenario refuses to corrupt something it cannot identify"
-             % (pool_block, was.hex()))
-img.seek(at)
-img.write(BAD)
-img.flush()
-img.seek(at)
-now = img.read(4)
-img.close()
-if now != BAD:
-    sys.exit("logcheck: the image did not take the corruption")
-print("logcheck: metadata pool at volume block %d (byte %d): %s -> aabbccdd"
-      % (pool_block, at, was.hex()))
-EOF
-    then
-        echo "badpool: the image could not be corrupted where the pool should be"
-        exit 1
-    fi
-}
-badpool_off() {
-    restore build/boxos.img
-}
-
-run_badpool() {
-    echo "== badpool: the metadata pool holds something that is not a pool =="
-    build
-    badpool_on
-    # boot_bare() rebuilds nothing — it runs what is on disk now.
-    boot_bare badpool
-    badpool_off
-    build   # leave the tree with an image built from clean sources
-    L="$SCRATCH/serial.badpool.log"
-
-    grep -q "where a metadata pool should be" "$L"
-    chk $? "the mount says what it found instead of a pool"
-
-    ! grep -q "starting fresh" "$L"
-    chk $? "and does not decide the volume is empty"
-
-    ! grep -qE "AUTOSTART. Started" "$L"
-    chk $? "nothing from the volume was started off it"
-
-    grep -q "$NO_VOLUME_YET" "$L"
-    chk $? "and the machine says it waits for a volume, starting nothing in its place"
 }
 
 run_novolume() {
@@ -3034,21 +2708,21 @@ run_yank() {
 # replug proves a volume that leaves and comes home is judged, and one read
 # again is read again. It proves it on an IDLE machine, which is the one case
 # where letting go is free: nobody is in the filesystem, so the memory it hands
-# back — the tag registry, the tag index, the block map, the file table, the
-# metadata pool — is memory nobody is holding. That is not the machine this
+# back — the tag registry, the tag index, the block map, the book's map of
+# files — is memory nobody is holding. That is not the machine this
 # has to survive.
 #
 # `make HOLDGROUND=on` puts somebody there. At the moment the medium is noticed
 # gone, one caller steps into the volume and does not step out until the volume
 # is back; and a file is held OPEN across the whole departure.
 #
-# ‼ SINCE 1.12 ONLY A BOOK GIVEN UP TAKES ANYTHING DOWN. A stick that comes
-# back as it left is taken up with its book open (tagfs/mount/away.h) — the
-# caller steps out, the handle reads on, nothing is let go of — so the
-# situation this exists for needs a stick that is NOT the book this kernel
-# holds: its Ledger is moved on from the host while it is out, as another BoxOS
-# kernel settling a cycle on it would move it (ledger_moved_on_host). The book
-# is given up, and the take-down has to wait for the caller.
+# ‼ ONLY A BOOK GIVEN UP TAKES ANYTHING DOWN. A stick that comes back as it
+# left is taken up with its book open (tagfs/mount/away.h) — the caller steps
+# out, the handle reads on, nothing is let go of — so the situation this exists
+# for needs a stick that is NOT the book this kernel holds: a newer Spine slot
+# is laid on it from the host while it is out, as another BoxOS kernel writing
+# a Tally of it would (slot_moved_on_host). The book is given up, and the
+# take-down has to wait for the caller.
 #
 # What each party hears, derived from the code rather than guessed:
 #   a program that asks the volume while its medium is away — a block read of
@@ -3065,13 +2739,6 @@ run_yank() {
 #
 # ‼ THE MUTATIONS IT EXISTS FOR, each measured against this scenario on 1.12:
 #
-#   take `if (as == LEDGER_OTHER) return AWAY_OTHER;` out of AwayJudge
-#      (away.c) -> the stick whose Ledger moved is taken up as the book this
-#      kernel holds, and nothing below happens at all. MEASURED: 17 passed,
-#      2 failed — the doubt replug names (a volume mounted and never written
-#      is already judged AWAY_IN_DOUBT) still gives that book up, so only its
-#      judgement and its order go red; with one flush after each Spare refill,
-#      10 passed, 9 failed;
 #   take the "somebody is inside" refusal out of tagfs_abandon      -> the
 #      take-down says nothing and frees the volume under the caller.
 #      MEASURED: 11 passed, 8 failed;
@@ -3128,7 +2795,7 @@ run_holdground() {
     # The stick is changed while it is out, and pushed back in. drive_add
     # first: an HMP drive is auto-delete and went with the device.
     local MOVED=1
-    moved_on_host "$SCRATCH/stick.img" && MOVED=0
+    slot_moved_on_host "$SCRATCH/stick.img" && MOVED=0
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick"
@@ -3157,7 +2824,7 @@ run_holdground() {
     grep -q "HOLDGROUND. a caller was inside the volume when its medium left" "$S"
     chk $? "somebody was inside the volume when the medium left"
     [ "$MOVED" = 0 ]
-    chk $? "the host moved the stick's book on (its Ledger, or a book's Spine slot) while it was out"
+    chk $? "the host moved the stick's book on (a newer Spine slot) while it was out"
 
     # ── a program asking the absent medium hears it is absent ──────────────
     grep -q "answered 203 — 0 of .* bytes had landed" "$S"
@@ -3166,7 +2833,7 @@ run_holdground() {
     chk $? "and the program was refused by name, not called unknown"
 
     # ── ‼ NOT THE BOOK THIS KERNEL HOLDS ───────────────────────────────────
-    grep -q "$(moved_on_said)" "$S"
+    grep -q "$MOVED_ON_SAID" "$S"
     chk $? "the stick whose book moved was judged not to be the book this kernel holds"
     ! grep -q "the volume is back, in seat" "$S"
     chk $? "and was not taken up as that book"
@@ -3184,7 +2851,7 @@ run_holdground() {
     # In that ORDER. A "let go of" line that precedes the "still inside" line
     # would mean the memory went back first and the sentence came after.
     local GIVEN_AT WAIT_AT OUT_AT FREE_AT MOUNT_AT
-    GIVEN_AT=$(grep -n "$(moved_on_said)" "$S" | head -1 | cut -d: -f1)
+    GIVEN_AT=$(grep -n "$MOVED_ON_SAID" "$S" | head -1 | cut -d: -f1)
     WAIT_AT=$(grep -nE "the volume is on its way out and [1-9]" "$S" | head -1 | cut -d: -f1)
     OUT_AT=$(grep -n "HOLDGROUND. the caller has stepped out" "$S" | head -1 | cut -d: -f1)
     FREE_AT=$(grep -n  "the last caller is out and the old volume" "$S" | head -1 | cut -d: -f1)
@@ -3235,13 +2902,13 @@ run_holdground() {
 # ONCE after the pull — that single arrival is spent on the attempt that
 # fails — so every line after it is the machine asking again by itself.
 #
-# ‼ SINCE 1.12 THERE IS A RE-MOUNT ONLY WHEN THE BOOK IS GIVEN UP. A stick that
-# comes back as this kernel left it is taken up with its book open, and nothing
-# is read again (tagfs/mount/away.h) — there would be no re-mount here to fail.
-# So the stick comes back CHANGED: its Ledger is moved on from the host while
-# it is out, as another BoxOS kernel settling a cycle on it would move it
-# (ledger_moved_on_host). That book is given up by design, the volume is let
-# go of, and the mount that follows is the one RETURNFAIL fails.
+# ‼ THERE IS A RE-MOUNT ONLY WHEN THE BOOK IS GIVEN UP. A stick that comes back
+# as this kernel left it is taken up with its book open, and nothing is read
+# again (tagfs/mount/away.h) — there would be no re-mount here to fail. So the
+# stick comes back CHANGED: a newer Spine slot is laid on it from the host
+# while it is out, as another BoxOS kernel writing a Tally of it would
+# (slot_moved_on_host). That book is given up by design, the volume is let go
+# of, and the mount that follows is the one RETURNFAIL fails.
 #
 # ‼ AND IT IS ASKED AGAIN WHEN THE SEAT SAYS IT ANSWERS AGAIN, NOT ON A CLOCK.
 # The refusal is a read the medium refused, so the machine owes the mount until
@@ -3295,7 +2962,7 @@ run_returnfail() {
     # spent on the re-mount this build is told to fail; nothing is plugged in
     # after it.
     local MOVED=1
-    moved_on_host "$SCRATCH/stick.img" && MOVED=0
+    slot_moved_on_host "$SCRATCH/stick.img" && MOVED=0
     mon_raw "drive_add 0 if=none,id=stick,file=$SCRATCH/stick.img,format=raw"
     sleep 1
     mon_raw "device_add usb-storage,drive=stick,id=usbstick"
@@ -3324,8 +2991,8 @@ run_returnfail() {
     grep -q "the medium the volume lives on has left — its book is held open" "$S"
     chk $? "and the medium then left, its book held open"
     [ "$MOVED" = 0 ]
-    chk $? "the host moved the stick's book on (its Ledger, or a book's Spine slot) while it was out"
-    grep -q "$(moved_on_said)" "$S"
+    chk $? "the host moved the stick's book on (a newer Spine slot) while it was out"
+    grep -q "$MOVED_ON_SAID" "$S"
     chk $? "the changed stick was not taken for the book this kernel holds, and the book was given up"
     grep -q "this volume is NOT mounted: RETURNFAIL=on asked this re-mount to fail" "$S"
     chk $? "the re-mount failed where it was told to, and said so out loud"
@@ -3358,7 +3025,7 @@ run_returnfail() {
     # An asking that comes before the reset is a machine asking on a clock, or
     # at once, which is what this replaced.
     local GIVEN_AT OWED_AT RESET_AT ASK_AT UP_AT
-    GIVEN_AT=$(grep -n "$(moved_on_said)" "$S" | head -1 | cut -d: -f1)
+    GIVEN_AT=$(grep -n "$MOVED_ON_SAID" "$S" | head -1 | cut -d: -f1)
     OWED_AT=$(grep -n "refused a read while its volume was being read" "$S" | head -1 | cut -d: -f1)
     RESET_AT=$(grep -n "its medium is reset once" "$S" | head -1 | cut -d: -f1)
     ASK_AT=$(grep -n "asking for the volume nobody has mounted" "$S" | head -1 | cut -d: -f1)
@@ -3721,8 +3388,8 @@ run_haltslow() {
 # the disk's writes are held to HALTCYCLE_BPS once the writer runs, so a cycle
 # lasts seconds; the button goes on the first cache flush QEMU counts after an
 # anchor was said — a flush no data write makes (write_job.c, "no flush of its
-# own"), so it is the next cycle's FLUSH#1, and that cycle's pool and Ledger
-# are still to be written. And the halt says it found the cycle ("a Settle
+# own"), so it is the next cycle's FLUSH#1, and that cycle's stitch is still
+# to be written. And the halt says it found the cycle ("a Settle
 # cycle runs on another core"); a leg where it did not asked nothing. That
 # happens: on sixteen cores, measured once in three runs, the button met no
 # cycle on another core — the drain found a command in the port and nobody
@@ -3756,7 +3423,7 @@ run_haltslow() {
 # the digest of the bytes before it on the medium, and a clean seal is the
 # next mount's word that every digest stands — now the halt shuts the volume
 # to changes not begun before its drain, and seals clean only with none in
-# flight (TagFSShutForHalt; stand_settle_halt_seals_what_stands). The keeper's
+# flight (TagFSShutForHalt). The keeper's
 # write after the shut is answered -203 (ERR_DEVICE_NOT_READY), said by it.
 # ---------------------------------------------------------------------------
 
@@ -3900,14 +3567,12 @@ run_haltcycle() {
 #              and one MiB laid down, the rest of the volume filled until it
 #              answers no-space, anchored; then _qra.bin deleted and at once a
 #              GiB written to _qrc.bin. The ground the delete frees rests in
-#              Fallow until a cycle has its Quitclaim in a closed block and the
-#              cycles after it settle (fallow.h): the write must wait for that,
-#              never be told there is no room, and land whole — read back by
-#              the guest, then off the medium by volume-read, every block of it
-#              beginning with its own stream, _qra.bin gone, the volume
-#              consistent once the machine halted through bye. On a book the
-#              write waits for the Tallies that make the reserve exact too, and
-#              may be refused no-space past them — the guest's PENDING — by
+#              Fallow until the Quire it was let go in is left behind
+#              (fallow.h): the write waits for that and for the Tallies that
+#              make the reserve exact, and lands whole — read back by the guest,
+#              then off the medium by volume-read, every block of it beginning
+#              with its own stream, _qra.bin gone, the volume consistent once
+#              the machine halted through bye — or is refused no-space past them — the guest's PENDING — by
 #              the ground free and the book holds itself, named, more than
 #              when the volume was first full, the kernel's own word of both at
 #              each refusal — of the data, or of the ribbon — and of the
@@ -3920,9 +3585,8 @@ run_haltcycle() {
 #              that many empty files, the volume filled to its no-space,
 #              anchored, and every one of them deleted, then the file that
 #              filled the volume — each delete answered, and answered OK (the
-#              design: on a full volume the delete past the tail's room waits
-#              for a Spare, it is not refused; one that frees no ground waits
-#              for Glean's sweep, glean.h); the machine halts through bye and
+#              design: on a full volume a delete waits for the ribbon's room,
+#              it is not refused); the machine halts through bye and
 #              volume-read finds the volume consistent with neither on it.
 #   emptyback  the same case on one copy booted twice, the machine halted
 #              through bye between its halves: `quilltest emptyfill
@@ -3931,46 +3595,14 @@ run_haltcycle() {
 #              every one of them and deletes them, then the file that filled
 #              the volume — the volume a machine left full of empty files is
 #              mounted again, its reserve made again from the ground the halt
-#              gave back (meta_pool.h), and not one delete is refused.
+#              gave back, and not one delete is refused.
 #
 # The guest says a line each time a file passes 128 MiB and each 10000 files
 # (quilltest_room.c), so a machine at work talks and one that hangs goes quiet:
 # a leg whose verdict never came is a FAIL — the write or the deletes hung —
 # not the harness's.
 #
-# ‼ THE MUTATION IT EXISTS FOR, MEASURED: the room cycle's close kept off the
-# deletes' Spare — settle.c SettleTake `bool dig = why == SETTLE_FOR_HALT ||
-# (room && FallowRestsOnTail(PoolClosedGenMax()));` cut back to `why ==
-# SETTLE_FOR_HALT`, as the tree stood before this scenario. The fill spends
-# the Glean's Spare and a full volume cannot make it again ("could make the
-# pool only 1 of the 2 Spare(s)"), the delete's Quitclaim stays in the open
-# tail, Fallow never lets its GiB go, and the write waits through cycle after
-# cycle — each a Ledger write and a flush, thousands a second — and never
-# answers: roomback goes quiet after "the volume is full", 1 failed — "the
-# machine went quiet without roomback's verdict: the write of a GiB never
-# answered (last: [MetaPool] a cycle owes a waiter a closed block and the pool
-# holds 1 Spare(s), the last 1 of them the deletes' …)". Left alone, that
-# machine wrote 8.3 million 512-byte Ledger sectors, each with its flush, in
-# twenty-five minutes, and the write never came back. With the line the write
-# lands in ten seconds. (The line is now `bool dig = why == SETTLE_FOR_HALT ||
-# GleanMovedGen() > PoolClosedGenMax() || (room && FallowRestsOnTail(...))`:
-# the mutation is the last term cut, as it was then.)
-#
-# ‼ AND THE ONE EMPTYFULL EXISTS FOR (E1), MEASURED. The deletes of empty
-# files free no ground, so once the tail and the deletes' share of the reserve
-# hold their Quitclaims, the room for the next is Glean's to make (glean.h):
-# on the tree before the fix every delete past the 194th was refused
-# ERR_TAGFS_NO_SPACE (852), the delete of the file that filled the volume
-# among them — "100000 of 100000 deletes answered in 1268 ms, 99806 refused
-# (the first, index 194, with -852), and _qrf.bin's after them answered -852".
-# The sweep a delete waits on taken out — ink.c InkQuitclaim's
-# `if (rc == ERR_TAGFS_NO_SPACE && GleanSweepAsk())` made `&& false` — and
-# emptyfull is red again: "100000 of 100000 deletes answered in 1253 ms, 99903
-# refused (the first, index 97, with -852), and _qrf.bin's after them
-# answered 0" — the delete that frees ground still goes, past the close its
-# ground needs. (stand_room_empty_deletes_on_a_full_volume turns red on the
-# same mutation; stand_ink_full_volume_still_deletes on a Quitclaim of an
-# empty file let into Glean's share.)
+# The mutation it exists for is roombackmut's (logcheck_room.sh).
 # ---------------------------------------------------------------------------
 
 FULLVOLUME_MIB=1024
@@ -4127,17 +3759,11 @@ fullvolume_judge_roomback() {
     fi
     ok "fullvolume: roomback filled the volume to its no-space — ${full#*— }"
     if [ -n "$FULLVOLUME_SILENT" ]; then
-        last=$(tr -d '\r' < "$L" | grep -aE '^\[(QUILL|TagFS|Settle|MetaPool|Glean)\]' | tail -1 | cut -c1-160)
+        last=$(tr -d '\r' < "$L" | grep -aE '^\[(QUILL|TagFS|Settle)\]' | tail -1 | cut -c1-160)
         bad "fullvolume: roomback — _qra.bin deleted, and the machine went quiet without $FULLVOLUME_SILENT: the write of a GiB never answered (last: $last)"
         return
     fi
-    if [ "$(stand_format)" = v2 ]; then
-        fullvolume_roomback_book "$L" "${verdict#\[QUILL\] roomback: }"
-    else
-        TOOK=$((FULLVOLUME_MIB << 20))
-        grep -aq '^\[QUILL\] roomback: PASS' "$L"
-        chk $? "fullvolume: roomback — a GiB written the moment a GiB was deleted got its room, every byte, and read back whole (${verdict#*— })"
-    fi
+    fullvolume_roomback_book "$L" "${verdict#\[QUILL\] roomback: }"
     fullvolume_halted room
     fullvolume_census room
     fullvolume_roomback_medium "$TOOK"
@@ -4153,7 +3779,7 @@ fullvolume_judge_emptyfull() {
     fi
     ok "fullvolume: emptyfull made its empty files and filled the volume to its no-space — ${full#*— }"
     if [ -n "$FULLVOLUME_SILENT" ]; then
-        last=$(tr -d '\r' < "$L" | grep -aE '^\[(QUILL|TagFS|Settle|MetaPool|Glean)\]' | tail -1 | cut -c1-160)
+        last=$(tr -d '\r' < "$L" | grep -aE '^\[(QUILL|TagFS|Settle)\]' | tail -1 | cut -c1-160)
         bad "fullvolume: emptyfull — the machine went quiet without $FULLVOLUME_SILENT: a delete never answered (last: $last)"
         return
     fi
@@ -4183,7 +3809,7 @@ fullvolume_judge_emptyback() {
     [ -n "$found" ]
     chk $? "fullvolume: emptyback — the volume the halt left full is mounted again with every file emptyfill made (${found:-${verdict:-no word from emptyback}})"
     if [ -n "$FULLVOLUME_SILENT" ]; then
-        last=$(tr -d '\r' < "$L" | grep -aE '^\[(QUILL|TagFS|Settle|MetaPool|Glean)\]' | tail -1 | cut -c1-160)
+        last=$(tr -d '\r' < "$L" | grep -aE '^\[(QUILL|TagFS|Settle)\]' | tail -1 | cut -c1-160)
         bad "fullvolume: emptyback — the machine went quiet without $FULLVOLUME_SILENT: a delete never answered (last: $last)"
         return
     fi
@@ -7084,7 +6710,9 @@ run_caretmut() {
 # ground is stretched and the file behind it grown — exactly what writing the
 # image to a bigger medium and enlarging the partition does — and then the
 # machine is booted on it. Nothing inside the volume is touched: whether it
-# takes the ground is the machine's business, which is the whole point.
+# takes the ground is the machine's business, which is the whole point. The
+# scenarios that grow a book are logcheck_book_grow.sh's (grow, growcut,
+# growglass); growmut is the taking removed.
 
 grow_stretch() {
     # grow_stretch IMG SECTORS — give the BoxOS partition more ground.
@@ -7135,173 +6763,21 @@ grow_boot() {
     grep -q "BoxOS Hub" build/serial.log 2>/dev/null
 }
 
-grow_rollback_head() {
-    # Put the PRE-GROWTH head deed back: the state a power cut between the two
-    # writes of a growth leaves behind — a new far copy and an old head.
-    python3 - "$1" "$2" "$3" <<'EOF2'
-import sys
-pristine, img, start = sys.argv[1], sys.argv[2], int(sys.argv[3])
-off = start * 512
-o = open(pristine, "rb"); o.seek(off); head = o.read(4096); o.close()
-f = open(img, "r+b"); f.seek(off); f.write(head); f.close()
-EOF2
-}
-
-run_grow() {
-    [ "$(stand_format)" = v2 ] && { run_growbook; return; }
-    echo "== grow: a volume on a bigger medium takes the ground behind it =="
-    rm -f build/boxos.img   # a scenario that measures growth starts from a volume that has not grown
-    build STRICT=on
-    make run-stop >/dev/null 2>&1
-
-    # The stretched image goes under the manifest as the build product it is,
-    # so a run that dies anywhere below leaves no stretched image behind for
-    # the next scenario to measure.
-    mutate_product build/boxos.img
-    local START
-    START=$(grow_stretch build/boxos.img 409600 | cut -d' ' -f1)
-    if [ -z "$START" ]; then
-        bad "grow: the image has no BoxOS partition to stretch"
-        restore build/boxos.img; build; return
-    fi
-
-    if ! grow_boot grow; then
-        bad "grow: never reached a shell"
-        make run-stop >/dev/null 2>&1; restore build/boxos.img; build; return
-    fi
-    local L="$SCRATCH/serial.grow.log"
-
-    grep -q "takes the rest" "$L"
-    chk $? "grow: the volume sees the ground behind it and takes it"
-
-    grep -qE "the volume now runs [0-9]+ sectors; its data run is [0-9]+ blocks, [0-9]+ more" "$L"
-    chk $? "grow: $(grep -oE 'its data run is [0-9]+ blocks, [0-9]+ more than it had' "$L" | tail -1)"
-
-    grep -q "far copy has moved to sector" "$L"
-    chk $? "grow: the far copy moved to the new end"
-
-    grep -q "is inside the data run now and has been erased" "$L"
-    chk $? "grow: the deed that used to sit at the old end was erased"
-
-    grep -q "its far copy agrees — the whole volume is present" "$L"
-    chk $? "grow: both copies agree about the volume it has become"
-
-    # The free count and the data run have to be a possible pair of numbers.
-    local DB FB
-    DB=$(grep -oE "^\[TagFS\] [0-9]+ data blocks" "$L" | tail -1 | grep -oE "[0-9]+" || true)
-    FB=$(grep -oE "[0-9]+ free," "$L" | tail -1 | grep -oE "[0-9]+" || true)
-    if [ -n "$DB" ] && [ -n "$FB" ] && [ "$FB" -le "$DB" ]; then
-        ok "grow: $FB blocks free out of $DB — a volume cannot have more free than it has"
-    else
-        bad "grow: the volume claims $FB free out of $DB data blocks"
-    fi
-
-    grep -qE "MOUNTED — [0-9]+ file" "$L"
-    chk $? "grow: $(grep -oE 'MOUNTED — [0-9]+ file\(s\)' "$L" | tail -1)"
-
-    # And a file laid down before the growth still reads.
-    local MARK
-    MARK=$(wc -l < build/serial.log)
-    type_cmd "show hello.txt"
-    key_press ret
-    sleep 3
-    tail -n +$((MARK + 1)) build/serial.log | tr -d '\r' | grep -q "Hello from BoxOS"
-    chk $? "grow: a file written before the growth still reads afterwards"
-
-    # Boot it again: the volume now fills its ground and says so.
-    if grow_boot grow2; then
-        grep -q "fills the ground it was given" "$SCRATCH/serial.grow2.log"
-        chk $? "grow: the next mount finds nothing left to take, and says so"
-    else
-        bad "grow: the grown volume would not boot a second time"
-    fi
-
-    make run-stop >/dev/null 2>&1
-    restore build/boxos.img   # the stretched image is discarded
-    build                     # and an unstretched one is made again
-}
-
-run_growcut() {
-    [ "$(stand_format)" = v2 ] && { run_growcutbook; return; }
-    echo "== growcut: a growth cut between its two writes still mounts, and finishes =="
-    #
-    # The order is the crash safety: the far copy is written first, the head
-    # second, and the head is the commit point. This puts the machine in the
-    # exact state a power cut between the two leaves — a new far copy and the
-    # old head — by rolling the head deed back on the medium afterwards.
-    rm -f build/boxos.img   # a scenario that measures growth starts from a volume that has not grown
-    build STRICT=on
-    make run-stop >/dev/null 2>&1
-    # ‼ THIS COPY IS EVIDENCE, NOT A BACKUP. The scenario needs the bytes of the
-    # head deed as they stood BEFORE the growth, because writing them back is
-    # how the power cut between the two writes is reproduced. Putting the image
-    # back afterwards is the manifest's job, below, and it does it by deleting.
-    cp build/boxos.img "$SCRATCH/growcut.pristine"
-
-    mutate_product build/boxos.img
-    local START
-    START=$(grow_stretch build/boxos.img 409600 | cut -d' ' -f1)
-    if [ -z "$START" ]; then
-        bad "growcut: the image has no BoxOS partition to stretch"
-        restore build/boxos.img; build; return
-    fi
-
-    if ! grow_boot growcut1; then
-        bad "growcut: never reached a shell"
-        make run-stop >/dev/null 2>&1; restore build/boxos.img; build; return
-    fi
-    grep -q "the volume now runs" "$SCRATCH/serial.growcut1.log"
-    chk $? "growcut: the volume grew once, so there is a growth to cut"
-
-    make run-stop >/dev/null 2>&1
-    sleep 1
-    grow_rollback_head "$SCRATCH/growcut.pristine" build/boxos.img "$START"
-
-    if ! grow_boot growcut2; then
-        bad "growcut: a half-written growth would not boot"
-        make run-stop >/dev/null 2>&1; restore build/boxos.img; build; return
-    fi
-    local L="$SCRATCH/serial.growcut2.log"
-
-    grep -qE "MOUNTED — [0-9]+ file" "$L"
-    chk $? "growcut: the volume mounts whole — $(grep -oE 'MOUNTED — [0-9]+ file\(s\)' "$L" | tail -1)"
-
-    grep -q "takes the rest" "$L"
-    chk $? "growcut: and finishes the growth from the head's own numbers"
-
-    local DB FB
-    DB=$(grep -oE "^\[TagFS\] [0-9]+ data blocks" "$L" | tail -1 | grep -oE "[0-9]+" || true)
-    FB=$(grep -oE "[0-9]+ free," "$L" | tail -1 | grep -oE "[0-9]+" || true)
-    if [ -n "$DB" ] && [ -n "$FB" ] && [ "$FB" -le "$DB" ]; then
-        ok "growcut: $FB free out of $DB — the ground taken twice was not counted twice"
-    else
-        bad "growcut: the volume claims $FB free out of $DB data blocks"
-    fi
-
-    grep -qE "PANIC|\[EXCEPTION\]" "$L" \
-        && bad "growcut: the kernel faulted on a half-written growth" \
-        || ok "growcut: no panic, no fault"
-
-    make run-stop >/dev/null 2>&1
-    restore build/boxos.img
-    build
-}
-
 grow_blind_on() {
-    mutate src/kernel/tagfs/tagfs.c
+    mutate src/kernel/tagfs/mount/book_mount.c
     python3 - <<'EOF2'
-p = "src/kernel/tagfs/tagfs.c"
+p = "src/kernel/tagfs/mount/book_mount.c"
 s = open(p).read()
-anchor = "        volume_take_more_ground(seat, ground_run, &head);"
+anchor = "    MountBookGrow(tagfs_get_seat());\n"
 assert s.count(anchor) == 1, "grow mutation anchor missing"
-s = s.replace(anchor, "        (void)ground_run; (void)volume_take_more_ground;   /* logcheck mutation: the ground is left unclaimed */", 1)
+s = s.replace(anchor, "    (void)MountBookGrow;   /* logcheck mutation: the ground is left unclaimed */\n", 1)
 open(p, "w").write(s)
 EOF2
-    mut_done src/kernel/tagfs/tagfs.c "logcheck mutation"
+    mut_done src/kernel/tagfs/mount/book_mount.c "logcheck mutation"
 }
 
 grow_blind_off() {
-    restore src/kernel/tagfs/tagfs.c
+    restore src/kernel/tagfs/mount/book_mount.c
 }
 
 run_growmut() {
@@ -8455,271 +7931,21 @@ run_footing() {
 }
 
 # ===========================================================================
-# census — the host's roll call and the kernel's name the same blocks
+# census — the host's roll call and the kernel's name the same book
 # ===========================================================================
 #
-# `tools/volume-read.py check` holds two roll calls of one image: the CENSUS,
-# every owner of every block found the way the volume's writers laid it down,
-# and the KERNELVIEW, a simulation of what the mount in this tree decides —
-# which runs its fsck calls orphan and missing, which files it loses, what
-# free count it prints. The simulation is only worth anything if it IS the
-# mount, and the only way to know that is to boot the image and hold the
-# kernel's own lines against it.
-#
-# So an image is planted with damage the mount must see (self-test's
-# `reconcile`: two orphan blocks, a registry chained past data block 0, a
-# block of a live file cleared in the bitmap, a file whose only record was
-# retired), the tool predicts every line, and the machine boots it. The kernel
-# names its runs (MapTallySay, block_map_mount.c) — the first 32 of each kind one by
-# one, ascending, and the rest in one line that counts them — and every named
-# run, every count and the free figure must be the ones predicted, and every
-# orphan the kernel names one the census cannot find an owner for. A kernel
-# that calls an owned block an orphan is one whose roll call would free a live
-# block the day the repair starts giving orphans back. A second image, C17,
-# carries 40 orphan runs, so the line that counts the rest is held to its
-# numbers too.
-#
-# The rest hold the seal's decisions to the same prediction: S1, a newest seal
-# the medium did not keep, fallen back from; S2, an open block torn under both
-# seals, rolled back, every file whose only record settled there said lost;
-# S7, the newest seal alone, its open block torn — nothing rolled back; S8,
-# the other seal's open block a closed block of the newest, whose open block
-# alone rolls back (the owner's B3); GL1, a chain whose first block Glean
-# moved, the head's old blocks the pool's still; R2, a file's newest record
-# rotten in a sealed span, the file standing on the record before it and that
-# record's block another file's; R3, a file's only record rotten in a sealed
-# span, a file the seal had settled — lost, said, never let go as a cycle that
-# did not settle. And what the mount reads before it trusts:
-# C21b, a Quitclaim whose row was left, which goes with it; C24, a record's
-# file id rotten, which names no id; C25, an extent past the data run, which
-# is not followed; C26, a record's length rotten, the rest of its block said
-# unread. Each boot is held to the line the kernel says of the seal it stood
-# on, of the rows it let go or set, the records it passed over or did not
-# follow, the bytes of a block it did not read, the blocks before the chain's
-# first, a registry rolled back, the next file id and the blocks named twice —
-# every one the census's prediction.
-#
-# Host only, beside them: (A) a real blklogwrites log written by qemu-io, read
-# back by `cut` and replayed onto its base, byte for byte; and volume-read's
-# self-test in its plain form on a fresh image, the one gate that answers for
-# the rules no boot plants — TUSE, Spare, BOOT, the grounds, the constants
-# held against the headers.
-
-# census_selftest — volume-read's self-test, every case, on a fresh image.
-census_selftest() {
-    local rc said counts
-    rm -f build/boxos.img
-    build
-    python3 tools/volume-read.py build/boxos.img self-test >"$SCRATCH/census.selftest.out" 2>&1
-    rc=$?
-    said=$(tail -1 "$SCRATCH/census.selftest.out")
-    counts=$(printf '%s\n' "$said" | sed -nE 's/^self-test: ([0-9]+) of ([0-9]+) cases answered as expected$/\1 \2/p')
-    [ "$rc" = 0 ] && [ -n "$counts" ] && [ "${counts% *}" = "${counts#* }" ]
-    chk $? "census: volume-read's self-test on a fresh image — ${said:-no answer} (exit $rc)"
-    grep -v -e 'as expected$' -e '^self-test: aiming at' -e 'cases answered as expected$' \
-        "$SCRATCH/census.selftest.out" | sed 's/^/  /'
-}
-
-# census_boot NAME CASE — a fresh image, planted with self-test's CASE,
-# predicted, and booted as the disk it was written to: make builds no disk it
-# was handed, so what boots is what was predicted. It says why itself when it
-# answers 1 — a plant that would not take, the boot a harness fault, or a
-# machine that never reached its shell — and its caller counts nothing more.
-# Its two halves are logcheck_book.sh's (census_fresh, census_plant).
-census_boot() {
-    census_fresh
-    census_plant "$@"
-}
-
-# census_judge NAME — the prediction against the kernel's own lines, one
-# "ok|bad <sentence>" line per assertion into $SCRATCH/census.NAME.verdict.
-census_judge() {
-    python3 - "$SCRATCH/census.$1.json" "$SCRATCH/serial.$1.log" \
-        >"$SCRATCH/census.$1.verdict" 2>&1 <<'CENSUS_EOF'
-import json, re, sys
-pred = json.load(open(sys.argv[1]))
-log = open(sys.argv[2], errors="replace").read()
-k = pred["kernel"]
-
-NAMED = 32    # MapTallySay names this many runs of each kind, and counts the rest in one line
-
-def say(held, text):
-    print(("ok " if held else "bad ") + text)
-
-def said(kind):
-    """What the mount says of one kind: the runs it names, in the order it
-    names them, and its line for the rest as [(runs, blocks)] — empty when it
-    says none."""
-    named = [(int(a), int(b)) for a, b in re.findall(
-        r"\[TagFS FSCK\] %s run at data block (\d+), (\d+) block\(s\)" % kind, log)]
-    rest = [(int(a), int(b)) for a, b in re.findall(
-        r"\[TagFS FSCK\] and (\d+) more %s run\(s\), (\d+) block\(s\) — tools/volume-read\.py names "
-        r"every one" % kind, log)]
-    return named, rest
-
-def due(runs):
-    """What the mount must say of these runs: the first NAMED ascending, and
-    the count and blocks of the rest when there are any."""
-    runs = sorted(tuple(r) for r in runs)
-    rest = runs[NAMED:]
-    return runs[:NAMED], [(len(rest), sum(n for _s, n in rest))] if rest else []
-
-def text(rs):
-    return ", ".join("%u+%u" % r for r in rs) or "none"
-
-def more(rest):
-    return "%u more run(s), %u block(s)" % rest[0] if rest else "no more"
-
-if not k["mounts"]:
-    say(False, "the census predicts no mount at all: %s" % k["refusal"])
-    sys.exit(0)
-fsck = k["fsck"]
-m = re.search(r"is MOUNTED — (\d+) file", log)
-say(m is not None, "the kernel mounted the planted volume — %s file(s)" % (m.group(1) if m else "no MOUNTED line"))
-# The mount says the line only when it has something to repair
-# (block_map_mount.c): no line is 0 orphan, 0 missing.
-m = re.search(r"\[TagFS FSCK\] Bitmap mismatch: (\d+) orphan, (\d+) missing", log)
-have = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
-say(have == (fsck["orphan"], fsck["missing"]),
-    "the kernel's mismatch line says %s; the census predicted %u orphan, %u missing"
-    % ("%u orphan, %u missing" % have if m else "nothing", fsck["orphan"], fsck["missing"]))
-for kind in ("orphan", "missing"):
-    (got, got_rest), (want, want_rest) = said(kind), due(fsck[kind + "_runs"])
-    say(got == want, "the kernel names %s runs %s; the census predicted %s" % (kind, text(got), text(want)))
-    say(got_rest == want_rest, "past the %u %s runs it names the kernel counts %s; the census predicted %s"
-        % (NAMED, kind, more(got_rest) if len(got_rest) < 2 else "%u lines of them" % len(got_rest),
-           more(want_rest)))
-m = re.search(r"\[TagFS FSCK\] (\d+) file table entry\(s\) corrected from this volume's "
-              r"metadata pool, (\d+) file\(s\) lost", log)
-have = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
-say(have == (fsck["corrected"], fsck["lost"]),
-    "the kernel corrected %u table entry(s) and lost %u file(s); the census predicted %u and %u"
-    % (have + (fsck["corrected"], fsck["lost"])))
-m = re.search(r"\[TagFS\] (\d+) data blocks, (\d+) free, (\d+) files", log)
-have = tuple(int(x) for x in m.groups()) if m else None
-want = (k["says"]["data_blocks"], k["says"]["free"], k["says"]["files"])
-say(have == want, "the kernel says %s; the census predicted \"%u data blocks, %u free, %u files\""
-    % ('"%u data blocks, %u free, %u files"' % have if have else "nothing", *want))
-owned = []
-named, rest = said("orphan")
-for a, n in named:
-    for c in pred["census"]["claims"]:
-        for s, cn in c["runs"]:
-            lo, hi = max(a, s), min(a + n, s + cn)
-            if lo < hi:
-                owned.append("%s at data block %u+%u" % (c["label"], lo, hi - lo))
-census_named, census_rest = due(pred["census"]["orphan_runs"])
-say(not owned and (named, rest) == (census_named, census_rest),
-    "every orphan the kernel names (%s; %s) is one the census finds no owner for (%s; %s)%s"
-    % (text(named), more(rest), text(census_named), more(census_rest),
-       " — the kernel calls OWNED blocks orphans: " + "; ".join(owned) if owned else ""))
-
-# What the mount stood on, and what it rolled back, in the kernel's own words
-# (mount.c MountSealsRead, meta_pool_mount.c SayFellBack / WalkChoose).
-seal = k["seal"]
-m_none = re.search(r"\[TagFS\] this volume's newest Ledger carries no seal", log)
-m_fell = re.search(r"\[TagFS\] fell back: the newest seal \(cycle \d+\)[^\n]*so the volume stands on "
-                   r"cycle (\d+)", log)
-m_torn = re.search(r"\[TagFS\] the pool's open block (\d+) does not hold what [^\n]*ROLLED BACK", log)
-m_alone = re.search(r"\[TagFS\] the newest seal \(cycle \d+\) is the only one the Ledger holds, and "
-                    r"the pool's open block (\d+) does not hold what it says", log)
-m_unborne = re.search(r"\[TagFS\] no copy's seal is borne out by the pool's closed blocks", log)
-have = ("no seal on the newest copy" if m_none else
-        "the seal of cycle %s, fallen back to" % m_fell.group(1) if m_fell else
-        "its open block %s rolled back" % m_torn.group(1) if m_torn else
-        "the newest seal alone, not borne out" if m_alone else
-        "no seal borne out" if m_unborne else "the newest seal")
-want = ("no seal on the newest copy" if not seal["newest_sealed"] else
-        "the seal of cycle %s, fallen back to" % seal["settle"] if seal["fell_back"] else
-        "its open block %s rolled back" % seal["to_block"] if seal["stood"] == "torn" else
-        "the newest seal alone, not borne out" if seal["alone"] else
-        "no seal borne out" if seal["stood"] == "none" else "the newest seal")
-say(have == want, "the kernel's pool stands on %s; the census predicted %s" % (have, want))
-
-def count(pattern, groups=1):
-    m = re.search(pattern, log)
-    return tuple(int(x) for x in m.groups()) if m else (0,) * groups
-
-have = count(r"\[TagFS\] the file table is derived from the sealed pool: (\d+) row\(s\) named files "
-             r"of a cycle that did not settle and are let go, (\d+) row\(s\) the table lacked are set "
-             r"from the pool", 2)
-say(have == (fsck["unsettled"], fsck["derived"]),
-    "the kernel let %u row(s) go unsettled and set %u from the pool; the census predicted %u and %u"
-    % (have + (fsck["unsettled"], fsck["derived"])))
-have = count(r"\[TagFS FSCK\] (\d+) ACTIVE record\(s\) of the pool no table row names")
-say(have == (fsck["unnamed"],), "the kernel took up no record of %u unnamed one(s); the census "
-    "predicted %u" % (have + (fsck["unnamed"],)))
-have = count(r"\[MetaPool\] (\d+) record\(s\) of this volume's pool do not check out")
-say(have == (fsck["unreadable"],), "the kernel passed %u record(s) over that do not check out; the "
-    "census predicted %u" % (have + (fsck["unreadable"],)))
-have = count(r"\[TagFS\] (\d+) table row\(s\) named files whose newest record is a Quitclaim")
-say(have == (fsck["quitclaimed"],), "the kernel let %u row(s) go with the Quitclaim of their file; "
-    "the census predicted %u" % (have + (fsck["quitclaimed"],)))
-have = count(r"\[MetaPool\] (\d+) block\(s\) of this volume's pool end in (\d+) byte\(s\) that do "
-             r"not read as records [^\n]*the first at block (\d+), byte (\d+)", 4)
-want = tuple(fsck["skipped"]) + tuple(fsck["skipped_first"] or (0, 0))
-say(have == want, "the kernel left %u block(s) unread past a record that is not one, %u byte(s), the "
-    "first at block %u byte %u; the census predicted %u, %u, %u, %u" % (have + want))
-have = count(r"\[MetaPool\] (\d+) record\(s\) of this volume's pool name a block outside its data "
-             r"run of \d+ blocks[^\n]*the first is file (\d+)'s", 2)
-want = (fsck["dropped"], fsck["dropped_first"] or 0)
-say(have == want, "the kernel followed none of the extents of %u record(s), the first file %u's; the "
-    "census predicted %u, file %u's" % (have + want))
-have = count(r"\[Glean\] (\d+) block\(s\) the pool's head still names lie before the chain's first")
-say(have == (len(seal["prefix"]),), "the kernel rests %u block(s) the pool's head names before the "
-    "chain; the census predicted %u (%s)" % (have + (len(seal["prefix"]), seal["prefix"])))
-m = re.search(r"\[TagRegistry\] block (\d+), the registry's last, does not hold what the volume's "
-              r"seal says", log)
-have = int(m.group(1)) if m else None
-say(have == seal["registry_rolled"], "the kernel rolled back registry block %s; the census predicted %s"
-    % (have, seal["registry_rolled"]))
-stood = next(c for c in pred["ledger"]["copies"] if c["copy"] == pred["ledger"]["standing_on"])
-m = re.search(r"\[TagFS\] the Ledger's next file id is \d+ and the medium names file id \d+ — "
-              r"[^\n]*so the next file is given (\d+)", log)
-have = int(m.group(1)) if m else stood["next_file_id"]
-say(have == k["next_file_id"], "the kernel gives the next file id %u; the census predicted %u"
-    % (have, k["next_file_id"]))
-have = sorted(int(b) for b in re.findall(r"\[TagFS FSCK\] data block (\d+) is named by [^\n]* at once", log))
-want = sorted(s for s, _n in pred["census"]["double"])
-say(have == want, "the kernel names data block(s) %s twice owned; the census predicted %s"
-    % (have or "none", want or "none"))
-CENSUS_EOF
-    local rc=$?
-    [ $rc = 0 ] && [ -s "$SCRATCH/census.$1.verdict" ] && return 0
-    echo "bad the judge could not read $SCRATCH/census.$1.json against $SCRATCH/serial.$1.log: $(tail -1 "$SCRATCH/census.$1.verdict")" \
-        > "$SCRATCH/census.$1.verdict"
-}
-
+# `tools/volume-read.py check` holds two readings of one image: the census, the
+# book read the way the volume's writers laid it down, and a prediction of
+# what the mount in this tree makes of it. The prediction is only worth
+# anything if it IS the mount, and the only way to know that is to boot the
+# image and hold the kernel's own lines against it: census_book_all
+# (logcheck_book.sh) — a real blklogwrites log read back, the book's landings,
+# the book the kernel writes read back by both readers, its Tallies, cut and
+# rotten, and Escheat.
 run_census() {
-    # The census of the format this run makes (stand_format): a book's landings
-    # and the books the kernel writes, or format v1's plantings — the
-    # Backlist's (spec_v2 §16.5 п.22).
-    if [ "$(stand_format)" = v2 ]; then
-        echo "== census, a book: the host's roll call and the kernel's name the same book =="
-        census_book_all
-        return
-    fi
-    echo "== census: the host's roll call and the kernel's name the same blocks =="
-    if [ -n "${CENSUS_LANDINGS:-}" ]; then
-        harness "census: CENSUS_LANDINGS names landings of a book's census (census_book_some), and format v1's plants its own — nothing booted"
-        return
-    fi
-    local plant line
-    census_qemu_io
-    census_selftest
-    for plant in reconcile C17 S1 S2 S7 S8 GL1 R2 R3 C21b C24 C25 C26; do
-        census_boot "$plant" "$plant" || continue
-        census_judge "$plant"
-        while IFS= read -r line; do
-            case "$line" in
-                "ok "*)  ok  "census $plant: ${line#ok }" ;;
-                "bad "*) bad "census $plant: ${line#bad }" ;;
-            esac
-        done < "$SCRATCH/census.$plant.verdict"
-        lockrank_judge "$SCRATCH/serial.$plant.log" "census $plant"
-    done
+    echo "== census, a book: the host's roll call and the kernel's name the same book =="
+    census_book_all
 }
-
 
 # ---------------------------------------------------------------------------
 # book_proofblind: the copy check of a Tally laid in must be able to go red
@@ -8745,10 +7971,9 @@ EOF2
 }
 
 book_proofblind() {
-    local keep=${STAND_FORMAT:-} L="$SCRATCH/serial.stand_book_proofblind.log"
+    local L="$SCRATCH/serial.stand_book_proofblind.log"
     echo "== book proofblind: a copy check that reads nothing must fail stand_book_glean_copies =="
     rm -f build/boxos.img "$L"
-    STAND_FORMAT=v2
     book_proofblind_on
     if build_with_key VOLUME_TESTS=on STRICT=off; then
         stand_boot stand_book_proofblind CORES=4 MEM=4G
@@ -8760,69 +7985,7 @@ book_proofblind() {
         bad "proofblind: the tree with no copy read does not build — $(tail -1 "$SCRATCH/build.log")"
     fi
     restore src/kernel/tagfs/settle/binder_proof.c
-    STAND_FORMAT=$keep
     rm -f build/boxos.img
-}
-
-# The two halves of the reconcile must each be able to go red. The kernel's:
-# a census the pool does not claim its chain in calls pool[1] an orphan. The
-# host's: a census that calls every retired record damage — they fail their
-# sum by construction — is a census that cries wolf on every volume that ever
-# deleted a file.
-census_poolblind_on() {
-    mutate src/kernel/tagfs/mount/mount.c
-    python3 - <<'EOF2'
-p = "src/kernel/tagfs/mount/mount.c"
-s = open(p).read()
-anchor = "    PoolClaimGround(MountDataBlock(TagFSLayout()->metadata_pool_block));\n"
-assert s.count(anchor) == 1, "census pool-chain anchor missing"
-s = s.replace(anchor, "    /* logcheck mutation: the pool chain is not claimed */\n", 1)
-open(p, "w").write(s)
-EOF2
-    mut_done src/kernel/tagfs/mount/mount.c "logcheck mutation"
-}
-
-census_exempt_on() {
-    mutate tools/volumeread/census_claims.py
-    python3 - <<'EOF2'
-p = "tools/volumeread/census_claims.py"
-s = open(p).read()
-anchor = "            if r.fid != 0 and not r.unpack_ok:\n"
-assert s.count(anchor) == 1, "census exemption anchor missing"
-s = s.replace(anchor, "            if not r.unpack_ok:  # logcheck mutation: retired records are called bad\n", 1)
-open(p, "w").write(s)
-EOF2
-    mut_done tools/volumeread/census_claims.py "logcheck mutation"
-}
-
-run_censusmut() {
-    echo "== censusmut: with either half broken, the reconcile must go red =="
-    census_poolblind_on
-    if census_boot censusmut reconcile; then
-        census_judge censusmut
-        local reds
-        reds=$(grep -c '^bad ' "$SCRATCH/census.censusmut.verdict")
-        if [ "${reds:-0}" -gt 0 ]; then
-            ok "censusmut: the kernel left the pool chain out and $reds assertion(s) went red — $(grep -m1 '^bad ' "$SCRATCH/census.censusmut.verdict" | cut -c5-)"
-        else
-            bad "censusmut: the kernel left the pool chain out of its roll call and the reconcile stayed green"
-        fi
-    fi
-    restore src/kernel/tagfs/mount/mount.c
-    build
-
-    census_exempt_on
-    python3 tools/volume-read.py build/boxos.img self-test >"$SCRATCH/census.exempt.out" 2>&1
-    local rc=$?
-    restore tools/volumeread/census_claims.py
-    local c14
-    c14=$(grep -m1 "C14 retired is not bad" "$SCRATCH/census.exempt.out")
-    if [ $rc -ne 0 ] && echo "$c14" | grep -q "unexpected RECORD_CRC"; then
-        ok "censusmut: a census that calls retired records bad fails its self-test (exit $rc) — ${c14#self-test: }"
-    else
-        bad "censusmut: a census that calls retired records bad passed its self-test (exit $rc): ${c14:-no C14 line}"
-    fi
-    build   # every put-back discards the image; leave one built from clean sources
 }
 
 # ---------------------------------------------------------------------------
@@ -8832,29 +7995,10 @@ run_censusmut() {
 # Those tests could only ever be read by hand: nothing here built them, and a
 # run where one of them failed, or a caveat stopped holding, or a fault
 # mechanism quietly stopped refusing anything, looked from the outside exactly
-# like one where nothing happened. So they are booted on the two roads the
-# tests take to the medium — plain BIOS, the legacy channel (ATA), and UEFI on
-# q35, AHCI — each on a volume made fresh by the build, and the boot is held
-# to what it must say: nothing failed, exactly the caveats this table names
-# are held, each with the number it measured, the faults fired where they
-# were aimed, the road the writes took, and a halt whose sync wrote the
-# volume — what the tests gave back reaches the medium only there.
-#
-# Then the volume that boot left is booted a second time: a test that leaked a
-# block, or gave one back twice, leaves a volume whose next roll call says
-# "Bitmap mismatch". That boot is judged only on the volume the first one
-# really left: the first must have said "Storage sync complete", the image
-# must still carry the Deed the build laid down (a repack lays down another),
-# and the second boot stands on a copy of it named by BOOTDISK, which run-bg
-# boots as it stands, so no source touched in between can repack a fresh
-# volume under it. Every boot starts on an empty serial log, and one that
-# started no machine is the harness's failure — never a verdict read off the
-# log the last boot left.
-#
-# The held evidence is the same on the second boot as on the first, and on
-# both roads — measured — so it is held to on every boot. A number that moves
-# is a change to what a test saw, and this says so; the step that lifts a
-# caveat deletes its row here in the same commit.
+# like one where nothing happened. So they are booted on a book the build made
+# fresh, on its roads to the medium, and every boot is held to what it must
+# say (stand_book, logcheck_book.sh); and the copy check of a Tally laid in is
+# shown to go red (book_proofblind).
 # ---------------------------------------------------------------------------
 
 # NAME|STEP|HELD|LIFTED|ROADS — every caveat a VOLUME_TESTS boot holds: the
@@ -8869,34 +8013,29 @@ STAND_HELD="
 "
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
-# suite in tests.h TEST_SUITES — the plain build's 51 (healthy says how) and
-# the 413 of the stand's own fifty-two suites: stand 28, stand_lock 4,
-# stand_chain 7, stand_spelling 6, stand_roadstead 4, stand_map 9,
-# stand_plot 10, stand_index 6, stand_ink 6, stand_helm 7, stand_port 2,
-# stand_use 3, stand_use_chain 4, stand_seal 8, stand_settle 16, stand_glean 9,
-# stand_read 9, stand_run 6, stand_medium 19,
-# stand_warrant 8, stand_room 7, stand_integrity 2, frame 2, width 7,
-# parcel 13, tract 1, record_splices 4, stand_tally 16, stand_ribbon 8,
-# stand_stitch 14, stand_stitch_edge 12, stand_docket 14, stand_fresh 7,
-# stand_fresh_ground 5, stand_fresh_change 5, stand_binder 13,
-# stand_endpaper 6, stand_errata 8, stand_toll 5, stand_dog_ear 9,
-# stand_slip 14, stand_away 14, stand_tip_in 10, stand_slip_promise 5,
-# stand_book_glean 2, stand_escheat 7, stand_parity 2, stand_book_room 13,
-# stand_commonhold 1, stand_conjugate 5, stand_dedup 6, stand_keep 5. Counted off the code,
-# not a run (K9): a suite that drops out of the walk is a test that stopped
-# covering anything, and the count is where that shows. How many of them pass
-# and how many stand aside is the road's — said, not pinned.
-STAND_RUN=464
+# suite in tests.h TEST_SUITES — the plain build's 44 (healthy says how) and
+# the 322 of the stand's own forty-five suites: stand 25, stand_lock 1,
+# stand_spelling 6, stand_roadstead 4, stand_plot 3, stand_index 6,
+# stand_helm 6, stand_port 1, stand_use 2, stand_settle 9, stand_read 6,
+# stand_run 4, stand_medium 13, stand_warrant 7, stand_room 1, frame 2,
+# width 4, parcel 13, tract 1, record_splices 4, stand_tally 15,
+# stand_ribbon 8, stand_stitch 14, stand_stitch_edge 12, stand_docket 14,
+# stand_fresh 7, stand_fresh_ground 5, stand_fresh_change 5, stand_binder 13,
+# stand_endpaper 6, stand_book_room 13, stand_errata 8, stand_keep 5,
+# stand_toll 4, stand_dog_ear 9, stand_slip 14, stand_away 14,
+# stand_tip_in 10, stand_slip_promise 5, stand_book_glean 2, stand_escheat 7,
+# stand_parity 2, stand_commonhold 1, stand_conjugate 5, stand_dedup 6.
+# Counted off the code, not a run (K9): a suite that drops out of the walk is
+# a test that stopped covering anything, and the count is where that shows.
+# How many of them pass and how many stand down is the road's — said, not
+# pinned.
+STAND_RUN=366
 
-# What a VOLUME_TESTS kernel says of a record memory holds that is not the
-# file a format-v1 Ink packed (plot_conveyance.c, PackV1Agrees and
-# PlotConveyanceAgrees), of a live file the map holds a row and no record of,
-# or the other way round (file_map.c, FileMapRows), of a record that names a
-# run of no blocks (file_record.c, FileRecordBuild), and of a Tract about to
-# stand taller than its fill allows (tract.c, TractTooTall): a STRICT kernel
-# stops at each, and on a road that is not STRICT the line itself is the
-# failure.
-STAND_MIRROR_DEFECT='\[TagFS\] DEFECT: (the record memory holds of file|[0-9]+ file\(s\) of the map of live files|file [0-9]+.s record names a run of no blocks|a Tract of [0-9]+ levels was about to be built)'
+# What a VOLUME_TESTS kernel says of a record that names a run of no blocks
+# (file_record.c, FileRecordBuild), and of a Tract about to stand taller than
+# its fill allows (tract.c, TractTooTall): a STRICT kernel stops at each, and
+# on a road that is not STRICT the line itself is the failure.
+STAND_MIRROR_DEFECT='\[TagFS\] DEFECT: (file [0-9]+.s record names a run of no blocks|a Tract of [0-9]+ levels was about to be built)'
 
 # stand_boot TAG KEYS... — boot the image that is on the disk (or the one
 # BOOTDISK names) under VOLUME_TESTS=on and KEYS (the machine), wait for the
@@ -8954,292 +8093,38 @@ STAND_HELD_EOF
     echo "$n"
 }
 
-# stand_held LOG WHAT ROAD — every row of ROAD held, each with its number, and
-# no row of the other road held at all.
-stand_held() {
-    local L=$1 what=$2 road=$3 name step held lifted roads
-    while IFS='|' read -r name step held lifted roads; do
-        [ -n "$name" ] || continue
-        if stand_row_on "$roads" "$road"; then
-            grep -aF "[TESTS] caveat held: $name — " "$L" | grep -qF " — discharged by step $step ($held)"
-            chk $? "stand: $what — $name held under step $step ($held)"
-        else
-            ! grep -aqF "[TESTS] caveat held: $name — " "$L"
-            chk $? "stand: $what — $name is not held here: its row is written for the $roads road only"
-        fi
-    done <<STAND_HELD_EOF
-$STAND_HELD
-STAND_HELD_EOF
-}
-
-# The two orders LockRank names on every stand boot while their steps stand:
-# the chain growth tests (stand_chain_tests.c) grow the tag registry and the
-# file table on every boot, each under its own lock, and the growth takes the
-# volume's state lock under it — the two ABBA of MP-D4, seen without a race.
-STAND_ORDERS="registry@tag_registry_flush/state@tagfs_alloc_blocks_inside
-table@file_table_flush/state@tagfs_alloc_blocks_inside"
-
-# stand_orders LOG WHAT — each of those places named, while its row carries a
-# step. Once the step lifts it, the place is lockrank_judge's to fail if it is
-# ever named again.
-stand_orders() {
-    local L=$1 what=$2 key step
-    for key in $STAND_ORDERS; do
-        step=$(caveat_step "lockrank:$key")
-        [ -n "$step" ] || continue
-        lockrank_rows "$L" | grep -qF "|$key|"
-        chk $? "stand: $what — LockRank names the order $key, held under step $step: the chain growth tests take it on every boot"
-    done
-}
-
-# stand_judge TAG WHAT ROAD SEAT BLOCKFAILS — one first boot, held to all of
-# it. ROAD is bios or uefi; SEAT is the volume seat's name as an ERE;
-# BLOCKFAILS is how many commands the faults refuse on that machine, counted
-# off the tests' code, test by test. A refusal is said as "seat N: …"; a
-# protection a test puts the seat in (stand_settle_write_protected) is said
-# as "seat N protects …" and is no refusal. A plan that only counts
-# (BLOCK_FAIL_NEVER: stand_run_megabyte_*, stand_helm_guarded_file_refused)
-# refuses nothing, and neither does one armed for a command that never comes
-# (stand_flush_ticket's second plan).
-#
-#   test                                              BIOS 4c  UEFI 4c  USB 4c
-#   stand_blockfail_reads_the_nth                      1        1        1
-#   stand_blockfail_write_never_lands                  1        1        1
-#   stand_blockfail_flush_refused                      1        1        1
-#   stand_blockfail_async_read                         0        1        1   no asynchronous read on the legacy channel
-#   stand_flush_ticket                                 1        1        1
-#   stand_rmw_read_refused                             1        1        1
-#   stand_sync_owns_a_refused_write                    1        1        1
-#   stand_sync_owns_a_refused_flush                    1        1        1
-#   stand_registry_growth_links_what_landed            1        1        1
-#   stand_registry_flush_keeps_its_block               1        1        1
-#   stand_table_grows_onto_a_stamp                     1        1        1
-#   stand_helm_write_refused_part_way                  1        1        1
-#   stand_port_write_refused_part_way                  0        1        1   no port on the legacy channel
-#   stand_seal_cut_keeps_the_seal                      2        2        2   its open block, then its Ledger
-#   stand_seal_torn_table_stands                       2        2        2   its torn block refused, then a bad sector in it
-#   stand_seal_bad_open_block_rolls_back               2        2        2   a bad sector: the judging walk, the roll back
-#   stand_seal_bad_closed_block_is_rot                 2        2        2   a bad sector: the judging walk, the unsealed walk
-#   stand_glean_replaced_waits_for_the_close           2        2        2   a bad sector: the judging walk, the roll back
-#   stand_run_refused_inside_a_run                     0        1        1   one block a command: a run has no inside
-#   stand_run_refused_inside_a_run_through_the_port    0        1        1   and no port either
-#   stand_medium_no_medium_flush_refused               0        0        1   a USB disk's flush, answered NO MEDIUM
-#   stand_medium_sync_cache_remembered                 0        0        3   ILLEGAL REQUEST, then NO MEDIUM twice
-#   stand_medium_bell_rings_once                       1        1        1
-#   stand_medium_mount_rings_in_its_own_breath         1        1        1   the mount's first read of the data
-#   stand_medium_mount_bad_sector_waits                4        4        4   both Ledger copies, in each of its two attempts
-#   stand_medium_mount_refused_read_is_no_verdict      1        1        1   the pool block a file's record lies in
-#   stand_medium_return_refused_once                   1        1        1   the newest Ledger copy, on the return
-#   stand_medium_mount_resets_the_seat                 1        1        1   the mount's first read of the data
-#   stand_roadstead_refusal_rings_once                 0        1        0   an AHCI port's alone
-#   stand_settle_refusal_waits_for_the_bell            1        1        1   its Ledger; then a plan that only counts
-#   stand_settle_ring_during_the_cycle                 1        1        1   its Ledger
-#   stand_settle_table_refusal_is_the_mediums          2        2        2   the block written alone, then by the cycle
-#   stand_blockfail_two_ranges                         2        2        2   a read in each of its plan's two runs
-#   stand_blockfail_refused_writes                     4        4        4   two writes into each of its two runs
-#   total                                             40       45       48
-stand_judge() {
-    local L="$SCRATCH/serial.$1.log" what=$2 road=$3 seat=$4 want=$5 said got count
-    count=$(stand_held_count "$road")
-    said=$(stand_summary "$L")
-    echo "$said" | grep -qE "^TagFS: $STAND_RUN run, [0-9]+ passed, 0 failed, [0-9]+ skipped, $count held under a caveat"
-    chk $? "stand: $what — the $STAND_RUN tests this tree registers ran, nothing failed and exactly $count caveats are held (${said:-no summary})"
-    grep -aq '^\[TESTS\] All tests PASSED' "$L"
-    chk $? "stand: $what — and the runner answers PASSED"
-    ! grep -aq 'caveat lifted early' "$L"
-    chk $? "stand: $what — no caveat was lifted early"
-    ! grep -aq 'KERNEL PANIC' "$L"
-    chk $? "stand: $what — no panic"
-    ! grep -aqE "$STAND_MIRROR_DEFECT" "$L"
-    chk $? "stand: $what — every record memory held was the file its Ink packed, and every live file had its row"
-    grep -aqE "^\[TESTS\] the tests that write go through seat [0-9]+ \($seat\), on the synchronous path" "$L"
-    chk $? "stand: $what — the writes' road is said: $(grep -aoE 'go through seat [0-9]+ \([^)]*\)' "$L" | head -1)"
-    stand_held "$L" "$what" "$road"
-    stand_orders "$L" "$what"
-    got=$(grep -ac '^\[BLOCKFAIL\] seat [0-9]*: ' "$L")
-    [ "$got" = "$want" ]
-    chk $? "stand: $what — BLOCKFAIL refused $got command(s), as many as the tests that arm it refuse on this road ($want)"
-    got=$(grep -ac '^\[TagFS\] seat [0-9]* refused a read and no bell rang after the attempt that met it' "$L")
-    [ "$got" = 5 ]
-    chk $? "stand: $what — a refused seat no bell answered after its attempt was reset once by each of the five tests that leave one so — a bell rung inside the attempt answers nothing — never again (stand_medium_mount_rings_in_its_own_breath, stand_medium_mount_bad_sector_waits, stand_medium_mount_refused_read_is_no_verdict, stand_medium_return_refused_once, stand_medium_mount_resets_the_seat; reset $got time(s))"
-    ! grep -aq '^\[TagFS\] seat [0-9]* did not come back from its reset' "$L"
-    chk $? "stand: $what — and every seat reset came back from it"
-    grep -aqE '^\[BLOCKFAIL\] seat [0-9]+: the read of sectors [0-9]+\.\.[0-9]+ is refused as a medium error — occurrence 2 since arming' "$L"
-    chk $? "stand: $what — the read it refused was the second one at its block, not the first"
-    grep -aqE '^\[BLOCKFAIL\] seat [0-9]+: the write of sectors [0-9]+\.\.[0-9]+ is refused as a medium error — occurrence 1 since arming, and nothing of it was issued' "$L"
-    chk $? "stand: $what — a write refused before it reached the medium"
-    grep -aqE '^\[BLOCKFAIL\] seat [0-9]+: the cache flush is refused as a medium error — occurrence 2 since arming' "$L"
-    chk $? "stand: $what — the second of three flushes refused"
-    got=$(grep -ac '^\[Nightwatch\] SETTLE PARKED: 1 waiter(s) of the volume wait for a cycle, and the cycle refused [0-9]* ms ago waits for the volume.s seat to say seat:ready' "$L")
-    [ "$got" = 1 ]
-    chk $? "stand: $what — Nightwatch said the refused cycle its waiter waits on, parked a window long, once (stand_settle_refusal_waits_for_the_bell; said $got time(s))"
-    grep -aqE '^\[HEAPFAIL\] core [0-9]+: allocation 3 since arming \(32 bytes\) is answered NULL' "$L"
-    chk $? "stand: $what — HEAPFAIL refused the third allocation of its plan, a slab one"
-    grep -aqE '^\[HEAPFAIL\] core [0-9]+: allocation 4 since arming \(3000 bytes\) is answered NULL' "$L"
-    chk $? "stand: $what — and the fourth of the next, one the pool would have served"
-    grep -aqE '^\[HEAPFAIL\] core [0-9]+: allocation 1 since arming \(16 bytes\) is answered NULL' "$L"
-    chk $? "stand: $what — and the tag window's array doubling to eight members, which the index then refused to write past"
-    grep -aq '^\[HALT\] Storage sync complete' "$L"
-    chk $? "stand: $what — the halt through bye said its sync wrote the volume ($(grep -aE "$STAND_HALT_ENDS" "$L" | tr -d '\r' | head -1 | cut -c1-120))"
-}
-
-# stand_again TAG WHAT ROAD — the second boot of the volume the first one
-# left: its roll call finds nothing to repair, and the suite holds what it
-# held, number for number.
-stand_again() {
-    local L="$SCRATCH/serial.$1.log" what=$2 road=$3 said mounted count
-    count=$(stand_held_count "$road")
-    said=$(stand_summary "$L")
-    mounted=$(grep -aoE '\[TagFS\] [0-9]+ data blocks, [0-9]+ free, [0-9]+ files' "$L" | head -1)
-    [ -n "$mounted" ] && ! grep -aq 'Bitmap mismatch' "$L"
-    chk $? "stand: $what, second boot — the roll call finds no Bitmap mismatch (${mounted:-no mount line})"
-    echo "$said" | grep -qE "^TagFS: $STAND_RUN run, [0-9]+ passed, 0 failed, [0-9]+ skipped, $count held under a caveat"
-    chk $? "stand: $what, second boot — the $STAND_RUN ran again, nothing failed and the same $count caveats are held (${said:-no summary})"
-    ! grep -aq 'KERNEL PANIC' "$L"
-    chk $? "stand: $what, second boot — no panic"
-    ! grep -aqE "$STAND_MIRROR_DEFECT" "$L"
-    chk $? "stand: $what, second boot — every record memory held was the file its Ink packed, and every live file had its row"
-    stand_held "$L" "$what, second boot" "$road"
-    stand_orders "$L" "$what, second boot"
-}
-
-# stand_twice TAG WHAT ROAD SEAT BLOCKFAILS KEYS... — one road: a fresh volume
-# built and booted, judged, and the volume it left booted again and judged.
-stand_twice() {
-    local tag=$1 what=$2 road=$3 seat=$4 want=$5 img built kept rc; shift 5
-    img="$SCRATCH/stand.$tag.img"
-    rm -f build/boxos.img "$img"
-    if ! build_with_key VOLUME_TESTS=on "$(strict_key "$@")"; then
-        echo "BUILD FAILED (VOLUME_TESTS=on) — tail:"; tail -25 "$SCRATCH/build.log"
-        bad "stand: $what — VOLUME_TESTS=on does not build"
-        return
-    fi
-    built=$(deed_uuid build/boxos.img) || built=""
-    stand_boot "$tag" "$@"; rc=$?
-    [ "$rc" = 2 ] && return
-    stand_judge "$tag" "$what" "$road" "$seat" "$want"
-    if [ "$rc" != 0 ]; then
-        bad "stand: $what, second boot — not judged: the first boot never said its halt's sync wrote the volume, so a Bitmap mismatch on the next would be the halt's, not the tests'"
-        return
-    fi
-    cp -c build/boxos.img "$img" 2>/dev/null || cp build/boxos.img "$img"
-    kept=$(deed_uuid "$img") || kept=""
-    if [ -z "$built" ] || [ "$kept" != "$built" ]; then
-        bad "stand: $what, second boot — not judged: the image the first boot left carries Deed ${kept:-none} and the build laid down ${built:-none}, so it was repacked under that boot"
-        rm -f "$img"
-        return
-    fi
-    stand_boot "${tag}_again" BOOTDISK="$img" "$@"; rc=$?
-    [ "$rc" = 2 ] || stand_again "${tag}_again" "$what" "$road"
-    rm -f "$img"
-}
-
 run_stand() {
-    # The stand of the format this run makes (stand_format): a book's on its
-    # roads, or format v1's — the Backlist's (spec_v2 §16.5 п.22) — on its own.
-    if [ "$(stand_format)" = v2 ]; then
-        echo "== stand, a book: the startup tests that write, on a volume of format v2 =="
-        stand_book
-        book_proofblind
-        buildkey_restore
-        return
-    fi
-    echo "== stand: the startup tests that write, on both roads to the medium, twice each =="
-    local f logs=""
-    rm -f "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
-          "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log
-    stand_twice stand_bios "BIOS 4c" bios "ATA [a-z ]+" 40 CORES=4 MEM=4G
-    stand_twice stand_uefi "UEFI 4c" uefi "AHCI port [0-9]+" 45 UEFI=on STRICT=on CORES=4 MEM=4G
-    for f in "$SCRATCH"/serial.stand_bios.log "$SCRATCH"/serial.stand_bios_again.log \
-             "$SCRATCH"/serial.stand_uefi.log "$SCRATCH"/serial.stand_uefi_again.log; do
-        [ -f "$f" ] && logs="$logs $f"
-    done
-    lockrank_judge "$logs" "stand, both roads"
+    echo "== stand, a book: the startup tests that write, on a book =="
+    stand_book
+    book_proofblind
     buildkey_restore
 }
 
 # ---------------------------------------------------------------------------
 # standusb: the startup tests that write, on a USB volume (step 1.5c)
 #
-# stand runs the suite on the two disks a machine boots from. A USB stick is
-# the third road, and the one a person's machine has: a disk that runs one
-# command at a time, whose every step is a baton on the drain core, whose
-# flush answers with sense, and whose port's writes go on at a service point
-# (write_job.c, "A USB DISK'S ANSWER IS NOT AN INTERRUPT'S"). So the suite is
-# booted with the volume on a stick: BIOS, four cores, the image the loader
-# reads on the internal disk, the stick — a copy of that same image, the same
-# sixteen bytes — on the xHCI from power-on, and the internal disk declared
-# not this machine's (latearrival_on), so the mount takes the stick and the
-# tests write through it. Judged as stand judges its roads (stand_judge,
-# stand_again): every test ran, nothing failed, the writes' road named as the
-# stick's seat, BLOCKFAIL refusing as many commands as the tests that arm it
-# refuse on this road (STANDUSB_BLOCKFAILS, the USB column of stand_judge's
-# table), the halt's sync wrote the stick, and the stick that boot left booted
-# again with no Bitmap mismatch.
+# stand runs the suite on the disks a machine boots from. A USB stick is the
+# third road, and the one a person's machine has: a disk that runs one command
+# at a time, whose every step is a baton on the drain core, whose flush answers
+# with sense, and whose port's writes go on at a service point (write_job.c, "A
+# USB DISK'S ANSWER IS NOT AN INTERRUPT'S"). So the suite is booted with the
+# book on a stick, twice (stand_book_usb, logcheck_book_usb.sh).
 #
-# ‼ THE MUTATION IT EXISTS FOR, MEASURED: two tests of the suite run on a USB
-# disk alone, and stand steps them aside on both its roads, so only this sees
-# the line they guard — xhci_msd.c msd_flush_judge, a flush answered NO
-# MEDIUM taken as kept, as Linux takes it (`return MSD_FLUSH_REFUSED;` under
-# ASC_NO_MEDIUM made `return MSD_FLUSH_KEPT;`): stand_medium_no_medium_
-# flush_refused and stand_medium_sync_cache_remembered fail on both boots,
-# "190 run, 184 passed, 2 failed" — 17 passed, 3 failed. And a boot that
-# mounted the internal disk instead names another seat for the writes and is
-# red on that line.
+# ‼ THE MUTATION IT EXISTS FOR: two tests of the suite run on a USB disk alone,
+# and stand steps them aside on its roads, so only this sees the line they
+# guard — xhci_msd.c msd_flush_judge, a flush answered NO MEDIUM taken as kept,
+# as Linux takes it (`return MSD_FLUSH_REFUSED;` under ASC_NO_MEDIUM made
+# `return MSD_FLUSH_KEPT;`): stand_medium_no_medium_flush_refused and
+# stand_medium_sync_cache_remembered fail. And a boot that mounted the internal
+# disk instead names another seat for the writes and is red on that line.
 # ---------------------------------------------------------------------------
 
-STANDUSB_BLOCKFAILS=48   # stand_judge's table, its USB column
 STANDUSB_SEAT="usb[0-9]+ [^)]*"
 
 run_standusb() {
-    if [ "$(stand_format)" = v2 ]; then
-        echo "== standusb, a book: the startup tests that write, on a USB stick of format v2, twice =="
-        stand_book_usb again
-        lockrank_judge "$SCRATCH/serial.stand_book_usb.log $SCRATCH/serial.stand_book_usb_again.log" "standusb, the book"
-        buildkey_restore
-        return
-    fi
-    echo "== standusb: the startup tests that write, on a USB volume, twice =="
-    local tag=stand_usb what="USB, BIOS 4c" boot="$SCRATCH/standusb.boot.img"
-    local stick="$SCRATCH/standusb.stick.img" built kept rc extra logs="" f
-    rm -f "$SCRATCH"/serial.stand_usb.log "$SCRATCH"/serial.stand_usb_again.log build/boxos.img \
-          "$boot" "$stick"
-    latearrival_on
-    if ! build_with_key VOLUME_TESTS=on STRICT=off; then
-        echo "BUILD FAILED (VOLUME_TESTS=on) — tail:"; tail -25 "$SCRATCH/build.log"
-        bad "standusb: VOLUME_TESTS=on does not build"
-        latearrival_off; buildkey_restore
-        return
-    fi
-    # Both copies off the image just built, before any boot: run-bg boots a
-    # BOOTDISK as it stands and lays nothing down, so the stick and the disk
-    # the loader reads carry the one volume the boarding pass will name.
-    built=$(deed_uuid build/boxos.img) || built=""
-    if ! cp build/boxos.img "$boot" || ! cp build/boxos.img "$stick" || [ -z "$built" ]; then
-        harness "standusb: the image could not be copied to the boot disk and the stick (Deed ${built:-unreadable})"
-        latearrival_off; buildkey_restore; rm -f "$boot" "$stick"
-        return
-    fi
-    extra="-drive if=none,id=stick,file=$stick,format=raw -device usb-storage,bus=xhci1.0,drive=stick,id=usbstick"
-    stand_boot "$tag" BOOTDISK="$boot" USB=on CORES=4 MEM=4G QEMUEXTRA="$extra"; rc=$?
-    if [ "$rc" != 2 ]; then
-        stand_judge "$tag" "$what" usb "$STANDUSB_SEAT" "$STANDUSB_BLOCKFAILS"
-        kept=$(deed_uuid "$stick") || kept=""
-        if [ "$rc" != 0 ]; then
-            bad "standusb: $what, second boot — not judged: the first boot never said its halt's sync wrote the stick, so a Bitmap mismatch on the next would be the halt's, not the tests'"
-        elif [ "$kept" != "$built" ]; then
-            bad "standusb: $what, second boot — not judged: the stick the first boot left carries Deed ${kept:-none} and the build laid down $built"
-        else
-            stand_boot "${tag}_again" BOOTDISK="$boot" USB=on CORES=4 MEM=4G QEMUEXTRA="$extra"; rc=$?
-            [ "$rc" = 2 ] || stand_again "${tag}_again" "$what" usb
-        fi
-    fi
-    for f in "$SCRATCH"/serial.stand_usb.log "$SCRATCH"/serial.stand_usb_again.log; do
-        [ -f "$f" ] && logs="$logs $f"
-    done
-    lockrank_judge "$logs" "standusb"
-    latearrival_off
-    rm -f "$boot" "$stick"
+    echo "== standusb, a book: the startup tests that write, on a USB stick, twice =="
+    stand_book_usb again
+    lockrank_judge "$SCRATCH/serial.stand_book_usb.log $SCRATCH/serial.stand_book_usb_again.log" "standusb, the book"
     buildkey_restore
 }
 
@@ -9270,28 +8155,6 @@ run_standusb() {
 # Mutations whose tests do not meet each other's share a boot; each is judged
 # by its own test's own line, number and all.
 #
-# All of that is format-free and asked on the volume this run makes — a book
-# (`standmut`, among the gates) or format v1 (`v1_standmut`, the Backlist):
-# each group's tests run on either, the test that catches a run refused
-# inside one command the format's own (stand_run_refused_inside_fresh on a
-# book, stand_run_refused_inside_a_run on format v1). Format v1's run adds the
-# groups whose every test holds format v1's own structures (standmut_v1): the
-# Ledger written, and the integrity map paged in, under their own locks again,
-# the file table's growth as step 1.1 found it — a new block linked with no
-# stamp and no flush behind the link, the memory for the link asked only
-# after the block was taken — and the tag registry linking before it stamps,
-# writing under its lock, sharing its mark with a registry beside it, loading
-# what it cannot hold, handing out its own array, and forgetting the block a
-# refused pass took; the rest of room on its way — the Settle's own holder
-# refused its own cycle, a job that runs the cycles in its caller's call, a
-# caller in the kernel answered the word, an op waited for answered without
-# being asked again — and, on a STRICT kernel through the port, a W_SPARE that
-# answers the allocator's word, which the border stops the machine on; and the
-# mirror's check after every Ink of format v1 (ink_v1.c) — memory's record
-# held to the one v1 packed — broken three ways, one per kind of Ink: a Plot's
-# last splice not conveyed, a rename's record saying another time, a new
-# file's carrying a flag the packed one does not.
-#
 # And the runner is only worth believing if it cannot be made to pass what it
 # should fail. A failed assertion must say where, and what it saw — shown by
 # one forced to fail — and with that print put back on debug_printf, the
@@ -9299,10 +8162,8 @@ run_standusb() {
 # caveated test saw lets every fix in go by as held, with no "lifted early"
 # at all. And a test that takes a block and never gives it back — what CR-12
 # was, a copy of the literal block 1 its test took for a snapshot — must be
-# caught by the runner's count as it runs; and on format v1, whose bitmap
-# keeps what was taken, by the next boot's roll call as an orphan too (a
-# book's map is derived from its names, and a block nothing names is free at
-# the next mount by design).
+# caught by the runner's count as it runs (a book's map is derived from its
+# names, and a block nothing names is free at the next mount by design).
 # ---------------------------------------------------------------------------
 
 # stand_mut_boot TAG KEYS... — build what the tree now is under VOLUME_TESTS,
@@ -9348,18 +8209,11 @@ stand_mech_on() {
         lands)  marks="src/kernel/core/boardroom/boardroom.c:2 src/kernel/tagfs/tag_bitmap/tag_bitmap.c:1" ;;
         blind)  marks="src/kernel/tagfs/tests/tests.c:2 src/kernel/tagfs/tests/core_tests.c:1" ;;
         lockrank) marks="src/kernel/tagfs/lock_rank/lock_rank.c:2" ;;
-        underlock) marks="src/kernel/tagfs/ledger/ledger.c:1 src/kernel/tagfs/integrity/integrity.c:1" ;;
         scribe)    marks="src/kernel/tagfs/scribe/scribe.c:4" ;;
         flushsum)  marks="src/kernel/tagfs/scribe/scribe.c:3" ;;
         flushneed) marks="src/kernel/tagfs/scribe/scribe.c:1" ;;
         dmawait)   marks="src/kernel/drivers/disk/ata_async.c:1" ;;
-        table)     marks="src/kernel/tagfs/file_table/file_table.c:4" ;;
-        registry)     marks="src/kernel/tagfs/tag_registry/tag_registry.c:4 src/kernel/tagfs/tag_registry/tag_registry_load.c:2" ;;
-        registrykeep) marks="src/kernel/tagfs/tag_registry/tag_registry.c:1" ;;
         room)     marks="src/kernel/core/ipc/chit.c:1" ;;
-        roomwait) marks="src/kernel/tagfs/settle/settle.c:1 src/kernel/core/decks/storage/async/write_job.c:1 src/kernel/core/decks/storage/settle_ops.c:2" ;;
-        roomport) marks="src/kernel/core/decks/storage/async/write_job_port.c:1" ;;
-        mirror)   marks="src/kernel/tagfs/plot/plot_conveyance.c:1 src/kernel/tagfs/file_map/file_record.c:1 src/kernel/tagfs/ink/ink.c:1" ;;
     esac
     for mark in $marks; do mutate "${mark%%:*}"; done
     python3 - "$group" <<'EOF'
@@ -9436,17 +8290,6 @@ edits = {
    "        if (lock->Rank == LOCK_RANK_NONE || h->Rank < lock->Rank)\n            continue;\n",
    "        continue;   /* " + M + ": the order is never checked */\n"),
  ],
- "underlock": [
-  ("src/kernel/tagfs/ledger/ledger.c",
-   "    int wrote = tagfs_volume_write(ledger_vlba(s_image.slot), 1, s_image.sector);\n",
-   "    TagFSLockTake(&g_ledger_lock);   /* " + M + ": the Ledger's write is back under its lock */\n"
-   "    int wrote = tagfs_volume_write(ledger_vlba(s_image.slot), 1, s_image.sector);\n"
-   "    TagFSLockDrop(&g_ledger_lock);\n"),
-  ("src/kernel/tagfs/integrity/integrity.c",
-   "    TagFSLockDropAt(&g_map_lock, site);\n\n    error_t got = TagFSMetaBlockRead(at, g_map_page[s]);\n\n    TagFSLockTakeAt(&g_map_lock, site);\n",
-   "    (void)site;   /* " + M + ": the map's page comes in under its lock again */\n"
-   "    error_t got = TagFSMetaBlockRead(at, g_map_page[s]);\n\n"),
- ],
  "scribe": [
   ("src/kernel/tagfs/scribe/scribe.c",
    "    if (!kept)\n        return;\n    uint64_t cur = __atomic_load_n(&g_flush_kept, __ATOMIC_RELAXED);\n",
@@ -9488,105 +8331,10 @@ edits = {
    "    asm volatile(\"sti\" ::: \"memory\");   /* " + M + ": the DMA wait turns interrupts on under its caller again */\n"
    "    while (!__atomic_load_n(&cmd.done, __ATOMIC_ACQUIRE)) {\n"),
  ],
- "table": [
-  ("src/kernel/tagfs/file_table/file_table.c",
-   "        error_t  got     = SpareStamp(TAGFS_FILETBL_MAGIC, &g_image, &block, &stamped);\n",
-   "        uint64_t taken   = 0;   /* " + M + ": the new block is linked with no stamp */\n"
-   "        error_t  got     = tagfs_alloc_blocks(1, &taken) == 0 ? OK : ERR_TAGFS_NO_SPACE;\n"
-   "        block = (uint32_t)taken;   /* format v1: the table's link is a u32 block */\n"),
-  ("src/kernel/tagfs/file_table/file_table.c",
-   "    error_t ready = VolumeFlushFor(need);\n",
-   "    error_t ready = OK;   /* " + M + ": and no flush stands between it and its link */\n    (void)need;\n"),
-  ("src/kernel/tagfs/file_table/file_table.c",
-   "    if (LinksReserve(wanted) != OK) {\n"
-   "        FileTableShortSay(wanted, have, ERR_NO_MEMORY);\n"
-   "        return OK;\n"
-   "    }\n",
-   "    /* " + M + ": the memory for a link is asked only after its block is taken */\n"),
-  ("src/kernel/tagfs/file_table/file_table.c",
-   "        TagFSLockTake(table_lock());\n        g_links[have + in_hand] = (FileTableLink){ .block = block };\n",
-   "        if (LinksReserve(wanted) != OK)   /* " + M + ": and a refusal forgets the block */\n"
-   "            return -1;\n"
-   "        TagFSLockTake(table_lock());\n        g_links[have + in_hand] = (FileTableLink){ .block = block };\n"),
- ],
- "registry": [
-  ("src/kernel/tagfs/tag_registry/tag_registry.c",
-   "        rc = SpareStamp(TAGFS_REGISTRY_MAGIC, reg->spare_image, &reg->spare_block, &reg->spare_need);\n",
-   "        uint64_t taken = 0;   /* " + M + ": the new block is taken and never stamped */\n"
-   "        rc = tagfs_alloc_blocks(1, &taken) == 0 ? OK : ERR_TAGFS_NO_SPACE;\n"
-   "        reg->spare_block = (uint32_t)taken;   /* format v1: the registry's link is a u32 block */\n"),
-  ("src/kernel/tagfs/tag_registry/tag_registry.c",
-   "    rc = TagFSMetaBlockWrite(reg->spare_block, reg->spare_image);\n",
-   "    reg->tail_image->next_block = reg->spare_block;   /* " + M + ": the link goes down before the block it names */\n"
-   "    TagFSMetaBlockWrite(reg->tail_block, reg->tail_image);\n"
-   "    rc = TagFSMetaBlockWrite(reg->spare_block, reg->spare_image);\n"),
-  ("src/kernel/tagfs/tag_registry/tag_registry.c",
-   "        error_t wrote = TagFSMetaBlockWrite(reg->tail_block, tail);\n",
-   "        TagFSLockTake(&reg->lock);   /* " + M + ": the tail is written holding the registry's lock */\n"
-   "        error_t wrote = TagFSMetaBlockWrite(reg->tail_block, tail);\n"
-   "        TagFSLockDrop(&reg->lock);\n"),
-  ("src/kernel/tagfs/tag_registry/tag_registry_load.c",
-   "    /* The two blocks every flush of this registry is written through, and the\n",
-   "    if (fs->registry && fs->registry != reg)   /* " + M + ": a registry beside the volume's shares its mark of what is owed */\n"
-   "        fs->registry->written_next = 0;\n"
-   "    /* The two blocks every flush of this registry is written through, and the\n"),
-  ("src/kernel/tagfs/tag_registry/tag_registry_load.c",
-   "        end += size;\n        walked++;\n",
-   "        if (held == ERR_NO_MEMORY)   /* " + M + ": a tag the load cannot hold is dropped, and the load goes on */\n"
-   "            held = OK;\n"
-   "        end += size;\n        walked++;\n"),
-  ("src/kernel/tagfs/tag_registry/tag_registry.c",
-   "        out->ids = kmalloc(sizeof(uint32_t) * group->count);\n"
-   "        if (out->ids) {\n"
-   "            memcpy(out->ids, group->tag_ids, sizeof(uint32_t) * group->count);\n",
-   "        out->ids = group->tag_ids;   /* " + M + ": the registry's own array is handed out */\n"
-   "        if (out->ids) {\n"),
- ],
- "registrykeep": [
-  ("src/kernel/tagfs/tag_registry/tag_registry.c",
-   "    tail->used_bytes  = was_used;\n",
-   "    reg->spare_block  = 0;   /* " + M + ": a refused pass forgets the block it took */\n"
-   "    tail->used_bytes  = was_used;\n"),
- ],
  "room": [
   ("src/kernel/core/ipc/chit.c",
    "    if (rc != ERR_WOULD_BLOCK)\n        return rc;\n",
    "    return rc;   /* " + M + ": the border lets ERR_WOULD_BLOCK through */\n"),
- ],
- "roomwait": [
-  ("src/kernel/tagfs/settle/settle.c",
-   "    if (LockRankAnyHeldHere() || BatonRunningHere() || (ScribeAnyHeldHere() && !own)) {\n",
-   "    (void)own;   /* " + M + ": the Settle's own holder may not wait for its own cycle */\n"
-   "    if (LockRankAnyHeldHere() || BatonRunningHere() || ScribeAnyHeldHere()) {\n"),
-  ("src/kernel/core/decks/storage/async/write_job.c",
-   "        if (rc == ERR_WOULD_BLOCK && wjob_answered_later(j)) {\n",
-   "        if (rc == ERR_WOULD_BLOCK && wjob_answered_later(j) && !j) {   /* " + M + ": the job runs the cycles in its caller's call */\n"),
-  ("src/kernel/core/decks/storage/settle_ops.c",
-   "    for (;;) {\n        if (!tagfs_enter())\n            return ERR_TAGFS_NOT_INITIALIZED;\n        error_t room = SettleForRoom();\n",
-   "    for (;;) {\n        if (op)   /* " + M + ": a caller in the kernel is answered the word */\n            return ERR_WOULD_BLOCK;\n        if (!tagfs_enter())\n            return ERR_TAGFS_NOT_INITIALIZED;\n        error_t room = SettleForRoom();\n"),
-  ("src/kernel/core/decks/storage/settle_ops.c",
-   "    if (rc == OK) {\n        bool      owns = false;\n",
-   "    if (rc != OK) {   /* " + M + ": the op waited for is answered, never asked again */\n        bool      owns = false;\n"),
- ],
- "roomport": [
-  ("src/kernel/core/decks/storage/async/write_job_port.c",
-   "    error_t rc = PoolSpareBegin(&j->spare_block, &j->spare_image);\n    if (rc == ERR_WOULD_BLOCK) {\n",
-   "    error_t rc = PoolSpareBegin(&j->spare_block, &j->spare_image);\n    if (rc == ERR_WOULD_BLOCK && !j) {   /* " + M + ": W_SPARE answers the allocator's word */\n"),
- ],
- "mirror": [
-  ("src/kernel/tagfs/plot/plot_conveyance.c",
-   "    ConveyanceSplices(cur, from, took, p->runs, p->run_count, *out);\n    return OK;\n",
-   "    ConveyanceSplices(cur, from, took, p->runs, p->run_count, *out);\n"
-   "    (*count)--;   /* " + M + ": the last splice a Plot made is not conveyed */\n    return OK;\n"),
-  ("src/kernel/tagfs/file_map/file_record.c",
-   "    rec->modified_time = old->modified_time;\n    rec->keep_until    = keep_until;\n",
-   "    rec->modified_time = old->modified_time + 1u;   /* " + M + ": a rename's record says another time */\n"
-   "    rec->keep_until    = keep_until;\n"),
-  ("src/kernel/tagfs/ink/ink.c",
-   "    rc = InkRecordMake(&meta, &r);\n    if (rc == OK && !(r.rec = FileRecordBuild(&meta))) {\n",
-   "    rc = InkRecordMake(&meta, &r);\n"
-   "    meta.flags |= 0x80000000u;   /* " + M + ": a new file's record carries a flag the packed one does not */\n"
-   "    if (rc == OK && !(r.rec = FileRecordBuild(&meta))) {\n"),
  ],
  "blind": [
   ("src/kernel/tagfs/tests/tests.c",
@@ -9612,21 +8360,14 @@ stand_mech_off() {
              src/kernel/tagfs/tag_bitmap/tag_bitmap.c src/kernel/tagfs/tests/tests.c \
              src/kernel/tagfs/tests/core_tests.c src/kernel/tagfs/lock_rank/lock_rank.c \
              src/kernel/tagfs/scribe/scribe.c src/kernel/drivers/disk/ata_async.c \
-             src/kernel/tagfs/ledger/ledger.c src/kernel/tagfs/integrity/integrity.c \
-             src/kernel/tagfs/file_table/file_table.c src/kernel/tagfs/tag_registry/tag_registry.c \
-             src/kernel/tagfs/tag_registry/tag_registry_load.c src/kernel/core/ipc/chit.c \
-             src/kernel/tagfs/settle/settle.c src/kernel/core/decks/storage/async/write_job.c \
-             src/kernel/core/decks/storage/settle_ops.c \
-             src/kernel/core/decks/storage/async/write_job_port.c \
-             src/kernel/tagfs/plot/plot_conveyance.c src/kernel/tagfs/file_map/file_record.c \
-             src/kernel/tagfs/ink/ink.c; do
+             src/kernel/core/ipc/chit.c; do
         restore "$f"
     done
 }
 
 # stand_leak_on — a test that takes a block and never gives it back, the way
 # CR-12's test left the copy it took for a snapshot: the core suite's test of
-# a file made, which every build runs on either format, with one block taken
+# a file made, which every build runs, with one block taken
 # at its start and nothing done with it.
 stand_leak_on() {
     mutate src/kernel/tagfs/tests/core_tests.c
@@ -9656,8 +8397,8 @@ stand_red() {
 }
 
 run_standmut() {
-    echo "== standmut: every stand test, and every fault it stands on, can go red, on a volume of format $(stand_format) =="
-    local L name step held lifted roads count said n before after inside
+    echo "== standmut: every stand test, and every fault it stands on, can go red =="
+    local L name step held lifted roads count said n before after inside=stand_run_refused_inside_fresh
 
     # ── the real fixes: every caveat must be lifted early, and fail ────────
     # On the legacy channel, so the rows written for the bios road are asked.
@@ -9750,11 +8491,8 @@ STAND_HELD_EOF
     # refused at its k-th block answers none of the k-1 before it, on both
     # roads — an AHCI port takes 32 blocks a command, so k is 17 and the
     # sixteen before it are 65536 bytes. On q35: the legacy channel takes one
-    # block a command, and a run there has no inside to refuse. The run is the
-    # format's: one a book's write takes on fresh ground, or one format v1
-    # writes over where it lies.
-    inside=stand_run_refused_inside_a_run
-    [ "$(stand_format)" = v2 ] && inside=stand_run_refused_inside_fresh
+    # block a command, and a run there has no inside to refuse. The run is one
+    # a book's write takes on fresh ground.
     stand_mech_on inside
     if stand_mut_boot standmut_inside UEFI=on STRICT=on CORES=4 MEM=4G; then
         stand_red standmut_inside "a BLOCKFAIL that holds nothing before the sector answers a run refused inside as refused whole" \
@@ -9826,137 +8564,17 @@ STAND_HELD_EOF
     fi
     stand_mech_off
 
-    # ── a test that leaks a block: caught as it runs, and on format v1 by the
-    # next roll call
+    # ── a test that leaks a block: caught as it runs
     stand_leak_on
     if stand_mut_boot standmut_leak CORES=4 MEM=4G; then
         L="$SCRATCH/serial.standmut_leak.log"
-        before=$(grep -aoE 'tagfs_create_file failed: it left residue — [0-9]+ block\(s\) in use outside the volume.s own chains before it and [0-9]+ after' "$L" | grep -oE '[0-9]+' | head -1)
-        after=$(grep -aoE 'tagfs_create_file failed: it left residue — [0-9]+ block\(s\) in use outside the volume.s own chains before it and [0-9]+ after' "$L" | grep -oE '[0-9]+' | tail -1)
+        before=$(grep -aoE 'tagfs_create_file failed: it left residue — [0-9]+ block\(s\) in use outside the volume.s own ground before it and [0-9]+ after' "$L" | grep -oE '[0-9]+' | head -1)
+        after=$(grep -aoE 'tagfs_create_file failed: it left residue — [0-9]+ block\(s\) in use outside the volume.s own ground before it and [0-9]+ after' "$L" | grep -oE '[0-9]+' | tail -1)
         [ -n "$before" ] && [ "$after" = "$((before + 1))" ]
         chk $? "standmut: a test that takes a block and never gives it back is counted by the runner — ${before:-no} block(s) before it, ${after:-no} after"
-        [ "$(stand_format)" = v1 ] && standmut_leak_again
     fi
     stand_leak_off
-
-    [ "$(stand_format)" = v1 ] && standmut_v1
     buildkey_restore
-}
-
-# standmut_leak_again — the leaking boot's volume booted again on format v1,
-# whose bitmap kept the block the test took: its roll call names it an orphan.
-standmut_leak_again() {
-    local img
-    if grep -aq '^\[HALT\] Storage sync complete' "$L"; then
-        img="$SCRATCH/stand.leak.img"
-        cp -c build/boxos.img "$img" 2>/dev/null || cp build/boxos.img "$img"
-        stand_boot standmut_leak_again BOOTDISK="$img" CORES=4 MEM=4G
-        if [ $? != 2 ]; then
-            stand_red standmut_leak_again "and the next boot's roll call finds the block it left as an orphan" \
-                '\[TagFS FSCK\] Bitmap mismatch: 1 orphan, 0 missing'
-            stand_red standmut_leak_again "named by where it is" \
-                '\[TagFS FSCK\] orphan run at data block [0-9]+, 1 block\(s\)'
-        fi
-        rm -f "$img"
-    else
-        bad "standmut: the leaking boot never said its halt's sync wrote the volume, so the next roll call would judge nothing"
-    fi
-}
-
-# standmut_v1 — the groups of format v1's own structures (above): the Ledger
-# and the integrity map under their locks, the file table's and the tag
-# registry's growth, the waits for room of format v1's own tests, W_SPARE,
-# and the mirror of v1's Ink.
-standmut_v1() {
-    # Step 1.1 lifted the caveats of the Ledger's write and of the map's
-    # paging: each put back under its own lock, the test says the defect it
-    # stands for is back, with the number it saw.
-    stand_mech_on underlock
-    if stand_mut_boot standmut_underlock CORES=4 MEM=4G; then
-        stand_red standmut_underlock "the Ledger written under its lock again is the defect back" \
-            'stand_ledger_writes_outside_its_lock failed: the defect it stands for is back — .* \(Ledger writes of one that crossed the medium holding the Ledger.s lock 1\)'
-        stand_red standmut_underlock "the map paged in under its lock again is the defect back" \
-            'stand_integrity_pages_outside_its_lock failed: the defect it stands for is back — .* \(17-page runs of block writes whose map paging crossed the medium under a lock 1\)'
-    fi
-    stand_mech_off
-
-    # The file table's growth as step 1.1 found it: both of the defects it
-    # lifted are back, and each test that stands for one says so, number and all.
-    stand_mech_on table
-    if stand_mut_boot standmut_table CORES=4 MEM=4G; then
-        stand_red standmut_table "a new block of the file table linked with no stamp and no flush behind it runs the chain into unstamped ground" \
-            "stand_table_grows_onto_a_stamp failed: the defect it stands for is back — .* \\(file table chains on the medium that run into a block without the table's magic 1\\)"
-        stand_red standmut_table "the memory for a link asked only after its block is taken strands the block when it is refused" \
-            'stand_table_growth_gives_back_its_ground failed: the defect it stands for is back — .* \(blocks a growth of the file table took and left named by nothing 1\)'
-    fi
-    stand_mech_off
-
-    # The tag registry's step 1.1 undone, each defect in the place the fix
-    # took it out of, and each test must say its defect is back. A refused
-    # pass that forgets its block has a boot of its own: the growth that links
-    # before it stamps takes no flush at all, and the test of the block kept
-    # refuses exactly that flush.
-    stand_mech_on registry
-    if stand_mut_boot standmut_registry CORES=4 MEM=4G; then
-        stand_red standmut_registry "a registry that links its new block before stamping it runs its chain into unstamped ground" \
-            'stand_registry_growth_links_what_landed failed: the defect it stands for is back — .* \(registry chains on the medium that run into a block without the registry.s magic 1\)'
-        stand_red standmut_registry "a tail written holding the registry's lock crosses the medium under it" \
-            'stand_registry_flush_holds_no_lock failed: the defect it stands for is back — .* \(registry flushes of one new name that crossed the medium holding the registry.s lock 1\)'
-        stand_red standmut_registry "a registry beside the volume's that shares its mark of what is owed moves the volume's chain" \
-            'stand_registry_scratch_leaves_the_volume_alone failed: the defect it stands for is back — .* \(registry chains on the medium a scratch registry moved by living and dying 1\)'
-        stand_red standmut_registry "a load that drops what it cannot hold answers OK" \
-            'stand_registry_load_refuses_what_it_cannot_hold failed: the defect it stands for is back — .* \(registry loads with an allocation refused that answered OK, stopping at the first 1\)'
-        stand_red standmut_registry "a key's ids handed out as the registry's own array are not a copy" \
-            'stand_registry_key_ids_are_copies failed: the defect it stands for is back — .* \(copies of a key.s tag ids that were the registry.s own array 1\)'
-    fi
-    stand_mech_off
-
-    stand_mech_on registrykeep
-    if stand_mut_boot standmut_registrykeep CORES=4 MEM=4G; then
-        stand_red standmut_registrykeep "a refused pass that forgets the block it took leaves it owned by nothing" \
-            'stand_registry_flush_keeps_its_block failed: the defect it stands for is back — .* \(blocks a refused registry growth took that its retry did not link 1\)'
-    fi
-    stand_mech_off
-
-    # The rest of room on its way, on the legacy channel, where every wait for
-    # room but the port's is asked: each caught by a test of format v1's own.
-    stand_mech_on roomwait
-    if stand_mut_boot standmut_roomwait CORES=4 MEM=4G; then
-        stand_red standmut_roomwait "the Settle's own holder refused its own cycle answers a write in the kernel the word" \
-            'stand_room_kernel_write_between_the_steps failed at [^ ]+: a write in the kernel on that core .* \(9, 0\)'
-        stand_red standmut_roomwait "a job that runs the cycles in its caller's call is answered before any cycle ends" \
-            'stand_room_job_between_the_steps failed at [^ ]+: it waits for the cycle.s end as a waiter of the Settle, unanswered \(0, 1\)'
-        stand_red standmut_roomwait "a caller in the kernel answered the word is told ERR_WOULD_BLOCK" \
-            'stand_room_create_grows_the_registry failed at [^ ]+: a create whose name grows the registry .* \(9, 0\)'
-        stand_red standmut_roomwait "an op waited for and answered without being asked again made nothing" \
-            'stand_room_create_parked failed at [^ ]+: and says the new file.s id \(0, 1\)'
-    fi
-    stand_mech_off
-
-    # And through the port, on a STRICT kernel: a W_SPARE that answers the
-    # allocator's word meets the border, which stops the machine naming it.
-    stand_mech_on roomport
-    if stand_mut_boot standmut_roomport UEFI=on STRICT=on CORES=4 MEM=4G; then
-        stand_red standmut_roomport "a W_SPARE that answers the allocator's word stops a STRICT kernel at the border" \
-            'KERNEL PANIC:.*\[CHIT\] DEFECT: storage\.write answered pid 0.s token 0x000000 ERR_WOULD_BLOCK'
-    fi
-    stand_mech_off
-
-    # The mirror's own check (spec_v2 §16.1 p.1) is only worth its silence if a
-    # record memory holds, broken, is said: one per kind of Ink — a Plot whose
-    # last splice is not conveyed, a rename whose record says another time, a
-    # new file whose record carries a flag the packed one does not. Not STRICT,
-    # so each is said by its own line and none stops the machine first.
-    stand_mech_on mirror
-    if stand_mut_boot standmut_mirror CORES=4 MEM=4G; then
-        stand_red standmut_mirror "a Plot's last splice not conveyed leaves memory a record that is not the Plot's" \
-            '\[TagFS\] DEFECT: the record memory holds of file [0-9]+ does not say what its Plot did — its Strips are not the Plot.s runs'
-        stand_red standmut_mirror "a rename's record that says another time is not the one format v1 packed" \
-            '\[TagFS\] DEFECT: the record memory holds of file [0-9]+ is not the one format v1 packed — its times'
-        stand_red standmut_mirror "a new file's record that carries a flag the packed one does not is not it" \
-            '\[TagFS\] DEFECT: the record memory holds of file [0-9]+ is not the one format v1 packed — its flags'
-    fi
-    stand_mech_off
 }
 
 # ===========================================================================
@@ -9971,9 +8589,8 @@ standmut_v1() {
 #
 #   boot 1  on QUILL_BOOT1_MEM: longquery bigwrite sequential interleave
 #           coldread coldwrite usememory; then the host lists the volume and
-#           counts the runs of ground each file was given (format v1's
-#           extents; a book's runs of ground, past the run a cycle its
-#           record keeps on each)
+#           counts the runs of ground each file was given (past the run a
+#           cycle its record keeps on each)
 #   boot 2  usememory's second half, when the first said PENDING; fidhistory
 #   boot 3  nothing run: the mount fidhistory's cost is read from
 #
@@ -10137,11 +8754,6 @@ import math, re, sys
 scratch, tag = sys.argv[1], sys.argv[2]
 BIG, SEQ, WEAVE, USE_BYTES, USE_TAGS, FIDS, NEED_FREE = (int(x) for x in sys.argv[3:10])
 COLD = 1 << 20                          # quilltest's QUILL_COLD_BYTES
-# The extents a record holds with one stem tag and a 10-byte name (quillS.bin,
-# quillA.bin): 42 bytes of header, 2 per tag, 6 per extent and the name in
-# 4080 (plot/plot_width.h RECORD_HEADER_SIZE, PlotFits). A file of one
-# extent per block is refused at exactly EMAX blocks.
-EMAX = (4080 - 42 - 2 - 10) // 6
 
 def text(path):
     try:
@@ -10163,21 +8775,19 @@ def said(log, case):
     word, rest = verdict(log, case)
     return "the machine said %s — %s" % (word, rest) if word else "the machine gave %s no verdict" % case
 
-# A file as the host lists it: (bytes, runs of ground, blocks). Format v1's
-# record holds an extent a run of ground; a book's holds a run a cycle on each
-# run of ground — a run a settled stitch named is never grown — so what
-# Allotment lays is the runs of ground volume-read counts beside them.
-LISTED = (r"^ +%s +(\d+) bytes +(\d+) extent\(s\), (\d+) block\(s\)$",
-          r"^ +%s +(\d+) bytes +\d+ run\(s\), (\d+) block\(s\), (\d+) run\(s\) of ground(?:, \d+ Slip\(s\))?$")
-BOOK = any(re.search(r"^ground sector .* — format v2$", l, re.M) for l in lists)
-RUNS = "run(s) of ground" if BOOK else "extent(s)"
+# A file as the host lists it: (bytes, runs of ground, blocks). A record holds
+# a run a cycle on each run of ground — a run a settled stitch named is never
+# grown — so what Allotment lays is the runs of ground volume-read counts
+# beside them.
+LISTED = r"^ +%s +(\d+) bytes +\d+ run\(s\), (\d+) block\(s\), (\d+) run\(s\) of ground(?:, \d+ Slip\(s\))?$"
+RUNS = "run(s) of ground"
 
 def host(listing, name):
-    m = re.search(LISTED[BOOK] % re.escape(name), listing, re.M)
+    m = re.search(LISTED % re.escape(name), listing, re.M)
     if not m:
         return None
     n = tuple(int(x) for x in m.groups())
-    return (n[0], n[2], n[1]) if BOOK else n
+    return (n[0], n[2], n[1])
 
 # The most extents a file grown a block at a time can have: its Allotment
 # windows, each sized to the file when it has none left — 1, 1, 2, 4, … — so
@@ -10259,11 +8869,6 @@ def bigwrite():
         return "behaves", rest
     return "fail", "%s; the kernel's heap refusals for it: %s" % (said(logs[0], "bigwrite"), seen or "none")
 
-def at_width(files):
-    """Every file whole on the host at the record's width: EMAX blocks in EMAX
-    extents, one per write."""
-    return all(h and h == (EMAX * 4096, EMAX, EMAX) for h in files)
-
 def sequential():
     word, rest = verdict(logs[0], "sequential")
     h = host(lists[0], "quillS.bin")
@@ -10277,14 +8882,6 @@ def sequential():
                               "the ceiling %d" % (SEQ, h[1], RUNS, h[2], c)
         return "fail", "the file is whole but quillS.bin has %d %s where %d is the ceiling (%d bytes, " \
                        "%d blocks)" % (h[1], RUNS, c, h[0], h[2])
-    m = re.match(r"quillS\.bin, with no other writer, refused its write at byte (\d+) of (\d+) \(error (\d+)\) "
-                 r"after (\d+) writes of 4096 in a row, the byte its record's width puts the refusal at "
-                 r"\((\d+)\)", rest)
-    if word == "DEFECT" and m and int(m.group(2)) == SEQ and m.group(3) == "200" and \
-            int(m.group(1)) == int(m.group(5)) == EMAX * 4096 and at_width([h]):
-        return "defect", "quillS.bin, its only writer, was refused at byte %s (error 200) after %s writes, " \
-                         "the record's width; the host counts %d extents for %d blocks — one per write" \
-                         % (m.group(1), m.group(4), h[1], h[2])
     return "fail", "%s; the host lists quillS.bin as %s" % (said(logs[0], "sequential"), h)
 
 def interleave():
@@ -10300,16 +8897,6 @@ def interleave():
                               "%s, the ceiling %d" % (WEAVE, ha[1], hb[1], RUNS, c)
         return "fail", "the files are whole but quillA.bin has %d %s and quillB.bin %d where %d is the " \
                        "ceiling" % (ha[1], RUNS, hb[1], c)
-    m = re.match(r"(quill[AB]\.bin) refused its write at byte (\d+) of (\d+) \(error (\d+)\) after (\d+) "
-                 r"alternating writes of 4096, the byte its record's width puts the refusal at \((\d+)\); "
-                 r"the (\d+) and (\d+) bytes", rest)
-    if word == "DEFECT" and m and m.group(1) == "quillA.bin" and int(m.group(3)) == WEAVE and \
-            m.group(4) == "200" and int(m.group(2)) == int(m.group(6)) == EMAX * 4096 and \
-            int(m.group(7)) == int(m.group(8)) == EMAX * 4096 and at_width([ha, hb]):
-        return "defect", "%s was refused at byte %s (error 200) after %s alternating writes, the record's " \
-                         "width; the host counts %d and %d extents for %d and %d blocks — one per write, as for " \
-                         "the lone writer of sequential" % (m.group(1), m.group(2), m.group(5), ha[1], hb[1],
-                                                           ha[2], hb[2])
     return "fail", "%s; the host lists quillA.bin as %s and quillB.bin as %s" % (said(logs[0], "interleave"), ha, hb)
 
 def coldread():
@@ -10343,7 +8930,7 @@ def usememory():
     w1, t1 = verdict(logs[0], "usememory")
     w2, t2 = verdict(logs[1], "usememory")
     # The clear right after is the control: remembered, it says the volume took
-    # a Ledger write beside the probe's, so the length is what was refused.
+    # a write beside the probe's, so the length is what was refused.
     m = re.match(r"a Use Context of (\d+) bytes in (\d+) tags was set and the volume did not remember it "
                  r"\(remembered=0; cleared with remembered=1, anchor 0\)$", t1)
     if w1 == "DEFECT" and m and (int(m.group(1)), int(m.group(2))) == (USE_BYTES, USE_TAGS):
@@ -10442,13 +9029,10 @@ run_quill() {
 # and interleave are the tree's own since step 1.3 — each must behave with
 # nothing put in. One fix that used to be emulated here is the tree's own
 # as well, and so it is taken OUT, and its oracle must see the defect come
-# back: the Use Context's chain (step 1.6B, use_memory.c) — never staked, a context of 1000 bytes is
-# carried by nothing and the volume does not remember it (usememory). A book
-# carries the word in its stitch, not on a chain, so its stitch takes it out
-# too (sewing.c StitchBuild): a word with bytes finds no room on the ribbon,
-# the stitch is laid without it and the one who said it is refused — the
-# clear, an empty word, still rides. Each of the two bites its own format and
-# leaves the other's road as it was, so the mutants are one set on either.
+# back: the Use Context's word, which the stitch carries (sewing.c
+# StitchBuild) — a word with bytes finds no room on the ribbon, the stitch is
+# laid without it and the one who said it is refused, so a context of 1000
+# bytes is not remembered (usememory); the clear, an empty word, still rides.
 # fidhistory keeps one file in a thousand, so its guest must count them. The
 # slab stops counting, so the kernel's heap self-test must say FAILED. The
 # kernel's copies stop bringing in a page the program has not touched
@@ -10457,14 +9041,10 @@ run_quill() {
 # without the other. And first, with no machine at all, caveat_judge's three
 # answers in their approved words.
 quill_mutants_on() {
-    mutate src/kernel/tagfs/use_memory/use_memory.c
     mutate src/kernel/tagfs/settle/sewing.c
     mutate src/userspace/apps/quilltest_throwaway.c
     python3 - <<'EOF2'
 for p, a, b in (
-    ("src/kernel/tagfs/use_memory/use_memory.c",
-     "    error_t rc   = UseChainStake(s_cycle.need, &s_cycle.chain, &s_cycle.got);\n",
-     "    error_t rc   = ERR_TAGFS_NO_SPACE;   /* logcheck mutation: no chain is staked, a Use Context rides on nothing */\n"),
     ("src/kernel/tagfs/settle/sewing.c",
      "    error_t rc   = StitchLay(s, &word);\n",
      "    error_t rc   = s->use && s->use->bytes ? (word = true, ERR_TAGFS_NO_SPACE) : StitchLay(s, &word);   /* logcheck mutation: a word with bytes finds no room on the ribbon */\n"),
@@ -10475,7 +9055,6 @@ for p, a, b in (
     assert s.count(a) == 1, "quillmut anchor missing in %s: %s" % (p, a.strip().splitlines()[0])
     open(p, "w").write(s.replace(a, b, 1))
 EOF2
-    mut_done src/kernel/tagfs/use_memory/use_memory.c "logcheck mutation" 1
     mut_done src/kernel/tagfs/settle/sewing.c "logcheck mutation" 1
     mut_done src/userspace/apps/quilltest_throwaway.c "logcheck mutation" 1
 
@@ -10504,7 +9083,6 @@ EOF2
 
 quill_mutants_off() {
     restore src/kernel/tagfs/ink/ink.c
-    restore src/kernel/tagfs/use_memory/use_memory.c
     restore src/kernel/tagfs/settle/sewing.c
     restore src/userspace/apps/quilltest_throwaway.c
     restore src/lib/kernel/slab.c
@@ -10957,395 +9535,6 @@ EOF
     chk $? "lockrankmut: the rule turns on a DogEar lock ranked above a leaf, and on a TagFS lock taken under it"
 }
 
-# ===========================================================================
-# abba — the tag registry and the file table grown on sixteen cores while
-# three other cabins rename, create and tag: the machine must come back
-# ===========================================================================
-#
-# MP-D4, the two ABBAs. A chain that grew took the volume's state lock under
-# its own — the registry's in tag_registry_flush, the file table's in
-# file_table_flush, both through tagfs_alloc_blocks — while a rename, a create,
-# a delete, a tag and an untag take those locks under state. Every TagFS lock
-# keeps its core's interrupts off, so two K-Cores that met there the two ways
-# round never moved again. Step 1.1 took the block out from under both locks
-# (a Spare stamped with none held, scribe.h), and LockRank's order line — the
-# red that does not depend on timing — is now demanded NOT to come. This gate
-# is the guard beside it (the owner, 2026-09-28): `quilltest abba` on UEFI
-# STRICT with sixteen cores — four K-Cores — grows both chains while its three
-# workers call the other way round, each in a cabin of its own, and the run
-# must reach the case's verdict. On a tree where the crossing strikes, it does
-# not: that is this gate going red on evidence, not on a flake.
-#
-# ‼ A STALL IS MEASURED AGAINST THE RUN'S OWN PACE, AND THE BOUND IS THE
-# HARNESS'S, NEVER THE KERNEL'S. The driver prints a progress line every 25 new
-# tags, each saying when by the machine's own clock. Once two have come, a
-# stall is no new progress line for ABBA_STALL_TIMES × (the slowest interval
-# between two so far + 1 s, the resolution the log is looked at with) — the
-# interval the larger of the machine's clock and the gaps the host saw the
-# lines arrive in, since a console may hand over a burst at once — however
-# much else the log says meanwhile, since a kernel that is wedged on two cores
-# may still print on a third. Before two lines there is no pace to hold the
-# machine to, and the wait is the stand's own: the log quiet for
-# WAIT_QUIET_S, or the runaway guard. The verdict says the bound and the
-# numbers it came from.
-#
-# ‼ THE ORDER LINES ARE DEMANDED BY THEIR ROWS, NOT BY THIS BLOCK. Each of the
-# two places in ABBA_ORDER_KEYS is judged by its row in stand_caveat.sh: while
-# the row carries a step the place must be named in this boot — a chain grew
-# under its own lock — and a place not named is the workload failing to ask
-# its question, or the step already landed; once the step is lifted the place
-# must not be named at all. The commit that fixes a chain lifts this demand by
-# deleting the step in the row, as it lifts every caveat, and nothing here
-# changes.
-#
-# Aimed where the case starts: enough new tags to fill the registry's last
-# block and reach ABBA_EDGES blocks past it, and the table's edge — its rows,
-# 510 to a block. Built VOLUME_TESTS=on, because abba spends tags and file ids
-# for good, so the startup tests run first — and they grow both chains, the
-# table by whole blocks, past any edge read off the fresh image. So the kernel
-# says, after its last test, how long each chain is on the medium and how full
-# the registry's last block is ("[TESTS] the tests leave ..."), and the aim is
-# taken from that line with volume-read's figures of the format. After the
-# verdict the machine halts through `bye` and volume-read reads the volume
-# again: against that same line, the registry must have grown by at least the
-# blocks any packing of the case's own records takes past the room its last
-# block had, and the table by a block — growth nothing but the case made.
-#
-# ABBA_STAND is the machine: the gate is sixteen cores, and a look at the same
-# workload on another machine names it here, as QUILL_STAND does for quill
-# (one K-Core never crosses, so on a single core the run must always end).
-# ---------------------------------------------------------------------------
-
-ABBA_STAND=${ABBA_STAND:-"UEFI=on STRICT=on CORES=16 MEM=8G"}
-ABBA_NAME=_qa
-ABBA_STEM=31          # quilltest_locks.c: every new tag's name is 31 bytes long
-ABBA_EDGES=3          # registry blocks the new tags reach, the first the last one's room
-ABBA_STALL_TIMES=5
-ABBA_ORDER_KEYS="registry@tag_registry_flush/state@tagfs_alloc_blocks_inside table@file_table_flush/state@tagfs_alloc_blocks_inside"
-ABBA_PROGRESS='^\[QUILL\] abba: (workers rename pid [0-9]+|[0-9]+ of [0-9]+ new tags made).* at [0-9]+ ms[;,]'
-ABBA_VERDICT='^\[QUILL\] abba: (PASS|FAIL) — '
-
-# abba_aim JSON TABLE REGISTRY TAIL — "TAGS EDGE REGISTRY TABLE NEED": the
-# format's figures off volume-read's check of the image (a registry record's
-# head, a block's data, a table block's rows), the chains as the startup tests
-# left them (TABLE and REGISTRY blocks, TAIL bytes in the registry's last),
-# and from them the new tags that fill that last block and reach ABBA_EDGES
-# blocks past it, the table's edge, both chains' lengths, and the least number
-# of blocks any packing of those tags' records takes past the room the last
-# block has.
-abba_aim() {
-    python3 - "$1" "$ABBA_STEM" "$ABBA_EDGES" "$2" "$3" "$4" <<'ABBA_AIM_EOF'
-import json, sys
-d = json.load(open(sys.argv[1]))
-ch, stem, edges = d["chains"], int(sys.argv[2]), int(sys.argv[3])
-table, registry, tail = int(sys.argv[4]), int(sys.argv[5]), int(sys.argv[6])
-record = ch["registry_record_header"] + stem
-room_bytes = ch["registry_block_data"] - tail
-room, per_block = room_bytes // record, ch["registry_block_data"] // record
-tags = room + (edges - 1) * per_block + 1
-need = -(-(tags * record - room_bytes) // ch["registry_block_data"])
-print(tags, ch["table_rows_per_block"] * table, registry, table, need)
-ABBA_AIM_EOF
-}
-
-# The kernel's own word on the chains once its startup tests are done
-# (stand_chain_tests.c, StandSayChainsLeft): "TABLE REGISTRY TAIL".
-ABBA_LEFT='^\[TESTS\] the tests leave the file table ([0-9]+) block\(s\) long on the medium and the registry ([0-9]+), its last block holding ([0-9]+) byte\(s\)'
-abba_left() {
-    tr -d '\r' < "$1" | grep -aE "$ABBA_LEFT" | tail -1 | sed -E "s/$ABBA_LEFT.*/\1 \2 \3/"
-}
-
-# abba_chains JSON — "REGISTRY TABLE": both chains' lengths after the run.
-abba_chains() {
-    python3 -c 'import json, sys; c = json.load(open(sys.argv[1]))["chains"]; print(len(c["registry"]), len(c["table"]))' "$1"
-}
-
-# abba_lines MARK — the case's own lines since line MARK of the serial log.
-abba_lines() {
-    tail -n +$(($1 + 1)) build/serial.log | tr -d '\r' | grep -a '^\[QUILL\] abba: '
-}
-
-# abba_pace MARK — the slowest interval between two consecutive progress
-# lines since line MARK, in ms by the machine's own clock (each line says when
-# it was printed); 0 while fewer than two have come.
-abba_pace() {
-    abba_lines "$1" | grep -E "$ABBA_PROGRESS" | sed -nE 's/.* at ([0-9]+) ms[;,].*/\1/p' |
-        awk 'NR > 1 && $1 - p > m { m = $1 - p } { p = $1 } END { print m + 0 }'
-}
-
-# abba_watch MARK — follow quilltest abba from line MARK until its verdict
-# (answers 0) or a stall (answers 1). The pace is the slowest interval between
-# two progress lines, taken the larger of two ways: by the machine's clock,
-# which the lines carry, and by the gaps in which the host saw them arrive —
-# a console may hand over a burst of lines at once, and a host may fall
-# behind. Leaves ABBA_SEEN (progress lines), ABBA_PACE_MS (the machine's
-# slowest interval), ABBA_SLOWEST (the pace, whole s), ABBA_BOUND (the stall
-# bound it came to, s; 0 while fewer than two lines had come), ABBA_SPENT (s
-# since the echo) and ABBA_WHY.
-abba_watch() {
-    local mark=$1 t0 now n at size last="" still=0 ms
-    t0=$(date +%s); at=$t0
-    ABBA_SEEN=0; ABBA_PACE_MS=0; ABBA_SLOWEST=0; ABBA_BOUND=0; ABBA_SPENT=0
-    while :; do
-        now=$(date +%s)
-        ABBA_SPENT=$((now - t0))
-        n=$(abba_lines "$mark" | grep -cE "$ABBA_PROGRESS")
-        if [ "$n" -gt "$ABBA_SEEN" ]; then
-            [ "$ABBA_SEEN" -gt 0 ] && [ $((now - at)) -gt "$ABBA_SLOWEST" ] && ABBA_SLOWEST=$((now - at))
-            ABBA_PACE_MS=$(abba_pace "$mark")
-            ms=$(((ABBA_PACE_MS + 999) / 1000))
-            [ "$ms" -gt "$ABBA_SLOWEST" ] && ABBA_SLOWEST=$ms
-            [ "$n" -ge 2 ] && ABBA_BOUND=$((ABBA_STALL_TIMES * (ABBA_SLOWEST + 1)))
-            ABBA_SEEN=$n; at=$now
-        fi
-        if abba_lines "$mark" | grep -qE "$ABBA_VERDICT"; then
-            ABBA_WHY=verdict; return 0
-        fi
-        if [ "$ABBA_BOUND" -gt 0 ] && [ $((now - at)) -ge "$ABBA_BOUND" ]; then
-            ABBA_WHY="no progress line for $((now - at)) s, past the bound of $ABBA_BOUND s — $ABBA_STALL_TIMES × (the slowest interval between two, $ABBA_SLOWEST s, + 1), the machine's own clock saying $ABBA_PACE_MS ms"
-            return 1
-        elif [ "$ABBA_BOUND" = 0 ]; then
-            size=$(wc -c < build/serial.log | tr -d ' ')
-            if [ "$size" = "$last" ]; then still=$((still + 1)); else still=0; last=$size; fi
-            if [ "$still" -ge "$WAIT_QUIET_S" ]; then
-                ABBA_WHY="the log went quiet for $WAIT_QUIET_S s with $ABBA_SEEN progress line(s), fewer than the two a pace needs"
-                return 1
-            fi
-        fi
-        if [ "$ABBA_SPENT" -ge "$WAIT_RUNAWAY_S" ]; then
-            ABBA_WHY="no verdict in the runaway guard's $WAIT_RUNAWAY_S s, the progress lines still coming"
-            return 1
-        fi
-        sleep 1
-    done
-}
-
-# abba_session TAG — a fresh image built VOLUME_TESTS=on, aimed, booted on
-# ABBA_STAND, `quilltest abba` typed and watched, and the machine halted
-# through bye once the case answered. Leaves $SCRATCH/serial.abba.TAG.log, the
-# checks abba.TAG.before.json and (after an orderly halt) abba.TAG.after.json,
-# the aim (ABBA_TAGS ABBA_EDGE ABBA_R0 ABBA_T0 ABBA_NEED), ABBA_HALTED and
-# abba_watch's figures. Answers 1, having said why, when there is no run to
-# judge.
-abba_session() {
-    local tag=$1 mark aim
-    ABBA_HALTED=0; ABBA_WHY="not watched"; ABBA_SEEN=0; ABBA_SLOWEST=0; ABBA_BOUND=0; ABBA_SPENT=0
-    rm -f "$SCRATCH/serial.abba.$tag.log" "$SCRATCH/abba.$tag.before.json" "$SCRATCH/abba.$tag.after.json"
-    make run-stop >/dev/null 2>&1
-    rm -f build/boxos.img
-    # shellcheck disable=SC2086
-    if ! build_with_key VOLUME_TESTS=on "$(strict_key $ABBA_STAND)"; then
-        echo "BUILD FAILED (VOLUME_TESTS=on) — tail:"; tail -25 "$SCRATCH/build.log"
-        bad "abba: $tag — VOLUME_TESTS=on does not build"
-        return 1
-    fi
-    python3 tools/volume-read.py build/boxos.img check --json >"$SCRATCH/abba.$tag.before.json" 2>/dev/null
-    if ! python3 -c 'import json, sys; json.load(open(sys.argv[1]))["chains"]' \
-            "$SCRATCH/abba.$tag.before.json" >/dev/null 2>&1; then
-        harness "abba: $tag — volume-read's figures of the fresh image would not read"
-        return 1
-    fi
-    # shellcheck disable=SC2086
-    if ! make run-bg VOLUME_TESTS=on $ABBA_STAND >"$SCRATCH/runbg.abba.$tag.log" 2>&1 || [ ! -S build/qemu.mon ]; then
-        harness "abba: $tag — no machine was started: $(tail -1 "$SCRATCH/runbg.abba.$tag.log" | tr -d '\r')"
-        make run-stop >/dev/null 2>&1
-        return 1
-    fi
-    if ! wait_for_line -E build/serial.log 'TagFS: [0-9]+ run, |KERNEL PANIC' "$WAIT_QUIET_S" ||
-       ! grep -aqE 'TagFS: [0-9]+ run, ' build/serial.log || ! wait_for_prompt; then
-        make run-stop >/dev/null 2>&1
-        cp build/serial.log "$SCRATCH/serial.abba.$tag.log"
-        bad "abba: $tag — the machine never came to its shell after the startup tests ($(grep -aE 'KERNEL PANIC|TagFS: [0-9]+ run, ' "$SCRATCH/serial.abba.$tag.log" | tr -d '\r' | tail -1))"
-        return 1
-    fi
-    local left
-    left=$(abba_left build/serial.log)
-    if [ -z "$left" ] || ! aim=$(abba_aim "$SCRATCH/abba.$tag.before.json" $left 2>&1); then
-        make run-stop >/dev/null 2>&1
-        cp build/serial.log "$SCRATCH/serial.abba.$tag.log"
-        harness "abba: $tag — the kernel did not say where its startup tests left the chains, so there is nothing to aim from${aim:+: $(echo "$aim" | tail -1)}"
-        return 1
-    fi
-    read -r ABBA_TAGS ABBA_EDGE ABBA_R0 ABBA_T0 ABBA_NEED <<ABBA_AIM
-$aim
-ABBA_AIM
-    echo "   aim: the startup tests left the registry $ABBA_R0 block(s) and the table $ABBA_T0; $ABBA_TAGS new tags reach $ABBA_EDGES registry blocks past its last one's room, and the table's edge is fid $ABBA_EDGE"
-    mark=$(wc -l < build/serial.log)
-    if type_line "quilltest abba $ABBA_NAME $ABBA_TAGS $ABBA_EDGE"; then
-        abba_watch "$mark"
-    else
-        ABBA_WHY="the machine never took the command"
-    fi
-    if [ "$ABBA_WHY" = verdict ] &&
-       wait_until "$WAIT_QUIET_S" "the shell's prompt after quilltest abba" \
-           '[ "$(tail -n +$((mark + 1)) build/serial.log | tr -d "\r" | grep -cE "^(\[[^]]*\] )?~ ")" -ge 2 ]' &&
-       type_line bye && wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S" $((mark + 1)) &&
-       grep -aq '^\[HALT\] Storage sync complete' build/serial.log; then
-        ABBA_HALTED=1
-    fi
-    make run-stop >/dev/null 2>&1
-    cp build/serial.log "$SCRATCH/serial.abba.$tag.log"
-    if [ "$ABBA_HALTED" = 1 ]; then
-        python3 tools/volume-read.py build/boxos.img check --json >"$SCRATCH/abba.$tag.after.json" 2>/dev/null
-    fi
-    return 0
-}
-
-# abba_order LOG WHAT ENDED — each place of ABBA_ORDER_KEYS as its row
-# demands: named in this boot while the row holds it under a step, not named
-# once the step is lifted. The row is read where this is asked, so a caller
-# that sources a changed stand_caveat.sh gets the demand that row makes. A
-# held place a run that did not reach its end (ENDED 0) never named is said
-# and not counted: that run never came to the question, and its stall is
-# the finding.
-abba_order() {
-    local log=$1 what=$2 ended=$3 key step line
-    for key in $ABBA_ORDER_KEYS; do
-        step=$(caveat_step "lockrank:$key")
-        line=$(lockrank_rows "$log" | awk -F'|' -v k="$key" '$2 == k { print $3; exit }')
-        if [ -n "$step" ] && [ -n "$line" ]; then
-            ok "abba: $what — the order place $key is held under step $step, and this boot named it: $line"
-        elif [ -n "$step" ] && [ "$ended" = 0 ]; then
-            echo "  (abba: $what — the order place $key, held under step $step, was not named before the run stopped: not asked, and not counted)"
-        elif [ -n "$step" ]; then
-            bad "abba: $what — the order place $key is held under step $step and this boot did not name it: the workload did not grow that chain under its lock, or step $step already landed — lift the caveat"
-        elif [ -z "$line" ]; then
-            ok "abba: $what — the order place $key, its step lifted, is not named"
-        else
-            bad "abba: $what — the order place $key, its step lifted, is named again: the defect it stands for is back — $(caveat_defect "lockrank:$key") ($line)"
-        fi
-    done
-}
-
-# abba_judge TAG WHAT — the session's run, the case's verdict, the chains and
-# the order demand.
-abba_judge() {
-    local tag=$1 what=$2 L="$SCRATCH/serial.abba.$1.log" said fault verdict made r1 t1
-    said=$(stand_summary "$L")
-    echo "$said" | grep -qE "^TagFS: $STAND_RUN run, [0-9]+ passed, 0 failed"
-    chk $? "abba: $what — the boot's $STAND_RUN startup tests ran before the case and none failed (${said:-no summary})"
-    fault=$(grep -aE 'KERNEL PANIC|\[EXCEPTION\]' "$L" | tr -d '\r' | head -1 | cut -c1-160)
-    [ -z "$fault" ]
-    chk $? "abba: $what — no panic, no exception${fault:+: $fault}"
-    if [ "$ABBA_WHY" = verdict ] && [ "$ABBA_BOUND" -gt 0 ]; then
-        ok "abba: $what — the run reached its verdict in $ABBA_SPENT s after $ABBA_SEEN progress lines; the slowest interval between two was $ABBA_PACE_MS ms by the machine's clock and $ABBA_SLOWEST s the larger way, so a stall was no line for $ABBA_BOUND s ($ABBA_STALL_TIMES × ($ABBA_SLOWEST + 1))"
-    elif [ "$ABBA_WHY" = verdict ]; then
-        ok "abba: $what — the run reached its verdict in $ABBA_SPENT s after $ABBA_SEEN progress line(s), too few for a pace, so the wait was the stand's quiet rule ($WAIT_QUIET_S s)"
-    else
-        bad "abba: $what — the run did not reach its verdict: $ABBA_WHY; $ABBA_SEEN progress lines in $ABBA_SPENT s, the last: $(tr -d '\r' < "$L" | grep -aE "$ABBA_PROGRESS" | tail -1)"
-    fi
-    verdict=$(tr -d '\r' < "$L" | grep -aE "$ABBA_VERDICT" | tail -1)
-    case "$verdict" in
-        *"abba: PASS"*) ok "abba: $what — ${verdict#\[QUILL\] abba: }" ;;
-        ?*)             bad "abba: $what — ${verdict#\[QUILL\] abba: }" ;;
-    esac
-    made=$(printf '%s\n' "$verdict" | sed -nE 's/.*PASS — made ([0-9]+) new tags.*/\1/p')
-    if [ -n "$made" ]; then
-        if [ "$ABBA_HALTED" = 1 ] && read -r r1 t1 <<ABBA_AFTER
-$(abba_chains "$SCRATCH/abba.$tag.after.json" 2>/dev/null)
-ABBA_AFTER
-        then
-            [ $((r1 - ABBA_R0)) -ge "$ABBA_NEED" ] && [ "$t1" -gt "$ABBA_T0" ]
-            chk $? "abba: $what — from where the startup tests left them, the registry went from $ABBA_R0 to $r1 blocks, $ABBA_NEED at least for the case's $made new tags past the room its last block had, and the file table from $ABBA_T0 to $t1"
-        else
-            bad "abba: $what — the chains were not read after the run: the machine $([ "$ABBA_HALTED" = 1 ] && echo "halted and volume-read could not read the volume" || echo "did not halt through bye ($(grep -aE "$STAND_HALT_ENDS" "$L" | tr -d '\r' | tail -1 | cut -c1-120))")"
-        fi
-    fi
-    abba_order "$L" "$what" "$([ "$ABBA_WHY" = verdict ] && echo 1 || echo 0)"
-}
-
-run_abba() {
-    echo "== abba: the tag registry and the file table grown on $ABBA_STAND while three cabins rename, create and tag =="
-    if abba_session abba; then
-        abba_judge abba "the guard"
-        lockrank_judge "$SCRATCH/serial.abba.abba.log" "abba"
-    fi
-    make run-stop >/dev/null 2>&1
-    rm -f build/boxos.img
-    buildkey_restore
-}
-
-# ---------------------------------------------------------------------------
-# abbamut — a block taken under the registry's lock, and the demand must turn
-# ---------------------------------------------------------------------------
-#
-# The order demand is only worth its PASS if it can see the place come back.
-# So the registry takes a block for nothing — taken and given straight back —
-# under its own lock at the start of every flush, the allocation the fix of
-# its chain takes out from under that lock, put back where it cannot miss:
-# the first registry flush of the boot names the place, grown chain or not.
-# The session is abba's own, typed and watched as the gate does it, and its
-# guard is not judged here — a tree that takes the state lock under the
-# registry at every flush is expected to stall. Then the row is read as it
-# will stand the day that fix lands, its step lifted, and abba's demand must
-# answer that the defect it stands for is back.
-abbamut_kernel_on() {
-    mutate src/kernel/tagfs/tag_registry/tag_registry.c
-    python3 - <<'EOF'
-p = "src/kernel/tagfs/tag_registry/tag_registry.c"
-s = open(p).read()
-a = "    TagFSLockTake(&reg->lock);\n    bool owed = reg->written_next < reg->next_id || reg->tail_owed;\n"
-assert s.count(a) == 1, "abbamut registry-flush anchor missing"
-s = s.replace(a, "    TagFSLockTake(&reg->lock);\n"
-                 "    uint64_t logcheck_taken;   /* logcheck mutation: a block taken under the registry's lock at every flush */\n"
-                 "    if (tagfs_alloc_blocks(1, &logcheck_taken) == 0)\n"
-                 "        tagfs_free_blocks(logcheck_taken, 1);\n"
-                 "    bool owed = reg->written_next < reg->next_id || reg->tail_owed;\n", 1)
-open(p, "w").write(s)
-EOF
-    mut_done src/kernel/tagfs/tag_registry/tag_registry.c "logcheck mutation" 1
-}
-
-# abbamut_lift_on KEY — KEY's row with its step lifted, as the commit that
-# fixes its place will leave it; a row already lifted is left as it is.
-abbamut_lift_on() {
-    mutate tools/stand_caveat.sh
-    python3 - "$1" <<'EOF'
-import re, sys
-p = "tools/stand_caveat.sh"
-s = open(p).read()
-key = re.escape("lockrank:" + sys.argv[1])
-s, n = re.subn(r'(' + key + r'[|)][^"]*?\n\s*echo ")[0-9.]*[a-z]*(\|[^\n]*;;)',
-               r'\1\2   # logcheck mutation: the step lifted', s, count=1, flags=re.S)
-assert n == 1, "abbamut: the row of " + sys.argv[1] + " was not found"
-open(p, "w").write(s)
-EOF
-    mut_done tools/stand_caveat.sh "logcheck mutation" 1
-}
-
-run_abbamut() {
-    echo "== abbamut: a block taken under the registry's lock at every flush, the step lifted — abba's demand must turn =="
-    local key=registry@tag_registry_flush/state@tagfs_alloc_blocks_inside L="$SCRATCH/serial.abba.abbamut.log"
-    local rc line said defect at typed
-    # Since step 1.5B a STRICT kernel stops the machine at every place LockRank
-    # names (lock_rank.c, LockRankStops), and this mutant's place has to be
-    # NAMED, at the first flush, for abba's judge to be shown it: the session
-    # runs on the same stand with STRICT's kernel half off.
-    local ABBA_STAND="${ABBA_STAND//STRICT=on/STRICT=off}"
-    abbamut_kernel_on
-    abba_session abbamut; rc=$?
-    make run-stop >/dev/null 2>&1
-    restore src/kernel/tagfs/tag_registry/tag_registry.c
-    if [ "$rc" = 0 ]; then
-        line=$(lockrank_rows "$L" | awk -F'|' -v k="$key" '$2 == k { print $3; exit }')
-        at=$(tr -d '\r' < "$L" | grep -anF -- "$line" | head -1 | cut -d: -f1)
-        typed=$(tr -d '\r' < "$L" | grep -an '^~ quilltest abba ' | head -1 | cut -d: -f1)
-        [ -n "$line" ] && [ -n "$at" ] && [ -n "$typed" ] && [ "$at" -lt "$typed" ]
-        chk $? "abbamut: the registry taking a block under its lock is named at the boot's first flush, before the case began to grow anything (log line ${at:-none}, the case's echo ${typed:-none}) — ${line:-not named}; the run: $ABBA_WHY"
-        defect=$(caveat_defect "lockrank:$key")
-        abbamut_lift_on "$key"
-        said=$(. tools/stand_caveat.sh
-               PASS=0; FAIL=0; CAVEAT=0; HARNESS=0
-               abba_order "$L" "abbamut" "$([ "$ABBA_WHY" = verdict ] && echo 1 || echo 0)"
-               echo "counted $PASS $FAIL")
-        restore tools/stand_caveat.sh
-        printf '%s\n' "$said" | grep -qF "abba: abbamut — the order place $key, its step lifted, is named again: the defect it stands for is back — $defect ($line)"
-        chk $? "abbamut: with its step lifted, abba's demand for $key answers that the defect is back ($(printf '%s\n' "$said" | tail -1))"
-    fi
-    rm -f build/boxos.img
-    buildkey_restore
-}
-
 # ---------------------------------------------------------------------------
 # turns — the boundary is the pocket, and on one core Helm work is owed the
 # quantum (RT-11)
@@ -11598,17 +9787,6 @@ run_turnsmut() {
 # THE MUTATIONS THEY EXIST FOR, each put in by hand and the scenario run on it,
 # whole, on this tree (2026-10-07):
 #
-#   writers      PoolAppend (meta_pool_tail.c) without
-#                `g_pool_tail->used_bytes = (uint16_t)(pos + bytes);` — every
-#                record of the tail laid at one place. The running machine
-#                reads every round back (the mirror is in memory); the medium
-#                after the halt has lost the sixteen files. MEASURED: 7 passed,
-#                5 failed — check (16 damage, FILE_LOST), the host's get,
-#                writersback, the next mount's census, the second check. The
-#                literal D1 — TagFSInkPlot's lock around InkPlotLocked taken
-#                out — did NOT turn it in the one run it was given: every
-#                asynchronous write is inked on the one drain core, and the
-#                spans' Inks on the K-Cores met them too rarely to tear the tail.
 #   appenders    wjob_load (write_job_port.c) beginning an append at the size
 #                the job's open saw, `j->handle->file_size`, not the size of the
 #                record loaded under the Helm, `j->plot.size`. MEASURED: 8
@@ -11620,18 +9798,7 @@ run_turnsmut() {
 #                filler takes the lowest free run, where the file lay, and the
 #                window being read answers 9304382 of its bytes with the
 #                filler's. MEASURED: 7 passed, 1 failed (the case's DEFECT).
-#   defragdelete InkQuitclaimLocked (ink.c) without
-#                `if (fallow) FallowAdd(fallow, gen);` — a deleted file's ground
-#                never comes to rest, so it never goes back, and the medium
-#                keeps it taken with nothing owning it. MEASURED: 9 passed, 3
-#                failed — both checks (ORPHAN) and the next mount's census
-#                ("Bitmap mismatch: 6335 orphan"). Taking the defrag's own line
-#                out instead — PlotGatherLay's `PlotLetGoLater` of the old
-#                ground — leaks so fast that the volume fills and a defragger
-#                is refused ERR_TAGFS_NO_SPACE in the first round: red too, for
-#                a reason the scenario does not name, so it is not the one
-#                written here.
-#                And the stand's hold not holding — HelmReadyOnceVacated
+#   defragdelete the stand's hold not holding — HelmReadyOnceVacated
 #                (helm.c) listing the holder at once (2026-10-28). MEASURED:
 #                11 passed, 1 failed — the kernel held 8 defrags and all 8 went
 #                on and answered a score, none the file given up under it.
@@ -11767,15 +9934,12 @@ cores_check() {
 }
 
 # cores_mounted LOG WHAT — the next mount's own census: no block named twice,
-# none orphaned or missing, no file lost. Table rows it corrects from the pool
-# are said, not counted: the pool is where a file's newest record is.
-CORES_FSCK_CORRECTED="^\[TagFS FSCK\] [0-9]+ file table entry\(s\) corrected from this volume's metadata pool, 0 file\(s\) lost$"
+# no file lost.
 cores_mounted() {
-    local fsck corrected
-    fsck=$(tr -d '\r' < "$1" | grep -aE '^\[TagFS FSCK\] ' | grep -avE "$CORES_FSCK_CORRECTED" | head -1 | cut -c1-200)
-    corrected=$(tr -d '\r' < "$1" | grep -aE "$CORES_FSCK_CORRECTED" | head -1 | sed -nE 's/^\[TagFS FSCK\] ([0-9]+) .*/\1/p')
+    local fsck
+    fsck=$(tr -d '\r' < "$1" | grep -aE '^\[TagFS FSCK\] ' | head -1 | cut -c1-200)
     grep -aqE 'MOUNTED — [0-9]+ file' "$1" && [ -z "$fsck" ]
-    chk $? "$2 — the volume mounted again and its census named no block twice, nothing orphaned or missing, no file lost (table rows corrected from the pool: ${corrected:-0})${fsck:+: $fsck}"
+    chk $? "$2 — the volume mounted again and its census named no block twice, no file lost${fsck:+: $fsck}"
 }
 
 # cores_streams IMG FILES... — each NAME:SIZE:SEED got off the medium and held
@@ -12174,7 +10338,6 @@ run_cores() {
 case "${1:-both}" in
     healthy)  run_healthy ;;
     novolume) run_novolume ;;
-    badpool)  run_badpool ;;
     framerefuse) run_framerefuse ;;
     bookboot) run_bookboot ;;
     dedup)    run_dedup ;;
@@ -12184,7 +10347,7 @@ case "${1:-both}" in
     stranger) run_stranger ;;
     latearrival) run_latearrival ;;
     replug)   run_replug ;;
-    replugwrite) run_replugwrite ;;
+    replugwrite) run_replugwritebook ;;
     latelaunchmut) run_latelaunchmut ;;
     roombackmut) run_roombackmut ;;
     nofsgsbase) run_nofsgsbase ;;
@@ -12267,14 +10430,13 @@ case "${1:-both}" in
     orderlifemut) run_orderlifemut ;;
     caret)    run_caret ;;
     caretmut) run_caretmut ;;
-    grow)     run_grow ;;
-    growcut)  run_growcut ;;
+    grow)     run_growbook ;;
+    growcut)  run_growcutbook ;;
     growglass) run_growglass ;;
     growmut)  run_growmut ;;
     loggerhour) run_loggerhour ;;
     loggerhourmut) run_loggerhourmut ;;
     census)   run_census ;;
-    censusmut) run_censusmut ;;
     stand)    run_stand ;;
     standusb) run_standusb ;;
     standmut) run_standmut ;;
@@ -12282,8 +10444,6 @@ case "${1:-both}" in
     quillmut) run_quillmut ;;
     stackguard) run_stackguard ;;
     lockrankmut) run_lockrankmut ;;
-    abba)     run_abba ;;
-    abbamut)  run_abbamut ;;
     turns)    run_turns ;;
     turnsmut) run_turnsmut ;;
     writers)  run_writers ;;
@@ -12292,8 +10452,8 @@ case "${1:-both}" in
     defragdelete) run_defragdelete ;;
     cores)    run_cores ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_replugwrite; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_haltcycle; echo; run_halthog; echo; run_halthogmut; echo; run_panicstop; echo; run_panicstopmut; echo; run_fullvolume; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_caret; echo; run_grow; echo; run_growcut; echo; run_quill; echo; run_mountfail; echo; run_badpool; echo; run_framerefuse; echo; run_bookboot; echo; run_census; echo; run_censusmut; echo; run_stand; echo; run_standusb; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_abba; echo; run_abbamut; echo; run_turns; echo; run_turnsmut; echo; run_cores ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|caret|caretmut|grow|growcut|growglass|growmut|loggerhour|loggerhourmut|census|censusmut|stand|standusb|standmut|quill|quillmut|stackguard|abba|abbamut|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|latelaunchmut|nofsgsbase|badpool|framerefuse|bookboot|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|halthog|halthogmut|panicstop|panicstopmut|fullvolume|roombackmut|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all|fare|faremut]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_replugwritebook; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_haltcycle; echo; run_halthog; echo; run_halthogmut; echo; run_panicstop; echo; run_panicstopmut; echo; run_fullvolume; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_caret; echo; run_growbook; echo; run_growcutbook; echo; run_quill; echo; run_mountfail; echo; run_framerefuse; echo; run_bookboot; echo; run_census; echo; run_stand; echo; run_standusb; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_turns; echo; run_turnsmut; echo; run_cores ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|caret|caretmut|grow|growcut|growglass|growmut|loggerhour|loggerhourmut|census|stand|standusb|standmut|quill|quillmut|stackguard|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|latelaunchmut|nofsgsbase|framerefuse|bookboot|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|halthog|halthogmut|panicstop|panicstopmut|fullvolume|roombackmut|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all|fare|faremut]"; exit 2 ;;
 esac
 
 STAND_FINISHED=1

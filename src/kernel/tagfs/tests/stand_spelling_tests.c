@@ -136,9 +136,9 @@ out:
 
 /* A key one byte past its width, handed to a registry as a spelling nobody
  * judged: refused as too long before a single allocation is made. A key cut
- * by a cast to fit the record would be given the number of a different,
- * shorter tag. The widths themselves are the record's: a 255-byte key and a
- * value to the end of the block are one tag, a byte more of either is not. */
+ * by a cast to fit the book would be given the number of a different,
+ * shorter tag. The widths themselves are the book's: a 255-byte key and a
+ * value to the tag's full width are one tag, a byte more of either is not. */
 static TestResult TestStandLongKeyRefusedBeforeAllocation(void)
 {
     TestResult   verdict = TEST_PASS;
@@ -180,10 +180,10 @@ static TestResult TestStandLongKeyRefusedBeforeAllocation(void)
 
     TagSpelling widest = { s_long, NULL, TAG_KEY_WIDTH, 0 };
     TEST_ASSERT_OK(TagRegistryIntern(scratch, &widest, &id), "a 255-byte key is a tag");
-    size_t      room = TAGFS_REGISTRY_DATA_SIZE - TAGFS_REGISTRY_RECORD_HEAD - 1;
+    size_t      room = TAG_KEY_VALUE_WIDTH - 1;
     TagSpelling full = { "w", s_text, 1, room };
     memset(s_text, 'v', room + 1);
-    TEST_ASSERT_OK(TagRegistryIntern(scratch, &full, &id), "a value to the end of the block is one");
+    TEST_ASSERT_OK(TagRegistryIntern(scratch, &full, &id), "a value to the tag's full width is one");
     full.value_len = room + 1;
     TEST_ASSERT_EQ(TagRegistryIntern(scratch, &full, &id), ERR_TAGFS_TAG_TOO_LONG,
                    "and a byte more is refused");
@@ -212,7 +212,7 @@ static TestResult TestStandFullRegistryRefusesLoudly(void)
     TEST_ASSERT(scratch != NULL, "memory for a registry of the test's own");
     TEST_ASSERT_EQ(tag_registry_init(scratch), 0, "a registry of the test's own is built");
     built = true;
-    scratch->next_id = scratch->id_most + 1u;
+    scratch->next_id = TAGFS_MAX_TAG_ID + 1u;
 
     TagSpelling tag = TagSpellingOfKey("stand_full");
     error_t     rc  = TagRegistryIntern(scratch, &tag, &id);

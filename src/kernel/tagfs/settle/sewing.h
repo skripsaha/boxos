@@ -5,8 +5,7 @@
 #include "../mount/ribbon.h"
 
 /*
- * The Settle cycle of a format-v2 volume: a stitch on its ribbon a cycle
- * (spec_v2 §2.7, §3.2).
+ * The Settle cycle: a stitch on the book's ribbon a cycle (spec_v2 §2.7, §3.2).
  *
  *   sewing.c    the cycle's steps — TAKE, BUILD, FIRST_FLUSH, STITCH,
  *               LAST_FLUSH, DONE — and the stitch they lay: a StitchHead
@@ -22,9 +21,8 @@
  *               room for a whole Tally in two copies, by the mirror's upper
  *               bound of what a Tally costs (§16.2 п.6)
  *
- * Format v1's cycle is settle.c's and stays what it was; settle.c fixes the
- * format of a cycle as it begins and runs this one's steps through
- * StitchRunStep. Everything the stitch carries is read back by the mount's
+ * settle.c begins a cycle and runs its steps through StitchRunStep.
+ * Everything the stitch carries is read back by the mount's
  * reader (ribbon.h) and by volume-read's (stitch.py, bookmount.py): one codec,
  * volume_ribbon.h.
  *

@@ -15,8 +15,8 @@
  * an Ink notes the digests of the blocks a write put in as it puts the record
  * in the mirror (GlossPut, under the state lock, beside the record), and the
  * stitch that names those blocks reads them back (GlossCopy) — a read of a
- * block of format v2 is held to the Gloss first and to the Tally's DIGESTS
- * only for a block the Gloss does not name (integrity.c, IntegrityVerifyBook).
+ * block is held to the Gloss first and to the Tally's DIGESTS only for a
+ * block the Gloss does not name (integrity.c, IntegrityVerify).
  * A later digest of a block stands over an earlier one's; a block given back
  * to the allocator from Fallow takes its digest out with it (GlossForget), so
  * its next owner is held to its own.
