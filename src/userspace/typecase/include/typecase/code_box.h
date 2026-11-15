@@ -5,7 +5,9 @@
  * character's code cut out of it in small hexadecimal digits — four for a
  * character of the Basic Multilingual Plane, six beyond it — so that which
  * one is missing can be read off the screen. Where the digits do not fit
- * the cell, the cell is only filled. */
+ * the cell, it is an empty box instead — a light line a pixel in from the
+ * cell's edges, so missing characters side by side stay apart rather than
+ * run together into a bar; a cell too small for even that is filled. */
 
 #include "typecase/glyph_image.h"
 #include "typecase/size.h"

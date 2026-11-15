@@ -404,14 +404,25 @@ void CheckSources(Tally &Count, const std::vector<std::uint8_t> &Bytes)
     Count.Check(Box.Width == 8 && Box.Height == 16 && ReadCode(Box, 4, 2, 1) == "4E00",
                 "U+4E00 in a cell of 8 by 16: its code reads back off the picture, 4E00");
     const auto Far = typecase::DrawCodeBox(U'\U0001F600', Small);
-    const auto Filled  = [](const typecase::GlyphImage &I) {
-        return std::all_of(I.Coverage.begin(), I.Coverage.end(), [](std::uint8_t V) { return V == 255; });
+    /* An empty box a pixel in from the cell's edges, a line of one pixel at
+     * these widths: inked on it, nowhere else. */
+    const auto Hollow = [](const typecase::GlyphImage &I) {
+        bool Holds = true;
+        for (std::int32_t Y = 0; Y < I.Height; Y++)
+            for (std::int32_t X = 0; X < I.Width; X++) {
+                const bool On = X >= 1 && X <= I.Width - 2 && Y >= 1 && Y <= I.Height - 2 &&
+                                (X == 1 || X == I.Width - 2 || Y == 1 || Y == I.Height - 2);
+                Holds = Holds && I.Coverage[static_cast<std::size_t>(Y * I.Width + X)] == (On ? 255 : 0);
+            }
+        return Holds;
     };
     const auto Natural = typecase::DrawCodeBox(U'\U0001F600', typecase::Size{0, 8, 18, 14});
     const auto Roomy   = typecase::DrawCodeBox(U'\U0001F600', typecase::Size{0, 10, 20, 15});
-    Count.Check(Filled(Far) && Filled(Natural) && ReadCode(Roomy, 6, 2, 1) == "01F600",
-                "U+1F600: six digits fit neither 8 by 16 nor 8 by 18 with ink round them, the cell is filled; in 10 "
-                "by 20 they read back, 01F600");
+    const auto Tiny    = typecase::DrawCodeBox(U'\U0001F600', typecase::Size{0, 2, 4, 3});
+    Count.Check(Hollow(Far) && Hollow(Natural) && ReadCode(Roomy, 6, 2, 1) == "01F600" &&
+                    std::all_of(Tiny.Coverage.begin(), Tiny.Coverage.end(), [](std::uint8_t V) { return V == 255; }),
+                "U+1F600: six digits fit neither 8 by 16 nor 8 by 18 with ink round them, so the cell is an empty box "
+                "a pixel in from its edges; in 10 by 20 they read back, 01F600; in 2 by 4 the cell is filled");
     Count.Check(ReadCode(typecase::DrawCodeBox(U'ꯍ', Large), 4, 2, 2) == "ABCD",
                 "in a cell of 16 by 32 the digits are twice the size and read back, ABCD");
 

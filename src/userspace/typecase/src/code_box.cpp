@@ -24,6 +24,21 @@ struct Layout {
     std::int32_t Rows;
 };
 
+/* The empty box: the cell's coverage cleared, and a line as thick as a
+ * frame's light one drawn a pixel in from every edge. */
+void Hollow(GlyphImage &Image)
+{
+    const std::int32_t W = Image.Width, H = Image.Height;
+    if (W < 3 || H < 3) return;
+    const std::int32_t Line = std::max(1, (W + 5) / 10);
+    for (std::int32_t Y = 0; Y < H; Y++)
+        for (std::int32_t X = 0; X < W; X++) {
+            const bool Inside = X >= 1 && X < W - 1 && Y >= 1 && Y < H - 1;
+            const bool Edge   = X < 1 + Line || X >= W - 1 - Line || Y < 1 + Line || Y >= H - 1 - Line;
+            Image.Coverage[static_cast<std::size_t>(Y * W + X)] = Inside && Edge ? 255 : 0;
+        }
+}
+
 }  // namespace
 
 GlyphImage DrawCodeBox(char32_t Character, const Size &At)
@@ -54,7 +69,10 @@ GlyphImage DrawCodeBox(char32_t Character, const Size &At)
             }
         }
     }
-    if (Times == 0) return Image;
+    if (Times == 0) {
+        Hollow(Image);
+        return Image;
+    }
 
     const std::int32_t Left = (Image.Width - (Chosen.Columns * 4 * Times - Times)) / 2;
     const std::int32_t Top  = (Image.Height - (Chosen.Rows * 6 * Times - Times)) / 2;
