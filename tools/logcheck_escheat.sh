@@ -4,9 +4,9 @@
 # ---------------------------------------------------------------------------
 # book_escheat PLANT [KEPT [written]]
 #
-# Escheat — the act that lets go what a format-v2 book can never give back
-# (spec_v2 §16.5 п.20). The landing PLANT (B4: a FILES leaf rotten in both
-# copies, its files locked and their blocks held; B6c: and the first DIGESTS
+# Escheat — the act that lets go what a book can never give back. The
+# landing PLANT (B4: a FILES leaf rotten in both copies, its files locked and
+# their blocks held; B6c: and the first DIGESTS
 # leaf rotten too; B4g: B4 and a file locked beside it for its Parcels, which
 # the act does not let go — KEPT 1) is planted in a fresh image. In the guest `quilltest
 # escheat refused` takes the system tag off itself and asks: a cabin wearing

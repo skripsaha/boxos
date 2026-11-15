@@ -64,7 +64,7 @@ def Judge(case, census):
 
 
 def FrameDeed(deed, frame, boot, role, frame_bytes=ondisk.VOLUME_FRAME.size):
-    """A Deed of eight sectors as FrameOnlyDeed writes one (create_tagfs_v2.c):
+    """A Deed of eight sectors as FrameOnlyDeed writes one (create_tagfs_book.c):
     GEOMETRY · FRAME · BORN · BOOT · PACKED, the identity and the extent of
     `deed`, sealed. `frame_bytes` past 24 is a FRAME a kernel that knows more
     wrote."""

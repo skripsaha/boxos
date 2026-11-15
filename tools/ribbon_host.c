@@ -3,7 +3,7 @@
  * how long each stitch it lays is, held on the host with the kernel's own
  * rules in volume_ribbon.h (`make ribbon-host`): seconds, no machine.
  *
- * spec_v2 §1.5, §16.2 п.11, §16.6 п.2. A writer never writes an atom of the
+ * A writer never writes an atom of the
  * medium a settled sector lies in: past an end off the medium's atom it goes
  * on only at the start of a next_quire laid on that atom, and nowhere — the
  * volume under glass — with none named; never in an atom smaller than the

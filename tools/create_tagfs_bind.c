@@ -1,15 +1,15 @@
 /*
- * create_tagfs_bind.c — format v2's book bound: the first Tally of a volume in
+ * create_tagfs_bind.c — the book bound: the first Tally of a volume in
  * both its Tally-Quires, slot 0 of its Spine naming it, and the ribbon's two
  * Quires blank for the first stitch a kernel will sew.
  *
  * ‼ THE SAME BINDER AS volume-read's, SAID AGAIN IN C. tools/volumeread/
- * binder.py lays a Tally by one rule (spec_v2 §16.1 п.7, §16.2 п.24, §16.3
- * п.5), and so does this, step for step — Pack, then the layers bottom up,
- * then the grains they take — so that the same files, uuid and BORN come out
- * the same bytes from either. That is what lets the host bind a mkfs volume's
- * Tally again where it lies and hold it byte for byte (binder.Circle), and a
- * kernel's whole Tally be held to the Python one (§16.1 п.7).
+ * binder.py lays a Tally by one rule, and so does this, step for step —
+ * Pack, then the layers bottom up, then the grains they take — so that the
+ * same files, uuid and BORN come out the same bytes from either. That is what
+ * lets the host bind a mkfs volume's Tally again where it lies and hold it
+ * byte for byte (binder.Circle), and a kernel's whole Tally be held to the
+ * Python one.
  *
  * The rule, once:
  *   - a file's runs cut into Parcels as evenly as they go, none past

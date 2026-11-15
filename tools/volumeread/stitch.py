@@ -1,4 +1,4 @@
-"""stitch — the ribbon (spec_v2 §2.7, §2.8, §3.9, §4.5 п.5): the records a
+"""stitch — the ribbon: the records a
 Settle cycle sews, read and written; a unit of the ribbon, the three classes
 of it and the place it lies in. The ribbon walked from the slot a mount
 stands on — the direct scan, what lies past the end — is stitch_ribbon.py;

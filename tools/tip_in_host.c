@@ -1,6 +1,6 @@
 /*
  * tip_in_host — TipIn, what a Tally lays anew among the nodes of the one before
- * it (spec_v2 §4.1, §4.3 TALLY_NODES, §16.5 п.16), held on the host with the
+ * it, held on the host with the
  * kernel's own settle/tip_in.c, settle/dog_ear.c and file_map/ (`make
  * tip-in-host`; tools/dog_ear_host.h stands in for the rest of the kernel):
  * seconds, no machine.

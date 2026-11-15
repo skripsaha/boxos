@@ -1,4 +1,4 @@
-"""blklog_book — what a write of a machine on a format-v2 volume touched
+"""blklog_book — what a write of a machine on a volume touched
 (blklog.Classifier, for a book): every block of the volume is an owner's or
 free, and the record says which without a word from the machine.
 
@@ -123,7 +123,7 @@ class BookSectors:
             return kind, what, (kind, h["seq"])
         f = self.frame
         if f is None:
-            return "unowned", "volume block %u of a format-v2 volume whose FRAME is short" % vb, ("v2", vb)
+            return "unowned", "volume block %u of a volume whose FRAME is short" % vb, ("unowned", vb)
         k = vb - f["spine_block"]
         if f["spine_stride"] and k >= 0 and k % f["spine_stride"] == 0 and k // f["spine_stride"] < f["spine_slots"]:
             return "slot", "Spine slot %u, a sector that does not hold" % (k // f["spine_stride"]), ("slot", vb)
@@ -147,4 +147,4 @@ class BookSectors:
                 return "free", "data run block %u, free ground as of its epoch: data no stitch of the record " \
                     "names" % vb, ("free",)
         return "unowned", "data run block %u: no stitch of the record names it, nor any owner as of its " \
-            "epoch, nor free ground of a book that mounts and counts it" % vb, ("v2", "data")
+            "epoch, nor free ground of a book that mounts and counts it" % vb, ("unowned", "data")

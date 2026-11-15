@@ -1,11 +1,10 @@
 /*
- * create_tagfs_bind.h — format v2's binder: what create_tagfs_v2.c hands it
+ * create_tagfs_bind.h — the book's binder: what create_tagfs_book.c hands it
  * and what it lays out (create_tagfs_bind.c).
  *
  * tools/volumeread/binder.py is the same binder said again in Python, by code
  * of its own, and the two lay the same bytes on the same files — one value,
- * one spelling (spec_v2 §2.4), one rule of packing for every writer (§16.1
- * п.7, §16.2 п.24, §16.3 п.5).
+ * one spelling, one rule of packing for every writer.
  */
 
 #ifndef CREATE_TAGFS_BIND_H
@@ -14,7 +13,7 @@
 #include "create_tagfs.h"
 #include "volume_tally.h"
 
-/* A file as format v2 lays it: the cargo's account of it and its one run —
+/* A file as the book lays it: the cargo's account of it and its one run —
  * blocks counted in u64, for the ground has no width. An empty file has no
  * run: a header alone (§2.9). */
 typedef struct {

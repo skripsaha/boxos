@@ -5,9 +5,9 @@
 # ---------------------------------------------------------------------------
 # run_dedup
 #
-# Dedup on a book (spec_v2 §8.2, §16.7 пп.7–9): the image as built — format v2
-# — is booted, and in the guest `quilltest dedup dedup MIB` writes dedup-a.d of
-# MIB mebibytes and then dedup-b.d of its very bytes, each in one write and
+# Dedup on a book: the image as built is booted, and in the guest
+# `quilltest dedup dedup MIB` writes dedup-a.d of MIB mebibytes and then
+# dedup-b.d of its very bytes, each in one write and
 # anchored, no two blocks of either alike; `quilltest log dedup N` appends N
 # lines one at a time, each anchored — a logger, whose stitches the Tallies
 # TALLY_SLACK owes take in. The pass Glean runs after the Tally that takes the

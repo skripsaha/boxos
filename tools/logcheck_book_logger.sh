@@ -1,7 +1,7 @@
 # shellcheck shell=bash
-# logcheck_book_logger.sh — a logger of one line a second on a format-v2 book,
+# logcheck_book_logger.sh — a logger of one line a second on a book,
 # for tools/logcheck.sh (loggerhour, loggerhourmut): what the host writes per
-# cycle, how often cycles and Tallies come (spec_v2 §10.4 step 2.4, §12.1).
+# cycle, how often cycles and Tallies come.
 #
 # SOURCED, NEVER RUN — by logcheck.sh, after logcheck_book.sh, whose judge of a
 # book's boot (census_book_judge) it uses; the boots, the waits and the guest's
@@ -19,7 +19,7 @@
 # ---------------------------------------------------------------------------
 # loggerhour
 #
-# A plain image of format v2 is booted on the BIOS machine, its disk recorded
+# A plain image is booted on the BIOS machine, its disk recorded
 # (POWERCUT=on, blklogwrites) and in the guest `quilltest logger loggerh N E`
 # appends one line of 80 bytes a second for N seconds by the guest's clock,
 # with an anchor after every E-th line and a last one; then the machine stops

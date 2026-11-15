@@ -1,5 +1,5 @@
-"""selftest_book_errata — the mount's verdict (spec_v2 §3.9, §2.8 Undone,
-§16.5 п.4-7): a stitch whose data never landed, sewn without its first flush
+"""selftest_book_errata — the mount's verdict: a stitch whose data never
+landed, sewn without its first flush
 (C3) or on a medium that lied (C5, C6), and a record that does not fit its
 file (the rule of rot), are rolled back by a verdict the mount holds in
 memory — Errata, a sorted list of (seq of the stitch undone, why, fids) the

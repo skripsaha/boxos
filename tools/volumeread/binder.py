@@ -1,6 +1,6 @@
-"""binder — the Tally laid down (spec_v2 §2.5, §2.9, §9.3): the one way every
-writer of the book lays one (§16.1 п.7, §16.2 п.24; mkfs repeats it byte for
-byte): a file's runs cut into Parcels as evenly as they go and none past
+"""binder — the Tally laid down: the one way every writer of the book lays
+one (mkfs repeats it byte for byte): a file's runs cut into Parcels as evenly
+as they go and none past
 PARCEL_STRIPS_MOST Strips, exactly as file_map/tract.c CutPieces/CutLength
 cut them; a DIGESTS element a run of blocks inside one window of
 DIGEST_ITEM_MOST; leaves filled greedily in key order, a node of more than

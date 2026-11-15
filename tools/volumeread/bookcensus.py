@@ -1,4 +1,4 @@
-"""bookcensus — the roll call of a volume (spec_v2 §4.6): every owner of
+"""bookcensus — the roll call of a volume: every owner of
 every block, set against the book's mount (bookmount.py).
 
 A volume keeps no bitmap: which blocks are taken is derived from
@@ -199,7 +199,7 @@ def MirrorPrint(files):
 
 
 def KernelBook(g, m, held, free, fallow):
-    """What the kernel of this tree makes of a format-v2 volume, in the
+    """What the kernel of this tree makes of a volume, in the
     numbers its own lines carry (mount/book_mount.c): refused — and in which
     words: first a book on ground the kernel's own survey of the medium does
     not take, which is no volume it mounts at all (tagfs.c volume_take_ground,
@@ -536,7 +536,7 @@ class BookCensus:
 
     def HumanLines(self):
         g, m, st = self.g, self.mount, self.g.stand
-        out = ["ground sector %u (%s), volume %s — format v2" % (st.start, st.how, g.uuid.hex())]
+        out = ["ground sector %u (%s), volume %s" % (st.start, st.how, g.uuid.hex())]
         if st.stood_on == "head" and st.tail is not None:
             out.append("the deed at the head and its far copy agree — %u sectors, far copy at %u"
                        % (st.deed["sectors"], st.deed["tail_sector"]))

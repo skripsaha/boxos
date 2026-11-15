@@ -1,7 +1,7 @@
 # dog-ear-host — DogEar, the keys a book's trees changed since the Tally the
 # next one is laid against, held on the host with the kernel's own
 # settle/dog_ear.c and file_map/ (tools/dog_ear_host.h stands in for the rest
-# of the kernel; tools/dog_ear_host.c, spec_v2 §16.5 п.9): spans joined, taken
+# of the kernel; tools/dog_ear_host.c): spans joined, taken
 # by a Tally and given back, lost whole to a heap that refuses them, a
 # change of a file held to its two records Parcel by Parcel and block by
 # block, and ground let go with no record held to every window it lies in —

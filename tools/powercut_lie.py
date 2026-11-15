@@ -1,4 +1,4 @@
-"""powercut_lie — the medium that lied (spec_v2 §16.5 п.21): the media a device
+"""powercut_lie — the medium that lied: the media a device
 leaves that does not keep what it answered it had, planned from a run's record,
 judged by volume-read, booted twice, and counted apart from the power's cuts.
 

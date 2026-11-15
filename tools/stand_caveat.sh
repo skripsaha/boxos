@@ -90,7 +90,7 @@ caveat_row_lockrank() {
 }
 
 # caveat_row_book NAME — the rows of a book's own oracles in PowerCut
-# (powercut_judge_book.py, powercut_lie.py; spec_v2 §3.10, §16.5 п.21), each
+# (powercut_judge_book.py, powercut_lie.py), each
 # the defect it stands for: no step — on a book none is known — so each is a
 # FAIL that names what came back the day one shows. One row is a limit, not a
 # defect a step discharges: book:wiped:fixed, a smudge's wipe on a fixed medium
@@ -114,7 +114,7 @@ caveat_row_book() {
         book:lost)    echo "|a medium lost what a stitch named, the evidence on it, and the book says nothing (C5, C13, C17, C18)" ;;
         book:wiped)   echo "|a medium that spoils the page around a stitch in flight wipes a settled stitch whole with nothing past it, and the book cannot say what settled is lost (C18)" ;;
         book:wiped:fixed)
-                      echo "limit|on a fixed medium the ribbon keeps the medium's own atom, so a cut that spoils the page around the stitch in flight can wipe the settled stitches that page holds whole with nothing past them — the newest, and those before it on the page — and no reader can tell them from cycles that never wrote — the format's limit on such a medium, as ext4's and NTFS's on the same disks (spec_v2 §16.6 п.5, C18)" ;;
+                      echo "limit|on a fixed medium the ribbon keeps the medium's own atom, so a cut that spoils the page around the stitch in flight can wipe the settled stitches that page holds whole with nothing past them — the newest, and those before it on the page — and no reader can tell them from cycles that never wrote — the format's limit on such a medium, as ext4's and NTFS's on the same disks (C18)" ;;
         book:boots)   echo "|a book a medium lied about is mounted otherwise than predicted, or a session on it gives a block twice (C16, C26)" ;;
     esac
 }

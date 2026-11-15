@@ -1,6 +1,6 @@
 """bookread — the book's alphabet and the block digest on the host.
 
-src/include/volume_book.h says what a sector of a format-v2 volume's book is
+src/include/volume_book.h says what a sector of a volume's book is
 and how its numbers and pointers are written; src/include/volume_digest.h says
 how a block's digest is taken. This is the same said again in Python, by code
 of its own — not translated out of the headers at run time — so that a reader

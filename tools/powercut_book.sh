@@ -105,7 +105,7 @@ pc_chain_boot() {
 }
 
 # ---------------------------------------------------------------------------
-# A book's own scenarios (spec_v2 §3.10)
+# A book's own scenarios
 # ---------------------------------------------------------------------------
 
 # A logger's lines (apps/quilltest_book.c QuillBookLog, 48 bytes each): past
@@ -367,7 +367,7 @@ pc_dedup() {
 # in flight, whose stitch the throttle holds and the drain at the pull lets
 # through whole while a stitch is one command — so the medium holds no stitch
 # of the machine's own cut short, and the return's reading of its own
-# unfinished attempt (spec_v2 §16.5 п.12) is the stand's to ask
+# unfinished attempt is the stand's to ask
 # (stand_away_own_attempt, stand_away_cut_midway). The open book judges every
 # return (Perambulation: the book taken, every waiter answered); the logger
 # ends and the power goes.

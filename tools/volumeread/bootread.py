@@ -1,6 +1,6 @@
-"""bootread — which kernel the UEFI loader jumps into on a format-v2 volume, and
-why (spec_v2 §9.2, §16.7 пп.2–6): the slot the book stands on, by the rule
-every reader of a book keeps (§1.4); the kernel the Deed's BOOT names first,
+"""bootread — which kernel the UEFI loader jumps into on a volume, and why:
+the slot the book stands on, by the rule every reader of a book keeps; the
+kernel the Deed's BOOT names first,
 held to the digests the DIGESTS tree of that slot's Tally keeps of its blocks;
 when it is not attested, the kernels the book names by role, in turn
 (bootbook.py), each held to its first block's KERNEL, then to the book — the

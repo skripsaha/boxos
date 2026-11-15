@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """loggerhour — the oracles of logcheck's loggerhour (tools/logcheck_book_logger.sh):
-a logger of one line a second on a format-v2 book, judged off the record
-blklogwrites kept of the boot that ran it (spec_v2 §10.4 step 2.4, §12.1).
+a logger of one line a second on a book, judged off the record
+blklogwrites kept of the boot that ran it.
 
     loggerhour.py BASE RECORD IMG GUESTLOG
 

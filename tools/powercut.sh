@@ -52,7 +52,7 @@
 # Every image the run builds is a book, its record named by the book's units
 # and its cuts judged by the book's census. A book on a fixed medium (the Boardroom's seat, stand_seat_kind) holds a smudge's wipe of
 # the settled stitches a spoilt page holds with nothing past them as the
-# format's limit (spec_v2 §16.6 п.5), and fails it on a removable one.
+# format's limit, and fails it on a removable one.
 #
 # A scenario's verdicts are held under its verify row and the rows of a
 # book's own oracles alone (stand_caveat.sh); a census code no row names is a
@@ -461,7 +461,7 @@ pc_caveats() {
         smudge:wiped=book:wiped blot:boots=book:boots smudge:boots=book:boots
     # On a fixed medium a book's ribbon keeps the medium's own atom, and a
     # smudge that wipes the settled stitches of a spoilt page whole with
-    # nothing past them is the format's limit there (spec_v2 §16.6 п.5): held
+    # nothing past them is the format's limit there: held
     # by its own row, signed by the medium the recorded boot mounted (pc_sign).
     [ "${PC_MEDIUM:-}" != fixed ] || echo smudge:wiped:fixed=book:wiped:fixed
     [ "$1" != machineb ] || echo lines:b-l.log=book:lines
@@ -628,8 +628,8 @@ run_selftest() {
     python3 "$PC" selftest >"$PC_DIR/planner.txt" 2>&1
     chk $? "selftest: the planner's arithmetic — $(tail -1 "$PC_DIR/planner.txt")"
     grep -v '^  ok' "$PC_DIR/planner.txt" | grep -v '^selftest:' | sed 's/^/  /'
-    # A smudge's wipe is the format's limit on a fixed medium alone (spec_v2
-    # §16.6 п.5): the medium read off the kernel's own words of the volume's
+    # A smudge's wipe is the format's limit on a fixed medium alone: the
+    # medium read off the kernel's own words of the volume's
     # seat, as boardroom.c and tagfs.c print them (medium_says), and the
     # limit's row given only to a volume on one.
     medium_says "$PC_DIR"

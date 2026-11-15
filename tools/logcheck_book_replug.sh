@@ -1,7 +1,6 @@
 # logcheck_book_replug — replugwrite asked of a book: `logcheck.sh
 # replugwrite`, the stick leaving while a write is in flight and
-# writers wait for the file's Helm, on a format-v2 volume (spec_v2 §3.8,
-# §16.5 пп.10-12, C14, C20).
+# writers wait for the file's Helm, on a volume (C14, C20).
 #
 # SOURCED, NEVER RUN — by logcheck.sh, whose replugwrite rounds, answers,
 # chunks, census and medium judge it runs (replugwrite_round and the rest),
@@ -77,7 +76,7 @@ replugwritebook_up() {
 }
 
 run_replugwritebook() {
-    echo "== replugwrite, a book: the stick of a format-v2 volume leaves while a write is in flight and writers wait for its Helm, and comes back as it left, then changed =="
+    echo "== replugwrite, a book: the stick of a volume leaves while a write is in flight and writers wait for its Helm, and comes back as it left, then changed =="
     typer_selfcheck
     local r change name seed from rc last pid L="$SCRATCH/serial.replugwritebook.log"
     REPLUGWRITE_ABSENT=""

@@ -1,5 +1,5 @@
 """selftest_book_tip_in — the book's landings of a Tally laid in among the
-nodes of the one before it (spec_v2 §4.1, §16.5 п.16, TipIn): a second Tally
+nodes of the one before it (TipIn): a second Tally
 over the base that lays anew the one leaf of FILES a file renamed changed and
 the path above it — TAGS, USE and DIGESTS laid anew besides — and names every
 other leaf of FILES as it lies, by the pointer, the separator and the count

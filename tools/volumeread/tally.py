@@ -1,4 +1,4 @@
-"""tally — the Spine's slots and the Tally (spec_v2 §1.4, §2.5, §2.9): their
+"""tally — the Spine's slots and the Tally: their
 records and nodes, written and read, and the Tally a slot names read off a
 medium.
 

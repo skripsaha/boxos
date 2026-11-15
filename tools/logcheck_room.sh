@@ -1,4 +1,4 @@
-# logcheck_room — a book's roomback by the kernel's word (spec_v2 §16.6 п.8):
+# logcheck_room — a book's roomback by the kernel's word:
 # the GiB written the moment a GiB was deleted on a full book, judged by what
 # the kernel says it keeps and holds at each refusal (fullvolume), and the
 # judge turned by a write that waits on no Tally (roombackmut).

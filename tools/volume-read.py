@@ -130,7 +130,7 @@ def BookDeed(medium, start):
 def GroundRuns(runs):
     """The runs of ground a book's file lies in. Its record keeps a run a
     cycle on each run of ground — a run a settled stitch named is never grown
-    (spec_v2 §2.8: a run's birth is the stitch that put it in) — so its runs
+    (a run's birth is the stitch that put it in) — so its runs
     count the cycles that grew it as well; one that begins where the one
     before it ended goes on the same run of ground, a hole between them or
     none, as the kernel's stand counts them (stand_fresh_ground_tests.c
