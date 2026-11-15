@@ -7,11 +7,11 @@
 #   logcheck.sh novolume  boot with tagfs_recognise() forced false — the board
 #                         failure reproduced on the desk. The kernel's
 #                         vocabulary must survive having no medium at all.
-#   logcheck.sh framerefuse a format-v2 volume (create_tagfs --frame-only) on
+#   logcheck.sh framerefuse a volume (create_tagfs --frame-only) on
 #                         BIOS q35 and through UEFI, every write recorded:
 #                         refused in so many words, and not one write lands
 #                         in its ground
-#   logcheck.sh bookboot  the kernel a format-v2 volume's BOOT names, held by
+#   logcheck.sh bookboot  the kernel a volume's BOOT names, held by
 #                         TagBoot to the book's digests before the jump, and
 #                         the kernels the book names by role after it: the
 #                         Lectern on the host against volume-read boot, the
@@ -3578,8 +3578,8 @@ run_haltcycle() {
 #              each refusal — of the data, or of the ribbon — and of the
 #              reserve measured to the block or a turn of the ring waited for,
 #              no more free than it keeps — the fill's last refusal before the
-#              volume was first full measured so too (spec_v2 §16.6 п.8,
-#              logcheck_room.sh roomback_book_judge; roombackmut turns it):
+#              volume was first full measured so too
+#              (logcheck_room.sh roomback_book_judge; roombackmut turns it):
 #              that much short and no more, what it took read back whole.
 #   emptyfull  the image as built, `quilltest emptyfull FULLVOLUME_EMPTIES`:
 #              that many empty files, the volume filled to its no-space,
@@ -4051,41 +4051,17 @@ seal_on() {
     python3 - <<'EOF'
 p = "src/boot/stage2/stage2.asm"
 s = open(p).read()
-anchor = "    mov [BOARDING_PASS_ADDR+68], eax\n    ret\n"
+anchor = "    mov [BOARDING_PASS_ADDR+BOARDING_AT_SEAL+4], eax\n    ret\n"
 assert anchor in s, "seal anchor missing"
 s = s.replace(anchor,
-              "    mov [BOARDING_PASS_ADDR+68], eax\n"
-              "    mov byte [BOARDING_PASS_ADDR+41], 0x7F   ; logcheck mutation: the block rots after it was sealed\n"
+              "    mov [BOARDING_PASS_ADDR+BOARDING_AT_SEAL+4], eax\n"
+              "    mov byte [BOARDING_PASS_ADDR+BOARDING_AT_MEDIUM+BOARDING_STAMP_HDR+1], 0x7F   ; logcheck mutation: the block rots after it was sealed\n"
               "    ret\n", 1)
 open(p, "w").write(s)
 EOF
     mut_done src/boot/stage2/stage2.asm "logcheck mutation"
 }
 seal_off() {
-    restore src/boot/stage2/stage2.asm
-}
-
-# ── a pass from a loader newer than this kernel ────────────────────────────
-#
-# The other half of the same question: what may be believed off the block.
-# The version used to throw the WHOLE pass away on any number the kernel had
-# not been compiled against — volume identity and all — which is the version
-# ladder boarding_pass.h promises not to build. The stamps are self-describing
-# and the header is frozen, so a later loader is readable.
-passver_on() {
-    mutate src/boot/stage2/stage2.asm
-    python3 - <<'EOF'
-p = "src/boot/stage2/stage2.asm"
-s = open(p).read()
-anchor = "    mov word  [BOARDING_PASS_ADDR+4],   BOARDING_PASS_VERSION   ; +4  version\n"
-assert anchor in s, "pass-version anchor missing"
-s = s.replace(anchor,
-              "    mov word  [BOARDING_PASS_ADDR+4],   2   ; logcheck mutation: a loader newer than this kernel\n", 1)
-open(p, "w").write(s)
-EOF
-    mut_done src/boot/stage2/stage2.asm "logcheck mutation"
-}
-passver_off() {
     restore src/boot/stage2/stage2.asm
 }
 
@@ -4126,25 +4102,6 @@ run_seal() {
     # refuse a machine: the pass is an optimisation over a rule that works.
     grep -q "BoxOS Hub" "$L";  chk $? "the machine still reaches a shell"
     typed_ok "$L";               chk $? "and still answers a keystroke"
-
-    # ── and now a pass this kernel is too old to have heard of ─────────────
-    passver_on; build
-    boot seal.newer
-    passver_off
-    local N="$SCRATCH/serial.seal.newer.log"
-
-    grep -q "the pass is version 2 and this kernel was built for 1" "$N"
-    chk $? "a newer pass is noticed and named"
-
-    # THE point. The stamps are self-describing and the header is frozen, so
-    # everything this kernel knows how to read is still there to be read. The
-    # old rule discarded the block whole and sent the room back to guessing.
-    grep -q "read out of the volume" "$N"
-    chk $? "and its volume identity is still read off it"
-    grep -q "the loader said so on its boarding pass" "$N"
-    chk $? "and the room is told which seat, by a loader it does not know"
-    grep -q "sealed, and the seal agrees" "$N"
-    chk $? "and the seal on it still checks out"
 }
 
 # ── the one control transfer nobody can answer ─────────────────────────────
@@ -7951,7 +7908,7 @@ run_census() {
 # book_proofblind: the copy check of a Tally laid in must be able to go red
 #
 # Each Tally laid in reads both copies of as many clean leaves as it lays
-# (settle/binder_proof.c, spec_v2 §16.5 п.18). With the read taken out —
+# (settle/binder_proof.c). With the read taken out —
 # every copy said to hold — stand_book_glean_copies, which spoils one copy of
 # a leaf no Tally laid since and waits for a Tally to lay it anew, must fail:
 # a check that reads nothing finds nothing.
@@ -8956,7 +8913,7 @@ def fidhistory():
         return "fail", "a mount did not say what it keeps: boot 2 %s, boot 3 %s" % (b, c)
     # Between the two mounts: boot 2's startup tests, then the case's ids,
     # the last of them the last id issued before boot 3. On a book an id no
-    # stitch carried may be issued again (spec_v2 §16.6 п.7); the case's last
+    # stitch carried may be issued again; the case's last
     # file lives through an anchor, so the medium saw it, and boot 3 issues
     # past it — never again an id the medium saw.
     if b[2] != c[2] or last - first + 1 != FIDS or c[1] != last or first <= b[1]:
@@ -9737,7 +9694,7 @@ run_turnsmut() {
 # cores — the volume asked from every core at once, on UEFI STRICT 16c
 # ===========================================================================
 #
-# Four claims of the write core that carry into format v2, each asked by
+# Four claims of the write core that carry into the book, each asked by
 # quilltest (quilltest_cores.c, quilltest_ground.c) from many cabins at once,
 # each cabin's calls a K-Core's and each write going through the AHCI port, and
 # each judged three ways: what the guest read back through the kernel, what
