@@ -1,6 +1,6 @@
 """bootbook — the kernels a format-v2 volume's book names by role, as the UEFI
 loader finds them once the kernel its Deed names is not attested (spec_v2
-§16.7 пп.3, 5; §9.2 п.2): the role of a file is bits 5 and 6 of its flags
+§16.7 пп.3, 5; §9.2 п.2): the role of a file is bits 2 and 3 of its flags
 (ondisk.FILE_ROLE_*) — kernel, boot or system, never a tag, a file's tags being
 its user's; every file of FILES kept in one; the stitches past the slot's `at`,
 sewn on by rules (а)/(б)/(б′)/(в) (stitch_ribbon.Ribbon, its direct scan left

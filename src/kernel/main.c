@@ -228,11 +228,11 @@ void kernel_main(void)
     boot_info_t *bi = boot_info_get();
     if (!boot_info_valid(bi))
     {
-        panic("Boot info invalid! magic=0x%x version=%u\n", bi->magic, bi->version);
+        panic("Boot info invalid! magic=0x%x method=%u\n", bi->magic, bi->boot_method);
     }
-    kprintf("[BOOT] Boot info v%u OK (drive=0x%x, kernel 0x%x-0x%x, pt=0x%x, stack=0x%x)\n",
-            bi->version, bi->boot_drive, bi->kernel_start, bi->kernel_end,
-            bi->page_table_base, bi->stack_base);
+    kprintf("[BOOT] Boot info OK, %s (drive=0x%x, kernel 0x%x-0x%x, pt=0x%x, stack=0x%x)\n",
+            bi->boot_method == BOOT_METHOD_UEFI ? "UEFI" : "BIOS", bi->boot_drive,
+            bi->kernel_start, bi->kernel_end, bi->page_table_base, bi->stack_base);
 
     debug_printf("[INIT] E820 Memory Map...\n");
     e820_entry_t *e820_map = (e820_entry_t *)(uintptr_t)bi->e820_map_addr;
@@ -265,8 +265,8 @@ void kernel_main(void)
     bi = boot_info_get();
 
     /* The UEFI loader's framebuffer becomes the glass. After vmm_init(), so
-     * the kernel can map it. */
-    if (bi->version >= BOOT_INFO_VERSION2 && bi->fb_addr)
+     * the kernel can map it. A BIOS boot leaves fb_addr zero. */
+    if (bi->fb_addr)
         ScreenAdoptFramebuffer(bi->fb_addr, bi->fb_width, bi->fb_height,
                                bi->fb_stride, bi->fb_format);
 

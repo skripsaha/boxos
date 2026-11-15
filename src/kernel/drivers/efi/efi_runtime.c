@@ -2,7 +2,7 @@
  * BoxOS — EFI Runtime Services driver (kernel side).
  *
  * Responsibilities (see efi.h for the public surface):
- *   1. Parse the EFI memory map preserved in boot_info v3/v4 (EfiACPIMemoryNVS
+ *   1. Parse the EFI memory map preserved in boot_info (EfiACPIMemoryNVS
  *      region, kept alive across ExitBootServices).
  *   2. Map every EFI_MEMORY_RUNTIME descriptor at EFI_RT_VA_BASE +
  *      physical_start, and identically at its physical address, since
@@ -996,15 +996,12 @@ bool efi_runtime_init(void)
     if (g_rt_available) return true;   /* idempotent */
 
     boot_info_t *bi = boot_info_get();
-    if (!bi || !boot_info_valid(bi) || !boot_info_has_efi_rt(bi)) {
-        debug_printf("[EFI] boot_info lacks EFI RT handoff (boot_method=%u version=%u); "
-                     "EFI runtime services unavailable\n",
-                     bi ? bi->boot_method : 0,
-                     bi ? bi->version    : 0);
+    if (!boot_info_valid(bi)) {
+        debug_printf("[EFI] boot_info is not a loader's; EFI runtime services unavailable\n");
         return false;
     }
 
-    if (bi->boot_method != 1) {
+    if (bi->boot_method != BOOT_METHOD_UEFI) {
         debug_printf("[EFI] BIOS boot — no EFI runtime services\n");
         return false;
     }
@@ -1917,7 +1914,7 @@ EfiConfigurationTable *efi_get_configuration_table(uint32_t *out_count)
     if (out_count) *out_count = 0;
 
     boot_info_t *bi = boot_info_get();
-    if (!bi || !boot_info_valid(bi) || bi->version != BOOT_INFO_VERSION4) {
+    if (!boot_info_valid(bi) || bi->boot_method != BOOT_METHOD_UEFI) {
         return NULL;
     }
     if (!bi->efi_cfg_table_phys || bi->efi_cfg_table_count == 0) {

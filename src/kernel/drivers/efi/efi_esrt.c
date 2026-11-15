@@ -2,7 +2,7 @@
  * BoxOS — EFI System Resource Table driver (UEFI 2.10 §23.4).
  *
  * Reads the ESRT copy that TagBoot staged in EfiACPIMemoryNVS pre-EBS
- * (boot_info v4 fields efi_esrt_copy_phys + efi_esrt_copy_size).
+ * (boot_info fields efi_esrt_copy_phys + efi_esrt_copy_size).
  *
  * Why a copy: ESRT lives in EfiBootServicesData per UEFI 2.10 §23.4.3.
  * After ExitBootServices that memory type is reclaimable by the OS PMM;
@@ -83,7 +83,7 @@ bool efi_esrt_init(void)
     if (g_esrt_ready) return true;
 
     boot_info_t *bi = boot_info_get();
-    if (!bi || !boot_info_valid(bi) || bi->version != BOOT_INFO_VERSION4) {
+    if (!boot_info_valid(bi) || bi->boot_method != BOOT_METHOD_UEFI) {
         return false;
     }
     if (bi->efi_esrt_copy_phys == 0 || bi->efi_esrt_copy_size == 0) {

@@ -78,12 +78,12 @@
  * a header that is not ACTIVE does not read (§16.3 п.7), and a RETIRED tag
  * carries no text (§6.4). The rest of their bits are carried as they are. */
 #define TALLY_FILE_ACTIVE    1u
-#define TALLY_FILE_UNDONE    16u     /* rolled back by a mount's verdict (§2.8) — the system's word, never a tag */
-#define TALLY_FILE_DELETED   128u    /* deleted, kept until a time its header names (TallyFileHead.keep_ns) — never a tag */
-#define TALLY_FILE_ROLE_MASK    96u  /* bits 5-6: what the system keeps the file as — never a tag (tagfs_constants.h) */
-#define TALLY_FILE_ROLE_SYSTEM  32u
-#define TALLY_FILE_ROLE_BOOT    64u
-#define TALLY_FILE_ROLE_KERNEL  96u  /* the loader's first choice; then boot, then system */
+#define TALLY_FILE_UNDONE    2u      /* rolled back by a mount's verdict (§2.8) — the system's word, never a tag */
+#define TALLY_FILE_ROLE_MASK    12u  /* bits 2-3: what the system keeps the file as — never a tag (tagfs_constants.h) */
+#define TALLY_FILE_ROLE_SYSTEM  4u
+#define TALLY_FILE_ROLE_BOOT    8u
+#define TALLY_FILE_ROLE_KERNEL  12u  /* the loader's first choice; then boot, then system */
+#define TALLY_FILE_DELETED   16u     /* deleted, kept until a time its header names (TallyFileHead.keep_ns) — never a tag */
 #define TALLY_TAG_HAS_VALUE  1u
 #define TALLY_TAG_RETIRED    2u
 
@@ -140,7 +140,7 @@ _Static_assert(TALLY_SHEET_PAYLOAD == VOLUME_BLOCK_SECTORS * BOOK_PAYLOAD_BYTES,
  *   (1, 0)  header: gen 1, flags ACTIVE, size 5000, created_ns
  *           1700000000000000000, modified 7 ns later, name "golden", tags 3, 5, 300
  *   (1, 1)  Parcel: DATA 1024 for 2 blocks, born at 1
- *   (2, 0)  header: gen 9, flags ACTIVE | bit 2 (5), a bit no kernel sets, size 0, created_ns 1,
+ *   (2, 0)  header: gen 9, flags ACTIVE | bit 5 (33), a bit no kernel sets, size 0, created_ns 1,
  *           modified_ns 0, name "", no tags
  *   (3, 0)  header: gen 1, flags ACTIVE, size 9000, created_ns 2, modified_ns 2,
  *           name "three", tag 0
@@ -155,7 +155,7 @@ _Static_assert(TALLY_SHEET_PAYLOAD == VOLUME_BLOCK_SECTORS * BOOK_PAYLOAD_BYTES,
  * 2600, Quire 2560 for 256, next 2816 for 256}; SpineCounts {next_fid 71,
  * next_tag 52, next_bookmark 1}; SpineFlags MEDIUM_LIED.
  */
-#define TALLY_GOLDEN_NODE_CRC  0x2DB73240u
+#define TALLY_GOLDEN_NODE_CRC  0xC9CF331Eu
 #define TALLY_GOLDEN_SLOT_CRC  0x364D3494u
 
 /* ------------------------------------------------------------------------- */

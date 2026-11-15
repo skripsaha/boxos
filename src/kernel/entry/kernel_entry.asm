@@ -20,11 +20,13 @@ extern _kernel_phys_end
 KERNEL_VMA_OFFSET equ 0xFFFFFFFF80000000
 
 _start:
+    ; The header both loaders read before the jump (stage2.asm, tagboot.c,
+    ; tagboot_succession.c, and volume-read's bootread.py on the host): the
+    ; magic at +2, and at +8 where the kernel ends in memory, BSS included. No
+    ; version — a kernel is known by its magic.
     jmp short .past_header          ; 2 bytes — skip header
     db 'KERNEL'                     ; 6 bytes — magic identifier
-    dd 1                            ; 4 bytes — header version
     dd _kernel_phys_end             ; 4 bytes — true kernel PHYSICAL end (includes BSS)
-    times 16 db 0                   ; 16 bytes — reserved
 .past_header:
     ; ---- Interrupts are OFF from this instruction, whoever we came from ----
     ;
@@ -62,10 +64,11 @@ _start:
     mov gs, ax
 
     ; Read stack address from boot_info structure (identity address, boot tables active)
-    ; stack_base is at offset +32. BOOT_INFO_ADDR comes from the build, which
-    ; is the only place it is written down; it used to be spelled here as a
-    ; bare 0x9000, and moving the block would have left this line reading the
-    ; kernel's stack pointer out of whatever was at the old address.
+    ; stack_base is at offset +32, which boot_info.h asserts. BOOT_INFO_ADDR
+    ; comes from the build, which is the only place it is written down; it
+    ; used to be spelled here as a bare 0x9000, and moving the block would
+    ; have left this line reading the kernel's stack pointer out of whatever
+    ; was at the old address.
 %ifndef BOOT_INFO_ADDR
   %error "BOOT_INFO_ADDR must come from the build (-DBOOT_INFO_ADDR=...)"
 %endif

@@ -82,8 +82,8 @@ DEED_SECTORS = 8                        # deed_pen.h:62 DEED_PEN_SECTORS
 DEED_ROLE_HEAD, DEED_ROLE_TAIL = 1, 2   # volume_deed.h:106-107
 DEED_CRC_AT = 12                        # volume_deed.h:146 VolumeDeed.crc32
 STAMP_GEOMETRY = 1                      # volume_deed.h VOLUME_STAMP_GEOMETRY
-STAMP_BORN, STAMP_BOOT, STAMP_PACKED = 3, 4, 5  # volume_deed.h VOLUME_STAMP_BORN, _BOOT, _PACKED
-STAMP_FRAME = 6                         # volume_deed.h VOLUME_STAMP_FRAME
+STAMP_BORN, STAMP_BOOT, STAMP_PACKED = 2, 3, 4  # volume_deed.h VOLUME_STAMP_BORN, _BOOT, _PACKED
+STAMP_FRAME = 5                         # volume_deed.h VOLUME_STAMP_FRAME
 STAMP_HEADER = 4                        # volume_deed.h:161-164 VolumeStamp
 
 VOLUME_DEED = Fields("<8sHHI16sQQI",    # volume_deed.h:142-151
@@ -104,14 +104,14 @@ FRAME_SPINE_SLOTS = 3                   # volume_deed.h:338 VOLUME_FRAME_SPINE_S
 # A file's flags, as its Born, its Labeled and the Tally's FILES carry them
 # ---------------------------------------------------------------------------
 
-FILE_ACTIVE = 1                         # tagfs_constants.h TAGFS_FILE_ACTIVE; bits 1-3 are named by no kernel
-FILE_LAID_BIT = 1 << 2                  # a header flag no kernel names, kept as laid (book_tests.c BOOK_TEST_LAID_BIT)
-FILE_UNDONE = 1 << 4                    # tagfs_constants.h TAGFS_FILE_UNDONE: rolled back by a mount's verdict
-FILE_DELETED = 1 << 7                   # tagfs_constants.h TAGFS_FILE_DELETED: deleted, kept until the keep_ns of its header
-FILE_ROLE_MASK = 96                     # tagfs_constants.h TAGFS_FILE_ROLE_MASK: bits 5-6, what the system keeps the file as
-FILE_ROLE_SYSTEM = 1 << 5               # TAGFS_FILE_ROLE_SYSTEM
-FILE_ROLE_BOOT = 1 << 6                 # TAGFS_FILE_ROLE_BOOT
-FILE_ROLE_KERNEL = 96                   # TAGFS_FILE_ROLE_KERNEL: the loader's first choice, then boot, then system
+FILE_ACTIVE = 1                         # tagfs_constants.h TAGFS_FILE_ACTIVE
+FILE_UNDONE = 1 << 1                    # tagfs_constants.h TAGFS_FILE_UNDONE: rolled back by a mount's verdict
+FILE_ROLE_MASK = 12                     # tagfs_constants.h TAGFS_FILE_ROLE_MASK: bits 2-3, what the system keeps the file as
+FILE_ROLE_SYSTEM = 1 << 2               # TAGFS_FILE_ROLE_SYSTEM
+FILE_ROLE_BOOT = 1 << 3                 # TAGFS_FILE_ROLE_BOOT
+FILE_ROLE_KERNEL = 12                   # TAGFS_FILE_ROLE_KERNEL: the loader's first choice, then boot, then system
+FILE_DELETED = 1 << 4                   # tagfs_constants.h TAGFS_FILE_DELETED: deleted, kept until the keep_ns of its header
+FILE_LAID_BIT = 1 << 5                  # a header flag no kernel names, kept as laid (book_tests.c BOOK_TEST_LAID_BIT)
 
 # ---------------------------------------------------------------------------
 # Partition tables — the ground the kernel will stand on

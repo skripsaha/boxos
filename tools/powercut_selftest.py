@@ -772,12 +772,13 @@ def BookRowTests(pc, Want, Synthetic):
 
 
 def ChainTests(pc, Want, Synthetic, pjb):
+    from volumeread import ondisk
     shape = Synthetic([[1, (1, None, "stitch", "stitch seq 1")], [1, (1, None, "stitch", "stitch seq 2")], [1]])
     landed = [("NOT_LANDED", "note", "fid 1's data in stitch 2 did not land (block 9 of 1 checked does not "
                "match its digest): its record is rolled back by its splice — ERR_TAGFS_NOT_LANDED")]
     mount = "[TagFS] 9 data blocks, 5 free, 1 files\n[TagFS] the volume is MOUNTED — 1 file(s)\nBoxOS Hub\n"
 
-    def Chain(second=mount, flags=17):
+    def Chain(second=mount, flags=ondisk.FILE_ACTIVE | ondisk.FILE_UNDONE):
         j = Judged(pc, shape, lambda cid: Book([[1, "a", 3, "aa"]], landed if cid == "e1-s1" else []))
         boots = os.path.join(j.run.dir, "boots")
         os.makedirs(boots)
@@ -804,7 +805,7 @@ def ChainTests(pc, Want, Synthetic, pjb):
     got = Chain(second=mount.replace("5 free", "6 free"))
     Want(got[0] == "fail" and "second boot" in got[1],
          "the second mount saying other counts than the census of what the first left fails it (%s)" % (got,))
-    got = Chain(flags=1)
+    got = Chain(flags=ondisk.FILE_ACTIVE)
     Want(got[0] == "fail" and "verdict's mark" in got[1],
          "fid 1 rolled back without the verdict's mark in its record fails it (%s)" % (got,))
 

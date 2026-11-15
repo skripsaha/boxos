@@ -1048,7 +1048,7 @@ static int proc_spawn_raw(const char *tags)
  * what it itself holds (utility) but nothing above it (system) and nothing it
  * could never legitimately hold (god — only god grants god). We assert both the
  * "system" and "god" rejects: the reserved-seed fix now seeds the privilege
- * vocabulary at ids 0..11, so every well-known tag is representable (< 64) and
+ * vocabulary at ids 0..6, so every well-known tag is representable (< 64) and
  * its auth bit is live — "god" is no longer a silently-zero mask, so the gate
  * really evaluates it and the escalation it must stop is the real one. */
 static void test17(void)

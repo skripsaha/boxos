@@ -183,7 +183,7 @@ static bool pmm_for_each_firmware_range(
 {
     boot_info_t *bi = boot_info_get();
     if (!boot_info_valid(bi)) return false;
-    if (bi->boot_method != 1) return false;              /* BIOS */
+    if (bi->boot_method != BOOT_METHOD_UEFI) return false;
     if (!bi->efi_mmap_phys || !bi->efi_mmap_size ||
         bi->efi_mmap_desc_size < sizeof(EfiMemoryDescriptor)) return false;
 

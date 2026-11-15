@@ -66,12 +66,12 @@ STAGE2_SECTORS      = 16
 # Physical address of the boot_info handoff block. ONE number, four consumers:
 # src/boot/stage2/stage2.asm (BIOS loader writes it), src/boot/uefi/tagboot.c
 # (UEFI loader writes it), src/kernel/entry/kernel_entry.asm (reads the boot
-# stack out of it before any C runs) and src/include/boot_info.h (everything
-# else). It was spelled out separately in all four until 2026-08-23, when
-# moving it turned up the copy in kernel_entry.asm — which would have taken
-# the kernel's stack pointer from whatever happened to be at the old address.
-# The two headers _Static_assert against this value, so a drift is a build
-# error rather than a boot that gets as far as its first push.
+# stack out of it before any C runs) and src/include/boot_info.h (the kernel
+# and TagBoot both). It was spelled out separately in all four until
+# 2026-08-23, when moving it turned up the copy in kernel_entry.asm — which
+# would have taken the kernel's stack pointer from whatever happened to be at
+# the old address. The header _Static_asserts against this value, so a drift
+# is a build error rather than a boot that gets as far as its first push.
 BOOT_INFO_ADDR      = 0xA000
 # Where the loaders leave the Boarding Pass — what they say about the journey
 # that produced this kernel, as opposed to boot_info, which describes the
@@ -890,6 +890,7 @@ TAGBOOT_SRC    = src/boot/uefi/tagboot.c src/boot/uefi/tagboot_deed.c src/boot/u
                  src/boot/uefi/tagboot_succession.c
 TAGBOOT_HDRS   = src/boot/uefi/tagboot.h src/boot/uefi/uefi.h \
                  src/boot/uefi/tagboot_lectern.h src/boot/uefi/tagboot_lectern_book.h \
+                 src/include/boot_info.h src/include/boarding_pass.h \
                  src/include/volume_deed.h src/include/volume_book.h \
                  src/include/volume_tally.h src/include/volume_spine.h src/include/volume_ribbon.h \
                  src/include/volume_digest.h
@@ -1211,9 +1212,21 @@ $(STAGE1_BIN): $(STAGE1_SRC) | $(BUILDDIR)
 	    rm -f $@; exit 1; \
 	fi
 
-$(STAGE2_BIN): $(STAGE2_SRC) | $(BUILDDIR)
+# The Deed's stamp kinds, as stage2 reads them: written out of their one owner,
+# src/include/volume_deed.h, by the C preprocessor, because an assembler cannot
+# read a C header. stage2 used to spell BOOT's kind for itself with nothing
+# holding it to the header; renumbered in one place and not the other, a BIOS
+# boot would have walked past the kernel's stamp and said the volume names none.
+STAGE2_STAMPS_INC = $(BUILDDIR)/volume_stamps.inc
+
+$(STAGE2_STAMPS_INC): $(SRCDIR)/include/volume_deed.h | $(BUILDDIR)
+	@$(CC) -E -dM -x c $< | sed -n 's/^#define \(VOLUME_STAMP_[A-Z_]*\) \([0-9][0-9]*\)$$/\1 equ \2/p' > $@
+	@grep -q '^VOLUME_STAMP_BOOT equ [0-9]' $@ || \
+	    { echo "ERROR: $< gives stage2 no VOLUME_STAMP_BOOT it can read as a number."; rm -f $@; exit 1; }
+
+$(STAGE2_BIN): $(STAGE2_SRC) $(STAGE2_STAMPS_INC) | $(BUILDDIR)
 	@echo "Building Stage2..."
-	@$(ASM) $(ASMFLAGS) $(ASM_LAYOUT) $< -o $@
+	@$(ASM) $(ASMFLAGS) $(ASM_LAYOUT) -I$(BUILDDIR)/ $< -o $@
 	@sz=$$(stat -f%z $@ 2>/dev/null || stat -c%s $@); \
 	max=$$(( $(STAGE2_SECTORS) * 512 )); \
 	if [ "$$sz" -gt "$$max" ]; then \

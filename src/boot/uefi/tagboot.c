@@ -16,7 +16,7 @@
  *   6. Get UEFI memory map; convert to e820_entry_t format at 0x500
  *   7. Allocate 32 KB for page tables after kernel_end + guard page
  *   8. Build identity + higher-half page tables (2 MB pages)
- *   9. Fill boot_info_t (v2) at BOOT_INFO_ADDR
+ *   9. Fill boot_info_t at BOOT_INFO_ADDR
  *  10. ExitBootServices, then rebuild the E820 map from the map whose key
  *      the firmware accepted — the only one that describes this loader's
  *      own late allocations
@@ -33,6 +33,10 @@
  */
 
 #include "tagboot.h"
+/* The two blocks the kernel reads, by the structures it reads them by — the
+ * one definition of each, shared, not a copy of it. */
+#include "boot_info.h"
+#include "boarding_pass.h"
 
 /* =========================================================================
  * Boot constants — must match kernel contract
@@ -49,10 +53,6 @@ static __attribute__((noinline)) void PhysWrite16(uint64_t addr, uint16_t val)
     *p = val;
 }
 
-#define BOOT_INFO_MAGIC       0x42583031U   /* "BX01" */
-#define BOOT_INFO_VERSION_V4  4U   /* current TagBoot output: system_table +
-                                    * cfg_table + ESRT copy + EFI RT handoff */
-
 /* Defensive ceiling on EFI Configuration Table entry count. Real firmware
  * publishes 6-20 entries (ACPI 1.0, ACPI 2.0, SMBIOS 2.1/3.0, ESRT, MPS,
  * SAL, debug-image-info, RT-properties, etc.). A count larger than this
@@ -60,20 +60,9 @@ static __attribute__((noinline)) void PhysWrite16(uint64_t addr, uint16_t val)
  * loop over uncontrolled memory. */
 #define EFI_CFG_TABLE_MAX_ENTRIES  256U
 
-/* KERNEL_LOAD_ADDR is tagboot.h's; KERNEL_HEADER_VERSION — the header layout
- * bootloader and kernel agree on, bumped when src/kernel/entry/
- * kernel_entry.asm changes its shape, a mismatch refused — and
- * KERNEL_MAX_SIZE are the Lectern's (tagboot_lectern.h), which holds every
- * kernel to them before it is jumped into. */
-#define BOOT_INFO_ADDR        0xA000ULL
-
-/* Same block, same address, third file to say so. The build passes the value
- * it wrote into the image layout; disagreeing with it means the kernel would
- * read this structure from somewhere TagBoot never wrote. */
-#ifdef BOOT_INFO_ADDR_FROM_BUILD
-_Static_assert(BOOT_INFO_ADDR == BOOT_INFO_ADDR_FROM_BUILD,
-               "TagBoot writes boot_info somewhere the build does not expect");
-#endif
+/* KERNEL_LOAD_ADDR is tagboot.h's; KERNEL_MAX_SIZE is the Lectern's
+ * (tagboot_lectern.h), which holds every kernel to it before it is jumped
+ * into. */
 #define E820_COUNT_ADDR       0x500ULL
 #define E820_SIZE_ADDR        0x502ULL
 #define E820_MAP_ADDR         0x504ULL
@@ -124,55 +113,6 @@ _Static_assert(BOOT_INFO_ADDR == BOOT_INFO_ADDR_FROM_BUILD,
 #define E820_RESERVED  2U
 #define E820_ACPI_RECL 3U
 #define E820_ACPI_NVS  4U
-
-/* =========================================================================
- * boot_info_t v2 layout at BOOT_INFO_ADDR
- * Matches src/include/boot_info.h extended with v2 fields.
- * ========================================================================= */
-
-typedef struct __attribute__((packed)) {
-    /* v1 fields (40 bytes) */
-    uint32_t magic;           /* +0  BOOT_INFO_MAGIC */
-    uint32_t version;         /* +4  4 for v4 UEFI boot */
-    uint32_t e820_map_addr;   /* +8  physical address of e820 entries */
-    uint16_t e820_count;      /* +12 */
-    uint16_t reserved1;       /* +14 */
-    uint32_t kernel_start;    /* +16 */
-    uint32_t kernel_end;      /* +20 */
-    uint8_t  boot_drive;      /* +24 0xFF for UEFI */
-    uint8_t  reserved2;       /* +25 */
-    uint16_t reserved3;       /* +26 */
-    uint32_t page_table_base; /* +28 */
-    uint32_t stack_base;      /* +32 */
-    uint32_t total_size;      /* +36 140 for v4 */
-    /* v2 additions (+40) */
-    uint64_t fb_addr;         /* +40 GOP framebuffer physical address */
-    uint32_t fb_width;        /* +48 */
-    uint32_t fb_height;       /* +52 */
-    uint32_t fb_stride;       /* +56 bytes per row */
-    uint32_t fb_format;       /* +60 0=RGB, 1=BGR. Other layouts are refused
-                               * because the kernel backend writes uint32_t
-                               * pixels in exactly these two orders. */
-    uint8_t  boot_method;     /* +64 1=UEFI */
-    uint8_t  reserved_v2[3];  /* +65 */
-    uint64_t rsdp_addr;       /* +68 ACPI RSDP physical address (0 if not found) */
-    /* v3 additions — EFI runtime services handoff.
-     * Layout MUST mirror src/include/boot_info.h exactly. */
-    uint64_t efi_rt_services_phys; /* +76 EFI_RUNTIME_SERVICES* phys (0 if absent) */
-    uint64_t efi_mmap_phys;        /* +84 copy of EFI memory map (EfiACPIMemoryNVS) */
-    uint32_t efi_mmap_size;        /* +92 total bytes */
-    uint32_t efi_mmap_desc_size;   /* +96 bytes per descriptor */
-    uint32_t efi_mmap_desc_ver;    /* +100 descriptor version */
-    uint32_t efi_fw_revision;      /* +104 firmware revision */
-    /* v4 additions — EFI System Table + Configuration Table + ESRT copy. */
-    uint64_t efi_system_table_phys; /* +108 EFI_SYSTEM_TABLE* phys */
-    uint64_t efi_cfg_table_phys;    /* +116 EFI_CONFIGURATION_TABLE[] phys */
-    uint32_t efi_cfg_table_count;   /* +124 count */
-    uint64_t efi_esrt_copy_phys;    /* +128 NVS-preserved ESRT copy (0 if absent) */
-    uint32_t efi_esrt_copy_size;    /* +136 bytes (0 if absent) */
-} BootInfoV4;
-
-_Static_assert(sizeof(BootInfoV4) == 140, "BootInfoV4 must be 140 bytes");
 
 /* =========================================================================
  * e820_entry_t (matches kernel's e820.h)
@@ -1558,7 +1498,7 @@ static uint32_t EmitE820(const uint8_t *map, uint64_t map_size, uint64_t desc_si
  * EFI runtime handoff state
  *
  * Captured pre-ExitBootServices and forwarded to the kernel via
- * boot_info v4. The kernel uses this to invoke SetVirtualAddressMap
+ * boot_info. The kernel uses this to invoke SetVirtualAddressMap
  * (UEFI §8.4) and call runtime services like ResetSystem, plus walk
  * the surviving Configuration Table for SMBIOS / ESRT / RT properties.
  * ========================================================================= */
@@ -1699,7 +1639,7 @@ static uint64_t CopyEsrtToNvs(uint64_t esrt_phys, uint32_t esrt_size)
  *
  *   0x0000  E820 count (0x500), entry size (0x502), start of the map (0x504)
  *   0x1000  the tail of that map — 128 entries of 24 bytes end at 0x1104
- *   0xA000  boot_info v4 (140 bytes) and the boarding pass (512 at 0xA600)
+ *   0xA000  boot_info (132 bytes) and the boarding pass (512 at 0xA600)
  *
  * ‼ WHAT THIS DOES NOT DO IS free_pages FIRST — and neither does any other
  * AllocateAddress site in this file. There are three of them (the kernel image,
@@ -1824,7 +1764,7 @@ static EFI_STATUS BuildMemoryMap(MemMapResult *out)
  * event allocated memory after step 2). Free the scratch and retry.
  *
  * On success we forward the staged map pointer + sizes to the kernel via
- * boot_info v3 so the kernel can walk RUNTIME descriptors for
+ * boot_info so the kernel can walk RUNTIME descriptors for
  * SetVirtualAddressMap (UEFI 2.10 §8.4).
  *
  * 10 retries — spec only requires 1, but slow enterprise boards (HP Z,
@@ -2091,13 +2031,8 @@ static EFI_STATUS SetupPageTables(uint64_t kernel_phys_end)
 }
 
 /* =========================================================================
- * The Boarding Pass — what this loader tells the kernel about its own arrival
- *
- * Mirrors src/include/boarding_pass.h. Duplicated rather than included for the
- * same reason BootInfoV4 above is: this is a freestanding UEFI application
- * built against its own headers, and the agreement is enforced by the build
- * passing the address in and by the kernel's own static assertions on the
- * layout — not by hoping two copies of a comment stay in step.
+ * The Boarding Pass — what this loader tells the kernel about its own arrival,
+ * written by the structures the kernel reads it by (boarding_pass.h).
  *
  * The stamp that matters is the volume. A kernel in long mode cannot ask the
  * firmware which device it was booted from, so without this the Boardroom
@@ -2105,34 +2040,6 @@ static EFI_STATUS SetupPageTables(uint64_t kernel_phys_end)
  * machine carrying BoxOS on an internal disk with a flash drive in a socket.
  * This loader knows the answer: it has the volume's Deed in hand.
  * ========================================================================= */
-#define BOARDING_PASS_ADDR      0xA600ULL
-#define BOARDING_PASS_BYTES     512U
-#define BOARDING_PASS_MAGIC     0x53415042U   /* "BPAS" */
-#define BOARDING_PASS_VERSION   1U
-#define BOARDING_HDR_BYTES      16U
-#define BOARDING_STAMP_VOLUME   1U
-#define BOARDING_STAMP_MEDIUM   2U
-#define BOARDING_STAMP_LOADER   3U
-#define BOARDING_STAMP_SEAL     4U
-#define BOARDING_FIRMWARE_UEFI  1U
-
-#ifdef BOARDING_PASS_ADDR_FROM_BUILD
-_Static_assert(BOARDING_PASS_ADDR == BOARDING_PASS_ADDR_FROM_BUILD,
-               "TagBoot writes the boarding pass somewhere the build does not "
-               "expect");
-#endif
-
-typedef struct __attribute__((packed)) {
-    uint32_t magic;
-    uint16_t version;
-    uint16_t header_bytes;
-    uint16_t used_bytes;
-    uint16_t capacity;
-    uint16_t count;
-    uint16_t reserved;
-} BoardingPassHeaderV1;
-
-_Static_assert(sizeof(BoardingPassHeaderV1) == 16, "boarding pass header is 16 bytes");
 
 /* Append one stamp. The kind and the length go down first, then the payload,
  * then the write cursor moves to the next four-byte boundary — which is the
@@ -2156,29 +2063,25 @@ static void WriteBoardingPass(void)
     uint8_t *base = (uint8_t *)(uintptr_t)BOARDING_PASS_ADDR;
     MemZero(base, BOARDING_PASS_BYTES);
 
-    uint16_t at = BOARDING_HDR_BYTES;
+    uint16_t at = sizeof(BoardingPassHeader);
     uint16_t count = 0;
 
     /* The volume this kernel was read out of, straight out of the Deed
      * this loader verified on the way in. */
     at = BoardingStamp(base, at, BOARDING_STAMP_VOLUME,
-                       g_volume_uuid, 16);
+                       g_volume_uuid, sizeof(BoardingVolume));
     count++;
 
     /* How it was reached. UEFI has no BIOS drive number, and saying 0xFF is
      * saying so rather than leaving a zero that reads as drive zero. */
-    struct __attribute__((packed)) {
-        uint8_t firmware; uint8_t bios_drive; uint16_t reserved;
-    } medium = { BOARDING_FIRMWARE_UEFI, 0xFF, 0 };
+    BoardingMedium medium = { BOARDING_FIRMWARE_UEFI, 0xFF, 0 };
     at = BoardingStamp(base, at, BOARDING_STAMP_MEDIUM, &medium, sizeof(medium));
     count++;
 
     /* Who wrote it. On a board that boots through CSM one week and UEFI the
      * next, that is a real question with nothing else on the screen to answer
      * it. */
-    struct __attribute__((packed)) {
-        char name[12]; uint16_t major; uint16_t minor;
-    } loader = { { 'T','a','g','B','o','o','t',0,0,0,0,0 }, 1, 0 };
+    BoardingLoader loader = { { 'T','a','g','B','o','o','t',0,0,0,0,0 } };
     at = BoardingStamp(base, at, BOARDING_STAMP_LOADER, &loader, sizeof(loader));
     count++;
 
@@ -2190,40 +2093,38 @@ static void WriteBoardingPass(void)
      * part of what it covers. So: reserve the stamp, finish the header with
      * the seal counted in, then sum.
      */
-    uint32_t sum = 0;
+    BoardingSeal seal = { 0 };
     uint16_t seal_at = at;
-    at = BoardingStamp(base, at, BOARDING_STAMP_SEAL, &sum, sizeof(sum));
+    at = BoardingStamp(base, at, BOARDING_STAMP_SEAL, &seal, sizeof(seal));
     count++;
 
-    BoardingPassHeaderV1 hdr;
+    BoardingPassHeader hdr;
     hdr.magic        = BOARDING_PASS_MAGIC;
-    hdr.version      = BOARDING_PASS_VERSION;
-    hdr.header_bytes = BOARDING_HDR_BYTES;
+    hdr.header_bytes = sizeof(BoardingPassHeader);
     hdr.used_bytes   = at;
     hdr.capacity     = BOARDING_PASS_BYTES;
     hdr.count        = count;
-    hdr.reserved     = 0;
     MemCopy(base, &hdr, sizeof(hdr));
 
     /* Every byte ahead of the seal's payload: the header, the stamps, and the
      * seal's own kind/length pair. Nothing sums itself. */
-    uint32_t covered = (uint32_t)seal_at + 4U;   /* past its kind/length */
-    sum = Crc32(base, covered);
-    MemCopy(base + covered, &sum, sizeof(sum));
+    uint32_t covered = (uint32_t)seal_at + sizeof(BoardingStampHeader);   /* past its kind/length */
+    seal.crc32 = Crc32(base, covered);
+    MemCopy(base + covered, &seal, sizeof(seal));
 }
 
 /* =========================================================================
- * boot_info_t v2 population
+ * boot_info_t population
  * ========================================================================= */
 
 static void FillBootInfo(const FbInfo *fb, uint32_t e820_count,
                          uint64_t kernel_end_phys)
 {
-    BootInfoV4 *bi = (BootInfoV4 *)(uintptr_t)BOOT_INFO_ADDR;
-    MemZero(bi, sizeof(BootInfoV4));
+    boot_info_t *bi = (boot_info_t *)(uintptr_t)BOOT_INFO_ADDR;
+    MemZero(bi, sizeof(boot_info_t));
 
     bi->magic          = BOOT_INFO_MAGIC;
-    bi->version        = BOOT_INFO_VERSION_V4;
+    bi->boot_method    = BOOT_METHOD_UEFI;
     bi->e820_map_addr  = (uint32_t)E820_MAP_ADDR;
     bi->e820_count     = (uint16_t)e820_count;
     bi->reserved1      = 0;
@@ -2236,24 +2137,19 @@ static void FillBootInfo(const FbInfo *fb, uint32_t e820_count,
     bi->reserved3      = 0;
     bi->page_table_base = (uint32_t)g_pt_base;
     bi->stack_base     = (uint32_t)g_stack_base;
-    bi->total_size     = sizeof(BootInfoV4);
 
     bi->fb_addr        = fb->addr;
     bi->fb_width       = fb->width;
     bi->fb_height      = fb->height;
     bi->fb_stride      = fb->stride;
     bi->fb_format      = fb->format;
-    bi->boot_method    = 1;   /* UEFI */
-    bi->reserved_v2[0] = 0;
-    bi->reserved_v2[1] = 0;
-    bi->reserved_v2[2] = 0;
     bi->rsdp_addr      = FindAcpiRsdp();
 
-    /* v3 fields. g_efi_mmap_* are populated inside DoExitBootServices —
-     * FillBootInfo runs BEFORE EBS so we publish placeholders here and
-     * the EBS retry-loop updates them in-place via the same fixed
-     * BOOT_INFO_ADDR. After EBS returns we patch the final values in
-     * TagBootMain (see PostEbsPatchBootInfo). */
+    /* The EFI runtime handoff. g_efi_mmap_* are populated inside
+     * DoExitBootServices — FillBootInfo runs BEFORE EBS so we publish
+     * placeholders here and the EBS retry-loop updates them in-place via the
+     * same fixed BOOT_INFO_ADDR. After EBS returns we patch the final values
+     * in TagBootMain (see PostEbsPatchBootInfo). */
     bi->efi_rt_services_phys = g_efi_rt_services_phys;
     bi->efi_mmap_phys        = 0;   /* set by post-EBS patch */
     bi->efi_mmap_size        = 0;
@@ -2261,7 +2157,7 @@ static void FillBootInfo(const FbInfo *fb, uint32_t e820_count,
     bi->efi_mmap_desc_ver    = 0;
     bi->efi_fw_revision      = g_efi_fw_revision;
 
-    /* v4 fields. system_table + config_table are captured at TagBootMain
+    /* The system and configuration tables, captured at TagBootMain
      * entry — they survive EBS because both live in EfiRuntimeServicesData.
      * efi_esrt_copy_* are populated by the pre-EBS ESRT capture path; zero
      * if the firmware did not publish an ESRT. */
@@ -2277,7 +2173,7 @@ static void FillBootInfo(const FbInfo *fb, uint32_t e820_count,
  * No UEFI services are valid here — pure memory writes. */
 static void PostEbsPatchBootInfo(void)
 {
-    BootInfoV4 *bi = (BootInfoV4 *)(uintptr_t)BOOT_INFO_ADDR;
+    boot_info_t *bi = (boot_info_t *)(uintptr_t)BOOT_INFO_ADDR;
     bi->efi_mmap_phys      = g_efi_mmap_copy_phys;
     bi->efi_mmap_size      = g_efi_mmap_copy_size;
     bi->efi_mmap_desc_size = g_efi_mmap_desc_size;
@@ -2440,7 +2336,7 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     g_efi_cfg_table_count    = (uint32_t)cfg_count_raw;
 
     st->con_out->clear_screen(st->con_out);
-    Print("TagBoot v4 — BoxOS UEFI Bootloader\r\n");
+    Print("TagBoot — BoxOS UEFI Bootloader\r\n");
     Print("------------------------------------\r\n");
 
     /* Firmware vendor string is a CHAR16* in EfiRuntimeServicesData and
@@ -2501,28 +2397,13 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     if (stop) Panic(stop);
 
     /* Validate kernel header magic — 'KERNEL' at byte offset 2.
-     * Kernel header layout:
+     * Kernel header layout (kernel_entry.asm):
      *   +0  2 bytes  jmp short .past_header
      *   +2  6 bytes  "KERNEL"
-     *   +8  4 bytes  header version
-     *   +12 4 bytes  _kernel_phys_end  (physical end INCLUDING BSS)
+     *   +8  4 bytes  _kernel_phys_end  (physical end INCLUDING BSS)
      */
     if (!MemEqual((const void *)(uintptr_t)(KERNEL_LOAD_ADDR + 2), "KERNEL", 6)) {
         Panic("kernel header magic invalid — wrong binary at load address");
-    }
-    /* Header version: bootloader and kernel must agree on the layout below.
-     * If the kernel header version drifts past what we know how to parse,
-     * the offsets/fields might mean something different — refuse to boot
-     * an unrecognised kernel rather than parse it as the wrong shape. */
-    uint32_t hdr_version = 0;
-    MemCopy(&hdr_version, (const void *)(uintptr_t)(KERNEL_LOAD_ADDR + 8), 4);
-    if (hdr_version != KERNEL_HEADER_VERSION) {
-        Print("TagBoot: kernel header version mismatch — got ");
-        PrintDec(hdr_version);
-        Print(", expected ");
-        PrintDec(KERNEL_HEADER_VERSION);
-        Print("\r\n");
-        Panic("incompatible kernel header version");
     }
     Print("TagBoot: kernel header OK\r\n");
 
@@ -2531,7 +2412,7 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
      * before BSS end, kernel_entry.asm's "rep stosb" will overwrite them. */
     uint32_t header_phys_end = 0;
     MemCopy(&header_phys_end,
-            (const void *)(uintptr_t)(KERNEL_LOAD_ADDR + 12), 4);
+            (const void *)(uintptr_t)(KERNEL_LOAD_ADDR + 8), 4);
 
     uint64_t kernel_end_phys = KERNEL_LOAD_ADDR + loaded_bytes;
 
@@ -2657,11 +2538,11 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
         }
     }
 
-    /* ----- 9. Fill boot_info_t v4 (includes RSDP + ESRT — must be before EBS) ----- */
+    /* ----- 9. Fill boot_info_t (includes RSDP + ESRT — must be before EBS) ----- */
     FillBootInfo(&fb, mmap.e820_count, kernel_end_phys);
     WriteBoardingPass();
 
-    Print("TagBoot: boot_info at 0xA000 (v4, method=UEFI)\r\n");
+    Print("TagBoot: boot_info at 0xA000 (method=UEFI)\r\n");
 
     /* ----- 10. ExitBootServices -----
      *
@@ -2688,7 +2569,7 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     if (EFI_ERROR(status)) Panic("ExitBootServices failed after 10 attempts");
 
     /* From here: no UEFI services, no Print(). Pure bare metal.
-     * Patch boot_info v3 with the FINAL EFI memory map (the one whose
+     * Patch boot_info with the FINAL EFI memory map (the one whose
      * key was accepted by ExitBootServices). */
     PostEbsPatchBootInfo();
 

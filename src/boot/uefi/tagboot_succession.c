@@ -120,22 +120,18 @@ static void TailLaid(const LecternCandidate *c, uint8_t *block)
         if (c->tail[VOLUME_BLOCK_BYTES + i / 8u] & (1u << (i % 8u))) block[i] = c->tail[i];
 }
 
-/* The header the kernel opens with (kernel_entry.asm): "KERNEL" at byte 2 and
- * the version this loader reads at byte 8 — or why not, said. */
+/* The header the kernel opens with (kernel_entry.asm): "KERNEL" at byte 2 —
+ * or why not, said. */
 static int HeaderHeld(LecternChoice *s, const LecternCandidate *c, const uint8_t *first)
 {
     static const char magic[6] = { 'K', 'E', 'R', 'N', 'E', 'L' };
-    uint64_t          version  = TallyLe(first + 8, 4);
     for (uint32_t i = 0; i < sizeof(magic); i++) {
         if (first[2 + i] == (uint8_t)magic[i]) continue;
         Refused(s, c, " is no kernel: its first block does not begin with KERNEL", 0, (const char *)0, 0,
                 (const char *)0);
         return 0;
     }
-    if (version == KERNEL_HEADER_VERSION) return 1;
-    Refused(s, c, " is a kernel of header version ", version, ", and this loader reads version ",
-            KERNEL_HEADER_VERSION, "");
-    return 0;
+    return 1;
 }
 
 /* What may be loaded of the kernel, and its first block as it loads held to

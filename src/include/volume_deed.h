@@ -163,14 +163,16 @@ typedef struct __attribute__((packed)) {
     uint16_t bytes;
 } VolumeStamp;
 
-/* Kinds are permanent. A kind that is retired is never reused, so a new mkfs
- * and an old kernel can never disagree about what a stamp means. */
+/* Kinds are dense until the first release. From it on a kind that is retired
+ * is never reused, so a new mkfs and an old kernel can never disagree about
+ * what a stamp means. stage2 reads BOOT by the number written here: the build
+ * writes these lines out for it (Makefile, volume_stamps.inc), and an
+ * assembler that spelled the kind for itself would be a second owner of it. */
 #define VOLUME_STAMP_GEOMETRY  1    /* VolumeGeometry */
-                                    /* 2 is unassigned */
-#define VOLUME_STAMP_BORN      3    /* VolumeBorn     */
-#define VOLUME_STAMP_BOOT      4    /* VolumeBoot     */
-#define VOLUME_STAMP_PACKED    5    /* VolumePacked   */
-#define VOLUME_STAMP_FRAME     6    /* VolumeFrame — where the volume's book is */
+#define VOLUME_STAMP_BORN      2    /* VolumeBorn     */
+#define VOLUME_STAMP_BOOT      3    /* VolumeBoot     */
+#define VOLUME_STAMP_PACKED    4    /* VolumePacked   */
+#define VOLUME_STAMP_FRAME     5    /* VolumeFrame — where the volume's book is */
 
 /*
  * What the volume was laid out for — as opposed to what it is sitting on.

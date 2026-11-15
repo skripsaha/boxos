@@ -51,7 +51,7 @@ constexpr Color OldInk  = COLOR_CORAL;
 constexpr Color NewInk  = COLOR_LEAF;
 constexpr Color NameInk = COLOR_SLATE;
 
-#define RETAG_RESERVED(Key) Key,
+#define RETAG_RESERVED(Name, Key) Key,
 constexpr std::string_view Reserved[] = {TAGFS_RESERVED_KEYS(RETAG_RESERVED)};
 #undef RETAG_RESERVED
 

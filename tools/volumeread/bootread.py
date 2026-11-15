@@ -23,8 +23,6 @@ decides nothing until the last block, and a block the book cannot vouch for
 leaves the kernel not attested only when no block is found broken (§16.7 п.4).
 """
 
-import struct
-
 from . import bookread, ondisk, tally
 from .bookground import BookGround
 from .bookread import Short
@@ -34,10 +32,8 @@ from .ondisk import BLOCK
 WHO = "the kernel the deed names"
 
 # The most a kernel may be, and the header it opens with (tagboot_lectern.h
-# KERNEL_MAX_SIZE, KERNEL_HEADER_VERSION; kernel_entry.asm: "KERNEL" at byte 2,
-# the header's version at byte 8).
+# KERNEL_MAX_SIZE; kernel_entry.asm: "KERNEL" at byte 2).
 KERNEL_MAX_SIZE = 0x2000000
-KERNEL_HEADER_VERSION = 1
 
 
 def Loaded(boot):
@@ -255,10 +251,6 @@ class Succession:
                                  % (c.who, blocks[0]))
         if first[2:8] != b"KERNEL":
             return self._Refused("%s is no kernel: its first block does not begin with KERNEL" % c.who)
-        version = struct.unpack_from("<I", first, 8)[0]
-        if version != KERNEL_HEADER_VERSION:
-            return self._Refused("%s is a kernel of header version %u, and this loader reads version %u"
-                                 % (c.who, version, KERNEL_HEADER_VERSION))
         unread = next((k for k, v in enumerate(blocks) if k and v is not None and self.g.Block(v) is None), None)
         if unread is not None:
             return self._Refused("%s cannot be loaded: its block %u (volume block %u) will not read"

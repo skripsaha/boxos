@@ -20,7 +20,7 @@ DEFAULT ABS
 ; 0x07000             - 16-bit stack top, grows down
 ; 0x07C00             - Stage1 (512 bytes)
 ; 0x08000..0x09FFF    - Stage2 (16 sectors — the whole window, always loaded)
-; 0x0A000             - Boot info for kernel (structured, versioned)
+; 0x0A000             - Boot info for kernel (one structure, boot_info.h)
 ; 0x0A200             - Sector 0 of the medium: its partition table (512 bytes)
 ; 0x0A600             - Boarding pass for kernel (512 bytes, stamped)
 ; 0x0B000..0x0BFFF    - The volume's Deed (4096 bytes — one whole block)
@@ -75,23 +75,37 @@ STAGE2_SIGNATURE      equ 0x2907
   %error "BOOT_INFO_ADDR must come from the build (-DBOOT_INFO_ADDR=...)"
 %endif
 
-; boot_info structure constants (shared contract with kernel)
-BOOT_INFO_MAGIC       equ 0x42583031     ; "BX01" — BoxOS boot info v1
-BOOT_INFO_VERSION     equ 1
+; boot_info — the layout is src/include/boot_info.h, whose static assertions
+; hold every offset written below and the size zeroed before it.
+BOOT_INFO_MAGIC       equ 0x544F4F42     ; 'B','O','O','T'
+BOOT_INFO_BYTES       equ 132
+BOOT_METHOD_BIOS      equ 0
 
 ; The Boarding Pass — what this loader tells the kernel about its own arrival,
 ; as opposed to boot_info, which describes the machine. Layout in
 ; src/include/boarding_pass.h; the numbers below are that layout and the
 ; kernel's static assertions are the other half of the agreement.
 BOARDING_PASS_MAGIC   equ 0x53415042     ; "BPAS"
-BOARDING_PASS_VERSION equ 1
 BOARDING_PASS_BYTES   equ 512
-BOARDING_HDR_BYTES    equ 16
+BOARDING_HDR_BYTES    equ 12
+BOARDING_STAMP_HDR    equ 4
+BOARDING_VOLUME_BYTES equ 16
+BOARDING_MEDIUM_BYTES equ 4
+BOARDING_LOADER_BYTES equ 12
+BOARDING_SEAL_BYTES   equ 4
 BOARDING_STAMP_VOLUME equ 1
 BOARDING_STAMP_MEDIUM equ 2
 BOARDING_STAMP_LOADER equ 3
 BOARDING_STAMP_SEAL   equ 4
 BOARDING_FIRMWARE_BIOS equ 0
+; Where the four stamps go: one after another, every payload a whole number of
+; four-byte words, so none is padded and each place is the sum of the sizes
+; before it — never a literal of its own.
+BOARDING_AT_VOLUME    equ BOARDING_HDR_BYTES
+BOARDING_AT_MEDIUM    equ BOARDING_AT_VOLUME + BOARDING_STAMP_HDR + BOARDING_VOLUME_BYTES
+BOARDING_AT_LOADER    equ BOARDING_AT_MEDIUM + BOARDING_STAMP_HDR + BOARDING_MEDIUM_BYTES
+BOARDING_AT_SEAL      equ BOARDING_AT_LOADER + BOARDING_STAMP_HDR + BOARDING_LOADER_BYTES
+BOARDING_USED_BYTES   equ BOARDING_AT_SEAL + BOARDING_STAMP_HDR + BOARDING_SEAL_BYTES
 ; ---------------------------------------------------------------------------
 ; The Deed, by offset.
 ;
@@ -124,7 +138,11 @@ DEED_SECTORS            equ 8
 DEED_BYTES              equ DEED_SECTORS * 512
 
 ; The one stamp this loader needs: where the kernel is, in the volume's blocks.
-VOLUME_STAMP_BOOT       equ 4
+; Its kind is not spelled here. The build writes the Deed's stamp kinds out of
+; src/include/volume_deed.h into volume_stamps.inc (Makefile), so a kind
+; renumbered there is the kind this loader looks for — never a BIOS boot that
+; finds no kernel, or reads another stamp's payload for BOOT's.
+%include "volume_stamps.inc"
 BOOT_KERNEL_BLOCK       equ 0
 BOOT_KERNEL_BLOCKS      equ 4
 BOOT_KERNEL_BYTES       equ 8
@@ -181,7 +199,7 @@ DEED_SEG                equ DEED_ADDR >> 4
 
 KERNEL_HDR_MAGIC        equ 0x4E52454B  ; "KERN" little-endian
 KERNEL_HDR_MAGIC_HI     equ 0x4C45      ; "EL" little-endian
-KERNEL_HDR_VERSION      equ 1           ; must match kernel_entry.asm dd at offset +8
+KERNEL_HDR_PHYS_END     equ 8           ; kernel_entry.asm: _kernel_phys_end, BSS included
 
 ; The volume's block and the sectors in it — owned by src/include/volume_deed.h
 ; (VOLUME_BLOCK_BYTES, VOLUME_BLOCK_SECTORS). NASM can't include C headers, so
@@ -296,7 +314,7 @@ protected_mode_start:
     jmp 0x18:long_mode_start
 
 ; Computes page table and stack addresses from the REAL kernel memory footprint.
-; Reads _kernel_end from kernel header at offset +12 (filled by linker, includes BSS).
+; Reads _kernel_end from kernel header at offset +8 (filled by linker, includes BSS).
 ; Layout (low to high):
 ;   kernel_end  →  guard  →  page tables (32KB)  →  guard  →  stack space (64KB)
 ;                                                              ↑ ESP here (top, grows down)
@@ -304,8 +322,8 @@ compute_dynamic_layout:
     push eax
 
     ; Read true kernel_end from kernel header (includes BSS section)
-    ; Header: [jmp 2B][KERNEL 6B][version 4B][kernel_end 4B @ offset +12]
-    mov eax, [KERNEL_RUN_ADDR + 12]
+    ; Header: [jmp 2B][KERNEL 6B][kernel_end 4B @ offset +8]
+    mov eax, [KERNEL_RUN_ADDR + KERNEL_HDR_PHYS_END]
 
     ; Round kernel_end up to 2 MB so the guard sits on a clean PD boundary.
     add eax, 0x1FFFFF
@@ -425,9 +443,16 @@ long_mode_start:
     test rax, rax
     jz .kernel_not_loaded
 
-    ; Write structured boot_info at BOOT_INFO_ADDR
+    ; Write boot_info at BOOT_INFO_ADDR. The whole block is zeroed first:
+    ; every field of it is always present, and the ones this loader has
+    ; nothing to say in — the framebuffer, the firmware's tables — must read
+    ; as zero, not as whatever the memory held before.
+    mov edi, BOOT_INFO_ADDR
+    mov ecx, BOOT_INFO_BYTES / 4
+    xor eax, eax
+    rep stosd
     mov dword [BOOT_INFO_ADDR],      BOOT_INFO_MAGIC    ; +0:  magic
-    mov dword [BOOT_INFO_ADDR+4],    BOOT_INFO_VERSION   ; +4:  version
+    mov dword [BOOT_INFO_ADDR+4],    BOOT_METHOD_BIOS    ; +4:  boot_method
     mov dword [BOOT_INFO_ADDR+8],    E820_MAP_ADDR       ; +8:  e820_map_addr
     mov ax, [E820_COUNT_ADDR]
     mov word  [BOOT_INFO_ADDR+12],   ax                  ; +12: e820_count
@@ -436,14 +461,14 @@ long_mode_start:
 
     ; kernel_end = the *true* end of memory the kernel will occupy at
     ; runtime — i.e. including BSS. The linker bakes that value into the
-    ; kernel header at offset +12 (`_kernel_phys_end`), and that's the
+    ; kernel header at offset +8 (`_kernel_phys_end`), and that's the
     ; same value compute_dynamic_layout already trusted to place the
     ; page tables. Reporting `KERNEL_RUN_ADDR + kernel_loaded_bytes`
     ; here used to leak the wrong number out of BIOS boot — the kernel
     ; saw a kernel_end that stopped before BSS. UEFI's tagboot already
     ; reports the BSS-inclusive value, so reporting it here too keeps
     ; both boot paths telling the same story to PMM.
-    mov eax, [KERNEL_RUN_ADDR + 12]
+    mov eax, [KERNEL_RUN_ADDR + KERNEL_HDR_PHYS_END]
     add eax, 0xFFF
     and eax, 0xFFFFF000
     mov dword [BOOT_INFO_ADDR+20],   eax                 ; +20: kernel_end
@@ -459,7 +484,6 @@ long_mode_start:
     mov dword [BOOT_INFO_ADDR+28],   eax                 ; +28: page_table_base
     mov eax, [dynamic_stack_base]
     mov dword [BOOT_INFO_ADDR+32],   eax                 ; +32: stack_base
-    mov dword [BOOT_INFO_ADDR+36],   40                  ; +36: total_size
 
     call write_boarding_pass
 
@@ -498,57 +522,53 @@ long_mode_start:
 write_boarding_pass:
     ; Header
     mov dword [BOARDING_PASS_ADDR],     BOARDING_PASS_MAGIC     ; +0  magic
-    mov word  [BOARDING_PASS_ADDR+4],   BOARDING_PASS_VERSION   ; +4  version
-    mov word  [BOARDING_PASS_ADDR+6],   BOARDING_HDR_BYTES      ; +6  header_bytes
-    mov word  [BOARDING_PASS_ADDR+8],   72                      ; +8  used_bytes
-    mov word  [BOARDING_PASS_ADDR+10],  BOARDING_PASS_BYTES     ; +10 capacity
-    mov word  [BOARDING_PASS_ADDR+12],  4                       ; +12 count
-    mov word  [BOARDING_PASS_ADDR+14],  0                       ; +14 reserved
+    mov word  [BOARDING_PASS_ADDR+4],   BOARDING_HDR_BYTES      ; +4  header_bytes
+    mov word  [BOARDING_PASS_ADDR+6],   BOARDING_USED_BYTES     ; +6  used_bytes
+    mov word  [BOARDING_PASS_ADDR+8],   BOARDING_PASS_BYTES     ; +8  capacity
+    mov word  [BOARDING_PASS_ADDR+10],  4                       ; +10 count
 
-    ; Stamp 1 at +16: the volume, sixteen bytes out of its Deed.
-    mov word  [BOARDING_PASS_ADDR+16],  BOARDING_STAMP_VOLUME
-    mov word  [BOARDING_PASS_ADDR+18],  16
+    ; Stamp 1: the volume, sixteen bytes out of its Deed.
+    mov word  [BOARDING_PASS_ADDR+BOARDING_AT_VOLUME],    BOARDING_STAMP_VOLUME
+    mov word  [BOARDING_PASS_ADDR+BOARDING_AT_VOLUME+2],  BOARDING_VOLUME_BYTES
     mov rax, [DEED_ADDR + DEED_OFF_UUID]
-    mov [BOARDING_PASS_ADDR+20], rax
+    mov [BOARDING_PASS_ADDR+BOARDING_AT_VOLUME+4], rax
     mov rax, [DEED_ADDR + DEED_OFF_UUID + 8]
-    mov [BOARDING_PASS_ADDR+28], rax
+    mov [BOARDING_PASS_ADDR+BOARDING_AT_VOLUME+12], rax
 
-    ; Stamp 2 at +36: the medium. The drive number is the one this loader
-    ; actually used, which is not always the one the firmware first offered —
-    ; there is a fallback to 0x80 above for firmware that hands out a handle it
-    ; then does not honour, and the kernel should be told which one worked.
-    mov word  [BOARDING_PASS_ADDR+36],  BOARDING_STAMP_MEDIUM
-    mov word  [BOARDING_PASS_ADDR+38],  4
-    mov byte  [BOARDING_PASS_ADDR+40],  BOARDING_FIRMWARE_BIOS
+    ; Stamp 2: the medium. The drive number is the one this loader actually
+    ; used, which is not always the one the firmware first offered — there is
+    ; a fallback to 0x80 above for firmware that hands out a handle it then
+    ; does not honour, and the kernel should be told which one worked.
+    mov word  [BOARDING_PASS_ADDR+BOARDING_AT_MEDIUM],    BOARDING_STAMP_MEDIUM
+    mov word  [BOARDING_PASS_ADDR+BOARDING_AT_MEDIUM+2],  BOARDING_MEDIUM_BYTES
+    mov byte  [BOARDING_PASS_ADDR+BOARDING_AT_MEDIUM+4],  BOARDING_FIRMWARE_BIOS
     mov al, [boot_drive_saved]
-    mov byte  [BOARDING_PASS_ADDR+41],  al
-    mov word  [BOARDING_PASS_ADDR+42],  0
+    mov byte  [BOARDING_PASS_ADDR+BOARDING_AT_MEDIUM+5],  al
+    mov word  [BOARDING_PASS_ADDR+BOARDING_AT_MEDIUM+6],  0
 
-    ; Stamp 3 at +44: who wrote this. On a board that boots through CSM one
-    ; week and UEFI the next, that is a real question with nothing on the
-    ; screen to answer it.
-    mov word  [BOARDING_PASS_ADDR+44],  BOARDING_STAMP_LOADER
-    mov word  [BOARDING_PASS_ADDR+46],  16
+    ; Stamp 3: who wrote this. On a board that boots through CSM one week and
+    ; UEFI the next, that is a real question with nothing on the screen to
+    ; answer it.
+    mov word  [BOARDING_PASS_ADDR+BOARDING_AT_LOADER],    BOARDING_STAMP_LOADER
+    mov word  [BOARDING_PASS_ADDR+BOARDING_AT_LOADER+2],  BOARDING_LOADER_BYTES
     mov rax, [boarding_loader_name]
-    mov [BOARDING_PASS_ADDR+48], rax
+    mov [BOARDING_PASS_ADDR+BOARDING_AT_LOADER+4], rax
     mov eax, [boarding_loader_name+8]
-    mov [BOARDING_PASS_ADDR+56], eax
-    mov word  [BOARDING_PASS_ADDR+60],  1                       ; major
-    mov word  [BOARDING_PASS_ADDR+62],  0                       ; minor
+    mov [BOARDING_PASS_ADDR+BOARDING_AT_LOADER+12], eax
 
-    ; Stamp 4 at +64: the seal, and it is last because it covers everything
-    ; ahead of it — the header, the three stamps, and its own kind/length pair.
-    ; The rule and the reasoning live in src/include/boarding_pass.h; what is
-    ; here is the same CRC-32 (ISO 3309) the Deed and the GPT are checked with.
+    ; Stamp 4: the seal, and it is last because it covers everything ahead of
+    ; it — the header, the three stamps, and its own kind/length pair. The rule
+    ; and the reasoning live in src/include/boarding_pass.h; what is here is
+    ; the same CRC-32 (ISO 3309) the Deed and the GPT are checked with.
     ;
     ; It cannot reuse crc32_chunk further down this file: that one addresses
     ; through ES:DI and belongs to the real-mode half, and this runs in long
-    ; mode. Sixty-eight bytes, once per boot.
-    mov word  [BOARDING_PASS_ADDR+64],  BOARDING_STAMP_SEAL
-    mov word  [BOARDING_PASS_ADDR+66],  4
+    ; mode. A few dozen bytes, once per boot.
+    mov word  [BOARDING_PASS_ADDR+BOARDING_AT_SEAL],      BOARDING_STAMP_SEAL
+    mov word  [BOARDING_PASS_ADDR+BOARDING_AT_SEAL+2],    BOARDING_SEAL_BYTES
 
     mov esi, BOARDING_PASS_ADDR
-    mov ecx, 68                         ; up to the seal's payload, not into it
+    mov ecx, BOARDING_AT_SEAL + BOARDING_STAMP_HDR   ; up to the seal's payload, not into it
     mov eax, 0xFFFFFFFF
 .seal_byte:
     movzx edx, byte [rsi]
@@ -565,7 +585,7 @@ write_boarding_pass:
     dec ecx
     jnz .seal_byte
     not eax
-    mov [BOARDING_PASS_ADDR+68], eax
+    mov [BOARDING_PASS_ADDR+BOARDING_AT_SEAL+4], eax
     ret
 
 
@@ -1824,26 +1844,12 @@ validate_kernel_magic:
     cmp ax, KERNEL_HDR_MAGIC_HI
     jne .bad_magic
 
-    ; Header version at offset +8 must match what the bootloader speaks.
-    ; A drift here means the kernel layout (e.g. _kernel_phys_end position)
-    ; might have moved — refuse to launch with stale assumptions.
-    a32 mov eax, [es:edi + 8]
-    cmp eax, KERNEL_HDR_VERSION
-    jne .bad_version
-
     pop edi
     pop eax
     ret
 
 .bad_magic:
     mov si, msg_kernel_bad_magic
-    call print_string_16
-    cli
-    hlt
-    jmp $
-
-.bad_version:
-    mov si, msg_kernel_bad_version
     call print_string_16
     cli
     hlt
@@ -2970,7 +2976,6 @@ msg_no_long_mode      db '[ERROR] 64-bit mode not supported!', 13, 10, 0
 msg_entering_protected db 'Entering protected mode...', 13, 10, 0
 ; (page table validation now done dynamically in 32-bit mode via VGA "NO MEM" on failure)
 msg_kernel_bad_magic      db '[FATAL] Kernel header magic mismatch — corrupted load!', 13, 10, 0
-msg_kernel_bad_version    db '[FATAL] Kernel header version mismatch — rebuild required!', 13, 10, 0
 
 ;=============================================================================
 ; Assemble-time invariants. These cost nothing at runtime and each one stands
