@@ -247,7 +247,7 @@ bool Show::OnKey(const painter::tui::KeyEvent &Key)
         }
         return true;
     }
-    switch (Key.Ascii) {
+    switch (Key.Character) {
     case ' ': AquaFeed(Tank, MiddleX(), Dice); break;
     case 't':
     case 'T': AquaTap(Tank, MiddleX(), MiddleY()); break;

@@ -245,8 +245,8 @@ void Editor::OnWriting(const tui::KeyEvent &Key)
     Tab                       &Here  = Active();
     const std::optional<Heard> Asked = Hear(Key);
     if (!Asked) {
-        const bool Typed = !Key.IsExtended() && !Key.IsCtrl() && !Key.IsAlt() && Key.Ascii >= 0x20 && Key.Ascii < 0x7F;
-        if (Typed && !Here.Safety) Here.Type(Key.Ascii, Overtype);
+        const bool Typed = !Key.IsExtended() && !Key.IsCtrl() && !Key.IsAlt() && Key.IsPrintable();
+        if (Typed && !Here.Safety) Here.Type(Key.Character, Overtype);
         return;
     }
     if (Writes(Asked->Does) && Here.Safety) return;
@@ -380,12 +380,12 @@ void Editor::OnPicking(const tui::KeyEvent &Key)
 void Editor::OnGoingTo(const tui::KeyEvent &Key)
 {
     Tab &Here = Active();
-    if (!Key.IsExtended() && Key.Ascii == tui::KeyCodes::Escape) {
+    if (!Key.IsExtended() && Key.Character == tui::KeyCodes::Escape) {
         Here.MoveTo(LineOrigin, false);
         Now = Mode::Writing;
         return;
     }
-    if (!Key.IsExtended() && (Key.Ascii == tui::KeyCodes::Enter || Key.Ascii == '\r')) {
+    if (!Key.IsExtended() && (Key.Character == tui::KeyCodes::Enter || Key.Character == '\r')) {
         Now = Mode::Writing;
         return;
     }
@@ -456,7 +456,7 @@ void Editor::OnClipping(const tui::KeyEvent &Key)
 void Editor::OnLeaving(const tui::KeyEvent &Key)
 {
     if (Key.IsExtended() || Key.IsCtrl()) return;
-    switch (Key.Ascii) {
+    switch (Key.Character) {
     case 's': case 'S':
         GoOnLeaving();
         return;

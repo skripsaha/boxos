@@ -64,9 +64,9 @@ List::Outcome List::OnKey(const tui::KeyEvent &Key)
         Follow();
         return Outcome::Stay;
     }
-    if (Key.Ascii == tui::KeyCodes::Enter || Key.Ascii == '\r')
+    if (Key.Character == tui::KeyCodes::Enter || Key.Character == '\r')
         return Lines.empty() ? Outcome::Closed : Outcome::Chosen;
-    return Key.Ascii == tui::KeyCodes::Escape ? Outcome::Closed : Outcome::Stay;
+    return Key.Character == tui::KeyCodes::Escape ? Outcome::Closed : Outcome::Stay;
 }
 
 void List::Paint(tui::Frame &Out) const

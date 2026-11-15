@@ -155,7 +155,7 @@ public:
   }
 
   bool handle(const painter::tui::KeyEvent &Key) {
-    if (Key.Ascii == painter::tui::KeyCodes::Escape)
+    if (Key.Character == painter::tui::KeyCodes::Escape)
       return false;
     if (!time_ok_)
       return true;
@@ -174,7 +174,7 @@ public:
       shift_days(7);
       break;
     default:
-      switch (Key.Ascii) {
+      switch (Key.Character) {
       case 'a':
       case 'A':
         shift_days(-1);

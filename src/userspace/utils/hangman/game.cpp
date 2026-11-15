@@ -62,7 +62,7 @@ void Game::Run()
 
 bool Game::Chose(HangKey Which, const tui::KeyEvent &Pressed) const
 {
-    const kb_event_t Raw{Pressed.Scancode, Pressed.Ascii, Pressed.Mods};
+    const kb_event_t Raw{Pressed.Character, Pressed.Scancode, Pressed.Mods};
     return KeyChordMatches(&Chosen.Keys[Which], &Raw);
 }
 
@@ -106,9 +106,9 @@ bool Game::OnKey(const tui::KeyEvent &Pressed)
 
 bool Game::OnPlainKey(const tui::KeyEvent &Pressed)
 {
-    if (Pressed.Ascii == tui::KeyCodes::Escape) return false;
-    if (Pressed.Ascii == tui::KeyCodes::Enter && Now->State() != Phase::Playing) Next();
-    else if (Round::IsLetter(Pressed.Ascii)) Say(Pressed.Ascii);
+    if (Pressed.Character == tui::KeyCodes::Escape) return false;
+    if (Pressed.Character == tui::KeyCodes::Enter && Now->State() != Phase::Playing) Next();
+    else if (Round::IsLetter(Pressed.Character)) Say(static_cast<char>(Pressed.Character));
     return true;
 }
 

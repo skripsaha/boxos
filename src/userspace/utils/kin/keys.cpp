@@ -67,9 +67,10 @@ std::optional<Pressed> PressedOf(const tui::KeyEvent &Key) noexcept
     Pressed Down{Key.IsExtended(), Key.Scancode, Key.IsCtrl(), Key.IsShift(), std::nullopt};
     if (!Down.Key) {
         /* A terminal's Enter and Backspace on the serial line. */
-        const char Ch = Key.Ascii == '\r' ? KeyCodes::Enter : Key.Ascii == 0x7F ? KeyCodes::Backspace : Key.Ascii;
+        const char32_t Ch = Key.Character == '\r' ? KeyCodes::Enter : Key.Character == 0x7F ? KeyCodes::Backspace : Key.Character;
         if (Down.Ctrl && !Down.Shift && Ch >= '0' && Ch <= '9') Down.Digit = static_cast<std::uint8_t>(Ch - '0');
-        Down.Code = static_cast<std::uint8_t>(Ch);
+        /* A binding names an ASCII key; a character past it is bound to nothing. */
+        Down.Code = Ch < 0x80 ? static_cast<std::uint8_t>(Ch) : 0;
     }
     return Down;
 }

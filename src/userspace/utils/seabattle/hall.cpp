@@ -25,7 +25,7 @@ public:
 
     void Key(const tui::KeyEvent &Pressed) override
     {
-        if (!Pressed.IsExtended() && (Pressed.Ascii == tui::KeyCodes::Escape || Pressed.Ascii == tui::KeyCodes::Enter)) Ctx.Go(PageId::Title);
+        if (!Pressed.IsExtended() && (Pressed.Character == tui::KeyCodes::Escape || Pressed.Character == tui::KeyCodes::Enter)) Ctx.Go(PageId::Title);
     }
 
 protected:

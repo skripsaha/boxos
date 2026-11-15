@@ -407,7 +407,7 @@ Act Map::OnKey(const KeyEvent &Key)
         Here.Selected = TagmapStep(Here.Tiles, Here.Selected, Way);
         return Act::Stay;
     }
-    switch (Key.Ascii) {
+    switch (Key.Character) {
     case 'q':
     case 'Q':
     case painter::tui::KeyCodes::Escape: return Act::Leave;

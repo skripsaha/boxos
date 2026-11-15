@@ -143,7 +143,7 @@ int main()
         }
         if (Event.Kind == tui::EventKind::EndAsked) break;
         if (Event.Kind == tui::EventKind::Key &&
-            Event.Key.Ascii == tui::KeyCodes::Escape) break;
+            Event.Key.Character == tui::KeyCodes::Escape) break;
     }
     if (!Screen->Close()) return 4;
     return Result;

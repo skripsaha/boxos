@@ -162,7 +162,7 @@ void Stringview::Scroll(std::int64_t Lines)
 void Stringview::OnKey(const painter::tui::KeyEvent &Key)
 {
     if (Key.IsCtrl()) {
-        if (Key.Ascii == 'q' || Key.Ascii == 'Q') Leaving = true;
+        if (Key.Character == 'q' || Key.Character == 'Q') Leaving = true;
         return;
     }
 
@@ -182,7 +182,7 @@ void Stringview::OnKey(const painter::tui::KeyEvent &Key)
         return;
     }
 
-    char Ch = Key.Ascii;
+    char32_t Ch = Key.Character;
     if (Ch == painter::tui::KeyCodes::Escape) {
         if (Filter.empty()) {
             Leaving = true;

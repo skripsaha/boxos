@@ -22,7 +22,7 @@ constexpr std::int32_t KeyColumn = 24;
 
 bool Chose(const Look &Shown, SeaKey Which, const tui::KeyEvent &Pressed)
 {
-    const kb_event_t Raw{Pressed.Scancode, Pressed.Ascii, Pressed.Mods};
+    const kb_event_t Raw{Pressed.Character, Pressed.Scancode, Pressed.Mods};
     return KeyChordMatches(&Shown.Keys[Which], &Raw);
 }
 
@@ -36,8 +36,8 @@ std::string Spelled(const Look &Shown, SeaKey Which)
 LeavePrompt::Verdict LeavePrompt::Answer(const tui::KeyEvent &Pressed)
 {
     if (Pressed.IsExtended() || Pressed.IsCtrl() || Pressed.IsAlt()) return Verdict::Asking;
-    if (Pressed.Ascii == tui::KeyCodes::Enter) return Verdict::Leave;
-    if (Pressed.Ascii == tui::KeyCodes::Escape) {
+    if (Pressed.Character == tui::KeyCodes::Enter) return Verdict::Leave;
+    if (Pressed.Character == tui::KeyCodes::Escape) {
         Asking = false;
         return Verdict::Stay;
     }

@@ -230,9 +230,10 @@ The system's tags include `keyboard`, `process:died`, `process:spawned`,
 
 ```text
 Touch (120 bytes)                  a key (keyboard), at payload
-  @0  uint32_t tag_id                @24 uint8_t scancode
-  @4  uint16_t flags                 @25 char    ascii (0 for keys without one)
-  @8  uint32_t source_pid            @26 uint8_t mods: shift 1, ctrl 2, alt 4, extended 8
+  @0  uint32_t tag_id                @24 uint32_t cp: the character typed, Unicode
+  @4  uint16_t flags                     (0 for keys without one)
+  @8  uint32_t source_pid            @28 uint8_t scancode
+                                     @29 uint8_t mods: shift 1, ctrl 2, alt 4, extended 8
   @12 uint32_t payload_len
   @16 uint64_t timestamp_tsc       process:died, at payload
   @24 uint8_t  payload[96]           @24 uint32_t pid; @28 int32_t exit_code; @32 uint32_t generation

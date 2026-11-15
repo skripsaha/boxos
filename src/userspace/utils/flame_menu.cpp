@@ -220,7 +220,7 @@ FlameOutcome FlameMenu::Type(const painter::tui::KeyEvent &Key, FlameSettings &S
 {
     if (Key.IsExtended()) return {};
 
-    char Ch = Key.Ascii;
+    char32_t Ch = Key.Character;
     if (Ch == painter::tui::KeyCodes::Escape) {
         Editing = false;
         Note    = nullptr;
@@ -252,7 +252,7 @@ FlameOutcome FlameMenu::Choose(const painter::tui::KeyEvent &Key, FlameSettings 
         }
         return {};
     }
-    switch (Key.Ascii) {
+    switch (Key.Character) {
     case painter::tui::KeyCodes::Escape: Open = false; break;
     case painter::tui::KeyCodes::Tab:    Item = (Item + 1) % RowCount; break;
     case painter::tui::KeyCodes::Enter:  BeginEdit(Settings); break;
@@ -275,7 +275,7 @@ FlameOutcome FlameMenu::Quick(const painter::tui::KeyEvent &Key, FlameSettings &
         default: return {};
         }
     }
-    char Ch = Key.Ascii;
+    char32_t Ch = Key.Character;
     if (Ch >= '1' && Ch < '1' + FlamePlaceCount) return SetPlace(static_cast<FlamePlace>(Ch - '1'), Settings);
     switch (Ch) {
     case painter::tui::KeyCodes::Escape: Open = true; break;
@@ -297,7 +297,7 @@ FlameOutcome FlameMenu::Quick(const painter::tui::KeyEvent &Key, FlameSettings &
 
 FlameOutcome FlameMenu::OnKey(const painter::tui::KeyEvent &Key, FlameSettings &Settings)
 {
-    bool IsQ = !Key.IsExtended() && (Key.Ascii == 'q' || Key.Ascii == 'Q');
+    bool IsQ = !Key.IsExtended() && (Key.Character == 'q' || Key.Character == 'Q');
     if ((Key.IsCtrl() && IsQ) || (!Editing && IsQ)) {
         FlameOutcome Leaving;
         Leaving.Leave = true;

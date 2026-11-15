@@ -5517,15 +5517,24 @@ void Phase29()
     box::key none(0, 0x48, 0);  // a scancode-only key (e.g. an arrow)
     Check(!none.has_char() && !none.printable(), "phase29 scancode-only key has no char");
 
-    // kb_event_t is the keyboard Touch payload {scancode, ascii, mods} — verify
-    // from_event reads the right fields (the order is not ch-first).
+    // kb_event_t is the keyboard Touch payload {cp, scancode, mods} — verify
+    // from_event reads the right fields.
     kb_event_t ke{};
     ke.scancode = 0x10;
-    ke.ascii = 'q';
+    ke.cp = 'q';
     ke.mods = KB_MOD_CTRL;
     box::key ek = box::key::from_event(ke);
     Check(ek.ch() == 'q' && ek.scancode() == 0x10 && ek.ctrl() && !ek.alt(),
           "phase29 from_event decodes the keyboard Touch payload");
+
+    // A key types a character, not a byte: one past ASCII comes through whole,
+    // and shows; a C1 control does not.
+    kb_event_t zhe{};
+    zhe.cp = 0x416;   // Ж
+    box::key zk = box::key::from_event(zhe);
+    Check(zk.ch() == U'\u0416' && zk.has_char() && zk.printable(),
+          "phase29 a key past ASCII is its character, whole");
+    Check(!box::key(0x85, 0, 0).printable(), "phase29 a C1 control does not show");
 
     // ── box::keyboard — event-driven (Touch), NO polling. poll() peeks a
     //    delivered event; wait(ms) blocks IN THE KERNEL (woken by the key event,

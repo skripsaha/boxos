@@ -193,7 +193,7 @@ static KbRepeatState kb_repeat = {0};
  *
  * Two things come out of that, and the second is the serious one.
  *   - kb_event_t is three PACKED bytes, so held_event is written as sub-word
- *     stores and can be read half-updated: a new scancode with an old ascii,
+ *     stores and can be read half-updated: a new scancode with an old character,
  *     one wrong character at the moment a key is pressed.
  *   - `active` is written 1 by the arm and 0 by the release. A press and its
  *     release can be drained by two different cores, and if the arm's 1 lands
@@ -222,6 +222,12 @@ static spinlock_t kb_repeat_lock;
  * and not yet ended; only the COM1 IRQ handler touches it. */
 static char     kb_seq[8];
 static uint32_t kb_seq_len;
+
+/* A character the line spells in UTF-8, gathered byte by byte: the bytes so
+ * far and how many its lead byte promised. */
+static uint8_t  kb_utf8[4];
+static uint8_t  kb_utf8_len;
+static uint8_t  kb_utf8_need;
 
 /* What a sequence names: the key's scancode, 0 for one that is no key
  * below, -1 while it may still become one. */
@@ -256,39 +262,90 @@ static int kb_seq_key(const char *seq, uint32_t len)
  * one. `quiet` says the line fell silent after these bytes — the UART's own
  * measure — so an ESC still held then was a lone Escape. A sequence the line
  * cut in two goes on in the next call. */
+/* A character the line typed, published as a key with no scancode. */
+static void kb_publish_char(uint32_t cp)
+{
+    kb_event_t kb_ev = { .cp = cp, .scancode = 0, .mods = 0 };
+    kb_publish_event(&kb_ev);
+}
+
+/* The character gathered is whole: published — or U+FFFD, the replacement
+ * character, for one UTF-8 forbids (an overlong spelling, a surrogate, past
+ * U+10FFFF), so a broken byte is never typed as some other character. */
+static void kb_utf8_publish(void)
+{
+    static const uint32_t least[5] = { 0, 0, 0x80u, 0x800u, 0x10000u };
+    char     seq[5];
+    uint32_t cp = 0;
+    memcpy(seq, kb_utf8, kb_utf8_len);
+    seq[kb_utf8_len] = '\0';
+    bool sound = utf8_decode(seq, &cp) == kb_utf8_need && cp >= least[kb_utf8_need] &&
+                 cp <= 0x10FFFFu && !(cp >= 0xD800u && cp <= 0xDFFFu);
+    kb_publish_char(sound ? cp : 0xFFFDu);
+    kb_utf8_len = kb_utf8_need = 0;
+}
+
+/* One byte of the line at or past 0x80, or after a lead byte. True when it is
+ * taken — a lead, a continuation, a character ended and published; false when
+ * it is a plain byte that broke the character it was to continue (U+FFFD
+ * published for that one), to be looked at afresh. */
+static bool kb_inject_utf8(uint8_t u)
+{
+    if (kb_utf8_need) {
+        if ((u & 0xC0u) == 0x80u) {
+            kb_utf8[kb_utf8_len++] = u;
+            if (kb_utf8_len == kb_utf8_need) kb_utf8_publish();
+            return true;
+        }
+        kb_publish_char(0xFFFDu);
+        kb_utf8_len = kb_utf8_need = 0;
+        if (u < 0x80u) return false;
+    }
+    uint8_t need = (u >= 0xC2u && u <= 0xDFu) ? 2 : (u >= 0xE0u && u <= 0xEFu) ? 3
+                 : (u >= 0xF0u && u <= 0xF4u) ? 4 : 0;
+    if (!need) {
+        kb_publish_char(0xFFFDu);
+        return true;
+    }
+    kb_utf8[0]   = u;
+    kb_utf8_len  = 1;
+    kb_utf8_need = need;
+    return true;
+}
+
 void keyboard_inject(const char *chars, uint32_t count, bool quiet)
 {
     for (uint32_t i = 0; i < count; i++) {
+        uint8_t u = (uint8_t)chars[i];
+        if ((kb_utf8_need || u >= 0x80u) && kb_inject_utf8(u)) continue;
         char c = chars[i];
         if (kb_seq_len == 0 && c != KEY_ESCAPE) {
-            kb_event_t kb_ev = { .scancode = 0, .ascii = c, .mods = 0 };
-            kb_publish_event(&kb_ev);
+            kb_publish_char(u);
             continue;
         }
         kb_seq[kb_seq_len++] = c;
         int key = kb_seq_key(kb_seq, kb_seq_len);
         if (key < 0) continue;
         if (key > 0) {
-            kb_event_t kb_ev = { .scancode = (uint8_t)key, .ascii = 0, .mods = KB_MOD_EXTENDED };
+            kb_event_t kb_ev = { .cp = 0, .scancode = (uint8_t)key, .mods = KB_MOD_EXTENDED };
             kb_publish_event(&kb_ev);
             kb_seq_len = 0;
             continue;
         }
         /* No key: what was held is bytes after all, and the last one is
          * looked at again — it may begin a sequence of its own. */
-        for (uint32_t k = 0; k + 1 < kb_seq_len; k++) {
-            kb_event_t kb_ev = { .scancode = 0, .ascii = kb_seq[k], .mods = 0 };
-            kb_publish_event(&kb_ev);
-        }
+        for (uint32_t k = 0; k + 1 < kb_seq_len; k++) kb_publish_char((uint8_t)kb_seq[k]);
         kb_seq_len = 0;
         i--;
     }
     if (quiet) {
-        for (uint32_t k = 0; k < kb_seq_len; k++) {
-            kb_event_t kb_ev = { .scancode = 0, .ascii = kb_seq[k], .mods = 0 };
-            kb_publish_event(&kb_ev);
-        }
+        for (uint32_t k = 0; k < kb_seq_len; k++) kb_publish_char((uint8_t)kb_seq[k]);
         kb_seq_len = 0;
+        /* A character the line left unfinished as it fell silent. */
+        if (kb_utf8_need) {
+            kb_publish_char(0xFFFDu);
+            kb_utf8_len = kb_utf8_need = 0;
+        }
     }
 }
 
@@ -985,9 +1042,9 @@ void keyboard_handle_scancode(uint8_t scancode)
         }
 
         /* An extended key is a KEY, not a character: it is published as
-         * its scancode with ascii 0 and KB_MOD_EXTENDED, and an editor
+         * its scancode with cp 0 and KB_MOD_EXTENDED, and an editor
          * answers it by name (arrows, Home/End, Delete). */
-        kb_event_t kb_ev = { .scancode = key, .ascii = 0,
+        kb_event_t kb_ev = { .cp = 0, .scancode = key,
                              .mods = (uint8_t)(kb_mods_now() | KB_MOD_EXTENDED) };
         kb_arm_repeat(key, 1, &kb_ev);
         kb_publish_event(&kb_ev);
@@ -1090,7 +1147,7 @@ void keyboard_handle_scancode(uint8_t scancode)
          * was delayed past make-t2. Real fix for Bochs host-typematic
          * passthrough needs time-based debounce or per-environment
          * policy, not unconditional same-key suppression.) */
-        kb_event_t kb_ev = { .scancode = key, .ascii = ascii, .mods = kb_mods_now() };
+        kb_event_t kb_ev = { .cp = (uint8_t)ascii, .scancode = key, .mods = kb_mods_now() };
         kb_arm_repeat(key, 0, &kb_ev);
         kb_publish_event(&kb_ev);
     }

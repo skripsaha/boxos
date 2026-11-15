@@ -568,7 +568,7 @@ static LampVerdict edit_key(const painter::tui::KeyEvent &Key)
 {
     if (Key.IsExtended()) return LAMP_RUN;   /* arrows do nothing here */
 
-    char c = Key.Ascii;
+    char32_t c = Key.Character;
     if (c == painter::tui::KeyCodes::Escape) {        /* cancel: the old value stands */
         g_menu.editing = false;
         g_menu.note    = NULL;
@@ -609,7 +609,7 @@ static LampVerdict menu_key(const painter::tui::KeyEvent &Key)
         return LAMP_RUN;
     }
 
-    switch (Key.Ascii) {
+    switch (Key.Character) {
     case painter::tui::KeyCodes::Escape: g_menu.open = false;                          break;
     case painter::tui::KeyCodes::Tab:    g_menu.item = (g_menu.item + 1) % MENU_ITEMS; break;
     case painter::tui::KeyCodes::Enter:  begin_edit();                                 break;
@@ -622,17 +622,17 @@ static LampVerdict menu_key(const painter::tui::KeyEvent &Key)
 
 static LampVerdict handle_key(const painter::tui::KeyEvent &Key)
 {
-    if (Key.IsCtrl() && (Key.Ascii == 'q' || Key.Ascii == 'Q'))
+    if (Key.IsCtrl() && (Key.Character == 'q' || Key.Character == 'Q'))
         return LAMP_LEAVE;
 
     if (g_menu.editing) return edit_key(Key);
 
     /* A bare q, for the console that cannot deliver a modifier at all. It is
      * unreachable while a field is open, where q is not a hex digit anyway. */
-    if (Key.Ascii == 'q' || Key.Ascii == 'Q') return LAMP_LEAVE;
+    if (Key.Character == 'q' || Key.Character == 'Q') return LAMP_LEAVE;
 
     if (!g_menu.open) {
-        if (Key.Ascii == painter::tui::KeyCodes::Escape) g_menu.open = true;
+        if (Key.Character == painter::tui::KeyCodes::Escape) g_menu.open = true;
         return LAMP_RUN;
     }
     return menu_key(Key);

@@ -111,11 +111,11 @@ void VictoryPage::Key(const tui::KeyEvent &Pressed)
         return;
     }
     if (Pressed.IsCtrl() || Pressed.IsAlt()) return;
-    if (Pressed.Ascii == tui::KeyCodes::Tab) {
+    if (Pressed.Character == tui::KeyCodes::Tab) {
         Picked = (Picked + 1) % Total;
-    } else if (Pressed.Ascii == tui::KeyCodes::Escape) {
+    } else if (Pressed.Character == tui::KeyCodes::Escape) {
         Ctx.Go(PageId::Title);
-    } else if (Pressed.Ascii == tui::KeyCodes::Enter || Pressed.Ascii == ' ') {
+    } else if (Pressed.Character == tui::KeyCodes::Enter || Pressed.Character == ' ') {
         const Choice &Chosen = Choices[static_cast<std::size_t>(Picked)];
         if (Chosen.Again) Ctx.StartGame();
         else Ctx.Go(Chosen.Goes);

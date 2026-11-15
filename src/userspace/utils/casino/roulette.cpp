@@ -169,7 +169,7 @@ bool Roulette::Aimed(const tui::KeyEvent &Key, std::uint64_t)
 
 bool Roulette::OnKey(const tui::KeyEvent &Key, std::uint64_t NowUs)
 {
-    const kb_event_t Raw{Key.Scancode, Key.Ascii, Key.Mods};
+    const kb_event_t Raw{Key.Character, Key.Scancode, Key.Mods};
     if (KeyChordMatches(&Ctx.Shown.Keys[KeySpin], &Raw)) {
         Throw(NowUs);
         return true;
@@ -185,7 +185,7 @@ bool Roulette::OnKey(const tui::KeyEvent &Key, std::uint64_t NowUs)
         }
     }
     if (!Plain(Key)) return false;
-    switch (Key.Ascii) {
+    switch (Key.Character) {
     case tui::KeyCodes::Enter:
     case '\r':                      PlaceChip(Aim.Here().On); return true;
     case tui::KeyCodes::Backspace:  TakeChip(); return true;

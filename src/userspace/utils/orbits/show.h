@@ -44,7 +44,7 @@ private:
     bool     OnKey(const painter::tui::KeyEvent &Key);
     bool     OnChord(const painter::tui::KeyEvent &Key);
     void     OnExtended(const painter::tui::KeyEvent &Key);
-    void     OnCharacter(char Typed);
+    void     OnCharacter(char32_t Typed);
     const Aiming &Foresee();
     Readout  Reading();
     void     Paint();

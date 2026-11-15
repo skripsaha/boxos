@@ -177,13 +177,13 @@ void Slots::ChangeLines()
 
 bool Slots::OnKey(const tui::KeyEvent &Key, std::uint64_t NowUs)
 {
-    const kb_event_t Raw{Key.Scancode, Key.Ascii, Key.Mods};
+    const kb_event_t Raw{Key.Character, Key.Scancode, Key.Mods};
     if (KeyChordMatches(&Ctx.Shown.Keys[KeySpin], &Raw)) {
         Pull(NowUs);
         return true;
     }
     if (!Plain(Key)) return false;
-    switch (Key.Ascii) {
+    switch (Key.Character) {
     case ' ':
     case tui::KeyCodes::Enter:
     case '\r': Pull(NowUs); return true;

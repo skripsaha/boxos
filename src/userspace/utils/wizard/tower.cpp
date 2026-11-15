@@ -99,7 +99,7 @@ bool Tower::OnKey(const tui::KeyEvent &Key)
         Help = false;
         return true;
     }
-    const kb_event_t Raw{Key.Scancode, Key.Ascii, Key.Mods};
+    const kb_event_t Raw{Key.Character, Key.Scancode, Key.Mods};
     const auto       Is = [&](WizardKey Which) { return KeyChordMatches(&Chosen.Keys[Which], &Raw); };
     if (Is(KeyHelp)) Help = true;
     else if (Is(KeySpell)) CastRandom();
@@ -119,13 +119,13 @@ bool Tower::OnKey(const tui::KeyEvent &Key)
         }
     } else if (Key.IsCtrl() || Key.IsAlt()) {
         return true;
-    } else if (Key.Ascii == tui::KeyCodes::Escape) {
+    } else if (Key.Character == tui::KeyCodes::Escape) {
         return false;
-    } else if (Key.Ascii == tui::KeyCodes::Enter) {
+    } else if (Key.Character == tui::KeyCodes::Enter) {
         Drink();
-    } else if (Key.Ascii == ' ') {
+    } else if (Key.Character == ' ') {
         Throw();
-    } else if (Key.Ascii == tui::KeyCodes::Backspace) {
+    } else if (Key.Character == tui::KeyCodes::Backspace) {
         TakeBack();
     }
     return true;
@@ -134,12 +134,12 @@ bool Tower::OnKey(const tui::KeyEvent &Key)
 // The grimoire's keys: tab or the arrows turn the page, up and down choose, enter casts a spell chosen.
 bool Tower::OnBookKey(const tui::KeyEvent &Key)
 {
-    const kb_event_t Raw{Key.Scancode, Key.Ascii, Key.Mods};
+    const kb_event_t Raw{Key.Character, Key.Scancode, Key.Mods};
     const std::size_t Count = Reading.Page == 0 ? RecipeCount : CharmCount;
     int &Cursor = Reading.Cursor[Reading.Page];
-    if (KeyChordMatches(&Chosen.Keys[KeyBook], &Raw) || (!Key.IsExtended() && Key.Ascii == tui::KeyCodes::Escape)) {
+    if (KeyChordMatches(&Chosen.Keys[KeyBook], &Raw) || (!Key.IsExtended() && Key.Character == tui::KeyCodes::Escape)) {
         Reading.Open = false;
-    } else if (!Key.IsExtended() && Key.Ascii == tui::KeyCodes::Tab) {
+    } else if (!Key.IsExtended() && Key.Character == tui::KeyCodes::Tab) {
         Reading.Page = 1 - Reading.Page;
     } else if (Key.IsExtended()) {
         switch (Key.Scancode) {
@@ -151,7 +151,7 @@ bool Tower::OnBookKey(const tui::KeyEvent &Key)
         case tui::KeyCodes::PageDown: Cursor = std::min(static_cast<int>(Count) - 1, Cursor + 6); break;
         default: break;
         }
-    } else if (Key.Ascii == tui::KeyCodes::Enter && Reading.Page == 1) {
+    } else if (Key.Character == tui::KeyCodes::Enter && Reading.Page == 1) {
         Reading.Open = false;
         Cast(Charms()[static_cast<std::size_t>(Cursor)]);
     }

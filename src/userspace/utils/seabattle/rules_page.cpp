@@ -56,9 +56,9 @@ public:
         if (Pressed.IsExtended()) {
             if (Pressed.Scancode == tui::KeyCodes::Left || Pressed.Scancode == tui::KeyCodes::PageUp) Leaf = (Leaf + Count - 1) % Count;
             else if (Pressed.Scancode == tui::KeyCodes::Right || Pressed.Scancode == tui::KeyCodes::PageDown) Leaf = (Leaf + 1) % Count;
-        } else if (Pressed.Ascii == tui::KeyCodes::Tab || Pressed.Ascii == ' ') {
+        } else if (Pressed.Character == tui::KeyCodes::Tab || Pressed.Character == ' ') {
             Leaf = (Leaf + 1) % Count;
-        } else if (Pressed.Ascii == tui::KeyCodes::Escape || Pressed.Ascii == tui::KeyCodes::Enter) {
+        } else if (Pressed.Character == tui::KeyCodes::Escape || Pressed.Character == tui::KeyCodes::Enter) {
             Ctx.Go(PageId::Title);
         }
     }

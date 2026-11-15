@@ -232,7 +232,7 @@ void Blackjack::ChangeBet(int By)
 
 bool Blackjack::OnKey(const tui::KeyEvent &Key, std::uint64_t NowUs)
 {
-    const kb_event_t Raw{Key.Scancode, Key.Ascii, Key.Mods};
+    const kb_event_t Raw{Key.Character, Key.Scancode, Key.Mods};
     const bool       Spin = KeyChordMatches(&Ctx.Shown.Keys[KeySpin], &Raw);
     if (Key.IsExtended() && !Spin) {
         if (Key.Scancode == tui::KeyCodes::Up) ChangeBet(1);
@@ -241,7 +241,7 @@ bool Blackjack::OnKey(const tui::KeyEvent &Key, std::uint64_t NowUs)
         return true;
     }
     if (!Spin && !Plain(Key)) return false;
-    char Pressed = Spin ? ' ' : Key.Ascii;
+    char32_t Pressed = Spin ? U' ' : Key.Character;
     if (Pressed >= 'A' && Pressed <= 'Z') Pressed = static_cast<char>(Pressed - 'A' + 'a');
     if (Pressed == '=') Pressed = '+';
     if (Pressed == '_') Pressed = '-';

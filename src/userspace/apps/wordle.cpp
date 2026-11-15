@@ -148,15 +148,15 @@ public:
   }
 
   bool handle_key(const painter::tui::KeyEvent &Key) {
-    if (Key.Ascii == painter::tui::KeyCodes::Escape)
+    if (Key.Character == painter::tui::KeyCodes::Escape)
       return false;
     if (finished_) {
-      if (Key.Ascii == painter::tui::KeyCodes::Enter || Key.Ascii == ' ')
+      if (Key.Character == painter::tui::KeyCodes::Enter || Key.Character == ' ')
         reset();
       return true;
     }
 
-    char ch = Key.Ascii;
+    char32_t ch = Key.Character;
     if (ch >= 'A' && ch <= 'Z')
       ch = static_cast<char>(ch - 'A' + 'a');
     if (ch >= 'a' && ch <= 'z') {
@@ -403,8 +403,8 @@ private:
 };
 
 bool is_exit_key(const painter::tui::KeyEvent &Key) {
-  return Key.Ascii == painter::tui::KeyCodes::Escape ||
-         (Key.IsCtrl() && (Key.Ascii == 'c' || Key.Ascii == 'C'));
+  return Key.Character == painter::tui::KeyCodes::Escape ||
+         (Key.IsCtrl() && (Key.Character == 'c' || Key.Character == 'C'));
 }
 
 } // namespace

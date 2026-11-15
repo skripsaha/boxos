@@ -110,7 +110,7 @@ private:
     std::string &Typed() { return At == RowOne ? Plan.NameOne : Plan.NameTwo; }
     void        Move(int By);
     void        Change(int By);
-    void        Type(char Letter);
+    void        Type(char32_t Letter);
     void        CheckFit();
     void        Begin();
     std::string ValueOf(int Which) const;
@@ -153,13 +153,13 @@ void SetupPage::Change(int By)
     CheckFit();
 }
 
-void SetupPage::Type(char Letter)
+void SetupPage::Type(char32_t Letter)
 {
     std::string &Name = Typed();
     if (Letter == tui::KeyCodes::Backspace) {
         if (!Name.empty()) Name.pop_back();
     } else if (Letter >= ' ' && Letter <= '~' && Name.size() < MostName) {
-        Name += Letter;
+        Name += static_cast<char>(Letter);
     }
 }
 
@@ -204,16 +204,16 @@ void SetupPage::Key(const tui::KeyEvent &Pressed)
         return;
     }
     if (Pressed.IsCtrl() || Pressed.IsAlt()) return;
-    if (Pressed.Ascii == tui::KeyCodes::Escape) {
+    if (Pressed.Character == tui::KeyCodes::Escape) {
         Ctx.Go(PageId::Title);
-    } else if (Pressed.Ascii == tui::KeyCodes::Enter) {
+    } else if (Pressed.Character == tui::KeyCodes::Enter) {
         if (At == RowStart) Begin();
         else Move(1);
-    } else if (Pressed.Ascii == tui::KeyCodes::Tab) {
+    } else if (Pressed.Character == tui::KeyCodes::Tab) {
         Move(1);
     } else if (Typing()) {
-        Type(Pressed.Ascii);
-    } else if (Pressed.Ascii == ' ') {
+        Type(Pressed.Character);
+    } else if (Pressed.Character == ' ') {
         Change(1);
     }
 }

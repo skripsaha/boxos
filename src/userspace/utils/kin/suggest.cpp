@@ -39,11 +39,11 @@ Suggest::Outcome Suggest::OnKey(const tui::KeyEvent &Key)
         return Outcome::Stay;
     }
     if (Key.IsExtended() || Key.IsCtrl()) return Outcome::Passed;
-    if (Key.Ascii == tui::KeyCodes::Escape) {
+    if (Key.Character == tui::KeyCodes::Escape) {
         Close();
         return Outcome::Closed;
     }
-    if (Key.Ascii == tui::KeyCodes::Enter || Key.Ascii == '\r') {
+    if (Key.Character == tui::KeyCodes::Enter || Key.Character == '\r') {
         if (Row >= Shown.size()) return Outcome::Stay;
         Picked = Spelled(All[Shown[Row]].what);
         Close();

@@ -66,11 +66,11 @@ public:
             else if (Pressed.Scancode == tui::KeyCodes::Down) Choice = (Choice + 1) % Count;
             else if (Pressed.Scancode == tui::KeyCodes::Home) Choice = 0;
             else if (Pressed.Scancode == tui::KeyCodes::End) Choice = Count - 1;
-        } else if (Pressed.Ascii == tui::KeyCodes::Enter || Pressed.Ascii == ' ') {
+        } else if (Pressed.Character == tui::KeyCodes::Enter || Pressed.Character == ' ') {
             Ctx.Go(Menu[static_cast<std::size_t>(Choice)].Goes);
-        } else if (Pressed.Ascii == tui::KeyCodes::Escape) {
+        } else if (Pressed.Character == tui::KeyCodes::Escape) {
             Ctx.Go(PageId::Quit);
-        } else if (Pressed.Ascii == tui::KeyCodes::Tab) {
+        } else if (Pressed.Character == tui::KeyCodes::Tab) {
             Choice = (Choice + 1) % Count;
         }
     }

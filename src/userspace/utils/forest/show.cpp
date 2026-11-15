@@ -141,7 +141,7 @@ bool Show::Draw()
 // False to leave.
 bool Show::OnKey(const tui::KeyEvent &Key)
 {
-    const kb_event_t Raw{Key.Scancode, Key.Ascii, Key.Mods};
+    const kb_event_t Raw{Key.Character, Key.Scancode, Key.Mods};
     const auto       Is = [&](ForestKey Which) { return KeyChordMatches(&Chosen.Keys[Which], &Raw); };
     Say(KeptSeconds);
     if (Is(KeySeason)) {
@@ -168,7 +168,7 @@ bool Show::OnKey(const tui::KeyEvent &Key)
         case tui::KeyCodes::Down:  Speed = Slower(Speed); Real = false; break;
         default: break;
         }
-    } else if (!Key.IsCtrl() && !Key.IsAlt() && (Key.Ascii == 'q' || Key.Ascii == 'Q' || Key.Ascii == tui::KeyCodes::Escape)) {
+    } else if (!Key.IsCtrl() && !Key.IsAlt() && (Key.Character == 'q' || Key.Character == 'Q' || Key.Character == tui::KeyCodes::Escape)) {
         return false;
     }
     return true;

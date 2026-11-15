@@ -45,7 +45,7 @@ bool OnKey(TumbleWorld &World, const painter::tui::KeyEvent &Key)
         }
         return true;
     }
-    switch (Key.Ascii) {
+    switch (Key.Character) {
     case 's':
     case 'S': World.AddWeed(World.CameraX + World.ViewWidth * 0.5f); break;
     case 'c':

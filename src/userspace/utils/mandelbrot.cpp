@@ -208,7 +208,7 @@ bool Explorer::OnKey(const KeyEvent &Key)
         }
         return true;
     }
-    char Ch = Key.Ascii;
+    char32_t Ch = Key.Character;
     if (Ch >= 'A' && Ch <= 'Z') Ch = static_cast<char>(Ch - 'A' + 'a');
     switch (Ch) {
     case 'q':

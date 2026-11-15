@@ -446,7 +446,7 @@ int display_effect(uint32_t kinds, uint8_t strength, uint8_t axes, uint32_t colo
 int display_effect_lift(void);
 
 /* A word of the display on a lane's own tag, in place of a key — told from a
- * key, which is a kb_event_t of three bytes, by its length and its mark. */
+ * key, which is a kb_event_t of six bytes, by its length and its mark. */
 #define CONSOLE_NOTICE_MARK  0x4E4F5445u   /* "ETON", the bytes of NOTE */
 
 typedef enum {

@@ -86,11 +86,11 @@ public:
 
   InputResult handle_key(const painter::tui::KeyEvent &Key) {
     if (Key.Scancode == painter::tui::KeyCodes::Escape ||
-        Key.Ascii == painter::tui::KeyCodes::Escape)
+        Key.Character == painter::tui::KeyCodes::Escape)
       return InputResult::quit;
 
     if (game_over_) {
-      const char ch = Key.Ascii;
+      const char32_t ch = Key.Character;
       if (ch == painter::tui::KeyCodes::Enter || ch == '\r' || ch == ' ') {
         reset();
         render();
@@ -295,7 +295,7 @@ private:
       break;
     }
 
-    char ch = Key.Ascii;
+    char32_t ch = Key.Character;
     if (ch >= 'A' && ch <= 'Z')
       ch = static_cast<char>(ch - 'A' + 'a');
     switch (ch) {

@@ -438,7 +438,7 @@ int main()
                 Waiting = End == Through::Interrupted;
                 continue;
             }
-            char Ch = Key.Ascii;
+            char32_t Ch = Key.Character;
             if (Ch == 'q' || Ch == 'Q' || Ch == painter::tui::KeyCodes::Escape) break;
             if (Ch == 'u' || Ch == 'U') { Desk.Play.Undo(); Slides.clear(); }
             if (Ch == 'r' || Ch == 'R') { Desk.Play.New(); Slides.clear(); }

@@ -69,7 +69,7 @@ public:
 
     /* Writing. */
     void Replace(Position From, Position To, std::string_view Bytes, Merge Run);
-    void Type(char Ch, bool Overtype);
+    void Type(char32_t Ch, bool Overtype);
     void NewLine();
     void Backspace();
     void Delete();

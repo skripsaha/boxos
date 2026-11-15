@@ -201,7 +201,7 @@ bool Board::OnKey(const tui::KeyEvent &Key)
         return true;
     }
     Status.clear();
-    const kb_event_t Raw{Key.Scancode, Key.Ascii, Key.Mods};
+    const kb_event_t Raw{Key.Character, Key.Scancode, Key.Mods};
     const auto       Is = [&](BoardKey Which) { return KeyChordMatches(&Shown.Keys[Which], &Raw); };
     if (Is(KeyHelp)) {
         Help = true;
@@ -236,7 +236,7 @@ bool Board::OnKey(const tui::KeyEvent &Key)
         }
         return true;
     }
-    switch (Key.Ascii) {
+    switch (Key.Character) {
     case tui::KeyCodes::Escape:
         if (Filter.empty()) return false;
         Filter.clear();
@@ -256,8 +256,8 @@ bool Board::OnKey(const tui::KeyEvent &Key)
     default:
         break;
     }
-    if (Key.Ascii > ' ' && Key.Ascii < 0x7F) {
-        Filter += Key.Ascii;
+    if (Key.Character > ' ' && Key.Character < 0x7F) {
+        Filter += Key.Character;
         Move(0);
     }
     return true;

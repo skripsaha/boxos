@@ -130,7 +130,7 @@ bool Sandbox::OnKey(const tui::KeyEvent &Key)
         Helping = false;
         return true;
     }
-    const kb_event_t Raw{Key.Scancode, Key.Ascii, Key.Mods};
+    const kb_event_t Raw{Key.Character, Key.Scancode, Key.Mods};
     const auto       Is = [&](SandKey Which) { return KeyChordMatches(&Shown.Keys[Which], &Raw); };
     if (Is(KeyHelp)) {
         Helping = true;
@@ -155,7 +155,7 @@ bool Sandbox::OnKey(const tui::KeyEvent &Key)
         }
         return true;
     }
-    switch (Key.Ascii) {
+    switch (Key.Character) {
     case tui::KeyCodes::Escape:
     case 'q':
     case 'Q': return false;
@@ -177,8 +177,8 @@ bool Sandbox::OnKey(const tui::KeyEvent &Key)
     case 'r':
     case 'R': Restart(); break;
     default:
-        if (Key.Ascii >= '1' && Key.Ascii <= '9') Choose(Key.Ascii - '1');
-        else if (Key.Ascii == '0') Choose(EraserAt - 1);
+        if (Key.Character >= '1' && Key.Character <= '9') Choose(Key.Character - '1');
+        else if (Key.Character == '0') Choose(EraserAt - 1);
         break;
     }
     return true;

@@ -144,7 +144,7 @@ Clips::Outcome Clips::OnKey(const tui::KeyEvent &Key, bool MayPaste, std::string
         return Outcome::Stay;
     }
 
-    const char Ch = Key.Ascii;
+    const char32_t Ch = Key.Character;
     if (Ch == tui::KeyCodes::Escape) return Outcome::Closed;
     if (Ch == tui::KeyCodes::Enter || Ch == '\r') {
         if (!MayPaste) return Outcome::Closed;
