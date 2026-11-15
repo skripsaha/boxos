@@ -63,6 +63,11 @@ GlassKind Surface::Glass() const noexcept
     return State ? State->Canvas.Glass() : GlassKind::Pixels;
 }
 
+std::uint8_t Surface::Mosaics() const noexcept
+{
+    return State ? State->Canvas.Mosaics() : 0;
+}
+
 bool Surface::IsOpen() const noexcept
 {
     return State && State->Canvas.IsOpen();

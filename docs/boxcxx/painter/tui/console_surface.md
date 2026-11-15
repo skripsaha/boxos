@@ -218,6 +218,27 @@ namespace core = painter::core;
 tui::GlassKind Example(const tui::ConsoleSurface &Screen) { return Screen.Glass(); }
 ```
 
+### `ConsoleSurface::Mosaics`
+
+**Краткое описание:** Получите сетки тоньше половин, которые рисует стекло.
+
+**Параметры:** Нет; `std::uint8_t Mosaics() const noexcept`.
+
+**Возвращает:** `std::uint8_t`: флаги `DisplayMosaic`, как их сказал сервер, либо 0 без состояния.
+
+**Побочные эффекты:** Нет.
+
+**Пример:**
+
+```cpp
+#include "painter/tui/console_surface.h"
+
+namespace tui = painter::tui;
+namespace core = painter::core;
+
+std::uint8_t Example(const tui::ConsoleSurface &Screen) { return Screen.Mosaics(); }
+```
+
 ### `ConsoleSurface::Cursor`
 
 **Краткое описание:** Получите сохранённую позицию продолжения консоли с поправкой на прокрутку.

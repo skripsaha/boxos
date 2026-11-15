@@ -69,14 +69,22 @@ like, so a program asks it and does not guess from the screen's size. Painter
 does not draw pixels for it: `painter::tui` is cells, half-blocks and CP437
 glyphs, and real pixels belong to `painter::gui`.
 
+The display also says which grids finer than the halves its glass draws
+exactly (`DisplayMosaic`: quadrants, sextants, octants), and `Mosaics()` of
+`Stage`, `Surface`, `ConsoleSurface` and `Frame` gives them; today it says
+none.
+
 `PutPixel` has one pixel across a cell and two down. `FineCanvas`
 (`painter/tui/fine_canvas.h`) is the opt-in finer way to draw shapes on a
-`Frame`: each cell is two sub-pixels across and two down, and a shape
-(`Disc`, `Ellipse`, `Ring`, `Rounded`, `Line`, `Polygon`, `Fill`, or `Cover`
-for any shape given as a distance) is placed in `PutPixel`'s units and
-blended into each sub-pixel by how much of it the shape covers. Every cell a
-shape reaches is then settled by `ResolveQuad` (`painter/tui/subcell.h`),
-which picks the glyph and the two colours that reproduce the four sub-pixels
+`Frame`: each cell is two sub-pixels across and, down, as many as the glass
+draws exactly (four, three, or two), and a shape (`Disc`, `Ellipse`, `Ring`,
+`Rounded`, `Line`, `Polygon`, `Fill`, or `Cover` for any shape given as a
+distance) is placed in `PutPixel`'s units and blended into each sub-pixel by
+how much of it the shape covers. Every cell a shape reaches is then settled
+by `ResolveMosaic` (`painter/tui/mosaic.h`). On a pixel glass that draws the
+grid it is exact: the two colours and the one character of `boxos_mosaic.h`
+that split the sub-pixels with the least colour error. Otherwise it picks the
+glyph and the two colours that reproduce the four sub-pixels of two rows
 with the least colour error:
 
 - one colour (a space), the upper half, or the left half, of two mean colours;

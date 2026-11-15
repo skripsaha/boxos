@@ -40,7 +40,7 @@ DisplayLayer::DisplayLayer(core::Rect BoundsValue, const DisplayLayerOpenReply &
     : Bounds(BoundsValue), DisplayPid(Reply.display_pid), LayerId(Reply.layer_id),
       ConsoleCursor{static_cast<std::int32_t>(Reply.cursor_x),
                     static_cast<std::int32_t>(Reply.cursor_y)},
-      Kind(static_cast<GlassKind>(Reply.glass)),
+      Kind(static_cast<GlassKind>(Reply.glass)), MosaicFlags(Reply.mosaics),
       Shared(std::move(SharedValue)),
       Header(reinterpret_cast<DisplayLayerSharedHeader *>(Shared.data())), Opened(true)
 {

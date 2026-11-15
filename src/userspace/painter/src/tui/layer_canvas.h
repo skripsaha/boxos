@@ -27,6 +27,7 @@ public:
     core::Size Size() const noexcept;
     bool IsOpen() const noexcept;
     GlassKind Glass() const noexcept;
+    std::uint8_t Mosaics() const noexcept;
     std::expected<core::Point, box::error> Cursor() const noexcept;
 
     box::status Paint(core::Point Origin, const Frame &FrameBuffer) noexcept;

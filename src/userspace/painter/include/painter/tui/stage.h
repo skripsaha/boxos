@@ -106,6 +106,8 @@ public:
     bool       IsOpen() const noexcept;
     // Whether the glass is a text page or pixels, as the display holds it.
     GlassKind  Glass() const noexcept;
+    // The grids finer than the halves it draws exactly (box/display.h DisplayMosaic).
+    std::uint8_t Mosaics() const noexcept;
 
     Frame &FrameBuffer() noexcept;
     const Frame &FrameBuffer() const noexcept;

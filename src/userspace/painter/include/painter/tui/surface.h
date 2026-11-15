@@ -31,6 +31,7 @@ public:
     core::Size Size() const noexcept;
     bool IsOpen() const noexcept;
     GlassKind Glass() const noexcept;
+    std::uint8_t Mosaics() const noexcept;
 
     box::status Composite(core::Point Origin, const Frame &FrameBuffer) noexcept;
     box::status Composite(core::Point Origin, const Frame &FrameBuffer,

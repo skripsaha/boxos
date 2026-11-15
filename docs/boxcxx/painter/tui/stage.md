@@ -459,7 +459,7 @@ auto Example() { return tui::Stage::Open(20, 4); }
 
 **Побочные эффекты:** Обращается к DisplayServer, выделяет память, открывает клавиатурную подписку.
 
-**Как работает:** Открывает слой, создаёт кадр полного фактического размера и назначает ему `Glass()` сервера. Затем открывает `Keyboard` и состояние Stage; при отказе ранее созданные ресурсы освобождаются деструкторами.
+**Как работает:** Открывает слой, создаёт кадр полного фактического размера и назначает ему `Glass()` и `Mosaics()` сервера. Затем открывает `Keyboard` и состояние Stage; при отказе ранее созданные ресурсы освобождаются деструкторами.
 
 **Примечания:** Аргументы задают минимум, а не размер области. Открытие само по себе не вызывает `Present`.
 
@@ -539,6 +539,27 @@ namespace tui = painter::tui;
 namespace core = painter::core;
 
 tui::GlassKind Example(const tui::Stage &Screen) { return Screen.Glass(); }
+```
+
+### `Stage::Mosaics`
+
+**Краткое описание:** Получите сетки тоньше половин, которые рисует стекло.
+
+**Параметры:** Нет; `std::uint8_t Mosaics() const noexcept`.
+
+**Возвращает:** `std::uint8_t`: флаги `DisplayMosaic`, как их сказал сервер, либо 0 без состояния.
+
+**Побочные эффекты:** Нет.
+
+**Пример:**
+
+```cpp
+#include "painter/tui/stage.h"
+
+namespace tui = painter::tui;
+namespace core = painter::core;
+
+std::uint8_t Example(const tui::Stage &Screen) { return Screen.Mosaics(); }
 ```
 
 ### `Stage::FrameBuffer`

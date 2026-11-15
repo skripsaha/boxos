@@ -217,6 +217,27 @@ namespace core = painter::core;
 tui::GlassKind Example(const tui::Surface &Screen) { return Screen.Glass(); }
 ```
 
+### `Surface::Mosaics`
+
+**Краткое описание:** Получите сетки тоньше половин, которые рисует стекло.
+
+**Параметры:** Нет; `std::uint8_t Mosaics() const noexcept`.
+
+**Возвращает:** `std::uint8_t`: флаги `DisplayMosaic`, как их сказал сервер, либо 0 без состояния.
+
+**Побочные эффекты:** Нет.
+
+**Пример:**
+
+```cpp
+#include "painter/tui/surface.h"
+
+namespace tui = painter::tui;
+namespace core = painter::core;
+
+std::uint8_t Example(const tui::Surface &Screen) { return Screen.Mosaics(); }
+```
+
 ### `Surface::IsOpen`
 
 **Краткое описание:** Проверьте локальное открытие поверхности.

@@ -400,7 +400,7 @@ tui::GlassKind Example(const tui::Frame &Out) { return Out.Glass(); }
 
 **Побочные эффекты:** Меняет метаданные кадра.
 
-**Примечания:** Не меняет видеорежим и не перерисовывает существующие ячейки. Самостоятельному кадру назначайте `Surface::Glass()` или `ConsoleSurface::Glass()` перед работой `FineCanvas`.
+**Примечания:** Не меняет видеорежим и не перерисовывает существующие ячейки. Самостоятельному кадру назначайте `Surface::Glass()` или `ConsoleSurface::Glass()` (и `SetMosaics`) перед работой `FineCanvas`.
 
 **Пример:**
 
@@ -411,6 +411,50 @@ namespace tui = painter::tui;
 namespace core = painter::core;
 
 void Example(tui::Frame &Out) { Out.SetGlass(tui::GlassKind::Text); }
+```
+
+### `Frame::Mosaics`
+
+**Краткое описание:** Получите сетки тоньше половин, которые стекло рисует точно.
+
+**Параметры:** Нет; `std::uint8_t Mosaics() const noexcept`.
+
+**Возвращает:** `std::uint8_t`: флаги `DisplayMosaic` (`DISPLAY_MOSAIC_QUADRANTS`, `DISPLAY_MOSAIC_SEXTANTS`, `DISPLAY_MOSAIC_OCTANTS`) так, как их назвал дисплей; по умолчанию 0.
+
+**Побочные эффекты:** Нет.
+
+**Пример:**
+
+```cpp
+#include "painter/tui/frame.h"
+
+namespace tui = painter::tui;
+namespace core = painter::core;
+
+std::uint8_t Example(const tui::Frame &Out) { return Out.Mosaics(); }
+```
+
+### `Frame::SetMosaics`
+
+**Краткое описание:** Назначьте кадру сетки, которые рисует стекло.
+
+**Параметры:** `Value` (`std::uint8_t`, in): флаги `DisplayMosaic`; `void SetMosaics(std::uint8_t Value) noexcept`.
+
+**Возвращает:** `void`.
+
+**Побочные эффекты:** Меняет метаданные кадра.
+
+**Примечания:** Не перерисовывает существующие ячейки. Самостоятельному кадру назначайте `Surface::Mosaics()` или `ConsoleSurface::Mosaics()` вместе с `SetGlass` перед работой `FineCanvas`.
+
+**Пример:**
+
+```cpp
+#include "painter/tui/frame.h"
+
+namespace tui = painter::tui;
+namespace core = painter::core;
+
+void Example(tui::Frame &Out, const tui::Surface &Screen) { Out.SetMosaics(Screen.Mosaics()); }
 ```
 
 ### `Frame::Clear`

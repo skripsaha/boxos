@@ -119,6 +119,7 @@ int main()
     painter::tui::Frame Overlay = std::move(*Created);
     Overlay.ClearTransparent();
     Overlay.SetGlass(Screen.Glass());
+    Overlay.SetMosaics(Screen.Mosaics());
 
     duppo::Random Dice;
     Dice.Seed(cpu_rdtsc());

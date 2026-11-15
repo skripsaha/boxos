@@ -129,6 +129,10 @@ int Reply(const Result &Asked, error_t Error, const DisplayLayerState *Layer,
     DisplayLayerOpenReply Answer{};
     Answer.command = DISP_CMD_LAYER_OPEN;
     Answer.glass = static_cast<std::uint8_t>(Glass);
+    // The 8x16 font and the text page's own font have no quadrant, sextant or
+    // octant: on either glass those characters are drawn as whatever the font
+    // holds for them, so no grid is exact.
+    Answer.mosaics = 0;
     Answer.error = static_cast<std::int32_t>(Error);
     Answer.display_pid = cabin_info()->pid;
     Answer.cols = Model.Width();

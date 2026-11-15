@@ -522,6 +522,19 @@ typedef enum {
     DISPLAY_GLASS_PIXELS = 2,
 } DisplayGlassKind;
 
+/* Which grids finer than the halves the glass draws its cells' characters in
+ * exactly, said in every answer to an open as the flags of `mosaics`: the
+ * quadrants (two across, two down), the sextants (three down), the octants
+ * (four down), the characters of boxos_mosaic.h. A cell of two colours on a
+ * grid the glass has is then drawn as its pattern says, to the pixel. A
+ * program that draws finer than a cell asks this, and does not guess it from
+ * the kind of glass. */
+typedef enum {
+    DISPLAY_MOSAIC_QUADRANTS = 1,
+    DISPLAY_MOSAIC_SEXTANTS  = 2,
+    DISPLAY_MOSAIC_OCTANTS   = 4,
+} DisplayMosaic;
+
 typedef enum {
     DISPLAY_LAYER_FREE    = 0,
     DISPLAY_LAYER_WRITING = 1,
@@ -544,7 +557,8 @@ typedef struct PACKED {
 typedef struct PACKED {
     uint8_t  command;         /* DISP_CMD_LAYER_OPEN */
     uint8_t  glass;           /* DisplayGlassKind; given with an error as well */
-    uint8_t  reserved[2];
+    uint8_t  mosaics;         /* DisplayMosaic flags; given with an error as well */
+    uint8_t  reserved;
     int32_t  error;           /* error_t; the rest is meaningful only with 0 */
     uint32_t layer_id;
     uint32_t display_pid;     /* where FRAME and CLOSE go */

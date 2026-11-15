@@ -179,6 +179,7 @@ void Scene::Paint(tui::Frame &Out, painter::core::Rect Cells, const Look &Shown,
     }
     tui::Frame &Page = *Canvas;
     Page.SetGlass(Out.Glass());
+    Page.SetMosaics(Out.Mosaics());
     const View    Where = View::Fit({0, 0, Cells.Width, Cells.Height});
     const Timbers Wood = Timbers::For(Where.Across);
     const Tones   Tone = TonesFor(Shown, Dusk, Joy);

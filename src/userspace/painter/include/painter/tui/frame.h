@@ -84,6 +84,11 @@ public:
     GlassKind Glass() const noexcept { return Kind; }
     void      SetGlass(GlassKind Value) noexcept { Kind = Value; }
 
+    /* The grids finer than the halves the glass draws exactly, as the display
+     * said them (box/display.h DisplayMosaic): none until told. */
+    std::uint8_t Mosaics() const noexcept { return MosaicFlags; }
+    void         SetMosaics(std::uint8_t Value) noexcept { MosaicFlags = Value; }
+
     /* Clear writes an opaque background. ClearTransparent leaves every cell
      * transparent when this frame is passed to an overlay replacement. */
     void Clear(TextStyle Style = {});
@@ -138,6 +143,7 @@ private:
     std::vector<Cell>          Cells;
     std::optional<core::Point> CaretAt;
     GlassKind                  Kind = GlassKind::Pixels;
+    std::uint8_t               MosaicFlags = 0;
 };
 
 }  // namespace painter::tui
