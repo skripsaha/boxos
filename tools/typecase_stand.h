@@ -33,6 +33,7 @@ void CheckForged(Tally &Count, const char *ForgeDir);
 void CheckGlyphs(Tally &Count, const std::vector<std::uint8_t> &Font);
 void CheckSources(Tally &Count, const std::vector<std::uint8_t> &Font);
 void CheckGeometry(Tally &Count);
+void CheckSymbols(Tally &Count);
 void CheckDamage(Tally &Count, const std::vector<std::uint8_t> &Font, int Mutations);
 
 }  // namespace stand

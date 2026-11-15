@@ -3,7 +3,6 @@
 #include "typecase/geometry_source.h"
 
 #include <algorithm>
-#include <cmath>
 #include <cstdint>
 
 #include "box_lines.h"
@@ -79,25 +78,6 @@ void DrawMosaic(std::uint8_t Rows, std::uint8_t Pattern, CellInk &Ink)
     }
 }
 
-/* A circle as eight curves, each an eighth of a turn, its control where the
- * tangents at its ends meet. */
-Outline Circle(float X, float Y, float Radius)
-{
-    constexpr int   Pieces = 8;
-    constexpr float Turn   = 6.28318531f / Pieces;
-    const float     Reach  = Radius / std::cos(Turn / 2);
-    Outline         Shape;
-    Shape.Steps.push_back(Step::Move);
-    Shape.Points.push_back(Point{X + Radius, Y});
-    for (int Index = 0; Index < Pieces; Index++) {
-        const float A = Turn * static_cast<float>(Index), B = A + Turn;
-        Shape.Steps.push_back(Step::Quad);
-        Shape.Points.push_back(Point{X + Reach * std::cos((A + B) / 2), Y + Reach * std::sin((A + B) / 2)});
-        Shape.Points.push_back(Point{X + Radius * std::cos(B), Y + Radius * std::sin(B)});
-    }
-    return Shape;
-}
-
 /* Braille's dots, two across and four down, each in the middle of its part
  * of the cell, half as wide as the part: a square of pixels while that is
  * three or fewer, a round dot beyond. Dot 1 is the top left, 2 and 3 below
@@ -116,9 +96,8 @@ void DrawBraille(char32_t Character, CellInk &Ink, Rasterizer &Pen)
             Ink.Fill(X, Y, X + Side, Y + Side);
             continue;
         }
-        Ink.Smooth(Circle(static_cast<float>(Left + Right) / 2, static_cast<float>(Top + Bottom) / 2,
-                          static_cast<float>(Side) / 2),
-                   Pen);
+        const float Reach = static_cast<float>(Side) / 2;
+        Ink.Smooth(Oval(static_cast<float>(Left + Right) / 2, static_cast<float>(Top + Bottom) / 2, Reach, Reach), Pen);
     }
 }
 

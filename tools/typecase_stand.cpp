@@ -21,9 +21,11 @@
 #include <string_view>
 #include <vector>
 
+#include "boxos_symbols.h"
 #include "typecase/chain.h"
 #include "typecase/font_source.h"
 #include "typecase/geometry_source.h"
+#include "typecase/symbol_source.h"
 #include "typecase_stand.h"
 
 namespace stand {
@@ -90,6 +92,7 @@ int Checks(const char *Path, const char *ForgeDir, int Mutations)
     stand::CheckGlyphs(Count, Font);
     stand::CheckSources(Count, Font);
     stand::CheckGeometry(Count);
+    stand::CheckSymbols(Count);
     stand::CheckDamage(Count, Font, Mutations);
     std::printf("typecase stand: %d held, %d failed\n", Count.Held, Count.Failed);
     return Count.Failed == 0 ? 0 : 1;
@@ -184,7 +187,7 @@ std::vector<std::u32string> SheetLines(bool Geometry)
                                  "{}[]()<>!?@#$%^&*_+-=/\\|~`'\";:,. il1I| O0o rnm",
                                  "ÀÉÎÕÜ Ññ Çç ß Łł Ёё Йй Її Ґґ Ўў ŠŽ šž",
                                  "┌─┬─┐ ╔═╦═╗ ▀▄█▌▐ ░▒▓ ■□▪ ←→↑↓ ≠≤≥ ★ ♠♥♦♣",
-                                 "漢字 😀 \xEE\x80\x80 ⠿ 🬀 ▖▗▘▝"})
+                                 "漢字 😀 \xEE\x80\x80 ⠿ 🬀 ▖▗▘▝ " BOXOS_SYMBOL_DUPPO_TEXT " Duppo"})
             Lines.push_back(Characters(Line));
         return Lines;
     }
@@ -220,6 +223,7 @@ int Sheet(const char *Path, std::int32_t Width, std::int32_t Height, const char 
     }
     const typecase::Size Cell = typecase::FitCell(*Read, Width, Height);
     typecase::Chain      Chain;
+    Chain.Add(std::make_unique<typecase::SymbolSource>());
     Chain.Add(std::make_unique<typecase::GeometrySource>());
     Chain.Add(std::make_unique<typecase::FontSource>(std::move(*Read)));
     Chain.Add(stand::BoxFont());

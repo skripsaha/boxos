@@ -21,7 +21,7 @@ CXXFLAGS = -std=gnu++23 -nostdinc++ -fexceptions -frtti \
          -I ../../include
 
 SRCS = src/font.cpp src/character_map.cpp src/glyph_reader.cpp src/rasterizer.cpp src/size.cpp \
-       src/font_source.cpp src/bitmap_source.cpp src/geometry_source.cpp src/box_lines.cpp src/wedges.cpp src/code_box.cpp \
+       src/font_source.cpp src/bitmap_source.cpp src/geometry_source.cpp src/box_lines.cpp src/wedges.cpp src/symbol_source.cpp src/code_box.cpp \
        src/chain.cpp src/glyph_cache.cpp
 OBJS = $(SRCS:.cpp=.o)
 DEPS = $(OBJS:.o=.d)
