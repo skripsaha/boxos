@@ -33,7 +33,6 @@
 #include "touch.h"
 #include "baton.h"          /* Knock — Ctrl+Alt+Esc comes from an interrupt */
 #include "cabin_layout.h"
-#include "boxos_font.h"
 #include "journey.h"
 
 typedef struct {
@@ -202,8 +201,9 @@ void ScreenQuietEnds(void)
 void ScreenAdoptFramebuffer(uint64_t phys, uint32_t width, uint32_t height,
                             uint32_t stride, uint32_t format)
 {
-    if (!phys || width < BOXOS_FONT_WIDTH || height < BOXOS_FONT_HEIGHT ||
-        stride < width * 4u) {
+    uint32_t least_w, least_h;
+    EmergencyScreenLeastCell(&least_w, &least_h);
+    if (!phys || width < least_w || height < least_h || stride < width * 4u) {
         kprintf("[SCREEN] the loader's framebuffer is not one this screen can draw on "
                 "(phys 0x%lx, %ux%u, stride %u); the text page stays\n",
                 (unsigned long)phys, width, height, stride);
@@ -231,9 +231,10 @@ void ScreenAdoptFramebuffer(uint64_t phys, uint32_t width, uint32_t height,
     console_lock_release();
     spin_unlock(&s_screen_turn);
 
+    uint32_t cols, rows, cell_w, cell_h;
+    EmergencyScreenCells(&cols, &rows, &cell_w, &cell_h);
     kprintf("[SCREEN] framebuffer %ux%u, stride %u, format %u — %u columns by %u rows "
-            "of the 8x16 font\n", width, height, stride, format,
-            width / BOXOS_FONT_WIDTH, height / BOXOS_FONT_HEIGHT);
+            "in cells of %ux%u from the imprint\n", width, height, stride, format, cols, rows, cell_w, cell_h);
 }
 
 /* =========================================================================

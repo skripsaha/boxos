@@ -29,9 +29,12 @@ CXXFLAGS = -std=gnu++23 -nostdinc++ -fexceptions -frtti -fcoroutines \
          -I../boxlib/include \
          -I../boxcxx/include/std -I../boxcxx/include \
          -I../typecase/include \
-         -I../../include
+         -I../../include \
+         -I$(IMPRINT_DIR)
 
 BOXLIB_DIR   = ../boxlib
+# Where the build wrote the imprint's data (the top Makefile says it).
+IMPRINT_DIR ?= ../../../build/imprint_data
 BOXCXX_DIR   = ../boxcxx
 LDFLAGS      = -nostdlib -static -T $(BOXLIB_DIR)/user.ld -Wl,-pie -Wl,--no-dynamic-linker -Wl,-z,pack-relative-relocs
 BOXLIB       = ../boxlib/libbox.a

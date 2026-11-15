@@ -619,18 +619,18 @@ std::int32_t CellHeight(std::uint32_t Tall)
 }
 
 // The person's font, read and made a font of: none when it is not found or
-// does not read — said, and the 8x16 font draws.
+// does not read — said, and the imprint draws.
 std::optional<typecase::Font> PersonsFont()
 {
     const char *Name = settings_text("text font");
     std::expected<std::vector<std::uint8_t>, std::string> Bytes = FontFileRead(Name, settings_text("text tags"));
     if (!Bytes) {
-        kdbg_print("[display] %s; the 8x16 font draws", Bytes.error().c_str());
+        kdbg_print("[display] %s; the imprint draws", Bytes.error().c_str());
         return std::nullopt;
     }
     std::expected<typecase::Font, typecase::Fault> Face = typecase::Font::Read(std::move(*Bytes));
     if (!Face) {
-        kdbg_print("[display] %s is no font this display reads — %s; the 8x16 font draws", Name,
+        kdbg_print("[display] %s is no font this display reads — %s; the imprint draws", Name,
                    Face.error().Said.c_str());
         return std::nullopt;
     }
@@ -677,7 +677,7 @@ int main(void)
     if (g_easel->Pixels()) {
         try {
             std::optional<typecase::Font> Face = PersonsFont();
-            const char *Drawn = Face ? settings_text("text font") : "the 8x16 font";
+            const char *Drawn = Face ? settings_text("text font") : "the imprint";
             g_typesetter.emplace(std::move(Face), CellHeight(g_easel->PixelHeight()));
             g_easel->SetTypesetter(*g_typesetter);
             kdbg_print("[display] text: %s in cells of %dx%d, %ux%u of them", Drawn, g_typesetter->Cell().Width,

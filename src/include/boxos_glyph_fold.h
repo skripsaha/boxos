@@ -2,15 +2,16 @@
  * boxos_glyph_fold.h — one contract on a character, held where the glyphs are.
  *
  * BoxOS speaks UTF-8 and a cell of the glass holds a character (text_cell.h).
- * The 256-glyph 8×16 font in boxos_font.h cannot draw them all, so the fold
- * from a codepoint to one of its glyphs happens at the font and nowhere
- * upstream, in the two hands that draw with it: the display program, a cell
- * at a time (BoxGlyphFoldOne), and the kernel's Emergency Screen, a line of
- * text at a time (BoxGlyphFoldCodepoint). One table, so a character looks the
- * same on both.
+ * A VGA text page draws a cell with the adapter's own 256-glyph CP437 font,
+ * which cannot draw them all, so the fold from a codepoint to one of its
+ * glyphs happens at the text page and nowhere upstream, in the two hands that
+ * write one: the display program, a cell at a time (BoxGlyphFoldOne), and the
+ * kernel's Emergency Screen, a line of text at a time (BoxGlyphFoldCodepoint).
+ * One table, so a character looks the same on both. A framebuffer folds
+ * nothing: its hands draw the character itself (boxos_imprint.h, Typecase).
  *
  * The table is the whole CP437 font read the other way — every character a
- * glyph of boxos_font.h draws — and, for the few that CP437 has no glyph of,
+ * glyph of it draws — and, for the few that CP437 has no glyph of,
  * what the text was written with before it was written in Unicode: an em
  * dash as the rule, × as x, ∧ as ^, ≠ as != (two cells, so a line of text
  * folds it and a cell does not); and BoxOS's own characters

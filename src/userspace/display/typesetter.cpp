@@ -13,12 +13,11 @@
 
 #include "box/types.h"
 #include "box/display.h"
-#include "boxos_font.h"
-#include "boxos_glyph_fold.h"
+#include "boxos_imprint_data.h"
 #include "boxos_mosaic.h"
-#include "typecase/bitmap_source.h"
 #include "typecase/font_source.h"
 #include "typecase/geometry_source.h"
+#include "typecase/imprint_source.h"
 #include "typecase/symbol_source.h"
 
 namespace {
@@ -29,22 +28,13 @@ constexpr std::size_t KeptBytes = std::size_t{1} << 20;
 
 const typecase::GlyphImage Nothing{};
 
-// The cell of the 8x16 font's type: half as wide as it is tall, its baseline
-// a quarter of the height up from the foot, where sixteen rows put it.
-typecase::Size BitmapCell(std::int32_t Height)
+// The cell of the imprint's type: its largest size no taller than Height,
+// the smallest when even that is taller.
+typecase::Size ImprintCell(std::int32_t Height)
 {
-    return typecase::Size{0, std::max(Height / 2, 1), Height, Height * 3 / 4};
-}
-
-// The glyph of the 8x16 font that draws Character as itself, by the fold
-// every hand that draws with it shares (boxos_glyph_fold.h): none for a
-// character it would show as the box in its place, nor for 0.
-std::optional<std::uint32_t> FoldedGlyph(char32_t Character)
-{
-    if (Character == 0) return std::nullopt;
-    const unsigned char Glyph = BoxGlyphFoldOne(Character);
-    if (Glyph == static_cast<unsigned char>(BOXOS_GLYPH_FOLD_BOX) && Character != U'■') return std::nullopt;
-    return Glyph;
+    const BoxImprintSize &Cell =
+        BoxSystemImprint.Sizes[BoxImprintSizeFor(&BoxSystemImprint, static_cast<std::uint32_t>(std::max(Height, 0)))];
+    return typecase::Size{0, Cell.Width, Cell.Height, Cell.Baseline};
 }
 
 // The grids every pattern of which Geometry draws: to the cell, exactly.
@@ -63,16 +53,14 @@ std::uint8_t GridsOf(const typecase::GeometrySource &Geometry)
 }  // namespace
 
 Typesetter::Typesetter(std::optional<typecase::Font> Face, std::int32_t Height)
-    : At(Face ? typecase::FitCell(*Face, Height) : BitmapCell(Height)), Kept(Sources, KeptBytes)
+    : At(Face ? typecase::FitCell(*Face, Height) : ImprintCell(Height)), Kept(Sources, KeptBytes)
 {
     auto Geometry = std::make_unique<typecase::GeometrySource>();
     Grids         = GridsOf(*Geometry);
     Sources.Add(std::make_unique<typecase::SymbolSource>());
     Sources.Add(std::move(Geometry));
     if (Face) Sources.Add(std::make_unique<typecase::FontSource>(std::move(*Face)));
-    Sources.Add(std::make_unique<typecase::BitmapSource>(
-        std::span<const std::uint8_t>(&BoxFontGlyphs[0][0], sizeof(BoxFontGlyphs)), BOXOS_FONT_WIDTH,
-        BOXOS_FONT_HEIGHT, FoldedGlyph));
+    Sources.Add(std::make_unique<typecase::ImprintSource>(BoxSystemImprint));
 }
 
 const typecase::GlyphImage &Typesetter::Glyph(char32_t Character) noexcept

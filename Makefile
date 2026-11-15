@@ -856,6 +856,19 @@ TYPECASE_LIB   = $(TYPECASE_DIR)/libtypecase.a
 TYPECASE_FONTS = $(TYPECASE_DIR)/fonts/JetBrainsMonoNL-Regular.ttf $(TYPECASE_DIR)/fonts/JetBrainsMonoNL-Bold.ttf \
                  $(TYPECASE_DIR)/fonts/JetBrainsMono-OFL.txt
 
+# The imprint (src/include/boxos_imprint.h): the system's characters drawn
+# ahead of time by Typecase from the system's font, for the hands that cannot
+# read one — the kernel's Emergency Screen, the display's rescue. tools/imprint
+# makes it at every build from the font, so the font stays the one account of
+# how text looks, and nothing of it is kept in the tree. The tool is built for
+# the host from Typecase's very sources, as tools/typecase_stand.sh builds them.
+CXX_HOST       = c++
+IMPRINT_FONT   = $(TYPECASE_DIR)/fonts/JetBrainsMonoNL-Regular.ttf
+IMPRINT_TOOL   = $(BUILDDIR)/imprint
+IMPRINT_DIR    = $(BUILDDIR)/imprint_data
+IMPRINT_DATA   = $(IMPRINT_DIR)/boxos_imprint_data.h
+CFLAGS        += -I$(IMPRINT_DIR)
+
 # Utility ELF binaries
 UTILS_DIR = $(USERSPACE_DIR)/utils
 UTIL_NAMES = create show files tag untag name trash delete assemble \
@@ -1284,6 +1297,22 @@ $(PAINTER_LIB): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxc
 .PHONY: painter
 painter: $(PAINTER_LIB)
 
+$(IMPRINT_TOOL): tools/imprint.cpp tools/imprint_make.cpp tools/imprint_make.h \
+                 $(wildcard $(TYPECASE_DIR)/src/*.cpp) $(wildcard $(TYPECASE_DIR)/src/*.h) \
+                 $(wildcard $(TYPECASE_DIR)/include/typecase/*.h) $(SRCDIR)/include/boxos_imprint.h \
+                 $(SRCDIR)/include/boxos_symbols.h $(SRCDIR)/include/boxos_mascot.h \
+                 $(SRCDIR)/include/boxos_mosaic.h | $(BUILDDIR)
+	@echo "Compiling the imprint tool for $(UNAME_S) ($(UNAME_M))..."
+	@$(CXX_HOST) -std=c++23 -O2 -Wall -Wextra -I$(TYPECASE_DIR)/include -I$(SRCDIR)/include -Itools \
+		-o $@ $(filter %.cpp,$^)
+
+$(IMPRINT_DATA): $(IMPRINT_TOOL) $(IMPRINT_FONT)
+	@mkdir -p $(@D)
+	@$(IMPRINT_TOOL) $(IMPRINT_FONT) $@
+
+# The one file of the kernel that includes the imprint's data.
+$(BUILDDIR)/kernel/drivers/video/emergency_screen.o: $(IMPRINT_DATA)
+
 # Typecase, likewise a library of its own: the display draws through it, and
 # tools/typecase_stand.sh builds and holds it.
 .PHONY: $(TYPECASE_LIB)
@@ -1348,9 +1377,10 @@ $(HUB_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a
 	@echo "hub.elf: $$(stat -f%z $(HUB_BIN) 2>/dev/null || stat -c%s $(HUB_BIN) 2>/dev/null) bytes"
 
 # Build display server
-$(DISPLAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(TYPECASE_LIB) $(NAMEPLATE_TOOL)
+$(DISPLAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(TYPECASE_LIB) $(IMPRINT_DATA) \
+                $(NAMEPLATE_TOOL)
 	@echo "Building display server..."
-	@cd $(DISPLAY_DIR) && $(MAKE)
+	@cd $(DISPLAY_DIR) && $(MAKE) IMPRINT_DIR=$(abspath $(IMPRINT_DIR))
 	@echo "display.elf: $$(stat -f%z $(DISPLAY_BIN) 2>/dev/null || stat -c%s $(DISPLAY_BIN) 2>/dev/null) bytes"
 
 # `timezone` carries the zone database, which is C++. Stated BEFORE the rule
