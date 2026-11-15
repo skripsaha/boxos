@@ -238,7 +238,7 @@ static LecternTried Try(LecternChoice *s, const LecternCandidate *c)
 /* ------------------------------------------------------------------------- */
 
 /* The kernel BOOT names: said, and a kernel to try — 0 when its bytes overrun
- * its blocks, refused (tagboot.c TagFsLoadKernel, bootread.py Loaded). */
+ * its blocks, refused (bootread.py Loaded says it the same way). */
 static int BootNamed(LecternChoice *s, const VolumeBoot *boot)
 {
     uint64_t    have = (uint64_t)boot->kernel_blocks * VOLUME_BLOCK_BYTES;

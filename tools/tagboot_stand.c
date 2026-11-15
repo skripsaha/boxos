@@ -91,11 +91,11 @@ static const uint8_t *StandStamp(const uint8_t *deed, uint16_t kind, uint16_t *b
 
 /* The Deed taken up as TagBoot takes it (tagboot_deed.c, DeedTakeUp): the
  * desk's volume, FRAME and atom, and BOOT — *named 0 when it names no kernel.
- * 0 with nothing for the Lectern to read, said in TagBoot's words. */
+ * 0 with nothing for the Lectern to read — a Deed with no FRAME is no book,
+ * and TagBoot passes its medium over — said in TagBoot's words. */
 static int StandDeed(const uint8_t *deed, LecternDesk *desk, VolumeBoot *boot, int *named)
 {
     uint16_t       bytes = 0, frame_bytes = 0, geo_bytes = 0;
-    const uint8_t *layout = StandStamp(deed, VOLUME_STAMP_LAYOUT, &bytes);
     const uint8_t *frame  = StandStamp(deed, VOLUME_STAMP_FRAME, &frame_bytes);
     const uint8_t *stamp  = StandStamp(deed, VOLUME_STAMP_BOOT, &bytes);
     const uint8_t *geo    = StandStamp(deed, VOLUME_STAMP_GEOMETRY, &geo_bytes);
@@ -105,8 +105,7 @@ static int StandDeed(const uint8_t *deed, LecternDesk *desk, VolumeBoot *boot, i
 
     memcpy(&d, deed, sizeof(d));
     if (!frame) {
-        printf("boot: a format-v%s volume — the loader takes its kernel as it always has, held to no book\n",
-               layout ? "1" : "-");
+        printf("boot: this deed bears no FRAME, so its volume is no book — an older one, or not TagFS's\n");
         return 0;
     }
     if ((why = VolumeFrameCheck(frame, frame_bytes, d.tail_sector, &note)) != NULL) {
