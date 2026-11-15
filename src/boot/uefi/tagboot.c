@@ -60,11 +60,9 @@ static __attribute__((noinline)) void PhysWrite16(uint64_t addr, uint16_t val)
  * loop over uncontrolled memory. */
 #define EFI_CFG_TABLE_MAX_ENTRIES  256U
 
-/* KERNEL_LOAD_ADDR is tagboot.h's; KERNEL_HEADER_VERSION — the header layout
- * bootloader and kernel agree on, bumped when src/kernel/entry/
- * kernel_entry.asm changes its shape, a mismatch refused — and
- * KERNEL_MAX_SIZE are the Lectern's (tagboot_lectern.h), which holds every
- * kernel to them before it is jumped into. */
+/* KERNEL_LOAD_ADDR is tagboot.h's; KERNEL_MAX_SIZE is the Lectern's
+ * (tagboot_lectern.h), which holds every kernel to it before it is jumped
+ * into. */
 #define E820_COUNT_ADDR       0x500ULL
 #define E820_SIZE_ADDR        0x502ULL
 #define E820_MAP_ADDR         0x504ULL
@@ -2399,28 +2397,13 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     if (stop) Panic(stop);
 
     /* Validate kernel header magic — 'KERNEL' at byte offset 2.
-     * Kernel header layout:
+     * Kernel header layout (kernel_entry.asm):
      *   +0  2 bytes  jmp short .past_header
      *   +2  6 bytes  "KERNEL"
-     *   +8  4 bytes  header version
-     *   +12 4 bytes  _kernel_phys_end  (physical end INCLUDING BSS)
+     *   +8  4 bytes  _kernel_phys_end  (physical end INCLUDING BSS)
      */
     if (!MemEqual((const void *)(uintptr_t)(KERNEL_LOAD_ADDR + 2), "KERNEL", 6)) {
         Panic("kernel header magic invalid — wrong binary at load address");
-    }
-    /* Header version: bootloader and kernel must agree on the layout below.
-     * If the kernel header version drifts past what we know how to parse,
-     * the offsets/fields might mean something different — refuse to boot
-     * an unrecognised kernel rather than parse it as the wrong shape. */
-    uint32_t hdr_version = 0;
-    MemCopy(&hdr_version, (const void *)(uintptr_t)(KERNEL_LOAD_ADDR + 8), 4);
-    if (hdr_version != KERNEL_HEADER_VERSION) {
-        Print("TagBoot: kernel header version mismatch — got ");
-        PrintDec(hdr_version);
-        Print(", expected ");
-        PrintDec(KERNEL_HEADER_VERSION);
-        Print("\r\n");
-        Panic("incompatible kernel header version");
     }
     Print("TagBoot: kernel header OK\r\n");
 
@@ -2429,7 +2412,7 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
      * before BSS end, kernel_entry.asm's "rep stosb" will overwrite them. */
     uint32_t header_phys_end = 0;
     MemCopy(&header_phys_end,
-            (const void *)(uintptr_t)(KERNEL_LOAD_ADDR + 12), 4);
+            (const void *)(uintptr_t)(KERNEL_LOAD_ADDR + 8), 4);
 
     uint64_t kernel_end_phys = KERNEL_LOAD_ADDR + loaded_bytes;
 

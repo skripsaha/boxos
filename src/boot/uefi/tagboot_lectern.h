@@ -47,9 +47,7 @@
 #include "volume_ribbon.h"
 #include "volume_digest.h"
 
-/* The kernel's header (kernel_entry.asm): "KERNEL" at byte 2, the version of
- * the header at byte 8 — the one this loader reads — and the most it places. */
-#define KERNEL_HEADER_VERSION 1u
+/* The most a kernel may be that this loader places. */
 #define KERNEL_MAX_SIZE       0x2000000ull   /* 32 MB */
 
 /*

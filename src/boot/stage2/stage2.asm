@@ -199,7 +199,7 @@ DEED_SEG                equ DEED_ADDR >> 4
 
 KERNEL_HDR_MAGIC        equ 0x4E52454B  ; "KERN" little-endian
 KERNEL_HDR_MAGIC_HI     equ 0x4C45      ; "EL" little-endian
-KERNEL_HDR_VERSION      equ 1           ; must match kernel_entry.asm dd at offset +8
+KERNEL_HDR_PHYS_END     equ 8           ; kernel_entry.asm: _kernel_phys_end, BSS included
 
 ; The volume's block and the sectors in it — owned by src/include/volume_deed.h
 ; (VOLUME_BLOCK_BYTES, VOLUME_BLOCK_SECTORS). NASM can't include C headers, so
@@ -314,7 +314,7 @@ protected_mode_start:
     jmp 0x18:long_mode_start
 
 ; Computes page table and stack addresses from the REAL kernel memory footprint.
-; Reads _kernel_end from kernel header at offset +12 (filled by linker, includes BSS).
+; Reads _kernel_end from kernel header at offset +8 (filled by linker, includes BSS).
 ; Layout (low to high):
 ;   kernel_end  →  guard  →  page tables (32KB)  →  guard  →  stack space (64KB)
 ;                                                              ↑ ESP here (top, grows down)
@@ -322,8 +322,8 @@ compute_dynamic_layout:
     push eax
 
     ; Read true kernel_end from kernel header (includes BSS section)
-    ; Header: [jmp 2B][KERNEL 6B][version 4B][kernel_end 4B @ offset +12]
-    mov eax, [KERNEL_RUN_ADDR + 12]
+    ; Header: [jmp 2B][KERNEL 6B][kernel_end 4B @ offset +8]
+    mov eax, [KERNEL_RUN_ADDR + KERNEL_HDR_PHYS_END]
 
     ; Round kernel_end up to 2 MB so the guard sits on a clean PD boundary.
     add eax, 0x1FFFFF
@@ -461,14 +461,14 @@ long_mode_start:
 
     ; kernel_end = the *true* end of memory the kernel will occupy at
     ; runtime — i.e. including BSS. The linker bakes that value into the
-    ; kernel header at offset +12 (`_kernel_phys_end`), and that's the
+    ; kernel header at offset +8 (`_kernel_phys_end`), and that's the
     ; same value compute_dynamic_layout already trusted to place the
     ; page tables. Reporting `KERNEL_RUN_ADDR + kernel_loaded_bytes`
     ; here used to leak the wrong number out of BIOS boot — the kernel
     ; saw a kernel_end that stopped before BSS. UEFI's tagboot already
     ; reports the BSS-inclusive value, so reporting it here too keeps
     ; both boot paths telling the same story to PMM.
-    mov eax, [KERNEL_RUN_ADDR + 12]
+    mov eax, [KERNEL_RUN_ADDR + KERNEL_HDR_PHYS_END]
     add eax, 0xFFF
     and eax, 0xFFFFF000
     mov dword [BOOT_INFO_ADDR+20],   eax                 ; +20: kernel_end
@@ -1844,26 +1844,12 @@ validate_kernel_magic:
     cmp ax, KERNEL_HDR_MAGIC_HI
     jne .bad_magic
 
-    ; Header version at offset +8 must match what the bootloader speaks.
-    ; A drift here means the kernel layout (e.g. _kernel_phys_end position)
-    ; might have moved — refuse to launch with stale assumptions.
-    a32 mov eax, [es:edi + 8]
-    cmp eax, KERNEL_HDR_VERSION
-    jne .bad_version
-
     pop edi
     pop eax
     ret
 
 .bad_magic:
     mov si, msg_kernel_bad_magic
-    call print_string_16
-    cli
-    hlt
-    jmp $
-
-.bad_version:
-    mov si, msg_kernel_bad_version
     call print_string_16
     cli
     hlt
@@ -2990,7 +2976,6 @@ msg_no_long_mode      db '[ERROR] 64-bit mode not supported!', 13, 10, 0
 msg_entering_protected db 'Entering protected mode...', 13, 10, 0
 ; (page table validation now done dynamically in 32-bit mode via VGA "NO MEM" on failure)
 msg_kernel_bad_magic      db '[FATAL] Kernel header magic mismatch — corrupted load!', 13, 10, 0
-msg_kernel_bad_version    db '[FATAL] Kernel header version mismatch — rebuild required!', 13, 10, 0
 
 ;=============================================================================
 ; Assemble-time invariants. These cost nothing at runtime and each one stands
