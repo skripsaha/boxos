@@ -9034,13 +9034,10 @@ run_quill() {
 # and interleave are the tree's own since step 1.3 — each must behave with
 # nothing put in. One fix that used to be emulated here is the tree's own
 # as well, and so it is taken OUT, and its oracle must see the defect come
-# back: the Use Context's chain (step 1.6B, use_memory.c) — never staked, a context of 1000 bytes is
-# carried by nothing and the volume does not remember it (usememory). A book
-# carries the word in its stitch, not on a chain, so its stitch takes it out
-# too (sewing.c StitchBuild): a word with bytes finds no room on the ribbon,
-# the stitch is laid without it and the one who said it is refused — the
-# clear, an empty word, still rides. Each of the two bites its own format and
-# leaves the other's road as it was, so the mutants are one set on either.
+# back: the Use Context's word, which the stitch carries (sewing.c
+# StitchBuild) — a word with bytes finds no room on the ribbon, the stitch is
+# laid without it and the one who said it is refused, so a context of 1000
+# bytes is not remembered (usememory); the clear, an empty word, still rides.
 # fidhistory keeps one file in a thousand, so its guest must count them. The
 # slab stops counting, so the kernel's heap self-test must say FAILED. The
 # kernel's copies stop bringing in a page the program has not touched
@@ -9049,14 +9046,10 @@ run_quill() {
 # without the other. And first, with no machine at all, caveat_judge's three
 # answers in their approved words.
 quill_mutants_on() {
-    mutate src/kernel/tagfs/use_memory/use_memory.c
     mutate src/kernel/tagfs/settle/sewing.c
     mutate src/userspace/apps/quilltest_throwaway.c
     python3 - <<'EOF2'
 for p, a, b in (
-    ("src/kernel/tagfs/use_memory/use_memory.c",
-     "    error_t rc   = UseChainStake(s_cycle.need, &s_cycle.chain, &s_cycle.got);\n",
-     "    error_t rc   = ERR_TAGFS_NO_SPACE;   /* logcheck mutation: no chain is staked, a Use Context rides on nothing */\n"),
     ("src/kernel/tagfs/settle/sewing.c",
      "    error_t rc   = StitchLay(s, &word);\n",
      "    error_t rc   = s->use && s->use->bytes ? (word = true, ERR_TAGFS_NO_SPACE) : StitchLay(s, &word);   /* logcheck mutation: a word with bytes finds no room on the ribbon */\n"),
@@ -9067,7 +9060,6 @@ for p, a, b in (
     assert s.count(a) == 1, "quillmut anchor missing in %s: %s" % (p, a.strip().splitlines()[0])
     open(p, "w").write(s.replace(a, b, 1))
 EOF2
-    mut_done src/kernel/tagfs/use_memory/use_memory.c "logcheck mutation" 1
     mut_done src/kernel/tagfs/settle/sewing.c "logcheck mutation" 1
     mut_done src/userspace/apps/quilltest_throwaway.c "logcheck mutation" 1
 
@@ -9096,7 +9088,6 @@ EOF2
 
 quill_mutants_off() {
     restore src/kernel/tagfs/ink/ink.c
-    restore src/kernel/tagfs/use_memory/use_memory.c
     restore src/kernel/tagfs/settle/sewing.c
     restore src/userspace/apps/quilltest_throwaway.c
     restore src/lib/kernel/slab.c

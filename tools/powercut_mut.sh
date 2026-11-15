@@ -41,7 +41,7 @@ run_noanchormut() {
     mut_on src/kernel/tagfs/settle/cadence.c "logcheck mutation" <<'EOF'
 import sys
 p = sys.argv[1]; s = open(p).read()
-a = "    if (waiters || closed || demand)\n        return CADENCE_NOW;\n"
+a = "    if (waiters || demand)\n        return CADENCE_NOW;\n"
 assert s.count(a) == 1
 open(p, "w").write(s.replace(a, "    if (waiters)\n        return CADENCE_NOW;\n"
                                 "    return CADENCE_REST;   /* logcheck mutation: the cadence is off, only a waiter starts a cycle */\n"))
