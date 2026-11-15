@@ -16,6 +16,11 @@ namespace typecase {
 
 GlyphImage DrawCodeBox(char32_t Character, const Size &At);
 
+/* The empty box alone: what a missing character is when its code is not to
+ * be said — the light line a pixel in from the cell's edges, or the cell
+ * filled when it is too small for that. */
+GlyphImage DrawEmptyBox(const Size &At);
+
 }  // namespace typecase
 
 #endif  // TYPECASE_CODE_BOX_H

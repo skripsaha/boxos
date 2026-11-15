@@ -6,10 +6,11 @@
  *   typecase_stand checks FONT DIR [MUTATIONS]    every check; the forged fonts written into DIR
  *   typecase_stand sheet FONT WIDTH HEIGHT OUT [MAGNIFY]
  *                                                 lines of text in cells of WIDTH by HEIGHT, a PNG,
- *                                                 through the chain a screen of cells asks: geometry,
- *                                                 the font, the bitmap font BoxOS carries, the code
+ *                                                 through the chain a screen of cells asks: BoxOS's
+ *                                                 own symbols, geometry, the font, its imprint, the code
  *   typecase_stand geometry FONT WIDTH HEIGHT OUT [MAGNIFY]
  *                                                 the same, of frames and every character geometry draws
+ *   typecase_stand imprint-digest FONT            the digest of the imprint made from FONT
  */
 
 #include <cmath>
@@ -25,7 +26,9 @@
 #include "typecase/chain.h"
 #include "typecase/font_source.h"
 #include "typecase/geometry_source.h"
+#include "typecase/imprint_source.h"
 #include "typecase/symbol_source.h"
+#include "imprint_make.h"
 #include "typecase_stand.h"
 
 namespace stand {
@@ -93,6 +96,7 @@ int Checks(const char *Path, const char *ForgeDir, int Mutations)
     stand::CheckSources(Count, Font);
     stand::CheckGeometry(Count);
     stand::CheckSymbols(Count);
+    stand::CheckImprint(Count, Font);
     stand::CheckDamage(Count, Font, Mutations);
     std::printf("typecase stand: %d held, %d failed\n", Count.Held, Count.Failed);
     return Count.Failed == 0 ? 0 : 1;
@@ -221,12 +225,18 @@ int Sheet(const char *Path, std::int32_t Width, std::int32_t Height, const char 
         std::printf("broken: %s\n", Read.error().Said.c_str());
         return 1;
     }
-    const typecase::Size Cell = typecase::FitCell(*Read, Width, Height);
+    const auto Imprinted = MakeImprint(stand::Load(Path));
+    if (!Imprinted) {
+        std::printf("broken: %s\n", Imprinted.error().c_str());
+        return 1;
+    }
+    const BoxImprint     Imprint = Imprinted->View();
+    const typecase::Size Cell    = typecase::FitCell(*Read, Width, Height);
     typecase::Chain      Chain;
     Chain.Add(std::make_unique<typecase::SymbolSource>());
     Chain.Add(std::make_unique<typecase::GeometrySource>());
     Chain.Add(std::make_unique<typecase::FontSource>(std::move(*Read)));
-    Chain.Add(stand::BoxFont());
+    Chain.Add(std::make_unique<typecase::ImprintSource>(Imprint));
 
     const std::vector<std::u32string> Lines = SheetLines(Geometry);
     std::size_t Columns = 0;
@@ -273,7 +283,13 @@ int main(int Count, char **Words)
     if ((Mode == "sheet" || Mode == "geometry") && Count >= 6)
         return Sheet(Words[2], std::stoi(Words[3]), std::stoi(Words[4]), Words[5], Count > 6 ? std::stoi(Words[6]) : 1,
                      Mode == "geometry");
+    if (Mode == "imprint-digest" && Count >= 3) {
+        const auto Made = MakeImprint(stand::Load(Words[2]));
+        if (!Made) return 1;
+        stand::SayImprintDigest(Made->View());
+        return 0;
+    }
     std::fprintf(stderr, "usage: typecase_stand outlines FONT [INDEX] | checks FONT DIR [MUTATIONS] | "
-                         "sheet|geometry FONT WIDTH HEIGHT OUT [MAGNIFY]\n");
+                         "sheet|geometry FONT WIDTH HEIGHT OUT [MAGNIFY] | imprint-digest FONT\n");
     return 2;
 }

@@ -10,7 +10,9 @@
 # a fine sampling of every glyph; the sources, the chain and the cache to
 # what they promise; geometry — every frame line leaving the cell at its
 # weight's pixels, every mosaic and its complement filling the cell once, the
-# eighths, shades and braille — at ten sizes; the stand's own fonts — every
+# eighths, shades, wedges and braille — at ten sizes; Duppo's two halves; the
+# imprint made from the tree's font, every glyph the chain's picture; the
+# stand's own fonts — every
 # character map format, every way a component is put in place, nesting to
 # the limit and past it, cycles, a collection — to what each was made to
 # say; each named damage of
@@ -42,7 +44,8 @@ if grep -q 'warning:' "$WORK/make.log"; then
 fi
 
 FLAGS="-std=c++23 -g -O1 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all"
-$CXX_HOST $FLAGS -I$LIB/include -Isrc/include -Itools tools/typecase_stand*.cpp $LIB/src/*.cpp -o "$WORK/stand" \
+$CXX_HOST $FLAGS -I$LIB/include -Isrc/include -Itools tools/typecase_stand*.cpp tools/imprint_make.cpp $LIB/src/*.cpp \
+    -o "$WORK/stand" \
     > "$WORK/cc.log" 2>&1 ||
     { cat "$WORK/cc.log"; echo "typecase: harness failed — the stand did not build"; exit 2; }
 
@@ -53,6 +56,23 @@ FAILED=$(sed -n 's/^typecase stand: [0-9]* held, \([0-9]*\) failed/\1/p' "$WORK/
 if [ -z "$HELD" ] || [ -z "$FAILED" ]; then
     echo "typecase: harness failed — the checks did not finish (a sanitizer stopped them?)"
     exit 2
+fi
+
+# The imprint as the build writes it — tools/imprint, the header, a C program
+# reading it as the kernel does — said alike with the imprint the stand made.
+$CXX_HOST -std=c++23 -O2 -Wall -Wextra -Werror -I$LIB/include -Isrc/include -Itools tools/imprint.cpp \
+    tools/imprint_make.cpp $LIB/src/*.cpp -o "$WORK/imprint" > "$WORK/imprint.log" 2>&1 &&
+    "$WORK/imprint" "$FONT" "$WORK/boxos_imprint_data.h" >> "$WORK/imprint.log" 2>&1 &&
+    ${CC_HOST:-cc} -std=c11 -Wall -Wextra -Werror -I"$WORK" -Isrc/include tools/typecase_stand_imprint.c \
+        -o "$WORK/digest" >> "$WORK/imprint.log" 2>&1 ||
+    { cat "$WORK/imprint.log"; echo "typecase: harness failed — the imprint did not build as the build makes it"; exit 2; }
+WRITTEN=$("$WORK/digest")
+if [ "$WRITTEN" = "$("$WORK/stand" imprint-digest "$FONT")" ]; then
+    echo "held the header tools/imprint writes, read as the kernel reads it, is the imprint the stand made — $WRITTEN"
+    HELD=$((HELD + 1))
+else
+    echo "FAILED the header tools/imprint writes is not the imprint the stand made: $WRITTEN"
+    FAILED=$((FAILED + 1))
 fi
 
 oracle() {

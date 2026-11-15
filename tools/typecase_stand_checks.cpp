@@ -8,21 +8,18 @@
 #include <cmath>
 #include <cstdio>
 #include <memory>
-#include <optional>
 #include <random>
-#include <span>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "boxos_font.h"
-#include "boxos_glyph_fold.h"
-#include "typecase/bitmap_source.h"
+#include "imprint_make.h"
 #include "typecase/chain.h"
 #include "typecase/code_box.h"
 #include "typecase/font_source.h"
 #include "typecase/geometry_source.h"
 #include "typecase/glyph_cache.h"
+#include "typecase/imprint_source.h"
 #include "typecase/rasterizer.h"
 #include "typecase_stand.h"
 
@@ -222,23 +219,6 @@ std::string ReadCode(const typecase::GlyphImage &Image, int Count, int Columns, 
 
 }  // namespace
 
-static std::optional<std::uint32_t> BoxFontIndex(char32_t Character)
-{
-    if (Character < 0x20 || Character == 0x7F) return std::nullopt;
-    char Cells[BOXOS_GLYPH_FOLD_MAX];
-    if (BoxGlyphFoldCodepoint(Character, Cells) != 1) return std::nullopt;
-    const auto Glyph = static_cast<unsigned char>(Cells[0]);
-    if (Glyph == static_cast<unsigned char>(BOXOS_GLYPH_FOLD_BOX) && Character != U'■') return std::nullopt;
-    return Glyph;
-}
-
-std::unique_ptr<typecase::BitmapSource> BoxFont()
-{
-    return std::make_unique<typecase::BitmapSource>(
-        std::span<const std::uint8_t>(&BoxFontGlyphs[0][0], sizeof BoxFontGlyphs), BOXOS_FONT_WIDTH,
-        BOXOS_FONT_HEIGHT, BoxFontIndex);
-}
-
 void CheckRaster(Tally &Count)
 {
     typecase::Rasterizer   Pen;
@@ -385,21 +365,7 @@ void CheckSources(Tally &Count, const std::vector<std::uint8_t> &Bytes)
     Count.Check(Sharp, "the lowercase a whole number of pixels high: z's top row ends on its pixel edge, inked whole "
                        "(the most of its first row, by cell width:" + Tops + ")");
 
-    auto Bitmap = BoxFont();
-    const typecase::Size Small{0, 8, 16, 12}, Large{0, 16, 32, 24}, Odd{0, 12, 24, 18};
-    const auto A = Bitmap->Draw(U'A', Small), A2 = Bitmap->Draw(U'A', Large), A3 = Bitmap->Draw(U'A', Odd);
-    bool Same = A && A2 && A3 && A->Width == 8 && A->Height == 16 && A->Top == -12;
-    for (int Y = 0; Same && Y < 16; Y++)
-        for (int X = 0; X < 8; X++) {
-            const bool Ink = BoxFontGlyphs['A'][Y] & (0x80 >> X);
-            Same = Same && A->Coverage[static_cast<std::size_t>(Y * 8 + X)] == (Ink ? 255 : 0) &&
-                   A2->Coverage[static_cast<std::size_t>((2 * Y + 1) * 16 + 2 * X)] == (Ink ? 255 : 0) &&
-                   A3->Coverage[static_cast<std::size_t>((Y + 4) * 12 + X + 2)] == (Ink ? 255 : 0);
-        }
-    Count.Check(Same, "the bitmap font's A: as its rows, doubled in a cell twice its size, centred in one between");
-    Count.Check(Bitmap->Has(U'█') && !Bitmap->Has(U'一') && !Bitmap->Has(U'\x07') && Bitmap->Has(U'■'),
-                "the bitmap font has what it folds to one glyph of its own, and ■ itself; no control, no box for another");
-
+    const typecase::Size Small{0, 8, 16, 12}, Large{0, 16, 32, 24};
     const auto Box = typecase::DrawCodeBox(U'一', Small);
     Count.Check(Box.Width == 8 && Box.Height == 16 && ReadCode(Box, 4, 2, 1) == "4E00",
                 "U+4E00 in a cell of 8 by 16: its code reads back off the picture, 4E00");
@@ -426,17 +392,19 @@ void CheckSources(Tally &Count, const std::vector<std::uint8_t> &Bytes)
     Count.Check(ReadCode(typecase::DrawCodeBox(U'ꯍ', Large), 4, 2, 2) == "ABCD",
                 "in a cell of 16 by 32 the digits are twice the size and read back, ABCD");
 
-    typecase::Chain Cells;
-    Cells.Add(BoxFont());
+    const auto       Imprinted = MakeImprint(Bytes);
+    const BoxImprint Imprint   = Imprinted->View();
+    typecase::Chain  Cells;
+    Cells.Add(std::make_unique<typecase::ImprintSource>(Imprint));
     Cells.Add(std::make_unique<typecase::FontSource>(std::move(*typecase::Font::Read(Bytes))));
     typecase::Chain Text;
     Text.Add(std::make_unique<typecase::FontSource>(std::move(*typecase::Font::Read(Bytes))));
-    Text.Add(BoxFont());
-    const auto ByBitmap = Cells.Draw(U'A', Cell), ByFont = Text.Draw(U'A', Cell), ByNone = Text.Draw(U'一', Cell);
-    const auto Smooth   = [](const typecase::GlyphImage &I) {
-        return std::any_of(I.Coverage.begin(), I.Coverage.end(), [](std::uint8_t V) { return V > 0 && V < 255; });
+    Text.Add(std::make_unique<typecase::ImprintSource>(Imprint));
+    const auto ByImprint = Cells.Draw(U'A', Cell), ByFont = Text.Draw(U'A', Cell), ByNone = Text.Draw(U'一', Cell);
+    const auto Stepped   = [](const typecase::GlyphImage &I) {
+        return std::all_of(I.Coverage.begin(), I.Coverage.end(), [](std::uint8_t V) { return V % 85 == 0; });
     };
-    Count.Check(!Smooth(ByBitmap) && Smooth(ByFont) && ReadCode(ByNone, 4, 2, 1) == "4E00" && Text.Has(U'A') &&
+    Count.Check(Stepped(ByImprint) && !Stepped(ByFont) && ReadCode(ByNone, 4, 2, 1) == "4E00" && Text.Has(U'A') &&
                     !Text.Has(U'一'),
                 "a chain asks its sources in order — the first that has a character draws it — and draws what none "
                 "has as its code");
