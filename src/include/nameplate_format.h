@@ -66,8 +66,6 @@
 /* The section the linker script places, and the tool fills. */
 #define NAMEPLATE_SECTION_NAME  ".nameplate"
 
-#define NAMEPLATE_VERSION       1u
-
 /* A table with more entries than this is refused as corrupt rather than
  * trusted: the largest real one in the tree holds ~40k, and the bound keeps
  * every size computation below far away from overflowing 64 bits. */
@@ -75,9 +73,8 @@
 
 typedef struct NameplateHeader {
     uint32_t Magic;        /* NAMEPLATE_MAGIC */
-    uint32_t Version;      /* NAMEPLATE_VERSION */
     uint32_t EntryCount;
-    uint32_t NameBytes;
+    uint64_t NameBytes;    /* at most 4 GiB: NameOffset[] is 32-bit */
     uint64_t BaseAddress;  /* address that Offset[] is measured from */
     uint64_t TotalBytes;   /* whole table, header included — self-describing */
 } NameplateHeader;
@@ -108,7 +105,7 @@ static inline int NameplateHeaderValid(const NameplateHeader *Header, uint64_t B
 
     if (!Header)
         return 0;
-    if (Header->Magic != NAMEPLATE_MAGIC || Header->Version != NAMEPLATE_VERSION)
+    if (Header->Magic != NAMEPLATE_MAGIC)
         return 0;
     if (Header->EntryCount == 0 || Header->EntryCount > NAMEPLATE_MAX_ENTRIES)
         return 0;

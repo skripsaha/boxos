@@ -73,7 +73,7 @@ int main(int argc, char **argv)
     /* A Nameplate of two functions: header, three arrays of two, two names. */
     uint8_t names[NAMEPLATE_TOTAL_BYTES(2, 4)];
     memset(names, 0, sizeof(names));
-    NameplateHeader header = { NAMEPLATE_MAGIC, NAMEPLATE_VERSION, 2, 4, 0, sizeof(names) };
+    NameplateHeader header = { NAMEPLATE_MAGIC, 2, 4, 0, sizeof(names) };
     uint32_t arrays[6] = { 0, 8, 8, 8, 0, 2 };
     memcpy(names, &header, sizeof(header));
     memcpy(names + NAMEPLATE_OFFSETS_AT(2), arrays, sizeof(arrays));
@@ -113,7 +113,7 @@ int main(int argc, char **argv)
     uint8_t  one_thread[64], one_fixup[8];
     uint64_t one_thread_bytes, one_fixup_bytes, one_place = 0x1000;
     uint8_t  one_name[NAMEPLATE_TOTAL_BYTES(1, 2)];
-    NameplateHeader one_header = { NAMEPLATE_MAGIC, NAMEPLATE_VERSION, 1, 2, 0, sizeof(one_name) };
+    NameplateHeader one_header = { NAMEPLATE_MAGIC, 1, 2, 0, sizeof(one_name) };
     uint32_t one_arrays[3] = { 0, 8, 0 };
     memset(one_name, 0, sizeof(one_name));
     memcpy(one_name, &one_header, sizeof(one_header));

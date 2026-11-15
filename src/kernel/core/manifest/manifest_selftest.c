@@ -87,23 +87,22 @@ static error_t register_test_ops_once(void)
 static error_t build_test_manifest(uint8_t **out_buf, uint32_t *out_size)
 {
     /* Layout:
-     *   Manifest header (16)
+     *   Manifest header (14)
      *   ManifestOp #1 header (12) + 1 byte param   = 13
      *   ManifestOp #2 header (12) + 0 byte params  = 12
-     * total = 16 + 13 + 12 = 41
+     * total = 14 + 13 + 12 = 39
      */
-    const uint32_t total = 16u + 13u + 12u;
+    const uint32_t total = (uint32_t)sizeof(Manifest) + 13u + 12u;
     uint8_t *buf = kmalloc(total);
     if (!buf) return ERR_NO_MEMORY;
 
     Manifest *m = (Manifest *)buf;
     m->magic       = MANIFEST_MAGIC;
-    m->version     = MANIFEST_VERSION;
     m->op_count    = 2;
     m->flags       = 0;
     m->total_size  = total;
 
-    ManifestOp *op0 = (ManifestOp *)(buf + 16);
+    ManifestOp *op0 = (ManifestOp *)(buf + sizeof(Manifest));
     op0->op_kind    = OP_KIND(DECK_OPERATIONS, TEST_OP_FILL);
     op0->flags      = 0;
     op0->in_crate   = CRATE_INDEX_NONE;
@@ -111,7 +110,7 @@ static error_t build_test_manifest(uint8_t **out_buf, uint32_t *out_size)
     op0->param_size = 1;
     op0->params[0]  = 0xABu;
 
-    ManifestOp *op1 = (ManifestOp *)(buf + 16 + 13);
+    ManifestOp *op1 = (ManifestOp *)(buf + sizeof(Manifest) + 13);
     op1->op_kind    = OP_KIND(DECK_OPERATIONS, TEST_OP_COPY);
     op1->flags      = 0;
     op1->in_crate   = 0;

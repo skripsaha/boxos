@@ -99,15 +99,12 @@ static_assert(sizeof(ManifestOp) == 12, "ManifestOp header must be 12 bytes");
  */
 typedef struct __packed {
     uint32_t magic;       /* MANIFEST_MAGIC */
-    uint16_t version;     /* layout version (1) */
     uint16_t op_count;    /* number of ops following */
     uint32_t flags;       /* MANIFEST_FLAG_* */
     uint32_t total_size;  /* total bytes (header + all ops) */
 } Manifest;
 
-static_assert(sizeof(Manifest) == 16, "Manifest header must be 16 bytes");
-
-#define MANIFEST_VERSION 1u
+static_assert(sizeof(Manifest) == 14, "Manifest header must be 14 bytes");
 
 /* ---------------------------------------------------------------------------
  * Iteration helpers — work on raw (not yet compiled) Manifest streams.

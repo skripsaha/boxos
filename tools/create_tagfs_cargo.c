@@ -151,7 +151,7 @@ static void kernel_plate(const char* path, uint64_t* tree, uint32_t* verdict) {
     if (seen == 1) {
         BuildPlate p;
         memcpy(&p, img + at, sizeof(p));
-        if (p.Magic == BUILDPLATE_MAGIC && p.Version == BUILDPLATE_VERSION) {
+        if (p.Magic == BUILDPLATE_MAGIC) {
             *tree = p.TreeFingerprint;
             *verdict = p.Verdict;
         }

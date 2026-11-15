@@ -19,11 +19,10 @@ __attribute__((used, aligned(16)))
 static const volatile BuildPlate g_buildplate = {
     .Tag             = BUILDPLATE_TAG_INIT,
     .Magic           = BUILDPLATE_MAGIC,
-    .Version         = BUILDPLATE_VERSION,
+    .Verdict         = BUILDPLATE_VERDICT_UNSTAMPED,
     .TreeFingerprint = 0,
     .StampedUnix     = 0,
     .FileCount       = 0,
-    .Verdict         = BUILDPLATE_VERDICT_UNSTAMPED,
     .Keys            = { 'n','o','t',' ','s','t','a','m','p','e','d', 0 },
 };
 
@@ -60,13 +59,13 @@ void BuildPlateSay(void)
 {
     const BuildPlate *p = BuildPlateRead();
 
-    if (p->Magic != BUILDPLATE_MAGIC || p->Version != BUILDPLATE_VERSION) {
+    if (p->Magic != BUILDPLATE_MAGIC) {
         /* Not a plate at all. Said rather than skipped: an image whose plate
          * cannot be read is an image nothing can be concluded from, and that
          * is worth a line of its own. */
         kprintf("[BuildPlate] this image carries no readable plate (magic "
-                "0x%x, version %u) — nothing here can say which tree it was "
-                "made from\n", p->Magic, p->Version);
+                "0x%x) — nothing here can say which tree it was made from\n",
+                p->Magic);
         return;
     }
 

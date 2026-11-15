@@ -267,9 +267,9 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
         } else {
             const Manifest *mh = (const Manifest *)m_kbuf;
             debug_printf("[MANIFEST_FAIL] PID=%u rc=%d ops=%u/%u "
-                         "magic=0x%x ver=%u op_count=%u total=%u uaddr=0x%lx tier=%u\n",
+                         "magic=0x%x op_count=%u total=%u uaddr=0x%lx tier=%u\n",
                          proc->pid, rc, result.completed_ops, result.total_ops,
-                         mh->magic, mh->version, mh->op_count, mh->total_size,
+                         mh->magic, mh->op_count, mh->total_size,
                          (unsigned long)manifest_uaddr, (unsigned)grant.tier);
         }
     }

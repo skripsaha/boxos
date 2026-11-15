@@ -201,9 +201,8 @@ static int BoxAsmWriteNameplate(BoxAsmLinker *Link, const BoxAsmNameList *Names)
         return -ERR_NO_MEMORY;
     memset(Table, 0, (size_t)Total);
     Header.Magic = NAMEPLATE_MAGIC;
-    Header.Version = NAMEPLATE_VERSION;
     Header.EntryCount = (uint32_t)Names->Count;
-    Header.NameBytes = (uint32_t)NameBytes;
+    Header.NameBytes = NameBytes;
     Header.BaseAddress = Names->Items[0].Address;
     Header.TotalBytes = Total;
     memcpy(Table, &Header, sizeof(Header));

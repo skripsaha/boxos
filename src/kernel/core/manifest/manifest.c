@@ -140,7 +140,6 @@ static error_t manifest_validate_and_index(const uint8_t *bytes,
 
     const Manifest *hdr = (const Manifest *)bytes;
     if (hdr->magic != MANIFEST_MAGIC)        return ERR_INVALID_POCKET;
-    if (hdr->version != MANIFEST_VERSION)    return ERR_VERSION_MISMATCH;
     if (hdr->total_size != size)             return ERR_INVALID_ARGUMENT;
     if (hdr->op_count == 0)                  return ERR_INVALID_ARGUMENT;
 
