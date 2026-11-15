@@ -19,36 +19,29 @@
  * The points are named by the record ABOUT to be written, and each stands at
  * one stage of the cycle (settle/settle.h):
  *
- *   1 registry   before the tag registry is written              (S1)
- *   2 pool       before the metadata pool is written             (S3)
- *   3 table      before the file table is written                (S1)
- *   4 integrity  before the integrity map is written             (S1)
- *   5 bitmap     before the block bitmap is written              (S1)
- *   6 ledger     before the ledger is written                    (S4)
- *   7 flush      before the medium's cache is flushed            (S5)
- *   8 done       after the flush, with the whole cycle on the medium (S6)
- *   9 usechain   before the Use Context's chain is written         (S1)
- *  10 stitch     before a format-v2 stitch's last atom is written —
- *                a stitch of one atom not begun, one of more torn  (STITCH)
- *  11 tally      before a format-v2 Tally's flush, its nodes written
- *                and no slot naming them                         (TALLY_FLUSH)
- *  12 slot       before the second half of a Tally's slot is written —
+ *   1 flush      before the medium's cache is flushed, the stitch's
+ *                last flush                                       (LAST_FLUSH)
+ *   2 done       after the flush, with the whole cycle on the medium (DONE)
+ *   3 stitch     before a stitch's last atom is written — a stitch of one
+ *                atom not begun, one of more torn                 (STITCH)
+ *   4 tally      before a Tally's flush, its nodes written and no slot naming
+ *                them                                             (TALLY_FLUSH)
+ *   5 slot       before the second half of a Tally's slot is written —
  *                the slot torn                                    (TALLY_SLOT)
- *  13 spared     before the last flush of a format-v2 stitch whose toll
- *                spared the flush of its data: its data and its atoms
- *                written, neither flushed                         (S5)
- *  14 undone     before the first atom of the stitch that lays a mount's
+ *   6 spared     before the last flush of a stitch whose toll spared the
+ *                flush of its data: its data and its atoms written, neither
+ *                flushed                                          (LAST_FLUSH)
+ *   7 undone     before the first atom of the stitch that lays a mount's
  *                verdict down — the first such stitch, anchored or not:
  *                the verdict is the scenario                      (STITCH)
- *  15 engross    before the first atom of the stitch that names a block an
+ *   8 engross    before the first atom of the stitch that names a block an
  *                Engross laid — a tail out of its Slips, laid for the Tally
  *                that waits for it, anchored or not: the block on the medium,
  *                no stitch naming it (C22)                        (STITCH)
  *
- * A format-v2 cycle passes `flush` and `done` as format v1's does, around its
- * own last flush; `stitch`, `spared`, `undone` and `engross` are its alone. `tally` and `slot` are passed by the
- * Tally that covers the anchor — the state after a stitch that carries it
- * (settle/binder.c), a work of the same Scribe between the cycles.
+ * `tally` and `slot` are passed by the Tally that covers the anchor — the
+ * state after a stitch that carries it (settle/binder.c), a work of the same
+ * Scribe between the cycles.
  *
  * This list is the only list of the names: the Makefile turns the value it is
  * given into SETTLE_CUT_POINT_<VALUE>, and a value that is none of these does
@@ -60,12 +53,12 @@
  * waits for the first anchor taken after the "armed" line (a program parked
  * on SettleWaitLink for Ink G) and stops the first cycle that reaches the
  * point, after that, with G in its snapshot: the cycle in flight when it still
- * has the point ahead of it, else a later one — the cycle that closes the tail
- * for the anchor's waiter takes its snapshot after the waiter was linked.
+ * has the point ahead of it, else a later one — the cycle that answers the
+ * anchor's waiter takes its snapshot after the waiter was linked.
  * Every cycle before it, a shutdown's included, runs as in any kernel. What
- * this cannot stop: a cycle already past the point that covers G and closes
- * its tail for another asker answers the anchor itself, and the machine runs
- * on — which the scenario says, as a machine that never stopped.
+ * this cannot stop: a cycle already past the point that covers G for another
+ * asker answers the anchor itself, and the machine runs on — which the
+ * scenario says, as a machine that never stopped.
  *
  * Not built together with VOLUME_TESTS=on, which the Makefile refuses: the
  * startup tests settle the volume themselves, and the cut would land inside a
@@ -75,15 +68,8 @@
 #include "../../../lib/kernel/ktypes.h"
 
 typedef enum {
-    SETTLE_CUT_POINT_REGISTRY = 1,
-    SETTLE_CUT_POINT_POOL,
-    SETTLE_CUT_POINT_TABLE,
-    SETTLE_CUT_POINT_INTEGRITY,
-    SETTLE_CUT_POINT_BITMAP,
-    SETTLE_CUT_POINT_LEDGER,
-    SETTLE_CUT_POINT_FLUSH,
+    SETTLE_CUT_POINT_FLUSH = 1,
     SETTLE_CUT_POINT_DONE,
-    SETTLE_CUT_POINT_USECHAIN,
     SETTLE_CUT_POINT_STITCH,
     SETTLE_CUT_POINT_TALLY,
     SETTLE_CUT_POINT_SLOT,
@@ -97,7 +83,7 @@ typedef enum {
 
 #ifdef CONFIG_TAGFS_SETTLE_CUT_POINT
 
-/* The cycle took its snapshot (S0): it settles every Ink up to `target`. By
+/* The cycle took its snapshot (its TAKE): it settles every Ink up to `target`. By
  * the cycle's holder, before any point of that cycle is passed. */
 void SettleCutCycle(uint64_t target);
 

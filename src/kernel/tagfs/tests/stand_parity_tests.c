@@ -9,22 +9,14 @@
 #ifdef CONFIG_VOLUME_TESTS
 
 // ============================================================================
-// The stand_parity suite: what a book is held to where format v1's stand holds
-// its own records, and no test of a book held it yet.
-//
-// The stand runs on a book as on format v1 (spec_v2 §16.5 п.22). A test that
-// holds format v1's own records is written for format v1 and names the test
-// that holds a book to the same property (TestCase.analog, held to the tree by
-// tools/concordance.py); a property no test of a book held has its test here.
+// The stand_parity suite: properties the volume's earlier records were held
+// to, each held here on the book (spec_v2 §16.5 п.22).
 // ============================================================================
 
 /*
- * A book's cycle crosses the medium holding no TagFS lock — what
- * stand_ledger_writes_outside_its_lock, stand_registry_flush_holds_no_lock and
- * stand_integrity_pages_outside_its_lock hold format v1's Ledger, registry and
- * integrity map to: a core that waits on a lock held across the medium spins
- * with its interrupts off for as long as the medium takes. A book has none of
- * the three. What it writes is a file's data, by its writer, and a stitch with
+ * A book's cycle crosses the medium holding no TagFS lock: a core that waits
+ * on a lock held across the medium spins with its interrupts off for as long
+ * as the medium takes. What it writes is a file's data, by its writer, and a stitch with
  * its flush, by the cycle — so a file is made and written, and its cycle
  * settled: this core's count of doors to the medium passed holding a TagFS lock
  * (LockRankCountHere) is the answer, and the larger seq the ribbon's writer
@@ -58,15 +50,14 @@ out:
     return verdict;
 }
 
-#define STAND_PARITY_FILES   16u    /* files the appends go round, as stand_ink_records_never_share_a_place */
+#define STAND_PARITY_FILES   16u    /* files the appends go round */
 #define STAND_PARITY_ROUNDS  8u     /* appends each of them takes */
 #define STAND_PARITY_CHUNK   16u    /* bytes an append lays */
 
 /*
- * Files appended to in turn keep each its own bytes — what
- * stand_ink_records_never_share_a_place holds format v1's pool to: two live
- * files never named by one record's place. A book has no pool; a file's
- * change is a record of the stitch its cycle lays, and an append that leaves
+ * Files appended to in turn keep each its own bytes: two live files never
+ * named by one record's place. A file's change is a record of the stitch its
+ * cycle lays, and an append that leaves
  * its last block short rides the stitch as the file's Slip (§2.8) — so sixteen
  * files take eight appends each in turn, a cycle half way and one after, and
  * the volume is mounted again: what each file reads was replayed from the

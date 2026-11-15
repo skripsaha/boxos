@@ -187,20 +187,6 @@ out:
     return verdict;
 }
 
-// ----------------------------------------------------------------------------
-// A block's write the medium refuses part way answers what the file holds
-//
-// W-ERR, on the port. The medium refuses the write of the second block of the
-// second window: the first window and the block before the refused one landed
-// and are inked, and the answer carries the refusal, those bytes and the size
-// the file still is — on a USB disk exactly as on an AHCI port. BLOCKFAIL is
-// asked at the seat's door for a command nobody stands over
-// (BoardroomWriteAsync), so the refused block's write never reaches the medium.
-// Format v1's: the write goes over the file's blocks where they lie, so the
-// block refused is one the test names before it; a book lays every write on
-// fresh ground, the run it takes named before it (its analog).
-// ----------------------------------------------------------------------------
-
 static const TestCase g_stand_port_tests[] = {
     { .name  = "stand_port_write_goes_through_the_port",
       .func  = TestStandPortWriteGoesThroughThePort, .reach = TEST_WRITES_TO_VOLUME },

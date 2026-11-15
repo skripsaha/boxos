@@ -28,8 +28,7 @@
 // spared stitch costs the mount stays within the D the writer judged it by —
 // weighed by the stand's own clock, a seek for every read command it gives.
 //
-// And the window a frequent small writer waits for: five seconds on a book, a
-// Lull on format v1, as it ever was (§16.5 п.8 — format v1 is frozen).
+// And the window a frequent small writer waits for: five seconds.
 // ============================================================================
 
 #define STAND_TOLL_LAG_US    200u      /* a seek, when the build names none (SEEKLAG=) */
@@ -270,44 +269,41 @@ static bool StandTollCycled(uint64_t us)
  * counts a write that grew a file as a small append when its data took less
  * than the last cycle's D (ink.c InkPlotLazy), so whether the making counts —
  * a block written, then a settle shorter than a Lull — rests on the D the test
- * before left: none after a mount (CadenceMountReset), and on format v1, where
- * the test before mounts nothing, a D the block's write beats. Counted, the
- * first append is already the second small one, lazy, and waits for the very
- * window its check is bounded by. So the first append comes past the horizon
- * a frequent writer is judged by: a Lull on format v1, the window on a book.
+ * before left: none after a mount (CadenceMountReset), else a D the block's
+ * write may beat. Counted, the first append is already the second small one,
+ * lazy, and waits for the very window its check is bounded by. So the first
+ * append comes past the horizon a frequent writer is judged by: the window.
  */
-static void StandTollPastFrequent(uint64_t fid, bool book)
+static void StandTollPastFrequent(uint64_t fid)
 {
-    FileRecord* rec     = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
-    uint64_t    since   = rec ? rec->small_append_us : 0;
-    uint64_t    horizon = book ? SETTLE_WINDOW_US : SettleLullUs();
+    FileRecord* rec   = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    uint64_t    since = rec ? rec->small_append_us : 0;
     FileRecordRelease(rec);
-    while (since && cpu_tsc_to_us(rdtsc()) - since <= horizon)
+    while (since && cpu_tsc_to_us(rdtsc()) - since <= SETTLE_WINDOW_US)
         cpu_pause();
 }
 
 /*
  * A file appended to in small pieces: the second within a Lull of the first
  * makes its writer a frequent small one. Its third comes past a Lull and well
- * inside the window: on a book it is lazy still — no cycle begins for it
- * before the window ends — and on format v1 a Lull is all it waits, as it
- * always did. `book` is which the test asks. On a book the ribbon is put back
- * as the test found it: the file given up still leaves its stitches past the
- * Tally and its blocks fallow, which every later mount — the next tests', the
- * next boot's of a book on a stick — would replay as its own.
+ * inside the window: it is lazy still — no cycle begins for it before the
+ * window ends. The ribbon is put back as the test found it: the file given up
+ * still leaves its stitches past the Tally and its blocks fallow, which every
+ * later mount — the next tests', the next boot's of a book on a stick — would
+ * replay as its own.
  */
-static TestResult StandTollSmallWriter(bool book)
+static TestResult TestStandTollWindowBook(void)
 {
     TestResult  verdict = TEST_PASS;
     StandStitch s;
     uint64_t    fid = 0, lull = 0, size = 0;
     bool        let_go = false;
-    const char* aside  = book ? StandStitchAside(&s) : StandStepsAsideFor();
+    const char* aside  = StandStitchAside(&s);
 
     if (aside)
         return test_steps_aside(aside);
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x5Au);
-    TEST_ASSERT(StandMakeFile(book ? "toll-small-book" : "toll-small-v1", g_test_buffer, TAGFS_BLOCK_SIZE, &fid),
+    TEST_ASSERT(StandMakeFile("toll-small-book", g_test_buffer, TAGFS_BLOCK_SIZE, &fid),
                 "a file is made and written");
     TEST_ASSERT_OK(TagFSSettle(), "and settled: the last cycle's D is measured");
     lull = SettleLullUs();
@@ -315,7 +311,7 @@ static TestResult StandTollSmallWriter(bool book)
         verdict = test_steps_aside("a Lull of this medium is not well inside the window");
         goto out;
     }
-    StandTollPastFrequent(fid, book);
+    StandTollPastFrequent(fid);
     SettleCadenceHold(false);
     let_go = true;
     size   = TAGFS_BLOCK_SIZE;
@@ -326,24 +322,15 @@ static TestResult StandTollSmallWriter(bool book)
     size += 10u;
     TEST_ASSERT(!StandTollCycled(2u * lull), "whose change waits past a Lull");
     TEST_ASSERT_EQ(StandWriteAt(fid, size, g_test_buffer, 10), 10, "ten more, past a Lull since the last");
-    if (book)
-        TEST_ASSERT(!StandTollCycled(2u * lull), "on a book its writer is lazy still: the window, not a Lull");
-    else
-        TEST_ASSERT(StandTollCycled(2u * lull + SETTLE_WINDOW_US / 4u), "on format v1 a Lull is all it waits");
+    TEST_ASSERT(!StandTollCycled(2u * lull), "its writer is lazy still: the window, not a Lull");
 out:
     if (let_go)
         SettleCadenceHold(true);
     if (fid)
         (void)tagfs_delete_file(fid, INK_UNWARRANTED);
     (void)TagFSSettle();
-    if (book)
-        STAND_STITCH_PUT_BACK(&s);
+    STAND_STITCH_PUT_BACK(&s);
     return verdict;
-}
-
-static TestResult TestStandTollWindowBook(void)
-{
-    return StandTollSmallWriter(true);
 }
 
 static const TestCase g_stand_toll_tests[] = {

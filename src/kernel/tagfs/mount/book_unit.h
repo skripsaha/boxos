@@ -20,7 +20,7 @@
  * counted as a refusal. Any other refusal is the medium not answering: it
  * is counted (TagFSNoteReadRefused) and handed back, and the mount it ends
  * is asked again when a seat answers again — the arrangement every reader of
- * a mount keeps (TagFSMetaBlockRead, meta_pool_mount.c WalkRead).
+ * a mount keeps (tagfs_read_block, SpineRead).
  *
  * ‼ SUMMED BY THE CRC32 INSTRUCTION, HELD TO THE TABLE FIRST. The kernel sums a
  * sector with KCrc32c, the crc32 instruction where every core has SSE4.2

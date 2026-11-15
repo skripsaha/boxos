@@ -35,7 +35,7 @@
 // handle's view being no room a cycle brings; a stitch the kernel sewed, a
 // sector of it unreadable, is closed and damaged at the next mount; and a
 // medium that leaves and comes back loses the file no stitch settled; the
-// warrant guards a book's files as format v1's. Every test puts the ribbon
+// warrant guards a book's files. Every test puts the ribbon
 // back as it found it (stand_stitch.h) — and one whose wait for room may be
 // answered by a Tally the Spine's ring and the ground its slots hold too
 // (stand_binder.h): the Tally a wait writes is laid over a slot, which no
@@ -763,7 +763,7 @@ out:
 }
 
 // ----------------------------------------------------------------------------
-// The warrant guards a book's files as it guards format v1's (RT-09)
+// The warrant guards a book's files (RT-09)
 // ----------------------------------------------------------------------------
 
 /* A file the maker laid on the book wearing a tag the system keeps: *fid. */

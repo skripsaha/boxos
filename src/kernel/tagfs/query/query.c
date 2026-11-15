@@ -103,9 +103,9 @@ static error_t QueryUnless(const TagSpelling* without, uint32_t without_count, b
 // ----------------------------------------------------------------------------
 
 /* The files are the map's that have a record (FileMapFiles). Every one is below
- * the id the next create takes: the mount derives that id past every row and
- * record the medium holds (mount/mount.c), so no live file has an id the
- * volume never issued. */
+ * the id the next create takes: the mount derives that id past every record
+ * the book holds (book_mount.c), so no live file has an id the volume never
+ * issued. */
 static void ListPageInside(const uint32_t* unless, uint32_t unless_count, uint64_t from, uint64_t* out,
                            uint32_t room, bool want_total, TagFSPage* page)
 {

@@ -22,7 +22,7 @@
 // or the volume's state.
 // ============================================================================
 
-#define PARCEL_FILE_STRIPS   1000u      /* format v1 holds ~670 at most; past it on purpose */
+#define PARCEL_FILE_STRIPS   1000u      /* past one Parcel, and many of them */
 #define PARCEL_FIRST_BLOCK   5000u      /* where the test's ground begins */
 #define PARCEL_FRESH_BLOCK   900000u    /* ground no Strip of the test's file names */
 #define PARCEL_ROOM          (PARCEL_FILE_STRIPS + 512u)
@@ -33,7 +33,7 @@ static char s_parcel_name[]  = "parcel";
 static char s_parcel_other[] = "renamed";
 
 /* `count` Strips of a file, every `hole_every`-th a hole (0: none, and every
- * birth 0 — a file as format v1 has them): 1 to 4 blocks each by a fixed rule,
+ * birth 0): 1 to 4 blocks each by a fixed rule,
  * each DATA Strip beginning 1 to 3 blocks past where the one before it ended,
  * so no two of them meet on the medium. */
 static void ParcelStrips(Strip* out, uint32_t count, uint32_t hole_every, uint64_t first)
@@ -745,7 +745,7 @@ out:
     return verdict;
 }
 
-/* A file of 1000 runs as format v1 has them, one of them written over onto
+/* A file of 1000 runs, one of them written over onto
  * fresh ground: the change builds a header, the one Parcel holding that run
  * and the node over it — far less than the flat copy of every run each change
  * of the file made (24 bytes a run, 24000 here). */

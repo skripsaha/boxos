@@ -97,8 +97,7 @@ out:
 }
 
 // ============================================================================
-// The suite — none of these grows a chain on purpose, so they walk before the
-// ones that do (stand_chain_tests.c)
+// The suite
 // ============================================================================
 
 static const TestCase g_stand_lock_tests[] = {

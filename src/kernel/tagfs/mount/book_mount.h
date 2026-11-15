@@ -26,7 +26,7 @@
  * Tally of it in time (settle/binder.h), named by a slot of the Spine.
  *
  * ‼ NOT A BYTE IS WRITTEN BY THE MOUNT, before the door or after it — no
- * Ledger, no Spare, no flush — but the one act a book's mount may make once
+ * stitch, no flush — but the one act a book's mount may make once
  * every verdict is in: taking the ground behind the volume, by a mount that
  * writes it (book_grow.c, §16.1 п.4). Two mounts of one volume that grows by
  * neither are one state (C12).

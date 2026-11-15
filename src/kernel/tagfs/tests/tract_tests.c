@@ -9,7 +9,7 @@
 // TRACT — a record's runs in a Tract more than one node tall
 //
 // A record of a few hundred Strips is one leaf of its Tract (tract.c), and so
-// is every record of the parcel suite and every one format v1 can hold. Here
+// is every record of the parcel suite. Here
 // a file grows the way a writer grows it — a few Strips appended at its end at
 // a time — until its Tract stands three levels tall, and is then cut: the
 // leaf a parent begins with emptied into the last leaf of the parent before

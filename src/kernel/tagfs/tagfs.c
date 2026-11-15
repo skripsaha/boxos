@@ -1793,8 +1793,8 @@ static void tagfs_stamp_reserved_tags(void)
         return;
     TagRegistry *reg = fs->registry;
 
-    // Stamp the reserved vocabulary as system tags. Runs after tag_registry_load,
-    // so it self-heals over whatever flags the disk carried; mark_system sets no
+    // Stamp the reserved vocabulary as system tags. Runs after the book's TAGS
+    // are read, so it self-heals over whatever flags the disk carried; mark_system sets no
     // dirty flag, so this re-derivation never forces a write.
     for (size_t i = 0; i < sizeof(TagFsReservedKeys) / sizeof(TagFsReservedKeys[0]); i++) {
         TagSpelling reserved = TagSpellingOfKey(TagFsReservedKeys[i]);

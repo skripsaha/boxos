@@ -165,14 +165,6 @@ out:
 }
 
 // ----------------------------------------------------------------------------
-// A read beside a write never serves a stale read-ahead block (N1)
-//
-// Format v1's: its write goes over the block where it lies, under a window a
-// handle holds. A book lays every write on fresh ground and a handle reads the
-// version it opened (tagfs.c, MP-D16) — its analog below.
-// ----------------------------------------------------------------------------
-
-// ----------------------------------------------------------------------------
 // A book's read beside a write serves the version its handle opened (N1)
 //
 // A book never writes a block a version names: the write over lays fresh
