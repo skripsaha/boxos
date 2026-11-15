@@ -849,6 +849,11 @@ HUB_BIN = $(HUB_DIR)/hub.elf
 PAINTER_DIR = $(USERSPACE_DIR)/painter
 PAINTER_LIB = $(PAINTER_DIR)/libpainter.a
 
+# Typecase — characters to glyphs to pictures: TrueType fonts read and drawn,
+# and the chain of sources a screen asks.
+TYPECASE_DIR   = $(USERSPACE_DIR)/typecase
+TYPECASE_LIB   = $(TYPECASE_DIR)/libtypecase.a
+
 # Utility ELF binaries
 UTILS_DIR = $(USERSPACE_DIR)/utils
 UTIL_NAMES = create show files tag untag name trash delete assemble \
@@ -1275,6 +1280,16 @@ $(PAINTER_LIB): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxc
 
 .PHONY: painter
 painter: $(PAINTER_LIB)
+
+# Typecase, likewise a library of its own, linked by no program until the
+# display draws through it; tools/typecase_stand.sh builds and holds it.
+.PHONY: $(TYPECASE_LIB)
+$(TYPECASE_LIB):
+	@echo "Building Typecase..."
+	@cd $(TYPECASE_DIR) && $(MAKE)
+
+.PHONY: typecase
+typecase: $(TYPECASE_LIB)
 
 # Build apps (proca, procb, today, memtest)
 #
@@ -2398,6 +2413,7 @@ clean:
 	@cd $(HUB_DIR) && $(MAKE) clean
 	@cd $(UTILS_DIR) && $(MAKE) clean
 	@cd $(PAINTER_DIR) && $(MAKE) clean
+	@cd $(TYPECASE_DIR) && $(MAKE) clean
 	@cd $(USERSPACE_DIR)/boxlib && $(MAKE) clean
 	# boxcxx was missing here, and its absence was not cosmetic: no Makefile in
 	# userspace tracks header dependencies, so `make clean && make` is the ONLY
