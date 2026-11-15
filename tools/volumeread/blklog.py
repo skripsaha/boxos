@@ -34,7 +34,7 @@ import os
 import struct
 
 from . import ondisk
-from .ondisk import SECTOR, SECTORS_PER_BLOCK, BLOCK
+from .ondisk import SECTOR, SECTORS_PER_BLOCK
 from .medium import OverlayMedium, StandOnDeed, Unreadable, GroundCandidates
 from .bookcensus import BookCensus
 from .blklog_book import BOOK_KINDS, BookSectors
@@ -46,8 +46,7 @@ LOG_VERSION = 1                                         # blklogwrites.c:34 WRIT
 LOG_SUPER = struct.Struct("<QQQI")                      # blklogwrites.c:38-43 log_write_super
 LOG_ENTRY = struct.Struct("<QQQQ")                      # blklogwrites.c:45-50 log_write_entry
 
-KINDS = ("deed", "ledger", "diskbook", "bitmap", "registry", "table", "pool",
-         "integrity", "manifest", "tuse", "spare", "file", "unowned", "outside") + BOOK_KINDS
+KINDS = ("deed", "file", "unowned", "outside") + BOOK_KINDS
 
 
 class LogUnreadable(Exception):
@@ -336,6 +335,8 @@ class Classifier:
             self.stand = StandOnDeed(base, forced_start)
         except Unreadable:
             self.stand = None
+        if self.stand is not None and ondisk.STAMP_FRAME not in self.stand.deed["stamps"]:
+            self.stand = None     # a Deed with no FRAME names nothing inside the volume
         candidates, _said = GroundCandidates(base)
         self.parts = [(s, n, how) for s, n, how, _k in candidates if n and s]
         try:
@@ -343,58 +344,40 @@ class Classifier:
         except IOError:
             self.has_mbr = False
         self.cache, self.grown, self.grown_at = {}, {}, None
-        self.book = None      # a format-v2 volume's writes, named (blklog_book.py)
+        self.book = None      # the volume's writes, named (blklog_book.py)
 
     def _Owners(self, epoch):
-        """The census of base + epochs 0..epoch, built incrementally: the
-        book's for a format-v2 volume, which never moves the stand — a book's
-        Deed changes only by a growth, whose far copy is named by its bytes."""
+        """The book's census of base + epochs 0..epoch, built incrementally —
+        it never moves the stand: a book's Deed changes only by a growth, whose
+        far copy is named by its bytes."""
         while self.done_epoch < epoch:
             self.done_epoch += 1
             for w in self.log.epochs[self.done_epoch]:
                 self.log.Apply(self.over, w)
             self.census = None
         if self.census is None:
-            v2 = self.stand is not None and self.stand.format == "v2"
             try:
-                if v2:
-                    self.census = BookCensus(self.over, self.forced_start)
-                else:
-                    from .census import GroundCensus    # format v1's, asked of a v1 volume alone
-                    self.census = GroundCensus(self.over, self.forced_start)
+                self.census = BookCensus(self.over, self.forced_start)
             except (Unreadable, IOError):
                 self.census = False
-            if self.census and not v2:
-                self.stand = self.census.f.stand
         return self.census
 
     def Classify(self, w):
+        """[Touch] of write w. The census is asked only of data no stitch of
+        the record names (blklog_book.py): the book's units name themselves."""
         if w.seq in self.cache:
             return self.cache[w.seq]
-        # A book's census is asked only of data no stitch of the record names
-        # (blklog_book.py): its units name themselves.
-        v2 = self.stand is not None and self.stand.format == "v2"
-        census = self._Owners(w.epoch) if self.stand is not None and not v2 else None
         touches, cur = [], None
         for i in range(w.sectors):
-            kind, what, group = self._Sector(w, i, census)
+            kind, what, group = self._Sector(w, i)
             if cur is not None and cur[3] == group:
                 cur[1] += 1
             else:
                 cur = [w.lba + i, 1, kind, group, what]
                 touches.append(cur)
-        out = [Touch(t[0], t[1], t[2], self._Finish(t, w)) for t in touches]
+        out = [Touch(t[0], t[1], t[2], t[4]) for t in touches]
         self.cache[w.seq] = out
         return out
-
-    def _Finish(self, t, w):
-        first, count, kind, group, what = t
-        if kind in ("file", "integrity", "unowned") and group[0] == "data":
-            b0 = (first - self.stand.start) // SECTORS_PER_BLOCK - self.lay["data_block"]
-            b1 = (first + count - 1 - self.stand.start) // SECTORS_PER_BLOCK - self.lay["data_block"]
-            return "%s, data block%s %u%s" % (what, "s" if b1 > b0 else "", b0,
-                                             "..%u" % b1 if b1 > b0 else "")
-        return what
 
     def _Outside(self, lba):
         if lba == 0 and self.has_mbr:
@@ -407,7 +390,7 @@ class Classifier:
             return "boot code sectors 1..%u" % (first - 1)
         return "outside every partition"
 
-    def _Sector(self, w, i, census):
+    def _Sector(self, w, i):
         """(kind, what, group) for sector i of write w: consecutive sectors of
         one group are one touch."""
         lba = w.lba + i
@@ -426,43 +409,9 @@ class Classifier:
             return "deed", what, ("deed", vb)
         if any(vb == t // SECTORS_PER_BLOCK for t in before) and self._Erased(w, st.start + vb * SECTORS_PER_BLOCK):
             return "deed", "the far copy the volume grew past, erased", ("deed", vb, "erased")
-        if st.format == "v2":
-            if self.book is None:
-                self.book = BookSectors(self.log, st, self._Owners, self._Sectors)
-            return self.book.Sector(w, i, vb)
-        self.lay = lay = (census.f.layout if census else st.deed["layout"])
-        if lay["state_block"] <= vb < lay["state_block"] + lay["state_blocks"]:
-            c = vb - lay["state_block"]
-            if v % SECTORS_PER_BLOCK:
-                return "ledger", "ledger copy %u, unused sector %u" % (c, v % SECTORS_PER_BLOCK), ("ledger", vb, 1)
-            d = ondisk.ReadLedgerCopy(bytes(self.log.SectorData(w, i)), c)
-            what = ("ledger copy %u (seq %u, next_file_id %u, free %u, integrity map %u+%u)"
-                    % (c, d["seq"], d["next_file_id"], d["free_blocks"], d["integrity_map_block"],
-                       d["integrity_map_blocks"]) if d["ok"] else "ledger copy %u (%s)" % (c, d["why"]))
-            return "ledger", what, ("ledger", vb, 0)
-        db = lay["disk_book_block"]
-        if db <= vb < db + ondisk.DISKBOOK_BLOCKS:
-            if vb == db and v % SECTORS_PER_BLOCK == 0:
-                h = ondisk.ReadDiskBookHead(bytes(self.log.SectorData(w, i)), (db + 2) * SECTORS_PER_BLOCK)
-                return "diskbook", "DiskBook head (count %u, generation %u)" % (h["count"], h["generation"]), ("db", 0)
-            if vb == db + 1:
-                return "diskbook", "DiskBook head's copy", ("db", 1)
-            rec = (v - (db + 2) * SECTORS_PER_BLOCK) // ondisk.DISKBOOK_SECTORS_PER_ENTRY
-            return "diskbook", "DiskBook record %u" % rec, ("db", 2, rec)
-        bm = lay["block_bitmap_block"]
-        if bm <= vb < bm + lay["block_bitmap_blocks"]:
-            k = v - bm * SECTORS_PER_BLOCK
-            D = lay["data_blocks"]
-            if k * SECTOR * 8 >= D:
-                return "bitmap", "bitmap past the data run", ("bm", "past")
-            return "bitmap", "bitmap sector %u (data blocks %u..%u)" % (
-                k, k * SECTOR * 8, min(D, (k + 1) * SECTOR * 8) - 1), ("bm", k)
-        b = vb - lay["data_block"]
-        if 0 <= b < lay["data_blocks"]:
-            kind, what = self._DataBlock(w, i, b, census)
-            return kind, what, ("data", kind, what) if kind in ("file", "integrity", "unowned") \
-                else ("data", kind, what, b)
-        return "unowned", "volume block %u, in no region of the deed" % vb, ("gap", vb)
+        if self.book is None:
+            self.book = BookSectors(self.log, st, self._Owners, self._Sectors)
+        return self.book.Sector(w, i, vb)
 
     def _Growths(self, w):
         """Every growth whose far copy the record wrote before w, in the order
@@ -507,45 +456,6 @@ class Classifier:
                              d["tail_sector"])
             self.grown[w.seq] = grown
         return self.grown[w.seq][0]
-
-    def _DataBlock(self, w, i, b, census):
-        v_first = (self.lay["data_block"] + b) * SECTORS_PER_BLOCK + self.stand.start
-        head = None
-        if w.lba <= v_first < w.lba + w.sectors:
-            head = bytes(self.log.SectorData(w, v_first - w.lba))
-        chains = {}
-        if census:
-            for c in census.claims:
-                if c.runs and any(s <= b < s + n for s, n in c.runs):
-                    chains.setdefault(c.kind, c.label)
-        if head is not None:
-            magic, nxt = struct.unpack_from("<II", head, 0)
-            names = {ondisk.MPOOL_MAGIC: "pool", ondisk.FILETBL_MAGIC: "table",
-                     ondisk.REGISTRY_MAGIC: "registry"}
-            if magic in names:
-                whole = head + bytes(BLOCK - SECTOR)
-                if w.lba <= v_first and v_first + SECTORS_PER_BLOCK <= w.lba + w.sectors:
-                    whole = b"".join(bytes(self.log.SectorData(w, v_first - w.lba + j))
-                                     for j in range(SECTORS_PER_BLOCK))
-                spare = ondisk.SpareShape(whole)
-                if spare and names[magic] not in chains:
-                    return "spare", "a spare %s header at data block %u" % (spare, b)
-                if magic == ondisk.MPOOL_MAGIC:
-                    hdr = ondisk.META_POOL_BLOCK.Unpack(head)
-                    return "pool", "pool block %u (%u records, next %u)" % (b, hdr["record_count"], nxt)
-                return names[magic], "%s block %u (next %u)" % (names[magic], b, nxt)
-            if magic == ondisk.TUSE_MAGIC:
-                return "tuse", "TUSE link at data block %u" % b
-            if magic == ondisk.COW_MANIFEST_MAGIC:
-                return "manifest", "snapshot manifest at data block %u" % b
-        # The BOOT run is an alias of the kernel file and is named by it.
-        for kind, name in (("file", "file"), ("integrity", "integrity"), ("manifest", "manifest")):
-            if kind in chains:
-                return name, chains[kind]
-        for kind in ("registry", "table", "pool"):
-            if kind in chains:
-                return kind, "%s at data block %u" % (chains[kind], b)
-        return "unowned", "no owner"
 
 
 # ---------------------------------------------------------------------------

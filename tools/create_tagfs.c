@@ -15,10 +15,8 @@
  * This file is the modes and nothing else; what each of them writes is in the
  * files create_tagfs.h names.
  *
- * Usage: create_tagfs --v1 [--kernel <file>] <disk_image> [<file> <tags>] ...
- *        create_tagfs --v2 [--kernel <file>] <disk_image> [<file> <tags>] ...
- *        create_tagfs --ground --v1 [--kernel <file>] [<file> <tags>] ...
- *        create_tagfs --ground --v2 [--kernel <file>] [<file> <tags>] ...
+ * Usage: create_tagfs [--kernel <file>] <disk_image> [<file> <tags>] ...
+ *        create_tagfs --ground [--kernel <file>] [<file> <tags>] ...
  *        create_tagfs --frame-only [--kernel <file>] <disk_image> [<file> <tags>] ...
  *
  * ‼ THE TAGS ARE THE FILE'S USER'S WORDS, AND THE ROLE IS NOT ONE OF THEM.
@@ -28,23 +26,19 @@
  * what it is in its own box (the part `role`, tools/pack --role), and this
  * tool, which lays the boxes it has just packed, trusts it. Nothing running
  * on the volume grants a role from a box, and no tag ever did.
- *
- * The format is always named: a tool that made one format when none was named
- * would make that one for every caller that relied on it, whichever the build
- * makes by default (Makefile VOLUME_FORMAT) — so it makes neither, and says so.
  */
 
 #include "create_tagfs.h"
 
 static int Usage(const char* self)
 {
-    fprintf(stderr, "Usage: %s --v1|--v2 [--kernel <file>] <disk_image> [<file> <tags>] ...\n", self);
-    fprintf(stderr, "       %s --ground --v1|--v2 [--kernel <file>] [<file> <tags>] ...\n", self);
+    fprintf(stderr, "Usage: %s [--kernel <file>] <disk_image> [<file> <tags>] ...\n", self);
+    fprintf(stderr, "       %s --ground [--kernel <file>] [<file> <tags>] ...\n", self);
     fprintf(stderr, "       %s --frame-only [--kernel <file>] <disk_image> [<file> <tags>] ...\n", self);
     fprintf(stderr, "\n");
     fprintf(stderr, "Makes a BoxOS volume on the run of this image claimed for\n");
     fprintf(stderr, "BoxOS by its partition table (MBR type 0x7F, or the BoxOS\n");
-    fprintf(stderr, "type GUID in a GPT), in the format named — always named.\n");
+    fprintf(stderr, "type GUID in a GPT), its book bound over its files.\n");
     fprintf(stderr, "Nothing outside that run is touched. A file's tags are its\n");
     fprintf(stderr, "user's words; what the system keeps a file as is its role:\n");
     fprintf(stderr, "the kernel is the file --kernel names (the one the Deed\n");
@@ -65,29 +59,20 @@ static int KernelOptionTake(int* argc, char* argv[], int at)
     return 1;
 }
 
-/* Whether `arg` names a format, and which: 1 for --v1, 2 for --v2, else 0. */
-static int FormatNamed(const char* arg)
-{
-    return strcmp(arg, "--v1") == 0 ? 1 : strcmp(arg, "--v2") == 0 ? 2 : 0;
-}
-
 int main(int argc, char* argv[]) {
     /* --ground answers a question about a file list and touches no medium. */
     if (argc >= 2 && strcmp(argv[1], "--ground") == 0) {
-        int format = argc >= 3 ? FormatNamed(argv[2]) : 0;
-        if (!format || !KernelOptionTake(&argc, argv, 3) || (argc - 3) % 2 != 0)
-            return Usage(argv[0]);
-        return format == 2 ? V2GroundSay((argc - 3) / 2, argv, 3) : say_the_ground((argc - 3) / 2, argv, 3);
+        if (!KernelOptionTake(&argc, argv, 2) || (argc - 2) % 2 != 0) return Usage(argv[0]);
+        return V2GroundSay((argc - 2) / 2, argv, 2);
     }
 
-    /* --frame-only lays a format-v2 Deed over files and writes no book. */
+    /* --frame-only lays a Deed over files and writes no book. */
     if (argc >= 3 && strcmp(argv[1], "--frame-only") == 0) {
         if (!KernelOptionTake(&argc, argv, 2) || argc < 3 || (argc - 3) % 2 != 0) return Usage(argv[0]);
         return FrameOnlyMake(argv[2], (argc - 3) / 2, argv, 3);
     }
 
-    int format = argc >= 3 ? FormatNamed(argv[1]) : 0;
-    if (!format || !KernelOptionTake(&argc, argv, 2) || argc < 3 || (argc - 3) % 2 != 0)
+    if (!KernelOptionTake(&argc, argv, 1) || argc < 2 || (argc - 2) % 2 != 0 || argv[1][0] == '-')
         return Usage(argv[0]);
-    return format == 2 ? V2BindMake(argv[2], (argc - 3) / 2, argv, 3) : V1PackMake(argv[2], (argc - 3) / 2, argv, 3);
+    return V2BindMake(argv[1], (argc - 2) / 2, argv, 2);
 }

@@ -2,9 +2,9 @@
  * create_tagfs_cargo.c — what a volume is packed with: its files' tags and the
  * shipment's pedigree.
  *
- * Both formats intern the same vocabulary the same way — the reserved keys at
- * ids 0..11, a file's stem first — and stamp the same pedigree into the Deed,
- * so the part of a volume that is not its format is said once, here.
+ * The vocabulary is interned the kernel's way — the reserved keys at ids
+ * 0..11, a file's stem first — and the pedigree stamped into the Deed: the
+ * part of a volume that is not its book, said once, here.
  */
 
 #include "create_tagfs.h"
@@ -16,21 +16,25 @@
 TagEntry* g_tags       = NULL;
 uint32_t  g_tag_count  = 0;
 static uint32_t  g_tag_cap    = 0;
-static uint32_t  g_tag_id_most = 0;   /* the last id the volume's format carries */
+
+/* The last tag id the kernel gives a volume (tagfs_constants.h, which a host
+ * tool cannot include): bit 31 is its Logbook's (spec_v2 §6.4). The book
+ * writes an id as a varint and has no width of its own, but a volume naming
+ * an id past this one is a volume the kernel may only read (tally.py
+ * TagGlass) — so the cargo interns none past it. */
+#define TAGFS_MAX_TAG_ID  0x7FFFFFFEu
 
 /* ====================================================================
  * Tag interning
  *
- * ‼ AN ID IS A u32, AND THE FORMAT SAYS HOW FAR IT GOES. It was a u16 cast
+ * ‼ AN ID IS A u32, AND THE KERNEL SAYS HOW FAR IT GOES. It was a u16 cast
  * of the count: the 65537th tag was given id 0 again, and every one after
  * it the id of a tag interned long before — the reserved keys among them, so
  * a file's header named god, bypass or network for tags it was never given,
  * and no census could tell (the ids were whole; only their meaning was
- * wrong). Now the count is the id, whole, and the format part that seeds
- * the vocabulary says the last id its volume carries: format v1's registry
- * and records hold an id in a u16 and stop at TAGFS_V1_TAG_ID_MOST, format
- * v2 writes a varint and stops where the kernel's ids do (§6.4). The tag
- * that would pass it is refused, not given another's number.
+ * wrong). Now the count is the id, whole, and it stops where the kernel's
+ * ids do (TAGFS_MAX_TAG_ID, §6.4). The tag that would pass it is refused,
+ * not given another's number.
  * ==================================================================== */
 
 /* The id of `key` (with `value`, or none), interned when it is new — `whose`
@@ -52,9 +56,9 @@ static int intern_tag(const char* key, const char* value, const char* whose, uin
                 whose, key, key_len > 40 ? "..." : "", key_len, value_len, TAG_KEY_WIDTH, TAG_TEXT_ROOM);
         return -1;
     }
-    if (g_tag_count > g_tag_id_most) {
-        fprintf(stderr, "%s: the tag '%.40s%s' would be the volume's tag id %u, and its format carries "
-                        "none past %u\n", whose, key, key_len > 40 ? "..." : "", g_tag_count, g_tag_id_most);
+    if (g_tag_count > TAGFS_MAX_TAG_ID) {
+        fprintf(stderr, "%s: the tag '%.40s%s' would be the volume's tag id %u, and the kernel gives "
+                        "none past %u\n", whose, key, key_len > 40 ? "..." : "", g_tag_count, TAGFS_MAX_TAG_ID);
         return -1;
     }
     if (g_tag_count >= g_tag_cap) {
@@ -74,12 +78,9 @@ static int intern_tag(const char* key, const char* value, const char* whose, uin
  * each tag at its stored id (tag_registry.c RegistryAdopt), so the
  * auth-privilege keys (god/stopped/bypass/network) land at ids < 64 and their
  * (1ULL<<id) masks are non-zero. Reserved keys that a file also carries dedup
- * back onto these low ids; genuinely new file tags start at id 12. `id_most`
- * is the last id the volume's format carries; the twelve are under it in
- * either format, so none of them is ever refused. */
-void seed_reserved_tags(uint32_t id_most) {
+ * back onto these low ids; genuinely new file tags start at id 12. */
+void seed_reserved_tags(void) {
     uint32_t id;
-    g_tag_id_most = id_most;
 #define X(k) (void)intern_tag(k, NULL, "the reserved vocabulary", &id);
     TAGFS_RESERVED_KEYS(X)
 #undef X
@@ -312,10 +313,9 @@ static int TagTake(char* token, const char* whose, uint32_t* ids, uint32_t* coun
  * ‼ THE LIST IS TAKEN WHOLE. It was copied into 4096 bytes and the rest cut
  * off, its tags counted into 256 and the rest dropped, the stem cut at 255 —
  * each without a word, and the volume made of what was left. Now every tag
- * given is interned or the volume is refused: how many a file can carry is
- * its format's to judge (format v1's record in one pool block, V1PackPlace;
- * format v2 has no such width), and how wide one can be the kernel's
- * (TAG_KEY_WIDTH, TAG_TEXT_ROOM).
+ * given is interned or the volume is refused: a file carries as many as it
+ * is given (the book has no width for them), and how wide one can be is the
+ * kernel's to judge (TAG_KEY_WIDTH, TAG_TEXT_ROOM).
  */
 int parse_tags(const char* tag_string, const char* path, uint32_t** out_ids, uint32_t* out_count,
                uint32_t* out_role) {

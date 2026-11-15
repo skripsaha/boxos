@@ -24,21 +24,18 @@ be able to damage it. The only files it writes are the ones it is told to
     tools/volume-read.py DEVICE boot
     tools/volume-read.py IMAGE  self-test [--emit CASE --out IMG]
 
-`list` and `get` show the files the mounted kernel would show: each at the
-newest record its pool holds, CRC-checked, the way the mount resolves it — or,
-on a volume of format v2, as its book holds them once its ribbon is replayed.
-`check` is the GroundCensus: every owner of every block against the bitmap,
-and a simulation of what the next mount decides (exit 0 consistent, 1 not,
-2 unreadable) — on format v2 the book's census (bookcensus.py), every owner
-derived from the names that take a block. `cut` reads a QEMU blklogwrites log
-of this DEVICE and builds any crash state out of it; the cuts of one record
-share a memo of the block digests a book's census takes (bookcensus.py
-DigestMemoWrite). `boot` says which kernel the UEFI loader jumps into on a
-format-v2 volume, and why: the slot its book stands on, whether the blocks BOOT
-names match the digests its Tally keeps, and, when they do not, each kernel
-the book names by tag in turn (bootread.py, bootbook.py, the oracle of
-tools/tagboot_stand.c). `self-test` plants every rule's damage into an overlay
-over IMAGE and checks that each is caught.
+`list` and `get` show the files the mounted kernel would show: as its book
+holds them once its ribbon is replayed. `check` is the book's census
+(bookcensus.py): every owner derived from the names that take a block, and a
+simulation of what the next mount decides (exit 0 consistent, 1 not,
+2 unreadable). `cut` reads a QEMU blklogwrites log of this DEVICE and builds
+any crash state out of it; the cuts of one record share a memo of the block
+digests the census takes (bookcensus.py DigestMemoWrite). `boot` says which
+kernel the UEFI loader jumps into, and why: the slot its book stands on,
+whether the blocks BOOT names match the digests its Tally keeps, and, when
+they do not, each kernel the book names by tag in turn (bootread.py,
+bootbook.py, the oracle of tools/tagboot_stand.c). `self-test` plants every
+rule's damage into an overlay over IMAGE and checks that each is caught.
 
 DEVICE is a raw device or an image file:
 
@@ -48,9 +45,9 @@ DEVICE is a raw device or an image file:
 On macOS use /dev/rdiskN rather than /dev/diskN — the raw node reads without
 the buffer cache, and diskN refuses unaligned reads.
 
-The format itself is said once, in tools/volumeread/ondisk.py (and the book of
-format v2 in bookread.py, tally.py and stitch.py), with the C line every number
-is copied from; `self-test` holds those numbers against the headers in src/.
+The format itself is said once, in tools/volumeread/ondisk.py (and the book
+in bookread.py, tally.py and stitch.py), with the C line every number is
+copied from; `self-test` holds those numbers against the headers in src/.
 This file is only the command line.
 """
 
@@ -66,9 +63,8 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from volumeread import ondisk                                   # noqa: E402
-from volumeread.medium import (FormatVerdict, Medium, Unreadable,  # noqa: E402
-                               find_ground, find_the_stick, permission_advice,
-                               read_deed)
+from volumeread.medium import (Medium, Unreadable, find_ground,  # noqa: E402
+                               find_the_stick, permission_advice, read_deed)
 
 
 def OpenDevice(device):
@@ -85,86 +81,31 @@ def OpenDevice(device):
                  f"on macOS a raw device is /dev/rdiskN, not /dev/diskN")
 
 
-def CmdFiles(args, medium):
+def CmdDeed(args, medium):
+    """What the Deed says — read forgivingly, as evidence off a volume that
+    may not mount — and what the Spine says of the book behind it."""
     try:
         ground, how = find_ground(medium, args.start)
         deed = read_deed(medium, ground)
     except (ValueError, IOError) as e:
         sys.exit(f"{e}")
-
-    if args.command == "deed":
-        uuid = deed["uuid"].hex()
-        lay, frame = deed["layout"], deed["frame"]
-        print(f"ground      : sector {ground} ({how})")
-        print(f"volume      : {uuid}")
-        print(f"sectors     : {deed['sectors']}")
-        print(f"role        : {deed['role']} (1=head, 2=tail)")
-        print(f"format      : {deed['format']} (v1 = LAYOUT, v2 = FRAME)")
-        if lay:
-            print(f"blocks      : {lay['total_blocks']}")
-            print(f"metadata at : block {lay['metadata_pool_block']}")
-            print(f"data run    : block {lay['data_block']}, "
-                  f"{lay['data_blocks']} block(s)")
-        if frame:
-            print(f"spine       : {frame['spine_slots']} slot(s) from block "
-                  f"{frame['spine_block']}, {frame['spine_stride']} block(s) apart")
-            print(f"data run    : block {frame['data_block']} to the far copy at block "
-                  f"{deed['tail_sector'] // ondisk.SECTORS_PER_BLOCK}")
-        if deed["format"] == "v2":
-            return BookDeed(medium, args.start)
-        verdict = FormatVerdict(deed)
-        if verdict:
-            print(f"verdict     : {verdict}")
-        return 0
-
-    if deed["format"] == "v2":
-        return BookFiles(args, medium, ground, how)
-    verdict = FormatVerdict(deed)
-    if verdict:
-        sys.exit(verdict)
-
-    from volumeread.mount import Volume
-    vol = Volume(medium, ground, deed)
-    if vol.ledger() is None:
-        print("[volume-read] neither ledger copy is readable, so the kernel would not "
-              "mount this volume; every file its table names is listed",
-              file=sys.stderr)
-    files = vol.files()
-
-    if args.command == "list":
-        print(f"ground sector {ground} ({how}), "
-              f"volume {deed['uuid'].hex()[:16]}…")
-        if not files:
-            print("no active files")
-            return 0
-        width = max(len(f["name"]) for f in files)
-        for f in sorted(files, key=lambda x: x["name"]):
-            blocks = sum(c for _s, c in f["extents"])
-            print(f"  {f['name']:<{width}}  {f['size']:>10} bytes  "
-                  f"{len(f['extents'])} extent(s), {blocks} block(s)")
-        return 0
-
-    match = [f for f in files if f["name"] == args.name]
-    if not match:
-        have = ", ".join(sorted(f["name"] for f in files)) or "(none)"
-        sys.exit(f"no active file named {args.name!r} on this volume.\n"
-                 f"what is here: {have}")
-
-    data = vol.contents(match[0])
-    if args.out:
-        with open(args.out, "wb") as fh:
-            fh.write(data)
-        print(f"{len(data)} byte(s) of {args.name} written to {args.out}",
-              file=sys.stderr)
-    else:
-        sys.stdout.buffer.write(data)
-    return 0
+    frame = deed["frame"]
+    print(f"ground      : sector {ground} ({how})")
+    print(f"volume      : {deed['uuid'].hex()}")
+    print(f"sectors     : {deed['sectors']}")
+    print(f"role        : {deed['role']} (1=head, 2=tail)")
+    if frame:
+        print(f"spine       : {frame['spine_slots']} slot(s) from block "
+              f"{frame['spine_block']}, {frame['spine_stride']} block(s) apart")
+        print(f"data run    : block {frame['data_block']} to the far copy at block "
+              f"{deed['tail_sector'] // ondisk.SECTORS_PER_BLOCK}")
+    return BookDeed(medium, args.start)
 
 
 def BookDeed(medium, start):
-    """What the Spine of a format-v2 volume says, slot by slot, and whether
-    its book mounts — or, when the volume cannot be stood on at all (neither
-    copy of the Deed answers as the strict reader asks), why, beside what the
+    """What the Spine says, slot by slot, and whether its book mounts — or,
+    when the volume cannot be stood on at all (neither copy of the Deed answers
+    as the strict reader asks, or it carries no FRAME), why, beside what the
     forgiving read of the Deed above already said."""
     from volumeread import tally
     from volumeread.bookmount import BookMount
@@ -202,20 +143,21 @@ def GroundRuns(runs):
     return n
 
 
-def BookFiles(args, medium, ground, how):
-    """`list` and `get` of a format-v2 volume: the files its book holds once
-    its ribbon is replayed, each read through its runs and Slips."""
+def CmdFiles(args, medium):
+    """`list` and `get`: the files the book holds once its ribbon is replayed,
+    each read through its runs and Slips."""
     from volumeread.bookcensus import BookCensus
     try:
+        ground, how = find_ground(medium, args.start)
         census = BookCensus(medium, args.start)
-    except (Unreadable, IOError) as e:
+    except (ValueError, Unreadable, IOError) as e:
         sys.exit(f"{e}")
     m = census.mount
     if m.refusal:
         sys.exit(f"the book does not mount: {m.refusal}")
     named = {fs.name.decode("utf-8", "replace"): fid for fid, fs in m.files.items()}
     if args.command == "list":
-        print(f"ground sector {ground} ({how}), volume {census.g.uuid.hex()[:16]}… — format v2")
+        print(f"ground sector {ground} ({how}), volume {census.g.uuid.hex()[:16]}…")
         if not named:
             print("no active files")
             return 0
@@ -244,17 +186,6 @@ def BookFiles(args, medium, ground, how):
     return 0
 
 
-def AnyCensus(medium, start):
-    """The census of the volume's own format: the book's for format v2,
-    GroundCensus for v1 (which refuses every other Deed as it always has)."""
-    from volumeread.bookcensus import BookCensus
-    from volumeread.medium import StandOnDeed
-    if StandOnDeed(medium, start).format == "v2":
-        return BookCensus(medium, start)
-    from volumeread.census import GroundCensus
-    return GroundCensus(medium, start)
-
-
 def SayCensus(census, as_json):
     if as_json:
         print(json.dumps(census.Json(), sort_keys=True))
@@ -265,8 +196,9 @@ def SayCensus(census, as_json):
 
 
 def CmdCheck(args, medium):
+    from volumeread.bookcensus import BookCensus
     try:
-        census = AnyCensus(medium, args.start)
+        census = BookCensus(medium, args.start)
     except (Unreadable, IOError) as e:
         print(f"check: unreadable — {e}")
         return 2
@@ -275,7 +207,7 @@ def CmdCheck(args, medium):
 
 def CmdCut(args, medium):
     from volumeread import blklog
-    from volumeread.bookcensus import DigestMemoRead, DigestMemoWrite
+    from volumeread.bookcensus import BookCensus, DigestMemoRead, DigestMemoWrite
     try:
         log = blklog.BlkLog(args.log, medium.SizeSectors())
         if args.against:
@@ -313,7 +245,7 @@ def CmdCut(args, medium):
                 print(f"cut: the memo of digests {args.digests} does not read — {e}", file=sys.stderr)
                 return 2
         try:
-            census = AnyCensus(over, args.start)
+            census = BookCensus(over, args.start)
         except (Unreadable, IOError) as e:
             print(f"check: unreadable — {e}")
             return 2
@@ -378,7 +310,7 @@ def CutList(log, facts, classifier, as_json):
 
 
 def CmdBound(args, medium):
-    """A format-v2 book's newest Tally held to what a writer of one lays
+    """The book's newest Tally held to what a writer of one lays
     (binder.BindCheck): bound again where it lies, and the state it is of
     read off the slot before it and its ribbon."""
     from volumeread import binder
@@ -440,7 +372,7 @@ def Main():
     get.add_argument("name", help="file to get")
     get.add_argument("-o", "--out", help="write to this path instead of stdout")
     sub.add_parser("deed", parents=[start], help="what the Deed says")
-    check = sub.add_parser("check", parents=[start], help="the GroundCensus")
+    check = sub.add_parser("check", parents=[start], help="the book's census")
     check.add_argument("--json", action="store_true")
     cut = sub.add_parser("cut", parents=[start], help="read a blklogwrites log; build a crash state")
     cut.add_argument("log")
@@ -477,7 +409,9 @@ def Main():
         ap.error("--keep, --subset-bits, --tear, --out and --check go with --epoch")
 
     args.device, medium = OpenDevice(args.device)
-    if args.command in ("list", "get", "deed"):
+    if args.command == "deed":
+        return CmdDeed(args, medium)
+    if args.command in ("list", "get"):
         return CmdFiles(args, medium)
     if args.command == "check":
         return CmdCheck(args, medium)

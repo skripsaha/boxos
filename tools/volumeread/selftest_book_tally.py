@@ -13,19 +13,14 @@ from .selftest_book import LANDING_ROOM, PADDING, Born, Case, Found, FrameDeed, 
 
 
 def Pristine(bt):
-    """B0: what the base must read as — no finding at all, every file whole
-    (byte for byte the v1 image's, when the book was laid over one), and the
-    bounds its binder wrote."""
-    want = None if bt.t is None else {fid: bt.t.c0.Sha256(e["record"]) for fid, e in bt.t.c0.files.items()
-                                      if e["state"] == "live"}
+    """B0: what the base must read as — no finding at all, every file whole,
+    and the bounds its binder wrote."""
     return [Case("B0 the book as a binder lays it", lambda o: None, checks=[
         ("not one finding — 0 damage, 0 leak, 0 note", lambda c: not c.findings),
         ("the book mounts on slot 0, at seq 2, not under glass",
          lambda c: c.mount.refusal is None and c.mount.slot.index == 0 and c.mount.slot.seq == 2 and
          not c.mount.glass),
-        ("every live file reads%s" % (", byte for byte the v1 image's %u" % len(want) if want else ""),
-         lambda c: all(c.Sha256(fid) for fid in c.mount.files) and
-         (want is None or {fid: c.Sha256(fid) for fid in c.mount.files} == want)),
+        ("every live file reads", lambda c: all(c.Sha256(fid) for fid in c.mount.files)),
         ("the next file id %u, tag id %u, bookmark 1, seq 3" % (bt.fid, bt.tag),
          lambda c: c.mount.counts == {"next_fid": bt.fid, "next_tag": bt.tag, "next_bookmark": 1,
                                       "next_seq": 3}),
@@ -40,13 +35,10 @@ def Pristine(bt):
 def LaidAfter(bt, c):
     """Where a binder lays the book of what the base's mount read from
     scratch, against where it lies (§16.3 п.5): Tally-Quire A at the first
-    grain at or past the end of the files — past the landings' room too, on
-    a base laid over a format-v1 image — B as many grains on, the ribbon's
+    grain at or past the end of the files, B as many grains on, the ribbon's
     Quire and its next_quire the two grains after B. [] when they agree."""
     files = c.mount.tally.content.files.values()
-    after = bt.plan.after
-    if after is None:
-        after = max([c.g.data_block] + [r.start + r.count for fs in files for r in fs.runs if not r.hole])
+    after = max([c.g.data_block] + [r.start + r.count for fs in files for r in fs.runs if not r.hole])
     fresh = binder.Bind(c.mount.tally.content, c.g, after=after)
     want = (fresh.a, fresh.b, tuple(fresh.ribbon), tuple(fresh.next))
     have = (bt.plan.a, bt.plan.b, tuple(bt.plan.ribbon), tuple(bt.plan.next))

@@ -1,34 +1,21 @@
 """selftest — every census rule planted into an image and caught, the cut logic
 proved on a synthetic log, and the format held against the C headers.
 
-A rule nobody has seen fire is a rule that may not work. Each case here lays
-one kind of damage — or one state a kernel cycle leaves — over the image in
+A rule nobody has seen fire is a rule that may not work. Each landing lays one
+kind of damage — or one state a kernel cycle leaves — over the image's book in
 memory (an OverlayMedium — the image file is never written), runs the census on
 it, and holds the findings, and the mount's decisions, against what that state
-must produce. The image has to be consistent to begin with (C0), because every
-case is measured as a difference from it; and it is sealed, as mkfs leaves every
-volume, so a plant that changes the pool or the registry either seals again what
-it laid down (Reseal — what a Settle cycle's last write leaves) or leaves the
-seal as it was and is read the way the mount reads a seal the medium does not
-bear out. NoSeal writes both copies of the Ledger the way a kernel before the
-seal writes them.
+must produce (selftest_book.py and its siblings). The medium under the book is
+the book's to answer for too: the ground the kernel finds on it, the sectors it
+will not give, no Deed at all, and the cut logic on a log built over it
+(selftest_book_medium.py).
 
-`--emit CASE --out IMG` writes one case's overlay out as a new image, for a
+`--emit CASE --out IMG` writes one landing's overlay out as a new image, for a
 harness to boot: logcheck's `census` scenario boots some of them and holds the
 kernel's own lines against this package's prediction.
-
-The book of format v2 has landings of its own (selftest_book.py): over the
-book laid on the v1 image's files, or over a format-v2 image's own book, when
-that is what self-test is handed — no case of format v1 has a volume to run
-on then (selftest_cases.py runs them, on a format-v1 image alone), and X2
-holds ground_owners.py to the header with no owner of format v1 to hear. The
-medium under the book is the book's to answer for: the ground the kernel
-finds on it, the sectors it will not give, no Deed at all, and the cut logic
-on a log built over it (selftest_book_medium.py).
 """
 
-from .medium import OverlayMedium, StandOnDeed, Unreadable
-from .ground_owners import GROUND_OWNERS
+from .medium import Unreadable
 from .selftest_headers import ConstantsCheck, OwnersCheck, AlphabetCheck
 from .bookcensus import BOOK_OWNERS, BookCensus
 from .selftest_book import BookTargets, Judge
@@ -67,13 +54,12 @@ def BookCases(bt):
     return cases, refused
 
 
-def BookRun(t=None, medium=None):
+def BookRun(medium):
     """[(name, ok, said)] of every landing, and the owner kinds heard — over
-    the book laid on a format-v1 image (`t`), or a format-v2 image's own. An
-    image the book cannot be laid on, or that gives the landings nothing to
-    aim at, is one red line and no owner heard (None)."""
+    the image's own book. An image that gives the landings no base, or nothing
+    to aim at, is one red line and no owner heard (None)."""
     try:
-        bt = BookTargets(t, medium)
+        bt = BookTargets(medium)
     except (Unreadable, ValueError) as e:
         return [("B the book's landings", False, "NOT so: the image gives them no base — %s" % e)], None
     cases, refused = BookCases(bt)
@@ -96,12 +82,12 @@ def BookRun(t=None, medium=None):
     return out, heard
 
 
-def BookEmit(t, name, out, medium=None):
+def BookEmit(medium, name, out):
     """The landing `name` written to `out`: (its name, sectors written, []) —
     or (None, the names of the landings there are, [(group, why)] of the
     groups the image gave nothing to aim at) when there is none of that name,
     so a landing refused is said with why, never as one that does not exist."""
-    bt = BookTargets(t, medium)
+    bt = BookTargets(medium)
     cases, refused = BookCases(bt)
     wanted = [c for c in cases if c.name == name or c.name.split()[0] == name]
     if not wanted:
@@ -120,15 +106,6 @@ def BookOwnersCheck(heard):
     return ["no landing's census heard %s claim a block" % ", ".join(unheard)] if unheard else []
 
 
-def Book(medium):
-    """Is the image's volume one of format v2? Then its own book is the base
-    the landings stand on, and no case of format v1 has a volume to run on."""
-    try:
-        return StandOnDeed(medium, None).format == "v2"
-    except (Unreadable, IOError):
-        return False
-
-
 class Count:
     """The count of cases answered, and each one's line."""
 
@@ -141,8 +118,8 @@ class Count:
         print("self-test: " + line)
 
 
-def BookCasesRun(count, t=None, medium=None):
-    book, owners = BookRun(t, medium)
+def BookCasesRun(count, medium):
+    book, owners = BookRun(medium)
     for name, ok, said in book:
         count.Say(ok, "%s — %s" % (name, said))
     if owners is None:
@@ -152,23 +129,17 @@ def BookCasesRun(count, t=None, medium=None):
               % ("as expected" if not wrong else "; ".join(wrong)))
 
 
-def Headers(src, heard, count):
-    """X1, X2 — and the owners format v1's cases heard, when they ran: `heard`
-    not None — and X3; False when the source tree is not beside the tool."""
+def Headers(src, count):
+    """X1, X2 and X3; False when the source tree is not beside the tool."""
     wrong, n = ConstantsCheck(src)
     if wrong is None:
         print("self-test: X1 constants — %s" % n)
         return False
     count.Say(not wrong, "X1 constants — %u constants and struct fields held against the headers — %s"
               % (n, "as expected" if not wrong else "; ".join(wrong)))
-    wrong = OwnersCheck(src, heard)
-    if heard is None:
-        count.Say(not wrong, "X2 ground owners — ground_owners.py is what tools/gen_ground_owners.py writes of "
-                  "the header's owners — %s" % ("as expected" if not wrong else "; ".join(wrong)))
-    else:
-        count.Say(not wrong, "X2 ground owners — the %u owners ground_owners.py lists are the header's, and "
-                  "each is heard in a case — %s" % (len(GROUND_OWNERS), "as expected" if not wrong
-                                                   else "; ".join(wrong)))
+    wrong = OwnersCheck(src)
+    count.Say(not wrong, "X2 ground owners — ground_owners.py is what tools/gen_ground_owners.py writes of "
+              "the header's owners — %s" % ("as expected" if not wrong else "; ".join(wrong)))
     wrong, n = AlphabetCheck(src)
     if wrong is None:
         print("self-test: X3 alphabet — %s" % n)
@@ -179,52 +150,23 @@ def Headers(src, heard, count):
 
 
 def Run(medium, src):
-    count, heard = Count(), None
-    if Book(medium):
-        print("self-test: a format-v2 image — the book's landings stand on its own book")
-        BookCasesRun(count, medium=medium)
-    else:
-        from .selftest_cases import Start, V1Cases
-        t = Start(medium)
-        if t is None:
-            return 2
-        print("self-test: aiming at S = %s (%u block(s)), L = %s (%u), F = data block %u"
-              % (t.Label(t.S), t.Srec.Blocks(), t.Label(t.L), t.Lrec.Blocks(), t.F))
-        heard = V1Cases(t, medium, count)
-        BookCasesRun(count, t)
-    if not Headers(src, heard, count):
+    count = Count()
+    BookCasesRun(count, medium)
+    if not Headers(src, count):
         return 2
     print("self-test: %u of %u cases answered as expected" % (count.passed, count.total))
     return 0 if count.passed == count.total else 1
 
 
 def Emit(medium, device, name, out):
-    book = Book(medium)
-    t, v1 = None, []
-    if not book:
-        from .selftest_cases import Cases, Start
-        t = Start(medium)
-        if t is None:
-            return 2
-        v1 = Cases(t)
-    wanted = [c for c in v1 if c.name == name or c.name.split()[0] == name]
     try:
-        if wanted:
-            over = OverlayMedium(medium)
-            wanted[0].plant(over)
-            over.WriteOut(out)
-            said, sectors = wanted[0].name, len(over.over)
-        else:
-            said, landed, refused = BookEmit(t, name, out, medium if book else None)
-            if said is None:
-                print("self-test: no case %r; the cases are %s%s" % (name, ", ".join(
-                    [c.name.split()[0] for c in v1] + landed),
-                    "".join("; the image gives %s nothing to aim at — %s" % (group, why)
-                            for group, why in refused)))
-                return 2
-            sectors = landed
+        said, landed, refused = BookEmit(medium, name, out)
     except (ValueError, Unreadable) as e:
         print("self-test: %s" % e)
         return 2
-    print("self-test: %s written to %s — %u sector(s) differ from %s" % (said, out, sectors, device))
+    if said is None:
+        print("self-test: no case %r; the cases are %s%s" % (name, ", ".join(landed), "".join(
+            "; the image gives %s nothing to aim at — %s" % (group, why) for group, why in refused)))
+        return 2
+    print("self-test: %s written to %s — %u sector(s) differ from %s" % (said, out, landed, device))
     return 0

@@ -3,33 +3,27 @@
 # the binder it keeps — before any machine is asked. No boot.
 #
 # SOURCED, NEVER RUN — by logcheck.sh, which dispatches `mkfs` to run_mkfs
-# here; ok, bad, chk, harness, build, build_with_key, buildkey_restore and
-# SCRATCH are stand.sh's. Its own file for the reason logcheck_framerefuse.sh
-# has one: logcheck.sh is twelve thousand lines.
+# here; bad, chk, make and SCRATCH are stand.sh's. Its own file for the
+# reason logcheck_framerefuse.sh has one: logcheck.sh is twelve thousand lines.
 #
-# ‼ THE WRITER IS HELD TO THE READER, NOT TO ITSELF. `make VOLUME_FORMAT=v2`
-# runs volume-read's census over the image it made, and that census only asks
-# whether the book holds together. Whether it is the book a binder lays of the
-# same files — node for node, byte for byte, where §16.3 п.5 says it lies — is
-# asked by self-test's B0b and B0d, which on an image mkfs bound fork every
-# landing from mkfs's own book; on the v1 image a plain `make` lays, the book
-# under them is laid by volume-read's binder itself and they compare it with
-# itself. So the self-test is run here over the image `make VOLUME_FORMAT=v2`
-# lays — all its files, for the landings that fork a tree need items enough in
-# it (on a volume of a few files two of them answer NOT so) — and every file on
-# it is held to the file the build laid there, read off the source the Makefile
-# names (VOLUME_LAID), and its ground to the formula --ground --v2 answers by
-# (§16.2 п.23), the working room a v1 volume is given included.
+# ‼ THE WRITER IS HELD TO THE READER, NOT TO ITSELF. `make` runs volume-read's
+# census over the image it made, and that census only asks whether the book
+# holds together. Whether it is the book a binder lays of the same files —
+# node for node, byte for byte, where §16.3 п.5 says it lies — is asked by
+# self-test's B0b and B0d, which fork every landing from mkfs's own book. So
+# the self-test is run here over the image `make` lays — all its files, for
+# the landings that fork a tree need items enough in it (on a volume of a few
+# files two of them answer NOT so) — and every file on it is held to the file
+# the build laid there, read off the source the Makefile names (VOLUME_LAID),
+# and its ground to the formula --ground answers by (§16.2 п.23), the working
+# room included.
 #
 # Then what no image of the build can show, each on a sparse ground of its own:
-# a ground past 16 TiB, which --v2 takes and format v1 refuses; a ground the
-# book does not fit, refused with not a byte of it written; and the cargo's
-# widths — a vocabulary past 65535 tags, a file of hundreds of tags in a list
-# longer than four kilobytes, both carried whole by --v2, each file naming its
-# own tags; a vocabulary past format v1's last tag id, a record past its pool
-# block, a tag wider than the kernel holds — each refused before the first
-# write, in a sentence. Last, `make` lays the run's format again: the format's
-# marker.
+# a ground past 16 TiB, taken; a ground the book does not fit, refused with not
+# a byte of it written; and the cargo's widths — a vocabulary past 65535 tags,
+# a file of hundreds of tags in a list longer than four kilobytes, both
+# carried whole, each file naming its own tags; a tag wider than the kernel
+# holds, refused before the first write, in a sentence.
 #
 # ‼ THE BUILD'S IMAGE PACKS NO TREE PAST ONE LEAF. Its FILES and its TAGS fit
 # a Sheet each, and every DIGESTS element fills one alone, so where a node is
@@ -52,8 +46,8 @@ MKFS_CLEAN="check: consistent — 0 damage, 0 leak, 0 note"
 #                        and none more
 #   formula IMG          the ground IMG stands on against §16.2 п.23 over its
 #                        own book
-#   wide|v1ids|v1record|keywide WORK   the cargo's widths (above)
-#   roles WORK           a format-v2 volume of the kernel, a system box, a plain
+#   wide|keywide WORK    the cargo's widths (above)
+#   roles WORK           a volume of the kernel, a system box, a plain
 #                        box and a text a person tagged system, boot, god and
 #                        kernel: each file's role in its record is what its
 #                        box says, and the kernel is the file --kernel names
@@ -110,13 +104,13 @@ def Files(work, prefix, tag_lists):
     return args
 
 
-def Refused(work, name, mode, args, says):
-    """create_tagfs MODE over a fresh ground: refused, in so many words, and
-    not a byte of the image written."""
+def Refused(work, name, args, says):
+    """create_tagfs over a fresh ground: refused, in so many words, and not a
+    byte of the image written."""
     img = os.path.join(work, name + ".img")
     Ground(img, 131072)
     before = Sha(img)
-    rc, out = Mkfs(mode, img, *args)
+    rc, out = Mkfs(img, *args)
     said = [l for l in out if says in l]
     print("MKFS %s refused=%u untouched=%u said=%s" % (name, rc != 0 and bool(said), Sha(img) == before,
                                                       (said or out or ["nothing"])[-1][:150]))
@@ -146,13 +140,13 @@ def Wide(work):
     lists = [["t%x" % (i * 252 + j) for j in range(252)] for i in range(260)]
     lists.append(["w%04u" % j for j in range(700)])
     args = Files(work, "wide", lists)
-    rc, out = Mkfs("--ground", "--v2", *args)
+    rc, out = Mkfs("--ground", *args)
     if rc != 0:
         print("MKFS wide made=0 why=%s" % out[-1:])
         return
     img = os.path.join(work, "wide.img")
     Ground(img, int(out[-1]))
-    rc, out = Mkfs("--v2", img, *args)
+    rc, out = Mkfs(img, *args)
     if rc != 0:
         print("MKFS wide made=0 why=%s" % out[-1:])
         return
@@ -179,7 +173,7 @@ def Roles(work):
         f.write("a text a person tagged with the words of the system's roles\n")
     Ground(img, 524288)
     kept = {"kernel.bin": ondisk.FILE_ROLE_MASK, "hub.box": ondisk.FILE_ROLE_SYSTEM, "clock.box": 0, "words.txt": 0}
-    rc, out = Mkfs("--v2", "--kernel", "build/kernel.bin", img, "build/kernel.bin", "", "build/box/hub.box", "",
+    rc, out = Mkfs("--kernel", "build/kernel.bin", img, "build/kernel.bin", "", "build/box/hub.box", "",
                    "build/box/clock.box", "", text, "system,boot,god,kernel,app,utility")
     roles = {}
     if rc == 0:
@@ -215,22 +209,10 @@ def Leg(leg, a):
                                                   g.stand.deed["sectors"], k))
     elif leg == "wide":
         Wide(a[0])
-    elif leg == "v1ids":
-        lists = [["v%x" % (i * 252 + j) for j in range(252)] for i in range(130)]
-        args = Files(a[0], "ids", lists)
-        Refused(a[0], "v1ids", "--v1", args, "its format carries none past 32766")
-        rc, out = Mkfs("--ground", "--v1", *args)
-        said = [l for l in out if "its format carries none past 32766" in l]
-        print("MKFS v1ground refused=%u said=%s" % (rc != 0 and bool(said), (said or out or ["nothing"])[-1][:150]))
-    elif leg == "v1record":
-        Refused(a[0], "v1record", "--v1", Files(a[0], "rec", [["r%u" % j for j in range(2100)]]),
-                "format v1 keeps a file's record in one pool block")
     elif leg == "keywide":
-        for mode in ("--v1", "--v2"):
-            Refused(a[0], "keywide" + (mode if mode == "--v2" else ""), mode, Files(a[0], "key", [["k" * 256]]),
-                    "the kernel holds a tag's key in 255 bytes")
-            Refused(a[0], "textwide" + (mode if mode == "--v2" else ""), mode, Files(a[0], "text", [["k:" + "v" * 4074]]),
-                    "the kernel holds a tag's key in 255 bytes")
+        Refused(a[0], "keywide", Files(a[0], "key", [["k" * 256]]), "the kernel holds a tag's key in 255 bytes")
+        Refused(a[0], "textwide", Files(a[0], "text", [["k:" + "v" * 4074]]),
+                "the kernel holds a tag's key in 255 bytes")
 
 
 Leg(sys.argv[1], sys.argv[2:])
@@ -244,29 +226,28 @@ mkfs_laid() {
         command make --no-print-directory -s -f Makefile -f - mkfs-volume-laid
 }
 
-# mkfs_image WORK — `make VOLUME_FORMAT=v2`, and the image it lays held to the
-# source files it was laid from, to §16.2 п.23 and to self-test.
+# mkfs_image WORK — `make`, and the image it lays held to the source files it
+# was laid from, to §16.2 п.23 and to self-test. Non-zero when the tree does
+# not build: the legs after it stand on the build's kernel and boxes.
 mkfs_image() {
     local work=$1 said line
-    if ! build_with_key VOLUME_FORMAT=v2; then
-        bad "mkfs: make VOLUME_FORMAT=v2 does not build: $(grep -aE 'ERROR|check:|error' "$SCRATCH/build.log" | tail -1)"
-        return
+    if ! make >"$SCRATCH/build.log" 2>&1; then
+        bad "mkfs: make does not build: $(grep -aE 'ERROR|check:|error' "$SCRATCH/build.log" | tail -1)"
+        return 1
     fi
     said=$(grep -a '^  check: ' "$SCRATCH/build.log" | tail -1)
     [ "$said" = "  $MKFS_CLEAN" ]
-    chk $? "mkfs: make VOLUME_FORMAT=v2 builds, its census clean in the build's own words (${said# })"
+    chk $? "mkfs: make builds, its census clean in the build's own words (${said# })"
     line=$(python3 tools/volume-read.py build/boxos.img check | grep -a '^check: the kernel in this tree would NOT mount')
     [ -z "$line" ] || grep -aqF "  WARNING: ${line#check: }" "$SCRATCH/build.log"
     chk $? "mkfs: and the build says what the census says of this tree's kernel (${line:-it would mount it})"
-    python3 tools/volume-read.py build/boxos.img deed | grep -q '^format      : v2'
-    chk $? "mkfs: build/boxos.img is format v2"
     mkfs_laid >"$work/laid" 2>&1
     said=$(mkfs_py files build/boxos.img "$work/laid" 2>&1 | tail -1)
     echo "$said" | grep -qE '^MKFS files=([1-9][0-9]*) same=\1 differ=none$'
     chk $? "mkfs: every file on it is the source file the build laid there, name and bytes, none missing and none more (${said#MKFS })"
     said=$(mkfs_py formula build/boxos.img)
     echo "$said" | grep -qE '^MKFS formula=([0-9]+) ground=\1 '
-    chk $? "mkfs: its ground is what --ground --v2 answers by §16.2 п.23 over the book it lays (${said#MKFS })"
+    chk $? "mkfs: its ground is what --ground answers by §16.2 п.23 over the book it lays (${said#MKFS })"
     python3 tools/volume-read.py build/boxos.img self-test >"$work/selftest.out" 2>&1
     chk $? "mkfs: self-test over mkfs's own book — B0b binds it again byte for byte, B0d holds it where it lies, every landing forks from it ($(grep -E '^self-test: ' "$work/selftest.out" | tail -1))"
     grep -E 'NOT so|missing|unexpected' "$work/selftest.out" | head -5 | sed 's/^/    /'
@@ -276,14 +257,11 @@ mkfs_image() {
 mkfs_grounds() {
     local work=$1 img=$1/big.img kb sb blocks before rc
     mkfs_py ground "$img" $((17 * 2147483648))
-    tools/create_tagfs --v2 --kernel build/kernel.bin "$img" build/box/hub.box "" build/kernel.bin "" \
+    tools/create_tagfs --kernel build/kernel.bin "$img" build/box/hub.box "" build/kernel.bin "" \
         >"$work/big.log" 2>&1
-    chk $? "mkfs: --v2 lays a volume on a ground of 17 TiB ($(grep -a 'Ground' "$work/big.log" | head -1 | sed 's/^ *//'))"
+    chk $? "mkfs: a volume is laid on a ground of 17 TiB ($(grep -a 'Ground' "$work/big.log" | head -1 | sed 's/^ *//'))"
     [ "$(python3 tools/volume-read.py "$img" check | tail -1)" = "$MKFS_CLEAN" ]
     chk $? "mkfs: and its census reads it clean"
-    ! tools/create_tagfs --v1 "$img" build/box/hub.box "" >"$work/big.v1.log" 2>&1 \
-        && grep -aq '16 TiB' "$work/big.v1.log"
-    chk $? "mkfs: format v1 refuses the same ground ($(grep -a '16 TiB' "$work/big.v1.log" | head -1 | cut -c1-90))"
     rm -f "$img"
 
     img=$work/small.img
@@ -292,7 +270,7 @@ mkfs_grounds() {
     blocks=$(( ( (1024 + kb + sb + 255) / 256 ) * 256 + 256 + 1 ))
     mkfs_py ground "$img" $((blocks * 8))
     before=$(shasum -a 256 <"$img")
-    tools/create_tagfs --v2 --kernel build/kernel.bin "$img" build/box/hub.box "" build/kernel.bin "" \
+    tools/create_tagfs --kernel build/kernel.bin "$img" build/box/hub.box "" build/kernel.bin "" \
         >"$work/small.log" 2>&1
     rc=$?
     [ $rc -ne 0 ] && grep -aq "does not fit" "$work/small.log"
@@ -302,27 +280,19 @@ mkfs_grounds() {
     rm -f "$img"
 }
 
-# mkfs_tags WORK — the cargo's widths: carried whole where the format has
-# none, refused before the first write where a format or the kernel has one.
+# mkfs_tags WORK — the cargo's widths: carried whole where the book has none,
+# refused before the first write where the kernel has one.
 mkfs_tags() {
     local work=$1 said
     said=$(mkfs_py wide "$work")
     echo "$said" | grep -qE '^MKFS wide made=1 files=261 tags=[0-9]+ clean=1 glass=0 named=own ' \
         && [ "$(echo "$said" | sed -nE 's/.* tags=([0-9]+) .*/\1/p')" -gt 65535 ]
-    chk $? "mkfs: --v2 carries a vocabulary past 65535 tags and a file of 700 in 4.9 KB of list, each file naming its own (${said#MKFS })"
+    chk $? "mkfs: a volume carries a vocabulary past 65535 tags and a file of 700 in 4.9 KB of list, each file naming its own (${said#MKFS })"
     echo "$said" | grep -qE ' circle=same laid=1$'
     chk $? "mkfs: and its book, trees many leaves wide, is the one volume-read's binder lays, byte for byte and where it lies ($(echo "$said" | sed -nE 's/.* (nodes=.*)/\1/p'))"
-    said=$(mkfs_py v1ids "$work")
-    echo "$said" | grep -q '^MKFS v1ids refused=1 untouched=1 '
-    chk $? "mkfs: format v1 refuses a vocabulary past tag id 32766 before a byte — $(echo "$said" | grep '^MKFS v1ids' | sed 's/^MKFS //')"
-    echo "$said" | grep -q '^MKFS v1ground refused=1 '
-    chk $? "mkfs: and --ground refuses the same list — $(echo "$said" | grep '^MKFS v1ground' | sed 's/^MKFS //')"
-    said=$(mkfs_py v1record "$work")
-    echo "$said" | grep -q '^MKFS v1record refused=1 untouched=1 '
-    chk $? "mkfs: format v1 refuses a file of 2100 tags, whose record no pool block holds, before a byte — ${said#MKFS }"
     said=$(mkfs_py keywide "$work")
-    [ "$(echo "$said" | grep -c ' refused=1 untouched=1 ')" = 4 ]
-    chk $? "mkfs: a key of 256 bytes, and a tag of 4075, refused by both formats before a byte — $(echo "$said" | sed 's/^MKFS //; s/ said=.*//' | paste -sd ';' -)"
+    [ "$(echo "$said" | grep -c ' refused=1 untouched=1 ')" = 2 ]
+    chk $? "mkfs: a key of 256 bytes, and a tag of 4075, refused before a byte — $(echo "$said" | sed 's/^MKFS //; s/ said=.*//' | paste -sd ';' -)"
     echo "$said" | grep -v ' refused=1 untouched=1 ' | sed 's/^/    /'
 }
 
@@ -337,28 +307,13 @@ mkfs_roles() {
 
 run_mkfs() {
     echo "== mkfs: what create_tagfs lays down, held on the host to the format's second reader =="
-    local work="$SCRATCH/mkfs" format
-    format=$(stand_format)
-    # A v1 image is built first, as v1 by name, so that the format the run asks
-    # — the gate's VOLUME_FORMAT, or the Makefile's when nobody names one — must
-    # be laid again after it: the format's marker, held last.
-    STAND_FORMAT=v1 build
+    local work="$SCRATCH/mkfs"
     rm -rf "$work"
     mkdir -p "$work"
-    python3 tools/volume-read.py build/boxos.img deed | grep -q '^format      : v1' \
-        || { harness "mkfs: make asked for format v1 by name laid no v1 image"; return; }
-    mkfs_image "$work"
-    mkfs_grounds "$work"
-    mkfs_tags "$work"
-    mkfs_roles "$work"
-    buildkey_restore
-    # The v1 build above was plain: the tree is put back in the run's format
-    # whether or not a keyed build came after it. The deed names the format
-    # and then its stamps — `format      : v2 (v1 = LAYOUT, v2 = FRAME)`,
-    # volume-read.py — so the word is matched with the space after it.
-    python3 tools/volume-read.py build/boxos.img deed | grep -q "^format      : $format " ||
-        STAND_FORMAT=$format build
-    python3 tools/volume-read.py build/boxos.img deed | grep -q "^format      : $format "
-    chk $? "mkfs: and \`make\` after it lays format $format again, the format the run asked — the image carries its format's marker"
+    if mkfs_image "$work"; then
+        mkfs_grounds "$work"
+        mkfs_tags "$work"
+        mkfs_roles "$work"
+    fi
     rm -rf "$work"
 }

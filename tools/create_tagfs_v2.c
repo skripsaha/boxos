@@ -1,8 +1,8 @@
 /*
- * create_tagfs_v2.c — format v2's part of the volume maker: --v2, a format-v2
- * volume, its files in a row and its book bound over them (the binder is
- * create_tagfs_bind.c); --ground --v2, how far its ground must run; and
- * --frame-only, a format-v2 Deed over files in a row and no book — a stand.
+ * create_tagfs_v2.c — the volume maker's writer: the volume, its files in a
+ * row and its book bound over them (the binder is create_tagfs_bind.c);
+ * --ground, how far its ground must run; and --frame-only, a Deed over files
+ * in a row and no book — a stand.
  */
 
 #include <unistd.h>           /* fsync: the order the medium takes the writes in */
@@ -10,20 +10,13 @@
 #include "create_tagfs_bind.h"
 #include "volume_digest.h"   /* the digest of a block, bit for bit the kernel's */
 
-/* The last tag id the kernel gives a volume (tagfs_constants.h, which a host
- * tool cannot include): bit 31 is its Logbook's (spec_v2 §6.4). Format v2
- * writes an id as a varint and has no width of its own, but a volume naming
- * an id past this one is a volume the kernel may only read (tally.py
- * TagGlass) — so the cargo interns none past it. */
-#define TAGFS_MAX_TAG_ID  0x7FFFFFFEu
-
 /* ====================================================================
  *  --frame-only: a format-v2 Deed over files in a row, and no book
  *
- * ‼ A STAND, NOT A FORMAT WRITER. Format v2 keeps what it knows about its
- * files in a book, and this writes none (--v2, below, does). What it lays
- * down is what a kernel meets when a format-v2 volume with no book is put in
- * front of it: a Deed bearing FRAME instead of LAYOUT, the Spine ring's slots
+ * ‼ A STAND, NOT A FORMAT WRITER. A volume keeps what it knows about its
+ * files in a book, and this writes none (V2BindMake, below, does). What it
+ * lays down is what a kernel meets when a volume with no book is put in
+ * front of it: a Deed bearing FRAME, the Spine ring's slots
  * empty, and the files in a row from the data run's first block with the
  * kernel first — so a loader boots it by BOOT exactly as it boots any volume.
  * That kernel must turn the volume away without writing a byte of it, and
@@ -34,8 +27,7 @@
  * data run from the grain after the last of them.
  * ==================================================================== */
 
-/* GEOMETRY · FRAME · BORN · BOOT · PACKED — and no LAYOUT, which is what says
- * this volume's book is not format v1. */
+/* GEOMETRY · FRAME · BORN · BOOT · PACKED. */
 static int FrameOnlyDeed(FILE* disk, uint32_t role, uint64_t vsector,
                          const uint8_t uuid[16], const VolumeFrame* frame,
                          uint64_t volume_blocks, uint64_t made_at,
@@ -70,7 +62,7 @@ static int FrameOnlyDeed(FILE* disk, uint32_t role, uint64_t vsector,
  * block past the last file in *end. 0, or -1 having said why. */
 static int FrameOnlyPlace(FileInfo* files, int file_count, char* argv[], int first,
                           uint64_t from, int* kernel, uint64_t* end) {
-    seed_reserved_tags(TAGFS_MAX_TAG_ID);
+    seed_reserved_tags();
     *kernel = -1;
     for (int i = 0; i < file_count; i++) {
         FILE* f = fopen(argv[first + i * 2], "rb");
@@ -186,7 +178,7 @@ int FrameOnlyMake(const char* disk_path, int file_count, char* argv[], int first
         fprintf(stderr, "Failed to write the Deed\n");
         goto out;
     }
-    printf("  Deed:          format v2 — FRAME, no LAYOUT; far copy at sector %llu\n"
+    printf("  Deed:          FRAME; far copy at sector %llu\n"
            "  Spine ring:    %u slots %u blocks apart from block %llu, empty: no book\n"
            "  Data run:      from block %llu, the kernel first%s\n",
            (unsigned long long)tail, frame.spine_slots, frame.spine_stride,
@@ -208,7 +200,7 @@ out:
 }
 
 /* ====================================================================
- *  --v2: a format-v2 volume, its book bound
+ *  The volume, its book bound
  *
  * The ground, the Deed and the row of files --frame-only lays, and the book a
  * kernel stands on (spec_v2 §9.3, §16.2 п.23, §16.3 п.5): the Tally of seq 1
@@ -289,7 +281,7 @@ static int V2FileOf(BindFile* f, uint64_t fid, const char* path, const char* tag
  * first block, in a row, the kernel first — as --frame-only places them, but
  * an empty file takes no block. 0, or -1 having said why. */
 static int V2Place(V2Bind* v, char* argv[], int first) {
-    seed_reserved_tags(TAGFS_MAX_TAG_ID);
+    seed_reserved_tags();
     v->kernel = -1;
     for (int i = 0; i < v->count; i++) {
         if (V2FileOf(&v->files[i], (uint64_t)i + 1u, argv[first + i * 2], argv[first + i * 2 + 1]) != 0)
@@ -520,7 +512,7 @@ static int V2WriteBook(V2Bind* v, char* argv[], int first) {
         return -1;
     }
     if (V2Settle(v->disk, "the volume's Deed") != 0) return -1;
-    printf("  Deed:          format v2 — FRAME, no LAYOUT; far copy at sector %llu\n"
+    printf("  Deed:          FRAME; far copy at sector %llu\n"
            "  Tally:         seq %u, %u node(s) twice — Tally-Quires at blocks %llu and %llu, %llu grain(s) each\n"
            "  Spine:         slot 0 at block %llu, seq %u; slots 1 and 2 blank\n"
            "  Ribbon:        its Quire at block %llu and its next_quire at %llu, blank\n",
@@ -594,7 +586,7 @@ int V2BindMake(const char* disk_path, int file_count, char* argv[], int first) {
 }
 
 /* ====================================================================
- *  --ground --v2: how far a format-v2 volume's ground must run
+ *  --ground: how far a volume's ground must run
  *
  * The answer the Makefile makes the medium give (§16.2 п.23): the front four
  * grains, the files, the two Tally-Quires of k grains — the k the book of
@@ -602,9 +594,8 @@ int V2BindMake(const char* disk_path, int file_count, char* argv[], int first) {
  * ribbon's Quire and its next_quire, and R past them: the reserve the
  * kernel's allocator keeps so that a turn of the ribbon and one whole Tally
  * are always possible, one ribbon Quire and two Tally-Quires' worth
- * (§16.2 п.6) — the room a running machine works in past that, as a volume of
- * format v1 is given it (GROUND_WORKING_ROOM_BLOCKS), so a book takes the
- * writes of the same machine — then the block of the far Deed, all of it to
+ * (§16.2 п.6) — the room a running machine works in past that
+ * (GROUND_WORKING_ROOM_BLOCKS) — then the block of the far Deed, all of it to
  * the grain.
  *
  * The digests' values are not known before the volume has a uuid and do not
