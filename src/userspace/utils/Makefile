@@ -67,7 +67,7 @@ ASSEMBLE_ENTRY_BLOB = $(ASSEMBLE_DIR)/entry_blob.o
 
 UTILS = create show files tag untag name trash delete assemble \
         me info say reboot bye defrag escheat fsck ipc_test memtag hw \
-        timezone logsave lastsaid usetest faretest luggagetest rollcall handset headcount \
+        timezone logsave lastsaid journey usetest faretest luggagetest rollcall handset headcount \
         playtime lavalamp finish taskboard memmap hexer stringview \
         calculate difference copy typer flame checksum passport aquarium \
         nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits \

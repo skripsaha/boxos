@@ -94,7 +94,7 @@
  * chunk. Params: [u64 va_base][u64 size]. */
 #define SYSTEM_OP_HEAP_PREFAULT     0x10
 
-/* ─── System telemetry (0x18 – 0x1B) ───────────────────────────────── */
+/* ─── System telemetry (0x18 – 0x1D) ───────────────────────────────── */
 #define SYSTEM_OP_DEFRAG_FILE       0x18
 #define SYSTEM_OP_FRAG_SCORE        0x19
 #define SYSTEM_OP_RESOURCES         0x1A
@@ -109,6 +109,11 @@
  * strand first — then the tags, comma-joined, no NUL. A program live at the
  * walk; one that would not fit whole is the shortfall against `total`. */
 #define SYSTEM_OP_ROSTER            0x1C
+/* The machine's way from power-on to a shell, in moments (journey.c).
+ * params: none. out_crate: a JourneyHead, then its `count` JourneyMoments —
+ * the loader's first, then the kernel's (boxos_journey.h holds the layout).
+ * The whole answer or ERR_BUFFER_TOO_SMALL; a few hundred bytes at most. */
+#define SYSTEM_OP_JOURNEY           0x1D
 
 /* ─── Process tags (0x20 – 0x22) ───────────────────────────────────── */
 #define SYSTEM_OP_TAG_ADD           0x20

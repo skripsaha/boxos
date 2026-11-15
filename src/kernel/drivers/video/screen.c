@@ -34,6 +34,7 @@
 #include "baton.h"          /* Knock — Ctrl+Alt+Esc comes from an interrupt */
 #include "cabin_layout.h"
 #include "boxos_font.h"
+#include "journey.h"
 
 typedef struct {
     uint32_t kind;        /* SCREEN_KIND_* */
@@ -314,6 +315,7 @@ error_t ScreenClaim(struct process_t *proc, ScreenDescription *out, bool *taken)
     EmergencyHide();
     ScreenDescribe(out);
     *taken = true;
+    JourneyMark("display");
     spin_unlock(&s_screen_turn);
     return OK;
 }

@@ -853,7 +853,7 @@ PAINTER_LIB = $(PAINTER_DIR)/libpainter.a
 UTILS_DIR = $(USERSPACE_DIR)/utils
 UTIL_NAMES = create show files tag untag name trash delete assemble \
              me info say reboot bye defrag escheat fsck ipc_test memtag hw \
-             timezone logsave lastsaid usetest faretest luggagetest headcount \
+             timezone logsave lastsaid journey usetest faretest luggagetest headcount \
              playtime lavalamp finish taskboard memmap hexer stringview \
              calculate difference copy typer flame checksum passport aquarium \
              nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits \
@@ -1568,6 +1568,7 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/luggagetest.elf "test" \
 	$(UTILS_DIR)/logsave.elf "log" \
 	$(UTILS_DIR)/lastsaid.elf "log" \
+	$(UTILS_DIR)/journey.elf "boot" \
 	$(UTILS_DIR)/rollcall.elf "test" \
 	$(UTILS_DIR)/handset.elf "test" \
 	$(UTILS_DIR)/headcount.elf "test" \
@@ -1639,7 +1640,7 @@ PackAsks = $(if $(filter $(basename $(notdir $(1))),$(PACK_ASKS_NOTHING)),,--ask
 # tools/pack --role): the programs the machine runs on say `system`, and the
 # volume maker, which trusts what it has itself just packed, keeps them in that
 # role. The rest are ordinary.
-PACK_SYSTEM = display hub pulse quilltest autostart reboot bye escheat timezone memtag hw usetest faretest logsave lastsaid finish taskboard memmap passport gardener
+PACK_SYSTEM = display hub pulse quilltest autostart reboot bye escheat timezone memtag hw usetest faretest logsave lastsaid journey finish taskboard memmap passport gardener
 PackRole = $(if $(filter $(basename $(notdir $(1))),$(PACK_SYSTEM)),--role system)
 
 define BoxRule

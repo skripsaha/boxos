@@ -44,6 +44,7 @@
 #include "cpuid.h"
 #include "cpu_caps_page.h"
 #include "boarding.h"
+#include "journey.h"
 #include "boot_info.h"
 #include "notify.h"
 #include "amp.h"
@@ -81,6 +82,9 @@ uint64_t g_entry_rflags = 0;
 
 void kernel_main(void)
 {
+    /* The kernel's first moment of the journey, before anything is done. */
+    JourneyMark("kernel");
+
     /* Before a single byte is said, because a byte said before this is a byte
      * the next boot will not find. See klib_logring.h for what the window
      * survives — a warm reset, not a power cut. */
@@ -944,6 +948,10 @@ void kernel_main(void)
     {
         debug_printf("[INIT] xHCI controller not found or initialization failed\n");
     }
+
+    /* Before any medium is asked for a volume: the journey notes when the
+     * first one is mounted. */
+    JourneyWatch();
 
     debug_printf("[INIT] Boardroom (media)...\n");
     BoardroomInit();

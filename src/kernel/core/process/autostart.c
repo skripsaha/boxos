@@ -10,6 +10,7 @@
 #include "klib.h"
 #include "kernel_config.h"
 #include "screen.h"   /* ScreenQuietEnds — the display program is not coming */
+#include "journey.h"
 
 /*
  * Autostart — the system's start set, whenever the volume turns up.
@@ -276,6 +277,7 @@ static int AutostartWalk(process_t **out_first, AutostartHeld *held)
     }
 
     if (!screen_coming) ScreenQuietEnds();
+    if (launched) JourneyMark("start");
     return launched;
 }
 

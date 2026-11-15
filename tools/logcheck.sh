@@ -1244,6 +1244,12 @@ run_uefi() {
     make run-bg UEFI=on >/dev/null 2>&1
     wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 3
+    # journey: the loader's moments off the pass and the kernel's, through
+    # SYSTEM_OP_JOURNEY, drawn by the utility — the whole road at once.
+    type_cmd "journey"
+    sleep 1
+    key_press ret
+    wait_for_line build/serial.log "from the loader's first moment to\|from power-on to" "$WAIT_QUIET_S"
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.uefi.log"
     probe_off
@@ -1316,6 +1322,13 @@ run_uefi() {
     chk $? "the kernel took the journal whole"
     grep -q "\[Boarding\]   it marked 7 moment(s) of its journey: entry medium kernel screen memory tables leave" "$L"
     chk $? "and Gangway marked every step of its journey"
+
+    # And journey draws it: Gangway step by step, then the kernel's steps —
+    # the volume mounted, the start set launched, the display on the glass.
+    grep -qE "^  Gangway .* medium .* kernel .* screen .* memory .* tables .* leave " "$L"
+    chk $? "journey shows Gangway's every step"
+    grep -qE "^  kernel .* volume .* start .* display " "$L"
+    chk $? "and the kernel's, to the display taking the glass"
 }
 
 # Does the medium actually carry this text? Read off the image rather than

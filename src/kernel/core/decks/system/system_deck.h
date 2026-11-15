@@ -94,4 +94,8 @@ error_t ClipboardOpsRegister(void);
  * its strands. Called from SystemDeckRegister. */
 error_t RosterOpsRegister(void);
 
+/* Register SYSTEM_OP_JOURNEY (journey.c) — the loader's moments and the
+ * kernel's, from power-on to a shell. Called from SystemDeckRegister. */
+error_t JourneyOpsRegister(void);
+
 #endif /* SYSTEM_DECK_H */
