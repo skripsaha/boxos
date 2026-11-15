@@ -1741,32 +1741,21 @@ error_t tagfs_write_block(uint64_t block, const void *buffer)
 // ----------------------------------------------------------------------------
 
 // The reserved-key vocabulary: the words a running program's cabin is given its
-// authority by (auth_tags.h) and the vocabulary's own. A registry tag carries
-// TAGFS_TAG_FLAG_SYSTEM iff it is the bare (value=NULL) entry for one of these
-// keys; a value-bearing tag like "system:foo" is a distinct entry and stays a
-// user tag. None of these is a file's role: that is its record's, and a file
-// wearing the word system is only a file its user called so. Mirrors the format-time intern order
-// (deterministic ids 0-11) and is re-stamped at every mount below. Built from
-// the same tagfs_reserved.h source as the format-seed, so the list cannot drift.
+// authority by (auth_tags.h). A registry tag carries TAGFS_TAG_FLAG_SYSTEM iff
+// it is the bare (value=NULL) entry for one of these keys; a value-bearing tag
+// like "system:foo" is a distinct entry and stays a user tag. None of these is
+// a file's role: that is its record's, and a file wearing the word system is
+// only a file its user called so. The image builder lays them first, at ids
+// 0-6 in this order, and they are re-stamped at every mount below. Built from
+// the same tagfs_reserved.h source as the builder's seed and the authority
+// bits, so the lists cannot drift.
 static const char *const TagFsReservedKeys[] = {
-#define X(k) k,
+#define X(id, key) key,
     TAGFS_RESERVED_KEYS(X)
 #undef X
 };
 _Static_assert(sizeof(TagFsReservedKeys) / sizeof(TagFsReservedKeys[0]) == TAGFS_RESERVED_COUNT,
                "reserved-key drift");
-
-/* The auth-privilege keys in TAGFS_AUTH_KEYS order. The fixed auth bit
- * AUTH_TAG_X (auth_tags.h) is 1u<<position here; cabin sync resolves it from the
- * key string. tagfs_stamp_reserved_tags asserts these are the exact prefix of
- * TagFsReservedKeys[] so the two vocabularies cannot silently diverge. */
-static const char *const AuthReservedKeys[] = {
-#define X(id, key) key,
-    TAGFS_AUTH_KEYS(X)
-#undef X
-};
-_Static_assert(sizeof(AuthReservedKeys) / sizeof(AuthReservedKeys[0]) == TAGFS_AUTH_COUNT,
-               "auth-key drift");
 
 /* True iff the key_len bytes at `key` are one of the reserved kernel-owned tag
  * keys (TagFsReservedKeys[]). A key, not a tag's text, so it catches both
@@ -1781,11 +1770,10 @@ bool tagfs_key_is_reserved(const char *key, size_t key_len)
     return false;
 }
 
-/* The reserved vocabulary stamped as the system's tags at every mount, and
- * its order held to the auth keys'. Every reserved tag is a tag like any
- * other to a question: none is filtered, none is kept by number. The auth
- * keys' op-authority is the FIXED cabin_t.auth_bits (auth_tags.h),
- * independent of the registry id. */
+/* The reserved vocabulary stamped as the system's tags at every mount. Every
+ * reserved tag is a tag like any other to a question: none is filtered, none
+ * is kept by number. The keys' op-authority is the FIXED cabin_t.auth_bits
+ * (auth_tags.h), independent of the registry id. */
 static void tagfs_stamp_reserved_tags(void)
 {
     TagFSState *fs = tagfs_get_state();
@@ -1801,17 +1789,6 @@ static void tagfs_stamp_reserved_tags(void)
         uint32_t    tid      = TagRegistryLookup(reg, &reserved);
         if (tid != TAGFS_INVALID_TAG_ID)
             tag_registry_mark_system(reg, tid);
-    }
-
-    /* Vocabulary-drift guard: the fixed auth bit AUTH_TAG_X (auth_tags.h) is
-     * 1u<<position in TAGFS_AUTH_KEYS, while cabin sync resolves that bit from
-     * the key string. This is only coherent if the auth keys are exactly the
-     * prefix of the reserved vocabulary. A mismatch means one list was
-     * reordered without the other — fail closed rather than mis-grant. */
-    for (size_t i = 0; i < TAGFS_AUTH_COUNT; i++) {
-        if (strcmp(AuthReservedKeys[i], TagFsReservedKeys[i]) != 0)
-            panic("auth/reserved vocab drift at index %u: auth='%s' reserved='%s'",
-                  (unsigned)i, AuthReservedKeys[i], TagFsReservedKeys[i]);
     }
 }
 

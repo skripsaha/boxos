@@ -3,7 +3,7 @@
  * shipment's pedigree.
  *
  * The vocabulary is interned the kernel's way — the reserved keys at ids
- * 0..11, a file's stem first — and the pedigree stamped into the Deed: the
+ * 0..6, a file's stem first — and the pedigree stamped into the Deed: the
  * part of a volume that is not its book, said once, here.
  */
 
@@ -73,15 +73,14 @@ static int intern_tag(const char* key, const char* value, const char* whose, uin
     return 0;
 }
 
-/* Intern the reserved vocabulary first so it claims tag_ids 0..11 — the same
- * on-disk ID contract the kernel's format-seed produces. The kernel restores
- * each tag at its stored id (tag_registry.c RegistryAdopt), so the
- * auth-privilege keys (god/stopped/bypass/network) land at ids < 64 and their
- * (1ULL<<id) masks are non-zero. Reserved keys that a file also carries dedup
- * back onto these low ids; genuinely new file tags start at id 12. */
+/* Intern the reserved vocabulary first so it claims tag_ids 0..6, in the
+ * order tagfs_reserved.h lists it — the on-disk id contract the kernel stamps
+ * the same keys by at every mount. The kernel restores each tag at its stored
+ * id (tag_registry.c RegistryAdopt). Reserved keys that a file also carries
+ * dedup back onto these low ids; genuinely new file tags start at id 7. */
 void seed_reserved_tags(void) {
     uint32_t id;
-#define X(k) (void)intern_tag(k, NULL, "the reserved vocabulary", &id);
+#define X(name, k) (void)intern_tag(k, NULL, "the reserved vocabulary", &id);
     TAGFS_RESERVED_KEYS(X)
 #undef X
 }

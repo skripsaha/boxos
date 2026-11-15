@@ -584,11 +584,11 @@ static int SysGiveBack(const ManifestOp *op, Crate *crates, uint16_t crate_count
  * auth privilege it does not itself hold (granted auth-level ⊆ granter auth-level).
  * god grants anything. stopped is a self-freeze, not an escalation, so it passes.
  *
- * This gates only the auth-privilege keys — unlike the PROC_EXEC merge path,
- * which rejects every reserved key. The asymmetry is deliberate: a spawn tag
- * set is wholly caller-supplied (there is no trusted file-tag base to protect),
- * and the non-auth reserved keys (name/autostart/snapshot/trashed/hidden) confer
- * no op-authority — none appear in any auth mask — so they are not escalations.
+ * This grants a reserved key the spawner holds itself — unlike the PROC_EXEC
+ * merge path, which rejects every reserved key outright. The asymmetry is
+ * deliberate: a spawn tag set is wholly caller-supplied (there is no trusted
+ * file-tag base to protect), so a key the spawner already holds is no
+ * escalation.
  *
  * Authority is the FIXED auth_bits (auth_tags.h) on both sides, so the subset
  * check no longer depends on the privilege tags interning below registry id 64.

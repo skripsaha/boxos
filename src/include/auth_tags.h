@@ -4,7 +4,7 @@
 /*
  * Fixed process op-authority bits, decoupled from the TagFS registry id.
  *
- * Each of the 7 auth-privilege keys (TAGFS_AUTH_KEYS) owns a FIXED bit
+ * Each reserved key (TAGFS_RESERVED_KEYS) owns a FIXED bit
  * 1u<<position in cabin_t.auth_bits — never (1u<<registry_id). A cabin sets
  * AUTH_TAG_X iff it carries the BARE key X (value empty); the three mutation
  * points (cabin_create's cabin_wear_tags, process_add_tag, process_remove_tag)
@@ -19,28 +19,28 @@
 
 enum AuthTagIndex {
 #define X(id, key) AUTH_IX_##id,
-    TAGFS_AUTH_KEYS(X)
+    TAGFS_RESERVED_KEYS(X)
 #undef X
     AUTH_TAG_COUNT
 };
 
 enum AuthTagBit {
 #define X(id, key) AUTH_TAG_##id = (1u << AUTH_IX_##id),
-    TAGFS_AUTH_KEYS(X)
+    TAGFS_RESERVED_KEYS(X)
 #undef X
 };
 
 _Static_assert(AUTH_TAG_COUNT <= 32, "auth_bits is uint32_t");
-_Static_assert(AUTH_TAG_COUNT == TAGFS_AUTH_COUNT, "auth vocab count drift");
+_Static_assert(AUTH_TAG_COUNT == TAGFS_RESERVED_COUNT, "reserved-key count drift");
 
-/* The single checkpoint: the key_len bytes of a bare auth key -> its fixed
+/* The single checkpoint: the key_len bytes of a bare reserved key -> its fixed
  * bit, 0 for any other key. A key as a tag's spelling holds it, in place. */
 static inline uint32_t AuthBitForKey(const char *key, size_t key_len)
 {
 #define X(id, keystr) \
     if (key_len == sizeof(keystr) - 1 && __builtin_memcmp(key, keystr, key_len) == 0) \
         return AUTH_TAG_##id;
-    TAGFS_AUTH_KEYS(X)
+    TAGFS_RESERVED_KEYS(X)
 #undef X
     return 0;
 }
