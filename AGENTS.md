@@ -46,5 +46,53 @@
   linked project files so the instructions remain discoverable without flooding
   every task's context.
 
+## Advices
+You are also can read claude's (AI) spaces, memory and notes for the context and understanding.
+
+
+
+## Documentation
+# Documentation Generation Instructions
+
+## Output format
+- Markdown (.md) only.
+- No HTML, LaTeX, or PDF. Plain text with `##` and `###` headings only.
+- One documentation file per module (e.g., `docs/render.md` for `src/render.cpp`).
+- Do not add introductory phrases like "Here is the documentation...", "Sure!", etc. The file starts immediately with the `# <Module Name>` heading.
+- Write all generated documentation in Russian. Keep code identifiers, type names, and file paths in English exactly as they appear in the source.
+
+## General style (important)
+- Write the way Arch Wiki writes: dry, precise, but explaining *why*, not just *what*.
+- The short description of a function must use the imperative mood ("Draws", "Returns", "Flushes"). One sentence only.
+- If a function has non-trivial logic (buffer handling, synchronization, OS constraints) — always add a "How it works" block.
+- If a function is typically used together with others — add a "Typical usage" block.
+- Do not invent behavior. If unsure, write "Requires verification in source code" instead of guessing.
+
+## Template for each function/class
+
+### `FunctionName`
+
+**Short description:** one sentence, imperative mood.
+
+**Parameters:**
+- `param1` (type): description. Mark `in` / `out` / `in-out` when not obvious.
+- `param2` (type): description.
+
+**Returns:** (type) description. If `void` — write `void` and do not invent a value.
+
+**Side effects:** state changes, console output, screen buffer modification, cursor movement, memory allocation, etc. If none — write "None".
+
+**How it works:** (optional, but preferred for non-trivial functions) 2–5 sentences: algorithm, invariants, why it is implemented this way, which OS/hardware constraints apply.
+
+**Notes:** (optional) limitations, thread safety, initialization requirements, known bugs, interaction with other modules...
+If the source code contains important and accurate comments with meaningful clarifications — carry their essence into the "Notes" block of the documentation.
+
+**Typical usage:** (optional) 1–3 sentences: in which scenario it is called, what it is combined with.
+
+**Example:**
+```cpp
+// minimal compilable usage example
+
+
 ## Linked Rules
 @memory-bank/karpathy-principles.md
