@@ -14,7 +14,7 @@
  * its medium leaves (logcheck replugwrite); quilltest_room.c roomback,
  * emptyfull and its halves either side of a reboot, emptyfill and emptyback,
  * a full volume (logcheck fullvolume); quilltest_book.c names, namecut and
- * namecheck, files made, named, tagged and given up on a format-v2 book
+ * namecheck, files made, named, tagged and given up on a book
  * (logcheck book_circle, book_stitchcut). All say their verdict in the same
  * four words and ask the volume for files by name.
  */
@@ -114,7 +114,7 @@ QuillVerdict QuillEmptyFull(const char *const *args);
 QuillVerdict QuillEmptyFillOnly(const char *const *args);
 QuillVerdict QuillEmptyBack(const char *const *args);
 
-/* A format-v2 book's files, quilltest_book.c. */
+/* A book's files, quilltest_book.c. */
 QuillVerdict QuillBookNames(const char *const *args);
 QuillVerdict QuillBookNameCut(const char *const *args);
 QuillVerdict QuillBookNameCheck(const char *const *args);

@@ -1,6 +1,6 @@
 /*
  * quilltest_book.c — files made, named, tagged, written and given up on a
- * format-v2 book, whose kernel lays them into stitches (logcheck book_circle,
+ * book, whose kernel lays them into stitches (logcheck book_circle,
  * book_big, book_stitchcut).
  *
  * ‼ NAMES: EVERY KIND OF RECORD A STITCH CARRIES FOR A FILE, EACH ROUND

@@ -107,9 +107,8 @@ int delete(file_id_t file_id);
  * file_restore until the term ends, and the volume lets it go by itself then.
  * The term is the caller's — in seconds, from now — and the volume has none of
  * its own; 0 gives the file up at once, as `delete` does. Guarded as `delete`
- * is: a file the system keeps is refused (-ERR_PERMISSION_DENIED); -ERR_UNSUPPORTED
- * on a format-v1 volume for a term above 0. Whoever deletes warns the person
- * first, if he is to be warned. file_restore: the file found again, its name
+ * is: a file the system keeps is refused (-ERR_PERMISSION_DENIED). Whoever
+ * deletes warns the person first, if he is to be warned. file_restore: the file found again, its name
  * and tags as they were (-ERR_FILE_NOT_FOUND once its term has ended). */
 int file_keep(file_id_t file_id, uint64_t term_seconds);
 int file_restore(file_id_t file_id);
@@ -190,7 +189,7 @@ int anchor(file_id_t file_id);
 int write_settled(file_id_t file_id);
 
 /*
- * escheat() — Escheat: what a format-v2 book can never give back let go for
+ * escheat() — Escheat: what a book can never give back let go for
  * good (storage.escheat). Every FILES range of the Tally that no copy of its
  * node reads: its files declared lost, their ids never given again, the blocks
  * held for them freed once the next Tally — written whole — names none of it.

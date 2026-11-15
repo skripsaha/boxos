@@ -566,7 +566,7 @@ int main(void)
      * we print are measured cleanly because every print is said at once. */
     io_set_mode(IO_MODE_RING);
 
-    println("BoxOS bench v1 — RDTSC microbenchmarks");
+    println("BoxOS bench — RDTSC microbenchmarks");
 
     uint64_t khz = cpu_get_tsc_freq_khz();
     if (khz == 0)

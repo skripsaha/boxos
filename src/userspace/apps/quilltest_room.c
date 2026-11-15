@@ -16,7 +16,7 @@
  * must be its own stream. The one MiB more _qra.bin had is the room the new
  * file's record may take, never the write's own. On a book the write waits
  * for the Tallies that make the reserve exact and may yet be refused the
- * growth of what the book keeps and holds (spec_v2 §16.6 п.8): refused
+ * growth of what the book keeps and holds: refused
  * no-space part way, whatever it took read back whole, it says PENDING —
  * logcheck gives the verdict by the kernel's word.
  *
@@ -195,8 +195,8 @@ QuillVerdict QuillRoomBack(const char *const *args)
         return QUILL_PASS;
     }
     /* Refused no-space part way, all it took read back: a book's word to give
-     * (the reserve's measure, §16.6 п.8), never this case's — format v1 holds
-     * it to the PASS above, a book to what the kernel says it keeps. */
+     * (the reserve's measure), never this case's — the book is held to what
+     * the kernel says it keeps. */
     if (drc == 0 && cfid > 0 && c > 0 && cend == -(int)ERR_TAGFS_NO_SPACE && good == c && arc == 0) {
         printf("[QUILL] roomback: PENDING — _qra.bin deleted (0), _qrc.bin (create %ld) took %llu of %llu "
                "bytes in %llu ms and was refused %d; read back good to byte %llu (read %lld, anchor 0): what "

@@ -7,7 +7,7 @@
 
 /*
  * quilltest dedup — a file and its copy on a book, for the pass Glean runs
- * after each Tally (logcheck dedup; spec_v2 §8.2, §16.7 пп.7–9):
+ * after each Tally (logcheck dedup):
  *
  *   NAME MIB   NAME-a.d of MIB mebibytes written in one write and anchored,
  *              then NAME-b.d of its very bytes the same way, every earlier

@@ -47,7 +47,7 @@ typedef struct {
     uint64_t volume_free_bytes;
     uint8_t  volume_present;
     uint8_t  volume_free_counted; /* 0: the kernel holds no count of this volume's
-                                   * free ground (a format-v2 book whose Tally names
+                                   * free ground (a book whose Tally names
                                    * a bookmark, whose ground it does not read), and
                                    * the free and used bytes say nothing */
     uint8_t  _volume_pad[6];
