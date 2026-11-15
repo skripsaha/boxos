@@ -501,22 +501,22 @@ static void TestKeys(void)
     KeyChord chord, other;
     KeyChordRead((const uint8_t *)"ctrl+alt+q", 10, &chord);
     KeyChordRead((const uint8_t *)"alt+ctrl+q", 10, &other);
-    const kb_event_t typed = { 0x10, 'q', KB_MOD_CTRL | KB_MOD_ALT };
-    const kb_event_t shifted = { 0x10, 'Q', KB_MOD_CTRL | KB_MOD_ALT | KB_MOD_SHIFT };
-    const kb_event_t alone = { 0x10, 'q', KB_MOD_CTRL };
+    const kb_event_t typed = { .cp = 'q', .scancode = 0x10, .mods = KB_MOD_CTRL | KB_MOD_ALT };
+    const kb_event_t shifted = { .cp = 'Q', .scancode = 0x10, .mods = KB_MOD_CTRL | KB_MOD_ALT | KB_MOD_SHIFT };
+    const kb_event_t alone = { .cp = 'q', .scancode = 0x10, .mods = KB_MOD_CTRL };
     Check(KeyChordSame(&chord, &other) && KeyChordMatches(&chord, &typed) && !KeyChordMatches(&chord, &shifted) &&
               !KeyChordMatches(&chord, &alone),
           "ctrl+alt+q is the key q with ctrl and alt held, and with nothing more or less");
     KeyChordRead((const uint8_t *)"ctrl+alt+shift+q", 16, &chord);
     Check(KeyChordMatches(&chord, &shifted), "with shift held the letter comes as a capital, and matches");
     KeyChordRead((const uint8_t *)"ctrl+left", 9, &chord);
-    const kb_event_t left = { KEY_LEFT, 0, KB_MOD_CTRL | KB_MOD_EXTENDED };
-    const kb_event_t four = { KEY_LEFT, '4', KB_MOD_CTRL };
+    const kb_event_t left = { .cp = 0, .scancode = KEY_LEFT, .mods = KB_MOD_CTRL | KB_MOD_EXTENDED };
+    const kb_event_t four = { .cp = '4', .scancode = KEY_LEFT, .mods = KB_MOD_CTRL };
     Check(KeyChordMatches(&chord, &left) && !KeyChordMatches(&chord, &four),
           "left is the key of the 0xE0 set, not the keypad's 4 with the same scancode");
     KeyChordRead((const uint8_t *)"ctrl+?", 6, &chord);
-    const kb_event_t asked = { 0x35, '?', KB_MOD_CTRL | KB_MOD_SHIFT };
-    const kb_event_t slash = { 0x35, '/', KB_MOD_CTRL };
+    const kb_event_t asked = { .cp = '?', .scancode = 0x35, .mods = KB_MOD_CTRL | KB_MOD_SHIFT };
+    const kb_event_t slash = { .cp = '/', .scancode = 0x35, .mods = KB_MOD_CTRL };
     Check(KeyChordMatches(&chord, &asked) && !KeyChordMatches(&chord, &slash),
           "ctrl+? is the key under ? with ctrl and shift held, as the keyboard says it, not ctrl+/");
 
