@@ -158,9 +158,8 @@ static bool test_storage_getinfo(void)
  *
  *    ERR_ACCESS_DENIED   — the op is there, and the gate would not let US
  *                          have it. That is the gate working.
- *    ERR_INVALID_OPCODE  — there is no such op on this deck at all, and there
- *                          never will be again. That is a retired number
- *                          staying retired.
+ *    ERR_INVALID_OPCODE  — there is no such op on this deck at all. That is
+ *                          the registry knowing what it does not offer.
  * ------------------------------------------------------------------------- */
 
 static bool test_auth_denies_system_op(void)
@@ -177,7 +176,7 @@ static bool test_auth_denies_system_op(void)
     if (ManifestBuilderInit(&mb, mbuf, sizeof(mbuf)) != 0) return false;
 
     uint8_t params[1] = { 0 };                 /* the first controller */
-    if (ManifestBuilderAddOp(&mb, DECK_HARDWARE, 0x98 /* hw.usb.port.query */, 0,
+    if (ManifestBuilderAddOp(&mb, DECK_HARDWARE, HW_USB_PORT_QUERY, 0,
                              CRATE_INDEX_NONE, 0,
                              params, sizeof(params)) != 0) return false;
     if (ManifestBuilderFinalize(&mb) != 0) return false;
@@ -191,18 +190,18 @@ static bool test_auth_denies_system_op(void)
     return r.error_code == (uint32_t)ERR_ACCESS_DENIED;
 }
 
-static bool test_retired_opcode_is_unknown(void)
+static bool test_unnamed_opcode_is_unknown(void)
 {
-    /* 0x21 was hw.port.outb. It is withdrawn and its number is spent for ever
-     * (hardware_deck.h), so the deck must answer that there is no such op —
-     * a different refusal from the one above, and the difference is the whole
-     * reason both tests exist. */
+    /* No section of the hardware deck reaches 0xFF (boxos_decks.h), so the
+     * deck must answer that there is no such op — a different refusal from
+     * the one above, and the difference is the whole reason both tests
+     * exist. */
     static uint8_t mbuf[64];
     ManifestBuilder mb;
     if (ManifestBuilderInit(&mb, mbuf, sizeof(mbuf)) != 0) return false;
 
-    uint8_t params[3] = { 0x80, 0x00, 0x00 };  /* port 0x80, value 0 */
-    if (ManifestBuilderAddOp(&mb, DECK_HARDWARE, 0x21 /* retired */, 0,
+    uint8_t params[3] = { 0x80, 0x00, 0x00 };
+    if (ManifestBuilderAddOp(&mb, DECK_HARDWARE, 0xFF /* named by no section */, 0,
                              CRATE_INDEX_NONE, CRATE_INDEX_NONE,
                              params, sizeof(params)) != 0) return false;
     if (ManifestBuilderFinalize(&mb) != 0) return false;
@@ -233,7 +232,7 @@ int main(void)
     check("Storage:    query all",     test_storage_query());
     check("Storage:    getinfo",       test_storage_getinfo());
     check("Auth gate:  deny usb.port.query", test_auth_denies_system_op());
-    check("Retired:    port.outb is no op",  test_retired_opcode_is_unknown());
+    check("Unnamed:    hw 0xFF is no op",     test_unnamed_opcode_is_unknown());
 
     print("[decks] ");
     print_int(g_passed);

@@ -387,11 +387,8 @@ static bool Describe(const InsideFile *file, const BoxTable *table, const BoxPar
 {
     *read = true;
     if (part->Kind == BOX_KIND_UNKNOWN) {
-        bool bare;
         SayUnder(file);
-        Say(file, BoxKindOf(part->Name, part->NameLength, &bare) != BOX_KIND_UNKNOWN
-                      ? "of a later version of its kind than this reader knows\n"
-                      : "of a kind this reader does not know\n");
+        Say(file, "of a kind this reader does not know\n");
         return true;
     }
     if (BoxKindLoadable(part->Kind)) {
@@ -528,9 +525,7 @@ static InsideVerdict ShowBox(const InsideFile *file, const uint8_t *first, uint6
     }
 
     Say(file, file->Name);
-    Say(file, ": a box, format ");
-    SayNumber(file, head.Version, 0);
-    Say(file, ", ");
+    Say(file, ": a box, ");
     SayCount(file, file->Size, "byte", "bytes");
     Say(file, ", ");
     SayNumber(file, head.PartCount, 0);

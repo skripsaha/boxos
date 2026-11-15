@@ -31,7 +31,7 @@ static void Check(bool ok, const char *what)
 }
 
 static const char g_clock[] =
-    "settings 1\n"
+    "settings\n"
     "hours one-of 24 12 default 24 \"how the hours are counted\"\n"
     "seconds on-or-off default on \"whether the seconds are shown\"\n"
     "digits \"the digits of the time\"\n"
@@ -242,7 +242,7 @@ static void TestDeclarationWrong(void)
 {
     BoxSettings s;
     Assemble(&s,
-             "settings 1\n"
+             "settings\n"
              "look gradient default x \"a later kind\"\n"
              "    shade color default red \"inside it\"\n"
              "hours one-of 24 default 24 \"one choice\"\n"
@@ -264,7 +264,7 @@ static void TestDeclarationWrong(void)
 
     Assemble(&s, "a word default b \"c\"\n", "a x\n");
     static const char *const headless[] = {
-        "clock's settings do not begin with the line \"settings 1\"; it has none",
+        "clock's settings do not begin with the line \"settings\"; it has none",
         "clock.settings, line 1: clock has no setting a; the line is left as it is",
     };
     ProblemsAre(&s, headless, 2, "a declaration without its first line");
@@ -405,7 +405,7 @@ static void TestKey(void)
 {
     BoxSettings s;
     char        wants[120];
-    Assemble(&s, "settings 1\nkeys \"the keys\"\n    stop key default ctrl+alt+q \"end it\"\n",
+    Assemble(&s, "settings\nkeys \"the keys\"\n    stop key default ctrl+alt+q \"end it\"\n",
              "keys stop alt+shift+end\n[work]\n    keys stop ctrl+alt+x\n    keys stop q\n");
     const BoxSetting *stop = settings_find(&s, "keys stop");
     Check(stop && strcmp(stop->Value.Text, "alt+shift+end") == 0 && stop->Value.Key.Extended &&

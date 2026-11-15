@@ -194,7 +194,7 @@ int form_parse(const char *text, size_t length, BoxForm *out)
     const char *end = nul ? nul : text + length;
     const char *at  = text;
 
-    static const char head[] = "form 1";
+    static const char head[] = "form";
     size_t head_length = sizeof(head) - 1;
     if ((size_t)(end - at) < head_length || memcmp(at, head, head_length) != 0)
         return -ERR_INVALID_ARGUMENT;

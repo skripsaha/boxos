@@ -66,8 +66,7 @@ static const uint64_t g_fixups[] = { 0x1000, 0x2000, 0x2008, 0x2010, 0x2018 };
 static void Add(Sample *sample, const char *name, const void *bytes, uint64_t size, uint64_t memory,
                 uint64_t place, uint32_t flags)
 {
-    sample->Parts[sample->Count++] = (BoxPenPart){ name, bytes, size, memory, place, flags,
-                                                   BOX_PART_VERSION };
+    sample->Parts[sample->Count++] = (BoxPenPart){ name, bytes, size, memory, place, flags };
 }
 
 static BoxPenPart *PartNamed(Sample *sample, const char *name)
@@ -109,17 +108,17 @@ static void SampleMake(Sample *sample)
     Add(sample, "thread", sample->Thread, thread_bytes, thread_bytes, 0, must);
     Add(sample, "paint:brushes", "brushes", 7, 7, 0, 0);
     Add(sample, "data", sample->Data, 0x20, 0x3000, 0x2000, must);
-    Add(sample, "about:ru", "about 1\nname Edit\n", 18, 18, 0, 0);
+    Add(sample, "about:ru", "about\nname Edit\n", 16, 16, 0, 0);
     Add(sample, "code", sample->Code, 0x300, 0x300, 0, must);
     Add(sample, "icon:64", sample->Icon, 16, 16, 0, 0);
-    Add(sample, "form", "form 1\n", 7, 7, 0, BOX_FLAG_LOAD_AT_START);
+    Add(sample, "form", "form\n", 5, 5, 0, BOX_FLAG_LOAD_AT_START);
     Add(sample, "doors", sample->Doors, doors_bytes, doors_bytes, 0, must);
     Add(sample, "fixups", sample->Fixups, fixups_bytes, fixups_bytes, 0, must);
-    Add(sample, "about", "about 1\nname Edit\n", 18, 18, 0, 0);
+    Add(sample, "about", "about\nname Edit\n", 16, 16, 0, 0);
     Add(sample, "const", sample->Const, 0x40, 0x40, 0x1000, must);
-    Add(sample, "needs", "needs 1\n", 8, 8, 0, must);
-    Add(sample, "hints", "hints 1\nstack 1 MiB\n", 20, 20, 0, 0);
-    Add(sample, "life", "life 1\ntask\n", 12, 12, 0, 0);
+    Add(sample, "needs", "needs\n", 6, 6, 0, must);
+    Add(sample, "hints", "hints\nstack 1 MiB\n", 18, 18, 0, 0);
+    Add(sample, "life", "life\ntask\n", 10, 10, 0, 0);
     Add(sample, "names", sample->Names, 16, 16, 0, 0);
 }
 
@@ -253,13 +252,11 @@ static void TestHeader(void)
     f = Fresh(); f[4] = 0x0A;
     Expect("a CR a text transfer took", f, g_bytes, BOX_NOT_BOX, "");
     Expect("a header cut short", g_box, 60, BOX_TRUNCATED, "");
-    f = Fresh(); BoxPut16(f + BOX_AT_VERSION, 2);
-    Expect("version 2", f, g_bytes, BOX_VERSION_UNKNOWN, "");
-    f = Fresh(); BoxPut16(f + BOX_AT_HEADER_SIZE, 72);
+    f = Fresh(); BoxPut32(f + BOX_AT_HEADER_SIZE, 72);
     Expect("a header shorter than the header", f, g_bytes, BOX_HEADER_SIZE, "");
-    f = Fresh(); BoxPut16(f + BOX_AT_HEADER_SIZE, 84);
+    f = Fresh(); BoxPut32(f + BOX_AT_HEADER_SIZE, 84);
     Expect("a header of a length not a multiple of eight", f, g_bytes, BOX_HEADER_SIZE, "");
-    f = Fresh(); BoxPut16(f + BOX_AT_HEADER_SIZE, 88);
+    f = Fresh(); BoxPut32(f + BOX_AT_HEADER_SIZE, 88);
     Expect("a header longer than where the table starts", f, g_bytes, BOX_TABLE_MISPLACED, "");
     Expect("the file cut by one byte", g_box, g_bytes - 1, BOX_FILE_SIZE, "");
     f = Fresh(); BoxPut64(f + BOX_AT_FILE_SIZE, g_bytes + 1);
@@ -281,6 +278,8 @@ static void TestTable(void)
     uint8_t *f;
     f = Fresh(); BoxPut32(EntryIn(f, "data") + BOX_ENTRY_RESERVED, 1);
     Expect("an entry not zero where it must be", f, g_bytes, BOX_ENTRY_NOT_ZERO, "data");
+    f = Fresh(); EntryIn(f, "data")[BOX_ENTRY_HASH - 1] = 1;
+    Expect("an entry not zero in the last byte before its hash", f, g_bytes, BOX_ENTRY_NOT_ZERO, "data");
     f = Fresh(); BoxPut32(EntryIn(f, "const") + BOX_ENTRY_FLAGS, BOX_FLAG_MUST_UNDERSTAND | 0x8u);
     Expect("a mark nobody knows", f, g_bytes, BOX_FLAGS_UNKNOWN, "const");
 
@@ -368,18 +367,9 @@ static void TestPartRules(void)
     BoxPut64(EntryIn(f, "paint:brushes") + BOX_ENTRY_PLACE, 0x1000);
     Expect("a part nobody here knows, loaded at start at a place of its own", f, g_bytes,
            BOX_PART_PLACE, "paint:brushes");
-    f = Fresh(); BoxPut16(EntryIn(f, "life") + BOX_ENTRY_VERSION, 2);
-    BoxPut32(EntryIn(f, "life") + BOX_ENTRY_FLAGS, BOX_FLAG_LOAD_AT_START);
-    BoxPut64(EntryIn(f, "life") + BOX_ENTRY_MEMORY, 0);
-    Expect("life in a later version, loaded at start shorter in memory", f, g_bytes,
-           BOX_PART_MEMORY, "life");
     f = Fresh(); BoxPut32(EntryIn(f, "paint:brushes") + BOX_ENTRY_FLAGS, BOX_FLAG_MUST_UNDERSTAND);
     Expect("a part nobody here knows, to be understood", f, g_bytes, BOX_PART_UNKNOWN_REQUIRED,
            "paint:brushes");
-    f = Fresh(); BoxPut16(EntryIn(f, "needs") + BOX_ENTRY_VERSION, 2);
-    Expect("needs in a version nobody here knows", f, g_bytes, BOX_PART_VERSION_REQUIRED, "needs");
-    f = Fresh(); BoxPut16(EntryIn(f, "life") + BOX_ENTRY_VERSION, 2);
-    Expect("life in a later version, passed over", f, g_bytes, BOX_OK, "");
 }
 
 static void TestHashes(void)
@@ -745,22 +735,22 @@ static uint64_t CountFacts(const char *text, BoxKind kind, BoxVerdict *verdict)
 static void TestTextParts(void)
 {
     BoxVerdict verdict;
-    Check(CountFacts("needs 1\ncpu avx2\ncpu bmi2\n", BOX_KIND_NEEDS, &verdict) == 2 && verdict == BOX_OK,
+    Check(CountFacts("needs\ncpu avx2\ncpu bmi2\n", BOX_KIND_NEEDS, &verdict) == 2 && verdict == BOX_OK,
           "needs: two facts after its first line");
-    Check(CountFacts("\n  \nneeds 1\n\n   cpu avx2   \n\ncpu bmi2", BOX_KIND_NEEDS, &verdict) == 2 && verdict == BOX_OK,
+    Check(CountFacts("\n  \nneeds\n\n   cpu avx2   \n\ncpu bmi2", BOX_KIND_NEEDS, &verdict) == 2 && verdict == BOX_OK,
           "blank lines and blanks around words are nothing; the last newline may be left off");
-    Check(CountFacts("needs 1", BOX_KIND_NEEDS, &verdict) == 0 && verdict == BOX_OK, "a part of its first line alone");
-    CountFacts("hints 1\n", BOX_KIND_NEEDS, &verdict);
+    Check(CountFacts("needs", BOX_KIND_NEEDS, &verdict) == 0 && verdict == BOX_OK, "a part of its first line alone");
+    CountFacts("hints\n", BOX_KIND_NEEDS, &verdict);
     Check(verdict == BOX_TEXT_LAYOUT, "a first line of another kind");
-    CountFacts("needs 2\n", BOX_KIND_NEEDS, &verdict);
-    Check(verdict == BOX_TEXT_LAYOUT, "a first line of another version");
+    CountFacts("needs 1\n", BOX_KIND_NEEDS, &verdict);
+    Check(verdict == BOX_TEXT_LAYOUT, "a first line with a word after the kind");
     CountFacts("needs 1 more\n", BOX_KIND_NEEDS, &verdict);
     Check(verdict == BOX_TEXT_LAYOUT, "a first line of three words");
     CountFacts("", BOX_KIND_NEEDS, &verdict);
     Check(verdict == BOX_TEXT_LAYOUT, "no first line");
-    CountFacts("needs 1\ncpu\tavx2\n", BOX_KIND_NEEDS, &verdict);
+    CountFacts("needs\ncpu\tavx2\n", BOX_KIND_NEEDS, &verdict);
     Check(verdict == BOX_TEXT_LAYOUT, "a tab in a text part");
-    CountFacts("needs 1\r\ncpu avx2\r\n", BOX_KIND_NEEDS, &verdict);
+    CountFacts("needs\r\ncpu avx2\r\n", BOX_KIND_NEEDS, &verdict);
     Check(verdict == BOX_TEXT_LAYOUT, "a carriage return in a text part");
 
     const uint8_t *line = (const uint8_t *)"  cpu   sse4.1 ", *word;
@@ -837,28 +827,28 @@ static void TestLife(void)
 {
     BoxLife  life;
     uint64_t unknown = 9;
-    Check(LifeOf("life 1\n", &life, &unknown) == BOX_OK && life.Kind == BOX_LIFE_TASK && !life.Rise && unknown == 0,
+    Check(LifeOf("life\n", &life, &unknown) == BOX_OK && life.Kind == BOX_LIFE_TASK && !life.Rise && unknown == 0,
           "life: one that says nothing is a task, not raised");
-    Check(LifeOf("life 1\nstays\n", &life, &unknown) == BOX_OK && life.Kind == BOX_LIFE_STAYS && !life.Rise,
+    Check(LifeOf("life\nstays\n", &life, &unknown) == BOX_OK && life.Kind == BOX_LIFE_STAYS && !life.Rise,
           "life: stays");
-    Check(LifeOf("life 1\nserves\nrise", &life, &unknown) == BOX_OK && life.Kind == BOX_LIFE_SERVES && life.Rise,
+    Check(LifeOf("life\nserves\nrise", &life, &unknown) == BOX_OK && life.Kind == BOX_LIFE_SERVES && life.Rise,
           "life: serves and rise, the last newline left off");
-    Check(LifeOf("life 1\nrise\ntask\n", &life, &unknown) == BOX_OK && life.Kind == BOX_LIFE_TASK && life.Rise,
+    Check(LifeOf("life\nrise\ntask\n", &life, &unknown) == BOX_OK && life.Kind == BOX_LIFE_TASK && life.Rise,
           "life: rise said before the way of living");
-    Check(LifeOf("life 1\n\n   stays   \n", &life, &unknown) == BOX_OK && life.Kind == BOX_LIFE_STAYS,
+    Check(LifeOf("life\n\n   stays   \n", &life, &unknown) == BOX_OK && life.Kind == BOX_LIFE_STAYS,
           "life: blank lines and blanks around the word are nothing");
-    Check(LifeOf("life 1\nstays\nserves\n", &life, &unknown) == BOX_TEXT_LAYOUT, "life: two ways of living");
-    Check(LifeOf("life 1\nstays\nstays\n", &life, &unknown) == BOX_TEXT_LAYOUT, "life: one way said twice");
-    Check(LifeOf("life 1\nrise\nrise\n", &life, &unknown) == BOX_TEXT_LAYOUT, "life: rise said twice");
-    Check(LifeOf("life 1\nstays rise\n", &life, &unknown) == BOX_TEXT_LAYOUT,
+    Check(LifeOf("life\nstays\nserves\n", &life, &unknown) == BOX_TEXT_LAYOUT, "life: two ways of living");
+    Check(LifeOf("life\nstays\nstays\n", &life, &unknown) == BOX_TEXT_LAYOUT, "life: one way said twice");
+    Check(LifeOf("life\nrise\nrise\n", &life, &unknown) == BOX_TEXT_LAYOUT, "life: rise said twice");
+    Check(LifeOf("life\nstays rise\n", &life, &unknown) == BOX_TEXT_LAYOUT,
           "life: a word it knows with another on its line");
-    Check(LifeOf("life 1\nlonely\nstays\nhermit\n", &life, &unknown) == BOX_OK && life.Kind == BOX_LIFE_STAYS &&
+    Check(LifeOf("life\nlonely\nstays\nhermit\n", &life, &unknown) == BOX_OK && life.Kind == BOX_LIFE_STAYS &&
               unknown == 2,
           "life: a word this reader does not know is passed over, and the first such line is named");
-    Check(LifeOf("life 2\nstays\n", &life, &unknown) == BOX_TEXT_LAYOUT, "life: another version");
-    Check(LifeOf("hints 1\nstays\n", &life, &unknown) == BOX_TEXT_LAYOUT && life.Kind == BOX_LIFE_TASK,
+    Check(LifeOf("life 1\nstays\n", &life, &unknown) == BOX_TEXT_LAYOUT, "life: a word after the kind");
+    Check(LifeOf("hints\nstays\n", &life, &unknown) == BOX_TEXT_LAYOUT && life.Kind == BOX_LIFE_TASK,
           "life: a part of another kind is refused, and says a task");
-    Check(LifeOf("life 1\nserves\n", &life, NULL) == BOX_OK && life.Kind == BOX_LIFE_SERVES,
+    Check(LifeOf("life\nserves\n", &life, NULL) == BOX_OK && life.Kind == BOX_LIFE_SERVES,
           "life: read without asking what it passed over");
 }
 
@@ -885,24 +875,24 @@ static void TestRole(void)
 {
     BoxRole  role;
     uint64_t unknown;
-    Check(RoleOf("role 1\nsystem\n", &role, &unknown) == BOX_OK && role == BOX_ROLE_SYSTEM && unknown == 0,
+    Check(RoleOf("role\nsystem\n", &role, &unknown) == BOX_OK && role == BOX_ROLE_SYSTEM && unknown == 0,
           "role: system");
-    Check(RoleOf("role 1\nboot", &role, &unknown) == BOX_OK && role == BOX_ROLE_BOOT && unknown == 0,
+    Check(RoleOf("role\nboot", &role, &unknown) == BOX_OK && role == BOX_ROLE_BOOT && unknown == 0,
           "role: boot, the last newline left off");
-    Check(RoleOf("role 1\n\n   system   \n", &role, &unknown) == BOX_OK && role == BOX_ROLE_SYSTEM,
+    Check(RoleOf("role\n\n   system   \n", &role, &unknown) == BOX_OK && role == BOX_ROLE_SYSTEM,
           "role: blank lines and blanks around the word are nothing");
-    Check(RoleOf("role 1\nkernel\n", &role, &unknown) == BOX_OK && role == BOX_ROLE_ORDINARY && unknown == 2,
+    Check(RoleOf("role\nkernel\n", &role, &unknown) == BOX_OK && role == BOX_ROLE_ORDINARY && unknown == 2,
           "role: a word this reader does not know is passed over and named — kernel is no role a box can say");
-    Check(RoleOf("role 1\n", &role, &unknown) == BOX_TEXT_LAYOUT && role == BOX_ROLE_ORDINARY,
+    Check(RoleOf("role\n", &role, &unknown) == BOX_TEXT_LAYOUT && role == BOX_ROLE_ORDINARY,
           "role: no word at all");
-    Check(RoleOf("role 1\nsystem boot\n", &role, &unknown) == BOX_TEXT_LAYOUT && role == BOX_ROLE_ORDINARY,
+    Check(RoleOf("role\nsystem boot\n", &role, &unknown) == BOX_TEXT_LAYOUT && role == BOX_ROLE_ORDINARY,
           "role: two words in a line");
-    Check(RoleOf("role 1\nsystem\nboot\n", &role, &unknown) == BOX_TEXT_LAYOUT && role == BOX_ROLE_ORDINARY,
+    Check(RoleOf("role\nsystem\nboot\n", &role, &unknown) == BOX_TEXT_LAYOUT && role == BOX_ROLE_ORDINARY,
           "role: two lines, and a role that is neither");
-    Check(RoleOf("role 2\nsystem\n", &role, &unknown) == BOX_TEXT_LAYOUT, "role: another version");
-    Check(RoleOf("asks 1\nsystem\n", &role, &unknown) == BOX_TEXT_LAYOUT && role == BOX_ROLE_ORDINARY,
+    Check(RoleOf("role 1\nsystem\n", &role, &unknown) == BOX_TEXT_LAYOUT, "role: a word after the kind");
+    Check(RoleOf("asks\nsystem\n", &role, &unknown) == BOX_TEXT_LAYOUT && role == BOX_ROLE_ORDINARY,
           "role: a part of another kind is refused, and says nothing");
-    Check(RoleOf("role 1\nsystem\n", &role, NULL) == BOX_OK && role == BOX_ROLE_SYSTEM,
+    Check(RoleOf("role\nsystem\n", &role, NULL) == BOX_OK && role == BOX_ROLE_SYSTEM,
           "role: read without asking what it passed over");
 }
 
@@ -910,26 +900,26 @@ static void TestAsks(void)
 {
     BoxAsks  asks;
     uint64_t unknown = 9;
-    Check(AsksOf("asks 1\n", &asks, &unknown) == BOX_OK && !asks.Utility && !asks.Network && unknown == 0,
+    Check(AsksOf("asks\n", &asks, &unknown) == BOX_OK && !asks.Utility && !asks.Network && unknown == 0,
           "asks: one that asks for nothing is granted nothing");
-    Check(AsksOf("asks 1\nask utility\n", &asks, &unknown) == BOX_OK && asks.Utility && !asks.Network,
+    Check(AsksOf("asks\nask utility\n", &asks, &unknown) == BOX_OK && asks.Utility && !asks.Network,
           "asks: utility");
-    Check(AsksOf("asks 1\nask network to fetch updates\nask utility to start programs", &asks, &unknown) == BOX_OK &&
+    Check(AsksOf("asks\nask network to fetch updates\nask utility to start programs", &asks, &unknown) == BOX_OK &&
               asks.Utility && asks.Network,
           "asks: both, with their reasons, the last newline left off");
-    Check(AsksOf("asks 1\n\n   ask   utility   \n", &asks, &unknown) == BOX_OK && asks.Utility,
+    Check(AsksOf("asks\n\n   ask   utility   \n", &asks, &unknown) == BOX_OK && asks.Utility,
           "asks: blank lines and blanks around the words are nothing");
-    Check(AsksOf("asks 1\nask utility\nask utility\n", &asks, &unknown) == BOX_TEXT_LAYOUT,
+    Check(AsksOf("asks\nask utility\nask utility\n", &asks, &unknown) == BOX_TEXT_LAYOUT,
           "asks: one ask said twice");
-    Check(AsksOf("asks 1\nutility\n", &asks, &unknown) == BOX_TEXT_LAYOUT, "asks: a line without ask");
-    Check(AsksOf("asks 1\nask\n", &asks, &unknown) == BOX_TEXT_LAYOUT, "asks: ask of nothing");
-    Check(AsksOf("asks 1\nask system\nask utility\nask god\n", &asks, &unknown) == BOX_OK && asks.Utility &&
+    Check(AsksOf("asks\nutility\n", &asks, &unknown) == BOX_TEXT_LAYOUT, "asks: a line without ask");
+    Check(AsksOf("asks\nask\n", &asks, &unknown) == BOX_TEXT_LAYOUT, "asks: ask of nothing");
+    Check(AsksOf("asks\nask system\nask utility\nask god\n", &asks, &unknown) == BOX_OK && asks.Utility &&
               !asks.Network && unknown == 2,
           "asks: system is not a word a box can ask, passed over and named, never granted");
-    Check(AsksOf("asks 2\nask utility\n", &asks, &unknown) == BOX_TEXT_LAYOUT, "asks: another version");
-    Check(AsksOf("life 1\nask utility\n", &asks, &unknown) == BOX_TEXT_LAYOUT && !asks.Utility,
+    Check(AsksOf("asks 1\nask utility\n", &asks, &unknown) == BOX_TEXT_LAYOUT, "asks: a word after the kind");
+    Check(AsksOf("life\nask utility\n", &asks, &unknown) == BOX_TEXT_LAYOUT && !asks.Utility,
           "asks: a part of another kind is refused, and asks for nothing");
-    Check(AsksOf("asks 1\nask network\n", &asks, NULL) == BOX_OK && asks.Network,
+    Check(AsksOf("asks\nask network\n", &asks, NULL) == BOX_OK && asks.Network,
           "asks: read without asking what it passed over");
 }
 

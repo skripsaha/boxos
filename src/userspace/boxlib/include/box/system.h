@@ -23,7 +23,7 @@ typedef struct {
  * fits 64 bits for ~584 years; physical memory amounts up to 16 EiB fit too).
  * No legacy 32-bit memory cap, no fake values. */
 typedef struct {
-    char     version[32];        /* "BoxOS X.Y", NUL-padded         */
+    char     name[32];           /* "BoxOS", NUL-padded             */
     uint64_t uptime_ns;          /* nanosecond-precision uptime     */
     uint64_t total_memory;       /* total physical RAM (bytes)      */
     uint64_t used_memory;        /* in-use RAM (bytes)              */
@@ -277,7 +277,6 @@ int tls_set_fsbase(uint64_t base);
  * ========================================================================= */
 
 typedef struct {
-    uint32_t version;             /* layout version of this struct */
     uint8_t  rt_available;        /* 1 iff EFI runtime services online */
     uint8_t  esrt_available;      /* 1 iff ESRT was published by firmware */
     uint8_t  sb_available;        /* 1 iff Secure Boot vars were enumerated */

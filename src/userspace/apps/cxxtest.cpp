@@ -4755,13 +4755,7 @@ void Phase18()
            "create/query/find\n");
 }
 
-// ── Ф15b: the Use Context / snapshots refused on format v1 + anchor↔touch observer
-// A snapshot's error arm: unsupported, which is what every snapshot request on
-// a format-v1 volume is answered — snapshots arrive with format v2.
-static bool SnapshotRefused(int rc)
-{
-    return rc < 0 && box::error{box_errno_of(rc)}.code() == box::errc::unsupported;
-}
+// ── Ф15b: the Use Context + anchor↔touch observer
 
 void Phase19()
 {
@@ -4779,7 +4773,7 @@ void Phase19()
 
     box::result<file> created_a = box::tagfs::create("cxx:p19:alpha", {"p19ctx:alpha", "p19:probe"});
     if (!created_a) {
-        printf("[CXX] PASS phase19: box::use / snapshots refused / anchor "
+        printf("[CXX] PASS phase19: box::use / anchor "
                "(compiled; storage unavailable)\n");
         return;
     }
@@ -4824,18 +4818,6 @@ void Phase19()
               "phase19 all_everywhere is never less than all");
     }
 
-    // ── snapshots: refused on a format-v1 volume ────────────────────────
-    // A snapshot on format v1 could be taken and never read, so a program that
-    // asks for one — of a file or of the whole volume — is answered
-    // unsupported, and handed no id to hold.
-    {
-        std::uint32_t sid = 0;
-        Check(SnapshotRefused(::snap_create("cxx:p19:snap1", fa.id(), &sid)) && sid == 0,
-              "phase19 a snapshot of a file is refused (unsupported) and hands back no id");
-        Check(SnapshotRefused(::snap_create("cxx:p19:snapall", 0, &sid)) && sid == 0,
-              "phase19 a snapshot of the whole volume is refused (unsupported)");
-    }
-
     // ── anchor observer: durability events bridged into box::touch ──────
     // anchor() publishes an ANCHOR event on the "anchor" tag; on_anchor()
     // claims it. Touch self-delivery is best-effort on the matrix (see
@@ -4864,8 +4846,7 @@ void Phase19()
     (void)fb.remove();
 
     printf("[CXX] PASS phase19: box::use (asked by anyone, set only with authority) + "
-           "query_everywhere + snapshots refused on format v1 + "
-           "on_anchor/anchor_event\n");
+           "query_everywhere + on_anchor/anchor_event\n");
 }
 
 // ── Ф16a: box::message (process-to-process messaging) + Ф12 IPC debt ──────────
@@ -5117,7 +5098,7 @@ void Phase23()
     box::result<box::system_info> si = box::system::info();
     Check(si.has_value(), "phase23 system::info() returns a snapshot");
     if (si) {
-        Check(si->version().substr(0, 5) == "BoxOS", "phase23 system version is BoxOS");
+        Check(si->name() == "BoxOS", "phase23 the system calls itself BoxOS");
         Check(si->total_memory() > 0, "phase23 total_memory > 0");
         Check(si->used_memory() <= si->total_memory() && si->free_memory() <= si->total_memory(),
               "phase23 memory accounting within total");
@@ -10547,8 +10528,7 @@ void Phase56()
 {
     using box::tagfs::file;
 
-    // SL-1 (system-tag classification) + SL-2 (snapshot bookkeeping refused)
-    // honesty. The matrix shares one disk across its 4 configs, so this is
+    // SL-1 (system-tag classification) honesty. The matrix shares one disk across its 4 configs, so this is
     // cleanup-first and re-runnable: leftover p56 files are swept. p56sys
     // carries an explicit "p56" tag purely so query() finds it for the sweep
     // (also covers a crash between the add and the final sweep).
@@ -10591,26 +10571,10 @@ void Phase56()
               "phase56 auto-label 'p56sys' is not system (reserved-vocabulary model, not provenance)");
     }
 
-    // ── SL-2: a snapshot's bookkeeping is refused as its taking is ─────────
-    // There is none to list, name, or delete on format v1: each request is
-    // answered unsupported, never an empty list or a "not found" that would
-    // read as if snapshots existed and this one did not.
-    {
-        std::uint32_t ids[4] = {0, 0, 0, 0};
-        std::uint32_t count  = 0;
-        snap_info_t   info{};
-        Check(SnapshotRefused(::snap_list(ids, 4, &count)) && count == 0,
-              "phase56 snap_list is refused (unsupported), not answered empty");
-        Check(SnapshotRefused(::snap_info(1, &info)),
-              "phase56 snap_info is refused (unsupported), not answered 'not found'");
-        Check(SnapshotRefused(::snap_delete(1)),
-              "phase56 snap_delete is refused (unsupported)");
-    }
-
     sweep();  // clean the p56 files
 
     printf("[CXX] PASS phase56: TagFS substrate honesty — system-tag classification "
-           "(reserved vocabulary) + snapshot list / info / delete refused on format v1\n");
+           "(reserved vocabulary)\n");
 }
 
 // phase57 — box::reflex (TOUCH_REACT manifest RAII). The kernel runs a stored

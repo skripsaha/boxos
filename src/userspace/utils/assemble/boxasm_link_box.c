@@ -109,8 +109,7 @@ static int BoxAsmFixupsOrder(BoxAsmLinker *Link)
 static void BoxAsmBoxPart(BoxAsmBox *Box, const char *Name, const uint8_t *Bytes, uint64_t Size,
                           uint64_t Memory, uint64_t Place, uint32_t Flags)
 {
-    Box->Parts[Box->Count++] = (BoxPenPart){ Name, Bytes, Size, Memory, Place, Flags,
-                                             BOX_PART_VERSION };
+    Box->Parts[Box->Count++] = (BoxPenPart){ Name, Bytes, Size, Memory, Place, Flags };
 }
 
 /* Room for a part's bytes, freed with the box. */
@@ -235,8 +234,7 @@ static int BoxAsmBoxSettings(BoxAsmLinker *Link, const BoxAsmOutputSection *Sect
         return 0;
     BoxAsmMessageBegin(&Message, Link->Error, Link->ErrorCapacity);
     if (SettingsDeclaredBegin(Section->Data.Data, Size, &Declared) != SETTINGS_OK) {
-        BoxAsmMessageText(&Message, "the program's settings do not begin with the line \"settings "
-                                    SETTINGS_VERSION_WORD "\"");
+        BoxAsmMessageText(&Message, "the program's settings do not begin with the line \"settings\"");
         return -ERR_INVALID_ARGUMENT;
     }
     while (SettingsDeclaredNext(&Declared, &Setting, &Verdict)) {

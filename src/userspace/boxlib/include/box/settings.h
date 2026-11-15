@@ -68,11 +68,11 @@ extern "C" {
  */
 
 /* BOX_SETTINGS(text): the program's declaration, text as above without its
- * first line `settings 1`. One per program. It lands in .boxos.settings — in a
+ * first line `settings`. One per program. It lands in .boxos.settings — in a
  * box the part settings, put into memory at start. */
 #define BOX_SETTINGS(Text)                                                     \
     __attribute__((section(".boxos.settings"), used, aligned(1)))              \
-    static const char BoxSettingsDeclared[] = "settings " SETTINGS_VERSION_WORD "\n" Text
+    static const char BoxSettingsDeclared[] = "settings\n" Text
 
 /* ---- A program's own settings ----------------------------------------- */
 

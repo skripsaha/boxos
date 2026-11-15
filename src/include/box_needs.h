@@ -5,7 +5,7 @@
  * The words of a box's `needs` part (box_format.h): what a program needs of
  * the processor, said the way compilers say it (-mavx2 is "avx2").
  *
- *     needs 1
+ *     needs
  *     cpu avx2
  *     cpu bmi2
  *

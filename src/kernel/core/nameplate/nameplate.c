@@ -181,10 +181,10 @@ static int ReadHeader(NameplateReadWord Read, uintptr_t table_va,
 
     if (!Read(table_va + 0, &out->Magic)) return 0;
     if (out->Magic != NAMEPLATE_MAGIC) return 0;
-    if (!Read(table_va + 4, &out->Version)) return 0;
-    if (!Read(table_va + 8, &out->EntryCount)) return 0;
-    if (!Read(table_va + 12, &out->NameBytes)) return 0;
+    if (!Read(table_va + 4, &out->EntryCount)) return 0;
 
+    if (!Read(table_va + 8, &lo) || !Read(table_va + 12, &hi)) return 0;
+    out->NameBytes = ((uint64_t)hi << 32) | lo;
     if (!Read(table_va + 16, &lo) || !Read(table_va + 20, &hi)) return 0;
     out->BaseAddress = ((uint64_t)hi << 32) | lo;
     if (!Read(table_va + 24, &lo) || !Read(table_va + 28, &hi)) return 0;

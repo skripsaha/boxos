@@ -161,8 +161,8 @@ static int assemble_declared(BoxSettings *out)
 
     if (out->DeclaredSize == 0) return 0;
     if (SettingsDeclaredBegin((const uint8_t *)out->Declared, out->DeclaredSize, &declared) != SETTINGS_OK) {
-        snprintf(line, sizeof(line), "%s's settings do not begin with the line \"settings %s\"; it has none",
-                 out->Program, SETTINGS_VERSION_WORD);
+        snprintf(line, sizeof(line), "%s's settings do not begin with the line \"settings\"; it has none",
+                 out->Program);
         return settings_say(out, line);
     }
     while (SettingsDeclaredNext(&declared, &setting, &verdict)) count += verdict == SETTINGS_OK;

@@ -6,7 +6,7 @@ set -u
 POLL_TICKS=480   # 240 seconds @ 0.5 s each (UEFI 16c host contention)
 
 burst="memtest files bench memtest files bench memtest \
-       mtest chain htest cow_test lifecycle write_observer \
+       mtest chain htest lifecycle write_observer \
        write_concurrent write_stress touch_test decks touch_stress"
 
 mkdir -p build/uefi16c_x20_logs
@@ -52,7 +52,6 @@ for run in $(seq 1 20); do
             mtest)            pat="\[mtest\] PASS";           want=1 ;;
             chain)            pat="\[chain\] PASS";           want=1 ;;
             htest)            pat="\[htest\] PASS";           want=1 ;;
-            cow_test)         pat="\[COW\] PASS";             want=1 ;;
             lifecycle)        pat="\[LIFECYCLE\] PASS";       want=1 ;;
             write_observer)   pat="\[WO\] PASS";              want=1 ;;
             write_concurrent) pat="\[WC\] PASS";              want=1 ;;

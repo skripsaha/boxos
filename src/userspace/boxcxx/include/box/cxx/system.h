@@ -2,7 +2,7 @@
 //
 // The idiomatic C++ surface over the boxlib system + EFI API (box/system.h):
 //
-//   box::system_info  — a snapshot of the machine (version / uptime as
+//   box::system_info  — a snapshot of the machine (name / uptime as
 //                       std::chrono::nanoseconds / memory / cpu topology /
 //                       CPU feature flags).
 //   box::system       — box::system::info(); maintenance perf_dump() /
@@ -51,7 +51,7 @@ public:
     explicit system_info(const system_info_t &s) noexcept : s_(s) {}
     const system_info_t &raw() const noexcept { return s_; }
 
-    std::string_view         version() const noexcept { return __sysdetail::bounded(s_.version, sizeof(s_.version)); }
+    std::string_view         name() const noexcept { return __sysdetail::bounded(s_.name, sizeof(s_.name)); }
     std::chrono::nanoseconds uptime() const noexcept { return std::chrono::nanoseconds(s_.uptime_ns); }
     std::uint64_t            total_memory() const noexcept { return s_.total_memory; }
     std::uint64_t            used_memory() const noexcept { return s_.used_memory; }

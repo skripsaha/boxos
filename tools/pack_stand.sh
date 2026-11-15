@@ -50,8 +50,8 @@ const int *const fixed[] = { &counter };
 __thread int local = 7;
 __thread char space[64];
 __attribute__((section(".boxos.settings"), used)) static const char settings[] =
-    "settings 1\nlook one-of dark light default dark \"how the page looks\"\n";
-__attribute__((section(".boxos.life"), used)) static const char life[] = "life 1\nstays\nrise\n";
+    "settings\nlook one-of dark light default dark \"how the page looks\"\n";
+__attribute__((section(".boxos.life"), used)) static const char life[] = "life\nstays\nrise\n";
 int helper(int x) { return x + counter + local + space[x & 63] + *fixed[0]; }
 const char **said(void) { return &greeting; }
 void _start(void) { table[1] = &counter; helper(3); for (;;) { } }
@@ -82,7 +82,7 @@ $LD_CROSS $LINK -pie -z pack-relative-relocs -T $LIB/user.ld "$WORK/tlsptr.o" -o
 
 # A static PIE whose settings declare one with no default: a setting no
 # program could have, refused at the build.
-printf '__attribute__((section(".boxos.settings"), used)) static const char s[] =\n    "settings 1\\nlook one-of dark light \\"how it looks\\"\\n";\nvoid _start(void) { for (;;) { } }\n' \
+printf '__attribute__((section(".boxos.settings"), used)) static const char s[] =\n    "settings\\nlook one-of dark light \\"how it looks\\"\\n";\nvoid _start(void) { for (;;) { } }\n' \
     > "$WORK/badsettings.c"
 $CC_CROSS -ffreestanding -nostdlib -fpie -O2 -c "$WORK/badsettings.c" -o "$WORK/badsettings.o" > "$WORK/cc.log" 2>&1 &&
 $LD_CROSS $LINK -pie -T $LIB/user.ld "$WORK/badsettings.o" -o "$WORK/badsettings.elf" > "$WORK/ld.log" 2>&1 ||
@@ -90,13 +90,13 @@ $LD_CROSS $LINK -pie -T $LIB/user.ld "$WORK/badsettings.o" -o "$WORK/badsettings
 
 # A static PIE whose life says a word nobody who starts it knows: one it meant
 # and nobody would hear, refused at the build.
-printf '__attribute__((section(".boxos.life"), used)) static const char l[] = "life 1\\nstays\\nlonely\\n";\nvoid _start(void) { for (;;) { } }\n' \
+printf '__attribute__((section(".boxos.life"), used)) static const char l[] = "life\\nstays\\nlonely\\n";\nvoid _start(void) { for (;;) { } }\n' \
     > "$WORK/badlife.c"
 $CC_CROSS -ffreestanding -nostdlib -fpie -O2 -c "$WORK/badlife.c" -o "$WORK/badlife.o" > "$WORK/cc.log" 2>&1 &&
 $LD_CROSS $LINK -pie -T $LIB/user.ld "$WORK/badlife.o" -o "$WORK/badlife.elf" > "$WORK/ld.log" 2>&1 ||
     { cat "$WORK/cc.log" "$WORK/ld.log"; harness "the program with a bad life did not build"; }
 # And one that lives two ways at once.
-printf '__attribute__((section(".boxos.life"), used)) static const char l[] = "life 1\\nstays\\nserves\\n";\nvoid _start(void) { for (;;) { } }\n' \
+printf '__attribute__((section(".boxos.life"), used)) static const char l[] = "life\\nstays\\nserves\\n";\nvoid _start(void) { for (;;) { } }\n' \
     > "$WORK/twolives.c"
 $CC_CROSS -ffreestanding -nostdlib -fpie -O2 -c "$WORK/twolives.c" -o "$WORK/twolives.o" > "$WORK/cc.log" 2>&1 &&
 $LD_CROSS $LINK -pie -T $LIB/user.ld "$WORK/twolives.o" -o "$WORK/twolives.elf" > "$WORK/ld.log" 2>&1 ||
@@ -235,13 +235,13 @@ refuse "a Form that is no text" "$WORK/badform.elf" "is not text as a box keeps 
 
 # ── what a program asks for: the box says it, and pack refuses what no one reads ──
 if "$WORK/pack" --ask utility --ask network "$WORK/small_rela.elf" "$WORK/asked.box" 2> "$WORK/ask.err" &&
-   grep -qF "$(printf 'asks 1\nask utility\nask network\n')" "$WORK/asked.box"; then
+   grep -qF "$(printf 'asks\nask utility\nask network\n')" "$WORK/asked.box"; then
     passed=$((passed + 1))
 else
     echo "FAIL pack did not put the asks in the box: $(cat "$WORK/ask.err")"
     failed=$((failed + 1))
 fi
-if "$WORK/pack" "$WORK/small_rela.elf" "$WORK/plain.box" 2> "$WORK/ask.err" && ! grep -qF 'asks 1' "$WORK/plain.box"; then
+if "$WORK/pack" "$WORK/small_rela.elf" "$WORK/plain.box" 2> "$WORK/ask.err" && ! grep -qF 'asks' "$WORK/plain.box"; then
     passed=$((passed + 1))
 else
     echo "FAIL a box packed with no --ask asks for something: $(cat "$WORK/ask.err")"
@@ -264,20 +264,20 @@ refuse_ask "an ask twice" "the same thing twice" --ask utility --ask utility
 
 # ── what a program is to the machine: the box says it, and pack refuses what no volume maker reads ──
 if "$WORK/pack" --role system "$WORK/small_rela.elf" "$WORK/system.box" 2> "$WORK/role.err" &&
-   grep -qF "$(printf 'role 1\nsystem\n')" "$WORK/system.box" && ! grep -qF 'asks 1' "$WORK/system.box"; then
+   grep -qF "$(printf 'role\nsystem\n')" "$WORK/system.box" && ! grep -qF 'asks' "$WORK/system.box"; then
     passed=$((passed + 1))
 else
     echo "FAIL pack did not put the role in the box, or put asks with it: $(cat "$WORK/role.err")"
     failed=$((failed + 1))
 fi
 if "$WORK/pack" --ask utility --role boot "$WORK/small_rela.elf" "$WORK/boot.box" 2> "$WORK/role.err" &&
-   grep -qF "$(printf 'role 1\nboot\n')" "$WORK/boot.box" && grep -qF 'asks 1' "$WORK/boot.box"; then
+   grep -qF "$(printf 'role\nboot\n')" "$WORK/boot.box" && grep -qF 'asks' "$WORK/boot.box"; then
     passed=$((passed + 1))
 else
     echo "FAIL pack did not put a role and an ask in one box: $(cat "$WORK/role.err")"
     failed=$((failed + 1))
 fi
-if ! grep -qF 'role 1' "$WORK/plain.box" && ! grep -qF 'role 1' "$WORK/asked.box"; then
+if ! grep -qF 'role' "$WORK/plain.box" && ! grep -qF 'role' "$WORK/asked.box"; then
     passed=$((passed + 1))
 else
     echo "FAIL a box packed with no --role says a role"

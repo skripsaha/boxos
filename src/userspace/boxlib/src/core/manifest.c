@@ -64,7 +64,6 @@ int ManifestBuilderFinalize(ManifestBuilder *mb)
 
     Manifest *hdr = (Manifest *)mb->buf;
     hdr->magic      = MANIFEST_MAGIC;
-    hdr->version    = MANIFEST_VERSION;
     hdr->op_count   = mb->op_count;
     hdr->flags      = 0;
     hdr->total_size = mb->size;
@@ -339,8 +338,8 @@ int MfCall1(uint16_t      deck,
             Result       *out_result)
 {
     /* Per-process stack scratch — reused across calls. Size covers
-     * Manifest header (16) + ManifestOp header (12) + up to 256B params. */
-    uint8_t mbuf[284];
+     * Manifest header + ManifestOp header + up to 256B params. */
+    uint8_t mbuf[sizeof(Manifest) + sizeof(ManifestOp) + 256];
 
     ManifestBuilder mb;
     if (ManifestBuilderInit(&mb, mbuf, sizeof(mbuf)) != 0) return -ERR_INVALID_ARGS;

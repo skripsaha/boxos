@@ -14,9 +14,9 @@
  * static fields are written once during early boot. A read from userspace is
  * a plain pointer load — no syscall, no manifest, no ring round-trip.
  *
- * Layout is versioned so future field additions cannot silently break
- * mismatched userspace boxlibs. Reader pattern: check `magic` then
- * `version` first; on mismatch fall back to the manifest path.
+ * The layout is this tree's: the kernel and BoxLib are built together, and
+ * BoxLib mirrors it field for field. Reader pattern: check `magic` first;
+ * without it (no page mapped) fall back to the manifest path.
  *
  * Counter consistency: uptime_us is a single naturally-aligned 64-bit
  * word, written by exactly one core (BSP). On x86-64 such a store is
@@ -32,14 +32,9 @@
  */
 
 #define CLOCKBOARD_MAGIC    0x4b4c4342u    /* 'BCLK' = Box Clock */
-#define CLOCKBOARD_VERSION  1u
 
 typedef struct __attribute__((packed)) {
-    /* Static (set once during boot, never changes after). */
-    uint32_t magic;            /* CLOCKBOARD_MAGIC */
-    uint32_t version;          /* CLOCKBOARD_VERSION */
-
-    /* Dynamic — written per PIT tick by BSP. */
+    /* Dynamic — written per PIT tick by BSP. Each a naturally-aligned word. */
     volatile uint64_t uptime_us;     /* monotonic; advanced by 1_000_000/freq µs per tick */
     volatile uint64_t uptime_ms;     /* uptime_us / 1000, refreshed per tick */
     volatile uint64_t tick_count;    /* raw PIT tick counter */
@@ -47,15 +42,16 @@ typedef struct __attribute__((packed)) {
     /* Constant after boot. */
     uint64_t tsc_freq_khz;     /* TSC frequency in kHz, calibrated once */
     uint64_t boot_unix_secs;   /* RTC unix-epoch seconds at boot */
+    uint32_t magic;            /* CLOCKBOARD_MAGIC, set once during boot */
 
     /* Pad to one full page so the struct sizeof matches the mapping. */
-    uint8_t  _reserved[4096 - 4 - 4 - 8 - 8 - 8 - 8 - 8];
+    uint8_t  _reserved[4096 - 8 - 8 - 8 - 8 - 8 - 4];
 } ClockBoard;
 
 _Static_assert(sizeof(ClockBoard) == 4096, "ClockBoard must be exactly one page");
 
-/* One-time setup: allocate the physical backing page, fill magic /
- * version. Call from kernel_main BEFORE pit_init so the IRQ handler
+/* One-time setup: allocate the physical backing page, fill the
+ * magic. Call from kernel_main BEFORE pit_init so the IRQ handler
  * always finds a valid page. Idempotent. */
 void clockboard_init(void);
 

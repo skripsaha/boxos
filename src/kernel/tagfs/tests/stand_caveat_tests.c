@@ -646,11 +646,10 @@ TestResult TestStandOpenJoinsTheWriters(void)
 // gave it back again — free_run_locked did not look at the bit, so the block
 // went on the free list a second time and was counted free a second time.
 //
-// A format-v1 volume never reaches that state now: the snapshot is refused,
-// and the write lands on the block the file has; and a second give of a free
+// A format-v1 volume never reaches that state now: no snapshot is taken, and
+// the write lands on the block the file has; and a second give of a free
 // block is refused whole by the block map and said (CW-D3). So the road is
-// walked as it now is — a one-block file, a snapshot of it asked for and
-// refused, its block written over whole, the file deleted and its block rested
+// walked as it now is — a one-block file, its block written over whole, the file deleted and its block rested
 // in Fallow until the cycles after its Quitclaim gave it back — and the
 // allocator is then asked how far its count drifted from its map
 // (TagFSAllocatorRederive, which also derives it again, so no drift outlives
@@ -672,8 +671,6 @@ TestResult TestStandFrozenBlockFreedTwice(void)
     TEST_ASSERT(StandMakeFile("test_file", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a one-block file is made");
     TEST_ASSERT(StandBlockOf(file_id, 0, &kept), "its block is found");
-    TEST_ASSERT_EQ(TagFS_SnapshotRefused("a snapshot of the stand's one-block file"),
-                   ERR_UNSUPPORTED, "a snapshot of the file is refused");
 
     TestFillAt(g_test_output, TAGFS_BLOCK_SIZE, 0x60, 0);
     TEST_ASSERT_EQ(TestFileWrite(file_id, g_test_output, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,

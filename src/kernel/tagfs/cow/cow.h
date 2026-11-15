@@ -18,8 +18,7 @@
  * Nothing anywhere read a file as a snapshot kept it, and a snapshot of the
  * volume did not even record which files it held. What taking one did do was
  * send every write of the file through a copy under an interrupts-off lock and
- * a redirect log on the medium. So on this format every request for a
- * snapshot is answered ERR_UNSUPPORTED (TagFS_SnapshotRefused), and nothing on
+ * a redirect log on the medium. So no request takes a snapshot, and nothing on
  * the write path asks copy-on-write anything: a write goes where the file's
  * blocks are. Snapshots arrive with format v2, as bookmarks that can be read.
  *

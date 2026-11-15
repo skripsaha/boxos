@@ -6,8 +6,7 @@
 // ============================================================================
 // Copy-on-write, as format v1 leaves it
 //
-// A format-v1 volume takes no snapshot: every request for one is answered
-// ERR_UNSUPPORTED (TagFS_SnapshotRefused), and a write lands where the file's
+// A format-v1 volume takes no snapshot, and a write lands where the file's
 // blocks are — nothing is copied for a snapshot, and no extent moves.
 // ============================================================================
 
@@ -24,12 +23,12 @@ static uint64_t CowBlockOf(const FileRecord* rec, uint32_t k)
 }
 
 /*
- * W-COW. A file whose data is ONE extent three blocks long, a snapshot of it
- * asked for, and a write of its first block alone. The write path used to copy
+ * W-COW. A file whose data is ONE extent three blocks long, and a write of its
+ * first block alone. The write path used to copy
  * that block for the snapshot and move the extent's start onto the copy — the
  * whole extent, three blocks long — so the file's second and third blocks then
- * read the two blocks after the copy, which it never held. Now the snapshot is
- * refused and the write lands where the block is: the evidence counts every
+ * read the two blocks after the copy, which it never held. Now no snapshot is
+ * taken and the write lands where the block is: the evidence counts every
  * block of the file that the write moved, or changed besides the one it wrote.
  *
  * The extent is laid down by gathering three one-block extents into one
@@ -65,9 +64,6 @@ static TestResult TestCowMovesOnlyTheBlockWritten(void)
     start = CowBlockOf(rec, 0);
     FileRecordRelease(rec);
     rec = NULL;
-
-    TEST_ASSERT_EQ(TagFS_SnapshotRefused("a snapshot of the cow suite's file"), ERR_UNSUPPORTED,
-                   "a snapshot of the file is refused, as every snapshot is on format v1");
 
     TEST_ASSERT_EQ(TestFileWrite(file_id, now, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
                    "the first block alone is written");

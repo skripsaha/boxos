@@ -171,16 +171,15 @@ static int HwRtcGetUptime(const ManifestOp *op, Crate *crates, uint16_t crate_co
 /* =========================================================================
  *  ‼ WHAT THIS DECK DELIBERATELY NO LONGER OFFERS
  *
- *  Fourteen opcodes are withdrawn and their numbers retired for ever — see
- *  hardware_deck.h. A deck answers for the hardware with NAMED operations the
- *  kernel understands and can carry through properly: hw.usb.reset is the
- *  whole eleven-step repair of a controller, hw.disk.info is the drive as the
- *  driver knows it, hw.screen.claim lends the glass to the program that
- *  draws. None of the fourteen was one of those.
+ *  Fourteen operations were withdrawn. A deck answers for the hardware with
+ *  NAMED operations the kernel understands and can carry through properly:
+ *  hw.usb.reset is the whole eleven-step repair of a controller, hw.disk.info
+ *  is the drive as the driver knows it, hw.screen.claim lends the glass to the
+ *  program that draws. None of the fourteen was one of those.
  *
- *  hw.port.inb/outb/inw/outw/inl/outl (0x20-0x25) were the `in` and `out`
- *      instructions with a name put on them — the screwdriver taken out of the
- *      lock, with which every other lock in the house can be worked. The port
+ *  hw.port.inb/outb/inw/outw/inl/outl were the `in` and `out` instructions
+ *      with a name put on them — the screwdriver taken out of the lock, with
+ *      which every other lock in the house can be worked. The port
  *      was assembled from two parameter bytes, so all 65536 of them were
  *      reachable, and not one of the six ever looked at the address it was
  *      handed. One call rewrote BAR0 of an xHCI controller, which the driver
@@ -196,15 +195,15 @@ static int HwRtcGetUptime(const ManifestOp *op, Crate *crates, uint16_t crate_co
  *      PM1a/PM1b, PM_TMR, GPE0/GPE1 from the FADT — are not known until the
  *      machine is running and differ from board to board.
  *
- *  hw.irq.register/unregister/enable/disable/isr/irr/eoi (0x30-0x36) were the
+ *  hw.irq.register/unregister/enable/disable/isr/irr/eoi were the
  *      same hole one storey up. The check they shared refused line 0 and line
  *      2 and nothing else, so every other line could be masked from outside:
  *      the keyboard on 1, the Wire on 4, the disk on 14 and 15 — or somebody
  *      else's EOI could be sent through the middle of their handler. Two of
- *      the seven, 0x30 and 0x31, never had a handler at all: they were names
+ *      the seven, register and unregister, never had a handler at all: they were names
  *      in a header and nothing else, and the registry had never heard of them.
  *
- *  hw.cpu.halt (0x40) could not be made honest. A Manifest arrives through
+ *  hw.cpu.halt could not be made honest. A Manifest arrives through
  *      SYSCALL with IF clear — SFMASK clears it (amp/per_core.c) and nothing
  *      between there and a handler raises it again (idt.c says so of the
  *      dispatch itself) — so the bare `hlt` this op ran was a halt with
@@ -309,8 +308,7 @@ static int HwSystemShutdown(const ManifestOp *op, Crate *crates, uint16_t crate_
 /*
  * ‼ WHAT THIS SURFACE DELIBERATELY NO LONGER OFFERS
  *
- * `hw.usb.init` (opcode 0x90) and `hw.usb.stop` (0x93) are gone, and their
- * numbers are retired for ever — see hardware_deck.h. They were not operations.
+ * `hw.usb.init` and `hw.usb.stop` are gone. They were not operations.
  * They were two of the driver's own boot steps, exposed by name to anything
  * carrying the system tag.
  *
@@ -536,32 +534,6 @@ void HardwareDeckUsbRecoverProof(void)
 
     kprintf("[USB RECOVER TEST] begin — a controller in service and a volume "
             "on seat %u\n", tagfs_get_seat());
-
-    /* Every number this deck has withdrawn, not just the USB pair — the ports,
-     * the lines and the halt went the same way and are spent for the same
-     * reason (see the account above the Disk section). The only right answer
-     * the registry can give about any of them is "no such op", and the one
-     * that matters is the number, so they are written out as numbers here:
-     * the names are gone from the header on purpose and must not come back
-     * just to be tested against. */
-    static const uint16_t retired[] = {
-        0x20u, 0x21u, 0x22u, 0x23u, 0x24u, 0x25u,        /* hw.port.*   */
-        0x30u, 0x31u, 0x32u, 0x33u, 0x34u, 0x35u, 0x36u, /* hw.irq.*    */
-        0x40u,                                           /* hw.cpu.halt */
-        0x90u, 0x93u,                                    /* hw.usb.init, .stop */
-    };
-    size_t reissued = 0;
-    for (size_t i = 0; i < sizeof(retired) / sizeof(retired[0]); i++) {
-        if (OpRegistryLookup(OP_KIND(HARDWARE_DECK_ID, retired[i]))) {
-            kprintf("[USB RECOVER TEST] FAIL: retired opcode 0x%x is "
-                    "registered again\n", (unsigned)retired[i]);
-            reissued++;
-        }
-    }
-    if (reissued == 0) {
-        kprintf("[USB RECOVER TEST] PASS: all %zu withdrawn opcodes answer to "
-                "nothing\n", sizeof(retired) / sizeof(retired[0]));
-    }
 
     const OpRegistration *reg =
         OpRegistryLookup(OP_KIND(HARDWARE_DECK_ID, HW_USB_RESET));

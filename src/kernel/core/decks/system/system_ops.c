@@ -2277,7 +2277,7 @@ static int SysCoreUsage(const ManifestOp *op, Crate *crates, uint16_t crate_coun
  *  Layout written into out_crate (must be ≥ 96 bytes, matches userspace
  *  system_info_t):
  *
- *    [00..31]  char     version[32]
+ *    [00..31]  char     name[32]
  *    [32..39]  uint64_t uptime_ns
  *    [40..47]  uint64_t total_memory
  *    [48..55]  uint64_t used_memory
@@ -2324,13 +2324,10 @@ static int SysInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 
     uint8_t blob[SYSINFO_BLOB_SIZE];
 
-    /* Version string. Pinned here for now (kernel_config.h has no version
-     * macro yet); migrate to a single source when the version policy lands. */
-    static const char kver[] = "BoxOS v0.2.0";
-    size_t vlen = sizeof(kver) - 1;
-    if (vlen > 31) vlen = 31;
+    /* What the system calls itself. */
+    static const char name[] = "BoxOS";
     memset(blob, 0, 32);
-    memcpy(blob, kver, vlen);
+    memcpy(blob, name, sizeof(name) - 1);
 
     /* Memory in bytes — PMM tracks pages; convert with PAGE_SIZE. */
     uint64_t total_pages = (uint64_t)pmm_total_pages();
@@ -2534,7 +2531,6 @@ static int SysEfiInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     EfiSecureBootState sb = {0};
     efi_secureboot_get_state(&sb);
 
-    uint32_t version       = EFI_INFO_VERSION;
     uint8_t  rt_available  = efi_runtime_available() ? 1 : 0;
     uint8_t  esrt_available= efi_esrt_available()    ? 1 : 0;
     uint8_t  sb_available  = sb.available            ? 1 : 0;
@@ -2547,34 +2543,32 @@ static int SysEfiInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     uint32_t hash_count    = sb.hash_count;
 
     /* Layout (offset-aligned, packed):
-     *   +0   u32 version
-     *   +4   u8  rt_available
-     *   +5   u8  esrt_available
-     *   +6   u8  sb_available
-     *   +7   u8  sb_enforced
-     *   +8   u8  sb_setup_mode
-     *   +9   u8  sb_audit_mode
-     *   +10  u8  sb_deployed_mode
-     *   +11  u8  _pad
-     *   +12  u32 esrt_count
-     *   +16  u32 cert_count_total
-     *   +20  u32 hash_count_total
-     *   +24  u32 cert_count_by_db[6]   (PK,KEK,db,dbx,dbt,dbr)
-     *   +48  u32 hash_count_by_db[6]
-     *   +72  56  reserved (zero) */
-    memcpy(blob + 0,  &version,        4);
-    blob[4]  = rt_available;
-    blob[5]  = esrt_available;
-    blob[6]  = sb_available;
-    blob[7]  = sb_enforced;
-    blob[8]  = sb_setup;
-    blob[9]  = sb_audit;
-    blob[10] = sb_deployed;
-    memcpy(blob + 12, &esrt_count,    4);
-    memcpy(blob + 16, &cert_count,    4);
-    memcpy(blob + 20, &hash_count,    4);
-    memcpy(blob + 24, sb.cert_count_by_db, 6 * 4);
-    memcpy(blob + 48, sb.hash_count_by_db, 6 * 4);
+     *   +0   u8  rt_available
+     *   +1   u8  esrt_available
+     *   +2   u8  sb_available
+     *   +3   u8  sb_enforced
+     *   +4   u8  sb_setup_mode
+     *   +5   u8  sb_audit_mode
+     *   +6   u8  sb_deployed_mode
+     *   +7   u8  _pad
+     *   +8   u32 esrt_count
+     *   +12  u32 cert_count_total
+     *   +16  u32 hash_count_total
+     *   +20  u32 cert_count_by_db[6]   (PK,KEK,db,dbx,dbt,dbr)
+     *   +44  u32 hash_count_by_db[6]
+     *   +68  60  reserved (zero) */
+    blob[0] = rt_available;
+    blob[1] = esrt_available;
+    blob[2] = sb_available;
+    blob[3] = sb_enforced;
+    blob[4] = sb_setup;
+    blob[5] = sb_audit;
+    blob[6] = sb_deployed;
+    memcpy(blob + 8,  &esrt_count,    4);
+    memcpy(blob + 12, &cert_count,    4);
+    memcpy(blob + 16, &hash_count,    4);
+    memcpy(blob + 20, sb.cert_count_by_db, 6 * 4);
+    memcpy(blob + 44, sb.hash_count_by_db, 6 * 4);
 
     if (crate_write(out, ctx, blob, EFI_INFO_BLOB_SIZE) != OK) return ERR_INVALID_ADDRESS;
     return OK;

@@ -539,7 +539,7 @@ static error_t BoxCarry(BoxLoading *load, BoxPlan *plan, uint64_t base)
             part = &carry;
         }
         BoxLoadedPart entry = { base + part->Place, part->Part.Memory, (uint32_t)name_at,
-                                part->Part.NameLength, part->Part.Version };
+                                part->Part.NameLength };
         BoxImagePut(&table, entry_at, &entry, sizeof(entry));
         BoxImagePut(&table, name_at, part->Part.Name, part->Part.NameLength);
         entry_at += sizeof(entry);

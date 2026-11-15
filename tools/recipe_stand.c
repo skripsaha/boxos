@@ -62,7 +62,7 @@ typedef struct {
     file_id_t   Id;
     const char *Bytes;
     size_t      Size;
-    uint32_t    Flags;
+    uint64_t    KeptUntil;     /* deleted for a term: kept until then, 0 for not */
     bool        Refuses;       /* the volume will not answer for it */
 } StandFile;
 
@@ -80,9 +80,9 @@ static void volume_reset(void)
     g_read_most  = (size_t)-1;
 }
 
-static void volume_add(file_id_t id, const char *bytes, size_t size, uint32_t flags, bool refuses)
+static void volume_add(file_id_t id, const char *bytes, size_t size, uint64_t kept_until, bool refuses)
 {
-    g_files[g_file_count++] = (StandFile){ id, bytes, size, flags, refuses };
+    g_files[g_file_count++] = (StandFile){ id, bytes, size, kept_until, refuses };
 }
 
 static const StandFile *volume_file(file_id_t id)
@@ -127,8 +127,8 @@ int StandMetadata(file_id_t file, FileMetadata *out)
     const StandFile *found = volume_file(file);
     if (!found) return -ERR_FILE_NOT_FOUND;
     if (found->Refuses && found->Size == 0) return -ERR_IO;
-    out->Size  = found->Size;
-    out->Flags = found->Flags;
+    out->Size      = found->Size;
+    out->KeptUntil = found->KeptUntil;
     return 0;
 }
 
@@ -225,7 +225,7 @@ static BoxRecipe two_files(const char *by, const char *context)
 }
 
 static const char g_text[] =
-    "recipe 1\n"
+    "recipe\n"
     "by assemble\n"
     "context demo,asm\n"
     "from #41 " DIGEST_ABC " planets.asm\n"
@@ -258,7 +258,7 @@ static int parse_text(const char *text, size_t length)
     check_int("parse " label, parse_text(text, sizeof(text) - 1), -ERR_INVALID_ARGUMENT)
 #define READ(label, text) check_int("parse " label, parse_text(text, sizeof(text) - 1), 0)
 
-#define HEAD "recipe 1\nby assemble\ncontext demo\n"
+#define HEAD "recipe\nby assemble\ncontext demo\n"
 #define FROM "from #41 " DIGEST_ABC " planets.asm\n"
 
 static void test_text(void)
@@ -283,7 +283,7 @@ static void test_text(void)
 
     recipe = two_files("assemble", "");
     check_written("text no context", &recipe,
-                  "recipe 1\nby assemble\ncontext\nfrom #41 " DIGEST_ABC " planets.asm\n"
+                  "recipe\nby assemble\ncontext\nfrom #41 " DIGEST_ABC " planets.asm\n"
                   "from #18446744073709551615 " DIGEST_EMPTY " my lines.inc\n");
     recipe = two_files("assemble", NULL);
     char *text;
@@ -297,7 +297,7 @@ static void test_text(void)
     recipe = two_files("assemble", "demo");
     g_two[0].Name = (char *)"a\tb\x7f" "c";
     check_written("text name shown", &recipe,
-                  "recipe 1\nby assemble\ncontext demo\nfrom #41 " DIGEST_ABC " a?b?c\n"
+                  "recipe\nby assemble\ncontext demo\nfrom #41 " DIGEST_ABC " a?b?c\n"
                   "from #18446744073709551615 " DIGEST_EMPTY " my lines.inc\n");
 
     recipe = two_files(NULL, "demo");
@@ -326,15 +326,15 @@ static void test_text(void)
     READ("unknown line", HEAD "made on a tuesday\n" FROM);
     READ("empty line", HEAD "\n" FROM);
     READ("word like a kind", HEAD "bypass x\n" FROM);
-    READ("lines in any order", "recipe 1\n" FROM "context demo\nby assemble\n");
+    READ("lines in any order", "recipe\n" FROM "context demo\nby assemble\n");
     REFUSED("nothing", "");
-    REFUSED("not first", "by assemble\nrecipe 1\ncontext demo\n" FROM);
-    REFUSED("recipe 2", "recipe 2\nby assemble\ncontext demo\n" FROM);
-    REFUSED("recipe twice", HEAD "recipe 1\n" FROM);
-    REFUSED("no by", "recipe 1\ncontext demo\n" FROM);
+    REFUSED("not first", "by assemble\nrecipe\ncontext demo\n" FROM);
+    REFUSED("recipe 1", "recipe 1\nby assemble\ncontext demo\n" FROM);
+    REFUSED("recipe twice", HEAD "recipe\n" FROM);
+    REFUSED("no by", "recipe\ncontext demo\n" FROM);
     REFUSED("by twice", HEAD "by other\n" FROM);
-    REFUSED("by empty", "recipe 1\nby\ncontext demo\n" FROM);
-    REFUSED("no context", "recipe 1\nby assemble\n" FROM);
+    REFUSED("by empty", "recipe\nby\ncontext demo\n" FROM);
+    REFUSED("no context", "recipe\nby assemble\n" FROM);
     REFUSED("context twice", HEAD "context other\n" FROM);
     REFUSED("no from", HEAD);
     REFUSED("id 0", HEAD "from #0 " DIGEST_ABC " planets.asm\n");
@@ -427,7 +427,7 @@ static void test_image(void)
     check_int("not an image declared", recipe.Declared, 0);
     check_int("not an image is image", recipe.Image, 0);
 
-    static const char bad[] = "recipe 1\nby assemble\n";
+    static const char bad[] = "recipe\nby assemble\n";
     build_image(".boxos.recipe", bad, sizeof(bad) - 1, true);
     check_int("image bad recipe", recipe_of_file(7, &recipe), -ERR_INVALID_ARGUMENT);
     check_int("image bad recipe declared", recipe.Declared, 0);
@@ -442,7 +442,7 @@ static void test_image(void)
  * `text`, or of nothing when `text` is NULL. */
 static void use_box(const char *text, size_t length)
 {
-    BoxPenPart recipe = { "recipe", (const uint8_t *)text, length, length, 0, 0, BOX_PART_VERSION };
+    BoxPenPart recipe = { "recipe", (const uint8_t *)text, length, length, 0, 0 };
     uint64_t   bytes  = 0;
     free(g_image);
     g_image      = StandBox(&recipe, text ? 1 : 0, &bytes);
@@ -529,7 +529,7 @@ static void test_check(void)
     check_text("check changed states", shown, "changed changed changed");
 
     volume_reset();
-    volume_add(41, "abc", 3, FILE_FLAG_TRASHED, false);
+    volume_add(41, "abc", 3, 1, false);
     volume_add(43, big, sizeof(big), 0, false);
     check_int("check gone", states_of(&recipe, shown), 0);
     check_text("check gone states", shown, "gone gone same");

@@ -87,7 +87,7 @@ int main(void) {
     uint64_t s         = uptime_ms / 1000;
     unsigned tenths    = (unsigned)((uptime_ms % 1000) / 100);
 
-    printf("%color%s%color\n", COLOR_CYAN, info.version, COLOR_DEFAULT);
+    printf("%color%s%color\n", COLOR_CYAN, info.name, COLOR_DEFAULT);
     printf("  Uptime:    %llu.%u s (%llu ms total)\n",
            (unsigned long long)s, tenths,
            (unsigned long long)uptime_ms);

@@ -20,13 +20,12 @@ void clockboard_init(void)
     s_clockboard_phys = (uint64_t)page;
     s_clockboard_kva  = (ClockBoard *)vmm_phys_to_virt(s_clockboard_phys);
 
-    s_clockboard_kva->magic           = CLOCKBOARD_MAGIC;
-    s_clockboard_kva->version         = CLOCKBOARD_VERSION;
     s_clockboard_kva->uptime_us       = 0;
     s_clockboard_kva->uptime_ms       = 0;
     s_clockboard_kva->tick_count      = 0;
     s_clockboard_kva->tsc_freq_khz    = 0;  /* set by clockboard_set_tsc_freq_khz */
     s_clockboard_kva->boot_unix_secs  = 0;  /* set by clockboard_set_boot_unix_secs */
+    s_clockboard_kva->magic           = CLOCKBOARD_MAGIC;
 
     /* Register as shared so vmm_destroy_context skips pmm_free — this
      * page is mapped R/O into every Cabin and lives for the whole

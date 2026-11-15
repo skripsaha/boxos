@@ -32,7 +32,6 @@ typedef struct {
     uint64_t       Memory;
     uint64_t       Place;
     uint32_t       Flags;
-    uint16_t       Version;
 } BoxPenPart;
 
 typedef struct {
@@ -137,8 +136,7 @@ static inline BoxVerdict BoxPenWrite(const BoxPenPart *parts, uint32_t count, ui
 
     for (uint64_t i = 0; i < bytes; i++) out[i] = 0;
     BoxPenCopy(out + BOX_AT_MAGIC, magic, 8);
-    BoxPut16(out + BOX_AT_VERSION, BOX_VERSION);
-    BoxPut16(out + BOX_AT_HEADER_SIZE, BOX_HEADER_BYTES);
+    BoxPut32(out + BOX_AT_HEADER_SIZE, BOX_HEADER_BYTES);
     BoxPut32(out + BOX_AT_PART_COUNT, count);
     BoxPut64(out + BOX_AT_TABLE, table);
     BoxPut64(out + BOX_AT_NAMES, names);
@@ -163,9 +161,8 @@ static inline BoxVerdict BoxPenWrite(const BoxPenPart *parts, uint32_t count, ui
         BoxPut64(entry + BOX_ENTRY_MEMORY, part->Memory);
         BoxPut64(entry + BOX_ENTRY_PLACE, part->Place);
         BoxPut32(entry + BOX_ENTRY_FLAGS, part->Flags);
-        BoxPut16(entry + BOX_ENTRY_VERSION, part->Version);
-        BoxPut16(entry + BOX_ENTRY_NAME_LEN, (uint16_t)length);
         BoxPut32(entry + BOX_ENTRY_NAME_AT, (uint32_t)name_at);
+        BoxPut16(entry + BOX_ENTRY_NAME_LEN, (uint16_t)length);
         BoxHashBytes(hasher, out + offset, part->Size, entry + BOX_ENTRY_HASH);
 
         name_at += length;

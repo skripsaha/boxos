@@ -359,7 +359,6 @@ static int cmd_stamp(const char *image, const char *root, const char *keys,
         return EXIT_USAGE;
     }
 
-    p.Version         = BUILDPLATE_VERSION;
     p.TreeFingerprint = tree.fingerprint;
     p.StampedUnix     = (uint64_t)time(NULL);
     p.FileCount       = tree.file_count;
@@ -397,7 +396,7 @@ static int read_plate(const char *image, BuildPlate *out)
     if (at < 0) { free(img); return EXIT_NOPLATE; }
     memcpy(out, img + at, sizeof(*out));
     free(img);
-    if (out->Magic != BUILDPLATE_MAGIC || out->Version != BUILDPLATE_VERSION)
+    if (out->Magic != BUILDPLATE_MAGIC)
         return EXIT_NOPLATE;
     return 0;
 }

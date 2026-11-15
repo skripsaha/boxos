@@ -4,7 +4,7 @@
 #
 # Boots ONLY the four owner-mandated configs (UEFI/BIOS × STRICT × {1c,16c})
 # and runs ONLY the test app(s) relevant to the phase under test — never the
-# unrelated heavy suites (write_stress / cow_test / touch_stress), which are
+# unrelated heavy suites (write_stress / touch_stress), which are
 # slow and carry the pre-existing AMP-storage UEFI-16c flake. This keeps the
 # signal about the phase clean and the run fast ("только нужные тесты").
 #

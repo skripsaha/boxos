@@ -1080,28 +1080,6 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     return OK;
 }
 
-
-/* -------------------------------------------------------------------------
- * Snapshot ops — STORAGE_SNAP_CREATE, _DELETE, _LIST and _INFO.
- *
- * All four are answered ERR_UNSUPPORTED on a format-v1 volume, whatever their
- * params: a snapshot there could be taken and never read, and snapshots arrive
- * with format v2 (TagFS_SnapshotRefused, tagfs.h). The four stay on the wire so a
- * program that asks is told why, not met with an operation nobody knows.
- * ------------------------------------------------------------------------- */
-
-static int ObjSnapRefused(const ManifestOp *op, Crate *crates, uint16_t crate_count,
-                          const OpContext *ctx)
-{
-    (void)crates; (void)crate_count; (void)ctx;
-    switch (OP_KIND_OPCODE(op->op_kind)) {
-    case STORAGE_SNAP_CREATE: return TagFS_SnapshotRefused("storage.snap.create");
-    case STORAGE_SNAP_DELETE: return TagFS_SnapshotRefused("storage.snap.delete");
-    case STORAGE_SNAP_LIST:   return TagFS_SnapshotRefused("storage.snap.list");
-    default:                  return TagFS_SnapshotRefused("storage.snap.info");
-    }
-}
-
 /* -------------------------------------------------------------------------
  * Registration
  * ------------------------------------------------------------------------- */
@@ -1129,11 +1107,6 @@ error_t StorageDeckRegister(void)
         { STORAGE_OBJ_RESTORE,  ObjRestore,      OP_AUTH_APP, "storage.restore"  },
         { STORAGE_OBJ_SPAN,     ObjSpan,         OP_AUTH_APP, "storage.span"     },
         { STORAGE_OBJ_RENAME,   ObjRename,       OP_AUTH_APP, "storage.rename"   },
-        /* Snapshots: app+, refused on format v1. */
-        { STORAGE_SNAP_CREATE,  ObjSnapRefused,  OP_AUTH_APP, "storage.snap.create"},
-        { STORAGE_SNAP_DELETE,  ObjSnapRefused,  OP_AUTH_APP, "storage.snap.delete"},
-        { STORAGE_SNAP_LIST,    ObjSnapRefused,  OP_AUTH_APP, "storage.snap.list"  },
-        { STORAGE_SNAP_INFO,    ObjSnapRefused,  OP_AUTH_APP, "storage.snap.info"  },
         { STORAGE_OBJ_ANCHOR,   ObjAnchor,       OP_AUTH_APP, "storage.anchor"     },
         { STORAGE_OBJ_WRITE_SETTLED, ObjWriteSettled, OP_AUTH_APP, "storage.write.settled" },
         /* Escheat lets a rotten range's files and blocks go for good: system. */

@@ -153,7 +153,6 @@ error_t ManifestExecuteOnce(const void              *manifest_kp,
 
     const Manifest *hdr = (const Manifest *)manifest_kp;
     if (hdr->magic != MANIFEST_MAGIC)        return ERR_INVALID_POCKET;
-    if (hdr->version != MANIFEST_VERSION)    return ERR_VERSION_MISMATCH;
     if (hdr->total_size != manifest_size)    return ERR_INVALID_ARGUMENT;
     if (hdr->op_count == 0)                  return ERR_INVALID_ARGUMENT;
 

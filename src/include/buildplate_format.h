@@ -59,8 +59,6 @@
 
 #include "boxos_magic.h"
 
-#define BUILDPLATE_VERSION      1u
-
 /* Sixteen bytes, no terminator: this is a tag, not a string. */
 #define BUILDPLATE_TAG_BYTES    16
 #define BUILDPLATE_TAG_INIT     { 'B','O','X','O','S',' ','B','U','I','L','D', \
@@ -70,7 +68,7 @@
  * pairs separated by spaces. Fourteen keys at around a dozen characters each,
  * with room to grow; the tool refuses to stamp a longer list rather than
  * truncating one, because a truncated key list is a key list that lies. */
-#define BUILDPLATE_KEYS_MAX     208
+#define BUILDPLATE_KEYS_MAX     212
 
 #define BUILDPLATE_VERDICT_UNSTAMPED   0u  /* nothing has been riveted here */
 #define BUILDPLATE_VERDICT_CLEAN       1u  /* the tree carried no injection */
@@ -79,11 +77,10 @@
 typedef struct BuildPlate {
     char     Tag[BUILDPLATE_TAG_BYTES]; /* BUILDPLATE_TAG_INIT — how it is found */
     uint32_t Magic;                     /* BUILDPLATE_MAGIC */
-    uint32_t Version;                   /* BUILDPLATE_VERSION */
+    uint32_t Verdict;                   /* BUILDPLATE_VERDICT_* */
     uint64_t TreeFingerprint;           /* FNV-1a 64 over every input file */
     uint64_t StampedUnix;               /* when it was riveted */
     uint32_t FileCount;                 /* how many files the fingerprint spans */
-    uint32_t Verdict;                   /* BUILDPLATE_VERDICT_* */
     char     Keys[BUILDPLATE_KEYS_MAX]; /* NUL-terminated */
 } BuildPlate;
 

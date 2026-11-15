@@ -84,9 +84,6 @@
  * and the drain core would wait on itself for ever. So on a USB disk the job
  * goes on at a service point (HelmReady), where standing over the medium is
  * allowed, and the port carries only its blocks.
- *
- * Nothing here copies a block for a snapshot: a format-v1 volume takes none
- * (TagFS_SnapshotRefused), so every block is written where the file has it.
  */
 
 #include "write_job_internal.h"

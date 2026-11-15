@@ -34,7 +34,7 @@ typedef struct {
 } ProgramLife;
 #define BOX_LIFE(Text)                                                         \
     __attribute__((section(".boxos.life"), used, aligned(1)))                  \
-    static const char BoxLifeDeclared[] = "life 1\n" Text "\n"
+    static const char BoxLifeDeclared[] = "life\n" Text "\n"
 
 /* How the program File lives: 0 with *Out as its part says — a task, not
  * raised, when it has none; -ERR_INVALID_ARGUMENT for a part not written as

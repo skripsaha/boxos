@@ -344,13 +344,13 @@ static void expect(const char *form_text, const char *line, const char *const *a
 
 /* ---- the Forms ----------------------------------------------------------- */
 
-#define TAG    "form 1\ntakes things \"the files to tag\"\ntakes words \"the tags they get\"\ngives things\n"
-#define RENAME "form 1\ntakes thing \"the file\"\ntakes name \"the new name\"\n"
-#define SAY    "form 1\ntakes text \"what to say\"\n"
-#define COPY   "form 1\ntakes thing \"the file\"\ntakes optional into \"where to put it\"\n"
-#define WORDS  "form 1\ntakes words \"words\"\n"
-#define NOTE   "form 1\ntakes thing \"the file\"\ntakes text \"the note\"\n"
-#define PUT    "form 1\ntakes words \"words\"\ntakes things \"the files\"\n"
+#define TAG    "form\ntakes things \"the files to tag\"\ntakes words \"the tags they get\"\ngives things\n"
+#define RENAME "form\ntakes thing \"the file\"\ntakes name \"the new name\"\n"
+#define SAY    "form\ntakes text \"what to say\"\n"
+#define COPY   "form\ntakes thing \"the file\"\ntakes optional into \"where to put it\"\n"
+#define WORDS  "form\ntakes words \"words\"\n"
+#define NOTE   "form\ntakes thing \"the file\"\ntakes text \"the note\"\n"
+#define PUT    "form\ntakes words \"words\"\ntakes things \"the files\"\n"
 
 static void test_examples(void)
 {
@@ -442,7 +442,7 @@ static void test_which(void)
     expect(TAG, "note.txt done", pick3, "WHICH(note.txt:2) => things(#3) words(=done)");
     expect(TAG, "note.txt done", NULL, "WHICH(note.txt:2) UNANSWERED");
     const char *two[] = { "which:3", "which:4", NULL };
-    expect("form 1\ntakes things \"the files\"\n", "note.txt a.txt note.txt", two,
+    expect("form\ntakes things \"the files\"\n", "note.txt a.txt note.txt", two,
            "WHICH(note.txt:2) WHICH(note.txt:2) => things(#3 #1 #4)");
     expect(RENAME, "a.txt note.txt", NULL, "=> thing(#1) name(=note.txt)");
     expect(WORDS, "note.txt", NULL, "=> words(=note.txt)");
@@ -479,17 +479,17 @@ static void test_leftovers(void)
     expect(RENAME, "a.txt c.txt b.txt", NULL, "REFUSED: b.txt has no place in this command");
     expect(WORDS, "them all everywhere ->", NULL, "REFUSED: -> wants the name of a file after it");
     expect(WORDS, "them all everywhere", NULL, "=> words(=them =all =everywhere)");
-    expect("form 1\n", "x y", NULL, "REFUSED: x has no place in this command");
-    expect("form 1\ntakes optional words \"w\"\n", "", NULL, "=> words()");
+    expect("form\n", "x y", NULL, "REFUSED: x has no place in this command");
+    expect("form\ntakes optional words \"w\"\n", "", NULL, "=> words()");
     expect(PUT, "x a.txt b.txt", NULL, "=> words(=x) things(#1 #2)");
     expect(COPY, "a.txt b.txt", NULL, "REFUSED: b.txt has no place in this command");
     /* A file-like word where the command's file was left out is that file not
      * being here; with the file given, it is a word out of place. */
-    expect("form 1\ntakes optional thing \"the file\"\n", "alpha.txt", NULL,
+    expect("form\ntakes optional thing \"the file\"\n", "alpha.txt", NULL,
            "REFUSED: there is no alpha.txt here");
-    expect("form 1\ntakes optional thing \"the file\"\n", "zzz", NULL,
+    expect("form\ntakes optional thing \"the file\"\n", "zzz", NULL,
            "REFUSED: zzz has no place in this command");
-    expect("form 1\ntakes optional thing \"the file\"\n", "a.txt alpha.txt", NULL,
+    expect("form\ntakes optional thing \"the file\"\n", "a.txt alpha.txt", NULL,
            "REFUSED: alpha.txt has no place in this command");
 }
 
@@ -523,12 +523,12 @@ static void test_arrow(void)
     expect(COPY, "a.txt -> b.txt", NULL, "=> thing(#1) into(=b.txt)");
     expect(COPY, "a.txt -> fresh", NULL, "=> thing(#1) into(=fresh)");
     expect(COPY, "a.txt", NULL, "=> thing(#1) into()");
-    expect("form 1\ntakes thing \"the file\"\ntakes into \"where\"\n", "a.txt", NULL,
+    expect("form\ntakes thing \"the file\"\ntakes into \"where\"\n", "a.txt", NULL,
            "FIELD(1:-) UNANSWERED");
     const char *where[] = { "words:out", NULL };
-    expect("form 1\ntakes thing \"the file\"\ntakes into \"where\"\n", "a.txt", where,
+    expect("form\ntakes thing \"the file\"\ntakes into \"where\"\n", "a.txt", where,
            "FIELD(1:-) => thing(#1) into(=out)");
-    expect("form 1\ntakes words \"w\"\n", "x -> y", NULL, "=> words(=x) create=y");
+    expect("form\ntakes words \"w\"\n", "x -> y", NULL, "=> words(=x) create=y");
 }
 
 static void check_luggage(const char *label, const char *form_text, const char *line, const char *program,
@@ -572,10 +572,10 @@ static void test_luggage_bytes(void)
     BYTES("bytes arrow first", TAG, "-> out a.txt done", "tag", TAG_BYTES);
     BYTES("bytes arrow last", TAG, "a.txt done -> out (file)", "tag", TAG_BYTES);
     BYTES("bytes no program", WORDS, "x  y", NULL, "x  y\0filled 1\0field words\0=x\0=y\0screen #77\0");
-    BYTES("bytes no words", "form 1\n", "", "prog", "prog\0filled 1\0screen #77\0");
-    BYTES("bytes undeclared", "form 1\n", "", NULL, "\0filled 1\0screen #77\0");
+    BYTES("bytes no words", "form\n", "", "prog", "prog\0filled 1\0screen #77\0");
+    BYTES("bytes undeclared", "form\n", "", NULL, "\0filled 1\0screen #77\0");
     SOUVENIR_BYTES("bytes souvenir", TAG, "a.txt done", "tag", TAG_BYTES "souvenir\0");
-    SOUVENIR_BYTES("bytes souvenir undeclared", "form 1\n", "", "prog",
+    SOUVENIR_BYTES("bytes souvenir undeclared", "form\n", "", "prog",
                    "prog\0filled 1\0screen #77\0souvenir\0");
     check_int("souvenir no filler", form_fill_souvenir(NULL), -ERR_INVALID_ARGUMENT);
     HERE_BYTES("bytes here", TAG, "a.txt done", "tag", false, TAG_BYTES "here\0");
@@ -693,35 +693,35 @@ static void test_form_parse(void)
     check_int("form declared", form.Declared, 1);
     form_release(&form);
 
-    check_int("form optional", parse("form 1\ntakes optional name \"n\"\ngives text\n", &form), 0);
+    check_int("form optional", parse("form\ntakes optional name \"n\"\ngives text\n", &form), 0);
     check_int("form optional flag", form.Fields[0].Optional, 1);
     check_int("form gives text", form.Gives, BOX_FORM_GIVES_TEXT);
     form_release(&form);
 
-    check_int("form every kind", parse("form 1\ntakes thing \"a\"\ntakes things \"b\"\ntakes name \"c\"\n"
+    check_int("form every kind", parse("form\ntakes thing \"a\"\ntakes things \"b\"\ntakes name \"c\"\n"
                                        "takes words \"d\"\ntakes text \"e\"\ntakes into \"f\"\n", &form), 0);
     check_int("form kind into", form.Fields[5].Kind, BOX_FORM_INTO);
     form_release(&form);
 
-    check_int("form no what", parse("form 1\ntakes words\n", &form), 0);
+    check_int("form no what", parse("form\ntakes words\n", &form), 0);
     check_text("form no what text", form.Fields[0].What, "");
     form_release(&form);
 
-    check_int("form no final newline", parse("form 1\ntakes words \"w\"", &form), 0);
+    check_int("form no final newline", parse("form\ntakes words \"w\"", &form), 0);
     check_int("form no final newline fields", form.FieldCount, 1);
     form_release(&form);
 
-    check_int("form unknown lines", parse("form 1\nfrobnicate yes\n\ntakes words \"w\"\ngives bogus\n"
+    check_int("form unknown lines", parse("form\nfrobnicate yes\n\ntakes words \"w\"\ngives bogus\n"
                                           "  \nwhatever \"x\"\n", &form), 0);
     check_int("form unknown lines fields", form.FieldCount, 1);
     check_int("form unknown gives", form.Gives, BOX_FORM_GIVES_NOTHING);
     form_release(&form);
 
-    check_int("form nul ends", form_parse("form 1\ntakes words \"w\"\n\0takes words \"x\"\n", 40, &form), 0);
+    check_int("form nul ends", form_parse("form\ntakes words \"w\"\n\0takes words \"x\"\n", 38, &form), 0);
     check_int("form nul ends fields", form.FieldCount, 1);
     form_release(&form);
 
-    check_int("form head only", parse("form 1", &form), 0);
+    check_int("form head only", parse("form", &form), 0);
     check_int("form head only fields", form.FieldCount, 0);
     form_release(&form);
 }
@@ -733,20 +733,20 @@ static void test_form_refused(void)
 
     check_int("refuse empty", parse("", &form), bad);
     check_int("refuse no head", parse("takes words \"w\"\n", &form), bad);
-    check_int("refuse form 2", parse("form 2\ntakes words \"w\"\n", &form), bad);
+    check_int("refuse form 1", parse("form 1\ntakes words \"w\"\n", &form), bad);
     check_int("refuse form 10", parse("form 10\n", &form), bad);
     check_int("refuse head glued", parse("form 1x\n", &form), bad);
-    check_int("refuse unknown kind", parse("form 1\ntakes bogus \"w\"\n", &form), bad);
-    check_int("refuse no kind", parse("form 1\ntakes\n", &form), bad);
-    check_int("refuse optional only", parse("form 1\ntakes optional\n", &form), bad);
-    check_int("refuse open quote", parse("form 1\ntakes words \"w\n", &form), bad);
-    check_int("refuse junk after what", parse("form 1\ntakes words \"w\" more\n", &form), bad);
-    check_int("refuse what not quoted", parse("form 1\ntakes words the tags\n", &form), bad);
+    check_int("refuse unknown kind", parse("form\ntakes bogus \"w\"\n", &form), bad);
+    check_int("refuse no kind", parse("form\ntakes\n", &form), bad);
+    check_int("refuse optional only", parse("form\ntakes optional\n", &form), bad);
+    check_int("refuse open quote", parse("form\ntakes words \"w\n", &form), bad);
+    check_int("refuse junk after what", parse("form\ntakes words \"w\" more\n", &form), bad);
+    check_int("refuse what not quoted", parse("form\ntakes words the tags\n", &form), bad);
     check_int("refuse null", form_parse(NULL, 0, &form), bad);
-    check_int("refuse no out", form_parse("form 1\n", 7, NULL), bad);
+    check_int("refuse no out", form_parse("form\n", 5, NULL), bad);
     check_int("refused leaves nothing", form.Declared, 0);
 
-    char many[512] = "form 1\n";
+    char many[512] = "form\n";
     for (int i = 0; i < 16; i++) strcat(many, "takes name \"n\"\n");
     check_int("sixteen fields", parse(many, &form), 0);
     check_int("sixteen count", form.FieldCount, 16);
@@ -757,7 +757,7 @@ static void test_form_refused(void)
 
 static void test_sixteen(void)
 {
-    char form_text[512] = "form 1\n";
+    char form_text[512] = "form\n";
     for (int i = 0; i < 16; i++) strcat(form_text, "takes optional name \"n\"\n");
 
     reset_volume();
@@ -944,12 +944,12 @@ static void test_image(void)
     check_int("image names unterminated", form_of_file(7, &form), 0);
     check_int("image names unterminated declared", form.Declared, 0);
 
-    build_image("form 2\n", clean);
-    check_int("image form 2", form_of_file(7, &form), -ERR_INVALID_ARGUMENT);
-    build_image("form 1\ntakes bogus \"x\"\n", clean);
+    build_image("form 1\n", clean);
+    check_int("image form 1", form_of_file(7, &form), -ERR_INVALID_ARGUMENT);
+    build_image("form\ntakes bogus \"x\"\n", clean);
     check_int("image bad form", form_of_file(7, &form), -ERR_INVALID_ARGUMENT);
 
-    char with_nul[80] = "form 1\ntakes name \"n\"\n";
+    char with_nul[80] = "form\ntakes name \"n\"\n";
     build_image(with_nul, clean);
     check_int("image form with trailing nul", form_of_file(7, &form), 0);
     check_int("image form with trailing nul fields", form.FieldCount, 1);
@@ -973,7 +973,7 @@ static void use_box(const BoxPenPart *parts, uint32_t count)
 
 static BoxPenPart form_part(const char *text, uint32_t flags)
 {
-    BoxPenPart part = { "form", (const uint8_t *)text, strlen(text), strlen(text), 0, flags, BOX_PART_VERSION };
+    BoxPenPart part = { "form", (const uint8_t *)text, strlen(text), strlen(text), 0, flags };
     return part;
 }
 
@@ -1024,25 +1024,25 @@ static void test_box(void)
 
     static char huge[70000];
     memset(huge, 'x', sizeof(huge) - 1);
-    memcpy(huge, "form 1\n", 7);
+    memcpy(huge, "form\n", 5);
     BoxPenPart large = form_part(huge, BOX_FLAG_LOAD_AT_START);
     use_box(&large, 1);
     check_int("box form past what a Form may be", form_of_file(7, &form), -ERR_CORRUPTED);
 
-    BoxPenPart later = form_part("form 2\n", BOX_FLAG_LOAD_AT_START);
+    BoxPenPart later = form_part("form 1\n", BOX_FLAG_LOAD_AT_START);
     use_box(&later, 1);
-    check_int("box form 2", form_of_file(7, &form), -ERR_INVALID_ARGUMENT);
+    check_int("box form 1", form_of_file(7, &form), -ERR_INVALID_ARGUMENT);
 
     /* Any part by its name, and what the file is. */
     BoxPenPart parts[2] = { form_part(TAG, BOX_FLAG_LOAD_AT_START),
-                            { "about", (const uint8_t *)"about 1\n", 8, 8, 0, 0, BOX_PART_VERSION } };
+                            { "about", (const uint8_t *)"about\n", 6, 6, 0, 0 } };
     char       *bytes;
     size_t      size;
     ProgramKind kind;
     use_box(parts, 2);
     check_int("box part about", program_part_read(7, "about", 64, &bytes, &size, &kind), 1);
-    check(bytes && size == 8 && memcmp(bytes, "about 1\n", 9) == 0, "box part about bytes", bytes,
-          "about 1\n");
+    check(bytes && size == 6 && memcmp(bytes, "about\n", 7) == 0, "box part about bytes", bytes,
+          "about\n");
     check_int("box part about kind", kind, PROGRAM_BOX);
     free(bytes);
     check_int("box part not there", program_part_read(7, "recipe", 64, &bytes, &size, &kind), 0);
@@ -1182,29 +1182,29 @@ static void test_given_names(void)
 {
     BoxForm form;
 
-    check_int("names good", parse("form 1\ntakes things files \"the files\"\ntakes optional words label_2 \"w\"\n",
+    check_int("names good", parse("form\ntakes things files \"the files\"\ntakes optional words label_2 \"w\"\n",
                                   &form), 0);
     check_text("name 0", form.Fields[0].Name, "files");
     check_text("name 1", form.Fields[1].Name, "label_2");
     check_text("name what", form.Fields[1].What, "w");
     check_int("name optional", form.Fields[1].Optional, 1);
     form_release(&form);
-    check_int("name no what", parse("form 1\ntakes words label\n", &form), 0);
+    check_int("name no what", parse("form\ntakes words label\n", &form), 0);
     check_text("name no what name", form.Fields[0].Name, "label");
     check_text("name no what what", form.Fields[0].What, "");
     form_release(&form);
-    check_int("no name", parse("form 1\ntakes words \"w\"\n", &form), 0);
+    check_int("no name", parse("form\ntakes words \"w\"\n", &form), 0);
     check_int("no name is null", form.Fields[0].Name == NULL, 1);
     form_release(&form);
-    check_int("name digit first", parse("form 1\ntakes words 9x \"w\"\n", &form), -ERR_INVALID_ARGUMENT);
-    check_int("name them", parse("form 1\ntakes things them \"w\"\n", &form), -ERR_INVALID_ARGUMENT);
-    check_int("name everywhere", parse("form 1\ntakes words everywhere \"w\"\n", &form), -ERR_INVALID_ARGUMENT);
-    check_int("name dash", parse("form 1\ntakes words la-bel \"w\"\n", &form), -ERR_INVALID_ARGUMENT);
-    check_int("name dot", parse("form 1\ntakes words a.txt \"w\"\n", &form), -ERR_INVALID_ARGUMENT);
-    check_int("name twice", parse("form 1\ntakes words a \"w\"\ntakes things a \"t\"\n", &form),
+    check_int("name digit first", parse("form\ntakes words 9x \"w\"\n", &form), -ERR_INVALID_ARGUMENT);
+    check_int("name them", parse("form\ntakes things them \"w\"\n", &form), -ERR_INVALID_ARGUMENT);
+    check_int("name everywhere", parse("form\ntakes words everywhere \"w\"\n", &form), -ERR_INVALID_ARGUMENT);
+    check_int("name dash", parse("form\ntakes words la-bel \"w\"\n", &form), -ERR_INVALID_ARGUMENT);
+    check_int("name dot", parse("form\ntakes words a.txt \"w\"\n", &form), -ERR_INVALID_ARGUMENT);
+    check_int("name twice", parse("form\ntakes words a \"w\"\ntakes things a \"t\"\n", &form),
               -ERR_INVALID_ARGUMENT);
-    check_int("name two words", parse("form 1\ntakes words a b \"w\"\n", &form), -ERR_INVALID_ARGUMENT);
-    check_int("name after what", parse("form 1\ntakes words \"w\" a\n", &form), -ERR_INVALID_ARGUMENT);
+    check_int("name two words", parse("form\ntakes words a b \"w\"\n", &form), -ERR_INVALID_ARGUMENT);
+    check_int("name after what", parse("form\ntakes words \"w\" a\n", &form), -ERR_INVALID_ARGUMENT);
 }
 
 static void test_screen_file(void)

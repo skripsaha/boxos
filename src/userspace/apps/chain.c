@@ -9,7 +9,7 @@
  *
  * Layout per op in the Manifest stream:
  *   ManifestOp header (12 bytes) + 1 byte param (fill_byte) = 13 bytes
- * Total Manifest size = sizeof(Manifest) [16] + N * 13 ≈ 13 KiB for N=1000.
+ * Total Manifest size = sizeof(Manifest) [14] + N * 13 ≈ 13 KiB for N=1000.
  */
 
 #include "box/print.h"

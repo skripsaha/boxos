@@ -38,7 +38,6 @@ typedef enum {
     BOX_OK = 0,
     BOX_NOT_BOX,
     BOX_TRUNCATED,
-    BOX_VERSION_UNKNOWN,
     BOX_HEADER_SIZE,
     BOX_NO_PARTS,
     BOX_TABLE_MISPLACED,
@@ -58,7 +57,6 @@ typedef enum {
     BOX_PART_PLACE,
     BOX_PART_FLAGS,
     BOX_PART_UNKNOWN_REQUIRED,
-    BOX_PART_VERSION_REQUIRED,
     BOX_LOADABLE_OVERLAP,
     BOX_NO_CODE,
     BOX_NO_DOORS,
@@ -80,8 +78,7 @@ typedef enum {
 #define BOX_NO_PART  0xFFFFFFFFu
 
 typedef struct {
-    uint16_t Version;
-    uint16_t HeaderSize;
+    uint32_t HeaderSize;
     uint32_t PartCount;
     uint64_t TableAt;
     uint64_t NamesAt;
@@ -110,7 +107,6 @@ typedef struct {
     uint64_t       Memory;
     uint64_t       Place;
     uint32_t       Flags;
-    uint16_t       Version;
 } BoxPart;
 
 /* The includer's SHA-256: Begin, then Add as often as there are pieces, then
@@ -278,15 +274,13 @@ static inline BoxVerdict BoxReadHead(const uint8_t *bytes, uint64_t available, u
         if (bytes[BOX_AT_MAGIC + i] != magic[i]) return BOX_NOT_BOX;
     if (available < BOX_HEADER_BYTES || file_size < BOX_HEADER_BYTES) return BOX_TRUNCATED;
 
-    out->Version    = BoxU16(bytes + BOX_AT_VERSION);
-    out->HeaderSize = BoxU16(bytes + BOX_AT_HEADER_SIZE);
+    out->HeaderSize = BoxU32(bytes + BOX_AT_HEADER_SIZE);
     out->PartCount  = BoxU32(bytes + BOX_AT_PART_COUNT);
     out->TableAt    = BoxU64(bytes + BOX_AT_TABLE);
     out->NamesAt    = BoxU64(bytes + BOX_AT_NAMES);
     out->NamesSize  = BoxU64(bytes + BOX_AT_NAMES_SIZE);
     out->FileSize   = BoxU64(bytes + BOX_AT_FILE_SIZE);
 
-    if (out->Version != BOX_VERSION) return BOX_VERSION_UNKNOWN;
     if (out->HeaderSize < BOX_HEADER_BYTES || out->HeaderSize % BOX_PART_ALIGN != 0)
         return BOX_HEADER_SIZE;
     if (out->FileSize != file_size) return BOX_FILE_SIZE;
@@ -315,15 +309,10 @@ static inline void BoxEntryRead(const BoxTable *table, uint32_t index, BoxPart *
     out->Memory     = BoxU64(entry + BOX_ENTRY_MEMORY);
     out->Place      = BoxU64(entry + BOX_ENTRY_PLACE);
     out->Flags      = BoxU32(entry + BOX_ENTRY_FLAGS);
-    out->Version    = BoxU16(entry + BOX_ENTRY_VERSION);
     out->NameLength = BoxU16(entry + BOX_ENTRY_NAME_LEN);
     out->Name       = table->Prefix + table->Head.NamesAt + BoxU32(entry + BOX_ENTRY_NAME_AT);
     out->Hash       = entry + BOX_ENTRY_HASH;
     out->Kind       = BoxKindOf(out->Name, out->NameLength, &bare);
-    /* A standard kind in a version this reader predates is passed over like
-     * any part it does not know — BoxRead has already refused it where it
-     * had to be understood. */
-    if (out->Version != BOX_PART_VERSION) out->Kind = BOX_KIND_UNKNOWN;
 }
 
 /* The rules of a part of a kind this reader understands, by its kind. */
@@ -353,8 +342,7 @@ static inline BoxVerdict BoxKindRules(const BoxPart *part, bool required)
 /* The rules of one part's entry, its name already held to its place. The
  * name's own kind decides what the name may say and what must be understood;
  * the rules of a kind's layout bind only a part this reader understands
- * (part->Kind) — one in a later version of its kind, not required, is passed
- * over. A part marked to be loaded at start is put into the program's memory
+ * (part->Kind). A part marked to be loaded at start is put into the program's memory
  * whatever its kind, one passed over too, and so as it is: its bytes exactly,
  * never compressed, on pages the kernel chooses. */
 static inline BoxVerdict BoxPartRules(const BoxPart *part)
@@ -365,8 +353,6 @@ static inline BoxVerdict BoxPartRules(const BoxPart *part)
 
     if (named != BOX_KIND_UNKNOWN && !bare && !BoxKindTakesValue(named)) return BOX_NAME_NOT_STANDARD;
     if (named == BOX_KIND_UNKNOWN && required) return BOX_PART_UNKNOWN_REQUIRED;
-    if (named != BOX_KIND_UNKNOWN && part->Version != BOX_PART_VERSION && required)
-        return BOX_PART_VERSION_REQUIRED;
     if (part->Kind != BOX_KIND_UNKNOWN) {
         BoxVerdict verdict = BoxKindRules(part, required);
         if (verdict != BOX_OK) return verdict;
@@ -428,7 +414,8 @@ static inline BoxVerdict BoxRead(const uint8_t *prefix, uint64_t prefix_bytes, c
         out->RefusedNameLength = name_length;
         names_used += name_length;
 
-        if (BoxU32(entry + BOX_ENTRY_RESERVED) != 0) return BOX_ENTRY_NOT_ZERO;
+        for (unsigned k = BOX_ENTRY_RESERVED; k < BOX_ENTRY_HASH; k++)
+            if (entry[k] != 0) return BOX_ENTRY_NOT_ZERO;
         if ((BoxU32(entry + BOX_ENTRY_FLAGS) & ~BOX_FLAGS_KNOWN) != 0) return BOX_FLAGS_UNKNOWN;
 
         BoxEntryRead(out, i, &part);
@@ -437,7 +424,7 @@ static inline BoxVerdict BoxRead(const uint8_t *prefix, uint64_t prefix_bytes, c
             return BOX_NAME_ORDER;
 
         /* Each part at the first offset its alignment allows after the last;
-         * the alignment is the name's, whatever version the part is in. */
+         * the alignment is the name's. */
         BoxKind  named = BoxKindOf(part.Name, part.NameLength, &bare);
         uint64_t align = BoxKindLoadable(named) ? BOX_LOADABLE_ALIGN : BOX_PART_ALIGN;
         if (!BoxAlignUp(file_used, align, head->FileSize, &expected)) return BOX_PART_OUTSIDE;
@@ -776,8 +763,7 @@ static inline BoxVerdict BoxFixupsCheck(const uint8_t *bytes, uint64_t size, con
  * needs, hints, life, form and the rest are written for people and programs
  * alike: lines ended by '\n' (the last one's may be left off), a line's words
  * between blanks, no byte below a blank but the newline and no DEL. The first
- * line with words says the kind and its version, "needs 1"; after it, a line
- * is a fact. A reader passes over a line it does not know and reads one it
+ * line with words says the kind alone, "needs"; after it, a line is a fact. A reader passes over a line it does not know and reads one it
  * knows strictly.
  */
 
@@ -828,7 +814,7 @@ static inline uint64_t BoxTextWordCount(const uint8_t *line, uint64_t length)
 }
 
 /* The `size` bytes at `bytes`, a part of kind `kind` written as text, opened
- * past its first line, which must be "<kind> 1". */
+ * past its first line, which must be "<kind>". */
 static inline BoxVerdict BoxTextBegin(const uint8_t *bytes, uint64_t size, BoxKind kind, BoxText *out)
 {
     for (uint64_t i = 0; i < size; i++)
@@ -840,11 +826,9 @@ static inline BoxVerdict BoxTextBegin(const uint8_t *bytes, uint64_t size, BoxKi
 
     const uint8_t *line, *word = NULL;
     uint64_t       length, at = 0, word_length = 0;
-    if (!BoxTextLine(out, &line, &length) || BoxTextWordCount(line, length) != 2) return BOX_TEXT_LAYOUT;
+    if (!BoxTextLine(out, &line, &length) || BoxTextWordCount(line, length) != 1) return BOX_TEXT_LAYOUT;
     BoxTextWord(line, length, &at, &word, &word_length);
     if (!BoxSpanIs(word, word_length, BoxKindWord(kind))) return BOX_TEXT_LAYOUT;
-    BoxTextWord(line, length, &at, &word, &word_length);
-    if (!BoxSpanIs(word, word_length, "1")) return BOX_TEXT_LAYOUT;
     return BOX_OK;
 }
 
@@ -877,7 +861,7 @@ static inline bool BoxTextSize(const uint8_t *number, uint64_t number_length, co
 
 /* ── life ────────────────────────────────────────────────────────────────── *
  *
- * How a program lives, a word a line after "life 1":
+ * How a program lives, a word a line after "life":
  *
  *   task     it does its work and ends — what a program without the part does;
  *            whoever starts it waits for its end
@@ -944,7 +928,7 @@ static inline BoxVerdict BoxLifeRead(const uint8_t *bytes, uint64_t size, BoxLif
 
 /* ── asks ────────────────────────────────────────────────────────────────── *
  *
- * What a program asks to be allowed, a line each after "asks 1":
+ * What a program asks to be allowed, a line each after "asks":
  *
  *   ask utility [why]   to start other programs, to read the machine's log,
  *                       to flush a disk and to defragment a file
@@ -1000,7 +984,7 @@ static inline BoxVerdict BoxAsksRead(const uint8_t *bytes, uint64_t size, BoxAsk
 /* ── role ────────────────────────────────────────────────────────────────── *
  *
  * What the program is to the machine it is laid on, said by the box's maker
- * in one line after "role 1":
+ * in one line after "role":
  *
  *   system    a program the machine runs on: the display, the hub, the
  *             programs that start, stop and mend it
@@ -1062,7 +1046,6 @@ static inline const char *BoxVerdictText(BoxVerdict verdict)
     case BOX_OK:                    return "nothing is wrong with it";
     case BOX_NOT_BOX:               return "it does not begin as a box";
     case BOX_TRUNCATED:             return "it ends before what its header says it holds";
-    case BOX_VERSION_UNKNOWN:       return "it is a box of a version this system does not know";
     case BOX_HEADER_SIZE:           return "its header says a length a header cannot have";
     case BOX_NO_PARTS:              return "it holds no parts";
     case BOX_TABLE_MISPLACED:       return "its table does not start where its header ends";
@@ -1082,7 +1065,6 @@ static inline const char *BoxVerdictText(BoxVerdict verdict)
     case BOX_PART_PLACE:            return "a part's place in the image does not fit its kind";
     case BOX_PART_FLAGS:            return "a part's marks do not fit its kind";
     case BOX_PART_UNKNOWN_REQUIRED: return "it needs a part this system does not know";
-    case BOX_PART_VERSION_REQUIRED: return "it needs a version of a part this system does not know";
     case BOX_LOADABLE_OVERLAP:      return "two parts of its image share a page";
     case BOX_NO_CODE:               return "it has no code";
     case BOX_NO_DOORS:              return "it has no doors";

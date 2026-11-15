@@ -395,9 +395,8 @@ static Blob TableBuild(const Symbol *Syms, size_t Count)
         Fail("out of memory building the table", NULL);
 
     Header.Magic       = NAMEPLATE_MAGIC;
-    Header.Version     = NAMEPLATE_VERSION;
     Header.EntryCount  = (uint32_t)Count;
-    Header.NameBytes   = (uint32_t)NameBytes;
+    Header.NameBytes   = NameBytes;
     Header.BaseAddress = Syms[0].Address;
     Header.TotalBytes  = Total;
     memcpy(Out.Bytes, &Header, sizeof(Header));

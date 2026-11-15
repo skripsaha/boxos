@@ -18,7 +18,7 @@ static int system_summary(void) {
 
     uint64_t up_ms = sys.uptime_ns / 1000000ULL;
     printf("%color%s%color  uptime %u ms  procs %u\n",
-           COLOR_CYAN, sys.version, COLOR_DEFAULT,
+           COLOR_CYAN, sys.name, COLOR_DEFAULT,
            (unsigned)up_ms, sys.process_count);
     printf("  RAM:  %u MB used / %u MB total\n",
            (unsigned)(sys.used_memory  >> 20),

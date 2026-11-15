@@ -2064,8 +2064,7 @@ error_t tagfs_init(void) {
     /* --- And on format v1 the Ledger beside it: what is true of the volume
      *     today; and the snapshots an earlier kernel left: the manifest the
      *     Ledger names and the DiskBook's redirects into it, read, named, and
-     *     not kept. A format-v1 volume takes no new one (TagFS_SnapshotRefused).
-     *     A format-v2 volume has neither: its book says it all (book_mount.h). */
+     *     not kept. A format-v2 volume has neither: its book says it all (book_mount.h). */
     if (g_state.format == DEED_FORMAT_V1) {
         error_t ledger_rc = ledger_load();
         if (ledger_rc != OK) {
@@ -2912,22 +2911,6 @@ bool TagFSTagMatches(uint32_t tag_id, const TagSpelling *pattern)
     bool matches = TagFSTagSpelling(tag_id, &tag, NULL) && TagPatternMatches(pattern, &tag);
     tagfs_leave();
     return matches;
-}
-
-// ----------------------------------------------------------------------------
-// Snapshots
-// ----------------------------------------------------------------------------
-
-/* Said once a boot: the refusal itself is every caller's, on every request. */
-static bool g_refusal_said;
-
-error_t TagFS_SnapshotRefused(const char *asked)
-{
-    if (!__atomic_exchange_n(&g_refusal_said, true, __ATOMIC_ACQ_REL))
-        kprintf("[TagFS] %s is refused: snapshots arrive with format v2 — on format v1 a "
-                "snapshot could be taken but never read, so every request for one is "
-                "answered ERR_UNSUPPORTED\n", asked ? asked : "a snapshot request");
-    return ERR_UNSUPPORTED;
 }
 
 // ----------------------------------------------------------------------------
