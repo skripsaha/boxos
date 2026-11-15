@@ -15,8 +15,7 @@
 
 // ============================================================================
 // The stand_dog_ear suite: the keys a Tally's trees changed since the Tally
-// before it, and the self-check that holds them to the state (spec_v2
-// §16.5 п.9, §4.3 TALLY_TAKE, §2.5)
+// before it, and the self-check that holds them to the state
 //
 // DogEar is every key of FILES, TAGS, USE and DIGESTS changed since the Tally
 // the next one is laid against — by a stitch that settled, by the ribbon a

@@ -17,8 +17,8 @@
 #ifdef CONFIG_VOLUME_TESTS
 
 // ============================================================================
-// The stand_fresh suite: the data of a file on a format-v2 volume, written on
-// fresh ground (spec_v2 §3.1, §2.8 Shaped, §3.3, §8.1, §16.2 п.7)
+// The stand_fresh suite: the data of a file on a volume, written on fresh
+// ground
 //
 // A block the settled book names is never written: a write over it lays the
 // new bytes on fresh ground and splices them in, the old block resting in

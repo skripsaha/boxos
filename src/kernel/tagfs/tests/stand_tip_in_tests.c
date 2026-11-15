@@ -13,7 +13,6 @@
 
 // ============================================================================
 // The stand_tip_in suite: a Tally laid in among the nodes of the one before it
-// (spec_v2 §4.1, §4.3 TALLY_NODES, §16.5 пп.16–17, §16.2 п.4, §10.4 step 2.4)
 //
 // A Tally writes the nodes whose keys changed since the Tally before it and
 // the inner nodes above them, and names every other node as it lies, by the

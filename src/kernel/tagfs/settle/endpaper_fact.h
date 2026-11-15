@@ -28,11 +28,10 @@
 uint64_t EndpaperInnerBlocks(uint64_t kids, uint64_t atom);
 
 /*
- * The measure of the next Tally by what the last one took (endpaper_fact.c,
- * spec_v2 §16.4 п.7): the leaves a Tally laid, counted to the block as its
- * writer lays them, and the growth of what changed since — so the reserve
- * keeps what the next Tally can take, not what a whole Tally measured from
- * above would.
+ * The measure of the next Tally by what the last one took (endpaper_fact.c):
+ * the leaves a Tally laid, counted to the block as its writer lays them, and
+ * the growth of what changed since — so the reserve keeps what the next Tally
+ * can take, not what a whole Tally measured from above would.
  *
  * What a Tally laid of FILES, TAGS and DIGESTS — the trees that grow with the
  * files, their tags and their data — counted by the one rule of both its

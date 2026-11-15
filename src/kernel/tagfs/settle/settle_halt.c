@@ -34,7 +34,7 @@ error_t SettleHaltAnswer(uint64_t* unsettled)
 /*
  * ‼ THE LAST STITCH IS CLEAN, AND NOTHING RESTS THAT A HALT MUST WRITE FREE.
  * The book keeps no map on the medium, and a mount derives its ground from
- * the names alone (spec_v2 §4.6). The cycles go on while an Ink is unsettled
+ * the names alone. The cycles go on while an Ink is unsettled
  * — one begun before the shut may be inked while the first runs — each stitch
  * CLEAN when no change is in flight under it (HelmOwed), and the next mount
  * reads the last one CLEAN.

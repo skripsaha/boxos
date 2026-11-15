@@ -4,7 +4,7 @@
 #include "../ink/docket.h"
 
 /*
- * LooseLeaves — the Slips the settled state carries (spec_v2 §16.5 п.13-14):
+ * LooseLeaves — the Slips the settled state carries:
  * the files whose record, as the last stitch to settle left it, keeps Slips
  * over its last block.
  *

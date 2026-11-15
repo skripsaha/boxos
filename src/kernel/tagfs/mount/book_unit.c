@@ -70,13 +70,13 @@ static uint8_t BookSectorJudged(const uint8_t* s, const uint8_t uuid[16], uint64
     return sum == h.crc32c ? BOOK_SECTOR_HOLDS : BOOK_SECTOR_LOOSE;
 }
 
-/* The largest seq a sector of the book read held at (spec_v2 §2.2, §4.5
- * п.8): the next seq is past everything the mount saw hold, the torn tail and
- * the direct scan among it — every reader of a book reads through here, so
- * nothing read is left out. The mount reads it with its door shut; but the
- * DIGESTS leaves a read of a block opens after the mount (TallyDigestFind)
- * read through here too, on any core at once — so it only ever rises, by an
- * atomic max, and no fold is lost to another. */
+/* The largest seq a sector of the book read held at: the next seq is past
+ * everything the mount saw hold, the torn tail and the direct scan among it —
+ * every reader of a book reads through here, so nothing read is left out. The
+ * mount reads it with its door shut; but the DIGESTS leaves a read of a block
+ * opens after the mount (TallyDigestFind) read through here too, on any core
+ * at once — so it only ever rises, by an atomic max, and no fold is lost to
+ * another. */
 static uint64_t s_seq_seen;
 
 static void BookSeqFold(const BookUnit* u)

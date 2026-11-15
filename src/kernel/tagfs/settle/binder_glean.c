@@ -2,7 +2,7 @@
 #include "../dedup/dedup.h"
 
 /*
- * Glean of the Tally-Quires (spec_v2 §4.8, §16.5 пп.17–18) at a Tally's DONE.
+ * Glean of the Tally-Quires at a Tally's DONE.
  *
  * A Tally laid in names every node nothing changed as it lies, wherever it
  * was laid, and a Tally-Quire is held whole while one node in it lives
@@ -189,13 +189,13 @@ void BinderGleanAt(const BinderRun* r)
 }
 
 /*
- * Dedup, Glean's step after each Tally (dedup/dedup.h; spec_v2 §8.2, §16.7
- * п.9): the ground the Tally took in — DogEar's, the blocks written since the
- * Tally before — handed to Dedup's pass, which finds the copies among them and
- * lays each on its original. Asked by the DONE before the Gloss lets go of
- * what the Tally's DIGESTS now names (binder_done.c, GlossCaptured): those
- * blocks' digests are the Gloss's until then, and the pass reads no leaf the
- * Tally just laid to learn them.
+ * Dedup, Glean's step after each Tally (dedup/dedup.h): the ground the Tally
+ * took in — DogEar's, the blocks written since the Tally before — handed to
+ * Dedup's pass, which finds the copies among them and lays each on its
+ * original. Asked by the DONE before the Gloss lets go of what the Tally's
+ * DIGESTS now names (binder_done.c, GlossCaptured): those blocks' digests are
+ * the Gloss's until then, and the pass reads no leaf the Tally just laid to
+ * learn them.
  */
 void BinderGleanDedup(const BinderRun* r)
 {

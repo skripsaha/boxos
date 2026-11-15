@@ -13,9 +13,8 @@
 #ifdef CONFIG_VOLUME_TESTS
 
 // ============================================================================
-// The stand_fresh_change suite: what a change of a file's data on a format-v2
-// volume costs the stitch that names it, and the ground it gives up (spec_v2
-// §2.8 Shaped, §3.6, §3.7, §8.1)
+// The stand_fresh_change suite: what a change of a file's data on a volume
+// costs the stitch that names it, and the ground it gives up
 //
 // A stitch names what changed, and only that: a block written over in the
 // middle of a run is one block in, the run's pieces on either side of it kept

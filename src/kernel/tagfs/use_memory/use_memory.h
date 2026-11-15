@@ -8,7 +8,7 @@
 /*
  * The volume's memory of the Use Context — what its person was doing when
  * they left (use_context.h), carried whole by a stitch as a UseContext and
- * held in the book's Tally (spec_v2 §7).
+ * held in the book's Tally.
  *
  * ‼ A CHANGE IS A DEMAND ON THE SETTLE CYCLE, NOT A WRITE. What the person
  * says is handed over (tagfs_remember_use_context) and a cycle carries it in
@@ -66,7 +66,7 @@ bool     UseMemoryRefused(uint64_t ticket);
 // The Settle cycle's part (settle/sewing.c), by the Settle's holder
 // ----------------------------------------------------------------------------
 
-/* The stitch carries the word whole as a UseContext (spec_v2 §7). Take, at
+/* The stitch carries the word whole as a UseContext. Take, at
  * the cycle's TAKE under the state lock: whether a word is owed the medium, and then the word — held, the
  * caller's to drop; NULL says none — and its demand's number. Settled, at DONE
  * under the state lock: the volume holds `said` (the reference is the
@@ -86,7 +86,7 @@ UseText *UseMemoryStitchRefused(uint64_t ticket, bool forgot);
 // The mount (with the door shut)
 // ----------------------------------------------------------------------------
 
-/* The book's Use Context, as its Tally holds it (spec_v2 §7 Recall): `len`
+/* The book's Use Context, as its Tally holds it: `len`
  * bytes of `text`, or none. It is the medium's memory, landed. OK, or
  * ERR_NO_MEMORY. */
 error_t  UseMemoryRecall(const uint8_t *text, uint64_t len);

@@ -13,7 +13,7 @@
  * side each ask for the block after their own last one, and a take near the
  * hint then deals them alternate blocks: every Strip one block long, a read of
  * either file a seek per block, and a record as long as the file's blocks are
- * many (spec_v2 §3.1, Allotment 1 and 2). A window taken for the file, sized
+ * many (Allotment 1 and 2). A window taken for the file, sized
  * to what it already is, keeps the next growths contiguous whoever else is
  * writing — a file of N blocks is laid in about log2 N runs however its writes
  * interleave.
@@ -137,7 +137,7 @@ bool AllotmentOthersIn(uint64_t fid, uint64_t start, uint64_t count, uint64_t *p
 }
 
 // ----------------------------------------------------------------------------
-// A book's data (spec_v2 §3.1, Allotment 1 and 2; §3.6)
+// A book's data (Allotment 1 and 2)
 // ----------------------------------------------------------------------------
 
 /* Every block a book's data was handed since the volume came up: the reserve
@@ -291,7 +291,7 @@ static bool AllotmentBookPick(uint64_t fid, uint32_t want, uint64_t file_blocks,
 }
 
 // ----------------------------------------------------------------------------
-// The block a Slip promises (spec_v2 §16.6 п.1)
+// The block a Slip promises
 // ----------------------------------------------------------------------------
 
 /*

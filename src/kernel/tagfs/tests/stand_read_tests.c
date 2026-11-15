@@ -252,7 +252,7 @@ out:
 // A partial write over a rotten block is refused; a whole one is not (RT-22)
 //
 // The block rots on the medium behind its digest's back — a byte flipped by
-// the Boardroom's own doors, the same on either format — and a read of it
+// the Boardroom's own doors — and a read of it
 // says so. Sixteen bytes written into it, which would read the rest of the
 // block and lay a fresh digest over the rot, are refused; a write of the whole
 // block reads nothing of it and is taken. Where the whole block lands is the
@@ -330,12 +330,12 @@ out:
 // ----------------------------------------------------------------------------
 // A record that names holes, on both roads
 //
-// Format v1 has no holes, so the record read here is the test's own, built in
-// memory and put on a handle opened onto a two-block file in place of the one
-// the open found: three blocks of hole, the file's two blocks of ground, two
-// of hole. Both roads land zeros, the file's bytes and zeros — all seven
-// blocks — and ask the medium for no block of a hole: BLOCKFAIL, counting and
-// refusing nothing, sees no read of block 0, which a hole's start reads as.
+// The record read here is the test's own, built in memory and put on a handle
+// opened onto a two-block file in place of the one the open found: three
+// blocks of hole, the file's two blocks of ground, two of hole. Both roads
+// land zeros, the file's bytes and zeros — all seven blocks — and ask the
+// medium for no block of a hole: BLOCKFAIL, counting and refusing nothing,
+// sees no read of block 0, which a hole's start reads as.
 // ----------------------------------------------------------------------------
 
 #define STAND_READ_HOLED_BLOCKS 7u

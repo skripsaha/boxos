@@ -20,7 +20,6 @@
 
 // ============================================================================
 // The stand_book_room suite: where a book's ground goes when it comes back
-// (spec_v2 §3.6, §3.7's table)
 //
 // A next_quire is read past the Tally a mount stands on, and a reader takes it
 // only clear of that Tally's files (§3.7, ribbon_collate.c RibbonNamed,

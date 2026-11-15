@@ -4,7 +4,7 @@
 #include "volume_digest.h"
 
 // ============================================================================
-// BoxHash v2 — deterministic integrity and content hashing
+// BoxHash — deterministic integrity and content hashing
 // ============================================================================
 
 static TestResult test_boxhash_determinism(void)

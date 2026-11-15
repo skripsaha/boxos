@@ -4,8 +4,8 @@
 #include "../tagfs.h"
 
 /*
- * Gloss — the digests of the blocks of fresh data no Tally names yet (spec_v2
- * §2.8, §8.1), held beside the Tally's DIGESTS.
+ * Gloss — the digests of the blocks of fresh data no Tally names yet, held
+ * beside the Tally's DIGESTS.
  *
  * A Born or a Shaped names every block of fresh data it puts in with the
  * digest it was written with: 8 bytes a block, in the stitch. The Tally learns

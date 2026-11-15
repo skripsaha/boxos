@@ -16,7 +16,7 @@
 
 // ============================================================================
 // The stand_toll suite: what a cycle pays before its stitch, and what a mount
-// pays to believe it (spec_v2 §3.3, §3.7, §16.5 п.1-3, п.8)
+// pays to believe it
 //
 // The hybrid: a stitch naming fresh data pays the flush of that data before
 // its atoms only when the mount's check of it — its runs and its blocks, by
@@ -251,7 +251,7 @@ out:
 }
 
 // ----------------------------------------------------------------------------
-// The window of a frequent small writer: five seconds on a book, a Lull on v1
+// The window of a frequent small writer: five seconds
 // ----------------------------------------------------------------------------
 
 /* The cadence let run for `us`: whether a cycle settled anything meanwhile. */

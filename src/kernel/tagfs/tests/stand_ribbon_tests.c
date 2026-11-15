@@ -33,18 +33,17 @@
 // kernel's own writer sewed since (settle/sewing.h) — past TagFS, by the
 // Boardroom's doors, as the stand's hand; mounts the volume again and holds what the
 // mount made of them — above what a mount of the ribbon as it stood made of it,
-// which on a book a boot before left is never nothing — to the rule (spec_v2
-// §4.5 п.5): the chain sewn on by the
-// Clasp each stitch names, a retry taken at the start of the next_quire, a
-// stitch closed and damaged read by `lead`, a branch of another history left
-// out, a torn tail said, an Undone passed over, a Slip laid on the last block
-// and a fresh block held to the digest its record carries (Gloss) on every
-// road a read takes, and a Slip on the file the loader reads the kernel by
-// taking the book to read only. Then every sector it laid is put back and the
-// volume is mounted again as it was — written on again where a test's mount
-// left it under glass, for the glass is let go of with the volume. No cycle runs
-// while a test's stitches lie on the medium: the runner holds the cadence, and
-// these tests ask for none.
+// which on a book a boot before left is never nothing — to the rule: the chain
+// sewn on by the Clasp each stitch names, a retry taken at the start of the
+// next_quire, a stitch closed and damaged read by `lead`, a branch of another
+// history left out, a torn tail said, an Undone passed over, a Slip laid on
+// the last block and a fresh block held to the digest its record carries
+// (Gloss) on every road a read takes, and a Slip on the file the loader reads
+// the kernel by taking the book to read only. Then every sector it laid is put
+// back and the volume is mounted again as it was — written on again where a
+// test's mount left it under glass, for the glass is let go of with the
+// volume. No cycle runs while a test's stitches lie on the medium: the runner
+// holds the cadence, and these tests ask for none.
 // ============================================================================
 
 static uint8_t            s_ribbon_sectors[VOLUME_BLOCK_BYTES];
@@ -690,7 +689,7 @@ out:
     return verdict;
 }
 
-/* A Slip on the file the loader reads the kernel by (spec_v2 §16.6 п.4): a
+/* A Slip on the file the loader reads the kernel by: a
  * Shaped of it laying a Slip of its last block's own bytes — a stitch only
  * another writer sews, for no call of this kernel changes that file. Its tail
  * is neither laid in its block nor let go by Escheat, so no Tally could ever be

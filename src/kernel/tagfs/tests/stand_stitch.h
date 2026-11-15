@@ -8,7 +8,7 @@
 
 /*
  * The kit a book's writer is tested with (stand_stitch_tests.c), shared by the
- * suites that sew on a format-v2 volume's ribbon: stand_stitch,
+ * suites that sew on a volume's ribbon: stand_stitch,
  * stand_stitch_edge (stand_stitch_edge_tests.c) — the edges of a Quire, a
  * refusal there, and the measure of the Tally's reserve — and stand_docket
  * (stand_docket_tests.c), the files a book's Ink changes: those of its tests

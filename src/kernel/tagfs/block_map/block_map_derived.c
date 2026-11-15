@@ -23,7 +23,7 @@ typedef struct {
     uint32_t  longest;       /* the longest run of them */
     uint64_t* bits;          /* a bit a block, set where taken — a mixed window's alone */
 } DerivedWindow;
-_Static_assert(sizeof(DerivedWindow) == 16, "a window's summary is sixteen bytes (spec_v2 §4.6)");
+_Static_assert(sizeof(DerivedWindow) == 16, "a window's summary is sixteen bytes");
 
 static struct {
     bool           up;

@@ -9,8 +9,8 @@
 #include "../block_map/block_map.h"
 
 /*
- * A write that rides a Slip (spec_v2 §2.8, §3.7, §16.5 п.13-15) — the Plot of
- * a format-v2 volume (plot_window.c) choosing, at its Begin, to lay no block.
+ * A write that rides a Slip — the Plot (plot_window.c) choosing, at its Begin,
+ * to lay no block.
  *
  * ‼ A SMALL WRITE'S BYTES GO WHERE THE CYCLE GOES ANYWAY. A logger's line of
  * 40 bytes laid as a block costs the medium a block of fresh ground and its

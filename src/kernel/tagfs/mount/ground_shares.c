@@ -3,8 +3,7 @@
 
 /*
  * Commonhold counted from the census's claims (GroundSharesCounted) — the one
- * thing a mount derives it from: no tree of it lies on the medium (spec_v2
- * §16.7 п.10, §8.2 "при полной загрузке выводится из FILES").
+ * thing a mount derives it from: no tree of it lies on the medium.
  *
  * Every claim of a file — its DATA, its runs SHARED — and of the held that
  * meets a block a run SHARED names is cut into its two edges, and the edges

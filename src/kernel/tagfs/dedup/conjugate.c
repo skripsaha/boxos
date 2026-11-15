@@ -23,7 +23,7 @@
  * record the act compared, and each changes only by an Ink of that file, whose
  * gen the lock then finds past the one the act holds it to. And a block the
  * target names stays named, its bytes and its digest with it, for as long as
- * its record stands: a block a record names is never written (spec_v2 §3.1),
+ * its record stands: a block a record names is never written,
  * and goes back to the allocator only once a change of its file let it go. So
  * no digest is asked under the lock — the DIGESTS leaf that names a block may
  * have to be read off the medium (tally_read.h, TallyDigestFind) — and the

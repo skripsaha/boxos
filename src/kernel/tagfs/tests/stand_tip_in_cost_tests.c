@@ -13,7 +13,7 @@
 
 // ============================================================================
 // The stand_tip_in suite, its cost: what the next Tally is reckoned at, held
-// to the rule as the test counts it (spec_v2 §16.6 п.6, §4.2, §16.5 п.16) —
+// to the rule as the test counts it —
 // every leaf a span DogEar holds meets, at its Sheets where a key of the state
 // lies in its range and at none where none does, and every inner node over
 // one, once; both copies and the slot, never past the last Tally's whole book.

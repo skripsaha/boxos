@@ -548,11 +548,11 @@ void tag_registry_mark_system(TagRegistry* reg, uint32_t tag_id) {
 
 /*
  * Whether `id` is one the registry gave: a tag lies in the stitch of the cycle
- * that settles the record wearing it, as a Coined ahead of the record (spec_v2
- * §2.8) — the cycle takes every id given before the record's Ink
- * (TagRegistryCoinedRange) — so nothing is written here. A volume under glass
- * takes no write, and a tag it does not hold yet is one no record of it may
- * wear. Called with no TagFS lock held.
+ * that settles the record wearing it, as a Coined ahead of the record — the
+ * cycle takes every id given before the record's Ink (TagRegistryCoinedRange)
+ * — so nothing is written here. A volume under glass takes no write, and a tag
+ * it does not hold yet is one no record of it may wear. Called with no TagFS
+ * lock held.
  */
 error_t TagRegistryIdGiven(TagRegistry* reg, uint32_t id) {
     if (!reg) return ERR_NULL_POINTER;

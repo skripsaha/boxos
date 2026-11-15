@@ -5,13 +5,12 @@
 #include "volume_spine.h"
 
 /*
- * SpineRead — the Spine's slots of a format-v2 volume, read and judged
- * (spec_v2 §1.4): each one block of eight sectors at spine_block + i *
- * spine_stride. A slot is VALID when all eight hold as one SLOT unit and its
- * stream parses — SpineHead first, a root per tree at most once, SpineRibbon
- * and SpineCounts once each, by the rule every reader of a slot keeps
- * (volume_spine.h); BLANK when every byte of it is zero, a slot no Tally has
- * been written to; TORN otherwise, with why.
+ * SpineRead — the Spine's slots of a volume, read and judged: each one block
+ * of eight sectors at spine_block + i * spine_stride. A slot is VALID when all
+ * eight hold as one SLOT unit and its stream parses — SpineHead first, a root
+ * per tree at most once, SpineRibbon and SpineCounts once each, by the rule
+ * every reader of a slot keeps (volume_spine.h); BLANK when every byte of it
+ * is zero, a slot no Tally has been written to; TORN otherwise, with why.
  *
  * A record of a kind this reader does not know is stepped over when its tag
  * says it may be, and otherwise, like a body longer than this reader knows,

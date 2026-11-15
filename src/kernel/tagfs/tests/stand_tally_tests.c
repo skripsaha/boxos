@@ -28,23 +28,22 @@
 #ifdef CONFIG_VOLUME_TESTS
 
 // ============================================================================
-// The stand_tally suite: a format-v2 volume read off its book
+// The stand_tally suite: a volume read off its book
 //
-// This kernel reads a format-v2 volume's book — the Spine's slots and the
+// This kernel reads a volume's book — the Spine's slots and the
 // Tally of the newest one that reads — and writes into it stitches and the
 // Tallies past them (settle/sewing.h, settle/binder.h): a change to a file's
-// data it refuses. So these are asked of the volume the machine stands on,
-// every one written for format v2 and standing aside on any other: every file
-// it holds reads whole, each block held to its digest; a mount writes nothing,
-// and two mounts are one state (C12); a node whose first copy rotted reads off
-// its second, said (§2.5); a FILES leaf neither copy of which reads is a
-// rotten range — mounted, its files locked, its blocks held (C19:
+// data it refuses. So these are asked of the volume the machine stands on:
+// every file it holds reads whole, each block held to its digest; a mount
+// writes nothing, and two mounts are one state (C12); a node whose first copy
+// rotted reads off its second, said (§2.5); a FILES leaf neither copy of which
+// reads is a rotten range — mounted, its files locked, its blocks held (C19:
 // stand_tally_range_tests.c); every road that would change a file is refused
 // before a byte, and every door below the glass of a volume under it; a rotten data block is refused on the three roads a read
 // takes, and published once on the integrity tag; a block with no digest as one that does not match; a medium that
 // leaves and comes back has its book read again, with nothing read to judge
 // it; and the live files are the records, with no table to agree with. And BLOCKFAIL's plan of bad sectors in
-// two places at once, which C19 asks of it, for any format. And the block map derived from the owners'
+// two places at once, which C19 asks of it. And the block map derived from the owners'
 // names: it holds to them, names a claim on a taken block and a release of a free one, and refuses the
 // mount out loud when the heap will not hold its pages.
 //
@@ -154,7 +153,7 @@ static const char* StandTallyDigestSaid(TallyDigestSays says)
 
 /*
  * Every DATA block of `rec` carries the digest it was written with, asked
- * where a read asks it (integrity.c, IntegrityVerifyBook; spec_v2 §8.1): the
+ * where a read asks it (integrity.c, IntegrityVerifyBook): the
  * Gloss first, then the Tally's DIGESTS. The Gloss holds what no Tally names
  * yet (gloss.h) — a block a stitch past the Tally put in among them, named by
  * that stitch alone until the next Tally: a used book holds such blocks
@@ -593,7 +592,7 @@ out:
 // ----------------------------------------------------------------------------
 
 /* The block before the far Deed: past every file the image lays, so no element
- * of DIGESTS names it. Every block format v2 writes carries its digest, so a
+ * of DIGESTS names it. Every block the book writes carries its digest, so a
  * read that meets one with none is answered as one that does not match
  * (bookcensus.py _Digests: "a read of them answers ERR_CHECKSUM"). */
 static TestResult TestStandTallyUndigestedRefused(void)

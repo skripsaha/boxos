@@ -8,7 +8,7 @@
 // the slot a book is read from — each held on the golden slot (book_tests.c)
 // or on a leaf the codec lays, what it finds, what it refuses and why. The
 // kernel's mount reads by them and the UEFI loader is to pick its kernel by
-// them (spec_v2 §16.7 п.2): one that drifted would stand the two on two
+// them: one that drifted would stand the two on two
 // slots, or hold a block to another element's digest.
 //
 // Arithmetic over memory and nothing else, like the book suite beside it: no

@@ -6,7 +6,7 @@
 
 /*
  * Engross — a file's tail, out of the Slips over its last block, laid in that
- * block (spec_v2 §16.5 п.14): by the holder of the file's Helm, through the
+ * block: by the holder of the file's Helm, through the
  * Ink, as a defrag is (HelmEngross) — never by the cycle, which would be a
  * second door a file changes by, racing the writer that holds the Helm.
  *

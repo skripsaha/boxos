@@ -56,8 +56,8 @@ static error_t PlotStage(Plot *p, const PlotStretch *s, uint32_t i, const PlotSo
         }
     }
     /* The rest of the file's last block is what a read of it gives: its base
-     * and the Slips over it (format v2, tail_slip.h) — the block the write lays
-     * carries them, and the record that names it lets them go. */
+     * and the Slips over it (tail_slip.h) — the block the write lays carries
+     * them, and the record that names it lets them go. */
     if (fill != PLOT_FILL_WHOLE)
         (void)TailSlipOver(p->rec, s->k + i, into);
 

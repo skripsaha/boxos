@@ -7,7 +7,7 @@
 
 /*
  * DogEar — the keys of the book's trees changed since the Tally the next one
- * is laid against (spec_v2 §16.5 п.9, §4.3 TALLY_TAKE): spans of keys
+ * is laid against: spans of keys
  * [lo, hi), tree by tree — FILES, TAGS, USE, DIGESTS — put in by
  *
  *   a stitch that settles, at its S6 (sewing.c): every file it carried a

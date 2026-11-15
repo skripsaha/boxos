@@ -13,7 +13,6 @@
 
 // ============================================================================
 // The stand_book_glean suite: what a book's Tallies keep of their ground
-// (spec_v2 §4.8, §2.5, §16.5 пп.17–18)
 //
 // A logger's Tallies are laid in among the nodes of the ones before them, and
 // a node nothing changed is named as it lies wherever it was laid: left to

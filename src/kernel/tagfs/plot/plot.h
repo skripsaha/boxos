@@ -214,12 +214,12 @@ error_t  PlotExtendZero(Plot *p, uint64_t size);
  * copied into it and flushed, and the Plot names the run instead. The ground
  * left comes to rest once a record that no longer names it is inked.
  *
- * ‼ A RUN SHARED IS NEVER GATHERED (spec_v2 §8.2). Its blocks are another
- * file's too, laid there by Dedup (dedup/dedup.h): copied into the file's own
- * run they would hold the bytes twice again, the saving undone. So no window
- * reaches across a run SHARED — the file's own runs between two are a
- * stretch, gathered on its own — and a run SHARED makes no file one to
- * defragment (PlotStretchScattered).
+ * ‼ A RUN SHARED IS NEVER GATHERED. Its blocks are another file's too, laid
+ * there by Dedup (dedup/dedup.h): copied into the file's own run they would
+ * hold the bytes twice again, the saving undone. So no window reaches across a
+ * run SHARED — the file's own runs between two are a stretch, gathered on its
+ * own — and a run SHARED makes no file one to defragment
+ * (PlotStretchScattered).
  *
  * Only ground the loaded record named is moved, never a Stake — and never a
  * block of a file the system keeps (B10): one kept in a role by its
@@ -313,12 +313,12 @@ error_t  PlotConveyance(const Plot *p, const FileRecord *cur, BookSplice **out, 
 error_t  PlotWindowWhole(Plot *p);
 error_t  PlotWindowLanded(Plot *p, uint64_t departed, uint64_t block, const uint8_t *data, uint32_t count);
 
-/* Engross (plot_slip.c, spec_v2 §16.5 п.14): a file whose last block
- * has Slips over it gets that block laid again on fresh ground — its base,
- * the Slips over it, zeros past the size — and the Plot names it, *laid; the
- * caller inks it, and the record lets the Slips go with the block they lay
- * on. OK and nothing done for a file with no Slip; or the refusal of the
- * ground, the read, the write or the ribbon's room. */
+/* Engross (plot_slip.c): a file whose last block has Slips over it gets that
+ * block laid again on fresh ground — its base, the Slips over it, zeros past
+ * the size — and the Plot names it, *laid; the caller inks it, and the record
+ * lets the Slips go with the block they lay on. OK and nothing done for a file
+ * with no Slip; or the refusal of the ground, the read, the write or the
+ * ribbon's room. */
 error_t  PlotEngross(Plot *p, bool *laid);
 
 /* The Plot's Slip let go of (plot_slip.c), and the block it promised its

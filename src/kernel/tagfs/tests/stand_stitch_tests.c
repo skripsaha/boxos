@@ -18,8 +18,8 @@
 #ifdef CONFIG_VOLUME_TESTS
 
 // ============================================================================
-// The stand_stitch suite: the kernel sews its own stitches on a format-v2
-// volume's ribbon (spec_v2 §2.7, §3.2, §3.5, §3.6)
+// The stand_stitch suite: the kernel sews its own stitches on a volume's
+// ribbon
 //
 // A cycle of a book lays one stitch past the last one sewn: right after a
 // mount a waiter is answered only once a stitch of this mount settled under

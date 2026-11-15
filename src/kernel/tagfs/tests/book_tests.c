@@ -714,7 +714,7 @@ out:
 
 /* DIGEST_ITEM_MOST is the most digests one element can carry and still share
  * a Sheet with its node's NodeHead, whatever the numbers: 485 fit, 486 do
- * not (volume_tally.h; spec_v2 §16.3 п.1). */
+ * not (volume_tally.h). */
 static TestResult TestDigestItemMost(void)
 {
     TestResult verdict = TEST_PASS;

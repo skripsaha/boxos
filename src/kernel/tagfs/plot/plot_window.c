@@ -11,17 +11,17 @@
 #include "../mount/away.h"
 
 /*
- * PlotWindow — the Plot of a format-v2 volume (plot.h): fresh ground, and a
- * window instead of a copy of the file.
+ * PlotWindow — the Plot (plot.h): fresh ground, and a window instead of a copy
+ * of the file.
  *
- * ‼ DATA IS NEVER WRITTEN INTO A BLOCK THE SETTLED BOOK NAMES (spec_v2 §3.1). A
- * block written over gets a new block of fresh ground — a new Stake on the
- * same place in the file (PlotRestake) — and the record's splice names it; the
- * old block rests in Fallow once the Ink is laid. A write the medium refuses,
- * or a stitch that does not land, leaves the file on its old blocks, whole:
- * a block written over reads its old 4096 bytes or its new ones, never a mix.
- * A block written in part is read first — from the OLD block, held to its
- * digest — and the whole block laid on the new one.
+ * ‼ DATA IS NEVER WRITTEN INTO A BLOCK THE SETTLED BOOK NAMES. A block written
+ * over gets a new block of fresh ground — a new Stake on the same place in the
+ * file (PlotRestake) — and the record's splice names it; the old block rests
+ * in Fallow once the Ink is laid. A write the medium refuses, or a stitch that
+ * does not land, leaves the file on its old blocks, whole: a block written
+ * over reads its old 4096 bytes or its new ones, never a mix. A block written
+ * in part is read first — from the OLD block, held to its digest — and the
+ * whole block laid on the new one.
  *
  * ‼ THE PLOT HOLDS THE RECORD, NOT A COPY OF ITS RUNS (§2.9, H-5). A file of
  * a million runs copied whole for every 4 KiB written is 24 MB a write. So the

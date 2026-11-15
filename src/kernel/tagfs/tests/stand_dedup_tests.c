@@ -13,7 +13,7 @@
 
 // ============================================================================
 // The stand_dedup suite: duplicates found and laid by the pass after each
-// Tally (spec_v2 §8.2, §16.7 пп.7–9), and a defrag that keeps what is shared
+// Tally, and a defrag that keeps what is shared
 //
 // The pass Glean runs after a Tally weighs the blocks written since the Tally
 // before: a block whose digest another's matches — one written beside it, or

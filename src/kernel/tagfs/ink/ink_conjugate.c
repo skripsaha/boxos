@@ -5,10 +5,10 @@
 
 /*
  * Conjugate's Ink (ink.h, InkConjugate): the act compared the blocks with no
- * lock held (dedup/conjugate.c); here they are laid, a format-v2 Ink like a
- * Plot's — before the lock the record the splice builds, the Fallow node of
- * the duplicate's own ground and the room Commonhold's change takes; under
- * the lock the guards, then the change, nothing asked of the heap.
+ * lock held (dedup/conjugate.c); here they are laid, an Ink like a Plot's —
+ * before the lock the record the splice builds, the Fallow node of the
+ * duplicate's own ground and the room Commonhold's change takes; under the
+ * lock the guards, then the change, nothing asked of the heap.
  *
  * ‼ THE GROUND LET GO IS THE GROUND THE RANGE NAMED, ONE OWNER OFF EACH NAME
  * (§8.2). The splice's own reckoning of what the record stops naming is the

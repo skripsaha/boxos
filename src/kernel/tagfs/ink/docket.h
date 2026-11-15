@@ -5,8 +5,8 @@
 #include "../file_map/file_record.h"
 
 /*
- * The Docket — what Ink keeps for the next stitch of a format-v2 volume (spec_v2
- * §3.7): one Jot a file, the change the next stitch carries for it, by fid.
+ * The Docket — what Ink keeps for the next stitch of the book: one Jot a file,
+ * the change the next stitch carries for it, by fid.
  *
  * ‼ A JOT IS TWO RECORDS, NOT A LIST OF EDITS. It holds the file as the last
  * stitch naming it left it (`was`) and as its newest change leaves it (`now`);

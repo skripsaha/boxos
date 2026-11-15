@@ -9,8 +9,7 @@
 
 // ============================================================================
 // The stand_endpaper suite: the measure of the next Tally the book's reserve
-// keeps — what the last Tally laid and what changed since (spec_v2 §16.4 п.7,
-// §16.2 п.6)
+// keeps — what the last Tally laid and what changed since
 //
 // What Ink laid in memory and no stitch settled yet is in the measure, so a
 // stitch that settles never raises it. Data a write puts in an old file is

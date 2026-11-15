@@ -10,8 +10,7 @@
 #ifdef CONFIG_VOLUME_TESTS
 
 // ============================================================================
-// The stand_commonhold suite: a block more than one file names (spec_v2 §8.2,
-// §16.7 п.10)
+// The stand_commonhold suite: a block more than one file names
 //
 // A run SHARED names ground another run may name too. Its file reads through
 // it as through DATA, each block held to the block's one digest; its stitch

@@ -10,7 +10,7 @@ static uint32_t g_errors = 0;
  * ‼ A BLOCK'S DIGEST IS THE BOOK'S. The digest a block was written with is the
  * one the Tally's DIGESTS names (tally_read.h, TallyDigestFind — a leaf read
  * off the medium when it is not held, with no lock held here), the function
- * seeded with the volume (spec_v2 §8.1).
+ * seeded with the volume.
  *
  * A block a record of the ribbon put in is held to the digest that record
  * carries (gloss.h) before the Tally is asked: the Tally learns it only at

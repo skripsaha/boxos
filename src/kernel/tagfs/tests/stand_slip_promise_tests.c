@@ -18,7 +18,7 @@
 #ifdef CONFIG_VOLUME_TESTS
 
 // ============================================================================
-// The stand_slip_promise suite: a Slip promises its block (spec_v2 §16.6 п.1)
+// The stand_slip_promise suite: a Slip promises its block
 //
 // A write that rides a Slip takes no ground now, and its tail is laid in a
 // block before the next Tally (Engross) — so every file a Slip lies over keeps

@@ -12,7 +12,6 @@
 
 // ============================================================================
 // The stand_conjugate suite: a duplicate laid on the blocks it duplicates
-// (spec_v2 §8.2, §16.7 пп.8–9)
 //
 // Two files of one content: the act lays the duplicate's blocks on the
 // target's — a Shaped of a run SHARED — and the duplicate's own blocks rest in

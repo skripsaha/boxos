@@ -11,8 +11,8 @@
 #include "facsimile.h"
 
 /*
- * The leaves of the Tally the mount stands on, into the memory every format
- * shares (book_mount.h): FILES into the map of live files, TAGS into the
+ * The leaves of the Tally the mount stands on, into the memory a mount fills
+ * (book_mount.h): FILES into the map of live files, TAGS into the
  * registry, USE into the Use Context. BOOKMARKS and LIEN carry what this
  * kernel cannot hold — a tree of them that is not empty puts the volume
  * under glass (book_mount.c) — and their leaves are read for nothing but

@@ -3,7 +3,7 @@
 
 /*
  * What this kernel left on the ribbon, kept for the medium's return (sewing.h,
- * BookLeftMark and RibbonTry; spec_v2 §3.8, §16.5 пп.11-12).
+ * BookLeftMark and RibbonTry).
  *
  * The marks are the stitches past the slot the ribbon is replayed over, as the
  * mount's walk found them and as each settled: a medium that came back is held

@@ -165,7 +165,7 @@ int StandDeckAsk(uint16_t opcode, const void* params, uint16_t param_size, const
  * first read of the middle one meets the plan once and is served; the second
  * is refused at that block; a write of the block is a write and is not
  * counted — the Boardroom's own, of the bytes the block holds, which meets the
- * plan's sectors on every format, and the file's overwrite, which a book lays
+ * plan's sectors, and the file's overwrite, which a book lays
  * on fresh ground; the third read is served again, because the plan fires
  * once; and once the plan is down, nothing is counted at all — not a read of
  * the block itself, nor of the file. */
@@ -233,14 +233,14 @@ out:
 
 /* A refused write is refused before the driver is called, so the medium keeps
  * what it held. The write is the Boardroom's own — the door every write of
- * TagFS reaches the medium by, on either format — of a block of a file the
+ * TagFS reaches the medium by — of a block of a file the
  * test made, in place: the plan refuses it, the medium is read straight back
  * past the digest a read through TagFS checks it against (a refused write
  * that landed anyway would be a digest mismatch there, refused before
  * anything was compared — and what this asks is what the medium holds), and
  * the file still reads under the digest of what it held. Where the file lies
  * is its volume's to choose; that the medium never sees a refused command is
- * BLOCKFAIL's, and the same on every format. */
+ * BLOCKFAIL's. */
 static TestResult TestStandBlockFailWriteNeverLands(void)
 {
     TestResult  verdict = TEST_PASS;

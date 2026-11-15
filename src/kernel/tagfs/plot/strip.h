@@ -12,7 +12,7 @@
  * `kind` says what the blocks are. STRIP_DATA is ground holding the file's
  * bytes, the file its one owner; STRIP_HOLE is blocks of the file that read as
  * zeros and own no ground; STRIP_SHARED is ground holding the file's bytes
- * that other files may name too (spec_v2 §8.2, a run that carries SHARED) —
+ * that other files may name too (a run that carries SHARED) —
  * read as DATA is, never written in place, let go by the last of its owners
  * (ink/commonhold.h); the book's records say all three (§2.8).
  * `birth` is the stitch that laid the run.

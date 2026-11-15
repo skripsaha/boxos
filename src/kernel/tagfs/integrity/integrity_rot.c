@@ -160,7 +160,7 @@ void IntegrityRotName(uint64_t block, uint64_t stored, uint64_t read)
     if (naming != ROT_NEW)
         return;
 
-    /* The book writes no block in place (spec_v2 §8.1): a closed block that
+    /* The book writes no block in place: a closed block that
      * does not match is rot, whatever the last stop was. */
     kprintf("[Integrity] block %llu does not hold what was written to it (digest %016llx, "
             "read %016llx) — rot; a read of it is refused ERR_CHECKSUM, and it is "
@@ -176,7 +176,7 @@ void IntegrityUndigestedName(uint64_t block)
     RotPublish(block);
     if (naming == ROT_NEW)
         kprintf("[Integrity] block %llu carries no digest in its volume's Tally, and every block of "
-                "format v2 is written with one — a read of it is refused ERR_CHECKSUM, and it is "
+                "the book is written with one — a read of it is refused ERR_CHECKSUM, and it is "
                 "published on the integrity tag\n", (unsigned long long)block);
 }
 

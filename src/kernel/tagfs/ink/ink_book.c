@@ -7,18 +7,18 @@
 #include "../mount/perambulation.h"
 
 /*
- * Format v2's second half of an Ink (ink_internal.h): the writer's half of
- * BookPut (spec_v2 §3.7, §16.2 п.15). Before the lock, the record the file
- * becomes is built, a Jot made for it and the stakes taken; under the lock the
- * file is held to what the first half read, the record put in the mirror, the
- * Jot merged into the Docket for the next stitch (docket.h), the tag index and
- * the counters moved — nothing asked of the heap, nothing laid anywhere: the
- * stitch that takes the Docket lays the records (settle/sewing.c). What the
- * Docket spends, and the records it lets go, are let go after the lock. A
- * change to a file's data comes as a Plot's window spliced into the record it
- * was loaded from, the digests of the blocks it wrote put in the Gloss under
- * the same lock as the record (§8.1), and the ground it let go resting in
- * Fallow (BY_RECORD) — the writer's half of BookPut.
+ * The second half of an Ink (ink_internal.h): the writer's half of BookPut.
+ * Before the lock, the record the file becomes is built, a Jot made for it and
+ * the stakes taken; under the lock the file is held to what the first half
+ * read, the record put in the mirror, the Jot merged into the Docket for the
+ * next stitch (docket.h), the tag index and the counters moved — nothing asked
+ * of the heap, nothing laid anywhere: the stitch that takes the Docket lays
+ * the records (settle/sewing.c). What the Docket spends, and the records it
+ * lets go, are let go after the lock. A change to a file's data comes as a
+ * Plot's window spliced into the record it was loaded from, the digests of the
+ * blocks it wrote put in the Gloss under the same lock as the record (§8.1),
+ * and the ground it let go resting in Fallow (BY_RECORD) — the writer's half
+ * of BookPut.
  *
  * ‼ THE RIBBON'S ROOM IS CLAIMED UNDER THE SAME LOCK, BEFORE ANYTHING CHANGES
  * (P21, §3.6). The bytes the change's record takes at the most are counted
@@ -262,7 +262,7 @@ error_t InkBookQuitclaim(uint64_t fid, const RecordWhere* was, const FileRecord*
 }
 
 // ----------------------------------------------------------------------------
-// A file's data (spec_v2 §2.8 Shaped, §3.1, §8.1)
+// A file's data
 // ----------------------------------------------------------------------------
 
 /* The blocks the Plot wrote, as the runs they lie in, for the Gloss's room: a

@@ -7,8 +7,8 @@
 // Braid
 //
 // Every test builds its own braid: there is no Braid of the machine for a test
-// to leave standing. The volume's is the one its mount assembled, and a v1
-// volume has none — so no read or write of it ever asks Braid, and nothing a
+// to leave standing. The volume's is the one its mount names, and a book's
+// mount names none — so no read or write of it ever asks Braid, and nothing a
 // test does here can send one of its blocks anywhere but its own medium.
 // ============================================================================
 
@@ -27,7 +27,7 @@ static TestResult test_braid_init(void)
 
     memset(&s_braid, 0, sizeof(s_braid));
     TEST_ASSERT(tagfs_get_state()->braid == NULL,
-                "the mounted v1 volume is assembled in no Braid, so none of its blocks is sent to one");
+                "the mounted volume is assembled in no Braid, so none of its blocks is sent to one");
     TEST_ASSERT_OK(BraidInit(&s_braid, BraidModeMirror, s_braid_seed), "a braid of its own is begun");
     TEST_ASSERT_EQ(BraidInit(&s_braid, BraidModeMirror, s_braid_seed), ERR_ALREADY_INITIALIZED,
                    "and begun only once");

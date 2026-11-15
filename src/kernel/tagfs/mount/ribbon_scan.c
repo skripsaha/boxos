@@ -4,7 +4,7 @@
 
 /*
  * RibbonScan — the direct scan past the end of the chain a slot's ribbon was
- * sewn into (ribbon_collate.c, spec_v2 §2.2), and what each branch it finds
+ * sewn into (ribbon_collate.c), and what each branch it finds
  * there is (§3.9, §16.3 пп.10–11): every unit of a seq past the last stitch
  * taken in the rest of the last Quire and all of its next, joined to the one
  * its StitchHead names, each branch said by the census's own codes — word for

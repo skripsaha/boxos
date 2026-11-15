@@ -13,9 +13,8 @@
 #ifdef CONFIG_VOLUME_TESTS
 
 // ============================================================================
-// The stand_binder suite: the kernel writes a whole Tally of a format-v2
-// volume and the Spine slot that names it (spec_v2 §4.1–§4.4, §1.4, §2.5,
-// §16.2 пп.4–6, §16.4 п.5)
+// The stand_binder suite: the kernel writes a whole Tally of a volume and the
+// Spine slot that names it
 //
 // The state after a settled stitch, every tree written whole in two copies,
 // the slot of the least seq named over it: mounted again on that slot, the

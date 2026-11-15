@@ -4,13 +4,13 @@
 #include "../mount/tally_read.h"
 
 /*
- * Foliation — the Tally the next one is laid against, as memory knows it
- * (spec_v2 §16.5 п.9): every node of its FILES, TAGS and USE and every inner
- * node of its DIGESTS, each by its place — its BookPtr, its level, the keys
- * [lo, hi) its parent gives it, the count it carries — and whether it is to be
- * laid again whatever its keys say: a copy of it did not hold (§2.5). The
- * leaves of its DIGESTS are not kept twice: they are the reads' own table
- * (mount/tally_read.h), which each Tally this mount writes turns to itself.
+ * Foliation — the Tally the next one is laid against, as memory knows it:
+ * every node of its FILES, TAGS and USE and every inner node of its DIGESTS,
+ * each by its place — its BookPtr, its level, the keys [lo, hi) its parent
+ * gives it, the count it carries — and whether it is to be laid again whatever
+ * its keys say: a copy of it did not hold (§2.5). The leaves of its DIGESTS
+ * are not kept twice: they are the reads' own table (mount/tally_read.h),
+ * which each Tally this mount writes turns to itself.
  *
  *   the mount   every node of the Tally of the slot it stands on, as its walk
  *               reaches it (book_ground.c) — and an inner node a copy of which

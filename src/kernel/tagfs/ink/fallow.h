@@ -12,7 +12,7 @@
  * write can take back, and the mount may stand on the stitch before it.
  * Handed to another file while any of that is so, the block would have two
  * owners the moment the power went. So it rests, and goes back to the
- * allocator only when all of these hold (spec_v2 §3.4, H-3, В1):
+ * allocator only when all of these hold:
  *
  *   (1) the stitch that carries its freer settled (FallowStitchSettled), and
  *       the ribbon has left the Quire that stitch lies in — the first stitch
@@ -71,15 +71,15 @@ FallowNode* FallowNodeMake(const Strip* runs, uint32_t count, FallowKind kind, u
 error_t     FallowNodeOfRecord(const struct FileRecord* rec, FallowKind kind, FallowNode** out);
 
 /*
- * ‼ A BLOCK MORE THAN ONE NAMES RESTS WHEN ITS LAST OWNER LETS IT GO (spec_v2
- * §8.2, ink/commonhold.h). An Ink, under the state lock and before the
- * change is put in, asks whether the node and Commonhold have the room the
- * cut of its ground takes as Commonhold stands now (FallowNodeCommonRoom) —
- * the Ink goes round when they do not; once its gen is given, the node's runs
- * are cut to the blocks the change lets go — one owner off each block in
- * common, a block another owner still names kept from it — the runs it is
- * left with counted (FallowNodeCommonheld): a node left with none is added to
- * nothing and let go by its Ink.
+ * ‼ A BLOCK MORE THAN ONE NAMES RESTS WHEN ITS LAST OWNER LETS IT GO
+ * (ink/commonhold.h). An Ink, under the state lock and before the change is
+ * put in, asks whether the node and Commonhold have the room the cut of its
+ * ground takes as Commonhold stands now (FallowNodeCommonRoom) — the Ink goes
+ * round when they do not; once its gen is given, the node's runs are cut to
+ * the blocks the change lets go — one owner off each block in common, a block
+ * another owner still names kept from it — the runs it is left with counted
+ * (FallowNodeCommonheld): a node left with none is added to nothing and let go
+ * by its Ink.
  */
 bool        FallowNodeCommonRoom(const FallowNode* node);
 uint32_t    FallowNodeCommonheld(FallowNode* node, uint64_t gen);

@@ -7,7 +7,7 @@
 #include "../file_map/file_record.h"
 
 /*
- * The ribbon past a slot's Tally, as a mount reads it (spec_v2 §4.5 пп.5–6):
+ * The ribbon past a slot's Tally, as a mount reads it:
  *
  *   ribbon_unit.c        a unit of the ribbon read off the medium — its
  *                        sectors judged, its stream parsed whole or, where
@@ -22,8 +22,7 @@
  *                        (RibbonVerify, §4.5 п.6)
  *   ribbon_transcribe.c  pass 2 (RibbonTranscribe): every record replayed
  *                        through the rule of its kind (§3.7) into the memory
- *                        every format shares, through the one door of the
- *                        mirror
+ *                        a mount fills, through the one door of the mirror
  *
  * Read the way volume-read reads the same ribbon
  * (tools/volumeread/stitch_ribbon.py Ribbon, bookmount.py _Replay): the census

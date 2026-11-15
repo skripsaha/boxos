@@ -6,7 +6,7 @@
 
 /*
  * The volume's block map — derived from its owners' names, never read off the
- * medium, never written to it (spec_v2 §4.6).
+ * medium, never written to it.
  *
  * A book keeps no bitmap: which blocks are taken is what the owners name
  * (ground_owner.h), every claim the mount finds inserted here by the census
@@ -72,7 +72,7 @@ error_t  BlockMapDerivedStock(void);
 error_t  BlockMapDerivedHold(uint32_t pages);
 
 /*
- * A run of the book's own (spec_v2 §3.6): a whole Quire for the ribbon, its
+ * A run of the book's own: a whole Quire for the ribbon, its
  * next_quire given ahead of need, or the run a copy of a whole Tally goes in
  * (settle/binder.c) — `blocks` free blocks in a row, the first on a multiple
  * of `align` — the medium's atom — inside the data run [first, the map's

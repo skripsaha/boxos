@@ -4,7 +4,7 @@
 #include "../tagfs.h"
 
 /*
- * Commonhold — how many name each block a run SHARED names (spec_v2 §8.2): a
+ * Commonhold — how many name each block a run SHARED names: a
  * block owned in common. A run SHARED (STRIP_SHARED, plot/strip.h) names
  * ground another run may name too — the one DATA run the block was written
  * by, other SHARED runs, or none once that owner has gone. The count is

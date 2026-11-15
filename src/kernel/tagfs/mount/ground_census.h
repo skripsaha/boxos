@@ -32,15 +32,14 @@ void    GroundClaim(GroundOwner owner, uint64_t start, uint32_t count, uint64_t 
 void    GroundClaimBySlot(GroundOwner owner, uint64_t start, uint32_t count, uint64_t who, uint32_t slot);
 
 /*
- * The census, which keeps no bitmap to hold the claims against (spec_v2
- * §4.6): every block an owner names is taken, and the only finding is a block
- * two owners name — said where they meet, as above; a run
- * SHARED (GROUND_SHARED) is no second owner beside its block's DATA run or
- * another run SHARED, and is one on any other owner's ground (§8.2). Before
- * the cut below, how many name each block a run SHARED names is counted into
- * Commonhold (ink/commonhold.h, ground_shares.c). The
- * GROUND_FALLOW claims are the ground the ribbon let go (M-1); fallow is what
- * of them no other owner but the held names, *fallow their blocks. The
+ * The census, which keeps no bitmap to hold the claims against: every block an
+ * owner names is taken, and the only finding is a block two owners name — said
+ * where they meet, as above; a run SHARED (GROUND_SHARED) is no second owner
+ * beside its block's DATA run or another run SHARED, and is one on any other
+ * owner's ground (§8.2). Before the cut below, how many name each block a run
+ * SHARED names is counted into Commonhold (ink/commonhold.h, ground_shares.c).
+ * The GROUND_FALLOW claims are the ground the ribbon let go (M-1); fallow is
+ * what of them no other owner but the held names, *fallow their blocks. The
  * GROUND_HELD claims are what may be held for what rotted; held is what of
  * them no other owner names — the fallow among them, BOOT, which lies over a
  * file by design, aside — and *held their blocks.

@@ -5,7 +5,7 @@
 
 /*
  * Foxing — the copies of the book's Tally nodes a mount found spoiled, kept
- * for that mount alone (spec_v2 §16.6 п.10). A copy whose unit does not hold
+ * for that mount alone. A copy whose unit does not hold
  * (book_unit.h: a sector the medium will not read, a sum that fails, a seq
  * or a length that is not its pointer's) holds in no read of the same
  * sectors as a unit of the same Sheets and seq: the answer is the bytes'

@@ -94,7 +94,7 @@ static bool EngrossPasses(error_t rc)
 }
 
 /*
- * ‼ A TAIL THAT CAN NEVER BE LAID IS LOST ONLY BY ESCHEAT (spec_v2 §16.5 п.20).
+ * ‼ A TAIL THAT CAN NEVER BE LAID IS LOST ONLY BY ESCHEAT.
  * A refusal that is the file's own — its last block unreadable — holds the
  * Tally back for that file alone, said, until the act is asked
  * (settle/escheat.h); then the tail is lost — the file cut to the end of its

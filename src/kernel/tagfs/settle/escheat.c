@@ -9,9 +9,9 @@
 #include "boardroom.h"
 
 /*
- * Escheat (escheat.h; spec_v2 §16.5 п.20). What the act lets go is the
- * mount's: the rotten FILES nodes (g_binder.rot), what of the files locked by
- * name with them read (g_book.kept) and the ground held for what rotted.
+ * Escheat (escheat.h). What the act lets go is the mount's: the rotten FILES
+ * nodes (g_binder.rot), what of the files locked by name with them read
+ * (g_book.kept) and the ground held for what rotted.
  *
  * ‼ THE ACT LETS GO ONLY THE GROUND OF WHAT IT LETS GO. The census holds alike
  * a block a rotten range may own and a block a file locked for another reason

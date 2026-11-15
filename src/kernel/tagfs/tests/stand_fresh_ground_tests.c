@@ -10,9 +10,8 @@
 #ifdef CONFIG_VOLUME_TESTS
 
 // ============================================================================
-// The stand_fresh_ground suite: where fresh ground is taken on a format-v2
-// volume, what a write of it costs memory, and the reserve it leaves (spec_v2
-// §3.1 Allotment, §2.9 Parcel, §3.6, §16.2 п.6)
+// The stand_fresh_ground suite: where fresh ground is taken on a volume, what
+// a write of it costs memory, and the reserve it leaves
 //
 // A file written at its end keeps its ground in one run — the block that
 // continues its last run is taken while it is free (Allotment 1) — and blocks

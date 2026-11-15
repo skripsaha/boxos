@@ -14,8 +14,7 @@
 
 // ============================================================================
 // The stand_stitch_edge suite: a book's writer at the edges of a Quire, and
-// the measure of what a whole Tally takes (spec_v2 §2.7, §3.2, §3.6, §4.5
-// п.5, §16.2 п.24)
+// the measure of what a whole Tally takes
 //
 // A write the medium refuses is taken again only where the mount's reader
 // takes a retry up — in the next_quire the last stitch sewn names, at its

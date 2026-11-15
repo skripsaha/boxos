@@ -8,17 +8,17 @@
 #include "../use_memory/use_memory.h"
 
 /*
- * Whether a leaf of the Tally before keeps a key of the state now (spec_v2
- * §16.6 п.6). A leaf a span of DogEar meets costs the next Tally what is left
- * live in it: its Sheets as it lies while a key of its range lives, none when
- * none does — laid anew it lays nothing, and only its parent, which drops it,
- * is laid. So a Tally after a large delete is cheap and owed at once, and the
- * ribbon a mount replays is bounded by the state that lives, not by what was
- * given up (§4.2, §4.7). What the next Tally is reckoned at (binder_cost.c)
- * and a Tally's dry count of itself (binder_sift.c, BinderSiftCount) ask it
- * alike — one rule with volume-read (tools/volumeread/binder.py Lives,
- * dog_ear.py TipInBlocks). The state is the one a slice takes: as the last
- * settled stitch left it (binder_slice.c).
+ * Whether a leaf of the Tally before keeps a key of the state now. A leaf a
+ * span of DogEar meets costs the next Tally what is left live in it: its
+ * Sheets as it lies while a key of its range lives, none when none does — laid
+ * anew it lays nothing, and only its parent, which drops it, is laid. So a
+ * Tally after a large delete is cheap and owed at once, and the ribbon a mount
+ * replays is bounded by the state that lives, not by what was given up (§4.2,
+ * §4.7). What the next Tally is reckoned at (binder_cost.c) and a Tally's dry
+ * count of itself (binder_sift.c, BinderSiftCount) ask it alike — one rule
+ * with volume-read (tools/volumeread/binder.py Lives, dog_ear.py TipInBlocks).
+ * The state is the one a slice takes: as the last settled stitch left it
+ * (binder_slice.c).
  *
  *   FILES    a file of that state whose id is among the ids the leaf holds
  *            keys of (BinderLeafFids): a key of FILES is known by its file, so

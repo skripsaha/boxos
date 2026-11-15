@@ -24,7 +24,6 @@
 
 // ============================================================================
 // The stand_slip suite: a tail shorter than a block carried in the stitch
-// (spec_v2 §2.8, §3.7, §4.3, §9.1, §16.5 п.13-15)
 //
 // A write that lies wholly in a file's last block and leaves it short of full
 // lays no block: its bytes ride in the stitch as a Slip over the block's base

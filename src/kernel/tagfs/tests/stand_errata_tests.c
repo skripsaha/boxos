@@ -19,7 +19,7 @@
 
 // ============================================================================
 // The stand_errata suite: a mount's verdict, held in memory and laid down by
-// the session's first stitch (spec_v2 §3.9, §2.8 Undone, §16.5 п.4-7)
+// the session's first stitch
 //
 // Each test sews, by the stand's hand (stand_ribbon.h), a ribbon whose newest
 // stitch a mount must roll back — its data never landed, sewn without its
