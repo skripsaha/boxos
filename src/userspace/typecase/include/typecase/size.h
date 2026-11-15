@@ -29,6 +29,11 @@ struct Size {
  * descender, stands centred in the height. */
 Size FitCell(const Font &Face, std::int32_t Width, std::int32_t Height);
 
+/* Face's type in a cell Height tall and as wide as the font's proportions
+ * make it: M's advance at the em whose line, ascender to descender, is the
+ * height, to the nearest pixel and at least one — then as above. */
+Size FitCell(const Font &Face, std::int32_t Height);
+
 }  // namespace typecase
 
 #endif  // TYPECASE_SIZE_H

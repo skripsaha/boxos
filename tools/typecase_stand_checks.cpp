@@ -347,6 +347,19 @@ void CheckSources(Tally &Count, const std::vector<std::uint8_t> &Bytes)
                 "a cell of 8 by 16: M's advance its width, the baseline in its lower half (" +
                     std::to_string(Cell.Baseline) + ")");
 
+    const typecase::FontMetrics &Measures = Read->Metrics();
+    const float Proportion = static_cast<float>(Read->AdvanceOf(Read->Find(U'M'))) / (Measures.Ascender - Measures.Descender);
+    bool        Proportioned = true;
+    std::string Widths;
+    for (const std::int32_t Tall : {10, 16, 20, 27, 40, 96}) {
+        const typecase::Size At = typecase::FitCell(*Read, Tall);
+        Proportioned = Proportioned && At.Height == Tall && At.Width == std::lround(Tall * Proportion) &&
+                       At == typecase::FitCell(*Read, At.Width, Tall);
+        Widths += " " + std::to_string(At.Width) + "x" + std::to_string(Tall);
+    }
+    Count.Check(Proportioned, "a cell by its height alone: as wide as the font's advance to its line, to the pixel, and "
+                              "set as a cell of both is (" + Widths.substr(1) + ")");
+
     typecase::FontSource Face(std::move(*Read));
     bool Within = true, Said = true;
     for (char32_t Character = 0x20; Character < 0x500; Character++) {
