@@ -49,8 +49,8 @@
  * interleave leak blocks on the synchronous path of HEAD, fidhistory spends
  * fifty thousand file ids for good, usememory interns its 91 tags in the
  * volume's registry for good, and abba interns hundreds of tags and spends
- * file ids past a block of the file table for good (with abbaworker, the
- * workers it starts). Those six
+ * hundreds of file ids for good (with abbaworker, the workers it starts).
+ * Those six
  * are compiled only into a quilltest built with VOLUME_TESTS=on — the key
  * that already means a throwaway image, and that builds the kernel's own
  * writing tests — and anywhere else each answers one FAIL saying so. The
@@ -475,7 +475,7 @@ static QuillVerdict QuillUseMemory(const char *const *args)
     }
     if (!rem) {
         /* The clear is the control. An empty context always fits, so a
-         * volume that remembers the clear took a Ledger write just after the
+         * volume that remembers the clear carried it in a stitch just after the
          * probe's was dropped: the volume is up, the medium takes the write,
          * and the length is what was refused. A refusal of the probe's own
          * write alone still reads the same — `remembered` is one bit — until
@@ -490,8 +490,8 @@ static QuillVerdict QuillUseMemory(const char *const *args)
             return QUILL_DEFECT;
         }
         printf("[QUILL] usememory: FAIL — a Use Context of %u bytes was not remembered, and "
-               "clearing it answered %d with remembered=%d (anchor %d) — the volume is not "
-               "taking the Ledger, so the length was never asked\n", (unsigned)probe_len, crc,
+               "clearing it answered %d with remembered=%d (anchor %d) — the volume remembers "
+               "no word of the context at all, so the length was never asked\n", (unsigned)probe_len, crc,
                crem ? 1 : 0, arc);
         return QUILL_FAIL;
     }
@@ -676,7 +676,7 @@ static const QuillCase g_cases[] = {
       "between its halves a remembered context of 91 tags; for good, tags quilu* interned", true },
     { "fidhistory", "", 0, 0, QUILL_THROWAWAY(QuillFidHistory),
       "what 50000 file ids spent on deleted files cost the next mount",
-      "50000 file ids spent for good, and their dead records in the pool", true },
+      "50000 file ids spent for good: the book issues none of them again", true },
     { "hog", "", 0, 0, QuillHog, "nothing: it computes without end",
       "a cabin spinning until the machine stops; never returns", false },
     { "settle", "NAME", 1, 0, QuillSettle,
@@ -699,8 +699,8 @@ static const QuillCase g_cases[] = {
       "and the anchors make it durable; then NAME, and the churn it started, still writing",
       false },
     { "crowd", "N [FROM] [unanchored]", 3, 2, QuillCrowd,
-      "for the power-cut stand: N files, each wearing a tag no other file wears, so each adds "
-      "one record to the tag registry and one row to the file table",
+      "for the power-cut stand: N files, each wearing a tag no other file wears, so each coins "
+      "one tag of its own and adds one file to the book's FILES",
       "N files crowdNNNNNNNNNN numbered from FROM (0 when it is not given), anchored unless "
       "unanchored is said; a file already called one of those names is deleted first and made "
       "again", false },
@@ -787,9 +787,9 @@ static const QuillCase g_cases[] = {
       "without, are both found and every byte of both the one written",
       "with MIB: NAME-a.d and NAME-b.d, every earlier file of those names given up first; without, nothing", false },
     { "abba", "NAME TAGS EDGE", 3, 0, QUILL_THROWAWAY(QuillAbba),
-      "does a machine of many cores come back while TAGS new tags and file ids past EDGE, where "
-      "the file table takes its next block, grow the registry and the table, and three cabins of "
-      "its own rename, create and tag NAME's files, taking the same locks the other way round",
+      "does a machine of many cores come back while TAGS new tags and files up to file id EDGE "
+      "grow the book's TAGS and FILES, and three cabins of its own rename, create and tag NAME's "
+      "files, taking the same locks the other way round",
       "for good, the TAGS new tags and the file ids spent; files NAMEg... wearing them, NAMEra "
       "and NAMEt; every earlier file of those names or NAMErb or NAMEc.tmp deleted; anchored",
       true },

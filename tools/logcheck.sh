@@ -3412,8 +3412,8 @@ run_haltslow() {
 #
 # ‼ AND WHAT IT CAUGHT (H1, check #1): on the tree it was written for, the drain
 # gave up 3 boots in 4 on four cores and 1 in 4 on sixteen, and the anchored
-# record read back as rot ("a read of 16 answered -19", ERR_CHECKSUM) on a
-# volume volume-read found consistent. Measured on four cores, two roots. The
+# record read back as rot ("a read of 16 answered -19": ERR_CHECKSUM, numbered
+# 19 then and 16 since) on a volume volume-read found consistent. Measured on four cores, two roots. The
 # glass turned as the committer's cycle ended ran on through the halt's own two
 # cycles — their steps counted only when another core took them — and ran out
 # while a writer's window was taking the medium's answers, which counted not
