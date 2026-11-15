@@ -4,10 +4,10 @@
  *
  * One font for every hand that draws a glyph: the display program, which owns
  * the screen, and the kernel's Emergency Screen, which draws only while nobody
- * does. A cell byte means the same picture in both, and it is the picture
- * hardware VGA text mode draws from its own copy of this ROM, so a line looks
- * the same on a BIOS glass and a GOP one. Codepoints reach a cell through
- * boxos_glyph_fold.h, which cites this table.
+ * does. A glyph's number means the same picture in both, and it is the
+ * picture hardware VGA text mode draws from its own copy of this ROM, so a
+ * line looks the same on a BIOS glass and a GOP one. A character reaches its
+ * glyph through boxos_glyph_fold.h, which cites this table.
  *
  * Source: public-domain VGA BIOS character set, originally from the IBM PC
  * VGA ROM at segment 0xC000. No copyright applies. Code page 437 throughout:

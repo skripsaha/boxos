@@ -5,6 +5,8 @@
 #include <format>
 #include <vector>
 
+#include "painter/tui/text.h"
+
 #include "hexer.h"
 
 namespace {
@@ -46,7 +48,7 @@ std::uint32_t Hexer::TextColumn(std::uint32_t Byte) const
     return Digits + 3 * Width + 4 + Byte;
 }
 
-void Hexer::Put(std::uint32_t Row, std::uint32_t Col, char Ch, painter::core::Color Fg,
+void Hexer::Put(std::uint32_t Row, std::uint32_t Col, char32_t Ch, painter::core::Color Fg,
                 painter::core::Color Bg)
 {
     if (Row >= Rows || Col >= Cols) return;
@@ -54,15 +56,15 @@ void Hexer::Put(std::uint32_t Row, std::uint32_t Col, char Ch, painter::core::Co
                               painter::tui::Cell{Ch, Fg, Bg});
 }
 
-/* A name off the volume is bytes, not letters: what the font has no glyph for
- * is drawn '?'. */
+/* A name off the volume is bytes, not letters: what is no character — a
+ * control, a byte that begins none — is drawn '?'. */
 std::uint32_t Hexer::Write(std::uint32_t Row, std::uint32_t Col, std::string_view Text,
                            painter::core::Color Fg, painter::core::Color Bg)
 {
-    for (char Ch : Text) {
-        if (Col >= Cols) break;
-        auto Byte = static_cast<unsigned char>(Ch);
-        Put(Row, Col++, Byte >= 0x20 && Byte < 0x7f ? Ch : '?', Fg, Bg);
+    for (std::size_t Byte = 0; Byte < Text.size() && Col < Cols;) {
+        const painter::tui::Glyph Shape = painter::tui::GlyphAt(Text, Byte);
+        Put(Row, Col++, Shape.Odd || Shape.Character == U'\t' ? U'?' : Shape.Character, Fg, Bg);
+        Byte += Shape.Length;
     }
     return Col;
 }

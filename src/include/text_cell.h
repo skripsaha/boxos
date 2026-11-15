@@ -16,8 +16,9 @@
 typedef struct TextCell {
     uint32_t fg;        /* #RRGGBB */
     uint32_t bg;        /* #RRGGBB */
-    char     ch;
-    uint8_t  pad[3];
+    uint32_t cp;        /* the character it shows: a Unicode codepoint, 0 for none —
+                           never a glyph's number; which glyph draws it is the
+                           display's to decide */
 } TextCell;
 
 #ifdef __cplusplus

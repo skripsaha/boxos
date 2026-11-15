@@ -107,7 +107,7 @@ private:
     void          PaintTitle();
     void          PaintList();
     void          PaintFoot();
-    void          Put(std::uint32_t Row, std::uint32_t Col, char Ch, painter::core::Color Fg,
+    void          Put(std::uint32_t Row, std::uint32_t Col, char32_t Ch, painter::core::Color Fg,
                       painter::core::Color Bg);
     std::uint32_t Write(std::uint32_t Row, std::uint32_t Col, std::string_view Text, painter::core::Color Fg,
                         painter::core::Color Bg);

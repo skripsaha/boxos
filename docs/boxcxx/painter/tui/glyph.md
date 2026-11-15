@@ -1,29 +1,25 @@
-# painter::tui::Glyphs — коды псевдографики
+# painter::tui::Glyphs — символы псевдографики
 
 ## Назначение
 
 [Заголовок](../../../../src/userspace/painter/include/painter/tui/glyph.h)
-содержит только `inline constexpr char` в пространстве имён
-`painter::tui::Glyphs`. Отдельного файла реализации нет. Индексы
-соответствуют шрифту BoxOS; это байты глифов, а не UTF-8.
+содержит только `inline constexpr char32_t` в пространстве имён
+`painter::tui::Glyphs`. Отдельного файла реализации нет. Каждая константа —
+символ Unicode, а не номер глифа: какой глиф его рисует, решает дисплей.
 
-Передавайте константу в `Frame::Put`, `Frame::Fill` или в строку готовых
-глифов для `Frame::Write`. Не передавайте такой байт как текст UTF-8 в
-`PutText`: управляющий или недопустимый байт будет показан квадратом.
-
-На платформе с знаковым char значения выше 0x7F могут быть отрицательными.
-Для числового сравнения преобразуйте их в `unsigned char`. Сам индекс
-глифа от этого не меняется.
+Кладите константу в ячейку через `Frame::Put` или `Frame::Fill`. Внутри
+текста UTF-8 для `Frame::Write`, `Frame::Centre` или `PutText` пишите сам
+символ в UTF-8: `"←"`, а не `Glyphs::Left`.
 
 ## Справочник
 
 ### `Glyphs::UpperHalf`
 
-**Краткое описание:** Используйте глиф: верхняя половина.
+**Краткое описание:** Используйте символ: верхняя половина.
 
-**Параметры:** Нет; `inline constexpr char UpperHalf = static_cast<char>(0xDF)`.
+**Параметры:** Нет; `inline constexpr char32_t UpperHalf = U'▀'` (U+2580).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -34,16 +30,16 @@
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::UpperHalf;
+char32_t Glyph = tui::Glyphs::UpperHalf;
 ```
 
 ### `Glyphs::LowerHalf`
 
-**Краткое описание:** Используйте глиф: нижняя половина.
+**Краткое описание:** Используйте символ: нижняя половина.
 
-**Параметры:** Нет; `inline constexpr char LowerHalf = static_cast<char>(0xDC)`.
+**Параметры:** Нет; `inline constexpr char32_t LowerHalf = U'▄'` (U+2584).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -54,16 +50,16 @@ char Glyph = tui::Glyphs::UpperHalf;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::LowerHalf;
+char32_t Glyph = tui::Glyphs::LowerHalf;
 ```
 
 ### `Glyphs::Full`
 
-**Краткое описание:** Используйте глиф: полный блок.
+**Краткое описание:** Используйте символ: полный блок.
 
-**Параметры:** Нет; `inline constexpr char Full = static_cast<char>(0xDB)`.
+**Параметры:** Нет; `inline constexpr char32_t Full = U'█'` (U+2588).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -74,16 +70,16 @@ char Glyph = tui::Glyphs::LowerHalf;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::Full;
+char32_t Glyph = tui::Glyphs::Full;
 ```
 
 ### `Glyphs::LightShade`
 
-**Краткое описание:** Используйте глиф: редкая штриховка.
+**Краткое описание:** Используйте символ: редкая штриховка.
 
-**Параметры:** Нет; `inline constexpr char LightShade = static_cast<char>(0xB0)`.
+**Параметры:** Нет; `inline constexpr char32_t LightShade = U'░'` (U+2591).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -94,16 +90,16 @@ char Glyph = tui::Glyphs::Full;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::LightShade;
+char32_t Glyph = tui::Glyphs::LightShade;
 ```
 
 ### `Glyphs::MidShade`
 
-**Краткое описание:** Используйте глиф: средняя штриховка.
+**Краткое описание:** Используйте символ: средняя штриховка.
 
-**Параметры:** Нет; `inline constexpr char MidShade = static_cast<char>(0xB1)`.
+**Параметры:** Нет; `inline constexpr char32_t MidShade = U'▒'` (U+2592).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -114,16 +110,16 @@ char Glyph = tui::Glyphs::LightShade;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::MidShade;
+char32_t Glyph = tui::Glyphs::MidShade;
 ```
 
 ### `Glyphs::DenseShade`
 
-**Краткое описание:** Используйте глиф: плотная штриховка.
+**Краткое описание:** Используйте символ: плотная штриховка.
 
-**Параметры:** Нет; `inline constexpr char DenseShade = static_cast<char>(0xB2)`.
+**Параметры:** Нет; `inline constexpr char32_t DenseShade = U'▓'` (U+2593).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -134,16 +130,16 @@ char Glyph = tui::Glyphs::MidShade;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::DenseShade;
+char32_t Glyph = tui::Glyphs::DenseShade;
 ```
 
 ### `Glyphs::Dot`
 
-**Краткое описание:** Используйте глиф: точка.
+**Краткое описание:** Используйте символ: точка.
 
-**Параметры:** Нет; `inline constexpr char Dot = static_cast<char>(0xFA)`.
+**Параметры:** Нет; `inline constexpr char32_t Dot = U'·'` (U+00B7).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -154,16 +150,16 @@ char Glyph = tui::Glyphs::DenseShade;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::Dot;
+char32_t Glyph = tui::Glyphs::Dot;
 ```
 
 ### `Glyphs::Bullet`
 
-**Краткое описание:** Используйте глиф: маркер.
+**Краткое описание:** Используйте символ: маркер.
 
-**Параметры:** Нет; `inline constexpr char Bullet = static_cast<char>(0x07)`.
+**Параметры:** Нет; `inline constexpr char32_t Bullet = U'•'` (U+2022).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -174,16 +170,16 @@ char Glyph = tui::Glyphs::Dot;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::Bullet;
+char32_t Glyph = tui::Glyphs::Bullet;
 ```
 
 ### `Glyphs::Tick`
 
-**Краткое описание:** Используйте глиф: знак корня, используемый как отметка.
+**Краткое описание:** Используйте символ: знак корня, используемый как отметка.
 
-**Параметры:** Нет; `inline constexpr char Tick = static_cast<char>(0xFB)`.
+**Параметры:** Нет; `inline constexpr char32_t Tick = U'√'` (U+221A).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -194,16 +190,16 @@ char Glyph = tui::Glyphs::Bullet;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::Tick;
+char32_t Glyph = tui::Glyphs::Tick;
 ```
 
 ### `Glyphs::Left`
 
-**Краткое описание:** Используйте глиф: стрелка влево.
+**Краткое описание:** Используйте символ: стрелка влево.
 
-**Параметры:** Нет; `inline constexpr char Left = static_cast<char>(0x1B)`.
+**Параметры:** Нет; `inline constexpr char32_t Left = U'←'` (U+2190).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -214,16 +210,16 @@ char Glyph = tui::Glyphs::Tick;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::Left;
+char32_t Glyph = tui::Glyphs::Left;
 ```
 
 ### `Glyphs::Right`
 
-**Краткое описание:** Используйте глиф: стрелка вправо.
+**Краткое описание:** Используйте символ: стрелка вправо.
 
-**Параметры:** Нет; `inline constexpr char Right = static_cast<char>(0x1A)`.
+**Параметры:** Нет; `inline constexpr char32_t Right = U'→'` (U+2192).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -234,16 +230,16 @@ char Glyph = tui::Glyphs::Left;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::Right;
+char32_t Glyph = tui::Glyphs::Right;
 ```
 
 ### `Glyphs::Up`
 
-**Краткое описание:** Используйте глиф: стрелка вверх.
+**Краткое описание:** Используйте символ: стрелка вверх.
 
-**Параметры:** Нет; `inline constexpr char Up = static_cast<char>(0x18)`.
+**Параметры:** Нет; `inline constexpr char32_t Up = U'↑'` (U+2191).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -254,16 +250,16 @@ char Glyph = tui::Glyphs::Right;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::Up;
+char32_t Glyph = tui::Glyphs::Up;
 ```
 
 ### `Glyphs::Down`
 
-**Краткое описание:** Используйте глиф: стрелка вниз.
+**Краткое описание:** Используйте символ: стрелка вниз.
 
-**Параметры:** Нет; `inline constexpr char Down = static_cast<char>(0x19)`.
+**Параметры:** Нет; `inline constexpr char32_t Down = U'↓'` (U+2193).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -274,16 +270,16 @@ char Glyph = tui::Glyphs::Up;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::Down;
+char32_t Glyph = tui::Glyphs::Down;
 ```
 
 ### `Glyphs::Pointer`
 
-**Краткое описание:** Используйте глиф: треугольник вправо.
+**Краткое описание:** Используйте символ: треугольник вправо.
 
-**Параметры:** Нет; `inline constexpr char Pointer = static_cast<char>(0x10)`.
+**Параметры:** Нет; `inline constexpr char32_t Pointer = U'►'` (U+25BA).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -294,16 +290,16 @@ char Glyph = tui::Glyphs::Down;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::Pointer;
+char32_t Glyph = tui::Glyphs::Pointer;
 ```
 
 ### `Glyphs::LeftHalf`
 
-**Краткое описание:** Используйте глиф: левая половина.
+**Краткое описание:** Используйте символ: левая половина.
 
-**Параметры:** Нет; `inline constexpr char LeftHalf = static_cast<char>(0xDD)`.
+**Параметры:** Нет; `inline constexpr char32_t LeftHalf = U'▌'` (U+258C).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -314,16 +310,16 @@ char Glyph = tui::Glyphs::Pointer;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::LeftHalf;
+char32_t Glyph = tui::Glyphs::LeftHalf;
 ```
 
 ### `Glyphs::RightHalf`
 
-**Краткое описание:** Используйте глиф: правая половина.
+**Краткое описание:** Используйте символ: правая половина.
 
-**Параметры:** Нет; `inline constexpr char RightHalf = static_cast<char>(0xDE)`.
+**Параметры:** Нет; `inline constexpr char32_t RightHalf = U'▐'` (U+2590).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -334,16 +330,16 @@ char Glyph = tui::Glyphs::LeftHalf;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::RightHalf;
+char32_t Glyph = tui::Glyphs::RightHalf;
 ```
 
 ### `Glyphs::RuleAcross`
 
-**Краткое описание:** Используйте глиф: горизонтальная линия.
+**Краткое описание:** Используйте символ: горизонтальная линия.
 
-**Параметры:** Нет; `inline constexpr char RuleAcross = static_cast<char>(0xC4)`.
+**Параметры:** Нет; `inline constexpr char32_t RuleAcross = U'─'` (U+2500).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -354,16 +350,16 @@ char Glyph = tui::Glyphs::RightHalf;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::RuleAcross;
+char32_t Glyph = tui::Glyphs::RuleAcross;
 ```
 
 ### `Glyphs::DoubleRule`
 
-**Краткое описание:** Используйте глиф: двойная горизонтальная линия.
+**Краткое описание:** Используйте символ: двойная горизонтальная линия.
 
-**Параметры:** Нет; `inline constexpr char DoubleRule = static_cast<char>(0xCD)`.
+**Параметры:** Нет; `inline constexpr char32_t DoubleRule = U'═'` (U+2550).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -374,16 +370,16 @@ char Glyph = tui::Glyphs::RuleAcross;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::DoubleRule;
+char32_t Glyph = tui::Glyphs::DoubleRule;
 ```
 
 ### `Glyphs::RuleDown`
 
-**Краткое описание:** Используйте глиф: вертикальная линия.
+**Краткое описание:** Используйте символ: вертикальная линия.
 
-**Параметры:** Нет; `inline constexpr char RuleDown = static_cast<char>(0xB3)`.
+**Параметры:** Нет; `inline constexpr char32_t RuleDown = U'│'` (U+2502).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -394,16 +390,16 @@ char Glyph = tui::Glyphs::DoubleRule;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::RuleDown;
+char32_t Glyph = tui::Glyphs::RuleDown;
 ```
 
 ### `Glyphs::CornerTL`
 
-**Краткое описание:** Используйте глиф: левый верхний угол.
+**Краткое описание:** Используйте символ: левый верхний угол.
 
-**Параметры:** Нет; `inline constexpr char CornerTL = static_cast<char>(0xDA)`.
+**Параметры:** Нет; `inline constexpr char32_t CornerTL = U'┌'` (U+250C).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -414,16 +410,16 @@ char Glyph = tui::Glyphs::RuleDown;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::CornerTL;
+char32_t Glyph = tui::Glyphs::CornerTL;
 ```
 
 ### `Glyphs::CornerTR`
 
-**Краткое описание:** Используйте глиф: правый верхний угол.
+**Краткое описание:** Используйте символ: правый верхний угол.
 
-**Параметры:** Нет; `inline constexpr char CornerTR = static_cast<char>(0xBF)`.
+**Параметры:** Нет; `inline constexpr char32_t CornerTR = U'┐'` (U+2510).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -434,16 +430,16 @@ char Glyph = tui::Glyphs::CornerTL;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::CornerTR;
+char32_t Glyph = tui::Glyphs::CornerTR;
 ```
 
 ### `Glyphs::CornerBL`
 
-**Краткое описание:** Используйте глиф: левый нижний угол.
+**Краткое описание:** Используйте символ: левый нижний угол.
 
-**Параметры:** Нет; `inline constexpr char CornerBL = static_cast<char>(0xC0)`.
+**Параметры:** Нет; `inline constexpr char32_t CornerBL = U'└'` (U+2514).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -454,16 +450,16 @@ char Glyph = tui::Glyphs::CornerTR;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::CornerBL;
+char32_t Glyph = tui::Glyphs::CornerBL;
 ```
 
 ### `Glyphs::CornerBR`
 
-**Краткое описание:** Используйте глиф: правый нижний угол.
+**Краткое описание:** Используйте символ: правый нижний угол.
 
-**Параметры:** Нет; `inline constexpr char CornerBR = static_cast<char>(0xD9)`.
+**Параметры:** Нет; `inline constexpr char32_t CornerBR = U'┘'` (U+2518).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -474,16 +470,16 @@ char Glyph = tui::Glyphs::CornerBL;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::CornerBR;
+char32_t Glyph = tui::Glyphs::CornerBR;
 ```
 
 ### `Glyphs::TeeLeft`
 
-**Краткое описание:** Используйте глиф: соединение с левой вертикальной рамкой, ответвление вправо.
+**Краткое описание:** Используйте символ: соединение с левой вертикальной рамкой, ответвление вправо.
 
-**Параметры:** Нет; `inline constexpr char TeeLeft = static_cast<char>(0xC3)`.
+**Параметры:** Нет; `inline constexpr char32_t TeeLeft = U'├'` (U+251C).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -494,16 +490,16 @@ char Glyph = tui::Glyphs::CornerBR;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::TeeLeft;
+char32_t Glyph = tui::Glyphs::TeeLeft;
 ```
 
 ### `Glyphs::TeeRight`
 
-**Краткое описание:** Используйте глиф: соединение с правой вертикальной рамкой, ответвление влево.
+**Краткое описание:** Используйте символ: соединение с правой вертикальной рамкой, ответвление влево.
 
-**Параметры:** Нет; `inline constexpr char TeeRight = static_cast<char>(0xB4)`.
+**Параметры:** Нет; `inline constexpr char32_t TeeRight = U'┤'` (U+2524).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -514,16 +510,16 @@ char Glyph = tui::Glyphs::TeeLeft;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::TeeRight;
+char32_t Glyph = tui::Glyphs::TeeRight;
 ```
 
 ### `Glyphs::MoreLeft`
 
-**Краткое описание:** Используйте глиф: двойная угловая кавычка влево: продолжение строки.
+**Краткое описание:** Используйте символ: двойная угловая кавычка влево: продолжение строки.
 
-**Параметры:** Нет; `inline constexpr char MoreLeft = static_cast<char>(0xAE)`.
+**Параметры:** Нет; `inline constexpr char32_t MoreLeft = U'«'` (U+00AB).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -534,16 +530,16 @@ char Glyph = tui::Glyphs::TeeRight;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::MoreLeft;
+char32_t Glyph = tui::Glyphs::MoreLeft;
 ```
 
 ### `Glyphs::MoreRight`
 
-**Краткое описание:** Используйте глиф: двойная угловая кавычка вправо: продолжение строки.
+**Краткое описание:** Используйте символ: двойная угловая кавычка вправо: продолжение строки.
 
-**Параметры:** Нет; `inline constexpr char MoreRight = static_cast<char>(0xAF)`.
+**Параметры:** Нет; `inline constexpr char32_t MoreRight = U'»'` (U+00BB).
 
-**Возвращает:** Неприменимо: константа байтового глифа.
+**Возвращает:** Неприменимо: константа символа.
 
 **Побочные эффекты:** Нет.
 
@@ -554,5 +550,5 @@ char Glyph = tui::Glyphs::MoreLeft;
 
 namespace tui = painter::tui;
 
-char Glyph = tui::Glyphs::MoreRight;
+char32_t Glyph = tui::Glyphs::MoreRight;
 ```

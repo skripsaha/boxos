@@ -43,6 +43,7 @@
 #include "box/string.h"
 #include "box/convert.h"
 #include "painter/tui/stage.h"
+#include "painter/tui/text.h"
 
 #include <cstdlib>
 #include <string>
@@ -359,7 +360,7 @@ static void paint_lamp(void)
     }
 }
 
-static void put_cell(int row, int col, char ch, Color fg, Color bg)
+static void put_cell(int row, int col, char32_t ch, Color fg, Color bg)
 {
     if (row < 0 || col < 0 || row >= g_lamp.rows || col >= g_lamp.cols) return;
     g_frame->Put({col, row}, painter::tui::Cell{ch, painter_color(fg), painter_color(bg)});
@@ -367,7 +368,11 @@ static void put_cell(int row, int col, char ch, Color fg, Color bg)
 
 static void put_text(int row, int col, const char *s, Color fg, Color bg)
 {
-    for (int i = 0; s[i] != '\0'; i++) put_cell(row, col + i, s[i], fg, bg);
+    for (std::size_t at = 0, i = 0; s[at] != '\0'; i++) {
+        const painter::tui::Glyph shape = painter::tui::GlyphAt(s, at);
+        put_cell(row, col + static_cast<int>(i), shape.Character, fg, bg);
+        at += shape.Length;
+    }
 }
 
 /* ===========================================================================

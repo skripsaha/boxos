@@ -15,12 +15,12 @@ namespace {
 // How long what an owner gained is still shown as new.
 constexpr std::uint64_t GlowUs = 6000000;
 
-constexpr char ShadeDark  = static_cast<char>(0xB2);
-constexpr char ShadeMid   = static_cast<char>(0xB1);
-constexpr char ShadeLight = static_cast<char>(0xB0);
-constexpr char BlockFull  = static_cast<char>(0xDB);
-constexpr char BlockSmall = static_cast<char>(0xFE);
-constexpr char MarkDot    = static_cast<char>(0xFA);
+constexpr char32_t ShadeDark  = U'\u2593';   /* ▓ */
+constexpr char32_t ShadeMid   = U'\u2592';   /* ▒ */
+constexpr char32_t ShadeLight = U'\u2591';   /* ░ */
+constexpr char32_t BlockFull  = U'\u2588';   /* █ */
+constexpr char32_t BlockSmall = U'\u25A0';   /* ■ */
+constexpr char32_t MarkDot    = U'\u00B7';   /* · */
 
 std::uint32_t Hash(std::string_view Text) noexcept
 {
@@ -39,9 +39,9 @@ Color ProgramInk(std::string_view Name, std::uint32_t Tint)
                                       static_cast<std::uint8_t>(std::min<std::uint32_t>(Tint, 100) * 255u / 100u), 230));
 }
 
-char ProgramMark(std::string_view Name) noexcept
+char32_t ProgramMark(std::string_view Name) noexcept
 {
-    static constexpr char Marks[] = {BlockFull, ShadeDark, ShadeMid};
+    static constexpr char32_t Marks[] = {BlockFull, ShadeDark, ShadeMid};
     return Marks[(Hash(Name) / 1536u) % std::size(Marks)];
 }
 
@@ -64,7 +64,7 @@ struct KindWords {
     const char *Key;
     const char *Name;
     const char *Note;
-    char        Mark;
+    char32_t    Mark;
 };
 
 KindWords WordsOf(Kind What) noexcept

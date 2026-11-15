@@ -23,8 +23,8 @@ namespace Glyphs = painter::tui::Glyphs;
 using painter::core::Point;
 using painter::core::Rect;
 
-constexpr char  Opened      = static_cast<char>(0x1F);       // a triangle pointing down
-// Between the words of a line: a middle dot, as text (the font folds it).
+constexpr char32_t Opened   = U'\u25BC';       // ▼ a triangle pointing down
+// Between the words of a line: a middle dot, as text.
 constexpr std::string_view Between = "\xC2\xB7";
 
 // The least of each part of the picture; below them a part is left out.
@@ -197,7 +197,7 @@ void Board::PaintHeader(tui::Frame &Out, Rect Area) const
     // What is said here stands at the left: the right of the top line is where
     // the programs that live on their own lay their notices.
     Out.Fill(Area, ' ', {Shown.Text, Shown.Bars});
-    Out.Put(Point{Area.X + 1, Area.Y}, static_cast<char>(0xFE), {LoadColor(Shown, Load.Machine()), Shown.Bars});
+    Out.Put(Point{Area.X + 1, Area.Y}, U'\u25A0', {LoadColor(Shown, Load.Machine()), Shown.Bars});
     Say(Out, Point{Area.X + 3, Area.Y}, "taskboard", Area.Width - 3, Shown.Title, Shown.Bars);
     if (!Now) return;
     std::size_t Strands = 0;
@@ -377,7 +377,7 @@ void Board::PaintPrograms(tui::Frame &Out, Rect Area)
             return M.Program == Who{Of.Seen.Pid, Of.Seen.Generation};
         });
         const bool StrandsShown = Index + 1 < All.size() && All[Index + 1].What == Line::Kind::Strand;
-        if (IsMarked) Out.Put(Point{Inside.X, Row}, static_cast<char>(0xFE), {Shown.Marked, Under});
+        if (IsMarked) Out.Put(Point{Inside.X, Row}, U'\u25A0', {Shown.Marked, Under});
         Out.Put(Point{Inside.X + 1, Row}, StrandsShown ? Opened : Glyphs::Pointer,
                 {Of.Seen.Strands.size() > 1 ? Shown.Text : Shown.Quiet, Under});
         Say(Out, Point{Inside.X + 3, Row}, tui::Shortened(Of.Name, static_cast<std::size_t>(NameW - 1)), NameW - 1,

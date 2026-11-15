@@ -10,6 +10,7 @@
 #include <string_view>
 
 #include "box/color.h"
+#include "painter/tui/text.h"
 
 #include "flame.h"
 
@@ -47,16 +48,15 @@ static_assert(Block <= FlameMinRows, "the menu is taller than the screen flame a
 
 constexpr const char *Labels[RowCount] = {"where", "colour", "height", "wind", "sparks", "word"};
 
-/* The console font is CP437 and a painted frame carries raw bytes, so the
- * box is drawn with its own single-line characters. */
-constexpr char CornerTopLeft     = static_cast<char>(0xDA);
-constexpr char CornerTopRight    = static_cast<char>(0xBF);
-constexpr char CornerBottomLeft  = static_cast<char>(0xC0);
-constexpr char CornerBottomRight = static_cast<char>(0xD9);
-constexpr char Horizontal        = static_cast<char>(0xC4);
-constexpr char Vertical          = static_cast<char>(0xB3);
-constexpr char GaugeFull         = static_cast<char>(0xDB);
-constexpr char GaugeEmpty        = static_cast<char>(0xB0);
+/* The box is drawn with single-line rules, and the height as a gauge. */
+constexpr char32_t         CornerTopLeft     = U'\u250C';   /* ┌ */
+constexpr char32_t         CornerTopRight    = U'\u2510';   /* ┐ */
+constexpr char32_t         CornerBottomLeft  = U'\u2514';   /* └ */
+constexpr char32_t         CornerBottomRight = U'\u2518';   /* ┘ */
+constexpr char32_t         Horizontal        = U'\u2500';   /* ─ */
+constexpr char32_t         Vertical          = U'\u2502';   /* │ */
+constexpr std::string_view GaugeFull         = "\u2588";    /* █ */
+constexpr std::string_view GaugeEmpty        = "\u2591";    /* ░ */
 
 /* A BIOS text console shows 16 colours and the kernel picks one by dominant
  * hue (BoxColorToVga4): any tint at all in a dark makes it a blue or a green.
@@ -82,7 +82,7 @@ struct Canvas {
     int       Rows;
     int       Cols;
 
-    void Put(int Row, int Col, char Ch, PainterColor Fg, PainterColor Bg) const
+    void Put(int Row, int Col, char32_t Ch, PainterColor Fg, PainterColor Bg) const
     {
         if (Row < 0 || Col < 0 || Row >= Rows || Col >= Cols) return;
         Cells.Put({Col, Row}, painter::tui::Cell{Ch, Fg, Bg});
@@ -90,7 +90,11 @@ struct Canvas {
 
     void Write(int Row, int Col, std::string_view Text, PainterColor Fg, PainterColor Bg) const
     {
-        for (std::size_t At = 0; At < Text.size(); At++) Put(Row, Col + static_cast<int>(At), Text[At], Fg, Bg);
+        for (std::size_t At = 0; At < Text.size();) {
+            const painter::tui::Glyph Shape = painter::tui::GlyphAt(Text, At);
+            Put(Row, Col++, Shape.Character, Fg, Bg);
+            At += Shape.Length;
+        }
     }
 };
 
@@ -120,9 +124,11 @@ std::string ValueOf(int Row, const FlameSettings &Settings)
         color_format(Settings.Custom, Spelled);
         return Spelled;
     }
-    case RowHeight:
-        return std::string(static_cast<std::size_t>(Settings.Height), GaugeFull) +
-               std::string(static_cast<std::size_t>(FlameHeightMax - Settings.Height), GaugeEmpty);
+    case RowHeight: {
+        std::string Gauge;
+        for (int At = 0; At < FlameHeightMax; At++) Gauge += At < Settings.Height ? GaugeFull : GaugeEmpty;
+        return Gauge;
+    }
     case RowWind:
         if (Settings.Wind == 0) return "calm";
         return std::string(Settings.Wind < 0 ? "left " : "right ") +
@@ -136,7 +142,8 @@ std::string ValueOf(int Row, const FlameSettings &Settings)
 std::string_view Tail(const std::string &Text, std::size_t Width)
 {
     std::string_view Whole = Text;
-    return Whole.size() > Width ? Whole.substr(Whole.size() - Width) : Whole;
+    while (painter::tui::CellsOf(Whole) > Width) Whole.remove_prefix(painter::tui::GlyphAt(Whole, 0).Length);
+    return Whole;
 }
 
 }
@@ -313,7 +320,7 @@ void FlameMenu::Draw(painter::tui::Frame &Frame, int Rows, int Cols, const Flame
     int    Top  = OriginRow(Rows);
     int    Left = OriginCol(Cols);
 
-    auto Rule = [&](int Line, char First, char Last) {
+    auto Rule = [&](int Line, char32_t First, char32_t Last) {
         Drawing.Put(Line, Left, First, Ink, Paper);
         for (int At = 1; At <= MenuInner; At++) Drawing.Put(Line, Left + At, Horizontal, Ink, Paper);
         Drawing.Put(Line, Left + MenuInner + 1, Last, Ink, Paper);

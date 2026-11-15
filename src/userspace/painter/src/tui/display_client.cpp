@@ -208,7 +208,7 @@ box::status DisplayLayer::Present(const Frame &Picture) noexcept
         for (std::int32_t Col = 0; Col < Bounds.Width; Col++) {
             const Cell Value = Picture.Read({Col, Row});
             *Out++ = DisplayLayerCell{
-                TextCell{Value.Foreground.Raw(), Value.Background.Raw(), Value.Glyph, {0, 0, 0}},
+                TextCell{Value.Foreground.Raw(), Value.Background.Raw(), static_cast<std::uint32_t>(Value.Glyph)},
                 Value.MarkColor.Raw(), static_cast<std::uint8_t>(Value.IsTransparent() ? 0u : 1u),
                 static_cast<std::uint8_t>(Value.Mark), {0, 0}};
         }

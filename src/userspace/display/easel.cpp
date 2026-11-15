@@ -7,13 +7,14 @@
 #include "box/error.h"
 #include "box/turnin.h"
 #include "boxos_font.h"
+#include "boxos_glyph_fold.h"
 #include "boxos_pixel.h"
 
 namespace {
 
 bool SameCell(const GlassCell &Left, const GlassCell &Right) noexcept
 {
-    return Left.Cell.ch == Right.Cell.ch && Left.Cell.fg == Right.Cell.fg && Left.Cell.bg == Right.Cell.bg &&
+    return Left.Cell.cp == Right.Cell.cp && Left.Cell.fg == Right.Cell.fg && Left.Cell.bg == Right.Cell.bg &&
            Left.Mark == Right.Mark && (Left.Mark == DISPLAY_CELL_MARK_NONE || Left.MarkColor == Right.MarkColor);
 }
 
@@ -152,7 +153,7 @@ void Easel::DrawCell(std::uint32_t Col, std::uint32_t Row, const GlassCell &Cell
             Attribute = static_cast<std::uint8_t>((Attribute << 4) | (Attribute >> 4));
         volatile std::uint8_t *At = Base + static_cast<std::size_t>(Row) * Description.stride +
                                     static_cast<std::size_t>(Col) * 2u;
-        At[0] = static_cast<std::uint8_t>(Cell.Cell.ch);
+        At[0] = BoxGlyphFoldOne(Cell.Cell.cp);
         At[1] = Attribute;
         return;
     }
@@ -162,7 +163,7 @@ void Easel::DrawCell(std::uint32_t Col, std::uint32_t Row, const GlassCell &Cell
     const std::uint32_t Marking = BoxPixelEncode(MarkInk, Description.format);
     const std::uint32_t CaretInk =
         BoxPixelEncode(Ink != Paper ? Ink : COLOR_LIGHT_GRAY, Description.format);
-    const unsigned char *Glyph = BoxFontGlyphs[static_cast<std::uint8_t>(Cell.Cell.ch)];
+    const unsigned char *Glyph = BoxFontGlyphs[BoxGlyphFoldOne(Cell.Cell.cp)];
     volatile std::uint8_t *Line =
         Base + static_cast<std::size_t>(Row) * BOXOS_FONT_HEIGHT * Description.stride +
         static_cast<std::size_t>(Col) * BOXOS_FONT_WIDTH * 4u;

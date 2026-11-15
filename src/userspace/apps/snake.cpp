@@ -8,6 +8,7 @@
 
 #include "box/cxx/console.h"
 #include "painter/tui/stage.h"
+#include "painter/tui/text.h"
 
 namespace {
 
@@ -34,7 +35,7 @@ PaintColor paint_color(box::color color) {
   return PaintColor::FromRaw(color.raw());
 }
 
-painter::tui::Cell make_cell(char ch, box::color fg,
+painter::tui::Cell make_cell(char32_t ch, box::color fg,
                              box::color bg = kBackground) {
   return painter::tui::Cell{ch, paint_color(fg), paint_color(bg)};
 }
@@ -265,14 +266,13 @@ private:
   void draw_text(std::uint8_t row, std::string_view text, box::color color) {
     if (row >= height_)
       return;
-    const std::size_t start =
-        text.size() < screen_width_ ? (screen_width_ - text.size()) / 2 : 0;
-    const std::size_t count =
-        text.size() < screen_width_ ? text.size() : screen_width_;
-    for (std::size_t i = 0; i < count; ++i) {
-      const std::size_t column = start + i;
-      put_screen(static_cast<std::uint8_t>(column), row,
-                 make_cell(text[i], color));
+    const std::size_t cells = painter::tui::CellsOf(text);
+    std::size_t column = cells < screen_width_ ? (screen_width_ - cells) / 2 : 0;
+    for (std::size_t at = 0; at < text.size() && column < screen_width_;) {
+      const painter::tui::Glyph shape = painter::tui::GlyphAt(text, at);
+      put_screen(static_cast<std::uint8_t>(column++), row,
+                 make_cell(shape.Character, color));
+      at += shape.Length;
     }
   }
 

@@ -38,7 +38,7 @@ constexpr std::uint8_t Dimmed  = 150;
 constexpr std::uint8_t Brought = 120;
 constexpr std::uint8_t Under   = 100;
 
-// Between the words of a line: a middle dot, as text (the font folds it).
+// Between the words of a line: a middle dot, as text.
 constexpr std::string_view Between = "\xC2\xB7";
 
 std::string Bytes(std::uint64_t Count)

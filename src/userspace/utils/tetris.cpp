@@ -61,10 +61,10 @@ const Color PieceInks[] = {Color::Rgb(0x40, 0xE8, 0xF8), Color::Rgb(0xF0, 0xE0, 
                            Color::Rgb(0x30, 0xE0, 0x40), Color::Rgb(0xF0, 0x20, 0x20), Color::Rgb(0x30, 0x60, 0xFF),
                            Color::Rgb(0xF0, 0x90, 0x00)};
 
-/* Box-drawing glyphs of the console font: the double frame. */
-constexpr char FrameSide = static_cast<char>(0xBA), FrameTop = static_cast<char>(0xCD);
-constexpr char CornerTL = static_cast<char>(0xC9), CornerTR = static_cast<char>(0xBB);
-constexpr char CornerBL = static_cast<char>(0xC8), CornerBR = static_cast<char>(0xBC);
+/* The double frame's box-drawing characters. */
+constexpr char32_t FrameSide = U'\u2551', FrameTop = U'\u2550';   /* ║ ═ */
+constexpr char32_t CornerTL = U'\u2554', CornerTR = U'\u2557';    /* ╔ ╗ */
+constexpr char32_t CornerBL = U'\u255A', CornerBR = U'\u255D';    /* ╚ ╝ */
 
 class Table {
 public:
@@ -168,7 +168,7 @@ void Table::Panels()
     for (int At = 0; At < NextShown; At++) Mini(Row + 2 + At * 3, Right, Game.Upcoming(At), At > 0);
 
     Row = Top + 2 + NextShown * 3 + 1;
-    for (auto [Keys, What] : {std::pair{"\x1B\x1A", "move"}, {"\x18 x z", "turn"}, {"\x19", "down"},
+    for (auto [Keys, What] : {std::pair{"\u2190\u2192", "move"}, {"\u2191 x z", "turn"}, {"\u2193", "down"},
                               {"space", "drop"}, {"c", "hold"}, {"p", "pause"}, {"q", "leave"}}) {
         if (Row >= Dimensions.Height) break;
         int Col = Right;

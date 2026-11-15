@@ -147,7 +147,7 @@ void Rail(tui::Frame &Out, painter::core::Rect Area, Color Wood, Color Inlay, bo
     }
     if (!WithInlay) return;
     const painter::core::Rect In{Area.X + 1, Area.Y + 1, Area.Width - 2, Area.Height - 2};
-    const auto Line = [&](std::int32_t Col, std::int32_t Row, char Glyph) {
+    const auto Line = [&](std::int32_t Col, std::int32_t Row, char32_t Glyph) {
         Out.Put({Col, Row}, Glyph, tui::TextStyle{Inlay, Out.Read({Col, Row}).Background});
     };
     for (std::int32_t Col = In.X + 1; Col < In.X + In.Width - 1; Col++) {
@@ -166,9 +166,11 @@ void Rail(tui::Frame &Out, painter::core::Rect Area, Color Wood, Color Inlay, bo
 
 void Print(tui::Frame &Out, painter::core::Point At, std::string_view Words, Color Ink)
 {
-    for (const char Glyph : Words) {
-        Out.Put(At, Glyph, tui::TextStyle{Ink, Out.Read(At).Background});
+    for (std::size_t Byte = 0; Byte < Words.size();) {
+        const tui::Glyph Shape = tui::GlyphAt(Words, Byte);
+        Out.Put(At, Shape.Character, tui::TextStyle{Ink, Out.Read(At).Background});
         At.X++;
+        Byte += Shape.Length;
     }
 }
 

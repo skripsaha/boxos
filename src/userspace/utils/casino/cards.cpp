@@ -30,9 +30,9 @@ std::string_view RankName(int Rank)
     return Names[(Rank - 1 + RankKinds) % RankKinds];
 }
 
-char SuitGlyph(Suit Of)
+char32_t SuitGlyph(Suit Of)
 {
-    static constexpr char Glyphs[SuitKinds] = {0x06, 0x03, 0x04, 0x05};
+    static constexpr char32_t Glyphs[SuitKinds] = {U'\u2660', U'\u2665', U'\u2666', U'\u2663'};   /* ♠ ♥ ♦ ♣ */
     return Glyphs[static_cast<int>(Of)];
 }
 

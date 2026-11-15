@@ -2,9 +2,9 @@
 #define PAINTER_TUI_TEXT_H
 
 /* Text as cells of the glass. A character is one UTF-8 sequence, or one byte
- * that is none; the console font draws it in one cell, or in two it folds it
- * into (boxos_glyph_fold.h). A tab runs to the next stop of four, and a
- * control or a byte that is no character is drawn as a box, in OddInk. */
+ * that is none, and takes one cell, which holds it; how it looks is the
+ * display's to draw. A tab runs to the next stop of four, and a control or a
+ * byte that is no character is U+FFFD, in OddInk. */
 
 #include <cstddef>
 #include <cstdint>
@@ -24,10 +24,10 @@ inline constexpr core::Color OddInk = core::Color::Rgb(0xE0, 0x9A, 0x30);
 
 /* One character as the glass shows it. */
 struct Glyph {
-    std::size_t Length = 1;            /* its bytes */
-    std::size_t Width  = 1;            /* its cells */
-    char        Cells[2] = {' ', ' '};
-    bool        Odd = false;           /* a control, or a byte that is no UTF-8: drawn as a box */
+    std::size_t Length    = 1;         /* its bytes */
+    std::size_t Width     = 1;         /* its cells */
+    char32_t    Character = U' ';      /* what each of them holds */
+    bool        Odd       = false;     /* a control, or a byte that is no UTF-8: U+FFFD */
 };
 
 /* The character at Byte of Text, when it stands at Column. */

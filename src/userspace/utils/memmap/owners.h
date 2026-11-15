@@ -29,7 +29,7 @@ struct Owner {
     std::int64_t  Since = 0;            // held more (or less) than when the map opened
     std::uint64_t Glow = 0;             // grown just now, by this much
     Color         Ink;
-    char          Mark = ' ';           // drawn on a screen that has no pixels
+    char32_t      Mark = U' ';          // drawn on a screen that has no pixels
     std::uint32_t Pid = 0;              // of a program; 0 for a kind
     file_id_t     File = 0;
     std::uint64_t BeganUs = 0;

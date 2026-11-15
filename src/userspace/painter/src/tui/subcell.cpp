@@ -6,6 +6,7 @@
 #include <cstdint>
 
 #include "boxos_font.h"
+#include "boxos_glyph_fold.h"
 
 #include "painter/tui/glyph.h"
 
@@ -15,11 +16,12 @@ namespace {
 
 constexpr int CellInk = BOXOS_FONT_WIDTH * BOXOS_FONT_HEIGHT;
 
-/* How much of a glyph the font inks, out of CellInk. */
-int InkOf(unsigned char Glyph)
+/* How much of the cell the display's font inks to show Character, out of
+ * CellInk: the glyph it draws it with, read from the same font. */
+int InkOf(char32_t Character)
 {
     int Count = 0;
-    for (const unsigned char Row : BoxFontGlyphs[Glyph]) Count += std::popcount(Row);
+    for (const unsigned char Row : BoxFontGlyphs[BoxGlyphFoldOne(Character)]) Count += std::popcount(Row);
     return Count;
 }
 
@@ -27,16 +29,16 @@ int InkOf(unsigned char Glyph)
  * takes. The font's shades are not the usual 25, 50 and 75 percent, so the
  * share is read from it and not written here. */
 struct Shade {
-    char Glyph;
-    int  Ink;
+    char32_t Glyph;
+    int      Ink;
 };
 
-constexpr std::size_t ShadeCount = 3;
+constexpr std::array<char32_t, 3> Shades = {Glyphs::LightShade, Glyphs::MidShade, Glyphs::DenseShade};
+constexpr std::size_t             ShadeCount = Shades.size();
 
 Shade ShadeAt(std::size_t Index)
 {
-    const unsigned char Code = static_cast<unsigned char>(Glyphs::LightShade) + static_cast<unsigned char>(Index);
-    return {static_cast<char>(Code), InkOf(Code)};
+    return {Shades[Index], InkOf(Shades[Index])};
 }
 
 struct Rgb {
@@ -165,7 +167,7 @@ Fit OneColour(const Quad &Wanted, bool Pure)
 }
 
 /* The places in Places drawn in the foreground, the rest in the background. */
-Fit Split(const Quad &Wanted, int Places, char Glyph, bool Pure)
+Fit Split(const Quad &Wanted, int Places, char32_t Glyph, bool Pure)
 {
     const Side Front = SideOf(Wanted, Places, Pure), Back = SideOf(Wanted, All & ~Places, Pure);
     return {Cell{Glyph, Front.Colour, Back.Colour}, Front.Error + Back.Error};
@@ -236,16 +238,16 @@ bool AllWhole(const Quad &Wanted)
 Quad QuadOf(const Cell &Shown) noexcept
 {
     const core::Color Front = Shown.Foreground, Back = Shown.Background;
-    switch (static_cast<unsigned char>(Shown.Glyph)) {
-    case 0xDB: return {Front, Front, Front, Front};
-    case 0xDF: return {Front, Front, Back, Back};
-    case 0xDC: return {Back, Back, Front, Front};
-    case 0xDD: return {Front, Back, Front, Back};
-    case 0xDE: return {Back, Front, Back, Front};
-    case 0xB0:
-    case 0xB1:
-    case 0xB2: {
-        const Shade Dither = ShadeAt(static_cast<unsigned char>(Shown.Glyph) - 0xB0);
+    switch (Shown.Glyph) {
+    case Glyphs::Full:      return {Front, Front, Front, Front};
+    case Glyphs::UpperHalf: return {Front, Front, Back, Back};
+    case Glyphs::LowerHalf: return {Back, Back, Front, Front};
+    case Glyphs::LeftHalf:  return {Front, Back, Front, Back};
+    case Glyphs::RightHalf: return {Back, Front, Back, Front};
+    case Glyphs::LightShade:
+    case Glyphs::MidShade:
+    case Glyphs::DenseShade: {
+        const Shade Dither = ShadeAt(static_cast<std::size_t>(Shown.Glyph - Glyphs::LightShade));
         const core::Color Mixed = core::Color::Mix(Back, Front, static_cast<std::uint8_t>(Dither.Ink * 255 / CellInk));
         return {Mixed, Mixed, Mixed, Mixed};
     }

@@ -4,8 +4,6 @@
 
 #include <cstdint>
 
-#include "boxos_glyph_fold.h"
-
 namespace painter::tui {
 
 namespace {
@@ -51,13 +49,14 @@ Glyph GlyphAt(std::string_view Text, std::size_t Byte, std::size_t Column) noexc
 
     std::uint32_t     Codepoint = 0;
     const std::size_t Length    = Decode(Text, Byte, Codepoint);
-    if (Length == 0 || Codepoint < 0x20 || Codepoint == 0x7F) {
-        Out.Cells[0] = BOXOS_GLYPH_FOLD_BOX;
-        Out.Odd      = true;
+    if (Length == 0 || Codepoint < 0x20 || (Codepoint >= 0x7F && Codepoint < 0xA0)) {
+        Out.Character = U'\uFFFD';
+        Out.Odd       = true;
+        Out.Length    = Length == 0 ? 1 : Length;
         return Out;
     }
-    Out.Length = Length;
-    Out.Width  = static_cast<std::size_t>(BoxGlyphFoldCodepoint(Codepoint, Out.Cells));
+    Out.Length    = Length;
+    Out.Character = static_cast<char32_t>(Codepoint);
     return Out;
 }
 
@@ -98,10 +97,8 @@ std::int32_t PutText(Frame &Out, core::Point At, std::string_view Text, std::int
     for (std::size_t Byte = 0; Byte < Text.size();) {
         const Glyph Shape = GlyphAt(Text, Byte, static_cast<std::size_t>(Col));
         if (Col + static_cast<std::int32_t>(Shape.Width) > Width) break;
-        const bool Blank = Text[Byte] == '\t';
         for (std::size_t Part = 0; Part < Shape.Width; Part++)
-            (void)Out.Put({At.X + Col++, At.Y},
-                          Cell{Blank ? ' ' : Shape.Cells[Part], Shape.Odd ? OddInk : Ink, Under});
+            (void)Out.Put({At.X + Col++, At.Y}, Cell{Shape.Character, Shape.Odd ? OddInk : Ink, Under});
         Byte += Shape.Length;
     }
     return Col;

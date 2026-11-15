@@ -21,7 +21,7 @@ constexpr std::string_view kLeaves = "&+*";
 
 using PaintColor = painter::core::Color;
 
-painter::tui::Cell cell(char glyph, box::color foreground) {
+painter::tui::Cell cell(char32_t glyph, box::color foreground) {
   return painter::tui::Cell{glyph, PaintColor::FromRaw(foreground.raw()),
                             PaintColor::FromRaw(kBackground.raw())};
 }

@@ -1,18 +1,37 @@
 #include "layers.h"
 
 #include <algorithm>
+#include <climits>
 #include <cstdio>
 #include <cstring>
+#include <cuchar>
+#include <string_view>
 #include <utility>
 
 #include "box/core/cabin.h"
 #include "box/cxx/bay.h"
 #include "box/ipc.h"
-#include "boxos_glyph_fold.h"
 
 #include "front.h"
 
 namespace {
+
+// A cell's character as the log ring keeps it: its UTF-8, a cell that shows
+// nothing as a space, and what is no character to show — a control, a
+// surrogate, a number past U+10FFFF — as U+FFFD, the box the glass draws.
+void Spell(std::string &Text, std::uint32_t Character)
+{
+    if (Character == 0) {
+        Text += ' ';
+        return;
+    }
+    char           Spelled[MB_LEN_MAX];
+    std::mbstate_t State{};
+    const bool        Control = Character < 0x20u || (Character >= 0x7Fu && Character < 0xA0u);
+    const std::size_t Length  = Control ? static_cast<std::size_t>(-1)
+                                        : std::c32rtomb(Spelled, static_cast<char32_t>(Character), &State);
+    Text += Length == static_cast<std::size_t>(-1) ? std::string_view{"\uFFFD"} : std::string_view{Spelled, Length};
+}
 
 struct DisplayLayerState {
     std::uint32_t Id = 0;
@@ -313,12 +332,14 @@ std::expected<LayerCommit, error_t> LayersCommit(std::uint32_t Pid, std::uint32_
         // without its trailing blanks and on a line of its own, the rows that
         // show nothing above and below the picture left out, and the first on
         // a line of its own too when the caret stands inside a line.
-        const auto Blank = [](char Glyph) { return Glyph == ' ' || Glyph == '\0' || Glyph == '\xFF'; };
+        const auto Blank = [](std::uint32_t Character) {
+            return Character == U' ' || Character == 0 || Character == U'\u00A0';
+        };
         const auto Shows = [&](std::uint32_t Row) {
             for (std::uint32_t Col = 0; Col < It->Width; Col++) {
                 const DisplayLayerCell &Cell =
                     It->Cells[static_cast<std::size_t>(Row) * It->Width + Col];
-                if (Cell.Opaque && !Blank(Cell.Cell.ch)) return true;
+                if (Cell.Opaque && !Blank(Cell.Cell.cp)) return true;
             }
             return false;
         };
@@ -335,9 +356,9 @@ std::expected<LayerCommit, error_t> LayersCommit(std::uint32_t Pid, std::uint32_
             for (std::uint32_t Col = 0; Col < It->Width; Col++) {
                 const DisplayLayerCell &Cell =
                     It->Cells[static_cast<std::size_t>(Row) * It->Width + Col];
-                const char Glyph = Cell.Opaque ? Cell.Cell.ch : ' ';
-                Text += BoxGlyphUnicode(static_cast<unsigned char>(Glyph));
-                if (!Blank(Glyph)) Kept = Text.size();
+                const std::uint32_t Character = Cell.Opaque ? Cell.Cell.cp : U' ';
+                Spell(Text, Character);
+                if (!Blank(Character)) Kept = Text.size();
             }
             Text.resize(Kept);
         }

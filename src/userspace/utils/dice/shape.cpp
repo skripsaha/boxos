@@ -232,7 +232,7 @@ void DrawTile(const Canvas &On, Point At, int Digits, int Face, const DieStyle &
         const int Column = At.X + static_cast<int>(Place);
         if (!On.Allows(Column, Row * 2) || !On.Allows(Column, Row * 2 + 1)) continue;
         const bool Rim = Place == 0 || Place + 1 == Text.size();
-        On.Out.Put({Column, Row}, tui::Cell{Text[Place], Style.Ink, Rim ? Style.Edge : Style.Body});
+        On.Out.Put({Column, Row}, tui::Cell{static_cast<char32_t>(Text[Place]), Style.Ink, Rim ? Style.Edge : Style.Body});
     }
 }
 

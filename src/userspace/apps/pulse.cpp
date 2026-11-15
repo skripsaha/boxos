@@ -17,6 +17,7 @@
 #include "painter/tui/frame.h"
 #include "painter/tui/glyph.h"
 #include "painter/tui/surface.h"
+#include "painter/tui/text.h"
 
 BOX_LIFE("stays");
 
@@ -44,9 +45,9 @@ PainterColor Warmth(int Percent)
     return Percent >= 85 ? Hot : Percent >= 50 ? Busy : Calm;
 }
 
-char Height(int Percent)
+char32_t Height(int Percent)
 {
-    if (Percent < 35) return '_';
+    if (Percent < 35) return U'_';
     if (Percent < 70) return painter::tui::Glyphs::LowerHalf;
     return painter::tui::Glyphs::Full;
 }
@@ -55,10 +56,14 @@ class Strip {
 public:
     void Text(std::string_view Words, PainterColor Fore)
     {
-        for (char Ch : Words) Cell(Ch, Fore);
+        for (std::size_t Byte = 0; Byte < Words.size();) {
+            const painter::tui::Glyph Shape = painter::tui::GlyphAt(Words, Byte);
+            Cell(Shape.Character, Fore);
+            Byte += Shape.Length;
+        }
     }
 
-    void Cell(char Glyph, PainterColor Fore)
+    void Cell(char32_t Glyph, PainterColor Fore)
     {
         Cells.push_back(painter::tui::Cell{Glyph, Fore, Ground});
     }

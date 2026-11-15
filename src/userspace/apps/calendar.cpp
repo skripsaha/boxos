@@ -9,6 +9,7 @@
 #include "box/clock.h"
 #include "box/cxx/console.h"
 #include "painter/tui/stage.h"
+#include "painter/tui/text.h"
 
 namespace {
 
@@ -116,7 +117,7 @@ PaintColor paint_color(box::color color) {
   return PaintColor::FromRaw(color.raw());
 }
 
-painter::tui::Cell cell(char ch, box::color fg, box::color bg) {
+painter::tui::Cell cell(char32_t ch, box::color fg, box::color bg) {
   return painter::tui::Cell{ch, paint_color(fg), paint_color(bg)};
 }
 
@@ -262,7 +263,7 @@ private:
     selected_ = month / std::chrono::day{day};
   }
 
-  void put(std::uint8_t row, std::uint8_t col, char ch, box::color fg,
+  void put(std::uint8_t row, std::uint8_t col, char32_t ch, box::color fg,
            box::color bg = kBackground) {
     if (row < rows_ && col < cols_)
       frame_.Put({col, row}, cell(ch, fg, bg));
@@ -271,18 +272,21 @@ private:
   void text(std::uint8_t row, std::uint8_t col, const std::string &value,
             box::color fg, std::uint8_t max_width = 255,
             box::color bg = kBackground) {
-    for (std::size_t i = 0; i < value.size() && i < max_width; ++i) {
-      const std::uint16_t x = static_cast<std::uint16_t>(col) + i;
+    std::size_t cells = 0;
+    for (std::size_t at = 0; at < value.size() && cells < max_width; ++cells) {
+      const std::uint16_t x = static_cast<std::uint16_t>(col) + cells;
       if (x >= cols_)
         break;
-      put(row, static_cast<std::uint8_t>(x), value[i], fg, bg);
+      const painter::tui::Glyph shape = painter::tui::GlyphAt(value, at);
+      put(row, static_cast<std::uint8_t>(x), shape.Character, fg, bg);
+      at += shape.Length;
     }
   }
 
   void centered(std::uint8_t row, std::uint8_t first, std::uint8_t width,
                 const std::string &value, box::color fg,
                 box::color bg = kBackground) {
-    const unsigned length = static_cast<unsigned>(value.size());
+    const unsigned length = static_cast<unsigned>(painter::tui::CellsOf(value));
     const unsigned offset = length < width ? (width - length) / 2 : 0;
     text(row, static_cast<std::uint8_t>(first + offset), value, fg,
          static_cast<std::uint8_t>(width - offset), bg);

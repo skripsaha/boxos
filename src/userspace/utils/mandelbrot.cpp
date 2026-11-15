@@ -29,6 +29,7 @@
 #include "box/print.h"
 
 #include "mandelbrot.h"
+#include "painter/tui/text.h"
 #include "painter/tui/stage.h"
 
 BOX_FORM("takes optional words \"tour, julia, or a palette: classic, fire, ocean, candy, aurora\"\n");
@@ -290,9 +291,9 @@ void Explorer::KeysBar()
     painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
     const painter::core::Size Dimensions = Screen->Size();
     int Row = Dimensions.Height - 1, Col = 1;
-    for (auto [Keys, What] : {std::pair{"\x1B\x18\x19\x1A", "look"}, {"+-", "zoom"}, {"j", "julia"}, {"c", "colours"},
+    for (auto [Keys, What] : {std::pair{"\u2190\u2191\u2193\u2192", "look"}, {"+-", "zoom"}, {"j", "julia"}, {"c", "colours"},
                               {"a", "turn"}, {"space", "tour"}, {"[]", "detail"}, {"r", "home"}, {"q", "leave"}}) {
-        int Wide = static_cast<int>(std::string_view(Keys).size() + std::string_view(What).size()) + 3;
+        int Wide = static_cast<int>(painter::tui::CellsOf(Keys) + std::string_view(What).size()) + 3;
         if (Col + Wide > Dimensions.Width) break;
         Col += static_cast<int>(FrameBuffer.Write({Col, Row}, Keys, TextStyle{KeyInk, BarPaper}));
         Col += 1;

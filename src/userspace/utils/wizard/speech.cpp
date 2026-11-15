@@ -21,8 +21,8 @@ constexpr std::int32_t LeastBubble = 22;
 constexpr std::uint64_t HoldBase = 2800;
 constexpr std::uint64_t HoldPerLetter = 48;
 constexpr std::uint64_t FadeMs = 800;
-constexpr char TailLeft = static_cast<char>(0x11);
-constexpr char TailRight = static_cast<char>(0x10);
+constexpr char32_t TailLeft = U'\u25C4';    /* ◄ */
+constexpr char32_t TailRight = U'\u25BA';   /* ► */
 
 // What the bubble is made of at its fullest and at the moment: Weight 0..256.
 struct Stuff {
