@@ -231,6 +231,9 @@ mkfs_laid() {
 # not build: the legs after it stand on the build's kernel and boxes.
 mkfs_image() {
     local work=$1 said line
+    # The image laid by THIS make, whatever a gate before this one left built:
+    # an image already there is not laid again, and says no census.
+    rm -f build/boxos.img
     if ! make >"$SCRATCH/build.log" 2>&1; then
         bad "mkfs: make does not build: $(grep -aE 'ERROR|check:|error' "$SCRATCH/build.log" | tail -1)"
         return 1

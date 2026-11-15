@@ -82,15 +82,12 @@ VolumeGeometry DeedGeometry(void);
 /* ====================================================================
  * The cargo (create_tagfs_cargo.c)
  *
- * A tag the kernel can hold — the widths of tag_spelling.h, which a host
- * tool cannot include: a key of at most TAG_KEY_WIDTH bytes, and a key and
- * value together of at most TAG_TEXT_ROOM (the ':' between them is not
- * stored). A tag wider than these is refused by the cargo, before the first
- * write: a volume carrying it could only be read (tally.py TagGlass).
+ * A tag the kernel can hold — the widths tagfs_reserved.h states for both: a
+ * key of at most TAG_KEY_WIDTH bytes, and a key and value together of at most
+ * TAG_KEY_VALUE_WIDTH (the ':' between them is not stored). A tag wider than
+ * these is refused by the cargo, before the first write: a volume carrying it
+ * could only be read (tally.py TagGlass).
  * ==================================================================== */
-
-#define TAG_KEY_WIDTH   255u
-#define TAG_TEXT_ROOM   4074u
 
 void         seed_reserved_tags(void);
 int          parse_tags(const char* tag_string, const char* path,

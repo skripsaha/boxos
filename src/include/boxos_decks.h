@@ -347,7 +347,7 @@
 #define STORAGE_OBJ_CREATE          0x06
 #define STORAGE_OBJ_DELETE          0x07
 #define STORAGE_OBJ_RENAME          0x08
-/* obj.getinfo — params = [u64 fid]; out_crate = [u64 fid][u64 size][u16 tags]
+/* obj.getinfo — params = [u64 fid]; out_crate = [u64 fid][u64 size][u32 tags]
  * [u16 name_len][name][tag records]…[u64 kept_until]: the last eight bytes are
  * the time, in nanoseconds of the wall clock, at which the volume lets a
  * deleted file go (obj.keep), 0 for a file that is not deleted. */
@@ -507,5 +507,21 @@
 #define HW_USB_ENUM_DEVICE      0x94
 #define HW_USB_GET_INFO         0x95
 #define HW_USB_PORT_QUERY       0x96
+
+/* ============================================================================
+ *  Operations deck opcodes — the same single source, for the kernel's handler
+ *  table (decks/operations/operations_ops.c, which says each op's crates and
+ *  params) and every program that builds a Manifest of them.
+ * ============================================================================ */
+#define OP_BUF_MOVE     0x01
+#define OP_BUF_FILL     0x02
+#define OP_BUF_XOR      0x03
+#define OP_BUF_HASH     0x04
+#define OP_BUF_CMP      0x05
+#define OP_BUF_FIND     0x06
+#define OP_BUF_PACK     0x07
+#define OP_BUF_UNPACK   0x08
+#define OP_BIT_SWAP     0x09
+#define OP_VAL_ADD      0x0A
 
 #endif // BOXOS_DECKS_H

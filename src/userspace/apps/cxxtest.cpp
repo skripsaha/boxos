@@ -4955,7 +4955,7 @@ void Phase20()
 }
 
 // ── Ф16b: box::manifest / box::crate / compiled_manifest / mf_call1 ───────────
-// Exercised against a read-only storage query (DECK_STORAGE, TAG_QUERY 0x01):
+// Exercised against a read-only storage query (DECK_STORAGE, STORAGE_TAG_QUERY):
 // in == none lists every file; the kernel writes [u32 delivered][u32 total]
 // [u64 ids...] into the output crate. The image always holds files, so this
 // is deterministic.

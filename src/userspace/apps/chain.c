@@ -25,9 +25,6 @@
 #define CHAIN_BUF_BYTES   64
 #define CHAIN_MBUF_BYTES  (16 + CHAIN_OPS * 13 + 64)  /* header + ops + slack */
 
-/* Operations Deck opcodes (mirror src/kernel/core/decks/operations/operations_deck.h) */
-#define OP_BUF_FILL  0x02
-
 static uint8_t  s_mbuf[CHAIN_MBUF_BYTES];
 static uint8_t  s_buf[CHAIN_BUF_BYTES];
 

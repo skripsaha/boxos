@@ -71,10 +71,16 @@
  * every size computation below far away from overflowing 64 bits. */
 #define NAMEPLATE_MAX_ENTRIES   (1u << 24)
 
+/* The most bytes the names may take: a name is found by a 32-bit NameOffset,
+ * so the blob ends where one can still point. Every writer refuses a wider
+ * blob and every reader a header that claims one — with both bounds the size
+ * arithmetic below cannot wrap. */
+#define NAMEPLATE_MAX_NAME_BYTES 0xFFFFFFFFull
+
 typedef struct NameplateHeader {
     uint32_t Magic;        /* NAMEPLATE_MAGIC */
     uint32_t EntryCount;
-    uint64_t NameBytes;    /* at most 4 GiB: NameOffset[] is 32-bit */
+    uint64_t NameBytes;    /* at most NAMEPLATE_MAX_NAME_BYTES: NameOffset[] is 32-bit */
     uint64_t BaseAddress;  /* address that Offset[] is measured from */
     uint64_t TotalBytes;   /* whole table, header included — self-describing */
 } NameplateHeader;
@@ -110,7 +116,7 @@ static inline int NameplateHeaderValid(const NameplateHeader *Header, uint64_t B
     if (Header->EntryCount == 0 || Header->EntryCount > NAMEPLATE_MAX_ENTRIES)
         return 0;
     /* Every name is at least one NUL, and the blob ends with one. */
-    if (Header->NameBytes < Header->EntryCount)
+    if (Header->NameBytes < Header->EntryCount || Header->NameBytes > NAMEPLATE_MAX_NAME_BYTES)
         return 0;
 
     Expected = NAMEPLATE_TOTAL_BYTES(Header->EntryCount, Header->NameBytes);

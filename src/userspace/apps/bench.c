@@ -337,8 +337,6 @@ static uint8_t s_bulk_mbuf[16 + BULK_OPS * 13 + 64];
 static uint8_t s_bulk_buf[64];
 static bool s_bulk_built = false;
 
-#define DECK_OPS_FILL 0x02
-
 static int b_chain_bulk(uint32_t i, void *ctx)
 {
     (void)i;
@@ -351,7 +349,7 @@ static int b_chain_bulk(uint32_t i, void *ctx)
         for (int k = 0; k < BULK_OPS; k++)
         {
             uint8_t fb = (uint8_t)k;
-            if (ManifestBuilderAddOp(&mb, DECK_OPERATIONS, DECK_OPS_FILL, 0,
+            if (ManifestBuilderAddOp(&mb, DECK_OPERATIONS, OP_BUF_FILL, 0,
                                      CRATE_INDEX_NONE, 0, &fb, 1) != 0)
                 return -1;
         }

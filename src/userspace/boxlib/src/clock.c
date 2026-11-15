@@ -12,23 +12,23 @@
  * is still correct, just slow.
  */
 
-static const ClockBoardView *cb(void)
+static const ClockBoard *cb(void)
 {
-    return (const ClockBoardView *)(uintptr_t)CABIN_CLOCKBOARD_ADDR;
+    return (const ClockBoard *)(uintptr_t)CABIN_CLOCKBOARD_ADDR;
 }
 
 bool clock_available(void)
 {
-    const ClockBoardView *v = cb();
+    const ClockBoard *v = cb();
     /* The magic says the page is mapped — a Cabin where the mapping
      * hasn't been set up reads none. */
-    return v->magic == CLOCKBOARD_MAGIC_USER;
+    return v->magic == CLOCKBOARD_MAGIC;
 }
 
 uint64_t clock_uptime_us(void)
 {
-    const ClockBoardView *v = cb();
-    if (v->magic == CLOCKBOARD_MAGIC_USER) {
+    const ClockBoard *v = cb();
+    if (v->magic == CLOCKBOARD_MAGIC) {
         return v->uptime_us;
     }
     /* Fallback: ask the kernel via the HW deck. */
@@ -39,8 +39,8 @@ uint64_t clock_uptime_us(void)
 
 uint64_t clock_uptime_ms(void)
 {
-    const ClockBoardView *v = cb();
-    if (v->magic == CLOCKBOARD_MAGIC_USER) {
+    const ClockBoard *v = cb();
+    if (v->magic == CLOCKBOARD_MAGIC) {
         return v->uptime_ms;
     }
     uint64_t ms = 0;
@@ -50,8 +50,8 @@ uint64_t clock_uptime_ms(void)
 
 uint64_t clock_unix_now(void)
 {
-    const ClockBoardView *v = cb();
-    if (v->magic == CLOCKBOARD_MAGIC_USER && v->boot_unix_secs != 0) {
+    const ClockBoard *v = cb();
+    if (v->magic == CLOCKBOARD_MAGIC && v->boot_unix_secs != 0) {
         return v->boot_unix_secs + (v->uptime_us / 1000000ULL);
     }
     /* Fallback: ask the kernel directly. */
@@ -62,8 +62,8 @@ uint64_t clock_unix_now(void)
 
 uint64_t clock_unix_now_ns(void)
 {
-    const ClockBoardView *v = cb();
-    if (v->magic == CLOCKBOARD_MAGIC_USER && v->boot_unix_secs != 0) {
+    const ClockBoard *v = cb();
+    if (v->magic == CLOCKBOARD_MAGIC && v->boot_unix_secs != 0) {
         /* Single board view: boot_unix_secs is immutable post-boot and the
          * kernel writes uptime_us as one 8-byte store, so reading both from
          * the same snapshot keeps seconds and sub-seconds consistent. */
@@ -80,8 +80,8 @@ uint64_t clock_unix_now_ns(void)
 
 uint64_t clock_tsc_to_ns(uint64_t tsc_ticks)
 {
-    const ClockBoardView *v = cb();
-    uint64_t khz = (v->magic == CLOCKBOARD_MAGIC_USER) ? v->tsc_freq_khz : 0;
+    const ClockBoard *v = cb();
+    uint64_t khz = (v->magic == CLOCKBOARD_MAGIC) ? v->tsc_freq_khz : 0;
     if (khz == 0) return 0;
     /* (tsc * 1_000_000) / khz — split to avoid 64-bit overflow on the
      * multiply when tsc is large. khz is ~1e6 so (tsc / khz) is the
@@ -141,8 +141,8 @@ int clock_boxtime(BoxTime *out)
 {
     if (!out) return -ERR_NULL_POINTER;
 
-    const ClockBoardView *v = cb();
-    if (v->magic != CLOCKBOARD_MAGIC_USER) {
+    const ClockBoard *v = cb();
+    if (v->magic != CLOCKBOARD_MAGIC) {
         /* Fallback: full RTC fetch via manifest. */
         return time_get(out);
     }

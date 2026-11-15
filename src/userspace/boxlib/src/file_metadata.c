@@ -70,6 +70,16 @@ static int ReadU16(const uint8_t *Blob, uint32_t Size, uint32_t *Position,
     return 0;
 }
 
+static int ReadU32(const uint8_t *Blob, uint32_t Size, uint32_t *Position,
+                   uint32_t *Out)
+{
+    if (!Blob || !Position || !Out || *Position > Size || Size - *Position < 4u)
+        return -ERR_INTERNAL;
+    memcpy(Out, Blob + *Position, sizeof(*Out));
+    *Position += sizeof(*Out);
+    return 0;
+}
+
 static int ReadBytes(const uint8_t *Blob, uint32_t Size, uint32_t *Position,
                      uint32_t Count, const uint8_t **Out)
 {
@@ -81,11 +91,11 @@ static int ReadBytes(const uint8_t *Blob, uint32_t Size, uint32_t *Position,
 }
 
 static int MetadataTagBytes(const uint8_t *Blob, uint32_t Size,
-                            uint32_t Position, uint16_t TagCount,
+                            uint32_t Position, uint32_t TagCount,
                             size_t *OutBytes)
 {
     size_t Bytes = 0;
-    uint16_t Index;
+    uint32_t Index;
 
     if (!Blob || !OutBytes)
         return -ERR_INVALID_ARGUMENT;
@@ -132,13 +142,13 @@ int FileMetadataRead(file_id_t FileId, FileMetadata *Out)
     uint8_t *Blob = NULL;
     uint32_t BlobSize = 0;
     uint32_t Position = 0;
-    uint16_t TagCount;
+    uint32_t TagCount;
     uint16_t FilenameLength;
     const uint8_t *FilenameBytes;
     size_t TagBytes = 0;
     char *Filename = NULL;
     char *Tags = NULL;
-    uint16_t Index;
+    uint32_t Index;
     int Rc;
 
     if (!Out)
@@ -149,7 +159,7 @@ int FileMetadataRead(file_id_t FileId, FileMetadata *Out)
     if (Rc != 0)
         return Rc;
 
-    if (BlobSize < 28u) {
+    if (BlobSize < 30u) {
         free(Blob);
         return -ERR_INTERNAL;
     }
@@ -158,7 +168,7 @@ int FileMetadataRead(file_id_t FileId, FileMetadata *Out)
     Position += sizeof(Out->FileId);
     memcpy(&Out->Size, Blob + Position, sizeof(Out->Size));
     Position += sizeof(Out->Size);
-    if (ReadU16(Blob, BlobSize, &Position, &TagCount) != 0 ||
+    if (ReadU32(Blob, BlobSize, &Position, &TagCount) != 0 ||
         ReadU16(Blob, BlobSize, &Position, &FilenameLength) != 0) {
         free(Blob);
         return -ERR_INTERNAL;

@@ -8,6 +8,13 @@
 # record is judged by the book's census and blklog_book.py — a step committed
 # by its stitch (powercut.py COMMIT_KINDS).
 
+# The two sentences of src/kernel/tagfs/settle_cut/settle_cut.c the cuts at a
+# point wait for (spared, undonecut, engross): a kernel built SETTLECUT=<point>
+# says it is armed — for the verdict's stitch or an Engross in a sentence of
+# their own — and says where the power went when it stops the machine there.
+SC_ARMED_ERE='^\[SETTLECUT\] armed( for the (verdict|Engross))?: the first (cycle|stitch) to reach point [0-9]+ of [0-9]+, .*, (with the change of the first anchor after this line in its snapshot stops this machine there|stops this machine there, anchored or not)$'
+SC_CUT_ERE='\[SETTLECUT\] the power went at point [0-9]+ of [0-9]+, .*, in cycle [0-9]+ of this boot, whose snapshot reaches Ink [0-9]+ of the anchor.s [0-9]+,'
+
 # ---------------------------------------------------------------------------
 # The medium that lied (powercut_lie.py): Blot and Smudge, apart
 # ---------------------------------------------------------------------------

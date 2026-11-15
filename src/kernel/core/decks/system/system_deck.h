@@ -4,6 +4,7 @@
 #include "ktypes.h"
 #include "error.h"
 #include "boxos_decks.h"
+#include "boxos_system_info.h"   /* SystemInfo, SystemResources, EfiInfo — the answers, shared with boxlib */
 
 typedef struct process_t process_t;
 typedef struct Question Question;
@@ -11,11 +12,6 @@ typedef struct Question Question;
 /* All SYSTEM_OP_* opcodes live in src/include/boxos_decks.h (included
  * above) — single source of truth for kernel handler tables and boxlib
  * syscall wrappers. NEVER add a SYSTEM_OP_* define here. */
-
-/* Layout of SYSTEM_OP_EFI_INFO out_crate (128 bytes, packed; system_ops.c
- * spells it). Returned in one blob so a single op call gives userspace the
- * full picture without round-trips. */
-#define EFI_INFO_BLOB_SIZE        128u
 
 /* The deposit window (system_deck.c, cabin.h deposit_*): what the kernel
  * lends a program to read, in whole pages of its own. */

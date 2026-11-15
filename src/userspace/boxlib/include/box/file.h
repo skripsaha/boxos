@@ -33,7 +33,7 @@ typedef struct {
 typedef struct {
     file_id_t FileId;
     uint64_t  Size;
-    uint16_t  TagCount;
+    uint32_t  TagCount;
     char     *Filename;
     char     *Tags;
     uint64_t  KeptUntil;      /* the wall clock's nanoseconds a deleted file is kept until; 0 for one that is not */

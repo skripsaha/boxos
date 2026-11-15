@@ -385,7 +385,7 @@ static Blob TableBuild(const Symbol *Syms, size_t Count)
 
     for (i = 0; i < Count; i++)
         NameBytes += strlen(Syms[i].Name) + 1;
-    if (NameBytes > 0xFFFFFFFFull)
+    if (NameBytes > NAMEPLATE_MAX_NAME_BYTES)
         Fail("name blob exceeds 4 GiB", NULL);
 
     Total = NAMEPLATE_TOTAL_BYTES(Count, NameBytes);

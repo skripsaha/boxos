@@ -595,6 +595,29 @@ static void TestTallyOwedLaid(const TestCase* test)
                 "it stands\n", test->name, (unsigned)rc);
 }
 
+/*
+ * The tests that write begin on a book whose ribbon a Tally took in, whatever
+ * a session before this boot left on it: a stitch of this mount settled, which
+ * a Tally stands past (§4.2), its tails laid in their blocks (binder.c,
+ * BinderRunWhole), and nothing its ribbon let go resting in Fallow at the
+ * mounts after. A session leaves files whose tails ride Slips — each
+ * holds every Tally back until the Helm's service, on another core, lays it —
+ * and the ground its stitches gave up resting at every mount until a stitch of
+ * that mount leaves the ribbon's Quire: past a test's cut of the free ground,
+ * where it gives the ribbon a Quire the test weighed it without. Measured: a
+ * second boot of the stand met two such tails and 453 blocks resting, and 25
+ * tests of room, Tallies and Slips failed on them.
+ */
+static void TestBookTallied(void)
+{
+    error_t rc = TagFSSettle();
+    if (rc == OK)
+        rc = BinderRunWhole();
+    if (rc != OK)
+        kprintf("[TESTS] the Tally the tests that write begin on was not laid (error %u): they meet the book as it "
+                "stands\n", (unsigned)rc);
+}
+
 static void TestRun(const TestCase* test, uint32_t of, TestStats* stats)
 {
     bool        guarded = test->reach == TEST_WRITES_TO_VOLUME;
@@ -700,6 +723,7 @@ error_t TagFS_RunAllTests(TestStats* stats)
             }
             if (test->reach == TEST_WRITES_TO_VOLUME && !path_said) {
                 TestSayWritePath();
+                TestBookTallied();
                 TestSeekLag();
                 path_said = true;
             }

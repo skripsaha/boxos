@@ -30,12 +30,8 @@
  *   - in a list, tags are separated by ',' and a blank element is skipped.
  */
 
-#define TAG_KEY_WIDTH        255u
-
-/* The bytes of one tag's key and value together — what every station, the
- * book's TAGS and a stitch's Coined hold a tag to (mount/tally_leaves.c,
- * settle/endpaper_fact.h). */
-#define TAG_KEY_VALUE_WIDTH  4074u
+/* TAG_KEY_WIDTH and TAG_KEY_VALUE_WIDTH are tagfs_reserved.h's, which the
+ * image builder reads too. */
 
 /* The longest text of one tag: key, ':' and value. A station that must copy
  * one tag out of a program's memory judges the text's whole length against it

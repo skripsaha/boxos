@@ -14,9 +14,7 @@
 #include "box/print.h"
 #include "box/file.h"
 #include "box/memory.h"
-#include "box/string.h"
 #include "box/system.h"
-#include "box/error.h"
 #include "quilltest.h"
 
 #ifdef CONFIG_VOLUME_TESTS
@@ -41,32 +39,16 @@ static int64_t QuillWriteChunk(file_id_t fid, uint32_t seed, uint64_t off)
     return fwrite(fid, off, g_chunk, QUILL_CHUNK);
 }
 
-/* The byte at which a file holding one extent per block is refused: its
- * record — 42 bytes, 2 per tag, 6 per extent and the name — fills the 4080
- * bytes of a pool block's data (plot/plot_width.h RECORD_HEADER_SIZE and
- * TAGFS_MPOOL_DATA_SIZE, PlotFits). 2748416, 671 extents, for
- * a 10-byte name wearing its stem alone. 0 when the file will not say. */
-static uint64_t QuillWidthLimit(file_id_t fid)
-{
-    file_info_t info;
-    if (file_info(fid, &info) != 0)
-        return 0;
-    uint32_t fixed = 42u + 2u * info.tag_count + (uint32_t)strlen(info.filename);
-    return fixed < 4080u ? (uint64_t)((4080u - fixed) / 6u) * QUILL_CHUNK : 0;
-}
-
 /* =========================================================================
  *  sequential — one writer, 4 KiB at a time, one write after another
  * ========================================================================= */
 
 /* The design's 1.3 test "3 MB in a row". A lone writer is the case where
- * every block could lie next to the one before it: a record that merges
- * neighbouring blocks into one extent holds the whole file in a handful of
- * extents, and a record that takes one extent per write runs out of room at
- * its 4080 bytes long before the volume runs out of space. The DEFECT is that
- * refusal and nothing else: ERR_IO at exactly the byte the record's width
- * puts it — any other refusal, a medium's among them, is a FAIL. The host
- * counts the extents (logcheck `quill`, volume-read.py list). */
+ * every block could lie next to the one before it, so the file should come to
+ * lie in a handful of runs. The book holds a file's runs in as many Parcels as
+ * they take (file_record.h) — no width of a record refuses a write — so every
+ * refusal is a FAIL, the medium's among them. The host counts the runs
+ * against their ceiling (logcheck `quill`, volume-read.py list). */
 QuillVerdict QuillSequential(const char *const *args)
 {
     (void)args;
@@ -88,7 +70,6 @@ QuillVerdict QuillSequential(const char *const *args)
     }
     uint64_t acked = (uint64_t)done * QUILL_CHUNK;
     uint64_t size  = QuillSize((file_id_t)fid);
-    uint64_t limit = QuillWidthLimit((file_id_t)fid);
     int64_t  rerr  = 0;
     uint64_t good  = QuillReadBack((file_id_t)fid, QUILL_SEED_S, size, &rerr);
     int      arc   = anchor(0);
@@ -100,20 +81,10 @@ QuillVerdict QuillSequential(const char *const *args)
                QUILL_SEQ_BYTES, writes, QUILL_CHUNK);
         return QUILL_PASS;
     }
-    if (whole && refusal == -(int64_t)ERR_IO && limit && acked == limit) {
-        printf("[QUILL] sequential: DEFECT — quillS.bin, with no other writer, refused its "
-               "write at byte %llu of %u (error %u) after %u writes of %u in a row, the byte "
-               "its record's width puts the refusal at (%llu); the %llu bytes it acknowledged "
-               "read back exactly — no extent merge, and the record width runs out\n",
-               (unsigned long long)acked, QUILL_SEQ_BYTES, box_errno_of((int)refusal), done,
-               QUILL_CHUNK, (unsigned long long)limit, (unsigned long long)size);
-        return QUILL_DEFECT;
-    }
     printf("[QUILL] sequential: FAIL — quillS.bin took %u of %u writes of %u (the next "
-           "answered %lld, and the record's width refuses at byte %llu), holds %llu bytes and "
-           "reads back good to byte %llu (read answer %lld, anchor %d)\n", done, writes,
-           QUILL_CHUNK, (long long)refusal, (unsigned long long)limit, (unsigned long long)size,
-           (unsigned long long)good, (long long)rerr, arc);
+           "answered %lld), holds %llu bytes and reads back good to byte %llu (read answer "
+           "%lld, anchor %d)\n", done, writes, QUILL_CHUNK, (long long)refusal,
+           (unsigned long long)size, (unsigned long long)good, (long long)rerr, arc);
     return QUILL_FAIL;
 }
 
@@ -123,10 +94,10 @@ QuillVerdict QuillSequential(const char *const *args)
 
 /* One program alternating rather than two strands: the allocator sees the
  * same interleaving, the order is the same on every run, and what makes two
- * files' blocks land apart — Allotment — is per file id either way. On HEAD
- * this case is refused at the same byte as `sequential`, by quillA.bin, which
- * writes first in every round: the record width, not the interleaving; once
- * 1.3 lands it asks about Allotment alone. */
+ * files' blocks land apart — Allotment — is per file id either way. It asks
+ * about Allotment alone: as for `sequential`, no width of a record refuses a
+ * write, so every refusal is a FAIL, and the host counts each file's runs
+ * against their ceiling. */
 QuillVerdict QuillInterleave(const char *const *args)
 {
     (void)args;
@@ -171,7 +142,6 @@ QuillVerdict QuillInterleave(const char *const *args)
         size[f] = QuillSize((file_id_t)fids[f]);
         good[f] = QuillReadBack((file_id_t)fids[f], seeds[f], size[f], &rerr[f]);
     }
-    uint64_t limit = QuillWidthLimit((file_id_t)fids[0]);
     int  arc   = anchor(0);
     bool whole = arc == 0 && good[0] == size[0] && good[1] == size[1] &&
                  size[0] + size[1] == (uint64_t)done * QUILL_CHUNK;
@@ -182,23 +152,12 @@ QuillVerdict QuillInterleave(const char *const *args)
                QUILL_WEAVE_BYTES, done, QUILL_CHUNK);
         return QUILL_PASS;
     }
-    if (whole && stopped == 0 && refusal == -(int64_t)ERR_IO && limit && refused_at == limit &&
-        size[0] == refused_at && size[1] == refused_at) {
-        printf("[QUILL] interleave: DEFECT — %s refused its write at byte %llu of %u (error %u) "
-               "after %u alternating writes of %u, the byte its record's width puts the refusal "
-               "at (%llu); the %llu and %llu bytes the two files acknowledged read back exactly\n",
-               names[stopped], (unsigned long long)refused_at, QUILL_WEAVE_BYTES,
-               box_errno_of((int)refusal), done, QUILL_CHUNK, (unsigned long long)limit,
-               (unsigned long long)size[0], (unsigned long long)size[1]);
-        return QUILL_DEFECT;
-    }
     printf("[QUILL] interleave: FAIL — %u alternating writes of %u taken (the next answered "
-           "%lld at byte %llu, and the record's width refuses at byte %llu); quillA.bin holds "
-           "%llu bytes good to %llu, quillB.bin %llu good to %llu (read answers %lld, %lld; "
-           "anchor %d)\n", done, QUILL_CHUNK, (long long)refusal, (unsigned long long)refused_at,
-           (unsigned long long)limit, (unsigned long long)size[0], (unsigned long long)good[0],
-           (unsigned long long)size[1], (unsigned long long)good[1], (long long)rerr[0],
-           (long long)rerr[1], arc);
+           "%lld at byte %llu); quillA.bin holds %llu bytes good to %llu, quillB.bin %llu good "
+           "to %llu (read answers %lld, %lld; anchor %d)\n", done, QUILL_CHUNK,
+           (long long)refusal, (unsigned long long)refused_at, (unsigned long long)size[0],
+           (unsigned long long)good[0], (unsigned long long)size[1], (unsigned long long)good[1],
+           (long long)rerr[0], (long long)rerr[1], arc);
     return QUILL_FAIL;
 }
 

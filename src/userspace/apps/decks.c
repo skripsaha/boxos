@@ -21,11 +21,6 @@
 #include "box/convert.h"
 #include "box/error.h"
 
-#define DECK_OPS_FILL   0x02
-#define DECK_OPS_MOVE   0x01
-#define DECK_OPS_HASH   0x04
-#define DECK_OPS_CMP    0x05
-
 static int g_passed = 0;
 static int g_failed = 0;
 
@@ -52,9 +47,9 @@ static bool test_operations(void)
     if (ManifestBuilderInit(&mb, mbuf, sizeof(mbuf)) != 0) return false;
 
     uint8_t fill = 0xABu;
-    if (ManifestBuilderAddOp(&mb, DECK_OPERATIONS, DECK_OPS_FILL, 0,
+    if (ManifestBuilderAddOp(&mb, DECK_OPERATIONS, OP_BUF_FILL, 0,
                              CRATE_INDEX_NONE, 0, &fill, 1) != 0) return false;
-    if (ManifestBuilderAddOp(&mb, DECK_OPERATIONS, DECK_OPS_MOVE, 0,
+    if (ManifestBuilderAddOp(&mb, DECK_OPERATIONS, OP_BUF_MOVE, 0,
                              0, 1, NULL, 0) != 0) return false;
     if (ManifestBuilderFinalize(&mb) != 0) return false;
 

@@ -2,7 +2,7 @@
 #define CLOCKBOARD_H
 
 #include "ktypes.h"
-#include "cabin_layout.h"
+#include "boxos_clockboard.h"   /* ClockBoard, CLOCKBOARD_MAGIC — the page's layout, shared with boxlib */
 
 /*
  * ClockBoard — kernel-published, userspace-readable clock page.
@@ -14,9 +14,9 @@
  * static fields are written once during early boot. A read from userspace is
  * a plain pointer load — no syscall, no manifest, no ring round-trip.
  *
- * The layout is this tree's: the kernel and BoxLib are built together, and
- * BoxLib mirrors it field for field. Reader pattern: check `magic` first;
- * without it (no page mapped) fall back to the manifest path.
+ * The layout is boxos_clockboard.h's, the one header the kernel and BoxLib
+ * both read it from. Reader pattern: check `magic` first; without it (no page
+ * mapped) fall back to the manifest path.
  *
  * Counter consistency: uptime_us is a single naturally-aligned 64-bit
  * word, written by exactly one core (BSP). On x86-64 such a store is
@@ -30,25 +30,6 @@
  * publishes; the userspace consumes via plain pointer read; per-process
  * filtering / derivation lives in the boxlib layer.
  */
-
-#define CLOCKBOARD_MAGIC    0x4b4c4342u    /* 'BCLK' = Box Clock */
-
-typedef struct __attribute__((packed)) {
-    /* Dynamic — written per PIT tick by BSP. Each a naturally-aligned word. */
-    volatile uint64_t uptime_us;     /* monotonic; advanced by 1_000_000/freq µs per tick */
-    volatile uint64_t uptime_ms;     /* uptime_us / 1000, refreshed per tick */
-    volatile uint64_t tick_count;    /* raw PIT tick counter */
-
-    /* Constant after boot. */
-    uint64_t tsc_freq_khz;     /* TSC frequency in kHz, calibrated once */
-    uint64_t boot_unix_secs;   /* RTC unix-epoch seconds at boot */
-    uint32_t magic;            /* CLOCKBOARD_MAGIC, set once during boot */
-
-    /* Pad to one full page so the struct sizeof matches the mapping. */
-    uint8_t  _reserved[4096 - 8 - 8 - 8 - 8 - 8 - 4];
-} ClockBoard;
-
-_Static_assert(sizeof(ClockBoard) == 4096, "ClockBoard must be exactly one page");
 
 /* One-time setup: allocate the physical backing page, fill the
  * magic. Call from kernel_main BEFORE pit_init so the IRQ handler
