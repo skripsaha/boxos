@@ -5,9 +5,9 @@
 #include "../plot/plot.h"
 
 /*
- * Perambulation — the judge of a book whose medium came back (spec_v2 §3.8,
- * §16.5 пп.10-12, C14, C20): the bounds of what this kernel left walked
- * again, on the medium as it now is, before the open book is taken up.
+ * Perambulation — the judge of a book whose medium came back (C14, C20):
+ * the bounds of what this kernel left walked again, on the medium as it now
+ * is, before the open book is taken up.
  *
  * ‼ THE MARK IS SEARCHED FOR, NOT READ FROM ONE PLACE (M-3). A book changes
  * nothing at a fixed place in a cycle — the Spine changes only with a Tally —

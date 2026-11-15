@@ -24,8 +24,7 @@
 #ifdef CONFIG_VOLUME_TESTS
 
 // ============================================================================
-// The stand_away suite: a book's medium that leaves and comes back (spec_v2
-// §3.8, §16.5 пп.10-12, C14, C20)
+// The stand_away suite: a book's medium that leaves and comes back (C14, C20)
 //
 // The volume is let go of nowhere here: the stand's departure latches it
 // (TagFSStandMediumLeaves), what a hand or another machine would do to the

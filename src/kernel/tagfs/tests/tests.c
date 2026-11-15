@@ -235,7 +235,7 @@ uint64_t StandTallyQuires(uint64_t q, uint64_t** marks, uint64_t* nquire)
 }
 
 /* A book's own ground, each block once, as its census holds it at a mount and
- * its Binder at a Tally (spec_v2 §16.5 п.17): every Quire of the grid a slot
+ * its Binder at a Tally: every Quire of the grid a slot
  * names a node in, and the current pair, whole (StandTallyQuires) — a slot a
  * mount read names its nodes alone, and the census holds the Quire each lies
  * in (mount/ground_census.c GroundQuiresHeld), the Binder gives it back whole
