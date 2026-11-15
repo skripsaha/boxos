@@ -20,7 +20,7 @@ DEFAULT ABS
 ; 0x07000             - 16-bit stack top, grows down
 ; 0x07C00             - Stage1 (512 bytes)
 ; 0x08000..0x09FFF    - Stage2 (16 sectors — the whole window, always loaded)
-; 0x0A000             - Boot info for kernel (structured, versioned)
+; 0x0A000             - Boot info for kernel (one structure, boot_info.h)
 ; 0x0A200             - Sector 0 of the medium: its partition table (512 bytes)
 ; 0x0A600             - Boarding pass for kernel (512 bytes, stamped)
 ; 0x0B000..0x0BFFF    - The volume's Deed (4096 bytes — one whole block)
@@ -75,9 +75,11 @@ STAGE2_SIGNATURE      equ 0x2907
   %error "BOOT_INFO_ADDR must come from the build (-DBOOT_INFO_ADDR=...)"
 %endif
 
-; boot_info structure constants (shared contract with kernel)
-BOOT_INFO_MAGIC       equ 0x42583031     ; "BX01" — BoxOS boot info v1
-BOOT_INFO_VERSION     equ 1
+; boot_info — the layout is src/include/boot_info.h, whose static assertions
+; hold every offset written below and the size zeroed before it.
+BOOT_INFO_MAGIC       equ 0x544F4F42     ; 'B','O','O','T'
+BOOT_INFO_BYTES       equ 132
+BOOT_METHOD_BIOS      equ 0
 
 ; The Boarding Pass — what this loader tells the kernel about its own arrival,
 ; as opposed to boot_info, which describes the machine. Layout in
@@ -429,9 +431,16 @@ long_mode_start:
     test rax, rax
     jz .kernel_not_loaded
 
-    ; Write structured boot_info at BOOT_INFO_ADDR
+    ; Write boot_info at BOOT_INFO_ADDR. The whole block is zeroed first:
+    ; every field of it is always present, and the ones this loader has
+    ; nothing to say in — the framebuffer, the firmware's tables — must read
+    ; as zero, not as whatever the memory held before.
+    mov edi, BOOT_INFO_ADDR
+    mov ecx, BOOT_INFO_BYTES / 4
+    xor eax, eax
+    rep stosd
     mov dword [BOOT_INFO_ADDR],      BOOT_INFO_MAGIC    ; +0:  magic
-    mov dword [BOOT_INFO_ADDR+4],    BOOT_INFO_VERSION   ; +4:  version
+    mov dword [BOOT_INFO_ADDR+4],    BOOT_METHOD_BIOS    ; +4:  boot_method
     mov dword [BOOT_INFO_ADDR+8],    E820_MAP_ADDR       ; +8:  e820_map_addr
     mov ax, [E820_COUNT_ADDR]
     mov word  [BOOT_INFO_ADDR+12],   ax                  ; +12: e820_count
@@ -463,7 +472,6 @@ long_mode_start:
     mov dword [BOOT_INFO_ADDR+28],   eax                 ; +28: page_table_base
     mov eax, [dynamic_stack_base]
     mov dword [BOOT_INFO_ADDR+32],   eax                 ; +32: stack_base
-    mov dword [BOOT_INFO_ADDR+36],   40                  ; +36: total_size
 
     call write_boarding_pass
 

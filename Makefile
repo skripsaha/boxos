@@ -890,6 +890,7 @@ TAGBOOT_SRC    = src/boot/uefi/tagboot.c src/boot/uefi/tagboot_deed.c src/boot/u
                  src/boot/uefi/tagboot_succession.c
 TAGBOOT_HDRS   = src/boot/uefi/tagboot.h src/boot/uefi/uefi.h \
                  src/boot/uefi/tagboot_lectern.h src/boot/uefi/tagboot_lectern_book.h \
+                 src/include/boot_info.h \
                  src/include/volume_deed.h src/include/volume_book.h \
                  src/include/volume_tally.h src/include/volume_spine.h src/include/volume_ribbon.h \
                  src/include/volume_digest.h

@@ -96,24 +96,13 @@ static acpi_rsdp_t* scan_memory_range(uintptr_t start, uintptr_t end) {
  *
  * The bootloader (TagBoot) walks the EFI Configuration Table looking for
  * the ACPI 2.0 GUID (preferred) or the ACPI 1.0 GUID, and forwards the
- * physical address in boot_info v2. Under UEFI low memory may be entirely
- * unmapped or contain garbage — do NOT fall back to EBDA/ROM scans.
+ * physical address in boot_info's rsdp_addr. Under UEFI low memory may be
+ * entirely unmapped or contain garbage — do NOT fall back to EBDA/ROM scans.
  */
 static acpi_rsdp_t* rsdp_from_uefi(void) {
     boot_info_t* bi = boot_info_get();
-    if (!bi || !boot_info_valid(bi))
+    if (!boot_info_valid(bi) || bi->boot_method != BOOT_METHOD_UEFI)
         return NULL;
-    /* Accept any UEFI version (v2 or v3+). The RSDP forwarding contract
-     * is identical from v2 onward — only the trailing fields grow. */
-    if (!boot_info_is_uefi(bi))
-        return NULL;
-    /* total_size is the size of THIS boot_info_t copy at link time;
-     * loader-side may be older and write a smaller record. Require at
-     * least up through rsdp_addr. */
-    if (bi->total_size < offsetof(boot_info_t, rsdp_addr) + sizeof(bi->rsdp_addr))
-        return NULL;
-    if (bi->boot_method != 1)
-        return NULL;             /* not UEFI */
     if (bi->rsdp_addr == 0) {
         debug_printf("[ACPI] UEFI boot but firmware exposed no RSDP — refusing legacy scan\n");
         return NULL;
@@ -179,10 +168,8 @@ acpi_rsdp_t* acpi_find_rsdp(void) {
      * no spec-compliant fallback. If TagBoot couldn't find the RSDP, neither
      * can we. */
     boot_info_t* bi = boot_info_get();
-    if (bi && boot_info_valid(bi) && boot_info_is_uefi(bi)
-        && bi->boot_method == 1) {
+    if (boot_info_valid(bi) && bi->boot_method == BOOT_METHOD_UEFI)
         return rsdp_from_uefi();
-    }
 
     return rsdp_from_bios();
 }

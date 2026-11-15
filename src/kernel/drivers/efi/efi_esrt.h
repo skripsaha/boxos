@@ -62,7 +62,7 @@ typedef struct {
 _Static_assert(sizeof(EfiSystemResourceEntry) == 40,
                "EfiSystemResourceEntry must be 40 bytes (UEFI 2.10 §23.4.2)");
 
-/* Initialise ESRT from the boot-info v4 capture.  Idempotent.  Returns
+/* Initialise ESRT from the boot_info capture.  Idempotent.  Returns
  * false on BIOS boots or when the firmware did not publish an ESRT. */
 bool efi_esrt_init(void);
 

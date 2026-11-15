@@ -4,7 +4,7 @@
 /*
  * BoxOS EFI runtime services driver — kernel side.
  *
- * Consumes the EFI handoff fields in boot_info v4 (see
+ * Consumes the EFI handoff fields in boot_info (see
  * src/include/boot_info.h) and:
  *
  *   1. Maps every EFI_MEMORY_RUNTIME descriptor at a dedicated kernel
@@ -309,7 +309,7 @@ typedef struct {
  * observed to mishandle reordered virtual maps. */
 #define EFI_RT_VA_BASE  0xFFFFFF8000000000ULL
 
-/* Initialise EFI runtime services from boot_info v3 or v4. Maps every
+/* Initialise EFI runtime services from boot_info. Maps every
  * EFI_MEMORY_RUNTIME descriptor at EFI_RT_VA_BASE + phys, then calls
  * SetVirtualAddressMap. After success the public wrappers below are
  * usable. Idempotent on the second call (returns OK without re-mapping).
@@ -398,7 +398,7 @@ EfiStatus efi_query_capsule_capabilities(EfiCapsuleHeader **capsule_header_array
  *
  * Returns a kernel-VA pointer (via Pull Map) to the firmware-published
  * Configuration Table array and writes the count to *out_count. Returns
- * NULL with *out_count=0 on BIOS boots or when the v4 handoff is absent.
+ * NULL with *out_count=0 on BIOS boots or when the firmware gave none.
  *
  * The vendor_table fields in each entry are physical addresses — apply
  * vmm_phys_to_virt() before dereferencing them.
