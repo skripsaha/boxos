@@ -66,12 +66,12 @@ STAGE2_SECTORS      = 16
 # Physical address of the boot_info handoff block. ONE number, four consumers:
 # src/boot/stage2/stage2.asm (BIOS loader writes it), src/boot/uefi/tagboot.c
 # (UEFI loader writes it), src/kernel/entry/kernel_entry.asm (reads the boot
-# stack out of it before any C runs) and src/include/boot_info.h (everything
-# else). It was spelled out separately in all four until 2026-08-23, when
-# moving it turned up the copy in kernel_entry.asm — which would have taken
-# the kernel's stack pointer from whatever happened to be at the old address.
-# The two headers _Static_assert against this value, so a drift is a build
-# error rather than a boot that gets as far as its first push.
+# stack out of it before any C runs) and src/include/boot_info.h (the kernel
+# and TagBoot both). It was spelled out separately in all four until
+# 2026-08-23, when moving it turned up the copy in kernel_entry.asm — which
+# would have taken the kernel's stack pointer from whatever happened to be at
+# the old address. The header _Static_asserts against this value, so a drift
+# is a build error rather than a boot that gets as far as its first push.
 BOOT_INFO_ADDR      = 0xA000
 # Where the loaders leave the Boarding Pass — what they say about the journey
 # that produced this kernel, as opposed to boot_info, which describes the
