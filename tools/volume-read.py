@@ -34,7 +34,7 @@ digests the census takes (bookcensus.py DigestMemoWrite). `boot` says which
 kernel the UEFI loader jumps into, and why: the slot its book stands on,
 whether the blocks BOOT names match the digests its Tally keeps, and, when
 they do not, each kernel the book names by tag in turn (bootread.py,
-bootbook.py, the oracle of tools/tagboot_stand.c). `self-test` plants every
+bootbook.py, the oracle of tools/gangway_stand.c). `self-test` plants every
 rule's damage into an overlay over IMAGE and checks that each is caught.
 
 DEVICE is a raw device or an image file:

@@ -1,16 +1,16 @@
-#ifndef TAGBOOT_H
-#define TAGBOOT_H
+#ifndef GANGWAY_H
+#define GANGWAY_H
 
 /*
- * What crosses between the files of TagBoot, and nothing else.
+ * What crosses between the files of Gangway, and nothing else.
  *
- * The loader is one EFI image linked from more than one file: tagboot.c holds
- * the firmware, the medium and the jump; tagboot_deed.c takes up what a
- * volume's Deed says; tagboot_attest.c is the desk the Lectern
- * (tagboot_lectern*.c, tagboot_succession.c) chooses the volume's kernel at.
+ * The loader is one EFI image linked from more than one file: gangway.c holds
+ * the firmware, the medium and the jump; gangway_deed.c takes up what a
+ * volume's Deed says; gangway_attest.c is the desk the Lectern
+ * (gangway_lectern*.c, gangway_succession.c) chooses the volume's kernel at.
  * Every other function and variable stays static to its own file, so a name
  * here is a name another file of the loader really uses — the Lectern's own
- * are tagboot_lectern_book.h's.
+ * are gangway_lectern_book.h's.
  */
 
 #include "uefi.h"
@@ -20,19 +20,19 @@
  * includer. The book's (its Spine, ribbon and digests) come in with the
  * Lectern's header. */
 #include "volume_deed.h"
-#include "tagboot_lectern.h"
+#include "gangway_lectern.h"
 
 /* Where the kernel is placed and jumped into. */
 #define KERNEL_LOAD_ADDR 0x100000ULL
 
-/* tagboot.c: the console, and bytes moved with no library under them. */
+/* gangway.c: the console, and bytes moved with no library under them. */
 void Print(const char *msg);
 void PrintDec(uint64_t v);
 void PrintHex64(uint64_t v);
 void MemCopy(void *dst, const void *src, size_t n);
 
 /*
- * tagboot_deed.c: what the Deed said, filled by DeedTakeUp — the FRAME its
+ * gangway_deed.c: what the Deed said, filled by DeedTakeUp — the FRAME its
  * book is laid out by; BOOT where the Deed carries one naming a kernel, the
  * kernel tried first, before those its book names by role.
  */
@@ -48,19 +48,19 @@ extern uint64_t     g_volume_end;
 extern uint64_t     g_volume_atom_blocks;
 
 /*
- * Take up the Deed the probe read and checked (tagboot.c, FindGroundOn) out
+ * Take up the Deed the probe read and checked (gangway.c, FindGroundOn) out
  * of `deed_block`: EFI_SUCCESS when the volume on the ground at `ground_start`
  * is a book this loader boots, said in a line of its own; else why it is not
  * — a Deed with no FRAME, or one whose FRAME, block or BOOT does not hold — is
  * said with the line left open, and the caller ends it naming the medium it
- * passes over (tagboot.c, BlockIoProbeVolume).
+ * passes over (gangway.c, BlockIoProbeVolume).
  */
 EFI_STATUS DeedTakeUp(const uint8_t *deed_block, uint64_t ground_start);
 
 /*
- * tagboot_attest.c: the volume's kernel, chosen by the Succession
+ * gangway_attest.c: the volume's kernel, chosen by the Succession
  * — BOOT's first, then the kernels its book names by role — read through
- * `read` (tagboot.c's reader of the volume, 512-byte sectors counted from its
+ * `read` (gangway.c's reader of the volume, 512-byte sectors counted from its
  * ground) into pages `bs` gives, and placed at KERNEL_LOAD_ADDR: NULL with its
  * size in *bytes and the end of its pages in *alloc_end — attested, or with
  * nothing to hold it to, said — or the sentence to stop
@@ -70,4 +70,4 @@ EFI_STATUS DeedTakeUp(const uint8_t *deed_block, uint64_t ground_start);
 typedef EFI_STATUS (*AttestReader)(uint64_t vlba, uint32_t count_512, void *buffer);
 const char *SuccessionTake(EFI_BOOT_SERVICES *bs, AttestReader read, uint64_t *bytes, uint64_t *alloc_end);
 
-#endif /* TAGBOOT_H */
+#endif /* GANGWAY_H */

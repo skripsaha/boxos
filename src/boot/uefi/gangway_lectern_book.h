@@ -1,20 +1,20 @@
-#ifndef TAGBOOT_LECTERN_BOOK_H
-#define TAGBOOT_LECTERN_BOOK_H
+#ifndef GANGWAY_LECTERN_BOOK_H
+#define GANGWAY_LECTERN_BOOK_H
 
 /*
- * What crosses between the files of the Lectern (tagboot_lectern.h), and
+ * What crosses between the files of the Lectern (gangway_lectern.h), and
  * nothing else:
  *
- *   tagboot_lectern.c         memory and lines; a unit and a node read off
+ *   gangway_lectern.c         memory and lines; a unit and a node read off
  *                             the medium; the slot stood on; the DIGESTS tree
  *                             walked down to a block's digest; Attest
- *   tagboot_lectern_tree.c    a tree's leaves walked in key order: the files
+ *   gangway_lectern_tree.c    a tree's leaves walked in key order: the files
  *                             of FILES kept in a role
- *   tagboot_lectern_ribbon.c  the stitches past the slot's `at`, sewn on by
+ *   gangway_lectern_ribbon.c  the stitches past the slot's `at`, sewn on by
  *                             rules (а)/(б)/(б′)/(в)
- *   tagboot_lectern_replay.c  their records replayed for the files followed,
+ *   gangway_lectern_replay.c  their records replayed for the files followed,
  *                             and the digests they carry
- *   tagboot_succession.c      the kernels tried in turn, and the choice
+ *   gangway_succession.c      the kernels tried in turn, and the choice
  *
  * The loader's integer types are uefi.h's (it builds -nostdinc, with no
  * <stdint.h>); the host stand's are the host's.
@@ -26,7 +26,7 @@
 #include "uefi.h"
 #endif
 
-#include "tagboot_lectern.h"
+#include "gangway_lectern.h"
 
 /* ------------------------------------------------------------------------- */
 /* Lines                                                                     */
@@ -200,7 +200,7 @@ typedef struct {
 } LecternBook;
 
 /* ------------------------------------------------------------------------- */
-/* tagboot_lectern.c                                                         */
+/* gangway_lectern.c                                                         */
 /* ------------------------------------------------------------------------- */
 
 void    LecternSay(const LecternBook *b, const LecternLine *l);
@@ -237,7 +237,7 @@ AttestSays LecternAttest(LecternBook *b, const char *who, const LecternRun *runs
 void    LecternClose(LecternBook *b);
 
 /* ------------------------------------------------------------------------- */
-/* tagboot_lectern_tree.c                                                    */
+/* gangway_lectern_tree.c                                                    */
 /* ------------------------------------------------------------------------- */
 
 /* The files FILES holds that are kept in a role or that the ribbon puts in
@@ -253,7 +253,7 @@ void    LecternFileGive(const LecternBook *b, LecternFile *f);
 int     LecternFileCopy(LecternBook *b, LecternFile *to, const LecternFile *from);
 
 /* ------------------------------------------------------------------------- */
-/* tagboot_lectern_ribbon.c                                                  */
+/* gangway_lectern_ribbon.c                                                  */
 /* ------------------------------------------------------------------------- */
 
 /* The stitches past the slot's `at`, sewn on into b->stitches. 1, or 0 no room. */
@@ -261,7 +261,7 @@ int     LecternSew(LecternBook *b);
 void    LecternStitchGive(const LecternBook *b, LecternStitch *u);
 
 /* ------------------------------------------------------------------------- */
-/* tagboot_lectern_replay.c                                                  */
+/* gangway_lectern_replay.c                                                  */
 /* ------------------------------------------------------------------------- */
 
 /* Before the files: the files the ribbon puts in a role. */
@@ -273,4 +273,4 @@ int     LecternOverlay(LecternBook *b, LecternFile *const *kernels, uint64_t n);
 /* The digest of block `v` the ribbon carries: 1 with it in *digest, or 0. */
 int     LecternOverlaid(const LecternBook *b, uint64_t v, uint64_t *digest);
 
-#endif /* TAGBOOT_LECTERN_BOOK_H */
+#endif /* GANGWAY_LECTERN_BOOK_H */

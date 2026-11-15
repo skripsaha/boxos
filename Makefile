@@ -64,10 +64,10 @@ DEBUG    ?= off
 STAGE2_SECTORS      = 16
 
 # Physical address of the boot_info handoff block. ONE number, four consumers:
-# src/boot/stage2/stage2.asm (BIOS loader writes it), src/boot/uefi/tagboot.c
+# src/boot/stage2/stage2.asm (BIOS loader writes it), src/boot/uefi/gangway.c
 # (UEFI loader writes it), src/kernel/entry/kernel_entry.asm (reads the boot
 # stack out of it before any C runs) and src/include/boot_info.h (the kernel
-# and TagBoot both). It was spelled out separately in all four until
+# and Gangway both). It was spelled out separately in all four until
 # 2026-08-23, when moving it turned up the copy in kernel_entry.asm — which
 # would have taken the kernel's stack pointer from whatever happened to be at
 # the old address. The header _Static_asserts against this value, so a drift
@@ -884,22 +884,22 @@ UEFI_ESP_IMG = $(BUILDDIR)/esp.img
 # ==== UEFI BOOTLOADER ====
 # The loader's files, and every header any of them reads: a change to one is a
 # change to the loader.
-TAGBOOT_SRC    = src/boot/uefi/tagboot.c src/boot/uefi/tagboot_deed.c src/boot/uefi/tagboot_attest.c \
-                 src/boot/uefi/tagboot_lectern.c src/boot/uefi/tagboot_lectern_tree.c \
-                 src/boot/uefi/tagboot_lectern_ribbon.c src/boot/uefi/tagboot_lectern_replay.c \
-                 src/boot/uefi/tagboot_succession.c
-TAGBOOT_HDRS   = src/boot/uefi/tagboot.h src/boot/uefi/uefi.h \
-                 src/boot/uefi/tagboot_lectern.h src/boot/uefi/tagboot_lectern_book.h \
+GANGWAY_SRC    = src/boot/uefi/gangway.c src/boot/uefi/gangway_deed.c src/boot/uefi/gangway_attest.c \
+                 src/boot/uefi/gangway_lectern.c src/boot/uefi/gangway_lectern_tree.c \
+                 src/boot/uefi/gangway_lectern_ribbon.c src/boot/uefi/gangway_lectern_replay.c \
+                 src/boot/uefi/gangway_succession.c
+GANGWAY_HDRS   = src/boot/uefi/gangway.h src/boot/uefi/uefi.h \
+                 src/boot/uefi/gangway_lectern.h src/boot/uefi/gangway_lectern_book.h \
                  src/include/boot_info.h src/include/boarding_pass.h \
                  src/include/volume_deed.h src/include/volume_book.h \
                  src/include/volume_tally.h src/include/volume_spine.h src/include/volume_ribbon.h \
                  src/include/volume_digest.h
-TAGBOOT_JUMP   = src/boot/uefi/tagboot_jump.asm
-TAGBOOT_LD     = src/boot/uefi/tagboot.ld
-TAGBOOT_EFI    = $(BUILDDIR)/BOOTX64.EFI
-TAGBOOT_SO     = $(BUILDDIR)/tagboot.so
-TAGBOOT_OBJ    = $(patsubst src/boot/uefi/%.c,$(BUILDDIR)/%.o,$(TAGBOOT_SRC))
-TAGBOOT_JUMP_OBJ = $(BUILDDIR)/tagboot_jump.o
+GANGWAY_JUMP   = src/boot/uefi/gangway_jump.asm
+GANGWAY_LD     = src/boot/uefi/gangway.ld
+GANGWAY_EFI    = $(BUILDDIR)/BOOTX64.EFI
+GANGWAY_SO     = $(BUILDDIR)/gangway.so
+GANGWAY_OBJ    = $(patsubst src/boot/uefi/%.c,$(BUILDDIR)/%.o,$(GANGWAY_SRC))
+GANGWAY_JUMP_OBJ = $(BUILDDIR)/gangway_jump.o
 
 # UEFI compile/link flags
 # gcc ELF path: compile with -fpic, link as .so, objcopy to PE32+
@@ -1693,13 +1693,13 @@ $(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_B
 	printf '  %s\n' "$$LAST"; \
 	printf '%s\n' "$$VERDICT" | sed -n 's/^check: \(the kernel in this tree would NOT mount this volume: .*\)/  WARNING: \1/p'
 	@# The loader holds the kernel to the book before the jump
-	@# (tagboot_attest.c, tagboot_succession.c). The oracle reads the image as
+	@# (gangway_attest.c, gangway_succession.c). The oracle reads the image as
 	@# the loader will, so a kernel the book does not attest fails the build
 	@# here — not at the first UEFI boot of the image.
 	@BOOT=$$(python3 tools/volume-read.py $@ boot 2>&1); \
 	if ! printf '%s\n' "$$BOOT" | grep -q 'is attested by the book'; then \
 		printf '%s\n' "$$BOOT"; \
-		echo "ERROR: tools/volume-read.py boot finds no kernel the book of $@ attests — TagBoot would not jump into it as made"; \
+		echo "ERROR: tools/volume-read.py boot finds no kernel the book of $@ attests — Gangway would not jump into it as made"; \
 		exit 1; \
 	fi; \
 	printf '  %s\n' "$$(printf '%s\n' "$$BOOT" | tail -1)"
@@ -1726,34 +1726,34 @@ $(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_B
 # The EFI binary is placed at build/BOOTX64.EFI.  To boot it with OVMF:
 #   make run UEFI=on   (requires OVMF.fd in the project root or /usr/share/ovmf/)
 
-uefi: $(TAGBOOT_EFI)
+uefi: $(GANGWAY_EFI)
 
 ifdef CLANG_AVAILABLE
 
 # ---- clang path: compile directly to PE32+ EFI application ----
-# Assemble tagboot_jump.asm to ELF64 first; clang links both objects into PE.
-$(TAGBOOT_JUMP_OBJ): $(TAGBOOT_JUMP) | $(BUILDDIR)
-	@echo "Assembling TagBoot jump trampoline..."
+# Assemble gangway_jump.asm to ELF64 first; clang links both objects into PE.
+$(GANGWAY_JUMP_OBJ): $(GANGWAY_JUMP) | $(BUILDDIR)
+	@echo "Assembling Gangway jump trampoline..."
 	@$(ASM) -f elf64 $< -o $@
 
-$(TAGBOOT_EFI): $(TAGBOOT_SRC) $(TAGBOOT_JUMP_OBJ) $(TAGBOOT_LD) $(TAGBOOT_HDRS) | $(BUILDDIR)
-	@echo "Building TagBoot UEFI (clang/lld → PE32+)..."
+$(GANGWAY_EFI): $(GANGWAY_SRC) $(GANGWAY_JUMP_OBJ) $(GANGWAY_LD) $(GANGWAY_HDRS) | $(BUILDDIR)
+	@echo "Building Gangway UEFI (clang/lld → PE32+)..."
 	@clang $(UEFI_CFLAGS_CLANG) \
-		-Wl,-entry:TagBootMain \
+		-Wl,-entry:GangwayMain \
 		-Wl,-subsystem:efi_application \
 		-Wl,-nodefaultlib \
-		-o $@ $(TAGBOOT_SRC) $(TAGBOOT_JUMP_OBJ)
-	@echo "TagBoot EFI: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
+		-o $@ $(GANGWAY_SRC) $(GANGWAY_JUMP_OBJ)
+	@echo "Gangway EFI: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
 
 else
 
 # ---- gcc path: compile to ELF PIC .so, then objcopy to PE32+ ----
-$(TAGBOOT_JUMP_OBJ): $(TAGBOOT_JUMP) | $(BUILDDIR)
-	@echo "Assembling TagBoot jump trampoline..."
+$(GANGWAY_JUMP_OBJ): $(GANGWAY_JUMP) | $(BUILDDIR)
+	@echo "Assembling Gangway jump trampoline..."
 	@$(ASM) -f elf64 $< -o $@
 
-$(TAGBOOT_OBJ): $(BUILDDIR)/%.o: src/boot/uefi/%.c $(TAGBOOT_HDRS) | $(BUILDDIR)
-	@echo "Building TagBoot UEFI object $@ (gcc ELF)..."
+$(GANGWAY_OBJ): $(BUILDDIR)/%.o: src/boot/uefi/%.c $(GANGWAY_HDRS) | $(BUILDDIR)
+	@echo "Building Gangway UEFI object $@ (gcc ELF)..."
 	@$(UEFI_CC) $(UEFI_CFLAGS_GCC) -c $< -o $@
 
 # ‼ -z defs: no symbol of the loader is left for anyone to resolve at load. It
@@ -1761,18 +1761,18 @@ $(TAGBOOT_OBJ): $(BUILDDIR)/%.o: src/boot/uefi/%.c $(TAGBOOT_HDRS) | $(BUILDDIR)
 # on its own — a memcpy for a struct copied, a memset for a loop it saw
 # through — is a symbol nothing will ever define, and an EFI image that calls
 # address 0 the first time that path runs. The link refuses it here instead.
-$(TAGBOOT_SO): $(TAGBOOT_OBJ) $(TAGBOOT_JUMP_OBJ) $(TAGBOOT_LD) | $(BUILDDIR)
-	@echo "Linking TagBoot ELF shared object..."
+$(GANGWAY_SO): $(GANGWAY_OBJ) $(GANGWAY_JUMP_OBJ) $(GANGWAY_LD) | $(BUILDDIR)
+	@echo "Linking Gangway ELF shared object..."
 	@$(LD) \
 		-nostdlib \
 		-shared \
 		-Bsymbolic \
 		-z defs \
-		-T $(TAGBOOT_LD) \
-		-o $@ $(TAGBOOT_OBJ) $(TAGBOOT_JUMP_OBJ)
+		-T $(GANGWAY_LD) \
+		-o $@ $(GANGWAY_OBJ) $(GANGWAY_JUMP_OBJ)
 
-$(TAGBOOT_EFI): $(TAGBOOT_SO) | $(BUILDDIR)
-	@echo "Converting TagBoot ELF → PE32+ EFI binary (make_efi.py)..."
+$(GANGWAY_EFI): $(GANGWAY_SO) | $(BUILDDIR)
+	@echo "Converting Gangway ELF → PE32+ EFI binary (make_efi.py)..."
 	@python3 tools/make_efi.py $< $@
 
 endif
@@ -1791,7 +1791,7 @@ comma := ,
 #   make run EMU=bochs                — Bochs (SDL2 on macOS, X11 on Linux)
 #   make run EMU=bochs BOCHSDBG=on    — Bochs + internal text debugger
 #   make run EMU=bochs GDB=on         — Bochs gdb stub on tcp:1234
-#   make run UEFI=on                  — QEMU via OVMF + TagBoot EFI
+#   make run UEFI=on                  — QEMU via OVMF + Gangway EFI
 #   make run UEFI=on EMU=bochs        — Bochs via OVMF (only on Bochs builds with
 #                                       extended ROM area; stock builds reject 3.5MB OVMF)
 #   make run EMU=bochs CORES=4        — only works on Bochs built --enable-smp
@@ -1999,9 +1999,9 @@ $(BUILDDIR)/edk2-vars.fd: | $(BUILDDIR)
 # from it. It no longer depends on edk2-vars.fd — NVRAM belongs to running a
 # virtual machine, not to building a filesystem, and the image needs this even
 # when no OVMF is installed.
-$(UEFI_ESP_IMG): $(TAGBOOT_EFI) | $(BUILDDIR)
+$(UEFI_ESP_IMG): $(GANGWAY_EFI) | $(BUILDDIR)
 	@echo "Creating UEFI ESP image (FAT32) for sector $(ESP_START_SECTOR)..."
-	@python3 tools/make_esp.py $(TAGBOOT_EFI) $@ $(ESP_START_SECTOR)
+	@python3 tools/make_esp.py $(GANGWAY_EFI) $@ $(ESP_START_SECTOR)
 
 # The two run-bg keys, refused here before anything is built: an interactive
 # run would boot build/boxos.img unrecorded and let the key pass unheard.
@@ -2190,7 +2190,7 @@ run-bg: $(RUN_BG_NEEDS)
 #                       inside the volume is counted from there.
 #   • Partition 2     = an EFI System Partition (FAT32) holding
 #                       EFI/BOOT/BOOTX64.EFI, which UEFI firmware finds by
-#                       itself. TagBoot then reads this same table for the
+#                       itself. Gangway then reads this same table for the
 #                       BoxOS partition, so both paths reach the same volume
 #                       by asking the same question.
 #
@@ -2383,7 +2383,7 @@ clean:
 	@rm -f $(TAGFS_TOOL)
 	@rm -f tools/nameplate
 	@rm -f $(APPS_STAMP) $(UTILS_STAMP)
-	@rm -f $(TAGBOOT_SO) $(TAGBOOT_OBJ) $(TAGBOOT_JUMP_OBJ)
+	@rm -f $(GANGWAY_SO) $(GANGWAY_OBJ) $(GANGWAY_JUMP_OBJ)
 	@cd $(USERSPACE_DIR) && $(MAKE) clean
 	@cd $(APPS_DIR) && $(MAKE) clean
 	@cd $(DISPLAY_DIR) && $(MAKE) clean
@@ -2460,7 +2460,7 @@ info:
 	@echo "  FULLSCREEN=on — fullscreen mode"
 	@echo "  USB=on|off    — enable/disable USB keyboard"
 	@echo "  AHCI=on       — use AHCI disk controller"
-	@echo "  UEFI=on       — boot via OVMF + TagBoot EFI (requires OVMF.fd)"
+	@echo "  UEFI=on       — boot via OVMF + Gangway EFI (requires OVMF.fd)"
 	@echo "  POWERCUT=on   — run-bg: record every write and flush of the boot disk in POWERCUT_LOG (tools/powercut.sh)"
 	@echo "  BOOTDISK=path — run-bg: boot this disk as it stands, without rebuilding the image"
 	@echo ""

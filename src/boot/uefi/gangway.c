@@ -1,14 +1,14 @@
 /*
- * TagBoot — UEFI bootloader for BoxOS
+ * Gangway — UEFI bootloader for BoxOS
  *
  * Boot sequence:
  *   1. Locate Block IO on boot device via loaded image device handle
  *   2. Read the medium's partition table for the ground claimed for BoxOS,
  *      and the Deed at the head of it
- *   3. Take up what the Deed says (tagboot_deed.c): a volume whose Deed bears
+ *   3. Take up what the Deed says (gangway_deed.c): a volume whose Deed bears
  *      no FRAME, or one that does not hold, is no book this loader boots, and
  *      its medium is passed over for the next one
- *   4. The Succession (tagboot_attest.c, tagboot_succession.c) — the kernel
+ *   4. The Succession (gangway_attest.c, gangway_succession.c) — the kernel
  *      BOOT names, then the kernels the book names by role, each placed at
  *      0x100000 and held to the digests the book keeps of its blocks; the
  *      first attested is the one jumped into, one that does not match never is
@@ -27,12 +27,12 @@
  * PAE=1) and the kernel establishes every further EFER bit it needs — NXE
  * in CpuTakeUpNoExecute, SCE in per_core_setup_notify_msrs. Three comments
  * in this file used to claim EFER.LME+NXE was set here while
- * tagboot_jump.asm said the opposite and did nothing; the kernel's own NXE
+ * gangway_jump.asm said the opposite and did nothing; the kernel's own NXE
  * write then landed after it had already mapped firmware pages with bit 63,
  * and two real boards panicked inside SetVirtualAddressMap with err=0x9.
  */
 
-#include "tagboot.h"
+#include "gangway.h"
 /* The two blocks the kernel reads, by the structures it reads them by — the
  * one definition of each, shared, not a copy of it. */
 #include "boot_info.h"
@@ -60,8 +60,8 @@ static __attribute__((noinline)) void PhysWrite16(uint64_t addr, uint16_t val)
  * loop over uncontrolled memory. */
 #define EFI_CFG_TABLE_MAX_ENTRIES  256U
 
-/* KERNEL_LOAD_ADDR is tagboot.h's; KERNEL_MAX_SIZE is the Lectern's
- * (tagboot_lectern.h), which holds every kernel to it before it is jumped
+/* KERNEL_LOAD_ADDR is gangway.h's; KERNEL_MAX_SIZE is the Lectern's
+ * (gangway_lectern.h), which holds every kernel to it before it is jumped
  * into. */
 #define E820_COUNT_ADDR       0x500ULL
 #define E820_SIZE_ADDR        0x502ULL
@@ -276,7 +276,7 @@ void PrintDec(uint64_t v)
 /* Fatal halt: print error, spin forever. */
 static void Panic(const char *msg)
 {
-    Print("\r\n[TAGBOOT FATAL] ");
+    Print("\r\n[GANGWAY FATAL] ");
     Print(msg);
     Print("\r\n");
     for (;;) {
@@ -478,7 +478,7 @@ static int DeedAt(EFI_BLOCK_IO_PROTOCOL *bio, uint64_t lba, uint32_t want_role,
     MemCopy(probe, out, summed);
     MemZero(probe + __builtin_offsetof(VolumeDeed, crc32), 4);
     if (Crc32(probe, summed) != deed.crc32) {
-        Print("TagBoot: a deed here does not match its own checksum\r\n");
+        Print("Gangway: a deed here does not match its own checksum\r\n");
         return 0;
     }
 
@@ -524,7 +524,7 @@ static int FindGroundOn(EFI_BLOCK_IO_PROTOCOL *bio, uint8_t *deed_out,
              * volume's own second opinion, and it says the same things. */
             uint64_t tail = start + ((count / 8) - 1) * 8;
             if (DeedAt(bio, tail, VOLUME_DEED_ROLE_TAIL, deed_out)) {
-                Print("TagBoot: read the deed from the far end of the volume\r\n");
+                Print("Gangway: read the deed from the far end of the volume\r\n");
                 *out_start = start; *out_sectors = count; return 1;
             }
         }
@@ -547,7 +547,7 @@ static int FindGroundOn(EFI_BLOCK_IO_PROTOCOL *bio, uint8_t *deed_out,
     MemCopy(hprobe, header, header_bytes);
     MemZero(hprobe + GPT_HEADER_CRC_OFFSET, 4);
     if (Crc32(hprobe, header_bytes) != Le32(header + GPT_HEADER_CRC_OFFSET)) {
-        Print("TagBoot: this disk's GPT header fails its own checksum\r\n");
+        Print("Gangway: this disk's GPT header fails its own checksum\r\n");
         return 0;
     }
 
@@ -564,7 +564,7 @@ static int FindGroundOn(EFI_BLOCK_IO_PROTOCOL *bio, uint8_t *deed_out,
     if (EFI_ERROR(ReadMediumSectors(bio, entry_lba, array_secs, array))) return 0;
 
     if (Crc32(array, array_bytes) != Le32(header + GPT_ENTRY_CRC_OFFSET)) {
-        Print("TagBoot: this disk's GPT entries fail their own checksum\r\n");
+        Print("Gangway: this disk's GPT entries fail their own checksum\r\n");
         return 0;
     }
 
@@ -585,7 +585,7 @@ static int FindGroundOn(EFI_BLOCK_IO_PROTOCOL *bio, uint8_t *deed_out,
         }
         uint64_t tail = first + ((count / 8) - 1) * 8;
         if (DeedAt(bio, tail, VOLUME_DEED_ROLE_TAIL, deed_out)) {
-            Print("TagBoot: read the deed from the far end of the volume\r\n");
+            Print("Gangway: read the deed from the far end of the volume\r\n");
             *out_start = first; *out_sectors = count; return 1;
         }
     }
@@ -664,7 +664,7 @@ static EFI_STATUS BlockIoFindDevice(EFI_HANDLE image_handle)
     EFI_HANDLE probed = NULL;
     EFI_STATUS status;
 
-    Print("TagBoot: scanning for TagFS block device...\r\n");
+    Print("Gangway: scanning for TagFS block device...\r\n");
 
     status = g_bs->handle_protocol(image_handle,
                                    &loaded_image_guid,
@@ -676,7 +676,7 @@ static EFI_STATUS BlockIoFindDevice(EFI_HANDLE image_handle)
                                        &block_io_guid,
                                        (void **)&bio);
         if (!EFI_ERROR(status) && BlockIoProbeVolume(bio, 0, 0)) {
-            Print("TagBoot: the volume is on the device this loader came from\r\n");
+            Print("Gangway: the volume is on the device this loader came from\r\n");
             g_block_io = bio;
             return EFI_SUCCESS;
         }
@@ -684,7 +684,7 @@ static EFI_STATUS BlockIoFindDevice(EFI_HANDLE image_handle)
 
     /* The loaded-image device carries no book.
      * Enumerate all raw (non-partition) BlockIO handles and probe each. */
-    Print("TagBoot: loaded-image device has no TagFS book, scanning all handles...\r\n");
+    Print("Gangway: loaded-image device has no TagFS book, scanning all handles...\r\n");
 
     UINTN       handle_count = 0;
     EFI_HANDLE *handles      = NULL;
@@ -727,7 +727,7 @@ static EFI_STATUS BlockIoFindDevice(EFI_HANDLE image_handle)
     g_bs->free_pool(handles);
 
     if (EFI_ERROR(found))
-        Print("TagBoot: no medium here carries a book — a TagFS volume whose deed this loader reads and holds\r\n");
+        Print("Gangway: no medium here carries a book — a TagFS volume whose deed this loader reads and holds\r\n");
 
     return found;
 }
@@ -746,7 +746,7 @@ static EFI_STATUS ReadSectors(uint64_t vlba, uint32_t count_512, void *buffer)
  * Kernel loading
  * ========================================================================= */
 
-/* Where the pages the kernel was placed in END (tagboot_attest.c, AttestPlace,
+/* Where the pages the kernel was placed in END (gangway_attest.c, AttestPlace,
  * asked for them; SuccessionTake says where they end). Page-aligned by
  * construction, and the first address past it is the first one the loader has
  * NOT already reserved — which is where the BSS reservation has to begin, for
@@ -1171,7 +1171,7 @@ static GopModeChoice SelectGopBestMode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
         if (verified)
             return GopChoiceEdid;
 
-        Print("TagBoot: GOP EDID mode change ");
+        Print("Gangway: GOP EDID mode change ");
         Print(EFI_ERROR(status) ? "failed status=" : "verification failed status=");
         PrintHex64((uint64_t)status);
         Print(" — keeping the firmware mode\r\n");
@@ -1214,7 +1214,7 @@ static GopModeChoice SelectGopBestMode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
                   GopModeInfoUsable(gop->mode->info, &current_format,
                                     &current_bytes);
     if (!verified) {
-        Print("TagBoot: GOP fallback mode change ");
+        Print("Gangway: GOP fallback mode change ");
         Print(EFI_ERROR(status) ? "failed status=" : "verification failed status=");
         PrintHex64((uint64_t)status);
         Print(" — keeping the firmware mode\r\n");
@@ -1230,7 +1230,7 @@ static FbInfo QueryGopFramebuffer(void)
 
     GopSelection selection;
     if (!GopFindPrimary(&selection) || !selection.gop || !selection.gop->mode) {
-        Print("TagBoot: no display adapter here offers a linear framebuffer — "
+        Print("Gangway: no display adapter here offers a linear framebuffer — "
               "the kernel comes up on text\r\n");
         return fb;
     }
@@ -1243,7 +1243,7 @@ static FbInfo QueryGopFramebuffer(void)
     GopModeChoice choice = SelectGopBestMode(gop, have_edid ? &preferred : NULL,
                                              &invalid_modes);
 
-    Print("TagBoot: GOP modes=");
+    Print("Gangway: GOP modes=");
     PrintDec(gop->mode->max_mode);
     Print(" current=");
     PrintDec(current_mode);
@@ -1270,7 +1270,7 @@ static FbInfo QueryGopFramebuffer(void)
     uint32_t format      = 0;
     uint32_t pixel_bytes = 0;
     if (!GopModeInfoUsable(mode->info, &format, &pixel_bytes)) {
-        Print("TagBoot: GOP pixel format ");
+        Print("Gangway: GOP pixel format ");
         PrintDec((uint64_t)mode->info->pixel_format);
         Print(" (masks r=");
         PrintHex64(mode->info->pixel_info.red_mask);
@@ -1288,14 +1288,14 @@ static FbInfo QueryGopFramebuffer(void)
     uint64_t stride = (uint64_t)mode->info->pixels_per_scan_line * pixel_bytes;
     if (stride > 0xFFFFFFFFULL ||
         stride > (~0ULL / (uint64_t)mode->info->vertical_resolution)) {
-        Print("TagBoot: GOP scan-line geometry overflows the framebuffer contract — "
+        Print("Gangway: GOP scan-line geometry overflows the framebuffer contract — "
               "the kernel comes up on text\r\n");
         return fb;
     }
     uint64_t span = stride * (uint64_t)mode->info->vertical_resolution;
 
     if (mode->frame_buffer_base == 0 || span == 0) {
-        Print("TagBoot: GOP reports no framebuffer for its own mode — "
+        Print("Gangway: GOP reports no framebuffer for its own mode — "
               "the kernel comes up on text\r\n");
         return fb;
     }
@@ -1311,12 +1311,12 @@ static FbInfo QueryGopFramebuffer(void)
      */
     if (mode->frame_buffer_size != 0 &&
         span > (uint64_t)mode->frame_buffer_size) {
-        Print("TagBoot: GOP's aperture is smaller than the scan lines it "
+        Print("Gangway: GOP's aperture is smaller than the scan lines it "
               "describes — refusing the framebuffer\r\n");
         return fb;
     }
     if (mode->frame_buffer_base > (~0ULL - span)) {
-        Print("TagBoot: GOP framebuffer address overflows its visible span — "
+        Print("Gangway: GOP framebuffer address overflows its visible span — "
               "the kernel comes up on text\r\n");
         return fb;
     }
@@ -1330,7 +1330,7 @@ static FbInfo QueryGopFramebuffer(void)
     /* The order and the scan line go on the line as well. They are what this
      * loader decided rather than read, and a wrong one shows as inverted
      * colours or diagonal text with nothing else on screen to explain it. */
-    Print("TagBoot: GOP ");
+    Print("Gangway: GOP ");
     PrintDec(fb.width);
     Print("x");
     PrintDec(fb.height);
@@ -1561,7 +1561,7 @@ static uint64_t FindEsrt(uint32_t *out_size)
         EsrtHeader *hdr = (EsrtHeader *)ct[i].vendor_table;
         if (!hdr) return 0;
         if (hdr->fw_resource_version != ESRT_FW_RESOURCE_VERSION) {
-            Print("TagBoot: ESRT: unknown FwResourceVersion=");
+            Print("Gangway: ESRT: unknown FwResourceVersion=");
             PrintDec(hdr->fw_resource_version);
             Print(" — ignoring\r\n");
             return 0;
@@ -1570,7 +1570,7 @@ static uint64_t FindEsrt(uint32_t *out_size)
          * board publishes; rejects a corrupted table that would otherwise
          * overflow our NVS copy. */
         if (hdr->fw_resource_count > 1024U) {
-            Print("TagBoot: ESRT: unreasonable FwResourceCount=");
+            Print("Gangway: ESRT: unreasonable FwResourceCount=");
             PrintDec(hdr->fw_resource_count);
             Print(" — ignoring\r\n");
             return 0;
@@ -1584,7 +1584,7 @@ static uint64_t FindEsrt(uint32_t *out_size)
 
 /* Copy ESRT to fresh EfiACPIMemoryNVS pages. Returns physical address of
  * the copy, or 0 on failure. Idempotent in the sense that a subsequent
- * call would just consume another arena — but TagBootMain calls this once.
+ * call would just consume another arena — but GangwayMain calls this once.
  *
  * The ESRT here still resides in EfiBootServicesData and therefore must be
  * fully read out before EBS. We do this immediately after FindEsrt. */
@@ -1607,7 +1607,7 @@ static uint64_t CopyEsrtToNvs(uint64_t esrt_phys, uint32_t esrt_size)
                                          pages,
                                          &buf);
     if (EFI_ERROR(s)) {
-        Print("TagBoot: ESRT NVS alloc failed\r\n");
+        Print("Gangway: ESRT NVS alloc failed\r\n");
         return 0;
     }
     MemCopy((void *)(uintptr_t)buf,
@@ -1675,7 +1675,7 @@ static void ClaimHandoffPages(void)
         EFI_STATUS s = g_bs->allocate_pages(AllocateAddress, EfiLoaderData,
                                             1, &pa);
         if (EFI_ERROR(s)) {
-            Print("TagBoot: firmware would not set aside ");
+            Print("Gangway: firmware would not set aside ");
             PrintHex64(wanted[i].at);
             Print(" for ");
             Print(wanted[i].what);
@@ -1687,7 +1687,7 @@ static void ClaimHandoffPages(void)
         held++;
     }
 
-    Print("TagBoot: set aside ");
+    Print("Gangway: set aside ");
     PrintDec(held);
     Print(" of 3 handoff page(s)\r\n");
 }
@@ -1739,7 +1739,7 @@ static EFI_STATUS BuildMemoryMap(MemMapResult *out)
      * operator can act on, and it is the only headroom figure anyone gets:
      * the map rebuilt after ExitBootServices is a different map, and this one
      * does not bound it. */
-    Print("TagBoot: memory map ");
+    Print("Gangway: memory map ");
     PrintDec(count);
     Print(" of ");
     PrintDec(E820_MAX_ENTRIES);
@@ -1818,7 +1818,7 @@ static EFI_STATUS DoExitBootServices(EFI_HANDLE image_handle)
                                             &buf_pa);
         if (EFI_ERROR(s)) {
             last_status = s;
-            Print("TagBoot: EBS attempt ");
+            Print("Gangway: EBS attempt ");
             PrintDec(attempt);
             Print(" — allocate_pages(NVS) failed\r\n");
             continue;
@@ -1830,7 +1830,7 @@ static EFI_STATUS DoExitBootServices(EFI_HANDLE image_handle)
                                   &key, &desc_sz, &desc_ver);
         if (EFI_ERROR(s)) {
             last_status = s;
-            Print("TagBoot: EBS attempt ");
+            Print("Gangway: EBS attempt ");
             PrintDec(attempt);
             Print(" — get_memory_map failed\r\n");
             g_bs->free_pages(buf_pa, pages);
@@ -1857,7 +1857,7 @@ static EFI_STATUS DoExitBootServices(EFI_HANDLE image_handle)
          * indicates firmware is starved and may need a power cycle. Logging
          * the status hex lets us tell them apart without a debugger. */
         last_status = s;
-        Print("TagBoot: EBS attempt ");
+        Print("Gangway: EBS attempt ");
         PrintDec(attempt);
         Print(" — exit_boot_services failed status=");
         PrintHex64((uint64_t)s);
@@ -1971,7 +1971,7 @@ static EFI_STATUS SetupPageTables(uint64_t kernel_phys_end)
          * sense, and EDK2 returns it exactly when the pages ARE allocated to
          * someone. The guard fired only in the case it was written to stop.
          */
-        Print("TagBoot: cannot allocate page tables + stack at ");
+        Print("Gangway: cannot allocate page tables + stack at ");
         PrintHex64(g_pt_base);
         Print(" (status=");
         PrintHex64((uint64_t)status);
@@ -2021,7 +2021,7 @@ static EFI_STATUS SetupPageTables(uint64_t kernel_phys_end)
                    PTE_PRESENT | PTE_WRITABLE | PTE_PAGE_SIZE;
     }
 
-    Print("TagBoot: page tables at ");
+    Print("Gangway: page tables at ");
     PrintHex64(g_pt_base);
     Print(", stack at ");
     PrintHex64(g_stack_base);
@@ -2081,7 +2081,7 @@ static void WriteBoardingPass(void)
     /* Who wrote it. On a board that boots through CSM one week and UEFI the
      * next, that is a real question with nothing else on the screen to answer
      * it. */
-    BoardingLoader loader = { { 'T','a','g','B','o','o','t',0,0,0,0,0 } };
+    BoardingLoader loader = { { 'G','a','n','g','w','a','y',0,0,0,0,0 } };
     at = BoardingStamp(base, at, BOARDING_STAMP_LOADER, &loader, sizeof(loader));
     count++;
 
@@ -2149,7 +2149,7 @@ static void FillBootInfo(const FbInfo *fb, uint32_t e820_count,
      * DoExitBootServices — FillBootInfo runs BEFORE EBS so we publish
      * placeholders here and the EBS retry-loop updates them in-place via the
      * same fixed BOOT_INFO_ADDR. After EBS returns we patch the final values
-     * in TagBootMain (see PostEbsPatchBootInfo). */
+     * in GangwayMain (see PostEbsPatchBootInfo). */
     bi->efi_rt_services_phys = g_efi_rt_services_phys;
     bi->efi_mmap_phys        = 0;   /* set by post-EBS patch */
     bi->efi_mmap_size        = 0;
@@ -2157,7 +2157,7 @@ static void FillBootInfo(const FbInfo *fb, uint32_t e820_count,
     bi->efi_mmap_desc_ver    = 0;
     bi->efi_fw_revision      = g_efi_fw_revision;
 
-    /* The system and configuration tables, captured at TagBootMain
+    /* The system and configuration tables, captured at GangwayMain
      * entry — they survive EBS because both live in EfiRuntimeServicesData.
      * efi_esrt_copy_* are populated by the pre-EBS ESRT capture path; zero
      * if the firmware did not publish an ESRT. */
@@ -2209,7 +2209,7 @@ static void PostEbsPatchBootInfo(void)
          */
         if (g_e820_truncated) {
             Com1Init();
-            Com1Str("\r\n[TAGBOOT] the final memory map did not fit the E820 "
+            Com1Str("\r\n[GANGWAY] the final memory map did not fit the E820 "
                     "table: the entries past the cut are gone, and memory they "
                     "described is neither usable to the kernel nor carved out "
                     "of what it will hand away\r\n");
@@ -2234,7 +2234,7 @@ static void PostEbsPatchBootInfo(void)
  * ========================================================================= */
 
 /*
- * Implemented in tagboot_jump.asm — pure NASM, no inline asm ambiguity.
+ * Implemented in gangway_jump.asm — pure NASM, no inline asm ambiguity.
  * Installs our CR3, switches RSP, jumps to entry. Does not write EFER.
  * Never returns.
  *
@@ -2244,13 +2244,13 @@ static void PostEbsPatchBootInfo(void)
  * registers and cause a triple fault.  The sysv_abi attribute forces System V
  * calling convention regardless of the compilation target.
  */
-extern void __attribute__((sysv_abi)) TagBootJump(uint64_t pt_base,
+extern void __attribute__((sysv_abi)) GangwayJump(uint64_t pt_base,
                                                    uint64_t stack,
                                                    uint64_t entry);
 
 static void __attribute__((noreturn)) JumpToKernel(uint64_t pt_base)
 {
-    TagBootJump(pt_base, g_stack_base, (uint64_t)KERNEL_LOAD_ADDR);
+    GangwayJump(pt_base, g_stack_base, (uint64_t)KERNEL_LOAD_ADDR);
     __builtin_unreachable();
 }
 
@@ -2258,7 +2258,7 @@ static void __attribute__((noreturn)) JumpToKernel(uint64_t pt_base)
  * CheckEfiLoadAddress — verify the EFI application is within our 4 GB
  * identity map.
  *
- * The JMP after `mov cr3` in tagboot_jump.asm runs from the EFI .text
+ * The JMP after `mov cr3` in gangway_jump.asm runs from the EFI .text
  * section, so the image must remain mapped through the CR3 switch. Our
  * identity map covers 4 GB. UEFI spec recommends loading EFI applications
  * below 4 GB and every implementation observed in the wild (OVMF, AMI,
@@ -2277,14 +2277,14 @@ static void CheckEfiLoadAddress(void)
     uint64_t app_base = (uint64_t)(uintptr_t)li->image_base;
     uint64_t app_end  = app_base + li->image_size;
 
-    Print("TagBoot: EFI image at ");
+    Print("Gangway: EFI image at ");
     PrintHex64(app_base);
     Print(" size=");
     PrintDec(li->image_size);
     Print("\r\n");
 
     if (app_end > 0x100000000ULL) {
-        Print("TagBoot: FATAL — EFI app loaded above 4 GB (");
+        Print("Gangway: FATAL — EFI app loaded above 4 GB (");
         PrintHex64(app_end);
         Print(")\r\n");
         Panic("EFI app above 4 GB — extend identity map or update firmware");
@@ -2296,17 +2296,17 @@ static void CheckEfiLoadAddress(void)
  * ========================================================================= */
 
 /*
- * TagBootMain — UEFI entry point.
+ * GangwayMain — UEFI entry point.
  *
  * MUST be declared EFIAPI: UEFI firmware calls this with Microsoft x64 ABI
  * (image_handle in RCX, st in RDX).  Without EFIAPI the gcc-compiled function
  * reads System V registers RDI/RSI instead → garbage pointers → instant crash.
  */
-EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
+EFI_STATUS EFIAPI GangwayMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
 {
     /* Raw COM1 byte BEFORE touching any UEFI pointer — confirms we were called. */
     Com1Init();
-    Com1Str("\r\n[TAGBOOT] Entry reached\r\n");
+    Com1Str("\r\n[GANGWAY] Entry reached\r\n");
 
     g_st           = st;
     g_bs           = st->boot_services;
@@ -2336,7 +2336,7 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     g_efi_cfg_table_count    = (uint32_t)cfg_count_raw;
 
     st->con_out->clear_screen(st->con_out);
-    Print("TagBoot — BoxOS UEFI Bootloader\r\n");
+    Print("Gangway — BoxOS UEFI Bootloader\r\n");
     Print("------------------------------------\r\n");
 
     /* Firmware vendor string is a CHAR16* in EfiRuntimeServicesData and
@@ -2344,7 +2344,7 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
      * bytes are dropped). Lets operator see "American Megatrends",
      * "Insyde", "HP", "Apple", etc. without a debugger. */
     if (st->firmware_vendor) {
-        Print("TagBoot: firmware vendor=");
+        Print("Gangway: firmware vendor=");
         for (CHAR16 *v = st->firmware_vendor; *v; v++) {
             CHAR16 ch[2];
             ch[0] = (*v < 0x80) ? *v : (CHAR16)'?';
@@ -2356,7 +2356,7 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
         Print("\r\n");
     }
 
-    Print("TagBoot: EFI ST=");
+    Print("Gangway: EFI ST=");
     PrintHex64(g_efi_system_table_phys);
     Print(" RT=");
     PrintHex64(g_efi_rt_services_phys);
@@ -2377,10 +2377,10 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
      * The deed of every medium probed is taken up there and then, so a medium
      * whose volume is no book is passed over for the next (BlockIoProbeVolume);
      * the one found is a book, its Deed taken up. */
-    Print("TagBoot: locating disk...\r\n");
+    Print("Gangway: locating disk...\r\n");
     EFI_STATUS status = BlockIoFindDevice(image_handle);
     if (EFI_ERROR(status)) Panic("no medium carries a book this loader can boot");
-    Print("TagBoot: disk found, block_size=");
+    Print("Gangway: disk found, block_size=");
     PrintDec(g_block_io->media->block_size);
     Print("\r\n");
 
@@ -2391,7 +2391,7 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
      * placed at KERNEL_LOAD_ADDR and held to the digests the book keeps of its
      * blocks — one that does not match is never jumped into, and when none may
      * be, the loader stops with every kernel it tried and why
-     * (tagboot_attest.c, tagboot_succession.c). */
+     * (gangway_attest.c, gangway_succession.c). */
     uint64_t loaded_bytes = 0;
     const char *stop = SuccessionTake(g_bs, ReadSectors, &loaded_bytes, &g_kernel_alloc_end);
     if (stop) Panic(stop);
@@ -2405,7 +2405,7 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     if (!MemEqual((const void *)(uintptr_t)(KERNEL_LOAD_ADDR + 2), "KERNEL", 6)) {
         Panic("kernel header magic invalid — wrong binary at load address");
     }
-    Print("TagBoot: kernel header OK\r\n");
+    Print("Gangway: kernel header OK\r\n");
 
     /* Read the true physical end (including BSS) from the kernel header.
      * This MUST be used for page table placement — if we place page tables
@@ -2448,7 +2448,7 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
          * the code (§7.2.2 vs §7.2.1) and so fired only when the pages WERE
          * held by someone. */
         kernel_end_phys = (uint64_t)header_phys_end;
-        Print("TagBoot: kernel phys end (BSS) ");
+        Print("Gangway: kernel phys end (BSS) ");
         PrintHex64(kernel_end_phys);
 
         if (kernel_end_phys > g_kernel_alloc_end) {
@@ -2481,7 +2481,7 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     FbInfo fb = QueryGopFramebuffer();
 
     /* ----- 6. Build E820 memory map ----- */
-    Print("TagBoot: building memory map...\r\n");
+    Print("Gangway: building memory map...\r\n");
     MemMapResult mmap;
     status = BuildMemoryMap(&mmap);
     if (EFI_ERROR(status)) Panic("failed to get UEFI memory map");
@@ -2504,7 +2504,7 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
      * stub budgets EFI_MMAP_NR_SLACK_SLOTS between its own two. The second
      * pass says its own piece, over COM1, in PostEbsPatchBootInfo. */
     if (g_e820_truncated) {
-        Print("TagBoot: WARNING — the memory map does not fit ");
+        Print("Gangway: WARNING — the memory map does not fit ");
         PrintDec(E820_MAX_ENTRIES);
         Print(" entries and was cut short\r\n");
     }
@@ -2513,7 +2513,7 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     CheckEfiLoadAddress();
 
     /* ----- 8. Set up page tables ----- */
-    Print("TagBoot: setting up page tables...\r\n");
+    Print("Gangway: setting up page tables...\r\n");
     status = SetupPageTables(kernel_end_phys);
     if (EFI_ERROR(status)) Panic("page table setup failed");
 
@@ -2527,14 +2527,14 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
             if (nvs != 0) {
                 g_efi_esrt_copy_phys = nvs;
                 g_efi_esrt_copy_size = esrt_size;
-                Print("TagBoot: ESRT copied to ACPI_NVS at ");
+                Print("Gangway: ESRT copied to ACPI_NVS at ");
                 PrintHex64(nvs);
                 Print(" (");
                 PrintDec(esrt_size);
                 Print(" bytes)\r\n");
             }
         } else {
-            Print("TagBoot: ESRT not published by firmware\r\n");
+            Print("Gangway: ESRT not published by firmware\r\n");
         }
     }
 
@@ -2542,7 +2542,7 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     FillBootInfo(&fb, mmap.e820_count, kernel_end_phys);
     WriteBoardingPass();
 
-    Print("TagBoot: boot_info at 0xA000 (method=UEFI)\r\n");
+    Print("Gangway: boot_info at 0xA000 (method=UEFI)\r\n");
 
     /* ----- 10. ExitBootServices -----
      *
@@ -2557,13 +2557,13 @@ EFI_STATUS EFIAPI TagBootMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     {
         EFI_STATUS wd = g_bs->set_watchdog_timer(0, 0, 0, NULL);
         if (EFI_ERROR(wd)) {
-            Print("TagBoot: watchdog disable returned status=");
+            Print("Gangway: watchdog disable returned status=");
             PrintHex64((uint64_t)wd);
             Print(" (proceeding)\r\n");
         }
     }
 
-    Print("TagBoot: exiting boot services...\r\n");
+    Print("Gangway: exiting boot services...\r\n");
 
     status = DoExitBootServices(image_handle);
     if (EFI_ERROR(status)) Panic("ExitBootServices failed after 10 attempts");

@@ -17,7 +17,7 @@
  * data run, or that a rotten range of FILES touches is locked — no kernel.
  */
 
-#include "tagboot_lectern_book.h"
+#include "gangway_lectern_book.h"
 
 /* What a walk hands its reader: each leaf item with the seq of the node it
  * lies in (a Parcel counts its runs' births from it, §2.9), and each range

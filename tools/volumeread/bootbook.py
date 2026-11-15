@@ -9,8 +9,8 @@ alone, each record held to its base, an Undone passing over what it names; and
 the digest of every block a record of the ribbon puts in.
 
 The loader's Lectern does the same by its own code (src/boot/uefi/
-tagboot_lectern_tree.c, _ribbon.c, _replay.c), and the host stand holds the
-two to one answer line for line (tools/tagboot_stand.sh).
+gangway_lectern_tree.c, _ribbon.c, _replay.c), and the host stand holds the
+two to one answer line for line (tools/gangway_stand.sh).
 
 What the loader leaves to the kernel's mount, where the mount alone can
 judge it (the narrowing, said here once): a file's records are replayed only

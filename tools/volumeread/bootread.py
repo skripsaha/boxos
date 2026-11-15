@@ -8,8 +8,8 @@ DIGESTS tree, or the record of the ribbon that put a block in; the first
 attested is jumped into. Nothing attested: the kernel nothing shows broken —
 BOOT's first — loaded not attested (F2); nothing of that either: the loader
 stops with every kernel it tried and why. All in the very words the loader's
-Lectern says (src/boot/uefi/tagboot_lectern.c, tagboot_succession.c): the
-oracle the host stand (tools/tagboot_stand.c, which builds that same Lectern)
+Lectern says (src/boot/uefi/gangway_lectern.c, gangway_succession.c): the
+oracle the host stand (tools/gangway_stand.c, which builds that same Lectern)
 is held to line for line on every landing of self-test's group A
 (selftest_book_boot.py).
 
@@ -31,7 +31,7 @@ from .ondisk import BLOCK
 
 WHO = "the kernel the deed names"
 
-# The most a kernel may be, and the header it opens with (tagboot_lectern.h
+# The most a kernel may be, and the header it opens with (gangway_lectern.h
 # KERNEL_MAX_SIZE; kernel_entry.asm: "KERNEL" at byte 2).
 KERNEL_MAX_SIZE = 0x2000000
 
@@ -39,7 +39,7 @@ KERNEL_MAX_SIZE = 0x2000000
 def Loaded(boot):
     """(blocks, None): the blocks the loader loads of the kernel BOOT names —
     as many as its bytes take, every block it names when it names no bytes
-    (tagboot.c TagFsLoadKernel) — or (None, why) when its bytes overrun them."""
+    (gangway.c TagFsLoadKernel) — or (None, why) when its bytes overrun them."""
     have = boot["kernel_blocks"] * BLOCK
     if boot["kernel_bytes"] > have:
         return None, "it is said to be %u bytes and its blocks hold %u" % (boot["kernel_bytes"], have)

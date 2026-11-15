@@ -153,7 +153,7 @@ static error_t pmm_defer_region(uintptr_t start, uintptr_t end) {
 /* ===========================================================================
  * The firmware's own memory, kept out of the buddy — see the note in pmm.h.
  *
- * The EFI memory map TagBoot staged in ACPI NVS is the only place the kernel
+ * The EFI memory map Gangway staged in ACPI NVS is the only place the kernel
  * can learn WHICH ranges are the firmware's; the E820 table cannot say,
  * because E820 has no such type and calling them RESERVED there would lose
  * the memory permanently on any board where the top of RAM happens to be one.
@@ -258,7 +258,7 @@ void PmmReserveFirmwareMemory(void)
  * pmm_deferred while pmm_init runs, so the pass from there took nothing over
  * it. The deferred spans reach the buddy in pmm_activate_pull_map, carved
  * against NON-USABLE E820 entries only — and EfiBootServicesCode/Data carry
- * no E820 type of their own (tagboot's UefiTypeToE820 maps both to
+ * no E820 type of their own (gangway's UefiTypeToE820 maps both to
  * E820_USABLE), so that carve does not hold them back either. EDK2 allocates
  * top-down from the highest free address, which puts them above 4 GiB on any
  * board with the RAM for it; EfiMapBootServicesWindow then maps the same

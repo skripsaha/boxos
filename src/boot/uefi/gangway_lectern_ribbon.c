@@ -2,7 +2,7 @@
  * The Lectern's ribbon: from the `at` of the
  * slot the book stands on, the stitches sewn on, one after another, by the
  * Clasp each names — rules (а)/(б)/(б′)/(в) — into b->stitches, for the
- * replay of the files followed (tagboot_lectern_replay.c).
+ * replay of the files followed (gangway_lectern_replay.c).
  *
  * The rules are the kernel's pass 1 (mount/ribbon_collate.c, ribbon_unit.c)
  * and volume-read's (stitch_ribbon.py Ribbon, stitch.py Unit), held to one
@@ -20,7 +20,7 @@
  * and no more are taken than the volume has blocks.
  */
 
-#include "tagboot_lectern_book.h"
+#include "gangway_lectern_book.h"
 
 /* The most sectors read in one command while a unit is read or looked for. */
 #define RIBBON_READ_SECTORS 64u

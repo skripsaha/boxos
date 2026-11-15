@@ -1,11 +1,11 @@
 /*
- * TagBoot — the desk the Lectern chooses the volume's kernel at:
+ * Gangway — the desk the Lectern chooses the volume's kernel at:
  * the kernel BOOT names, then the kernels its book names by role, each held to
- * the digests the book keeps of it before the jump (tagboot_succession.c).
+ * the digests the book keeps of it before the jump (gangway_succession.c).
  *
- * The reading is the Lectern's, which knows nothing of UEFI; what is TagBoot's
+ * The reading is the Lectern's, which knows nothing of UEFI; what is Gangway's
  * is its desk. The medium is read through the loader's own reader of the
- * volume (tagboot.c, ReadSectors), into pages the firmware gives: Block IO
+ * volume (gangway.c, ReadSectors), into pages the firmware gives: Block IO
  * reads into a buffer aligned to the medium's io_align (UEFI 2.10 §13.9,
  * EFI_BLOCK_IO_MEDIA.IoAlign — 0 or 1 any, else a power of two), and a page is
  * aligned to every io_align up to 4096, which is as far as any medium BoxOS
@@ -13,10 +13,10 @@
  * that address and handed back when the kernel there is not the one — so the
  * next is placed where the first was. Every other page is handed back before
  * this returns, so the memory map the loader builds after it carries none
- * but the kernel's. Each line is said as TagBoot says one.
+ * but the kernel's. Each line is said as Gangway says one.
  */
 
-#include "tagboot.h"
+#include "gangway.h"
 
 typedef struct {
     EFI_BOOT_SERVICES *bs;
@@ -50,7 +50,7 @@ static void AttestGive(void *ctx, uint8_t *room, uint64_t bytes)
 static void AttestSay(void *ctx, const char *line)
 {
     (void)ctx;
-    Print("TagBoot: ");
+    Print("Gangway: ");
     Print(line);
     Print("\r\n");
 }
@@ -63,7 +63,7 @@ static void AttestSay(void *ctx, const char *line)
  * ‼ A refusal here is somebody else's range, and it is NOT freed.
  *
  * Nothing at KERNEL_LOAD_ADDR is this loader's when it is asked for —
- * ClaimHandoffPages (tagboot.c) asks for 0x0000, 0x1000 and 0xA000 and nothing
+ * ClaimHandoffPages (gangway.c) asks for 0x0000, 0x1000 and 0xA000 and nothing
  * else, and a kernel this desk placed before is unplaced before the next is
  * asked for — so there is nothing here to re-claim. EDK2's
  * CoreInternalFreePages performs no ownership check whatsoever: it finds the
@@ -86,7 +86,7 @@ static uint8_t *AttestPlace(void *ctx, uint64_t bytes)
     UINTN                pages  = AttestPages(bytes);
     EFI_STATUS           status = ((AttestDesk *)ctx)->bs->allocate_pages(AllocateAddress, EfiLoaderData, pages, &at);
     if (!EFI_ERROR(status)) return (uint8_t *)(uintptr_t)at;
-    Print("TagBoot: cannot allocate ");
+    Print("Gangway: cannot allocate ");
     PrintDec(pages);
     Print(" pages at 0x100000 (status=");
     PrintHex64((uint64_t)status);
@@ -122,13 +122,13 @@ const char *SuccessionTake(EFI_BOOT_SERVICES *bs, AttestReader read, uint64_t *b
     if (chosen.says == ATTEST_BROKEN) return chosen.line;
     *bytes     = chosen.bytes;
     *alloc_end = KERNEL_LOAD_ADDR + chosen.blocks * VOLUME_BLOCK_BYTES;
-    Print("TagBoot: kernel at volume block ");
+    Print("Gangway: kernel at volume block ");
     PrintDec(chosen.first);
     Print(" (");
     PrintDec(chosen.blocks);
     Print(" blocks in ");
     PrintDec(chosen.runs);
-    Print(" run(s))\r\nTagBoot: kernel loaded (");
+    Print(" run(s))\r\nGangway: kernel loaded (");
     PrintDec(chosen.bytes);
     Print(" bytes)\r\n");
     return NULL;

@@ -1,6 +1,6 @@
 [BITS 64]
 
-; void TagBootJump(uint64_t pt_base, uint64_t stack, uint64_t entry)
+; void GangwayJump(uint64_t pt_base, uint64_t stack, uint64_t entry)
 ;
 ; System V AMD64 ABI:
 ;   rdi = pt_base   — physical address of our PML4
@@ -27,9 +27,9 @@
 ;
 ; IMPORTANT: do NOT use rdmsr/wrmsr here — rdmsr clobbers rdx (entry point).
 
-global TagBootJump
+global GangwayJump
 
-TagBootJump:
+GangwayJump:
     ; CR4: ensure PAE (bit 5) — already set by UEFI, enforce to be safe
     mov rax, cr4
     or  rax, 0x20

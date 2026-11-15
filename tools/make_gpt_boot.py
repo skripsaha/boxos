@@ -45,7 +45,7 @@ STAGE2_SECTORS = 16
 
 STAGE2_LBA_FIELD = 432        # the field in stage1, see src/boot/stage1/stage1.asm
 
-# Permanent, never reissued — the same sixteen bytes ground.c, tagboot.c and
+# Permanent, never reissued — the same sixteen bytes ground.c, gangway.c and
 # stage2.asm each compare against.
 BOXOS_TYPE = uuid.UUID('cf8ae49a-d26a-4959-9a6f-71c932e0c9eb')
 ESP_TYPE = uuid.UUID('c12a7328-f81f-11d2-ba4b-00a0c93ec93b')

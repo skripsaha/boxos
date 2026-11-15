@@ -1,5 +1,5 @@
-#ifndef TAGBOOT_LECTERN_H
-#define TAGBOOT_LECTERN_H
+#ifndef GANGWAY_LECTERN_H
+#define GANGWAY_LECTERN_H
 
 /*
  * The Lectern — the UEFI loader's reader of a volume's book — and
@@ -28,11 +28,11 @@
  * loader stops with every kernel it tried and why.
  *
  * NOTHING OF UEFI HERE. The medium, memory, the console and the place a kernel
- * is jumped into are the caller's, handed in a desk: TagBoot reads by Block IO,
- * gives pages and places at its load address (tagboot_attest.c); the host
- * stand reads an image file and gives the heap (tools/tagboot_stand.c) — one
+ * is jumped into are the caller's, handed in a desk: Gangway reads by Block IO,
+ * gives pages and places at its load address (gangway_attest.c); the host
+ * stand reads an image file and gives the heap (tools/gangway_stand.c) — one
  * text, so what the stand is held to against volume-read's oracle
- * (tools/volumeread/bootread.py, bootbook.py) is what TagBoot does. The loops
+ * (tools/volumeread/bootread.py, bootbook.py) is what Gangway does. The loops
  * that walk the book are the loader's own: the kernel's mount reads on a heap
  * and holds every file in memory, and a loader needs a few nodes and the
  * files kept in a role (§16.7 п.2, F1); the decisions — a slot's shape,
@@ -112,4 +112,4 @@ typedef struct {
  */
 void LecternSuccession(const LecternDesk *desk, const VolumeBoot *boot, LecternKernel *kernel);
 
-#endif /* TAGBOOT_LECTERN_H */
+#endif /* GANGWAY_LECTERN_H */

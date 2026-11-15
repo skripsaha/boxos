@@ -4711,7 +4711,7 @@ void vmm_init(void)
     uintptr_t saved_ctx_phys = (uintptr_t)kernel_context;
 
     /* LA57 runtime transition. Done BEFORE vmm_switch_context so the boot
-     * identity mapping (PA=VA for 0..4 GB stage2/tagboot tables) is still
+     * identity mapping (PA=VA for 0..4 GB stage2/gangway tables) is still
      * alive — the asm trampoline needs it to execute its low-PA aliased
      * post-PG=0 code and to jump back to the high-VA kernel after PG=1.
      *

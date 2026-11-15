@@ -3,7 +3,7 @@
  * kernel the Deed's BOOT names first, held to the DIGESTS tree of the slot
  * the book stands on with no walk of FILES; when it is not attested, the
  * kernels the book names by
- * role of their files (tagboot_lectern_tree.c, _ribbon.c, _replay.c), role by
+ * role of their files (gangway_lectern_tree.c, _ribbon.c, _replay.c), role by
  * role in the order they are asked — kernel, boot, system — the newest gen
  * first and of one gen the larger fid, each once. A file's tags are its
  * user's and no part of the choice.
@@ -24,7 +24,7 @@
  * loader stops with. Line for line volume-read's bootread.py Succession.
  */
 
-#include "tagboot_lectern_book.h"
+#include "gangway_lectern_book.h"
 
 /* A kernel to try: its name in the lines, its runs in file order, its size,
  * the Slips on its last block (NULL none), and whether the ribbon's digests

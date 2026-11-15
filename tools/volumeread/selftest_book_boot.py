@@ -16,7 +16,7 @@ the ribbon's next_quire (rule (б)); its stitch closed and damaged, a sector
 of it lost and a stitch after it naming it (rule (в)) — the spare attested by
 what of its Born reads. Each a fork of the base
 selftest_book.py lays, the census's words for it, and the verdict bootread.py
-says — which the host stand (tools/tagboot_stand.sh) then holds the Lectern
+says — which the host stand (tools/gangway_stand.sh) then holds the Lectern
 itself to, line for line, on every one of them written out by --emit; and
 logcheck's bookboot boots A7 and A9 through OVMF."""
 

@@ -1,6 +1,6 @@
 /*
  * The Lectern's replay of the ribbon, as the mount's pass 2 replays it: the
- * stitches sewn on (tagboot_lectern_ribbon.c), their records
+ * stitches sewn on (gangway_lectern_ribbon.c), their records
  * replayed for the files the Lectern follows — those kept in a role, or that
  * the ribbon puts in one — and the digests every record puts in.
  *
@@ -18,7 +18,7 @@
  * the digests it carries.
  */
 
-#include "tagboot_lectern_book.h"
+#include "gangway_lectern_book.h"
 
 /* ------------------------------------------------------------------------- */
 /* A record read                                                             */
@@ -531,7 +531,7 @@ static int BornApplied(LecternBook *b, LecternHand *h, const LecternStitch *u, c
 
 /* A Labeled: its flags set and cleared, as the record says — the role among
  * them — and the deleted bit its KEEP verb puts on or takes off: a file kept
- * deleted is no kernel for the loader to start (tagboot_succession.c). Its
+ * deleted is no kernel for the loader to start (gangway_succession.c). Its
  * name and tags are not the loader's. */
 static int LabeledApplied(LecternHand *h, const LecternRead *d)
 {

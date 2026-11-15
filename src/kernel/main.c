@@ -117,7 +117,7 @@ void kernel_main(void)
      *
      * IF set here means the loader left interrupts enabled and the kernel has
      * been running interruptible since its entry point — which is what the
-     * UEFI path did, because TagBootJump never clears IF while stage2.asm
+     * UEFI path did, because GangwayJump never clears IF while stage2.asm
      * clears it ten times over. _start now clears it unconditionally; this
      * line reports which of the two the machine came from, because a fix that
      * makes both paths silent teaches nothing about either. */
@@ -416,7 +416,7 @@ void kernel_main(void)
 
         /* EFI System Resource Table — must come after efi_runtime_init
          * because efi_esrt_init reads boot_info's preserved ESRT copy
-         * (allocated in EfiACPIMemoryNVS by TagBoot). Independent of
+         * (allocated in EfiACPIMemoryNVS by Gangway). Independent of
          * SVAM success: ESRT is a plain in-memory copy. Touch publish
          * matches the acpi_init pattern: emit at boot — late subscribers
          * can query via efi_esrt_get(). */

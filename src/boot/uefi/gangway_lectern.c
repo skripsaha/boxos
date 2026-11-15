@@ -1,7 +1,7 @@
 /*
- * TagBoot's Lectern — a volume's book read the way the kernel's
+ * Gangway's Lectern — a volume's book read the way the kernel's
  * mount stands on it, and Attest: a kernel's blocks held to the digests the
- * book keeps of them before the loader jumps (tagboot_lectern.h).
+ * book keeps of them before the loader jumps (gangway_lectern.h).
  *
  * What it holds at once is a few nodes: the slot stood on, and the path down
  * the DIGESTS tree to the leaf that names the block in hand — one rung a
@@ -11,7 +11,7 @@
  * reached it.
  */
 
-#include "tagboot_lectern_book.h"
+#include "gangway_lectern_book.h"
 
 /* ------------------------------------------------------------------------- */
 /* Lines, memory and bytes, with no library under them                       */

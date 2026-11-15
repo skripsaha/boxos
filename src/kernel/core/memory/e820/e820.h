@@ -6,8 +6,8 @@
 /* The map lives at a fixed low address (0x504) written by BOTH loaders, so
  * this number is a three-way agreement: it must stay equal to
  * E820_MAX_ENTRIES in src/boot/stage2/stage2.asm and in src/boot/uefi/
- * tagboot.c, and it is bounded by stage1's scratch at 0x1200 (see the
- * assertion at the bottom of stage2.asm). TagBoot merges adjacent runs of
+ * gangway.c, and it is bounded by stage1's scratch at 0x1200 (see the
+ * assertion at the bottom of stage2.asm). Gangway merges adjacent runs of
  * the same E820 type before writing here, which is what keeps a UEFI map of
  * two hundred descriptors from ever approaching this. */
 #define E820_MAX_ENTRIES  128

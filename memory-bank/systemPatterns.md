@@ -14,7 +14,7 @@
 ## TagFS and Quill
 
 - Format v2 is a distinct book format with shared codecs used by the kernel,
-  TagBoot, mkfs, and `volume-read`.
+  Gangway, mkfs, and `volume-read`.
 - The ribbon is append-oriented and sector-checked. A stitch names a complete
   state transition; retry at `next_quire` follows the reader's matching rule.
 - File data is written on fresh ground. Overwrites create new stakes and splice

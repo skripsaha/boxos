@@ -51,7 +51,7 @@ fi
 #  4. LA57 dance asm internals (.low32, .low_64_trampoline, .high64,
 #     .reload_cs, .bail) execute with CR4.CET=0 during paging-mode flip.
 #  5. ASM data labels (vmm_la57_dance_gdt etc.) — not code.
-#  6. TagBoot UEFI bootloader symbols — runs before kernel CR4.CET=1.
+#  6. Gangway UEFI bootloader symbols — runs before kernel CR4.CET=1.
 #  7. NASM-generated local labels containing "." (sub-labels like
 #     "_start.past_header" or "load_gdt.reload_cs") — these are
 #     internal jump targets, never independent functions.
@@ -61,7 +61,7 @@ fi
 #     (whole-program isolated) — IBT-safe by analysis. We trust GCC's
 #     -fcf-protection=full output for C; this script audits the
 #     boundary between asm and C only.
-SKIP_RE='^(_start|stage[12]_.*|ap_trampoline_(start|end|data)|ap_protected|ap_long_mode|ap_gdt|ap_gdt_ptr|isr_common|paranoid_isr_common|low_64_trampoline|vmm_la57_(dance_gdt|dance_gdtr|saved_gdtr|saved_idtr|jmp32|jmp64).*|.*\.(isra|constprop|part|cold)(\.[0-9]+)?.*|__bss_(start|end)|_kernel_(phys_)?(start|end)|_kernel_start|_text_(start|end)|gdt_(start|end|pointer|null|kernel_code|kernel_data|user_code|user_data|tss)|__init_array_(start|end)|__fini_array_(start|end)|TagBootJump)$'
+SKIP_RE='^(_start|stage[12]_.*|ap_trampoline_(start|end|data)|ap_protected|ap_long_mode|ap_gdt|ap_gdt_ptr|isr_common|paranoid_isr_common|low_64_trampoline|vmm_la57_(dance_gdt|dance_gdtr|saved_gdtr|saved_idtr|jmp32|jmp64).*|.*\.(isra|constprop|part|cold)(\.[0-9]+)?.*|__bss_(start|end)|_kernel_(phys_)?(start|end)|_kernel_start|_text_(start|end)|gdt_(start|end|pointer|null|kernel_code|kernel_data|user_code|user_data|tss)|__init_array_(start|end)|__fini_array_(start|end)|GangwayJump)$'
 
 # nm-derived function symbols (lowercase t = local FUNC, uppercase T =
 # global FUNC). Extract address + name, skip local labels and macro-

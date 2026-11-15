@@ -1033,7 +1033,7 @@ bool efi_runtime_init(void)
      * Is the map the kernel is about to walk memory the allocator believes is
      * free? It used to be, on every UEFI boot, and nothing said so.
      *
-     * TagBoot asks the firmware for this buffer AFTER it has already written
+     * Gangway asks the firmware for this buffer AFTER it has already written
      * the E820 table, and the firmware answers out of ordinary conventional
      * memory. In the E820 the kernel received, those pages were still
      * CONVENTIONAL — so the buddy allocator owned them, could hand them out,

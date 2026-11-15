@@ -1,6 +1,6 @@
 # logcheck_framerefuse — the framerefuse scenario of tools/logcheck.sh: a
 # volume met by this kernel, through either loader — a Deed with no book turned
-# away whole, a book mounted and written only on its ribbon — and TagBoot alone
+# away whole, a book mounted and written only on its ribbon — and Gangway alone
 # on Deeds made again one way at a time.
 #
 # SOURCED, NEVER RUN — by logcheck.sh, which dispatches `framerefuse` to
@@ -41,12 +41,12 @@
 # lands in its ribbon, none on the ground a live file of the book the machine
 # left names, by place, the book left whole, holding the Use Context said and
 # the file's 128 bytes.
-# Then the blank ring again through UEFI (OVMF and TagBoot): the loader has to
+# Then the blank ring again through UEFI (OVMF and Gangway): the loader has to
 # take the kernel where the BOOT stamp of a deed bearing FRAME names it, and
 # the kernel it loads has to turn the volume away in the same words. Then
-# TagBoot alone, on that image with its Deed made again one way at a time
+# Gangway alone, on that image with its Deed made again one way at a time
 # (framerefuse_deed): no BOOT, a ring of one slot, 8 KiB blocks, BOOT before
-# the data run — each refused in TagBoot's words before any kernel is loaded,
+# the data run — each refused in Gangway's words before any kernel is loaded,
 # the medium passed over and the ground left as it was — and a FRAME of 32
 # bytes, taken with a line. The FRAME is held to the one rule the kernel and
 # volume-read hold it to (volume_deed.h, VolumeFrameCheck).
@@ -259,7 +259,7 @@ PY
         grep -q "$NO_VOLUME_YET" "$L" && ! grep -q "BoxOS Hub" "$L"
         chk $? "framerefuse ($leg): the machine says it waits for a volume of its own, starting nothing in its place"
     fi
-    ! grep -qE "PANIC|\[EXCEPTION\]|\[TAGBOOT FATAL\]" "$L"
+    ! grep -qE "PANIC|\[EXCEPTION\]|\[GANGWAY FATAL\]" "$L"
     chk $? "framerefuse ($leg): no panic, no fault"
 
     verdict=$(framerefuse_judge "$before" "$rec" "$img")
@@ -346,34 +346,34 @@ with open(img, "r+b") as f:
 PY
 }
 
-# framerefuse_tagboot EDIT SAYS [PANIC] — the framerefuse image with its Deed
-# made again by framerefuse_deed EDIT, booted through UEFI. TagBoot has to say
+# framerefuse_gangway EDIT SAYS [PANIC] — the framerefuse image with its Deed
+# made again by framerefuse_deed EDIT, booted through UEFI. Gangway has to say
 # SAYS. With PANIC, it has to stop there with PANIC, load no kernel, and leave
 # the volume's ground byte for byte as it found it (it holds no write to the
 # medium at all; this is the proof that it did not need one) — a Deed it does
 # not hold passes its medium over, and with no other medium it stops. Without, the
-# Deed is one TagBoot takes: it says SAYS and loads the kernel BOOT names, and
+# Deed is one Gangway takes: it says SAYS and loads the kernel BOOT names, and
 # the leg ends there — what that kernel makes of the volume is the legs above.
-framerefuse_tagboot() {
+framerefuse_gangway() {
     local edit=$1 says=$2 panic=${3:-} leg="uefi, deed $1"
-    local img="$SCRATCH/framerefuse.tagboot.img" before="$SCRATCH/framerefuse.tagboot.before.img"
-    local L="$SCRATCH/serial.framerefuse.tagboot.$1.log" pid same
+    local img="$SCRATCH/framerefuse.gangway.img" before="$SCRATCH/framerefuse.gangway.before.img"
+    local L="$SCRATCH/serial.framerefuse.gangway.$1.log" pid same
     rm -f "$img" "$before" "$L"
     cp build/boxos.img "$img" || { harness "framerefuse ($leg): could not copy build/boxos.img"; return; }
     if ! tools/create_tagfs --frame-only --kernel build/kernel.bin "$img" build/box/hub.box "" \
-            build/kernel.bin "" >"$SCRATCH/framerefuse.tagboot.mkfs.log" 2>&1; then
-        bad "framerefuse ($leg): create_tagfs --frame-only would not make the image: $(tail -1 "$SCRATCH/framerefuse.tagboot.mkfs.log")"
+            build/kernel.bin "" >"$SCRATCH/framerefuse.gangway.mkfs.log" 2>&1; then
+        bad "framerefuse ($leg): create_tagfs --frame-only would not make the image: $(tail -1 "$SCRATCH/framerefuse.gangway.mkfs.log")"
         return
     fi
-    if ! framerefuse_deed "$img" "$edit" >"$SCRATCH/framerefuse.tagboot.deed.log" 2>&1; then
-        harness "framerefuse ($leg): the Deed could not be made again: $(tail -1 "$SCRATCH/framerefuse.tagboot.deed.log")"
+    if ! framerefuse_deed "$img" "$edit" >"$SCRATCH/framerefuse.gangway.deed.log" 2>&1; then
+        harness "framerefuse ($leg): the Deed could not be made again: $(tail -1 "$SCRATCH/framerefuse.gangway.deed.log")"
         return
     fi
     cp "$img" "$before" || { harness "framerefuse ($leg): could not keep the image as it stood"; return; }
 
     make run-stop >/dev/null 2>&1
-    if ! make run-bg BOOTDISK="$img" STRICT=on UEFI=on >"$SCRATCH/framerefuse.tagboot.run-bg" 2>&1; then
-        harness "framerefuse ($leg): run-bg would not start the image: $(tail -1 "$SCRATCH/framerefuse.tagboot.run-bg")"
+    if ! make run-bg BOOTDISK="$img" STRICT=on UEFI=on >"$SCRATCH/framerefuse.gangway.run-bg" 2>&1; then
+        harness "framerefuse ($leg): run-bg would not start the image: $(tail -1 "$SCRATCH/framerefuse.gangway.run-bg")"
         return
     fi
     pid=$(cat build/qemu.pid 2>/dev/null)
@@ -384,24 +384,24 @@ framerefuse_tagboot() {
            return ;;
     esac
     if [ -n "$panic" ]; then
-        wait_for_line build/serial.log "TAGBOOT FATAL" "$WAIT_QUIET_S"
+        wait_for_line build/serial.log "GANGWAY FATAL" "$WAIT_QUIET_S"
     else
-        wait_for_line build/serial.log "TagBoot: kernel at volume block" "$WAIT_QUIET_S"
+        wait_for_line build/serial.log "Gangway: kernel at volume block" "$WAIT_QUIET_S"
     fi
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$L"
 
-    grep -aqF "TagBoot: $says" "$L"
-    chk $? "framerefuse ($leg): TagBoot says $says"
+    grep -aqF "Gangway: $says" "$L"
+    chk $? "framerefuse ($leg): Gangway says $says"
     if [ -z "$panic" ]; then
-        grep -aq "^TagBoot: the deed names the kernel" "$L"
+        grep -aq "^Gangway: the deed names the kernel" "$L"
         chk $? "framerefuse ($leg): and takes the kernel where the deed's BOOT names it"
         rm -f "$img" "$before"
         return
     fi
-    grep -aqF "[TAGBOOT FATAL] $panic" "$L"
+    grep -aqF "[GANGWAY FATAL] $panic" "$L"
     chk $? "framerefuse ($leg): and stops: $panic"
-    ! grep -aq "^TagBoot: kernel at volume block" "$L"
+    ! grep -aq "^Gangway: kernel at volume block" "$L"
     chk $? "framerefuse ($leg): no kernel is loaded off the volume"
     same=$(python3 - "$before" "$img" <<'PY'
 import sys
@@ -435,20 +435,20 @@ run_framerefuse() {
     framerefuse_leg build/kernel.bin "$FRAMEREFUSE_BOOK_SAYS" book ""
     framerefuse_leg build/kernel.bin "$FRAMEREFUSE_BLANK_SAYS" uefi --frame-only UEFI=on
     local L="$SCRATCH/serial.framerefuse.uefi.log"
-    grep -aqE "^TagBoot: volume on ground at sector [0-9]+, a book with its data run from block 1024" "$L"
-    chk $? "framerefuse (uefi): TagBoot reads the deed's FRAME ($(grep -a '^TagBoot: volume on ground' "$L" | tr -d '\r' | head -1))"
-    grep -aq "^TagBoot: the deed names the kernel" "$L"
+    grep -aqE "^Gangway: volume on ground at sector [0-9]+, a book with its data run from block 1024" "$L"
+    chk $? "framerefuse (uefi): Gangway reads the deed's FRAME ($(grep -a '^Gangway: volume on ground' "$L" | tr -d '\r' | head -1))"
+    grep -aq "^Gangway: the deed names the kernel" "$L"
     chk $? "framerefuse (uefi): and takes the kernel where the deed's BOOT names it"
     framerefuse_after uefi
 
-    framerefuse_tagboot noboot "volume on ground at sector" "this volume's deed names no kernel"
-    framerefuse_tagboot slots=1 \
+    framerefuse_gangway noboot "volume on ground at sector" "this volume's deed names no kernel"
+    framerefuse_gangway slots=1 \
         "this deed's FRAME does not hold: its Spine ring has fewer than two slots, which is no ring" \
         "$FRAMEREFUSE_PASSED_OVER"
-    framerefuse_tagboot block=8192 \
+    framerefuse_gangway block=8192 \
         "this volume was laid out in 8192-byte blocks and this loader speaks 4096" \
         "$FRAMEREFUSE_PASSED_OVER"
-    framerefuse_tagboot bootout "this deed's BOOT names blocks outside its data run" \
+    framerefuse_gangway bootout "this deed's BOOT names blocks outside its data run" \
         "$FRAMEREFUSE_PASSED_OVER"
-    framerefuse_tagboot long "this deed's FRAME is 32 bytes: it is longer than the FRAME this reader knows"
+    framerefuse_gangway long "this deed's FRAME is 32 bytes: it is longer than the FRAME this reader knows"
 }

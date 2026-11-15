@@ -51,7 +51,7 @@ BOOT_STACK_SIZE       equ 0x10000      ; 64KB boot stack (stack grows downward)
 E820_COUNT_ADDR       equ 0x500
 E820_SIZE_ADDR        equ 0x502
 E820_MAP_ADDR         equ 0x504
-E820_MAX_ENTRIES      equ 128           ; must match E820_MAX_ENTRIES in e820.h and tagboot.c
+E820_MAX_ENTRIES      equ 128           ; must match E820_MAX_ENTRIES in e820.h and gangway.c
 E820_SEG              equ E820_COUNT_ADDR >> 4   ; 0x0050:0000 = 0x500
 ; Words to wipe before the firmware fills the map. It used to be a flat 1024,
 ; which covers 2048 bytes — but the map reaches 0x504 + 128*24 = 0x1104, so
@@ -465,7 +465,7 @@ long_mode_start:
     ; same value compute_dynamic_layout already trusted to place the
     ; page tables. Reporting `KERNEL_RUN_ADDR + kernel_loaded_bytes`
     ; here used to leak the wrong number out of BIOS boot — the kernel
-    ; saw a kernel_end that stopped before BSS. UEFI's tagboot already
+    ; saw a kernel_end that stopped before BSS. UEFI's gangway already
     ; reports the BSS-inclusive value, so reporting it here too keeps
     ; both boot paths telling the same story to PMM.
     mov eax, [KERNEL_RUN_ADDR + KERNEL_HDR_PHYS_END]
@@ -860,7 +860,7 @@ A20_KBC_FF_READS        equ 32
 ; is set, and the first wait never returned; a chipset that answers 0x00 for
 ; an unclaimed port passed that wait and stopped in the second one, which
 ; waited for an output byte that was never coming. Either way the board sat
-; with 'BoxKernel Stage2 Started' as the last thing on its screen, and the
+; with the loader's first line as the last thing on its screen, and the
 ; '[FATAL] A20 enable failed' arm written for exactly that board was
 ; unreachable, because control never came back to reach it.
 ;
@@ -2887,7 +2887,7 @@ boot_drive_saved:       db 0
 
 ; Twelve bytes, NUL-padded, copied verbatim onto the boarding pass so the
 ; kernel can say which loader produced the image it is running.
-boarding_loader_name:   db 'stage2', 0, 0, 0, 0, 0, 0
+boarding_loader_name:   db 'Gangway', 0, 0, 0, 0, 0
 
 align 4
 dynamic_pt_base:        dd 0            ; computed page table base (after kernel)
@@ -2935,7 +2935,7 @@ kernel_load_sectors:    dd 0
 kernel_size_bytes:      dd 0            ; actual file size from TagFS metadata
 kernel_loaded_bytes:    dd 0            ; total bytes loaded (sectors * 512)
 
-msg_stage2_start      db 'BoxKernel Stage2 Started', 13, 10, 0
+msg_stage2_start      db 'Gangway (BIOS)', 13, 10, 0
 msg_a20_enabled       db '[OK] A20 line enabled', 13, 10, 0
 msg_a20_fatal         db '[FATAL] A20 enable failed — system halted', 13, 10, 0
 msg_detecting_memory  db 'Detecting memory (E820)...', 13, 10, 0

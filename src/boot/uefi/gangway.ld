@@ -1,5 +1,5 @@
 /*
- * tagboot.ld — Linker script for TagBoot UEFI application (PE32+ x86_64)
+ * gangway.ld — Linker script for Gangway UEFI application (PE32+ x86_64)
  *
  * The ELF shared object is converted to PE32+ by tools/make_efi.py.
  * Starting at VMA 0x1000 ensures PE sections begin at RVA >= 0x1000
@@ -10,7 +10,7 @@
 
 OUTPUT_FORMAT("elf64-x86-64")
 OUTPUT_ARCH(i386:x86-64)
-ENTRY(TagBootMain)
+ENTRY(GangwayMain)
 
 SECTIONS
 {

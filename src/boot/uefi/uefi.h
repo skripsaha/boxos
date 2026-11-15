@@ -2,8 +2,8 @@
 #define UEFI_H
 
 /*
- * Minimal UEFI type and protocol definitions for TagBoot.
- * No external dependencies — implements exactly what TagBoot needs.
+ * Minimal UEFI type and protocol definitions for Gangway.
+ * No external dependencies — implements exactly what Gangway needs.
  * Based on UEFI Specification 2.10.
  *
  * CALLING CONVENTION (critical):
@@ -317,7 +317,7 @@ struct EFI_GRAPHICS_OUTPUT_PROTOCOL {
 };
 
 /* UEFI 2.10 §12.9.2.4–§12.9.2.5. The buffer is firmware-owned and read-only;
- * TagBoot may inspect it while boot services are alive, but never retains the
+ * Gangway may inspect it while boot services are alive, but never retains the
  * pointer after ExitBootServices. */
 typedef struct {
     uint32_t size_of_edid;

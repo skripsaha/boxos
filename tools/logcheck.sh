@@ -12,7 +12,7 @@
 #                         refused in so many words, and not one write lands
 #                         in its ground
 #   logcheck.sh bookboot  the kernel a volume's BOOT names, held by
-#                         TagBoot to the book's digests before the jump, and
+#                         Gangway to the book's digests before the jump, and
 #                         the kernels the book names by role after it: the
 #                         Lectern on the host against volume-read boot, the
 #                         image attested through OVMF, a byte past the
@@ -1270,7 +1270,7 @@ run_uefi() {
 
     # ── what the loader hands over, and where it puts it ───────────────────
     #
-    # TagBoot writes the E820 map at 0x500, boot_info at 0xA000 and the pass
+    # Gangway writes the E820 map at 0x500, boot_info at 0xA000 and the pass
     # at 0xA600 — three fixed addresses it had never asked the firmware for,
     # while calling that same firmware's allocator several more times before
     # ExitBootServices. Two of those calls are AllocateAnyPages, which lets
@@ -1278,9 +1278,9 @@ run_uefi() {
     # pick. Now the pages are claimed first, and the loader SAYS how many it
     # got — a board whose firmware refuses one names it instead of booting
     # strangely.
-    grep -qE "TagBoot: set aside [0-9]+ of 3 handoff page\(s\)" "$L"
+    grep -qE "Gangway: set aside [0-9]+ of 3 handoff page\(s\)" "$L"
     chk $? "the loader asked for the pages it writes the handoff into"
-    grep -q "TagBoot: set aside 3 of 3 handoff page(s)" "$L"
+    grep -q "Gangway: set aside 3 of 3 handoff page(s)" "$L"
     chk $? "and this firmware gave it all three"
     # ‼ This one cannot go red here and is kept anyway: OVMF gives all three,
     # so there is no refusal to report and removing the claim entirely leaves
@@ -1292,7 +1292,7 @@ run_uefi() {
     # The UEFI half of the seal — a different loader, a different CRC, the
     # same block and the same kernel check.
     grep -q "sealed, and the seal agrees" "$L"
-    chk $? "the pass TagBoot wrote adds up too"
+    chk $? "the pass Gangway wrote adds up too"
 }
 
 # Does the medium actually carry this text? Read off the image rather than
@@ -1462,7 +1462,7 @@ run_noexec() {
 # The second thing that kept BoxOS off a real machine, and the emulator could
 # not show it either: on an i5-9400F booting UEFI, RFLAGS.IF was set by
 # something OUTSIDE this kernel — stage2.asm clears it ten times over on the
-# BIOS path, TagBootJump clears it nowhere, and UEFI 2.10 §8.1 obliges
+# BIOS path, GangwayJump clears it nowhere, and UEFI 2.10 §8.1 obliges
 # firmware to restore it after a runtime call, which is the kind of obligation
 # firmware breaks. The first HPET tick then landed inside cpu_calibrate_tsc,
 # thirty-six lines of kernel_main before scheduler_init() had allocated

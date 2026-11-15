@@ -22,7 +22,7 @@
 # The GATES, every one on the book the build makes: the logcheck and PowerCut
 # scenarios — the book's PowerCut matrix among them (overwrite, logger, tipin,
 # sessions, replug, machineb) — then framerefuse, bookboot (the kernel BOOT
-# names held to the book by TagBoot before the jump), dedup (a copy laid on its
+# names held to the book by Gangway before the jump), dedup (a copy laid on its
 # original by the pass after a Tally), and volume-read's self-test over the
 # image the build lays.
 # Beside them the host's own stands, which no volume touches: boxasm, the

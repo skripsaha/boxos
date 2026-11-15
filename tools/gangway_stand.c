@@ -1,24 +1,24 @@
 /*
- * tagboot_stand — the UEFI loader's Lectern built on the host, the very files
- * TagBoot links (src/boot/uefi/tagboot_lectern*.c, tagboot_succession.c),
- * reading an image file the way TagBoot reads its medium: the Deed at the
+ * gangway_stand — the UEFI loader's Lectern built on the host, the very files
+ * Gangway links (src/boot/uefi/gangway_lectern*.c, gangway_succession.c),
+ * reading an image file the way Gangway reads its medium: the Deed at the
  * ground's head, then the kernel BOOT names and, when it is not attested, the
  * kernels the book names by role, each placed, held to its header and to the
  * digests the book keeps of it, the first attested jumped into.
  *
- *     build/tagboot_stand IMAGE GROUND_START
+ *     build/gangway_stand IMAGE GROUND_START
  *
- * Every line it prints is what TagBoot says of the volume, "boot: " before it
- * where TagBoot puts "TagBoot: ", and the same lines `volume-read IMAGE boot`
+ * Every line it prints is what Gangway says of the volume, "boot: " before it
+ * where Gangway puts "Gangway: ", and the same lines `volume-read IMAGE boot`
  * prints by its own code (tools/volumeread/bootread.py, bootbook.py): the two
  * are held to each other byte for byte on every landing of self-test's group
- * A (tools/tagboot_stand.sh) — the agreement the shared headers alone do not
+ * A (tools/gangway_stand.sh) — the agreement the shared headers alone do not
  * give, for the loops that walk the book are the loader's own (§16.7 п.2, F1).
  *
- * Where the ground is is not the Lectern's question, and TagBoot answers it
- * off the partition table before the Lectern is asked (tagboot.c,
+ * Where the ground is is not the Lectern's question, and Gangway answers it
+ * off the partition table before the Lectern is asked (gangway.c,
  * FindGroundOn): the caller says it here, as volume-read found it. Where a
- * kernel is placed is TagBoot's 0x100000 and the heap here.
+ * kernel is placed is Gangway's 0x100000 and the heap here.
  */
 
 #include <stdint.h>
@@ -26,7 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "tagboot_lectern.h"
+#include "gangway_lectern.h"
 
 typedef struct {
     FILE    *image;
@@ -61,7 +61,7 @@ static void StandSay(void *ctx, const char *line)
 }
 
 /* The payload of the Deed's stamp of `kind`, its bytes in *bytes — NULL when
- * it carries none or its stamps run past it (tagboot_deed.c, DeedStampOf). */
+ * it carries none or its stamps run past it (gangway_deed.c, DeedStampOf). */
 static const uint8_t *StandStamp(const uint8_t *deed, uint16_t kind, uint16_t *bytes)
 {
     VolumeDeed d;
@@ -88,10 +88,10 @@ static const uint8_t *StandStamp(const uint8_t *deed, uint16_t kind, uint16_t *b
     return NULL;
 }
 
-/* The Deed taken up as TagBoot takes it (tagboot_deed.c, DeedTakeUp): the
+/* The Deed taken up as Gangway takes it (gangway_deed.c, DeedTakeUp): the
  * desk's volume, FRAME and atom, and BOOT — *named 0 when it names no kernel.
  * 0 with nothing for the Lectern to read — a Deed with no FRAME is no book,
- * and TagBoot passes its medium over — said in TagBoot's words. */
+ * and Gangway passes its medium over — said in Gangway's words. */
 static int StandDeed(const uint8_t *deed, LecternDesk *desk, VolumeBoot *boot, int *named)
 {
     uint16_t       bytes = 0, frame_bytes = 0, geo_bytes = 0;

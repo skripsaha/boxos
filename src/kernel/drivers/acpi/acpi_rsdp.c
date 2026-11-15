@@ -94,7 +94,7 @@ static acpi_rsdp_t* scan_memory_range(uintptr_t start, uintptr_t end) {
 
 /* ACPI 6.5 §5.2.5.2 — finding the RSDP under UEFI.
  *
- * The bootloader (TagBoot) walks the EFI Configuration Table looking for
+ * The bootloader (Gangway) walks the EFI Configuration Table looking for
  * the ACPI 2.0 GUID (preferred) or the ACPI 1.0 GUID, and forwards the
  * physical address in boot_info's rsdp_addr. Under UEFI low memory may be
  * entirely unmapped or contain garbage — do NOT fall back to EBDA/ROM scans.
@@ -165,7 +165,7 @@ static acpi_rsdp_t* rsdp_from_bios(void) {
 
 acpi_rsdp_t* acpi_find_rsdp(void) {
     /* UEFI: the firmware contract is the EFI Configuration Table; there is
-     * no spec-compliant fallback. If TagBoot couldn't find the RSDP, neither
+     * no spec-compliant fallback. If Gangway couldn't find the RSDP, neither
      * can we. */
     boot_info_t* bi = boot_info_get();
     if (boot_info_valid(bi) && bi->boot_method == BOOT_METHOD_UEFI)
