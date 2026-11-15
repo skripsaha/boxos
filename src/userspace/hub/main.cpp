@@ -9,6 +9,8 @@
 #include "box/core/cabin.h"
 #include "box/life.h"
 #include "box/print.h"
+#include "boxos_mascot.h"
+#include "boxos_symbols.h"
 
 #include "hub.h"
 #include "say.h"
@@ -24,7 +26,10 @@ int main()
     Self.Lines.Begin();
 
     if (cabin_info()->spawner_pid == 0 && cabin_info()->raised == 0) clear();
-    if (Self.Shown.Greeting) hub::Say("BoxOS Hub — help shows what there is\n");
+    if (Self.Shown.Greeting) {
+        hub::SayIn(BOXOS_DUPPO_PINK, BOXOS_SYMBOL_DUPPO_TEXT);
+        hub::Say(" BoxOS Hub — help shows what there is\n");
+    }
 
     if (!hub::Converse(Self)) {
         hub::Say("hub: no keyboard can be heard here, so nothing can be typed; the hub ends\n");

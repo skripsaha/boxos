@@ -19,6 +19,7 @@
 #include "typecase/bitmap_source.h"
 #include "typecase/font_source.h"
 #include "typecase/geometry_source.h"
+#include "typecase/symbol_source.h"
 
 namespace {
 
@@ -66,6 +67,7 @@ Typesetter::Typesetter(std::optional<typecase::Font> Face, std::int32_t Height)
 {
     auto Geometry = std::make_unique<typecase::GeometrySource>();
     Grids         = GridsOf(*Geometry);
+    Sources.Add(std::make_unique<typecase::SymbolSource>());
     Sources.Add(std::move(Geometry));
     if (Face) Sources.Add(std::make_unique<typecase::FontSource>(std::move(*Face)));
     Sources.Add(std::make_unique<typecase::BitmapSource>(

@@ -12,12 +12,12 @@
 
 // The typesetter — what each character looks like in a cell of a
 // framebuffer: Typecase's sources in the order a screen of cells asks them —
-// geometry first, so a frame's line meets the next cell's exactly whatever
-// the font, then the person's font, then the 8x16 font every hand that draws
-// carries, and a character none of them draws shown as its code — and the
-// pictures kept for when they are asked again. It reads no file and touches
-// no pixel: the display gives it a font already read, and the easel puts its
-// pictures on the glass.
+// BoxOS's own symbols and geometry first, so Duppo's halves and a frame's
+// line meet the next cell's exactly whatever the font, then the person's
+// font, then the 8x16 font every hand that draws carries, and a character
+// none of them draws shown as its code — and the pictures kept for when
+// they are asked again. It reads no file and touches no pixel: the display
+// gives it a font already read, and the easel puts its pictures on the glass.
 class Typesetter {
 public:
     // Type for cells Height pixels tall: Face's, the cell as wide as its

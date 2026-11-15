@@ -21,13 +21,14 @@ autostart_wears() {
 }
 
 # replugwrite_spoke_after LOG — the volume's hub greeted after the kernel said
-# what its late launch started: the greeting is not among the kernel's lines
+# what its late launch started (the greeting's words, Duppo before them): the
+# greeting is not among the kernel's lines
 # about the launch. What the greeting is followed by — a kernel line a
 # remount prints after the prompt — it does not hold; the typer reads past
 # that (type_line, typer_selfcheck).
 replugwrite_spoke_after() {
     tr -d '\r' < "$1" | awk '/a volume arrived after the boot had given up/ { h = NR }
-        /^BoxOS Hub/ && h { b = NR } END { exit !(h && b > h) }'
+        /BoxOS Hub — help shows what there is/ && h { b = NR } END { exit !(h && b > h) }'
 }
 
 # ‼ THE ORDER ON THE CONSOLE IS A RACE; THE STATE AS THE LAUNCH IS SAID IS NOT.

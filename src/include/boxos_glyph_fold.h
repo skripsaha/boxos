@@ -13,7 +13,9 @@
  * glyph of boxos_font.h draws — and, for the few that CP437 has no glyph of,
  * what the text was written with before it was written in Unicode: an em
  * dash as the rule, × as x, ∧ as ^, ≠ as != (two cells, so a line of text
- * folds it and a cell does not). Sorted by codepoint and found by halves. A
+ * folds it and a cell does not); and BoxOS's own characters
+ * (boxos_symbols.h) as the pictures of the font nearest them — Duppo's two
+ * halves a bubble and a dot, ○•. Sorted by codepoint and found by halves. A
  * codepoint that is none of these is drawn as 0xFE, the solid box: one cell,
  * visibly not a letter.
  *
@@ -195,6 +197,8 @@ static const BoxGlyphFold BoxGlyphFoldTable[] = {
     {0x2666, "\x04"},
     {0x266A, "\x0D"},
     {0x266B, "\x0E"},
+    {0x10B000, "\x09"},   /* Duppo, the left half: ○ */
+    {0x10B001, "\x07"},   /* Duppo, the right half: • */
 };
 
 static inline int BoxGlyphFoldCodepoint(uint32_t Codepoint,
