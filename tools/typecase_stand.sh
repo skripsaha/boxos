@@ -72,5 +72,5 @@ for font in $LIB/fonts/*.ttf "$WORK"/forge/*.ttf; do oracle "$font" 0; done
 oracle "$WORK/forge/collection.ttc" 0
 oracle "$WORK/forge/collection.ttc" 1
 
-echo "typecase stand: $HELD held, $FAILED failed"
+echo "typecase: $HELD passed, $FAILED failed"
 [ "$FAILED" -eq 0 ]
