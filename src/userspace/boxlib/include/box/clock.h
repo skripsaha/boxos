@@ -15,9 +15,8 @@ extern "C" {
  * Reads cost a single memory load; no syscall, no manifest, no ring
  * round-trip. The page is mapped read-only at a fixed VA in every
  * Cabin; the kernel writes per-tick on the BSP. If the page is missing
- * or has the wrong magic / version (e.g. a future kernel/boxlib drift)
- * each helper falls back to the manifest path so the caller still gets
- * a correct answer — slower, but never wrong.
+ * (no magic) each helper falls back to the manifest path so the caller
+ * still gets a correct answer — slower, but never wrong.
  */
 
 #define CLOCKBOARD_MAGIC_USER    0x4b4c4342u    /* 'BCLK' */
@@ -25,13 +24,12 @@ extern "C" {
 /* Mirrors the kernel struct exactly — keep in lock-step with
  * src/kernel/core/clockboard/clockboard.h. */
 typedef struct PACKED {
-    uint32_t magic;
-    uint32_t version;
     volatile uint64_t uptime_us;
     volatile uint64_t uptime_ms;
     volatile uint64_t tick_count;
     uint64_t tsc_freq_khz;
     uint64_t boot_unix_secs;
+    uint32_t magic;
 } ClockBoardView;
 
 /* True if the ClockBoard page is mapped and carries a valid header.

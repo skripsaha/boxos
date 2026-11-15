@@ -12,12 +12,10 @@ typedef struct Question Question;
  * above) — single source of truth for kernel handler tables and boxlib
  * syscall wrappers. NEVER add a SYSTEM_OP_* define here. */
 
-/* Layout of SYSTEM_OP_EFI_INFO out_crate (128 bytes, packed). Versioned
- * via the leading u32 so userspace can grow the surface forwards-
- * compatibly. Returned in one blob so a single op call gives userspace
- * the full picture without round-trips. */
+/* Layout of SYSTEM_OP_EFI_INFO out_crate (128 bytes, packed; system_ops.c
+ * spells it). Returned in one blob so a single op call gives userspace the
+ * full picture without round-trips. */
 #define EFI_INFO_BLOB_SIZE        128u
-#define EFI_INFO_VERSION          1u
 
 /* The deposit window (system_deck.c, cabin.h deposit_*): what the kernel
  * lends a program to read, in whole pages of its own. */

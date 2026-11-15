@@ -322,7 +322,7 @@ void AddCores(std::vector<Line> &Card, const system_info_t &Info)
 
 std::vector<Line> MakeCard(const ReportSample &Sample)
 {
-    std::string Name  = FixedText(Sample.Info.version, sizeof(Sample.Info.version));
+    std::string Name  = FixedText(Sample.Info.name, sizeof(Sample.Info.name));
     std::string Title = Name;
     Title.resize(ContentWidth - 8, ' ');
     Title += "passport";

@@ -97,11 +97,12 @@ uint8_t LogRingToneAt(uint64_t pos)
 #define LOGKEEP_BYTES     (LOGKEEP_HEADER + (uint64_t)LOGKEEP_BANKS * LOGRING_CAPACITY)
 
 #define LOGKEEP_MAGIC     0x4449415353584F42ULL   /* "BOXSAID" + NUL, little-end */
-#define LOGKEEP_VERSION   1u
 
+/* `size` is the header's own length: a header that survived a warm reset from
+ * a kernel of another layout says another, and is not taken. */
 typedef struct {
     uint64_t magic;
-    uint32_t version;
+    uint32_t size;         /* sizeof(LogKeepHeader) */
     uint32_t capacity;     /* per bank */
     uint32_t current;      /* bank this boot writes */
     uint32_t boot;         /* counts up; names which run a bank came from */
@@ -283,7 +284,7 @@ void LogKeepInit(void)
 
     volatile LogKeepHeader *h = keep_header();
     bool carried = (h->magic == LOGKEEP_MAGIC) &&
-                   (h->version == LOGKEEP_VERSION) &&
+                   (h->size == (uint32_t)sizeof(LogKeepHeader)) &&
                    (h->capacity == (uint32_t)LOGRING_CAPACITY) &&
                    (h->current < LOGKEEP_BANKS);
 
@@ -302,7 +303,7 @@ void LogKeepInit(void)
         g_keep_prev_boot  = 0;
         g_keep_current    = 0;
         h->magic    = LOGKEEP_MAGIC;
-        h->version  = LOGKEEP_VERSION;
+        h->size     = (uint32_t)sizeof(LogKeepHeader);
         h->capacity = (uint32_t)LOGRING_CAPACITY;
         h->boot     = 1u;
         h->bytes[0] = 0;

@@ -55,12 +55,11 @@ int time_uptime_ms(uint64_t *out_ms)
 
     /* ClockBoard fast path: a single memory load instead of a 46 µs
      * HW-deck round trip. Falls through to the manifest path if the
-     * page is missing or carries the wrong magic (older kernel,
-     * missing mapping, future ABI mismatch). The page is mapped R/O
+     * page is missing (no magic). The page is mapped R/O
      * into every Cabin at CABIN_CLOCKBOARD_ADDR. */
     const volatile ClockBoardView *v =
         (const volatile ClockBoardView *)(uintptr_t)CABIN_CLOCKBOARD_ADDR;
-    if (v->magic == CLOCKBOARD_MAGIC_USER && v->version >= 1u) {
+    if (v->magic == CLOCKBOARD_MAGIC_USER) {
         *out_ms = v->uptime_ms;
         return OK;
     }

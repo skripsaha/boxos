@@ -503,7 +503,6 @@ uint8_t console_notice_of(const void *payload, uint32_t length);
 #define DISP_CMD_LAYER_CLOSE  0x42
 #define DISP_CMD_LAYER_COMMIT 0x43
 
-#define DISPLAY_LAYER_VERSION   5u
 #define DISPLAY_LAYER_SLOTS     3u
 #define DISPLAY_LAYER_TAG_PREFIX "display:layer:"
 #define DISPLAY_LAYER_TAG_MAX   48u
@@ -590,7 +589,6 @@ typedef struct PACKED {
  * changed with compiler atomics by both cabins. */
 typedef struct {
     uint32_t magic;
-    uint32_t version;
     uint32_t width;
     uint32_t height;
     uint32_t cell_count;
@@ -624,8 +622,8 @@ typedef struct {
 
 #define DISPLAY_LAYER_MAGIC 0x4C594552u /* "LYER" */
 
-STATIC_ASSERT(sizeof(DisplayLayerSharedHeader) == 104,
-              "DisplayLayerSharedHeader is a Bay ABI and must stay 104 bytes");
+STATIC_ASSERT(sizeof(DisplayLayerSharedHeader) == 96,
+              "DisplayLayerSharedHeader is a Bay ABI and must stay 96 bytes");
 STATIC_ASSERT(sizeof(DisplayLayerOpenRequest) == 32,
               "DisplayLayerOpenRequest is a question's ABI and must stay 32 bytes");
 STATIC_ASSERT(sizeof(DisplayLayerOpenReply) == 80,

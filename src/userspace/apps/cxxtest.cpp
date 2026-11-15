@@ -5098,7 +5098,7 @@ void Phase23()
     box::result<box::system_info> si = box::system::info();
     Check(si.has_value(), "phase23 system::info() returns a snapshot");
     if (si) {
-        Check(si->version().substr(0, 5) == "BoxOS", "phase23 system version is BoxOS");
+        Check(si->name() == "BoxOS", "phase23 the system calls itself BoxOS");
         Check(si->total_memory() > 0, "phase23 total_memory > 0");
         Check(si->used_memory() <= si->total_memory() && si->free_memory() <= si->total_memory(),
               "phase23 memory accounting within total");

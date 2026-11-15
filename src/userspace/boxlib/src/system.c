@@ -588,8 +588,8 @@ int sysinfo(system_info_t *info)
     if (rc != 0)            return box_fail(rc);
     if (got < sizeof(blob)) return -ERR_INTERNAL;
 
-    memcpy(info->version, blob, 32);
-    info->version[31] = '\0';
+    memcpy(info->name, blob, 32);
+    info->name[31] = '\0';
     memcpy(&info->uptime_ns,    blob + 32, sizeof(uint64_t));
     memcpy(&info->total_memory, blob + 40, sizeof(uint64_t));
     memcpy(&info->used_memory,  blob + 48, sizeof(uint64_t));
@@ -704,20 +704,19 @@ int efi_info(efi_info_t *out)
     if (rc != 0)            return box_fail(rc);
     if (got < sizeof(blob)) return -ERR_INTERNAL;
 
-    memcpy(&out->version,         blob + 0,  4);
-    out->rt_available     = blob[4];
-    out->esrt_available   = blob[5];
-    out->sb_available     = blob[6];
-    out->sb_enforced      = blob[7];
-    out->sb_setup_mode    = blob[8];
-    out->sb_audit_mode    = blob[9];
-    out->sb_deployed_mode = blob[10];
+    out->rt_available     = blob[0];
+    out->esrt_available   = blob[1];
+    out->sb_available     = blob[2];
+    out->sb_enforced      = blob[3];
+    out->sb_setup_mode    = blob[4];
+    out->sb_audit_mode    = blob[5];
+    out->sb_deployed_mode = blob[6];
     out->_pad             = 0;
-    memcpy(&out->esrt_count,       blob + 12, 4);
-    memcpy(&out->cert_count_total, blob + 16, 4);
-    memcpy(&out->hash_count_total, blob + 20, 4);
-    memcpy(out->cert_count_by_db,  blob + 24, 6 * 4);
-    memcpy(out->hash_count_by_db,  blob + 48, 6 * 4);
+    memcpy(&out->esrt_count,       blob + 8,  4);
+    memcpy(&out->cert_count_total, blob + 12, 4);
+    memcpy(&out->hash_count_total, blob + 16, 4);
+    memcpy(out->cert_count_by_db,  blob + 20, 6 * 4);
+    memcpy(out->hash_count_by_db,  blob + 44, 6 * 4);
     return 0;
 }
 

@@ -112,7 +112,7 @@ std::expected<DisplayLayer, StageError> DisplayLayer::Open(std::int32_t LeastCol
     const DisplayLayerSharedHeader *Header = Layer.Header;
     if (Layer.Shared.size_bytes() < sizeof(DisplayLayerSharedHeader) +
                                         DISPLAY_LAYER_SLOTS * Cells * sizeof(DisplayLayerCell) ||
-        Header->magic != DISPLAY_LAYER_MAGIC || Header->version != DISPLAY_LAYER_VERSION ||
+        Header->magic != DISPLAY_LAYER_MAGIC ||
         Header->width != Request.width || Header->height != Request.height ||
         Header->cell_count != Cells || Header->slot_count != DISPLAY_LAYER_SLOTS)
         return Refused(box::error{box::errc::corrupted});

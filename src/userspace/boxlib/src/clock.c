@@ -20,10 +20,9 @@ static const ClockBoardView *cb(void)
 bool clock_available(void)
 {
     const ClockBoardView *v = cb();
-    /* Magic + version check — guards against an older boxlib running
-     * against a future kernel layout, or a Cabin where the mapping
-     * hasn't been set up. */
-    return v->magic == CLOCKBOARD_MAGIC_USER && v->version >= 1u;
+    /* The magic says the page is mapped — a Cabin where the mapping
+     * hasn't been set up reads none. */
+    return v->magic == CLOCKBOARD_MAGIC_USER;
 }
 
 uint64_t clock_uptime_us(void)

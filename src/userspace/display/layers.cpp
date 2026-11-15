@@ -225,7 +225,6 @@ void LayersOpen(const Result &Asked, const AskFrom &From, const DisplayLayerOpen
 
     auto *Header = reinterpret_cast<DisplayLayerSharedHeader *>(Layer.Shared.data());
     Header->magic = DISPLAY_LAYER_MAGIC;
-    Header->version = DISPLAY_LAYER_VERSION;
     Header->width = Request.width;
     Header->height = Request.height;
     Header->cell_count = static_cast<std::uint32_t>(CellCount);
