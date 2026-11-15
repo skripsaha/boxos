@@ -829,6 +829,7 @@ SNAKE_BIN        = $(APPS_DIR)/snake.elf
 HACKER_BIN       = $(APPS_DIR)/hacker.elf
 PIPES_BIN        = $(APPS_DIR)/pipes.elf
 WORDLE_BIN       = $(APPS_DIR)/wordle.elf
+TESTPROGRAM_BIN  = $(APPS_DIR)/testprogram.elf
 STRANDPARK_BIN   = $(APPS_DIR)/strandpark.elf
 CHILDSPIN_BIN    = $(APPS_DIR)/childspin.elf
 PRINT_STRESS_BIN = $(APPS_DIR)/print_stress.elf
@@ -1287,7 +1288,7 @@ painter: $(PAINTER_LIB)
 # every binary simply waits for it. The stamp is distrusted whenever any of the
 # binaries it claims to have built is missing, so deleting one by hand heals
 # itself at the next parse instead of silently doing nothing.
-APP_ELFS := $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(PULSE_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN)
+APP_ELFS := $(PROCA_BIN) $(PROCB_BIN) $(TESTPROGRAM_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(PULSE_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN)
 
 APPS_STAMP  := $(APPS_DIR)/.apps.stamp
 APPS_INPUTS := $(wildcard $(APPS_DIR)/*.c) $(wildcard $(APPS_DIR)/*.cpp) \
@@ -1480,6 +1481,7 @@ VOLUME_CONTENT = \
 	$(DECKS_BIN)    "" \
 	$(BENCH_BIN)         "bench" \
 	$(TOUCH_TEST_BIN)    "test" \
+	$(TESTPROGRAM_BIN)   "test,cpp" \
 	$(TOUCH_STRESS_BIN)  "test" \
 	$(LIFECYCLE_BIN)     "test" \
 	$(PERSIST_BIN)       "test" \
@@ -1552,7 +1554,8 @@ VOLUME_CONTENT = \
 	$(USERSPACE_DIR)/try "example" \
 	$(USERSPACE_DIR)/file.txt    "file,info,message,text" \
 	$(USERSPACE_DIR)/guide.md    "guide,text" \
-	$(TESTBIN_EMPTY)         "binary,test:forerror,emptyfile" \
+	$(USERSPACE_DIR)/text.md     "document, painter, boxcxx, text, for:module" \
+	$(TESTBIN_EMPTY)         "binary, test:forerror, emptyfile" \
 	$(UTILS_DIR)/ipc_test.elf "" \
 	$(UTILS_DIR)/memtag.elf  "memory" \
 	$(UTILS_DIR)/hw.elf      "hardware" \
