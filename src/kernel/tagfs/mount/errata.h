@@ -6,7 +6,7 @@
 
 /*
  * Errata — the mount's verdict, held in memory until the session's first
- * stitch lays it down (spec_v2 §3.9, §2.8 Undone, §16.5 п.4-7).
+ * stitch lays it down.
  *
  * A mount that rolls a file back — its data in the newest stitch never landed
  * (NOT_LANDED, why 1), or a record of it did not fit the file (the rule of

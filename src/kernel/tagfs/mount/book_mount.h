@@ -8,11 +8,11 @@
 #include "../settle/endpaper_fact.h"
 
 /*
- * MountReadBook — the volume's mount: its book read the way the spec reads it
- * (spec_v2 §4.5 пп.1–4, 8; §16.1 п.2–5), the Spine's slots and the Tally of
- * the newest one whose roots read, into memory — the map of live files, the
- * registry, the tag index, the Use Context — with every owner of every block claimed (§4.6) and the numbers
- * the volume gives next past everything it showed.
+ * MountReadBook — the volume's mount: its book read, the Spine's slots and the
+ * Tally of the newest one whose roots read, into memory — the map of live
+ * files, the registry, the tag index, the Use Context — with every owner of
+ * every block claimed (§4.6) and the numbers the volume gives next past
+ * everything it showed.
  *
  * It reads the Tally and the ribbon of stitches sewn past it (§4.5 п.5,
  * ribbon.h): the state it mounts is the Tally's with every stitch after it
@@ -49,7 +49,7 @@
 error_t MountBookGround(uint8_t seat, const DeedCopy* head, uint64_t ground_sectors);
 
 /*
- * The volume takes the ground behind it (spec_v2 §16.1 п.4, §1.3): after its
+ * The volume takes the ground behind it: after its
  * book is read and its block map derived, before the door — and only by a
  * mount that writes it, every verdict in. A volume under glass takes none, nor
  * one stood on its far copy alone, nor one whose medium refuses writes as
@@ -77,7 +77,7 @@ void    MountBookLetGo(void);
 /*
  * Whether file `file_id` is one the mounted book holds and cannot read — its
  * header or its Parcels lost with a rotten range of the Tally, or written
- * against the book's own rules (spec_v2 §4.5 п.3, §2.9). Such a file opens
+ * against the book's own rules. Such a file opens
  * for nobody (ERR_TAGFS_CORRUPTED, as the storage deck answers it), its id is
  * never given again and the blocks it may name are held. False when no
  * volume is up, and for a file Escheat let go — no file from then on.

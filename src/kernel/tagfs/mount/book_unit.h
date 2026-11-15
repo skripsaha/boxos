@@ -5,7 +5,7 @@
 #include "volume_book.h"
 
 /*
- * BookUnitRead — sectors of a format-v2 volume's book read off the medium and
+ * BookUnitRead — sectors of a volume's book read off the medium and
  * each judged once, by the alphabet every reader of the book keeps
  * (volume_book.h): whether it holds as a sector of this volume's book at its
  * own address, and whether the run of them is one whole unit — a slot, a
@@ -15,8 +15,8 @@
  * THAT DID NOT ANSWER. ERR_BAD_SECTOR (UNC, MEDIUM ERROR) on a run is read
  * again a sector at a time, so the one that will not read is named and the
  * rest are judged — a slot torn there, a copy of a node that does not hold,
- * a stitch closed and damaged: the book's reader decides by where it lies
- * (spec_v2 §2.5, §3.9), and no seat:ready will change it, so it is never
+ * a stitch closed and damaged: the book's reader decides by where it lies,
+ * and no seat:ready will change it, so it is never
  * counted as a refusal. Any other refusal is the medium not answering: it
  * is counted (TagFSNoteReadRefused) and handed back, and the mount it ends
  * is asked again when a seat answers again — the arrangement every reader of
@@ -74,7 +74,7 @@ error_t  BookUnitOf(uint64_t vlba, uint32_t count, uint16_t kind, uint64_t seq, 
 error_t  BookUnitRefused(int rc);
 
 /* The largest seq a sector read through BookUnitRead held at since the mount
- * forgot it — what the next seq is given past (spec_v2 §2.2, §4.5 п.8). Read
+ * forgot it — what the next seq is given past. Read
  * by the mount, with its door shut; raised by every reader of the book on any
  * core, the mount's and the DIGESTS leaves a read of a block opens after it. */
 uint64_t BookSeqSeen(void);

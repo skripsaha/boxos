@@ -8,8 +8,7 @@
 #include "cpu_calibrate.h"
 
 /*
- * RibbonVerify — the data of the newest stitch held to its digests (spec_v2
- * §4.5 п.6, §3.9).
+ * RibbonVerify — the data of the newest stitch held to its digests.
  *
  * A stitch sewn without DATA_FLUSHED was laid without its cycle's first
  * flush: its data may not have reached the medium when the stitch did. So

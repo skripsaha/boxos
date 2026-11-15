@@ -14,7 +14,7 @@
  * ‼ THE ORDER IS THE CRASH SAFETY, and there is nothing else protecting it:
  * the far copy at the new end, read back; then the head, which is the commit.
  * Cut the power before the head and the volume is exactly what it was; after
- * it, grown, with both copies agreeing (spec_v2 §3.10 C11).
+ * it, grown, with both copies agreeing (logcheck.sh growcut).
  */
 
 /* Whether there is ground behind a volume of `have` sectors, on ground the

@@ -5,13 +5,12 @@
 #include "../file_map/file_map.h"
 
 /*
- * RibbonCollate — pass 1 of the ribbon (spec_v2 §4.5 п.5): from the `at` of a
- * slot, the stitches sewn on, one after another, by the Clasp each names
- * (H-2) — rules (а)–(г) — and the Quires the chain runs through; then, for the
- * slot the mount stands on, the direct scan of what lies past the end of the
- * chain (§2.2) and what each branch there is (§3.9, §16.3 пп.10–11), made by
- * ribbon_scan.c. Nothing is applied here: pass 2 replays what pass 1 sewed on
- * (ribbon_transcribe.c).
+ * RibbonCollate — pass 1 of the ribbon: from the `at` of a slot, the stitches
+ * sewn on, one after another, by the Clasp each names (H-2) — rules (а)–(г) —
+ * and the Quires the chain runs through; then, for the slot the mount stands
+ * on, the direct scan of what lies past the end of the chain (§2.2) and what
+ * each branch there is (§3.9, §16.3 пп.10–11), made by ribbon_scan.c. Nothing
+ * is applied here: pass 2 replays what pass 1 sewed on (ribbon_transcribe.c).
  *
  * ‼ THE CHAIN IS SEWN BY IDENTITY, NOT BY SEQ. A stitch is taken only when its
  * StitchHead names the last one taken by its seq AND its Clasp: a dead branch

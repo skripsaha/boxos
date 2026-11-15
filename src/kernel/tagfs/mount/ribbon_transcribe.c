@@ -9,9 +9,9 @@
 #include "../settle/loose_leaves.h"
 
 /*
- * RibbonTranscribe — pass 2 of the ribbon (spec_v2 §4.5 п.5, §3.7): every
- * stitch pass 1 sewed on, in order, each record through the rule of its kind
- * into the memory every format shares — the map of live files, the registry,
+ * RibbonTranscribe — pass 2 of the ribbon: every stitch pass 1 sewed on, in
+ * order, each record through the rule of its kind into the memory a mount
+ * fills — the map of live files, the registry,
  * the tag index, the Use Context.
  *
  * ‼ ONE DOOR OF THE MIRROR. A record is replayed the way an Ink is made: the
@@ -790,7 +790,7 @@ error_t RibbonTranscribe(RibbonWalk* w, const char** what)
     else if (rc != OK && !read)
         *what = "its medium would not give up the data of the ribbon's newest stitch";
     else if (rc != OK)
-        *what = "the memory every format shares would not take a record of the ribbon past its Tally";
+        *what = "the memory a mount fills would not take a record of the ribbon past its Tally";
     return rc;
 }
 

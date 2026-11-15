@@ -88,7 +88,7 @@ error_t  PlotAppendHole(Plot *p, uint64_t count);
 error_t  PlotWindowTail(Plot *p, uint64_t k, uint32_t tail);
 
 /*
- * The Slip of a write (plot_slip.c, spec_v2 §3.7, §16.5 п.13-15):
+ * The Slip of a write (plot_slip.c):
  *   PlotSlipBegin   the choice, at PlotWindowBegin: a write that lies wholly in
  *                   the file's last block as it leaves it, leaves that block
  *                   short of full, keeps the Slips one span, of a file

@@ -212,7 +212,7 @@ static void RunsSayDoubles(void)
 }
 
 /*
- * Format v2's census says two owners of one block as the blocks the two
+ * The census says two owners of one block as the blocks the two
  * name together: a meeting is the part of a run the furthest reach before it
  * covers, put to the pair of owners met — each a file by its id, any other by
  * its kind — and the meetings of one pair that go on without a gap are one
@@ -578,16 +578,16 @@ static uint32_t QuireGaps(const GroundRun* q, uint32_t nq, GroundRun* gaps)
 }
 
 /*
- * ‼ A TALLY-QUIRE IS HELD WHOLE WHILE ONE NODE IN IT LIVES (spec_v2 §16.5
- * п.17, Р-d3 (б)). The Binder takes its Tally-Quires whole on the grid of
- * `quire` (settle/binder.c TallyRunsTake), and a slot holds every one a node
- * of its Tally lies in: so every block of such a Quire that no owner names —
- * a dead node's, the tail no Tally reached — is the Tallies' too, given to no
- * one, and the Quire goes back whole once no node of it lives (§4.8). Only
- * what no claim at all names is taken: a Quire cut on another grid holds
- * nothing an owner holds. One rule with volume-read (bookcensus.py _Quires),
- * and the block log by its census (blklog_book.py). Before the cut of the
- * fallow and the held: every name as claimed. ERR_NO_MEMORY, said.
+ * ‼ A TALLY-QUIRE IS HELD WHOLE WHILE ONE NODE IN IT LIVES. The Binder takes
+ * its Tally-Quires whole on the grid of `quire` (settle/binder.c
+ * TallyRunsTake), and a slot holds every one a node of its Tally lies in: so
+ * every block of such a Quire that no owner names — a dead node's, the tail no
+ * Tally reached — is the Tallies' too, given to no one, and the Quire goes
+ * back whole once no node of it lives (§4.8). Only what no claim at all names
+ * is taken: a Quire cut on another grid holds nothing an owner holds. One rule
+ * with volume-read (bookcensus.py _Quires), and the block log by its census
+ * (blklog_book.py). Before the cut of the fallow and the held: every name as
+ * claimed. ERR_NO_MEMORY, said.
  */
 error_t GroundQuiresHeld(uint64_t quire)
 {

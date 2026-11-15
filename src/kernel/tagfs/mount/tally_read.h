@@ -5,11 +5,11 @@
 #include "volume_tally.h"
 
 /*
- * TallyRead — the Tally a slot names, walked down from its roots (spec_v2 §2.5,
- * §2.9, §4.5 п.3): every node by the BookPtr its parent gives it, the copies
- * in their order, a copy held to the pointer's seq and to the range of keys
- * its parent's separators give it (§16.3 п.2), the leaves' items handed to
- * their reader in the order of the tree's keys.
+ * TallyRead — the Tally a slot names, walked down from its roots: every node
+ * by the BookPtr its parent gives it, the copies in their order, a copy held
+ * to the pointer's seq and to the range of keys its parent's separators give
+ * it (§16.3 п.2), the leaves' items handed to their reader in the order of the
+ * tree's keys.
  *
  * A copy that does not hold is said, with why, and the next copy read — the
  * first part of Self-Heal, which the next Tally's writer finishes by writing
@@ -25,9 +25,9 @@
  * And the DIGESTS tree, read the way §4.5 п.3 and §8.1 ask: its inner nodes
  * at the mount, each leaf kept by the range of blocks it covers; the leaf a
  * block lies in read when the block is (TallyDigestFind) — IntegrityVerify's
- * question on a format-v2 volume — and every leaf read only when a FILES
- * range rots, for the blocks with a digest that no living file names are
- * held then (§16.1 п.5, TallyDigestsEach).
+ * question — and every leaf read only when a FILES range rots, for the blocks
+ * with a digest that no living file names are held then (§16.1 п.5,
+ * TallyDigestsEach).
  *
  * The walk is the mount's, with the door shut; TallyDigestFind is any
  * reader's, inside the door, with no TagFS lock held — it may read the

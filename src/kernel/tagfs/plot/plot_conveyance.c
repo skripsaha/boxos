@@ -4,13 +4,13 @@
  * What a Plot conveys (plot.h, PlotConveyance): the difference between the
  * runs of the record it was loaded from and the runs it leaves, as splices of
  * that record — the one change an Ink makes of a file's runs, and the one a
- * Shaped record of the book says was made (spec_v2 §2.8, §3.7).
+ * Shaped record of the book says was made.
  *
- * ‼ THE DIFFERENCE IS TAKEN, NOT KEPT (spec_v2 §16.2 p.13). A Plot works on a
- * flat copy of its window of the runs and changes it in place — a trim, an
- * append, a gather, a run put where another was — and never knew where its
- * changes lie in the record. The Ink finds them once it holds the record the
- * Plot was loaded from: one walk of both in the file's order, O(runs).
+ * ‼ THE DIFFERENCE IS TAKEN, NOT KEPT. A Plot works on a flat copy of its
+ * window of the runs and changes it in place — a trim, an append, a gather, a
+ * run put where another was — and never knew where its changes lie in the
+ * record. The Ink finds them once it holds the record the Plot was loaded
+ * from: one walk of both in the file's order, O(runs).
  */
 
 static bool StripSame(const Strip *a, const Strip *b)

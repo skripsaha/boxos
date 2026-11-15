@@ -5,15 +5,14 @@
 #include "../../core/error/error.h"
 
 /*
- * ‼ UNDER GLASS — A KERNEL WRITES ONLY WHAT IT CAN CARRY ON (spec_v2 §16.1 п.2).
+ * ‼ UNDER GLASS — A KERNEL WRITES ONLY WHAT IT CAN CARRY ON.
  *
  * A volume whose book carries something this kernel's writer could not carry
  * on — a record of a kind it does not know and may not step over, a body
  * longer than it knows, a run's extension, a bookmark, a tag wider than it
  * holds, a FRAME longer than its own, ground off the medium's physical
  * blocks — is mounted to be read, and nothing of it is written: what this
- * kernel wrote over it would lose what it does not understand, in silence. A
- * format-v2 book this kernel reads and does not yet write stands so too.
+ * kernel wrote over it would lose what it does not understand, in silence.
  *
  * TagFSUnderGlass says why, aloud, each reason once, and puts the volume
  * under glass for the rest of its mount — no Ink, no cycle, no write of its

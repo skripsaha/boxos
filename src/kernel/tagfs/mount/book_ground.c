@@ -9,10 +9,10 @@
 #include "../settle/escheat.h"
 
 /*
- * The census of a format-v2 volume (book_mount.h; spec_v2 §4.6): no bitmap
+ * The census of a volume (book_mount.h): no bitmap
  * says which blocks are taken — every owner names its ground, and what none
- * names is free. The owners are the kernel's one list (ground_owner.h, those
- * of format v2), the same volume-read's census asks of the same image
+ * names is free. The owners are the kernel's one list (ground_owner.h), the
+ * same volume-read's census asks of the same image
  * (tools/volumeread/bookcensus.py, from the generated BOOK_OWNERS):
  *
  *   front     the volume before its data run, the Spine's slots aside
@@ -285,7 +285,7 @@ static uint32_t BookFilesWalk(bool laid)
 
 /*
  * ‼ A SLIP ON THE FILE THE LOADER READS THE KERNEL BY PUTS THE BOOK UNDER
- * GLASS (spec_v2 §16.6 п.4). The loader reads that file by its blocks (§9.1)
+ * GLASS. The loader reads that file by its blocks (§9.1)
  * and no call changes it (ink.c, InkGuardSays), so this kernel never gives it
  * a Slip (plot_slip.c) — one there is another writer's, and its tail can be
  * neither laid in its block (an Engross is a change of the file) nor let go by

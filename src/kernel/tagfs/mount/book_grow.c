@@ -4,8 +4,7 @@
 #include "boardroom.h"
 
 /*
- * The volume taking the ground behind it (book_mount.h, MountBookGrow;
- * spec_v2 §16.1 п.4, §1.3, §4.5 п.1).
+ * The volume taking the ground behind it (book_mount.h, MountBookGrow).
  *
  * ‼ ONLY THE PROLOGUE MOVES. A book counts its blocks from the volume's block
  * 0 and keeps no map of them on the medium: its FRAME names where the Spine

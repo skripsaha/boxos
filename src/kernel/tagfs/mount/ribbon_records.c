@@ -6,12 +6,11 @@
 #include "../tag_registry/tag_registry.h"
 
 /*
- * The rules a record of the ribbon is replayed by (spec_v2 §2.8, §3.7's
- * table), one function a kind, for pass 2 (ribbon_transcribe.c): each reads
- * the file as the stitch leaves it so far, holds the record to it, and puts
- * what the record makes of it into the stitch's stage — a refusal of the
- * whole stitch, or the rule of rot for the one file, said in bookmount.py's
- * words (_Record, _File, _Label, _Slip).
+ * The rules a record of the ribbon is replayed by, one function a kind, for
+ * pass 2 (ribbon_transcribe.c): each reads the file as the stitch leaves it so
+ * far, holds the record to it, and puts what the record makes of it into the
+ * stitch's stage — a refusal of the whole stitch, or the rule of rot for the
+ * one file, said in bookmount.py's words (_Record, _File, _Label, _Slip).
  */
 
 static const char* const g_kind_names[RIBBON_KINDS_KNOWN + 1u] = {

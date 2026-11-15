@@ -181,8 +181,8 @@ error_t PlotAppendRun(Plot *p, uint64_t start, uint32_t count)
                   (uint64_t)p->run_count + 1, sizeof(Strip)))
         return ERR_NO_MEMORY;
     /* A run the record names is never grown: the stitch would say its ground
-     * was taken out and put back, and a reader frees what it takes out
-     * (spec_v2 §2.8). Only this call's own Stake is. */
+     * was taken out and put back, and a reader frees what it takes out. Only
+     * this call's own Stake is. */
     const Strip *last = p->run_count ? &p->runs[p->run_count - 1] : NULL;
     if (last && PlotStakeHolding(p, last->start) == p->stake_count)
         p->runs[p->run_count++] = (Strip){ .start = start, .count = count, .kind = STRIP_DATA };

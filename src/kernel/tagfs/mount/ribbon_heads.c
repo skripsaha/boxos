@@ -2,16 +2,15 @@
 #include "book_mount.h"
 
 /*
- * RibbonQuiresOf — the Quires the ribbon of a slot not stood on runs through
- * (spec_v2 §16.2 п.12, §4.5 п.4): the slot names that ground, and the census
- * must see it, but the slot is read for its ground alone. So its ribbon is
- * walked by its StitchHeads only: from the slot's `at`, one sector a stitch —
- * the first, where its StitchHead lies — the next stitch where the last one
- * ends by its `of` (rule (а)) or at the start of the next_quire, naming the
- * Quire the last one ended in as the one it came from (rule (б)); on through
- * each next_quire a StitchHead names, the walk bounded by the data run's
- * length. Nothing past a stitch's first sector is
- * read, nothing of a stitch is held past its step, and nothing is said.
+ * RibbonQuiresOf — the Quires the ribbon of a slot not stood on runs through:
+ * the slot names that ground, and the census must see it, but the slot is read
+ * for its ground alone. So its ribbon is walked by its StitchHeads only: from
+ * the slot's `at`, one sector a stitch — the first, where its StitchHead lies
+ * — the next stitch where the last one ends by its `of` (rule (а)) or at the
+ * start of the next_quire, naming the Quire the last one ended in as the one
+ * it came from (rule (б)); on through each next_quire a StitchHead names, the
+ * walk bounded by the data run's length. Nothing past a stitch's first sector
+ * is read, nothing of a stitch is held past its step, and nothing is said.
  *
  * ‼ A HEAD IS NOT A STITCH. What reads of a StitchHead is its seq, the stitch
  * it names before it by seq — and, at the slot's own boundary, by Clasp — and
