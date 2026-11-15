@@ -8,9 +8,12 @@
 # The library is first built as BoxOS builds it, without a warning. Then the
 # checks (tools/typecase_stand.cpp): the rasterizer held to exact areas and to
 # a fine sampling of every glyph; the sources, the chain and the cache to
-# what they promise; the stand's own fonts — every character map format,
-# every way a component is put in place, nesting to the limit and past it,
-# cycles, a collection — to what each was made to say; each named damage of
+# what they promise; geometry — every frame line leaving the cell at its
+# weight's pixels, every mosaic and its complement filling the cell once, the
+# eighths, shades and braille — at ten sizes; the stand's own fonts — every
+# character map format, every way a component is put in place, nesting to
+# the limit and past it, cycles, a collection — to what each was made to
+# say; each named damage of
 # the tree's font and MUTATIONS random ones (1000 when none is named) read and
 # drawn whole. Then every font of the tree and every font the stand made is
 # read again by tools/typecase_oracle.py, a reader written apart, and the two

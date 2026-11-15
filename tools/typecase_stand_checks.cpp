@@ -21,6 +21,7 @@
 #include "typecase/chain.h"
 #include "typecase/code_box.h"
 #include "typecase/font_source.h"
+#include "typecase/geometry_source.h"
 #include "typecase/glyph_cache.h"
 #include "typecase/rasterizer.h"
 #include "typecase_stand.h"
@@ -415,6 +416,15 @@ void CheckSources(Tally &Count, const std::vector<std::uint8_t> &Bytes)
                     !Text.Has(U'一'),
                 "a chain asks its sources in order — the first that has a character draws it — and draws what none "
                 "has as its code");
+
+    typecase::Chain Screen;
+    Screen.Add(std::make_unique<typecase::GeometrySource>());
+    Screen.Add(std::make_unique<typecase::FontSource>(std::move(*typecase::Font::Read(Bytes))));
+    typecase::GeometrySource Lines;
+    const auto Frame = Screen.Draw(U'\u2502', Cell), Drawn = *Lines.Draw(U'\u2502', Cell);
+    Count.Check(Frame.Coverage == Drawn.Coverage && Frame.Width == Cell.Width && Screen.Draw(U'A', Cell).Width < Cell.Width + 2,
+                "a screen's chain, geometry before the font: a frame's line from geometry, to the cell; a letter from the "
+                "font");
 
     typecase::GlyphCache Kept(Text, 4096);
     const auto First = Kept.Get(U'A', Cell).Coverage;
