@@ -2733,7 +2733,7 @@ run_yank() {
 #      says it waits, the caller steps out, and only then is the old volume let
 #      go of and the new one mounted (tagfs_abandon, the service pass);
 #   the handle held from before — its mounting is not the one up, so a read
-#      through it is refused by name and answers ERR_TAGFS_INVALID_HANDLE (855,
+#      through it is refused by name and answers ERR_TAGFS_INVALID_HANDLE (853,
 #      handle_belongs_here), never a block of somebody else's file; its entry
 #      in the open-file table is still the one the table hands out.
 #
@@ -2865,8 +2865,8 @@ run_holdground() {
     grep -q "was opened on an earlier mounting of this volume" "$S"
     chk $? "a read through the handle from the previous mounting is refused"
 
-    # 855 is ERR_TAGFS_INVALID_HANDLE: the read's own code, never folded (S3b).
-    grep -q "HOLDGROUND. a read through the handle from before answered 855" "$S"
+    # 853 is ERR_TAGFS_INVALID_HANDLE: the read's own code, never folded (S3b).
+    grep -q "HOLDGROUND. a read through the handle from before answered 853" "$S"
     chk $? "and the refusal reaches the caller as its own code, ERR_TAGFS_INVALID_HANDLE"
 
     # ── ‼ THE OPEN-FILE TABLE BELONGS TO THE MACHINE ───────────────────────

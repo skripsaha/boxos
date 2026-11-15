@@ -13,7 +13,8 @@ typedef uint32_t error_t;
 
 /* ── BOX_ERROR_LIST — the single source of truth for every BoxOS error code ──
  * One row per code, mirroring the kernel enum (src/kernel/core/error/error.h)
- * and its strings (error.c ErrorString):
+ * and its strings (error.c ErrorString) — the same numbers, dense inside each
+ * group until the first release:
  *
  *     X(SUFFIX, enumerator, value, "message", "category")
  *
@@ -25,7 +26,7 @@ typedef uint32_t error_t;
  * anonymous enum — exactly like the kernel — not #defines; nothing in the tree
  * keys off ERR_* being a macro, so this is transparent to every caller.) */
 #define BOX_ERROR_LIST(X) \
-    /* General (1-20) */ \
+    /* General (1-17) */ \
     X(UNKNOWN,                       unknown,                       1,    "unknown error",                 "core") \
     X(NOT_IMPLEMENTED,               not_implemented,               2,    "not implemented",               "core") \
     X(INVALID_ARGUMENT,              invalid_argument,              3,    "invalid argument",              "core") \
@@ -35,73 +36,39 @@ typedef uint32_t error_t;
     X(TIMEOUT,                       timeout,                       7,    "timed out",                     "core") \
     X(BUSY,                          busy,                          8,    "busy",                          "core") \
     X(WOULD_BLOCK,                   would_block,                   9,    "operation would block",         "core") \
-    X(ALIGNMENT,                     alignment,                     10,   "bad alignment",                 "core") \
-    X(CORRUPTED,                     corrupted,                     11,   "corrupted",                     "core") \
-    X(INTERNAL,                      internal,                      12,   "internal error",                "core") \
-    X(NOT_INITIALIZED,               not_initialized,               13,   "not initialized",               "core") \
-    X(ALREADY_INITIALIZED,           already_initialized,           14,   "already initialized",           "core") \
-    X(INVALID_STATE,                 invalid_state,                 15,   "invalid state",                 "core") \
-    X(RETRY,                         retry,                         16,   "retry operation",               "core") \
-    X(UNSUPPORTED,                   unsupported,                   17,   "unsupported operation",         "core") \
-    X(VERSION_MISMATCH,              version_mismatch,              18,   "version mismatch",              "core") \
-    X(CHECKSUM,                      checksum,                      19,   "checksum failed",               "core") \
-    X(QUOTA_EXCEEDED,                quota_exceeded,                20,   "quota exceeded",                "core") \
-    /* Memory (100-116) */ \
+    X(CORRUPTED,                     corrupted,                     10,   "corrupted",                     "core") \
+    X(INTERNAL,                      internal,                      11,   "internal error",                "core") \
+    X(NOT_INITIALIZED,               not_initialized,               12,   "not initialized",               "core") \
+    X(ALREADY_INITIALIZED,           already_initialized,           13,   "already initialized",           "core") \
+    X(INVALID_STATE,                 invalid_state,                 14,   "invalid state",                 "core") \
+    X(UNSUPPORTED,                   unsupported,                   15,   "unsupported operation",         "core") \
+    X(CHECKSUM,                      checksum,                      16,   "checksum failed",               "core") \
+    X(QUOTA_EXCEEDED,                quota_exceeded,                17,   "quota exceeded",                "core") \
+    /* Memory (100-108) */ \
     X(NO_MEMORY,                     no_memory,                     100,  "out of memory",                 "memory") \
     X(INVALID_ADDRESS,               invalid_address,               101,  "invalid address",               "memory") \
-    X(PAGE_FAULT,                    page_fault,                    102,  "page fault",                    "memory") \
-    X(ALREADY_MAPPED,                already_mapped,                103,  "already mapped",                "memory") \
-    X(NOT_MAPPED,                    not_mapped,                    104,  "not mapped",                    "memory") \
-    X(PERMISSION_DENIED_MEM,         permission_denied_mem,         105,  "memory permission denied",      "memory") \
-    X(HEAP_EXHAUSTED,                heap_exhausted,                106,  "heap exhausted",                "memory") \
-    X(STACK_OVERFLOW,                stack_overflow,                107,  "stack overflow",                "memory") \
-    X(BUFFER_OVERFLOW,               buffer_overflow,               108,  "buffer overflow",               "memory") \
-    X(INVALID_BUFFER_ID,             invalid_buffer_id,             109,  "invalid buffer id",             "memory") \
-    X(BUFFER_IN_USE,                 buffer_in_use,                 110,  "buffer in use",                 "memory") \
-    X(BUFFER_LIMIT_EXCEEDED,         buffer_limit_exceeded,         111,  "buffer limit exceeded",         "memory") \
-    X(MAPPING_FAILED,                mapping_failed,                112,  "memory mapping failed",         "memory") \
-    X(UNMAP_FAILED,                  unmap_failed,                  113,  "memory unmapping failed",       "memory") \
-    X(TLB_FLUSH_FAILED,              tlb_flush_failed,              114,  "tlb flush failed",              "memory") \
-    X(PHYS_ADDR_EXCEEDED,            phys_addr_exceeded,            115,  "physical address exceeded",     "memory") \
-    X(PCID_EXHAUSTED,                pcid_exhausted,                116,  "pcid pool exhausted",           "memory") \
-    /* I/O (200-214) */ \
+    X(ALREADY_MAPPED,                already_mapped,                102,  "already mapped",                "memory") \
+    X(NOT_MAPPED,                    not_mapped,                    103,  "not mapped",                    "memory") \
+    X(PERMISSION_DENIED_MEM,         permission_denied_mem,         104,  "memory permission denied",      "memory") \
+    X(HEAP_EXHAUSTED,                heap_exhausted,                105,  "heap exhausted",                "memory") \
+    X(INVALID_BUFFER_ID,             invalid_buffer_id,             106,  "invalid buffer id",             "memory") \
+    X(MAPPING_FAILED,                mapping_failed,                107,  "memory mapping failed",         "memory") \
+    X(PCID_EXHAUSTED,                pcid_exhausted,                108,  "pcid pool exhausted",           "memory") \
+    /* I/O (200-206) */ \
     X(IO,                            io,                            200,  "i/o error",                     "io") \
     X(READ_FAILED,                   read_failed,                   201,  "read failed",                   "io") \
     X(WRITE_FAILED,                  write_failed,                  202,  "write failed",                  "io") \
     X(DEVICE_NOT_READY,              device_not_ready,              203,  "device not ready",              "io") \
-    X(DEVICE_ERROR,                  device_error,                  204,  "device error",                  "io") \
-    X(STREAM_CLOSED,                 stream_closed,                 205,  "stream closed",                 "io") \
-    X(DISK_FULL,                     disk_full,                     206,  "disk full",                     "io") \
-    X(BAD_SECTOR,                    bad_sector,                    207,  "bad sector",                    "io") \
-    X(IO_PENDING,                    io_pending,                    208,  "i/o pending",                   "io") \
-    X(IO_QUEUE_FULL,                 io_queue_full,                 209,  "i/o queue full",                "io") \
-    X(IO_CANCELLED,                  io_cancelled,                  210,  "i/o cancelled",                 "io") \
-    X(DMA_FAILED,                    dma_failed,                    211,  "dma failed",                    "io") \
-    X(DMA_TIMEOUT,                   dma_timeout,                   212,  "dma timeout",                   "io") \
-    X(SECTOR_READ_FAILED,            sector_read_failed,            213,  "sector read failed",            "io") \
-    X(SECTOR_WRITE_FAILED,           sector_write_failed,           214,  "sector write failed",           "io") \
-    /* Filesystem (300-322) */ \
+    X(STREAM_CLOSED,                 stream_closed,                 204,  "stream closed",                 "io") \
+    X(BAD_SECTOR,                    bad_sector,                    205,  "bad sector",                    "io") \
+    X(IO_CANCELLED,                  io_cancelled,                  206,  "i/o cancelled",                 "io") \
+    /* Filesystem (300-304) */ \
     X(FILE_NOT_FOUND,                file_not_found,                300,  "file not found",                "storage") \
     X(OBJECT_NOT_FOUND,              object_not_found,              301,  "object not found",              "storage") \
     X(TAG_NOT_FOUND,                 tag_not_found,                 302,  "tag not found",                 "storage") \
     X(ALREADY_EXISTS,                already_exists,                303,  "already exists",                "storage") \
-    X(INVALID_TAG,                   invalid_tag,                   304,  "invalid tag",                   "storage") \
-    X(TAG_LIMIT_EXCEEDED,            tag_limit_exceeded,            305,  "tag limit exceeded",            "storage") \
-    X(OBJECT_CORRUPTED,              object_corrupted,              306,  "object corrupted",              "storage") \
-    X(JOURNAL_FULL,                  journal_full,                  307,  "journal full",                  "storage") \
-    X(JOURNAL_CORRUPTED,             journal_corrupted,             308,  "journal corrupted",             "storage") \
-    X(METADATA_CORRUPTED,            metadata_corrupted,            309,  "metadata corrupted",            "storage") \
-    X(TAG_REGISTRY_FULL,             tag_registry_full,             310,  "tag registry full",             "storage") \
-    X(METADATA_POOL_FULL,            metadata_pool_full,            312,  "metadata pool full",            "storage") \
-    X(BLOCK_ALLOC_FAILED,            block_alloc_failed,            313,  "block allocation failed",       "storage") \
-    X(BLOCK_FREE_FAILED,             block_free_failed,             314,  "block free failed",             "storage") \
-    X(FILE_HANDLE_INVALID,           file_handle_invalid,           315,  "invalid file handle",           "storage") \
-    X(FILE_HANDLE_IN_USE,            file_handle_in_use,            316,  "file handle in use",            "storage") \
-    X(EXTENT_INVALID,                extent_invalid,                317,  "invalid extent",                "storage") \
-    X(BITMAP_FULL,                   bitmap_full,                   318,  "bitmap full",                   "storage") \
-    X(SUPERBLOCK_INVALID,            superblock_invalid,            319,  "invalid superblock",            "storage") \
-    X(BOOT_HINTS_MISSING,            boot_hints_missing,            320,  "boot hints missing",            "storage") \
-    /* Process (400-414) */ \
+    X(METADATA_CORRUPTED,            metadata_corrupted,            304,  "metadata corrupted",            "storage") \
+    /* Process (400-411) */ \
     X(PROCESS_NOT_FOUND,             process_not_found,             400,  "process not found",             "process") \
     X(INVALID_PID,                   invalid_pid,                   401,  "invalid pid",                   "process") \
     X(PROCESS_LIMIT_EXCEEDED,        process_limit_exceeded,        402,  "process limit exceeded",        "process") \
@@ -110,117 +77,53 @@ typedef uint32_t error_t;
     X(INVALID_ELF,                   invalid_elf,                   405,  "invalid elf",                   "process") \
     X(BINARY_TOO_LARGE,              binary_too_large,              406,  "binary too large",              "process") \
     X(SPAWN_FAILED,                  spawn_failed,                  407,  "spawn failed",                  "process") \
-    X(PROCESS_RUNNING,               process_running,               408,  "process is running",            "process") \
-    X(PROCESS_DESTROYING,            process_destroying,            409,  "process is being destroyed",    "process") \
-    X(CABIN_CREATE_FAILED,           cabin_create_failed,           410,  "cabin creation failed",         "process") \
-    X(PID_EXHAUSTED,                 pid_exhausted,                 411,  "pid pool exhausted",            "process") \
-    X(TAG_OVERFLOW_FAILED,           tag_overflow_failed,           412,  "tag overflow allocation failed","process") \
-    X(FPU_INIT_FAILED,               fpu_init_failed,               413,  "fpu initialization failed",     "process") \
-    X(STACK_ALLOC_FAILED,            stack_alloc_failed,            414,  "stack allocation failed",       "process") \
-    X(PROCESS_KILLED,                process_killed,                415,  "process killed",                "process") \
-    X(PROCESS_CRASHED,               process_crashed,               416,  "process crashed",               "process") \
-    /* Security (500-506) */ \
+    X(PROCESS_DESTROYING,            process_destroying,            408,  "process is being destroyed",    "process") \
+    X(TAG_OVERFLOW_FAILED,           tag_overflow_failed,           409,  "tag overflow allocation failed","process") \
+    X(PROCESS_KILLED,                process_killed,                410,  "process killed",                "process") \
+    X(PROCESS_CRASHED,               process_crashed,               411,  "process crashed",               "process") \
+    /* Security (500-502) */ \
     X(ACCESS_DENIED,                 access_denied,                 500,  "access denied",                 "security") \
     X(PERMISSION_DENIED,             permission_denied,             501,  "permission denied",             "security") \
-    X(SECURITY_VIOLATION,            security_violation,            502,  "security violation",            "security") \
-    X(TAG_MISMATCH,                  tag_mismatch,                  503,  "tag mismatch",                  "security") \
-    X(INVALID_OPERATION,             invalid_operation,             504,  "invalid operation",             "security") \
-    X(PRIVILEGE_REQUIRED,            privilege_required,            505,  "privilege required",            "security") \
-    X(SANDBOX_VIOLATION,             sandbox_violation,             506,  "sandbox violation",             "security") \
-    /* Hardware (600-612) */ \
-    X(HARDWARE,                      hardware,                      600,  "hardware error",                "hardware") \
-    X(INVALID_DEVICE,                invalid_device,                601,  "invalid device",                "hardware") \
-    X(DEVICE_BUSY,                   device_busy,                   602,  "device busy",                   "hardware") \
-    X(KEYBOARD_BUFFER_FULL,          keyboard_buffer_full,          603,  "keyboard buffer full",          "hardware") \
-    /* 604 was the VGA's; its operations are gone, and the number is not given again. */ \
-    X(ATA_ERROR,                     ata_error,                     605,  "ata error",                     "hardware") \
-    X(PCI_ERROR,                     pci_error,                     606,  "pci error",                     "hardware") \
-    X(USB_ERROR,                     usb_error,                     607,  "usb error",                     "hardware") \
-    X(XHCI_ERROR,                    xhci_error,                    608,  "xhci error",                    "hardware") \
-    X(AHCI_ERROR,                    ahci_error,                    609,  "ahci error",                    "hardware") \
-    X(TIMER_ERROR,                   timer_error,                   610,  "timer error",                   "hardware") \
-    X(INTERRUPT_ERROR,               interrupt_error,               611,  "interrupt error",               "hardware") \
-    X(CPU_ERROR,                     cpu_error,                     612,  "cpu error",                     "hardware") \
-    /* ACPI (800-805) */ \
-    X(ACPI_NOT_FOUND,                acpi_not_found,                800,  "acpi tables not found",         "acpi") \
-    X(ACPI_INVALID_TABLE,            acpi_invalid_table,            801,  "invalid acpi table",            "acpi") \
-    X(ACPI_CHECKSUM_FAILED,          acpi_checksum_failed,          802,  "acpi checksum failed",          "acpi") \
-    X(ACPI_PARSE_ERROR,              acpi_parse_error,              803,  "acpi parse error",              "acpi") \
-    X(ACPI_MADT_NOT_FOUND,           acpi_madt_not_found,           804,  "acpi madt not found",           "acpi") \
-    X(ACPI_FADT_NOT_FOUND,           acpi_fadt_not_found,           805,  "acpi fadt not found",           "acpi") \
-    /* TagFS core (850-869) */ \
+    X(INVALID_OPERATION,             invalid_operation,             502,  "invalid operation",             "security") \
+    /* Hardware (600) */ \
+    X(CPU_ERROR,                     cpu_error,                     600,  "cpu error",                     "hardware") \
+    /* TagFS core (850-863) */ \
     X(TAGFS_NOT_INITIALIZED,         tagfs_not_initialized,         850,  "tagfs not initialized",         "tagfs") \
     X(TAGFS_CORRUPTED,               tagfs_corrupted,               851,  "tagfs corrupted",               "tagfs") \
     X(TAGFS_NO_SPACE,                tagfs_no_space,                852,  "tagfs no space",                "tagfs") \
-    X(TAGFS_FILE_NOT_FOUND,          tagfs_file_not_found,          853,  "tagfs file not found",          "tagfs") \
-    X(TAGFS_FILE_EXISTS,             tagfs_file_exists,             854,  "tagfs file exists",             "tagfs") \
-    X(TAGFS_INVALID_HANDLE,          tagfs_invalid_handle,          855,  "tagfs invalid handle",          "tagfs") \
-    X(TAGFS_READ_ONLY,               tagfs_read_only,               856,  "tagfs read only",               "tagfs") \
-    X(TAGFS_QUOTA_EXCEEDED,          tagfs_quota_exceeded,          857,  "tagfs quota exceeded",          "tagfs") \
-    X(TAGFS_METADATA_ERROR,          tagfs_metadata_error,          858,  "tagfs metadata error",          "tagfs") \
-    X(TAGFS_BITMAP_FULL,             tagfs_bitmap_full,             859,  "tagfs bitmap full",             "tagfs") \
-    X(TAGFS_REGISTRY_FULL,           tagfs_registry_full,           860,  "tagfs registry full",           "tagfs") \
-    X(TAGFS_TAG_NOT_FOUND,           tagfs_tag_not_found,           861,  "tagfs tag not found",           "tagfs") \
-    X(TAGFS_TAG_EXISTS,              tagfs_tag_exists,              862,  "tagfs tag exists",              "tagfs") \
-    X(TAGFS_INVALID_TAG,             tagfs_invalid_tag,             863,  "tagfs invalid tag",             "tagfs") \
-    X(TAGFS_EXTENT_ERROR,            tagfs_extent_error,            864,  "tagfs extent error",            "tagfs") \
-    X(TAGFS_RECOVERY_FAILED,         tagfs_recovery_failed,         865,  "tagfs recovery failed",         "tagfs") \
-    X(TAGFS_TAG_TOO_LONG,            tagfs_tag_too_long,            866,  "tagfs tag too long",            "tagfs") \
-    X(TAGFS_BEYOND_SIZE,             tagfs_beyond_size,             867,  "tagfs write past the size",     "tagfs") \
-    X(TAGFS_RECORD_FULL,             tagfs_record_full,             868,  "tagfs file record full",        "tagfs") \
-    X(TAGFS_FID_EXHAUSTED,           tagfs_fid_exhausted,           869,  "tagfs file ids exhausted",      "tagfs") \
-    /* Pocket / IPC (900-911) */ \
+    X(TAGFS_INVALID_HANDLE,          tagfs_invalid_handle,          853,  "tagfs invalid handle",          "tagfs") \
+    X(TAGFS_READ_ONLY,               tagfs_read_only,               854,  "tagfs read only",               "tagfs") \
+    X(TAGFS_METADATA_ERROR,          tagfs_metadata_error,          855,  "tagfs metadata error",          "tagfs") \
+    X(TAGFS_REGISTRY_FULL,           tagfs_registry_full,           856,  "tagfs registry full",           "tagfs") \
+    X(TAGFS_TAG_NOT_FOUND,           tagfs_tag_not_found,           857,  "tagfs tag not found",           "tagfs") \
+    X(TAGFS_INVALID_TAG,             tagfs_invalid_tag,             858,  "tagfs invalid tag",             "tagfs") \
+    X(TAGFS_EXTENT_ERROR,            tagfs_extent_error,            859,  "tagfs extent error",            "tagfs") \
+    X(TAGFS_TAG_TOO_LONG,            tagfs_tag_too_long,            860,  "tagfs tag too long",            "tagfs") \
+    X(TAGFS_BEYOND_SIZE,             tagfs_beyond_size,             861,  "tagfs write past the size",     "tagfs") \
+    X(TAGFS_RECORD_FULL,             tagfs_record_full,             862,  "tagfs file record full",        "tagfs") \
+    X(TAGFS_FID_EXHAUSTED,           tagfs_fid_exhausted,           863,  "tagfs file ids exhausted",      "tagfs") \
+    /* Pocket / IPC (900-904) */ \
     X(POCKET_RING_FULL,              pocket_ring_full,              900,  "pocket ring full",              "ipc") \
-    X(RESULT_RING_FULL,              result_ring_full,              901,  "result ring full",              "ipc") \
-    X(INVALID_POCKET,                invalid_pocket,                902,  "invalid pocket",                "ipc") \
-    X(INVALID_DECK_ID,               invalid_deck_id,               903,  "invalid deck id",               "ipc") \
-    X(INVALID_OPCODE,                invalid_opcode,                904,  "invalid opcode",                "ipc") \
-    X(PREFIX_CHAIN_TOO_LONG,         prefix_chain_too_long,         905,  "prefix chain too long",         "ipc") \
-    X(POCKET_PROCESSING_FAILED,      pocket_processing_failed,      906,  "pocket processing failed",      "ipc") \
-    X(PENDING_QUEUE_FULL,            pending_queue_full,            907,  "pending queue full",            "ipc") \
-    X(KCORE_QUEUE_FULL,              kcore_queue_full,              908,  "k-core queue full",             "ipc") \
-    X(KCORE_SUBMIT_FAILED,           kcore_submit_failed,           909,  "k-core submit failed",          "ipc") \
-    X(RESULT_NOT_READY,              result_not_ready,              910,  "result not ready",              "ipc") \
-    X(RESULT_STASH_FULL,             result_stash_full,             911,  "result stash full",             "ipc") \
-    /* Routing (940-946) */ \
-    X(ROUTE_TARGET_FULL,             route_target_full,             940,  "route target queue full",       "routing") \
-    X(ROUTE_NO_SUBSCRIBERS,          route_no_subscribers,          941,  "no subscribers for route",      "routing") \
-    X(ROUTE_SELF,                    route_self,                    942,  "cannot route to self",          "routing") \
-    X(LISTEN_TABLE_FULL,             listen_table_full,             943,  "listen table full",             "routing") \
-    X(LISTEN_ALREADY,                listen_already,                944,  "already listening on route",    "routing") \
-    X(ROUTE_INVALID_TAG,             route_invalid_tag,             945,  "invalid route tag",             "routing") \
-    X(ROUTE_AMBIGUOUS,               route_ambiguous,               946,  "more than one carries the route tag", "routing") \
-    /* Pocket failure (950) — its own code, a pocket-class fault */ \
-    X(POCKET_FAILED,                 pocket_failed,                 950,  "pocket failed",                 "ipc") \
-    /* Scheduler (960-964) */ \
-    X(SCHEDULER_LOCKED,              scheduler_locked,              960,  "scheduler locked",              "scheduler") \
-    X(RUNQUEUE_FULL,                 runqueue_full,                 961,  "runqueue full",                 "scheduler") \
-    X(RUNQUEUE_EMPTY,                runqueue_empty,                962,  "runqueue empty",                "scheduler") \
-    X(HOME_CORE_INVALID,             home_core_invalid,             963,  "invalid home core",             "scheduler") \
-    X(WORK_STEAL_FAILED,             work_steal_failed,             964,  "work stealing failed",          "scheduler") \
-    /* Boot (970-974) */ \
-    X(BOOT_INFO_INVALID,             boot_info_invalid,             970,  "invalid boot info",             "boot") \
-    X(E820_FAILED,                   e820_failed,                   971,  "e820 memory detection failed",  "boot") \
-    X(A20_FAILED,                    a20_failed,                    972,  "a20 gate failed",               "boot") \
-    X(LONG_MODE_FAILED,              long_mode_failed,              973,  "long mode failed",              "boot") \
-    X(KERNEL_LOAD_FAILED,            kernel_load_failed,            974,  "kernel load failed",            "boot") \
+    X(INVALID_POCKET,                invalid_pocket,                901,  "invalid pocket",                "ipc") \
+    X(INVALID_OPCODE,                invalid_opcode,                902,  "invalid opcode",                "ipc") \
+    X(KCORE_QUEUE_FULL,              kcore_queue_full,              903,  "k-core queue full",             "ipc") \
+    X(KCORE_SUBMIT_FAILED,           kcore_submit_failed,           904,  "k-core submit failed",          "ipc") \
+    /* Routing (940-942) */ \
+    X(ROUTE_NO_SUBSCRIBERS,          route_no_subscribers,          940,  "no subscribers for route",      "routing") \
+    X(ROUTE_SELF,                    route_self,                    941,  "cannot route to self",          "routing") \
+    X(ROUTE_AMBIGUOUS,               route_ambiguous,               942,  "more than one carries the route tag", "routing") \
+    /* Scheduler (960-961) */ \
+    X(RUNQUEUE_FULL,                 runqueue_full,                 960,  "runqueue full",                 "scheduler") \
+    X(HOME_CORE_INVALID,             home_core_invalid,             961,  "invalid home core",             "scheduler") \
+    /* Boot (970) */ \
+    X(E820_FAILED,                   e820_failed,                   970,  "e820 memory detection failed",  "boot") \
     /* TagFS module — a write the mount found never landed (1000) */ \
     X(TAGFS_NOT_LANDED,              tagfs_not_landed,              1000, "tagfs write did not land",      "tagfs") \
-    /* TagFS module — BoxHash (1040-1042) */ \
-    X(BOXHASH_INVALID_CONTEXT,       boxhash_invalid_context,       1040, "boxhash invalid context",       "boxhash") \
-    X(BOXHASH_VERIFICATION_FAILED,   boxhash_verification_failed,   1041, "boxhash verification failed",   "boxhash") \
-    X(BOXHASH_KEY_NOT_SET,           boxhash_key_not_set,           1042, "boxhash key not set",           "boxhash") \
-    /* TagFS module — Braid RAID (1050-1059) */ \
-    X(BRAID_NOT_INITIALIZED,         braid_not_initialized,         1050, "braid not initialized",         "braid") \
-    X(BRAID_DISK_OFFLINE,            braid_disk_offline,            1051, "braid disk offline",            "braid") \
-    X(BRAID_DISK_FULL,               braid_disk_full,               1052, "braid disk full",               "braid") \
-    X(BRAID_READ_FAILED,             braid_read_failed,             1053, "braid read failed",             "braid") \
-    X(BRAID_WRITE_FAILED,            braid_write_failed,            1054, "braid write failed",            "braid") \
-    X(BRAID_CHECKSUM_MISMATCH,       braid_checksum_mismatch,       1055, "braid checksum mismatch",       "braid") \
-    X(BRAID_HEAL_FAILED,             braid_heal_failed,             1056, "braid heal failed",             "braid") \
-    X(BRAID_INSUFFICIENT_DISKS,      braid_insufficient_disks,      1057, "braid insufficient disks",      "braid") \
-    X(BRAID_MODE_INVALID,            braid_mode_invalid,            1058, "braid invalid mode",            "braid") \
-    X(BRAID_REBUILD_FAILED,          braid_rebuild_failed,          1059, "braid rebuild failed",          "braid") \
+    /* TagFS module — Braid RAID (1050-1053) */ \
+    X(BRAID_DISK_OFFLINE,            braid_disk_offline,            1050, "braid disk offline",            "braid") \
+    X(BRAID_HEAL_FAILED,             braid_heal_failed,             1051, "braid heal failed",             "braid") \
+    X(BRAID_INSUFFICIENT_DISKS,      braid_insufficient_disks,      1052, "braid insufficient disks",      "braid") \
+    X(BRAID_MODE_INVALID,            braid_mode_invalid,            1053, "braid invalid mode",            "braid") \
     /* Strand (1100) */ \
     X(ADDR_VALUE_MISMATCH,           addr_value_mismatch,           1100, "park value mismatch",           "strand")
 
@@ -231,9 +134,7 @@ enum {
 #undef BOX_ERROR_DEFINE
 };
 
-/* Convenience aliases (boxlib-only; resolve to codes defined above). Note:
- * ERR_POCKET_FAILED is NO LONGER an alias — it is its own code 950 (matching
- * the kernel), so a real "pocket failed" cause is no longer mislabelled 906. */
+/* Convenience aliases (boxlib-only; resolve to codes defined above). */
 #define ERR_INVALID_ARGS        ERR_INVALID_ARGUMENT
 #define ERR_RESULT_INVALID      ERR_CORRUPTED
 

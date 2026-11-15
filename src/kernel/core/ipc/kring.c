@@ -556,7 +556,7 @@ bool KResultPush(process_t *target, const Result *r)
  * Owed — an answer that will not fit is a DEBT, not a loss.
  *
  * A full reply ring used to end the story: KResultPush said no, SysRoute
- * turned that into ERR_ROUTE_TARGET_FULL, and the payload it had already
+ * turned that into a refusal of the route, and the payload it had already
  * deposited in the target's cabin heap was simply abandoned there — mapped,
  * paid for, and pointed at by nothing. The sender was told to come back later,
  * which for a daemon answering a request means either standing in a retry loop
