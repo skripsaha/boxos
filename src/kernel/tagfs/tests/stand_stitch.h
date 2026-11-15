@@ -21,8 +21,10 @@
  *   StandStitchContextBack the machine given back the Use Context set aside, if
  *                       one still is: false when it would not be set again — by
  *                       the put-back, and by the runner after every test
- *   StandStitchRemount  the volume let go of, writing nothing, and mounted
- *                       again on what its medium holds: true when it came up
+ *   StandStitchRemount  the volume let go of, writing nothing — a caller on its
+ *                       way out waited out — and mounted again on what its
+ *                       medium holds: true when it came up; the runner's hold
+ *                       on the door given back either way
  *   StandStitchPutBack  the ribbon put back as the test found it, the machine's
  *                       Use Context given back, the volume mounted again on it
  *                       (STAND_STITCH_PUT_BACK at `out`)

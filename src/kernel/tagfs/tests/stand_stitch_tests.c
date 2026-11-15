@@ -118,12 +118,18 @@ bool StandStitchContextBack(void)
     return ok;
 }
 
-/* The volume let go of — writing nothing — and mounted again on what its
- * medium holds: true when it came up. */
+/* The volume let go of — writing nothing, a caller on its way out waited out
+ * (StandRibbonLetGo) — and mounted again on what its medium holds: true when it
+ * came up. A caller still inside at the bound — another core's turn of a
+ * service — leaves it not let go of, and the runner's hold on its door is
+ * given back, so the put-back lets go of the hold the runner has, never of
+ * that caller's. */
 bool StandStitchRemount(void)
 {
-    if (tagfs_get_state()->initialized && !TagFSStandLetGo())
+    if (tagfs_get_state()->initialized && !StandRibbonLetGo(NULL)) {
+        TagFSStandHoldAgain();
         return false;
+    }
     return StandRibbonUp();
 }
 
