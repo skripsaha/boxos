@@ -43,7 +43,10 @@
 # one reader and the one pen of a program's settings held to exact outcomes —
 # a declaration of every kind and each way one is wrong, every kind's values,
 # the person's file line by line, the pen's changes byte for byte — and to
-# bytes made at random.
+# bytes made at random; typecase, Typecase's reader and rasterizer held to a
+# second reader of every font and to exact areas, its sources, chain and
+# cache to what they promise, and every named damage of a font and a
+# thousand random ones read and drawn whole under the sanitizers.
 #
 # The list is here, in the tree it judges, and not beside a session: a list
 # kept out of the tree can lose a gate without a diff saying so.
@@ -67,7 +70,7 @@ GATES_LOGCHECK="healthy unattended byname quill quillmut census lockrankmut repl
                 stand standusb standmut mkfs crewcrash fare faremut"
 GATES_POWERCUT="selftest noanchor noanchormut nextfid hog halt race overwrite logger tipin sessions
                 replug machineb spared undonecut engross dedup firstflushmut lastflushmut booknextfidmut stitchmut"
-GATES_OTHER="framerefuse bookboot dedup volread_selftest boxasm format form recipe elf box pack inside settings"
+GATES_OTHER="framerefuse bookboot dedup volread_selftest boxasm format form recipe elf box pack inside settings typecase"
 GATES_LONG="loggerhour loggerhourmut"
 
 gate_names() {
@@ -98,6 +101,7 @@ gate_run() {
         pack)             tools/pack_stand.sh ;;
         inside)           tools/inside_stand.sh ;;
         settings)         tools/settings_stand.sh ;;
+        typecase)         tools/typecase_stand.sh ;;
         *)                tools/logcheck.sh "$1" ;;
     esac
 }
