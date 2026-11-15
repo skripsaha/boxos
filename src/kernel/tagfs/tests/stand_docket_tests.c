@@ -16,8 +16,7 @@
 
 // ============================================================================
 // The stand_docket suite: a book's Ink — files made, named, tagged and given
-// up on a format-v2 volume, each change a Jot of the Docket the next stitch
-// carries (spec_v2 §2.8, §3.4, §3.6, §3.7)
+// up on a volume, each change a Jot of the Docket the next stitch carries
 //
 // After every change and the cycle that takes it, the volume mounted again on
 // what its medium holds holds the file as memory did before; changes of one

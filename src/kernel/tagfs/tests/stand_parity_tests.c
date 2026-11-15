@@ -9,8 +9,8 @@
 #ifdef CONFIG_VOLUME_TESTS
 
 // ============================================================================
-// The stand_parity suite: properties the volume's earlier records were held
-// to, each held here on the book (spec_v2 §16.5 п.22).
+// The stand_parity suite: properties of the write core, each held here on the
+// book.
 // ============================================================================
 
 /*

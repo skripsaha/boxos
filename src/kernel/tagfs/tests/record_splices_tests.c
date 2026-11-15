@@ -6,7 +6,7 @@
 
 // ============================================================================
 // RECORD_SPLICES — the change a stitch says was made of a file (file_record.h,
-// FileRecordSplices; spec_v2 §2.8 Shaped, §3.7)
+// FileRecordSplices)
 //
 // The splices that make the record a file settled as into the one memory holds
 // now name only what changed: a block written over in the middle of a run is

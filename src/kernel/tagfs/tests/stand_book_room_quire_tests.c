@@ -15,7 +15,7 @@
 #ifdef CONFIG_VOLUME_TESTS
 
 // ============================================================================
-// A next_quire given clear of the files the newest Tally names (spec_v2 §3.7)
+// A next_quire given clear of the files the newest Tally names
 // — a case of the stand_book_room suite (stand_book_room_tests.c): ground a
 // file the newest Tally names gave up since is kept from the ribbon, and is
 // the ribbon's too once every slot a mount may stand on took the delete in.

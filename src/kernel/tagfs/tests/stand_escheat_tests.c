@@ -16,7 +16,7 @@
 
 // ============================================================================
 // The stand_escheat suite: the act that lets go what a book can never give
-// back (spec_v2 §16.5 п.20)
+// back
 //
 // Escheat is asked only with the warrant a cabin wearing system or god
 // carries; with nothing to let go it says so. A Slip's tail whose block cannot
