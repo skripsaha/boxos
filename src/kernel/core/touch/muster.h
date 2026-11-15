@@ -92,6 +92,7 @@
     X("efi:variable:nv-info")           \
     X("esrt:ready")                     \
     X("ibt:enabled")                    \
+    X("integrity")                      \
     X("iommu:dma:mapped")               \
     X("iommu:dma:unmapped")             \
     X("iommu:domain:attached")          \
