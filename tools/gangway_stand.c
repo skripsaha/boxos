@@ -4,7 +4,9 @@
  * reading an image file the way Gangway reads its medium: the Deed at the
  * ground's head, then the kernel BOOT names and, when it is not attested, the
  * kernels the book names by role, each placed, held to its header and to the
- * digests the book keeps of it, the first attested jumped into.
+ * digests the book keeps of it, the first attested jumped into; then the file
+ * Gangway asks for by name, gangway.settings (boxos_gangway_settings.h), read
+ * and held to the book as Gangway reads it.
  *
  *     build/gangway_stand IMAGE GROUND_START
  *
@@ -21,12 +23,15 @@
  * kernel is placed is Gangway's 0x100000 and the heap here.
  */
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "boxos_gangway_settings.h"
 #include "gangway_lectern.h"
+#include "settings_chosen.h"   /* SETTINGS_FILE_MAX */
 
 typedef struct {
     FILE    *image;
@@ -131,6 +136,7 @@ int main(int argc, char **argv)
     LecternDesk    desk;
     VolumeBoot     boot;
     LecternKernel  kernel;
+    LecternCalled  called = { GANGWAY_SETTINGS_FILE, SETTINGS_FILE_MAX, CALLED_NONE, NULL, 0, 0 };
     int            named = 0;
 
     if (argc != 3) {
@@ -157,9 +163,11 @@ int main(int argc, char **argv)
     desk.unplace = StandGive;
     desk.uuid    = uuid;
     if (StandDeed(deed, &desk, &boot, &named)) {
-        LecternSuccession(&desk, named ? &boot : NULL, &kernel);
+        LecternSuccession(&desk, named ? &boot : NULL, &kernel, &called);
         if (kernel.image)
             desk.unplace(&m, kernel.image, kernel.blocks * VOLUME_BLOCK_BYTES);
+        if (called.bytes)
+            desk.give(&m, called.bytes, called.room);
     }
     fclose(m.image);
     return 0;

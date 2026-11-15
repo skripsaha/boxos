@@ -15,6 +15,7 @@
  *   gangway_lectern_replay.c  their records replayed for the files followed,
  *                             and the digests they carry
  *   gangway_succession.c      the kernels tried in turn, and the choice
+ *   gangway_lectern_called.c  the file asked for by its name, read and held
  *
  * The loader's integer types are uefi.h's (it builds -nostdinc, with no
  * <stdint.h>); the host stand's are the host's.
@@ -40,6 +41,17 @@ typedef struct {
 void LineStart(LecternLine *l);
 void LinePut(LecternLine *l, const char *s);
 void LineNum(LecternLine *l, uint64_t v);
+
+/* Whether the name `name` (`len` bytes, not NUL-terminated) is the one the
+ * loader asks for — never when it asks for none. */
+static inline int LecternNamed(const char *called, const uint8_t *name, uint64_t len)
+{
+    uint64_t i = 0;
+    if (!called) return 0;
+    for (; i < len; i++)
+        if (!called[i] || (uint8_t)called[i] != name[i]) return 0;
+    return called[i] == '\0';
+}
 
 /* The role of a file, from its flags: TALLY_FILE_ROLE_KERNEL, _BOOT, _SYSTEM,
  * or 0 for a file the system keeps in none — a file's tags are its user's,
@@ -88,7 +100,8 @@ typedef struct {
 /* A file the Lectern follows: its gen, size and flags, its runs, and the
  * Slips laid on its last block — `tail` NULL for none, else a block of their
  * bytes and a block's bits more saying which are laid. `gone` a file followed
- * that a Quitclaim took. */
+ * that a Quitclaim took; `called` one whose name is the one the loader asks
+ * for (LecternCalled) as the book and the ribbon leave it. */
 typedef struct {
     uint64_t    fid;
     uint64_t    gen;
@@ -98,6 +111,7 @@ typedef struct {
     uint64_t    nruns, capruns;
     uint8_t    *tail;
     int         gone;
+    int         called;
 } LecternFile;
 
 #define LECTERN_TAIL_BYTES (VOLUME_BLOCK_BYTES + VOLUME_BLOCK_BYTES / 8u)
@@ -162,6 +176,8 @@ typedef struct {
 
 typedef struct {
     const LecternDesk *desk;
+    const char        *called;        /* the name of the file asked for, NULL none */
+    int                booked;        /* the book past its Tally read (BookRead): 1, -1 that failed, 0 not asked */
     uint64_t           lane;          /* the digests' seed: lane 0 of the volume's uuid */
     int                starved;       /* the desk gave no room for something asked */
     /* The slot stood on, its stream held while the book is read. */
@@ -187,7 +203,7 @@ typedef struct {
     uint64_t           nskip, capskip;
     uint64_t          *refused;       /* the stitches not applied */
     uint64_t           nrefused, caprefused;
-    uint64_t          *interest;      /* files a Labeled puts in a role */
+    uint64_t          *interest;      /* files a Labeled puts in a role, or names as the file asked for */
     uint64_t           ninterest, capinterest;
     /* The files followed, by fid, rising; the rotten ranges of FILES. */
     LecternFile       *files;
@@ -228,6 +244,12 @@ void    LecternCopiesSay(LecternBook *b, uint64_t tree, uint64_t level, const Bo
 /* The book stood on, or b->why: 1 stood, 0 not, -1 no room. */
 int     LecternStand(LecternBook *b);
 
+/* Volume block `v` — none for a hole, its zeros — read into `into`: 1, or 0
+ * the medium will not give it. */
+int     LecternBlockRead(const LecternBook *b, int hole, uint64_t v, uint8_t *into);
+/* The Slips `tail` (a file's, NULL none) laid on its last block, at `block`. */
+void    LecternTailLaid(const uint8_t *tail, uint8_t *block);
+
 /* The kernel `who` — `blocks` blocks of its runs in file order, loaded at
  * `image` — held to the book, the digests the ribbon carries first when
  * `overlay`; its verdict said and in *verdict. */
@@ -240,8 +262,9 @@ void    LecternClose(LecternBook *b);
 /* gangway_lectern_tree.c                                                    */
 /* ------------------------------------------------------------------------- */
 
-/* The files FILES holds that are kept in a role or that the ribbon puts in
- * one (b->interest). 1, or 0 no room. */
+/* The files FILES holds that are kept in a role, that the ribbon puts in one
+ * or names as the file asked for (b->interest), or that are called so. 1, or
+ * 0 no room. */
 int     LecternFiles(LecternBook *b);
 
 LecternFile *LecternFileOf(LecternBook *b, uint64_t fid);
@@ -251,6 +274,14 @@ int     LecternFilePut(LecternBook *b, const LecternFile *f);
 void    LecternFileGive(const LecternBook *b, LecternFile *f);
 /* `to` a deep copy of `from`; 0 no room. */
 int     LecternFileCopy(LecternBook *b, LecternFile *to, const LecternFile *from);
+
+/* ------------------------------------------------------------------------- */
+/* gangway_lectern_called.c                                                  */
+/* ------------------------------------------------------------------------- */
+
+/* The file b->called names, read into *c as LecternCalled says — the book's
+ * files read first (b->booked) — or why not, said. */
+void    LecternCalledTake(LecternBook *b, LecternCalled *c);
 
 /* ------------------------------------------------------------------------- */
 /* gangway_lectern_ribbon.c                                                  */
@@ -264,11 +295,13 @@ void    LecternStitchGive(const LecternBook *b, LecternStitch *u);
 /* gangway_lectern_replay.c                                                  */
 /* ------------------------------------------------------------------------- */
 
-/* Before the files: the files the ribbon puts in a role. */
+/* Before the files: the files the ribbon puts in a role, or names as the
+ * file asked for. */
 void    LecternBefore(LecternBook *b);
 /* The Undones, then each stitch's records for the files followed. 1, or 0. */
 int     LecternReplay(LecternBook *b);
-/* The digests the ribbon carries of every block of the files `kernels`. 1, or 0. */
+/* The digests the ribbon carries of every block of the files `kernels` — the
+ * kernels to try, or the file asked for by name. 1, or 0 no room. */
 int     LecternOverlay(LecternBook *b, LecternFile *const *kernels, uint64_t n);
 /* The digest of block `v` the ribbon carries: 1 with it in *digest, or 0. */
 int     LecternOverlaid(const LecternBook *b, uint64_t v, uint64_t *digest);

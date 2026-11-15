@@ -9,8 +9,8 @@
  */
 
 #include "box/settings.h"
+#include "settings_chosen.h"   /* SETTINGS_FILE_MAX */
 
-#define SETTINGS_FILE_MAX    65536u   /* the most of a person's file read */
 #define SETTINGS_SAYING_MAX  256u     /* the longest sentence said of a setting */
 
 /* out->Settings and out->Problems from out->Declared and out->Chosen, for the

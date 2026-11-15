@@ -1,7 +1,7 @@
 /*
  * The Lectern's walk of a tree's leaves in key order — FILES, for the files
- * the system keeps in a role — and the files it follows,
- * kept by fid.
+ * the system keeps in a role and the file the loader asks for by name — and
+ * the files it follows, kept by fid.
  *
  * A walk holds one node a level: the path from the root to the leaf in hand,
  * each node read from the first copy that holds as a node of the range its
@@ -179,7 +179,7 @@ int LecternFileCopy(LecternBook *b, LecternFile *to, const LecternFile *from)
 }
 
 /* ------------------------------------------------------------------------- */
-/* FILES: the files kept in a role                                           */
+/* FILES: the files kept in a role, and the file called by the name asked   */
 /* ------------------------------------------------------------------------- */
 
 typedef enum { FILE_UNSEEN, FILE_FOLLOWED, FILE_PASSED } LecternFileState;
@@ -206,8 +206,8 @@ static int FileDone(LecternBook *b, LecternFilesWalk *w)
     return kept;
 }
 
-/* A file's header: followed when its flags put it in a role or the ribbon
- * gives it one. */
+/* A file's header: followed when its flags put it in a role, when it is
+ * called by the name the loader asks for, or when the ribbon does either. */
 static int FileHead(LecternBook *b, LecternFilesWalk *w, uint64_t fid, const uint8_t *body, uint32_t len)
 {
     TallyFileHead h;
@@ -219,7 +219,8 @@ static int FileHead(LecternBook *b, LecternFilesWalk *w, uint64_t fid, const uin
     w->f.gen     = h.gen;
     w->f.size    = h.size;
     w->f.flags   = h.flags;
-    if (!LecternRoleOf(w->f.flags) && !LecternListHas(b->interest, b->ninterest, fid)) {
+    w->f.called  = LecternNamed(b->called, h.name, h.name_len);
+    if (!LecternRoleOf(w->f.flags) && !w->f.called && !LecternListHas(b->interest, b->ninterest, fid)) {
         LecternFileGive(b, &w->f);
         return 1;
     }

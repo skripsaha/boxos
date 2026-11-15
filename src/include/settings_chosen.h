@@ -51,6 +51,10 @@
 
 /* ── the person's file ───────────────────────────────────────────────────── */
 
+/* The most of a person's file any reader takes — BoxLib for a program, Gangway
+ * for itself: a file larger is not read, and everything is as it came. */
+#define SETTINGS_FILE_MAX 65536u
+
 typedef enum {
     SETTINGS_LINE_BLANK = 0,
     SETTINGS_LINE_COMMENT,

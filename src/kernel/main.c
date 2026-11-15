@@ -85,11 +85,6 @@ void kernel_main(void)
     /* The kernel's first moment of the journey, before anything is done. */
     JourneyMark("kernel");
 
-    /* Before a single byte is said, because a byte said before this is a byte
-     * the next boot will not find. See klib_logring.h for what the window
-     * survives — a warm reset, not a power cut. */
-    LogKeepInit();
-
     ScreenInit();
 
     /*
@@ -116,6 +111,16 @@ void kernel_main(void)
      * names the kernel (boarding.h). */
     BoardingPassTake();
 
+    /* The carry-over window as soon as the pass can say whether it is wanted
+     * — what was said before it goes in first, so the window holds the boot
+     * from its first byte. See klib_logring.h for what it survives: a warm
+     * reset, not a power cut. */
+    LogKeepInit(BoardingPassKeepLog());
+
+    /* A person who asked to see everything (gangway.settings startup all) sees
+     * the log's tail from here on, until the display takes the glass. */
+    if (BoardingPassStartup() == BOARDING_STARTUP_ALL) ScreenQuietEnds();
+
     serial_init();
 
     kprintf(" Cabin (0x%lx Info, 0x%lx PocketRing, 0x%lx ResultRing, 0x%lx Code)\n",
@@ -135,19 +140,18 @@ void kernel_main(void)
             (unsigned long)g_entry_rflags,
             (g_entry_rflags & (1ULL << 9)) ? "ENABLED" : "disabled");
 
-    /* WHETHER THIS IMAGE KEEPS ANYTHING AT ALL, said out loud and once.
+    /* WHETHER THIS BOOT KEEPS ANYTHING AT ALL, said out loud and once.
      *
-     * The carry-over window is behind PRINTTOFILE, and a default image
-     * carried nothing while saying nothing — which is how a board run gets
-     * thrown away: the machine dies, and only afterwards does anybody find
-     * out that this image was never going to keep the record. So the three
-     * cases are told apart by name.
+     * The carry-over window is armed only when asked for, and a boot that
+     * carried nothing while saying nothing is how a board run gets thrown
+     * away: the machine dies, and only afterwards does anybody find out that
+     * it was never going to keep the record. So the three cases are told
+     * apart by name.
      *
      * Early, so it is on the screen even when the machine does not get much
      * further, and so an operator who just watched a machine die knows
      * whether `lastsaid` has something for them. The bank is NOT dumped
      * here — it is named, and lastsaid reads it. */
-#ifdef CONFIG_PRINTTOFILE
     if (LogKeepWindow(NULL, NULL)) {
         uint64_t carried = LogKeepPreviousBytes();
         if (carried) {
@@ -162,15 +166,14 @@ void kernel_main(void)
                     "or firmware that scrubs memory\n",
                     LogKeepWriteBackName());
         }
-    } else {
-        kprintf("[BOOT] %[W]LogKeep is compiled in but this machine's E820 map "
+    } else if (BoardingPassKeepLog()) {
+        kprintf("[BOOT] %[W]LogKeep is asked for but this machine's E820 map "
                 "does not offer the window — NOTHING will survive a reset%[D]\n");
+    } else {
+        kprintf("[BOOT] LogKeep is not asked for — nothing this kernel says will "
+                "survive a reset, and `lastsaid` will have nothing to read "
+                "(gangway.settings keep-log on asks for it)\n");
     }
-#else
-    kprintf("[BOOT] %[W]LogKeep is COMPILED OUT of this image (build it with "
-            "`make PRINTTOFILE=on`) — nothing this kernel says will survive a "
-            "reset, and `lastsaid` will have nothing to read%[D]\n");
-#endif
 
     debug_printf("[INIT] CPU Feature Detection (early)...\n");
     cpu_detect_features();

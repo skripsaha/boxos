@@ -22,6 +22,10 @@
  * again at once. A value between double quotes is taken as it stands:
  * "  two edges  ", "default".
  *
+ * A part of the system the volume carries no program file of is named as a
+ * program all the same — gangway, the loader: its declaration is the one it
+ * reads by itself (boxos_gangway_settings.h), its file gangway.settings.
+ *
  * Its exit: 0 when it did what it was asked, 1 when it refused, or the
  * program has lines in its file it could not take.
  */
@@ -36,6 +40,7 @@
 #include "box/system.h"
 #include "box/program_part.h"
 #include "box/use.h"
+#include "boxos_gangway_settings.h"
 #include "settings_pen.h"
 
 BOX_FORM("takes name program \"the program\"\n"
@@ -423,16 +428,37 @@ static int change(BoxSettings *settings, char *typed)
     return 0;
 }
 
+/* The parts of the system the volume carries no program file of, and the
+ * declarations they read their settings by. */
+static const struct {
+    const char *name;
+    const char *declared;
+    size_t      size;
+} g_boxless[] = {
+    { GANGWAY_SETTINGS_PROGRAM, GANGWAY_SETTINGS, sizeof(GANGWAY_SETTINGS) - 1 },
+};
+
+/* The settings the word names: a part of the system without a program file,
+ * or a program — 0 or a negative -error_t; a word that names neither ends the
+ * utility, said (find_program). */
+static int read_named(const char *word, BoxSettings *settings)
+{
+    for (size_t i = 0; i < sizeof(g_boxless) / sizeof(g_boxless[0]); i++)
+        if (strcmp(word, g_boxless[i].name) == 0)
+            return settings_read_declared(g_boxless[i].name, g_boxless[i].declared, g_boxless[i].size, settings);
+    file_id_t program = 0;
+    if (find_program(word, &program) != 0) exit(1);
+    return settings_read(program, settings);
+}
+
 int main(void)
 {
     const char *const *words;
     size_t             count;
-    file_id_t          program = 0;
     BoxSettings        settings;
 
     if (form_words(0, &words, &count) != 0 || count != 1) exit(1);
-    if (find_program(words[0], &program) != 0) exit(1);
-    int rc = settings_read(program, &settings);
+    int rc = read_named(words[0], &settings);
     if (rc != 0) {
         printf("settings: %s could not be read\n", words[0]);
         exit(1);

@@ -5,8 +5,10 @@ its user's; every file of FILES kept in one; the stitches past the slot's `at`,
 sewn on by rules (а)/(б)/(б′)/(в) (stitch_ribbon.Ribbon, its direct scan left
 out: a loader writes nothing and needs no next seq), and their records
 replayed narrowly — the files kept in a role or put in one on the ribbon
-alone, each record held to its base, an Undone passing over what it names; and
-the digest of every block a record of the ribbon puts in.
+alone, and the file called by the name the loader asks for (`called`, its
+name as the book and the ribbon leave it), each record held to its base, an
+Undone passing over what it names; and the digest of every block a record of
+the ribbon puts in.
 
 The loader's Lectern does the same by its own code (src/boot/uefi/
 gangway_lectern_tree.c, _ribbon.c, _replay.c), and the host stand holds the
@@ -14,8 +16,9 @@ two to one answer line for line (tools/gangway_stand.sh).
 
 What the loader leaves to the kernel's mount, where the mount alone can
 judge it (the narrowing, said here once): a file's records are replayed only
-for the files it follows, so a Born of a fid it does not follow, and a Labeled's name and tags are not
-weighed; a next_quire is not held against the ground of the book and the
+for the files it follows, so a Born of a fid it does not follow is not
+weighed, nor a Labeled's tags, nor its name but for whether it is the one
+asked for; a next_quire is not held against the ground of the book and the
 files; and the data of the newest stitch is not held to its digests before
 the replay (§4.5 п.6) — a block that did not land is one that does not match
 its digest when the kernel that names it is attested."""
@@ -23,7 +26,7 @@ its digest when the kernel that names it is attested."""
 from . import ondisk, stitch, tally
 from .bookmount import Blocks, BookMount, LastBlock, Mismatch, Splice
 from .bookread import Short
-from .stitch import BORN, LABELED, QUITCLAIM, SHAPED, UNDONE, KIND_NAMES, LABEL_FLAGS, LABEL_KEEP
+from .stitch import BORN, LABELED, QUITCLAIM, SHAPED, UNDONE, KIND_NAMES, LABEL_FLAGS, LABEL_KEEP, LABEL_NAME
 from .stitch_ribbon import Ribbon
 
 # The roles a kernel is looked for by, in the order they are asked (§16.7 п.3).
@@ -55,10 +58,11 @@ class BootBook:
     each line said into `say`: `files` {fid: FileState} the files it follows as
     the ribbon leaves them, `overlay` {block: digest} of the blocks the ribbon
     put in, and `candidates` — the files kept in a role in the order they are
-    tried."""
+    tried. `called` the name (bytes) of the file the loader asks for, None for
+    none: followed as the files kept in a role are."""
 
-    def __init__(self, g, slot, t, say):
-        self.g, self.slot, self.t, self.say = g, slot, t, say
+    def __init__(self, g, slot, t, say, called=None):
+        self.g, self.slot, self.t, self.say, self.called = g, slot, t, say, called
         self.ribbon = Ribbon(g, slot, (), scan=False)
         seqs = [u.seq for u in self.ribbon.stitches]
         say("the ribbon past slot %u's Tally: %s" % (slot.index, "%u stitch(es) sewn on, seq %u to %u" % (
@@ -67,7 +71,7 @@ class BootBook:
         self._Before()
         self._Copies(tally.FILES)
         self.files = {fid: fs.Copy() for fid, fs in t.content.files.items()
-                      if Role(fs.flags) or fid in self.interest}
+                      if Role(fs.flags) or fid in self.interest or self._Called(fs.name)}
         self.followed = set(self.files)
         self.skip, self.refused = {}, set()
         self._Undone()
@@ -86,11 +90,17 @@ class BootBook:
                          % (tally.TREE_NAMES[tree], n.level, "/".join(str(b) for b in n.blocks), n.copy,
                             n.copy + 1))
 
-    # --- before the files: the files the ribbon puts in a role ---------------
+    def _Called(self, name):
+        """Whether `name` is the one the loader asks for — never when it asks
+        for none."""
+        return self.called is not None and name is not None and bytes(name) == self.called
+
+    # --- before the files: the files the ribbon puts in a role or names so ---
 
     def _Before(self):
-        """Every file a Labeled puts in a role, in the order of the ribbon —
-        followed from the Tally on, whatever its records come to."""
+        """Every file a Labeled puts in a role or gives the name the loader
+        asks for, in the order of the ribbon — followed from the Tally on,
+        whatever its records come to."""
         for u in self.ribbon.stitches:
             for kind, _ign, body, _at in u.records:
                 if kind != LABELED:
@@ -99,7 +109,8 @@ class BootBook:
                     d = stitch.RecordDecode(kind, body, u.seq)
                 except Short:
                     continue
-                if d["what"] & LABEL_FLAGS and Role(d["flags"][0]):
+                if (d["what"] & LABEL_FLAGS and Role(d["flags"][0])) or \
+                        (d["what"] & LABEL_NAME and self._Called(d["name"])):
                     self.interest.add(d["fid"])
 
     # --- pass 1: the Undones (bookmount.BookMount._Undone) ----------------------
@@ -178,7 +189,7 @@ class BootBook:
             if fid in skip:
                 continue
             if fid not in self.followed:
-                if kind != BORN or not (Role(d["flags"]) or fid in self.interest):
+                if kind != BORN or not (Role(d["flags"]) or fid in self.interest or self._Called(d["name"])):
                     continue
                 self.followed.add(fid)
             old = now[fid] if fid in now else self.files.get(fid)
@@ -215,6 +226,8 @@ class BootBook:
             if kind == QUITCLAIM:
                 return None
             if kind == LABELED:
+                if d["what"] & LABEL_NAME:
+                    fs.name = bytes(d["name"])
                 if d["what"] & LABEL_FLAGS:
                     fs.flags = (fs.flags | d["flags"][0]) & ~d["flags"][1]
                 if d["what"] & LABEL_KEEP:

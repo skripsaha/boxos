@@ -121,15 +121,15 @@ static void TestDeclared(void)
     Check(Is(s[3].Name, "color") && s[3].Kind == SETTING_COLOR && Is(s[3].Default, "light-gray") && s[3].Parent == 4,
           "a color by its name");
     Check(Is(s[4].Name, "blink") && s[4].Kind == SETTING_NUMBER && s[4].From == 100 && s[4].To == 5000 &&
-              Is(s[4].Unit, "ms") && s[4].Off && Is(s[4].Default, "off"),
+              Is(s[4].Unit, "ms") && Is(s[4].Zero, "off") && Is(s[4].Default, "off"),
           "a number with a unit and or off, off its default");
     Check(Is(s[5].Name, "sign") && s[5].Kind == SETTING_WORD && s[5].Parent == 0 && s[5].Depth == 0,
           "back at the top after cursor's lines");
     Check(Is(s[6].Name, "color") && s[6].Parent == 8 && Is(s[6].Default, "#AAAAAA"),
           "a setting with a value of its own holds another: the same name as one inside cursor");
     Check(Is(s[8].Name, "color") && s[8].Parent == 10 && s[8].Line == 12, "a blank line inside messages passed over");
-    Check(s[9].From == 1 && s[9].Off && Is(s[9].Unit, "seconds") && Is(s[9].Default, "10"), "or off with a number default");
-    Check(s[12].From == -10 && s[12].To == 10 && Is(s[12].Default, "-3") && s[12].Unit.Length == 0 && !s[12].Off,
+    Check(s[9].From == 1 && Is(s[9].Zero, "off") && Is(s[9].Unit, "seconds") && Is(s[9].Default, "10"), "or off with a number default");
+    Check(s[12].From == -10 && s[12].To == 10 && Is(s[12].Default, "-3") && s[12].Unit.Length == 0 && s[12].Zero.Length == 0,
           "a number below zero, no unit");
     Check(Is(s[13].Name, "note") && s[13].Kind == SETTING_TEXT && s[13].Default.Length == 0, "an empty text default");
     Check(Is(s[14].Name, "title") && Is(s[14].Default, "BoxOS Hub") && Is(s[15].Name, "color") && s[15].Parent == 18 &&
@@ -172,6 +172,28 @@ static void Verdicts(const char *text, const int *want, const char *what)
     char label[400];
     snprintf(label, sizeof(label), "%s (got%s)", what, got);
     Check(same, label);
+}
+
+/* `or all`: the word all read as 0 — every one there is, as off is a thing
+ * turned off — and nothing but off or all after `or`. */
+static void TestZeroWord(void)
+{
+    static const char text[] = "settings\ncores number from 1 to 256 or all default all \"how many\"\n";
+    SettingsDeclared  declared;
+    SettingsVerdict   verdict = SETTINGS_OK;
+    Setting           s;
+    SettingValue      v;
+    bool read = SettingsDeclaredBegin((const uint8_t *)text, strlen(text), &declared) == SETTINGS_OK &&
+                SettingsDeclaredNext(&declared, &s, &verdict) && verdict == SETTINGS_OK;
+    Check(read && Is(s.Zero, "all") && Is(s.Default, "all") && s.From == 1 && s.To == 256,
+          "or all: the word all stands for 0, and may be the default");
+    Check(read && SettingValueRead(&s, Span("all"), &v) == SETTINGS_OK && v.Number == 0 && Is(v.Text, "all"),
+          "all read as 0");
+    Check(read && SettingValueRead(&s, Span("4"), &v) == SETTINGS_OK && v.Number == 4, "a number all the same");
+    Check(read && SettingValueRead(&s, Span("off"), &v) == SETTING_VALUE_NOT_NUMBER,
+          "off is no value of a setting whose 0 is all");
+    LineVerdict("cores number from 0 to 8 or all default all \"x\"", SETTING_LIMITS_BAD, "or all from 0");
+    LineVerdict("cores number from 1 to 8 or some default 1 \"x\"", SETTING_LIMITS_BAD, "or a word neither off nor all");
 }
 
 static void TestDeclaredWrong(void)
@@ -970,6 +992,7 @@ static void TestRandom(void)
 int main(void)
 {
     TestDeclared();
+    TestZeroWord();
     TestDeclaredWrong();
     TestFind();
     TestValues();

@@ -106,6 +106,9 @@ _Static_assert(sizeof(BoardingStampHeader) == 4, "a stamp header is 4 bytes — 
 #define BOARDING_STAMP_SEAL    4    /* BoardingSeal — always the last one */
 #define BOARDING_STAMP_JOURNAL 5    /* BoardingJournal */
 #define BOARDING_STAMP_MOMENTS 6    /* BoardingMoment, as many as were marked */
+#define BOARDING_STAMP_STARTUP  7   /* BoardingStartup */
+#define BOARDING_STAMP_CORES    8   /* BoardingCores */
+#define BOARDING_STAMP_KEEP_LOG 9   /* BoardingKeepLog */
 
 /*
  * The volume this kernel was read out of, by the identity the filesystem keeps
@@ -215,5 +218,44 @@ typedef struct __attribute__((packed)) {
 } BoardingMoment;
 
 _Static_assert(sizeof(BoardingMoment) == 16, "a moment is 16 bytes — stage2 BOARDING_MOMENT_BYTES");
+
+/*
+ * What the person asked of the kernel, in gangway.settings
+ * (boxos_gangway_settings.h): a stamp for each setting the file sets, written
+ * by Gangway. Where there is none — a setting the file leaves alone, a BIOS
+ * boot, whose stage2 reads no settings, or a loader older than these — the
+ * kernel goes its own way: the screen quiet, every core started, and what it
+ * says kept through a reset only in a kernel built to (PRINTTOFILE).
+ *
+ * STARTUP: what the screen shows while the machine starts. QUIET, the screen
+ * as the firmware left it until the display takes it, the Emergency Screen
+ * woken by an error; ALL, the Emergency Screen from the kernel's first line.
+ */
+#define BOARDING_STARTUP_QUIET 0u
+#define BOARDING_STARTUP_ALL   1u
+
+typedef struct __attribute__((packed)) {
+    uint8_t show;               /* BOARDING_STARTUP_* */
+    uint8_t reserved[3];
+} BoardingStartup;
+
+_Static_assert(sizeof(BoardingStartup) == 4, "a startup stamp is 4 bytes");
+
+/* CORES: the most processors the kernel starts, the one it runs on first
+ * among them — 0 for every one the machine has. */
+typedef struct __attribute__((packed)) {
+    uint32_t most;
+} BoardingCores;
+
+_Static_assert(sizeof(BoardingCores) == 4, "a cores stamp is 4 bytes");
+
+/* KEEP_LOG: whether what the machine says is kept through a reset — the
+ * carry-over window (klib_logring.h) — for lastsaid to read after it. */
+typedef struct __attribute__((packed)) {
+    uint8_t keep;               /* 1 kept, 0 not */
+    uint8_t reserved[3];
+} BoardingKeepLog;
+
+_Static_assert(sizeof(BoardingKeepLog) == 4, "a keep-log stamp is 4 bytes");
 
 #endif /* BOARDING_PASS_H */

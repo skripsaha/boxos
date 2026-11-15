@@ -2,7 +2,8 @@
  * The Lectern's replay of the ribbon, as the mount's pass 2 replays it: the
  * stitches sewn on (gangway_lectern_ribbon.c), their records
  * replayed for the files the Lectern follows — those kept in a role, or that
- * the ribbon puts in one — and the digests every record puts in.
+ * the ribbon puts in one, and the file called by the name the loader asks for
+ * — and the digests every record puts in.
  *
  * The rules are the kernel's (mount/ribbon_transcribe.c, ribbon_records.c)
  * and volume-read's (bookmount.py _Undone, _Stitch, _File), narrowed to what
@@ -177,9 +178,12 @@ static int Sewn(const LecternBook *b, uint64_t seq)
 }
 
 /* ------------------------------------------------------------------------- */
-/* Before the files: the files the ribbon puts in a role                     */
+/* Before the files: the files the ribbon puts in a role or names as asked  */
 /* ------------------------------------------------------------------------- */
 
+/* Every file a Labeled puts in a role or gives the name the loader asks for,
+ * in the order of the ribbon — followed from the Tally on, whatever its
+ * records come to. */
 void LecternBefore(LecternBook *b)
 {
     for (uint64_t s = 0; s < b->nstitches; s++) {
@@ -190,8 +194,10 @@ void LecternBefore(LecternBook *b)
             if (r->kind != RIBBON_LABELED) continue;
             RecordRead(u, r, &d);
             if (d.read == TALLY_BODY_BROKEN) continue;
-            if ((d.labeled.what & LABEL_FLAGS) && LecternRoleOf(d.labeled.set) &&
-                !LecternListAdd(b, &b->interest, &b->ninterest, &b->capinterest, d.fid))
+            int role  = (d.labeled.what & LABEL_FLAGS) && LecternRoleOf(d.labeled.set);
+            int named = (d.labeled.what & LABEL_NAME) &&
+                        LecternNamed(b->called, d.labeled.name, d.labeled.name_len);
+            if ((role || named) && !LecternListAdd(b, &b->interest, &b->ninterest, &b->capinterest, d.fid))
                 return;
         }
     }
@@ -510,10 +516,11 @@ static int BornApplied(LecternBook *b, LecternHand *h, const LecternStitch *u, c
 
     if (h->alive) return 1;
     LecternZero(&f, sizeof(f));
-    f.fid   = d->fid;
-    f.gen   = u->seq;
-    f.size  = d->born.size;
-    f.flags = d->born.flags;
+    f.fid    = d->fid;
+    f.gen    = u->seq;
+    f.size   = d->born.size;
+    f.flags  = d->born.flags;
+    f.called = LecternNamed(b->called, d->born.name, d->born.name_len);
     if (!RunsPut(u, RIBBON_BORN, d, RunTaken, &runs)) {
         LecternGive(b, runs.runs, runs.cap * sizeof(LecternRun));
         LecternFileGive(b, &f);
@@ -531,11 +538,14 @@ static int BornApplied(LecternBook *b, LecternHand *h, const LecternStitch *u, c
 
 /* A Labeled: its flags set and cleared, as the record says — the role among
  * them — and the deleted bit its KEEP verb puts on or takes off: a file kept
- * deleted is no kernel for the loader to start (gangway_succession.c). Its
- * name and tags are not the loader's. */
-static int LabeledApplied(LecternHand *h, const LecternRead *d)
+ * deleted is no kernel for the loader to start (gangway_succession.c), nor
+ * the file it asks for by name (gangway_lectern_called.c). Its name is the
+ * loader's only as far as whether it is the one asked for; its tags are not
+ * the loader's. */
+static int LabeledApplied(const LecternBook *b, LecternHand *h, const LecternRead *d)
 {
     const RibbonLabeled *r = &d->labeled;
+    if (r->what & LABEL_NAME) h->f.called = LecternNamed(b->called, r->name, r->name_len);
     if (r->what & LABEL_FLAGS) h->f.flags = (h->f.flags | r->set) & ~r->clear;
     if (r->what & LABEL_KEEP)
         h->f.flags = r->keep_ns ? h->f.flags | TALLY_FILE_DELETED : h->f.flags & ~(uint64_t)TALLY_FILE_DELETED;
@@ -595,7 +605,7 @@ static int Applied(LecternBook *b, LecternHand *h, const LecternStitch *u, uint6
         h->alive = 0;
         return 1;
     }
-    return kind == RIBBON_LABELED ? LabeledApplied(h, d) : ShapedApplied(b, h, u, d, why);
+    return kind == RIBBON_LABELED ? LabeledApplied(b, h, d) : ShapedApplied(b, h, u, d, why);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -609,8 +619,8 @@ typedef struct {
 
 /* The file in hand for record `d` of kind `kind` — taken up the first time:
  * a file followed as the Lectern holds it, or one a Born of which is kept in
- * a role or the ribbon puts in one. NULL with *none for a file not followed; NULL
- * with no room. */
+ * a role, called by the name asked for, or that the ribbon puts in one or
+ * names so. NULL with *none for a file not followed; NULL with no room. */
 static LecternHand *HandOf(LecternBook *b, LecternHands *hs, uint64_t kind, const LecternRead *d, int *none)
 {
     LecternFile *held = LecternFileOf(b, d->fid);
@@ -626,7 +636,8 @@ static LecternHand *HandOf(LecternBook *b, LecternHands *hs, uint64_t kind, cons
         if (h.alive && !LecternFileCopy(b, &h.f, held)) return (LecternHand *)0;
     } else {
         if (kind != RIBBON_BORN ||
-            (!LecternRoleOf(d->born.flags) && !LecternListHas(b->interest, b->ninterest, d->fid))) {
+            (!LecternRoleOf(d->born.flags) && !LecternNamed(b->called, d->born.name, d->born.name_len) &&
+             !LecternListHas(b->interest, b->ninterest, d->fid))) {
             *none = 1;
             return (LecternHand *)0;
         }
@@ -668,7 +679,7 @@ static int HandsLaid(LecternBook *b, LecternHands *hs)
     int ok = 1;
     for (uint64_t i = 0; i < hs->n; i++) {
         LecternHand *h    = &hs->at[i];
-        LecternFile  gone = { h->fid, 0, 0, 0, (LecternRun *)0, 0, 0, (uint8_t *)0, 1 };
+        LecternFile  gone = { h->fid, 0, 0, 0, (LecternRun *)0, 0, 0, (uint8_t *)0, 1, 0 };
         LecternFile *held = LecternFileOf(b, h->fid);
         if (h->failed || !h->alive) {
             LecternFileGive(b, &h->f);

@@ -40,9 +40,10 @@ struct cabin_t;
  * EmergencyScreenAwait). Runs before mem_init. */
 void ScreenInit(void);
 
-/* The quiet boot is over, because nobody is coming for the glass: no volume
- * to start the display program from, or a start set without it. The log's
- * tail goes on the glass now, unless a holder has it. */
+/* The quiet boot is over, because nobody is coming for the glass — no volume
+ * to start the display program from, or a start set without it — or because
+ * the person asked to see everything (gangway.settings startup all). The
+ * log's tail goes on the glass now, unless a holder has it. */
 void ScreenQuietEnds(void);
 
 /* The linear framebuffer a UEFI loader handed over (boot_info), after

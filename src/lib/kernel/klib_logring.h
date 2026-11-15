@@ -23,8 +23,10 @@
  *     moment it exists for.
  *
  * Always on: the ring is the wire's source, and a kernel without it would
- * have no serial line. `make PRINTTOFILE=on` adds the carry-over window below
- * — the copy that survives a reset.
+ * have no serial line. The carry-over window below — the copy that survives a
+ * reset — is armed when the person asks for it (gangway.settings keep-log on,
+ * a stamp of the Boarding Pass), or by a kernel built to keep it
+ * (`make PRINTTOFILE=on`) when the loader does not say.
  *
  * Where the account begins, and where it ends, said here so the file does not
  * promise more than it carries:
@@ -157,9 +159,8 @@ uint64_t LogRingReadTones(uint64_t from, void *dst, uint8_t *tones, uint64_t max
 
 /* Write the carry-over window back out of cache, NOW.
  *
- * Callable in every build and from every path: without CONFIG_PRINTTOFILE
- * both are defined and do nothing, so a reset path may ask without knowing
- * whether this image has a window. Takes no lock, allocates nothing and waits
+ * Callable from every path: with no window armed both do nothing, so a reset
+ * path may ask without knowing whether this boot has one. Takes no lock, allocates nothing and waits
  * on nothing, because its callers are a panic and a one-way reset ladder —
  * a core may already be frozen holding any lock this kernel owns.
  *
@@ -171,8 +172,6 @@ uint64_t LogRingReadTones(uint64_t from, void *dst, uint8_t *tones, uint64_t max
  * evidence was preserved. */
 void        LogKeepFlush(void);
 const char *LogKeepWriteBackName(void);
-
-#ifdef CONFIG_PRINTTOFILE
 
 /* ==========================================================================
  * The carry-over: what the machine said LAST time, read after a reset.
@@ -207,16 +206,19 @@ const char *LogKeepWriteBackName(void);
  * evidence the crash exists to provide.
  * ========================================================================== */
 
-/* Called as the first act of kernel_main, before anything is said, because a
- * byte said before it is a byte the next boot will not see. Validates the
- * window against the E820 map at its fixed low address (the kernel's own
- * memory map is not parsed yet, and a blind store into a machine with less RAM
- * than the window needs would be a store into nothing, or into MMIO). */
-void LogKeepInit(void);
+/* Called as soon as the Boarding Pass is read — `keep` is what it asks, or
+ * the kernel's own way (boarding.h, BoardingPassKeepLog) — and with no window
+ * asked for, nothing is armed. What the ring holds by then — the line naming
+ * the kernel, the loader's journal — goes into the window first, so it holds
+ * the boot from its first byte. Validates the window against the E820 map at
+ * its fixed low address (the kernel's own memory map is not parsed yet, and a
+ * blind store into a machine with less RAM than the window needs would be a
+ * store into nothing, or into MMIO). */
+void LogKeepInit(bool keep);
 
 /* Where the window is, so pmm_init can hold it out of the allocator. Returns
- * false when there is no window — no ring in this build, or the machine could
- * not offer the memory. */
+ * false when there is no window — none asked for, or the machine could not
+ * offer the memory. */
 bool LogKeepWindow(uintptr_t *out_phys, uint64_t *out_bytes);
 
 /* How many bytes the previous boot said, and which boot it was. Zero bytes
@@ -230,19 +232,5 @@ uint32_t LogKeepPreviousBoot(void);
  * still held is moved forward and told where to. */
 uint64_t LogKeepPreviousRead(uint64_t from, void *dst, uint64_t max,
                              uint64_t *out_oldest, uint64_t *out_written);
-
-#else
-
-static inline void LogKeepInit(void)     { }
-static inline bool LogKeepWindow(uintptr_t *p, uint64_t *b)
-{ (void)p; (void)b; return false; }
-static inline uint64_t LogKeepPreviousBytes(void) { return 0; }
-static inline uint32_t LogKeepPreviousBoot(void)  { return 0; }
-static inline uint64_t LogKeepPreviousRead(uint64_t from, void *dst,
-                                           uint64_t max, uint64_t *o,
-                                           uint64_t *w)
-{ (void)from; (void)dst; (void)max; if (o) *o = 0; if (w) *w = 0; return 0; }
-
-#endif /* CONFIG_PRINTTOFILE */
 
 #endif /* KLIB_LOGRING_H */

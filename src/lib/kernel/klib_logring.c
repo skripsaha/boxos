@@ -79,8 +79,6 @@ uint8_t LogRingToneAt(uint64_t pos)
     return g_ring_tone[pos & LOGRING_MASK];
 }
 
-#ifdef CONFIG_PRINTTOFILE
-
 /* ==========================================================================
  * The carry-over window. See klib_logring.h for what it survives and what it
  * does not.
@@ -271,9 +269,11 @@ static bool keep_window_is_ram(uint64_t phys, uint64_t bytes)
     return false;
 }
 
-void LogKeepInit(void)
+static inline void keep_put(char c);
+
+void LogKeepInit(bool keep)
 {
-    if (!keep_window_is_ram(LOGKEEP_PHYS, LOGKEEP_BYTES)) {
+    if (!keep || !keep_window_is_ram(LOGKEEP_PHYS, LOGKEEP_BYTES)) {
         g_keep_ok = false;
         g_keep_previous = LOGKEEP_BANKS;
         return;
@@ -318,6 +318,12 @@ void LogKeepInit(void)
      * cache reads as "nothing was carried" after a reset. */
     keep_writeback_line((volatile void *)h);
     __asm__ volatile("sfence" ::: "memory");
+
+    /* What was said before the pass could be read goes in first. One core
+     * runs, and nothing else writes the ring yet. */
+    uint64_t written = LogRingWritten();
+    uint64_t from    = written > (uint64_t)LOGRING_CAPACITY ? written - (uint64_t)LOGRING_CAPACITY : 0;
+    for (uint64_t p = from; p < written; p++) keep_put(g_ring[p & LOGRING_MASK]);
 }
 
 const char *LogKeepWriteBackName(void)
@@ -437,16 +443,7 @@ static inline void keep_put(char c)
     }
 }
 
-#else
 
-static inline void keep_put(char c) { (void)c; }
-
-/* Compiled out, but still callable: the reset and panic paths ask for the
- * window to be written back without knowing whether this build has one. */
-void LogKeepFlush(void) { }
-const char *LogKeepWriteBackName(void) { return "none"; }
-
-#endif /* CONFIG_PRINTTOFILE */
 
 /* One byte in, under the lock. The tone goes in before the store that
  * publishes the position, so a lock-free reader never sees a byte without

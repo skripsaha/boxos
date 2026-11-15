@@ -14,14 +14,20 @@ Born — no such kernel, the loader stops; a Shaped of it whose base does not
 hold — passed over, the kernel as it was born; its stitch at the start of
 the ribbon's next_quire (rule (б)); its stitch closed and damaged, a sector
 of it lost and a stitch after it naming it (rule (в)) — the spare attested by
-what of its Born reads. Each a fork of the base
+what of its Born reads. Then gangway.settings, the file the loader asks for by
+name (bootread.py Called): bound into the Tally, born on the ribbon, a file of
+another name renamed so on the ribbon — read and attested, its bytes the
+person's; kept deleted on the ribbon — none is read; a byte of it flipped —
+its block named, not handed over; two files of the name — the first made
+read; born with its bytes in a Slip over a hole — read as the Slip lays them.
+Each a fork of the base
 selftest_book.py lays, the census's words for it, and the verdict bootread.py
 says — which the host stand (tools/gangway_stand.sh) then holds the Lectern
 itself to, line for line, on every one of them written out by --emit; and
 logcheck's bookboot boots A7 and A9 through OVMF."""
 
 from . import binder, bookread, ondisk, stitch, tally
-from .bootread import WHO, BootRead, Loaded
+from .bootread import CALLED, WHO, BootRead, Loaded, Succession
 from .bookground import BookGround
 from .medium import Unreadable
 from .ondisk import BLOCK, SECTOR, SECTORS_PER_BLOCK
@@ -83,6 +89,52 @@ class Spare:
 
     def Records(self):
         return [self.Born()]
+
+
+class Note:
+    """gangway.settings for the landings: the person's `text`, a file of fid
+    `fid` at block F + `at` of the landings' room, one block — its bytes, the
+    rest of the block zeros, and their digest."""
+
+    def __init__(self, bt, fid, at, text, name=CALLED):
+        self.fid, self.text, self.name, self.block = fid, text, name, bt.F + at
+        self.raw = text + bytes(BLOCK - len(text))
+        self.digest = bookread.Integrity(self.raw, bt.lanes)
+
+    def Lay(self, bt, o):
+        bt.PutBlock(o, self.block, self.raw)
+
+    def State(self):
+        return tally.FileState(self.fid, 1, ondisk.FILE_ACTIVE, len(self.text), 1, 1, self.name, [],
+                               [tally.Run(False, self.block, 1, 1)])
+
+    def Born(self):
+        return stitch.Born(fid=self.fid, flags=ondisk.FILE_ACTIVE, size=len(self.text), created_ns=1, modified_ns=1,
+                           name=self.name, tags=[], runs=[stitch.Data(self.block, 1)], digests=[self.digest])
+
+
+def BoundNotes(bt, notes):
+    """The base's Tally bound again where it lies with the notes in it, laid:
+    a plant."""
+    content = tally.Content.Copy(bt.content)
+    for n in notes:
+        content.files[n.fid] = n.State()
+        content.digests[n.block] = n.digest
+    content.next_fid = max(n.fid for n in notes) + 1
+    plan = binder.Bind(content, bt.ground, a=bt.plan.a)
+    if any(plan.next[0] <= n.block < plan.next[0] + plan.next[1] for n in notes):
+        raise Unreadable("the Tally bound with gangway.settings would lie over it")
+
+    def Plant(o):
+        for n in notes:
+            n.Lay(bt, o)
+        binder.BindWrite(o, bt.ground, plan)
+    return Plant
+
+
+def Called(c):
+    """The oracle's reading of the landing with gangway.settings asked for."""
+    return Succession(BookGround(c.medium), CALLED)
 
 
 def BoundSpare(bt, sp):
@@ -197,6 +249,39 @@ def BootCases(bt):
         pen.Sew([stitch.UseContext(b"after")], flags=stitch.DATA_FLUSHED)
         bt.Rot(o, born.vlbas[-1])
 
+    text = b"# what I like\nstartup all\ncores 2\n"
+    note = Note(bt, bt.fid, 0, text)
+    other = Note(bt, bt.fid + 1, 1, b"cores 1\n")
+    draft = Note(bt, bt.fid, 0, text, name=b"draft.txt")
+    noted = "%s (fid %u) is attested by the book: 1 block(s)" % (CALLED.decode(), note.fid)
+
+    def NoteBorn(o):
+        note.Lay(bt, o)
+        bt.Pen(o).Sew([note.Born()], flags=stitch.DATA_FLUSHED)
+
+    def NoteRenamed(o):
+        BoundNotes(bt, [draft])(o)
+        bt.Pen(o).Sew([stitch.Labeled(fid=draft.fid, base=2, name=CALLED)], flags=stitch.DATA_FLUSHED)
+
+    def NoteDeleted(o):
+        BoundNotes(bt, [note])(o)
+        bt.Pen(o).Sew([stitch.Labeled(fid=note.fid, base=2, keep=1 << 62)], flags=stitch.DATA_FLUSHED)
+
+    def NoteFlipped(o):
+        BoundNotes(bt, [note])(o)
+        bt.Rot(o, note.block * SECTORS_PER_BLOCK, 10)
+
+    def NoteSlipped(o):
+        bt.Pen(o).Sew([stitch.Born(fid=note.fid, flags=ondisk.FILE_ACTIVE, size=len(text), created_ns=1, modified_ns=1,
+                                   name=CALLED, tags=[], runs=[stitch.Hole(1)], digests=[], slip=(0, text))],
+                      flags=stitch.DATA_FLUSHED)
+
+    def Read(c, fid=None):
+        """The note read, attested, its bytes the person's text."""
+        s = Called(c)
+        return s.found == "held" and s.content == text and s.lines[-1] == noted.replace(
+            "fid %u)" % note.fid, "fid %u)" % (note.fid if fid is None else fid))
+
     rotten = ("no slot that holds names a Tally that reads" if root.level == 0 else
               "its block 0 (volume block %u) lies in the DIGESTS range of blocks [%u, %s), which does not read"
               % (first, lo, "the end" if hi is None else hi))
@@ -269,4 +354,26 @@ def BootCases(bt):
                       "its Born reads" % sp.fid,
                       lambda c: "the ribbon past slot 0's Tally: 2 stitch(es) sewn on, seq 3 to 4" in Verdict(c) and
                       Verdict(c)[-1] == spare)]),
+        Case("A16 gangway.settings bound in the Tally", BoundNotes(bt, [note]), checks=[
+            ("the loader reads gangway.settings, fid %u, attested, its bytes the person's" % note.fid, Read)]),
+        Case("A17 gangway.settings born on the ribbon past the Tally", NoteBorn, checks=[
+            ("the loader follows its Born and reads it by the digest the Born carries", Read)]),
+        Case("A18 a file of another name renamed gangway.settings on the ribbon", NoteRenamed, checks=[
+            ("the loader follows the file its Labeled names so from the Tally on and reads it",
+             lambda c: Read(c, draft.fid))]),
+        Case("A19 gangway.settings kept deleted on the ribbon", NoteDeleted, checks=[
+            ("a file kept deleted is none the loader reads",
+             lambda c: Called(c).lines[-1] == "no file on this volume is called %s" % CALLED.decode() and
+             Called(c).found is None)]),
+        Case("A20 a byte of gangway.settings flipped", NoteFlipped, must={"DIGEST_MISMATCH"}, checks=[
+            ("the loader names its block and hands nothing over",
+             lambda c: Called(c).lines[-1] == "%s (fid %u) does not match the book: block 0 (volume block %u)"
+             % (CALLED.decode(), note.fid, note.block) and Called(c).found is None)]),
+        Case("A21 two files called gangway.settings", BoundNotes(bt, [note, other]), checks=[
+            ("the loader reads the first made, fid %u, and says there are two" % note.fid,
+             lambda c: "2 files are called %s — fid %u, the first made, is read" % (CALLED.decode(), note.fid)
+             in Called(c).lines and Read(c))]),
+        Case("A22 gangway.settings born with its bytes in a Slip over a hole", NoteSlipped, checks=[
+            ("the loader reads the bytes the Slip lays on its one block",
+             lambda c: Called(c).found == "held" and Called(c).content == text)]),
     ]

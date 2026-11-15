@@ -22,6 +22,10 @@
  * broken, is loaded not attested, else the first put off; nothing of that
  * either, and every kernel tried is said with why, and the sentence the
  * loader stops with. Line for line volume-read's bootread.py Succession.
+ *
+ * A kernel chosen, the file the loader asks for by name is read in the same
+ * reading of the book (gangway_lectern_called.c) — the book past its Tally
+ * read for it first when no kernel by role was looked for.
  */
 
 #include "gangway_lectern_book.h"
@@ -101,25 +105,6 @@ static void Refused(LecternChoice *s, const LecternCandidate *c, const char *wha
     Kept(s, &l);
 }
 
-/* Volume block `v` — none for a hole, its zeros — read into `into`: 1, or 0
- * the medium will not give it. */
-static int BlockRead(const LecternChoice *s, int hole, uint64_t v, uint8_t *into)
-{
-    const LecternDesk *d = s->b.desk;
-    if (hole) {
-        LecternZero(into, VOLUME_BLOCK_BYTES);
-        return 1;
-    }
-    return d->read(d->ctx, v * VOLUME_BLOCK_SECTORS, VOLUME_BLOCK_SECTORS, into);
-}
-
-/* The Slips laid on the kernel's last block, at `block`. */
-static void TailLaid(const LecternCandidate *c, uint8_t *block)
-{
-    for (uint32_t i = 0; c->tail && i < VOLUME_BLOCK_BYTES; i++)
-        if (c->tail[VOLUME_BLOCK_BYTES + i / 8u] & (1u << (i % 8u))) block[i] = c->tail[i];
-}
-
 /* The header the kernel opens with (kernel_entry.asm): "KERNEL" at byte 2 —
  * or why not, said. */
 static int HeaderHeld(LecternChoice *s, const LecternCandidate *c, const uint8_t *first)
@@ -158,8 +143,8 @@ static int Loadable(LecternChoice *s, const LecternCandidate *c)
         return 0;
     }
     if (!(first = (uint8_t *)LecternTake(&s->b, VOLUME_BLOCK_BYTES))) return 0;
-    read = BlockRead(s, (int)c->runs[0].hole, c->runs[0].start, first);
-    if (read && BlocksOf(c->size) == 1) TailLaid(c, first);
+    read = LecternBlockRead(&s->b, (int)c->runs[0].hole, c->runs[0].start, first);
+    if (read && BlocksOf(c->size) == 1) LecternTailLaid(c->tail, first);
     held = read && HeaderHeld(s, c, first);
     LecternGive(&s->b, first, VOLUME_BLOCK_BYTES);
     if (!read)
@@ -180,7 +165,8 @@ static uint8_t *Placed(LecternChoice *s, const LecternCandidate *c, LecternTried
     if (!image) return image;
     for (uint64_t r = 0; r < c->nruns && k < blocks; r++) {
         for (uint64_t i = 0; i < c->runs[r].count && k < blocks; i++, k++) {
-            if (BlockRead(s, (int)c->runs[r].hole, c->runs[r].start + i, image + k * VOLUME_BLOCK_BYTES)) continue;
+            if (LecternBlockRead(&s->b, (int)c->runs[r].hole, c->runs[r].start + i, image + k * VOLUME_BLOCK_BYTES))
+                continue;
             d->unplace(d->ctx, image, blocks * VOLUME_BLOCK_BYTES);
             Refused(s, c, " cannot be loaded: its block ", k, " (volume block ", c->runs[r].start + i,
                     ") will not read");
@@ -197,7 +183,7 @@ static void Chosen(LecternChoice *s, const LecternCandidate *c, uint8_t *image, 
 {
     LecternKernel *k      = s->kernel;
     uint64_t       blocks = BlocksOf(c->size), n = 0;
-    TailLaid(c, image + (blocks - 1u) * VOLUME_BLOCK_BYTES);
+    LecternTailLaid(c->tail, image + (blocks - 1u) * VOLUME_BLOCK_BYTES);
     k->says   = says;
     k->image  = image;
     k->bytes  = c->size;
@@ -323,14 +309,19 @@ static void RibbonSaid(LecternBook *b)
 }
 
 /* What the book names past its Tally, in the order volume-read's bootbook.py
- * says it: the ribbon, the files it puts in a role, the files of FILES kept in
- * one, and the ribbon's records replayed for them. 1, or 0 no room. */
+ * says it: the ribbon, the files it puts in a role or names as asked, the
+ * files of FILES kept in one or called so, and the ribbon's records replayed
+ * for them — once, b->booked saying how it went. 1, or 0 no room. */
 static int BookRead(LecternBook *b)
 {
-    if (!LecternSew(b)) return 0;
-    RibbonSaid(b);
-    LecternBefore(b);
-    return !b->starved && LecternFiles(b) && LecternReplay(b);
+    int read = LecternSew(b);
+    if (read) {
+        RibbonSaid(b);
+        LecternBefore(b);
+        read = !b->starved && LecternFiles(b) && LecternReplay(b);
+    }
+    b->booked = read ? 1 : -1;
+    return read;
 }
 
 /* The kernels the book names by role, tried in turn, the ribbon's digests of
@@ -420,7 +411,8 @@ static void Stopped(LecternChoice *s, int unplaced)
     s->kernel->says = ATTEST_BROKEN;
 }
 
-void LecternSuccession(const LecternDesk *desk, const VolumeBoot *boot, LecternKernel *kernel)
+void LecternSuccession(const LecternDesk *desk, const VolumeBoot *boot, LecternKernel *kernel,
+                       LecternCalled *called)
 {
     LecternChoice s;
     uint64_t      lanes[4];
@@ -429,8 +421,9 @@ void LecternSuccession(const LecternDesk *desk, const VolumeBoot *boot, LecternK
 
     LecternZero(&s, sizeof(s));
     LecternZero(kernel, sizeof(*kernel));
-    s.b.desk = desk;
-    s.kernel = kernel;
+    s.b.desk   = desk;
+    s.b.called = called ? called->name : (const char *)0;
+    s.kernel   = kernel;
     WySeedLanes(desk->uuid, 16u, lanes);
     s.b.lane = lanes[0];
     booted   = boot && BootNamed(&s, boot);
@@ -441,6 +434,10 @@ void LecternSuccession(const LecternDesk *desk, const VolumeBoot *boot, LecternK
     }
     if (t != TRY_HELD && t != TRY_UNPLACED && s.b.stood && !s.b.starved) t = ByTag(&s);
     if (t != TRY_HELD && (t == TRY_UNPLACED || !Unattested(&s))) Stopped(&s, t == TRY_UNPLACED);
+    if (called && kernel->says != ATTEST_BROKEN) {
+        if (s.b.stood && !s.b.starved && !s.b.booked) BookRead(&s.b);
+        LecternCalledTake(&s.b, called);
+    }
     LecternGive(&s.b, s.tried, s.captried * sizeof(LecternLine));
     LecternClose(&s.b);
 }

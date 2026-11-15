@@ -22,9 +22,10 @@
  *   - it sees NOTHING after power was removed. Holding the power button for
  *     four seconds cuts the rails and takes RAM with them. On a wedged
  *     machine, press RESET, not power.
- *   - a kernel built without PRINTTOFILE=on carries nothing through a reset
- *     (the ring of THIS run it keeps regardless), and says so by name rather
- *     than handing back an empty file.
+ *   - a run that was not asked to keep its log carries nothing through a
+ *     reset (the ring of THIS run it keeps regardless), and says so by name
+ *     rather than handing back an empty file: gangway.settings keep-log on
+ *     asks, or a kernel built PRINTTOFILE=on when the loader does not say.
  */
 #include "box/print.h"
 #include "box/form.h"
@@ -59,8 +60,9 @@ int main(void)
     Current *log = current_open_ex("log:previous", CURRENT_READ, 0, 0, &why);
     if (!log) {
         if (why == ERR_UNSUPPORTED) {
-            println("This kernel carries nothing through a reset. Build it with "
-                    "PRINTTOFILE=on and the last run will be here.");
+            println("This run carries nothing through a reset. Ask for it with "
+                    "`settings gangway keep-log on`: from the next start on, what a "
+                    "run said is here after a reset.");
         } else {
             printf("The previous run's log could not be opened (error %u)\n",
                    (unsigned)why);

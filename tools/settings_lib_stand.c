@@ -123,7 +123,7 @@ static void TestNoFile(void)
           "a path found with two blanks between its names");
     Check(label && label->Value.Color == 0x808080u && strcmp(label->Value.Text, "gray") == 0,
           "a color's name for its default, as written and as its color");
-    Check(settings_find(&s, "seconds")->Value.On && settings_find(&s, "blink")->Off &&
+    Check(settings_find(&s, "seconds")->Value.On && strcmp(settings_find(&s, "blink")->Zero, "off") == 0 &&
               settings_find(&s, "blink")->Value.Number == 0,
           "on, and off read as 0");
     Check(strcmp(settings_find(&s, "hours")->Choices, "24 12") == 0, "the choices kept");

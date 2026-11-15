@@ -14,11 +14,14 @@
 # its end; a second kernel kept in the boot role bound in the Tally or born on the ribbon
 # with BOOT's flipped, the ribbon torn past its birth, an Undone of its Born, a
 # Shaped of it whose base does not hold, its stitch at the start of the
-# next_quire, its stitch closed and damaged — and on each, and on IMAGE as it is,
-# what the stand says (tools/gangway_stand.c) must be what `volume-read boot`
-# says: the slots passed over, the slot stood on, every node read past a copy
-# that did not hold, the ribbon and its records, each kernel tried and its
-# verdict, and the one Gangway jumps into or the sentence it stops on. Built
+# next_quire, its stitch closed and damaged; gangway.settings bound in the
+# Tally, born on the ribbon, renamed so on it, kept deleted, a byte of it
+# flipped, two of the name, its bytes in a Slip over a hole — and on each, and
+# on IMAGE as it is, what the stand says (tools/gangway_stand.c) must be what
+# `volume-read boot` says: the slots passed over, the slot stood on, every node
+# read past a copy that did not hold, the ribbon and its records, each kernel
+# tried and its verdict, the one Gangway jumps into or the sentence it stops
+# on, and gangway.settings found, read and held to the book, or why not. Built
 # under the address and undefined-behaviour sanitizers: the Lectern parses
 # what a medium hands it. The last line counts the landings that held.
 
@@ -28,7 +31,7 @@ TREE=$(cd "$(dirname "$0")/.." && pwd)
 cd "$TREE" || exit 2
 CC_HOST=${CC_HOST:-cc}
 IMG=${1:-build/boxos.img}
-LANDINGS="A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12 A13 A14 A15"
+LANDINGS="A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12 A13 A14 A15 A16 A17 A18 A19 A20 A21 A22"
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/gangway_stand.XXXXXX") || exit 2
 trap 'rm -rf "$WORK"' EXIT

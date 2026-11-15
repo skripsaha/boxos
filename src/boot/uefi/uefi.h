@@ -25,6 +25,19 @@ typedef unsigned long long uint64_t;
 typedef signed long long   int64_t;
 typedef signed int         int32_t;
 
+#ifndef INT64_MAX
+#define INT64_MAX 0x7FFFFFFFFFFFFFFFLL
+#endif
+
+/* What the shared headers that take bool from their includer read it as —
+ * the settings readers (settings_reader.h): a keyword from C23 on, and before
+ * it C11's own _Bool, with no <stdbool.h> under a -nostdinc build. */
+#if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 202311L
+typedef _Bool bool;
+#define true  1
+#define false 0
+#endif
+
 /*
  * uintptr_t must be 64-bit on the UEFI x86_64 target regardless of the
  * compiler's platform model (LP64 on Linux, LLP64 on Windows).

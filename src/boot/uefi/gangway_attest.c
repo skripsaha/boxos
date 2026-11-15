@@ -12,11 +12,14 @@
  * meets asks. A kernel is placed at KERNEL_LOAD_ADDR, in pages asked for at
  * that address and handed back when the kernel there is not the one — so the
  * next is placed where the first was. Every other page is handed back before
- * this returns, so the memory map the loader builds after it carries none
- * but the kernel's. Each line is said as Gangway says one.
+ * this returns — gangway.settings's too, once SettingsTake has read it — so
+ * the memory map the loader builds after it carries none but the kernel's.
+ * Each line is said as Gangway says one.
  */
 
 #include "gangway.h"
+#include "boxos_gangway_settings.h"
+#include "settings_chosen.h"   /* SETTINGS_FILE_MAX */
 
 typedef struct {
     EFI_BOOT_SERVICES *bs;
@@ -102,6 +105,7 @@ static void AttestUnplace(void *ctx, uint8_t *room, uint64_t bytes)
 const char *SuccessionTake(EFI_BOOT_SERVICES *bs, AttestReader read, uint64_t *bytes, uint64_t *alloc_end)
 {
     static LecternKernel chosen;
+    LecternCalled        called = { GANGWAY_SETTINGS_FILE, SETTINGS_FILE_MAX, CALLED_NONE, NULL, 0, 0 };
     AttestDesk           ctx;
     LecternDesk          desk;
 
@@ -118,8 +122,10 @@ const char *SuccessionTake(EFI_BOOT_SERVICES *bs, AttestReader read, uint64_t *b
     MemCopy(&desk.frame, &g_frame, sizeof(desk.frame));
     desk.block_end   = g_volume_end;
     desk.atom_blocks = g_volume_atom_blocks;
-    LecternSuccession(&desk, g_have_boot ? &g_boot : NULL, &chosen);
+    LecternSuccession(&desk, g_have_boot ? &g_boot : NULL, &chosen, &called);
     if (chosen.says == ATTEST_BROKEN) return chosen.line;
+    if (called.says != CALLED_NONE) SettingsTake(called.bytes, called.size);
+    if (called.bytes) AttestGive(&ctx, called.bytes, called.room);
     *bytes     = chosen.bytes;
     *alloc_end = KERNEL_LOAD_ADDR + chosen.blocks * VOLUME_BLOCK_BYTES;
     Print("Gangway: kernel at volume block ");

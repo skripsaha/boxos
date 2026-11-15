@@ -1,8 +1,9 @@
 /*
  * Gangway — the screen: the GOP that is the operator's display, a mode chosen
- * by the monitor's own preferred timing (EDID) where it can be had, and the
- * framebuffer the kernel is handed, said in full because a wrong one shows as
- * inverted colours or diagonal text with nothing on screen to explain it.
+ * — the size the person asks for in gangway.settings when the adapter has it,
+ * else by the monitor's own preferred timing (EDID) where it can be had — and
+ * the framebuffer the kernel is handed, said in full because a wrong one shows
+ * as inverted colours or diagonal text with nothing on screen to explain it.
  */
 
 #include "gangway.h"
@@ -20,6 +21,7 @@ typedef struct {
 } EdidPreferredTiming;
 
 typedef enum {
+    GopChoiceSettings,
     GopChoiceCurrent,
     GopChoiceEdid,
     GopChoiceLargest,
@@ -30,6 +32,7 @@ typedef enum {
 } GopModeChoice;
 
 typedef struct {
+    uint32_t asked_mode;
     uint32_t selected_mode;
     uint32_t largest_mode;
     uint32_t smallest_mode;
@@ -38,6 +41,8 @@ typedef struct {
     uint64_t smallest_area;
     uint64_t aspect_area;
     uint32_t invalid_modes;
+    int      found_asked;
+    int      asked_matches_format;
     int      found_selected;
     int      selected_matches_format;
     int      found_largest;
@@ -312,6 +317,7 @@ static int GopReadPreferredTiming(EFI_HANDLE handle, EdidPreferredTiming *out)
 static const char *GopChoiceName(GopModeChoice choice)
 {
     switch (choice) {
+        case GopChoiceSettings:   return "settings";
         case GopChoiceCurrent:    return "current-fallback";
         case GopChoiceEdid:       return "edid";
         case GopChoiceLargest:    return "largest-fallback";
@@ -350,6 +356,16 @@ static void GopScanModes(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
         uint32_t width = info->horizontal_resolution;
         uint32_t height = info->vertical_resolution;
         uint64_t area = GopModeArea(width, height);
+
+        if (width == g_settings.screen_width && height == g_settings.screen_height &&
+            FbModeInBand(width, height)) {
+            int matches_format = format == current_format;
+            if (!out->found_asked || (matches_format && !out->asked_matches_format)) {
+                out->asked_mode = m;
+                out->found_asked = 1;
+                out->asked_matches_format = matches_format;
+            }
+        }
 
         if (preferred && preferred->valid &&
             width == preferred->width && height == preferred->height &&
@@ -398,6 +414,28 @@ static GopModeChoice SelectGopBestMode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
     GopModeCandidates candidates;
     GopScanModes(gop, preferred, current_format, &candidates);
     if (out_invalid_modes) *out_invalid_modes = candidates.invalid_modes;
+
+    if (candidates.found_asked) {
+        if (candidates.asked_mode == gop->mode->mode) return GopChoiceSettings;
+        EFI_STATUS status = gop->set_mode(gop, candidates.asked_mode);
+        if (!EFI_ERROR(status) && gop->mode && gop->mode->mode == candidates.asked_mode &&
+            GopModeInfoUsable(gop->mode->info, &current_format, &current_bytes))
+            return GopChoiceSettings;
+        Print("Gangway: GOP mode change to the size gangway.settings asks for ");
+        Print(EFI_ERROR(status) ? "failed status=" : "verification failed status=");
+        PrintHex64((uint64_t)status);
+        Print(" — the mode is chosen as without it\r\n");
+        current_usable = GopModeInfoUsable(gop->mode->info, &current_format, &current_bytes);
+    } else if (g_settings.screen_width) {
+        int band = FbModeInBand(g_settings.screen_width, g_settings.screen_height);
+        Print(band ? "Gangway: this adapter has no mode of " : "Gangway: ");
+        PrintDec(g_settings.screen_width);
+        Print("x");
+        PrintDec(g_settings.screen_height);
+        Print(band ? ", the size gangway.settings asks for — the mode is chosen as without it\r\n"
+                   : ", the size gangway.settings asks for, is past what the kernel is handed (640x400 to "
+                     "3840x2160) — the mode is chosen as without it\r\n");
+    }
 
     if (candidates.found_selected) {
         if (candidates.selected_mode == gop->mode->mode) return GopChoiceEdid;

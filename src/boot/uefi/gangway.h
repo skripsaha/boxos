@@ -123,13 +123,41 @@ EFI_STATUS DeedTakeUp(const uint8_t *deed_block, uint64_t ground_start);
  * from its ground) into pages `bs` gives, and placed at KERNEL_LOAD_ADDR: NULL
  * with its size in *bytes and the end of its pages in *alloc_end — attested,
  * or with nothing to hold it to, said — or the sentence to stop with when no
- * kernel on the volume may be jumped into, every one tried said with why.
+ * kernel on the volume may be jumped into, every one tried said with why. A
+ * kernel chosen, gangway.settings is read in the same reading of the book and
+ * handed to SettingsTake.
  */
 typedef EFI_STATUS (*AttestReader)(uint64_t vlba, uint32_t count_512, void *buffer);
 const char *SuccessionTake(EFI_BOOT_SERVICES *bs, AttestReader read, uint64_t *bytes, uint64_t *alloc_end);
 
+/*
+ * gangway_settings.c: what the person set in gangway.settings
+ * (boxos_gangway_settings.h), read by the one reader every program's settings
+ * are read by — taken from the file's bytes (SettingsTake), every line that
+ * does not fit said; with no file, everything as Gangway came. `set` says
+ * which the file sets — a value of its own, not the word default: only those
+ * go to the kernel, as stamps, and the kernel goes its own way in the rest.
+ */
+#define GANGWAY_SET_SCREEN   1u
+#define GANGWAY_SET_STARTUP  2u
+#define GANGWAY_SET_CORES    4u
+#define GANGWAY_SET_KEEP_LOG 8u
+
+typedef struct {
+    uint32_t set;             /* GANGWAY_SET_* */
+    uint32_t screen_width;    /* the screen asked for — 0 by 0 for the monitor's own (auto) */
+    uint32_t screen_height;
+    uint8_t  startup;         /* BOARDING_STARTUP_* (boarding_pass.h) */
+    uint8_t  keep_log;        /* 1: what the machine says is kept through a reset */
+    uint32_t cores;           /* the most processors the kernel starts, 0 for every one */
+} GangwaySettings;
+
+extern GangwaySettings g_settings;
+void SettingsTake(const uint8_t *text, uint64_t bytes);
+
 /* gangway_video.c: the framebuffer the kernel is handed, in the mode chosen
- * for it, said (QueryGopFramebuffer); the framebuffer of the mode the firmware
+ * for it — the size gangway.settings asks for when the adapter has it — said
+ * (QueryGopFramebuffer); the framebuffer of the mode the firmware
  * has on now, the mode left as it is and nothing said (GopFramebufferNow).
  * Each all zero when there is none it can be — handed over, the kernel comes
  * up on text. */

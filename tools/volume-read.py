@@ -333,9 +333,9 @@ def CmdBound(args, medium):
 def CmdBoot(args, medium):
     """What the loader's Lectern says of the volume's kernels, line by line
     (bootread.py): 0 when it says a verdict, 2 when the volume does not read."""
-    from volumeread.bootread import BootRead
+    from volumeread.bootread import CALLED, BootRead
     try:
-        lines, _says = BootRead(medium, args.start)
+        lines, _says = BootRead(medium, args.start, CALLED)
     except (Unreadable, IOError) as e:
         print(f"boot: unreadable — {e}")
         return 2

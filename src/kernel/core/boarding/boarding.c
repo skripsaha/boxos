@@ -208,6 +208,37 @@ bool BoardingPassMedium(uint8_t* out_firmware, uint8_t* out_bios_drive)
     return true;
 }
 
+uint8_t BoardingPassStartup(void)
+{
+    uint16_t bytes = 0;
+    const BoardingStartup* s =
+        (const BoardingStartup*)BoardingPassStamp(BOARDING_STAMP_STARTUP, &bytes);
+    if (!s || bytes < sizeof(BoardingStartup) || s->show != BOARDING_STARTUP_ALL)
+        return BOARDING_STARTUP_QUIET;
+    return BOARDING_STARTUP_ALL;
+}
+
+uint32_t BoardingPassCores(void)
+{
+    uint16_t bytes = 0;
+    const BoardingCores* c =
+        (const BoardingCores*)BoardingPassStamp(BOARDING_STAMP_CORES, &bytes);
+    return c && bytes >= sizeof(BoardingCores) ? c->most : 0u;
+}
+
+bool BoardingPassKeepLog(void)
+{
+    uint16_t bytes = 0;
+    const BoardingKeepLog* k =
+        (const BoardingKeepLog*)BoardingPassStamp(BOARDING_STAMP_KEEP_LOG, &bytes);
+    if (k && bytes >= sizeof(BoardingKeepLog)) return k->keep != 0;
+#ifdef CONFIG_PRINTTOFILE
+    return true;
+#else
+    return false;
+#endif
+}
+
 /* A UUID is sixteen bytes and this kernel's printf has no field width, so the
  * digits are assembled by hand. Printed in full because two volumes made by the
  * same tool on the same day differ in the middle of it. */
@@ -307,6 +338,29 @@ static void boarding_describe(unsigned stamps, bool sealed)
         }
         words[at] = '\0';
         kprintf("[Boarding]   it marked %u moment(s) of its journey:%s\n", n, words);
+    }
+
+    /* What the person asked of the kernel, as the stamps say it — those the
+     * pass carries; in the rest the kernel goes its own way. */
+    uint16_t sbytes = 0, cbytes = 0, kbytes = 0;
+    const void* startup = BoardingPassStamp(BOARDING_STAMP_STARTUP, &sbytes);
+    const void* cores   = BoardingPassStamp(BOARDING_STAMP_CORES, &cbytes);
+    const void* keep    = BoardingPassStamp(BOARDING_STAMP_KEEP_LOG, &kbytes);
+    if (startup || cores || keep) {
+        char     asked[96] = "";
+        uint32_t most = BoardingPassCores();
+        int      at   = 0;
+        if (startup)
+            at += ksnprintf(asked + at, sizeof(asked) - (size_t)at, " startup %s",
+                            BoardingPassStartup() == BOARDING_STARTUP_ALL ? "all" : "quiet");
+        if (cores && most)
+            at += ksnprintf(asked + at, sizeof(asked) - (size_t)at, " cores %u", most);
+        else if (cores)
+            at += ksnprintf(asked + at, sizeof(asked) - (size_t)at, " cores all");
+        if (keep)
+            at += ksnprintf(asked + at, sizeof(asked) - (size_t)at, " keep-log %s",
+                            BoardingPassKeepLog() ? "on" : "off");
+        kprintf("[Boarding]   the person asks of the kernel, in gangway.settings:%s\n", asked);
     }
 
     /* Four lines that answer "which loader, off what, from where". Said once,

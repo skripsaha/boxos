@@ -329,15 +329,17 @@ BRINGUP_MARK = $(BUILDDIR)/.bringup.$(if $(filter on,$(BRINGUP)),on,off)
 # through Current. See src/lib/kernel/klib_logring.h for why a ring in memory
 # and not a file written as it goes.
 #
-# Off by default and deliberately not "always on": a board run where this is
-# wanted is not a constant activity, and a build that carries a megabyte of
-# buffer for a boot nobody is going to read is a cost with no reader. Built
-# once with it, every run of that image keeps its log — first, second, third —
-# until the tree is rebuilt without it.
+# The carry-over window — the copy of the ring that survives a warm reset for
+# `lastsaid` — is armed when it is asked for, not always: a board run where
+# it is wanted is not a constant activity, and a megabyte of memory held for
+# a boot nobody is going to read is a cost with no reader. The person asks in
+# gangway.settings (keep-log on), a stamp of the Boarding Pass the kernel
+# reads first of all (boarding.h, BoardingPassKeepLog).
 #
-# `make PRINTTOFILE=on` — the log ring itself is always in the kernel (it is
-# the serial line's source); this switch adds the carry-over window, the copy
-# of the ring that survives a warm reset for `lastsaid`.
+# `make PRINTTOFILE=on` — the kernel's own way when the loader does not say:
+# a BIOS boot, whose stage2 reads no settings, or a gangway.settings that
+# leaves keep-log alone. Built once with it, every such run keeps its log —
+# first, second, third — until the tree is rebuilt without it.
 ifeq ($(PRINTTOFILE),on)
 CFLAGS += -DCONFIG_PRINTTOFILE=1
 endif
@@ -914,7 +916,8 @@ GANGWAY_SRC    = src/boot/uefi/gangway.c src/boot/uefi/gangway_bytes.c src/boot/
                  src/boot/uefi/gangway_deed.c src/boot/uefi/gangway_attest.c \
                  src/boot/uefi/gangway_lectern.c src/boot/uefi/gangway_lectern_tree.c \
                  src/boot/uefi/gangway_lectern_ribbon.c src/boot/uefi/gangway_lectern_replay.c \
-                 src/boot/uefi/gangway_succession.c
+                 src/boot/uefi/gangway_succession.c src/boot/uefi/gangway_lectern_called.c \
+                 src/boot/uefi/gangway_settings.c
 GANGWAY_HDRS   = src/boot/uefi/gangway.h src/boot/uefi/uefi.h \
                  src/boot/uefi/gangway_lectern.h src/boot/uefi/gangway_lectern_book.h \
                  src/include/boot_info.h src/include/boarding_pass.h \
@@ -923,7 +926,9 @@ GANGWAY_HDRS   = src/boot/uefi/gangway.h src/boot/uefi/uefi.h \
                  src/include/volume_digest.h \
                  src/include/boxos_imprint.h src/include/boxos_imprint_press.h src/include/boxos_pixel.h \
                  src/include/boxos_screen.h src/include/boxos_utf8.h src/include/boxos_color.h \
-                 src/include/video_colors.h $(IMPRINT_DATA)
+                 src/include/video_colors.h src/include/boxos_gangway_settings.h \
+                 src/include/settings_reader.h src/include/settings_chosen.h src/include/key_chord.h \
+                 src/include/kb_event.h $(IMPRINT_DATA)
 GANGWAY_JUMP   = src/boot/uefi/gangway_jump.asm
 GANGWAY_LD     = src/boot/uefi/gangway.ld
 GANGWAY_EFI    = $(BUILDDIR)/BOOTX64.EFI
@@ -1761,12 +1766,13 @@ $(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_B
 	@# the loader will, so a kernel the book does not attest fails the build
 	@# here — not at the first UEFI boot of the image.
 	@BOOT=$$(python3 tools/volume-read.py $@ boot 2>&1); \
-	if ! printf '%s\n' "$$BOOT" | grep -q 'is attested by the book'; then \
+	KERNEL=$$(printf '%s\n' "$$BOOT" | grep -E '^boot: (the kernel the deed names|kernel fid [0-9]+) is attested by the book' | head -1); \
+	if [ -z "$$KERNEL" ]; then \
 		printf '%s\n' "$$BOOT"; \
 		echo "ERROR: tools/volume-read.py boot finds no kernel the book of $@ attests — Gangway would not jump into it as made"; \
 		exit 1; \
 	fi; \
-	printf '  %s\n' "$$(printf '%s\n' "$$BOOT" | tail -1)"
+	printf '  %s\n' "$$KERNEL"
 	@echo "Disk image created: $(IMAGE)"
 
 # There is no floppy image and no ISO here any more.
@@ -2276,7 +2282,8 @@ run-bg: $(RUN_BG_NEEDS)
 usb: $(BUILDPLATE_TOOL)
 	@if [ ! -f "$(IMAGE)" ]; then \
 		echo "ERROR: $(IMAGE) does not exist — run 'make' first"; \
-		echo "  (and 'make PRINTTOFILE=on' if you want the machine to keep its log)"; \
+		echo "  (a machine that boots through UEFI keeps its log once 'settings gangway keep-log on' is set;"; \
+		echo "   one that boots through BIOS, with 'make PRINTTOFILE=on')"; \
 		exit 1; \
 	fi
 	@# ‼ AND IT IS THE IMAGE THIS TREE MADE, OR IT IS NOT FLASHED.

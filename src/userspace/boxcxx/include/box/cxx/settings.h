@@ -7,7 +7,7 @@
 // path, its names from the top down:
 //
 //   box::settings::on("seconds")         — an on-or-off setting
-//   box::settings::number("width")       — a number setting: 0 for off
+//   box::settings::number("width")       — a number setting: 0 for off, or all
 //   box::settings::word("label")         — a word, text or one-of setting, as a copy
 //   box::settings::text("greeting")
 //   box::settings::choice("hours")

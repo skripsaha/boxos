@@ -129,6 +129,22 @@ void LecternSectors(LecternBook *b, uint64_t vlba, uint32_t sectors, uint8_t *in
             LecternZero(into + (uint64_t)k * BOOK_SECTOR_BYTES, BOOK_SECTOR_BYTES);
 }
 
+int LecternBlockRead(const LecternBook *b, int hole, uint64_t v, uint8_t *into)
+{
+    const LecternDesk *d = b->desk;
+    if (hole) {
+        LecternZero(into, VOLUME_BLOCK_BYTES);
+        return 1;
+    }
+    return d->read(d->ctx, v * VOLUME_BLOCK_SECTORS, VOLUME_BLOCK_SECTORS, into);
+}
+
+void LecternTailLaid(const uint8_t *tail, uint8_t *block)
+{
+    for (uint32_t i = 0; tail && i < VOLUME_BLOCK_BYTES; i++)
+        if (tail[VOLUME_BLOCK_BYTES + i / 8u] & (1u << (i % 8u))) block[i] = tail[i];
+}
+
 static int LecternZeros(const uint8_t *p, uint64_t n)
 {
     for (uint64_t i = 0; i < n; i++)

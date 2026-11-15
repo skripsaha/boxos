@@ -108,6 +108,25 @@ void WriteBoardingPass(void)
                        (uint16_t)(g_moment_count * sizeof(BoardingMoment)));
     count++;
 
+    /* What the person asked of the kernel in gangway.settings
+     * (gangway_settings.c): a stamp for each the file sets; in the rest the
+     * kernel goes its own way. */
+    if (g_settings.set & GANGWAY_SET_STARTUP) {
+        BoardingStartup startup = { g_settings.startup, { 0, 0, 0 } };
+        at = BoardingStamp(base, at, BOARDING_STAMP_STARTUP, &startup, sizeof(startup));
+        count++;
+    }
+    if (g_settings.set & GANGWAY_SET_CORES) {
+        BoardingCores cores = { g_settings.cores };
+        at = BoardingStamp(base, at, BOARDING_STAMP_CORES, &cores, sizeof(cores));
+        count++;
+    }
+    if (g_settings.set & GANGWAY_SET_KEEP_LOG) {
+        BoardingKeepLog keep = { g_settings.keep_log, { 0, 0, 0 } };
+        at = BoardingStamp(base, at, BOARDING_STAMP_KEEP_LOG, &keep, sizeof(keep));
+        count++;
+    }
+
     /*
      * The seal, and it goes on last because it covers everything ahead of it.
      *

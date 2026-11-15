@@ -8,6 +8,7 @@
 #include "io.h"
 #include "atomics.h"
 #include "linker_symbols.h"
+#include "boarding.h"
 #include "per_core.h"   // PerCpuData layout + g_per_core_active for the gs fast path
 #include "cpu_calibrate.h" // cpu_get_tsc_freq_khz() — the timebase that cannot be absent
 #include "cpuid.h"         // rdtsc()
@@ -158,9 +159,13 @@ void amp_init(void)
         lapic_ids[0] = my_lapic_id;
     }
 
-    // Build core descriptors: BSP first, then APs
-    uint8_t core_idx = 0;
-    uint8_t max_idx = (uint8_t)(MAX_CORES - 1);
+    // Build core descriptors: BSP first, then APs — no more than the person
+    // asked for (gangway.settings cores, boarding.h): the cores past that are
+    // never described, so never started, scheduled or counted.
+    uint8_t  core_idx = 0;
+    uint8_t  max_idx  = (uint8_t)(MAX_CORES - 1);
+    uint32_t asked    = BoardingPassCores();
+    if (asked && asked < max_idx) max_idx = (uint8_t)asked;
 
     // Find BSP in collected list and put it at index 0
     for (uint8_t i = 0; i < count && core_idx < max_idx; i++)
@@ -203,6 +208,9 @@ void amp_init(void)
         g_amp.cores[i].is_kcore = (i < g_amp.k_count);
     }
 
+    if (g_amp.total_cores < count)
+        kprintf("[AMP] gangway.settings asks for %u core(s): %u of the %u the machine has are started\n",
+                asked, g_amp.total_cores, count);
     kprintf("[AMP] Detected %u core(s) (%u K-core(s), %u App Core(s))\n",
             g_amp.total_cores, g_amp.k_count, g_amp.app_count);
 
