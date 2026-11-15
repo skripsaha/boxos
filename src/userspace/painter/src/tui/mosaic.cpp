@@ -2,11 +2,8 @@
 
 #include <algorithm>
 #include <array>
-#include <bit>
 #include <cstdint>
 
-#include "boxos_font.h"
-#include "boxos_glyph_fold.h"
 #include "boxos_mosaic.h"
 
 #include "painter/tui/glyph.h"
@@ -17,31 +14,23 @@ namespace {
 
 constexpr std::size_t TopLeft = 0, TopRight = 1, BottomLeft = 2, BottomRight = 3;
 
-constexpr int CellInk = BOXOS_FONT_WIDTH * BOXOS_FONT_HEIGHT;
+/* A shade and the share of the cell its foreground takes, out of CellInk: as
+ * Unicode names them, light, medium and dark — a quarter, a half and three
+ * quarters. What a character means is the contract, not any glass's font: a
+ * glass draws the shades so, the display's pixels and a VGA ROM alike. */
+constexpr int CellInk = 4;
 
-/* How much of the cell the display's font inks to show Character, out of
- * CellInk: the glyph it draws it with, read from the same font. */
-int InkOf(char32_t Character)
-{
-    int Count = 0;
-    for (const unsigned char Row : BoxFontGlyphs[BoxGlyphFoldOne(Character)]) Count += std::popcount(Row);
-    return Count;
-}
-
-/* A shade by the font's own picture: the share of the cell its foreground
- * takes. The font's shades are not the usual 25, 50 and 75 percent, so the
- * share is read from it and not written here. */
 struct Shade {
     char32_t Glyph;
     int      Ink;
 };
 
-constexpr std::array<char32_t, 3> Shades = {Glyphs::LightShade, Glyphs::MidShade, Glyphs::DenseShade};
-constexpr std::size_t             ShadeCount = Shades.size();
+constexpr std::array<Shade, 3> Shades = {{{Glyphs::LightShade, 1}, {Glyphs::MidShade, 2}, {Glyphs::DenseShade, 3}}};
+constexpr std::size_t          ShadeCount = Shades.size();
 
 Shade ShadeAt(std::size_t Index)
 {
-    return {Shades[Index], InkOf(Shades[Index])};
+    return Shades[Index];
 }
 
 struct Rgb {

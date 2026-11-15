@@ -14,6 +14,8 @@
 #include "box/touch.h"
 #include "text_cell.h"
 
+class Typesetter;
+
 // A cell as the glass is to show it: the console's text cell — its colours a
 // triple each, or COLOR_DEFAULT for the screen's own — and the mark a layer
 // drew in it (DisplayCellMark), none in the console's own text.
@@ -32,12 +34,14 @@ struct Caret {
 
 // The easel — where the display puts the picture on the glass: the screen the
 // kernel lends this program, and the only hand that draws on it
-// (box/screen.h). A cell is drawn from the 8x16 font into the
-// framebuffer, or as glyph and attribute into the text page; a cell is drawn
-// only when it differs from what the glass already shows, and video memory is
-// never read. The caret is drawn here too, by software: two rows at the foot of
-// its cell on a framebuffer, the attribute turned over on the text page. So is
-// a cell's mark: a line under the glyph or a bar down its left side on a
+// (box/screen.h). A cell is drawn into the framebuffer as the typesetter's
+// picture of its character (typesetter.h), each pixel the ink's colour and
+// the paper's mixed as light by how much of it the picture covers, or as
+// glyph and attribute into the text page; a cell is drawn only when it
+// differs from what the glass already shows, and video memory is never read.
+// The caret is drawn here too, by software: an eighth of its cell at the
+// foot on a framebuffer, the attribute turned over on the text page. So is a
+// cell's mark: a line under the glyph or a bar down its left side on a
 // framebuffer, the mark's colour behind the glyph on the text page. And the
 // screen's own colours are here: a colour no program chose (COLOR_DEFAULT) is
 // drawn as the text colour, or behind the text as the page colour.
@@ -59,6 +63,17 @@ public:
 
     // Whether the glass is a framebuffer, not a text page.
     bool Pixels() const noexcept { return Description.kind == SCREEN_KIND_PIXELS; }
+
+    // How many pixels tall a framebuffer is; 0 for a text page.
+    std::uint32_t PixelHeight() const noexcept { return Pixels() ? Description.height : 0; }
+
+    // The typesetter whose pictures a framebuffer shows, alive as long as the
+    // easel: the console as many of its cells as the glass holds, at least
+    // one — a cell past the glass's edge drawn as far as the glass goes —
+    // in the middle of the glass, the pixels round them in the page colour.
+    // Given before the first Present; until then a framebuffer has no cells.
+    // A text page has its own glyphs and cells, and is not given one.
+    void SetTypesetter(Typesetter &With);
 
     // The screen's own colours, as COLOR_DEFAULT is drawn in them.
     std::uint32_t TextColor() const noexcept { return TextColour; }
@@ -82,11 +97,15 @@ private:
 
     void DrawCell(std::uint32_t Col, std::uint32_t Row, const GlassCell &Cell,
                   bool CaretHere) noexcept;
+    void PaintMargin() noexcept;
 
     ScreenDescription Description{};
+    Typesetter *Type = nullptr;
     TouchTag Turns = TOUCH_TAG_INVALID;
     std::uint32_t ColsValue = 0;
     std::uint32_t RowsValue = 0;
+    std::uint32_t OriginX = 0;     // where a framebuffer's first cell stands
+    std::uint32_t OriginY = 0;
     std::vector<GlassCell> Shown;  // what the glass shows now
     std::uint32_t TextColour = COLOR_LIGHT_GRAY;
     std::uint32_t PageColour = COLOR_BLACK;

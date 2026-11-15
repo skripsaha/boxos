@@ -14,9 +14,14 @@ implementation of it exists in the current source tree. This module belongs to
 
 Header: [`painter/tui/text.h`](../../../../src/userspace/painter/include/painter/tui/text.h).
 Implementation: [`text.cpp`](../../../../src/userspace/painter/src/tui/text.cpp).
-The display chooses a character's glyph when it draws: the 8×16 font and the
-table in [`boxos_glyph_fold.h`](../../../../src/include/boxos_glyph_fold.h);
-a character the font lacks is drawn as a solid square ■.
+The display chooses a character's glyph when it draws. On a framebuffer it
+is the display's typesetter (Typecase): frames, blocks, mosaics and braille
+are worked out for the cell, letters come from the font named in the display's
+settings (JetBrains Mono by default, Cyrillic included), then from the 8×16
+font; a character none of them has is drawn as its code in the cell. On a VGA
+text page it is the adapter's font through the table in
+[`boxos_glyph_fold.h`](../../../../src/include/boxos_glyph_fold.h); a
+character without a glyph there is a solid square ■.
 
 Include: `#include "painter/tui/text.h"`. The functions are in the
 `painter::tui` namespace and are part of `src/userspace/painter/libpainter.a`.
@@ -47,10 +52,10 @@ columns from zero on every call. In `PutText`, this count is independent of
 
 `OddInk` is a `core::Color` constant with the value
 `core::Color::Rgb(0xE0, 0x9A, 0x30)`. `PutText` uses it for elements with
-`Odd == true`. A validly encoded character that the display's font lacks is
-kept in its cell as it is, and the display draws it as a square in the
-regular `Ink` color. In particular, the font has no Cyrillic characters yet,
-so they appear as such squares.
+`Odd == true`. A validly encoded character that the display's fonts lack is
+kept in its cell as it is, and the display draws it in the regular `Ink`
+color: as its code in the cell on a framebuffer, as a square on a VGA text
+page.
 
 The decoder rejects truncated sequences, stray continuation bytes, overlong
 encodings, surrogates, and values above U+10FFFF. It does not combine code

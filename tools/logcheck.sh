@@ -6506,10 +6506,13 @@ run_orderlifemut() {
 # The caret is the part of a console a person actually watches, and until this
 # was measured nobody could say where it was: the serial mirror carries the
 # TEXT a program said and says nothing at all about the cursor. So this reads
-# the glass itself. A screendump is 8x16 cells of pixels; the display draws
-# the caret as two solid rows at the bottom of a cell, and the 8x16 font is
-# right here in the tree, so a cell can be told back into the character it
-# carries AND whether a caret is standing on it.
+# the glass itself. The display says the cells it draws in when it starts
+# ("[display] text: ... in cells of WxH, CxR of them", the grid in the middle
+# of the glass) and draws the caret as the foot of its cell, an eighth of the
+# height and two rows at least, solid across; so a screendump can be told back
+# into cells that carry ink and the one a caret stands on. A foot solid
+# across is a caret only in a cell alone: a run of them is a bar of blocks,
+# the load meter's lower eighths.
 #
 # Two things are checked, and they are different defects:
 #   ONE caret — a caret is pixels inside the surface, so a scroll carries it up
@@ -6522,64 +6525,48 @@ run_orderlifemut() {
 #               moved the insertion point and left the caret behind.
 
 caret_read() {
-    # caret_read PPM — prints "carets N at r,c r,c ..." and the last screen row
-    # that carries anything, so a verdict can name what it saw.
-    python3 - "$1" <<'EOF2'
-import re, sys, collections
-ROOT = "."
-src = open(ROOT + "/src/include/boxos_font.h").read()
-body = src[src.index("BoxFontGlyphs[256][16] = {"):]
-rows = re.findall(r"\{([^{}]*)\}", body)
-FONT = []
-for r in rows[:256]:
-    v = [int(x, 0) for x in r.split(",") if x.strip()]
-    if len(v) == 16: FONT.append(tuple(v))
-BY = {}
-TOP = {}
-for code in range(255, -1, -1):
-    # A cell of nothing is a SPACE, not a NUL: the glyphs are identical and the
-    # lower code would win, and then a blank row could not be told from a row
-    # of text by trimming it.
-    if code == 0: continue
-    BY[FONT[code]] = code
-    TOP.setdefault(FONT[code][:14], code)
+    # caret_read PPM — prints "carets N at r,c r,c ..." and, of the row the
+    # caret stands on (with none, the last row that carries anything), "ink
+    # ROW ends at COL": the last cell there that carries ink above the foot.
+    python3 - "$1" build/serial.log <<'EOF2'
+import collections, re, sys
+
+said = re.findall(rb"\[display\] text: .* in cells of (\d+)x(\d+), (\d+)x(\d+) of them", open(sys.argv[2], "rb").read())
+if not said:
+    print("carets ? at (the display never said its cells)")
+    print("ink -1 ends at -1")
+    sys.exit(0)
+W, H, COLS, ROWS = map(int, said[-1])
 
 d = open(sys.argv[1], "rb").read()
 parts = d.split(b"\n", 3)
 w, h = map(int, parts[1].split())
 px = parts[3]
+ox, oy = (w - COLS * W) // 2, (h - ROWS * H) // 2
+foot = H - max(2, H // 8)
+
 def pix(x, y):
     i = (y * w + x) * 3
-    return (px[i], px[i+1], px[i+2])
+    return px[i:i+3]
 
-carets = []
-lines = []
-for r in range(h // 16):
-    line = []
-    for c in range(w // 8):
-        box = [[pix(c*8 + x, r*16 + y) for x in range(8)] for y in range(16)]
-        flat = [p for row in box for p in row]
-        cnt = collections.Counter(flat)
-        bg = cnt.most_common(1)[0][0]
-        bits = tuple(sum(1 << (7-x) for x in range(8) if box[y][x] != bg) for y in range(16))
-        ch = BY.get(bits)
-        caret = False
-        if ch is None:
-            if bits[14] == 0xFF and bits[15] == 0xFF:
-                ch = TOP.get(bits[:14])
-                if ch is not None: caret = True
-        elif bits[14] == 0xFF and bits[15] == 0xFF and not any(bits[:14]):
-            caret = True; ch = 32
-        if ch is None: ch = ord('?')
-        if caret: carets.append((r, c))
-        line.append(chr(ch) if 32 <= ch < 127 else '.')
-    lines.append("".join(line).rstrip())
+solid = {}   # (r, c) -> the colour its foot is solid in, unlike its page
+inked = set()
+for r in range(ROWS):
+    for c in range(COLS):
+        box = [[pix(ox + c*W + x, oy + r*H + y) for x in range(W)] for y in range(H)]
+        page = collections.Counter(p for row in box for p in row).most_common(1)[0][0]
+        if any(p != page for row in box[:foot] for p in row):
+            inked.add((r, c))
+        band = set(p for row in box[foot:] for p in row)
+        if len(band) == 1 and page not in band:
+            solid[(r, c)] = band.pop()
 
-last = ""
-for i, l in enumerate(lines):
-    if l: last = "%d|%s" % (i, l)
-print("carets %d at %s" % (len(carets), " ".join("%d,%d" % x for x in carets)))
-print("last " + last)
+carets = sorted(k for k, colour in solid.items()
+                if solid.get((k[0], k[1] - 1)) != colour and solid.get((k[0], k[1] + 1)) != colour)
+row = carets[-1][0] if carets else max([r for r, _ in inked], default=-1)
+end = max([c for r, c in inked if r == row], default=-1)
+print("carets %d at %s" % (len(carets), " ".join("%d,%d" % k for k in carets)))
+print("ink %d ends at %d" % (row, end))
 EOF2
 }
 
@@ -6637,15 +6624,16 @@ run_caret() {
     chk $? "caret: still one after a screenful of output and three scrolls ($S)"
 
     # Where it stands: `abcdef` typed, then Left twice, so the caret must be on
-    # the cell holding 'e' — two back from the end of what was typed.
-    local LINE COL WANT
-    LINE=$(tail -1 "$SCRATCH/caret.edit.txt")
+    # the cell holding 'e' — the cell before the last that carries ink on its
+    # row, 'f'.
+    local INK COL WANT
+    INK=$(tail -1 "$SCRATCH/caret.edit.txt")
     COL=$(echo "$E" | awk '{print $4}' | cut -d, -f2)
-    WANT=$(echo "$LINE" | sed 's/^last [0-9]*|//' | awk '{ i=index($0,"abcdef"); print (i>0 ? i-1+4 : -1) }')
+    WANT=$(echo "$INK" | awk '{ print ($5 >= 0 ? $5 - 1 : -1) }')
     if [ -n "$COL" ] && [ "$COL" = "$WANT" ]; then
-        ok "caret: it sits on the cell the editor is editing (column $COL of \"$(echo "$LINE" | sed 's/^last [0-9]*|//')\")"
+        ok "caret: it sits on the cell the editor is editing (column $COL, the cell before \"abcdef\"'s last, $INK)"
     else
-        bad "caret: the editor is two cells back from the end of \"abcdef\" and the caret is at column $COL, not $WANT"
+        bad "caret: the editor is on 'e', two cells back from the end of \"abcdef\" ($INK), and the caret is at column $COL, not $WANT"
     fi
 }
 
@@ -6677,11 +6665,11 @@ run_caretmut() {
     caret_blind_off
     if [ $booted -ne 0 ]; then bad "caretmut: never reached a shell"; build; return; fi
 
-    local E COL LINE WANT
+    local E COL INK WANT
     E=$(head -1 "$SCRATCH/caretmut.edit.txt")
-    LINE=$(tail -1 "$SCRATCH/caretmut.edit.txt")
+    INK=$(tail -1 "$SCRATCH/caretmut.edit.txt")
     COL=$(echo "$E" | awk '{print $4}' | cut -d, -f2)
-    WANT=$(echo "$LINE" | sed 's/^last [0-9]*|//' | awk '{ i=index($0,"abcdef"); print (i>0 ? i-1+4 : -1) }')
+    WANT=$(echo "$INK" | awk '{ print ($5 >= 0 ? $5 - 1 : -1) }')
     if [ -n "$COL" ] && [ "$COL" = "$WANT" ]; then
         bad "caretmut: the caret's move was left untold and the caret STILL followed the arrows — the oracle cannot see that defect"
     else

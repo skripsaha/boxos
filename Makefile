@@ -1283,8 +1283,8 @@ $(PAINTER_LIB): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxc
 .PHONY: painter
 painter: $(PAINTER_LIB)
 
-# Typecase, likewise a library of its own, linked by no program until the
-# display draws through it; tools/typecase_stand.sh builds and holds it.
+# Typecase, likewise a library of its own: the display draws through it, and
+# tools/typecase_stand.sh builds and holds it.
 .PHONY: $(TYPECASE_LIB)
 $(TYPECASE_LIB):
 	@echo "Building Typecase..."
@@ -1347,7 +1347,7 @@ $(HUB_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a
 	@echo "hub.elf: $$(stat -f%z $(HUB_BIN) 2>/dev/null || stat -c%s $(HUB_BIN) 2>/dev/null) bytes"
 
 # Build display server
-$(DISPLAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(NAMEPLATE_TOOL)
+$(DISPLAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(TYPECASE_LIB) $(NAMEPLATE_TOOL)
 	@echo "Building display server..."
 	@cd $(DISPLAY_DIR) && $(MAKE)
 	@echo "display.elf: $$(stat -f%z $(DISPLAY_BIN) 2>/dev/null || stat -c%s $(DISPLAY_BIN) 2>/dev/null) bytes"

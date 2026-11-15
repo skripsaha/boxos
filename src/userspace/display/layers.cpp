@@ -124,15 +124,12 @@ bool LayerAbove(const DisplayLayerState &Left, const DisplayLayerState &Right) n
 // and caret either way. Anything but OK back means the asker never learned of
 // what the answer names.
 int Reply(const Result &Asked, error_t Error, const DisplayLayerState *Layer,
-          const ConsoleModel &Model, DisplayGlassKind Glass) noexcept
+          const ConsoleModel &Model, DisplayGlassKind Glass, std::uint8_t Mosaics) noexcept
 {
     DisplayLayerOpenReply Answer{};
     Answer.command = DISP_CMD_LAYER_OPEN;
     Answer.glass = static_cast<std::uint8_t>(Glass);
-    // The 8x16 font and the text page's own font have no quadrant, sextant or
-    // octant: on either glass those characters are drawn as whatever the font
-    // holds for them, so no grid is exact.
-    Answer.mosaics = 0;
+    Answer.mosaics = Mosaics;
     Answer.error = static_cast<std::int32_t>(Error);
     Answer.display_pid = cabin_info()->pid;
     Answer.cols = Model.Width();
@@ -203,7 +200,7 @@ std::expected<box::bay<std::byte>, box::error> LayerMemory(std::size_t Bytes, co
 }  // namespace
 
 void LayersOpen(const Result &Asked, const AskFrom &From, const DisplayLayerOpenRequest &Request,
-                const ConsoleModel &Model, DisplayGlassKind Glass) noexcept
+                const ConsoleModel &Model, DisplayGlassKind Glass, std::uint8_t Mosaics) noexcept
 {
     const std::uint32_t Width = Model.Width();
     const std::uint32_t Height = Model.Height();
@@ -211,12 +208,12 @@ void LayersOpen(const Result &Asked, const AskFrom &From, const DisplayLayerOpen
         Request.width > Width || Request.height > Height ||
         static_cast<std::uint32_t>(Request.x) > Width - Request.width ||
         static_cast<std::uint32_t>(Request.y) > Height - Request.height) {
-        (void)Reply(Asked, ERR_OUT_OF_RANGE, nullptr, Model, Glass);
+        (void)Reply(Asked, ERR_OUT_OF_RANGE, nullptr, Model, Glass, Mosaics);
         return;
     }
     if (Request.role < DISPLAY_LAYER_SCENE || Request.role > DISPLAY_LAYER_NOTICE ||
         Request.flags != 0) {
-        (void)Reply(Asked, ERR_INVALID_ARGUMENT, nullptr, Model, Glass);
+        (void)Reply(Asked, ERR_INVALID_ARGUMENT, nullptr, Model, Glass, Mosaics);
         return;
     }
     const DisplayLayerRole Role = static_cast<DisplayLayerRole>(Request.role);
@@ -224,7 +221,7 @@ void LayersOpen(const Result &Asked, const AskFrom &From, const DisplayLayerOpen
     const std::size_t CellCount = static_cast<std::size_t>(Request.width) * Request.height;
     if (AreaHeld(From.program_pid, From.program_generation, Role) + CellCount >
         static_cast<std::uint64_t>(Width) * Height) {
-        (void)Reply(Asked, ERR_QUOTA_EXCEEDED, nullptr, Model, Glass);
+        (void)Reply(Asked, ERR_QUOTA_EXCEEDED, nullptr, Model, Glass, Mosaics);
         return;
     }
 
@@ -235,14 +232,14 @@ void LayersOpen(const Result &Asked, const AskFrom &From, const DisplayLayerOpen
                             DISPLAY_LAYER_SLOTS * CellCount * sizeof(DisplayLayerCell),
                         From, Layer.BayNumber);
         if (!Shared) {
-            (void)Reply(Asked, Shared.error().raw(), nullptr, Model, Glass);
+            (void)Reply(Asked, Shared.error().raw(), nullptr, Model, Glass, Mosaics);
             return;
         }
         Layer.Shared = std::move(*Shared);
         Layer.Cells.resize(CellCount);
     } catch (...) {
         if (Layer.Shared) g_free_bay_numbers.push_back(Layer.BayNumber);
-        (void)Reply(Asked, ERR_NO_MEMORY, nullptr, Model, Glass);
+        (void)Reply(Asked, ERR_NO_MEMORY, nullptr, Model, Glass, Mosaics);
         return;
     }
 
@@ -270,13 +267,13 @@ void LayersOpen(const Result &Asked, const AskFrom &From, const DisplayLayerOpen
         g_layers.push_back(std::move(Layer));
     } catch (...) {
         g_free_bay_numbers.push_back(Layer.BayNumber);
-        (void)Reply(Asked, ERR_NO_MEMORY, nullptr, Model, Glass);
+        (void)Reply(Asked, ERR_NO_MEMORY, nullptr, Model, Glass, Mosaics);
         return;
     }
 
     // A layer whose answer reached nobody — its asker died first — is
     // nobody's.
-    if (Reply(Asked, OK, &g_layers.back(), Model, Glass) != 0) {
+    if (Reply(Asked, OK, &g_layers.back(), Model, Glass, Mosaics) != 0) {
         g_free_bay_numbers.push_back(g_layers.back().BayNumber);
         g_layers.pop_back();
     }

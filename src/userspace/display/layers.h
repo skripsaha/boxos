@@ -32,10 +32,11 @@ struct LayerCommit {
 };
 
 // DISP_CMD_LAYER_OPEN, asked of this display (Asked) by its sender, whom From
-// names: answered here, with the kind of glass the layer will be shown on. A
-// new layer shows nothing until its first frame.
+// names: answered here, with the kind of glass the layer will be shown on and
+// the grids of mosaics it draws exactly (DisplayMosaic flags). A new layer
+// shows nothing until its first frame.
 void LayersOpen(const Result &Asked, const AskFrom &From, const DisplayLayerOpenRequest &Request,
-                const ConsoleModel &Model, DisplayGlassKind Glass) noexcept;
+                const ConsoleModel &Model, DisplayGlassKind Glass, std::uint8_t Mosaics) noexcept;
 
 // DISP_CMD_LAYER_FRAME and _CLOSE from `Requester`; they answer nothing. True
 // when the picture changed.
