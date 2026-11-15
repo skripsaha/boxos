@@ -24,12 +24,10 @@
  * allocation at the aligned address. Sub-2 MiB allocations stay on the
  * existing 4 KiB demand-paging path.
  *
- * The pre-fault syscall mirrors src/kernel/core/decks/system/system_deck.h
- * SYSTEM_OP_HEAP_PREFAULT and the handler in bay_ops.c. */
+ * The pre-fault is SYSTEM_OP_HEAP_PREFAULT (boxos_decks.h), answered by
+ * SysHeapPrefault in bay_ops.c. */
 #include "boxos_sizes.h"
 #include "boxos_decks.h"
-
-#define HEAP_OP_PREFAULT         0x14u
 #define HEAP_HUGE_THRESHOLD      LARGE_PAGE_2M_SIZE
 #define HEAP_HUGE_MASK           LARGE_PAGE_2M_MASK
 
@@ -268,7 +266,7 @@ static int prefault_huge(uintptr_t va_base, uint64_t size_2m_aligned) {
     uint64_t va64 = (uint64_t)va_base;
     memcpy(params,     &va64,           sizeof(uint64_t));
     memcpy(params + 8, &size_2m_aligned, sizeof(uint64_t));
-    return MfCall1(DECK_SYSTEM, HEAP_OP_PREFAULT,
+    return MfCall1(DECK_SYSTEM, SYSTEM_OP_HEAP_PREFAULT,
                    params, sizeof(params),
                    NULL, 0, NULL, 0, NULL,
                    BOX_ANSWER_GUARANTEED, NULL);
