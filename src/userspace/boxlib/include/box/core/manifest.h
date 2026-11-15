@@ -34,9 +34,9 @@ extern "C" {
  *   ManifestBuilder mb;
  *   ManifestBuilderInit(&mb, mbuf, sizeof(mbuf));
  *   uint8_t fill_byte = 0xAA;
- *   ManifestBuilderAddOp(&mb, DECK_OPERATIONS, 0x02, 0,
+ *   ManifestBuilderAddOp(&mb, DECK_OPERATIONS, OP_BUF_FILL, 0,
  *                        CRATE_INDEX_NONE, 0, &fill_byte, 1);
- *   ManifestBuilderAddOp(&mb, DECK_OPERATIONS, 0x01, 0, 0, 1, NULL, 0);
+ *   ManifestBuilderAddOp(&mb, DECK_OPERATIONS, OP_BUF_MOVE, 0, 0, 1, NULL, 0);
  *   ManifestBuilderFinalize(&mb);
  *
  *   Crate crates[2];

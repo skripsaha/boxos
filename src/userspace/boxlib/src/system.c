@@ -29,10 +29,10 @@
 #define EFI_INFO_BLOB_SIZE       128u
 #define EFI_VERIFY_PE_OUT_SIZE   80u
 #define EFI_ESRT_ENTRY_SIZE      40u
-#define SYS_TAG_ADD     0x20
-#define SYS_TAG_REMOVE  0x21
-#define SYS_TAG_CHECK   0x22
-#define SYS_PERF_DUMP   0x50
+#define SYS_TAG_ADD     SYSTEM_OP_TAG_ADD
+#define SYS_TAG_REMOVE  SYSTEM_OP_TAG_REMOVE
+#define SYS_TAG_CHECK   SYSTEM_OP_TAG_CHECK
+#define SYS_PERF_DUMP   SYSTEM_OP_PERF_DUMP
 
 /* Upper bound on a caller-supplied tag augment for proc_exec_tagged: the
  * augment rides in the op's params, and MfCall1 carries at most 256 bytes of

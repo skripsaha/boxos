@@ -48,7 +48,6 @@
 #define QUILL_TURNS_MAX      16u        /* floods a board has room for */
 #define QUILL_TURNS_MIB_MAX  128u       /* the largest write beside them, in MiB */
 #define QUILL_TURNS_SEED     0x7E5u
-#define QUILL_TURNS_TIMER    0x11       /* the hardware deck's milliseconds, as time.c names it */
 
 /* What every flood has had answered, each in its own slot. */
 typedef struct {
@@ -75,7 +74,7 @@ QuillVerdict QuillFlood(const char *const *args)
         board = bay_open(QUILL_TURNS_BOARD, 0, BAY_OPEN);
     CrateSetOutput(&g_flood_crate, &g_flood_ms, sizeof(g_flood_ms));
     bool made = ManifestBuilderInit(&mb, g_flood_manifest, sizeof(g_flood_manifest)) == 0 &&
-                ManifestBuilderAddOp(&mb, DECK_HARDWARE, QUILL_TURNS_TIMER, 0, CRATE_INDEX_NONE,
+                ManifestBuilderAddOp(&mb, DECK_HARDWARE, HW_TIMER_GET_MS, 0, CRATE_INDEX_NONE,
                                      0, NULL, 0) == 0 &&
                 ManifestBuilderFinalize(&mb) == 0;
     if (!board || !made) {

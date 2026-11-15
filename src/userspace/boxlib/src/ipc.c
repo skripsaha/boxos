@@ -46,10 +46,10 @@ int send(uint32_t target_pid, const void* data, uint16_t size) {
     Crate c;
     if (data && size > 0) {
         CrateSetInput(&c, (void *)data, size);
-        return ipc_submit_one_op(0x40 /* ROUTE */, 0,
+        return ipc_submit_one_op(SYSTEM_OP_ROUTE, 0,
                                  NULL, 0, &c, 1, target_pid, 0 /* no deadline — reply guaranteed */);
     }
-    return ipc_submit_one_op(0x40, CRATE_INDEX_NONE,
+    return ipc_submit_one_op(SYSTEM_OP_ROUTE, CRATE_INDEX_NONE,
                              NULL, 0, NULL, 0, target_pid, 0 /* no deadline — reply guaranteed */);
 }
 
@@ -67,11 +67,11 @@ int broadcast(const char* tag, const void* data, uint16_t size) {
     Crate c;
     if (data && size > 0) {
         CrateSetInput(&c, (void *)data, size);
-        return ipc_submit_one_op(0x41 /* BROADCAST */, 0,
+        return ipc_submit_one_op(SYSTEM_OP_ROUTE_TAG, 0,
                                  tag, (uint16_t)(tlen + 1),
                                  &c, 1, 0, 0 /* no deadline — reply guaranteed */);
     }
-    return ipc_submit_one_op(0x41, CRATE_INDEX_NONE,
+    return ipc_submit_one_op(SYSTEM_OP_ROUTE_TAG, CRATE_INDEX_NONE,
                              tag, (uint16_t)(tlen + 1),
                              NULL, 0, 0, 0 /* no deadline — reply guaranteed */);
 }
