@@ -104,6 +104,8 @@ _Static_assert(sizeof(BoardingStampHeader) == 4, "a stamp header is 4 bytes — 
 #define BOARDING_STAMP_MEDIUM  2    /* BoardingMedium */
 #define BOARDING_STAMP_LOADER  3    /* BoardingLoader */
 #define BOARDING_STAMP_SEAL    4    /* BoardingSeal — always the last one */
+#define BOARDING_STAMP_JOURNAL 5    /* BoardingJournal */
+#define BOARDING_STAMP_MOMENTS 6    /* BoardingMoment, as many as were marked */
 
 /*
  * The volume this kernel was read out of, by the identity the filesystem keeps
@@ -176,5 +178,42 @@ typedef struct __attribute__((packed)) {
 } BoardingSeal;
 
 _Static_assert(sizeof(BoardingSeal) == 4, "a seal stamp is 4 bytes — stage2 BOARDING_SEAL_BYTES");
+
+/*
+ * The loader's journal — every line it said, kept instead of printed.
+ *
+ * A loader that boots quietly still has things to say, and the place they are
+ * worth reading is the kernel's log, beside everything that follows them. So
+ * the loader keeps its lines in its own memory and names it here; the kernel
+ * puts them into its log ring before it manages memory at all
+ * (BoardingPassTake), which is what makes the loader's own pages a safe place
+ * for them: nothing can be handed those pages before they are read. Below
+ * 4 GB, in the loader's identity map. The text is as said, '\n' ending a
+ * line; `lost` counts what was said past the room the loader had.
+ */
+typedef struct __attribute__((packed)) {
+    uint64_t addr;              /* physical address of the text */
+    uint32_t bytes;             /* how much of it there is */
+    uint32_t lost;              /* bytes said past its room, not kept */
+} BoardingJournal;
+
+_Static_assert(sizeof(BoardingJournal) == 16, "a journal stamp is 16 bytes");
+
+/*
+ * One moment of the loader's journey: a step, in the loader's own word, and
+ * the processor's time-stamp counter as the step was reached. The stamp holds
+ * as many as were marked, in the order they were — its length says how many.
+ * The step is a word rather than a number so that a loader which learns to
+ * mark a new step needs no kernel taught about it: whoever shows the journey
+ * shows the words it was given.
+ */
+#define BOARDING_MOMENT_WORD 8
+
+typedef struct __attribute__((packed)) {
+    char     what[BOARDING_MOMENT_WORD];    /* NUL-padded, not necessarily NUL-terminated */
+    uint64_t tsc;
+} BoardingMoment;
+
+_Static_assert(sizeof(BoardingMoment) == 16, "a moment is 16 bytes — stage2 BOARDING_MOMENT_BYTES");
 
 #endif /* BOARDING_PASS_H */

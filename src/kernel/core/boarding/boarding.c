@@ -2,6 +2,7 @@
 #include "vmm.h"
 #include "klib.h"
 #include "crypto.h"
+#include "klib_logring.h"   /* the loader's journal goes into the ring */
 
 /*
  * The pass, once it has been believed.
@@ -17,6 +18,9 @@
  */
 static uint8_t  g_pass[BOARDING_PASS_BYTES];
 static bool     g_present = false;
+static unsigned g_stamps   = 0;      /* how many the pass carries */
+static bool     g_sealed   = false;  /* and whether its seal agreed */
+static uint32_t g_journal_taken = 0; /* bytes of the loader's journal put into the ring */
 
 static const BoardingPassHeader* pass_header(void)
 {
@@ -275,22 +279,92 @@ static void boarding_describe(unsigned stamps, bool sealed)
                 "will have to choose by rule\n");
     }
 
+    uint16_t jbytes = 0;
+    const BoardingJournal* j =
+        (const BoardingJournal*)BoardingPassStamp(BOARDING_STAMP_JOURNAL, &jbytes);
+    if (j && jbytes >= sizeof(BoardingJournal)) {
+        if (g_journal_taken)
+            kprintf("[Boarding]   it kept a journal of %u byte(s), and its lines open "
+                    "this log%s\n", g_journal_taken,
+                    j->lost ? "" : " whole");
+        if (j->lost)
+            kprintf("[Boarding]   %[W]%u byte(s) more were said than its journal had "
+                    "room for, and are not here%[D]\n", j->lost);
+    }
+
+    uint16_t mbytes = 0;
+    const BoardingMoment* m =
+        (const BoardingMoment*)BoardingPassStamp(BOARDING_STAMP_MOMENTS, &mbytes);
+    if (m && mbytes >= sizeof(BoardingMoment)) {
+        /* One line, so nothing lands inside it: the words, a space before each. */
+        char     words[(BOARDING_PASS_BYTES / sizeof(BoardingMoment)) * (BOARDING_MOMENT_WORD + 1u) + 1u];
+        unsigned n  = mbytes / sizeof(BoardingMoment);
+        size_t   at = 0;
+        for (unsigned i = 0; i < n; i++) {
+            words[at++] = ' ';
+            for (unsigned c = 0; c < BOARDING_MOMENT_WORD && m[i].what[c]; c++)
+                words[at++] = m[i].what[c];
+        }
+        words[at] = '\0';
+        kprintf("[Boarding]   it marked %u moment(s) of its journey:%s\n", n, words);
+    }
+
     /* Four lines that answer "which loader, off what, from where". Said once,
      * early, and the whole of the boot scrolls over them — which is why the
      * kernel keeps its own account of what it said (`make PRINTTOFILE=on`,
      * then `logsave`) instead of standing still to be photographed. */
 }
 
-void BoardingPassInit(void)
+/*
+ * The loader's journal into the log ring — its lines are the first account of
+ * this boot, and they go in before memory is managed at all: the journal lies
+ * in the loader's own pages, which the physical allocator would hand out as
+ * free once it is running. Below 4 GB, read through the identity map the
+ * loader left.
+ */
+static void BoardingJournalTake(void)
 {
-    const uint8_t* raw = (const uint8_t*)vmm_phys_to_virt(BOARDING_PASS_ADDR);
-    if (!raw) {
+    uint16_t bytes = 0;
+    const BoardingJournal* j =
+        (const BoardingJournal*)BoardingPassStamp(BOARDING_STAMP_JOURNAL, &bytes);
+    if (!j || bytes < sizeof(BoardingJournal) || j->bytes == 0) {
         return;
     }
 
-    unsigned stamps = 0;
-    bool     sealed = false;
-    if (!pass_is_sound(raw, &stamps, &sealed)) {
+    /* Half the ring at the most: a journal longer than that would push the
+     * kernel's own first lines out of it before anybody read them. */
+    uint32_t take = j->bytes;
+    if (take > LOGRING_CAPACITY / 2u) {
+        take = LOGRING_CAPACITY / 2u;
+    }
+    if (j->addr == 0 || j->addr + take > 0x100000000ull) {
+        kprintf("[Boarding] the loader's journal is said to lie at 0x%lx for %u "
+                "byte(s), past the 4 GB the loader mapped — not taken\n",
+                (unsigned long)j->addr, j->bytes);
+        return;
+    }
+
+    LogRingSay((const char*)vmm_phys_to_virt((uintptr_t)j->addr), take,
+               LOG_TONE_PLAIN, NULL, NULL);
+    g_journal_taken = take;
+}
+
+void BoardingPassTake(void)
+{
+    const uint8_t* raw = (const uint8_t*)vmm_phys_to_virt(BOARDING_PASS_ADDR);
+    if (!raw || !pass_is_sound(raw, &g_stamps, &g_sealed)) {
+        g_present = false;
+        return;
+    }
+
+    memcpy(g_pass, raw, ((const BoardingPassHeader*)raw)->used_bytes);
+    g_present = true;
+    BoardingJournalTake();
+}
+
+void BoardingPassSay(void)
+{
+    if (!g_present) {
         /*
          * No pass. Not an error and not silence either: the difference between
          * "the loader did not say" and "the loader said and nobody listened"
@@ -299,12 +373,8 @@ void BoardingPassInit(void)
          */
         kprintf("[Boarding] the loader left no pass — nothing to say which "
                 "volume this kernel came from\n");
-        g_present = false;
         return;
     }
 
-    memcpy(g_pass, raw, ((const BoardingPassHeader*)raw)->used_bytes);
-    g_present = true;
-
-    boarding_describe(stamps, sealed);
+    boarding_describe(g_stamps, g_sealed);
 }

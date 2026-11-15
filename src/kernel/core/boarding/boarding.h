@@ -20,9 +20,14 @@
  * Boardroom is a rule it prints while it applies it.
  */
 
-/* Look at the block once, decide whether it is a pass, and say what is on it.
- * Called early, before anything asks. */
-void BoardingPassInit(void);
+/* Look at the block once, decide whether it is a pass, copy it, and put the
+ * loader's journal into the log ring. Called first of all — before memory is
+ * managed, because the journal lies in the loader's own pages — and before
+ * anything asks. */
+void BoardingPassTake(void);
+
+/* Say what is on the pass, or that there is none. */
+void BoardingPassSay(void);
 
 /* Did a loader leave one. */
 bool BoardingPassPresent(void);

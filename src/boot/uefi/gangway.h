@@ -48,14 +48,18 @@ uint32_t Le32(const uint8_t *p);
 uint64_t Le64(const uint8_t *p);
 
 /* gangway_console.c: COM1 by the loader's own port writes — the voice before
- * the firmware's console is reached and after ExitBootServices takes it — and
- * the firmware's console in between. Panic says why and stops the machine. */
+ * anything else is reached and after ExitBootServices — and the journal every
+ * Print goes into instead of the screen. Panic shows the journal and why on
+ * the firmware's console and stops the machine. */
 void Com1Init(void);
 void Com1Str(const char *s);
 void Print(const char *msg);
 void PrintDec(uint64_t v);
 void PrintHex64(uint64_t v);
 void Panic(const char *msg) __attribute__((noreturn));
+/* The journal — what was said, kept: its text, how much of it, and how much
+ * more was said than it had room for. */
+const char *JournalText(uint32_t *bytes, uint32_t *lost);
 
 /*
  * gangway_firmware.c: the firmware's tables, captured at entry
@@ -155,8 +159,11 @@ extern uint64_t g_stack_base;
 void       CheckEfiLoadAddress(void);
 EFI_STATUS SetupPageTables(uint64_t kernel_phys_end);
 
-/* gangway_handoff.c: boot_info at BOOT_INFO_ADDR, the Boarding Pass at
- * BOARDING_PASS_ADDR, and the jump. */
+/* gangway_handoff.c: boot_info at BOOT_INFO_ADDR; a step of the journey
+ * marked as it is reached (Moment, a word of up to eight letters); the
+ * Boarding Pass at BOARDING_PASS_ADDR, written after ExitBootServices so the
+ * journal it names is whole; and the jump. */
+void Moment(const char *what);
 void FillBootInfo(const FbInfo *fb, uint32_t e820_count, uint64_t kernel_end_phys);
 void WriteBoardingPass(void);
 void JumpToKernel(uint64_t pt_base) __attribute__((noreturn));

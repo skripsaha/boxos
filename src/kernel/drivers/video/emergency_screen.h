@@ -27,6 +27,13 @@ void EmergencyScreenUseText(uint32_t cols, uint32_t rows);
 void EmergencyScreenUsePixels(volatile uint8_t *pixels, uint32_t width,
                               uint32_t height, uint32_t stride, uint32_t format);
 
+/* A quiet boot: nothing is drawn — the glass keeps what the firmware left on
+ * it, its logo on a desk machine — until the display program claims it, and
+ * the tail is shown at once instead when the ring says anything in the error
+ * tone (Follow looks), on a panic, or when the screen is shown outright
+ * (screen.c, ScreenQuietEnds). Never a timer: only something said. */
+void EmergencyScreenAwait(void);
+
 /* Take the glass: clear it and draw the ring's tail; from now on Follow draws. */
 void EmergencyScreenShow(void);
 

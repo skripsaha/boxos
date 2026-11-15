@@ -198,6 +198,8 @@ static void WatchdogStop(void)
  */
 EFI_STATUS EFIAPI GangwayMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
 {
+    Moment("entry");
+
     /* Raw COM1 byte BEFORE touching any UEFI pointer — confirms we were called. */
     Com1Init();
     Com1Str("\r\n[GANGWAY] Entry reached\r\n");
@@ -207,7 +209,8 @@ EFI_STATUS EFIAPI GangwayMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     g_image_handle = image_handle;
     FirmwareTablesTake(st);
 
-    st->con_out->clear_screen(st->con_out);
+    /* The screen is left as the firmware left it — its logo, on a desk
+     * machine — until the display program takes it; this is the journal's. */
     Print("Gangway — BoxOS UEFI Bootloader\r\n");
     Print("------------------------------------\r\n");
     FirmwareTablesSay(st);
@@ -222,14 +225,18 @@ EFI_STATUS EFIAPI GangwayMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     Print("Gangway: locating disk...\r\n");
     if (EFI_ERROR(BlockIoFindDevice(image_handle)))
         Panic("no medium carries a book this loader can boot");
+    Moment("medium");
 
     uint64_t kernel_end_phys = KernelTake();
+    Moment("kernel");
 
     FbInfo fb = QueryGopFramebuffer();
+    Moment("screen");
 
     Print("Gangway: building memory map...\r\n");
     uint32_t e820_count = 0;
     if (EFI_ERROR(BuildMemoryMap(&e820_count))) Panic("failed to get UEFI memory map");
+    Moment("memory");
 
     /* Before CR3 is switched: the loader must lie inside the identity map. */
     CheckEfiLoadAddress();
@@ -238,10 +245,10 @@ EFI_STATUS EFIAPI GangwayMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     if (EFI_ERROR(SetupPageTables(kernel_end_phys))) Panic("page table setup failed");
 
     EsrtKeep();
+    Moment("tables");
 
     /* boot_info carries the RSDP and the ESRT copy, so it is filled before EBS. */
     FillBootInfo(&fb, e820_count, kernel_end_phys);
-    WriteBoardingPass();
     Print("Gangway: boot_info at 0xA000 (method=UEFI)\r\n");
 
     WatchdogStop();
@@ -249,9 +256,12 @@ EFI_STATUS EFIAPI GangwayMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     if (EFI_ERROR(DoExitBootServices(image_handle)))
         Panic("ExitBootServices failed after 10 attempts");
 
-    /* From here: no UEFI services, no Print(). Pure bare metal. boot_info is
-     * patched with the FINAL EFI memory map — the one whose key
-     * ExitBootServices accepted. */
+    /* From here: no UEFI services, and nothing more for the journal. Pure
+     * bare metal. boot_info is patched with the FINAL EFI memory map — the
+     * one whose key ExitBootServices accepted — and the Boarding Pass is
+     * written, naming the journal now that it is whole. */
     PostEbsPatchBootInfo();
+    Moment("leave");
+    WriteBoardingPass();
     JumpToKernel(g_pt_base);
 }

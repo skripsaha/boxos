@@ -1074,6 +1074,11 @@ run_healthy() {
     grep -q "BoxOS Hub" "$L"; chk $? "boot reaches the shell"
     typed_ok "$L"; chk $? "and answers a keystroke"
 
+    # The BIOS road marks its journey too: when stage2 began and when it let
+    # go, on the pass (boarding_pass.h, BoardingMoment).
+    grep -q "\[Boarding\]   it marked 2 moment(s) of its journey: entry leave" "$L"
+    chk $? "the BIOS loader marked when it began and when it let go"
+
     # ‼ THE MOUNT FINISHED, WHICH IS NOT WHAT ANY OTHER LINE HERE SAYS.
     #
     # Everything TagFS prints while mounting — the deed, the far copy, the
@@ -1180,8 +1185,8 @@ run_healthy() {
     # its magic looked right — which a block half-overwritten by firmware also
     # manages. Both loaders seal it now; the kernel says which of the two
     # things it has: a block that adds up, or a block it had to take on trust.
-    grep -q "the loader left a pass with 4 stamp(s)" "$L"
-    chk $? "the pass carries its seal as well as its three facts"
+    grep -q "the loader left a pass with 5 stamp(s)" "$L"
+    chk $? "the pass carries its seal as well as its four facts"
     grep -q "sealed, and the seal agrees" "$L"
     chk $? "and the block adds up to what the loader sealed it with"
 
@@ -1293,6 +1298,24 @@ run_uefi() {
     # same block and the same kernel check.
     grep -q "sealed, and the seal agrees" "$L"
     chk $? "the pass Gangway wrote adds up too"
+
+    # ── Gangway boots quietly, and nothing it said is lost ─────────────────
+    #
+    # Its lines go into its journal, not onto the firmware's console; the
+    # kernel puts the journal into its log ring before it manages memory —
+    # after the line that names the kernel, before the kernel's own first one
+    # (boarding.c, BoardingPassTake) — so the loader's lines open the log on
+    # the wire, once each: a line said on the firmware's console as well would
+    # reach the wire twice, through OVMF's mirror and through the ring.
+    awk '/^\[BuildPlate\]/{b=1} b&&/^Gangway: kernel header OK/{g=1} g&&/^ Cabin \(/{print "in order"; exit}' "$L" |
+        grep -q "in order"
+    chk $? "Gangway's journal opens the log, after the build plate and before the kernel"
+    [ "$(grep -c '^Gangway: kernel header OK' "$L")" = 1 ]
+    chk $? "and each of its lines is said once — none on the firmware's console"
+    grep -qE "\[Boarding\]   it kept a journal of [0-9]+ byte\(s\), and its lines open this log whole" "$L"
+    chk $? "the kernel took the journal whole"
+    grep -q "\[Boarding\]   it marked 7 moment(s) of its journey: entry medium kernel screen memory tables leave" "$L"
+    chk $? "and Gangway marked every step of its journey"
 }
 
 # Does the medium actually carry this text? Read off the image rather than

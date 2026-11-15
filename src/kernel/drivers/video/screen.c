@@ -187,8 +187,15 @@ void ScreenInit(void)
 
     console_lock_acquire();
     EmergencyScreenUseText(SCREEN_TEXT_COLS, SCREEN_TEXT_ROWS);
-    EmergencyScreenShow();
+    EmergencyScreenAwait();
     console_lock_release();
+}
+
+void ScreenQuietEnds(void)
+{
+    spin_lock(&s_screen_turn);
+    if (!g_holder.cabin) EmergencyShow();
+    spin_unlock(&s_screen_turn);
 }
 
 void ScreenAdoptFramebuffer(uint64_t phys, uint32_t width, uint32_t height,
@@ -382,7 +389,11 @@ static void ScreenSwapKnocked(void *ctx)
 
     uint32_t event = 0;
     spin_lock(&s_screen_turn);
-    if (g_holder.cabin) {
+    if (!g_holder.cabin) {
+        /* Nobody holds the glass: a quiet boot a person wants to look behind,
+         * or the log already on it — either way, the log. */
+        EmergencyShow();
+    } else {
         ScreenWindow w = ScreenWindowOf();
         bool turned;
         if (!g_holder.away) {

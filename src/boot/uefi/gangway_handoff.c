@@ -18,6 +18,38 @@
  * This loader knows the answer: it has the volume's Deed in hand.
  * ========================================================================= */
 
+/* =========================================================================
+ * The journey's moments (boarding_pass.h, BoardingMoment)
+ *
+ * A step marked as it is reached, by the time-stamp counter — the clock every
+ * x86-64 core has from power-on, read with no firmware call, so the first
+ * moment also says how long the firmware took before this loader ran. The
+ * kernel counts on in the same ticks, which is what lets one line be drawn
+ * from power-on to a shell.
+ * ========================================================================= */
+
+/* The loader marks seven steps; the pass has room for some twenty-five. */
+#define MOMENTS_MAX 16u
+
+static BoardingMoment g_moments[MOMENTS_MAX];
+static uint16_t       g_moment_count = 0;
+
+static uint64_t Tsc(void)
+{
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+void Moment(const char *what)
+{
+    if (g_moment_count >= MOMENTS_MAX) return;
+    BoardingMoment *m = &g_moments[g_moment_count++];
+    MemZero(m->what, sizeof(m->what));
+    for (unsigned i = 0; i < BOARDING_MOMENT_WORD && what[i]; i++) m->what[i] = what[i];
+    m->tsc = Tsc();
+}
+
 /* Append one stamp. The kind and the length go down first, then the payload,
  * then the write cursor moves to the next four-byte boundary — which is the
  * whole of what lets a kernel walk a pass carrying stamps it has never been
@@ -60,6 +92,20 @@ void WriteBoardingPass(void)
      * it. */
     BoardingLoader loader = { { 'G','a','n','g','w','a','y',0,0,0,0,0 } };
     at = BoardingStamp(base, at, BOARDING_STAMP_LOADER, &loader, sizeof(loader));
+    count++;
+
+    /* What it said, kept rather than printed (gangway_console.c) — written
+     * after ExitBootServices, so the journal is whole: nothing is said past
+     * this but the one COM1 line a cut memory map earns. */
+    uint32_t said = 0, lost = 0;
+    const char *text = JournalText(&said, &lost);
+    BoardingJournal journal = { (uint64_t)(uintptr_t)text, said, lost };
+    at = BoardingStamp(base, at, BOARDING_STAMP_JOURNAL, &journal, sizeof(journal));
+    count++;
+
+    /* And when each step of the journey was reached. */
+    at = BoardingStamp(base, at, BOARDING_STAMP_MOMENTS, g_moments,
+                       (uint16_t)(g_moment_count * sizeof(BoardingMoment)));
     count++;
 
     /*

@@ -93,10 +93,13 @@ BOARDING_VOLUME_BYTES equ 16
 BOARDING_MEDIUM_BYTES equ 4
 BOARDING_LOADER_BYTES equ 12
 BOARDING_SEAL_BYTES   equ 4
+BOARDING_MOMENT_BYTES equ 16
+BOARDING_MOMENTS_BYTES equ 2 * BOARDING_MOMENT_BYTES   ; entry, leave
 BOARDING_STAMP_VOLUME equ 1
 BOARDING_STAMP_MEDIUM equ 2
 BOARDING_STAMP_LOADER equ 3
 BOARDING_STAMP_SEAL   equ 4
+BOARDING_STAMP_MOMENTS equ 6
 BOARDING_FIRMWARE_BIOS equ 0
 ; Where the four stamps go: one after another, every payload a whole number of
 ; four-byte words, so none is padded and each place is the sum of the sizes
@@ -104,7 +107,8 @@ BOARDING_FIRMWARE_BIOS equ 0
 BOARDING_AT_VOLUME    equ BOARDING_HDR_BYTES
 BOARDING_AT_MEDIUM    equ BOARDING_AT_VOLUME + BOARDING_STAMP_HDR + BOARDING_VOLUME_BYTES
 BOARDING_AT_LOADER    equ BOARDING_AT_MEDIUM + BOARDING_STAMP_HDR + BOARDING_MEDIUM_BYTES
-BOARDING_AT_SEAL      equ BOARDING_AT_LOADER + BOARDING_STAMP_HDR + BOARDING_LOADER_BYTES
+BOARDING_AT_MOMENTS   equ BOARDING_AT_LOADER + BOARDING_STAMP_HDR + BOARDING_LOADER_BYTES
+BOARDING_AT_SEAL      equ BOARDING_AT_MOMENTS + BOARDING_STAMP_HDR + BOARDING_MOMENTS_BYTES
 BOARDING_USED_BYTES   equ BOARDING_AT_SEAL + BOARDING_STAMP_HDR + BOARDING_SEAL_BYTES
 ; ---------------------------------------------------------------------------
 ; The Deed, by offset.
@@ -246,7 +250,16 @@ start_stage2:
     mov ss, ax
     mov sp, 0x7000      ; safe stack: below stage1 (0x7C00), above E820 data (~0x1104)
 
-    ; Force VGA text mode 3 (80x25 color) before any output.
+    ; The first moment of the journey: the time-stamp counter as this loader
+    ; begins (boarding_pass.h, BoardingMoment) — it counts from power-on, so
+    ; it also says how long the firmware took to get here.
+    rdtsc
+    mov [tsc_at_entry], eax
+    mov [tsc_at_entry+4], edx
+
+    ; Force VGA text mode 3 (80x25 color), so the screen is in a known state
+    ; for the kernel — and for the errors this loader says, the only lines it
+    ; puts on it.
     ; On real hardware, BIOS does not guarantee a known video state at boot.
     ; INT 10h also re-initialises the cursor, clears the screen — deterministic start.
     mov ax, 0x0003
@@ -254,8 +267,6 @@ start_stage2:
 
     sti
 
-    mov si, msg_stage2_start
-    call print_string_16
 
     call enable_a20_enhanced
     call enter_unreal_mode
@@ -264,8 +275,6 @@ start_stage2:
     call validate_kernel_magic
     call check_long_mode_support
 
-    mov si, msg_entering_protected
-    call print_string_16
 
     cli
 
@@ -525,7 +534,7 @@ write_boarding_pass:
     mov word  [BOARDING_PASS_ADDR+4],   BOARDING_HDR_BYTES      ; +4  header_bytes
     mov word  [BOARDING_PASS_ADDR+6],   BOARDING_USED_BYTES     ; +6  used_bytes
     mov word  [BOARDING_PASS_ADDR+8],   BOARDING_PASS_BYTES     ; +8  capacity
-    mov word  [BOARDING_PASS_ADDR+10],  4                       ; +10 count
+    mov word  [BOARDING_PASS_ADDR+10],  5                       ; +10 count
 
     ; Stamp 1: the volume, sixteen bytes out of its Deed.
     mov word  [BOARDING_PASS_ADDR+BOARDING_AT_VOLUME],    BOARDING_STAMP_VOLUME
@@ -556,8 +565,24 @@ write_boarding_pass:
     mov eax, [boarding_loader_name+8]
     mov [BOARDING_PASS_ADDR+BOARDING_AT_LOADER+12], eax
 
-    ; Stamp 4: the seal, and it is last because it covers everything ahead of
-    ; it — the header, the three stamps, and its own kind/length pair. The rule
+    ; Stamp 4: when this loader began and when it let go, by the time-stamp
+    ; counter (boarding_pass.h, BoardingMoment) — the kernel counts on in the
+    ; same ticks, which is what draws one line from power-on to a shell.
+    mov word  [BOARDING_PASS_ADDR+BOARDING_AT_MOMENTS],   BOARDING_STAMP_MOMENTS
+    mov word  [BOARDING_PASS_ADDR+BOARDING_AT_MOMENTS+2], BOARDING_MOMENTS_BYTES
+    mov rax, 'entry'
+    mov [BOARDING_PASS_ADDR+BOARDING_AT_MOMENTS+4], rax
+    mov rax, [tsc_at_entry]
+    mov [BOARDING_PASS_ADDR+BOARDING_AT_MOMENTS+12], rax
+    mov rax, 'leave'
+    mov [BOARDING_PASS_ADDR+BOARDING_AT_MOMENTS+20], rax
+    rdtsc
+    shl rdx, 32
+    or rax, rdx
+    mov [BOARDING_PASS_ADDR+BOARDING_AT_MOMENTS+28], rax
+
+    ; Stamp 5: the seal, and it is last because it covers everything ahead of
+    ; it — the header, the four stamps, and its own kind/length pair. The rule
     ; and the reasoning live in src/include/boarding_pass.h; what is here is
     ; the same CRC-32 (ISO 3309) the Deed and the GPT are checked with.
     ;
@@ -620,8 +645,6 @@ check_long_mode_support:
     test edx, (1 << 29)         ; LM bit
     jz .no_long_mode
 
-    mov si, msg_long_mode_ok
-    call print_string_16
 
     pop edx
     pop ecx
@@ -748,8 +771,6 @@ enable_a20_enhanced:
     call test_a20
     jc .a20_fatal
 
-    mov si, msg_a20_enabled
-    call print_string_16
     ret
 
 .a20_fatal:
@@ -860,7 +881,7 @@ A20_KBC_FF_READS        equ 32
 ; is set, and the first wait never returned; a chipset that answers 0x00 for
 ; an unclaimed port passed that wait and stopped in the second one, which
 ; waited for an output byte that was never coming. Either way the board sat
-; with the loader's first line as the last thing on its screen, and the
+; with nothing past the firmware's own words on its screen, and the
 ; '[FATAL] A20 enable failed' arm written for exactly that board was
 ; unreachable, because control never came back to reach it.
 ;
@@ -952,8 +973,6 @@ enter_unreal_mode:
 
     sti
 
-    mov si, msg_unreal_mode
-    call print_string_16
     ret
 
 ; =============================================================
@@ -990,8 +1009,6 @@ restore_unreal_mode:
     ret
 
 load_kernel_tagfs:
-    mov si, msg_loading_tagfs
-    call print_string_16
 
     ; The firmware told stage1 which handle to use, and stage1 passed it here
     ; unchanged. Now that reads go through INT 13h — the same interface the
@@ -1028,8 +1045,6 @@ load_kernel_tagfs:
     call tagfs_load_kernel_file
     jc .load_error
 
-    mov si, msg_kernel_loaded_tagfs
-    call print_string_16
     ret
 
 .ground_error:
@@ -1583,8 +1598,6 @@ read_deed:
     call validate_deed
     jc .fail
 
-    mov si, msg_deed_from_tail
-    call print_string_16
 
 .ok:
     clc
@@ -1997,8 +2010,6 @@ tagfs_load_kernel_file:
     ret
 
 detect_memory_e820:
-    mov si, msg_detecting_memory
-    call print_string_16
 
     mov ax, E820_SEG
     mov es, ax
@@ -2091,8 +2102,6 @@ detect_memory_e820:
     add ax, cx
     mov [E820_SIZE_ADDR], ax
 
-    mov si, msg_e820_success
-    call print_string_16
     ret
 
 .e820_fail:
@@ -2159,8 +2168,6 @@ detect_memory_e820:
     mov es, ax
     mov word [E820_COUNT_ADDR], 3
     mov word [E820_SIZE_ADDR], 72
-    mov si, msg_memory_fallback
-    call print_string_16
     ret
 
 .e801_done:
@@ -2168,8 +2175,6 @@ detect_memory_e820:
     mov es, ax
     mov word [E820_COUNT_ADDR], 2
     mov word [E820_SIZE_ADDR], 48
-    mov si, msg_memory_fallback
-    call print_string_16
     ret
 
     ; Last resort: INT 15h 0x88 — caps at 64MB, available on very old BIOSes.
@@ -2190,8 +2195,6 @@ detect_memory_e820:
     mov es, ax
     mov word [E820_COUNT_ADDR], 2
     mov word [E820_SIZE_ADDR], 48
-    mov si, msg_memory_fallback
-    call print_string_16
     ret
 
 .memory_fail:
@@ -2889,6 +2892,11 @@ boot_drive_saved:       db 0
 ; kernel can say which loader produced the image it is running.
 boarding_loader_name:   db 'Gangway', 0, 0, 0, 0, 0
 
+; The time-stamp counter as this loader began, for the boarding pass's first
+; moment; written in real mode at the top, read in long mode at the end.
+align 8
+tsc_at_entry:           dq 0
+
 align 4
 dynamic_pt_base:        dd 0            ; computed page table base (after kernel)
 dynamic_stack_base:     dd 0            ; computed stack base (after page tables)
@@ -2935,18 +2943,10 @@ kernel_load_sectors:    dd 0
 kernel_size_bytes:      dd 0            ; actual file size from TagFS metadata
 kernel_loaded_bytes:    dd 0            ; total bytes loaded (sectors * 512)
 
-msg_stage2_start      db 'Gangway (BIOS)', 13, 10, 0
-msg_a20_enabled       db '[OK] A20 line enabled', 13, 10, 0
 msg_a20_fatal         db '[FATAL] A20 enable failed — system halted', 13, 10, 0
-msg_detecting_memory  db 'Detecting memory (E820)...', 13, 10, 0
-msg_e820_success      db '[OK] E820 memory map created', 13, 10, 0
 msg_e820_fail         db '[WARN] E820 failed, using fallback', 13, 10, 0
-msg_memory_fallback   db '[OK] Fallback memory detection', 13, 10, 0
 msg_memory_error      db '[ERROR] Memory detection failed!', 13, 10, 0
-msg_unreal_mode       db '[OK] Unreal Mode (4GB addressing) active', 13, 10, 0
 msg_kernel_too_large  db '[ERROR] Kernel exceeds 32MB limit!', 13, 10, 0
-msg_loading_tagfs     db 'Finding the volume and loading its kernel...', 13, 10, 0
-msg_kernel_loaded_tagfs db '[OK] Kernel loaded to 0x100000 via Unreal Mode', 13, 10, 0
 msg_no_ground         db '[ERROR] This medium says nothing about where BoxOS lives', 13, 10, 0
 msg_no_table          db '[ERROR] No partition table on this medium', 13, 10, 0
 msg_no_boxos_partition db '[ERROR] A partition table with no BoxOS partition in it', 13, 10, 0
@@ -2962,7 +2962,6 @@ msg_gpt_too_long      db '[ERROR] That BoxOS partition is longer than this loade
 msg_ground_too_small  db '[ERROR] The BoxOS partition is too small to hold a deed', 13, 10, 0
 msg_no_deed           db '[ERROR] Neither copy of this volume deed can be read', 13, 10, 0
 msg_deed_head_bad     db '[WARN] The deed at the head is unreadable; trying the far end', 13, 10, 0
-msg_deed_from_tail    db '[OK] Read the deed from the far end of the volume', 13, 10, 0
 msg_deed_not_one      db '[ERROR] What is at this sector is not a deed', 13, 10, 0
 msg_deed_crc          db '[ERROR] The deed does not match its own checksum', 13, 10, 0
 msg_deed_role         db '[ERROR] The deed is the wrong end of the volume', 13, 10, 0
@@ -2970,10 +2969,8 @@ msg_kernel_not_found  db '[ERROR] This volume does not say where its kernel is',
 msg_kernel_load_error_pre db '[ERROR] Kernel file load failed!', 13, 10, 0
 msg_bios_status       db '        last BIOS disk status: 0x', 0
 msg_crlf              db 13, 10, 0
-msg_long_mode_ok      db '[OK] CPU supports 64-bit mode', 13, 10, 0
 msg_no_cpuid          db '[ERROR] CPUID not supported!', 13, 10, 0
 msg_no_long_mode      db '[ERROR] 64-bit mode not supported!', 13, 10, 0
-msg_entering_protected db 'Entering protected mode...', 13, 10, 0
 ; (page table validation now done dynamically in 32-bit mode via VGA "NO MEM" on failure)
 msg_kernel_bad_magic      db '[FATAL] Kernel header magic mismatch — corrupted load!', 13, 10, 0
 

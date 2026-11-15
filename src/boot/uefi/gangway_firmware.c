@@ -56,7 +56,7 @@ void FirmwareTablesTake(EFI_SYSTEM_TABLE *st)
     g_efi_cfg_table_count    = (uint32_t)cfg_count_raw;
 }
 
-/* What was captured, on the console. The firmware vendor string is a CHAR16*
+/* What was captured, in the journal. The firmware vendor string is a CHAR16*
  * in EfiRuntimeServicesData and survives EBS. Print as ASCII (best-effort
  * transliteration; high bytes are dropped). Lets operator see "American
  * Megatrends", "Insyde", "HP", "Apple", etc. without a debugger. */
@@ -65,10 +65,8 @@ void FirmwareTablesSay(EFI_SYSTEM_TABLE *st)
     if (st->firmware_vendor) {
         Print("Gangway: firmware vendor=");
         for (CHAR16 *v = st->firmware_vendor; *v; v++) {
-            CHAR16 ch[2];
-            ch[0] = (*v < 0x80) ? *v : (CHAR16)'?';
-            ch[1] = 0;
-            st->con_out->output_string(st->con_out, ch);
+            char ch[2] = { (*v < 0x80) ? (char)*v : '?', 0 };
+            Print(ch);
         }
         Print(" rev=");
         PrintHex64(g_efi_fw_revision);

@@ -107,6 +107,11 @@ void kernel_main(void)
      */
     BuildPlateSay();
 
+    /* The loader's journal next, while its pages are still nobody's to hand
+     * out: what brought this kernel here opens the log, after the line that
+     * names the kernel (boarding.h). */
+    BoardingPassTake();
+
     serial_init();
 
     kprintf(" Cabin (0x%lx Info, 0x%lx PocketRing, 0x%lx ResultRing, 0x%lx Code)\n",
@@ -284,7 +289,7 @@ void kernel_main(void)
      * block sits in memory the loaders own, below the first megabyte, and
      * because the Boardroom will want the answer long before there is a
      * filesystem to keep it in. */
-    BoardingPassInit();
+    BoardingPassSay();
 
     debug_printf("[INIT] MemTag...\n");
     error_t memtag_err = MemTagInit();
