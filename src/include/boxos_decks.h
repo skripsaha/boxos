@@ -342,7 +342,7 @@
 #define STORAGE_OBJ_CREATE          0x06
 #define STORAGE_OBJ_DELETE          0x07
 #define STORAGE_OBJ_RENAME          0x08
-/* obj.getinfo — params = [u64 fid]; out_crate = [u64 fid][u64 size][u16 tags]
+/* obj.getinfo — params = [u64 fid]; out_crate = [u64 fid][u64 size][u32 tags]
  * [u16 name_len][name][tag records]…[u64 kept_until]: the last eight bytes are
  * the time, in nanoseconds of the wall clock, at which the volume lets a
  * deleted file go (obj.keep), 0 for a file that is not deleted. */

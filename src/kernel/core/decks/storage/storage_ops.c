@@ -426,7 +426,7 @@ static int ObjRename(const ManifestOp *op,
  * Layout written into out_crate (little-endian):
  *   [u64 file_id]
  *   [u64 size]
- *   [u16 tag_count]
+ *   [u32 tag_count]      every tag the file wears: the book caps a file's tags at none
  *   [u16 filename_len]
  *   [char filename[filename_len]]
  *   for each tag:
@@ -491,9 +491,8 @@ static int ObjGetInfo(const ManifestOp *op,
         return ERR_FILE_NOT_FOUND;
     }
 
-    /* The answer's tag count is u16 on the wire; a record holds no more. */
-    uint16_t tag_count = (uint16_t)md.tag_count;
-    uint64_t need = 8u + 8u + 2u + 2u + filename_len + 8u;
+    uint32_t tag_count = md.tag_count;
+    uint64_t need = 8u + 8u + 4u + 2u + filename_len + 8u;
     for (uint32_t i = 0; i < tag_count; i++)
         need = info_tag_record(NULL, need, md.tag_ids[i]);
 
@@ -511,7 +510,7 @@ static int ObjGetInfo(const ManifestOp *op,
          * but one the volume's own word, the time a deleted file is kept until. */
         memcpy(kp + pos, &file_id,    8); pos += 8;   /* the id asked: the record's own */
         memcpy(kp + pos, &md.size,    8); pos += 8;
-        memcpy(kp + pos, &tag_count,  2); pos += 2;
+        memcpy(kp + pos, &tag_count,  4); pos += 4;
         memcpy(kp + pos, &filename_len, 2); pos += 2;
         if (filename_len) { memcpy(kp + pos, md.filename, filename_len); pos += filename_len; }
         for (uint32_t i = 0; i < tag_count; i++)
