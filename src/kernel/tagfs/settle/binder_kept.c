@@ -14,13 +14,12 @@
  * DIGESTS lies under a node it names as it lies. A Tally is written whole when there
  * is nothing known to lay it in against: the Foliation lost, or DogEar.
  *
- * ‼ ONE PASS FORWARD A LEVEL (spec_v2 §16.4 п.5, map tally §2). The nodes
- * named as they lie are kept in the order of tree and key, and a tree's walk
- * meets them in that order at every level: three cursors — the next one of the
- * level below for the level above, the first not behind the node being
- * filled, and at the leaves the first whose range ends past the last key —
- * only go forward, so a Tally of thousands of them looks at each a few times
- * a level, never once an element.
+ * ‼ ONE PASS FORWARD A LEVEL. The nodes named as they lie are kept in the
+ * order of tree and key, and a tree's walk meets them in that order at every
+ * level: three cursors — the next one of the level below for the level above,
+ * the first not behind the node being filled, and at the leaves the first
+ * whose range ends past the last key — only go forward, so a Tally of
+ * thousands of them looks at each a few times a level, never once an element.
  */
 
 // ----------------------------------------------------------------------------

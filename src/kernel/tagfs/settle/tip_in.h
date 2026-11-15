@@ -4,13 +4,12 @@
 #include "dog_ear.h"
 
 /*
- * TipIn — a Tally laid in among the nodes of the one before it (spec_v2 §4.1,
- * §4.3 TALLY_NODES, §16.5 п.16): the leaves whose keys changed laid anew, the
- * inner nodes above them, and every other node named as it lies — by the
- * pointer, the separator and the count the Tally before named it with. The
- * book keeps one rule of packing (§16.2 п.24): the nodes laid anew are packed
- * greedily between the ones named as they lie, as a whole Tally packs them
- * around a rotten node (§16.4 п.5).
+ * TipIn — a Tally laid in among the nodes of the one before it: the leaves
+ * whose keys changed laid anew, the inner nodes above them, and every other
+ * node named as it lies — by the pointer, the separator and the count the
+ * Tally before named it with. The book keeps one rule of packing (§16.2 п.24):
+ * the nodes laid anew are packed greedily between the ones named as they lie,
+ * as a whole Tally packs them around a rotten node (§16.4 п.5).
  *
  * TipInSift weighs one tree of the Tally before — its leaves in key order and
  * its inner nodes in any order, as Foliation keeps them — against the spans

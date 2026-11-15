@@ -6,16 +6,16 @@
 #include "../tag_registry/tag_registry.h"
 
 /*
- * ‼ THE NEXT TALLY BY WHAT THE LAST ONE TOOK (spec_v2 §16.4 п.7). A measure
- * from above of a whole Tally (endpaper.c) takes every item at its widest and
- * every pair of leaves at one room — six times what a Tally of empty files
- * lays — and the reserve keeps it once for the Tally and again for each slot
- * of the ring that holds less (BinderRingShort): metadata runs into the
- * reserve long before the ground runs out. So FILES, TAGS and DIGESTS — the
- * trees that grow with the files, their tags and their data — are measured by
- * the last Tally, counted to the block as it was laid (EndpaperLaid), and what
- * changed since, from above; USE, one item, stays measured as it stands. Each
- * tree's measure is the lesser of the two: both are bounds from above.
+ * ‼ THE NEXT TALLY BY WHAT THE LAST ONE TOOK. A measure from above of a whole
+ * Tally (endpaper.c) takes every item at its widest and every pair of leaves
+ * at one room — six times what a Tally of empty files lays — and the reserve
+ * keeps it once for the Tally and again for each slot of the ring that holds
+ * less (BinderRingShort): metadata runs into the reserve long before the
+ * ground runs out. So FILES, TAGS and DIGESTS — the trees that grow with the
+ * files, their tags and their data — are measured by the last Tally, counted
+ * to the block as it was laid (EndpaperLaid), and what changed since, from
+ * above; USE, one item, stays measured as it stands. Each tree's measure is
+ * the lesser of the two: both are bounds from above.
  *
  * ‼ WHY IT IS NEVER LESS THAN THE NEXT TALLY LAYS. Not because the leaves of
  * a tree change only where its items do: the packing is greedy (binder_nodes.c,

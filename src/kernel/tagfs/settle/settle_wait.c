@@ -133,12 +133,12 @@ bool SettleWaitersOwed(void)
 }
 
 /*
- * ‼ A BOOK'S WAITER IS ANSWERED BY A FLUSH OF ITS OWN MOUNT (X2-3, spec_v2
- * §3.5). What a mount read may have come from the medium's cache, after a warm
- * restart that took no power away: a book's waiter right after its mount —
- * `anchor` with nothing inked yet — is answered only once a stitch of this
- * mount settled under its kept flush, and the cadence runs that one, empty if
- * need be, at once (a waiter is a demand).
+ * ‼ A BOOK'S WAITER IS ANSWERED BY A FLUSH OF ITS OWN MOUNT (X2-3). What a
+ * mount read may have come from the medium's cache, after a warm restart that
+ * took no power away: a book's waiter right after its mount — `anchor` with
+ * nothing inked yet — is answered only once a stitch of this mount settled
+ * under its kept flush, and the cadence runs that one, empty if need be, at
+ * once (a waiter is a demand).
  */
 static bool SettleMountKept(void)
 {

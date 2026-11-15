@@ -5,7 +5,7 @@
 #include "../mount/ribbon.h"
 
 /*
- * The Settle cycle: a stitch on the book's ribbon a cycle (spec_v2 §2.7, §3.2).
+ * The Settle cycle: a stitch on the book's ribbon a cycle.
  *
  *   sewing.c    the cycle's steps — TAKE, BUILD, FIRST_FLUSH, STITCH,
  *               LAST_FLUSH, DONE — and the stitch they lay: a StitchHead
@@ -193,9 +193,9 @@ bool     RibbonCloseEarly(void);
 void     RibbonTallied(uint64_t tally, uint64_t taken);
 
 /*
- * ‼ WHAT THIS KERNEL LEFT ON THE RIBBON IS KEPT FOR THE MEDIUM'S RETURN (spec_v2
- * §3.8, §16.5 пп.11-12; ribbon_left.c). A medium that leaves and comes back is
- * held to it (mount/perambulation.c) before its book is taken up:
+ * ‼ WHAT THIS KERNEL LEFT ON THE RIBBON IS KEPT FOR THE MEDIUM'S RETURN
+ * (ribbon_left.c). A medium that leaves and comes back is held to it
+ * (mount/perambulation.c) before its book is taken up:
  *
  *   BookLeftMark   a stitch this kernel left on the ribbon past the slot it is
  *                  replayed over: where it lies, its seq, its Clasp and where

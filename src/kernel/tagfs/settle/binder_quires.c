@@ -1,14 +1,14 @@
 #include "binder_internal.h"
 
 /*
- * ‼ A SLOT HOLDS EVERY TALLY-QUIRE ITS TALLY NAMES A NODE IN (spec_v2 §16.5
- * п.17, Р-d3 (б)). A Tally laid in names the nodes of the Tally before as they
- * lie — each node it keeps, and every node under one — and those lie in
- * Quires the Tallies before it took: the slot that holds it holds each of
- * those Quires whole while it holds (binder_slots.c, SlotsHold), as a mount's
- * census does (mount/ground_census.c, GroundQuiresHeld), so the ring writing
- * over the slot that laid a node never gives back a Quire a Tally still names
- * a node in. Its own nodes are its own runs (binder_done.c, FreshFill).
+ * ‼ A SLOT HOLDS EVERY TALLY-QUIRE ITS TALLY NAMES A NODE IN. A Tally laid in
+ * names the nodes of the Tally before as they lie — each node it keeps, and
+ * every node under one — and those lie in Quires the Tallies before it took:
+ * the slot that holds it holds each of those Quires whole while it holds
+ * (binder_slots.c, SlotsHold), as a mount's census does
+ * (mount/ground_census.c, GroundQuiresHeld), so the ring writing over the slot
+ * that laid a node never gives back a Quire a Tally still names a node in. Its
+ * own nodes are its own runs (binder_done.c, FreshFill).
  *
  * Made at TAKE, once every node it names as it lies is known — the FILES ones
  * the mount found rotten, the ones TipIn keeps and the DIGESTS ones weighed a

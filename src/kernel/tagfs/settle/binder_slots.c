@@ -514,16 +514,16 @@ static bool SlotNames(const SlotGround* s, uint64_t start, uint64_t end)
 }
 
 /*
- * ‼ A TALLY-QUIRE IS HELD WHOLE WHILE ONE NODE IN IT LIVES (spec_v2 §16.5
- * п.17, Р-d3 (б)). The Binder takes its Tally-Quires whole on the grid of the
- * ribbon's Quire (binder.c TallyRunsTake), and every slot that holds counts
- * the nodes of its Tally — or of either, unsure — in each by its ground and
- * by the Quires its Tally names a node in as it lies (binder_quires.c): the
- * Quire goes back whole once no such count is left, the nodes there that no
- * Tally names any more and the tail no Tally reached with it (§4.8), resting
- * in Fallow for the lag (§3.4) — the same Quire a mount's census holds whole
- * (mount/ground_census.c GroundQuiresHeld). What of the current pair a Tally
- * may still be laid in stays the pair's.
+ * ‼ A TALLY-QUIRE IS HELD WHOLE WHILE ONE NODE IN IT LIVES. The Binder takes
+ * its Tally-Quires whole on the grid of the ribbon's Quire (binder.c
+ * TallyRunsTake), and every slot that holds counts the nodes of its Tally — or
+ * of either, unsure — in each by its ground and by the Quires its Tally names
+ * a node in as it lies (binder_quires.c): the Quire goes back whole once no
+ * such count is left, the nodes there that no Tally names any more and the
+ * tail no Tally reached with it (§4.8), resting in Fallow for the lag (§3.4) —
+ * the same Quire a mount's census holds whole (mount/ground_census.c
+ * GroundQuiresHeld). What of the current pair a Tally may still be laid in
+ * stays the pair's.
  */
 static bool SlotsHold(uint64_t start, uint64_t end)
 {

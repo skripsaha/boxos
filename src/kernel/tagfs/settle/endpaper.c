@@ -10,7 +10,7 @@
 
 /*
  * The book's reserve (sewing.h): what a whole Tally of the volume as memory
- * holds it would take, measured from above (spec_v2 §3.6, §16.2 п.6).
+ * holds it would take, measured from above.
  *
  * ‼ AN UPPER BOUND, BY THE RULES EVERY WRITER OF A TALLY KEEPS — never less
  * than the Tally a writer lays of the same mirror (§16.2 п.24, §16.3 пп.1, 5):

@@ -2,8 +2,8 @@
 #include "../mount/book_mount.h"
 
 /*
- * The copies of the leaves no Tally lays again, read (spec_v2 §16.5 п.18,
- * Р-e3 (б); §2.5 — the part of Self-Heal v2 carries).
+ * The copies of the leaves no Tally lays again, read — the part of Self-Heal
+ * the Binder carries.
  *
  * A mount reads a node's first copy and the second only when the first does
  * not hold, and a Tally laid in names a leaf nothing changed as it lies: a

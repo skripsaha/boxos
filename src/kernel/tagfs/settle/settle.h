@@ -5,7 +5,7 @@
 
 /*
  * Settle — the cycle that takes what was inked to the medium: one stitch on
- * the book's ribbon a cycle (sewing.h, spec_v2 §2.7, §3.2).
+ * the book's ribbon a cycle (sewing.h).
  *
  * One cycle at a time, held by the Settle's Scribe (g_settle_scribe, whose
  * holder is the committer), and no TagFS lock across the medium:

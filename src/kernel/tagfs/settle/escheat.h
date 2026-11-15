@@ -5,19 +5,19 @@
 #include "../mount/tally_read.h"
 
 /*
- * Escheat — the act that lets go what a format-v2 book can never give back
- * (spec_v2 §16.5 п.20, §2.5, §4.5 п.3 (б)). A FILES range no copy of whose node
- * reads locks its files and holds every block they may own, and nothing
- * automatic ever lets them go: a block named by nothing that reads may be the
- * locked file's, and a reader may yet save it (volume-read). Escheat is the
- * one explicit act that ends that: asked by a cabin wearing system or god
- * alone — the warrant the guard of a file the system keeps asks (ink.h) — it
- * is owed to the next Tally, which names none of the rotten nodes, carries
- * none of the files locked with them, and is written whole; at its DONE the
- * files of the ranges are lost, said, their ids never given again (next_fid
- * stands past them) and answering as no file's from then on, and the blocks
- * held for them — and only for them: a file locked for another reason keeps
- * its ground held — rest in Fallow for the lag and go back. Nothing new is written: the Tally is the act's whole record
+ * Escheat — the act that lets go what a book can never give back. A FILES
+ * range no copy of whose node reads locks its files and holds every block they
+ * may own, and nothing automatic ever lets them go: a block named by nothing
+ * that reads may be the locked file's, and a reader may yet save it
+ * (volume-read). Escheat is the one explicit act that ends that: asked by a
+ * cabin wearing system or god alone — the warrant the guard of a file the
+ * system keeps asks (ink.h) — it is owed to the next Tally, which names none
+ * of the rotten nodes, carries none of the files locked with them, and is
+ * written whole; at its DONE the files of the ranges are lost, said, their ids
+ * never given again (next_fid stands past them) and answering as no file's
+ * from then on, and the blocks held for them — and only for them: a file
+ * locked for another reason keeps its ground held — rest in Fallow for the lag
+ * and go back. Nothing new is written: the Tally is the act's whole record
  * (§16.5 п.20), and a reader takes a Tally that leaves out a range the slot
  * before named rotten (tools/volumeread/binder.py, _LetGo). Refused, the Tally
  * gives everything back and the next one owes it again.

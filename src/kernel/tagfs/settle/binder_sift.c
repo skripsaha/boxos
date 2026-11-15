@@ -2,10 +2,9 @@
 
 /*
  * TipIn's sifting of one tree of the Tally before (tip_in.h, TipInSift) at the
- * slice of a Tally laid in (binder_kept.c, BinderTipInTake; spec_v2 §4.3
- * TALLY_TAKE, §16.5 п.16): FILES, TAGS and USE out of the Foliation, DIGESTS
- * its inner nodes out of the Foliation and its leaves out of the reads' own
- * table (mount/tally_read.h).
+ * slice of a Tally laid in (binder_kept.c, BinderTipInTake): FILES, TAGS and
+ * USE out of the Foliation, DIGESTS its inner nodes out of the Foliation and
+ * its leaves out of the reads' own table (mount/tally_read.h).
  *
  * ‼ THE LEAVES SIFTED ARE THE CHILDREN OF A PARENT THAT CHANGED. A leaf a span
  * meets, and every leaf a row of them may take in as its margin, lies under a

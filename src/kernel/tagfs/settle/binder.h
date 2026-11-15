@@ -9,8 +9,7 @@
 #include "../../core/use_context/use_context.h"
 
 /*
- * The Binder — the kernel's writer of a format-v2 volume's Tally (spec_v2
- * §4.1–§4.4, §16.2 пп.4–6, 24, §16.3 пп.1–5, §16.4 п.5): the state of the book
+ * The Binder — the kernel's writer of a volume's Tally: the state of the book
  * after one settled stitch, every tree written whole in two copies, and the
  * Spine slot of the least seq made to name it.
  *

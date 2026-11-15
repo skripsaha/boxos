@@ -1,9 +1,9 @@
 #include "binder_internal.h"
 
 /*
- * DIGESTS laid in among the nodes of the Tally before (TipIn, spec_v2 §16.5
- * п.16): the leaves it lays anew and offers, the ground it speaks for in them,
- * and the reads' table its DONE turns the reads of a digest to.
+ * DIGESTS laid in among the nodes of the Tally before (TipIn): the leaves it
+ * lays anew and offers, the ground it speaks for in them, and the reads' table
+ * its DONE turns the reads of a digest to.
  *
  * ‼ THE GROUND OF A LEAF LAID IN IS ITS OLD ELEMENTS, LESS WHAT WENT, WITH WHAT
  * CAME (§4.3 TALLY_TAKE, H-5). A whole Tally's DIGESTS walks every run of
