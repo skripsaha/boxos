@@ -43,23 +43,15 @@
 #define TAGFS_TAG_FLAG_HAS_VALUE    0x01
 #define TAGFS_TAG_FLAG_SYSTEM       0x02
 
-// File flags
+// File flags — dense until the first release; from it on, a bit once given is
+// never given again.
 #define TAGFS_FILE_ACTIVE           (1 << 0)
 /* Rolled back by a mount's verdict (spec_v2 §2.8, Undone): its last write did
  * not land, and it stands as it stood before. The system's own word in the
  * file's record, put there by the Ink the verdict's first cycle makes
  * (mount/errata.h) — never a tag: a file's tags are its user's. */
-#define TAGFS_FILE_UNDONE           (1 << 4)
-/* Deleted, and kept until the time its record names (FileRecord.keep_until):
- * the volume's queries do not see it, and it can be brought back until then;
- * when the time passes the volume lets it go by itself, its blocks to Fallow
- * (keep/keep.h). Bit 7, after the role's two: put on by InkKeep and taken off
- * by InkRestore, never by a flag a caller names, and never a tag — what a
- * person calls the trash is the volume's word on the file, not a label he
- * wears. Bit 7 is the Labeled's KEEP verb in the ribbon and the header's
- * keep_ns in the Tally (volume_ribbon.h, volume_tally.h). */
-#define TAGFS_FILE_DELETED          (1 << 7)
-/* The file's ROLE — what the system keeps it as — is bits 5 and 6 of its
+#define TAGFS_FILE_UNDONE           (1 << 1)
+/* The file's ROLE — what the system keeps it as — is bits 2 and 3 of its
  * record's flags, a number of two bits: 0 an ordinary file, 1 a system file,
  * 2 a boot file, 3 the kernel. Set by the image builder (tools/
  * create_tagfs_cargo.c) as it lays the volume — the kernel is the file it is
@@ -75,16 +67,20 @@
  * A program started from a system file is started with the system's
  * authority (system_ops.c). The values stand in place: a role is
  * `flags & TAGFS_FILE_ROLE_MASK`, and the larger value is the first looked for. */
-#define TAGFS_FILE_ROLE_MASK        96
+#define TAGFS_FILE_ROLE_MASK        12
 #define TAGFS_FILE_ROLE_ORDINARY    0
-#define TAGFS_FILE_ROLE_SYSTEM      (1 << 5)
-#define TAGFS_FILE_ROLE_BOOT        (1 << 6)
-#define TAGFS_FILE_ROLE_KERNEL      96
-/* Bits 1 and 2 named trashed and hidden once, which were tags a file wore and
- * never bits of its record: no kernel set them, and none reads them (the trash
- * is bit 7 now, and no tag of a file says anything to the system). Bit 3 is
- * spent on v1: kernels before Quill step 1.1 took it for copy-on-write, so it
- * is never set and never trusted. */
+#define TAGFS_FILE_ROLE_SYSTEM      (1 << 2)
+#define TAGFS_FILE_ROLE_BOOT        (1 << 3)
+#define TAGFS_FILE_ROLE_KERNEL      12
+/* Deleted, and kept until the time its record names (FileRecord.keep_until):
+ * the volume's queries do not see it, and it can be brought back until then;
+ * when the time passes the volume lets it go by itself, its blocks to Fallow
+ * (keep/keep.h). Bit 4, after the role's two: put on by InkKeep and taken off
+ * by InkRestore, never by a flag a caller names, and never a tag — what a
+ * person calls the trash is the volume's word on the file, not a label he
+ * wears. The bit is what the ribbon's Labeled KEEP leaves and what puts the
+ * header's keep_ns in the Tally (volume_ribbon.h, volume_tally.h). */
+#define TAGFS_FILE_DELETED          (1 << 4)
 
 // Handle flags
 #define TAGFS_HANDLE_READ           (1 << 0)

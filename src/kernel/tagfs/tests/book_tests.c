@@ -401,7 +401,7 @@ out:
  * (volume_tally.h, TALLY_GOLDEN_NODE_CRC). */
 /* A bit of a header's flags no kernel names (tagfs_constants.h): the header
  * keeps it exactly as it was laid. */
-#define BOOK_TEST_LAID_BIT (1u << 2)
+#define BOOK_TEST_LAID_BIT (1u << 5)
 
 static const uint32_t g_golden_tags_one[3]   = { 3, 5, 300 };
 static const uint32_t g_golden_tags_three[1] = { 0 };
