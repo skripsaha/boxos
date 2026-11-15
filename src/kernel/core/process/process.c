@@ -1917,7 +1917,7 @@ void process_start_initial(process_t *proc)
 
     cet_load_user_ssp_for_iretq(proc);
 
-    jump_to_userspace(proc->context.rip, proc->context.rsp, proc->context.rflags);
+    jump_to_userspace(proc->context.rip, proc->context.rsp, proc->context.rflags, proc->context.user_fsbase);
 
     debug_printf("[PROCESS] PANIC: jump_to_userspace returned (should never happen)\n");
     while (1)

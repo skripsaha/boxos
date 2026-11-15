@@ -6,10 +6,11 @@
 
 global jump_to_userspace
 
-; void jump_to_userspace(uint64_t rip, uint64_t rsp, uint64_t rflags);
+; void jump_to_userspace(uint64_t rip, uint64_t rsp, uint64_t rflags, uint64_t fsbase);
 ; RDI = user RIP (entry point)
 ; RSI = user RSP (stack pointer)
 ; RDX = user RFLAGS
+; RCX = user FS base: the process's thread pointer, 0 when it keeps nothing per thread
 ;
 ; Builds the iretq frame on the CURRENT (kernel) stack and lets iretq pop
 ; it + atomically switch SS:RSP to the user values. Writing the frame to
@@ -53,6 +54,21 @@ jump_to_userspace:
     ; (per-cpu) is untouched by the selector load.
     swapgs
     mov gs, ax
+
+    ; The thread pointer goes in after the selectors: loading FS set its base
+    ; to the descriptor's 0. Every later entry to ring 3 is a dispatch, and a
+    ; dispatch installs it (context_switch.c); this one is not, and a process
+    ; it started kept the 0 — its first switch-out saved that 0 over the
+    ; loader's pointer, and its thread-local storage was gone for good.
+    ; WRMSR to IA32_FS_BASE works whether CR4.FSGSBASE is on or not.
+    mov r8, rdx             ; RFLAGS, for WRMSR takes EDX
+    mov r9, rcx
+    mov ecx, 0xC0000100     ; IA32_FS_BASE
+    mov eax, r9d
+    shr r9, 32
+    mov edx, r9d
+    wrmsr
+    mov rdx, r8
 
     ; Build iretq frame on the kernel stack (SMAP-safe).
     push GDT_USER_DATA   ; SS
