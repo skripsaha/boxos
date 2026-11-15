@@ -39,9 +39,15 @@ bool ItineraryFile(const volume::Record &File)
            (Head->back() == '\n' || Head->back() == '\r');
 }
 
-bool CommandFile(const volume::Record &File)
+// Whether File is a command — a program or an Itinerary: 1 or 0, told by its
+// first bytes; or the negative -error_t that kept them from being read, its
+// medium gone — a file that may well be a command, not one that is none.
+int CommandOf(const volume::Record &File)
 {
-    return ProgramFile(File) || ItineraryFile(File);
+    ProgramKind Kind = PROGRAM_NONE;
+    const int   Rc   = program_kind(File.Id(), &Kind);
+    if (Rc < 0) return Rc;
+    return Kind != PROGRAM_NONE || ItineraryFile(File) ? 1 : 0;
 }
 
 // One of Ids, asked for when there are several.
@@ -88,7 +94,7 @@ void EachCommand(const std::function<void(file_id_t, std::string_view)> &Visit)
     const int  Count = query_all_everywhere(nullptr, nullptr, &Ids);
     for (file_id_t File : volume::Taken(Ids, Count)) {
         const std::expected<volume::Record, int> Held = volume::Record::Of(File);
-        if (Held && !Held->Name().empty() && CommandFile(*Held)) Visit(File, Held->Name());
+        if (Held && !Held->Name().empty() && CommandOf(*Held) == 1) Visit(File, Held->Name());
     }
 }
 
@@ -108,7 +114,9 @@ Picked Pick(const Look &Shown, std::string_view Name)
             if (Unread == 0) Unread = Held.error();
             continue;
         }
-        if (CommandFile(*Held)) Commands.push_back(File);
+        const int Is = CommandOf(*Held);
+        if (Is < 0 && Unread == 0) Unread = Is;
+        if (Is == 1) Commands.push_back(File);
     }
     if (!Commands.empty()) return ChooseOne(Shown, Name, Commands);
     return std::unexpected(Unread != 0 ? Unread : -ERR_FILE_NOT_FOUND);
