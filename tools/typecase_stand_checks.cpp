@@ -358,6 +358,19 @@ void CheckSources(Tally &Count, const std::vector<std::uint8_t> &Bytes)
     Count.Check(Said && Within, "every character the font has, U+0020..U+04FF, drawn and kept within the cell and an em");
     Count.Check(!Face.Has(U'一') && !Face.Draw(U'一', Cell), "a character the font has not: not had, not drawn");
 
+    bool Sharp = true;
+    std::string Tops;
+    for (const std::int32_t Wide : {8, 10, 12, 16}) {
+        const typecase::Size At    = typecase::FitCell(Face.Of(), Wide, Wide * 2);
+        const float          Lower = Face.Of().Metrics().XHeight * At.Em / Face.Of().Metrics().UnitsPerEm;
+        const auto           Z     = Face.Draw(U'z', At);
+        const auto           Top   = std::max_element(Z->Coverage.begin(), Z->Coverage.begin() + Z->Width);
+        Sharp = Sharp && Z->Top == -static_cast<std::int32_t>(std::lround(Lower)) && *Top >= 250;
+        Tops += " " + std::to_string(Wide) + ":" + std::to_string(*Top);
+    }
+    Count.Check(Sharp, "the lowercase a whole number of pixels high: z's top row ends on its pixel edge, inked whole "
+                       "(the most of its first row, by cell width:" + Tops + ")");
+
     auto Bitmap = BoxFont();
     const typecase::Size Small{0, 8, 16, 12}, Large{0, 16, 32, 24}, Odd{0, 12, 24, 18};
     const auto A = Bitmap->Draw(U'A', Small), A2 = Bitmap->Draw(U'A', Large), A3 = Bitmap->Draw(U'A', Odd);
