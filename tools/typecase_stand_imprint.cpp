@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "boxos_glyph_fold.h"
 #include "boxos_symbols.h"
 #include "imprint_make.h"
 #include "typecase/chain.h"
@@ -91,6 +92,12 @@ void CheckImprint(Tally &Count, const std::vector<std::uint8_t> &Font)
     Count.Check(Kept, "the imprint holds, in order and once each, every character it is asked for that the chain "
                       "draws, and no other — Latin, Cyrillic, Greek, frames, blocks, arrows, U+FFFD, Duppo among them (" +
                           std::to_string(Of.Count) + ")");
+
+    bool Folded = BoxImprintFind(&Of, 0x203C) < Of.Count && BoxImprintFind(&Of, 0x221A) < Of.Count;
+    for (const BoxGlyphFold &Each : BoxGlyphFoldTable)
+        Folded = Folded && (!Chain.Has(Each.Codepoint) || BoxImprintFind(&Of, Each.Codepoint) < Of.Count);
+    Count.Check(Folded, "every character the text page folds to a glyph, and the chain draws, is in the imprint: a "
+                        "framebuffer shows no less than the text page — ‼ and √ among them");
 
     std::vector<typecase::Size> Cells;
     for (const std::int32_t Height : ImprintHeights) Cells.push_back(typecase::FitCell(*typecase::Font::Read(Font), Height));

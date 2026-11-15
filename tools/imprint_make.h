@@ -31,8 +31,9 @@ struct MadeImprint {
 
 /* What the imprint is asked to hold — what the system says: Latin, Greek and
  * Cyrillic, punctuation, arrows and a few signs, frames, blocks and shapes,
- * the replacement character, Duppo. A character the chain cannot draw is
- * left out, and drawn as the empty box. */
+ * the replacement character, Duppo, and every character the text page folds
+ * to a glyph (boxos_glyph_fold.h). A character the chain cannot draw is left
+ * out, and drawn as the empty box. In order of code, each once. */
 std::vector<char32_t> ImprintWanted();
 
 /* The imprint of the font Bytes are; why not, when they are no font. */

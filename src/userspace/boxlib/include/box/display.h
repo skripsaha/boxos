@@ -515,7 +515,8 @@ typedef enum {
 
 /* What the glass is, said in every answer to an open: a text page of 16
  * colours, or a framebuffer. Text is 80x25 cells of the page's own font; on
- * pixels a cell is the 8x16 font's. A program that draws with more than the
+ * pixels a cell is the display's typesetter's, sized by its settings. A
+ * program that draws with more than the
  * cell grid asks this, and does not guess it from the size. */
 typedef enum {
     DISPLAY_GLASS_TEXT   = 1,

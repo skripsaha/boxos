@@ -862,7 +862,7 @@ TYPECASE_FONTS = $(TYPECASE_DIR)/fonts/JetBrainsMonoNL-Regular.ttf $(TYPECASE_DI
 # makes it at every build from the font, so the font stays the one account of
 # how text looks, and nothing of it is kept in the tree. The tool is built for
 # the host from Typecase's very sources, as tools/typecase_stand.sh builds them.
-CXX_HOST       = c++
+CXX_HOST      ?= c++
 IMPRINT_FONT   = $(TYPECASE_DIR)/fonts/JetBrainsMonoNL-Regular.ttf
 IMPRINT_TOOL   = $(BUILDDIR)/imprint
 IMPRINT_DIR    = $(BUILDDIR)/imprint_data

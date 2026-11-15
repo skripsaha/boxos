@@ -3,11 +3,13 @@
 
 #include "imprint_make.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <format>
 #include <memory>
 #include <utility>
 
+#include "boxos_glyph_fold.h"
 #include "boxos_symbols.h"
 #include "typecase/chain.h"
 #include "typecase/code_box.h"
@@ -64,6 +66,11 @@ std::vector<char32_t> ImprintWanted()
     std::vector<char32_t> Wanted;
     for (const Range &Each : Ranges)
         for (char32_t Character = Each.First; Character <= Each.Last; Character++) Wanted.push_back(Character);
+    /* And every character the text page folds to a glyph of its own, so a
+     * framebuffer never shows less than the text page does (‼, √, ►...). */
+    for (const BoxGlyphFold &Each : BoxGlyphFoldTable) Wanted.push_back(static_cast<char32_t>(Each.Codepoint));
+    std::sort(Wanted.begin(), Wanted.end());
+    Wanted.erase(std::unique(Wanted.begin(), Wanted.end()), Wanted.end());
     return Wanted;
 }
 

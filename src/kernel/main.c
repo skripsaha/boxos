@@ -283,10 +283,10 @@ void kernel_main(void)
      * will ask about standing in front of the board — and because for three
      * years the same em dash came out of this kernel as three empty cells and
      * out of userspace as a '?'. */
-    kprintf("[SCREEN] one cell of this glass holds one CP437 glyph, so UTF-8 is folded "
-            "at the font and nowhere earlier — the log ring still keeps every byte it "
-            "was handed, and a character this font cannot draw appears as one solid box "
-            "rather than two or three wrong glyphs\n");
+    kprintf("[SCREEN] a cell of this glass holds one character: on a framebuffer drawn from "
+            "the imprint, one it lacks an empty box; on a text page folded to the adapter's "
+            "CP437 glyphs, one they lack a solid box — never two or three wrong glyphs, and "
+            "the log ring keeps every byte it was handed\n");
 
     /* The loader's account of its own journey — which volume this kernel was
      * read out of, off what medium, by which loader. Read here because the
