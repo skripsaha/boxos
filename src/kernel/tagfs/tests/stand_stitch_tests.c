@@ -8,6 +8,7 @@
 #include "../use_memory/use_memory.h"
 #include "../block_map/block_map_derived.h"
 #include "../ink/ink.h"
+#include "../ink/fallow.h"
 #include "use_context.h"
 #include "amp.h"
 #include "boardroom.h"
@@ -118,12 +119,18 @@ bool StandStitchContextBack(void)
     return ok;
 }
 
-/* The volume let go of — writing nothing — and mounted again on what its
- * medium holds: true when it came up. */
+/* The volume let go of — writing nothing, a caller on its way out waited out
+ * (StandRibbonLetGo) — and mounted again on what its medium holds: true when it
+ * came up. A caller still inside at the bound — another core's turn of a
+ * service — leaves it not let go of, and the runner's hold on its door is
+ * given back, so the put-back lets go of the hold the runner has, never of
+ * that caller's. */
 bool StandStitchRemount(void)
 {
-    if (tagfs_get_state()->initialized && !TagFSStandLetGo())
+    if (tagfs_get_state()->initialized && !StandRibbonLetGo(NULL)) {
+        TagFSStandHoldAgain();
         return false;
+    }
     return StandRibbonUp();
 }
 
@@ -674,10 +681,35 @@ out:
 // ground alone (§3.6, §16.2 п.6)
 // ----------------------------------------------------------------------------
 
+/*
+ * The free ground is cut only once nothing rests in Fallow. What the ribbon
+ * let go before the mount comes back once a stitch of this mount leaves the
+ * Quire the ribbon stands in (ink.c, InkMountFallow), and the words that run
+ * the ribbon out leave it: ground come back past the cut gave the ribbon its
+ * next_quire at the DONE of the very stitch the run-out was weighed by (the
+ * 453 blocks a first boot's tests left resting, on the second). So a word fills
+ * the rest of the Quire, the word none is said, and cycles settle until Fallow
+ * is empty — and the cut leaves a block less than a Quire past the reserve,
+ * measured with no word aboard: no next_quire is taken from it whatever word
+ * the volume holds, nor once it forgets the one it held for want of room.
+ */
+#define STAND_STITCH_FALLOW_CYCLES  8u    /* cycles that give back what rests in Fallow, at the most */
+
+/* The blocks resting in Fallow, read under the state lock. */
+static uint64_t StandStitchFallow(void)
+{
+    TagFSState* fs = tagfs_get_state();
+    TagFSLockTake(&fs->lock);
+    uint64_t blocks = FallowBlocks();
+    TagFSLockDrop(&fs->lock);
+    return blocks;
+}
+
 static TestResult TestStandStitchRibbonRunsOut(void)
 {
     TestResult               verdict = TEST_PASS;
     StandStitch              s;
+    RibbonCursor             now;
     static StandStitchWaiter waiter;
     TagFSState*              fs      = tagfs_get_state();
     bool                     kept    = false, held = false;
@@ -688,17 +720,28 @@ static TestResult TestStandStitchRibbonRunsOut(void)
     if (aside)
         return test_steps_aside(aside);
     memset(&waiter, 0, sizeof(waiter));
+    TEST_ASSERT(s.at.next.blocks, "the ribbon names its next_quire");
+    uint64_t left = s.at.quire.blocks * TAGFS_BLOCK_SECTORS - s.at.off;
+    TEST_ASSERT_OK(StandStitchSayFilling(left, 'r', 1, &kept),
+                   "a word whose stitch fills the rest of its Quire is laid down");
+    RibbonCursorStand(&now);
+    TEST_ASSERT(!RibbonQuireSame(&now.quire, &s.at.quire), "the ribbon goes on past the Quire it stood in");
+    TEST_ASSERT_OK(StandStitchSay(NULL, 0, 2, &kept), "the word none is said");
+    TEST_ASSERT(kept, "and the volume holds no word");
+    for (uint32_t c = 0; StandStitchFallow() && c < STAND_STITCH_FALLOW_CYCLES; c++)
+        TEST_ASSERT_OK(TagFSSettle(), "a cycle settles past what rests in Fallow");
+    TEST_ASSERT_EQ(StandStitchFallow(), 0, "nothing rests in Fallow: no ground comes back past the cut");
     uint64_t keep = EndpaperKeeps(s.at.quire_blocks);
     TEST_ASSERT(keep >= 2u * s.at.quire_blocks, "the Tally's reserve is two copies of at least one Quire");
     TEST_ASSERT(fs->free_blocks > keep + s.at.quire_blocks, "the volume has more than that free");
-    TEST_ASSERT(BlockMapDerivedStandShrink(keep + s.at.quire_blocks), "its free ground is cut to one Quire past it");
+    TEST_ASSERT(BlockMapDerivedStandShrink(keep + s.at.quire_blocks - 1u),
+                "its free ground is cut to a block short of one Quire past it: no next_quire is taken from it");
     held = true;
     for (; rc == OK && k < 10u + 3u * s.at.quire_blocks; k++)
         rc = StandStitchSayLong(16u * TALLY_SHEET_PAYLOAD, (char)('a' + k % 26u), k, &kept);
     TEST_ASSERT_EQ(rc, ERR_TAGFS_NO_SPACE, "words are laid down until the ribbon runs out, said ERR_TAGFS_NO_SPACE");
-    RibbonCursor now;
     RibbonCursorStand(&now);
-    TEST_ASSERT(now.out, "and said aloud");
+    TEST_ASSERT(now.out && !now.next.blocks, "and said aloud: the ribbon names no next_quire");
     TEST_ASSERT(!SettleParked(), "and the cadence is not parked for room nothing on a book asks for");
     uint64_t saying = 0, ticket = 0;
     UseText* memory = tagfs_recall_use_context(&saying);
@@ -715,7 +758,8 @@ static TestResult TestStandStitchRibbonRunsOut(void)
                    "word, in the rest kept");
     TEST_ASSERT(waiter.answered && waiter.rc == OK, "and the waiter is answered");
     TEST_ASSERT(UseMemoryRefused(ticket), "the word is refused: no claim held room for it, and none comes");
-    TEST_ASSERT(!now.next.blocks, "the ribbon names no next_quire");
+    RibbonCursorStand(&now);
+    TEST_ASSERT(now.out && !now.next.blocks, "the ribbon names no next_quire still");
     TEST_ASSERT(fs->free_blocks >= keep, "and the ground a Tally needs is left free");
     memory = tagfs_recall_use_context(NULL);
     rc     = StandStitchSay(memory ? memory->text : NULL, memory ? memory->bytes : 0, k + 1u, &kept);

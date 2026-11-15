@@ -91,7 +91,8 @@ bool StandRibbonUp(void)
  * medium is put back past TagFS; `at`, when given, the writer's cursor as it
  * was let go of. A caller still inside when the runner lets go — a cycle of
  * its writer on its way out, which gives the Settle back before it leaves the
- * door (settle.c, SettleRunEnd) — keeps the door LEAVING until it is out; the
+ * door (settle.c, SettleRunEnd), or another core's turn of the Engross
+ * (engross.c, EngrossTurn) — keeps the door LEAVING until it is out; the
  * service pass then lets the volume go and mounts it again on its medium
  * (TagFSServiceIfPending), the cursor standing past what that cycle sewed, and
  * that mount is let go of in turn. The runner's hold on the door is let go of
@@ -105,7 +106,7 @@ bool StandRibbonLetGo(RibbonCursor* at)
         RibbonCursorStand(at);
     if (!tagfs_get_state()->initialized || TagFSStandLetGo())
         return true;
-    kprintf("[TESTS] stand_ribbon: a caller is still inside the volume — waited out before anything is put back\n");
+    kprintf("[TESTS] stand_ribbon: a caller is still inside the volume — waited out before it is let go of\n");
     while (rdtsc() < bound) {
         BoardroomAttendIfPending();
         TagFSServiceIfPending();
