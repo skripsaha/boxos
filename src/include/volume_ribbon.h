@@ -3,9 +3,9 @@
 
 /*
  * The ribbon's stitches and the records they carry — how each is written and
- * read (spec_v2 §2.7, §2.8).
+ * read.
  *
- * A Settle cycle of a format-v2 volume lays its changes down as one stitch on
+ * A Settle cycle of a volume lays its changes down as one stitch on
  * the ribbon: a unit of kind STITCH whose stream (volume_book.h) is a
  * StitchHead, the cycle's records about files and tags, and a Clasp, then PAD
  * to the end of its last atom. The Tally (volume_tally.h) sums the ribbon up

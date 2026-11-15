@@ -6,9 +6,9 @@
  * as one text for every build that computes or checks one.
  *
  * A digest is written by whoever writes the block and checked by whoever
- * reads it: the kernel (tagfs/box_hash/box_hash.c) and, as format v2 is laid
- * out (spec_v2 §9.2-§9.3), mkfs writing a volume's DIGESTS and the UEFI loader
- * checking the kernel's blocks before it jumps. If any two of them disagreed
+ * reads it: the kernel (tagfs/box_hash/box_hash.c), mkfs writing a volume's
+ * DIGESTS and the UEFI loader checking the kernel's blocks before it jumps.
+ * If any two of them disagreed
  * by one bit, every block the other wrote would read as rot. So the hash is
  * spelled once, here, and the kernel's startup suite and volume-read's
  * self-test both hold it to one known answer (VOLUME_DIGEST_GOLDEN_4096).

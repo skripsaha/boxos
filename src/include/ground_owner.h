@@ -5,8 +5,8 @@
  * ‼ EVERY OWNER OF THE VOLUME'S GROUND, IN ONE LIST — GroundOwner.
  *
  * A volume keeps no bitmap at all — which blocks are taken is derived from
- * these owners' names, and the only finding left is a block two of them name
- * (spec_v2 §4.6). The mount's census (tagfs/mount/ground_census.h) asks each
+ * these owners' names, and the only finding left is a block two of them name.
+ * The mount's census (tagfs/mount/ground_census.h) asks each
  * owner for its ground, and tools/volume-read.py's census asks the same
  * owners of the same image: its constants are generated from this list
  * (tools/gen_ground_owners.py), so a kind added here and not there is a build

@@ -2,12 +2,12 @@
 #define VOLUME_BOOK_H
 
 /*
- * The book's alphabet — what every sector of a format-v2 volume's book is,
+ * The book's alphabet — what every sector of a volume's book is,
  * and how a number, a record and a pointer are written in it.
  *
- * A format-v2 volume keeps everything but its files' bytes in a BOOK: the
+ * A volume keeps everything but its files' bytes in a BOOK: the
  * ribbon of stitches the Settle cycles sew, the Tally that sums the ribbon up,
- * and the Spine slots that say where both are (docs: spec_v2 §1.4, §2). All of
+ * and the Spine slots that say where both are. All of
  * it is written in the letters below and in nothing else, so one reader of
  * these letters reads every part of it — the kernel, the UEFI loader, mkfs,
  * and volume-read on the host (tools/volumeread/bookread.py, which self-test
@@ -287,8 +287,8 @@ static inline int64_t BookUnzigzag(uint64_t z)
  * 8 * sheets sectors whose seq its pointer names.
  *
  * How large a unit a reader can hold in memory is the reader's to say, aloud,
- * before it reads one (spec_v2 §2.4: the widths of memory are the kernel's,
- * not the format's) — not this check's, which takes what it is given.
+ * before it reads one (the widths of memory are the kernel's, not the
+ * format's) — not this check's, which takes what it is given.
  */
 static inline int BookUnitHeadsAgree(const uint8_t *sectors, uint32_t count, BookSectorHead *head);
 
@@ -491,8 +491,8 @@ static inline uint32_t BookAtomOf(uint32_t geometry_physical, uint32_t medium_ph
 }
 
 /*
- * ‼ ON A REMOVABLE MEDIUM THE RIBBON IS WRITTEN IN FLASH PAGES (spec_v2 §16.6
- * п.2, C18). A cheap stick programs its page whole, reading, patching and
+ * ‼ ON A REMOVABLE MEDIUM THE RIBBON IS WRITTEN IN FLASH PAGES (C18).
+ * A cheap stick programs its page whole, reading, patching and
  * rewriting it to put down part of one, and a cut in that rewrite spoils what
  * the page held before — a settled stitch beside the new one; the newest
  * stitch wiped whole, with nothing past it, reads as a cycle that never wrote,
