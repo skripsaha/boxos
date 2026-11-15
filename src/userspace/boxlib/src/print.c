@@ -166,10 +166,10 @@ static bool g_no_daemon;
  *
  * ‼ A FULL RING IS NOT A FUNERAL.
  *
- * `send` is a Manifest op, and the kernel refuses it for reasons that have
- * nothing to do with whether the daemon exists: its result ring is momentarily
- * full (ERR_ROUTE_TARGET_FULL, system_ops.c SysRoute), or there was no room to
- * copy the payload into it (ERR_NO_MEMORY). Both of those mean "not now". Only
+ * `send` is a Manifest op, and the kernel refuses it for a reason that has
+ * nothing to do with whether the daemon exists: there was no room to copy the
+ * payload, or to hold it as a debt while the daemon's ring is full
+ * (ERR_NO_MEMORY, system_ops.c SysRoute). That means "not now". Only
  * ERR_PROCESS_NOT_FOUND means "nobody is there".
  *
  * Reading the first as the second is what this closes, and the place it hurt
@@ -193,24 +193,23 @@ static bool g_no_daemon;
 static int daemon_say(const StrandPrintState *ps, const uint8_t *req, uint16_t len)
 {
     /* Said once per cabin, the first time a word to the daemon has to be
-     * waited for. Not a threshold and not a clock: the FACT that the daemon's
-     * ring was full at all is the news, because until this was found nobody
-     * knew it happened — the refusal was swallowed as a death and the machine
-     * quietly changed how it prints. One line, and the next board run says
-     * whether this road is the one being taken. */
+     * waited for. Not a threshold and not a clock: the FACT that a word had
+     * to wait at all is the news, because until this was found nobody knew it
+     * happened — the refusal was swallowed as a death and the machine quietly
+     * changed how it prints. One line, and the next board run says whether
+     * this road is the one being taken. */
     static bool waited_before = false;
 
     for (;;) {
         int rc = send(ps->display, req, len);
         if (rc == 0) return 0;
         error_t why = box_errno_of(rc);
-        if (why != ERR_ROUTE_TARGET_FULL && why != ERR_NO_MEMORY) return rc;
+        if (why != ERR_NO_MEMORY) return rc;
         if (!waited_before) {
             waited_before = true;
             kdbg_print("[print] the display daemon would not take a word just "
-                       "now (%s); waiting for room rather than burying it",
-                       why == ERR_ROUTE_TARGET_FULL ? "its ring is full"
-                                                    : "no room for the record");
+                       "now (no room for the record); waiting for room rather "
+                       "than burying it");
         }
         yield();
     }

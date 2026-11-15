@@ -29,7 +29,11 @@
  *   So does another volume taking the seat the book was held for, and the
  *   machine stopping. And the programs, which live on, hold the file ids and
  *   tag ids the book's memory gave them, which the medium never saw: the
- *   volume's next mounts give out none below them (AwayNumbersKnown).
+ *   volume's next mounts give out none below them (AwayNumbersKnown). A
+ *   medium found holding less than a flush it said it kept covered — a stitch
+ *   or the slot this kernel knew gone from where it lies, nothing there
+ *   another writer's — lied: the volume's next mounts hold it so
+ *   (AwayLiedLearned), and the book carries MEDIUM_LIED from then on.
  *
  * There is no declared eject in this kernel: the events above are every one
  * there is.
@@ -67,6 +71,12 @@ void        AwayTakeUp(uint8_t seat);
  * caller's to let go of. */
 uint64_t    AwayGiveUp(AwayVerdict why, uint8_t seat);
 
+/* Whether a book of the volume `uuid` was given up this boot because its
+ * medium came back holding less than a flush it said it kept covered
+ * (PerambulationSaid.lied): its mounts from then on hold the medium to have
+ * lied. */
+bool        AwayLiedLearned(const uint8_t uuid[16]);
+
 /* The furthest next file id and next tag id memory had reached when a book of
  * the volume `uuid` was given up — 0 for one never given up. Its mounts give
  * out no id below them, for the rest of the boot. */
@@ -90,6 +100,10 @@ AwayVerdict TagFSStandMediumReturns(void);
  * the departure a core attending the seat latches while a writer's command is
  * answered. Once. */
 void        TagFSStandLeavesAfterRun(void);
+/* Every volume's medium remembered as one that lied this boot forgotten — the
+ * stand's own volume is every test's, and a lie one test proved would mark
+ * each mount after it: true when one was remembered. */
+bool        TagFSStandLiedForget(void);
 
 /*
  * And the stand's own take-down and mount, for the road a mount takes when the

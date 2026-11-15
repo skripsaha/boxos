@@ -21,6 +21,7 @@
 static PerambulationSaid s_said;
 static char              s_why[200];
 static bool              s_refused;
+static uint64_t          s_unreadable;   /* sectors the medium said it cannot read, left zeros */
 
 const PerambulationSaid* PerambulationLast(void)
 {
@@ -37,10 +38,12 @@ static bool PerambulationRead(uint8_t seat, uint64_t base, uint64_t vlba, uint32
         rc = 0;
         for (uint32_t k = 0; rc == 0 && k < n; k++) {
             int one = BoardroomRead(seat, base + vlba + k, 1, buf + (uint64_t)k * BOOK_SECTOR_BYTES);
-            if (one == (int)ERR_BAD_SECTOR)
+            if (one == (int)ERR_BAD_SECTOR) {
                 memset(buf + (uint64_t)k * BOOK_SECTOR_BYTES, 0, BOOK_SECTOR_BYTES);
-            else
+                s_unreadable++;
+            } else {
                 rc = one;
+            }
         }
     }
     if (rc != 0)
@@ -53,6 +56,14 @@ static bool PerambulationNot(const char* why)
 {
     s_said.why = why;
     return false;
+}
+
+/* Whether a flush the medium said it kept covers everything the walk holds it
+ * to: a stitch of this mount settled — its last flush came after every read
+ * of the mount and every unit laid before it (perambulation.h, the lie). */
+static bool PerambulationCovered(void)
+{
+    return SettledCycles() > 0;
 }
 
 // ----------------------------------------------------------------------------
@@ -97,6 +108,8 @@ static bool PerambulationSlot(uint8_t seat, uint64_t base, uint8_t* buf)
     s_said.slot = found;
     if (s_refused || own)
         return true;
+    s_said.lied = found && found < known && g_binder.slot[found_at].holds && g_binder.slot[found_at].seq == found &&
+                  PerambulationCovered();
     ksnprintf(s_why, sizeof(s_why), "its newest slot is seq %llu, where the newest this kernel left is seq %llu%s",
               (unsigned long long)found, (unsigned long long)known,
               found > known ? " — and no slot this kernel sealed holds it byte for byte" : "");
@@ -108,25 +121,40 @@ static bool PerambulationSlot(uint8_t seat, uint64_t base, uint8_t* buf)
 // ----------------------------------------------------------------------------
 
 /* Mark `m` read where its stitch was sewn into `buf` (its `of` sectors): every
- * sector holding there, one STITCH unit of its seq, and its stream's crc up
- * to its Clasp the Clasp this kernel sealed. */
-static bool PerambulationMarkHolds(uint8_t seat, uint64_t base, const BookLeftMark* m, uint8_t* buf)
+ * sector holding there as a sector of its own unit — one STITCH unit of its
+ * seq, each at its place in it — and its stream's crc up to its Clasp the
+ * Clasp this kernel sealed. Not holding, *lost whether the stitch is plainly
+ * gone from there (perambulation.h, the lie): a sector of it no sector of the
+ * book or one of an older seq, none the medium said it cannot read, and every
+ * other sector still of its own unit. */
+static bool PerambulationMarkHolds(uint8_t seat, uint64_t base, const BookLeftMark* m, uint8_t* buf, bool* lost)
 {
-    const uint8_t* uuid  = tagfs_get_state()->uuid;
-    uint64_t       left  = RibbonPlaceLeft(&m->at);
-    uint32_t       first = m->of < left ? m->of : (uint32_t)left;
-    BookSectorHead h;
+    const uint8_t* uuid       = tagfs_get_state()->uuid;
+    uint64_t       left       = RibbonPlaceLeft(&m->at);
+    uint32_t       first      = m->of < left ? m->of : (uint32_t)left;
+    uint64_t       unreadable = s_unreadable;
+    uint32_t       gone       = 0;
+    bool           other      = false;
+    *lost = false;
     if (!PerambulationRead(seat, base, RibbonPlaceVlba(&m->at), first, buf) ||
         (m->of > first && !PerambulationRead(seat, base, m->hop.block * TAGFS_BLOCK_SECTORS, m->of - first,
                                              buf + (uint64_t)first * BOOK_SECTOR_BYTES)))
         return false;
     for (uint32_t k = 0; k < m->of; k++) {
-        uint64_t vlba = k < first ? RibbonPlaceVlba(&m->at) + k : m->hop.block * TAGFS_BLOCK_SECTORS + (k - first);
-        if (!BookSectorCheck(buf + (uint64_t)k * BOOK_SECTOR_BYTES, uuid, vlba))
-            return false;
+        const uint8_t* sector = buf + (uint64_t)k * BOOK_SECTOR_BYTES;
+        uint64_t       vlba   = k < first ? RibbonPlaceVlba(&m->at) + k
+                                          : m->hop.block * TAGFS_BLOCK_SECTORS + (k - first);
+        BookSectorHead h;
+        if (!BookSectorCheck(sector, uuid, vlba) || !BookSectorHeadHolds(sector, &h) || h.seq < m->seq)
+            gone++;
+        else if (h.kind != BOOK_UNIT_STITCH || h.seq != m->seq || h.at != k || h.of != m->of)
+            other = true;
     }
-    if (!BookUnitHeadsAgree(buf, m->of, &h) || h.kind != BOOK_UNIT_STITCH || h.seq != m->seq ||
-        m->clasp_at > (uint64_t)m->of * BOOK_PAYLOAD_BYTES)
+    if (gone || other) {
+        *lost = gone && !other && s_unreadable == unreadable;
+        return false;
+    }
+    if (m->clasp_at > (uint64_t)m->of * BOOK_PAYLOAD_BYTES)
         return false;
     BookUnitStream(buf, m->of, buf);      /* the payloads close up in place: each moves to a lower address */
     return KCrc32c(buf, m->clasp_at) == m->clasp;
@@ -155,11 +183,13 @@ static bool PerambulationMarks(uint8_t seat, uint64_t base)
         return PerambulationNot("the last stitch this kernel kept a mark of is not the last it sewed");
     for (uint32_t i = c->lied || !n ? 0 : n - 1u; i < n; i++) {
         uint8_t* buf  = kmalloc((uint64_t)m[i].of * BOOK_SECTOR_BYTES);
-        bool     held = buf && PerambulationMarkHolds(seat, base, &m[i], buf);
+        bool     lost = false;
+        bool     held = buf && PerambulationMarkHolds(seat, base, &m[i], buf, &lost);
         kfree(buf);
         if (!buf)
             return PerambulationNot("memory would not hold a stitch of it to read it back");
         if (!held && !s_refused) {
+            s_said.lied = lost && PerambulationCovered();
             ksnprintf(s_why, sizeof(s_why), "its stitch %llu no longer stands where this kernel sewed it, by its "
                       "seq and its Clasp%s", (unsigned long long)m[i].seq,
                       c->lied ? " (a medium that lied: every stitch past its slot is held)" : "");

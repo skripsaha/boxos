@@ -176,8 +176,8 @@ static int SysRoute(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     /* A full ring is no longer a refusal: the kernel takes the message as a
      * debt the target settles itself at its next syscall gate. What is left to
      * fail is the debt itself — kmalloc refusing the node — and that is
-     * ERR_NO_MEMORY, not ERR_ROUTE_TARGET_FULL, because the target's ring is
-     * not what ran out. The deposit goes back rather than being abandoned in a
+     * ERR_NO_MEMORY, not a refusal for a full ring, because the target's ring
+     * is not what ran out. The deposit goes back rather than being abandoned in a
      * cabin nobody will ever point at it from. */
     if (rc == OK && !push_ipc_result(target, ctx->proc->pid, target_addr, length)) {
         (void)cabin_heap_take_back(target, target_addr, length);

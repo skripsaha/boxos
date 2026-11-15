@@ -7,7 +7,9 @@
 #include "../tagfs.h"
 #include "../file_map/file_map.h"
 #include "../ink/ink.h"
+#include "../ink/fallow.h"
 #include "../mount/away.h"
+#include "../mount/perambulation.h"
 #include "../mount/book_mount.h"
 #include "../mount/errata.h"
 #include "../settle/sewing.h"
@@ -38,12 +40,15 @@
 // attempt, as a retry does (M-6). Anything another machine sewed or laid gives
 // the book up, and every waiter hears its change lost — a seq this kernel gave
 // is no proof of its own (R11); what the mount found past the last stitch is
-// no other writer's. A block that did not land gives it up with
-// ERR_TAGFS_NOT_LANDED, and a write that laid its block as the medium left is
-// refused so at its Ink. A mark memory would not keep gives a return up only
-// until it is made good. The verdict the mount held is held while the book is
-// taken up, and built again by a mount of the medium another machine changed
-// — no Undone laid twice. Everything laid is put back.
+// no other writer's. A stitch a kept flush covered gone from where it was
+// sewn, nothing another writer's in its place, is a medium that lied: the
+// volume is remembered so, and its next mount holds it so. A block that did
+// not land gives it up with ERR_TAGFS_NOT_LANDED, and a write that laid its
+// block as the medium left is refused so at its Ink. A mark memory would not
+// keep gives a return up only until it is made good. The verdict the mount
+// held is held while the book is taken up, and built again by a mount of the
+// medium another machine changed — no Undone laid twice. Everything laid is
+// put back.
 // ============================================================================
 
 #define STAND_AWAY_FAST  (1ull << 50)   /* a read pace that makes a stitch's check cheaper than any cycle */
@@ -653,6 +658,8 @@ static TestResult TestStandAwayLastClasp(void)
     TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_OTHER, "the medium comes back: its last stitch does not stand "
                    "where this kernel sewed it by its Clasp, and its book is given up");
     away = false;
+    TEST_ASSERT(!AwayLiedLearned(s.uuid), "and the volume is not remembered as one whose medium lied: another "
+                "writer's stitch of the same seq proves nothing of the medium");
 out:
     if (away)
         (void)TagFSStandMediumReturns();
@@ -734,9 +741,77 @@ static TestResult TestStandAwayLiedWhole(void)
     TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_OTHER, "its last stitch stands where it was sewn, and still "
                    "the book is given up: on a medium that lied the whole ribbon from the slot is walked");
     away = false;
+    TEST_ASSERT(AwayLiedLearned(s.uuid), "a stitch a kept flush covered lost a sector, the rest of it its own: the "
+                "volume is remembered as one whose medium lied");
 out:
     if (away)
         (void)TagFSStandMediumReturns();
+    (void)TagFSStandLiedForget();
+    STAND_STITCH_PUT_BACK(&s);
+    return verdict;
+}
+
+// ----------------------------------------------------------------------------
+// A medium that lost a stitch a kept flush covered: remembered as one that lied
+// ----------------------------------------------------------------------------
+
+/* `n` sectors from the volume's sector `vlba` to zeros, past TagFS. */
+static bool StandAwayZeros(const StandStitch* s, uint64_t vlba, uint64_t n)
+{
+    uint32_t most = sizeof(s_away_bytes) / BOOK_SECTOR_BYTES;
+    memset(s_away_bytes, 0, sizeof(s_away_bytes));
+    for (uint64_t k = 0; k < n;) {
+        uint32_t run = n - k < most ? (uint32_t)(n - k) : most;
+        if (BoardroomWrite(s->seat, s->base + vlba + k, run, s_away_bytes, NULL) != 0)
+            return false;
+        k += run;
+    }
+    return true;
+}
+
+/* A cycle settles — its stitch the last this kernel left, covered by the
+ * flush the medium said it kept — and the medium comes back with zeros where
+ * that stitch was sewn, as a stick that answered a flush it never kept comes
+ * back from its power: the book is given up, the volume remembered as one
+ * whose medium lied, and its next mount holds the medium so. The lie is
+ * forgotten before the ribbon is put back: the stand's volume is every
+ * test's. */
+static TestResult TestStandAwayLostSettled(void)
+{
+    TestResult    verdict = TEST_PASS;
+    StandStitch   s;
+    RibbonCursor  now;
+    MountBookSaid said;
+    uint64_t      left = 0;
+    bool          away = false;
+    const char*   aside = StandStitchAside(&s);
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(!AwayLiedLearned(s.uuid), "the volume is not remembered as one whose medium lied");
+    TEST_ASSERT(StandAwaySettled("away-lost"), "a cycle settles, its stitch the last this kernel left");
+    RibbonCursorStand(&now);
+    left = RibbonPlaceLeft(&now.sewn);
+    TagFSStandMediumLeaves();
+    away = true;
+    TEST_ASSERT(StandAwayZeros(&s, RibbonPlaceVlba(&now.sewn), now.sewn_of < left ? now.sewn_of : left) &&
+                (now.sewn_of <= left ||
+                 StandAwayZeros(&s, now.sewn_hop.block * TAGFS_BLOCK_SECTORS, now.sewn_of - left)),
+                "the medium loses that stitch while it is out: zeros where it was sewn");
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_OTHER, "the medium comes back: its last stitch does not stand "
+                   "where this kernel sewed it, and its book is given up");
+    away = false;
+    TEST_ASSERT(PerambulationLast()->lied && AwayLiedLearned(s.uuid), "the stitch is gone, nothing another writer's "
+                "in its place, though a kept flush covered it: the volume is remembered as one whose medium lied");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts again on what its medium holds");
+    MountBookStandSaid(&said);
+    TEST_ASSERT(said.lied && RibbonCursorLied(), "and holds its medium to have lied: every stitch it sews says "
+                "MEDIUM_LIED");
+    TEST_ASSERT_EQ(FallowLag(), FALLOW_LIED_LAG, "and Fallow waits its longer lag on it");
+out:
+    if (away)
+        (void)TagFSStandMediumReturns();
+    (void)TagFSStandLiedForget();
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
 }
@@ -901,6 +976,8 @@ static const TestCase g_stand_away_tests[] = {
     { .name = "stand_away_newer_slot", .func = TestStandAwayNewerSlot,
       .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_away_lied_whole", .func = TestStandAwayLiedWhole,
+      .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_away_lost_settled", .func = TestStandAwayLostSettled,
       .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_away_verdict", .func = TestStandAwayVerdict,
       .reach = TEST_WRITES_TO_VOLUME },

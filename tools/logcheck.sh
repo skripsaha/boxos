@@ -2733,7 +2733,7 @@ run_yank() {
 #      says it waits, the caller steps out, and only then is the old volume let
 #      go of and the new one mounted (tagfs_abandon, the service pass);
 #   the handle held from before — its mounting is not the one up, so a read
-#      through it is refused by name and answers ERR_TAGFS_INVALID_HANDLE (855,
+#      through it is refused by name and answers ERR_TAGFS_INVALID_HANDLE (853,
 #      handle_belongs_here), never a block of somebody else's file; its entry
 #      in the open-file table is still the one the table hands out.
 #
@@ -2865,8 +2865,8 @@ run_holdground() {
     grep -q "was opened on an earlier mounting of this volume" "$S"
     chk $? "a read through the handle from the previous mounting is refused"
 
-    # 855 is ERR_TAGFS_INVALID_HANDLE: the read's own code, never folded (S3b).
-    grep -q "HOLDGROUND. a read through the handle from before answered 855" "$S"
+    # 853 is ERR_TAGFS_INVALID_HANDLE: the read's own code, never folded (S3b).
+    grep -q "HOLDGROUND. a read through the handle from before answered 853" "$S"
     chk $? "and the refusal reaches the caller as its own code, ERR_TAGFS_INVALID_HANDLE"
 
     # ── ‼ THE OPEN-FILE TABLE BELONGS TO THE MACHINE ───────────────────────
@@ -7971,7 +7971,7 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 44 (healthy says how) and
-# the 322 of the stand's own forty-five suites: stand 25, stand_lock 1,
+# the 323 of the stand's own forty-five suites: stand 25, stand_lock 1,
 # stand_spelling 6, stand_roadstead 4, stand_plot 3, stand_index 6,
 # stand_helm 6, stand_port 1, stand_use 2, stand_settle 9, stand_read 6,
 # stand_run 4, stand_medium 13, stand_warrant 7, stand_room 1, frame 2,
@@ -7979,14 +7979,14 @@ STAND_HELD="
 # stand_ribbon 8, stand_stitch 14, stand_stitch_edge 12, stand_docket 14,
 # stand_fresh 7, stand_fresh_ground 5, stand_fresh_change 5, stand_binder 13,
 # stand_endpaper 6, stand_book_room 13, stand_errata 8, stand_keep 5,
-# stand_toll 4, stand_dog_ear 9, stand_slip 14, stand_away 14,
+# stand_toll 4, stand_dog_ear 9, stand_slip 14, stand_away 15,
 # stand_tip_in 10, stand_slip_promise 5, stand_book_glean 2, stand_escheat 7,
 # stand_parity 2, stand_commonhold 1, stand_conjugate 5, stand_dedup 6.
 # Counted off the code, not a run (K9): a suite that drops out of the walk is
 # a test that stopped covering anything, and the count is where that shows.
 # How many of them pass and how many stand down is the road's — said, not
 # pinned.
-STAND_RUN=366
+STAND_RUN=367
 
 # What a VOLUME_TESTS kernel says of a record that names a run of no blocks
 # (file_record.c, FileRecordBuild), and of a Tract about to stand taller than

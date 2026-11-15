@@ -161,7 +161,7 @@ box::status DisplayLayer::Notify() noexcept
         const int Code = send(DisplayPid, &Notice, sizeof(Notice));
         if (Code == 0) return {};
         const error_t CauseCode = box_errno_of(Code);
-        if (CauseCode != ERR_ROUTE_TARGET_FULL && CauseCode != ERR_NO_MEMORY)
+        if (CauseCode != ERR_NO_MEMORY)
             return std::unexpected(box::error{CauseCode});
         yield();
     }

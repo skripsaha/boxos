@@ -60,10 +60,27 @@
  * (StitchHoldStill) from the first read to the verdict.
  */
 
-/* What the last judgement found, for its line (away.c) and the stand: why the
+/*
+ * What the last judgement found, for its line (away.c) and the stand: why the
  * book is not as left; the last stitch held where it was sewn and the newest
- * slot; the blocks read back and those that did not hold; and whether its own
- * attempt lay past the last stitch. */
+ * slot; the blocks read back and those that did not hold; whether its own
+ * attempt lay past the last stitch; and whether the medium lied.
+ *
+ * ‼ A MEDIUM LIED WHEN IT LOST WHAT A FLUSH IT KEPT COVERED, AND NOTHING THERE
+ * IS ANOTHER WRITER'S. Once a stitch of this mount settled, its last flush the
+ * medium said it kept covers every stitch the marks hold and every slot this
+ * kernel holds sure — what the mount read and all laid since. One of them gone
+ * from where it lies is a medium that answered a flush it never kept (a cheap
+ * stick, X3-1): a stitch whose place holds a sector that is no sector of the
+ * book — zeros, an unreadable one aside — or one of an older seq, every other
+ * sector there still of its own unit; or a newest slot older than the newest
+ * this kernel knew, and one it knows in that very slot. A sector of the
+ * stitch's seq or past it of any other unit, or a slot this kernel does not
+ * know, may be another machine's — a writer that mounted the medium
+ * meanwhile, or an older copy of it written back — and proves nothing of the
+ * medium: the book is given up all the same, nothing remembered (AwayGiveUp,
+ * AwayLiedLearned).
+ */
 typedef struct {
     const char* why;
     uint64_t    last;
@@ -71,6 +88,7 @@ typedef struct {
     uint64_t    proved;
     uint64_t    missed;
     bool        tried;
+    bool        lied;
 } PerambulationSaid;
 
 /* The verdict on the volume found on `seat` from `base` — `same` whether its

@@ -8424,16 +8424,16 @@ void Phase44()
     // ── box::result / box::status ergonomics + monadic ops ──
     box::result<int> r = 7;
     Check(r && *r == 7 && r.value_or(0) == 7, "phase44 result success");
-    box::result<int> re = std::unexpected(box::error{box::errc::device_busy});
-    Check(!re && re.error().code() == box::errc::device_busy && re.value_or(-1) == -1,
+    box::result<int> re = std::unexpected(box::error{box::errc::read_failed});
+    Check(!re && re.error().code() == box::errc::read_failed && re.value_or(-1) == -1,
           "phase44 result error arm");
     auto chained = re.and_then([](int v) { return box::result<int>{v + 1}; });
-    Check(!chained && chained.error().code() == box::errc::device_busy,
+    Check(!chained && chained.error().code() == box::errc::read_failed,
           "phase44 and_then propagates the error untouched");
     int recovered = re.or_else([](box::error e) {
                           return box::result<int>{static_cast<int>(e.raw())};
                       }).value_or(0);
-    Check(recovered == (int)ERR_DEVICE_BUSY, "phase44 or_else sees the typed cause");
+    Check(recovered == (int)ERR_READ_FAILED, "phase44 or_else sees the typed cause");
 
     box::status sok;
     Check(sok.has_value(), "phase44 default status is success");
@@ -8803,16 +8803,16 @@ void Phase46()
 // real-storage round-trip is gated on a confirmed create (storage-up probe).
 void Phase47()
 {
-    // ── B-1: the trigger code now names itself (was "box:941 error") ─────────
+    // ── B-1: the trigger code names itself (it once printed as "box:<n> error") ──
     {
         box::error e{box::errc::route_no_subscribers};
-        Check(e.raw() == 941u, "phase47 route_no_subscribers raw == 941");
+        Check(e.raw() == 940u, "phase47 route_no_subscribers raw == 940");
         Check(e.category_name() == std::string_view("routing"),
-              "phase47 941 category == routing (was the 'box' fallback)");
+              "phase47 940 category == routing (was the 'box' fallback)");
         Check(e.message() == std::string_view("no subscribers for route"),
-              "phase47 941 carries its real message (was the 'error' fallback)");
-        Check(std::format("{}", e) == "routing:941 no subscribers for route",
-              "phase47 941 formats as 'routing:941 no subscribers for route' — box:941 bug dead");
+              "phase47 940 carries its real message (was the 'error' fallback)");
+        Check(std::format("{}", e) == "routing:940 no subscribers for route",
+              "phase47 940 formats as 'routing:940 no subscribers for route' — the box:<n> bug dead");
     }
 
     // Every kernel range carries a faithful category + message — no code falls
@@ -8822,21 +8822,18 @@ void Phase47()
         static const CatCase cats[] = {
             {box::errc::unknown,                "core"},     {box::errc::quota_exceeded,        "core"},
             {box::errc::no_memory,              "memory"},   {box::errc::pcid_exhausted,        "memory"},
-            {box::errc::io,                     "io"},       {box::errc::sector_write_failed,   "io"},
-            {box::errc::file_not_found,         "storage"},  {box::errc::boot_hints_missing,    "storage"},
-            {box::errc::process_not_found,      "process"},  {box::errc::stack_alloc_failed,    "process"},
-            {box::errc::access_denied,          "security"}, {box::errc::sandbox_violation,     "security"},
-            {box::errc::hardware,               "hardware"}, {box::errc::cpu_error,             "hardware"},
-            {box::errc::acpi_not_found,         "acpi"},     {box::errc::acpi_fadt_not_found,   "acpi"},
+            {box::errc::io,                     "io"},       {box::errc::io_cancelled,          "io"},
+            {box::errc::file_not_found,         "storage"},  {box::errc::metadata_corrupted,    "storage"},
+            {box::errc::process_not_found,      "process"},  {box::errc::process_crashed,       "process"},
+            {box::errc::access_denied,          "security"}, {box::errc::invalid_operation,     "security"},
+            {box::errc::cpu_error,              "hardware"},
             {box::errc::tagfs_not_initialized,  "tagfs"},    {box::errc::tagfs_fid_exhausted,   "tagfs"},
             {box::errc::tagfs_not_landed,       "tagfs"},
-            {box::errc::pocket_ring_full,       "ipc"},      {box::errc::result_stash_full,     "ipc"},
-            {box::errc::route_target_full,      "routing"},  {box::errc::route_invalid_tag,     "routing"},
-            {box::errc::pocket_failed,          "ipc"},
-            {box::errc::scheduler_locked,       "scheduler"},{box::errc::work_steal_failed,     "scheduler"},
-            {box::errc::boot_info_invalid,      "boot"},     {box::errc::kernel_load_failed,    "boot"},
-            {box::errc::boxhash_invalid_context,"boxhash"},  {box::errc::boxhash_key_not_set,   "boxhash"},
-            {box::errc::braid_not_initialized,  "braid"},    {box::errc::braid_rebuild_failed,  "braid"},
+            {box::errc::pocket_ring_full,       "ipc"},      {box::errc::kcore_submit_failed,   "ipc"},
+            {box::errc::route_no_subscribers,   "routing"},  {box::errc::route_ambiguous,       "routing"},
+            {box::errc::runqueue_full,          "scheduler"},{box::errc::home_core_invalid,     "scheduler"},
+            {box::errc::e820_failed,            "boot"},
+            {box::errc::braid_disk_offline,     "braid"},    {box::errc::braid_mode_invalid,    "braid"},
             {box::errc::addr_value_mismatch,    "strand"},
         };
         bool cats_ok = true;
@@ -8848,16 +8845,11 @@ void Phase47()
         Check(cats_ok, "phase47 every kernel range carries a faithful category + named message");
     }
 
-    // The ERR_POCKET_FAILED 906→950 fix, locked at compile time, and the
-    // single-source guarantee (box::errc values ARE the boxlib codes).
-    static_assert(ERR_POCKET_FAILED == 950,
-                  "phase47 ERR_POCKET_FAILED is the kernel's own 950 (no longer a 906 alias)");
-    static_assert(static_cast<error_t>(box::errc::pocket_failed) == 950 &&
-                  static_cast<error_t>(box::errc::pocket_processing_failed) == 906,
-                  "phase47 pocket_failed(950) is distinct from pocket_processing_failed(906)");
+    // The single-source guarantee (box::errc values ARE the boxlib codes),
+    // locked at compile time.
     static_assert(static_cast<error_t>(box::errc::route_no_subscribers) == ERR_ROUTE_NO_SUBSCRIBERS &&
                   static_cast<error_t>(box::errc::no_memory) == ERR_NO_MEMORY &&
-                  static_cast<error_t>(box::errc::braid_rebuild_failed) == ERR_BRAID_REBUILD_FAILED,
+                  static_cast<error_t>(box::errc::braid_mode_invalid) == ERR_BRAID_MODE_INVALID,
                   "phase47 box::errc enumerators ARE the boxlib ERR_* codes (single source)");
 
     // ── B-2: the int64 byte-count bridge ────────────────────────────────────
@@ -8869,9 +8861,9 @@ void Phase47()
               "phase47 from_ret64 carries a 3e9 count as SUCCESS (the int bridge mis-read it as a cause)");
         auto zero = box::_detail::from_ret64<std::size_t>(0);
         Check(zero.has_value() && *zero == 0u, "phase47 from_ret64(0) is a zero-count success");
-        auto df = box::_detail::from_ret64<std::size_t>(box_fail(ERR_DISK_FULL));
-        Check(!df.has_value() && df.error().code() == box::errc::disk_full,
-              "phase47 from_ret64 recovers disk_full from box_fail(ERR_DISK_FULL)");
+        auto df = box::_detail::from_ret64<std::size_t>(box_fail(ERR_TAGFS_NO_SPACE));
+        Check(!df.has_value() && df.error().code() == box::errc::tagfs_no_space,
+              "phase47 from_ret64 recovers tagfs_no_space from box_fail(ERR_TAGFS_NO_SPACE)");
         auto io = box::_detail::from_ret64<std::size_t>(-(int)ERR_IO);
         Check(!io.has_value() && io.error().code() == box::errc::io,
               "phase47 from_ret64 recovers io from a raw -ERR_IO");
@@ -8916,7 +8908,7 @@ void Phase47()
     }
 
     printf("[CXX] PASS phase47: Ф23 backlog — full kernel-code sync via single-source "
-           "X-macro (941 names itself, every range categorized, POCKET_FAILED=950) + "
+           "X-macro (route_no_subscribers names itself, every range categorized) + "
            ">2 GiB int64 byte-count bridge (from_ret64)\n");
 }
 
@@ -54342,7 +54334,7 @@ const char *const kTag = "clock:zone";
 box::result<box::tagfs::file> SettingFile()
 {
     auto files = box::tagfs::query(kTag, nullptr);
-    if (files.empty()) return std::unexpected(box::error{box::errc::tagfs_file_not_found});
+    if (files.empty()) return std::unexpected(box::error{box::errc::file_not_found});
     return files.front();
 }
 
@@ -54498,7 +54490,7 @@ const char *const kTag = "clock:tzdb";
 box::result<box::tagfs::file> DoorFile()
 {
     auto files = box::tagfs::query(kTag, nullptr);
-    if (files.empty()) return std::unexpected(box::error{box::errc::tagfs_file_not_found});
+    if (files.empty()) return std::unexpected(box::error{box::errc::file_not_found});
     return files.front();
 }
 

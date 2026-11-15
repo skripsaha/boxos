@@ -24,13 +24,16 @@ static volatile uint64_t s_departures;  /* the medium left, this boot: AwayLeft 
  * while the next mount reads its numbers off the medium alone, which never
  * saw those ids. Given out again, one program's id named another's file. So
  * the ids memory had reached are remembered by the volume's UUID, and its
- * mounts give out nothing below them (AwayNumbersKnown), every volume's, not
- * only the last.
+ * mounts give out nothing below them (AwayNumbersKnown); and a volume whose
+ * medium came back holding less than a flush it said it kept covered is
+ * remembered the same way, so its mounts hold the medium to have lied
+ * (AwayLiedLearned) — every volume's, not only the last.
  */
 typedef struct {
     uint8_t  uuid[16];
     uint64_t next_file_id;
     uint32_t next_tag_id;
+    bool     lied;
 } AwayKnown;
 
 /* The entries, under their own leaf lock: a book is given up where the medium
@@ -51,9 +54,9 @@ static AwayKnown* AwayKnownFind(const uint8_t uuid[16])
 }
 
 /* `next_file` and `next_tag` into the volume `uuid`'s entry, each where it is
- * further; the entry made when there is none. False when there is no memory
- * for it. */
-static bool AwayKnownRaise(const uint8_t uuid[16], uint64_t next_file, uint32_t next_tag)
+ * further, and `lied` with it; the entry made when there is none. False when
+ * there is no memory for it. */
+static bool AwayKnownRaise(const uint8_t uuid[16], uint64_t next_file, uint32_t next_tag, bool lied)
 {
     for (;;) {
         TagFSLockTake(&s_known_lock);
@@ -68,6 +71,7 @@ static bool AwayKnownRaise(const uint8_t uuid[16], uint64_t next_file, uint32_t 
                 k->next_file_id = next_file;
             if (next_tag > k->next_tag_id)
                 k->next_tag_id = next_tag;
+            k->lied |= lied;
             TagFSLockDrop(&s_known_lock);
             return true;
         }
@@ -94,8 +98,9 @@ static bool AwayKnownRaise(const uint8_t uuid[16], uint64_t next_file, uint32_t 
     }
 }
 
-/* The numbers the book's memory had reached, remembered for its volume. */
-static void AwayRemember(void)
+/* The numbers the book's memory had reached, and whether its medium lied,
+ * remembered for its volume. */
+static void AwayRemember(bool lied)
 {
     TagFSState* fs        = tagfs_get_state();
     uint64_t    next_file;
@@ -109,11 +114,12 @@ static void AwayRemember(void)
         next_tag = fs->registry->next_id;
         TagFSLockDrop(&fs->registry->lock);
     }
-    if (!AwayKnownRaise(fs->uuid, next_file, next_tag))
+    if (!AwayKnownRaise(fs->uuid, next_file, next_tag, lied))
         kprintf("[TagFS] there is no memory to remember the ids this kernel gave out on the "
-                "volume whose book is given up (file ids below %llu, tag ids below %u) — its "
+                "volume whose book is given up (file ids below %llu, tag ids below %u)%s — its "
                 "next mount may give one of them again, to a program other than the one "
-                "holding it\n", (unsigned long long)next_file, next_tag);
+                "holding it\n", (unsigned long long)next_file, next_tag,
+                lied ? ", nor that its medium lied" : "");
 }
 
 /* The changes the book holds: inked, and no cycle settled. */
@@ -180,7 +186,8 @@ void AwayTakeUp(uint8_t seat)
 uint64_t AwayGiveUp(AwayVerdict why, uint8_t seat)
 {
     uint64_t lost = AwayUnsettled();
-    AwayRemember();
+    bool     lied = why == AWAY_OTHER && PerambulationLast()->lied;
+    AwayRemember(lied);
     switch (why) {
     case AWAY_NOT_LANDED:
         kprintf("[TagFS] the volume came back in seat %u as this kernel left its book, but %llu of the %llu block(s) "
@@ -190,8 +197,11 @@ uint64_t AwayGiveUp(AwayVerdict why, uint8_t seat)
                 (unsigned long long)lost);
         break;
     case AWAY_OTHER:
-        kprintf("[TagFS] the volume came back in seat %u not as this kernel left its book: %s" AWAY_LOST, seat,
-                PerambulationLast()->why, (unsigned long long)lost);
+        kprintf("[TagFS] the volume came back in seat %u not as this kernel left its book: %s%s" AWAY_LOST, seat,
+                PerambulationLast()->why,
+                lied ? " — gone, nothing another writer's in its place, though a flush the medium said it kept "
+                       "covered it: the medium lied, and its book carries MEDIUM_LIED from its next mount on" : "",
+                (unsigned long long)lost);
         break;
     case AWAY_SEAT_TAKEN:
         kprintf("[TagFS] another volume sits in seat %u, where the book of the volume that left "
@@ -217,6 +227,29 @@ uint64_t AwayGiveUp(AwayVerdict why, uint8_t seat)
     SettleWaitersAnswerAll(why == AWAY_NOT_LANDED ? ERR_TAGFS_NOT_LANDED : ERR_DEVICE_NOT_READY);
     return lost;
 }
+
+bool AwayLiedLearned(const uint8_t uuid[16])
+{
+    TagFSLockTake(&s_known_lock);
+    const AwayKnown* k    = AwayKnownFind(uuid);
+    bool             lied = k && k->lied;
+    TagFSLockDrop(&s_known_lock);
+    return lied;
+}
+
+#ifdef CONFIG_VOLUME_TESTS
+bool TagFSStandLiedForget(void)
+{
+    bool was = false;
+    TagFSLockTake(&s_known_lock);
+    for (uint32_t i = 0; i < s_known_count; i++) {
+        was |= s_known[i].lied;
+        s_known[i].lied = false;
+    }
+    TagFSLockDrop(&s_known_lock);
+    return was;
+}
+#endif
 
 void AwayNumbersKnown(const uint8_t uuid[16], uint64_t* next_file_id, uint32_t* next_tag_id)
 {
