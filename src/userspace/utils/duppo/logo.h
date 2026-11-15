@@ -1,10 +1,12 @@
-/* logo.h — Duppo as the vector master draws it (duppo-bubble.svg): seven
- * discs, each shaded by a radial gradient on its own affine map. The numbers
- * are the SVG's, in its units; Logo::*Color gives the colour of a point of
- * the logo in those units, and nothing here knows of the glass. */
+/* logo.h — Duppo as the vector master draws it: seven discs, their shapes
+ * boxos_mascot.h's, each shaded by a radial gradient on its own affine map
+ * (duppo-bubble.svg's). The numbers are the master's, in its units;
+ * Logo::*Color gives the colour of a point of the logo in those units, and
+ * nothing here knows of the glass. */
 #ifndef DUPPO_LOGO_H
 #define DUPPO_LOGO_H
 
+#include "boxos_mascot.h"
 #include "painter/core/color.h"
 
 #include "vec.h"
@@ -34,22 +36,20 @@ struct Ball {
 
 namespace Logo {
 
-inline constexpr int MoonCount = 3;
+inline constexpr int MoonCount = BOXOS_DUPPO_MOONS;
 
-inline constexpr Ball Body{{34.510509f, 28.268843f}, 17.16255f};
-inline constexpr Ball Socket{{33.996025f, 25.892982f}, 11.508257f};
-inline constexpr Ball White{{33.996025f, 25.892982f}, 10.013677f};
-inline constexpr Vec  PupilCenter{33.771843f, 24.676687f};
-inline constexpr Vec  PupilReach{7.8465376f, 7.9419012f};
+constexpr Ball BallOf(const BoxDuppoDisc &Disc) { return {{Disc.X, Disc.Y}, Disc.Radius}; }
+
+inline constexpr Ball Body   = BallOf(BoxDuppoBody);
+inline constexpr Ball Socket = BallOf(BoxDuppoSocket);
+inline constexpr Ball White  = BallOf(BoxDuppoWhite);
+inline constexpr Vec  PupilCenter{BoxDuppoPupil.X, BoxDuppoPupil.Y};
+inline constexpr Vec  PupilReach{BoxDuppoPupil.ReachX, BoxDuppoPupil.ReachY};
 
 /* The medium bubble on the lower right edge, the small one up left, the tiny
- * one to the right: the order they are kept in, so fewer bubbles drop the tiny
- * one first. */
-inline constexpr Ball Moons[MoonCount] = {
-    {{45.021469f, 42.663223f}, 5.1373868f},
-    {{16.983208f, 15.099807f}, 3.5669854f},
-    {{55.582016f, 23.11713f}, 2.4925005f},
-};
+ * one to the right, in boxos_mascot.h's order. */
+inline constexpr Ball Moons[MoonCount] = {BallOf(BoxDuppoMoons[0]), BallOf(BoxDuppoMoons[1]),
+                                          BallOf(BoxDuppoMoons[2])};
 
 /* How far the logo reaches from the body's centre, bubbles included. */
 inline constexpr float ReachLeft  = 21.2f;
