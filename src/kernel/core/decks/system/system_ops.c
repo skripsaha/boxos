@@ -2162,10 +2162,7 @@ static int SysFragScore(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     return OK;
 }
 
-/* SYSTEM_OP_RESOURCES out_crate:
- * [16 bytes volume name][u64 free bytes][u8 volume present][u8 free counted]
- * [6 bytes padding][u64 busy TSC ticks][u64 total TSC ticks][16 bytes volume
- * UUID][u64 total bytes][u64 used bytes].
+/* SYSTEM_OP_RESOURCES out_crate: a SystemResources (boxos_system_info.h).
  * The name comes from the mounted volume's Deed; the UUID and capacity from
  * the mounted TagFS state. CPU counters are cumulative, monotonic snapshots;
  * userspace derives a utilization percentage from two snapshots.
@@ -2176,7 +2173,10 @@ static int SysFragScore(const ManifestOp *op, Crate *crates, uint16_t crate_coun
  * kernel does not read the ground a bookmark holds (book_ground.c) — and
  * carries 0, and free and used bytes of 0: not a number that would read as a
  * full volume, or as the free count of a volume mounted before it. */
-#define SYSRES_BLOB_SIZE 80
+_Static_assert(sizeof(((SystemResources *)0)->volume_name) == sizeof(((TagFSState *)0)->volume_name),
+               "SystemResources.volume_name carries the volume's name whole");
+_Static_assert(sizeof(((SystemResources *)0)->volume_uuid) == sizeof(((TagFSState *)0)->uuid),
+               "SystemResources.volume_uuid carries the volume's UUID whole");
 
 static int SysResources(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                         const OpContext *ctx)
@@ -2184,29 +2184,26 @@ static int SysResources(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     (void)crate_count;
     if (!ctx || op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
     Crate *out = &crates[op->out_crate];
-    if (out->capacity < SYSRES_BLOB_SIZE) return ERR_BUFFER_TOO_SMALL;
+    if (out->capacity < sizeof(SystemResources)) return ERR_BUFFER_TOO_SMALL;
 
-    uint8_t blob[SYSRES_BLOB_SIZE];
-    memset(blob, 0, sizeof(blob));
+    SystemResources res;
+    memset(&res, 0, sizeof(res));
 
-    bool volume_present = false;
     if (tagfs_enter()) {
         TagFSState *fs = tagfs_get_state();
         bool counted = BlockMapDerivedUp();
         uint64_t free_bytes = counted ? AllotmentFreeUnpromised() * (uint64_t)VOLUME_BLOCK_BYTES : 0;
         uint64_t total_bytes = fs->volume_bytes;
         if (free_bytes > total_bytes) free_bytes = total_bytes;
-        uint64_t used_bytes = counted ? total_bytes - free_bytes : 0;
-        memcpy(blob + 0,  fs->volume_name, sizeof(fs->volume_name));
-        memcpy(blob + 16, &free_bytes, sizeof(free_bytes));
-        blob[25] = counted ? 1 : 0;
-        volume_present = total_bytes != 0;
-        memcpy(blob + 48, fs->uuid, sizeof(fs->uuid));
-        memcpy(blob + 64, &total_bytes, sizeof(total_bytes));
-        memcpy(blob + 72, &used_bytes, sizeof(used_bytes));
+        memcpy(res.volume_name, fs->volume_name, sizeof(res.volume_name));
+        res.volume_free_bytes   = free_bytes;
+        res.volume_free_counted = counted ? 1 : 0;
+        res.volume_present      = total_bytes != 0 ? 1 : 0;
+        memcpy(res.volume_uuid, fs->uuid, sizeof(res.volume_uuid));
+        res.volume_total_bytes  = total_bytes;
+        res.volume_used_bytes   = counted ? total_bytes - free_bytes : 0;
         tagfs_leave();
     }
-    blob[24] = volume_present ? 1 : 0;
 
     /* The App Cores as their scheduler counts them, and each K-Core as its
      * loop does. */
@@ -2219,10 +2216,10 @@ static int SysResources(const ManifestOp *op, Crate *crates, uint16_t crate_coun
         busy_tsc += core_busy;
         total_tsc += core_total;
     }
-    memcpy(blob + 32, &busy_tsc,  sizeof(busy_tsc));
-    memcpy(blob + 40, &total_tsc, sizeof(total_tsc));
+    res.cpu_busy_tsc  = busy_tsc;
+    res.cpu_total_tsc = total_tsc;
 
-    if (crate_write(out, ctx, blob, sizeof(blob)) != OK) return ERR_INVALID_ADDRESS;
+    if (crate_write(out, ctx, &res, sizeof(res)) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -2272,43 +2269,17 @@ static int SysCoreUsage(const ManifestOp *op, Crate *crates, uint16_t crate_coun
 /* =========================================================================
  *  System info — real-time snapshot (no hardcoded values)
  *
- *  Layout written into out_crate (must be ≥ 96 bytes, matches userspace
- *  system_info_t):
+ *  out_crate: a SystemInfo (boxos_system_info.h), whole.
  *
- *    [00..31]  char     name[32]
- *    [32..39]  uint64_t uptime_ns
- *    [40..47]  uint64_t total_memory
- *    [48..55]  uint64_t used_memory
- *    [56..63]  uint64_t free_memory
- *    [64..71]  uint64_t tsc_freq_khz
- *    [72..75]  uint32_t cpu_total
- *    [76..79]  uint32_t cpu_k_cores
- *    [80..83]  uint32_t cpu_app_cores
- *    [84..87]  uint32_t process_count
- *    [88..91]  uint32_t tick_freq_hz
- *    [92]      uint8_t  multicore_active
- *    [93]      uint8_t  has_invariant_tsc
- *    [94]      uint8_t  has_waitpkg
- *    [95]      uint8_t  tick_source
- *
- *  Offsets 88 and 95 travel together and must be read together. A frequency
- *  on its own named the wrong silicon for years: the field was called
- *  pit_freq_hz and `me` printed "PIT: 250 Hz" about an 8254 that pit_init()
- *  deliberately never wrote a byte into, because the HPET had taken IRQ0
- *  through LegacyReplacement and, per HPET 1.0a 2.4.2.1, "the 8254 timer will
- *  not cause any interrupts". The number was true; the name on it was not.
- *  The report now carries the pair {who is ticking, how fast}, and the
- *  frequency comes from whichever part is actually ticking.
- *
- *  These values are duplicated by hand in boxlib's box/system.h, exactly as
- *  the offsets above are — keep the two in step.
+ *  tick_freq_hz and tick_source travel together and must be read together. A
+ *  frequency on its own named the wrong silicon for years: the field was
+ *  called pit_freq_hz and `me` printed "PIT: 250 Hz" about an 8254 that
+ *  pit_init() deliberately never wrote a byte into, because the HPET had
+ *  taken IRQ0 through LegacyReplacement and, per HPET 1.0a 2.4.2.1, "the 8254
+ *  timer will not cause any interrupts". The number was true; the name on it
+ *  was not. The report now carries the pair {who is ticking, how fast}, and
+ *  the frequency comes from whichever part is actually ticking.
  * ========================================================================= */
-
-#define SYSINFO_BLOB_SIZE  96
-
-#define SYSINFO_TICK_SOURCE_NONE          0u  /* nothing is driving IRQ0 */
-#define SYSINFO_TICK_SOURCE_HPET_LEGACY   1u  /* HPET timer 0, LegacyReplacement */
-#define SYSINFO_TICK_SOURCE_8254          2u  /* 8254 channel 0, divisor ours */
 
 static int SysInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                    const OpContext *ctx)
@@ -2318,66 +2289,49 @@ static int SysInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
 
     Crate *out = &crates[op->out_crate];
-    if (out->capacity < SYSINFO_BLOB_SIZE) return ERR_BUFFER_TOO_SMALL;
+    if (out->capacity < sizeof(SystemInfo)) return ERR_BUFFER_TOO_SMALL;
 
-    uint8_t blob[SYSINFO_BLOB_SIZE];
+    SystemInfo info;
+    memset(&info, 0, sizeof(info));
 
     /* What the system calls itself. */
     static const char name[] = "BoxOS";
-    memset(blob, 0, 32);
-    memcpy(blob, name, sizeof(name) - 1);
+    memcpy(info.name, name, sizeof(name) - 1);
 
     /* Memory in bytes — PMM tracks pages; convert with PAGE_SIZE. */
     uint64_t total_pages = (uint64_t)pmm_total_pages();
     uint64_t used_pages  = (uint64_t)pmm_used_pages();
     uint64_t free_pages  = total_pages > used_pages ? total_pages - used_pages : 0;
-    uint64_t total_b     = total_pages * PMM_PAGE_SIZE;
-    uint64_t used_b      = used_pages  * PMM_PAGE_SIZE;
-    uint64_t free_b      = free_pages  * PMM_PAGE_SIZE;
+    info.total_memory    = total_pages * PMM_PAGE_SIZE;
+    info.used_memory     = used_pages  * PMM_PAGE_SIZE;
+    info.free_memory     = free_pages  * PMM_PAGE_SIZE;
 
-    uint64_t uptime_ns   = rtc_get_uptime_ns();
-    uint64_t tsc_khz     = cpu_get_tsc_freq_khz();
+    info.uptime_ns       = rtc_get_uptime_ns();
+    info.tsc_freq_khz    = cpu_get_tsc_freq_khz();
 
-    uint32_t cpu_total   = (uint32_t)g_amp.total_cores;
-    uint32_t cpu_k       = (uint32_t)g_amp.k_count;
-    uint32_t cpu_app     = (uint32_t)g_amp.app_count;
-    uint32_t proc_count  = process_get_count();
+    info.cpu_total       = (uint32_t)g_amp.total_cores;
+    info.cpu_k_cores     = (uint32_t)g_amp.k_count;
+    info.cpu_app_cores   = (uint32_t)g_amp.app_count;
+    info.process_count   = process_get_count();
 
     /* Ask who is ticking before asking how fast. When the HPET holds IRQ0 the
      * rate comes from the HPET, derived from the interval written into its
      * comparator; pit_get_frequency() in that mode returns only the number the
      * scheduler was configured with, and no 8254 anywhere agreed to it. */
-    uint32_t tick_hz;
-    uint8_t  tick_src;
     if (hpet_tick_active()) {
-        tick_hz  = hpet_tick_hz();
-        tick_src = SYSINFO_TICK_SOURCE_HPET_LEGACY;
+        info.tick_freq_hz = hpet_tick_hz();
+        info.tick_source  = SYSINFO_TICK_SOURCE_HPET_LEGACY;
     } else {
-        tick_hz  = pit_get_frequency();
-        tick_src = tick_hz ? SYSINFO_TICK_SOURCE_8254
-                           : SYSINFO_TICK_SOURCE_NONE;
+        info.tick_freq_hz = pit_get_frequency();
+        info.tick_source  = info.tick_freq_hz ? SYSINFO_TICK_SOURCE_8254
+                                              : SYSINFO_TICK_SOURCE_NONE;
     }
 
-    uint8_t mc_active    = g_amp.multicore_active   ? 1 : 0;
-    uint8_t inv_tsc      = g_cpu_caps.has_invariant_tsc ? 1 : 0;
-    uint8_t waitpkg      = g_cpu_caps.has_waitpkg       ? 1 : 0;
+    info.multicore_active  = g_amp.multicore_active       ? 1 : 0;
+    info.has_invariant_tsc = g_cpu_caps.has_invariant_tsc ? 1 : 0;
+    info.has_waitpkg       = g_cpu_caps.has_waitpkg       ? 1 : 0;
 
-    memcpy(blob + 32, &uptime_ns, sizeof(uint64_t));
-    memcpy(blob + 40, &total_b,   sizeof(uint64_t));
-    memcpy(blob + 48, &used_b,    sizeof(uint64_t));
-    memcpy(blob + 56, &free_b,    sizeof(uint64_t));
-    memcpy(blob + 64, &tsc_khz,   sizeof(uint64_t));
-    memcpy(blob + 72, &cpu_total, sizeof(uint32_t));
-    memcpy(blob + 76, &cpu_k,     sizeof(uint32_t));
-    memcpy(blob + 80, &cpu_app,   sizeof(uint32_t));
-    memcpy(blob + 84, &proc_count,sizeof(uint32_t));
-    memcpy(blob + 88, &tick_hz,   sizeof(uint32_t));
-    blob[92] = mc_active;
-    blob[93] = inv_tsc;
-    blob[94] = waitpkg;
-    blob[95] = tick_src;
-
-    if (crate_write(out, ctx, blob, SYSINFO_BLOB_SIZE) != OK) return ERR_INVALID_ADDRESS;
+    if (crate_write(out, ctx, &info, sizeof(info)) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 
@@ -2515,6 +2469,11 @@ static int SysManifestRelease(const ManifestOp *op, Crate *crates,
 #include "efi_secureboot.h"
 #include "efi_authenticode.h"
 
+_Static_assert(sizeof(((EfiInfo *)0)->cert_count_by_db) == sizeof(((EfiSecureBootState *)0)->cert_count_by_db) &&
+               sizeof(((EfiInfo *)0)->hash_count_by_db) == sizeof(((EfiSecureBootState *)0)->hash_count_by_db),
+               "EfiInfo carries a count for every Secure Boot database the kernel enumerates");
+
+/* out_crate: an EfiInfo (boxos_system_info.h), whole. */
 static int SysEfiInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                        const OpContext *ctx)
 {
@@ -2522,53 +2481,27 @@ static int SysEfiInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     if (!ctx)                              return ERR_INVALID_ARGUMENT;
     if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
     Crate *out = &crates[op->out_crate];
-    if (out->capacity < EFI_INFO_BLOB_SIZE) return ERR_BUFFER_TOO_SMALL;
-    uint8_t blob[EFI_INFO_BLOB_SIZE];
-    memset(blob, 0, EFI_INFO_BLOB_SIZE);
+    if (out->capacity < sizeof(EfiInfo)) return ERR_BUFFER_TOO_SMALL;
 
     EfiSecureBootState sb = {0};
     efi_secureboot_get_state(&sb);
 
-    uint8_t  rt_available  = efi_runtime_available() ? 1 : 0;
-    uint8_t  esrt_available= efi_esrt_available()    ? 1 : 0;
-    uint8_t  sb_available  = sb.available            ? 1 : 0;
-    uint8_t  sb_enforced   = sb.enforced             ? 1 : 0;
-    uint8_t  sb_setup      = sb.setup_mode           ? 1 : 0;
-    uint8_t  sb_audit      = sb.audit_mode           ? 1 : 0;
-    uint8_t  sb_deployed   = sb.deployed_mode        ? 1 : 0;
-    uint32_t esrt_count    = efi_esrt_count();
-    uint32_t cert_count    = sb.cert_count;
-    uint32_t hash_count    = sb.hash_count;
+    EfiInfo info;
+    memset(&info, 0, sizeof(info));
+    info.rt_available     = efi_runtime_available() ? 1 : 0;
+    info.esrt_available   = efi_esrt_available()    ? 1 : 0;
+    info.sb_available     = sb.available            ? 1 : 0;
+    info.sb_enforced      = sb.enforced             ? 1 : 0;
+    info.sb_setup_mode    = sb.setup_mode           ? 1 : 0;
+    info.sb_audit_mode    = sb.audit_mode           ? 1 : 0;
+    info.sb_deployed_mode = sb.deployed_mode        ? 1 : 0;
+    info.esrt_count       = efi_esrt_count();
+    info.cert_count_total = sb.cert_count;
+    info.hash_count_total = sb.hash_count;
+    memcpy(info.cert_count_by_db, sb.cert_count_by_db, sizeof(info.cert_count_by_db));
+    memcpy(info.hash_count_by_db, sb.hash_count_by_db, sizeof(info.hash_count_by_db));
 
-    /* Layout (offset-aligned, packed):
-     *   +0   u8  rt_available
-     *   +1   u8  esrt_available
-     *   +2   u8  sb_available
-     *   +3   u8  sb_enforced
-     *   +4   u8  sb_setup_mode
-     *   +5   u8  sb_audit_mode
-     *   +6   u8  sb_deployed_mode
-     *   +7   u8  _pad
-     *   +8   u32 esrt_count
-     *   +12  u32 cert_count_total
-     *   +16  u32 hash_count_total
-     *   +20  u32 cert_count_by_db[6]   (PK,KEK,db,dbx,dbt,dbr)
-     *   +44  u32 hash_count_by_db[6]
-     *   +68  60  reserved (zero) */
-    blob[0] = rt_available;
-    blob[1] = esrt_available;
-    blob[2] = sb_available;
-    blob[3] = sb_enforced;
-    blob[4] = sb_setup;
-    blob[5] = sb_audit;
-    blob[6] = sb_deployed;
-    memcpy(blob + 8,  &esrt_count,    4);
-    memcpy(blob + 12, &cert_count,    4);
-    memcpy(blob + 16, &hash_count,    4);
-    memcpy(blob + 20, sb.cert_count_by_db, 6 * 4);
-    memcpy(blob + 44, sb.hash_count_by_db, 6 * 4);
-
-    if (crate_write(out, ctx, blob, EFI_INFO_BLOB_SIZE) != OK) return ERR_INVALID_ADDRESS;
+    if (crate_write(out, ctx, &info, sizeof(info)) != OK) return ERR_INVALID_ADDRESS;
     return OK;
 }
 

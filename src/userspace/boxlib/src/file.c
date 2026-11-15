@@ -332,15 +332,16 @@ int file_info(file_id_t file_id, file_info_t *info)
                      out, sizeof(out), &out_actual,
                      BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0) return box_fail(rc);
-    if (out_actual < 20) return -ERR_INTERNAL;
+    if (out_actual < 22) return -ERR_INTERNAL;
 
     memset(info, 0, sizeof(*info));
 
     size_t pos = 0;
     memcpy(&info->file_id, out + pos, 8); pos += 8;
     memcpy(&info->size,    out + pos, 8); pos += 8;
-    uint16_t tag_count_raw = 0, fn_len = 0;
-    memcpy(&tag_count_raw, out + pos, 2); pos += 2;
+    uint32_t tag_count_raw = 0;
+    uint16_t fn_len        = 0;
+    memcpy(&tag_count_raw, out + pos, 4); pos += 4;
     memcpy(&fn_len,        out + pos, 2); pos += 2;
 
     if (pos + fn_len > out_actual) return -ERR_INTERNAL;
@@ -366,7 +367,7 @@ int file_info(file_id_t file_id, file_info_t *info)
                    "list says so. Said once.",
                    file_id, (unsigned)tag_count_raw, (unsigned)slots);
 
-    for (uint16_t i = 0; i < tag_count_raw; i++) {
+    for (uint32_t i = 0; i < tag_count_raw; i++) {
         if (pos + 5 > out_actual) break;
         uint16_t kl = 0, vl = 0;
         memcpy(&kl, out + pos, 2); pos += 2;

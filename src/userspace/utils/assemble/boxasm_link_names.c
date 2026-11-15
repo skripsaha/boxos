@@ -191,7 +191,7 @@ static int BoxAsmWriteNameplate(BoxAsmLinker *Link, const BoxAsmNameList *Names)
         return BoxAsmNameplateRefuse(Link, "more functions than the format admits");
     for (Index = 0; Index < Names->Count; Index++)
         NameBytes += strlen(Names->Items[Index].Name) + 1u;
-    if (NameBytes > UINT32_MAX)
+    if (NameBytes > NAMEPLATE_MAX_NAME_BYTES)
         return BoxAsmNameplateRefuse(Link, "the names exceed 4 GiB");
     Total = NAMEPLATE_TOTAL_BYTES(Names->Count, NameBytes);
     if (Total > SIZE_MAX)

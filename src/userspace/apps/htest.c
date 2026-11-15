@@ -30,18 +30,14 @@
 #define BUF_BYTES    32u
 #define MBUF_BYTES   (16u + 2u * (12u + 1u))  /* hdr + 2 ops, 1 byte param max */
 
-#define DECK_OPS     0x01u  /* mirror of DECK_OPERATIONS */
-#define OPS_FILL     0x02u
-#define OPS_MOVE     0x01u
-
 static int build_inner_manifest(uint8_t *mbuf, uint32_t mbuf_size,
                                 uint8_t fill_byte)
 {
     ManifestBuilder mb;
     if (ManifestBuilderInit(&mb, mbuf, mbuf_size) != 0)            return -1;
-    if (ManifestBuilderAddOp(&mb, DECK_OPS, OPS_FILL, 0,
+    if (ManifestBuilderAddOp(&mb, DECK_OPERATIONS, OP_BUF_FILL, 0,
                              CRATE_INDEX_NONE, 0, &fill_byte, 1) != 0) return -2;
-    if (ManifestBuilderAddOp(&mb, DECK_OPS, OPS_MOVE, 0, 0, 1, NULL, 0) != 0) return -3;
+    if (ManifestBuilderAddOp(&mb, DECK_OPERATIONS, OP_BUF_MOVE, 0, 0, 1, NULL, 0) != 0) return -3;
     if (ManifestBuilderFinalize(&mb) != 0)                          return -4;
     return 0;
 }

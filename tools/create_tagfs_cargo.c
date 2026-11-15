@@ -9,20 +9,13 @@
 
 #include "create_tagfs.h"
 #include "buildplate_format.h"   /* the verdict this volume copies out of the kernel it packs */
-#include "tagfs_reserved.h"      /* shared reserved-tag vocabulary (-I src/include) */
+#include "tagfs_reserved.h"      /* the reserved keys, the last id, the widths: the kernel's (-I src/include) */
 #include <stdbool.h>
 #include "box_reader.h"          /* the box a program is, read for its role (-I src/include) */
 
 TagEntry* g_tags       = NULL;
 uint32_t  g_tag_count  = 0;
 static uint32_t  g_tag_cap    = 0;
-
-/* The last tag id the kernel gives a volume (tagfs_constants.h, which a host
- * tool cannot include): bit 31 is its Logbook's. The book
- * writes an id as a varint and has no width of its own, but a volume naming
- * an id past this one is a volume the kernel may only read (tally.py
- * TagGlass) — so the cargo interns none past it. */
-#define TAGFS_MAX_TAG_ID  0x7FFFFFFEu
 
 /* ====================================================================
  * Tag interning
@@ -50,10 +43,10 @@ static int intern_tag(const char* key, const char* value, const char* whose, uin
     }
 
     size_t key_len = strlen(key), value_len = value ? strlen(value) : 0;
-    if (key_len > TAG_KEY_WIDTH || key_len + value_len > TAG_TEXT_ROOM) {
+    if (key_len > TAG_KEY_WIDTH || key_len + value_len > TAG_KEY_VALUE_WIDTH) {
         fprintf(stderr, "%s: the tag '%.40s%s' has a key of %zu bytes and a value of %zu: the kernel holds "
-                        "a tag's key in %u bytes and its key and value together in %u (tag_spelling.h)\n",
-                whose, key, key_len > 40 ? "..." : "", key_len, value_len, TAG_KEY_WIDTH, TAG_TEXT_ROOM);
+                        "a tag's key in %u bytes and its key and value together in %u (tagfs_reserved.h)\n",
+                whose, key, key_len > 40 ? "..." : "", key_len, value_len, TAG_KEY_WIDTH, TAG_KEY_VALUE_WIDTH);
         return -1;
     }
     if (g_tag_count > TAGFS_MAX_TAG_ID) {
@@ -314,7 +307,7 @@ static int TagTake(char* token, const char* whose, uint32_t* ids, uint32_t* coun
  * each without a word, and the volume made of what was left. Now every tag
  * given is interned or the volume is refused: a file carries as many as it
  * is given (the book has no width for them), and how wide one can be is the
- * kernel's to judge (TAG_KEY_WIDTH, TAG_TEXT_ROOM).
+ * kernel's to judge (TAG_KEY_WIDTH, TAG_KEY_VALUE_WIDTH).
  */
 int parse_tags(const char* tag_string, const char* path, uint32_t** out_ids, uint32_t* out_count,
                uint32_t* out_role) {

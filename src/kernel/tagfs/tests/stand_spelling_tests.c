@@ -360,7 +360,7 @@ out:
 }
 
 /* Whether storage.getinfo gives back the tag `text` spells whole: its key and
- * value, each at its own length. The record is [u64 id][u64 size][u16 tags]
+ * value, each at its own length. The record is [u64 id][u64 size][u32 tags]
  * [u16 name_len][name], then per tag [u16 key_len][u16 val_len][u8 type][key]
  * [val]. */
 static bool StandInfoHasWhole(uint64_t file_id, const char* text)
@@ -370,13 +370,14 @@ static bool StandInfoHasWhole(uint64_t file_id, const char* text)
     uint64_t    id   = file_id;   /* a program's file_id_t */
     if (TagSpell(text, strlen(text), &tag) != OK ||
         StandStorageOp(STORAGE_OBJ_GET_INFO, &id, sizeof(id), NULL, 0,
-                       s_info, sizeof(s_info), &said) != OK || said < 20)
+                       s_info, sizeof(s_info), &said) != OK || said < 22)
         return false;
 
-    uint16_t tags, name_len;
-    memcpy(&tags, s_info + 16, 2);
-    memcpy(&name_len, s_info + 18, 2);
-    for (uint64_t at = 20u + name_len, t = 0; t < tags && at + 5 <= said; t++) {
+    uint32_t tags;
+    uint16_t name_len;
+    memcpy(&tags, s_info + 16, 4);
+    memcpy(&name_len, s_info + 20, 2);
+    for (uint64_t at = 22u + name_len, t = 0; t < tags && at + 5 <= said; t++) {
         uint16_t kl, vl;
         memcpy(&kl, s_info + at, 2);
         memcpy(&vl, s_info + at + 2, 2);

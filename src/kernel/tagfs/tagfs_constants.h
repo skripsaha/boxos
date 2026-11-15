@@ -9,6 +9,7 @@
 
 #include "../../lib/kernel/ktypes.h"     /* volume_deed.h takes its types from the includer */
 #include "../../include/volume_deed.h"
+#include "../../include/tagfs_reserved.h"   /* TAGFS_MAX_TAG_ID, the tag widths: the builder's too */
 
 /* The volume's block and its sectors are the format's, owned by the Deed's
  * header; these are the names the kernel has always used for them. */
@@ -23,13 +24,7 @@
 
 // Tag constants
 #define TAGFS_INVALID_TAG_ID        0xFFFFFFFFu
-/* Volume tag ids stop one short of bit 31. Bit 31 belongs to the kernel's
- * Logbook (core/touch/logbook.h) — the vocabulary of occurrences, which must
- * exist on a machine that never mounted a volume. Capping here is what makes
- * the split an invariant instead of a convention: the volume cannot issue an
- * id that collides with an occurrence even in principle. */
-#define TAGFS_MAX_TAG_ID            0x7FFFFFFEu
-/* The one id past them: no tag's, never in the registry nor in a file's tags,
+/* The one id past a volume's (TAGFS_MAX_TAG_ID, tagfs_reserved.h): no tag's, never in the registry nor in a file's tags,
  * but the tag index's own set of the files that are deleted and kept
  * (TAGFS_FILE_DELETED) — held beside the tags' members so that every query,
  * which already sets members aside, sets these aside by default and asks for

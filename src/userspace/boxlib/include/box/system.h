@@ -7,6 +7,7 @@ extern "C" {
 
 #include "box/types.h"
 #include "box/error.h"
+#include "boxos_system_info.h"   /* SystemInfo, SystemResources, EfiInfo, SYSINFO_TICK_SOURCE_* */
 
 #define PROC_STATE_TERMINATED   4
 
@@ -17,46 +18,11 @@ typedef struct {
     uint32_t memory_usage;
 } proc_info_t;
 
-/* Real per-cabin system snapshot — populated by `system.info` kernel op.
- *
- * Each numeric field is sized to its natural range (uptime in nanoseconds
- * fits 64 bits for ~584 years; physical memory amounts up to 16 EiB fit too).
- * No legacy 32-bit memory cap, no fake values. */
-typedef struct {
-    char     name[32];           /* "BoxOS", NUL-padded             */
-    uint64_t uptime_ns;          /* nanosecond-precision uptime     */
-    uint64_t total_memory;       /* total physical RAM (bytes)      */
-    uint64_t used_memory;        /* in-use RAM (bytes)              */
-    uint64_t free_memory;        /* free RAM (bytes)                */
-    uint64_t tsc_freq_khz;       /* calibrated TSC freq, 0 = N/A    */
-    uint32_t cpu_total;          /* total cores detected            */
-    uint32_t cpu_k_cores;        /* K-Cores (kernel/IO)             */
-    uint32_t cpu_app_cores;      /* App-Cores (userspace)           */
-    uint32_t process_count;      /* live processes                  */
-    uint32_t tick_freq_hz;       /* rate of the system tick, in Hz  */
-    uint8_t  multicore_active;   /* 1 if AMP currently active       */
-    uint8_t  has_invariant_tsc;  /* 1 if TSC stable across cores    */
-    uint8_t  has_waitpkg;        /* 1 if UMWAIT available           */
-    uint8_t  tick_source;        /* which part produces that tick   */
-} system_info_t;
-
-/* Read-only machine resources snapshot. CPU counters are cumulative TSC
- * counters; compare two snapshots to obtain utilization over that interval. */
-typedef struct {
-    char     volume_name[16];
-    uint64_t volume_free_bytes;
-    uint8_t  volume_present;
-    uint8_t  volume_free_counted; /* 0: the kernel holds no count of this volume's
-                                   * free ground (a book whose Tally names
-                                   * a bookmark, whose ground it does not read), and
-                                   * the free and used bytes say nothing */
-    uint8_t  _volume_pad[6];
-    uint64_t cpu_busy_tsc;
-    uint64_t cpu_total_tsc;
-    uint8_t  volume_uuid[16];
-    uint64_t volume_total_bytes;
-    uint64_t volume_used_bytes;
-} system_resources_t;
+/* What system.info and system.resources answer, as the kernel writes them
+ * (boxos_system_info.h): a real-time snapshot, and the machine's resources —
+ * their CPU counters cumulative, compared across two snapshots. */
+typedef SystemInfo      system_info_t;
+typedef SystemResources system_resources_t;
 
 /* Per-core cumulative CPU accounting — an App Core's by its scheduler, a
  * K-Core's by its own loop. Compare two snapshots for the utilization of one
@@ -68,15 +34,6 @@ typedef struct {
     uint8_t  kernel;   /* a K-Core: it runs the system's work, not programs */
     uint8_t  _pad[6];
 } system_core_usage_t;
-
-/* Which part is actually producing the system tick. Read it before reporting
- * tick_freq_hz: the frequency alone used to be labelled "PIT", and on every
- * board where the HPET takes IRQ0 through LegacyReplacement that named a chip
- * the kernel never programmed. Values match the kernel's own SYSINFO_TICK_*
- * in system_ops.c, which fills byte 95 of the blob. */
-#define SYSINFO_TICK_SOURCE_NONE          0u  /* nothing is driving IRQ0 */
-#define SYSINFO_TICK_SOURCE_HPET_LEGACY   1u  /* HPET timer 0, LegacyReplacement */
-#define SYSINFO_TICK_SOURCE_8254          2u  /* 8254 channel 0 */
 
 int proc_info(uint16_t pid, proc_info_t* info);
 
@@ -276,21 +233,7 @@ int tls_set_fsbase(uint64_t base);
  *    SYSTEM_OP_EFI_VERIFY_PE   — Authenticode-verify a PE image against db/dbx.
  * ========================================================================= */
 
-typedef struct {
-    uint8_t  rt_available;        /* 1 iff EFI runtime services online */
-    uint8_t  esrt_available;      /* 1 iff ESRT was published by firmware */
-    uint8_t  sb_available;        /* 1 iff Secure Boot vars were enumerated */
-    uint8_t  sb_enforced;         /* SecureBoot variable value */
-    uint8_t  sb_setup_mode;       /* SetupMode variable value */
-    uint8_t  sb_audit_mode;       /* AuditMode variable value */
-    uint8_t  sb_deployed_mode;    /* DeployedMode variable value */
-    uint8_t  _pad;
-    uint32_t esrt_count;          /* total EFI System Resource entries */
-    uint32_t cert_count_total;    /* X.509 certs across all DBs */
-    uint32_t hash_count_total;    /* raw hashes across all DBs */
-    uint32_t cert_count_by_db[6]; /* PK, KEK, db, dbx, dbt, dbr */
-    uint32_t hash_count_by_db[6];
-} efi_info_t;
+typedef EfiInfo efi_info_t;   /* boxos_system_info.h: what SYSTEM_OP_EFI_INFO answers */
 
 typedef struct {
     uint8_t  fw_class[16];        /* GUID */

@@ -22,9 +22,6 @@
 #define BUF_BYTES   64u
 #define MBUF_BYTES  256u
 
-#define OPS_FILL  0x02u
-#define OPS_MOVE  0x01u
-
 int main(void)
 {
     static uint8_t  mbuf[MBUF_BYTES];
@@ -42,12 +39,12 @@ int main(void)
     }
 
     uint8_t fill_byte = 0xABu;
-    if (ManifestBuilderAddOp(&mb, DECK_OPERATIONS, OPS_FILL, 0,
+    if (ManifestBuilderAddOp(&mb, DECK_OPERATIONS, OP_BUF_FILL, 0,
                              CRATE_INDEX_NONE, 0, &fill_byte, 1) != 0) {
         print("[mtest] add fill fail\n");
         exit(1);
     }
-    if (ManifestBuilderAddOp(&mb, DECK_OPERATIONS, OPS_MOVE, 0,
+    if (ManifestBuilderAddOp(&mb, DECK_OPERATIONS, OP_BUF_MOVE, 0,
                              0, 1, NULL, 0) != 0) {
         print("[mtest] add move fail\n");
         exit(1);

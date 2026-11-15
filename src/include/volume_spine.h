@@ -29,7 +29,7 @@
  * kernel's mount would hold the kernel's blocks to digests of another Tally.
  * So the shape, the order and the trees that must read are spelled once,
  * here, and both take them from here — the loader compiles this text already
- * (tagfs_boot.h).
+ * (tagboot_lectern.h, which tagboot_lectern*.c are built on).
  *
  * No library, no state, no memory but the caller's: the rule of volume_book.h.
  * Integer types come from the includer, as volume_deed.h says.
