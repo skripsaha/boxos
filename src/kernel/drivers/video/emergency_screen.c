@@ -35,15 +35,12 @@
 #include "vmm.h"              /* vmm_phys_to_virt */
 #include "boxos_screen.h"
 #include "boxos_imprint_data.h"
+#include "boxos_imprint_press.h"
+#include "boxos_utf8.h"
 #include "boxos_pixel.h"
 #include "boxos_color.h"
 #include "boxos_glyph_fold.h"
 #include "video_colors.h"
-
-/* What a framebuffer is drawn in without asking: a cell the glass shows about
- * this many rows of, never under the smallest the imprint has — as the
- * display chooses when the person has not. */
-#define EMERGENCY_ROWS_CHOSEN 54u
 
 /* Where the next cell goes, and a character the ring has begun but not
  * finished. A multi-byte character takes its lead byte's tone. */
@@ -109,34 +106,8 @@ static volatile uint8_t *TextPage(void)
     return (volatile uint8_t *)vmm_phys_to_virt((uintptr_t)SCREEN_TEXT_PHYS);
 }
 
-/* The whole number nearest below the square root of value, value < 65536. */
-static uint32_t Root(uint32_t value)
-{
-    uint32_t low = 0, high = 256;
-    while (high - low > 1) {
-        uint32_t middle = (low + high) / 2u;
-        if (middle * middle <= value) low = middle;
-        else                          high = middle;
-    }
-    return low;
-}
-
-/* Paper and ink, 0xRRGGBB, mixed as light — share parts of the imprint's
- * steps of the ink: light taken as the square of a value, near enough to
- * sRGB's curve for the two steps between the two. */
-static uint32_t MixLight(uint32_t paper, uint32_t ink, uint32_t share)
-{
-    uint32_t mixed = 0;
-    for (uint32_t shift = 0; shift <= 16u; shift += 8u) {
-        uint32_t p = (paper >> shift) & 0xFFu, i = (ink >> shift) & 0xFFu;
-        uint32_t light = ((BOXOS_IMPRINT_INKED - share) * p * p + share * i * i) / BOXOS_IMPRINT_INKED;
-        mixed |= Root(light) << shift;
-    }
-    return mixed;
-}
-
 /* A cell's content: on the text page the adapter's glyph, on a framebuffer
- * the character, drawn from the imprint. */
+ * the character, pressed from the imprint (boxos_imprint_press.h). */
 static void PutCell(uint32_t col, uint32_t row, uint32_t cell, uint8_t tone)
 {
     if (col >= g_glass.cols || row >= g_glass.rows) return;
@@ -149,20 +120,11 @@ static void PutCell(uint32_t col, uint32_t row, uint32_t cell, uint8_t tone)
         return;
     }
 
-    uint32_t ink = BoxAttrFgRgb(attr), paper = BoxAttrBgRgb(attr);
-    uint32_t steps[BOXOS_IMPRINT_INKED + 1u];
-    for (uint32_t share = 0; share <= BOXOS_IMPRINT_INKED; share++)
-        steps[share] = BoxPixelEncode(share == 0 ? paper : share == BOXOS_IMPRINT_INKED ? ink : MixLight(paper, ink, share),
-                                      g_glass.format);
-    uint32_t glyph = BoxImprintFind(&BoxSystemImprint, cell);
-    volatile uint8_t *line = g_glass.pixels
-                           + (size_t)row * g_glass.cell_h * g_glass.stride
-                           + (size_t)col * g_glass.cell_w * 4u;
-    for (uint32_t y = 0; y < g_glass.cell_h; y++, line += g_glass.stride) {
-        volatile uint32_t *px = (volatile uint32_t *)line;
-        for (uint32_t x = 0; x < g_glass.cell_w; x++)
-            px[x] = steps[BoxImprintShade(&BoxSystemImprint, g_glass.size, glyph, x, y)];
-    }
+    uint32_t inks[BOXOS_IMPRINT_INKED + 1u];
+    BoxPressInks(BoxAttrBgRgb(attr), BoxAttrFgRgb(attr), g_glass.format, inks);
+    BoxPressGlyph(&BoxSystemImprint, g_glass.size, BoxImprintFind(&BoxSystemImprint, cell),
+                  g_glass.pixels + (size_t)row * g_glass.cell_h * g_glass.stride + (size_t)col * g_glass.cell_w * 4u,
+                  g_glass.stride, inks);
 }
 
 static void ClearGlass(void)
@@ -191,16 +153,6 @@ static void ClearGlass(void)
 /* =========================================================================
  *  The pen — bytes into cells, drawn or only counted
  * ========================================================================= */
-
-/* Bytes the lead byte promises, itself included; 0 = not a lead byte
- * (0x80-0xBF stray continuation, 0xC0/0xC1 overlong, 0xF5+ past U+10FFFF). */
-static uint8_t Utf8Promise(uint8_t b)
-{
-    if (b >= 0xC2u && b <= 0xDFu) return 2;
-    if (b >= 0xE0u && b <= 0xEFu) return 3;
-    if (b >= 0xF0u && b <= 0xF4u) return 4;
-    return 0;
-}
 
 /* A line ends. Below the last row nothing is drawn; the caller draws the tail
  * again. A drawing pen asks about a panic once a row. */
@@ -277,7 +229,7 @@ static void PenByte(EmergencyPen *pen, uint8_t b, uint8_t tone, bool draw)
             if (pen->have < pen->need) return;
 
             uint32_t cp = 0;
-            if (utf8_decode((const char *)pen->seq, &cp) == (int)pen->need) {
+            if (BoxUtf8Next((const char *)pen->seq, pen->need, &cp) == pen->need) {
                 pen->have = 0;
                 pen->need = 0;
                 PenCharacter(pen, cp, pen->tone, draw);
@@ -291,7 +243,7 @@ static void PenByte(EmergencyPen *pen, uint8_t b, uint8_t tone, bool draw)
 
     if (b < 0x80u) { PenAscii(pen, b, tone, draw); return; }
 
-    uint8_t need = Utf8Promise(b);
+    uint8_t need = (uint8_t)BoxUtf8Promise(b);
     if (!need) { PenCharacter(pen, 0xFFFDu, tone, draw); return; }
 
     pen->seq[0] = b;
@@ -393,7 +345,7 @@ void EmergencyScreenUsePixels(volatile uint8_t *pixels, uint32_t width,
     g_glass.height = height;
     g_glass.stride = stride;
     g_glass.format = format;
-    g_glass.size   = BoxImprintSizeFor(&BoxSystemImprint, (height + EMERGENCY_ROWS_CHOSEN / 2u) / EMERGENCY_ROWS_CHOSEN);
+    g_glass.size   = BoxPressSize(&BoxSystemImprint, height);
     g_glass.cell_w = BoxSystemImprint.Sizes[g_glass.size].Width;
     g_glass.cell_h = BoxSystemImprint.Sizes[g_glass.size].Height;
     g_glass.cols   = width  / g_glass.cell_w;

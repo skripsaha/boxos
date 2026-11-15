@@ -35,6 +35,11 @@ _Static_assert(sizeof(ScreenDescription) == 32,
                "ScreenDescription is a kernel/userspace ABI and must stay 32 bytes");
 #endif
 
+/* A framebuffer's cell when nobody has chosen one: as tall as shows about this
+ * many rows — the display's, the Emergency Screen's and Gangway's alike, so
+ * the system's text is one size from the loader on. */
+#define SCREEN_ROWS_CHOSEN  54u
+
 /*
  * The Touch tag the kernel publishes the screen's turns on. Payload: one
  * uint32_t, a SCREEN_EVENT_*.

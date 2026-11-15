@@ -607,14 +607,13 @@ bool IpcStep()
 }
 
 // How tall a cell is on a framebuffer Tall pixels high: text size, or with
-// none, a height the glass shows about this many rows of — never under
-// sixteen pixels, never taller than the glass.
-constexpr std::uint32_t RowsChosen = 54;
-
+// none, a height the glass shows about SCREEN_ROWS_CHOSEN rows of — never
+// under sixteen pixels, never taller than the glass.
 std::int32_t CellHeight(std::uint32_t Tall)
 {
     const std::int64_t Said = settings_number("text size");
-    const std::int64_t Height = Said ? Said : std::max<std::int64_t>(16, (Tall + RowsChosen / 2) / RowsChosen);
+    const std::int64_t Height =
+        Said ? Said : std::max<std::int64_t>(16, (Tall + SCREEN_ROWS_CHOSEN / 2) / SCREEN_ROWS_CHOSEN);
     return static_cast<std::int32_t>(std::min<std::int64_t>(Height, Tall));
 }
 

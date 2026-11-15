@@ -1,10 +1,13 @@
 /*
- * Gangway — what the loader says, and where: COM1, driven by its own port
- * writes and so the one voice before the firmware's console is reached and
- * after ExitBootServices takes it away; and the firmware's console in between.
+ * Gangway — what the loader says, and where: the journal, which every line
+ * goes into; COM1, driven by its own port writes and so a voice before the
+ * firmware's tables are reached and after ExitBootServices; and, when the
+ * loader stops, the screen it draws on itself (gangway_draw.c), or the
+ * firmware's console where there is no framebuffer to draw on.
  */
 
 #include "gangway.h"
+#include "video_colors.h"
 
 /* =========================================================================
  * COM1 serial debug output (raw port I/O — works before UEFI console)
@@ -53,9 +56,9 @@ void Com1Str(const char *s)
  * else (boarding_pass.h, BoardingJournal): the loader's lines open the log —
  * on the serial wire, in logsave, in the display — beside all that follows.
  *
- * Only a loader that stops shows what it said: Panic puts the whole journal on
- * the firmware's console and then why, because on a machine that will not
- * boot the account is the whole of the diagnosis.
+ * Only a loader that stops shows what it said: Panic draws the journal and
+ * then why, because on a machine that will not boot the account is the whole
+ * of the diagnosis.
  *
  * '\n' alone ends a line here, as in the kernel's ring; the '\r' a firmware
  * console wants is put back when the journal is shown.
@@ -87,6 +90,15 @@ const char *JournalText(uint32_t *bytes, uint32_t *lost)
     return g_journal;
 }
 
+/* Text down COM1, '\n' as "\r\n". */
+static void Com1Show(const char *text, uint32_t bytes)
+{
+    for (uint32_t i = 0; i < bytes; i++) {
+        if (text[i] == '\n') Com1Byte('\r');
+        Com1Byte(text[i]);
+    }
+}
+
 /* Text on the firmware's console, '\n' as "\r\n", a batch to one
  * output_string call: a call a character cost ~80 firmware round trips a line
  * on a board that funnels its console through a 115200-baud serial port. */
@@ -109,13 +121,6 @@ static void ConsoleShow(const char *text, uint32_t bytes)
         buf[pos] = 0;
         g_st->con_out->output_string(g_st->con_out, buf);
     }
-}
-
-static void ConsoleSay(const char *text)
-{
-    uint32_t n = 0;
-    while (text[n]) n++;
-    ConsoleShow(text, n);
 }
 
 /* "0x" and all sixteen digits. It wrote fourteen once, from the top of a
@@ -147,25 +152,41 @@ void PrintDec(uint64_t v)
     Print(buf + pos);
 }
 
-/* Fatal halt: the journal on the firmware's console, then why — said there
- * directly, so a journal that ran out of room cannot swallow it — and nothing
- * more. */
+/* Fatal halt: the journal, then why — said apart from it, so a journal that
+ * ran out of room cannot swallow it — on the screen in the loader's own
+ * letters, the journal's last lines when it holds no more, and the whole of it
+ * down COM1; on the firmware's console only where there is no framebuffer to
+ * draw on. Then nothing more. */
 void Panic(const char *msg)
 {
-    ConsoleShow(g_journal, g_journal_used);
-    if (g_journal_lost) {
-        char count[11];
-        int  at = 10;
-        uint32_t n = g_journal_lost;
-        count[at] = '\0';
-        do { count[--at] = (char)('0' + n % 10); n /= 10; } while (n && at > 0);
-        ConsoleSay("\n(and ");
-        ConsoleSay(count + at);
-        ConsoleSay(" bytes more were said than the journal had room for)\n");
+    static const char lost_open[]  = "\n(and ";
+    static const char lost_close[] = " bytes more were said than the journal had room for)\n";
+    static const char fatal[]      = "\n[GANGWAY FATAL] ";
+
+    char     count[10];
+    uint32_t digits = 0;
+    for (uint32_t n = g_journal_lost; n; n /= 10) digits++;
+    for (uint32_t n = g_journal_lost, at = digits; at > 0; n /= 10) count[--at] = (char)('0' + n % 10);
+    uint32_t msg_bytes = 0;
+    while (msg[msg_bytes]) msg_bytes++;
+    uint32_t noted = g_journal_lost ? 1u : 0u;
+
+    const DrawPiece account[] = {
+        { g_journal,  g_journal_used,                    VIDEO_ATTR_DEFAULT },
+        { lost_open,  noted * (sizeof(lost_open) - 1u),  VIDEO_ATTR_WARNING },
+        { count,      digits,                            VIDEO_ATTR_WARNING },
+        { lost_close, noted * (sizeof(lost_close) - 1u), VIDEO_ATTR_WARNING },
+        { fatal,      sizeof(fatal) - 1u,                VIDEO_ATTR_ERROR   },
+        { msg,        msg_bytes,                         VIDEO_ATTR_ERROR   },
+        { "\n",       1u,                                VIDEO_ATTR_ERROR   },
+    };
+    const uint32_t pieces = sizeof(account) / sizeof(account[0]);
+
+    int drawn = DrawEnd(account, pieces);
+    for (uint32_t i = 0; i < pieces; i++) {
+        Com1Show(account[i].text, account[i].bytes);
+        if (!drawn) ConsoleShow(account[i].text, account[i].bytes);
     }
-    ConsoleSay("\n[GANGWAY FATAL] ");
-    ConsoleSay(msg);
-    ConsoleSay("\n");
     for (;;) {
         __asm__ volatile ("cli; hlt");
     }

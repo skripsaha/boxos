@@ -7,7 +7,8 @@
  * The loader is one EFI image linked from more than one file, each answering
  * for one part of the journey gangway.c walks in order: the firmware's tables,
  * the console, the medium, the screen, memory, the page tables and the
- * handoff; gangway_deed.c takes up what a volume's Deed says; gangway_attest.c
+ * handoff; gangway_draw.c draws on the screen what the loader shows itself;
+ * gangway_deed.c takes up what a volume's Deed says; gangway_attest.c
  * is the desk the Lectern (gangway_lectern*.c, gangway_succession.c) chooses
  * the volume's kernel at. Every other function and variable stays static to
  * its own file, so a name here is a name another file of the loader really
@@ -127,8 +128,11 @@ EFI_STATUS DeedTakeUp(const uint8_t *deed_block, uint64_t ground_start);
 typedef EFI_STATUS (*AttestReader)(uint64_t vlba, uint32_t count_512, void *buffer);
 const char *SuccessionTake(EFI_BOOT_SERVICES *bs, AttestReader read, uint64_t *bytes, uint64_t *alloc_end);
 
-/* gangway_video.c: the framebuffer the kernel is handed — all zero when there
- * is none it can be, and the kernel comes up on text. */
+/* gangway_video.c: the framebuffer the kernel is handed, in the mode chosen
+ * for it, said (QueryGopFramebuffer); the framebuffer of the mode the firmware
+ * has on now, the mode left as it is and nothing said (GopFramebufferNow).
+ * Each all zero when there is none it can be — handed over, the kernel comes
+ * up on text. */
 typedef struct {
     uint64_t addr;
     uint32_t width;
@@ -138,6 +142,25 @@ typedef struct {
 } FbInfo;
 
 FbInfo QueryGopFramebuffer(void);
+FbInfo GopFramebufferNow(void);
+
+/*
+ * gangway_draw.c: text the loader draws on the screen itself, in the cells of
+ * the imprint (boxos_imprint_press.h) — the same characters the kernel and the
+ * display draw, never the firmware's font. DrawUse names the framebuffer the
+ * journey chose (QueryGopFramebuffer); before it, the firmware's mode as it is
+ * is drawn on (GopFramebufferNow). DrawEnd clears the screen and draws the end
+ * of the pieces — one text, each piece in its colours — as much of it as the
+ * screen holds, cut from the front: 0 when there is no framebuffer to draw on.
+ */
+typedef struct {
+    const char *text;   /* UTF-8; '\n' ends a line */
+    uint32_t    bytes;
+    uint8_t     attr;   /* VIDEO_ATTR_* (video_colors.h) */
+} DrawPiece;
+
+void DrawUse(const FbInfo *fb);
+int  DrawEnd(const DrawPiece *pieces, uint32_t count);
 
 /*
  * gangway_memory.c: the three handoff pages asked for before anything is

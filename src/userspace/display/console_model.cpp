@@ -5,40 +5,9 @@
 
 #include "box/color.h"
 #include "boxos_log_tone.h"
+#include "boxos_utf8.h"
 
 namespace {
-
-std::uint8_t Utf8Promise(std::uint8_t Byte) noexcept
-{
-    if (Byte >= 0xC2u && Byte <= 0xDFu) return 2;
-    if (Byte >= 0xE0u && Byte <= 0xEFu) return 3;
-    if (Byte >= 0xF0u && Byte <= 0xF4u) return 4;
-    return 0;
-}
-
-int DecodeUtf8(const char *Bytes, std::size_t Length, std::uint32_t &Codepoint) noexcept
-{
-    if (Length == 0) return 0;
-    const std::uint8_t Lead = static_cast<std::uint8_t>(Bytes[0]);
-    const std::uint8_t Need = Utf8Promise(Lead);
-    if (Need == 0 || Length < Need) return 0;
-
-    std::uint32_t Value = 0;
-    if (Need == 2) Value = Lead & 0x1Fu;
-    if (Need == 3) Value = Lead & 0x0Fu;
-    if (Need == 4) Value = Lead & 0x07u;
-    for (std::uint8_t Index = 1; Index < Need; Index++) {
-        const std::uint8_t Byte = static_cast<std::uint8_t>(Bytes[Index]);
-        if ((Byte & 0xC0u) != 0x80u) return 0;
-        Value = (Value << 6) | (Byte & 0x3Fu);
-    }
-    if ((Need == 2 && Value < 0x80u) || (Need == 3 && Value < 0x800u) ||
-        (Need == 4 && (Value < 0x10000u || Value > 0x10FFFFu)) ||
-        (Value >= 0xD800u && Value <= 0xDFFFu))
-        return 0;
-    Codepoint = Value;
-    return Need;
-}
 
 // What a cell is given for Codepoint: the character, or — for a control the
 // console does not act on, which shows nothing a reader could take for text —
@@ -150,11 +119,10 @@ void ConsoleModel::Write(const char *Bytes, std::size_t Length,
         }
 
         // A byte that begins no character is one missing character: U+FFFD,
-        // and the next byte read afresh.
+        // and the next byte read afresh (BoxUtf8Next).
         std::uint32_t Codepoint = 0;
-        const int Decoded = DecodeUtf8(Bytes + Offset, Length - Offset, Codepoint);
-        WriteCell(Decoded == 0 ? U'\uFFFD' : AsCell(Codepoint), Foreground, Background);
-        Offset += Decoded == 0 ? 1u : static_cast<std::size_t>(Decoded);
+        Offset += BoxUtf8Next(Bytes + Offset, Length - Offset, &Codepoint);
+        WriteCell(AsCell(Codepoint), Foreground, Background);
     }
 }
 

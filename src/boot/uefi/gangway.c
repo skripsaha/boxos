@@ -230,7 +230,9 @@ EFI_STATUS EFIAPI GangwayMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     uint64_t kernel_end_phys = KernelTake();
     Moment("kernel");
 
+    /* The screen chosen is the one a stop from here on is drawn on. */
     FbInfo fb = QueryGopFramebuffer();
+    DrawUse(&fb);
     Moment("screen");
 
     Print("Gangway: building memory map...\r\n");

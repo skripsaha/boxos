@@ -460,6 +460,60 @@ static GopModeChoice SelectGopBestMode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
     }
     return choice;
 }
+
+/* What a mode's framebuffer is to this loader: one it can hand the kernel —
+ * and draw on itself (gangway_draw.c) — or why it is not. */
+typedef enum {
+    FbHeld,
+    FbNoInfo,       /* the mode describes nothing */
+    FbLayout,       /* pixels in a layout the kernel cannot be told about */
+    FbOverflow,     /* scan lines past what the contract can say */
+    FbAbsent,       /* no framebuffer for its own mode */
+    FbAperture,     /* an aperture smaller than its scan lines */
+    FbPastEnd,      /* an address its span overflows */
+} FbVerdict;
+
+/* The framebuffer of a GOP's current mode, in *fb — all zero unless FbHeld.
+ * Says nothing: the caller says why when it should. */
+static FbVerdict GopFramebufferOf(const EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *mode, FbInfo *fb)
+{
+    MemZero(fb, sizeof(*fb));
+    if (!mode->info) return FbNoInfo;
+
+    uint32_t format      = 0;
+    uint32_t pixel_bytes = 0;
+    if (!GopModeInfoUsable(mode->info, &format, &pixel_bytes)) return FbLayout;
+
+    uint64_t stride = (uint64_t)mode->info->pixels_per_scan_line * pixel_bytes;
+    if (stride > 0xFFFFFFFFULL ||
+        stride > (~0ULL / (uint64_t)mode->info->vertical_resolution))
+        return FbOverflow;
+    uint64_t span = stride * (uint64_t)mode->info->vertical_resolution;
+
+    if (mode->frame_buffer_base == 0 || span == 0) return FbAbsent;
+
+    /*
+     * UEFI 2.10 §12.9.2 defines FrameBufferSize as PixelsPerScanLine ×
+     * VerticalResolution × PixelElementSize — the one number the firmware
+     * publishes that can catch a pixel size this loader derived wrongly.
+     *
+     * A non-zero FrameBufferSize is authoritative for every pixel format.
+     * Zero is permitted by older firmware, so it cannot be used as a reason
+     * to reject an otherwise valid mode.
+     */
+    if (mode->frame_buffer_size != 0 &&
+        span > (uint64_t)mode->frame_buffer_size)
+        return FbAperture;
+    if (mode->frame_buffer_base > (~0ULL - span)) return FbPastEnd;
+
+    fb->addr   = mode->frame_buffer_base;
+    fb->width  = mode->info->horizontal_resolution;
+    fb->height = mode->info->vertical_resolution;
+    fb->stride = (uint32_t)stride;
+    fb->format = format;
+    return FbHeld;
+}
+
 FbInfo QueryGopFramebuffer(void)
 {
     FbInfo fb;
@@ -502,11 +556,25 @@ FbInfo QueryGopFramebuffer(void)
     Print("\r\n");
 
     EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *mode = gop->mode;
-    if (!mode->info) return fb;
-
-    uint32_t format      = 0;
-    uint32_t pixel_bytes = 0;
-    if (!GopModeInfoUsable(mode->info, &format, &pixel_bytes)) {
+    switch (GopFramebufferOf(mode, &fb)) {
+    case FbHeld:
+        /* The order and the scan line go on the line as well. They are what
+         * this loader decided rather than read, and a wrong one shows as
+         * inverted colours or diagonal text with nothing else on screen to
+         * explain it. */
+        Print("Gangway: GOP ");
+        PrintDec(fb.width);
+        Print("x");
+        PrintDec(fb.height);
+        Print(" fb=");
+        PrintHex64(fb.addr);
+        Print(" stride=");
+        PrintDec(fb.stride);
+        Print(fb.format == 0 ? " order=RGBX\r\n" : " order=BGRX\r\n");
+        break;
+    case FbNoInfo:
+        break;
+    case FbLayout:
         Print("Gangway: GOP pixel format ");
         PrintDec((uint64_t)mode->info->pixel_format);
         Print(" (masks r=");
@@ -519,63 +587,34 @@ FbInfo QueryGopFramebuffer(void)
         PrintHex64(mode->info->pixel_info.reserved_mask);
         Print(") is not a layout this loader can hand over — no framebuffer, "
               "the kernel comes up on text\r\n");
-        return fb;
-    }
-
-    uint64_t stride = (uint64_t)mode->info->pixels_per_scan_line * pixel_bytes;
-    if (stride > 0xFFFFFFFFULL ||
-        stride > (~0ULL / (uint64_t)mode->info->vertical_resolution)) {
+        break;
+    case FbOverflow:
         Print("Gangway: GOP scan-line geometry overflows the framebuffer contract — "
               "the kernel comes up on text\r\n");
-        return fb;
-    }
-    uint64_t span = stride * (uint64_t)mode->info->vertical_resolution;
-
-    if (mode->frame_buffer_base == 0 || span == 0) {
+        break;
+    case FbAbsent:
         Print("Gangway: GOP reports no framebuffer for its own mode — "
               "the kernel comes up on text\r\n");
-        return fb;
-    }
-
-    /*
-     * UEFI 2.10 §12.9.2 defines FrameBufferSize as PixelsPerScanLine ×
-     * VerticalResolution × PixelElementSize — the one number the firmware
-     * publishes that can catch a pixel size this loader derived wrongly.
-     *
-     * A non-zero FrameBufferSize is authoritative for every pixel format.
-     * Zero is permitted by older firmware, so it cannot be used as a reason
-     * to reject an otherwise valid mode.
-     */
-    if (mode->frame_buffer_size != 0 &&
-        span > (uint64_t)mode->frame_buffer_size) {
+        break;
+    case FbAperture:
         Print("Gangway: GOP's aperture is smaller than the scan lines it "
               "describes — refusing the framebuffer\r\n");
-        return fb;
-    }
-    if (mode->frame_buffer_base > (~0ULL - span)) {
+        break;
+    case FbPastEnd:
         Print("Gangway: GOP framebuffer address overflows its visible span — "
               "the kernel comes up on text\r\n");
-        return fb;
+        break;
     }
+    return fb;
+}
 
-    fb.addr   = mode->frame_buffer_base;
-    fb.width  = mode->info->horizontal_resolution;
-    fb.height = mode->info->vertical_resolution;
-    fb.stride = (uint32_t)stride;
-    fb.format = format;
+FbInfo GopFramebufferNow(void)
+{
+    FbInfo fb;
+    MemZero(&fb, sizeof(fb));
 
-    /* The order and the scan line go on the line as well. They are what this
-     * loader decided rather than read, and a wrong one shows as inverted
-     * colours or diagonal text with nothing else on screen to explain it. */
-    Print("Gangway: GOP ");
-    PrintDec(fb.width);
-    Print("x");
-    PrintDec(fb.height);
-    Print(" fb=");
-    PrintHex64(fb.addr);
-    Print(" stride=");
-    PrintDec(fb.stride);
-    Print(fb.format == 0 ? " order=RGBX\r\n" : " order=BGRX\r\n");
-
+    GopSelection selection;
+    if (GopFindPrimary(&selection) && selection.gop && selection.gop->mode)
+        (void)GopFramebufferOf(selection.gop->mode, &fb);
     return fb;
 }

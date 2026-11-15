@@ -774,9 +774,10 @@ STAGE2_SRC        = $(BOOTDIR)/stage2/stage2.asm
 KERNEL_ENTRY_SRC  = $(ENTRYDIR)/kernel_entry.asm
 
 # ==== DISCOVER FILES ====
-# Exclude macOS metadata files (._*) and userspace
-C_SRCS      := $(shell find $(SRCDIR) -name '*.c' ! -name '._*' ! -path '*/userspace/*')
-ASM_SRCS    := $(shell find $(SRCDIR) -name '*.asm' ! -name '._*' ! -path '*/userspace/*')
+# Exclude macOS metadata files (._*), userspace, and the UEFI loader — Gangway
+# is an image of its own (GANGWAY_SRC), never a part of the kernel.
+C_SRCS      := $(shell find $(SRCDIR) -name '*.c' ! -name '._*' ! -path '*/userspace/*' ! -path '*/boot/uefi/*')
+ASM_SRCS    := $(shell find $(SRCDIR) -name '*.asm' ! -name '._*' ! -path '*/userspace/*' ! -path '*/boot/uefi/*')
 
 # ==== EXCLUSIONS ====
 BOOT_ASM_SRCS     := $(STAGE1_SRC) $(STAGE2_SRC)
@@ -908,7 +909,7 @@ UEFI_ESP_IMG = $(BUILDDIR)/esp.img
 # change to the loader.
 GANGWAY_SRC    = src/boot/uefi/gangway.c src/boot/uefi/gangway_bytes.c src/boot/uefi/gangway_console.c \
                  src/boot/uefi/gangway_firmware.c src/boot/uefi/gangway_medium.c \
-                 src/boot/uefi/gangway_video.c src/boot/uefi/gangway_memory.c \
+                 src/boot/uefi/gangway_video.c src/boot/uefi/gangway_draw.c src/boot/uefi/gangway_memory.c \
                  src/boot/uefi/gangway_paging.c src/boot/uefi/gangway_handoff.c \
                  src/boot/uefi/gangway_deed.c src/boot/uefi/gangway_attest.c \
                  src/boot/uefi/gangway_lectern.c src/boot/uefi/gangway_lectern_tree.c \
@@ -919,7 +920,10 @@ GANGWAY_HDRS   = src/boot/uefi/gangway.h src/boot/uefi/uefi.h \
                  src/include/boot_info.h src/include/boarding_pass.h \
                  src/include/volume_deed.h src/include/volume_book.h \
                  src/include/volume_tally.h src/include/volume_spine.h src/include/volume_ribbon.h \
-                 src/include/volume_digest.h
+                 src/include/volume_digest.h \
+                 src/include/boxos_imprint.h src/include/boxos_imprint_press.h src/include/boxos_pixel.h \
+                 src/include/boxos_screen.h src/include/boxos_utf8.h src/include/boxos_color.h \
+                 src/include/video_colors.h $(IMPRINT_DATA)
 GANGWAY_JUMP   = src/boot/uefi/gangway_jump.asm
 GANGWAY_LD     = src/boot/uefi/gangway.ld
 GANGWAY_EFI    = $(BUILDDIR)/BOOTX64.EFI
@@ -936,7 +940,7 @@ UEFI_CFLAGS_GCC = -ffreestanding -nostdlib -nostdinc \
                   -Wall -Wextra -Os \
                   -DBOOT_INFO_ADDR_FROM_BUILD=$(BOOT_INFO_ADDR) \
                   -DBOARDING_PASS_ADDR_FROM_BUILD=$(BOARDING_PASS_ADDR) \
-                  -I$(SRCDIR)/boot/uefi -I$(SRCDIR)/include
+                  -I$(SRCDIR)/boot/uefi -I$(SRCDIR)/include -I$(IMPRINT_DIR)
 
 # clang direct-to-PE path: -fpic is invalid on MSVC target; PE handles
 # relocations natively via the .reloc section.
@@ -947,7 +951,7 @@ UEFI_CFLAGS_CLANG = -ffreestanding -nostdlib -nostdinc \
                     -target x86_64-unknown-windows \
                     -DBOOT_INFO_ADDR_FROM_BUILD=$(BOOT_INFO_ADDR) \
                     -DBOARDING_PASS_ADDR_FROM_BUILD=$(BOARDING_PASS_ADDR) \
-                    -I$(SRCDIR)/boot/uefi -I$(SRCDIR)/include
+                    -I$(SRCDIR)/boot/uefi -I$(SRCDIR)/include -I$(IMPRINT_DIR)
 
 # Detect whether lld-link is available for direct PE output via clang.
 # Apple clang does not ship lld-link, so we fall through to the gcc+objcopy path
