@@ -670,9 +670,12 @@ static error_t volume_take_ground(uint8_t seat)
                 from_tail = true;
             }
 
+            /* With a pass, the first walk takes only the volume it names;
+             * without one there is nothing to prefer, and the first walk
+             * takes the first volume it can read. */
             bool wanted = have_pass &&
                           memcmp(candidate.head.uuid, want, 16) == 0;
-            if (pass == 0 && !wanted) {
+            if (pass == 0 && have_pass && !wanted) {
                 DeedRelease(&candidate);
                 continue;
             }
