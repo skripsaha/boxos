@@ -12,6 +12,7 @@
 #include "../block_map/block_map_derived.h"
 #include "op_registry.h"
 #include "boxos_decks.h"
+#include "boxos_system_info.h"   /* SystemResources — what system.resources answers */
 #include "atomics.h"
 #include "cpu_calibrate.h"
 
@@ -49,18 +50,16 @@ static StandBinder s_promise_binder;
 static uint64_t StandPromiseSeen(void)
 {
     const OpRegistration* reg = OpRegistryLookup(OP_KIND(DECK_SYSTEM, SYSTEM_OP_RESOURCES));
-    uint8_t               blob[96];
-    uint64_t              free = 0;
+    SystemResources       res;
     ManifestOp            op   = { .op_kind = OP_KIND(DECK_SYSTEM, SYSTEM_OP_RESOURCES),
                                    .in_crate = CRATE_INDEX_NONE, .out_crate = 0 };
-    Crate                 out  = { .magic = CRATE_MAGIC, .addr = (uint64_t)(uintptr_t)blob,
-                                   .capacity = sizeof(blob) };
+    Crate                 out  = { .magic = CRATE_MAGIC, .addr = (uint64_t)(uintptr_t)&res,
+                                   .capacity = sizeof(res) };
     OpContext             ctx;
     memset(&ctx, 0, sizeof(ctx));
-    if (!reg || reg->handler(&op, &out, 1, &ctx) != OK || blob[25] != 1)
+    if (!reg || reg->handler(&op, &out, 1, &ctx) != OK || res.volume_free_counted != 1)
         return UINT64_MAX;
-    memcpy(&free, blob + 16, sizeof(free));
-    return free / TAGFS_BLOCK_SIZE;
+    return res.volume_free_bytes / TAGFS_BLOCK_SIZE;
 }
 
 /* Whether Slips lie over the file's last block. */

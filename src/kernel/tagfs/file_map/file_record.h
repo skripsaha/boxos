@@ -4,6 +4,18 @@
 #include "../tagfs.h"
 #include "volume_tally.h"   /* PARCEL_STRIPS_MOST: the cut every writer of a Tally keeps alike */
 
+/* FileRecord.flags is one word spelled twice: the kernel's TAGFS_FILE_*
+ * (tagfs_constants.h) and the book's TALLY_FILE_* (volume_tally.h), which the
+ * Tally and the ribbon carry as they stand (binder_items.c, endpaper_fact.c,
+ * ribbon_records.c). Each bit is held to its other spelling here. */
+STATIC_ASSERT(TAGFS_FILE_ACTIVE      == TALLY_FILE_ACTIVE,      "TAGFS_FILE_ACTIVE is the book's TALLY_FILE_ACTIVE");
+STATIC_ASSERT(TAGFS_FILE_UNDONE      == TALLY_FILE_UNDONE,      "TAGFS_FILE_UNDONE is the book's TALLY_FILE_UNDONE");
+STATIC_ASSERT(TAGFS_FILE_ROLE_MASK   == TALLY_FILE_ROLE_MASK,   "TAGFS_FILE_ROLE_MASK is the book's TALLY_FILE_ROLE_MASK");
+STATIC_ASSERT(TAGFS_FILE_ROLE_SYSTEM == TALLY_FILE_ROLE_SYSTEM, "TAGFS_FILE_ROLE_SYSTEM is the book's TALLY_FILE_ROLE_SYSTEM");
+STATIC_ASSERT(TAGFS_FILE_ROLE_BOOT   == TALLY_FILE_ROLE_BOOT,   "TAGFS_FILE_ROLE_BOOT is the book's TALLY_FILE_ROLE_BOOT");
+STATIC_ASSERT(TAGFS_FILE_ROLE_KERNEL == TALLY_FILE_ROLE_KERNEL, "TAGFS_FILE_ROLE_KERNEL is the book's TALLY_FILE_ROLE_KERNEL");
+STATIC_ASSERT(TAGFS_FILE_DELETED     == TALLY_FILE_DELETED,     "TAGFS_FILE_DELETED is the book's TALLY_FILE_DELETED");
+
 /*
  * FileRecord — what memory knows of one live file: a header (name, tags,
  * flags, size, times) and the file's runs, as the map of live files holds them

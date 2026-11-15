@@ -8,6 +8,7 @@ extern "C" {
 #include "box/types.h"
 #include "box/error.h"
 #include "box/time.h"   /* BoxTime, for clock_boxtime below */
+#include "boxos_clockboard.h"   /* ClockBoard, CLOCKBOARD_MAGIC — the page, as the kernel lays it */
 
 /*
  * box/clock.h — userspace API over the kernel-mapped ClockBoard page.
@@ -18,19 +19,6 @@ extern "C" {
  * (no magic) each helper falls back to the manifest path so the caller
  * still gets a correct answer — slower, but never wrong.
  */
-
-#define CLOCKBOARD_MAGIC_USER    0x4b4c4342u    /* 'BCLK' */
-
-/* Mirrors the kernel struct exactly — keep in lock-step with
- * src/kernel/core/clockboard/clockboard.h. */
-typedef struct PACKED {
-    volatile uint64_t uptime_us;
-    volatile uint64_t uptime_ms;
-    volatile uint64_t tick_count;
-    uint64_t tsc_freq_khz;
-    uint64_t boot_unix_secs;
-    uint32_t magic;
-} ClockBoardView;
 
 /* True if the ClockBoard page is mapped and carries a valid header.
  * Helpers below silently fall back to the kernel path otherwise. */

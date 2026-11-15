@@ -26,7 +26,6 @@
 #define SYS_PROC_EXEC_FILE SYSTEM_OP_PROC_EXEC_FILE
 #define SYS_DEFRAG      SYSTEM_OP_DEFRAG_FILE
 #define SYS_FRAG_SCORE  SYSTEM_OP_FRAG_SCORE
-#define EFI_INFO_BLOB_SIZE       128u
 #define EFI_VERIFY_PE_OUT_SIZE   80u
 #define EFI_ESRT_ENTRY_SIZE      40u
 #define SYS_TAG_ADD     SYSTEM_OP_TAG_ADD
@@ -580,54 +579,26 @@ int sysinfo(system_info_t *info)
 {
     if (!info) return -ERR_INVALID_ARGUMENT;
 
-    uint8_t  blob[96] = {0};
-    uint32_t got      = 0;
+    uint32_t got = 0;
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_INFO,
                      NULL, 0, NULL, 0,
-                     blob, sizeof(blob), &got, BOX_ANSWER_GUARANTEED, NULL);
-    if (rc != 0)            return box_fail(rc);
-    if (got < sizeof(blob)) return -ERR_INTERNAL;
-
-    memcpy(info->name, blob, 32);
-    info->name[31] = '\0';
-    memcpy(&info->uptime_ns,    blob + 32, sizeof(uint64_t));
-    memcpy(&info->total_memory, blob + 40, sizeof(uint64_t));
-    memcpy(&info->used_memory,  blob + 48, sizeof(uint64_t));
-    memcpy(&info->free_memory,  blob + 56, sizeof(uint64_t));
-    memcpy(&info->tsc_freq_khz, blob + 64, sizeof(uint64_t));
-    memcpy(&info->cpu_total,    blob + 72, sizeof(uint32_t));
-    memcpy(&info->cpu_k_cores,  blob + 76, sizeof(uint32_t));
-    memcpy(&info->cpu_app_cores,blob + 80, sizeof(uint32_t));
-    memcpy(&info->process_count,blob + 84, sizeof(uint32_t));
-    memcpy(&info->tick_freq_hz, blob + 88, sizeof(uint32_t));
-    info->multicore_active  = blob[92];
-    info->has_invariant_tsc = blob[93];
-    info->has_waitpkg       = blob[94];
-    info->tick_source       = blob[95];
+                     info, sizeof(*info), &got, BOX_ANSWER_GUARANTEED, NULL);
+    if (rc != 0)             return box_fail(rc);
+    if (got < sizeof(*info)) return -ERR_INTERNAL;
+    info->name[sizeof(info->name) - 1] = '\0';
     return 0;
 }
 
 int system_resources(system_resources_t *out)
 {
     if (!out) return -ERR_INVALID_ARGUMENT;
-    uint8_t blob[80] = {0};
+
     uint32_t got = 0;
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_RESOURCES,
                      NULL, 0, NULL, 0,
-                     blob, sizeof(blob), &got, BOX_ANSWER_GUARANTEED, NULL);
-    if (rc != 0) return box_fail(rc);
-    if (got < sizeof(blob)) return -ERR_INTERNAL;
-
-    memcpy(out->volume_name, blob + 0, 16);
-    memcpy(&out->volume_free_bytes, blob + 16, 8);
-    out->volume_present = blob[24];
-    out->volume_free_counted = blob[25];
-    memset(out->_volume_pad, 0, sizeof(out->_volume_pad));
-    memcpy(&out->cpu_busy_tsc,      blob + 32, 8);
-    memcpy(&out->cpu_total_tsc,     blob + 40, 8);
-    memcpy(out->volume_uuid, blob + 48, 16);
-    memcpy(&out->volume_total_bytes, blob + 64, 8);
-    memcpy(&out->volume_used_bytes,  blob + 72, 8);
+                     out, sizeof(*out), &got, BOX_ANSWER_GUARANTEED, NULL);
+    if (rc != 0)            return box_fail(rc);
+    if (got < sizeof(*out)) return -ERR_INTERNAL;
     return 0;
 }
 
@@ -696,27 +667,13 @@ int perf_dump(void)
 int efi_info(efi_info_t *out)
 {
     if (!out) return -ERR_INVALID_ARGUMENT;
-    uint8_t  blob[EFI_INFO_BLOB_SIZE] = {0};
+
     uint32_t got = 0;
     int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_EFI_INFO,
                      NULL, 0, NULL, 0,
-                     blob, sizeof(blob), &got, BOX_ANSWER_GUARANTEED, NULL);
+                     out, sizeof(*out), &got, BOX_ANSWER_GUARANTEED, NULL);
     if (rc != 0)            return box_fail(rc);
-    if (got < sizeof(blob)) return -ERR_INTERNAL;
-
-    out->rt_available     = blob[0];
-    out->esrt_available   = blob[1];
-    out->sb_available     = blob[2];
-    out->sb_enforced      = blob[3];
-    out->sb_setup_mode    = blob[4];
-    out->sb_audit_mode    = blob[5];
-    out->sb_deployed_mode = blob[6];
-    out->_pad             = 0;
-    memcpy(&out->esrt_count,       blob + 8,  4);
-    memcpy(&out->cert_count_total, blob + 12, 4);
-    memcpy(&out->hash_count_total, blob + 16, 4);
-    memcpy(out->cert_count_by_db,  blob + 20, 6 * 4);
-    memcpy(out->hash_count_by_db,  blob + 44, 6 * 4);
+    if (got < sizeof(*out)) return -ERR_INTERNAL;
     return 0;
 }
 
