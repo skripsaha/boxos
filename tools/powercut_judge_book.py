@@ -1,6 +1,6 @@
 """powercut_judge_book — the oracles PowerCut's judge holds a book's run to
 beside the ones it holds every run to (powercut_judge.py): what spec_v2 §3.10
-promises of a book that format v1 never did.
+promises of a book.
 
 Not a program of its own, nor a second judge: each function here takes the
 Judge (powercut_judge.py) and says its verdicts through it, one line each, on

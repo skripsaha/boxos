@@ -51,80 +51,9 @@ EOF
     restore src/kernel/tagfs/settle/cadence.c
 }
 
-# Since step 1.6 the mount's next file id is past every id the medium shows
-# (mount/mount.c MountFidBoundary), so nextfid's fix is in, and its mutant
-# takes it out: the Ledger's count stands, and a cut whose medium names the
-# anchor's file ahead of its Ledger must hand that id out again.
-run_nextfidmut() {
-    mut_on src/kernel/tagfs/mount/mount.c "logcheck mutation" <<'EOF'
-import sys
-p = sys.argv[1]; s = open(p).read()
-a = "    if (next != led->next_file_id) {\n"
-assert s.count(a) == 1
-open(p, "w").write(s.replace(a, "    if (0 && next != led->next_file_id) {   /* logcheck mutation: the Ledger's count stands */\n"))
-EOF
-    mut_run nextfidmut nextfid reissue defect \
-        "the Ledger's count standing at the mount, a cut whose medium names the anchor's file hands its id out again"
-    restore src/kernel/tagfs/mount/mount.c
-}
-
-# The durability oracle's own mutant. It used to leave the file table
-# unwritten; since step 1.6 a sealed volume derives the table from the pool
-# (mount/mount.c MountFile: a row the table lacks is set from the record), so
-# the file is whole without it and that claim is gone. What a file's
-# durability stands on now is its record in the pool, under the seal: the
-# cycle's S3 writes nothing of the pool, and the anchored file must not be
-# found whole after the flush its ack stands on. And the state that flush
-# stood behind names what is wrong with it in volume-read's own code: the
-# newest seal names records the medium does not hold, and the mount falls
-# back from it (SEAL_FELL_BACK, with the rows it lets go) — where a cut before
-# the flush may leave the same, and is no defect.
-run_poolmut() {
-    mut_on src/kernel/tagfs/settle/settle.c "logcheck mutation" <<'EOF'
-import sys
-p = sys.argv[1]; s = open(p).read()
-a = "        rc          = PoolSnapWriteNext(&snap->pool, &done);\n"
-assert s.count(a) == 1
-open(p, "w").write(s.replace(a, "        rc          = OK;   /* logcheck mutation: the cycle writes nothing of the pool */\n"
-                                "        done        = true;\n"))
-EOF
-    mut_run poolmut nextfid boundaries fail \
-        "the cycle writing nothing of the pool, the state its flush stood behind does not stand on its newest seal"
-    awk -F"$TAB" '$1 == "boundaries"' "$PC_DIR/verdicts.tsv" | grep -q 'SEAL_FELL_BACK: '
-    chk $? "poolmut: and names it SEAL_FELL_BACK, the rows it lets go with it"
-    pc_expect "durable:_anchor_test@anchor_test" fail \
-        "the cycle writing nothing of the pool, the anchored file is not durable"
-    restore src/kernel/tagfs/settle/settle.c
-}
-
-# Since step 1.7 an anchor asks the medium for nothing itself: it waits for
-# the cycle that settles its change, and is answered from that cycle's end
-# (settle_ops.c). So the one flush its ack stands on is the cycle's last, S5,
-# after the Ledger — and that alone is taken out; the cycle's first flush, S2,
-# still covers the data and the chains. The mutant is asked on the WriteJob's
-# machine too, where the data's own flush comes before the cycle: the ack must
-# not be credited with it.
-run_flushmut() {
-    mut_on src/kernel/tagfs/settle/settle.c "logcheck mutation" <<'EOF'
-import sys
-p = sys.argv[1]; s = open(p).read()
-a = "        rc = VolumeFlushFor(VolumeFlushNeed());\n        snap->stage = \"the flush after the ledger\";"
-assert s.count(a) == 1
-open(p, "w").write(s.replace(a, "        rc = OK;   /* logcheck mutation: the cycle never asks the medium to flush after its ledger */\n"
-                                "        snap->stage = \"the flush after the ledger\";"))
-EOF
-    mut_run flushmut nextfid ack:anchor_test fail "the cycle never flushing after its Ledger, the anchor's ack has no flush behind it"
-    mut_run flushmut nextfid ack:anchor_test fail \
-        "on the WriteJob the data's own flush comes first, and still the anchor's ack has none behind it" \
-        STRICT=on CORES=4 MEM=4G
-    restore src/kernel/tagfs/settle/settle.c
-}
-
-# A book's mutants (VOLUME_FORMAT=v2). The ones above bite format v1's path,
-# and on a book would pass without touching a line it runs; each of these puts
-# one fault into the book's own (settle/sewing.c, mount/book_mount.c) and
-# asks the verdict that must say so. None asks for the lie's media: one
-# verdict of the power's is the question.
+# The book's own mutants: each puts one fault into the book's path
+# (settle/sewing.c, mount/book_mount.c) and asks the verdict that must say so.
+# None asks for the lie's media: one verdict of the power's is the question.
 
 # The flush of a stitch's data (FIRST_FLUSH, §3.3) taken out: the stitch still
 # says DATA_FLUSHED, and the record shows its data behind no flush its first

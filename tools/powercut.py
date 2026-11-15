@@ -19,8 +19,6 @@ it had made durable:
     powercut.py boots DIR --picks final|prefixes:STEP|dedup:A:B --sample N --seed HEX [--by-kind] > BOOTS
     powercut.py judge DIR --path PATH [--caveat KEY=NAME]... [--verify KIND] [--hogged] [--waited S]
                       [--by-kind]
-    powercut.py settlecut DIR --path PATH [--caveat KEY=NAME]...
-    powercut.py crowd CHECK --name-bytes N --room N [--names N]
     powercut.py forge LIST LOG OUT
     powercut.py selftest
 
@@ -54,18 +52,18 @@ order can leave. --by-kind keeps the two apart in the census, because a fix
 may close one and not the other: an order of writes closes every prefix,
 and only a flush between two writes closes the subsets that part them.
 
-`judge` and `settlecut` are asked here and answered by tools/powercut_judge.py:
+`judge` is asked here and answered by tools/powercut_judge.py:
 every oracle, one verdict line each, and the report of the run — a book's own
 oracles beside it (powercut_judge_book.py). `lies` and `lieboots` are
 answered by tools/powercut_lie.py: the media a medium that lied leaves (Blot,
 Smudge), planned, judged by `checks --lies` and counted apart from the cuts.
 
 A step's acknowledgement stands behind the first flush after the last write of
-its own that touches the ledger — HEAD's sync writes the ledger last and then
-flushes — and before the answer was read. Where another writer flushes too
-(race, and halt on the AHCI WriteJob) the record cannot say whose that flush
-is: `ack:` then proves only that some flush followed the step's last ledger
-write before its answer.
+its own that commits it — a stitch, or a slot (COMMIT_KINDS): the cycle
+writes its stitch last and then flushes — and before the answer was read.
+Where another writer flushes too (race, and halt on the AHCI WriteJob) the
+record cannot say whose that flush is: `ack:` then proves only that some
+flush followed the step's last commit write before its answer.
 """
 
 import sys
@@ -90,7 +88,6 @@ RECORDS = {
     "anchor":  (0x414E4348, 128),    # apps/anchor_test.c AnchorRecord: magic, seq, sum, 116 zeros
     "persist": (0x42504552, 16),     # apps/persist.c PersistRecord: magic, seq, sum, 0
     "quill":   (0x5155494C, 16),     # apps/quilltest_powercut.c QuillRecord: magic, seq, sum, 0
-    "empty":   (0, 0),               # apps/quilltest_powercut.c QuillCrowd: made, never written
     "log":     (0, 48),              # apps/quilltest_book.c QuillLogLine: a line; a record of N is N lines
 }
 
@@ -148,9 +145,9 @@ def LoadLines(path):
         return [json.loads(line) for line in fh if line.strip()]
 
 
-# The writes that commit a step: format v1's Ledger, a book's stitch and slot
+# The writes that commit a step: a stitch, and the slot a Tally is committed by
 # (blklog_book.py names them by their sectors' heads).
-COMMIT_KINDS = ("ledger", "stitch", "slot")
+COMMIT_KINDS = ("stitch", "slot")
 
 
 def Outside(w):
@@ -303,9 +300,8 @@ def FileKey(f):
 
 def Compact(cid, rc, out, err, base_files, base_names):
     """What the judge needs from one `check --json`: the mount the kernel would
-    make, every finding, which chains would be refused and how long each is,
-    the base's files where they differ from the base, and every file the base
-    did not have."""
+    make, every finding, the base's files where they differ from the base, and
+    every file the base did not have, and where it lies."""
     try:
         d = json.loads(out)
     except ValueError:
@@ -320,43 +316,28 @@ def Compact(cid, rc, out, err, base_files, base_names):
             changed.append("fid %d %s %s" % (bf["fid"], bf["name"], "gone" if f is None else
                            "not visible (%s)" % f["state"] if not f["visible"] else
                            "is %s bytes, sha256 %s" % (f["size"], (f["sha256"] or "none")[:12])))
-    out = {"id": cid, "rc": rc, "verdict": d["verdict"], "mounts": k["mounts"],
-           "refusal": k["refusal"], "format": d.get("format", "v1")}
-    out.update(CompactBook(d) if out["format"] == "v2" else CompactLedger(d))
+    out = {"id": cid, "rc": rc, "verdict": d["verdict"], "mounts": k["mounts"], "refusal": k["refusal"]}
+    out.update(CompactBook(d))
     out.update({
             "findings": [[x["code"], x["severity"], x["text"]] for x in d["findings"]],
             "base_changed": changed,
             "new_files": [[f["fid"], f.get("name"), f["state"], f["visible"], f.get("size"), f.get("sha256")]
-                          for f in d["files"] if (f["fid"], f.get("name")) not in base_names]})
-    if out["format"] == "v2":
-        # Where the files the base did not have lie, run by run — a book's file
-        # may share its ground with another's (powercut_judge_book.py Dedup).
-        out["new_runs"] = [[f["fid"], [r[:3] for r in f.get("runs", [])]] for f in d["files"]
-                           if f["visible"] and (f["fid"], f.get("name")) not in base_names]
+                          for f in d["files"] if (f["fid"], f.get("name")) not in base_names],
+            # Where the files the base did not have lie, run by run — a file may
+            # share its ground with another's (powercut_judge_book.py Dedup).
+            "new_runs": [[f["fid"], [r[:3] for r in f.get("runs", [])]] for f in d["files"]
+                         if f["visible"] and (f["fid"], f.get("name")) not in base_names]})
     return out
 
 
-def CompactLedger(d):
-    """Format v1's part: the next file id the mount derives against the one the
-    Ledger it stands on counts, the chains — which are refused, how long — and
-    what the kernel's fsck will say (a book has no fsck: bookcensus.py KernelBook)."""
-    led, fsck = d["ledger"], d["kernel"]["fsck"] or {}
-    stood = next((c for c in led["copies"] if c.get("copy") == led["standing_on"]), None)
-    return {"says": d["kernel"]["says"], "next_file_id": led.get("next_file_id"),
-            "fsck": {x: fsck.get(x) for x in ("orphan", "missing", "corrected", "lost")},
-            "ledger_next": stood.get("next_file_id") if stood else None,
-            "refused": d["chains"]["refused"] or {},
-            "chains": {x: len(d["chains"][x]) for x in ("registry", "table", "pool")}}
-
-
 def CompactBook(d):
-    """A book's part (bookcensus.py Json, `book`): the next file id the mount
-    derives against the one the slot it stands on counts — the Ledger's place
-    in format v2 (SpineCounts) — the kernel's count line, and the ribbon: how
+    """The book (bookcensus.py Json, `book`): the next file id the mount
+    derives against the one the slot it stands on counts (SpineCounts), the
+    kernel's count line, and the ribbon: how
     many stitches it sews on, the last, how many torn, whether the medium is
     shown to have lied — and the last it sews on, every line the mount says
     of it by its code, and where each sector of each stitch lies on the device
-    — on into its next Quire too (stitch.py Place.On). A book has no chains. And every file it shows, as [fid, name, size, sha256]: a book's
+    — on into its next Quire too (stitch.py Place.On). And every file it shows, as [fid, name, size, sha256]: a book's
     file is the state a stitch left it in, held to every state a flush stood
     behind (powercut_judge_book.py Whole)."""
     k, b = d["kernel"], d["book"]
@@ -364,8 +345,7 @@ def CompactBook(d):
     r, start = b["ribbon"], (d.get("ground") or {}).get("start", 0)
     return {"says": {"data_blocks": k.get("data_blocks"), "free": k.get("free"), "files": k.get("files")},
             "next_file_id": b["counts"].get("next_fid"),
-            "ledger_next": (slot["counts"] or {}).get("next_fid") if slot else None,
-            "refused": {}, "chains": {},
+            "slot_next": (slot["counts"] or {}).get("next_fid") if slot else None,
             "files": [[f["fid"], f.get("name"), f.get("size"), f.get("sha256")] for f in d["files"] if f["visible"]],
             "book": {"slot": b["slot"], "tally": (b["tally"] or {}).get("seq"),
                      "stitches": len(r["stitches"]), "torn": len(r["torn"]), "lied": r["lied"],
@@ -496,9 +476,8 @@ class Run:
 
     def CommitWrites(self, step):
         """The step's own writes that commit what it changed: entries in (before,
-        ack] that touch format v1's Ledger, or a book's stitch — the unit a
-        Settle cycle of format v2 commits by (spec_v2 §3.2), a slot the one a
-        Tally does (COMMIT_KINDS)."""
+        ack] that touch a stitch — the unit a Settle cycle commits by (spec_v2
+        §3.2) — or a slot, the one a Tally does (COMMIT_KINDS)."""
         return [w["seq"] for w in self.listing["writes"] if step["before"] < w["seq"] <= step["ack"]
                 and any(t["kind"] in COMMIT_KINDS for t in w["touches"])]
 
@@ -533,9 +512,8 @@ class Run:
     def SeqCeiling(self, item, held):
         """The last seq a durable item may hold. TO 0 is "as far as the medium
         took the writer": no further than the record holds entries past FROM,
-        where each record it writes is a write of its own (format v1), nor than
-        HELD, the seq the final state reads back — the final state is every
-        write of the record, so no cut of it holds a newer record. On a book a
+        nor than HELD, the seq the final state reads back — the final state is
+        every write of the record, so no cut of it holds a newer record. A
         writer's 16 bytes ride the stitches as a Slip (spec_v2 §2.8): thousands
         of records between two stitches, the newest stitch carrying the last.
         Read off the medium and never off the writer's log, whose lines reach
@@ -552,15 +530,10 @@ class Run:
         r = self.results.get(cid)
         return r is not None and "error" not in r
 
-    def Signature(self, cid, chains=False):
-        """The damage and leak codes a cut shows; with `chains`, CHAIN_REFUSED
-        once per chain it names, as CHAIN_REFUSED:<chain>."""
+    def Signature(self, cid):
+        """The damage and leak codes a cut shows."""
         r = self.results.get(cid, {})
-        harm = {(f[0], f[1]) for f in r.get("findings", []) if f[1] in HARM}
-        if chains:
-            harm = ({x for x in harm if x[0] != "CHAIN_REFUSED"} |
-                    {("CHAIN_REFUSED:" + name, "damage") for name in r.get("refused", {})})
-        return tuple(sorted(harm))
+        return tuple(sorted({(f[0], f[1]) for f in r.get("findings", []) if f[1] in HARM}))
 
     def Step(self, name):
         return next((s for s in self.steps if s["step"] == name), None)
@@ -616,13 +589,13 @@ def CmdBoots(a):
         f = run.AckFlush(s) if s["durable"] else None
         if f is not None:
             Add(run.Canon("e%d-all" % run.closes[f]), "the boundary after the flush of %s" % s["step"])
-    # The first medium of every signature is booted — of every kind and
-    # every chain refused, too, when the census is kept by kind, so the
-    # kernel's own mount is held to check's for each (the judge's reconcile).
+    # The first medium of every signature is booted — of every kind, too,
+    # when the census is kept by kind, so the kernel's own mount is held to
+    # check's for each (the judge's reconcile).
     seen = set()
     for c in run.canon:
         kind = run.kind[c["id"]] if a.by_kind else None
-        sig = (kind, run.Signature(c["id"], a.by_kind))
+        sig = (kind, run.Signature(c["id"]))
         if sig not in seen:
             seen.add(sig)
             Add(c["id"], "the first%s of %s" % (" %s" % kind if kind else "",
@@ -635,65 +608,6 @@ def CmdBoots(a):
         print("\t".join((cid, str(c["epoch"]), c["keep"] or "none",
                          "%d:0x%x" % tuple(c["tear"]) if c["tear"] else "-", "; ".join(why))))
     return 0
-
-
-# ---------------------------------------------------------------------------
-# crowd — the arithmetic that brings chaingrow's base to both edges
-# ---------------------------------------------------------------------------
-
-
-def CmdCrowd(a):
-    """Where a volume stands against both edges — the file table one create
-    short of the row its blocks run out at, and the tag registry's last block
-    with room for exactly --room more of crowd's tags — read off volume-read's
-    check of it, as the volume is and not as a count of crowd's files says it
-    should be: the machine interns tags of its own (a program's console lane,
-    `anchor`) whenever it likes.
-
-    At both edges it prints "edges", how many files the recorded run makes to
-    grow both chains, and the numbers. Anywhere else, "more", FILL and AGAIN:
-    what one more round of crowd takes to get there. A crowd file adds a table
-    row and, when its name is new, a registry record; a name made again — one
-    of the --names crowd's earlier rounds made, crowd0000000000 up — adds the
-    row alone. The registry is filled a record at a time, one that does not
-    fit starting the next block (tag_registry.c flush), so the FILLs that
-    leave --room are one every PER_BLOCK records from the first; the table's
-    edge is the end of its last block, or of a block past it when the rows
-    left are fewer than that FILL. The least FILL whose AGAIN the names made
-    so far can cover is taken. Tab-separated; 1 when no round reaches both."""
-    with open(a.check) as fh:
-        d = json.load(fh)
-    ch = d["chains"]
-    nfid = next(c["next_file_id"] for c in d["ledger"]["copies"]
-                if c["copy"] == d["ledger"]["standing_on"])
-    rows = ch["table_rows_per_block"] * len(ch["table"])
-    record = ch["registry_record_header"] + a.name_bytes
-    per_block = ch["registry_block_data"] // record
-    room = (ch["registry_block_data"] - ch["registry_tail_used"]) // record
-    said = ("next_file_id %d; the file table %d block(s), %d rows, so fid %d takes its next block; "
-            "the registry %d block(s), its last (data block %d) %d of %d bytes used — room for %d "
-            "more of crowd's %d-byte records (%d of header, a %d-byte name), %d to a fresh block"
-            % (nfid, len(ch["table"]), rows, rows, len(ch["registry"]), ch["registry"][-1],
-               ch["registry_tail_used"], ch["registry_block_data"], room, record,
-               ch["registry_record_header"], a.name_bytes, per_block))
-    if room == a.room and rows - nfid == 1:
-        run = max(room, rows - nfid) + 1
-        print("edges\t%d\t%s; so %d of crowd's files grow both chains: the last is fid %d, the first "
-              "row past the table's blocks, and its tag the record past the registry's room"
-              % (run, said, run, nfid + run - 1))
-        return 0
-    first = (room - a.room) % per_block
-    for edge in (rows + ch["table_rows_per_block"] * j for j in range(3)):
-        fids = edge - 1 - nfid
-        fill = next((t for t in range(first, fids + 1, per_block) if fids - t <= a.names + t), None)
-        if fids >= 0 and fill is not None:
-            print("more\t%d\t%d\t%s; so crowd makes %d new names and %d of them again: %d file ids, "
-                  "next_file_id %d, and the registry's last block left room for %d"
-                  % (fill, fids - fill, said, fill, fids - fill, fids, edge - 1, a.room))
-            return 0
-    print("no FILL and AGAIN of crowd's reach both edges: %s — %d of its names made so far"
-          % (said, a.names), file=sys.stderr)
-    return 1
 
 
 def Main():
@@ -740,24 +654,14 @@ def Main():
     s.add_argument("--final-consistent", action="store_true")
     s.add_argument("--waited", type=int, default=0)
     s.add_argument("--by-kind", action="store_true")
-    s.add_argument("--medium", default="")          # a book's run signed by its medium (powercut.sh pc_sign)
-    s = sub.add_parser("settlecut")
-    s.add_argument("dir")
-    s.add_argument("--path", required=True)
-    s.add_argument("--caveat", action="append", default=[])
-    s = sub.add_parser("crowd")
-    s.add_argument("check")
-    s.add_argument("--name-bytes", type=int, required=True)
-    s.add_argument("--room", type=int, required=True)
-    s.add_argument("--names", type=int, default=0)
+    s.add_argument("--medium", default="")          # the run signed by its medium (powercut.sh pc_sign)
     s = sub.add_parser("forge")
     for x in ("list", "log", "out"):
         s.add_argument(x)
     sub.add_parser("selftest")
     a = ap.parse_args()
     if not a.verb:
-        ap.error("say what to do: step, plan, checks, lies, lieboots, boots, judge, settlecut, crowd, forge "
-                 "or selftest")
+        ap.error("say what to do: step, plan, checks, lies, lieboots, boots, judge, forge or selftest")
     if a.verb in ("selftest", "forge"):
         # The gate judging itself lives beside it, and is handed this very
         # module: the arithmetic tested is the arithmetic the judge runs.
@@ -770,15 +674,14 @@ def Main():
         sys.modules.setdefault("powercut", sys.modules[__name__])
         import powercut_lie
         return (powercut_lie.CmdLies if a.verb == "lies" else powercut_lie.CmdLieBoots)(a)
-    if a.verb in ("judge", "settlecut"):
+    if a.verb == "judge":
         # The judge lives beside it as well, and takes the run, the records and
         # the severities from this module: registered under its own name
         # first, the import it makes finds this very module and not a copy.
         sys.modules.setdefault("powercut", sys.modules[__name__])
         import powercut_judge
-        return (powercut_judge.CmdJudge if a.verb == "judge" else powercut_judge.CmdSettleCut)(a)
-    return {"step": CmdStep, "plan": CmdPlan, "checks": CmdChecks, "boots": CmdBoots,
-            "crowd": CmdCrowd}[a.verb](a)
+        return powercut_judge.CmdJudge(a)
+    return {"step": CmdStep, "plan": CmdPlan, "checks": CmdChecks, "boots": CmdBoots}[a.verb](a)
 
 
 if __name__ == "__main__":

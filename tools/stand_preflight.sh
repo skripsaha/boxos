@@ -9,10 +9,10 @@
 # tools/ is asked as well as src/: an oracle that proves a host tool edits
 # that tool exactly as one that proves the kernel edits the kernel, and an
 # edit left behind there is a tool that judges every later run with its
-# defect put back. Eleven files in tools/ carry the two phrases as TEXT and are
+# defect put back. Ten files in tools/ carry the two phrases as TEXT and are
 # passed over by name: the files the harnesses write them from into their
 # mutations (logcheck.sh, logcheck_book_logger.sh, logcheck_autostart.sh,
-# logcheck_room.sh, logcheck_halthog.sh, logcheck_panicstop.sh, bindery.sh,
+# logcheck_room.sh, logcheck_halthog.sh, logcheck_panicstop.sh,
 # powercut_mut.sh —
 # powercut.sh keeps none of its own), stand.sh,
 # whose mutate and restore insist on them, this
@@ -23,7 +23,7 @@
 # own compiled search for them.
 MUT_LEFTOVER=$( { grep -rl -e "logcheck mutation" -e "logcheck injection" src
                   grep -rlI -e "logcheck mutation" -e "logcheck injection" \
-                       --exclude=logcheck.sh --exclude=logcheck_book_logger.sh --exclude=logcheck_autostart.sh --exclude=logcheck_room.sh --exclude=logcheck_halthog.sh --exclude=logcheck_panicstop.sh --exclude=bindery.sh --exclude=powercut_mut.sh \
+                       --exclude=logcheck.sh --exclude=logcheck_book_logger.sh --exclude=logcheck_autostart.sh --exclude=logcheck_room.sh --exclude=logcheck_halthog.sh --exclude=logcheck_panicstop.sh --exclude=powercut_mut.sh \
                        --exclude=stand.sh --exclude=stand_preflight.sh --exclude=buildplate.c tools
                 } 2>/dev/null || true)
 if [ -n "$MUT_LEFTOVER" ]; then
@@ -60,7 +60,7 @@ fi
 # that declares it.
 python3 - "$0" "$STAND_NAME" <<'ANCHOR_EOF' || exit 1
 import ast, os, re, sys
-HARNESSES = {"logcheck.sh", "powercut.sh", "powercut_mut.sh", "bindery.sh", "stand.sh"}
+HARNESSES = {"logcheck.sh", "powercut.sh", "powercut_mut.sh", "stand.sh"}
 SOURCES = (".c", ".h", ".cpp", ".hpp", ".S", ".asm", ".ld", ".py", ".sh", ".txt", ".mk")
 CACHE = {}
 

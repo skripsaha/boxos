@@ -3,7 +3,7 @@
 # own lines (census_book), and the stand's road on a book (stand_book).
 #
 # SOURCED, NEVER RUN — by logcheck.sh; everything it calls (build,
-# census_boot, stand_boot, chk, ok, bad, harness, the waits) is stand.sh's or
+# stand_boot, chk, ok, bad, harness, the waits) is stand.sh's or
 # logcheck.sh's. Its own file for the reason logcheck_framerefuse.sh is: a
 # harness of twelve thousand lines does not grow further for format v2.
 
@@ -266,8 +266,8 @@ census_fresh() {
     build
 }
 
-# census_plant NAME CASE — census_boot on the image make made last, which
-# nothing booted since: the plant is written beside it (an overlay of its
+# census_plant NAME CASE — CASE planted on the image make made last, which
+# nothing booted since, predicted and booted: the plant is written beside it (an overlay of its
 # sectors, selftest.py Emit), and the boot is of the plant, so a run of
 # landings makes the image once (census_book) and not once a landing — a make
 # of the image took 30 of the 35 seconds a landing of a book's census cost.
@@ -346,8 +346,7 @@ census_book() {
 # ---------------------------------------------------------------------------
 # stand_book: the startup tests on a format-v2 volume
 #
-# The image is made in format v2 (VOLUME_FORMAT=v2) under VOLUME_TESTS=on and
-# booted three times. BIOS, four cores, its seat an ATA disk; then the padded
+# The image is made under VOLUME_TESTS=on and booted three times. BIOS, four cores, its seat an ATA disk; then the padded
 # landing of it (self-test --emit B4p: the image's files and forty more, whose
 # FILES tree is a root over two leaves) the same way — the image's own files
 # take a root over two leaves since it holds more than a leaf's worth, so the
@@ -362,12 +361,7 @@ census_book() {
 # image again under UEFI, STRICT, four cores, its seat an AHCI port — the seat
 # whose reads go through the port, parked on each answer, so the rotten block
 # is refused on the port's road too (stand_tally_rot_three_paths), and every
-# door below the glass is knocked at in a kernel that stops at a defect. On a
-# book the kernel writes stitches — files made, named, tagged and given up,
-# tags, the Use Context — and no byte of a file's data, so every test that
-# writes through TagFS written for format v1 stands aside, counted (K9): the
-# stand_tally, stand_ribbon, stand_stitch, stand_stitch_edge and stand_docket
-# suites are what runs, and the suites written for any format that only read.
+# door below the glass is knocked at in a kernel that stops at a defect.
 #
 # Judged: the STAND_RUN tests this tree registers walked, nothing failed,
 # nothing held; every book test ran — none stood down but on the legs
@@ -378,7 +372,7 @@ census_book() {
 # named; the four doors below the glass knocked at and refused; the book's
 # medium coming back read again; no panic, no mirror defect and no defect of
 # TagFS or Settle said — a door below the glass reached by a road nobody
-# shut, code of format v1 asking for a LAYOUT; BLOCKFAIL refusing as many
+# shut; BLOCKFAIL refusing as many
 # commands as the tests that arm it refuse on each boot — the refusals of the
 # tests whose book then takes no write as many as their lines say; the halt
 # laying its stitch and syncing the volume; and the block map derived from the
@@ -442,8 +436,7 @@ census_book() {
 #   stand_escheat_tail_helm_held                                              service races the test for: its line
 # ---------------------------------------------------------------------------
 
-# Every test of the tree runs on a book, the neutral ones among them (spec_v2
-# §16.5 п.22). A test whose refusals differ from one leg to another is a row
+# Every test of the tree runs on a book (spec_v2 §16.5 п.22). A test whose refusals differ from one leg to another is a row
 # above, so each column differs from the next by its rows alone; the rest —
 # 62, the same on every leg — is the refusals of the tests the rows do not
 # name: stand_medium_mount_bad_sector_waits 54, and one each of
@@ -472,20 +465,21 @@ STAND_BOOK_REFUSED='^\[TagFS\] the book takes no write: ([0-9]+) refusal\(s\) in
 STAND_BOOK_RACED='^\[TESTS\] [a-z_]+: BLOCKFAIL answered ([0-9]+) command\(s\) of the plan let go'
 STAND_BOOK_PROMISE='^\[TagFS\] what this volume promises: its book takes files made, written, named, tagged and given up, the names of tags and the memory of its Use Context'
 STAND_BOOK_TALLY='^\[TagFS\] a whole Tally of the book is written once the ribbon past the newest slot holds as many useful bytes as one costs'
-# The book's tests: every TestCase of format v2 the registry holds (tests.h
-# TEST_SUITES, read by stand_book_tests — counted off the code, not a run),
-# and every neutral one registered in a file beside them — a book suite's own,
-# written for any format — each run on every leg but where it stands down by
-# its own words, named here
-# as TEST:LEG,LEG — the Flash page's tests on a seat that is not removable,
-# the levers on the Tally's self-check on a STRICT kernel, which stops at
-# their DEFECT, and the tests of a run inside one command, or of a window of
-# three blocks, on the ATA disk, which takes one block a command — and those
-# of a read or a write through the port there, whose legacy channel answers
-# only a read somebody stands over (stand_read_tests.c, StandReadPortAside:
+# The book's tests: every TestCase the registry holds (tests.h TEST_SUITES,
+# read by stand_book_tests — counted off the code, not a run), each run on
+# every leg but where it stands down by its own words, named here as
+# TEST:LEG,LEG — the Flash page's tests on a seat that is not removable, the
+# levers on the Tally's self-check on a STRICT kernel, which stops at their
+# DEFECT, and the tests of a run inside one command, or of a window of three
+# blocks, on the ATA disk, which takes one block a command — and those of a
+# read or a write through the port there, whose legacy channel answers only a
+# read somebody stands over (stand_read_tests.c, StandReadPortAside:
 # ReadJobSeatRunsAsync) and moves every byte of a write by the processor
 # (stand_port_tests.c, StandPortAside: the seat's kind), said in the words
-# STAND_BOOK_ASIDE_WORDS holds them to.
+# STAND_BOOK_ASIDE_WORDS holds them to; the asynchronous read and the
+# roadstead's doors on any seat but an AHCI port, the flush a USB disk answers
+# anywhere but on the stick, the legacy-IDE DMA wait anywhere but on the
+# legacy channel, and the border's room on its way on a STRICT kernel.
 STAND_BOOK_ASIDE="stand_stitch_page_atom:stand_book,stand_book_padded,stand_book_uefi
 stand_stitch_page_atom_hop:stand_book,stand_book_padded,stand_book_uefi
 stand_stitch_page_inside:stand_book,stand_book_padded,stand_book_uefi
@@ -498,7 +492,16 @@ stand_run_megabyte_through_the_port:stand_book,stand_book_padded
 stand_slip_port:stand_book,stand_book_padded
 stand_read_hole_refused_through_port:stand_book,stand_book_padded
 stand_read_holes_through_port:stand_book,stand_book_padded
-stand_readahead_reads_its_version:stand_book,stand_book_padded"
+stand_readahead_reads_its_version:stand_book,stand_book_padded
+stand_blockfail_async_read:stand_book,stand_book_padded
+stand_port_write_goes_through_the_port:stand_book,stand_book_padded
+stand_roadstead_one_slot_two_reads:stand_book,stand_book_padded,stand_book_usb
+stand_roadstead_read_waits_for_the_door:stand_book,stand_book_padded,stand_book_usb
+stand_roadstead_refusal_rings_once:stand_book,stand_book_padded,stand_book_usb
+stand_medium_no_medium_flush_refused:stand_book,stand_book_padded,stand_book_uefi
+stand_medium_sync_cache_remembered:stand_book,stand_book_padded,stand_book_uefi
+stand_dma_wait_keeps_the_callers_interrupts:stand_book_uefi,stand_book_usb
+stand_room_never_an_answer:stand_book_uefi"
 # TEST|WORDS — a row of STAND_BOOK_ASIDE whose test may stand down for more
 # than one reason, and the reason its legs are for: the line it stands down
 # by begins with them.
@@ -507,8 +510,7 @@ stand_slip_port|the volume's seat is a legacy channel, whose processor moves eve
 stand_read_hole_refused_through_port|a read on this seat stands in its call: one core, or a seat that answers only a read somebody stands over
 stand_read_holes_through_port|a read on this seat stands in its call: one core, or a seat that answers only a read somebody stands over"
 
-# stand_book_tests — every test of format v2 the registry holds, and every
-# neutral one in a file that registers one of them, by name: the TestCases of
+# stand_book_tests — every test the registry holds, by name: the TestCases of
 # the arrays the suites tests.h TEST_SUITES walks name, read off the source.
 stand_book_tests() {
     python3 - <<'STAND_BOOK_TESTS_EOF'
@@ -535,11 +537,8 @@ for fname in sorted(os.listdir(tdir)):
 for suite in re.findall(r"SUITE\((\w+)\)", listed.group(1)) if listed else []:
     if suites.get(suite) in arrays:
         fname, body = arrays[suites[suite]]
-        for c in re.finditer(r'\{\s*\.name\s*=\s*"([^"]+)"(.*?)\}', body, re.S):
-            fmt = re.search(r"\.format\s*=\s*DEED_FORMAT_(V1|V2|NONE)", c.group(2))
-            cases.append((c.group(1), fname, fmt.group(1) if fmt else "NONE"))
-book = {fname for _name, fname, fmt in cases if fmt == "V2"}
-print(" ".join(sorted(name for name, fname, fmt in cases if fmt == "V2" or (fmt == "NONE" and fname in book))))
+        cases += re.findall(r'\{\s*\.name\s*=\s*"([^"]+)"', body)
+print(" ".join(sorted(cases)))
 STAND_BOOK_TESTS_EOF
 }
 STAND_BOOK_PORT_ASIDE='^\[TESTS\] stand_(tally_rot_three_paths|ribbon_slip_three_roads): the port.s road stands aside — '
@@ -606,11 +605,9 @@ stand_book_judge() {
     said=$(stand_summary "$L")
     echo "$said" | grep -qE "^TagFS: $STAND_RUN run, [0-9]+ passed, 0 failed, [0-9]+ skipped, 0 held under a caveat"
     chk $? "stand: $what — the $STAND_RUN tests this tree registers ran on the book, nothing failed (${said:-no summary})"
-    grep -aqE '^\[TESTS\] [0-9]+ test\(s\) stood aside: this volume is format v2' "$L"
-    chk $? "stand: $what — the tests the book is not for are counted aside, in so many words ($(grep -aoE '[0-9]+ test\(s\) stood aside: this volume is format v2[^—]*' "$L" | head -1))"
     t=$(stand_book_tests)
     [ -n "$t" ]
-    chk $? "stand: $what — the tests of format v2 the registry holds are read off it ($(echo $t | wc -w | tr -d ' '))"
+    chk $? "stand: $what — the tests the registry holds are read off it ($(echo $t | wc -w | tr -d ' '))"
     for t in $t; do
         if [ "$t" = "$aside" ] || echo "$STAND_BOOK_ASIDE" | tr ' ' '\n' | grep -qE "^$t:(.*,)?$1(,|\$)"; then
             words=$(echo "$STAND_BOOK_ASIDE_WORDS" | awk -v t="$t|" 'index($0, t) == 1 { print substr($0, length(t) + 1); exit }')
@@ -649,7 +646,7 @@ stand_book_judge() {
     ! grep -aq 'KERNEL PANIC' "$L"
     chk $? "stand: $what — no panic"
     ! grep -aqE "$STAND_MIRROR_DEFECT" "$L"
-    chk $? "stand: $what — every live file of the map stood as its record, with no row to disagree with"
+    chk $? "stand: $what — every record memory held named its runs, and every Tract stood within its fill"
     got=$(stand_book_defects "$L")
     [ -z "$got" ]
     chk $? "stand: $what — no defect of TagFS said but the one each lever of the stand draws from the Tally's self-check: no door below the glass reached by a road nobody shut, no code of format v1 asked for a LAYOUT, no cycle asked, no element of a Tally changed outside DogEar ($(echo "$got" | head -1 | cut -c1-120))"
@@ -698,14 +695,12 @@ stand_book_judge() {
 
 # stand_book — the book's three boots (above).
 stand_book() {
-    local img="$SCRATCH/stand.book_padded.img" keep=${STAND_FORMAT:-} booted planted
+    local img="$SCRATCH/stand.book_padded.img" booted planted
     rm -f build/boxos.img "$img" "$SCRATCH"/serial.stand_book.log "$SCRATCH"/serial.stand_book_padded.log \
           "$SCRATCH"/serial.stand_book_uefi.log
-    STAND_FORMAT=v2
     if ! build_with_key VOLUME_TESTS=on STRICT=off; then
-        echo "BUILD FAILED (VOLUME_TESTS=on VOLUME_FORMAT=v2) — tail:"; tail -25 "$SCRATCH/build.log"
-        bad "stand: the book — VOLUME_TESTS=on VOLUME_FORMAT=v2 does not build"
-        STAND_FORMAT=$keep
+        echo "BUILD FAILED (VOLUME_TESTS=on) — tail:"; tail -25 "$SCRATCH/build.log"
+        bad "stand: the book — VOLUME_TESTS=on does not build"
         return
     fi
     booted=$(stand_book_census build/boxos.img)
@@ -730,11 +725,10 @@ stand_book() {
         [ $? = 2 ] || stand_book_judge stand_book_uefi "the book, UEFI 4c on an AHCI port, STRICT" \
             "$STAND_BOOK_UEFI_BLOCKFAILS" "" taken build/boxos.img "$booted"
     else
-        echo "BUILD FAILED (VOLUME_TESTS=on STRICT=on VOLUME_FORMAT=v2) — tail:"; tail -25 "$SCRATCH/build.log"
-        bad "stand: the book — VOLUME_TESTS=on STRICT=on VOLUME_FORMAT=v2 does not build"
+        echo "BUILD FAILED (VOLUME_TESTS=on STRICT=on) — tail:"; tail -25 "$SCRATCH/build.log"
+        bad "stand: the book — VOLUME_TESTS=on STRICT=on does not build"
     fi
     stand_book_usb
-    STAND_FORMAT=$keep
     lockrank_judge "$SCRATCH/serial.stand_book.log $SCRATCH/serial.stand_book_padded.log $SCRATCH/serial.stand_book_uefi.log $SCRATCH/serial.stand_book_usb.log" \
         "stand, the book"
 }
@@ -746,7 +740,7 @@ stand_book() {
 # (create_tagfs.h GROUND_WORKING_ROOM_BLOCKS), so a file past that needs ground
 # the build does not lay: the image is copied, its volume's partition grown by
 # BOOK_BIG_GROW_MIB at its end — the volume is last on the medium (Makefile) —
-# and a book made on it again by create_tagfs --v2 with the shell, quilltest,
+# and a book made on it again by create_tagfs with the shell, quilltest,
 # bye and the kernel. In the guest `quilltest big big BOOK_BIG_MIB` writes the file
 # in ONE write — the windows the Helm cuts it into each inked, the Docket
 # merging them into the one Born a stitch lays, its digests alone 8 bytes a
@@ -777,8 +771,8 @@ book_big() {
     local w="$SCRATCH/serial.book_big_write.log" parts said again got line rc
     echo "== book big: a file past the room a machine is given, in one write, read back by both readers =="
     rm -f "$img" "$w" "$SCRATCH/serial.$name.log"
-    if ! build_with_key VOLUME_FORMAT=v2; then
-        bad "big: make VOLUME_FORMAT=v2 does not build: $(grep -aE 'ERROR|error' "$SCRATCH/build.log" | tail -1)"
+    if ! make >"$SCRATCH/build.log" 2>&1; then
+        bad "big: make does not build: $(grep -aE 'ERROR|error' "$SCRATCH/build.log" | tail -1)"
         return
     fi
     cp build/boxos.img "$img" || { harness "big: could not copy build/boxos.img"; return; }
@@ -808,7 +802,7 @@ BIG_EOF
     # shellcheck disable=SC2086
     set -- $parts
     if [ $# != 4 ] || ! python3 tools/make_mbr.py "$img" "$1,$2,7f,boot" "$3,$4,ef" >"$SCRATCH/big.mbr" 2>&1 ||
-       ! tools/create_tagfs --v2 --kernel build/kernel.bin "$img" build/box/hub.box "" \
+       ! tools/create_tagfs --kernel build/kernel.bin "$img" build/box/hub.box "" \
             build/box/quilltest.box "test" build/box/bye.box "" \
             build/kernel.bin "" \
             >"$SCRATCH/big.mkfs" 2>&1; then
@@ -910,8 +904,8 @@ book_stitchcut() {
     local w="$SCRATCH/serial.book_stitchcut_write.log" round fid after next=""
     echo "== book stitchcut: the power goes before a stitch's last atom, and both readers stop at the one before =="
     rm -f build/boxos.img "$img" "$w" "$SCRATCH/serial.$name.log"
-    if ! build_with_key VOLUME_FORMAT=v2 SETTLECUT=stitch; then
-        bad "stitchcut: make VOLUME_FORMAT=v2 SETTLECUT=stitch does not build: $(grep -aE 'ERROR|error' "$SCRATCH/build.log" | tail -1)"
+    if ! build_with_key SETTLECUT=stitch; then
+        bad "stitchcut: make SETTLECUT=stitch does not build: $(grep -aE 'ERROR|error' "$SCRATCH/build.log" | tail -1)"
         return
     fi
     cp build/boxos.img "$img"
@@ -987,7 +981,7 @@ STITCHCUT_EOF
 
 # census_book_some — the landings CENSUS_LANDINGS names, booted alone: the road
 # of a change to a few of them, where the whole census takes hours.
-#     VOLUME_FORMAT=v2 CENSUS_LANDINGS="B59 B65" tools/logcheck.sh census
+#     CENSUS_LANDINGS="B59 B65" tools/logcheck.sh census
 # It is no verdict on the census — its other landings and every other part of
 # census_book_all go unrun — so before the first boot it says so in a HARNESS
 # line, which keeps the run from ending green (logcheck.sh's last line), under

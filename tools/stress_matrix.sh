@@ -20,7 +20,7 @@
 #   Additional production-stability suite (each ×1):
 #     - mtest             "[mtest] PASS"             — Manifest fill+move
 #     - chain             "[chain] PASS"             — multi-op Manifest
-#     - cow_test          "[COW] PASS"               — snapshots refused on format v1
+#     - cow_test          "[COW] PASS"               — snapshots refused
 #     - lifecycle         "[LIFECYCLE] PASS"         — process:spawned/died Touches
 #     - write_observer    "[WO] PASS"                — Touch WROTE delivery
 #     - write_concurrent  "[WC] PASS"                — 4 children × cross-write

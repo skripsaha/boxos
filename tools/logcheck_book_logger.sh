@@ -143,8 +143,8 @@ book_loggerhour() {
     progress_selfcheck
     loggerhour_selftest
     rm -f build/boxos.img "$SCRATCH/serial.$name.log"
-    if ! build_with_key VOLUME_FORMAT=v2; then
-        bad "loggerhour: make VOLUME_FORMAT=v2 does not build: $(grep -aE 'ERROR|error' "$SCRATCH/build.log" | tail -1)"
+    if ! make >"$SCRATCH/build.log" 2>&1; then
+        bad "loggerhour: make does not build: $(grep -aE 'ERROR|error' "$SCRATCH/build.log" | tail -1)"
         return
     fi
     loggerhour_record "$name" "$seconds" "$every"
@@ -210,7 +210,7 @@ MUT_EOF
 loggerhourmut_leg() {
     local file=$1 pattern=$4 w="$SCRATCH/serial.loggerhourmut_write.log" turned
     loggerhourmut_edit "$file" "$2" "$3"
-    if ! build_with_key VOLUME_FORMAT=v2; then
+    if ! make >"$SCRATCH/build.log" 2>&1; then
         restore "$file"
         bad "loggerhourmut: the kernel with the edit in $file does not build: $(grep -aE 'ERROR|error' "$SCRATCH/build.log" | tail -1)"
         return

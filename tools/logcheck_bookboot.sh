@@ -80,7 +80,7 @@ PY
 
 run_bookboot() {
     echo "== bookboot: the kernel BOOT names, held to the book by TagBoot before the jump =="
-    build VOLUME_FORMAT=v2 STRICT=on
+    build STRICT=on
     local img="$SCRATCH/bookboot.img" L said blocks last vblock untouched rc
 
     tools/tagboot_stand.sh build/boxos.img >"$SCRATCH/bookboot.stand" 2>&1

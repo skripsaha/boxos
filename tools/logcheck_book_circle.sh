@@ -44,8 +44,8 @@ book_circle() {
     local base="$SCRATCH/circle.base.img" record="$SCRATCH/circle.record"
     echo "== book circle: what the kernel writes on a book, read back by both readers =="
     rm -f build/boxos.img "$img" "$base" "$record" "$SCRATCH/serial.book_circle_write.log" "$SCRATCH/serial.$name.log"
-    if ! build_with_key VOLUME_FORMAT=v2; then
-        bad "circle: make VOLUME_FORMAT=v2 does not build: $(grep -aE 'ERROR|error' "$SCRATCH/build.log" | tail -1)"
+    if ! make >"$SCRATCH/build.log" 2>&1; then
+        bad "circle: make does not build: $(grep -aE 'ERROR|error' "$SCRATCH/build.log" | tail -1)"
         return
     fi
     cp build/boxos.img "$img"

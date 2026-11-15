@@ -46,8 +46,8 @@ book_bind() {
     local w="$SCRATCH/serial.book_bind_write.log" rc tallies line
     echo "== book bind: a logger's stitches taken in by the kernel's Tallies, held to the one rule of binding =="
     rm -f build/boxos.img "$img" "$w" "$SCRATCH/serial.$name.log"
-    if ! build_with_key VOLUME_FORMAT=v2; then
-        bad "bind: make VOLUME_FORMAT=v2 does not build: $(grep -aE 'ERROR|error' "$SCRATCH/build.log" | tail -1)"
+    if ! make >"$SCRATCH/build.log" 2>&1; then
+        bad "bind: make does not build: $(grep -aE 'ERROR|error' "$SCRATCH/build.log" | tail -1)"
         return
     fi
     cp build/boxos.img "$img"
@@ -215,8 +215,8 @@ book_bindcut() {
     local rc line slot=0 before
     echo "== book bindcut $point${second:+ ($second)}: the power goes inside a Tally, and both readers stand on the slot before it =="
     rm -f build/boxos.img "$img" "$w" "$SCRATCH/serial.$name.log"
-    if ! build_with_key VOLUME_FORMAT=v2 SETTLECUT="$point"; then
-        bad "bindcut $point: make VOLUME_FORMAT=v2 SETTLECUT=$point does not build: $(grep -aE 'ERROR|error' "$SCRATCH/build.log" | tail -1)"
+    if ! build_with_key SETTLECUT="$point"; then
+        bad "bindcut $point: make SETTLECUT=$point does not build: $(grep -aE 'ERROR|error' "$SCRATCH/build.log" | tail -1)"
         return
     fi
     cp build/boxos.img "$img"

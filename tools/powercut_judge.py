@@ -1,9 +1,8 @@
 """powercut_judge — PowerCut's judge: every oracle held against one recorded run
-of tools/powercut.sh, one verdict line each, the settlecut cross-check, and the
-report of what was enumerated, found and booted.
+of tools/powercut.sh, one verdict line each, and the report of what was
+enumerated, found and booted.
 
-Not a program of its own: tools/powercut.py is the way in (`judge`,
-`settlecut`), and the run, the records a surviving file must hold and the
+Not a program of its own: tools/powercut.py is the way in (`judge`), and the run, the records a surviving file must hold and the
 severities that make volume-read say "inconsistent" are that module's, taken
 from it by name — powercut.py registers itself under its own name before it
 imports this, so the import below finds the module that is running and not a
@@ -19,18 +18,12 @@ import hashlib
 import json
 import os
 import re
-import subprocess
-import sys
 
-from powercut import COMMIT_KINDS, HARM, VOLUME_READ, Outside, Ranges, RecordBytes, Run
+from powercut import COMMIT_KINDS, HARM, Ranges, RecordBytes, Run
 
-# What volume-read says of a mount that does not stand on the newest seal borne
-# out (census_claims.py _Seal): no harm on a cut before its sync's flush — a
-# cut there rolls the cycle back — and a record the seal says landed that the
-# medium does not hold on a state the flush stood behind.
-SEAL_NOT_STOOD = ("SEAL_FELL_BACK", "SEAL_TAIL_TORN", "SEAL_ALONE_TORN", "SEAL_UNBORNE")
-# And of a book (bookmount.py, stitch_ribbon.py): data a stitch the flush stood
-# behind names that did not land, a slot fallen back, the ribbon's end or a
+# What volume-read says of a book (bookmount.py, stitch_ribbon.py) that a state
+# behind a flush may not show: data a stitch the flush stood behind names that
+# did not land, a slot fallen back, the ribbon's end or a
 # closed stitch torn — none of which a state behind a flush may show. But a
 # torn tail past the ribbon's end said as a note: a stitch cut while it was
 # written, its own retry gone on past it (M-6, away.c AwayBookTakenUp) — the
@@ -75,7 +68,7 @@ class Judge:
         for s in self.run.steps:
             if not s["durable"]:
                 continue
-            f, led, unit = self.run.AckFlush(s), self.run.CommitWrites(s), self.Unit()
+            f, led, unit = self.run.AckFlush(s), self.run.CommitWrites(s), "stitch"
             if not led:
                 self.Out("ack:" + s["step"], "fail", "%s was acknowledged at record entry %d and wrote "
                          "no %s in entries %d..%d, so no sync of its own stands behind it"
@@ -91,20 +84,14 @@ class Judge:
                          "closing epoch %d, stands behind it"
                          % (s["step"], s["ack"], f, unit, led[-1], self.run.closes[f]))
 
-    def Unit(self):
-        """What commits a step on the volume of this run: format v1's Ledger, a
-        book's stitch (powercut.py COMMIT_KINDS)."""
-        return "stitch" if self.base.get("format") == "v2" else "ledger"
-
     def BaseFiles(self):
-        """No cut the kernel mounts loses or changes a file the base held — on a
-        book, but as the run's own writes changed it: a file of the base the
+        """No cut the kernel mounts loses or changes a file the base held — but
+        as the run's own writes changed it: a file of the base the
         session itself writes again (the shell's history, a program's state,
         on a base a session was run on) may show in a cut as one state a flush
         of the run left it in, never absent and never another. A cut the
         kernel refuses to mount holds no file of anybody's, and every refusal
-        is a damage code of its own (GROUND_REFUSED … CHAIN_REFUSED), judged
-        there."""
+        is a damage code of its own, judged there."""
         run = self.run
         judged = [c["id"] for c in run.canon if run.Judged(c["id"])]
         mounted = [cid for cid in judged if run.results[cid]["mounts"]]
@@ -134,10 +121,8 @@ class Judge:
 
     def RewroteBase(self):
         """Whether a cut shows a file of the base, `fid`, as a state a flush of
-        the run left it in other than the base's own — a book's file the run
-        wrote again (powercut_judge_book.States); never on format v1."""
-        if self.base.get("format") != "v2":
-            return lambda cid, fid: False
+        the run left it in other than the base's own — a file the run wrote
+        again (powercut_judge_book.States)."""
         import powercut_judge_book as book
         states, _n = book.States(self)
         base = {f["fid"]: (f.get("name"), f.get("size"), f.get("sha256")) for f in self.base["files"] if f["visible"]}
@@ -189,16 +174,11 @@ class Judge:
 
     def Findings(self, cid, r):
         """A cut's findings as the census keeps them: each code as it stands,
-        or — kept by kind — the cut's kind before it, and CHAIN_REFUSED once
-        for every chain the kernel would refuse, by name, so a refusal of the
-        table and one of the registry are two verdicts and not one."""
+        or — kept by kind — the cut's kind before it."""
         if not self.by_kind:
             return r["findings"]
         kind = self.run.kind[cid]
-        return ([("%s:%s" % (kind, code), sev, text) for code, sev, text in r["findings"]
-                 if code != "CHAIN_REFUSED"] +
-                [("%s:CHAIN_REFUSED:%s" % (kind, name), "damage", "the %s: %s" % (name, why))
-                 for name, why in sorted(r["refused"].items())])
+        return [("%s:%s" % (kind, code), sev, text) for code, sev, text in r["findings"]]
 
     def Codes(self):
         run, broken, judged = self.run, [], {}
@@ -249,18 +229,19 @@ class Judge:
 
     def Behind(self, cid):
         """What a state a sync's flush stood behind shows that it must not: a
-        damage or a leak code, and a mount that does not stand on the newest
-        seal borne out — each in the census's words. Empty when nothing."""
+        damage or a leak code, and a book that does not stand on what the flush
+        stood behind (BOOK_NOT_STOOD) — each in the census's words. Empty when
+        nothing."""
         said = ["%s/%s" % x for x in self.run.Signature(cid)]
         said += ["%s: %s" % (code, text) for code, sev, text in
-                 self.run.results.get(cid, {}).get("findings", []) if code in SEAL_NOT_STOOD + BOOK_NOT_STOOD
+                 self.run.results.get(cid, {}).get("findings", []) if code in BOOK_NOT_STOOD
                  and (code, sev) != ("RIBBON_TORN", "note")]
         return " ".join(said)
 
     def Boundaries(self):
-        """Every state a sync stood behind — an epoch its flush closed, holding the ledger HEAD's sync
-        writes last, all applied — is consistent and stands on the seal that sync wrote, borne
-        out; a WriteJob's flush of data promises nothing."""
+        """Every state a sync stood behind — an epoch its flush closed, holding the stitch or the slot
+        the sync writes last, all applied — is consistent and stands on what that sync wrote; a
+        WriteJob's flush of data promises nothing."""
         synced = {w["epoch"] for w in self.run.listing["writes"]
                   if any(t["kind"] in COMMIT_KINDS for t in w["touches"])}
         ends = [(self.run.Canon("e%d-all" % e["epoch"]), e["flush_seq"])
@@ -273,9 +254,9 @@ class Judge:
                      % (len(blind), len(ends), "; ".join(blind[:3])))
         elif ends:
             self.Out("boundaries", "fail" if bad else "behaves", "%d of %d syncs' flushes stand behind an "
-                     "inconsistent volume, or one that does not stand on its newest seal: %s"
+                     "inconsistent volume, or one that does not stand on what they stood behind: %s"
                      % (len(bad), len(ends), "; ".join(bad[:3])) if bad else
-                     "the volume is consistent, and stands on its newest seal, at every one of %d "
+                     "the volume is consistent, and stands on what each stood behind, at every one of %d "
                      "syncs' flushes" % len(ends))
 
     def Boots(self):
@@ -313,8 +294,6 @@ class Judge:
         what, _sep, arg = kind.partition(":")
         if what == "reissue":
             return self.Reissue(arg)
-        if what == "grown":
-            return self.Grown()
         if what in ("logger", "lines", "tipin", "spared", "engross", "chain", "dedup"):
             import powercut_judge_book as book
             name, _sep, most = arg.partition(":")
@@ -370,87 +349,64 @@ class Judge:
 
     def Reissue(self, step_name):
         """No booted prefix cut hands its first create an id its medium already
-        shows. The id due is volume-read's: past every id a row or a record of
-        the cut names, and past the Ledger's count (mount/mount.c); a create
-        given less is given an id that was issued before. Asked only where it
-        means something — a cut whose medium names more than its Ledger counts
-        — and at least one such cut must have been booted. On format v1 the
-        create is anchor_test's own, where its file is not found. A book's cut
-        that asks it bears the anchor's file on its ribbon ahead of the slot,
-        so anchor_test finds the file there and creates nothing: the boot is
+        shows. The id due is volume-read's: past every id the cut's book names,
+        and past the count of the slot it stands on (mount/book_mount.c); a
+        create given less is given an id that was issued before. Asked only
+        where it means something — a cut whose medium names more than its slot
+        counts — and at least one such cut must have been booted. A cut that
+        asks it bears the anchor's file on its ribbon ahead of the slot, so
+        anchor_test would find the file there and create nothing: the boot is
         asked a create of a file no medium of the run held (pc_nextfid,
         persist write), and its id is the answer."""
         step = self.run.Step(step_name)
         m = re.search(r"fid=(\d+)", step["line"]) if step else None
         fid = m.group(1) if m else None
         seen, judged, ahead, blind = [], 0, 0, []
-        book = self.base.get("format") == "v2"
-        counter = "the slot it stands on" if book else "its Ledger"
-        asker = "persist write" if book else "anchor_test"
-        made = (r"\[PERSIST\] WROTE fid=(\d+)" if book else r"\[ANCHOR\] (?:WROTE\+ANCHORED fid=(\d+)|PASS)")
         for b in self.boots:
             if not b["why"].startswith("prefix"):
                 continue
-            a = re.search(made, b["log"])
+            a = re.search(r"\[PERSIST\] WROTE fid=(\d+)", b["log"])
             if not a:
                 continue
             judged += 1
             r = self.run.results.get(b["id"], {})
-            due, counted = r.get("next_file_id"), r.get("ledger_next")
+            due, counted = r.get("next_file_id"), r.get("slot_next")
             if due is None or counted is None:
                 blind.append(b["id"])
                 continue
             if due > counted:
                 ahead += 1
-            if a.group(1) and int(a.group(1)) < due:
-                seen.append("%s (%s): its medium names ids below %d, %s counts %d, and "
-                            "%s was issued fid %s" % (b["id"], b["why"], due, counter, counted, asker,
-                                                      a.group(1)))
+            if int(a.group(1)) < due:
+                seen.append("%s (%s): its medium names ids below %d, the slot it stands on counts %d, and "
+                            "persist write was issued fid %s" % (b["id"], b["why"], due, counted, a.group(1)))
         if blind:
             self.Out("reissue", "harness", "volume-read gave no next file id for %d booted cut(s), "
                      "e.g. %s" % (len(blind), blind[0]))
         elif not judged:
-            self.Out("reissue", "fail", "no prefix cut of the anchor's epoch answered %s with a file it made"
-                     % asker if book else "no prefix cut of the anchor's epoch answered anchor_test")
+            self.Out("reissue", "fail", "no prefix cut of the anchor's epoch answered persist write with a "
+                     "file it made")
         elif seen:
             self.Out("reissue", "defect", "%d of %d prefix cuts issued a file id their medium already "
                      "shows: %s" % (len(seen), judged, "; ".join(seen[:2])))
         elif not ahead:
             self.Out("reissue", "fail", "none of %d prefix cuts has a medium naming more files than "
-                     "%s counts, so no cut asked the question" % (judged, counter))
+                     "the slot it stands on counts, so no cut asked the question" % judged)
         else:
             self.Out("reissue", "behaves", "none of %d prefix cuts issued an id its medium shows — "
-                     "%d of them name the anchor's fid %s ahead of %s"
-                     % (judged, ahead, fid, "the slots they stand on" if book else "their Ledger"))
-
-    def Grown(self):
-        """chaingrow's own question: did the recorded run give the tag registry
-        and the file table a block each? A run that grew neither has no cut
-        that tests how a chain grows, however green its census."""
-        base = {name: len(self.base["chains"][name]) for name in ("registry", "table")}
-        have = self.run.results.get(self.run.final or "", {}).get("chains")
-        if not have:
-            return self.Out("grown", "fail", "the final state %s was not judged, so nothing says "
-                            "whether the chains grew" % self.run.final)
-        grew = all(have[name] > base[name] for name in base)
-        self.Out("grown", "behaves" if grew else "fail", "the recorded run took the tag registry from "
-                 "%d to %d block(s) and the file table from %d to %d (the final state %s)"
-                 % (base["registry"], have["registry"], base["table"], have["table"], self.run.final))
+                     "%d of them name the anchor's fid %s ahead of the slots they stand on"
+                     % (judged, ahead, fid))
 
     def FinalState(self):
         """The state an orderly halt left: consistent, and booted, nothing lost."""
         final, r = self.Final(), self.run.results.get(self.run.final or "", {})
         log = final["log"] if final else ""
-        gone = sorted(set(re.findall(r"\[TagFS FSCK\] file (\d+) is named at block \d+\+\d+ and there "
-                                     r"is no readable metadata", log)))
         lost = re.search(r"(\d+) file\(s\) lost", log)
         harm = sorted({"%s/%s" % (x[0], x[1]) for x in r.get("findings", []) if x[1] in HARM})
-        held = final is not None and r.get("verdict") == "consistent" and not gone and \
-            not (lost and int(lost.group(1)))
+        held = final is not None and r.get("verdict") == "consistent" and not (lost and int(lost.group(1)))
         self.Out("final", "behaves" if held else "fail", "the state the halt left (%s): check says %s%s; "
-                 "booted, %s file(s) gone and %s lost" % (
+                 "booted, %s file(s) lost" % (
                      self.run.final, r.get("verdict", "nothing"), " — " + " ".join(harm) if harm else "",
-                     len(gone), lost.group(1) if lost else "no"))
+                     lost.group(1) if lost else "no"))
 
     def Hogged(self):
         final = self.Final()
@@ -477,16 +433,6 @@ def Reconcile(r, log):
     if have != want or int(mounted.group(1)) != want[2]:
         wrong.append("the kernel says %s blocks, free, files and MOUNTED %s; check predicted %s"
                      % (have, mounted.group(1), want))
-    if r.get("format") == "v2":
-        return wrong      # a book keeps no bitmap and no pool: its census is its mount's (bookcensus.py)
-    for pat, a, b in ((r"\[TagFS FSCK\] Bitmap mismatch: (\d+) orphan, (\d+) missing", "orphan", "missing"),
-                      (r"\[TagFS FSCK\] (\d+) file table entry\(s\) corrected from this volume's "
-                       r"metadata pool, (\d+) file\(s\) lost", "corrected", "lost")):
-        m = re.search(pat, log)
-        got, due = (tuple(map(int, m.groups())) if m else (0, 0)), (r["fsck"][a], r["fsck"][b])
-        if got != due:
-            wrong.append("fsck says %u %s, %u %s; check predicted %u and %u"
-                         % (got[0], a, got[1], b, due[0], due[1]))
     return wrong
 
 
@@ -500,10 +446,9 @@ def CmdJudge(a):
     j.Durable()
     j.Codes()
     j.Boundaries()
-    if base.get("format") == "v2":
-        import powercut_judge_book
-        powercut_judge_book.Whole(j)
-        powercut_judge_book.Order(j)
+    import powercut_judge_book
+    powercut_judge_book.Whole(j)
+    powercut_judge_book.Order(j)
     j.Boots()
     for kind in a.verify:
         j.Verify(kind)
@@ -515,89 +460,6 @@ def CmdJudge(a):
     powercut_lie.Judge(j)
     with open(os.path.join(a.dir, "report.txt"), "w") as fh:
         fh.write(Report(run, j))
-    return 0
-
-
-# ---------------------------------------------------------------------------
-# settlecut — the second oracle, held against the first
-# ---------------------------------------------------------------------------
-
-
-def Harm(d):
-    return sorted({(x["code"], x["severity"]) for x in d["findings"] if x["severity"] in HARM})
-
-
-def Codes(codes):
-    return " ".join("%s/%s" % c for c in codes) or "consistent"
-
-
-def CmdSettleCut(a):
-    """A kernel built SETTLECUT=ledger stopped the cycle that settles anchor_test's change before the
-    ledger (DIR/ledger.check.json); one built SETTLECUT=done stopped it after the flush
-    (DIR/done.check.json). The recorded plain run of the same anchor_test is cut at two points of its
-    own cycle — through the file table, and everything before the ledger — and each is judged by
-    volume-read: the SETTLECUT medium and PowerCut's cut before the ledger must name the same codes. The SETTLECUT=ledger medium is judged code by code, as
-    Codes judges a census: each harm code is held under its own caveat or is a FAIL, and a caveated code
-    it does not show is lifted early — one medium is its own whole census."""
-    run = Run(a.dir)
-    judge = Judge(run, None, dict(x.split("=", 1) for x in a.caveat), a.path, 0)
-    checks = {}
-    for point in ("ledger", "done"):
-        with open(os.path.join(a.dir, point + ".check.json")) as fh:
-            checks[point] = json.load(fh)
-    ledger, done = checks["ledger"], checks["done"]
-    harm, first = Harm(ledger), {}
-    for x in ledger["findings"]:
-        first.setdefault(x["code"], x["text"])
-    for code, sev in harm:
-        what = "SETTLECUT=ledger left %s/%s — %s" % (code, sev, first[code])
-        if judge.caveats.get("code:" + code):
-            judge.Out("code:" + code, "defect", what)
-        else:
-            judge.Out("code:" + code, "fail", what + " — no caveat names it; its step is the owner's to "
-                      "assign")
-    for key in sorted(judge.caveats):
-        if key.startswith("code:") and key[5:] not in {c for c, _s in harm}:
-            judge.Out(key, "behaves", "SETTLECUT=ledger left %s, and no %s" % (Codes(harm), key[5:]))
-    step = run.Step("anchor_test")
-    flush = run.AckFlush(step) if step else None
-    if flush is None:
-        judge.Out("cross", "fail", "the recorded anchor_test has no flush behind it, so its cycle has "
-                  "no points to cut at")
-    else:
-        # The anchor's cycle is every volume write from its first to the flush its ack stands on,
-        # across the epochs its FLUSH#1 parts. A cut at a point is the point's own epoch: every
-        # epoch before it whole, and of it the writes before the point — and those outside the
-        # volume, which every cut applies.
-        cycle = [w for w in run.listing["writes"] if step["before"] < w["seq"] < flush and not Outside(w)]
-        table_at = next((w for w in cycle if w["touches"] and w["touches"][0]["kind"] == "table"), None)
-        ledger_at = next((w for w in cycle if w["touches"] and w["touches"][0]["kind"] == "ledger"), None)
-        if table_at is None or ledger_at is None:
-            judge.Out("cross", "fail", "the anchor's cycle, entries %d to %d, wrote no %s"
-                      % (step["before"] + 1, flush, "file table" if table_at is None else "ledger"))
-        else:
-            said = []
-            for name, at, last in (("through the file table", table_at, table_at["seq"]),
-                                   ("before the ledger", ledger_at, ledger_at["seq"] - 1)):
-                keep = [w["index"] for w in run.listing["writes"]
-                        if w["epoch"] == at["epoch"] and (w["seq"] <= last or Outside(w))]
-                r = subprocess.run([sys.executable, VOLUME_READ, os.path.join(a.dir, "base.img"), "cut",
-                                    os.path.join(a.dir, "run.log"), "--epoch", str(at["epoch"]), "--keep",
-                                    Ranges(keep) or "none", "--check", "--json"],
-                                   stdout=subprocess.PIPE, universal_newlines=True)
-                said.append((name, run.LastWriteBefore(last + 1), Harm(json.loads(r.stdout))))
-            judge.Out("cross", "behaves" if said[1][2] == Harm(ledger) else "fail",
-                      "SETTLECUT=ledger names %s; PowerCut's cut of the same cycle %s" % (
-                          Codes(Harm(ledger)), "; ".join("%s (entries to %d) names %s" % (
-                              name, seq, Codes(codes)) for name, seq, codes in said)))
-    anchored = [f for f in done["files"] if f["name"] == "_anchor_test"]
-    whole = [f for f in anchored if f["visible"] and f["size"] == 128 and
-             f["sha256"] == hashlib.sha256(RecordBytes("anchor", 1)).hexdigest()]
-    judge.Out("done", "behaves" if whole and done["verdict"] == "consistent" else "fail",
-              "SETTLECUT=done left a %s volume, and _anchor_test %s" % (
-                  done["verdict"], "whole: 128 bytes, seq 1" if whole else
-                  "; ".join("%s, visible %s, %s bytes" % (f["state"], f["visible"], f["size"])
-                            for f in anchored) or "absent"))
     return 0
 
 
@@ -617,8 +479,7 @@ def Report(run, judge):
     L.append("plan: seed %s — every subset of an epoch of up to %d volume writes, else every prefix, "
              "every single omission and %d drawn; the last write of each epoch torn by sectors "
              "(every sector up to %d)%s" % (p["seed"], p["all_max"], p["sample"], p["tear_all_max"],
-                                            ", and a book's every stitch at each of its sectors"
-                                            if judge.base.get("format") == "v2" else ""))
+                                            ", and every stitch at each of its sectors"))
     groups = []
     for e in p["epochs"]:
         shape = tuple(e.get(k, 0) for k in ("writes", "outside", "subsets", "enumerated", "not_enumerated",
