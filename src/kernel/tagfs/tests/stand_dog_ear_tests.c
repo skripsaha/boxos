@@ -58,7 +58,7 @@ static void StandDogEarStateOf(StandDogEarState* st)
 {
     UseText* use    = tagfs_recall_use_context(NULL);
     st->files_print = BookFilesStandPrint();
-    st->files       = tagfs_get_state()->ledger.total_files;
+    st->files       = tagfs_get_state()->total_files;
     st->use_print   = use && use->bytes ? KCrc32c((const uint8_t*)use->text, (uint32_t)use->bytes) : 0;
     UseTextDrop(use);
 }
@@ -565,8 +565,8 @@ static TestResult TestStandDogEarEmptied(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
-    files0 = tagfs_get_state()->ledger.total_files;
-    free0  = tagfs_get_state()->ledger.free_blocks;
+    files0 = tagfs_get_state()->total_files;
+    free0  = tagfs_get_state()->free_blocks;
     TEST_ASSERT(StandDogEarMake(0, STAND_DOG_EAR_MANY, &first), "files enough for FILES to take two leaves");
     TEST_ASSERT(StandFreshModelMake(&m, 8u * TAGFS_BLOCK_SIZE), "a model of the data");
     for (uint64_t f = first; f < first + 8u; f++)
@@ -589,7 +589,7 @@ static TestResult TestStandDogEarEmptied(void)
     TEST_ASSERT_OK(StandBinderTallies(1u), "and another, with nothing changed between");
     TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
     StandDogEarStateOf(&after);
-    free1 = tagfs_get_state()->ledger.free_blocks;
+    free1 = tagfs_get_state()->free_blocks;
     TestEvidence("free blocks the emptied volume lacks of the start", free0 > free1 ? free0 - free1 : 0);
     TEST_ASSERT_EQ(after.files, files0, "the files the volume began with, and no other");
     TEST_ASSERT(TagFSSettle() == OK && BinderRunWhole() == OK, "a stitch of this mount settles, a Tally is written");
@@ -757,23 +757,23 @@ out:
 
 static const TestCase g_stand_dog_ear_tests[] = {
     { .name = "stand_dog_ear_strict_bites", .func = TestStandDogEarStrictBites,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_dog_ear_runs_bite", .func = TestStandDogEarRunsBite,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_dog_ear_digest_bites", .func = TestStandDogEarDigestBites,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_dog_ear_replayed", .func = TestStandDogEarReplayed,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_dog_ear_stitched", .func = TestStandDogEarStitched,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_dog_ear_emptied", .func = TestStandDogEarEmptied,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_dog_ear_mended", .func = TestStandDogEarMended,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_dog_ear_root_mended", .func = TestStandDogEarRootMended,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_dog_ear_digest_mended", .func = TestStandDogEarDigestMended,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_dog_ear_suite = {

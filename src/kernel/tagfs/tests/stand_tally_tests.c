@@ -87,8 +87,6 @@ void StandTallyClose(void)
 /* Why a test written for a book stands aside here, or NULL. */
 const char* StandTallyAside(void)
 {
-    if (tagfs_get_state()->format != DEED_FORMAT_V2)
-        return "the volume is not format v2: there is no book to read";
     return StandStepsAsideFor();
 }
 
@@ -108,7 +106,7 @@ static void StandTallyStateTake(StandTallyState* out)
     uint32_t    n;
 
     memset(out, 0, sizeof(*out));
-    while ((n = FileMapRows(fs->files, from, ids, 32)) > 0) {
+    while ((n = FileMapFiles(fs->files, from, ids, 32)) > 0) {
         for (uint32_t i = 0; i < n; i++) {
             FileRecord* rec = FileMapRecordHold(fs->files, ids[i], NULL);
             if (!rec)
@@ -227,7 +225,7 @@ static TestResult TestStandTallyFilesReadWhole(void)
     if (aside)
         return test_steps_aside(aside);
     uint32_t errors = IntegrityErrorCount();
-    while ((n = FileMapRows(fs->files, from, ids, 16)) > 0) {
+    while ((n = FileMapFiles(fs->files, from, ids, 16)) > 0) {
         for (uint32_t i = 0; i < n; i++) {
             FileRecord* rec = FileMapRecordHold(fs->files, ids[i], NULL);
             TEST_ASSERT(rec != NULL, "every live file has its record");
@@ -367,7 +365,7 @@ static TestResult TestStandTallyWritesRefused(void)
 
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(FileMapRows(tagfs_get_state()->files, 0, ids, 1) == 1, "a live file to change");
+    TEST_ASSERT(FileMapFiles(tagfs_get_state()->files, 0, ids, 1) == 1, "a live file to change");
     BlockFailArm(seat, BLOCK_FAIL_WRITE, 0, 0, BLOCK_FAIL_NEVER);
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x3C);
     TEST_ASSERT_EQ(TestFileWrite(ids[0], g_test_buffer, TAGFS_BLOCK_SIZE), -1,
@@ -392,7 +390,7 @@ static bool StandTallyRunOfThree(uint64_t* fid, uint64_t* first)
     TagFSState* fs   = tagfs_get_state();
     uint64_t    from = 0, ids[16];
     uint32_t    n;
-    while ((n = FileMapRows(fs->files, from, ids, 16)) > 0) {
+    while ((n = FileMapFiles(fs->files, from, ids, 16)) > 0) {
         for (uint32_t i = 0; i < n; i++) {
             FileRecord* rec = FileMapRecordHold(fs->files, ids[i], NULL);
             FileSpot    spot;
@@ -684,8 +682,8 @@ static TestResult TestStandTallyLowerDoorsRefused(void)
     TagFSGlassKnocking(true);
     TEST_ASSERT_EQ(tagfs_volume_write(block * TAGFS_BLOCK_SECTORS, 1, g_test_buffer), (int)ERR_TAGFS_READ_ONLY,
                    "the volume's sector door refuses");
-    TEST_ASSERT_EQ(TagFSMetaBlockWrite(block, g_test_buffer), ERR_TAGFS_READ_ONLY,
-                   "the metadata block door refuses");
+    TEST_ASSERT_EQ(tagfs_write_block(block, g_test_buffer), ERR_TAGFS_READ_ONLY,
+                   "the block door refuses");
     TEST_ASSERT_EQ(TagFSWriteRun(block, 1, g_test_buffer, &landed), ERR_TAGFS_READ_ONLY,
                    "the data run door refuses");
     TEST_ASSERT_EQ(landed, 0, "and lands nothing");
@@ -723,12 +721,12 @@ static TestResult TestStandTallyMediumReturns(void)
     away = true;
     TEST_ASSERT(TagFSMediumLeft(), "the medium is said to have left");
     BlockFailArm(seat, BLOCK_FAIL_READ, 0, 0, BLOCK_FAIL_NEVER);
-    AwayVerdict back = TagFSStandMediumReturns(NULL);
+    AwayVerdict back = TagFSStandMediumReturns();
     away = false;
     TEST_ASSERT_EQ(back, AWAY_AS_LEFT, "its book is taken up: nothing changed it");
     TEST_ASSERT(BlockFailSeen() > 0, "judged by sectors read off the medium: its newest slot, the ribbon's end");
     BlockFailDisarm();
-    TEST_ASSERT(tagfs_get_state()->initialized && tagfs_get_state()->format == DEED_FORMAT_V2 &&
+    TEST_ASSERT(tagfs_get_state()->initialized &&
                 !TagFSMediumLeft(), "and the volume stands, its medium here again");
     TEST_ASSERT(!TagFSIsUnderGlass(), "a book its writer goes on, as it was");
     StandTallyStateTake(&after);
@@ -737,34 +735,9 @@ static TestResult TestStandTallyMediumReturns(void)
 out:
     BlockFailDisarm();
     if (away)
-        (void)TagFSStandMediumReturns(NULL);
+        (void)TagFSStandMediumReturns();
     TagFSStandLetGo();
     StandTallyClose();
-    return verdict;
-}
-
-// ----------------------------------------------------------------------------
-// The live files are the records: a volume with no table has none to agree
-// ----------------------------------------------------------------------------
-
-static TestResult TestStandTallyLiveWithoutRows(void)
-{
-    TestResult  verdict = TEST_PASS;
-    TagFSState* fs      = tagfs_get_state();
-    const char* aside   = StandTallyAside();
-    uint64_t    from = 0, files = 0, ids[32];
-    uint32_t    n;
-
-    if (aside)
-        return test_steps_aside(aside);
-    while ((n = FileMapRows(fs->files, from, ids, 32)) > 0) {
-        for (uint32_t i = 0; i < n; i++)
-            TEST_ASSERT(!FileMapRowGet(fs->files, ids[i], NULL, NULL), "a live file of a book has no row");
-        files += n;
-        from = ids[n - 1] + 1;
-    }
-    TEST_ASSERT_EQ(files, FileMapCount(fs->files), "and every file the map holds is live by its record");
-out:
     return verdict;
 }
 
@@ -786,7 +759,7 @@ static bool StandTallyFilesTaken(uint64_t* blocks)
     TagFSState* fs   = tagfs_get_state();
     uint64_t    from = 0, ids[16];
     uint32_t    n;
-    while ((n = FileMapRows(fs->files, from, ids, 16)) > 0) {
+    while ((n = FileMapFiles(fs->files, from, ids, 16)) > 0) {
         for (uint32_t i = 0; i < n; i++) {
             FileRecord* rec   = FileMapRecordHold(fs->files, ids[i], NULL);
             bool        taken = rec != NULL;
@@ -869,7 +842,7 @@ static TestResult TestStandTallyMapClaimNamed(void)
     TestResult  verdict = TEST_PASS;
     TagFSState* fs      = tagfs_get_state();
     const char* aside   = StandTallyAside();
-    uint64_t    before  = fs->ledger.free_blocks, start = 0, met = 0, free = 0;
+    uint64_t    before  = fs->free_blocks, start = 0, met = 0, free = 0;
     uint32_t    mixed = 0, w, k;
     bool        claimed = false;
 
@@ -887,7 +860,7 @@ static TestResult TestStandTallyMapClaimNamed(void)
     TEST_ASSERT_EQ(met, 0, "none of them was taken");
     TEST_ASSERT(!BlockMapDerivedIsFree(start) && !BlockMapDerivedIsFree(start + 1u) &&
                 BlockMapDerivedIsFree(start + 2u), "the two read taken, the third free");
-    TEST_ASSERT_EQ(fs->ledger.free_blocks, before - 2u, "and the volume's free count is two less");
+    TEST_ASSERT_EQ(fs->free_blocks, before - 2u, "and the volume's free count is two less");
     TEST_ASSERT_OK(BlockMapDerivedClaim(GROUND_TALLY, 1, start, 3, &met), "all three are claimed for a node");
     TEST_ASSERT_EQ(met, 2, "and the two the file names are met taken — two owners, named on the insertion");
     TEST_ASSERT_OK(BlockMapDerivedRelease(GROUND_TALLY, 1, start, 3, &met), "the three are let go");
@@ -904,7 +877,7 @@ static TestResult TestStandTallyMapClaimNamed(void)
                        "the third, free, is let go once more");
         TEST_ASSERT_EQ(met, 1, "and is met free already");
     }
-    TEST_ASSERT_EQ(fs->ledger.free_blocks, before, "the volume's free count is what it was");
+    TEST_ASSERT_EQ(fs->free_blocks, before, "the volume's free count is what it was");
     TEST_ASSERT(BlockMapDerivedStandHolds(&free, &mixed), "and every window's summary holds to its page");
 out:
     if (claimed)
@@ -983,35 +956,33 @@ out:
 
 static const TestCase g_stand_tally_tests[] = {
     { .name = "stand_tally_files_read_whole", .func = TestStandTallyFilesReadWhole,
-      .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V2 },
+      .reach = TEST_READS_ONLY },
     { .name = "stand_tally_mount_writes_nothing", .func = TestStandTallyMountWritesNothing,
-      .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V2 },
+      .reach = TEST_READS_ONLY },
     { .name = "stand_tally_copy_one_rotten", .func = TestStandTallyCopyOneRotten,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_tally_rotten_leaf_locked", .func = TestStandTallyRottenLeafLocked,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_tally_writes_refused", .func = TestStandTallyWritesRefused,
-      .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V2 },
+      .reach = TEST_READS_ONLY },
     { .name = "stand_tally_rot_three_paths", .func = TestStandTallyRotThreePaths,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_tally_rot_published", .func = TestStandTallyRotPublished,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_tally_undigested_refused", .func = TestStandTallyUndigestedRefused,
-      .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V2 },
+      .reach = TEST_READS_ONLY },
     { .name = "stand_tally_length_asked", .func = TestStandTallyLengthAsked,
-      .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V2 },
+      .reach = TEST_READS_ONLY },
     { .name = "stand_tally_lower_doors_refused", .func = TestStandTallyLowerDoorsRefused,
-      .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V2 },
+      .reach = TEST_READS_ONLY },
     { .name = "stand_tally_medium_returns", .func = TestStandTallyMediumReturns,
-      .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V2 },
-    { .name = "stand_tally_live_without_rows", .func = TestStandTallyLiveWithoutRows,
-      .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V2 },
+      .reach = TEST_READS_ONLY },
     { .name = "stand_tally_map_holds", .func = TestStandTallyMapHolds,
-      .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V2 },
+      .reach = TEST_READS_ONLY },
     { .name = "stand_tally_map_claim_named", .func = TestStandTallyMapClaimNamed,
-      .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V2 },
+      .reach = TEST_READS_ONLY },
     { .name = "stand_tally_map_short_of_memory", .func = TestStandTallyMapShortOfMemory,
-      .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V2 },
+      .reach = TEST_READS_ONLY },
     { .name = "stand_blockfail_two_ranges", .func = TestStandBlockFailTwoRanges,
       .reach = TEST_READS_ONLY },
 };

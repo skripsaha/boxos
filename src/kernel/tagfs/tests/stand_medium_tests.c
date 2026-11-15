@@ -5,9 +5,7 @@
 #include "../ink/ink.h"
 #include "../settle/settle.h"
 #include "../scribe/scribe.h"
-#include "../ledger/ledger.h"
 #include "../mount/away.h"
-#include "../metadata_pool/meta_pool.h"
 #include "../tag_registry/tag_registry.h"
 #include "block_fail.h"   /* BLOCKFAIL — a flush answered with the sense a USB disk gives */
 #include "boardroom.h"
@@ -295,7 +293,7 @@ out:
 static void StandBookClose(StandBook* b)
 {
     if (TagFSMediumLeft())
-        (void)TagFSStandMediumReturns(NULL);
+        (void)TagFSStandMediumReturns();
     if (b->holding)
         HelmLetGo(b->holder->ofe, &s_holder);
     if (b->queued && StandBookTurnSettled(&s_waiting)) {
@@ -334,7 +332,7 @@ static TestResult TestStandMediumBookTakenUp(void)
     if (verdict != TEST_PASS)
         goto out;
 
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_AS_LEFT,
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_AS_LEFT,
                    "the medium came back as this kernel left it");
     TEST_ASSERT(!TagFSMediumLeft(), "and the book is taken up");
     TEST_ASSERT(StandBookTurnSettled(&s_waiting) && s_waiting.handed,
@@ -351,105 +349,6 @@ static TestResult TestStandMediumBookTakenUp(void)
     TEST_ASSERT(!tagfs_has_tag(b.file_id, b.tag), "and the file is as the change left it");
 out:
     StandBookClose(&b);
-    return verdict;
-}
-
-/*
- * The return is judged by what this kernel left: an intact Ledger as read is
- * as left, one a cycle behind the settled one is a medium that lied, and one
- * whose seal is not the one left — a medium another kernel settled on — is
- * another's. A return that is not as left gives the book up: every waiter,
- * the Helm's FIFO among them, is answered with the changes no cycle settled,
- * and the anchor hears ERR_DEVICE_NOT_READY. The stand's volume stays mounted
- * (away.h, TagFSStandMediumReturns).
- */
-static TestResult TestStandMediumBookGivenUp(void)
-{
-    TestResult   verdict = TEST_PASS;
-    StandBook    b;
-    VolumeLedger found;
-    VolumeLedger other;
-    const char*  aside   = StandStepsAsideFor();
-
-    if (aside)
-        return test_steps_aside(aside);
-
-    verdict = StandBookOpen(&b, "book_given_up");
-    if (verdict == TEST_PASS)
-        verdict = StandBookLeaves(&b);
-    if (verdict != TEST_PASS)
-        goto out;
-
-    TEST_ASSERT(LedgerNewestOn(tagfs_get_seat(), tagfs_get_volume_base(), &found),
-                "the medium's newest Ledger is read");
-    TEST_ASSERT(found.mark.settle == found.seq, "and carries a seal of its own");
-    TEST_ASSERT_EQ(AwayJudge(&found), AWAY_AS_LEFT, "as read, it is as this kernel left it");
-    other = found;
-    other.seq--;
-    TEST_ASSERT_EQ(AwayJudge(&other), AWAY_OLDER, "a cycle behind it, the medium lied");
-    other = found;
-    other.mark.closed_crc32 ^= 1u;
-    TEST_ASSERT_EQ(AwayJudge(&other), AWAY_OTHER, "and with another seal, it is another's");
-
-    uint64_t owed = HelmOwed();
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(&other), AWAY_OTHER, "that return gives the book up");
-    TEST_ASSERT(StandBookTurnSettled(&s_waiting), "the waiter is answered");
-    b.queued = false;
-    TEST_ASSERT_EQ(s_waiting.gone, 1, "once, that the medium left");
-    TEST_ASSERT(!s_waiting.handed, "and was never handed the Helm");
-    TestEvidence("changes the answer said left with the medium", s_waiting.lost);
-    TEST_ASSERT_EQ(s_waiting.lost, b.unsettled, "with the changes no cycle settled");
-    TEST_ASSERT(s_anchor.answered, "the anchor is answered too");
-    TEST_ASSERT_EQ(s_anchor.rc, ERR_DEVICE_NOT_READY, "with ERR_DEVICE_NOT_READY");
-    TEST_ASSERT_EQ(HelmOwed(), owed - 1u, "and nothing is owed on the file any more");
-out:
-    StandBookClose(&b);
-    return verdict;
-}
-
-/*
- * K3. A cycle with a waiter closes the tail onto a Spare and makes the reserve
- * whole again, and the new Spare's stamp is a write: the cycle's last flush
- * keeps it. So a volume nobody writes to after it — saved, taken out, put back
- * — comes back as this kernel left it, and its book is taken up. Red before:
- * the reserve was made again after the last flush, every such book was in
- * doubt, and the return gave it up.
- */
-static TestResult TestStandMediumIdleTakenUpAfterSpare(void)
-{
-    TestResult  verdict = TEST_PASS;
-    TagFSState* fs      = tagfs_get_state();
-    uint64_t    file_id = 0;
-    const char* aside   = StandStepsAsideFor();
-
-    if (aside)
-        return test_steps_aside(aside);
-
-    fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0xB1u);
-    TEST_ASSERT(StandMakeFile("idle_after_spare", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
-                "a file is made and written");
-    uint64_t gen = InkedGen();
-    TEST_ASSERT_OK(TagFSSettle(), "a cycle with a waiter settles it");
-    TEST_ASSERT(PoolClosedSettledGen() >= gen,
-                "in a closed block: the cycle closed the tail onto a Spare");
-    TagFSLockTake(&fs->lock);
-    uint32_t held = PoolSparesHeld(NULL, 0);
-    TagFSLockDrop(&fs->lock);
-    TEST_ASSERT_EQ(held, SPARE_RESERVE, "and made the reserve whole again");
-    TEST_ASSERT(VolumeWritesKept(),
-                "every write the cycle made, the new Spare's stamp among them, is kept");
-
-    TagFSStandMediumLeaves();
-    TEST_ASSERT(TagFSMediumLeft(), "the medium leaves with nothing owed");
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_AS_LEFT,
-                   "and comes back as this kernel left it");
-    TEST_ASSERT(!TagFSMediumLeft(), "its book is taken up");
-out:
-    if (TagFSMediumLeft())
-        (void)TagFSStandMediumReturns(NULL);
-    if (file_id)
-        (void)tagfs_delete_file(file_id, INK_UNWARRANTED);
-    (void)TagFSSettle();
     return verdict;
 }
 
@@ -548,51 +447,6 @@ out:
 }
 
 /*
- * R9 (Z07-2). A book is given up — its waiter owed the answer that its change
- * went with the medium — and before any service point runs the medium leaves
- * again and comes back as it was left. The waiter has its answer from the
- * give-up itself, and the book taken up after it hands that waiter nothing.
- * Red before: the fate was one word walked at the next service point, the
- * take-up's HAND wrote over the give-up's ANSWER, and the waiter was handed
- * the Helm of a volume the give-up was letting go of.
- */
-static TestResult TestStandMediumGivenUpFateStands(void)
-{
-    TestResult   verdict = TEST_PASS;
-    StandBook    b;
-    VolumeLedger found;
-    const char*  aside   = StandStepsAsideFor();
-
-    if (aside)
-        return test_steps_aside(aside);
-
-    verdict = StandBookOpen(&b, "book_fate_stands");
-    if (verdict == TEST_PASS)
-        verdict = StandBookLeaves(&b);
-    if (verdict != TEST_PASS)
-        goto out;
-
-    TEST_ASSERT(LedgerNewestOn(tagfs_get_seat(), tagfs_get_volume_base(), &found),
-                "the medium's newest Ledger is read");
-    found.mark.closed_crc32 ^= 1u;
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(&found), AWAY_OTHER,
-                   "the medium comes back another's, and the book is given up");
-    TEST_ASSERT_EQ(s_waiting.gone, 1,
-                   "the waiter is answered by the give-up itself, before any service point runs");
-
-    TagFSStandMediumLeaves();
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_AS_LEFT,
-                   "the medium leaves again and comes back as it was left, and that book is taken up");
-    HelmRunReady();
-    TEST_ASSERT_EQ(s_waiting.handed, 0, "and hands nothing to the waiter the give-up answered");
-    TEST_ASSERT_EQ(s_waiting.gone, 1, "which was answered once");
-    TEST_ASSERT_EQ(s_waiting.lost, b.unsettled, "with the changes the given-up book held");
-out:
-    StandBookClose(&b);
-    return verdict;
-}
-
-/*
  * R9 (П0-K1, X3-5). The book is open. A writer asking for a file's Helm, free
  * as it is, is answered at once that the medium is away, and a read of the
  * volume is refused as the departure it is, before any of the work is begun.
@@ -644,7 +498,7 @@ static TestResult TestStandMediumNeverLeftIsNoReturn(void)
                 "and the volume is the one up all along");
 out:
     if (TagFSMediumLeft())
-        (void)TagFSStandMediumReturns(NULL);
+        (void)TagFSStandMediumReturns();
     if (mine)
         HelmLetGo(handle->ofe, &s_late.waiter);
     tagfs_close(handle);
@@ -681,7 +535,7 @@ static TestResult TestStandMediumTakenUpTakesWrites(void)
     protected_ = false;
 
     TagFSStandMediumLeaves();
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_AS_LEFT,
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_AS_LEFT,
                    "it leaves, and comes back as this kernel left it");
     TEST_ASSERT(!TagFSReadOnly(), "and its book taken up, the volume takes changes again");
     TEST_ASSERT_OK(TagFSSettle(), "and a cycle settles on it");
@@ -689,7 +543,7 @@ out:
     if (protected_)
         BlockFailProtect(seat, false);
     if (TagFSMediumLeft())
-        (void)TagFSStandMediumReturns(NULL);
+        (void)TagFSStandMediumReturns();
     InkReadOnlyLift();
     return verdict;
 }
@@ -783,17 +637,8 @@ static const TestCase g_stand_medium_tests[] = {
       .func  = TestStandMediumSyncCacheRemembered, .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_medium_book_taken_up", .func = TestStandMediumBookTakenUp,
       .reach = TEST_WRITES_TO_VOLUME },
-    { .name  = "stand_medium_book_given_up", .func = TestStandMediumBookGivenUp,
-      .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V1, .analog = "stand_away_other_stitches" },
-    { .name  = "stand_medium_idle_taken_up_after_spare",
-      .func  = TestStandMediumIdleTakenUpAfterSpare, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V1, .analog = "stand_docket_replug_kept" },
     { .name  = "stand_medium_bell_rings_once",
       .func  = TestStandMediumBellRingsOnce, .reach = TEST_READS_ONLY },
-    { .name  = "stand_medium_given_up_fate_stands",
-      .func  = TestStandMediumGivenUpFateStands, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V1, .analog = "stand_away_verdict" },
     { .name  = "stand_medium_never_left_is_no_return",
       .func  = TestStandMediumNeverLeftIsNoReturn, .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_medium_numbers_past_the_table",
@@ -808,15 +653,6 @@ static const TestCase g_stand_medium_tests[] = {
       .func  = TestStandMediumMountRingsInItsOwnBreath, .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_medium_mount_bad_sector_waits",
       .func  = TestStandMediumMountBadSectorWaits, .reach = TEST_WRITES_TO_VOLUME },
-    { .name  = "stand_medium_mount_refused_read_is_no_verdict",
-      .func  = TestStandMediumMountRefusedReadIsNoVerdict, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V1, .analog = "stand_medium_mount_bad_sector_waits" },
-    { .name  = "stand_medium_given_up_ids_not_given_again",
-      .func  = TestStandMediumGivenUpIdsNotGivenAgain, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V1, .analog = "stand_errata_born_undone" },
-    { .name  = "stand_medium_return_refused_once",
-      .func  = TestStandMediumReturnRefusedOnce, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V1, .analog = "stand_away_marks_refused" },
     { .name  = "stand_medium_mount_resets_the_seat",
       .func  = TestStandMediumMountResetsTheSeat, .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_medium_mount_waits_for_memory",

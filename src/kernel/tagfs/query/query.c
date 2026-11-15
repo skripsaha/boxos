@@ -102,7 +102,7 @@ static error_t QueryUnless(const TagSpelling* without, uint32_t without_count, b
 // Every file
 // ----------------------------------------------------------------------------
 
-/* The files are the map's that have a record (FileMapRows). Every one is below
+/* The files are the map's that have a record (FileMapFiles). Every one is below
  * the id the next create takes: the mount derives that id past every row and
  * record the medium holds (mount/mount.c), so no live file has an id the
  * volume never issued. */
@@ -114,7 +114,7 @@ static void ListPageInside(const uint32_t* unless, uint32_t unless_count, uint64
     uint64_t    at = from ? from : 1;
     uint32_t    n;
 
-    while ((n = FileMapRows(fs->files, at, batch, QUERY_BATCH)) > 0) {
+    while ((n = FileMapFiles(fs->files, at, batch, QUERY_BATCH)) > 0) {
         for (uint32_t i = 0; i < n; i++) {
             bool aside = false;
             for (uint32_t u = 0; u < unless_count && !aside; u++)
@@ -433,7 +433,7 @@ uint32_t tagfs_get_fragmentation_score(uint32_t* out_files, uint32_t* out_gaps)
     uint64_t batch[QUERY_BATCH];
     uint64_t at = 1;
     uint32_t n;
-    while ((n = FileMapRows(tagfs_get_state()->files, at, batch, QUERY_BATCH)) > 0) {
+    while ((n = FileMapFiles(tagfs_get_state()->files, at, batch, QUERY_BATCH)) > 0) {
         for (uint32_t i = 0; i < n; i++)
             FragOfFile(&frag, batch[i]);
         if (batch[n - 1] == UINT64_MAX)

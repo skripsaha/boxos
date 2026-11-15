@@ -2166,14 +2166,12 @@ static int SysFragScore(const ManifestOp *op, Crate *crates, uint16_t crate_coun
  * [16 bytes volume name][u64 free bytes][u8 volume present][u8 free counted]
  * [6 bytes padding][u64 busy TSC ticks][u64 total TSC ticks][16 bytes volume
  * UUID][u64 total bytes][u64 used bytes].
- * The name and free count come from the mounted volume's existing Deed and
- * Ledger. The UUID and capacity come from the mounted TagFS state. CPU
- * counters are cumulative, monotonic snapshots; userspace derives a
- * utilization percentage from two snapshots.
+ * The name comes from the mounted volume's Deed; the UUID and capacity from
+ * the mounted TagFS state. CPU counters are cumulative, monotonic snapshots;
+ * userspace derives a utilization percentage from two snapshots.
  *
- * A format-v2 volume keeps no Ledger: its free count is its block map's,
- * derived from the owners' names at the mount (block_map_derived.h), less what
- * Slips promise, kept where format v1's map keeps its own. "free counted" says
+ * The free count is the block map's, derived from the owners' names at the
+ * mount (block_map_derived.h), less what Slips promise. "free counted" says
  * the count is there. A book whose Tally names a bookmark has no map — this
  * kernel does not read the ground a bookmark holds (book_ground.c) — and
  * carries 0, and free and used bytes of 0: not a number that would read as a
@@ -2194,7 +2192,7 @@ static int SysResources(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     bool volume_present = false;
     if (tagfs_enter()) {
         TagFSState *fs = tagfs_get_state();
-        bool counted = fs->format != DEED_FORMAT_V2 || BlockMapDerivedUp();
+        bool counted = BlockMapDerivedUp();
         uint64_t free_bytes = counted ? AllotmentFreeUnpromised() * (uint64_t)VOLUME_BLOCK_BYTES : 0;
         uint64_t total_bytes = fs->volume_bytes;
         if (free_bytes > total_bytes) free_bytes = total_bytes;

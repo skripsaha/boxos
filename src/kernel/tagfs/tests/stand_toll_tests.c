@@ -346,22 +346,15 @@ static TestResult TestStandTollWindowBook(void)
     return StandTollSmallWriter(true);
 }
 
-static TestResult TestStandTollLullV1(void)
-{
-    return StandTollSmallWriter(false);
-}
-
 static const TestCase g_stand_toll_tests[] = {
     { .name = "stand_toll_both_ways", .func = TestStandTollBothWays,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_toll_weighs", .func = TestStandTollWeighs,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_toll_check_within_d", .func = TestStandTollCheckWithinD,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_toll_window_book", .func = TestStandTollWindowBook,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
-    { .name = "stand_toll_lull_v1", .func = TestStandTollLullV1,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V1, .analog = "stand_toll_window_book" },
+      .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_toll_suite = {

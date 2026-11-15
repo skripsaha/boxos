@@ -4,68 +4,50 @@
 #include "../tagfs.h"
 
 /*
- * Settle — the cycle that takes what was inked to the medium.
+ * Settle — the cycle that takes what was inked to the medium: one stitch on
+ * the book's ribbon a cycle (sewing.h, spec_v2 §2.7, §3.2).
  *
  * One cycle at a time, held by the Settle's Scribe (g_settle_scribe, whose
  * holder is the committer), and no TagFS lock across the medium:
  *
- *   Glean's pass (glean.h), but in a machine's last cycles: blocks at the pool
- *       chain's front taken off, their live records laid again in the tail;
- *   S0  under the state lock, memory only: the target (every Ink so far), the
- *       tail closed onto a Spare when a waiter is owed a closed block, the
- *       pool's closed blocks and tail taken, the Ledger's image taken, naming
- *       the Use Context's chain — a new one, its blocks staked just before S0
- *       with no lock held, when the person's word changed (use_memory.h);
- *   S1  the tag registry, the block map, the file table, the pool's head
- *       named again once the chain begins past it, the integrity map — the
- *       digests of the ground at rest zeroed first — and the new chain's
- *       links;
- *   S2  FLUSH#1, when the cycle names blocks or tags a kept flush does not
- *       yet cover: the data, the tags and the chain lie on the medium before
- *       any record names them;
- *   S3  the pool's closed blocks, then its tail;
- *   S4  the Ledger, into its older copy — the only writer it has — sealed
- *       with the cycle's SettleMark (volume_ledger.h): the pool from
- *       chain_first to where this cycle's records end, the registry up to
- *       its last record, each with the CRC32 a mount holds the medium to;
- *       then the pool's reserve of Spares made whole again, as it was just
- *       before S0 — their stamps are writes S5 keeps (meta_pool.h);
- *   S5  FLUSH#2;
- *   S6  under the state lock: settled_gen is the target, the closed blocks
- *       written leave memory, the demand for the Use Context is answered, and
- *       Fallow gives back what has rested enough; then every waiter the cycle
- *       covered is answered.
+ *   TAKE         under the state lock, memory only: the target (every Ink so
+ *                far), the Docket's records, the tags given since the last
+ *                stitch, the Use Context's word when the person's word changed;
+ *   BUILD        the stitch laid out in memory;
+ *   FIRST_FLUSH  when the stitch names fresh data a kept flush does not yet
+ *                cover: the data lies on the medium before the stitch names it;
+ *   STITCH       the stitch's atoms written to the ribbon;
+ *   LAST_FLUSH   the flush that keeps it;
+ *   DONE         under the state lock: settled_gen is the target, the demand
+ *                for the Use Context is answered, and Fallow gives back what has
+ *                rested enough; then every waiter the cycle covered is answered.
  *
- * ‼ THE CYCLE IS AN AUTOMATON OF STEPS. The committer runs one step — S1's
- * parts one at a time, S3 one block at a time — and goes back to its loop
- * between two: the next pocket, one (kcore.c), the batons and the halt's
- * pass, the services and the volume's Helm work. It holds the Scribe from S0
- * to S6, so every other asker still waits for, or is answered by, the cycle in
- * flight; one on the committer's own core, between two of its steps, runs the
- * rest of the cycle itself rather than wait for itself.
+ * ‼ THE CYCLE IS AN AUTOMATON OF STEPS. The committer runs one step and goes
+ * back to its loop between two: the next pocket, one (kcore.c), the batons and
+ * the halt's pass, the services and the volume's Helm work. It holds the
+ * Scribe from TAKE to DONE, so every other asker still waits for, or is
+ * answered by, the cycle in flight; one on the committer's own core, between
+ * two of its steps, runs the rest of the cycle itself rather than wait for
+ * itself.
  *
- * A refusal anywhere from S1 on declares nothing settled: said once for the
- * episode, and every step is one the next cycle makes again the same way —
- * the same bytes to the same places, the same older copy of the Ledger.
+ * A refusal anywhere declares nothing settled: said once for the episode, and
+ * the next cycle sews the same changes again.
  */
 
 extern Scribe g_settle_scribe;
 
-/* A cycle that began after this call covers every Ink made before it, and lays
- * every record up to it in a closed block: OK once it settled, or its refusal.
- * A kernel path's own demand — the integrity map's new place, the stand — with
- * no TagFS lock held; takes the volume's door itself. A program never waits
+/* A cycle that began after this call covers every Ink made before it: OK once
+ * it settled, or its refusal. A kernel path's own demand — the stand's, the
+ * Use Context's — with no TagFS lock held; takes the volume's door itself. A program never waits
  * here: an anchor waits through its Chit (SettleWaitLink). */
 error_t  TagFSSettle(void);
 
-/* The volume is short and Fallow rests blocks, or Glean may take the pool's
- * slack off its chain: cycles run until some come back — at most
- * 2 + FallowLag() of them — for a caller in the kernel standing in its call; a
- * program's call never runs one (helm.h, settle_ops.h). OK when the cycles gave
- * ground back, or when nothing rests and the chain has no slack — the take
- * asked again then says the last word itself — or after one cycle of a sweep
- * of Glean's a delete waits on (glean.h); ERR_TAGFS_NO_SPACE when none came
- * back; or a cycle's refusal. ERR_WOULD_BLOCK at once for a caller that may not
+/* The volume is short and Fallow rests blocks, or the ribbon is short of room:
+ * cycles run until some come back — at most 2 + FallowLag() of them — for a
+ * caller in the kernel standing in its call; a program's call never runs one
+ * (helm.h, settle_ops.h). OK when the cycles gave ground back, or when nothing
+ * rests — the take asked again then says the last word itself;
+ * ERR_TAGFS_NO_SPACE when none came back; or a cycle's refusal. ERR_WOULD_BLOCK at once for a caller that may not
  * wait for a cycle — under a TagFS lock, a Scribe or a baton continuation —
  * but the Settle's own holder between two steps of its cycle, which runs that
  * cycle to its end first. Inside the door. */
@@ -75,19 +57,17 @@ error_t  SettleForRoom(void);
  * The machine is stopping (RT-12): the last cycles, run by the halt itself
  * before interrupts go off, right after the asynchronous writes drained — and
  * never after the cores are stopped, when a committer could be frozen in the
- * middle of the medium. They give back every Spare no link names, and every
- * block Fallow rests, as its rule allows once they settled — or, held only by
- * an open handle, write it free in the map — so no clean shutdown leaves a
- * block taken that nothing names. From the halt's shut on, a cycle anybody
- * begins is one of the halt's. A committer whose core is no longer running is
- * an abandoned cycle: it is taken over and begun again from S0. A volume whose
+ * middle of the medium. They settle every change made and seal the volume with
+ * the halt's last word. From the halt's shut on, a cycle anybody begins is one
+ * of the halt's. A committer whose core is no longer running is an abandoned
+ * cycle: it is taken over and begun again from its TAKE. A volume whose
  * medium is away runs no cycle: the stopping machine is the event its open
  * book waited for, and the book is given up — every waiter answered
  * (mount/away.h). The answer is kept for tagfs_shutdown. They seal the volume
  * clean only when no change is in flight: none holds or waits for a file's
  * Helm — a write's bytes in place may land after the seal, and its digest with
  * them or not, and a clean seal is the next mount's word that every digest on
- * the medium stands (RT-22, mount.c MountAfterDoor).
+ * the medium stands (RT-22).
  */
 error_t  TagFSSettleForHalt(void);
 
@@ -124,11 +104,9 @@ uint64_t SettledGen(void);
 uint64_t SettledCycles(void);
 
 #ifdef CONFIG_VOLUME_TESTS
-/* A cycle begun as the cadence begins one — it closes the tail only as far as
- * a waiter is owed — and run to its end on this core: OK once it settled,
- * ERR_BUSY when another asker holds the Settle, or the cycle's refusal. For
- * the stand, whose runner holds the cadence: cycles that close for nobody let
- * Glean bring the pool's chain down to what its live records fill. */
+/* A cycle begun as the cadence begins one, and run to its end on this core: OK
+ * once it settled, ERR_BUSY when another asker holds the Settle, or the
+ * cycle's refusal. For the stand, whose runner holds the cadence. */
 error_t  TagFSSettleAsCadence(void);
 
 /* A cycle begun as the cadence begins one, on this core, and left standing
@@ -141,13 +119,12 @@ bool     TagFSStandSettleBegin(void);
 /* The next cycle's seat rings seat:ready once, as a driver's recovery would
  * while the cycle runs — noted, and said later by the room's pass: just before
  * the cycle takes the count a refusal of it is judged by (`before_its_count`),
- * or right after its S0 — a book's TAKE. For the stand. */
+ * or right after its TAKE. For the stand. */
 void     TagFSStandSettleRings(bool before_its_count);
 
-/* The next cycle's block map answers `code` once its own writes are done —
- * on a book, the making of its stitch answers it before anything is made — a
- * refusal that is not the medium's (ERR_NO_MEMORY, ERR_WOULD_BLOCK), as a
- * step meets one. For the stand. */
+/* The making of the next cycle's stitch answers `code` before anything is
+ * made — a refusal that is not the medium's (ERR_NO_MEMORY, ERR_WOULD_BLOCK),
+ * as a step meets one. For the stand. */
 void     TagFSStandSettleRefuses(error_t code);
 
 /* The demands standing for the next cycle (SettleDemandKind), read and left
@@ -168,19 +145,6 @@ void     TagFSStandShutForHalt(bool shut);
  * went before it left unanswered. With the door shut. */
 void     SettleMountReset(void);
 
-/*
- * What the mount stood on, for the seals the cycles of this mount write: the
- * pool block and the bytes of its records the first cycle's own records begin
- * after — the stood seal's pool_to, or the tail as a mount with no seal found
- * it — and whether the medium was ever found holding less than a settled
- * cycle's seal said (SETTLE_MEDIUM_LIED): every seal from now on carries it,
- * and ground Fallow rests waits one cycle more for good. With the door shut.
- */
-void     SettleMountStand(uint32_t from_block, uint32_t from_bytes, bool medium_lied);
-
-/* Whether this volume's seals carry SETTLE_MEDIUM_LIED. */
-bool     SettleMediumLied(void);
-
 // ============================================================================
 // Cadence — what starts a cycle (cadence.c)
 //
@@ -198,14 +162,14 @@ bool     SettleMediumLied(void);
 // The window is the promise — no change of the volume waits longer than
 // SETTLE_WINDOW_US for its cycle to begin, ext4's own five seconds: once the
 // oldest unsettled change is that old, or once a demand comes (a waiter in a
-// Chit, a tail that filled, a volume short while Fallow rests blocks, a
-// program leaving with changes unsettled), the cycle begins between two
-// pockets, not only after the last one.
+// Chit, a volume short while Fallow rests blocks, a program leaving with
+// changes unsettled), the cycle begins between two pockets, not only after
+// the last one.
 //
 // A frequent small writer — small appends to one file, each smaller than what
-// settling it costs the medium, again before a Lull has passed (on a book,
-// before the window has: its cycles come at most one a window) — does not
-// start cycles by Lull: its changes wait for the window or a demand. It is
+// settling it costs the medium, again before the window has passed: its
+// cycles come at most one a window — does not start cycles by Lull: its
+// changes wait for the window or a demand. It is
 // told by what it does, never by a word on its file: a file's tags are its
 // user's.
 // ============================================================================
@@ -214,8 +178,8 @@ bool     SettleMediumLied(void);
 #define SETTLE_WINDOW_US  5000000ull          /* the promise: ext4's commit interval */
 
 typedef enum {
-    SETTLE_DEMAND_ROOM  = 1u << 0,  /* the allocator is short while Fallow rests blocks,
-                                       or while Glean may take the pool's slack off */
+    SETTLE_DEMAND_ROOM  = 1u << 0,  /* the allocator, or the ribbon, is short while a cycle
+                                       would give room back */
     SETTLE_DEMAND_LEAVE = 1u << 1,  /* a program left with changes no cycle settled */
     SETTLE_DEMAND_TALLY = 1u << 2,  /* a book's ribbon wants a Tally to take it in: no next_quire
                                        could be given — a Tally's work, not a cycle's (binder.h) */
@@ -275,7 +239,7 @@ uint64_t SettleLastDUs(void);
 void     SettleCadenceHold(bool hold);
 
 /*
- * Format v2's writer (settle/sewing.c). StitchBookRefused: no Quire took a
+ * The writer (settle/sewing.c). StitchBookRefused: no Quire took a
  * stitch's write — the volume may only be read until it is mounted again, part
  * of what TagFSReadOnly answers (M-6). StitchMarksVerdict: this core is the
  * Settle's holder marking the files of the mount's verdict in their records,
@@ -285,20 +249,12 @@ void     SettleCadenceHold(bool hold);
 bool     StitchBookRefused(void);
 bool     StitchMarksVerdict(void);
 
-/* A part of format v1's cycle — the pool's Spares, Glean, the Ledger's write —
- * reached on a book: a defect of the road there, which the cycle's dispatch by
- * format shuts (settle.c). Said once a mount and stopped at in a STRICT
- * kernel; true then, and the caller does nothing. False on format v1. With no
- * TagFS lock held. */
-bool     SettleV1OnBook(const char* what);
-
 // ============================================================================
 // Waiting for a cycle through a Chit (settle_wait.c)
 //
 // ‼ ONE RULE FOR EVERY WAITER. A program's anchor, its OBJ_WRITE_SETTLED, its
 // Use Context remembered: the handler parks the program behind its Chit and
-// links a waiter; a cycle that settles the waiter's Ink and lays it in a closed
-// block answers it at S6. A medium that takes no write answers every waiter
+// links a waiter; a cycle that settles the waiter's Ink answers it at DONE. A medium that takes no write answers every waiter
 // with ERR_TAGFS_READ_ONLY; one that left holds them with its open book
 // (mount/away.h) — the next cycle answers them once the same volume comes back
 // as it was left, and the book given up answers them ERR_DEVICE_NOT_READY; any
@@ -328,8 +284,8 @@ error_t  SettleWaitNow(uint64_t gen);
 void     SettleWaitLink(SettleWaiter* w, uint64_t gen,
                         void (*answer)(SettleWaiter* w, error_t rc));
 
-/* A waiter for the next cycle whose S0 comes after this call — what a word
- * said to the Ledger's memory waits for (the Use Context): answered when that
+/* A waiter for the next cycle whose TAKE comes after this call — what a word
+ * said to the volume's memory waits for (the Use Context): answered when that
  * cycle settles, by the same rule. Inside the door. */
 void     SettleWaitLinkCycle(SettleWaiter* w, void (*answer)(SettleWaiter* w, error_t rc));
 
@@ -342,7 +298,7 @@ bool     SettleWaitUnlink(SettleWaiter* w);
  * cadence begins no cycle. */
 bool     SettleWaitersOwed(void);
 uint64_t SettleWaitersCloseUpto(void);
-void     SettleWaitersRunEnded(error_t rc, uint64_t target, bool unclosed);
+void     SettleWaitersRunEnded(error_t rc, uint64_t target);
 void     SettleWaitersSweep(void);
 void     SettleWaitersAnswerAll(error_t code);
 bool     SettleParked(void);

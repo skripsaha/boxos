@@ -297,9 +297,9 @@ static int ObjWrite(const ManifestOp *op,
  * its record puts it in a role (system, boot or kernel) — is refused ERR_PERMISSION_DENIED to a program
  * whose cabin holds no warrant, the kernel the loader reads by its blocks to
  * every program, by the volume's own guard (InkMayChange); and so is every
- * delete once the medium left: the answer is the volume's. A delete whose
- * Quitclaim finds no Spare to close the tail onto, while a cycle would make
- * one, waits for that cycle's end and is asked again (SettleOpForRoom).
+ * delete once the medium left: the answer is the volume's. A delete short of
+ * room on the ribbon for its stitch, while a cycle would give some back, waits
+ * for that cycle's end and is asked again (SettleOpForRoom).
  * ------------------------------------------------------------------------- */
 
 static int ObjDelete(const ManifestOp *op,
@@ -319,7 +319,7 @@ static int ObjDelete(const ManifestOp *op,
  * OBJ_KEEP — params = [u64 file_id][u64 term seconds]: the file deleted for a
  * term, or given up at once for a term of 0 (tagfs_keep_file). Guarded as
  * OBJ_DELETE is, by the volume's own guard and the caller's warrant; a
- * give-up that finds no Spare waits for the cycle that makes one and is asked
+ * give-up short of room waits for the cycle that gives it back and is asked
  * again, as OBJ_DELETE's does. OBJ_RESTORE — params = [u64 file_id]: the file
  * brought back until its term ends (tagfs_restore_file).
  * ------------------------------------------------------------------------- */
@@ -408,10 +408,8 @@ static int ObjRename(const ManifestOp *op,
     memcpy(name, op->params + 10, new_name_len);
     name[new_name_len] = '\0';
 
-    /* The volume's own answer: ERR_TAGFS_RECORD_FULL for a name that would
-     * take the room a write in flight claimed (RT-19) among them. Room on its
-     * way — the name's tag for the registry, a Spare for the tail — is waited
-     * for (SettleOpForRoom). */
+    /* The volume's own answer. Room on its way — room on the ribbon for the
+     * rename's stitch — is waited for (SettleOpForRoom). */
     int rc = tagfs_rename_file(file_id, name);
     if (-rc == ERR_WOULD_BLOCK)
         return SettleOpForRoom(op, crates, crate_count, ctx, file_id);
@@ -906,8 +904,8 @@ static error_t storage_one_tag(const ManifestOp *op, Crate *crates, const OpCont
 /* STORAGE_TAG_SET  params:[u64 file_id]  in_crate: "key" or "key:value" —
  * the file wears exactly that tag, or the call is refused. Any tag goes on
  * any file, whatever its key: a file's tags are its user's, and none makes a
- * file one the system keeps. Room on its way — a new tag's block of the
- * registry, a Spare for the tail — is waited for (SettleOpForRoom). */
+ * file one the system keeps. Room on its way — room on the ribbon for the
+ * tag's stitch — is waited for (SettleOpForRoom). */
 static int ObjTagSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                      const OpContext *ctx)
 {
@@ -985,23 +983,6 @@ static error_t StorageCreateInterned(const TagSpelling *tags, uint32_t count, ui
     return rc;
 }
 
-/* The record a file named `filename` wearing `tags` would have, judged before
- * any tag is interned: a create refused for its width spends none of the
- * volume's numbers. When the caller's own tags fit and the Use Context's do
- * not, the refusal says it is the context. */
-static error_t storage_create_fits(const char *filename, const TagSpelling *tags,
-                                   uint32_t own, uint32_t total)
-{
-    uint32_t worn = 0;
-    error_t  rc   = TagFSCreateFits(filename, tags, total, &worn);
-    if (rc == ERR_TAGFS_RECORD_FULL && total > own &&
-        TagFSCreateFits(filename, tags, own, NULL) == OK)
-        kprintf("[USE] '%s' is not made: the context carries more tags than a file on "
-                "this volume can hold — %u tags with the file's own and its name's\n",
-                filename, worn);
-    return rc;
-}
-
 /* STORAGE_OBJ_CREATE  params:[char filename[32]] (NUL-padded)
  *                            [u8 scope] (optional) — inside the Use Context
  *                            (absent, STORAGE_SCOPE_USE) or EVERYWHERE
@@ -1009,13 +990,12 @@ static error_t storage_create_fits(const char *filename, const TagSpelling *tags
  *                     out_crate (optional): u64 file_id
  *                     Inside the context the new file is stamped with the
  *                     user's tags as well as its own. Every tag is spelled,
- *                     and the record they make judged, before any is
- *                     interned; a tag that does not spell or intern, or a
- *                     record wider than a file may have (ERR_TAGFS_RECORD_FULL),
- *                     refuses the create: no file is made without a tag it
- *                     was asked to wear, least of all its context's. Room on
- *                     its way — the name's tag for the registry, a Spare for
- *                     the tail — is waited for (SettleOpForRoom). */
+ *                     and the name's own tag with them, before any is
+ *                     interned; a tag that does not spell or intern refuses
+ *                     the create: no file is made without a tag it was asked
+ *                     to wear, least of all its context's. Room on its way —
+ *                     room on the ribbon for the create's stitch — is waited
+ *                     for (SettleOpForRoom). */
 static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
                      const OpContext *ctx)
 {
@@ -1048,9 +1028,10 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     uint32_t     own     = 0;
     uint32_t     total   = 0;
     uint32_t    *tag_ids = NULL;
+    TagSpelling stem;
     rc = storage_tags_spelled(scope, text, tlen, &tags, &use, &own, &total);
     if (rc == OK)
-        rc = storage_create_fits(filename, tags, own, total);
+        rc = InkNameStem(filename, &stem);
     if (rc == OK)
         rc = StorageCreateInterned(tags, total, &tag_ids);
     kfree(tags);
@@ -1084,9 +1065,8 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 /* -------------------------------------------------------------------------
  * Snapshot ops — STORAGE_SNAP_CREATE, _DELETE, _LIST and _INFO.
  *
- * All four are answered ERR_UNSUPPORTED on a format-v1 volume, whatever their
- * params: a snapshot there could be taken and never read, and snapshots arrive
- * with format v2 (TagFS_SnapshotRefused, tagfs.h). The four stay on the wire so a
+ * All four are answered ERR_UNSUPPORTED, whatever their params: TagFS takes
+ * no snapshot (TagFS_SnapshotRefused, tagfs.h). The four stay on the wire so a
  * program that asks is told why, not met with an operation nobody knows.
  * ------------------------------------------------------------------------- */
 
@@ -1129,7 +1109,7 @@ error_t StorageDeckRegister(void)
         { STORAGE_OBJ_RESTORE,  ObjRestore,      OP_AUTH_APP, "storage.restore"  },
         { STORAGE_OBJ_SPAN,     ObjSpan,         OP_AUTH_APP, "storage.span"     },
         { STORAGE_OBJ_RENAME,   ObjRename,       OP_AUTH_APP, "storage.rename"   },
-        /* Snapshots: app+, refused on format v1. */
+        /* Snapshots: app+, refused. */
         { STORAGE_SNAP_CREATE,  ObjSnapRefused,  OP_AUTH_APP, "storage.snap.create"},
         { STORAGE_SNAP_DELETE,  ObjSnapRefused,  OP_AUTH_APP, "storage.snap.delete"},
         { STORAGE_SNAP_LIST,    ObjSnapRefused,  OP_AUTH_APP, "storage.snap.list"  },

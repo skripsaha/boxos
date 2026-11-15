@@ -448,14 +448,14 @@ static TestResult TestStandFreshFillAndEmpty(void)
     (void)BinderStandNoRoomWait(true);
     TEST_ASSERT(BlockMapDerivedStandShrink(kept + STAND_FRESH_FILL_ROOM), "the volume is cut to 96 blocks past its reserve");
     shrunk = true;
-    free   = fs->ledger.free_blocks;
+    free   = fs->free_blocks;
     quires = __atomic_load_n(&RibbonCursorNow()->quires, __ATOMIC_ACQUIRE);
     TestFillAt(g_test_buffer, sizeof(g_test_buffer), 81, 0);
     while (made < STAND_FRESH_FILL_MOST && rc == OK) {
         TEST_ASSERT_EQ(tagfs_create_file("fresh-fill.bin", NULL, 0, &fids[made]), 0, "a file is made");
         rc = StandFreshFill(fids[made++]);
         uint64_t went = __atomic_load_n(&RibbonCursorNow()->quires, __ATOMIC_ACQUIRE) - quires;
-        TEST_ASSERT(fs->ledger.free_blocks + went * s.at.quire_blocks >= kept,
+        TEST_ASSERT(fs->free_blocks + went * s.at.quire_blocks >= kept,
                     "and the data leaves the book's reserve free — but the Quires the ribbon went on into, "
                     "which are what it is kept for");
     }
@@ -464,7 +464,7 @@ static TestResult TestStandFreshFillAndEmpty(void)
         TEST_ASSERT_EQ(tagfs_delete_file(fids[i], INK_UNWARRANTED), 0, "every file is given up");
     TEST_ASSERT_OK(SettleForRoom(), "room is asked for");
     quires = __atomic_load_n(&RibbonCursorNow()->quires, __ATOMIC_ACQUIRE) - quires;
-    TEST_ASSERT(fs->ledger.free_blocks + quires * s.at.quire_blocks >= free,
+    TEST_ASSERT(fs->free_blocks + quires * s.at.quire_blocks >= free,
                 "and the data's ground came back — all of it but the Quires the ribbon went on into");
 out:
     (void)BinderStandNoRoomWait(false);
@@ -506,15 +506,15 @@ out:
 
 static const TestCase g_stand_fresh_ground_tests[] = {
     { .name = "stand_fresh_ground_appends_keep_one_run", .func = TestStandFreshAppendsKeepOneRun,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_fresh_ground_overwrite_one_run", .func = TestStandFreshOverwriteOneRun,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_fresh_ground_parcel_copied", .func = TestStandFreshParcelCopied,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_fresh_ground_fill_and_empty", .func = TestStandFreshFillAndEmpty,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_fresh_ground_big_write", .func = TestStandFreshBigWrite,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_fresh_ground_suite = {

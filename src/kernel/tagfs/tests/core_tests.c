@@ -5,31 +5,6 @@
 // Core — the mount itself, and one file through create, write, read, delete
 // ============================================================================
 
-/* What the mounted volume says about itself — out of its Deed and its Ledger,
- * which is where it now lives. There is no magic number to check here: a
- * volume whose deed did not check out never became a mount at all. */
-static TestResult test_tagfs_deed(void)
-{
-    TestResult verdict = TEST_PASS;
-    TagFSState* fs = tagfs_get_state();
-    TEST_ASSERT(fs != NULL, "TagFS state should not be NULL");
-
-    TEST_ASSERT(fs->layout.data_block > 0,
-                "The data run cannot begin at block 0 — the Deed is there");
-    TEST_ASSERT(fs->layout.data_blocks > 0, "A volume with no data run");
-    TEST_ASSERT(fs->layout.state_blocks >= VOLUME_LEDGER_COPIES,
-                "The layout leaves no room for both copies of the Ledger");
-    TEST_ASSERT_EQ(fs->geometry.block_bytes, TAGFS_BLOCK_SIZE,
-                   "Volume block size is not the one this kernel speaks");
-    TEST_ASSERT(fs->ledger.free_blocks > 0, "Free blocks should be > 0");
-
-    uint8_t named = 0;
-    for (int i = 0; i < 16; i++) named |= fs->uuid[i];
-    TEST_ASSERT(named != 0, "The volume has no identity");
-out:
-    return verdict;
-}
-
 static TestResult test_tagfs_create_file(void)
 {
     TestResult verdict = TEST_PASS;
@@ -72,8 +47,6 @@ out:
 }
 
 static const TestCase g_core_tests[] = {
-    { .name = "tagfs_deed",        .func = test_tagfs_deed,        .reach = TEST_READS_ONLY,
-      .format = DEED_FORMAT_V1, .analog = "stand_tally_files_read_whole" },
     { .name = "tagfs_create_file", .func = test_tagfs_create_file, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "tagfs_write_read",  .func = test_tagfs_write_read,  .reach = TEST_WRITES_TO_VOLUME },
 };

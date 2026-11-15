@@ -111,9 +111,9 @@ out:
 
 static const TestCase g_stand_parity_tests[] = {
     { .name  = "stand_parity_stitch_holds_no_lock", .func = TestStandParityStitchHoldsNoLock,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_parity_files_in_turn", .func = TestStandParityFilesInTurn,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_parity_suite = {

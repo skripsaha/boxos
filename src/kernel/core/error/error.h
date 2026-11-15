@@ -80,7 +80,6 @@ typedef enum {
     ERR_JOURNAL_CORRUPTED = 308,
     ERR_METADATA_CORRUPTED = 309,
     ERR_TAG_REGISTRY_FULL = 310,
-    ERR_FILE_TABLE_CORRUPT = 311,
     ERR_METADATA_POOL_FULL = 312,
     ERR_BLOCK_ALLOC_FAILED = 313,
     ERR_BLOCK_FREE_FAILED = 314,
@@ -200,16 +199,16 @@ typedef enum {
     ERR_TAGFS_INVALID_TAG = 863,
     ERR_TAGFS_EXTENT_ERROR = 864,
     ERR_TAGFS_RECOVERY_FAILED = 865,
-    /* A key past its u8 width, or a tag whose registry record would not fit a block. */
+    /* A key past its u8 width, or a tag wider than the book carries one (tag_spelling.h). */
     ERR_TAGFS_TAG_TOO_LONG = 866,
     /* A write asked to begin past the file's size: a file grows at its end, or by span. */
     ERR_TAGFS_BEYOND_SIZE = 867,
-    /* A file's record would be wider than format v1 carries (plot/plot_width.h). */
+    /* A defrag found no run of the file's extents it could gather into one
+     * (plot_gather.c). */
     ERR_TAGFS_RECORD_FULL = 868,
-    /* A file id past the 32 bits format v1 carries: every one of them has been
-     * issued — a volume never issues one twice, nor id 0 (ledger.h,
-     * LedgerIssueFileId) — or an id the kernel holds would have to be cut to
-     * be carried (PackV1), and is refused. */
+    /* Every file id a program can name has been issued — past INT64_MAX, read
+     * back as a signed 64-bit number — and a volume never issues one twice
+     * (ink_book.c). */
     ERR_TAGFS_FID_EXHAUSTED = 869,
 
     // TagFS Module Errors (1000-1099)

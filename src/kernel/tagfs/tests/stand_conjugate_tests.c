@@ -380,16 +380,11 @@ out:
 }
 
 static const TestCase g_stand_conjugate_tests[] = {
-    { .name = "stand_conjugate_laid", .func = TestStandConjugateLaid, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V2 },
-    { .name = "stand_conjugate_changed", .func = TestStandConjugateChanged, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V2 },
-    { .name = "stand_conjugate_differs", .func = TestStandConjugateDiffers, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V2 },
-    { .name = "stand_conjugate_unwarranted", .func = TestStandConjugateUnwarranted, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V2 },
-    { .name = "stand_conjugate_kept", .func = TestStandConjugateKept, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V2 },
+    { .name = "stand_conjugate_laid", .func = TestStandConjugateLaid, .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_conjugate_changed", .func = TestStandConjugateChanged, .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_conjugate_differs", .func = TestStandConjugateDiffers, .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_conjugate_unwarranted", .func = TestStandConjugateUnwarranted, .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_conjugate_kept", .func = TestStandConjugateKept, .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_conjugate_suite = {

@@ -21,10 +21,8 @@
  *
  *   - WHAT IS KEPT BACK. The kernel's own paths that must finish whatever the
  *     machine is short of — the passes that write the volume (a Scribe's
- *     holder: the sync with its registry, pool, file table, integrity and
- *     bitmap, the registry's pass and the SpareStamp inside it, the Ledger's
- *     pass) and the integrity map's pages — are served from a reserve that
- *     nothing else can take from. The reserve holds what those paths have held
+ *     holder: the Settle cycle's steps, the stitch it sews and the Tally it
+ *     lays) — are served from a reserve that nothing else can take from. The reserve holds what those paths have held
  *     at once: it grows by what it was short, the first time it is, and never
  *     gives memory back. Chit, which answers every waiter, allocates nothing
  *     and needs no share of it.

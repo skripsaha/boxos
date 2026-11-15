@@ -1,5 +1,6 @@
-#include "block_map_internal.h"
+#include "block_map.h"
 #include "block_map_derived.h"
+#include "../tagfs.h"
 #include "../ink/fallow.h"
 #include "../settle/settle.h"
 #include "../settle/binder.h"   /* BinderRoomWait — a Tally gives ground back */
@@ -10,14 +11,15 @@
  *
  * ‼ WHY A FILE KEEPS A WINDOW AND NOT JUST A HINT. Two files written side by
  * side each ask for the block after their own last one, and a take near the
- * hint then deals them alternate blocks: every extent one block long, and a
- * record that holds 4080 bytes of them refuses the file at about 2.6 MB. A
- * window taken for the file, sized to what it already is, keeps the next
- * growths contiguous whoever else is writing — a file of N blocks is laid in
- * about log2 N extents however its writes interleave.
+ * hint then deals them alternate blocks: every Strip one block long, a read of
+ * either file a seek per block, and a record as long as the file's blocks are
+ * many (spec_v2 §3.1, Allotment 1 and 2). A window taken for the file, sized
+ * to what it already is, keeps the next growths contiguous whoever else is
+ * writing — a file of N blocks is laid in about log2 N runs however its writes
+ * interleave.
  *
- * The window lives in memory only. Its blocks stay free on the medium, and
- * every take but its file's own is kept off them (AllotmentOverlay), so a
+ * The window lives in memory only. Its blocks are free ground in the book, and
+ * every take but its file's own is kept off them (block_map_derived.c), so a
  * volume cut at any moment has no block that is taken and owned by nobody.
  * Everything here is under the volume's state lock.
  */
@@ -32,7 +34,6 @@ typedef struct {
 static Allotment *s_allot;
 static uint32_t   s_allot_len;
 static uint32_t   s_allot_cap;
-static bool       s_no_memory_said;
 
 static uint32_t AllotmentFind(uint64_t fid)
 {
@@ -54,22 +55,6 @@ static uint32_t AllotmentFirstEndingAfter(uint64_t block)
             hi = mid;
     }
     return lo;
-}
-
-void AllotmentOverlay(uint32_t w, uint8_t *view)
-{
-    uint64_t base = (uint64_t)w * MAP_WINDOW_BLOCKS;
-    uint64_t end  = base + MAP_WINDOW_BLOCKS;
-
-    for (uint32_t i = AllotmentFirstEndingAfter(base);
-         i < s_allot_len && s_allot[i].start < end; i++) {
-        uint64_t a = s_allot[i].start > base ? s_allot[i].start : base;
-        uint64_t b = s_allot[i].start + s_allot[i].count;
-        if (b > end)
-            b = end;
-        for (uint32_t off = (uint32_t)(a - base); off < (uint32_t)(b - base); off++)
-            view[off / 8] |= (uint8_t)(1u << (off % 8));
-    }
 }
 
 static bool AllotmentAdd(uint64_t fid, uint64_t start, uint32_t count)
@@ -100,14 +85,6 @@ static void AllotmentRemove(uint32_t i)
     s_allot_len--;
 }
 
-/* A book's map is derived, and a window lies on it as free ground no take of
- * another file's may have (block_map_derived.c): nothing of format v1's map is
- * told when one comes or goes. */
-static bool AllotmentOnBook(void)
-{
-    return tagfs_get_state()->format == DEED_FORMAT_V2;
-}
-
 TagFSLock *MapLock(void)
 {
     return &tagfs_get_state()->lock;
@@ -121,11 +98,8 @@ bool AllotmentTakeBackLocked(uint64_t keep_fid)
     for (uint32_t i = s_allot_len; i-- > 0; ) {
         if (s_allot[i].fid == keep_fid)
             continue;
-        uint64_t start = s_allot[i].start;
         uint32_t count = s_allot[i].count;
         AllotmentRemove(i);
-        if (!AllotmentOnBook())
-            MapAvailabilityChanged(start, count, false);
         files++;
         blocks += count;
     }
@@ -136,35 +110,19 @@ bool AllotmentTakeBackLocked(uint64_t keep_fid)
     return files != 0;
 }
 
-uint64_t AllotmentKeptLocked(void)
-{
-    uint64_t kept = 0;
-    for (uint32_t i = 0; i < s_allot_len; i++)
-        kept += s_allot[i].count;
-    return kept;
-}
-
 void AllotmentDropAll(void)
 {
     kfree(s_allot);
-    s_allot          = NULL;
-    s_allot_len      = 0;
-    s_allot_cap      = 0;
-    s_no_memory_said = false;
+    s_allot     = NULL;
+    s_allot_len = 0;
+    s_allot_cap = 0;
 }
 
 void AllotmentRelease(uint64_t fid)
 {
-    if (!g_map.up && !AllotmentOnBook())
-        return;
     uint32_t i = AllotmentFind(fid);
-    if (i == s_allot_len)
-        return;
-    uint64_t start = s_allot[i].start;
-    uint32_t count = s_allot[i].count;
-    AllotmentRemove(i);
-    if (!AllotmentOnBook())
-        MapAvailabilityChanged(start, count, false);
+    if (i < s_allot_len)
+        AllotmentRemove(i);
 }
 
 bool AllotmentOthersIn(uint64_t fid, uint64_t start, uint64_t count, uint64_t *past)
@@ -176,152 +134,6 @@ bool AllotmentOthersIn(uint64_t fid, uint64_t start, uint64_t count, uint64_t *p
         }
     }
     return false;
-}
-
-/* The front of the file's own window: *n blocks from *s, the window shortened
- * by them. False when the file keeps none, or when the take cannot be written
- * down. */
-static bool AllotmentTakeOwn(uint64_t fid, uint32_t want, uint64_t *s, uint32_t *n,
-                             error_t *refusal)
-{
-    uint32_t i = AllotmentFind(fid);
-    if (i == s_allot_len)
-        return false;
-
-    *s = s_allot[i].start;
-    *n = want < s_allot[i].count ? want : s_allot[i].count;
-    if (!MapDeltaRoom(MapUnreadWindows(*s, *n), false, true) || !MapUnsettledRoom()) {
-        *refusal = ERR_NO_MEMORY;
-        return true;
-    }
-    s_allot[i].start += *n;
-    s_allot[i].count -= *n;
-    if (s_allot[i].count == 0)
-        AllotmentRemove(i);
-    MapTakeKept(*s, *n);
-    MapUnsettledAdd(fid, *s, *n);
-    return true;
-}
-
-/* A new window for the file, best-fit, and the growth taken from its front;
- * what is left of the window is kept. The pick is already made. */
-static error_t AllotmentTakeNew(uint64_t fid, uint32_t want, const MapPick *k,
-                                uint64_t *s, uint32_t *n)
-{
-    *s = k->at;
-    *n = k->got < want ? k->got : want;
-    if (!MapDeltaRoom(MapUnreadWindows(*s, *n), false, true) || !MapUnsettledRoom())
-        return ERR_NO_MEMORY;
-
-    uint32_t keep = k->got - *n;
-    if (keep) {
-        if (AllotmentAdd(fid, *s + *n, keep)) {
-            MapAvailabilityChanged(*s + *n, keep, true);
-            s_no_memory_said = false;
-        } else if (!s_no_memory_said) {
-            s_no_memory_said = true;
-            kprintf("[TagFS] block map: no memory to keep a window of %u block(s) in hand "
-                    "for file %llu — it grows without one, and its extents may be shorter\n",
-                    keep, fid);
-        }
-    }
-    MapTakeKnown(*s, *n);
-    MapUnsettledAdd(fid, *s, *n);
-    return OK;
-}
-
-/* No take hands out more than BLOCK_MAP_TAKE_MOST: a growth past it — a span —
- * comes as as many takes, each a run's worth of windows under the lock. */
-static error_t AllotmentTakeInside(uint64_t fid, uint32_t want, uint64_t file_blocks,
-                                   uint64_t hint, uint64_t *start, uint32_t *got)
-{
-    TagFSLock *lock      = MapLock();
-    bool       may_read  = !LockRankAnyHeldHere();
-    bool       caught_up = false;
-    uint32_t   rounds    = 0;
-    uint64_t   fits      = file_blocks < BLOCK_MAP_TAKE_MOST ? file_blocks
-                                                             : BLOCK_MAP_TAKE_MOST;
-    uint32_t   size;
-
-    if (want > BLOCK_MAP_TAKE_MOST)
-        want = BLOCK_MAP_TAKE_MOST;
-    size = fits > want ? (uint32_t)fits : want;
-
-    MapPick k = { .want = size, .hint = hint, .best_fit = true };
-    for (;;) {
-        TagFSLockTake(lock);
-        if (!g_map.up) {
-            TagFSLockDrop(lock);
-            return ERR_TAGFS_NOT_INITIALIZED;
-        }
-
-        /* Its own window as much as a new one: what the pool's reserve still
-         * lacks is left free for it (block_map.h). */
-        uint64_t s = 0;
-        uint32_t n = 0;
-        error_t  rc  = OK;
-        uint64_t may = MapMayHaveLocked();
-        uint32_t ask = may < want ? (uint32_t)may : want;
-        if (!ask || !AllotmentTakeOwn(fid, ask, &s, &n, &rc)) {
-            if (ask) {
-                MapPlan(&k, may_read && rounds < MAP_LOOK_ROUNDS, may_read);
-                if (k.paused) {
-                    TagFSLockDrop(lock);
-                    continue;
-                }
-            }
-            k.stage = MAP_PLAN_FRESH;
-            if (ask && k.looks) {
-                uint32_t look = k.look[0];
-                TagFSLockDrop(lock);
-                rounds++;
-                (void)MapFetch(look, __func__);
-                continue;
-            }
-            if (!ask || !k.found) {
-                if (AllotmentTakeBackLocked(fid)) {
-                    TagFSLockDrop(lock);
-                    continue;
-                }
-                if (!may_read || !g_map.gives || caught_up) {
-                    error_t short_by = MapShort(want);
-                    TagFSLockDrop(lock);
-                    return short_by;
-                }
-                TagFSLockDrop(lock);
-                caught_up = true;
-                BlockMapSettle();
-                continue;
-            }
-            if (k.spanned && !MapRunStillFree(k.at, k.got)) {
-                TagFSLockDrop(lock);
-                continue;
-            }
-            rc = AllotmentTakeNew(fid, ask, &k, &s, &n);
-        }
-        TagFSLockDrop(lock);
-
-        if (rc != OK) {
-            kprintf("[TagFS] block map: no memory to write down a take of %u block(s) for "
-                    "file %llu — nothing is taken\n", want, fid);
-            return rc;
-        }
-        *start = s;
-        *got   = n;
-        return OK;
-    }
-}
-
-error_t AllotmentTake(uint64_t fid, uint32_t want, uint64_t file_blocks, uint64_t hint,
-                      uint64_t *start, uint32_t *got)
-{
-    if (want == 0 || fid == 0 || !start || !got)
-        return ERR_INVALID_ARGUMENT;
-    if (!tagfs_enter())
-        return ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc = AllotmentTakeInside(fid, want, file_blocks, hint, start, got);
-    tagfs_leave();
-    return rc;
 }
 
 // ----------------------------------------------------------------------------
@@ -522,7 +334,7 @@ uint64_t AllotmentPromised(void)
 uint64_t AllotmentFreeUnpromised(void)
 {
     uint64_t promised = AllotmentPromised();
-    uint64_t free     = __atomic_load_n(&tagfs_get_state()->ledger.free_blocks, __ATOMIC_ACQUIRE);
+    uint64_t free     = __atomic_load_n(&tagfs_get_state()->free_blocks, __ATOMIC_ACQUIRE);
     return free > promised ? free - promised : 0;
 }
 
@@ -544,7 +356,7 @@ bool AllotmentPromise(uint64_t keep, uint32_t epoch)
         __atomic_store_n(&s_promises, 0, __ATOMIC_RELEASE);
         __atomic_store_n(&s_promises_epoch, epoch, __ATOMIC_RELEASE);
     }
-    given = given && tagfs_get_state()->ledger.free_blocks > keep + AllotmentPromised();
+    given = given && tagfs_get_state()->free_blocks > keep + AllotmentPromised();
     if (given)
         __atomic_add_fetch(&s_promises, 1, __ATOMIC_ACQ_REL);
     TagFSLockDrop(lock);
@@ -562,7 +374,7 @@ void AllotmentPromiseLetGo(uint32_t epoch)
 static error_t AllotmentBookLocked(uint64_t fid, uint32_t want, uint64_t file_blocks, uint64_t hint, bool aside,
                                    uint64_t keep, bool own, uint64_t *start, uint32_t *got)
 {
-    uint64_t may = AllotmentBookMay(tagfs_get_state()->ledger.free_blocks, keep, own);
+    uint64_t may = AllotmentBookMay(tagfs_get_state()->free_blocks, keep, own);
     if (want > may)
         want = (uint32_t)may;
     if (want > BLOCK_MAP_TAKE_MOST)
@@ -607,7 +419,7 @@ static error_t AllotmentBookShort(uint32_t want, uint64_t keep)
         kprintf("[TagFS] no block can be had for %u block(s) of a file's data: %llu free, the book keeps %llu "
                 "for its ribbon and its Tally and holds %llu itself in its Tallies and its ribbon, and %llu are "
                 "promised to the tails Slips lie over — the reserve measured %s%s%s (ERR_TAGFS_NO_SPACE)\n", want,
-                (unsigned long long)tagfs_get_state()->ledger.free_blocks, (unsigned long long)keep,
+                (unsigned long long)tagfs_get_state()->free_blocks, (unsigned long long)keep,
                 (unsigned long long)BinderGroundHeld(), (unsigned long long)AllotmentPromised(), measured,
                 why ? ": " : "", why ? why : "");
     }
@@ -681,7 +493,7 @@ error_t AllotmentTakeBook(uint64_t fid, uint32_t want, uint64_t file_blocks, uin
  */
 static error_t AllotmentRunLocked(uint64_t fid, uint32_t want, uint64_t hint, uint64_t keep, uint64_t *start)
 {
-    if (AllotmentBookMay(tagfs_get_state()->ledger.free_blocks, keep, false) < want)
+    if (AllotmentBookMay(tagfs_get_state()->free_blocks, keep, false) < want)
         return ERR_TAGFS_NO_SPACE;
     for (uint32_t round = 0; round < 2u; round++) {
         if (BlockMapDerivedRunFree(hint, want, fid, start)) {

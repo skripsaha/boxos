@@ -1,5 +1,4 @@
 #include "settle_internal.h"
-#include "../metadata_pool/meta_pool.h"
 #include "../settle_cut/settle_cut.h"
 #include "boardroom.h"
 #include "pmm.h"
@@ -8,11 +7,9 @@
  * The waiters of the Settle (settle.h): who is answered by which cycle, and
  * the one rule for a cycle that was refused.
  *
- * A waiter for Ink `gen` is answered OK once every record up to `gen` lies in
- * a closed block a cycle settled (PoolClosedSettledGen) — or, when a cycle
- * owed that close found no Spare to close onto, once a cycle settled it in the
- * open tail. The list is FIFO under a leaf lock; the answers are given after
- * the lock is let go.
+ * A waiter for Ink `gen` is answered OK once a stitch that settled took every
+ * change up to `gen`: a settled stitch is never written again. The list is
+ * FIFO under a leaf lock; the answers are given after the lock is let go.
  */
 
 static TagFSLock          s_wait_lock = TAGFS_LOCK_INIT("settlewait", LOCK_RANK_LEAF);
@@ -141,12 +138,11 @@ bool SettleWaitersOwed(void)
  * restart that took no power away: a book's waiter right after its mount —
  * `anchor` with nothing inked yet — is answered only once a stitch of this
  * mount settled under its kept flush, and the cadence runs that one, empty if
- * need be, at once (a waiter is a demand). A volume of format v1 answers by
- * the tail its mount found sealed, as it always has.
+ * need be, at once (a waiter is a demand).
  */
 static bool SettleMountKept(void)
 {
-    return tagfs_get_state()->format != DEED_FORMAT_V2 || SettledCycles() > 0;
+    return SettledCycles() > 0;
 }
 
 error_t SettleWaitNow(uint64_t gen)
@@ -354,10 +350,7 @@ void SettleWaitersPark(error_t rc)
         SettlePark(SETTLE_PARK_HEAP, SettleHeapNow());
         break;
     case ERR_TAGFS_NO_SPACE:
-        if (tagfs_get_state()->format == DEED_FORMAT_V2)
-            __atomic_store_n(&s_park, (uint64_t)SETTLE_PARK_NONE, __ATOMIC_RELEASE);
-        else
-            SettlePark(SETTLE_PARK_ROOM, CadenceRoomAsked());
+        __atomic_store_n(&s_park, (uint64_t)SETTLE_PARK_NONE, __ATOMIC_RELEASE);
         break;
     case ERR_WOULD_BLOCK:
         SettlePark(SETTLE_PARK_ROOM, CadenceRoomAsked());
@@ -368,7 +361,7 @@ void SettleWaitersPark(error_t rc)
     }
 }
 
-void SettleWaitersRunEnded(error_t rc, uint64_t target, bool unclosed)
+void SettleWaitersRunEnded(error_t rc, uint64_t target)
 {
     if (rc != OK) {
         if (TagFSReadOnly() && !TagFSMediumLeft())
@@ -377,16 +370,13 @@ void SettleWaitersRunEnded(error_t rc, uint64_t target, bool unclosed)
          * back only through a Tally and the lag of the slots it lets go of
          * (settle/binder.h): its waiters hear so rather than wait on an event
          * no park can name. */
-        else if (rc == ERR_TAGFS_NO_SPACE && tagfs_get_state()->format == DEED_FORMAT_V2)
+        else if (rc == ERR_TAGFS_NO_SPACE)
             SettleWaitersAnswerAll(ERR_TAGFS_NO_SPACE);
         return;
     }
-    /* A book's stitch is never written again once it settled: everything up
-     * to its target is answered. Format v1's record is answered once it lies
-     * in a closed block, or in the tail when no Spare was there to close it. */
-    uint64_t upto = tagfs_get_state()->format == DEED_FORMAT_V2 ? target : PoolClosedSettledGen();
-    if (unclosed && target > upto)
-        upto = target;
+    /* A stitch is never written again once it settled: everything up to its
+     * target is answered. */
+    uint64_t upto = target;
     uint64_t seen = __atomic_load_n(&s_answered_upto, __ATOMIC_RELAXED);
     while (seen < upto &&
            !__atomic_compare_exchange_n(&s_answered_upto, &seen, upto, false,

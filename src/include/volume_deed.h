@@ -56,9 +56,9 @@
  * A title deed that is rewritten continuously is not a title deed, and copying
  * it to the far end protects nothing when both copies are dirtied together.
  *
- * The bookkeeping lives in its own block inside the volume, which the layout
- * stamp points at. The Deed is written when the volume is made and read for
- * the rest of its life.
+ * The bookkeeping lives in the volume's book, which the FRAME stamp says where
+ * to find. The Deed is written when the volume is made and read for the rest
+ * of its life.
  *
  *
  * ‼ TWO COPIES, AT OPPOSITE ENDS
@@ -113,8 +113,8 @@
 
 /*
  * The volume's own block: the unit every block number in a Deed is counted in
- * — LAYOUT's, BOOT's and FRAME's alike — and the unit the volume is read and
- * written in.
+ * — BOOT's and FRAME's alike — and the unit the volume is read and written
+ * in.
  *
  * ‼ ONE OWNER. It used to be spelled 4096 in five places: twice in the
  * kernel's headers, once in the UEFI loader's, once in the host tool and once
@@ -166,11 +166,11 @@ typedef struct __attribute__((packed)) {
 /* Kinds are permanent. A kind that is retired is never reused, so a new mkfs
  * and an old kernel can never disagree about what a stamp means. */
 #define VOLUME_STAMP_GEOMETRY  1    /* VolumeGeometry */
-#define VOLUME_STAMP_LAYOUT    2    /* VolumeLayout   */
+                                    /* 2 is unassigned */
 #define VOLUME_STAMP_BORN      3    /* VolumeBorn     */
 #define VOLUME_STAMP_BOOT      4    /* VolumeBoot     */
 #define VOLUME_STAMP_PACKED    5    /* VolumePacked   */
-#define VOLUME_STAMP_FRAME     6    /* VolumeFrame — the volume's book is format v2 */
+#define VOLUME_STAMP_FRAME     6    /* VolumeFrame — where the volume's book is */
 
 /*
  * What the volume was laid out for — as opposed to what it is sitting on.
@@ -201,52 +201,15 @@ typedef struct __attribute__((packed)) {
 } VolumeGeometry;
 
 /*
- * Where the volume's parts are, in ITS blocks, counted from ITS start.
- *
- * `state_block` is the one that changes: free counts, next ids, how many files,
- * when it was last written. It is named here and kept out of the Deed for the
- * reason at the top of this file — and there are `state_blocks` of it, because
- * a record that is rewritten continuously is the one record that will be found
- * half-written. Two copies, written alternately, each stating which is newer:
- * the older one is intact by construction while the newer one is being made.
- *
- * `data_block` is where file contents start and `data_blocks` is how many
- * there are. Everything the filesystem allocates is counted inside that run,
- * so a block number in a file's metadata means the same thing forever, no
- * matter what is added in front of the data or left spare behind it.
- *
- * ‼ FORMAT v1 ONLY. A volume whose book is format v2 carries FRAME instead and
- * never this; a Deed that carries both claims two formats at once and is
- * refused before anything of it is read further.
- */
-typedef struct __attribute__((packed)) {
-    uint64_t total_blocks;      /* the whole volume, Deed and all */
-    uint32_t state_block;
-    uint32_t state_blocks;
-    uint32_t tag_registry_block;
-    uint32_t tag_registry_blocks;
-    uint32_t file_table_block;
-    uint32_t file_table_blocks;
-    uint32_t metadata_pool_block;
-    uint32_t metadata_pool_blocks;
-    uint32_t block_bitmap_block;
-    uint32_t block_bitmap_blocks;
-    uint32_t disk_book_block;
-    uint32_t disk_book_blocks;
-    uint32_t data_block;        /* first block that holds file contents */
-    uint32_t data_blocks;       /* how many, and the bitmap covers exactly these */
-} VolumeLayout;
-
-/*
  * Where the kernel is, for the loader that has to find it before there is
  * anything to find it with.
  *
  * The kernel is a file inside the volume, so a loader in sixteen-bit real mode
- * would otherwise have to understand the metadata pool to reach it. This says
+ * would otherwise have to understand the book to reach it. This says
  * it outright, in the volume's own blocks: read from here, this many, this
  * many bytes.
  *
- * It belongs in the Deed rather than in the bookkeeping block because it
+ * It belongs in the Deed rather than in the book because it
  * changes only when the kernel is replaced, which is an act of installation
  * and not a write — and because the loader has the Deed in front of it already
  * and nothing else yet.
@@ -297,8 +260,8 @@ typedef struct __attribute__((packed)) {
 } VolumePacked;
 
 /*
- * WHERE A FORMAT-v2 BOOK BEGINS — the stamp that says this volume's book is
- * format v2, and the two places a reader starts from.
+ * WHERE THE BOOK BEGINS — the stamp that says this volume carries a book, and
+ * the two places a reader starts from. A Deed without it is no TagFS volume.
  *
  * `spine_block` is slot 0 of the Spine ring: the slots are single blocks at
  * spine_block + i * spine_stride, i < spine_slots, each the book's own root as
@@ -312,15 +275,13 @@ typedef struct __attribute__((packed)) {
  *
  * `data_block` is the first block the allocator may hand out. Every block
  * number the book or a file names is a block OF THE VOLUME — not of a data
- * run, as LAYOUT's are — so turning one into a sector is block * 8, once.
+ * run — so turning one into a sector is block * 8, once.
  *
  * ‼ WHY THERE IS NO LENGTH HERE. Where the volume ends is already in the
  * prologue: the far copy of this Deed sits in its last block, so the data run
  * ends at tail_sector / VOLUME_BLOCK_SECTORS. A volume that takes the ground
  * behind it moves `sectors` and `tail_sector` (DeedPenSetGround) and nothing
- * here — the bitmap LAYOUT had to be laid down for, and the u32 it was counted
- * in, have no counterpart: in format v2 the map of the blocks is derived from
- * the book and kept nowhere.
+ * here: the map of the blocks is derived from the book and kept nowhere.
  *
  * Everything else a book needs — where its ribbon runs, how big its quires
  * are, the atom it writes in — is a property of the medium and the allocator,

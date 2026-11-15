@@ -497,7 +497,7 @@ static error_t BookFileLive(BookFile* f)
     RecordWhere  where, was;
     FileMapStake stake = { .count = 0 };
     memset(&where, 0, sizeof(where));
-    error_t rc = FileMapRecordPut(fs->files, f->fid, rec, &where, 0, &stake, &was);
+    error_t rc = FileMapRecordPut(fs->files, f->fid, rec, &where, &stake, &was);
     FileMapStakeLetGo(&stake);
     if (rc != OK)
         return rc;

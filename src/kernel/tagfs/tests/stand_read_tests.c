@@ -98,17 +98,6 @@ static bool StandReadMakeRun(uint32_t blocks, uint32_t stream, uint64_t* file_id
     return true;
 }
 
-/* Block `block` rots on the medium behind the map's back: `was` with one byte
- * flipped. */
-static bool StandReadRot(uint64_t block, const uint8_t* was)
-{
-    uint8_t* rot = g_test_buffer + 3 * TAGFS_BLOCK_SIZE;
-    memcpy(rot, was, TAGFS_BLOCK_SIZE);
-    rot[100] ^= 0xFF;
-    uint64_t vlba = ((uint64_t)tagfs_get_state()->layout.data_block + block) * TAGFS_BLOCK_SECTORS;
-    return tagfs_volume_write(vlba, TAGFS_BLOCK_SECTORS, rot) == 0;
-}
-
 // ----------------------------------------------------------------------------
 // A hole inside the size, on both roads (S2)
 // ----------------------------------------------------------------------------
@@ -182,64 +171,6 @@ out:
 // handle holds. A book lays every write on fresh ground and a handle reads the
 // version it opened (tagfs.c, MP-D16) — its analog below.
 // ----------------------------------------------------------------------------
-
-static TestResult TestStandReadAheadForgetsAWrite(void)
-{
-    TestResult       verdict = TEST_PASS;
-    uint64_t         file_id = 0;
-    uint64_t         first   = 0, again = 0;
-    TagFSFileHandle* handle  = NULL;
-    const char*      aside   = StandStepsAsideFor();
-    uint8_t*         newer   = g_test_buffer + STAND_READ_BLOCKS * TAGFS_BLOCK_SIZE;
-    uint64_t         got     = 0;
-
-    if (aside)
-        return test_steps_aside(aside);
-    if (TagFSRunBlocks() < STAND_READ_BLOCKS)
-        return test_steps_aside("the medium hands over fewer than three blocks at a time, so "
-                                "no window holds the run this test fetches");
-    TEST_ASSERT(StandReadMakeRun(STAND_READ_BLOCKS, 0x73, &file_id, &first),
-                "a three-block file is made in one run");
-    handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
-    TEST_ASSERT(handle != NULL, "and opened to read");
-
-    /* The write lands between two reads of the window. */
-    TEST_ASSERT_OK(tagfs_read(handle, g_test_output, 2 * TAGFS_BLOCK_SIZE, &got),
-                   "its first two blocks are read in one fetch");
-    TEST_ASSERT(ReadAheadServe(handle, first + 1) != NULL, "and the window holds the second");
-    TestFillAt(newer, TAGFS_BLOCK_SIZE, 0x74, TAGFS_BLOCK_SIZE);
-    TEST_ASSERT_EQ(StandWriteAt(file_id, TAGFS_BLOCK_SIZE, newer, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
-                   "the second block is written over whole");
-    TEST_ASSERT(StandBlockOf(file_id, 1, &again) && again == first + 1, "in place");
-    TEST_ASSERT(ReadAheadServe(handle, first + 1) == NULL, "and the window lets it go");
-    handle->offset = 0;
-    TEST_ASSERT_OK(tagfs_read(handle, g_test_output, 2 * TAGFS_BLOCK_SIZE, &got),
-                   "the two blocks are read again through the same handle");
-    TEST_ASSERT_EQ(TestFirstDifference(g_test_output + TAGFS_BLOCK_SIZE, newer, TAGFS_BLOCK_SIZE),
-                   TAGFS_BLOCK_SIZE, "and the second is what the write left");
-
-    /* The write lands while a fetch over its block is on its way in. */
-    uint32_t count = STAND_READ_BLOCKS;
-    uint64_t gen   = ReadAheadBegin(handle, first, &count);
-    TEST_ASSERT(gen != 0 && count == STAND_READ_BLOCKS, "a fetch of the three is named");
-    TEST_ASSERT_OK(TagFSReadRun(first, count, ReadAheadBuffer(handle)),
-                   "and reads the medium before the write lands");
-    TestFillAt(newer, TAGFS_BLOCK_SIZE, 0x75, 2 * TAGFS_BLOCK_SIZE);
-    TEST_ASSERT_EQ(StandWriteAt(file_id, 2 * TAGFS_BLOCK_SIZE, newer, TAGFS_BLOCK_SIZE),
-                   TAGFS_BLOCK_SIZE, "the third block is written over whole meanwhile");
-    TEST_ASSERT(!ReadAheadLand(handle, gen, count), "the fetch that landed late is dropped");
-    TEST_ASSERT(ReadAheadServe(handle, first + 2) == NULL, "and the window holds nothing of it");
-    handle->offset = 2 * TAGFS_BLOCK_SIZE;
-    TEST_ASSERT_OK(tagfs_read(handle, g_test_output, TAGFS_BLOCK_SIZE, &got),
-                   "the third block is read through the same handle");
-    TEST_ASSERT_EQ(TestFirstDifference(g_test_output, newer, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
-                   "and is what the write left, not what the late fetch read");
-out:
-    tagfs_close(handle);
-    if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
-    return verdict;
-}
 
 // ----------------------------------------------------------------------------
 // A book's read beside a write serves the version its handle opened (N1)
@@ -325,133 +256,6 @@ out:
 // and hands every block out of the window. Its middle block rotted on the
 // medium behind the map's back first, so the read is refused ERR_CHECKSUM with
 // the first block landed, and the block is named on the "integrity" tag.
-// ----------------------------------------------------------------------------
-
-typedef struct {
-    uint32_t block;
-    uint32_t heard;
-} StandRotEar;
-
-static StandRotEar s_rot_ear;
-
-static void StandRotHeard(TouchTag tag_id, const void* payload, uint32_t plen,
-                          uint32_t source_pid, void* ctx)
-{
-    (void)tag_id;
-    (void)source_pid;
-    StandRotEar* ear = (StandRotEar*)ctx;
-    uint32_t     block;
-    if (!payload || plen < sizeof(block))
-        return;
-    memcpy(&block, payload, sizeof(block));
-    if (block == ear->block)
-        __atomic_add_fetch(&ear->heard, 1u, __ATOMIC_RELAXED);
-}
-
-static TestResult TestStandReadAheadHitIsVerified(void)
-{
-    TestResult       verdict = TEST_PASS;
-    uint64_t         file_id = 0;
-    uint64_t         first   = 0;
-    TagFSFileHandle* handle  = NULL;
-    TouchWatch*      ear     = NULL;
-    bool             rotten  = false;
-    uint8_t*         was     = g_test_buffer;
-    const char*      aside   = StandStepsAsideFor();
-    uint64_t         got     = 0;
-
-    if (aside)
-        return test_steps_aside(aside);
-    if (!IntegrityIsInitialized())
-        return test_steps_aside("verify-on-read is not armed on this volume, so no rot "
-                                "can be caught");
-    TouchTag tag = tagfs_tag_lookup("integrity");
-    if (tag == TOUCH_TAG_INVALID)
-        return test_steps_aside("this volume has no \"integrity\" tag to name rot on");
-
-    TEST_ASSERT(StandReadMakeRun(STAND_READ_BLOCKS, 0x6A, &file_id, &first),
-                "a three-block file is made in one run");
-    TEST_ASSERT(StandReadRot(first + 1, was + TAGFS_BLOCK_SIZE),
-                "its middle block rots on the medium, behind the map's back");
-    rotten = true;
-    memset(&s_rot_ear, 0, sizeof(s_rot_ear));
-    s_rot_ear.block = (uint32_t)(first + 1);   /* the event names it in u32 */
-    ear = TouchWatchSet(tag, StandRotHeard, &s_rot_ear);
-    TEST_ASSERT(ear != NULL, "an ear on the integrity tag");
-
-    uint32_t errors_before = IntegrityErrorCount();
-    handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
-    TEST_ASSERT(handle != NULL, "the file is opened to read");
-    error_t rc = tagfs_read(handle, g_test_output, STAND_READ_BLOCKS * TAGFS_BLOCK_SIZE, &got);
-    uint32_t caught = IntegrityErrorCount() - errors_before;
-    TestEvidence("rotten blocks a read caught out of the read-ahead window, of 1", caught);
-    TEST_ASSERT_EQ(rc, ERR_CHECKSUM, "the read of the rotten block answers the verdict");
-    TEST_ASSERT_EQ(got, TAGFS_BLOCK_SIZE, "with the block before it landed");
-    TEST_ASSERT_EQ(TestFirstDifference(g_test_output, was, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
-                   "as the file holds it");
-    TEST_ASSERT_EQ(caught, 1, "the rotten block is caught once");
-    TEST_ASSERT_EQ(__atomic_load_n(&s_rot_ear.heard, __ATOMIC_RELAXED), 1,
-                   "and named once on the integrity tag");
-out:
-    if (ear)
-        TouchWatchClear(ear);
-    tagfs_close(handle);
-    if (rotten && tagfs_write_block(first + 1, was + TAGFS_BLOCK_SIZE) != OK)
-        verdict = TestFailedAt(__FILE__, __LINE__,
-                               "the rotten block would not take its bytes back — the map and "
-                               "the medium disagree over it (block, 0)", first + 1, 0);
-    if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
-    return verdict;
-}
-
-/* The same rot through the port: the job checks each block before it lands —
- * against format v1's map, which a book has none of; a book's block is held
- * to its Tally's DIGESTS on the port's road by stand_tally_rot_three_paths. */
-static TestResult TestStandReadRotThroughPort(void)
-{
-    TestResult       verdict = TEST_PASS;
-    uint8_t          seat    = tagfs_get_seat();
-    uint64_t         file_id = 0;
-    uint64_t         first   = 0;
-    TagFSFileHandle* handle  = NULL;
-    bool             rotten  = false;
-    uint8_t*         was     = g_test_buffer;
-    const char*      aside   = StandReadPortAside(seat);
-
-    if (aside)
-        return test_steps_aside(aside);
-    if (!IntegrityIsInitialized())
-        return test_steps_aside("verify-on-read is not armed on this volume, so no rot "
-                                "can be caught");
-
-    TEST_ASSERT(StandReadMakeRun(STAND_READ_BLOCKS, 0x6B, &file_id, &first),
-                "a three-block file is made in one run");
-    TEST_ASSERT(StandReadRot(first + 1, was + TAGFS_BLOCK_SIZE),
-                "its middle block rots on the medium, behind the map's back");
-    rotten = true;
-    handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
-    TEST_ASSERT(handle != NULL, "the file is opened to read");
-
-    int submit = StandReadSubmit(handle, file_id, 0, STAND_READ_BLOCKS * TAGFS_BLOCK_SIZE);
-    TEST_ASSERT_EQ(submit, ERR_WOULD_BLOCK, "the read goes through the port");
-    handle = NULL;
-    TEST_ASSERT(StandReadAnswered(seat), "and is answered");
-    TEST_ASSERT_EQ(s_read_answer.rc, ERR_CHECKSUM, "with the verdict on the rotten block");
-    TEST_ASSERT_EQ(s_read_answer.landed, TAGFS_BLOCK_SIZE, "and the block before it landed");
-    TEST_ASSERT_EQ(TestFirstDifference(g_test_output, was, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
-                   "as the file holds it");
-out:
-    tagfs_close(handle);
-    if (rotten && tagfs_write_block(first + 1, was + TAGFS_BLOCK_SIZE) != OK)
-        verdict = TestFailedAt(__FILE__, __LINE__,
-                               "the rotten block would not take its bytes back — the map and "
-                               "the medium disagree over it (block, 0)", first + 1, 0);
-    if (file_id && __atomic_load_n(&s_read_answer.answered, __ATOMIC_ACQUIRE))
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
-    return verdict;
-}
-
 // ----------------------------------------------------------------------------
 // A partial write over a rotten block is refused; a whole one is not (RT-22)
 //
@@ -687,24 +491,8 @@ static const TestCase g_stand_read_tests[] = {
       .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "a part of a file inside its size that no extent covers was read "
                        "as a short success on the road through the port" },
-    { .name = "stand_readahead_forgets_a_write", .func = TestStandReadAheadForgetsAWrite,
-      .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_defect = "a read-ahead fetch that lands after a write to its block fills the "
-                       "cache with what the block held before, and a later read serves it",
-      .format = DEED_FORMAT_V1, .analog = "stand_readahead_reads_its_version" },
     { .name = "stand_readahead_reads_its_version", .func = TestStandReadAheadReadsItsVersion,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
-    { .name  = "stand_readahead_hit_is_verified", .func = TestStandReadAheadHitIsVerified,
-      .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_defect = "a block read out of the read-ahead cache is handed out without "
-                       "verify-on-read, so a rotten block is caught only when it is the "
-                       "first of the run a read prefetched",
-      .format = DEED_FORMAT_V1, .analog = "stand_tally_rot_three_paths" },
-    { .name = "stand_read_rot_through_port", .func = TestStandReadRotThroughPort,
-      .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_defect = "a read through the port never checks a block against its digest, "
-                       "and a rotten block reaches the program as data",
-      .format = DEED_FORMAT_V1, .analog = "stand_tally_rot_three_paths" },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_read_holes", .func = TestStandReadHoles, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_read_holes_through_port", .func = TestStandReadHolesThroughPort,
       .reach = TEST_WRITES_TO_VOLUME },

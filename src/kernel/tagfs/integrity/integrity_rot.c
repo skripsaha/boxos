@@ -1,17 +1,15 @@
 #include "integrity_internal.h"
-#include "../mount/mount.h"
 #include "../../lib/kernel/klib.h"
 #include "touch.h"
 
 /*
  * The rotten blocks this mount has named.
  *
- * A block whose bytes do not match the digest recorded when it was written is
- * named the moment a read finds it: one line that says which block and why it
- * may be, and one Touch on the "integrity" tag — each once, however often the
- * block is read after, until it is written again or given back: what it holds
- * then has a digest of its own, and rot in it is new rot. What remembers that
- * it was named is a set that grows as rot is found — the machine is told of
+ * A block whose bytes do not match the digest it was written with is named
+ * the moment a read finds it: one line that says which block and why it may
+ * be, and one Touch on the "integrity" tag — each once a mount, however often
+ * the block is read after. What remembers that it was named is a set that
+ * grows as rot is found — the machine is told of
  * every rotten block, not the first 64 a ring had room for (the 65th was
  * counted and never told). A set that cannot grow, the heap spent, still has
  * each rot published and answered to its reader; only its own line is not
@@ -20,8 +18,8 @@
  *
  * The set is open-addressed on block + 1 (0 is an empty slot), at most half
  * full, grown with its lock let go: the bigger table is allocated outside it
- * and swapped in under it. Its own leaf lock, never the map's: a rot is named
- * from inside a read, and naming it holds no page of the map.
+ * and swapped in under it. Its own leaf lock: a rot is named from inside a
+ * read.
  */
 static TagFSLock g_rot_lock  = TAGFS_LOCK_INIT("rot", LOCK_RANK_LEAF);
 static uint64_t* g_rot_set;
@@ -59,34 +57,6 @@ static bool RotSetFind(uint64_t block, bool put)
             return false;
         }
     }
-}
-
-/* Under g_rot_lock: `block` out of the set, the entries after it in its probe
- * run shifted back over the hole, so every one is still found from its home. */
-static void RotSetDrop(uint64_t block)
-{
-    if (g_rot_slots == 0)
-        return;
-    uint32_t mask = g_rot_slots - 1u;
-    uint64_t key  = block + 1u;
-    uint32_t hole = RotSlotOf(block, g_rot_slots);
-    while (g_rot_set[hole] != key) {
-        if (g_rot_set[hole] == 0)
-            return;
-        hole = (hole + 1u) & mask;
-    }
-    for (uint32_t j = (hole + 1u) & mask; g_rot_set[j] != 0; j = (j + 1u) & mask) {
-        uint32_t home = RotSlotOf(g_rot_set[j] - 1u, g_rot_slots);
-        /* The entry at j may fill the hole unless its home lies after the
-         * hole and at or before j, cyclically. */
-        bool stays = hole <= j ? (home > hole && home <= j) : (home > hole || home <= j);
-        if (!stays) {
-            g_rot_set[hole] = g_rot_set[j];
-            hole            = j;
-        }
-    }
-    g_rot_set[hole] = 0;
-    g_rot_named--;
 }
 
 /* The set's slots once more as many, the old table handed back to be freed
@@ -190,21 +160,12 @@ void IntegrityRotName(uint64_t block, uint64_t stored, uint64_t read)
     if (naming != ROT_NEW)
         return;
 
-    /* Format v2 writes no block in place (spec_v2 §8.1): a closed block that
+    /* The book writes no block in place (spec_v2 §8.1): a closed block that
      * does not match is rot, whatever the last stop was. */
-    uint64_t cycle = 0;
-    if (tagfs_get_state()->format == DEED_FORMAT_V2 || MountStopWasClean(&cycle))
-        kprintf("[Integrity] block %llu does not hold what was written to it (digest %016llx, "
-                "read %016llx) — rot; a read of it is refused ERR_CHECKSUM, and it is "
-                "published on the integrity tag\n", (unsigned long long)block,
-                (unsigned long long)stored, (unsigned long long)read);
-    else
-        kprintf("[Integrity] block %llu does not match its digest (digest %016llx, read %016llx), "
-                "on a volume whose last stop is not known to have been clean (seal of cycle "
-                "%llu) — rot, or a write in place before that stop that did not land: format "
-                "v1 cannot tell which; a read of it is refused ERR_CHECKSUM, and it is "
-                "published on the integrity tag\n", (unsigned long long)block,
-                (unsigned long long)stored, (unsigned long long)read, (unsigned long long)cycle);
+    kprintf("[Integrity] block %llu does not hold what was written to it (digest %016llx, "
+            "read %016llx) — rot; a read of it is refused ERR_CHECKSUM, and it is "
+            "published on the integrity tag\n", (unsigned long long)block,
+            (unsigned long long)stored, (unsigned long long)read);
 }
 
 void IntegrityUndigestedName(uint64_t block)
@@ -217,24 +178,6 @@ void IntegrityUndigestedName(uint64_t block)
         kprintf("[Integrity] block %llu carries no digest in its volume's Tally, and every block of "
                 "format v2 is written with one — a read of it is refused ERR_CHECKSUM, and it is "
                 "published on the integrity tag\n", (unsigned long long)block);
-}
-
-/* A block written again, or given back: what it holds now has a digest of its
- * own, and rot found in it later is new rot, named again. Nothing to look up
- * while the set is empty — the common case, and it costs one load; a long run
- * is looked up 64 blocks to a hold of the lock. */
-void IntegrityRotForget(uint64_t start, uint32_t count)
-{
-    uint64_t end   = start + count;
-    bool     named = __atomic_load_n(&g_rot_named, __ATOMIC_RELAXED) != 0;
-
-    for (uint64_t b = start; b < end && named; ) {
-        TagFSLockTake(&g_rot_lock);
-        for (uint32_t n = 0; n < 64u && b < end && g_rot_named > 0; n++, b++)
-            RotSetDrop(b);
-        named = g_rot_named > 0;
-        TagFSLockDrop(&g_rot_lock);
-    }
 }
 
 void IntegrityRotEnd(void)

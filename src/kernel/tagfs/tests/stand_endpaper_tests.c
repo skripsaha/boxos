@@ -344,17 +344,17 @@ out:
 
 static const TestCase g_stand_endpaper_tests[] = {
     { .name = "stand_endpaper_owed", .func = TestStandEndpaperOwed,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_endpaper_labeled_carries", .func = TestStandEndpaperLabeledCarries,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_endpaper_mount", .func = TestStandEndpaperMount,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_endpaper_pending", .func = TestStandEndpaperPending,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_endpaper_kept", .func = TestStandEndpaperKept,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_endpaper_empty_files", .func = TestStandEndpaperEmptyFiles,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_endpaper_suite = {

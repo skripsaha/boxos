@@ -20,9 +20,6 @@
 #define STAND_USE_WIDE   100000u   /* tags of the context the scheduler is asked under */
 #define STAND_USE_ASKS   1000u     /* scheduler questions counted */
 
-/* The Ledger's copies as the medium holds them. */
-static VolumeLedger s_use_ledger[VOLUME_LEDGER_COPIES];
-
 /* `lead` (may be NULL), then `count` tags "key:0000000", "key:0000001", ...
  * comma-joined, in the heap; NULL with no memory. */
 static char* StandUseList(const char* lead, const char* key, uint32_t count, size_t* out_len)
@@ -69,21 +66,6 @@ static void StandUseRestore(UseList* saved)
     UseListDrop(saved);
 }
 
-/* The text the newest intact Ledger copy on the medium remembers — its chain
- * read back off the medium — held (UseTextDrop); NULL when it remembers none. */
-static bool StandUseOnMedium(UseText** out_text)
-{
-    int newest = -1;
-    *out_text  = NULL;
-    for (uint32_t c = 0; c < VOLUME_LEDGER_COPIES; c++) {
-        if (!tagfs_ledger_peek(c, &s_use_ledger[c], NULL))
-            continue;
-        if (newest < 0 || s_use_ledger[c].seq > s_use_ledger[newest].seq)
-            newest = (int)c;
-    }
-    return newest >= 0 && tagfs_ledger_peek((uint32_t)newest, &s_use_ledger[newest], out_text);
-}
-
 // ----------------------------------------------------------------------------
 // `use` looks up, and never issues
 // ----------------------------------------------------------------------------
@@ -124,74 +106,6 @@ out:
 // ----------------------------------------------------------------------------
 // Two sayings, one whole memory
 // ----------------------------------------------------------------------------
-
-/* Two `use` writers of different lengths: the short word is said, then the
- * long one, and the long one's remembering lands. Then the short word's
- * remembering lands last — as it would from a core that took it before the
- * long one was said and was held up on its way to the volume. The volume
- * keeps the later word, whole, in memory and on the medium. */
-static TestResult TestStandUseLaterWordStands(void)
-{
-    static const char quiet[] = "use:test:quiet";
-    static const char night[] = "use:test:night,use:test:orders,use:test:north,use:test:long";
-
-    TestResult  verdict     = TEST_PASS;
-    UseList*    saved       = UseContextHold();
-    uint64_t    saying      = 0;
-    UseText*    before      = tagfs_recall_use_context(&saying);
-    UseList*    early       = NULL;
-    UseList*    late        = NULL;
-    UseText*    held        = NULL;
-    bool        changed     = false;
-    bool        kept_late   = false;
-    bool        kept_early  = true;
-    uint64_t    late_saying = 0;
-    UseText*    medium      = NULL;
-
-    TEST_ASSERT_OK(UseContextSet(quiet, sizeof(quiet) - 1, NULL), "the short word is said");
-    early = UseContextHold();
-    TEST_ASSERT_OK(UseContextSet(night, sizeof(night) - 1, NULL), "and the long one after it");
-    late = UseContextHold();
-
-    changed = true;
-    UseContextRemember(&kept_late);
-    TEST_ASSERT(kept_late, "the volume remembers the long word");
-    UseTextDrop(tagfs_recall_use_context(&late_saying));
-    TEST_ASSERT(late_saying > 0, "as a word the machine said");
-
-    TEST_ASSERT_OK(tagfs_remember_use_context(UseListText(early), late_saying - 1, &kept_early),
-                   "the short word's remembering lands last");
-
-    held = tagfs_recall_use_context(NULL);
-    TEST_ASSERT(StandUseOnMedium(&medium), "a Ledger copy is readable");
-    TestEvidence("bytes the volume remembers after the earlier, shorter word landed last",
-                 held ? held->bytes : 0);
-    if (kept_early || !UseTextSame(held, UseListText(late))) {
-        verdict = TEST_DEFECT;
-        goto out;
-    }
-    TEST_ASSERT(medium != NULL && medium->bytes == sizeof(night) - 1,
-                "the medium carries the long word's length");
-    TEST_ASSERT(memcmp(medium->text, night, sizeof(night) - 1) == 0, "and the long word, whole");
-out:
-    UseTextDrop(medium);
-    UseTextDrop(held);
-    UseListDrop(early);
-    UseListDrop(late);
-    if (changed) {
-        /* Put back as the word the volume now stands on, so it is taken. */
-        uint64_t now = 0;
-        bool     put = false;
-        UseTextDrop(tagfs_recall_use_context(&now));
-        error_t  rc  = tagfs_remember_use_context(before, now, &put);
-        if (rc != OK || (before && !put))
-            verdict = TestFailedAt(__FILE__, __LINE__, "the volume's earlier memory is put "
-                                   "back (error, remembered)", rc, put);
-    }
-    UseTextDrop(before);
-    StandUseRestore(saved);
-    return verdict;
-}
 
 // ----------------------------------------------------------------------------
 // The scheduler's question is one compare
@@ -310,12 +224,6 @@ static const TestCase g_stand_use_tests[] = {
       .reach = TEST_READS_ONLY,
       .caveat_defect = "`use` interns every tag it is given, spending the volume's lifetime "
                        "tag numbers on a context that wears nothing" },
-    { .name  = "stand_use_later_word_stands", .func = TestStandUseLaterWordStands,
-      .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_defect = "an earlier Use Context whose remembering lands after a later one's "
-                       "replaces it on the volume, which then remembers what the machine no "
-                       "longer holds",
-      .format = DEED_FORMAT_V1, .analog = "stand_stitch_use_later_word_stands" },
     { .name  = "stand_use_verdict_is_one_compare", .func = TestStandUseVerdictIsOneCompare,
       .reach = TEST_READS_ONLY,
       .caveat_defect = "the scheduler's question walks the Use Context against the cabin's tags "

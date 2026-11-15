@@ -152,7 +152,7 @@ static TestResult TestStandSlipPromiseRefused(void)
     TEST_ASSERT(!StandPromiseSlipped(fids[STAND_PROMISE_ROOM]), "and no Slip lies over it");
     TEST_ASSERT_EQ(StandPromiseWrite(fids[STAND_PROMISE_ROOM], 0, TAGFS_BLOCK_SIZE), ERR_TAGFS_NO_SPACE,
                    "as a write of a whole block is");
-    TEST_ASSERT_EQ(StandPromiseSeen(), tagfs_get_state()->ledger.free_blocks - STAND_PROMISE_ROOM,
+    TEST_ASSERT_EQ(StandPromiseSeen(), tagfs_get_state()->free_blocks - STAND_PROMISE_ROOM,
                    "a program is told the free ground less the three blocks promised");
 out:
     (void)BinderStandNoRoomWait(false);
@@ -251,7 +251,7 @@ static TestResult TestStandSlipPromiseOwn(void)
     for (uint32_t i = 0; i < STAND_PROMISE_FILES; i++)
         TEST_ASSERT(!slipped[i] || StandPromiseEngrossed(fids[i]),
                     "the Helm's service lays each tail in a block — the one promised to it, past no reserve");
-    TEST_ASSERT_EQ(tagfs_get_state()->ledger.free_blocks, 0u, "the three blocks promised are the three laid");
+    TEST_ASSERT_EQ(tagfs_get_state()->free_blocks, 0u, "the three blocks promised are the three laid");
     BlockMapDerivedStandGrow();
     shrunk = false;
     TEST_ASSERT_OK(TagFSSettle(), "the volume given its ground back, the cycle that carries them settles");
@@ -289,7 +289,7 @@ static TestResult TestStandSlipPromiseGivenBack(void)
     TEST_ASSERT_EQ(StandPromiseWrite(fids[2], 0, TAGFS_BLOCK_SIZE), ERR_TAGFS_NO_SPACE,
                    "a block of the third is refused: both blocks are promised");
     seen = StandPromiseSeen();
-    TEST_ASSERT_EQ(seen, tagfs_get_state()->ledger.free_blocks - 2u, "a program is told the free ground less both");
+    TEST_ASSERT_EQ(seen, tagfs_get_state()->free_blocks - 2u, "a program is told the free ground less both");
     TEST_ASSERT_EQ(tagfs_delete_file(fids[0], INK_UNWARRANTED), 0, "the first file is given up");
     TEST_ASSERT_EQ(StandPromiseSeen(), seen + 1u, "and a program is told the block promised to it is free");
     TEST_ASSERT_OK(tagfs_span_file(fids[1], 0), "the second is cut to nothing");
@@ -328,7 +328,7 @@ static TestResult TestStandSlipPromiseRemount(void)
     TEST_ASSERT_OK(TagFSSettle(), "settled");
     TEST_ASSERT(StandStitchRemount(), "the volume is mounted again");
     TEST_ASSERT(StandPromiseSlipped(fids[0]) && StandPromiseSlipped(fids[1]), "both Slips are carried on");
-    TEST_ASSERT_EQ(StandPromiseSeen(), tagfs_get_state()->ledger.free_blocks - 2u,
+    TEST_ASSERT_EQ(StandPromiseSeen(), tagfs_get_state()->free_blocks - 2u,
                    "and a program is told the free ground less a block promised to each");
     TEST_ASSERT_OK(SettleForRoom(), "nothing rests in Fallow");
     shrunk = true;
@@ -359,15 +359,15 @@ out:
 
 static const TestCase g_stand_slip_promise_tests[] = {
     { .name = "stand_slip_promise_refused", .func = TestStandSlipPromiseRefused,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_slip_promise_tally", .func = TestStandSlipPromiseTally,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_slip_promise_own", .func = TestStandSlipPromiseOwn,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_slip_promise_given_back", .func = TestStandSlipPromiseGivenBack,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_slip_promise_remount", .func = TestStandSlipPromiseRemount,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_slip_promise_suite = {

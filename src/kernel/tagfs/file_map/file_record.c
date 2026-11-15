@@ -413,6 +413,7 @@ bool StripWalkNextGround(StripWalk* w, Strip* out)
     return false;
 }
 
+#ifdef CONFIG_VOLUME_TESTS
 error_t FileRecordFlatten(const FileRecord* rec, Strip** out, uint32_t* count)
 {
     StripWalk w;
@@ -436,6 +437,7 @@ error_t FileRecordFlatten(const FileRecord* rec, Strip** out, uint32_t* count)
     *count = n;
     return OK;
 }
+#endif
 
 void FileRecordRelease(FileRecord* rec)
 {

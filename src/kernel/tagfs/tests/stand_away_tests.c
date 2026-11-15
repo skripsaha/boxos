@@ -143,7 +143,7 @@ static TestResult TestStandAwayOtherStitches(void)
     b.at.off  += b.at.atom;
     b.at.came  = (RibbonQuire){ 0, 0 };
     TEST_ASSERT(StandStitchLayAt(&b, STITCH_DATA_FLUSHED, b.at.atom, &b.at.next) != 0, "and a second one after it");
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_OTHER, "the medium comes back holding stitches this kernel "
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_OTHER, "the medium comes back holding stitches this kernel "
                    "did not sew: its book is given up");
     away = false;
     TEST_ASSERT(waiter.answered && waiter.rc == ERR_DEVICE_NOT_READY, "the file's waiter is told its change is lost");
@@ -156,7 +156,7 @@ static TestResult TestStandAwayOtherStitches(void)
     TEST_ASSERT(now.last > b.at.given + 1u, "its stitch goes on past the other machine's: no seq is sewn twice");
 out:
     if (away)
-        (void)TagFSStandMediumReturns(NULL);
+        (void)TagFSStandMediumReturns();
     StandAwayUnlink(&waiter);
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
@@ -183,7 +183,7 @@ static TestResult TestStandAwayNotLanded(void)
     TagFSStandMediumLeaves();
     away = true;
     TEST_ASSERT(StandAwaySpoil(&s, block), "its second block holds, on the medium, what no write of it laid");
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_NOT_LANDED, "the medium comes back as its book was left, "
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_NOT_LANDED, "the medium comes back as its book was left, "
                    "but a block written since the last kept flush reads otherwise: the book is given up");
     away = false;
     TEST_ASSERT(waiter.answered && waiter.rc == ERR_TAGFS_NOT_LANDED,
@@ -192,7 +192,7 @@ static TestResult TestStandAwayNotLanded(void)
     TEST_ASSERT(!StandAwayLive(fid), "without the file no stitch carried");
 out:
     if (away)
-        (void)TagFSStandMediumReturns(NULL);
+        (void)TagFSStandMediumReturns();
     StandAwayUnlink(&waiter);
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
@@ -248,17 +248,17 @@ static TestResult TestStandAwayPlotInFlight(void)
     away = TagFSMediumLeft();
     TEST_ASSERT(away && plot.digest_count == 1, "and the medium leaves as it answers, before the writer hears it");
     TEST_ASSERT(StandAwaySpoil(&s, plot.digests[0].block), "the block holds, on the medium, what no write of it laid");
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_AS_LEFT, "the medium comes back as its book was left: the "
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_AS_LEFT, "the medium comes back as its book was left: the "
                    "write is in no Docket yet");
     away = false;
     TEST_ASSERT_OK(PlotEndWrite(&plot, at, done), "the write is made ready to be the file's");
-    TEST_ASSERT_EQ(TagFSInkPlot(&plot, INK_MAKES_SPARES, &inked), ERR_TAGFS_NOT_LANDED, "and its Ink is refused: "
+    TEST_ASSERT_EQ(TagFSInkPlot(&plot, &inked), ERR_TAGFS_NOT_LANDED, "and its Ink is refused: "
                    "the block it laid before the medium left does not read back as written");
     TEST_ASSERT(StandAwaySized(fid, TAGFS_BLOCK_SIZE), "the file is as the last stitch left it, nothing of the "
                 "write inked");
 out:
     if (away)
-        (void)TagFSStandMediumReturns(NULL);
+        (void)TagFSStandMediumReturns();
     if (loaded)
         PlotRelease(&plot);
     if (holding)
@@ -313,7 +313,7 @@ static TestResult TestStandAwayOwnAttempt(void)
     TEST_ASSERT(StandAwayCutShort(), "its stitch is sewn whole and the medium leaves before its last flush: the "
                 "cycle is refused");
     away = true;
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_AS_LEFT, "the medium comes back holding past the last stitch "
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_AS_LEFT, "the medium comes back holding past the last stitch "
                    "only this kernel's own attempt, byte for byte as sealed: its book is taken up");
     away = false;
     RibbonCursorStand(&now);
@@ -322,7 +322,7 @@ static TestResult TestStandAwayOwnAttempt(void)
     TEST_ASSERT(!waiter.answered, "the file's waiter is told nothing yet");
     TEST_ASSERT(StandAwayCutShort(), "that stitch too is cut short before its last flush");
     away = true;
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_AS_LEFT, "and its book taken up again, both attempts its own");
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_AS_LEFT, "and its book taken up again, both attempts its own");
     away = false;
     RibbonCursorStand(&now);
     TEST_ASSERT(RibbonQuireSame(&now.quire, &cut.named) && now.off > 0,
@@ -336,7 +336,7 @@ static TestResult TestStandAwayOwnAttempt(void)
     TEST_ASSERT(StandAwayLive(fid), "and holds the file");
 out:
     if (away)
-        (void)TagFSStandMediumReturns(NULL);
+        (void)TagFSStandMediumReturns();
     StandAwayUnlink(&waiter);
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
@@ -373,7 +373,7 @@ static TestResult TestStandAwayCutMidway(void)
     tried = StandAwaySeqAt(&s, first);
     TEST_ASSERT(tried > cut.last && StandAwaySeqAt(&s, first + cut.atom) != tried,
                 "the first atom of its attempt lies past the last stitch, the second does not");
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_AS_LEFT, "the medium comes back holding past the last stitch "
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_AS_LEFT, "the medium comes back holding past the last stitch "
                    "only the part of its own attempt that landed, byte for byte as sealed: its book is taken up");
     away = false;
     RibbonCursorStand(&now);
@@ -386,7 +386,7 @@ static TestResult TestStandAwayCutMidway(void)
     TEST_ASSERT_EQ(said.last, now.last, "its ribbon ends on the retry that settled — the attempt cut part way is none");
 out:
     if (away)
-        (void)TagFSStandMediumReturns(NULL);
+        (void)TagFSStandMediumReturns();
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
 }
@@ -419,13 +419,13 @@ static TestResult TestStandAwayOwnForged(void)
      * on a removable medium (§16.6 п.2). */
     TEST_ASSERT(StandStitchLayAt(&b, STITCH_DATA_FLUSHED, b.at.atom, &b.at.next) != 0,
                 "another machine sews a stitch of that seq in the very place of the attempt");
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_OTHER, "the medium comes back holding a unit of a seq this "
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_OTHER, "the medium comes back holding a unit of a seq this "
                    "kernel gave that is not the one it sealed: its book is given up");
     away = false;
     TEST_ASSERT(waiter.answered && waiter.rc == ERR_DEVICE_NOT_READY, "the file's waiter is told its change is lost");
 out:
     if (away)
-        (void)TagFSStandMediumReturns(NULL);
+        (void)TagFSStandMediumReturns();
     StandAwayUnlink(&waiter);
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
@@ -455,7 +455,7 @@ static TestResult TestStandAwayBornNotLanded(void)
     TEST_ASSERT(StandAwayCutShort(), "its stitch, sparing the flush of its data, is cut short before its last flush");
     away = true;
     TEST_ASSERT(StandAwaySpoil(&s, block), "and its block holds what no write of it laid");
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_NOT_LANDED, "the medium comes back: its book given up for "
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_NOT_LANDED, "the medium comes back: its book given up for "
                    "the block that did not land");
     away = false;
     TEST_ASSERT(waiter.answered && waiter.rc == ERR_TAGFS_NOT_LANDED, "the Born's waiter hears ERR_TAGFS_NOT_LANDED");
@@ -468,7 +468,7 @@ static TestResult TestStandAwayBornNotLanded(void)
 out:
     BlockFailReadPace(false, 0, 0);
     if (away)
-        (void)TagFSStandMediumReturns(NULL);
+        (void)TagFSStandMediumReturns();
     StandAwayUnlink(&waiter);
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
@@ -543,12 +543,12 @@ static TestResult TestStandAwayNewerSlot(void)
     away = true;
     forged = StandAwaySlotForged(&s, newest, other, s.at.given + 1000u);
     TEST_ASSERT(forged, "another machine lays a slot newer than any this kernel knows");
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_OTHER, "the medium comes back with a newer slot: its book is "
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_OTHER, "the medium comes back with a newer slot: its book is "
                    "given up");
     away = false;
 out:
     if (away)
-        (void)TagFSStandMediumReturns(NULL);
+        (void)TagFSStandMediumReturns();
     if (forged) {
         TagFSStandLetGo();
         if (BoardroomWrite(s.seat, s.base + slot_vlba, VOLUME_BLOCK_SECTORS,
@@ -604,19 +604,19 @@ static TestResult TestStandAwaySlotUnsure(void)
                 "the medium holds the new Tally's slot whole, the newest of the ring");
     TagFSStandMediumLeaves();
     away = true;
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_AS_LEFT, "the medium comes back as it was left: the slot "
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_AS_LEFT, "the medium comes back as it was left: the slot "
                    "this kernel holds unsure holds its own unit, byte for byte as sealed — its book is taken up");
     away = false;
     TagFSStandMediumLeaves();
     away = true;
     TEST_ASSERT(StandAwaySlotOther(&b.s, newest, &from) && StandAwaySlotForged(&b.s, from, newest, seq),
                 "another machine lays a slot of its own of that very seq in that very slot");
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_OTHER, "the medium comes back: a seq this kernel gave is no "
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_OTHER, "the medium comes back: a seq this kernel gave is no "
                    "proof of its own, and its book is given up");
     away = false;
 out:
     if (away)
-        (void)TagFSStandMediumReturns(NULL);
+        (void)TagFSStandMediumReturns();
     STAND_BINDER_PUT_BACK(&b);
     return verdict;
 }
@@ -650,12 +650,12 @@ static TestResult TestStandAwayLastClasp(void)
     b.at.given = now.last - 1u;
     TEST_ASSERT(StandStitchLayAt(&b, STITCH_DATA_FLUSHED, b.at.atom, &b.at.next) != 0,
                 "another machine lays a stitch of the same seq in its place, its body and its Clasp another");
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_OTHER, "the medium comes back: its last stitch does not stand "
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_OTHER, "the medium comes back: its last stitch does not stand "
                    "where this kernel sewed it by its Clasp, and its book is given up");
     away = false;
 out:
     if (away)
-        (void)TagFSStandMediumReturns(NULL);
+        (void)TagFSStandMediumReturns();
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
 }
@@ -690,12 +690,12 @@ static TestResult TestStandAwayTornTail(void)
     TEST_ASSERT(said.last <= s.at.given, "its ribbon ends before the torn tail");
     TagFSStandMediumLeaves();
     away = true;
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_AS_LEFT, "the medium comes back before a stitch of the session "
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_AS_LEFT, "the medium comes back before a stitch of the session "
                    "settled: the torn tail its mount found is no other writer's, and its book is taken up");
     away = false;
 out:
     if (away)
-        (void)TagFSStandMediumReturns(NULL);
+        (void)TagFSStandMediumReturns();
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
 }
@@ -731,12 +731,12 @@ static TestResult TestStandAwayLiedWhole(void)
     memset(s_away_bytes, 0, BOOK_SECTOR_BYTES);
     TEST_ASSERT(BoardroomWrite(s.seat, s.base + RibbonPlaceVlba(&first.sewn), 1, s_away_bytes, NULL) == 0,
                 "the first of the two stitches loses its first sector while the medium is out");
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_OTHER, "its last stitch stands where it was sewn, and still "
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_OTHER, "its last stitch stands where it was sewn, and still "
                    "the book is given up: on a medium that lied the whole ribbon from the slot is walked");
     away = false;
 out:
     if (away)
-        (void)TagFSStandMediumReturns(NULL);
+        (void)TagFSStandMediumReturns();
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
 }
@@ -771,7 +771,7 @@ static TestResult TestStandAwayMarksRefused(void)
     TEST_ASSERT(StandAwaySettled("away-marks-1"), "a cycle settles, the place of its stitch kept");
     TagFSStandMediumLeaves();
     away = true;
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_AS_LEFT, "the medium comes back as it was left: held to the "
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_AS_LEFT, "the medium comes back as it was left: held to the "
                    "last stitch alone, its book is taken up");
     away = false;
     t = b.s;
@@ -788,12 +788,12 @@ static TestResult TestStandAwayMarksRefused(void)
     TEST_ASSERT_OK(BinderRunWhole(), "and a Tally takes every stitch in");
     TagFSStandMediumLeaves();
     away = true;
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_AS_LEFT, "the medium comes back as it was left: the stitch "
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_AS_LEFT, "the medium comes back as it was left: the stitch "
                    "whose mark memory refused lies behind the slot, and its book is taken up");
     away = false;
 out:
     if (away)
-        (void)TagFSStandMediumReturns(NULL);
+        (void)TagFSStandMediumReturns();
     STAND_BINDER_PUT_BACK(&b);
     return verdict;
 }
@@ -857,7 +857,7 @@ static TestResult TestStandAwayVerdict(void)
     TEST_ASSERT(StandRibbonUp() && ErrataHeld(), "the volume mounts on them, holding a verdict");
     TagFSStandMediumLeaves();
     away = true;
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_AS_LEFT, "the medium leaves and comes back as it was left");
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_AS_LEFT, "the medium leaves and comes back as it was left");
     away = false;
     TEST_ASSERT(ErrataHeld(), "and the verdict is held: no stitch of the session has settled it yet");
     TagFSStandMediumLeaves();
@@ -866,7 +866,7 @@ static TestResult TestStandAwayVerdict(void)
     h = StandRibbonHead(&w, w.top + 3u, w.top + 2u, c2);
     TEST_ASSERT(StandRibbonSew(&w, w.at + 2u, w.top + 3u, &h, r3, VOLUME_BLOCK_SECTORS) != 0,
                 "out of it, another machine lays the same verdict as an Undone of its own");
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(NULL), AWAY_OTHER, "the medium comes back changed: its book given up");
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_OTHER, "the medium comes back changed: its book given up");
     away = false;
     TEST_ASSERT(TagFSStandLetGo() && StandRibbonUp(), "the volume mounts on what its medium holds");
     MountBookStandSaid(&said);
@@ -881,7 +881,7 @@ static TestResult TestStandAwayVerdict(void)
     TEST_ASSERT(u->nrecords > 0 && u->records[0].kind != RIBBON_UNDONE, "and its stitch carries no Undone: none twice");
 out:
     if (away)
-        (void)TagFSStandMediumReturns(NULL);
+        (void)TagFSStandMediumReturns();
     RibbonUnitLetGo(u);
     if (!StandRibbonPutBack(&w))
         verdict = TestFailedAt(__FILE__, __LINE__, "what the test laid would not be put back (laid, 0)",
@@ -891,33 +891,33 @@ out:
 
 static const TestCase g_stand_away_tests[] = {
     { .name = "stand_away_other_stitches", .func = TestStandAwayOtherStitches,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_away_not_landed", .func = TestStandAwayNotLanded,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_away_own_attempt", .func = TestStandAwayOwnAttempt,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_away_born_not_landed", .func = TestStandAwayBornNotLanded,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_away_newer_slot", .func = TestStandAwayNewerSlot,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_away_lied_whole", .func = TestStandAwayLiedWhole,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_away_verdict", .func = TestStandAwayVerdict,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_away_plot_in_flight", .func = TestStandAwayPlotInFlight,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_away_cut_midway", .func = TestStandAwayCutMidway,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_away_own_forged", .func = TestStandAwayOwnForged,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_away_slot_unsure", .func = TestStandAwaySlotUnsure,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_away_last_clasp", .func = TestStandAwayLastClasp,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_away_torn_tail", .func = TestStandAwayTornTail,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_away_marks_refused", .func = TestStandAwayMarksRefused,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_away_suite = {

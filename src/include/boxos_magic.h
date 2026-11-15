@@ -8,11 +8,6 @@
 #define TOUCH_RING_MAGIC       0x54434852  // "TCHR"
 #define BROOK_HEADER_MAGIC     0x42524B48  // "BRKH" — Brook SPSC stream header
 
-// TagFS
-#define TAGFS_REGISTRY_MAGIC   0x54524547  // "TREG"
-#define TAGFS_FILETBL_MAGIC    0x54465442  // "TFTB"
-#define TAGFS_MPOOL_MAGIC      0x544D504C  // "TMPL"
-
 // Process
 #define PROCESS_MAGIC          0x50524F43  // "PROC"
 

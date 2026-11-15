@@ -10,38 +10,28 @@
  *
  * Every change of a file's record — a write's new size and extents, a span, a
  * defrag, a new name or tag, a new file, a file given up — is one Ink, and an
- * Ink is a change of MEMORY: the record is laid in the pool's tail, the map of
- * live files names it (through the same door the mount puts records through,
- * PoolMirrorPut), the file table and the tag index follow, and what the file
- * stopped naming comes to rest in Fallow. Nothing reaches the medium here; a
- * Settle cycle (settle/) takes what was inked to it.
+ * Ink is a change of MEMORY: the map of live files names the new record, the
+ * Docket keeps the change for the next stitch (docket.h), the tag index
+ * follows, and what the file stopped naming comes to rest in Fallow. Nothing
+ * reaches the medium here; a Settle cycle (settle/) takes what was inked to
+ * it.
  *
  * ‼ UNDER THE VOLUME'S STATE LOCK, AND NOTHING THERE THAT CAN WAIT OR FAIL.
  * An Ink is made in two halves. Before the lock, everything it could need is
- * taken: the record built and packed, the memory the map and the tag index
- * lack for it, the node its freed ground rests in. Under the lock it checks
- * that the file is still what the first half read (its record's gen), that
- * the stakes still cover, and that the tail has room — or a Spare to close
- * onto — and only then, with nothing left that can refuse, does it change
- * anything. A refusal before that point changes nothing anywhere.
+ * taken: the record built, the memory the map and the tag index lack for it,
+ * the node its freed ground rests in, the room on the ribbon its stitch's
+ * record takes (settle/ribbon.c, RibbonClaim). Under the lock it checks that
+ * the file is still what the first half read (its record's gen) and that the
+ * stakes still cover, and only then, with nothing left that can refuse, does
+ * it change anything. A refusal before that point changes nothing anywhere.
  *
- * ‼ AN UNSETTLED RECORD OF THE SAME FILE IS REPLACED, NOT FOLLOWED. A file
- * written a thousand times between two cycles leaves one record in the tail,
- * not a thousand: its record no cycle has taken is taken back (PoolTakeBack)
- * and the new one laid after the rest.
+ * ‼ AN UNSETTLED CHANGE OF THE SAME FILE IS MERGED, NOT FOLLOWED. A file
+ * written a thousand times between two cycles leaves one Jot in the Docket,
+ * not a thousand (docket.h).
  *
- * ‼ NO SPARE IS WAITED FOR. A tail with no room needs a Spare to close onto,
- * and each change leaves the pool its floor of the reserve (meta_pool.h) —
- * the whole of it while the volume has a free block; with none, a record that
- * frees nothing still the whole of it, a Quitclaim of a file with no ground
- * Glean's share, a change that frees ground the close its ground needs — and
- * below Glean's share none takes room the close or Glean's next step needs. An
- * Ink that has no Spare it may take makes one itself, with no state lock held
- * (PoolSpareMake) — or, where it cannot (an asynchronous write's
- * continuation), answers ERR_WOULD_BLOCK and the caller makes one its own way.
- * It never waits for a cycle to make one for it: a volume with no ground for
- * one while a Settle cycle would give some back answers ERR_WOULD_BLOCK as
- * well, nothing changed, and the caller waits for that cycle its own way.
+ * ‼ NO ROOM IS WAITED FOR. A volume with no room for the change while a Settle
+ * cycle would give some back answers ERR_WOULD_BLOCK, nothing changed, and the
+ * caller waits for that cycle its own way.
  *
  * ‼ A FILE THE SYSTEM KEEPS IS CHANGED ONLY WITH THE WARRANT, AND WHAT THE
  * LOADER READS BY ITS BLOCKS BY NOBODY (RT-09); THIS IS THE ONE PLACE THAT
@@ -69,41 +59,18 @@ typedef struct {
     uint64_t gen;
 } InkReceipt;
 
-/* How an Ink meets a tail with no room and no Spare it may take: it makes one
- * itself (a caller holding no state lock), or answers ERR_WOULD_BLOCK (a
- * continuation, which may not stand over the medium) and the caller does. */
-typedef enum {
-    INK_MAKES_SPARES = 0,
-    INK_ASKS_SPARES  = 1,
-} InkSpares;
-
 /* The Plot's size and extents become the file's record, with its name and tags
- * as they are now; the ground the Plot let go of rests in Fallow, every Stake
- * is the record's, and the room it claimed is let go. Called by the holder of
+ * as they are now; the ground the Plot let go of rests in Fallow, and every
+ * Stake is the record's. Called by the holder of
  * the file's Helm, which loaded the Plot under it, and guarded with the
  * warrant it was loaded with. OK — and the Plot stands for the record
  * committed — or the refusal, the file as it was and the Stakes still the
  * Plot's: ERR_FILE_NOT_FOUND (the file was given up meanwhile), ERR_BUSY (its
  * extents were changed since the load, which only a caller that did not hold
  * the Helm can do — said), ERR_PERMISSION_DENIED, ERR_DEVICE_NOT_READY,
- * ERR_TAGFS_READ_ONLY, ERR_TAGFS_RECORD_FULL, ERR_NO_MEMORY, or a Spare's
- * refusal. */
-error_t TagFSInkPlot(Plot* p, InkSpares spares, InkReceipt* out);
-
-/*
- * RT-19. The room in its record the Plot's extents need, claimed before a byte
- * of the call moves: the record with its name and tags as they are now and the
- * Plot's extents must fit, or the call is refused ERR_TAGFS_RECORD_FULL — said
- * — with nothing written; and from here until the Plot is inked or let go, a
- * name or a tag inked for the file (InkFields) must leave that room, or is
- * refused itself. A write's record is full because of a tag, never after its
- * data landed. Nothing is claimed for a Plot loaded with no Helm, or one that
- * names no more extents than its record. Called with no TagFS lock held.
- */
-error_t InkRoomClaim(Plot* p);
-
-/* The room the Plot claimed let go; nothing when it claimed none. */
-void    InkRoomLetGo(Plot* p);
+ * ERR_TAGFS_READ_ONLY, ERR_NO_MEMORY, or ERR_WOULD_BLOCK while the room its
+ * stitch needs is on its way. */
+error_t TagFSInkPlot(Plot* p, InkReceipt* out);
 
 /* A file's name and tags. `name` non-NULL renames it, and the name's tag
  * moves with it: the tag of the name it had comes off, `add` (the new name's,
@@ -117,8 +84,8 @@ error_t InkFields(uint64_t fid, const char* name, uint32_t add, uint32_t drop, I
 #ifdef CONFIG_VOLUME_TESTS
 /* The stand's way to keep a file in a role, as the image builder lays one
  * (tools/create_tagfs_cargo.c): the record's role bits become `role`
- * (TAGFS_FILE_ROLE_*) by an ordinary Ink, the tags as they are. On a book the
- * tail is laid in the file's block first, under its Helm (helm/engross.h,
+ * (TAGFS_FILE_ROLE_*) by an ordinary Ink, the tags as they are. The tail is
+ * laid in the file's block first, under its Helm (helm/engross.h,
  * EngrossRoled), as the loader reads a file of a role by its blocks and no
  * write lays a Slip on one (plot_slip.c). No program asks it: the system has
  * no call that puts a role on a file the volume already holds. */
@@ -128,8 +95,8 @@ error_t InkRoleLaid(uint64_t fid, uint32_t role, InkReceipt* out);
 /* A book's file rolled back by the mount's verdict (mount/errata.h): its
  * record marked TAGFS_FILE_UNDONE by an ordinary Ink, its name and tags as
  * they are — the system's own word on the file, never one of its tags. OK, and
- * OK with no Ink for one marked already; ERR_UNSUPPORTED on format v1, or the
- * refusal an Ink of a file's fields answers. */
+ * OK with no Ink for one marked already, or the refusal an Ink of a file's
+ * fields answers. */
 error_t InkUndone(uint64_t fid, InkReceipt* out);
 
 /* A book's file deleted and kept — the record marked TAGFS_FILE_DELETED, the
@@ -138,9 +105,8 @@ error_t InkUndone(uint64_t fid, InkReceipt* out);
  * brought back: the mark and the time taken off. Deleting a deleted file moves
  * its term. The guard of a change asks the warrant, as a delete does: a file
  * the system keeps is not deleted without one. OK — and OK with no Ink for a
- * call that changes nothing — or the refusal; ERR_UNSUPPORTED on format v1
- * (its record has no room for the time). Only the system lets a kept file go
- * at its term (keep/keep.h): InkQuitclaim, as ever. */
+ * call that changes nothing — or the refusal. Only the system lets a kept file
+ * go at its term (keep/keep.h): InkQuitclaim, as ever. */
 error_t InkKeep(uint64_t fid, uint64_t until, InkWarrant warrant, InkReceipt* out);
 
 /* A new file named `name`, wearing the `count` tags in `tags` (the name's
@@ -149,22 +115,12 @@ error_t InkKeep(uint64_t fid, uint64_t until, InkWarrant warrant, InkReceipt* ou
 error_t InkNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t* out_fid,
                InkReceipt* out);
 
-/* The file given up: a Quitclaim laid for it, its extents to Fallow, and it
- * leaves the map, the table and the tag index. OK, or the refusal — the guard's
- * among them, asked with `warrant` — and ERR_WOULD_BLOCK, nothing changed,
- * while the room for its Quitclaim is on its way: ground a cycle gives back,
- * or a sweep of Glean's (glean.h), which a volume with no block to make a
- * Spare from waits for rather than refuse the delete. */
+/* The file given up: a Quitclaim kept for the next stitch, its extents to
+ * Fallow, and it leaves the map and the tag index. OK, or the refusal — the
+ * guard's among them, asked with `warrant` — and ERR_WOULD_BLOCK, nothing
+ * changed, while the room for its Quitclaim is on its way: room a cycle gives
+ * back. */
 error_t InkQuitclaim(uint64_t fid, InkWarrant warrant, InkReceipt* out);
-
-/*
- * Glean's move (glean.h), under the state lock: the record at `from` — its
- * file's newest, as the caller saw under this same hold of the lock — laid
- * again at the tail's end, its bytes `packed` as they are, by an Ink of its
- * own: the map names it there, the file's row and the links' counts follow,
- * and its shape is the file's still. The tail has the room. Nothing refuses.
- */
-void    InkGleanLocked(uint64_t fid, const RecordWhere* from, const uint8_t* packed);
 
 /*
  * Conjugate's Ink (ink_conjugate.c; the act is dedup/conjugate.h): book file
@@ -237,8 +193,7 @@ void     InkReadOnlyLift(void);
  * so a refused change interns nothing, and two do not both take the room one
  * has: OK holds those Coineds' bytes on the ribbon (*held) until the tags hold
  * their ids and the registry counts them, InkBookHeldLetGo letting the hold go
- * after the interning, inside the same stay behind the door. OK on format
- * v1, which interns first as it always has. */
+ * after the interning, inside the same stay behind the door. */
 error_t InkBookRefuses(const TagSpelling* tags, uint32_t count, uint64_t* held);
 void    InkBookHeldLetGo(uint64_t held);
 

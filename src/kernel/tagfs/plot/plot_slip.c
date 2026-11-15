@@ -159,7 +159,7 @@ uint64_t PlotSlipMost(const Plot *p)
 error_t PlotEngross(Plot *p, bool *laid)
 {
     *laid = false;
-    if (!p->book || !p->rec || !p->size || !TailSlipOn(p->rec, (p->size - 1u) / PLOT_BLOCK))
+    if (!p->rec || !p->size || !TailSlipOn(p->rec, (p->size - 1u) / PLOT_BLOCK))
         return OK;
     uint64_t k    = (p->size - 1u) / PLOT_BLOCK;
     error_t  rc   = PlotWindowCover(p, k, p->rec->blocks);

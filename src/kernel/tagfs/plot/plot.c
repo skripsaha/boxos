@@ -1,5 +1,4 @@
 #include "plot_internal.h"
-#include "../metadata_pool/meta_pool.h"
 #include "../file_map/file_map.h"
 #include "../ink/ink.h"
 #include "../block_map/block_map_derived.h"
@@ -53,31 +52,13 @@ error_t PlotLoad(Plot *p, uint64_t fid, InkWarrant warrant)
     if (!rec)
         return ERR_FILE_NOT_FOUND;
     p->shape = where.shape;
-    p->book  = tagfs_get_state()->format == DEED_FORMAT_V2;
     if (FileRecordCopyOut(rec, &p->meta) != 0) {
         FileRecordRelease(rec);
         return ERR_NO_MEMORY;
     }
-    if (p->book) {
-        /* A book's Plot holds the record and works on a window of it, never
-         * a copy of every run (plot_window.c). */
-        PlotWindowLoad(p, rec);
-    } else {
-        /* The record's header is the Plot's own copy, and its runs laid flat
-         * are the Plot's runs from here on — the one copy of them a call of
-         * format v1 works on and packs (PackV1); the record itself is never
-         * changed, and the Ink conveys what the Plot did to it
-         * (PlotConveyance). */
-        error_t flat = FileRecordFlatten(rec, &p->runs, &p->run_count);
-        FileRecordRelease(rec);
-        if (flat != OK)
-            return ERR_NO_MEMORY;
-        p->run_room = p->run_count;
-        for (uint32_t i = 0; i < p->run_count; i++)
-            p->blocks += p->runs[i].count;
-        p->blocks_before = p->blocks;
-        p->runs_before   = PackV1Extents(p->runs, p->run_count);
-    }
+    /* The Plot holds the record and works on a window of it, never a copy of
+     * every run (plot_window.c). */
+    PlotWindowLoad(p, rec);
     p->size_before   = p->meta.size;
     p->size          = p->meta.size;
 
@@ -91,16 +72,14 @@ error_t PlotLoad(Plot *p, uint64_t fid, InkWarrant warrant)
     }
     /* A file the system keeps, to a call with no warrant; the kernel the
      * loader reads by its blocks, or a volume whose medium left, to every
-     * call: refused here, before a byte of the call moves. A book's file is
-     * known for the kernel's by its id (ink.c). */
+     * call: refused here, before a byte of the call moves. The kernel's file
+     * is known by its id (ink.c). */
     return InkMayChange(fid, p->meta.flags, p->runs, p->run_count, warrant);
 }
 
 int PlotGiveBack(const Plot *p, uint64_t start, uint32_t count)
 {
-    if (p->book)
-        return -(int)BlockMapDerivedGive(p->fid, start, count);
-    return tagfs_free_blocks(start, count);
+    return -(int)BlockMapDerivedGive(p->fid, start, count);
 }
 
 void PlotPullStakes(Plot *p)
@@ -127,7 +106,6 @@ void PlotPullStakes(Plot *p)
 void PlotRelease(Plot *p)
 {
     PlotPullStakes(p);
-    InkRoomLetGo(p);
     PlotWindowLetGo(p);
     kfree(p->runs);
     kfree(p->stakes);
@@ -176,37 +154,7 @@ uint64_t PlotStretchBytes(const PlotStretch *s, uint32_t blocks)
 
 bool PlotStretchAt(const Plot *p, uint64_t pos, uint64_t left, uint32_t most, PlotStretch *out)
 {
-    if (p->book)
-        return PlotWindowStretchAt(p, pos, left, most, out);
-    uint64_t k     = pos / PLOT_BLOCK;
-    uint64_t block = 0;
-    uint32_t after = 0;
-    if (left == 0 || most == 0 || !PlotFind(p->runs, p->run_count, k, &block, &after))
-        return false;
-
-    uint32_t head  = (uint32_t)(pos % PLOT_BLOCK);
-    uint64_t count = PlotBlocksFor(head + left);
-    if (count > (uint64_t)after + 1)
-        count = (uint64_t)after + 1;
-    if (count > most)
-        count = most;
-
-    uint64_t carried = count * PLOT_BLOCK - head;
-    out->block = block;
-    out->count = (uint32_t)count;
-    out->head  = head;
-    out->bytes = carried < left ? carried : left;
-
-    uint64_t in_first = PLOT_BLOCK - head < out->bytes ? PLOT_BLOCK - head : out->bytes;
-    out->first = PlotFillFor(p, k, head, (uint32_t)in_first);
-    out->last  = out->first;
-    if (count > 1)
-        out->last = PlotFillFor(p, k + count - 1, 0,
-                                (uint32_t)(head + out->bytes - (count - 1) * PLOT_BLOCK));
-    out->from_first = block;
-    out->from_last  = block + count - 1;
-    out->k          = k;
-    return true;
+    return PlotWindowStretchAt(p, pos, left, most, out);
 }
 
 void PlotRunsPut(Strip *runs, uint32_t *n, uint64_t start, uint32_t count)
@@ -232,11 +180,11 @@ error_t PlotAppendRun(Plot *p, uint64_t start, uint32_t count)
     if (!PlotRoom((void **)&p->runs, &p->run_room, p->run_count,
                   (uint64_t)p->run_count + 1, sizeof(Strip)))
         return ERR_NO_MEMORY;
-    /* On a book a run the record names is never grown: the stitch would say
-     * its ground was taken out and put back, and a reader frees what it takes
-     * out (spec_v2 §2.8). Only this call's own Stake is. */
+    /* A run the record names is never grown: the stitch would say its ground
+     * was taken out and put back, and a reader frees what it takes out
+     * (spec_v2 §2.8). Only this call's own Stake is. */
     const Strip *last = p->run_count ? &p->runs[p->run_count - 1] : NULL;
-    if (p->book && last && PlotStakeHolding(p, last->start) == p->stake_count)
+    if (last && PlotStakeHolding(p, last->start) == p->stake_count)
         p->runs[p->run_count++] = (Strip){ .start = start, .count = count, .kind = STRIP_DATA };
     else
         PlotRunsPut(p->runs, &p->run_count, start, count);
@@ -264,8 +212,6 @@ void PlotStakesCount(Plot *p, uint64_t more)
     uint64_t       stakes = p->stake_count + (more ? 1u : 0u);
     uint64_t       runs   = (p->rec ? p->rec->strip_count : p->run_count) + 2u * stakes;
     uint64_t       blocks = (p->rec ? p->rec->blocks : p->blocks) + more;
-    if (!p->book)
-        return;
     for (uint32_t i = 0; i < p->stake_count; i++)
         blocks += p->stakes[i].count;
     if (stakes == 0) {
@@ -356,7 +302,7 @@ error_t PlotLetGo(Plot *p, uint64_t start, uint32_t count)
 
 error_t PlotTrimTo(Plot *p, uint64_t keep_blocks)
 {
-    if (p->book && p->blocks > keep_blocks) {
+    if (p->blocks > keep_blocks) {
         error_t rc = PlotWindowTrim(p, keep_blocks);
         if (rc != OK)
             return rc;
@@ -380,102 +326,6 @@ error_t PlotTrimTo(Plot *p, uint64_t keep_blocks)
     return OK;
 }
 
-/* The record the Plot would commit, as a view: its own name and tags, the
- * Plot's runs and size. Nothing in it is the view's to free. */
-static TagFSMetadata PlotRecord(const Plot *p)
-{
-    TagFSMetadata record = p->meta;
-    record.size         = p->size;
-    record.extents      = p->runs;
-    record.extent_count = p->run_count;
-    return record;
-}
-
-bool PlotRecordFits(const Plot *p)
-{
-    TagFSMetadata record = PlotRecord(p);
-    return PlotFits(&record, NULL);
-}
-
-/* The record fits, or its runs are gathered until it does, or the write is
- * refused — said, with the numbers. A gather's own refusal is the answer as it
- * gave it: a run that waits for a Settle cycle (ERR_WOULD_BLOCK) is not a
- * record full for good, nor a medium that refused the copy. */
-static error_t PlotFitOrGather(Plot *p)
-{
-    if (PlotRecordFits(p))
-        return OK;
-
-    uint32_t room    = PlotRunRoom(&p->meta);
-    uint64_t extents = PackV1Extents(p->runs, p->run_count);
-    if (extents <= room) {
-        kprintf("[TagFS] file %llu: its %u tag(s) and its name leave its record no room it "
-                "needs — refused\n", p->fid, p->meta.tag_count);
-        return ERR_TAGFS_RECORD_FULL;
-    }
-
-    uint64_t hint = p->run_count ? p->runs[0].start : 0;
-    error_t  rc   = PlotGather(p, extents - room, hint);
-    if (rc == OK && PlotRecordFits(p))
-        return OK;
-    if (rc == OK)
-        rc = ERR_TAGFS_RECORD_FULL;
-    if (rc != ERR_WOULD_BLOCK)
-        kprintf("[TagFS] file %llu: growing it would leave it %llu extent(s) and its record holds "
-                "%u — refused (error %u), and nothing of it written\n", p->fid,
-                (unsigned long long)extents, room, (unsigned)rc);
-    return rc;
-}
-
-error_t PlotReserve(Plot *p, uint64_t end)
-{
-    uint64_t need = PlotBlocksFor(end);
-    uint32_t room = PlotRunRoom(&p->meta);
-
-    while (p->blocks < need) {
-        /* The new ground alone already takes more extents than the record
-         * holds: gathering moves only what the record named, so no gather
-         * could make room, and nothing more is taken. */
-        if (PackV1Extents(p->runs, p->run_count) > (uint64_t)room + p->runs_before) {
-            kprintf("[TagFS] file %llu: the free ground it would grow into lies in more runs "
-                    "than its record holds extents (%u) — refused, and nothing of it "
-                    "written\n", p->fid, room);
-            return ERR_TAGFS_RECORD_FULL;
-        }
-
-        uint64_t left = need - p->blocks;
-        uint32_t want = left > UINT32_MAX ? UINT32_MAX : (uint32_t)left;
-        uint64_t hint = 0;
-        if (p->run_count) {
-            const Strip *last = &p->runs[p->run_count - 1];
-            hint = last->start + last->count;
-        }
-
-        /* ERR_WOULD_BLOCK is room on its way, not a refusal: its caller waits
-         * for the cycle that brings it and asks again. */
-        uint64_t start = 0;
-        uint32_t got   = 0;
-        error_t  rc    = AllotmentTake(p->fid, want, p->blocks, hint, &start, &got);
-        if (rc != OK) {
-            if (rc != ERR_WOULD_BLOCK)
-                kprintf("[TagFS] file %llu: %llu more block(s) could not be had for it (error %u) "
-                        "— the write is refused\n", p->fid, (unsigned long long)left,
-                        (unsigned)rc);
-            return rc;
-        }
-        rc = PlotStake(p, start, got);
-        if (rc != OK) {
-            (void)PlotGiveBack(p, start, got);
-            return rc;
-        }
-        rc = PlotAppendRun(p, start, got);
-        if (rc != OK)
-            return rc;
-    }
-    error_t rc = PlotFitOrGather(p);
-    return rc == OK ? InkRoomClaim(p) : rc;
-}
-
 error_t PlotBeginWrite(Plot *p, uint64_t offset, bool append, uint64_t bytes, uint64_t *out_at)
 {
     uint64_t at = append ? p->size : offset;
@@ -483,7 +333,7 @@ error_t PlotBeginWrite(Plot *p, uint64_t offset, bool append, uint64_t bytes, ui
         return ERR_TAGFS_BEYOND_SIZE;
     if (bytes > UINT64_MAX - at)
         return ERR_INVALID_ARGUMENT;
-    error_t rc = p->book ? PlotWindowBegin(p, at, bytes) : PlotReserve(p, at + bytes);
+    error_t rc = PlotWindowBegin(p, at, bytes);
     if (rc != OK)
         return rc;
     *out_at = at;
@@ -492,11 +342,9 @@ error_t PlotBeginWrite(Plot *p, uint64_t offset, bool append, uint64_t bytes, ui
 
 error_t PlotEndWrite(Plot *p, uint64_t at, uint64_t done)
 {
-    if (p->book) {
-        error_t rc = PlotWindowEnd(p, at, done);
-        if (rc != OK)
-            return rc;
-    }
+    error_t rc = PlotWindowEnd(p, at, done);
+    if (rc != OK)
+        return rc;
     uint64_t end  = at + done;
     uint64_t keep = PlotBlocksFor(end);
     if (keep < p->blocks_before)

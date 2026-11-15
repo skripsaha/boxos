@@ -48,8 +48,8 @@
  *                    reason: ERR_PERMISSION_DENIED (UNWARRANTED, KEPT),
  *                    ERR_INVALID_ARGUMENT (UNSHAPED, DIFFERS,
  *                    COLLIDES), ERR_CHECKSUM (UNDIGESTED), ERR_BUSY (CHANGED),
- *                    and the volume's own refusal (REFUSED): ERR_UNSUPPORTED
- *                    on format v1, ERR_FILE_NOT_FOUND, ERR_BUSY for a Helm
+ *                    and the volume's own refusal (REFUSED):
+ *                    ERR_FILE_NOT_FOUND, ERR_BUSY for a Helm
  *                    another holds, ERR_TAGFS_CORRUPTED for a file the mount
  *                    locked, ERR_READ_FAILED, ERR_NO_MEMORY, the ribbon's room
  *                    (ERR_WOULD_BLOCK while it can come) and the rest an Ink

@@ -155,16 +155,6 @@ static bool StandRunWrite(bool port, uint64_t file_id, const uint8_t *data, uint
     return true;
 }
 
-/* Where the first byte that is not zero is, or `n`. */
-static uint32_t StandRunFirstNonZero(const uint8_t *p, uint32_t n)
-{
-    for (uint32_t i = 0; i < n; i++) {
-        if (p[i])
-            return i;
-    }
-    return n;
-}
-
 // ----------------------------------------------------------------------------
 // A megabyte in one run goes out in as few commands as the seat takes
 //
@@ -193,7 +183,6 @@ static TestResult StandRunMegabyte(bool port)
     bool           running = false;
     const uint32_t N       = TagFSRunBlocks();
     const uint32_t want    = (STAND_RUN_BLOCKS + N - 1) / N;
-    const bool     book    = tagfs_get_state()->format == DEED_FORMAT_V2;
     StandRunAnswer answer;
     TagFSDataCost  before, after;
     const char    *aside   = StandRunAside(port);
@@ -214,12 +203,8 @@ static TestResult StandRunMegabyte(bool port)
     TEST_ASSERT(!port || WriteJobSeatRunsAsync(seat),
                 "a program's write on this seat goes through the port, as the path line said");
 
-    if (book)
-        BlockFailArm(seat, BLOCK_FAIL_WRITE, tagfs_block_to_sector(g_book.frame.data_block),
-                     (g_book.data_end - g_book.frame.data_block) * TAGFS_BLOCK_SECTORS, BLOCK_FAIL_NEVER);
-    else
-        BlockFailArm(seat, BLOCK_FAIL_WRITE, tagfs_block_to_sector(first),
-                     (uint64_t)STAND_RUN_BLOCKS * TAGFS_BLOCK_SECTORS, BLOCK_FAIL_NEVER);
+    BlockFailArm(seat, BLOCK_FAIL_WRITE, tagfs_block_to_sector(g_book.frame.data_block),
+                 (g_book.data_end - g_book.frame.data_block) * TAGFS_BLOCK_SECTORS, BLOCK_FAIL_NEVER);
     armed = true;
     TagFSDataCostTake(&before);
     bool answered = StandRunWrite(port, file_id, data, STAND_RUN_BYTES, &answer, &running);
@@ -233,7 +218,7 @@ static TestResult StandRunMegabyte(bool port)
     TEST_ASSERT_OK(answer.rc, "the write is answered OK");
     TEST_ASSERT_EQ(answer.written, STAND_RUN_BYTES, "with every byte of it the file's");
     TEST_ASSERT_EQ(answer.size, STAND_RUN_BYTES, "and the size it was");
-    if (book && !StandRunLiesInOneRun(file_id, &first)) {
+    if (!StandRunLiesInOneRun(file_id, &first)) {
         verdict = test_steps_aside("the book laid the megabyte's fresh ground in more than one run, and a "
                                    "write across runs goes out a command a run");
         goto out;
@@ -254,92 +239,6 @@ out:
     if (running) {
         data    = NULL;   /* the job may still take its bytes from here: left to it */
         file_id = 0;      /* ... and it holds the file's Helm */
-    }
-    if (armed)
-        BlockFailDisarm();
-    if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
-    kfree(data);
-    kfree(back);
-    return verdict;
-}
-
-// ----------------------------------------------------------------------------
-// The k-th block of a run refused answers exactly the k-1 before it
-//
-// W-ERR, inside a run. When every block went out alone, a refused block's
-// write was a command of its own and the blocks before it had landed by their
-// own. Now they go out in one command with it, and a medium that names the
-// sector it failed at keeps what came before (BLOCKFAIL refuses the way one
-// does): the answer counts exactly the k-1 blocks of the run before the
-// refused one, their digests are recorded, and the refused block and every
-// one after it hold what they held. Format v1's: the run is written over where
-// it lies, so its k-th block is one the test names before the write; a book
-// lays the write on fresh ground — its analog below.
-// ----------------------------------------------------------------------------
-
-static TestResult StandRunRefusedInside(bool port)
-{
-    TestResult     verdict = TEST_PASS;
-    uint8_t        seat    = tagfs_get_seat();
-    uint64_t       file_id = 0;
-    uint64_t       first   = 0;
-    uint8_t       *data    = NULL;
-    uint8_t       *back    = NULL;
-    bool           armed   = false;
-    bool           running = false;
-    const uint32_t B       = TAGFS_BLOCK_SIZE;
-    const uint32_t N       = TagFSRunBlocks();
-    const uint32_t k       = N / 2 + 1;   /* the refused block's place in the run, from 1 */
-    const uint32_t kept    = (k - 1) * B;
-    StandRunAnswer answer;
-    const char    *aside   = StandRunAside(port);
-
-    if (aside)
-        return test_steps_aside(aside);
-    if (N < 2)
-        return test_steps_aside("the seat takes one block in a command: a run has no inside");
-
-    data = kmalloc(STAND_RUN_BYTES);
-    back = kmalloc(STAND_RUN_BYTES);
-    TEST_ASSERT(data && back, "room for the megabyte and for reading it back");
-    TestFillAt(data, STAND_RUN_BYTES, 0x4E1D0C00u + (port ? 1u : 0u), 0);
-    TEST_ASSERT(StandRunMake(&file_id), "a file of a megabyte is made by one span");
-    if (!StandRunLiesInOneRun(file_id, &first)) {
-        verdict = test_steps_aside("the volume gave the megabyte more than one run, so its "
-                                   "first run may end before the refused block");
-        goto out;
-    }
-
-    BlockFailArm(seat, BLOCK_FAIL_WRITE, tagfs_block_to_sector(first + k - 1),
-                 TAGFS_BLOCK_SECTORS, 1);
-    armed = true;
-    bool answered = StandRunWrite(port, file_id, data, STAND_RUN_BYTES, &answer, &running);
-    bool fired    = BlockFailFired();
-    uint32_t seen = BlockFailSeen();
-    BlockFailDisarm();
-    armed = false;
-
-    TEST_ASSERT(answered, "the write answers");
-    TEST_ASSERT_EQ(answer.through_port, port, "on the road it was put on, to its end");
-    TEST_ASSERT(fired, "the k-th block of the first run was the one refused");
-    TEST_ASSERT_EQ(seen, 1, "by the first command that met it: the run's own");
-    TEST_ASSERT(answer.rc != OK, "the write answers the refusal");
-    TestEvidence("blocks the refused run answered as landed", answer.written / B);
-    TEST_ASSERT_EQ(answer.written, kept, "exactly the k-1 blocks of the run before the refused one");
-    TEST_ASSERT_EQ(answer.size, STAND_RUN_BYTES, "and the size the file still is");
-
-    TEST_ASSERT_EQ(TestFileRead(file_id, back, STAND_RUN_BYTES), (int)STAND_RUN_BYTES,
-                   "the file reads back, every block checked against its own digest");
-    TEST_ASSERT_EQ(TestFirstDifference(back, data, kept), kept,
-                   "the blocks before the refused one hold the write");
-    TEST_ASSERT_EQ(StandRunFirstNonZero(back + kept, STAND_RUN_BYTES - kept),
-                   STAND_RUN_BYTES - kept,
-                   "and the refused block and every one after it the zeros they held");
-out:
-    if (running) {
-        data    = NULL;
-        file_id = 0;
     }
     if (armed)
         BlockFailDisarm();
@@ -451,32 +350,15 @@ static TestResult TestStandRunMegabyteThroughThePort(void)
     return StandRunMegabyte(true);
 }
 
-static TestResult TestStandRunRefusedInsideARun(void)
-{
-    return StandRunRefusedInside(false);
-}
-
-static TestResult TestStandRunRefusedInsideARunThroughThePort(void)
-{
-    return StandRunRefusedInside(true);
-}
-
 static const TestCase g_stand_run_tests[] = {
     { .name  = "stand_run_megabyte_in_seat_runs", .func = TestStandRunMegabyteInSeatRuns,
       .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_run_megabyte_through_the_port",
       .func  = TestStandRunMegabyteThroughThePort, .reach = TEST_WRITES_TO_VOLUME },
-    { .name  = "stand_run_refused_inside_a_run", .func = TestStandRunRefusedInsideARun,
-      .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V1, .analog = "stand_run_refused_inside_fresh" },
-    { .name  = "stand_run_refused_inside_a_run_through_the_port",
-      .func  = TestStandRunRefusedInsideARunThroughThePort, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V1, .analog = "stand_run_refused_inside_fresh_through_the_port" },
     { .name  = "stand_run_refused_inside_fresh", .func = TestStandRunRefusedFresh,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name  = "stand_run_refused_inside_fresh_through_the_port",
-      .func  = TestStandRunRefusedFreshThroughThePort, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V2 },
+      .func  = TestStandRunRefusedFreshThroughThePort, .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_run_suite = {

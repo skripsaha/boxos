@@ -473,7 +473,7 @@ static error_t ConjugateAsked(InkWarrant warrant, const ConjugateAsk* ask, Conju
     else if (!tagfs_enter())
         a.rc = ERR_DEVICE_NOT_READY;
     else {
-        a.rc = tagfs_get_state()->format == DEED_FORMAT_V2 ? InkVolumeBegins() : ERR_UNSUPPORTED;
+        a.rc = InkVolumeBegins();
         if (a.rc == OK)
             why = ConjugateOpened(&a, out);
         tagfs_leave();

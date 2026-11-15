@@ -358,57 +358,34 @@ void DeedDescribe(uint8_t seat, const DeedCopy *copy)
     }
 }
 
-DeedFormat DeedFormatOf(const DeedCopy *copy)
-{
-    bool layout = DeedStamp(copy, VOLUME_STAMP_LAYOUT, NULL) != NULL;
-    bool frame  = DeedStamp(copy, VOLUME_STAMP_FRAME, NULL) != NULL;
-
-    if (layout && frame) return DEED_FORMAT_BOTH;
-    if (frame)           return DEED_FORMAT_V2;
-    if (layout)          return DEED_FORMAT_V1;
-    return DEED_FORMAT_NONE;
-}
-
 /*
  * ‼ SAID IN THE MOUNT'S VOICE, [TagFS], because it is the mount's refusal: the
  * Deed itself is whole — it passed its checksum to get here — and what is
  * refused is what this kernel can make of it.
  *
  * A FRAME that holds is a book this kernel reads (mount/book_mount.h): what
- * of it the kernel may not write is the book's to say, not the Deed's.
+ * of it the kernel may not write is the book's to say, not the Deed's. A Deed
+ * that bears no FRAME says nothing of where a book is, so its volume is not
+ * one this kernel stands on.
  */
-error_t DeedFormatRefused(uint8_t seat, const DeedCopy *copy, DeedFormat format)
+error_t DeedRefused(uint8_t seat, const DeedCopy *copy)
 {
     uint16_t bytes = 0;
 
-    if (format == DEED_FORMAT_BOTH) {
-        kprintf("[TagFS] the deed on seat %u claims both formats — it carries a "
-                "LAYOUT and a FRAME, and a volume's book is written in one\n", seat);
-        return ERR_TAGFS_CORRUPTED;
-    }
-
-    /* A LAYOUT shorter than this kernel's says less than it reads, which is a
-     * Deed that does not say where everything is — the same line as none. */
-    if (format == DEED_FORMAT_V1)
-        (void)DeedStamp(copy, VOLUME_STAMP_LAYOUT, &bytes);
-    if (format == DEED_FORMAT_NONE ||
-        (format == DEED_FORMAT_V1 && bytes < sizeof(VolumeLayout))) {
+    if (!DeedStamp(copy, VOLUME_STAMP_FRAME, NULL)) {
         kprintf("[TagFS] the deed on seat %u does not say where anything is — "
-                "it carries no layout this kernel understands\n", seat);
+                "it carries no FRAME, so its volume is no book this kernel reads\n", seat);
         return ERR_TAGFS_CORRUPTED;
     }
-    if (format == DEED_FORMAT_V1)
-        return OK;
 
-    /* The block a book is counted in is the one rule both formats share, and
-     * a Deed without GEOMETRY states none — the way the v1 mount judges it. */
+    /* The block a book is counted in, which a Deed without GEOMETRY does not
+     * state. */
     const VolumeGeometry *geo =
         (const VolumeGeometry *)DeedStamp(copy, VOLUME_STAMP_GEOMETRY, &bytes);
     uint32_t block_bytes = (geo && bytes >= sizeof(*geo)) ? geo->block_bytes : 0;
     if (block_bytes != VOLUME_BLOCK_BYTES) {
-        kprintf("[TagFS] the format-v2 volume on seat %u was laid out in %u-byte "
-                "blocks and this kernel speaks %u\n", seat, block_bytes,
-                VOLUME_BLOCK_BYTES);
+        kprintf("[TagFS] the volume on seat %u was laid out in %u-byte blocks and "
+                "this kernel speaks %u\n", seat, block_bytes, VOLUME_BLOCK_BYTES);
         return ERR_TAGFS_CORRUPTED;
     }
 

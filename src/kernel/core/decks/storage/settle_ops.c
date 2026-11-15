@@ -23,8 +23,8 @@
  * ‼ ROOM ON ITS WAY IS WAITED FOR, AND THE OPERATION ASKED AGAIN (RT-06/07,
  * RT-17). A create, a rename, a tag put on or taken off, a delete: each is a
  * change the volume refuses ERR_WOULD_BLOCK, nothing of it done, while it is
- * short of ground a Settle cycle gives back — a block for the registry to
- * grow by, a Spare for the pool's tail. The program waits behind its Chit for
+ * short of room a Settle cycle gives back — room on the ribbon for the
+ * change's stitch. The program waits behind its Chit for
  * the next cycle's end, and a service point then asks the very op again —
  * its params as they were asked, its crates the program's still — through the
  * deck's own handler (SettleOpForRoom). Its answer is the program's, or it

@@ -109,8 +109,6 @@ typedef enum {
     W_BLOCK_DONE,      /* ... and its answer */
     W_LOG_META,        /* what landed of the window made ready to be the file's */
     W_INK,             /* the window's record inked (TagFSInkPlot) */
-    W_SPARE,           /* a Spare for the pool's tail stamped through the port */
-    W_SPARE_DONE,
     W_DONE,
 } WriteJobState;
 
@@ -160,8 +158,6 @@ typedef struct WriteJob {
     error_t           stopped;           /* the refusal a write that stopped part way ends on */
     bool              medium_left;       /* never handed the Helm: the medium left (RT-13) */
     uint64_t          lost;              /* ... and the book given up took this many changes */
-    uint32_t          spare_block;       /* the Spare W_SPARE stamps, until the pool has it */
-    MetaPoolBlock    *spare_image;
 
     /* ---- the stretch in flight (PlotStretchAt) ---- */
     PlotStretch       st;

@@ -39,10 +39,6 @@ typedef struct {
      * the service again. */
     bool          noted;
     volatile bool vacated;    /* a Quitclaim gave the file up */
-    /* The extents the holder's unfinished Plot will ink, claimed as room in
-     * the file's record that no name or tag inked meanwhile may take (RT-19);
-     * 0 for none. Under the volume's state lock. */
-    uint32_t      claimed_runs;
 } FileHelm;
 
 struct TagFSFileHandle;

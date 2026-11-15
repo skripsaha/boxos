@@ -11,9 +11,7 @@
 #include "../../include/volume_deed.h"
 
 /* The volume's block and its sectors are the format's, owned by the Deed's
- * header; these are the names the kernel has always used for them. There is
- * no version number: what a volume's book is written in is said by which
- * stamp its Deed carries (LAYOUT for format v1, FRAME for v2). */
+ * header; these are the names the kernel has always used for them. */
 #define TAGFS_BLOCK_SIZE            VOLUME_BLOCK_BYTES
 #define TAGFS_SECTOR_SIZE           VOLUME_DEED_SECTOR_BYTES
 #define TAGFS_BLOCK_SECTORS         VOLUME_BLOCK_SECTORS
@@ -29,9 +27,7 @@
  * Logbook (core/touch/logbook.h) — the vocabulary of occurrences, which must
  * exist on a machine that never mounted a volume. Capping here is what makes
  * the split an invariant instead of a convention: the volume cannot issue an
- * id that collides with an occurrence even in principle. What a volume's own
- * book can carry may be less (TAGFS_V1_TAG_ID_MOST), and its registry issues
- * no id past that. */
+ * id that collides with an occurrence even in principle. */
 #define TAGFS_MAX_TAG_ID            0x7FFFFFFEu
 /* The one id past them: no tag's, never in the registry nor in a file's tags,
  * but the tag index's own set of the files that are deleted and kept
@@ -98,10 +94,5 @@
 // Registry constants
 #define TAGFS_REG_BUCKETS           512
 #define TAGFS_KEY_BUCKETS           128
-#define TAGFS_REGISTRY_DATA_SIZE    4080
-/* A registry record's head: u16 tag_id, u8 flags, u8 key_len, u16 value_len.
- * A record never crosses a block, so a tag is at most what one block holds. */
-#define TAGFS_REGISTRY_RECORD_HEAD  6
-#define TAGFS_FTABLE_PER_BLOCK      510
 
 #endif // TAGFS_CONSTANTS_H

@@ -462,18 +462,12 @@ out:
 }
 
 static const TestCase g_stand_dedup_tests[] = {
-    { .name = "stand_dedup_copy", .func = TestStandDedupCopy, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V2 },
-    { .name = "stand_dedup_old", .func = TestStandDedupOld, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V2 },
-    { .name = "stand_dedup_kept", .func = TestStandDedupKept, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V2 },
-    { .name = "stand_dedup_series", .func = TestStandDedupSeries, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V2 },
-    { .name = "stand_dedup_defrag", .func = TestStandDedupDefrag, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V2 },
-    { .name = "stand_dedup_frag", .func = TestStandDedupFrag, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V2 },
+    { .name = "stand_dedup_copy", .func = TestStandDedupCopy, .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_dedup_old", .func = TestStandDedupOld, .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_dedup_kept", .func = TestStandDedupKept, .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_dedup_series", .func = TestStandDedupSeries, .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_dedup_defrag", .func = TestStandDedupDefrag, .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_dedup_frag", .func = TestStandDedupFrag, .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_dedup_suite = {

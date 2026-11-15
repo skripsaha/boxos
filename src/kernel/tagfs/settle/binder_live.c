@@ -63,7 +63,7 @@ static uint64_t SettledFileFrom(uint64_t from)
         FileRecord* was = NULL;
         TagFSLockTake(&fs->lock);
         bool changed = DocketWasFrom(from, &jot, &was, NULL);
-        if (FileMapRows(fs->files, from, &fid, 1) != 1)
+        if (FileMapFiles(fs->files, from, &fid, 1) != 1)
             fid = UINT64_MAX;
         TagFSLockDrop(&fs->lock);
         bool born = changed && jot <= fid && !was;

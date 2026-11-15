@@ -38,9 +38,8 @@ uint32_t PlotStakeHolding(const Plot *p, uint64_t block);
  * goes back now, what a record named comes to rest once the Ink is laid. */
 error_t  PlotLetGo(Plot *p, uint64_t start, uint32_t count);
 
-/* Ground this call took given back to the allocator it came from — format
- * v2's derived map for a Plot of a book (`rec`), format v1's map else: 0, or
- * the allocator's refusal negated. */
+/* Ground this call took given back to the derived map it came from: 0, or the
+ * allocator's refusal negated. */
 int      PlotGiveBack(const Plot *p, uint64_t start, uint32_t count);
 
 /*
@@ -105,9 +104,6 @@ error_t  PlotWindowTail(Plot *p, uint64_t k, uint32_t tail);
 error_t  PlotSlipBegin(Plot *p, uint64_t at, uint64_t bytes, bool *chosen);
 error_t  PlotSlipWrite(Plot *p, uint64_t at, const PlotSource *src, uint64_t *out_done);
 uint64_t PlotSlipMost(const Plot *p);
-
-/* Whether the record the Plot would ink fits format v1. */
-bool     PlotRecordFits(const Plot *p);
 
 /* A buffer of up to *most blocks from the heap, halved while the heap will not
  * give it — *most says how many it holds: NULL only when not one block fits. */

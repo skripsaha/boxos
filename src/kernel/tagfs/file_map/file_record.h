@@ -7,8 +7,7 @@
 /*
  * FileRecord — what memory knows of one live file: a header (name, tags,
  * flags, size, times) and the file's runs, as the map of live files holds them
- * for every reader and every Ink (file_map.h), whatever format the volume's
- * book is written in.
+ * for every reader and every Ink (file_map.h).
  *
  * ‼ A CHANGE COPIES WHAT IT CHANGES, NOT THE FILE (spec_v2 §3.7, §2.9). The runs
  * used to be one flat array inside the record's one allocation, so renaming a
@@ -32,8 +31,7 @@
  * writer of a Tally, and the book never has to cut one.
  *
  * A record keeps the Strips exactly as its writer gave them — two Strips that
- * meet on the medium stay two: format v1's packer counts extents off them
- * (PackV1), and the record a v1 Ink packs must be the one it always packed.
+ * meet on the medium stay two.
  */
 
 /* A Parcel holds at most PARCEL_STRIPS_MOST Strips; a Parcel of a file of
@@ -80,10 +78,10 @@ typedef struct FileRecord {
     uint64_t           strip_count;  /* the Strips of its runs, in the file's order */
     uint64_t           blocks;       /* the file's blocks they cover */
     const Tract*       tract;        /* the runs; NULL for a record that names none */
-    /* Format v2 alone. `gen` is the seq of the stitch that last changed the
-     * file (spec_v2 §2.8) — a record of the ribbon applies only over the gen
-     * its base names — not the Ink number of RecordWhere.gen (§16.2 п.14);
-     * 0 on format v1. The one field of a header written after it is built:
+    /* `gen` is the seq of the stitch that last changed the file (spec_v2
+     * §2.8) — a record of the ribbon applies only over the gen its base names
+     * — not the Ink number of RecordWhere.gen (§16.2 п.14). The one field of
+     * a header written after it is built:
      * a record Ink makes on a book holds what it was made from — 0 for a
      * file born — until the stitch that carries it settles, and then that
      * stitch's seq — or its base's, when
@@ -214,18 +212,19 @@ bool        StripWalkParcel(StripWalk* w, const Strip** strips, uint32_t* count)
  * alone (ink/commonhold.h). */
 bool        StripWalkNextGround(StripWalk* w, Strip* out);
 
-/* Every Strip of the record, in order, in a new array the caller frees: the
- * flat runs format v1's packer and a v1 Plot work on. OK; ERR_NO_MEMORY for no
- * memory, or for a record of more Strips than a u32 counts — said. A record of
- * none gives NULL and 0. */
+#ifdef CONFIG_VOLUME_TESTS
+/* Every Strip of the record, in order, in a new array the caller frees — for
+ * the stand, which holds a record to the Strips it was built of. OK;
+ * ERR_NO_MEMORY for no memory, or for a record of more Strips than a u32
+ * counts — said. A record of none gives NULL and 0. */
 error_t     FileRecordFlatten(const FileRecord* rec, Strip** out, uint32_t* count);
+#endif
 
 /* `count` Strips of ground laid as the ground they name, in place, each DATA
  * whatever its kind: in order of their first block, those that meet joined
  * into one — how many are left.
  * Two lists of the same ground, in whatever order and cut, come out the same
- * (a join stops short of a u32 count of blocks, which no volume of format v1
- * reaches). */
+ * (a join stops short of a u32 count of blocks). */
 uint64_t    StripsAsGround(Strip* strips, uint64_t count);
 
 void        FileRecordRelease(FileRecord* rec);

@@ -144,7 +144,7 @@ static bool RibbonGroundBuilt(RibbonWalk* w)
     uint32_t    n;
     if (w->ground_built)
         return true;
-    while ((n = FileMapRows(fs->files, from, ids, 16)) > 0) {
+    while ((n = FileMapFiles(fs->files, from, ids, 16)) > 0) {
         for (uint32_t i = 0; i < n; i++) {
             FileRecord* rec  = FileMapRecordHold(fs->files, ids[i], NULL);
             bool        room = true;

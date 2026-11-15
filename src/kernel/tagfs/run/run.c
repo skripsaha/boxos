@@ -1,7 +1,6 @@
 #include "run.h"
 #include "boardroom.h"
 #include "../braid/braid.h"
-#include "../integrity/integrity.h"
 #include "../read/read.h"
 #include "../scribe/scribe.h"   /* VolumeWriteSeen — what a flush must cover now */
 #ifdef CONFIG_VOLUME_TESTS
@@ -29,7 +28,7 @@ uint32_t TagFSRunBlocks(void)
     return run ? run : 1u;
 }
 
-/* A Braid (TagFSState.braid, which a v1 mount never names) addresses a block
+/* A Braid (TagFSState.braid) addresses a block
  * at a time: a run through it is its blocks one by one, each off the volume's
  * own medium when the Braid would not give it. A refusal the medium's
  * departure explains is ERR_DEVICE_NOT_READY, as at a block's doors. */
@@ -84,10 +83,8 @@ error_t TagFSWriteRun(uint64_t first, uint32_t count, const void *buffer, uint32
         if (sectors)
             VolumeWriteSeen();
         landed = sectors / TAGFS_BLOCK_SECTORS;   /* a block cut part way is not one that landed */
-        for (uint32_t i = 0; i < landed; i++) {
+        for (uint32_t i = 0; i < landed; i++)
             ReadAheadForgetBlock(first + i);
-            IntegrityUpdate(first + i, in + (size_t)i * TAGFS_BLOCK_SIZE);
-        }
     }
     *out_landed = landed;
 #ifdef CONFIG_VOLUME_TESTS

@@ -97,8 +97,7 @@ out:
 }
 
 static const TestCase g_stand_commonhold_tests[] = {
-    { .name = "stand_commonhold_owners", .func = TestStandCommonholdOwners, .reach = TEST_WRITES_TO_VOLUME,
-      .format = DEED_FORMAT_V2 },
+    { .name = "stand_commonhold_owners", .func = TestStandCommonholdOwners, .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_commonhold_suite = {

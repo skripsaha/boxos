@@ -6,7 +6,6 @@
 #include "../read/read.h"
 #include "../ink/ink.h"
 #include "../ink/fallow.h"
-#include "../mount/mount.h"
 #include "../mount/ground_census.h"
 
 #ifdef CONFIG_VOLUME_TESTS
@@ -603,22 +602,24 @@ static TestResult TestParcelHoleOwnsNothing(void)
     TEST_ASSERT(!StripWalkNextGround(&walk, &run) && n == 3, "three of them, and no hole");
 
     TEST_ASSERT_OK(FallowNodeOfRecord(rec, FALLOW_BY_RECORD, &node), "a Fallow node of the record");
-    TEST_ASSERT_EQ(FallowNodeKeep(node, 302), 12, "holds 11 blocks: one more kept makes 12");
+    TEST_ASSERT_EQ(FallowNodeBlocks(node), 11, "holds the record's 11 blocks of ground");
     TEST_ASSERT_OK(FallowNodeOfRecord(holes, FALLOW_BY_RECORD, &none), "a record of a hole alone");
     TEST_ASSERT(none == NULL, "gives back no ground");
 
     fs->boot.kernel_blocks = 1;
-    fs->boot.kernel_block  = (uint32_t)(fs->block_base + 200u);
+    fs->boot.kernel_block  = 200u;
     TEST_ASSERT(!InkRecordTouchesBoot(rec), "the Deed at the hole's start finds no kernel in it");
     TEST_ASSERT(!InkTouchesBoot(&s_parcel_holed[1], 1), "nor in the hole laid flat, as a Plot's runs are");
-    fs->boot.kernel_block  = (uint32_t)(fs->block_base + 107u);
+    fs->boot.kernel_block  = 107u;
     TEST_ASSERT(InkRecordTouchesBoot(rec), "at a block of its ground, the kernel");
     TEST_ASSERT(InkTouchesBoot(&s_parcel_holed[2], 1), "and in that ground laid flat");
     fs->boot = boot;
 
     GroundCensusBegin();
     census = true;
-    MountClaimRuns(rec, 9);
+    StripWalkBegin(rec, &walk);
+    while (StripWalkNextGround(&walk, &run))
+        GroundClaim(GROUND_FILE, run.start, run.count, 9);
     for (uint64_t b = 100; b < 109; b++)
         TEST_ASSERT_EQ(GroundClaimOf(b), GROUND_FILE, "the census claims the ground as the file's");
     TEST_ASSERT_EQ(GroundClaimOf(301), GROUND_FILE, "all of it");

@@ -314,7 +314,7 @@ static TestResult TestStandBookRoomStakesCounted(void)
     staked = TallyCostBlocks();
     TEST_ASSERT_OK(PlotWriteBlocks(&plot, at, &src, &done), "its blocks land");
     TEST_ASSERT_OK(PlotEndWrite(&plot, at, done), "the write is made ready to be the file's");
-    TEST_ASSERT_OK(TagFSInkPlot(&plot, INK_MAKES_SPARES, &inked), "and inked");
+    TEST_ASSERT_OK(TagFSInkPlot(&plot, &inked), "and inked");
     after = TallyCostBlocks();
     TestEvidence("blocks of the next Tally measured while the write's ground was staked", staked);
     TestEvidence("... and once it was inked", after);
@@ -937,31 +937,31 @@ out:
 
 static const TestCase g_stand_book_room_tests[] = {
     { .name = "stand_book_room_next_quire_clear", .func = TestStandBookRoomNextQuireClear,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_book_room_gather_one_run", .func = TestStandBookRoomGatherOneRun,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_book_room_defrag_gives_the_core_back", .func = TestStandBookRoomDefragGivesTheCoreBack,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_book_room_kept_file_not_gathered", .func = TestStandBookRoomKeptFileNotGathered,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_book_room_stakes_counted", .func = TestStandBookRoomStakesCounted,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_book_room_own_whole", .func = TestStandBookRoomOwnWhole,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_book_room_tally_gives_room", .func = TestStandBookRoomTallyGivesRoom,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_book_room_rest_under_tally", .func = TestStandBookRoomRestUnderTally,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_book_room_wait_bounded", .func = TestStandBookRoomWaitBounded,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_book_room_bar_waits_tally", .func = TestStandBookRoomBarWaitsTally,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_book_room_ribbon_waits_under_way", .func = TestStandBookRoomRibbonWaitsUnderWay,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_book_room_ribbon_waits_grown", .func = TestStandBookRoomRibbonWaitsGrown,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_book_room_bar_past_unsure", .func = TestStandBookRoomBarPastUnsure,
-      .reach = TEST_READS_ONLY, .format = DEED_FORMAT_V2 },
+      .reach = TEST_READS_ONLY },
 };
 
 const TestSuite g_stand_book_room_suite = {

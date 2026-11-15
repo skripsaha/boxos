@@ -4,9 +4,6 @@
 #include "cpu_calibrate.h"
 #include "../run/run.h"
 #include "../file_map/tail_slip.h"
-#include "../ink/fallow.h"                 /* FallowBlocks — ground a cycle gives back */
-#include "../glean/glean.h"                /* GleanMayFree — ground the pool's slack gives back */
-#include "../metadata_pool/meta_pool.h"
 #include "../mount/away.h"                 /* AwayDepartures — what a book's write is held to at its Ink */
 
 /*
@@ -154,113 +151,14 @@ error_t PlotWriteBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *o
     return rc;
 }
 
-/* [k, end) of the file's blocks written from `buf`, a run a command: at most
- * `most` blocks each, block k's own bytes staged in buf's first block by the
- * caller and every other block of buf zeros. */
-static error_t PlotLayZeros(Plot *p, uint64_t k, uint64_t end, uint8_t *buf, uint32_t most,
-                            uint32_t kept)
-{
-    while (k < end) {
-        uint64_t block = 0;
-        uint32_t after = 0;
-        if (!PlotFind(p->runs, p->run_count, k, &block, &after))
-            return ERR_TAGFS_EXTENT_ERROR;
-        uint64_t n = end - k;
-        if (n > (uint64_t)after + 1)
-            n = (uint64_t)after + 1;
-        if (n > most)
-            n = most;
-
-        uint32_t landed = 0;
-        error_t  rc     = TagFSWriteRun(block, (uint32_t)n, buf, &landed);
-        if (rc != OK) {
-            kprintf("[TagFS] file %llu: blocks %llu..%llu would not take their zeros (error %u), "
-                    "so the file is not grown\n", p->fid, (unsigned long long)block,
-                    (unsigned long long)(block + n - 1), (unsigned)rc);
-            return rc;
-        }
-        memset(buf, 0, kept);   /* the old last block's bytes went out with the first run */
-        kept = 0;
-        k   += n;
-    }
-    return OK;
-}
-
 error_t PlotExtendZero(Plot *p, uint64_t size)
 {
     if (size <= p->size)
         return OK;
-    if (p->book)
-        return PlotWindowGrow(p, size);
-
-    uint64_t from = p->size;
-    error_t  rc   = PlotReserve(p, size);
-    if (rc != OK)
-        return rc;
-
-    uint32_t most = TagFSRunBlocks();
-    uint8_t *buf  = PlotRunBuffer(&most);
-    if (!buf)
-        return ERR_NO_MEMORY;
-    memset(buf, 0, (size_t)most * TAGFS_BLOCK_SIZE);
-
-    uint64_t k    = from / TAGFS_BLOCK_SIZE;
-    uint64_t end  = (size + TAGFS_BLOCK_SIZE - 1) / TAGFS_BLOCK_SIZE;
-    uint32_t tail = (uint32_t)(from % TAGFS_BLOCK_SIZE);
-
-    /* The old last block keeps the file's bytes up to the old size and has,
-     * past it, whatever the block held before — a cut tail, a previous owner.
-     * It is read, zeroed from the old size on, and goes out with the zeros
-     * after it. */
-    if (tail) {
-        uint64_t block = 0;
-        if (!PlotFind(p->runs, p->run_count, k, &block, NULL)) {
-            rc = ERR_TAGFS_EXTENT_ERROR;
-            goto out;
-        }
-        rc = tagfs_read_block(block, buf);
-        if (rc != OK) {
-            kprintf("[TagFS] file %llu: its last block %llu answered %u to its read, so it is not "
-                    "grown past its %llu bytes\n", p->fid, (unsigned long long)block,
-                    (unsigned)rc, (unsigned long long)from);
-            goto out;
-        }
-        memset(buf + tail, 0, TAGFS_BLOCK_SIZE - tail);
-    }
-
-    rc = PlotLayZeros(p, k, end, buf, most, tail);
-    if (rc == OK) {
-        p->size      = size;
-        p->data_need = VolumeFlushNeed();
-    }
-out:
-    kfree(buf);
-    return rc;
+    return PlotWindowGrow(p, size);
 }
 
 error_t PlotRoomFor(const Plot *p, uint64_t end)
 {
-    if (p->book)
-        return PlotWindowRoomFor(p, end);
-    uint64_t need = end / TAGFS_BLOCK_SIZE + (end % TAGFS_BLOCK_SIZE != 0);
-    if (need <= p->blocks)
-        return OK;
-    need -= p->blocks;
-
-    TagFSState *fs = tagfs_get_state();
-    TagFSLockTake(&fs->lock);
-    uint64_t free    = fs->ledger.free_blocks;
-    uint64_t resting = FallowBlocks();
-    uint64_t slack   = GleanMayFree() ? PoolChainBlocks() - PoolLiveBlocks() - 1u : 0;
-    TagFSLockDrop(&fs->lock);
-
-    if (need <= free + resting + slack)
-        return OK;
-    kprintf("[TagFS] file %llu: growing it to %llu bytes needs %llu more block(s), and the volume "
-            "could give it %llu at most — %llu free, %llu resting in Fallow, %llu in the pool's "
-            "slack — refused, the file %llu bytes long\n", p->fid, (unsigned long long)end,
-            (unsigned long long)need, (unsigned long long)(free + resting + slack),
-            (unsigned long long)free, (unsigned long long)resting, (unsigned long long)slack,
-            (unsigned long long)p->size);
-    return ERR_TAGFS_NO_SPACE;
+    return PlotWindowRoomFor(p, end);
 }

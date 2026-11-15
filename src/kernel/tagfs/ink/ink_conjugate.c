@@ -115,7 +115,7 @@ static error_t InkConjugateLocked(const InkConjugation* c, InkConjugateWork* w, 
     uint64_t     gen   = InkGenNextLocked();
     RecordWhere  where = { .gen = gen, .shape = gen }, gone;
     FileMapStake none  = { .count = 0 };
-    (void)FileMapRecordPut(fs->files, c->fid, w->rec, &where, 0, &none, &gone);
+    (void)FileMapRecordPut(fs->files, c->fid, w->rec, &where, &none, &gone);
     w->rec = NULL;
     j->was = still;
     j->now = FileMapRecordHold(fs->files, c->fid, NULL);

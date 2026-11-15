@@ -115,31 +115,14 @@ const void *DeedStamp(const DeedCopy *copy, uint16_t kind, uint16_t *out_bytes);
 void DeedDescribe(uint8_t seat, const DeedCopy *copy);
 
 /*
- * ‼ WHICH FORMAT A VOLUME'S BOOK IS WRITTEN IN — said by the stamp its Deed
- * carries, because there is no version number to read and never will be: a
- * format is a new stamp (volume_deed.h). LAYOUT is format v1, FRAME format v2.
- * A Deed with both claims two formats at once; one with neither says where
- * nothing is. Asked before anything else of the volume is read or written.
+ * The mount's answer to a Deed, said out loud, asked before anything else of
+ * the volume is read or written: OK for a Deed whose FRAME holds (a FRAME
+ * longer than this kernel's, or a ring of other than three slots, a line);
+ * ERR_TAGFS_CORRUPTED for a Deed that bears no FRAME — whatever its volume is,
+ * it is not a book — a FRAME that does not hold, or a block this kernel does
+ * not speak.
  */
-typedef enum {
-    DEED_FORMAT_NONE = 0,       /* neither stamp */
-    DEED_FORMAT_V1,             /* LAYOUT */
-    DEED_FORMAT_V2,             /* FRAME */
-    DEED_FORMAT_BOTH            /* LAYOUT and FRAME */
-} DeedFormat;
-
-DeedFormat DeedFormatOf(const DeedCopy *copy);
-
-/*
- * The mount's answer to a Deed of `format`, said out loud: OK for format v1
- * whose LAYOUT this kernel reads whole, and for format v2 whose FRAME holds
- * (a FRAME longer than this kernel's, or a ring of other than three slots,
- * a line); for anything else the refusal, before the volume is touched —
- * ERR_TAGFS_CORRUPTED for a FRAME that does not hold or a block this kernel
- * does not speak, a Deed claiming both formats, or one that says where
- * nothing is.
- */
-error_t DeedFormatRefused(uint8_t seat, const DeedCopy *copy, DeedFormat format);
+error_t DeedRefused(uint8_t seat, const DeedCopy *copy);
 
 /*
  * Walk every seated medium, survey its ground, and read whatever Deeds are on

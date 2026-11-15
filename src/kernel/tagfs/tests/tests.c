@@ -1,7 +1,6 @@
 #include "tests.h"
 #include "../tagfs.h"
 #include "../plot/plot.h"
-#include "../metadata_pool/meta_pool.h"
 #include "../ink/fallow.h"
 #include "../settle/settle.h"
 #include "../settle/binder.h"
@@ -180,53 +179,21 @@ int TestFileRead(uint64_t file_id, void* buffer, uint32_t capacity)
 // found it or it fails — by the runner's count, not by its own word. Taken
 // before and after every such test:
 //
-//   files      the Ledger's file count;
+//   files      the volume's file count;
 //   held       blocks in use that are not the volume's own bookkeeping.
 //
 // Not the free count on its own, because the free count is not the test's
-// alone to move. The metadata pool takes Spares and closes its tail onto them
-// (metadata_pool/), and the file table and the registry chain theirs at a
-// Settle cycle — all of it for good, and none of it residue — and what a file
-// gave up rests in Fallow until the cycles after its record gave it back
-// (ink/fallow.h). So the registry's and the table's chains are walked on the
-// medium, the way the mount's roll call walks them; the pool's chain and its
-// Spares are counted in memory, which holds the pool's newest links before any
-// cycle wrote them; and they, the ground at rest, the integrity map and the
-// snapshot manifest an earlier kernel may have laid down are taken out of the
-// count. No test can take a snapshot (a format-v1 volume refuses one), so what
-// is left is what files hold, and a test that leaves a block behind, or hands
-// back one that was never its own, moves it.
+// alone to move. The book lays its Tallies and its ribbon on ground of its
+// own, and what a file gave up rests in Fallow until the cycles after its
+// record gave it back (ink/fallow.h) — all of it the book's, and none of it
+// residue. So the book's own ground and the ground at rest are taken out of
+// the count, and what is left is what files hold: a test that leaves a block
+// behind, or hands back one that was never its own, moves it.
 //
 // Not the tag count: a tag is interned for good (every created file interns
 // the stem of its name), so the tests keep to names they have always used and
 // the guard does not count tags.
 // ============================================================================
-
-static uint8_t  g_chain_block[TAGFS_BLOCK_SIZE];
-
-/* Blocks on one metadata chain, walked on the medium from its head (a volume
- * block, as the Deed names it) by the magic every link carries. */
-static uint32_t VolumeChainLength(uint32_t head_volume_block, uint32_t magic)
-{
-    TagFSState* fs = tagfs_get_state();
-    uint32_t block = head_volume_block - fs->layout.data_block;
-    uint32_t links = 0;
-
-    while (links < fs->layout.data_blocks) {
-        if (TagFSMetaBlockRead(block, g_chain_block) != OK)
-            break;
-        uint32_t says_magic, next;
-        memcpy(&says_magic, g_chain_block, sizeof(says_magic));
-        memcpy(&next, g_chain_block + sizeof(says_magic), sizeof(next));
-        if (says_magic != magic)
-            break;
-        links++;
-        if (next == 0)
-            break;
-        block = next;
-    }
-    return links;
-}
 
 #ifdef CONFIG_VOLUME_TESTS
 /* The Quires of the grid of `q` blocks that [start, start + count) meets,
@@ -321,59 +288,38 @@ bool VolumeTallyTake(VolumeTally* tally)
     if (!fs || !fs->initialized)
         return false;
 
-    /* A book keeps no chain, pool or integrity map: what is in use of its
-     * volume and not its own ground — its Tallies', its ribbon's, and Fallow's,
-     * which gives back at a lag — is its files' blocks, and any a write took
-     * and named nowhere. The front, the Spine's slots, the far Deed and the
-     * ground held for rotten ranges are the same before and after a test, and
-     * fall out of the difference the count is read by. Across a cycle that
-     * settles a Tally may be cut, and the nodes it laid in its pair of
-     * Tally-Quires are the book's, kept for the next Tally to go on in
-     * (binder.c TallyEnded), and named by no slot — so the runner reads
-     * `held` across a test only when no cycle settled within it (`cycles`,
-     * VolumeResidueSaid). The book's ground is the stand's to name, Quires
-     * whole as its census holds them (BookOwnBlocks): a build without
+    /* What is in use of the volume and not its own ground — its Tallies',
+     * its ribbon's, and Fallow's, which gives back at a lag — is its files'
+     * blocks, and any a write took and named nowhere. The front, the Spine's
+     * slots, the far Deed and the ground held for rotten ranges are the same
+     * before and after a test, and fall out of the difference the count is
+     * read by. Across a cycle that settles a Tally may be cut, and the nodes
+     * it laid in its pair of Tally-Quires are the book's, kept for the next
+     * Tally to go on in (binder.c TallyEnded), and named by no slot — so the
+     * runner reads `held` across a test only when no cycle settled within it
+     * (`cycles`, VolumeResidueSaid). The book's ground is the stand's to name,
+     * Quires whole as its census holds them (BookOwnBlocks): a build without
      * VOLUME_TESTS counts its files. */
-    if (fs->format == DEED_FORMAT_V2) {
-        uint64_t own = 0;
+    uint64_t own = 0;
 #ifdef CONFIG_VOLUME_TESTS
-        if (!BookOwnBlocks(&own))
-            return false;
+    if (!BookOwnBlocks(&own))
+        return false;
 #endif
-        TagFSLockTake(&fs->lock);
-        uint64_t used = fs->block_end - fs->ledger.free_blocks;
-        uint64_t rest = FallowBlocks();
-        tally->files  = fs->ledger.total_files;
-        TagFSLockDrop(&fs->lock);
-        tally->held   = used - own - rest;
-        tally->cycles = SettledCycles();
-        return true;
-    }
-
-    uint64_t chains =
-        VolumeChainLength(fs->layout.tag_registry_block,  TAGFS_REGISTRY_MAGIC) +
-        VolumeChainLength(fs->layout.file_table_block,    TAGFS_FILETBL_MAGIC);
-
     TagFSLockTake(&fs->lock);
-    uint64_t used = fs->layout.data_blocks - fs->ledger.free_blocks;
-    uint64_t own  = chains + PoolBlocksHeld() + FallowBlocks() + UseMemoryBlocksHeld() +
-                    fs->ledger.integrity_map_blocks + IntegrityLayBlocks() +
-                    (fs->ledger.cow_manifest_block != 0);
-    tally->files = fs->ledger.total_files;
+    uint64_t used = fs->block_end - fs->free_blocks;
+    uint64_t rest = FallowBlocks();
+    tally->files  = fs->total_files;
     TagFSLockDrop(&fs->lock);
-
-    tally->held   = used - own;
+    tally->held   = used - own - rest;
     tally->cycles = SettledCycles();
     return true;
 }
 
-/* Whether `held` tells across a test: always on format v1; on a book only in a
- * VOLUME_TESTS build, which names its own ground, and when no cycle settled
- * within the test (VolumeTally). */
+/* Whether `held` tells across a test: only in a VOLUME_TESTS build, which
+ * names the book's own ground, and when no cycle settled within the test
+ * (VolumeTally). */
 static bool VolumeHeldRead(const VolumeTally* before, const VolumeTally* after)
 {
-    if (tagfs_get_state()->format != DEED_FORMAT_V2)
-        return true;
 #ifdef CONFIG_VOLUME_TESTS
     return after->cycles == before->cycles;
 #else
@@ -404,7 +350,7 @@ static bool VolumeResidueSaid(const char* name, const VolumeTally* before)
     }
     if (after.held != before->held && VolumeHeldRead(before, &after)) {
         kprintf("[TESTS] %s failed: it left residue — %llu block(s) in use "
-                "outside the volume's own chains before it and %llu after\n",
+                "outside the volume's own ground before it and %llu after\n",
                 name, (unsigned long long)before->held,
                 (unsigned long long)after.held);
         residue = true;
@@ -531,16 +477,14 @@ static void TestSayWritePath(void)
                                         : "the synchronous path too",
             (unsigned)g_amp.total_cores);
 #ifdef CONFIG_VOLUME_TESTS
-    if (tagfs_get_state()->format == DEED_FORMAT_V2)
-        kprintf("[TESTS] on a book each test that writes is held to the files it leaves, and — when no cycle "
-                "settled within it — to the blocks in use outside the book's own ground: a block a write took and "
-                "named nowhere is free again at the next mount, which derives the map from the book, and only a "
-                "count in this session finds it\n");
+    kprintf("[TESTS] on a book each test that writes is held to the files it leaves, and — when no cycle "
+            "settled within it — to the blocks in use outside the book's own ground: a block a write took and "
+            "named nowhere is free again at the next mount, which derives the map from the book, and only a "
+            "count in this session finds it\n");
 #else
-    if (tagfs_get_state()->format == DEED_FORMAT_V2)
-        kprintf("[TESTS] on a book each test that writes is held to the files it leaves alone: a build without "
-                "VOLUME_TESTS does not name the book's own ground, and the blocks a test leaves in use are "
-                "counted by the stand's build\n");
+    kprintf("[TESTS] on a book each test that writes is held to the files it leaves alone: a build without "
+            "VOLUME_TESTS does not name the book's own ground, and the blocks a test leaves in use are "
+            "counted by the stand's build\n");
 #endif
 }
 
@@ -637,7 +581,7 @@ static bool TestLeftContextAside(const TestCase* test)
  */
 static void TestTallyOwedLaid(const TestCase* test)
 {
-    if (tagfs_get_state()->format != DEED_FORMAT_V2 || !BinderEngrossOwed())
+    if (!BinderEngrossOwed())
         return;
     error_t rc = BinderRunWhole();
     if (rc != OK)
@@ -708,11 +652,9 @@ error_t TagFS_RunAllTests(TestStats* stats)
         return ERR_NOT_INITIALIZED;
 
     memset(stats, 0, sizeof(*stats));
-    uint32_t   skipped_writers = 0;
-    uint32_t   aside_format    = 0;
-    bool       path_said       = false;
-    DeedFormat volume          = tagfs_get_state()->format;
-    uint32_t   registered      = 0;
+    uint32_t skipped_writers = 0;
+    bool     path_said       = false;
+    uint32_t registered      = 0;
 
     for (uint32_t s = 0; s < ARRAY_SIZE(g_suites); s++)
         registered += g_suites[s]->count;
@@ -733,13 +675,6 @@ error_t TagFS_RunAllTests(TestStats* stats)
         for (uint32_t i = 0; i < suite->count; i++) {
             const TestCase* test = &suite->tests[i];
             stats->total_tests++;
-
-            /* A test written for the other format stands aside — counted. */
-            if (test->format != DEED_FORMAT_NONE && test->format != volume) {
-                aside_format++;
-                stats->total_skipped++;
-                continue;
-            }
 
             /*
              * A test that writes goes nowhere near a volume somebody is using.
@@ -771,20 +706,11 @@ error_t TagFS_RunAllTests(TestStats* stats)
 
     /* Said with kprintf: "37 run, 35 passed" tells nobody which 37, and a
      * suite that quietly shrank is how a test stops covering anything. */
-    if (aside_format > 0)
-        kprintf("[TESTS] %u test(s) stood aside: this volume is format %s — %s\n", aside_format,
-                volume == DEED_FORMAT_V2 ? "v2" : "v1",
-                volume == DEED_FORMAT_V2 ? "they are written for format v1's records"
-                                         : "they are written for a format-v2 book");
     if (skipped_writers > 0) {
         kprintf("[TESTS] %u test(s) that write to the volume were not run — "
                 "this volume belongs to whoever is using this machine (build "
                 "with VOLUME_TESTS=on to run them)\n", skipped_writers);
     }
-#ifdef CONFIG_VOLUME_TESTS
-    if (path_said)
-        StandSayChainsLeft();
-#endif
 
     return stats->total_failed == 0 ? OK : ERR_INTERNAL;
 }

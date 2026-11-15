@@ -398,15 +398,6 @@ uint64_t HelmOwed(void)
     return __atomic_load_n(&s_helm_owed, __ATOMIC_ACQUIRE);
 }
 
-uint32_t HelmClaimedRuns(uint64_t file_id)
-{
-    TagFSLockTake(&g_open_table_lock);
-    OpenFileEntry *e       = ofe_find(file_id);
-    uint32_t       claimed = e ? e->helm.claimed_runs : 0;
-    TagFSLockDrop(&g_open_table_lock);
-    return claimed;
-}
-
 // ----------------------------------------------------------------------------
 // Waiters whose work is run at a service point
 // ----------------------------------------------------------------------------

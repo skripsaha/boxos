@@ -292,7 +292,7 @@ static TestResult TestStandFreshRefusedNamesNothing(void)
     TEST_ASSERT_EQ(tagfs_create_file("fresh-c1.bin", NULL, 0, &fid), 0, "a file is made on the book");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, TAGFS_BLOCK_SIZE, 21), TAGFS_BLOCK_SIZE, "a block is written");
     TEST_ASSERT(StandFreshSettledAndBack(&m, fid), "and settled");
-    free    = fs->ledger.free_blocks;
+    free    = fs->free_blocks;
     resting = FallowBlocks();
     BlockFailArm(s.seat, BLOCK_FAIL_WRITE, 0, 0, 1);
     TagFSFileHandle* h = tagfs_open(fid, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
@@ -303,10 +303,10 @@ static TestResult TestStandFreshRefusedNamesNothing(void)
     tagfs_close(h);
     TEST_ASSERT(BlockFailDisarm() && BlockFailFired(), "the medium refused the write's first command");
     TEST_ASSERT(wrote < 0, "and the write is refused");
-    TEST_ASSERT(fs->ledger.free_blocks == free && FallowBlocks() == resting,
+    TEST_ASSERT(fs->free_blocks == free && FallowBlocks() == resting,
                 "every block it took went back, and nothing rests: no record named them");
     TEST_ASSERT(StandFreshSettledAndBack(&m, fid), "settled and mounted again, the file is as it was");
-    TEST_ASSERT_EQ(fs->ledger.free_blocks, free, "and the volume's free ground the same");
+    TEST_ASSERT_EQ(fs->free_blocks, free, "and the volume's free ground the same");
 out:
     BlockFailDisarm();
     StandFreshModelLetGo(&m);
@@ -490,19 +490,19 @@ out:
 
 static const TestCase g_stand_fresh_tests[] = {
     { .name = "stand_fresh_each_change", .func = TestStandFreshEachChange,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_fresh_whole_not_landed", .func = TestStandFreshWholeNotLanded,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_fresh_part_not_landed", .func = TestStandFreshPartNotLanded,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_fresh_refused_names_nothing", .func = TestStandFreshRefusedNamesNothing,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_fresh_flushes_first", .func = TestStandFreshFlushesFirst,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_fresh_digest_held", .func = TestStandFreshDigestHeld,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_fresh_writes_intern_nothing", .func = TestStandFreshWritesInternNothing,
-      .reach = TEST_WRITES_TO_VOLUME, .format = DEED_FORMAT_V2 },
+      .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_stand_fresh_suite = {

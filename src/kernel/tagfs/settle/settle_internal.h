@@ -8,7 +8,7 @@
  * (settle_wait.c) say to each other, and to nobody else.
  */
 
-/* Why a cycle runs: its reason, for the cycle of either format. */
+/* Why a cycle runs: its reason. */
 typedef enum {
     SETTLE_FOR_WAITER = 1,   /* a kernel path asks and waits for what it settles */
     SETTLE_FOR_ROOM,         /* the volume is short while Fallow rests blocks */
@@ -63,25 +63,23 @@ error_t  SettleStandRefusalHere(error_t rc);
 
 /* settle.c: the volume's seat rings seat:ready here, once, when the stand
  * chose this turn of the cycle (TagFSStandSettleRings): just before the cycle
- * takes the count its refusal is judged by, or right after its S0 — a book's
- * TAKE. */
+ * takes the count its refusal is judged by, or right after its TAKE. */
 void     SettleStandRingsHere(bool before_its_count);
 #endif
 
-/* settle.c: a cycle of either format settled — every Ink up to `target`, as
- * the `cycle`-th of this mount, the volume sealed clean or not — under the
- * state lock, at the cycle's S6. */
+/* settle.c: a cycle settled — every Ink up to `target`, as the `cycle`-th of
+ * this mount, the volume sealed clean or not — under the state lock, at the
+ * cycle's DONE. */
 void     SettleSettledLocked(uint64_t target, uint64_t cycle, bool clean);
 
-/* settle.c: the blocks a settled cycle's S6 gave back from Fallow, under the
+/* settle.c: the blocks a settled cycle's DONE gave back from Fallow, under the
  * state lock — what an asker for room judges a cycle by (SettleForRoom). */
 void     SettleGivenLocked(uint64_t given);
 
 /* settle.c: a cycle asked for and waited through — this call's own, or one
- * another core was making — for `why`; its answer (settle_halt.c). The ground
- * the last settled cycle's S6 gave back, and a mount's first word for the halt. */
+ * another core was making — for `why`; its answer (settle_halt.c). And a
+ * mount's first word for the halt. */
 error_t  SettleAskedFor(SettleWhy why);
-uint64_t SettleGivenLast(void);
 void     SettleHaltMountReset(void);
 
 #endif /* TAGFS_SETTLE_INTERNAL_H */

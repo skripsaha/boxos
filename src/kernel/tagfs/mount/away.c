@@ -2,7 +2,6 @@
 #include "book_mount.h"
 #include "perambulation.h"
 #include "errata.h"
-#include "../ledger/ledger.h"
 #include "../scribe/scribe.h"
 #include "../settle/settle.h"
 #include "../helm/helm.h"
@@ -11,12 +10,9 @@
 
 /*
  * The open book (away.h). Everything here runs where the medium is attended
- * to — one core at a time — or where the machine stops; the seqs the judge
- * found are kept for the line its verdict says.
+ * to — one core at a time — or where the machine stops.
  */
 
-static uint64_t s_found_seq;    /* the newest Ledger the returned medium holds */
-static uint64_t s_left_seq;     /* the one a cycle this kernel settled on it */
 static volatile uint64_t s_departures;  /* the medium left, this boot: AwayLeft counts it */
 
 /*
@@ -28,15 +24,13 @@ static volatile uint64_t s_departures;  /* the medium left, this boot: AwayLeft 
  * while the next mount reads its numbers off the medium alone, which never
  * saw those ids. Given out again, one program's id named another's file. So
  * the ids memory had reached are remembered by the volume's UUID, and its
- * mounts give out nothing below them (AwayNumbersKnown); and a volume found
- * holding less than a settled cycle is remembered the same way, every one of
- * them, not only the last.
+ * mounts give out nothing below them (AwayNumbersKnown), every volume's, not
+ * only the last.
  */
 typedef struct {
     uint8_t  uuid[16];
     uint64_t next_file_id;
     uint32_t next_tag_id;
-    bool     lied;
 } AwayKnown;
 
 /* The entries, under their own leaf lock: a book is given up where the medium
@@ -57,12 +51,9 @@ static AwayKnown* AwayKnownFind(const uint8_t uuid[16])
 }
 
 /* `next_file` and `next_tag` into the volume `uuid`'s entry, each where it is
- * further, and `lied` with it; the entry made when there is none. False when
- * there is no memory for it. A count an earlier kernel let wrap (0) is the
- * medium's to keep refusing creates on: the mount keeps it, whatever is
- * remembered here. */
-static bool AwayKnownRaise(const uint8_t uuid[16], uint64_t next_file, uint32_t next_tag,
-                           bool lied)
+ * further; the entry made when there is none. False when there is no memory
+ * for it. */
+static bool AwayKnownRaise(const uint8_t uuid[16], uint64_t next_file, uint32_t next_tag)
 {
     for (;;) {
         TagFSLockTake(&s_known_lock);
@@ -77,7 +68,6 @@ static bool AwayKnownRaise(const uint8_t uuid[16], uint64_t next_file, uint32_t 
                 k->next_file_id = next_file;
             if (next_tag > k->next_tag_id)
                 k->next_tag_id = next_tag;
-            k->lied |= lied;
             TagFSLockDrop(&s_known_lock);
             return true;
         }
@@ -104,28 +94,26 @@ static bool AwayKnownRaise(const uint8_t uuid[16], uint64_t next_file, uint32_t 
     }
 }
 
-/* The numbers the book's memory had reached, and whether the medium lied,
- * remembered for its volume. */
-static void AwayRemember(bool lied)
+/* The numbers the book's memory had reached, remembered for its volume. */
+static void AwayRemember(void)
 {
     TagFSState* fs        = tagfs_get_state();
     uint64_t    next_file;
     uint32_t    next_tag  = 0;
 
     TagFSLockTake(&fs->lock);
-    next_file = fs->format == DEED_FORMAT_V2 ? g_book.next_fid : fs->ledger.next_file_id;
+    next_file = g_book.next_fid;
     TagFSLockDrop(&fs->lock);
     if (fs->registry) {
         TagFSLockTake(&fs->registry->lock);
         next_tag = fs->registry->next_id;
         TagFSLockDrop(&fs->registry->lock);
     }
-    if (!AwayKnownRaise(fs->uuid, next_file, next_tag, lied))
+    if (!AwayKnownRaise(fs->uuid, next_file, next_tag))
         kprintf("[TagFS] there is no memory to remember the ids this kernel gave out on the "
-                "volume whose book is given up (file ids below %llu, tag ids below %u)%s — its "
+                "volume whose book is given up (file ids below %llu, tag ids below %u) — its "
                 "next mount may give one of them again, to a program other than the one "
-                "holding it\n", (unsigned long long)next_file, next_tag,
-                lied ? ", nor that its medium lied" : "");
+                "holding it\n", (unsigned long long)next_file, next_tag);
 }
 
 /* The changes the book holds: inked, and no cycle settled. */
@@ -143,14 +131,9 @@ uint64_t AwayDepartures(void)
 
 bool AwayDeedSame(const DeedCopy* head)
 {
-    TagFSState* fs    = tagfs_get_state();
-    uint16_t    bytes = 0;
-    if (fs->format == DEED_FORMAT_V2) {
-        const VolumeFrame* frame = (const VolumeFrame*)DeedStamp(head, VOLUME_STAMP_FRAME, &bytes);
-        return frame && bytes >= sizeof(VolumeFrame) && memcmp(frame, &g_book.frame, sizeof(VolumeFrame)) == 0;
-    }
-    const VolumeLayout* layout = (const VolumeLayout*)DeedStamp(head, VOLUME_STAMP_LAYOUT, &bytes);
-    return layout && bytes >= sizeof(VolumeLayout) && memcmp(layout, &fs->layout, sizeof(VolumeLayout)) == 0;
+    uint16_t           bytes = 0;
+    const VolumeFrame* frame = (const VolumeFrame*)DeedStamp(head, VOLUME_STAMP_FRAME, &bytes);
+    return frame && bytes >= sizeof(VolumeFrame) && memcmp(frame, &g_book.frame, sizeof(VolumeFrame)) == 0;
 }
 
 void AwayLeft(bool swapped)
@@ -161,27 +144,6 @@ void AwayLeft(bool swapped)
             "to come back as it was left; every read and write of it is refused until then\n",
             swapped ? "been replaced by another one in the same seat" : "left",
             (unsigned long long)AwayUnsettled());
-}
-
-AwayVerdict AwayJudge(const VolumeLedger* found)
-{
-    uint64_t   settled_seq = 0;
-    LedgerLeft as          = LedgerLeftAs(found, &settled_seq);
-    s_found_seq = found->seq;
-    s_left_seq  = settled_seq;
-    if (as == LEDGER_OLDER)
-        return AWAY_OLDER;
-    if (as == LEDGER_OTHER)
-        return AWAY_OTHER;
-    return VolumeWritesKept() ? AWAY_AS_LEFT : AWAY_IN_DOUBT;
-}
-
-AwayVerdict AwayJudgeOn(uint8_t seat, uint64_t base)
-{
-    VolumeLedger found;
-    if (!LedgerNewestOn(seat, base, &found))
-        return AWAY_UNREAD;
-    return AwayJudge(&found);
 }
 
 /* A book taken up (perambulation.h): said with what was found, and the
@@ -207,16 +169,7 @@ static void AwayBookTakenUp(uint8_t seat)
 
 void AwayTakeUp(uint8_t seat)
 {
-    if (tagfs_get_state()->format == DEED_FORMAT_V2)
-        AwayBookTakenUp(seat);
-    else
-        kprintf("[TagFS] the volume is back, in seat %u: %s — as this kernel left it: its Ledger "
-                "at seq %llu with the seal it was left with, and every write it saw kept by a flush. "
-                "Its book is taken up: %llu change(s) no cycle settled go to the medium with the "
-                "next cycle, none lost. This proves only that no BoxOS kernel settled a cycle on it "
-                "meanwhile — a host that changed its bytes and left the Ledger alone is not seen\n",
-                seat, BoardroomSeatName(seat), (unsigned long long)s_found_seq,
-                (unsigned long long)AwayUnsettled());
+    AwayBookTakenUp(seat);
     SettleSeatReady();
     HelmBookTakenUp();
 }
@@ -227,21 +180,8 @@ void AwayTakeUp(uint8_t seat)
 uint64_t AwayGiveUp(AwayVerdict why, uint8_t seat)
 {
     uint64_t lost = AwayUnsettled();
-    AwayRemember(why == AWAY_OLDER);
+    AwayRemember();
     switch (why) {
-    case AWAY_IN_DOUBT:
-        kprintf("[TagFS] the volume came back in seat %u with its Ledger as this kernel left it "
-                "(seq %llu), but a write it saw complete was never covered by a flush the medium "
-                "kept, and a medium's cache goes with its power" AWAY_LOST,
-                seat, (unsigned long long)s_found_seq, (unsigned long long)lost);
-        break;
-    case AWAY_OLDER:
-        kprintf("[TagFS] the volume came back in seat %u holding a Ledger older (seq %llu) than "
-                "the one a cycle this kernel settled on it (seq %llu): the medium lost a cycle it "
-                "said it kept, and its seals carry SETTLE_MEDIUM_LIED from its next mount on"
-                AWAY_LOST, seat, (unsigned long long)s_found_seq,
-                (unsigned long long)s_left_seq, (unsigned long long)lost);
-        break;
     case AWAY_NOT_LANDED:
         kprintf("[TagFS] the volume came back in seat %u as this kernel left its book, but %llu of the %llu block(s) "
                 "of data no stitch settled do not read back as written — a medium's cache goes with its power, "
@@ -250,19 +190,8 @@ uint64_t AwayGiveUp(AwayVerdict why, uint8_t seat)
                 (unsigned long long)lost);
         break;
     case AWAY_OTHER:
-        if (tagfs_get_state()->format == DEED_FORMAT_V2) {
-            kprintf("[TagFS] the volume came back in seat %u not as this kernel left its book: %s" AWAY_LOST, seat,
-                    PerambulationLast()->why, (unsigned long long)lost);
-            break;
-        }
-        kprintf("[TagFS] the volume came back in seat %u with a Ledger or a Deed this kernel did "
-                "not leave on it — a BoxOS kernel changed it meanwhile" AWAY_LOST,
-                seat, (unsigned long long)lost);
-        break;
-    case AWAY_UNREAD:
-        kprintf("[TagFS] the volume came back in seat %u and neither copy of its Ledger reads "
-                "intact — nothing says it is as it was left" AWAY_LOST,
-                seat, (unsigned long long)lost);
+        kprintf("[TagFS] the volume came back in seat %u not as this kernel left its book: %s" AWAY_LOST, seat,
+                PerambulationLast()->why, (unsigned long long)lost);
         break;
     case AWAY_SEAT_TAKEN:
         kprintf("[TagFS] another volume sits in seat %u, where the book of the volume that left "
@@ -287,15 +216,6 @@ uint64_t AwayGiveUp(AwayVerdict why, uint8_t seat)
     HelmBookGivenUp(lost);
     SettleWaitersAnswerAll(why == AWAY_NOT_LANDED ? ERR_TAGFS_NOT_LANDED : ERR_DEVICE_NOT_READY);
     return lost;
-}
-
-bool AwayLiedLearned(const uint8_t uuid[16])
-{
-    TagFSLockTake(&s_known_lock);
-    const AwayKnown* k    = AwayKnownFind(uuid);
-    bool             lied = k && k->lied;
-    TagFSLockDrop(&s_known_lock);
-    return lied;
 }
 
 void AwayNumbersKnown(const uint8_t uuid[16], uint64_t* next_file_id, uint32_t* next_tag_id)

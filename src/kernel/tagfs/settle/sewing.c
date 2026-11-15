@@ -23,7 +23,7 @@
 #include "crypto.h"
 
 /*
- * The Settle cycle of a format-v2 volume (sewing.h): one stitch on its ribbon.
+ * The Settle cycle (sewing.h): one stitch on the book's ribbon.
  *
  *   TAKE         S0: under the state lock, memory only — the target (every
  *                Ink so far) and the Docket with it (docket.h), the ribbon's
@@ -145,26 +145,9 @@ static uint64_t s_settled_flush_us;
  * again. */
 static volatile uint8_t s_book_refused;
 
-/* A part of format v1's cycle asked of a book, said once a mount. */
-static volatile uint8_t s_v1_said;
-
 void StitchMountReset(void)
 {
     __atomic_store_n(&s_book_refused, 0u, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_v1_said, 0u, __ATOMIC_RELEASE);
-}
-
-bool SettleV1OnBook(const char* what)
-{
-    if (tagfs_get_state()->format != DEED_FORMAT_V2)
-        return false;
-#if CONFIG_STRICT
-    panic("[Settle] DEFECT: %s, a part of format v1's cycle, was asked of a format-v2 volume", what);
-#endif
-    if (!__atomic_exchange_n(&s_v1_said, 1u, __ATOMIC_ACQ_REL))
-        kprintf("[Settle] DEFECT: %s, a part of format v1's cycle, was asked of a format-v2 volume — it does "
-                "nothing there\n", what);
-    return true;
 }
 
 bool StitchBookRefused(void)
@@ -908,7 +891,7 @@ void StitchRunEnd(error_t rc)
         /* A slot's rest is let go in the hold its ground is given back in:
          * no measure between sees it twice, or the reserve without it. */
         bool     held = BinderHoldsGround();
-        uint64_t ripe = held ? 0 : FallowRipen(0, s->cycle, &nodes);
+        uint64_t ripe = held ? 0 : FallowRipen(s->cycle, &nodes);
         if (!held)
             BinderRestRipens(FallowSpineRipeFrom());
         SettleGivenLocked(ripe);

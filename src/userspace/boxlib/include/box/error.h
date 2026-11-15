@@ -92,7 +92,6 @@ typedef uint32_t error_t;
     X(JOURNAL_CORRUPTED,             journal_corrupted,             308,  "journal corrupted",             "storage") \
     X(METADATA_CORRUPTED,            metadata_corrupted,            309,  "metadata corrupted",            "storage") \
     X(TAG_REGISTRY_FULL,             tag_registry_full,             310,  "tag registry full",             "storage") \
-    X(FILE_TABLE_CORRUPT,            file_table_corrupt,            311,  "file table corrupt",            "storage") \
     X(METADATA_POOL_FULL,            metadata_pool_full,            312,  "metadata pool full",            "storage") \
     X(BLOCK_ALLOC_FAILED,            block_alloc_failed,            313,  "block allocation failed",       "storage") \
     X(BLOCK_FREE_FAILED,             block_free_failed,             314,  "block free failed",             "storage") \

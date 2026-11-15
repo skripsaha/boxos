@@ -1,5 +1,6 @@
 #include "use_context.h"
 #include "tagfs.h"
+#include "use_memory.h"
 #include "klib.h"
 #include "atomics.h"
 #include "process.h"

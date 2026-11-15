@@ -2,6 +2,7 @@
 #include "../keep/keep.h"
 #include "../file_map/file_map.h"
 #include "../tag_registry/tag_registry.h"
+#include "../../core/use_context/use_context.h"
 
 /*
  * The file operations every caller outside TagFS reaches — create, delete,
@@ -59,7 +60,7 @@ error_t InkNameTagIntern(const char* name, uint32_t* out_tag)
     if (rc != OK)
         return rc;
     UseContextBindTag(&stem, *out_tag);
-    return TagRegistryFlushFor(OpsRegistry(), *out_tag);
+    return TagRegistryIdGiven(OpsRegistry(), *out_tag);
 }
 
 uint32_t InkNameTagLookup(const char* name)
@@ -93,7 +94,7 @@ static error_t CreateTags(uint32_t name_tag, const uint32_t* tag_ids, uint32_t t
             dup = tags[j] == tid;
         if (dup)
             continue;
-        error_t rc = TagRegistryFlushFor(OpsRegistry(), tid);
+        error_t rc = TagRegistryIdGiven(OpsRegistry(), tid);
         if (rc != OK) {
             kfree(tags);
             return rc;
@@ -134,50 +135,6 @@ static error_t CreateInside(const char* filename, const uint32_t* tag_ids, uint3
         rc = InkNew(filename, tags, count, out_file_id, &receipt);
     kfree(tags);
     return rc;
-}
-
-static int CreateTagOrder(const void* a, const void* b, void* ctx)
-{
-    const TagSpelling* tags = ctx;
-    return TagSpellingCompare(&tags[*(const uint32_t*)a], &tags[*(const uint32_t*)b]);
-}
-
-error_t TagFSCreateFits(const char* filename, const TagSpelling* tags, uint32_t count,
-                        uint32_t* out_worn)
-{
-    if (!filename || (count && !tags))
-        return ERR_INVALID_ARGUMENT;
-    TagSpelling stem;
-    error_t     rc = InkNameStem(filename, &stem);
-    if (rc != OK)
-        return rc;
-
-    /* Each tag counted once — the record lists a tag once however often it
-     * was asked for — sorted, so the count is n log n compares at any n. */
-    uint32_t* order = count ? kmalloc(sizeof(uint32_t) * count) : NULL;
-    if (count && !order)
-        return ERR_NO_MEMORY;
-    for (uint32_t i = 0; i < count; i++)
-        order[i] = i;
-    KSort(order, count, sizeof(uint32_t), CreateTagOrder, (void*)tags);
-
-    uint32_t worn      = 0;
-    bool     stem_worn = false;
-    for (uint32_t s = 0; s < count; s++) {
-        const TagSpelling* tag = &tags[order[s]];
-        if (s > 0 && TagSpellingCompare(tag, &tags[order[s - 1]]) == 0)
-            continue;
-        worn++;
-        stem_worn = stem_worn || (stem.key && TagSpellingCompare(&stem, tag) == 0);
-    }
-    kfree(order);
-    if (stem.key && !stem_worn)
-        worn++;
-    if (out_worn)
-        *out_worn = worn;
-
-    TagFSMetadata record = { .filename = (char*)filename, .tag_count = worn };
-    return PlotFits(&record, NULL) ? OK : ERR_TAGFS_RECORD_FULL;
 }
 
 int tagfs_create_file(const char* filename, const uint32_t* tag_ids, uint32_t tag_count,
@@ -262,7 +219,7 @@ int tagfs_add_tag(uint64_t file_id, uint32_t tag_id)
         return -(int)ERR_TAGFS_NOT_INITIALIZED;
     InkReceipt receipt;
     error_t    rc = tag_id == TAGFS_INVALID_TAG_ID ? ERR_TAGFS_INVALID_TAG
-                                                   : TagRegistryFlushFor(OpsRegistry(), tag_id);
+                                                   : TagRegistryIdGiven(OpsRegistry(), tag_id);
     if (rc == OK)
         rc = InkFields(file_id, NULL, tag_id, TAGFS_INVALID_TAG_ID, &receipt);
     tagfs_leave();

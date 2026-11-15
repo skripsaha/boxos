@@ -469,7 +469,7 @@ static void RibbonOutSaid(void)
             "the Tallies and %llu promised to the tails Slips lie over — %s%s; until then %s, and the rest of its "
             "Quire is kept for what was claimed before and what gives ground up\n",
             (unsigned long long)__atomic_load_n(&c->quires, __ATOMIC_RELAXED),
-            (unsigned long long)__atomic_load_n(&tagfs_get_state()->ledger.free_blocks, __ATOMIC_ACQUIRE),
+            (unsigned long long)__atomic_load_n(&tagfs_get_state()->free_blocks, __ATOMIC_ACQUIRE),
             (unsigned long long)EndpaperKeeps(c->quire_blocks), (unsigned long long)AllotmentPromised(),
             none ? "no Tally is written by this mount, so none of its Quires comes back before the volume is "
                    "mounted again: " : "a Tally is asked for to take its end in, and its Quires come back only once "
@@ -810,7 +810,7 @@ static void RibbonRefusedSaid(void)
     kprintf("[TagFS] no room on the ribbon for a change of the volume: %llu free, the book keeps %llu for its "
             "ribbon and its Tally and holds %llu itself in its Tallies and its ribbon, and %llu are promised to the "
             "tails Slips lie over — the reserve measured %s%s%s (ERR_TAGFS_NO_SPACE)\n",
-            (unsigned long long)__atomic_load_n(&tagfs_get_state()->ledger.free_blocks, __ATOMIC_ACQUIRE),
+            (unsigned long long)__atomic_load_n(&tagfs_get_state()->free_blocks, __ATOMIC_ACQUIRE),
             (unsigned long long)(EndpaperKeeps(s_cursor.quire_blocks) + s_cursor.quire_blocks),
             (unsigned long long)BinderGroundHeld(), (unsigned long long)AllotmentPromised(), measured,
             why ? ": " : "", why ? why : "");

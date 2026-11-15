@@ -77,72 +77,9 @@ out:
     return verdict;
 }
 
-/*
- * A block through a braid of its own and back: a stripe whose one disk is the
- * volume's own seat, over a block the volume hands out. The bytes come back as
- * written, each command is counted once, and a copy that does not match the
- * checksum asked for is refused and counted. The block holds the same bytes
- * through the volume's own door first and after, so the integrity map's digest
- * of it is the medium's all along.
- */
-static TestResult test_braid_writes_and_reads(void)
-{
-    TestResult verdict = TEST_PASS;
-    uint64_t   blk     = 0;
-    uint8_t    seat    = tagfs_get_seat();
-    uint8_t*   wrote   = g_test_buffer;
-    uint8_t*   got     = g_test_output;
-    BraidStats stats;
-
-    memset(&s_braid, 0, sizeof(s_braid));
-    if (seat >= BRAID_MAX_DISKS)
-        return test_steps_aside("the volume's seat is past the disks a braid can name");
-    if (tagfs_alloc_blocks(1, &blk) != 0)
-        return test_steps_aside("the volume would not hand out a block to write through a braid");
-
-    TestFillAt(wrote, TAGFS_BLOCK_SIZE, 0xB7, 0);
-    TEST_ASSERT_OK(tagfs_write_block(blk, wrote), "the block takes its bytes through the volume");
-
-    TEST_ASSERT_OK(BraidInit(&s_braid, BraidModeStripe, s_braid_seed), "a stripe of its own is begun");
-    TEST_ASSERT_OK(BraidAddDisk(&s_braid, seat, BRAID_FAKE_DISK_BLOCKS),
-                   "with the volume's seat as its one disk");
-    TEST_ASSERT(BraidIsHealthy(&s_braid), "one disk is a whole stripe");
-
-    uint64_t sector = tagfs_block_to_sector(blk);
-    TEST_ASSERT_OK(BraidWriteBlock(&s_braid, sector, wrote, NULL), "the braid writes the block");
-    memset(got, 0, TAGFS_BLOCK_SIZE);
-    TEST_ASSERT_OK(BraidReadBlock(&s_braid, sector, got, NULL), "and reads it back");
-    TEST_ASSERT_EQ(TestFirstDifference(got, wrote, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
-                   "as it was written");
-
-    BoxHash right = BoxHashContent(wrote, TAGFS_BLOCK_SIZE, &s_braid.hash_ctx);
-    TEST_ASSERT_OK(BraidReadBlock(&s_braid, sector, got, &right),
-                   "a read asked for the checksum the block has is served");
-    BoxHash wrong = right;
-    wrong.bytes[0] ^= 0xFF;
-    TEST_ASSERT_EQ(BraidReadBlock(&s_braid, sector, got, &wrong), ERR_CORRUPTED,
-                   "and one asked for another checksum is refused");
-
-    TEST_ASSERT_OK(BraidGetStats(&s_braid, &stats), "the braid's counts are read");
-    TEST_ASSERT_EQ(stats.total_writes, 1, "one write, counted once");
-    TEST_ASSERT_EQ(stats.total_reads, 2, "two reads served, each counted once");
-    TEST_ASSERT_EQ(stats.checksum_errors, 1, "and the one refused counted as a checksum error");
-
-    memset(got, 0, TAGFS_BLOCK_SIZE);
-    TEST_ASSERT_OK(tagfs_read_block(blk, got), "the volume reads the block through its own door");
-    TEST_ASSERT_EQ(TestFirstDifference(got, wrote, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
-                   "and finds what the braid wrote, matching its digest");
-out:
-    BraidShutdown(&s_braid);
-    if (blk)
-        tagfs_free_blocks(blk, 1);
-    return verdict;
-}
-
 static const TestCase g_braid_tests[] = {
     { .name = "braid_init",             .func = test_braid_init,             .reach = TEST_READS_ONLY },
     { .name = "braid_counts_disks",     .func = test_braid_counts_disks,     .reach = TEST_READS_ONLY },
-    { .name = "braid_writes_and_reads", .func = test_braid_writes_and_reads, .reach = TEST_WRITES_TO_VOLUME },
 };
 
 const TestSuite g_braid_suite = {

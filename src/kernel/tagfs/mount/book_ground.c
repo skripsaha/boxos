@@ -268,7 +268,7 @@ static uint32_t BookFilesWalk(bool laid)
     TagFSState* fs   = tagfs_get_state();
     uint64_t    from = 0, ids[32];
     uint32_t    n, crc = 0;
-    while ((n = FileMapRows(fs->files, from, ids, 32)) > 0) {
+    while ((n = FileMapFiles(fs->files, from, ids, 32)) > 0) {
         for (uint32_t i = 0; i < n; i++) {
             FileRecord* rec = FileMapRecordHold(fs->files, ids[i], NULL);
             if (!rec)

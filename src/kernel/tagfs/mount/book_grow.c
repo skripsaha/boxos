@@ -4,7 +4,7 @@
 #include "boardroom.h"
 
 /*
- * A format-v2 volume taking the ground behind it (book_mount.h, MountBookGrow;
+ * The volume taking the ground behind it (book_mount.h, MountBookGrow;
  * spec_v2 §16.1 п.4, §1.3, §4.5 п.1).
  *
  * ‼ ONLY THE PROLOGUE MOVES. A book counts its blocks from the volume's block
@@ -21,8 +21,7 @@
  * reason the ground or the book gave, takes no ground, and neither does one
  * whose medium refuses writes as protected.
  *
- * ‼ THE NEW GROUND IS PROVEN NO ONE'S BEFORE IT IS TAKEN. Format v1 reads its
- * bitmap past the data run and finds it blank (ground_v1.c); a book has no
+ * ‼ THE NEW GROUND IS PROVEN NO ONE'S BEFORE IT IS TAKEN. A book has no
  * bitmap, and the census is its account of every owner: no owner but the far
  * Deed may name a block at or past the old far Deed's (GroundCensusReach) —
  * as the owner names it, before a run is cut to the data run: a file locked
@@ -33,7 +32,7 @@
  *
  * ‼ NOTHING CHANGES UNLESS ALL OF IT CAN. The wider block map is made before a
  * byte is written (BlockMapDerivedWidenMake); the two copies of the Deed are
- * written the format-v1 way, far end then head (ground_grow.h); only once the
+ * written far end then head (ground_grow.h); only once the
  * head is written is the map widened and the data run ended at the new far
  * Deed. A growth cut between its two writes leaves the volume its old size —
  * the head is what the next mount stands on — and that mount grows it again
