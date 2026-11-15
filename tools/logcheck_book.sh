@@ -1,11 +1,11 @@
 # logcheck_book — what tools/logcheck.sh asks of a kernel that reads a
-# format-v2 volume's book: the census of a planted book held to the kernel's
+# volume's book: the census of a planted book held to the kernel's
 # own lines (census_book), and the stand's road on a book (stand_book).
 #
 # SOURCED, NEVER RUN — by logcheck.sh; everything it calls (build,
 # stand_boot, chk, ok, bad, harness, the waits) is stand.sh's or
 # logcheck.sh's. Its own file for the reason logcheck_framerefuse.sh is: a
-# harness of twelve thousand lines does not grow further for format v2.
+# harness of twelve thousand lines does not grow further for the book.
 
 # ---------------------------------------------------------------------------
 # census_book: a book planted with one kind of damage, booted, and the kernel
@@ -344,7 +344,7 @@ census_book() {
 }
 
 # ---------------------------------------------------------------------------
-# stand_book: the startup tests on a format-v2 volume
+# stand_book: the startup tests on a book
 #
 # The image is made under VOLUME_TESTS=on and booted three times. BIOS, four cores, its seat an ATA disk; then the padded
 # landing of it (self-test --emit B4p: the image's files and forty more, whose
@@ -436,7 +436,7 @@ census_book() {
 #   stand_escheat_tail_helm_held                                              service races the test for: its line
 # ---------------------------------------------------------------------------
 
-# Every test of the tree runs on a book (spec_v2 §16.5 п.22). A test whose refusals differ from one leg to another is a row
+# Every test of the tree runs on a book. A test whose refusals differ from one leg to another is a row
 # above, so each column differs from the next by its rows alone; the rest —
 # 62, the same on every leg — is the refusals of the tests the rows do not
 # name: stand_medium_mount_bad_sector_waits 54, and one each of
@@ -628,8 +628,6 @@ stand_book_judge() {
     fi
     grep -aqE "$STAND_BOOK_PROMISE" "$L" && grep -aqE "$STAND_BOOK_TALLY" "$L"
     chk $? "stand: $what — the mount says what the book takes and when a Tally is written"
-    ! grep -aqF "[TagFS] the volume may only be read: this kernel reads format-v2 books" "$L"
-    chk $? "stand: $what — no book stands under glass for being a book"
     grep -aqE '^\[Integrity\] block [0-9]+ carries no digest in its volume.s Tally' "$L"
     chk $? "stand: $what — a block with no digest is named, its read refused"
     got=$(grep -acE '^\[TESTS\] .*, knocked at by the stand under glass, refused before a byte' "$L")
@@ -649,7 +647,7 @@ stand_book_judge() {
     chk $? "stand: $what — every record memory held named its runs, and every Tract stood within its fill"
     got=$(stand_book_defects "$L")
     [ -z "$got" ]
-    chk $? "stand: $what — no defect of TagFS said but the one each lever of the stand draws from the Tally's self-check: no door below the glass reached by a road nobody shut, no code of format v1 asked for a LAYOUT, no cycle asked, no element of a Tally changed outside DogEar ($(echo "$got" | head -1 | cut -c1-120))"
+    chk $? "stand: $what — no defect of TagFS said but the one each lever of the stand draws from the Tally's self-check: no door below the glass reached by a road nobody shut, no cycle asked, no element of a Tally changed outside DogEar ($(echo "$got" | head -1 | cut -c1-120))"
     got=$(grep -ac '^\[BLOCKFAIL\] seat [0-9]*: ' "$L")
     t=$(grep -aoE "$STAND_BOOK_REFUSED" "$L" | sed -E "s/$STAND_BOOK_REFUSED/\1/" | awk '{ n += $1 } END { print n + 0 }')
     r=$(grep -aoE "$STAND_BOOK_RACED" "$L" | sed -E "s/$STAND_BOOK_RACED/\1/" | awk '{ n += $1 } END { print n + 0 }')
@@ -884,8 +882,8 @@ print("%u 0x%016X" % (n, h))' 2>/dev/null)
 # A kernel built SETTLECUT=stitch stops the machine before the last atom of
 # the stitch that settles the first anchor a program waited for — the one
 # window of a stitch written as a write of its own (settle/sewing.c,
-# StitchWindow), so what lands is a stitch torn short. A plain image of format
-# v2 is booted with that kernel; in the guest `quilltest namecut cut` makes
+# StitchWindow), so what lands is a stitch torn short. A plain image
+# is booted with that kernel; in the guest `quilltest namecut cut` makes
 # cut<r>.n with two tags of 3000 bytes — its Coineds take the stitch past one
 # atom — and anchors it, round after round until the machine stops: the last
 # round said is the file of the torn stitch. The image is held: volume-read

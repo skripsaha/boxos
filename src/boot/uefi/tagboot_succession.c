@@ -1,8 +1,8 @@
 /*
- * The Succession — which kernel the UEFI loader jumps into on a format-v2
- * volume (spec_v2 §16.7 пп.3, 4; §9.2 пп.2–4): the kernel the Deed's BOOT
- * names first, held to the DIGESTS tree of the slot the book stands on with
- * no walk of FILES; when it is not attested, the kernels the book names by
+ * The Succession — which kernel the UEFI loader jumps into on a volume: the
+ * kernel the Deed's BOOT names first, held to the DIGESTS tree of the slot
+ * the book stands on with no walk of FILES; when it is not attested, the
+ * kernels the book names by
  * role of their files (tagboot_lectern_tree.c, _ribbon.c, _replay.c), role by
  * role in the order they are asked — kernel, boot, system — the newest gen
  * first and of one gen the larger fid, each once. A file's tags are its

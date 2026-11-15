@@ -1,5 +1,5 @@
 /*
- * The Lectern's ribbon (spec_v2 §16.7 п.5, §4.5 п.5): from the `at` of the
+ * The Lectern's ribbon: from the `at` of the
  * slot the book stands on, the stitches sewn on, one after another, by the
  * Clasp each names — rules (а)/(б)/(б′)/(в) — into b->stitches, for the
  * replay of the files followed (tagboot_lectern_replay.c).

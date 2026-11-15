@@ -63,7 +63,7 @@ EFI_STATUS DeedTakeUp(const uint8_t *deed_block, uint64_t ground_start);
  * `read` (tagboot.c's reader of the volume, 512-byte sectors counted from its
  * ground) into pages `bs` gives, and placed at KERNEL_LOAD_ADDR: NULL with its
  * size in *bytes and the end of its pages in *alloc_end — attested, or with
- * nothing to hold it to, said (spec_v2 §16.7 п.4) — or the sentence to stop
+ * nothing to hold it to, said — or the sentence to stop
  * with when no kernel on the volume may be jumped into, every one tried said
  * with why.
  */

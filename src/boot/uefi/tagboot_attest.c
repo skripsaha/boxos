@@ -1,8 +1,7 @@
 /*
  * TagBoot — the desk the Lectern chooses the volume's kernel at:
  * the kernel BOOT names, then the kernels its book names by role, each held to
- * the digests the book keeps of it before the jump (spec_v2 §16.7 пп.3–6;
- * tagboot_succession.c).
+ * the digests the book keeps of it before the jump (tagboot_succession.c).
  *
  * The reading is the Lectern's, which knows nothing of UEFI; what is TagBoot's
  * is its desk. The medium is read through the loader's own reader of the

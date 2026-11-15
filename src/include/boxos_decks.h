@@ -376,8 +376,8 @@
  * lasting refusal answers with its code (ERR_TAGFS_READ_ONLY,
  * ERR_DEVICE_NOT_READY). */
 #define STORAGE_OBJ_WRITE_SETTLED   0x21
-/* obj.escheat — Escheat, the act that lets go what a format-v2 book can never
- * give back (spec_v2 §16.5 пп.19–20): every rotten range the Tally stood on
+/* obj.escheat — Escheat, the act that lets go what a book can never give
+ * back: every rotten range the Tally stood on
  * names — its files declared lost, the blocks held for it let go, a rotten
  * DIGESTS range's digests taken anew of the data the living files name — and
  * every tail a Slip holds that can never be laid in its block, the file left
@@ -403,8 +403,8 @@
 #define STORAGE_TAG_LIST_HEAD       8u      /* [u32 delivered][u32 next] */
 #define STORAGE_TAG_LISTED_HEAD     8u      /* a record before its text */
 #define STORAGE_TAG_LISTED_SYSTEM   0x01u   /* flags: a tag the system keeps */
-/* obj.conjugate — Conjugate, a duplicate laid on the blocks it duplicates
- * (spec_v2 §8.2, §16.7 пп.8–9): `count` blocks of file `fid` from its block
+/* obj.conjugate — Conjugate, a duplicate laid on the blocks it duplicates:
+ * `count` blocks of file `fid` from its block
  * `at`, each held byte for byte to the block of file `onto` from its block
  * `onto_at` it is laid on, named by a run SHARED on that file's ground — its
  * own let go, its bytes, size and times as they were. Every block alike or
@@ -416,8 +416,7 @@
  * 6 the digests agree and the bytes differ, 7 a file changed meanwhile, 8 the
  * volume's own refusal — the error says it. Only
  * a cabin wearing system or god (ERR_ACCESS_DENIED at the gate,
- * ERR_PERMISSION_DENIED past it); refused on a format-v1 volume
- * (ERR_UNSUPPORTED). */
+ * ERR_PERMISSION_DENIED past it). */
 #define STORAGE_OBJ_CONJUGATE       0x24
 /* obj.keep — a file deleted for a term: params = [u64 fid][u64 term seconds].
  * No query meets the file from now on, it can be brought back by obj.restore
@@ -425,9 +424,8 @@
  * keep.h). The term is the caller's — a program passes what its person
  * chose — and a term of 0 is the file given up at once, as obj.delete does.
  * Guarded as obj.delete is, by the same one guard and the same warrant (a
- * file the system keeps is refused, ERR_PERMISSION_DENIED); ERR_UNSUPPORTED on
- * a format-v1 volume for a term above 0. Deleting a deleted file moves its
- * term. */
+ * file the system keeps is refused, ERR_PERMISSION_DENIED). Deleting a
+ * deleted file moves its term. */
 #define STORAGE_OBJ_KEEP            0x25
 /* obj.restore — a deleted file brought back: params = [u64 fid]. The file is
  * found by queries again, its tags and name as they were. ERR_FILE_NOT_FOUND

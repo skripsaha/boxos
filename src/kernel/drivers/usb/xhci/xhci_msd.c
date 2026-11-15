@@ -1825,8 +1825,8 @@ uint32_t xhci_msd_unit_physical_bytes(uint8_t unit)
 
 /* The first sector of the room's 512 that begins one of the unit's physical
  * blocks: READ CAPACITY(16)'s LOWEST ALIGNED LOGICAL BLOCK ADDRESS, counted
- * in the unit's own logical blocks, turned into 512-byte sectors (spec_v2
- * §16.2 п.19). Zero when the device would not say. */
+ * in the unit's own logical blocks, turned into 512-byte sectors. Zero when
+ * the device would not say. */
 uint64_t xhci_msd_unit_first_aligned(uint8_t unit)
 {
     if (!g_units_lock_ready) return 0;

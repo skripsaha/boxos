@@ -1,5 +1,5 @@
 """selftest_book_facsimile — the book's landings of Facsimile's one rule
-(spec_v2 §4.5 п.3 (а), §16.5 п.19; mount/facsimile.c, bookmount._Facsimile):
+(mount/facsimile.c, bookmount._Facsimile):
 rotten FILES ranges of the Tally stood on that reach into one fid weighed as
 one; a slot whose Tally names a file of the keys it cannot stand on, or whose
 ribbon replayed for the keys passes over a stitch of them — a record of the

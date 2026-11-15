@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# logcheck_bind.sh — the kernel's Tallies of a format-v2 book, held by both
+# logcheck_bind.sh — the kernel's Tallies of a book, held by both
 # readers (sourced by tools/logcheck.sh beside logcheck_book.sh; run by the
 # census scenario).
 #
@@ -15,7 +15,7 @@
 # ---------------------------------------------------------------------------
 # book_bind
 #
-# A plain image of format v2 is booted; in the guest the state book_circle
+# A plain image is booted; in the guest the state book_circle
 # leaves is made first — a Use Context said (`use bind sewn`), files made,
 # tagged, renamed, untagged and given up (`quilltest names bind`), a file the
 # maker laid given up blocks and all (`quilltest ground bind`), a file written
@@ -156,8 +156,8 @@ BIND_EOF
 # A kernel built SETTLECUT=tally stops the machine before the flush of the
 # nodes of the first Tally of a state carrying the anchor a program waited for
 # — the nodes written, no slot naming them (C8); one built SETTLECUT=slot stops
-# it with the first half of that Tally's slot written (C9). A plain image of
-# format v2 is booted with that kernel and `quilltest log cut N` appends and
+# it with the first half of that Tally's slot written (C9). A plain image
+# is booted with that kernel and `quilltest log cut N` appends and
 # anchors until the machine stops. The image is held: volume-read finds it
 # consistent — the nodes no slot names are nobody's, so its free count is the
 # kernel's — the newest slot that holds is the one before the Tally (a torn

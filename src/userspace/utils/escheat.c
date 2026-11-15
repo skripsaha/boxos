@@ -4,11 +4,11 @@
 #include "box/error.h"
 
 /*
- * escheat — let go for good what a format-v2 book can never give back: every
+ * escheat — let go for good what a book can never give back: every
  * rotten range of FILES its Tally names, the files in it declared lost and the
  * blocks held for them freed once the next Tally names none of it, and every
- * DIGESTS leaf that reads in no copy laid anew of the data (spec_v2 §16.5
- * пп.19–20). Destructive and final: save what can be saved first (volume-read
+ * DIGESTS leaf that reads in no copy laid anew of the data. Destructive and
+ * final: save what can be saved first (volume-read
  * on another machine reads a rotten range's blocks unchecked). Only a program
  * wearing system or god may ask.
  */

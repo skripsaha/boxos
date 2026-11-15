@@ -16,7 +16,7 @@
                 circle that binds a Tally read back again byte for byte
     stitch      the ribbon: a stitch's records, the ribbon walked and scanned,
                 and a pen that sews stitches
-    bookmount   a volume mounted the way spec_v2 §4.5 mounts it
+    bookmount   a volume mounted the way the kernel mounts it
     bookcensus  its roll call (§4.6), the mount's findings and the account
     bootread    which kernel the UEFI loader jumps into, and why
     selftest    every census rule planted and caught, the cut logic on a

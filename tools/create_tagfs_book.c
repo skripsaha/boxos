@@ -1,5 +1,5 @@
 /*
- * create_tagfs_v2.c — the volume maker's writer: the volume, its files in a
+ * create_tagfs_book.c — the volume maker's writer: the volume, its files in a
  * row and its book bound over them (the binder is create_tagfs_bind.c);
  * --ground, how far its ground must run; and --frame-only, a Deed over files
  * in a row and no book — a stand.
@@ -11,10 +11,10 @@
 #include "volume_digest.h"   /* the digest of a block, bit for bit the kernel's */
 
 /* ====================================================================
- *  --frame-only: a format-v2 Deed over files in a row, and no book
+ *  --frame-only: a Deed over files in a row, and no book
  *
  * ‼ A STAND, NOT A FORMAT WRITER. A volume keeps what it knows about its
- * files in a book, and this writes none (V2BindMake, below, does). What it
+ * files in a book, and this writes none (BookMake, below, does). What it
  * lays down is what a kernel meets when a volume with no book is put in
  * front of it: a Deed bearing FRAME, the Spine ring's slots
  * empty, and the files in a row from the data run's first block with the
@@ -100,9 +100,9 @@ static int FrameOnlyPlace(FileInfo* files, int file_count, char* argv[], int fir
     return 0;
 }
 
-/* The FRAME every format-v2 volume this tool makes is laid out by: the Deed's
- * grain, a grain to each Spine slot, the data run from the grain after. */
-static VolumeFrame V2Frame(void) {
+/* The FRAME every volume this tool makes is laid out by: the Deed's grain, a
+ * grain to each Spine slot, the data run from the grain after. */
+static VolumeFrame FrameLaid(void) {
     const uint32_t grain = GROUND_GRAIN_SECTORS / TAGFS_BLOCK_SECTORS;
     VolumeFrame frame;
     memset(&frame, 0, sizeof(frame));
@@ -117,7 +117,7 @@ int FrameOnlyMake(const char* disk_path, int file_count, char* argv[], int first
     FILE* disk = GroundOpen(disk_path);
     if (!disk) return 1;
 
-    VolumeFrame frame = V2Frame();
+    VolumeFrame frame = FrameLaid();
     uint64_t  volume_blocks = g_ground_sectors / TAGFS_BLOCK_SECTORS;
     FileInfo* files  = calloc(file_count > 0 ? (size_t)file_count : 1, sizeof(FileInfo));
     int       kernel = -1;
@@ -195,7 +195,7 @@ out:
         rc = 1;
     }
     if (rc == 0)
-        printf("\n[create_tagfs] The volume is made: format v2, its book not yet written.\n");
+        printf("\n[create_tagfs] The volume is made, its book not yet written.\n");
     return rc;
 }
 
@@ -203,7 +203,7 @@ out:
  *  The volume, its book bound
  *
  * The ground, the Deed and the row of files --frame-only lays, and the book a
- * kernel stands on (spec_v2 §9.3, §16.2 п.23, §16.3 п.5): the Tally of seq 1
+ * kernel stands on: the Tally of seq 1
  * — every file's header and Parcels, every tag, the digest of every block of
  * the files — in both its Tally-Quires, slot 0 of the Spine at seq 2 naming
  * it, and the ribbon's Quire and its next_quire blank. Nothing a running
@@ -218,13 +218,13 @@ out:
  * second time to be written, and every block written is held to the digest
  * the book carries for it: a file that changed between the two is refused.
  *
- * ‼ u64 THROUGH. A format-v2 volume counts its blocks in varints (§2.4) and is
+ * ‼ u64 THROUGH. A volume counts its blocks in varints (§2.4) and is
  * not held to 16 TiB; the kernel's own run alone is held to the Deed's BOOT,
  * whose fields are u32.
  * ==================================================================== */
 
-#define V2_SEQ_TALLY  1u   /* the first Tally's seq — and every run's birth, every file's gen (§16.2 п.23) */
-#define V2_SEQ_SLOT   2u   /* slot 0's */
+#define FIRST_TALLY_SEQ  1u   /* the first Tally's seq — and every run's birth, every file's gen (§16.2 п.23) */
+#define FIRST_SLOT_SEQ   2u   /* slot 0's */
 
 typedef struct {
     FILE*       disk;          /* NULL for --ground: nothing is written */
@@ -240,16 +240,16 @@ typedef struct {
     uint64_t    made_at;       /* seconds: BORN, and every file's times in ns */
     BindLeaves  leaves;
     BindPlan    plan;
-} V2Bind;
+} Binding;
 
-static int V2IdOrder(const void* a, const void* b) {
+static int IdOrder(const void* a, const void* b) {
     uint32_t x = *(const uint32_t*)a, y = *(const uint32_t*)b;
     return (x > y) - (x < y);
 }
 
 /* One file's size and tags — rising, as the book writes them (§2.9) — and
  * the role it is kept in. 0, or -1 having said why. */
-static int V2FileOf(BindFile* f, uint64_t fid, const char* path, const char* tags) {
+static int FileOf(BindFile* f, uint64_t fid, const char* path, const char* tags) {
     uint32_t* ids = NULL;
     uint32_t  n   = 0;
     FILE*     src = fopen(path, "rb");
@@ -271,7 +271,7 @@ static int V2FileOf(BindFile* f, uint64_t fid, const char* path, const char* tag
     f->size   = (uint64_t)size;
     f->blocks = (f->size + TAGFS_BLOCK_SIZE - 1u) / TAGFS_BLOCK_SIZE;
     if (parse_tags(tags, f->path, &ids, &n, &f->role) != 0) return -1;
-    qsort(ids, n, sizeof(uint32_t), V2IdOrder);
+    qsort(ids, n, sizeof(uint32_t), IdOrder);
     f->tags  = ids;
     f->ntags = n;
     return 0;
@@ -280,11 +280,11 @@ static int V2FileOf(BindFile* f, uint64_t fid, const char* path, const char* tag
 /* Every file, fid by the order given, and its place: from the data run's
  * first block, in a row, the kernel first — as --frame-only places them, but
  * an empty file takes no block. 0, or -1 having said why. */
-static int V2Place(V2Bind* v, char* argv[], int first) {
+static int BindingPlace(Binding* v, char* argv[], int first) {
     seed_reserved_tags();
     v->kernel = -1;
     for (int i = 0; i < v->count; i++) {
-        if (V2FileOf(&v->files[i], (uint64_t)i + 1u, argv[first + i * 2], argv[first + i * 2 + 1]) != 0)
+        if (FileOf(&v->files[i], (uint64_t)i + 1u, argv[first + i * 2], argv[first + i * 2 + 1]) != 0)
             return -1;
         if (v->files[i].role == TALLY_FILE_ROLE_KERNEL) v->kernel = i;
     }
@@ -313,7 +313,7 @@ static int V2Place(V2Bind* v, char* argv[], int first) {
  * of the uuid, BoxHashIntegrity bit for bit; the last block's tail zeros, as
  * written): into `digests` when `disk` is NULL; else each block written to
  * its place, and held to the digest already taken. 0, or -1 having said why. */
-static int V2FileBlocks(FILE* disk, const BindFile* f, uint64_t lane, uint64_t* digests) {
+static int FileBlocks(FILE* disk, const BindFile* f, uint64_t lane, uint64_t* digests) {
     static uint8_t block[TAGFS_BLOCK_SIZE];
     uint64_t       left = f->size;
     FILE*          src  = fopen(f->path, "rb");
@@ -350,7 +350,7 @@ static int V2FileBlocks(FILE* disk, const BindFile* f, uint64_t lane, uint64_t* 
 
 /* Room for a digest of every block of the files — and, with `read`, each
  * one taken from the files themselves. 0, or -1 having said why. */
-static int V2Digests(V2Bind* v, int read) {
+static int BindingDigests(Binding* v, int read) {
     v->digests = calloc(v->end > v->frame.data_block ? v->end - v->frame.data_block : 1u, sizeof(uint64_t));
     if (!v->digests) {
         fprintf(stderr, "No memory for the digests of %llu blocks\n",
@@ -359,7 +359,7 @@ static int V2Digests(V2Bind* v, int read) {
     }
     for (int i = 0; read && i < v->count; i++) {
         const BindFile* f = &v->files[i];
-        if (f->blocks && V2FileBlocks(NULL, f, v->lane, v->digests + (f->start - v->frame.data_block)) != 0)
+        if (f->blocks && FileBlocks(NULL, f, v->lane, v->digests + (f->start - v->frame.data_block)) != 0)
             return -1;
     }
     return 0;
@@ -367,7 +367,7 @@ static int V2Digests(V2Bind* v, int read) {
 
 /* FILES: each file's header — gen 1, ACTIVE, its size, made and modified at
  * BORN, its name and tags — and its one run as its Parcels (§2.9). */
-static int V2FileLeaves(V2Bind* v) {
+static int FileLeaves(Binding* v) {
     BindLeaves* l  = &v->leaves;
     uint64_t    ns = v->made_at * 1000000000ull;
     for (int i = 0; i < v->count; i++) {
@@ -375,13 +375,13 @@ static int V2FileLeaves(V2Bind* v) {
         uint8_t*        ids  = BindBody(l, 10u * (uint64_t)f->ntags);
         uint8_t*        body = BindBody(l, 80u + strlen(f->name) + 10u * (uint64_t)f->ntags);
         if (!ids || !body) return -1;
-        TallyFileHead h = { .gen = V2_SEQ_TALLY, .flags = TALLY_FILE_ACTIVE | f->role, .size = f->size,
+        TallyFileHead h = { .gen = FIRST_TALLY_SEQ, .flags = TALLY_FILE_ACTIVE | f->role, .size = f->size,
                             .created_ns = ns, .modified_ns = ns, .name = (const uint8_t*)f->name,
                             .name_len = strlen(f->name), .ntags = f->ntags, .tags = ids };
         h.tags_bytes = TallyIdsPut(ids, f->tags, f->ntags);
         if (BindAdd(l, TALLY_FILES, (TallyKey){ f->fid, 0 }, body, TallyFileHeadPut(body, &h), 1) != 0)
             return -1;
-        TallyRun run = { .start = f->start, .count = f->blocks, .birth = V2_SEQ_TALLY };
+        TallyRun run = { .start = f->start, .count = f->blocks, .birth = FIRST_TALLY_SEQ };
         if (BindParcels(l, f->fid, &run, f->blocks ? 1u : 0u) != 0) return -1;
     }
     return 0;
@@ -389,7 +389,7 @@ static int V2FileLeaves(V2Bind* v) {
 
 /* TAGS: every tag interned — the reserved vocabulary at its ids, and every
  * one a file wears — its key, and its value when it has one. */
-static int V2TagLeaves(V2Bind* v) {
+static int TagLeaves(Binding* v) {
     BindLeaves* l = &v->leaves;
     for (uint32_t id = 0; id < g_tag_count; id++) {
         const TagEntry* e = &g_tags[id];
@@ -405,7 +405,7 @@ static int V2TagLeaves(V2Bind* v) {
 
 /* DIGESTS: the files' blocks are one row from the data run's first block, cut
  * at every window of DIGEST_ITEM_MOST blocks (§16.3 п.1). */
-static int V2DigestLeaves(V2Bind* v) {
+static int DigestLeaves(Binding* v) {
     BindLeaves* l = &v->leaves;
     for (uint64_t b = v->frame.data_block; b < v->end;) {
         uint64_t stop = (b / DIGEST_ITEM_MOST + 1u) * DIGEST_ITEM_MOST;
@@ -422,12 +422,12 @@ static int V2DigestLeaves(V2Bind* v) {
 /* Every leaf element of the Tally, and the ground's grain and atom. USE is
  * not among them: a new volume remembers no Use Context, and an empty tree
  * is not written (§1.4). 0, or -1 having said why. */
-static int V2Leaves(V2Bind* v) {
+static int BindingLeaves(Binding* v) {
     VolumeGeometry geo = DeedGeometry();
     v->leaves.grain = geo.grain_bytes / TAGFS_BLOCK_SIZE;
     v->leaves.grid  = geo.physical_bytes > TAGFS_BLOCK_SIZE ? geo.physical_bytes / TAGFS_BLOCK_SIZE : 1u;
-    v->leaves.seq   = V2_SEQ_TALLY;
-    if (V2FileLeaves(v) != 0 || V2TagLeaves(v) != 0 || V2DigestLeaves(v) != 0) {
+    v->leaves.seq   = FIRST_TALLY_SEQ;
+    if (FileLeaves(v) != 0 || TagLeaves(v) != 0 || DigestLeaves(v) != 0) {
         fprintf(stderr, "No memory for the elements of the Tally\n");
         return -1;
     }
@@ -437,7 +437,7 @@ static int V2Leaves(V2Bind* v) {
 /* Everything written so far handed to the medium and on it before anything
  * after it is: the order a volume cut short is read in. 0, or -1 having said
  * why. */
-static int V2Settle(FILE* disk, const char* what) {
+static int MediumSettle(FILE* disk, const char* what) {
     if (fflush(disk) == 0 && fsync(fileno(disk)) == 0) return 0;
     fprintf(stderr, "The medium did not take %s\n", what);
     return -1;
@@ -449,7 +449,7 @@ static int V2Settle(FILE* disk, const char* what) {
  * volume they overwrote. Then the front blank — the Deed's grain past the
  * Deed, and the Spine's three — and the files' blocks, each held to its
  * digest. 0, or -1. */
-static int V2WriteData(V2Bind* v) {
+static int BindingWriteData(Binding* v) {
     static const uint8_t blank[TAGFS_BLOCK_SIZE];
     uint64_t tail = (v->volume_blocks - 1u) * TAGFS_BLOCK_SECTORS;
     if (write_at_sector(v->disk, 0, blank, sizeof(blank)) != 0 ||
@@ -457,7 +457,7 @@ static int V2WriteData(V2Bind* v) {
         fprintf(stderr, "Failed to blank the Deed's blocks\n");
         return -1;
     }
-    if (V2Settle(v->disk, "the Deed's blocks blanked") != 0) return -1;
+    if (MediumSettle(v->disk, "the Deed's blocks blanked") != 0) return -1;
     for (uint64_t b = 1; b < v->frame.data_block; b++) {
         if (write_at_sector(v->disk, b * TAGFS_BLOCK_SECTORS, blank, sizeof(blank)) != 0) {
             fprintf(stderr, "Failed to blank block %llu\n", (unsigned long long)b);
@@ -467,7 +467,7 @@ static int V2WriteData(V2Bind* v) {
     for (int i = 0; i < v->count; i++) {
         const BindFile* f = &v->files[i];
         if (f->blocks &&
-            V2FileBlocks(v->disk, f, v->lane, v->digests + (f->start - v->frame.data_block)) != 0)
+            FileBlocks(v->disk, f, v->lane, v->digests + (f->start - v->frame.data_block)) != 0)
             return -1;
         if (f->blocks)
             printf("  File %2d: %-40s blocks %llu-%llu\n", i + 1, f->path, (unsigned long long)f->start,
@@ -481,16 +481,16 @@ static int V2WriteData(V2Bind* v) {
 /* The book — the Tally's nodes in both copies, then slot 0 naming them — on
  * the medium with the files, and only then the Deed at both ends, on the
  * medium in its turn: a volume cut short anywhere before has no Deed at all
- * (V2WriteData blanked the one a volume before it had), never one that names
+ * (BindingWriteData blanked the one a volume before it had), never one that names
  * a book half written. 0, or -1. */
-static int V2WriteBook(V2Bind* v, char* argv[], int first) {
-    const SpineHead   head   = { V2_SEQ_TALLY, 0, 0, v->made_at * 1000000000ull };
+static int BindingWriteBook(Binding* v, char* argv[], int first) {
+    const SpineHead   head   = { FIRST_TALLY_SEQ, 0, 0, v->made_at * 1000000000ull };
     const SpineCounts counts = { (uint64_t)v->count + 1u, g_tag_count, 1 };
     VolumeBoot        boot;
     memset(&boot, 0, sizeof(boot));
-    if (BindTally(v->disk, &v->plan, v->uuid, V2_SEQ_TALLY) != 0 ||
+    if (BindTally(v->disk, &v->plan, v->uuid, FIRST_TALLY_SEQ) != 0 ||
         BindSpine(v->disk, &v->plan, v->frame.spine_block, v->leaves.grain, v->uuid, &head, &counts,
-                  V2_SEQ_SLOT) != 0)
+                  FIRST_SLOT_SEQ) != 0)
         return -1;
     if (v->kernel >= 0) {
         boot.kernel_block  = (uint32_t)v->files[v->kernel].start;
@@ -503,7 +503,7 @@ static int V2WriteBook(V2Bind* v, char* argv[], int first) {
     VolumePacked packed = PackedStamp(v->count, argv, first,
                                       v->kernel >= 0 ? v->files[v->kernel].path : NULL);
     uint64_t tail = (v->volume_blocks - 1u) * TAGFS_BLOCK_SECTORS;
-    if (V2Settle(v->disk, "the volume's files and book before its Deed") != 0) return -1;
+    if (MediumSettle(v->disk, "the volume's files and book before its Deed") != 0) return -1;
     if (FrameOnlyDeed(v->disk, VOLUME_DEED_ROLE_HEAD, 0, v->uuid, &v->frame, v->volume_blocks, v->made_at,
                       &boot, &packed) != 0 ||
         FrameOnlyDeed(v->disk, VOLUME_DEED_ROLE_TAIL, tail, v->uuid, &v->frame, v->volume_blocks, v->made_at,
@@ -511,19 +511,19 @@ static int V2WriteBook(V2Bind* v, char* argv[], int first) {
         fprintf(stderr, "Failed to write the Deed\n");
         return -1;
     }
-    if (V2Settle(v->disk, "the volume's Deed") != 0) return -1;
+    if (MediumSettle(v->disk, "the volume's Deed") != 0) return -1;
     printf("  Deed:          FRAME; far copy at sector %llu\n"
            "  Tally:         seq %u, %u node(s) twice — Tally-Quires at blocks %llu and %llu, %llu grain(s) each\n"
            "  Spine:         slot 0 at block %llu, seq %u; slots 1 and 2 blank\n"
            "  Ribbon:        its Quire at block %llu and its next_quire at %llu, blank\n",
-           (unsigned long long)tail, V2_SEQ_TALLY, v->plan.nnodes, (unsigned long long)v->plan.a,
+           (unsigned long long)tail, FIRST_TALLY_SEQ, v->plan.nnodes, (unsigned long long)v->plan.a,
            (unsigned long long)v->plan.b, (unsigned long long)v->plan.k,
-           (unsigned long long)v->frame.spine_block, V2_SEQ_SLOT, (unsigned long long)v->plan.ribbon,
+           (unsigned long long)v->frame.spine_block, FIRST_SLOT_SEQ, (unsigned long long)v->plan.ribbon,
            (unsigned long long)v->plan.next);
     return 0;
 }
 
-static void V2Release(V2Bind* v) {
+static void BindingRelease(Binding* v) {
     for (int i = 0; v->files && i < v->count; i++) free(v->files[i].tags);
     free(v->files);
     free(v->digests);
@@ -535,15 +535,15 @@ static void V2Release(V2Bind* v) {
 /* The files and the book laid out, and the book refused when the ground
  * cannot hold it. `data_end` is the far Deed's block (UINT64_MAX: no ground
  * yet, --ground asks how much). 0, or -1 having said why. */
-static int V2Lay(V2Bind* v, char* argv[], int first, uint64_t data_end, int read) {
+static int BindingLay(Binding* v, char* argv[], int first, uint64_t data_end, int read) {
     v->files = calloc(v->count > 0 ? (size_t)v->count : 1u, sizeof(BindFile));
     if (!v->files) {
         fprintf(stderr, "calloc failed\n");
         return -1;
     }
-    v->frame   = V2Frame();
+    v->frame   = FrameLaid();
     v->made_at = (uint64_t)time(NULL);
-    if (V2Place(v, argv, first) != 0) return -1;
+    if (BindingPlace(v, argv, first) != 0) return -1;
     if (v->end > data_end) {
         fprintf(stderr, "The ground claimed for BoxOS is %llu blocks, and the files laid from block %llu "
                         "need it to run to block %llu and one more for the far copy of the Deed\n",
@@ -557,19 +557,19 @@ static int V2Lay(V2Bind* v, char* argv[], int first, uint64_t data_end, int read
         WySeedLanes(v->uuid, sizeof(v->uuid), lanes);
         v->lane = lanes[0];
     }
-    return V2Digests(v, read) == 0 && V2Leaves(v) == 0 && QuireLay(&v->leaves, v->end, data_end, &v->plan) == 0
+    return BindingDigests(v, read) == 0 && BindingLeaves(v) == 0 && QuireLay(&v->leaves, v->end, data_end, &v->plan) == 0
            ? 0 : -1;
 }
 
-int V2BindMake(const char* disk_path, int file_count, char* argv[], int first) {
-    V2Bind v;
+int BookMake(const char* disk_path, int file_count, char* argv[], int first) {
+    Binding v;
     memset(&v, 0, sizeof(v));
     v.count = file_count;
     v.disk  = GroundOpen(disk_path);
     if (!v.disk) return 1;
     v.volume_blocks = g_ground_sectors / TAGFS_BLOCK_SECTORS;
-    int made = v.volume_blocks >= 2u && V2Lay(&v, argv, first, v.volume_blocks - 1u, 1) == 0 &&
-               V2WriteData(&v) == 0 && V2WriteBook(&v, argv, first) == 0;
+    int made = v.volume_blocks >= 2u && BindingLay(&v, argv, first, v.volume_blocks - 1u, 1) == 0 &&
+               BindingWriteData(&v) == 0 && BindingWriteBook(&v, argv, first) == 0;
     if (v.volume_blocks < 2u)
         fprintf(stderr, "The ground claimed for BoxOS is %llu block(s): no room for a Deed at both ends\n",
                 (unsigned long long)v.volume_blocks);
@@ -580,8 +580,8 @@ int V2BindMake(const char* disk_path, int file_count, char* argv[], int first) {
         made = 0;
     }
     if (made)
-        printf("\n[create_tagfs] The volume is made: format v2, %d file(s), its book bound.\n", file_count);
-    V2Release(&v);
+        printf("\n[create_tagfs] The volume is made: %d file(s), its book bound.\n", file_count);
+    BindingRelease(&v);
     return made ? 0 : 1;
 }
 
@@ -603,16 +603,16 @@ int V2BindMake(const char* disk_path, int file_count, char* argv[], int first) {
  * call, as long in varints.
  * ==================================================================== */
 
-int V2GroundSay(int file_count, char* argv[], int first) {
-    V2Bind v;
+int GroundSay(int file_count, char* argv[], int first) {
+    Binding v;
     memset(&v, 0, sizeof(v));
     v.count = file_count;
-    int said = V2Lay(&v, argv, first, UINT64_MAX, 0) == 0;
+    int said = BindingLay(&v, argv, first, UINT64_MAX, 0) == 0;
     if (said) {
         uint64_t grain = v.leaves.grain;
         uint64_t end   = v.plan.next + grain + (1u + 2u * v.plan.k) * grain + GROUND_WORKING_ROOM_BLOCKS + 1u;
         printf("%llu\n", (unsigned long long)((end + grain - 1u) / grain * grain * TAGFS_BLOCK_SECTORS));
     }
-    V2Release(&v);
+    BindingRelease(&v);
     return said ? 0 : 1;
 }

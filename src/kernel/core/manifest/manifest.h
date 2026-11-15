@@ -93,7 +93,7 @@ void    ManifestSubsystemShutdown(void);
  *   out_handle     : on success, opaque handle for later submit/release.
  *
  * Validation performed:
- *   - magic, version, total_size sanity
+ *   - magic, total_size sanity
  *   - op_count > 0
  *   - each ManifestOp fits within total_size
  *   - each op_kind is registered in OpRegistry

@@ -1,6 +1,6 @@
 /*
  * dog_ear_host — DogEar, the keys of a book's trees changed since the Tally
- * the next one is laid against (spec_v2 §16.5 п.9), held on the host with the
+ * the next one is laid against, held on the host with the
  * kernel's own settle/dog_ear.c and file_map/ (`make dog-ear-host`;
  * tools/dog_ear_host.h stands in for the rest of the kernel): seconds, no
  * machine.

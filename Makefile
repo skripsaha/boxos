@@ -584,10 +584,10 @@ SETTLECUT_MARK = $(BUILDDIR)/.settlecut.$(if $(SETTLECUT),at-$(SETTLECUT),unset)
 
 # ── TOLL=spare ─────────────────────────────────────────────────────────────
 #
-# Every format-v2 stitch that names fresh data, the halt's CLEAN one apart, is
+# Every stitch that names fresh data, the halt's CLEAN one apart, is
 # begun before the flush of that data whatever its toll would judge (sewing.c
-# StitchToll), so the mount reads every block of it back against its digest
-# (spec_v2 §3.3). A lever of PowerCut's chains (tools/powercut_book.sh,
+# StitchToll), so the mount reads every block of it back against its digest.
+# A lever of PowerCut's chains (tools/powercut_book.sh,
 # PC_TOLLED): their record must hold a cut that kept a stitch and lost data it
 # names (C3), and the toll judges by the pace the medium's reads keep and the
 # last cycle's length — a loaded host can have it pay every flush of a run, and
@@ -609,8 +609,8 @@ TOLL_MARK = $(BUILDDIR)/.toll.$(if $(TOLL),$(TOLL),unset)
 # writes, every read command on the volume's seat waits <us> microseconds
 # before its driver is handed it (core/boardroom/block_fail.h,
 # BlockFailReadLag) — so the mount's check of a book's newest stitch is held
-# to the D its writer judged it by on a medium that seeks (spec_v2 §3.3,
-# M-13). A lever of the stand: only with VOLUME_TESTS=on.
+# to the D its writer judged it by on a medium that seeks (M-13). A lever of
+# the stand: only with VOLUME_TESTS=on.
 SEEKLAG ?=
 ifneq ($(SEEKLAG),)
 ifneq ($(VOLUME_TESTS),on)
@@ -1013,7 +1013,7 @@ TAGFS_OS_SIGNATURE = $(BUILDDIR)/.tagfs_host_os.$(UNAME_S).$(UNAME_M)
 # ($(filter %.c,$^)): a .c that is not here is not in the tool either, and the
 # link says so instead of a stale part going on writing.
 $(TAGFS_TOOL): tools/create_tagfs.c tools/create_tagfs_ground.c tools/create_tagfs_cargo.c \
-               tools/create_tagfs_v2.c tools/create_tagfs_bind.c \
+               tools/create_tagfs_book.c tools/create_tagfs_bind.c \
                tools/create_tagfs.h tools/create_tagfs_bind.h \
                $(SRCDIR)/include/tagfs_reserved.h \
                $(SRCDIR)/include/volume_deed.h \

@@ -5197,7 +5197,7 @@ What is left:
 - `✓` **`tagfs_delete_file` did not unregister the blocks it freed from the
   dedup index.** Found while writing the truncate path above. Gone with the
   index: Dedup was deleted in Quill step 1.3 (nothing on the write path ever
-  consulted it), and deduplication comes back as a working part of format v2.
+  consulted it), and deduplication comes back as a working part of the book.
 - **The file backing now accepts `CURRENT_READ | CURRENT_WRITE`.** Every other
   Current still takes exactly one role, and a Brook end explicitly rejects the
   combination — a producer and a consumer open different objects. A file is one

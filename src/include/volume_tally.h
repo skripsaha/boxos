@@ -4,20 +4,19 @@
 /*
  * The Tally's nodes and the Spine's slots — how each is written and read.
  *
- * A format-v2 volume keeps what it knows of its files in a book (volume_book.h
+ * A volume keeps what it knows of its files in a book (volume_book.h
  * says how every sector of it is lettered). Two parts of the book are written
  * here: the Tally, a set of trees of nodes that sums up everything the ribbon
- * of stitches has said (spec_v2 §2.9), and the slots of the Spine ring, each
- * naming one Tally and where the ribbon goes on from it (§1.4). A node and a
+ * of stitches has said, and the slots of the Spine ring, each naming one
+ * Tally and where the ribbon goes on from it. A node and a
  * slot are each a stream of records across the sectors of one unit — a SHEET
  * of 8 * sheets sectors, a SLOT of 8 — and nothing in them has a width but
  * u64's: every number is a varint.
  *
  * ‼ ONE CODEC FOR EVERY WRITER AND READER OF THEM. mkfs writes the first Tally
- * of every format-v2 volume with this (tools/create_tagfs_bind.c), and
- * volume-read on the host says the same again by its own code
- * (tools/volumeread/tally.py). The kernel of this tree reads no book yet — it
- * turns a format-v2 volume away (deed.c, DeedFormatRefused) — but its book
+ * of every volume with this (tools/create_tagfs_bind.c), the kernel reads and
+ * binds every Tally after it with this, and volume-read on the host says the
+ * same again by its own code (tools/volumeread/tally.py). The kernel's book
  * suite (book_tests.c) holds this codec to the sums below on every boot that
  * mounts a volume, and no second codec of these records is to be written
  * beside it. So the golden node and the golden slot are sums all three must

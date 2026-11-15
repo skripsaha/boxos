@@ -63,7 +63,7 @@ int main(int argc, char* argv[]) {
     /* --ground answers a question about a file list and touches no medium. */
     if (argc >= 2 && strcmp(argv[1], "--ground") == 0) {
         if (!KernelOptionTake(&argc, argv, 2) || (argc - 2) % 2 != 0) return Usage(argv[0]);
-        return V2GroundSay((argc - 2) / 2, argv, 2);
+        return GroundSay((argc - 2) / 2, argv, 2);
     }
 
     /* --frame-only lays a Deed over files and writes no book. */
@@ -74,5 +74,5 @@ int main(int argc, char* argv[]) {
 
     if (!KernelOptionTake(&argc, argv, 1) || argc < 2 || (argc - 2) % 2 != 0 || argv[1][0] == '-')
         return Usage(argv[0]);
-    return V2BindMake(argv[1], (argc - 2) / 2, argv, 2);
+    return BookMake(argv[1], (argc - 2) / 2, argv, 2);
 }

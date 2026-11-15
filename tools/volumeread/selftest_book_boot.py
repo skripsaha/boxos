@@ -1,5 +1,5 @@
 """selftest_book_boot — group A: the landings the UEFI loader's Lectern is held
-to (spec_v2 §16.7 пп.3–6): the kernel BOOT names on the book as a binder lays
+to: the kernel BOOT names on the book as a binder lays
 it, attested; the DIGESTS leaf that names its first block rotten in its first
 copy — the second read, attested — and in both — not attested, and loaded
 for nothing shows it broken; the newest slot torn, and a newer slot whose

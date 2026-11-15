@@ -2,7 +2,7 @@
 volume stands, its uuid, its FRAME and what follows from it, and its sectors,
 each read once and judged as a sector of the book.
 
-Everything here is the book's (spec_v2 §1.2, §2.1), shared by the slots, the
+Everything here is the book's, shared by the slots, the
 Tally and the ribbon; where on the medium the volume stands is medium.py's.
 """
 
@@ -16,7 +16,7 @@ class BookGround:
     what follows from it, and its sectors, each read once and judged as a
     sector of the book (volume_book.h BookSectorCheck) — every one that holds
     counted into `top_seq`, for the next seq is past everything the mount saw
-    hold (spec_v2 §2.2)."""
+    hold."""
 
     def __init__(self, medium, forced_start=None):
         st = StandOnDeed(medium, forced_start)

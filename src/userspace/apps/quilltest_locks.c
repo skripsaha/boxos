@@ -151,8 +151,8 @@ static void QuillAbbaName(char out[QUILL_ABBA_NAME_CAP], const char *name, const
  * be, so each is the biggest registry record a name makes (6 bytes and 31)
  * and the host counts how many fill a block. The run's number is the file id
  * of its rename file, which no earlier run was given, so every run's tags are
- * new — ten digits carry every id below 10^10, past every 32-bit id a format v1
- * volume issues. False once the index no longer fits. */
+ * new — ten digits carry every id below 10^10, past every 32-bit id. False
+ * once the index no longer fits. */
 static bool QuillAbbaGrowName(char out[QUILL_ABBA_NAME_CAP], const char *name, file_id_t run,
                               uint32_t index)
 {

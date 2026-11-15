@@ -1,7 +1,7 @@
 # parcel-host — the kernel's own file_map/ built for the host, unchanged
 # (tools/parcel_host.h stands in for the kernel headers it reaches), and what a
 # write into a file of 1 GiB keeps of the heap held to one Parcel and the
-# record's head (tools/parcel_host.c, spec_v2 §10.4): seconds, no machine. Not
+# record's head (tools/parcel_host.c): seconds, no machine. Not
 # a part of `make`; a harness asks for it.
 PARCEL_HOST      := $(BUILDDIR)/parcel_host
 PARCEL_HOST_SRCS := tools/parcel_host.c $(addprefix $(SRCDIR)/kernel/tagfs/file_map/,file_record.c \

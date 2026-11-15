@@ -1,6 +1,6 @@
 /*
  * The Lectern's walk of a tree's leaves in key order — FILES, for the files
- * the system keeps in a role (spec_v2 §16.7 п.3) — and the files it follows,
+ * the system keeps in a role — and the files it follows,
  * kept by fid.
  *
  * A walk holds one node a level: the path from the root to the leaf in hand,

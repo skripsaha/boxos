@@ -35,7 +35,7 @@ sector n-1 and every 4 KiB boundary — and the plan counts the prefixes it did
 not tear. A book's stitch is torn after every sector it has wherever it
 stands in its epoch, the writes before it kept: a stitch is one unit
 whatever windows it went out in, and a power cut in any 512-byte quantum of
-it is a cut the mount must take (spec_v2 §3.10 C2), so no quantum of one is
+it is a cut the mount must take (C2), so no quantum of one is
 left to a sample. An epoch with nothing left unbuilt is enumerated whole, and only
 there does a defect's absence say anything: a sample cannot show one is gone —
 and neither can a record a writer kept writing (a step --noquiet), whose cuts
@@ -476,8 +476,8 @@ class Run:
 
     def CommitWrites(self, step):
         """The step's own writes that commit what it changed: entries in (before,
-        ack] that touch a stitch — the unit a Settle cycle commits by (spec_v2
-        §3.2) — or a slot, the one a Tally does (COMMIT_KINDS)."""
+        ack] that touch a stitch — the unit a Settle cycle commits by — or a
+        slot, the one a Tally does (COMMIT_KINDS)."""
         return [w["seq"] for w in self.listing["writes"] if step["before"] < w["seq"] <= step["ack"]
                 and any(t["kind"] in COMMIT_KINDS for t in w["touches"])]
 
@@ -514,7 +514,7 @@ class Run:
         took the writer": no further than the record holds entries past FROM,
         nor than HELD, the seq the final state reads back — the final state is
         every write of the record, so no cut of it holds a newer record. A
-        writer's 16 bytes ride the stitches as a Slip (spec_v2 §2.8): thousands
+        writer's 16 bytes ride the stitches as a Slip: thousands
         of records between two stitches, the newest stitch carrying the last.
         Read off the medium and never off the writer's log, whose lines reach
         the serial port through the display's lane after its writes — a halt

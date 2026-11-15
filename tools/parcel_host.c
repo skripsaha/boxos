@@ -2,7 +2,7 @@
  * parcel_host — what a write into a file of 1 GiB copies, measured on the host
  * with the kernel's own file_map/ (`make parcel-host`; tools/parcel_host.h).
  *
- * spec_v2 §10.4, step 2.3: a random overwrite of a block of a file of 1 GiB
+ * A random overwrite of a block of a file of 1 GiB
  * copies in memory no more than one Parcel and the record's head. The stand
  * holds it on a file of 32 MiB (stand_fresh_parcel_copied) — a stand image
  * has no room for 1 GiB — so here the file is 1 GiB of runs: 262 144 blocks

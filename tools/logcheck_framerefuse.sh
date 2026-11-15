@@ -34,7 +34,7 @@
 # what the volume does not remember — and remembered, a stitch on its ribbon —
 # `anchor_test` asked to write and anchor a file of 128 bytes, less than a
 # block, so its bytes ride a Slip in the stitch that anchors it and no block
-# of data is written (spec_v2 §2.8: a new small file is born with one HOLE run
+# of data is written (a new small file is born with one HOLE run
 # and a Slip; its block is written once the tail fills it, or before a Tally,
 # and three stitches owe no Tally) — and the power button pressed, the halt
 # laying its last stitch — and every write that lands in the volume's ground
@@ -435,7 +435,7 @@ run_framerefuse() {
     framerefuse_leg build/kernel.bin "$FRAMEREFUSE_BOOK_SAYS" book ""
     framerefuse_leg build/kernel.bin "$FRAMEREFUSE_BLANK_SAYS" uefi --frame-only UEFI=on
     local L="$SCRATCH/serial.framerefuse.uefi.log"
-    grep -aqE "^TagBoot: volume on ground at sector [0-9]+, a format-v2 book with its data run from block 1024" "$L"
+    grep -aqE "^TagBoot: volume on ground at sector [0-9]+, a book with its data run from block 1024" "$L"
     chk $? "framerefuse (uefi): TagBoot reads the deed's FRAME ($(grep -a '^TagBoot: volume on ground' "$L" | tr -d '\r' | head -1))"
     grep -aq "^TagBoot: the deed names the kernel" "$L"
     chk $? "framerefuse (uefi): and takes the kernel where the deed's BOOT names it"
@@ -446,7 +446,7 @@ run_framerefuse() {
         "this deed's FRAME does not hold: its Spine ring has fewer than two slots, which is no ring" \
         "$FRAMEREFUSE_PASSED_OVER"
     framerefuse_tagboot block=8192 \
-        "this format-v2 volume was laid out in 8192-byte blocks and this loader speaks 4096" \
+        "this volume was laid out in 8192-byte blocks and this loader speaks 4096" \
         "$FRAMEREFUSE_PASSED_OVER"
     framerefuse_tagboot bootout "this deed's BOOT names blocks outside its data run" \
         "$FRAMEREFUSE_PASSED_OVER"

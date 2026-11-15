@@ -1,5 +1,5 @@
-"""stitch_ribbon — the ribbon walked from the slot a mount stands on (spec_v2
-§4.5 п.5, pass 1): the stitches sewn on and the Quires the chain runs through,
+"""stitch_ribbon — the ribbon walked from the slot a mount stands on (the
+mount's pass 1): the stitches sewn on and the Quires the chain runs through,
 then the direct scan of what lies past its end, each unit there joined into its
 branch (§2.2, §3.9). The records it reads, a unit's three classes and the place
 a unit lies in are stitch.py's."""

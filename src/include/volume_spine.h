@@ -2,8 +2,8 @@
 #define VOLUME_SPINE_H
 
 /*
- * The Spine's slots judged, and the slot a book is read from chosen (spec_v2
- * §1.4) — the decisions, not the reads: every sector of a slot and every node
+ * The Spine's slots judged, and the slot a book is read from chosen — the
+ * decisions, not the reads: every sector of a slot and every node
  * a root names is read by the caller off its own medium, and handed here as
  * bytes.
  *

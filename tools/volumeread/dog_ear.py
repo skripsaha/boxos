@@ -1,7 +1,6 @@
 """dog_ear — the keys of the book's trees the stitches past a slot's `at`
-changed, and what a Tally laid in after them is reckoned to cost (spec_v2
-§4.2, §16.5 пп.9, 16; the kernel's settle/dog_ear.c and settle/binder_cost.c,
-one rule with both).
+changed, and what a Tally laid in after them is reckoned to cost (the
+kernel's settle/dog_ear.c and settle/binder_cost.c, one rule with both).
 
 A stitch changes, of FILES, every file it carries a record of: the header of
 one changed, and every Parcel of either side the other does not hold at the

@@ -3,7 +3,7 @@
  *
  * The tool is one program in parts: the modes (create_tagfs.c), the ground
  * and the I/O on it (create_tagfs_ground.c), the files and the tags they are
- * packed with (create_tagfs_cargo.c), and the writer (create_tagfs_v2.c) —
+ * packed with (create_tagfs_cargo.c), and the writer (create_tagfs_book.c) —
  * --frame-only, a Deed with no book behind it, and the volume with its book
  * bound by create_tagfs_bind.c (create_tagfs_bind.h). What the parts share is
  * named here, once.
@@ -101,11 +101,11 @@ VolumePacked PackedStamp(int file_count, char* argv[], int first,
 void         CargoRelease(void);
 
 /* ====================================================================
- * The writer (create_tagfs_v2.c) — --frame-only, the volume, and --ground
+ * The writer (create_tagfs_book.c) — --frame-only, the volume, and --ground
  * ==================================================================== */
 
 int FrameOnlyMake(const char* disk_path, int file_count, char* argv[], int first);
-int V2BindMake(const char* disk_path, int file_count, char* argv[], int first);
-int V2GroundSay(int file_count, char* argv[], int first);
+int BookMake(const char* disk_path, int file_count, char* argv[], int first);
+int GroundSay(int file_count, char* argv[], int first);
 
 #endif /* CREATE_TAGFS_H */

@@ -2,10 +2,10 @@
 #define TAGBOOT_LECTERN_H
 
 /*
- * The Lectern — the UEFI loader's reader of a format-v2 volume's book — and
+ * The Lectern — the UEFI loader's reader of a volume's book — and
  * the Succession of kernels it is asked for: which kernel the loader jumps
  * into, each one tried held to the digests the book keeps of its blocks
- * before the jump (spec_v2 §16.7 пп.2–6; §9.2).
+ * before the jump.
  *
  * The book is read as the kernel's mount stands on it (§1.4, §4.5): every slot
  * of the Spine judged by the one rule every reader of a slot keeps
@@ -19,7 +19,7 @@
  * base, an Undone passing over what it names (§16.7 п.5); and every file of
  * FILES kept in one, role by role — kernel, boot, system — the newest gen
  * first. Each kernel is
- * held to its header (KERNEL at byte 2, the version at byte 8), placed where
+ * held to its header (KERNEL at byte 2), placed where
  * it is jumped into, and its every block held to its digest — the record of
  * the ribbon that put it in, or DIGESTS: the first attested is jumped into;
  * one found broken is named and passed; one the book cannot vouch for is put

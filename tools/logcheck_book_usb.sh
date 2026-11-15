@@ -1,5 +1,5 @@
 # logcheck_book_usb — the book's third road for tools/logcheck.sh: the startup
-# tests that write, on a format-v2 volume on a USB stick (stand_book, and
+# tests that write, on a volume on a USB stick (stand_book, and
 # standusb).
 #
 # SOURCED, NEVER RUN — by logcheck.sh, after logcheck_book.sh, whose judge of

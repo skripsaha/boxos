@@ -62,7 +62,7 @@
 /* ─────────────────────────────────────────────────────────────────────
  * Page class. We deal in two classes only: 4 KiB (PMM_PAGE_SIZE) and
  * 2 MiB (VMM_LARGE_PAGE_2M_SIZE). 1 GiB would require BUDDY_MAX_ORDER
- * to be bumped from 14 to 18 — out of scope for v1.
+ * to be bumped from 14 to 18.
  *
  * BAY_HUGE_THRESHOLD is the cut-off at which we try 2 MiB chunks; it
  * equals the chunk size by design so a single chunk is always at least

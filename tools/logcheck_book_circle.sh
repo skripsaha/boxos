@@ -12,7 +12,7 @@
 #
 # What the kernel lays on a book is read again by the kernel's own reader and
 # by volume-read's, written apart from it (settle/sewing.c against
-# stitch.py / bookmount.py). A plain image of format v2 is booted; in the guest
+# stitch.py / bookmount.py). A plain image is booted; in the guest
 # the person says a Use Context (`use circle sewn`) — a stitch with its
 # UseContext, the tags the boot gave ids in Coineds — a program makes, tags,
 # renames, untags and gives up files in three anchored rounds (`quilltest

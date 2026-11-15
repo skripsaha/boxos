@@ -1,7 +1,7 @@
 # logcheck_bookboot — the bookboot scenario of tools/logcheck.sh: the kernel a
-# format-v2 volume's BOOT names, held by TagBoot to the book before the jump
-# (spec_v2 §16.7 пп.4, 6 — the Lectern reads the book, Attest holds each block
-# of the kernel to its digest).
+# volume's BOOT names, held by TagBoot to the book before the jump (the
+# Lectern reads the book, Attest holds each block of the kernel to its
+# digest).
 #
 # SOURCED, NEVER RUN — by logcheck.sh, which dispatches `bookboot` to
 # run_bookboot here; everything it calls (build, chk, bad, harness, the waits)
@@ -11,7 +11,7 @@
 # ---------------------------------------------------------------------------
 # bookboot: TagBoot jumps only into a kernel the book says its blocks are the
 # ones it keeps the digests of — BOOT's first, then the kernels the book names
-# by role (spec_v2 §16.7 пп.3–6)
+# by role
 #
 # First on the host, no machine: the Lectern TagBoot links, built for the host
 # (tools/tagboot_stand.sh), says of the image and of every landing of

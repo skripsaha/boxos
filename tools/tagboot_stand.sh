@@ -6,7 +6,7 @@
 #
 #     tools/tagboot_stand.sh [IMAGE]
 #
-# IMAGE (build/boxos.img when none is named) is a format-v2 volume. Every
+# IMAGE (build/boxos.img when none is named) is a volume. Every
 # landing of self-test's group A is written out of it (--emit) — the kernel
 # BOOT names attested, its DIGESTS leaf rotten in one copy and in both, the
 # newest slot torn, a newer slot whose DIGESTS root does not read, the Spine's
@@ -18,10 +18,9 @@
 # what the stand says (tools/tagboot_stand.c) must be what `volume-read boot`
 # says: the slots passed over, the slot stood on, every node read past a copy
 # that did not hold, the ribbon and its records, each kernel tried and its
-# verdict, and the one TagBoot jumps into or the sentence it stops on (spec_v2
-# §16.7 пп.2–6). Built under the address and undefined-behaviour sanitizers:
-# the Lectern parses what a medium hands it. The last line counts the
-# landings that held.
+# verdict, and the one TagBoot jumps into or the sentence it stops on. Built
+# under the address and undefined-behaviour sanitizers: the Lectern parses
+# what a medium hands it. The last line counts the landings that held.
 
 set -u
 

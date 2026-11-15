@@ -1,7 +1,7 @@
 # tip-in-host — TipIn's choice of what a Tally lays anew and what it names as
 # it lies, held on the host with the kernel's own settle/tip_in.c, settle/
 # dog_ear.c and file_map/ (tools/dog_ear_host.h stands in for the rest of the
-# kernel; tools/tip_in_host.c, spec_v2 §4.1, §16.5 п.16, §10.4 step 2.4): a
+# kernel; tools/tip_in_host.c): a
 # leaf laid anew for each changed key and a neighbour beside each row, the
 # inner nodes above them and no other; a file of 1 GiB written over 10 000
 # times, a Tally after each write, its nodes counted — seconds, no machine. Not

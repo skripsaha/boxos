@@ -18,7 +18,7 @@ uint32_t  g_tag_count  = 0;
 static uint32_t  g_tag_cap    = 0;
 
 /* The last tag id the kernel gives a volume (tagfs_constants.h, which a host
- * tool cannot include): bit 31 is its Logbook's (spec_v2 §6.4). The book
+ * tool cannot include): bit 31 is its Logbook's. The book
  * writes an id as a varint and has no width of its own, but a volume naming
  * an id past this one is a volume the kernel may only read (tally.py
  * TagGlass) — so the cargo interns none past it. */

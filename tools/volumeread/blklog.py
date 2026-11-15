@@ -18,8 +18,8 @@ Reading it:
 
 A crash state is `base + every write of the epochs before K + a subset of epoch
 K [+ torn writes of epoch K]`, applied in log order, built as an overlay over
-the base without copying it. A medium that lied is built the same way, apart
-(spec_v2 §16.5 п.21): Blot leaves out named writes of the epochs before K —
+the base without copying it. A medium that lied is built the same way, apart:
+Blot leaves out named writes of the epochs before K —
 writes a flush the medium answered stood behind, and it did not keep — and
 Smudge lays named sectors last, as bytes no writer laid: the rest of a flash
 page a write in flight tore. Writes in flight across a flush may have landed

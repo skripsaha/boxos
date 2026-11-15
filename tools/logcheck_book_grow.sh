@@ -1,11 +1,11 @@
-# logcheck_book_grow — a format-v2 volume taking the ground behind it:
+# logcheck_book_grow — a volume taking the ground behind it:
 #
 #   logcheck.sh grow      a book on a bigger medium takes the
 #                         rest, after its mount has read it and before the door
 #                         — its data run ends at the new far Deed, its block
 #                         map counts the new ground free, volume-read reads the
 #                         grown book, and the next mount finds nothing to take
-#   logcheck.sh growcut   C11 (spec_v2 §3.10): the power cut
+#   logcheck.sh growcut   C11: the power cut
 #                         between the far Deed's write and the head's — built
 #                         on the host from the record of the boot that grew,
 #                         not emulated — leaves a volume of its old size, read
@@ -145,7 +145,7 @@ grow_book_after() {
 }
 
 run_growbook() {
-    echo "== grow, a book: a volume of format v2 on a bigger medium takes the ground behind it after its book is read =="
+    echo "== grow, a book: a volume on a bigger medium takes the ground behind it after its book is read =="
     local img="$SCRATCH/growbook.img" said start count before db
     said=$(grow_book_image growbook) || { bad "growbook: no stretched book — ${said:-not built}"; buildkey_restore; return; }
     start=${said% *}; count=${said#* }

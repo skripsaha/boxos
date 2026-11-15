@@ -1,5 +1,5 @@
 """selftest_book_escheat — the book's landings of a rotten range a Tally after
-it no longer leaves rotten (spec_v2 §4.5 п.3, §16.5 п.19-20): a leaf of FILES
+it no longer leaves rotten: a leaf of FILES
 laid anew between two slots, the newer copy rotten in both, read from the older
 slot's Tally and the older slot's ribbon replayed for its keys (Facsimile); a
 leaf both slots name as it lies, rotten, which no older slot can stand in for;

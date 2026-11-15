@@ -7,7 +7,7 @@
 
 /*
  * quilltest escheat — Escheat asked on a book whose Tally names a rotten range
- * (logcheck book_escheat; spec_v2 §16.5 п.20):
+ * (logcheck book_escheat):
  *
  *   refused   the program takes the system tag off itself first, then asks:
  *             a cabin wearing neither system nor god is refused — at the

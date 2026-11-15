@@ -10,7 +10,7 @@
  * it holds it, already turned into the room's 512-byte sectors: IDENTIFY word
  * 209 by ata_identify.h for an ATA disk and an AHCI port, READ CAPACITY(16)'s
  * LOWEST ALIGNED LOGICAL BLOCK ADDRESS by xhci_msd.c for a USB unit. Its own
- * file beside the Boardroom's: a question of a format-v2 volume's ground,
+ * file beside the Boardroom's: a question of a volume's ground,
  * asked of the seats through their public face (seat kind and index).
  */
 void BoardroomSeatGrid(uint8_t seat, uint32_t* physical, uint64_t* first_aligned)

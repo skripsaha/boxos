@@ -4,8 +4,7 @@
 #include "ktypes.h"
 
 /*
- * ReadPace — what the volume's medium is seen to take to read (spec_v2 §3.3,
- * §16.5 п.2).
+ * ReadPace — what the volume's medium is seen to take to read.
  *
  * A book's cycle pays the flush of its data before its stitch only when the
  * mount's check of that data would cost more than the last cycle did

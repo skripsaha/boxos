@@ -65,7 +65,7 @@ static EFI_STATUS DeedTakeFrame(const uint8_t *raw, const VolumeDeed *deed,
         (const VolumeGeometry *)DeedStampOf(raw, VOLUME_STAMP_GEOMETRY, &geo_bytes);
     uint32_t block_bytes = (geo && geo_bytes >= sizeof(VolumeGeometry)) ? geo->block_bytes : 0;
     if (block_bytes != VOLUME_BLOCK_BYTES) {
-        Print("TagBoot: this format-v2 volume was laid out in ");
+        Print("TagBoot: this volume was laid out in ");
         PrintDec(block_bytes);
         Print("-byte blocks and this loader speaks ");
         PrintDec(VOLUME_BLOCK_BYTES);
@@ -125,7 +125,7 @@ EFI_STATUS DeedTakeUp(const uint8_t *deed_block, uint64_t ground_start)
 
     Print("TagBoot: volume on ground at sector ");
     PrintDec(ground_start);
-    Print(", a format-v2 book with its data run from block ");
+    Print(", a book with its data run from block ");
     PrintDec(g_frame.data_block);
     Print("\r\n");
     return EFI_SUCCESS;

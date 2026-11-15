@@ -1,11 +1,10 @@
-"""bookmount — a format-v2 volume mounted on the host, the way spec_v2 §4.5
-mounts it: the Spine's slots (п.2), the Tally of the newest slot whose roots
-read (п.3, the rotten ranges below a root said, not refused), the Tallies of
-the other slots for the ground they hold (п.4), the ribbon from that slot's
-`at` (п.5: pass 1 in stitch_ribbon.Ribbon, pass 2 here — every record through
-the one rule of §3.7, a file's records held to its base), the data of the
-newest stitch held to its digests (п.6), and the numbers never given again
-(п.8).
+"""bookmount — a volume mounted on the host, the way the kernel mounts it:
+the Spine's slots, the Tally of the newest slot whose roots read (the rotten
+ranges below a root said, not refused), the Tallies of the other slots for
+the ground they hold, the ribbon from that slot's `at` (pass 1 in
+stitch_ribbon.Ribbon, pass 2 here — every record through one rule, a file's
+records held to its base), the data of the newest stitch held to its
+digests, and the numbers never given again.
 
 It writes nothing and decides everything a mount decides: which slot, which
 files are live and which locked, what of their blocks lies fallow, the next

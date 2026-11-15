@@ -373,7 +373,7 @@ def DurableTests(pc, Want, Synthetic):
     before the halt, and no newer than the medium took: the final state is
     every write of the record, and the seq quilltest verify reads back off it
     is the newest record of the writer's any cut of the record holds. On a book
-    its 16 bytes ride the stitches as a Slip (spec_v2 §2.8), thousands of
+    its 16 bytes ride the stitches as a Slip, thousands of
     records between two stitches, so the record's count of writes bounds
     nothing there; nor does the writer's own word, whose lines reach the
     serial port through the display's lane after its writes, and a halt ends
@@ -611,10 +611,10 @@ def LieLostTests(pc, Want, Blot):
 
 
 def LieAtomTests(pc, Want, Synthetic, lie):
-    """A removable medium's ribbon on an atom of a flash page (spec_v2
-    §16.6 п.2): the page Smudge tears is the page the kernel lifts the atom
-    to, and a stitch laid on that atom wipes no settled one; on an atom of a
-    block the stitch in flight wipes the one before it whole, smudge:wiped's
+    """A removable medium's ribbon on an atom of a flash page: the page
+    Smudge tears is the page the kernel lifts the atom to, and a stitch laid
+    on that atom wipes no settled one; on an atom of a block the stitch in
+    flight wipes the one before it whole, smudge:wiped's
     FAIL (C18). The last two a guard: the oracle reads the stitches where the
     record lays them."""
     here = os.path.dirname(os.path.abspath(__file__))
@@ -693,7 +693,7 @@ def SmudgeRowTests(pc, Want, Synthetic, lie):
     Want(Smudge([[1, [994, 995]]], {"m1-0-t": lost})[1] == "fail",
          "stitch 1 at 994-995, wholly inside the page of stitch 2 in flight, nothing of either left: a settled "
          "stitch lost with no word — smudge:wiped fails, the format's answer the owner's to give")
-    # The owner's answer (spec_v2 §16.6 п.5): on a fixed medium the ribbon
+    # The owner's answer: on a fixed medium the ribbon
     # keeps the medium's own atom, and the settled stitches a spoilt page
     # wipes whole with nothing past them — the newest, and those before it on
     # its page — are the format's limit there: a caveat, signed by the machine
