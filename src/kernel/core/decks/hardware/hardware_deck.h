@@ -12,8 +12,7 @@ error_t HardwareDeckRegister(void);
 
 /*
  * Prove, on this machine, that asking the hardware deck to put a USB controller
- * back in service does it — and that the two withdrawn opcodes answer to
- * nothing. Runs once, on the first pass through the idle or guide loop with a
+ * back in service does it. Runs once, on the first pass through the idle or guide loop with a
  * controller in service and a volume mounted; that is a fact about the machine
  * and not a moment waited for.
  *

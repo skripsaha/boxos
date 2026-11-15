@@ -2866,12 +2866,7 @@ run_usbrecover() {
     cp build/serial.log "$SCRATCH/serial.usbrecover.log"
     L="$SCRATCH/serial.usbrecover.log"
 
-    # The surface first: the two opcodes that used to break the machine are
-    # withdrawn, and their numbers answer to nothing rather than to something
-    # else. hw.usb.reset is still there and still system-only.
-    grep -q "the two withdrawn opcodes answer to nothing" "$L"
-    chk $? "hw.usb.init and hw.usb.stop are gone and their numbers are spent"
-
+    # The surface first: hw.usb.reset is there and system-only.
     grep -q "hw.usb.reset is registered, system-only" "$L"
     chk $? "hw.usb.reset is still there, and still system-only"
 

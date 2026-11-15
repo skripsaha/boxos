@@ -21,10 +21,13 @@
  *    userspace: src/userspace/boxlib/src/X.c includes it
  *
  *  Sections are grouped by byte range so a new op is a one-line edit in the
- *  right block and can't collide silently with an existing range.
+ *  right block and can't collide silently with an existing range. Inside a
+ *  section the numbers are dense: until the first release, an op that goes
+ *  takes its number with it and the ops after it close up — every deck below
+ *  keeps this rule.
  * ============================================================================ */
 
-/* ─── Process + info (0x01 – 0x0C) ─────────────────────────────────── */
+/* ─── Process + info (0x01 – 0x0D) ─────────────────────────────────── */
 #define SYSTEM_OP_PROC_SPAWN        0x01
 #define SYSTEM_OP_PROC_KILL         0x02
 #define SYSTEM_OP_PROC_INFO         0x03
@@ -83,14 +86,13 @@
 #define SYSTEM_OP_INFO              0x07
 #define SYSTEM_OP_TLS_FSBASE        0x0A  /* set caller's FS base (its own thread pointer) */
 
-/* 0x10 – 0x12 were the buffer registry — an allocator no program ever
- * submitted to, removed with it; the numbers stay unassigned. */
+/* ─── Memory (0x10) ─────────────────────────────────────────────────── */
 /* Implicit huge-page prefault — boxlib memory.c calls this when growing
  * the user heap by >= 2 MB so the kernel pre-backs the new VA range with
  * 2 MB pages instead of waiting for 4 KB demand paging. The pre-fault
  * path falls back to 4 KB transparently if PMM cannot deliver a 2 MB
  * chunk. Params: [u64 va_base][u64 size]. */
-#define SYSTEM_OP_HEAP_PREFAULT     0x14
+#define SYSTEM_OP_HEAP_PREFAULT     0x10
 
 /* ─── System telemetry (0x18 – 0x1B) ───────────────────────────────── */
 #define SYSTEM_OP_DEFRAG_FILE       0x18
@@ -149,7 +151,7 @@
 #define SYSTEM_OP_BAY_RELEASE       0x71
 #define SYSTEM_OP_BAY_SIZE          0x72
 
-/* ─── Brook — SPSC ordered streaming (0x75 – 0x7A) ─────────────────── */
+/* ─── Brook — SPSC ordered streaming (0x75 – 0x78) ─────────────────── */
 /* open attaches with role + maps header/slots; release drops the claim
  * (last release destroys backing); handover moves the writer/reader seat
  * to a sibling strand of the SAME cabin, leaving the mapping where it is;
@@ -157,7 +159,7 @@
 #define SYSTEM_OP_BROOK_OPEN        0x75
 #define SYSTEM_OP_BROOK_RELEASE     0x76
 #define SYSTEM_OP_BROOK_HANDOVER    0x77  /* (u64 va_header)(u32 to_pid)   */
-#define SYSTEM_OP_BROOK_INFO        0x7A
+#define SYSTEM_OP_BROOK_INFO        0x78
 
 /* ─── Manifest compile-and-reuse (0x80 – 0x81) ─────────────────────── */
 /* Prepared-statement pattern for hot syscall paths: build a Manifest
@@ -326,7 +328,7 @@
 #define STORAGE_TAG_QUERY           0x01
 #define STORAGE_TAG_SET             0x02
 #define STORAGE_TAG_UNSET           0x03
-#define STORAGE_OBJ_READ            0x05
+#define STORAGE_OBJ_READ            0x04
 /* obj.write — params = [u64 file_id][u64 offset][u32 flags], and a ferry's
  * [u64 waybill] after them when it carries one; in_crate = the bytes; an
  * out_crate of 16 bytes = [u64 the bytes the file holds of the write][u64 the
@@ -335,16 +337,16 @@
  * read — so writers appending to one file never lay their bytes over each
  * other's, and each learns where its own begin: the size it left less what it
  * wrote. */
-#define STORAGE_OBJ_WRITE           0x06
+#define STORAGE_OBJ_WRITE           0x05
 #define STORAGE_WRITE_APPEND        (1u << 0)
-#define STORAGE_OBJ_CREATE          0x07
-#define STORAGE_OBJ_DELETE          0x08
-#define STORAGE_OBJ_RENAME          0x09
+#define STORAGE_OBJ_CREATE          0x06
+#define STORAGE_OBJ_DELETE          0x07
+#define STORAGE_OBJ_RENAME          0x08
 /* obj.getinfo — params = [u64 fid]; out_crate = [u64 fid][u64 size][u16 tags]
  * [u16 name_len][name][tag records]…[u64 kept_until]: the last eight bytes are
  * the time, in nanoseconds of the wall clock, at which the volume lets a
  * deleted file go (obj.keep), 0 for a file that is not deleted. */
-#define STORAGE_OBJ_GET_INFO        0x0A
+#define STORAGE_OBJ_GET_INFO        0x09
 /* obj.span — a file made exactly `size` bytes long. params =
  * [u64 file_id][u64 size][u32 flags], the flags word optional (0). Shorter:
  * the tail is cut and its blocks given back. Longer: the bytes from the old
@@ -355,7 +357,7 @@
  * and left as it is otherwise — decided where nothing else changes the file
  * meanwhile, so a writer that spans to where its write begins never cuts back
  * what another writer added since it looked. */
-#define STORAGE_OBJ_SPAN            0x0B
+#define STORAGE_OBJ_SPAN            0x0A
 #define STORAGE_SPAN_GROW           (1u << 0)
 /* anchor — durability + tag-event fan-out. params = [u64 file_id].
  * Answered once every change made before it is settled and lies in a block
@@ -365,7 +367,7 @@
  * observers keyed by tag (Touch REST) wake with payload {file_id, op=2, ...}.
  * No POSIX equivalent — fsync() returns silently and offers no notification
  * side-channel. */
-#define STORAGE_OBJ_ANCHOR          0x23
+#define STORAGE_OBJ_ANCHOR          0x20
 /* obj.write.settled — the wait for a file's changes to reach the medium on
  * their own: params = [u64 file_id]; 0 = every change of the volume so far.
  * Answered, with nothing published, once the file's newest change is settled
@@ -373,7 +375,7 @@
  * A demand: the cycle it waits for does not wait for Lull. The medium's
  * lasting refusal answers with its code (ERR_TAGFS_READ_ONLY,
  * ERR_DEVICE_NOT_READY). */
-#define STORAGE_OBJ_WRITE_SETTLED   0x25
+#define STORAGE_OBJ_WRITE_SETTLED   0x21
 /* obj.escheat — Escheat, the act that lets go what a format-v2 book can never
  * give back (spec_v2 §16.5 пп.19–20): every rotten range the Tally stood on
  * names — its files declared lost, the blocks held for it let go, a rotten
@@ -384,7 +386,7 @@
  * [u64 DIGESTS ranges known rotten, laid anew]. Only a cabin wearing system or god: any other is
  * refused (ERR_ACCESS_DENIED at the gate, ERR_PERMISSION_DENIED past it).
  * ERR_OBJECT_NOT_FOUND when there is nothing to let go. */
-#define STORAGE_OBJ_ESCHEAT         0x26
+#define STORAGE_OBJ_ESCHEAT         0x22
 /* tag.list — the tags files wear, each with how many files wear it, in the
  * order of the volume's numbers for them. The volume's registry names more
  * than files' tags — a process's, a Touch's, a Bay's — and a tag no file wears
@@ -397,7 +399,7 @@
  * [u16 value_len][key][value] while they fit; `next` is the number to ask from
  * for the rest, 0 when there are none. A crate too small for even the first
  * record is refused ERR_BUFFER_TOO_SMALL. */
-#define STORAGE_TAG_LIST            0x27
+#define STORAGE_TAG_LIST            0x23
 #define STORAGE_TAG_LIST_HEAD       8u      /* [u32 delivered][u32 next] */
 #define STORAGE_TAG_LISTED_HEAD     8u      /* a record before its text */
 #define STORAGE_TAG_LISTED_SYSTEM   0x01u   /* flags: a tag the system keeps */
@@ -416,7 +418,7 @@
  * a cabin wearing system or god (ERR_ACCESS_DENIED at the gate,
  * ERR_PERMISSION_DENIED past it); refused on a format-v1 volume
  * (ERR_UNSUPPORTED). */
-#define STORAGE_OBJ_CONJUGATE       0x28
+#define STORAGE_OBJ_CONJUGATE       0x24
 /* obj.keep — a file deleted for a term: params = [u64 fid][u64 term seconds].
  * No query meets the file from now on, it can be brought back by obj.restore
  * until the term ends, and the volume lets it go by itself then (tagfs/keep/
@@ -426,12 +428,12 @@
  * file the system keeps is refused, ERR_PERMISSION_DENIED); ERR_UNSUPPORTED on
  * a format-v1 volume for a term above 0. Deleting a deleted file moves its
  * term. */
-#define STORAGE_OBJ_KEEP            0x29
+#define STORAGE_OBJ_KEEP            0x25
 /* obj.restore — a deleted file brought back: params = [u64 fid]. The file is
  * found by queries again, its tags and name as they were. ERR_FILE_NOT_FOUND
  * when the volume holds no such file or its term has ended; OK, changing
  * nothing, for a file that is not deleted. */
-#define STORAGE_OBJ_RESTORE         0x2A
+#define STORAGE_OBJ_RESTORE         0x26
 
 /* The scope byte storage.query and storage.create carry in their params.
  *
@@ -452,50 +454,23 @@
 
 /* ============================================================================
  *  Hardware deck opcodes — the same single source, for the kernel's handler
- *  table (hardware_ops.c) and boxlib's wrappers alike. A spent number stays
- *  spent; the blocks below say which and why.
+ *  table (hardware_ops.c) and boxlib's wrappers alike. What the deck no longer
+ *  offers, and why, hardware_ops.c says above its Disk and USB sections.
  * ============================================================================ */
 #define HW_TIMER_GET_TICKS    0x10
 #define HW_TIMER_GET_MS       0x11
 #define HW_TIMER_GET_FREQ     0x12
 
-#define HW_RTC_GET_TIME       0x15
-#define HW_RTC_GET_UNIX64     0x16
-#define HW_RTC_GET_UPTIME     0x17
+#define HW_RTC_GET_TIME       0x13
+#define HW_RTC_GET_UNIX64     0x14
+#define HW_RTC_GET_UPTIME     0x15
 
-/*
- * ‼ FOURTEEN NUMBERS ARE SPENT HERE, AND NONE OF THEM COMES BACK.
- *
- * 0x20-0x25 were hw.port.inb/outb/inw/outw/inl/outl, 0x30-0x36 were
- * hw.irq.register/unregister/enable/disable/isr/irr/eoi, and 0x40 was
- * hw.cpu.halt. Not one of them was an operation. The first thirteen were this
- * kernel's own `in`, `out` and interrupt-controller writes published outside
- * under a name, and the last was a bare `hlt` reached with interrupts already
- * masked — hardware_ops.c, above the Disk section, says what each of them
- * actually did and what it cost. Their numbers stay spent, so an old caller
- * that still knows one of them can only ever be told there is no such op,
- * never handed a different one. The same rule, and the same reason, as 0x90
- * and 0x93 below.
- */
-
-#define HW_DISK_FLUSH         0x52
-#define HW_DISK_INFO          0x53
+#define HW_DISK_FLUSH         0x50
+#define HW_DISK_INFO          0x51
 
 /* The screen is lent to the one system program that draws (screen.h). */
 #define HW_SCREEN_CLAIM         0x60
 #define HW_SCREEN_RELEASE       0x61
-
-/*
- * ‼ 0x70-0x7D ARE SPENT, AND NONE OF THEM COMES BACK.
- *
- * They were hw.vga.putchar, putstring, clear, clear_line, clear_eol,
- * cursor.get, cursor.set, color.get, color.set, scroll, newline, dims, paint
- * and step: fourteen ways for any program to draw through the kernel. The
- * kernel draws nothing now — the screen is the display program's (0x60) and
- * a program with no display says its text into the log ring (HW_LOG_SAY). The
- * numbers stay spent so an old caller is told there is no such op, never
- * handed a different one.
- */
 
 #define HW_SYSTEM_REBOOT        0x80
 #define HW_SYSTEM_SHUTDOWN      0x81
@@ -522,23 +497,12 @@
 /* The most one HW_LOG_SAY takes: a page. A longer run is several. */
 #define HW_LOG_SAY_MAX          4096u
 
-/*
- * ‼ A RETIRED OPCODE IS NEVER REISSUED.
- *
- * 0x90 was hw.usb.init and 0x93 was hw.usb.stop. Both are withdrawn: the first
- * re-ran the driver's boot and took the machine's USB down with it, the second
- * returned success for doing nothing (hardware_ops.c says what each of them
- * actually did). Their numbers stay spent, so an old caller that still knows
- * them can only ever be told there is no such op — never handed a different
- * one. The Boarding Pass keeps its stamp kinds the same way and for the same
- * reason: a number that meant one thing must not come back meaning another.
- */
-#define HW_USB_RESET            0x91
-#define HW_USB_START            0x92
-#define HW_USB_PORT_STATUS      0x94
-#define HW_USB_PORT_RESET       0x95
-#define HW_USB_ENUM_DEVICE      0x96
-#define HW_USB_GET_INFO         0x97
-#define HW_USB_PORT_QUERY       0x98
+#define HW_USB_RESET            0x90
+#define HW_USB_START            0x91
+#define HW_USB_PORT_STATUS      0x92
+#define HW_USB_PORT_RESET       0x93
+#define HW_USB_ENUM_DEVICE      0x94
+#define HW_USB_GET_INFO         0x95
+#define HW_USB_PORT_QUERY       0x96
 
 #endif // BOXOS_DECKS_H
