@@ -62,7 +62,7 @@ typedef struct {
     file_id_t   Id;
     const char *Bytes;
     size_t      Size;
-    uint32_t    Flags;
+    uint64_t    KeptUntil;     /* deleted for a term: kept until then, 0 for not */
     bool        Refuses;       /* the volume will not answer for it */
 } StandFile;
 
@@ -80,9 +80,9 @@ static void volume_reset(void)
     g_read_most  = (size_t)-1;
 }
 
-static void volume_add(file_id_t id, const char *bytes, size_t size, uint32_t flags, bool refuses)
+static void volume_add(file_id_t id, const char *bytes, size_t size, uint64_t kept_until, bool refuses)
 {
-    g_files[g_file_count++] = (StandFile){ id, bytes, size, flags, refuses };
+    g_files[g_file_count++] = (StandFile){ id, bytes, size, kept_until, refuses };
 }
 
 static const StandFile *volume_file(file_id_t id)
@@ -127,8 +127,8 @@ int StandMetadata(file_id_t file, FileMetadata *out)
     const StandFile *found = volume_file(file);
     if (!found) return -ERR_FILE_NOT_FOUND;
     if (found->Refuses && found->Size == 0) return -ERR_IO;
-    out->Size  = found->Size;
-    out->Flags = found->Flags;
+    out->Size      = found->Size;
+    out->KeptUntil = found->KeptUntil;
     return 0;
 }
 
@@ -529,7 +529,7 @@ static void test_check(void)
     check_text("check changed states", shown, "changed changed changed");
 
     volume_reset();
-    volume_add(41, "abc", 3, FILE_FLAG_TRASHED, false);
+    volume_add(41, "abc", 3, 1, false);
     volume_add(43, big, sizeof(big), 0, false);
     check_int("check gone", states_of(&recipe, shown), 0);
     check_text("check gone states", shown, "gone gone same");
