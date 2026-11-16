@@ -26,8 +26,9 @@
 # (gangway.settings set in the hub and taken at the next start), panel
 # (Gangway's panel: a start changed on it, the log kept before a reset),
 # crossings (every start kept in the medium's front and landed; two misses open
-# the panel), scene (the brush a scene is painted with, held on the host to
-# exact areas, the press's pixels and its clip), dedup (a copy laid on its
+# the panel), scene (the brush a scene is painted with and the boot scene,
+# held on the host to exact areas, the press's pixels, its clip and every
+# frame drawn where it changed being the frame drawn whole), dedup (a copy laid on its
 # original by the pass after a Tally), and volume-read's self-test over the
 # image the build lays.
 # Beside them the host's own stands, which no volume touches: boxasm, the

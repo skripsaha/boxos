@@ -1,9 +1,11 @@
 /*
- * scene_stand — the brush (src/include/boxos_brush.h) on the host: the very
- * header Gangway and the display paint with, built under the address and
- * undefined-behaviour sanitizers and held to what it must do.
+ * scene_stand — the brush (src/include/boxos_brush.h) and scenes
+ * (boxos_scene.h, boxos_scene_play.h) on the host: the very headers Gangway
+ * and the display paint and play with, built under the address and
+ * undefined-behaviour sanitizers and held to what they must do.
  *
  *     scene_stand brush SHEET.png
+ *     scene_stand frames SCENE OUTDIR
  *
  * brush: numbers held to the host's own (the roots, the sine); colour laid as
  * the imprint is pressed, and text drawn the very pixels BoxPressGlyph makes;
@@ -13,6 +15,16 @@
  * gradients' ends, a picture laid one to one; random fills under random
  * matrices never touching a pixel past the clip; what spills refused. Then a
  * sheet of everything it draws, SHEET.png, to look at.
+ *
+ * frames: the packed scene read; its first frame on screens from 640x480 to
+ * 3840x2160 and standing up — Duppo in the middle, his size the scene's, the
+ * corners the paper; every frame of enter, of a round and more of wait, and of
+ * leave begun in the middle of a round, drawn only where it changed and held
+ * to the same frame drawn whole, pixel for pixel; enter's last frame wait's
+ * first; leave ending in the paper alone; the scene damaged one named way at a
+ * time refused for what is wrong, and thousands of random damages read and
+ * played without a byte read or drawn past where it may be. Then a few of its
+ * frames, PNG files in OUTDIR, to look at.
  *
  * Every check says "  ok   …" or "  FAIL …"; the last line counts them.
  */
@@ -27,6 +39,7 @@
 #include "boxos_brush.h"
 #include "boxos_imprint_data.h"
 #include "boxos_imprint_press.h"
+#include "boxos_scene_play.h"
 
 #define ONE  BOX_BRUSH_ONE
 #define UNIT BOX_BRUSH_UNIT
@@ -914,10 +927,316 @@ static int DrawSheet(const char *Path)
     return Written;
 }
 
+/* ---------------------------------------------------------------------------
+ * Scenes
+ * ------------------------------------------------------------------------- */
+
+/* A scene played onto a board of its own, every room the player asks for. */
+typedef struct {
+    Board          Board;
+    BoxScenePlayer Player;
+    BoxScenePose  *Start, *Now;
+    BoxSceneLaid  *Laid, *Shown;
+    BoxBrushEdge  *Edges;
+} Stage;
+
+static void StageMake(Stage *T, const BoxScene *S, uint32_t Width, uint32_t Height)
+{
+    const uint32_t Figures = S->Head->Figures;
+    BoardMake(&T->Board, Width, Height);
+    T->Start = calloc(Figures, sizeof(BoxScenePose));
+    T->Now   = calloc(Figures, sizeof(BoxScenePose));
+    T->Laid  = calloc(Figures, sizeof(BoxSceneLaid));
+    T->Shown = calloc(Figures, sizeof(BoxSceneLaid));
+    T->Edges = calloc(BOX_SCENE_EDGES, sizeof(BoxBrushEdge));
+    if (!T->Start || !T->Now || !T->Laid || !T->Shown || !T->Edges) exit(2);
+    BoxScenePlayBegin(&T->Player, S, &T->Board.Canvas, T->Start, T->Now, T->Laid, T->Shown, T->Edges);
+}
+
+static void StageFree(Stage *T)
+{
+    BoardFree(&T->Board);
+    free(T->Start);
+    free(T->Now);
+    free(T->Laid);
+    free(T->Shown);
+    free(T->Edges);
+}
+
+/* The frame Ms into the act drawn where it changed; the pixels drawn. */
+static uint64_t Frame(Stage *T, uint32_t Ms)
+{
+    BoxBrushRect   Dirty[8];
+    const uint32_t Count = BoxScenePlayAt(&T->Player, Ms, Dirty, 8);
+    uint64_t       Drawn = 0;
+    BoxScenePlayDraw(&T->Player, Dirty, Count);
+    for (uint32_t I = 0; I < Count; I++) Drawn += (uint64_t)Dirty[I].Width * Dirty[I].Height;
+    return Drawn;
+}
+
+/* The same frame drawn whole by a player of its own, begun from where T's
+ * act began: whether it is T's canvas, pixel for pixel. */
+static int SameAsWhole(Stage *T, const BoxScene *S, uint32_t Ms)
+{
+    Stage Whole;
+    StageMake(&Whole, S, T->Board.Canvas.Width, T->Board.Canvas.Height);
+    memcpy(Whole.Start, T->Start, S->Head->Figures * sizeof(BoxScenePose));
+    Whole.Player.Act = T->Player.Act;
+    Frame(&Whole, Ms);
+    int Same = 1;
+    for (uint32_t Y = 0; Y < T->Board.Canvas.Height && Same; Y++)
+        if (memcmp(At(&T->Board, 0, (int32_t)Y), At(&Whole.Board, 0, (int32_t)Y), T->Board.Canvas.Width * 4u) != 0)
+            Same = 0;
+    StageFree(&Whole);
+    return Same;
+}
+
+static uint8_t *ReadFile(const char *Path, uint64_t *Size)
+{
+    FILE *In = fopen(Path, "rb");
+    if (!In) return NULL;
+    fseek(In, 0, SEEK_END);
+    *Size          = (uint64_t)ftell(In);
+    uint8_t *Bytes = malloc(*Size ? *Size : 1);
+    fseek(In, 0, SEEK_SET);
+    if (!Bytes || fread(Bytes, 1, *Size, In) != *Size) {
+        fclose(In);
+        free(Bytes);
+        return NULL;
+    }
+    fclose(In);
+    return Bytes;
+}
+
+static void CheckFirstFrames(const BoxScene *S)
+{
+    static const uint32_t Screens[6][2] = { { 640, 480 }, { 1024, 768 }, { 1280, 800 },
+                                            { 1920, 1080 }, { 3840, 2160 }, { 768, 1024 } };
+    int  Held = 1;
+    char Line[240];
+    for (uint32_t I = 0; I < 6u; I++) {
+        const uint32_t W = Screens[I][0], H = Screens[I][1], Short = W < H ? W : H;
+        Stage          T;
+        StageMake(&T, S, W, H);
+        Frame(&T, 0);
+        const uint32_t Paper = S->Head->Paper;
+        if (*At(&T.Board, 0, 0) != Paper || *At(&T.Board, (int32_t)W - 1, (int32_t)H - 1) != Paper ||
+            *At(&T.Board, (int32_t)W / 2, (int32_t)H / 2) == Paper || !Untouched(&T.Board, T.Board.Canvas.Clip))
+            Held = 0;
+        /* Across the row through the body's middle, the first and last
+         * pixels that are not the paper: the body, its middle the screen's. */
+        int32_t Left = -1, Right = -1;
+        for (int32_t X = 0; X < (int32_t)W; X++)
+            if (*At(&T.Board, X, (int32_t)H / 2) != Paper) {
+                if (Left < 0) Left = X;
+                Right = X;
+            }
+        const double Across = Right - Left + 1, Want = 0.30036 * Short;
+        if (Left < 0 || fabs((Left + Right + 1) / 2.0 - W / 2.0) > 1.0 || fabs(Across - Want) > Want * 0.01 + 2.0)
+            Held = 0;
+        StageFree(&T);
+    }
+    snprintf(Line, sizeof(Line),
+             "the first frame on six screens, 640x480 to 3840x2160 and one standing up: Duppo in the middle, three "
+             "tenths of the shorter side across, the corners the paper");
+    Check(Held, Line);
+}
+
+static void CheckPlay(const BoxScene *S, const char *Out)
+{
+    Stage    T;
+    char     Line[300], Path[512];
+    int      Held = 1;
+    uint64_t Drawn = 0, Frames = 0;
+    const uint32_t W = 1024, H = 768;
+    StageMake(&T, S, W, H);
+
+    const uint32_t Enter = S->Head->Acts[BOX_SCENE_ENTER], Wait = S->Head->Acts[BOX_SCENE_WAIT];
+    const uint32_t Leave = S->Head->Acts[BOX_SCENE_LEAVE];
+    Frame(&T, 0);
+    snprintf(Path, sizeof(Path), "%s/enter-0000.png", Out);
+    WritePng(Path, &T.Board.Canvas);
+    for (uint32_t Ms = 33; Ms <= Enter + 33u; Ms += 33u) {
+        Drawn += Frame(&T, Ms);
+        Frames++;
+        if (!SameAsWhole(&T, S, Ms)) Held = 0;
+        if (Ms == 495u) {
+            snprintf(Path, sizeof(Path), "%s/enter-0495.png", Out);
+            WritePng(Path, &T.Board.Canvas);
+        }
+    }
+    Check(Held, "every frame of enter drawn only where it changed is the frame drawn whole, pixel for pixel");
+
+    /* Enter's last frame, and wait's first. */
+    Frame(&T, Enter);
+    uint32_t *Last = malloc((size_t)W * H * 4u);
+    for (uint32_t Y = 0; Y < H; Y++) memcpy(Last + (size_t)Y * W, At(&T.Board, 0, (int32_t)Y), W * 4u);
+    BoxScenePlayAct(&T.Player, BOX_SCENE_WAIT);
+    Frame(&T, 0);
+    int Seam = 1;
+    for (uint32_t Y = 0; Y < H; Y++)
+        if (memcmp(Last + (size_t)Y * W, At(&T.Board, 0, (int32_t)Y), W * 4u) != 0) Seam = 0;
+    free(Last);
+    Check(Seam, "wait begins on the very frame enter ended on");
+
+    Held = 1;
+    const uint32_t Cut = Wait + Wait / 2u - 55u;
+    for (uint32_t Ms = 33; Ms <= Cut; Ms += 33u) {
+        Drawn += Frame(&T, Ms);
+        Frames++;
+        if (!SameAsWhole(&T, S, Ms)) Held = 0;
+        if (Ms == 1188u || Ms == 3102u) {
+            snprintf(Path, sizeof(Path), "%s/wait-%04u.png", Out, Ms);
+            WritePng(Path, &T.Board.Canvas);
+        }
+    }
+    snprintf(Line, sizeof(Line),
+             "every frame of a round and a half of wait drawn only where it changed is the frame drawn whole (%llu "
+             "frames, %.1f%% of the screen drawn a frame)",
+             (unsigned long long)Frames, 100.0 * Drawn / Frames / (W * H));
+    Check(Held, Line);
+
+    Held = 1;
+    Frame(&T, Cut);
+    BoxScenePlayAct(&T.Player, BOX_SCENE_LEAVE);
+    for (uint32_t Ms = 0; Ms <= Leave + 33u; Ms += 33u) {
+        Frame(&T, Ms);
+        if (!SameAsWhole(&T, S, Ms)) Held = 0;
+        if (Ms == 231u) {
+            snprintf(Path, sizeof(Path), "%s/leave-0231.png", Out);
+            WritePng(Path, &T.Board.Canvas);
+        }
+    }
+    int Dark = 1;
+    for (uint32_t Y = 0; Y < H; Y++)
+        for (uint32_t X = 0; X < W; X++)
+            if (*At(&T.Board, (int32_t)X, (int32_t)Y) != S->Head->Paper) Dark = 0;
+    Check(Held && Dark && Untouched(&T.Board, T.Board.Canvas.Clip),
+          "leave, begun in the middle of a round, drawn where it changed is the frame drawn whole, and ends in the "
+          "paper alone");
+    StageFree(&T);
+}
+
+/* A copy of the scene with four bytes at Offset written as Value — none when
+ * Offset lies past it — read as Cut bytes, or all of it. */
+static const char *Damaged(const uint8_t *Bytes, uint64_t Size, uint64_t Offset, uint32_t Value, uint64_t Cut)
+{
+    static uint8_t Copy[1u << 16];
+    BoxScene       S;
+    if (Size > sizeof(Copy)) return "the stand's room is too small";
+    memcpy(Copy, Bytes, Size);
+    if (Size >= 4u && Offset <= Size - 4u) memcpy(Copy + Offset, &Value, 4);
+    return BoxSceneRead(Copy, Cut ? Cut : Size, &S);
+}
+
+static void CheckRefusals(const uint8_t *Bytes, uint64_t Size, const BoxScene *S)
+{
+    const BoxSceneHead *H       = S->Head;
+    const uint64_t      Paints  = sizeof(BoxSceneHead);
+    const uint64_t      Stops   = Paints + (uint64_t)H->Paints * sizeof(BoxScenePaint);
+    const uint64_t      Figures = Stops + (uint64_t)H->Stops * sizeof(BoxBrushStop);
+    const uint64_t      Tracks  = Figures + (uint64_t)H->Figures * sizeof(BoxSceneFigure);
+    const uint64_t      Keys    = Tracks + (uint64_t)H->Tracks * sizeof(BoxSceneTrack);
+    const struct {
+        uint64_t    Offset;
+        uint32_t    Value;
+        uint64_t    Cut;
+        const char *Why;
+    } Cases[] = {
+        { 0, 0x584F4258u, 0, "it does not begin as a scene does" },
+        { ~0ull, 0, Size - 1u, "its size is not the size of its tables" },
+        { 8, (uint32_t)Size + 12u, 0, "its size is not the size of its tables" },
+        { 12, 3, 0, "its units are past what a screen holds" },
+        { 16, 0x01000000u, 0, "its paper is no colour" },
+        { 24, 0, 0, "its wait act has no length to go round" },
+        { Paints, 9, 0, "a paint of no kind a scene has" },
+        { Stops, BOX_BRUSH_UNIT + 1u, 0, "a gradient's stops do not rise from 0 to 1" },
+        { Figures + 4u, 5, 0, "a figure's group is not a group laid before it" },
+        { Figures + sizeof(BoxSceneFigure) + 4u, 1, 0, "a figure's group is not a group laid before it" },
+        { Figures + sizeof(BoxSceneFigure) + 8u, 99, 0, "a figure is painted with no paint the scene keeps" },
+        { Figures + sizeof(BoxSceneFigure) + 20u, 0, 0, "a figure's shape has no size" },
+        { Figures + sizeof(BoxSceneFigure) + 56u, 256, 0, "a figure stands where none may" },
+        { Tracks + 4u, 99, 0, "a track moves what the scene has not" },
+        { Tracks + sizeof(BoxSceneTrack) + 4u, 0, 0, "the tracks are not kept by act, figure and what, one for each" },
+        { Tracks + 16u, 999, 0, "a track's keys lie past the keys kept" },
+        { Keys + sizeof(BoxSceneKey), 999999, 0, "a track's keys do not rise within its act" },
+        { Keys + 8u, 7, 0, "a track's key is none a scene has" },
+    };
+    int  Held = 1;
+    char Line[200];
+    for (size_t I = 0; I < sizeof(Cases) / sizeof(Cases[0]); I++) {
+        const char *Why = Damaged(Bytes, Size, Cases[I].Offset, Cases[I].Value, Cases[I].Cut);
+        if (!Why || strcmp(Why, Cases[I].Why) != 0) {
+            printf("    case %zu: wanted \"%s\", got \"%s\"\n", I, Cases[I].Why, Why ? Why : "(read)");
+            Held = 0;
+        }
+    }
+    snprintf(Line, sizeof(Line), "the scene damaged %zu named ways, one at a time: each refused for what is wrong",
+             sizeof(Cases) / sizeof(Cases[0]));
+    Check(Held, Line);
+
+    /* Random damage: read, and what reads played, all under the sanitizers. */
+    static uint8_t Copy[1u << 16];
+    uint32_t       Read = 0;
+    Held                = 1;
+    for (uint32_t I = 0; I < 20000u; I++) {
+        memcpy(Copy, Bytes, Size);
+        const uint32_t Flips = 1u + Random() % 8u;
+        for (uint32_t K = 0; K < Flips; K++) Copy[Random() % Size] ^= (uint8_t)(1u << (Random() % 8u));
+        const uint64_t Cut = I % 10u == 0 ? Random() % Size : Size;
+        uint8_t       *Held_ = malloc(Cut ? Cut : 1);
+        memcpy(Held_, Copy, Cut);
+        BoxScene Damage;
+        if (!BoxSceneRead(Held_, Cut, &Damage)) {
+            Read++;
+            Stage T;
+            StageMake(&T, &Damage, 96, 72);
+            for (uint32_t Act = 0; Act < BOX_SCENE_ACTS; Act++) {
+                if (Act) BoxScenePlayAct(&T.Player, Act);
+                for (uint32_t Ms = 0; Ms < 3000u; Ms += 450u) Frame(&T, Ms);
+            }
+            if (!Untouched(&T.Board, T.Board.Canvas.Clip)) Held = 0;
+            StageFree(&T);
+        }
+        free(Held_);
+    }
+    snprintf(Line, sizeof(Line),
+             "20000 random damages read without a byte past the scene; the %u that read played through every act "
+             "with no pixel past the canvas", Read);
+    Check(Held, Line);
+}
+
+static int Frames(const char *Path, const char *Out)
+{
+    uint64_t Size  = 0;
+    uint8_t *Bytes = ReadFile(Path, &Size);
+    BoxScene S;
+    if (!Bytes) {
+        Check(0, "the scene could not be read from its file");
+        return 0;
+    }
+    const char *Why = BoxSceneRead(Bytes, Size, &S);
+    char        Line[200];
+    snprintf(Line, sizeof(Line), "BoxSceneRead holds the scene to every bound: %s (%u figures, %u tracks)",
+             Why ? Why : "read", S.Head->Figures, S.Head->Tracks);
+    Check(!Why, Line);
+    if (Why) return 0;
+    CheckFirstFrames(&S);
+    CheckPlay(&S, Out);
+    CheckRefusals(Bytes, Size, &S);
+    free(Bytes);
+    return 1;
+}
+
 int main(int Argc, char **Argv)
 {
+    if (Argc == 4 && strcmp(Argv[1], "frames") == 0) {
+        Frames(Argv[2], Argv[3]);
+        printf("scene: %d passed, %d failed — the scene %s\n", g_passed, g_failed, Argv[2]);
+        return g_failed ? 1 : 0;
+    }
     if (Argc != 3 || strcmp(Argv[1], "brush") != 0) {
-        fprintf(stderr, "usage: scene_stand brush SHEET.png\n");
+        fprintf(stderr, "usage: scene_stand brush SHEET.png | scene_stand frames SCENE OUTDIR\n");
         return 2;
     }
     CheckNumbers();

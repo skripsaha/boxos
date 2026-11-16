@@ -8,15 +8,15 @@ namespace duppo {
 
 namespace {
 
-constexpr Color LightDefault    = Color::Rgb(0xE9, 0x78, 0xA0);
-constexpr Color DeepDefault     = Color::Rgb(0x81, 0x26, 0x5C);
-constexpr Color LipDefault      = Color::Rgb(0xE8, 0x66, 0x96);
-constexpr Color RingDefault     = Color::Rgb(0xFF, 0xE2, 0xF0);
-constexpr Color RingEdgeDefault = Color::Rgb(0x8B, 0x60, 0x77);
+constexpr Color LightDefault    = Color::FromRaw(BoxDuppoHues[BOXOS_DUPPO_LIGHT]);
+constexpr Color DeepDefault     = Color::FromRaw(BoxDuppoHues[BOXOS_DUPPO_DEEP]);
+constexpr Color LipDefault      = Color::FromRaw(BoxDuppoHues[BOXOS_DUPPO_LIP]);
+constexpr Color RingDefault     = Color::FromRaw(BoxDuppoHues[BOXOS_DUPPO_RING]);
+constexpr Color RingEdgeDefault = Color::FromRaw(BoxDuppoHues[BOXOS_DUPPO_RING_EDGE]);
 
-/* How much white the pupil's glow and its rim are mixed with: #3B and #29 over black. */
-constexpr std::uint8_t GlowShare   = 0x3B;
-constexpr std::uint8_t EdgeShare   = 0x29;
+/* How much white the pupil's glow and its rim are mixed with. */
+constexpr std::uint8_t GlowShare   = BOXOS_DUPPO_GLOW_SHARE;
+constexpr std::uint8_t EdgeShare   = BOXOS_DUPPO_RIM_SHARE;
 constexpr std::uint8_t HazeShare   = 205;
 
 std::uint8_t Moved(std::uint8_t Base, std::uint8_t Was, std::uint8_t Now)
@@ -31,13 +31,20 @@ Color Followed(Color Base, Color Was, Color Now)
                       Moved(Base.Blue(), Was.Blue(), Now.Blue()));
 }
 
-/* A radial gradient as the SVG gives it: the circle (Center, Radius) lives in
- * a space that the matrix (A B C D E F, as SVG's matrix()) maps into the
- * disc's own, so a point is taken back through it and measured from the centre. */
+/* A radial gradient as boxos_mascot.h gives it: the circle (Center, Radius)
+ * lives in a space that the matrix (A B C D E F, as SVG's matrix()) maps into
+ * the disc's own, so a point is taken back through it and measured from the
+ * centre. */
 struct Gradient {
     float A, B, C, D, E, F;
     Vec   Center;
     float Radius;
+
+    constexpr explicit Gradient(const BoxDuppoShade &Shade)
+        : A(Shade.A), B(Shade.B), C(Shade.C), D(Shade.D), E(Shade.E), F(Shade.F), Center{Shade.CX, Shade.CY},
+          Radius(Shade.Radius)
+    {
+    }
 
     float At(Vec Point) const
     {
@@ -67,15 +74,21 @@ Color Ramp(float Along, Stop First, Stop Second, Stop Third)
     return Along <= Second.At ? Ramp(Along, First, Second) : Ramp(Along, Second, Third);
 }
 
-constexpr Gradient BodyGradient{1.143646f, -0.09094687f, 0.09189171f, 1.1555275f, -124.59179f, -94.515235f, {128.0959f, 112.31412f}, 16.922415f};
-constexpr Gradient SocketGradient{0.54407561f, 0.0f, 0.0f, 0.54407561f, -22.114865f, -36.849767f, {103.13065f, 115.31994f}, 21.151943f};
-constexpr Gradient WhiteGradient{0.57626908f, -0.00182151f, 0.00186949f, 0.59144541f, -25.591621f, -42.04433f, {101.40121f, 113.55885f}, 18.404936f};
-constexpr Gradient PupilGradient{1.1021106f, 0.92894668f, -1.0140942f, 1.2031302f, 7.747513f, -225.95277f, {124.25608f, 110.82202f}, 7.3780317f};
+constexpr Gradient BodyGradient{BoxDuppoBodyShade};
+constexpr Gradient SocketGradient{BoxDuppoSocketShade};
+constexpr Gradient WhiteGradient{BoxDuppoWhiteShade};
+constexpr Gradient PupilGradient{BoxDuppoPupilShade};
 constexpr Gradient MoonGradients[Logo::MoonCount] = {
-    {0.34233561f, -0.02722377f, 0.02750658f, 0.3458922f, -2.6037641f, 5.9093724f, {128.0959f, 112.31412f}, 16.922415f},
-    {0.23769016f, -0.01890198f, 0.01909834f, 0.24015957f, -16.083896f, -10.419087f, {128.0959f, 112.31412f}, 16.922415f},
-    {0.16609062f, -0.01320812f, 0.01334534f, 0.16781617f, 32.475734f, 5.2852998f, {128.0959f, 112.31412f}, 16.922415f},
-};
+    Gradient{BoxDuppoMoonShades[0]}, Gradient{BoxDuppoMoonShades[1]}, Gradient{BoxDuppoMoonShades[2]}};
+
+/* The hues each disc's stops are drawn in are the palette's, the one the
+ * person set: they are held here to the ones boxos_mascot.h names. */
+static_assert(BoxDuppoBodyStops[0].Hue == BOXOS_DUPPO_LIGHT && BoxDuppoBodyStops[1].Hue == BOXOS_DUPPO_DEEP);
+static_assert(BoxDuppoSocketStops[0].Hue == BOXOS_DUPPO_DEEP && BoxDuppoSocketStops[1].Hue == BOXOS_DUPPO_LIP);
+static_assert(BoxDuppoWhiteStops[0].Hue == BOXOS_DUPPO_RING && BoxDuppoWhiteStops[1].Hue == BOXOS_DUPPO_RING_EDGE);
+static_assert(BoxDuppoPupilStops[0].Hue == BOXOS_DUPPO_GLOW && BoxDuppoPupilStops[1].Hue == BOXOS_DUPPO_CORE &&
+              BoxDuppoPupilStops[2].Hue == BOXOS_DUPPO_PUPIL_EDGE);
+static_assert(BoxDuppoMoonStops[0].Hue == BOXOS_DUPPO_LIGHT && BoxDuppoMoonStops[1].Hue == BOXOS_DUPPO_DEEP);
 
 }  // namespace
 
@@ -97,27 +110,28 @@ namespace Logo {
 
 Color BodyColor(const Palette &Hues, Vec At)
 {
-    return Ramp(BodyGradient.At(At), {0.51822966f, Hues.Light}, {0.9999f, Hues.Deep});
+    return Ramp(BodyGradient.At(At), {BoxDuppoBodyStops[0].At, Hues.Light}, {BoxDuppoBodyStops[1].At, Hues.Deep});
 }
 
 Color SocketColor(const Palette &Hues, Vec At)
 {
-    return Ramp(SocketGradient.At(At), {0.87368202f, Hues.Deep}, {1.0f, Hues.Lip});
+    return Ramp(SocketGradient.At(At), {BoxDuppoSocketStops[0].At, Hues.Deep}, {BoxDuppoSocketStops[1].At, Hues.Lip});
 }
 
 Color WhiteColor(const Palette &Hues, Vec At)
 {
-    return Ramp(WhiteGradient.At(At), {0.7325418f, Hues.Ring}, {0.98360658f, Hues.RingEdge});
+    return Ramp(WhiteGradient.At(At), {BoxDuppoWhiteStops[0].At, Hues.Ring}, {BoxDuppoWhiteStops[1].At, Hues.RingEdge});
 }
 
 Color PupilColor(const Palette &Hues, Vec At)
 {
-    return Ramp(PupilGradient.At(At), {0.03465074f, Hues.Glow}, {0.8121683f, Hues.Core}, {0.9999f, Hues.PupilEdge});
+    return Ramp(PupilGradient.At(At), {BoxDuppoPupilStops[0].At, Hues.Glow}, {BoxDuppoPupilStops[1].At, Hues.Core},
+                {BoxDuppoPupilStops[2].At, Hues.PupilEdge});
 }
 
 Color MoonColor(const Palette &Hues, int Which, Vec At)
 {
-    return Ramp(MoonGradients[Which].At(At), {0.0f, Hues.Light}, {0.9297424f, Hues.Deep});
+    return Ramp(MoonGradients[Which].At(At), {BoxDuppoMoonStops[0].At, Hues.Light}, {BoxDuppoMoonStops[1].At, Hues.Deep});
 }
 
 }  // namespace Logo

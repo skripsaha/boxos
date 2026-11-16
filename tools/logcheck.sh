@@ -31,8 +31,9 @@
 #                         marked landed by the kernel (AHCI and legacy IDE);
 #                         two cut starts open the panel by themselves
 #   logcheck.sh scene     the brush Gangway and the display paint a scene
-#                         with, built on the host under the sanitizers: exact
-#                         areas, mirrors, the press's pixels, the clip
+#                         with, and the boot scene, on the host under the
+#                         sanitizers: exact areas, the clip; every frame drawn
+#                         where it changed the frame drawn whole; damage refused
 #   logcheck.sh mkfs      no boot: the image `make` lays held to
 #                         volume-read — its self-test over mkfs's own book, its
 #                         files, its ground — and create_tagfs on grounds past

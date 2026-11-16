@@ -1,9 +1,10 @@
 /*
  * boxos_mascot.h — Duppo, the mascot of BoxOS, as its master draws it: discs
  * in the units of the master logo (duppogluten.svg; duppo-bubble.svg carries
- * the same numbers), y down. One account of its shape for every hand that
- * draws it — the utility duppo, in colour and turning, and Typecase's symbol,
- * in one colour.
+ * the same numbers), y down, and how each is shaded. One account of its shape
+ * and its colour for every hand that draws it — the utility duppo, in colour
+ * and turning, Typecase's symbol, in one colour, and the scene the machine
+ * starts with (src/userspace/scenes/boot.txt, packed by tools/scene.py).
  *
  * The colour logo is a body; the socket and the white of the eye in it; the
  * pupil, a hair taller than it is wide; three little bubbles — the medium one
@@ -53,6 +54,64 @@ BOXOS_MASCOT_NUMBER BoxDuppoDisc BoxDuppoMoons[BOXOS_DUPPO_MOONS] = {
     {16.983208f, 15.099807f, 3.5669854f},
     {55.582016f, 23.11713f, 2.4925005f},
 };
+
+/*
+ * How each disc of the colour logo is shaded (duppo-bubble.svg): a radial
+ * gradient — the circle CX, CY, Radius of the gradient's own space, which the
+ * matrix A B C D E F (SVG's matrix()) lays on the logo — through its stops,
+ * each a place along the radius and the hue there, the first hue before the
+ * first stop and the last past the last.
+ */
+typedef struct BoxDuppoShade {
+    float A, B, C, D, E, F, CX, CY, Radius;
+} BoxDuppoShade;
+
+typedef struct BoxDuppoStop {
+    float    At;
+    unsigned Hue;   /* BOXOS_DUPPO_* below */
+} BoxDuppoStop;
+
+/* The hues: the body's pink and its deep plum, the lip round the eye, the
+ * ring round the pupil and its shaded edge, the pupil — and the pupil's glow
+ * and its rim, the pupil mixed straight with white by BOXOS_DUPPO_GLOW_SHARE
+ * and BOXOS_DUPPO_RIM_SHARE of 255. BoxDuppoHues holds the first six as the
+ * master has them; a hand that lets the person set the colours works them
+ * from those. */
+enum {
+    BOXOS_DUPPO_LIGHT,
+    BOXOS_DUPPO_DEEP,
+    BOXOS_DUPPO_LIP,
+    BOXOS_DUPPO_RING,
+    BOXOS_DUPPO_RING_EDGE,
+    BOXOS_DUPPO_CORE,
+    BOXOS_DUPPO_GLOW,
+    BOXOS_DUPPO_PUPIL_EDGE
+};
+#define BOXOS_DUPPO_GLOW_SHARE 0x3Bu
+#define BOXOS_DUPPO_RIM_SHARE  0x29u
+BOXOS_MASCOT_NUMBER unsigned BoxDuppoHues[6] = { BOXOS_DUPPO_PINK, 0x81265Cu, 0xE86696u, 0xFFE2F0u, 0x8B6077u, 0x000000u };
+
+BOXOS_MASCOT_NUMBER BoxDuppoShade BoxDuppoBodyShade = {
+    1.143646f, -0.09094687f, 0.09189171f, 1.1555275f, -124.59179f, -94.515235f, 128.0959f, 112.31412f, 16.922415f};
+BOXOS_MASCOT_NUMBER BoxDuppoShade BoxDuppoSocketShade = {
+    0.54407561f, 0.0f, 0.0f, 0.54407561f, -22.114865f, -36.849767f, 103.13065f, 115.31994f, 21.151943f};
+BOXOS_MASCOT_NUMBER BoxDuppoShade BoxDuppoWhiteShade = {
+    0.57626908f, -0.00182151f, 0.00186949f, 0.59144541f, -25.591621f, -42.04433f, 101.40121f, 113.55885f, 18.404936f};
+BOXOS_MASCOT_NUMBER BoxDuppoShade BoxDuppoPupilShade = {
+    1.1021106f, 0.92894668f, -1.0140942f, 1.2031302f, 7.747513f, -225.95277f, 124.25608f, 110.82202f, 7.3780317f};
+BOXOS_MASCOT_NUMBER BoxDuppoShade BoxDuppoMoonShades[BOXOS_DUPPO_MOONS] = {
+    {0.34233561f, -0.02722377f, 0.02750658f, 0.3458922f, -2.6037641f, 5.9093724f, 128.0959f, 112.31412f, 16.922415f},
+    {0.23769016f, -0.01890198f, 0.01909834f, 0.24015957f, -16.083896f, -10.419087f, 128.0959f, 112.31412f, 16.922415f},
+    {0.16609062f, -0.01320812f, 0.01334534f, 0.16781617f, 32.475734f, 5.2852998f, 128.0959f, 112.31412f, 16.922415f},
+};
+
+BOXOS_MASCOT_NUMBER BoxDuppoStop BoxDuppoBodyStops[2]   = {{0.51822966f, BOXOS_DUPPO_LIGHT}, {0.9999f, BOXOS_DUPPO_DEEP}};
+BOXOS_MASCOT_NUMBER BoxDuppoStop BoxDuppoSocketStops[2] = {{0.87368202f, BOXOS_DUPPO_DEEP}, {1.0f, BOXOS_DUPPO_LIP}};
+BOXOS_MASCOT_NUMBER BoxDuppoStop BoxDuppoWhiteStops[2]  = {{0.7325418f, BOXOS_DUPPO_RING},
+                                                           {0.98360658f, BOXOS_DUPPO_RING_EDGE}};
+BOXOS_MASCOT_NUMBER BoxDuppoStop BoxDuppoPupilStops[3]  = {
+    {0.03465074f, BOXOS_DUPPO_GLOW}, {0.8121683f, BOXOS_DUPPO_CORE}, {0.9999f, BOXOS_DUPPO_PUPIL_EDGE}};
+BOXOS_MASCOT_NUMBER BoxDuppoStop BoxDuppoMoonStops[2]   = {{0.0f, BOXOS_DUPPO_LIGHT}, {0.9297424f, BOXOS_DUPPO_DEEP}};
 
 /* What the one-colour mark has of its own: its medium bubble, the paper
  * round it, and the spark. */
