@@ -4,41 +4,18 @@
 #include <cstring>
 
 #include "box/color.h"
-#include "boxos_glyph_fold.h"
 #include "boxos_log_tone.h"
+#include "boxos_utf8.h"
 
 namespace {
 
-std::uint8_t Utf8Promise(std::uint8_t Byte) noexcept
+// What a cell is given for Codepoint: the character, or — for a control the
+// console does not act on, which shows nothing a reader could take for text —
+// U+FFFD, the character that says one is missing.
+char32_t AsCell(std::uint32_t Codepoint) noexcept
 {
-    if (Byte >= 0xC2u && Byte <= 0xDFu) return 2;
-    if (Byte >= 0xE0u && Byte <= 0xEFu) return 3;
-    if (Byte >= 0xF0u && Byte <= 0xF4u) return 4;
-    return 0;
-}
-
-int DecodeUtf8(const char *Bytes, std::size_t Length, std::uint32_t &Codepoint) noexcept
-{
-    if (Length == 0) return 0;
-    const std::uint8_t Lead = static_cast<std::uint8_t>(Bytes[0]);
-    const std::uint8_t Need = Utf8Promise(Lead);
-    if (Need == 0 || Length < Need) return 0;
-
-    std::uint32_t Value = 0;
-    if (Need == 2) Value = Lead & 0x1Fu;
-    if (Need == 3) Value = Lead & 0x0Fu;
-    if (Need == 4) Value = Lead & 0x07u;
-    for (std::uint8_t Index = 1; Index < Need; Index++) {
-        const std::uint8_t Byte = static_cast<std::uint8_t>(Bytes[Index]);
-        if ((Byte & 0xC0u) != 0x80u) return 0;
-        Value = (Value << 6) | (Byte & 0x3Fu);
-    }
-    if ((Need == 2 && Value < 0x80u) || (Need == 3 && Value < 0x800u) ||
-        (Need == 4 && (Value < 0x10000u || Value > 0x10FFFFu)) ||
-        (Value >= 0xD800u && Value <= 0xDFFFu))
-        return 0;
-    Codepoint = Value;
-    return Need;
+    const bool Control = Codepoint < 0x20u || (Codepoint >= 0x7Fu && Codepoint < 0xA0u);
+    return Control ? U'\uFFFD' : static_cast<char32_t>(Codepoint);
 }
 
 }  // namespace
@@ -55,7 +32,7 @@ ConsoleModel::ConsoleModel(std::uint32_t Width, std::uint32_t Height)
 
 void ConsoleModel::Clear(std::uint32_t Foreground, std::uint32_t Background)
 {
-    const TextCell Blank{Foreground, Background, ' ', {0, 0, 0}};
+    const TextCell Blank{Foreground, Background, U' '};
     std::fill(Surface.begin(), Surface.end(), Blank);
     CursorColumn = 0;
     CursorRow = 0;
@@ -69,7 +46,7 @@ void ConsoleModel::Scroll()
     const std::size_t RowBytes = static_cast<std::size_t>(WidthValue) * sizeof(TextCell);
     std::memmove(Surface.data(), Surface.data() + WidthValue,
                  static_cast<std::size_t>(HeightValue - 1u) * RowBytes);
-    const TextCell Blank{COLOR_DEFAULT, COLOR_DEFAULT, ' ', {0, 0, 0}};
+    const TextCell Blank{COLOR_DEFAULT, COLOR_DEFAULT, U' '};
     std::fill(Surface.end() - WidthValue, Surface.end(), Blank);
     // What is kept as places on the console moves up with it.
     for (std::size_t *Place : {&LineStart, &LineEnd, &Others})
@@ -96,7 +73,7 @@ void ConsoleModel::Backspace(std::uint32_t Foreground, std::uint32_t Background)
     if (CursorColumn == 0 || CursorRow >= HeightValue) return;
     CursorColumn--;
     Surface[static_cast<std::size_t>(CursorRow) * WidthValue + CursorColumn] =
-        TextCell{Foreground, Background, ' ', {0, 0, 0}};
+        TextCell{Foreground, Background, U' '};
 }
 
 void ConsoleModel::Tab()
@@ -106,11 +83,11 @@ void ConsoleModel::Tab()
     else CursorColumn = Target;
 }
 
-void ConsoleModel::WriteCell(char Glyph, std::uint32_t Foreground, std::uint32_t Background)
+void ConsoleModel::WriteCell(char32_t Character, std::uint32_t Foreground, std::uint32_t Background)
 {
     if (CursorRow < HeightValue && CursorColumn < WidthValue) {
         Surface[static_cast<std::size_t>(CursorRow) * WidthValue + CursorColumn] =
-            TextCell{Foreground, Background, Glyph, {0, 0, 0}};
+            TextCell{Foreground, Background, Character};
     }
     CursorColumn++;
     if (CursorColumn >= WidthValue) Newline();
@@ -135,24 +112,17 @@ void ConsoleModel::Write(const char *Bytes, std::size_t Length,
             case '\r': CarriageReturn(); break;
             case '\b': Backspace(Foreground, Background); break;
             case '\t': Tab(); break;
-            default:   WriteCell(Byte, Foreground, Background); break;
+            default:   WriteCell(AsCell(static_cast<std::uint8_t>(Byte)), Foreground, Background); break;
             }
             Offset++;
             continue;
         }
 
+        // A byte that begins no character is one missing character: U+FFFD,
+        // and the next byte read afresh (BoxUtf8Next).
         std::uint32_t Codepoint = 0;
-        const int Decoded = DecodeUtf8(Bytes + Offset, Length - Offset, Codepoint);
-        if (Decoded == 0) {
-            WriteCell(Byte, Foreground, Background);
-            Offset++;
-            continue;
-        }
-        char Cells[BOXOS_GLYPH_FOLD_MAX]{};
-        const int Count = BoxGlyphFoldCodepoint(Codepoint, Cells);
-        for (int Index = 0; Index < Count; Index++)
-            WriteCell(Cells[Index], Foreground, Background);
-        Offset += static_cast<std::size_t>(Decoded);
+        Offset += BoxUtf8Next(Bytes + Offset, Length - Offset, &Codepoint);
+        WriteCell(AsCell(Codepoint), Foreground, Background);
     }
 }
 
@@ -267,7 +237,7 @@ void ConsoleModel::AsAnother(std::uint32_t Lane, bool Text, Drawing &&Said)
     Lifted.assign(Surface.begin() + static_cast<std::ptrdiff_t>(LineStart),
                   Surface.begin() + static_cast<std::ptrdiff_t>(End));
     const std::size_t Caret = std::min(Here() >= LineStart ? Here() - LineStart : 0, Lifted.size());
-    const TextCell    Blank{COLOR_DEFAULT, COLOR_DEFAULT, ' ', {0, 0, 0}};
+    const TextCell    Blank{COLOR_DEFAULT, COLOR_DEFAULT, U' '};
     std::fill(Surface.begin() + static_cast<std::ptrdiff_t>(LineStart),
               Surface.begin() + static_cast<std::ptrdiff_t>(End), Blank);
 

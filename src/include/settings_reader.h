@@ -36,12 +36,14 @@
  *           '-'; at most SETTING_NAME_MAX bytes; not `settings` nor `default`;
  *           one sibling's only
  *   KIND    on-or-off                 on or off
- *           number from A to B [UNIT] [or off]
+ *           number from A to B [UNIT] [or off | or all]
  *                                     a whole number from A to B, A no more
  *                                     than B; UNIT a word that says what it
  *                                     counts, which a value may repeat; `or
- *                                     off` lets the word off stand for 0, so
- *                                     A is then 1 or more
+ *                                     off` lets the word off stand for 0 — a
+ *                                     thing it turns off — and `or all` the
+ *                                     word all — every one there is, no
+ *                                     bound — so A is then 1 or more
  *           word                      one word: no blank, no '"'
  *           text                      any text on one line, "" for none
  *           one-of W1 W2 ...          one of two or more different words
@@ -103,7 +105,7 @@ typedef struct {
     SettingSpan Name;
     SettingKind Kind;
     int64_t     From, To;       /* number */
-    bool        Off;            /* number: `or off`, the word off read as 0 */
+    SettingSpan Zero;           /* number: the word read as 0 — off or all (`or off`, `or all`); empty for none */
     SettingSpan Unit;           /* number: empty for none */
     SettingSpan Choices;        /* one-of: the words, as the line has them */
     SettingSpan Default;        /* the value, its quotes taken off; empty for a group */
@@ -121,7 +123,7 @@ typedef struct {
     int64_t     Number;         /* number: 0 for off */
     uint32_t    Color;          /* color: 0xRRGGBB */
     KeyChord    Key;            /* key */
-    SettingSpan Text;           /* the value itself: a number's digits, or off */
+    SettingSpan Text;           /* the value itself: a number's digits, or the word read as 0 */
 } SettingValue;
 
 typedef enum {
@@ -420,7 +422,7 @@ static inline SettingsVerdict SettingValueRead(const Setting *setting, SettingSp
         else if (!SettingSpanIs(value, "off")) return SETTING_VALUE_NOT_ON_OR_OFF;
         return SETTINGS_OK;
     case SETTING_NUMBER: {
-        if (setting->Off && SettingSpanIs(value, "off")) return SETTINGS_OK;
+        if (setting->Zero.Length != 0 && SettingSpanSame(value, setting->Zero)) return SETTINGS_OK;
         SettingSpan number = value;
         uint64_t    end    = 0;
         while (end < value.Length && !SettingBlank(value.At[end])) end++;
@@ -473,8 +475,8 @@ static inline bool SettingKindOf(SettingSpan word, SettingKind *kind)
     return false;
 }
 
-/* What a number or one-of takes, after its kind: from A to B [UNIT] [or off],
- * or the choices up to `default`. *at is left on the word after them. */
+/* What a number or one-of takes, after its kind: from A to B [UNIT] [or off |
+ * or all], or the choices up to `default`. *at is left on the word after them. */
 static inline SettingsVerdict SettingKindWords(SettingSpan line, uint64_t *at, Setting *out)
 {
     SettingSpan     word;
@@ -500,11 +502,11 @@ static inline SettingsVerdict SettingKindWords(SettingSpan line, uint64_t *at, S
         }
         look = *at;
         if (SettingWord(line, &look, &word, &quoted, &verdict) && !quoted && SettingSpanIs(word, "or")) {
-            if (!SettingWord(line, &look, &word, &quoted, &verdict) || quoted || !SettingSpanIs(word, "off") ||
-                out->From < 1)
+            if (!SettingWord(line, &look, &word, &quoted, &verdict) || quoted ||
+                (!SettingSpanIs(word, "off") && !SettingSpanIs(word, "all")) || out->From < 1)
                 return verdict != SETTINGS_OK ? verdict : SETTING_LIMITS_BAD;
-            out->Off = true;
-            *at      = look;
+            out->Zero = word;
+            *at       = look;
         }
         return verdict;
     }
@@ -537,10 +539,9 @@ static inline SettingsVerdict SettingRead(SettingSpan line, uint64_t at, uint32_
     SettingsVerdict verdict = SETTINGS_OK;
     SettingSpan     none    = SettingSpanOf(line.At, 0);
 
-    out->Name = out->Unit = out->Choices = out->Default = out->What = none;
+    out->Name = out->Unit = out->Choices = out->Default = out->What = out->Zero = none;
     out->Kind      = SETTING_KIND_COUNT;
     out->From      = out->To = 0;
-    out->Off       = false;
     out->NextStart = false;
     out->Line      = number;
     out->Parent    = out->Depth = out->Indent = 0;
@@ -867,7 +868,7 @@ static inline const char *SettingsVerdictText(SettingsVerdict verdict)
     case SETTING_HOLDS_NOTHING:       return "holds nothing: what it holds goes below it, indented";
     case SETTING_KIND_UNKNOWN:        return "is of a kind this reader does not know";
     case SETTING_LIMITS_BAD:          return "does not say from and to as two whole numbers, the smaller first "
-                                             "(and from 1 or more with or off)";
+                                             "(and from 1 or more with or off or or all)";
     case SETTING_UNIT_BAD:            return "has a unit that is not a word of letters";
     case SETTING_CHOICES_BAD:         return "does not have two or more different words to choose from";
     case SETTING_NO_DEFAULT:          return "has no default";

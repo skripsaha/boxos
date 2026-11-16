@@ -191,24 +191,24 @@ void PlacePage::Key(const tui::KeyEvent &Pressed)
         }
     } else if (Pressed.IsCtrl() || Pressed.IsAlt()) {
         return;
-    } else if (Pressed.Ascii == tui::KeyCodes::Escape) {
+    } else if (Pressed.Character == tui::KeyCodes::Escape) {
         Leaving.Ask();
-    } else if (Pressed.Ascii == tui::KeyCodes::Enter) {
+    } else if (Pressed.Character == tui::KeyCodes::Enter) {
         if (Waiting.empty()) Ctx.FleetLaid();
         else Put();
-    } else if (Pressed.Ascii == ' ') {
+    } else if (Pressed.Character == ' ') {
         Put();
-    } else if (Pressed.Ascii == tui::KeyCodes::Tab || Pressed.Ascii == 'r' || Pressed.Ascii == 'R') {
+    } else if (Pressed.Character == tui::KeyCodes::Tab || Pressed.Character == 'r' || Pressed.Character == 'R') {
         Turn();
-    } else if (Pressed.Ascii == tui::KeyCodes::Backspace || Pressed.Ascii == 'u' || Pressed.Ascii == 'U') {
+    } else if (Pressed.Character == tui::KeyCodes::Backspace || Pressed.Character == 'u' || Pressed.Character == 'U') {
         Undo();
-    } else if (Pressed.Ascii == 'a' || Pressed.Ascii == 'A') {
+    } else if (Pressed.Character == 'a' || Pressed.Character == 'A') {
         Shuffle();
-    } else if (Pressed.Ascii == 'c' || Pressed.Ascii == 'C') {
+    } else if (Pressed.Character == 'c' || Pressed.Character == 'C') {
         Clear();
-    } else if (Pressed.Ascii == '+' || Pressed.Ascii == '=') {
+    } else if (Pressed.Character == '+' || Pressed.Character == '=') {
         Pick(1);
-    } else if (Pressed.Ascii == '-') {
+    } else if (Pressed.Character == '-') {
         Pick(-1);
     }
 }

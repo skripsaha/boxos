@@ -121,7 +121,7 @@ int run() {
     const painter::tui::Event Event = Screen.Wait(250);
     if (Event.Kind == painter::tui::EventKind::Gone) return 1;
     if (Event.Kind == painter::tui::EventKind::Key &&
-        Event.Key.Ascii == painter::tui::KeyCodes::Escape)
+        Event.Key.Character == painter::tui::KeyCodes::Escape)
       return 0;
   }
 }

@@ -27,6 +27,22 @@ void EmergencyScreenUseText(uint32_t cols, uint32_t rows);
 void EmergencyScreenUsePixels(volatile uint8_t *pixels, uint32_t width,
                               uint32_t height, uint32_t stride, uint32_t format);
 
+/* The smallest cell a framebuffer is drawn in — what one must hold to be
+ * drawn on at all — and the cells the one in use is drawn in: their size and
+ * how many go across and down. */
+void EmergencyScreenLeastCell(uint32_t *width, uint32_t *height);
+void EmergencyScreenCells(uint32_t *cols, uint32_t *rows, uint32_t *cell_width, uint32_t *cell_height);
+
+/* A quiet boot: nothing is drawn — the glass keeps what the firmware left on
+ * it, its logo on a desk machine or the loader's scene — until the display
+ * program claims it; the tail is shown instead on a panic, or when the screen
+ * is shown outright: nobody is coming for the glass, the person asked to see
+ * everything, or presses Ctrl+Alt+Esc (screen.c, ScreenQuietEnds,
+ * ScreenSwapKnock). A line said in error is not one of them: the boot goes on,
+ * and the display shows the line once it has the glass. Never a timer: only
+ * something done. */
+void EmergencyScreenAwait(void);
+
 /* Take the glass: clear it and draw the ring's tail; from now on Follow draws. */
 void EmergencyScreenShow(void);
 
@@ -35,6 +51,10 @@ void EmergencyScreenHide(void);
 
 /* Draw what the ring has said since the last draw, if the glass is ours. */
 void EmergencyScreenFollow(void);
+
+/* Whether this screen has taken the glass since the start — shown, or taken
+ * by a panic: whatever the loader left there is gone. */
+bool EmergencyScreenEverShown(void);
 
 /* A panic's: the glass taken whoever holds the screen, the tail drawn, and
  * every bit of state a core stopped mid-draw may have left reset. */

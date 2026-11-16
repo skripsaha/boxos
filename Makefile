@@ -42,7 +42,9 @@ DEBUG    ?= off
 # not move it — which is why every LBA below is the one it always was.
 #   Sector 0        : Stage1 (446 bytes of code, then the MBR partition table)
 #   Sectors 1-16    : Stage2 (16 sectors = 8192 bytes)
-#   Sectors 17-2047 : the rest of the first mebibyte — nothing, on purpose
+#   Sectors 17-2047 : the rest of the first mebibyte — nothing, on purpose,
+#                     but the crossings at 128-391 (boxos_crossings.h): every
+#                     start Gangway hands a kernel over, and whether it landed
 #   Sector 2048+    : EFI System Partition (FAT32) — as long as the loader it
 #                     carries needs, rounded up to the mebibyte
 #   after the ESP   : the BoxOS partition, LAST on the medium. Everything
@@ -64,10 +66,10 @@ DEBUG    ?= off
 STAGE2_SECTORS      = 16
 
 # Physical address of the boot_info handoff block. ONE number, four consumers:
-# src/boot/stage2/stage2.asm (BIOS loader writes it), src/boot/uefi/tagboot.c
-# (UEFI loader writes it), src/kernel/entry/kernel_entry.asm (reads the boot
-# stack out of it before any C runs) and src/include/boot_info.h (the kernel
-# and TagBoot both). It was spelled out separately in all four until
+# src/boot/stage2/stage2.asm (BIOS loader writes it), src/boot/uefi/
+# gangway_handoff.c (UEFI loader writes it), src/kernel/entry/kernel_entry.asm
+# (reads the boot stack out of it before any C runs) and src/include/boot_info.h
+# (the kernel and Gangway both). It was spelled out separately in all four until
 # 2026-08-23, when moving it turned up the copy in kernel_entry.asm — which
 # would have taken the kernel's stack pointer from whatever happened to be at
 # the old address. The header _Static_asserts against this value, so a drift
@@ -94,6 +96,7 @@ KERNEL_MAX_BYTES    = 33554432  # 32MB (sanity check; bootloader places page tab
 #
 #   sector 0            stage1, and the partition table inside it
 #   sectors 1..16       stage2
+#   sectors 128..391    the crossings (tools/crossings.py lay)
 #   sector 2048         the ESP — as long as the loader it carries needs,
 #                       rounded up to the grain
 #   after the ESP       the volume's ground, as far as its CONTENT needs plus
@@ -329,15 +332,17 @@ BRINGUP_MARK = $(BUILDDIR)/.bringup.$(if $(filter on,$(BRINGUP)),on,off)
 # through Current. See src/lib/kernel/klib_logring.h for why a ring in memory
 # and not a file written as it goes.
 #
-# Off by default and deliberately not "always on": a board run where this is
-# wanted is not a constant activity, and a build that carries a megabyte of
-# buffer for a boot nobody is going to read is a cost with no reader. Built
-# once with it, every run of that image keeps its log — first, second, third —
-# until the tree is rebuilt without it.
+# The carry-over window — the copy of the ring that survives a warm reset for
+# `lastsaid` — is armed when it is asked for, not always: a board run where
+# it is wanted is not a constant activity, and a megabyte of memory held for
+# a boot nobody is going to read is a cost with no reader. The person asks in
+# gangway.settings (keep-log on), a stamp of the Boarding Pass the kernel
+# reads first of all (boarding.h, BoardingPassKeepLog).
 #
-# `make PRINTTOFILE=on` — the log ring itself is always in the kernel (it is
-# the serial line's source); this switch adds the carry-over window, the copy
-# of the ring that survives a warm reset for `lastsaid`.
+# `make PRINTTOFILE=on` — the kernel's own way when the loader does not say:
+# a BIOS boot, whose stage2 reads no settings, or a gangway.settings that
+# leaves keep-log alone. Built once with it, every such run keeps its log —
+# first, second, third — until the tree is rebuilt without it.
 ifeq ($(PRINTTOFILE),on)
 CFLAGS += -DCONFIG_PRINTTOFILE=1
 endif
@@ -774,9 +779,10 @@ STAGE2_SRC        = $(BOOTDIR)/stage2/stage2.asm
 KERNEL_ENTRY_SRC  = $(ENTRYDIR)/kernel_entry.asm
 
 # ==== DISCOVER FILES ====
-# Exclude macOS metadata files (._*) and userspace
-C_SRCS      := $(shell find $(SRCDIR) -name '*.c' ! -name '._*' ! -path '*/userspace/*')
-ASM_SRCS    := $(shell find $(SRCDIR) -name '*.asm' ! -name '._*' ! -path '*/userspace/*')
+# Exclude macOS metadata files (._*), userspace, and the UEFI loader — Gangway
+# is an image of its own (GANGWAY_SRC), never a part of the kernel.
+C_SRCS      := $(shell find $(SRCDIR) -name '*.c' ! -name '._*' ! -path '*/userspace/*' ! -path '*/boot/uefi/*')
+ASM_SRCS    := $(shell find $(SRCDIR) -name '*.asm' ! -name '._*' ! -path '*/userspace/*' ! -path '*/boot/uefi/*')
 
 # ==== EXCLUSIONS ====
 BOOT_ASM_SRCS     := $(STAGE1_SRC) $(STAGE2_SRC)
@@ -849,15 +855,47 @@ HUB_BIN = $(HUB_DIR)/hub.elf
 PAINTER_DIR = $(USERSPACE_DIR)/painter
 PAINTER_LIB = $(PAINTER_DIR)/libpainter.a
 
+# Typecase — characters to glyphs to pictures: TrueType fonts read and drawn,
+# and the chain of sources a screen asks. The fonts it reads go on the volume.
+TYPECASE_DIR   = $(USERSPACE_DIR)/typecase
+TYPECASE_LIB   = $(TYPECASE_DIR)/libtypecase.a
+TYPECASE_FONTS = $(TYPECASE_DIR)/fonts/JetBrainsMonoNL-Regular.ttf $(TYPECASE_DIR)/fonts/JetBrainsMonoNL-Bold.ttf \
+                 $(TYPECASE_DIR)/fonts/JetBrainsMono-OFL.txt
+
+# The boot scenes (boxos_scene.h): each drawing still and alive, dark and
+# light, packed from src/userspace/scenes/NAME-KIND.txt — drawn from
+# duppogluten.svg by tools/scenedraw (make scenes-draw) — into
+# build/scenes/KIND/NAME.scene — on the volume they are NAME.scene, told apart
+# by the tags the volume list gives them. The first called boot.scene is the
+# one Gangway draws when nothing else is asked (BOX_SCENE_BOOT); Gangway shows
+# a scene's first frame, and the display plays on from it.
+SCENE_NAMES = boot duppo-word duppo-line duppo-letters
+SCENE_KINDS = dark-alive dark-still light-alive light-still
+SCENE_FILES = $(foreach k,$(SCENE_KINDS),$(foreach n,$(SCENE_NAMES),$(BUILDDIR)/scenes/$(k)/$(n).scene))
+
+# The imprint (src/include/boxos_imprint.h): the system's characters drawn
+# ahead of time by Typecase from the system's font, for the hands that cannot
+# read one — the kernel's Emergency Screen, the display's rescue. tools/imprint
+# makes it at every build from the font, so the font stays the one account of
+# how text looks, and nothing of it is kept in the tree. The tool is built for
+# the host from Typecase's very sources, as tools/typecase_stand.sh builds them.
+CXX_HOST      ?= c++
+IMPRINT_FONT   = $(TYPECASE_DIR)/fonts/JetBrainsMonoNL-Regular.ttf
+IMPRINT_TOOL   = $(BUILDDIR)/imprint
+IMPRINT_DIR    = $(BUILDDIR)/imprint_data
+IMPRINT_DATA   = $(IMPRINT_DIR)/boxos_imprint_data.h
+CFLAGS        += -I$(IMPRINT_DIR)
+
 # Utility ELF binaries
 UTILS_DIR = $(USERSPACE_DIR)/utils
 UTIL_NAMES = create show files tag untag name trash delete assemble \
              me info say reboot bye defrag escheat fsck ipc_test memtag hw \
-             timezone logsave lastsaid usetest faretest luggagetest headcount \
+             timezone logsave lastsaid journey usetest faretest luggagetest headcount \
              playtime lavalamp finish taskboard memmap hexer stringview \
              calculate difference copy typer flame checksum passport aquarium \
              nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits \
-             edit seek retag read rollcall handset inside settings autostart scratchpad garden gardener random sand coinflip dice casino seabattle whale hangman duppo
+             edit seek retag read rollcall handset inside settings autostart scratchpad garden gardener random sand coinflip dice casino seabattle whale hangman duppo \
+             glyphs
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
 # ==== FINAL BINARIES ====
@@ -885,22 +923,36 @@ UEFI_ESP_IMG = $(BUILDDIR)/esp.img
 # ==== UEFI BOOTLOADER ====
 # The loader's files, and every header any of them reads: a change to one is a
 # change to the loader.
-TAGBOOT_SRC    = src/boot/uefi/tagboot.c src/boot/uefi/tagboot_deed.c src/boot/uefi/tagboot_attest.c \
-                 src/boot/uefi/tagboot_lectern.c src/boot/uefi/tagboot_lectern_tree.c \
-                 src/boot/uefi/tagboot_lectern_ribbon.c src/boot/uefi/tagboot_lectern_replay.c \
-                 src/boot/uefi/tagboot_succession.c
-TAGBOOT_HDRS   = src/boot/uefi/tagboot.h src/boot/uefi/uefi.h \
-                 src/boot/uefi/tagboot_lectern.h src/boot/uefi/tagboot_lectern_book.h \
+GANGWAY_SRC    = src/boot/uefi/gangway.c src/boot/uefi/gangway_bytes.c src/boot/uefi/gangway_console.c \
+                 src/boot/uefi/gangway_firmware.c src/boot/uefi/gangway_medium.c \
+                 src/boot/uefi/gangway_video.c src/boot/uefi/gangway_draw.c src/boot/uefi/gangway_memory.c \
+                 src/boot/uefi/gangway_paging.c src/boot/uefi/gangway_handoff.c \
+                 src/boot/uefi/gangway_deed.c src/boot/uefi/gangway_attest.c \
+                 src/boot/uefi/gangway_lectern.c src/boot/uefi/gangway_lectern_tree.c \
+                 src/boot/uefi/gangway_lectern_ribbon.c src/boot/uefi/gangway_lectern_replay.c \
+                 src/boot/uefi/gangway_succession.c src/boot/uefi/gangway_lectern_called.c \
+                 src/boot/uefi/gangway_settings.c src/boot/uefi/gangway_keys.c \
+                 src/boot/uefi/gangway_panel.c src/boot/uefi/gangway_panel_log.c \
+                 src/boot/uefi/gangway_crossings.c src/boot/uefi/gangway_scene.c
+GANGWAY_HDRS   = src/boot/uefi/gangway.h src/boot/uefi/uefi.h \
+                 src/boot/uefi/gangway_lectern.h src/boot/uefi/gangway_lectern_book.h \
                  src/include/boot_info.h src/include/boarding_pass.h \
                  src/include/volume_deed.h src/include/volume_book.h \
                  src/include/volume_tally.h src/include/volume_spine.h src/include/volume_ribbon.h \
-                 src/include/volume_digest.h
-TAGBOOT_JUMP   = src/boot/uefi/tagboot_jump.asm
-TAGBOOT_LD     = src/boot/uefi/tagboot.ld
-TAGBOOT_EFI    = $(BUILDDIR)/BOOTX64.EFI
-TAGBOOT_SO     = $(BUILDDIR)/tagboot.so
-TAGBOOT_OBJ    = $(patsubst src/boot/uefi/%.c,$(BUILDDIR)/%.o,$(TAGBOOT_SRC))
-TAGBOOT_JUMP_OBJ = $(BUILDDIR)/tagboot_jump.o
+                 src/include/volume_digest.h \
+                 src/include/boxos_imprint.h src/include/boxos_imprint_press.h src/include/boxos_pixel.h \
+                 src/include/boxos_screen.h src/include/boxos_utf8.h src/include/boxos_color.h \
+                 src/include/video_colors.h src/include/boxos_gangway_settings.h \
+                 src/include/settings_reader.h src/include/settings_chosen.h src/include/key_chord.h \
+                 src/include/kb_event.h src/include/boxos_logkeep.h src/include/boxos_crossings.h \
+                 src/include/boxos_brush.h src/include/boxos_scene.h src/include/boxos_scene_play.h \
+                 $(IMPRINT_DATA)
+GANGWAY_JUMP   = src/boot/uefi/gangway_jump.asm
+GANGWAY_LD     = src/boot/uefi/gangway.ld
+GANGWAY_EFI    = $(BUILDDIR)/BOOTX64.EFI
+GANGWAY_SO     = $(BUILDDIR)/gangway.so
+GANGWAY_OBJ    = $(patsubst src/boot/uefi/%.c,$(BUILDDIR)/%.o,$(GANGWAY_SRC))
+GANGWAY_JUMP_OBJ = $(BUILDDIR)/gangway_jump.o
 
 # UEFI compile/link flags
 # gcc ELF path: compile with -fpic, link as .so, objcopy to PE32+
@@ -911,7 +963,7 @@ UEFI_CFLAGS_GCC = -ffreestanding -nostdlib -nostdinc \
                   -Wall -Wextra -Os \
                   -DBOOT_INFO_ADDR_FROM_BUILD=$(BOOT_INFO_ADDR) \
                   -DBOARDING_PASS_ADDR_FROM_BUILD=$(BOARDING_PASS_ADDR) \
-                  -I$(SRCDIR)/boot/uefi -I$(SRCDIR)/include
+                  -I$(SRCDIR)/boot/uefi -I$(SRCDIR)/include -I$(IMPRINT_DIR)
 
 # clang direct-to-PE path: -fpic is invalid on MSVC target; PE handles
 # relocations natively via the .reloc section.
@@ -922,7 +974,7 @@ UEFI_CFLAGS_CLANG = -ffreestanding -nostdlib -nostdinc \
                     -target x86_64-unknown-windows \
                     -DBOOT_INFO_ADDR_FROM_BUILD=$(BOOT_INFO_ADDR) \
                     -DBOARDING_PASS_ADDR_FROM_BUILD=$(BOARDING_PASS_ADDR) \
-                    -I$(SRCDIR)/boot/uefi -I$(SRCDIR)/include
+                    -I$(SRCDIR)/boot/uefi -I$(SRCDIR)/include -I$(IMPRINT_DIR)
 
 # Detect whether lld-link is available for direct PE output via clang.
 # Apple clang does not ship lld-link, so we fall through to the gcc+objcopy path
@@ -1272,6 +1324,47 @@ $(PAINTER_LIB): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxc
 .PHONY: painter
 painter: $(PAINTER_LIB)
 
+$(IMPRINT_TOOL): tools/imprint.cpp tools/imprint_make.cpp tools/imprint_make.h \
+                 $(wildcard $(TYPECASE_DIR)/src/*.cpp) $(wildcard $(TYPECASE_DIR)/src/*.h) \
+                 $(wildcard $(TYPECASE_DIR)/include/typecase/*.h) $(SRCDIR)/include/boxos_imprint.h \
+                 $(SRCDIR)/include/boxos_symbols.h $(SRCDIR)/include/boxos_mascot.h \
+                 $(SRCDIR)/include/boxos_mosaic.h | $(BUILDDIR)
+	@echo "Compiling the imprint tool for $(UNAME_S) ($(UNAME_M))..."
+	@$(CXX_HOST) -std=c++23 -O2 -Wall -Wextra -I$(TYPECASE_DIR)/include -I$(SRCDIR)/include -Itools \
+		-o $@ $(filter %.cpp,$^)
+
+define SCENE_RULE
+$(BUILDDIR)/scenes/$(1)/$(2).scene: $(USERSPACE_DIR)/scenes/$(2)-$(1).txt tools/scene.py \
+                                    $(SRCDIR)/include/boxos_scene.h $(SRCDIR)/include/boxos_brush.h
+	@mkdir -p $$(@D)
+	@python3 tools/scene.py pack $$< $$@ >/dev/null
+endef
+$(foreach k,$(SCENE_KINDS),$(foreach n,$(SCENE_NAMES),$(eval $(call SCENE_RULE,$(k),$(n)))))
+
+# The scenes' texts drawn again from the owner's drawing (tools/scenedraw):
+# asked for when the drawing or a design changes, never by a build — it needs
+# rsvg-convert and the Gluten font, which a build does not.
+.PHONY: scenes-draw
+scenes-draw:
+	@python3 tools/scenedraw/draw.py $(USERSPACE_DIR)/scenes/duppogluten.svg $(USERSPACE_DIR)/scenes
+
+$(IMPRINT_DATA): $(IMPRINT_TOOL) $(IMPRINT_FONT)
+	@mkdir -p $(@D)
+	@$(IMPRINT_TOOL) $(IMPRINT_FONT) $@
+
+# The one file of the kernel that includes the imprint's data.
+$(BUILDDIR)/kernel/drivers/video/emergency_screen.o: $(IMPRINT_DATA)
+
+# Typecase, likewise a library of its own: the display draws through it, and
+# tools/typecase_stand.sh builds and holds it.
+.PHONY: $(TYPECASE_LIB)
+$(TYPECASE_LIB):
+	@echo "Building Typecase..."
+	@cd $(TYPECASE_DIR) && $(MAKE)
+
+.PHONY: typecase
+typecase: $(TYPECASE_LIB)
+
 # Build apps (proca, procb, today, memtest)
 #
 # ONE recipe, ONE target — and that is the whole point. GNU make reads
@@ -1326,9 +1419,10 @@ $(HUB_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a
 	@echo "hub.elf: $$(stat -f%z $(HUB_BIN) 2>/dev/null || stat -c%s $(HUB_BIN) 2>/dev/null) bytes"
 
 # Build display server
-$(DISPLAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(NAMEPLATE_TOOL)
+$(DISPLAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(TYPECASE_LIB) $(IMPRINT_DATA) \
+                $(NAMEPLATE_TOOL)
 	@echo "Building display server..."
-	@cd $(DISPLAY_DIR) && $(MAKE)
+	@cd $(DISPLAY_DIR) && $(MAKE) IMPRINT_DIR=$(abspath $(IMPRINT_DIR))
 	@echo "display.elf: $$(stat -f%z $(DISPLAY_BIN) 2>/dev/null || stat -c%s $(DISPLAY_BIN) 2>/dev/null) bytes"
 
 # `timezone` carries the zone database, which is C++. Stated BEFORE the rule
@@ -1555,6 +1649,25 @@ VOLUME_CONTENT = \
 	$(USERSPACE_DIR)/file.txt    "file,info,message,text" \
 	$(USERSPACE_DIR)/guide.md    "guide,text" \
 	$(USERSPACE_DIR)/text.md     "document, painter, boxcxx, text, for:module" \
+	$(TYPECASE_DIR)/fonts/JetBrainsMonoNL-Regular.ttf "font" \
+	$(TYPECASE_DIR)/fonts/JetBrainsMonoNL-Bold.ttf    "font" \
+	$(TYPECASE_DIR)/fonts/JetBrainsMono-OFL.txt       "font, license" \
+	$(BUILDDIR)/scenes/dark-alive/boot.scene           "boot, duppo, dark, animated" \
+	$(BUILDDIR)/scenes/dark-still/boot.scene           "boot, duppo, dark" \
+	$(BUILDDIR)/scenes/light-alive/boot.scene          "boot, duppo, light, animated" \
+	$(BUILDDIR)/scenes/light-still/boot.scene          "boot, duppo, light" \
+	$(BUILDDIR)/scenes/dark-alive/duppo-word.scene     "boot, duppo, logo:word, dark, animated" \
+	$(BUILDDIR)/scenes/dark-still/duppo-word.scene     "boot, duppo, logo:word, dark" \
+	$(BUILDDIR)/scenes/light-alive/duppo-word.scene    "boot, duppo, logo:word, light, animated" \
+	$(BUILDDIR)/scenes/light-still/duppo-word.scene    "boot, duppo, logo:word, light" \
+	$(BUILDDIR)/scenes/dark-alive/duppo-line.scene     "boot, duppo, logo:full, dark, animated" \
+	$(BUILDDIR)/scenes/dark-still/duppo-line.scene     "boot, duppo, logo:full, dark" \
+	$(BUILDDIR)/scenes/light-alive/duppo-line.scene    "boot, duppo, logo:full, light, animated" \
+	$(BUILDDIR)/scenes/light-still/duppo-line.scene    "boot, duppo, logo:full, light" \
+	$(BUILDDIR)/scenes/dark-alive/duppo-letters.scene  "boot, duppo, logo:letters, dark, animated" \
+	$(BUILDDIR)/scenes/dark-still/duppo-letters.scene  "boot, duppo, logo:letters, dark" \
+	$(BUILDDIR)/scenes/light-alive/duppo-letters.scene "boot, duppo, logo:letters, light, animated" \
+	$(BUILDDIR)/scenes/light-still/duppo-letters.scene "boot, duppo, logo:letters, light" \
 	$(TESTBIN_EMPTY)         "binary, test:forerror, emptyfile" \
 	$(UTILS_DIR)/ipc_test.elf "" \
 	$(UTILS_DIR)/memtag.elf  "memory" \
@@ -1564,6 +1677,7 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/luggagetest.elf "test" \
 	$(UTILS_DIR)/logsave.elf "log" \
 	$(UTILS_DIR)/lastsaid.elf "log" \
+	$(UTILS_DIR)/journey.elf "boot" \
 	$(UTILS_DIR)/rollcall.elf "test" \
 	$(UTILS_DIR)/handset.elf "test" \
 	$(UTILS_DIR)/headcount.elf "test" \
@@ -1608,7 +1722,8 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/seabattle.elf "fun,game" \
 	$(UTILS_DIR)/whale.elf "fun" \
 	$(UTILS_DIR)/hangman.elf   "fun,game" \
-	$(UTILS_DIR)/duppo.elf     "fun"
+	$(UTILS_DIR)/duppo.elf     "fun" \
+	$(UTILS_DIR)/glyphs.elf    ""
 
 # ‼ EVERY PROGRAM ON THE VOLUME IS A BOX. VOLUME_CONTENT names the programs as
 # the tree links them; each ELF there goes onto the volume as the box tools/pack
@@ -1635,7 +1750,7 @@ PackAsks = $(if $(filter $(basename $(notdir $(1))),$(PACK_ASKS_NOTHING)),,--ask
 # tools/pack --role): the programs the machine runs on say `system`, and the
 # volume maker, which trusts what it has itself just packed, keeps them in that
 # role. The rest are ordinary.
-PACK_SYSTEM = display hub pulse quilltest autostart reboot bye escheat timezone memtag hw usetest faretest logsave lastsaid finish taskboard memmap passport gardener
+PACK_SYSTEM = display hub pulse quilltest autostart reboot bye escheat timezone memtag hw usetest faretest logsave lastsaid journey finish taskboard memmap passport gardener
 PackRole = $(if $(filter $(basename $(notdir $(1))),$(PACK_SYSTEM)),--role system)
 
 define BoxRule
@@ -1645,7 +1760,8 @@ $(call Box,$(1)): $(1) $(PACK_TOOL)
 endef
 $(foreach elf,$(VOLUME_ELFS),$(eval $(call BoxRule,$(elf))))
 
-$(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(HUB_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(PULSE_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TAGFS_TOOL)
+$(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(HUB_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(PULSE_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TYPECASE_FONTS) $(SCENE_FILES) $(TAGFS_TOOL) \
+         tools/crossings.py $(SRCDIR)/include/boxos_crossings.h
 	@GROUND=$$($(TAGFS_TOOL) --ground --kernel $(KERNEL_BIN) $(VOLUME_LAID)); \
 	ESP_RAW=$$(( ( $$(stat -f%z $(UEFI_ESP_IMG) 2>/dev/null || stat -c%s $(UEFI_ESP_IMG)) + 511 ) / 512 )); \
 	ESP=$$(( ( $$ESP_RAW + $(MEDIUM_GRAIN_SECTORS) - 1 ) / $(MEDIUM_GRAIN_SECTORS) * $(MEDIUM_GRAIN_SECTORS) )); \
@@ -1662,7 +1778,9 @@ $(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_B
 	echo "  Writing the partition table (the ESP, then the volume's ground)..."; \
 	python3 tools/make_mbr.py $@ \
 	    $$START,$$GROUND,7f,boot \
-	    $(ESP_START_SECTOR),$$ESP,ef
+	    $(ESP_START_SECTOR),$$ESP,ef; \
+	echo "  Laying the crossings in the front (src/include/boxos_crossings.h)..."; \
+	python3 tools/crossings.py lay $@
 	@echo "  Making the volume on it..."
 	@$(TAGFS_TOOL) --kernel $(KERNEL_BIN) $@ $(VOLUME_LAID)
 	@# ‼ AND WHAT IT WROTE IS READ BACK BEFORE ANYTHING BOOTS IT.
@@ -1696,16 +1814,17 @@ $(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_B
 	printf '  %s\n' "$$LAST"; \
 	printf '%s\n' "$$VERDICT" | sed -n 's/^check: \(the kernel in this tree would NOT mount this volume: .*\)/  WARNING: \1/p'
 	@# The loader holds the kernel to the book before the jump
-	@# (tagboot_attest.c, tagboot_succession.c). The oracle reads the image as
+	@# (gangway_attest.c, gangway_succession.c). The oracle reads the image as
 	@# the loader will, so a kernel the book does not attest fails the build
 	@# here — not at the first UEFI boot of the image.
 	@BOOT=$$(python3 tools/volume-read.py $@ boot 2>&1); \
-	if ! printf '%s\n' "$$BOOT" | grep -q 'is attested by the book'; then \
+	KERNEL=$$(printf '%s\n' "$$BOOT" | grep -E '^boot: (the kernel the deed names|kernel fid [0-9]+) is attested by the book' | head -1); \
+	if [ -z "$$KERNEL" ]; then \
 		printf '%s\n' "$$BOOT"; \
-		echo "ERROR: tools/volume-read.py boot finds no kernel the book of $@ attests — TagBoot would not jump into it as made"; \
+		echo "ERROR: tools/volume-read.py boot finds no kernel the book of $@ attests — Gangway would not jump into it as made"; \
 		exit 1; \
 	fi; \
-	printf '  %s\n' "$$(printf '%s\n' "$$BOOT" | tail -1)"
+	printf '  %s\n' "$$KERNEL"
 	@echo "Disk image created: $(IMAGE)"
 
 # There is no floppy image and no ISO here any more.
@@ -1729,34 +1848,34 @@ $(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_B
 # The EFI binary is placed at build/BOOTX64.EFI.  To boot it with OVMF:
 #   make run UEFI=on   (requires OVMF.fd in the project root or /usr/share/ovmf/)
 
-uefi: $(TAGBOOT_EFI)
+uefi: $(GANGWAY_EFI)
 
 ifdef CLANG_AVAILABLE
 
 # ---- clang path: compile directly to PE32+ EFI application ----
-# Assemble tagboot_jump.asm to ELF64 first; clang links both objects into PE.
-$(TAGBOOT_JUMP_OBJ): $(TAGBOOT_JUMP) | $(BUILDDIR)
-	@echo "Assembling TagBoot jump trampoline..."
+# Assemble gangway_jump.asm to ELF64 first; clang links both objects into PE.
+$(GANGWAY_JUMP_OBJ): $(GANGWAY_JUMP) | $(BUILDDIR)
+	@echo "Assembling Gangway jump trampoline..."
 	@$(ASM) -f elf64 $< -o $@
 
-$(TAGBOOT_EFI): $(TAGBOOT_SRC) $(TAGBOOT_JUMP_OBJ) $(TAGBOOT_LD) $(TAGBOOT_HDRS) | $(BUILDDIR)
-	@echo "Building TagBoot UEFI (clang/lld → PE32+)..."
+$(GANGWAY_EFI): $(GANGWAY_SRC) $(GANGWAY_JUMP_OBJ) $(GANGWAY_LD) $(GANGWAY_HDRS) | $(BUILDDIR)
+	@echo "Building Gangway UEFI (clang/lld → PE32+)..."
 	@clang $(UEFI_CFLAGS_CLANG) \
-		-Wl,-entry:TagBootMain \
+		-Wl,-entry:GangwayMain \
 		-Wl,-subsystem:efi_application \
 		-Wl,-nodefaultlib \
-		-o $@ $(TAGBOOT_SRC) $(TAGBOOT_JUMP_OBJ)
-	@echo "TagBoot EFI: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
+		-o $@ $(GANGWAY_SRC) $(GANGWAY_JUMP_OBJ)
+	@echo "Gangway EFI: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
 
 else
 
 # ---- gcc path: compile to ELF PIC .so, then objcopy to PE32+ ----
-$(TAGBOOT_JUMP_OBJ): $(TAGBOOT_JUMP) | $(BUILDDIR)
-	@echo "Assembling TagBoot jump trampoline..."
+$(GANGWAY_JUMP_OBJ): $(GANGWAY_JUMP) | $(BUILDDIR)
+	@echo "Assembling Gangway jump trampoline..."
 	@$(ASM) -f elf64 $< -o $@
 
-$(TAGBOOT_OBJ): $(BUILDDIR)/%.o: src/boot/uefi/%.c $(TAGBOOT_HDRS) | $(BUILDDIR)
-	@echo "Building TagBoot UEFI object $@ (gcc ELF)..."
+$(GANGWAY_OBJ): $(BUILDDIR)/%.o: src/boot/uefi/%.c $(GANGWAY_HDRS) | $(BUILDDIR)
+	@echo "Building Gangway UEFI object $@ (gcc ELF)..."
 	@$(UEFI_CC) $(UEFI_CFLAGS_GCC) -c $< -o $@
 
 # ‼ -z defs: no symbol of the loader is left for anyone to resolve at load. It
@@ -1764,18 +1883,18 @@ $(TAGBOOT_OBJ): $(BUILDDIR)/%.o: src/boot/uefi/%.c $(TAGBOOT_HDRS) | $(BUILDDIR)
 # on its own — a memcpy for a struct copied, a memset for a loop it saw
 # through — is a symbol nothing will ever define, and an EFI image that calls
 # address 0 the first time that path runs. The link refuses it here instead.
-$(TAGBOOT_SO): $(TAGBOOT_OBJ) $(TAGBOOT_JUMP_OBJ) $(TAGBOOT_LD) | $(BUILDDIR)
-	@echo "Linking TagBoot ELF shared object..."
+$(GANGWAY_SO): $(GANGWAY_OBJ) $(GANGWAY_JUMP_OBJ) $(GANGWAY_LD) | $(BUILDDIR)
+	@echo "Linking Gangway ELF shared object..."
 	@$(LD) \
 		-nostdlib \
 		-shared \
 		-Bsymbolic \
 		-z defs \
-		-T $(TAGBOOT_LD) \
-		-o $@ $(TAGBOOT_OBJ) $(TAGBOOT_JUMP_OBJ)
+		-T $(GANGWAY_LD) \
+		-o $@ $(GANGWAY_OBJ) $(GANGWAY_JUMP_OBJ)
 
-$(TAGBOOT_EFI): $(TAGBOOT_SO) | $(BUILDDIR)
-	@echo "Converting TagBoot ELF → PE32+ EFI binary (make_efi.py)..."
+$(GANGWAY_EFI): $(GANGWAY_SO) | $(BUILDDIR)
+	@echo "Converting Gangway ELF → PE32+ EFI binary (make_efi.py)..."
 	@python3 tools/make_efi.py $< $@
 
 endif
@@ -1794,7 +1913,7 @@ comma := ,
 #   make run EMU=bochs                — Bochs (SDL2 on macOS, X11 on Linux)
 #   make run EMU=bochs BOCHSDBG=on    — Bochs + internal text debugger
 #   make run EMU=bochs GDB=on         — Bochs gdb stub on tcp:1234
-#   make run UEFI=on                  — QEMU via OVMF + TagBoot EFI
+#   make run UEFI=on                  — QEMU via OVMF + Gangway EFI
 #   make run UEFI=on EMU=bochs        — Bochs via OVMF (only on Bochs builds with
 #                                       extended ROM area; stock builds reject 3.5MB OVMF)
 #   make run EMU=bochs CORES=4        — only works on Bochs built --enable-smp
@@ -2002,9 +2121,9 @@ $(BUILDDIR)/edk2-vars.fd: | $(BUILDDIR)
 # from it. It no longer depends on edk2-vars.fd — NVRAM belongs to running a
 # virtual machine, not to building a filesystem, and the image needs this even
 # when no OVMF is installed.
-$(UEFI_ESP_IMG): $(TAGBOOT_EFI) | $(BUILDDIR)
+$(UEFI_ESP_IMG): $(GANGWAY_EFI) | $(BUILDDIR)
 	@echo "Creating UEFI ESP image (FAT32) for sector $(ESP_START_SECTOR)..."
-	@python3 tools/make_esp.py $(TAGBOOT_EFI) $@ $(ESP_START_SECTOR)
+	@python3 tools/make_esp.py $(GANGWAY_EFI) $@ $(ESP_START_SECTOR)
 
 # The two run-bg keys, refused here before anything is built: an interactive
 # run would boot build/boxos.img unrecorded and let the key pass unheard.
@@ -2193,7 +2312,7 @@ run-bg: $(RUN_BG_NEEDS)
 #                       inside the volume is counted from there.
 #   • Partition 2     = an EFI System Partition (FAT32) holding
 #                       EFI/BOOT/BOOTX64.EFI, which UEFI firmware finds by
-#                       itself. TagBoot then reads this same table for the
+#                       itself. Gangway then reads this same table for the
 #                       BoxOS partition, so both paths reach the same volume
 #                       by asking the same question.
 #
@@ -2215,7 +2334,8 @@ run-bg: $(RUN_BG_NEEDS)
 usb: $(BUILDPLATE_TOOL)
 	@if [ ! -f "$(IMAGE)" ]; then \
 		echo "ERROR: $(IMAGE) does not exist — run 'make' first"; \
-		echo "  (and 'make PRINTTOFILE=on' if you want the machine to keep its log)"; \
+		echo "  (a machine that boots through UEFI keeps its log once 'settings gangway keep-log on' is set;"; \
+		echo "   one that boots through BIOS, with 'make PRINTTOFILE=on')"; \
 		exit 1; \
 	fi
 	@# ‼ AND IT IS THE IMAGE THIS TREE MADE, OR IT IS NOT FLASHED.
@@ -2386,13 +2506,14 @@ clean:
 	@rm -f $(TAGFS_TOOL)
 	@rm -f tools/nameplate
 	@rm -f $(APPS_STAMP) $(UTILS_STAMP)
-	@rm -f $(TAGBOOT_SO) $(TAGBOOT_OBJ) $(TAGBOOT_JUMP_OBJ)
+	@rm -f $(GANGWAY_SO) $(GANGWAY_OBJ) $(GANGWAY_JUMP_OBJ)
 	@cd $(USERSPACE_DIR) && $(MAKE) clean
 	@cd $(APPS_DIR) && $(MAKE) clean
 	@cd $(DISPLAY_DIR) && $(MAKE) clean
 	@cd $(HUB_DIR) && $(MAKE) clean
 	@cd $(UTILS_DIR) && $(MAKE) clean
 	@cd $(PAINTER_DIR) && $(MAKE) clean
+	@cd $(TYPECASE_DIR) && $(MAKE) clean
 	@cd $(USERSPACE_DIR)/boxlib && $(MAKE) clean
 	# boxcxx was missing here, and its absence was not cosmetic: no Makefile in
 	# userspace tracks header dependencies, so `make clean && make` is the ONLY
@@ -2463,7 +2584,7 @@ info:
 	@echo "  FULLSCREEN=on — fullscreen mode"
 	@echo "  USB=on|off    — enable/disable USB keyboard"
 	@echo "  AHCI=on       — use AHCI disk controller"
-	@echo "  UEFI=on       — boot via OVMF + TagBoot EFI (requires OVMF.fd)"
+	@echo "  UEFI=on       — boot via OVMF + Gangway EFI (requires OVMF.fd)"
 	@echo "  POWERCUT=on   — run-bg: record every write and flush of the boot disk in POWERCUT_LOG (tools/powercut.sh)"
 	@echo "  BOOTDISK=path — run-bg: boot this disk as it stands, without rebuilding the image"
 	@echo ""

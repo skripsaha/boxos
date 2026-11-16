@@ -133,7 +133,7 @@ typedef struct EditLine {
     LineWhisper *whisper;    /* NULL: the cabin's history and nothing whispered */
     char    *said;     /* what the whisper says the line could go on with, or NULL */
     uint32_t said_len;
-    uint32_t dim_end;  /* the offset in the line the dim cells reach; 0 when none */
+    uint32_t dim_end;  /* the cell of the line the dim cells reach; 0 when none */
 } EditLine;
 
 /* Dim enough to read as not typed yet, on a framebuffer and on the sixteen
@@ -143,6 +143,96 @@ typedef struct EditLine {
 /* The first room a growing line is given; it doubles whenever the line fills
  * it, so a line is as long as the person types it. */
 #define READLINE_FIRST_ROOM 64u
+
+/* ===========================================================================
+ * Characters, not bytes
+ *
+ * The line is UTF-8: a character is one to four bytes and one cell. The
+ * cursor and the length count BYTES, which is what moving text about takes;
+ * every step the caret takes on the glass counts CELLS — characters — which
+ * is what the console lays. A key is a Unicode character (kb_event.h), typed
+ * in as its UTF-8.
+ * =========================================================================== */
+
+static bool Continues(char b)
+{
+    return ((unsigned char)b & 0xC0u) == 0x80u;
+}
+
+/* The cells `n` bytes of `text` take: one a character. */
+static uint32_t Cells(const char *text, uint32_t n)
+{
+    uint32_t cells = 0;
+    for (uint32_t i = 0; i < n; i++) cells += !Continues(text[i]);
+    return cells;
+}
+
+/* Where the character before `at` begins, and where the one at `at` ends. */
+static uint32_t CharBefore(const EditLine *l, uint32_t at)
+{
+    while (at > 0 && Continues(l->buf[--at])) {}
+    return at;
+}
+
+static uint32_t CharAfter(const EditLine *l, uint32_t at)
+{
+    if (at < l->len) at++;
+    while (at < l->len && Continues(l->buf[at])) at++;
+    return at;
+}
+
+/* A character that shows: none of the C0 or C1 controls, nor DEL, nor what is
+ * no character at all. */
+static bool Shows(uint32_t cp)
+{
+    return cp >= 0x20u && cp != 0x7Fu && !(cp >= 0x80u && cp < 0xA0u) &&
+           !(cp >= 0xD800u && cp <= 0xDFFFu) && cp <= 0x10FFFFu;
+}
+
+/* The character `text` begins with, as UTF-8 spells it: its length, or 0 for
+ * a spelling UTF-8 forbids (a stray continuation, an overlong form, a
+ * surrogate, past U+10FFFF, or cut short at `n`). */
+static uint32_t CharAt(const char *text, uint32_t n, uint32_t *cp)
+{
+    static const uint32_t least[5] = { 0, 0, 0x80u, 0x800u, 0x10000u };
+    unsigned char lead = (unsigned char)text[0];
+    uint32_t len = lead < 0x80u ? 1 : (lead >= 0xC2u && lead <= 0xDFu) ? 2
+                 : (lead >= 0xE0u && lead <= 0xEFu) ? 3 : (lead >= 0xF0u && lead <= 0xF4u) ? 4 : 0;
+    if (len == 0 || len > n) return 0;
+    uint32_t value = len == 1 ? lead : lead & (0x7Fu >> len);
+    for (uint32_t i = 1; i < len; i++) {
+        if (!Continues(text[i])) return 0;
+        value = (value << 6) | ((unsigned char)text[i] & 0x3Fu);
+    }
+    if (value < least[len] || value > 0x10FFFFu || (value >= 0xD800u && value <= 0xDFFFu)) return 0;
+    *cp = value;
+    return len;
+}
+
+/* `cp` as UTF-8 in `out`: its length. */
+static uint32_t Spell(uint32_t cp, char out[4])
+{
+    if (cp < 0x80u) {
+        out[0] = (char)cp;
+        return 1;
+    }
+    if (cp < 0x800u) {
+        out[0] = (char)(0xC0u | (cp >> 6));
+        out[1] = (char)(0x80u | (cp & 0x3Fu));
+        return 2;
+    }
+    if (cp < 0x10000u) {
+        out[0] = (char)(0xE0u | (cp >> 12));
+        out[1] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+        out[2] = (char)(0x80u | (cp & 0x3Fu));
+        return 3;
+    }
+    out[0] = (char)(0xF0u | (cp >> 18));
+    out[1] = (char)(0x80u | ((cp >> 12) & 0x3Fu));
+    out[2] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+    out[3] = (char)(0x80u | (cp & 0x3Fu));
+    return 4;
+}
 
 /* Room for `need` bytes of text: true when the buffer holds them — as it is,
  * or grown, for a line that grows. A caller's own buffer never grows. */
@@ -200,7 +290,7 @@ static void EchoTail(EditLine *l, uint32_t from, uint32_t trailing_blanks)
      * shorter line leaves behind, then step back to the cursor. */
     if (l->len > from) print_bytes_to_screen(l->buf + from, l->len - from);
     EchoBlanks(trailing_blanks, false);
-    int32_t back = (int32_t)(l->len - l->cursor) + (int32_t)trailing_blanks;
+    int32_t back = (int32_t)Cells(l->buf + l->cursor, l->len - l->cursor) + (int32_t)trailing_blanks;
     console_step(-back);
     io_flush();   /* an echo is seen as it is typed, not when a line is done */
 }
@@ -218,12 +308,16 @@ static void Insert(EditLine *l, const char *text, uint32_t n)
     EchoTail(l, l->cursor - n, 0);
 }
 
-/* What the editor would have typed itself: a character is one cell, so the
- * steps it counts are the cells it laid. */
+/* What the editor would have typed itself: characters that show, in UTF-8
+ * as it may be spelled — each one cell, so the steps it counts are the cells
+ * it laid. */
 static bool Typeable(const char *text, uint32_t n)
 {
-    for (uint32_t i = 0; i < n; i++) {
-        if ((unsigned char)text[i] < 0x20 || (unsigned char)text[i] >= 0x7F) return false;
+    for (uint32_t at = 0; at < n;) {
+        uint32_t cp  = 0;
+        uint32_t len = CharAt(text + at, n - at, &cp);
+        if (len == 0 || !Shows(cp)) return false;
+        at += len;
     }
     return true;
 }
@@ -237,10 +331,11 @@ static void DimDraw(EditLine *l, const char *text, uint32_t n)
         l->dim_end = 0;
         return;
     }
-    uint32_t reach  = l->len + n;
+    uint32_t cells  = Cells(text, n);
+    uint32_t reach  = Cells(l->buf, l->len) + cells;
     uint32_t blanks = l->dim_end > reach ? l->dim_end - reach : 0;
     l->dim_end = n ? reach : 0;
-    if (n + blanks == 0) return;
+    if (cells + blanks == 0) return;
 
     if (n) {
         Color was = get_color();
@@ -249,7 +344,7 @@ static void DimDraw(EditLine *l, const char *text, uint32_t n)
         set_color(was);
     }
     EchoBlanks(blanks, true);
-    console_step(-(int32_t)(n + blanks));
+    console_step(-(int32_t)(cells + blanks));
     io_flush();
 }
 
@@ -280,7 +375,7 @@ static void WhisperRefresh(EditLine *l)
     }
 
     bool same = said && l->said && n == l->said_len && memcmp(said, l->said, n) == 0 &&
-                l->dim_end == l->len + n;
+                l->dim_end == Cells(l->buf, l->len) + Cells(said, n);
     free(l->said);
     l->said     = said;
     l->said_len = n;
@@ -320,21 +415,22 @@ static bool WhisperTab(EditLine *l, bool all)
     return true;
 }
 
+/* The character before the caret, gone — every byte of it. */
 static void Backspace(EditLine *l)
 {
     if (!console_step(0)) {
         MoveTo(l, l->len);
         if (l->len == 0) return;
-        l->len--;
-        l->cursor--;
+        l->len = l->cursor = CharBefore(l, l->len);
         print_bytes_to_screen("\b \b", 3);   /* back, blank, back: a rub-out */
         io_flush();
         return;
     }
     if (l->cursor == 0) return;
-    memmove(l->buf + l->cursor - 1, l->buf + l->cursor, l->len - l->cursor);
-    l->len--;
-    l->cursor--;
+    uint32_t from = CharBefore(l, l->cursor);
+    memmove(l->buf + from, l->buf + l->cursor, l->len - l->cursor);
+    l->len   -= l->cursor - from;
+    l->cursor = from;
     /* A STEP back, not a '\b'. The console's '\b' erases the cell it steps
      * onto and does nothing at all at column zero, so on a line that had
      * wrapped past the right edge one character refused to disappear and
@@ -348,8 +444,9 @@ static void Backspace(EditLine *l)
 static void DeleteForward(EditLine *l)
 {
     if (l->cursor == l->len || !console_step(0)) return;
-    memmove(l->buf + l->cursor, l->buf + l->cursor + 1, l->len - l->cursor - 1);
-    l->len--;
+    uint32_t to = CharAfter(l, l->cursor);
+    memmove(l->buf + l->cursor, l->buf + to, l->len - to);
+    l->len -= to - l->cursor;
     EchoTail(l, l->cursor, 1);
 }
 
@@ -367,7 +464,8 @@ static void MoveTo(EditLine *l, uint32_t where)
         return;
     }
     if (where < l->len) DimHide(l);
-    console_step((int32_t)where - (int32_t)l->cursor);
+    console_step(where >= l->cursor ? (int32_t)Cells(l->buf + l->cursor, where - l->cursor)
+                                    : -(int32_t)Cells(l->buf + where, l->cursor - where));
     l->cursor = where;
 }
 
@@ -381,7 +479,8 @@ static void MoveTo(EditLine *l, uint32_t where)
  * only that way: the old line rubbed out from its end, the new one typed. */
 static void Replace(EditLine *l, const char *text, uint32_t n)
 {
-    uint32_t was = l->len;
+    uint32_t was        = Cells(l->buf, l->len);
+    uint32_t caret_back = Cells(l->buf, l->cursor);
     if (!EnsureRoom(l, n)) n = l->cap;
 
     if (!console_step(0)) {
@@ -409,13 +508,14 @@ static void Replace(EditLine *l, const char *text, uint32_t n)
      * is right about it without being told again. */
     if (was > 0) l->echo_diverged = true;
 
-    console_step(-(int32_t)l->cursor);
+    console_step(-(int32_t)caret_back);
     memcpy(l->buf, text, n);
     l->len    = n;
     l->cursor = n;
     if (n > 0) print_bytes_to_screen(l->buf, n);
 
-    uint32_t blanks = was > n ? was - n : 0;
+    uint32_t now    = Cells(l->buf, n);
+    uint32_t blanks = was > now ? was - now : 0;
     EchoBlanks(blanks, false);
     if (blanks) console_step(-(int32_t)blanks);
     io_flush();
@@ -488,7 +588,7 @@ static void Recall(EditLine *l, bool older)
  * key because the tag says so and not because the length allows it. */
 typedef enum { HEARD_KEY, HEARD_END, HEARD_NOTHING } Heard;
 
-/* A key — three bytes, kb_event_t — or the display's word that the program is
+/* A key — six bytes, kb_event_t — or the display's word that the program is
  * asked to finish (box/display.h ConsoleNotice), told apart by length; anything
  * else said on the tag is passed over. */
 static Heard NextKey(TouchTag ear, kb_event_t *out)
@@ -538,7 +638,7 @@ static Heard NextKey(TouchTag ear, kb_event_t *out)
 static void RestateLine(const EditLine *l)
 {
     if (l->len == 0 || !console_step(0)) return;
-    console_step(-(int32_t)l->len);
+    console_step(-(int32_t)Cells(l->buf, l->len));
     print_bytes_to_screen(l->buf, l->len);
 }
 
@@ -548,8 +648,8 @@ static void EditKey(EditLine *l, const kb_event_t *k)
 {
     if (k->mods & KB_MOD_EXTENDED) {
         switch (k->scancode) {
-        case KEY_LEFT:   if (l->cursor > 0) MoveTo(l, l->cursor - 1); break;
-        case KEY_RIGHT:  MoveTo(l, l->cursor + 1);                    break;
+        case KEY_LEFT:   MoveTo(l, CharBefore(l, l->cursor));         break;
+        case KEY_RIGHT:  MoveTo(l, CharAfter(l, l->cursor));          break;
         case KEY_HOME:   MoveTo(l, 0);                                break;
         case KEY_END:    MoveTo(l, l->len);                           break;
         case KEY_UP:     Recall(l, true);                             break;
@@ -561,13 +661,14 @@ static void EditKey(EditLine *l, const kb_event_t *k)
         return;
     }
 
-    char c = k->ascii;
+    uint32_t c = k->cp;
     if (c == '\t') {
         if (WhisperTab(l, (k->mods & KB_MOD_SHIFT) != 0)) return;
-    } else if (c == '\b' || c == 0x7F) {
+    } else if (c == '\b' || c == 0x7Fu) {
         Backspace(l);
-    } else if ((unsigned char)c >= 0x20 && (unsigned char)c < 0x7F) {
-        Insert(l, &c, 1);
+    } else if (Shows(c)) {
+        char spelled[4];
+        Insert(l, spelled, Spell(c, spelled));
     }
     WhisperRefresh(l);
 }
@@ -613,7 +714,7 @@ static int EditUntilEnter(EditLine *l)
             len = READLINE_ASKED_TO_END;
         }
         if (heard != HEARD_KEY) break;
-        if (k.ascii == '\r' || k.ascii == '\n') {
+        if (k.cp == '\r' || k.cp == '\n') {
             len = Accept(l);
             break;
         }
@@ -665,12 +766,22 @@ int readline_whispered(char **line, LineWhisper *whisper)
     return ReadGrowing(line, whisper);
 }
 
+/* The bytes of a character getchar has begun handing out and not finished:
+ * a byte is what getchar answers, and a character typed is one to four. */
+static char     g_getchar_rest[4];
+static uint32_t g_getchar_left;
+static uint32_t g_getchar_at;
+
 /* WEAK for the same reason as printf in print.c: boxcxx's getchar reads
  * through the same FILE as fgetc(stdin), so a byte pushed back with ungetc
  * comes back to it. This one cannot see that pushback, which is correct for
  * a C program that has no FILE and wrong for a C++ one that does. */
 __attribute__((weak)) int getchar(void)
 {
+    if (g_getchar_left) {
+        g_getchar_left--;
+        return (unsigned char)g_getchar_rest[g_getchar_at++];
+    }
     if (console_input_ended()) return -1;
     TouchTag ear = console_listen();
     if (ear == TOUCH_TAG_INVALID) return -1;
@@ -679,9 +790,12 @@ __attribute__((weak)) int getchar(void)
         const Heard heard = NextKey(ear, &k);
         if (heard == HEARD_END) console_input_ends();
         if (heard != HEARD_KEY) { console_unlisten(); return -1; }
-        if (!(k.mods & KB_MOD_EXTENDED) && k.ascii != 0) {
+        if (!(k.mods & KB_MOD_EXTENDED) && k.cp != 0) {
             console_unlisten();
-            return (unsigned char)k.ascii;
+            uint32_t n = Spell(k.cp, g_getchar_rest);
+            g_getchar_left = n - 1;
+            g_getchar_at   = 1;
+            return (unsigned char)g_getchar_rest[0];
         }
     }
 }

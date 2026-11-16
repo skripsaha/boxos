@@ -214,9 +214,9 @@ void BattlePage::Key(const tui::KeyEvent &Pressed)
         }
     } else if (Pressed.IsExtended() || Pressed.IsCtrl() || Pressed.IsAlt()) {
         return;
-    } else if (Pressed.Ascii == tui::KeyCodes::Escape) {
+    } else if (Pressed.Character == tui::KeyCodes::Escape) {
         Leaving.Ask();
-    } else if (Pressed.Ascii == tui::KeyCodes::Enter || Pressed.Ascii == ' ') {
+    } else if (Pressed.Character == tui::KeyCodes::Enter || Pressed.Character == ' ') {
         if (Now == Phase::Hold) {
             Close();
         } else if (Now == Phase::Aim) {

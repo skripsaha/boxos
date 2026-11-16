@@ -44,6 +44,7 @@
 #include "cpuid.h"
 #include "cpu_caps_page.h"
 #include "boarding.h"
+#include "journey.h"
 #include "boot_info.h"
 #include "notify.h"
 #include "amp.h"
@@ -81,10 +82,8 @@ uint64_t g_entry_rflags = 0;
 
 void kernel_main(void)
 {
-    /* Before a single byte is said, because a byte said before this is a byte
-     * the next boot will not find. See klib_logring.h for what the window
-     * survives — a warm reset, not a power cut. */
-    LogKeepInit();
+    /* The kernel's first moment of the journey, before anything is done. */
+    JourneyMark("kernel");
 
     ScreenInit();
 
@@ -107,6 +106,21 @@ void kernel_main(void)
      */
     BuildPlateSay();
 
+    /* The loader's journal next, while its pages are still nobody's to hand
+     * out: what brought this kernel here opens the log, after the line that
+     * names the kernel (boarding.h). */
+    BoardingPassTake();
+
+    /* The carry-over window as soon as the pass can say whether it is wanted
+     * — what was said before it goes in first, so the window holds the boot
+     * from its first byte. See klib_logring.h for what it survives: a warm
+     * reset, not a power cut. */
+    LogKeepInit(BoardingPassKeepLog());
+
+    /* A person who asked to see everything (gangway.settings startup all) sees
+     * the log's tail from here on, until the display takes the glass. */
+    if (BoardingPassStartup() == BOARDING_STARTUP_ALL) ScreenQuietEnds();
+
     serial_init();
 
     kprintf(" Cabin (0x%lx Info, 0x%lx PocketRing, 0x%lx ResultRing, 0x%lx Code)\n",
@@ -117,7 +131,7 @@ void kernel_main(void)
      *
      * IF set here means the loader left interrupts enabled and the kernel has
      * been running interruptible since its entry point — which is what the
-     * UEFI path did, because TagBootJump never clears IF while stage2.asm
+     * UEFI path did, because GangwayJump never clears IF while stage2.asm
      * clears it ten times over. _start now clears it unconditionally; this
      * line reports which of the two the machine came from, because a fix that
      * makes both paths silent teaches nothing about either. */
@@ -126,19 +140,18 @@ void kernel_main(void)
             (unsigned long)g_entry_rflags,
             (g_entry_rflags & (1ULL << 9)) ? "ENABLED" : "disabled");
 
-    /* WHETHER THIS IMAGE KEEPS ANYTHING AT ALL, said out loud and once.
+    /* WHETHER THIS BOOT KEEPS ANYTHING AT ALL, said out loud and once.
      *
-     * The carry-over window is behind PRINTTOFILE, and a default image
-     * carried nothing while saying nothing — which is how a board run gets
-     * thrown away: the machine dies, and only afterwards does anybody find
-     * out that this image was never going to keep the record. So the three
-     * cases are told apart by name.
+     * The carry-over window is armed only when asked for, and a boot that
+     * carried nothing while saying nothing is how a board run gets thrown
+     * away: the machine dies, and only afterwards does anybody find out that
+     * it was never going to keep the record. So the three cases are told
+     * apart by name.
      *
      * Early, so it is on the screen even when the machine does not get much
      * further, and so an operator who just watched a machine die knows
      * whether `lastsaid` has something for them. The bank is NOT dumped
      * here — it is named, and lastsaid reads it. */
-#ifdef CONFIG_PRINTTOFILE
     if (LogKeepWindow(NULL, NULL)) {
         uint64_t carried = LogKeepPreviousBytes();
         if (carried) {
@@ -153,15 +166,14 @@ void kernel_main(void)
                     "or firmware that scrubs memory\n",
                     LogKeepWriteBackName());
         }
-    } else {
-        kprintf("[BOOT] %[W]LogKeep is compiled in but this machine's E820 map "
+    } else if (BoardingPassKeepLog()) {
+        kprintf("[BOOT] %[W]LogKeep is asked for but this machine's E820 map "
                 "does not offer the window — NOTHING will survive a reset%[D]\n");
+    } else {
+        kprintf("[BOOT] LogKeep is not asked for — nothing this kernel says will "
+                "survive a reset, and `lastsaid` will have nothing to read "
+                "(gangway.settings keep-log on asks for it)\n");
     }
-#else
-    kprintf("[BOOT] %[W]LogKeep is COMPILED OUT of this image (build it with "
-            "`make PRINTTOFILE=on`) — nothing this kernel says will survive a "
-            "reset, and `lastsaid` will have nothing to read%[D]\n");
-#endif
 
     debug_printf("[INIT] CPU Feature Detection (early)...\n");
     cpu_detect_features();
@@ -274,17 +286,17 @@ void kernel_main(void)
      * will ask about standing in front of the board — and because for three
      * years the same em dash came out of this kernel as three empty cells and
      * out of userspace as a '?'. */
-    kprintf("[SCREEN] one cell of this glass holds one CP437 glyph, so UTF-8 is folded "
-            "at the font and nowhere earlier — the log ring still keeps every byte it "
-            "was handed, and a character this font cannot draw appears as one solid box "
-            "rather than two or three wrong glyphs\n");
+    kprintf("[SCREEN] a cell of this glass holds one character: on a framebuffer drawn from "
+            "the imprint, one it lacks an empty box; on a text page folded to the adapter's "
+            "CP437 glyphs, one they lack a solid box — never two or three wrong glyphs, and "
+            "the log ring keeps every byte it was handed\n");
 
     /* The loader's account of its own journey — which volume this kernel was
      * read out of, off what medium, by which loader. Read here because the
      * block sits in memory the loaders own, below the first megabyte, and
      * because the Boardroom will want the answer long before there is a
      * filesystem to keep it in. */
-    BoardingPassInit();
+    BoardingPassSay();
 
     debug_printf("[INIT] MemTag...\n");
     error_t memtag_err = MemTagInit();
@@ -416,7 +428,7 @@ void kernel_main(void)
 
         /* EFI System Resource Table — must come after efi_runtime_init
          * because efi_esrt_init reads boot_info's preserved ESRT copy
-         * (allocated in EfiACPIMemoryNVS by TagBoot). Independent of
+         * (allocated in EfiACPIMemoryNVS by Gangway). Independent of
          * SVAM success: ESRT is a plain in-memory copy. Touch publish
          * matches the acpi_init pattern: emit at boot — late subscribers
          * can query via efi_esrt_get(). */
@@ -939,6 +951,10 @@ void kernel_main(void)
     {
         debug_printf("[INIT] xHCI controller not found or initialization failed\n");
     }
+
+    /* Before any medium is asked for a volume: the journey notes when the
+     * first one is mounted. */
+    JourneyWatch();
 
     debug_printf("[INIT] Boardroom (media)...\n");
     BoardroomInit();

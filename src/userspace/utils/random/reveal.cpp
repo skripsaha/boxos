@@ -12,6 +12,7 @@
 
 #include "painter/tui/console_surface.h"
 #include "painter/tui/frame.h"
+#include "painter/tui/text.h"
 
 namespace random_pick {
 
@@ -36,10 +37,16 @@ std::uint64_t UptimeMs()
     return Ms;
 }
 
-// Text the glass has every letter of: the font has no others than these.
+// Text a reel can show: characters, a cell each — no control, no tab, no
+// byte that begins no character.
 bool Letters(const std::string &Text)
 {
-    return std::all_of(Text.begin(), Text.end(), [](char Each) { return Each >= 0x20 && Each <= 0x7E; });
+    for (std::size_t Byte = 0; Byte < Text.size();) {
+        const painter::tui::Glyph Shape = painter::tui::GlyphAt(Text, Byte);
+        if (Shape.Odd || Text[Byte] == '\t') return false;
+        Byte += Shape.Length;
+    }
+    return true;
 }
 
 // One reel: it turns through what the pool holds at moments that grow apart,
@@ -82,14 +89,14 @@ private:
     std::string   Text;
 };
 
-// How many letters the widest of what might show is, or 0 when one is not
+// How many cells the widest of what might show takes, or 0 when one is not
 // for the glass.
 std::size_t WidthOf(const Request &Asked, const std::vector<Drawn> &Chosen)
 {
     std::size_t Widest = 0;
     for (const Drawn &One : Chosen) {
         if (!Letters(One.Text)) return 0;
-        Widest = std::max(Widest, One.Text.size());
+        Widest = std::max(Widest, painter::tui::CellsOf(One.Text));
     }
     if (Asked.From == Kind::Range) {
         Widest = std::max({Widest, std::to_string(Asked.Low).size(), std::to_string(Asked.High).size()});
@@ -97,7 +104,7 @@ std::size_t WidthOf(const Request &Asked, const std::vector<Drawn> &Chosen)
     }
     for (const std::string &Name : Asked.Names) {
         if (!Letters(Name)) return 0;
-        Widest = std::max(Widest, Name.size());
+        Widest = std::max(Widest, painter::tui::CellsOf(Name));
     }
     return Widest;
 }

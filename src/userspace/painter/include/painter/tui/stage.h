@@ -59,11 +59,21 @@ struct StageError {
 };
 
 struct KeyEvent {
-    char        Ascii    = 0;
-    std::uint8_t Scancode = 0;
-    std::uint8_t Mods     = 0;
+    char32_t     Character = 0;   // what the key types, Unicode; 0 for a key that types none
+    std::uint8_t Scancode  = 0;
+    std::uint8_t Mods      = 0;
 
-    bool HasCharacter() const noexcept { return Ascii != 0; }
+    bool HasCharacter() const noexcept { return Character != 0; }
+    // A character that shows — none of the C0 or C1 controls, nor DEL, nor
+    // what is no character at all.
+    bool IsPrintable() const noexcept
+    {
+        return Character >= 0x20 && Character != 0x7F && !(Character >= 0x80 && Character < 0xA0) &&
+               !(Character >= 0xD800 && Character <= 0xDFFF) && Character <= 0x10FFFF;
+    }
+    // The character as UTF-8 — what a line of text it is typed into holds;
+    // empty for a key that types none.
+    std::string Spelling() const;
     bool IsExtended() const noexcept { return (Mods & Modifiers::Extended) != 0; }
     bool IsShift() const noexcept { return (Mods & Modifiers::Shift) != 0; }
     bool IsCtrl() const noexcept { return (Mods & Modifiers::Ctrl) != 0; }
@@ -96,6 +106,8 @@ public:
     bool       IsOpen() const noexcept;
     // Whether the glass is a text page or pixels, as the display holds it.
     GlassKind  Glass() const noexcept;
+    // The grids finer than the halves it draws exactly (box/display.h DisplayMosaic).
+    std::uint8_t Mosaics() const noexcept;
 
     Frame &FrameBuffer() noexcept;
     const Frame &FrameBuffer() const noexcept;

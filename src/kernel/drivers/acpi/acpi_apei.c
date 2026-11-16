@@ -664,7 +664,7 @@ void acpi_parse_apei(void) {
      * was machine-readable and unsaid. */
     if (!g_acpi.apei.hest_present && !g_acpi.apei.bert_present &&
         !g_acpi.apei.erst_present && !g_acpi.apei.einj_present) {
-        kprintf("[APEI] %[E]this firmware describes no hardware error source "
+        kprintf("[APEI] %[W]this firmware describes no hardware error source "
                 "at all%[D] — no HEST, no BERT, no ERST, no EINJ. Nothing "
                 "here arms the platform's error reporting: a corrected "
                 "memory error on this machine is handed to nobody, whatever "

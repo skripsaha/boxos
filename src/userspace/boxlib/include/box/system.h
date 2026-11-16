@@ -7,6 +7,7 @@ extern "C" {
 
 #include "box/types.h"
 #include "box/error.h"
+#include "boxos_journey.h"
 #include "boxos_system_info.h"   /* SystemInfo, SystemResources, EfiInfo, SYSINFO_TICK_SOURCE_* */
 
 #define PROC_STATE_TERMINATED   4
@@ -193,6 +194,12 @@ typedef struct RosterProgram {
  * when more than one answer holds. Every program was live at the walk; one
  * found here may have ended by the time it is used, as for proc_crew. */
 int proc_roster(RosterProgram **out_programs, uint32_t *out_total);
+
+/* The machine's way from power-on to a shell (SYSTEM_OP_JOURNEY): the head
+ * into *head and its head->count moments into `moments`, which has room for
+ * JOURNEY_MOMENTS_MAX — the loader's first, head->from_loader of them, then
+ * the kernel's. 0, or a negative -error_t. boxos_journey.h holds the layout. */
+int journey_read(JourneyHead *head, JourneyMoment moments[JOURNEY_MOMENTS_MAX]);
 
 int proc_tag_add(const char* tag);
 int proc_tag_remove(const char* tag);

@@ -89,7 +89,8 @@ bool Draw(painter::tui::Surface &Screen, painter::tui::Frame &Canvas, const Look
     Canvas.ClearTransparent();
     for (std::int32_t Col = 0; Col < Length; Col++) {
         const PainterColor Ink = Text[Col] == ':' ? Shown.Colons : Shown.Digits;
-        Canvas.Put({ClockWidth - Length + Col, 0}, painter::tui::Cell{Text[Col], Ink, Shown.Background});
+        Canvas.Put({ClockWidth - Length + Col, 0},
+                   painter::tui::Cell{static_cast<char32_t>(Text[Col]), Ink, Shown.Background});
     }
     if (!Screen.Clear()) return false;
     return static_cast<bool>(Screen.Composite({Screen.Size().Width - ClockWidth, 0}, Canvas));

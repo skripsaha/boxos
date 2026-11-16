@@ -4,14 +4,14 @@
 #include <cmath>
 
 #include "painter/tui/fine_canvas.h"
-#include "painter/tui/subcell.h"
+#include "painter/tui/mosaic.h"
 
 namespace duppo {
 
 namespace {
 
 using painter::core::Rect;
-using painter::tui::Quad;
+using painter::tui::Mosaic;
 
 /* A sub-pixel is half a unit across and one down. */
 constexpr float SubAcross = 0.5f;
@@ -253,16 +253,16 @@ Rect Picture::Draw(const Flight &Body, const Face &Eye, const Spin &Turning, con
 
     for (std::int32_t Row = Reached.Y; Row < Reached.Y + Reached.Height; Row++) {
         for (std::int32_t Col = Reached.X; Col < Reached.X + Reached.Width; Col++) {
-            Quad Wanted;
+            Mosaic Wanted;
             bool Touched = false;
-            for (std::size_t Place = 0; Place < Wanted.size(); Place++) {
+            for (std::size_t Place = 0; Place < Wanted.Count(); Place++) {
                 const Vec Middle{static_cast<float>(Col) + (Place % 2 == 0 ? 0.25f : 0.75f),
                                  static_cast<float>(Row * 2) + (Place < 2 ? 0.5f : 1.5f)};
                 bool Here = false;
-                Wanted[Place] = Seen.At(Middle, Here);
+                Wanted.At[Place] = Seen.At(Middle, Here);
                 Touched       = Touched || Here;
             }
-            if (Touched) Overlay.Put({Col, Row}, painter::tui::ResolveQuad(Wanted, Overlay.Glass()));
+            if (Touched) Overlay.Put({Col, Row}, painter::tui::ResolveMosaic(Wanted, Overlay.Glass(), Overlay.Mosaics()));
         }
     }
 

@@ -29,9 +29,9 @@ core::Rect FineCanvas::Reaching(float Left, float Top, float Right, float Bottom
     return core::Rect{From, Up, Floor(Right) + 2 - From, Floor(Bottom / 2.0f) + 2 - Up};
 }
 
-bool FineCanvas::PutQuad(core::Point Cell, const Quad &Wanted)
+bool FineCanvas::PutMosaic(core::Point Cell, const Mosaic &Wanted)
 {
-    return Target->Put(Cell, ResolveQuad(Wanted, Target->Glass()));
+    return Target->Put(Cell, ResolveMosaic(Wanted, Target->Glass(), Target->Mosaics()));
 }
 
 void FineCanvas::Fill(float Left, float Top, float Across, float Down, core::Color Ink, float Opacity)

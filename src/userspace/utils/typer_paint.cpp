@@ -25,8 +25,8 @@ constexpr std::uint32_t TextRow     = 4;
 constexpr std::uint32_t BelowText   = 4;
 constexpr std::uint32_t MarginLeast = 8;
 constexpr std::uint32_t WidthMost   = 72;
-constexpr char          FullBlock   = static_cast<char>(0xDB);
-constexpr char          LightShade  = static_cast<char>(0xB0);
+constexpr char32_t      FullBlock   = U'\u2588';   /* █ */
+constexpr char32_t      LightShade  = U'\u2591';   /* ░ */
 
 std::string KindWords(const Task &Job)
 {

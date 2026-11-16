@@ -32,18 +32,18 @@
 
 namespace box {
 
-// ── box::key — one structured key event (char + scancode + modifiers) ───────
+// ── box::key — one structured key event (character + scancode + modifiers) ──
 class key {
-    char         ch_{0};
+    char32_t     ch_{0};   // Unicode; 0 for a key that types no character
     std::uint8_t scancode_{0};
     std::uint8_t mods_{0};  // KB_MOD_* bitset
 
 public:
     key() noexcept = default;
-    key(char ch, std::uint8_t scancode, std::uint8_t mods) noexcept
+    key(char32_t ch, std::uint8_t scancode, std::uint8_t mods) noexcept
         : ch_(ch), scancode_(scancode), mods_(mods) {}
 
-    char         ch() const noexcept { return ch_; }
+    char32_t     ch() const noexcept { return ch_; }
     std::uint8_t scancode() const noexcept { return scancode_; }
     std::uint8_t modifiers() const noexcept { return mods_; }
 
@@ -51,13 +51,16 @@ public:
     bool ctrl() const noexcept { return (mods_ & KB_MOD_CTRL) != 0; }
     bool alt() const noexcept { return (mods_ & KB_MOD_ALT) != 0; }
 
-    // Carries an ASCII char (false for a pure scancode key — e.g. an arrow).
+    // Carries a character (false for a pure scancode key — e.g. an arrow).
     bool has_char() const noexcept { return ch_ != 0; }
-    // Printable ASCII (space .. '~').
-    bool printable() const noexcept { return ch_ >= 0x20 && ch_ < 0x7F; }
+    // A character that shows — none of the C0 or C1 controls, nor DEL.
+    bool printable() const noexcept
+    {
+        return ch_ >= 0x20 && ch_ != 0x7F && !(ch_ >= 0x80 && ch_ < 0xA0) && ch_ <= 0x10FFFF;
+    }
 
-    // Decode the keyboard Touch payload {scancode, ascii, mods}.
-    static key from_event(const kb_event_t &e) noexcept { return key(e.ascii, e.scancode, e.mods); }
+    // Decode the keyboard Touch payload {cp, scancode, mods}.
+    static key from_event(const kb_event_t &e) noexcept { return key(e.cp, e.scancode, e.mods); }
     // Decode a "keyboard" box::touch (its payload is a kb_event_t).
     static std::optional<key> from_touch(const touch &ev) noexcept
     {

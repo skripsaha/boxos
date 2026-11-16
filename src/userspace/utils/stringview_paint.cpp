@@ -5,6 +5,8 @@
 
 #include <format>
 
+#include "painter/tui/text.h"
+
 #include "stringview.h"
 
 namespace {
@@ -34,7 +36,7 @@ std::size_t CharacterBytes(unsigned char Lead)
 
 }
 
-void Stringview::Put(std::uint32_t Row, std::uint32_t Col, char Ch, painter::core::Color Fg,
+void Stringview::Put(std::uint32_t Row, std::uint32_t Col, char32_t Ch, painter::core::Color Fg,
                      painter::core::Color Bg)
 {
     if (Row >= Rows || Col >= Cols) return;
@@ -45,10 +47,10 @@ void Stringview::Put(std::uint32_t Row, std::uint32_t Col, char Ch, painter::cor
 std::uint32_t Stringview::Write(std::uint32_t Row, std::uint32_t Col, std::string_view Text,
                                 painter::core::Color Fg, painter::core::Color Bg)
 {
-    for (char Ch : Text) {
-        if (Col >= Cols) break;
-        auto Byte = static_cast<unsigned char>(Ch);
-        Put(Row, Col++, Byte >= 0x20 && Byte < 0x7f ? Ch : '?', Fg, Bg);
+    for (std::size_t Byte = 0; Byte < Text.size() && Col < Cols;) {
+        const painter::tui::Glyph Shape = painter::tui::GlyphAt(Text, Byte);
+        Put(Row, Col++, Shape.Odd || Shape.Character == U'\t' ? U'?' : Shape.Character, Fg, Bg);
+        Byte += Shape.Length;
     }
     return Col;
 }
@@ -90,7 +92,7 @@ void Stringview::PaintList()
         Write(Row, 0, std::format("{:0{}x}", Found.Offset, Digits), OffsetInk, Paper);
         if (Found.Wide) Write(Row, Digits + 2, "u16", WideInk, Paper);
 
-        /* One cell a character; a character the font cannot draw is '?'. */
+        /* One cell a character; what is no character to show is '?'. */
         std::size_t   Mark = StringviewFind(Found.Text, Filter);
         std::size_t   MarkEnd = Filter.empty() ? 0 : Mark + Filter.size();
         std::uint32_t Character = 0;
@@ -103,9 +105,10 @@ void Stringview::PaintList()
                     Put(Row, Cols - 1, '>', HintInk, Paper);
                     break;
                 }
+                const painter::tui::Glyph Shape = painter::tui::GlyphAt(Found.Text, Byte);
                 bool Marked = Byte >= Mark && Byte < MarkEnd;
-                bool Drawn  = Lead >= 0x20 && Lead < 0x7f;
-                Put(Row, Col, Lead == '\t' ? ' ' : Drawn ? static_cast<char>(Lead) : '?',
+                bool Drawn  = !Shape.Odd && Lead != '\t';
+                Put(Row, Col, Lead == '\t' ? U' ' : Drawn ? Shape.Character : U'?',
                     Marked ? MarkInk : Drawn ? TextInk : HintInk, Marked ? MarkPaper : Paper);
             }
             Byte += Taken;

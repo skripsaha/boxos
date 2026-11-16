@@ -6,6 +6,7 @@
 
 #include "box/cxx/console.h"
 #include "painter/tui/stage.h"
+#include "painter/tui/text.h"
 
 namespace {
 
@@ -117,7 +118,7 @@ PaintColor paint_color(box::color color) {
   return PaintColor::FromRaw(color.raw());
 }
 
-painter::tui::Cell make_cell(char ch, box::color fg, box::color bg) {
+painter::tui::Cell make_cell(char32_t ch, box::color fg, box::color bg) {
   return painter::tui::Cell{ch, paint_color(fg), paint_color(bg)};
 }
 
@@ -148,15 +149,15 @@ public:
   }
 
   bool handle_key(const painter::tui::KeyEvent &Key) {
-    if (Key.Ascii == painter::tui::KeyCodes::Escape)
+    if (Key.Character == painter::tui::KeyCodes::Escape)
       return false;
     if (finished_) {
-      if (Key.Ascii == painter::tui::KeyCodes::Enter || Key.Ascii == ' ')
+      if (Key.Character == painter::tui::KeyCodes::Enter || Key.Character == ' ')
         reset();
       return true;
     }
 
-    char ch = Key.Ascii;
+    char32_t ch = Key.Character;
     if (ch >= 'A' && ch <= 'Z')
       ch = static_cast<char>(ch - 'A' + 'a');
     if (ch >= 'a' && ch <= 'z') {
@@ -320,12 +321,14 @@ private:
                      box::color color) {
     if (row >= rows_)
       return;
-    const std::size_t count = text.size() < cols_ ? text.size() : cols_;
-    const std::uint8_t left =
-        static_cast<std::uint8_t>(count < cols_ ? (cols_ - count) / 2 : 0);
-    for (std::size_t i = 0; i < count; ++i)
-      frame_.Put({static_cast<std::int32_t>(left + i), row},
-                 make_cell(text[i], color, kBackground));
+    const std::size_t cells = painter::tui::CellsOf(text);
+    std::size_t column = cells < cols_ ? (cols_ - cells) / 2 : 0;
+    for (std::size_t at = 0; at < text.size() && column < cols_;) {
+      const painter::tui::Glyph shape = painter::tui::GlyphAt(text, at);
+      frame_.Put({static_cast<std::int32_t>(column++), row},
+                 make_cell(shape.Character, color, kBackground));
+      at += shape.Length;
+    }
   }
 
   bool is_word(const char *guess) const {
@@ -403,8 +406,8 @@ private:
 };
 
 bool is_exit_key(const painter::tui::KeyEvent &Key) {
-  return Key.Ascii == painter::tui::KeyCodes::Escape ||
-         (Key.IsCtrl() && (Key.Ascii == 'c' || Key.Ascii == 'C'));
+  return Key.Character == painter::tui::KeyCodes::Escape ||
+         (Key.IsCtrl() && (Key.Character == 'c' || Key.Character == 'C'));
 }
 
 } // namespace

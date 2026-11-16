@@ -4,7 +4,7 @@
 
 This module measures text, selects the longest prefix that fits, truncates strings,
 and writes them into a `painter::tui::Frame`. Input strings contain UTF-8 bytes;
-the rendered output consists of single-byte glyphs from the BoxOS font.
+each cell of the output holds one Unicode character.
 
 Painter is a family of graphics APIs. Shared coordinate and color types reside
 in `painter::core`, while text and character-based graphics rendering reside in
@@ -14,8 +14,14 @@ implementation of it exists in the current source tree. This module belongs to
 
 Header: [`painter/tui/text.h`](../../../../src/userspace/painter/include/painter/tui/text.h).
 Implementation: [`text.cpp`](../../../../src/userspace/painter/src/tui/text.cpp).
-Code point-to-glyph conversion is defined in
-[`boxos_glyph_fold.h`](../../../../src/include/boxos_glyph_fold.h).
+The display chooses a character's glyph when it draws. On a framebuffer it
+is the display's typesetter (Typecase): frames, blocks, mosaics and braille
+are worked out for the cell, letters come from the font named in the display's
+settings (JetBrains Mono by default, Cyrillic included), then from the 8×16
+font; a character none of them has is drawn as its code in the cell. On a VGA
+text page it is the adapter's font through the table in
+[`boxos_glyph_fold.h`](../../../../src/include/boxos_glyph_fold.h); a
+character without a glyph there is a solid square ■.
 
 Include: `#include "painter/tui/text.h"`. The functions are in the
 `painter::tui` namespace and are part of `src/userspace/painter/libpainter.a`.
@@ -30,14 +36,13 @@ in cells: `X` is the column and `Y` is the row; the frame origin is `{0, 0}`.
 
 | Input | Handling | Cells | `Odd` |
 | --- | --- | --- | --- |
-| Printable ASCII, U+0020–U+007E | Corresponding glyph | 1 | `false` |
-| `é` (U+00E9) | CP437 glyph `0x82` | 1 | `false` |
-| `≠` (U+2260) | Two glyphs, `!=` | 2 | `false` |
-| `—` (U+2014) | Horizontal line `0xC4` | 1 | `false` |
-| Valid code point without a table entry | Square `0xFE` | 1 | `false` |
+| Printable ASCII, U+0020–U+007E | The character itself | 1 | `false` |
+| `é` (U+00E9) | One cell holding U+00E9 | 1 | `false` |
+| `≠` (U+2260) | One cell holding U+2260; no `!=` substitute | 1 | `false` |
+| Any other valid code point from U+00A0 | The code point itself | 1 | `false` |
 | Tab `\t` | Spaces up to the next tab stop | 1–4 | `false` |
-| U+0000–U+001F except tab, and U+007F | Square `0xFE` | 1 | `true` |
-| Invalid UTF-8 byte | Square `0xFE`; advance by one byte | 1 | `true` |
+| U+0000–U+001F except tab, U+007F, and U+0080–U+009F | U+FFFD | 1 | `true` |
+| Invalid UTF-8 byte | U+FFFD; advance by one byte | 1 | `true` |
 
 `TabStop` is a `std::size_t` constant equal to `4`. A tab occupies
 `TabStop - Column % TabStop` cells: at a tab-stop boundary, it occupies four
@@ -47,17 +52,18 @@ columns from zero on every call. In `PutText`, this count is independent of
 
 `OddInk` is a `core::Color` constant with the value
 `core::Color::Rgb(0xE0, 0x9A, 0x30)`. `PutText` uses it for elements with
-`Odd == true`. An unknown but validly encoded Unicode character is drawn as
-a square in the regular `Ink` color. In particular, Cyrillic characters are
-absent from the current table and are displayed as such squares.
+`Odd == true`. A validly encoded character that the display's fonts lack is
+kept in its cell as it is, and the display draws it in the regular `Ink`
+color: as its code in the cell on a framebuffer, as a square on a VGA text
+page.
 
 The decoder rejects truncated sequences, stray continuation bytes, overlong
 encodings, surrogates, and values above U+10FFFF. It does not combine code
 points into grapheme clusters or perform normalization. Combining marks are
-processed separately; width rules are defined by the BoxOS table.
+processed separately: each takes a cell of its own.
 
 The module does not parse ANSI sequences or wrap text. `\n` and `\r` become
-squares rather than cursor-movement commands. A null byte inside an explicitly
+U+FFFD rather than cursor-movement commands. A null byte inside an explicitly
 specified `std::string_view` is likewise treated as a control character,
 not as the end of the text.
 
@@ -73,8 +79,8 @@ not as the end of the text.
 | --- | --- | --- | --- |
 | `Length` | `std::size_t` | `1` | Number of input bytes to advance |
 | `Width` | `std::size_t` | `1` | Number of cells occupied by the element |
-| `Cells` | `char[2]` | `{' ', ' '}` | Glyph codes; not a null-terminated string |
-| `Odd` | `bool` | `false` | Flag indicating a control character or invalid UTF-8 byte |
+| `Character` | `char32_t` | `U' '` | The character each of its `Width` cells holds |
+| `Odd` | `bool` | `false` | Flag indicating a control character or invalid UTF-8 byte; `Character` is then U+FFFD |
 
 **Parameters:** This aggregate has no user-defined constructor; its fields can
 be set through aggregate initialization.
@@ -85,13 +91,11 @@ be set through aggregate initialization.
 
 **How it works:** `GlyphAt` fills the structure for one input element.
 For a valid sequence, `Length` equals its number of bytes; for an error,
-it remains one. For an ordinary element, the first `Width` entries of
-`Cells` are used. A tab, however, is represented only by its width:
-the two-element array does not hold all of its spaces.
+it remains one. Each of the element's `Width` cells holds `Character`;
+for a tab, that is the space `U' '`.
 
-**Notes:** When iterating manually, identify tabs by the original input byte
-and output `Width` spaces. Without this check, do not read `Cells[Part]`
-for every `Part < Width`: a tab can have a `Width` greater than two.
+**Notes:** When iterating manually, write `Character` into each of the
+`Width` cells; there is no need to recognize tabs separately.
 
 **Typical use:** Obtain the structure through `GlyphAt` to iterate over
 a string while tracking both the byte offset and the screen column.
@@ -123,15 +127,16 @@ Glyph GlyphAt(std::string_view Text, std::size_t Byte,
 - `Byte` (`std::size_t`, in): offset to the start of the element; must satisfy `Byte < Text.size()`.
 - `Column` (`std::size_t`, in): current column used to calculate tab width; defaults to `0`.
 
-**Returns:** A `Glyph` containing the input element's length, width, and glyphs.
+**Returns:** A `Glyph` containing the input element's length, width, and character.
 
 **Side effects:** None; does not allocate memory.
 
 **How it works:** Tabs are handled before UTF-8 decoding. For other bytes,
-the function decodes one code point and passes it to
-`BoxGlyphFoldCodepoint`. Invalid UTF-8 and control characters produce
-a square with `Odd == true`; a valid unknown code point produces a square
-without that flag.
+the function decodes one code point, which becomes `Character` with a width
+of 1. Invalid UTF-8, C0 control characters, DEL, and C1 control characters
+produce U+FFFD with `Odd == true`. There is no substitution or folding into
+glyphs: a code point the display's font lacks stays itself and does not get
+that flag.
 
 **Notes:** The function does not check whether `Byte` is in bounds; it must
 not be called on empty text. If `Byte` points into a multibyte sequence,
@@ -149,8 +154,8 @@ and the column by `Width`; continue until the offset reaches the input size.
 int main()
 {
     const auto Shape = painter::tui::GlyphAt("\u2260", 0);
-    return Shape.Length == 3 && Shape.Width == 2 &&
-           Shape.Cells[0] == '!' && Shape.Cells[1] == '=' ? 0 : 1;
+    return Shape.Length == 3 && Shape.Width == 1 &&
+           Shape.Character == U'\u2260' && !Shape.Odd ? 0 : 1;
 }
 ```
 
@@ -191,8 +196,8 @@ individual measurements may differ from the width of the concatenated string.
 
 int main()
 {
-    // A: 1, tab: 3, ≠: 2.
-    return painter::tui::CellsOf("A\t\u2260") == 6 ? 0 : 1;
+    // A: 1, tab: 3, ≠: 1.
+    return painter::tui::CellsOf("A\t\u2260") == 5 ? 0 : 1;
 }
 ```
 
@@ -216,8 +221,8 @@ std::size_t BytesWithin(std::string_view Text, std::size_t Cells) noexcept;
 
 **How it works:** The function processes elements sequentially using
 `GlyphAt`. If the next element would exceed the remaining width, iteration
-stops before that element. A valid UTF-8 sequence, a two-cell replacement,
-and a tab are never split.
+stops before that element. A valid UTF-8 sequence and a tab are never
+split.
 
 **Notes:** Invalid UTF-8 is already treated as individual erroneous bytes,
 so the function does not repair the input or guarantee that the result
@@ -236,9 +241,9 @@ without an ellipsis. If you need an indication of truncation, use
 int main()
 {
     const std::string_view Text = "A\u2260B";
-    // ≠ does not fit in the one remaining cell.
+    // A and ≠ are two cells and four bytes; B no longer fits.
     const auto Bytes = painter::tui::BytesWithin(Text, 2);
-    return Text.substr(0, Bytes) == "A" ? 0 : 1;
+    return Bytes == 4 && Text.substr(0, Bytes) == "A\u2260" ? 0 : 1;
 }
 ```
 
@@ -269,7 +274,7 @@ periods. Because elements cannot be split, the result may occupy fewer
 than `Width` cells; it is not padded with spaces.
 
 **Notes:** The result preserves the original prefix bytes, including tabs
-and invalid UTF-8; no glyph conversion takes place here. The `Width <= 3`
+and invalid UTF-8; no conversion into cells takes place here. The `Width <= 3`
 rule applies only when truncation is needed: for example,
 `Shortened("A", 2)` returns `"A"`, not `".."`.
 
@@ -329,8 +334,8 @@ still count toward the returned width.
 - A negative `At.X` clips the left portion of the output. If `At.Y` is
   outside the frame, the frame is not modified, but the return value is
   still not forced to zero.
-- An entire two-cell element is checked against `Width`, but the frame's
-  own boundary may clip just one of its cells.
+- An entire tab is checked against `Width`, but the frame's own boundary
+  may clip just some of its cells.
 - There is no ellipsis, wrapping, or background fill for unused cells.
   Before replacing a long label with a shorter one, clear its area with
   `Frame::Fill`.
@@ -360,21 +365,20 @@ int main()
     tui::Frame &Out = *Created;
     Out.Clear();
 
-    // A occupies column 1, the tab occupies columns 2–4, != occupies 5–6.
+    // A occupies column 1, the tab occupies columns 2–4, ≠ occupies 5.
     const auto Used = tui::PutText(Out, {1, 0}, "A\t\u2260", 6,
                                    core::Colors::White, core::Colors::Black);
-    return Used == 6 && Out.Read({5, 0}).Glyph == '!' &&
-           Out.Read({6, 0}).Glyph == '=' ? 0 : 1;
+    return Used == 5 && Out.Read({5, 0}).Glyph == U'\u2260' ? 0 : 1;
 }
 ```
 
 ## Choosing a Writing Method
 
-`Frame::Write` writes each byte as an already prepared glyph code and does
-not perform UTF-8 decoding. Use it for strings of prepared glyph codes,
-and use `PutText` for UTF-8. The result of `Shortened` remains UTF-8 text;
-it must not be treated as a string of prepared glyph codes merely because
-its width has been limited.
+`Frame::Write` lays out UTF-8 by the same `GlyphAt` rules, but without a
+width budget: only the frame limits it. It writes U+FFFD in
+`Style.Foreground`, not `OddInk`, and returns the number of cells written.
+Use `PutText` when a label is limited in width or errors in the text should
+stand out in color.
 
 `PutText` modifies only the frame buffer. It does not open a surface,
 receive key presses, or publish a layer to DisplayServer. Other Painter

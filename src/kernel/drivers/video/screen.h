@@ -35,13 +35,26 @@ struct cabin_t;
 #define SCREEN_TEXT_ROWS   25u
 
 /* The first act of the kernel's console: the text page, with the Emergency
- * Screen on it. Runs before mem_init. */
+ * Screen waiting on it — a quiet boot draws nothing until the display program
+ * claims the glass, unless the boot cannot reach it or the person asks to see
+ * (emergency_screen.h, EmergencyScreenAwait). Runs before mem_init. */
 void ScreenInit(void);
+
+/* The quiet boot is over, because nobody is coming for the glass — no volume
+ * to start the display program from, or a start set without it — or because
+ * the person asked to see everything (gangway.settings startup all). The
+ * log's tail goes on the glass now, unless a holder has it. */
+void ScreenQuietEnds(void);
 
 /* The linear framebuffer a UEFI loader handed over (boot_info), after
  * vmm_init. Says on the console what it took, or why it kept the text page. */
 void ScreenAdoptFramebuffer(uint64_t phys, uint32_t width, uint32_t height,
                             uint32_t stride, uint32_t format);
+
+/* The loader left the first frame of the scene whose file is `fid` on the
+ * framebuffer (boarding_pass.h SCENE): said to the first claim of the glass
+ * (SCREEN_LEFT_SCENE), unless the Emergency Screen has drawn over it by then. */
+void ScreenLeftByLoader(uint64_t fid);
 
 /* hw.screen.claim / hw.screen.release. A claim by the cabin that already holds
  * the screen answers the same description again, *taken false; a claim that
@@ -67,7 +80,8 @@ error_t ScreenBellHang(struct cabin_t *cabin, uint32_t pid, uint32_t generation,
                        uint64_t from, bool *news);
 
 /* Ctrl+Alt+Esc (keyboard.c). Any context, an interrupt's included: counts the
- * press and knocks; a K-Core turns the glass over. */
+ * press and knocks; a K-Core turns the glass over — or, with nobody holding
+ * it, ends a quiet boot and shows the log. */
 void ScreenSwapKnock(void);
 
 #endif /* SCREEN_H */

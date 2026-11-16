@@ -10,9 +10,9 @@ namespace effects {
 
 namespace {
 
-constexpr char UpperHalf = static_cast<char>(0xDF);
-constexpr char LowerHalf = static_cast<char>(0xDC);
-constexpr char Full = static_cast<char>(0xDB);
+constexpr std::uint32_t UpperHalf = U'\u2580';   // ▀
+constexpr std::uint32_t LowerHalf = U'\u2584';   // ▄
+constexpr std::uint32_t Full = U'\u2588';        // █
 constexpr std::int32_t Sixth = 341;     // a third of a turn is 341 of 1024ths
 
 std::uint32_t Own(std::uint32_t Colour, std::uint32_t Default) noexcept
@@ -134,7 +134,7 @@ struct Halves {
 bool HalvesOf(const GlassCell &Cell, std::uint32_t Ink, std::uint32_t Paper, Halves &Out) noexcept
 {
     const std::uint32_t Fg = Own(Cell.Cell.fg, Ink), Bg = Own(Cell.Cell.bg, Paper);
-    switch (Cell.Cell.ch) {
+    switch (Cell.Cell.cp) {
     case UpperHalf: Out = {Fg, Bg}; return true;
     case LowerHalf: Out = {Bg, Fg}; return true;
     case Full:      Out = {Fg, Fg}; return true;
@@ -152,7 +152,7 @@ void Plot(GlassCell &Cell, bool Lower, std::uint32_t Colour, std::uint32_t Weigh
     std::uint32_t &Half = Lower ? Now.Bottom : Now.Top;
     Half = Pack(Between(Channel(Half, 16), Channel(Colour, 16), Weight), Between(Channel(Half, 8), Channel(Colour, 8), Weight),
                 Between(Channel(Half, 0), Channel(Colour, 0), Weight));
-    Cell.Cell.ch = UpperHalf;
+    Cell.Cell.cp = UpperHalf;
     Cell.Cell.fg = Now.Top;
     Cell.Cell.bg = Now.Bottom;
 }
@@ -240,9 +240,9 @@ void InkSplit(GlassCell &Cell, const GlassCell &Left, const GlassCell &Right, st
 
 void InkSparkle(GlassCell &Cell, std::uint32_t Roll, std::uint32_t Star, std::uint32_t Ink) noexcept
 {
-    static constexpr char Stars[4] = {'*', '+', '.', static_cast<char>(0xFA)};
-    if (Cell.Cell.ch == ' ' || Cell.Cell.ch == 0) {
-        Cell.Cell.ch = Stars[(Roll >> 12) & 3u];
+    static constexpr std::uint32_t Stars[4] = {U'*', U'+', U'.', U'\u00B7'};
+    if (Cell.Cell.cp == U' ' || Cell.Cell.cp == 0) {
+        Cell.Cell.cp = Stars[(Roll >> 12) & 3u];
         Cell.Cell.fg = Star;
     } else {
         Cell.Cell.fg = Brightened(Own(Cell.Cell.fg, Ink), 190);

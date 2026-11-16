@@ -52,7 +52,7 @@ Subsystem menu (pick 3-4 to offer based on prior work, then "Other"):
 - RNG (RDRAND/RDSEED feature gating, retry, TRNG mixing)
 - Keyboard / mouse (PS/2 0x60/0x64, scancode set, controller init, USB HID)
 - Serial (16550A detection, baud, FIFO, MSR — used as debug spine)
-- Boot path (stage1/stage2 BIOS, TagBoot UEFI, E820/EFI mmap parsing)
+- Boot path (stage1/stage2 BIOS, Gangway UEFI, E820/EFI mmap parsing)
 
 ### Step 2 — Deep code analysis
 

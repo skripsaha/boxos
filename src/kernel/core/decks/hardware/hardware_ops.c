@@ -19,6 +19,7 @@
 #include "crate_io.h"
 #include "process.h"
 #include "screen.h"
+#include "crossing.h"      /* the display holding the glass lands the start */
 #include "emergency_screen.h"
 #include "pit.h"
 #include "rtc.h"
@@ -63,6 +64,9 @@ static int HwScreenClaim(const ManifestOp *op, Crate *crates, uint16_t crate_cou
         if (taken) (void)ScreenRelease(ctx->proc);
         return ERR_INVALID_ADDRESS;
     }
+    /* The display holding the glass is the start come up: its crossing is
+     * marked landed (crossing.c), with nothing held here. */
+    if (taken) CrossingLand();
     return OK;
 }
 
@@ -667,21 +671,17 @@ static int HwLogReadFrom(LogSource source, const ManifestOp *op, Crate *crates,
     return (crc == OK) ? OK : ERR_INVALID_ADDRESS;
 }
 
-/* What the run before this one said. A kernel built without the carry-over
- * window (PRINTTOFILE) says so, rather than answering with an empty log that
- * reads exactly like a machine that never spoke; an empty answer from a
- * kernel that HAS the window means nothing came through the last reset,
+/* What the run before this one said. A run with no carry-over window armed
+ * (klib_logring.h, LogKeepInit) says so, rather than answering with an empty
+ * log that reads exactly like a machine that never spoke; an empty answer
+ * from a run that HAS the window means nothing came through the last reset,
  * which is a different fact and one the caller is left to report. */
 static int HwLogPrevious(const ManifestOp *op, Crate *crates,
                          uint16_t crate_count, const OpContext *ctx)
 {
     (void)crate_count;
-#ifndef CONFIG_PRINTTOFILE
-    (void)op; (void)crates; (void)ctx;
-    return ERR_UNSUPPORTED;
-#else
+    if (!LogKeepWindow(NULL, NULL)) return ERR_UNSUPPORTED;
     return HwLogReadFrom(LogKeepPreviousRead, op, crates, ctx);
-#endif
 }
 
 /* The same read with each byte's Tone after the bytes: half the room for

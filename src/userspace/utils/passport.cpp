@@ -8,12 +8,14 @@
  * under an arrow the same lines are written as text, because a painted frame
  * is deliberately not part of the console text stream.
  *
- * The logo is a two-pixel-high raster per console cell: the CP437 upper-half
- * block carries one colour in its foreground and one in its background. */
+ * The logo is a two-pixel-high raster per console cell: the upper-half block
+ * carries one colour in its foreground and one in its background. */
 
 #include <algorithm>
+#include <climits>
 #include <cstddef>
 #include <cstdint>
+#include <cuchar>
 #include <format>
 #include <new>
 #include <string>
@@ -33,6 +35,7 @@
 #include "painter/core/color.h"
 #include "painter/tui/glyph.h"
 #include "painter/tui/console_surface.h"
+#include "painter/tui/text.h"
 
 BOX_FORM("gives text\n");
 
@@ -80,18 +83,29 @@ constexpr std::size_t GaugeWidth   = ValueWidth - 5;   /* and " 100%" after it *
 constexpr std::size_t MinimumCols  = PanelOriginX + PanelWidth;
 
 namespace Glyph {
-constexpr char UpperHalf = static_cast<char>(0xDF);
-constexpr char LowerHalf = static_cast<char>(0xDC);
-constexpr char Across    = static_cast<char>(0xC4);
-constexpr char Down      = static_cast<char>(0xB3);
-constexpr char TopLeft   = static_cast<char>(0xDA);
-constexpr char TopRight  = static_cast<char>(0xBF);
-constexpr char LowLeft   = static_cast<char>(0xC0);
-constexpr char LowRight  = static_cast<char>(0xD9);
-constexpr char TeeLeft   = static_cast<char>(0xC3);
-constexpr char TeeRight  = static_cast<char>(0xB4);
-constexpr char Filled    = static_cast<char>(0xFE);
-constexpr char Left      = static_cast<char>(0xFA);
+constexpr char32_t UpperHalf = U'\u2580';   /* ▀ */
+constexpr char32_t LowerHalf = U'\u2584';   /* ▄ */
+constexpr char32_t Across    = U'\u2500';   /* ─ */
+constexpr char32_t Down      = U'\u2502';   /* │ */
+constexpr char32_t TopLeft   = U'\u250C';   /* ┌ */
+constexpr char32_t TopRight  = U'\u2510';   /* ┐ */
+constexpr char32_t LowLeft   = U'\u2514';   /* └ */
+constexpr char32_t LowRight  = U'\u2518';   /* ┘ */
+constexpr char32_t TeeLeft   = U'\u251C';   /* ├ */
+constexpr char32_t TeeRight  = U'\u2524';   /* ┤ */
+constexpr char32_t Filled    = U'\u25A0';   /* ■ a gauge's share */
+constexpr char32_t Left      = U'\u00B7';   /* · and what is left of it */
+}
+
+/* Count times the character Shown, as UTF-8. */
+std::string Repeated(char32_t Shown, std::size_t Count)
+{
+    char              Spelled[MB_LEN_MAX];
+    std::mbstate_t    State{};
+    const std::size_t Length = std::c32rtomb(Spelled, Shown, &State);
+    std::string       Out;
+    for (std::size_t Each = 0; Each < Count; Each++) Out.append(Spelled, Length);
+    return Out;
 }
 
 /* ---- the card, as lines of coloured runs ---------------------------------- */
@@ -230,8 +244,8 @@ Line Gauge(std::string_view Label, int Percent)
     Head.resize(LabelWidth, ' ');
     return Line{LineKind::Words, PanelBackground,
                 {{std::move(Head), LabelInk},
-                 {std::string(Lit, Glyph::Filled), Ink},
-                 {std::string(GaugeWidth - Lit, Glyph::Left), GaugeLeft},
+                 {Repeated(Glyph::Filled, Lit), Ink},
+                 {Repeated(Glyph::Left, GaugeWidth - Lit), GaugeLeft},
                  {std::format(" {:>3}%", Percent), ValueInk}}};
 }
 
@@ -426,14 +440,14 @@ public:
     const painter::tui::Frame &Canvas() const { return FrameBuffer; }
 
 private:
-    void Put(std::size_t Row, std::size_t Col, char Ch, PainterColor Ink, PainterColor Paper)
+    void Put(std::size_t Row, std::size_t Col, char32_t Ch, PainterColor Ink, PainterColor Paper)
     {
         if (Row >= Rows || Col >= Cols) return;
         FrameBuffer.Put({static_cast<std::int32_t>(Col), static_cast<std::int32_t>(Row)},
                         painter::tui::Cell{Ch, Ink, Paper});
     }
 
-    void Edge(std::size_t Row, char LeftCorner, char Middle, char RightCorner);
+    void Edge(std::size_t Row, char32_t LeftCorner, char32_t Middle, char32_t RightCorner);
     void Words(std::size_t Row, const Line &One);
     void Strip(std::size_t Row);
 
@@ -456,7 +470,7 @@ void Portrait::Logo(std::size_t Top)
     }
 }
 
-void Portrait::Edge(std::size_t Row, char LeftCorner, char Middle, char RightCorner)
+void Portrait::Edge(std::size_t Row, char32_t LeftCorner, char32_t Middle, char32_t RightCorner)
 {
     Put(Row, PanelOriginX, LeftCorner, FrameInk, PanelBackground);
     for (std::size_t Col = 1; Col + 1 < PanelWidth; Col++) Put(Row, PanelOriginX + Col, Middle, FrameInk, PanelBackground);
@@ -471,11 +485,11 @@ void Portrait::Words(std::size_t Row, const Line &One)
 
     std::size_t Col = 0;
     for (const Run &Piece : One.Runs) {
-        for (char Ch : Piece.Text) {
+        for (std::size_t Byte = 0; Byte < Piece.Text.size();) {
             if (Col >= ContentWidth) return;
-            unsigned char Byte = static_cast<unsigned char>(Ch);
-            char Shown = Byte >= 0x20 && Byte != 0x7F ? Ch : '?';
-            Put(Row, PanelOriginX + 2 + Col++, Shown, Piece.Ink, One.Paper);
+            const painter::tui::Glyph Shape = painter::tui::GlyphAt(Piece.Text, Byte);
+            Put(Row, PanelOriginX + 2 + Col++, Shape.Odd ? U'?' : Shape.Character, Piece.Ink, One.Paper);
+            Byte += Shape.Length;
         }
     }
 }
@@ -557,12 +571,17 @@ std::string TextCardLine(const Line &One)
     if (One.Kind == LineKind::Rule) return "+" + std::string(PanelInner, '-') + "+";
     std::string Content;
     for (const Run &Piece : One.Runs) {
-        for (char Ch : Piece.Text) {
-            unsigned char Byte = static_cast<unsigned char>(Ch);
-            Content += Ch == Glyph::Filled ? '#' : Ch == Glyph::Left ? '.' : Byte >= 0x20 && Byte < 0x7F ? Ch : '?';
+        for (std::size_t Byte = 0; Byte < Piece.Text.size();) {
+            const painter::tui::Glyph Shape = painter::tui::GlyphAt(Piece.Text, Byte);
+            if (Shape.Character == Glyph::Filled) Content += '#';
+            else if (Shape.Character == Glyph::Left) Content += '.';
+            else if (Shape.Odd) Content += '?';
+            else Content.append(Piece.Text, Byte, Shape.Length);
+            Byte += Shape.Length;
         }
     }
-    Content.resize(ContentWidth, ' ');
+    Content.resize(painter::tui::BytesWithin(Content, ContentWidth));
+    Content.append(ContentWidth - painter::tui::CellsOf(Content), ' ');
     return "| " + Content + " |";
 }
 

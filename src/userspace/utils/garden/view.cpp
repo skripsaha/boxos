@@ -194,7 +194,7 @@ bool View::OnKey(const tui::KeyEvent &Key)
         return true;
     }
     Status.clear();
-    const kb_event_t Raw{Key.Scancode, Key.Ascii, Key.Mods};
+    const kb_event_t Raw{Key.Character, Key.Scancode, Key.Mods};
     const auto       Is = [&](GardenKey Which) { return KeyChordMatches(&Shown.Keys[Which], &Raw); };
     if (Is(KeyHelp)) {
         Help = true;
@@ -228,8 +228,8 @@ bool View::OnKey(const tui::KeyEvent &Key)
         }
         return true;
     }
-    if (Key.Ascii == tui::KeyCodes::Escape) return false;
-    if (Key.Ascii == ' ') Mark();
+    if (Key.Character == tui::KeyCodes::Escape) return false;
+    if (Key.Character == ' ') Mark();
     return true;
 }
 

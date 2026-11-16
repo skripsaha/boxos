@@ -2687,6 +2687,9 @@ error_t SystemDeckRegister(void)
     error_t roster_rc = RosterOpsRegister();
     if (roster_rc != OK) return roster_rc;
 
+    error_t journey_rc = JourneyOpsRegister();
+    if (journey_rc != OK) return journey_rc;
+
     debug_printf("[SystemDeck] registered %zu ops (full surface, gated)\n",
                  sizeof(table) / sizeof(table[0]));
     return OK;

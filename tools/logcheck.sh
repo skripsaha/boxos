@@ -12,12 +12,28 @@
 #                         refused in so many words, and not one write lands
 #                         in its ground
 #   logcheck.sh bookboot  the kernel a volume's BOOT names, held by
-#                         TagBoot to the book's digests before the jump, and
+#                         Gangway to the book's digests before the jump, and
 #                         the kernels the book names by role after it: the
 #                         Lectern on the host against volume-read boot, the
 #                         image attested through OVMF, a byte past the
 #                         kernel's end flipped — named, and no jump — and a
 #                         second kernel kept in the boot role jumped into in its place
+#   logcheck.sh loadersettings  gangway.settings set in the hub on a UEFI
+#                         machine of four cores and taken at the next start:
+#                         Gangway reads it held to the book and chooses the
+#                         screen by it; the kernel starts two cores, arms the
+#                         carry-over window, says what was asked
+#   logcheck.sh panel     Space held while a UEFI machine starts: Gangway's
+#                         panel opens, says so on the wire; a start changed on
+#                         it (startup all, cores 1) is what the kernel does;
+#                         the log kept before a warm reset shown; Turn off
+#   logcheck.sh crossings every UEFI start kept in the medium's front and
+#                         marked landed by the kernel (AHCI and legacy IDE);
+#                         two cut starts open the panel by themselves
+#   logcheck.sh scene     the brush Gangway and the display paint a scene
+#                         with, and the boot scene, on the host under the
+#                         sanitizers: exact areas, the clip; every frame drawn
+#                         where it changed the frame drawn whole; damage refused
 #   logcheck.sh mkfs      no boot: the image `make` lays held to
 #                         volume-read — its self-test over mkfs's own book, its
 #                         files, its ground — and create_tagfs on grounds past
@@ -92,6 +108,14 @@ STAND_NAME=logcheck
 . "$(dirname "$0")/logcheck_framerefuse.sh"
 # The bookboot scenario: tools/logcheck_bookboot.sh.
 . "$(dirname "$0")/logcheck_bookboot.sh"
+# The loadersettings scenario: tools/logcheck_loadersettings.sh.
+. "$(dirname "$0")/logcheck_loadersettings.sh"
+# The panel scenario: tools/logcheck_panel.sh.
+. "$(dirname "$0")/logcheck_panel.sh"
+# The crossings scenario: tools/logcheck_crossings.sh.
+. "$(dirname "$0")/logcheck_crossings.sh"
+# The scene scenario: tools/logcheck_scene.sh.
+. "$(dirname "$0")/logcheck_scene.sh"
 # The dedup scenario: tools/logcheck_dedup.sh.
 . "$(dirname "$0")/logcheck_dedup.sh"
 # The mkfs scenario: tools/logcheck_mkfs.sh.
@@ -1074,6 +1098,11 @@ run_healthy() {
     grep -q "BoxOS Hub" "$L"; chk $? "boot reaches the shell"
     typed_ok "$L"; chk $? "and answers a keystroke"
 
+    # The BIOS road marks its journey too: when stage2 began and when it let
+    # go, on the pass (boarding_pass.h, BoardingMoment).
+    grep -q "\[Boarding\]   it marked 2 moment(s) of its journey: entry leave" "$L"
+    chk $? "the BIOS loader marked when it began and when it let go"
+
     # ‼ THE MOUNT FINISHED, WHICH IS NOT WHAT ANY OTHER LINE HERE SAYS.
     #
     # Everything TagFS prints while mounting — the deed, the far copy, the
@@ -1180,8 +1209,8 @@ run_healthy() {
     # its magic looked right — which a block half-overwritten by firmware also
     # manages. Both loaders seal it now; the kernel says which of the two
     # things it has: a block that adds up, or a block it had to take on trust.
-    grep -q "the loader left a pass with 4 stamp(s)" "$L"
-    chk $? "the pass carries its seal as well as its three facts"
+    grep -q "the loader left a pass with 5 stamp(s)" "$L"
+    chk $? "the pass carries its seal as well as its four facts"
     grep -q "sealed, and the seal agrees" "$L"
     chk $? "and the block adds up to what the loader sealed it with"
 
@@ -1239,6 +1268,12 @@ run_uefi() {
     make run-bg UEFI=on >/dev/null 2>&1
     wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
     sleep 3
+    # journey: the loader's moments off the pass and the kernel's, through
+    # SYSTEM_OP_JOURNEY, drawn by the utility — the whole road at once.
+    type_cmd "journey"
+    sleep 1
+    key_press ret
+    wait_for_line build/serial.log "from the loader's first moment to\|from power-on to" "$WAIT_QUIET_S"
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.uefi.log"
     probe_off
@@ -1270,7 +1305,7 @@ run_uefi() {
 
     # ── what the loader hands over, and where it puts it ───────────────────
     #
-    # TagBoot writes the E820 map at 0x500, boot_info at 0xA000 and the pass
+    # Gangway writes the E820 map at 0x500, boot_info at 0xA000 and the pass
     # at 0xA600 — three fixed addresses it had never asked the firmware for,
     # while calling that same firmware's allocator several more times before
     # ExitBootServices. Two of those calls are AllocateAnyPages, which lets
@@ -1278,9 +1313,9 @@ run_uefi() {
     # pick. Now the pages are claimed first, and the loader SAYS how many it
     # got — a board whose firmware refuses one names it instead of booting
     # strangely.
-    grep -qE "TagBoot: set aside [0-9]+ of 3 handoff page\(s\)" "$L"
+    grep -qE "Gangway: set aside [0-9]+ of 3 handoff page\(s\)" "$L"
     chk $? "the loader asked for the pages it writes the handoff into"
-    grep -q "TagBoot: set aside 3 of 3 handoff page(s)" "$L"
+    grep -q "Gangway: set aside 3 of 3 handoff page(s)" "$L"
     chk $? "and this firmware gave it all three"
     # ‼ This one cannot go red here and is kept anyway: OVMF gives all three,
     # so there is no refusal to report and removing the claim entirely leaves
@@ -1292,7 +1327,32 @@ run_uefi() {
     # The UEFI half of the seal — a different loader, a different CRC, the
     # same block and the same kernel check.
     grep -q "sealed, and the seal agrees" "$L"
-    chk $? "the pass TagBoot wrote adds up too"
+    chk $? "the pass Gangway wrote adds up too"
+
+    # ── Gangway boots quietly, and nothing it said is lost ─────────────────
+    #
+    # Its lines go into its journal, not onto the firmware's console; the
+    # kernel puts the journal into its log ring before it manages memory —
+    # after the line that names the kernel, before the kernel's own first one
+    # (boarding.c, BoardingPassTake) — so the loader's lines open the log on
+    # the wire, once each: a line said on the firmware's console as well would
+    # reach the wire twice, through OVMF's mirror and through the ring.
+    awk '/^\[BuildPlate\]/{b=1} b&&/^Gangway: kernel header OK/{g=1} g&&/^ Cabin \(/{print "in order"; exit}' "$L" |
+        grep -q "in order"
+    chk $? "Gangway's journal opens the log, after the build plate and before the kernel"
+    [ "$(grep -c '^Gangway: kernel header OK' "$L")" = 1 ]
+    chk $? "and each of its lines is said once — none on the firmware's console"
+    grep -qE "\[Boarding\]   it kept a journal of [0-9]+ byte\(s\), and its lines open this log whole" "$L"
+    chk $? "the kernel took the journal whole"
+    grep -q "\[Boarding\]   it marked 9 moment(s) of its journey: entry medium kernel screen crossing scene memory tables leave" "$L"
+    chk $? "and Gangway marked every step of its journey"
+
+    # And journey draws it: Gangway step by step, then the kernel's steps —
+    # the volume mounted, the start set launched, the display on the glass.
+    grep -qE "^  Gangway .* medium .* kernel .* screen .* memory .* tables .* leave " "$L"
+    chk $? "journey shows Gangway's every step"
+    grep -qE "^  kernel .* volume .* start .* display " "$L"
+    chk $? "and the kernel's, to the display taking the glass"
 }
 
 # Does the medium actually carry this text? Read off the image rather than
@@ -1462,7 +1522,7 @@ run_noexec() {
 # The second thing that kept BoxOS off a real machine, and the emulator could
 # not show it either: on an i5-9400F booting UEFI, RFLAGS.IF was set by
 # something OUTSIDE this kernel — stage2.asm clears it ten times over on the
-# BIOS path, TagBootJump clears it nowhere, and UEFI 2.10 §8.1 obliges
+# BIOS path, GangwayJump clears it nowhere, and UEFI 2.10 §8.1 obliges
 # firmware to restore it after a runtime call, which is the kind of obligation
 # firmware breaks. The first HPET tick then landed inside cpu_calibrate_tsc,
 # thirty-six lines of kernel_main before scheduler_init() had allocated
@@ -2366,9 +2426,11 @@ run_mountfail() {
 run_logsave() {
     echo "== logsave: what the kernel said, written down where it can be read =="
 
-    # Two kernels, because the switch is a BUILD switch. Every kernel keeps the
-    # ring of its own run (it is the serial line's source); PRINTTOFILE adds
-    # the window that carries it through a reset. Both halves have to hold:
+    # Two kernels, on the BIOS boot this runs, whose stage2 reads no
+    # gangway.settings: there the window that carries the log through a reset
+    # is the kernel's own way only when it is built PRINTTOFILE=on. Every kernel
+    # keeps the ring of its own run (it is the serial line's source). Both
+    # halves have to hold:
     # both kernels must produce a readable account of their run, and the one
     # without the window must SAY it carries nothing through a reset rather
     # than hand back an empty file that reads like a machine which never spoke.
@@ -6250,27 +6312,30 @@ overtake_listing() {
 # A second number of 0 is a whole listing, whatever the volume holds today; a
 # positive one is a cut and says how much was stranded; -1 means no prompt ever
 # followed the listing at all, which is a third thing and not a pass.
+#
+# The prompt is the hub's as prompt.cpp lays it: the context's tags in
+# brackets, how many files the last line gave (a listing gives every one it
+# lists: "141 ~ "), "+N" or "+N!" for the programs behind, each with a blank
+# after it and each there or not, then the sign and its blank.
 overtake_cuts() {
     python3 - "$1" <<'EOF2'
 import re, sys
 t = open(sys.argv[1], "rb").read().replace(b"\r", b"")
 row = re.compile(rb"(?m)^[!-~]+ +\[")
+prompt = re.compile(rb"\n(?:\[[^\]\n]*\] )?(?:[0-9]+ )?(?:\+[0-9]+!? )?~ ")
 starts = [m.end() for m in re.finditer(rb"Files:\n", t)]
 for k, s in enumerate(starts):
     end = starts[k + 1] if k + 1 < len(starts) else len(t)
     body = t[s:end]
-    n = body.find(b"\n~ ")
-    if n < 0:
+    m = prompt.search(body)
+    if m is None:
         print("%d -1" % len(body))
         continue
-    # The prompt is two bytes with no newline after it, so whatever the merge
-    # put next lands on the prompt's OWN line. Drop the "~ " and the rest of
-    # that line is read like any other, or a listing stranded by exactly one
-    # row would be counted as a listing that was never cut.
-    after = body[n + 1:]
-    if after.startswith(b"~ "):
-        after = after[2:]
-    print("%d %d" % (n, len(row.findall(after))))
+    # The prompt has no newline after it, so whatever the merge put next lands
+    # on the prompt's OWN line: the rest of that line is read like any other,
+    # or a listing stranded by exactly one row would be counted as a listing
+    # that was never cut.
+    print("%d %d" % (m.start(), len(row.findall(body[m.end():]))))
 EOF2
 }
 
@@ -6470,10 +6535,13 @@ run_orderlifemut() {
 # The caret is the part of a console a person actually watches, and until this
 # was measured nobody could say where it was: the serial mirror carries the
 # TEXT a program said and says nothing at all about the cursor. So this reads
-# the glass itself. A screendump is 8x16 cells of pixels; the display draws
-# the caret as two solid rows at the bottom of a cell, and the 8x16 font is
-# right here in the tree, so a cell can be told back into the character it
-# carries AND whether a caret is standing on it.
+# the glass itself. The display says the cells it draws in when it starts
+# ("[display] text: ... in cells of WxH, CxR of them", the grid in the middle
+# of the glass) and draws the caret as the foot of its cell, an eighth of the
+# height and two rows at least, solid across; so a screendump can be told back
+# into cells that carry ink and the one a caret stands on. A foot solid
+# across is a caret only in a cell alone: a run of them is a bar of blocks,
+# the load meter's lower eighths.
 #
 # Two things are checked, and they are different defects:
 #   ONE caret — a caret is pixels inside the surface, so a scroll carries it up
@@ -6486,64 +6554,48 @@ run_orderlifemut() {
 #               moved the insertion point and left the caret behind.
 
 caret_read() {
-    # caret_read PPM — prints "carets N at r,c r,c ..." and the last screen row
-    # that carries anything, so a verdict can name what it saw.
-    python3 - "$1" <<'EOF2'
-import re, sys, collections
-ROOT = "."
-src = open(ROOT + "/src/include/boxos_font.h").read()
-body = src[src.index("BoxFontGlyphs[256][16] = {"):]
-rows = re.findall(r"\{([^{}]*)\}", body)
-FONT = []
-for r in rows[:256]:
-    v = [int(x, 0) for x in r.split(",") if x.strip()]
-    if len(v) == 16: FONT.append(tuple(v))
-BY = {}
-TOP = {}
-for code in range(255, -1, -1):
-    # A cell of nothing is a SPACE, not a NUL: the glyphs are identical and the
-    # lower code would win, and then a blank row could not be told from a row
-    # of text by trimming it.
-    if code == 0: continue
-    BY[FONT[code]] = code
-    TOP.setdefault(FONT[code][:14], code)
+    # caret_read PPM — prints "carets N at r,c r,c ..." and, of the row the
+    # caret stands on (with none, the last row that carries anything), "ink
+    # ROW ends at COL": the last cell there that carries ink above the foot.
+    python3 - "$1" build/serial.log <<'EOF2'
+import collections, re, sys
+
+said = re.findall(rb"\[display\] text: .* in cells of (\d+)x(\d+), (\d+)x(\d+) of them", open(sys.argv[2], "rb").read())
+if not said:
+    print("carets ? at (the display never said its cells)")
+    print("ink -1 ends at -1")
+    sys.exit(0)
+W, H, COLS, ROWS = map(int, said[-1])
 
 d = open(sys.argv[1], "rb").read()
 parts = d.split(b"\n", 3)
 w, h = map(int, parts[1].split())
 px = parts[3]
+ox, oy = (w - COLS * W) // 2, (h - ROWS * H) // 2
+foot = H - max(2, H // 8)
+
 def pix(x, y):
     i = (y * w + x) * 3
-    return (px[i], px[i+1], px[i+2])
+    return px[i:i+3]
 
-carets = []
-lines = []
-for r in range(h // 16):
-    line = []
-    for c in range(w // 8):
-        box = [[pix(c*8 + x, r*16 + y) for x in range(8)] for y in range(16)]
-        flat = [p for row in box for p in row]
-        cnt = collections.Counter(flat)
-        bg = cnt.most_common(1)[0][0]
-        bits = tuple(sum(1 << (7-x) for x in range(8) if box[y][x] != bg) for y in range(16))
-        ch = BY.get(bits)
-        caret = False
-        if ch is None:
-            if bits[14] == 0xFF and bits[15] == 0xFF:
-                ch = TOP.get(bits[:14])
-                if ch is not None: caret = True
-        elif bits[14] == 0xFF and bits[15] == 0xFF and not any(bits[:14]):
-            caret = True; ch = 32
-        if ch is None: ch = ord('?')
-        if caret: carets.append((r, c))
-        line.append(chr(ch) if 32 <= ch < 127 else '.')
-    lines.append("".join(line).rstrip())
+solid = {}   # (r, c) -> the colour its foot is solid in, unlike its page
+inked = set()
+for r in range(ROWS):
+    for c in range(COLS):
+        box = [[pix(ox + c*W + x, oy + r*H + y) for x in range(W)] for y in range(H)]
+        page = collections.Counter(p for row in box for p in row).most_common(1)[0][0]
+        if any(p != page for row in box[:foot] for p in row):
+            inked.add((r, c))
+        band = set(p for row in box[foot:] for p in row)
+        if len(band) == 1 and page not in band:
+            solid[(r, c)] = band.pop()
 
-last = ""
-for i, l in enumerate(lines):
-    if l: last = "%d|%s" % (i, l)
-print("carets %d at %s" % (len(carets), " ".join("%d,%d" % x for x in carets)))
-print("last " + last)
+carets = sorted(k for k, colour in solid.items()
+                if solid.get((k[0], k[1] - 1)) != colour and solid.get((k[0], k[1] + 1)) != colour)
+row = carets[-1][0] if carets else max([r for r, _ in inked], default=-1)
+end = max([c for r, c in inked if r == row], default=-1)
+print("carets %d at %s" % (len(carets), " ".join("%d,%d" % k for k in carets)))
+print("ink %d ends at %d" % (row, end))
 EOF2
 }
 
@@ -6601,15 +6653,16 @@ run_caret() {
     chk $? "caret: still one after a screenful of output and three scrolls ($S)"
 
     # Where it stands: `abcdef` typed, then Left twice, so the caret must be on
-    # the cell holding 'e' — two back from the end of what was typed.
-    local LINE COL WANT
-    LINE=$(tail -1 "$SCRATCH/caret.edit.txt")
+    # the cell holding 'e' — the cell before the last that carries ink on its
+    # row, 'f'.
+    local INK COL WANT
+    INK=$(tail -1 "$SCRATCH/caret.edit.txt")
     COL=$(echo "$E" | awk '{print $4}' | cut -d, -f2)
-    WANT=$(echo "$LINE" | sed 's/^last [0-9]*|//' | awk '{ i=index($0,"abcdef"); print (i>0 ? i-1+4 : -1) }')
+    WANT=$(echo "$INK" | awk '{ print ($5 >= 0 ? $5 - 1 : -1) }')
     if [ -n "$COL" ] && [ "$COL" = "$WANT" ]; then
-        ok "caret: it sits on the cell the editor is editing (column $COL of \"$(echo "$LINE" | sed 's/^last [0-9]*|//')\")"
+        ok "caret: it sits on the cell the editor is editing (column $COL, the cell before \"abcdef\"'s last, $INK)"
     else
-        bad "caret: the editor is two cells back from the end of \"abcdef\" and the caret is at column $COL, not $WANT"
+        bad "caret: the editor is on 'e', two cells back from the end of \"abcdef\" ($INK), and the caret is at column $COL, not $WANT"
     fi
 }
 
@@ -6641,11 +6694,11 @@ run_caretmut() {
     caret_blind_off
     if [ $booted -ne 0 ]; then bad "caretmut: never reached a shell"; build; return; fi
 
-    local E COL LINE WANT
+    local E COL INK WANT
     E=$(head -1 "$SCRATCH/caretmut.edit.txt")
-    LINE=$(tail -1 "$SCRATCH/caretmut.edit.txt")
+    INK=$(tail -1 "$SCRATCH/caretmut.edit.txt")
     COL=$(echo "$E" | awk '{print $4}' | cut -d, -f2)
-    WANT=$(echo "$LINE" | sed 's/^last [0-9]*|//' | awk '{ i=index($0,"abcdef"); print (i>0 ? i-1+4 : -1) }')
+    WANT=$(echo "$INK" | awk '{ print ($5 >= 0 ? $5 - 1 : -1) }')
     if [ -n "$COL" ] && [ "$COL" = "$WANT" ]; then
         bad "caretmut: the caret's move was left untold and the caret STILL followed the arrows — the oracle cannot see that defect"
     else
@@ -10304,6 +10357,10 @@ case "${1:-both}" in
     novolume) run_novolume ;;
     framerefuse) run_framerefuse ;;
     bookboot) run_bookboot ;;
+    loadersettings) run_loadersettings ;;
+    panel)    run_panel ;;
+    crossings) run_crossings ;;
+    scene)    run_scene ;;
     dedup)    run_dedup ;;
     mkfs)     run_mkfs ;;
     uefi)     run_uefi ;;
@@ -10416,8 +10473,8 @@ case "${1:-both}" in
     defragdelete) run_defragdelete ;;
     cores)    run_cores ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_replugwritebook; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_haltcycle; echo; run_halthog; echo; run_halthogmut; echo; run_panicstop; echo; run_panicstopmut; echo; run_fullvolume; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_caret; echo; run_growbook; echo; run_growcutbook; echo; run_quill; echo; run_mountfail; echo; run_framerefuse; echo; run_bookboot; echo; run_census; echo; run_stand; echo; run_standusb; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_turns; echo; run_turnsmut; echo; run_cores ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|caret|caretmut|grow|growcut|growglass|growmut|loggerhour|loggerhourmut|census|stand|standusb|standmut|quill|quillmut|stackguard|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|latelaunchmut|nofsgsbase|framerefuse|bookboot|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|halthog|halthogmut|panicstop|panicstopmut|fullvolume|roombackmut|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all|fare|faremut]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_replugwritebook; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_haltcycle; echo; run_halthog; echo; run_halthogmut; echo; run_panicstop; echo; run_panicstopmut; echo; run_fullvolume; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_caret; echo; run_growbook; echo; run_growcutbook; echo; run_quill; echo; run_mountfail; echo; run_framerefuse; echo; run_bookboot; echo; run_loadersettings; echo; run_panel; echo; run_crossings; echo; run_scene; echo; run_census; echo; run_stand; echo; run_standusb; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_turns; echo; run_turnsmut; echo; run_cores ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|caret|caretmut|grow|growcut|growglass|growmut|loggerhour|loggerhourmut|census|stand|standusb|standmut|quill|quillmut|stackguard|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|latelaunchmut|nofsgsbase|framerefuse|bookboot|loadersettings|panel|crossings|scene|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|halthog|halthogmut|panicstop|panicstopmut|fullvolume|roombackmut|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all|fare|faremut]"; exit 2 ;;
 esac
 
 STAND_FINISHED=1

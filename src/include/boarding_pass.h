@@ -104,6 +104,13 @@ _Static_assert(sizeof(BoardingStampHeader) == 4, "a stamp header is 4 bytes — 
 #define BOARDING_STAMP_MEDIUM  2    /* BoardingMedium */
 #define BOARDING_STAMP_LOADER  3    /* BoardingLoader */
 #define BOARDING_STAMP_SEAL    4    /* BoardingSeal — always the last one */
+#define BOARDING_STAMP_JOURNAL 5    /* BoardingJournal */
+#define BOARDING_STAMP_MOMENTS 6    /* BoardingMoment, as many as were marked */
+#define BOARDING_STAMP_STARTUP  7   /* BoardingStartup */
+#define BOARDING_STAMP_CORES    8   /* BoardingCores */
+#define BOARDING_STAMP_KEEP_LOG 9   /* BoardingKeepLog */
+#define BOARDING_STAMP_CROSSING 10  /* BoardingCrossing */
+#define BOARDING_STAMP_SCENE    11  /* BoardingScene */
 
 /*
  * The volume this kernel was read out of, by the identity the filesystem keeps
@@ -176,5 +183,106 @@ typedef struct __attribute__((packed)) {
 } BoardingSeal;
 
 _Static_assert(sizeof(BoardingSeal) == 4, "a seal stamp is 4 bytes — stage2 BOARDING_SEAL_BYTES");
+
+/*
+ * The loader's journal — every line it said, kept instead of printed.
+ *
+ * A loader that boots quietly still has things to say, and the place they are
+ * worth reading is the kernel's log, beside everything that follows them. So
+ * the loader keeps its lines in its own memory and names it here; the kernel
+ * puts them into its log ring before it manages memory at all
+ * (BoardingPassTake), which is what makes the loader's own pages a safe place
+ * for them: nothing can be handed those pages before they are read. Below
+ * 4 GB, in the loader's identity map. The text is as said, '\n' ending a
+ * line; `lost` counts what was said past the room the loader had.
+ */
+typedef struct __attribute__((packed)) {
+    uint64_t addr;              /* physical address of the text */
+    uint32_t bytes;             /* how much of it there is */
+    uint32_t lost;              /* bytes said past its room, not kept */
+} BoardingJournal;
+
+_Static_assert(sizeof(BoardingJournal) == 16, "a journal stamp is 16 bytes");
+
+/*
+ * One moment of the loader's journey: a step, in the loader's own word, and
+ * the processor's time-stamp counter as the step was reached. The stamp holds
+ * as many as were marked, in the order they were — its length says how many.
+ * The step is a word rather than a number so that a loader which learns to
+ * mark a new step needs no kernel taught about it: whoever shows the journey
+ * shows the words it was given.
+ */
+#define BOARDING_MOMENT_WORD 8
+
+typedef struct __attribute__((packed)) {
+    char     what[BOARDING_MOMENT_WORD];    /* NUL-padded, not necessarily NUL-terminated */
+    uint64_t tsc;
+} BoardingMoment;
+
+_Static_assert(sizeof(BoardingMoment) == 16, "a moment is 16 bytes — stage2 BOARDING_MOMENT_BYTES");
+
+/*
+ * What the person asked of the kernel, in gangway.settings
+ * (boxos_gangway_settings.h) or on Gangway's panel for one start: a stamp for
+ * each setting the file or the panel sets, written by Gangway — which of the
+ * two, its journal says. Where there is none — a setting left alone, a BIOS
+ * boot, whose stage2 reads no settings, or a loader older than these — the
+ * kernel goes its own way: the screen quiet, every core started, and what it
+ * says kept through a reset only in a kernel built to (PRINTTOFILE).
+ *
+ * STARTUP: what the screen shows while the machine starts. QUIET, the screen
+ * as the firmware left it until the display takes it, the Emergency Screen
+ * woken by an error; ALL, the Emergency Screen from the kernel's first line.
+ */
+#define BOARDING_STARTUP_QUIET 0u
+#define BOARDING_STARTUP_ALL   1u
+
+typedef struct __attribute__((packed)) {
+    uint8_t show;               /* BOARDING_STARTUP_* */
+    uint8_t reserved[3];
+} BoardingStartup;
+
+_Static_assert(sizeof(BoardingStartup) == 4, "a startup stamp is 4 bytes");
+
+/* CORES: the most processors the kernel starts, the one it runs on first
+ * among them — 0 for every one the machine has. */
+typedef struct __attribute__((packed)) {
+    uint32_t most;
+} BoardingCores;
+
+_Static_assert(sizeof(BoardingCores) == 4, "a cores stamp is 4 bytes");
+
+/* KEEP_LOG: whether what the machine says is kept through a reset — the
+ * carry-over window (klib_logring.h) — for lastsaid to read after it. */
+typedef struct __attribute__((packed)) {
+    uint8_t keep;               /* 1 kept, 0 not */
+    uint8_t reserved[3];
+} BoardingKeepLog;
+
+_Static_assert(sizeof(BoardingKeepLog) == 4, "a keep-log stamp is 4 bytes");
+
+/* CROSSING: this start's crossing on the medium it started from
+ * (boxos_crossings.h) — the sector its slot begins at and its number — for
+ * the kernel to mark landed when the display takes the screen. A pass without
+ * one is a start no crossing was kept of: a BIOS boot, or a medium whose front
+ * carries no crossings. */
+typedef struct __attribute__((packed)) {
+    uint64_t sector;
+    uint64_t number;
+} BoardingCrossing;
+
+_Static_assert(sizeof(BoardingCrossing) == 16, "a crossing stamp is 16 bytes");
+
+/* SCENE: the scene whose first frame the loader left on the screen
+ * (boxos_scene.h) — the fid of its file on the volume and its bytes — for the
+ * display to go on from that frame (boxos_screen.h SCREEN_LEFT_SCENE). A pass
+ * without one left nothing of its own there: the scene was off, the start
+ * shows all it says, or there was none to draw. */
+typedef struct __attribute__((packed)) {
+    uint64_t fid;
+    uint64_t bytes;
+} BoardingScene;
+
+_Static_assert(sizeof(BoardingScene) == 16, "a scene stamp is 16 bytes");
 
 #endif /* BOARDING_PASS_H */

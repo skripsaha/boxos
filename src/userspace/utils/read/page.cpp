@@ -25,7 +25,7 @@ constexpr core::Color LinkInk       = core::Color::Rgb(0x7F, 0xB8, 0xE6);
 constexpr core::Color AccentInk     = core::Color::Rgb(0xF2, 0xC4, 0x6F);   /* an item's marker, a bookmark's sign */
 constexpr core::Color WayPaper      = core::Color::Rgb(0x22, 0x55, 0x88);   /* the badge of the other way of reading */
 
-constexpr char BookmarkSign = static_cast<char>(0x10);   /* ► */
+constexpr char32_t BookmarkSign = U'\u25BA';   /* ► */
 
 /* What a reader takes in, in words a minute: the time left is told by it. */
 constexpr std::size_t WordsAMinute = 230;
@@ -195,7 +195,7 @@ void Reader::PaintText(tui::Frame &Out, std::int32_t Y, std::size_t Index, core:
             break;
         }
         for (std::size_t Cell = 0; Cell < Shape.Width; Cell++)
-            (void)Out.Put({Col++, Y}, tui::Cell{Shape.Cells[Cell], Shape.Odd ? tui::OddInk : Ink, Behind});
+            (void)Out.Put({Col++, Y}, tui::Cell{Shape.Character, Shape.Odd ? tui::OddInk : Ink, Behind});
         Byte += Shape.Length;
     }
     if (Cut) (void)Out.Put({End - 1, Y}, tui::Glyphs::MoreRight, {tui::HintInk, Ground});

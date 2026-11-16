@@ -49,10 +49,10 @@ public:
     void                       Give();
 
     void          Clear(PainterColor Fill);
-    void          Put(std::uint32_t Row, std::uint32_t Col, char Ch, PainterColor Fg, PainterColor Bg);
+    void          Put(std::uint32_t Row, std::uint32_t Col, char32_t Ch, PainterColor Fg, PainterColor Bg);
     std::uint32_t Write(std::uint32_t Row, std::uint32_t Col, std::string_view Text, PainterColor Fg,
                         PainterColor Bg);
-    void          Fill(std::uint32_t Row, std::uint32_t Col, std::uint32_t Width, char Ch, PainterColor Fg,
+    void          Fill(std::uint32_t Row, std::uint32_t Col, std::uint32_t Width, char32_t Ch, PainterColor Fg,
                        PainterColor Bg);
     /* Centred on the row; the column it began at. */
     std::uint32_t Centre(std::uint32_t Row, std::string_view Text, PainterColor Fg, PainterColor Bg);

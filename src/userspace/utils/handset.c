@@ -78,7 +78,7 @@ static int HearToEnter(void)
         if (t.payload_len < sizeof(k))
             continue;
         memcpy(&k, t.payload, sizeof(k));
-        if (k.ascii == '\n' || k.ascii == '\r')
+        if (k.cp == '\n' || k.cp == '\r')
             break;
     }
     touch_release(kb);

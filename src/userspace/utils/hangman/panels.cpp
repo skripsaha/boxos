@@ -57,12 +57,12 @@ void PaintHelp(tui::Frame &Out, const Look &Shown, HintCost Price)
 SecretEntry::Verdict SecretEntry::Key(const tui::KeyEvent &Pressed)
 {
     if (Pressed.IsExtended() || Pressed.IsCtrl() || Pressed.IsAlt()) return Verdict::Typing;
-    if (Pressed.Ascii == tui::KeyCodes::Escape) return Verdict::Cancelled;
-    if (Pressed.Ascii == tui::KeyCodes::Enter) return Typed.size() >= LeastSecret ? Verdict::Done : Verdict::Typing;
-    if (Pressed.Ascii == tui::KeyCodes::Backspace) {
+    if (Pressed.Character == tui::KeyCodes::Escape) return Verdict::Cancelled;
+    if (Pressed.Character == tui::KeyCodes::Enter) return Typed.size() >= LeastSecret ? Verdict::Done : Verdict::Typing;
+    if (Pressed.Character == tui::KeyCodes::Backspace) {
         if (!Typed.empty()) Typed.pop_back();
-    } else if (Round::IsLetter(Pressed.Ascii) && Typed.size() < MostSecret) {
-        Typed += Round::Upper(Pressed.Ascii);
+    } else if (Round::IsLetter(Pressed.Character) && Typed.size() < MostSecret) {
+        Typed += Round::Upper(Pressed.Character);
     }
     return Verdict::Typing;
 }

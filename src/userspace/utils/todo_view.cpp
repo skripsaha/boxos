@@ -10,6 +10,8 @@
 
 #include "box/clock.h"
 
+#include "painter/tui/text.h"
+
 #include "todo_desk.h"
 
 namespace {
@@ -42,11 +44,11 @@ const Color GaugeLeft   = Color::Rgb(0x4A, 0x4A, 0x4A);
 const Color TagInks[] = {Color::Rgb(0x60, 0xA0, 0xF0), Color::Rgb(0x70, 0xD0, 0x80), Color::Rgb(0x60, 0xD0, 0xD0),
                          Color::Rgb(0xD0, 0x80, 0xE0), Color::Rgb(0xF0, 0x80, 0x80), Color::Rgb(0xE0, 0xD0, 0x60)};
 
-constexpr char StarGlyph   = static_cast<char>(0x0F);
-constexpr char FilledGlyph = static_cast<char>(0xFE);
-constexpr char RuleGlyph   = static_cast<char>(0xC4);
-constexpr int  GaugeWidth  = 12;
-constexpr int  FirstRow    = 2;
+constexpr char32_t StarGlyph   = U'\u263C';   /* ☼ */
+constexpr char32_t FilledGlyph = U'\u25A0';   /* ■ */
+constexpr char32_t RuleGlyph   = U'\u2500';   /* ─ */
+constexpr int      GaugeWidth  = 12;
+constexpr int      FirstRow    = 2;
 constexpr std::uint64_t SparkUs = 600000;
 
 Color TagInk(std::string_view Tag)
@@ -88,10 +90,8 @@ void TodoDesk::Head(const std::vector<std::size_t> &Places)
     if (!Places.empty() && Col + 4 + GaugeWidth + 16 < Dimensions.Width) {
         int Lit = static_cast<int>(Done * GaugeWidth / Places.size());
         Col += 4;
-        Col += static_cast<int>(FrameBuffer.Write({Col, 0}, std::string(static_cast<std::size_t>(Lit), FilledGlyph),
-                                                   TextStyle{TickInk, Paper}));
-        Col += static_cast<int>(FrameBuffer.Write({Col, 0}, std::string(static_cast<std::size_t>(GaugeWidth - Lit), Glyphs::Dot),
-                                                   TextStyle{GaugeLeft, Paper}));
+        Col += static_cast<int>(FrameBuffer.Fill({Col, 0, Lit, 1}, FilledGlyph, TextStyle{TickInk, Paper}));
+        Col += static_cast<int>(FrameBuffer.Fill({Col, 0, GaugeWidth - Lit, 1}, Glyphs::Dot, TextStyle{GaugeLeft, Paper}));
         FrameBuffer.Write({Col + 1, 0}, std::format("{} of {} done", Done, Places.size()), TextStyle{HintInk, Paper});
     }
     FrameBuffer.Fill({0, 1, Dimensions.Width, 1}, RuleGlyph, TextStyle{RuleInk, Paper});
@@ -138,9 +138,9 @@ void TodoDesk::Empty()
     Frame &FrameBuffer = Stage->FrameBuffer();
     const painter::core::Size Dimensions = Stage->Size();
     int Row = Dimensions.Height / 2 - 2, Col = Dimensions.Width / 2 - 14;
-    static const char Box[3][5] = {{'\xDA', '\xC4', '\xC4', '\xC4', '\xBF'},
-                                   {'\xB3', ' ', '\xFB', ' ', '\xB3'},
-                                   {'\xC0', '\xC4', '\xC4', '\xC4', '\xD9'}};
+    static const char32_t Box[3][5] = {{Glyphs::CornerTL, Glyphs::RuleAcross, Glyphs::RuleAcross, Glyphs::RuleAcross, Glyphs::CornerTR},
+                                       {Glyphs::RuleDown, U' ', Glyphs::Tick, U' ', Glyphs::RuleDown},
+                                       {Glyphs::CornerBL, Glyphs::RuleAcross, Glyphs::RuleAcross, Glyphs::RuleAcross, Glyphs::CornerBR}};
     for (int R = 0; R < 3; R++)
         for (int C = 0; C < 5; C++)
             FrameBuffer.Put({Col + C, Row + R}, Box[R][C], TextStyle{R == 1 && C == 2 ? TickInk : HintInk, Paper});
@@ -158,22 +158,23 @@ void TodoDesk::Sparks()
     const painter::core::Size Dimensions = Stage->Size();
     std::uint64_t Since = clock_uptime_us() - CheerAt;
     if (CheerAt == 0 || Since >= TodoCheerUs) return;
-    static const char Phases[] = {static_cast<char>(0xFA), '+', '*', StarGlyph, '*', '+', static_cast<char>(0xFA)};
+    static const char32_t Phases[] = {Glyphs::Dot, U'+', U'*', StarGlyph, U'*', U'+', Glyphs::Dot};
     for (const TodoSpark &One : Confetti) {
         if (Since < One.Born || Since - One.Born >= SparkUs) continue;
         if (One.Row >= Dimensions.Height - 1 || One.Col >= Dimensions.Width) continue;
-        std::size_t Phase = static_cast<std::size_t>((Since - One.Born) * sizeof(Phases) / SparkUs);
+        std::size_t Phase = static_cast<std::size_t>((Since - One.Born) * std::size(Phases) / SparkUs);
         painter::tui::Cell Cell = FrameBuffer.Read({One.Col, One.Row});
         if (Cell.Glyph != ' ') continue;
         Cell.Glyph = Phases[Phase];
         Cell.Foreground = One.Ink;
         FrameBuffer.Put({One.Col, One.Row}, Cell);
     }
-    std::string Banner = std::format("  {} all done here  ", Glyphs::Tick);
-    int         Row    = Dimensions.Height / 2;
-    int         Col    = static_cast<int>(FrameBuffer.Centre(Row, Banner, TextStyle{Colors::White, FlashPaper}));
-    FrameBuffer.Fill({Col, Row - 1, static_cast<int>(Banner.size()), 1}, ' ', TextStyle{Colors::White, FlashPaper});
-    FrameBuffer.Fill({Col, Row + 1, static_cast<int>(Banner.size()), 1}, ' ', TextStyle{Colors::White, FlashPaper});
+    const std::string_view Banner = "  \u221A all done here  ";   /* √, Glyphs::Tick */
+    const int              Wide   = static_cast<int>(painter::tui::CellsOf(Banner));
+    int                    Row    = Dimensions.Height / 2;
+    int                    Col    = static_cast<int>(FrameBuffer.Centre(Row, Banner, TextStyle{Colors::White, FlashPaper}));
+    FrameBuffer.Fill({Col, Row - 1, Wide, 1}, ' ', TextStyle{Colors::White, FlashPaper});
+    FrameBuffer.Fill({Col, Row + 1, Wide, 1}, ' ', TextStyle{Colors::White, FlashPaper});
 }
 
 /* The words being typed, a note, or the keys: as many as fit, chosen by how
@@ -200,11 +201,11 @@ void TodoDesk::Bar()
         return;
     }
     struct Hint { const char *Keys, *What; int Need; };
-    const Hint Hints[] = {{"\x18\x19", "choose", 7}, {"space", "done", 0}, {"s", "star", 4},
+    const Hint Hints[] = {{"\u2191\u2193", "choose", 7}, {"space", "done", 0}, {"s", "star", 4},
                           {"a", "add", 1},          {"enter", "change", 5}, {"d", "away", 6},
-                          {"shift+\x18\x19", "move", 8}, {"tab", List.Everywhere ? "here" : "everywhere", 2},
+                          {"shift+\u2191\u2193", "move", 8}, {"tab", List.Everywhere ? "here" : "everywhere", 2},
                           {"q", "leave", 3}};
-    auto Width = [](const Hint &One) { return static_cast<int>(std::string_view(One.Keys).size() + std::string_view(One.What).size()) + 3; };
+    auto Width = [](const Hint &One) { return static_cast<int>(painter::tui::CellsOf(One.Keys) + std::string_view(One.What).size()) + 3; };
     int  Most  = -1, Used = 1;
     for (int Need = 0; Need <= 8; Need++)
         for (const Hint &One : Hints)

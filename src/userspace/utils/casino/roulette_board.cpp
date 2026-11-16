@@ -27,23 +27,23 @@ const Color Ink   = Color::Rgb(0xEC, 0xE6, 0xD2);
 // Which way a rule of the grid runs from a point.
 constexpr std::uint8_t ToUp = 1, ToDown = 2, ToRight = 4, ToLeft = 8;
 
-char Joint(std::uint8_t Ways)
+char32_t Joint(std::uint8_t Ways)
 {
     switch (Ways) {
-    case ToRight | ToLeft:                       return static_cast<char>(0xC4);
-    case ToUp | ToDown:                          return static_cast<char>(0xB3);
-    case ToDown | ToRight:                       return static_cast<char>(0xDA);
-    case ToDown | ToLeft:                        return static_cast<char>(0xBF);
-    case ToUp | ToRight:                         return static_cast<char>(0xC0);
-    case ToUp | ToLeft:                          return static_cast<char>(0xD9);
-    case ToUp | ToDown | ToRight:                return static_cast<char>(0xC3);
-    case ToUp | ToDown | ToLeft:                 return static_cast<char>(0xB4);
-    case ToDown | ToRight | ToLeft:              return static_cast<char>(0xC2);
-    case ToUp | ToRight | ToLeft:                return static_cast<char>(0xC1);
-    case ToUp | ToDown | ToRight | ToLeft:       return static_cast<char>(0xC5);
+    case ToRight | ToLeft:                       return U'\u2500';
+    case ToUp | ToDown:                          return U'\u2502';
+    case ToDown | ToRight:                       return U'\u250C';
+    case ToDown | ToLeft:                        return U'\u2510';
+    case ToUp | ToRight:                         return U'\u2514';
+    case ToUp | ToLeft:                          return U'\u2518';
+    case ToUp | ToDown | ToRight:                return U'\u251C';
+    case ToUp | ToDown | ToLeft:                 return U'\u2524';
+    case ToDown | ToRight | ToLeft:              return U'\u252C';
+    case ToUp | ToRight | ToLeft:                return U'\u2534';
+    case ToUp | ToDown | ToRight | ToLeft:       return U'\u253C';
     case ToUp:
-    case ToDown:                                 return static_cast<char>(0xB3);
-    default:                                     return static_cast<char>(0xC4);
+    case ToDown:                                 return U'\u2502';
+    default:                                     return U'\u2500';
     }
 }
 
@@ -136,7 +136,7 @@ void Roulette::PaintSplits(tui::Frame &Out, const Layout &Where)
         }
         int Size = 0;
         while (Size + 1 < ChipSizes && One.Chips >= ChipValue(Ctx.Shown, Size + 1)) Size++;
-        Out.Put(At, static_cast<char>(0x07), tui::TextStyle{ChipColor(Size), Out.Read(At).Background});
+        Out.Put(At, U'\u2022', tui::TextStyle{ChipColor(Size), Out.Read(At).Background});
     }
 }
 
@@ -147,21 +147,21 @@ void Roulette::PaintCursor(tui::Frame &Out, const Layout &Where)
     const painter::core::Rect Edge{Where.BoardLeft + One.Left * Where.CellWide, Where.BoardTop + One.Top * Where.CellHigh,
                                    (One.Right - One.Left + 1) * Where.CellWide + 1, (One.Bottom - One.Top + 1) * Where.CellHigh + 1};
     const std::int32_t Right = Edge.X + Edge.Width - 1, Bottom = Edge.Y + Edge.Height - 1;
-    const auto         Put   = [&](std::int32_t Col, std::int32_t Row, char Glyph) {
+    const auto         Put   = [&](std::int32_t Col, std::int32_t Row, char32_t Glyph) {
         Out.Put({Col, Row}, Glyph, tui::TextStyle{Ctx.Shown.Lights, Out.Read({Col, Row}).Background});
     };
     for (std::int32_t Col = Edge.X + 1; Col < Right; Col++) {
-        Put(Col, Edge.Y, static_cast<char>(0xCD));
-        Put(Col, Bottom, static_cast<char>(0xCD));
+        Put(Col, Edge.Y, U'\u2550');
+        Put(Col, Bottom, U'\u2550');
     }
     for (std::int32_t Row = Edge.Y + 1; Row < Bottom; Row++) {
-        Put(Edge.X, Row, static_cast<char>(0xBA));
-        Put(Right, Row, static_cast<char>(0xBA));
+        Put(Edge.X, Row, U'\u2551');
+        Put(Right, Row, U'\u2551');
     }
-    Put(Edge.X, Edge.Y, static_cast<char>(0xC9));
-    Put(Right, Edge.Y, static_cast<char>(0xBB));
-    Put(Edge.X, Bottom, static_cast<char>(0xC8));
-    Put(Right, Bottom, static_cast<char>(0xBC));
+    Put(Edge.X, Edge.Y, U'\u2554');
+    Put(Right, Edge.Y, U'\u2557');
+    Put(Edge.X, Bottom, U'\u255A');
+    Put(Right, Bottom, U'\u255D');
 }
 
 void Roulette::PaintBoard(tui::Frame &Out, const Layout &Where, std::uint64_t NowUs)

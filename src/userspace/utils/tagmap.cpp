@@ -34,6 +34,7 @@
 #include "painter/core/color.h"
 #include "painter/tui/glyph.h"
 #include "painter/tui/stage.h"
+#include "painter/tui/text.h"
 #include "tagmap.h"
 
 BOX_FORM("takes optional things \"the files to map; with none, the Use Context\"\n"
@@ -345,9 +346,9 @@ void Map::Foot()
     Row = Dimensions.Height - 1;
     FrameBuffer.Fill({0, Row, Dimensions.Width, 1}, ' ', TextStyle{TextInk, BarPaper});
     int Col = 1;
-    for (auto [Keys, What] : {std::pair{"\x1B\x18\x19\x1A", "choose"}, {"enter", "open"}, {"bksp", "back"},
+    for (auto [Keys, What] : {std::pair{"\u2190\u2191\u2193\u2192", "choose"}, {"enter", "open"}, {"bksp", "back"},
                               {"space", "give"}, {"w", BySize ? "by count" : "by size"}, {"q", "leave"}}) {
-        int Wide = static_cast<int>(std::string_view(Keys).size() + 1 + std::string_view(What).size() + 2);
+        int Wide = static_cast<int>(painter::tui::CellsOf(Keys) + 1 + std::string_view(What).size() + 2);
         if (Col + Wide > Dimensions.Width) break;
         Col += static_cast<int>(FrameBuffer.Write({Col, Row}, Keys, TextStyle{KeyInk, BarPaper}));
         Col += 1;
@@ -407,7 +408,7 @@ Act Map::OnKey(const KeyEvent &Key)
         Here.Selected = TagmapStep(Here.Tiles, Here.Selected, Way);
         return Act::Stay;
     }
-    switch (Key.Ascii) {
+    switch (Key.Character) {
     case 'q':
     case 'Q':
     case painter::tui::KeyCodes::Escape: return Act::Leave;

@@ -71,11 +71,11 @@ bool ReadNumber(std::string_view Word, std::uint64_t &Out)
     return true;
 }
 
-int HexValue(char Ch)
+int HexValue(char32_t Ch)
 {
-    if (Ch >= '0' && Ch <= '9') return Ch - '0';
-    if (Ch >= 'a' && Ch <= 'f') return Ch - 'a' + 10;
-    if (Ch >= 'A' && Ch <= 'F') return Ch - 'A' + 10;
+    if (Ch >= '0' && Ch <= '9') return static_cast<int>(Ch - '0');
+    if (Ch >= 'a' && Ch <= 'f') return static_cast<int>(Ch - 'a' + 10);
+    if (Ch >= 'A' && Ch <= 'F') return static_cast<int>(Ch - 'A' + 10);
     return -1;
 }
 
@@ -251,8 +251,8 @@ void Hexer::Type(std::uint8_t Value)
 void Hexer::OnEditKey(const painter::tui::KeyEvent &Key)
 {
     if (Key.IsCtrl()) {
-        if (Key.Ascii == 's' || Key.Ascii == 'S')      Save();
-        else if (Key.Ascii == 'q' || Key.Ascii == 'Q') Leave();
+        if (Key.Character == 's' || Key.Character == 'S')      Save();
+        else if (Key.Character == 'q' || Key.Character == 'Q') Leave();
         return;         /* every other chord is deliberately not a command */
     }
 
@@ -272,7 +272,7 @@ void Hexer::OnEditKey(const painter::tui::KeyEvent &Key)
         return;
     }
 
-    char Ch = Key.Ascii;
+    char32_t Ch = Key.Character;
     if (Ch == painter::tui::KeyCodes::Escape) {
         CommandOpen = true;
         Command.clear();
@@ -312,7 +312,7 @@ void Hexer::OnCommandKey(const painter::tui::KeyEvent &Key)
 {
     if (Key.IsCtrl() || Key.IsExtended()) return;
 
-    char Ch = Key.Ascii;
+    char32_t Ch = Key.Character;
     if (Ch == painter::tui::KeyCodes::Escape) {
         CommandOpen = false;
         return;

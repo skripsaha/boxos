@@ -422,13 +422,13 @@ int main()
                 Spent >= FrameUs ? 1 : static_cast<std::uint32_t>((FrameUs - Spent) / 1000 + 1));
             if (Event.Kind == EventKind::Gone) break;
             if (Event.Kind != EventKind::Key || Event.Key.IsExtended()) continue;
-            if (Event.Key.Ascii == 'q' || Event.Key.Ascii == 'Q' ||
-                Event.Key.Ascii == painter::tui::KeyCodes::Escape)
+            if (Event.Key.Character == 'q' || Event.Key.Character == 'Q' ||
+                Event.Key.Character == painter::tui::KeyCodes::Escape)
                 break;
-            if (Event.Key.Ascii == ' ') Night.Launch(Night.AnyKind(), Night.AnyX());
-            if (Event.Key.Ascii >= '1' && Event.Key.Ascii <= '9')
-                Night.Launch(static_cast<Kind>(Event.Key.Ascii - '1'), Night.AnyX());
-            if (Event.Key.Ascii == 'f' || Event.Key.Ascii == 'F') Night.Finale();
+            if (Event.Key.Character == ' ') Night.Launch(Night.AnyKind(), Night.AnyX());
+            if (Event.Key.Character >= '1' && Event.Key.Character <= '9')
+                Night.Launch(static_cast<Kind>(Event.Key.Character - '1'), Night.AnyX());
+            if (Event.Key.Character == 'f' || Event.Key.Character == 'F') Night.Finale();
         }
         unsigned Launched = Night.Launched;
         (void)Night.Screen->Close();

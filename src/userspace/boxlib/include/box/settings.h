@@ -24,7 +24,7 @@ extern "C" {
  * color color default #E6E6E6 "their color"`.) Each line is `NAME KIND [what
  * the kind takes] default VALUE [next-start] "what it does"`, or `NAME "what
  * it holds"` for a thing that only holds the lines indented under it — the
- * kinds on-or-off, number from A to B [UNIT] [or off], word, text, one-of W1
+ * kinds on-or-off, number from A to B [UNIT] [or off | or all], word, text, one-of W1
  * W2 ..., color and key, as src/include/settings_reader.h defines them; the
  * toolchain refuses a line it could not read. The declaration is the one
  * source of what each setting is: the utility settings and help show it, the
@@ -77,7 +77,7 @@ extern "C" {
 /* ---- A program's own settings ----------------------------------------- */
 
 bool        settings_on(const char *path);
-int64_t     settings_number(const char *path);     /* 0 for off */
+int64_t     settings_number(const char *path);     /* 0 for off, or all */
 const char *settings_word(const char *path);
 const char *settings_text(const char *path);
 const char *settings_choice(const char *path);
@@ -127,7 +127,7 @@ typedef struct {
     const char     *What;
     const char     *Default;
     int64_t         From, To;   /* number */
-    bool            Off;        /* number: off stands for 0 */
+    const char     *Zero;       /* number: the word that stands for 0 — "off" or "all"; "" for none */
     const char     *Unit;       /* number: "" for none */
     const char     *Choices;    /* one-of: the words apart by blanks */
     bool            NextStart;
@@ -166,6 +166,11 @@ typedef struct {
  * found and read. A program that declares none answers Count 0 and 0.
  * Returns 0 or a negative -error_t. */
 int  settings_read(file_id_t program, BoxSettings *out);
+/* The settings of a part of the system the volume carries no program file of
+ * — the loader, Gangway (boxos_gangway_settings.h) — its declaration given as
+ * `size` bytes of text, its person's file <program>.settings found and read as
+ * any program's. Returns 0 or a negative -error_t. */
+int  settings_read_declared(const char *program, const char *declared, size_t size, BoxSettings *out);
 void settings_release(BoxSettings *settings);
 
 /* The setting a path names — names apart by blanks — or NULL. */

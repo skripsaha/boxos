@@ -14,8 +14,8 @@
 
 namespace {
 
-constexpr char FullBlock = static_cast<char>(0xDB);
-constexpr char LowerHalf = static_cast<char>(0xDC);
+constexpr char32_t FullBlock = U'\u2588';   /* █ */
+constexpr char32_t LowerHalf = U'\u2584';   /* ▄ */
 
 constexpr std::uint32_t BigRows       = 5;
 constexpr std::uint32_t BigScaleMost  = 2;
@@ -142,7 +142,7 @@ void PaintBar(Screen &Display, std::uint32_t Bottom, std::uint32_t Left, std::ui
     if (Speed != 0 && Halves == 0) Halves = 1;
     PainterColor Ink = PainterColor::Mix(ChartLow, AmberInk, static_cast<std::uint8_t>(Speed * 255 / Top));
     for (std::uint32_t Up = 0; Up < Rows; Up++) {
-        char Ch = Halves >= 2 * (Up + 1) ? FullBlock : Halves == 2 * Up + 1 ? LowerHalf : 0;
+        char32_t Ch = Halves >= 2 * (Up + 1) ? FullBlock : Halves == 2 * Up + 1 ? LowerHalf : 0;
         if (Ch != 0) Display.Fill(Bottom - Up, Left, Wide, Ch, Ink, Paper);
     }
 }
@@ -201,7 +201,7 @@ void PaintStanding(Screen &Display, std::uint32_t Row, const Report &Result, uns
 /* Sparks on the empty glass only: the numbers are never written over. */
 void Sparkle(Screen &Display, unsigned Beat)
 {
-    constexpr std::array<char, 4> Shapes = {'*', '.', '+', 0x0F};
+    constexpr std::array<char32_t, 4> Shapes = {U'*', U'.', U'+', U'\u263C'};
     Dice Chance(Beat * 7919ull + 1);
     std::uint32_t Count = Display.Rows * Display.Cols / 50;
     for (std::uint32_t I = 0; I < Count; I++) {

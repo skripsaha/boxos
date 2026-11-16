@@ -2,7 +2,7 @@
 
 ## Decision
 
-Commit `1b48c455` makes TagBoot choose a GOP mode with one deterministic
+Commit `1b48c455` makes Gangway choose a GOP mode with one deterministic
 decision:
 
 - select the primary GOP together with its handle;
@@ -17,14 +17,14 @@ decision:
 - reject invalid stride, overflow, unsupported pixel layouts, and undersized
   framebuffer apertures.
 
-The boot_info v4 contract remains unchanged. EDID is used by TagBoot before
+The boot_info v4 contract remains unchanged. EDID is used by Gangway before
 `ExitBootServices()` and no firmware-owned EDID pointer is retained afterward.
 
 ## Evidence
 
 - `make clean && make` passed; CET audit: 2318 checked, 0 violations.
 - `make run UEFI=on` reached `Kernel initialization complete!`, all startup
-  tests passed, and TagBoot reported:
+  tests passed, and Gangway reported:
   `GOP modes=30 current=0 selected=0 edid=none choice=current-fallback invalid=0`.
   OVMF did not expose EDID on the selected GOP handle, so the fallback was
   intentionally exercised.

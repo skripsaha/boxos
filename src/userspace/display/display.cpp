@@ -41,12 +41,29 @@
  * sets an alarm (box/alarm.h) for the nearest of them before it goes down, and
  * the kernel's Touch at that moment is one more arrival the sleep watches;
  * with no effect over the glass there is no alarm, and the sleep costs nothing.
+ *
+ * The first thing on the glass may be the loader's: the first frame of the
+ * scene the machine starts with (scene.cpp). It is played on from that very
+ * frame, the console kept under it, its enter act to its end and on until a
+ * program waits for the person — then it leaves and the console is drawn
+ * whole, a line said in error among it; a key or the glass turned over takes
+ * it away at once.
+ *
+ * On a framebuffer each character is drawn as the typesetter pictures it
+ * (typesetter.cpp), in the font the person names in the display's settings —
+ * text font, and text tags to tell files of one name apart — read once at
+ * start (font_file.cpp), in cells of text size pixels tall, or of a height
+ * the glass shows about fifty-four rows of. They take effect at the display's
+ * next start: the console's cells are counted once, and every program asks
+ * for them once.
  */
 
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <expected>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -59,6 +76,7 @@
 #include "box/ipc.h"
 #include "box/life.h"
 #include "box/print.h"
+#include "box/settings.h"
 #include "box/touch.h"
 #include "box/turnin.h"
 #include "boxos_utf8.h"
@@ -66,16 +84,27 @@
 #include "console_model.h"
 #include "easel.h"
 #include "effects.h"
+#include "font_file.h"
 #include "front.h"
 #include "lanes.h"
 #include "layers.h"
 #include "ring.h"
+#include "scene.h"
+#include "typesetter.h"
 
 BOX_LIFE("serves\nrise");
+
+BOX_SETTINGS("text \"the text on a framebuffer\"\n"
+             "    size number from 10 to 96 px or off default off next-start "
+             "\"how tall a cell is; off chooses for the screen\"\n"
+             "    font text default JetBrainsMonoNL-Regular.ttf next-start \"the font, by its file's name\"\n"
+             "    tags text default \"\" next-start "
+             "\"tags the font's file wears besides, apart by commas, to tell files of one name apart\"\n");
 
 namespace {
 
 std::optional<Easel> g_easel;
+std::optional<Typesetter> g_typesetter;  // a framebuffer's; a text page has its own glyphs
 ConsoleModel *g_model;
 RingFollower g_ring;
 std::vector<GlassCell> g_composed;
@@ -187,7 +216,7 @@ void HoldFrame(const ConsoleRun &Run, std::uint32_t Lane)
 
 void Present()
 {
-    if (!g_dirty) return;
+    if (!g_dirty || SceneOn()) return;
     g_dirty = false;
     Caret At;
     LayersCompose(*g_model, g_easel->PageColor(), g_composed, At);
@@ -211,7 +240,8 @@ bool AnswerWaiting()
 
         if (Waiting.Command == DISP_CMD_LAYER_OPEN) {
             LayersOpen(Waiting.Asked, Waiting.From, Waiting.Open, *g_model,
-                       g_easel->Pixels() ? DISPLAY_GLASS_PIXELS : DISPLAY_GLASS_TEXT);
+                       g_easel->Pixels() ? DISPLAY_GLASS_PIXELS : DISPLAY_GLASS_TEXT,
+                       g_typesetter ? g_typesetter->Mosaics() : 0);
         } else {
             std::expected<LayerCommit, error_t> Taken =
                 LayersCommit(Waiting.Asked.sender_pid, Waiting.From.generation, Waiting.Commit,
@@ -264,10 +294,19 @@ bool DeathStep()
     return Did;
 }
 
+// The scene gone at once, the console drawn whole in its place.
+void SceneGoes()
+{
+    if (!SceneOn()) return;
+    SceneEnd();
+    g_dirty = true;
+}
+
 bool ScreenStep()
 {
     const bool Again = g_easel->Step();
     g_dirty |= Again;
+    if (Again) SceneGoes();   // the glass was turned over
     return Again;
 }
 
@@ -296,7 +335,8 @@ bool EffectStep()
 // glass.
 void SetAlarm()
 {
-    const std::uint64_t Due = EffectsDue();
+    const std::uint64_t Effect = EffectsDue(), Scene = SceneDue();
+    const std::uint64_t Due    = !Effect ? Scene : !Scene ? Effect : std::min(Effect, Scene);
     if (Due == g_alarm) return;
     if (Due == 0) alarm_cancel();
     else alarm_set(Due);
@@ -334,6 +374,17 @@ bool RingStep()
     const bool Drew = g_ring.CatchUp(*g_model);
     g_dirty |= Drew;
     return Drew;
+}
+
+// The scene's frame when one is due; it leaves once a program waits for the
+// person — a lane listens to the keyboard — and the console is drawn whole
+// when it is gone.
+bool SceneMove()
+{
+    if (!SceneOn()) return false;
+    const bool Moved = SceneStep(LanesTyping() != 0);
+    if (!SceneOn()) g_dirty = true;
+    return Moved;
 }
 
 bool LayerStep()
@@ -584,10 +635,45 @@ bool IpcStep()
     return Did;
 }
 
+// How tall a cell is on a framebuffer Tall pixels high: text size, or with
+// none, a height the glass shows about SCREEN_ROWS_CHOSEN rows of — never
+// under sixteen pixels, never taller than the glass.
+std::int32_t CellHeight(std::uint32_t Tall)
+{
+    const std::int64_t Said = settings_number("text size");
+    const std::int64_t Height =
+        Said ? Said : std::max<std::int64_t>(16, (Tall + SCREEN_ROWS_CHOSEN / 2) / SCREEN_ROWS_CHOSEN);
+    return static_cast<std::int32_t>(std::min<std::int64_t>(Height, Tall));
+}
+
+// The person's font, read and made a font of: none when it is not found or
+// does not read — said, and the imprint draws.
+std::optional<typecase::Font> PersonsFont()
+{
+    const char *Name = settings_text("text font");
+    std::expected<std::vector<std::uint8_t>, std::string> Bytes = FontFileRead(Name, settings_text("text tags"));
+    if (!Bytes) {
+        kdbg_print("[display] %s; the imprint draws", Bytes.error().c_str());
+        return std::nullopt;
+    }
+    std::expected<typecase::Font, typecase::Fault> Face = typecase::Font::Read(std::move(*Bytes));
+    if (!Face) {
+        kdbg_print("[display] %s is no font this display reads — %s; the imprint draws", Name,
+                   Face.error().Said.c_str());
+        return std::nullopt;
+    }
+    if (Face->Damage())
+        kdbg_print("[display] %s: %s; its other glyphs are drawn", Name, Face->Damage()->Said.c_str());
+    return std::move(*Face);
+}
+
 bool Rotate()
 {
     bool Moved = false;
-    Moved |= LanesKeys();
+    if (LanesKeys()) {
+        Moved = true;
+        SceneGoes();   // the person pressed a key
+    }
     Moved |= DeathStep();
     Moved |= FrontSpawnStep();
     Moved |= ScreenStep();
@@ -596,6 +682,7 @@ bool Rotate()
     Moved |= RingStep();
     Moved |= LayerStep();
     Moved |= IpcStep();
+    Moved |= SceneMove();
     return Moved;
 }
 
@@ -619,6 +706,20 @@ int main(void)
     }
     g_easel.emplace(std::move(*Claimed));
 
+    if (g_easel->Pixels()) {
+        try {
+            std::optional<typecase::Font> Face = PersonsFont();
+            const char *Drawn = Face ? settings_text("text font") : "the imprint";
+            g_typesetter.emplace(std::move(Face), CellHeight(g_easel->PixelHeight()));
+            g_easel->SetTypesetter(*g_typesetter);
+            kdbg_print("[display] text: %s in cells of %dx%d, %ux%u of them", Drawn, g_typesetter->Cell().Width,
+                       g_typesetter->Cell().Height, g_easel->Cols(), g_easel->Rows());
+        } catch (...) {
+            kdbg_print("[display] no room to set type; nothing is drawn but the kernel's Emergency Screen");
+            return 1;
+        }
+    }
+
     try {
         g_model = new ConsoleModel(g_easel->Cols(), g_easel->Rows());
         g_composed.resize(static_cast<std::size_t>(g_easel->Cols()) * g_easel->Rows());
@@ -629,6 +730,10 @@ int main(void)
         kdbg_print("[display] no room for a %ux%u console", g_easel->Cols(), g_easel->Rows());
         return 1;
     }
+
+    // The scene the loader left, played on from its frame; the console waits
+    // under it.
+    (void)SceneBegin(*g_easel);
 
     // The machine's account so far, from the oldest byte the ring holds: what
     // the Emergency Screen showed until now goes on being shown.

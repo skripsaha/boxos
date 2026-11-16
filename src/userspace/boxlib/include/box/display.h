@@ -446,7 +446,7 @@ int display_effect(uint32_t kinds, uint8_t strength, uint8_t axes, uint32_t colo
 int display_effect_lift(void);
 
 /* A word of the display on a lane's own tag, in place of a key — told from a
- * key, which is a kb_event_t of three bytes, by its length and its mark. */
+ * key, which is a kb_event_t of six bytes, by its length and its mark. */
 #define CONSOLE_NOTICE_MARK  0x4E4F5445u   /* "ETON", the bytes of NOTE */
 
 typedef enum {
@@ -515,12 +515,26 @@ typedef enum {
 
 /* What the glass is, said in every answer to an open: a text page of 16
  * colours, or a framebuffer. Text is 80x25 cells of the page's own font; on
- * pixels a cell is the 8x16 font's. A program that draws with more than the
+ * pixels a cell is the display's typesetter's, sized by its settings. A
+ * program that draws with more than the
  * cell grid asks this, and does not guess it from the size. */
 typedef enum {
     DISPLAY_GLASS_TEXT   = 1,
     DISPLAY_GLASS_PIXELS = 2,
 } DisplayGlassKind;
+
+/* Which grids finer than the halves the glass draws its cells' characters in
+ * exactly, said in every answer to an open as the flags of `mosaics`: the
+ * quadrants (two across, two down), the sextants (three down), the octants
+ * (four down), the characters of boxos_mosaic.h. A cell of two colours on a
+ * grid the glass has is then drawn as its pattern says, to the pixel. A
+ * program that draws finer than a cell asks this, and does not guess it from
+ * the kind of glass. */
+typedef enum {
+    DISPLAY_MOSAIC_QUADRANTS = 1,
+    DISPLAY_MOSAIC_SEXTANTS  = 2,
+    DISPLAY_MOSAIC_OCTANTS   = 4,
+} DisplayMosaic;
 
 typedef enum {
     DISPLAY_LAYER_FREE    = 0,
@@ -544,7 +558,8 @@ typedef struct PACKED {
 typedef struct PACKED {
     uint8_t  command;         /* DISP_CMD_LAYER_OPEN */
     uint8_t  glass;           /* DisplayGlassKind; given with an error as well */
-    uint8_t  reserved[2];
+    uint8_t  mosaics;         /* DisplayMosaic flags; given with an error as well */
+    uint8_t  reserved;
     int32_t  error;           /* error_t; the rest is meaningful only with 0 */
     uint32_t layer_id;
     uint32_t display_pid;     /* where FRAME and CLOSE go */

@@ -33,7 +33,7 @@
 #include "touch.h"
 #include "baton.h"          /* Knock — Ctrl+Alt+Esc comes from an interrupt */
 #include "cabin_layout.h"
-#include "boxos_font.h"
+#include "journey.h"
 
 typedef struct {
     uint32_t kind;        /* SCREEN_KIND_* */
@@ -50,8 +50,15 @@ typedef struct {
     bool            away;   /* Ctrl+Alt+Esc has the glass; the window leads to the stand-in */
 } ScreenHolder;
 
+/* What the loader left on the glass, for the first claim to hear. */
+typedef struct {
+    uint32_t left;    /* SCREEN_LEFT_* */
+    uint64_t scene;   /* SCREEN_LEFT_SCENE: the fid of the scene's file */
+} ScreenLeft;
+
 static ScreenGlass  g_glass;
 static ScreenHolder g_holder;
+static ScreenLeft   g_left;   /* under s_screen_turn */
 static spinlock_t   s_screen_turn;   /* BSS-zero is unlocked; ScreenInit says so formally */
 static uintptr_t    g_stand_in;      /* phys of the stand-in page; 0 until the first claim; under s_screen_turn */
 
@@ -187,15 +194,23 @@ void ScreenInit(void)
 
     console_lock_acquire();
     EmergencyScreenUseText(SCREEN_TEXT_COLS, SCREEN_TEXT_ROWS);
-    EmergencyScreenShow();
+    EmergencyScreenAwait();
     console_lock_release();
+}
+
+void ScreenQuietEnds(void)
+{
+    spin_lock(&s_screen_turn);
+    if (!g_holder.cabin) EmergencyShow();
+    spin_unlock(&s_screen_turn);
 }
 
 void ScreenAdoptFramebuffer(uint64_t phys, uint32_t width, uint32_t height,
                             uint32_t stride, uint32_t format)
 {
-    if (!phys || width < BOXOS_FONT_WIDTH || height < BOXOS_FONT_HEIGHT ||
-        stride < width * 4u) {
+    uint32_t least_w, least_h;
+    EmergencyScreenLeastCell(&least_w, &least_h);
+    if (!phys || width < least_w || height < least_h || stride < width * 4u) {
         kprintf("[SCREEN] the loader's framebuffer is not one this screen can draw on "
                 "(phys 0x%lx, %ux%u, stride %u); the text page stays\n",
                 (unsigned long)phys, width, height, stride);
@@ -223,9 +238,10 @@ void ScreenAdoptFramebuffer(uint64_t phys, uint32_t width, uint32_t height,
     console_lock_release();
     spin_unlock(&s_screen_turn);
 
+    uint32_t cols, rows, cell_w, cell_h;
+    EmergencyScreenCells(&cols, &rows, &cell_w, &cell_h);
     kprintf("[SCREEN] framebuffer %ux%u, stride %u, format %u — %u columns by %u rows "
-            "of the 8x16 font\n", width, height, stride, format,
-            width / BOXOS_FONT_WIDTH, height / BOXOS_FONT_HEIGHT);
+            "in cells of %ux%u from the imprint\n", width, height, stride, format, cols, rows, cell_w, cell_h);
 }
 
 /* =========================================================================
@@ -253,13 +269,24 @@ static bool ScreenStandInReadyLocked(void)
 static void ScreenDescribe(ScreenDescription *out)
 {
     ScreenWindow w = ScreenWindowOf();
-    out->kind     = g_glass.kind;
-    out->width    = g_glass.width;
-    out->height   = g_glass.height;
-    out->stride   = g_glass.stride;
-    out->format   = g_glass.format;
-    out->reserved = 0;
-    out->va       = CABIN_SCREEN_BASE + w.offset;
+    out->kind   = g_glass.kind;
+    out->width  = g_glass.width;
+    out->height = g_glass.height;
+    out->stride = g_glass.stride;
+    out->format = g_glass.format;
+    out->left   = g_left.left;
+    out->va     = CABIN_SCREEN_BASE + w.offset;
+    out->scene  = g_left.scene;
+}
+
+void ScreenLeftByLoader(uint64_t fid)
+{
+    spin_lock(&s_screen_turn);
+    if (g_glass.kind == SCREEN_KIND_PIXELS) {
+        g_left.left  = SCREEN_LEFT_SCENE;
+        g_left.scene = fid;
+    }
+    spin_unlock(&s_screen_turn);
 }
 
 error_t ScreenClaim(struct process_t *proc, ScreenDescription *out, bool *taken)
@@ -304,9 +331,15 @@ error_t ScreenClaim(struct process_t *proc, ScreenDescription *out, bool *taken)
 
     g_holder.cabin = cabin;
     g_holder.away  = false;
+    /* What the loader left is said to this claim, the first — and only when
+     * the Emergency Screen has not drawn over it. */
+    if (EmergencyScreenEverShown()) g_left.left = SCREEN_LEFT_NOTHING;
     EmergencyHide();
     ScreenDescribe(out);
+    g_left.left  = SCREEN_LEFT_NOTHING;
+    g_left.scene = 0;
     *taken = true;
+    JourneyMark("display");
     spin_unlock(&s_screen_turn);
     return OK;
 }
@@ -382,7 +415,11 @@ static void ScreenSwapKnocked(void *ctx)
 
     uint32_t event = 0;
     spin_lock(&s_screen_turn);
-    if (g_holder.cabin) {
+    if (!g_holder.cabin) {
+        /* Nobody holds the glass: a quiet boot a person wants to look behind,
+         * or the log already on it — either way, the log. */
+        EmergencyShow();
+    } else {
         ScreenWindow w = ScreenWindowOf();
         bool turned;
         if (!g_holder.away) {

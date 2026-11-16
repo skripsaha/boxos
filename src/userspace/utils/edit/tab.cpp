@@ -4,6 +4,8 @@
 #include "tab.h"
 
 #include <algorithm>
+#include <climits>
+#include <cuchar>
 #include <format>
 
 #include "kin/volume.h"
@@ -124,9 +126,13 @@ void Tab::Replace(Position From, Position To, std::string_view Bytes, Merge Run)
     Past.Record(Change{From, std::move(Removed), std::string(Bytes)}, Run, Before, Ends);
 }
 
-void Tab::Type(char Ch, bool Overtype)
+void Tab::Type(char32_t Ch, bool Overtype)
 {
-    const std::string_view One(&Ch, 1);
+    char              Spelled[MB_LEN_MAX];
+    std::mbstate_t    State{};
+    const std::size_t Length = std::c32rtomb(Spelled, Ch, &State);
+    if (Length == static_cast<std::size_t>(-1)) return;
+    const std::string_view One(Spelled, Length);
     if (HasSelection()) {
         const auto [From, To] = Selection();
         Replace(From, To, One, Merge::Never);

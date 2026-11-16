@@ -74,7 +74,7 @@ bool Field::OnKey(const tui::KeyEvent &Key)
     }
     /* Ctrl+V, as everywhere: the newest clip's first line, put where the
      * caret is — over an offered value, as typing is. */
-    if (Key.IsCtrl() && !Key.IsShift() && !Key.IsAlt() && (Key.Ascii == 'v' || Key.Ascii == 'V')) {
+    if (Key.IsCtrl() && !Key.IsShift() && !Key.IsAlt() && (Key.Character == 'v' || Key.Character == 'V')) {
         if (std::expected<std::optional<Taken>, std::string> Newest = TakeNewest(); Newest && *Newest) {
             if (WasOffered) Clear();
             Put(FirstLine((*Newest)->Bytes));
@@ -87,7 +87,7 @@ bool Field::OnKey(const tui::KeyEvent &Key)
         Offered = WasOffered;
         return false;
     }
-    if (Key.Ascii == tui::KeyCodes::Backspace || Key.Ascii == 0x7F) {
+    if (Key.Character == tui::KeyCodes::Backspace || Key.Character == 0x7F) {
         if (WasOffered) {
             Clear();
         } else if (Caret > 0) {
@@ -97,9 +97,9 @@ bool Field::OnKey(const tui::KeyEvent &Key)
         }
         return true;
     }
-    if (Key.Ascii >= 0x20 && Key.Ascii < 0x7F) {
+    if (Key.IsPrintable()) {
         if (WasOffered) Clear();
-        Put(std::string_view(&Key.Ascii, 1));
+        Put(Key.Spelling());
         return true;
     }
     Offered = WasOffered;

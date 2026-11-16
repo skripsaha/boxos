@@ -167,7 +167,7 @@ void cpu_intersect_features_ap(void);
  * before the first mapping this kernel makes. It used to be nobody's job
  * on the BSP: stage2.asm set NXE for BIOS boots and the AP trampoline set
  * it for every AP, but the UEFI loader deliberately did not (see
- * tagboot_jump.asm) and the kernel's own write lived in
+ * gangway_jump.asm) and the kernel's own write lived in
  * per_core_setup_notify_msrs — seventy-four lines of kernel_main AFTER
  * efi_runtime_init had already mapped EFI runtime data with bit 63 and
  * handed those pages to firmware. On two different boards (AMI desktop,

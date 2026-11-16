@@ -3,6 +3,6 @@
 
 #include "ktypes.h"
 
-void jump_to_userspace(uint64_t rip, uint64_t rsp, uint64_t rflags);
+void jump_to_userspace(uint64_t rip, uint64_t rsp, uint64_t rflags, uint64_t fsbase);
 
 #endif

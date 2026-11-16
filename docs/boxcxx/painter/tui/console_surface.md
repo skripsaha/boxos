@@ -17,8 +17,9 @@
 
 Серверная сторона фиксации описана исходниками
 [layers.cpp](../../../../src/userspace/display/layers.cpp): текстовое
-представление строится из глифов слоя с удалением пустых крайних строк и
-пробелов в конце строк. Это не сохранение исходной строки UTF-8 программы.
+представление строится из символов ячеек слоя, записанных в UTF-8, с
+удалением пустых крайних строк и пробелов в конце строк. Это не сохранение
+исходной строки UTF-8 программы.
 
 ## Владение и время жизни
 
@@ -215,6 +216,27 @@ namespace tui = painter::tui;
 namespace core = painter::core;
 
 tui::GlassKind Example(const tui::ConsoleSurface &Screen) { return Screen.Glass(); }
+```
+
+### `ConsoleSurface::Mosaics`
+
+**Краткое описание:** Получите сетки тоньше половин, которые рисует стекло.
+
+**Параметры:** Нет; `std::uint8_t Mosaics() const noexcept`.
+
+**Возвращает:** `std::uint8_t`: флаги `DisplayMosaic`, как их сказал сервер, либо 0 без состояния.
+
+**Побочные эффекты:** Нет.
+
+**Пример:**
+
+```cpp
+#include "painter/tui/console_surface.h"
+
+namespace tui = painter::tui;
+namespace core = painter::core;
+
+std::uint8_t Example(const tui::ConsoleSurface &Screen) { return Screen.Mosaics(); }
 ```
 
 ### `ConsoleSurface::Cursor`

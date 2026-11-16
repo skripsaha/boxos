@@ -216,7 +216,11 @@ static void SaySetting(const InsideFile *file, const Setting *setting)
             Say(file, " ");
             SaySpan(file, setting->Unit.At, setting->Unit.Length);
         }
-        Say(file, setting->Off ? ", or off, " : ", ");
+        if (setting->Zero.Length != 0) {
+            Say(file, ", or ");
+            SaySpan(file, setting->Zero.At, setting->Zero.Length);
+        }
+        Say(file, ", ");
         break;
     case SETTING_WORD: Say(file, ": a word, "); break;
     case SETTING_TEXT: Say(file, ": text, "); break;

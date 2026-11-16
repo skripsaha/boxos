@@ -110,11 +110,11 @@ void Blackjack::PaintShoe(tui::Frame &Out, const Layout &Where) const
     for (std::int32_t Row = Area.Y + 1; Row < Area.Y + Area.Height - 1; Row++) {
         for (std::int32_t At = 0; At < Stack; At++) {
             const bool Cut = Game.Stock().Held() > 0 && Ahead > 0 && At == std::min(Stack - 1, Stack * Ahead / std::max(1, Rest));
-            Out.Put({Area.X + 2 + At, Row}, static_cast<char>(0xDE), tui::TextStyle{Cut ? Shown.CardBack : Shown.CardFace, Cut ? Shade(Shown.CardBack, 0.6f) : Shade(Shown.CardFace, 0.7f)});
+            Out.Put({Area.X + 2 + At, Row}, U'\u2590', tui::TextStyle{Cut ? Shown.CardBack : Shown.CardFace, Cut ? Shade(Shown.CardBack, 0.6f) : Shade(Shown.CardFace, 0.7f)});
         }
-        Out.Put({Area.X + 1, Row}, static_cast<char>(0xDD), tui::TextStyle{Shade(Back, 0.4f), Back});
+        Out.Put({Area.X + 1, Row}, U'\u258C', tui::TextStyle{Shade(Back, 0.4f), Back});
     }
-    Out.Put({Area.X, Area.Y + Area.Height - 2}, static_cast<char>(0xDB), tui::TextStyle{painter::core::Colors::Black, Back});
+    Out.Put({Area.X, Area.Y + Area.Height - 2}, U'\u2588', tui::TextStyle{painter::core::Colors::Black, Back});
     if (Game.Stock().Held() > 0 && Game.Stock().CutReached())
         Print(Out, {Area.X + 2, Area.Y + Area.Height}, "cut card", Shown.Lost);
 }
@@ -133,7 +133,7 @@ void Blackjack::PaintTray(tui::Frame &Out, const Layout &Where) const
         const std::int32_t Row = Area.Y + Area.Height - 2 - Layer, Slip = (Layer * 5 + 1) % 3;
         const Color        Edge = Shade(Shown.CardFace, Layer % 2 == 0 ? 1.0f : 0.82f);
         for (std::int32_t Col = Area.X + 2 + Slip; Col < Area.X + Area.Width - 3 + Slip; Col++)
-            Out.Put({Col, Row}, static_cast<char>(0xDC), tui::TextStyle{Edge, Back});
+            Out.Put({Col, Row}, U'\u2584', tui::TextStyle{Edge, Back});
     }
 }
 

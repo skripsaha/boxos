@@ -67,11 +67,12 @@ ASSEMBLE_ENTRY_BLOB = $(ASSEMBLE_DIR)/entry_blob.o
 
 UTILS = create show files tag untag name trash delete assemble \
         me info say reboot bye defrag escheat fsck ipc_test memtag hw \
-        timezone logsave lastsaid usetest faretest luggagetest rollcall handset headcount \
+        timezone logsave lastsaid journey usetest faretest luggagetest rollcall handset headcount \
         playtime lavalamp finish taskboard memmap hexer stringview \
         calculate difference copy typer flame checksum passport aquarium \
         nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits \
-        edit seek retag read inside settings autostart scratchpad garden gardener random sand coinflip dice casino seabattle whale hangman duppo
+        edit seek retag read inside settings autostart scratchpad garden gardener random sand coinflip dice casino seabattle whale hangman duppo \
+        glyphs
 
 .PHONY: all clean
 
@@ -508,6 +509,14 @@ hangman.elf: $(BOXLIB_START) $(HANGMAN_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BO
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(HANGMAN_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
+# glyphs is C++ in parts of its own directory; its table of Unicode's blocks
+# is written by tools/gen_unicode_blocks.py.
+GLYPHS_DIR  = glyphs
+GLYPHS_OBJS = $(addprefix $(GLYPHS_DIR)/,glyphs.o pages.o)
+
+glyphs.elf: $(BOXLIB_START) $(GLYPHS_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(GLYPHS_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+
 # The family's parts are named from the utilities' root: "kin/look.h".
 $(sort $(EDIT_OBJS) $(READ_OBJS) $(CASINO_OBJS) $(SEABATTLE_OBJS)): CXXFLAGS += -I.
 
@@ -527,4 +536,5 @@ $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 
 clean:
 	rm -f *.o *.d *.elf inside/*.o inside/*.d $(ASSEMBLE_DIR)/*.o $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.o $(KIN_DIR)/*.d $(EDIT_DIR)/*.o $(EDIT_DIR)/*.d $(READ_DIR)/*.o $(READ_DIR)/*.d \
-	      $(TASKBOARD_DIR)/*.o $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.o $(SCRATCHPAD_DIR)/*.d $(GARDEN_DIR)/*.o $(GARDEN_DIR)/*.d $(MEMMAP_DIR)/*.o $(MEMMAP_DIR)/*.d $(WIZARD_DIR)/*.o $(WIZARD_DIR)/*.d $(RANDOM_DIR)/*.o $(RANDOM_DIR)/*.d $(SAND_DIR)/*.o $(SAND_DIR)/*.d $(FOREST_DIR)/*.o $(FOREST_DIR)/*.d $(COINFLIP_DIR)/*.o $(COINFLIP_DIR)/*.d $(DICE_DIR)/*.o $(DICE_DIR)/*.d $(ORBITS_DIR)/*.o $(ORBITS_DIR)/*.d $(CASINO_DIR)/*.o $(CASINO_DIR)/*.d $(SEABATTLE_DIR)/*.o $(SEABATTLE_DIR)/*.d $(WHALE_DIR)/*.o $(WHALE_DIR)/*.d $(HANGMAN_DIR)/*.o $(HANGMAN_DIR)/*.d $(DUPPO_DIR)/*.o $(DUPPO_DIR)/*.d
+	      $(TASKBOARD_DIR)/*.o $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.o $(SCRATCHPAD_DIR)/*.d $(GARDEN_DIR)/*.o $(GARDEN_DIR)/*.d $(MEMMAP_DIR)/*.o $(MEMMAP_DIR)/*.d $(WIZARD_DIR)/*.o $(WIZARD_DIR)/*.d $(RANDOM_DIR)/*.o $(RANDOM_DIR)/*.d $(SAND_DIR)/*.o $(SAND_DIR)/*.d $(FOREST_DIR)/*.o $(FOREST_DIR)/*.d $(COINFLIP_DIR)/*.o $(COINFLIP_DIR)/*.d $(DICE_DIR)/*.o $(DICE_DIR)/*.d $(ORBITS_DIR)/*.o $(ORBITS_DIR)/*.d $(CASINO_DIR)/*.o $(CASINO_DIR)/*.d $(SEABATTLE_DIR)/*.o $(SEABATTLE_DIR)/*.d $(WHALE_DIR)/*.o $(WHALE_DIR)/*.d $(HANGMAN_DIR)/*.o $(HANGMAN_DIR)/*.d $(DUPPO_DIR)/*.o $(DUPPO_DIR)/*.d \
+	      $(GLYPHS_DIR)/*.o $(GLYPHS_DIR)/*.d

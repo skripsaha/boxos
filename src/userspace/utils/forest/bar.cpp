@@ -9,7 +9,7 @@
 #include <string_view>
 #include <vector>
 
-#include "painter/tui/glyph.h"
+#include "painter/tui/text.h"
 #include "show.h"
 
 namespace forest {
@@ -31,9 +31,10 @@ public:
 
     void Write(std::string_view Text, Color With)
     {
-        for (char Ch : Text) {
-            if (Col >= Cols) break;
-            Glass.Put({Col++, Row}, tui::Cell{Ch, With, Paper});
+        for (std::size_t Byte = 0; Byte < Text.size() && Col < Cols;) {
+            const tui::Glyph Shape = tui::GlyphAt(Text, Byte);
+            Glass.Put({Col++, Row}, tui::Cell{Shape.Character, With, Paper});
+            Byte += Shape.Length;
         }
     }
 
@@ -62,7 +63,7 @@ std::string Spelled(const KeyChord &Chord)
     return Spelling;
 }
 
-std::size_t Width(const Key &Each) { return 2 + Each.Keys.size() + 1 + std::strlen(Each.What); }
+std::size_t Width(const Key &Each) { return 2 + tui::CellsOf(Each.Keys) + 1 + std::strlen(Each.What); }
 
 }  // namespace
 
@@ -84,10 +85,8 @@ void PaintBar(tui::Frame &Glass, const Look &Chosen, const Saying &Say)
         Bar.Write(Each.Text, Each.Bright ? Bar.Bright() : Bar.Dim());
     }
 
-    const std::string Arrows = {tui::Glyphs::Left, tui::Glyphs::Right};
-    const std::string Speeds = {tui::Glyphs::Up, tui::Glyphs::Down};
-    const std::vector<Key> Keys = {{Arrows, "time"},
-                                   {Speeds, "speed"},
+    const std::vector<Key> Keys = {{"\u2190\u2192", "time"},
+                                   {"\u2191\u2193", "speed"},
                                    {Spelled(Chosen.Keys[KeySeason]), "season"},
                                    {Spelled(Chosen.Keys[KeyWeather]), "weather"},
                                    {Spelled(Chosen.Keys[KeyTime]), "clock"},

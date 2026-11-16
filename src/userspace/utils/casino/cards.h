@@ -35,8 +35,8 @@ bool IsRed(Suit Of);
 bool IsCourt(Card One);
 // "A", "2" to "10", "J", "Q", "K".
 std::string_view RankName(int Rank);
-// The suit as one byte of the console font (CP437): spade, heart, diamond, club.
-char SuitGlyph(Suit Of);
+// The suit's character: spade, heart, diamond, club.
+char32_t SuitGlyph(Suit Of);
 
 class Shoe {
 public:

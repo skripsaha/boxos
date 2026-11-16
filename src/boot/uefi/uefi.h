@@ -2,8 +2,8 @@
 #define UEFI_H
 
 /*
- * Minimal UEFI type and protocol definitions for TagBoot.
- * No external dependencies — implements exactly what TagBoot needs.
+ * Minimal UEFI type and protocol definitions for Gangway.
+ * No external dependencies — implements exactly what Gangway needs.
  * Based on UEFI Specification 2.10.
  *
  * CALLING CONVENTION (critical):
@@ -24,6 +24,19 @@ typedef unsigned int       uint32_t;
 typedef unsigned long long uint64_t;
 typedef signed long long   int64_t;
 typedef signed int         int32_t;
+
+#ifndef INT64_MAX
+#define INT64_MAX 0x7FFFFFFFFFFFFFFFLL
+#endif
+
+/* What the shared headers that take bool from their includer read it as —
+ * the settings readers (settings_reader.h): a keyword from C23 on, and before
+ * it C11's own _Bool, with no <stdbool.h> under a -nostdinc build. */
+#if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 202311L
+typedef _Bool bool;
+#define true  1
+#define false 0
+#endif
 
 /*
  * uintptr_t must be 64-bit on the UEFI x86_64 target regardless of the
@@ -116,6 +129,16 @@ typedef struct {
 #define EFI_LOADED_IMAGE_PROTOCOL_GUID \
     EFI_GUID_INIT(0x5b1b31a1,0x9562,0x11d2, 0x8e,0x3f,0x00,0xa0,0xc9,0x69,0x72,0x3b)
 
+/* The PI specification's MP Services (Vol. 2 §13.4) — how many processors the
+ * firmware brought up. Not every firmware publishes it. */
+#define EFI_MP_SERVICES_PROTOCOL_GUID \
+    EFI_GUID_INIT(0x3fdda605,0xa76e,0x4f46, 0xad,0x29,0x12,0xf4,0x53,0x1b,0x3d,0x08)
+
+/* The variables the specification itself defines (§3.3), OsIndications and
+ * OsIndicationsSupported among them. */
+#define EFI_GLOBAL_VARIABLE_GUID \
+    EFI_GUID_INIT(0x8be4df61,0x93ca,0x11d2, 0xaa,0x0d,0x00,0xe0,0x98,0x03,0x2b,0x8c)
+
 /* ACPI table GUIDs (UEFI spec §4.6) — for RSDP discovery */
 #define EFI_ACPI_20_TABLE_GUID \
     EFI_GUID_INIT(0x8868e871,0xe4f1,0x11d3, 0xbc,0x22,0x00,0x80,0xc7,0x3c,0x88,0x81)
@@ -202,6 +225,38 @@ struct EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL {
     void                 *set_cursor_position;
     void                 *enable_cursor;
     void                 *mode;
+};
+
+/* =========================================================================
+ * Simple Text Input Protocol (§12.3) — the keyboard, as the firmware's console
+ * has it: a key read when one is there, and the event signalled when one is
+ * ========================================================================= */
+
+typedef struct {
+    uint16_t scan_code;      /* EFI_SCAN_*, or 0 for a key with a character */
+    CHAR16   unicode_char;
+} EFI_INPUT_KEY;
+
+#define EFI_SCAN_UP         0x01
+#define EFI_SCAN_DOWN       0x02
+#define EFI_SCAN_RIGHT      0x03
+#define EFI_SCAN_LEFT       0x04
+#define EFI_SCAN_HOME       0x05
+#define EFI_SCAN_END        0x06
+#define EFI_SCAN_PAGE_UP    0x09
+#define EFI_SCAN_PAGE_DOWN  0x0A
+#define EFI_SCAN_ESC        0x17
+
+typedef struct EFI_SIMPLE_TEXT_INPUT_PROTOCOL EFI_SIMPLE_TEXT_INPUT_PROTOCOL;
+
+typedef EFI_STATUS (EFIAPI *EFI_INPUT_READ_KEY)(
+    EFI_SIMPLE_TEXT_INPUT_PROTOCOL *this_proto,
+    EFI_INPUT_KEY                  *key);
+
+struct EFI_SIMPLE_TEXT_INPUT_PROTOCOL {
+    void               *reset;
+    EFI_INPUT_READ_KEY  read_key_stroke;
+    EFI_EVENT           wait_for_key;
 };
 
 /* =========================================================================
@@ -317,7 +372,7 @@ struct EFI_GRAPHICS_OUTPUT_PROTOCOL {
 };
 
 /* UEFI 2.10 §12.9.2.4–§12.9.2.5. The buffer is firmware-owned and read-only;
- * TagBoot may inspect it while boot services are alive, but never retains the
+ * Gangway may inspect it while boot services are alive, but never retains the
  * pointer after ExitBootServices. */
 typedef struct {
     uint32_t size_of_edid;
@@ -414,6 +469,35 @@ typedef EFI_STATUS (EFIAPI *EFI_OPEN_PROTOCOL)(
 
 #define EFI_BY_PROTOCOL  2
 
+typedef EFI_STATUS (EFIAPI *EFI_WAIT_FOR_EVENT)(
+    UINTN      number_of_events,
+    EFI_EVENT *event,
+    UINTN     *index);
+
+/* A timer event (UEFI 2.10 §7.1): made with no notification, set to fire once
+ * a span from now — in 100 ns units — and waited on with the others. */
+#define EVT_TIMER  0x80000000u
+
+typedef enum {
+    TimerCancel,
+    TimerPeriodic,
+    TimerRelative,
+} EFI_TIMER_DELAY;
+
+typedef EFI_STATUS (EFIAPI *EFI_CREATE_EVENT)(
+    uint32_t   type,
+    UINTN      notify_tpl,
+    void      *notify_function,
+    void      *notify_context,
+    EFI_EVENT *event);
+
+typedef EFI_STATUS (EFIAPI *EFI_SET_TIMER)(
+    EFI_EVENT       event,
+    EFI_TIMER_DELAY type,
+    uint64_t        trigger_time);
+
+typedef EFI_STATUS (EFIAPI *EFI_CLOSE_EVENT)(EFI_EVENT event);
+
 typedef struct {
     uint64_t          signature;
     uint32_t          revision;
@@ -434,11 +518,11 @@ typedef struct {
     EFI_ALLOCATE_POOL         allocate_pool;
     EFI_FREE_POOL             free_pool;
     /* events */
-    void                     *create_event;
-    void                     *set_timer;
-    void                     *wait_for_event;
+    EFI_CREATE_EVENT          create_event;
+    EFI_SET_TIMER             set_timer;
+    EFI_WAIT_FOR_EVENT        wait_for_event;
     void                     *signal_event;
-    void                     *close_event;
+    EFI_CLOSE_EVENT           close_event;
     void                     *check_event;
     /* protocols */
     void                     *install_protocol_interface;
@@ -481,14 +565,100 @@ typedef struct {
 } EFI_BOOT_SERVICES;
 
 /* =========================================================================
- * Runtime Services (minimal — only what we need)
+ * Runtime Services (§8) — the variables, and the reset
  * ========================================================================= */
 
+typedef enum {
+    EfiResetCold,
+    EfiResetWarm,
+    EfiResetShutdown,
+    EfiResetPlatformSpecific
+} EFI_RESET_TYPE;
+
+#define EFI_VARIABLE_NON_VOLATILE        0x00000001u
+#define EFI_VARIABLE_BOOTSERVICE_ACCESS  0x00000002u
+#define EFI_VARIABLE_RUNTIME_ACCESS      0x00000004u
+
+/* OsIndications (§8.5.4): start the firmware's own setup at the next boot. */
+#define EFI_OS_INDICATIONS_BOOT_TO_FW_UI 0x0000000000000001ULL
+
+/* The firmware's clock (§8.3). */
 typedef struct {
-    EFI_TABLE_HEADER hdr;
-    /* lots of fields we don't use */
-    uint8_t          _pad[256];
+    uint16_t year;
+    uint8_t  month;
+    uint8_t  day;
+    uint8_t  hour;
+    uint8_t  minute;
+    uint8_t  second;
+    uint8_t  pad1;
+    uint32_t nanosecond;
+    uint16_t time_zone;
+    uint8_t  daylight;
+    uint8_t  pad2;
+} EFI_TIME;
+
+typedef EFI_STATUS (EFIAPI *EFI_GET_TIME)(
+    EFI_TIME *time,
+    void     *capabilities);
+
+typedef EFI_STATUS (EFIAPI *EFI_GET_VARIABLE)(
+    CHAR16   *name,
+    EFI_GUID *vendor,
+    uint32_t *attributes,
+    UINTN    *data_size,
+    void     *data);
+
+typedef EFI_STATUS (EFIAPI *EFI_SET_VARIABLE)(
+    CHAR16   *name,
+    EFI_GUID *vendor,
+    uint32_t  attributes,
+    UINTN     data_size,
+    void     *data);
+
+typedef void (EFIAPI *EFI_RESET_SYSTEM)(
+    EFI_RESET_TYPE type,
+    EFI_STATUS     status,
+    UINTN          data_size,
+    void          *data);
+
+typedef struct {
+    EFI_TABLE_HEADER  hdr;
+    EFI_GET_TIME      get_time;
+    void             *set_time;
+    void             *get_wakeup_time;
+    void             *set_wakeup_time;
+    void             *set_virtual_address_map;
+    void             *convert_pointer;
+    EFI_GET_VARIABLE  get_variable;
+    void             *get_next_variable_name;
+    EFI_SET_VARIABLE  set_variable;
+    void             *get_next_high_monotonic_count;
+    EFI_RESET_SYSTEM  reset_system;
+    void             *update_capsule;
+    void             *query_capsule_capabilities;
+    void             *query_variable_info;
 } EFI_RUNTIME_SERVICES;
+
+/* =========================================================================
+ * MP Services (PI Vol. 2 §13.4) — only the count is asked
+ * ========================================================================= */
+
+typedef struct EFI_MP_SERVICES_PROTOCOL EFI_MP_SERVICES_PROTOCOL;
+
+typedef EFI_STATUS (EFIAPI *EFI_MP_SERVICES_GET_NUMBER_OF_PROCESSORS)(
+    EFI_MP_SERVICES_PROTOCOL *this_proto,
+    UINTN                    *number_of_processors,
+    UINTN                    *number_of_enabled_processors);
+
+struct EFI_MP_SERVICES_PROTOCOL {
+    EFI_MP_SERVICES_GET_NUMBER_OF_PROCESSORS get_number_of_processors;
+    void                                    *get_processor_info;
+    void                                    *startup_all_aps;
+    void                                    *startup_this_ap;
+    void                                    *switch_bsp;
+    void                                    *enable_disable_ap;
+    void                                    *who_am_i;
+};
 
 /* =========================================================================
  * System Table
@@ -500,7 +670,7 @@ typedef struct {
     uint32_t                          firmware_revision;
     uint32_t                          _pad0;
     EFI_HANDLE                        console_in_handle;
-    void                             *con_in;
+    EFI_SIMPLE_TEXT_INPUT_PROTOCOL   *con_in;
     EFI_HANDLE                        console_out_handle;
     EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL  *con_out;
     EFI_HANDLE                        std_err_handle;

@@ -1099,7 +1099,7 @@ static void HaltMachine(bool reboot)
      * reaches a cable; this reaches the next boot, which is the only reader a
      * machine on a bench has. It must be the LAST thing said, because
      * everything after this line happens inside firmware and is not ours to
-     * record. Does nothing in a build without CONFIG_PRINTTOFILE. */
+     * record. Does nothing when no window is armed. */
     LogKeepFlush();
 
     if (reboot) acpi_reboot();

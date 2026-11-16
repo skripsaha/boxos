@@ -3,8 +3,9 @@
 
 /*
  * The keyboard is EVENTS: the kernel publishes every key as a Touch on the
- * "keyboard" tag, payload kb_event_t — scancode, ascii (0 for a key that is
- * not a character), modifiers (KB_MOD_*, KB_MOD_EXTENDED for the 0xE0 set:
+ * "keyboard" tag, payload kb_event_t — the character typed as Unicode (0 for
+ * a key that is not a character), scancode, modifiers (KB_MOD_*,
+ * KB_MOD_EXTENDED for the 0xE0 set:
  * arrows, Home/End, Delete). There is no ring to poll and no call that
  * returns "no data": a program hears its keys through the console's ear
  * (readline / getchar / console_listen in box/print.h) or by claiming the

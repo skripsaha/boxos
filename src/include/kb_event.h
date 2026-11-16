@@ -25,26 +25,37 @@
 #define KB_MOD_CTRL   0x02u
 #define KB_MOD_ALT    0x04u
 /* The key is one of the 0xE0-prefixed set (arrows, Home/End, Delete, …):
- * `scancode` names it and `ascii` is 0 — it is a key, not a character. */
+ * `scancode` names it and `cp` is 0 — it is a key, not a character. */
 #define KB_MOD_EXTENDED 0x08u
 
+/*
+ * A key, and the character it types: `cp` is a Unicode scalar value — the
+ * character itself, never a code page's number for it — or 0 for a key that
+ * types none. What a key types is the layout's answer; the keyboard driver
+ * says which key it was (`scancode`) beside it.
+ *
+ * ‼ SIX BYTES, AND THE LENGTH IS PART OF THE CONTRACT. A lane's tag carries
+ * keys and the display's notices both (box/display.h, ConsoleNotice: eight
+ * bytes and a mark), and a reader tells them apart by length first. No padding
+ * may make a key eight bytes long.
+ */
 typedef struct __packed {
-    uint8_t scancode;
-    char    ascii;
-    uint8_t mods;   /* KB_MOD_* */
+    uint32_t cp;        /* the character typed, Unicode; 0 none */
+    uint8_t  scancode;
+    uint8_t  mods;      /* KB_MOD_* */
 } kb_event_t;
 
 #ifdef __cplusplus
-static_assert(sizeof(kb_event_t) == 3,
-              "kb_event_t is a kernel/userspace ABI struct — must stay 3 packed bytes");
+static_assert(sizeof(kb_event_t) == 6,
+              "kb_event_t is a kernel/userspace ABI struct — must stay 6 packed bytes");
 #else
-_Static_assert(sizeof(kb_event_t) == 3,
-               "kb_event_t is a kernel/userspace ABI struct — must stay 3 packed bytes");
+_Static_assert(sizeof(kb_event_t) == 6,
+               "kb_event_t is a kernel/userspace ABI struct — must stay 6 packed bytes");
 #endif
 
 /*
  * Set-1 scancodes of the 0xE0-prefixed keys — the ones that arrive with
- * KB_MOD_EXTENDED set and ascii 0, because they are keys rather than
+ * KB_MOD_EXTENDED set and cp 0, because they are keys rather than
  * characters. Named here rather than in each program that answers them: the
  * line editor, a full-screen editor and a menu all decode the same seven
  * bytes, and a private copy of a number is how two of them come to disagree.
@@ -67,8 +78,8 @@ _Static_assert(sizeof(kb_event_t) == 3,
 #define KEY_DELETE  0x53
 
 /* The characters that are keys as much as they are bytes. ESC arrives as a
- * character (ascii 27) with no EXTENDED bit, and Ctrl is a MODIFIER on the
- * letter — Ctrl+S is {ascii 's', mods KB_MOD_CTRL}, never byte 0x13. */
+ * character (cp 27) with no EXTENDED bit, and Ctrl is a MODIFIER on the
+ * letter — Ctrl+S is {cp 's', mods KB_MOD_CTRL}, never byte 0x13. */
 #define KEY_ESCAPE     27
 #define KEY_BACKSPACE  '\b'
 #define KEY_ENTER      '\n'

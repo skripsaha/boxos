@@ -131,11 +131,10 @@ void Editor::PaintLine(tui::Frame &Out, std::int32_t Y, std::size_t Line)
             if (Byte >= One.From && Byte < One.To) Over = &One;
         const core::Color Ground = Selected(Byte) ? SelectedPaper : Over ? (Over->Chosen ? HerePaper : MatchPaper) : Under;
         const core::Color Ink    = Over && Over->Chosen ? HereInk : Shape.Odd ? tui::OddInk : TextInk;
-        const bool        Blank  = Words[Byte] == '\t';
         for (std::size_t Cell = 0; Cell < Shape.Width; Cell++, Column++)
             if (Column >= Here.Left && Column < Here.Left + Cols)
                 (void)Out.Put({Gutter + static_cast<std::int32_t>(Column - Here.Left), Y},
-                              tui::Cell{Blank ? ' ' : Shape.Cells[Cell], Ink, Ground});
+                              tui::Cell{Shape.Character, Ink, Ground});
         Byte += Shape.Length;
     }
 

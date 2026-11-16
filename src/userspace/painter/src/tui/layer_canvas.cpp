@@ -109,6 +109,11 @@ GlassKind LayerCanvas::Glass() const noexcept
     return State ? State->Layer.Glass() : GlassKind::Pixels;
 }
 
+std::uint8_t LayerCanvas::Mosaics() const noexcept
+{
+    return State ? State->Layer.Mosaics() : 0;
+}
+
 bool LayerCanvas::IsOpen() const noexcept
 {
     return State && State->Opened;

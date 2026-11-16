@@ -37,7 +37,7 @@
  * ‼ NO LIBRARY, ON PURPOSE
  *
  * Bytes are moved with an explicit loop, not memcpy. The kernel has klib, the
- * host tool has <string.h>, and the UEFI loader (src/boot/uefi/tagboot.c) has
+ * host tool has <string.h>, and the UEFI loader (src/boot/uefi/gangway_bytes.c) has
  * neither — it carries its own MemCopy. A shared builder that reached for a
  * library would be shared between two of the three. Six lines buys the third.
  *

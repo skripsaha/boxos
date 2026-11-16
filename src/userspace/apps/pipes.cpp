@@ -259,7 +259,7 @@ private:
 };
 
 bool is_exit_key(const painter::tui::KeyEvent &key) {
-  return key.Ascii == painter::tui::KeyCodes::Escape || key.Ascii == 'q' || key.Ascii == 'Q';
+  return key.Character == painter::tui::KeyCodes::Escape || key.Character == 'q' || key.Character == 'Q';
 }
 
 } // namespace

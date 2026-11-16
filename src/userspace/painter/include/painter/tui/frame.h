@@ -47,7 +47,7 @@ enum class CellMark : std::uint8_t {
 };
 
 struct Cell {
-    char        Glyph      = ' ';
+    char32_t    Glyph      = U' ';   /* the character it shows, not a glyph's number */
     core::Color Foreground = core::Colors::LightGray;
     core::Color Background = core::Colors::Black;
     Visibility  VisibilityMode = Visibility::Opaque;
@@ -58,7 +58,7 @@ struct Cell {
      * into it leaves the other half of the cell to what lies beneath. */
     static constexpr Cell TransparentCell() noexcept
     {
-        return {' ', core::Color::Through(), core::Color::Through(), Visibility::Transparent};
+        return {U' ', core::Color::Through(), core::Color::Through(), Visibility::Transparent};
     }
 
     bool IsTransparent() const noexcept { return VisibilityMode == Visibility::Transparent; }
@@ -84,6 +84,11 @@ public:
     GlassKind Glass() const noexcept { return Kind; }
     void      SetGlass(GlassKind Value) noexcept { Kind = Value; }
 
+    /* The grids finer than the halves the glass draws exactly, as the display
+     * said them (box/display.h DisplayMosaic): none until told. */
+    std::uint8_t Mosaics() const noexcept { return MosaicFlags; }
+    void         SetMosaics(std::uint8_t Value) noexcept { MosaicFlags = Value; }
+
     /* Clear writes an opaque background. ClearTransparent leaves every cell
      * transparent when this frame is passed to an overlay replacement. */
     void Clear(TextStyle Style = {});
@@ -91,11 +96,13 @@ public:
 
     /* Cell operations clip at the frame boundary and report whether anything
      * was written. This keeps drawing convenient while making the boundary
-     * behavior explicit. */
+     * behavior explicit. Write and Centre take UTF-8 text and lay it as
+     * text.h measures it: a character to a cell, a tab to the next stop, and
+     * a control or a byte that begins no character as U+FFFD. */
     bool        Put(core::Point At, Cell Value);
-    bool        Put(core::Point At, char Glyph, TextStyle Style = {});
+    bool        Put(core::Point At, char32_t Glyph, TextStyle Style = {});
     std::size_t Fill(core::Rect Area, Cell Value);
-    std::size_t Fill(core::Rect Area, char Glyph, TextStyle Style = {});
+    std::size_t Fill(core::Rect Area, char32_t Glyph, TextStyle Style = {});
     std::size_t Write(core::Point At, std::string_view Text, TextStyle Style = {});
     std::size_t Centre(std::int32_t Row, std::string_view Text, TextStyle Style = {});
 
@@ -136,6 +143,7 @@ private:
     std::vector<Cell>          Cells;
     std::optional<core::Point> CaretAt;
     GlassKind                  Kind = GlassKind::Pixels;
+    std::uint8_t               MosaicFlags = 0;
 };
 
 }  // namespace painter::tui

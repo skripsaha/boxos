@@ -34,11 +34,18 @@
  * the rest still start. A program whose box says rise is raised again by the
  * system if it falls, as one the system started itself (rise.h).
  *
+ * What starts as it should is the system's log's to keep, not the person's to
+ * read: a program started, one that runs already, an empty list go into the
+ * log (kdbg_print — the wire, logsave, the Emergency Screen), which the hub's
+ * screen does not show. A program on the list that will not start is said to
+ * the person: the list asks for something the machine could not do.
+ *
  * Its exit: 0 when everything asked of it was done (at the start: every
  * program on the list runs), 1 when something was not.
  */
 
 #include "box/core/cabin.h"
+#include "box/debug.h"
 #include "box/error.h"
 #include "box/file.h"
 #include "box/form.h"
@@ -263,8 +270,9 @@ static const char *Reason(int refusal)
     }
 }
 
-/* One program of the list started, unless it runs already, and a line said for
- * it. True when it runs now. */
+/* One program of the list started, unless it runs already, and a line for it
+ * — in the log when it runs, to the person when it will not. True when it runs
+ * now. */
 static bool Start(const char *name, file_id_t program, const char *why)
 {
     if (program == 0) {
@@ -273,7 +281,7 @@ static bool Start(const char *name, file_id_t program, const char *why)
     }
     uint32_t running;
     if (Running(program, &running)) {
-        printf("[AUTOSTART] Skip '%s': it runs already (PID %u)\n", name, running);
+        kdbg_print("[AUTOSTART] Skip '%s': it runs already (PID %u)", name, running);
         return true;
     }
 
@@ -282,7 +290,7 @@ static bool Start(const char *name, file_id_t program, const char *why)
         printf("[AUTOSTART] Skip '%s': %s\n", name, Reason(pid));
         return false;
     }
-    printf("[AUTOSTART] Started '%s' (PID %d)\n", name, pid);
+    kdbg_print("[AUTOSTART] Started '%s' (PID %d)", name, pid);
     return true;
 }
 
@@ -294,7 +302,7 @@ static int StartList(void)
         NamesRelease(&names);
         return 1;
     }
-    if (names.Count == 0) printf("[AUTOSTART] the list is empty — nothing to start\n");
+    if (names.Count == 0) kdbg_print("[AUTOSTART] the list is empty — nothing to start");
 
     int refused = 0;
     for (size_t i = 0; i < names.Count; i++) {

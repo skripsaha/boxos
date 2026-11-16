@@ -9,6 +9,8 @@
 #include "vmm.h"
 #include "klib.h"
 #include "kernel_config.h"
+#include "screen.h"   /* ScreenQuietEnds — the display program is not coming */
+#include "journey.h"
 
 /*
  * Autostart — the system's start set, whenever the volume turns up.
@@ -239,14 +241,20 @@ static process_t *autostart_consider(uint64_t file_id, bool again)
 /* Every program of the start set, made into a process: with `held` NULL the
  * boot's — the state set directly, the sweep after the boot's last line
  * enqueuing it, exactly as it always was — else the late launch's, held. How
- * many were started. A program the volume does not hold is said, by name. */
+ * many were started. A program the volume does not hold is said, by name.
+ * With no volume, or no display program started from it, nobody is coming for
+ * the screen, and the quiet boot ends (ScreenQuietEnds). */
 static int AutostartWalk(process_t **out_first, AutostartHeld *held)
 {
     if (out_first) *out_first = NULL;
 
-    if (!AutostartVolumeHere()) return 0;
+    if (!AutostartVolumeHere()) {
+        ScreenQuietEnds();
+        return 0;
+    }
 
-    int launched = 0;
+    int  launched       = 0;
+    bool screen_coming  = false;
     for (size_t i = 0; i < ARRAY_SIZE(g_start_set); i++) {
         uint64_t file_id = autostart_find(g_start_set[i]);
         if (file_id == 0) {
@@ -256,6 +264,7 @@ static int AutostartWalk(process_t **out_first, AutostartHeld *held)
         process_t *proc = autostart_consider(file_id, false);
         if (!proc) continue;
         launched++;
+        if (i == 0) screen_coming = true;   /* the start set's first is the display */
         if (out_first && !*out_first) *out_first = proc;
         if (!held) {
             proc->state = PROC_WORKING;
@@ -267,6 +276,8 @@ static int AutostartWalk(process_t **out_first, AutostartHeld *held)
         }
     }
 
+    if (!screen_coming) ScreenQuietEnds();
+    if (launched) JourneyMark("start");
     return launched;
 }
 

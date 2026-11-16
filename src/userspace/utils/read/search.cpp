@@ -72,7 +72,7 @@ void Search::Seek(Tab &Active, std::size_t Index, std::size_t Rows)
 
 Search::Outcome Search::OnKey(const tui::KeyEvent &Key, Tab &Active, std::size_t Rows)
 {
-    const char Ch    = Key.Ascii;
+    const char32_t Ch    = Key.Character;
     const bool Enter = !Key.IsExtended() && (Ch == tui::KeyCodes::Enter || Ch == '\r');
     if (!Key.IsExtended() && Ch == tui::KeyCodes::Escape) return Outcome::Closed;
 

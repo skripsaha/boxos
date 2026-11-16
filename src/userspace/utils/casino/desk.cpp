@@ -89,7 +89,7 @@ bool Desk::OnKey(const tui::KeyEvent &Key, std::uint64_t NowUs)
         Help = Paying = false;
         return true;
     }
-    const kb_event_t Raw{Key.Scancode, Key.Ascii, Key.Mods};
+    const kb_event_t Raw{Key.Character, Key.Scancode, Key.Mods};
     if (KeyChordMatches(&Ctx.Shown.Keys[KeyHelp], &Raw)) {
         Help = true;
         return true;
@@ -98,13 +98,13 @@ bool Desk::OnKey(const tui::KeyEvent &Key, std::uint64_t NowUs)
         Paying = true;
         return true;
     }
-    if (KeyChordMatches(&Ctx.Shown.Keys[KeyTable], &Raw) || (Plain && Key.Ascii == tui::KeyCodes::Tab)) {
+    if (KeyChordMatches(&Ctx.Shown.Keys[KeyTable], &Raw) || (Plain && Key.Character == tui::KeyCodes::Tab)) {
         Sit((Seat + 1) % TableCount);
         return true;
     }
-    if (Plain && Key.Ascii == tui::KeyCodes::Escape) return false;
-    if (Plain && Key.Ascii >= '1' && Key.Ascii < '1' + TableCount) {
-        Sit(Key.Ascii - '1');
+    if (Plain && Key.Character == tui::KeyCodes::Escape) return false;
+    if (Plain && Key.Character >= '1' && Key.Character < '1' + TableCount) {
+        Sit(Key.Character - '1');
         return true;
     }
     Tables[Seat]->OnKey(Key, NowUs);

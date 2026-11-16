@@ -105,7 +105,7 @@ Card::Outcome Card::OnKey(const tui::KeyEvent &Key, std::string &Said)
         }
     }
 
-    const char Ch    = Key.Ascii;
+    const char32_t Ch    = Key.Character;
     const bool Plain = !Key.IsExtended() && !Key.IsCtrl() && !Key.IsAlt();
     if (Plain && Ch == tui::KeyCodes::Escape) return Outcome::Closed;
     if (Plain && Ch == tui::KeyCodes::Tab) {

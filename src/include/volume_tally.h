@@ -418,7 +418,7 @@ typedef struct {
  * is whole in the stream, each key above the one before it and none below the
  * first key; nothing but PAD follows the last; and every key lies inside the
  * range. The kernel's mount reads a node by it (mount/tally_walk.c,
- * TallyNodeParse) and so does the UEFI loader's Lectern (tagboot_lectern.c):
+ * TallyNodeParse) and so does the UEFI loader's Lectern (gangway_lectern.c):
  * a loader that held a node another kernel refuses would stand on another
  * slot than the kernel's mount, and hold the kernel's blocks to the digests of
  * another Tally. volume-read keeps the same rule by its own code (tally.py

@@ -305,8 +305,8 @@ main:
     call touch_wait_tag
     test al, al
     jz .wait
-    movzx edx, byte [touch + 24]    ; kb_event_t: scancode,
-    movzx esi, byte [touch + 25]    ; ascii, mods
+    movzx edx, byte [touch + 28]    ; kb_event_t: the character (Unicode, @24),
+    mov esi, [touch + 24]           ; the scancode (@28), mods (@29)
     cmp esi, 'q'
     je .done
     test esi, esi

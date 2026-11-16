@@ -27,10 +27,10 @@ namespace Glyphs = painter::tui::Glyphs;
 using painter::core::Point;
 using painter::core::Rect;
 
-constexpr char Club    = static_cast<char>(0x05);
-constexpr char Diamond = static_cast<char>(0x04);
-constexpr char Sun     = static_cast<char>(0x0F);
-// Between the words of a line: a middle dot, as text (the font folds it).
+constexpr char32_t Club    = U'\u2663';   /* ♣ */
+constexpr char32_t Diamond = U'\u2666';   /* ♦ */
+constexpr char32_t Sun     = U'\u263C';   /* ☼ */
+// Between the words of a line: a middle dot, as text.
 constexpr std::string_view Between = "\xC2\xB7";
 constexpr std::int32_t     LabelRows = 3;
 // What the top line leaves to the notices of the programs that live on their own.

@@ -58,7 +58,7 @@
  * given up and moved by no call without the system's warrant (ink.c), is laid
  * by neither Dedup nor Conjugate on another's blocks nor another's on its own
  * (dedup_owners.c, conjugate.c), and — the kernel's role first, then the boot's,
- * then the system's — is what TagBoot looks the kernel for (tagboot_lectern.c).
+ * then the system's — is what Gangway looks the kernel for (gangway_lectern.c).
  * A program started from a system file is started with the system's
  * authority (system_ops.c). The values stand in place: a role is
  * `flags & TAGFS_FILE_ROLE_MASK`, and the larger value is the first looked for. */

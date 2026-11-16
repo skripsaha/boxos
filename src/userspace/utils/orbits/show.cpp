@@ -146,7 +146,7 @@ void Show::Throw()
 
 bool Show::OnChord(const tui::KeyEvent &Key)
 {
-    const kb_event_t Raw{Key.Scancode, Key.Ascii, Key.Mods};
+    const kb_event_t Raw{Key.Character, Key.Scancode, Key.Mods};
     const auto       Is = [&](OrbitKey Which) { return KeyChordMatches(&Shown.Keys[Which], &Raw); };
     if (Is(KeyHelp)) Helping = true;
     else if (Is(KeyClear)) Picture.Clear();
@@ -170,9 +170,9 @@ void Show::OnExtended(const tui::KeyEvent &Key)
     }
 }
 
-void Show::OnCharacter(char Typed)
+void Show::OnCharacter(char32_t Typed)
 {
-    if (Typed >= 'A' && Typed <= 'Z') Typed = static_cast<char>(Typed - 'A' + 'a');
+    if (Typed >= 'A' && Typed <= 'Z') Typed = Typed - 'A' + 'a';
     switch (Typed) {
     case tui::KeyCodes::Enter:
     case '\r':
@@ -207,8 +207,8 @@ bool Show::OnKey(const tui::KeyEvent &Key)
         OnExtended(Key);
         return true;
     }
-    if (Key.Ascii == tui::KeyCodes::Escape) return false;
-    OnCharacter(Key.Ascii);
+    if (Key.Character == tui::KeyCodes::Escape) return false;
+    OnCharacter(Key.Character);
     return true;
 }
 

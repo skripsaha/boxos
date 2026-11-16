@@ -157,7 +157,7 @@ bool Pad::OnKey(const tui::KeyEvent &Key)
         return true;
     }
     if (Now == Asking::Trash) {
-        if (!Key.IsExtended() && !Key.IsCtrl() && (Key.Ascii == 'y' || Key.Ascii == 'Y')) {
+        if (!Key.IsExtended() && !Key.IsCtrl() && (Key.Character == 'y' || Key.Character == 'Y')) {
             TrashHere();
             return !Notes.empty();
         }
@@ -165,7 +165,7 @@ bool Pad::OnKey(const tui::KeyEvent &Key)
         Status = "the note stays";
         return true;
     }
-    const bool Leaving = !Key.IsExtended() && Key.Ascii == tui::KeyCodes::Escape;
+    const bool Leaving = !Key.IsExtended() && Key.Character == tui::KeyCodes::Escape;
     if (!Leaving) Warned = false;
     Status.clear();
     return OnWriting(Key);
@@ -173,7 +173,7 @@ bool Pad::OnKey(const tui::KeyEvent &Key)
 
 bool Pad::OnWriting(const tui::KeyEvent &Key)
 {
-    const kb_event_t Raw{Key.Scancode, Key.Ascii, Key.Mods};
+    const kb_event_t Raw{Key.Character, Key.Scancode, Key.Mods};
     const auto       Is = [&](PadKey Which) { return KeyChordMatches(&Shown.Keys[Which], &Raw); };
     if (Is(KeyHelp)) {
         Now = Asking::Help;
@@ -183,7 +183,7 @@ bool Pad::OnWriting(const tui::KeyEvent &Key)
         Now = Asking::Trash;
     } else if (Is(KeyAll)) {
         OpenAll();
-    } else if (!Key.IsExtended() && !Key.IsCtrl() && !Key.IsAlt() && Key.Ascii == tui::KeyCodes::Escape) {
+    } else if (!Key.IsExtended() && !Key.IsCtrl() && !Key.IsAlt() && Key.Character == tui::KeyCodes::Escape) {
         return !Leave();
     } else {
         Write(Key);
@@ -211,9 +211,9 @@ void Pad::Write(const tui::KeyEvent &Key)
     }
     if (Key.IsCtrl() || Key.IsAlt()) return;
     bool Room = true;
-    if (Key.Ascii == tui::KeyCodes::Enter || Key.Ascii == '\r') Room = Text.NewLine();
-    else if (Key.Ascii == tui::KeyCodes::Backspace || Key.Ascii == 0x7F) Text.Backspace();
-    else if (Key.Ascii >= 0x20 && Key.Ascii < 0x7F) Room = Text.Type(Key.Ascii);
+    if (Key.Character == tui::KeyCodes::Enter || Key.Character == '\r') Room = Text.NewLine();
+    else if (Key.Character == tui::KeyCodes::Backspace || Key.Character == 0x7F) Text.Backspace();
+    else if (Key.IsPrintable()) Room = Text.Type(Key.Spelling());
     if (!Room) Status = "the note is full — it is for a few lines";
 }
 

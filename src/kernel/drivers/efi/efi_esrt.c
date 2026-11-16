@@ -1,13 +1,13 @@
 /*
  * BoxOS — EFI System Resource Table driver (UEFI 2.10 §23.4).
  *
- * Reads the ESRT copy that TagBoot staged in EfiACPIMemoryNVS pre-EBS
+ * Reads the ESRT copy that Gangway staged in EfiACPIMemoryNVS pre-EBS
  * (boot_info fields efi_esrt_copy_phys + efi_esrt_copy_size).
  *
  * Why a copy: ESRT lives in EfiBootServicesData per UEFI 2.10 §23.4.3.
  * After ExitBootServices that memory type is reclaimable by the OS PMM;
  * by the time the kernel boots, the firmware-published bytes may be
- * overwritten by kmalloc heap pages. TagBoot's pre-EBS copy ensures
+ * overwritten by kmalloc heap pages. Gangway's pre-EBS copy ensures
  * the ESRT contents persist for the lifetime of the kernel.
  *
  * Touch surface:

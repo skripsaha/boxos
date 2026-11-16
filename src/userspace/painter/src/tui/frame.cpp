@@ -6,6 +6,7 @@
 #include <stdexcept>
 
 #include "painter/tui/glyph.h"
+#include "painter/tui/text.h"
 
 namespace painter::tui {
 
@@ -71,7 +72,7 @@ bool Frame::Put(core::Point At, Cell Value)
     return true;
 }
 
-bool Frame::Put(core::Point At, char Glyph, TextStyle Style)
+bool Frame::Put(core::Point At, char32_t Glyph, TextStyle Style)
 {
     return Put(At, Cell{Glyph, Style.Foreground, Style.Background});
 }
@@ -89,7 +90,7 @@ std::size_t Frame::Fill(core::Rect Area, Cell Value)
     return static_cast<std::size_t>(Clipped.Width) * static_cast<std::size_t>(Clipped.Height);
 }
 
-std::size_t Frame::Fill(core::Rect Area, char Glyph, TextStyle Style)
+std::size_t Frame::Fill(core::Rect Area, char32_t Glyph, TextStyle Style)
 {
     return Fill(Area, Cell{Glyph, Style.Foreground, Style.Background});
 }
@@ -98,24 +99,30 @@ std::size_t Frame::Write(core::Point At, std::string_view Text, TextStyle Style)
 {
     if (At.Y < 0 || At.Y >= Bounds.Height) return 0;
 
-    std::size_t Written = 0;
-    for (char Glyph : Text) {
-        if (At.X >= Bounds.Width) break;
-        if (At.X >= 0) {
-            this->At(At) = Cell{Glyph, Style.Foreground, Style.Background};
-            Written++;
+    std::size_t Written = 0, Column = 0;
+    for (std::size_t Byte = 0; Byte < Text.size();) {
+        const Glyph Shape = GlyphAt(Text, Byte, Column);
+        Byte += Shape.Length;
+        Column += Shape.Width;
+        for (std::size_t Part = 0; Part < Shape.Width; Part++) {
+            if (At.X >= Bounds.Width) return Written;
+            if (At.X >= 0) {
+                this->At(At) = Cell{Shape.Character, Style.Foreground, Style.Background};
+                Written++;
+            }
+            if (At.X == std::numeric_limits<std::int32_t>::max()) return Written;
+            At.X++;
         }
-        if (At.X == std::numeric_limits<std::int32_t>::max()) break;
-        At.X++;
     }
     return Written;
 }
 
 std::size_t Frame::Centre(std::int32_t Row, std::string_view Text, TextStyle Style)
 {
-    std::int32_t Start = 0;
-    if (Text.size() < static_cast<std::size_t>(Bounds.Width)) {
-        Start = (Bounds.Width - static_cast<std::int32_t>(Text.size())) / 2;
+    std::int32_t      Start = 0;
+    const std::size_t Cells = CellsOf(Text);
+    if (Cells < static_cast<std::size_t>(Bounds.Width)) {
+        Start = (Bounds.Width - static_cast<std::int32_t>(Cells)) / 2;
     }
     return Write({Start, Row}, Text, Style);
 }

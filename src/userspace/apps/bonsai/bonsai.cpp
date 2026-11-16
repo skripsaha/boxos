@@ -21,7 +21,7 @@ constexpr std::string_view kLeaves = "&+*";
 
 using PaintColor = painter::core::Color;
 
-painter::tui::Cell cell(char glyph, box::color foreground) {
+painter::tui::Cell cell(char32_t glyph, box::color foreground) {
   return painter::tui::Cell{glyph, PaintColor::FromRaw(foreground.raw()),
                             PaintColor::FromRaw(kBackground.raw())};
 }
@@ -145,15 +145,15 @@ int run() {
     if (Event.Kind == painter::tui::EventKind::Quiet)
       continue;
     if (Event.Kind == painter::tui::EventKind::Gone) return 1;
-    if (Event.Key.Ascii == painter::tui::KeyCodes::Escape)
+    if (Event.Key.Character == painter::tui::KeyCodes::Escape)
       return 0;
-    if (Event.Key.Ascii == ' ') {
+    if (Event.Key.Character == ' ') {
       paused = !paused;
-    } else if (Event.Key.Ascii == 'r' || Event.Key.Ascii == 'R') {
+    } else if (Event.Key.Character == 'r' || Event.Key.Character == 'R') {
       tree.restart();
       paused = false;
       deadline = Clock::now() + std::chrono::milliseconds{kStepMs};
-    } else if (Event.Key.Ascii == painter::tui::KeyCodes::Enter || Event.Key.Ascii == '\r') {
+    } else if (Event.Key.Character == painter::tui::KeyCodes::Enter || Event.Key.Character == '\r') {
       tree.finish();
     } else {
       continue;

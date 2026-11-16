@@ -283,7 +283,7 @@ int main()
             if (Event.Key.IsExtended()) {
                 if (Event.Key.Scancode == painter::tui::KeyCodes::Up) Show.Height = std::max(0.0f, Show.Height - 0.1f);
                 if (Event.Key.Scancode == painter::tui::KeyCodes::Down) Show.Height = std::min(1.0f, Show.Height + 0.1f);
-            } else if (Event.Key.Ascii == 'q' || Event.Key.Ascii == 'Q' || Event.Key.Ascii == painter::tui::KeyCodes::Escape) {
+            } else if (Event.Key.Character == 'q' || Event.Key.Character == 'Q' || Event.Key.Character == painter::tui::KeyCodes::Escape) {
                 break;
             }
         }

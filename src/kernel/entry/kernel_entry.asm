@@ -20,8 +20,8 @@ extern _kernel_phys_end
 KERNEL_VMA_OFFSET equ 0xFFFFFFFF80000000
 
 _start:
-    ; The header both loaders read before the jump (stage2.asm, tagboot.c,
-    ; tagboot_succession.c, and volume-read's bootread.py on the host): the
+    ; The header both loaders read before the jump (stage2.asm, gangway.c,
+    ; gangway_succession.c, and volume-read's bootread.py on the host): the
     ; magic at +2, and at +8 where the kernel ends in memory, BSS included. No
     ; version — a kernel is known by its magic.
     jmp short .past_header          ; 2 bytes — skip header
@@ -32,7 +32,7 @@ _start:
     ;
     ; The kernel owns its interrupt state from its first instruction, the same
     ; way it owns EFER.NXE — and for the same reason: it cannot be inherited.
-    ; stage2.asm clears IF ten times over on the BIOS path. TagBootJump clears
+    ; stage2.asm clears IF ten times over on the BIOS path. GangwayJump clears
     ; it NOWHERE, because UEFI runs with interrupts enabled and nothing in that
     ; loader ever turned them off. So on a UEFI boot this kernel used to start
     ; running with IF set, and the first device the init sequence armed could

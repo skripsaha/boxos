@@ -98,14 +98,14 @@ bool Game::OnKey(const tui::KeyEvent &Key, std::uint64_t Now)
         Help = false;
         return true;
     }
-    const kb_event_t Raw{Key.Scancode, Key.Ascii, Key.Mods};
+    const kb_event_t Raw{Key.Character, Key.Scancode, Key.Mods};
     const auto       Is = [&](CoinKey Which) { return KeyChordMatches(&Shown.Keys[Which], &Raw); };
     if (Is(KeyHelp)) {
         Help = true;
         return true;
     }
     const bool Plain = !Key.IsExtended() && !Key.IsCtrl() && !Key.IsAlt();
-    const bool Flip  = Is(KeyFlip) || (Plain && (Key.Ascii == ' ' || Key.Ascii == tui::KeyCodes::Enter || Key.Ascii == '\r'));
+    const bool Flip  = Is(KeyFlip) || (Plain && (Key.Character == ' ' || Key.Character == tui::KeyCodes::Enter || Key.Character == '\r'));
     if (Flip) {
         if (!Running()) StartRun(Now);
         else if (Wish.Count > 1) Hurry(Now);
@@ -113,15 +113,15 @@ bool Game::OnKey(const tui::KeyEvent &Key, std::uint64_t Now)
     }
     // A call is a chosen chord, or plain h or t.
     std::optional<Face> Called;
-    if (Is(KeyHeads) || (Plain && (Key.Ascii == 'h' || Key.Ascii == 'H'))) Called = Face::Heads;
-    if (Is(KeyTails) || (Plain && (Key.Ascii == 't' || Key.Ascii == 'T'))) Called = Face::Tails;
+    if (Is(KeyHeads) || (Plain && (Key.Character == 'h' || Key.Character == 'H'))) Called = Face::Heads;
+    if (Is(KeyTails) || (Plain && (Key.Character == 't' || Key.Character == 'T'))) Called = Face::Tails;
     if (Called && !Running()) {
         Wish.Called = Called;
         StartRun(Now);
         return true;
     }
-    if (Plain && Key.Ascii == tui::KeyCodes::Backspace && !Running()) Wish.Called.reset();
-    return !(Plain && Key.Ascii == tui::KeyCodes::Escape);
+    if (Plain && Key.Character == tui::KeyCodes::Backspace && !Running()) Wish.Called.reset();
+    return !(Plain && Key.Character == tui::KeyCodes::Escape);
 }
 
 }  // namespace coinflip

@@ -65,8 +65,8 @@ void HandoverPage::Key(const tui::KeyEvent &Pressed)
         return;
     }
     if (Pressed.IsExtended() || Pressed.IsCtrl() || Pressed.IsAlt() || Age < FadeOutMs + FadeInMs + DeafMs) return;
-    if (Pressed.Ascii == tui::KeyCodes::Enter) Ctx.Go(Ctx.Purpose == Errand::PlaceFleet ? PageId::Place : PageId::Battle);
-    else if (Pressed.Ascii == tui::KeyCodes::Escape) Leaving.Ask();
+    if (Pressed.Character == tui::KeyCodes::Enter) Ctx.Go(Ctx.Purpose == Errand::PlaceFleet ? PageId::Place : PageId::Battle);
+    else if (Pressed.Character == tui::KeyCodes::Escape) Leaving.Ask();
 }
 
 void HandoverPage::Pixels(Canvas &Out)

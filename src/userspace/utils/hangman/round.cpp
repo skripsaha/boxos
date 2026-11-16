@@ -13,14 +13,14 @@ Round::Round(std::string Word, std::string Label, Level Hardness)
 {
 }
 
-bool Round::IsLetter(char Raw)
+bool Round::IsLetter(char32_t Raw)
 {
     return (Raw >= 'a' && Raw <= 'z') || (Raw >= 'A' && Raw <= 'Z');
 }
 
-char Round::Upper(char Raw)
+char Round::Upper(char32_t Raw)
 {
-    return Raw >= 'a' && Raw <= 'z' ? static_cast<char>(Raw - 'a' + 'A') : Raw;
+    return static_cast<char>(Raw >= 'a' && Raw <= 'z' ? Raw - 'a' + 'A' : Raw);
 }
 
 Guess Round::Say(char Letter)

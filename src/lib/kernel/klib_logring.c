@@ -11,6 +11,7 @@
  */
 #include "klib.h"
 #include "klib_logring.h"
+#include "boxos_logkeep.h"
 #include "serial.h"     /* WireKick — the line is this ring's reader */
 #include "vmm.h"
 #include "cpu.h"            /* cpu_cpuid — which write-back this part has */
@@ -79,38 +80,14 @@ uint8_t LogRingToneAt(uint64_t pos)
     return g_ring_tone[pos & LOGRING_MASK];
 }
 
-#ifdef CONFIG_PRINTTOFILE
-
 /* ==========================================================================
  * The carry-over window. See klib_logring.h for what it survives and what it
  * does not.
  * ========================================================================== */
 
-/* 64 MiB. Above anything either loader places (the kernel may be 32 MiB and
- * its page tables and boot stack sit just past it, ~33 MiB at the very most),
- * below the first address any machine BoxOS targets fails to have. Fixed
- * rather than allocated because the whole point is that the NEXT boot finds
- * it, and the next boot's allocator has not run yet. */
-#define LOGKEEP_PHYS      0x04000000ULL
-#define LOGKEEP_HEADER    4096ULL
-#define LOGKEEP_BANKS     2u
-#define LOGKEEP_BYTES     (LOGKEEP_HEADER + (uint64_t)LOGKEEP_BANKS * LOGRING_CAPACITY)
-
-#define LOGKEEP_MAGIC     0x4449415353584F42ULL   /* "BOXSAID" + NUL, little-end */
-
-/* `size` is the header's own length: a header that survived a warm reset from
- * a kernel of another layout says another, and is not taken. */
-typedef struct {
-    uint64_t magic;
-    uint32_t size;         /* sizeof(LogKeepHeader) */
-    uint32_t capacity;     /* per bank */
-    uint32_t current;      /* bank this boot writes */
-    uint32_t boot;         /* counts up; names which run a bank came from */
-    uint64_t bytes[LOGKEEP_BANKS];
-} LogKeepHeader;
-
-_Static_assert(sizeof(LogKeepHeader) <= LOGKEEP_HEADER,
-               "the carry-over header must fit its page");
+/* The window's place and layout are boxos_logkeep.h's: Gangway's panel reads
+ * the bank of the start before by them. A bank holds what the ring does. */
+_Static_assert(LOGRING_CAPACITY == LOGKEEP_BANK_BYTES, "a carry-over bank holds the ring");
 
 /* False until LogKeepInit accepts the window. Every use is guarded on it, so a
  * machine that cannot offer the memory simply carries nothing forward.
@@ -140,7 +117,7 @@ static inline volatile LogKeepHeader *keep_header(void)
 
 static inline volatile uint8_t *keep_bank(uint32_t which)
 {
-    return keep_base() + LOGKEEP_HEADER + (uint64_t)which * LOGRING_CAPACITY;
+    return keep_base() + LOGKEEP_HEADER + (uint64_t)which * LOGKEEP_BANK_BYTES;
 }
 
 /* ── getting the window out of the cache and into the memory ─────────────
@@ -241,7 +218,7 @@ static inline void keep_writeback_line(volatile void *at)
  * noinline and through a void* on purpose: GCC traces a cast-from-integer
  * pointer back to its origin, decides the object it points at has zero extent,
  * and fires -Warray-bounds on every access. The loaders hit the same wall and
- * answered it the same way (PhysWrite16 in tagboot.c). The memory is real; the
+ * answered it the same way (PhysWrite16 in gangway_memory.c). The memory is real; the
  * compiler simply has no declaration for it. */
 static __attribute__((noinline)) void phys_read(uint64_t at, void *dst, unsigned n)
 {
@@ -271,9 +248,11 @@ static bool keep_window_is_ram(uint64_t phys, uint64_t bytes)
     return false;
 }
 
-void LogKeepInit(void)
+static inline void keep_put(char c);
+
+void LogKeepInit(bool keep)
 {
-    if (!keep_window_is_ram(LOGKEEP_PHYS, LOGKEEP_BYTES)) {
+    if (!keep || !keep_window_is_ram(LOGKEEP_PHYS, LOGKEEP_BYTES)) {
         g_keep_ok = false;
         g_keep_previous = LOGKEEP_BANKS;
         return;
@@ -318,6 +297,12 @@ void LogKeepInit(void)
      * cache reads as "nothing was carried" after a reset. */
     keep_writeback_line((volatile void *)h);
     __asm__ volatile("sfence" ::: "memory");
+
+    /* What was said before the pass could be read goes in first. One core
+     * runs, and nothing else writes the ring yet. */
+    uint64_t written = LogRingWritten();
+    uint64_t from    = written > (uint64_t)LOGRING_CAPACITY ? written - (uint64_t)LOGRING_CAPACITY : 0;
+    for (uint64_t p = from; p < written; p++) keep_put(g_ring[p & LOGRING_MASK]);
 }
 
 const char *LogKeepWriteBackName(void)
@@ -437,16 +422,7 @@ static inline void keep_put(char c)
     }
 }
 
-#else
 
-static inline void keep_put(char c) { (void)c; }
-
-/* Compiled out, but still callable: the reset and panic paths ask for the
- * window to be written back without knowing whether this build has one. */
-void LogKeepFlush(void) { }
-const char *LogKeepWriteBackName(void) { return "none"; }
-
-#endif /* CONFIG_PRINTTOFILE */
 
 /* One byte in, under the lock. The tone goes in before the store that
  * publishes the position, so a lock-free reader never sees a byte without

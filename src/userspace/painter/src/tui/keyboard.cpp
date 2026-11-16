@@ -1,6 +1,8 @@
 #include "painter/tui/keyboard.h"
 
+#include <climits>
 #include <cstring>
+#include <cuchar>
 #include <memory>
 #include <new>
 #include <optional>
@@ -32,10 +34,10 @@ Event Decode(const Touch &Data)
 {
     kb_event_t Key{};
     std::memcpy(&Key, Data.payload, sizeof(Key));
-    return Event{EventKind::Key, KeyEvent{Key.ascii, Key.scancode, Key.mods}, {}};
+    return Event{EventKind::Key, KeyEvent{Key.cp, Key.scancode, Key.mods}, {}};
 }
 
-// A key is three bytes (kb_event_t); the display's word that the program is
+// A key is six bytes (kb_event_t); the display's word that the program is
 // asked to finish is a ConsoleNotice. Anything else said on the tag is no
 // event. A program that does not answer the asking itself has its input over
 // (box/print.h), for this keyboard and every other reader of it.
@@ -51,6 +53,14 @@ std::optional<Event> Heard(const Touch &Data, bool HearsEnd)
 }
 
 }  // namespace
+
+std::string KeyEvent::Spelling() const
+{
+    char           Spelled[MB_LEN_MAX];
+    std::mbstate_t State{};
+    const std::size_t Length = Character ? std::c32rtomb(Spelled, Character, &State) : 0;
+    return Length == static_cast<std::size_t>(-1) ? std::string{} : std::string(Spelled, Length);
+}
 
 std::expected<Keyboard, StageError> Keyboard::Open() noexcept
 {

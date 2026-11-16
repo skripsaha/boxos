@@ -303,7 +303,7 @@ _Static_assert(sizeof(VolumeFrame) == 24, "VolumeFrame is 24 bytes on the medium
 /*
  * Does a FRAME hold — the one rule every reader of one keeps: the kernel at
  * its format check (tagfs/deed/deed.c, DeedFormatRefused), the UEFI loader
- * before it takes the kernel BOOT names (tagboot_deed.c), and volume-read on
+ * before it takes the kernel BOOT names (gangway_deed.c), and volume-read on
  * the host in the same words (tools/volumeread/ondisk.py, VolumeFrameCheck).
  * Here, so the three cannot hold a FRAME to three rules. `frame` and `bytes`
  * are the stamp as the reader's stamp walk found it; `tail_sector` is the

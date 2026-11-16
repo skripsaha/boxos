@@ -22,7 +22,13 @@
 # The GATES, every one on the book the build makes: the logcheck and PowerCut
 # scenarios — the book's PowerCut matrix among them (overwrite, logger, tipin,
 # sessions, replug, machineb) — then framerefuse, bookboot (the kernel BOOT
-# names held to the book by TagBoot before the jump), dedup (a copy laid on its
+# names held to the book by Gangway before the jump), loadersettings
+# (gangway.settings set in the hub and taken at the next start), panel
+# (Gangway's panel: a start changed on it, the log kept before a reset),
+# crossings (every start kept in the medium's front and landed; two misses open
+# the panel), scene (the brush a scene is painted with and the boot scene,
+# held on the host to exact areas, the press's pixels, its clip and every
+# frame drawn where it changed being the frame drawn whole), dedup (a copy laid on its
 # original by the pass after a Tally), and volume-read's self-test over the
 # image the build lays.
 # Beside them the host's own stands, which no volume touches: boxasm, the
@@ -43,7 +49,10 @@
 # one reader and the one pen of a program's settings held to exact outcomes —
 # a declaration of every kind and each way one is wrong, every kind's values,
 # the person's file line by line, the pen's changes byte for byte — and to
-# bytes made at random.
+# bytes made at random; typecase, Typecase's reader and rasterizer held to a
+# second reader of every font and to exact areas, its sources, chain and
+# cache to what they promise, and every named damage of a font and a
+# thousand random ones read and drawn whole under the sanitizers.
 #
 # The list is here, in the tree it judges, and not beside a session: a list
 # kept out of the tree can lose a gate without a diff saying so.
@@ -67,7 +76,7 @@ GATES_LOGCHECK="healthy unattended byname quill quillmut census lockrankmut repl
                 stand standusb standmut mkfs crewcrash fare faremut"
 GATES_POWERCUT="selftest noanchor noanchormut nextfid hog halt race overwrite logger tipin sessions
                 replug machineb spared undonecut engross dedup firstflushmut lastflushmut booknextfidmut stitchmut"
-GATES_OTHER="framerefuse bookboot dedup volread_selftest boxasm format form recipe elf box pack inside settings"
+GATES_OTHER="framerefuse bookboot loadersettings panel crossings scene dedup volread_selftest boxasm format form recipe elf box pack inside settings typecase"
 GATES_LONG="loggerhour loggerhourmut"
 
 gate_names() {
@@ -98,6 +107,7 @@ gate_run() {
         pack)             tools/pack_stand.sh ;;
         inside)           tools/inside_stand.sh ;;
         settings)         tools/settings_stand.sh ;;
+        typecase)         tools/typecase_stand.sh ;;
         *)                tools/logcheck.sh "$1" ;;
     esac
 }
@@ -141,7 +151,7 @@ for name in $WANTED; do
     # The harness's own closing words: its count, and the caveats and harness
     # failures it owns to — each cut at its explanation.
     verdict=$(sed $'s/\x1b\\[[0-9;]*m//g' "$OUT/$name.out" \
-              | grep -E '^(logcheck|powercut|boxasm|format|form|recipe|elf|box|pack|inside|settings): [0-9]+ (passed|caveat|harness)|^self-test: [0-9]+ of [0-9]+ cases' \
+              | grep -E '^(logcheck|powercut|boxasm|format|form|recipe|elf|box|pack|inside|settings|typecase): [0-9]+ (passed|caveat|harness)|^self-test: [0-9]+ of [0-9]+ cases' \
               | sed 's/ — .*//' | paste -sd '|' - | sed 's/|/; /g')
     line="$name rc=$rc $(( $(date +%s) - t0 ))s ${verdict:-(no verdict line)}"
     echo "$line" | tee -a "$OUT/SUMMARY"

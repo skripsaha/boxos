@@ -20,9 +20,14 @@
  * Boardroom is a rule it prints while it applies it.
  */
 
-/* Look at the block once, decide whether it is a pass, and say what is on it.
- * Called early, before anything asks. */
-void BoardingPassInit(void);
+/* Look at the block once, decide whether it is a pass, copy it, and put the
+ * loader's journal into the log ring. Called first of all — before memory is
+ * managed, because the journal lies in the loader's own pages — and before
+ * anything asks. */
+void BoardingPassTake(void);
+
+/* Say what is on the pass, or that there is none. */
+void BoardingPassSay(void);
 
 /* Did a loader leave one. */
 bool BoardingPassPresent(void);
@@ -49,5 +54,26 @@ bool BoardingPassVolume(uint8_t out_uuid[16]);
 /* Which firmware the loader ran under, and the BIOS drive number it was handed
  * where there was one. False when the pass carries no medium stamp. */
 bool BoardingPassMedium(uint8_t* out_firmware, uint8_t* out_bios_drive);
+
+/*
+ * What the person asked of the kernel — in gangway.settings, or in Gangway's
+ * panel for one start (boarding_pass.h STARTUP, CORES, KEEP_LOG); which of
+ * the two, the loader's journal says. With no stamp, the kernel's own way: the
+ * screen quiet, every core, the log kept through a reset only in a kernel
+ * built to (PRINTTOFILE). Asked as early as BoardingPassTake has run.
+ */
+uint8_t  BoardingPassStartup(void);    /* BOARDING_STARTUP_* */
+uint32_t BoardingPassCores(void);      /* the most cores started, 0 for every one */
+bool     BoardingPassKeepLog(void);
+
+/* This start's crossing on its medium (boxos_crossings.h): the sector its slot
+ * begins at and its number. False when the pass carries none — a BIOS boot,
+ * or a medium whose front keeps no crossings. */
+bool BoardingPassCrossing(uint64_t* out_sector, uint64_t* out_number);
+
+/* The scene whose first frame the loader left on the screen (boxos_scene.h):
+ * the fid of its file and its bytes. False when the pass carries none — the
+ * scene was off or not drawn, or a BIOS boot. */
+bool BoardingPassScene(uint64_t* out_fid, uint64_t* out_bytes);
 
 #endif /* BOARDING_H */

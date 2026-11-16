@@ -121,7 +121,7 @@ bool TodoDesk::Type(const KeyEvent &Key)
         }
         return false;
     }
-    char Ch = Key.Ascii;
+    char32_t Ch = Key.Character;
     if (Ch == painter::tui::KeyCodes::Escape) return true;
     if (Ch == '\n' || Ch == '\r') {
         std::vector<std::size_t> Places = List.View(Here());
@@ -141,8 +141,8 @@ bool TodoDesk::Type(const KeyEvent &Key)
     }
     if (Ch == '\b' || Ch == 0x7F) {
         if (Caret > 0) Line.erase(--Caret, 1);
-    } else if (static_cast<unsigned char>(Ch) >= 0x20 && static_cast<unsigned char>(Ch) < 0x7F) {
-        Line.insert(Caret++, 1, Ch);
+    } else if (Ch >= 0x20 && Ch < 0x7F) {   /* the line counts bytes as cells: ASCII until it counts characters */
+        Line.insert(Caret++, 1, static_cast<char>(Ch));
     }
     return false;
 }
@@ -168,7 +168,7 @@ void TodoDesk::Browse(const KeyEvent &Key, const std::vector<std::size_t> &Place
         }
         return;
     }
-    char Ch = Key.Ascii;
+    char32_t Ch = Key.Character;
     if (Ch >= 'A' && Ch <= 'Z') Ch = static_cast<char>(Ch - 'A' + 'a');
     if (Ch == '\t') {
         List.Everywhere = !List.Everywhere;
@@ -202,7 +202,7 @@ bool TodoDesk::OnKey(const KeyEvent &Key)
         if (Type(Key)) Now = TodoMode::Browse;
         return true;
     }
-    if (!Key.IsExtended() && (Key.Ascii == 'q' || Key.Ascii == 'Q' || Key.Ascii == painter::tui::KeyCodes::Escape)) return false;
+    if (!Key.IsExtended() && (Key.Character == 'q' || Key.Character == 'Q' || Key.Character == painter::tui::KeyCodes::Escape)) return false;
     std::size_t Before = List.Items.size();
     Browse(Key, List.View(Here()));
     if (List.Items.size() < Before) Flashed = static_cast<std::size_t>(-1);

@@ -284,7 +284,7 @@ void Table::Head()
     FrameBuffer.Write({Left + BoardWide - static_cast<int>(Scores.size()), 1}, Scores, TextStyle{BarInk, Page});
 
     int Row = std::min(Dimensions.Height - 1, Top + BoardHigh), Col = Left;
-    for (auto [Keys, What] : {std::pair{"\x1B\x1A\x18\x19", "slide"}, {"u", "undo"}, {"r", "new"}, {"q", "leave"}}) {
+    for (auto [Keys, What] : {std::pair{"\u2190\u2192\u2191\u2193", "slide"}, {"u", "undo"}, {"r", "new"}, {"q", "leave"}}) {
         Col += static_cast<int>(FrameBuffer.Write({Col, Row}, Keys, TextStyle{KeyInk, Page}));
         Col += 1;
         Col += static_cast<int>(FrameBuffer.Write({Col, Row}, What, TextStyle{HintInk, Page}));
@@ -438,7 +438,7 @@ int main()
                 Waiting = End == Through::Interrupted;
                 continue;
             }
-            char Ch = Key.Ascii;
+            char32_t Ch = Key.Character;
             if (Ch == 'q' || Ch == 'Q' || Ch == painter::tui::KeyCodes::Escape) break;
             if (Ch == 'u' || Ch == 'U') { Desk.Play.Undo(); Slides.clear(); }
             if (Ch == 'r' || Ch == 'R') { Desk.Play.New(); Slides.clear(); }

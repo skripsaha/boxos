@@ -2,9 +2,12 @@
  * emergency_screen.c — the log ring's tail on the glass. See emergency_screen.h.
  *
  * One state machine reads the ring a byte at a time: the pen. It turns bytes
- * into cells — '\n' '\r' '\b' '\t' as a console does, UTF-8 folded at the font
- * (boxos_glyph_fold.h), any other byte one cell — and either draws them or
- * only counts where they would go. Counting is how the tail is found: a scroll
+ * into cells — '\n' '\r' '\b' '\t' as a console does, UTF-8 read into its
+ * characters, a byte that is none U+FFFD — and either draws them or only
+ * counts where they would go. On a framebuffer a cell is a character, drawn
+ * from the imprint (boxos_imprint.h) in cells sized to the glass; on the text
+ * page it is the adapter's glyph, the character folded to it
+ * (boxos_glyph_fold.h), as many cells as the fold gives. Counting is how the tail is found: a scroll
  * is never a copy of what is on the glass (a read of write-combining memory
  * costs a bus round trip a word), it is the ring's last lines drawn afresh.
  *
@@ -31,7 +34,9 @@
 #include "klib_panic.h"       /* PanicStandIfClaimedElsewhere */
 #include "vmm.h"              /* vmm_phys_to_virt */
 #include "boxos_screen.h"
-#include "boxos_font.h"
+#include "boxos_imprint_data.h"
+#include "boxos_imprint_press.h"
+#include "boxos_utf8.h"
 #include "boxos_pixel.h"
 #include "boxos_color.h"
 #include "boxos_glyph_fold.h"
@@ -57,7 +62,11 @@ typedef struct {
     uint32_t          format;
     uint32_t          cols;
     uint32_t          rows;
+    uint32_t          size;      /* PIXELS: the imprint's size the cells are */
+    uint32_t          cell_w;
+    uint32_t          cell_h;
     bool              shown;     /* the glass is ours to draw on */
+    bool              ever;      /* it has taken the glass since the start */
     uint64_t          drawn;     /* the ring position drawn up to */
     EmergencyPen      pen;
 } EmergencyGlass;
@@ -96,30 +105,25 @@ static volatile uint8_t *TextPage(void)
     return (volatile uint8_t *)vmm_phys_to_virt((uintptr_t)SCREEN_TEXT_PHYS);
 }
 
-static void PutCell(uint32_t col, uint32_t row, uint8_t ch, uint8_t tone)
+/* A cell's content: on the text page the adapter's glyph, on a framebuffer
+ * the character, pressed from the imprint (boxos_imprint_press.h). */
+static void PutCell(uint32_t col, uint32_t row, uint32_t cell, uint8_t tone)
 {
     if (col >= g_glass.cols || row >= g_glass.rows) return;
     uint8_t attr = ToneAttr(tone);
 
     if (g_glass.kind == SCREEN_KIND_TEXT) {
-        volatile uint8_t *cell = TextPage() + ((size_t)row * g_glass.cols + col) * 2u;
-        cell[0] = ch;
-        cell[1] = attr;
+        volatile uint8_t *at = TextPage() + ((size_t)row * g_glass.cols + col) * 2u;
+        at[0] = (uint8_t)cell;
+        at[1] = attr;
         return;
     }
 
-    uint32_t fg = BoxPixelEncode(BoxAttrFgRgb(attr), g_glass.format);
-    uint32_t bg = BoxPixelEncode(BoxAttrBgRgb(attr), g_glass.format);
-    const unsigned char *glyph = BoxFontGlyphs[ch];
-    volatile uint8_t *line = g_glass.pixels
-                           + (size_t)row * BOXOS_FONT_HEIGHT * g_glass.stride
-                           + (size_t)col * BOXOS_FONT_WIDTH * 4u;
-    for (uint32_t y = 0; y < BOXOS_FONT_HEIGHT; y++, line += g_glass.stride) {
-        volatile uint32_t *px = (volatile uint32_t *)line;
-        uint8_t bits = glyph[y];
-        for (uint32_t x = 0; x < BOXOS_FONT_WIDTH; x++)
-            px[x] = (bits & (0x80u >> x)) ? fg : bg;
-    }
+    uint32_t inks[BOXOS_IMPRINT_INKED + 1u];
+    BoxPressInks(BoxAttrBgRgb(attr), BoxAttrFgRgb(attr), g_glass.format, inks);
+    BoxPressGlyph(&BoxSystemImprint, g_glass.size, BoxImprintFind(&BoxSystemImprint, cell),
+                  g_glass.pixels + (size_t)row * g_glass.cell_h * g_glass.stride + (size_t)col * g_glass.cell_w * 4u,
+                  g_glass.stride, inks);
 }
 
 static void ClearGlass(void)
@@ -139,7 +143,7 @@ static void ClearGlass(void)
     uint32_t bg = BoxPixelEncode(BoxAttrBgRgb(VIDEO_ATTR_DEFAULT), g_glass.format);
     volatile uint8_t *line = g_glass.pixels;
     for (uint32_t y = 0; y < g_glass.height; y++, line += g_glass.stride) {
-        if ((y % BOXOS_FONT_HEIGHT) == 0) PanicStandIfClaimedElsewhere();
+        if ((y % g_glass.cell_h) == 0) PanicStandIfClaimedElsewhere();
         volatile uint32_t *px = (volatile uint32_t *)line;
         for (uint32_t x = 0; x < g_glass.width; x++) px[x] = bg;
     }
@@ -148,16 +152,6 @@ static void ClearGlass(void)
 /* =========================================================================
  *  The pen — bytes into cells, drawn or only counted
  * ========================================================================= */
-
-/* Bytes the lead byte promises, itself included; 0 = not a lead byte
- * (0x80-0xBF stray continuation, 0xC0/0xC1 overlong, 0xF5+ past U+10FFFF). */
-static uint8_t Utf8Promise(uint8_t b)
-{
-    if (b >= 0xC2u && b <= 0xDFu) return 2;
-    if (b >= 0xE0u && b <= 0xEFu) return 3;
-    if (b >= 0xF0u && b <= 0xF4u) return 4;
-    return 0;
-}
 
 /* A line ends. Below the last row nothing is drawn; the caller draws the tail
  * again. A drawing pen asks about a panic once a row. */
@@ -168,10 +162,24 @@ static void PenNewline(EmergencyPen *pen, bool draw)
     if (draw) PanicStandIfClaimedElsewhere();
 }
 
-static void PenCell(EmergencyPen *pen, uint8_t ch, uint8_t tone, bool draw)
+static void PenCell(EmergencyPen *pen, uint32_t cell, uint8_t tone, bool draw)
 {
-    if (draw) PutCell(pen->col, pen->row, ch, tone);
+    if (draw) PutCell(pen->col, pen->row, cell, tone);
     if (++pen->col >= g_glass.cols) PenNewline(pen, draw);
+}
+
+/* A character into cells: one on a framebuffer, as many as the fold gives on
+ * the text page. */
+static void PenCharacter(EmergencyPen *pen, uint32_t cp, uint8_t tone, bool draw)
+{
+    if (g_glass.kind != SCREEN_KIND_TEXT) {
+        PenCell(pen, cp, tone, draw);
+        return;
+    }
+    char cells[BOXOS_GLYPH_FOLD_MAX];
+    int  n = BoxGlyphFoldCodepoint(cp, cells);
+    for (int i = 0; i < n; i++)
+        PenCell(pen, (uint8_t)cells[i], tone, draw);
 }
 
 static void PenAscii(EmergencyPen *pen, uint8_t b, uint8_t tone, bool draw)
@@ -201,15 +209,15 @@ static void PenAscii(EmergencyPen *pen, uint8_t b, uint8_t tone, bool draw)
     }
 }
 
-/* What was held of a character that never finished goes down as its own raw
- * cells, in the tone it was begun in; the byte that broke it starts over. */
+/* What was held of a character that never finished is no character: U+FFFD
+ * a byte, in the tone it was begun in; the byte that broke it starts over. */
 static void PenSpill(EmergencyPen *pen, bool draw)
 {
     uint8_t have = pen->have;
     pen->have = 0;
     pen->need = 0;
     for (uint8_t i = 0; i < have; i++)
-        PenCell(pen, pen->seq[i], pen->tone, draw);
+        PenCharacter(pen, 0xFFFDu, pen->tone, draw);
 }
 
 static void PenByte(EmergencyPen *pen, uint8_t b, uint8_t tone, bool draw)
@@ -220,13 +228,10 @@ static void PenByte(EmergencyPen *pen, uint8_t b, uint8_t tone, bool draw)
             if (pen->have < pen->need) return;
 
             uint32_t cp = 0;
-            if (utf8_decode((const char *)pen->seq, &cp) == (int)pen->need) {
-                char cells[BOXOS_GLYPH_FOLD_MAX];
-                int  n = BoxGlyphFoldCodepoint(cp, cells);
+            if (BoxUtf8Next((const char *)pen->seq, pen->need, &cp) == pen->need) {
                 pen->have = 0;
                 pen->need = 0;
-                for (int i = 0; i < n; i++)
-                    PenCell(pen, (uint8_t)cells[i], pen->tone, draw);
+                PenCharacter(pen, cp, pen->tone, draw);
                 return;
             }
             PenSpill(pen, draw);
@@ -237,8 +242,8 @@ static void PenByte(EmergencyPen *pen, uint8_t b, uint8_t tone, bool draw)
 
     if (b < 0x80u) { PenAscii(pen, b, tone, draw); return; }
 
-    uint8_t need = Utf8Promise(b);
-    if (!need) { PenCell(pen, b, tone, draw); return; }
+    uint8_t need = (uint8_t)BoxUtf8Promise(b);
+    if (!need) { PenCharacter(pen, 0xFFFDu, tone, draw); return; }
 
     pen->seq[0] = b;
     pen->have   = 1;
@@ -325,17 +330,40 @@ void EmergencyScreenUsePixels(volatile uint8_t *pixels, uint32_t width,
     g_glass.height = height;
     g_glass.stride = stride;
     g_glass.format = format;
-    g_glass.cols   = width  / BOXOS_FONT_WIDTH;
-    g_glass.rows   = height / BOXOS_FONT_HEIGHT;
+    g_glass.size   = BoxPressSize(&BoxSystemImprint, height);
+    g_glass.cell_w = BoxSystemImprint.Sizes[g_glass.size].Width;
+    g_glass.cell_h = BoxSystemImprint.Sizes[g_glass.size].Height;
+    g_glass.cols   = width  / g_glass.cell_w;
+    g_glass.rows   = height / g_glass.cell_h;
     if (g_glass.shown) {
         DrawTail(LogRingWritten(), g_glass.rows);
         Fence();
     }
 }
 
+void EmergencyScreenLeastCell(uint32_t *width, uint32_t *height)
+{
+    *width  = BoxSystemImprint.Sizes[0].Width;
+    *height = BoxSystemImprint.Sizes[0].Height;
+}
+
+void EmergencyScreenCells(uint32_t *cols, uint32_t *rows, uint32_t *cell_width, uint32_t *cell_height)
+{
+    *cols        = g_glass.cols;
+    *rows        = g_glass.rows;
+    *cell_width  = g_glass.cell_w;
+    *cell_height = g_glass.cell_h;
+}
+
+void EmergencyScreenAwait(void)
+{
+    g_glass.shown = false;
+}
+
 void EmergencyScreenShow(void)
 {
     g_glass.shown = true;
+    __atomic_store_n(&g_glass.ever, true, __ATOMIC_RELEASE);
     DrawTail(LogRingWritten(), g_glass.rows);
     Fence();
 }
@@ -370,8 +398,14 @@ void EmergencyScreenFollow(void)
 void EmergencyScreenPanicTake(void)
 {
     g_glass.shown = true;
+    __atomic_store_n(&g_glass.ever, true, __ATOMIC_RELEASE);
     DrawTail(LogRingWritten(), g_glass.rows);
     Fence();
+}
+
+bool EmergencyScreenEverShown(void)
+{
+    return __atomic_load_n(&g_glass.ever, __ATOMIC_ACQUIRE);
 }
 
 void EmergencyScreenRedraw(void)

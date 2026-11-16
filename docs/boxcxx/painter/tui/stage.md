@@ -205,20 +205,20 @@ std::uint8_t Mods = tui::Modifiers::Ctrl;
 namespace tui = painter::tui;
 namespace core = painter::core;
 
-bool Example(const tui::KeyEvent &Key) { return Key.Ascii == tui::KeyCodes::Escape; }
+bool Example(const tui::KeyEvent &Key) { return Key.Character == tui::KeyCodes::Escape; }
 ```
 
 ### `KeyEvent`
 
-**Краткое описание:** Получите байтовый символ, сканкод и модификаторы клавиши.
+**Краткое описание:** Получите символ Unicode, сканкод и модификаторы клавиши.
 
-**Параметры:** Агрегат: `Ascii` (`char`) = `0`, `Scancode` и `Mods` (`std::uint8_t`) = `0`.
+**Параметры:** Агрегат: `Character` (`char32_t`) = `0`, `Scancode` и `Mods` (`std::uint8_t`) = `0`.
 
 **Возвращает:** Неприменимо.
 
 **Побочные эффекты:** Нет.
 
-**Примечания:** Ненулевой `Ascii` может быть управляющим кодом. Событие не содержит строки UTF-8.
+**Примечания:** `Character` — сам символ Unicode, который печатает клавиша, а не номер кодовой страницы; ненулевой может быть управляющим кодом. Его запись UTF-8 даёт `Spelling()`, печатный ли он — `IsPrintable()`.
 
 **Пример:**
 
@@ -233,11 +233,11 @@ tui::KeyEvent Key{};
 
 ### `KeyEvent::HasCharacter`
 
-**Краткое описание:** Проверьте ненулевой байт `Ascii`.
+**Краткое описание:** Проверьте, что клавиша печатает символ.
 
 **Параметры:** Нет; `bool HasCharacter() const noexcept`.
 
-**Возвращает:** `bool`: результат `Ascii != 0`.
+**Возвращает:** `bool`: результат `Character != 0`.
 
 **Побочные эффекты:** Нет.
 
@@ -250,6 +250,48 @@ namespace tui = painter::tui;
 namespace core = painter::core;
 
 bool Example(const tui::KeyEvent &Key) { return Key.HasCharacter(); }
+```
+
+### `KeyEvent::IsPrintable`
+
+**Краткое описание:** Проверьте, что символ показывается: не управляющий код C0 или C1, не DEL и не суррогат.
+
+**Параметры:** Нет; `bool IsPrintable() const noexcept`.
+
+**Возвращает:** `bool`: `true` для символа, который можно вставить в текст.
+
+**Побочные эффекты:** Нет.
+
+**Пример:**
+
+```cpp
+#include "painter/tui/stage.h"
+
+namespace tui = painter::tui;
+
+bool Example(const tui::KeyEvent &Key) { return Key.IsPrintable(); }
+```
+
+### `KeyEvent::Spelling`
+
+**Краткое описание:** Получите символ клавиши записью UTF-8 — то, что хранит строка текста, в которую он набран.
+
+**Параметры:** Нет; `std::string Spelling() const`.
+
+**Возвращает:** `std::string`: от одного до четырёх байтов UTF-8; пустая строка для клавиши без символа.
+
+**Побочные эффекты:** Нет.
+
+**Пример:**
+
+```cpp
+#include <string>
+
+#include "painter/tui/stage.h"
+
+namespace tui = painter::tui;
+
+void Example(const tui::KeyEvent &Key, std::string &Line) { if (Key.IsPrintable()) Line += Key.Spelling(); }
 ```
 
 ### `KeyEvent::IsExtended`
@@ -417,7 +459,7 @@ auto Example() { return tui::Stage::Open(20, 4); }
 
 **Побочные эффекты:** Обращается к DisplayServer, выделяет память, открывает клавиатурную подписку.
 
-**Как работает:** Открывает слой, создаёт кадр полного фактического размера и назначает ему `Glass()` сервера. Затем открывает `Keyboard` и состояние Stage; при отказе ранее созданные ресурсы освобождаются деструкторами.
+**Как работает:** Открывает слой, создаёт кадр полного фактического размера и назначает ему `Glass()` и `Mosaics()` сервера. Затем открывает `Keyboard` и состояние Stage; при отказе ранее созданные ресурсы освобождаются деструкторами.
 
 **Примечания:** Аргументы задают минимум, а не размер области. Открытие само по себе не вызывает `Present`.
 
@@ -497,6 +539,27 @@ namespace tui = painter::tui;
 namespace core = painter::core;
 
 tui::GlassKind Example(const tui::Stage &Screen) { return Screen.Glass(); }
+```
+
+### `Stage::Mosaics`
+
+**Краткое описание:** Получите сетки тоньше половин, которые рисует стекло.
+
+**Параметры:** Нет; `std::uint8_t Mosaics() const noexcept`.
+
+**Возвращает:** `std::uint8_t`: флаги `DisplayMosaic`, как их сказал сервер, либо 0 без состояния.
+
+**Побочные эффекты:** Нет.
+
+**Пример:**
+
+```cpp
+#include "painter/tui/stage.h"
+
+namespace tui = painter::tui;
+namespace core = painter::core;
+
+std::uint8_t Example(const tui::Stage &Screen) { return Screen.Mosaics(); }
 ```
 
 ### `Stage::FrameBuffer`

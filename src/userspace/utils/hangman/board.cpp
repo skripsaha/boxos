@@ -26,8 +26,8 @@ namespace tui = painter::tui;
 namespace core = painter::core;
 namespace G = painter::tui::Glyphs;
 
-constexpr char HeartGlyph = 0x03;       // CP437 heart, a life left
-constexpr char SquareGlyph = static_cast<char>(0xFE);
+constexpr char32_t HeartGlyph = U'\u2665';    // ♥ a life left
+constexpr char32_t SquareGlyph = U'\u25A0';   // ■
 constexpr std::uint64_t RefusedMs = 380;
 constexpr std::uint64_t NoteMs = 5000;
 constexpr std::int32_t  MostColumn = 64;   // the widest the sections are, in cells

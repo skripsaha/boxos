@@ -43,6 +43,7 @@
 #include "box/string.h"
 #include "box/convert.h"
 #include "painter/tui/stage.h"
+#include "painter/tui/text.h"
 
 #include <cstdlib>
 #include <string>
@@ -359,7 +360,7 @@ static void paint_lamp(void)
     }
 }
 
-static void put_cell(int row, int col, char ch, Color fg, Color bg)
+static void put_cell(int row, int col, char32_t ch, Color fg, Color bg)
 {
     if (row < 0 || col < 0 || row >= g_lamp.rows || col >= g_lamp.cols) return;
     g_frame->Put({col, row}, painter::tui::Cell{ch, painter_color(fg), painter_color(bg)});
@@ -367,7 +368,11 @@ static void put_cell(int row, int col, char ch, Color fg, Color bg)
 
 static void put_text(int row, int col, const char *s, Color fg, Color bg)
 {
-    for (int i = 0; s[i] != '\0'; i++) put_cell(row, col + i, s[i], fg, bg);
+    for (std::size_t at = 0, i = 0; s[at] != '\0'; i++) {
+        const painter::tui::Glyph shape = painter::tui::GlyphAt(s, at);
+        put_cell(row, col + static_cast<int>(i), shape.Character, fg, bg);
+        at += shape.Length;
+    }
 }
 
 /* ===========================================================================
@@ -568,7 +573,7 @@ static LampVerdict edit_key(const painter::tui::KeyEvent &Key)
 {
     if (Key.IsExtended()) return LAMP_RUN;   /* arrows do nothing here */
 
-    char c = Key.Ascii;
+    char32_t c = Key.Character;
     if (c == painter::tui::KeyCodes::Escape) {        /* cancel: the old value stands */
         g_menu.editing = false;
         g_menu.note    = NULL;
@@ -609,7 +614,7 @@ static LampVerdict menu_key(const painter::tui::KeyEvent &Key)
         return LAMP_RUN;
     }
 
-    switch (Key.Ascii) {
+    switch (Key.Character) {
     case painter::tui::KeyCodes::Escape: g_menu.open = false;                          break;
     case painter::tui::KeyCodes::Tab:    g_menu.item = (g_menu.item + 1) % MENU_ITEMS; break;
     case painter::tui::KeyCodes::Enter:  begin_edit();                                 break;
@@ -622,17 +627,17 @@ static LampVerdict menu_key(const painter::tui::KeyEvent &Key)
 
 static LampVerdict handle_key(const painter::tui::KeyEvent &Key)
 {
-    if (Key.IsCtrl() && (Key.Ascii == 'q' || Key.Ascii == 'Q'))
+    if (Key.IsCtrl() && (Key.Character == 'q' || Key.Character == 'Q'))
         return LAMP_LEAVE;
 
     if (g_menu.editing) return edit_key(Key);
 
     /* A bare q, for the console that cannot deliver a modifier at all. It is
      * unreachable while a field is open, where q is not a hex digit anyway. */
-    if (Key.Ascii == 'q' || Key.Ascii == 'Q') return LAMP_LEAVE;
+    if (Key.Character == 'q' || Key.Character == 'Q') return LAMP_LEAVE;
 
     if (!g_menu.open) {
-        if (Key.Ascii == painter::tui::KeyCodes::Escape) g_menu.open = true;
+        if (Key.Character == painter::tui::KeyCodes::Escape) g_menu.open = true;
         return LAMP_RUN;
     }
     return menu_key(Key);

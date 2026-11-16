@@ -7,9 +7,12 @@ when it is not attested, the kernels the book names by role, in turn
 DIGESTS tree, or the record of the ribbon that put a block in; the first
 attested is jumped into. Nothing attested: the kernel nothing shows broken —
 BOOT's first — loaded not attested (F2); nothing of that either: the loader
-stops with every kernel it tried and why. All in the very words the loader's
-Lectern says (src/boot/uefi/tagboot_lectern.c, tagboot_succession.c): the
-oracle the host stand (tools/tagboot_stand.c, which builds that same Lectern)
+stops with every kernel it tried and why. A kernel chosen, the file the loader
+asks for by name — gangway.settings, boot.scene — read and held to the book in
+the same reading (Called). All in the very words the loader's Lectern says
+(src/boot/uefi/gangway_lectern.c, gangway_succession.c,
+gangway_lectern_called.c): the
+oracle the host stand (tools/gangway_stand.c, which builds that same Lectern)
 is held to line for line on every landing of self-test's group A
 (selftest_book_boot.py).
 
@@ -26,20 +29,35 @@ leaves the kernel not attested only when no block is found broken (§16.7 п.4).
 from . import bookread, ondisk, tally
 from .bookground import BookGround
 from .bookread import Short
-from .bootbook import BootBook
+from .bootbook import BootBook, Scene
 from .ondisk import BLOCK
 
 WHO = "the kernel the deed names"
 
-# The most a kernel may be, and the header it opens with (tagboot_lectern.h
+# The most a kernel may be, and the header it opens with (gangway_lectern.h
 # KERNEL_MAX_SIZE; kernel_entry.asm: "KERNEL" at byte 2).
 KERNEL_MAX_SIZE = 0x2000000
+
+# The files Gangway asks the volume for by name, in the order it asks, and the
+# most of each it reads: the person's settings (src/include/
+# boxos_gangway_settings.h GANGWAY_SETTINGS_FILE, settings_chosen.h
+# SETTINGS_FILE_MAX) and the scene the machine starts with (boxos_scene.h
+# BOX_SCENE_BOOT, BOX_SCENE_FILE_MOST).
+CALLED = b"gangway.settings"
+CALLED_MOST = 65536
+SCENE = b"boot.scene"
+SCENE_MOST = 1 << 20
+ASKED = ((CALLED, CALLED_MOST), (SCENE, SCENE_MOST))
+
+# The most of a file's name the loader keeps (LecternFile.name: a line's room
+# less its end, LECTERN_LINE_BYTES - 1): what a scene is named and judged by.
+NAME_KEPT = 255
 
 
 def Loaded(boot):
     """(blocks, None): the blocks the loader loads of the kernel BOOT names —
     as many as its bytes take, every block it names when it names no bytes
-    (tagboot.c TagFsLoadKernel) — or (None, why) when its bytes overrun them."""
+    (gangway_succession.c) — or (None, why) when its bytes overrun them."""
     have = boot["kernel_blocks"] * BLOCK
     if boot["kernel_bytes"] > have:
         return None, "it is said to be %u bytes and its blocks hold %u" % (boot["kernel_bytes"], have)
@@ -187,10 +205,29 @@ class Candidate:
 class Succession:
     """The loader's choice on the ground `g`: `lines` as it says them, `says`
     "held" (attested, jumped into), "unchecked" (loaded not attested) or
-    "broken" (no kernel may be jumped into: it stops)."""
+    "broken" (no kernel may be jumped into: it stops). With `called` — names
+    (bytes) and the most of each read, in the order asked — and a kernel
+    chosen, the files called so: `content[name]` the bytes of each read,
+    `found[name]` "held" or "unchecked" then; neither for one not read. With
+    `asked` {which: (tags, pick)}, the file `which` of those called is asked
+    by those tags (bytes) instead of by its name, as a desk's ask asks it:
+    the scene `pick` falls on of those that wear them all — with none, the
+    file by its name in its place."""
 
-    def __init__(self, g):
-        self.g, self.lines, self.tried, self.deferred, self.says = g, [], [], [], None
+    def __init__(self, g, called=(), asked=None):
+        self.g, self.called, self.lines, self.tried, self.deferred, self.says = g, tuple(called), [], [], [], None
+        self.book = None
+        self.content, self.found = {}, {}
+        self._Choose()
+        if self.called and self.says != "broken":
+            for which, (name, most) in enumerate(self.called):
+                self._Called(name, most, (asked or {}).get(which))
+
+    def _Names(self):
+        return tuple(name for name, _most in self.called)
+
+    def _Choose(self):
+        g = self.g
         boot = g.deed["boot"]
         named = bool(boot and boot["kernel_block"] and boot["kernel_blocks"])
         first = self._Boot(boot) if named else None
@@ -199,11 +236,88 @@ class Succession:
         if said == "held":
             return
         if self.lec.slot is not None:
-            book = BootBook(g, self.lec.slot, self.lec.t, self.lines.append)
-            for fs in book.candidates:
-                if self._Try(Candidate("kernel fid %u" % fs.fid, fs.runs, fs.size, fs.slips), book.overlay) == "held":
+            self.book = BootBook(g, self.lec.slot, self.lec.t, self.lines.append, self._Names())
+            for fs in self.book.candidates:
+                if self._Try(Candidate("kernel fid %u" % fs.fid, fs.runs, fs.size, fs.slips),
+                             self.book.overlay) == "held":
                     return
         self._Last(first if said == "unchecked" else None, named)
+
+    def _Picked(self, tags, pick):
+        """The scene followed that the book does not keep deleted and that
+        wears, for every tag asked, a tag of the ids TAGS and the ribbon give
+        it — the one `pick` falls on counted by fid — and how many do."""
+        ids = [self.book.TagIds(word) for word in tags]
+        wear = sorted(fid for fid, fs in self.book.files.items()
+                      if not fs.flags & ondisk.FILE_DELETED and Scene(bytes(fs.name)[:NAME_KEPT]) and
+                      all(set(fs.tags) & word for word in ids))
+        return (wear[pick % len(wear)] if wear else None), len(wear)
+
+    def _Called(self, called, most, asked=None):
+        """The file `called` names (gangway_lectern_called.c): the first made of
+        those the book does not keep deleted, said when there are more — or,
+        `asked` (tags, pick), the scene picked of those that wear them all,
+        said with how many, and with none the file by its name in its place,
+        said; what may be read of it, `most` bytes at most; its
+        blocks held to the book, the Slips laid on its last."""
+        g, lec, name = self.g, self.lec, called.decode()
+        label = "the scene carrying " + ", ".join(t.decode() for t in asked[0]) if asked else name
+        if lec.slot is None:
+            self._Say("%s is not read: %s" % (label, lec.why))
+            return
+        if self.book is None:
+            self.book = BootBook(g, lec.slot, lec.t, self.lines.append, self._Names())
+        if asked:
+            fid, count = self._Picked(*asked)
+            if fid is None:
+                self._Say("no scene on this volume carries %s — %s is read in its place"
+                          % (", ".join(t.decode() for t in asked[0]), name))
+                asked = None
+            else:
+                self._Say("%u %s %s — fid %u, the one picked, is read"
+                          % (count, "scene carries" if count == 1 else "scenes carry",
+                             ", ".join(t.decode() for t in asked[0]), fid))
+                fs = self.book.files[fid]
+                name = bytes(fs.name)[:NAME_KEPT].decode(errors="replace")
+        if not asked:
+            named = sorted(fid for fid, fs in self.book.files.items()
+                           if fs.name == called and not fs.flags & ondisk.FILE_DELETED)
+            if not named:
+                self._Say("no file on this volume is called %s" % name)
+                return
+            if len(named) > 1:
+                self._Say("%u files are called %s — fid %u, the first made, is read" % (len(named), name, named[0]))
+            fs = self.book.files[named[0]]
+        who = "%s (fid %u)" % (name, fs.fid)
+        for r in fs.runs:
+            if not tally.RunCarried(r):
+                self._Say("%s cannot be read: a run of it carries an extension this loader does not read (CODEC or "
+                          "COPY, §8)" % who)
+                return
+            if not r.hole and (r.start < g.data_block or r.start + r.count > g.data_end):
+                self._Say("%s cannot be read: it names ground outside the data run" % who)
+                return
+        if fs.size > most:
+            self._Say("%s cannot be read: it is %u bytes, more than the %u this loader reads"
+                      % (who, fs.size, most))
+            return
+        if fs.size == 0:
+            self._Say("%s is empty" % who)
+            self.content[called], self.found[called] = b"", "held"
+            return
+        blocks = Candidate(who, fs.runs, fs.size).Blocks()
+        unread = next((k for k, v in enumerate(blocks) if v is not None and g.Block(v) is None), None)
+        if unread is not None:
+            self._Say("%s cannot be read: its block %u (volume block %u) will not read" % (who, unread, blocks[unread]))
+            return
+        says, _line = lec.Attest(who, blocks, self.book.overlay)
+        if says == "broken":
+            return
+        raw = bytearray(b"".join(bytes(BLOCK) if v is None else g.Block(v) for v in blocks))
+        last = (len(blocks) - 1) * BLOCK
+        for off, data in fs.slips:
+            raw[last + off:last + off + len(data)] = data
+        self.content[called], self.found[called] = bytes(raw[:fs.size]), says
 
     def _Say(self, line):
         self.lines.append(line)
@@ -287,16 +401,17 @@ class Succession:
             self._Say("this volume's deed names no kernel, and its book names none by role")
 
 
-def BootRead(medium, start=None):
+def BootRead(medium, start=None, called=(), asked=None):
     """(lines, verdict): what the loader says of the volume's kernels, line by
     line, and its verdict — "held", "unchecked", "broken" — or None where it
     reads no book: a Deed that bears no FRAME, or one whose FRAME it refuses
-    (said in the lines)."""
+    (said in the lines). With `called`, the lines of the files called so after
+    the choice's, `asked` asking some by tags (Succession)."""
     from .medium import StandOnDeed
     if ondisk.STAMP_FRAME not in StandOnDeed(medium, start).deed["stamps"]:
         return ["this deed bears no FRAME, so its volume is no book — an older one, or not TagFS's"], None
     g = BookGround(medium, start)
     if g.frame_why:
         return ["this deed's FRAME does not hold: %s" % g.frame_why], None
-    s = Succession(g)
+    s = Succession(g, called, asked)
     return s.lines, s.says

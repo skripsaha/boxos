@@ -32,6 +32,8 @@
 #include "box/form.h"
 #include "box/print.h"
 
+#include "painter/tui/text.h"
+
 #include "aquarium.h"
 
 BOX_FORM("takes optional words \"its light (day, dusk or night; by the clock if none is said) "
@@ -50,12 +52,8 @@ constexpr int           MostFish    = 500;
 constexpr int           LeastCols   = 40;
 constexpr int           LeastRows   = 12;
 
-constexpr char ArrowLeft  = 0x1B;   /* the console font's arrows */
-constexpr char ArrowRight = 0x1A;
-constexpr char ArrowUp    = 0x18;
-constexpr char ArrowDown  = 0x19;
-constexpr char FullBlock  = static_cast<char>(0xDB);
-constexpr char LightShade = static_cast<char>(0xB0);
+constexpr char32_t FullBlock  = U'\u2588';   /* █ */
+constexpr char32_t LightShade = U'\u2591';   /* ░ */
 
 /* Exact greys and saturated hues, so the bar reads the same on a text console
  * (typer_screen.h spells out why). */
@@ -169,9 +167,10 @@ AquaDaylight Show::Daylight()
 int Write(painter::tui::Frame &Canvas, int Cols, int Row, int Col, std::string_view Text, AquaColor Ink,
           AquaColor Paper)
 {
-    for (char Ch : Text) {
-        if (Col >= Cols) break;
-        Canvas.Put({Col++, Row}, painter::tui::Cell{Ch, Ink, Paper});
+    for (std::size_t Byte = 0; Byte < Text.size() && Col < Cols;) {
+        const painter::tui::Glyph Shape = painter::tui::GlyphAt(Text, Byte);
+        Canvas.Put({Col++, Row}, painter::tui::Cell{Shape.Character, Ink, Paper});
+        Byte += Shape.Length;
     }
     return Col;
 }
@@ -190,10 +189,10 @@ void Show::Bar(painter::tui::Frame &Canvas)
     /* How to leave is never what a narrow screen loses: its room is kept
      * while the others are laid. */
     struct Key { std::string Keys; const char *What; };
-    const Key   Keys[] = {{{ArrowLeft, ArrowRight, ArrowUp, ArrowDown}, "look"}, {"space", "feed"}, {"t", "knock"},
+    const Key   Keys[] = {{"\u2190\u2192\u2191\u2193", "look"}, {"space", "feed"}, {"t", "knock"},
                           {"a", "fish"}, {"n", "light"}, {"h", "hide"}};
     const Key   Leave{"q", "leave"};
-    auto        Width = [](const Key &Each) { return 2 + Each.Keys.size() + 1 + std::strlen(Each.What); };
+    auto        Width = [](const Key &Each) { return 2 + painter::tui::CellsOf(Each.Keys) + 1 + std::strlen(Each.What); };
     bool        Full  = false;
     for (const Key &Each : Keys) {
         Full = Full || !Fits(Col, Width(Each) + Width(Leave));
@@ -247,7 +246,7 @@ bool Show::OnKey(const painter::tui::KeyEvent &Key)
         }
         return true;
     }
-    switch (Key.Ascii) {
+    switch (Key.Character) {
     case ' ': AquaFeed(Tank, MiddleX(), Dice); break;
     case 't':
     case 'T': AquaTap(Tank, MiddleX(), MiddleY()); break;

@@ -10,11 +10,11 @@
  * ONE STRUCTURE, recognised by its magic. Both loaders write all of it: stage2
  * (BIOS) zeroes the whole block before it writes the fields it has, so every
  * field a BIOS boot has nothing to say in — the framebuffer, the firmware's
- * tables — reads as zero; TagBoot (UEFI) fills it. `boot_method` says which of
+ * tables — reads as zero; Gangway (UEFI) fills it. `boot_method` says which of
  * them wrote it, and a reader asks that, never how long the block is.
  *
  * Integer types come from the includer, as volume_deed.h says: the kernel
- * (ktypes.h) and TagBoot (uefi.h) both read this text, so the loader writes
+ * (ktypes.h) and Gangway (uefi.h) both read this text, so the loader writes
  * the structure the kernel reads rather than a copy of it. stage2 writes its
  * first fields by offsets it spells for itself, and kernel_entry.asm reads the
  * stack by one; the assertions below hold every one of those offsets.
@@ -24,7 +24,7 @@
 
 /* How the machine was booted: which loader wrote the block. */
 #define BOOT_METHOD_BIOS  0u            /* stage2 */
-#define BOOT_METHOD_UEFI  1u            /* TagBoot */
+#define BOOT_METHOD_UEFI  1u            /* Gangway */
 
 /*
  * Physical address of the handoff block. Moved from 0x9000 to 0xA000 on
@@ -74,7 +74,7 @@ _Static_assert(BOOT_INFO_ADDR == BOOT_INFO_ADDR_FROM_BUILD,
  *                           in EfiRuntimeServicesData (UEFI 2.10 §4.6) —
  *                           ESRT and SMBIOS lookups never depend on SVAM.
  *
- * efi_esrt_copy_phys/size   A TagBoot copy of the ESRT (UEFI 2.10 §23.4) in
+ * efi_esrt_copy_phys/size   A Gangway copy of the ESRT (UEFI 2.10 §23.4) in
  *                           EfiACPIMemoryNVS — the firmware's own lives in
  *                           EfiBootServicesData, which PMM reclaims after
  *                           EBS. Zero when the firmware published none.

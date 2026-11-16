@@ -131,10 +131,10 @@ Attempt Trainer::NewAttempt()
 /* True while the run goes on. */
 bool Trainer::Handle(Attempt &Run, const painter::tui::KeyEvent &Key, std::vector<Line> &Lines)
 {
-    if (Key.IsCtrl()) return !(Key.Ascii == 'q' || Key.Ascii == 'Q');
+    if (Key.IsCtrl()) return !(Key.Character == 'q' || Key.Character == 'Q');
     if (Key.IsExtended()) return true;
 
-    char Ch = Key.Ascii;
+    char32_t Ch = Key.Character;
     if (Ch == painter::tui::KeyCodes::Escape) return false;
     if (Ch == painter::tui::KeyCodes::Backspace || Ch == 0x7f) {
         Run.Back();
@@ -225,10 +225,10 @@ bool Trainer::ShowResults(const Attempt &Run, std::uint64_t Ms)
         if (Got != Heard::Key) continue;
 
         if (Key.IsCtrl()) {
-            if (Key.Ascii == 'q' || Key.Ascii == 'Q') return false;
+            if (Key.Character == 'q' || Key.Character == 'Q') return false;
         } else if (!Key.IsExtended()) {
-            if (Key.Ascii == painter::tui::KeyCodes::Enter) return true;
-            if (Key.Ascii == painter::tui::KeyCodes::Escape || Key.Ascii == 'q' || Key.Ascii == 'Q') return false;
+            if (Key.Character == painter::tui::KeyCodes::Enter) return true;
+            if (Key.Character == painter::tui::KeyCodes::Escape || Key.Character == 'q' || Key.Character == 'Q') return false;
         }
     }
 }

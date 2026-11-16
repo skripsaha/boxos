@@ -2,6 +2,8 @@
 
 #include <format>
 
+#include "painter/tui/text.h"
+
 #include "typer_screen.h"
 
 using painter::tui::TextStyle;
@@ -24,14 +26,14 @@ void Screen::Give()
     Stage.reset();
 }
 
-void Screen::Put(std::uint32_t Row, std::uint32_t Col, char Ch, PainterColor Fg, PainterColor Bg)
+void Screen::Put(std::uint32_t Row, std::uint32_t Col, char32_t Ch, PainterColor Fg, PainterColor Bg)
 {
     if (Row >= Rows || Col >= Cols) return;
     Stage->FrameBuffer().Put({static_cast<std::int32_t>(Col), static_cast<std::int32_t>(Row)},
                               painter::tui::Cell{Ch, Fg, Bg});
 }
 
-void Screen::Fill(std::uint32_t Row, std::uint32_t Col, std::uint32_t Width, char Ch, PainterColor Fg,
+void Screen::Fill(std::uint32_t Row, std::uint32_t Col, std::uint32_t Width, char32_t Ch, PainterColor Fg,
                   PainterColor Bg)
 {
     for (std::uint32_t I = 0; I < Width; I++) Put(Row, Col + I, Ch, Fg, Bg);
@@ -45,16 +47,18 @@ void Screen::Clear(PainterColor FillColor)
 std::uint32_t Screen::Write(std::uint32_t Row, std::uint32_t Col, std::string_view Text, PainterColor Fg,
                             PainterColor Bg)
 {
-    for (char Ch : Text) {
-        if (Col >= Cols) break;
-        Put(Row, Col++, Ch, Fg, Bg);
+    for (std::size_t Byte = 0; Byte < Text.size() && Col < Cols;) {
+        const painter::tui::Glyph Shape = painter::tui::GlyphAt(Text, Byte);
+        Put(Row, Col++, Shape.Character, Fg, Bg);
+        Byte += Shape.Length;
     }
     return Col;
 }
 
 std::uint32_t Screen::Centre(std::uint32_t Row, std::string_view Text, PainterColor Fg, PainterColor Bg)
 {
-    std::uint32_t Col = Text.size() < Cols ? static_cast<std::uint32_t>((Cols - Text.size()) / 2) : 0;
+    const std::size_t Cells = painter::tui::CellsOf(Text);
+    std::uint32_t     Col   = Cells < Cols ? static_cast<std::uint32_t>((Cols - Cells) / 2) : 0;
     Write(Row, Col, Text, Fg, Bg);
     return Col;
 }

@@ -15,17 +15,17 @@ namespace tui = painter::tui;
 namespace core = painter::core;
 namespace G = painter::tui::Glyphs;
 
-constexpr char DoubleDown = static_cast<char>(0xBA);
-constexpr char DoubleTL = static_cast<char>(0xC9);
-constexpr char DoubleTR = static_cast<char>(0xBB);
-constexpr char DoubleBL = static_cast<char>(0xC8);
-constexpr char DoubleBR = static_cast<char>(0xBC);
+constexpr char32_t DoubleDown = U'\u2551';   /* ║ */
+constexpr char32_t DoubleTL = U'\u2554';     /* ╔ */
+constexpr char32_t DoubleTR = U'\u2557';     /* ╗ */
+constexpr char32_t DoubleBL = U'\u255A';     /* ╚ */
+constexpr char32_t DoubleBR = U'\u255D';     /* ╝ */
 
 std::int32_t Cells(std::string_view Text) { return static_cast<std::int32_t>(tui::CellsOf(Text)); }
 
 // A frame of these glyphs round Area, and what each edge is made of.
 struct RuleSet {
-    char Across, Down, TopLeft, TopRight, BottomLeft, BottomRight;
+    char32_t Across, Down, TopLeft, TopRight, BottomLeft, BottomRight;
 };
 
 void Edge(tui::Frame &Out, core::Rect Area, const RuleSet &Of, tui::TextStyle Style)

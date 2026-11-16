@@ -61,11 +61,11 @@ std::size_t NoteText::After(const std::string &Line, std::size_t Byte) const noe
     return std::min(Line.size(), Byte + tui::GlyphAt(Line, Byte).Length);
 }
 
-bool NoteText::Type(char Typed)
+bool NoteText::Type(std::string_view Typed)
 {
-    if (Size() >= MostBytes) return false;
-    Lines[Caret.Line].insert(Caret.Byte, 1, Typed);
-    Caret.Byte++;
+    if (Size() + Typed.size() > MostBytes) return false;
+    Lines[Caret.Line].insert(Caret.Byte, Typed);
+    Caret.Byte += Typed.size();
     Wanted = NoColumn;
     Edited = true;
     return true;

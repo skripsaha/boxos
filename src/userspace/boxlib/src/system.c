@@ -416,6 +416,25 @@ int proc_crew(const char *tag, ProcMate **out_mates, uint32_t *out_total)
     return (int)delivered;
 }
 
+int journey_read(JourneyHead *head, JourneyMoment moments[JOURNEY_MOMENTS_MAX])
+{
+    if (!head || !moments) return -ERR_INVALID_ARGUMENT;
+
+    uint8_t  answer[sizeof(JourneyHead) + JOURNEY_MOMENTS_MAX * sizeof(JourneyMoment)];
+    uint32_t got = 0;
+    int rc = MfCall1(DECK_SYSTEM, SYSTEM_OP_JOURNEY, NULL, 0, NULL, 0, answer, sizeof(answer), &got,
+                     BOX_ANSWER_GUARANTEED, NULL);
+    if (rc != 0) return box_fail(rc);
+    if (got < sizeof(JourneyHead)) return -ERR_INTERNAL;
+
+    memcpy(head, answer, sizeof(JourneyHead));
+    if (head->count > JOURNEY_MOMENTS_MAX || head->from_loader > head->count ||
+        got != sizeof(JourneyHead) + (uint32_t)head->count * sizeof(JourneyMoment))
+        return -ERR_INTERNAL;
+    memcpy(moments, answer + sizeof(JourneyHead), (uint32_t)head->count * sizeof(JourneyMoment));
+    return 0;
+}
+
 /* The roster's answer — boxos_decks.h SYSTEM_OP_ROSTER holds the layout — and
  * its asks, which grow as the crew's do. */
 #define ROSTER_HEADER   8u

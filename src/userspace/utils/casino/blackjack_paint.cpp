@@ -191,9 +191,9 @@ void Blackjack::PaintLabels(tui::Frame &Out, const Layout &Where, std::uint64_t 
             }
         }
         const Color TotalInk = Says == "BUST" ? Shown.Lost : Says == "BLACKJACK" ? Shown.Gold : Turn ? Shown.Gold : Shown.Text;
-        const std::string Mark = Turn && Seats > 1 ? std::string("\x10 ") : std::string();
+        const std::string Mark = Turn && Seats > 1 ? std::string("\u25BA ") : std::string();
         const auto Centered = [&](std::int32_t Row, const std::string &Words, Color With) {
-            const auto Wide = static_cast<std::int32_t>(Words.size());
+            const auto Wide = static_cast<std::int32_t>(tui::CellsOf(Words));
             Print(Out, {(Of.Left + Of.Right) / 2 - Wide / 2, Row}, Words, With);
         };
         const bool Settled = !Playing && Held.Result != Outcome::Open;

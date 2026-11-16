@@ -257,11 +257,25 @@ static int change_tags(BoxSettings *settings, const char *tags, SettingSpan *out
     return settings_refuse(settings, line);
 }
 
+/* The person's file of out->Program found and read, and the settings put
+ * together with out->Declared: 0, or the settings released and an error. */
+static int settings_take(BoxSettings *out)
+{
+    char *saying = NULL;
+    int   rc;
+    if ((rc = settings_file_find(out->Program, &out->File, &saying)) == 0 && out->File != 0)
+        rc = settings_file_read(out->File, &out->Chosen, &out->ChosenSize);
+    if (rc == 0 && saying) rc = settings_say(out, saying);
+    free(saying);
+    if (rc == 0) rc = settings_assemble(out);
+    if (rc != 0) settings_release(out);
+    return rc;
+}
+
 int settings_read(file_id_t program, BoxSettings *out)
 {
     char  *text = NULL;
     size_t size = 0;
-    char  *saying = NULL;
     int    rc;
 
     if (!out) return -ERR_INVALID_ARGUMENT;
@@ -273,14 +287,18 @@ int settings_read(file_id_t program, BoxSettings *out)
     while (size > 0 && text[size - 1] == '\0') size--;
     out->Declared     = text;
     out->DeclaredSize = size;
+    return settings_take(out);
+}
 
-    if ((rc = settings_file_find(out->Program, &out->File, &saying)) == 0 && out->File != 0)
-        rc = settings_file_read(out->File, &out->Chosen, &out->ChosenSize);
-    if (rc == 0 && saying) rc = settings_say(out, saying);
-    free(saying);
-    if (rc == 0) rc = settings_assemble(out);
-    if (rc != 0) settings_release(out);
-    return rc;
+int settings_read_declared(const char *program, const char *declared, size_t size, BoxSettings *out)
+{
+    if (!out || !program || !declared || strlen(program) >= sizeof(out->Program)) return -ERR_INVALID_ARGUMENT;
+    memset(out, 0, sizeof(*out));
+    memcpy(out->Program, program, strlen(program) + 1);
+    if (!(out->Declared = malloc(size ? size : 1))) return -ERR_NO_MEMORY;
+    memcpy(out->Declared, declared, size);
+    out->DeclaredSize = size;
+    return settings_take(out);
 }
 
 int settings_set(BoxSettings *settings, const char *tags, const char *path, const char *value, const char **why)

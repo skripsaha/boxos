@@ -34,10 +34,11 @@ constexpr float CornerRadius = 5.0f / 8.0f;
 
 const Color Skin = Color::Rgb(0xE8, 0xB8, 0x90);
 
-constexpr char Head      = 0x02;
-constexpr char FullBlock = static_cast<char>(0xDB);
-constexpr char LowerHalf = static_cast<char>(0xDC);
-constexpr char UpperHalf = static_cast<char>(0xDF);
+constexpr char32_t Head      = U'\u263B';   /* ☻ */
+constexpr char32_t FullBlock = U'\u2588';   /* █ */
+constexpr char32_t LowerHalf = U'\u2584';   /* ▄ */
+constexpr char32_t UpperHalf = U'\u2580';   /* ▀ */
+constexpr char32_t Jewel     = U'\u2022';   /* • */
 
 // Where a pip stands: a column from -1 to 1 and a share of the way down.
 struct Pip {
@@ -154,7 +155,7 @@ void Body(Canvas &Pixels, const Look &Shown, bool Back, float Left, float Top, f
     });
 }
 
-void Put(tui::Frame &Out, std::int32_t Col, std::int32_t Row, char Glyph, Color Ink, Color Paper)
+void Put(tui::Frame &Out, std::int32_t Col, std::int32_t Row, char32_t Glyph, Color Ink, Color Paper)
 {
     Out.Put({Col, Row}, Glyph, tui::TextStyle{Ink, Paper});
 }
@@ -162,12 +163,12 @@ void Put(tui::Frame &Out, std::int32_t Col, std::int32_t Row, char Glyph, Color 
 // The shadow a card casts to the right and below, as thin as a half cell.
 void Shadow(tui::Frame &Out, const Look &Shown, painter::core::Point At, CardSize Size)
 {
-    const auto Cast = [&](std::int32_t Col, std::int32_t Row, char Glyph) {
+    const auto Cast = [&](std::int32_t Col, std::int32_t Row, char32_t Glyph) {
         const tui::Cell Beneath = Out.Read({Col, Row});
         if (Beneath.Background == Shown.CardFace || Beneath.Glyph != ' ') return;
         Put(Out, Col, Row, Glyph, Shade(Beneath.Background, 0.45f), Beneath.Background);
     };
-    for (std::int32_t Row = At.Y + 1; Row <= At.Y + Size.Rows; Row++) Cast(At.X + Size.Cols, Row, static_cast<char>(0xDD));
+    for (std::int32_t Row = At.Y + 1; Row <= At.Y + Size.Rows; Row++) Cast(At.X + Size.Cols, Row, Glyphs::LeftHalf);
     for (std::int32_t Col = At.X + 1; Col < At.X + Size.Cols; Col++) Cast(Col, At.Y + Size.Rows, UpperHalf);
 }
 
@@ -209,16 +210,16 @@ void Plaque(tui::Frame &Out, const Look &Shown, Card One, painter::core::Point A
 
 // The head-dress of a court card, as wide as the portrait allows, and its
 // color; Turned for the half that stands on its head.
-std::string Crown(int Rank, std::int32_t Wide, bool Turned, Color &Ink, const Look &Shown)
+std::u32string Crown(int Rank, std::int32_t Wide, bool Turned, Color &Ink, const Look &Shown)
 {
-    std::string Full = Rank == 13 ? std::string{LowerHalf, UpperHalf, LowerHalf, UpperHalf, LowerHalf}
-                       : Rank == 12 ? std::string{LowerHalf, 0x07, LowerHalf, 0x07, LowerHalf}
-                                    : std::string{LowerHalf, LowerHalf, LowerHalf, LowerHalf, LowerHalf};
+    std::u32string Full = Rank == 13 ? std::u32string{LowerHalf, UpperHalf, LowerHalf, UpperHalf, LowerHalf}
+                          : Rank == 12 ? std::u32string{LowerHalf, Jewel, LowerHalf, Jewel, LowerHalf}
+                                       : std::u32string{LowerHalf, LowerHalf, LowerHalf, LowerHalf, LowerHalf};
     Ink = Rank == 11 ? Shown.Black : Shown.Gold;
     const auto Keep = std::min<std::size_t>(static_cast<std::size_t>(Wide), Full.size());
-    std::string Cut = Full.substr((Full.size() - Keep) / 2, Keep);
+    std::u32string Cut = Full.substr((Full.size() - Keep) / 2, Keep);
     if (Turned)
-        for (char &Glyph : Cut) Glyph = Glyph == LowerHalf ? UpperHalf : Glyph == UpperHalf ? LowerHalf : Glyph;
+        for (char32_t &Glyph : Cut) Glyph = Glyph == LowerHalf ? UpperHalf : Glyph == UpperHalf ? LowerHalf : Glyph;
     return Cut;
 }
 
@@ -246,11 +247,11 @@ void Portrait(tui::Frame &Out, const Look &Shown, Card One, painter::core::Point
     for (std::int32_t Col = Left + 1; Col < Left + Wide - 1; Col++) Out.Put({Col, Line}, Glyphs::RuleAcross, Rule);
     Out.Put({Middle, Line}, SuitGlyph(One.Of), Rule);
     for (int Turned = 0; Turned < 2; Turned++) {
-        const std::int32_t Dir = Turned ? 1 : -1, Start = Turned ? Line + 1 : Line - 1;
-        std::int32_t       Row = Start + Dir * (Half - 1);
-        Color              CrownInk;
-        const std::string  Hat = Crown(One.Rank, Inner, Turned != 0, CrownInk, Shown);
-        const auto         Width = static_cast<std::int32_t>(Hat.size());
+        const std::int32_t   Dir = Turned ? 1 : -1, Start = Turned ? Line + 1 : Line - 1;
+        std::int32_t         Row = Start + Dir * (Half - 1);
+        Color                CrownInk;
+        const std::u32string Hat = Crown(One.Rank, Inner, Turned != 0, CrownInk, Shown);
+        const auto           Width = static_cast<std::int32_t>(Hat.size());
         for (std::int32_t At2 = 0; At2 < Width; At2++) Put(Out, Middle - Width / 2 + At2, Row, Hat[static_cast<std::size_t>(At2)], CrownInk, Shown.CardFace);
         Row -= Dir;
         if (Half >= 2) Put(Out, Middle, Row, Head, Skin, Shown.CardFace);

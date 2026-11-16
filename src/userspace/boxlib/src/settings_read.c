@@ -55,7 +55,8 @@ void settings_wants(const BoxSetting *setting, char *out, size_t capacity)
     case SETTING_ON_OR_OFF: snprintf(out, capacity, "on or off"); return;
     case SETTING_NUMBER:
         snprintf(out, capacity, "a whole number from %lld to %lld%s%s%s", (long long)setting->From,
-                 (long long)setting->To, setting->Unit[0] ? " " : "", setting->Unit, setting->Off ? ", or off" : "");
+                 (long long)setting->To, setting->Unit[0] ? " " : "", setting->Unit, setting->Zero[0] ? ", or " : "");
+        if (setting->Zero[0]) snprintf(out + strlen(out), capacity - strlen(out), "%s", setting->Zero);
         return;
     case SETTING_WORD: snprintf(out, capacity, "one word"); return;
     case SETTING_TEXT: snprintf(out, capacity, "text on one line"); return;
@@ -126,14 +127,15 @@ static int keep_setting(BoxSettings *settings, BoxSetting *entry, const Setting 
     entry->Depth     = declared->Depth;
     entry->From      = declared->From;
     entry->To        = declared->To;
-    entry->Off       = declared->Off;
     entry->NextStart = declared->NextStart;
     entry->Name      = keep(declared->Name);
     entry->What      = keep(declared->What);
     entry->Default   = keep(declared->Default);
     entry->Unit      = keep(declared->Unit);
     entry->Choices   = keep(declared->Choices);
-    if (!entry->Name || !entry->What || !entry->Default || !entry->Unit || !entry->Choices) return -ERR_NO_MEMORY;
+    entry->Zero      = keep(declared->Zero);
+    if (!entry->Name || !entry->What || !entry->Default || !entry->Unit || !entry->Choices || !entry->Zero)
+        return -ERR_NO_MEMORY;
 
     /* Its path: the path of what holds it — put together before it — and its name. */
     size_t      parent = index_of_line(settings, declared->Parent);
@@ -461,6 +463,7 @@ static void release_assembled(BoxSettings *settings)
         free((void *)entry->Default);
         free((void *)entry->Unit);
         free((void *)entry->Choices);
+        free((void *)entry->Zero);
         forget_value(&entry->Value);
     }
     free(settings->Settings);

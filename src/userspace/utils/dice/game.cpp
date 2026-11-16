@@ -90,7 +90,7 @@ bool Game::OnKey(const tui::KeyEvent &Key)
         return true;
     }
     Said.clear();
-    const kb_event_t Raw{Key.Scancode, Key.Ascii, Key.Mods};
+    const kb_event_t Raw{Key.Character, Key.Scancode, Key.Mods};
     if (KeyChordMatches(&Shown.Keys[KeyHelp], &Raw)) {
         Help = true;
         return true;
@@ -101,7 +101,7 @@ bool Game::OnKey(const tui::KeyEvent &Key)
     }
     if (Key.IsCtrl() || Key.IsAlt() || Key.IsExtended()) return true;
 
-    switch (Key.Ascii) {
+    switch (Key.Character) {
     case tui::KeyCodes::Escape:
         return false;
     case tui::KeyCodes::Enter:
@@ -120,7 +120,7 @@ bool Game::OnKey(const tui::KeyEvent &Key)
     default:
         break;
     }
-    if (Key.Ascii >= ' ' && Key.Ascii < 0x7F && Typed.size() < MostTyped) Typed += Key.Ascii;
+    if (Key.Character >= ' ' && Key.Character < 0x7F && Typed.size() < MostTyped) Typed += Key.Character;
     return true;
 }
 

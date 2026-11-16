@@ -60,6 +60,11 @@ GlassKind ConsoleSurface::Glass() const noexcept
     return State ? State->Canvas.Glass() : GlassKind::Pixels;
 }
 
+std::uint8_t ConsoleSurface::Mosaics() const noexcept
+{
+    return State ? State->Canvas.Mosaics() : 0;
+}
+
 bool ConsoleSurface::IsOpen() const noexcept
 {
     return State && State->Canvas.IsOpen();

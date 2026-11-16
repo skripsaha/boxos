@@ -48,7 +48,7 @@ public:
     void Kept() noexcept { Edited = false; }
 
     // Type and NewLine: false when the note is full.
-    bool Type(char Typed);
+    bool Type(std::string_view Typed);
     bool NewLine();
     void Backspace();
     void Delete();

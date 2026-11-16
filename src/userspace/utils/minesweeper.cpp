@@ -29,6 +29,7 @@
 #include "painter/core/color.h"
 #include "painter/tui/glyph.h"
 #include "painter/tui/stage.h"
+#include "painter/tui/text.h"
 
 BOX_FORM("takes optional words \"the field: beginner, intermediate or expert\"\n");
 
@@ -75,8 +76,8 @@ const Color NumberInks[9] = {Sunken,
                              Color::Rgb(0xC0, 0x70, 0xFF), Color::Rgb(0xE0, 0xA0, 0x30), Color::Rgb(0x40, 0xD0, 0xD0),
                              Color::Rgb(0xEE, 0xEE, 0xEE), Color::Rgb(0x9A, 0x9A, 0x9A)};
 
-constexpr char FlagGlyph = painter::tui::Glyphs::Pointer;
-constexpr char MineGlyph = static_cast<char>(0x0F);
+constexpr char32_t FlagGlyph = painter::tui::Glyphs::Pointer;
+constexpr char32_t MineGlyph = U'\u263C';   /* ☼ */
 
 /* Square sizes, biggest first: the first the glass holds is taken. */
 constexpr int TileSizes[][2] = {{6, 3}, {4, 2}, {3, 1}, {2, 1}};
@@ -151,13 +152,13 @@ void Board::Tile(int X, int Y, const std::vector<int> &Rank, int ShownMines)
 {
     painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
     const MineCell &Cell = Field.At(X, Y);
-    bool  Here   = X == CursorX && Y == CursorY;
-    bool  Lost   = Field.State == MineState::Lost;
-    bool  Shown  = Cell.Open || (Lost && Cell.Mine && Rank[static_cast<std::size_t>(Y * Field.Wide + X)] < ShownMines);
-    int   Row    = Top + Y * TileH, Col = Left + X * TileW;
-    char  Mark  = ' ';
-    Color Ink    = TextInk;
-    Color Paper;
+    bool     Here  = X == CursorX && Y == CursorY;
+    bool     Lost  = Field.State == MineState::Lost;
+    bool     Shown = Cell.Open || (Lost && Cell.Mine && Rank[static_cast<std::size_t>(Y * Field.Wide + X)] < ShownMines);
+    int      Row   = Top + Y * TileH, Col = Left + X * TileW;
+    char32_t Mark  = U' ';
+    Color    Ink   = TextInk;
+    Color    Paper;
 
     if (!Shown) {
         Paper = Here ? RaisedHere : TileH > 1 ? Raised : (X + Y) % 2 ? RaisedOdd : RaisedEven;
@@ -173,7 +174,7 @@ void Board::Tile(int X, int Y, const std::vector<int> &Rank, int ShownMines)
             Ink   = MineInk;
             if (X == Field.HitX && Y == Field.HitY) Paper = Blast;
         } else if (Cell.Near) {
-            Mark = static_cast<char>('0' + Cell.Near);
+            Mark = static_cast<char32_t>(U'0' + Cell.Near);
             Ink   = NumberInks[Cell.Near];
         }
     }
@@ -237,9 +238,9 @@ void Board::Foot()
     }
     int Bar = Dimensions.Height - 1, Col = 1;
     FrameBuffer.Fill({0, Bar, Dimensions.Width, 1}, ' ', TextStyle{TextInk, BarPaper});
-    for (auto [Keys, What] : {std::pair{"\x1B\x18\x19\x1A", "move"}, {"space", "open"}, {"f", "flag"},
+    for (auto [Keys, What] : {std::pair{"\u2190\u2191\u2193\u2192", "move"}, {"space", "open"}, {"f", "flag"},
                               {"1 2 3", "field"}, {"r", "new"}, {"q", "leave"}}) {
-        int Wide = static_cast<int>(std::string_view(Keys).size() + std::string_view(What).size()) + 3;
+        int Wide = static_cast<int>(painter::tui::CellsOf(Keys) + std::string_view(What).size()) + 3;
         if (Col + Wide > Dimensions.Width) break;
         Col += static_cast<int>(FrameBuffer.Write({Col, Bar}, Keys, TextStyle{KeyInk, BarPaper}));
         Col += 1;
@@ -301,7 +302,7 @@ bool Board::OnKey(const KeyEvent &Key)
         }
         return true;
     }
-    char Ch = Key.Ascii;
+    char32_t Ch = Key.Character;
     if (Ch >= 'A' && Ch <= 'Z') Ch = static_cast<char>(Ch - 'A' + 'a');
     switch (Ch) {
     case 'q':

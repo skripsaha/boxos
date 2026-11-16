@@ -79,7 +79,7 @@ private:
     void Step(std::int32_t Delta);
     void Write(const char *Bytes, std::size_t Length,
                std::uint32_t Foreground, std::uint32_t Background);
-    void WriteCell(char Glyph, std::uint32_t Foreground, std::uint32_t Background);
+    void WriteCell(char32_t Character, std::uint32_t Foreground, std::uint32_t Background);
     void Newline();
     void CarriageReturn();
     void Backspace(std::uint32_t Foreground, std::uint32_t Background);

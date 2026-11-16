@@ -158,7 +158,8 @@ static inline bool KeyChordMatches(const KeyChord *chord, const kb_event_t *key)
     if ((key->mods & KEY_CHORD_MODS) != chord->Mods) return false;
     bool extended = (key->mods & KB_MOD_EXTENDED) != 0;
     if (extended != (chord->Extended != 0)) return false;
-    return extended ? key->scancode == chord->Code : KeyChordLower((uint8_t)key->ascii) == chord->Code;
+    return extended ? key->scancode == chord->Code
+                    : key->cp < 0x80u && KeyChordLower((uint8_t)key->cp) == chord->Code;
 }
 
 /* The chord said as it is read — "ctrl+alt+q" — into out, NUL-ended, cut to

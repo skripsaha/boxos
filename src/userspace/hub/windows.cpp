@@ -128,13 +128,13 @@ std::optional<asking::Answer> Choose(std::string_view Title, std::span<const std
             continue;
         }
         if (Key.IsExtended()) continue;
-        if (Key.Ascii == tui::KeyCodes::Escape) return asking::Answer::Empty;
-        if (Key.Ascii == tui::KeyCodes::Enter || Key.Ascii == '\r') {
+        if (Key.Character == tui::KeyCodes::Escape) return asking::Answer::Empty;
+        if (Key.Character == tui::KeyCodes::Enter || Key.Character == '\r') {
             Chosen = Marked;
             return asking::Answer::Given;
         }
-        if (Choices.size() <= 9 && Key.Ascii >= '1' && Key.Ascii < static_cast<char>('1' + Choices.size())) {
-            Chosen = static_cast<std::size_t>(Key.Ascii - '1');
+        if (Choices.size() <= 9 && Key.Character >= '1' && Key.Character < static_cast<char32_t>(U'1' + Choices.size())) {
+            Chosen = static_cast<std::size_t>(Key.Character - '1');
             return asking::Answer::Given;
         }
     }

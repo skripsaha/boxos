@@ -54,8 +54,8 @@ public:
     // The wrong letters in the order they were said.
     const std::string &Misses() const { return Order; }
 
-    static bool IsLetter(char Raw);
-    static char Upper(char Raw);
+    static bool IsLetter(char32_t Raw);
+    static char Upper(char32_t Raw);
 
 private:
     static std::size_t Index(char Letter) { return static_cast<std::size_t>(Letter - 'A'); }
