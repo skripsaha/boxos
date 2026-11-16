@@ -3,8 +3,9 @@
  * (KeyPanelAsked, once, after the kernel and the screen are chosen), or open
  * by itself when the last starts did not land (the crossings,
  * gangway_crossings.c). A page of rows: Start, and the pages they open — the
- * start's options, the same seven settings gangway.settings sets, changed for
- * this one start and taken as the file's are; the journals: this start's, the
+ * start's options — what gangway.settings sets of the start and of the panel's
+ * own look, every one but its colours — changed for this one start and taken
+ * as the file's are; the journals: this start's, the
  * log the kernel kept of the start before and the crossings kept
  * (gangway_panel_log.c); and what the loader found and chose — then Restart,
  * Turn off, and a restart into the firmware's own settings. How it looks is
@@ -31,7 +32,9 @@ typedef enum {
     SET_KEEP_LOG,
     SET_SCENE,
     SET_TEXT,
+    SET_FONT,
     SET_THEME,
+    SET_LOGO,
     PANEL_SETTINGS,
 } PanelSetting;
 
@@ -51,7 +54,9 @@ typedef enum {
     ROW_KEEP_LOG,
     ROW_SCENE,
     ROW_TEXT,
+    ROW_FONT,
     ROW_THEME,
+    ROW_LOGO,
     ROW_JOURNAL,
     ROW_PREVIOUS,
     ROW_CROSSINGS,
@@ -66,7 +71,7 @@ typedef enum {
 
 static const char *const g_names[] = {
     "Start", "Start options", "Journals", "About this machine", "Restart", "Turn off", "Firmware settings",
-    "Screen", "Cores", "Startup", "Keep-log", "Scene", "Text size", "Theme",
+    "Screen", "Cores", "Startup", "Keep-log", "Scene", "Text size", "Font", "Theme", "Logo",
     "This start's journal", "The previous start's log", "The crossings",
     "Kernel", "Volume", "Screen", "Processors", "Starts", "Back", NULL,
 };
@@ -81,8 +86,8 @@ typedef enum {
 
 static const PanelRow g_main[]     = { ROW_START, ROW_OPTIONS, ROW_JOURNALS, ROW_ABOUT, ROW_RULE,
                                        ROW_RESTART, ROW_OFF, ROW_FIRMWARE };
-static const PanelRow g_options[]  = { ROW_SCREEN, ROW_CORES, ROW_STARTUP, ROW_KEEP_LOG, ROW_SCENE,
-                                       ROW_TEXT, ROW_THEME, ROW_RULE, ROW_BACK };
+static const PanelRow g_options[]  = { ROW_SCREEN, ROW_CORES, ROW_STARTUP, ROW_KEEP_LOG, ROW_SCENE, ROW_RULE,
+                                       ROW_TEXT, ROW_FONT, ROW_THEME, ROW_LOGO, ROW_RULE, ROW_BACK };
 static const PanelRow g_journals[] = { ROW_JOURNAL, ROW_PREVIOUS, ROW_CROSSINGS, ROW_RULE, ROW_BACK };
 static const PanelRow g_about[]    = { ROW_KERNEL, ROW_VOLUME, ROW_FOUND_SCREEN, ROW_PROCESSORS, ROW_STARTS,
                                        ROW_RULE, ROW_BACK };
@@ -103,8 +108,8 @@ typedef struct {
     int         firmware_ui;              /* the firmware can be asked to start its settings */
     /* Each setting's value — screen: 0 auto, else sizes[v - 1]; cores: 0 all,
      * else so many; startup: BOARDING_STARTUP_*; keep-log, scene: 1 on;
-     * text-size: px, 0 auto; theme: GANGWAY_THEME_* — and as the panel found
-     * it. */
+     * text size: px, 0 auto; font: GANGWAY_FONT_*; theme: GANGWAY_THEME_*;
+     * logo: 1 on — and as the panel found it. */
     uint32_t    value[PANEL_SETTINGS];
     uint32_t    came[PANEL_SETTINGS];
     PanelSheet  sheet;
@@ -255,7 +260,9 @@ static void PanelTake(Panel *p, const FbInfo *fb, uint8_t why, uint32_t misses)
     p->came[SET_KEEP_LOG] = g_settings.keep_log;
     p->came[SET_SCENE]    = g_settings.scene;
     p->came[SET_TEXT]     = g_settings.text_size;
+    p->came[SET_FONT]     = g_settings.text_font;
     p->came[SET_THEME]    = g_settings.theme;
+    p->came[SET_LOGO]     = g_settings.logo;
     MemCopy(p->value, p->came, sizeof(p->value));
     p->sheet  = SHEET_MAIN;
     p->chosen = 0;
@@ -284,7 +291,7 @@ static int IsInfo(PanelRow row)
 
 static int IsSetting(PanelRow row)
 {
-    return row >= ROW_SCREEN && row <= ROW_THEME;
+    return row >= ROW_SCREEN && row <= ROW_LOGO;
 }
 
 static int Choosable(PanelRow row)
@@ -312,7 +319,9 @@ static void ValueSaid(PanelWords *w, const Panel *p, PanelSetting s)
         return;
     case SET_STARTUP:  WordsPut(w, v == BOARDING_STARTUP_ALL ? "all" : "quiet"); return;
     case SET_KEEP_LOG:
-    case SET_SCENE:    WordsPut(w, v ? "on" : "off"); return;
+    case SET_SCENE:
+    case SET_LOGO:     WordsPut(w, v ? "on" : "off"); return;
+    case SET_FONT:     WordsPut(w, v == GANGWAY_FONT_BOLD ? "bold" : "regular"); return;
     case SET_TEXT:
         if (v) {
             WordsNum(w, v);
@@ -473,7 +482,8 @@ static void Back(Panel *p)
 }
 
 /* A setting's value one step on (`up`) or back, round from the last to the
- * first; the panel's own letters and colours taken at once. */
+ * first; the panel's own look — its letters, colours and logo — taken at
+ * once. */
 static void Step(Panel *p, PanelSetting s, int up)
 {
     uint32_t *v = &p->value[s];
@@ -491,9 +501,11 @@ static void Step(Panel *p, PanelSetting s, int up)
         if (up) *v = *v >= last ? 0u : *v + 1u;
         else *v = *v ? *v - 1u : last;
     }
-    if (s == SET_TEXT || s == SET_THEME) {
+    if (s == SET_TEXT || s == SET_FONT || s == SET_THEME || s == SET_LOGO) {
         g_settings.text_size = p->value[SET_TEXT];
+        g_settings.text_font = (uint8_t)p->value[SET_FONT];
         g_settings.theme     = (uint8_t)p->value[SET_THEME];
+        g_settings.logo      = (uint8_t)p->value[SET_LOGO];
         DrawUse(&p->fb);
         (void)PanelAgain(p);
     }
@@ -620,9 +632,13 @@ static void Leave(const Panel *p, FbInfo *fb)
         changed |= GANGWAY_SET_SCENE;
     }
     g_settings.text_size = p->value[SET_TEXT];
+    g_settings.text_font = (uint8_t)p->value[SET_FONT];
     g_settings.theme     = (uint8_t)p->value[SET_THEME];
-    if (p->value[SET_TEXT] != p->came[SET_TEXT]) changed |= GANGWAY_SET_TEXT;
+    g_settings.logo      = (uint8_t)p->value[SET_LOGO];
+    if (p->value[SET_TEXT] != p->came[SET_TEXT]) changed |= GANGWAY_SET_TEXT_SIZE;
+    if (p->value[SET_FONT] != p->came[SET_FONT]) changed |= GANGWAY_SET_TEXT_FONT;
     if (p->value[SET_THEME] != p->came[SET_THEME]) changed |= GANGWAY_SET_THEME;
+    if (p->value[SET_LOGO] != p->came[SET_LOGO]) changed |= GANGWAY_SET_LOGO;
     g_settings.set |= changed;
 
     PrintAloud(1);

@@ -884,6 +884,10 @@ IMPRINT_FONT   = $(TYPECASE_DIR)/fonts/JetBrainsMonoNL-Regular.ttf
 IMPRINT_TOOL   = $(BUILDDIR)/imprint
 IMPRINT_DIR    = $(BUILDDIR)/imprint_data
 IMPRINT_DATA   = $(IMPRINT_DIR)/boxos_imprint_data.h
+# Gangway's second face, for gangway.settings `text font bold`: the same
+# characters pressed from the bold of the same font.
+IMPRINT_BOLD_FONT = $(TYPECASE_DIR)/fonts/JetBrainsMonoNL-Bold.ttf
+IMPRINT_BOLD      = $(IMPRINT_DIR)/boxos_imprint_bold_data.h
 CFLAGS        += -I$(IMPRINT_DIR)
 
 # Utility ELF binaries
@@ -947,7 +951,7 @@ GANGWAY_HDRS   = src/boot/uefi/gangway.h src/boot/uefi/uefi.h \
                  src/include/settings_reader.h src/include/settings_chosen.h src/include/key_chord.h \
                  src/include/kb_event.h src/include/boxos_logkeep.h src/include/boxos_crossings.h \
                  src/include/boxos_brush.h src/include/boxos_scene.h src/include/boxos_scene_play.h \
-                 $(IMPRINT_DATA)
+                 $(IMPRINT_DATA) $(IMPRINT_BOLD)
 GANGWAY_JUMP   = src/boot/uefi/gangway_jump.asm
 # The panel's logo, kept in the loader (gangway_logo.asm): duppo-word, still.
 GANGWAY_LOGO   = src/boot/uefi/gangway_logo.asm
@@ -1356,6 +1360,10 @@ scenes-draw:
 $(IMPRINT_DATA): $(IMPRINT_TOOL) $(IMPRINT_FONT)
 	@mkdir -p $(@D)
 	@$(IMPRINT_TOOL) $(IMPRINT_FONT) $@
+
+$(IMPRINT_BOLD): $(IMPRINT_TOOL) $(IMPRINT_BOLD_FONT)
+	@mkdir -p $(@D)
+	@$(IMPRINT_TOOL) $(IMPRINT_BOLD_FONT) $@ Bold
 
 # The one file of the kernel that includes the imprint's data.
 $(BUILDDIR)/kernel/drivers/video/emergency_screen.o: $(IMPRINT_DATA)

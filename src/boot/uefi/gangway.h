@@ -163,12 +163,29 @@ const LecternKernel *KernelChosen(void);
 #define GANGWAY_SET_CORES    4u
 #define GANGWAY_SET_KEEP_LOG 8u
 #define GANGWAY_SET_SCENE    16u
-#define GANGWAY_SET_TEXT     32u
-#define GANGWAY_SET_THEME    64u
+#define GANGWAY_SET_TEXT_SIZE 32u
+#define GANGWAY_SET_TEXT_FONT 64u
+#define GANGWAY_SET_THEME     128u
+#define GANGWAY_SET_COLORS    256u
+#define GANGWAY_SET_LOGO      512u
 
-/* The panel's colours (theme). */
-#define GANGWAY_THEME_DARK  0u
-#define GANGWAY_THEME_LIGHT 1u
+/* The panel's colours (theme) and the face of its letters (text font). */
+#define GANGWAY_THEME_DARK   0u
+#define GANGWAY_THEME_LIGHT  1u
+#define GANGWAY_FONT_REGULAR 0u
+#define GANGWAY_FONT_BOLD    1u
+
+/* The colours a person may set over the theme's (colors), in the order of the
+ * declaration. */
+typedef enum {
+    GANGWAY_COLOR_PAGE,
+    GANGWAY_COLOR_TEXT,
+    GANGWAY_COLOR_TITLE,
+    GANGWAY_COLOR_HINT,
+    GANGWAY_COLOR_CHOICE,
+    GANGWAY_COLOR_NOTE,
+    GANGWAY_COLORS,
+} GangwayColor;
 
 /* The longest text of tags the person may ask the scene by, and how many. */
 #define SCENE_TAGS_BYTES 256u
@@ -183,7 +200,11 @@ typedef struct {
     uint8_t  scene;           /* 1: the scene's first frame drawn as the machine starts (gangway_scene.c) */
     uint32_t cores;           /* the most processors the kernel starts, 0 for every one */
     uint32_t text_size;       /* how tall the panel's letters are, px: 0 for the screen to say (auto) */
+    uint8_t  text_font;       /* GANGWAY_FONT_* */
     uint8_t  theme;           /* GANGWAY_THEME_* */
+    uint8_t  logo;            /* 1: Duppo's logo beside the panel */
+    uint32_t colors[GANGWAY_COLORS];   /* 0xRRGGBB, each over the theme's where its bit is in colors_set */
+    uint32_t colors_set;
     /* The tags the person asks the scene by — none: boot.scene, by its name —
      * their text, and its words: SCENE_ASKED_MOST at the most. */
     char        scene_tags[SCENE_TAGS_BYTES];

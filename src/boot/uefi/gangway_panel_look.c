@@ -13,7 +13,11 @@
  * Everything is drawn into a canvas as large as the screen, in memory the
  * firmware gives while the panel stands, and shown from it: the whole once,
  * then the page's column alone on every key. The letters are the person's
- * text-size, or a size the screen holds comfortably; the colours their theme.
+ * text size and font, or a size the screen holds comfortably; the colours
+ * their theme's, each colour they set standing over it — the plashka's light
+ * falls the same way down whatever colour they choose. With the logo off the
+ * page stands in the middle of the screen, and what would be said under the
+ * logo above it.
  */
 
 #include "gangway.h"
@@ -49,6 +53,10 @@ static const BoxBrushStop g_plashka[] = {
 
 typedef struct {
     FbInfo               fb;
+    LookInks             own;             /* the theme's, the person's colours over it */
+    BoxBrushStop         plashka[5];
+    int                  logo;            /* Duppo's logo beside the page */
+    const char          *said, *under;    /* what is said under it — over the page with no logo */
     EFI_PHYSICAL_ADDRESS room;
     UINTN                pages;
     BoxBrushCanvas       canvas;
@@ -115,7 +123,48 @@ static void Solid(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r, uint32_
     Rounded(x, y, w, h, r, &paint);
 }
 
-/* The size the rows are drawn in: the person's text-size, or by the screen's
+/* `rgb` lit `per` percent: past 100 toward white, under it toward black. */
+static uint32_t Shade(uint32_t rgb, uint32_t per)
+{
+    uint32_t out = 0;
+    for (uint32_t s = 0; s <= 16u; s += 8u) {
+        uint32_t c = (rgb >> s) & 255u;
+        c = per >= 100u ? c + (255u - c) * (per - 100u) / 100u : c * per / 100u;
+        out |= c << s;
+    }
+    return out;
+}
+
+/* Whether `rgb` is a light colour, by how bright it looks. */
+static int Light(uint32_t rgb)
+{
+    return ((rgb >> 16 & 255u) * 299u + (rgb >> 8 & 255u) * 587u + (rgb & 255u) * 114u) / 1000u >= 128u;
+}
+
+/* The colours as the person has them: the theme's, each they set over it; the
+ * plashka Duppo's own, or their choice with his light falling down it. */
+static void LookInksTake(void)
+{
+    const uint32_t set = g_settings.colors_set;
+    const uint32_t *c  = g_settings.colors;
+    g_look.own = g_settings.theme == GANGWAY_THEME_LIGHT ? g_light : g_dark;
+    if (set & 1u << GANGWAY_COLOR_PAGE) g_look.own.paper = c[GANGWAY_COLOR_PAGE];
+    if (set & 1u << GANGWAY_COLOR_TEXT) g_look.own.quiet = c[GANGWAY_COLOR_TEXT];
+    if (set & 1u << GANGWAY_COLOR_TITLE) g_look.own.ink = c[GANGWAY_COLOR_TITLE];
+    if (set & 1u << GANGWAY_COLOR_HINT) {
+        g_look.own.faint = c[GANGWAY_COLOR_HINT];
+        g_look.own.rule  = c[GANGWAY_COLOR_HINT];
+    }
+    if (set & 1u << GANGWAY_COLOR_NOTE) g_look.own.told = c[GANGWAY_COLOR_NOTE];
+    g_look.inks = &g_look.own;
+    MemCopy(g_look.plashka, g_plashka, sizeof(g_plashka));
+    if (set & 1u << GANGWAY_COLOR_CHOICE) {
+        static const uint32_t per[5] = { 102u, 107u, 100u, 78u, 60u };
+        for (uint32_t i = 0; i < 5u; i++) g_look.plashka[i].Color = 0xFF000000u | Shade(c[GANGWAY_COLOR_CHOICE], per[i]);
+    }
+}
+
+/* The size the rows are drawn in: the person's text size, or by the screen's
  * height — and never one whose longest row would not fit the column. */
 static uint32_t LookSize(uint32_t height, int32_t column)
 {
@@ -131,7 +180,14 @@ static uint32_t LookSize(uint32_t height, int32_t column)
  * the logo over the page on one standing up. */
 static void LookLay(uint32_t w, uint32_t h)
 {
-    if ((uint64_t)w * 10u >= (uint64_t)h * 12u) {
+    if (!g_look.logo) {
+        const int wide = (uint64_t)w * 10u >= (uint64_t)h * 12u;
+        g_look.lx = g_look.ly = g_look.lw = g_look.lh = 0;
+        g_look.mw   = (int32_t)(w * (wide ? 40u : 76u) / 100u);
+        g_look.size = LookSize(h, g_look.mw);
+        g_look.ch   = (int32_t)DrawImprint()->Sizes[g_look.size].Height;
+        g_look.mx   = ((int32_t)w - g_look.mw - 2 * g_look.ch) / 2 + 2 * g_look.ch;
+    } else if ((uint64_t)w * 10u >= (uint64_t)h * 12u) {
         g_look.lx = (int32_t)(w * 6u / 100u);
         g_look.lw = (int32_t)(w * 38u / 100u);
         g_look.ly = 0;
@@ -146,12 +202,12 @@ static void LookLay(uint32_t w, uint32_t h)
         g_look.mx = (int32_t)(w * 14u / 100u);
         g_look.mw = (int32_t)(w * 76u / 100u);
     }
-    g_look.size  = LookSize(h, g_look.mw);
+    if (g_look.logo) g_look.size = LookSize(h, g_look.mw);
     g_look.small = g_look.size ? g_look.size - 1u : 0u;
     g_look.ch    = (int32_t)DrawImprint()->Sizes[g_look.size].Height;
     g_look.cw    = (int32_t)DrawImprint()->Sizes[g_look.size].Width;
     g_look.sh    = (int32_t)DrawImprint()->Sizes[g_look.small].Height;
-    g_look.left  = g_look.mx - 3 * g_look.ch;
+    g_look.left  = g_look.logo ? g_look.mx - 3 * g_look.ch : 0;
 }
 
 /* The logo in its room: the scene's first frame, its paper the theme's. */
@@ -192,20 +248,26 @@ int PanelLookBegin(const FbInfo *fb, const char *said, const char *under)
     PanelLookEnd();
     if (!fb->addr || !fb->width || !fb->height) return 0;
     MemCopy(&g_look.fb, fb, sizeof(*fb));
-    g_look.inks = g_settings.theme == GANGWAY_THEME_LIGHT ? &g_light : &g_dark;
+    g_look.logo  = g_settings.logo;
+    g_look.said  = said;
+    g_look.under = under;
+    LookInksTake();
     LookLay(fb->width, fb->height);
 
-    const int      light = g_settings.theme == GANGWAY_THEME_LIGHT;
+    /* The logo drawn for the page it stands on: its light variant on a light
+     * page, and the page's own colour as its paper. */
+    const int      light = Light(g_look.own.paper);
     const uint8_t *logo  = light ? GangwayLogoLight : GangwayLogoDark;
-    const uint8_t *end   = light ? GangwayLogoLightEnd : GangwayLogoDarkEnd;
+    const uint64_t size  = (uint64_t)((light ? GangwayLogoLightEnd : GangwayLogoDarkEnd) - logo);
     BoxScene       scene;
-    const char    *bad   = BoxSceneRead(logo, (uint64_t)(end - logo), &scene);
-    const uint64_t figures = bad ? 0u : scene.Head->Figures;
+    const char    *bad   = g_look.logo ? BoxSceneRead(logo, size, &scene) : NULL;
+    const uint64_t figures = g_look.logo && !bad ? scene.Head->Figures : 0u;
     const uint64_t pixels = (uint64_t)fb->width * fb->height * 4u;
     const uint64_t row    = ((uint64_t)fb->width + 2u) * 4u;
     const uint64_t edges  = (uint64_t)BOX_SCENE_EDGES * sizeof(BoxBrushEdge);
     const uint64_t poses  = figures * 2u * (sizeof(BoxScenePose) + sizeof(BoxSceneLaid));
-    const uint64_t bytes  = pixels + row + edges + poses + 8u * 16u;
+    const uint64_t copy   = g_look.logo ? size : 0u;
+    const uint64_t bytes  = pixels + row + edges + poses + copy + 8u * 16u;
     g_look.pages = LookPages(bytes);
     if (EFI_ERROR(g_bs->allocate_pages(AllocateAnyPages, EfiLoaderData, g_look.pages, &g_look.room))) {
         g_look.room = 0;
@@ -227,10 +289,15 @@ int PanelLookBegin(const FbInfo *fb, const char *said, const char *under)
         Print("Gangway: the panel's logo will not read — ");
         Print(bad);
         Print("; the panel is drawn without it\n");
-    } else {
-        LookLogo(&scene, &at);
+    } else if (g_look.logo) {
+        uint8_t *own = Carve(&at, copy);
+        MemCopy(own, logo, copy);
+        if (!BoxSceneRead(own, copy, &scene)) {
+            ((BoxSceneHead *)(uintptr_t)scene.Head)->Paper = g_look.own.paper;
+            LookLogo(&scene, &at);
+        }
+        LookSaid(said, under);
     }
-    LookSaid(said, under);
     g_look.shown = 0;
     return 1;
 }
@@ -245,7 +312,7 @@ static void LookRow(const PanelLookRow *r, int chosen, int32_t y, int32_t rh, in
     if (chosen) {
         const int32_t px = g_look.mx - 2 * g_look.ch - g_look.ch / 3, pw = g_look.mw + 2 * g_look.ch + g_look.ch / 3;
         const int32_t py = y + rh / 10, ph = rh * 8 / 10;
-        const BoxBrushPaint plashka = { BOX_BRUSH_PAINT_LINEAR, 0, g_plashka, sizeof g_plashka / sizeof g_plashka[0],
+        const BoxBrushPaint plashka = { BOX_BRUSH_PAINT_LINEAR, 0, g_look.plashka, 5,
                                         { 0, ph * ONE, pw * ONE, 0, px * ONE, py * ONE }, NULL, 0, 0, 0 };
         Rounded(px, py, pw, ph, ph / 2, &plashka);
         Say(g_look.size, g_look.mx - g_look.ch - g_look.cw, ty, BOXOS_SYMBOL_DUPPO_TEXT, 0xFFFFFFu);
@@ -277,8 +344,8 @@ void PanelLookPage(const char *title, const PanelLookRow *rows, uint32_t count, 
     if (!g_look.room) return;
     const LookInks *k  = g_look.inks;
     const int32_t   W  = (int32_t)g_look.fb.width, H = (int32_t)g_look.fb.height;
-    const int32_t   rh = 2 * g_look.ch, gap = g_look.ch;
     const int       wide = g_look.ly == 0;
+    const int       over = !g_look.logo && g_look.said;
 
     /* The column's room cleared to the paper: from left of the plashka to the
      * screen's right edge, top to bottom — or under the logo, standing up. */
@@ -286,17 +353,28 @@ void PanelLookPage(const char *title, const PanelLookRow *rows, uint32_t count, 
     BoxBrushRect  room = { g_look.left, top, W - g_look.left, H - top };
     BoxBrushClear(&g_look.canvas, room, k->paper);
 
-    int32_t block = 0, names = 0;
-    for (uint32_t i = 0; i < count; i++) {
-        block += rows[i].label ? rh : gap;
-        if (rows[i].info) {
-            const int32_t a = Across(rows[i].label, g_look.size) + 2 * g_look.cw;
-            if (a > names) names = a;
-        }
+    /* Rows two cells tall and a cell between groups — closer, when the block
+     * would reach down into the hints under it on a short screen. */
+    int32_t rh = 2 * g_look.ch, gap = g_look.ch, block = 0, names = 0;
+    for (int tight = 0; tight < 2; tight++) {
+        block = (title ? 2 * g_look.ch : 0) + (over ? 4 * g_look.ch : 0);
+        for (uint32_t i = 0; i < count; i++) block += rows[i].label ? rh : gap;
+        if (block <= H - 5 * g_look.sh - top - g_look.ch) break;
+        rh  = g_look.ch * 3 / 2;
+        gap = g_look.ch / 2;
     }
-    if (title) block += 2 * g_look.ch;
+    for (uint32_t i = 0; i < count; i++) {
+        if (!rows[i].info) continue;
+        const int32_t a = Across(rows[i].label, g_look.size) + 2 * g_look.cw;
+        if (a > names) names = a;
+    }
     int32_t y = wide ? H / 2 - block / 2 : top + (H - top) / 2 - block / 2;
     if (y < top + g_look.ch) y = top + g_look.ch;
+    if (over) {
+        Say(g_look.size, g_look.mx, y, g_look.said, k->told);
+        if (g_look.under) Say(g_look.small, g_look.mx, y + g_look.ch * 3 / 2, g_look.under, k->faint);
+        y += 4 * g_look.ch;
+    }
 
     if (title) {
         Say(g_look.size, g_look.mx, y, title, k->ink);

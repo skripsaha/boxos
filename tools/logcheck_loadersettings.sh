@@ -16,10 +16,13 @@
 # loadersettings: a UEFI machine of four cores boots with no gangway.settings
 # — Gangway says none is called so, the kernel starts every core and keeps no
 # log through a reset. In the hub the person sets the screen to 1024x768,
-# startup all, cores 2 and keep-log on, each said to take effect when it
+# startup all, cores 2 and keep-log on, and the panel's look — text size 24,
+# text font bold, theme light, colors choice #4060E0, logo off, and colors
+# text set and then said back to default — each said to take effect when it
 # starts next, and halts the machine through bye. At the next start Gangway
-# reads the file, held to the book, says what it sets, and chooses the
-# 1024x768 mode by it; the kernel says what the person asks of it, starts two
+# reads the file, held to the book, says what it sets — the colour said back
+# to default not among it, the theme's again — and chooses the 1024x768 mode
+# by it; the kernel says what the person asks of it, starts two
 # of the four cores, arms the carry-over window, and the display draws on the
 # glass Gangway chose. The image is put back as it was after.
 # ---------------------------------------------------------------------------
@@ -58,7 +61,14 @@ run_loadersettings() {
             loadersettings_say "settings gangway screen 1024x768" "when it starts next" &&
             loadersettings_say "settings gangway startup all" "when it starts next" &&
             loadersettings_say "settings gangway cores 2" "when it starts next" &&
-            loadersettings_say "settings gangway keep-log on" "when it starts next"
+            loadersettings_say "settings gangway keep-log on" "when it starts next" &&
+            loadersettings_say "settings gangway text size 24" "when it starts next" &&
+            loadersettings_say "settings gangway text font bold" "when it starts next" &&
+            loadersettings_say "settings gangway theme light" "when it starts next" &&
+            loadersettings_say "settings gangway colors choice #4060E0" "when it starts next" &&
+            loadersettings_say "settings gangway colors text #FFFFFF" "when it starts next" &&
+            loadersettings_say "settings gangway colors text default" "when it starts next" &&
+            loadersettings_say "settings gangway logo off" "when it starts next"
         type_cmd "bye" && sleep 1 && key_press ret &&
             wait_for_line -E build/serial.log "$STAND_HALT_ENDS" "$WAIT_QUIET_S"
         sleep 2
@@ -73,8 +83,8 @@ run_loadersettings() {
     chk $? "loadersettings (first): with none, the kernel starts every core of the four"
     grep -aq "\[BOOT\] LogKeep is not asked for" "$L"
     chk $? "loadersettings (first): and keeps no log through a reset, saying it is not asked for"
-    [ "$(grep -ac "when it starts next" "$L")" -ge 4 ]
-    chk $? "loadersettings (first): settings takes each of the four, to take effect when it starts next"
+    [ "$(grep -ac "when it starts next" "$L")" -ge 11 ]
+    chk $? "loadersettings (first): settings takes each of the eleven, to take effect when it starts next"
     grep -aqE "$STAND_HALT_ENDS" "$L"
     chk $? "loadersettings (first): the machine halts through bye, the volume synced"
 
@@ -87,8 +97,8 @@ run_loadersettings() {
 
     grep -aqE "Gangway: gangway.settings \(fid [0-9]+\) is attested by the book" "$A"
     chk $? "loadersettings (second): Gangway reads gangway.settings, held to the book ($(grep -a 'Gangway: gangway.settings (fid' "$A" | tr -d '\r' | head -1 | cut -c10-))"
-    grep -aq "Gangway: gangway.settings sets screen 1024x768, startup all, cores 2, keep-log on" "$A"
-    chk $? "loadersettings (second): and says what it sets: screen 1024x768, startup all, cores 2, keep-log on"
+    grep -aq "Gangway: gangway.settings sets screen 1024x768, startup all, cores 2, keep-log on, text size 24, text font bold, theme light, colors choice #4060E0, logo off" "$A"
+    chk $? "loadersettings (second): and says what it sets: screen 1024x768, startup all, cores 2, keep-log on, text size 24, text font bold, theme light, colors choice #4060E0, logo off — colors text, said back to default, the theme's again"
     grep -aq "choice=settings" "$A" && grep -aq "Gangway: GOP 1024x768 " "$A"
     chk $? "loadersettings (second): Gangway chooses the 1024x768 mode by the file ($(grep -a 'Gangway: GOP modes=' "$A" | tr -d '\r' | head -1 | cut -c10-))"
     grep -aq "\[Boarding\]   the person asks of the kernel: startup all cores 2 keep-log on" "$A"
