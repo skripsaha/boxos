@@ -984,6 +984,29 @@ static uint64_t Frame(Stage *T, uint32_t Ms)
     return Drawn;
 }
 
+/* The frame Ms into the act drawn where it changed: the pixels the brush
+ * works through for it — each rectangle's paper, and every figure laid over
+ * the part of it the figure may cover. */
+static uint64_t FrameWork(Stage *T, uint32_t Ms)
+{
+    const BoxScene *S = T->Player.Scene;
+    BoxBrushRect    Dirty[8];
+    const uint32_t  Count = BoxScenePlayAt(&T->Player, Ms, Dirty, 8);
+    uint64_t        Work  = 0;
+    for (uint32_t R = 0; R < Count; R++) {
+        const BoxBrushRect Rect = BoxBrushMeet(Dirty[R], T->Board.Canvas.Clip);
+        if (Rect.Width <= 0 || Rect.Height <= 0) continue;
+        Work += (uint64_t)Rect.Width * (uint64_t)Rect.Height;
+        for (uint32_t I = 0; I < S->Head->Figures; I++) {
+            const BoxBrushRect Met = BoxBrushMeet(T->Laid[I].Bounds, Rect);
+            if (S->Figures[I].Kind != BOX_SCENE_GROUP && T->Laid[I].Opacity && Met.Width > 0 && Met.Height > 0)
+                Work += (uint64_t)Met.Width * (uint64_t)Met.Height;
+        }
+    }
+    BoxScenePlayDraw(&T->Player, Dirty, Count);
+    return Work;
+}
+
 /* The same frame drawn whole by a player of its own, begun from where T's
  * act began: whether it is T's canvas, pixel for pixel. */
 static int SameAsWhole(Stage *T, const BoxScene *S, uint32_t Ms)
@@ -1173,6 +1196,50 @@ static void CheckPlay(const BoxScene *S, const char *Out)
     StageFree(&T);
 }
 
+/* Every frame the display draws — enter, a round and a half of wait, leave
+ * begun in the middle of a round, one each 33 ms on a screen of 1920x1080 —
+ * held to WORK_SCREENS screens' worth of pixels worked through at most: a
+ * scene whose frame costs more is played as a slide show on a machine that
+ * paints in software, however fast the stand's own machine draws it. */
+#define WORK_SCREENS 2u
+
+static void CheckWork(const BoxScene *S)
+{
+    const uint32_t W = 1920, H = 1080;
+    const uint32_t Enter = S->Head->Acts[BOX_SCENE_ENTER], Wait = S->Head->Acts[BOX_SCENE_WAIT];
+    const uint32_t Leave = S->Head->Acts[BOX_SCENE_LEAVE], Cut = Wait + Wait / 2u - 55u;
+    const uint32_t Ends[3] = { Enter, Cut, Leave };
+    uint64_t       Most = 0, Sum = 0, Frames = 0;
+    uint32_t       MostAct = 0, MostMs = 0;
+    char           Line[260];
+    Stage          T;
+    StageMake(&T, S, W, H);
+    (void)FrameWork(&T, 0);
+    for (uint32_t Act = 0; Act < 3u; Act++) {
+        if (Act) {
+            (void)FrameWork(&T, Ends[Act - 1u]);
+            BoxScenePlayAct(&T.Player, Act);
+        }
+        for (uint32_t Ms = 33; Ms <= Ends[Act] + 33u; Ms += 33u) {
+            const uint64_t Work = FrameWork(&T, Ms);
+            Sum += Work;
+            Frames++;
+            if (Work > Most) {
+                Most    = Work;
+                MostAct = Act;
+                MostMs  = Ms;
+            }
+        }
+    }
+    StageFree(&T);
+    snprintf(Line, sizeof(Line),
+             "no frame on a screen of 1920x1080 works through more than %u screens of pixels: the most %.2f, %s at "
+             "%u ms; %.2f a frame over %llu frames",
+             WORK_SCREENS, (double)Most / (W * H), (const char *[]){ "enter", "wait", "leave" }[MostAct], MostMs,
+             (double)Sum / Frames / (W * H), (unsigned long long)Frames);
+    Check(Most <= (uint64_t)WORK_SCREENS * W * H, Line);
+}
+
 /* A copy of the scene with four bytes at Offset written as Value — none when
  * Offset lies past it — read as Cut bytes, or all of it. */
 /* The scene with Span words from Offset set to Value, read Cut bytes long (0:
@@ -1330,6 +1397,7 @@ static int Frames(const char *Path, const char *Out)
     CheckFirstFrames(&S);
     CheckRoom(&S);
     CheckPlay(&S, Out);
+    CheckWork(&S);
     CheckRefusals(Bytes, Size, &S);
     free(Bytes);
     return 1;

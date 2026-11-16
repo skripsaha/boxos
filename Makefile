@@ -863,7 +863,8 @@ TYPECASE_FONTS = $(TYPECASE_DIR)/fonts/JetBrainsMonoNL-Regular.ttf $(TYPECASE_DI
                  $(TYPECASE_DIR)/fonts/JetBrainsMono-OFL.txt
 
 # The boot scenes (boxos_scene.h): each drawing still and alive, dark and
-# light, packed from src/userspace/scenes/NAME-KIND.txt into
+# light, packed from src/userspace/scenes/NAME-KIND.txt — drawn from
+# duppogluten.svg by tools/scenedraw (make scenes-draw) — into
 # build/scenes/KIND/NAME.scene — on the volume they are NAME.scene, told apart
 # by the tags the volume list gives them. The first called boot.scene is the
 # one Gangway draws when nothing else is asked (BOX_SCENE_BOOT); Gangway shows
@@ -1339,6 +1340,13 @@ $(BUILDDIR)/scenes/$(1)/$(2).scene: $(USERSPACE_DIR)/scenes/$(2)-$(1).txt tools/
 	@python3 tools/scene.py pack $$< $$@ >/dev/null
 endef
 $(foreach k,$(SCENE_KINDS),$(foreach n,$(SCENE_NAMES),$(eval $(call SCENE_RULE,$(k),$(n)))))
+
+# The scenes' texts drawn again from the owner's drawing (tools/scenedraw):
+# asked for when the drawing or a design changes, never by a build — it needs
+# rsvg-convert and the Gluten font, which a build does not.
+.PHONY: scenes-draw
+scenes-draw:
+	@python3 tools/scenedraw/draw.py $(USERSPACE_DIR)/scenes/duppogluten.svg $(USERSPACE_DIR)/scenes
 
 $(IMPRINT_DATA): $(IMPRINT_TOOL) $(IMPRINT_FONT)
 	@mkdir -p $(@D)

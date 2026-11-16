@@ -1,5 +1,6 @@
 # boot, alive: duppogluten.svg as drawn — the letters Gluten's outlines, each light kept
 # inside its letter, and Duppo awake
+# Made by tools/scenedraw/draw.py (make scenes-draw), not by hand.
 scene units=1000 paper=#000000 enter=1200 wait=3600 leave=520
 paint p0 radial matrix=9.998854,-0.795145,0.803405,10.102732,-1390.9006,-1073.3660 center=128.0959,112.3141 radius=16.9224 stops=0.5182:#FFE978A0,0.9999:#FF81265C
 paint p1 radial matrix=4.756833,0.000000,0.000000,4.756833,-494.9488,-569.1991 center=103.1307,115.3199 radius=21.1519 stops=0.8737:#FF81265C,1.0000:#FFE86696
@@ -8,22 +9,20 @@ paint p3 radial matrix=9.635710,8.121746,-8.866187,10.518922,-233.8632,-2222.519
 paint p4 radial matrix=2.993027,-0.238016,0.240489,3.024122,-324.3640,-195.3576 center=128.0959,112.3141 radius=16.9224 stops=0.0000:#FFE978A0,0.9297:#FF81265C
 paint p5 radial matrix=1.452124,-0.115478,0.116678,1.467211,-17.6653,-200.8138 center=128.0959,112.3141 radius=16.9224 stops=0.0000:#FFE978A0,0.9297:#FF81265C
 paint p6 radial matrix=2.078117,-0.165259,0.166976,2.099707,-442.2203,-338.1167 center=128.0959,112.3141 radius=16.9224 stops=0.0000:#FFE978A0,0.9297:#FF81265C
-paint p7 solid #FF000000
 group all pivot=-6.393,-31.333
 group duppo in=all pivot=0.000,150.180
 ellipse medium_back in=duppo center=91.983,125.941 radius=44.950,44.995 paint=p4 pivot=91.983,125.941 opacity=0
 ellipse small_back in=duppo center=184.332,-44.927 radius=21.809,21.831 paint=p5 pivot=184.332,-44.927 opacity=0
 ellipse tiny_back in=duppo center=-153.144,-115.030 radius=31.211,31.238 paint=p6 pivot=-153.144,-115.030 opacity=0
 ellipse body in=duppo center=0.000,0.000 radius=150.180,150.307 paint=p0 pivot=0.000,0.000
-group eye in=duppo pivot=-4.459,-20.729
+group eye in=duppo pivot=-4.459,-20.729 tall=0.08
 ellipse socket in=eye center=-4.459,-20.729 radius=100.703,100.789 paint=p1 pivot=-4.459,-20.729
 ellipse white in=eye center=-4.446,-20.715 radius=87.623,87.700 paint=p2 pivot=-4.446,-20.715
 ellipse pupil in=eye center=-6.393,-31.333 radius=68.661,69.555 paint=p3 pivot=-6.393,-31.333
 ellipse medium in=duppo center=91.983,125.941 radius=44.950,44.995 paint=p4 pivot=91.983,125.941
 ellipse small in=duppo center=184.332,-44.927 radius=21.809,21.831 paint=p5 pivot=184.332,-44.927
 ellipse tiny in=duppo center=-153.144,-115.030 radius=31.211,31.238 paint=p6 pivot=-153.144,-115.030
-rect veil box=-6000,-6000,12000,12000 paint=p7 opacity=0
-move eye enter tall 120:1.0000 180:0.0800:in 280:1.0000:out
+move eye enter tall 60:0.0800 240:1.0000:out 420:1.0000 470:0.1200:in 570:1.0000:out
 move duppo enter wide 300:1.0000 400:1.0500:out 520:0.9500:out 760:1.0000:inout 820:1.0700:out 960:1.0000:inout
 move duppo enter tall 300:1.0000 400:0.9300:out 520:1.0600:out 760:1.0000:inout 820:0.9200:out 960:1.0000:inout
 move duppo enter y 400:150.1800 580:126.1512:out 760:150.1800:in
@@ -92,11 +91,29 @@ move eye leave tall 90:1.0000:out
 move pupil leave x 90:-6.3930:out
 move pupil leave y 90:-31.3327:out
 move duppo leave y 90:150.1800:out
-move medium leave opacity 160:0.0000:out
-move medium_back leave opacity 160:0.0000:out
-move small leave opacity 160:0.0000:out
-move small_back leave opacity 160:0.0000:out
-move tiny leave opacity 160:0.0000:out
-move tiny_back leave opacity 160:0.0000:out
-move all leave scale 90:1.0000 520:30.0000:in
-move veil leave opacity 380:0.0000 520:255.0000:in
+move medium leave x 230:0.0000:in
+move medium leave y 230:0.0000:in
+move medium leave scale 230:0.4000:in
+move medium leave opacity 230:0.0000:in
+move medium_back leave x 230:0.0000:in
+move medium_back leave y 230:0.0000:in
+move medium_back leave scale 230:0.4000:in
+move medium_back leave opacity 230:0.0000:in
+move small leave x 230:0.0000:in
+move small leave y 230:0.0000:in
+move small leave scale 230:0.4000:in
+move small leave opacity 230:0.0000:in
+move small_back leave x 230:0.0000:in
+move small_back leave y 230:0.0000:in
+move small_back leave scale 230:0.4000:in
+move small_back leave opacity 230:0.0000:in
+move tiny leave x 230:0.0000:in
+move tiny leave y 230:0.0000:in
+move tiny leave scale 230:0.4000:in
+move tiny leave opacity 230:0.0000:in
+move tiny_back leave x 230:0.0000:in
+move tiny_back leave y 230:0.0000:in
+move tiny_back leave scale 230:0.4000:in
+move tiny_back leave opacity 230:0.0000:in
+move all leave scale 90:1.0000 170:1.0500:out 450:0.0200:in
+move all leave opacity 340:255.0000 450:0.0000:in

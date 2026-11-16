@@ -1,5 +1,6 @@
 # duppo-letters, still: duppogluten.svg as drawn — the letters Gluten's outlines, each light kept
 # inside its letter
+# Made by tools/scenedraw/draw.py (make scenes-draw), not by hand.
 scene units=1000 paper=#FFFFFF enter=1200 wait=3600 leave=520
 paint p0 radial matrix=11.869196,0.187807,-0.038433,2.428922,-972.4252,-442.8917 center=89.6241,149.9304 radius=39.9454 stops=0.3115:#F2444444,1.0000:#F2080808
 paint p1 radial matrix=11.869196,0.187807,-0.038433,2.428922,-971.9233,-446.5633 center=89.6241,149.9304 radius=39.9454 stops=0.3115:#C2858585,1.0000:#C2474747
@@ -27,7 +28,7 @@ paint p22 radial matrix=82.927802,0.000000,0.000000,45.052416,-400.4614,-51.9706
 paint p23 radial matrix=82.927802,0.000000,0.000000,45.052416,-51.4175,-34.1849 center=0,0 radius=1 stops=0.0000:#26FEFEFE,0.0833:#26FEFEFE,0.1667:#25FEFEFE,0.2500:#24FEFEFE,0.3333:#21FEFEFE,0.4167:#1CFEFEFE,0.5000:#15FEFEFE,0.5833:#0DFEFEFE,0.6667:#07FEFEFE,0.7500:#03FEFEFE,0.8333:#01FEFEFE,0.9167:#00FEFEFE,1.0000:#00FEFEFE
 paint p24 radial matrix=82.927802,0.000000,0.000000,45.052416,114.2116,-28.6269 center=0,0 radius=1 stops=0.0000:#26FEFEFE,0.0833:#26FEFEFE,0.1667:#25FEFEFE,0.2500:#24FEFEFE,0.3333:#21FEFEFE,0.4167:#1CFEFEFE,0.5000:#15FEFEFE,0.5833:#0DFEFEFE,0.6667:#07FEFEFE,0.7500:#03FEFEFE,0.8333:#01FEFEFE,0.9167:#00FEFEFE,1.0000:#00FEFEFE
 paint p25 radial matrix=82.927802,0.000000,0.000000,45.052416,285.9546,-58.0844 center=0,0 radius=1 stops=0.0000:#26FEFEFE,0.0833:#26FEFEFE,0.1667:#25FEFEFE,0.2500:#24FEFEFE,0.3333:#21FEFEFE,0.4167:#1CFEFEFE,0.5000:#15FEFEFE,0.5833:#0DFEFEFE,0.6667:#07FEFEFE,0.7500:#03FEFEFE,0.8333:#01FEFEFE,0.9167:#00FEFEFE,1.0000:#00FEFEFE
-paint p26 solid #FF000000
+paint p26 solid #FFFFFFFF
 group word
 group letter0 in=word pivot=-351.727,62.530
 ellipse sphere0 in=letter0 center=-356.087,4.196 radius=30.160,30.190 paint=p2 pivot=-356.087,4.196
@@ -77,5 +78,5 @@ path path742_2 in=letter2 shape=face2 paint=p24
 path path742_3 in=letter3 shape=face3 paint=p24
 path path743_3 in=letter3 shape=face3 paint=p25
 path path743_4 in=letter4 shape=face4 paint=p25
-rect veil box=-6000,-6000,12000,12000 paint=p26 opacity=0
+rect veil box=-437.000,-136.820,874.000,323.761 paint=p26 opacity=0
 move veil leave opacity 0:0.0000 520:255.0000:inout

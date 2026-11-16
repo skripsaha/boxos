@@ -1,5 +1,6 @@
 # duppo-letters, alive: duppogluten.svg as drawn — the letters Gluten's outlines, each light kept
 # inside its letter, and Duppo awake
+# Made by tools/scenedraw/draw.py (make scenes-draw), not by hand.
 scene units=1000 paper=#000000 enter=1200 wait=3600 leave=520
 paint p0 radial matrix=11.869196,0.187807,-0.038433,2.428922,-972.4252,-442.8917 center=89.6241,149.9304 radius=39.9454 stops=0.3115:#F2444444,1.0000:#F2080808
 paint p1 radial matrix=11.869196,0.187807,-0.038433,2.428922,-971.9233,-446.5633 center=89.6241,149.9304 radius=39.9454 stops=0.3115:#C2858585,1.0000:#C2474747
@@ -88,7 +89,7 @@ path glint1 in=letter1 shape=face1 paint=p27 opacity=0
 path glint2 in=letter2 shape=face2 paint=p28 opacity=0
 path glint3 in=letter3 shape=face3 paint=p29 opacity=0
 path glint4 in=letter4 shape=face4 paint=p30 opacity=0
-rect veil box=-6000,-6000,12000,12000 paint=p31 opacity=0
+rect veil box=-437.000,-136.820,874.000,323.761 paint=p31 opacity=0
 move sphere0 enter scale 200:1.0000 350:1.2400:out 580:1.0000:inout
 move sphere0 wait scale 0:1.0000 900:1.0000 1060:1.1400:out 1300:1.0000:inout 3600:1.0000
 move sphere0 leave scale 0:1.0000 110:1.2500:out 260:0.0000:in

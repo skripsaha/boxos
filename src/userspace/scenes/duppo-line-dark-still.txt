@@ -1,5 +1,6 @@
 # duppo-line, still: duppogluten.svg as drawn — the letters Gluten's outlines, each light kept
 # inside its letter
+# Made by tools/scenedraw/draw.py (make scenes-draw), not by hand.
 scene units=1000 paper=#000000 enter=1200 wait=3600 leave=520
 paint p0 radial matrix=9.483836,0.150063,-0.030709,1.940780,-666.5822,-353.8831 center=89.6241,149.9304 radius=39.9454 stops=0.3115:#F2444444,1.0000:#F2080808
 paint p1 radial matrix=9.483836,0.150063,-0.030709,1.940780,-666.1811,-356.8169 center=89.6241,149.9304 radius=39.9454 stops=0.3115:#C2858585,1.0000:#C2474747
@@ -83,5 +84,5 @@ ellipse pupil in=eye center=-355.346,-30.117 radius=36.519,36.991 paint=p24 pivo
 ellipse medium in=duppo center=-303.027,53.527 radius=23.912,23.930 paint=p25 pivot=-303.027,53.527
 ellipse small in=duppo center=-253.906,-37.347 radius=11.600,11.609 paint=p26 pivot=-253.906,-37.347
 ellipse tiny in=duppo center=-433.399,-74.629 radius=16.601,16.615 paint=p27 pivot=-433.399,-74.629
-rect veil box=-6000,-6000,12000,12000 paint=p28 opacity=0
+rect veil box=-462.000,-111.740,924.000,263.533 paint=p28 opacity=0
 move veil leave opacity 0:0.0000 520:255.0000:inout
