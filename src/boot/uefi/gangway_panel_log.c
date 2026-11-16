@@ -20,7 +20,13 @@
 
 #include "gangway.h"
 #include "boxos_logkeep.h"
+#include "boxos_symbols.h"
 #include "video_colors.h"
+
+/* A page's title begins with Duppo's symbol, as the panel's chosen row does;
+ * its foot is in the quiet grey of the panel's hints. */
+#define TITLE_MARK " " BOXOS_SYMBOL_DUPPO_TEXT " "
+#define ATTR_FOOT  VIDEO_COLOR(VIDEO_DARK_GRAY, VIDEO_BLACK)
 
 /* The page a journal is shown on — one at a time, so one for all three. */
 static PanelPage g_title, g_body;
@@ -112,12 +118,12 @@ static void Shown(const PanelPage *title, const PanelPage *body)
 
     for (;;) {
         PanelBegin(&foot);
-        PanelPut(&foot, VIDEO_ATTR_HINT, " ↑↓ PgUp PgDn Home End · Esc back · rows ");
-        PanelNum(&foot, VIDEO_ATTR_HINT, filled ? skip + 1u : 0u);
-        PanelPut(&foot, VIDEO_ATTR_HINT, "–");
-        PanelNum(&foot, VIDEO_ATTR_HINT, skip + height < filled ? skip + height : filled);
-        PanelPut(&foot, VIDEO_ATTR_HINT, " of ");
-        PanelNum(&foot, VIDEO_ATTR_HINT, filled);
+        PanelPut(&foot, ATTR_FOOT, " ↑↓ PgUp PgDn Home End · Esc back · rows ");
+        PanelNum(&foot, ATTR_FOOT, filled ? skip + 1u : 0u);
+        PanelPut(&foot, ATTR_FOOT, "–");
+        PanelNum(&foot, ATTR_FOOT, skip + height < filled ? skip + height : filled);
+        PanelPut(&foot, ATTR_FOOT, " of ");
+        PanelNum(&foot, ATTR_FOOT, filled);
         DrawPage(title->pieces, title->count, 0, 0, 1);
         DrawPage(body->pieces, body->count, skip, 1, height);
         DrawPage(foot.pieces, foot.count, 0, rows - 1u, 1);
@@ -147,7 +153,7 @@ void PanelJournalShow(void)
     PrintAloud(0);
 
     PanelBegin(title);
-    PanelPut(title, VIDEO_ATTR_INPUT, " This start's journal — ");
+    PanelPut(title, VIDEO_ATTR_INPUT, TITLE_MARK "This start's journal — ");
     PanelNum(title, VIDEO_ATTR_INPUT, bytes);
     PanelPut(title, VIDEO_ATTR_INPUT, " bytes");
     if (lost) {
@@ -184,7 +190,7 @@ void PanelPreviousShow(void)
     PanelBegin(title);
     PanelBegin(body);
     if (none) {
-        PanelPut(title, VIDEO_ATTR_INPUT, " The previous start's log");
+        PanelPut(title, VIDEO_ATTR_INPUT, TITLE_MARK "The previous start's log");
         PanelPut(body, VIDEO_ATTR_WARNING, "\n There is none to show: ");
         PanelPut(body, VIDEO_ATTR_WARNING, none);
         PanelPut(body, VIDEO_ATTR_WARNING, ".\n\n");
@@ -192,7 +198,7 @@ void PanelPreviousShow(void)
                  " The kernel keeps what it says through a reset when keep-log is on — in gangway.settings, or on\n"
                  " this panel for one start. It lasts through a reset, not through the power cut off.\n");
     } else {
-        PanelPut(title, VIDEO_ATTR_INPUT, " The previous start's log — start ");
+        PanelPut(title, VIDEO_ATTR_INPUT, TITLE_MARK "The previous start's log — start ");
         PanelNum(title, VIDEO_ATTR_INPUT, log.start);
         PanelPut(title, VIDEO_ATTR_INPUT, ", the last that kept one: ");
         PanelNum(title, VIDEO_ATTR_INPUT, log.said);
@@ -265,7 +271,7 @@ void PanelCrossingsShow(void)
 
     PanelBegin(title);
     PanelBegin(body);
-    PanelPut(title, VIDEO_ATTR_INPUT, " The crossings");
+    PanelPut(title, VIDEO_ATTR_INPUT, TITLE_MARK "The crossings");
     if (CrossingsNone()) {
         PanelPut(body, VIDEO_ATTR_WARNING, "\n None are kept on this medium: ");
         PanelPut(body, VIDEO_ATTR_WARNING, CrossingsNone());

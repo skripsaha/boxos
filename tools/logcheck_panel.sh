@@ -91,14 +91,15 @@ run_panel() {
     ! grep -aq "Gangway: the panel" "$P" && grep -aq "BoxOS Hub" "$P"
     chk $? "panel (plain): with no key held there is no panel, and the start reaches the hub"
 
-    # Start (the row chosen) → up three times: Startup → all; up: Cores → 1;
-    # down five times: This start's journal; back; down: the previous start's
-    # log; back; up twice: Start.
+    # Start (the row chosen) → down, Enter: the start's options, Screen chosen;
+    # down twice: Startup → all; up: Cores → 1; back to the first page; down,
+    # Enter: the journals; Enter: this start's journal; back; down, Enter: the
+    # previous start's log; back, and back to the first page; up twice: Start.
     if panel_boot && panel_hold; then
         qemu=$(cat build/qemu.pid 2>/dev/null)
         sleep 1
         mon_shot "$SCRATCH/panel.ppm"
-        panel_keys up up up right up right down down down down down ret esc down ret esc up up ret
+        panel_keys down ret down down right up right esc down ret ret esc down ret esc esc up up ret
         wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
         sleep 2
         cp build/serial.log "$SCRATCH/serial.panel.start.log"
@@ -106,6 +107,26 @@ run_panel() {
     Q="$SCRATCH/serial.panel.start.log"
     grep -aq "Gangway: the panel is open (Space held)" "$Q"
     chk $? "panel (start): Space held, the panel opens, and the wire says so as it does"
+    [ -s "$SCRATCH/panel.ppm" ] && python3 - "$SCRATCH/panel.ppm" <<'EOF'
+import sys
+data, fields, at = open(sys.argv[1], "rb").read(), [], 0
+while len(fields) < 4:
+    while data[at:at + 1].isspace():
+        at += 1
+    end = at
+    while not data[end:end + 1].isspace():
+        end += 1
+    fields.append(data[at:end])
+    at = end
+w, h, px = int(fields[1]), int(fields[2]), data[at + 1:]
+def pink(x, y):
+    r, g, b = px[3 * (y * w + x):3 * (y * w + x) + 3]
+    return r > 120 and r > g + 50 and b > g + 10
+left = sum(pink(x, y) for y in range(0, h, 4) for x in range(0, w // 2, 4))
+right = sum(pink(x, y) for y in range(0, h, 4) for x in range(w // 2, w, 4))
+sys.exit(0 if left > 200 and right > 200 else 1)
+EOF
+    chk $? "panel (look): Duppo's logo on the left of the glass, the chosen row's plashka of his pink on the right"
     grep -aq "Gangway: the panel shows this start's journal" "$Q"
     chk $? "panel (start): it shows this start's journal"
     grep -aq "Gangway: the panel shows the previous start's log — there is none: nothing is kept there" "$Q"
@@ -125,15 +146,15 @@ run_panel() {
     # A warm reset keeps the memory: keep-log on for the start after it, and
     # that start's log read by the panel at the next.
     if [ -s "$Q" ] && mon_raw system_reset && panel_hold; then
-        panel_keys up up ret down down ret
+        panel_keys down ret down down down right esc up ret
         wait_for_line build/serial.log "LogKeep is armed" "$WAIT_QUIET_S"
         wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" "$(grep -an "LogKeep is armed" build/serial.log | tail -1 | cut -d: -f1)"
         sleep 3
         if mon_raw system_reset && panel_hold; then
-            panel_keys down down ret
+            panel_keys down down ret down ret
             sleep 1
             mon_shot "$SCRATCH/panel.previous.ppm"
-            panel_keys esc down down down ret
+            panel_keys esc esc down down down ret
             sleep 5
             # QEMU takes its pidfile away as it exits: the pid read at the
             # start is the one asked after.

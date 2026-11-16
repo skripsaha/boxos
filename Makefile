@@ -932,7 +932,8 @@ GANGWAY_SRC    = src/boot/uefi/gangway.c src/boot/uefi/gangway_bytes.c src/boot/
                  src/boot/uefi/gangway_lectern_ribbon.c src/boot/uefi/gangway_lectern_replay.c \
                  src/boot/uefi/gangway_succession.c src/boot/uefi/gangway_lectern_called.c \
                  src/boot/uefi/gangway_settings.c src/boot/uefi/gangway_keys.c \
-                 src/boot/uefi/gangway_panel.c src/boot/uefi/gangway_panel_log.c \
+                 src/boot/uefi/gangway_panel.c src/boot/uefi/gangway_panel_look.c \
+                 src/boot/uefi/gangway_panel_log.c \
                  src/boot/uefi/gangway_crossings.c src/boot/uefi/gangway_scene.c
 GANGWAY_HDRS   = src/boot/uefi/gangway.h src/boot/uefi/uefi.h \
                  src/boot/uefi/gangway_lectern.h src/boot/uefi/gangway_lectern_book.h \
@@ -948,11 +949,15 @@ GANGWAY_HDRS   = src/boot/uefi/gangway.h src/boot/uefi/uefi.h \
                  src/include/boxos_brush.h src/include/boxos_scene.h src/include/boxos_scene_play.h \
                  $(IMPRINT_DATA)
 GANGWAY_JUMP   = src/boot/uefi/gangway_jump.asm
+# The panel's logo, kept in the loader (gangway_logo.asm): duppo-word, still.
+GANGWAY_LOGO   = src/boot/uefi/gangway_logo.asm
+GANGWAY_LOGO_SCENES = $(BUILDDIR)/scenes/dark-still/duppo-word.scene $(BUILDDIR)/scenes/light-still/duppo-word.scene
 GANGWAY_LD     = src/boot/uefi/gangway.ld
 GANGWAY_EFI    = $(BUILDDIR)/BOOTX64.EFI
 GANGWAY_SO     = $(BUILDDIR)/gangway.so
 GANGWAY_OBJ    = $(patsubst src/boot/uefi/%.c,$(BUILDDIR)/%.o,$(GANGWAY_SRC))
 GANGWAY_JUMP_OBJ = $(BUILDDIR)/gangway_jump.o
+GANGWAY_LOGO_OBJ = $(BUILDDIR)/gangway_logo.o
 
 # UEFI compile/link flags
 # gcc ELF path: compile with -fpic, link as .so, objcopy to PE32+
@@ -1858,13 +1863,17 @@ $(GANGWAY_JUMP_OBJ): $(GANGWAY_JUMP) | $(BUILDDIR)
 	@echo "Assembling Gangway jump trampoline..."
 	@$(ASM) -f elf64 $< -o $@
 
-$(GANGWAY_EFI): $(GANGWAY_SRC) $(GANGWAY_JUMP_OBJ) $(GANGWAY_LD) $(GANGWAY_HDRS) | $(BUILDDIR)
+$(GANGWAY_LOGO_OBJ): $(GANGWAY_LOGO) $(GANGWAY_LOGO_SCENES) | $(BUILDDIR)
+	@$(ASM) -f elf64 -DLOGO_DARK='"$(word 1,$(GANGWAY_LOGO_SCENES))"' \
+		-DLOGO_LIGHT='"$(word 2,$(GANGWAY_LOGO_SCENES))"' $< -o $@
+
+$(GANGWAY_EFI): $(GANGWAY_SRC) $(GANGWAY_JUMP_OBJ) $(GANGWAY_LOGO_OBJ) $(GANGWAY_LD) $(GANGWAY_HDRS) | $(BUILDDIR)
 	@echo "Building Gangway UEFI (clang/lld → PE32+)..."
 	@clang $(UEFI_CFLAGS_CLANG) \
 		-Wl,-entry:GangwayMain \
 		-Wl,-subsystem:efi_application \
 		-Wl,-nodefaultlib \
-		-o $@ $(GANGWAY_SRC) $(GANGWAY_JUMP_OBJ)
+		-o $@ $(GANGWAY_SRC) $(GANGWAY_JUMP_OBJ) $(GANGWAY_LOGO_OBJ)
 	@echo "Gangway EFI: $@ ($$(stat -f%z $@ 2>/dev/null || stat -c%s $@ 2>/dev/null) bytes)"
 
 else
@@ -1873,6 +1882,10 @@ else
 $(GANGWAY_JUMP_OBJ): $(GANGWAY_JUMP) | $(BUILDDIR)
 	@echo "Assembling Gangway jump trampoline..."
 	@$(ASM) -f elf64 $< -o $@
+
+$(GANGWAY_LOGO_OBJ): $(GANGWAY_LOGO) $(GANGWAY_LOGO_SCENES) | $(BUILDDIR)
+	@$(ASM) -f elf64 -DLOGO_DARK='"$(word 1,$(GANGWAY_LOGO_SCENES))"' \
+		-DLOGO_LIGHT='"$(word 2,$(GANGWAY_LOGO_SCENES))"' $< -o $@
 
 $(GANGWAY_OBJ): $(BUILDDIR)/%.o: src/boot/uefi/%.c $(GANGWAY_HDRS) | $(BUILDDIR)
 	@echo "Building Gangway UEFI object $@ (gcc ELF)..."
@@ -1883,7 +1896,7 @@ $(GANGWAY_OBJ): $(BUILDDIR)/%.o: src/boot/uefi/%.c $(GANGWAY_HDRS) | $(BUILDDIR)
 # on its own — a memcpy for a struct copied, a memset for a loop it saw
 # through — is a symbol nothing will ever define, and an EFI image that calls
 # address 0 the first time that path runs. The link refuses it here instead.
-$(GANGWAY_SO): $(GANGWAY_OBJ) $(GANGWAY_JUMP_OBJ) $(GANGWAY_LD) | $(BUILDDIR)
+$(GANGWAY_SO): $(GANGWAY_OBJ) $(GANGWAY_JUMP_OBJ) $(GANGWAY_LOGO_OBJ) $(GANGWAY_LD) | $(BUILDDIR)
 	@echo "Linking Gangway ELF shared object..."
 	@$(LD) \
 		-nostdlib \
@@ -1891,7 +1904,7 @@ $(GANGWAY_SO): $(GANGWAY_OBJ) $(GANGWAY_JUMP_OBJ) $(GANGWAY_LD) | $(BUILDDIR)
 		-Bsymbolic \
 		-z defs \
 		-T $(GANGWAY_LD) \
-		-o $@ $(GANGWAY_OBJ) $(GANGWAY_JUMP_OBJ)
+		-o $@ $(GANGWAY_OBJ) $(GANGWAY_JUMP_OBJ) $(GANGWAY_LOGO_OBJ)
 
 $(GANGWAY_EFI): $(GANGWAY_SO) | $(BUILDDIR)
 	@echo "Converting Gangway ELF → PE32+ EFI binary (make_efi.py)..."

@@ -27,6 +27,7 @@
 #include "gangway_lectern.h"
 #include "boarding_pass.h"
 #include "boxos_crossings.h"
+#include "boxos_imprint.h"
 
 /* Where the kernel is placed and jumped into. */
 #define KERNEL_LOAD_ADDR 0x100000ULL
@@ -162,6 +163,12 @@ const LecternKernel *KernelChosen(void);
 #define GANGWAY_SET_CORES    4u
 #define GANGWAY_SET_KEEP_LOG 8u
 #define GANGWAY_SET_SCENE    16u
+#define GANGWAY_SET_TEXT     32u
+#define GANGWAY_SET_THEME    64u
+
+/* The panel's colours (theme). */
+#define GANGWAY_THEME_DARK  0u
+#define GANGWAY_THEME_LIGHT 1u
 
 /* The longest text of tags the person may ask the scene by, and how many. */
 #define SCENE_TAGS_BYTES 256u
@@ -175,6 +182,8 @@ typedef struct {
     uint8_t  keep_log;        /* 1: what the machine says is kept through a reset */
     uint8_t  scene;           /* 1: the scene's first frame drawn as the machine starts (gangway_scene.c) */
     uint32_t cores;           /* the most processors the kernel starts, 0 for every one */
+    uint32_t text_size;       /* how tall the panel's letters are, px: 0 for the screen to say (auto) */
+    uint8_t  theme;           /* GANGWAY_THEME_* */
     /* The tags the person asks the scene by — none: boot.scene, by its name —
      * their text, and its words: SCENE_ASKED_MOST at the most. */
     char        scene_tags[SCENE_TAGS_BYTES];
@@ -261,6 +270,9 @@ typedef struct {
 } DrawPiece;
 
 void     DrawUse(const FbInfo *fb);
+/* The system's characters, drawn ahead of time (boxos_imprint.h): the one
+ * copy of them the loader carries, for any hand of it that draws text. */
+const BoxImprint *DrawImprint(void);
 uint32_t DrawRows(void);
 uint32_t DrawCols(void);
 uint32_t DrawCount(const DrawPiece *pieces, uint32_t count);
@@ -299,10 +311,17 @@ GangwayKey KeyNext(void);
  * gangway_panel.c: the panel — asked for by holding Space while the machine
  * starts, after the kernel and the screen are chosen, or opened by itself
  * when `misses` starts in a row did not land (PanelIfAsked, which answers
- * CROSSING_PANEL_* — why it opened, or that it did not): what was found and
- * chosen, what the person may change for this one start, and Restart, Turn
- * off, the firmware's settings. Leaving it, the start goes on with what was
- * changed in g_settings, and in *fb when the screen was.
+ * CROSSING_PANEL_* — why it opened, or that it did not): a page of rows and
+ * the pages they open — Start, the start's options the person may change for
+ * this one start, the journals, what was found and chosen — and Restart,
+ * Turn off, the firmware's settings. Leaving it, the start goes on with what
+ * was changed in g_settings, and in *fb when the screen was.
+ * gangway_panel_look.c: how it looks — Duppo's logo on the left, kept in the
+ * loader, the page on the right, the row chosen on a plashka of his sphere —
+ * drawn from rows it is handed: PanelLookBegin takes a canvas as large as the
+ * screen and draws the logo and what is said under it (0: no room to draw
+ * the panel), PanelLookPage draws a page and shows it, PanelLookEnd gives the
+ * canvas back.
  * gangway_panel_log.c: its two journals, each shown until the person goes
  * back — this start's, the loader's own (PanelJournalShow), and what the
  * kernel said in the start before, out of its carry-over window
@@ -327,6 +346,19 @@ void PanelBegin(PanelPage *page);
 void PanelPut(PanelPage *page, uint8_t attr, const char *text);
 void PanelNum(PanelPage *page, uint8_t attr, uint64_t n);
 void PanelRaw(PanelPage *page, uint8_t attr, const char *text, uint32_t bytes);
+
+typedef struct {
+    const char *label;     /* NULL: a rule between groups */
+    const char *value;     /* a setting's value, or what an info row says; NULL: none */
+    uint8_t     more;      /* it opens a page of its own (›) */
+    uint8_t     changed;   /* the value is not the one the start came with */
+    uint8_t     info;      /* it says, and is never chosen */
+} PanelLookRow;
+
+int  PanelLookBegin(const FbInfo *fb, const char *said, const char *under);
+void PanelLookPage(const char *title, const PanelLookRow *rows, uint32_t count, uint32_t chosen,
+                   const char *note, const char *hint);
+void PanelLookEnd(void);
 
 uint8_t PanelIfAsked(FbInfo *fb, uint32_t misses);
 void    PanelJournalShow(void);

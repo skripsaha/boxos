@@ -18,13 +18,13 @@
  * gangway_lectern_called.c); the scene it starts with by its name too —
  * boot.scene — unless the person's `scene` names tags: then of the scenes
  * (*.scene) that wear every one of them, one picked by chance, and boot.scene
- * when none does. What it takes
- * for itself — the screen, the scene — it does; what is the kernel's it hands on in the
- * Boarding Pass, a stamp for each the file sets (boarding_pass.h: STARTUP,
- * CORES, KEEP_LOG). Every setting takes effect when the machine starts next.
- * The panel (gangway_panel.c) changes the same five for one start and writes
- * nothing back. BIOS boots read no
- * settings: stage2 stays quiet, and the kernel goes its own way.
+ * when none does. What it takes for itself — the screen, the scene, the
+ * panel's letters and colours (text-size, theme) — it does; what is the
+ * kernel's it hands on in the Boarding Pass, a stamp for each the file sets
+ * (boarding_pass.h: STARTUP, CORES, KEEP_LOG). Every setting takes effect when
+ * the machine starts next. The panel (gangway_panel.c) changes the same seven
+ * for one start and writes nothing back. BIOS boots read no settings: stage2
+ * stays quiet, and the kernel goes its own way.
  */
 
 #define GANGWAY_SETTINGS_PROGRAM "gangway"
@@ -42,6 +42,9 @@
     "read after it\"\n"                                                                                       \
     "scene text default on next-start \"the scene shown while the machine starts, played until it is ready "  \
     "for you: on (boot.scene), off, or tags — each start one of the scenes that wear them all, by chance, "     \
-    "and boot.scene when none does: duppo-word dark animated\"\n"
+    "and boot.scene when none does: duppo-word dark animated\"\n"                                            \
+    "text-size one-of auto 16 24 32 default auto next-start \"how tall the letters of the panel and its "      \
+    "pages are: auto for the screen, or 16, 24 or 32 px\"\n"                                                  \
+    "theme one-of dark light default dark next-start \"the panel's colours: dark, or light\"\n"
 
 #endif /* BOXOS_GANGWAY_SETTINGS_H */

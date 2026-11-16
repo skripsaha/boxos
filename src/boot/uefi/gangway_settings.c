@@ -12,9 +12,10 @@
  * Use Context are passed over, said once at their [ ] line: Gangway starts
  * before there is a context. What was taken is said last, in one line.
  *
- * The screen and the scene are Gangway's own (gangway_video.c,
- * gangway_scene.c read g_settings); the rest is the kernel's, handed on as
- * stamps of the Boarding Pass (gangway_handoff.c).
+ * The screen, the scene and the panel's letters and colours are Gangway's own
+ * (gangway_video.c, gangway_scene.c, gangway_draw.c and gangway_panel_look.c
+ * read g_settings); the rest is the kernel's, handed on as stamps of the
+ * Boarding Pass (gangway_handoff.c).
  */
 
 #include "gangway.h"
@@ -162,6 +163,14 @@ static int Taken(const Setting *s, SettingSpan v, uint32_t line, bool set)
     } else if (SettingSpanIs(s->Name, "scene")) {
         bit = GANGWAY_SET_SCENE;
         SceneTaken(v, line);
+    } else if (SettingSpanIs(s->Name, "text-size")) {
+        uint32_t px = 0;
+        for (uint64_t at = 0; at < v.Length && v.At[at] >= '0' && v.At[at] <= '9'; at++) px = px * 10u + (v.At[at] - '0');
+        bit                  = GANGWAY_SET_TEXT;
+        g_settings.text_size = px;   /* auto reads as no digits: 0 */
+    } else if (SettingSpanIs(s->Name, "theme")) {
+        bit              = GANGWAY_SET_THEME;
+        g_settings.theme = SettingSpanIs(v, "light") ? GANGWAY_THEME_LIGHT : GANGWAY_THEME_DARK;
     }
     g_settings.set = set ? g_settings.set | bit : g_settings.set & ~bit;
     return 1;
@@ -261,6 +270,18 @@ int SettingsList(uint32_t which)
             Print(" ");
             Print(g_settings.scene_asked[k]);
         }
+        between = ", ";
+    }
+    if (which & GANGWAY_SET_TEXT) {
+        Print(between);
+        Print("text-size ");
+        if (g_settings.text_size) PrintDec(g_settings.text_size);
+        else Print("auto");
+        between = ", ";
+    }
+    if (which & GANGWAY_SET_THEME) {
+        Print(between);
+        Print(g_settings.theme == GANGWAY_THEME_LIGHT ? "theme light" : "theme dark");
         between = ", ";
     }
     return between[0] != '\0';

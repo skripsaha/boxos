@@ -2,51 +2,96 @@
  * Gangway — the panel. Asked for by holding Space while the machine starts
  * (KeyPanelAsked, once, after the kernel and the screen are chosen), or open
  * by itself when the last starts did not land (the crossings,
- * gangway_crossings.c), it shows what the loader found and chose — the kernel
- * and the book's word on it, the volume, the screen, the processors, the
- * crossings — and lets the person change, for this one start, what
- * gangway.settings sets: the same five settings, taken as the file's are.
- * It shows this start's journal, the log the kernel kept of the start before
- * and the crossings kept (gangway_panel_log.c), and it restarts the machine,
- * turns it off, or restarts it into the firmware's own settings.
+ * gangway_crossings.c). A page of rows: Start, and the pages they open — the
+ * start's options, the same seven settings gangway.settings sets, changed for
+ * this one start and taken as the file's are; the journals: this start's, the
+ * log the kernel kept of the start before and the crossings kept
+ * (gangway_panel_log.c); and what the loader found and chose — then Restart,
+ * Turn off, and a restart into the firmware's own settings. How it looks is
+ * gangway_panel_look.c's: this file says what each page holds and what each
+ * key does.
  *
  * Nothing in it waits on a clock: the firmware's watchdog is stopped when it
  * opens, keys are waited for on the console's event, and it stays until the
  * person chooses. It writes nothing to the volume — a choice kept is set in
- * the hub (`settings gangway`), and the page says so. What it says goes into
- * the journal and down COM1 both (PrintAloud): a machine standing at the panel
- * says why on the wire.
+ * the hub (`settings gangway`), and the options page says so. What it says goes
+ * into the journal and down COM1 both (PrintAloud): a machine standing at the
+ * panel says why on the wire.
  */
 
 #include "gangway.h"
 #include "boarding_pass.h"
-#include "video_colors.h"
 
-/* The settings' rows first, in the order of the declaration
- * (boxos_gangway_settings.h), then what may be done. */
+/* The settings the options page changes, in the order of the declaration
+ * (boxos_gangway_settings.h). */
 typedef enum {
+    SET_SCREEN,
+    SET_CORES,
+    SET_STARTUP,
+    SET_KEEP_LOG,
+    SET_SCENE,
+    SET_TEXT,
+    SET_THEME,
+    PANEL_SETTINGS,
+} PanelSetting;
+
+/* Every row a page may hold: a setting's row is its setting's place on from
+ * ROW_SCREEN; an info row only says. */
+typedef enum {
+    ROW_START,
+    ROW_OPTIONS,
+    ROW_JOURNALS,
+    ROW_ABOUT,
+    ROW_RESTART,
+    ROW_OFF,
+    ROW_FIRMWARE,
     ROW_SCREEN,
     ROW_CORES,
     ROW_STARTUP,
     ROW_KEEP_LOG,
     ROW_SCENE,
-    ROW_START,
+    ROW_TEXT,
+    ROW_THEME,
     ROW_JOURNAL,
     ROW_PREVIOUS,
     ROW_CROSSINGS,
-    ROW_RESTART,
-    ROW_OFF,
-    ROW_FIRMWARE,
+    ROW_KERNEL,
+    ROW_VOLUME,
+    ROW_FOUND_SCREEN,
+    ROW_PROCESSORS,
+    ROW_STARTS,
+    ROW_BACK,
+    ROW_RULE,
 } PanelRow;
 
-#define PANEL_SETTINGS    ROW_START
+static const char *const g_names[] = {
+    "Start", "Start options", "Journals", "About this machine", "Restart", "Turn off", "Firmware settings",
+    "Screen", "Cores", "Startup", "Keep-log", "Scene", "Text size", "Theme",
+    "This start's journal", "The previous start's log", "The crossings",
+    "Kernel", "Volume", "Screen", "Processors", "Starts", "Back", NULL,
+};
+
+/* The pages, and the rows each holds in its order. */
+typedef enum {
+    SHEET_MAIN,
+    SHEET_OPTIONS,
+    SHEET_JOURNALS,
+    SHEET_ABOUT,
+} PanelSheet;
+
+static const PanelRow g_main[]     = { ROW_START, ROW_OPTIONS, ROW_JOURNALS, ROW_ABOUT, ROW_RULE,
+                                       ROW_RESTART, ROW_OFF, ROW_FIRMWARE };
+static const PanelRow g_options[]  = { ROW_SCREEN, ROW_CORES, ROW_STARTUP, ROW_KEEP_LOG, ROW_SCENE,
+                                       ROW_TEXT, ROW_THEME, ROW_RULE, ROW_BACK };
+static const PanelRow g_journals[] = { ROW_JOURNAL, ROW_PREVIOUS, ROW_CROSSINGS, ROW_RULE, ROW_BACK };
+static const PanelRow g_about[]    = { ROW_KERNEL, ROW_VOLUME, ROW_FOUND_SCREEN, ROW_PROCESSORS, ROW_STARTS,
+                                       ROW_RULE, ROW_BACK };
+
 #define PANEL_SIZES_MOST  48u
 /* The most cores the declaration takes (cores number from 1 to 256). */
 #define PANEL_CORES_MOST  256u
-
-#define ATTR_TITLE    VIDEO_ATTR_INPUT
-#define ATTR_NAME     VIDEO_ATTR_HINT
-#define ATTR_CHOSEN   VIDEO_WHITE_ON_BLUE
+/* The text sizes text-size takes, auto first. */
+static const uint32_t g_text_sizes[] = { 0u, 16u, 24u, 32u };
 
 typedef struct {
     uint8_t     why;                      /* CROSSING_PANEL_KEY or _MISSES */
@@ -57,25 +102,22 @@ typedef struct {
     uint32_t    machine_cores;            /* as the firmware counts them, 0 when it does not say */
     int         firmware_ui;              /* the firmware can be asked to start its settings */
     /* Each setting's value — screen: 0 auto, else sizes[v - 1]; cores: 0 all,
-     * else so many; startup: BOARDING_STARTUP_*; keep-log, scene: 1 on — and
-     * as the panel found it. */
+     * else so many; startup: BOARDING_STARTUP_*; keep-log, scene: 1 on;
+     * text-size: px, 0 auto; theme: GANGWAY_THEME_* — and as the panel found
+     * it. */
     uint32_t    value[PANEL_SETTINGS];
     uint32_t    came[PANEL_SETTINGS];
-    PanelRow    row;
+    PanelSheet  sheet;
+    uint32_t    chosen;                   /* the row chosen, its place on the page */
+    uint32_t    opened;                   /* the main page's row that opened the one shown */
     const char *note;                     /* what the last thing done could not do */
 } Panel;
 
 static CHAR16 g_os_indications[]           = u"OsIndications";
 static CHAR16 g_os_indications_supported[] = u"OsIndicationsSupported";
 
-static const char *const g_row_names[] = {
-    "Screen", "Cores", "Startup", "Keep-log", "Scene",
-    "Start", "This start's journal", "The previous start's log", "The crossings", "Restart", "Turn off",
-    "Firmware settings",
-};
-
 /* ------------------------------------------------------------------------- */
-/* A page                                                                    */
+/* A page of text (gangway_panel_log.c's)                                    */
 /* ------------------------------------------------------------------------- */
 
 void PanelBegin(PanelPage *page)
@@ -122,19 +164,50 @@ void PanelRaw(PanelPage *page, uint8_t attr, const char *text, uint32_t bytes)
     page->count++;
 }
 
-/* "2.0 GiB", "512 MiB". */
-static void PanelBytes(PanelPage *page, uint8_t attr, uint64_t bytes)
+/* ------------------------------------------------------------------------- */
+/* Words of a row                                                            */
+/* ------------------------------------------------------------------------- */
+
+typedef struct {
+    char     text[64];
+    uint32_t used;
+} PanelWords;
+
+static void WordsPut(PanelWords *w, const char *text)
+{
+    while (*text && w->used < sizeof(w->text) - 1u) w->text[w->used++] = *text++;
+    w->text[w->used] = '\0';
+}
+
+static void WordsNum(PanelWords *w, uint64_t n)
+{
+    char digits[21];
+    int  at = 20;
+    digits[at] = '\0';
+    do {
+        digits[--at] = (char)('0' + n % 10u);
+        n /= 10u;
+    } while (n);
+    WordsPut(w, digits + at);
+}
+
+/* "2.0 GiB", "155 MiB", "1.5 MiB". */
+static void WordsBytes(PanelWords *w, uint64_t bytes)
 {
     const uint64_t mib = 1024u * 1024u, gib = 1024u * mib;
     if (bytes < gib) {
-        PanelNum(page, attr, bytes / mib);
-        PanelPut(page, attr, " MiB");
+        WordsNum(w, bytes / mib);
+        if (bytes < 10u * mib) {
+            WordsPut(w, ".");
+            WordsNum(w, bytes % mib * 10u / mib);
+        }
+        WordsPut(w, " MiB");
         return;
     }
-    PanelNum(page, attr, bytes / gib);
-    PanelPut(page, attr, ".");
-    PanelNum(page, attr, bytes % gib * 10u / gib);
-    PanelPut(page, attr, " GiB");
+    WordsNum(w, bytes / gib);
+    WordsPut(w, ".");
+    WordsNum(w, bytes % gib * 10u / gib);
+    WordsPut(w, " GiB");
 }
 
 /* ------------------------------------------------------------------------- */
@@ -175,198 +248,255 @@ static void PanelTake(Panel *p, const FbInfo *fb, uint8_t why, uint32_t misses)
     if ((g_settings.set & GANGWAY_SET_SCREEN) && g_settings.screen_width) {
         for (uint32_t i = 0; i < p->nsizes; i++)
             if (p->sizes[i].width == g_settings.screen_width && p->sizes[i].height == g_settings.screen_height)
-                p->came[ROW_SCREEN] = i + 1u;
+                p->came[SET_SCREEN] = i + 1u;
     }
-    p->came[ROW_CORES]    = g_settings.cores;
-    p->came[ROW_STARTUP]  = g_settings.startup;
-    p->came[ROW_KEEP_LOG] = g_settings.keep_log;
-    p->came[ROW_SCENE]    = g_settings.scene;
+    p->came[SET_CORES]    = g_settings.cores;
+    p->came[SET_STARTUP]  = g_settings.startup;
+    p->came[SET_KEEP_LOG] = g_settings.keep_log;
+    p->came[SET_SCENE]    = g_settings.scene;
+    p->came[SET_TEXT]     = g_settings.text_size;
+    p->came[SET_THEME]    = g_settings.theme;
     MemCopy(p->value, p->came, sizeof(p->value));
-    p->row = ROW_START;
-}
-
-static PanelRow LastRow(const Panel *p)
-{
-    return p->firmware_ui ? ROW_FIRMWARE : ROW_OFF;
+    p->sheet  = SHEET_MAIN;
+    p->chosen = 0;
 }
 
 /* ------------------------------------------------------------------------- */
-/* The page                                                                  */
+/* The pages                                                                 */
 /* ------------------------------------------------------------------------- */
 
-static void FoundKernel(PanelPage *page)
+static const PanelRow *SheetRows(const Panel *p, uint32_t *count)
 {
-    const LecternKernel *k = KernelChosen();
-
-    PanelPut(page, ATTR_NAME, " Kernel      ");
-    PanelPut(page, VIDEO_ATTR_DEFAULT, k->line);
-    PanelPut(page, VIDEO_ATTR_DEFAULT, ", ");
-    PanelNum(page, VIDEO_ATTR_DEFAULT, k->bytes);
-    PanelPut(page, VIDEO_ATTR_DEFAULT, " bytes — ");
-    if (k->says == ATTEST_HELD) PanelPut(page, VIDEO_ATTR_SUCCESS, "attested by the book\n");
-    else PanelPut(page, VIDEO_ATTR_WARNING, "not attested: nothing to hold it to, and nothing shows it broken\n");
-}
-
-/* The volume's name as volume-read shows it — the first eight bytes of its
- * Deed's uuid — and its size. */
-static void FoundVolume(PanelPage *page)
-{
-    static const char hex[] = "0123456789abcdef";
-
-    PanelPut(page, ATTR_NAME, " Volume      ");
-    for (uint32_t i = 0; i < 8u; i++) {
-        char pair[3] = { hex[g_volume_uuid[i] >> 4], hex[g_volume_uuid[i] & 15u], '\0' };
-        PanelPut(page, VIDEO_ATTR_DEFAULT, pair);
-    }
-    PanelPut(page, VIDEO_ATTR_DEFAULT, "…, ");
-    PanelBytes(page, VIDEO_ATTR_DEFAULT, g_volume_end * VOLUME_BLOCK_BYTES);
-    PanelPut(page, VIDEO_ATTR_DEFAULT, "\n");
-}
-
-static void FoundMachine(PanelPage *page, const Panel *p)
-{
-    PanelPut(page, ATTR_NAME, " Screen      ");
-    PanelNum(page, VIDEO_ATTR_DEFAULT, p->fb.width);
-    PanelPut(page, VIDEO_ATTR_DEFAULT, "x");
-    PanelNum(page, VIDEO_ATTR_DEFAULT, p->fb.height);
-    PanelPut(page, VIDEO_ATTR_DEFAULT, " — ");
-    PanelPut(page, VIDEO_ATTR_DEFAULT, GopChosenWhy());
-    PanelPut(page, VIDEO_ATTR_DEFAULT, "\n");
-
-    PanelPut(page, ATTR_NAME, " Processors  ");
-    if (p->machine_cores) {
-        PanelNum(page, VIDEO_ATTR_DEFAULT, p->machine_cores);
-        PanelPut(page, VIDEO_ATTR_DEFAULT, ", as the firmware counts them\n");
-    } else {
-        PanelPut(page, VIDEO_ATTR_DEFAULT, "the firmware does not say how many\n");
+    switch (p->sheet) {
+    case SHEET_OPTIONS:  *count = sizeof(g_options) / sizeof(g_options[0]); return g_options;
+    case SHEET_JOURNALS: *count = sizeof(g_journals) / sizeof(g_journals[0]); return g_journals;
+    case SHEET_ABOUT:    *count = sizeof(g_about) / sizeof(g_about[0]); return g_about;
+    default:
+        *count = sizeof(g_main) / sizeof(g_main[0]) - (p->firmware_ui ? 0u : 1u);
+        return g_main;
     }
 }
 
-/* Which crossing this start is, and how the one before it went — or why the
- * medium keeps none. */
-static void FoundCrossings(PanelPage *page, const Panel *p)
+static int IsInfo(PanelRow row)
 {
-    const Crossing *kept;
-    uint32_t        count = CrossingsKept(&kept);
-
-    PanelPut(page, ATTR_NAME, " Crossings   ");
-    if (CrossingsNone()) {
-        PanelPut(page, VIDEO_ATTR_DEFAULT, "none kept: ");
-        PanelPut(page, VIDEO_ATTR_DEFAULT, CrossingsNone());
-        PanelPut(page, VIDEO_ATTR_DEFAULT, "\n");
-        return;
-    }
-    PanelPut(page, VIDEO_ATTR_DEFAULT, "this start is crossing ");
-    PanelNum(page, VIDEO_ATTR_DEFAULT, CrossingsNext());
-    if (!count) {
-        PanelPut(page, VIDEO_ATTR_DEFAULT, ", the first on this medium\n");
-    } else if (p->misses) {
-        PanelPut(page, VIDEO_ATTR_DEFAULT, " — ");
-        PanelPut(page, VIDEO_ATTR_WARNING, p->misses == 1u ? "the one before did not land" : "the last ");
-        if (p->misses > 1u) {
-            PanelNum(page, VIDEO_ATTR_WARNING, p->misses);
-            PanelPut(page, VIDEO_ATTR_WARNING, " did not land");
-        }
-        PanelPut(page, VIDEO_ATTR_DEFAULT, "\n");
-    } else {
-        PanelPut(page, VIDEO_ATTR_DEFAULT, " — the one before landed ");
-        PanelNum(page, VIDEO_ATTR_DEFAULT, kept[0].landed_ms);
-        PanelPut(page, VIDEO_ATTR_DEFAULT, " ms after its kernel began\n");
-    }
+    return row >= ROW_KERNEL && row <= ROW_STARTS;
 }
 
-static void ValueSaid(PanelPage *page, const Panel *p, PanelRow row, uint8_t attr)
+static int IsSetting(PanelRow row)
 {
-    uint32_t v = p->value[row];
-    switch (row) {
-    case ROW_SCREEN:
+    return row >= ROW_SCREEN && row <= ROW_THEME;
+}
+
+static int Choosable(PanelRow row)
+{
+    return row != ROW_RULE && !IsInfo(row);
+}
+
+/* A setting's value in words. */
+static void ValueSaid(PanelWords *w, const Panel *p, PanelSetting s)
+{
+    uint32_t v = p->value[s];
+    switch (s) {
+    case SET_SCREEN:
         if (!v) {
-            PanelPut(page, attr, "auto");
+            WordsPut(w, "auto");
             return;
         }
-        PanelNum(page, attr, p->sizes[v - 1u].width);
-        PanelPut(page, attr, "x");
-        PanelNum(page, attr, p->sizes[v - 1u].height);
+        WordsNum(w, p->sizes[v - 1u].width);
+        WordsPut(w, "x");
+        WordsNum(w, p->sizes[v - 1u].height);
         return;
-    case ROW_CORES:
-        if (v) PanelNum(page, attr, v);
-        else PanelPut(page, attr, "all");
+    case SET_CORES:
+        if (v) WordsNum(w, v);
+        else WordsPut(w, "all");
         return;
-    case ROW_STARTUP:  PanelPut(page, attr, v == BOARDING_STARTUP_ALL ? "all" : "quiet"); return;
-    case ROW_KEEP_LOG:
-    case ROW_SCENE:    PanelPut(page, attr, v ? "on" : "off"); return;
+    case SET_STARTUP:  WordsPut(w, v == BOARDING_STARTUP_ALL ? "all" : "quiet"); return;
+    case SET_KEEP_LOG:
+    case SET_SCENE:    WordsPut(w, v ? "on" : "off"); return;
+    case SET_TEXT:
+        if (v) {
+            WordsNum(w, v);
+            WordsPut(w, " px");
+        } else {
+            WordsPut(w, "auto");
+        }
+        return;
+    case SET_THEME:    WordsPut(w, v == GANGWAY_THEME_LIGHT ? "light" : "dark"); return;
     default:           return;
     }
 }
 
-/* One row the person may choose: its name, and a setting's value between
- * the marks that say ←→ change it — in the warning colour once changed. The
- * chosen row is one bar across the screen. */
-static void Choosable(PanelPage *page, const Panel *p, PanelRow row)
+/* What an info row says of what the loader found and chose. */
+static void FoundSaid(PanelWords *w, const Panel *p, PanelRow row)
 {
-    int     chosen = p->row == row;
-    uint8_t attr   = chosen ? ATTR_CHOSEN : VIDEO_ATTR_DEFAULT;
-
-    PanelPut(page, attr, chosen ? " ▶ " : "   ");
-    PanelPut(page, attr, g_row_names[row]);
-    if (row < PANEL_SETTINGS) {
-        uint32_t pad = 12u;
-        for (const char *c = g_row_names[row]; *c && pad; c++) pad--;
-        for (; pad; pad--) PanelPut(page, attr, " ");
-        PanelPut(page, attr, "‹ ");
-        ValueSaid(page, p, row, chosen || p->value[row] == p->came[row] ? attr : VIDEO_ATTR_WARNING);
-        PanelPut(page, attr, " ›");
+    static const char hex[] = "0123456789abcdef";
+    const LecternKernel *k = KernelChosen();
+    switch (row) {
+    case ROW_KERNEL:
+        WordsPut(w, k->says == ATTEST_HELD ? "attested by the book, " : "not attested, ");
+        WordsBytes(w, k->bytes);
+        return;
+    case ROW_VOLUME:
+        for (uint32_t i = 0; i < 4u; i++) {
+            char pair[3] = { hex[g_volume_uuid[i] >> 4], hex[g_volume_uuid[i] & 15u], '\0' };
+            WordsPut(w, pair);
+        }
+        WordsPut(w, "…, ");
+        WordsBytes(w, g_volume_end * VOLUME_BLOCK_BYTES);
+        return;
+    case ROW_FOUND_SCREEN:
+        WordsNum(w, p->fb.width);
+        WordsPut(w, "x");
+        WordsNum(w, p->fb.height);
+        return;
+    case ROW_PROCESSORS:
+        if (p->machine_cores) WordsNum(w, p->machine_cores);
+        else WordsPut(w, "the firmware does not say");
+        return;
+    case ROW_STARTS:
+        if (CrossingsNone()) {
+            WordsPut(w, "none kept on this medium");
+            return;
+        }
+        WordsPut(w, "this is start ");
+        WordsNum(w, CrossingsNext());
+        if (p->misses) {
+            WordsPut(w, "; ");
+            WordsNum(w, p->misses);
+            WordsPut(w, " before did not land");
+        }
+        return;
+    default: return;
     }
-    PanelPut(page, attr, "\n");
 }
 
+/* The page as it stands, handed to how the panel looks. */
 static void PanelDraw(const Panel *p)
 {
-    static PanelPage page;
+    static PanelWords words[16];
+    PanelLookRow      rows[16];
+    uint32_t          count;
+    const PanelRow   *list = SheetRows(p, &count);
+    static const char *const titles[] = { NULL, "Start options", "Journals", "About this machine" };
+    static const char *const hints[]  = {
+        "↑↓ choose · Enter open",
+        "↑↓ choose · ←→ change · Esc back\nfor this start only — to keep it: settings gangway",
+        "↑↓ choose · Enter open · Esc back",
+        "Esc back",
+    };
 
-    PanelBegin(&page);
-    PanelPut(&page, ATTR_TITLE, " Gangway · the panel\n");
+    for (uint32_t i = 0; i < count; i++) {
+        PanelRow row = list[i];
+        MemZero(&rows[i], sizeof(rows[i]));
+        words[i].used    = 0;
+        words[i].text[0] = '\0';
+        rows[i].label    = g_names[row];
+        rows[i].more     = row == ROW_OPTIONS || row == ROW_JOURNALS || row == ROW_ABOUT;
+        rows[i].info     = (uint8_t)IsInfo(row);
+        if (IsSetting(row)) {
+            PanelSetting s = (PanelSetting)(row - ROW_SCREEN);
+            ValueSaid(&words[i], p, s);
+            rows[i].value   = words[i].text;
+            rows[i].changed = p->value[s] != p->came[s];
+        } else if (IsInfo(row)) {
+            FoundSaid(&words[i], p, row);
+            rows[i].value = words[i].text;
+        }
+    }
+    PanelLookPage(titles[p->sheet], rows, count, p->chosen, p->note, hints[p->sheet]);
+}
+
+/* The logo drawn again, and what is said under it: when the panel opened by
+ * itself, why; when the kernel is not attested, that. */
+static int PanelAgain(const Panel *p)
+{
+    static PanelWords said;
+    const char       *line = NULL, *under = NULL;
     if (p->why == CROSSING_PANEL_MISSES) {
-        PanelPut(&page, VIDEO_ATTR_WARNING, " It opened by itself: the last ");
-        PanelNum(&page, VIDEO_ATTR_WARNING, p->misses);
-        PanelPut(&page, VIDEO_ATTR_WARNING,
-                 " starts did not land. The log the start before kept, startup all or one core may tell why.\n");
+        said.used = 0;
+        WordsPut(&said, "The last ");
+        WordsNum(&said, p->misses);
+        WordsPut(&said, " starts did not finish.");
+        line  = said.text;
+        under = "Start again, or open Journals to see why.";
+    } else if (KernelChosen()->says != ATTEST_HELD) {
+        line  = "The kernel is not attested by the book.";
+        under = "Nothing shows it broken; it is loaded all the same.";
     }
-    PanelPut(&page, VIDEO_ATTR_DEFAULT, "\n");
-    FoundKernel(&page);
-    FoundVolume(&page);
-    FoundMachine(&page, p);
-    FoundCrossings(&page, p);
-    PanelPut(&page, ATTR_TITLE, "\n For this start\n");
-    for (PanelRow row = ROW_SCREEN; row < PANEL_SETTINGS; row++) Choosable(&page, p, row);
-    PanelPut(&page, VIDEO_ATTR_DEFAULT, "\n");
-    for (PanelRow row = ROW_START; row <= LastRow(p); row++) Choosable(&page, p, row);
-    PanelPut(&page, ATTR_NAME, "\n ↑↓ choose · ←→ change · Enter do\n");
-    PanelPut(&page, VIDEO_ATTR_DEFAULT,
-             " What is changed here holds for this start only; to keep it, set it in the hub: settings gangway\n");
-    if (p->note) {
-        PanelPut(&page, VIDEO_ATTR_WARNING, " ");
-        PanelPut(&page, VIDEO_ATTR_WARNING, p->note);
-        PanelPut(&page, VIDEO_ATTR_WARNING, "\n");
-    }
-    DrawPage(page.pieces, page.count, 0, 0, DrawRows());
+    return PanelLookBegin(&p->fb, line, under);
 }
 
 /* ------------------------------------------------------------------------- */
 /* What the keys do                                                          */
 /* ------------------------------------------------------------------------- */
 
-/* A setting's value one step on (`up`) or back, round from the last to the
- * first. */
-static void Step(Panel *p, int up)
+/* The next row that may be chosen, down or up, staying where it is at the
+ * page's end. */
+static void Move(Panel *p, int down)
 {
-    uint32_t *v    = &p->value[p->row];
-    uint32_t  last = 1u;
-    if (p->row == ROW_SCREEN) last = p->nsizes;
-    if (p->row == ROW_CORES) last = p->machine_cores ? p->machine_cores : PANEL_CORES_MOST;
-    if (*v > last) last = *v;   /* asked past what the machine has: kept, and stepped from */
-    if (up) *v = *v >= last ? 0u : *v + 1u;
-    else *v = *v ? *v - 1u : last;
+    uint32_t        count;
+    const PanelRow *list = SheetRows(p, &count);
+    for (uint32_t at = p->chosen;;) {
+        if (down ? at + 1u >= count : at == 0) return;
+        at = down ? at + 1u : at - 1u;
+        if (Choosable(list[at])) {
+            p->chosen = at;
+            return;
+        }
+    }
+}
+
+static void Ends(Panel *p, int last)
+{
+    uint32_t        count;
+    const PanelRow *list = SheetRows(p, &count);
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t at = last ? count - 1u - i : i;
+        if (Choosable(list[at])) {
+            p->chosen = at;
+            return;
+        }
+    }
+}
+
+static void Open(Panel *p, PanelSheet sheet)
+{
+    p->opened = p->chosen;
+    p->sheet  = sheet;
+    Ends(p, 0);
+}
+
+static void Back(Panel *p)
+{
+    p->sheet  = SHEET_MAIN;
+    p->chosen = p->opened;
+}
+
+/* A setting's value one step on (`up`) or back, round from the last to the
+ * first; the panel's own letters and colours taken at once. */
+static void Step(Panel *p, PanelSetting s, int up)
+{
+    uint32_t *v = &p->value[s];
+    if (s == SET_TEXT) {
+        const uint32_t n = sizeof(g_text_sizes) / sizeof(g_text_sizes[0]);
+        uint32_t       at = 0;
+        while (at < n && g_text_sizes[at] != *v) at++;
+        at = at == n ? 0 : up ? (at + 1u) % n : (at + n - 1u) % n;
+        *v = g_text_sizes[at];
+    } else {
+        uint32_t last = 1u;
+        if (s == SET_SCREEN) last = p->nsizes;
+        if (s == SET_CORES) last = p->machine_cores ? p->machine_cores : PANEL_CORES_MOST;
+        if (*v > last) last = *v;   /* asked past what the machine has: kept, and stepped from */
+        if (up) *v = *v >= last ? 0u : *v + 1u;
+        else *v = *v ? *v - 1u : last;
+    }
+    if (s == SET_TEXT || s == SET_THEME) {
+        g_settings.text_size = p->value[SET_TEXT];
+        g_settings.theme     = (uint8_t)p->value[SET_THEME];
+        DrawUse(&p->fb);
+        (void)PanelAgain(p);
+    }
 }
 
 /* Said aloud, then the machine reset as `type` asks; back here only when the
@@ -407,11 +537,22 @@ static const char *FirmwareUi(void)
 /* Enter on the chosen row: 1 when the person goes on with the start. */
 static int Do(Panel *p)
 {
-    switch (p->row) {
-    case ROW_START:    return 1;
-    case ROW_JOURNAL:  PanelJournalShow(); return 0;
-    case ROW_PREVIOUS: PanelPreviousShow(); return 0;
-    case ROW_CROSSINGS: PanelCrossingsShow(); return 0;
+    uint32_t        count;
+    const PanelRow *list = SheetRows(p, &count);
+    PanelRow        row  = list[p->chosen];
+    if (IsSetting(row)) {
+        Step(p, (PanelSetting)(row - ROW_SCREEN), 1);
+        return 0;
+    }
+    switch (row) {
+    case ROW_START:     return 1;
+    case ROW_OPTIONS:   Open(p, SHEET_OPTIONS); return 0;
+    case ROW_JOURNALS:  Open(p, SHEET_JOURNALS); return 0;
+    case ROW_ABOUT:     Open(p, SHEET_ABOUT); return 0;
+    case ROW_BACK:      Back(p); return 0;
+    case ROW_JOURNAL:   PanelJournalShow(); (void)PanelAgain(p); return 0;
+    case ROW_PREVIOUS:  PanelPreviousShow(); (void)PanelAgain(p); return 0;
+    case ROW_CROSSINGS: PanelCrossingsShow(); (void)PanelAgain(p); return 0;
     case ROW_RESTART:
         Reset(EfiResetCold, "restarts the machine");
         p->note = "the firmware would not restart the machine";
@@ -420,8 +561,8 @@ static int Do(Panel *p)
         Reset(EfiResetShutdown, "turns the machine off");
         p->note = "the firmware would not turn the machine off";
         return 0;
-    case ROW_FIRMWARE: p->note = FirmwareUi(); return 0;
-    default:           Step(p, 1); return 0;
+    case ROW_FIRMWARE:  p->note = FirmwareUi(); return 0;
+    default:            return 0;
     }
 }
 
@@ -429,14 +570,18 @@ static int Do(Panel *p)
  * until the next key. */
 static int Key(Panel *p, GangwayKey key)
 {
+    uint32_t        count;
+    const PanelRow *list = SheetRows(p, &count);
+    PanelRow        row  = list[p->chosen];
     p->note = NULL;
     switch (key) {
-    case KEY_UP:    if (p->row > ROW_SCREEN) p->row--; return 0;
-    case KEY_DOWN:  if (p->row < LastRow(p)) p->row++; return 0;
-    case KEY_HOME:  p->row = ROW_SCREEN; return 0;
-    case KEY_END:   p->row = LastRow(p); return 0;
+    case KEY_UP:    Move(p, 0); return 0;
+    case KEY_DOWN:  Move(p, 1); return 0;
+    case KEY_HOME:  Ends(p, 0); return 0;
+    case KEY_END:   Ends(p, 1); return 0;
     case KEY_LEFT:
-    case KEY_RIGHT: if (p->row < PANEL_SETTINGS) Step(p, key == KEY_RIGHT); return 0;
+    case KEY_RIGHT: if (IsSetting(row)) Step(p, (PanelSetting)(row - ROW_SCREEN), key == KEY_RIGHT); return 0;
+    case KEY_BACK:  if (p->sheet != SHEET_MAIN) Back(p); return 0;
     case KEY_ENTER: return Do(p);
     default:        return 0;
     }
@@ -452,28 +597,32 @@ static void Leave(const Panel *p, FbInfo *fb)
 {
     uint32_t changed = 0;
 
-    if (p->value[ROW_SCREEN] != p->came[ROW_SCREEN]) {
-        uint32_t v               = p->value[ROW_SCREEN];
+    if (p->value[SET_SCREEN] != p->came[SET_SCREEN]) {
+        uint32_t v               = p->value[SET_SCREEN];
         g_settings.screen_width  = v ? p->sizes[v - 1u].width : 0;
         g_settings.screen_height = v ? p->sizes[v - 1u].height : 0;
         changed |= GANGWAY_SET_SCREEN;
     }
-    if (p->value[ROW_CORES] != p->came[ROW_CORES]) {
-        g_settings.cores = p->value[ROW_CORES];
+    if (p->value[SET_CORES] != p->came[SET_CORES]) {
+        g_settings.cores = p->value[SET_CORES];
         changed |= GANGWAY_SET_CORES;
     }
-    if (p->value[ROW_STARTUP] != p->came[ROW_STARTUP]) {
-        g_settings.startup = (uint8_t)p->value[ROW_STARTUP];
+    if (p->value[SET_STARTUP] != p->came[SET_STARTUP]) {
+        g_settings.startup = (uint8_t)p->value[SET_STARTUP];
         changed |= GANGWAY_SET_STARTUP;
     }
-    if (p->value[ROW_KEEP_LOG] != p->came[ROW_KEEP_LOG]) {
-        g_settings.keep_log = (uint8_t)p->value[ROW_KEEP_LOG];
+    if (p->value[SET_KEEP_LOG] != p->came[SET_KEEP_LOG]) {
+        g_settings.keep_log = (uint8_t)p->value[SET_KEEP_LOG];
         changed |= GANGWAY_SET_KEEP_LOG;
     }
-    if (p->value[ROW_SCENE] != p->came[ROW_SCENE]) {
-        g_settings.scene = (uint8_t)p->value[ROW_SCENE];
+    if (p->value[SET_SCENE] != p->came[SET_SCENE]) {
+        g_settings.scene = (uint8_t)p->value[SET_SCENE];
         changed |= GANGWAY_SET_SCENE;
     }
+    g_settings.text_size = p->value[SET_TEXT];
+    g_settings.theme     = (uint8_t)p->value[SET_THEME];
+    if (p->value[SET_TEXT] != p->came[SET_TEXT]) changed |= GANGWAY_SET_TEXT;
+    if (p->value[SET_THEME] != p->came[SET_THEME]) changed |= GANGWAY_SET_THEME;
     g_settings.set |= changed;
 
     PrintAloud(1);
@@ -487,6 +636,7 @@ static void Leave(const Panel *p, FbInfo *fb)
     }
     PrintAloud(0);
 
+    PanelLookEnd();
     DrawPage(NULL, 0, 0, 0, DrawRows());
     if (changed & GANGWAY_SET_SCREEN) {
         *fb = QueryGopFramebuffer();
@@ -525,6 +675,12 @@ uint8_t PanelIfAsked(FbInfo *fb, uint32_t misses)
     (void)g_bs->set_watchdog_timer(0, 0, 0, NULL);
 
     PanelTake(&p, fb, why, misses);
+    if (!PanelAgain(&p)) {
+        PrintAloud(1);
+        Print("Gangway: the firmware gives no room to draw the panel — the start goes on\n");
+        PrintAloud(0);
+        return CROSSING_PANEL_NONE;
+    }
     for (;;) {
         PanelDraw(&p);
         GangwayKey key = KeyNext();
