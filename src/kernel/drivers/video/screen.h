@@ -36,8 +36,8 @@ struct cabin_t;
 
 /* The first act of the kernel's console: the text page, with the Emergency
  * Screen waiting on it — a quiet boot draws nothing until the display program
- * claims the glass, or something is wrong (emergency_screen.h,
- * EmergencyScreenAwait). Runs before mem_init. */
+ * claims the glass, unless the boot cannot reach it or the person asks to see
+ * (emergency_screen.h, EmergencyScreenAwait). Runs before mem_init. */
 void ScreenInit(void);
 
 /* The quiet boot is over, because nobody is coming for the glass — no volume

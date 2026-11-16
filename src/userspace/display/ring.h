@@ -40,16 +40,12 @@ public:
     // sleep. An unreadable ring hangs no bell: news of it could not be read.
     bool HangBell() noexcept;
 
-    // How many of the kernel's lines said in error have been drawn.
-    std::uint64_t Errors() const noexcept { return ErrorLines; }
-
 private:
     std::uint64_t Position = 0;   // drawn up to here
     std::uint64_t Seen = 0;       // looked at up to here: past Position only by
                                   // a character still waiting for its last bytes
     bool Due = true;
     bool Unreadable = false;
-    std::uint64_t ErrorLines = 0;
 };
 
 #endif

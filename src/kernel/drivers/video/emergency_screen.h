@@ -34,10 +34,13 @@ void EmergencyScreenLeastCell(uint32_t *width, uint32_t *height);
 void EmergencyScreenCells(uint32_t *cols, uint32_t *rows, uint32_t *cell_width, uint32_t *cell_height);
 
 /* A quiet boot: nothing is drawn — the glass keeps what the firmware left on
- * it, its logo on a desk machine — until the display program claims it, and
- * the tail is shown at once instead when the ring says anything in the error
- * tone (Follow looks), on a panic, or when the screen is shown outright
- * (screen.c, ScreenQuietEnds). Never a timer: only something said. */
+ * it, its logo on a desk machine or the loader's scene — until the display
+ * program claims it; the tail is shown instead on a panic, or when the screen
+ * is shown outright: nobody is coming for the glass, the person asked to see
+ * everything, or presses Ctrl+Alt+Esc (screen.c, ScreenQuietEnds,
+ * ScreenSwapKnock). A line said in error is not one of them: the boot goes on,
+ * and the display shows the line once it has the glass. Never a timer: only
+ * something done. */
 void EmergencyScreenAwait(void);
 
 /* Take the glass: clear it and draw the ring's tail; from now on Follow draws. */
@@ -49,8 +52,8 @@ void EmergencyScreenHide(void);
 /* Draw what the ring has said since the last draw, if the glass is ours. */
 void EmergencyScreenFollow(void);
 
-/* Whether this screen has taken the glass since the start — shown, woken by an
- * error, or by a panic: whatever the loader left there is gone. */
+/* Whether this screen has taken the glass since the start — shown, or taken
+ * by a panic: whatever the loader left there is gone. */
 bool EmergencyScreenEverShown(void);
 
 /* A panic's: the glass taken whoever holds the screen, the tail drawn, and

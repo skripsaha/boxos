@@ -88,7 +88,6 @@ bool RingFollower::CatchUp(ConsoleModel &Model, std::uint64_t End) noexcept
             if (Error) {
                 Model.WriteKernel(Bytes + Done, Tones + Done, Stop - Done);
                 Drew = true;
-                ErrorLines++;
             }
             Done = Stop;
         }

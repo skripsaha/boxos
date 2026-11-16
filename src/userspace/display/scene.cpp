@@ -11,8 +11,7 @@
  * Only its beginning is said, before any program has a prompt on the screen.
  * Its going is not: a line said then would stand on the wire between a
  * program's prompt and what the person types at it. The going shows on the
- * glass, and what took it away — a key, a line said in error — is in the log
- * already.
+ * glass, and what took it away — a key — is in the log already.
  */
 
 #include "scene.h"

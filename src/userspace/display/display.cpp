@@ -46,8 +46,8 @@
  * scene the machine starts with (scene.cpp). It is played on from that very
  * frame, the console kept under it, its enter act to its end and on until a
  * program waits for the person — then it leaves and the console is drawn
- * whole; a key, a line said in error or the glass turned over takes it away
- * at once.
+ * whole, a line said in error among it; a key or the glass turned over takes
+ * it away at once.
  *
  * On a framebuffer each character is drawn as the typesetter pictures it
  * (typesetter.cpp), in the font the person names in the display's settings —
@@ -371,10 +371,8 @@ bool LaneStep()
 
 bool RingStep()
 {
-    const std::uint64_t Errors = g_ring.Errors();
     const bool Drew = g_ring.CatchUp(*g_model);
     g_dirty |= Drew;
-    if (g_ring.Errors() != Errors) SceneGoes();   // a line said in error is shown at once
     return Drew;
 }
 

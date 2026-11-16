@@ -66,9 +66,7 @@ typedef struct {
     uint32_t          cell_w;
     uint32_t          cell_h;
     bool              shown;     /* the glass is ours to draw on */
-    bool              waiting;   /* a quiet boot: shown at the first error said */
     bool              ever;      /* it has taken the glass since the start */
-    uint64_t          watched;   /* the ring position looked at for one, up to */
     uint64_t          drawn;     /* the ring position drawn up to */
     EmergencyPen      pen;
 } EmergencyGlass;
@@ -302,20 +300,6 @@ static void DrawTail(uint64_t end, uint32_t lines)
     g_glass.drawn = end;
 }
 
-/* Whether the ring has said anything in the error tone since the last look —
- * what ends a quiet boot. A position the ring has let go of is not looked at:
- * what was there is gone, and the tail is what will be shown. */
-static bool ErrorSaid(void)
-{
-    uint64_t written = LogRingWritten();
-    uint64_t p       = g_glass.watched < RingOldest() ? RingOldest() : g_glass.watched;
-    bool     said    = false;
-    for (; p < written && !said; p++)
-        said = LogRingToneAt(p) == LOG_TONE_ERROR;
-    g_glass.watched = written;
-    return said;
-}
-
 static uint32_t JumpLines(void)
 {
     return g_glass.rows > 1u ? g_glass.rows / 2u : 1u;
@@ -373,15 +357,12 @@ void EmergencyScreenCells(uint32_t *cols, uint32_t *rows, uint32_t *cell_width, 
 
 void EmergencyScreenAwait(void)
 {
-    g_glass.shown   = false;
-    g_glass.waiting = true;
-    g_glass.watched = 0;
+    g_glass.shown = false;
 }
 
 void EmergencyScreenShow(void)
 {
-    g_glass.shown   = true;
-    g_glass.waiting = false;
+    g_glass.shown = true;
     __atomic_store_n(&g_glass.ever, true, __ATOMIC_RELEASE);
     DrawTail(LogRingWritten(), g_glass.rows);
     Fence();
@@ -389,16 +370,12 @@ void EmergencyScreenShow(void)
 
 void EmergencyScreenHide(void)
 {
-    g_glass.shown   = false;
-    g_glass.waiting = false;
+    g_glass.shown = false;
 }
 
 void EmergencyScreenFollow(void)
 {
-    if (!g_glass.shown) {
-        if (g_glass.waiting && ErrorSaid()) EmergencyScreenShow();
-        return;
-    }
+    if (!g_glass.shown) return;
 
     /* Overtaken by more than the ring holds: what was not drawn is gone from
      * it, and the tail is what there is to show. */

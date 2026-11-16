@@ -9,10 +9,12 @@
 // SCREEN_LEFT_SCENE), played on from that very frame while the machine gets
 // ready, and then gone into the console: its enter act to its end, its wait
 // act round and round, and its leave act once the machine waits for the
-// person and enter is over — or gone at once when the person presses a key, a
-// line is said in error, or the glass is turned over. While it is on, the console is kept under it and
-// drawn whole when it goes. Each frame is drawn where it changed, the pixels
-// of the brush the loader drew with (boxos_scene_play.h), onto the easel.
+// person and enter is over — or gone at once when the person presses a key or
+// the glass is turned over. A line said in error does not take it away: the
+// machine goes on, and the line is in the console, which is kept under the
+// scene and drawn whole when it goes. Each frame is drawn where it changed,
+// the pixels of the brush the loader drew with (boxos_scene_play.h), onto the
+// easel.
 
 // The scene the claim says the loader left, read by its fid and its first
 // frame made — the pixels the glass shows already. False: none is left, or it
