@@ -6312,27 +6312,30 @@ overtake_listing() {
 # A second number of 0 is a whole listing, whatever the volume holds today; a
 # positive one is a cut and says how much was stranded; -1 means no prompt ever
 # followed the listing at all, which is a third thing and not a pass.
+#
+# The prompt is the hub's as prompt.cpp lays it: the context's tags in
+# brackets, how many files the last line gave (a listing gives every one it
+# lists: "141 ~ "), "+N" or "+N!" for the programs behind, each with a blank
+# after it and each there or not, then the sign and its blank.
 overtake_cuts() {
     python3 - "$1" <<'EOF2'
 import re, sys
 t = open(sys.argv[1], "rb").read().replace(b"\r", b"")
 row = re.compile(rb"(?m)^[!-~]+ +\[")
+prompt = re.compile(rb"\n(?:\[[^\]\n]*\] )?(?:[0-9]+ )?(?:\+[0-9]+!? )?~ ")
 starts = [m.end() for m in re.finditer(rb"Files:\n", t)]
 for k, s in enumerate(starts):
     end = starts[k + 1] if k + 1 < len(starts) else len(t)
     body = t[s:end]
-    n = body.find(b"\n~ ")
-    if n < 0:
+    m = prompt.search(body)
+    if m is None:
         print("%d -1" % len(body))
         continue
-    # The prompt is two bytes with no newline after it, so whatever the merge
-    # put next lands on the prompt's OWN line. Drop the "~ " and the rest of
-    # that line is read like any other, or a listing stranded by exactly one
-    # row would be counted as a listing that was never cut.
-    after = body[n + 1:]
-    if after.startswith(b"~ "):
-        after = after[2:]
-    print("%d %d" % (n, len(row.findall(after))))
+    # The prompt has no newline after it, so whatever the merge put next lands
+    # on the prompt's OWN line: the rest of that line is read like any other,
+    # or a listing stranded by exactly one row would be counted as a listing
+    # that was never cut.
+    print("%d %d" % (m.start(), len(row.findall(body[m.end():]))))
 EOF2
 }
 
