@@ -44,7 +44,7 @@ HALTHOG_WAITS='^\[QUILL\] shutdownhog: pid [0-9]+ waits for the machine to stop'
 HALTHOG_TOLD='^\[QUILL\] shutdownhog: the machine is stopping — pid [0-9]+ computes'
 HALTHOG_OFF='^\[HALT\] Powering off'
 HALTHOG_UNMUSTERED="the kernel named 'system:shutdown', which is not in its muster"
-HALTHOG_CLOCK="^\[AUTOSTART\] Started 'clock(\.box)?' "
+HALTHOG_CLOCK="^(\[[0-9]+\] )?\[AUTOSTART\] Started 'clock(\.box)?' "
 
 # halthog_quiet KEYS... — $SCRATCH/halthog.quiet.img: a copy of the image as
 # built, booted once on one core to take clock off the list autostart.box starts (autostart remove everywhere clock.box)
