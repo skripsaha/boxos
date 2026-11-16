@@ -917,7 +917,8 @@ GANGWAY_SRC    = src/boot/uefi/gangway.c src/boot/uefi/gangway_bytes.c src/boot/
                  src/boot/uefi/gangway_lectern.c src/boot/uefi/gangway_lectern_tree.c \
                  src/boot/uefi/gangway_lectern_ribbon.c src/boot/uefi/gangway_lectern_replay.c \
                  src/boot/uefi/gangway_succession.c src/boot/uefi/gangway_lectern_called.c \
-                 src/boot/uefi/gangway_settings.c
+                 src/boot/uefi/gangway_settings.c src/boot/uefi/gangway_keys.c \
+                 src/boot/uefi/gangway_panel.c src/boot/uefi/gangway_panel_log.c
 GANGWAY_HDRS   = src/boot/uefi/gangway.h src/boot/uefi/uefi.h \
                  src/boot/uefi/gangway_lectern.h src/boot/uefi/gangway_lectern_book.h \
                  src/include/boot_info.h src/include/boarding_pass.h \
@@ -928,7 +929,7 @@ GANGWAY_HDRS   = src/boot/uefi/gangway.h src/boot/uefi/uefi.h \
                  src/include/boxos_screen.h src/include/boxos_utf8.h src/include/boxos_color.h \
                  src/include/video_colors.h src/include/boxos_gangway_settings.h \
                  src/include/settings_reader.h src/include/settings_chosen.h src/include/key_chord.h \
-                 src/include/kb_event.h $(IMPRINT_DATA)
+                 src/include/kb_event.h src/include/boxos_logkeep.h $(IMPRINT_DATA)
 GANGWAY_JUMP   = src/boot/uefi/gangway_jump.asm
 GANGWAY_LD     = src/boot/uefi/gangway.ld
 GANGWAY_EFI    = $(BUILDDIR)/BOOTX64.EFI

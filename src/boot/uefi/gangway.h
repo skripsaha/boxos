@@ -8,6 +8,8 @@
  * for one part of the journey gangway.c walks in order: the firmware's tables,
  * the console, the medium, the screen, memory, the page tables and the
  * handoff; gangway_draw.c draws on the screen what the loader shows itself;
+ * gangway_keys.c reads the keyboard and gangway_panel*.c is the panel a
+ * person asks for by holding Space;
  * gangway_deed.c takes up what a volume's Deed says; gangway_attest.c
  * is the desk the Lectern (gangway_lectern*.c, gangway_succession.c) chooses
  * the volume's kernel at. Every other function and variable stays static to
@@ -50,11 +52,12 @@ uint64_t Le64(const uint8_t *p);
 
 /* gangway_console.c: COM1 by the loader's own port writes — the voice before
  * anything else is reached and after ExitBootServices — and the journal every
- * Print goes into instead of the screen. Panic shows the journal and why on
- * the firmware's console and stops the machine. */
+ * Print goes into instead of the screen; while PrintAloud is on, down COM1 as
+ * well. Panic shows the journal and why on the screen and stops the machine. */
 void Com1Init(void);
 void Com1Str(const char *s);
 void Print(const char *msg);
+void PrintAloud(int on);
 void PrintDec(uint64_t v);
 void PrintHex64(uint64_t v);
 void Panic(const char *msg) __attribute__((noreturn));
@@ -129,6 +132,8 @@ EFI_STATUS DeedTakeUp(const uint8_t *deed_block, uint64_t ground_start);
  */
 typedef EFI_STATUS (*AttestReader)(uint64_t vlba, uint32_t count_512, void *buffer);
 const char *SuccessionTake(EFI_BOOT_SERVICES *bs, AttestReader read, uint64_t *bytes, uint64_t *alloc_end);
+/* The kernel SuccessionTake chose, as the Lectern told it (gangway_lectern.h). */
+const LecternKernel *KernelChosen(void);
 
 /*
  * gangway_settings.c: what the person set in gangway.settings
@@ -137,6 +142,9 @@ const char *SuccessionTake(EFI_BOOT_SERVICES *bs, AttestReader read, uint64_t *b
  * does not fit said; with no file, everything as Gangway came. `set` says
  * which the file sets — a value of its own, not the word default: only those
  * go to the kernel, as stamps, and the kernel goes its own way in the rest.
+ * The panel sets them as well, for one start. SettingsList says those of
+ * `which` as they stand — "screen 1920x1080, cores 2" — and whether it said
+ * any.
  */
 #define GANGWAY_SET_SCREEN   1u
 #define GANGWAY_SET_STARTUP  2u
@@ -154,13 +162,16 @@ typedef struct {
 
 extern GangwaySettings g_settings;
 void SettingsTake(const uint8_t *text, uint64_t bytes);
+int  SettingsList(uint32_t which);
 
 /* gangway_video.c: the framebuffer the kernel is handed, in the mode chosen
- * for it — the size gangway.settings asks for when the adapter has it — said
- * (QueryGopFramebuffer); the framebuffer of the mode the firmware
- * has on now, the mode left as it is and nothing said (GopFramebufferNow).
- * Each all zero when there is none it can be — handed over, the kernel comes
- * up on text. */
+ * for it — the size the person asks for (g_settings.screen_*) when the adapter
+ * has it — said (QueryGopFramebuffer), and how it was chosen, in words
+ * (GopChosenWhy); the framebuffer of the mode the firmware has on now, the
+ * mode left as it is and nothing said (GopFramebufferNow). Each all zero when
+ * there is none it can be — handed over, the kernel comes up on text. GopSizes
+ * lists the sizes the adapter's modes come in that the kernel can be handed,
+ * each once, smallest first: how many, at most `most`. */
 typedef struct {
     uint64_t addr;
     uint32_t width;
@@ -169,17 +180,28 @@ typedef struct {
     uint32_t format;  /* 0=RGB, 1=BGR — the only two layouts we publish */
 } FbInfo;
 
-FbInfo QueryGopFramebuffer(void);
-FbInfo GopFramebufferNow(void);
+typedef struct {
+    uint32_t width;
+    uint32_t height;
+} GopSize;
+
+FbInfo      QueryGopFramebuffer(void);
+FbInfo      GopFramebufferNow(void);
+const char *GopChosenWhy(void);
+uint32_t    GopSizes(GopSize *sizes, uint32_t most);
 
 /*
  * gangway_draw.c: text the loader draws on the screen itself, in the cells of
  * the imprint (boxos_imprint_press.h) — the same characters the kernel and the
  * display draw, never the firmware's font. DrawUse names the framebuffer the
  * journey chose (QueryGopFramebuffer); before it, the firmware's mode as it is
- * is drawn on (GopFramebufferNow). DrawEnd clears the screen and draws the end
- * of the pieces — one text, each piece in its colours — as much of it as the
- * screen holds, cut from the front: 0 when there is no framebuffer to draw on.
+ * is drawn on (GopFramebufferNow). The pieces are one text, each piece in its
+ * colours. DrawPage draws its rows from row `skip` onto `height` rows of the
+ * screen from row `top`, every cell of them, and answers how many rows the
+ * whole text fills; DrawCount only counts them. DrawEnd draws the end of the
+ * pieces on the whole screen, as much as it holds, cut from the front: 0 when
+ * there is no framebuffer to draw on. DrawRows and DrawCols: the screen's
+ * cells, 0 when there is none.
  */
 typedef struct {
     const char *text;   /* UTF-8; '\n' ends a line */
@@ -187,8 +209,70 @@ typedef struct {
     uint8_t     attr;   /* VIDEO_ATTR_* (video_colors.h) */
 } DrawPiece;
 
-void DrawUse(const FbInfo *fb);
-int  DrawEnd(const DrawPiece *pieces, uint32_t count);
+void     DrawUse(const FbInfo *fb);
+uint32_t DrawRows(void);
+uint32_t DrawCols(void);
+uint32_t DrawCount(const DrawPiece *pieces, uint32_t count);
+uint32_t DrawPage(const DrawPiece *pieces, uint32_t count, uint32_t skip, uint32_t top, uint32_t height);
+int      DrawEnd(const DrawPiece *pieces, uint32_t count);
+
+/*
+ * gangway_keys.c: the keyboard, the firmware's console's. KeyPanelAsked reads
+ * every stroke waiting and answers whether one was Space — asked once, never
+ * waited on. KeyNext waits for the next key the panel uses on the console's
+ * own event; KEY_GONE when the console gives none any more.
+ */
+typedef enum {
+    KEY_NONE,
+    KEY_GONE,
+    KEY_UP,
+    KEY_DOWN,
+    KEY_LEFT,
+    KEY_RIGHT,
+    KEY_PAGE_UP,
+    KEY_PAGE_DOWN,
+    KEY_HOME,
+    KEY_END,
+    KEY_ENTER,
+    KEY_BACK,
+} GangwayKey;
+
+int        KeyPanelAsked(void);
+GangwayKey KeyNext(void);
+
+/*
+ * gangway_panel.c: the panel — asked for by holding Space while the machine
+ * starts, after the kernel and the screen are chosen (PanelIfAsked): what was
+ * found and chosen, what the person may change for this one start, and
+ * Restart, Turn off, the firmware's settings. Leaving it, the start goes on
+ * with what was changed in g_settings, and in *fb when the screen was.
+ * gangway_panel_log.c: its two journals, each shown until the person goes
+ * back — this start's, the loader's own (PanelJournalShow), and what the
+ * kernel said in the start before, out of its carry-over window
+ * (PanelPreviousShow, boxos_logkeep.h).
+ *
+ * A page the panel draws is built of pieces in their colours: text put into
+ * the page's own room (PanelPut, PanelNum), or text lying elsewhere named as
+ * it is (PanelRaw) — a journal is never copied.
+ */
+#define PANEL_TEXT_BYTES  6144u
+#define PANEL_PIECES_MOST 128u
+
+typedef struct {
+    char      text[PANEL_TEXT_BYTES];
+    uint32_t  used;
+    DrawPiece pieces[PANEL_PIECES_MOST];
+    uint32_t  count;
+} PanelPage;
+
+void PanelBegin(PanelPage *page);
+void PanelPut(PanelPage *page, uint8_t attr, const char *text);
+void PanelNum(PanelPage *page, uint8_t attr, uint64_t n);
+void PanelRaw(PanelPage *page, uint8_t attr, const char *text, uint32_t bytes);
+
+void PanelIfAsked(FbInfo *fb);
+void PanelJournalShow(void);
+void PanelPreviousShow(void);
 
 /*
  * gangway_memory.c: the three handoff pages asked for before anything is

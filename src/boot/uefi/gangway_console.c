@@ -73,11 +73,25 @@ static char     g_journal[JOURNAL_BYTES];
 static uint32_t g_journal_used = 0;
 static uint32_t g_journal_lost = 0;
 
+/* While on, what is said goes down COM1 as well as into the journal — the
+ * panel's lines: a machine that stands waiting for a person says why on the
+ * wire, where nothing else will. */
+static int g_aloud = 0;
+
+void PrintAloud(int on)
+{
+    g_aloud = on;
+}
+
 void Print(const char *msg)
 {
     if (!msg) return;
     for (; *msg; msg++) {
         if (*msg == '\r') continue;
+        if (g_aloud) {
+            if (*msg == '\n') Com1Byte('\r');
+            Com1Byte(*msg);
+        }
         if (g_journal_used < JOURNAL_BYTES) g_journal[g_journal_used++] = *msg;
         else                                g_journal_lost++;
     }

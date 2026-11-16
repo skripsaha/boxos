@@ -221,8 +221,9 @@ _Static_assert(sizeof(BoardingMoment) == 16, "a moment is 16 bytes — stage2 BO
 
 /*
  * What the person asked of the kernel, in gangway.settings
- * (boxos_gangway_settings.h): a stamp for each setting the file sets, written
- * by Gangway. Where there is none — a setting the file leaves alone, a BIOS
+ * (boxos_gangway_settings.h) or on Gangway's panel for one start: a stamp for
+ * each setting the file or the panel sets, written by Gangway — which of the
+ * two, its journal says. Where there is none — a setting left alone, a BIOS
  * boot, whose stage2 reads no settings, or a loader older than these — the
  * kernel goes its own way: the screen quiet, every core started, and what it
  * says kept through a reset only in a kernel built to (PRINTTOFILE).

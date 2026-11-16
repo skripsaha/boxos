@@ -160,7 +160,7 @@ void amp_init(void)
     }
 
     // Build core descriptors: BSP first, then APs — no more than the person
-    // asked for (gangway.settings cores, boarding.h): the cores past that are
+    // asked for (cores, in gangway.settings or the panel; boarding.h): the cores past that are
     // never described, so never started, scheduled or counted.
     uint8_t  core_idx = 0;
     uint8_t  max_idx  = (uint8_t)(MAX_CORES - 1);
@@ -209,7 +209,7 @@ void amp_init(void)
     }
 
     if (g_amp.total_cores < count)
-        kprintf("[AMP] gangway.settings asks for %u core(s): %u of the %u the machine has are started\n",
+        kprintf("[AMP] the person asks for %u core(s): %u of the %u the machine has are started\n",
                 asked, g_amp.total_cores, count);
     kprintf("[AMP] Detected %u core(s) (%u K-core(s), %u App Core(s))\n",
             g_amp.total_cores, g_amp.k_count, g_amp.app_count);

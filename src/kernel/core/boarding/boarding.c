@@ -360,7 +360,7 @@ static void boarding_describe(unsigned stamps, bool sealed)
         if (keep)
             at += ksnprintf(asked + at, sizeof(asked) - (size_t)at, " keep-log %s",
                             BoardingPassKeepLog() ? "on" : "off");
-        kprintf("[Boarding]   the person asks of the kernel, in gangway.settings:%s\n", asked);
+        kprintf("[Boarding]   the person asks of the kernel:%s\n", asked);
     }
 
     /* Four lines that answer "which loader, off what, from where". Said once,

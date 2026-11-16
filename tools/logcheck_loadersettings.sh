@@ -91,9 +91,9 @@ run_loadersettings() {
     chk $? "loadersettings (second): and says what it sets: screen 1024x768, startup all, cores 2, keep-log on"
     grep -aq "choice=settings" "$A" && grep -aq "Gangway: GOP 1024x768 " "$A"
     chk $? "loadersettings (second): Gangway chooses the 1024x768 mode by the file ($(grep -a 'Gangway: GOP modes=' "$A" | tr -d '\r' | head -1 | cut -c10-))"
-    grep -aq "\[Boarding\]   the person asks of the kernel, in gangway.settings: startup all cores 2 keep-log on" "$A"
+    grep -aq "\[Boarding\]   the person asks of the kernel: startup all cores 2 keep-log on" "$A"
     chk $? "loadersettings (second): the kernel reads the three stamps and says what the person asks of it"
-    grep -aq "\[AMP\] gangway.settings asks for 2 core(s): 2 of the 4 the machine has are started" "$A" &&
+    grep -aq "\[AMP\] the person asks for 2 core(s): 2 of the 4 the machine has are started" "$A" &&
         grep -aq "\[AMP\] Detected 2 core(s)" "$A"
     chk $? "loadersettings (second): it starts two of the four cores"
     grep -aq "\[BOOT\] LogKeep is armed" "$A"

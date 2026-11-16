@@ -191,13 +191,10 @@ static void Untaken(const SettingsLine *line)
     Print("; it is passed over\n");
 }
 
-/* What the file sets, each as it is taken — "screen 1920x1080, cores 2" — or
- * that it sets nothing. */
-static void TakenSaid(void)
+int SettingsList(uint32_t which)
 {
     const char *between = "";
-    Print("Gangway: " GANGWAY_SETTINGS_FILE " sets ");
-    if (g_settings.set & GANGWAY_SET_SCREEN) {
+    if (which & GANGWAY_SET_SCREEN) {
         Print("screen ");
         if (g_settings.screen_width) {
             PrintDec(g_settings.screen_width);
@@ -208,24 +205,31 @@ static void TakenSaid(void)
         }
         between = ", ";
     }
-    if (g_settings.set & GANGWAY_SET_STARTUP) {
+    if (which & GANGWAY_SET_STARTUP) {
         Print(between);
         Print(g_settings.startup == BOARDING_STARTUP_ALL ? "startup all" : "startup quiet");
         between = ", ";
     }
-    if (g_settings.set & GANGWAY_SET_CORES) {
+    if (which & GANGWAY_SET_CORES) {
         Print(between);
         Print("cores ");
         if (g_settings.cores) PrintDec(g_settings.cores);
         else Print("all");
         between = ", ";
     }
-    if (g_settings.set & GANGWAY_SET_KEEP_LOG) {
+    if (which & GANGWAY_SET_KEEP_LOG) {
         Print(between);
         Print(g_settings.keep_log ? "keep-log on" : "keep-log off");
         between = ", ";
     }
-    Print(between[0] ? "\n" : "nothing — everything as Gangway came\n");
+    return between[0] != '\0';
+}
+
+/* What the file sets, each as it is taken, or that it sets nothing. */
+static void TakenSaid(void)
+{
+    Print("Gangway: " GANGWAY_SETTINGS_FILE " sets ");
+    Print(SettingsList(g_settings.set) ? "\n" : "nothing — everything as Gangway came\n");
 }
 
 void SettingsTake(const uint8_t *text, uint64_t bytes)

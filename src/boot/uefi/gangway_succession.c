@@ -184,6 +184,7 @@ static void Chosen(LecternChoice *s, const LecternCandidate *c, uint8_t *image, 
     LecternKernel *k      = s->kernel;
     uint64_t       blocks = BlocksOf(c->size), n = 0;
     LecternTailLaid(c->tail, image + (blocks - 1u) * VOLUME_BLOCK_BYTES);
+    for (uint32_t i = 0; i <= c->who.at; i++) k->line[i] = c->who.text[i];
     k->says   = says;
     k->image  = image;
     k->bytes  = c->size;

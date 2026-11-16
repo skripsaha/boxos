@@ -88,8 +88,10 @@ typedef enum {
 
 /*
  * The kernel the Succession chose: HELD, attested and placed; UNCHECKED,
- * placed, nothing to hold it to and nothing showing it broken (F2); BROKEN,
- * none may be jumped into, `line` the sentence the loader stops with.
+ * placed, nothing to hold it to and nothing showing it broken (F2) — `line`
+ * naming it as the journal does ("the kernel the deed names", "kernel fid
+ * 12"); BROKEN, none may be jumped into, `line` the sentence the loader stops
+ * with.
  * Placed: `image` (the desk's room, `blocks` blocks), its size in `bytes`,
  * and where it lay — the volume block of its first block (0 for a hole) and
  * the runs it was read from.

@@ -1,6 +1,7 @@
 /*
  * Gangway — the screen: the GOP that is the operator's display, a mode chosen
- * — the size the person asks for in gangway.settings when the adapter has it,
+ * — the size the person asks for, in gangway.settings or on the panel for one
+ * start, when the adapter has it,
  * else by the monitor's own preferred timing (EDID) where it can be had — and
  * the framebuffer the kernel is handed, said in full because a wrong one shows
  * as inverted colours or diagonal text with nothing on screen to explain it.
@@ -314,6 +315,14 @@ static int GopReadPreferredTiming(EFI_HANDLE handle, EdidPreferredTiming *out)
     return 0;
 }
 
+/* How the mode the kernel is handed was chosen, at the last
+ * QueryGopFramebuffer; and the mode the firmware had on before the first, put
+ * back before a mode is chosen again with no size asked — auto is the choice
+ * a start makes without one, never the size asked a moment ago. */
+static GopModeChoice g_choice = GopChoiceUnavailable;
+static int           g_found_known = 0;
+static uint32_t      g_found_mode  = 0;
+
 static const char *GopChoiceName(GopModeChoice choice)
 {
     switch (choice) {
@@ -421,7 +430,7 @@ static GopModeChoice SelectGopBestMode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
         if (!EFI_ERROR(status) && gop->mode && gop->mode->mode == candidates.asked_mode &&
             GopModeInfoUsable(gop->mode->info, &current_format, &current_bytes))
             return GopChoiceSettings;
-        Print("Gangway: GOP mode change to the size gangway.settings asks for ");
+        Print("Gangway: GOP mode change to the size the person asks for ");
         Print(EFI_ERROR(status) ? "failed status=" : "verification failed status=");
         PrintHex64((uint64_t)status);
         Print(" — the mode is chosen as without it\r\n");
@@ -432,8 +441,8 @@ static GopModeChoice SelectGopBestMode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
         PrintDec(g_settings.screen_width);
         Print("x");
         PrintDec(g_settings.screen_height);
-        Print(band ? ", the size gangway.settings asks for — the mode is chosen as without it\r\n"
-                   : ", the size gangway.settings asks for, is past what the kernel is handed (640x400 to "
+        Print(band ? ", the size the person asks for — the mode is chosen as without it\r\n"
+                   : ", the size the person asks for, is past what the kernel is handed (640x400 to "
                      "3840x2160) — the mode is chosen as without it\r\n");
     }
 
@@ -565,12 +574,19 @@ FbInfo QueryGopFramebuffer(void)
     }
 
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = selection.gop;
+    if (!g_found_known) {
+        g_found_mode  = gop->mode->mode;
+        g_found_known = 1;
+    } else if (!g_settings.screen_width && gop->mode->mode != g_found_mode) {
+        (void)gop->set_mode(gop, g_found_mode);
+    }
     uint32_t current_mode = gop->mode->mode;
     EdidPreferredTiming preferred;
     int have_edid = GopReadPreferredTiming(selection.handle, &preferred);
     uint32_t invalid_modes = 0;
     GopModeChoice choice = SelectGopBestMode(gop, have_edid ? &preferred : NULL,
                                              &invalid_modes);
+    g_choice = choice;
 
     Print("Gangway: GOP modes=");
     PrintDec(gop->mode->max_mode);
@@ -655,4 +671,55 @@ FbInfo GopFramebufferNow(void)
     if (GopFindPrimary(&selection) && selection.gop && selection.gop->mode)
         (void)GopFramebufferOf(selection.gop->mode, &fb);
     return fb;
+}
+
+const char *GopChosenWhy(void)
+{
+    switch (g_choice) {
+    case GopChoiceSettings:        return "the size asked for";
+    case GopChoiceCurrent:         return "the mode the firmware had on";
+    case GopChoiceEdid:            return "the monitor's own size";
+    case GopChoiceLargest:         return "the largest the adapter has";
+    case GopChoiceSmallest:        return "the smallest the adapter has";
+    case GopChoiceEdidTooLarge:    return "the monitor's own size is past 3840x2160";
+    case GopChoiceEdidUnavailable: return "the adapter has no mode of the monitor's size";
+    case GopChoiceUnavailable:
+    default:                       return "no mode could be set";
+    }
+}
+
+uint32_t GopSizes(GopSize *sizes, uint32_t most)
+{
+    GopSelection selection;
+    uint32_t     count = 0;
+
+    if (!GopFindPrimary(&selection) || !selection.gop || !selection.gop->mode) return 0;
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = selection.gop;
+    for (uint32_t m = 0; m < gop->mode->max_mode; m++) {
+        UINTN                                 size_of_info = 0;
+        EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info         = NULL;
+        uint32_t                              format = 0, bytes = 0;
+        if (EFI_ERROR(gop->query_mode(gop, m, &size_of_info, &info)) || !info) continue;
+        uint32_t w = info->horizontal_resolution, h = info->vertical_resolution;
+        int      usable = GopModeInfoUsable(info, &format, &bytes) && FbModeInBand(w, h);
+        g_bs->free_pool(info);
+        if (!usable) continue;
+
+        /* In order of area, then width; a size two modes share is one. */
+        uint32_t at = 0;
+        while (at < count && (GopModeArea(sizes[at].width, sizes[at].height) < GopModeArea(w, h) ||
+                              (GopModeArea(sizes[at].width, sizes[at].height) == GopModeArea(w, h) &&
+                               sizes[at].width < w)))
+            at++;
+        if (at < count && sizes[at].width == w && sizes[at].height == h) continue;
+        if (count == most) {
+            if (at == count) continue;
+            count--;
+        }
+        for (uint32_t i = count; i > at; i--) sizes[i] = sizes[i - 1u];
+        sizes[at].width  = w;
+        sizes[at].height = h;
+        count++;
+    }
+    return count;
 }

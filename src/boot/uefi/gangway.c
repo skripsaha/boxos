@@ -16,6 +16,8 @@
  *                                                         gangway_succession.c,
  *                                                         gangway_lectern*.c)
  *   5. the screen: the GOP mode, the framebuffer         (gangway_video.c)
+ *      — and the panel, when the person holds Space     (gangway_panel*.c,
+ *                                                         gangway_keys.c)
  *   6. the firmware's memory map as E820 at 0x500        (gangway_memory.c)
  *   7. the loader's own place checked against the 4 GB identity map, and the
  *      page tables and boot stack built after the kernel (gangway_paging.c)
@@ -234,6 +236,10 @@ EFI_STATUS EFIAPI GangwayMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     FbInfo fb = QueryGopFramebuffer();
     DrawUse(&fb);
     Moment("screen");
+
+    /* A person holding Space is shown the panel before the start goes on;
+     * what they change there may be the screen itself. */
+    PanelIfAsked(&fb);
 
     Print("Gangway: building memory map...\r\n");
     uint32_t e820_count = 0;

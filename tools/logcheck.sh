@@ -23,6 +23,10 @@
 #                         Gangway reads it held to the book and chooses the
 #                         screen by it; the kernel starts two cores, arms the
 #                         carry-over window, says what was asked
+#   logcheck.sh panel     Space held while a UEFI machine starts: Gangway's
+#                         panel opens, says so on the wire; a start changed on
+#                         it (startup all, cores 1) is what the kernel does;
+#                         the log kept before a warm reset shown; Turn off
 #   logcheck.sh mkfs      no boot: the image `make` lays held to
 #                         volume-read — its self-test over mkfs's own book, its
 #                         files, its ground — and create_tagfs on grounds past
@@ -99,6 +103,8 @@ STAND_NAME=logcheck
 . "$(dirname "$0")/logcheck_bookboot.sh"
 # The loadersettings scenario: tools/logcheck_loadersettings.sh.
 . "$(dirname "$0")/logcheck_loadersettings.sh"
+# The panel scenario: tools/logcheck_panel.sh.
+. "$(dirname "$0")/logcheck_panel.sh"
 # The dedup scenario: tools/logcheck_dedup.sh.
 . "$(dirname "$0")/logcheck_dedup.sh"
 # The mkfs scenario: tools/logcheck_mkfs.sh.
@@ -10338,6 +10344,7 @@ case "${1:-both}" in
     framerefuse) run_framerefuse ;;
     bookboot) run_bookboot ;;
     loadersettings) run_loadersettings ;;
+    panel)    run_panel ;;
     dedup)    run_dedup ;;
     mkfs)     run_mkfs ;;
     uefi)     run_uefi ;;
@@ -10450,8 +10457,8 @@ case "${1:-both}" in
     defragdelete) run_defragdelete ;;
     cores)    run_cores ;;
     both)     run_healthy; echo; run_novolume ;;
-    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_replugwritebook; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_haltcycle; echo; run_halthog; echo; run_halthogmut; echo; run_panicstop; echo; run_panicstopmut; echo; run_fullvolume; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_caret; echo; run_growbook; echo; run_growcutbook; echo; run_quill; echo; run_mountfail; echo; run_framerefuse; echo; run_bookboot; echo; run_loadersettings; echo; run_census; echo; run_stand; echo; run_standusb; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_turns; echo; run_turnsmut; echo; run_cores ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|caret|caretmut|grow|growcut|growglass|growmut|loggerhour|loggerhourmut|census|stand|standusb|standmut|quill|quillmut|stackguard|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|latelaunchmut|nofsgsbase|framerefuse|bookboot|loadersettings|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|halthog|halthogmut|panicstop|panicstopmut|fullvolume|roombackmut|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all|fare|faremut]"; exit 2 ;;
+    all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_replugwritebook; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_haltcycle; echo; run_halthog; echo; run_halthogmut; echo; run_panicstop; echo; run_panicstopmut; echo; run_fullvolume; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_caret; echo; run_growbook; echo; run_growcutbook; echo; run_quill; echo; run_mountfail; echo; run_framerefuse; echo; run_bookboot; echo; run_loadersettings; echo; run_panel; echo; run_census; echo; run_stand; echo; run_standusb; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_turns; echo; run_turnsmut; echo; run_cores ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|caret|caretmut|grow|growcut|growglass|growmut|loggerhour|loggerhourmut|census|stand|standusb|standmut|quill|quillmut|stackguard|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|latelaunchmut|nofsgsbase|framerefuse|bookboot|loadersettings|panel|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|halthog|halthogmut|panicstop|panicstopmut|fullvolume|roombackmut|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all|fare|faremut]"; exit 2 ;;
 esac
 
 STAND_FINISHED=1

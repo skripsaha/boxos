@@ -11,6 +11,7 @@
  */
 #include "klib.h"
 #include "klib_logring.h"
+#include "boxos_logkeep.h"
 #include "serial.h"     /* WireKick — the line is this ring's reader */
 #include "vmm.h"
 #include "cpu.h"            /* cpu_cpuid — which write-back this part has */
@@ -84,31 +85,9 @@ uint8_t LogRingToneAt(uint64_t pos)
  * does not.
  * ========================================================================== */
 
-/* 64 MiB. Above anything either loader places (the kernel may be 32 MiB and
- * its page tables and boot stack sit just past it, ~33 MiB at the very most),
- * below the first address any machine BoxOS targets fails to have. Fixed
- * rather than allocated because the whole point is that the NEXT boot finds
- * it, and the next boot's allocator has not run yet. */
-#define LOGKEEP_PHYS      0x04000000ULL
-#define LOGKEEP_HEADER    4096ULL
-#define LOGKEEP_BANKS     2u
-#define LOGKEEP_BYTES     (LOGKEEP_HEADER + (uint64_t)LOGKEEP_BANKS * LOGRING_CAPACITY)
-
-#define LOGKEEP_MAGIC     0x4449415353584F42ULL   /* "BOXSAID" + NUL, little-end */
-
-/* `size` is the header's own length: a header that survived a warm reset from
- * a kernel of another layout says another, and is not taken. */
-typedef struct {
-    uint64_t magic;
-    uint32_t size;         /* sizeof(LogKeepHeader) */
-    uint32_t capacity;     /* per bank */
-    uint32_t current;      /* bank this boot writes */
-    uint32_t boot;         /* counts up; names which run a bank came from */
-    uint64_t bytes[LOGKEEP_BANKS];
-} LogKeepHeader;
-
-_Static_assert(sizeof(LogKeepHeader) <= LOGKEEP_HEADER,
-               "the carry-over header must fit its page");
+/* The window's place and layout are boxos_logkeep.h's: Gangway's panel reads
+ * the bank of the start before by them. A bank holds what the ring does. */
+_Static_assert(LOGRING_CAPACITY == LOGKEEP_BANK_BYTES, "a carry-over bank holds the ring");
 
 /* False until LogKeepInit accepts the window. Every use is guarded on it, so a
  * machine that cannot offer the memory simply carries nothing forward.
@@ -138,7 +117,7 @@ static inline volatile LogKeepHeader *keep_header(void)
 
 static inline volatile uint8_t *keep_bank(uint32_t which)
 {
-    return keep_base() + LOGKEEP_HEADER + (uint64_t)which * LOGRING_CAPACITY;
+    return keep_base() + LOGKEEP_HEADER + (uint64_t)which * LOGKEEP_BANK_BYTES;
 }
 
 /* ── getting the window out of the cache and into the memory ─────────────

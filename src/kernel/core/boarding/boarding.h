@@ -56,8 +56,9 @@ bool BoardingPassVolume(uint8_t out_uuid[16]);
 bool BoardingPassMedium(uint8_t* out_firmware, uint8_t* out_bios_drive);
 
 /*
- * What the person asked of the kernel in gangway.settings (boarding_pass.h
- * STARTUP, CORES, KEEP_LOG) — and with no stamp, the kernel's own way: the
+ * What the person asked of the kernel — in gangway.settings, or in Gangway's
+ * panel for one start (boarding_pass.h STARTUP, CORES, KEEP_LOG); which of
+ * the two, the loader's journal says. With no stamp, the kernel's own way: the
  * screen quiet, every core, the log kept through a reset only in a kernel
  * built to (PRINTTOFILE). Asked as early as BoardingPassTake has run.
  */

@@ -102,9 +102,17 @@ static void AttestUnplace(void *ctx, uint8_t *room, uint64_t bytes)
     ((AttestDesk *)ctx)->bs->free_pages((EFI_PHYSICAL_ADDRESS)(uintptr_t)room, AttestPages(bytes));
 }
 
+/* The kernel the Succession chose, kept for the panel to show. */
+static LecternKernel g_chosen;
+
+const LecternKernel *KernelChosen(void)
+{
+    return &g_chosen;
+}
+
 const char *SuccessionTake(EFI_BOOT_SERVICES *bs, AttestReader read, uint64_t *bytes, uint64_t *alloc_end)
 {
-    static LecternKernel chosen;
+    LecternKernel       *chosen = &g_chosen;
     LecternCalled        called = { GANGWAY_SETTINGS_FILE, SETTINGS_FILE_MAX, CALLED_NONE, NULL, 0, 0 };
     AttestDesk           ctx;
     LecternDesk          desk;
@@ -122,20 +130,20 @@ const char *SuccessionTake(EFI_BOOT_SERVICES *bs, AttestReader read, uint64_t *b
     MemCopy(&desk.frame, &g_frame, sizeof(desk.frame));
     desk.block_end   = g_volume_end;
     desk.atom_blocks = g_volume_atom_blocks;
-    LecternSuccession(&desk, g_have_boot ? &g_boot : NULL, &chosen, &called);
-    if (chosen.says == ATTEST_BROKEN) return chosen.line;
+    LecternSuccession(&desk, g_have_boot ? &g_boot : NULL, chosen, &called);
+    if (chosen->says == ATTEST_BROKEN) return chosen->line;
     if (called.says != CALLED_NONE) SettingsTake(called.bytes, called.size);
     if (called.bytes) AttestGive(&ctx, called.bytes, called.room);
-    *bytes     = chosen.bytes;
-    *alloc_end = KERNEL_LOAD_ADDR + chosen.blocks * VOLUME_BLOCK_BYTES;
+    *bytes     = chosen->bytes;
+    *alloc_end = KERNEL_LOAD_ADDR + chosen->blocks * VOLUME_BLOCK_BYTES;
     Print("Gangway: kernel at volume block ");
-    PrintDec(chosen.first);
+    PrintDec(chosen->first);
     Print(" (");
-    PrintDec(chosen.blocks);
+    PrintDec(chosen->blocks);
     Print(" blocks in ");
-    PrintDec(chosen.runs);
+    PrintDec(chosen->runs);
     Print(" run(s))\r\nGangway: kernel loaded (");
-    PrintDec(chosen.bytes);
+    PrintDec(chosen->bytes);
     Print(" bytes)\r\n");
     return NULL;
 }

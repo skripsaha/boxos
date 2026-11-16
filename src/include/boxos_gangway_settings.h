@@ -18,8 +18,9 @@
  * gangway_lectern_called.c). What it takes for itself — the screen — it does;
  * what is the kernel's it hands on in the Boarding Pass, a stamp for each the
  * file sets (boarding_pass.h: STARTUP, CORES, KEEP_LOG). Every setting takes
- * effect when the machine starts next. BIOS boots read no settings: stage2
- * stays quiet, and the kernel goes its own way.
+ * effect when the machine starts next. The panel (gangway_panel.c) changes the
+ * same four for one start and writes nothing back. BIOS boots read no
+ * settings: stage2 stays quiet, and the kernel goes its own way.
  */
 
 #define GANGWAY_SETTINGS_PROGRAM "gangway"
