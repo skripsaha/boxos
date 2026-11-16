@@ -69,7 +69,7 @@
  * Numbers
  * ------------------------------------------------------------------------- */
 
-/* The whole number nearest below the square root of Value, Value < 65536. */
+/* The whole number nearest below the square root of Value. */
 static inline uint32_t BoxBrushRoot(uint32_t Value)
 {
     static const uint8_t Fine[256] = {
@@ -109,8 +109,20 @@ static inline uint32_t BoxBrushRoot(uint32_t Value)
         247, 248, 248, 249, 249, 250, 250, 251, 251, 252, 252, 253, 253, 254, 254, 255
     };
     if (Value < 256u) return Fine[Value];
-    uint32_t Root = Coarse[Value >> 8];
-    while ((Root + 1u) * (Root + 1u) <= Value) Root++;
+    if (Value < 65536u) {
+        uint32_t Root = Coarse[Value >> 8];
+        while ((Root + 1u) * (Root + 1u) <= Value) Root++;
+        return Root;
+    }
+    /* Past the tables: the root of Value's top fifteen or sixteen bits, an
+     * even shift down, is the root's top bits — the middle of what they leave
+     * open, one step of Newton's, and at most one to either side. */
+    uint32_t Shift = 2u;
+    while (Value >> Shift >= 65536u) Shift += 2u;
+    uint32_t Root = (BoxBrushRoot(Value >> Shift) << (Shift / 2u)) + (1u << (Shift / 2u - 1u));
+    Root = (Root + Value / Root) / 2u;
+    if ((uint64_t)Root * Root > Value) Root--;
+    else if ((uint64_t)(Root + 1u) * (Root + 1u) <= Value) Root++;
     return Root;
 }
 
@@ -859,8 +871,11 @@ static inline uint32_t BoxBrushInkAt(const BoxBrushInk *Ink, int32_t X, int32_t 
     if (P->Kind == BOX_BRUSH_PAINT_LINEAR) return BoxBrushAlong(P, (uint32_t)BoxBrushLeast(BoxBrushMost(U, 0), BOX_BRUSH_GRADIENT));
     if (BoxBrushSize(U) > 4 * BOX_BRUSH_GRADIENT || BoxBrushSize(V) > 4 * BOX_BRUSH_GRADIENT)
         return BoxBrushAlong(P, BOX_BRUSH_GRADIENT);
-    const int64_t Out = (int64_t)BoxBrushRoot64((uint64_t)(U * U + V * V));
-    return BoxBrushAlong(P, (uint32_t)BoxBrushLeast(Out, BOX_BRUSH_GRADIENT));
+    /* Its way's end and past it the last colour, no root asked: the root of
+     * Far reaches GRADIENT exactly when Far reaches its square. */
+    const uint64_t Far = (uint64_t)(U * U + V * V);
+    if (Far >= (uint64_t)BOX_BRUSH_GRADIENT * BOX_BRUSH_GRADIENT) return BoxBrushAlong(P, BOX_BRUSH_GRADIENT);
+    return BoxBrushAlong(P, BoxBrushRoot((uint32_t)Far));
 }
 
 /* ---------------------------------------------------------------------------

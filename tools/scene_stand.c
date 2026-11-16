@@ -178,11 +178,14 @@ static int Near(double Got, double Want, double Share)
 static void CheckNumbers(void)
 {
     int Held = 1;
-    for (uint32_t V = 0; V < 65536u; V++) {
-        const uint32_t R = BoxBrushRoot(V);
+    for (uint32_t I = 0; I < (1u << 21); I++) {
+        const uint32_t V = I < (1u << 20) ? I : (uint32_t)Random();
+        const uint64_t R = BoxBrushRoot(V);
         if (R * R > V || (R + 1u) * (R + 1u) <= V) Held = 0;
     }
-    Check(Held, "BoxBrushRoot is the whole root of every value below 65536");
+    for (uint32_t R = 1; R < 65536u; R++)
+        if (BoxBrushRoot(R * R) != R || BoxBrushRoot(R * R - 1u) != R - 1u) Held = 0;
+    Check(Held, "BoxBrushRoot is the whole root of 32-bit values: all below 2^20, a million more, every square and the value under it");
 
     Held = 1;
     for (uint32_t I = 0; I < 200000u; I++) {
