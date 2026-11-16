@@ -1,7 +1,11 @@
 /* imprint — the system's characters drawn ahead of time, for the hands that
  * cannot read a font (boxos_imprint.h): made by every build from the font.
  *
- *     imprint FONT.ttf OUT.h
+ *     imprint FONT.ttf OUT.h [NAME]
+ *
+ * NAME names an imprint beside the system's — Bold makes BoxBoldImprint in
+ * boxos_imprint_bold_data.h's guard — for a hand that carries more than one;
+ * with none it is the system's own, BoxSystemImprint.
  *
  * OUT is written whole or not at all: beside it first, then moved over it,
  * so a build cut short never leaves half an imprint for the next to take. */
@@ -17,8 +21,8 @@
 
 int main(int Count, char **Words)
 {
-    if (Count != 3) {
-        std::fprintf(stderr, "usage: imprint FONT.ttf OUT.h\n");
+    if (Count != 3 && Count != 4) {
+        std::fprintf(stderr, "usage: imprint FONT.ttf OUT.h [NAME]\n");
         return 2;
     }
     std::ifstream In(Words[1], std::ios::binary);
@@ -37,7 +41,7 @@ int main(int Count, char **Words)
     const std::string Side = std::string(Words[2]) + ".new";
     {
         std::ofstream Out(Side, std::ios::binary | std::ios::trunc);
-        Out << ImprintHeader(*Made, Name);
+        Out << ImprintHeader(*Made, Name, Count == 4 ? Words[3] : "");
         if (!Out.flush()) {
             std::fprintf(stderr, "imprint: %s cannot be written\n", Side.c_str());
             return 1;

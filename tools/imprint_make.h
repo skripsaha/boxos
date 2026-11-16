@@ -40,7 +40,8 @@ std::vector<char32_t> ImprintWanted();
 std::expected<MadeImprint, std::string> MakeImprint(std::vector<std::uint8_t> Bytes);
 
 /* The imprint as the header boxos_imprint_data.h, made from the font called
- * FontName. */
-std::string ImprintHeader(const MadeImprint &Made, const std::string &FontName);
+ * FontName: the system's, BoxSystemImprint — or, Called Bold, BoxBoldImprint
+ * and arrays of its own, for a hand that carries both. */
+std::string ImprintHeader(const MadeImprint &Made, const std::string &FontName, const std::string &Called);
 
 #endif  // TOOLS_IMPRINT_MAKE_H

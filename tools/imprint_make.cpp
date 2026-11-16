@@ -104,28 +104,37 @@ std::expected<MadeImprint, std::string> MakeImprint(std::vector<std::uint8_t> By
     return Made;
 }
 
-std::string ImprintHeader(const MadeImprint &Made, const std::string &FontName)
+std::string ImprintHeader(const MadeImprint &Made, const std::string &FontName, const std::string &Called)
 {
+    std::string Upper, Lower;
+    for (const char C : Called) {
+        Upper += static_cast<char>(C >= 'a' && C <= 'z' ? C - 'a' + 'A' : C);
+        Lower += static_cast<char>(C >= 'A' && C <= 'Z' ? C - 'A' + 'a' : C);
+    }
+    const std::string File  = Called.empty() ? "boxos_imprint_data.h" : "boxos_imprint_" + Lower + "_data.h";
+    const std::string Guard = Called.empty() ? "BOXOS_IMPRINT_DATA_H" : "BOXOS_IMPRINT_" + Upper + "_DATA_H";
+    const std::string Arrays = "Box" + Called + "Imprint";
+    const std::string Whole  = Called.empty() ? "BoxSystemImprint" : "Box" + Called + "Imprint";
     std::string Cells;
     for (const BoxImprintSize &Each : Made.Sizes) Cells += std::format("{}{}x{}", Cells.empty() ? "" : ", ", Each.Width, Each.Height);
     std::string Out = std::format(
-        "/* boxos_imprint_data.h — the imprint (boxos_imprint.h) of\n"
+        "/* {} — the imprint (boxos_imprint.h) of\n"
         " * {}: {} characters and the empty box, in cells of {}.\n"
         " * Written by tools/imprint at every build and not kept in the tree. One file\n"
         " * of a program includes it: its arrays are that file's own. */\n"
-        "#ifndef BOXOS_IMPRINT_DATA_H\n#define BOXOS_IMPRINT_DATA_H\n\n#include \"boxos_imprint.h\"\n\n",
-        FontName, Made.Characters.size(), Cells);
-    Out += std::format("static const uint32_t BoxImprintCharacters[{}] = {{", Made.Characters.size());
+        "#ifndef {}\n#define {}\n\n#include \"boxos_imprint.h\"\n\n",
+        File, FontName, Made.Characters.size(), Cells, Guard, Guard);
+    Out += std::format("static const uint32_t {}Characters[{}] = {{", Arrays, Made.Characters.size());
     for (std::size_t Index = 0; Index < Made.Characters.size(); Index++)
         Out += std::format("{}0x{:04X},", Index % 12 ? " " : "\n    ", Made.Characters[Index]);
-    Out += std::format("\n}};\n\nstatic const BoxImprintSize BoxImprintSizes[{}] = {{\n", Made.Sizes.size());
+    Out += std::format("\n}};\n\nstatic const BoxImprintSize {}Sizes[{}] = {{\n", Arrays, Made.Sizes.size());
     for (const BoxImprintSize &Each : Made.Sizes)
         Out += std::format("    {{{}, {}, {}, 0, {}}},\n", Each.Width, Each.Height, Each.Baseline, Each.Offset);
-    Out += std::format("}};\n\nstatic const uint8_t BoxImprintPixels[{}] = {{", Made.Pixels.size());
+    Out += std::format("}};\n\nstatic const uint8_t {}Pixels[{}] = {{", Arrays, Made.Pixels.size());
     for (std::size_t Index = 0; Index < Made.Pixels.size(); Index++)
         Out += std::format("{}0x{:02X},", Index % 16 ? " " : "\n    ", Made.Pixels[Index]);
-    Out += std::format("\n}};\n\nstatic const BoxImprint BoxSystemImprint = {{BoxImprintCharacters, {}, BoxImprintSizes, {}, "
-                       "BoxImprintPixels}};\n\n#endif /* BOXOS_IMPRINT_DATA_H */\n",
-                       Made.Characters.size(), Made.Sizes.size());
+    Out += std::format("\n}};\n\nstatic const BoxImprint {} = {{{}Characters, {}, {}Sizes, {}, "
+                       "{}Pixels}};\n\n#endif /* {} */\n",
+                       Whole, Arrays, Made.Characters.size(), Arrays, Made.Sizes.size(), Arrays, Guard);
     return Out;
 }

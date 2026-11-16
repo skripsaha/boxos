@@ -11,8 +11,10 @@
  * ExitBootServices as before it; until then it is the firmware's mode as it
  * is (GopFramebufferNow), asked for when there is something to draw, and a
  * stop before the screen step leaves that mode as the firmware set it. The
- * cells are the size the Emergency Screen draws a screen as tall in
- * (BoxPressSize), from the top-left corner.
+ * cells are the size the person's text size names, or the one the Emergency
+ * Screen draws a screen as tall in (BoxPressSize), from the top-left corner, in
+ * the face their text font names and the colours of their theme, each colour
+ * they set over it.
  *
  * A page is drawn whole every time — every cell of every row, the rest of a
  * line in the colours of the piece that ends it — so the panel redrawn on a
@@ -22,6 +24,7 @@
 
 #include "gangway.h"
 #include "boxos_imprint_data.h"
+#include "boxos_imprint_bold_data.h"
 #include "boxos_imprint_press.h"
 #include "boxos_utf8.h"
 #include "boxos_color.h"
@@ -57,6 +60,48 @@ typedef struct {
     int      draw;
 } DrawPen;
 
+/* The imprint's size `px` tall (text-size), or the one the Emergency Screen
+ * draws a screen `height` tall in. */
+static uint32_t ScreenSize(uint32_t height)
+{
+    for (uint32_t s = 0; g_settings.text_size && s < DrawImprint()->SizeCount; s++)
+        if (DrawImprint()->Sizes[s].Height == g_settings.text_size) return s;
+    return BoxPressSize(DrawImprint(), height);
+}
+
+/* A colour of `colors` the person set, or none: 0 when it is not set. */
+static int ScreenColor(GangwayColor c, uint32_t *rgb)
+{
+    if (!(g_settings.colors_set & 1u << c)) return 0;
+    *rgb = g_settings.colors[c];
+    return 1;
+}
+
+/* The colours a cell of `attr` is pressed in: the VGA palette's on the dark
+ * theme; on the light one the paper white wherever the attr's is black, and
+ * every ink deep enough to read on it — and over either the person's page,
+ * text, title and hint colours, where they set them. */
+static uint32_t ScreenPaper(uint8_t attr)
+{
+    uint32_t rgb;
+    if ((attr >> 4) & 0x0Fu) return BoxAttrBgRgb(attr);
+    if (ScreenColor(GANGWAY_COLOR_PAGE, &rgb)) return rgb;
+    return g_settings.theme == GANGWAY_THEME_LIGHT ? 0xFFFFFFu : BoxAttrBgRgb(attr);
+}
+
+static uint32_t ScreenInk(uint8_t attr)
+{
+    static const uint32_t light[16] = {
+        0x2E1A26u, 0x1F4A9Au, 0x2E7D32u, 0x1D6F7Au, 0xB0263Cu, 0xA0306Au, 0x8A5A00u, 0x3A2E35u,
+        0x6F6670u, 0x2050B0u, 0x2E7D32u, 0x1D6F7Au, 0xB0263Cu, 0xA0306Au, 0x8A5A00u, 0x1F141Au,
+    };
+    uint32_t rgb;
+    if ((attr & 0x0Fu) == VIDEO_LIGHT_GRAY && ScreenColor(GANGWAY_COLOR_TEXT, &rgb)) return rgb;
+    if ((attr & 0x0Fu) == VIDEO_WHITE && ScreenColor(GANGWAY_COLOR_TITLE, &rgb)) return rgb;
+    if ((attr & 0x0Fu) == VIDEO_DARK_GRAY && ScreenColor(GANGWAY_COLOR_HINT, &rgb)) return rgb;
+    return g_settings.theme == GANGWAY_THEME_LIGHT ? light[attr & 0x0Fu] : BoxAttrFgRgb(attr);
+}
+
 static void ScreenTake(const FbInfo *fb)
 {
     MemCopy(&g_screen.fb, fb, sizeof(*fb));
@@ -65,9 +110,9 @@ static void ScreenTake(const FbInfo *fb)
     g_screen.cols  = 0;
     g_screen.rows  = 0;
     if (!fb->addr) return;
-    g_screen.size   = BoxPressSize(&BoxSystemImprint, fb->height);
-    g_screen.cell_w = BoxSystemImprint.Sizes[g_screen.size].Width;
-    g_screen.cell_h = BoxSystemImprint.Sizes[g_screen.size].Height;
+    g_screen.size   = ScreenSize(fb->height);
+    g_screen.cell_w = DrawImprint()->Sizes[g_screen.size].Width;
+    g_screen.cell_h = DrawImprint()->Sizes[g_screen.size].Height;
     g_screen.cols   = fb->width / g_screen.cell_w;
     g_screen.rows   = fb->height / g_screen.cell_h;
 }
@@ -91,7 +136,7 @@ static int ScreenReady(void)
 
 static void ScreenClear(void)
 {
-    uint32_t paper = BoxPixelEncode(BoxAttrBgRgb(VIDEO_ATTR_DEFAULT), g_screen.fb.format);
+    uint32_t paper = BoxPixelEncode(ScreenPaper(VIDEO_ATTR_DEFAULT), g_screen.fb.format);
     volatile uint8_t *line = (volatile uint8_t *)(uintptr_t)g_screen.fb.addr;
     for (uint32_t y = 0; y < g_screen.fb.height; y++, line += g_screen.fb.stride) {
         volatile uint32_t *px = (volatile uint32_t *)line;
@@ -104,14 +149,14 @@ static void ScreenClear(void)
 static void PutCell(uint32_t col, uint32_t row, uint32_t character, uint8_t attr)
 {
     if (!g_screen.inked || g_screen.inks_attr != attr) {
-        BoxPressInks(BoxAttrBgRgb(attr), BoxAttrFgRgb(attr), g_screen.fb.format, g_screen.inks);
+        BoxPressInks(ScreenPaper(attr), ScreenInk(attr), g_screen.fb.format, g_screen.inks);
         g_screen.inks_attr = attr;
         g_screen.inked     = 1;
     }
     volatile uint8_t *at = (volatile uint8_t *)(uintptr_t)g_screen.fb.addr
                          + (uint64_t)row * g_screen.cell_h * g_screen.fb.stride
                          + (uint64_t)col * g_screen.cell_w * 4u;
-    BoxPressGlyph(&BoxSystemImprint, g_screen.size, BoxImprintFind(&BoxSystemImprint, character), at,
+    BoxPressGlyph(DrawImprint(), g_screen.size, BoxImprintFind(DrawImprint(), character), at,
                   g_screen.fb.stride, g_screen.inks);
 }
 
@@ -146,6 +191,11 @@ static void PenText(DrawPen *pen, const DrawPiece *piece)
         if (PenShows(pen)) PutCell(pen->col, pen->top + pen->row - pen->skip, character, piece->attr);
         pen->col++;
     }
+}
+
+const BoxImprint *DrawImprint(void)
+{
+    return g_settings.text_font == GANGWAY_FONT_BOLD ? &BoxBoldImprint : &BoxSystemImprint;
 }
 
 uint32_t DrawRows(void)

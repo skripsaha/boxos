@@ -18,13 +18,14 @@
  * gangway_lectern_called.c); the scene it starts with by its name too —
  * boot.scene — unless the person's `scene` names tags: then of the scenes
  * (*.scene) that wear every one of them, one picked by chance, and boot.scene
- * when none does. What it takes
- * for itself — the screen, the scene — it does; what is the kernel's it hands on in the
- * Boarding Pass, a stamp for each the file sets (boarding_pass.h: STARTUP,
- * CORES, KEEP_LOG). Every setting takes effect when the machine starts next.
- * The panel (gangway_panel.c) changes the same five for one start and writes
- * nothing back. BIOS boots read no
- * settings: stage2 stays quiet, and the kernel goes its own way.
+ * when none does. What it takes for itself — the screen, the scene, the
+ * panel's letters, colours and logo (text, theme, colors, logo) — it does;
+ * what is the kernel's it hands on in the Boarding Pass, a stamp for each the
+ * file sets (boarding_pass.h: STARTUP, CORES, KEEP_LOG). Every setting takes
+ * effect when the machine starts next. The panel (gangway_panel.c) changes
+ * the start's and its own look for one start — every one but the colours —
+ * and writes nothing back. BIOS boots read no settings: stage2 stays quiet,
+ * and the kernel goes its own way.
  */
 
 #define GANGWAY_SETTINGS_PROGRAM "gangway"
@@ -42,6 +43,24 @@
     "read after it\"\n"                                                                                       \
     "scene text default on next-start \"the scene shown while the machine starts, played until it is ready "  \
     "for you: on (boot.scene), off, or tags — each start one of the scenes that wear them all, by chance, "     \
-    "and boot.scene when none does: duppo-word dark animated\"\n"
+    "and boot.scene when none does: duppo-word dark animated\"\n"                                            \
+    "text \"the letters of the panel and its pages\"\n"                                                        \
+    "    size one-of auto 16 24 32 default auto next-start \"how tall they are: auto for the screen, or 16, "   \
+    "24 or 32 px\"\n"                                                                                         \
+    "    font one-of regular bold default regular next-start \"their face: JetBrains Mono NL, regular or "       \
+    "bold\"\n"                                                                                                \
+    "theme one-of dark light default dark next-start \"the panel's colours: dark or light — a colour you set "  \
+    "below stands over it\"\n"                                                                                \
+    "colors \"the panel's colours, each over the theme's; one you set none of is the theme's — a name or "       \
+    "#RRGGBB\"\n"                                                                                             \
+    "    page color default black next-start \"behind everything\"\n"                                           \
+    "    text color default light-gray next-start \"the rows and the pages' text\"\n"                          \
+    "    title color default white next-start \"a page's title\"\n"                                             \
+    "    hint color default dark-gray next-start \"the hints, the marks and the rules\"\n"                      \
+    "    choice color default #CB5D87 next-start \"the chosen row's plashka: the light falls down it as down "  \
+    "Duppo's sphere\"\n"                                                                                      \
+    "    note color default #F2A0BF next-start \"a value changed, what is said under the logo, a note\"\n"     \
+    "logo on-or-off default on next-start \"Duppo's logo beside the panel; off, the panel stands in the "     \
+    "middle\"\n"
 
 #endif /* BOXOS_GANGWAY_SETTINGS_H */

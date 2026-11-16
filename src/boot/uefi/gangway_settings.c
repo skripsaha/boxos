@@ -12,9 +12,10 @@
  * Use Context are passed over, said once at their [ ] line: Gangway starts
  * before there is a context. What was taken is said last, in one line.
  *
- * The screen and the scene are Gangway's own (gangway_video.c,
- * gangway_scene.c read g_settings); the rest is the kernel's, handed on as
- * stamps of the Boarding Pass (gangway_handoff.c).
+ * The screen, the scene and the panel's letters and colours are Gangway's own
+ * (gangway_video.c, gangway_scene.c, gangway_draw.c and gangway_panel_look.c
+ * read g_settings); the rest is the kernel's, handed on as stamps of the
+ * Boarding Pass (gangway_handoff.c).
  */
 
 #include "gangway.h"
@@ -22,13 +23,16 @@
 #include "boxos_gangway_settings.h"
 #include "settings_chosen.h"
 
-GangwaySettings g_settings = { .startup = BOARDING_STARTUP_QUIET, .scene = 1 };
+GangwaySettings g_settings = { .startup = BOARDING_STARTUP_QUIET, .scene = 1, .logo = 1 };
 
 static const char g_declared[] = GANGWAY_SETTINGS;
 
 /* The most lines a declaration as short as Gangway's has; a line set before is
  * looked up by its line in it. */
-#define DECLARED_LINES_MOST 16u
+#define DECLARED_LINES_MOST 32u
+
+/* The colours of `colors`, by GangwayColor. */
+static const char *const g_color_names[GANGWAY_COLORS] = { "page", "text", "title", "hint", "choice", "note" };
 
 static void PrintSpan(SettingSpan span)
 {
@@ -84,6 +88,7 @@ static void PrintWants(const Setting *s)
         return;
     }
     case SETTING_WORD: Print("one word"); return;
+    case SETTING_COLOR: Print("a colour's name, or #RRGGBB"); return;
     default: Print("what this reader does not know"); return;
     }
 }
@@ -130,6 +135,28 @@ static void SceneTaken(SettingSpan v, uint32_t line)
     }
 }
 
+/* Whether setting `s` is `name`, inside the group `group` — at the top when
+ * `group` is NULL: `colors text` is no `text`. */
+static int SettingIs(const Setting *s, const char *group, const char *name)
+{
+    Setting parent;
+    if (!SettingSpanIs(s->Name, name)) return 0;
+    if (!group) return s->Parent == 0;
+    return s->Parent && SettingsDeclaredAt((const uint8_t *)g_declared, sizeof(g_declared) - 1u, s->Parent, &parent) &&
+           SettingSpanIs(parent.Name, group);
+}
+
+/* "#RRGGBB" */
+static void PrintColor(uint32_t rgb)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    char              said[8];
+    said[0] = '#';
+    for (int i = 0; i < 6; i++) said[1 + i] = hex[(rgb >> (20 - 4 * i)) & 15u];
+    said[7] = '\0';
+    Print(said);
+}
+
 /* The value `v` — one that fits setting `s` — taken, `set` when it is the
  * person's own and not the word default: 1, or 0 when it is one Gangway
  * cannot take after all (a screen that is no size), said. */
@@ -138,7 +165,16 @@ static int Taken(const Setting *s, SettingSpan v, uint32_t line, bool set)
     SettingValue value;
     uint32_t     bit = 0;
     if (SettingValueRead(s, v, &value) != SETTINGS_OK) return 0;
-    if (SettingSpanIs(s->Name, "screen")) {
+    for (uint32_t c = 0; c < GANGWAY_COLORS; c++) {
+        if (!SettingIs(s, "colors", g_color_names[c])) continue;
+        /* Each colour its own: one said as default goes back to the theme's,
+         * and the others stay as they were set. */
+        g_settings.colors[c]  = value.Color;
+        g_settings.colors_set = set ? g_settings.colors_set | 1u << c : g_settings.colors_set & ~(1u << c);
+        g_settings.set = g_settings.colors_set ? g_settings.set | GANGWAY_SET_COLORS : g_settings.set & ~GANGWAY_SET_COLORS;
+        return 1;
+    }
+    if (SettingIs(s, NULL, "screen")) {
         uint32_t w = 0, h = 0;
         bit = GANGWAY_SET_SCREEN;
         if (!SettingSpanIs(v, "auto") && !ScreenSize(v, &w, &h)) {
@@ -150,18 +186,32 @@ static int Taken(const Setting *s, SettingSpan v, uint32_t line, bool set)
         }
         g_settings.screen_width  = w;
         g_settings.screen_height = h;
-    } else if (SettingSpanIs(s->Name, "startup")) {
+    } else if (SettingIs(s, NULL, "startup")) {
         bit                = GANGWAY_SET_STARTUP;
         g_settings.startup = SettingSpanIs(v, "all") ? BOARDING_STARTUP_ALL : BOARDING_STARTUP_QUIET;
-    } else if (SettingSpanIs(s->Name, "cores")) {
+    } else if (SettingIs(s, NULL, "cores")) {
         bit              = GANGWAY_SET_CORES;
         g_settings.cores = (uint32_t)value.Number;
-    } else if (SettingSpanIs(s->Name, "keep-log")) {
+    } else if (SettingIs(s, NULL, "keep-log")) {
         bit                 = GANGWAY_SET_KEEP_LOG;
         g_settings.keep_log = value.On ? 1u : 0u;
-    } else if (SettingSpanIs(s->Name, "scene")) {
+    } else if (SettingIs(s, NULL, "scene")) {
         bit = GANGWAY_SET_SCENE;
         SceneTaken(v, line);
+    } else if (SettingIs(s, "text", "size")) {
+        uint32_t px = 0;
+        for (uint64_t at = 0; at < v.Length && v.At[at] >= '0' && v.At[at] <= '9'; at++) px = px * 10u + (v.At[at] - '0');
+        bit                  = GANGWAY_SET_TEXT_SIZE;
+        g_settings.text_size = px;   /* auto reads as no digits: 0 */
+    } else if (SettingIs(s, "text", "font")) {
+        bit                  = GANGWAY_SET_TEXT_FONT;
+        g_settings.text_font = SettingSpanIs(v, "bold") ? GANGWAY_FONT_BOLD : GANGWAY_FONT_REGULAR;
+    } else if (SettingIs(s, NULL, "theme")) {
+        bit              = GANGWAY_SET_THEME;
+        g_settings.theme = SettingSpanIs(v, "light") ? GANGWAY_THEME_LIGHT : GANGWAY_THEME_DARK;
+    } else if (SettingIs(s, NULL, "logo")) {
+        bit             = GANGWAY_SET_LOGO;
+        g_settings.logo = value.On ? 1u : 0u;
     }
     g_settings.set = set ? g_settings.set | bit : g_settings.set & ~bit;
     return 1;
@@ -261,6 +311,37 @@ int SettingsList(uint32_t which)
             Print(" ");
             Print(g_settings.scene_asked[k]);
         }
+        between = ", ";
+    }
+    if (which & GANGWAY_SET_TEXT_SIZE) {
+        Print(between);
+        Print("text size ");
+        if (g_settings.text_size) PrintDec(g_settings.text_size);
+        else Print("auto");
+        between = ", ";
+    }
+    if (which & GANGWAY_SET_TEXT_FONT) {
+        Print(between);
+        Print(g_settings.text_font == GANGWAY_FONT_BOLD ? "text font bold" : "text font regular");
+        between = ", ";
+    }
+    if (which & GANGWAY_SET_THEME) {
+        Print(between);
+        Print(g_settings.theme == GANGWAY_THEME_LIGHT ? "theme light" : "theme dark");
+        between = ", ";
+    }
+    for (uint32_t c = 0; (which & GANGWAY_SET_COLORS) && c < GANGWAY_COLORS; c++) {
+        if (!(g_settings.colors_set & 1u << c)) continue;
+        Print(between);
+        Print("colors ");
+        Print(g_color_names[c]);
+        Print(" ");
+        PrintColor(g_settings.colors[c]);
+        between = ", ";
+    }
+    if (which & GANGWAY_SET_LOGO) {
+        Print(between);
+        Print(g_settings.logo ? "logo on" : "logo off");
         between = ", ";
     }
     return between[0] != '\0';
