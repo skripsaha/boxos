@@ -40,6 +40,7 @@ DESIGNS = {
     "duppo-line":    {"word": (1, 2), "duppo": [3, 4, 5, 6, 7, 8, 9], "across": 900.0, "look": (0.17, 0.02)},
     "duppo-letters": {"spheres": [19, 20, 21, 22, 23], "word": (24, 25), "across": 850.0},
 }
+LID = 0xFF5A1640                                       # the shut lid's line: the body's dusk, deeper
 FLAT, DEPTH = 0.5, 0.22                                # how an orbit is seen leaned back, how much nearer grows
 ORBITS = {"medium": (1.5, 1), "small": (1.8, 1), "tiny": (1.32, 2)}   # radius in body radii, turns a round
 
@@ -55,6 +56,22 @@ class Moves:
     def Add(self, fig, act, what, keys):
         self.lines.append(f"move {fig} {act} {what} " + " ".join(
             f"{int(round(t))}:{v:.4f}" + (f":{e}" if e else "") for t, v, e in keys))
+
+
+def Lid(cx, cy, half, sag, thick, steps=48):
+    """A shut eye's lid: a line bowed down by `sag`, `half` to either side of
+    cx, cy, `thick` across its middle and coming to a point at its ends, as a
+    brush lays it — a path's data in the scene's units."""
+    top, bottom = [], []
+    for k in range(steps + 1):
+        t = k / steps
+        x = cx - half + 2 * half * t
+        y = cy + sag * (1 - ((x - cx) / half) ** 2)
+        w = thick * math.sin(math.pi * t) ** 0.75 / 2
+        top.append((x, y - w))
+        bottom.append((x, y + w))
+    points = top + bottom[::-1]
+    return "M " + " L ".join(f"{x:.2f} {y:.2f}" for x, y in points) + " Z"
 
 
 def Orbit(cx, cy, px, py, radius, ex, ey):
@@ -122,9 +139,13 @@ def Build(name, spec, shapes, grads, lights, paper, alive):
                 Disc(m, m + "_back", " opacity=0")
         Disc("body")
         (sx, sy), _ = parts["socket"][1]
-        figs.append(f"group eye in=duppo pivot={F2(sx)},{F2(sy)}" + (" tall=0.08" if alive else ""))
+        figs.append(f"group eye in=duppo pivot={F2(sx)},{F2(sy)}" + (" tall=0.08 opacity=0" if alive else ""))
         for part in ("socket", "white", "pupil"):
             Disc(part)
+        if alive:
+            # Asleep: his eye shut, the lid's line across where it will open.
+            (_, _), (srx, sry) = parts["socket"][1]
+            figs.append(f"path lid in=duppo paint={D.Solid(LID)} d={Lid(sx, sy + 0.12 * sry, 0.8 * srx, 0.22 * sry, 0.1 * sry)}")
         for m in ("medium", "small", "tiny"):
             Disc(m)
         if not alive:
@@ -133,6 +154,8 @@ def Build(name, spec, shapes, grads, lights, paper, alive):
         R2 = ORBITS["small"][0] * R * (1 + DEPTH)
         reach.extend([(bx - R2, by - R2), (bx + R2, by + R2)])
         # He wakes: the eye opens, blinks once more; then the hop and the look of enter.
+        M.Add("lid", "enter", "opacity", [(60, 255, ""), (130, 0, "in")])
+        M.Add("eye", "enter", "opacity", [(60, 0, ""), (130, 255, "out")])
         M.Add("eye", "enter", "tall", [(60, 0.08, ""), (240, 1, "out"), (420, 1, ""), (470, 0.12, "in"),
                                         (570, 1, "out")])
         M.Add("duppo", "enter", "wide", [(300, 1, ""), (400, 1.05, "out"), (520, 0.95, "out"), (760, 1, "inout"),
