@@ -57,12 +57,17 @@
  * (take answers NULL for none), a line said, with no prefix and no end of
  * line, and the room a kernel of `bytes` is placed in where it is jumped into
  * (place answers NULL when it cannot be had, said by the desk), given back
- * when the kernel there is not the one. `uuid` seeds every sector's sum and
+ * when the kernel there is not the one. `ask`, when there is one, is asked
+ * before the file `which` of those `called` is looked for — the files before
+ * it read already — and may ask it by tags instead of by its name (what the
+ * person's settings, read before it, say). `uuid` seeds every sector's sum and
  * every block's digest; `frame` is the Deed's, already held to
  * VolumeFrameCheck; `block_end` the block where the far copy of the Deed sits
  * — nothing at or past it is read; `atom_blocks` the volume's atom (its
  * GEOMETRY, BookAtomOf) in blocks — a Quire of the ribbon begins on one.
  */
+struct LecternCalled;
+
 typedef struct {
     void          *ctx;
     int          (*read)(void *ctx, uint64_t vlba, uint32_t sectors, uint8_t *into);
@@ -71,6 +76,7 @@ typedef struct {
     void         (*say)(void *ctx, const char *line);
     uint8_t     *(*place)(void *ctx, uint64_t bytes);
     void         (*unplace)(void *ctx, uint8_t *room, uint64_t bytes);
+    void         (*ask)(void *ctx, struct LecternCalled *called, uint32_t which);
     const uint8_t *uuid;
     VolumeFrame    frame;
     uint64_t       block_end;
@@ -114,24 +120,30 @@ typedef enum {
 } LecternCalledSays;
 
 /*
- * A file the loader asks the volume for by its name — beside the kernel, in
- * the same reading of the book: `name` (NUL-terminated) and the most bytes
- * `most` it takes, asked; what it is found to be, answered — when it is read,
- * its `size` bytes in `bytes`, the desk's room of `room` bytes, the caller's
- * to give back, and its `fid`. A file is found by its name alone, never by a
- * tag: the first
- * made (the least fid) of the files the book names so that it does not keep
- * deleted, its blocks held to the book as a kernel's are and the Slips of the
- * ribbon laid on its last. No two asked are called the same.
+ * A file the loader asks the volume for — beside the kernel, in the same
+ * reading of the book: by its `name` (NUL-terminated) — the first made (the
+ * least fid) of the files the book names so that it does not keep deleted —
+ * or, with `ntags` of `tags`, by the tags the person asked for: of the scenes
+ * (files called *.scene, BOX_SCENE_SUFFIX) the book does not keep deleted
+ * that carry every one of them, the one `pick` falls on, counted by fid. The
+ * most bytes `most` it takes, asked; what it is found to be, answered — when
+ * it is read, its `size` bytes in `bytes`, the desk's room of `room` bytes,
+ * the caller's to give back, and its `fid`. Its blocks are held to the book
+ * as a kernel's are and the Slips of the ribbon laid on its last. No two
+ * asked by name are called the same. A tag is the person's: none is read but
+ * those a person's settings ask for.
  */
-typedef struct {
-    const char       *name;
-    uint64_t          most;
-    LecternCalledSays says;
-    uint8_t          *bytes;
-    uint64_t          room;
-    uint64_t          size;
-    uint64_t          fid;
+typedef struct LecternCalled {
+    const char        *name;
+    uint64_t           most;
+    const char *const *tags;
+    uint32_t           ntags;
+    uint64_t           pick;
+    LecternCalledSays  says;
+    uint8_t           *bytes;
+    uint64_t           room;
+    uint64_t           size;
+    uint64_t           fid;
 } LecternCalled;
 
 /*

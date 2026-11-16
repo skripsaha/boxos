@@ -21,7 +21,11 @@
 # `volume-read boot` says: the slots passed over, the slot stood on, every node
 # read past a copy that did not hold, the ribbon and its records, each kernel
 # tried and its verdict, the one Gangway jumps into or the sentence it stops
-# on, and gangway.settings found, read and held to the book, or why not. Built
+# on, and gangway.settings found, read and held to the book, or why not; a
+# scene of the person's asked by their tag — bound in the Tally, born on the
+# ribbon with its tag coined there, renamed a scene, the tag taken off, put
+# on, put on again, the scene deleted, the tag retired — picked or not, and
+# the scenes the image carries asked by the tags they wear. Built
 # under the address and undefined-behaviour sanitizers: the Lectern parses
 # what a medium hands it. Then how it reads: the kernel in the fewest commands
 # LECTERN_READ_MOST allows — its first block, then its run a mebibyte at a
@@ -36,6 +40,9 @@ cd "$TREE" || exit 2
 CC_HOST=${CC_HOST:-cc}
 IMG=${1:-build/boxos.img}
 LANDINGS="A1 A2 A3 A4 A5 A6 A7 A8 A9 A10 A11 A12 A13 A14 A15 A16 A17 A18 A19 A20 A21 A22"
+SCENED="A23 A24 A25 A26 A27 A28 A29 A30"
+# The tag the scene landings are asked by (selftest_book_boot.py MINE).
+MINE=mine
 
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/gangway_stand.XXXXXX") || exit 2
 trap 'rm -rf "$WORK"' EXIT
@@ -51,13 +58,15 @@ start=$(python3 tools/volume-read.py "$IMG" deed 2>/dev/null | sed -nE 's/^groun
 passed=0; failed=0
 
 # held ID LABEL IMAGE [REFUSE_BLOCK [long]] — the stand and the oracle on one
-# image, their words compared byte for byte.
+# image, their words compared byte for byte; with ASK set, the scene asked by
+# those tags, the one PICK (0 when unset) falls on.
 held() {
-    local id=$1 label=$2 img=$3 rc
+    local id=$1 label=$2 img=$3 rc ask=()
     shift 3
-    "$WORK/gangway_stand" "$img" "$start" "$@" > "$WORK/$id.stand" 2> "$WORK/$id.stand.err"
+    [ -n "${ASK:-}" ] && ask=(--tags "$ASK" --pick "${PICK:-0}")
+    "$WORK/gangway_stand" ${ask[@]+"${ask[@]}"} "$img" "$start" "$@" > "$WORK/$id.stand" 2> "$WORK/$id.stand.err"
     rc=$?
-    python3 tools/volume-read.py "$img" boot > "$WORK/$id.oracle" 2>&1
+    python3 tools/volume-read.py "$img" boot ${ask[@]+"${ask[@]}"} > "$WORK/$id.oracle" 2>&1
     if [ $rc -eq 0 ] && [ -s "$WORK/$id.oracle" ] && cmp -s "$WORK/$id.stand" "$WORK/$id.oracle"; then
         echo "  ok   $label — $(tail -1 "$WORK/$id.stand" | sed 's/^boot: //')"
         passed=$((passed + 1))
@@ -81,6 +90,23 @@ for case in $LANDINGS; do
     held "$case" "$(sed -nE 's/^self-test: (A[0-9]+ .*) written to .*/\1/p' "$WORK/$case.emit")" "$WORK/$case.img"
     rm -f "$WORK/$case.img"
 done
+for case in $SCENED; do
+    if ! python3 tools/volume-read.py "$IMG" self-test --emit "$case" --out "$WORK/$case.img" \
+            > "$WORK/$case.emit" 2>&1; then
+        echo "  FAIL $case — self-test would not write it out: $(tail -1 "$WORK/$case.emit")"
+        failed=$((failed + 1))
+        continue
+    fi
+    ASK=$MINE held "$case" "$(sed -nE 's/^self-test: (A[0-9]+ .*) written to .*/\1/p' "$WORK/$case.emit"), asked by $MINE" \
+        "$WORK/$case.img"
+    rm -f "$WORK/$case.img"
+done
+# The scenes the image carries, asked by the tags they wear: a pick past how
+# many there are goes round.
+ASK="boot light animated" PICK=2 held asked-light "the image's scenes asked by boot, light, animated" "$IMG"
+ASK="logo:full" PICK=5 held asked-full "the image's scenes asked by logo:full, the pick past how many" "$IMG"
+ASK="boot: dark" PICK=3 held asked-key "the image's scenes asked by boot: (a key alone) and dark" "$IMG"
+ASK="boot nowhere" held asked-none "the image's scenes asked by a tag none wears" "$IMG"
 # judged LABEL — a check of how the Lectern reads, its verdict in $?.
 judged() {
     if [ $? -eq 0 ]; then

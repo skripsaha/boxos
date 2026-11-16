@@ -1,7 +1,8 @@
 /*
  * The Lectern's walk of a tree's leaves in key order — FILES, for the files
- * the system keeps in a role and the file the loader asks for by name — and
- * the files it follows, kept by fid.
+ * the system keeps in a role, the files the loader asks for by name and the
+ * scenes (*.scene), and TAGS, for the ids of the tags a person's settings ask
+ * a scene by — and the files it follows, kept by fid.
  *
  * A walk holds one node a level: the path from the root to the leaf in hand,
  * each node read from the first copy that holds as a node of the range its
@@ -142,8 +143,23 @@ void LecternFileGive(const LecternBook *b, LecternFile *f)
 {
     LecternGive(b, f->runs, f->capruns * sizeof(LecternRun));
     LecternGive(b, f->tail, LECTERN_TAIL_BYTES);
+    LecternGive(b, f->tags, f->captags * sizeof(uint64_t));
     f->runs = (LecternRun *)0;
     f->tail = (uint8_t *)0;
+    f->tags = (uint64_t *)0;
+    f->ntags = f->captags = 0;
+}
+
+int LecternFileTags(LecternBook *b, LecternFile *f, const uint8_t *ids, uint32_t bytes, uint64_t n)
+{
+    uint32_t at = 0;
+    uint64_t id = 0;
+    f->ntags = 0;
+    for (uint64_t i = 0; i < n && TallyIdNext(ids, bytes, &at, &id, i == 0); i++) {
+        if (!LecternGrow(b, (void **)&f->tags, f->ntags, &f->captags, sizeof(uint64_t))) return 0;
+        f->tags[f->ntags++] = id;
+    }
+    return 1;
 }
 
 int LecternFilePut(LecternBook *b, const LecternFile *f)
@@ -166,20 +182,24 @@ int LecternFileCopy(LecternBook *b, LecternFile *to, const LecternFile *from)
     *to         = *from;
     to->runs    = (LecternRun *)0;
     to->tail    = (uint8_t *)0;
+    to->tags    = (uint64_t *)0;
     to->capruns = from->nruns ? from->nruns : 1u;
+    to->captags = from->ntags;
     to->runs    = (LecternRun *)LecternTake(b, to->capruns * sizeof(LecternRun));
     if (from->tail) to->tail = (uint8_t *)LecternTake(b, LECTERN_TAIL_BYTES);
-    if (!to->runs || (from->tail && !to->tail)) {
+    if (from->ntags) to->tags = (uint64_t *)LecternTake(b, from->ntags * sizeof(uint64_t));
+    if (!to->runs || (from->tail && !to->tail) || (from->ntags && !to->tags)) {
         LecternFileGive(b, to);
         return 0;
     }
     LecternCopy(to->runs, from->runs, from->nruns * sizeof(LecternRun));
     if (from->tail) LecternCopy(to->tail, from->tail, LECTERN_TAIL_BYTES);
+    if (from->ntags) LecternCopy(to->tags, from->tags, from->ntags * sizeof(uint64_t));
     return 1;
 }
 
 /* ------------------------------------------------------------------------- */
-/* FILES: the files kept in a role, and the file called by the name asked   */
+/* FILES: the files kept in a role, those called by the names asked, scenes */
 /* ------------------------------------------------------------------------- */
 
 typedef enum { FILE_UNSEEN, FILE_FOLLOWED, FILE_PASSED } LecternFileState;
@@ -207,7 +227,8 @@ static int FileDone(LecternBook *b, LecternFilesWalk *w)
 }
 
 /* A file's header: followed when its flags put it in a role, when it is
- * called by the name the loader asks for, or when the ribbon does either. */
+ * called by a name the loader asks for or as a scene is, or when the ribbon
+ * does any of those — its name and its tags kept. 1, or 0 no room. */
 static int FileHead(LecternBook *b, LecternFilesWalk *w, uint64_t fid, const uint8_t *body, uint32_t len)
 {
     TallyFileHead h;
@@ -220,10 +241,13 @@ static int FileHead(LecternBook *b, LecternFilesWalk *w, uint64_t fid, const uin
     w->f.size    = h.size;
     w->f.flags   = h.flags;
     w->f.called  = LecternNamed(b->called, b->ncalled, h.name, h.name_len);
-    if (!LecternRoleOf(w->f.flags) && !w->f.called && !LecternListHas(b->interest, b->ninterest, fid)) {
+    if (!LecternRoleOf(w->f.flags) && !w->f.called && !LecternSceneNamed(h.name, h.name_len) &&
+        !LecternListHas(b->interest, b->ninterest, fid)) {
         LecternFileGive(b, &w->f);
         return 1;
     }
+    LecternFileNamed(&w->f, h.name, h.name_len);
+    if (!LecternFileTags(b, &w->f, h.tags, h.tags_bytes, h.ntags)) return 0;
     w->state   = FILE_FOLLOWED;
     w->covered = 0;
     return 1;
@@ -310,4 +334,42 @@ int LecternFiles(LecternBook *b)
     }
     b->nfiles = kept;
     return 1;
+}
+
+/* ------------------------------------------------------------------------- */
+/* TAGS: the ids of a tag a person's settings ask a scene by                 */
+/* ------------------------------------------------------------------------- */
+
+typedef struct {
+    const LecternSpelling *spelling;
+    uint64_t             **ids;
+    uint64_t              *n, *cap;
+} LecternTagsWalk;
+
+static int TagSeen(LecternBook *b, void *ctx, TallyKey key, const uint8_t *body, uint32_t len, uint64_t seq)
+{
+    LecternTagsWalk *w = (LecternTagsWalk *)ctx;
+    TallyTag         t;
+    (void)seq;
+    if (TallyTagGet(body, len, &t) == TALLY_BODY_BROKEN || !LecternSpells(w->spelling, &t)) return 1;
+    return LecternListAdd(b, w->ids, w->n, w->cap, key.k1);
+}
+
+/* A range of TAGS that does not read names no tag a scene can be asked by. */
+static int TagLost(LecternBook *b, void *ctx, const TallyRange *r)
+{
+    (void)b;
+    (void)ctx;
+    (void)r;
+    return 1;
+}
+
+int LecternTagIds(LecternBook *b, const char *word, uint64_t **ids, uint64_t *n, uint64_t *cap)
+{
+    LecternSpelling s;
+    LecternSpell(word, &s);
+    if (!s.key_len) return 1;
+    LecternTagsWalk w = { &s, ids, n, cap };
+    LecternLeaves   v = { TagSeen, TagLost, &w };
+    return LecternWalk(b, TALLY_TAGS, &v) && LecternCoinedIds(b, &s, ids, n, cap);
 }

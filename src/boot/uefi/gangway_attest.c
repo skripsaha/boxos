@@ -27,6 +27,8 @@
 typedef struct {
     EFI_BOOT_SERVICES *bs;
     AttestReader       read;
+    LecternCalled     *called;    /* gangway.settings, then the scene */
+    int                settled;   /* the person's settings taken */
 } AttestDesk;
 
 static int AttestRead(void *ctx, uint64_t vlba, uint32_t sectors, uint8_t *into)
@@ -105,6 +107,47 @@ static void AttestUnplace(void *ctx, uint8_t *room, uint64_t bytes)
     ((AttestDesk *)ctx)->bs->free_pages((EFI_PHYSICAL_ADDRESS)(uintptr_t)room, AttestPages(bytes));
 }
 
+/* A number to pick by: the processor's own randomness (RDRAND, CPUID.01H:ECX
+ * bit 30), or the time-stamp counter where it has none or gives none. */
+static uint64_t PickOf(void)
+{
+    uint32_t a = 1u, b, c = 0, d;
+    __asm__ volatile("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
+    for (uint32_t tries = 0; (c >> 30) & 1u && tries < 10u; tries++) {
+        uint64_t got;
+        uint8_t  ok;
+        __asm__ volatile("rdrand %0; setc %1" : "=r"(got), "=qm"(ok));
+        if (ok) return got;
+    }
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+/* The person's settings taken, once, from gangway.settings as the Lectern
+ * read it, and its room given back. */
+static void Settle(AttestDesk *d)
+{
+    if (d->settled) return;
+    d->settled = 1;
+    if (d->called[0].says != CALLED_NONE) SettingsTake(d->called[0].bytes, d->called[0].size);
+    if (d->called[0].bytes) AttestGive(d, d->called[0].bytes, d->called[0].room);
+    d->called[0].bytes = NULL;
+}
+
+/* Before the scene is looked for: the settings, read just before it, taken —
+ * and when they name tags, the scene asked by them, picked by chance. */
+static void AttestAsk(void *ctx, LecternCalled *called, uint32_t which)
+{
+    AttestDesk *d = (AttestDesk *)ctx;
+    if (which != 1u) return;
+    Settle(d);
+    if (!g_settings.scene_nasked) return;
+    called->tags  = g_settings.scene_asked;
+    called->ntags = g_settings.scene_nasked;
+    called->pick  = PickOf();
+}
+
 /* The kernel the Succession chose, kept for the panel to show. */
 static LecternKernel g_chosen;
 
@@ -116,13 +159,15 @@ const LecternKernel *KernelChosen(void)
 const char *SuccessionTake(EFI_BOOT_SERVICES *bs, AttestReader read, uint64_t *bytes, uint64_t *alloc_end)
 {
     LecternKernel       *chosen = &g_chosen;
-    LecternCalled        called[2] = { { GANGWAY_SETTINGS_FILE, SETTINGS_FILE_MAX, CALLED_NONE, NULL, 0, 0, 0 },
-                                       { BOX_SCENE_BOOT, BOX_SCENE_FILE_MOST, CALLED_NONE, NULL, 0, 0, 0 } };
+    LecternCalled        called[2] = { { .name = GANGWAY_SETTINGS_FILE, .most = SETTINGS_FILE_MAX },
+                                       { .name = BOX_SCENE_BOOT, .most = BOX_SCENE_FILE_MOST } };
     AttestDesk           ctx;
     LecternDesk          desk;
 
     ctx.bs           = bs;
     ctx.read         = read;
+    ctx.called       = called;
+    ctx.settled      = 0;
     desk.ctx         = &ctx;
     desk.read        = AttestRead;
     desk.take        = AttestTake;
@@ -130,14 +175,14 @@ const char *SuccessionTake(EFI_BOOT_SERVICES *bs, AttestReader read, uint64_t *b
     desk.say         = AttestSay;
     desk.place       = AttestPlace;
     desk.unplace     = AttestUnplace;
+    desk.ask         = AttestAsk;
     desk.uuid        = g_volume_uuid;
     MemCopy(&desk.frame, &g_frame, sizeof(desk.frame));
     desk.block_end   = g_volume_end;
     desk.atom_blocks = g_volume_atom_blocks;
     LecternSuccession(&desk, g_have_boot ? &g_boot : NULL, chosen, called, 2);
     if (chosen->says == ATTEST_BROKEN) return chosen->line;
-    if (called[0].says != CALLED_NONE) SettingsTake(called[0].bytes, called[0].size);
-    if (called[0].bytes) AttestGive(&ctx, called[0].bytes, called[0].room);
+    Settle(&ctx);
     SceneTake(&called[1]);
     *bytes     = chosen->bytes;
     *alloc_end = KERNEL_LOAD_ADDR + chosen->blocks * VOLUME_BLOCK_BYTES;

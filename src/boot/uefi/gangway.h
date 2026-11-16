@@ -163,6 +163,10 @@ const LecternKernel *KernelChosen(void);
 #define GANGWAY_SET_KEEP_LOG 8u
 #define GANGWAY_SET_SCENE    16u
 
+/* The longest text of tags the person may ask the scene by, and how many. */
+#define SCENE_TAGS_BYTES 256u
+#define SCENE_ASKED_MOST 32u
+
 typedef struct {
     uint32_t set;             /* GANGWAY_SET_* */
     uint32_t screen_width;    /* the screen asked for — 0 by 0 for the monitor's own (auto) */
@@ -171,6 +175,11 @@ typedef struct {
     uint8_t  keep_log;        /* 1: what the machine says is kept through a reset */
     uint8_t  scene;           /* 1: the scene's first frame drawn as the machine starts (gangway_scene.c) */
     uint32_t cores;           /* the most processors the kernel starts, 0 for every one */
+    /* The tags the person asks the scene by — none: boot.scene, by its name —
+     * their text, and its words: SCENE_ASKED_MOST at the most. */
+    char        scene_tags[SCENE_TAGS_BYTES];
+    const char *scene_asked[SCENE_ASKED_MOST];
+    uint32_t    scene_nasked;
 } GangwaySettings;
 
 extern GangwaySettings g_settings;

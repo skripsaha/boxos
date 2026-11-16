@@ -15,7 +15,9 @@
 # and leaving once the hub waits for the person, the console on the glass
 # after; `settings gangway scene off` in the hub, and at the next start no
 # scene is drawn, said, the firmware's picture left as it is, and the display
-# plays none.
+# plays none; `settings gangway scene boot light` then, and at the start after
+# Gangway picks one of the light scenes by chance — said, the glass light —
+# and the display plays on from the one picked.
 #
 # SOURCED, NEVER RUN — by logcheck.sh, which dispatches `scene` to run_scene
 # here; everything it calls (build, chk, harness, the waits, the keys) is
@@ -200,6 +202,20 @@ run_scene() {
         wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" "$(grep -an "Gangway: no scene is drawn" build/serial.log | tail -1 | cut -d: -f1)"
         sleep 1
         cp build/serial.log "$SCRATCH/serial.scene.off.log"
+        # Then the scene asked by tags, and the start after it.
+        scene_say "settings gangway scene boot light" "when it starts next"
+        local from
+        from=$(wc -l < build/serial.log | tr -d ' ')
+        if mon_raw system_reset; then
+            for ((i = 0; i < WAIT_QUIET_S * 50; i++)); do
+                tail -n +"$from" build/serial.log 2>/dev/null | grep -aq "Gangway: the scene's first frame is on the screen" && break
+                sleep 0.02
+            done
+            mon_raw stop && mon_shot "$SCRATCH/scene.tags.glass.ppm" && mon_raw cont
+            wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" "$from"
+            sleep 1
+            tail -n +"$from" build/serial.log > "$SCRATCH/serial.scene.tags.log"
+        fi
     fi
     make run-stop >/dev/null 2>&1
     L="$SCRATCH/serial.scene.off.log"
@@ -209,6 +225,29 @@ run_scene() {
         [ "$(grep -ac "the loader left the first frame of its scene" "$L")" = 1 ] &&
         [ "$(grep -ac "\[display\] scene: the one the loader left" "$L")" = 1 ] && grep -aq "BoxOS Hub" "$L"
     chk $? "scene (off): the glass is not the scene, neither the kernel nor the display hears of one, and the start reaches the hub"
+
+    L="$SCRATCH/serial.scene.tags.log"
+    local picked
+    picked=$(sed -nE 's/^Gangway: [0-9]+ scenes carry boot, light — fid ([0-9]+), the one picked, is read.*/\1/p' "$L" 2>/dev/null | head -1)
+    grep -aq "Gangway: gangway.settings sets scene boot light" "$L" && [ -n "$picked" ] &&
+        grep -aq "Gangway: the scene picked, fid $picked, is a scene of " "$L"
+    chk $? "scene (tags): asked by boot and light, Gangway picks one of the scenes that wear both — fid ${picked:-none} — and reads it"
+    [ -s "$SCRATCH/scene.tags.glass.ppm" ] && python3 - "$SCRATCH/scene.tags.glass.ppm" <<'EOF'
+import sys
+data, fields, at = open(sys.argv[1], "rb").read(), [], 0
+while len(fields) < 4:
+    while data[at:at + 1].isspace():
+        at += 1
+    end = at
+    while not data[end:end + 1].isspace():
+        end += 1
+    fields.append(data[at:end])
+    at = end
+sys.exit(0 if data[at + 1:at + 4] == b"\xff\xff\xff" else 1)
+EOF
+    chk $? "scene (tags): the glass, dumped the moment Gangway says so, is a light scene's — its corner the white paper"
+    grep -aqE "\[display\] scene: the one the loader left \(fid ${picked:-none}, [0-9]+ figures\) goes on from its frame" "$L"
+    chk $? "scene (tags): the display goes on from the scene picked, by its fid"
 
     cp "$SCRATCH/scene.before.img" build/boxos.img
 }

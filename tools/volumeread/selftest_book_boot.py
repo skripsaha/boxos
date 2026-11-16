@@ -27,7 +27,7 @@ itself to, line for line, on every one of them written out by --emit; and
 logcheck's bookboot boots A7 and A9 through OVMF."""
 
 from . import binder, bookread, ondisk, stitch, tally
-from .bootread import CALLED, CALLED_MOST, WHO, BootRead, Loaded, Succession
+from .bootread import ASKED, CALLED, CALLED_MOST, SCENE, WHO, BootRead, Loaded, Succession
 from .bookground import BookGround
 from .medium import Unreadable
 from .ondisk import BLOCK, SECTOR, SECTORS_PER_BLOCK
@@ -96,8 +96,8 @@ class Note:
     `fid` at block F + `at` of the landings' room, one block — its bytes, the
     rest of the block zeros, and their digest."""
 
-    def __init__(self, bt, fid, at, text, name=CALLED):
-        self.fid, self.text, self.name, self.block = fid, text, name, bt.F + at
+    def __init__(self, bt, fid, at, text, name=CALLED, tags=()):
+        self.fid, self.text, self.name, self.tags, self.block = fid, text, name, sorted(tags), bt.F + at
         self.raw = text + bytes(BLOCK - len(text))
         self.digest = bookread.Integrity(self.raw, bt.lanes)
 
@@ -105,21 +105,24 @@ class Note:
         bt.PutBlock(o, self.block, self.raw)
 
     def State(self):
-        return tally.FileState(self.fid, 1, ondisk.FILE_ACTIVE, len(self.text), 1, 1, self.name, [],
+        return tally.FileState(self.fid, 1, ondisk.FILE_ACTIVE, len(self.text), 1, 1, self.name, self.tags,
                                [tally.Run(False, self.block, 1, 1)])
 
     def Born(self):
         return stitch.Born(fid=self.fid, flags=ondisk.FILE_ACTIVE, size=len(self.text), created_ns=1, modified_ns=1,
-                           name=self.name, tags=[], runs=[stitch.Data(self.block, 1)], digests=[self.digest])
+                           name=self.name, tags=self.tags, runs=[stitch.Data(self.block, 1)], digests=[self.digest])
 
 
-def BoundNotes(bt, notes):
-    """The base's Tally bound again where it lies with the notes in it, laid:
-    a plant."""
+def BoundNotes(bt, notes, tags=()):
+    """The base's Tally bound again where it lies with the notes in it — and
+    `tags` (tid, key) in TAGS — laid: a plant."""
     content = tally.Content.Copy(bt.content)
     for n in notes:
         content.files[n.fid] = n.State()
         content.digests[n.block] = n.digest
+    for tid, key in tags:
+        content.tags[tid] = tally.TagState(0, key, None)
+        content.next_tag = max(content.next_tag, tid + 1)
     content.next_fid = max(n.fid for n in notes) + 1
     plan = binder.Bind(content, bt.ground, a=bt.plan.a)
     if any(plan.next[0] <= n.block < plan.next[0] + plan.next[1] for n in notes):
@@ -135,6 +138,17 @@ def BoundNotes(bt, notes):
 def Called(c):
     """The oracle's reading of the landing with gangway.settings asked for."""
     return Succession(BookGround(c.medium), ((CALLED, CALLED_MOST),))
+
+
+# The tag the scene landings ask by: a person's own, worn by no scene the
+# image carries (gangway_stand.sh asks the stand and the oracle by it too).
+MINE = b"mine"
+
+
+def Scened(c):
+    """The oracle's reading of the landing with the scene asked by MINE, the
+    first of those that wear it."""
+    return Succession(BookGround(c.medium), ASKED, {1: ((MINE,), 0)})
 
 
 def BoundSpare(bt, sp):
@@ -276,6 +290,37 @@ def BootCases(bt):
                                    name=CALLED, tags=[], runs=[stitch.Hole(1)], digests=[], slip=(0, text))],
                       flags=stitch.DATA_FLUSHED)
 
+    mine = Note(bt, bt.fid, 0, b"a scene of mine\n", name=b"mine.scene", tags=[bt.tag])
+    plain = Note(bt, bt.fid, 0, b"a scene of mine\n", name=b"mine.scene")
+    drafted = Note(bt, bt.fid, 0, b"a scene of mine\n", name=b"mine.txt", tags=[bt.tag])
+    coin = [(bt.tag, MINE)]
+    picked = "1 scene carries mine — fid %u, the one picked, is read" % bt.fid
+    none = "no scene on this volume carries mine"
+
+    def SceneBorn(o):
+        mine.Lay(bt, o)
+        bt.Pen(o).Sew([stitch.Coined(bt.tag, MINE), mine.Born()], flags=stitch.DATA_FLUSHED)
+
+    def SceneLabeled(note, **labeled):
+        def Plant(o):
+            BoundNotes(bt, [note], coin)(o)
+            bt.Pen(o).Sew([stitch.Labeled(fid=note.fid, base=2, **labeled)], flags=stitch.DATA_FLUSHED)
+        return Plant
+
+    def Retired(o):
+        BoundNotes(bt, [mine], coin)(o)
+        bt.Pen(o).Sew([stitch.Coined(bt.tag, retired=True)], flags=stitch.DATA_FLUSHED)
+
+    def Picked(c):
+        """The scene picked by MINE, read and attested."""
+        s = Scened(c)
+        return picked in s.lines and s.found.get(SCENE) == "held" and \
+            s.lines[-1] == "mine.scene (fid %u) is attested by the book: 1 block(s)" % bt.fid
+
+    def NonePicked(c):
+        s = Scened(c)
+        return s.lines[-1] == none and s.found.get(SCENE) is None
+
     def Read(c, fid=None):
         """The note read, attested, its bytes the person's text."""
         s = Called(c)
@@ -376,4 +421,23 @@ def BootCases(bt):
         Case("A22 gangway.settings born with its bytes in a Slip over a hole", NoteSlipped, checks=[
             ("the loader reads the bytes the Slip lays on its one block",
              lambda c: Called(c).found.get(CALLED) == "held" and Called(c).content.get(CALLED) == text)]),
+        Case("A23 a scene of the person's bound in the Tally, wearing their tag", BoundNotes(bt, [mine], coin), checks=[
+            ("asked by the tag, the loader picks it, reads it and attests it", Picked)]),
+        Case("A24 a scene born on the ribbon, wearing a tag coined there", SceneBorn, checks=[
+            ("the loader takes the tag's id from the Coined and picks the scene", Picked)]),
+        Case("A25 a file of another name renamed a scene on the ribbon", SceneLabeled(drafted, name=b"mine.scene"),
+             checks=[("the loader follows it from the Tally on and picks it", Picked)]),
+        Case("A26 the tag taken off the scene on the ribbon", SceneLabeled(mine, drop=[bt.tag]), checks=[
+            ("no scene wears it, and none is read", NonePicked)]),
+        Case("A27 the tag put on a scene on the ribbon", SceneLabeled(plain, add=[bt.tag]), checks=[
+            ("the scene wears it, and is picked", Picked)]),
+        Case("A28 the scene kept deleted on the ribbon", SceneLabeled(mine, keep=1 << 62), checks=[
+            ("a scene kept deleted is none the loader picks", NonePicked)]),
+        Case("A29 the tag put on a scene that wears it already", SceneLabeled(mine, add=[bt.tag]),
+             must={"BASE_MISMATCH"}, checks=[
+            ("the Labeled does not fit, said — the scene as it last matched, picked",
+             lambda c: "stitch 3's Labeled of fid %u does not fit the file: it puts on a tag already worn or takes off "
+             "one not worn — the file stays as it last matched" % bt.fid in Scened(c).lines and Picked(c))]),
+        Case("A30 the tag retired on the ribbon", Retired, checks=[
+            ("a retired tag is worn by nothing the loader picks", NonePicked)]),
     ]

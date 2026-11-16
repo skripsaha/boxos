@@ -41,12 +41,27 @@ static void SceneGiveBack(void)
     g_scene.bytes = NULL;
 }
 
+/* The scene as the journal names it: boot.scene, or the one picked by the
+ * tags the person asked for. */
+static void SceneSaid(const LecternCalled *called)
+{
+    Print("Gangway: ");
+    if (!called->ntags) {
+        Print(BOX_SCENE_BOOT);
+        return;
+    }
+    Print("the scene picked, fid ");
+    PrintDec(called->fid);
+    Print(",");
+}
+
 void SceneTake(const LecternCalled *called)
 {
     MemZero(&g_scene, sizeof(g_scene));
     if (called->says == CALLED_NONE) return;   /* the Lectern said why */
     if (!called->bytes) {
-        Print("Gangway: " BOX_SCENE_BOOT " is empty — no scene is drawn\n");
+        SceneSaid(called);
+        Print(" is empty — no scene is drawn\n");
         return;
     }
     g_scene.bytes = called->bytes;
@@ -56,7 +71,8 @@ void SceneTake(const LecternCalled *called)
 
     const char *why = BoxSceneRead(g_scene.bytes, g_scene.size, &g_scene.scene);
     if (why) {
-        Print("Gangway: " BOX_SCENE_BOOT " is no scene to draw — ");
+        SceneSaid(called);
+        Print(" is no scene to draw — ");
         Print(why);
         Print(" (its record ");
         PrintDec(g_scene.scene.Fault);
@@ -65,7 +81,8 @@ void SceneTake(const LecternCalled *called)
         return;
     }
     const BoxSceneHead *h = g_scene.scene.Head;
-    Print("Gangway: " BOX_SCENE_BOOT " is a scene of ");
+    SceneSaid(called);
+    Print(" is a scene of ");
     PrintDec(h->Figures);
     Print(" figure(s), its acts ");
     PrintDec(h->Acts[BOX_SCENE_ENTER]);

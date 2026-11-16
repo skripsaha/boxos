@@ -87,7 +87,7 @@ run_bookboot() {
     tools/gangway_stand.sh build/boxos.img >"$SCRATCH/bookboot.stand" 2>&1
     rc=$?
     sed 's/^/  /' "$SCRATCH/bookboot.stand"
-    [ $rc = 0 ] && grep -qE "^gangway: 27 passed, 0 failed" "$SCRATCH/bookboot.stand"
+    [ $rc = 0 ] && grep -qE "^gangway: 39 passed, 0 failed" "$SCRATCH/bookboot.stand"
     chk $? "bookboot: the Lectern built on the host says what volume-read boot says, on the image and every landing of group A, in long commands ($(tail -1 "$SCRATCH/bookboot.stand"))"
 
     # The image as built.

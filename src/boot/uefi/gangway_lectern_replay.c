@@ -2,8 +2,9 @@
  * The Lectern's replay of the ribbon, as the mount's pass 2 replays it: the
  * stitches sewn on (gangway_lectern_ribbon.c), their records
  * replayed for the files the Lectern follows — those kept in a role, or that
- * the ribbon puts in one, and the file called by the name the loader asks for
- * — and the digests every record puts in.
+ * the ribbon puts in one, the files called by the names the loader asks for,
+ * and the scenes, their names and tags — and the digests every record puts
+ * in; and the ids the ribbon coins for the tags a person asks a scene by.
  *
  * The rules are the kernel's (mount/ribbon_transcribe.c, ribbon_records.c)
  * and volume-read's (bookmount.py _Undone, _Stitch, _File), narrowed to what
@@ -181,9 +182,9 @@ static int Sewn(const LecternBook *b, uint64_t seq)
 /* Before the files: the files the ribbon puts in a role or names as asked  */
 /* ------------------------------------------------------------------------- */
 
-/* Every file a Labeled puts in a role or gives the name the loader asks for,
- * in the order of the ribbon — followed from the Tally on, whatever its
- * records come to. */
+/* Every file a Labeled puts in a role, gives a name the loader asks for or a
+ * scene's name, in the order of the ribbon — followed from the Tally on,
+ * whatever its records come to. */
 void LecternBefore(LecternBook *b)
 {
     for (uint64_t s = 0; s < b->nstitches; s++) {
@@ -196,7 +197,8 @@ void LecternBefore(LecternBook *b)
             if (d.read == TALLY_BODY_BROKEN) continue;
             int role  = (d.labeled.what & LABEL_FLAGS) && LecternRoleOf(d.labeled.set);
             int named = (d.labeled.what & LABEL_NAME) &&
-                        LecternNamed(b->called, b->ncalled, d.labeled.name, d.labeled.name_len);
+                        (LecternNamed(b->called, b->ncalled, d.labeled.name, d.labeled.name_len) ||
+                         LecternSceneNamed(d.labeled.name, d.labeled.name_len));
             if ((role || named) && !LecternListAdd(b, &b->interest, &b->ninterest, &b->capinterest, d.fid))
                 return;
         }
@@ -521,7 +523,9 @@ static int BornApplied(LecternBook *b, LecternHand *h, const LecternStitch *u, c
     f.size   = d->born.size;
     f.flags  = d->born.flags;
     f.called = LecternNamed(b->called, b->ncalled, d->born.name, d->born.name_len);
-    if (!RunsPut(u, RIBBON_BORN, d, RunTaken, &runs)) {
+    LecternFileNamed(&f, d->born.name, d->born.name_len);
+    if (!LecternFileTags(b, &f, d->born.tags, d->born.tags_bytes, d->born.ntags) ||
+        !RunsPut(u, RIBBON_BORN, d, RunTaken, &runs)) {
         LecternGive(b, runs.runs, runs.cap * sizeof(LecternRun));
         LecternFileGive(b, &f);
         return -1;
@@ -536,16 +540,59 @@ static int BornApplied(LecternBook *b, LecternHand *h, const LecternStitch *u, c
     return TailLay(b, &h->f, &d->born.slip, why);
 }
 
+/* A Labeled's tags put on and taken off the file, as the mount does
+ * (bookmount.py _File): every one put on that the file wears already, or
+ * taken off that it does not wear, weighed against the tags it wore before —
+ * then on and off. Whether each one put on is a tag the book coined is not
+ * weighed: a loader holds no list of every tag (bootbook.py narrows the same).
+ * 1, 0 it does not fit, -1 no room. */
+static int Retagged(LecternBook *b, LecternFile *f, const RibbonLabeled *r, LecternLine *why)
+{
+    uint32_t at = 0;
+    uint64_t id = 0;
+    int      fits = 1;
+    for (uint64_t i = 0; fits && i < r->nadd; i++)
+        fits = TallyIdNext(r->add, r->add_bytes, &at, &id, i == 0) && !LecternListHas(f->tags, f->ntags, id);
+    at = 0;
+    for (uint64_t i = 0; fits && i < r->ndrop; i++)
+        fits = TallyIdNext(r->drop, r->drop_bytes, &at, &id, i == 0) && LecternListHas(f->tags, f->ntags, id);
+    if (!fits) {
+        LinePut(why, "it puts on a tag already worn or takes off one not worn");
+        return 0;
+    }
+    at = 0;
+    for (uint64_t i = 0; i < r->nadd; i++) {
+        TallyIdNext(r->add, r->add_bytes, &at, &id, i == 0);
+        if (!LecternListAdd(b, &f->tags, &f->ntags, &f->captags, id)) return -1;
+    }
+    at = 0;
+    for (uint64_t i = 0; i < r->ndrop; i++) {
+        TallyIdNext(r->drop, r->drop_bytes, &at, &id, i == 0);
+        uint64_t k = 0;
+        while (f->tags[k] != id) k++;
+        for (; k + 1u < f->ntags; k++) f->tags[k] = f->tags[k + 1u];
+        f->ntags--;
+    }
+    return 1;
+}
+
 /* A Labeled: its flags set and cleared, as the record says — the role among
- * them — and the deleted bit its KEEP verb puts on or takes off: a file kept
- * deleted is no kernel for the loader to start (gangway_succession.c), nor
- * the file it asks for by name (gangway_lectern_called.c). Its name is the
- * loader's only as far as whether it is the one asked for; its tags are not
- * the loader's. */
-static int LabeledApplied(const LecternBook *b, LecternHand *h, const LecternRead *d)
+ * them — the deleted bit its KEEP verb puts on or takes off: a file kept
+ * deleted is no kernel for the loader to start (gangway_succession.c), nor a
+ * file it asks for (gangway_lectern_called.c) — its name, and the tags it
+ * puts on and takes off: what a scene is asked by. 1, 0 it does not fit, -1
+ * no room. */
+static int LabeledApplied(LecternBook *b, LecternHand *h, const LecternRead *d, LecternLine *why)
 {
     const RibbonLabeled *r = &d->labeled;
-    if (r->what & LABEL_NAME) h->f.called = LecternNamed(b->called, b->ncalled, r->name, r->name_len);
+    if (r->what & LABEL_TAGS) {
+        int retagged = Retagged(b, &h->f, r, why);
+        if (retagged <= 0) return retagged;
+    }
+    if (r->what & LABEL_NAME) {
+        h->f.called = LecternNamed(b->called, b->ncalled, r->name, r->name_len);
+        LecternFileNamed(&h->f, r->name, r->name_len);
+    }
     if (r->what & LABEL_FLAGS) h->f.flags = (h->f.flags | r->set) & ~r->clear;
     if (r->what & LABEL_KEEP)
         h->f.flags = r->keep_ns ? h->f.flags | TALLY_FILE_DELETED : h->f.flags & ~(uint64_t)TALLY_FILE_DELETED;
@@ -605,7 +652,7 @@ static int Applied(LecternBook *b, LecternHand *h, const LecternStitch *u, uint6
         h->alive = 0;
         return 1;
     }
-    return kind == RIBBON_LABELED ? LabeledApplied(b, h, d) : ShapedApplied(b, h, u, d, why);
+    return kind == RIBBON_LABELED ? LabeledApplied(b, h, d, why) : ShapedApplied(b, h, u, d, why);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -637,6 +684,7 @@ static LecternHand *HandOf(LecternBook *b, LecternHands *hs, uint64_t kind, cons
     } else {
         if (kind != RIBBON_BORN ||
             (!LecternRoleOf(d->born.flags) && !LecternNamed(b->called, b->ncalled, d->born.name, d->born.name_len) &&
+             !LecternSceneNamed(d->born.name, d->born.name_len) &&
              !LecternListHas(b->interest, b->ninterest, d->fid))) {
             *none = 1;
             return (LecternHand *)0;
@@ -679,7 +727,10 @@ static int HandsLaid(LecternBook *b, LecternHands *hs)
     int ok = 1;
     for (uint64_t i = 0; i < hs->n; i++) {
         LecternHand *h    = &hs->at[i];
-        LecternFile  gone = { h->fid, 0, 0, 0, (LecternRun *)0, 0, 0, (uint8_t *)0, 1, 0 };
+        LecternFile  gone;
+        LecternZero(&gone, sizeof(gone));
+        gone.fid  = h->fid;
+        gone.gone = 1;
         LecternFile *held = LecternFileOf(b, h->fid);
         if (h->failed || !h->alive) {
             LecternFileGive(b, &h->f);
@@ -823,6 +874,35 @@ int LecternOverlay(LecternBook *b, LecternFile *const *kernels, uint64_t n)
             l.ndigests = r->kind == RIBBON_BORN ? d.born.ndigests : d.shaped.ndigests;
             RunsPut(u, r->kind, &d, DigestLaid, &l);
             if (!l.ok) return 0;
+        }
+    }
+    return 1;
+}
+
+/* ------------------------------------------------------------------------- */
+/* The ids the ribbon coins                                                  */
+/* ------------------------------------------------------------------------- */
+
+int LecternCoinedIds(LecternBook *b, const LecternSpelling *sp, uint64_t **ids, uint64_t *n, uint64_t *cap)
+{
+    for (uint64_t s = 0; s < b->nstitches; s++) {
+        const LecternStitch *u = b->stitches[s];
+        if (LecternListHas(b->refused, b->nrefused, u->seq)) continue;
+        for (uint32_t i = 0; i < u->nrecords; i++) {
+            LecternRead d;
+            if (u->records[i].kind != RIBBON_COINED) continue;
+            RecordRead(u, &u->records[i], &d);
+            if (d.read == TALLY_BODY_BROKEN) continue;
+            if (LecternSpells(sp, &d.tag)) {
+                if (!LecternListAdd(b, ids, n, cap, d.id)) return 0;
+                continue;
+            }
+            for (uint64_t k = 0; k < *n; k++) {
+                if ((*ids)[k] != d.id) continue;
+                for (; k + 1u < *n; k++) (*ids)[k] = (*ids)[k + 1u];
+                (*n)--;
+                break;
+            }
         }
     }
     return 1;

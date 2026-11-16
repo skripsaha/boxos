@@ -1,14 +1,17 @@
 """bootbook — the kernels a volume's book names by role, as the UEFI loader
 finds them once the kernel its Deed names is not attested: the role of a file is bits 2 and 3 of its flags
 (ondisk.FILE_ROLE_*) — kernel, boot or system, never a tag, a file's tags being
-its user's; every file of FILES kept in one; the stitches past the slot's `at`,
+its user's and read only as a person's settings ask a scene by them; every
+file of FILES kept in one; the stitches past the slot's `at`,
 sewn on by rules (а)/(б)/(б′)/(в) (stitch_ribbon.Ribbon, its direct scan left
 out: a loader writes nothing and needs no next seq), and their records
 replayed narrowly — the files kept in a role or put in one on the ribbon
-alone, and the file called by the name the loader asks for (`called`, its
-name as the book and the ribbon leave it), each record held to its base, an
-Undone passing over what it names; and the digest of every block a record of
-the ribbon puts in.
+alone, the files called by the names the loader asks for (`called`, their
+names as the book and the ribbon leave them), and the scenes (every file
+called *.scene, its tags as the book and the ribbon leave them), each record
+held to its base, an Undone passing over what it names; the digest of every
+block a record of the ribbon puts in; and the ids of the tags a person's
+settings ask a scene by (TagIds: TAGS, then the ribbon's Coined).
 
 The loader's Lectern does the same by its own code (src/boot/uefi/
 gangway_lectern_tree.c, _ribbon.c, _replay.c), and the host stand holds the
@@ -17,8 +20,9 @@ two to one answer line for line (tools/gangway_stand.sh).
 What the loader leaves to the kernel's mount, where the mount alone can
 judge it (the narrowing, said here once): a file's records are replayed only
 for the files it follows, so a Born of a fid it does not follow is not
-weighed, nor a Labeled's tags, nor its name but for whether it is the one
-asked for; a next_quire is not held against the ground of the book and the
+weighed, nor its name but for whether it is one asked for or a scene's; the
+tags a Labeled puts on are not held to the tags the book coined; a
+next_quire is not held against the ground of the book and the
 files; and the data of the newest stitch is not held to its digests before
 the replay (§4.5 п.6) — a block that did not land is one that does not match
 its digest when the kernel that names it is attested."""
@@ -26,13 +30,38 @@ its digest when the kernel that names it is attested."""
 from . import ondisk, stitch, tally
 from .bookmount import Blocks, BookMount, LastBlock, Mismatch, Splice
 from .bookread import Short
-from .stitch import BORN, LABELED, QUITCLAIM, SHAPED, UNDONE, KIND_NAMES, LABEL_FLAGS, LABEL_KEEP, LABEL_NAME
+from .stitch import (BORN, COINED, LABELED, QUITCLAIM, SHAPED, UNDONE, KIND_NAMES, LABEL_FLAGS, LABEL_KEEP, LABEL_NAME,
+                     LABEL_TAGS)
 from .stitch_ribbon import Ribbon
 
 # The roles a kernel is looked for by, in the order they are asked (§16.7 п.3).
 ROLES = (ondisk.FILE_ROLE_KERNEL, ondisk.FILE_ROLE_BOOT, ondisk.FILE_ROLE_SYSTEM)
 
 FILE_KINDS = (BORN, SHAPED, LABELED, QUITCLAIM)
+
+# Every scene's name ends so (boxos_scene.h BOX_SCENE_SUFFIX).
+SCENE_SUFFIX = b".scene"
+
+
+def Scene(name):
+    """Whether `name` is a scene's."""
+    return name is not None and len(bytes(name)) > len(SCENE_SUFFIX) and bytes(name).endswith(SCENE_SUFFIX)
+
+
+def Spelling(word):
+    """A tag as a person spells it (tag_spelling.h): (key, value or None) —
+    blanks around it not part of it, the first ':' splitting the two, "key:"
+    "key"."""
+    word = word.strip(b" \t")
+    key, colon, value = word.partition(b":")
+    return key, (value if colon and value else None)
+
+
+def Spells(spelling, ts):
+    """Whether the book's tag `ts` (tally.TagState) is the one spelled: a
+    retired tag is none."""
+    key, value = spelling
+    return not ts.flags & tally.TAG_RETIRED and ts.key == key and ts.value == value
 
 
 def Role(flags):
@@ -71,7 +100,7 @@ class BootBook:
         self._Before()
         self._Copies(tally.FILES)
         self.files = {fid: fs.Copy() for fid, fs in t.content.files.items()
-                      if Role(fs.flags) or fid in self.interest or self._Called(fs.name)}
+                      if Role(fs.flags) or fid in self.interest or self._Called(fs.name) or Scene(fs.name)}
         self.followed = set(self.files)
         self.skip, self.refused = {}, set()
         self._Undone()
@@ -97,9 +126,9 @@ class BootBook:
     # --- before the files: the files the ribbon puts in a role or names so ---
 
     def _Before(self):
-        """Every file a Labeled puts in a role or gives the name the loader
-        asks for, in the order of the ribbon — followed from the Tally on,
-        whatever its records come to."""
+        """Every file a Labeled puts in a role, gives a name the loader asks
+        for or a scene's name, in the order of the ribbon — followed from the
+        Tally on, whatever its records come to."""
         for u in self.ribbon.stitches:
             for kind, _ign, body, _at in u.records:
                 if kind != LABELED:
@@ -109,7 +138,7 @@ class BootBook:
                 except Short:
                     continue
                 if (d["what"] & LABEL_FLAGS and Role(d["flags"][0])) or \
-                        (d["what"] & LABEL_NAME and self._Called(d["name"])):
+                        (d["what"] & LABEL_NAME and (self._Called(d["name"]) or Scene(d["name"]))):
                     self.interest.add(d["fid"])
 
     # --- pass 1: the Undones (bookmount.BookMount._Undone) ----------------------
@@ -188,7 +217,8 @@ class BootBook:
             if fid in skip:
                 continue
             if fid not in self.followed:
-                if kind != BORN or not (Role(d["flags"]) or fid in self.interest or self._Called(d["name"])):
+                if kind != BORN or not (Role(d["flags"]) or fid in self.interest or self._Called(d["name"]) or
+                                        Scene(d["name"])):
                     continue
                 self.followed.add(fid)
             old = now[fid] if fid in now else self.files.get(fid)
@@ -225,6 +255,11 @@ class BootBook:
             if kind == QUITCLAIM:
                 return None
             if kind == LABELED:
+                if d["what"] & LABEL_TAGS:
+                    worn = set(fs.tags)
+                    if any(t in worn for t in d["add"]) or any(t not in worn for t in d["drop"]):
+                        raise Mismatch("it puts on a tag already worn or takes off one not worn")
+                    fs.tags = sorted((worn | set(d["add"])) - set(d["drop"]))
                 if d["what"] & LABEL_NAME:
                     fs.name = bytes(d["name"])
                 if d["what"] & LABEL_FLAGS:
@@ -245,6 +280,32 @@ class BootBook:
                                                                                 Blocks(fs.size)))
         BookMount._Slip(fs, d["slip"])
         return fs
+
+    # --- the ids of a tag a person asks a scene by -------------------------------
+
+    def TagIds(self, word):
+        """The ids of the tags `word` spells, as the slot's TAGS and then the
+        Coined of the stitches the ribbon applies leave them — an id coined
+        for another tag taken out."""
+        spelling = Spelling(word)
+        if not spelling[0]:
+            return set()
+        ids = {tid for tid, ts in self.t.content.tags.items() if Spells(spelling, ts)}
+        for u in self.ribbon.stitches:
+            if u.seq in self.refused:
+                continue
+            for kind, _ign, body, _at in u.records:
+                if kind != COINED:
+                    continue
+                try:
+                    d = stitch.RecordDecode(kind, body, u.seq)
+                except Short:
+                    continue
+                if Spells(spelling, d["tag"]):
+                    ids.add(d["tid"])
+                else:
+                    ids.discard(d["tid"])
+        return ids
 
     # --- the digests the ribbon carries, and the order of the kernels -----------
 

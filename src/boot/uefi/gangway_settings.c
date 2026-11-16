@@ -22,7 +22,7 @@
 #include "boxos_gangway_settings.h"
 #include "settings_chosen.h"
 
-GangwaySettings g_settings = { 0, 0, 0, BOARDING_STARTUP_QUIET, 0, 1, 0 };
+GangwaySettings g_settings = { .startup = BOARDING_STARTUP_QUIET, .scene = 1 };
 
 static const char g_declared[] = GANGWAY_SETTINGS;
 
@@ -102,6 +102,34 @@ static int ScreenSize(SettingSpan v, uint32_t *width, uint32_t *height)
     return 1;
 }
 
+/* The scene's value `v` taken: on — boot.scene, by its name — off, or the
+ * tags the scene is to be picked by, each word one, SCENE_ASKED_MOST of them
+ * at the most (said when there are more). */
+static void SceneTaken(SettingSpan v, uint32_t line)
+{
+    uint64_t n = v.Length < SCENE_TAGS_BYTES - 1u ? v.Length : SCENE_TAGS_BYTES - 1u, at = 0;
+    g_settings.scene        = !SettingSpanIs(v, "off");
+    g_settings.scene_nasked = 0;
+    if (SettingSpanIs(v, "on") || SettingSpanIs(v, "off")) return;
+    for (uint64_t i = 0; i < n; i++) g_settings.scene_tags[i] = v.At[i];
+    g_settings.scene_tags[n] = '\0';
+    while (at < n) {
+        while (at < n && (g_settings.scene_tags[at] == ' ' || g_settings.scene_tags[at] == '\t' ||
+                          g_settings.scene_tags[at] == ',')) g_settings.scene_tags[at++] = '\0';
+        if (at == n) break;
+        if (g_settings.scene_nasked == SCENE_ASKED_MOST) {
+            LineHead(line);
+            Print("scene asks by more tags than the loader picks by; the first ");
+            PrintDec(SCENE_ASKED_MOST);
+            Print(" are asked\n");
+            break;
+        }
+        g_settings.scene_asked[g_settings.scene_nasked++] = &g_settings.scene_tags[at];
+        while (at < n && g_settings.scene_tags[at] != ' ' && g_settings.scene_tags[at] != '\t' &&
+               g_settings.scene_tags[at] != ',') at++;
+    }
+}
+
 /* The value `v` — one that fits setting `s` — taken, `set` when it is the
  * person's own and not the word default: 1, or 0 when it is one Gangway
  * cannot take after all (a screen that is no size), said. */
@@ -132,8 +160,8 @@ static int Taken(const Setting *s, SettingSpan v, uint32_t line, bool set)
         bit                 = GANGWAY_SET_KEEP_LOG;
         g_settings.keep_log = value.On ? 1u : 0u;
     } else if (SettingSpanIs(s->Name, "scene")) {
-        bit              = GANGWAY_SET_SCENE;
-        g_settings.scene = value.On ? 1u : 0u;
+        bit = GANGWAY_SET_SCENE;
+        SceneTaken(v, line);
     }
     g_settings.set = set ? g_settings.set | bit : g_settings.set & ~bit;
     return 1;
@@ -228,7 +256,11 @@ int SettingsList(uint32_t which)
     }
     if (which & GANGWAY_SET_SCENE) {
         Print(between);
-        Print(g_settings.scene ? "scene on" : "scene off");
+        Print(!g_settings.scene ? "scene off" : g_settings.scene_nasked ? "scene" : "scene on");
+        for (uint32_t k = 0; g_settings.scene && k < g_settings.scene_nasked; k++) {
+            Print(" ");
+            Print(g_settings.scene_asked[k]);
+        }
         between = ", ";
     }
     return between[0] != '\0';

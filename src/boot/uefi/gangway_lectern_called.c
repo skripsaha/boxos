@@ -1,10 +1,15 @@
 /*
- * A file the loader asks the volume for by its name (LecternCalled) — beside
- * the kernel, in the same reading of the book: among the files the Lectern
+ * A file the loader asks the volume for (LecternCalled) — beside the kernel,
+ * in the same reading of the book. By its name: among the files the Lectern
  * follows (gangway_lectern_tree.c, _replay.c follow those called so, as the
  * book and the ribbon leave their names), those the book does not keep deleted,
  * the first made — the least fid, as BoxLib takes a program's settings file —
- * said when there are more. What may be read of it — no run of an extension
+ * said when there are more. By the tags a person's settings ask for, when the
+ * desk asks so (LecternDesk.ask): among the scenes the Lectern follows (every
+ * file called *.scene, its tags as the book and the ribbon leave them), those
+ * the book does not keep deleted that wear, for each tag asked, a tag of the
+ * ids TAGS and the ribbon's Coined give it (LecternTagIds), the one `pick`
+ * falls on, counted by fid — said, with how many there were. What may be read of it — no run of an extension
  * this loader does not read, no ground outside the data run, no more bytes
  * than asked — its blocks read as the medium gives them and held to the book
  * as a kernel's are (LecternAttest, the digest the ribbon's record of a block
@@ -52,6 +57,56 @@ static LecternFile *FirstCalled(LecternBook *b, uint32_t which, uint64_t *count)
         (*count)++;
     }
     return first;
+}
+
+/* The tags asked, as a line says them: "boot, light". */
+static void TagsPut(LecternLine *l, const LecternCalled *c)
+{
+    for (uint32_t k = 0; k < c->ntags; k++) {
+        if (k) LinePut(l, ", ");
+        LinePut(l, c->tags[k]);
+    }
+}
+
+/* The scene followed that the book does not keep deleted and that wears a tag
+ * of every one asked, the one `pick` falls on counted by fid, and how many
+ * do; NULL when none does, or with no room (b->starved). */
+static LecternFile *Picked(LecternBook *b, const LecternCalled *c, uint64_t *count)
+{
+    const uint64_t words  = c->ntags;
+    uint64_t     **ids    = (uint64_t **)LecternTake(b, words * sizeof(uint64_t *));
+    uint64_t      *n      = (uint64_t *)LecternTake(b, words * sizeof(uint64_t));
+    uint64_t      *cap    = (uint64_t *)LecternTake(b, words * sizeof(uint64_t));
+    LecternFile   *picked = (LecternFile *)0;
+    int            room   = ids && n && cap;
+
+    *count = 0;
+    for (uint64_t k = 0; room && k < words; k++) {
+        ids[k] = (uint64_t *)0;
+        n[k] = cap[k] = 0;
+    }
+    for (uint64_t k = 0; room && k < words; k++) room = LecternTagIds(b, c->tags[k], &ids[k], &n[k], &cap[k]);
+    for (int round = 0; room && round < 2 && (round == 0 || *count); round++) {
+        uint64_t seen = 0, at = round ? c->pick % *count : 0;
+        for (uint64_t i = 0; i < b->nfiles && !picked; i++) {
+            const LecternFile *f     = &b->files[i];
+            int                wears = !f->gone && !(f->flags & TALLY_FILE_DELETED) &&
+                        LecternSceneNamed((const uint8_t *)f->name, f->name_len);
+            for (uint64_t k = 0; wears && k < words; k++) {
+                int one = 0;
+                for (uint64_t j = 0; !one && j < n[k]; j++) one = LecternListHas(f->tags, f->ntags, ids[k][j]);
+                wears = one;
+            }
+            if (!wears) continue;
+            if (round == 0) (*count)++;
+            else if (seen++ == at) picked = &b->files[i];
+        }
+    }
+    for (uint64_t k = 0; ids && n && cap && k < words; k++) LecternGive(b, ids[k], cap[k] * sizeof(uint64_t));
+    LecternGive(b, ids, words * sizeof(uint64_t *));
+    LecternGive(b, n, words * sizeof(uint64_t));
+    LecternGive(b, cap, words * sizeof(uint64_t));
+    return picked;
 }
 
 /* What of the file may be read: 1, or 0 refused, said. */
@@ -110,17 +165,23 @@ void LecternCalledTake(LecternBook *b, uint32_t which)
     LecternFile *f;
     uint64_t     count, blocks;
 
+    if (b->desk->ask) b->desk->ask(b->desk->ctx, c, which);
     c->says  = CALLED_NONE;
     c->bytes = (uint8_t *)0;
     c->room  = 0;
     c->size  = 0;
     c->fid   = 0;
     LineStart(&who);
-    LinePut(&who, c->name);
+    if (c->ntags) {
+        LinePut(&who, "the scene carrying ");
+        TagsPut(&who, c);
+    } else {
+        LinePut(&who, c->name);
+    }
     if (!b->stood) {
         LecternLine l;
         LineStart(&l);
-        LinePut(&l, c->name);
+        LinePut(&l, who.text);
         LinePut(&l, " is not read: ");
         LinePut(&l, b->why.text);
         LecternSay(b, &l);
@@ -130,7 +191,30 @@ void LecternCalledTake(LecternBook *b, uint32_t which)
         Said(b, &who, " is not read: the loader had no room to read the book's files", 0, none, 0, none);
         return;
     }
-    if (!(f = FirstCalled(b, which, &count))) {
+    if (c->ntags) {
+        LecternLine l;
+        f = Picked(b, c, &count);
+        if (b->starved) {
+            Said(b, &who, " is not read: the loader had no room to pick it", 0, none, 0, none);
+            return;
+        }
+        LineStart(&l);
+        if (!f) {
+            LinePut(&l, "no scene on this volume carries ");
+            TagsPut(&l, c);
+            LecternSay(b, &l);
+            return;
+        }
+        LineNum(&l, count);
+        LinePut(&l, count == 1 ? " scene carries " : " scenes carry ");
+        TagsPut(&l, c);
+        LinePut(&l, " — fid ");
+        LineNum(&l, f->fid);
+        LinePut(&l, ", the one picked, is read");
+        LecternSay(b, &l);
+        LineStart(&who);
+        LinePut(&who, f->name);
+    } else if (!(f = FirstCalled(b, which, &count))) {
         LecternLine l;
         LineStart(&l);
         LinePut(&l, "no file on this volume is called ");
@@ -138,7 +222,7 @@ void LecternCalledTake(LecternBook *b, uint32_t which)
         LecternSay(b, &l);
         return;
     }
-    if (count > 1) {
+    if (!c->ntags && count > 1) {
         LecternLine l;
         LineStart(&l);
         LineNum(&l, count);

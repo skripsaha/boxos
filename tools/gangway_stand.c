@@ -9,7 +9,7 @@
  * (boxos_gangway_settings.h) and boot.scene (boxos_scene.h) — read and held to
  * the book as Gangway reads them.
  *
- *     build/gangway_stand IMAGE GROUND_START [REFUSE_BLOCK [long]]
+ *     build/gangway_stand [--tags "TAG ..." [--pick N]] IMAGE GROUND_START [REFUSE_BLOCK [long]]
  *
  * Every line it prints is what Gangway says of the volume, "boot: " before it
  * where Gangway puts "Gangway: ", and the same lines `volume-read IMAGE boot`
@@ -22,6 +22,10 @@
  * off the partition table before the Lectern is asked (gangway_medium.c,
  * FindGroundOn): the caller says it here, as volume-read found it. Where a
  * kernel is placed is Gangway's 0x100000 and the heap here.
+ *
+ * With --tags, boot.scene is asked by those tags instead — as a desk's ask
+ * asks it when a person's settings say so (LecternDesk.ask) — the scene that
+ * --pick falls on, and `volume-read boot --tags --pick` is asked the same.
  *
  * How it read is said apart, on stderr: how many commands, the most sectors
  * one asked for (LECTERN_READ_MOST at the most), and in how many the kernel
@@ -185,12 +189,27 @@ int main(int argc, char **argv)
     LecternDesk    desk;
     VolumeBoot     boot;
     LecternKernel  kernel;
-    LecternCalled  called[2] = { { GANGWAY_SETTINGS_FILE, SETTINGS_FILE_MAX, CALLED_NONE, NULL, 0, 0, 0 },
-                                 { BOX_SCENE_BOOT, BOX_SCENE_FILE_MOST, CALLED_NONE, NULL, 0, 0, 0 } };
+    LecternCalled  called[2] = { { .name = GANGWAY_SETTINGS_FILE, .most = SETTINGS_FILE_MAX },
+                                 { .name = BOX_SCENE_BOOT, .most = BOX_SCENE_FILE_MOST } };
     int            named = 0;
 
+    static char        words[512];
+    static const char *tags[64];
+    uint32_t           ntags = 0;
+    uint64_t           pick  = 0;
+    while (argc >= 3 && (strcmp(argv[1], "--tags") == 0 || strcmp(argv[1], "--pick") == 0)) {
+        if (strcmp(argv[1], "--pick") == 0) {
+            pick = strtoull(argv[2], NULL, 10);
+        } else {
+            snprintf(words, sizeof(words), "%s", argv[2]);
+            for (char *w = strtok(words, " "); w && ntags < 64u; w = strtok(NULL, " ")) tags[ntags++] = w;
+        }
+        argv += 2;
+        argc -= 2;
+    }
     if (argc < 3 || argc > 5 || (argc == 5 && strcmp(argv[4], "long") != 0)) {
-        fprintf(stderr, "usage: %s IMAGE GROUND_START [REFUSE_BLOCK [long]]\n", argv[0]);
+        fprintf(stderr, "usage: %s [--tags \"TAG ...\" [--pick N]] IMAGE GROUND_START [REFUSE_BLOCK [long]]\n",
+                argv[0]);
         return 2;
     }
     memset(&m, 0, sizeof(m));
@@ -216,6 +235,9 @@ int main(int argc, char **argv)
     desk.place   = StandTake;
     desk.unplace = StandGive;
     desk.uuid    = uuid;
+    called[1].tags  = ntags ? tags : NULL;
+    called[1].ntags = ntags;
+    called[1].pick  = pick;
     if (StandDeed(deed, &desk, &boot, &named)) {
         LecternSuccession(&desk, named ? &boot : NULL, &kernel, called, 2);
         StandCommandsSay(&m, &kernel);

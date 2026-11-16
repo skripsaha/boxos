@@ -332,10 +332,13 @@ def CmdBound(args, medium):
 
 def CmdBoot(args, medium):
     """What the loader's Lectern says of the volume's kernels, line by line
-    (bootread.py): 0 when it says a verdict, 2 when the volume does not read."""
+    (bootread.py): 0 when it says a verdict, 2 when the volume does not read.
+    With --tags, the scene asked by those tags — as a person's settings ask
+    it — the one --pick falls on."""
     from volumeread.bootread import ASKED, BootRead
+    asked = {1: (tuple(w.encode() for w in args.tags.split()), args.pick)} if args.tags else None
     try:
-        lines, _says = BootRead(medium, args.start, ASKED)
+        lines, _says = BootRead(medium, args.start, ASKED, asked)
     except (Unreadable, IOError) as e:
         print(f"boot: unreadable — {e}")
         return 2
@@ -392,7 +395,9 @@ def Main():
     cut.add_argument("--digests", metavar="MEMO", help="a book's block digests a check of the same run took")
     cut.add_argument("--digests-out", metavar="MEMO", help="the block digests this check took, kept")
     sub.add_parser("bound", parents=[start], help="the newest Tally held to the one rule of binding")
-    sub.add_parser("boot", parents=[start], help="the kernel BOOT names, held to the book as the UEFI loader holds it")
+    bt = sub.add_parser("boot", parents=[start], help="the kernel BOOT names, held to the book as the UEFI loader holds it")
+    bt.add_argument("--tags", metavar="TAGS", help="the scene asked by these tags, as a person's settings ask it")
+    bt.add_argument("--pick", metavar="N", type=int, default=0, help="which of the scenes that wear them all")
     st = sub.add_parser("self-test", parents=[start], help="every census rule, planted and caught")
     st.add_argument("--emit", metavar="CASE")
     st.add_argument("--out", metavar="IMG")

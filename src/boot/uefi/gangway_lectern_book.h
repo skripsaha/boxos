@@ -22,11 +22,13 @@
  */
 
 #if __STDC_HOSTED__
+#include <stddef.h>
 #include <stdint.h>
 #else
 #include "uefi.h"
 #endif
 
+#include "boxos_scene.h"      /* BOX_SCENE_SUFFIX */
 #include "gangway_lectern.h"
 
 /* ------------------------------------------------------------------------- */
@@ -58,8 +60,9 @@ static inline int LecternNamed(const LecternCalled *called, uint32_t n, const ui
 
 /* The role of a file, from its flags: TALLY_FILE_ROLE_KERNEL, _BOOT, _SYSTEM,
  * or 0 for a file the system keeps in none — a file's tags are its user's,
- * and the loader reads none of them. A kernel is looked for in the order of
- * the roles, the larger first (§16.7 п.3). */
+ * and the loader reads none of them but those a person's settings ask a
+ * scene by. A kernel is looked for in the order of the roles, the larger
+ * first (§16.7 п.3). */
 static inline uint64_t LecternRoleOf(uint64_t flags)
 {
     return flags & TALLY_FILE_ROLE_MASK;
@@ -105,7 +108,9 @@ typedef struct {
  * bytes and a block's bits more saying which are laid. `gone` a file followed
  * that a Quitclaim took; `called` 1 + which of the files the loader asks for
  * by name (LecternCalled) it is called as the book and the ribbon leave it, 0
- * none. */
+ * none. Its name — no more of it than a line holds — and the ids of the tags
+ * it wears, rising, as the book and the ribbon leave them: what a scene is
+ * picked by when a person's settings ask by tags. */
 typedef struct {
     uint64_t    fid;
     uint64_t    gen;
@@ -116,7 +121,66 @@ typedef struct {
     uint8_t    *tail;
     int         gone;
     int         called;
+    char        name[LECTERN_LINE_BYTES];
+    uint32_t    name_len;
+    uint64_t   *tags;
+    uint64_t    ntags, captags;
 } LecternFile;
+
+/* Whether `name` (`len` bytes) is a scene's: it ends in BOX_SCENE_SUFFIX. */
+static inline int LecternSceneNamed(const uint8_t *name, uint64_t len)
+{
+    const uint64_t suffix = sizeof(BOX_SCENE_SUFFIX) - 1u;
+    if (len <= suffix) return 0;
+    for (uint64_t i = 0; i < suffix; i++)
+        if (name[len - suffix + i] != (uint8_t)BOX_SCENE_SUFFIX[i]) return 0;
+    return 1;
+}
+
+/* A tag as a person spells it — "key" or "key:value", blanks around it not
+ * part of it, the first ':' splitting the two and "key:" "key" (tag_spelling.h)
+ * — in place in the word it was read from. */
+typedef struct {
+    const uint8_t *key, *value;
+    uint64_t       key_len, value_len;
+    int            has_value;
+} LecternSpelling;
+
+static inline void LecternSpell(const char *word, LecternSpelling *s)
+{
+    const uint8_t *w = (const uint8_t *)word;
+    uint64_t       from = 0, to = 0, colon;
+    while (w[to]) to++;
+    while (from < to && (w[from] == ' ' || w[from] == '\t')) from++;
+    while (to > from && (w[to - 1u] == ' ' || w[to - 1u] == '\t')) to--;
+    for (colon = from; colon < to && w[colon] != ':'; colon++) {}
+    s->key       = w + from;
+    s->key_len   = colon - from;
+    s->value     = colon < to ? w + colon + 1u : w + to;
+    s->value_len = colon < to ? to - colon - 1u : 0;
+    s->has_value = s->value_len != 0;
+}
+
+/* Whether the book's tag `t` is the one `s` spells: a retired tag is none. */
+static inline int LecternSpells(const LecternSpelling *s, const TallyTag *t)
+{
+    if ((t->flags & TALLY_TAG_RETIRED) || t->key_len != s->key_len ||
+        !(t->flags & TALLY_TAG_HAS_VALUE) != !s->has_value || (s->has_value && t->value_len != s->value_len))
+        return 0;
+    for (uint64_t i = 0; i < s->key_len; i++)
+        if (t->key[i] != s->key[i]) return 0;
+    for (uint64_t i = 0; s->has_value && i < s->value_len; i++)
+        if (t->value[i] != s->value[i]) return 0;
+    return 1;
+}
+
+/* The file's name kept, no more of it than a line holds. */
+static inline void LecternFileNamed(LecternFile *f, const uint8_t *name, uint64_t len)
+{
+    f->name_len = len < LECTERN_LINE_BYTES - 1u ? (uint32_t)len : LECTERN_LINE_BYTES - 1u;
+    for (uint32_t i = 0; i < f->name_len; i++) f->name[i] = (char)name[i];
+    f->name[f->name_len] = '\0';
+}
 
 #define LECTERN_TAIL_BYTES (VOLUME_BLOCK_BYTES + VOLUME_BLOCK_BYTES / 8u)
 
@@ -208,7 +272,7 @@ typedef struct {
     uint64_t           nskip, capskip;
     uint64_t          *refused;       /* the stitches not applied */
     uint64_t           nrefused, caprefused;
-    uint64_t          *interest;      /* files a Labeled puts in a role, or names as the file asked for */
+    uint64_t          *interest;      /* files a Labeled puts in a role, or names as a file asked for or a scene */
     uint64_t           ninterest, capinterest;
     /* The files followed, by fid, rising; the rotten ranges of FILES. */
     LecternFile       *files;
@@ -283,6 +347,17 @@ void    LecternClose(LecternBook *b);
 int     LecternFiles(LecternBook *b);
 
 LecternFile *LecternFileOf(LecternBook *b, uint64_t fid);
+/* The `n` tag ids a list of the book's (TallyIdsPut) of `bytes` holds, as the
+ * file's tags: 1, or 0 no room. */
+int          LecternFileTags(LecternBook *b, LecternFile *f, const uint8_t *ids, uint32_t bytes, uint64_t n);
+/* The ids of the tags `word` spells — "key" or "key:value", the first ':'
+ * splitting them — as the slot's TAGS and the ribbon's Coined leave them, a
+ * retired one none, into the rising list *ids: 1, or 0 no room. */
+int          LecternTagIds(LecternBook *b, const char *word, uint64_t **ids, uint64_t *n, uint64_t *cap);
+/* The ribbon's Coined, in its order through the stitches it applies: an id
+ * given the tag `s` spells into *ids, one given another taken out. 1, or 0 no
+ * room. */
+int          LecternCoinedIds(LecternBook *b, const LecternSpelling *s, uint64_t **ids, uint64_t *n, uint64_t *cap);
 /* A file put into its place by fid (*f taken over); 0 no room. */
 int     LecternFilePut(LecternBook *b, const LecternFile *f);
 /* A file's arrays given back. */
