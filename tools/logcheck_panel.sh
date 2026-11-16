@@ -96,8 +96,8 @@ run_panel() {
     grep -aq "\[AMP\] the person asks for 1 core(s): 1 of the 4 the machine has are started" "$Q" &&
         grep -aq "\[AMP\] Detected 1 core(s)" "$Q"
     chk $? "panel (start): and starts one core of the four"
-    grep -aqE "\[Boarding\]   it marked [0-9]+ moment\(s\) of its journey: .*screen panel memory" "$Q"
-    chk $? "panel (start): the panel is a moment of the journey, between the screen and the memory map"
+    grep -aqE "\[Boarding\]   it marked [0-9]+ moment\(s\) of its journey: .*screen panel crossing memory" "$Q"
+    chk $? "panel (start): the panel is a moment of the journey, between the screen and the crossing kept"
     grep -aq "BoxOS Hub" "$Q"
     chk $? "panel (start): and the start reaches the hub"
 
@@ -112,7 +112,7 @@ run_panel() {
             panel_keys down down ret
             sleep 1
             mon_shot "$SCRATCH/panel.previous.ppm"
-            panel_keys esc down down ret
+            panel_keys esc down down down ret
             sleep 5
             # QEMU takes its pidfile away as it exits: the pid read at the
             # start is the one asked after.

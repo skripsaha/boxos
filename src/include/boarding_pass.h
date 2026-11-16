@@ -109,6 +109,7 @@ _Static_assert(sizeof(BoardingStampHeader) == 4, "a stamp header is 4 bytes — 
 #define BOARDING_STAMP_STARTUP  7   /* BoardingStartup */
 #define BOARDING_STAMP_CORES    8   /* BoardingCores */
 #define BOARDING_STAMP_KEEP_LOG 9   /* BoardingKeepLog */
+#define BOARDING_STAMP_CROSSING 10  /* BoardingCrossing */
 
 /*
  * The volume this kernel was read out of, by the identity the filesystem keeps
@@ -258,5 +259,17 @@ typedef struct __attribute__((packed)) {
 } BoardingKeepLog;
 
 _Static_assert(sizeof(BoardingKeepLog) == 4, "a keep-log stamp is 4 bytes");
+
+/* CROSSING: this start's crossing on the medium it started from
+ * (boxos_crossings.h) — the sector its slot begins at and its number — for
+ * the kernel to mark landed when the display takes the screen. A pass without
+ * one is a start no crossing was kept of: a BIOS boot, or a medium whose front
+ * carries no crossings. */
+typedef struct __attribute__((packed)) {
+    uint64_t sector;
+    uint64_t number;
+} BoardingCrossing;
+
+_Static_assert(sizeof(BoardingCrossing) == 16, "a crossing stamp is 16 bytes");
 
 #endif /* BOARDING_PASS_H */

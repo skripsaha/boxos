@@ -28,7 +28,7 @@
  * from power-on to a shell.
  * ========================================================================= */
 
-/* The loader marks seven steps; the pass has room for some twenty-five. */
+/* The loader marks some ten steps; the pass has room for some twenty. */
 #define MOMENTS_MAX 16u
 
 static BoardingMoment g_moments[MOMENTS_MAX];
@@ -124,6 +124,14 @@ void WriteBoardingPass(void)
     if (g_settings.set & GANGWAY_SET_KEEP_LOG) {
         BoardingKeepLog keep = { g_settings.keep_log, { 0, 0, 0 } };
         at = BoardingStamp(base, at, BOARDING_STAMP_KEEP_LOG, &keep, sizeof(keep));
+        count++;
+    }
+
+    /* This start's crossing, for the kernel to mark landed
+     * (gangway_crossings.c) — when one was kept. */
+    BoardingCrossing crossing;
+    if (CrossingStamp(&crossing)) {
+        at = BoardingStamp(base, at, BOARDING_STAMP_CROSSING, &crossing, sizeof(crossing));
         count++;
     }
 

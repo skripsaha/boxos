@@ -407,3 +407,47 @@ EFI_STATUS ReadSectors(uint64_t vlba, uint32_t count_512, void *buffer)
     if (!g_block_io) return EFI_NOT_READY;
     return ReadMediumSectors(g_block_io, g_ground_start + vlba, count_512, buffer);
 }
+
+EFI_STATUS MediumRead(uint64_t lba_512, uint32_t count_512, void *buffer)
+{
+    if (!g_block_io) return EFI_NOT_READY;
+    return ReadMediumSectors(g_block_io, lba_512, count_512, buffer);
+}
+
+/* Through a buffer of its own, on the 4096 any IoAlign a medium of these
+ * blocks asks for is at the most (§13.9); then flushed, so what was written is
+ * on the medium and not in its cache when the kernel is jumped into. A
+ * medium that has no cache to flush says EFI_UNSUPPORTED, which is no
+ * refusal. */
+EFI_STATUS MediumWriteSlot(uint64_t lba_512, const void *slot)
+{
+    static uint8_t aligned[4096] __attribute__((aligned(4096)));
+
+    if (!g_block_io || !g_block_io->media) return EFI_NOT_READY;
+    if (g_block_io->media->read_only) return EFI_WRITE_PROTECTED;
+    uint32_t bsz = g_block_io->media->block_size ? g_block_io->media->block_size : 512u;
+    if ((bsz != 512u && bsz != 4096u) || (lba_512 * 512u) % bsz) return EFI_UNSUPPORTED;
+
+    MemCopy(aligned, slot, sizeof(aligned));
+    EFI_STATUS st = g_block_io->write_blocks(g_block_io, g_block_io->media->media_id,
+                                             (EFI_LBA)(lba_512 * 512u / bsz), sizeof(aligned), aligned);
+    if (EFI_ERROR(st)) return st;
+    st = g_block_io->flush_blocks(g_block_io);
+    return st == EFI_UNSUPPORTED ? EFI_SUCCESS : st;
+}
+
+/* The medium's MBR read, and every partition it names begins at `end` or past
+ * it: 1. A GPT's protective entry is a table this loader does not answer for
+ * the front of — its entries lie at sectors 2 to 33 — and is 0. */
+int MediumFrontFree(uint64_t end)
+{
+    static uint8_t mbr[512] __attribute__((aligned(4096)));
+
+    if (EFI_ERROR(MediumRead(0, 1, mbr)) || mbr[510] != 0x55 || mbr[511] != 0xAA) return 0;
+    for (uint32_t i = 0; i < MBR_ENTRY_COUNT; i++) {
+        const uint8_t *e = mbr + MBR_TABLE_OFFSET + i * MBR_ENTRY_BYTES;
+        if (e[MBR_ENTRY_TYPE] == 0) continue;
+        if (e[MBR_ENTRY_TYPE] == MBR_TYPE_PROTECTIVE || Le32(e + MBR_ENTRY_START_LBA) < end) return 0;
+    }
+    return 1;
+}

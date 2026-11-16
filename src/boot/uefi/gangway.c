@@ -16,7 +16,10 @@
  *                                                         gangway_succession.c,
  *                                                         gangway_lectern*.c)
  *   5. the screen: the GOP mode, the framebuffer         (gangway_video.c)
- *      — and the panel, when the person holds Space     (gangway_panel*.c,
+ *      — the crossings this medium keeps, the panel when
+ *      the person holds Space or the last two starts did
+ *      not land, and this start's crossing kept           (gangway_crossings.c,
+ *                                                         gangway_panel*.c,
  *                                                         gangway_keys.c)
  *   6. the firmware's memory map as E820 at 0x500        (gangway_memory.c)
  *   7. the loader's own place checked against the 4 GB identity map, and the
@@ -237,9 +240,14 @@ EFI_STATUS EFIAPI GangwayMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     DrawUse(&fb);
     Moment("screen");
 
-    /* A person holding Space is shown the panel before the start goes on;
-     * what they change there may be the screen itself. */
-    PanelIfAsked(&fb);
+    /* The crossings this medium keeps; two starts in a row that did not land
+     * open the panel by themselves, and a person holding Space opens it too —
+     * what they change there may be the screen itself. This start's crossing
+     * is kept once the panel is left: one restarted or turned off there never
+     * crossed. */
+    CrossingsTake();
+    uint8_t panel = PanelIfAsked(&fb, CrossingsMisses());
+    CrossingKeep(panel, &fb);
 
     Print("Gangway: building memory map...\r\n");
     uint32_t e820_count = 0;

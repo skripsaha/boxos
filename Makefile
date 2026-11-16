@@ -42,7 +42,9 @@ DEBUG    ?= off
 # not move it — which is why every LBA below is the one it always was.
 #   Sector 0        : Stage1 (446 bytes of code, then the MBR partition table)
 #   Sectors 1-16    : Stage2 (16 sectors = 8192 bytes)
-#   Sectors 17-2047 : the rest of the first mebibyte — nothing, on purpose
+#   Sectors 17-2047 : the rest of the first mebibyte — nothing, on purpose,
+#                     but the crossings at 128-391 (boxos_crossings.h): every
+#                     start Gangway hands a kernel over, and whether it landed
 #   Sector 2048+    : EFI System Partition (FAT32) — as long as the loader it
 #                     carries needs, rounded up to the mebibyte
 #   after the ESP   : the BoxOS partition, LAST on the medium. Everything
@@ -94,6 +96,7 @@ KERNEL_MAX_BYTES    = 33554432  # 32MB (sanity check; bootloader places page tab
 #
 #   sector 0            stage1, and the partition table inside it
 #   sectors 1..16       stage2
+#   sectors 128..391    the crossings (tools/crossings.py lay)
 #   sector 2048         the ESP — as long as the loader it carries needs,
 #                       rounded up to the grain
 #   after the ESP       the volume's ground, as far as its CONTENT needs plus
@@ -918,7 +921,8 @@ GANGWAY_SRC    = src/boot/uefi/gangway.c src/boot/uefi/gangway_bytes.c src/boot/
                  src/boot/uefi/gangway_lectern_ribbon.c src/boot/uefi/gangway_lectern_replay.c \
                  src/boot/uefi/gangway_succession.c src/boot/uefi/gangway_lectern_called.c \
                  src/boot/uefi/gangway_settings.c src/boot/uefi/gangway_keys.c \
-                 src/boot/uefi/gangway_panel.c src/boot/uefi/gangway_panel_log.c
+                 src/boot/uefi/gangway_panel.c src/boot/uefi/gangway_panel_log.c \
+                 src/boot/uefi/gangway_crossings.c
 GANGWAY_HDRS   = src/boot/uefi/gangway.h src/boot/uefi/uefi.h \
                  src/boot/uefi/gangway_lectern.h src/boot/uefi/gangway_lectern_book.h \
                  src/include/boot_info.h src/include/boarding_pass.h \
@@ -929,7 +933,8 @@ GANGWAY_HDRS   = src/boot/uefi/gangway.h src/boot/uefi/uefi.h \
                  src/include/boxos_screen.h src/include/boxos_utf8.h src/include/boxos_color.h \
                  src/include/video_colors.h src/include/boxos_gangway_settings.h \
                  src/include/settings_reader.h src/include/settings_chosen.h src/include/key_chord.h \
-                 src/include/kb_event.h src/include/boxos_logkeep.h $(IMPRINT_DATA)
+                 src/include/kb_event.h src/include/boxos_logkeep.h src/include/boxos_crossings.h \
+                 $(IMPRINT_DATA)
 GANGWAY_JUMP   = src/boot/uefi/gangway_jump.asm
 GANGWAY_LD     = src/boot/uefi/gangway.ld
 GANGWAY_EFI    = $(BUILDDIR)/BOOTX64.EFI
@@ -1712,7 +1717,8 @@ $(call Box,$(1)): $(1) $(PACK_TOOL)
 endef
 $(foreach elf,$(VOLUME_ELFS),$(eval $(call BoxRule,$(elf))))
 
-$(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(HUB_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(PULSE_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TYPECASE_FONTS) $(TAGFS_TOOL)
+$(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(HUB_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(PULSE_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TYPECASE_FONTS) $(TAGFS_TOOL) \
+         tools/crossings.py $(SRCDIR)/include/boxos_crossings.h
 	@GROUND=$$($(TAGFS_TOOL) --ground --kernel $(KERNEL_BIN) $(VOLUME_LAID)); \
 	ESP_RAW=$$(( ( $$(stat -f%z $(UEFI_ESP_IMG) 2>/dev/null || stat -c%s $(UEFI_ESP_IMG)) + 511 ) / 512 )); \
 	ESP=$$(( ( $$ESP_RAW + $(MEDIUM_GRAIN_SECTORS) - 1 ) / $(MEDIUM_GRAIN_SECTORS) * $(MEDIUM_GRAIN_SECTORS) )); \
@@ -1729,7 +1735,9 @@ $(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_B
 	echo "  Writing the partition table (the ESP, then the volume's ground)..."; \
 	python3 tools/make_mbr.py $@ \
 	    $$START,$$GROUND,7f,boot \
-	    $(ESP_START_SECTOR),$$ESP,ef
+	    $(ESP_START_SECTOR),$$ESP,ef; \
+	echo "  Laying the crossings in the front (src/include/boxos_crossings.h)..."; \
+	python3 tools/crossings.py lay $@
 	@echo "  Making the volume on it..."
 	@$(TAGFS_TOOL) --kernel $(KERNEL_BIN) $@ $(VOLUME_LAID)
 	@# ‼ AND WHAT IT WROTE IS READ BACK BEFORE ANYTHING BOOTS IT.

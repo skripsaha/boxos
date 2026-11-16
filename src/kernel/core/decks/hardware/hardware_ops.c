@@ -19,6 +19,7 @@
 #include "crate_io.h"
 #include "process.h"
 #include "screen.h"
+#include "crossing.h"      /* the display holding the glass lands the start */
 #include "emergency_screen.h"
 #include "pit.h"
 #include "rtc.h"
@@ -63,6 +64,9 @@ static int HwScreenClaim(const ManifestOp *op, Crate *crates, uint16_t crate_cou
         if (taken) (void)ScreenRelease(ctx->proc);
         return ERR_INVALID_ADDRESS;
     }
+    /* The display holding the glass is the start come up: its crossing is
+     * marked landed (crossing.c), with nothing held here. */
+    if (taken) CrossingLand();
     return OK;
 }
 

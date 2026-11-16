@@ -56,6 +56,16 @@ void JourneyMark(const char *what)
     spin_unlock(&g_journey_lock);
 }
 
+uint64_t JourneyTscOf(const char *what)
+{
+    uint64_t tsc = 0;
+    spin_lock(&g_journey_lock);
+    for (uint16_t i = 0; i < g_marked && !tsc; i++)
+        if (MarkIs(&g_marks[i], what)) tsc = g_marks[i].tsc;
+    spin_unlock(&g_journey_lock);
+    return tsc;
+}
+
 static void JourneyVolumeMounted(TouchTag tag, const void *payload, uint32_t plen,
                                  uint32_t source_pid, void *ctx)
 {

@@ -14,12 +14,16 @@
  *   volume  — the first volume mounted ("volume:mounted", JourneyWatch)
  *   start   — the start set launched from it (AutostartWalk)
  *   display — the display program took the glass (ScreenClaim)
+ *   landed  — this start's crossing kept landed on its medium (crossing.c)
  *
  * A word marked again is not marked twice: the journey is when each step was
  * first reached. Any core, any context — an interrupt's or a Touch watch's on
  * the publisher's stack included; the lock under it is a leaf.
  */
 void JourneyMark(const char *what);
+
+/* The time-stamp counter `what` was marked at, 0 when it has not been. */
+uint64_t JourneyTscOf(const char *what);
 
 /* Listen for the first volume mounted. Called once, after Touch is up and
  * before the boot mount. */

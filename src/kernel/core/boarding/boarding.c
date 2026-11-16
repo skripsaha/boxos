@@ -239,6 +239,17 @@ bool BoardingPassKeepLog(void)
 #endif
 }
 
+bool BoardingPassCrossing(uint64_t* out_sector, uint64_t* out_number)
+{
+    uint16_t bytes = 0;
+    const BoardingCrossing* c =
+        (const BoardingCrossing*)BoardingPassStamp(BOARDING_STAMP_CROSSING, &bytes);
+    if (!c || bytes < sizeof(BoardingCrossing)) return false;
+    *out_sector = c->sector;
+    *out_number = c->number;
+    return true;
+}
+
 /* A UUID is sixteen bytes and this kernel's printf has no field width, so the
  * digits are assembled by hand. Printed in full because two volumes made by the
  * same tool on the same day differ in the middle of it. */
@@ -362,6 +373,13 @@ static void boarding_describe(unsigned stamps, bool sealed)
                             BoardingPassKeepLog() ? "on" : "off");
         kprintf("[Boarding]   the person asks of the kernel:%s\n", asked);
     }
+
+    /* The crossing this start is on its medium, to be marked landed
+     * (crossing.c). */
+    uint64_t crossing_sector = 0, crossing_number = 0;
+    if (BoardingPassCrossing(&crossing_sector, &crossing_number))
+        kprintf("[Boarding]   this start is crossing %llu on its medium, kept at sector %llu\n",
+                (unsigned long long)crossing_number, (unsigned long long)crossing_sector);
 
     /* Four lines that answer "which loader, off what, from where". Said once,
      * early, and the whole of the boot scrolls over them — which is why the

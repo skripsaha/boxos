@@ -1,11 +1,13 @@
 /*
  * Gangway — the panel. Asked for by holding Space while the machine starts
- * (KeyPanelAsked, once, after the kernel and the screen are chosen), it shows
- * what the loader found and chose — the kernel and the book's word on it, the
- * volume, the screen, the processors — and lets the person change, for this
- * one start, what gangway.settings sets: the same four settings, handed on as
- * the same stamps. It shows this start's journal and the log the kernel kept
- * of the start before (gangway_panel_log.c), and it restarts the machine,
+ * (KeyPanelAsked, once, after the kernel and the screen are chosen), or open
+ * by itself when the last starts did not land (the crossings,
+ * gangway_crossings.c), it shows what the loader found and chose — the kernel
+ * and the book's word on it, the volume, the screen, the processors, the
+ * crossings — and lets the person change, for this one start, what
+ * gangway.settings sets: the same four settings, handed on as the same stamps.
+ * It shows this start's journal, the log the kernel kept of the start before
+ * and the crossings kept (gangway_panel_log.c), and it restarts the machine,
  * turns it off, or restarts it into the firmware's own settings.
  *
  * Nothing in it waits on a clock: the firmware's watchdog is stopped when it
@@ -30,6 +32,7 @@ typedef enum {
     ROW_START,
     ROW_JOURNAL,
     ROW_PREVIOUS,
+    ROW_CROSSINGS,
     ROW_RESTART,
     ROW_OFF,
     ROW_FIRMWARE,
@@ -45,6 +48,8 @@ typedef enum {
 #define ATTR_CHOSEN   VIDEO_WHITE_ON_BLUE
 
 typedef struct {
+    uint8_t     why;                      /* CROSSING_PANEL_KEY or _MISSES */
+    uint32_t    misses;                   /* starts in a row that did not land */
     FbInfo      fb;                       /* the screen as the journey chose it */
     GopSize     sizes[PANEL_SIZES_MOST];
     uint32_t    nsizes;
@@ -64,7 +69,8 @@ static CHAR16 g_os_indications_supported[] = u"OsIndicationsSupported";
 
 static const char *const g_row_names[] = {
     "Screen", "Cores", "Startup", "Keep-log",
-    "Start", "This start's journal", "The previous start's log", "Restart", "Turn off", "Firmware settings",
+    "Start", "This start's journal", "The previous start's log", "The crossings", "Restart", "Turn off",
+    "Firmware settings",
 };
 
 /* ------------------------------------------------------------------------- */
@@ -156,9 +162,11 @@ static int FirmwareUiOffered(void)
            bytes == sizeof(value) && (value & EFI_OS_INDICATIONS_BOOT_TO_FW_UI);
 }
 
-static void PanelTake(Panel *p, const FbInfo *fb)
+static void PanelTake(Panel *p, const FbInfo *fb, uint8_t why, uint32_t misses)
 {
     MemZero(p, sizeof(*p));
+    p->why    = why;
+    p->misses = misses;
     MemCopy(&p->fb, fb, sizeof(*fb));
     p->nsizes        = GopSizes(p->sizes, PANEL_SIZES_MOST);
     p->machine_cores = MachineCores();
@@ -232,6 +240,39 @@ static void FoundMachine(PanelPage *page, const Panel *p)
     }
 }
 
+/* Which crossing this start is, and how the one before it went — or why the
+ * medium keeps none. */
+static void FoundCrossings(PanelPage *page, const Panel *p)
+{
+    const Crossing *kept;
+    uint32_t        count = CrossingsKept(&kept);
+
+    PanelPut(page, ATTR_NAME, " Crossings   ");
+    if (CrossingsNone()) {
+        PanelPut(page, VIDEO_ATTR_DEFAULT, "none kept: ");
+        PanelPut(page, VIDEO_ATTR_DEFAULT, CrossingsNone());
+        PanelPut(page, VIDEO_ATTR_DEFAULT, "\n");
+        return;
+    }
+    PanelPut(page, VIDEO_ATTR_DEFAULT, "this start is crossing ");
+    PanelNum(page, VIDEO_ATTR_DEFAULT, CrossingsNext());
+    if (!count) {
+        PanelPut(page, VIDEO_ATTR_DEFAULT, ", the first on this medium\n");
+    } else if (p->misses) {
+        PanelPut(page, VIDEO_ATTR_DEFAULT, " — ");
+        PanelPut(page, VIDEO_ATTR_WARNING, p->misses == 1u ? "the one before did not land" : "the last ");
+        if (p->misses > 1u) {
+            PanelNum(page, VIDEO_ATTR_WARNING, p->misses);
+            PanelPut(page, VIDEO_ATTR_WARNING, " did not land");
+        }
+        PanelPut(page, VIDEO_ATTR_DEFAULT, "\n");
+    } else {
+        PanelPut(page, VIDEO_ATTR_DEFAULT, " — the one before landed ");
+        PanelNum(page, VIDEO_ATTR_DEFAULT, kept[0].landed_ms);
+        PanelPut(page, VIDEO_ATTR_DEFAULT, " ms after its kernel began\n");
+    }
+}
+
 static void ValueSaid(PanelPage *page, const Panel *p, PanelRow row, uint8_t attr)
 {
     uint32_t v = p->value[row];
@@ -281,10 +322,18 @@ static void PanelDraw(const Panel *p)
     static PanelPage page;
 
     PanelBegin(&page);
-    PanelPut(&page, ATTR_TITLE, " Gangway · the panel\n\n");
+    PanelPut(&page, ATTR_TITLE, " Gangway · the panel\n");
+    if (p->why == CROSSING_PANEL_MISSES) {
+        PanelPut(&page, VIDEO_ATTR_WARNING, " It opened by itself: the last ");
+        PanelNum(&page, VIDEO_ATTR_WARNING, p->misses);
+        PanelPut(&page, VIDEO_ATTR_WARNING,
+                 " starts did not land. The log the start before kept, startup all or one core may tell why.\n");
+    }
+    PanelPut(&page, VIDEO_ATTR_DEFAULT, "\n");
     FoundKernel(&page);
     FoundVolume(&page);
     FoundMachine(&page, p);
+    FoundCrossings(&page, p);
     PanelPut(&page, ATTR_TITLE, "\n For this start\n");
     for (PanelRow row = ROW_SCREEN; row < PANEL_SETTINGS; row++) Choosable(&page, p, row);
     PanelPut(&page, VIDEO_ATTR_DEFAULT, "\n");
@@ -359,6 +408,7 @@ static int Do(Panel *p)
     case ROW_START:    return 1;
     case ROW_JOURNAL:  PanelJournalShow(); return 0;
     case ROW_PREVIOUS: PanelPreviousShow(); return 0;
+    case ROW_CROSSINGS: PanelCrossingsShow(); return 0;
     case ROW_RESTART:
         Reset(EfiResetCold, "restarts the machine");
         p->note = "the firmware would not restart the machine";
@@ -437,26 +487,37 @@ static void Leave(const Panel *p, FbInfo *fb)
     }
 }
 
-void PanelIfAsked(FbInfo *fb)
+uint8_t PanelIfAsked(FbInfo *fb, uint32_t misses)
 {
     static Panel p;
+    int          key = KeyPanelAsked();
+    uint8_t      why = misses >= CROSSINGS_MISSES_PANEL ? CROSSING_PANEL_MISSES
+                     : key                            ? CROSSING_PANEL_KEY
+                                                      : CROSSING_PANEL_NONE;
 
-    if (!KeyPanelAsked()) return;
+    if (why == CROSSING_PANEL_NONE) return why;
     PrintAloud(1);
     if (!DrawRows()) {
-        Print("Gangway: the panel is asked for (Space held), but there is no screen to draw it on — the start "
-              "goes on\n");
+        Print(why == CROSSING_PANEL_KEY ? "Gangway: the panel is asked for (Space held)"
+                                        : "Gangway: the panel would open by itself");
+        Print(", but there is no screen to draw it on — the start goes on\n");
         PrintAloud(0);
-        return;
+        return CROSSING_PANEL_NONE;
     }
-    Print("Gangway: the panel is open (Space held)\n");
+    if (why == CROSSING_PANEL_KEY) {
+        Print("Gangway: the panel is open (Space held)\n");
+    } else {
+        Print("Gangway: the panel is open by itself — the last ");
+        PrintDec(misses);
+        Print(" starts did not land\n");
+    }
     PrintAloud(0);
 
     /* The firmware's five minutes are for a loader that hangs, not for a
      * person reading. */
     (void)g_bs->set_watchdog_timer(0, 0, 0, NULL);
 
-    PanelTake(&p, fb);
+    PanelTake(&p, fb, why, misses);
     for (;;) {
         PanelDraw(&p);
         GangwayKey key = KeyNext();
@@ -470,4 +531,5 @@ void PanelIfAsked(FbInfo *fb)
     }
     Leave(&p, fb);
     Moment("panel");
+    return why;
 }

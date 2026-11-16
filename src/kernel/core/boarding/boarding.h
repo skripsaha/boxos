@@ -66,4 +66,9 @@ uint8_t  BoardingPassStartup(void);    /* BOARDING_STARTUP_* */
 uint32_t BoardingPassCores(void);      /* the most cores started, 0 for every one */
 bool     BoardingPassKeepLog(void);
 
+/* This start's crossing on its medium (boxos_crossings.h): the sector its slot
+ * begins at and its number. False when the pass carries none — a BIOS boot,
+ * or a medium whose front keeps no crossings. */
+bool BoardingPassCrossing(uint64_t* out_sector, uint64_t* out_number);
+
 #endif /* BOARDING_H */

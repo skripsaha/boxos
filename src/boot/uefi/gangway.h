@@ -25,6 +25,8 @@
  * Lectern's header. */
 #include "volume_deed.h"
 #include "gangway_lectern.h"
+#include "boarding_pass.h"
+#include "boxos_crossings.h"
 
 /* Where the kernel is placed and jumped into. */
 #define KERNEL_LOAD_ADDR 0x100000ULL
@@ -92,6 +94,15 @@ void     EsrtKeep(void);
  */
 EFI_STATUS BlockIoFindDevice(EFI_HANDLE image_handle);
 EFI_STATUS ReadSectors(uint64_t vlba, uint32_t count_512, void *buffer);
+/* The same medium counted from its first sector, not the volume's: MediumRead;
+ * one 4 KiB slot written at a 4 KiB-aligned sector and flushed
+ * (MediumWriteSlot) — EFI_WRITE_PROTECTED from a medium that refuses writes,
+ * EFI_UNSUPPORTED from one whose blocks are neither 512 nor 4096 bytes; and
+ * whether the MBR names every partition at `end` or past it (MediumFrontFree,
+ * 0 for a GPT's protective table). */
+EFI_STATUS MediumRead(uint64_t lba_512, uint32_t count_512, void *buffer);
+EFI_STATUS MediumWriteSlot(uint64_t lba_512, const void *slot);
+int        MediumFrontFree(uint64_t end);
 
 /*
  * gangway_deed.c: what the Deed said, filled by DeedTakeUp — the FRAME its
@@ -164,6 +175,22 @@ extern GangwaySettings g_settings;
 void SettingsTake(const uint8_t *text, uint64_t bytes);
 int  SettingsList(uint32_t which);
 
+/*
+ * gangway_crossings.c: the starts kept in the medium's front
+ * (boxos_crossings.h). CrossingsTake reads them, once; CrossingsMisses is how
+ * many in a row from the newest did not land, CrossingsNone why none are kept
+ * here (NULL when they are), CrossingsNext the number this start carries, and
+ * CrossingsKept the crossings that check out, newest first. CrossingKeep
+ * writes this start's — `panel` CROSSING_PANEL_*, `fb` the screen handed on —
+ * and CrossingStamp names it for the kernel: 0 when none was written.
+ */
+void        CrossingsTake(void);
+uint32_t    CrossingsMisses(void);
+const char *CrossingsNone(void);
+uint64_t    CrossingsNext(void);
+uint32_t    CrossingsKept(const Crossing **list);
+int         CrossingStamp(BoardingCrossing *out);
+
 /* gangway_video.c: the framebuffer the kernel is handed, in the mode chosen
  * for it — the size the person asks for (g_settings.screen_*) when the adapter
  * has it — said (QueryGopFramebuffer), and how it was chosen, in words
@@ -186,6 +213,7 @@ typedef struct {
 } GopSize;
 
 FbInfo      QueryGopFramebuffer(void);
+void        CrossingKeep(uint8_t panel, const FbInfo *fb);   /* gangway_crossings.c, above */
 FbInfo      GopFramebufferNow(void);
 const char *GopChosenWhy(void);
 uint32_t    GopSizes(GopSize *sizes, uint32_t most);
@@ -242,21 +270,24 @@ GangwayKey KeyNext(void);
 
 /*
  * gangway_panel.c: the panel — asked for by holding Space while the machine
- * starts, after the kernel and the screen are chosen (PanelIfAsked): what was
- * found and chosen, what the person may change for this one start, and
- * Restart, Turn off, the firmware's settings. Leaving it, the start goes on
- * with what was changed in g_settings, and in *fb when the screen was.
+ * starts, after the kernel and the screen are chosen, or opened by itself
+ * when `misses` starts in a row did not land (PanelIfAsked, which answers
+ * CROSSING_PANEL_* — why it opened, or that it did not): what was found and
+ * chosen, what the person may change for this one start, and Restart, Turn
+ * off, the firmware's settings. Leaving it, the start goes on with what was
+ * changed in g_settings, and in *fb when the screen was.
  * gangway_panel_log.c: its two journals, each shown until the person goes
  * back — this start's, the loader's own (PanelJournalShow), and what the
  * kernel said in the start before, out of its carry-over window
- * (PanelPreviousShow, boxos_logkeep.h).
+ * (PanelPreviousShow, boxos_logkeep.h); and the crossings kept on the medium
+ * (PanelCrossingsShow).
  *
  * A page the panel draws is built of pieces in their colours: text put into
  * the page's own room (PanelPut, PanelNum), or text lying elsewhere named as
  * it is (PanelRaw) — a journal is never copied.
  */
-#define PANEL_TEXT_BYTES  6144u
-#define PANEL_PIECES_MOST 128u
+#define PANEL_TEXT_BYTES  8192u
+#define PANEL_PIECES_MOST 256u
 
 typedef struct {
     char      text[PANEL_TEXT_BYTES];
@@ -270,9 +301,10 @@ void PanelPut(PanelPage *page, uint8_t attr, const char *text);
 void PanelNum(PanelPage *page, uint8_t attr, uint64_t n);
 void PanelRaw(PanelPage *page, uint8_t attr, const char *text, uint32_t bytes);
 
-void PanelIfAsked(FbInfo *fb);
-void PanelJournalShow(void);
-void PanelPreviousShow(void);
+uint8_t PanelIfAsked(FbInfo *fb, uint32_t misses);
+void    PanelJournalShow(void);
+void    PanelPreviousShow(void);
+void    PanelCrossingsShow(void);
 
 /*
  * gangway_memory.c: the three handoff pages asked for before anything is

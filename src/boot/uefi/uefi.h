@@ -558,6 +558,25 @@ typedef enum {
 /* OsIndications (§8.5.4): start the firmware's own setup at the next boot. */
 #define EFI_OS_INDICATIONS_BOOT_TO_FW_UI 0x0000000000000001ULL
 
+/* The firmware's clock (§8.3). */
+typedef struct {
+    uint16_t year;
+    uint8_t  month;
+    uint8_t  day;
+    uint8_t  hour;
+    uint8_t  minute;
+    uint8_t  second;
+    uint8_t  pad1;
+    uint32_t nanosecond;
+    uint16_t time_zone;
+    uint8_t  daylight;
+    uint8_t  pad2;
+} EFI_TIME;
+
+typedef EFI_STATUS (EFIAPI *EFI_GET_TIME)(
+    EFI_TIME *time,
+    void     *capabilities);
+
 typedef EFI_STATUS (EFIAPI *EFI_GET_VARIABLE)(
     CHAR16   *name,
     EFI_GUID *vendor,
@@ -580,7 +599,7 @@ typedef void (EFIAPI *EFI_RESET_SYSTEM)(
 
 typedef struct {
     EFI_TABLE_HEADER  hdr;
-    void             *get_time;
+    EFI_GET_TIME      get_time;
     void             *set_time;
     void             *get_wakeup_time;
     void             *set_wakeup_time;
