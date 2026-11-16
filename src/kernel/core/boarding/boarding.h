@@ -71,4 +71,9 @@ bool     BoardingPassKeepLog(void);
  * or a medium whose front keeps no crossings. */
 bool BoardingPassCrossing(uint64_t* out_sector, uint64_t* out_number);
 
+/* The scene whose first frame the loader left on the screen (boxos_scene.h):
+ * the fid of its file and its bytes. False when the pass carries none — the
+ * scene was off or not drawn, or a BIOS boot. */
+bool BoardingPassScene(uint64_t* out_fid, uint64_t* out_bytes);
+
 #endif /* BOARDING_H */

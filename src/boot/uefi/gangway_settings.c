@@ -12,8 +12,9 @@
  * Use Context are passed over, said once at their [ ] line: Gangway starts
  * before there is a context. What was taken is said last, in one line.
  *
- * The screen is Gangway's own (gangway_video.c reads g_settings); the rest is
- * the kernel's, handed on as stamps of the Boarding Pass (gangway_handoff.c).
+ * The screen and the scene are Gangway's own (gangway_video.c,
+ * gangway_scene.c read g_settings); the rest is the kernel's, handed on as
+ * stamps of the Boarding Pass (gangway_handoff.c).
  */
 
 #include "gangway.h"
@@ -21,7 +22,7 @@
 #include "boxos_gangway_settings.h"
 #include "settings_chosen.h"
 
-GangwaySettings g_settings = { 0, 0, 0, BOARDING_STARTUP_QUIET, 0, 0 };
+GangwaySettings g_settings = { 0, 0, 0, BOARDING_STARTUP_QUIET, 0, 1, 0 };
 
 static const char g_declared[] = GANGWAY_SETTINGS;
 
@@ -130,6 +131,9 @@ static int Taken(const Setting *s, SettingSpan v, uint32_t line, bool set)
     } else if (SettingSpanIs(s->Name, "keep-log")) {
         bit                 = GANGWAY_SET_KEEP_LOG;
         g_settings.keep_log = value.On ? 1u : 0u;
+    } else if (SettingSpanIs(s->Name, "scene")) {
+        bit              = GANGWAY_SET_SCENE;
+        g_settings.scene = value.On ? 1u : 0u;
     }
     g_settings.set = set ? g_settings.set | bit : g_settings.set & ~bit;
     return 1;
@@ -220,6 +224,11 @@ int SettingsList(uint32_t which)
     if (which & GANGWAY_SET_KEEP_LOG) {
         Print(between);
         Print(g_settings.keep_log ? "keep-log on" : "keep-log off");
+        between = ", ";
+    }
+    if (which & GANGWAY_SET_SCENE) {
+        Print(between);
+        Print(g_settings.scene ? "scene on" : "scene off");
         between = ", ";
     }
     return between[0] != '\0';

@@ -58,10 +58,10 @@ class BootBook:
     each line said into `say`: `files` {fid: FileState} the files it follows as
     the ribbon leaves them, `overlay` {block: digest} of the blocks the ribbon
     put in, and `candidates` — the files kept in a role in the order they are
-    tried. `called` the name (bytes) of the file the loader asks for, None for
-    none: followed as the files kept in a role are."""
+    tried. `called` the names (bytes) of the files the loader asks for:
+    followed as the files kept in a role are."""
 
-    def __init__(self, g, slot, t, say, called=None):
+    def __init__(self, g, slot, t, say, called=()):
         self.g, self.slot, self.t, self.say, self.called = g, slot, t, say, called
         self.ribbon = Ribbon(g, slot, (), scan=False)
         seqs = [u.seq for u in self.ribbon.stitches]
@@ -91,9 +91,8 @@ class BootBook:
                             n.copy + 1))
 
     def _Called(self, name):
-        """Whether `name` is the one the loader asks for — never when it asks
-        for none."""
-        return self.called is not None and name is not None and bytes(name) == self.called
+        """Whether `name` is one of those the loader asks for."""
+        return name is not None and bytes(name) in self.called
 
     # --- before the files: the files the ribbon puts in a role or names so ---
 

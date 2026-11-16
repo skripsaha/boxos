@@ -248,6 +248,7 @@ EFI_STATUS EFIAPI GangwayMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     CrossingsTake();
     uint8_t panel = PanelIfAsked(&fb, CrossingsMisses());
     CrossingKeep(panel, &fb);
+    SceneShow(&fb);
 
     Print("Gangway: building memory map...\r\n");
     uint32_t e820_count = 0;

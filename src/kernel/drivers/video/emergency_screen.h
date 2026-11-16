@@ -49,6 +49,10 @@ void EmergencyScreenHide(void);
 /* Draw what the ring has said since the last draw, if the glass is ours. */
 void EmergencyScreenFollow(void);
 
+/* Whether this screen has taken the glass since the start — shown, woken by an
+ * error, or by a panic: whatever the loader left there is gone. */
+bool EmergencyScreenEverShown(void);
+
 /* A panic's: the glass taken whoever holds the screen, the tail drawn, and
  * every bit of state a core stopped mid-draw may have left reset. */
 void EmergencyScreenPanicTake(void);

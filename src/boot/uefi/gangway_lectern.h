@@ -114,14 +114,15 @@ typedef enum {
 } LecternCalledSays;
 
 /*
- * The file the loader asks the volume for by its name — beside the kernel, in
+ * A file the loader asks the volume for by its name — beside the kernel, in
  * the same reading of the book: `name` (NUL-terminated) and the most bytes
  * `most` it takes, asked; what it is found to be, answered — when it is read,
  * its `size` bytes in `bytes`, the desk's room of `room` bytes, the caller's
- * to give back. A file is found by its name alone, never by a tag: the first
+ * to give back, and its `fid`. A file is found by its name alone, never by a
+ * tag: the first
  * made (the least fid) of the files the book names so that it does not keep
  * deleted, its blocks held to the book as a kernel's are and the Slips of the
- * ribbon laid on its last.
+ * ribbon laid on its last. No two asked are called the same.
  */
 typedef struct {
     const char       *name;
@@ -130,16 +131,17 @@ typedef struct {
     uint8_t          *bytes;
     uint64_t          room;
     uint64_t          size;
+    uint64_t          fid;
 } LecternCalled;
 
 /*
  * The kernel the loader jumps into on the volume the desk reads: BOOT's first
  * (`boot` NULL when the Deed names none), then the kernels the book names by
  * role — every line said as it is read and every kernel's verdict as it is
- * found, the choice last. Then, when a kernel is chosen and `called` is not
- * NULL, the file it names — its lines after the choice's.
+ * found, the choice last. Then, when a kernel is chosen, the `ncalled` files
+ * `called` names, in their order — their lines after the choice's.
  */
 void LecternSuccession(const LecternDesk *desk, const VolumeBoot *boot, LecternKernel *kernel,
-                       LecternCalled *called);
+                       LecternCalled *called, uint32_t ncalled);
 
 #endif /* GANGWAY_LECTERN_H */

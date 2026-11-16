@@ -135,6 +135,14 @@ void WriteBoardingPass(void)
         count++;
     }
 
+    /* The scene whose first frame is on the screen (gangway_scene.c), for the
+     * display to go on from it — when one is. */
+    BoardingScene scene;
+    if (SceneStamp(&scene)) {
+        at = BoardingStamp(base, at, BOARDING_STAMP_SCENE, &scene, sizeof(scene));
+        count++;
+    }
+
     /*
      * The seal, and it goes on last because it covers everything ahead of it.
      *

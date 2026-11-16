@@ -4,9 +4,10 @@
  * reading an image file the way Gangway reads its medium: the Deed at the
  * ground's head, then the kernel BOOT names and, when it is not attested, the
  * kernels the book names by role, each placed, held to its header and to the
- * digests the book keeps of it, the first attested jumped into; then the file
- * Gangway asks for by name, gangway.settings (boxos_gangway_settings.h), read
- * and held to the book as Gangway reads it.
+ * digests the book keeps of it, the first attested jumped into; then the files
+ * Gangway asks for by name, in its order — gangway.settings
+ * (boxos_gangway_settings.h) and boot.scene (boxos_scene.h) — read and held to
+ * the book as Gangway reads them.
  *
  *     build/gangway_stand IMAGE GROUND_START
  *
@@ -30,6 +31,7 @@
 #include <string.h>
 
 #include "boxos_gangway_settings.h"
+#include "boxos_scene.h"
 #include "gangway_lectern.h"
 #include "settings_chosen.h"   /* SETTINGS_FILE_MAX */
 
@@ -136,7 +138,8 @@ int main(int argc, char **argv)
     LecternDesk    desk;
     VolumeBoot     boot;
     LecternKernel  kernel;
-    LecternCalled  called = { GANGWAY_SETTINGS_FILE, SETTINGS_FILE_MAX, CALLED_NONE, NULL, 0, 0 };
+    LecternCalled  called[2] = { { GANGWAY_SETTINGS_FILE, SETTINGS_FILE_MAX, CALLED_NONE, NULL, 0, 0, 0 },
+                                 { BOX_SCENE_BOOT, BOX_SCENE_FILE_MOST, CALLED_NONE, NULL, 0, 0, 0 } };
     int            named = 0;
 
     if (argc != 3) {
@@ -163,11 +166,11 @@ int main(int argc, char **argv)
     desk.unplace = StandGive;
     desk.uuid    = uuid;
     if (StandDeed(deed, &desk, &boot, &named)) {
-        LecternSuccession(&desk, named ? &boot : NULL, &kernel, &called);
+        LecternSuccession(&desk, named ? &boot : NULL, &kernel, called, 2);
         if (kernel.image)
             desk.unplace(&m, kernel.image, kernel.blocks * VOLUME_BLOCK_BYTES);
-        if (called.bytes)
-            desk.give(&m, called.bytes, called.room);
+        for (int k = 0; k < 2; k++)
+            if (called[k].bytes) desk.give(&m, called[k].bytes, called[k].room);
     }
     fclose(m.image);
     return 0;

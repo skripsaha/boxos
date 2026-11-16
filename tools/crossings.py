@@ -24,10 +24,10 @@ import zlib
 HEADER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "include", "boxos_crossings.h")
 
 HEAD = struct.Struct("<8sIIIIQ")
-CROSSING = struct.Struct("<8sIIQ16sH10B7I16s")
+CROSSING = struct.Struct("<8sIIQ16sH10B7IB15s")
 FIELDS = ("magic", "size", "crc", "number", "volume", "year", "month", "day", "hour", "minute", "second",
           "clock", "kernel", "panel", "startup", "keep_log", "asked", "cores", "screen_width", "screen_height",
-          "misses", "landed", "landed_ms", "reserved")
+          "misses", "landed", "landed_ms", "scene", "reserved")
 
 
 def layout():

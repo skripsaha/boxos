@@ -20,7 +20,8 @@
 #include "gangway.h"
 
 _Static_assert(GANGWAY_SET_SCREEN == CROSSING_ASKED_SCREEN && GANGWAY_SET_STARTUP == CROSSING_ASKED_STARTUP &&
-                   GANGWAY_SET_CORES == CROSSING_ASKED_CORES && GANGWAY_SET_KEEP_LOG == CROSSING_ASKED_KEEP_LOG,
+                   GANGWAY_SET_CORES == CROSSING_ASKED_CORES && GANGWAY_SET_KEEP_LOG == CROSSING_ASKED_KEEP_LOG &&
+                   GANGWAY_SET_SCENE == CROSSING_ASKED_SCENE,
                "a crossing keeps what was asked by the bits Gangway keeps it by");
 
 /* The head and every slot, read at once. */
@@ -198,6 +199,7 @@ void CrossingKeep(uint8_t panel, const FbInfo *fb)
     x->panel         = panel;
     x->startup       = g_settings.startup;
     x->keep_log      = g_settings.keep_log;
+    x->scene         = g_settings.scene;
     x->asked         = g_settings.set;
     x->cores         = g_settings.cores;
     x->screen_width  = fb->width;

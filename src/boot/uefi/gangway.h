@@ -161,6 +161,7 @@ const LecternKernel *KernelChosen(void);
 #define GANGWAY_SET_STARTUP  2u
 #define GANGWAY_SET_CORES    4u
 #define GANGWAY_SET_KEEP_LOG 8u
+#define GANGWAY_SET_SCENE    16u
 
 typedef struct {
     uint32_t set;             /* GANGWAY_SET_* */
@@ -168,6 +169,7 @@ typedef struct {
     uint32_t screen_height;
     uint8_t  startup;         /* BOARDING_STARTUP_* (boarding_pass.h) */
     uint8_t  keep_log;        /* 1: what the machine says is kept through a reset */
+    uint8_t  scene;           /* 1: the scene's first frame drawn as the machine starts (gangway_scene.c) */
     uint32_t cores;           /* the most processors the kernel starts, 0 for every one */
 } GangwaySettings;
 
@@ -190,6 +192,7 @@ const char *CrossingsNone(void);
 uint64_t    CrossingsNext(void);
 uint32_t    CrossingsKept(const Crossing **list);
 int         CrossingStamp(BoardingCrossing *out);
+
 
 /* gangway_video.c: the framebuffer the kernel is handed, in the mode chosen
  * for it — the size the person asks for (g_settings.screen_*) when the adapter
@@ -217,6 +220,17 @@ void        CrossingKeep(uint8_t panel, const FbInfo *fb);   /* gangway_crossing
 FbInfo      GopFramebufferNow(void);
 const char *GopChosenWhy(void);
 uint32_t    GopSizes(GopSize *sizes, uint32_t most);
+
+/*
+ * gangway_scene.c: the scene the machine starts with (boxos_scene.h).
+ * SceneTake holds boot.scene, as the Lectern read it, to its bounds, and keeps
+ * it; SceneShow draws its first frame on the screen the kernel is handed, or
+ * says why not, and gives its pages back either way; SceneStamp names the
+ * scene for the kernel when its frame is on the screen: 0 when none is.
+ */
+void SceneTake(const LecternCalled *called);
+void SceneShow(const FbInfo *fb);
+int  SceneStamp(BoardingScene *out);
 
 /*
  * gangway_draw.c: text the loader draws on the screen itself, in the cells of

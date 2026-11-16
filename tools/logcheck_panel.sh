@@ -70,14 +70,14 @@ run_panel() {
     ! grep -aq "Gangway: the panel" "$P" && grep -aq "BoxOS Hub" "$P"
     chk $? "panel (plain): with no key held there is no panel, and the start reaches the hub"
 
-    # Start (the row chosen) → up twice: Startup → all; up: Cores → 1; down
-    # four times: This start's journal; back; down: the previous start's log;
-    # back; up twice: Start.
+    # Start (the row chosen) → up three times: Startup → all; up: Cores → 1;
+    # down five times: This start's journal; back; down: the previous start's
+    # log; back; up twice: Start.
     if panel_boot && panel_hold; then
         qemu=$(cat build/qemu.pid 2>/dev/null)
         sleep 1
         mon_shot "$SCRATCH/panel.ppm"
-        panel_keys up up right up right down down down down ret esc down ret esc up up ret
+        panel_keys up up up right up right down down down down down ret esc down ret esc up up ret
         wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
         sleep 2
         cp build/serial.log "$SCRATCH/serial.panel.start.log"
@@ -104,7 +104,7 @@ run_panel() {
     # A warm reset keeps the memory: keep-log on for the start after it, and
     # that start's log read by the panel at the next.
     if [ -s "$Q" ] && mon_raw system_reset && panel_hold; then
-        panel_keys up ret down ret
+        panel_keys up up ret down down ret
         wait_for_line build/serial.log "LogKeep is armed" "$WAIT_QUIET_S"
         wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" "$(grep -an "LogKeep is armed" build/serial.log | tail -1 | cut -d: -f1)"
         sleep 3

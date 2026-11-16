@@ -17,22 +17,30 @@
 #define SCREEN_KIND_TEXT    1u   /* 80x25 legacy VGA text: two bytes a cell, glyph then attribute */
 #define SCREEN_KIND_PIXELS  2u   /* linear framebuffer, four bytes a pixel */
 
+/* What the loader left on the glass, said to the first claim of the start
+ * alone: nothing of its own, or the first frame of a scene (boxos_scene.h),
+ * the one the display goes on from. Nothing when the Emergency Screen has
+ * drawn on the glass since. */
+#define SCREEN_LEFT_NOTHING 0u
+#define SCREEN_LEFT_SCENE   1u
+
 typedef struct ScreenDescription {
     uint32_t kind;      /* SCREEN_KIND_*                                          */
     uint32_t width;     /* PIXELS: pixels; TEXT: cells                            */
     uint32_t height;    /* PIXELS: pixels; TEXT: cells                            */
     uint32_t stride;    /* bytes from the start of one row to the next            */
     uint32_t format;    /* PIXELS: BOX_PIXEL_* (boxos_pixel.h); TEXT: 0           */
-    uint32_t reserved;
+    uint32_t left;      /* SCREEN_LEFT_*                                          */
     uint64_t va;        /* the first byte of the glass in the claimer's cabin     */
+    uint64_t scene;     /* SCREEN_LEFT_SCENE: the fid of the scene's file         */
 } ScreenDescription;
 
 #ifdef __cplusplus
-static_assert(sizeof(ScreenDescription) == 32,
-              "ScreenDescription is a kernel/userspace ABI and must stay 32 bytes");
+static_assert(sizeof(ScreenDescription) == 40,
+              "ScreenDescription is a kernel/userspace ABI and must stay 40 bytes");
 #else
-_Static_assert(sizeof(ScreenDescription) == 32,
-               "ScreenDescription is a kernel/userspace ABI and must stay 32 bytes");
+_Static_assert(sizeof(ScreenDescription) == 40,
+               "ScreenDescription is a kernel/userspace ABI and must stay 40 bytes");
 #endif
 
 /* A framebuffer's cell when nobody has chosen one: as tall as shows about this

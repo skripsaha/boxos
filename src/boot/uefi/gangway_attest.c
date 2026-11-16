@@ -12,13 +12,16 @@
  * meets asks. A kernel is placed at KERNEL_LOAD_ADDR, in pages asked for at
  * that address and handed back when the kernel there is not the one — so the
  * next is placed where the first was. Every other page is handed back before
- * this returns — gangway.settings's too, once SettingsTake has read it — so
- * the memory map the loader builds after it carries none but the kernel's.
+ * this returns — gangway.settings's too, once SettingsTake has read it — but
+ * boot.scene's, which gangway_scene.c gives back once its first frame is
+ * drawn or not: the memory map the loader builds after both carries none but
+ * the kernel's.
  * Each line is said as Gangway says one.
  */
 
 #include "gangway.h"
 #include "boxos_gangway_settings.h"
+#include "boxos_scene.h"
 #include "settings_chosen.h"   /* SETTINGS_FILE_MAX */
 
 typedef struct {
@@ -113,7 +116,8 @@ const LecternKernel *KernelChosen(void)
 const char *SuccessionTake(EFI_BOOT_SERVICES *bs, AttestReader read, uint64_t *bytes, uint64_t *alloc_end)
 {
     LecternKernel       *chosen = &g_chosen;
-    LecternCalled        called = { GANGWAY_SETTINGS_FILE, SETTINGS_FILE_MAX, CALLED_NONE, NULL, 0, 0 };
+    LecternCalled        called[2] = { { GANGWAY_SETTINGS_FILE, SETTINGS_FILE_MAX, CALLED_NONE, NULL, 0, 0, 0 },
+                                       { BOX_SCENE_BOOT, BOX_SCENE_FILE_MOST, CALLED_NONE, NULL, 0, 0, 0 } };
     AttestDesk           ctx;
     LecternDesk          desk;
 
@@ -130,10 +134,11 @@ const char *SuccessionTake(EFI_BOOT_SERVICES *bs, AttestReader read, uint64_t *b
     MemCopy(&desk.frame, &g_frame, sizeof(desk.frame));
     desk.block_end   = g_volume_end;
     desk.atom_blocks = g_volume_atom_blocks;
-    LecternSuccession(&desk, g_have_boot ? &g_boot : NULL, chosen, &called);
+    LecternSuccession(&desk, g_have_boot ? &g_boot : NULL, chosen, called, 2);
     if (chosen->says == ATTEST_BROKEN) return chosen->line;
-    if (called.says != CALLED_NONE) SettingsTake(called.bytes, called.size);
-    if (called.bytes) AttestGive(&ctx, called.bytes, called.room);
+    if (called[0].says != CALLED_NONE) SettingsTake(called[0].bytes, called[0].size);
+    if (called[0].bytes) AttestGive(&ctx, called[0].bytes, called[0].room);
+    SceneTake(&called[1]);
     *bytes     = chosen->bytes;
     *alloc_end = KERNEL_LOAD_ADDR + chosen->blocks * VOLUME_BLOCK_BYTES;
     Print("Gangway: kernel at volume block ");

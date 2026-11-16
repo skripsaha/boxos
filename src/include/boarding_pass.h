@@ -110,6 +110,7 @@ _Static_assert(sizeof(BoardingStampHeader) == 4, "a stamp header is 4 bytes — 
 #define BOARDING_STAMP_CORES    8   /* BoardingCores */
 #define BOARDING_STAMP_KEEP_LOG 9   /* BoardingKeepLog */
 #define BOARDING_STAMP_CROSSING 10  /* BoardingCrossing */
+#define BOARDING_STAMP_SCENE    11  /* BoardingScene */
 
 /*
  * The volume this kernel was read out of, by the identity the filesystem keeps
@@ -271,5 +272,17 @@ typedef struct __attribute__((packed)) {
 } BoardingCrossing;
 
 _Static_assert(sizeof(BoardingCrossing) == 16, "a crossing stamp is 16 bytes");
+
+/* SCENE: the scene whose first frame the loader left on the screen
+ * (boxos_scene.h) — the fid of its file on the volume and its bytes — for the
+ * display to go on from that frame (boxos_screen.h SCREEN_LEFT_SCENE). A pass
+ * without one left nothing of its own there: the scene was off, the start
+ * shows all it says, or there was none to draw. */
+typedef struct __attribute__((packed)) {
+    uint64_t fid;
+    uint64_t bytes;
+} BoardingScene;
+
+_Static_assert(sizeof(BoardingScene) == 16, "a scene stamp is 16 bytes");
 
 #endif /* BOARDING_PASS_H */

@@ -219,7 +219,7 @@ static int FileHead(LecternBook *b, LecternFilesWalk *w, uint64_t fid, const uin
     w->f.gen     = h.gen;
     w->f.size    = h.size;
     w->f.flags   = h.flags;
-    w->f.called  = LecternNamed(b->called, h.name, h.name_len);
+    w->f.called  = LecternNamed(b->called, b->ncalled, h.name, h.name_len);
     if (!LecternRoleOf(w->f.flags) && !w->f.called && !LecternListHas(b->interest, b->ninterest, fid)) {
         LecternFileGive(b, &w->f);
         return 1;

@@ -196,7 +196,7 @@ void LecternBefore(LecternBook *b)
             if (d.read == TALLY_BODY_BROKEN) continue;
             int role  = (d.labeled.what & LABEL_FLAGS) && LecternRoleOf(d.labeled.set);
             int named = (d.labeled.what & LABEL_NAME) &&
-                        LecternNamed(b->called, d.labeled.name, d.labeled.name_len);
+                        LecternNamed(b->called, b->ncalled, d.labeled.name, d.labeled.name_len);
             if ((role || named) && !LecternListAdd(b, &b->interest, &b->ninterest, &b->capinterest, d.fid))
                 return;
         }
@@ -520,7 +520,7 @@ static int BornApplied(LecternBook *b, LecternHand *h, const LecternStitch *u, c
     f.gen    = u->seq;
     f.size   = d->born.size;
     f.flags  = d->born.flags;
-    f.called = LecternNamed(b->called, d->born.name, d->born.name_len);
+    f.called = LecternNamed(b->called, b->ncalled, d->born.name, d->born.name_len);
     if (!RunsPut(u, RIBBON_BORN, d, RunTaken, &runs)) {
         LecternGive(b, runs.runs, runs.cap * sizeof(LecternRun));
         LecternFileGive(b, &f);
@@ -545,7 +545,7 @@ static int BornApplied(LecternBook *b, LecternHand *h, const LecternStitch *u, c
 static int LabeledApplied(const LecternBook *b, LecternHand *h, const LecternRead *d)
 {
     const RibbonLabeled *r = &d->labeled;
-    if (r->what & LABEL_NAME) h->f.called = LecternNamed(b->called, r->name, r->name_len);
+    if (r->what & LABEL_NAME) h->f.called = LecternNamed(b->called, b->ncalled, r->name, r->name_len);
     if (r->what & LABEL_FLAGS) h->f.flags = (h->f.flags | r->set) & ~r->clear;
     if (r->what & LABEL_KEEP)
         h->f.flags = r->keep_ns ? h->f.flags | TALLY_FILE_DELETED : h->f.flags & ~(uint64_t)TALLY_FILE_DELETED;
@@ -636,7 +636,7 @@ static LecternHand *HandOf(LecternBook *b, LecternHands *hs, uint64_t kind, cons
         if (h.alive && !LecternFileCopy(b, &h.f, held)) return (LecternHand *)0;
     } else {
         if (kind != RIBBON_BORN ||
-            (!LecternRoleOf(d->born.flags) && !LecternNamed(b->called, d->born.name, d->born.name_len) &&
+            (!LecternRoleOf(d->born.flags) && !LecternNamed(b->called, b->ncalled, d->born.name, d->born.name_len) &&
              !LecternListHas(b->interest, b->ninterest, d->fid))) {
             *none = 1;
             return (LecternHand *)0;

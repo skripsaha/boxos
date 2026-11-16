@@ -1344,7 +1344,7 @@ run_uefi() {
     chk $? "and each of its lines is said once — none on the firmware's console"
     grep -qE "\[Boarding\]   it kept a journal of [0-9]+ byte\(s\), and its lines open this log whole" "$L"
     chk $? "the kernel took the journal whole"
-    grep -q "\[Boarding\]   it marked 8 moment(s) of its journey: entry medium kernel screen crossing memory tables leave" "$L"
+    grep -q "\[Boarding\]   it marked 9 moment(s) of its journey: entry medium kernel screen crossing scene memory tables leave" "$L"
     chk $? "and Gangway marked every step of its journey"
 
     # And journey draws it: Gangway step by step, then the kernel's steps —

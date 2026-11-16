@@ -51,6 +51,11 @@ void ScreenQuietEnds(void);
 void ScreenAdoptFramebuffer(uint64_t phys, uint32_t width, uint32_t height,
                             uint32_t stride, uint32_t format);
 
+/* The loader left the first frame of the scene whose file is `fid` on the
+ * framebuffer (boarding_pass.h SCENE): said to the first claim of the glass
+ * (SCREEN_LEFT_SCENE), unless the Emergency Screen has drawn over it by then. */
+void ScreenLeftByLoader(uint64_t fid);
+
 /* hw.screen.claim / hw.screen.release. A claim by the cabin that already holds
  * the screen answers the same description again, *taken false; a claim that
  * took the screen now says *taken true. ERR_BUSY: another cabin holds it and

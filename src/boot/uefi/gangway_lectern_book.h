@@ -42,15 +42,18 @@ void LineStart(LecternLine *l);
 void LinePut(LecternLine *l, const char *s);
 void LineNum(LecternLine *l, uint64_t v);
 
-/* Whether the name `name` (`len` bytes, not NUL-terminated) is the one the
- * loader asks for — never when it asks for none. */
-static inline int LecternNamed(const char *called, const uint8_t *name, uint64_t len)
+/* Which of the `n` files the loader asks for by name (LecternCalled) the name
+ * `name` (`len` bytes, not NUL-terminated) is: 1 + its place among them, 0
+ * none. */
+static inline int LecternNamed(const LecternCalled *called, uint32_t n, const uint8_t *name, uint64_t len)
 {
-    uint64_t i = 0;
-    if (!called) return 0;
-    for (; i < len; i++)
-        if (!called[i] || (uint8_t)called[i] != name[i]) return 0;
-    return called[i] == '\0';
+    for (uint32_t k = 0; k < n; k++) {
+        const char *asked = called[k].name;
+        uint64_t    i     = 0;
+        while (i < len && asked[i] && (uint8_t)asked[i] == name[i]) i++;
+        if (i == len && asked[i] == '\0') return (int)k + 1;
+    }
+    return 0;
 }
 
 /* The role of a file, from its flags: TALLY_FILE_ROLE_KERNEL, _BOOT, _SYSTEM,
@@ -100,8 +103,9 @@ typedef struct {
 /* A file the Lectern follows: its gen, size and flags, its runs, and the
  * Slips laid on its last block — `tail` NULL for none, else a block of their
  * bytes and a block's bits more saying which are laid. `gone` a file followed
- * that a Quitclaim took; `called` one whose name is the one the loader asks
- * for (LecternCalled) as the book and the ribbon leave it. */
+ * that a Quitclaim took; `called` 1 + which of the files the loader asks for
+ * by name (LecternCalled) it is called as the book and the ribbon leave it, 0
+ * none. */
 typedef struct {
     uint64_t    fid;
     uint64_t    gen;
@@ -176,7 +180,8 @@ typedef struct {
 
 typedef struct {
     const LecternDesk *desk;
-    const char        *called;        /* the name of the file asked for, NULL none */
+    LecternCalled     *called;        /* the files asked for by name, ncalled of them */
+    uint32_t           ncalled;
     int                booked;        /* the book past its Tally read (BookRead): 1, -1 that failed, 0 not asked */
     uint64_t           lane;          /* the digests' seed: lane 0 of the volume's uuid */
     int                starved;       /* the desk gave no room for something asked */
@@ -279,9 +284,9 @@ int     LecternFileCopy(LecternBook *b, LecternFile *to, const LecternFile *from
 /* gangway_lectern_called.c                                                  */
 /* ------------------------------------------------------------------------- */
 
-/* The file b->called names, read into *c as LecternCalled says — the book's
- * files read first (b->booked) — or why not, said. */
-void    LecternCalledTake(LecternBook *b, LecternCalled *c);
+/* The file b->called[which] names, read into it as LecternCalled says — the
+ * book's files read first (b->booked) — or why not, said. */
+void    LecternCalledTake(LecternBook *b, uint32_t which);
 
 /* ------------------------------------------------------------------------- */
 /* gangway_lectern_ribbon.c                                                  */

@@ -413,7 +413,7 @@ static void Stopped(LecternChoice *s, int unplaced)
 }
 
 void LecternSuccession(const LecternDesk *desk, const VolumeBoot *boot, LecternKernel *kernel,
-                       LecternCalled *called)
+                       LecternCalled *called, uint32_t ncalled)
 {
     LecternChoice s;
     uint64_t      lanes[4];
@@ -423,7 +423,8 @@ void LecternSuccession(const LecternDesk *desk, const VolumeBoot *boot, LecternK
     LecternZero(&s, sizeof(s));
     LecternZero(kernel, sizeof(*kernel));
     s.b.desk   = desk;
-    s.b.called = called ? called->name : (const char *)0;
+    s.b.called  = called;
+    s.b.ncalled = ncalled;
     s.kernel   = kernel;
     WySeedLanes(desk->uuid, 16u, lanes);
     s.b.lane = lanes[0];
@@ -435,9 +436,9 @@ void LecternSuccession(const LecternDesk *desk, const VolumeBoot *boot, LecternK
     }
     if (t != TRY_HELD && t != TRY_UNPLACED && s.b.stood && !s.b.starved) t = ByTag(&s);
     if (t != TRY_HELD && (t == TRY_UNPLACED || !Unattested(&s))) Stopped(&s, t == TRY_UNPLACED);
-    if (called && kernel->says != ATTEST_BROKEN) {
+    if (ncalled && kernel->says != ATTEST_BROKEN) {
         if (s.b.stood && !s.b.starved && !s.b.booked) BookRead(&s.b);
-        LecternCalledTake(&s.b, called);
+        for (uint32_t k = 0; k < ncalled; k++) LecternCalledTake(&s.b, k);
     }
     LecternGive(&s.b, s.tried, s.captried * sizeof(LecternLine));
     LecternClose(&s.b);

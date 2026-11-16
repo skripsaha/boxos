@@ -1,8 +1,8 @@
 /*
- * The file the loader asks the volume for by its name (LecternCalled) — beside
+ * A file the loader asks the volume for by its name (LecternCalled) — beside
  * the kernel, in the same reading of the book: among the files the Lectern
- * follows (gangway_lectern_tree.c, _replay.c follow the one called so, as the
- * book and the ribbon leave its name), those the book does not keep deleted,
+ * follows (gangway_lectern_tree.c, _replay.c follow those called so, as the
+ * book and the ribbon leave their names), those the book does not keep deleted,
  * the first made — the least fid, as BoxLib takes a program's settings file —
  * said when there are more. What may be read of it — no run of an extension
  * this loader does not read, no ground outside the data run, no more bytes
@@ -39,15 +39,15 @@ static void Said(LecternBook *b, const LecternLine *who, const char *what, uint6
     LecternSay(b, &l);
 }
 
-/* The file followed that is called so and not kept deleted, the first made,
- * and how many are. */
-static LecternFile *FirstCalled(LecternBook *b, uint64_t *count)
+/* The file followed that is called as asked file `which` is and not kept
+ * deleted, the first made, and how many are. */
+static LecternFile *FirstCalled(LecternBook *b, uint32_t which, uint64_t *count)
 {
     LecternFile *first = (LecternFile *)0;
     *count = 0;
     for (uint64_t i = 0; i < b->nfiles; i++) {
         LecternFile *f = &b->files[i];
-        if (f->gone || !f->called || (f->flags & TALLY_FILE_DELETED)) continue;
+        if (f->gone || f->called != (int)which + 1 || (f->flags & TALLY_FILE_DELETED)) continue;
         if (!first) first = f;
         (*count)++;
     }
@@ -102,9 +102,10 @@ static uint8_t *Read(LecternBook *b, const LecternLine *who, const LecternFile *
     return room;
 }
 
-void LecternCalledTake(LecternBook *b, LecternCalled *c)
+void LecternCalledTake(LecternBook *b, uint32_t which)
 {
-    const char  *none = (const char *)0;
+    LecternCalled *c    = &b->called[which];
+    const char    *none = (const char *)0;
     LecternLine  who, verdict;
     LecternFile *f;
     uint64_t     count, blocks;
@@ -113,6 +114,7 @@ void LecternCalledTake(LecternBook *b, LecternCalled *c)
     c->bytes = (uint8_t *)0;
     c->room  = 0;
     c->size  = 0;
+    c->fid   = 0;
     LineStart(&who);
     LinePut(&who, c->name);
     if (!b->stood) {
@@ -128,7 +130,7 @@ void LecternCalledTake(LecternBook *b, LecternCalled *c)
         Said(b, &who, " is not read: the loader had no room to read the book's files", 0, none, 0, none);
         return;
     }
-    if (!(f = FirstCalled(b, &count))) {
+    if (!(f = FirstCalled(b, which, &count))) {
         LecternLine l;
         LineStart(&l);
         LinePut(&l, "no file on this volume is called ");
@@ -154,6 +156,7 @@ void LecternCalledTake(LecternBook *b, LecternCalled *c)
     if (!f->size) {
         Said(b, &who, " is empty", 0, none, 0, none);
         c->says = CALLED_HELD;
+        c->fid  = f->fid;
         return;
     }
     blocks = BlocksOf(f->size);
@@ -173,4 +176,5 @@ void LecternCalledTake(LecternBook *b, LecternCalled *c)
     c->bytes = room;
     c->room  = blocks * VOLUME_BLOCK_BYTES;
     c->size  = f->size;
+    c->fid   = f->fid;
 }

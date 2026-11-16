@@ -238,6 +238,8 @@ static void Asked(PanelPage *page, const Crossing *x)
     }
     if (x->asked & CROSSING_ASKED_KEEP_LOG)
         PanelPut(page, VIDEO_ATTR_DEFAULT, x->keep_log ? " · keep-log on" : " · keep-log off");
+    if (x->asked & CROSSING_ASKED_SCENE)
+        PanelPut(page, VIDEO_ATTR_DEFAULT, x->scene ? " · scene on" : " · scene off");
     if (x->kernel != CROSSING_KERNEL_HELD) PanelPut(page, VIDEO_ATTR_WARNING, " · kernel not attested");
     if (x->panel == CROSSING_PANEL_KEY) PanelPut(page, VIDEO_ATTR_DEFAULT, " · panel: Space");
     if (x->panel == CROSSING_PANEL_MISSES) PanelPut(page, VIDEO_ATTR_WARNING, " · panel: by itself");

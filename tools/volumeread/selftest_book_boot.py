@@ -27,7 +27,7 @@ itself to, line for line, on every one of them written out by --emit; and
 logcheck's bookboot boots A7 and A9 through OVMF."""
 
 from . import binder, bookread, ondisk, stitch, tally
-from .bootread import CALLED, WHO, BootRead, Loaded, Succession
+from .bootread import CALLED, CALLED_MOST, WHO, BootRead, Loaded, Succession
 from .bookground import BookGround
 from .medium import Unreadable
 from .ondisk import BLOCK, SECTOR, SECTORS_PER_BLOCK
@@ -134,7 +134,7 @@ def BoundNotes(bt, notes):
 
 def Called(c):
     """The oracle's reading of the landing with gangway.settings asked for."""
-    return Succession(BookGround(c.medium), CALLED)
+    return Succession(BookGround(c.medium), ((CALLED, CALLED_MOST),))
 
 
 def BoundSpare(bt, sp):
@@ -279,7 +279,7 @@ def BootCases(bt):
     def Read(c, fid=None):
         """The note read, attested, its bytes the person's text."""
         s = Called(c)
-        return s.found == "held" and s.content == text and s.lines[-1] == noted.replace(
+        return s.found.get(CALLED) == "held" and s.content.get(CALLED) == text and s.lines[-1] == noted.replace(
             "fid %u)" % note.fid, "fid %u)" % (note.fid if fid is None else fid))
 
     rotten = ("no slot that holds names a Tally that reads" if root.level == 0 else
@@ -364,16 +364,16 @@ def BootCases(bt):
         Case("A19 gangway.settings kept deleted on the ribbon", NoteDeleted, checks=[
             ("a file kept deleted is none the loader reads",
              lambda c: Called(c).lines[-1] == "no file on this volume is called %s" % CALLED.decode() and
-             Called(c).found is None)]),
+             Called(c).found.get(CALLED) is None)]),
         Case("A20 a byte of gangway.settings flipped", NoteFlipped, must={"DIGEST_MISMATCH"}, checks=[
             ("the loader names its block and hands nothing over",
              lambda c: Called(c).lines[-1] == "%s (fid %u) does not match the book: block 0 (volume block %u)"
-             % (CALLED.decode(), note.fid, note.block) and Called(c).found is None)]),
+             % (CALLED.decode(), note.fid, note.block) and Called(c).found.get(CALLED) is None)]),
         Case("A21 two files called gangway.settings", BoundNotes(bt, [note, other]), checks=[
             ("the loader reads the first made, fid %u, and says there are two" % note.fid,
              lambda c: "2 files are called %s — fid %u, the first made, is read" % (CALLED.decode(), note.fid)
              in Called(c).lines and Read(c))]),
         Case("A22 gangway.settings born with its bytes in a Slip over a hole", NoteSlipped, checks=[
             ("the loader reads the bytes the Slip lays on its one block",
-             lambda c: Called(c).found == "held" and Called(c).content == text)]),
+             lambda c: Called(c).found.get(CALLED) == "held" and Called(c).content.get(CALLED) == text)]),
     ]

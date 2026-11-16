@@ -29,6 +29,7 @@ typedef enum {
     ROW_CORES,
     ROW_STARTUP,
     ROW_KEEP_LOG,
+    ROW_SCENE,
     ROW_START,
     ROW_JOURNAL,
     ROW_PREVIOUS,
@@ -56,8 +57,8 @@ typedef struct {
     uint32_t    machine_cores;            /* as the firmware counts them, 0 when it does not say */
     int         firmware_ui;              /* the firmware can be asked to start its settings */
     /* Each setting's value — screen: 0 auto, else sizes[v - 1]; cores: 0 all,
-     * else so many; startup: BOARDING_STARTUP_*; keep-log: 1 on — and as the
-     * panel found it. */
+     * else so many; startup: BOARDING_STARTUP_*; keep-log, scene: 1 on — and
+     * as the panel found it. */
     uint32_t    value[PANEL_SETTINGS];
     uint32_t    came[PANEL_SETTINGS];
     PanelRow    row;
@@ -68,7 +69,7 @@ static CHAR16 g_os_indications[]           = u"OsIndications";
 static CHAR16 g_os_indications_supported[] = u"OsIndicationsSupported";
 
 static const char *const g_row_names[] = {
-    "Screen", "Cores", "Startup", "Keep-log",
+    "Screen", "Cores", "Startup", "Keep-log", "Scene",
     "Start", "This start's journal", "The previous start's log", "The crossings", "Restart", "Turn off",
     "Firmware settings",
 };
@@ -179,6 +180,7 @@ static void PanelTake(Panel *p, const FbInfo *fb, uint8_t why, uint32_t misses)
     p->came[ROW_CORES]    = g_settings.cores;
     p->came[ROW_STARTUP]  = g_settings.startup;
     p->came[ROW_KEEP_LOG] = g_settings.keep_log;
+    p->came[ROW_SCENE]    = g_settings.scene;
     MemCopy(p->value, p->came, sizeof(p->value));
     p->row = ROW_START;
 }
@@ -291,7 +293,8 @@ static void ValueSaid(PanelPage *page, const Panel *p, PanelRow row, uint8_t att
         else PanelPut(page, attr, "all");
         return;
     case ROW_STARTUP:  PanelPut(page, attr, v == BOARDING_STARTUP_ALL ? "all" : "quiet"); return;
-    case ROW_KEEP_LOG: PanelPut(page, attr, v ? "on" : "off"); return;
+    case ROW_KEEP_LOG:
+    case ROW_SCENE:    PanelPut(page, attr, v ? "on" : "off"); return;
     default:           return;
     }
 }
@@ -466,6 +469,10 @@ static void Leave(const Panel *p, FbInfo *fb)
     if (p->value[ROW_KEEP_LOG] != p->came[ROW_KEEP_LOG]) {
         g_settings.keep_log = (uint8_t)p->value[ROW_KEEP_LOG];
         changed |= GANGWAY_SET_KEEP_LOG;
+    }
+    if (p->value[ROW_SCENE] != p->came[ROW_SCENE]) {
+        g_settings.scene = (uint8_t)p->value[ROW_SCENE];
+        changed |= GANGWAY_SET_SCENE;
     }
     g_settings.set |= changed;
 

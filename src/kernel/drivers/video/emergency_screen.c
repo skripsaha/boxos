@@ -67,6 +67,7 @@ typedef struct {
     uint32_t          cell_h;
     bool              shown;     /* the glass is ours to draw on */
     bool              waiting;   /* a quiet boot: shown at the first error said */
+    bool              ever;      /* it has taken the glass since the start */
     uint64_t          watched;   /* the ring position looked at for one, up to */
     uint64_t          drawn;     /* the ring position drawn up to */
     EmergencyPen      pen;
@@ -381,6 +382,7 @@ void EmergencyScreenShow(void)
 {
     g_glass.shown   = true;
     g_glass.waiting = false;
+    __atomic_store_n(&g_glass.ever, true, __ATOMIC_RELEASE);
     DrawTail(LogRingWritten(), g_glass.rows);
     Fence();
 }
@@ -419,8 +421,14 @@ void EmergencyScreenFollow(void)
 void EmergencyScreenPanicTake(void)
 {
     g_glass.shown = true;
+    __atomic_store_n(&g_glass.ever, true, __ATOMIC_RELEASE);
     DrawTail(LogRingWritten(), g_glass.rows);
     Fence();
+}
+
+bool EmergencyScreenEverShown(void)
+{
+    return __atomic_load_n(&g_glass.ever, __ATOMIC_ACQUIRE);
 }
 
 void EmergencyScreenRedraw(void)

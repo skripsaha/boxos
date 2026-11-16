@@ -3,6 +3,7 @@
 #include "klib.h"
 #include "crypto.h"
 #include "klib_logring.h"   /* the loader's journal goes into the ring */
+#include "screen.h"         /* ScreenLeftByLoader — the scene the loader left */
 
 /*
  * The pass, once it has been believed.
@@ -250,6 +251,16 @@ bool BoardingPassCrossing(uint64_t* out_sector, uint64_t* out_number)
     return true;
 }
 
+bool BoardingPassScene(uint64_t* out_fid, uint64_t* out_bytes)
+{
+    uint16_t bytes = 0;
+    const BoardingScene* s = (const BoardingScene*)BoardingPassStamp(BOARDING_STAMP_SCENE, &bytes);
+    if (!s || bytes < sizeof(BoardingScene)) return false;
+    *out_fid   = s->fid;
+    *out_bytes = s->bytes;
+    return true;
+}
+
 /* A UUID is sixteen bytes and this kernel's printf has no field width, so the
  * digits are assembled by hand. Printed in full because two volumes made by the
  * same tool on the same day differ in the middle of it. */
@@ -380,6 +391,15 @@ static void boarding_describe(unsigned stamps, bool sealed)
     if (BoardingPassCrossing(&crossing_sector, &crossing_number))
         kprintf("[Boarding]   this start is crossing %llu on its medium, kept at sector %llu\n",
                 (unsigned long long)crossing_number, (unsigned long long)crossing_sector);
+
+    /* The scene the loader left the first frame of, for the display to go on
+     * from (screen.c tells the display's claim). */
+    uint64_t scene_fid = 0, scene_bytes = 0;
+    if (BoardingPassScene(&scene_fid, &scene_bytes)) {
+        ScreenLeftByLoader(scene_fid);
+        kprintf("[Boarding]   the loader left the first frame of its scene on the screen (fid %llu, %llu bytes)\n",
+                (unsigned long long)scene_fid, (unsigned long long)scene_bytes);
+    }
 
     /* Four lines that answer "which loader, off what, from where". Said once,
      * early, and the whole of the boot scrolls over them — which is why the

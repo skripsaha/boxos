@@ -50,8 +50,15 @@ typedef struct {
     bool            away;   /* Ctrl+Alt+Esc has the glass; the window leads to the stand-in */
 } ScreenHolder;
 
+/* What the loader left on the glass, for the first claim to hear. */
+typedef struct {
+    uint32_t left;    /* SCREEN_LEFT_* */
+    uint64_t scene;   /* SCREEN_LEFT_SCENE: the fid of the scene's file */
+} ScreenLeft;
+
 static ScreenGlass  g_glass;
 static ScreenHolder g_holder;
+static ScreenLeft   g_left;   /* under s_screen_turn */
 static spinlock_t   s_screen_turn;   /* BSS-zero is unlocked; ScreenInit says so formally */
 static uintptr_t    g_stand_in;      /* phys of the stand-in page; 0 until the first claim; under s_screen_turn */
 
@@ -262,13 +269,24 @@ static bool ScreenStandInReadyLocked(void)
 static void ScreenDescribe(ScreenDescription *out)
 {
     ScreenWindow w = ScreenWindowOf();
-    out->kind     = g_glass.kind;
-    out->width    = g_glass.width;
-    out->height   = g_glass.height;
-    out->stride   = g_glass.stride;
-    out->format   = g_glass.format;
-    out->reserved = 0;
-    out->va       = CABIN_SCREEN_BASE + w.offset;
+    out->kind   = g_glass.kind;
+    out->width  = g_glass.width;
+    out->height = g_glass.height;
+    out->stride = g_glass.stride;
+    out->format = g_glass.format;
+    out->left   = g_left.left;
+    out->va     = CABIN_SCREEN_BASE + w.offset;
+    out->scene  = g_left.scene;
+}
+
+void ScreenLeftByLoader(uint64_t fid)
+{
+    spin_lock(&s_screen_turn);
+    if (g_glass.kind == SCREEN_KIND_PIXELS) {
+        g_left.left  = SCREEN_LEFT_SCENE;
+        g_left.scene = fid;
+    }
+    spin_unlock(&s_screen_turn);
 }
 
 error_t ScreenClaim(struct process_t *proc, ScreenDescription *out, bool *taken)
@@ -313,8 +331,13 @@ error_t ScreenClaim(struct process_t *proc, ScreenDescription *out, bool *taken)
 
     g_holder.cabin = cabin;
     g_holder.away  = false;
+    /* What the loader left is said to this claim, the first — and only when
+     * the Emergency Screen has not drawn over it. */
+    if (EmergencyScreenEverShown()) g_left.left = SCREEN_LEFT_NOTHING;
     EmergencyHide();
     ScreenDescribe(out);
+    g_left.left  = SCREEN_LEFT_NOTHING;
+    g_left.scene = 0;
     *taken = true;
     JourneyMark("display");
     spin_unlock(&s_screen_turn);

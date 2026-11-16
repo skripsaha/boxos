@@ -71,6 +71,7 @@ _Static_assert(sizeof(CrossingsHead) == 32, "the head is 32 bytes");
 #define CROSSING_ASKED_STARTUP     2u
 #define CROSSING_ASKED_CORES       4u
 #define CROSSING_ASKED_KEEP_LOG    8u
+#define CROSSING_ASKED_SCENE      16u
 
 #define CROSSING_LANDED            1u
 
@@ -98,7 +99,8 @@ typedef struct __attribute__((packed)) {
     uint32_t misses;         /* starts in a row before this one that did not land */
     uint32_t landed;         /* CROSSING_LANDED, by the kernel */
     uint32_t landed_ms;      /* its first instruction to the display taking the screen */
-    uint8_t  reserved[16];
+    uint8_t  scene;          /* 1 asked on */
+    uint8_t  reserved[15];
 } Crossing;
 
 _Static_assert(sizeof(Crossing) == 96, "a crossing is 96 bytes");

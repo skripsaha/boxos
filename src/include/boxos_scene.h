@@ -40,6 +40,11 @@
 
 #define BOX_SCENE_MAGIC "BOXSCENE"
 
+/* The scene the machine starts with, as it is called on the volume — found by
+ * its name, never by a tag — and the most bytes of a scene a loader reads. */
+#define BOX_SCENE_BOOT      "boot.scene"
+#define BOX_SCENE_FILE_MOST (1u << 20)
+
 #define BOX_SCENE_ENTER 0u
 #define BOX_SCENE_WAIT  1u
 #define BOX_SCENE_LEAVE 2u

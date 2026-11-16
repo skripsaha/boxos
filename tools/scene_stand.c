@@ -6,6 +6,7 @@
  *
  *     scene_stand brush SHEET.png
  *     scene_stand frames SCENE OUTDIR
+ *     scene_stand first SCENE WIDTH HEIGHT OUT.ppm
  *
  * brush: numbers held to the host's own (the roots, the sine); colour laid as
  * the imprint is pressed, and text drawn the very pixels BoxPressGlyph makes;
@@ -25,6 +26,10 @@
  * time refused for what is wrong, and thousands of random damages read and
  * played without a byte read or drawn past where it may be. Then a few of its
  * frames, PNG files in OUTDIR, to look at.
+ *
+ * first: the scene's first frame on a screen of WIDTH x HEIGHT, as a PPM — the
+ * form QEMU's screendump writes, so what Gangway left on a machine's glass is
+ * held to it byte for byte.
  *
  * Every check says "  ok   …" or "  FAIL …"; the last line counts them.
  */
@@ -1228,15 +1233,46 @@ static int Frames(const char *Path, const char *Out)
     return 1;
 }
 
+/* The scene's first frame on a Width x Height screen, written as a PPM. */
+static int First(const char *Path, uint32_t Width, uint32_t Height, const char *Out)
+{
+    uint64_t Size  = 0;
+    uint8_t *Bytes = ReadFile(Path, &Size);
+    BoxScene S;
+    if (!Bytes || BoxSceneRead(Bytes, Size, &S) || !Width || !Height || Width > 8192u || Height > 8192u) {
+        fprintf(stderr, "scene_stand: %s is no scene to draw at %ux%u\n", Path, Width, Height);
+        free(Bytes);
+        return 2;
+    }
+    Stage T;
+    StageMake(&T, &S, Width, Height);
+    Frame(&T, 0);
+    FILE *File = fopen(Out, "wb");
+    if (!File) return 2;
+    fprintf(File, "P6\n%u %u\n255\n", Width, Height);
+    for (uint32_t Y = 0; Y < Height; Y++)
+        for (uint32_t X = 0; X < Width; X++) {
+            const uint32_t P      = *At(&T.Board, (int32_t)X, (int32_t)Y);
+            const uint8_t  Rgb[3] = { (uint8_t)(P >> 16), (uint8_t)(P >> 8), (uint8_t)P };
+            fwrite(Rgb, 1, 3, File);
+        }
+    const int Written = fclose(File) == 0;
+    StageFree(&T);
+    free(Bytes);
+    return Written ? 0 : 2;
+}
+
 int main(int Argc, char **Argv)
 {
+    if (Argc == 6 && strcmp(Argv[1], "first") == 0)
+        return First(Argv[2], (uint32_t)strtoul(Argv[3], NULL, 10), (uint32_t)strtoul(Argv[4], NULL, 10), Argv[5]);
     if (Argc == 4 && strcmp(Argv[1], "frames") == 0) {
         Frames(Argv[2], Argv[3]);
         printf("scene: %d passed, %d failed — the scene %s\n", g_passed, g_failed, Argv[2]);
         return g_failed ? 1 : 0;
     }
     if (Argc != 3 || strcmp(Argv[1], "brush") != 0) {
-        fprintf(stderr, "usage: scene_stand brush SHEET.png | scene_stand frames SCENE OUTDIR\n");
+        fprintf(stderr, "usage: scene_stand brush SHEET.png | frames SCENE OUTDIR | first SCENE WIDTH HEIGHT OUT.ppm\n");
         return 2;
     }
     CheckNumbers();
