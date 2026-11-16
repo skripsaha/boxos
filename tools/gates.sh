@@ -26,7 +26,8 @@
 # (gangway.settings set in the hub and taken at the next start), panel
 # (Gangway's panel: a start changed on it, the log kept before a reset),
 # crossings (every start kept in the medium's front and landed; two misses open
-# the panel), dedup (a copy laid on its
+# the panel), scene (the brush a scene is painted with, held on the host to
+# exact areas, the press's pixels and its clip), dedup (a copy laid on its
 # original by the pass after a Tally), and volume-read's self-test over the
 # image the build lays.
 # Beside them the host's own stands, which no volume touches: boxasm, the
@@ -74,7 +75,7 @@ GATES_LOGCHECK="healthy unattended byname quill quillmut census lockrankmut repl
                 stand standusb standmut mkfs crewcrash fare faremut"
 GATES_POWERCUT="selftest noanchor noanchormut nextfid hog halt race overwrite logger tipin sessions
                 replug machineb spared undonecut engross dedup firstflushmut lastflushmut booknextfidmut stitchmut"
-GATES_OTHER="framerefuse bookboot loadersettings panel crossings dedup volread_selftest boxasm format form recipe elf box pack inside settings typecase"
+GATES_OTHER="framerefuse bookboot loadersettings panel crossings scene dedup volread_selftest boxasm format form recipe elf box pack inside settings typecase"
 GATES_LONG="loggerhour loggerhourmut"
 
 gate_names() {
