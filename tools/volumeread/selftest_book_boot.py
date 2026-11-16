@@ -295,7 +295,7 @@ def BootCases(bt):
     drafted = Note(bt, bt.fid, 0, b"a scene of mine\n", name=b"mine.txt", tags=[bt.tag])
     coin = [(bt.tag, MINE)]
     picked = "1 scene carries mine — fid %u, the one picked, is read" % bt.fid
-    none = "no scene on this volume carries mine"
+    none = "no scene on this volume carries mine — %s is read in its place" % SCENE.decode()
 
     def SceneBorn(o):
         mine.Lay(bt, o)
@@ -318,8 +318,10 @@ def BootCases(bt):
             s.lines[-1] == "mine.scene (fid %u) is attested by the book: 1 block(s)" % bt.fid
 
     def NonePicked(c):
-        s = Scened(c)
-        return s.lines[-1] == none and s.found.get(SCENE) is None
+        """None wears the tag: said, and the scene read by its name in its
+        place, as when nothing is asked."""
+        s, named = Scened(c), Succession(BookGround(c.medium), ASKED, None)
+        return none in s.lines and s.found.get(SCENE) == named.found.get(SCENE) and s.lines[-1] == named.lines[-1]
 
     def Read(c, fid=None):
         """The note read, attested, its bytes the person's text."""
@@ -428,16 +430,16 @@ def BootCases(bt):
         Case("A25 a file of another name renamed a scene on the ribbon", SceneLabeled(drafted, name=b"mine.scene"),
              checks=[("the loader follows it from the Tally on and picks it", Picked)]),
         Case("A26 the tag taken off the scene on the ribbon", SceneLabeled(mine, drop=[bt.tag]), checks=[
-            ("no scene wears it, and none is read", NonePicked)]),
+            ("no scene wears it: said, and boot.scene read by its name in its place", NonePicked)]),
         Case("A27 the tag put on a scene on the ribbon", SceneLabeled(plain, add=[bt.tag]), checks=[
             ("the scene wears it, and is picked", Picked)]),
         Case("A28 the scene kept deleted on the ribbon", SceneLabeled(mine, keep=1 << 62), checks=[
-            ("a scene kept deleted is none the loader picks", NonePicked)]),
+            ("a scene kept deleted is none the loader picks: boot.scene is read in its place", NonePicked)]),
         Case("A29 the tag put on a scene that wears it already", SceneLabeled(mine, add=[bt.tag]),
              must={"BASE_MISMATCH"}, checks=[
             ("the Labeled does not fit, said — the scene as it last matched, picked",
              lambda c: "stitch 3's Labeled of fid %u does not fit the file: it puts on a tag already worn or takes off "
              "one not worn — the file stays as it last matched" % bt.fid in Scened(c).lines and Picked(c))]),
         Case("A30 the tag retired on the ribbon", Retired, checks=[
-            ("a retired tag is worn by nothing the loader picks", NonePicked)]),
+            ("a retired tag is worn by nothing the loader picks: boot.scene is read in its place", NonePicked)]),
     ]

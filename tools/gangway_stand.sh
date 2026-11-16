@@ -118,6 +118,12 @@ judged() {
     fi
 }
 
+# Asked by a tag none wears, the scene by its name in its place — never none.
+grep -qxF "boot: no scene on this volume carries boot, nowhere — boot.scene is read in its place" \
+    "$WORK/asked-none.stand" &&
+    tail -1 "$WORK/asked-none.stand" | grep -qE '^boot: boot\.scene \(fid [0-9]+\) is attested by the book'
+judged "asked by a tag none wears, the Lectern says so and reads boot.scene by its name in its place"
+
 read -r longest blocks first onkernel <<< "$(sed -nE 's/^stand: [0-9]+ command\(s\), the longest ([0-9]+) sector\(s\); the kernel.s ([0-9]+) block\(s\) from volume block ([0-9]+) in ([0-9]+) of them$/\1 \2 \3 \4/p' "$WORK/built.stand.err")"
 if [ -z "$onkernel" ]; then
     echo "  FAIL how it reads — the stand did not say: $(cat "$WORK/built.stand.err")"

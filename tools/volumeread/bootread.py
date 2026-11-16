@@ -211,7 +211,8 @@ class Succession:
     `found[name]` "held" or "unchecked" then; neither for one not read. With
     `asked` {which: (tags, pick)}, the file `which` of those called is asked
     by those tags (bytes) instead of by its name, as a desk's ask asks it:
-    the scene `pick` falls on of those that wear them all."""
+    the scene `pick` falls on of those that wear them all — with none, the
+    file by its name in its place."""
 
     def __init__(self, g, called=(), asked=None):
         self.g, self.called, self.lines, self.tried, self.deferred, self.says = g, tuple(called), [], [], [], None
@@ -256,7 +257,8 @@ class Succession:
         """The file `called` names (gangway_lectern_called.c): the first made of
         those the book does not keep deleted, said when there are more — or,
         `asked` (tags, pick), the scene picked of those that wear them all,
-        said with how many; what may be read of it, `most` bytes at most; its
+        said with how many, and with none the file by its name in its place,
+        said; what may be read of it, `most` bytes at most; its
         blocks held to the book, the Slips laid on its last."""
         g, lec, name = self.g, self.lec, called.decode()
         label = "the scene carrying " + ", ".join(t.decode() for t in asked[0]) if asked else name
@@ -268,14 +270,16 @@ class Succession:
         if asked:
             fid, count = self._Picked(*asked)
             if fid is None:
-                self._Say("no scene on this volume carries %s" % ", ".join(t.decode() for t in asked[0]))
-                return
-            self._Say("%u %s %s — fid %u, the one picked, is read"
-                      % (count, "scene carries" if count == 1 else "scenes carry",
-                         ", ".join(t.decode() for t in asked[0]), fid))
-            fs = self.book.files[fid]
-            name = bytes(fs.name)[:NAME_KEPT].decode(errors="replace")
-        else:
+                self._Say("no scene on this volume carries %s — %s is read in its place"
+                          % (", ".join(t.decode() for t in asked[0]), name))
+                asked = None
+            else:
+                self._Say("%u %s %s — fid %u, the one picked, is read"
+                          % (count, "scene carries" if count == 1 else "scenes carry",
+                             ", ".join(t.decode() for t in asked[0]), fid))
+                fs = self.book.files[fid]
+                name = bytes(fs.name)[:NAME_KEPT].decode(errors="replace")
+        if not asked:
             named = sorted(fid for fid, fs in self.book.files.items()
                            if fs.name == called and not fs.flags & ondisk.FILE_DELETED)
             if not named:

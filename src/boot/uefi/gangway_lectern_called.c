@@ -200,21 +200,30 @@ void LecternCalledTake(LecternBook *b, uint32_t which)
         }
         LineStart(&l);
         if (!f) {
+            /* Nothing the person asked for: the file by its name instead,
+             * never no file at all for a word mistyped. */
             LinePut(&l, "no scene on this volume carries ");
             TagsPut(&l, c);
+            LinePut(&l, " — ");
+            LinePut(&l, c->name);
+            LinePut(&l, " is read in its place");
             LecternSay(b, &l);
-            return;
+            c->ntags = 0;
+            LineStart(&who);
+            LinePut(&who, c->name);
+        } else {
+            LineNum(&l, count);
+            LinePut(&l, count == 1 ? " scene carries " : " scenes carry ");
+            TagsPut(&l, c);
+            LinePut(&l, " — fid ");
+            LineNum(&l, f->fid);
+            LinePut(&l, ", the one picked, is read");
+            LecternSay(b, &l);
+            LineStart(&who);
+            LinePut(&who, f->name);
         }
-        LineNum(&l, count);
-        LinePut(&l, count == 1 ? " scene carries " : " scenes carry ");
-        TagsPut(&l, c);
-        LinePut(&l, " — fid ");
-        LineNum(&l, f->fid);
-        LinePut(&l, ", the one picked, is read");
-        LecternSay(b, &l);
-        LineStart(&who);
-        LinePut(&who, f->name);
-    } else if (!(f = FirstCalled(b, which, &count))) {
+    }
+    if (!c->ntags && !(f = FirstCalled(b, which, &count))) {
         LecternLine l;
         LineStart(&l);
         LinePut(&l, "no file on this volume is called ");
