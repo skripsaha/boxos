@@ -862,11 +862,15 @@ TYPECASE_LIB   = $(TYPECASE_DIR)/libtypecase.a
 TYPECASE_FONTS = $(TYPECASE_DIR)/fonts/JetBrainsMonoNL-Regular.ttf $(TYPECASE_DIR)/fonts/JetBrainsMonoNL-Bold.ttf \
                  $(TYPECASE_DIR)/fonts/JetBrainsMono-OFL.txt
 
-# The scene the machine starts with (src/include/boxos_scene.h): packed by
-# tools/scene.py from its text, Duppo's numbers out of boxos_mascot.h; on the
-# volume, Gangway shows its first frame and the display plays on from it.
-SCENE_BOOT_TEXT = $(USERSPACE_DIR)/scenes/boot.txt
-SCENE_BOOT      = $(BUILDDIR)/boot.scene
+# The boot scenes (boxos_scene.h): each drawing still and alive, dark and
+# light, packed from src/userspace/scenes/NAME-KIND.txt into
+# build/scenes/KIND/NAME.scene — on the volume they are NAME.scene, told apart
+# by the tags the volume list gives them. The first called boot.scene is the
+# one Gangway draws when nothing else is asked (BOX_SCENE_BOOT); Gangway shows
+# a scene's first frame, and the display plays on from it.
+SCENE_NAMES = boot duppo-word duppo-line duppo-letters
+SCENE_KINDS = dark-alive dark-still light-alive light-still
+SCENE_FILES = $(foreach k,$(SCENE_KINDS),$(foreach n,$(SCENE_NAMES),$(BUILDDIR)/scenes/$(k)/$(n).scene))
 
 # The imprint (src/include/boxos_imprint.h): the system's characters drawn
 # ahead of time by Typecase from the system's font, for the hands that cannot
@@ -1328,9 +1332,13 @@ $(IMPRINT_TOOL): tools/imprint.cpp tools/imprint_make.cpp tools/imprint_make.h \
 	@$(CXX_HOST) -std=c++23 -O2 -Wall -Wextra -I$(TYPECASE_DIR)/include -I$(SRCDIR)/include -Itools \
 		-o $@ $(filter %.cpp,$^)
 
-$(SCENE_BOOT): $(SCENE_BOOT_TEXT) tools/scene.py $(SRCDIR)/include/boxos_scene.h $(SRCDIR)/include/boxos_brush.h \
-               $(SRCDIR)/include/boxos_mascot.h | $(BUILDDIR)
-	@python3 tools/scene.py pack $(SCENE_BOOT_TEXT) $@ >/dev/null
+define SCENE_RULE
+$(BUILDDIR)/scenes/$(1)/$(2).scene: $(USERSPACE_DIR)/scenes/$(2)-$(1).txt tools/scene.py \
+                                    $(SRCDIR)/include/boxos_scene.h $(SRCDIR)/include/boxos_brush.h
+	@mkdir -p $$(@D)
+	@python3 tools/scene.py pack $$< $$@ >/dev/null
+endef
+$(foreach k,$(SCENE_KINDS),$(foreach n,$(SCENE_NAMES),$(eval $(call SCENE_RULE,$(k),$(n)))))
 
 $(IMPRINT_DATA): $(IMPRINT_TOOL) $(IMPRINT_FONT)
 	@mkdir -p $(@D)
@@ -1636,7 +1644,22 @@ VOLUME_CONTENT = \
 	$(TYPECASE_DIR)/fonts/JetBrainsMonoNL-Regular.ttf "font" \
 	$(TYPECASE_DIR)/fonts/JetBrainsMonoNL-Bold.ttf    "font" \
 	$(TYPECASE_DIR)/fonts/JetBrainsMono-OFL.txt       "font, license" \
-	$(SCENE_BOOT)            "scene" \
+	$(BUILDDIR)/scenes/dark-alive/boot.scene           "boot, duppo, dark, animated" \
+	$(BUILDDIR)/scenes/dark-still/boot.scene           "boot, duppo, dark" \
+	$(BUILDDIR)/scenes/light-alive/boot.scene          "boot, duppo, light, animated" \
+	$(BUILDDIR)/scenes/light-still/boot.scene          "boot, duppo, light" \
+	$(BUILDDIR)/scenes/dark-alive/duppo-word.scene     "boot, duppo, logo:word, dark, animated" \
+	$(BUILDDIR)/scenes/dark-still/duppo-word.scene     "boot, duppo, logo:word, dark" \
+	$(BUILDDIR)/scenes/light-alive/duppo-word.scene    "boot, duppo, logo:word, light, animated" \
+	$(BUILDDIR)/scenes/light-still/duppo-word.scene    "boot, duppo, logo:word, light" \
+	$(BUILDDIR)/scenes/dark-alive/duppo-line.scene     "boot, duppo, logo:full, dark, animated" \
+	$(BUILDDIR)/scenes/dark-still/duppo-line.scene     "boot, duppo, logo:full, dark" \
+	$(BUILDDIR)/scenes/light-alive/duppo-line.scene    "boot, duppo, logo:full, light, animated" \
+	$(BUILDDIR)/scenes/light-still/duppo-line.scene    "boot, duppo, logo:full, light" \
+	$(BUILDDIR)/scenes/dark-alive/duppo-letters.scene  "boot, duppo, logo:letters, dark, animated" \
+	$(BUILDDIR)/scenes/dark-still/duppo-letters.scene  "boot, duppo, logo:letters, dark" \
+	$(BUILDDIR)/scenes/light-alive/duppo-letters.scene "boot, duppo, logo:letters, light, animated" \
+	$(BUILDDIR)/scenes/light-still/duppo-letters.scene "boot, duppo, logo:letters, light" \
 	$(TESTBIN_EMPTY)         "binary, test:forerror, emptyfile" \
 	$(UTILS_DIR)/ipc_test.elf "" \
 	$(UTILS_DIR)/memtag.elf  "memory" \
@@ -1729,7 +1752,7 @@ $(call Box,$(1)): $(1) $(PACK_TOOL)
 endef
 $(foreach elf,$(VOLUME_ELFS),$(eval $(call BoxRule,$(elf))))
 
-$(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(HUB_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(PULSE_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TYPECASE_FONTS) $(SCENE_BOOT) $(TAGFS_TOOL) \
+$(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(HUB_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(PULSE_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TYPECASE_FONTS) $(SCENE_FILES) $(TAGFS_TOOL) \
          tools/crossings.py $(SRCDIR)/include/boxos_crossings.h
 	@GROUND=$$($(TAGFS_TOOL) --ground --kernel $(KERNEL_BIN) $(VOLUME_LAID)); \
 	ESP_RAW=$$(( ( $$(stat -f%z $(UEFI_ESP_IMG) 2>/dev/null || stat -c%s $(UEFI_ESP_IMG)) + 511 ) / 512 )); \

@@ -1,0 +1,22 @@
+# boot, still: duppogluten.svg as drawn — the letters Gluten's outlines, each light kept
+# inside its letter
+scene units=1000 paper=#000000 enter=1200 wait=3600 leave=520
+paint p0 radial matrix=9.998854,-0.795145,0.803405,10.102732,-1390.9006,-1073.3660 center=128.0959,112.3141 radius=16.9224 stops=0.5182:#FFE978A0,0.9999:#FF81265C
+paint p1 radial matrix=4.756833,0.000000,0.000000,4.756833,-494.9488,-569.1991 center=103.1307,115.3199 radius=21.1519 stops=0.8737:#FF81265C,1.0000:#FFE86696
+paint p2 radial matrix=5.038299,-0.015925,0.016345,5.170984,-525.3459,-614.6149 center=101.4012,113.5589 radius=18.4049 stops=0.7325:#FFFFE2F0,0.9836:#FF8B6077
+paint p3 radial matrix=9.635710,8.121746,-8.866187,10.518922,-233.8632,-2222.5194 center=124.2561,110.8220 radius=7.3780 stops=0.0347:#FF3B3B3B,0.8122:#FF000000,0.9999:#FF292929
+paint p4 radial matrix=2.993027,-0.238016,0.240489,3.024122,-324.3640,-195.3576 center=128.0959,112.3141 radius=16.9224 stops=0.0000:#FFE978A0,0.9297:#FF81265C
+paint p5 radial matrix=1.452124,-0.115478,0.116678,1.467211,-17.6653,-200.8138 center=128.0959,112.3141 radius=16.9224 stops=0.0000:#FFE978A0,0.9297:#FF81265C
+paint p6 radial matrix=2.078117,-0.165259,0.166976,2.099707,-442.2203,-338.1167 center=128.0959,112.3141 radius=16.9224 stops=0.0000:#FFE978A0,0.9297:#FF81265C
+paint p7 solid #FF000000
+group duppo pivot=0.000,150.180
+ellipse body in=duppo center=0.000,0.000 radius=150.180,150.307 paint=p0 pivot=0.000,0.000
+group eye in=duppo pivot=-4.459,-20.729
+ellipse socket in=eye center=-4.459,-20.729 radius=100.703,100.789 paint=p1 pivot=-4.459,-20.729
+ellipse white in=eye center=-4.446,-20.715 radius=87.623,87.700 paint=p2 pivot=-4.446,-20.715
+ellipse pupil in=eye center=-6.393,-31.333 radius=68.661,69.555 paint=p3 pivot=-6.393,-31.333
+ellipse medium in=duppo center=91.983,125.941 radius=44.950,44.995 paint=p4 pivot=91.983,125.941
+ellipse small in=duppo center=184.332,-44.927 radius=21.809,21.831 paint=p5 pivot=184.332,-44.927
+ellipse tiny in=duppo center=-153.144,-115.030 radius=31.211,31.238 paint=p6 pivot=-153.144,-115.030
+rect veil box=-6000,-6000,12000,12000 paint=p7 opacity=0
+move veil leave opacity 0:0.0000 520:255.0000:inout

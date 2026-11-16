@@ -3,8 +3,7 @@
  * in the units of the master logo (duppogluten.svg; duppo-bubble.svg carries
  * the same numbers), y down, and how each is shaded. One account of its shape
  * and its colour for every hand that draws it — the utility duppo, in colour
- * and turning, Typecase's symbol, in one colour, and the scene the machine
- * starts with (src/userspace/scenes/boot.txt, packed by tools/scene.py).
+ * and turning, and Typecase's symbol, in one colour.
  *
  * The colour logo is a body; the socket and the white of the eye in it; the
  * pupil, a hair taller than it is wide; three little bubbles — the medium one

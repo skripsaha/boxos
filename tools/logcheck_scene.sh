@@ -4,11 +4,12 @@
 # from the very headers under the address and undefined-behaviour sanitizers
 # and held to what they must do (tools/scene_stand.c): the brush to exact
 # areas, mirrors, text the press's very pixels, gradients, pictures, its
-# clip and what it refuses; the boot scene packed from its text
-# (src/userspace/scenes/boot.txt, tools/scene.py) to its first frame on every
-# screen, every frame drawn where it changed being the frame drawn whole, its
-# acts meeting without a seam, and every way it may be damaged refused or
-# played safely. Then on a machine: the glass Gangway leaves, dumped the
+# clip and what it refuses; every boot scene the volume carries, packed from
+# its text (src/userspace/scenes/, tools/scene.py), to its first frame the
+# same picture on every screen, every figure drawn whole on a screen of 8K,
+# every frame drawn where it changed being the frame drawn whole, its acts
+# meeting without a seam, and every way it and its paths may be damaged
+# refused or played safely. Then on a machine: the glass Gangway leaves, dumped the
 # moment it says the scene's first frame is on it, the stand's frame byte for
 # byte, and the kernel told which scene; the display going on from that frame
 # and leaving once the hub waits for the person, the console on the glass
@@ -122,13 +123,20 @@ run_scene() {
     [ $rc = 0 ] && grep -qE "^scene: [0-9]+ passed, 0 failed — the brush$" "$out"
     chk $? "scene (brush): the brush built on the host holds to every check ($(tail -1 "$out")), the sheet at $SCRATCH/scene.brush.png"
 
-    out="$SCRATCH/scene.frames"
-    rm -rf "$SCRATCH/scene.frames.png" && mkdir -p "$SCRATCH/scene.frames.png"
-    "$stand" frames build/boot.scene "$SCRATCH/scene.frames.png" >"$out" 2>&1
-    rc=$?
-    sed 's/^/  /' "$out"
-    [ $rc = 0 ] && grep -qE "^scene: [0-9]+ passed, 0 failed — the scene " "$out"
-    chk $? "scene (boot): the boot scene holds to every check ($(tail -1 "$out" | sed 's/^scene: //; s/ — .*//')), its frames in $SCRATCH/scene.frames.png"
+    local one held=0 all=0 boot=build/scenes/dark-alive/boot.scene figures
+    for one in build/scenes/*/*.scene; do
+        out="$SCRATCH/scene.frames.$(basename "$(dirname "$one")").$(basename "$one" .scene)"
+        rm -rf "$out.png" && mkdir -p "$out.png"
+        "$stand" frames "$one" "$out.png" >"$out" 2>&1
+        rc=$?
+        echo "  -- $one"
+        sed 's/^/  /' "$out"
+        all=$((all + 1))
+        [ $rc = 0 ] && grep -qE "^scene: [0-9]+ passed, 0 failed — the scene " "$out" && held=$((held + 1))
+    done
+    [ "$all" -gt 0 ] && [ "$held" = "$all" ]
+    chk $? "scene (scenes): every boot scene the volume carries holds to every check ($held of $all), their frames in $SCRATCH/scene.frames.*.png"
+    figures=$(python3 tools/scene.py read "$boot" | sed -nE 's/.* ([0-9]+) figures, .*/\1/p')
 
     cp build/boxos.img "$SCRATCH/scene.before.img"
 
@@ -149,7 +157,7 @@ run_scene() {
         # looked at until it is the console, the scene gone and text on it.
         size=$(grep -a "Gangway: the scene's first frame is on the screen, " build/serial.log | tr -d '\r' | head -1 |
             sed -nE "s/.*on the screen, ([0-9]+)x([0-9]+) — .*/\1 \2/p")
-        [ -n "$size" ] && "$stand" first build/boot.scene $size "$SCRATCH/scene.first.stand.ppm"
+        [ -n "$size" ] && "$stand" first "$boot" $size "$SCRATCH/scene.first.stand.ppm"
         for ((i = 0; i < 50; i++)); do
             mon_shot "$SCRATCH/scene.first.console.ppm" &&
                 ! scene_same "$SCRATCH/scene.first.console.ppm" "$SCRATCH/scene.first.stand.ppm" &&
@@ -162,13 +170,13 @@ run_scene() {
     L="$SCRATCH/serial.scene.first.log"
     size=$(grep -a "Gangway: the scene's first frame is on the screen, " "$L" | tr -d '\r' | head -1 |
         sed -nE "s/.*on the screen, ([0-9]+)x([0-9]+) — .*/\1 \2/p")
-    grep -aq "Gangway: boot.scene is a scene of 11 figure(s)" "$L" && [ -n "$size" ]
+    grep -aq "Gangway: boot.scene is a scene of $figures figure(s)" "$L" && [ -n "$size" ]
     chk $? "scene (gangway): Gangway reads boot.scene by its name and draws its first frame ($(echo $size | tr ' ' x))"
     [ -n "$size" ] && scene_same "$SCRATCH/scene.first.glass.ppm" "$SCRATCH/scene.first.stand.ppm"
     chk $? "scene (gangway): the glass, dumped the moment Gangway says so, is the stand's first frame byte for byte"
     grep -aqE "\[Boarding\]   the loader left the first frame of its scene on the screen \(fid [0-9]+, [0-9]+ bytes\)" "$L"
     chk $? "scene (gangway): the kernel is told which scene the glass shows"
-    grep -aqE "\[display\] scene: the one the loader left \(fid [0-9]+, 11 figures\) goes on from its frame, $(echo $size | tr ' ' x)" "$L"
+    grep -aqE "\[display\] scene: the one the loader left \(fid [0-9]+, $figures figures\) goes on from its frame, $(echo $size | tr ' ' x)" "$L"
     chk $? "scene (display): the display goes on from the frame the loader left, at the loader's size"
     [ -s "$SCRATCH/scene.enter.glass.ppm" ] &&
         ! scene_same "$SCRATCH/scene.enter.glass.ppm" "$SCRATCH/scene.first.stand.ppm" &&

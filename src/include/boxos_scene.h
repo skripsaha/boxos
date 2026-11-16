@@ -7,7 +7,8 @@
  *
  * A scene is figures laid one over another in their order — groups, which
  * draw nothing and carry the figures in them, and shapes painted as the brush
- * paints (boxos_brush.h) — and tracks that move them through three acts:
+ * paints (boxos_brush.h): ellipses, rectangles and paths, a path's outlines
+ * pieces of the scene's own — and tracks that move them through three acts:
  * enter, played once; wait, played round and round while the machine is not
  * ready for the person; leave, played once, and then the scene is gone. Its
  * places are 1/BOX_BRUSH_ONE of its units, Units of them across the screen's
@@ -23,8 +24,8 @@
  * where enter left each figure and end where they began, so the round has no
  * seam (tools/scene.py holds a scene to it).
  *
- * The file is the head and then its five tables, each right after the one
- * before, little-endian: paints, stops, figures, tracks, keys. It is read
+ * The file is the head and then its six tables, each right after the one
+ * before, little-endian: paints, stops, figures, pieces, tracks, keys. It is read
  * whole and held to every bound before anything is drawn (BoxSceneRead): a
  * scene that is not one is refused with why, and nothing past the bytes
  * handed in is read, whatever they hold. No version: what a reader does not
@@ -59,6 +60,20 @@
 #define BOX_SCENE_GROUP   0u
 #define BOX_SCENE_ELLIPSE 1u   /* Shape: CX, CY, RX, RY */
 #define BOX_SCENE_RECT    2u   /* Shape: X, Y, WIDTH, HEIGHT */
+#define BOX_SCENE_PATH    3u   /* Shape: its FIRST piece, how many, 0, 0 */
+
+/* How the pen comes to a path's piece: MOVE begins an outline there, the one
+ * before it closed; LINE draws straight to it; QUAD and CUBIC come two and
+ * three together — the pulls, then the place the curve reaches. A path is
+ * filled nonzero, every outline closed. */
+#define BOX_SCENE_MOVE  0u
+#define BOX_SCENE_LINE  1u
+#define BOX_SCENE_QUAD  2u
+#define BOX_SCENE_CUBIC 3u
+
+/* The most pieces one path is drawn from: a word's letters, each a path, are
+ * a few hundred. */
+#define BOX_SCENE_PIECES_MOST 4096u
 
 /* What a track moves, and where a figure's Base keeps it. */
 #define BOX_SCENE_X       0u   /* places of its group */
@@ -85,7 +100,7 @@ typedef struct BoxSceneHead {
     uint32_t Units;
     uint32_t Paper;                   /* 0x00RRGGBB: what lies under every figure */
     uint32_t Acts[BOX_SCENE_ACTS];    /* each act's length, ms */
-    uint32_t Paints, Stops, Figures, Tracks, Keys;
+    uint32_t Paints, Stops, Figures, Pieces, Tracks, Keys;
 } BoxSceneHead;
 
 /* As the brush paints (BoxBrushPaint): SOLID, LINEAR or RADIAL, the stops
@@ -100,11 +115,17 @@ typedef struct BoxScenePaint {
 typedef struct BoxSceneFigure {
     uint32_t Kind;
     uint32_t Parent;                   /* a group laid before it, or NONE */
-    uint32_t Paint;                    /* ELLIPSE, RECT */
+    uint32_t Paint;                    /* ELLIPSE, RECT, PATH */
     int32_t  Shape[4];                 /* its own places */
     int32_t  Pivot[2];                 /* what it turns and stretches about, in its own places */
     int32_t  Base[BOX_SCENE_WHATS];    /* where it stands before any track moves it */
 } BoxSceneFigure;
+
+/* A piece of a path, in its figure's own places. */
+typedef struct BoxScenePiece {
+    uint32_t Verb;
+    int32_t  X, Y;
+} BoxScenePiece;
 
 /* Tracks are kept by act, then figure, then what they move — one at most for
  * each. */
@@ -122,12 +143,14 @@ typedef struct BoxSceneKey {
 } BoxSceneKey;
 
 #ifdef __cplusplus
-static_assert(sizeof(BoxSceneHead) == 52 && sizeof(BoxScenePaint) == 40 && sizeof(BoxBrushStop) == 8 &&
-                  sizeof(BoxSceneFigure) == 60 && sizeof(BoxSceneTrack) == 20 && sizeof(BoxSceneKey) == 12,
+static_assert(sizeof(BoxSceneHead) == 56 && sizeof(BoxScenePaint) == 40 && sizeof(BoxBrushStop) == 8 &&
+                  sizeof(BoxSceneFigure) == 60 && sizeof(BoxScenePiece) == 12 && sizeof(BoxSceneTrack) == 20 &&
+                  sizeof(BoxSceneKey) == 12,
               "a scene's records are the sizes tools/scene.py packs");
 #else
-_Static_assert(sizeof(BoxSceneHead) == 52 && sizeof(BoxScenePaint) == 40 && sizeof(BoxBrushStop) == 8 &&
-                   sizeof(BoxSceneFigure) == 60 && sizeof(BoxSceneTrack) == 20 && sizeof(BoxSceneKey) == 12,
+_Static_assert(sizeof(BoxSceneHead) == 56 && sizeof(BoxScenePaint) == 40 && sizeof(BoxBrushStop) == 8 &&
+                   sizeof(BoxSceneFigure) == 60 && sizeof(BoxScenePiece) == 12 && sizeof(BoxSceneTrack) == 20 &&
+                   sizeof(BoxSceneKey) == 12,
                "a scene's records are the sizes tools/scene.py packs");
 #endif
 
@@ -138,6 +161,7 @@ typedef struct BoxScene {
     const BoxScenePaint  *Paints;
     const BoxBrushStop   *Stops;
     const BoxSceneFigure *Figures;
+    const BoxScenePiece  *Pieces;
     const BoxSceneTrack  *Tracks;
     const BoxSceneKey    *Keys;
     uint32_t              Fault;
@@ -177,14 +201,40 @@ static inline const char *BoxScenePaintFault(const BoxScene *S, const BoxScenePa
     return NULL;
 }
 
+/* A path's pieces: within the pieces kept and as many as one is drawn from,
+ * the first a MOVE, a curve's pulls and place together, every place one the
+ * brush draws. */
+static inline const char *BoxScenePathFault(const BoxScene *S, const BoxSceneFigure *F)
+{
+    const uint32_t First = (uint32_t)F->Shape[0], Count = (uint32_t)F->Shape[1];
+    if (F->Shape[0] < 0 || F->Shape[1] < 2 || Count > BOX_SCENE_PIECES_MOST || F->Shape[2] || F->Shape[3] ||
+        (uint64_t)First + Count > S->Head->Pieces)
+        return "a path's pieces lie past the pieces kept";
+    uint32_t Run = 0;
+    for (uint32_t K = 0; K < Count; K++) {
+        const BoxScenePiece *P = &S->Pieces[First + K];
+        if (P->Verb > BOX_SCENE_CUBIC || (K == 0 && P->Verb != BOX_SCENE_MOVE))
+            return "a path's pieces are none the pen follows";
+        if (!BoxSceneOwn(P->X) || !BoxSceneOwn(P->Y)) return "a path reaches past what the brush draws";
+        const uint32_t Together = P->Verb == BOX_SCENE_QUAD ? 2u : P->Verb == BOX_SCENE_CUBIC ? 3u : 1u;
+        if (Run && (P->Verb != S->Pieces[First + K - 1u].Verb)) return "a path's curve is cut short";
+        Run = Run + 1u == Together ? 0 : Run + 1u;
+    }
+    return Run ? "a path's curve is cut short" : NULL;
+}
+
 static inline const char *BoxSceneFigureFault(const BoxScene *S, uint32_t Index)
 {
     const BoxSceneFigure *F = &S->Figures[Index];
-    if (F->Kind > BOX_SCENE_RECT) return "a figure of no kind a scene has";
+    if (F->Kind > BOX_SCENE_PATH) return "a figure of no kind a scene has";
     if (F->Parent != BOX_SCENE_NONE && (F->Parent >= Index || S->Figures[F->Parent].Kind != BOX_SCENE_GROUP))
         return "a figure's group is not a group laid before it";
-    if (F->Kind != BOX_SCENE_GROUP) {
-        if (F->Paint >= S->Head->Paints) return "a figure is painted with no paint the scene keeps";
+    if (F->Kind != BOX_SCENE_GROUP && F->Paint >= S->Head->Paints)
+        return "a figure is painted with no paint the scene keeps";
+    if (F->Kind == BOX_SCENE_PATH) {
+        const char *Why = BoxScenePathFault(S, F);
+        if (Why) return Why;
+    } else if (F->Kind != BOX_SCENE_GROUP) {
         for (uint32_t K = 0; K < 4u; K++)
             if (!BoxSceneOwn(F->Shape[K])) return "a figure's shape reaches past what the brush draws";
         if (F->Shape[2] <= 0 || F->Shape[3] <= 0) return "a figure's shape has no size";
@@ -232,7 +282,8 @@ static inline const char *BoxSceneRead(const uint8_t *Bytes, uint64_t Size, BoxS
     const uint64_t Paints  = sizeof(BoxSceneHead);
     const uint64_t Stops   = Paints + (uint64_t)H->Paints * sizeof(BoxScenePaint);
     const uint64_t Figures = Stops + (uint64_t)H->Stops * sizeof(BoxBrushStop);
-    const uint64_t Tracks  = Figures + (uint64_t)H->Figures * sizeof(BoxSceneFigure);
+    const uint64_t Pieces  = Figures + (uint64_t)H->Figures * sizeof(BoxSceneFigure);
+    const uint64_t Tracks  = Pieces + (uint64_t)H->Pieces * sizeof(BoxScenePiece);
     const uint64_t Keys    = Tracks + (uint64_t)H->Tracks * sizeof(BoxSceneTrack);
     const uint64_t End     = Keys + (uint64_t)H->Keys * sizeof(BoxSceneKey);
     if (End != H->Size || H->Size != Size) return "its size is not the size of its tables";
@@ -245,6 +296,7 @@ static inline const char *BoxSceneRead(const uint8_t *Bytes, uint64_t Size, BoxS
     S->Paints  = (const BoxScenePaint *)(Bytes + Paints);
     S->Stops   = (const BoxBrushStop *)(Bytes + Stops);
     S->Figures = (const BoxSceneFigure *)(Bytes + Figures);
+    S->Pieces  = (const BoxScenePiece *)(Bytes + Pieces);
     S->Tracks  = (const BoxSceneTrack *)(Bytes + Tracks);
     S->Keys    = (const BoxSceneKey *)(Bytes + Keys);
     for (S->Fault = 0; S->Fault < H->Paints; S->Fault++) {

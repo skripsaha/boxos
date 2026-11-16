@@ -7,9 +7,8 @@ what a packed one holds.
   scene.py read FILE         what a packed scene holds, a line each
 
 The numbers of the form are read out of boxos_scene.h and boxos_brush.h, its
-records held to the sizes boxos_scene.h asserts; Duppo's discs, shades and
-hues are read out of boxos_mascot.h by name. Nothing here is a second copy of
-what the loader, the display or the utility duppo read.
+records held to the sizes boxos_scene.h asserts. Nothing here is a second copy
+of what the loader or the display read.
 
 The text — a statement a line, a remark from a # on its own to the end of the
 line; places in the scene's units, colours #RRGGBB or #AARRGGBB, numbers as
@@ -17,19 +16,22 @@ they are:
 
   scene units=U paper=#RRGGBB enter=MS wait=MS leave=MS
   paint NAME solid COLOUR
-  paint NAME radial shade=SHADE stops=STOPS             Duppo's, by name
   paint NAME radial matrix=A,B,C,D,E,F center=X,Y radius=R stops=AT:COLOUR,...
   paint NAME linear from=X,Y to=X,Y stops=AT:COLOUR,...
   group NAME [FIGURE...]
-  ellipse NAME (disc=DISC | oval=OVAL | center=X,Y radius=R[,R]) paint=NAME [FIGURE...]
+  ellipse NAME center=X,Y radius=R[,R] paint=NAME [FIGURE...]
   rect NAME box=X,Y,W,H paint=NAME [FIGURE...]
+  path NAME paint=NAME [FIGURE...] (shape=PATH | d=DATA...)
   move NAME ACT WHAT MS:VALUE[:EASE] ...
 
-  FIGURE: in=GROUP pivot=X,Y|DISC at=X,Y scale=S wide=S tall=S turn=TURNS opacity=0..255
+  FIGURE: in=GROUP pivot=X,Y at=X,Y scale=S wide=S tall=S turn=TURNS opacity=0..255
   ACT: enter wait leave; WHAT: x y (where the pivot is put) wide tall scale turn opacity;
   EASE: linear in out inout step.
 
-A paint's places are its figure's own. A figure's pivot is in its own places
+A path's DATA is an SVG path's, to the end of the line — M L H V C S Q T Z,
+absolute and relative, no arcs — or shape= draws the pieces of a path said
+before it again, with paint of its own: a light that keeps to a letter's
+edges. A paint's places are its figure's own. A figure's pivot is in its own places
 and stays where it is unless at= puts it elsewhere in its group. The wait
 act's tracks must begin where enter left the figure and come back to where
 they began — a turn by whole turns — so its round has no seam.
@@ -42,19 +44,21 @@ import sys
 
 INCLUDE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "include")
 
-HEAD = struct.Struct("<8s11I")
+HEAD = struct.Struct("<8s12I")
 PAINT = struct.Struct("<4I6i")
 STOP = struct.Struct("<2I")
 FIGURE = struct.Struct("<3I4i2i6i")
+PIECE = struct.Struct("<I2i")
 TRACK = struct.Struct("<5I")
 KEY = struct.Struct("<IiI")
 RECORDS = {"BoxSceneHead": HEAD, "BoxScenePaint": PAINT, "BoxBrushStop": STOP, "BoxSceneFigure": FIGURE,
-           "BoxSceneTrack": TRACK, "BoxSceneKey": KEY}
+           "BoxScenePiece": PIECE, "BoxSceneTrack": TRACK, "BoxSceneKey": KEY}
 
 ACTS = ("enter", "wait", "leave")
 WHATS = ("x", "y", "wide", "tall", "turn", "opacity")
 EASES = ("linear", "in", "out", "inout", "step")
-KINDS = {"group": "BOX_SCENE_GROUP", "ellipse": "BOX_SCENE_ELLIPSE", "rect": "BOX_SCENE_RECT"}
+KINDS = {"group": "BOX_SCENE_GROUP", "ellipse": "BOX_SCENE_ELLIPSE", "rect": "BOX_SCENE_RECT", "path": "BOX_SCENE_PATH"}
+PATH_WORD = re.compile(r"[MmLlHhVvCcSsQqTtZzAa]|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 
 
 class Refused(Exception):
@@ -79,60 +83,6 @@ def numbers():
     return names
 
 
-def mascot():
-    """Duppo's numbers in boxos_mascot.h, by name: a record a tuple of its
-    fields, an array a list of them; its hues' names and defines."""
-    text = re.sub(r"/\*.*?\*/", "", open(os.path.join(INCLUDE, "boxos_mascot.h")).read(), flags=re.S)
-    names = {}
-    for name, value in re.findall(r"^#define\s+(BOXOS_\w+)\s+(0x[0-9A-Fa-f]+|\d+)u?\s*$", text, re.M):
-        names[name] = int(value, 0)
-    enum = re.search(r"enum\s*\{([^}]*)\}", text)
-    for index, name in enumerate(n.strip() for n in enum.group(1).split(",") if n.strip()):
-        names[name] = index
-
-    def value(token):
-        token = token.strip()
-        if token in names:
-            return names[token]
-        if re.fullmatch(r"0x[0-9A-Fa-f]+u?|\d+u?", token):
-            return int(token.rstrip("u"), 0)
-        return float(token.rstrip("f"))
-
-    def braces(body):
-        body = body.strip()
-        if not body.startswith("{"):
-            return value(body)
-        items, depth, start = [], 0, 1
-        for i, c in enumerate(body):
-            if c == "{":
-                depth += 1
-            elif c == "}":
-                depth -= 1
-            if (c == "," and depth == 1) or (c == "}" and depth == 0):
-                if body[start:i].strip():
-                    items.append(braces(body[start:i]))
-                start = i + 1
-        return tuple(items)
-
-    for name, array, body in re.findall(r"BOXOS_MASCOT_NUMBER\s+\w+\s+(\w+)(\[\w*\])?\s*=\s*(\{.*?\});", text, re.S):
-        got = braces(body)
-        names[name] = list(got) if array else got
-    return names
-
-
-def refer(m, token):
-    """A mascot number named in the text, NAME or NAME[I]."""
-    found = re.fullmatch(r"(\w+)(?:\[(\d+)\])?", token)
-    if not found or found.group(1) not in m:
-        raise Refused(f"boxos_mascot.h names no {token}")
-    got = m[found.group(1)]
-    if found.group(2) is not None:
-        if not isinstance(got, list) or int(found.group(2)) >= len(got):
-            raise Refused(f"{found.group(1)} has no [{found.group(2)}]")
-        got = got[int(found.group(2))]
-    return got
-
-
 def colour(token):
     found = re.fullmatch(r"#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})", token)
     if not found:
@@ -151,23 +101,102 @@ def floats(token, count):
     return got
 
 
-def mix(under, over, weight):
-    """Two colours mixed straight, as BoxLib's color_mix and Painter's Color::Mix mix them."""
-    out = 0
-    for shift in (0, 8, 16):
-        a, b = (under >> shift) & 0xFF, (over >> shift) & 0xFF
-        out |= ((a * (255 - weight) + b * weight) // 255) << shift
-    return out
+def outlines(data):
+    """An SVG path's data as (verb, x, y) pieces in its own units, every
+    curve absolute and whole: MOVE, LINE, QUAD twice, CUBIC thrice."""
+    words, at, pieces = PATH_WORD.findall(data), 0, []
+    if "".join(words).replace(" ", "") != re.sub(r"[\s,]+", "", data):
+        raise Refused("a path's data holds what is no command and no number")
+    x = y = sx = sy = 0.0
+    last, pull, command, pending = None, None, None, None
+
+    def take(count):
+        nonlocal at
+        got = words[at:at + count]
+        if len(got) < count or any(w.isalpha() for w in got):
+            raise Refused(f"a path's {command} lacks its numbers")
+        at += count
+        return [float(w) for w in got]
+
+    def begin():
+        nonlocal pending
+        if pending is not None:
+            pieces.append(("MOVE",) + pending)
+            pending = None
+
+    while at < len(words):
+        if words[at].isalpha():
+            command = words[at]
+            at += 1
+            if command in "Aa":
+                raise Refused("a path's arcs are not taken: flatten them to curves first")
+        elif command is None or command in "Zz":
+            raise Refused("a path's data begins with a number, or has numbers after Z")
+        rel = command.islower()
+        c = command.upper()
+        ox, oy = (x, y) if rel else (0.0, 0.0)
+        if c == "M":
+            px, py = take(2)
+            x, y = ox + px, oy + py
+            sx, sy, pending = x, y, None
+            pieces.append(("MOVE", x, y))
+            command = "l" if rel else "L"
+        elif c == "Z":
+            x, y, pending = sx, sy, (sx, sy)
+        elif c in "LHV":
+            begin()
+            if c == "L":
+                px, py = take(2)
+                x, y = ox + px, oy + py
+            elif c == "H":
+                x = ox + take(1)[0]
+            else:
+                y = oy + take(1)[0]
+            pieces.append(("LINE", x, y))
+        elif c in "CS":
+            begin()
+            if c == "C":
+                c1 = take(2)
+                c1 = (ox + c1[0], oy + c1[1])
+            else:
+                c1 = (2 * x - pull[0], 2 * y - pull[1]) if last in "CS" else (x, y)
+            c2, end = take(2), take(2)
+            c2, end = (ox + c2[0], oy + c2[1]), (ox + end[0], oy + end[1])
+            pieces += [("CUBIC",) + c1, ("CUBIC",) + c2, ("CUBIC",) + end]
+            pull, (x, y) = c2, end
+        elif c in "QT":
+            begin()
+            if c == "Q":
+                c1 = take(2)
+                c1 = (ox + c1[0], oy + c1[1])
+            else:
+                c1 = (2 * x - pull[0], 2 * y - pull[1]) if last in "QT" else (x, y)
+            end = take(2)
+            end = (ox + end[0], oy + end[1])
+            pieces += [("QUAD",) + c1, ("QUAD",) + end]
+            pull, (x, y) = c1, end
+        else:
+            raise Refused(f"{command} is no command of a path")
+        last = c
+    if not pieces or pieces[0][0] != "MOVE":
+        raise Refused("a path begins with M")
+    # A move the pen makes with nothing drawn after it draws nothing.
+    drawn = [p for i, p in enumerate(pieces)
+             if p[0] != "MOVE" or (i + 1 < len(pieces) and pieces[i + 1][0] != "MOVE")]
+    if len(drawn) < 2:
+        raise Refused("a path draws nothing")
+    return drawn
 
 
 class Scene:
-    def __init__(self, n, m):
-        self.n, self.m = n, m
+    def __init__(self, n):
+        self.n = n
         self.units = None
         self.paper = 0
         self.acts = [0, 0, 0]
         self.paints, self.paint_names, self.stops = [], {}, []
         self.figures, self.figure_names = [], {}
+        self.pieces = []
         self.tracks = {}
 
     def place(self, value):
@@ -197,19 +226,6 @@ class Scene:
         return [round(one * a * r), round(one * b * r), round(one * c * r), round(one * d * r),
                 round(one * (a * cx + c * cy + e)), round(one * (b * cx + d * cy + f))]
 
-    def mascot_stops(self, stops):
-        hues, m = self.m["BoxDuppoHues"], self.m
-        out = []
-        for at, hue in stops:
-            if hue == m["BOXOS_DUPPO_GLOW"]:
-                rgb = mix(hues[m["BOXOS_DUPPO_CORE"]], 0xFFFFFF, m["BOXOS_DUPPO_GLOW_SHARE"])
-            elif hue == m["BOXOS_DUPPO_PUPIL_EDGE"]:
-                rgb = mix(hues[m["BOXOS_DUPPO_CORE"]], 0xFFFFFF, m["BOXOS_DUPPO_RIM_SHARE"])
-            else:
-                rgb = hues[hue]
-            out.append((at, 0xFF000000 | rgb))
-        return out
-
     def given_stops(self, token):
         out = []
         for item in token.split(","):
@@ -230,11 +246,6 @@ class Scene:
             if len(rest) != 1:
                 raise Refused("a solid paint is one colour")
             paint = (n["BOX_BRUSH_PAINT_SOLID"], colour(rest[0]), [], [0] * 6)
-        elif kind == "radial" and rest and rest[0].startswith("shade="):
-            o = self.options(rest, ("shade", "stops"))
-            shade = refer(self.m, o["shade"])
-            paint = (n["BOX_BRUSH_PAINT_RADIAL"], 0, self.mascot_stops(refer(self.m, o["stops"])),
-                     self.shade_space(*shade))
         elif kind == "radial":
             o = self.options(rest, ("matrix", "center", "radius", "stops"))
             paint = (n["BOX_BRUSH_PAINT_RADIAL"], 0, self.given_stops(o["stops"]),
@@ -262,8 +273,13 @@ class Scene:
         name, rest = words[0], words[1:]
         if name in self.figure_names:
             raise Refused(f"figure {name} is said twice")
-        shape_keys = {"group": (), "ellipse": ("disc", "oval", "center", "radius", "paint"),
-                      "rect": ("box", "paint")}[kind]
+        shape_keys = {"group": (), "ellipse": ("center", "radius", "paint"),
+                      "rect": ("box", "paint"), "path": ("shape", "d", "paint")}[kind]
+        data = None
+        if kind == "path":
+            ds = [i for i, w in enumerate(rest) if w.startswith("d=")]
+            if ds:
+                data, rest = " ".join([rest[ds[0]][2:]] + rest[ds[0] + 1:]), rest[:ds[0]]
         o = self.options(rest, shape_keys + ("in", "pivot", "at", "scale", "wide", "tall", "turn", "opacity"))
         n = self.n
         parent = n["BOX_SCENE_NONE"]
@@ -275,33 +291,33 @@ class Scene:
                 raise Refused(f"figure {name} is in {o['in']}, which is no group")
         shape, paint = [0, 0, 0, 0], 0
         if kind == "ellipse":
-            given = [k for k in ("disc", "oval", "center") if k in o]
-            if len(given) != 1:
-                raise Refused(f"ellipse {name} says one of disc, oval or center")
-            if "disc" in o:
-                x, y, r = refer(self.m, o["disc"])
-                shape = [x, y, r, r]
-            elif "oval" in o:
-                shape = list(refer(self.m, o["oval"]))
-            else:
-                radius = floats(o["radius"], 2 if "," in o.get("radius", "") else 1) if "radius" in o else None
-                if radius is None:
-                    raise Refused(f"ellipse {name} says its radius")
-                shape = floats(o["center"], 2) + (radius * 2 if len(radius) == 1 else radius)
-            shape = [self.place(v) for v in shape]
+            if "center" not in o or "radius" not in o:
+                raise Refused(f"ellipse {name} says its center and radius")
+            radius = floats(o["radius"], 2 if "," in o["radius"] else 1)
+            shape = [self.place(v) for v in floats(o["center"], 2) + (radius * 2 if len(radius) == 1 else radius)]
         elif kind == "rect":
             if "box" not in o:
                 raise Refused(f"rect {name} says its box")
             shape = [self.place(v) for v in floats(o["box"], 4)]
+        elif kind == "path":
+            if (data is None) == ("shape" not in o):
+                raise Refused(f"path {name} says one of shape= or d=")
+            if data is None:
+                like = self.figure_names.get(o["shape"])
+                if like is None or self.figures[like]["kind"] != n["BOX_SCENE_PATH"]:
+                    raise Refused(f"path {name} takes the shape of {o['shape']}, which is no path said before it")
+                shape = list(self.figures[like]["shape"])
+            else:
+                got = outlines(data)
+                if len(got) > n["BOX_SCENE_PIECES_MOST"]:
+                    raise Refused(f"path {name} has {len(got)} pieces, more than {n['BOX_SCENE_PIECES_MOST']}")
+                shape = [len(self.pieces), len(got), 0, 0]
+                self.pieces += [(n["BOX_SCENE_" + verb], self.place(px), self.place(py)) for verb, px, py in got]
         if kind != "group":
             if o.get("paint") not in self.paint_names:
                 raise Refused(f"{kind} {name} is painted with {o.get('paint')}, which is no paint said before it")
             paint = self.paint_names[o["paint"]]
-        if "pivot" in o:
-            pivot = refer(self.m, o["pivot"])[:2] if re.match(r"^[A-Za-z]", o["pivot"]) else floats(o["pivot"], 2)
-        else:
-            pivot = [0.0, 0.0]
-        pivot = [self.place(v) for v in pivot]
+        pivot = [self.place(v) for v in (floats(o["pivot"], 2) if "pivot" in o else [0.0, 0.0])]
         at = [self.place(v) for v in floats(o["at"], 2)] if "at" in o else pivot
         scale = float(o.get("scale", "1"))
         base = [at[0] - pivot[0], at[1] - pivot[1],
@@ -406,6 +422,8 @@ class Scene:
             body += STOP.pack(at, ink)
         for f in self.figures:
             body += FIGURE.pack(f["kind"], f["parent"], f["paint"], *f["shape"], *f["pivot"], *f["base"])
+        for verb, px, py in self.pieces:
+            body += PIECE.pack(verb, px, py)
         first = 0
         for act, figure, what in order:
             body += TRACK.pack(act, figure, what, first, len(self.tracks[(act, figure, what)]))
@@ -414,7 +432,7 @@ class Scene:
             body += KEY.pack(at, value, ease)
         size = HEAD.size + len(body)
         head = HEAD.pack(n["BOX_SCENE_MAGIC"], size, self.units, self.paper, *self.acts, len(self.paints),
-                         len(self.stops), len(self.figures), len(order), len(keys))
+                         len(self.stops), len(self.figures), len(self.pieces), len(order), len(keys))
         return head + bytes(body)
 
 
@@ -423,9 +441,9 @@ def read(path, n):
     if len(data) < HEAD.size or data[:8] != n["BOX_SCENE_MAGIC"]:
         print(f"scene: {path} is no scene")
         return 1
-    magic, size, units, paper, enter, wait, leave, paints, stops, figures, tracks, keys = HEAD.unpack_from(data)
+    magic, size, units, paper, enter, wait, leave, paints, stops, figures, pieces, tracks, keys = HEAD.unpack_from(data)
     print(f"scene: {size} bytes, {units} units across, paper #{paper:06X}, acts {enter}/{wait}/{leave} ms, "
-          f"{paints} paints, {stops} stops, {figures} figures, {tracks} tracks, {keys} keys")
+          f"{paints} paints, {stops} stops, {figures} figures, {pieces} pieces, {tracks} tracks, {keys} keys")
     at = HEAD.size + paints * PAINT.size + stops * STOP.size
     kinds = {n[v]: k for k, v in KINDS.items()}
     for i in range(figures):
@@ -442,7 +460,7 @@ def main(argv):
     n = numbers()
     if argv[1] == "read":
         return read(argv[2], n)
-    scene = Scene(n, mascot())
+    scene = Scene(n)
     try:
         scene.parse(argv[2])
     except Refused as why:

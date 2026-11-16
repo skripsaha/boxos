@@ -18,11 +18,13 @@
  * sheet of everything it draws, SHEET.png, to look at.
  *
  * frames: the packed scene read; its first frame on screens from 640x480 to
- * 3840x2160 and standing up — Duppo in the middle, his size the scene's, the
- * corners the paper; every frame of enter, of a round and more of wait, and of
- * leave begun in the middle of a round, drawn only where it changed and held
- * to the same frame drawn whole, pixel for pixel; enter's last frame wait's
- * first; leave ending in the paper alone; the scene damaged one named way at a
+ * 3840x2160 and standing up — the same picture on each, the corners the
+ * paper; every figure drawn whole on a screen of 8K through enter and wait;
+ * every frame of enter, of a round and more of wait, and of leave begun in
+ * the middle of a round, drawn only where it changed and held to the same
+ * frame drawn whole, pixel for pixel; enter's last frame wait's first; leave
+ * ending in one colour, nothing of the scene left; the scene and its paths
+ * damaged one named way at a
  * time refused for what is wrong, and thousands of random damages read and
  * played without a byte read or drawn past where it may be. Then a few of its
  * frames, PNG files in OUTDIR, to look at.
@@ -1013,37 +1015,81 @@ static uint8_t *ReadFile(const char *Path, uint64_t *Size)
     return Bytes;
 }
 
+/* The first frame on six screens: the corners the paper, something drawn,
+ * and what is drawn the same picture on each — its box, measured in the
+ * shorter side, where it is on the others to a pixel or two. */
 static void CheckFirstFrames(const BoxScene *S)
 {
     static const uint32_t Screens[6][2] = { { 640, 480 }, { 1024, 768 }, { 1280, 800 },
                                             { 1920, 1080 }, { 3840, 2160 }, { 768, 1024 } };
-    int  Held = 1;
-    char Line[240];
+    int    Held = 1;
+    double Seen[6][4];
+    char   Line[240];
     for (uint32_t I = 0; I < 6u; I++) {
         const uint32_t W = Screens[I][0], H = Screens[I][1], Short = W < H ? W : H;
+        const uint32_t Paper = S->Head->Paper;
         Stage          T;
         StageMake(&T, S, W, H);
         Frame(&T, 0);
-        const uint32_t Paper = S->Head->Paper;
-        if (*At(&T.Board, 0, 0) != Paper || *At(&T.Board, (int32_t)W - 1, (int32_t)H - 1) != Paper ||
-            *At(&T.Board, (int32_t)W / 2, (int32_t)H / 2) == Paper || !Untouched(&T.Board, T.Board.Canvas.Clip))
+        int32_t Left = (int32_t)W, Top = (int32_t)H, Right = -1, Bottom = -1;
+        for (int32_t Y = 0; Y < (int32_t)H; Y++)
+            for (int32_t X = 0; X < (int32_t)W; X++)
+                if (*At(&T.Board, X, Y) != Paper) {
+                    if (X < Left) Left = X;
+                    if (X > Right) Right = X;
+                    if (Y < Top) Top = Y;
+                    if (Y > Bottom) Bottom = Y;
+                }
+        if (*At(&T.Board, 0, 0) != Paper || *At(&T.Board, (int32_t)W - 1, (int32_t)H - 1) != Paper || Right < 0 ||
+            !Untouched(&T.Board, T.Board.Canvas.Clip))
             Held = 0;
-        /* Across the row through the body's middle, the first and last
-         * pixels that are not the paper: the body, its middle the screen's. */
-        int32_t Left = -1, Right = -1;
-        for (int32_t X = 0; X < (int32_t)W; X++)
-            if (*At(&T.Board, X, (int32_t)H / 2) != Paper) {
-                if (Left < 0) Left = X;
-                Right = X;
-            }
-        const double Across = Right - Left + 1, Want = 0.30036 * Short;
-        if (Left < 0 || fabs((Left + Right + 1) / 2.0 - W / 2.0) > 1.0 || fabs(Across - Want) > Want * 0.01 + 2.0)
-            Held = 0;
+        Seen[I][0] = (Left - W / 2.0) / Short;
+        Seen[I][1] = (Right + 1 - W / 2.0) / Short;
+        Seen[I][2] = (Top - H / 2.0) / Short;
+        Seen[I][3] = (Bottom + 1 - H / 2.0) / Short;
+        for (uint32_t K = 0; K < 4u && I; K++)
+            if (fabs(Seen[I][K] - Seen[0][K]) > 2.5 / 480.0 + 2.0 / Short) Held = 0;
         StageFree(&T);
     }
     snprintf(Line, sizeof(Line),
-             "the first frame on six screens, 640x480 to 3840x2160 and one standing up: Duppo in the middle, three "
-             "tenths of the shorter side across, the corners the paper");
+             "the first frame on six screens, 640x480 to 3840x2160 and one standing up: the corners the paper, the "
+             "same picture on each (%.3f..%.3f across, %.3f..%.3f down, in the shorter side)",
+             Seen[0][0], Seen[0][1], Seen[0][2], Seen[0][3]);
+    Check(Held, Line);
+}
+
+/* Every figure's outline on a screen of 8K, through every frame of enter and
+ * a round of wait: none spills past the edges a figure is drawn with. */
+static void CheckRoom(const BoxScene *S)
+{
+    Stage    T;
+    int      Held = 1;
+    uint32_t Spilled = 0, Looked = 0;
+    char     Line[200];
+    StageMake(&T, S, 7680, 4320);
+    for (uint32_t Act = 0; Act < 2u; Act++) {
+        if (Act) {
+            BoxBrushRect Ignored[8];
+            (void)BoxScenePlayAt(&T.Player, S->Head->Acts[0], Ignored, 8);
+            BoxScenePlayAct(&T.Player, Act);
+        }
+        for (uint32_t Ms = 0; Ms <= S->Head->Acts[Act]; Ms += 100u) {
+            BoxBrushRect Ignored[8];
+            (void)BoxScenePlayAt(&T.Player, Ms, Ignored, 8);
+            for (uint32_t I = 0; I < S->Head->Figures; I++) {
+                if (S->Figures[I].Kind == BOX_SCENE_GROUP || T.Laid[I].Opacity == 0) continue;
+                BoxBrushOutline O;
+                BoxSceneOutline(&T.Player, I, &O);
+                Looked++;
+                if (O.Spilled) Spilled++;
+            }
+        }
+    }
+    Held = Spilled == 0;
+    StageFree(&T);
+    snprintf(Line, sizeof(Line),
+             "on a screen of 8K, every figure seen through enter and a round of wait is drawn whole: %u outline(s), "
+             "%u spilled", Looked, Spilled);
     Check(Held, Line);
 }
 
@@ -1112,25 +1158,31 @@ static void CheckPlay(const BoxScene *S, const char *Out)
             WritePng(Path, &T.Board.Canvas);
         }
     }
-    int Dark = 1;
+    int            Even = 1;
+    const uint32_t Ends = *At(&T.Board, 0, 0);
     for (uint32_t Y = 0; Y < H; Y++)
         for (uint32_t X = 0; X < W; X++)
-            if (*At(&T.Board, (int32_t)X, (int32_t)Y) != S->Head->Paper) Dark = 0;
-    Check(Held && Dark && Untouched(&T.Board, T.Board.Canvas.Clip),
-          "leave, begun in the middle of a round, drawn where it changed is the frame drawn whole, and ends in the "
-          "paper alone");
+            if (*At(&T.Board, (int32_t)X, (int32_t)Y) != Ends) Even = 0;
+    snprintf(Line, sizeof(Line),
+             "leave, begun in the middle of a round, drawn where it changed is the frame drawn whole, and ends in one "
+             "colour, #%06X, nothing of the scene left", Ends & 0xFFFFFFu);
+    Check(Held && Even && Untouched(&T.Board, T.Board.Canvas.Clip), Line);
     StageFree(&T);
 }
 
 /* A copy of the scene with four bytes at Offset written as Value — none when
  * Offset lies past it — read as Cut bytes, or all of it. */
-static const char *Damaged(const uint8_t *Bytes, uint64_t Size, uint64_t Offset, uint32_t Value, uint64_t Cut)
+/* The scene with Span words from Offset set to Value, read Cut bytes long (0:
+ * whole): why it is refused, or NULL. */
+static const char *Damaged(const uint8_t *Bytes, uint64_t Size, uint64_t Offset, uint32_t Value, uint32_t Span,
+                           uint64_t Cut)
 {
-    static uint8_t Copy[1u << 16];
+    static uint8_t Copy[BOX_SCENE_FILE_MOST];
     BoxScene       S;
     if (Size > sizeof(Copy)) return "the stand's room is too small";
     memcpy(Copy, Bytes, Size);
-    if (Size >= 4u && Offset <= Size - 4u) memcpy(Copy + Offset, &Value, 4);
+    for (uint32_t K = 0; K < Span; K++)
+        if (Size >= 4u && Offset + 4u * K <= Size - 4u) memcpy(Copy + Offset + 4u * K, &Value, 4);
     return BoxSceneRead(Copy, Cut ? Cut : Size, &S);
 }
 
@@ -1140,48 +1192,94 @@ static void CheckRefusals(const uint8_t *Bytes, uint64_t Size, const BoxScene *S
     const uint64_t      Paints  = sizeof(BoxSceneHead);
     const uint64_t      Stops   = Paints + (uint64_t)H->Paints * sizeof(BoxScenePaint);
     const uint64_t      Figures = Stops + (uint64_t)H->Stops * sizeof(BoxBrushStop);
-    const uint64_t      Tracks  = Figures + (uint64_t)H->Figures * sizeof(BoxSceneFigure);
+    const uint64_t      Pieces  = Figures + (uint64_t)H->Figures * sizeof(BoxSceneFigure);
+    const uint64_t      Tracks  = Pieces + (uint64_t)H->Pieces * sizeof(BoxScenePiece);
     const uint64_t      Keys    = Tracks + (uint64_t)H->Tracks * sizeof(BoxSceneTrack);
-    const struct {
+    /* The first figure that is a shape of its own, and whether there are
+     * tracks and keys to damage: the cases are the scene's, whatever it holds. */
+    uint32_t Shape = 0;
+    while (Shape < H->Figures && S->Figures[Shape].Kind != BOX_SCENE_ELLIPSE && S->Figures[Shape].Kind != BOX_SCENE_RECT)
+        Shape++;
+    const uint64_t Own = Figures + (uint64_t)Shape * sizeof(BoxSceneFigure);
+    typedef struct {
         uint64_t    Offset;
         uint32_t    Value;
+        uint32_t    Span;
         uint64_t    Cut;
+        int         Asks;   /* what the scene must hold for the case: 0 nothing, 1 a shape, 2 two tracks */
         const char *Why;
-    } Cases[] = {
-        { 0, 0x584F4258u, 0, "it does not begin as a scene does" },
-        { ~0ull, 0, Size - 1u, "its size is not the size of its tables" },
-        { 8, (uint32_t)Size + 12u, 0, "its size is not the size of its tables" },
-        { 12, 3, 0, "its units are past what a screen holds" },
-        { 16, 0x01000000u, 0, "its paper is no colour" },
-        { 24, 0, 0, "its wait act has no length to go round" },
-        { Paints, 9, 0, "a paint of no kind a scene has" },
-        { Stops, BOX_BRUSH_UNIT + 1u, 0, "a gradient's stops do not rise from 0 to 1" },
-        { Figures + 4u, 5, 0, "a figure's group is not a group laid before it" },
-        { Figures + sizeof(BoxSceneFigure) + 4u, 1, 0, "a figure's group is not a group laid before it" },
-        { Figures + sizeof(BoxSceneFigure) + 8u, 99, 0, "a figure is painted with no paint the scene keeps" },
-        { Figures + sizeof(BoxSceneFigure) + 20u, 0, 0, "a figure's shape has no size" },
-        { Figures + sizeof(BoxSceneFigure) + 56u, 256, 0, "a figure stands where none may" },
-        { Tracks + 4u, 99, 0, "a track moves what the scene has not" },
-        { Tracks + sizeof(BoxSceneTrack) + 4u, 0, 0, "the tracks are not kept by act, figure and what, one for each" },
-        { Tracks + 16u, 999, 0, "a track's keys lie past the keys kept" },
-        { Keys + sizeof(BoxSceneKey), 999999, 0, "a track's keys do not rise within its act" },
-        { Keys + 8u, 7, 0, "a track's key is none a scene has" },
+    } Case;
+    const Case Cases[] = {
+        { 0, 0x584F4258u, 1, 0, 0, "it does not begin as a scene does" },
+        { ~0ull, 0, 1, Size - 1u, 0, "its size is not the size of its tables" },
+        { 8, (uint32_t)Size + 12u, 1, 0, 0, "its size is not the size of its tables" },
+        { 12, 3, 1, 0, 0, "its units are past what a screen holds" },
+        { 16, 0x01000000u, 1, 0, 0, "its paper is no colour" },
+        { 24, 0, 1, 0, 0, "its wait act has no length to go round" },
+        { Paints, 9, 1, 0, 0, "a paint of no kind a scene has" },
+        { Stops, BOX_BRUSH_UNIT + 1u, 1, 0, 0, "a gradient's stops do not rise from 0 to 1" },
+        { Figures + 4u, 5, 1, 0, 0, "a figure's group is not a group laid before it" },
+        { Figures + sizeof(BoxSceneFigure) + 4u, 1, 1, 0, 0, "a figure's group is not a group laid before it" },
+        { Own + 8u, 0xFFFFu, 1, 0, 1, "a figure is painted with no paint the scene keeps" },
+        { Own + 20u, 0, 1, 0, 1, "a figure's shape has no size" },
+        { Figures + sizeof(BoxSceneFigure) + 56u, 256, 1, 0, 0, "a figure stands where none may" },
+        { Tracks + 4u, 0xFFFFu, 1, 0, 2, "a track moves what the scene has not" },
+        { Tracks + sizeof(BoxSceneTrack), 0, 3, 0, 2, "the tracks are not kept by act, figure and what, one for each" },
+        { Tracks + 16u, 0x7FFFFFFFu, 1, 0, 2, "a track's keys lie past the keys kept" },
+        { Keys + sizeof(BoxSceneKey), 999999, 1, 0, 2, "a track's keys do not rise within its act" },
+        { Keys + 8u, 7, 1, 0, 2, "a track's key is none a scene has" },
     };
-    int  Held = 1;
-    char Line[200];
+    int    Held = 1;
+    size_t Tried = 0;
+    char   Line[200];
     for (size_t I = 0; I < sizeof(Cases) / sizeof(Cases[0]); I++) {
-        const char *Why = Damaged(Bytes, Size, Cases[I].Offset, Cases[I].Value, Cases[I].Cut);
+        if ((Cases[I].Asks == 1 && Shape == H->Figures) || (Cases[I].Asks == 2 && H->Tracks < 2u)) continue;
+        const char *Why = Damaged(Bytes, Size, Cases[I].Offset, Cases[I].Value, Cases[I].Span, Cases[I].Cut);
+        Tried++;
         if (!Why || strcmp(Why, Cases[I].Why) != 0) {
             printf("    case %zu: wanted \"%s\", got \"%s\"\n", I, Cases[I].Why, Why ? Why : "(read)");
             Held = 0;
         }
     }
     snprintf(Line, sizeof(Line), "the scene damaged %zu named ways, one at a time: each refused for what is wrong",
-             sizeof(Cases) / sizeof(Cases[0]));
+             Tried);
     Check(Held, Line);
 
+    /* A path's pieces damaged, when the scene draws one. */
+    uint32_t Path = 0, Cubic = 0;
+    while (Path < H->Figures && S->Figures[Path].Kind != BOX_SCENE_PATH) Path++;
+    while (Cubic < H->Pieces && S->Pieces[Cubic].Verb != BOX_SCENE_CUBIC) Cubic++;
+    if (Path < H->Figures && Cubic < H->Pieces) {
+        const uint64_t Figure = Figures + (uint64_t)Path * sizeof(BoxSceneFigure);
+        const uint64_t First  = Pieces + (uint64_t)S->Figures[Path].Shape[0] * sizeof(BoxScenePiece);
+        const struct {
+            uint64_t    Offset;
+            uint32_t    Value;
+            const char *Why;
+        } Paths[] = {
+            { Figure + 16u, H->Pieces + 1u, "a path's pieces lie past the pieces kept" },
+            { Figure + 16u, 1, "a path's pieces lie past the pieces kept" },
+            { Figure + 20u, 1, "a path's pieces lie past the pieces kept" },
+            { First, 9, "a path's pieces are none the pen follows" },
+            { First, BOX_SCENE_LINE, "a path's pieces are none the pen follows" },
+            { First + 4u, 0x7FFFFFFFu, "a path reaches past what the brush draws" },
+            { Pieces + (uint64_t)Cubic * sizeof(BoxScenePiece), BOX_SCENE_LINE, "a path's curve is cut short" },
+        };
+        Held = 1;
+        for (size_t I = 0; I < sizeof(Paths) / sizeof(Paths[0]); I++) {
+            const char *Why = Damaged(Bytes, Size, Paths[I].Offset, Paths[I].Value, 1, 0);
+            if (!Why || strcmp(Why, Paths[I].Why) != 0) {
+                printf("    path case %zu: wanted \"%s\", got \"%s\"\n", I, Paths[I].Why, Why ? Why : "(read)");
+                Held = 0;
+            }
+        }
+        snprintf(Line, sizeof(Line), "a path damaged %zu named ways, one at a time: each refused for what is wrong",
+                 sizeof(Paths) / sizeof(Paths[0]));
+        Check(Held, Line);
+    }
+
     /* Random damage: read, and what reads played, all under the sanitizers. */
-    static uint8_t Copy[1u << 16];
+    static uint8_t Copy[BOX_SCENE_FILE_MOST];
     uint32_t       Read = 0;
     Held                = 1;
     for (uint32_t I = 0; I < 20000u; I++) {
@@ -1227,6 +1325,7 @@ static int Frames(const char *Path, const char *Out)
     Check(!Why, Line);
     if (Why) return 0;
     CheckFirstFrames(&S);
+    CheckRoom(&S);
     CheckPlay(&S, Out);
     CheckRefusals(Bytes, Size, &S);
     free(Bytes);

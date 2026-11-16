@@ -16,9 +16,12 @@
 
 #include "boxos_scene.h"
 
-/* The most edges one figure is drawn with: the roundest shape, and a
- * rectangle's four to spare. */
-#define BOX_SCENE_EDGES (BOX_BRUSH_STEPS_MOST + 8u)
+/* The most edges one figure is drawn with: four times the roundest ellipse —
+ * a path's curves are broken by how far they bend on the canvas, and a
+ * letter of a word across a screen of 8K takes some hundreds. A figure that
+ * would take more is not drawn (its outline spills); the stand holds every
+ * scene the machine carries to drawing whole on such a screen. */
+#define BOX_SCENE_EDGES (4u * BOX_BRUSH_STEPS_MOST)
 
 typedef struct BoxScenePose {
     int32_t Value[BOX_SCENE_WHATS];
@@ -126,12 +129,30 @@ static inline BoxBrushMatrix BoxSceneLocal(const BoxSceneFigure *F, const BoxSce
 }
 
 /* Figure I's outline built through its world, into the player's edges. */
+/* A path's pieces followed by the pen. */
+static inline void BoxSceneAddPath(const BoxScene *S, const BoxSceneFigure *F, BoxBrushOutline *O)
+{
+    const BoxScenePiece *P = &S->Pieces[F->Shape[0]];
+    for (uint32_t K = 0; K < (uint32_t)F->Shape[1];) {
+        switch (P[K].Verb) {
+        case BOX_SCENE_MOVE: BoxBrushMoveTo(O, P[K].X, P[K].Y); K += 1u; break;
+        case BOX_SCENE_LINE: BoxBrushLineTo(O, P[K].X, P[K].Y); K += 1u; break;
+        case BOX_SCENE_QUAD: BoxBrushQuadTo(O, P[K].X, P[K].Y, P[K + 1u].X, P[K + 1u].Y); K += 2u; break;
+        default:
+            BoxBrushCubicTo(O, P[K].X, P[K].Y, P[K + 1u].X, P[K + 1u].Y, P[K + 2u].X, P[K + 2u].Y);
+            K += 3u;
+            break;
+        }
+    }
+}
+
 static inline void BoxSceneOutline(const BoxScenePlayer *P, uint32_t I, BoxBrushOutline *O)
 {
     const BoxSceneFigure *F = &P->Scene->Figures[I];
     BoxBrushBegin(O, P->Edges, BOX_SCENE_EDGES, &P->Laid[I].World);
-    if (F->Kind == BOX_SCENE_ELLIPSE) BoxBrushAddEllipse(O, F->Shape[0], F->Shape[1], F->Shape[2], F->Shape[3], 0);
-    else                              BoxBrushAddRect(O, F->Shape[0], F->Shape[1], F->Shape[2], F->Shape[3], 0);
+    if (F->Kind == BOX_SCENE_ELLIPSE)   BoxBrushAddEllipse(O, F->Shape[0], F->Shape[1], F->Shape[2], F->Shape[3], 0);
+    else if (F->Kind == BOX_SCENE_RECT) BoxBrushAddRect(O, F->Shape[0], F->Shape[1], F->Shape[2], F->Shape[3], 0);
+    else                                BoxSceneAddPath(P->Scene, F, O);
     BoxBrushClose(O);
 }
 
