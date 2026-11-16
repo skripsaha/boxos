@@ -5,7 +5,7 @@
  * gangway_crossings.c), it shows what the loader found and chose — the kernel
  * and the book's word on it, the volume, the screen, the processors, the
  * crossings — and lets the person change, for this one start, what
- * gangway.settings sets: the same four settings, handed on as the same stamps.
+ * gangway.settings sets: the same five settings, taken as the file's are.
  * It shows this start's journal, the log the kernel kept of the start before
  * and the crossings kept (gangway_panel_log.c), and it restarts the machine,
  * turns it off, or restarts it into the firmware's own settings.

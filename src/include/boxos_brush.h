@@ -346,7 +346,7 @@ static inline uint32_t BoxBrushShare(uint32_t Coverage, uint32_t Alpha, uint32_t
 /* Color (its RGB) laid over Below at Share of 255, mixed as light. */
 static inline uint32_t BoxBrushLay(uint32_t Below, uint32_t Color, uint32_t Share)
 {
-    if (Share >= BOX_BRUSH_FULL) return Color & 0x00FFFFFFu;
+    if (Share >= BOX_BRUSH_FULL || (Below & 0x00FFFFFFu) == (Color & 0x00FFFFFFu)) return Color & 0x00FFFFFFu;
     uint32_t Laid = 0;
     for (uint32_t Shift = 0; Shift <= 16u; Shift += 8u) {
         const uint32_t B = (Below >> Shift) & 0xFFu, C = (Color >> Shift) & 0xFFu;

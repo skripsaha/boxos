@@ -10,9 +10,11 @@
 # acts meeting without a seam, and every way it may be damaged refused or
 # played safely. Then on a machine: the glass Gangway leaves, dumped the
 # moment it says the scene's first frame is on it, the stand's frame byte for
-# byte, and the kernel told which scene; `settings gangway scene off` in the
-# hub, and at the next start no scene is drawn, said, the firmware's picture
-# left as it is.
+# byte, and the kernel told which scene; the display going on from that frame
+# and leaving once the hub waits for the person, the console on the glass
+# after; `settings gangway scene off` in the hub, and at the next start no
+# scene is drawn, said, the firmware's picture left as it is, and the display
+# plays none.
 #
 # SOURCED, NEVER RUN — by logcheck.sh, which dispatches `scene` to run_scene
 # here; everything it calls (build, chk, harness, the waits, the keys) is
@@ -52,6 +54,45 @@ scene_boot() {
         sleep 0.02
     done
     mon_raw stop && mon_shot "$SCRATCH/scene.$tag.glass.ppm" && mon_raw cont
+}
+
+# Whether a PPM shows more than `least` pixels that are not black: 0, or 1.
+scene_lit() {
+    python3 - "$1" "$2" <<'EOF'
+import sys
+data, fields, at = open(sys.argv[1], "rb").read(), [], 0
+while len(fields) < 4:
+    while data[at:at + 1].isspace():
+        at += 1
+    end = at
+    while not data[end:end + 1].isspace():
+        end += 1
+    fields.append(data[at:end])
+    at = end
+pixels = data[at + 1:]
+lit = sum(1 for k in range(0, len(pixels), 3) if pixels[k:k + 3] != b"\0\0\0")
+sys.exit(0 if lit > int(sys.argv[2]) else 1)
+EOF
+}
+
+# Whether a PPM's middle pixel is not black — Duppo there, not the console's
+# dark page: 0, or 1.
+scene_middle() {
+    python3 - "$1" <<'EOF'
+import sys
+data, fields, at = open(sys.argv[1], "rb").read(), [], 0
+while len(fields) < 4:
+    while data[at:at + 1].isspace():
+        at += 1
+    end = at
+    while not data[end:end + 1].isspace():
+        end += 1
+    fields.append(data[at:end])
+    at = end
+width, height = int(fields[1]), int(fields[2])
+middle = at + 1 + 3 * ((height // 2) * width + width // 2)
+sys.exit(0 if data[middle:middle + 3] != b"\0\0\0" else 1)
+EOF
 }
 
 # A line typed into the hub, Enter, and `until` waited for after it.
@@ -94,7 +135,27 @@ run_scene() {
     # The first start: the scene drawn by Gangway, the kernel told; then the
     # scene turned off in the hub for the starts after.
     if scene_boot first; then
-        wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" && sleep 2
+        # A third of a second into enter, which is played to its end whatever
+        # comes: the bubbles on their way out.
+        local i
+        for ((i = 0; i < WAIT_QUIET_S * 50; i++)); do
+            grep -aq "\[display\] scene: the one the loader left" build/serial.log 2>/dev/null && break
+            sleep 0.02
+        done
+        sleep 0.3
+        mon_shot "$SCRATCH/scene.enter.glass.ppm"
+        wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S"
+        # The scene leaves once the hub waits for the person: the glass
+        # looked at until it is the console, the scene gone and text on it.
+        size=$(grep -a "Gangway: the scene's first frame is on the screen, " build/serial.log | tr -d '\r' | head -1 |
+            sed -nE "s/.*on the screen, ([0-9]+)x([0-9]+) — .*/\1 \2/p")
+        [ -n "$size" ] && "$stand" first build/boot.scene $size "$SCRATCH/scene.first.stand.ppm"
+        for ((i = 0; i < 50; i++)); do
+            mon_shot "$SCRATCH/scene.first.console.ppm" &&
+                ! scene_same "$SCRATCH/scene.first.console.ppm" "$SCRATCH/scene.first.stand.ppm" &&
+                scene_lit "$SCRATCH/scene.first.console.ppm" 500 && break
+            sleep 0.2
+        done
         scene_say "settings gangway scene off" "when it starts next"
         cp build/serial.log "$SCRATCH/serial.scene.first.log"
     fi
@@ -103,11 +164,20 @@ run_scene() {
         sed -nE "s/.*on the screen, ([0-9]+)x([0-9]+) — .*/\1 \2/p")
     grep -aq "Gangway: boot.scene is a scene of 11 figure(s)" "$L" && [ -n "$size" ]
     chk $? "scene (gangway): Gangway reads boot.scene by its name and draws its first frame ($(echo $size | tr ' ' x))"
-    [ -n "$size" ] && "$stand" first build/boot.scene $size "$SCRATCH/scene.first.stand.ppm" &&
-        scene_same "$SCRATCH/scene.first.glass.ppm" "$SCRATCH/scene.first.stand.ppm"
+    [ -n "$size" ] && scene_same "$SCRATCH/scene.first.glass.ppm" "$SCRATCH/scene.first.stand.ppm"
     chk $? "scene (gangway): the glass, dumped the moment Gangway says so, is the stand's first frame byte for byte"
     grep -aqE "\[Boarding\]   the loader left the first frame of its scene on the screen \(fid [0-9]+, [0-9]+ bytes\)" "$L"
     chk $? "scene (gangway): the kernel is told which scene the glass shows"
+    grep -aqE "\[display\] scene: the one the loader left \(fid [0-9]+, 11 figures\) goes on from its frame, $(echo $size | tr ' ' x)" "$L"
+    chk $? "scene (display): the display goes on from the frame the loader left, at the loader's size"
+    [ -s "$SCRATCH/scene.enter.glass.ppm" ] &&
+        ! scene_same "$SCRATCH/scene.enter.glass.ppm" "$SCRATCH/scene.first.stand.ppm" &&
+        scene_middle "$SCRATCH/scene.enter.glass.ppm"
+    chk $? "scene (display): it plays — a third of a second into enter the glass is neither the loader's frame nor the console"
+    [ -s "$SCRATCH/scene.first.console.ppm" ] &&
+        ! scene_same "$SCRATCH/scene.first.console.ppm" "$SCRATCH/scene.first.stand.ppm" &&
+        scene_lit "$SCRATCH/scene.first.console.ppm" 500
+    chk $? "scene (display): once the hub waits for the person the scene leaves — the glass is the console, not the scene, and not dark"
     grep -aq "gangway.settings" "$L" && grep -aq "when it starts next" "$L"
     chk $? "scene (off): settings gangway scene off, said to take effect when the machine starts next"
 
@@ -128,8 +198,9 @@ run_scene() {
     grep -aq "Gangway: gangway.settings sets scene off" "$L" && grep -aq "Gangway: no scene is drawn — the scene is off" "$L"
     chk $? "scene (off): the next start reads scene off and says no scene is drawn"
     [ -s "$SCRATCH/scene.off.glass.ppm" ] && ! scene_same "$SCRATCH/scene.off.glass.ppm" "$SCRATCH/scene.first.stand.ppm" &&
-        [ "$(grep -ac "the loader left the first frame of its scene" "$L")" = 1 ] && grep -aq "BoxOS Hub" "$L"
-    chk $? "scene (off): the glass is not the scene, the kernel hears of none, and the start reaches the hub"
+        [ "$(grep -ac "the loader left the first frame of its scene" "$L")" = 1 ] &&
+        [ "$(grep -ac "\[display\] scene: the one the loader left" "$L")" = 1 ] && grep -aq "BoxOS Hub" "$L"
+    chk $? "scene (off): the glass is not the scene, neither the kernel nor the display hears of one, and the start reaches the hub"
 
     cp "$SCRATCH/scene.before.img" build/boxos.img
 }

@@ -42,6 +42,13 @@
  * the kernel's Touch at that moment is one more arrival the sleep watches;
  * with no effect over the glass there is no alarm, and the sleep costs nothing.
  *
+ * The first thing on the glass may be the loader's: the first frame of the
+ * scene the machine starts with (scene.cpp). It is played on from that very
+ * frame, the console kept under it, its enter act to its end and on until a
+ * program waits for the person — then it leaves and the console is drawn
+ * whole; a key, a line said in error or the glass turned over takes it away
+ * at once.
+ *
  * On a framebuffer each character is drawn as the typesetter pictures it
  * (typesetter.cpp), in the font the person names in the display's settings —
  * text font, and text tags to tell files of one name apart — read once at
@@ -82,6 +89,7 @@
 #include "lanes.h"
 #include "layers.h"
 #include "ring.h"
+#include "scene.h"
 #include "typesetter.h"
 
 BOX_LIFE("serves\nrise");
@@ -208,7 +216,7 @@ void HoldFrame(const ConsoleRun &Run, std::uint32_t Lane)
 
 void Present()
 {
-    if (!g_dirty) return;
+    if (!g_dirty || SceneOn()) return;
     g_dirty = false;
     Caret At;
     LayersCompose(*g_model, g_easel->PageColor(), g_composed, At);
@@ -286,10 +294,19 @@ bool DeathStep()
     return Did;
 }
 
+// The scene gone at once, the console drawn whole in its place.
+void SceneGoes()
+{
+    if (!SceneOn()) return;
+    SceneEnd();
+    g_dirty = true;
+}
+
 bool ScreenStep()
 {
     const bool Again = g_easel->Step();
     g_dirty |= Again;
+    if (Again) SceneGoes();   // the glass was turned over
     return Again;
 }
 
@@ -318,7 +335,8 @@ bool EffectStep()
 // glass.
 void SetAlarm()
 {
-    const std::uint64_t Due = EffectsDue();
+    const std::uint64_t Effect = EffectsDue(), Scene = SceneDue();
+    const std::uint64_t Due    = !Effect ? Scene : !Scene ? Effect : std::min(Effect, Scene);
     if (Due == g_alarm) return;
     if (Due == 0) alarm_cancel();
     else alarm_set(Due);
@@ -353,9 +371,22 @@ bool LaneStep()
 
 bool RingStep()
 {
+    const std::uint64_t Errors = g_ring.Errors();
     const bool Drew = g_ring.CatchUp(*g_model);
     g_dirty |= Drew;
+    if (g_ring.Errors() != Errors) SceneGoes();   // a line said in error is shown at once
     return Drew;
+}
+
+// The scene's frame when one is due; it leaves once a program waits for the
+// person — a lane listens to the keyboard — and the console is drawn whole
+// when it is gone.
+bool SceneMove()
+{
+    if (!SceneOn()) return false;
+    const bool Moved = SceneStep(LanesTyping() != 0);
+    if (!SceneOn()) g_dirty = true;
+    return Moved;
 }
 
 bool LayerStep()
@@ -641,7 +672,10 @@ std::optional<typecase::Font> PersonsFont()
 bool Rotate()
 {
     bool Moved = false;
-    Moved |= LanesKeys();
+    if (LanesKeys()) {
+        Moved = true;
+        SceneGoes();   // the person pressed a key
+    }
     Moved |= DeathStep();
     Moved |= FrontSpawnStep();
     Moved |= ScreenStep();
@@ -650,6 +684,7 @@ bool Rotate()
     Moved |= RingStep();
     Moved |= LayerStep();
     Moved |= IpcStep();
+    Moved |= SceneMove();
     return Moved;
 }
 
@@ -697,6 +732,10 @@ int main(void)
         kdbg_print("[display] no room for a %ux%u console", g_easel->Cols(), g_easel->Rows());
         return 1;
     }
+
+    // The scene the loader left, played on from its frame; the console waits
+    // under it.
+    (void)SceneBegin(*g_easel);
 
     // The machine's account so far, from the oldest byte the ring holds: what
     // the Emergency Screen showed until now goes on being shown.

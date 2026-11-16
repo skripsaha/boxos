@@ -189,6 +189,15 @@ bool Easel::Step() noexcept
     return Changed;
 }
 
+void Easel::Show(const BoxBrushCanvas &Canvas, const BoxBrushRect *Rects, std::uint32_t Count) noexcept
+{
+    if (Away || !Pixels() || Canvas.Width != Description.width || Canvas.Height != Description.height) return;
+    volatile std::uint8_t *Glass =
+        reinterpret_cast<volatile std::uint8_t *>(static_cast<std::uintptr_t>(Description.va));
+    for (std::uint32_t I = 0; I < Count; I++) BoxBrushShow(&Canvas, Rects[I], Glass, Description.stride, Description.format);
+    ShownKnown = false;
+}
+
 void Easel::Page(std::uint32_t Text, std::uint32_t PageValue) noexcept
 {
     if (Text == TextColour && PageValue == PageColour) return;

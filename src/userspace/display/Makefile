@@ -50,15 +50,15 @@ all: display.elf
 include ../nameplate.mk
 
 OBJS = display.o lanes.o front.o layers.o console_model.o ring.o easel.o effects.o effects_warp.o effects_ink.o \
-       font_file.o typesetter.o
+       font_file.o typesetter.o scene.o
 
 display.elf: $(BOXLIB_START) $(OBJS) $(TYPECASE) $(BOXLIB) $(BOXCXX) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(OBJS) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
 
-# An effect works out every cell of the glass every frame, and the easel
-# every pixel of a cell it draws: built -O2, as the utilities' per-pixel
-# parts are.
-effects.o effects_warp.o effects_ink.o easel.o: CXXFLAGS += -O2
+# An effect works out every cell of the glass every frame, the easel every
+# pixel of a cell it draws, and the scene every pixel of the part of a frame
+# that changed: built -O2, as the utilities' per-pixel parts are.
+effects.o effects_warp.o effects_ink.o easel.o scene.o: CXXFLAGS += -O2
 
 # -MMD -MP: header dependencies, so a header edit rebuilds what read it.
 # See boxcxx/Makefile for what their absence cost.

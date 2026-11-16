@@ -12,6 +12,7 @@
 #include "box/display.h"
 #include "box/screen.h"
 #include "box/touch.h"
+#include "boxos_brush.h"
 #include "text_cell.h"
 
 class Typesetter;
@@ -64,8 +65,20 @@ public:
     // Whether the glass is a framebuffer, not a text page.
     bool Pixels() const noexcept { return Description.kind == SCREEN_KIND_PIXELS; }
 
-    // How many pixels tall a framebuffer is; 0 for a text page.
+    // How many pixels tall and wide a framebuffer is; 0 for a text page.
     std::uint32_t PixelHeight() const noexcept { return Pixels() ? Description.height : 0; }
+    std::uint32_t PixelWidth() const noexcept { return Pixels() ? Description.width : 0; }
+
+    // What the loader left on the glass, as the claim says (SCREEN_LEFT_*),
+    // and the fid of the scene whose first frame it is (SCREEN_LEFT_SCENE).
+    std::uint32_t Left() const noexcept { return Description.left; }
+    std::uint64_t LeftScene() const noexcept { return Description.scene; }
+
+    // Count rectangles of a canvas as big as a framebuffer onto it, pixel for
+    // pixel (boxos_brush.h BoxBrushShow) — nothing while the Emergency Screen
+    // has the glass. What the console shows there is no longer known to be
+    // on it.
+    void Show(const BoxBrushCanvas &Canvas, const BoxBrushRect *Rects, std::uint32_t Count) noexcept;
 
     // The typesetter whose pictures a framebuffer shows, alive as long as the
     // easel: the console as many of its cells as the glass holds, at least
