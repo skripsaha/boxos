@@ -78,8 +78,8 @@ static int Readable(LecternBook *b, const LecternLine *who, const LecternFile *f
     return 1;
 }
 
-/* The file's blocks read in file order into the desk's room: the room, or
- * NULL — no room, or a block will not read — said. */
+/* The file's blocks read in file order into the desk's room, a run at a
+ * time: the room, or NULL — no room, or a block will not read — said. */
 static uint8_t *Read(LecternBook *b, const LecternLine *who, const LecternFile *f, uint64_t blocks)
 {
     const char *none = (const char *)0;
@@ -91,13 +91,13 @@ static uint8_t *Read(LecternBook *b, const LecternLine *who, const LecternFile *
         return room;
     }
     for (uint64_t r = 0; r < f->nruns && k < blocks; r++) {
-        for (uint64_t i = 0; i < f->runs[r].count && k < blocks; i++, k++) {
-            if (LecternBlockRead(b, (int)f->runs[r].hole, f->runs[r].start + i, room + k * VOLUME_BLOCK_BYTES))
-                continue;
-            b->desk->give(b->desk->ctx, room, blocks * VOLUME_BLOCK_BYTES);
-            Said(b, who, " cannot be read: its block ", k, " (volume block ", f->runs[r].start + i, ") will not read");
-            return (uint8_t *)0;
-        }
+        uint64_t n   = f->runs[r].count < blocks - k ? f->runs[r].count : blocks - k;
+        uint64_t got = LecternRunRead(b, (int)f->runs[r].hole, f->runs[r].start, n, room + k * VOLUME_BLOCK_BYTES);
+        k += got;
+        if (got == n) continue;
+        b->desk->give(b->desk->ctx, room, blocks * VOLUME_BLOCK_BYTES);
+        Said(b, who, " cannot be read: its block ", k, " (volume block ", f->runs[r].start + got, ") will not read");
+        return (uint8_t *)0;
     }
     return room;
 }

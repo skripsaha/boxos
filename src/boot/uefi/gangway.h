@@ -259,10 +259,13 @@ uint32_t DrawPage(const DrawPiece *pieces, uint32_t count, uint32_t skip, uint32
 int      DrawEnd(const DrawPiece *pieces, uint32_t count);
 
 /*
- * gangway_keys.c: the keyboard, the firmware's console's. KeyPanelAsked reads
- * every stroke waiting and answers whether one was Space — asked once, never
- * waited on. KeyNext waits for the next key the panel uses on the console's
- * own event; KEY_GONE when the console gives none any more.
+ * gangway_keys.c: the keyboard, the firmware's console's. KeyListen, at
+ * Gangway's first moment, begins KEY_LISTEN_MS of listening — a held key's
+ * repeat at the least. KeyPanelAsked reads every stroke waiting and answers
+ * whether one was Space; with `listen`, when none was, it waits for a stroke
+ * of Space through what is left of the listening — any other key waits on.
+ * KeyNext waits for the next key the panel uses on the console's own event;
+ * KEY_GONE when the console gives none any more.
  */
 typedef enum {
     KEY_NONE,
@@ -279,7 +282,8 @@ typedef enum {
     KEY_BACK,
 } GangwayKey;
 
-int        KeyPanelAsked(void);
+void       KeyListen(void);
+int        KeyPanelAsked(int listen);
 GangwayKey KeyNext(void);
 
 /*

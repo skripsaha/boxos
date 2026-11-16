@@ -474,6 +474,30 @@ typedef EFI_STATUS (EFIAPI *EFI_WAIT_FOR_EVENT)(
     EFI_EVENT *event,
     UINTN     *index);
 
+/* A timer event (UEFI 2.10 §7.1): made with no notification, set to fire once
+ * a span from now — in 100 ns units — and waited on with the others. */
+#define EVT_TIMER  0x80000000u
+
+typedef enum {
+    TimerCancel,
+    TimerPeriodic,
+    TimerRelative,
+} EFI_TIMER_DELAY;
+
+typedef EFI_STATUS (EFIAPI *EFI_CREATE_EVENT)(
+    uint32_t   type,
+    UINTN      notify_tpl,
+    void      *notify_function,
+    void      *notify_context,
+    EFI_EVENT *event);
+
+typedef EFI_STATUS (EFIAPI *EFI_SET_TIMER)(
+    EFI_EVENT       event,
+    EFI_TIMER_DELAY type,
+    uint64_t        trigger_time);
+
+typedef EFI_STATUS (EFIAPI *EFI_CLOSE_EVENT)(EFI_EVENT event);
+
 typedef struct {
     uint64_t          signature;
     uint32_t          revision;
@@ -494,11 +518,11 @@ typedef struct {
     EFI_ALLOCATE_POOL         allocate_pool;
     EFI_FREE_POOL             free_pool;
     /* events */
-    void                     *create_event;
-    void                     *set_timer;
+    EFI_CREATE_EVENT          create_event;
+    EFI_SET_TIMER             set_timer;
     EFI_WAIT_FOR_EVENT        wait_for_event;
     void                     *signal_event;
-    void                     *close_event;
+    EFI_CLOSE_EVENT           close_event;
     void                     *check_event;
     /* protocols */
     void                     *install_protocol_interface;

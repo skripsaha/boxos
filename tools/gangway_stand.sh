@@ -23,7 +23,11 @@
 # tried and its verdict, the one Gangway jumps into or the sentence it stops
 # on, and gangway.settings found, read and held to the book, or why not. Built
 # under the address and undefined-behaviour sanitizers: the Lectern parses
-# what a medium hands it. The last line counts the landings that held.
+# what a medium hands it. Then how it reads: the kernel in the fewest commands
+# LECTERN_READ_MOST allows — its first block, then its run a mebibyte at a
+# time — and no command longer; a long command over one of its blocks
+# refused, the run read again a block at a time and nothing said otherwise;
+# that block refused outright, named. The last line counts what held.
 
 set -u
 
@@ -46,11 +50,12 @@ start=$(python3 tools/volume-read.py "$IMG" deed 2>/dev/null | sed -nE 's/^groun
 
 passed=0; failed=0
 
-# held ID LABEL IMAGE — the stand and the oracle on one image, their words
-# compared byte for byte.
+# held ID LABEL IMAGE [REFUSE_BLOCK [long]] — the stand and the oracle on one
+# image, their words compared byte for byte.
 held() {
     local id=$1 label=$2 img=$3 rc
-    "$WORK/gangway_stand" "$img" "$start" > "$WORK/$id.stand" 2> "$WORK/$id.stand.err"
+    shift 3
+    "$WORK/gangway_stand" "$img" "$start" "$@" > "$WORK/$id.stand" 2> "$WORK/$id.stand.err"
     rc=$?
     python3 tools/volume-read.py "$img" boot > "$WORK/$id.oracle" 2>&1
     if [ $rc -eq 0 ] && [ -s "$WORK/$id.oracle" ] && cmp -s "$WORK/$id.stand" "$WORK/$id.oracle"; then
@@ -76,5 +81,33 @@ for case in $LANDINGS; do
     held "$case" "$(sed -nE 's/^self-test: (A[0-9]+ .*) written to .*/\1/p' "$WORK/$case.emit")" "$WORK/$case.img"
     rm -f "$WORK/$case.img"
 done
-echo "gangway: $passed passed, $failed failed — the Lectern and volume-read boot say the same of the kernels and the one jumped into"
+# judged LABEL — a check of how the Lectern reads, its verdict in $?.
+judged() {
+    if [ $? -eq 0 ]; then
+        echo "  ok   $1"
+        passed=$((passed + 1))
+    else
+        echo "  FAIL $1"
+        failed=$((failed + 1))
+    fi
+}
+
+read -r longest blocks first onkernel <<< "$(sed -nE 's/^stand: [0-9]+ command\(s\), the longest ([0-9]+) sector\(s\); the kernel.s ([0-9]+) block\(s\) from volume block ([0-9]+) in ([0-9]+) of them$/\1 \2 \3 \4/p' "$WORK/built.stand.err")"
+if [ -z "$onkernel" ]; then
+    echo "  FAIL how it reads — the stand did not say: $(cat "$WORK/built.stand.err")"
+    failed=$((failed + 1))
+else
+    [ "$longest" -le 2048 ]
+    judged "no command asks for more than a mebibyte — the longest $longest sector(s)"
+    [ "$onkernel" -eq $((1 + (blocks + 255) / 256)) ]
+    judged "the kernel's $blocks block(s) come in $onkernel command(s): its first block, then its run a mebibyte at a time"
+    half=$((blocks / 2))
+    held refused-long "a long command over the kernel's block $half refused: its run read again a block at a time" \
+        "$IMG" $((first + half)) long
+    "$WORK/gangway_stand" "$IMG" "$start" $((first + half)) > "$WORK/refused.stand" 2>&1
+    grep -qx "boot: the kernel the deed names cannot be loaded: its block $half (volume block $((first + half))) will not read" \
+        "$WORK/refused.stand"
+    judged "the kernel's block $half refused outright: named, its block and its volume block"
+fi
+echo "gangway: $passed passed, $failed failed — the Lectern and volume-read boot say the same of the kernels and the one jumped into, read in long commands"
 [ $failed -eq 0 ]

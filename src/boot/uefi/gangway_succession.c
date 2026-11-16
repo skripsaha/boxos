@@ -143,7 +143,7 @@ static int Loadable(LecternChoice *s, const LecternCandidate *c)
         return 0;
     }
     if (!(first = (uint8_t *)LecternTake(&s->b, VOLUME_BLOCK_BYTES))) return 0;
-    read = LecternBlockRead(&s->b, (int)c->runs[0].hole, c->runs[0].start, first);
+    read = LecternRunRead(&s->b, (int)c->runs[0].hole, c->runs[0].start, 1, first) == 1;
     if (read && BlocksOf(c->size) == 1) LecternTailLaid(c->tail, first);
     held = read && HeaderHeld(s, c, first);
     LecternGive(&s->b, first, VOLUME_BLOCK_BYTES);
@@ -152,9 +152,9 @@ static int Loadable(LecternChoice *s, const LecternCandidate *c)
     return held;
 }
 
-/* The kernel's blocks placed where it is jumped into, read in file order as
- * the medium gives them: the room — NULL when the desk gives none
- * (TRY_UNPLACED), or a block will not read: given back, refused, said. */
+/* The kernel's blocks placed where it is jumped into, read in file order a
+ * run at a time: the room — NULL when the desk gives none (TRY_UNPLACED), or
+ * a block will not read: given back, refused, said. */
 static uint8_t *Placed(LecternChoice *s, const LecternCandidate *c, LecternTried *t)
 {
     const LecternDesk *d      = s->b.desk;
@@ -164,15 +164,14 @@ static uint8_t *Placed(LecternChoice *s, const LecternCandidate *c, LecternTried
     *t = TRY_UNPLACED;
     if (!image) return image;
     for (uint64_t r = 0; r < c->nruns && k < blocks; r++) {
-        for (uint64_t i = 0; i < c->runs[r].count && k < blocks; i++, k++) {
-            if (LecternBlockRead(&s->b, (int)c->runs[r].hole, c->runs[r].start + i, image + k * VOLUME_BLOCK_BYTES))
-                continue;
-            d->unplace(d->ctx, image, blocks * VOLUME_BLOCK_BYTES);
-            Refused(s, c, " cannot be loaded: its block ", k, " (volume block ", c->runs[r].start + i,
-                    ") will not read");
-            *t = TRY_REFUSED;
-            return (uint8_t *)0;
-        }
+        uint64_t n   = c->runs[r].count < blocks - k ? c->runs[r].count : blocks - k;
+        uint64_t got = LecternRunRead(&s->b, (int)c->runs[r].hole, c->runs[r].start, n, image + k * VOLUME_BLOCK_BYTES);
+        k += got;
+        if (got == n) continue;
+        d->unplace(d->ctx, image, blocks * VOLUME_BLOCK_BYTES);
+        Refused(s, c, " cannot be loaded: its block ", k, " (volume block ", c->runs[r].start + got, ") will not read");
+        *t = TRY_REFUSED;
+        return (uint8_t *)0;
     }
     return image;
 }

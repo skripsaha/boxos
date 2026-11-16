@@ -22,7 +22,10 @@
 
 #include "gangway_lectern_book.h"
 
-/* The most sectors read in one command while a unit is read or looked for. */
+/* The sectors the first command reads while a unit is looked for: a stitch
+ * mostly lies where the last one ended, so the look begins small, and each
+ * command after reads twice as many as the one before, to LECTERN_READ_MOST —
+ * a ribbon sewn on far ahead, or none, costs a few long commands. */
 #define RIBBON_READ_SECTORS 64u
 
 /* ------------------------------------------------------------------------- */
@@ -202,8 +205,9 @@ static int Pieces(LecternBook *b, LecternStitch *u)
 }
 
 /* The unit's `of` sectors from its start through its hop, read a run at a time
- * into `buf` and judged: each its own when it holds at its place, of a stitch
- * of the unit's seq and `of`, at its own `at`. */
+ * into `buf` — room for `of` of them, or LECTERN_READ_MOST — and judged: each
+ * its own when it holds at its place, of a stitch of the unit's seq and `of`,
+ * at its own `at`. */
 static void SectorsJudged(LecternBook *b, LecternStitch *u, uint8_t *buf)
 {
     uint32_t k = 0;
@@ -213,7 +217,7 @@ static void SectorsJudged(LecternBook *b, LecternStitch *u, uint8_t *buf)
         uint64_t left = PlaceLeft(&p);
         uint32_t n    = u->of - k;
         if (n > left) n = (uint32_t)left;
-        if (n > RIBBON_READ_SECTORS) n = RIBBON_READ_SECTORS;
+        if (n > LECTERN_READ_MOST) n = LECTERN_READ_MOST;
         LecternSectors(b, PlaceVlba(&p), n, buf);
         for (uint32_t i = 0; i < n; i++) {
             const uint8_t *raw = buf + (uint64_t)i * BOOK_SECTOR_BYTES;
@@ -234,7 +238,8 @@ static void SectorsJudged(LecternBook *b, LecternStitch *u, uint8_t *buf)
  * pieces. 1, or 0 no room. */
 static int UnitFilled(LecternBook *b, LecternStitch *u)
 {
-    uint8_t *buf = (uint8_t *)LecternTake(b, RIBBON_READ_SECTORS * BOOK_SECTOR_BYTES);
+    uint64_t room  = (uint64_t)(u->of < LECTERN_READ_MOST ? u->of : LECTERN_READ_MOST) * BOOK_SECTOR_BYTES;
+    uint8_t *buf   = (uint8_t *)LecternTake(b, room);
     int      whole = 1, rc;
 
     u->size   = u->of * BOOK_PAYLOAD_BYTES;        /* RibbonShape: no more than 2^32 - 1 */
@@ -242,12 +247,12 @@ static int UnitFilled(LecternBook *b, LecternStitch *u)
     u->leads  = (uint16_t *)LecternTake(b, (uint64_t)u->of * sizeof(uint16_t));
     u->stream = (uint8_t *)LecternTake(b, u->size);
     if (!buf || !u->valid || !u->leads || !u->stream) {
-        LecternGive(b, buf, RIBBON_READ_SECTORS * BOOK_SECTOR_BYTES);
+        LecternGive(b, buf, room);
         return 0;
     }
     LecternZero(u->stream, u->size);
     SectorsJudged(b, u, buf);
-    LecternGive(b, buf, RIBBON_READ_SECTORS * BOOK_SECTOR_BYTES);
+    LecternGive(b, buf, room);
     u->has_end = PlaceOn(&u->start, u->of, &u->hop, &u->end);
     for (uint32_t k = 0; k < u->of; k++) whole = whole && u->valid[k];
     rc = whole ? Parsed(b, u) : 0;
@@ -293,19 +298,23 @@ static int Peek(const LecternBook *b, const uint8_t *raw, LecternQuire *next)
 }
 
 /* The first sector from `place` through `hop` holding a stitch of seq past
- * `after`: *found, its index in *j, its head and the sector in `first`. 1, or
- * 0 no room. */
+ * `after`: *found, its index in *j, its head and the sector in `first` —
+ * looked for RIBBON_READ_SECTORS first, twice as many each command after. 1,
+ * or 0 no room. */
 static int Look(LecternBook *b, const LecternPlace *place, const LecternQuire *hop, uint64_t after, uint64_t *j,
                 BookSectorHead *head, uint8_t *first, int *found)
 {
     uint64_t limit = PlaceLeft(place) + (hop ? hop->blocks * VOLUME_BLOCK_SECTORS : 0);
-    uint8_t *buf   = (uint8_t *)LecternTake(b, RIBBON_READ_SECTORS * BOOK_SECTOR_BYTES);
+    uint64_t room  = limit < LECTERN_READ_MOST ? limit : LECTERN_READ_MOST;
+    uint64_t look  = RIBBON_READ_SECTORS;
+    uint8_t *buf   = (uint8_t *)LecternTake(b, room * BOOK_SECTOR_BYTES);
     *found = 0;
     if (!buf) return 0;
     for (uint64_t k = 0; k < limit && !*found;) {
         LecternPlace p;
         if (!PlaceOn(place, k, hop, &p)) break;
-        uint64_t n = PlaceLeft(&p) < RIBBON_READ_SECTORS ? PlaceLeft(&p) : RIBBON_READ_SECTORS;
+        uint64_t n = PlaceLeft(&p) < look ? PlaceLeft(&p) : look;
+        if (n > room) n = room;
         LecternSectors(b, PlaceVlba(&p), (uint32_t)n, buf);
         for (uint32_t i = 0; i < n && !*found; i++) {
             const uint8_t *s = buf + (uint64_t)i * BOOK_SECTOR_BYTES;
@@ -318,8 +327,9 @@ static int Look(LecternBook *b, const LecternPlace *place, const LecternQuire *h
             }
         }
         k += n;
+        if (look < LECTERN_READ_MOST) look *= 2u;
     }
-    LecternGive(b, buf, RIBBON_READ_SECTORS * BOOK_SECTOR_BYTES);
+    LecternGive(b, buf, room * BOOK_SECTOR_BYTES);
     return 1;
 }
 

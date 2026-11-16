@@ -22,23 +22,42 @@
 # image is put back as it was after.
 # ---------------------------------------------------------------------------
 
-# Space held — sent over and over, as a held key repeats — until the wire says
-# once more than it had that the panel is open (the journal the kernel puts
-# into its log says it again, after): 0, or 1 when it never does.
+# Space held as a keyboard holds it — a stroke every 30 ms, a USB keyboard's
+# repeat, through one connection to the monitor (QEMU repeats no key itself)
+# — until the wire says once more than it had that the panel is open (the
+# journal the kernel puts into its log says it again, after): 0, or 1 when it
+# never does in 30 s.
 panel_hold() {
-    local n i
+    local n
     n=$(grep -ac "Gangway: the panel is open (Space held)" build/serial.log 2>/dev/null)
-    n=${n:-0}
-    for i in $(seq 1 300); do
-        ./tools/qemu-input.sh key spc >/dev/null 2>&1
-        [ "$(grep -ac "Gangway: the panel is open (Space held)" build/serial.log 2>/dev/null)" -gt "$n" ] && return 0
-        sleep 0.1
-    done
+    python3 - "${n:-0}" <<'EOF' && return 0
+import socket, sys, time
+seen, said = int(sys.argv[1]), b"Gangway: the panel is open (Space held)"
+end = time.monotonic() + 30
+mon = None
+while time.monotonic() < end:
+    try:
+        if mon is None:
+            mon = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            mon.connect("build/qemu.mon")
+            mon.setblocking(False)
+        mon.sendall(b"sendkey spc 10\n")
+        while mon.recv(4096):
+            pass
+    except BlockingIOError:
+        pass
+    except OSError:
+        mon = None
+    with open("build/serial.log", "rb") as wire:
+        if wire.read().count(said) > seen:
+            sys.exit(0)
+    time.sleep(0.03)
+sys.exit(1)
+EOF
     harness "panel: Space held for 30 s, and the wire never said the panel is open"
     return 1
 }
 
-# Keys on the panel, each given its moment to be drawn.
 panel_keys() {
     local key
     for key in "$@"; do
@@ -59,6 +78,8 @@ run_panel() {
     echo "== panel: Space held while the machine starts — Gangway's panel, a start changed on it, the log kept before =="
     build
     cp build/boxos.img "$SCRATCH/panel.before.img"
+    # Nothing a run before this one left is judged.
+    rm -f "$SCRATCH"/serial.panel.{plain,start,kept}.log "$SCRATCH"/panel.ppm "$SCRATCH"/panel.previous.ppm
 
     local P Q R qemu gone=1
     if panel_boot; then

@@ -233,8 +233,16 @@ void    LecternCopy(void *to, const void *from, uint64_t n);
 int     LecternListHas(const uint64_t *list, uint64_t n, uint64_t v);
 int     LecternListAdd(LecternBook *b, uint64_t **list, uint64_t *n, uint64_t *cap, uint64_t v);
 
-/* `sectors` sectors from `vlba` into `into`, each the medium will not give
- * read as zeros — no sector of the book. */
+/* The most sectors one command asks of the medium: a mebibyte. A command of
+ * the firmware costs about as much for one block as for many, so the Lectern
+ * reads in long ones — and in none longer, for some firmware stumbles on a
+ * read past this (the Linux EFI stub reads its files a mebibyte at a time for
+ * the same reason). */
+#define LECTERN_READ_MOST 2048u
+
+/* `sectors` sectors from `vlba` into `into`, in commands of LECTERN_READ_MOST
+ * at the most, each sector the medium will not give read as zeros — no sector
+ * of the book. */
 void    LecternSectors(LecternBook *b, uint64_t vlba, uint32_t sectors, uint8_t *into);
 
 /* The node `ptr` names into *n from the first of its copies that holds as a
@@ -249,9 +257,11 @@ void    LecternCopiesSay(LecternBook *b, uint64_t tree, uint64_t level, const Bo
 /* The book stood on, or b->why: 1 stood, 0 not, -1 no room. */
 int     LecternStand(LecternBook *b);
 
-/* Volume block `v` — none for a hole, its zeros — read into `into`: 1, or 0
- * the medium will not give it. */
-int     LecternBlockRead(const LecternBook *b, int hole, uint64_t v, uint8_t *into);
+/* `count` blocks of a run from volume block `v` — none for a hole, its zeros —
+ * read into `into` in as few commands as LECTERN_READ_MOST allows, a command
+ * the medium refuses read again a block at a time: the blocks read, `count`,
+ * or the place of the first the medium will not give. */
+uint64_t LecternRunRead(const LecternBook *b, int hole, uint64_t v, uint64_t count, uint8_t *into);
 /* The Slips `tail` (a file's, NULL none) laid on its last block, at `block`. */
 void    LecternTailLaid(const uint8_t *tail, uint8_t *block);
 

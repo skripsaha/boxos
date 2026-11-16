@@ -123,20 +123,39 @@ int LecternListAdd(LecternBook *b, uint64_t **list, uint64_t *n, uint64_t *cap, 
 void LecternSectors(LecternBook *b, uint64_t vlba, uint32_t sectors, uint8_t *into)
 {
     const LecternDesk *d = b->desk;
-    if (d->read(d->ctx, vlba, sectors, into)) return;
-    for (uint32_t k = 0; k < sectors; k++)
-        if (!d->read(d->ctx, vlba + k, 1, into + (uint64_t)k * BOOK_SECTOR_BYTES))
-            LecternZero(into + (uint64_t)k * BOOK_SECTOR_BYTES, BOOK_SECTOR_BYTES);
+    for (uint32_t at = 0; at < sectors;) {
+        uint32_t n    = sectors - at < LECTERN_READ_MOST ? sectors - at : LECTERN_READ_MOST;
+        uint8_t *part = into + (uint64_t)at * BOOK_SECTOR_BYTES;
+        if (!d->read(d->ctx, vlba + at, n, part))
+            for (uint32_t k = 0; k < n; k++)
+                if (!d->read(d->ctx, vlba + at + k, 1, part + (uint64_t)k * BOOK_SECTOR_BYTES))
+                    LecternZero(part + (uint64_t)k * BOOK_SECTOR_BYTES, BOOK_SECTOR_BYTES);
+        at += n;
+    }
 }
 
-int LecternBlockRead(const LecternBook *b, int hole, uint64_t v, uint8_t *into)
+uint64_t LecternRunRead(const LecternBook *b, int hole, uint64_t v, uint64_t count, uint8_t *into)
 {
-    const LecternDesk *d = b->desk;
+    const LecternDesk *d    = b->desk;
+    const uint64_t     most = LECTERN_READ_MOST / VOLUME_BLOCK_SECTORS;
+    uint64_t           done = 0;
     if (hole) {
-        LecternZero(into, VOLUME_BLOCK_BYTES);
-        return 1;
+        LecternZero(into, count * VOLUME_BLOCK_BYTES);
+        return count;
     }
-    return d->read(d->ctx, v * VOLUME_BLOCK_SECTORS, VOLUME_BLOCK_SECTORS, into);
+    while (done < count) {
+        uint64_t n = count - done < most ? count - done : most;
+        if (d->read(d->ctx, (v + done) * VOLUME_BLOCK_SECTORS, (uint32_t)(n * VOLUME_BLOCK_SECTORS),
+                    into + done * VOLUME_BLOCK_BYTES)) {
+            done += n;
+            continue;
+        }
+        for (uint64_t end = done + n; done < end; done++)
+            if (!d->read(d->ctx, (v + done) * VOLUME_BLOCK_SECTORS, VOLUME_BLOCK_SECTORS,
+                         into + done * VOLUME_BLOCK_BYTES))
+                return done;
+    }
+    return done;
 }
 
 void LecternTailLaid(const uint8_t *tail, uint8_t *block)
@@ -178,7 +197,7 @@ static LecternUnitSays LecternUnit(LecternBook *b, uint64_t block, uint64_t bloc
 
     *room = (uint8_t *)0;
     if (!r) return UNIT_NO_ROOM;
-    if (d->read(d->ctx, block * VOLUME_BLOCK_SECTORS, sectors, r)) {
+    if (LecternRunRead(b, 0, block, blocks, r) == blocks) {
         if (LecternZeros(r, bytes))
             says = UNIT_BLANK;
         else if (BookUnitCheck(r, sectors, d->uuid, block * VOLUME_BLOCK_SECTORS, head) && head->kind == kind &&

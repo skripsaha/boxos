@@ -497,7 +497,7 @@ static void Leave(const Panel *p, FbInfo *fb)
 uint8_t PanelIfAsked(FbInfo *fb, uint32_t misses)
 {
     static Panel p;
-    int          key = KeyPanelAsked();
+    int          key = KeyPanelAsked(misses < CROSSINGS_MISSES_PANEL && DrawRows());
     uint8_t      why = misses >= CROSSINGS_MISSES_PANEL ? CROSSING_PANEL_MISSES
                      : key                            ? CROSSING_PANEL_KEY
                                                       : CROSSING_PANEL_NONE;

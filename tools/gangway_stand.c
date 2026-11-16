@@ -9,7 +9,7 @@
  * (boxos_gangway_settings.h) and boot.scene (boxos_scene.h) — read and held to
  * the book as Gangway reads them.
  *
- *     build/gangway_stand IMAGE GROUND_START
+ *     build/gangway_stand IMAGE GROUND_START [REFUSE_BLOCK [long]]
  *
  * Every line it prints is what Gangway says of the volume, "boot: " before it
  * where Gangway puts "Gangway: ", and the same lines `volume-read IMAGE boot`
@@ -22,6 +22,13 @@
  * off the partition table before the Lectern is asked (gangway_medium.c,
  * FindGroundOn): the caller says it here, as volume-read found it. Where a
  * kernel is placed is Gangway's 0x100000 and the heap here.
+ *
+ * How it read is said apart, on stderr: how many commands, the most sectors
+ * one asked for (LECTERN_READ_MOST at the most), and in how many the kernel
+ * jumped into came when it lies in one run. With REFUSE_BLOCK the medium
+ * will not give that volume block — with `long`, only in a command of more
+ * than one block, as a medium that stumbles on long commands and gives each
+ * block alone: what the Lectern does when a command is refused.
  */
 
 #include <stdbool.h>
@@ -36,16 +43,56 @@
 #include "settings_chosen.h"   /* SETTINGS_FILE_MAX */
 
 typedef struct {
-    FILE    *image;
-    uint64_t start;           /* the ground's first sector */
+    uint64_t vlba;
+    uint32_t sectors;
+} StandCommand;
+
+typedef struct {
+    FILE         *image;
+    uint64_t      start;      /* the ground's first sector */
+    uint64_t      refuse;     /* the volume block it will not give; UINT64_MAX none */
+    bool          long_only;  /* ... only in a command of more than one block */
+    StandCommand *commands;   /* every command asked, in order */
+    uint64_t      ncommands, capcommands;
 } StandMedium;
 
 static int StandRead(void *ctx, uint64_t vlba, uint32_t sectors, uint8_t *into)
 {
-    StandMedium *m = (StandMedium *)ctx;
+    StandMedium *m     = (StandMedium *)ctx;
+    uint64_t     first = m->refuse * VOLUME_BLOCK_SECTORS;
+    if (m->ncommands == m->capcommands) {
+        m->capcommands = m->capcommands ? m->capcommands * 2u : 64u;
+        if (!(m->commands = realloc(m->commands, m->capcommands * sizeof(*m->commands)))) {
+            perror("stand");
+            exit(2);
+        }
+    }
+    m->commands[m->ncommands++] = (StandCommand){ vlba, sectors };
+    if (m->refuse != UINT64_MAX && vlba < first + VOLUME_BLOCK_SECTORS && first < vlba + sectors &&
+        (!m->long_only || sectors > VOLUME_BLOCK_SECTORS))
+        return 0;
     if (fseeko(m->image, (off_t)((m->start + vlba) * VOLUME_DEED_SECTOR_BYTES), SEEK_SET) != 0)
         return 0;
     return fread(into, VOLUME_DEED_SECTOR_BYTES, sectors, m->image) == sectors;
+}
+
+/* How it read, on stderr: the commands, the longest, and those that fell on
+ * the kernel jumped into when it lies in one run. */
+static void StandCommandsSay(const StandMedium *m, const LecternKernel *kernel)
+{
+    uint64_t most = 0, onkernel = 0;
+    uint64_t from = kernel->first * VOLUME_BLOCK_SECTORS, to = from + kernel->blocks * VOLUME_BLOCK_SECTORS;
+    for (uint64_t i = 0; i < m->ncommands; i++) {
+        const StandCommand *c = &m->commands[i];
+        if (c->sectors > most) most = c->sectors;
+        if (c->vlba < to && from < c->vlba + c->sectors) onkernel++;
+    }
+    fprintf(stderr, "stand: %llu command(s), the longest %llu sector(s)", (unsigned long long)m->ncommands,
+            (unsigned long long)most);
+    if (kernel->image && kernel->runs == 1 && kernel->first)
+        fprintf(stderr, "; the kernel's %llu block(s) from volume block %llu in %llu of them",
+                (unsigned long long)kernel->blocks, (unsigned long long)kernel->first, (unsigned long long)onkernel);
+    fprintf(stderr, "\n");
 }
 
 static uint8_t *StandTake(void *ctx, uint64_t bytes)
@@ -142,11 +189,14 @@ int main(int argc, char **argv)
                                  { BOX_SCENE_BOOT, BOX_SCENE_FILE_MOST, CALLED_NONE, NULL, 0, 0, 0 } };
     int            named = 0;
 
-    if (argc != 3) {
-        fprintf(stderr, "usage: %s IMAGE GROUND_START\n", argv[0]);
+    if (argc < 3 || argc > 5 || (argc == 5 && strcmp(argv[4], "long") != 0)) {
+        fprintf(stderr, "usage: %s IMAGE GROUND_START [REFUSE_BLOCK [long]]\n", argv[0]);
         return 2;
     }
-    m.start = strtoull(argv[2], NULL, 10);
+    memset(&m, 0, sizeof(m));
+    m.start     = strtoull(argv[2], NULL, 10);
+    m.refuse    = argc >= 4 ? strtoull(argv[3], NULL, 10) : UINT64_MAX;
+    m.long_only = argc == 5;
     if (!(m.image = fopen(argv[1], "rb"))) {
         perror(argv[1]);
         return 2;
@@ -156,6 +206,7 @@ int main(int argc, char **argv)
         return 2;
     }
     memcpy(uuid, ((const VolumeDeed *)(const void *)deed)->uuid, sizeof(uuid));
+    m.ncommands = 0;
     memset(&desk, 0, sizeof(desk));
     desk.ctx     = &m;
     desk.read    = StandRead;
@@ -167,11 +218,13 @@ int main(int argc, char **argv)
     desk.uuid    = uuid;
     if (StandDeed(deed, &desk, &boot, &named)) {
         LecternSuccession(&desk, named ? &boot : NULL, &kernel, called, 2);
+        StandCommandsSay(&m, &kernel);
         if (kernel.image)
             desk.unplace(&m, kernel.image, kernel.blocks * VOLUME_BLOCK_BYTES);
         for (int k = 0; k < 2; k++)
             if (called[k].bytes) desk.give(&m, called[k].bytes, called[k].room);
     }
+    free(m.commands);
     fclose(m.image);
     return 0;
 }

@@ -214,6 +214,10 @@ EFI_STATUS EFIAPI GangwayMain(EFI_HANDLE image_handle, EFI_SYSTEM_TABLE *st)
     g_image_handle = image_handle;
     FirmwareTablesTake(st);
 
+    /* A held Space has from here to repeat into the console's queue before
+     * the panel is asked for — the kernel read meanwhile (KeyPanelAsked). */
+    KeyListen();
+
     /* The screen is left as the firmware left it — its logo, on a desk
      * machine — until the display program takes it; this is the journal's. */
     Print("Gangway — BoxOS UEFI Bootloader\r\n");

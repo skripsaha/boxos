@@ -17,13 +17,14 @@
 # (tools/gangway_stand.sh), says of the image and of every landing of
 # self-test's group A what volume-read's `boot` says by its own code — the slot
 # stood on, the nodes read past a copy that did not hold, the ribbon, every
-# kernel tried and its verdict. Then the image as `make` lays it, booted
-# through OVMF: Gangway says the kernel is attested by the book, every block of
-# it, and the kernel comes up to its Hub. Then landing A7: one byte of the zeros
-# past the kernel's end in its last block flipped — the kernel's bytes as they
-# were, so a loader that did not hold the block to the book would load it and
-# the kernel would come up as on any boot (the BSS it zeroes begins where its
-# bytes end); the digest mkfs took of the block, zeros and all, no longer
+# kernel tried and its verdict — reading in long commands, and a command the
+# medium refuses read again a block at a time. Then the image as `make` lays
+# it, booted through OVMF: Gangway says the kernel is attested by the book,
+# every block of it, and the kernel comes up to its Hub. Then landing A7: one
+# byte of the zeros past the kernel's end in its last block flipped — the
+# kernel's bytes as they were, so a loader that did not hold the block to the
+# book would load it and the kernel would come up as on any boot (the BSS it
+# zeroes begins where its bytes end); the digest mkfs took of the block, zeros and all, no longer
 # matches, and no other kernel lies on the volume. Gangway has to name the
 # block, stop with every kernel it tried, and never jump: no line of the
 # kernel's. Then landing A9: a second kernel the book names by the tag boot,
@@ -86,8 +87,8 @@ run_bookboot() {
     tools/gangway_stand.sh build/boxos.img >"$SCRATCH/bookboot.stand" 2>&1
     rc=$?
     sed 's/^/  /' "$SCRATCH/bookboot.stand"
-    [ $rc = 0 ] && grep -qE "^gangway: 23 passed, 0 failed" "$SCRATCH/bookboot.stand"
-    chk $? "bookboot: the Lectern built on the host says what volume-read boot says, on the image and every landing of group A ($(tail -1 "$SCRATCH/bookboot.stand"))"
+    [ $rc = 0 ] && grep -qE "^gangway: 27 passed, 0 failed" "$SCRATCH/bookboot.stand"
+    chk $? "bookboot: the Lectern built on the host says what volume-read boot says, on the image and every landing of group A, in long commands ($(tail -1 "$SCRATCH/bookboot.stand"))"
 
     # The image as built.
     rm -f "$img"
