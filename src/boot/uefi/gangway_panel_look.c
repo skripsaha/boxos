@@ -29,8 +29,8 @@
 extern const uint8_t GangwayLogoDark[], GangwayLogoDarkEnd[];
 extern const uint8_t GangwayLogoLight[], GangwayLogoLightEnd[];
 
-#define ONE  BOX_BRUSH_ONE
-#define UNIT BOX_BRUSH_UNIT
+#define ONE  BOX_SHAPE_ONE
+#define UNIT BOX_SHAPE_UNIT
 
 /* The theme's colours, 0x00RRGGBB. */
 typedef struct {
@@ -46,7 +46,7 @@ static const LookInks g_dark  = { 0x000000u, 0xFFFFFFu, 0xA49CA6u, 0x6A636Cu, 0x
 static const LookInks g_light = { 0xFFFFFFu, 0x2E1A26u, 0x6F6670u, 0x9A929Cu, 0xE2DADFu, 0xB0476Fu };
 
 /* The plashka: Duppo's sphere top to bottom, a step darker than the logo. */
-static const BoxBrushStop g_plashka[] = {
+static const BoxPaintStop g_plashka[] = {
     { 0u, 0xFFCF6089u }, { UNIT / 5u, 0xFFD8678Fu }, { UNIT / 2u, 0xFFCB5D87u },
     { UNIT * 4u / 5u, 0xFFA0406Fu }, { UNIT, 0xFF7E2457u },
 };
@@ -54,13 +54,13 @@ static const BoxBrushStop g_plashka[] = {
 typedef struct {
     FbInfo               fb;
     LookInks             own;             /* the theme's, the person's colours over it */
-    BoxBrushStop         plashka[5];
+    BoxPaintStop         plashka[5];
     int                  logo;            /* Duppo's logo beside the page */
     const char          *said, *under;    /* what is said under it — over the page with no logo */
     EFI_PHYSICAL_ADDRESS room;
     UINTN                pages;
     BoxBrushCanvas       canvas;
-    BoxBrushEdge        *edges;
+    BoxShapeEdge        *edges;
     const LookInks      *inks;
     uint32_t             size, small;   /* the imprint's sizes: the rows', the hints' */
     int32_t              ch, cw, sh;    /* a row's cell tall and wide, a hint's tall */
@@ -107,19 +107,20 @@ static void Say(uint32_t size, int32_t x, int32_t y, const char *text, uint32_t 
     BoxBrushText(&g_look.canvas, DrawImprint(), size, x, y, text, Length(text), 0xFF000000u | rgb, 255);
 }
 
-static void Rounded(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r, const BoxBrushPaint *paint)
+static void Rounded(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r, const BoxPaint *paint)
 {
-    BoxBrushOutline O;
-    static const BoxBrushMatrix plain = { BOX_BRUSH_UNIT, 0, 0, BOX_BRUSH_UNIT, 0, 0 };
-    BoxBrushBegin(&O, g_look.edges, BOX_SCENE_EDGES, &plain);
-    BoxBrushAddRounded(&O, x * ONE, y * ONE, w * ONE, h * ONE, r * ONE, 0);
+    BoxShape               O;
+    static const BoxMatrix plain    = { BOX_SHAPE_UNIT, 0, 0, BOX_SHAPE_UNIT, 0, 0 };
+    const int32_t          radii[4] = { r * ONE, r * ONE, r * ONE, r * ONE };
+    BoxShapeBegin(&O, g_look.edges, BOX_SCENE_EDGES, &plain);
+    BoxShapeAddRounded(&O, x * ONE, y * ONE, w * ONE, h * ONE, radii, 0);
     BoxBrushFill(&g_look.canvas, &O, paint, 255);
 }
 
 static void Solid(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r, uint32_t rgb)
 {
-    const BoxBrushPaint paint = { BOX_BRUSH_PAINT_SOLID, 0xFF000000u | rgb, NULL, 0,
-                                  { BOX_BRUSH_UNIT, 0, 0, BOX_BRUSH_UNIT, 0, 0 }, NULL, 0, 0, 0 };
+    const BoxPaint paint = { BOX_PAINT_SOLID, 0xFF000000u | rgb, NULL, 0,
+                             { BOX_SHAPE_UNIT, 0, 0, BOX_SHAPE_UNIT, 0, 0 }, NULL, 0, 0, 0, BOX_PAINT_PAD, 0, 0, 0 };
     Rounded(x, y, w, h, r, &paint);
 }
 
@@ -224,7 +225,7 @@ static void LookLogo(const BoxScene *scene, uint8_t **at)
     room.Clip.Width  = g_look.lw;
     room.Clip.Height = g_look.lh;
     BoxScenePlayer player;
-    BoxBrushRect   whole;
+    BoxRect        whole;
     BoxScenePlayBegin(&player, scene, &room, start, now, laid, shown, g_look.edges);
     BoxScenePlayDraw(&player, &whole, BoxScenePlayAt(&player, 0, &whole, 1));
 }
@@ -260,7 +261,7 @@ int PanelLookBegin(const FbInfo *fb, const char *said, const char *under)
     const uint64_t figures = g_look.logo && !bad ? scene.Head->Figures : 0u;
     const uint64_t pixels = (uint64_t)fb->width * fb->height * 4u;
     const uint64_t row    = ((uint64_t)fb->width + 2u) * 4u;
-    const uint64_t edges  = (uint64_t)BOX_SCENE_EDGES * sizeof(BoxBrushEdge);
+    const uint64_t edges  = (uint64_t)BOX_SCENE_EDGES * sizeof(BoxShapeEdge);
     const uint64_t poses  = figures * 2u * (sizeof(BoxScenePose) + sizeof(BoxSceneLaid));
     const uint64_t copy   = g_look.logo ? size : 0u;
     const uint64_t bytes  = pixels + row + edges + poses + copy + 8u * 16u;
@@ -279,7 +280,7 @@ int PanelLookBegin(const FbInfo *fb, const char *said, const char *under)
     g_look.canvas.Clip.Y      = 0;
     g_look.canvas.Clip.Width  = (int32_t)fb->width;
     g_look.canvas.Clip.Height = (int32_t)fb->height;
-    g_look.edges              = (BoxBrushEdge *)(void *)Carve(&at, edges);
+    g_look.edges              = (BoxShapeEdge *)(void *)Carve(&at, edges);
     BoxBrushClear(&g_look.canvas, g_look.canvas.Clip, g_look.inks->paper);
     if (bad) {
         Print("Gangway: the panel's logo will not read — ");
@@ -308,8 +309,8 @@ static void LookRow(const PanelLookRow *r, int chosen, int32_t y, int32_t rh, in
     if (chosen) {
         const int32_t px = g_look.mx - 2 * g_look.ch - g_look.ch / 3, pw = g_look.mw + 2 * g_look.ch + g_look.ch / 3;
         const int32_t py = y + rh / 10, ph = rh * 8 / 10;
-        const BoxBrushPaint plashka = { BOX_BRUSH_PAINT_LINEAR, 0, g_look.plashka, 5,
-                                        { 0, ph * ONE, pw * ONE, 0, px * ONE, py * ONE }, NULL, 0, 0, 0 };
+        const BoxPaint plashka = { BOX_PAINT_LINEAR, 0, g_look.plashka, 5,
+                                   { 0, ph * ONE, pw * ONE, 0, px * ONE, py * ONE }, NULL, 0, 0, 0, BOX_PAINT_PAD, 0, 0, 0 };
         Rounded(px, py, pw, ph, ph / 2, &plashka);
         Say(g_look.size, g_look.mx - g_look.ch - g_look.cw, ty, BOXOS_SYMBOL_DUPPO_TEXT, 0xFFFFFFu);
     }
@@ -346,7 +347,7 @@ void PanelLookPage(const char *title, const PanelLookRow *rows, uint32_t count, 
     /* The column's room cleared to the paper: from left of the plashka to the
      * screen's right edge, top to bottom — or under the logo, standing up. */
     const int32_t top = wide ? 0 : g_look.ly + g_look.lh;
-    BoxBrushRect  room = { g_look.left, top, W - g_look.left, H - top };
+    BoxRect       room = { g_look.left, top, W - g_look.left, H - top };
     BoxBrushClear(&g_look.canvas, room, k->paper);
 
     /* Rows two cells tall and a cell between groups — closer, when the block

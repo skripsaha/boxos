@@ -950,7 +950,8 @@ GANGWAY_HDRS   = src/boot/uefi/gangway.h src/boot/uefi/uefi.h \
                  src/include/video_colors.h src/include/boxos_gangway_settings.h \
                  src/include/settings_reader.h src/include/settings_chosen.h src/include/key_chord.h \
                  src/include/kb_event.h src/include/boxos_logkeep.h src/include/boxos_crossings.h \
-                 src/include/boxos_brush.h src/include/boxos_scene.h src/include/boxos_scene_play.h \
+                 src/include/boxos_brush.h src/include/boxos_shape.h src/include/boxos_paint.h \
+                 src/include/boxos_scene.h src/include/boxos_scene_play.h \
                  $(IMPRINT_DATA) $(IMPRINT_BOLD)
 GANGWAY_JUMP   = src/boot/uefi/gangway_jump.asm
 # The panel's logo, kept in the loader (gangway_logo.asm): duppo-word, still.
@@ -1344,7 +1345,8 @@ $(IMPRINT_TOOL): tools/imprint.cpp tools/imprint_make.cpp tools/imprint_make.h \
 
 define SCENE_RULE
 $(BUILDDIR)/scenes/$(1)/$(2).scene: $(USERSPACE_DIR)/scenes/$(2)-$(1).txt tools/scene.py \
-                                    $(SRCDIR)/include/boxos_scene.h $(SRCDIR)/include/boxos_brush.h
+                                    $(SRCDIR)/include/boxos_scene.h $(SRCDIR)/include/boxos_shape.h \
+                                    $(SRCDIR)/include/boxos_paint.h
 	@mkdir -p $$(@D)
 	@python3 tools/scene.py pack $$< $$@ >/dev/null
 endef

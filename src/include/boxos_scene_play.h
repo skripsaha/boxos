@@ -21,27 +21,27 @@
  * letter of a word across a screen of 8K takes some hundreds. A figure that
  * would take more is not drawn (its outline spills); the stand holds every
  * scene the machine carries to drawing whole on such a screen. */
-#define BOX_SCENE_EDGES (4u * BOX_BRUSH_STEPS_MOST)
+#define BOX_SCENE_EDGES (4u * BOX_SHAPE_STEPS_MOST)
 
 typedef struct BoxScenePose {
     int32_t Value[BOX_SCENE_WHATS];
 } BoxScenePose;
 
 typedef struct BoxSceneLaid {
-    BoxBrushMatrix World;     /* its own places onto the canvas */
+    BoxMatrix      World;     /* its own places onto the canvas */
     uint32_t       Opacity;   /* its own times its groups' */
-    BoxBrushRect   Bounds;    /* the pixels it may cover: none for a group, an unseen figure, one the brush refuses */
+    BoxRect        Bounds;    /* the pixels it may cover: none for a group, an unseen figure, one the brush refuses */
 } BoxSceneLaid;
 
 typedef struct BoxScenePlayer {
     const BoxScene       *Scene;
     const BoxBrushCanvas *Canvas;
-    BoxBrushMatrix        Screen;   /* the scene's places onto the canvas */
+    BoxMatrix             Screen;   /* the scene's places onto the canvas */
     BoxScenePose         *Start;    /* where each figure stood when the act began */
     BoxScenePose         *Now;
     BoxSceneLaid         *Laid;     /* the frame posed last */
     BoxSceneLaid         *Shown;    /* the frame drawn last */
-    BoxBrushEdge         *Edges;
+    BoxShapeEdge         *Edges;
     uint32_t              Act;
     int                   Fresh;    /* nothing of the scene drawn yet */
 } BoxScenePlayer;
@@ -51,12 +51,12 @@ typedef struct BoxScenePlayer {
  * enter. */
 static inline void BoxScenePlayBegin(BoxScenePlayer *P, const BoxScene *S, const BoxBrushCanvas *K,
                                      BoxScenePose *Start, BoxScenePose *Now, BoxSceneLaid *Laid,
-                                     BoxSceneLaid *Shown, BoxBrushEdge *Edges)
+                                     BoxSceneLaid *Shown, BoxShapeEdge *Edges)
 {
     const int64_t Short   = K->Width < K->Height ? K->Width : K->Height;
-    const int32_t Stretch = BoxBrushNarrow(Short * BOX_BRUSH_UNIT / S->Head->Units);
-    const BoxBrushMatrix Screen = { Stretch, 0, 0, Stretch, (int32_t)(K->Width * (BOX_BRUSH_ONE / 2)),
-                                    (int32_t)(K->Height * (BOX_BRUSH_ONE / 2)) };
+    const int32_t Stretch = BoxShapeNarrow(Short * BOX_SHAPE_UNIT / S->Head->Units);
+    const BoxMatrix Screen = { Stretch, 0, 0, Stretch, (int32_t)(K->Width * (BOX_SHAPE_ONE / 2)),
+                               (int32_t)(K->Height * (BOX_SHAPE_ONE / 2)) };
     P->Scene  = S;
     P->Canvas = K;
     P->Screen = Screen;
@@ -82,7 +82,7 @@ static inline void BoxScenePlayAct(BoxScenePlayer *P, uint32_t Act)
 /* T, 0 to UNIT of the way between two keys, as Ease takes it. */
 static inline int64_t BoxSceneEased(uint32_t Ease, int64_t T)
 {
-    const int64_t U = BOX_BRUSH_UNIT;
+    const int64_t U = BOX_SHAPE_UNIT;
     switch (Ease) {
     case BOX_SCENE_EASE_IN: return T * T / U;
     case BOX_SCENE_EASE_OUT: return U - (U - T) * (U - T) / U;
@@ -101,8 +101,8 @@ static inline int32_t BoxSceneAlong(const BoxScene *S, const BoxSceneTrack *T, i
     uint32_t           WasAt = 0;
     for (uint32_t I = 0; I < T->KeyCount; I++) {
         if (At < Key[I].At) {
-            const int64_t Part = (int64_t)(At - WasAt) * BOX_BRUSH_UNIT / (Key[I].At - WasAt);
-            return (int32_t)(Was + BoxBrushRound((Key[I].Value - Was) * BoxSceneEased(Key[I].Ease, Part)));
+            const int64_t Part = (int64_t)(At - WasAt) * BOX_SHAPE_UNIT / (Key[I].At - WasAt);
+            return (int32_t)(Was + BoxShapeRound((Key[I].Value - Was) * BoxSceneEased(Key[I].Ease, Part)));
         }
         Was   = Key[I].Value;
         WasAt = Key[I].At;
@@ -112,48 +112,48 @@ static inline int32_t BoxSceneAlong(const BoxScene *S, const BoxSceneTrack *T, i
 
 /* The figure's own places onto its group's: turned and stretched about its
  * pivot, the pivot put at X, Y from where it was. */
-static inline BoxBrushMatrix BoxSceneLocal(const BoxSceneFigure *F, const BoxScenePose *Pose)
+static inline BoxMatrix BoxSceneLocal(const BoxSceneFigure *F, const BoxScenePose *Pose)
 {
-    const int64_t  Cos  = BoxBrushCosine((uint32_t)Pose->Value[BOX_SCENE_TURN]);
-    const int64_t  Sin  = BoxBrushSine((uint32_t)Pose->Value[BOX_SCENE_TURN]);
-    const int64_t  Wide = Pose->Value[BOX_SCENE_WIDE], Tall = Pose->Value[BOX_SCENE_TALL];
-    const int64_t  PX = F->Pivot[0], PY = F->Pivot[1];
-    BoxBrushMatrix M;
-    M.A = BoxBrushNarrow(BoxBrushRound(Cos * Wide));
-    M.B = BoxBrushNarrow(BoxBrushRound(Sin * Wide));
-    M.C = BoxBrushNarrow(BoxBrushRound(-Sin * Tall));
-    M.D = BoxBrushNarrow(BoxBrushRound(Cos * Tall));
-    M.E = BoxBrushNarrow(Pose->Value[BOX_SCENE_X] + PX - BoxBrushRound((int64_t)M.A * PX + (int64_t)M.C * PY));
-    M.F = BoxBrushNarrow(Pose->Value[BOX_SCENE_Y] + PY - BoxBrushRound((int64_t)M.B * PX + (int64_t)M.D * PY));
+    const int64_t Cos  = BoxShapeCosine((uint32_t)Pose->Value[BOX_SCENE_TURN]);
+    const int64_t Sin  = BoxShapeSine((uint32_t)Pose->Value[BOX_SCENE_TURN]);
+    const int64_t Wide = Pose->Value[BOX_SCENE_WIDE], Tall = Pose->Value[BOX_SCENE_TALL];
+    const int64_t PX = F->Pivot[0], PY = F->Pivot[1];
+    BoxMatrix     M;
+    M.A = BoxShapeNarrow(BoxShapeRound(Cos * Wide));
+    M.B = BoxShapeNarrow(BoxShapeRound(Sin * Wide));
+    M.C = BoxShapeNarrow(BoxShapeRound(-Sin * Tall));
+    M.D = BoxShapeNarrow(BoxShapeRound(Cos * Tall));
+    M.E = BoxShapeNarrow(Pose->Value[BOX_SCENE_X] + PX - BoxShapeRound((int64_t)M.A * PX + (int64_t)M.C * PY));
+    M.F = BoxShapeNarrow(Pose->Value[BOX_SCENE_Y] + PY - BoxShapeRound((int64_t)M.B * PX + (int64_t)M.D * PY));
     return M;
 }
 
 /* Figure I's outline built through its world, into the player's edges. */
 /* A path's pieces followed by the pen. */
-static inline void BoxSceneAddPath(const BoxScene *S, const BoxSceneFigure *F, BoxBrushOutline *O)
+static inline void BoxSceneAddPath(const BoxScene *S, const BoxSceneFigure *F, BoxShape *O)
 {
     const BoxScenePiece *P = &S->Pieces[F->Shape[0]];
     for (uint32_t K = 0; K < (uint32_t)F->Shape[1];) {
         switch (P[K].Verb) {
-        case BOX_SCENE_MOVE: BoxBrushMoveTo(O, P[K].X, P[K].Y); K += 1u; break;
-        case BOX_SCENE_LINE: BoxBrushLineTo(O, P[K].X, P[K].Y); K += 1u; break;
-        case BOX_SCENE_QUAD: BoxBrushQuadTo(O, P[K].X, P[K].Y, P[K + 1u].X, P[K + 1u].Y); K += 2u; break;
+        case BOX_SCENE_MOVE: BoxShapeMoveTo(O, P[K].X, P[K].Y); K += 1u; break;
+        case BOX_SCENE_LINE: BoxShapeLineTo(O, P[K].X, P[K].Y); K += 1u; break;
+        case BOX_SCENE_QUAD: BoxShapeQuadTo(O, P[K].X, P[K].Y, P[K + 1u].X, P[K + 1u].Y); K += 2u; break;
         default:
-            BoxBrushCubicTo(O, P[K].X, P[K].Y, P[K + 1u].X, P[K + 1u].Y, P[K + 2u].X, P[K + 2u].Y);
+            BoxShapeCubicTo(O, P[K].X, P[K].Y, P[K + 1u].X, P[K + 1u].Y, P[K + 2u].X, P[K + 2u].Y);
             K += 3u;
             break;
         }
     }
 }
 
-static inline void BoxSceneOutline(const BoxScenePlayer *P, uint32_t I, BoxBrushOutline *O)
+static inline void BoxSceneOutline(const BoxScenePlayer *P, uint32_t I, BoxShape *O)
 {
     const BoxSceneFigure *F = &P->Scene->Figures[I];
-    BoxBrushBegin(O, P->Edges, BOX_SCENE_EDGES, &P->Laid[I].World);
-    if (F->Kind == BOX_SCENE_ELLIPSE)   BoxBrushAddEllipse(O, F->Shape[0], F->Shape[1], F->Shape[2], F->Shape[3], 0);
-    else if (F->Kind == BOX_SCENE_RECT) BoxBrushAddRect(O, F->Shape[0], F->Shape[1], F->Shape[2], F->Shape[3], 0);
+    BoxShapeBegin(O, P->Edges, BOX_SCENE_EDGES, &P->Laid[I].World);
+    if (F->Kind == BOX_SCENE_ELLIPSE)   BoxShapeAddEllipse(O, F->Shape[0], F->Shape[1], F->Shape[2], F->Shape[3], 0);
+    else if (F->Kind == BOX_SCENE_RECT) BoxShapeAddRect(O, F->Shape[0], F->Shape[1], F->Shape[2], F->Shape[3], 0);
     else                                BoxSceneAddPath(P->Scene, F, O);
-    BoxBrushClose(O);
+    BoxShapeClose(O);
 }
 
 static inline int BoxSceneSame(const BoxSceneLaid *A, const BoxSceneLaid *B)
@@ -166,13 +166,13 @@ static inline int BoxSceneSame(const BoxSceneLaid *A, const BoxSceneLaid *B)
 
 /* R among the Count rectangles in Dirty, Room of them at most: joined to every
  * one it meets, or kept apart, or — no room — joined to the first. */
-static inline uint32_t BoxSceneDirty(BoxBrushRect *Dirty, uint32_t Count, uint32_t Room, BoxBrushRect R)
+static inline uint32_t BoxSceneDirty(BoxRect *Dirty, uint32_t Count, uint32_t Room, BoxRect R)
 {
     for (uint32_t K = 0; K < Count;) {
-        const BoxBrushRect Wider = { Dirty[K].X - 1, Dirty[K].Y - 1, Dirty[K].Width + 2, Dirty[K].Height + 2 };
-        const BoxBrushRect Met   = BoxBrushMeet(Wider, R);
+        const BoxRect Wider = { Dirty[K].X - 1, Dirty[K].Y - 1, Dirty[K].Width + 2, Dirty[K].Height + 2 };
+        const BoxRect Met   = BoxRectMeet(Wider, R);
         if (Met.Width > 0 && Met.Height > 0) {
-            R        = BoxBrushJoin(R, Dirty[K]);
+            R        = BoxRectJoin(R, Dirty[K]);
             Dirty[K] = Dirty[--Count];
             K        = 0;
         } else {
@@ -182,7 +182,7 @@ static inline uint32_t BoxSceneDirty(BoxBrushRect *Dirty, uint32_t Count, uint32
     if (Count < Room) {
         Dirty[Count++] = R;
     } else {
-        Dirty[0] = BoxBrushJoin(Dirty[0], R);
+        Dirty[0] = BoxRectJoin(Dirty[0], R);
     }
     return Count;
 }
@@ -194,12 +194,12 @@ static inline uint32_t BoxSceneDirty(BoxBrushRect *Dirty, uint32_t Count, uint32
  * Room at most and at least one: their count — the whole canvas before the
  * first frame is drawn.
  */
-static inline uint32_t BoxScenePlayAt(BoxScenePlayer *P, uint32_t Ms, BoxBrushRect *Dirty, uint32_t Room)
+static inline uint32_t BoxScenePlayAt(BoxScenePlayer *P, uint32_t Ms, BoxRect *Dirty, uint32_t Room)
 {
     const BoxScene *S      = P->Scene;
     const uint32_t  Length = S->Head->Acts[P->Act];
     const uint32_t  At     = P->Act == BOX_SCENE_WAIT ? Ms % Length : Ms < Length ? Ms : Length;
-    const BoxBrushRect None = { 0, 0, 0, 0 };
+    const BoxRect None = { 0, 0, 0, 0 };
     BoxBrushCanvas     Whole = *P->Canvas;
     Whole.Clip.X = Whole.Clip.Y = 0;
     Whole.Clip.Width  = (int32_t)Whole.Width;
@@ -214,15 +214,15 @@ static inline uint32_t BoxScenePlayAt(BoxScenePlayer *P, uint32_t Ms, BoxBrushRe
     for (uint32_t I = 0; I < S->Head->Figures; I++) {
         const BoxSceneFigure *F    = &S->Figures[I];
         BoxSceneLaid         *Laid = &P->Laid[I];
-        const BoxBrushMatrix  Over = F->Parent == BOX_SCENE_NONE ? P->Screen : P->Laid[F->Parent].World;
-        const uint32_t        Seen = F->Parent == BOX_SCENE_NONE ? BOX_BRUSH_FULL : P->Laid[F->Parent].Opacity;
-        Laid->World   = BoxBrushThen(BoxSceneLocal(F, &P->Now[I]), Over);
-        Laid->Opacity = (Seen * (uint32_t)P->Now[I].Value[BOX_SCENE_OPACITY] + 127u) / BOX_BRUSH_FULL;
+        const BoxMatrix       Over = F->Parent == BOX_SCENE_NONE ? P->Screen : P->Laid[F->Parent].World;
+        const uint32_t        Seen = F->Parent == BOX_SCENE_NONE ? BOX_SHAPE_FULL : P->Laid[F->Parent].Opacity;
+        Laid->World   = BoxMatrixThen(BoxSceneLocal(F, &P->Now[I]), Over);
+        Laid->Opacity = (Seen * (uint32_t)P->Now[I].Value[BOX_SCENE_OPACITY] + 127u) / BOX_SHAPE_FULL;
         Laid->Bounds  = None;
         if (F->Kind == BOX_SCENE_GROUP || Laid->Opacity == 0) continue;
-        BoxBrushOutline O;
+        BoxShape O;
         BoxSceneOutline(P, I, &O);
-        if (!O.Spilled) Laid->Bounds = BoxBrushReach(&Whole, &O);
+        if (BoxShapeDrawable(&O)) Laid->Bounds = BoxShapeReach(&O, BoxBrushWithin(&Whole));
     }
 
     if (P->Fresh) {
@@ -232,7 +232,7 @@ static inline uint32_t BoxScenePlayAt(BoxScenePlayer *P, uint32_t Ms, BoxBrushRe
     uint32_t Count = 0;
     for (uint32_t I = 0; I < S->Head->Figures; I++) {
         if (BoxSceneSame(&P->Laid[I], &P->Shown[I])) continue;
-        const BoxBrushRect Changed = BoxBrushJoin(P->Shown[I].Bounds, P->Laid[I].Bounds);
+        const BoxRect Changed = BoxRectJoin(P->Shown[I].Bounds, P->Laid[I].Bounds);
         if (Changed.Width > 0 && Changed.Height > 0) Count = BoxSceneDirty(Dirty, Count, Room, Changed);
     }
     return Count;
@@ -240,24 +240,24 @@ static inline uint32_t BoxScenePlayAt(BoxScenePlayer *P, uint32_t Ms, BoxBrushRe
 
 /* The frame posed last drawn into each of the Count rectangles of the canvas:
  * the paper, and every figure that reaches into it, in their order. */
-static inline void BoxScenePlayDraw(BoxScenePlayer *P, const BoxBrushRect *Rects, uint32_t Count)
+static inline void BoxScenePlayDraw(BoxScenePlayer *P, const BoxRect *Rects, uint32_t Count)
 {
     const BoxScene *S = P->Scene;
     BoxBrushCanvas  K = *P->Canvas;
     for (uint32_t R = 0; R < Count; R++) {
-        const BoxBrushRect Whole = { 0, 0, (int32_t)K.Width, (int32_t)K.Height };
-        K.Clip                   = BoxBrushMeet(Rects[R], Whole);
+        const BoxRect Whole = { 0, 0, (int32_t)K.Width, (int32_t)K.Height };
+        K.Clip              = BoxRectMeet(Rects[R], Whole);
         BoxBrushClear(&K, K.Clip, S->Head->Paper);
         for (uint32_t I = 0; I < S->Head->Figures; I++) {
             const BoxSceneFigure *F    = &S->Figures[I];
             const BoxSceneLaid   *Laid = &P->Laid[I];
-            const BoxBrushRect    Met  = BoxBrushMeet(Laid->Bounds, K.Clip);
+            const BoxRect         Met  = BoxRectMeet(Laid->Bounds, K.Clip);
             if (F->Kind == BOX_SCENE_GROUP || Laid->Opacity == 0 || Met.Width <= 0 || Met.Height <= 0) continue;
             const BoxScenePaint *Kept  = &S->Paints[F->Paint];
-            const BoxBrushStop  *Stops = Kept->Kind == BOX_BRUSH_PAINT_SOLID ? NULL : &S->Stops[Kept->FirstStop];
-            const BoxBrushPaint  Paint = { Kept->Kind, Kept->Color, Stops, Kept->StopCount,
-                                           BoxBrushThen(Kept->Space, Laid->World), NULL, 0, 0, 0 };
-            BoxBrushOutline      O;
+            const BoxPaintStop  *Stops = Kept->Kind == BOX_PAINT_SOLID ? NULL : &S->Stops[Kept->FirstStop];
+            const BoxPaint       Paint = { Kept->Kind, Kept->Color, Stops, Kept->StopCount,
+                                           BoxMatrixThen(Kept->Space, Laid->World), NULL, 0, 0, 0, BOX_PAINT_PAD, 0, 0, 0 };
+            BoxShape             O;
             BoxSceneOutline(P, I, &O);
             BoxBrushFill(&K, &O, &Paint, Laid->Opacity);
         }

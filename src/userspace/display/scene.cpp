@@ -41,7 +41,7 @@ struct Playing {
     std::vector<std::int32_t>  Row;
     std::vector<BoxScenePose>  Start, Now;
     std::vector<BoxSceneLaid>  Laid, Shown;
-    std::vector<BoxBrushEdge>  Edges;
+    std::vector<BoxShapeEdge>  Edges;
     BoxBrushCanvas             Canvas{};
     BoxScenePlayer             Player{};
     std::uint64_t              ActBegan = 0;   // uptime ms the act began at
@@ -73,7 +73,7 @@ const char *ReadScene(file_id_t Fid, std::vector<std::uint8_t> &Bytes)
 // The frame Ms into the act drawn where it changed, onto the glass.
 void Draw(Playing &P, std::uint32_t Ms)
 {
-    BoxBrushRect   Dirty[DirtyMost];
+    BoxRect        Dirty[DirtyMost];
     const uint32_t Count = BoxScenePlayAt(&P.Player, Ms, Dirty, DirtyMost);
     BoxScenePlayDraw(&P.Player, Dirty, Count);
     g_on->Show(P.Canvas, Dirty, Count);
@@ -82,7 +82,7 @@ void Draw(Playing &P, std::uint32_t Ms)
 // The act begun, from where every figure stands At ms into the one before.
 void Act(Playing &P, std::uint32_t At, std::uint32_t Next, std::uint64_t Began)
 {
-    BoxBrushRect Ignored[DirtyMost];
+    BoxRect Ignored[DirtyMost];
     (void)BoxScenePlayAt(&P.Player, At, Ignored, DirtyMost);
     BoxScenePlayAct(&P.Player, Next);
     P.ActBegan = Began;

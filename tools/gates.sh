@@ -52,7 +52,9 @@
 # bytes made at random; typecase, Typecase's reader and rasterizer held to a
 # second reader of every font and to exact areas, its sources, chain and
 # cache to what they promise, and every named damage of a font and a
-# thousand random ones read and drawn whole under the sanitizers.
+# thousand random ones read and drawn whole under the sanitizers; draw, the
+# shapes, strokes and paints every hand draws with held to exact areas, the
+# host's atan2 and the light pictures are mixed in.
 #
 # The list is here, in the tree it judges, and not beside a session: a list
 # kept out of the tree can lose a gate without a diff saying so.
@@ -76,7 +78,7 @@ GATES_LOGCHECK="healthy unattended byname quill quillmut census lockrankmut repl
                 stand standusb standmut mkfs crewcrash fare faremut"
 GATES_POWERCUT="selftest noanchor noanchormut nextfid hog halt race overwrite logger tipin sessions
                 replug machineb spared undonecut engross dedup firstflushmut lastflushmut booknextfidmut stitchmut"
-GATES_OTHER="framerefuse bookboot loadersettings panel crossings scene dedup volread_selftest boxasm format form recipe elf box pack inside settings typecase"
+GATES_OTHER="framerefuse bookboot loadersettings panel crossings scene dedup volread_selftest boxasm format form recipe elf box pack inside settings typecase draw"
 GATES_LONG="loggerhour loggerhourmut"
 
 gate_names() {
@@ -108,6 +110,7 @@ gate_run() {
         inside)           tools/inside_stand.sh ;;
         settings)         tools/settings_stand.sh ;;
         typecase)         tools/typecase_stand.sh ;;
+        draw)             tools/draw_stand.sh ;;
         *)                tools/logcheck.sh "$1" ;;
     esac
 }

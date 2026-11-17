@@ -78,7 +78,7 @@ public:
     // pixel (boxos_brush.h BoxBrushShow) — nothing while the Emergency Screen
     // has the glass. What the console shows there is no longer known to be
     // on it.
-    void Show(const BoxBrushCanvas &Canvas, const BoxBrushRect *Rects, std::uint32_t Count) noexcept;
+    void Show(const BoxBrushCanvas &Canvas, const BoxRect *Rects, std::uint32_t Count) noexcept;
 
     // The typesetter whose pictures a framebuffer shows, alive as long as the
     // easel: the console as many of its cells as the glass holds, at least

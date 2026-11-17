@@ -127,7 +127,7 @@ void SceneShow(const FbInfo *fb)
     const uint64_t       row     = ((uint64_t)fb->width + 2u) * 4u;
     const uint64_t       poses   = (uint64_t)figures * sizeof(BoxScenePose);
     const uint64_t       lays    = (uint64_t)figures * sizeof(BoxSceneLaid);
-    const uint64_t       edges   = (uint64_t)BOX_SCENE_EDGES * sizeof(BoxBrushEdge);
+    const uint64_t       edges   = (uint64_t)BOX_SCENE_EDGES * sizeof(BoxShapeEdge);
     const uint64_t       bytes   = pixels + row + 2u * poses + 2u * lays + edges + 6u * 16u;
     EFI_PHYSICAL_ADDRESS room    = 0;
     if (EFI_ERROR(g_bs->allocate_pages(AllocateAnyPages, EfiLoaderData, ScenePages(bytes), &room))) {
@@ -152,9 +152,9 @@ void SceneShow(const FbInfo *fb)
     BoxScenePose  *now   = (BoxScenePose *)(void *)Carve(&at, poses);
     BoxSceneLaid  *laid  = (BoxSceneLaid *)(void *)Carve(&at, lays);
     BoxSceneLaid  *shown = (BoxSceneLaid *)(void *)Carve(&at, lays);
-    BoxBrushEdge  *edge  = (BoxBrushEdge *)(void *)Carve(&at, edges);
+    BoxShapeEdge  *edge  = (BoxShapeEdge *)(void *)Carve(&at, edges);
     BoxScenePlayer player;
-    BoxBrushRect   whole;
+    BoxRect        whole;
     BoxScenePlayBegin(&player, &g_scene.scene, &canvas, start, now, laid, shown, edge);
     BoxScenePlayDraw(&player, &whole, BoxScenePlayAt(&player, 0, &whole, 1));
     BoxBrushShow(&canvas, whole, (volatile uint8_t *)(uintptr_t)fb->addr, fb->stride, fb->format);
