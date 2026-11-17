@@ -5,6 +5,8 @@
  * the very sources the system builds, held to what they must do.
  *
  *     draw_stand checks
+ *     draw_stand speed
+ *     draw_stand sheet OUT.ppm
  *
  * checks: a shape swept row by row the very cells of every edge laid alone;
  * EVENODD's holes; rounded rectangles of four radii, shrunk as CSS shrinks
@@ -96,14 +98,22 @@ bool Near(double Got, double Want, double Share)
 
 int main(int Argc, char **Argv)
 {
+    if (Argc == 3 && std::strcmp(Argv[1], "sheet") == 0) return stand::WriteSheet(Argv[2]) ? 0 : 1;
+    if (Argc == 2 && std::strcmp(Argv[1], "speed") == 0) {
+        stand::SaySpeed();
+        return 0;
+    }
     if (Argc != 2 || std::strcmp(Argv[1], "checks") != 0) {
-        std::fprintf(stderr, "usage: draw_stand checks\n");
+        std::fprintf(stderr, "usage: draw_stand checks | speed | sheet OUT.ppm\n");
         return 2;
     }
     stand::Tally Count;
     stand::CheckShapes(Count);
     stand::CheckStrokes(Count);
     stand::CheckPaints(Count);
+    stand::CheckEngine(Count);
+    stand::CheckLanes(Count);
+    stand::CheckShadows(Count);
     std::printf("draw stand: %d held, %d failed\n", Count.Held, Count.Failed);
     return Count.Failed ? 1 : 0;
 }

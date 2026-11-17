@@ -445,6 +445,31 @@ void CheckPaints(Tally &Count)
         Count.Check(Holds, "past a gradient's end: held at its last colour, begun again, run back, or clear");
     }
 
+    /* A walk along a row: each place the one BoxPaintPlace gives. */
+    {
+        std::uint32_t Wrong = 0;
+        for (std::uint32_t I = 0; I < 2000u; I++) {
+            BoxPaint P{};
+            P.Kind      = BOX_PAINT_LINEAR;
+            P.Stops     = Stops;
+            P.StopCount = 2;
+            P.Space     = BoxMatrixPlaced(Within(-100, 300) * ONE, Within(-100, 300) * ONE, Within(UNIT / 8, 64 * UNIT), Random());
+            P.Space.C   = Random() % 3u ? P.Space.C : Within(-UNIT, UNIT);
+            BoxPaintReady R;
+            if (!BoxPaintPrepare(&P, &R)) continue;
+            const std::int32_t X0 = Within(-500, 500), Y = Within(-500, 500);
+            BoxPaintWalk       W;
+            BoxPaintWalkBegin(&R, X0, Y, &W);
+            for (std::int32_t K = 0; K < 300; K++, BoxPaintWalkNext(&W)) {
+                std::int64_t U, V, PU, PV;
+                BoxPaintWalkAt(&W, &U, &V);
+                BoxPaintPlace(&R, X0 + K, Y, &PU, &PV);
+                if (U != PU || V != PV) Wrong++;
+            }
+        }
+        Count.Check(Wrong == 0, "a walk along a row falls on the very places each pixel's own is worked out at");
+    }
+
     /* Pictures: sharp, smooth as light, past their edge. */
     {
         const std::uint32_t Two[2] = { 0xFF000000u, 0xFFFFFFFFu };

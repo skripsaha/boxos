@@ -77,6 +77,26 @@ typedef struct BoxPaintReady {
     int64_t         IA, IB, IC, ID;
 } BoxPaintReady;
 
+/* The canvas onto Space, for a paint of any kind — a picture whose pixels
+ * another hand keeps, too: 0 when Space does not fit, folds flat or shrinks
+ * past what is undone. */
+static inline int BoxPaintSpace(const BoxPaint *P, BoxPaintReady *Ready)
+{
+    Ready->Paint = P;
+    Ready->IA = Ready->IB = Ready->IC = Ready->ID = 0;
+    const BoxMatrix *M = &P->Space;
+    if (!BoxMatrixFits(M)) return 0;
+    const int64_t Folds = (int64_t)M->A * M->D - (int64_t)M->B * M->C;
+    if (Folds == 0) return 0;
+    Ready->IA = ((int64_t)M->D * 4294967296ll) / Folds;
+    Ready->IB = ((int64_t)-M->B * 4294967296ll) / Folds;
+    Ready->IC = ((int64_t)-M->C * 4294967296ll) / Folds;
+    Ready->ID = ((int64_t)M->A * 4294967296ll) / Folds;
+    const int64_t Most = 2147483647ll;
+    return BoxShapeSize(Ready->IA) <= Most && BoxShapeSize(Ready->IB) <= Most && BoxShapeSize(Ready->IC) <= Most &&
+           BoxShapeSize(Ready->ID) <= Most;
+}
+
 /* 0 when the paint is of no kind, its space does not fit, folds flat or
  * shrinks past what is undone, its focal point lies on or past its circle, or
  * it has nothing to show. */
@@ -96,27 +116,47 @@ static inline int BoxPaintPrepare(const BoxPaint *P, BoxPaintReady *Ready)
             (int64_t)P->FocalX * P->FocalX + (int64_t)P->FocalY * P->FocalY >= G * G)
             return 0;
     }
-    const BoxMatrix *M = &P->Space;
-    if (!BoxMatrixFits(M)) return 0;
-    const int64_t Folds = (int64_t)M->A * M->D - (int64_t)M->B * M->C;
-    if (Folds == 0) return 0;
-    Ready->IA = ((int64_t)M->D * 4294967296ll) / Folds;
-    Ready->IB = ((int64_t)-M->B * 4294967296ll) / Folds;
-    Ready->IC = ((int64_t)-M->C * 4294967296ll) / Folds;
-    Ready->ID = ((int64_t)M->A * 4294967296ll) / Folds;
-    const int64_t Most = 2147483647ll;
-    return BoxShapeSize(Ready->IA) <= Most && BoxShapeSize(Ready->IB) <= Most && BoxShapeSize(Ready->IC) <= Most &&
-           BoxShapeSize(Ready->ID) <= Most;
+    return BoxPaintSpace(P, Ready);
+}
+
+/* Where pixels X, X + 1, … of row Y fall in the paint's space, one after
+ * another — the sums BoxPaintPlace works out carried along the row, each
+ * place the very one it gives. */
+typedef struct BoxPaintWalk {
+    int64_t U, V;           /* the sums for the pixel the walk is at, before rounding */
+    int64_t StepU, StepV;   /* what a pixel to the right adds to them */
+} BoxPaintWalk;
+
+static inline void BoxPaintWalkBegin(const BoxPaintReady *R, int32_t X, int32_t Y, BoxPaintWalk *W)
+{
+    const BoxPaint *P  = R->Paint;
+    const int64_t   DX = (int64_t)X * BOX_SHAPE_ONE + BOX_SHAPE_ONE / 2 - P->Space.E;
+    const int64_t   DY = (int64_t)Y * BOX_SHAPE_ONE + BOX_SHAPE_ONE / 2 - P->Space.F;
+    W->U               = R->IA * DX + R->IC * DY;
+    W->V               = R->IB * DX + R->ID * DY;
+    W->StepU           = R->IA * BOX_SHAPE_ONE;
+    W->StepV           = R->IB * BOX_SHAPE_ONE;
+}
+
+/* The place of the pixel the walk is at, in places. */
+static inline void BoxPaintWalkAt(const BoxPaintWalk *W, int64_t *U, int64_t *V)
+{
+    *U = BoxShapeRound(W->U);
+    *V = BoxShapeRound(W->V);
+}
+
+static inline void BoxPaintWalkNext(BoxPaintWalk *W)
+{
+    W->U += W->StepU;
+    W->V += W->StepV;
 }
 
 /* Where pixel X, Y's middle lies in the paint's space, in places. */
 static inline void BoxPaintPlace(const BoxPaintReady *R, int32_t X, int32_t Y, int64_t *U, int64_t *V)
 {
-    const BoxPaint *P  = R->Paint;
-    const int64_t   DX = (int64_t)X * BOX_SHAPE_ONE + BOX_SHAPE_ONE / 2 - P->Space.E;
-    const int64_t   DY = (int64_t)Y * BOX_SHAPE_ONE + BOX_SHAPE_ONE / 2 - P->Space.F;
-    *U                 = BoxShapeRound(R->IA * DX + R->IC * DY);
-    *V                 = BoxShapeRound(R->IB * DX + R->ID * DY);
+    BoxPaintWalk W;
+    BoxPaintWalkBegin(R, X, Y, &W);
+    BoxPaintWalkAt(&W, U, V);
 }
 
 /* A way T past a gradient's ends brought within them as Extend says: 0 when
@@ -170,18 +210,24 @@ static inline int64_t BoxPaintRadialWay(const BoxPaint *P, int64_t U, int64_t V)
     return Top <= 0 ? 0 : Top * G / Room;
 }
 
-/* A gradient's way at pixel X, Y, within its ends: 0 when it is clear
+/* A gradient's way at its place U, V, within its ends: 0 when it is clear
  * there. */
-static inline int BoxPaintWay(const BoxPaintReady *R, int32_t X, int32_t Y, uint32_t *Way)
+static inline int BoxPaintWayAt(const BoxPaint *P, int64_t U, int64_t V, uint32_t *Way)
 {
-    const BoxPaint *P = R->Paint;
-    int64_t         U, V;
-    BoxPaintPlace(R, X, Y, &U, &V);
     if (P->Kind == BOX_PAINT_CONIC) {
         *Way = BoxShapeTurnOf(U, V);
         return 1;
     }
     return BoxPaintExtendWay(P->Extend, P->Kind == BOX_PAINT_LINEAR ? U : BoxPaintRadialWay(P, U, V), Way);
+}
+
+/* A gradient's way at pixel X, Y, within its ends: 0 when it is clear
+ * there. */
+static inline int BoxPaintWay(const BoxPaintReady *R, int32_t X, int32_t Y, uint32_t *Way)
+{
+    int64_t U, V;
+    BoxPaintPlace(R, X, Y, &U, &V);
+    return BoxPaintWayAt(R->Paint, U, V, Way);
 }
 
 /* The gradient's colour, 0xAARRGGBB, At (0 to GRADIENT) of its way: between

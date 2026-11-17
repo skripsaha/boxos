@@ -53,6 +53,16 @@ bool Near(double Got, double Want, double Share);
 void CheckShapes(Tally &Count);
 void CheckStrokes(Tally &Count);
 void CheckPaints(Tally &Count);
+void CheckEngine(Tally &Count);
+void CheckLanes(Tally &Count);
+void CheckShadows(Tally &Count);
+
+/* A sheet of everything the engine draws, a PPM at Out, to look at. */
+bool WriteSheet(const char *Out);
+
+/* How long each piece of the engine's work takes, every way this processor
+ * has: on the host a guide only — drawcheck says it on the machine itself. */
+void SaySpeed();
 
 }  // namespace stand
 
