@@ -126,8 +126,11 @@ ByteVector Forge::Build() const
     }
     for (const ForgeMap &Map : Maps) Cmap.insert(Cmap.end(), Map.Subtable.begin(), Map.Subtable.end());
 
-    return Assemble({{"head", Head}, {"maxp", Maxp}, {"hhea", Hhea}, {"hmtx", Hmtx},
-                     {"loca", Loca}, {"glyf", Glyf}, {"cmap", Cmap}});
+    std::vector<std::pair<const char *, ByteVector>> All = {{"head", Head}, {"maxp", Maxp}, {"hhea", Hhea},
+                                                            {"hmtx", Hmtx}, {"loca", Loca}, {"glyf", Glyf},
+                                                            {"cmap", Cmap}};
+    for (const auto &[Name, Data] : Tables) All.emplace_back(Name.c_str(), Data);
+    return Assemble(std::move(All));
 }
 
 /* Each point's coordinates as deltas, in the shortest form glyf has — none,

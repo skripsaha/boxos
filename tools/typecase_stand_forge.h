@@ -42,6 +42,7 @@ struct Forge {
     std::vector<ByteVector> Glyphs;      /* records; empty for a glyph of no outline */
     std::vector<std::uint16_t> Advances;
     std::vector<ForgeMap>   Maps;
+    std::vector<std::pair<std::string, ByteVector>> Tables;   /* any others: name, OS/2, post, GPOS, kern */
 
     ByteVector Build() const;
 };

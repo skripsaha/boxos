@@ -53,7 +53,7 @@ std::uint8_t GridsOf(const typecase::GeometrySource &Geometry)
 }  // namespace
 
 Typesetter::Typesetter(std::optional<typecase::Font> Face, std::int32_t Height)
-    : At(Face ? typecase::FitCell(*Face, Height) : ImprintCell(Height)), Kept(Sources, KeptBytes)
+    : At(Face ? typecase::FitCell(*Face, Height) : ImprintCell(Height)), Kept(KeptBytes)
 {
     auto Geometry = std::make_unique<typecase::GeometrySource>();
     Grids         = GridsOf(*Geometry);
@@ -70,12 +70,12 @@ const typecase::GlyphImage &Typesetter::Glyph(char32_t Character) noexcept
     // once more with the room that gives; with none even then, the cell shows
     // nothing rather than the display falling.
     try {
-        return Kept.Get(Character, At);
+        return Kept.Get(Sources, Character, At);
     } catch (...) {
         Kept.Clear();
     }
     try {
-        return Kept.Get(Character, At);
+        return Kept.Get(Sources, Character, At);
     } catch (...) {
         return Nothing;
     }

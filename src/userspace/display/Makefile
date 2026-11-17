@@ -29,6 +29,7 @@ CXXFLAGS = -std=gnu++23 -nostdinc++ -fexceptions -frtti -fcoroutines \
          -I../boxlib/include \
          -I../boxcxx/include/std -I../boxcxx/include \
          -I../typecase/include \
+         -I../painter/include \
          -I../../include \
          -I$(IMPRINT_DIR)
 
@@ -40,6 +41,7 @@ LDFLAGS      = -nostdlib -static -T $(BOXLIB_DIR)/user.ld -Wl,-pie -Wl,--no-dyna
 BOXLIB       = ../boxlib/libbox.a
 BOXCXX       = ../boxcxx/libboxcxx.a
 TYPECASE     = ../typecase/libtypecase.a
+PAINTER      = ../painter/libpainter.a
 BOXLIB_START = ../build/boxlib_start.o
 
 .PHONY: all clean
@@ -50,10 +52,10 @@ all: display.elf
 include ../nameplate.mk
 
 OBJS = display.o lanes.o front.o layers.o console_model.o ring.o easel.o effects.o effects_warp.o effects_ink.o \
-       font_file.o typesetter.o scene.o
+       typesetter.o scene.o
 
-display.elf: $(BOXLIB_START) $(OBJS) $(TYPECASE) $(BOXLIB) $(BOXCXX) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(OBJS) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
+display.elf: $(BOXLIB_START) $(OBJS) $(PAINTER) $(TYPECASE) $(BOXLIB) $(BOXCXX) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
 
 # An effect works out every cell of the glass every frame, the easel every
 # pixel of a cell it draws, and the scene every pixel of the part of a frame

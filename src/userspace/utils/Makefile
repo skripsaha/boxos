@@ -50,6 +50,7 @@ CXXFLAGS = -std=gnu++23 -nostdinc++ -fexceptions -frtti \
          -I../boxcxx/include/std \
          -I../boxcxx/include \
          -I../painter/include \
+         -I../typecase/include \
          -I../boxlib/include \
          -I../../include
 
@@ -58,6 +59,7 @@ LDFLAGS    = -nostdlib -static -T $(BOXLIB_DIR)/user.ld -Wl,-pie -Wl,--no-dynami
 BOXLIB     = ../boxlib/libbox.a
 BOXCXX     = ../boxcxx/libboxcxx.a
 PAINTER    = ../painter/libpainter.a
+TYPECASE   = ../typecase/libtypecase.a
 BOXLIB_START = ../build/boxlib_start.o
 # The assembler is several parts, kept in its own directory.
 ASSEMBLE_DIR  = assemble
@@ -513,11 +515,11 @@ hangman.elf: $(BOXLIB_START) $(HANGMAN_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BO
 # way the processor offers draws the plain way's pixels, and how long each
 # takes. Built -O2, as the engine it measures is.
 DRAWCHECK_DIR  = drawcheck
-DRAWCHECK_OBJS = $(addprefix $(DRAWCHECK_DIR)/,drawcheck.o scene.o speed.o)
+DRAWCHECK_OBJS = $(addprefix $(DRAWCHECK_DIR)/,drawcheck.o scene.o speed.o text.o)
 $(DRAWCHECK_OBJS): CXXFLAGS += -O2
 
-drawcheck.elf: $(BOXLIB_START) $(DRAWCHECK_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(DRAWCHECK_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+drawcheck.elf: $(BOXLIB_START) $(DRAWCHECK_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(DRAWCHECK_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
 
 # glyphs is C++ in parts of its own directory; its table of Unicode's blocks
 # is written by tools/gen_unicode_blocks.py.

@@ -1434,8 +1434,8 @@ $(HUB_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a
 	@echo "hub.elf: $$(stat -f%z $(HUB_BIN) 2>/dev/null || stat -c%s $(HUB_BIN) 2>/dev/null) bytes"
 
 # Build display server
-$(DISPLAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(TYPECASE_LIB) $(IMPRINT_DATA) \
-                $(NAMEPLATE_TOOL)
+$(DISPLAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(PAINTER_LIB) $(TYPECASE_LIB) \
+                $(IMPRINT_DATA) $(NAMEPLATE_TOOL)
 	@echo "Building display server..."
 	@cd $(DISPLAY_DIR) && $(MAKE) IMPRINT_DIR=$(abspath $(IMPRINT_DIR))
 	@echo "display.elf: $$(stat -f%z $(DISPLAY_BIN) 2>/dev/null || stat -c%s $(DISPLAY_BIN) 2>/dev/null) bytes"
@@ -1459,7 +1459,7 @@ ifneq ($(words $(wildcard $(UTIL_ELFS))),$(words $(UTIL_ELFS)))
 $(shell rm -f $(UTILS_STAMP))
 endif
 
-$(UTILS_STAMP): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(PAINTER_LIB) $(UTILS_INPUTS) \
+$(UTILS_STAMP): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(PAINTER_LIB) $(TYPECASE_LIB) $(UTILS_INPUTS) \
                 $(NAMEPLATE_TOOL)
 	@echo "Building utilities..."
 	@cd $(UTILS_DIR) && $(MAKE)

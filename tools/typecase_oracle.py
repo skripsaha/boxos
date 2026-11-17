@@ -319,9 +319,239 @@ def num(v):
     return "%.3f" % (round(v * 64) / 64)
 
 
+# --- what the face is, and its kerning -------------------------------------
+# Read past a table's end as 0, as Typecase reads it: a font that lies kerns
+# nothing rather than breaks.
+
+def u16(data, at):
+    return struct.unpack_from(">H", data, at)[0] if 0 <= at and at + 2 <= len(data) else 0
+
+
+def s16(data, at):
+    v = u16(data, at)
+    return v - 65536 if v >= 32768 else v
+
+
+def u32(data, at):
+    return struct.unpack_from(">I", data, at)[0] if 0 <= at and at + 4 <= len(data) else 0
+
+
+def name_of(table, wanted):
+    best = None
+    count, storage = u16(table, 2), u16(table, 4)
+    for i in range(count if len(table) >= 6 else 0):
+        at = 6 + 12 * i
+        if at + 12 > len(table):
+            break
+        platform, encoding, language, nid, length, offset = struct.unpack_from(">6H", table, at)
+        if nid != wanted:
+            continue
+        if platform == 3 and encoding in (1, 10):
+            rank = 4 if language == 0x409 else 3
+        elif platform == 0:
+            rank = 2
+        elif platform == 1 and encoding == 0 and language == 0:
+            rank = 1
+        else:
+            rank = 0
+        start = storage + offset
+        if rank and start + length <= len(table) and (best is None or rank > best[0]):
+            best = (rank, table[start:start + length], platform != 1)
+    if not best:
+        return ""
+    raw = best[1]
+    if best[2]:
+        return raw[:len(raw) // 2 * 2].decode("utf-16-be", errors="replace")
+    return raw.decode("mac_roman")
+
+
+def style_of(font):
+    names = font.tables.get("name", b"")
+    family = name_of(names, 16) or name_of(names, 1)
+    own = name_of(names, 17) or name_of(names, 2)
+    os2, head = font.tables.get("OS/2", b""), font.tables["head"]
+    weight = u16(os2, 4) if len(os2) >= 6 else 0
+    if 1 <= weight <= 9:
+        weight *= 100
+    selection = u16(os2, 62) if len(os2) >= 64 else 0
+    mac = u16(head, 44)
+    if not 1 <= weight <= 1000:
+        weight = 700 if selection & 0x20 or mac & 1 else 400
+    italic = bool(selection & 0x201) or bool(mac & 2)
+    post = font.tables.get("post", b"")
+    under = (s16(post, 8), s16(post, 10)) if len(post) >= 12 else (0, 0)
+    strike = (s16(os2, 28), s16(os2, 26)) if len(os2) >= 30 else (0, 0)
+    return family, own, weight, italic, under, strike
+
+
+def coverage_index(cov, glyph):
+    fmt = u16(cov, 0)
+    if fmt == 1:
+        for i in range(u16(cov, 2)):
+            if u16(cov, 4 + 2 * i) == glyph:
+                return i
+    elif fmt == 2:
+        for i in range(u16(cov, 2)):
+            start, end, first = u16(cov, 4 + 6 * i), u16(cov, 6 + 6 * i), u16(cov, 8 + 6 * i)
+            if start <= glyph <= end:
+                return first + glyph - start
+    return -1
+
+
+def class_of(cd, glyph):
+    fmt = u16(cd, 0)
+    if fmt == 1:
+        first, count = u16(cd, 2), u16(cd, 4)
+        return u16(cd, 6 + 2 * (glyph - first)) if first <= glyph < first + count else 0
+    if fmt == 2:
+        for i in range(u16(cd, 2)):
+            if u16(cd, 4 + 6 * i) <= glyph <= u16(cd, 6 + 6 * i):
+                return u16(cd, 8 + 6 * i)
+    return 0
+
+
+def value(data, at, fmt):
+    shift = advance = 0
+    if fmt & 1:
+        shift = s16(data, at)
+        at += 2
+    if fmt & 2:
+        at += 2
+    if fmt & 4:
+        advance = s16(data, at)
+    return shift, advance
+
+
+def pair(sub, first, second):
+    """A pair adjustment subtable's moves for the pair, or None when it has none."""
+    index = coverage_index(sub[u16(sub, 2):], first)
+    if index < 0:
+        return None
+    f1, f2 = u16(sub, 4), u16(sub, 6)
+    n1, n2 = 2 * bin(f1 & 0xFF).count("1"), 2 * bin(f2 & 0xFF).count("1")
+    if u16(sub, 0) == 1:
+        if index >= u16(sub, 8):
+            return None
+        pairs = sub[u16(sub, 10 + 2 * index):]
+        for i in range(u16(pairs, 0)):
+            at = 2 + i * (2 + n1 + n2)
+            if u16(pairs, at) == second:
+                return value(pairs, at + 2, f1) + value(pairs, at + 2 + n1, f2)
+        return None
+    if u16(sub, 0) == 2:
+        c1, c2 = class_of(sub[u16(sub, 8):], first), class_of(sub[u16(sub, 10):], second)
+        if c1 >= u16(sub, 12) or c2 >= u16(sub, 14):
+            return None
+        at = 16 + (c1 * u16(sub, 14) + c2) * (n1 + n2)
+        return value(sub, at, f1) + value(sub, at + n1, f2)
+    return None
+
+
+class Kerning:
+    def __init__(self, font):
+        self.scripts, self.table = {}, []
+        gpos = font.tables.get("GPOS", b"")
+        if len(gpos) >= 10 and u16(gpos, 0) == 1:
+            scripts, features, lookups = gpos[u16(gpos, 4):], gpos[u16(gpos, 6):], gpos[u16(gpos, 8):]
+            for i in range(u16(scripts, 0)):
+                tag = scripts[2 + 6 * i:6 + 6 * i].decode("latin-1")
+                script = scripts[u16(scripts, 6 + 6 * i):]
+                system = u16(script, 0) or (u16(script, 6) if u16(script, 2) else 0)
+                if not system:
+                    continue
+                langsys = script[system:]
+                wanted = ([u16(langsys, 2)] if u16(langsys, 2) != 0xFFFF else []) + \
+                         [u16(langsys, 6 + 2 * k) for k in range(u16(langsys, 4))]
+                chosen = set()
+                for f in wanted:
+                    if f >= u16(features, 0) or features[2 + 6 * f:6 + 6 * f] != b"kern":
+                        continue
+                    feature = features[u16(features, 6 + 6 * f):]
+                    chosen.update(u16(feature, 4 + 2 * k) for k in range(u16(feature, 2)))
+                kept = []
+                for index in sorted(chosen):
+                    if index >= u16(lookups, 0):
+                        continue
+                    lookup = lookups[u16(lookups, 2 + 2 * index):]
+                    subs = []
+                    for k in range(u16(lookup, 4)):
+                        sub = lookup[u16(lookup, 6 + 2 * k):]
+                        if u16(lookup, 0) == 9:
+                            if u16(sub, 0) != 1 or u16(sub, 2) != 2:
+                                continue
+                            sub = sub[u32(sub, 4):]
+                        elif u16(lookup, 0) != 2:
+                            break
+                        if sub:
+                            subs.append(sub)
+                    if subs:
+                        kept.append(subs)
+                if kept:
+                    self.scripts[tag] = kept
+        if self.scripts:
+            return
+        kern = font.tables.get("kern", b"")
+        apple = u32(kern, 0) == 0x00010000
+        count, at = (u32(kern, 4), 8) if apple else ((u16(kern, 2), 4) if u16(kern, 0) == 0 else (0, 4))
+        head = 8 if apple else 6
+        while count > 0 and at + head <= len(kern):
+            length = u32(kern, at) if apple else u16(kern, at + 2)
+            coverage = u16(kern, at + 4)
+            body = at + head
+            if apple:
+                fmt0, wanted, replaces = coverage & 0xFF == 0, not coverage & 0xE000, False
+            else:
+                fmt0, wanted, replaces = coverage >> 8 == 0, coverage & 1 and not coverage & 6, bool(coverage & 8)
+            if fmt0 and wanted and body + 8 <= len(kern):
+                pairs = {}
+                for i in range(min(u16(kern, body), (len(kern) - body - 8) // 6)):
+                    at2 = body + 8 + 6 * i
+                    pairs[(u16(kern, at2), u16(kern, at2 + 2))] = s16(kern, at2 + 4)
+                self.table.append((pairs, replaces))
+            npairs = u16(kern, body) * 6 + 8 if fmt0 else 0
+            at = body + max(npairs, length - head if length > head else 0)
+            if length == 0 and npairs == 0:
+                break
+            count -= 1
+
+    def of(self, first, second, tag):
+        moves = [0, 0, 0, 0]
+        if self.scripts:
+            for each in (tag, "DFLT", "dflt", "latn"):
+                if each in self.scripts:
+                    for subs in self.scripts[each]:
+                        for sub in subs:
+                            got = pair(sub, first, second)
+                            if got is not None:
+                                moves = [m + g for m, g in zip(moves, got)]
+                                break
+                    break
+            return moves
+        for pairs, replaces in self.table:
+            if (first, second) in pairs:
+                moves[1] = pairs[(first, second)] if replaces else moves[1] + pairs[(first, second)]
+        return moves
+
+
+KERNED = (("latn", list(range(0x21, 0x7F))),
+          ("cyrl", [0x401] + list(range(0x410, 0x450)) + [0x451]),
+          ("grek", list(range(0x391, 0x3AA)) + list(range(0x3B1, 0x3CA))))
+
+
 def say(font):
     yield ("font glyphs=%d upem=%d ascender=%d descender=%d gap=%d xheight=%d capheight=%d"
            % (font.glyphs, font.upem, font.ascender, font.descender, font.gap, font.xheight, font.capheight))
+    family, own, weight, italic, under, strike = style_of(font)
+    yield "style family=%s name=%s weight=%d italic=%d" % (family, own, weight, italic)
+    yield "lines underline=%d,%d strike=%d,%d" % (under + strike)
+    kerning = Kerning(font)
+    for tag, characters in KERNED:
+        mapped = [c for c in characters if c in font.mapping]
+        for a in mapped:
+            for b in mapped:
+                moves = kerning.of(font.mapping[a], font.mapping[b], tag)
+                if any(moves):
+                    yield "kern %s U+%04X U+%04X %d %d %d %d" % ((tag, a, b) + tuple(moves))
     for c in sorted(font.mapping):
         yield "U+%04X %d" % (c, font.mapping[c])
     for g in range(font.glyphs):

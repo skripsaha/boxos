@@ -5,12 +5,13 @@
 # The image is booted twice: on a processor of SSE2 alone (qemu64, the plain
 # build) and on one with AVX2 (-cpu max, the tree built STRICT=on). Each time
 # `drawcheck` is typed at the hub; it draws the same scenes of every kind of
-# thing every way the processor offers, and each must make the plain way's
-# very pixels and write the very numbers to the glass, near and dithered
-# (src/userspace/utils/drawcheck). The gate holds that the engine chose the
-# way the processor has, that every way below it was held, and that the last
-# line says PASS; the times each way took are kept in the log, a guide only
-# under TCG.
+# thing, and of text in the system's fonts, every way the processor offers,
+# and each must make the plain way's very pixels and write the very numbers
+# to the glass, near and dithered (src/userspace/utils/drawcheck). The gate
+# holds that the engine chose the way the processor has, that the system's
+# fonts were found on the volume and text set in them, that every way below
+# it was held, and that the last line says PASS; the times each way took, and
+# setting and drawing text, are kept in the log, a guide only under TCG.
 
 # drawcheck_say COMMAND LINE WAIT — COMMAND typed and entered, then LINE (a
 # pattern) waited for past where the log stood: the hub's prompt is not
@@ -67,12 +68,16 @@ run_drawcheck() {
         grep -a "^drawcheck: " "$L" | tr -d '\r' | sed 's/^/  /'
         grep -aq "drawcheck: the processor offers $want — the engine works it so" "$L"
         chk $? "drawcheck ($name): the engine works the way the processor offers — $want"
+        grep -aq "drawcheck: the system's fonts — JetBrains Mono NL; text set in JetBrains Mono NL" "$L"
+        chk $? "drawcheck ($name): the system's fonts read from the volume, text set in them"
         local way held=1
         for way in $ways; do
-            grep -aq "drawcheck: $way — 24 scenes, every pixel the plain way's, near and dithered" "$L" || held=0
+            grep -aq "drawcheck: $way — 32 scenes, every pixel the plain way's, near and dithered" "$L" || held=0
         done
         [ $held = 1 ]
-        chk $? "drawcheck ($name): $ways, each the plain way's very pixels in all 24 scenes, near and dithered"
+        chk $? "drawcheck ($name): $ways, each the plain way's very pixels in all 32 scenes of shapes and text, near and dithered"
+        grep -aq "drawcheck: text, " "$L"
+        chk $? "drawcheck ($name): a page of text set and drawn, and how long it took said"
         grep -aq "drawcheck: PASS — every way the processor offers draws the plain way's very pixels" "$L"
         chk $? "drawcheck ($name): PASS ($(grep -aoE 'drawcheck: (PASS|FAIL)' "$L" | tail -1))"
     done

@@ -418,11 +418,11 @@ void CheckSources(Tally &Count, const std::vector<std::uint8_t> &Bytes)
                 "a screen's chain, geometry before the font: a frame's line from geometry, to the cell; a letter from the "
                 "font");
 
-    typecase::GlyphCache Kept(Text, 4096);
-    const auto First = Kept.Get(U'A', Cell).Coverage;
-    for (char32_t Character = U'B'; Character <= U'Z'; Character++) (void)Kept.Get(Character, Cell);
+    typecase::GlyphCache Kept(4096);
+    const auto First = Kept.Get(Text, U'A', Cell).Coverage;
+    for (char32_t Character = U'B'; Character <= U'Z'; Character++) (void)Kept.Get(Text, Character, Cell);
     const bool Bounded = Kept.Held() <= 4096;
-    const auto Again   = Kept.Get(U'A', Cell).Coverage;
+    const auto Again   = Kept.Get(Text, U'A', Cell).Coverage;
     Kept.Clear();
     Count.Check(Bounded && Again == First && Kept.Held() == 0,
                 "the cache keeps within its budget, draws again what it let go as it was, and empties");

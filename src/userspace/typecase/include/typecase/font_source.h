@@ -2,8 +2,9 @@
 #define TYPECASE_FONT_SOURCE_H
 
 /* A TrueType font as a source: the characters its map names to a glyph
- * that reads, drawn to the size's em with the pen at the cell's baseline,
- * the height of its lowercase rounded to a whole pixel. */
+ * that reads, drawn to the size's em with the pen at the cell's baseline as
+ * text draws them (glyph_look.h), the height of its lowercase a whole
+ * number of pixels. */
 
 #include <optional>
 
@@ -23,8 +24,6 @@ public:
     std::optional<GlyphImage> Draw(char32_t Character, const Size &At) override;
 
 private:
-    float RiseAt(float Scale) const noexcept;
-
     Font       Face;
     Rasterizer Pen;
 };

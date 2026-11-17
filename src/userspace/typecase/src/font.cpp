@@ -3,6 +3,7 @@
 #include "typecase/font.h"
 
 #include <algorithm>
+#include <atomic>
 #include <format>
 #include <span>
 #include <string_view>
@@ -28,6 +29,9 @@ constexpr std::uint32_t HeadMagic       = 0x5F0F3CF5;
 /* OS/2 fsSelection: the line is the typographic ascender, descender and gap. */
 constexpr std::uint16_t UseTypoMetrics = 1u << 7;
 
+/* The serial the next font read takes. */
+std::atomic<std::uint64_t> NextSerial{1};
+
 Bytes View(const std::vector<std::uint8_t> &Data, std::uint32_t Offset, std::uint32_t Length) noexcept
 {
     return Bytes(std::span(Data)).Part(Offset, Length);
@@ -48,7 +52,10 @@ std::expected<Font, Fault> Font::Read(std::vector<std::uint8_t> Bytes, std::uint
     Made.MapFormat = Choice->Format;
     Made.SymbolMap = Choice->Symbol;
 
+    Made.ReadStyle();
+    Made.ReadKerning();
     Made.FindDamage();
+    Made.Number = NextSerial.fetch_add(1, std::memory_order_relaxed);
     return Made;
 }
 
@@ -88,6 +95,7 @@ std::optional<Fault> Font::ReadDirectory(std::uint32_t Index)
     const Wanted Sought[] = {
         {"head", &Head, true}, {"maxp", &Maxp, true}, {"hhea", &Hhea, true}, {"hmtx", &Hmtx, true},
         {"loca", &Loca, true}, {"glyf", &Glyf, true}, {"cmap", &Cmap, true}, {"OS/2", &Os2, false},
+        {"name", &Name, false}, {"post", &Post, false}, {"GPOS", &Gpos, false}, {"kern", &Kern, false},
     };
     for (const Wanted &Each : Sought) {
         bool Found = false;
@@ -147,6 +155,15 @@ std::optional<Fault> Font::ReadMeasures()
     if (Os2Of.U16(0) >= 2 && Os2Of.Holds(0, 90)) {
         Measures.XHeight   = Os2Of.I16(86);
         Measures.CapHeight = Os2Of.I16(88);
+    }
+    if (Os2Of.Holds(0, 30)) {
+        Measures.StrikeThickness = Os2Of.I16(26);
+        Measures.StrikePosition  = Os2Of.I16(28);
+    }
+    const Bytes PostOf = View(File, Post.Offset, Post.Length);
+    if (PostOf.Holds(0, 12)) {
+        Measures.UnderlinePosition  = PostOf.I16(8);
+        Measures.UnderlineThickness = PostOf.I16(10);
     }
     return std::nullopt;
 }

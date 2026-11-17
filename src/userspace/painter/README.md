@@ -163,6 +163,36 @@ glyphs and this engine — and its rows are worked plain, with SSE2 or with AVX2
 (`CpuPath`), the fastest the processor offers, every way the same bits.
 `tools/draw_stand.sh` holds it on the host, `drawcheck` on the machine.
 
+## Text
+
+Typecase (`src/userspace/typecase`) sets text; Painter draws it. A program
+asks for the system's fonts (`SystemFonts()`, `painter/core/system_fonts.h`:
+every file on the volume tagged `font`, its default family the person's
+`text font`) or reads its own (`typecase::Font::Read`), and gathers them in a
+`typecase::Fonts` book: families by name, the face nearest a weight and a
+slant found as CSS finds it, bold and leaning made where a family has no such
+face, a character a face has not taken from the next family that has it, one
+no font has drawn as its code — text never vanishes.
+
+A `typecase::Text` is its characters, its `Style` and `Span`s that each say
+only what they change — family, size, weight, italic, letter spacing, line
+height, lines under and through, an ink — and whether it is `Secret`.
+`typecase::Layout::Of(Text, TextBox, Fonts)` lays it in a box: kerned (GPOS
+pairs under `kern`, by writing, or the kern table), broken between words, a
+word too long between its characters, at a soft hyphen showing a hyphen,
+aligned left, in the middle, right or justified, cut to its lines and height
+with or without an ellipsis, or grown. The layout says how large it came to
+and answers where the caret stands before a character, which character is
+nearest a point, where a stretch lies, and the text to copy (never a secret's).
+
+`Canvas::FillText` fills a layout with any `Fill`s, all of it or one ink: its
+glyphs drawn once at their size and a quarter pixel's place and kept, one
+cache for the program, a line's glyphs gathered into one coverage and laid
+once; turned, slanted or larger than 256 pixels to the em it fills the text's
+shape. `TextPath` is that shape — glyph outlines and decoration lines — to
+stroke, cast a shadow or clip by. Not yet: ligatures, writings set right to
+left, input methods.
+
 ## Future GUI boundary
 
 Future GUI work uses the same Painter family and shared core values where the

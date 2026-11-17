@@ -278,7 +278,12 @@ bool Canvas::Stroke(const Path &Shape, const core::Stroke &Line, const core::Fil
 
 bool Canvas::FillMask(const Mask &Cover, std::span<const core::Fill> Fills, float Opacity)
 {
-    if (!Room->Prepare(Fills, Transform::Identity(), 1.0f)) return false;
+    return LayMask(Cover, Fills, Transform::Identity(), Opacity);
+}
+
+bool Canvas::LayMask(const Mask &Cover, std::span<const core::Fill> Fills, const Transform &Place, float Opacity)
+{
+    if (!Room->Prepare(Fills, Place, 1.0f)) return false;
     const Rect          At    = Cover.Area().Intersect(Room->Top().Area);
     const std::uint32_t Share = ShareOf(Opacity);
     if (At.Empty() || !Share) return true;
