@@ -60,5 +60,5 @@ for ARCH in $ARCHES; do
     HELD=$((HELD + H))
     FAILED=$((FAILED + F))
 done
-echo "draw: $HELD held, $FAILED failed"
+echo "draw: $HELD passed, $FAILED failed"
 [ "$FAILED" = 0 ]
