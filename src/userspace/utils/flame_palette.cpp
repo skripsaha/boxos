@@ -22,8 +22,8 @@ FlamePalette Gradient(const Stop (&Stops)[Count])
         const Stop &To   = Stops[Segment + 1];
         int         Span = To.At - From.At;
         for (int Heat = From.At; Heat <= To.At; Heat++) {
-            auto Weight = static_cast<std::uint8_t>((Heat - From.At) * 255 / Span);
-            Palette[static_cast<std::size_t>(Heat)] = color_mix(From.Color, To.Color, Weight);
+            const auto Weight = static_cast<std::uint32_t>((Heat - From.At) * BOX_COLOR_WAY / Span);
+            Palette[static_cast<std::size_t>(Heat)] = BoxColorBetween(From.Color, To.Color, Weight);
         }
     }
     return Palette;
@@ -33,9 +33,9 @@ FlamePalette Custom(std::uint32_t Color)
 {
     const Stop Stops[] = {
         {0,   0x000000},
-        {70,  color_mix(0x000000, Color, 90)},
+        {70,  BoxColorBetween(0x000000, Color, BOX_COLOR_WAY * 90 / 255)},
         {140, Color},
-        {210, color_mix(Color, 0xFFFFFF, 150)},
+        {210, BoxColorBetween(Color, 0xFFFFFF, BOX_COLOR_WAY * 150 / 255)},
         {255, 0xFFFFFF},
     };
     return Gradient(Stops);

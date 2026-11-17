@@ -41,7 +41,7 @@ std::uint64_t Mixed(std::uint64_t Seed)
 
 Color Toward(Color From, Color To, int Weight)
 {
-    return Color::Mix(From, To, static_cast<std::uint8_t>(Weight));
+    return Color::Between(From, To, static_cast<std::uint8_t>(Weight));
 }
 
 DieStyle StyleOf(int Sides, int Face, bool Counts, bool Settled, const Look &Shown)

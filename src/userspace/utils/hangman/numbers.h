@@ -54,7 +54,7 @@ inline float Smooth(float Low, float High, float Value)
 // Weight 0..1 of To in the mix.
 inline Color Mixed(Color From, Color To, float Weight)
 {
-    return Color::Mix(From, To, static_cast<std::uint8_t>(Clamped(Weight) * 255.0f + 0.5f));
+    return Color::Between(From, To, static_cast<std::uint8_t>(Clamped(Weight) * 255.0f + 0.5f));
 }
 
 inline Color Darker(Color Ink, float Amount) { return Mixed(Ink, painter::core::Colors::Black, Amount); }

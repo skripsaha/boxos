@@ -147,7 +147,7 @@ bool Frame::BlendPixel(core::Point Pixel, core::Color Ink, std::uint8_t Weight)
     Target.Glyph = Glyphs::UpperHalf;
     Target.VisibilityMode = Visibility::Opaque;
     core::Color &Current = (Pixel.Y & 1) == 0 ? Target.Foreground : Target.Background;
-    Current = core::Color::Mix(Current, Ink, Weight);
+    Current = core::Color::Over(Current, Ink, Weight);
     return true;
 }
 

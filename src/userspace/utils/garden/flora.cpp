@@ -21,7 +21,7 @@ std::uint8_t Part(double Share) noexcept
 
 Ink Between(Ink A, Ink B, double Share) noexcept
 {
-    return Ink::Mix(A, B, Part(Share));
+    return Ink::Between(A, B, Part(Share));
 }
 
 std::int32_t Round(double Value) noexcept

@@ -139,7 +139,7 @@ void Canvas::Blend(int X, int Y, Color Ink, double Weight)
 {
     if (X < 0 || Y < 0 || X >= Wide || Y >= High) return;
     Color &Under = Pixels[static_cast<std::size_t>(Y) * Wide + X];
-    Under        = Color::Mix(Under, Ink, Byte(Weight));
+    Under        = Color::Over(Under, Ink, Byte(Weight));
 }
 
 void Canvas::Disc(Spot At, double Radius, Color Ink, double Weight)
@@ -192,7 +192,7 @@ void Canvas::Background(const Look &Shown)
     if (Night.size() != Pixels.size() || !(NightBase == Shown.Background)) LayNight(Shown.Background);
     Pixels = Night;
     for (const Speck &One : Specks)
-        Pixels[One.At] = Color::Mix(Shown.Background, Dust, Byte(One.Level * (0.75 + 0.25 * std::sin(Time * One.Rate + One.Phase))));
+        Pixels[One.At] = Color::Over(Shown.Background, Dust, Byte(One.Level * (0.75 + 0.25 * std::sin(Time * One.Rate + One.Phase))));
     const auto Sum = [](std::uint8_t Under, std::uint8_t Over) { return static_cast<std::uint8_t>(std::min(255, Under + Over)); };
     for (std::size_t At = 0; At < Glows.size(); At++) {
         const Glow &Trail = Glows[At];
@@ -208,8 +208,8 @@ void Canvas::PaintStar(const Body &One, const Look &Shown)
     const Spot   At     = Where(One.At);
     const double Radius = std::max(3.0, One.Radius * Scale) * (1.0 + 0.05 * std::sin(Time * 2.1 + One.Id));
     Halo(At, Radius * 0.5, Radius * (1.0 + 2.4 * Reach), Ink, 0.7);
-    Disc(At, Radius, Color::Mix(Ink, Hot, 90), 1.0);
-    Disc(At, Radius * 0.55, Color::Mix(Ink, Hot, 200), 0.9);
+    Disc(At, Radius, Color::Between(Ink, Hot, 90), 1.0);
+    Disc(At, Radius * 0.55, Color::Between(Ink, Hot, 200), 0.9);
 }
 
 void Canvas::PaintBody(const Body &One, const Look &Shown)
@@ -219,7 +219,7 @@ void Canvas::PaintBody(const Body &One, const Look &Shown)
     const double Radius = std::max(One.Radius * Scale, 0.6 + 0.45 * std::cbrt(One.Mass));
     if (Radius > 1.4) Halo(At, 0.0, Radius + 2.5 * Reach, Ink, 0.3);
     Disc(At, Radius, Ink, 1.0);
-    if (Radius > 1.4) Disc(At, Radius * 0.5, Color::Mix(Ink, Hot, 150), 0.8);
+    if (Radius > 1.4) Disc(At, Radius * 0.5, Color::Between(Ink, Hot, 150), 0.8);
 }
 
 void Canvas::PaintBursts()
@@ -228,7 +228,7 @@ void Canvas::PaintBursts()
         const Spot   At     = Where(One.At);
         const double Radius = One.Size * std::sqrt(One.Age) + 1.0;
         const double Fading = std::pow(1.0 - One.Age, 1.5);
-        const Color  Ink    = Color::Mix(Hot, One.Ink, Byte(One.Age));
+        const Color  Ink    = Color::Between(Hot, One.Ink, Byte(One.Age));
         const int    Left = std::max(Floor(At.X - Radius - 2), 0), Right = std::min(Floor(At.X + Radius + 2), Wide - 1);
         const int    Top = std::max(Floor(At.Y - Radius - 2), 0), Bottom = std::min(Floor(At.Y + Radius + 2), High - 1);
         for (int Y = Top; Y <= Bottom; Y++) {

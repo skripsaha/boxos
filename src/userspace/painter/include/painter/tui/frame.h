@@ -111,7 +111,7 @@ public:
      * in a cell never painted before on a transparent frame, the other half
      * stays see-through. A blend over a see-through half is the ink at that
      * weight as its opacity, over a translucent one the two composed
-     * (Color::Mix); an Ink with an opacity is put as it is. */
+     * (Color::Over); an Ink with an opacity is put as it is. */
     bool PutPixel(core::Point Pixel, core::Color Ink);
     bool BlendPixel(core::Point Pixel, core::Color Ink, std::uint8_t Weight);
     bool PutPixels(std::span<const core::Color> Pixels);

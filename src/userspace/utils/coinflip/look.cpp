@@ -38,7 +38,7 @@ Look ReadLook()
     using box::settings;
     const Color Metal = Color::FromRaw(settings::color("coin metal"));
     return Look{.Metal    = Metal,
-                .Edge     = Color::Mix(Metal, painter::core::Colors::Black, 175),
+                .Edge     = Color::Between(Metal, painter::core::Colors::Black, 175),
                 .Page     = Color::FromRaw(settings::color("colors page")),
                 .Floor    = Color::FromRaw(settings::color("colors floor")),
                 .Text     = Color::FromRaw(settings::color("colors text")),

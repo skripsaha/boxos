@@ -132,9 +132,9 @@ Ramp MakeRamp(PainterColor Base)
 {
     const PainterColor Deep = PainterColor::Rgb(0x06, 0x24, 0x18);
     const PainterColor Pale = PainterColor::Rgb(0xFF, 0xFF, 0xE8);
-    return Ramp{{PainterColor::Mix(Base, Deep, 150), PainterColor::Mix(Base, Deep, 70), Base,
-                 PainterColor::Mix(Base, Pale, 80), PainterColor::Mix(Base, Pale, 160)},
-                PainterColor::Mix(Base, Deep, 205)};
+    return Ramp{{PainterColor::Between(Base, Deep, 150), PainterColor::Between(Base, Deep, 70), Base,
+                 PainterColor::Between(Base, Pale, 80), PainterColor::Between(Base, Pale, 160)},
+                PainterColor::Between(Base, Deep, 205)};
 }
 
 Ramp LightEye()
@@ -179,7 +179,7 @@ public:
         Y -= Down;
         if (X < 0 || X >= Width || Y < 0 || Y >= Height) return;
         PainterColor &Here = Dots[static_cast<std::size_t>(Y) * Width + X];
-        Here               = Ink.IsTranslucent() ? PainterColor::Mix(Here, Ink, 255) : Ink;
+        Here               = Ink.IsTranslucent() ? PainterColor::Over(Here, Ink, 255) : Ink;
     }
 
     /* The pixel whose middle lies Beyond a shape's edge, in pixels: Inside
@@ -190,7 +190,7 @@ public:
         const float Fill = painter::core::Snapped(painter::core::InsideShare(Beyond), Smooth);
         const float Rim  = painter::core::Snapped(painter::core::BandShare(Beyond, 0.0f, 1.0f), Smooth);
         if (Fill + Rim <= 0.0f) return;
-        const PainterColor Shown = PainterColor::Mix(Line, Inside, static_cast<std::uint8_t>(Fill / (Fill + Rim) * 255.0f + 0.5f));
+        const PainterColor Shown = PainterColor::Over(Line, Inside, static_cast<std::uint8_t>(Fill / (Fill + Rim) * 255.0f + 0.5f));
         Put(X, Y, Shown.WithOpacity(static_cast<std::uint8_t>(std::min(Fill + Rim, 1.0f) * 255.0f + 0.5f)));
     }
 

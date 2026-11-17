@@ -262,7 +262,7 @@ void Map::Tile(const TagmapTile &Place, const Entry &One, bool Chosen, std::uint
     painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
     bool  Gathered = One.Is == Kind::More;
     Color Ink      = Gathered ? MoreInk : Tints[Place.Index % (sizeof(Tints) / sizeof(Tints[0]))];
-    if (Chosen) Ink = Gathered ? MoreLit : Color::Mix(Ink, Colors::White, 120);
+    if (Chosen) Ink = Gathered ? MoreLit : Color::Between(Ink, Colors::White, 120);
     Color Grain = Gathered && !Chosen ? MoreGrain : Ink;
 
     for (int R = 0; R < Place.High; R++) {

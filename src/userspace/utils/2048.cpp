@@ -322,7 +322,7 @@ void Table::Draw(const std::vector<Slide> &Slides, float Along, float Flash)
             bool Joined = false;
             for (const Slide &One : Slides) Joined = Joined || (One.Joins && One.ToRow == R && One.ToCol == C);
             bool  Fresh = R == Play.NewRow && C == Play.NewCol && Flash > 0;
-            Color Ink = Joined && Flash > 0 ? Color::Mix(TileInk(Value), Colors::White,
+            Color Ink = Joined && Flash > 0 ? Color::Between(TileInk(Value), Colors::White,
                                                          static_cast<std::uint8_t>(110 * Flash))
                                             : TileInk(Value);
             Tile(CellRow(static_cast<float>(R)), CellCol(static_cast<float>(C)), Value, Ink, Fresh ? static_cast<int>(Flash * 2 + 0.5f) : 0);

@@ -25,7 +25,7 @@ const Color HintInk  = Color::Rgb(0x9A, 0x9A, 0x9A);
 Color Grained(Color Base, std::uint8_t Grain, int Variety)
 {
     const int Swing = std::abs(Grain - 128) * 2 * Variety * 2 / 500;
-    return Color::Mix(Base, Grain >= 128 ? White : Black, static_cast<std::uint8_t>(Swing));
+    return Color::Between(Base, Grain >= 128 ? White : Black, static_cast<std::uint8_t>(Swing));
 }
 
 // A flame is white at its hottest, the flame's color in the middle and dark as it dies;
@@ -33,13 +33,13 @@ Color Grained(Color Base, std::uint8_t Grain, int Variety)
 Color Flame(const Look &Shown, const Cell &Burning)
 {
     if (Burning.Life >= FuelFloor)
-        return Grained(Color::Mix(Shown.Colors[static_cast<int>(Kind::Fire)],
+        return Grained(Color::Over(Shown.Colors[static_cast<int>(Kind::Fire)],
                                   Shown.Colors[static_cast<int>(Burning.Was)], 90),
                        Burning.Grain, Shown.Variety);
     const int   Heat = std::min<int>(Burning.Life, 28) * 255 / 28;
     const Color Fire = Shown.Colors[static_cast<int>(Kind::Fire)];
-    const Color Lit  = Heat > 170 ? Color::Mix(Fire, White, static_cast<std::uint8_t>((Heat - 170) * 2))
-                                  : Color::Mix(Black, Fire, static_cast<std::uint8_t>(Heat * 255 / 170));
+    const Color Lit  = Heat > 170 ? Color::Between(Fire, White, static_cast<std::uint8_t>((Heat - 170) * 2))
+                                  : Color::Between(Black, Fire, static_cast<std::uint8_t>(Heat * 255 / 170));
     return Grained(Lit, Burning.Grain, Shown.Variety);
 }
 
@@ -60,14 +60,14 @@ Color CellColor(const Sandbox &Box, int X, int Y)
     case Kind::Fire:  return Flame(Shown, Here);
     case Kind::Smoke:
     case Kind::Steam:
-        return Color::Mix(Shown.Colors[static_cast<int>(Kind::Air)], Grained(Base, Here.Grain, Shown.Variety),
+        return Color::Over(Shown.Colors[static_cast<int>(Kind::Air)], Grained(Base, Here.Grain, Shown.Variety),
                           static_cast<std::uint8_t>(std::min(255, Here.Life * 2)));
     case Kind::Lava:
     case Kind::Water:
     case Kind::Oil: {
         const int Variety = Here.Type == Kind::Lava ? std::min(100, Shown.Variety * 2) : Shown.Variety;
         const Color Body  = Grained(Base, Here.Grain, Variety);
-        return Surface(Box.Field, X, Y) ? Color::Mix(Body, White, 70) : Body;
+        return Surface(Box.Field, X, Y) ? Color::Between(Body, White, 70) : Body;
     }
     default:          return Grained(Base, Here.Grain, Shown.Variety);
     }
@@ -86,7 +86,7 @@ void Ring(std::vector<Color> &Pixels, const Sandbox &Box)
                               !InBrush(Dx, Dy + 1, Box.Brush) || !InBrush(Dx, Dy - 1, Box.Brush);
             if (!Edge) continue;
             Color &Pixel = Pixels[static_cast<std::size_t>(Y) * Field.Width + X];
-            Pixel        = Color::Mix(Pixel, Box.Shown.Cursor, static_cast<std::uint8_t>(Weight));
+            Pixel        = Color::Over(Pixel, Box.Shown.Cursor, static_cast<std::uint8_t>(Weight));
         }
     }
 }

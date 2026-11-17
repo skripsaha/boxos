@@ -8,8 +8,10 @@
  *     scene_stand frames SCENE OUTDIR
  *     scene_stand first SCENE WIDTH HEIGHT OUT.ppm
  *
- * brush: numbers held to the host's own (the roots, the sine); colour laid as
- * the imprint is pressed, and text drawn the very pixels BoxPressGlyph makes;
+ * brush: numbers held to the host's own (the roots, the sine); the colour
+ * tables held to sRGB's curve and every way of mixing (boxos_color.h) to what
+ * it must give; colour laid as the imprint is pressed, and text drawn the very
+ * pixels BoxPressGlyph makes;
  * every shape's coverage summed to its exact area — rectangles at any
  * fraction of a pixel, ellipses, rings, holes, lines, curves, turns; a circle
  * its own mirror and a shape moved by whole pixels the same pixels moved;
@@ -228,7 +230,7 @@ static void CheckPress(void)
         BoxPressInks(Paper, Ink, BOX_PIXEL_BGR, Inks);
         for (uint32_t Shade = 0; Shade <= BOXOS_IMPRINT_INKED; Shade++) {
             const uint32_t Share = BoxBrushShare(Shade * BOX_BRUSH_FULL / BOXOS_IMPRINT_INKED, 255, 255);
-            const uint32_t Laid  = Share ? BoxBrushLay(Paper, Ink, Share) : Paper;
+            const uint32_t Laid  = BoxColorOver(Paper, Ink, Share);
             if (Laid != Inks[Shade]) Held = 0;
         }
     }
@@ -266,18 +268,123 @@ static void CheckPress(void)
     }
     Check(Held, "text drawn by the brush is the very pixels BoxPressGlyph presses, at every imprint size");
 
-    Held = BoxBrushLay(0x123456u, 0xFF654321u, 255) == 0x654321u;
+    Held = BoxColorOver(0x123456u, 0xFF654321u, 255) == 0x654321u;
     for (uint32_t I = 0; I < 1000u && Held; I++) {
         const uint32_t Below = Random() & 0xFFFFFFu, Color = Random();
         uint32_t       Last  = Below & 0xFFu;
         for (uint32_t Share = 1; Share <= 255u; Share++) {
-            const uint32_t Blue = BoxBrushLay(Below, Color, Share) & 0xFFu;
+            const uint32_t Blue = BoxColorOver(Below, Color, Share) & 0xFFu;
             if ((Color & 0xFFu) >= (Below & 0xFFu) ? Blue < Last : Blue > Last) Held = 0;
             Last = Blue;
         }
         if (Last != (Color & 0xFFu)) Held = 0;
     }
     Check(Held, "laying moves every channel steadily from what is beneath to the colour, and whole is the colour");
+}
+
+/* ---------------------------------------------------------------------------
+ * Colour: the curve's tables, and the two ways of mixing
+ * ------------------------------------------------------------------------- */
+
+/* sRGB's curve (IEC 61966-2-1), as tools/gen_color_light.py writes it. */
+static double LinearOf(double Value)
+{
+    return Value <= 0.04045 ? Value / 12.92 : pow((Value + 0.055) / 1.055, 2.4);
+}
+
+static double ValueOf(double Light)
+{
+    return Light <= 0.0031308 ? Light * 12.92 : 1.055 * pow(Light, 1 / 2.4) - 0.055;
+}
+
+/* The number nearest the light that Share of 255 of Over's light and the rest
+ * of Under's make, worked in doubles from the curve itself. */
+static uint32_t IdealOver(uint32_t Under, uint32_t Over, uint32_t Share)
+{
+    const double Light = LinearOf(Under / 255.0) + (LinearOf(Over / 255.0) - LinearOf(Under / 255.0)) * Share / 255.0;
+    return (uint32_t)floor(ValueOf(Light) * 255.0 + 0.5);
+}
+
+static void CheckColor(void)
+{
+    int Held = 1;
+    for (uint32_t Code = 0; Code < 256u; Code++)
+        if (BoxColorLightOf[Code] != (uint32_t)floor(LinearOf(Code / 255.0) * BOX_COLOR_LIGHT_MOST + 0.5)) Held = 0;
+    for (uint32_t Step = 0; Step < 4096u; Step++) {
+        double Value = ValueOf((Step + 0.5) / 4096.0);
+        Value        = Value < 0.0 ? 0.0 : Value > 1.0 ? 1.0 : Value;
+        if (BoxColorCodeOf[Step] != (uint32_t)floor(Value * 255.0 + 0.5)) Held = 0;
+    }
+    Check(Held, "the colour tables are sRGB's curve: every number's light and the number of every step of light");
+
+    Held = 1;
+    for (uint32_t Code = 0; Code < 256u; Code++)
+        if (BoxColorCode(BoxColorLight(Code)) != Code) Held = 0;
+    Check(Held, "every number's light is written back as that number");
+
+    Held = 1;
+    uint32_t Off = 0;
+    static const uint32_t Shares[] = { 1, 32, 64, 85, 128, 170, 191, 224, 254 };
+    for (uint32_t K = 0; K < sizeof Shares / sizeof Shares[0]; K++)
+        for (uint32_t Under = 0; Under < 256u; Under++)
+            for (uint32_t Over = 0; Over < 256u; Over++) {
+                const uint32_t Got = BoxColorOver(Under, Over, Shares[K]) & 0xFFu, Want = IdealOver(Under, Over, Shares[K]);
+                if (Got + 1u < Want || Got > Want + 1u) Held = 0;
+                Off += Got != Want;
+            }
+    for (uint32_t I = 0; I < 300000u; I++) {
+        const uint32_t Below = Random() & 0xFFFFFFu, Color = Random() & 0xFFFFFFu, Share = Random() % 256u;
+        const uint32_t Got = BoxColorOver(Below, Color, Share);
+        for (uint32_t Shift = 0; Shift <= 16u; Shift += 8u) {
+            const uint32_t Want = IdealOver((Below >> Shift) & 0xFFu, (Color >> Shift) & 0xFFu, Share);
+            if (((Got >> Shift) & 0xFFu) + 1u < Want || ((Got >> Shift) & 0xFFu) > Want + 1u) Held = 0;
+        }
+    }
+    Check(Held, "a colour laid over another is the light of the two mixed, never a number off what the curve gives in doubles");
+    printf("         (of every channel pair at nine shares, %u of %u a number off the ideal)\n", Off, 9u * 65536u);
+
+    Held = BoxColorOver(0x102030u, 0xA0B0C0u, 0) == 0x102030u && BoxColorOver(0x102030u, 0xFFA0B0C0u, 255) == 0xA0B0C0u;
+    for (uint32_t I = 0; I < 1000u; I++) {
+        const uint32_t One = Random() & 0xFFFFFFu;
+        if (BoxColorOver(One, One, Random() % 256u) != One) Held = 0;
+    }
+    Check(Held, "laying: none is what is beneath, whole is the colour, a colour over itself is itself");
+
+    Held = 1;
+    for (uint32_t I = 0; I < 100000u; I++) {
+        const uint32_t Below = Random() & 0xFFFFFFu, Color = Random() & 0xFFFFFFu, Share = Random() % 256u;
+        uint32_t       Whole = 255, None = 0, Part = Random() % 256u;
+        if (BoxColorOverPart(Below, Color, Share, &Whole) != BoxColorOver(Below, Color, Share) || Whole != 255) Held = 0;
+        const uint32_t Alone = BoxColorOverPart(Below, Color, Share, &None);
+        if (Share && (Alone != Color || None != Share)) Held = 0;
+        const uint32_t Kept = Part * (255u - Share) / 255u;
+        (void)BoxColorOverPart(Below, Color, Share, &Part);
+        if (Share && Part != Share + Kept) Held = 0;
+    }
+    Check(Held, "laying over a part not whole: over a whole one it is laying, over none the colour at its share, the two opacities composed");
+
+    Held = BoxColorBetween(0x80102030u, 0x40A0B0C0u, 0) == 0x80102030u &&
+           BoxColorBetween(0x80102030u, 0x40A0B0C0u, BOX_COLOR_WAY) == 0x40A0B0C0u &&
+           BoxColorBetween(0x00000000u, 0x00000001u, BOX_COLOR_WAY / 2) == 0x00000001u &&
+           BoxColorBetween(0x00000001u, 0x00000000u, BOX_COLOR_WAY / 2) == 0x00000000u;
+    for (uint32_t I = 0; I < 2000u && Held; I++) {
+        const uint32_t A = Random(), B = Random();
+        uint32_t       Last = A & 0xFFu;
+        for (uint32_t Weight = 0; Weight <= BOX_COLOR_WAY; Weight += 97u) {
+            const uint32_t Blue = BoxColorBetween(A, B, Weight) & 0xFFu;
+            if ((B & 0xFFu) >= (A & 0xFFu) ? Blue < Last : Blue > Last) Held = 0;
+            Last = Blue;
+        }
+    }
+    Check(Held, "walking: none is the first, a whole way the second, every byte steadily between, a half step rounded away from the first");
+
+    Held = BoxColorBlendOver(BoxColorTranslucent(0xA0B0C0u, COLOR_OPACITY_STEPS), 0x102030u) == 0xA0B0C0u &&
+           BoxColorBlendOver(COLOR_THROUGH, 0x102030u) == 0x102030u;
+    for (uint32_t Steps = 1; Steps < COLOR_OPACITY_STEPS; Steps++) {
+        const uint32_t Share = (Steps * 255u + COLOR_OPACITY_STEPS / 2u) / COLOR_OPACITY_STEPS;
+        if (BoxColorBlendOver(BoxColorTranslucent(0xA0B0C0u, Steps), 0x102030u) != BoxColorOver(0x102030u, 0xA0B0C0u, Share)) Held = 0;
+    }
+    Check(Held, "a cell's colour at an opacity is laid over what is beneath it as every colour is");
 }
 
 /* ---------------------------------------------------------------------------
@@ -571,7 +678,7 @@ static void CheckPaints(void)
     BoxBrushAddRect(&O, 0, 0, 300 * ONE, 20 * ONE, 0);
     int Held = BoxBrushFill(&B.Canvas, &O, &Linear, 255);
     Check(Held && *At(&B, 10, 5) == 0xFF2000u && *At(&B, 280, 5) == 0x0040FFu &&
-              ChannelsNear(*At(&B, 150, 5), BoxBrushBetween(Stops[0].Color, Stops[1].Color, UNIT / 2), 1),
+              ChannelsNear(*At(&B, 150, 5), BoxColorBetween(Stops[0].Color, Stops[1].Color, BOX_COLOR_WAY / 2), 1),
           "a linear gradient: its first colour before it, its last past it, halfway between at its middle");
 
     BoxBrushPaint Radial = { BOX_BRUSH_PAINT_RADIAL, 0, Stops, 2, { 12800, 0, 0, 12800, 150 * ONE + 128, 120 * ONE + 128 },
@@ -580,7 +687,7 @@ static void CheckPaints(void)
     BoxBrushAddRect(&O, 0, 30 * ONE, 300 * ONE, 170 * ONE, 0);
     Held = BoxBrushFill(&B.Canvas, &O, &Radial, 255);
     Check(Held && *At(&B, 150, 120) == 0xFF2000u && *At(&B, 150, 190) == 0x0040FFu && *At(&B, 10, 40) == 0x0040FFu &&
-              ChannelsNear(*At(&B, 175, 120), BoxBrushBetween(Stops[0].Color, Stops[1].Color, UNIT / 2), 2),
+              ChannelsNear(*At(&B, 175, 120), BoxColorBetween(Stops[0].Color, Stops[1].Color, BOX_COLOR_WAY / 2), 2),
           "a radial gradient: its first colour at its middle, its last past its radius, halfway between halfway out");
 
     uint32_t Picture[7 * 5];
@@ -600,7 +707,7 @@ static void CheckPaints(void)
     O                    = Begin(&g_plain);
     BoxBrushAddRect(&O, 30 * ONE, 40 * ONE, ONE, ONE, 0);
     BoxBrushFill(&B.Canvas, &O, &Laid, 255);
-    Check(*At(&B, 30, 40) == BoxBrushLay(Below, 0xFFFFFFu, 0x80), "a picture's half-clear pixel is laid at its alpha");
+    Check(*At(&B, 30, 40) == BoxColorOver(Below, 0xFFFFFFu, 0x80), "a picture's half-clear pixel is laid at its alpha");
 
     BoardFree(&B);
 }
@@ -1446,6 +1553,7 @@ int main(int Argc, char **Argv)
         return 2;
     }
     CheckNumbers();
+    CheckColor();
     CheckPress();
     CheckRects();
     CheckRound();

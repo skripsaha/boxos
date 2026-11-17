@@ -13,15 +13,16 @@ namespace painter::tui {
 
 namespace {
 
-/* How far a window's shadow darkens what lies under it, of 255: enough to lift
- * the window off the text, little enough that the text under it still reads. */
-constexpr std::uint8_t ShadowDepth = 72;
+/* How far a window's shadow darkens what lies under it, of 255, laid as light
+ * (Color::Over): enough to lift the window off the text, little enough that
+ * the text under it still reads. */
+constexpr std::uint8_t ShadowDepth = 103;
 
 void Shade(Frame &Out, core::Point At)
 {
     Cell Under       = Out.Read(At);
-    Under.Foreground = core::Color::Mix(Under.Foreground, core::Colors::Black, ShadowDepth);
-    Under.Background = core::Color::Mix(Under.Background, core::Colors::Black, ShadowDepth);
+    Under.Foreground = core::Color::Over(Under.Foreground, core::Colors::Black, ShadowDepth);
+    Under.Background = core::Color::Over(Under.Background, core::Colors::Black, ShadowDepth);
     (void)Out.Put(At, Under);
 }
 

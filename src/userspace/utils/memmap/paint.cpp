@@ -239,9 +239,9 @@ void Board::PaintCells(tui::Frame &Out) const
     const auto InkOf = [&](const Cell &One, bool Here) {
         const Owner &Of  = Owners[One.Owner];
         Color        Ink = Of.Ink;
-        if (Filter.empty() ? (Pick && &Of != Pick) : !Of.Holds(Filter)) Ink = Color::Mix(Ink, Shown.Panel, Dimmed);
-        if (One.Fresh) Ink = Color::Mix(Ink, painter::core::Colors::White, Brought);
-        if (Here) Ink = Color::Mix(Ink, painter::core::Colors::White, Under);
+        if (Filter.empty() ? (Pick && &Of != Pick) : !Of.Holds(Filter)) Ink = Color::Over(Ink, Shown.Panel, Dimmed);
+        if (One.Fresh) Ink = Color::Between(Ink, painter::core::Colors::White, Brought);
+        if (Here) Ink = Color::Between(Ink, painter::core::Colors::White, Under);
         return Ink;
     };
     const std::int32_t Side = Grid.Side;

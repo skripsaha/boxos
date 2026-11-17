@@ -60,7 +60,7 @@ void PaintBar(Screen &Display, const TypingView &View, std::uint32_t Left, std::
     std::uint32_t Filled = static_cast<std::uint32_t>(Progress(View) * Width / 1000);
     for (std::uint32_t I = 0; I < Width; I++) {
         if (I < Filled) {
-            PainterColor Fade = PainterColor::Mix(BarFilled, AmberInk, static_cast<std::uint8_t>(I * 255 / Width));
+            PainterColor Fade = PainterColor::Between(BarFilled, AmberInk, static_cast<std::uint8_t>(I * 255 / Width));
             Display.Put(BarRow, Left + I, FullBlock, Fade, Paper);
         } else {
             Display.Put(BarRow, Left + I, LightShade, BarEmpty, Paper);

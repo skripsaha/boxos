@@ -108,8 +108,8 @@ void Game::PaintScene(std::uint64_t Now)
 
     for (std::int32_t Y = Horizon; Y < Edge; Y++) {
         const auto Depth = static_cast<std::uint8_t>((Y - Horizon) * 150 / std::max(1, Edge - Horizon));
-        const core::Color Ink = Y == Horizon ? core::Color::Mix(Shown.Floor, core::Colors::White, 40)
-                                             : core::Color::Mix(Shown.Floor, Shown.Page, Depth);
+        const core::Color Ink = Y == Horizon ? core::Color::Between(Shown.Floor, core::Colors::White, 40)
+                                             : core::Color::Between(Shown.Floor, Shown.Page, Depth);
         for (std::int32_t X = 0; X < Is.Width; X++) Out.PutPixel({X, Y}, Ink);
     }
 

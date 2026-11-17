@@ -71,7 +71,7 @@ public:
     {
         int   Light = Lights[static_cast<std::size_t>(std::clamp(Y, 0, Tank.Height - 1))];
         AquaColor Shown = AquaShade(Ink, Light);
-        return Daylight.Night ? AquaColor::Mix(Shown, NightInk, 60) : Shown;
+        return Daylight.Night ? AquaColor::Over(Shown, NightInk, 60) : Shown;
     }
 
     bool Inside(int X, int Y) const
@@ -91,7 +91,7 @@ public:
     /* `Weight` 256ths of Ink over what is there. */
     void Blend(int X, int Y, AquaColor Ink, int Weight)
     {
-        if (Inside(X, Y)) At(X, Y) = AquaColor::Mix(At(X, Y), Ink, static_cast<std::uint8_t>(std::clamp(Weight, 0, 255)));
+        if (Inside(X, Y)) At(X, Y) = AquaColor::Over(At(X, Y), Ink, static_cast<std::uint8_t>(std::clamp(Weight, 0, 255)));
     }
 
     int Width, Height, Left, Top;
@@ -111,8 +111,8 @@ AquaColor Water(const AquaPicture &View, int X, int Y, int FarTop)
     if (Y < Tank.Surface) return Air;
 
     float Depth = static_cast<float>(Y - Tank.Surface) / static_cast<float>(Tank.Height - Tank.Surface);
-    AquaColor Ink   = AquaColor::Mix(WaterTop, WaterDeep, static_cast<std::uint8_t>(std::min(255.0f, Depth * 255.0f)));
-    if (Y >= FarTop) Ink = AquaColor::Mix(Ink, HillInk, 150);
+    AquaColor Ink   = AquaColor::Between(WaterTop, WaterDeep, static_cast<std::uint8_t>(std::min(255.0f, Depth * 255.0f)));
+    if (Y >= FarTop) Ink = AquaColor::Over(Ink, HillInk, 150);
 
     if (Y == Tank.Surface)
         Ink = AquaWave(X / 9.0f + Tank.Time * 0.4f) > 0.55f ? SparkleInk : SurfaceInk;
@@ -122,7 +122,7 @@ AquaColor Water(const AquaPicture &View, int X, int Y, int FarTop)
         float Slant = static_cast<float>(X) + static_cast<float>(Y) * 0.45f;
         float Ray   = 0.5f * AquaWave(Slant / 48.0f + Tank.Time * 0.02f) +
                       0.5f * AquaWave(Slant / 23.0f - Tank.Time * 0.035f) - 0.35f;
-        if (Ray > 0) Ink = AquaColor::Mix(Ink, RayInk, static_cast<std::uint8_t>(Ray / 0.65f * Fade * 110.0f * View.Daylight.Sun / 256));
+        if (Ray > 0) Ink = AquaColor::Over(Ink, RayInk, static_cast<std::uint8_t>(Ray / 0.65f * Fade * 110.0f * View.Daylight.Sun / 256));
     }
     return View.Lit(Ink, Y);
 }
@@ -148,17 +148,17 @@ void PaintSand(AquaPicture &View)
         int X     = View.Left + Col;
         int Floor = AquaFloor(Tank, X);
         for (int Y = std::max(Floor, View.Top); Y < View.Top + View.Height; Y++) {
-            AquaColor Grain = (Hash(X, Y) >> 29) == 0 ? SandDark : AquaColor::Mix(SandLight, SandDark, static_cast<std::uint8_t>((Y - Floor) * 18));
+            AquaColor Grain = (Hash(X, Y) >> 29) == 0 ? SandDark : AquaColor::Between(SandLight, SandDark, static_cast<std::uint8_t>((Y - Floor) * 18));
             if (Y - Floor < 3 && View.Daylight.Sun > 0) {
                 float Caustic = AquaWave(X / 7.0f + Tank.Time * 0.3f) * AquaWave(X / 4.3f - Tank.Time * 0.41f);
-                if (Caustic > 0.45f) Grain = AquaColor::Mix(Grain, SandLit, static_cast<std::uint8_t>(140 * View.Daylight.Sun / 256));
+                if (Caustic > 0.45f) Grain = AquaColor::Over(Grain, SandLit, static_cast<std::uint8_t>(140 * View.Daylight.Sun / 256));
             }
             View.PutLit(X, Y, Grain);
         }
     }
     for (const AquaShell &Shell : Tank.Scene.Shells) {
         View.PutLit(Shell.X, Shell.Y, Shell.Ink);
-        View.PutLit(Shell.X + 1, Shell.Y, AquaColor::Mix(Shell.Ink, SandDark, 90));
+        View.PutLit(Shell.X + 1, Shell.Y, AquaColor::Between(Shell.Ink, SandDark, 90));
     }
 }
 
@@ -174,10 +174,10 @@ void PaintRock(AquaPicture &View, const AquaRock &Rock)
             float Dy = (static_cast<float>(Y) + 0.5f - Cy) / Ry;
             if (Dx * Dx + Dy * Dy > 1.0f) continue;
             AquaColor Ink = Rock.Ink;
-            if (Dy < -0.55f && Dx < 0.2f) Ink = AquaColor::Mix(Ink, White, 50);
-            if (Dx > 0.45f) Ink = AquaColor::Mix(Ink, painter::core::Colors::Black, 70);
+            if (Dy < -0.55f && Dx < 0.2f) Ink = AquaColor::Between(Ink, White, 50);
+            if (Dx > 0.45f) Ink = AquaColor::Between(Ink, painter::core::Colors::Black, 70);
             if (Dy < -0.8f && (Hash(X, Y) >> 30) == 0) Ink = MossInk;
-            if ((Hash(X, Y) >> 28) == 0) Ink = AquaColor::Mix(Ink, painter::core::Colors::Black, 50);
+            if ((Hash(X, Y) >> 28) == 0) Ink = AquaColor::Between(Ink, painter::core::Colors::Black, 50);
             if (Rock.Cave) {
                 float Hx = Dx / 0.42f, Hy = (Dy + 0.05f) / 0.55f;
                 if (Hx * Hx + Hy * Hy < 1.0f && Dy > -0.6f) Ink = CaveInk;
@@ -198,10 +198,10 @@ void PaintStalks(AquaPicture &View)
             float Sway  = AquaWave(Tank.Time * 0.18f + Stalk.Phase + Rise * 0.035f) * Reach * Up;
             int   X     = Stalk.X + static_cast<int>(Sway + (Sway < 0 ? -0.5f : 0.5f));
             int   Y     = Floor - Rise;
-            AquaColor Ink   = AquaColor::Mix(Stalk.Ink, painter::core::Colors::Black, static_cast<std::uint8_t>(90 - 90 * Up));
+            AquaColor Ink   = AquaColor::Between(Stalk.Ink, painter::core::Colors::Black, static_cast<std::uint8_t>(90 - 90 * Up));
             View.PutLit(X, Y, Ink);
             if (Stalk.Kelp && Rise % 3 == 1 && Rise > 2)
-                View.PutLit(X + ((Rise / 3) % 2 ? 1 : -1), Y, AquaColor::Mix(Ink, White, 40));
+                View.PutLit(X + ((Rise / 3) % 2 ? 1 : -1), Y, AquaColor::Between(Ink, White, 40));
         }
     }
 }
@@ -332,7 +332,7 @@ void PaintLife(AquaPicture &View)
 
     for (const AquaBubble &Bubble : Tank.Bubbles) {
         int   X   = static_cast<int>(Bubble.X), Y = static_cast<int>(Bubble.Y);
-        AquaColor Ink = AquaColor::Mix(View.Lit(BubbleInk, Y), BubbleInk, static_cast<std::uint8_t>(View.Daylight.Sun * 120 / 256));
+        AquaColor Ink = AquaColor::Between(View.Lit(BubbleInk, Y), BubbleInk, static_cast<std::uint8_t>(View.Daylight.Sun * 120 / 256));
         View.Blend(X, Y, Ink, 210);
         if (Bubble.Big) {
             View.Blend(X + 1, Y, Ink, 160);

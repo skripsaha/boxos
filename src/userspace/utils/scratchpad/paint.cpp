@@ -62,8 +62,8 @@ void Pad::Paint()
     Note        &One    = Here();
     const Sheet &Colors = One.Paints();
     const Rect   Area   = Window();
-    const Color  Strip  = Color::Mix(Colors.Paper, Colors.Ink, StripWeight);
-    const Color  Quiet  = Color::Mix(Colors.Paper, Colors.Ink, QuietWeight);
+    const Color  Strip  = Color::Between(Colors.Paper, Colors.Ink, StripWeight);
+    const Color  Quiet  = Color::Between(Colors.Paper, Colors.Ink, QuietWeight);
 
     Out.Clear({Colors.Paper, DeskPaper});
     Out.Fill(Rect{Area.X + 1, Area.Y + 1, Area.Width, Area.Height}, ' ', {Colors.Ink, ShadowPaper});
@@ -99,8 +99,8 @@ void Pad::Paint()
 
 void Pad::PaintFooter(tui::Frame &Out, Rect Area, const Sheet &Colors) const
 {
-    const Color Strip = Color::Mix(Colors.Paper, Colors.Ink, StripWeight);
-    const Color Quiet = Color::Mix(Strip, Colors.Ink, QuietWeight);
+    const Color Strip = Color::Between(Colors.Paper, Colors.Ink, StripWeight);
+    const Color Quiet = Color::Between(Strip, Colors.Ink, QuietWeight);
     Out.Fill(Area, ' ', {Colors.Ink, Strip});
     const std::int32_t Room = Area.Width - 2;
     if (Now == Asking::Trash) {

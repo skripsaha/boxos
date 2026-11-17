@@ -123,7 +123,7 @@ void Picture::Edge(Rect Pixels)
                 Part Next = Parts[static_cast<std::size_t>(Ny) * Cells.Width + Nx];
                 Edged     = Next == Part::None || (Parts[At] == Part::Fin && Next != Part::Fin);
             }
-            if (Edged) Dots[At] = Color::Mix(Dots[At], Outline, 130);
+            if (Edged) Dots[At] = Color::Over(Dots[At], Outline, 130);
         }
     }
 }
@@ -164,7 +164,7 @@ void Picture::Soft(std::int32_t X, std::int32_t Y)
     if (Hits == 0) return;
     if (Parts[At] == Part::None) {
         Parts[At] = Nearest.Kind;
-        Dots[At]  = Outlined ? Color::Mix(Nearest.Ink, Outline, 130) : Nearest.Ink;
+        Dots[At]  = Outlined ? Color::Over(Nearest.Ink, Outline, 130) : Nearest.Ink;
     }
     Shares[At] = static_cast<std::uint8_t>((Hits * WholeShare + Samples * Samples / 2) / (Samples * Samples));
 }
@@ -211,7 +211,7 @@ void Picture::Sprinkle(const Swimmer &Whale, painter::tui::Frame &Overlay)
         if (!Overlay.Read(Place).IsTransparent()) continue;
 
         float Share = std::clamp(One.Age / One.Life, 0.0f, 1.0f);
-        Color Ink   = One.Spray ? Color::Mix(Spray, Water, static_cast<std::uint8_t>(Share * 255.0f))
+        Color Ink   = One.Spray ? Color::Between(Spray, Water, static_cast<std::uint8_t>(Share * 255.0f))
                                 : (std::sin(One.Age * 9.0f + One.Phase) > 0.0f ? Bright : Dim);
         Overlay.Put(Place, Cell{painter::tui::Glyphs::Full, Ink, Ink});
         Reached = Joined(Reached, {Place.X, Place.Y, 1, 1});

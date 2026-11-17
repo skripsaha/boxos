@@ -78,13 +78,3 @@ Color color_wheel(uint16_t hue, uint8_t sat, uint8_t val)
     }
     return COLOR_RGB(r, g, b);
 }
-
-Color color_mix(Color a, Color b, uint8_t weight)
-{
-    uint32_t w  = weight;
-    uint32_t iw = 255u - w;
-    uint32_t r = (COLOR_R(a) * iw + COLOR_R(b) * w) / 255u;
-    uint32_t g = (COLOR_G(a) * iw + COLOR_G(b) * w) / 255u;
-    uint32_t bl = (COLOR_B(a) * iw + COLOR_B(b) * w) / 255u;
-    return COLOR_RGB(r, g, bl);
-}

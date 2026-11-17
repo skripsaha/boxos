@@ -3,6 +3,8 @@
 
 #include <cstdint>
 
+#include "box/color.h"
+
 // What the effects' parts count with, and the frame they are all drawn at:
 // nothing of the display in it.
 
@@ -76,7 +78,10 @@ inline std::uint32_t Pack(std::uint32_t Red, std::uint32_t Green, std::uint32_t 
     return (Red << 16) | (Green << 8) | Blue;
 }
 
-// One channel `Mix` of the way (0..Whole) from `From` to `To`.
+// A number `Mix` of the way (0..Whole) from `From` to `To`: a level, a
+// matrix's part. A colour walks by BoxColorBetween, laid over another by
+// BoxColorOver (boxos_color.h), as every colour does — Way and Share give a
+// mix of Whole in their measures.
 inline std::uint32_t Between(std::uint32_t From, std::uint32_t To, std::uint32_t Mix) noexcept
 {
     const std::int32_t Step = ((static_cast<std::int32_t>(To) - static_cast<std::int32_t>(From)) *
@@ -84,10 +89,19 @@ inline std::uint32_t Between(std::uint32_t From, std::uint32_t To, std::uint32_t
     return static_cast<std::uint32_t>(static_cast<std::int32_t>(From) + Step);
 }
 
+inline std::uint32_t Way(std::uint32_t Mix) noexcept
+{
+    return Mix * (BOX_COLOR_WAY / Whole);
+}
+
+inline std::uint32_t Share(std::uint32_t Mix) noexcept
+{
+    return (Mix * 255u + Whole / 2u) / Whole;
+}
+
 inline std::uint32_t Brightened(std::uint32_t Colour, std::uint32_t Mix) noexcept
 {
-    return Pack(Between(Channel(Colour, 16), 255, Mix), Between(Channel(Colour, 8), 255, Mix),
-                Between(Channel(Colour, 0), 255, Mix));
+    return BoxColorBetween(Colour & 0x00FFFFFFu, 0x00FFFFFFu, Way(Mix));
 }
 
 }  // namespace effects

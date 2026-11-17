@@ -105,7 +105,7 @@ void Table::Block(int Row, int Col, Color Ink, int Size)
         FrameBuffer.Fill({Col, Row, 2, 1}, ' ', TextStyle{Ink, Ink});
         return;
     }
-    Color Lit = Color::Mix(Ink, Colors::White, 90), Shade = Color::Mix(Ink, Colors::Black, 70);
+    Color Lit = Color::Between(Ink, Colors::White, 90), Shade = Color::Between(Ink, Colors::Black, 70);
     for (int R = 0; R < Size; R++) {
         for (int C = 0; C < 2 * Size; C++) {
             if (R == 0) FrameBuffer.Put({Col + C, Row}, painter::tui::Glyphs::UpperHalf, TextStyle{Lit, Ink});
@@ -121,7 +121,7 @@ void Table::Mini(int Row, int Col, Piece Kind, bool Dim)
 {
     if (Kind == Piece::None) return;
     Color Ink = PieceInks[static_cast<int>(Kind)];
-    if (Dim) Ink = Color::Mix(Ink, Page, 150);
+    if (Dim) Ink = Color::Over(Ink, Page, 150);
     for (const auto &Cell : PieceCells(Kind, 0)) Block(Row + Cell[0], Col + 2 * Cell[1], Ink, 1);
 }
 
@@ -222,7 +222,7 @@ void Table::Draw()
             if (R < 0) continue;
             int Y = Top + 1 + R * Scale, X = Left + 1 + C * 2 * Scale;
             FrameBuffer.Fill({X, Y, 2 * Scale, Scale}, painter::tui::Glyphs::LightShade,
-                             TextStyle{Color::Mix(Ink, WellInk, 110), WellInk});
+                             TextStyle{Color::Between(Ink, WellInk, 110), WellInk});
         }
         for (const auto &Cell : PieceCells(Now.Kind, Now.Turn)) {
             int R = Now.Row + Cell[0] - WellHidden, C = Now.Col + Cell[1];

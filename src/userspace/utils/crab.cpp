@@ -141,9 +141,9 @@ Ramp MakeRamp(PainterColor Base)
 {
     const PainterColor Deep = PainterColor::Rgb(0x14, 0x06, 0x18);
     const PainterColor Pale = PainterColor::Rgb(0xFF, 0xF2, 0xE0);
-    return Ramp{{PainterColor::Mix(Base, Deep, 150), PainterColor::Mix(Base, Deep, 70), Base,
-                 PainterColor::Mix(Base, Pale, 70), PainterColor::Mix(Base, Pale, 150)},
-                PainterColor::Mix(Base, Deep, 205)};
+    return Ramp{{PainterColor::Between(Base, Deep, 150), PainterColor::Between(Base, Deep, 70), Base,
+                 PainterColor::Between(Base, Pale, 70), PainterColor::Between(Base, Pale, 150)},
+                PainterColor::Between(Base, Deep, 205)};
 }
 
 Ramp Flat(PainterColor Ink)
@@ -193,7 +193,7 @@ private:
         Y += Shift;
         if (X < 0 || X >= Width || Y < 0 || Y >= Height) return;
         PainterColor &Here = Dots[static_cast<std::size_t>(Y) * Width + X];
-        Here               = Ink.IsTranslucent() ? PainterColor::Mix(Here, Ink, 255) : Ink;
+        Here               = Ink.IsTranslucent() ? PainterColor::Over(Here, Ink, 255) : Ink;
     }
 
     void Plot(int X, int Y, float Beyond, float Nx, float Ny, const Ramp &Ink);
@@ -216,7 +216,7 @@ void Pixmap::Plot(int X, int Y, float Beyond, float Nx, float Ny, const Ramp &In
         float Flat = std::min(1.0f, Nx * Nx + Ny * Ny);
         float Lit  = std::clamp(-0.5f * Nx - 0.6f * Ny + 0.62f * std::sqrt(1.0f - Flat), 0.0f, 1.0f);
         int   Band = Lit < 0.25f ? 0 : Lit < 0.5f ? 1 : Lit < 0.75f ? 2 : Lit < 0.9f ? 3 : 4;
-        Shown      = PainterColor::Mix(Ink.Outline, Ink.Tone[Band], static_cast<std::uint8_t>(Fill / (Fill + Line) * 255.0f + 0.5f));
+        Shown      = PainterColor::Over(Ink.Outline, Ink.Tone[Band], static_cast<std::uint8_t>(Fill / (Fill + Line) * 255.0f + 0.5f));
     }
     Put(X, Y, Shown.WithOpacity(static_cast<std::uint8_t>(std::min(Fill + Line, 1.0f) * 255.0f + 0.5f)));
 }
@@ -556,7 +556,7 @@ Ramp LightEye()
 
 Palette PaletteOf(PainterColor Shell)
 {
-    return Palette{MakeRamp(Shell), MakeRamp(PainterColor::Mix(Shell, PainterColor::Rgb(0x30, 0x0C, 0x14), 70)),
+    return Palette{MakeRamp(Shell), MakeRamp(PainterColor::Between(Shell, PainterColor::Rgb(0x30, 0x0C, 0x14), 70)),
                    LightEye()};
 }
 

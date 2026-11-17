@@ -75,7 +75,7 @@ FractalPalette Build(const char *Name, std::initializer_list<Stop> Stops)
         }
         float Span = High->Place - Low->Place;
         float Part = Span > 0 ? (Place - Low->Place) / Span : 0.0f;
-        Out.Ramp[At] = Color::Mix(Low->Ink, High->Ink, static_cast<std::uint8_t>(Part * 255.0f));
+        Out.Ramp[At] = Color::Between(Low->Ink, High->Ink, static_cast<std::uint8_t>(Part * 255.0f));
     }
     return Out;
 }
@@ -195,6 +195,6 @@ void FractalColour(const FractalPicture &Picture, const FractalPalette &Palette,
         float Place = std::fmod(Count * Scale + Turn, 256.0f);
         int   Index = static_cast<int>(Place);
         PainterColor Here = Palette.Ramp[Index & 255], Next = Palette.Ramp[(Index + 1) & 255];
-        Pixels[At]  = PainterColor::Mix(Here, Next, static_cast<std::uint8_t>((Place - Index) * 255.0f));
+        Pixels[At]  = PainterColor::Between(Here, Next, static_cast<std::uint8_t>((Place - Index) * 255.0f));
     }
 }

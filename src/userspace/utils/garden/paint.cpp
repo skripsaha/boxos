@@ -38,7 +38,7 @@ constexpr std::int32_t     NoticeRoom = 36;
 
 Ink Mixed(Ink A, Ink B, double Share) noexcept
 {
-    return Ink::Mix(A, B, static_cast<std::uint8_t>(std::clamp(Share, 0.0, 1.0) * 255.0));
+    return Ink::Between(A, B, static_cast<std::uint8_t>(std::clamp(Share, 0.0, 1.0) * 255.0));
 }
 
 std::int32_t Say(tui::Frame &Out, Point At, std::string_view Text, std::int32_t Width, Ink Color, Ink Under)

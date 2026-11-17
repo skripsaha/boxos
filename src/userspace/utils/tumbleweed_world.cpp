@@ -155,7 +155,7 @@ bool TumbleWorld::Night() const { return Sky().Night; }
 
 TumbleColor TumbleWorld::Shade(TumbleColor Ink, int Amount) const
 {
-    return TumbleColor::Mix(Colors::Black, Ink, static_cast<std::uint8_t>(std::clamp(Amount, 0, 255)));
+    return TumbleColor::Between(Colors::Black, Ink, static_cast<std::uint8_t>(std::clamp(Amount, 0, 255)));
 }
 
 TumbleColor TumbleWorld::Illuminate(TumbleColor Ink, int WorldY, int Layer) const
@@ -169,9 +169,9 @@ TumbleColor TumbleWorld::Illuminate(TumbleColor Ink, int WorldY, int Layer) cons
     if (State.Warmth < 150) {
         const TumbleColor Cool = Season == TumbleSeason::Winter ? TumbleColor::Rgb(0x70, 0x94, 0xBA)
                                                            : TumbleColor::Rgb(0x68, 0x78, 0xB0);
-        Out = TumbleColor::Mix(Out, Cool, static_cast<std::uint8_t>((150 - State.Warmth) * 3 / 5));
+        Out = TumbleColor::Between(Out, Cool, static_cast<std::uint8_t>((150 - State.Warmth) * 3 / 5));
     } else if (State.Warmth > 205 && State.Sunlight < 210) {
-        Out = TumbleColor::Mix(Out, TumbleColor::Rgb(0xE0, 0x91, 0x5B), static_cast<std::uint8_t>((State.Warmth - 205) * 2));
+        Out = TumbleColor::Between(Out, TumbleColor::Rgb(0xE0, 0x91, 0x5B), static_cast<std::uint8_t>((State.Warmth - 205) * 2));
     }
     return Out;
 }
@@ -201,7 +201,7 @@ TumbleColor TumbleWorld::SkyAt(int WorldY, const TumbleSky &State) const
             Top = TumbleColor::Rgb(0x59, 0x80, 0x9C); Horizon = TumbleColor::Rgb(0xB9, 0xC8, 0xC9); break;
         }
     }
-    return TumbleColor::Mix(Top, Horizon, Gradient);
+    return TumbleColor::Between(Top, Horizon, Gradient);
 }
 
 TumbleColor TumbleWorld::Sand() const

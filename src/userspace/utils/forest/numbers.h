@@ -72,14 +72,11 @@ inline float Smooth(float Low, float High, float Value)
     return T * T * (3.0f - 2.0f * T);
 }
 
-// Weight 0..256 of To in the mix.
+// Weight 0..256 of the way from From to To (Color::Between).
 inline Color Mixed(Color From, Color To, int Weight)
 {
-    Weight   = std::clamp(Weight, 0, 256);
-    int Back = 256 - Weight;
-    return Color::Rgb(static_cast<std::uint8_t>((From.Red() * Back + To.Red() * Weight) >> 8),
-                      static_cast<std::uint8_t>((From.Green() * Back + To.Green() * Weight) >> 8),
-                      static_cast<std::uint8_t>((From.Blue() * Back + To.Blue() * Weight) >> 8));
+    Weight = std::clamp(Weight, 0, 256);
+    return Color::Between(From, To, static_cast<std::uint8_t>((Weight * 255 + 128) / 256));
 }
 
 // What light does to a colour, a 256th for each of its channels.

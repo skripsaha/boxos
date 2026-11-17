@@ -85,30 +85,27 @@ void PlanFilm(Ink &Out, const Moment &Now)
 // wherever it stands.
 std::uint32_t Settled(const Ink &Plan, std::uint32_t Colour) noexcept
 {
-    std::uint32_t Red = Channel(Colour, 16), Green = Channel(Colour, 8), Blue = Channel(Colour, 0);
+    Colour &= 0x00FFFFFFu;
     if (Plan.Fade != 0) {
-        const std::uint32_t Grey = (Red * 77 + Green * 151 + Blue * 28) >> 8;
-        Red = Between(Red, Grey, Plan.Fade);
-        Green = Between(Green, Grey, Plan.Fade);
-        Blue = Between(Blue, Grey, Plan.Fade);
+        const std::uint32_t Grey = (Channel(Colour, 16) * 77 + Channel(Colour, 8) * 151 + Channel(Colour, 0) * 28) >> 8;
+        Colour = BoxColorBetween(Colour, Pack(Grey, Grey, Grey), Way(Plan.Fade));
     }
-    if (Plan.Invert != 0) {
-        Red = Between(Red, 255 - Red, Plan.Invert);
-        Green = Between(Green, 255 - Green, Plan.Invert);
-        Blue = Between(Blue, 255 - Blue, Plan.Invert);
-    }
+    if (Plan.Invert != 0) Colour = BoxColorBetween(Colour, Colour ^ 0x00FFFFFFu, Way(Plan.Invert));
     if (Plan.TintMix != 0) {
-        Red = Red * Between(255, Channel(Plan.TintColor, 16), Plan.TintMix) / 255;
-        Green = Green * Between(255, Channel(Plan.TintColor, 8), Plan.TintMix) / 255;
-        Blue = Blue * Between(255, Channel(Plan.TintColor, 0), Plan.TintMix) / 255;
+        // The tint is a glass the colour is seen through: each primary let by
+        // as much as the glass's own colour holds of it.
+        const std::uint32_t Glass = BoxColorBetween(0x00FFFFFFu, Plan.TintColor & 0x00FFFFFFu, Way(Plan.TintMix));
+        Colour = Pack(Channel(Colour, 16) * Channel(Glass, 16) / 255, Channel(Colour, 8) * Channel(Glass, 8) / 255,
+                      Channel(Colour, 0) * Channel(Glass, 0) / 255);
     }
     if (Plan.Sepia != 0) {
-        const auto Toned = [&](std::uint32_t Of, std::uint32_t ByRed, std::uint32_t ByGreen, std::uint32_t ByBlue) {
-            return Between(Of, std::min<std::uint32_t>(255, (Red * ByRed + Green * ByGreen + Blue * ByBlue) >> 8), Plan.Sepia);
+        const std::uint32_t Red = Channel(Colour, 16), Green = Channel(Colour, 8), Blue = Channel(Colour, 0);
+        const auto Toned = [&](std::uint32_t ByRed, std::uint32_t ByGreen, std::uint32_t ByBlue) {
+            return std::min<std::uint32_t>(255, (Red * ByRed + Green * ByGreen + Blue * ByBlue) >> 8);
         };
-        return Pack(Toned(Red, 100, 197, 48), Toned(Green, 89, 175, 43), Toned(Blue, 69, 136, 34));
+        Colour = BoxColorBetween(Colour, Pack(Toned(100, 197, 48), Toned(89, 175, 43), Toned(69, 136, 34)), Way(Plan.Sepia));
     }
-    return Pack(Red, Green, Blue);
+    return Colour;
 }
 
 std::uint32_t Hued(const Hue &Turn, std::uint32_t Colour) noexcept
@@ -150,8 +147,7 @@ void Plot(GlassCell &Cell, bool Lower, std::uint32_t Colour, std::uint32_t Weigh
     Halves Now;
     if (!HalvesOf(Cell, Ink, Paper, Now)) return;
     std::uint32_t &Half = Lower ? Now.Bottom : Now.Top;
-    Half = Pack(Between(Channel(Half, 16), Channel(Colour, 16), Weight), Between(Channel(Half, 8), Channel(Colour, 8), Weight),
-                Between(Channel(Half, 0), Channel(Colour, 0), Weight));
+    Half = BoxColorOver(Half, Colour, Share(Weight));
     Cell.Cell.cp = UpperHalf;
     Cell.Cell.fg = Now.Top;
     Cell.Cell.bg = Now.Bottom;

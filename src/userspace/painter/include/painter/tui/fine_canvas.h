@@ -14,7 +14,7 @@
  * canvas keeps no state, and shapes drawn one over another are laid in
  * order, each over the cells as they are. Over a see-through sub-pixel — one
  * nothing has painted on a transparent frame — a shape's ink is laid at its
- * share as an opacity (Color::Mix), so an edge toward an unknown background
+ * share as an opacity (Color::Over), so an edge toward an unknown background
  * is soft all the same: the display blends it with whatever lies beneath,
  * and what the shape leaves is left see-through (Color::Through). Text is
  * part of the cells too, and where a shape reaches over it, it is gone: the
@@ -105,7 +105,7 @@ void FineCanvas::Cover(core::Rect Cells, core::Color Ink, Distance Outside, floa
                 if (Pure) Laid = Laid >= 0.5f ? 1.0f : 0.0f;
                 const auto Part = static_cast<std::uint8_t>(Laid * 255.0f + 0.5f);
                 if (Part == 0) continue;
-                Shown.At[Place] = core::Color::Mix(Shown.At[Place], Ink, Part);
+                Shown.At[Place] = core::Color::Over(Shown.At[Place], Ink, Part);
                 Touched = true;
             }
             if (Touched) Target->Put({Col, Row}, ResolveMosaic(Shown, Target->Glass(), Target->Mosaics()));

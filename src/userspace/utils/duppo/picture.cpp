@@ -70,7 +70,7 @@ Color Lay(Color Under, Color Over, float Share)
 {
     if (Share <= 0.0f) return Under;
     if (Share >= 1.0f) return Over;
-    return Color::Mix(Under, Over, static_cast<std::uint8_t>(Share * 255.0f + 0.5f));
+    return Color::Over(Under, Over, static_cast<std::uint8_t>(Share * 255.0f + 0.5f));
 }
 
 /* What Duppo is at one instant, and the colour of any point of the glass. */
@@ -219,7 +219,7 @@ Color Sampler::Little(const Layer &Hit, Color Under) const
 {
     Color Hue = Logo::MoonColor(Hues, Hit.Which, Logo::Moons[Hit.Which].Center + Hit.Local);
     const float Behind = -Moons.Moons[Hit.Which].Depth / (Logo::Body.Radius * Body.Scale);
-    if (Behind > 0.0f) Hue = Color::Mix(Hue, Hues.Haze, static_cast<std::uint8_t>(std::min(Behind, 1.0f) * FarHaze));
+    if (Behind > 0.0f) Hue = Color::Over(Hue, Hues.Haze, static_cast<std::uint8_t>(std::min(Behind, 1.0f) * FarHaze));
     return Lay(Under, Hue, Hit.Share);
 }
 

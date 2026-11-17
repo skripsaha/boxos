@@ -105,7 +105,7 @@ void TodoDesk::Thing(int Row, const TodoItem &Item, std::size_t At, bool Chosen)
     painter::core::Color Back  = Chosen ? ChosenPaper : Paper;
     std::uint64_t        Since = clock_uptime_us() - FlashAt;
     if (At == Flashed && Since < TodoFlashUs)
-        Back = painter::core::Color::Mix(FlashPaper, Back, static_cast<std::uint8_t>(Since * 255 / TodoFlashUs));
+        Back = painter::core::Color::Between(FlashPaper, Back, static_cast<std::uint8_t>(Since * 255 / TodoFlashUs));
 
     FrameBuffer.Fill({0, Row, Dimensions.Width, 1}, ' ', TextStyle{TextInk, Back});
     if (Chosen) FrameBuffer.Put({1, Row}, Glyphs::Pointer, TextStyle{TitleInk, Back});
@@ -124,7 +124,7 @@ void TodoDesk::Thing(int Row, const TodoItem &Item, std::size_t At, bool Chosen)
 
     int Col = Dimensions.Width - 1 - Chips;
     for (std::string_view Tag : Tags) {
-        painter::core::Color Ink = Item.Done ? painter::core::Color::Mix(TagInk(Tag), Back, 150) : TagInk(Tag);
+        painter::core::Color Ink = Item.Done ? painter::core::Color::Over(TagInk(Tag), Back, 150) : TagInk(Tag);
         FrameBuffer.Put({Col, Row}, Glyphs::Bullet, TextStyle{Ink, Back});
         Col += 2;
         Col += static_cast<int>(FrameBuffer.Write({Col, Row}, Tag, TextStyle{Ink, Back}));
