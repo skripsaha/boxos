@@ -46,6 +46,12 @@ struct Canvas::Work {
     std::vector<ClipLevel>        Clips;
     std::vector<engine::Prepared> Fills;
 
+    /* A stretch of a row whose shares are not none, Begin to End. */
+    struct Run {
+        std::int32_t Begin, End;
+    };
+    std::vector<Run> Runs;
+
     const ClipLevel &Top() const noexcept { return Clips.back(); }
 
     bool Prepare(std::span<const core::Fill> Given, const Transform &Place, float Opacity)
@@ -68,34 +74,50 @@ struct Canvas::Work {
     }
 
     /* Row Y's kept shares, from X0 — First to Last of them not none — laid
-     * with every fill. A colour that hides what it covers is put, not laid,
-     * where it covers whole: the very pixels laying it would make. */
+     * with every fill, run by run: where the shares are none for a stretch
+     * nothing is worked, not even a gradient's colours; a gap of a few is
+     * worked through, which costs less than stopping. A colour that hides
+     * what it covers is put, not laid, where it covers whole: the very pixels
+     * laying it would make. */
     void LayRow(Canvas &On, std::int32_t Y, std::int32_t X0, std::int32_t First, std::int32_t Last)
     {
-        if (First > Last) return;
-        const lanes::Kit    &Kit   = lanes::Chosen();
-        Pixel               *Row   = On.Row(static_cast<std::uint32_t>(Y)) + X0;
-        const std::uint16_t *Share = Shares.data();
-        for (const engine::Prepared &Fill : Fills) {
-            const std::uint32_t Count = static_cast<std::uint32_t>(Last - First + 1);
-            if (!Fill.Row(Y, X0 + First, Count, Paint.data())) {
-                Kit.LayPaint(Row + First, Paint.data(), Share + First, Count);
-                continue;
+        constexpr std::int32_t Gap = 16;
+        const std::uint16_t   *Share = Shares.data();
+        Runs.clear();
+        for (std::int32_t I = First; I <= Last;) {
+            while (I <= Last && !Share[I]) I++;
+            if (I > Last) break;
+            std::int32_t End = I, Quiet = 0;
+            while (End <= Last && Quiet < Gap) {
+                Quiet = Share[End] ? 0 : Quiet + 1;
+                End++;
             }
-            const Pixel Color = Paint[0];
-            if (Color.Alpha != light::Whole) {
-                Kit.LayColor(Row + First, Share + First, static_cast<std::uint32_t>(Last - First + 1), Color);
-                continue;
-            }
-            for (std::int32_t I = First; I <= Last;) {
-                std::int32_t End = I;
-                const bool   Whole = Share[I] == light::Whole;
-                while (End <= Last && (Share[End] == light::Whole) == Whole) End++;
-                if (Whole) std::fill(Row + I, Row + End, Color);
-                else       Kit.LayColor(Row + I, Share + I, static_cast<std::uint32_t>(End - I), Color);
-                I = End;
-            }
+            Runs.push_back({I, End - Quiet});
+            I = End;
         }
+        const lanes::Kit &Kit = lanes::Chosen();
+        Pixel            *Row = On.Row(static_cast<std::uint32_t>(Y)) + X0;
+        for (const engine::Prepared &Fill : Fills)
+            for (const Run &Each : Runs) {
+                const std::uint32_t Count = static_cast<std::uint32_t>(Each.End - Each.Begin);
+                if (!Fill.Row(Y, X0 + Each.Begin, Count, Paint.data())) {
+                    Kit.LayPaint(Row + Each.Begin, Paint.data(), Share + Each.Begin, Count);
+                    continue;
+                }
+                const Pixel Color = Paint[0];
+                if (Color.Alpha != light::Whole) {
+                    Kit.LayColor(Row + Each.Begin, Share + Each.Begin, Count, Color);
+                    continue;
+                }
+                for (std::int32_t I = Each.Begin; I < Each.End;) {
+                    std::int32_t End   = I;
+                    const bool   Whole = Share[I] == light::Whole;
+                    while (End < Each.End && (Share[End] == light::Whole) == Whole) End++;
+                    if (Whole) std::fill(Row + I, Row + End, Color);
+                    else       Kit.LayColor(Row + I, Share + I, static_cast<std::uint32_t>(End - I), Color);
+                    I = End;
+                }
+            }
     }
 
     /* The shape swept and laid with the prepared fills — kept within, or

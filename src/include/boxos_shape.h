@@ -61,8 +61,9 @@
  * Numbers
  * ------------------------------------------------------------------------- */
 
-/* The whole number nearest below the square root of Value. */
-static inline uint32_t BoxShapeRoot(uint32_t Value)
+/* The whole number nearest below the square root of Value, by tables: the
+ * way of a hand with no SSE (the loader). */
+static inline uint32_t BoxShapeRootByTable(uint32_t Value)
 {
     static const uint8_t Fine[256] = {
          0,  1,  1,  1,  2,  2,  2,  2,  2,  3,  3,  3,  3,  3,  3,  3,
@@ -111,15 +112,16 @@ static inline uint32_t BoxShapeRoot(uint32_t Value)
      * open, one step of Newton's, and at most one to either side. */
     uint32_t Shift = 2u;
     while (Value >> Shift >= 65536u) Shift += 2u;
-    uint32_t Root = (BoxShapeRoot(Value >> Shift) << (Shift / 2u)) + (1u << (Shift / 2u - 1u));
+    uint32_t Root = (BoxShapeRootByTable(Value >> Shift) << (Shift / 2u)) + (1u << (Shift / 2u - 1u));
     Root = (Root + Value / Root) / 2u;
     if ((uint64_t)Root * Root > Value) Root--;
     else if ((uint64_t)(Root + 1u) * (Root + 1u) <= Value) Root++;
     return Root;
 }
 
-/* The whole number nearest below the square root of Value. */
-static inline uint64_t BoxShapeRoot64(uint64_t Value)
+/* The whole number nearest below the square root of Value, a bit at a
+ * time: the way of a hand with no SSE. */
+static inline uint64_t BoxShapeRootByBits(uint64_t Value)
 {
     uint64_t Root = 0, Bit = 1ull << 62;
     while (Bit > Value) Bit >>= 2;
@@ -133,6 +135,45 @@ static inline uint64_t BoxShapeRoot64(uint64_t Value)
         Bit >>= 2;
     }
     return Root;
+}
+
+#if defined(__x86_64__) && defined(__SSE2__)
+/* The whole number nearest below the square root of Value by the
+ * processor's own square root: a double's root lies within one of the true
+ * one, and the steps after make it exact — the very number the ways above
+ * give, as the draw stand holds, in a few cycles instead of a loop. */
+static inline uint64_t BoxShapeRootBySse2(uint64_t Value)
+{
+    const double Seen = (double)Value;
+    double       Root;
+    __asm__("sqrtsd %1, %0" : "=x"(Root) : "x"(Seen));
+    uint64_t Whole = (uint64_t)Root;
+    if (Whole > 0xFFFFFFFFull) Whole = 0xFFFFFFFFull;
+    while (Whole * Whole > Value) Whole--;
+    while (Whole < 0xFFFFFFFFull && (Whole + 1u) * (Whole + 1u) <= Value) Whole++;
+    return Whole;
+}
+#endif
+
+/* The whole number nearest below the square root of Value — by the
+ * processor's square root where the hand has SSE2, by tables where it has
+ * not: one number either way. */
+static inline uint32_t BoxShapeRoot(uint32_t Value)
+{
+#if defined(__x86_64__) && defined(__SSE2__)
+    return (uint32_t)BoxShapeRootBySse2(Value);
+#else
+    return BoxShapeRootByTable(Value);
+#endif
+}
+
+static inline uint64_t BoxShapeRoot64(uint64_t Value)
+{
+#if defined(__x86_64__) && defined(__SSE2__)
+    return BoxShapeRootBySse2(Value);
+#else
+    return BoxShapeRootByBits(Value);
+#endif
 }
 
 /* The sine of Turn, in 1/BOX_SHAPE_UNIT: a quarter of the wave kept, the rest

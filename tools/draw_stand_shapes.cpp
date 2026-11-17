@@ -185,6 +185,34 @@ void CheckShapes(Tally &Count)
                          Circle, Arch));
     }
 
+    /* The square root, whichever way the hand takes it, the integer ways'
+     * very number: every 32-bit value below 2^24, the squares of every root
+     * and their neighbours, and millions at random up to 2^64. */
+    {
+        std::uint64_t Wrong = 0, Tried = 0;
+        const auto    Hold  = [&](std::uint64_t V) {
+            Tried++;
+            const std::uint64_t Bits = BoxShapeRootByBits(V);
+            if (BoxShapeRoot64(V) != Bits) Wrong++;
+            if (V <= 0xFFFFFFFFull && (BoxShapeRoot(static_cast<std::uint32_t>(V)) != Bits ||
+                                       BoxShapeRootByTable(static_cast<std::uint32_t>(V)) != Bits))
+                Wrong++;
+        };
+        for (std::uint64_t V = 0; V < (1u << 24); V++) Hold(V);
+        for (std::uint64_t R = 0; R < (1u << 20); R++)
+            for (int K = -1; K <= 1; K++) Hold(R * R + static_cast<std::uint64_t>(static_cast<std::int64_t>(K)));
+        for (std::uint64_t R = 0xFFFFFF00ull; R <= 0xFFFFFFFFull; R++) {
+            Hold(R * R - 1u);
+            Hold(R * R);
+            Hold(R * R + 1u);
+        }
+        Hold(~0ull);
+        for (std::uint32_t I = 0; I < 3000000u; I++)
+            Hold((static_cast<std::uint64_t>(Random()) << 32 | Random()) >> (Random() % 64u));
+        Count.Check(Wrong == 0, Said("the square root the same number every way: %.0f values, %.0f not alike",
+                                     static_cast<double>(Tried), static_cast<double>(Wrong)));
+    }
+
     /* The turn of a place held to the host's atan2. */
     {
         std::int64_t Worst = 0;
