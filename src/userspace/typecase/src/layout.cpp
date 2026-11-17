@@ -563,7 +563,7 @@ void Setter::Place()
         Laid.Height     = Of.Height;
         Laid.Baseline   = Top + Of.Ascent;
         Laid.Left       = Left;
-        Laid.Width      = Width;
+        Laid.Width      = Justified ? Box : Width;
         Laid.FirstGlyph = static_cast<std::uint32_t>(Out.GlyphList.size());
         Laid.From       = Of.From;
         Laid.To         = Of.To;

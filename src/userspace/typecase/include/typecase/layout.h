@@ -56,7 +56,7 @@ struct LaidLine {
     float         Height     = 0;
     float         Baseline   = 0;   /* from the layout's top */
     float         Left       = 0;   /* where its first character stands */
-    float         Width      = 0;   /* to the end of its last character, spaces at its end not counted */
+    float         Width      = 0;   /* to the end of its last character, spaces at its end not counted; justified, the box's */
     float         Right      = 0;   /* where the pen stands after all of it, spaces at its end and all */
     std::uint32_t FirstGlyph = 0;
     std::uint32_t GlyphCount = 0;

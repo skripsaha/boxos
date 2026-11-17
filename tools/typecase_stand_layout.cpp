@@ -130,7 +130,8 @@ void CheckPlacing(Tally &Count, const typecase::Fonts &Book)
     Box.Align         = typecase::TextAlign::Justify;
     const auto Full   = Lay(Book, U"aaaa bbbb cccc", Box);
     Count.Check(Near(Right.Lines()[0].Left, 2.5f) && Near(Right.Lines()[1].Left, 25) && Near(Middle.Lines()[1].Left, 12.5f) &&
-                    GlyphAt(Full, 5) && Near(GlyphAt(Full, 5)->X, 25) && GlyphAt(Full, 10) && Near(GlyphAt(Full, 10)->X, 0),
+                    GlyphAt(Full, 5) && Near(GlyphAt(Full, 5)->X, 25) && GlyphAt(Full, 10) && Near(GlyphAt(Full, 10)->X, 0) &&
+                    Near(Full.Lines()[0].Width, 45) && Near(Full.Lines()[1].Width, 20),
                 "aligned right and in the middle, its hanging spaces not counted; justified, a line spread at its "
                 "spaces to the width, a paragraph's last not");
 

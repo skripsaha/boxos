@@ -86,11 +86,17 @@ void SayTextSpeed(const typecase::Fonts &Book)
         Work();
         return std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - Start).count();
     };
+    /* Each measured over several rounds: one is shorter than some clocks' step. */
+    constexpr int                   Rounds = 8;
     std::optional<typecase::Layout> Laid;
-    const double Setting = Took([&] { Laid = typecase::Layout::Of(Text, Box, Book); });
-    const double Glyphs  = static_cast<double>(Laid->Glyphs().size());
+    const double Setting = Took([&] {
+        for (int Round = 0; Round < Rounds; Round++) Laid = typecase::Layout::Of(Text, Box, Book);
+    }) / Rounds;
+    const double Glyphs = static_cast<double>(Laid->Glyphs().size());
     C->FillText(*Laid, {40, 40}, Fill(Color::Rgb(240, 240, 240)));
-    const double Kept = Took([&] { C->FillText(*Laid, {40, 40}, Fill(Color::Rgb(240, 240, 240))); });
+    const double Kept = Took([&] {
+        for (int Round = 0; Round < Rounds; Round++) C->FillText(*Laid, {40, 40}, Fill(Color::Rgb(240, 240, 240)));
+    }) / Rounds;
     double       Fresh = 0;
     for (int Round = 0; Round < 3; Round++) {
         typecase::Text Other = Text;
