@@ -40,7 +40,7 @@ double Smooth(double From, double To, double At) noexcept
 
 Ink Between(Ink A, Ink B, double Share) noexcept
 {
-    return Ink::Mix(A, B, Part(Share));
+    return Ink::Between(A, B, Part(Share));
 }
 
 Season SeasonOfMonth(int Month) noexcept

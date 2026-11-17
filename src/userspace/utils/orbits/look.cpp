@@ -90,12 +90,12 @@ Color BodyColor(const Look &Shown, double Tone)
     const double       Place  = std::clamp(Tone, 0.0, 1.0) * (RampStops - 1);
     const std::size_t  Low    = std::min(static_cast<std::size_t>(Place), RampStops - 2);
     const double       Part   = Place - static_cast<double>(Low);
-    return Color::Mix(Stops.Stops[Low], Stops.Stops[Low + 1], static_cast<std::uint8_t>(Part * 255.0));
+    return Color::Between(Stops.Stops[Low], Stops.Stops[Low + 1], static_cast<std::uint8_t>(Part * 255.0));
 }
 
 Color StarColor(const Look &Shown, double Tone)
 {
-    return Color::Mix(Shown.Star, BodyColor(Shown, Tone), static_cast<std::uint8_t>(std::clamp(Tone, 0.0, 1.0) * 200.0));
+    return Color::Between(Shown.Star, BodyColor(Shown, Tone), static_cast<std::uint8_t>(std::clamp(Tone, 0.0, 1.0) * 200.0));
 }
 
 }  // namespace orbits

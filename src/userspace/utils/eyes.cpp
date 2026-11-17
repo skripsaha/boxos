@@ -331,7 +331,7 @@ private:
 /* Over laid at Share of a pixel. */
 PainterColor Laid(PainterColor Under, PainterColor Over, float Share)
 {
-    return PainterColor::Mix(Under, Over, static_cast<std::uint8_t>(std::clamp(Share, 0.0f, 1.0f) * 255.0f + 0.5f));
+    return PainterColor::Over(Under, Over, static_cast<std::uint8_t>(std::clamp(Share, 0.0f, 1.0f) * 255.0f + 0.5f));
 }
 
 void EyePicture::DrawEye(int Left, const Look &Eye, const Inks &Colours)
@@ -355,8 +355,8 @@ void EyePicture::DrawEye(int Left, const Look &Eye, const Inks &Colours)
             if (Cover <= 0.0f) continue;
 
             float Dx = Px - Ix, Dy = Py - Iy, Far = std::sqrt(Dx * Dx + Dy * Dy);
-            PainterColor Ink = PainterColor::Mix(Colours.Eyeball, Colours.Rim, static_cast<std::uint8_t>(std::clamp(Edge * Edge * 255.0f, 0.0f, 255.0f)));
-            Ink = Laid(Ink, Far > Ri - 1.0f ? PainterColor::Mix(Colours.Iris, painter::core::Colors::Black, 110) : Colours.Iris, InsideShare(Far - Ri));
+            PainterColor Ink = PainterColor::Between(Colours.Eyeball, Colours.Rim, static_cast<std::uint8_t>(std::clamp(Edge * Edge * 255.0f, 0.0f, 255.0f)));
+            Ink = Laid(Ink, Far > Ri - 1.0f ? PainterColor::Between(Colours.Iris, painter::core::Colors::Black, 110) : Colours.Iris, InsideShare(Far - Ri));
             Ink = Laid(Ink, Colours.Pupil, InsideShare(Far - Rp));
             float Gx = Px - (Ix - Rp * 0.6f), Gy = Py - (Iy - Rp * 0.6f);
             if (Far <= Ri) Ink = Laid(Ink, Glint, InsideShare(std::sqrt(Gx * Gx + Gy * Gy) - std::sqrt(Glow)));

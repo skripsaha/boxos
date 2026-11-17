@@ -93,8 +93,8 @@ Color Shaded(Shape Of, int Size, int X, int Y, Color Body)
     double       Light = (0.5 - (U + V) / 2) * 70;
     if (Of == Shape::Diamond) Light += V < 0.5 ? 25 : -25;
     if (Of == Shape::Kite || Of == Shape::Triangle) Light += U < 0.5 ? 25 : -25;
-    if (Light >= 0) return Color::Mix(Body, painter::core::Colors::White, static_cast<std::uint8_t>(Light));
-    return Color::Mix(Body, painter::core::Colors::Black, static_cast<std::uint8_t>(-Light));
+    if (Light >= 0) return Color::Between(Body, painter::core::Colors::White, static_cast<std::uint8_t>(Light));
+    return Color::Between(Body, painter::core::Colors::Black, static_cast<std::uint8_t>(-Light));
 }
 
 bool OnEdge(Shape Of, int Size, int X, int Y)
@@ -150,7 +150,7 @@ void DrawNumber(const Canvas &On, int CenterX, int CenterY, int Face, Color Ink)
         if (On.Allows(Column, Row * 2) && On.Allows(Column, Row * 2 + 1)) {
             tui::Cell Under = On.Out.Read({Column, Row});
             Under.Glyph      = Digit;
-            Under.Background = Color::Mix(Under.Foreground, Under.Background, 128);
+            Under.Background = Color::Between(Under.Foreground, Under.Background, 128);
             Under.Foreground = Ink;
             On.Out.Put({Column, Row}, Under);
         }

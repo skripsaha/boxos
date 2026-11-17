@@ -366,7 +366,7 @@ PainterColor SurfaceColor(int Distance, int RadiusSquared)
 {
     int Weight = RadiusSquared == 0 ? 255 : (RadiusSquared - Distance) * 255 / RadiusSquared;
     Weight = std::clamp(Weight, 0, 255);
-    return PainterColor::Mix(BubbleDark, BubblePink, static_cast<uint8_t>(Weight));
+    return PainterColor::Between(BubbleDark, BubblePink, static_cast<uint8_t>(Weight));
 }
 
 PainterColor BubblePixel(int X, int Y)
@@ -381,13 +381,13 @@ PainterColor BubblePixel(int X, int Y)
 
     if (Distance <= Pupil) {
         if (X < 13 && Y < 13 && Distance > 15)
-            return PainterColor::Mix(BubbleBlack, PupilGlow, 90);
+            return PainterColor::Between(BubbleBlack, PupilGlow, 90);
         return BubbleBlack;
     }
 
     if (Distance <= Ring) {
         int Weight = (Ring - Distance) * 255 / (Ring - Pupil);
-        return PainterColor::Mix(BubbleMid, BubbleLight, static_cast<uint8_t>(std::clamp(Weight, 0, 255)));
+        return PainterColor::Between(BubbleMid, BubbleLight, static_cast<uint8_t>(std::clamp(Weight, 0, 255)));
     }
     return SurfaceColor(Distance - Ring, Outer - Ring);
 }

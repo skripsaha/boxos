@@ -66,7 +66,7 @@ Color Ramp(float Along, Stop First, Stop Second)
     if (Along <= First.At) return First.Ink;
     if (Along >= Second.At) return Second.Ink;
     float Share = (Along - First.At) / (Second.At - First.At);
-    return Color::Mix(First.Ink, Second.Ink, static_cast<std::uint8_t>(Share * 255.0f + 0.5f));
+    return Color::Between(First.Ink, Second.Ink, static_cast<std::uint8_t>(Share * 255.0f + 0.5f));
 }
 
 Color Ramp(float Along, Stop First, Stop Second, Stop Third)
@@ -100,10 +100,10 @@ Palette Palette::Make(Color Body, Color RingSet, Color Pupil)
                    .Lip       = Followed(LipDefault, LightDefault, Body),
                    .Ring      = RingSet,
                    .RingEdge  = Followed(RingEdgeDefault, RingDefault, RingSet),
-                   .Glow      = Color::Mix(Pupil, painter::core::Colors::White, GlowShare),
+                   .Glow      = Color::Between(Pupil, painter::core::Colors::White, GlowShare),
                    .Core      = Pupil,
-                   .PupilEdge = Color::Mix(Pupil, painter::core::Colors::White, EdgeShare),
-                   .Haze      = Color::Mix(Deep, painter::core::Colors::Black, HazeShare)};
+                   .PupilEdge = Color::Between(Pupil, painter::core::Colors::White, EdgeShare),
+                   .Haze      = Color::Between(Deep, painter::core::Colors::Black, HazeShare)};
 }
 
 namespace Logo {

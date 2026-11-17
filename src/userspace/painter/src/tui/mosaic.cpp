@@ -47,6 +47,25 @@ Rgb Of(core::Color Ink)
     return {Ink.Red(), Ink.Green(), Ink.Blue()};
 }
 
+/* A colour's light (boxos_color.h). Sub-pixels seen together are seen as the
+ * mean of their light, not of their numbers, as every colour laid over
+ * another is mixed. */
+Rgb LightOf(Rgb Value)
+{
+    return {static_cast<int>(BoxColorLight(static_cast<std::uint32_t>(Value.Red))),
+            static_cast<int>(BoxColorLight(static_cast<std::uint32_t>(Value.Green))),
+            static_cast<int>(BoxColorLight(static_cast<std::uint32_t>(Value.Blue)))};
+}
+
+/* The colour whose light is Light, each part held to the light there is. */
+Rgb CodeOf(Rgb Light)
+{
+    const auto Code = [](int Part) {
+        return static_cast<int>(BoxColorCode(static_cast<std::uint32_t>(std::clamp(Part, 0, static_cast<int>(BOX_COLOR_LIGHT_MOST)))));
+    };
+    return {Code(Light.Red), Code(Light.Green), Code(Light.Blue)};
+}
+
 /* The squared distance of two colours, weighted as the eye sees green more
  * than red, and red more than blue. */
 int Distance(Rgb A, Rgb B)
@@ -68,7 +87,7 @@ constexpr int Whole = 255;
  * about a third of the way across the cube. */
 constexpr int OpacityWeight = 6;
 
-/* The mean of a group of places weighted by how opaque each is: a
+/* The mean of a group of places' light weighted by how opaque each is: a
  * see-through place has no colour to give. There must be one that is seen. */
 Rgb MeanOf(const Mosaic &Wanted, int Places)
 {
@@ -76,12 +95,13 @@ Rgb MeanOf(const Mosaic &Wanted, int Places)
     for (std::size_t Place = 0; Place < Wanted.Count(); Place++) {
         if ((Places & (1 << Place)) == 0) continue;
         const int Share = OpacityOf(Wanted.At[Place]);
-        Red += Wanted.At[Place].Red() * Share;
-        Green += Wanted.At[Place].Green() * Share;
-        Blue += Wanted.At[Place].Blue() * Share;
+        const Rgb Light = LightOf(Of(Wanted.At[Place]));
+        Red += Light.Red * Share;
+        Green += Light.Green * Share;
+        Blue += Light.Blue * Share;
         Seen += Share;
     }
-    return {(Red + Seen / 2) / Seen, (Green + Seen / 2) / Seen, (Blue + Seen / 2) / Seen};
+    return CodeOf({(Red + Seen / 2) / Seen, (Green + Seen / 2) / Seen, (Blue + Seen / 2) / Seen});
 }
 
 core::Color Ink(Rgb Value, int Opacity)
@@ -188,16 +208,13 @@ Fit Checker(const Mosaic &Wanted, Shade Half, int Places)
     return {Cell{Half.Glyph, Ink(Front, Whole), Ink(Back, Whole)}, Error};
 }
 
-/* The colour that, shown Share parts in CellInk of the way from Rest, is Want. */
+/* The colour that, laid Share parts in CellInk over Rest, is Want — in light,
+ * as far as the light there is reaches. */
 Rgb Beyond(Rgb Rest, Rgb Want, int Share)
 {
-    const auto Part = [&](int From, int To) { return From + (To - From) * CellInk / Share; };
-    return {Part(Rest.Red, Want.Red), Part(Rest.Green, Want.Green), Part(Rest.Blue, Want.Blue)};
-}
-
-Rgb Clamped(Rgb Value)
-{
-    return {std::clamp(Value.Red, 0, 255), std::clamp(Value.Green, 0, 255), std::clamp(Value.Blue, 0, 255)};
+    const Rgb  From = LightOf(Rest), To = LightOf(Want);
+    const auto Part = [&](int Under, int Over) { return Under + (Over - Under) * CellInk / Share; };
+    return CodeOf({Part(From.Red, To.Red), Part(From.Green, To.Green), Part(From.Blue, To.Blue)});
 }
 
 /* Dust: the sub-pixel at Lone drawn as the lesser colour of a shade, sprinkled
@@ -211,9 +228,8 @@ Fit Dust(const Mosaic &Wanted, Shade Sprinkle, std::size_t Lone)
     const int  Share    = 4 * Less;
     const Rgb  Rest     = MeanOf(Wanted, All(Wanted) & ~(1 << Lone));
     const Rgb  Want     = Of(Wanted.At[Lone]);
-    const Rgb  Dusted   = Clamped(Beyond(Rest, Want, Share));
-    const Rgb  Shown    = {Rest.Red + (Dusted.Red - Rest.Red) * Share / CellInk, Rest.Green + (Dusted.Green - Rest.Green) * Share / CellInk,
-                           Rest.Blue + (Dusted.Blue - Rest.Blue) * Share / CellInk};
+    const Rgb  Dusted   = Beyond(Rest, Want, Share);
+    const Rgb  Shown    = Of(core::Color::Over(Ink(Rest, Whole), Ink(Dusted, Whole), static_cast<std::uint8_t>(Share * Whole / CellInk)));
     const int  Error    = ErrorOver(Wanted, All(Wanted) & ~(1 << Lone), Rest, Whole) + Distance(Want, Shown) + Texture(Rest, Dusted, Sprinkle.Ink);
     return {Majority ? Cell{Sprinkle.Glyph, Ink(Rest, Whole), Ink(Dusted, Whole)} : Cell{Sprinkle.Glyph, Ink(Dusted, Whole), Ink(Rest, Whole)}, Error};
 }
@@ -274,10 +290,10 @@ Cell ExactFit(const Mosaic &Wanted)
     return Best.Look;
 }
 
-/* Two rows from more: each of the two takes the means of the rows it
- * overlaps, weighted by the area of the overlap and by how opaque each
- * sub-pixel is, at the mean of their opacities; a row nothing seen lies in
- * is see-through. */
+/* Two rows from more: each of the two takes the means of the light of the
+ * rows it overlaps, weighted by the area of the overlap and by how opaque
+ * each sub-pixel is, at the mean of their opacities; a row nothing seen lies
+ * in is see-through. */
 Mosaic Halved(const Mosaic &Wanted)
 {
     Mosaic Folded;
@@ -289,9 +305,10 @@ Mosaic Halved(const Mosaic &Wanted)
                 if (Weight == 0) continue;
                 const core::Color Part = Wanted.At[static_cast<std::size_t>(Source * 2 + Column)];
                 const int Share = Weight * OpacityOf(Part);
-                Red += Part.Red() * Share;
-                Green += Part.Green() * Share;
-                Blue += Part.Blue() * Share;
+                const Rgb Light = LightOf(Of(Part));
+                Red += Light.Red * Share;
+                Green += Light.Green * Share;
+                Blue += Light.Blue * Share;
                 Seen += Share;
                 Weights += Weight;
             }
@@ -300,7 +317,8 @@ Mosaic Halved(const Mosaic &Wanted)
                 Place = core::Color::Through();
                 continue;
             }
-            Place = Ink({(Red + Seen / 2) / Seen, (Green + Seen / 2) / Seen, (Blue + Seen / 2) / Seen}, (Seen + Weights / 2) / Weights);
+            Place = Ink(CodeOf({(Red + Seen / 2) / Seen, (Green + Seen / 2) / Seen, (Blue + Seen / 2) / Seen}),
+                        (Seen + Weights / 2) / Weights);
         }
     }
     return Folded;
@@ -338,7 +356,7 @@ Mosaic MosaicOf(const Cell &Shown, std::uint8_t Rows) noexcept
     case Glyphs::MidShade:
     case Glyphs::DenseShade: {
         const Shade Dither = ShadeAt(static_cast<std::size_t>(Shown.Glyph - Glyphs::LightShade));
-        Seen.At.fill(core::Color::Mix(Back, Front, static_cast<std::uint8_t>(Dither.Ink * 255 / CellInk)));
+        Seen.At.fill(core::Color::Over(Back, Front, static_cast<std::uint8_t>(Dither.Ink * 255 / CellInk)));
         return Seen;
     }
     default: break;
@@ -357,7 +375,7 @@ Mosaic MosaicOf(const Cell &Shown, std::uint8_t Rows) noexcept
             core::Color &Place = Seen.At[static_cast<std::size_t>(Target * 2 + Column)];
             if (Covered == 0) Place = Back;
             else if (Covered == Grid) Place = Front;
-            else Place = core::Color::Mix(Back, Front, static_cast<std::uint8_t>((Covered * 255 + Grid / 2) / Grid));
+            else Place = core::Color::Over(Back, Front, static_cast<std::uint8_t>((Covered * 255 + Grid / 2) / Grid));
         }
     }
     return Seen;

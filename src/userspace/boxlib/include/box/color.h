@@ -95,9 +95,6 @@ void  color_format(Color c, char out[8]);
  * `val` are 0..255; sat 0 is a grey of that value. */
 Color color_wheel(uint16_t hue, uint8_t sat, uint8_t val);
 
-/* `weight` parts of b in 256 parts of the mix, channel by channel. */
-Color color_mix(Color a, Color b, uint8_t weight);
-
 /* ------------------------------------------------------------------------- */
 /* Color state — process-local current text colors. Used by print/println and
  * the printf output path when no inline %color override applies. */

@@ -126,13 +126,9 @@ static void Solid(int32_t x, int32_t y, int32_t w, int32_t h, int32_t r, uint32_
 /* `rgb` lit `per` percent: past 100 toward white, under it toward black. */
 static uint32_t Shade(uint32_t rgb, uint32_t per)
 {
-    uint32_t out = 0;
-    for (uint32_t s = 0; s <= 16u; s += 8u) {
-        uint32_t c = (rgb >> s) & 255u;
-        c = per >= 100u ? c + (255u - c) * (per - 100u) / 100u : c * per / 100u;
-        out |= c << s;
-    }
-    return out;
+    rgb &= 0x00FFFFFFu;
+    return per >= 100u ? BoxColorBetween(rgb, 0x00FFFFFFu, (per - 100u) * BOX_COLOR_WAY / 100u)
+                       : BoxColorBetween(0, rgb, per * BOX_COLOR_WAY / 100u);
 }
 
 /* Whether `rgb` is a light colour, by how bright it looks. */

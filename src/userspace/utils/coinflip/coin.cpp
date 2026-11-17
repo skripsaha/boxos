@@ -98,16 +98,16 @@ private:
     {
         const double Radius = std::sqrt(Across * Across + Up * Up);
         if (Radius >= BorderFrom) return Shown.Metal;
-        if (Radius >= RingFrom) return Color::Mix(Shown.Metal, core::Colors::White, 70);
+        if (Radius >= RingFrom) return Color::Between(Shown.Metal, core::Colors::White, 70);
         const bool Raised =
             Radius <= ReliefTo && (Heads ? HeadsRaised(Across, Up) : TailsRaised(Across, Up));
-        return Raised ? Color::Mix(Shown.Metal, core::Colors::White, 60) : Color::Mix(Shown.Metal, Shown.Edge, 85);
+        return Raised ? Color::Between(Shown.Metal, core::Colors::White, 60) : Color::Between(Shown.Metal, Shown.Edge, 85);
     }
 
     Color RimBase(double U, double B) const
     {
-        const Color Plain = Color::Mix(Shown.Edge, Shown.Metal, 170);
-        return std::sin(std::atan2(B, U) * Grooves) > 0.25 ? Color::Mix(Plain, Shown.Edge, 110) : Plain;
+        const Color Plain = Color::Between(Shown.Edge, Shown.Metal, 170);
+        return std::sin(std::atan2(B, U) * Grooves) > 0.25 ? Color::Between(Plain, Shown.Edge, 110) : Plain;
     }
 
     // The color under the light: dark where the surface turns from it, a shine
@@ -119,8 +119,8 @@ private:
         const double Diffuse = std::max(0.0, Unit.X * Light.X + Unit.Y * Light.Y + Unit.Z * Light.Z);
         double       Shine   = std::max(0.0, Unit.X * Halfway.X + Unit.Y * Halfway.Y + Unit.Z * Halfway.Z);
         for (int Square = 0; Square < 5; Square++) Shine *= Shine;
-        const Color Shaded = Color::Mix(Shown.Edge, Base, static_cast<std::uint8_t>(70.0 + 185.0 * Diffuse));
-        return Color::Mix(Shaded, core::Colors::White, static_cast<std::uint8_t>(std::min(1.0, Shine * 0.9) * 255.0));
+        const Color Shaded = Color::Between(Shown.Edge, Base, static_cast<std::uint8_t>(70.0 + 185.0 * Diffuse));
+        return Color::Between(Shaded, core::Colors::White, static_cast<std::uint8_t>(std::min(1.0, Shine * 0.9) * 255.0));
     }
 
     const Look &Shown;

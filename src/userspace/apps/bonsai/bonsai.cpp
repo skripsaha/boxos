@@ -83,13 +83,9 @@ private:
     wood_[index] = wood;
     const unsigned dark = wood ? 1 : 0;
     const unsigned bright = dark + 2;
-    const auto a = box::color::from_raw(kColors[dark]);
-    const auto b = box::color::from_raw(kColors[bright]);
     const unsigned blend = std::min<unsigned>(mark.shade, 3);
-    const auto color = box::color::rgb(
-        (a.r() * (3 - blend) + b.r() * blend) / 3,
-        (a.g() * (3 - blend) + b.g() * blend) / 3,
-        (a.b() * (3 - blend) + b.b() * blend) / 3);
+    const auto color = box::color::from_raw(
+        BoxColorBetween(kColors[dark], kColors[bright], blend * BOX_COLOR_WAY / 3));
     const char glyph = wood ? mark.glyph
                             : kLeaves[(mark.col + mark.row + mark.shade) %
                                       kLeaves.size()];

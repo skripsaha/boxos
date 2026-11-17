@@ -30,11 +30,12 @@ struct Mosaic {
 };
 
 /* The sub-pixels a cell shows on a grid of Rows: for a space, a block, a
- * half and any other mosaic character, each sub-pixel the foreground and the
- * background mixed by the share of its area the character fills; the shade's
- * mix of its two colours for a shade; and the background for any other glyph,
- * whose strokes sub-pixels cannot hold. A colour of the cell that is
- * see-through or translucent is so in its sub-pixels. */
+ * half and any other mosaic character, each sub-pixel the foreground laid
+ * over the background by the share of its area the character fills
+ * (Color::Over); the shade's two colours laid so for a shade; and the
+ * background for any other glyph, whose strokes sub-pixels cannot hold. A
+ * colour of the cell that is see-through or translucent is so in its
+ * sub-pixels. */
 Mosaic MosaicOf(const Cell &Shown, std::uint8_t Rows) noexcept;
 
 /* The opaque cell whose picture is nearest to Wanted, on a glass that draws
@@ -48,10 +49,11 @@ Mosaic MosaicOf(const Cell &Shown, std::uint8_t Rows) noexcept;
  * the space.
  *
  * Otherwise the picture is of two rows, a grid of more being first brought to
- * two by the means of its sub-pixels over the area each covers. The candidates
- * are the upper half (rows), the left half (columns), one colour, and where
- * Glass is pixels also the shades: a diagonal of two colours is the half
- * shade, and one sub-pixel against three is dust of its colour on the other.
+ * two by the means of its sub-pixels' light over the area each covers. The
+ * candidates are the upper half (rows), the left half (columns), one colour,
+ * and where Glass is pixels also the shades: a diagonal of two colours is the
+ * half shade, and one sub-pixel against three is dust of its colour on the
+ * other.
  * A shade is a texture, so its error is raised by how far its two colours lie
  * apart. The candidate of least error is chosen, a split before one colour
  * when equal. A text page has sixteen colours and a dither there is only
@@ -61,8 +63,9 @@ Mosaic MosaicOf(const Cell &Shown, std::uint8_t Rows) noexcept;
  * A sub-pixel may have an opacity (Color::Opacity, none being Color::Through):
  * a part of the picture a shape reached by some share, or none reached. The
  * opacity is part of what a candidate is measured by, beside the colour, as
- * far as both are seen; a side is drawn in the mean of its colours weighted by
- * their opacities, at the mean of the opacities, and a side nothing seen lies
+ * far as both are seen; a side is drawn in the mean of its colours' light
+ * weighted by their opacities — sub-pixels seen together are seen as their
+ * light — at the mean of the opacities, and a side nothing seen lies
  * on is see-through whole. A cell with any such sub-pixel is never a shade,
  * which would paint them all, so it is one of the splits or one colour. The
  * display blends what is not whole with what lies beneath the cell. */

@@ -135,20 +135,24 @@ void Slots::PaintReel(Canvas &Draw, const Layout &Where, int Reel, std::int32_t 
         const float Near  = std::min(static_cast<float>(Down), static_cast<float>(High - 1 - Down)) / (static_cast<float>(High) * 0.16f);
         const float Round = 0.62f + 0.38f * std::min(Near, 1.0f);
         for (std::int32_t Across = 0; Across < Edge + 2; Across++) {
-            float Red = 0, Green = 0, Blue = 0;
+            std::uint32_t Red = 0, Green = 0, Blue = 0;
             for (int Sample = 0; Sample < Taken; Sample++) {
                 const float Off  = Taken == 1 ? 0.0f : (static_cast<float>(Sample) / (Taken - 1) - 0.5f) * Span;
                 const float Rise = Spot + Off + 1.5f - (static_cast<float>(Down) + 0.5f) / static_cast<float>(Edge);
                 const int   Stop = static_cast<int>(std::floor(Rise + 0.5f));
                 const int   Row  = std::clamp(static_cast<int>((static_cast<float>(Stop) + 0.5f - Rise) * static_cast<float>(Edge)), 0, Edge - 1);
                 const Rgba  Face = Art->At(OnStrip(Stop), Across - 1, Row);
-                const float Own  = static_cast<float>(Face.Cover) / 255.0f;
-                Red += Cream.Red() * (1.0f - Own) + Face.Red * Own;
-                Green += Cream.Green() * (1.0f - Own) + Face.Green * Own;
-                Blue += Cream.Blue() * (1.0f - Own) + Face.Blue * Own;
+                // The face laid over the strip's cream by how much of the pixel
+                // it covers, and the samples seen together as their light.
+                const Color Laid = Color::Over(Cream, Color::Rgb(Face.Red, Face.Green, Face.Blue), Face.Cover);
+                Red += BoxColorLight(Laid.Red());
+                Green += BoxColorLight(Laid.Green());
+                Blue += BoxColorLight(Laid.Blue());
             }
-            const Color Mean = Color::Rgb(static_cast<std::uint8_t>(Red / Taken), static_cast<std::uint8_t>(Green / Taken),
-                                          static_cast<std::uint8_t>(Blue / Taken));
+            const auto  Seen = static_cast<std::uint32_t>(Taken);
+            const Color Mean = Color::Rgb(static_cast<std::uint8_t>(BoxColorCode((Red + Seen / 2) / Seen)),
+                                          static_cast<std::uint8_t>(BoxColorCode((Green + Seen / 2) / Seen)),
+                                          static_cast<std::uint8_t>(BoxColorCode((Blue + Seen / 2) / Seen)));
             Draw.Plot(Left + Across, Top + Down, Shade(Mean, Round));
         }
     }

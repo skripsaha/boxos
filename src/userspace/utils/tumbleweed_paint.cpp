@@ -77,7 +77,7 @@ void PaintStars(Frame &Canvas, const TumbleWorld &World, const TumbleSky &Sky)
         const int Y = Star.Y - static_cast<int>(World.CameraY * 0.12f);
         const float Pulse = 0.68f + 0.32f * std::sin(World.Time * 1.3f + Star.Phase);
         const Color Dim = Sky.Night ? Color::Rgb(0x9E, 0xB8, 0xD8) : Color::Rgb(0xE1, 0xC0, 0xAE);
-        const Color Ink = Color::Mix(Colors::Black, Dim, static_cast<std::uint8_t>(Pulse * 255.0f));
+        const Color Ink = Color::Between(Colors::Black, Dim, static_cast<std::uint8_t>(Pulse * 255.0f));
         ScreenPixel(Canvas, X, Y, Ink);
         if (Star.Size == 2) {
             ScreenPixel(Canvas, X + 1, Y, Ink);
@@ -94,7 +94,7 @@ void PaintSun(Frame &Canvas, const TumbleWorld &World, const TumbleSky &Sky)
                                     : Color::Rgb(0xFF, 0xD0, 0x62);
     for (int Radius = 13; Radius >= 5; Radius--) {
         const std::uint8_t Weight = static_cast<std::uint8_t>(28 + (13 - Radius) * 27);
-        RawDisc(Canvas, World, Sky.SunX, Sky.SunY, Radius, Color::Mix(World.SkyAt(Sky.SunY, Sky), Glow, Weight));
+        RawDisc(Canvas, World, Sky.SunX, Sky.SunY, Radius, Color::Over(World.SkyAt(Sky.SunY, Sky), Glow, Weight));
     }
     RawDisc(Canvas, World, Sky.SunX, Sky.SunY, 5, Glow);
 }
@@ -163,9 +163,9 @@ void DrawCactus(Frame &Canvas, const TumbleWorld &World, const TumbleCactus &One
     const float Scale = One.Layer == 0 ? 0.62f : 1.0f;
     const int Base = BaseY(World, One.X, One.Layer);
     const int Height = std::max(5, static_cast<int>(One.Height * Scale));
-    const Color Ink = One.Layer == 0 ? Color::Mix(One.Ink, World.SkyAt(Base, World.Sky()), 100) : One.Ink;
-    const Color Dark = Color::Mix(Ink, Colors::Black, 82);
-    const Color Light = Color::Mix(Ink, Colors::White, 45);
+    const Color Ink = One.Layer == 0 ? Color::Over(One.Ink, World.SkyAt(Base, World.Sky()), 100) : One.Ink;
+    const Color Dark = Color::Between(Ink, Colors::Black, 82);
+    const Color Light = Color::Between(Ink, Colors::White, 45);
     for (int Rise = 0; Rise < Height; Rise++) {
         Pixel(Canvas, World, One.X, Base - Rise, Ink, One.Layer);
         Pixel(Canvas, World, One.X + 1, Base - Rise, Rise % 4 == 1 ? Dark : Light, One.Layer);
@@ -191,16 +191,16 @@ void DrawRock(Frame &Canvas, const TumbleWorld &World, const TumbleRock &One)
     const int Base = BaseY(World, One.X, One.Layer);
     const int Width = std::max(3, static_cast<int>(One.Width * Scale));
     const int Height = std::max(3, static_cast<int>(One.Height * Scale));
-    const Color BaseInk = One.Layer == 0 ? Color::Mix(One.Ink, World.SkyAt(Base, World.Sky()), 110) : One.Ink;
+    const Color BaseInk = One.Layer == 0 ? Color::Over(One.Ink, World.SkyAt(Base, World.Sky()), 110) : One.Ink;
     for (int Row = 0; Row < Height; Row++) {
         const float Position = Height <= 1 ? 0.0f : static_cast<float>(Row) / static_cast<float>(Height - 1);
         const int Half = std::max(1, static_cast<int>((1.0f - Position * 0.56f) * Width / 2.0f));
         for (int Col = -Half; Col <= Half; Col++) {
             Color Ink = BaseInk;
-            if (Row < Height / 3 && Col < 1) Ink = Color::Mix(Ink, Colors::White, 32);
-            if (Col > Half - 2) Ink = Color::Mix(Ink, Colors::Black, 62);
+            if (Row < Height / 3 && Col < 1) Ink = Color::Between(Ink, Colors::White, 32);
+            if (Col > Half - 2) Ink = Color::Between(Ink, Colors::Black, 62);
             if (((One.Seed + static_cast<std::uint32_t>(Row * 17 + Col * 5)) & 15u) == 0u)
-                Ink = Color::Mix(Ink, Color::Rgb(0x55, 0x45, 0x42), 58);
+                Ink = Color::Between(Ink, Color::Rgb(0x55, 0x45, 0x42), 58);
             Pixel(Canvas, World, One.X + Col, Base - Row, Ink, One.Layer);
         }
     }
@@ -215,9 +215,9 @@ void DrawRuin(Frame &Canvas, const TumbleWorld &World, const TumbleRuin &One)
     const float Scale = One.Layer == 0 ? 0.62f : 1.0f;
     const int Base = BaseY(World, One.X, One.Layer);
     const int Height = std::max(6, static_cast<int>(One.Height * Scale));
-    const Color Wood = One.Layer == 0 ? Color::Mix(One.Ink, World.SkyAt(Base, World.Sky()), 100) : One.Ink;
-    const Color DarkWood = Color::Mix(Wood, Colors::Black, 72);
-    const Color LightWood = Color::Mix(Wood, Colors::White, 35);
+    const Color Wood = One.Layer == 0 ? Color::Over(One.Ink, World.SkyAt(Base, World.Sky()), 100) : One.Ink;
+    const Color DarkWood = Color::Between(Wood, Colors::Black, 72);
+    const Color LightWood = Color::Between(Wood, Colors::White, 35);
 
     switch (One.Kind) {
     case TumbleStructureKind::Mine: {
@@ -268,8 +268,8 @@ void DrawRuin(Frame &Canvas, const TumbleWorld &World, const TumbleRuin &One)
 void DrawDeadTree(Frame &Canvas, const TumbleWorld &World, const TumbleDeadTree &One)
 {
     const int Base = BaseY(World, One.X, One.Layer);
-    const Color Trunk = One.Layer == 0 ? Color::Mix(One.Ink, World.SkyAt(Base, World.Sky()), 100) : One.Ink;
-    const Color Edge = Color::Mix(Trunk, Colors::Black, 70);
+    const Color Trunk = One.Layer == 0 ? Color::Over(One.Ink, World.SkyAt(Base, World.Sky()), 100) : One.Ink;
+    const Color Edge = Color::Between(Trunk, Colors::Black, 70);
     for (int Rise = 0; Rise < One.Height; Rise++) {
         const int Lean = static_cast<int>(std::sin(Rise * 0.18f + One.X) * 0.9f);
         Pixel(Canvas, World, One.X + Lean, Base - Rise, Trunk, One.Layer);
@@ -307,10 +307,10 @@ void DrawFence(Frame &Canvas, const TumbleWorld &World, const TumbleFence &One)
     for (int Offset = 0; Offset <= One.Length; Offset += 7) {
         const int Height = 5 + ((Offset / 7) % 3);
         Line(Canvas, World, One.X + Offset, Base, One.X + Offset, Base - Height, Wood, One.Layer);
-        Pixel(Canvas, World, One.X + Offset, Base - Height, Color::Mix(Wood, Colors::White, 25), One.Layer);
+        Pixel(Canvas, World, One.X + Offset, Base - Height, Color::Between(Wood, Colors::White, 25), One.Layer);
     }
     Line(Canvas, World, One.X, Base - 3, One.X + One.Length, Base - 3, Wood, One.Layer);
-    Line(Canvas, World, One.X, Base - 6, One.X + One.Length, Base - 5, Color::Mix(Wood, Colors::Black, 25), One.Layer);
+    Line(Canvas, World, One.X, Base - 6, One.X + One.Length, Base - 5, Color::Between(Wood, Colors::Black, 25), One.Layer);
 }
 
 void DrawWeed(Frame &Canvas, const TumbleWorld &World, const TumbleWeed &One)
@@ -319,13 +319,13 @@ void DrawWeed(Frame &Canvas, const TumbleWorld &World, const TumbleWeed &One)
     const int Base = BaseY(World, X, One.Layer);
     const int Y = Base - (One.Layer == 0 ? 2 : 4);
     const int Reach = std::max(2, static_cast<int>((3 + std::abs(std::sin(One.Spin)) * 3) * (One.Layer == 0 ? 0.7f : 1.0f)));
-    const Color Ink = One.Layer == 0 ? Color::Mix(One.Ink, World.SkyAt(Base, World.Sky()), 90) : One.Ink;
+    const Color Ink = One.Layer == 0 ? Color::Over(One.Ink, World.SkyAt(Base, World.Sky()), 90) : One.Ink;
     Line(Canvas, World, X - Reach, Y, X + Reach, Y, Ink, One.Layer);
-    Line(Canvas, World, X - 2, Y - Reach, X + 2, Y + Reach, Color::Mix(Ink, Colors::White, 45), One.Layer);
+    Line(Canvas, World, X - 2, Y - Reach, X + 2, Y + Reach, Color::Between(Ink, Colors::White, 45), One.Layer);
     Line(Canvas, World, X - 2, Y + Reach, X + 2, Y - Reach, Ink, One.Layer);
     if (One.Layer == 1) {
-        Line(Canvas, World, X - Reach, Y + 1, X + Reach, Y + 1, Color::Mix(Ink, Colors::Black, 40), One.Layer);
-        Pixel(Canvas, World, X, Y - Reach - 1, Color::Mix(Ink, Colors::White, 55), One.Layer);
+        Line(Canvas, World, X - Reach, Y + 1, X + Reach, Y + 1, Color::Between(Ink, Colors::Black, 40), One.Layer);
+        Pixel(Canvas, World, X, Y - Reach - 1, Color::Between(Ink, Colors::White, 55), One.Layer);
     }
 }
 
@@ -352,7 +352,7 @@ void DrawBird(Frame &Canvas, const TumbleWorld &World, const TumbleBird &One)
             const char Glyph = Sprite.Rows[Row][Source];
             if (Glyph == '.') continue;
             Color Ink = Body;
-            if (Glyph == 'w') Ink = Color::Mix(Body, Colors::White, 85);
+            if (Glyph == 'w') Ink = Color::Between(Body, Colors::White, 85);
             if (Glyph == 'e') Ink = Colors::White;
             if (Glyph == '>') Ink = Color::Rgb(0xD8, 0xA2, 0x4D);
             Pixel(Canvas, World, X0 + Col, Y0 + Row, Ink, One.Layer);
@@ -429,9 +429,9 @@ void PaintBackground(Frame &Canvas, const TumbleWorld &World)
                 const int Depth = WorldY - World.Ground(WorldX);
                 Ink = World.Shade(World.Sand(), Sky.Sunlight + 52 - Depth * 4);
                 const int Ripple = static_cast<int>(std::sin(WorldX * 0.21f + WorldY * 0.08f) * 14.0f);
-                if (Ripple > 0) Ink = Color::Mix(Ink, Color::Rgb(0xF2, 0xC5, 0x78), static_cast<std::uint8_t>(Ripple));
+                if (Ripple > 0) Ink = Color::Between(Ink, Color::Rgb(0xF2, 0xC5, 0x78), static_cast<std::uint8_t>(Ripple));
                 if (World.Season == TumbleSeason::Winter && Depth < 2)
-                    Ink = Color::Mix(Ink, Color::Rgb(0xE2, 0xE7, 0xE6), 170);
+                    Ink = Color::Over(Ink, Color::Rgb(0xE2, 0xE7, 0xE6), 170);
             } else if (WorldY >= World.DistantGround(WorldX)) {
                 const int Band = WorldY - World.DistantGround(WorldX);
                 const Color Mesa = World.Season == TumbleSeason::Winter ? Color::Rgb(0x6E, 0x6D, 0x76)
@@ -441,9 +441,9 @@ void PaintBackground(Frame &Canvas, const TumbleWorld &World)
                 Ink = World.SkyAt(WorldY, Sky);
             }
             if (World.Weather == TumbleWeather::Dust || World.Weather == TumbleWeather::Storm)
-                Ink = Color::Mix(Ink, Color::Rgb(0xB7, 0x8B, 0x5D), 48);
+                Ink = Color::Over(Ink, Color::Rgb(0xB7, 0x8B, 0x5D), 48);
             if (World.Weather == TumbleWeather::Rain || World.Weather == TumbleWeather::Storm)
-                Ink = Color::Mix(Ink, Color::Rgb(0x65, 0x70, 0x79), World.Weather == TumbleWeather::Storm ? 112 : 72);
+                Ink = Color::Over(Ink, Color::Rgb(0x65, 0x70, 0x79), World.Weather == TumbleWeather::Storm ? 112 : 72);
             Pixels[static_cast<std::size_t>(Y) * Columns + X] = Ink;
         }
     }

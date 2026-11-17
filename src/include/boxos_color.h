@@ -36,6 +36,10 @@
  * COLOR_DEFAULT (BoxColorOnWire), and only the display, at the glass, turns
  * COLOR_DEFAULT into the colour it stands for.
  *
+ * And colours are mixed here, each of the two ways once (BoxColorOver,
+ * BoxColorBetween) — the kernel, the loader, the display, Painter and the
+ * host's stands mix alike, so a colour is the same pixels whoever draws it.
+ *
  * This is the SINGLE definition of the IBM VGA palette triples and of the
  * dominant-hue quantiser. The quantiser is exact on palette entries, so an
  * attribute converted to RGB and drawn on the VGA text backend produces
@@ -64,6 +68,94 @@
 #define COLOR_TRANSLUCENT_BASE   ((uint32_t)0x80u)
 #define COLOR_OPACITY_STEPS      ((uint32_t)63u)
 
+/* ───── Mixing: the two ways, each once ─────
+ *
+ * A colour laid over another — a glyph's edge on its paper, a shape's soft
+ * edge, a colour at an opacity — is mixed as LIGHT. An sRGB number is not the
+ * light it shows: a pixel half covered by ink shows half the ink's light and
+ * half the paper's, and half of each number shows darker than that — light
+ * text on a dark page thin, dark text on a light one heavy. So each number is
+ * turned into its light by sRGB's own curve (BoxColorLight), the lights mixed
+ * by the share, and the light written back as the number nearest it
+ * (BoxColorCode): BoxColorOver.
+ *
+ * A way from one colour to another — a gradient's run, a palette's steps — is
+ * walked straight in the numbers, as drawing tools walk it, so a picture shows
+ * the colours it was drawn in: BoxColorBetween.
+ *
+ * Whole numbers only, read from the curve's tables (boxos_color_light.h): the
+ * kernel in a panic and the loader with no SSE mix as the display does. */
+
+#include "boxos_color_light.h"
+
+/* The light an sRGB number shows, 0..BOX_COLOR_LIGHT_MOST. */
+static inline uint32_t BoxColorLight(uint32_t code)
+{
+    return BoxColorLightOf[code & 0xFFu];
+}
+
+/* The sRGB number nearest a light, 0..BOX_COLOR_LIGHT_MOST. */
+static inline uint32_t BoxColorCode(uint32_t light)
+{
+    return BoxColorCodeOf[(light > BOX_COLOR_LIGHT_MOST ? BOX_COLOR_LIGHT_MOST : light) >> 4];
+}
+
+/* Color laid over Below at Share of 255, both their #RRGGBB, mixed as light:
+ * 0 is Below, 255 is Color, each channel's light the way between rounded to
+ * the nearest. */
+static inline uint32_t BoxColorOver(uint32_t below, uint32_t color, uint32_t share)
+{
+    if (share == 0u) return below & 0x00FFFFFFu;
+    if (share >= 255u || ((below ^ color) & 0x00FFFFFFu) == 0u) return color & 0x00FFFFFFu;
+    uint32_t laid = 0;
+    for (uint32_t shift = 0; shift <= 16u; shift += 8u) {
+        const int32_t under = (int32_t)BoxColorLight(below >> shift);
+        const int32_t over  = (int32_t)BoxColorLight(color >> shift);
+        const int32_t part  = (over - under) * (int32_t)share;
+        const int32_t light = under + (part >= 0 ? (part + 127) / 255 : -((-part + 127) / 255));
+        laid |= BoxColorCode((uint32_t)light) << shift;
+    }
+    return laid;
+}
+
+/* Color laid at Share of 255 over Below, itself *Opacity of 255 opaque —
+ * Porter-Duff "over", mixed as light: the colour seen, and in *Opacity how
+ * opaque the two are together. Over a whole Below it is BoxColorOver; over
+ * none it is Color at Share. */
+static inline uint32_t BoxColorOverPart(uint32_t below, uint32_t color, uint32_t share, uint32_t *opacity)
+{
+    if (*opacity >= 255u) return BoxColorOver(below, color, share);
+    if (share == 0u) return below & 0x00FFFFFFu;
+    const uint32_t kept  = *opacity * (255u - share) / 255u;
+    const uint32_t total = share + kept;
+    uint32_t laid = 0;
+    for (uint32_t shift = 0; shift <= 16u; shift += 8u) {
+        const uint32_t light = (BoxColorLight(color >> shift) * share + BoxColorLight(below >> shift) * kept + total / 2u) / total;
+        laid |= BoxColorCode(light) << shift;
+    }
+    *opacity = total;
+    return laid;
+}
+
+/* A whole way, in the weights BoxColorBetween takes. */
+#define BOX_COLOR_WAY 65536u
+
+/* The way from A to B at Weight of BOX_COLOR_WAY, each of the four bytes —
+ * 0xAARRGGBB, or #RRGGBB with a byte of 0 — walked straight, the step rounded
+ * to the nearest, halves away from A. */
+static inline uint32_t BoxColorBetween(uint32_t a, uint32_t b, uint32_t weight)
+{
+    const int32_t way = (int32_t)BOX_COLOR_WAY;
+    uint32_t mixed = 0;
+    for (uint32_t shift = 0; shift <= 24u; shift += 8u) {
+        const int32_t from = (int32_t)((a >> shift) & 0xFFu), to = (int32_t)((b >> shift) & 0xFFu);
+        const int32_t step = (to - from) * (int32_t)weight;
+        const int32_t went = step >= 0 ? (step + way / 2) / way : -((-step + way / 2) / way);
+        mixed |= (uint32_t)(from + went) << shift;
+    }
+    return mixed;
+}
+
 /* ───── A colour at an opacity ───── */
 
 static inline int BoxColorIsTranslucent(uint32_t c)
@@ -90,17 +182,11 @@ static inline uint32_t BoxColorTranslucent(uint32_t rgb, uint32_t steps)
 }
 
 /* A translucent colour laid over a plain triple, as the plain triple that is
- * seen: each channel from the beneath one toward the colour's by its opacity,
- * rounded to nearest. */
+ * seen: the colour laid over it by its opacity (BoxColorOver). */
 static inline uint32_t BoxColorBlendOver(uint32_t translucent, uint32_t beneath)
 {
-    uint32_t steps = BoxColorOpacity(translucent);
-    uint32_t out = 0;
-    for (uint32_t shift = 0; shift < 24u; shift += 8u) {
-        uint32_t over = (translucent >> shift) & 0xFFu, under = (beneath >> shift) & 0xFFu;
-        out |= ((under * (COLOR_OPACITY_STEPS - steps) + over * steps + COLOR_OPACITY_STEPS / 2u) / COLOR_OPACITY_STEPS) << shift;
-    }
-    return out;
+    const uint32_t share = (BoxColorOpacity(translucent) * 255u + COLOR_OPACITY_STEPS / 2u) / COLOR_OPACITY_STEPS;
+    return BoxColorOver(beneath, translucent, share);
 }
 
 /* ───── IBM VGA 16-colour palette (#RRGGBB per index) ───── */

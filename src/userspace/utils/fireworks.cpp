@@ -242,7 +242,7 @@ void Show::Burst(const Spark &Shell)
     float Speed = static_cast<float>(Height) * 0.5f;
     int   Many  = std::clamp(Height, 50, 140);
     Color Ink   = AnyInk();
-    Flash(Color::Mix(Ink, Colors::White, 170), 14);
+    Flash(Color::Between(Ink, Colors::White, 170), 14);
     for (int Glow = 0; Glow < 12; Glow++) Shine(Shell.X + Between(-1, 1), Shell.Y + Between(-1, 1), Colors::White, 255);
 
     switch (Shell.Bursts) {
@@ -357,7 +357,7 @@ void Show::Draw(float Seconds, float Shown)
     for (const Spark &One : Sparks) {
         float Left = One.Span > 0 ? One.Life / One.Span : 1.0f;
         if (One.Strobe && (static_cast<int>(Time * 20.0f + One.X) % 3) != 0) continue;
-        Color Ink = Left < 0.35f ? Color::Mix(One.Ink, Color::Rgb(0xC0, 0x20, 0x10),
+        Color Ink = Left < 0.35f ? Color::Between(One.Ink, Color::Rgb(0xC0, 0x20, 0x10),
                                               static_cast<std::uint8_t>((0.35f - Left) * 600)) : One.Ink;
         Shine(One.X, One.Y, Ink, static_cast<int>(120 + 136 * std::min(1.0f, Left * 1.4f)));
     }
@@ -372,7 +372,7 @@ void Show::Draw(float Seconds, float Shown)
     for (std::size_t Star = 0; Star < Twinkles.size(); Star++) {
         std::size_t At = static_cast<std::size_t>(Twinkles[Star]);
         if ((Star * 7 + static_cast<std::size_t>(Time * 2.0f)) % 3 != 0 && Sky[At] != MoonInk)
-            Pixels[At] = Color::Mix(Pixels[At], StarInk, 200);
+            Pixels[At] = Color::Over(Pixels[At], StarInk, 200);
     }
     painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
     FrameBuffer.PutPixels(Pixels);

@@ -65,7 +65,7 @@ void PaintBig(Screen &Display, std::uint32_t Row, std::uint32_t Col, std::string
     for (std::size_t At = 0; At < Number.size(); At++) {
         const auto &Glyph = GlyphOf(Number[At]);
         for (std::uint32_t Y = 0; Y < BigRows * Scale; Y++) {
-            PainterColor Shade = PainterColor::Mix(Ink, painter::core::Colors::White, static_cast<std::uint8_t>(60 - Y / Scale * 15));
+            PainterColor Shade = PainterColor::Between(Ink, painter::core::Colors::White, static_cast<std::uint8_t>(60 - Y / Scale * 15));
             for (std::uint32_t X = 0; X < 3; X++)
                 if (Glyph[Y / Scale][X] == '#')
                     Display.Fill(Row + Y, Col + static_cast<std::uint32_t>(At) * BigPitch(Scale) + X * PixelWide(Scale),
@@ -140,7 +140,7 @@ void PaintBar(Screen &Display, std::uint32_t Bottom, std::uint32_t Left, std::ui
 {
     unsigned Halves = (Speed * Rows * 2 + Top / 2) / Top;
     if (Speed != 0 && Halves == 0) Halves = 1;
-    PainterColor Ink = PainterColor::Mix(ChartLow, AmberInk, static_cast<std::uint8_t>(Speed * 255 / Top));
+    PainterColor Ink = PainterColor::Between(ChartLow, AmberInk, static_cast<std::uint8_t>(Speed * 255 / Top));
     for (std::uint32_t Up = 0; Up < Rows; Up++) {
         char32_t Ch = Halves >= 2 * (Up + 1) ? FullBlock : Halves == 2 * Up + 1 ? LowerHalf : 0;
         if (Ch != 0) Display.Fill(Bottom - Up, Left, Wide, Ch, Ink, Paper);

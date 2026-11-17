@@ -7,87 +7,87 @@
 
 namespace painter::core {
 
+// A colour: #RRGGBB and how opaque it is, of 255 — or the screen's own
+// colour, which the display draws. Laid over another, a colour is mixed as
+// light; walked toward another, straight in its numbers — the two ways every
+// colour of the system is mixed (boxos_color.h), so Painter's colours are the
+// pixels the display and the loader would make of them.
 class Color {
 public:
     constexpr Color() noexcept = default;
 
     static constexpr Color Rgb(std::uint8_t Red, std::uint8_t Green, std::uint8_t Blue) noexcept
     {
-        return Color((static_cast<std::uint32_t>(Red) << 16) |
-                     (static_cast<std::uint32_t>(Green) << 8) |
-                     static_cast<std::uint32_t>(Blue));
+        return Rgba(Red, Green, Blue, 255);
     }
-
-    static constexpr Color FromRaw(std::uint32_t Raw) noexcept { return Color(Raw & 0x00FFFFFFu); }
+    // #RRGGBBAA: a colour at Alpha of 255 over whatever lies beneath it.
+    static constexpr Color Rgba(std::uint8_t Red, std::uint8_t Green, std::uint8_t Blue, std::uint8_t Alpha) noexcept
+    {
+        return Color((static_cast<std::uint32_t>(Red) << 16) | (static_cast<std::uint32_t>(Green) << 8) |
+                         static_cast<std::uint32_t>(Blue),
+                     Alpha, false);
+    }
+    // #RRGGBB, whole; a sentinel's byte is not part of it.
+    static constexpr Color FromRaw(std::uint32_t Raw) noexcept { return Color(Raw & 0x00FFFFFFu, 255, false); }
 
     // The screen's own colour: as a background the page colour the display
     // draws, as ink its text colour. It follows what the person sets for the
     // screen, and a Color of any other kind never equals it.
-    static constexpr Color Screen() noexcept { return Color(COLOR_DEFAULT, WireTag{}); }
-    constexpr bool         IsScreen() const noexcept { return Value == COLOR_DEFAULT; }
+    static constexpr Color Screen() noexcept { return Color(0, 255, true); }
+    constexpr bool         IsScreen() const noexcept { return ScreenOwn; }
 
-    // See-through: whatever lies beneath the cell, in this place. It is for a
-    // surface that leaves part of a cell unpainted — the display draws it as
-    // the background of the cell below (COLOR_THROUGH), so the unpainted half
+    // See-through: nothing of its own, whatever lies beneath shows. It is for
+    // a picture that leaves part of a cell unpainted, so the unpainted half
     // of an edge cell is neither black nor any colour of the program's.
-    static constexpr Color Through() noexcept { return Color(COLOR_THROUGH, WireTag{}); }
-    constexpr bool         IsThrough() const noexcept { return Value == COLOR_THROUGH; }
+    static constexpr Color Through() noexcept { return Color(0, 0, false); }
+    constexpr bool         IsThrough() const noexcept { return !ScreenOwn && Alpha == 0; }
 
-    // This colour at Opacity of 255 over what is beneath, as the display draws
-    // it (COLOR_OPACITY_STEPS of them on the wire, boxos_color.h): none is
-    // Through, 255 the plain colour. The screen's own colour and see-through
+    // This colour at Opacity of 255. The screen's own colour and see-through
     // have no triple to take an opacity, and are returned as they are.
-    Color WithOpacity(std::uint8_t Opacity) const noexcept
+    constexpr Color WithOpacity(std::uint8_t Opacity) const noexcept
     {
-        if (IsScreen() || IsThrough()) return *this;
-        return Color(BoxColorTranslucent(Value, (static_cast<std::uint32_t>(Opacity) * COLOR_OPACITY_STEPS + 127u) / 255u), WireTag{});
+        return ScreenOwn || IsThrough() ? *this : Color(Value, Opacity, false);
     }
+    // How opaque the colour is, of 255; the screen's own is whole.
+    constexpr std::uint8_t Opacity() const noexcept { return Alpha; }
+    constexpr bool         IsTranslucent() const noexcept { return !ScreenOwn && Alpha != 0 && Alpha != 255; }
 
-    // How opaque the colour is, of 255: every colour but a translucent one and
-    // Through is whole.
-    std::uint8_t Opacity() const noexcept
+    // The colour as a cell carries it to the display (boxos_color.h): the
+    // screen's own as COLOR_DEFAULT, see-through as COLOR_THROUGH, a whole
+    // colour as its triple, and one between in the cell's steps of opacity.
+    std::uint32_t Raw() const noexcept
     {
-        return static_cast<std::uint8_t>((BoxColorOpacity(Value) * 255u + COLOR_OPACITY_STEPS / 2u) / COLOR_OPACITY_STEPS);
+        if (ScreenOwn) return COLOR_DEFAULT;
+        return BoxColorTranslucent(Value, (static_cast<std::uint32_t>(Alpha) * COLOR_OPACITY_STEPS + 127u) / 255u);
     }
-    bool IsTranslucent() const noexcept { return BoxColorIsTranslucent(Value) != 0; }
+    constexpr std::uint8_t Red() const noexcept { return static_cast<std::uint8_t>((Value >> 16) & 0xFFu); }
+    constexpr std::uint8_t Green() const noexcept { return static_cast<std::uint8_t>((Value >> 8) & 0xFFu); }
+    constexpr std::uint8_t Blue() const noexcept { return static_cast<std::uint8_t>(Value & 0xFFu); }
 
-    constexpr std::uint32_t Raw() const noexcept { return Value; }
-    constexpr std::uint8_t  Red() const noexcept { return static_cast<std::uint8_t>((Value >> 16) & 0xFFu); }
-    constexpr std::uint8_t  Green() const noexcept { return static_cast<std::uint8_t>((Value >> 8) & 0xFFu); }
-    constexpr std::uint8_t  Blue() const noexcept { return static_cast<std::uint8_t>(Value & 0xFFu); }
-
-    // B laid over A at Weight of 255 of its own opacity: Porter-Duff "over".
-    // Two whole colours are boxlib's one blend, A toward B. Over a part of the
-    // picture that is not whole B's share is its opacity times Weight, the
-    // result's opacity the two composed, and its colour the two weighted by
-    // what each contributes — so B over Through is B at that share, and over a
-    // translucent colour the pair as the display would show them stacked. The
-    // screen's own colour has no triple to blend: the result is whichever end
-    // is nearer.
-    static Color Mix(Color A, Color B, std::uint8_t Weight) noexcept
-    {
-        if (A.IsScreen() || B.IsScreen()) return Weight < 128 ? A : B;
-        const std::uint32_t Below = A.Opacity();
-        if (Below == 255u && B.Opacity() == 255u) return FromRaw(color_mix(A.Raw(), B.Raw(), Weight));
-        const std::uint32_t Laid = (static_cast<std::uint32_t>(B.Opacity()) * Weight + 127u) / 255u;
-        if (Laid == 0u) return A;
-        const std::uint32_t Kept = Below * (255u - Laid) / 255u;
-        const std::uint32_t Total = Laid + Kept;
-        const auto Channel = [&](std::uint8_t Over, std::uint8_t Under) {
-            return static_cast<std::uint8_t>((Over * Laid + Under * Kept + Total / 2u) / Total);
-        };
-        return Rgb(Channel(B.Red(), A.Red()), Channel(B.Green(), A.Green()), Channel(B.Blue(), A.Blue())).WithOpacity(static_cast<std::uint8_t>(Total));
-    }
+    // Above laid over Below at Weight of 255 of its own opacity, mixed as
+    // light — Porter-Duff "over" (BoxColorOverPart): what a pixel shows where
+    // a shape covers that share of it, or a colour at that opacity lies over
+    // another. Over a part of the picture that is not whole, the result's
+    // opacity is the two composed, so Above over Through is Above at that
+    // share. The screen's own colour has no triple to mix: the result is
+    // whichever end is nearer.
+    static Color Over(Color Below, Color Above, std::uint8_t Weight) noexcept;
+    // Weight of 255 of the way from A to B, each number and the opacity walked
+    // straight (BoxColorBetween): a gradient's step, a palette's shade, one
+    // colour turning into another. The screen's own colour has no triple to
+    // walk: the result is whichever end is nearer.
+    static Color Between(Color A, Color B, std::uint8_t Weight) noexcept;
 
     friend constexpr bool operator==(Color, Color) noexcept = default;
 
 private:
-    struct WireTag {};
-
-    explicit constexpr Color(std::uint32_t Raw) noexcept : Value(Raw & 0x00FFFFFFu) {}
-    constexpr Color(std::uint32_t Wire, WireTag) noexcept : Value(Wire) {}
-
-    std::uint32_t Value = 0;
+    constexpr Color(std::uint32_t Rgb, std::uint8_t Opacity, bool Screen) noexcept
+        : Value(Opacity == 0 && !Screen ? 0 : Rgb), Alpha(Opacity), ScreenOwn(Screen)
+    {
+    }
+    std::uint32_t Value = 0;       // #RRGGBB; 0 when see-through or the screen's own
+    std::uint8_t  Alpha = 255;
+    bool          ScreenOwn = false;
 };
 
 // The console's named colours (box/color.h), named for Painter.

@@ -180,7 +180,7 @@ class DonutPicture {
 
     void Colour(PainterColor Light) {
         Low = Light;
-        High = PainterColor::Mix(Light, Black, 136);
+        High = PainterColor::Between(Light, Black, 136);
     }
 
     bool Draw(float A, float B) {
@@ -306,15 +306,15 @@ class DonutPicture {
 
     PainterColor Ink(Shade Sample) const {
         const float Wrapped = std::clamp((Sample.V + 1.0f) * 0.5f, 0.0f, 1.0f);
-        const PainterColor Base = PainterColor::Mix(
+        const PainterColor Base = PainterColor::Between(
             Low, High, static_cast<std::uint8_t>(Wrapped * 255.0f));
-        return PainterColor::Mix(
+        return PainterColor::Between(
             Black, Base,
             static_cast<std::uint8_t>(std::clamp(Sample.Light, 0.0f, 1.0f) * 255.0f));
     }
 
     PainterColor Low = painter::core::Colors::White;
-    PainterColor High = PainterColor::Mix(painter::core::Colors::White, Black, 136);
+    PainterColor High = PainterColor::Between(painter::core::Colors::White, Black, 136);
     std::vector<float> RingCos, RingSin, TubeCos, TubeSin;
     int Width;
     int Height;

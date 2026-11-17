@@ -108,8 +108,8 @@ Look ReadLook()
 Color LoadColor(const Look &Shown, double Load)
 {
     const double Clamped = std::clamp(Load, 0.0, 1.0);
-    if (Clamped < 0.5) return Color::Mix(Shown.Cool, Shown.Warm, static_cast<std::uint8_t>(Clamped * 2.0 * 255.0));
-    return Color::Mix(Shown.Warm, Shown.Hot, static_cast<std::uint8_t>((Clamped - 0.5) * 2.0 * 255.0));
+    if (Clamped < 0.5) return Color::Between(Shown.Cool, Shown.Warm, static_cast<std::uint8_t>(Clamped * 2.0 * 255.0));
+    return Color::Between(Shown.Warm, Shown.Hot, static_cast<std::uint8_t>((Clamped - 0.5) * 2.0 * 255.0));
 }
 
 }  // namespace taskboard

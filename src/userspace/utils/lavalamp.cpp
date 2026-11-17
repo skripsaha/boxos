@@ -320,13 +320,13 @@ static painter::tui::Cell cell_paint(double f)
     }
     if (f >= EDGE_LEVEL) {
         uint8_t t = (uint8_t)(((f - EDGE_LEVEL) / (CORE_LEVEL - EDGE_LEVEL)) * 255.0);
-        out.Background = painter_color(color_mix(g_lamp.edge, g_lamp.liquid, t));
+        out.Background = painter::core::Color::Between(painter_color(g_lamp.edge), painter_color(g_lamp.liquid), t);
         out.Foreground = painter_color(g_lamp.back);
         return out;
     }
     if (f >= RIM_LEVEL) {
         uint8_t t = (uint8_t)(((f - RIM_LEVEL) / (EDGE_LEVEL - RIM_LEVEL)) * 255.0);
-        out.Background = painter_color(color_mix(g_lamp.back, g_lamp.edge, t));
+        out.Background = painter::core::Color::Between(painter_color(g_lamp.back), painter_color(g_lamp.edge), t);
         out.Foreground = painter_color(g_lamp.liquid);
         return out;
     }

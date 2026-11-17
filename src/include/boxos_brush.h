@@ -24,9 +24,9 @@
  * the whole of it. A
  * paint gives each pixel its colour: one colour, a linear or a radial
  * gradient, a picture. Coverage, alpha and opacity make one share, and the
- * colour is laid over what is beneath by it, mixed as light — the square of a
- * value, as the imprint is pressed (boxos_imprint_press.h) — so text drawn
- * here is the very pixels the press makes.
+ * colour is laid over what is beneath by it, mixed as light (BoxColorOver,
+ * boxos_color.h — the one way the kernel, the loader, the display and Painter
+ * mix) — so text drawn here is the very pixels the press makes.
  *
  * Places are in 1/BOX_BRUSH_ONE of a pixel, a matrix's numbers in
  * 1/BOX_BRUSH_UNIT, angles in 1/BOX_BRUSH_TURN of a turn. No place of a
@@ -35,12 +35,13 @@
  * stretches by more than BOX_BRUSH_STRETCH_MOST: an outline or a paint that
  * would is not drawn, and says so — never wrapped round into a wrong picture.
  *
- * The includer supplies uint8_t, uint32_t, int32_t, uint64_t, int64_t and
- * size_t.
+ * The includer supplies uint8_t, uint16_t, uint32_t, int32_t, uint64_t,
+ * int64_t and size_t.
  */
 #ifndef BOXOS_BRUSH_H
 #define BOXOS_BRUSH_H
 
+#include "boxos_color.h"
 #include "boxos_imprint.h"
 #include "boxos_pixel.h"
 #include "boxos_utf8.h"
@@ -355,18 +356,6 @@ static inline uint32_t BoxBrushShare(uint32_t Coverage, uint32_t Alpha, uint32_t
     return (Coverage * Alpha * Opacity + 32512u) / 65025u;
 }
 
-/* Color (its RGB) laid over Below at Share of 255, mixed as light. */
-static inline uint32_t BoxBrushLay(uint32_t Below, uint32_t Color, uint32_t Share)
-{
-    if (Share >= BOX_BRUSH_FULL || (Below & 0x00FFFFFFu) == (Color & 0x00FFFFFFu)) return Color & 0x00FFFFFFu;
-    uint32_t Laid = 0;
-    for (uint32_t Shift = 0; Shift <= 16u; Shift += 8u) {
-        const uint32_t B = (Below >> Shift) & 0xFFu, C = (Color >> Shift) & 0xFFu;
-        Laid |= BoxBrushRoot(((BOX_BRUSH_FULL - Share) * B * B + Share * C * C) / BOX_BRUSH_FULL) << Shift;
-    }
-    return Laid;
-}
-
 /* Rect, within the clip, made one colour — 0x00RRGGBB, whole. */
 static inline void BoxBrushClear(const BoxBrushCanvas *K, BoxBrushRect Rect, uint32_t Color)
 {
@@ -384,7 +373,7 @@ static inline void BoxBrushPixel(const BoxBrushCanvas *K, int32_t X, int32_t Y, 
     if (X < At.X || Y < At.Y || X >= At.X + At.Width || Y >= At.Y + At.Height) return;
     const uint32_t Share = BoxBrushShare(BOX_BRUSH_FULL, Color >> 24, Opacity);
     uint32_t      *Pixel = K->Pixels + (size_t)Y * K->Stride + X;
-    if (Share) *Pixel = BoxBrushLay(*Pixel, Color, Share);
+    if (Share) *Pixel = BoxColorOver(*Pixel, Color, Share);
 }
 
 /* Rect of the canvas onto the glass whose first byte is Glass — as many
@@ -750,8 +739,9 @@ typedef struct BoxBrushStop {
 
 /*
  * What colour a pixel is given. SOLID: Color, 0xAARRGGBB. LINEAR and RADIAL:
- * StopCount stops, At rising, at least one, the colours between mixed
- * straight, the first before the first stop and the last past the last;
+ * StopCount stops, At rising, at least one, the colours between walked
+ * straight (BoxColorBetween), the first before the first stop and the last
+ * past the last;
  * Space lays the gradient's own space (BOX_BRUSH_GRADIENT) on the canvas.
  * PICTURE: PictureWidth x PictureHeight pixels, 0xAARRGGBB, PictureStride
  * pixels from row to row, the picture's pixel I, J covering places I·ONE to
@@ -802,17 +792,6 @@ static inline int BoxBrushInkOf(const BoxBrushPaint *P, BoxBrushInk *Ink)
            BoxBrushSize(Ink->ID) <= Most;
 }
 
-/* A and B, both 0xAARRGGBB, mixed straight: Weight of UNIT of the way to B. */
-static inline uint32_t BoxBrushBetween(uint32_t A, uint32_t B, uint32_t Weight)
-{
-    uint32_t Mixed = 0;
-    for (uint32_t Shift = 0; Shift <= 24u; Shift += 8u) {
-        const int32_t From = (int32_t)((A >> Shift) & 0xFFu), To = (int32_t)((B >> Shift) & 0xFFu);
-        Mixed |= (uint32_t)(From + BoxBrushRound((int64_t)(To - From) * Weight)) << Shift;
-    }
-    return Mixed;
-}
-
 /* The gradient's colour At (0 to UNIT) of its way. */
 static inline uint32_t BoxBrushAlong(const BoxBrushPaint *P, uint32_t At)
 {
@@ -822,7 +801,7 @@ static inline uint32_t BoxBrushAlong(const BoxBrushPaint *P, uint32_t At)
         if (At > S[K].At) continue;
         const uint32_t Span = S[K].At - S[K - 1u].At;
         if (Span == 0) return S[K].Color;
-        return BoxBrushBetween(S[K - 1u].Color, S[K].Color, (uint32_t)(((uint64_t)(At - S[K - 1u].At) << 16) / Span));
+        return BoxColorBetween(S[K - 1u].Color, S[K].Color, (uint32_t)(((uint64_t)(At - S[K - 1u].At) * BOX_COLOR_WAY) / Span));
     }
     return S[P->StopCount - 1u].Color;
 }
@@ -995,7 +974,7 @@ static inline int BoxBrushFill(const BoxBrushCanvas *K, BoxBrushOutline *O, cons
             }
             const uint32_t Color = BoxBrushInkAt(&Ink, X, Y);
             const uint32_t Share = BoxBrushShare(Coverage, Color >> 24, Opacity);
-            if (Share) Line[X] = BoxBrushLay(Line[X], Color, Share);
+            if (Share) Line[X] = BoxColorOver(Line[X], Color, Share);
         }
     }
     return 1;
@@ -1032,7 +1011,7 @@ static inline int32_t BoxBrushText(const BoxBrushCanvas *K, const BoxImprint *Im
                 const uint32_t Inked = BoxImprintShade(Imprint, Size, Glyph, GX, GY);
                 const uint32_t Share =
                     Inked ? BoxBrushShare(Inked * BOX_BRUSH_FULL / BOXOS_IMPRINT_INKED, Color >> 24, Opacity) : 0u;
-                if (Share) Line[PX] = BoxBrushLay(Line[PX], Color, Share);
+                if (Share) Line[PX] = BoxColorOver(Line[PX], Color, Share);
             }
         }
         At += Cell->Width;

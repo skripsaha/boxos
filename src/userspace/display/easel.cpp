@@ -1,7 +1,6 @@
 #include "easel.h"
 
 #include <algorithm>
-#include <cmath>
 #include <cstring>
 #include <utility>
 
@@ -36,62 +35,6 @@ bool Drawable(const ScreenDescription &D) noexcept
     if (D.kind == SCREEN_KIND_PIXELS) return D.stride >= D.width * 4u;
     return false;
 }
-
-// Light, not numbers. An sRGB number is not the light it shows: a pixel half
-// covered by ink shows half the ink's light and half the paper's, and half of
-// each number would show darker than that — light text on a dark page thin,
-// dark text on a light one heavy. So the two colours are mixed as light, 0 to
-// 65535 here, and the light written back as the number nearest it, read in
-// 4096 steps.
-struct LightTables {
-    std::uint16_t Light[256];
-    std::uint8_t  Number[4096];
-};
-
-LightTables MakeLightTables() noexcept
-{
-    LightTables Made{};
-    for (int Code = 0; Code < 256; Code++) {
-        const double Value = Code / 255.0;
-        const double Light = Value <= 0.04045 ? Value / 12.92 : std::pow((Value + 0.055) / 1.055, 2.4);
-        Made.Light[Code]   = static_cast<std::uint16_t>(std::lround(Light * 65535.0));
-    }
-    for (int Step = 0; Step < 4096; Step++) {
-        const double Light = (Step + 0.5) / 4096.0;
-        const double Value = Light <= 0.0031308 ? Light * 12.92 : 1.055 * std::pow(Light, 1 / 2.4) - 0.055;
-        Made.Number[Step]  = static_cast<std::uint8_t>(std::lround(std::clamp(Value, 0.0, 1.0) * 255.0));
-    }
-    return Made;
-}
-
-const LightTables Tables = MakeLightTables();
-
-// A cell's two colours, ink and paper, as light: the colour of a pixel the
-// ink covers Share parts in 255 of.
-class Blend {
-public:
-    Blend(std::uint32_t Ink, std::uint32_t Paper) noexcept
-    {
-        for (int Channel = 0; Channel < 3; Channel++) {
-            InkLight[Channel]   = Tables.Light[(Ink >> (16 - 8 * Channel)) & 0xFFu];
-            PaperLight[Channel] = Tables.Light[(Paper >> (16 - 8 * Channel)) & 0xFFu];
-        }
-    }
-
-    std::uint32_t At(std::uint8_t Share) const noexcept
-    {
-        std::uint32_t Colour = 0;
-        for (int Channel = 0; Channel < 3; Channel++) {
-            const std::int32_t Light = PaperLight[Channel] + (InkLight[Channel] - PaperLight[Channel]) * Share / 255;
-            Colour = Colour << 8 | Tables.Number[Light >> 4];
-        }
-        return Colour;
-    }
-
-private:
-    std::int32_t InkLight[3];
-    std::int32_t PaperLight[3];
-};
 
 }  // namespace
 
@@ -238,7 +181,6 @@ void Easel::DrawCell(std::uint32_t Col, std::uint32_t Row, const GlassCell &Cell
     const std::uint32_t Marking = BoxPixelEncode(MarkInk, Description.format);
     const std::uint32_t CaretInk =
         BoxPixelEncode(Ink != Paper ? Ink : COLOR_LIGHT_GRAY, Description.format);
-    const Blend Mix(Ink, Paper);
 
     const typecase::Size &Fit = Type->Cell();
     const typecase::GlyphImage &Picture = Type->Glyph(Cell.Cell.cp);
@@ -276,7 +218,7 @@ void Easel::DrawCell(std::uint32_t Col, std::uint32_t Row, const GlassCell &Cell
             const std::uint8_t Share = Shares && Along >= 0 && Along < Picture.Width ? Shares[Along] : 0;
             Pixel[X] = Share == 0     ? Background
                        : Share == 255 ? Foreground
-                                      : BoxPixelEncode(Mix.At(Share), Description.format);
+                                      : BoxPixelEncode(BoxColorOver(Paper, Ink, Share), Description.format);
         }
     }
 }

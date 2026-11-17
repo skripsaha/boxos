@@ -78,7 +78,7 @@ AquaCoral GrowCoral(int X, int Floor, AquaDice &Dice)
     Coral.X      = X - Coral.Width / 2;
     Coral.Y      = Floor - Coral.Height + 1;
     Coral.Ink    = Pick(CoralInks, Dice);
-    Coral.Tip    = AquaColor::Mix(Coral.Ink, painter::core::Colors::White, 110);
+    Coral.Tip    = AquaColor::Between(Coral.Ink, painter::core::Colors::White, 110);
     Coral.Pixels.assign(static_cast<std::size_t>(Coral.Width * Coral.Height), 0);
 
     struct Branch { int X, Y; };

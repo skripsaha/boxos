@@ -19,8 +19,8 @@ std::uint8_t Weight(float Cover)
 
 Color Shade(Color Ink, float Factor)
 {
-    if (Factor <= 1.0f) return Color::Mix(painter::core::Colors::Black, Ink, Weight(Factor));
-    return Color::Mix(Ink, painter::core::Colors::White, Weight(Factor - 1.0f));
+    if (Factor <= 1.0f) return Color::Between(painter::core::Colors::Black, Ink, Weight(Factor));
+    return Color::Between(Ink, painter::core::Colors::White, Weight(Factor - 1.0f));
 }
 
 void Canvas::Plot(std::int32_t X, std::int32_t Y, Color Ink, float Cover)

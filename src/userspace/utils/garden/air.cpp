@@ -65,7 +65,7 @@ void Firefly(const Pen &Draw, const Haunt &Over, std::uint32_t Which, double Tim
     const std::int32_t Y = Over.Top.Y + 2 + Round(std::sin(Beat * 0.37 + Which) * 6.0);
     const double Pulse = 0.5 + 0.5 * std::sin(Beat * 2.1);
     if (Pulse < 0.2) return;
-    Draw.Dot(X, Y, Ink::Mix(Glow, White, Part(Pulse * 0.5)));
+    Draw.Dot(X, Y, Ink::Between(Glow, White, Part(Pulse * 0.5)));
     for (const std::int32_t Step : {-1, 1}) {
         Draw.Veil(X + Step, Y, Glow, Part(Pulse * 0.35));
         Draw.Veil(X, Y + Step, Glow, Part(Pulse * 0.35));
