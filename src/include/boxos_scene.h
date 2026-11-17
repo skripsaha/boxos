@@ -11,7 +11,7 @@
  * pieces of the scene's own — and tracks that move them through three acts:
  * enter, played once; wait, played round and round while the machine is not
  * ready for the person; leave, played once, and then the scene is gone. Its
- * places are 1/BOX_BRUSH_ONE of its units, Units of them across the screen's
+ * places are 1/BOX_SHAPE_ONE of its units, Units of them across the screen's
  * shorter side, 0,0 the screen's middle, y down: the same picture on every
  * screen.
  *
@@ -80,9 +80,9 @@
 /* What a track moves, and where a figure's Base keeps it. */
 #define BOX_SCENE_X       0u   /* places of its group */
 #define BOX_SCENE_Y       1u
-#define BOX_SCENE_WIDE    2u   /* 1/BOX_BRUSH_UNIT, 0 to BOX_BRUSH_STRETCH_MOST times it */
+#define BOX_SCENE_WIDE    2u   /* 1/BOX_SHAPE_UNIT, 0 to BOX_SHAPE_STRETCH_MOST times it */
 #define BOX_SCENE_TALL    3u
-#define BOX_SCENE_TURN    4u   /* 1/BOX_BRUSH_TURN of a turn, as many turns as it likes */
+#define BOX_SCENE_TURN    4u   /* 1/BOX_SHAPE_TURN of a turn, as many turns as it likes */
 #define BOX_SCENE_OPACITY 5u   /* 0 to 255 */
 #define BOX_SCENE_WHATS   6u
 
@@ -105,13 +105,13 @@ typedef struct BoxSceneHead {
     uint32_t Paints, Stops, Figures, Pieces, Tracks, Keys;
 } BoxSceneHead;
 
-/* As the brush paints (BoxBrushPaint): SOLID, LINEAR or RADIAL, the stops
+/* As the brush paints (BoxPaint): SOLID, LINEAR or RADIAL, the stops
  * FirstStop on, Space laying the paint's own space on the figure's. */
 typedef struct BoxScenePaint {
     uint32_t       Kind;
     uint32_t       Color;
     uint32_t       FirstStop, StopCount;
-    BoxBrushMatrix Space;
+    BoxMatrix      Space;
 } BoxScenePaint;
 
 typedef struct BoxSceneFigure {
@@ -145,12 +145,12 @@ typedef struct BoxSceneKey {
 } BoxSceneKey;
 
 #ifdef __cplusplus
-static_assert(sizeof(BoxSceneHead) == 56 && sizeof(BoxScenePaint) == 40 && sizeof(BoxBrushStop) == 8 &&
+static_assert(sizeof(BoxSceneHead) == 56 && sizeof(BoxScenePaint) == 40 && sizeof(BoxPaintStop) == 8 &&
                   sizeof(BoxSceneFigure) == 60 && sizeof(BoxScenePiece) == 12 && sizeof(BoxSceneTrack) == 20 &&
                   sizeof(BoxSceneKey) == 12,
               "a scene's records are the sizes tools/scene.py packs");
 #else
-_Static_assert(sizeof(BoxSceneHead) == 56 && sizeof(BoxScenePaint) == 40 && sizeof(BoxBrushStop) == 8 &&
+_Static_assert(sizeof(BoxSceneHead) == 56 && sizeof(BoxScenePaint) == 40 && sizeof(BoxPaintStop) == 8 &&
                    sizeof(BoxSceneFigure) == 60 && sizeof(BoxScenePiece) == 12 && sizeof(BoxSceneTrack) == 20 &&
                    sizeof(BoxSceneKey) == 12,
                "a scene's records are the sizes tools/scene.py packs");
@@ -161,7 +161,7 @@ _Static_assert(sizeof(BoxSceneHead) == 56 && sizeof(BoxScenePaint) == 40 && size
 typedef struct BoxScene {
     const BoxSceneHead   *Head;
     const BoxScenePaint  *Paints;
-    const BoxBrushStop   *Stops;
+    const BoxPaintStop   *Stops;
     const BoxSceneFigure *Figures;
     const BoxScenePiece  *Pieces;
     const BoxSceneTrack  *Tracks;
@@ -171,7 +171,7 @@ typedef struct BoxScene {
 
 static inline int BoxSceneOwn(int64_t Value)
 {
-    return BoxBrushSize(Value) <= BOX_BRUSH_OWN_MOST;
+    return BoxShapeSize(Value) <= BOX_SHAPE_OWN_MOST;
 }
 
 /* Whether Value is one a figure's What may hold. */
@@ -181,24 +181,24 @@ static inline int BoxSceneValue(uint32_t What, int32_t Value)
     case BOX_SCENE_X:
     case BOX_SCENE_Y: return BoxSceneOwn(Value);
     case BOX_SCENE_WIDE:
-    case BOX_SCENE_TALL: return Value >= 0 && Value <= BOX_BRUSH_STRETCH_MOST * BOX_BRUSH_UNIT;
+    case BOX_SCENE_TALL: return Value >= 0 && Value <= BOX_SHAPE_STRETCH_MOST * BOX_SHAPE_UNIT;
     case BOX_SCENE_TURN: return 1;
-    default: return Value >= 0 && Value <= (int32_t)BOX_BRUSH_FULL;
+    default: return Value >= 0 && Value <= (int32_t)BOX_SHAPE_FULL;
     }
 }
 
 static inline const char *BoxScenePaintFault(const BoxScene *S, const BoxScenePaint *P)
 {
-    if (P->Kind == BOX_BRUSH_PAINT_SOLID) return NULL;
-    if (P->Kind != BOX_BRUSH_PAINT_LINEAR && P->Kind != BOX_BRUSH_PAINT_RADIAL) return "a paint of no kind a scene has";
+    if (P->Kind == BOX_PAINT_SOLID) return NULL;
+    if (P->Kind != BOX_PAINT_LINEAR && P->Kind != BOX_PAINT_RADIAL) return "a paint of no kind a scene has";
     if (P->StopCount == 0 || (uint64_t)P->FirstStop + P->StopCount > S->Head->Stops)
         return "a gradient's stops lie past the stops kept";
     for (uint32_t K = 0; K < P->StopCount; K++) {
-        const BoxBrushStop *Stop = &S->Stops[P->FirstStop + K];
-        if (Stop->At > BOX_BRUSH_UNIT || (K && Stop->At < S->Stops[P->FirstStop + K - 1u].At))
+        const BoxPaintStop *Stop = &S->Stops[P->FirstStop + K];
+        if (Stop->At > BOX_SHAPE_UNIT || (K && Stop->At < S->Stops[P->FirstStop + K - 1u].At))
             return "a gradient's stops do not rise from 0 to 1";
     }
-    if (!BoxBrushFits(&P->Space) || (int64_t)P->Space.A * P->Space.D == (int64_t)P->Space.B * P->Space.C)
+    if (!BoxMatrixFits(&P->Space) || (int64_t)P->Space.A * P->Space.D == (int64_t)P->Space.B * P->Space.C)
         return "a gradient's space folds flat or reaches past what the brush draws";
     return NULL;
 }
@@ -283,7 +283,7 @@ static inline const char *BoxSceneRead(const uint8_t *Bytes, uint64_t Size, BoxS
         if (H->Magic[I] != BOX_SCENE_MAGIC[I]) return "it does not begin as a scene does";
     const uint64_t Paints  = sizeof(BoxSceneHead);
     const uint64_t Stops   = Paints + (uint64_t)H->Paints * sizeof(BoxScenePaint);
-    const uint64_t Figures = Stops + (uint64_t)H->Stops * sizeof(BoxBrushStop);
+    const uint64_t Figures = Stops + (uint64_t)H->Stops * sizeof(BoxPaintStop);
     const uint64_t Pieces  = Figures + (uint64_t)H->Figures * sizeof(BoxSceneFigure);
     const uint64_t Tracks  = Pieces + (uint64_t)H->Pieces * sizeof(BoxScenePiece);
     const uint64_t Keys    = Tracks + (uint64_t)H->Tracks * sizeof(BoxSceneTrack);
@@ -296,7 +296,7 @@ static inline const char *BoxSceneRead(const uint8_t *Bytes, uint64_t Size, BoxS
     if (H->Acts[BOX_SCENE_WAIT] == 0) return "its wait act has no length to go round";
     if (H->Figures == 0) return "it has no figure";
     S->Paints  = (const BoxScenePaint *)(Bytes + Paints);
-    S->Stops   = (const BoxBrushStop *)(Bytes + Stops);
+    S->Stops   = (const BoxPaintStop *)(Bytes + Stops);
     S->Figures = (const BoxSceneFigure *)(Bytes + Figures);
     S->Pieces  = (const BoxScenePiece *)(Bytes + Pieces);
     S->Tracks  = (const BoxSceneTrack *)(Bytes + Tracks);

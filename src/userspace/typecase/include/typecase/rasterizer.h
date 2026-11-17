@@ -2,22 +2,24 @@
 #define TYPECASE_RASTERIZER_H
 
 /* An outline to a picture: for each pixel, the share of it the ink covers,
- * found as an area, not by sampling — each edge leaves in the pixels it
- * crosses the area it closes off, and a row summed from the left is the
- * ink's winding at every pixel; a pixel's coverage is that winding, whole
- * where the contours wind round it once or more. Curves are followed by
- * straight lines that keep within a sixteenth of a pixel of them.
+ * worked out from the outline's edges as an area — by the one coverage every
+ * hand of BoxOS draws with (boxos_shape.h), so a glyph is covered as the
+ * brush and Painter cover a shape. Curves are followed by straight lines that
+ * keep within a sixteenth of a pixel of them; a pixel is whole where the
+ * contours wind round it once or more.
  *
  * Exact for contours that do not overlap. Where two do and their edges
  * cross inside one pixel, that pixel takes the sum of their shares, at
  * most whole: a little more ink than their union has, there only.
  *
- * One rasterizer holds the scratch it sums in, grown to the largest picture
- * it has drawn; it is used by one strand at a time. */
+ * One rasterizer holds the room it builds and sweeps a shape in, grown to the
+ * largest glyph it has drawn; it is used by one strand at a time. */
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
+#include "boxos_shape.h"
 #include "typecase/glyph_image.h"
 #include "typecase/outline.h"
 
@@ -40,13 +42,8 @@ public:
     GlyphImage Draw(const Outline &Shape, float Scale, float Rise, Bounds Limit, float Advance);
 
 private:
-    void Edge(Point From, Point To);
-    void Line(Point From, Point To);
-    void Curve(Point From, Point Control, Point To);
-
-    std::vector<float> Area;          /* (Width + 2) x Height: an edge reaches a column past the last */
-    std::int32_t       Width  = 0;
-    std::int32_t       Height = 0;
+    std::vector<BoxShapeEdge> Edges = std::vector<BoxShapeEdge>(512);
+    std::vector<std::int32_t> Cells;   /* a row's cells: the picture's width and two */
 };
 
 }  // namespace typecase

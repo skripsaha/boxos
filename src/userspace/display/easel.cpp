@@ -132,7 +132,7 @@ bool Easel::Step() noexcept
     return Changed;
 }
 
-void Easel::Show(const BoxBrushCanvas &Canvas, const BoxBrushRect *Rects, std::uint32_t Count) noexcept
+void Easel::Show(const BoxBrushCanvas &Canvas, const BoxRect *Rects, std::uint32_t Count) noexcept
 {
     if (Away || !Pixels() || Canvas.Width != Description.width || Canvas.Height != Description.height) return;
     volatile std::uint8_t *Glass =

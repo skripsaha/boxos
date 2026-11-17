@@ -6,7 +6,8 @@ what a packed one holds.
                              into the form Gangway and the display play
   scene.py read FILE         what a packed scene holds, a line each
 
-The numbers of the form are read out of boxos_scene.h and boxos_brush.h, its
+The numbers of the form are read out of boxos_scene.h, boxos_shape.h and
+boxos_paint.h, its
 records held to the sizes boxos_scene.h asserts. Nothing here is a second copy
 of what the loader or the display read.
 
@@ -51,7 +52,7 @@ FIGURE = struct.Struct("<3I4i2i6i")
 PIECE = struct.Struct("<I2i")
 TRACK = struct.Struct("<5I")
 KEY = struct.Struct("<IiI")
-RECORDS = {"BoxSceneHead": HEAD, "BoxScenePaint": PAINT, "BoxBrushStop": STOP, "BoxSceneFigure": FIGURE,
+RECORDS = {"BoxSceneHead": HEAD, "BoxScenePaint": PAINT, "BoxPaintStop": STOP, "BoxSceneFigure": FIGURE,
            "BoxScenePiece": PIECE, "BoxSceneTrack": TRACK, "BoxSceneKey": KEY}
 
 ACTS = ("enter", "wait", "leave")
@@ -66,10 +67,10 @@ class Refused(Exception):
 
 
 def numbers():
-    """Every #define of boxos_brush.h and boxos_scene.h, worked out, and the
-    sizes boxos_scene.h asserts of its records."""
+    """Every #define of boxos_shape.h, boxos_paint.h and boxos_scene.h, worked
+    out, and the sizes boxos_scene.h asserts of its records."""
     names = {}
-    for header in ("boxos_brush.h", "boxos_scene.h"):
+    for header in ("boxos_shape.h", "boxos_paint.h", "boxos_scene.h"):
         text = open(os.path.join(INCLUDE, header)).read()
         for name, value in re.findall(r"^#define\s+(BOX_\w+)\s+(.+?)\s*(?:/\*.*)?$", text, re.M):
             if value.startswith('"'):
@@ -200,7 +201,7 @@ class Scene:
         self.tracks = {}
 
     def place(self, value):
-        return round(value * self.n["BOX_BRUSH_ONE"])
+        return round(value * self.n["BOX_SHAPE_ONE"])
 
     def options(self, words, allowed):
         got = {}
@@ -222,7 +223,7 @@ class Scene:
         self.acts = [int(o[a]) for a in ACTS]
 
     def shade_space(self, a, b, c, d, e, f, cx, cy, r):
-        one = self.n["BOX_BRUSH_ONE"]
+        one = self.n["BOX_SHAPE_ONE"]
         return [round(one * a * r), round(one * b * r), round(one * c * r), round(one * d * r),
                 round(one * (a * cx + c * cy + e)), round(one * (b * cx + d * cy + f))]
 
@@ -245,16 +246,16 @@ class Scene:
         if kind == "solid":
             if len(rest) != 1:
                 raise Refused("a solid paint is one colour")
-            paint = (n["BOX_BRUSH_PAINT_SOLID"], colour(rest[0]), [], [0] * 6)
+            paint = (n["BOX_PAINT_SOLID"], colour(rest[0]), [], [0] * 6)
         elif kind == "radial":
             o = self.options(rest, ("matrix", "center", "radius", "stops"))
-            paint = (n["BOX_BRUSH_PAINT_RADIAL"], 0, self.given_stops(o["stops"]),
+            paint = (n["BOX_PAINT_RADIAL"], 0, self.given_stops(o["stops"]),
                      self.shade_space(*floats(o["matrix"], 6), *floats(o["center"], 2), *floats(o["radius"], 1)))
         elif kind == "linear":
             o = self.options(rest, ("from", "to", "stops"))
             (x0, y0), (x1, y1) = floats(o["from"], 2), floats(o["to"], 2)
             a, b = self.place(x1 - x0), self.place(y1 - y0)
-            paint = (n["BOX_BRUSH_PAINT_LINEAR"], 0, self.given_stops(o["stops"]),
+            paint = (n["BOX_PAINT_LINEAR"], 0, self.given_stops(o["stops"]),
                      [a, b, -b, a, self.place(x0), self.place(y0)])
         else:
             raise Refused(f"{kind} is no kind of paint (solid, radial, linear)")
@@ -263,7 +264,7 @@ class Scene:
         for at, stop_ink in stops:
             if not 0.0 <= at <= 1.0:
                 raise Refused(f"paint {name}: a stop at {at} lies outside 0 to 1")
-            self.stops.append((round(at * n["BOX_BRUSH_UNIT"]), stop_ink))
+            self.stops.append((round(at * n["BOX_SHAPE_UNIT"]), stop_ink))
         self.paint_names[name] = len(self.paints)
         self.paints.append((kind_n, ink, first if stops else 0, len(stops), space))
 
@@ -321,9 +322,9 @@ class Scene:
         at = [self.place(v) for v in floats(o["at"], 2)] if "at" in o else pivot
         scale = float(o.get("scale", "1"))
         base = [at[0] - pivot[0], at[1] - pivot[1],
-                round(float(o.get("wide", scale)) * n["BOX_BRUSH_UNIT"]),
-                round(float(o.get("tall", scale)) * n["BOX_BRUSH_UNIT"]),
-                round(float(o.get("turn", "0")) * n["BOX_BRUSH_TURN"]),
+                round(float(o.get("wide", scale)) * n["BOX_SHAPE_UNIT"]),
+                round(float(o.get("tall", scale)) * n["BOX_SHAPE_UNIT"]),
+                round(float(o.get("turn", "0")) * n["BOX_SHAPE_TURN"]),
                 int(o.get("opacity", "255"))]
         self.figure_names[name] = len(self.figures)
         self.figures.append({"name": name, "kind": n[KINDS[kind]], "parent": parent, "paint": paint,
@@ -354,9 +355,9 @@ class Scene:
                 if one in ("x", "y"):
                     value = self.place(raw) - pivot[0 if one == "x" else 1]
                 elif one in ("wide", "tall"):
-                    value = round(raw * n["BOX_BRUSH_UNIT"])
+                    value = round(raw * n["BOX_SHAPE_UNIT"])
                 elif one == "turn":
-                    value = round(raw * n["BOX_BRUSH_TURN"])
+                    value = round(raw * n["BOX_SHAPE_TURN"])
                 else:
                     value = int(raw)
                 track.append((ms, value, EASES.index(parts[2]) if len(parts) == 3 else 0))
@@ -393,7 +394,7 @@ class Scene:
         """What the reader takes on trust from the packer: keys within their
         act, the wait round without a seam, and wait taking up where enter
         left off."""
-        n, turn = self.n, self.n["BOX_BRUSH_TURN"]
+        n, turn = self.n, self.n["BOX_SHAPE_TURN"]
         for (act, figure, what), keys in self.tracks.items():
             name = f"move {self.figures[figure]['name']} {ACTS[act]} {WHATS[what]}"
             ats = [k[0] for k in keys]

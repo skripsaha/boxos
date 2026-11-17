@@ -21,6 +21,17 @@ struct PointF {
     float Y = 0.0f;
 };
 
+// A rectangle at fractions of a pixel: a shape's place and size before it is
+// drawn.
+struct RectF {
+    float X      = 0.0f;
+    float Y      = 0.0f;
+    float Width  = 0.0f;
+    float Height = 0.0f;
+
+    constexpr bool Empty() const noexcept { return !(Width > 0.0f) || !(Height > 0.0f); }
+};
+
 struct Size {
     std::int32_t Width  = 0;
     std::int32_t Height = 0;
@@ -66,6 +77,22 @@ struct Rect {
     constexpr Rect Intersect(Size Bounds) const noexcept
     {
         return Intersect(Rect{0, 0, Bounds.Width, Bounds.Height});
+    }
+
+    // The least rectangle holding both; an empty one holds nothing.
+    constexpr Rect Join(Rect Other) const noexcept
+    {
+        if (Empty()) return Other;
+        if (Other.Empty()) return *this;
+        const std::int64_t Left   = std::min<std::int64_t>(X, Other.X);
+        const std::int64_t Top    = std::min<std::int64_t>(Y, Other.Y);
+        const std::int64_t Right  = std::max<std::int64_t>(static_cast<std::int64_t>(X) + Width,
+                                                            static_cast<std::int64_t>(Other.X) + Other.Width);
+        const std::int64_t Bottom = std::max<std::int64_t>(static_cast<std::int64_t>(Y) + Height,
+                                                            static_cast<std::int64_t>(Other.Y) + Other.Height);
+        const std::int64_t Most   = std::numeric_limits<std::int32_t>::max();
+        return {static_cast<std::int32_t>(Left), static_cast<std::int32_t>(Top),
+                static_cast<std::int32_t>(std::min(Right - Left, Most)), static_cast<std::int32_t>(std::min(Bottom - Top, Most))};
     }
 
     friend constexpr bool operator==(Rect, Rect) noexcept = default;

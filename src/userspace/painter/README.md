@@ -4,8 +4,10 @@ Painter is the BoxOS family for user-facing drawing. It is one long-lived
 home for related graphics APIs, with separate contracts for each kind of
 surface:
 
-- `painter::core` — geometry, rectangles, clipping, and other backend-neutral
-  values that are genuinely shared;
+- `painter::core` — geometry and colours, and the drawing engine every pixel
+  picture of the system is drawn with: a `Canvas` of sixteen-bit light,
+  `Path`s filled and stroked, `Gradient`s, `Picture`s, `Mask`s, `Shadow`s,
+  clips and blur (see "The drawing engine" below);
 - `painter::tui` — the first implementation: `Frame`, `Stage`, `Surface`, regions,
   opaque and transparent cells, compositing, glyphs, half-block pixel drawing,
   palettes, and typed console input;
@@ -67,7 +69,7 @@ The display says what its glass is, and `Stage::Glass()` (also `Surface` and
 framebuffer. Both draw the same cells; the kind says what a cell may look
 like, so a program asks it and does not guess from the screen's size. Painter
 does not draw pixels for it: `painter::tui` is cells, half-blocks and CP437
-glyphs, and real pixels belong to `painter::gui`.
+glyphs; real pixels are drawn on a `painter::core::Canvas`.
 
 The display also says which grids finer than the halves its glass draws
 exactly (`DisplayMosaic`: quadrants, sextants, octants), and `Mosaics()` of
@@ -131,6 +133,35 @@ daemon and compositor binary.
    after each migration.
 6. Add higher-level controls only when several real applications require the
    same contract. Do not import an ncurses window/panel model by default.
+
+## The drawing engine
+
+`painter::core` draws pixels for every hand that draws them: the display's
+composition, a program's own picture, `painter::gui`. A `Canvas` keeps each
+pixel as four sixteen-bit numbers — red, green and blue light already times
+its opacity, and the opacity (`Pixel`) — so a colour is laid over another as
+light, the one way the system mixes (`boxos_color.h`), with room enough that a
+wide dark gradient keeps no bands. On it:
+
+- `Fill` and `Stroke` a `Path` — lines, curves, SVG arcs and path data, and
+  rectangles, rounded rectangles of four radii and ellipses kept as
+  themselves — under a `Transform`, by `FillRule::NonZero` or `EvenOdd`; a
+  stroke with every `LineCap`, `LineJoin`, the miter limit, dashes, and
+  `StrokeAlign` across, within or without its shape;
+- with several fills at once, each a colour, a `Gradient` (linear, radial from
+  a focal point, conic; `Extend` pad, repeat, reflect, none) or a `Picture`
+  (smooth from the copy nearest its size, or sharp);
+- `FillMask` a `Mask` — a glyph, a clip, a `Shadow` made once and kept, raised
+  or pressed, blurred and spread — and `Draw` another canvas over it;
+- `PushClip` a rectangle or a path, `Blur` an area as frosted glass, and
+  `CopyOut` to the glass, dithered by a fixed pattern of blue noise so a pixel
+  that does not change is written the same.
+
+Every edge is covered as the brush covers it — one text, `boxos_shape.h`,
+`boxos_stroke.h` and `boxos_paint.h`, for the brush in the loader, Typecase's
+glyphs and this engine — and its rows are worked plain, with SSE2 or with AVX2
+(`CpuPath`), the fastest the processor offers, every way the same bits.
+`tools/draw_stand.sh` holds it on the host, `drawcheck` on the machine.
 
 ## Future GUI boundary
 

@@ -46,12 +46,16 @@
 #include <string.h>
 
 #include "boxos_brush.h"
+#include "boxos_stroke.h"
 #include "boxos_imprint_data.h"
 #include "boxos_imprint_press.h"
 #include "boxos_scene_play.h"
 
-#define ONE  BOX_BRUSH_ONE
-#define UNIT BOX_BRUSH_UNIT
+#define ONE  BOX_SHAPE_ONE
+#define UNIT BOX_SHAPE_UNIT
+
+/* Four corners of one radius. */
+#define Radii(R) ((const int32_t[4]){ (R), (R), (R), (R) })
 
 static int g_passed, g_failed;
 
@@ -74,7 +78,7 @@ typedef struct {
     BoxBrushCanvas Canvas;
 } Board;
 
-static BoxBrushEdge g_edges[1u << 16];
+static BoxShapeEdge g_edges[1u << 16];
 
 static void BoardMake(Board *B, uint32_t Width, uint32_t Height)
 {
@@ -86,7 +90,7 @@ static void BoardMake(Board *B, uint32_t Width, uint32_t Height)
     B->Canvas.Width  = Width;
     B->Canvas.Height = Height;
     B->Canvas.Stride = Stride;
-    B->Canvas.Clip   = (BoxBrushRect){ 0, 0, (int32_t)Width, (int32_t)Height };
+    B->Canvas.Clip   = (BoxRect){ 0, 0, (int32_t)Width, (int32_t)Height };
     B->Canvas.Row    = malloc((Width + 2u) * sizeof(int32_t));
     if (!B->Canvas.Row) exit(2);
 }
@@ -109,7 +113,7 @@ static void BoardClear(Board *B, uint32_t Color)
 }
 
 /* Every pixel of the border and of the canvas past Clip still the sentinel. */
-static int Untouched(Board *B, BoxBrushRect Clip)
+static int Untouched(Board *B, BoxRect Clip)
 {
     const uint32_t Stride = B->Canvas.Stride, Rows = B->Canvas.Height + 2u * BORDER;
     for (uint32_t Y = 0; Y < Rows; Y++) {
@@ -122,32 +126,40 @@ static int Untouched(Board *B, BoxBrushRect Clip)
     return 1;
 }
 
-static const BoxBrushMatrix g_plain = { UNIT, 0, 0, UNIT, 0, 0 };
+static const BoxMatrix g_plain = { UNIT, 0, 0, UNIT, 0, 0 };
 
-static BoxBrushOutline Begin(const BoxBrushMatrix *M)
+static BoxShape Begin(const BoxMatrix *M)
 {
-    BoxBrushOutline O;
-    BoxBrushBegin(&O, g_edges, sizeof(g_edges) / sizeof(g_edges[0]), M);
+    BoxShape O;
+    BoxShapeBegin(&O, g_edges, sizeof(g_edges) / sizeof(g_edges[0]), M);
     return O;
 }
 
-/* The outline's coverage of every pixel of the canvas, 0 to 255, and the area
- * it covers in pixels: what BoxBrushFill lays, read as it reads it. */
-static double Coverages(Board *B, BoxBrushOutline *O, uint8_t *Map)
+/* The shape's coverage of every pixel of the canvas, 0 to 255, and the area
+ * it holds in pixels by its rule: what BoxBrushFill lays, swept as it sweeps
+ * it. */
+static double Coverages(Board *B, BoxShape *O, uint8_t *Map)
 {
     const BoxBrushCanvas *K = &B->Canvas;
     double                Area = 0;
     if (Map) memset(Map, 0, (size_t)K->Width * K->Height);
-    BoxBrushClose(O);
-    const BoxBrushRect Held = BoxBrushReach(K, O);
+    BoxShapeClose(O);
+    const BoxRect Held = BoxShapeReach(O, BoxBrushWithin(K));
+    if (Held.Width <= 0 || Held.Height <= 0) return 0;
+    BoxShapeSweep Sweep;
+    BoxShapeSweepBegin(&Sweep, O, K->Row, Held.X, Held.X + Held.Width);
     for (int32_t Y = Held.Y; Y < Held.Y + Held.Height; Y++) {
-        BoxBrushRowCells(K, O, Y, Held.X, Held.X + Held.Width);
+        BoxShapeSweepRow(&Sweep, Y);
         int64_t Run = K->Row[0];
         for (int32_t X = Held.X; X < Held.X + Held.Width; X++) {
             Run += K->Row[1 + X - Held.X];
-            const int64_t Covered = Run < 0 ? -Run : Run;
+            int64_t Covered = Run < 0 ? -Run : Run;
+            if (O->Rule == BOX_SHAPE_EVENODD) {
+                Covered %= 2 * 65536;
+                if (Covered > 65536) Covered = 2 * 65536 - Covered;
+            }
             Area += (double)(Covered > 65536 ? 65536 : Covered) / 65536.0;
-            if (Map) Map[(size_t)Y * K->Width + X] = (uint8_t)BoxBrushCoverage(Run);
+            if (Map) Map[(size_t)Y * K->Width + X] = (uint8_t)BoxShapeCoverage(Run, O->Rule);
         }
     }
     return Area;
@@ -182,12 +194,12 @@ static void CheckNumbers(void)
     int Held = 1;
     for (uint32_t I = 0; I < (1u << 21); I++) {
         const uint32_t V = I < (1u << 20) ? I : (uint32_t)Random();
-        const uint64_t R = BoxBrushRoot(V);
+        const uint64_t R = BoxShapeRoot(V);
         if (R * R > V || (R + 1u) * (R + 1u) <= V) Held = 0;
     }
     for (uint32_t R = 1; R < 65536u; R++)
-        if (BoxBrushRoot(R * R) != R || BoxBrushRoot(R * R - 1u) != R - 1u) Held = 0;
-    Check(Held, "BoxBrushRoot is the whole root of 32-bit values: all below 2^20, a million more, every square and the value under it");
+        if (BoxShapeRoot(R * R) != R || BoxShapeRoot(R * R - 1u) != R - 1u) Held = 0;
+    Check(Held, "BoxShapeRoot is the whole root of 32-bit values: all below 2^20, a million more, every square and the value under it");
 
     Held = 1;
     for (uint32_t I = 0; I < 200000u; I++) {
@@ -195,25 +207,25 @@ static void CheckNumbers(void)
         if (I % 4u == 1u) V >>= Random() % 64u;
         if (I == 0) V = ~0ull;
         if (I == 2) V = 0;
-        const uint64_t R = BoxBrushRoot64(V);
+        const uint64_t R = BoxShapeRoot64(V);
         if (R > 0xFFFFFFFFull || R * R > V || (R < 0xFFFFFFFFull && (R + 1u) * (R + 1u) <= V)) Held = 0;
     }
     for (uint64_t R = 1; R < 0xFFFFFFFFull; R = R * 3u + 1u)
-        if (BoxBrushRoot64(R * R) != R || BoxBrushRoot64(R * R - 1u) != R - 1u) Held = 0;
-    Check(Held, "BoxBrushRoot64 is the whole root of 64-bit values, squares and their neighbours");
+        if (BoxShapeRoot64(R * R) != R || BoxShapeRoot64(R * R - 1u) != R - 1u) Held = 0;
+    Check(Held, "BoxShapeRoot64 is the whole root of 64-bit values, squares and their neighbours");
 
-    Held = BoxBrushSine(0) == 0 && BoxBrushSine(16384) == UNIT && BoxBrushSine(32768) == 0 &&
-           BoxBrushSine(49152) == -UNIT && BoxBrushCosine(0) == UNIT && BoxBrushCosine(32768) == -UNIT;
+    Held = BoxShapeSine(0) == 0 && BoxShapeSine(16384) == UNIT && BoxShapeSine(32768) == 0 &&
+           BoxShapeSine(49152) == -UNIT && BoxShapeCosine(0) == UNIT && BoxShapeCosine(32768) == -UNIT;
     int32_t Off = 0;
-    for (uint32_t T = 0; T < BOX_BRUSH_TURN; T++) {
-        const int32_t Want = (int32_t)lround(sin(2.0 * M_PI * T / BOX_BRUSH_TURN) * UNIT);
-        const int32_t Diff = abs(BoxBrushSine(T) - Want);
+    for (uint32_t T = 0; T < BOX_SHAPE_TURN; T++) {
+        const int32_t Want = (int32_t)lround(sin(2.0 * M_PI * T / BOX_SHAPE_TURN) * UNIT);
+        const int32_t Diff = abs(BoxShapeSine(T) - Want);
         if (Diff > Off) Off = Diff;
-        if (T <= 32768u && BoxBrushSine(T) != BoxBrushSine(32768u - T)) Held = 0;
-        if (BoxBrushSine(T + 32768u) != -BoxBrushSine(T)) Held = 0;
+        if (T <= 32768u && BoxShapeSine(T) != BoxShapeSine(32768u - T)) Held = 0;
+        if (BoxShapeSine(T + 32768u) != -BoxShapeSine(T)) Held = 0;
     }
     char Line[160];
-    snprintf(Line, sizeof(Line), "BoxBrushSine: exact at every quarter, its own mirror, within %d/65536 of sin()", Off);
+    snprintf(Line, sizeof(Line), "BoxShapeSine: exact at every quarter, its own mirror, within %d/65536 of sin()", Off);
     Check(Held && Off <= 1, Line);
 }
 
@@ -229,7 +241,7 @@ static void CheckPress(void)
         uint32_t       Inks[BOXOS_IMPRINT_INKED + 1u];
         BoxPressInks(Paper, Ink, BOX_PIXEL_BGR, Inks);
         for (uint32_t Shade = 0; Shade <= BOXOS_IMPRINT_INKED; Shade++) {
-            const uint32_t Share = BoxBrushShare(Shade * BOX_BRUSH_FULL / BOXOS_IMPRINT_INKED, 255, 255);
+            const uint32_t Share = BoxBrushShare(Shade * BOX_SHAPE_FULL / BOXOS_IMPRINT_INKED, 255, 255);
             const uint32_t Laid  = BoxColorOver(Paper, Ink, Share);
             if (Laid != Inks[Shade]) Held = 0;
         }
@@ -396,9 +408,9 @@ static void CheckRects(void)
     Board B;
     BoardMake(&B, 256, 256);
     BoardClear(&B, 0x000000u);
-    BoxBrushOutline     O     = Begin(&g_plain);
-    const BoxBrushPaint Solid = { BOX_BRUSH_PAINT_SOLID, 0xFF30A0F0u, NULL, 0, g_plain, NULL, 0, 0, 0 };
-    BoxBrushAddRect(&O, 10 * ONE, 12 * ONE, 40 * ONE, 30 * ONE, 0);
+    BoxShape       O     = Begin(&g_plain);
+    const BoxPaint Solid = { BOX_PAINT_SOLID, 0xFF30A0F0u, NULL, 0, g_plain, NULL, 0, 0, 0, BOX_PAINT_PAD, 0, 0, 0 };
+    BoxShapeAddRect(&O, 10 * ONE, 12 * ONE, 40 * ONE, 30 * ONE, 0);
     int      Held  = BoxBrushFill(&B.Canvas, &O, &Solid, 255);
     uint32_t Count = 0;
     for (int32_t Y = 0; Y < 256; Y++)
@@ -416,7 +428,7 @@ static void CheckRects(void)
         const int32_t X = Within(0, 100 * ONE), Y = Within(0, 100 * ONE);
         const int32_t W = Within(1, 150 * ONE), H = Within(1, 150 * ONE);
         O = Begin(&g_plain);
-        BoxBrushAddRect(&O, X, Y, W, H, I % 2u);
+        BoxShapeAddRect(&O, X, Y, W, H, I % 2u);
         const double Got = Coverages(&B, &O, NULL), Want = (double)W * H / 65536.0;
         const double Off = fabs(Got - Want);
         if (Off > Worst) Worst = Off;
@@ -429,7 +441,7 @@ static void CheckRects(void)
 
     uint8_t *Map = malloc(256u * 256u);
     O            = Begin(&g_plain);
-    BoxBrushAddRect(&O, 10 * ONE + ONE / 2, 20 * ONE, 20 * ONE, 10 * ONE, 0);
+    BoxShapeAddRect(&O, 10 * ONE + ONE / 2, 20 * ONE, 20 * ONE, 10 * ONE, 0);
     Coverages(&B, &O, Map);
     Check(Map[25 * 256 + 10] == 128 && Map[25 * 256 + 11] == 255 && Map[25 * 256 + 30] == 128 &&
               Map[25 * 256 + 9] == 0 && Map[25 * 256 + 31] == 0,
@@ -439,27 +451,27 @@ static void CheckRects(void)
      * outline: every pixel the big one covers whole is covered once. */
     uint8_t *Once = malloc(256u * 256u);
     O             = Begin(&g_plain);
-    BoxBrushAddRect(&O, 12 * ONE, 15 * ONE, 35 * ONE, 27 * ONE, 0);
+    BoxShapeAddRect(&O, 12 * ONE, 15 * ONE, 35 * ONE, 27 * ONE, 0);
     const double Single = Coverages(&B, &O, Once);
     O                   = Begin(&g_plain);
-    BoxBrushAddRect(&O, 12 * ONE, 15 * ONE, 35 * ONE, 27 * ONE, 0);
-    BoxBrushAddRect(&O, 12 * ONE, 15 * ONE, 35 * ONE, 27 * ONE, 0);
-    BoxBrushAddEllipse(&O, 5000, 6000, 1700, 1200, 0);
+    BoxShapeAddRect(&O, 12 * ONE, 15 * ONE, 35 * ONE, 27 * ONE, 0);
+    BoxShapeAddRect(&O, 12 * ONE, 15 * ONE, 35 * ONE, 27 * ONE, 0);
+    BoxShapeAddEllipse(&O, 5000, 6000, 1700, 1200, 0);
     const double Twice = Coverages(&B, &O, Map);
     Check(fabs(Single - Twice) < 1e-9 && memcmp(Once, Map, 256u * 256u) == 0,
           "solid contours lying over each other cover each pixel the whole of one covers once");
 
     O = Begin(&g_plain);
-    BoxBrushAddRect(&O, 20 * ONE, 20 * ONE, 60 * ONE, 40 * ONE, 0);
-    BoxBrushAddRect(&O, 30 * ONE, 30 * ONE, 20 * ONE, 10 * ONE, 1);
+    BoxShapeAddRect(&O, 20 * ONE, 20 * ONE, 60 * ONE, 40 * ONE, 0);
+    BoxShapeAddRect(&O, 30 * ONE, 30 * ONE, 20 * ONE, 10 * ONE, 1);
     const double Rim = Coverages(&B, &O, Map);
     Check(fabs(Rim - (2400.0 - 200.0)) < 1e-9 && Map[35 * 256 + 40] == 0 && Map[25 * 256 + 40] == 255,
           "a contour wound the other way cuts its hole: the rim's area exactly, the hole bare");
 
     /* Two rectangles side by side at a fraction of a pixel, one outline: no seam. */
     O = Begin(&g_plain);
-    BoxBrushAddRect(&O, 10 * ONE, 10 * ONE, 15 * ONE + 77, 20 * ONE, 0);
-    BoxBrushAddRect(&O, 25 * ONE + 77, 10 * ONE, 15 * ONE, 20 * ONE, 0);
+    BoxShapeAddRect(&O, 10 * ONE, 10 * ONE, 15 * ONE + 77, 20 * ONE, 0);
+    BoxShapeAddRect(&O, 25 * ONE + 77, 10 * ONE, 15 * ONE, 20 * ONE, 0);
     Coverages(&B, &O, Map);
     Check(Map[15 * 256 + 25] == 255, "two shapes meeting inside a pixel in one outline leave no seam");
 
@@ -475,8 +487,8 @@ static void CheckRound(void)
     uint8_t *Map = malloc(300u * 300u);
     char     Line[220];
 
-    BoxBrushOutline O = Begin(&g_plain);
-    BoxBrushAddEllipse(&O, (int32_t)(100.4 * ONE), (int32_t)(80.7 * ONE), (int32_t)(37.3 * ONE),
+    BoxShape O = Begin(&g_plain);
+    BoxShapeAddEllipse(&O, (int32_t)(100.4 * ONE), (int32_t)(80.7 * ONE), (int32_t)(37.3 * ONE),
                        (int32_t)(21.9 * ONE), 0);
     const double Ellipse = Coverages(&B, &O, NULL), Want = M_PI * 37.3 * 21.9;
     snprintf(Line, sizeof(Line), "an ellipse covers its area, %.2f of %.2f pixels", Ellipse, Want);
@@ -486,7 +498,7 @@ static void CheckRound(void)
     for (uint32_t I = 0; I < 300u; I++) {
         const double R = 0.6 + (Random() % 12000u) / 100.0;
         O              = Begin(&g_plain);
-        BoxBrushAddEllipse(&O, 150 * ONE + Within(0, 255), 150 * ONE + Within(0, 255), (int32_t)(R * ONE),
+        BoxShapeAddEllipse(&O, 150 * ONE + Within(0, 255), 150 * ONE + Within(0, 255), (int32_t)(R * ONE),
                            (int32_t)(R * ONE), I % 2u);
         const double Got = Coverages(&B, &O, NULL), Disc = M_PI * (double)((int32_t)(R * ONE)) * ((int32_t)(R * ONE)) / 65536.0;
         if (!Near(Got, Disc, R < 4 ? 0.03 : 0.002)) Held = 0;
@@ -494,8 +506,8 @@ static void CheckRound(void)
     Check(Held, "300 circles from under a pixel to 120 across, either winding, cover their area");
 
     O = Begin(&g_plain);
-    BoxBrushAddEllipse(&O, 150 * ONE, 150 * ONE, 50 * ONE, 50 * ONE, 0);
-    BoxBrushAddEllipse(&O, 150 * ONE, 150 * ONE, 30 * ONE, 30 * ONE, 1);
+    BoxShapeAddEllipse(&O, 150 * ONE, 150 * ONE, 50 * ONE, 50 * ONE, 0);
+    BoxShapeAddEllipse(&O, 150 * ONE, 150 * ONE, 30 * ONE, 30 * ONE, 1);
     const double Ring = Coverages(&B, &O, Map);
     Check(Near(Ring, M_PI * (2500.0 - 900.0), 0.002) && Map[150 * 300 + 150] == 0 && Map[150 * 300 + 110] == 255,
           "a ring: its area, its middle bare, its band whole");
@@ -504,7 +516,7 @@ static void CheckRound(void)
      * exactly. Rows are crossed where columns are summed, so across the
      * diagonal it may be a 255th apart. */
     O = Begin(&g_plain);
-    BoxBrushAddEllipse(&O, 64 * ONE, 64 * ONE, (int32_t)(30.3 * ONE), (int32_t)(30.3 * ONE), 0);
+    BoxShapeAddEllipse(&O, 64 * ONE, 64 * ONE, (int32_t)(30.3 * ONE), (int32_t)(30.3 * ONE), 0);
     Coverages(&B, &O, Map);
     Held          = 1;
     int Diagonal  = 0;
@@ -520,13 +532,13 @@ static void CheckRound(void)
     /* The same circle moved by whole pixels: the same pixels, moved. */
     uint8_t *Moved = malloc(300u * 300u);
     O              = Begin(&g_plain);
-    BoxBrushAddEllipse(&O, (int32_t)(60.37 * ONE), (int32_t)(70.81 * ONE), (int32_t)(25.5 * ONE), (int32_t)(18.2 * ONE), 0);
+    BoxShapeAddEllipse(&O, (int32_t)(60.37 * ONE), (int32_t)(70.81 * ONE), (int32_t)(25.5 * ONE), (int32_t)(18.2 * ONE), 0);
     Coverages(&B, &O, Map);
-    BoxBrushMatrix Shift = g_plain;
+    BoxMatrix Shift = g_plain;
     Shift.E              = 7 * ONE;
     Shift.F              = 3 * ONE;
     O                    = Begin(&Shift);
-    BoxBrushAddEllipse(&O, (int32_t)(60.37 * ONE), (int32_t)(70.81 * ONE), (int32_t)(25.5 * ONE), (int32_t)(18.2 * ONE), 0);
+    BoxShapeAddEllipse(&O, (int32_t)(60.37 * ONE), (int32_t)(70.81 * ONE), (int32_t)(25.5 * ONE), (int32_t)(18.2 * ONE), 0);
     Coverages(&B, &O, Moved);
     Held = 1;
     for (int32_t Y = 0; Y < 200; Y++)
@@ -536,7 +548,7 @@ static void CheckRound(void)
 
     /* A rounded rectangle: the rectangle less four corners' worth. */
     O = Begin(&g_plain);
-    BoxBrushAddRounded(&O, 20 * ONE, 30 * ONE, 120 * ONE, 80 * ONE, 16 * ONE, 0);
+    BoxShapeAddRounded(&O, 20 * ONE, 30 * ONE, 120 * ONE, 80 * ONE, Radii(16 * ONE), 0);
     const double Rounded = Coverages(&B, &O, NULL), RoundedWant = 120.0 * 80.0 - (4.0 - M_PI) * 256.0;
     snprintf(Line, sizeof(Line), "a rounded rectangle covers its area, %.2f of %.2f", Rounded, RoundedWant);
     Check(Near(Rounded, RoundedWant, 0.001), Line);
@@ -552,11 +564,11 @@ static void CheckLinesCurves(void)
     BoardMake(&B, 320, 320);
     char Line[200];
 
-    BoxBrushOutline O = Begin(&g_plain);
-    BoxBrushAddLine(&O, 20 * ONE, 50 * ONE + ONE / 2, 120 * ONE, 50 * ONE + ONE / 2, 3 * ONE, 0);
+    BoxShape O = Begin(&g_plain);
+    BoxStrokeLine(&O, 20 * ONE, 50 * ONE + ONE / 2, 120 * ONE, 50 * ONE + ONE / 2, 3 * ONE, BOX_STROKE_CAP_BUTT);
     const double Butt = Coverages(&B, &O, NULL);
     O                 = Begin(&g_plain);
-    BoxBrushAddLine(&O, 20 * ONE, 50 * ONE + ONE / 2, 120 * ONE, 50 * ONE + ONE / 2, 3 * ONE, 1);
+    BoxStrokeLine(&O, 20 * ONE, 50 * ONE + ONE / 2, 120 * ONE, 50 * ONE + ONE / 2, 3 * ONE, BOX_STROKE_CAP_ROUND);
     const double Round = Coverages(&B, &O, NULL);
     snprintf(Line, sizeof(Line), "a line 3 wide and 100 long: %.3f square-cut, %.3f round-ended", Butt, Round);
     Check(fabs(Butt - 300.0) < 1e-6 && Near(Round, 300.0 + M_PI * 2.25, 0.003), Line);
@@ -567,7 +579,7 @@ static void CheckLinesCurves(void)
         const int32_t X1 = Within(40 * ONE, 280 * ONE), Y1 = Within(40 * ONE, 280 * ONE);
         const int32_t W  = Within(ONE / 4, 12 * ONE);
         O                = Begin(&g_plain);
-        BoxBrushAddLine(&O, X0, Y0, X1, Y1, W, 0);
+        BoxStrokeLine(&O, X0, Y0, X1, Y1, W, BOX_STROKE_CAP_BUTT);
         const double Length = hypot((double)(X1 - X0), (double)(Y1 - Y0)) / ONE;
         if (Length < 1) continue;
         /* A corner lands on the nearest place: the width may be half a place
@@ -580,8 +592,8 @@ static void CheckLinesCurves(void)
     /* Lines into one outline: a bent line covers its two halves less the
      * overlap at the bend — never twice. */
     O = Begin(&g_plain);
-    BoxBrushAddLine(&O, 50 * ONE, 200 * ONE, 150 * ONE, 200 * ONE, 8 * ONE, 1);
-    BoxBrushAddLine(&O, 150 * ONE, 200 * ONE, 150 * ONE, 300 * ONE, 8 * ONE, 1);
+    BoxStrokeLine(&O, 50 * ONE, 200 * ONE, 150 * ONE, 200 * ONE, 8 * ONE, BOX_STROKE_CAP_ROUND);
+    BoxStrokeLine(&O, 150 * ONE, 200 * ONE, 150 * ONE, 300 * ONE, 8 * ONE, BOX_STROKE_CAP_ROUND);
     /* Each covers 800 + 16π; they share the disc about the bend and the
      * corner of their bodies past it, 12π + 16. */
     const double Bent = Coverages(&B, &O, NULL), BentWant = 2.0 * (800.0 + M_PI * 16.0) - (M_PI * 12.0 + 16.0);
@@ -591,8 +603,8 @@ static void CheckLinesCurves(void)
 
     /* A quadratic closed by its chord: two thirds of its control triangle. */
     O = Begin(&g_plain);
-    BoxBrushMoveTo(&O, 20 * ONE, 150 * ONE);
-    BoxBrushQuadTo(&O, 110 * ONE, 20 * ONE, 260 * ONE, 140 * ONE);
+    BoxShapeMoveTo(&O, 20 * ONE, 150 * ONE);
+    BoxShapeQuadTo(&O, 110 * ONE, 20 * ONE, 260 * ONE, 140 * ONE);
     const double Quad     = Coverages(&B, &O, NULL);
     const double Triangle = fabs((110.0 - 20.0) * (140.0 - 150.0) - (260.0 - 20.0) * (20.0 - 150.0)) / 2.0;
     snprintf(Line, sizeof(Line), "a quadratic curve closed by its chord covers %.2f of %.2f", Quad, Triangle * 2.0 / 3.0);
@@ -602,11 +614,11 @@ static void CheckLinesCurves(void)
     const double  K = 0.5522847498 * 100.0;
     const int32_t C = 160 * ONE, R = 100 * ONE, P = (int32_t)(K * ONE);
     O               = Begin(&g_plain);
-    BoxBrushMoveTo(&O, C + R, C);
-    BoxBrushCubicTo(&O, C + R, C + P, C + P, C + R, C, C + R);
-    BoxBrushCubicTo(&O, C - P, C + R, C - R, C + P, C - R, C);
-    BoxBrushCubicTo(&O, C - R, C - P, C - P, C - R, C, C - R);
-    BoxBrushCubicTo(&O, C + P, C - R, C + R, C - P, C + R, C);
+    BoxShapeMoveTo(&O, C + R, C);
+    BoxShapeCubicTo(&O, C + R, C + P, C + P, C + R, C, C + R);
+    BoxShapeCubicTo(&O, C - P, C + R, C - R, C + P, C - R, C);
+    BoxShapeCubicTo(&O, C - R, C - P, C - P, C - R, C, C - R);
+    BoxShapeCubicTo(&O, C + P, C - R, C + R, C - P, C + R, C);
     const double Cubic = Coverages(&B, &O, NULL);
     snprintf(Line, sizeof(Line), "four cubic quarters cover the circle they stand for, %.2f of %.2f", Cubic, M_PI * 10000.0);
     Check(Near(Cubic, M_PI * 10000.0, 0.003), Line);
@@ -621,22 +633,22 @@ static void CheckTurns(void)
     uint8_t *Plain = malloc(200u * 200u), *Turned = malloc(200u * 200u);
     char     Line[200];
 
-    BoxBrushMatrix  M = BoxBrushPlaced(100 * ONE, 100 * ONE, UNIT, 0);
-    BoxBrushOutline O = Begin(&M);
-    BoxBrushAddRect(&O, -20 * ONE, -20 * ONE, 40 * ONE, 40 * ONE, 0);
+    BoxMatrix M = BoxMatrixPlaced(100 * ONE, 100 * ONE, UNIT, 0);
+    BoxShape  O = Begin(&M);
+    BoxShapeAddRect(&O, -20 * ONE, -20 * ONE, 40 * ONE, 40 * ONE, 0);
     Coverages(&B, &O, Plain);
-    M = BoxBrushPlaced(100 * ONE, 100 * ONE, UNIT, BOX_BRUSH_TURN / 4u);
+    M = BoxMatrixPlaced(100 * ONE, 100 * ONE, UNIT, BOX_SHAPE_TURN / 4u);
     O = Begin(&M);
-    BoxBrushAddRect(&O, -20 * ONE, -20 * ONE, 40 * ONE, 40 * ONE, 0);
+    BoxShapeAddRect(&O, -20 * ONE, -20 * ONE, 40 * ONE, 40 * ONE, 0);
     Coverages(&B, &O, Turned);
     Check(memcmp(Plain, Turned, 200u * 200u) == 0, "a square turned a quarter about its middle is the same pixels");
 
     int    Held  = 1;
     double Worst = 0;
-    for (uint32_t T = 0; T < BOX_BRUSH_TURN; T += 997u) {
-        M = BoxBrushPlaced(100 * ONE + 37, 100 * ONE + 211, (int32_t)(1.5 * UNIT), T);
+    for (uint32_t T = 0; T < BOX_SHAPE_TURN; T += 997u) {
+        M = BoxMatrixPlaced(100 * ONE + 37, 100 * ONE + 211, (int32_t)(1.5 * UNIT), T);
         O = Begin(&M);
-        BoxBrushAddRect(&O, -20 * ONE, -10 * ONE, 40 * ONE, 20 * ONE, 0);
+        BoxShapeAddRect(&O, -20 * ONE, -10 * ONE, 40 * ONE, 20 * ONE, 0);
         const double Got = Coverages(&B, &O, NULL), Off = fabs(Got - 1800.0) / 1800.0;
         if (Off > Worst) Worst = Off;
         if (Off > 0.0005) Held = 0;
@@ -644,8 +656,8 @@ static void CheckTurns(void)
     snprintf(Line, sizeof(Line), "a rectangle stretched by 1.5 keeps its area at 66 turns (worst %.4f%%)", Worst * 100.0);
     Check(Held, Line);
 
-    const BoxBrushMatrix Half  = { UNIT / 2, 0, 0, UNIT / 2, 10 * ONE, 10 * ONE };
-    const BoxBrushMatrix Twice = BoxBrushThen(Half, BoxBrushPlaced(50 * ONE, 0, 2 * UNIT, 0));
+    const BoxMatrix Half  = { UNIT / 2, 0, 0, UNIT / 2, 10 * ONE, 10 * ONE };
+    const BoxMatrix Twice = BoxMatrixThen(Half, BoxMatrixPlaced(50 * ONE, 0, 2 * UNIT, 0));
     Check(Twice.A == UNIT && Twice.D == UNIT && Twice.B == 0 && Twice.C == 0 && Twice.E == 70 * ONE &&
               Twice.F == 20 * ONE,
           "matrices made one: halved, then doubled and moved, is moved");
@@ -671,20 +683,21 @@ static void CheckPaints(void)
     Board B;
     BoardMake(&B, 300, 200);
     BoardClear(&B, 0);
-    const BoxBrushStop Stops[2] = { { 0, 0xFFFF2000u }, { UNIT, 0xFF0040FFu } };
+    const BoxPaintStop Stops[2] = { { 0, 0xFFFF2000u }, { UNIT, 0xFF0040FFu } };
 
-    BoxBrushPaint   Linear = { BOX_BRUSH_PAINT_LINEAR, 0, Stops, 2, { 51200, 0, 0, UNIT, 50 * ONE, 0 }, NULL, 0, 0, 0 };
-    BoxBrushOutline O      = Begin(&g_plain);
-    BoxBrushAddRect(&O, 0, 0, 300 * ONE, 20 * ONE, 0);
+    BoxPaint Linear = { BOX_PAINT_LINEAR, 0, Stops, 2, { 51200, 0, 0, UNIT, 50 * ONE, 0 },
+                        NULL, 0, 0, 0, BOX_PAINT_PAD, 0, 0, 0 };
+    BoxShape O      = Begin(&g_plain);
+    BoxShapeAddRect(&O, 0, 0, 300 * ONE, 20 * ONE, 0);
     int Held = BoxBrushFill(&B.Canvas, &O, &Linear, 255);
     Check(Held && *At(&B, 10, 5) == 0xFF2000u && *At(&B, 280, 5) == 0x0040FFu &&
               ChannelsNear(*At(&B, 150, 5), BoxColorBetween(Stops[0].Color, Stops[1].Color, BOX_COLOR_WAY / 2), 1),
           "a linear gradient: its first colour before it, its last past it, halfway between at its middle");
 
-    BoxBrushPaint Radial = { BOX_BRUSH_PAINT_RADIAL, 0, Stops, 2, { 12800, 0, 0, 12800, 150 * ONE + 128, 120 * ONE + 128 },
-                             NULL, 0, 0, 0 };
+    BoxPaint Radial = { BOX_PAINT_RADIAL, 0, Stops, 2, { 12800, 0, 0, 12800, 150 * ONE + 128, 120 * ONE + 128 },
+                        NULL, 0, 0, 0, BOX_PAINT_PAD, 0, 0, 0 };
     O                    = Begin(&g_plain);
-    BoxBrushAddRect(&O, 0, 30 * ONE, 300 * ONE, 170 * ONE, 0);
+    BoxShapeAddRect(&O, 0, 30 * ONE, 300 * ONE, 170 * ONE, 0);
     Held = BoxBrushFill(&B.Canvas, &O, &Radial, 255);
     Check(Held && *At(&B, 150, 120) == 0xFF2000u && *At(&B, 150, 190) == 0x0040FFu && *At(&B, 10, 40) == 0x0040FFu &&
               ChannelsNear(*At(&B, 175, 120), BoxColorBetween(Stops[0].Color, Stops[1].Color, BOX_COLOR_WAY / 2), 2),
@@ -692,9 +705,10 @@ static void CheckPaints(void)
 
     uint32_t Picture[7 * 5];
     for (uint32_t I = 0; I < 35u; I++) Picture[I] = 0xFF000000u | (Random() & 0xFFFFFFu);
-    BoxBrushPaint Laid = { BOX_BRUSH_PAINT_PICTURE, 0, NULL, 0, { UNIT, 0, 0, UNIT, 30 * ONE, 40 * ONE }, Picture, 7, 5, 7 };
+    BoxPaint Laid = { BOX_PAINT_PICTURE, 0, NULL, 0, { UNIT, 0, 0, UNIT, 30 * ONE, 40 * ONE }, Picture, 7, 5, 7,
+                      BOX_PAINT_PAD, 0, 0, 0 };
     O                  = Begin(&g_plain);
-    BoxBrushAddRect(&O, 30 * ONE, 40 * ONE, 7 * ONE, 5 * ONE, 0);
+    BoxShapeAddRect(&O, 30 * ONE, 40 * ONE, 7 * ONE, 5 * ONE, 0);
     Held = BoxBrushFill(&B.Canvas, &O, &Laid, 255);
     for (int32_t Y = 0; Y < 5; Y++)
         for (int32_t X = 0; X < 7; X++)
@@ -705,7 +719,7 @@ static void CheckPaints(void)
     const uint32_t Below = 0x102030u;
     *At(&B, 30, 40)      = Below;
     O                    = Begin(&g_plain);
-    BoxBrushAddRect(&O, 30 * ONE, 40 * ONE, ONE, ONE, 0);
+    BoxShapeAddRect(&O, 30 * ONE, 40 * ONE, ONE, ONE, 0);
     BoxBrushFill(&B.Canvas, &O, &Laid, 255);
     Check(*At(&B, 30, 40) == BoxColorOver(Below, 0xFFFFFFu, 0x80), "a picture's half-clear pixel is laid at its alpha");
 
@@ -716,11 +730,11 @@ static void CheckPaints(void)
  * The clip, and what is refused
  * ------------------------------------------------------------------------- */
 
-static BoxBrushMatrix RandomMatrix(int32_t Width, int32_t Height)
+static BoxMatrix RandomMatrix(int32_t Width, int32_t Height)
 {
     const int32_t Stretch = (int32_t)(UNIT >> 6) << (Random() % 13u);
-    BoxBrushMatrix M      = BoxBrushPlaced(Within(-Width, 2 * Width) * ONE + Within(0, 255),
-                                           Within(-Height, 2 * Height) * ONE + Within(0, 255), Stretch, Random());
+    BoxMatrix     M       = BoxMatrixPlaced(Within(-Width, 2 * Width) * ONE + Within(0, 255),
+                                            Within(-Height, 2 * Height) * ONE + Within(0, 255), Stretch, Random());
     if (Random() % 4u == 0) M.C = Within(-UNIT, UNIT);
     return M;
 }
@@ -729,31 +743,32 @@ static void CheckClip(void)
 {
     Board B;
     BoardMake(&B, 160, 120);
-    const BoxBrushRect Clip = { 20, 15, 100, 80 };
+    const BoxRect Clip = { 20, 15, 100, 80 };
     B.Canvas.Clip           = Clip;
     uint32_t           Picture[16 * 9];
     for (uint32_t I = 0; I < 16u * 9u; I++) Picture[I] = Random();
-    BoxBrushStop Stops[3] = { { 0, Random() }, { UNIT / 3, Random() }, { UNIT, Random() } };
-    uint32_t     Filled = 0, Refused = 0;
+    BoxPaintStop Stops[3] = { { 0, Random() }, { UNIT / 3, Random() }, { UNIT, Random() } };
+    uint32_t     Filled   = 0, Refused = 0;
     for (uint32_t I = 0; I < 30000u; I++) {
-        const BoxBrushMatrix M    = RandomMatrix(160, 120);
-        BoxBrushOutline      O    = Begin(&M);
-        const int32_t        Size = Within(1, 400) * ONE / 4;
+        const BoxMatrix M    = RandomMatrix(160, 120);
+        BoxShape        O    = Begin(&M);
+        const int32_t   Size = Within(1, 400) * ONE / 4;
         switch (Random() % 6u) {
-        case 0: BoxBrushAddRect(&O, -Size, -Size / 2, 2 * Size, Size, Random() % 2u); break;
-        case 1: BoxBrushAddEllipse(&O, 0, 0, Size, Size / 3 + 1, Random() % 2u); break;
-        case 2: BoxBrushAddRounded(&O, -Size, -Size, 2 * Size, Size, Size / 4, Random() % 2u); break;
-        case 3: BoxBrushAddLine(&O, -Size, 0, Size, Size / 2, Size / 5, Random() % 2u); break;
+        case 0: BoxShapeAddRect(&O, -Size, -Size / 2, 2 * Size, Size, Random() % 2u); break;
+        case 1: BoxShapeAddEllipse(&O, 0, 0, Size, Size / 3 + 1, Random() % 2u); break;
+        case 2: BoxShapeAddRounded(&O, -Size, -Size, 2 * Size, Size, Radii(Size / 4), Random() % 2u); break;
+        case 3: BoxStrokeLine(&O, -Size, 0, Size, Size / 2, Size / 5, Random() % 2u); break;
         case 4:
-            BoxBrushMoveTo(&O, -Size, 0);
-            BoxBrushCubicTo(&O, -Size, -Size, Size, Size, Size, 0);
-            BoxBrushQuadTo(&O, 0, Size, -Size, 0);
+            BoxShapeMoveTo(&O, -Size, 0);
+            BoxShapeCubicTo(&O, -Size, -Size, Size, Size, Size, 0);
+            BoxShapeQuadTo(&O, 0, Size, -Size, 0);
             break;
         default:
-            BoxBrushMoveTo(&O, 0, 0);
-            for (uint32_t K = 0; K < 9u; K++) BoxBrushLineTo(&O, Within(-Size, Size), Within(-Size, Size));
+            BoxShapeMoveTo(&O, 0, 0);
+            for (uint32_t K = 0; K < 9u; K++) BoxShapeLineTo(&O, Within(-Size, Size), Within(-Size, Size));
         }
-        BoxBrushPaint P = { Random() % 4u, Random(), Stops, 3, RandomMatrix(160, 120), Picture, 16, 9, 16 };
+        BoxPaint P = { Random() % 4u, Random(), Stops, 3, RandomMatrix(160, 120),
+                       Picture, 16, 9, 16, BOX_PAINT_PAD, 0, 0, 0 };
         BoxBrushFill(&B.Canvas, &O, &P, Random() % 256u) ? Filled++ : Refused++;
         if (I % 7u == 0) BoxBrushText(&B.Canvas, &BoxSystemImprint, Random() % 3u, Within(-40, 170), Within(-40, 130),
                                       "clip ✓", 8, Random(), 255);
@@ -772,38 +787,39 @@ static void CheckRefused(void)
     Board B;
     BoardMake(&B, 64, 64);
     BoardClear(&B, 0x111111u);
-    const BoxBrushPaint Solid = { BOX_BRUSH_PAINT_SOLID, 0xFFFFFFFFu, NULL, 0, g_plain, NULL, 0, 0, 0 };
-    BoxBrushEdge        Few[4];
-    BoxBrushOutline     O;
+    const BoxPaint Solid = { BOX_PAINT_SOLID, 0xFFFFFFFFu, NULL, 0, g_plain, NULL, 0, 0, 0, BOX_PAINT_PAD, 0, 0, 0 };
+    BoxShapeEdge   Few[4];
+    BoxShape       O;
 
-    BoxBrushBegin(&O, Few, 4, &g_plain);
-    BoxBrushAddEllipse(&O, 32 * ONE, 32 * ONE, 20 * ONE, 20 * ONE, 0);
+    BoxShapeBegin(&O, Few, 4, &g_plain);
+    BoxShapeAddEllipse(&O, 32 * ONE, 32 * ONE, 20 * ONE, 20 * ONE, 0);
     const int Room = BoxBrushFill(&B.Canvas, &O, &Solid, 255);
 
-    const BoxBrushMatrix Wide = { (BOX_BRUSH_STRETCH_MOST + 1) * UNIT, 0, 0, UNIT, 0, 0 };
+    const BoxMatrix Wide = { (BOX_SHAPE_STRETCH_MOST + 1) * UNIT, 0, 0, UNIT, 0, 0 };
     O                         = Begin(&Wide);
-    BoxBrushAddRect(&O, 0, 0, ONE, ONE, 0);
+    BoxShapeAddRect(&O, 0, 0, ONE, ONE, 0);
     const int Stretch = BoxBrushFill(&B.Canvas, &O, &Solid, 255);
 
     O = Begin(&g_plain);
-    BoxBrushAddRect(&O, 0, 0, (BOX_BRUSH_REACH + 1) * ONE, ONE, 0);
+    BoxShapeAddRect(&O, 0, 0, (BOX_SHAPE_REACH + 1) * ONE, ONE, 0);
     const int Reach = BoxBrushFill(&B.Canvas, &O, &Solid, 255);
 
     O = Begin(&g_plain);
-    BoxBrushLineTo(&O, 10 * ONE, 10 * ONE);
+    BoxShapeLineTo(&O, 10 * ONE, 10 * ONE);
     const int Unbegun = BoxBrushFill(&B.Canvas, &O, &Solid, 255);
 
     O = Begin(&g_plain);
-    BoxBrushAddLine(&O, -2147483647, 0, 2147483647, 0, 2147483647, 1);
-    BoxBrushAddEllipse(&O, 0, 0, 2147483647, 2147483647, 0);
+    BoxStrokeLine(&O, -2147483647, 0, 2147483647, 0, 2147483647, BOX_STROKE_CAP_ROUND);
+    BoxShapeAddEllipse(&O, 0, 0, 2147483647, 2147483647, 0);
     const int Own    = BoxBrushFill(&B.Canvas, &O, &Solid, 255);
     const int NoSize = BoxBrushText(&B.Canvas, &BoxSystemImprint, BoxSystemImprint.SizeCount, 0, 0, "x", 1,
                                     0xFFFFFFFFu, 255);
 
-    const BoxBrushStop  Stop   = { 0, 0xFFFFFFFFu };
-    const BoxBrushPaint Folded = { BOX_BRUSH_PAINT_RADIAL, 0, &Stop, 1, { UNIT, UNIT, UNIT, UNIT, 0, 0 }, NULL, 0, 0, 0 };
+    const BoxPaintStop Stop   = { 0, 0xFFFFFFFFu };
+    const BoxPaint     Folded = { BOX_PAINT_RADIAL, 0, &Stop, 1, { UNIT, UNIT, UNIT, UNIT, 0, 0 },
+                                  NULL, 0, 0, 0, BOX_PAINT_PAD, 0, 0, 0 };
     O                          = Begin(&g_plain);
-    BoxBrushAddRect(&O, 0, 0, 10 * ONE, 10 * ONE, 0);
+    BoxShapeAddRect(&O, 0, 0, 10 * ONE, 10 * ONE, 0);
     const int Flat = BoxBrushFill(&B.Canvas, &O, &Folded, 255);
 
     int Bare = 1;
@@ -908,9 +924,9 @@ static int WritePng(const char *Path, const BoxBrushCanvas *K)
     return Written;
 }
 
-static void Fill(Board *B, BoxBrushOutline *O, uint32_t Color, uint32_t Opacity)
+static void Fill(Board *B, BoxShape *O, uint32_t Color, uint32_t Opacity)
 {
-    const BoxBrushPaint P = { BOX_BRUSH_PAINT_SOLID, Color, NULL, 0, g_plain, NULL, 0, 0, 0 };
+    const BoxPaint P = { BOX_PAINT_SOLID, Color, NULL, 0, g_plain, NULL, 0, 0, 0, BOX_PAINT_PAD, 0, 0, 0 };
     BoxBrushFill(&B->Canvas, O, &P, Opacity);
 }
 
@@ -924,83 +940,85 @@ static int DrawSheet(const char *Path)
     Board B;
     BoardMake(&B, 1280, 800);
 
-    const BoxBrushStop Sky[3] = { { 0, 0xFF0E1428u }, { UNIT / 2, 0xFF1C1A3Cu }, { UNIT, 0xFF2A1430u } };
+    const BoxPaintStop Sky[3] = { { 0, 0xFF0E1428u }, { UNIT / 2, 0xFF1C1A3Cu }, { UNIT, 0xFF2A1430u } };
     /* The gradient's way runs down the sheet: its x is the sheet's y. */
-    const BoxBrushPaint Back = { BOX_BRUSH_PAINT_LINEAR, 0, Sky, 3, { 0, 800 * ONE, -UNIT, 0, 0, 0 }, NULL, 0, 0, 0 };
-    BoxBrushOutline     O    = Begin(&g_plain);
-    BoxBrushAddRect(&O, 0, 0, 1280 * ONE, 800 * ONE, 0);
+    const BoxPaint Back = { BOX_PAINT_LINEAR, 0, Sky, 3, { 0, 800 * ONE, -UNIT, 0, 0, 0 },
+                            NULL, 0, 0, 0, BOX_PAINT_PAD, 0, 0, 0 };
+    BoxShape       O    = Begin(&g_plain);
+    BoxShapeAddRect(&O, 0, 0, 1280 * ONE, 800 * ONE, 0);
     BoxBrushFill(&B.Canvas, &O, &Back, 255);
 
     Words(&B, 2, 24, 16, "BoxOS brush — пиксели, линии, прямоугольники, круги, кривые, градиенты, картинки", 0xFFF2EEE6u);
 
     /* Shapes along the top. */
     O = Begin(&g_plain);
-    BoxBrushAddRect(&O, 30 * ONE, 70 * ONE, 110 * ONE, 80 * ONE, 0);
+    BoxShapeAddRect(&O, 30 * ONE, 70 * ONE, 110 * ONE, 80 * ONE, 0);
     Fill(&B, &O, 0xFFE8604Cu, 255);
     O = Begin(&g_plain);
-    BoxBrushAddRounded(&O, 160 * ONE + 128, 70 * ONE + 64, 110 * ONE, 80 * ONE, 22 * ONE, 0);
+    BoxShapeAddRounded(&O, 160 * ONE + 128, 70 * ONE + 64, 110 * ONE, 80 * ONE, Radii(22 * ONE), 0);
     Fill(&B, &O, 0xFFF0B030u, 255);
     O = Begin(&g_plain);
-    BoxBrushAddRounded(&O, 290 * ONE, 70 * ONE, 110 * ONE, 80 * ONE, 14 * ONE, 0);
-    BoxBrushAddRounded(&O, 296 * ONE, 76 * ONE, 98 * ONE, 68 * ONE, 8 * ONE, 1);
+    BoxShapeAddRounded(&O, 290 * ONE, 70 * ONE, 110 * ONE, 80 * ONE, Radii(14 * ONE), 0);
+    BoxShapeAddRounded(&O, 296 * ONE, 76 * ONE, 98 * ONE, 68 * ONE, Radii(8 * ONE), 1);
     Fill(&B, &O, 0xFF60D090u, 255);
     O = Begin(&g_plain);
-    BoxBrushAddEllipse(&O, 475 * ONE, 110 * ONE, 55 * ONE, 40 * ONE, 0);
+    BoxShapeAddEllipse(&O, 475 * ONE, 110 * ONE, 55 * ONE, 40 * ONE, 0);
     Fill(&B, &O, 0xFF4CA8E8u, 255);
     O = Begin(&g_plain);
-    BoxBrushAddEllipse(&O, 600 * ONE, 110 * ONE, 42 * ONE, 42 * ONE, 0);
-    BoxBrushAddEllipse(&O, 600 * ONE, 110 * ONE, 28 * ONE, 28 * ONE, 1);
+    BoxShapeAddEllipse(&O, 600 * ONE, 110 * ONE, 42 * ONE, 42 * ONE, 0);
+    BoxShapeAddEllipse(&O, 600 * ONE, 110 * ONE, 28 * ONE, 28 * ONE, 1);
     Fill(&B, &O, 0xFFB070E0u, 255);
-    BoxBrushMatrix M = BoxBrushPlaced(720 * ONE, 110 * ONE, UNIT, BOX_BRUSH_TURN / 16u);
+    BoxMatrix M = BoxMatrixPlaced(720 * ONE, 110 * ONE, UNIT, BOX_SHAPE_TURN / 16u);
     O                = Begin(&M);
-    BoxBrushAddRect(&O, -35 * ONE, -35 * ONE, 70 * ONE, 70 * ONE, 0);
+    BoxShapeAddRect(&O, -35 * ONE, -35 * ONE, 70 * ONE, 70 * ONE, 0);
     Fill(&B, &O, 0xFFE070A0u, 255);
 
     /* A star, a heart and a leaf. */
     O = Begin(&g_plain);
     for (uint32_t K = 0; K < 10u; K++) {
-        const uint32_t Turn = K * BOX_BRUSH_TURN / 10u + BOX_BRUSH_TURN * 3u / 4u;
+        const uint32_t Turn = K * BOX_SHAPE_TURN / 10u + BOX_SHAPE_TURN * 3u / 4u;
         const int32_t  R    = (K % 2u ? 20 : 48) * ONE;
-        const int32_t  X    = 840 * ONE + (int32_t)(((int64_t)R * BoxBrushCosine(Turn)) >> 16);
-        const int32_t  Y    = 112 * ONE + (int32_t)(((int64_t)R * BoxBrushSine(Turn)) >> 16);
-        if (K == 0) BoxBrushMoveTo(&O, X, Y);
-        else        BoxBrushLineTo(&O, X, Y);
+        const int32_t  X    = 840 * ONE + (int32_t)(((int64_t)R * BoxShapeCosine(Turn)) >> 16);
+        const int32_t  Y    = 112 * ONE + (int32_t)(((int64_t)R * BoxShapeSine(Turn)) >> 16);
+        if (K == 0) BoxShapeMoveTo(&O, X, Y);
+        else        BoxShapeLineTo(&O, X, Y);
     }
     Fill(&B, &O, 0xFFF8E060u, 255);
     O = Begin(&g_plain);
-    BoxBrushMoveTo(&O, 960 * ONE, 150 * ONE);
-    BoxBrushCubicTo(&O, 900 * ONE, 110 * ONE, 915 * ONE, 60 * ONE, 960 * ONE, 88 * ONE);
-    BoxBrushCubicTo(&O, 1005 * ONE, 60 * ONE, 1020 * ONE, 110 * ONE, 960 * ONE, 150 * ONE);
+    BoxShapeMoveTo(&O, 960 * ONE, 150 * ONE);
+    BoxShapeCubicTo(&O, 900 * ONE, 110 * ONE, 915 * ONE, 60 * ONE, 960 * ONE, 88 * ONE);
+    BoxShapeCubicTo(&O, 1005 * ONE, 60 * ONE, 1020 * ONE, 110 * ONE, 960 * ONE, 150 * ONE);
     Fill(&B, &O, 0xFFF04870u, 255);
     O = Begin(&g_plain);
-    BoxBrushMoveTo(&O, 1050 * ONE, 150 * ONE);
-    BoxBrushQuadTo(&O, 1050 * ONE, 70 * ONE, 1140 * ONE, 70 * ONE);
-    BoxBrushQuadTo(&O, 1140 * ONE, 150 * ONE, 1050 * ONE, 150 * ONE);
+    BoxShapeMoveTo(&O, 1050 * ONE, 150 * ONE);
+    BoxShapeQuadTo(&O, 1050 * ONE, 70 * ONE, 1140 * ONE, 70 * ONE);
+    BoxShapeQuadTo(&O, 1140 * ONE, 150 * ONE, 1050 * ONE, 150 * ONE);
     Fill(&B, &O, 0xFF70D060u, 255);
 
     /* A fan of lines, widths a pixel to six, and hairlines at shallow slopes. */
     for (uint32_t K = 0; K < 24u; K++) {
-        const uint32_t Turn = K * (BOX_BRUSH_TURN / 2u) / 24u;
-        const int32_t  X    = 150 * ONE + (int32_t)(((int64_t)120 * ONE * BoxBrushCosine(Turn)) >> 16);
-        const int32_t  Y    = 330 * ONE - (int32_t)(((int64_t)120 * ONE * BoxBrushSine(Turn)) >> 16);
+        const uint32_t Turn = K * (BOX_SHAPE_TURN / 2u) / 24u;
+        const int32_t  X    = 150 * ONE + (int32_t)(((int64_t)120 * ONE * BoxShapeCosine(Turn)) >> 16);
+        const int32_t  Y    = 330 * ONE - (int32_t)(((int64_t)120 * ONE * BoxShapeSine(Turn)) >> 16);
         O                   = Begin(&g_plain);
-        BoxBrushAddLine(&O, 150 * ONE, 330 * ONE, X, Y, (int32_t)(1 + K % 6u) * ONE, 1);
+        BoxStrokeLine(&O, 150 * ONE, 330 * ONE, X, Y, (int32_t)(1 + K % 6u) * ONE, BOX_STROKE_CAP_ROUND);
         Fill(&B, &O, 0xFFDDE6F0u, 255);
     }
     for (uint32_t K = 0; K < 12u; K++) {
         O = Begin(&g_plain);
-        BoxBrushAddLine(&O, 300 * ONE, (200 + 12 * K) * ONE, 560 * ONE, (200 + 12 * K) * ONE + (int32_t)K * 40, ONE, 0);
+        BoxStrokeLine(&O, 300 * ONE, (200 + 12 * K) * ONE, 560 * ONE, (200 + 12 * K) * ONE + (int32_t)K * 40, ONE, BOX_STROKE_CAP_BUTT);
         Fill(&B, &O, 0xFFDDE6F0u, 255);
     }
 
     /* Spheres from radial gradients, Duppo's way. */
-    const BoxBrushStop Shine[3] = { { 0, 0xFFFFF0FAu }, { UNIT / 2, 0xFFE89AD0u }, { UNIT, 0xFF9A5AC0u } };
+    const BoxPaintStop Shine[3] = { { 0, 0xFFFFF0FAu }, { UNIT / 2, 0xFFE89AD0u }, { UNIT, 0xFF9A5AC0u } };
     for (uint32_t K = 0; K < 3u; K++) {
         const int32_t CX = (660 + 130 * (int32_t)K) * ONE, CY = 300 * ONE, R = (30 + 20 * (int32_t)K) * ONE;
-        const int32_t G  = (int32_t)((int64_t)R * 2 * UNIT / BOX_BRUSH_GRADIENT);
-        BoxBrushPaint P  = { BOX_BRUSH_PAINT_RADIAL, 0, Shine, 3, { G, 0, 0, G, CX - R / 3, CY - R / 3 }, NULL, 0, 0, 0 };
+        const int32_t G  = (int32_t)((int64_t)R * 2 * UNIT / BOX_PAINT_GRADIENT);
+        BoxPaint      P  = { BOX_PAINT_RADIAL, 0, Shine, 3, { G, 0, 0, G, CX - R / 3, CY - R / 3 },
+                             NULL, 0, 0, 0, BOX_PAINT_PAD, 0, 0, 0 };
         O                = Begin(&g_plain);
-        BoxBrushAddEllipse(&O, CX, CY, R, R, 0);
+        BoxShapeAddEllipse(&O, CX, CY, R, R, 0);
         BoxBrushFill(&B.Canvas, &O, &P, 255);
     }
 
@@ -1008,7 +1026,7 @@ static int DrawSheet(const char *Path)
     const uint32_t Lights[3] = { 0xFFFF4040u, 0xFF40FF60u, 0xFF4080FFu };
     for (uint32_t K = 0; K < 3u; K++) {
         O = Begin(&g_plain);
-        BoxBrushAddEllipse(&O, (1080 + (K == 1 ? 40 : K == 2 ? -40 : 0)) * ONE, (280 + (K ? 60 : 0)) * ONE, 60 * ONE,
+        BoxShapeAddEllipse(&O, (1080 + (K == 1 ? 40 : K == 2 ? -40 : 0)) * ONE, (280 + (K ? 60 : 0)) * ONE, 60 * ONE,
                            60 * ONE, 0);
         Fill(&B, &O, Lights[K], 140);
     }
@@ -1021,17 +1039,17 @@ static int DrawSheet(const char *Path)
                                    (X == 0 || Y == 0 || X == 15 || Y == 15 ? 0x00FFFFFFu : 0);
     const int32_t Places[3][3] = { { 40, 480, UNIT }, { 100, 480, 4 * UNIT }, { 290, 470, 3 * UNIT } };
     for (uint32_t K = 0; K < 3u; K++) {
-        const BoxBrushMatrix S =
-            BoxBrushPlaced(Places[K][0] * ONE, Places[K][1] * ONE, Places[K][2], K == 2 ? BOX_BRUSH_TURN / 12u : 0);
-        BoxBrushPaint P = { BOX_BRUSH_PAINT_PICTURE, 0, NULL, 0, S, Picture, 16, 16, 16 };
+        const BoxMatrix S =
+            BoxMatrixPlaced(Places[K][0] * ONE, Places[K][1] * ONE, Places[K][2], K == 2 ? BOX_SHAPE_TURN / 12u : 0);
+        BoxPaint P = { BOX_PAINT_PICTURE, 0, NULL, 0, S, Picture, 16, 16, 16, BOX_PAINT_PAD, 0, 0, 0 };
         O               = Begin(&S);
-        BoxBrushAddRect(&O, 0, 0, 16 * ONE, 16 * ONE, 0);
+        BoxShapeAddRect(&O, 0, 0, 16 * ONE, 16 * ONE, 0);
         BoxBrushFill(&B.Canvas, &O, &P, 255);
     }
 
     /* Pixels one by one. */
     for (int32_t K = 0; K < 200; K++)
-        BoxBrushPixel(&B.Canvas, 540 + K, 560 + (int32_t)((BoxBrushSine((uint32_t)K * 900u) * 30) >> 16),
+        BoxBrushPixel(&B.Canvas, 540 + K, 560 + (int32_t)((BoxShapeSine((uint32_t)K * 900u) * 30) >> 16),
                       0xFFFFFFFFu, 255);
 
     Words(&B, 0, 540, 620, "imprint 7x16: The quick brown fox — съешь же ещё этих мягких булок ✓", 0xFFE0E0E0u);
@@ -1054,7 +1072,7 @@ typedef struct {
     BoxScenePlayer Player;
     BoxScenePose  *Start, *Now;
     BoxSceneLaid  *Laid, *Shown;
-    BoxBrushEdge  *Edges;
+    BoxShapeEdge  *Edges;
 } Stage;
 
 static void StageMake(Stage *T, const BoxScene *S, uint32_t Width, uint32_t Height)
@@ -1065,7 +1083,7 @@ static void StageMake(Stage *T, const BoxScene *S, uint32_t Width, uint32_t Heig
     T->Now   = calloc(Figures, sizeof(BoxScenePose));
     T->Laid  = calloc(Figures, sizeof(BoxSceneLaid));
     T->Shown = calloc(Figures, sizeof(BoxSceneLaid));
-    T->Edges = calloc(BOX_SCENE_EDGES, sizeof(BoxBrushEdge));
+    T->Edges = calloc(BOX_SCENE_EDGES, sizeof(BoxShapeEdge));
     if (!T->Start || !T->Now || !T->Laid || !T->Shown || !T->Edges) exit(2);
     BoxScenePlayBegin(&T->Player, S, &T->Board.Canvas, T->Start, T->Now, T->Laid, T->Shown, T->Edges);
 }
@@ -1083,7 +1101,7 @@ static void StageFree(Stage *T)
 /* The frame Ms into the act drawn where it changed; the pixels drawn. */
 static uint64_t Frame(Stage *T, uint32_t Ms)
 {
-    BoxBrushRect   Dirty[8];
+    BoxRect        Dirty[8];
     const uint32_t Count = BoxScenePlayAt(&T->Player, Ms, Dirty, 8);
     uint64_t       Drawn = 0;
     BoxScenePlayDraw(&T->Player, Dirty, Count);
@@ -1096,16 +1114,16 @@ static uint64_t Frame(Stage *T, uint32_t Ms)
  * the part of it the figure may cover. */
 static uint64_t FrameWork(Stage *T, uint32_t Ms)
 {
-    const BoxScene *S = T->Player.Scene;
-    BoxBrushRect    Dirty[8];
+    const BoxScene *S     = T->Player.Scene;
+    BoxRect         Dirty[8];
     const uint32_t  Count = BoxScenePlayAt(&T->Player, Ms, Dirty, 8);
     uint64_t        Work  = 0;
     for (uint32_t R = 0; R < Count; R++) {
-        const BoxBrushRect Rect = BoxBrushMeet(Dirty[R], T->Board.Canvas.Clip);
+        const BoxRect Rect = BoxRectMeet(Dirty[R], T->Board.Canvas.Clip);
         if (Rect.Width <= 0 || Rect.Height <= 0) continue;
         Work += (uint64_t)Rect.Width * (uint64_t)Rect.Height;
         for (uint32_t I = 0; I < S->Head->Figures; I++) {
-            const BoxBrushRect Met = BoxBrushMeet(T->Laid[I].Bounds, Rect);
+            const BoxRect Met = BoxRectMeet(T->Laid[I].Bounds, Rect);
             if (S->Figures[I].Kind != BOX_SCENE_GROUP && T->Laid[I].Opacity && Met.Width > 0 && Met.Height > 0)
                 Work += (uint64_t)Met.Width * (uint64_t)Met.Height;
         }
@@ -1202,16 +1220,16 @@ static void CheckRoom(const BoxScene *S)
     StageMake(&T, S, 7680, 4320);
     for (uint32_t Act = 0; Act < 2u; Act++) {
         if (Act) {
-            BoxBrushRect Ignored[8];
+            BoxRect Ignored[8];
             (void)BoxScenePlayAt(&T.Player, S->Head->Acts[0], Ignored, 8);
             BoxScenePlayAct(&T.Player, Act);
         }
         for (uint32_t Ms = 0; Ms <= S->Head->Acts[Act]; Ms += 100u) {
-            BoxBrushRect Ignored[8];
+            BoxRect Ignored[8];
             (void)BoxScenePlayAt(&T.Player, Ms, Ignored, 8);
             for (uint32_t I = 0; I < S->Head->Figures; I++) {
                 if (S->Figures[I].Kind == BOX_SCENE_GROUP || T.Laid[I].Opacity == 0) continue;
-                BoxBrushOutline O;
+                BoxShape O;
                 BoxSceneOutline(&T.Player, I, &O);
                 Looked++;
                 if (O.Spilled) Spilled++;
@@ -1368,7 +1386,7 @@ static void CheckRefusals(const uint8_t *Bytes, uint64_t Size, const BoxScene *S
     const BoxSceneHead *H       = S->Head;
     const uint64_t      Paints  = sizeof(BoxSceneHead);
     const uint64_t      Stops   = Paints + (uint64_t)H->Paints * sizeof(BoxScenePaint);
-    const uint64_t      Figures = Stops + (uint64_t)H->Stops * sizeof(BoxBrushStop);
+    const uint64_t      Figures = Stops + (uint64_t)H->Stops * sizeof(BoxPaintStop);
     const uint64_t      Pieces  = Figures + (uint64_t)H->Figures * sizeof(BoxSceneFigure);
     const uint64_t      Tracks  = Pieces + (uint64_t)H->Pieces * sizeof(BoxScenePiece);
     const uint64_t      Keys    = Tracks + (uint64_t)H->Tracks * sizeof(BoxSceneTrack);
@@ -1394,7 +1412,7 @@ static void CheckRefusals(const uint8_t *Bytes, uint64_t Size, const BoxScene *S
         { 16, 0x01000000u, 1, 0, 0, "its paper is no colour" },
         { 24, 0, 1, 0, 0, "its wait act has no length to go round" },
         { Paints, 9, 1, 0, 0, "a paint of no kind a scene has" },
-        { Stops, BOX_BRUSH_UNIT + 1u, 1, 0, 0, "a gradient's stops do not rise from 0 to 1" },
+        { Stops, BOX_SHAPE_UNIT + 1u, 1, 0, 0, "a gradient's stops do not rise from 0 to 1" },
         { Figures + 4u, 5, 1, 0, 0, "a figure's group is not a group laid before it" },
         { Figures + sizeof(BoxSceneFigure) + 4u, 1, 1, 0, 0, "a figure's group is not a group laid before it" },
         { Own + 8u, 0xFFFFu, 1, 0, 1, "a figure is painted with no paint the scene keeps" },

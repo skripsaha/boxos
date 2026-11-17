@@ -72,7 +72,7 @@ UTILS = create show files tag untag name trash delete assemble \
         calculate difference copy typer flame checksum passport aquarium \
         nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits \
         edit seek retag read inside settings autostart scratchpad garden gardener random sand coinflip dice casino seabattle whale hangman duppo \
-        glyphs
+        glyphs drawcheck
 
 .PHONY: all clean
 
@@ -508,6 +508,16 @@ $(HANGMAN_OBJS): CXXFLAGS += -I.
 hangman.elf: $(BOXLIB_START) $(HANGMAN_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(HANGMAN_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
+
+# drawcheck holds the drawing engine to itself on the machine it runs on: every
+# way the processor offers draws the plain way's pixels, and how long each
+# takes. Built -O2, as the engine it measures is.
+DRAWCHECK_DIR  = drawcheck
+DRAWCHECK_OBJS = $(addprefix $(DRAWCHECK_DIR)/,drawcheck.o scene.o speed.o)
+$(DRAWCHECK_OBJS): CXXFLAGS += -O2
+
+drawcheck.elf: $(BOXLIB_START) $(DRAWCHECK_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(DRAWCHECK_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 
 # glyphs is C++ in parts of its own directory; its table of Unicode's blocks
 # is written by tools/gen_unicode_blocks.py.
