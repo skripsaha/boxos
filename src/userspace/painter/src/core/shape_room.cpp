@@ -58,6 +58,7 @@ template <typename Draw> bool ShapeRoom::Build(const Transform &Place, Draw &&La
         Lay();
         BoxShapeClose(&Shape);
         if (!Shape.Short) return !Shape.Spilled;
+        if (Shape.Spilled || Shape.Wanted > BOX_SHAPE_EDGES_MOST) return false;
         Edges.resize(Shape.Wanted);
     }
 }

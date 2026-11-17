@@ -45,6 +45,11 @@
 /* The most lengths a dash pattern has. */
 #define BOX_STROKE_DASHES_MOST 64u
 
+/* The most pieces one stroke is drawn in — dashes of a hair along a road
+ * would be millions: past this the stroke is refused, never drawn for
+ * ever. */
+#define BOX_STROKE_PIECES_MOST (1u << 20)
+
 typedef struct BoxStroke {
     BoxShape      *Shape;
     int64_t        Half;            /* half the width, own places */
@@ -66,6 +71,7 @@ typedef struct BoxStroke {
     int            DashOn;
     int            StartOn;         /* the dash was on where the contour began */
     /* The piece being drawn: the line between two gaps. */
+    uint32_t       Pieces;          /* begun so far, of PIECES_MOST */
     int            Piece;
     int            Bent;            /* it has an edge; LastX, LastY its way */
     int64_t        LastX, LastY;
@@ -219,6 +225,7 @@ static inline void BoxStrokeCorner(BoxStroke *K, int64_t PX, int64_t PY, int64_t
  * it begins where the contour began. */
 static inline void BoxStrokeOpenPiece(BoxStroke *K, int64_t PX, int64_t PY, int64_t WayX, int64_t WayY)
 {
+    if (++K->Pieces > BOX_STROKE_PIECES_MOST) K->Shape->Spilled = 1;
     K->Piece = 1;
     K->Bent  = 0;
     if (K->Fresh) {
@@ -254,6 +261,7 @@ static inline int64_t BoxStrokeDashLength(const BoxStroke *K, uint32_t Index)
 static inline void BoxStrokeNextDash(BoxStroke *K, int64_t PX, int64_t PY, int64_t WayX, int64_t WayY)
 {
     do {
+        if (K->Shape->Spilled) return;
         if (K->DashOn) BoxStrokeEndPiece(K, PX, PY, WayX, WayY);
         K->DashIndex = (K->DashIndex + 1u) % K->DashPeriod;
         K->DashLeft  = BoxStrokeDashLength(K, K->DashIndex);
@@ -273,7 +281,7 @@ static inline void BoxStrokeEdge(BoxStroke *K, int64_t AX, int64_t AY, int64_t B
     const int64_t Length = BoxShapeApart(WayX, WayY);
     if (Length == 0 || K->Half == 0) return;
     int64_t Done = 0;
-    while (Done < Length) {
+    while (Done < Length && !K->Shape->Spilled) {
         const int64_t Step = K->Dashes ? BoxShapeLeast(K->DashLeft, Length - Done) : Length;
         const int64_t FromX = AX + BoxShapeRoundDiv(WayX * Done, Length), FromY = AY + BoxShapeRoundDiv(WayY * Done, Length);
         const int64_t ToX = AX + BoxShapeRoundDiv(WayX * (Done + Step), Length);
@@ -314,6 +322,7 @@ static inline void BoxStrokeBegin(BoxStroke *K, BoxShape *Shape, int32_t Width, 
     K->DashCount  = K->DashPeriod = 0;
     K->DashOffset = 0;
     K->Open       = 0;
+    K->Pieces     = 0;
     K->Piece      = 0;
     K->FirstWaits = 0;
     if (BoxShapeOwn(Shape, &Width, 1)) Shape->Rule = BOX_SHAPE_NONZERO;

@@ -48,6 +48,11 @@
 /* The most edges a round shape or a curve is broken into. */
 #define BOX_SHAPE_STEPS_MOST 2048u
 
+/* The most edges a hand that grows its room gives one shape — 64 MiB of
+ * them: a shape that wants more is refused, so no shape asks for memory or
+ * time past a bound. */
+#define BOX_SHAPE_EDGES_MOST (1u << 22)
+
 /* Which pixels a shape holds. */
 #define BOX_SHAPE_NONZERO 0u   /* where its contours wind round a pixel at all */
 #define BOX_SHAPE_EVENODD 1u   /* where they wind round it an odd number of times */

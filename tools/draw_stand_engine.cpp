@@ -399,8 +399,10 @@ void CheckEngine(Tally &Count)
                              !C->Fill(Path::Rect({0, 0, 1e7f, 10}), Fill(Colors::White)) &&
                              !C->Fill(Path::Rect({0, 0, 10, 10}), Fill(Colors::White), Transform::Scale(1000)) &&
                              !C->Fill(Path::Rect({0, 0, 10, 10}), Fill(Colors::White), Transform{NAN, 0, 0, 1, 0, 0}) &&
-                             !C->Fill(Path::Rect({0, 0, 10, 10}), Fill(Gradient::Linear({0, 0}, {10, 0}, {})));
-        Count.Check(Refused && C->Changed().Empty(), "refused whole, and nothing drawn: what a canvas or a shape cannot take");
+                             !C->Fill(Path::Rect({0, 0, 10, 10}), Fill(Gradient::Linear({0, 0}, {10, 0}, {}))) &&
+                             !C->Stroke(Path::Line({0, 10}, {30000, 10}), Stroke{1, LineCap::Butt, LineJoin::Miter, 4, {0.01f, 0.01f}},
+                                        Fill(Colors::White));
+        Count.Check(Refused && C->Changed().Empty(), "refused whole, and nothing drawn: what a canvas or a shape cannot take — dashes of a hair along 30000 pixels too");
     }
 }
 

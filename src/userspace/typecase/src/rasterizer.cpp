@@ -75,6 +75,7 @@ GlyphImage Rasterizer::Draw(const Outline &Shape, float Scale, float Rise, Bound
         }
         BoxShapeClose(&Drawn);
         if (!Drawn.Short) break;
+        if (Drawn.Spilled || Drawn.Wanted > BOX_SHAPE_EDGES_MOST) return Image;
         Edges.resize(Drawn.Wanted);
     }
     if (!BoxShapeDrawable(&Drawn)) return Image;
