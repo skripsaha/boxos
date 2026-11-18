@@ -303,7 +303,7 @@ void ConsoleModel::Draw(const ConsoleRun &Run)
 {
     switch (Run.kind) {
     case CONSOLE_RUN_CLEAR:
-        Clear(Run.fg, Run.bg);
+        Clear(BoxColorOnWire(Run.fg), BoxColorOnWire(Run.bg));
         return;
     case CONSOLE_RUN_STEP: {
         std::int32_t Delta = 0;
@@ -313,7 +313,7 @@ void ConsoleModel::Draw(const ConsoleRun &Run)
     }
     case CONSOLE_RUN_TEXT:
     case CONSOLE_RUN_HINT:
-        Write(Run.text, std::min<std::size_t>(Run.len, CONSOLE_RUN_TEXT_MAX), Run.fg, Run.bg);
+        Write(Run.text, std::min<std::size_t>(Run.len, CONSOLE_RUN_TEXT_MAX), BoxColorOnWire(Run.fg), BoxColorOnWire(Run.bg));
         return;
     default:
         return;

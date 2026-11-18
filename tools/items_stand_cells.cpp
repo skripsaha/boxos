@@ -194,14 +194,14 @@ void CheckLanguage(Tally &Count)
 /* ---- The frame ------------------------------------------------------------ */
 
 /* Text into the console as a lane says it. */
-void Say(ConsoleModel &Console, const std::string &Text, std::uint32_t Ink = COLOR_DEFAULT)
+void Say(ConsoleModel &Console, const std::string &Text, std::uint32_t Ink = COLOR_DEFAULT, std::uint32_t Paper = COLOR_DEFAULT)
 {
     for (std::size_t At = 0; At < Text.size(); At += CONSOLE_RUN_TEXT_MAX) {
         ConsoleRun Run{};
         Run.kind = CONSOLE_RUN_TEXT;
         Run.len  = static_cast<std::uint8_t>(std::min<std::size_t>(CONSOLE_RUN_TEXT_MAX, Text.size() - At));
         Run.fg   = Ink;
-        Run.bg   = COLOR_DEFAULT;
+        Run.bg   = Paper;
         std::memcpy(Run.text, Text.data() + At, Run.len);
         Console.Apply(Run, 1);
     }
@@ -293,7 +293,7 @@ void CheckFrame(Tally &Count)
         Flushed(Shown, Seen, Written);
     };
     Frame();
-    bool Whole = true, Glassy = true;
+    bool Whole = true, Glassy = true, Plain = true;
     int  Failures = 0;
     double ScrollMicros = 0, WholeMicros = 0;
     for (int Round = 0; Round < 120; Round++) {
@@ -319,7 +319,16 @@ void CheckFrame(Tally &Count)
             break;
         case 0:
         case 1:
-        case 2: Say(Console, RandomText(), Random() % 3 ? COLOR_DEFAULT : 0x0060E0A0u); break;
+        case 2: {
+            /* Text in colours of every kind a lane may send: the screen's
+             * own, a triple, and what the console's wire does not carry —
+             * see-through, and half see-through — which it holds as the
+             * screen's own. */
+            static const std::uint32_t Colours[] = {COLOR_DEFAULT, 0x0060E0A0u, 0x00302040u, COLOR_THROUGH,
+                                                    BoxColorTranslucent(0x00C04020u, 24)};
+            Say(Console, RandomText(), Colours[Random() % 5], Colours[Random() % 5]);
+            break;
+        }
         case 3:
             Mine[Random() % Mine.size()] = RandomCell();
             SayRows(Up, 3, Mine, 14);
@@ -368,9 +377,16 @@ void CheckFrame(Tally &Count)
                         Put ? "" : "a changed pixel never went onto the glass");
         Whole  = Whole && Alike;
         Glassy = Glassy && Put;
+        for (std::size_t I = 0; I < Grid->Count(); I++) {
+            const ItemCell &Cell = Grid->At(I);
+            Plain = Plain && ((Cell.Ink >> 24) == 0 || Cell.Ink == COLOR_DEFAULT) && ((Cell.Paper >> 24) == 0 || Cell.Paper == COLOR_DEFAULT);
+        }
     }
-    Count.Check(Whole, "frame: after each of 120 steps of typing, scrolling, a caret moved and areas changed — a plate kept still "
-                       "over the console among them — the mirror holds the very pixels of the glass composed whole");
+    Count.Check(Plain, "frame: the console holds every colour plain — a triple or the screen's own — see-through and half "
+                       "see-through ones said in its text among them");
+    Count.Check(Whole, "frame: after each of 120 steps of typing in colours of every kind, scrolling, a caret moved and areas "
+                       "changed — a plate kept still over the console among them — the mirror holds the very pixels of the glass "
+                       "composed whole");
     Count.Check(Glassy, "frame: every pixel that changed went onto the glass");
     const std::uint64_t Pixels = static_cast<std::uint64_t>(Glass.Width) * Glass.Height;
     Count.Check(Scrolls > 5, "frame: the console scrolled " + std::to_string(Scrolls) + " times in the steps");

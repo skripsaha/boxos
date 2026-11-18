@@ -185,8 +185,9 @@ Rect Lying(Rect Tile, std::span<items::AreaState *const> Programs) noexcept
 }
 
 /* Tile as the console alone shows it, written into the mirror as triples —
- * the page round its cells, and its cells (cells_draw.h LayCells): the very
- * pixels composing it would put there, the canvas and its light passed by. */
+ * the page round its cells, and its cells (cells_draw.h LayCells), each
+ * covering its pixels whole (console_model.h): the very pixels composing it
+ * would put there, the canvas and its light passed by. */
 void LayConsole(Mirror &Into, Rect Tile)
 {
     const Rect          Grid = g_cells.Grid;
@@ -208,12 +209,14 @@ void LayConsole(Mirror &Into, Rect Tile)
 
 /* What the areas lay opaque over the console — their items that cover
  * their rectangles whole (compositor.h Entry::Hides), as last composed:
- * what lies still when the console scrolls under it. */
+ * what lies still when the console scrolls under it. An area that moves —
+ * one in the console's flow, going up with it — lies still nowhere: it is
+ * composed again where it was and where it is. */
 void Covers(std::span<items::AreaState *const> Programs, std::vector<Rect> &Into)
 {
     Into.clear();
     for (const items::AreaState *Each : Programs) {
-        if (!Each->WasShown) continue;
+        if (!Each->WasShown || !Each->Shown || Each->Place != Each->Was) continue;
         for (const items::Entry &One : Each->List) {
             const Rect Still = One.Hides.Intersect(g_cells.Grid);
             if (One.What != items::Entry::Kind::Draw || Still.Empty() || Into.size() == KeptMost) continue;
@@ -558,7 +561,7 @@ FrameCost FrameCompose(Mirror &Into, std::span<items::AreaState *const> Programs
                     const Rect Tile{X, Y, std::min(TileSide, Each.X + Each.Width - X), std::min(TileSide, Each.Y + Each.Height - Y)};
                     /* What the areas draw composed; round it, the console
                      * alone written straight. */
-                    const Rect Lies = g_console->Opaque() ? Lying(Tile, Programs) : Tile;
+                    const Rect Lies = Lying(Tile, Programs);
                     if (!Lies.Empty()) {
                         g_compositor->Compose(*g_tile, painter::core::Point{Lies.X, Lies.Y}, Lies, g_order, g_theme);
                         Into.Put(*g_tile, Lies);

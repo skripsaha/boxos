@@ -11,7 +11,11 @@
 
 // The console: the programs' text from their lanes and the kernel's lines,
 // laid into its grid of cells (cell_grid.h) — the console's cells item, the
-// lowest thing on the glass — in the console's one order.
+// lowest thing on the glass — in the console's one order. Every colour it
+// holds is plain: a triple or the screen's own (box/color.h BoxColorOnWire,
+// the console's wire), and what is folded in is laid over it whole (CellOver)
+// — so a cell of the console covers its pixels whole, the same wherever it
+// stands on the glass.
 class ConsoleModel {
 public:
     // A console of Surface's size, written into it. Throws std::bad_alloc only.
