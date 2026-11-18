@@ -67,10 +67,10 @@ bool Prepare(const Item &Of, const Sources &From, Drawing &Into, bool Keep);
 // The item drawn onto Target, its own points laid on the glass by Place, at
 // Opacity, within the target's clip: from its kept picture where Place only
 // moves it at the scale it was kept at — or turns or scales it while an
-// animation does, the picture laid through Place, smooth — straight
-// otherwise.
+// animation does (Turning: of it, or of a group it lies in), the picture
+// laid through Place, smooth — straight otherwise.
 void Paint(const Item &Of, const Drawing &Drawn, const Sources &From, painter::core::Canvas &Target,
-           const painter::core::Transform &Place, float Opacity);
+           const painter::core::Transform &Place, float Opacity, bool Turning = false);
 
 // A group's clip: its rectangle of its size, its corners rounded; none for a
 // group of no size.

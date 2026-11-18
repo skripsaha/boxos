@@ -453,7 +453,7 @@ bool Prepare(const Item &Of, const Sources &From, Drawing &Into, bool Keep)
 }
 
 void Paint(const Item &Of, const Drawing &Drawn, const Sources &From, Canvas &Target, const Transform &Place,
-           float Opacity)
+           float Opacity, bool Turning)
 {
     if (Drawn.Kept && Upright(Place, Drawn.KeptScale)) {
         const PointF Corner = Place.Apply({0, 0});
@@ -462,7 +462,7 @@ void Paint(const Item &Of, const Drawing &Drawn, const Sources &From, Canvas &Ta
                     Opacity);
         return;
     }
-    if (Drawn.Kept && Of.Turning) {
+    if (Drawn.Kept && (Turning || Of.Turning)) {
         const Canvas &Kept = *Drawn.Kept;
         if (!Drawn.KeptPicture) {
             std::vector<painter::core::Pixel> Pixels;

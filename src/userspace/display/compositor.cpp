@@ -175,7 +175,7 @@ void Compositor::Vanish(AreaState &Area, const std::vector<std::uint32_t> &Items
 }
 
 void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, const Transform &Parent, float Opacity,
-                      bool Moved, bool Plain)
+                      bool Moved, bool Plain, bool Turning)
 {
     ProgramState &Program = Area.Program;
     for (std::uint32_t Id : Items) {
@@ -226,7 +226,7 @@ void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, 
         }
         const float Own = static_cast<float>(OpacityOf(Of->Said)) / ITEM_OPAQUE * std::min(Of->Seen, 1.0f);
         if (Of->Kind != ITEM_GROUP) {
-            Entry Made{Entry::Kind::Draw, Of, Place, Opacity * Own, Now, {}, Fade};
+            Entry Made{Entry::Kind::Draw, Of, Place, Opacity * Own, Now, {}, Fade, Turning || Of->Turning};
             if (Fade) {
                 /* Fading from another look: it hides nothing beneath. */
             } else if (Plain && Drawn.Opaque && Opacity * Own >= 1.0f && Place.B == 0 && Place.C == 0) {
@@ -250,7 +250,7 @@ void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, 
         const std::size_t Begun   = Area.List.size();
         if (Layered) Area.List.push_back(Entry{Entry::Kind::LayerBegin, Of, Place, Opacity * Own, {}, {}});
         if (Clipped) Area.List.push_back(Entry{Entry::Kind::ClipBegin, Of, Place, 1.0f, {}, {}});
-        Walk(Area, Of->Children, Place, Layered ? 1.0f : Opacity * Own, Shifted, Plain && !Layered && !Clipped);
+        Walk(Area, Of->Children, Place, Layered ? 1.0f : Opacity * Own, Shifted, Plain && !Layered && !Clipped, Turning || Of->Turning);
         if (Clipped) Area.List.push_back(Entry{Entry::Kind::ClipEnd, Of, Place, 1.0f, {}, {}});
         if (Layered) {
             Area.List.push_back(Entry{Entry::Kind::LayerEnd, Of, Place, Opacity * Own, {}, {}});
@@ -291,7 +291,7 @@ void Compositor::TakeOne(AreaState &Area, const Theme &Look)
         const Transform Root = Transform::Scale(Area.Program.From.Scale)
                                    .Then(Transform::Translate(static_cast<float>(Area.Place.X), static_cast<float>(Area.Place.Y)));
         try {
-            Walk(Area, Area.Items.Top(), Root, 1.0f, Placed, true);
+            Walk(Area, Area.Items.Top(), Root, 1.0f, Placed, true, false);
         } catch (...) {
             /* No room to compose it: the area shown as far as it was walked,
              * and walked again whole at the next frame. */
@@ -401,15 +401,15 @@ void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Cor
                     New = painter::core::Canvas::Make(static_cast<std::uint32_t>(Part.Width), static_cast<std::uint32_t>(Part.Height));
                 }
                 if (!Old || !New) {
-                    Paint(*One.Of, *One.Of->Drawn, Each.Program.From, Current(), Moved(One.Place, At()), One.Opacity);
+                    Paint(*One.Of, *One.Of->Drawn, Each.Program.From, Current(), Moved(One.Place, At()), One.Opacity, One.Turning);
                     break;
                 }
                 /* Fading from another look: the two looks drawn apart, the
                  * old one walked toward the new as far as it has faded, laid
                  * as one. */
                 const painter::core::Point Here{Part.X, Part.Y};
-                Paint(One.Fade->Was, *One.Fade->Was.Drawn, Each.Program.From, *Old, Moved(One.Place, Here), 1.0f);
-                Paint(*One.Of, *One.Of->Drawn, Each.Program.From, *New, Moved(One.Place, Here), 1.0f);
+                Paint(One.Fade->Was, *One.Fade->Was.Drawn, Each.Program.From, *Old, Moved(One.Place, Here), 1.0f, One.Turning);
+                Paint(*One.Of, *One.Of->Drawn, Each.Program.From, *New, Moved(One.Place, Here), 1.0f, One.Turning);
                 Old->FadeTo(*New, One.Fade->Share);
                 const painter::core::Point Under = At();
                 Current().Draw(*Old, painter::core::Point{Part.X - Under.X, Part.Y - Under.Y}, One.Opacity);
