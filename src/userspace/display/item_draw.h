@@ -48,6 +48,9 @@ struct Drawing {
     std::optional<painter::core::Canvas> Kept;       // its picture at the scale it was drawn at
     painter::core::Point              KeptAt{};      // the picture's corner from the item's, in pixels
     float                             KeptScale = 0;
+    // The same picture to lay through a turn or a scale while an animation
+    // turns or scales the item: made the first time it is wanted.
+    mutable std::shared_ptr<const painter::core::Picture> KeptPicture;
     bool                              Opaque = false;   // its plain colours cover its rectangle whole
     std::size_t                      *Held  = nullptr;  // the program's count of kept bytes
     std::size_t                       Bytes = 0;        // of which, this picture's
@@ -63,7 +66,9 @@ bool Prepare(const Item &Of, const Sources &From, Drawing &Into, bool Keep);
 
 // The item drawn onto Target, its own points laid on the glass by Place, at
 // Opacity, within the target's clip: from its kept picture where Place only
-// moves it at the scale it was kept at, straight otherwise.
+// moves it at the scale it was kept at — or turns or scales it while an
+// animation does, the picture laid through Place, smooth — straight
+// otherwise.
 void Paint(const Item &Of, const Drawing &Drawn, const Sources &From, painter::core::Canvas &Target,
            const painter::core::Transform &Place, float Opacity);
 

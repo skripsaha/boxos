@@ -433,6 +433,54 @@ void CheckWishes(Tally &Count)
                 "forever: back and forth, halfway back at 150 ms, still on after nine seconds, cut with its item and told so");
 }
 
+void CheckTurning(Tally &Count)
+{
+    /* Turned in time: its kept picture laid through the turn while it moves
+     * — near the very text drawn turned — and drawn sharp, pixel for pixel,
+     * once still. */
+    const auto Heading = [](Scene &On) {
+        On.Say.Create(1, gui::Kind::Text, ITEM_AREA, ITEM_TOP, gui::Role::Heading);
+        On.Say.Place(1, {110, 80});
+        On.Say.Anchor(1, {30, 12});
+        On.Say.Text(1, "Turning");
+    };
+    Scene On;
+    Heading(On);
+    On.At(Ms);
+    (void)On.Frame();
+    On.Say.Animate(Animation::Linear(400ms), [&] { On.Say.Turn(1, 90); });
+    On.At(1000 * Ms);
+    On.Shown.Advance(1200 * Ms, On.Look);
+    const bool Laid = On.Of(1).Turning;
+    (void)On.Frame();
+    Scene Drawn;
+    Heading(Drawn);
+    Drawn.Say.Turn(1, 45);
+    Drawn.At(Ms);
+    (void)Drawn.Frame();
+    double Off = 0;
+    for (std::uint32_t Y = 0; Y < 200; Y++)
+        for (std::uint32_t X = 0; X < 320; X++) {
+            const painter::core::Pixel A = On.Screen.Row(Y)[X], B = Drawn.Screen.Row(Y)[X];
+            Off += std::abs(A.Red - B.Red) + std::abs(A.Green - B.Green) + std::abs(A.Blue - B.Blue);
+        }
+    Off /= 320.0 * 200.0 * 3.0 * 65535.0;
+    On.Shown.Advance(1400 * Ms, On.Look);
+    (void)On.Frame();
+    painter::core::Canvas Fresh = *painter::core::Canvas::Make(320, 200);
+    Fresh.Clear(Color::Rgb(20, 22, 30));
+    items::AreaState *const Areas[] = {&On.Shown.Area};
+    On.Composer.Compose(Fresh, painter::core::Point{}, Rect{0, 0, 320, 200}, Areas, On.Look);
+    bool Sharp = !On.Of(1).Turning;
+    for (std::uint32_t Y = 0; Y < 200 && Sharp; Y++)
+        for (std::uint32_t X = 0; X < 320 && Sharp; X++) Sharp = On.Screen.Row(Y)[X] == Fresh.Row(Y)[X];
+    char Share[32];
+    std::snprintf(Share, sizeof Share, "%.4f", Off * 100);
+    Count.Check(Laid && Off < 0.002 && Sharp,
+                std::string("turning: halfway its kept picture laid through the turn, ") + Share +
+                    " of a hundred off the text drawn turned; once still drawn sharp, the very pixels composed whole");
+}
+
 }  // namespace
 
 void CheckMotion(Tally &Count)
@@ -447,6 +495,7 @@ void CheckMotion(Tally &Count)
     CheckSeen(Count);
     CheckFade(Count);
     CheckWishes(Count);
+    CheckTurning(Count);
 }
 
 }  // namespace stand

@@ -123,6 +123,7 @@ private:
     void          Finish(std::size_t Index, std::uint64_t At);
     void          End(std::size_t Index, std::uint64_t At, bool Finished) noexcept;
     float         Progress(const Animation &Of, std::uint64_t At, std::uint64_t &RunOf) const noexcept;
+    void          Turns(std::uint32_t Item) noexcept;
 
     Tree                                   &Items;
     Budget                                 &Held;

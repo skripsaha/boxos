@@ -81,6 +81,9 @@ struct Item {
     // while one fades it from another look: that look.
     float                                 Seen = 1;
     std::unique_ptr<Leaving, DropLeaving> Fading;
+    // While an animation turns or scales it: its kept picture laid through
+    // its place each frame, not drawn again.
+    bool                                  Turning = false;
 };
 
 // The look an item fades from: the item as it was, its drawing too — laid

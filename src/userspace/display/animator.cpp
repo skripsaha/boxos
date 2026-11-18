@@ -57,6 +57,13 @@ bool Fadable(std::uint16_t Property, std::uint8_t Kind) noexcept
     }
 }
 
+/* What turns or scales an item about its anchor: its kept picture laid
+ * through it while it moves. */
+bool Turns(std::uint16_t Property) noexcept
+{
+    return Property == ITEM_PROP_TURN || Property == ITEM_PROP_SCALE || Property == ITEM_PROP_ANCHOR;
+}
+
 /* Less motion's longest fade. */
 constexpr std::uint64_t LessLongest = 200000;
 
@@ -408,7 +415,19 @@ void Animator::Begin(std::size_t Index, std::uint64_t At, const Theme &Look)
         End(Index, At, true);
         return;
     }
+    if (Of.Goes == Way::Walks && items::Turns(Of.Property)) It->Turning = true;
     Show(Of, At, Look);
+}
+
+void Animator::Turns(std::uint32_t Item) noexcept
+{
+    items::Item *It = Items.Find(Item);
+    if (!It || !It->Turning) return;
+    for (const Animation &Each : All)
+        if (Each.Item == Item && Each.Stage == State::Under && Each.Goes == Way::Walks && items::Turns(Each.Property)) return;
+    /* Still at last: drawn sharp again where it lies. */
+    It->Turning = false;
+    Items.Recompose(Item);
 }
 
 void Animator::Finish(std::size_t Index, std::uint64_t At)
@@ -437,7 +456,9 @@ void Animator::End(std::size_t Index, std::uint64_t At, bool Finished) noexcept
     Held.Animations--;
     Held.AnimationBytes -= Of.Value.size();
     const std::uint32_t Number = Of.How.Number, Item = Of.Item;
+    const bool          Turned = items::Turns(Of.Property);
     All.erase(All.begin() + static_cast<std::ptrdiff_t>(Index));
+    if (Turned) Turns(Item);
     if (Number == 0) return;
     const auto Found = ByNumber.find(Number);
     if (Found == ByNumber.end()) return;
