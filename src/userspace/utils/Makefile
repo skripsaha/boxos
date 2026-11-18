@@ -551,7 +551,10 @@ $(sort $(EDIT_OBJS) $(READ_OBJS) $(CASINO_OBJS) $(SEABATTLE_OBJS)): CXXFLAGS += 
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
--include $(wildcard *.d $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.d $(EDIT_DIR)/*.d $(READ_DIR)/*.d $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.d $(GARDEN_DIR)/*.d $(MEMMAP_DIR)/*.d $(WIZARD_DIR)/*.d $(RANDOM_DIR)/*.d $(SAND_DIR)/*.d $(FOREST_DIR)/*.d $(COINFLIP_DIR)/*.d $(DICE_DIR)/*.d $(ORBITS_DIR)/*.d $(CASINO_DIR)/*.d $(SEABATTLE_DIR)/*.d $(WHALE_DIR)/*.d $(HANGMAN_DIR)/*.d $(DUPPO_DIR)/*.d)
+# Every part's, in every directory of the utilities: one listed by name is one
+# a new directory is missing from — and an object built against a header that
+# changed since, a class of another size in its frames than in its own code.
+-include $(wildcard *.d */*.d)
 
 $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 	@mkdir -p $(dir $@)

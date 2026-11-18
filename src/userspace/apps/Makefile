@@ -188,7 +188,9 @@ cxxtest.elf: $(BOXLIB_START) cxxtest.o cxxtest_traits.o $(BOXCXX) $(BOXLIB) $(BO
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
--include $(wildcard *.d) $(wildcard commands/*.d)
+# Every part's, in every directory of the apps: one listed by name is one a
+# new directory is missing from.
+-include $(wildcard *.d */*.d)
 
 # ---- boxlib_start entry (shared with shell) ----
 $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
