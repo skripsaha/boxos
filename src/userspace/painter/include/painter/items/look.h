@@ -1,5 +1,5 @@
-#ifndef BOXOS_DISPLAY_ITEM_LOOK_H
-#define BOXOS_DISPLAY_ITEM_LOOK_H
+#ifndef PAINTER_ITEMS_LOOK_H
+#define PAINTER_ITEMS_LOOK_H
 
 // How an item looks: each property as the program said it, or — unsaid — as
 // its role is drawn by the theme, or else as the system draws it. The theme is
@@ -15,10 +15,10 @@
 #include <vector>
 
 #include "box/items.h"
-#include "item_wire.h"
+#include "painter/items/properties.h"
 #include "painter/core/color.h"
 
-namespace items {
+namespace painter::items {
 
 struct Theme {
     painter::core::Color Text   = painter::core::Color::Rgb(0xC0, 0xC0, 0xC0);
@@ -50,6 +50,6 @@ TextStyle StyleOf(const Properties &Said, std::uint16_t Role, const Theme &With)
 std::uint16_t OpacityOf(const Properties &Said) noexcept;
 bool          HiddenOf(const Properties &Said) noexcept;
 
-}  // namespace items
+}  // namespace painter::items
 
 #endif

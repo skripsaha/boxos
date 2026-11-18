@@ -11,6 +11,7 @@
 #include "painter/core/path.h"
 #include "painter/core/shadow.h"
 #include "painter/core/text.h"
+#include "painter/items/text.h"
 #include "typecase/text.h"
 
 namespace items {
@@ -160,50 +161,6 @@ Path OutlineOf(const Item &Of, PointF Size)
     if (Round[0] == 0 && Round[1] == 0 && Round[2] == 0 && Round[3] == 0) return Path::Rect(Box);
     return Path::RoundedRect(Box, painter::core::Corners{Round[0] * PerPoint, Round[1] * PerPoint, Round[2] * PerPoint,
                                                          Round[3] * PerPoint});
-}
-
-typecase::Style StyleFor(const TextStyle &Of, bool Whole)
-{
-    typecase::Style Made;
-    if (Whole || (Of.Said & ITEM_SAYS_FAMILY)) Made.Family = Of.Family;
-    if (Whole || (Of.Said & ITEM_SAYS_SIZE)) Made.Size = static_cast<float>(Of.Size) * PerPoint;
-    if (Whole || (Of.Said & ITEM_SAYS_WEIGHT)) Made.Weight = Of.Weight;
-    if (Whole || (Of.Said & ITEM_SAYS_ITALIC)) Made.Italic = Of.Italic;
-    if (Whole || (Of.Said & ITEM_SAYS_SPACING)) Made.LetterSpacing = static_cast<float>(Of.Spacing) * PerPoint;
-    if ((Whole && Of.LineHeight > 0) || (Of.Said & ITEM_SAYS_LINE_HEIGHT))
-        Made.LineHeight = static_cast<float>(Of.LineHeight) / ITEM_ONE;
-    if (Whole || (Of.Said & ITEM_SAYS_UNDERLINE)) Made.Underline = Of.Underline;
-    if (Whole || (Of.Said & ITEM_SAYS_STRIKE)) Made.Strike = Of.Strike;
-    return Made;
-}
-
-/* A text item laid out in its size: its stretches' colours as inks. */
-void LayText(const Item &Of, const Sources &From, Drawing &Into)
-{
-    const TextStyle Base = StyleOf(Of.Said, Of.Role, *From.Look);
-    typecase::Text  Text = typecase::Text::Of(Of.Said.Text ? *Of.Said.Text : std::string(), StyleFor(Base, true));
-    Text.Secret          = Of.Said.Secret && *Of.Said.Secret;
-    Into.Inks.clear();
-    if (Of.Said.Spans)
-        for (const Span &Each : *Of.Said.Spans) {
-            typecase::Span Made{Each.From, Each.To, StyleFor(Each.Style, false)};
-            if (Each.Style.Said & ITEM_SAYS_COLOR) {
-                Into.Inks.push_back(ColorOf(Each.Style.Color));
-                Made.Style.Ink = static_cast<std::uint32_t>(Into.Inks.size());
-            }
-            Text.Spans.push_back(std::move(Made));
-        }
-    typecase::TextBox Box;
-    const ItemPoint   Said = Of.Said.Size ? *Of.Said.Size : ItemPoint{ITEM_BY_CONTENT, ITEM_BY_CONTENT};
-    if (Said.X != ITEM_BY_CONTENT) Box.Width = static_cast<float>(Said.X) * PerPoint;
-    if (Said.Y != ITEM_BY_CONTENT) Box.Height = static_cast<float>(Said.Y) * PerPoint;
-    if (Of.Said.Box) {
-        Box.Align    = static_cast<typecase::TextAlign>(Of.Said.Box->Align);
-        Box.Overflow = static_cast<typecase::TextOverflow>(Of.Said.Box->Overflow);
-        Box.Wrap     = Of.Said.Box->Wrap != 0;
-        Box.MaxLines = Of.Said.Box->MaxLines;
-    }
-    Into.Laid.emplace(typecase::Layout::Of(Text, Box, From.Book()));
 }
 
 /* What a text is filled with: its fills said, else its style's colour, else
@@ -446,9 +403,10 @@ bool Prepare(const Item &Of, const Sources &From, Drawing &Into, bool Keep)
     Into.Kept.reset();
     Into.Measured = {};
     if (Of.Kind == ITEM_TEXT) {
-        LayText(Of, From, Into);
-        Into.Measured = ItemPoint{static_cast<std::int32_t>(std::lround(Into.Laid->Width() * ITEM_POINT)),
-                                  static_cast<std::int32_t>(std::lround(Into.Laid->Height() * ITEM_POINT))};
+        painter::items::LaidText Laid = painter::items::LayText(Of.Said, Of.Role, *From.Look, From.Book());
+        Into.Laid.emplace(std::move(Laid.Laid));
+        Into.Inks     = std::move(Laid.Inks);
+        Into.Measured = Laid.Measured;
     } else if (Of.Kind == ITEM_PICTURE && Of.Said.Picture && From.PictureOf) {
         if (const auto Picture = From.PictureOf(Of.Said.Picture->Block))
             Into.Measured = ItemPoint{static_cast<std::int32_t>(std::lround(Picture->Width() * ITEM_POINT / From.Scale)),

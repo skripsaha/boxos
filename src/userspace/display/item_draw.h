@@ -17,11 +17,11 @@
 #include <vector>
 
 #include "cells_draw.h"
-#include "item_look.h"
 #include "item_tree.h"
 #include "painter/core/canvas.h"
 #include "painter/core/picture.h"
 #include "painter/core/transform.h"
+#include "painter/items/look.h"
 #include "typecase/fonts.h"
 #include "typecase/layout.h"
 

@@ -6,11 +6,12 @@
 #     tools/items_stand.sh            every check, natively and as x86-64
 #     tools/items_stand.sh sheet OUT  a scene of items composed, a PPM
 #
-# The display's parts that need no system — the language read (item_wire),
-# the items' tree, their look, their drawing, the ring read (item_reception),
-# the compositor, the cells and their look (cell_grid, cells_draw), the
-# console (console_model), the mirror of the glass and the frame — with
-# Painter's engine, its writer of changes (painter/gui/changes.h), Typecase,
+# The display's parts that need no system — the items' tree, their drawing,
+# the ring read (item_reception), the compositor, the cells and their look
+# (cell_grid, cells_draw), the console (console_model), the mirror of the
+# glass and the frame — with Painter's engine, its writer of changes
+# (painter/gui/changes.h), the language read, an item's look and a text laid
+# out (painter/items), Typecase,
 # the typesetter on the imprint and the ring's one rule (boxlib
 # items_ring.c). The checks (tools/items_stand*.cpp): what a program says
 # arrives as it said it, a step whole or not at all, a full ring's last
@@ -32,9 +33,9 @@ trap 'rm -rf "$WORK"' EXIT
 
 D=src/userspace/display
 P=src/userspace/painter
-SOURCES="tools/items_stand*.cpp $D/item_wire.cpp $D/item_tree.cpp $D/item_look.cpp $D/item_draw.cpp $D/item_reception.cpp \
+SOURCES="tools/items_stand*.cpp $D/item_tree.cpp $D/item_draw.cpp $D/item_reception.cpp \
          $D/compositor.cpp $D/cell_grid.cpp $D/cells_draw.cpp $D/console_model.cpp $D/mirror.cpp $D/frame.cpp \
-         $D/typesetter.cpp $(ls $P/src/core/*.cpp | grep -v system_fonts.cpp) $P/src/gui/changes.cpp \
+         $D/typesetter.cpp $(ls $P/src/core/*.cpp | grep -v system_fonts.cpp) $P/src/gui/changes.cpp $P/src/items/*.cpp \
          src/userspace/typecase/src/*.cpp"
 INCLUDES="-Isrc/include -I$P/include -I$P/src/core -Isrc/userspace/typecase/include -Isrc/userspace/boxlib/include -I$D -Itools \
           -I$WORK"

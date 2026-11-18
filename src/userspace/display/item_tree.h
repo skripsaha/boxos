@@ -26,10 +26,14 @@
 #include "box/error.h"
 #include "box/items.h"
 #include "cell_grid.h"
-#include "item_wire.h"
 #include "painter/core/geometry.h"
+#include "painter/items/properties.h"
 
 namespace items {
+
+// The language's values as read, how an item looks and a text laid out are
+// Painter's (painter/items): the very code a program measures its texts with.
+using namespace painter::items;
 
 // What the drawing keeps of an item — its picture, its laid text — kept with
 // it and let go with it (compositor.cpp).
