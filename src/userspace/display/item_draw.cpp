@@ -349,9 +349,10 @@ bool Straight(const Item &Of)
     return true;
 }
 
-/* What an item covers in its own points: its outline's box, grown by its
- * stroke and its shadows. */
-RectF CoverOf(const Item &Of, const Drawing &Drawn, PointF Size)
+/* What an item covers in its own points, drawn at Scale: its outline's box,
+ * grown by its stroke and its shadows — a shadow as far as its blur reaches on
+ * the glass. */
+RectF CoverOf(const Item &Of, const Drawing &Drawn, PointF Size, float Scale)
 {
     RectF Box{0, 0, Size.X, Size.Y};
     if (Of.Kind == ITEM_GROUP) return RectF{};
@@ -373,7 +374,8 @@ RectF CoverOf(const Item &Of, const Drawing &Drawn, PointF Size)
     RectF Whole = Box;
     for (const Shadow &Each : ShadowsOf(Of.Said, Of.Role)) {
         if (Each.Inner) continue;
-        const float Reach = static_cast<float>(Each.Blur + std::max(Each.Spread, 0)) * PerPoint;
+        const float Reach = static_cast<float>(EngineShadow(Each, Scale).Reach()) / Scale +
+                            static_cast<float>(std::max(Each.Spread, 0)) * PerPoint;
         const RectF Cast{Box.X + Each.Offset.X * PerPoint - Reach, Box.Y + Each.Offset.Y * PerPoint - Reach,
                          Box.Width + 2 * Reach, Box.Height + 2 * Reach};
         const float Left = std::min(Whole.X, Cast.X), Top = std::min(Whole.Y, Cast.Y);
@@ -462,7 +464,7 @@ bool Prepare(const Item &Of, const Sources &From, Drawing &Into, bool Keep)
                                       static_cast<std::int32_t>(std::lround(Page->Height() * ITEM_POINT / From.Scale))};
     }
     const PointF Size = SizeOf(Of, Into);
-    Into.Own    = CoverOf(Of, Into, Size);
+    Into.Own    = CoverOf(Of, Into, Size, From.Scale);
     Into.Opaque = OpaqueOf(Of, From);
 
     if (Keep && !Straight(Of) && !Into.Own.Empty()) {

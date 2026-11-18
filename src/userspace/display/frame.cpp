@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -103,6 +104,35 @@ bool HoldCaret(std::span<items::AreaState *const> Programs)
     g_holder_area = Now.Area;
     g_holder_item = Now.Item;
     return true;
+}
+
+/* Where what an area drew lies on the glass, told to Each: every item's
+ * pixels as the compositor last laid them — of cells, only those that show
+ * something, and the caret the glass shows, for a cell that shows nothing
+ * shows what lies beneath it. */
+template <typename Telling> void Drawn(const items::AreaState &Area, Telling &&Each)
+{
+    for (const items::Entry &One : Area.List) {
+        if (One.What != items::Entry::Kind::Draw) continue;
+        const items::Item &Of = *One.Of;
+        if (Of.Kind != ITEM_CELLS || !Of.Grid || !items::Upright(One.Place, Area.Program.From.Scale)) {
+            Each(One.Device);
+            continue;
+        }
+        const painter::core::PointF Corner = One.Place.Apply({0, 0});
+        const auto                  X      = static_cast<std::int32_t>(std::floor(Corner.X + 0.5f));
+        const auto                  Y      = static_cast<std::int32_t>(std::floor(Corner.Y + 0.5f));
+        const auto                  Pixels = [&](Rect Cells) {
+            return Rect{X + Cells.X * g_cells.Width, Y + Cells.Y * g_cells.Height, Cells.Width * g_cells.Width,
+                        Cells.Height * g_cells.Height}
+                .Intersect(One.Device);
+        };
+        if (const Rect Cells = Of.Grid->Showing(); !Cells.Empty()) Each(Pixels(Cells));
+        if (Of.Grid->Holds() && Of.Grid->CaretShown()) {
+            const ItemCaret Caret = Of.Grid->Caret();
+            Each(Pixels(Rect{static_cast<std::int32_t>(Caret.Col), static_cast<std::int32_t>(Caret.Row), 1, 1}));
+        }
+    }
 }
 
 /* ---- A text page --------------------------------------------------------- */
@@ -316,9 +346,9 @@ FrameCost FrameCompose(Mirror &Into, std::span<items::AreaState *const> Programs
     }
 
     /* The console scrolled: what the glass shows of it moves with it, and
-     * only what came in is drawn — and the areas over it, where they lay and
-     * where the text under them went. Under an area that hides it whole,
-     * nothing of the console is seen, nor moved. */
+     * only what came in is drawn — and what the areas over it drew, where it
+     * lay and where the text under it went. Under an area that hides it
+     * whole, nothing of the console is seen, nor moved. */
     const std::uint32_t Scrolled = g_console->TakeScrolled();
     if (g_compositor->Hidden(g_cells.Grid, Programs)) {
         g_console->TakeMarks([](std::uint32_t, std::uint32_t, std::uint32_t) {});
@@ -328,10 +358,12 @@ FrameCost FrameCompose(Mirror &Into, std::span<items::AreaState *const> Programs
             Into.Shift(g_cells.Grid, Up);
             for (items::AreaState *Each : Programs) {
                 if (!Each->WasShown) continue;
-                const Rect Was = Each->Was.Intersect(g_cells.Grid);
-                if (Was.Empty()) continue;
-                g_compositor->Damage(Was);
-                g_compositor->Damage(Rect{Was.X, Was.Y - Up, Was.Width, Was.Height}.Intersect(g_cells.Grid));
+                Drawn(*Each, [&](Rect Where) {
+                    Where = Where.Intersect(g_cells.Grid);
+                    if (Where.Empty()) return;
+                    g_compositor->Damage(Where);
+                    g_compositor->Damage(Rect{Where.X, Where.Y - Up, Where.Width, Where.Height}.Intersect(g_cells.Grid));
+                });
             }
         }
         if (g_console->Changed()) g_console_area->Items.CellsChanged(ConsoleItem);

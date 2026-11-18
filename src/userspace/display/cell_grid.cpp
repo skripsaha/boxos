@@ -20,6 +20,11 @@ bool SeeThroughPaper(std::uint32_t Paper) noexcept
     return Paper == COLOR_THROUGH || BoxColorIsTranslucent(Paper);
 }
 
+bool CellShows(const ItemCell &Cell) noexcept
+{
+    return BoxColorOpacity(Cell.Ink) != 0 || BoxColorOpacity(Cell.Paper) != 0 || Cell.Mark != ITEM_MARK_NONE;
+}
+
 CellGrid::CellGrid(std::uint32_t Cols, std::uint32_t Rows, const ItemCell &Blank)
     : Wide(Cols), High(Rows), All(static_cast<std::size_t>(Cols) * Rows, Blank), Marks(Rows)
 {
@@ -30,6 +35,24 @@ CellGrid::CellGrid(std::uint32_t Cols, std::uint32_t Rows, const ItemCell &Blank
 void CellGrid::Counted(const ItemCell &Was, const ItemCell &Now) noexcept
 {
     SeeThrough = SeeThrough - SeeThroughPaper(Was.Paper) + SeeThroughPaper(Now.Paper);
+    ShowsKnown = false;
+}
+
+painter::core::Rect CellGrid::Showing() const noexcept
+{
+    if (ShowsKnown) return Shows;
+    std::uint32_t Left = Wide, Top = High, Right = 0, Bottom = 0;
+    for (std::uint32_t Row = 0; Row < High; Row++)
+        for (std::uint32_t Col = 0; Col < Wide; Col++) {
+            if (!CellShows(All[static_cast<std::size_t>(Row) * Wide + Col])) continue;
+            Left = std::min(Left, Col), Right = std::max(Right, Col + 1);
+            Top = std::min(Top, Row), Bottom = std::max(Bottom, Row + 1);
+        }
+    Shows      = Left < Right ? painter::core::Rect{static_cast<std::int32_t>(Left), static_cast<std::int32_t>(Top),
+                                                    static_cast<std::int32_t>(Right - Left), static_cast<std::int32_t>(Bottom - Top)}
+                              : painter::core::Rect{};
+    ShowsKnown = true;
+    return Shows;
 }
 
 void CellGrid::Mark(std::uint32_t Col, std::uint32_t Row, std::uint32_t Count) noexcept

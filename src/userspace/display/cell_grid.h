@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "box/items.h"
+#include "painter/core/geometry.h"
 
 class CellGrid {
 public:
@@ -55,6 +56,9 @@ public:
 
     // Whether every cell's paper covers what lies beneath it.
     bool Opaque() const noexcept { return SeeThrough == 0; }
+    // The least rectangle of cells holding every cell that shows something —
+    // in cells; none when every cell shows nothing.
+    painter::core::Rect Showing() const noexcept;
 
     // Whether anything changed since it was last taken.
     bool Changed() const noexcept { return MarkedRows != 0 || Moved != 0; }
@@ -89,6 +93,8 @@ private:
     std::uint32_t                                       MarkedRows = 0;
     std::uint32_t                                       Moved      = 0;   // rows scrolled up since asked
     std::size_t                                         SeeThrough = 0;   // cells whose paper lets through
+    mutable painter::core::Rect                         Shows{};          // Showing, as last worked out
+    mutable bool                                        ShowsKnown = false;
     ItemCaret                                           Said{};
     bool                                                Held = false;
 };
@@ -103,6 +109,10 @@ struct Caret {
 // Whether a cell's paper lets what lies beneath it show: see-through, or a
 // colour at an opacity.
 bool SeeThroughPaper(std::uint32_t Paper) noexcept;
+
+// Whether a cell shows anything of its own: a colour not wholly see-through,
+// or a mark.
+bool CellShows(const ItemCell &Cell) noexcept;
 
 // What a cell shows laid over the cell beneath it on a page of cells: its
 // own colours, each COLOR_THROUGH one the paper of the cell beneath and each

@@ -1,6 +1,7 @@
 #ifndef PAINTER_CORE_SHADOW_H
 #define PAINTER_CORE_SHADOW_H
 
+#include <cstdint>
 #include <optional>
 
 #include "painter/core/color.h"
@@ -26,6 +27,9 @@ struct Shadow {
     // while the shape keeps its size, then laid any number of times
     // (Canvas::DrawShadow); none when the shape is refused.
     std::optional<Mask> MaskFor(const Path &Shape, const Transform &Place = {}) const;
+    // How many whole pixels its blur reaches past the shape grown and moved:
+    // what the shadow may cover beyond it.
+    std::int32_t Reach() const noexcept;
 };
 
 }  // namespace painter::core

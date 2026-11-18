@@ -92,4 +92,6 @@ std::optional<Mask> Shadow::MaskFor(const Path &Shape, const Transform &Place) c
     return Made;
 }
 
+std::int32_t Shadow::Reach() const noexcept { return engine::BoxesFor(Blur / 2.0f).Reach + 1; }
+
 }  // namespace painter::core

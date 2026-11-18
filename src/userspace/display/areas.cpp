@@ -721,12 +721,6 @@ void Spell(std::string &Text, std::uint32_t Character)
     Text += Length == static_cast<std::size_t>(-1) ? std::string_view{"\uFFFD"} : std::string_view{Spelled, Length};
 }
 
-/* Whether a cell shows something of its own. */
-bool Covers(const ItemCell &Cell) noexcept
-{
-    return BoxColorOpacity(Cell.Ink) != 0 || BoxColorOpacity(Cell.Paper) != 0 || Cell.Mark != ITEM_MARK_NONE;
-}
-
 /* The fold's text, as the log ring will have it: what the cells themselves
  * show — the glyph where a cell shows something, a blank where it lets the
  * text beneath through, for that text is in the account already — each row
@@ -744,7 +738,7 @@ std::string FoldText(const AreaFold &Fold, std::uint32_t ConsoleCaretX)
     };
     const auto Shows = [&](std::uint32_t Row) {
         for (std::uint32_t Col = 0; Col < Fold.Width; Col++)
-            if (Covers(At(Col, Row)) && !Blank(At(Col, Row).Character)) return true;
+            if (CellShows(At(Col, Row)) && !Blank(At(Col, Row).Character)) return true;
         return false;
     };
     std::uint32_t First = 0;
@@ -758,7 +752,7 @@ std::string FoldText(const AreaFold &Fold, std::uint32_t ConsoleCaretX)
         if (Row != First) Text += '\n';
         std::size_t Kept = Text.size();
         for (std::uint32_t Col = 0; Col < Fold.Width; Col++) {
-            const std::uint32_t Character = Covers(At(Col, Row)) ? At(Col, Row).Character : U' ';
+            const std::uint32_t Character = CellShows(At(Col, Row)) ? At(Col, Row).Character : U' ';
             Spell(Text, Character);
             if (!Blank(Character)) Kept = Text.size();
         }
@@ -845,7 +839,7 @@ std::expected<AreaFold, error_t> AreasCommit(std::uint32_t Pid, std::uint32_t Ge
                         if (X < 0 || Y < 0 || X >= static_cast<std::int32_t>(Fold.Width) || Y >= static_cast<std::int32_t>(Fold.Height))
                             continue;
                         const ItemCell &Above = Grid.At(Col, Row);
-                        if (!Covers(Above)) continue;
+                        if (!CellShows(Above)) continue;
                         ItemCell &Into = Fold.Cells[static_cast<std::size_t>(Y) * Fold.Width + static_cast<std::size_t>(X)];
                         ItemCell  Shown;
                         if (CellOver(Above, Into, Look.Page, Shown) || Above.Mark != ITEM_MARK_NONE) Into = Shown;
