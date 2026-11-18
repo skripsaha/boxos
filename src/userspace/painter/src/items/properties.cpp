@@ -1,15 +1,15 @@
 /*
- * item_wire.cpp — the items' language read: a property's value held to its
- * bounds. See item_wire.h.
+ * properties.cpp — the items' language read: a property's value held to its
+ * bounds. See painter/items/properties.h.
  */
 
-#include "item_wire.h"
+#include "painter/items/properties.h"
 
 #include <algorithm>
 #include <cstring>
 #include <utility>
 
-namespace items {
+namespace painter::items {
 
 namespace {
 
@@ -442,4 +442,4 @@ std::size_t TextBytes(const Properties &Of) noexcept
     return Total;
 }
 
-}  // namespace items
+}  // namespace painter::items

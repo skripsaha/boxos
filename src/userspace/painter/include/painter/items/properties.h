@@ -1,8 +1,9 @@
-#ifndef BOXOS_DISPLAY_ITEM_WIRE_H
-#define BOXOS_DISPLAY_ITEM_WIRE_H
+#ifndef PAINTER_ITEMS_PROPERTIES_H
+#define PAINTER_ITEMS_PROPERTIES_H
 
 // The items' language read (box/items.h): a property's value as the program
-// wrote it, held to its bounds and kept as the display keeps it. Nothing in
+// wrote it, held to its bounds and kept as the display keeps it — and as a
+// program reads back what it said, to measure it as the display lays it. Nothing in
 // the bytes is trusted — every count, length and number is checked before it
 // is used, and a value that breaks the language is refused whole, its reason
 // said, the property left as it was.
@@ -17,7 +18,7 @@
 #include "box/error.h"
 #include "box/items.h"
 
-namespace items {
+namespace painter::items {
 
 struct Fill {
     std::uint8_t          Kind    = ITEM_FILL_COLOR;
@@ -86,7 +87,7 @@ struct PictureOf {
 };
 
 // Every property an item may say, each unsaid until it is: what is unsaid is
-// its role's, as the theme draws it (item_look.h).
+// its role's, as the theme draws it (painter/items/look.h).
 struct Properties {
     std::optional<ItemPoint>                   Place, Size, Scale, Anchor;
     std::optional<std::uint16_t>               Opacity;
@@ -120,6 +121,6 @@ error_t Unsay(std::uint16_t Property, Properties &Into) noexcept;
 // the program's bound (ITEM_TEXTS_MOST).
 std::size_t TextBytes(const Properties &Of) noexcept;
 
-}  // namespace items
+}  // namespace painter::items
 
 #endif

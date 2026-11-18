@@ -12,7 +12,10 @@
  *   space                  the tour, and out of it     r     the whole set again
  *   h                      the bar, hidden and shown   q, ESC  leave
  *
- * The working out and the colours are mandelbrot_paint.cpp. A move restarts
+ * The working out and the colours are mandelbrot_paint.cpp. On a framebuffer
+ * the set is drawn in the screen's own pixels, on a canvas of the program's
+ * (painter::gui), its bar a line of words on a plate beneath; on a text page
+ * in half-block pixels, two to a cell (painter::tui). A move restarts
  * the picture coarse and it sharpens while the keys are heard; once it is
  * whole and nothing turns, the program waits on the keys alone. */
 
@@ -21,14 +24,21 @@
 #include <cstring>
 #include <format>
 #include <new>
+#include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
+#include "box/alarm.h"
 #include "box/clock.h"
 #include "box/form.h"
 #include "box/print.h"
 
 #include "mandelbrot.h"
+#include "painter/gui/area.h"
+#include "painter/gui/items.h"
+#include "painter/gui/measure.h"
+#include "painter/tui/keyboard.h"
 #include "painter/tui/text.h"
 #include "painter/tui/stage.h"
 
@@ -37,6 +47,7 @@ BOX_FORM("takes optional words \"tour, julia, or a palette: classic, fire, ocean
 namespace {
 
 using Color = painter::core::Color;
+namespace gui = painter::gui;
 using painter::tui::EventKind;
 using painter::tui::KeyEvent;
 using painter::tui::Stage;
@@ -70,9 +81,144 @@ const Sight Sights[] = {{-0.743643887037151, 0.131825904205330, "seahorse valley
 
 enum class Bar { Keys, Status, Hidden };
 
+/* Words of the bar, each in its colour. */
+struct Words {
+    std::string Said;
+    Color       Ink;
+};
+
+/* What was heard while the explorer waited. */
+enum class Heard { Quiet, Key, Gone };
+
+/* Where the picture is shown — what the explorer asks of a glass. */
+class Glass {
+public:
+    virtual ~Glass() = default;
+    // The picture's size, in the glass's pixels.
+    virtual painter::core::Size Pixels() const = 0;
+    // How many characters of the bar's words go across.
+    virtual int Across() const = 0;
+    // The picture, Pixels() of colours row by row, of which rows [first,
+    // past) changed; the bar's words, or none for no bar.
+    virtual void Show(const std::vector<Color> &Picture, std::pair<int, int> Rows, const std::vector<Words> *Line) = 0;
+    virtual bool Present() = 0;
+    // A key, the keyboard gone, or Ms milliseconds gone by (0: wait on).
+    virtual Heard Wait(std::uint32_t Ms, KeyEvent &Key) = 0;
+    virtual void  Close() = 0;
+};
+
+/* A text page: half-block pixels, two to a cell, the bar the last row. */
+class CellsGlass final : public Glass {
+public:
+    explicit CellsGlass(Stage Opened) : Screen(std::move(Opened)) {}
+    painter::core::Size Pixels() const override { return {Screen.Size().Width, Screen.Size().Height * 2}; }
+    int                 Across() const override { return Screen.Size().Width - 2; }
+    void Show(const std::vector<Color> &Picture, std::pair<int, int>, const std::vector<Words> *Line) override
+    {
+        painter::tui::Frame &FrameBuffer = Screen.FrameBuffer();
+        FrameBuffer.PutPixels(Picture);
+        if (!Line) return;
+        const painter::core::Size Dimensions = Screen.Size();
+        const int                 Row        = Dimensions.Height - 1;
+        FrameBuffer.Fill({0, Row, Dimensions.Width, 1}, ' ', TextStyle{BarInk, BarPaper});
+        int Col = 1;
+        for (const Words &Each : *Line) Col += static_cast<int>(FrameBuffer.Write({Col, Row}, Each.Said, TextStyle{Each.Ink, BarPaper}));
+    }
+    bool  Present() override { return static_cast<bool>(Screen.Present()); }
+    Heard Wait(std::uint32_t Ms, KeyEvent &Key) override
+    {
+        const painter::tui::Event Event = Screen.Wait(Ms);
+        if (Event.Kind == EventKind::Gone) return Heard::Gone;
+        if (Event.Kind != EventKind::Key) return Heard::Quiet;
+        Key = Event.Key;
+        return Heard::Key;
+    }
+    void Close() override { (void)Screen.Close(); }
+
+private:
+    Stage Screen;
+};
+
+/* A framebuffer: the whole screen while the program is in front, the set on
+ * a canvas of its own pixels, the bar a line of words on a plate beneath. */
+class PixelsGlass final : public Glass {
+public:
+    PixelsGlass(gui::Area Opened, painter::tui::Keyboard Heard)
+        : Screen(std::move(Opened)), Keys(std::move(Heard)),
+          Board(Screen.Canvas({static_cast<std::int32_t>(std::lround(Screen.Size().X * Screen.Scale())),
+                               static_cast<std::int32_t>(std::lround(Screen.Size().Y * Screen.Scale()))})),
+          Plate(Screen.Rectangle()), Line(Screen.Text("", gui::Role::Code))
+    {
+        const painter::core::PointF Letter = gui::Measure(Screen, "0", gui::Role::Code);
+        Advance                            = std::max(1.0f, Letter.X);
+        High                               = Letter.Y + 2 * Inset;
+        Plate.SetPlace({0, Screen.Size().Y - High}).SetSize({Screen.Size().X, High}).SetFill(gui::Fill::Of(BarPaper));
+        Line.SetPlace({Advance, Screen.Size().Y - High + Inset});
+    }
+    painter::core::Size Pixels() const override { return Board.Size(); }
+    int                 Across() const override { return static_cast<int>(Screen.Size().X / Advance) - 2; }
+    void Show(const std::vector<Color> &Picture, std::pair<int, int> Rows, const std::vector<Words> *Said) override
+    {
+        /* Only the rows that changed drawn and given: the rest of the canvas
+         * is the picture shown. */
+        const painter::core::Size Size = Board.Size();
+        const std::int32_t        From = std::clamp(Rows.first, 0, Size.Height), Past = std::clamp(Rows.second, 0, Size.Height);
+        if (From < Past)
+            (void)Board.Draw(
+                [&](painter::core::Canvas &Page) {
+                    for (std::int32_t Y = From; Y < Past; Y++) {
+                        painter::core::Pixel *Row = Page.Row(static_cast<std::uint32_t>(Y));
+                        const Color *Colours = Picture.data() + static_cast<std::size_t>(Y) * static_cast<std::size_t>(Size.Width);
+                        for (std::int32_t X = 0; X < Size.Width; X++) Row[X] = painter::core::Pixel::Of(Colours[X]);
+                    }
+                },
+                painter::core::Rect{0, From, Size.Width, Past - From});
+        if (!Said) {
+            Plate.Hide();
+            Line.Hide();
+            return;
+        }
+        std::string            Text;
+        std::vector<gui::Span> Spans;
+        for (const Words &Each : *Said) {
+            gui::TextStyle Ink;
+            Ink.Color = Each.Ink;
+            Spans.push_back(gui::Span{static_cast<std::uint32_t>(Text.size()), static_cast<std::uint32_t>(Text.size() + Each.Said.size()), Ink});
+            Text += Each.Said;
+        }
+        Plate.Show();
+        Line.SetText(Text).SetSpans(Spans).Show();
+    }
+    bool  Present() override { return Screen.Present(); }
+    Heard Wait(std::uint32_t Ms, KeyEvent &Key) override
+    {
+        if (Ms) (void)alarm_set(clock_uptime_ms() + Ms);
+        else (void)alarm_cancel();
+        for (;;) {
+            const gui::Event Event = Screen.Wait(&Keys);
+            switch (Event.What) {
+            case gui::Event::Kind::Key: Key = Event.Key; return Heard::Key;
+            case gui::Event::Kind::Gone: return Heard::Gone;
+            case gui::Event::Kind::Alarm: return Heard::Quiet;
+            default: break;
+            }
+        }
+    }
+    void Close() override { (void)Keys.Close(); }
+
+private:
+    static constexpr float Inset = 3;
+    gui::Area              Screen;
+    painter::tui::Keyboard Keys;
+    gui::Canvas            Board;
+    gui::Shape             Plate;
+    gui::Text              Line;
+    float                  Advance = 8, High = 20;
+};
+
 class Explorer {
 public:
-    std::optional<Stage> Screen;
+    std::unique_ptr<Glass> Screen;
 
     void Begin(const char *const *Words, std::size_t Count);
     /* False to leave. */
@@ -95,8 +241,8 @@ private:
     void Pan(int Dx, int Dy);
     void Julia();
     void Tour();
-    void StatusBar();
-    void KeysBar();
+    std::vector<Words> StatusBar() const;
+    std::vector<Words> KeysBar() const;
 
     FractalView        View;
     FractalView        Saved;      /* the Mandelbrot view a Julia set was opened from */
@@ -107,6 +253,8 @@ private:
     float              Turn     = 0.0f;
     bool               Turning  = false;
     double             Detail   = 1.0;
+    bool               Recolour = true;    /* every pixel coloured anew at the next draw */
+    float              Coloured = 0.0f;    /* the spread the pixels were coloured with */
     Bar                Showing  = Bar::Keys;
     bool               Touring  = false;
     bool               Leaving  = false;   /* the tour on its way out of a sight */
@@ -116,10 +264,10 @@ private:
 
 void Explorer::Begin(const char *const *Words, std::size_t Count)
 {
-    const painter::core::Size Dimensions = Screen->Size();
-    Picture.Resize(Dimensions.Width, Dimensions.Height * 2);
+    const painter::core::Size Dimensions = Screen->Pixels();
+    Picture.Resize(Dimensions.Width, Dimensions.Height);
     /* The set is about 3.4 wide and 2.6 high: the view is as wide as both need. */
-    HomeWidth = std::max(3.4, 2.6 * Dimensions.Width / (Dimensions.Height * 2.0));
+    HomeWidth = std::max(3.4, 2.6 * Dimensions.Width / static_cast<double>(Dimensions.Height));
     View      = HomeView(false);
     Began     = clock_uptime_us();
     for (std::size_t At = 0; At < Count; At++) {
@@ -221,10 +369,10 @@ bool Explorer::OnKey(const KeyEvent &Key)
     case '-':
     case '_':  Touring = false; Zoom(1 / Nearer); break;
     case 'j':  Julia(); break;
-    case 'c':  Palette = (Palette + 1) % FractalPaletteCount(); break;
+    case 'c':  Palette = (Palette + 1) % FractalPaletteCount(); Recolour = true; break;
     case 'a':  Turning = !Turning; break;
-    case ',':  Spread = std::max(4.0f, Spread / 1.25f); break;
-    case '.':  Spread = std::min(400.0f, Spread * 1.25f); break;
+    case ',':  Spread = std::max(4.0f, Spread / 1.25f); Recolour = true; break;
+    case '.':  Spread = std::min(400.0f, Spread * 1.25f); Recolour = true; break;
     case '[':  Detail = std::max(0.25, Detail / 1.4); Restart(); break;
     case ']':  Detail = std::min(16.0, Detail * 1.4); Restart(); break;
     case ' ':
@@ -249,7 +397,10 @@ void Explorer::Step(float Seconds)
 {
     if (!Picture.Whole()) Picture.Work(WorkUs);
     else if (Touring) Tour();
-    if (Turning) Turn = std::fmod(Turn + Seconds * 48.0f, 256.0f);
+    if (Turning) {
+        Turn     = std::fmod(Turn + Seconds * 48.0f, 256.0f);
+        Recolour = true;
+    }
 }
 
 std::uint32_t Explorer::Wait() const
@@ -262,60 +413,55 @@ std::uint32_t Explorer::Wait() const
     return 0;
 }
 
-void Explorer::StatusBar()
+std::vector<Words> Explorer::StatusBar() const
 {
-    painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
-    const painter::core::Size Dimensions = Screen->Size();
-    int Row = Dimensions.Height - 1;
-    int Col = 1;
-    Col += static_cast<int>(FrameBuffer.Write({Col, Row}, View.Julia ? "julia" : "mandelbrot",
-                                              TextStyle{KeyInk, BarPaper}));
-
-    int         Digits = std::clamp(static_cast<int>(std::log10(HomeWidth / View.Width)) + 4, 4, 15);
-    double      X = View.Julia ? View.JuliaX : View.CentreX, Y = View.Julia ? View.JuliaY : View.CentreY;
-    std::string Where  = std::format("{}{:.{}f} {:+.{}f}i", View.Julia ? "c = " : "", X, Digits, Y, Digits);
-    Col += 2;
-    Col += static_cast<int>(FrameBuffer.Write({Col, Row}, Where, TextStyle{BarInk, BarPaper}));
-
-    std::string Depth = std::format("x{:.3g}", HomeWidth / View.Width);
-    Col += 2;
-    Col += static_cast<int>(FrameBuffer.Write({Col, Row}, Depth, TextStyle{BarInk, BarPaper}));
-    std::string More = std::format("{} steps  {}", FractalSteps(View, Detail), FractalPalettes(Palette).Name);
+    const int          Digits = std::clamp(static_cast<int>(std::log10(HomeWidth / View.Width)) + 4, 4, 15);
+    const double       X = View.Julia ? View.JuliaX : View.CentreX, Y = View.Julia ? View.JuliaY : View.CentreY;
+    std::string        More = std::format("{} steps  {}", FractalSteps(View, Detail), FractalPalettes(Palette).Name);
     if (Touring) More += std::format("  tour: {}", Sights[Visiting].Name);
     if (!Picture.Whole()) More += "  drawing";
-    FrameBuffer.Write({Col + 2, Row}, More, TextStyle{HintInk, BarPaper});
+    return {{View.Julia ? "julia" : "mandelbrot", KeyInk},
+            {std::format("  {}{:.{}f} {:+.{}f}i", View.Julia ? "c = " : "", X, Digits, Y, Digits), BarInk},
+            {std::format("  x{:.3g}", HomeWidth / View.Width), BarInk},
+            {"  " + More, HintInk}};
 }
 
-void Explorer::KeysBar()
+std::vector<Words> Explorer::KeysBar() const
 {
-    painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
-    const painter::core::Size Dimensions = Screen->Size();
-    int Row = Dimensions.Height - 1, Col = 1;
+    std::vector<Words> Line;
+    int                Used = 0;
     for (auto [Keys, What] : {std::pair{"\u2190\u2191\u2193\u2192", "look"}, {"+-", "zoom"}, {"j", "julia"}, {"c", "colours"},
                               {"a", "turn"}, {"space", "tour"}, {"[]", "detail"}, {"r", "home"}, {"q", "leave"}}) {
-        int Wide = static_cast<int>(painter::tui::CellsOf(Keys) + std::string_view(What).size()) + 3;
-        if (Col + Wide > Dimensions.Width) break;
-        Col += static_cast<int>(FrameBuffer.Write({Col, Row}, Keys, TextStyle{KeyInk, BarPaper}));
-        Col += 1;
-        Col += static_cast<int>(FrameBuffer.Write({Col, Row}, What, TextStyle{HintInk, BarPaper}));
-        Col += 2;
+        const int Wide = static_cast<int>(painter::tui::CellsOf(Keys) + std::string_view(What).size()) + 3;
+        if (Used + Wide > Screen->Across()) break;
+        Line.push_back({Keys, KeyInk});
+        Line.push_back({std::string(" ") + What + "  ", HintInk});
+        Used += Wide;
     }
+    return Line;
 }
 
 void Explorer::Draw(float Shown)
 {
     /* Counts run longer the deeper the view: the palette spreads with them, or a
      * deep picture is colour noise from pixel to pixel. */
-    float Wider = std::sqrt(static_cast<float>(FractalSteps(View, Detail)) / 150.0f);
-    FractalColour(Picture, FractalPalettes(Palette), Spread * Wider, Turn, Pixels);
-    painter::tui::Frame &FrameBuffer = Screen->FrameBuffer();
-    FrameBuffer.PutPixels(Pixels);
+    const float Wider = std::sqrt(static_cast<float>(FractalSteps(View, Detail)) / 150.0f);
+    /* Coloured anew where the counts changed — every pixel when the colours
+     * or how widely they spread changed. */
+    std::pair<int, int> Rows = Picture.TakeTouched();
+    if (Recolour || Spread * Wider != Coloured) {
+        Rows     = {0, Picture.Height};
+        Recolour = false;
+        Coloured = Spread * Wider;
+    }
+    if (Rows.first < Rows.second) FractalColour(Picture, FractalPalettes(Palette), Coloured, Turn, Pixels, Rows.first, Rows.second);
     if (Showing == Bar::Keys && Shown >= KeysShown) Showing = Bar::Status;
-    if (Showing == Bar::Hidden) return;
-    const painter::core::Size Dimensions = Screen->Size();
-    FrameBuffer.Fill({0, Dimensions.Height - 1, Dimensions.Width, 1}, ' ', TextStyle{BarInk, BarPaper});
-    if (Showing == Bar::Keys) KeysBar();
-    else StatusBar();
+    if (Showing == Bar::Hidden) {
+        Screen->Show(Pixels, Rows, nullptr);
+        return;
+    }
+    const std::vector<Words> Line = Showing == Bar::Keys ? KeysBar() : StatusBar();
+    Screen->Show(Pixels, Rows, &Line);
 }
 
 void Say(std::string_view Text)
@@ -323,6 +469,21 @@ void Say(std::string_view Text)
     std::string Line(Text);
     Line += '\n';
     print_to_screen(Line.c_str());
+}
+
+/* The glass the screen has: a framebuffer's pixels — the whole screen while
+ * the program is in front, and the keyboard — or a text page's cells. */
+std::unique_ptr<Glass> OpenGlass()
+{
+    if (std::expected<gui::Area, box::error> Area = gui::Area::Open(gui::Placement::Whole); Area && Area->On() == gui::Glass::Pixels)
+        if (std::expected<painter::tui::Keyboard, StageError> Keys = painter::tui::Keyboard::Open())
+            return std::make_unique<PixelsGlass>(std::move(*Area), std::move(*Keys));
+    std::expected<Stage, StageError> Opened = Stage::Open(40, 12);
+    if (!Opened) {
+        Say(Opened.error().Describe("mandelbrot"));
+        return nullptr;
+    }
+    return std::make_unique<CellsGlass>(std::move(*Opened));
 }
 
 }
@@ -335,12 +496,8 @@ int main()
         if (form_words(0, &Words, &Count) != 0) return 1;
 
         Explorer Look;
-        std::expected<Stage, StageError> Opened = Stage::Open(40, 12);
-        if (!Opened) {
-            Say(Opened.error().Describe("mandelbrot"));
-            return 1;
-        }
-        Look.Screen = std::move(*Opened);
+        Look.Screen = OpenGlass();
+        if (!Look.Screen) return 1;
         Look.Begin(Words, Count);
 
         std::uint64_t Began = clock_uptime_us(), Last = Began;
@@ -350,14 +507,16 @@ int main()
             Look.Step(static_cast<float>(Now - Last) / 1e6f);
             Last = Now;
             Look.Draw(static_cast<float>(Now - Began) / 1e6f);
-            if (!(Painted = static_cast<bool>(Look.Screen->Present()))) break;
+            if (!(Painted = Look.Screen->Present())) break;
 
-            const painter::tui::Event Event = Look.Screen->Wait(Look.Wait());
-            if (Event.Kind == EventKind::Gone) break;
-            if (Event.Kind == EventKind::Key && !Look.OnKey(Event.Key)) break;
+            KeyEvent    Key;
+            const Heard Said = Look.Screen->Wait(Look.Wait(), Key);
+            if (Said == Heard::Gone) break;
+            if (Said == Heard::Key && !Look.OnKey(Key)) break;
         }
         double Deepest = Look.HomeWidth / Look.Nearest;
-        (void)Look.Screen->Close();
+        Look.Screen->Close();
+        Look.Screen.reset();
         Say(Painted ? std::format("[MANDELBROT] looked {:.3g} times nearer than the whole set", Deepest)
                     : "The screen stopped taking frames.");
         return Painted ? 0 : 1;

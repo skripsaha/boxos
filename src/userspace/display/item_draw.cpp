@@ -11,6 +11,7 @@
 #include "painter/core/path.h"
 #include "painter/core/shadow.h"
 #include "painter/core/text.h"
+#include "painter/items/text.h"
 #include "typecase/text.h"
 
 namespace items {
@@ -162,50 +163,6 @@ Path OutlineOf(const Item &Of, PointF Size)
                                                          Round[3] * PerPoint});
 }
 
-typecase::Style StyleFor(const TextStyle &Of, bool Whole)
-{
-    typecase::Style Made;
-    if (Whole || (Of.Said & ITEM_SAYS_FAMILY)) Made.Family = Of.Family;
-    if (Whole || (Of.Said & ITEM_SAYS_SIZE)) Made.Size = static_cast<float>(Of.Size) * PerPoint;
-    if (Whole || (Of.Said & ITEM_SAYS_WEIGHT)) Made.Weight = Of.Weight;
-    if (Whole || (Of.Said & ITEM_SAYS_ITALIC)) Made.Italic = Of.Italic;
-    if (Whole || (Of.Said & ITEM_SAYS_SPACING)) Made.LetterSpacing = static_cast<float>(Of.Spacing) * PerPoint;
-    if ((Whole && Of.LineHeight > 0) || (Of.Said & ITEM_SAYS_LINE_HEIGHT))
-        Made.LineHeight = static_cast<float>(Of.LineHeight) / ITEM_ONE;
-    if (Whole || (Of.Said & ITEM_SAYS_UNDERLINE)) Made.Underline = Of.Underline;
-    if (Whole || (Of.Said & ITEM_SAYS_STRIKE)) Made.Strike = Of.Strike;
-    return Made;
-}
-
-/* A text item laid out in its size: its stretches' colours as inks. */
-void LayText(const Item &Of, const Sources &From, Drawing &Into)
-{
-    const TextStyle Base = StyleOf(Of.Said, Of.Role, *From.Look);
-    typecase::Text  Text = typecase::Text::Of(Of.Said.Text ? *Of.Said.Text : std::string(), StyleFor(Base, true));
-    Text.Secret          = Of.Said.Secret && *Of.Said.Secret;
-    Into.Inks.clear();
-    if (Of.Said.Spans)
-        for (const Span &Each : *Of.Said.Spans) {
-            typecase::Span Made{Each.From, Each.To, StyleFor(Each.Style, false)};
-            if (Each.Style.Said & ITEM_SAYS_COLOR) {
-                Into.Inks.push_back(ColorOf(Each.Style.Color));
-                Made.Style.Ink = static_cast<std::uint32_t>(Into.Inks.size());
-            }
-            Text.Spans.push_back(std::move(Made));
-        }
-    typecase::TextBox Box;
-    const ItemPoint   Said = Of.Said.Size ? *Of.Said.Size : ItemPoint{ITEM_BY_CONTENT, ITEM_BY_CONTENT};
-    if (Said.X != ITEM_BY_CONTENT) Box.Width = static_cast<float>(Said.X) * PerPoint;
-    if (Said.Y != ITEM_BY_CONTENT) Box.Height = static_cast<float>(Said.Y) * PerPoint;
-    if (Of.Said.Box) {
-        Box.Align    = static_cast<typecase::TextAlign>(Of.Said.Box->Align);
-        Box.Overflow = static_cast<typecase::TextOverflow>(Of.Said.Box->Overflow);
-        Box.Wrap     = Of.Said.Box->Wrap != 0;
-        Box.MaxLines = Of.Said.Box->MaxLines;
-    }
-    Into.Laid.emplace(typecase::Layout::Of(Text, Box, From.Book()));
-}
-
 /* What a text is filled with: its fills said, else its style's colour, else
  * its role's. */
 std::vector<painter::core::Fill> TextFills(const Item &Of, const Sources &From)
@@ -280,12 +237,8 @@ void DrawStraight(const Item &Of, const Drawing &Drawn, const Sources &From, Can
     case ITEM_CANVAS: {
         const Canvas *Page = Of.Said.Canvas && From.CanvasOf ? From.CanvasOf(*Of.Said.Canvas) : nullptr;
         if (!Page) break;
-        const PointF Corner = Place.Apply({0, 0});
-        if (Upright(Place, From.Scale) &&
-            std::fabs(Size.X * From.Scale - static_cast<float>(Page->Width())) < 0.5f &&
-            std::fabs(Size.Y * From.Scale - static_cast<float>(Page->Height())) < 0.5f) {
-            Target.Draw(*Page, painter::core::Point{Nearest(Corner.X), Nearest(Corner.Y)},
-                        Opacity);
+        if (const std::optional<painter::core::Point> Corner = CanvasCorner(Of, Drawn, From, Place)) {
+            Target.Draw(*Page, *Corner, Opacity);
             break;
         }
         /* Drawn at another size, or turned: its pixels as a picture. */
@@ -409,6 +362,18 @@ painter::core::Path ClipOf(const Item &Group)
     return OutlineOf(Group, Points(*Group.Said.Size));
 }
 
+std::optional<painter::core::Point> CanvasCorner(const Item &Of, const Drawing &Drawn, const Sources &From, const Transform &Place)
+{
+    const Canvas *Page = Of.Kind == ITEM_CANVAS && Of.Said.Canvas && From.CanvasOf ? From.CanvasOf(*Of.Said.Canvas) : nullptr;
+    if (!Page || !Upright(Place, From.Scale)) return std::nullopt;
+    const PointF Size = SizeOf(Of, Drawn);
+    if (std::fabs(Size.X * From.Scale - static_cast<float>(Page->Width())) >= 0.5f ||
+        std::fabs(Size.Y * From.Scale - static_cast<float>(Page->Height())) >= 0.5f)
+        return std::nullopt;
+    const PointF Corner = Place.Apply({0, 0});
+    return painter::core::Point{Nearest(Corner.X), Nearest(Corner.Y)};
+}
+
 bool Upright(const Transform &Place, float Scale) noexcept
 {
     return Place.B == 0 && Place.C == 0 && std::fabs(Place.A - Scale) < 1e-4f && std::fabs(Place.D - Scale) < 1e-4f;
@@ -446,9 +411,10 @@ bool Prepare(const Item &Of, const Sources &From, Drawing &Into, bool Keep)
     Into.Kept.reset();
     Into.Measured = {};
     if (Of.Kind == ITEM_TEXT) {
-        LayText(Of, From, Into);
-        Into.Measured = ItemPoint{static_cast<std::int32_t>(std::lround(Into.Laid->Width() * ITEM_POINT)),
-                                  static_cast<std::int32_t>(std::lround(Into.Laid->Height() * ITEM_POINT))};
+        painter::items::LaidText Laid = painter::items::LayText(Of.Said, Of.Role, *From.Look, From.Book());
+        Into.Laid.emplace(std::move(Laid.Laid));
+        Into.Inks     = std::move(Laid.Inks);
+        Into.Measured = Laid.Measured;
     } else if (Of.Kind == ITEM_PICTURE && Of.Said.Picture && From.PictureOf) {
         if (const auto Picture = From.PictureOf(Of.Said.Picture->Block))
             Into.Measured = ItemPoint{static_cast<std::int32_t>(std::lround(Picture->Width() * ITEM_POINT / From.Scale)),

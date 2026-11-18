@@ -23,7 +23,7 @@ using painter::core::Rect;
 
 /* A text page's cells as pixels, for an area's place: a point is a pixel of
  * an eighth of a cell across and a sixteenth down. */
-constexpr std::int32_t PageCellWide = 8, PageCellTall = 16;
+constexpr std::int32_t PageCellWide = ITEM_PAGE_CELL_WIDE, PageCellTall = ITEM_PAGE_CELL_TALL;
 
 /* A side of the canvas a frame composes on, tile by tile. */
 constexpr std::int32_t TileSide = 256;

@@ -158,11 +158,11 @@ timezone.elf: $(BOXLIB_START) timezone.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.
 
 # The board is C++ in parts of its own directory, each named for what it is.
 TASKBOARD_DIR  = taskboard
-TASKBOARD_OBJS = $(addprefix $(TASKBOARD_DIR)/,taskboard.o board.o paint.o graph.o look.o machine.o programs.o \
-                                               history.o journal.o)
+TASKBOARD_OBJS = $(addprefix $(TASKBOARD_DIR)/,taskboard.o board.o paint.o picture.o paint_words.o graph.o look.o machine.o \
+                                               programs.o history.o journal.o)
 
-taskboard.elf: $(BOXLIB_START) $(TASKBOARD_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(TASKBOARD_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+taskboard.elf: $(BOXLIB_START) $(TASKBOARD_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(TASKBOARD_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 # The scratchpad is C++ in parts of its own directory, each named for what it is.
@@ -387,8 +387,8 @@ tagmap.elf: $(BOXLIB_START) $(TAGMAP_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXL
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(TAGMAP_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
-mandelbrot.elf: $(BOXLIB_START) $(MANDELBROT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(MANDELBROT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+mandelbrot.elf: $(BOXLIB_START) $(MANDELBROT_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(MANDELBROT_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 qr.elf: $(BOXLIB_START) $(QR_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
@@ -524,7 +524,10 @@ drawcheck.elf: $(BOXLIB_START) $(DRAWCHECK_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX
 # itemcheck holds the items' language on the machine: a scene said, runs of
 # steps shown, and what each frame cost.
 ITEMCHECK_DIR  = itemcheck
-ITEMCHECK_OBJS = $(addprefix $(ITEMCHECK_DIR)/,itemcheck.o)
+ITEMCHECK_OBJS = $(addprefix $(ITEMCHECK_DIR)/,itemcheck.o gui.o from_c.o)
+
+# Its C part speaks painter::gui's C face.
+$(ITEMCHECK_DIR)/from_c.o: CFLAGS += -I../painter/include
 
 itemcheck.elf: $(BOXLIB_START) $(ITEMCHECK_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(ITEMCHECK_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
@@ -548,7 +551,10 @@ $(sort $(EDIT_OBJS) $(READ_OBJS) $(CASINO_OBJS) $(SEABATTLE_OBJS)): CXXFLAGS += 
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
--include $(wildcard *.d $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.d $(EDIT_DIR)/*.d $(READ_DIR)/*.d $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.d $(GARDEN_DIR)/*.d $(MEMMAP_DIR)/*.d $(WIZARD_DIR)/*.d $(RANDOM_DIR)/*.d $(SAND_DIR)/*.d $(FOREST_DIR)/*.d $(COINFLIP_DIR)/*.d $(DICE_DIR)/*.d $(ORBITS_DIR)/*.d $(CASINO_DIR)/*.d $(SEABATTLE_DIR)/*.d $(WHALE_DIR)/*.d $(HANGMAN_DIR)/*.d $(DUPPO_DIR)/*.d)
+# Every part's, in every directory of the utilities: one listed by name is one
+# a new directory is missing from — and an object built against a header that
+# changed since, a class of another size in its frames than in its own code.
+-include $(wildcard *.d */*.d)
 
 $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 	@mkdir -p $(dir $@)

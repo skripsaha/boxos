@@ -139,6 +139,71 @@ is the lowest item on the glass; an area in its flow lies on its text and
 moves with it when it scrolls, and `Area::Commit` folds an area's cells into
 the console's text, as `ConsoleSurface::Commit` does.
 
+### Items as objects (`painter/gui/items.h`)
+
+A program writes its items as objects, made in an area or a group and told
+what they show with `Set…` — words that chain:
+
+```cpp
+gui::Text Time = Screen->Text("12:46", gui::Role::Heading);
+Time.SetPlace({16, 8});
+gui::Shape Plate = Screen->Rectangle(gui::Role::Panel);
+Plate.SetSize({200, 40}).SetCorners(painter::core::Corners::All(6));
+Screen->Present();
+Time.SetText("12:47");          // only this goes to the display
+```
+
+`Text`, `Rectangle`, `Ellipse`, `Outline`, `Group` (`Subgroup` in a group),
+`Picture`, `Canvas` and `Cells` make them; `SetText`, `SetPlace`, `SetSize`,
+`SetFill`, `SetStroke`, `SetShadow`, `SetCorners`, `SetOpacity`, `Show`, `Hide`
+and the rest tell them. The numbers the language names items by are painter's.
+An object keeps its item: moved, the item goes with it; destroyed or
+`Remove()`d, the item is gone; an object outliving its area does nothing. What
+was said of each property is kept, so a property told again as it was goes
+nowhere — a program may tell an item all of itself every time.
+
+### Frames described whole (`painter/gui/frame.h`)
+
+Or a program describes each frame whole, and painter sends only what differs:
+
+```cpp
+Screen->Draw([&](gui::Frame &F) {
+    gui::Group Rows = F.Group();
+    for (const Row &Each : List) Rows.Text(Each.Name).Key(Each.Id).SetPlace(Each.At);
+});
+```
+
+Each item is found again in the frame before by its parent, its kind and its
+place among its siblings, or by the `Key` it says; what is new is made, what
+changed said, what it no longer says unsaid, what is gone removed, what moved
+among its siblings restacked — one step. A frame as the one before sends
+nothing. A program that draws no frames carries none of this.
+
+### Measuring, a canvas, waiting
+
+`gui::Measure(Area, text, Role, width)` lays a text beforehand as the display
+will — the same reading of the language, the same look of the roles and the
+same laying out (`painter/items`), in the program's fonts (the system's, then
+its own) — so a size known beforehand is the size the display lays; on a text
+page a character is a cell.
+
+A `Canvas` is the program's own pixels, real pixels of the screen: `Draw`
+paints the next picture on the page the display does not show, waiting until
+it lets one go, and copies the rest of the picture shown when only a part of
+it changed.
+
+`Area::Wait` waits for whatever comes next — what the display tells, a key of a
+`painter::tui::Keyboard` given it, the strand's alarm (`box/alarm.h`) — with no
+time out: a clock sets an alarm for the next second and waits.
+
+### For C (`painter/gui.h`)
+
+The same areas and items for C, named plainly: `gui_open`, `gui_text`,
+`gui_rectangle`, `gui_group`, `gui_set_text`, `gui_set_place`, `gui_set_fill`,
+`gui_present`, `gui_wait`, `gui_measure`, `gui_close` — an item a number,
+removed with `gui_remove` or with its area. A C program that measures nothing
+carries no reader of fonts.
+
 ## Layering
 
 ```text

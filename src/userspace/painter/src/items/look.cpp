@@ -1,10 +1,10 @@
 /*
- * item_look.cpp — how an item looks: said, or its role's. See item_look.h.
+ * look.cpp — how an item looks: said, or its role's. See painter/items/look.h.
  */
 
-#include "item_look.h"
+#include "painter/items/look.h"
 
-namespace items {
+namespace painter::items {
 
 namespace {
 
@@ -124,4 +124,4 @@ std::uint16_t OpacityOf(const Properties &Said) noexcept { return Said.Opacity ?
 
 bool HiddenOf(const Properties &Said) noexcept { return Said.Hidden && *Said.Hidden; }
 
-}  // namespace items
+}  // namespace painter::items

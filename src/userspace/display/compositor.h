@@ -63,6 +63,7 @@ struct AreaState {
     bool                 Shown    = false;
     bool                 WasShown = false;
     bool                 Paged    = false;   // the theme's page beneath it: the whole screen's
+    std::uint64_t        Composed = 0;       // the pixels its own changes asked the last frame to compose
     std::vector<Entry>   List;
     // An item sized by its content came to a size: told to the program.
     std::function<void(std::uint32_t, ItemPoint)> Sized;
@@ -71,12 +72,17 @@ struct AreaState {
 class Compositor {
 public:
     // The screen's pixels: damage is kept within them.
-    explicit Compositor(painter::core::Rect Screen) : Screen(Screen) { Waiting.reserve(DamageKept); }
+    explicit Compositor(painter::core::Rect Screen) : Screen(Screen)
+    {
+        Waiting.reserve(DamageKept);
+        Own.reserve(DamageKept);
+    }
 
     // Pixels to be composed again — something beneath the areas changed.
     void Damage(painter::core::Rect Area) noexcept;
     // Every area's marks taken: drawings made again where marked, and where
-    // anything changed added to the damage. Areas bottom to top.
+    // anything changed added to the damage — each area's own told in its
+    // Composed. Areas bottom to top.
     void Take(std::span<AreaState *const> Areas, const Theme &Look);
     // The damage as rectangles, few and apart, taken.
     std::vector<painter::core::Rect> Rects();
@@ -92,6 +98,7 @@ public:
                  std::span<AreaState *const> Areas, const Theme &Look);
 
 private:
+    void TakeOne(AreaState &Area, const Theme &Look);
     void Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, const painter::core::Transform &Parent,
               float Opacity, bool Moved, bool Plain);
     void Vanish(AreaState &Area, const std::vector<std::uint32_t> &Items);
@@ -101,6 +108,8 @@ private:
 
     painter::core::Rect              Screen;
     std::vector<painter::core::Rect> Waiting;
+    std::vector<painter::core::Rect> Own;       // the damage of the area being taken
+    bool                             Owning = false;
 };
 
 // An item's own placing: its place, then its turn and scale about its anchor.

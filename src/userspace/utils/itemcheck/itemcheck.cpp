@@ -8,11 +8,13 @@
  * step's frame is told back with what it cost: how long the display took to
  * compose it and put it on the glass, the pixels it put there, the ring's
  * bytes and records it took; and how long from the step to its frame told
- * back. Then the console: lines printed, an area opened in its flow after
- * them, and how long until the glass showed it all. The last line says PASS
- * when every step was shown, nothing was refused, and a word and a cell
- * changed each composed a small part of the area; FAIL when not. The times
- * are a guide only under TCG. */
+ * back. Then painter::gui as a program writes with it (gui.cpp): objects,
+ * a frame of a list, a canvas, a text measured beforehand, the C face. Then
+ * the console: lines printed, an area opened in its flow after them, and how
+ * long until the glass showed it all. The last line says PASS when every step
+ * was shown, nothing was refused, a word and a cell changed each composed a
+ * small part of the area, and the programmer's checks held; FAIL when not.
+ * The times are a guide only under TCG. */
 
 #include <algorithm>
 #include <chrono>
@@ -26,6 +28,7 @@
 #include "box/form.h"
 #include "box/touch.h"
 
+#include "itemcheck_gui.h"
 #include "painter/gui/area.h"
 
 BOX_FORM("");
@@ -51,6 +54,7 @@ constexpr std::uint32_t Lines = 400;                     // the console's lines 
 struct Told {
     std::uint32_t Refused = 0;
     bool          Lost    = false;   // the bell would not ring
+    bool          Same    = false;   // a step said only what was said: nothing went
 };
 
 /* The display's events until the frame showing Step is told: that frame's
@@ -175,11 +179,11 @@ void Scene(Area &Say, float W, float H, std::optional<std::uint32_t> Picture)
 /* One run's frames: what the display said each cost, and how long each took
  * from its step to its frame told back. */
 struct Run {
-    std::vector<std::uint32_t> Micros, Pixels, Bytes, Records, Round;
+    std::vector<std::uint32_t> Micros, Pixels, Own, Bytes, Records, Round;
 
     void Add(const Event &Shown, std::uint32_t RoundMicros)
     {
-        Micros.push_back(Shown.Micros), Pixels.push_back(Shown.Pixels), Bytes.push_back(Shown.Bytes);
+        Micros.push_back(Shown.Micros), Pixels.push_back(Shown.Pixels), Own.push_back(Shown.Own), Bytes.push_back(Shown.Bytes);
         Records.push_back(Shown.Records), Round.push_back(RoundMicros);
     }
     static std::uint64_t Mean(const std::vector<std::uint32_t> &Of)
@@ -191,10 +195,11 @@ struct Run {
     static std::uint32_t Most(const std::vector<std::uint32_t> &Of) { return Of.empty() ? 0 : *std::max_element(Of.begin(), Of.end()); }
     void Say(const char *What) const
     {
-        std::printf("itemcheck: %s, %zu steps — %llu us a frame composed and put on the glass (most %u), %llu pixels, "
-                    "%llu bytes and %llu records of the ring a step, %llu us from a step to its frame told back\n",
+        std::printf("itemcheck: %s, %zu steps — %llu us a frame composed and put on the glass (most %u), %llu pixels its own "
+                    "(%llu the frame's), %llu bytes and %llu records of the ring a step, %llu us from a step to its frame told back\n",
                     What, Micros.size(), static_cast<unsigned long long>(Mean(Micros)), Most(Micros),
-                    static_cast<unsigned long long>(Mean(Pixels)), static_cast<unsigned long long>(Mean(Bytes)),
+                    static_cast<unsigned long long>(Mean(Own)), static_cast<unsigned long long>(Mean(Pixels)),
+                    static_cast<unsigned long long>(Mean(Bytes)),
                     static_cast<unsigned long long>(Mean(Records)), static_cast<unsigned long long>(Mean(Round)));
     }
 };
@@ -204,8 +209,14 @@ struct Run {
 template <typename Change> bool Stepped(Area &On, Told &Heard, Run &Into, Change &&Say)
 {
     Say();
-    const auto Start = std::chrono::steady_clock::now();
+    const auto          Start  = std::chrono::steady_clock::now();
+    const std::uint64_t Before = On.Step();
     (void)On.Present();
+    /* What is said as it was goes nowhere: a step of nothing is no step. */
+    if (On.Step() == Before) {
+        Heard.Same = true;
+        return false;
+    }
     const std::optional<Event> Shown = ShownTo(On, On.Step(), Heard);
     if (!Shown) return false;
     const auto Took = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - Start).count();
@@ -238,12 +249,14 @@ int main()
     for (std::uint32_t I = 0; All && I < Steps; I++)
         All = Stepped(On, Heard, Word, [&] {
             char Time[8];
-            std::snprintf(Time, sizeof Time, "12:%02u", I % 60);
+            std::snprintf(Time, sizeof Time, "12:%02u", (I + 1) % 60);
             On.Text(Clock, Time);
         });
     if (All) Word.Say("one word changed");
     for (std::uint32_t I = 0; All && I < Steps; I++)
-        All = Stepped(On, Heard, Move, [&] { On.Place(Bubble, {On.Size().X * 0.62f - static_cast<float>(I * 3), 24.0f + static_cast<float>(I * 2)}); });
+        All = Stepped(On, Heard, Move, [&] {
+            On.Place(Bubble, {On.Size().X * 0.62f - static_cast<float>((I + 1) * 3), 24.0f + static_cast<float>((I + 1) * 2)});
+        });
     if (All) Move.Say("a shape moved");
     for (std::uint32_t I = 0; All && I < Steps; I++)
         All = Stepped(On, Heard, Fade, [&] { On.Opacity(Glass, 0.2f + 0.8f * static_cast<float>(I) / Steps); });
@@ -256,15 +269,24 @@ int main()
     if (All) Cell.Say("one cell changed");
 
     if (!All) {
-        std::printf("itemcheck: FAIL — a step was never told shown%s\n", Heard.Lost ? ": the area has no bell" : "");
+        std::printf("itemcheck: FAIL — %s\n", Heard.Same ? "a step said only what was said, and nothing went"
+                                               : Heard.Lost ? "a step was never told shown: the area has no bell"
+                                                            : "a step was never told shown");
         return 1;
     }
-    const std::uint64_t Small = Run::Mean(Word.Pixels), Tiny = Run::Mean(Cell.Pixels);
+    /* Judged by what each step's own change cost: what other programs
+     * changed in the same frames is theirs. */
+    const std::uint64_t Small = Run::Mean(Word.Own), Tiny = Run::Mean(Cell.Own);
     if (Heard.Refused || (Seen && (Small == 0 || Small * 8 > Shown || Tiny == 0 || Tiny * 64 > Shown))) {
         std::printf("itemcheck: FAIL — %u changes refused; a word changed composed %llu pixels of the area's %llu, a cell "
                     "changed %llu\n",
                     Heard.Refused, static_cast<unsigned long long>(Small), static_cast<unsigned long long>(Shown),
                     static_cast<unsigned long long>(Tiny));
+        return 1;
+    }
+
+    if (!CheckForProgrammer()) {
+        std::printf("itemcheck: FAIL — painter::gui for the programmer did not hold\n");
         return 1;
     }
 

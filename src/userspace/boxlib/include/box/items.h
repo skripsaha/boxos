@@ -391,7 +391,13 @@ enum {
     ITEM_EVENT_FREE    = 5,   /* ItemPageFree: a canvas's page may be drawn in again (Item is the block) */
 };
 
+/* The glass an area is on: a framebuffer's pixels, or a text page's cells —
+ * where a cell is ITEM_PAGE_CELL_WIDE points across and ITEM_PAGE_CELL_TALL
+ * down, a text is written into the cells a character each, a line of it a row,
+ * and an item that is no text is shown by its caption. */
 enum { ITEM_GLASS_TEXT = 1, ITEM_GLASS_PIXELS = 2 };
+#define ITEM_PAGE_CELL_WIDE 8
+#define ITEM_PAGE_CELL_TALL 16
 typedef struct {
     int32_t  Width, Height;   /* of ITEM_POINT */
     uint32_t Scale;           /* pixels to a point, of 256 */
@@ -409,9 +415,11 @@ typedef struct {
 typedef struct {
     uint64_t Step;            /* the last step the glass shows */
     uint32_t Micros;          /* composing and putting it on the glass */
-    uint32_t Pixels;          /* the pixels put on the glass */
+    uint32_t Pixels;          /* the pixels put on the glass — for every area's changes */
     uint32_t Bytes;           /* the ring's bytes it took */
     uint32_t Records;
+    uint32_t Own;             /* of the pixels, those this area's own changes asked for */
+    uint32_t Reserved;
 } ItemShown;
 
 typedef struct { uint32_t Page; uint32_t Reserved; } ItemPageFree;
@@ -617,7 +625,7 @@ STATIC_ASSERT(sizeof(ItemRecord) == 8 && sizeof(ItemCreate) == 16 && sizeof(Item
 STATIC_ASSERT(sizeof(ItemColor) == 8 && sizeof(ItemFill) == 8 && sizeof(ItemStop) == 12 &&
                   sizeof(ItemTextStyle) == 32 && sizeof(ItemShadow) == 28 && sizeof(ItemStroke) == 16,
               "the values of the items' language are an ABI of fixed sizes");
-STATIC_ASSERT(sizeof(ItemEvent) == 8 && sizeof(ItemAreaNews) == 16 && sizeof(ItemShown) == 24,
+STATIC_ASSERT(sizeof(ItemEvent) == 8 && sizeof(ItemAreaNews) == 16 && sizeof(ItemShown) == 32,
               "the events of the items' language are an ABI of fixed sizes");
 STATIC_ASSERT(sizeof(ItemAreaHeader) == 320 && sizeof(ItemBlockHeader) == 64,
               "an area's and a block's memory begin with heads of fixed sizes");

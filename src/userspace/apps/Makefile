@@ -60,6 +60,7 @@ BOXLIB     = ../boxlib/libbox.a
 BOXCXX     = ../boxcxx/libboxcxx.a
 BOXLIB_START = ../build/boxlib_start.o
 PAINTER    = ../painter/libpainter.a
+TYPECASE   = ../typecase/libtypecase.a
 
 .PHONY: all clean
 
@@ -128,11 +129,12 @@ brookexec.elf: $(BOXLIB_START) brookexec.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/use
 currentexec.elf: $(BOXLIB_START) currentexec.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) currentexec.o $(BOXCXX) $(BOXLIB) -lgcc)
 
-clock.elf: $(BOXLIB_START) clock.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) clock.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+# clock and pulse are notices of the panel (panel.h), in text they measure.
+clock.elf: $(BOXLIB_START) clock.o $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) clock.o $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
 
-pulse.elf: $(BOXLIB_START) pulse.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) pulse.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+pulse.elf: $(BOXLIB_START) pulse.o $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) pulse.o $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
 
 calendar.elf: $(BOXLIB_START) calendar.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) calendar.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
@@ -186,7 +188,9 @@ cxxtest.elf: $(BOXLIB_START) cxxtest.o cxxtest_traits.o $(BOXCXX) $(BOXLIB) $(BO
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
--include $(wildcard *.d) $(wildcard commands/*.d)
+# Every part's, in every directory of the apps: one listed by name is one a
+# new directory is missing from.
+-include $(wildcard *.d */*.d)
 
 # ---- boxlib_start entry (shared with shell) ----
 $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm

@@ -1,37 +1,40 @@
-/* pulse — the machine's pulse, as a notice layer beside the clock. */
+/* pulse — the machine's pulse, a notice of the panel (panel.h) beside the
+ * clock: the processor's load these last beats as bars, each as tall as the
+ * load and as warm, and the last as a figure; the memory in use, where the
+ * screen is wide. Every half second it looks, and says the display only what
+ * changed. On a text page each bar is shown by its caption — a block as tall
+ * as the load. */
 
 #include <algorithm>
-#include <chrono>
+#include <array>
 #include <cstdint>
 #include <format>
-#include <string_view>
-#include <thread>
-#include <utility>
+#include <string>
 #include <vector>
 
+#include "box/alarm.h"
+#include "box/clock.h"
 #include "box/error.h"
 #include "box/life.h"
 #include "box/system.h"
-
 #include "painter/core/color.h"
-#include "painter/tui/frame.h"
-#include "painter/tui/glyph.h"
-#include "painter/tui/surface.h"
-#include "painter/tui/text.h"
+#include "painter/gui/area.h"
+#include "painter/gui/items.h"
+#include "painter/gui/measure.h"
+
+#include "panel.h"
 
 BOX_LIFE("stays");
 
 namespace {
 
+namespace gui = painter::gui;
 using PainterColor = painter::core::Color;
 
-constexpr auto         Beat        = std::chrono::milliseconds(500);
-/* The clock's corner at its widest — 12:59:59 PM, as the person may set it
- * (settings clock): pulse stands left of all of it, however the clock is set. */
-constexpr std::int32_t ClockWidth  = 11;
-constexpr std::int32_t Gap         = 1;
-constexpr std::size_t  HistoryMost = 10;
-constexpr std::int32_t WideScreen  = 120;
+constexpr std::uint64_t BeatMs      = 500;
+constexpr std::size_t   HistoryMost = 10;
+constexpr float         BarWide     = 3, BarGap = 1;   // points
+constexpr float         WideScreen  = 960;             // points: the memory shown from here
 
 constexpr PainterColor Ink    = PainterColor::Rgb(0xE6, 0xE6, 0xE6);
 constexpr PainterColor Ground = PainterColor::Rgb(0x26, 0x26, 0x26);
@@ -40,97 +43,33 @@ constexpr PainterColor Calm   = PainterColor::Rgb(0x50, 0xD0, 0x60);
 constexpr PainterColor Busy   = painter::core::Colors::Amber;
 constexpr PainterColor Hot    = PainterColor::Rgb(0xFF, 0x50, 0x50);
 
-PainterColor Warmth(int Percent)
-{
-    return Percent >= 85 ? Hot : Percent >= 50 ? Busy : Calm;
-}
+PainterColor Warmth(int Percent) { return Percent >= 85 ? Hot : Percent >= 50 ? Busy : Calm; }
 
-char32_t Height(int Percent)
-{
-    if (Percent < 35) return U'_';
-    if (Percent < 70) return painter::tui::Glyphs::LowerHalf;
-    return painter::tui::Glyphs::Full;
-}
+/* A bar on a text page: a block as tall as the load. */
+const char *Block(int Percent) { return Percent < 35 ? "_" : Percent < 70 ? "\xE2\x96\x84" : "\xE2\x96\x88"; }
 
-class Strip {
+/* What the machine does: the processor's load each beat, the memory used. */
+class Machine {
 public:
-    void Text(std::string_view Words, PainterColor Fore)
-    {
-        for (std::size_t Byte = 0; Byte < Words.size();) {
-            const painter::tui::Glyph Shape = painter::tui::GlyphAt(Words, Byte);
-            Cell(Shape.Character, Fore);
-            Byte += Shape.Length;
-        }
-    }
-
-    void Cell(char32_t Glyph, PainterColor Fore)
-    {
-        Cells.push_back(painter::tui::Cell{Glyph, Fore, Ground});
-    }
-
-    std::expected<painter::tui::Frame, box::error> Frame() const
-    {
-        std::expected<painter::tui::Frame, box::error> Created =
-            painter::tui::Frame::Create({static_cast<std::int32_t>(Cells.size()), 1});
-        if (!Created) return std::unexpected(Created.error());
-        painter::tui::Frame Result = std::move(*Created);
-        for (std::size_t Col = 0; Col < Cells.size(); Col++)
-            Result.Put({static_cast<std::int32_t>(Col), 0}, Cells[Col]);
-        return Result;
-    }
-
-    std::size_t Size() const noexcept { return Cells.size(); }
-
-private:
-    std::vector<painter::tui::Cell> Cells;
-};
-
-class Pulse {
-public:
-    bool Look()
+    void Look()
     {
         system_resources_t Now{};
-        if (system_resources(&Now) != 0) return false;
-        if (Seen && Now.cpu_total_tsc > Last.cpu_total_tsc &&
-            Now.cpu_busy_tsc >= Last.cpu_busy_tsc) {
-            const std::uint64_t Total = Now.cpu_total_tsc - Last.cpu_total_tsc;
-            const std::uint64_t Busy  = Now.cpu_busy_tsc - Last.cpu_busy_tsc;
-            const int Load = static_cast<int>(std::min<std::uint64_t>(100, Busy * 100 / Total));
-            if (History.size() == HistoryMost) History.erase(History.begin());
-            History.push_back(Load);
+        if (system_resources(&Now) == 0) {
+            if (Seen && Now.cpu_total_tsc > Last.cpu_total_tsc && Now.cpu_busy_tsc >= Last.cpu_busy_tsc) {
+                const std::uint64_t Total = Now.cpu_total_tsc - Last.cpu_total_tsc;
+                const std::uint64_t Spent = Now.cpu_busy_tsc - Last.cpu_busy_tsc;
+                if (History.size() == HistoryMost) History.erase(History.begin());
+                History.push_back(static_cast<int>(std::min<std::uint64_t>(100, Spent * 100 / Total)));
+            }
+            Last = Now;
+            Seen = true;
         }
-        Last = Now;
-        Seen = true;
-
         system_info_t Info{};
         if (sysinfo(&Info) == 0 && Info.total_memory > 0)
-            Memory = static_cast<int>(std::min<std::uint64_t>(100,
-                                                               Info.used_memory * 100 / Info.total_memory));
-        return true;
+            Memory = static_cast<int>(std::min<std::uint64_t>(100, Info.used_memory * 100 / Info.total_memory));
     }
-
-    Strip Draw(bool Wide) const
-    {
-        Strip Out;
-        Out.Text(" cpu ", Quiet);
-        const std::size_t Shown = Wide ? HistoryMost : HistoryMost - 2;
-        for (std::size_t Pad = History.size(); Pad < Shown; Pad++) Out.Cell(' ', Ink);
-        const std::size_t First = History.size() > Shown ? History.size() - Shown : 0;
-        for (std::size_t At = First; At < History.size(); At++)
-            Out.Cell(Height(History[At]), Warmth(History[At]));
-        if (History.empty()) {
-            Out.Text("   --%", Quiet);
-        } else {
-            const PainterColor Figure = Warmth(History.back()) == Calm ? Ink : Warmth(History.back());
-            Out.Text(std::format(" {:>3}%", History.back()), Figure);
-        }
-        if (Wide && Memory >= 0) {
-            Out.Text("  mem ", Quiet);
-            Out.Text(std::format("{:>3}%", Memory), Memory >= 85 ? Hot : Ink);
-        }
-        Out.Cell(' ', Ink);
-        return Out;
-    }
+    const std::vector<int> &Loads() const noexcept { return History; }
+    int                     Used() const noexcept { return Memory; }
 
 private:
     system_resources_t Last{};
@@ -139,31 +78,107 @@ private:
     int                Memory = -1;
 };
 
+/* The notice's items, made once and told each beat what they show. */
+struct Notice {
+    explicit Notice(gui::Area &Screen)
+        : Plate(Screen.Rectangle()), Cpu(Screen.Text("cpu", panel::Words)), Load(Screen.Text("", panel::Words)),
+          Mem(Screen.Text("mem", panel::Words)), Used(Screen.Text("", panel::Words))
+    {
+        Plate.SetCorners(painter::core::Corners::All(panel::Round)).SetFill(gui::Fill::Of(Ground));
+        for (gui::Shape &Bar : Bars) Bar = Screen.Rectangle();
+        gui::TextStyle Faint;
+        Faint.Color = Quiet;
+        Cpu.SetStyle(Faint);
+        Mem.SetStyle(Faint);
+    }
+    gui::Shape                          Plate;
+    gui::Text                           Cpu, Load, Mem, Used;
+    std::array<gui::Shape, HistoryMost> Bars;
+};
+
+gui::TextStyle Coloured(PainterColor Of)
+{
+    gui::TextStyle Made;
+    Made.Color = Of;
+    return Made;
+}
+
+/* The notice laid out right to left from where the clock's corner ends. */
+void Show(const gui::Area &Screen, Notice &Shown, const Machine &Now)
+{
+    const float              High  = panel::Height(Screen);
+    const float              Top   = panel::Margin;
+    const float              Right = Screen.Size().X - panel::Margin - panel::ClockWidth(Screen) - panel::Gap;
+    const std::vector<int>  &Loads = Now.Loads();
+    const bool               Wide  = Screen.Size().X >= WideScreen && Now.Used() >= 0;
+    const auto               Width = [&](const std::string &Said) { return gui::Measure(Screen, Said, panel::Words).X; };
+    const std::string        Figure = Loads.empty() ? "--%" : std::format("{:>3}%", Loads.back());
+    const std::string        Memory = Wide ? std::format("{:>3}%", Now.Used()) : std::string();
+
+    /* Right to left: the memory's figure and word, the load's figure, the
+     * bars, the processor's word. */
+    float At = Right - panel::Padding;
+    if (Wide) {
+        At -= Width("100%");
+        Shown.Used.SetText(Memory).SetStyle(Coloured(Now.Used() >= 85 ? Hot : Ink)).SetPlace({At, Top + panel::Inset}).Show();
+        At -= Width("mem") + 6;
+        Shown.Mem.SetPlace({At, Top + panel::Inset}).Show();
+        At -= 10;
+    } else {
+        Shown.Used.Hide();
+        Shown.Mem.Hide();
+    }
+    At -= Width("100%");
+    const PainterColor Last = Loads.empty() ? Quiet : Warmth(Loads.back()) == Calm ? Ink : Warmth(Loads.back());
+    Shown.Load.SetText(Figure).SetStyle(Coloured(Last)).SetPlace({At, Top + panel::Inset});
+    /* On a text page a bar is its caption, a cell each in the words' row. */
+    const bool  Page  = Screen.On() == gui::Glass::Text;
+    const float Pitch = Page ? static_cast<float>(ITEM_PAGE_CELL_WIDE) : BarWide + BarGap;
+    At -= 6 + HistoryMost * Pitch;
+    const float Floor = Top + High - panel::Inset - 1, Tallest = High - 2 * panel::Inset - 2;
+    for (std::size_t Bar = 0; Bar < HistoryMost; Bar++) {
+        /* The newest at the right; a beat not yet seen shows nothing. */
+        const std::size_t Back = HistoryMost - 1 - Bar;
+        gui::Shape       &One  = Shown.Bars[Bar];
+        const float       X    = At + static_cast<float>(Bar) * Pitch;
+        if (Back >= Loads.size()) {
+            One.Hide();
+            continue;
+        }
+        const int   Percent = Loads[Loads.size() - 1 - Back];
+        const float Tall    = std::max(1.0f, Tallest * static_cast<float>(Percent) / 100.0f);
+        One.SetPlace({X, Page ? Top + panel::Inset : Floor - Tall})
+            .SetSize({BarWide, Tall})
+            .SetFill(gui::Fill::Of(Warmth(Percent)))
+            .SetCaption(Block(Percent))
+            .Show();
+    }
+    At -= Width("cpu") + 6;
+    Shown.Cpu.SetPlace({At, Top + panel::Inset});
+    At -= panel::Padding;
+    Shown.Plate.SetPlace({At, Top}).SetSize({Right - At, High});
+}
+
 }  // namespace
 
 int main()
 {
-    std::expected<painter::tui::Surface, painter::tui::StageError> Opened =
-        painter::tui::Surface::Open(12, 1, painter::tui::SurfaceRole::Notice);
+    std::expected<gui::Area, box::error> Opened = panel::Open();
     if (!Opened) return 1;
-    painter::tui::Surface Screen = std::move(*Opened);
-    const painter::core::Size Dimensions = Screen.Size();
-    if (Dimensions.Width <= ClockWidth + Gap || Dimensions.Height == 0) return 1;
-
-    Pulse Machine;
-    auto Next = std::chrono::steady_clock::now();
-    for (;;) {
-        if (Machine.Look()) {
-            Strip Picture = Machine.Draw(Dimensions.Width >= WideScreen);
-            std::expected<painter::tui::Frame, box::error> Canvas = Picture.Frame();
-            const int Right = Dimensions.Width - ClockWidth - Gap;
-            if (!Canvas || static_cast<int>(Picture.Size()) > Right) break;
-            if (!Screen.Clear() ||
-                !Screen.Composite({Right - static_cast<int>(Picture.Size()), 0}, *Canvas))
-                break;
+    gui::Area &Screen = *Opened;
+    Notice     Shown(Screen);
+    Machine    Now;
+    for (std::uint64_t Due = clock_uptime_ms();;) {
+        Now.Look();
+        Show(Screen, Shown, Now);
+        (void)Screen.Present();
+        /* The next beat: a beat behind is not made up, only the next kept. */
+        Due = std::max(Due + BeatMs, clock_uptime_ms() + 1);
+        (void)alarm_set(Due);
+        /* The beat came — or the screen changed, and the corner with it. */
+        for (;;) {
+            const gui::Event Heard = Screen.Wait();
+            if (Heard.What == gui::Event::Kind::Alarm || Heard.What == gui::Event::Kind::Area) break;
         }
-        Next += Beat;
-        std::this_thread::sleep_until(Next);
     }
-    return 1;
 }

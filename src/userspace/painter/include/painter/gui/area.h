@@ -13,10 +13,17 @@
 // of their own, made by the display for the program, and are named by number
 // from the items that show them.
 //
+// What it shows is said either way: items as objects (painter/gui/items.h)
+// kept and changed — Text, Rectangle, Group… made here — or each frame
+// described whole (Draw), painter sending only what differs. Wait waits for
+// whatever comes next: what the display tells, a key, the strand's alarm.
+//
 // One strand speaks for an area: the one that opened it.
 
 #include <cstdint>
+#include <deque>
 #include <expected>
+#include <memory>
 #include <optional>
 #include <span>
 
@@ -25,7 +32,18 @@
 #include "box/items.h"
 #include "box/touch.h"
 #include "painter/core/canvas.h"
+#include "painter/gui/blocks.h"
 #include "painter/gui/changes.h"
+#include "painter/gui/items.h"
+#include "painter/tui/key.h"
+
+namespace painter::tui {
+class Keyboard;
+}
+
+namespace painter::gui::detail {
+class Drawer;
+}
 
 namespace painter::gui {
 
@@ -37,8 +55,13 @@ enum class Placement : std::uint8_t {
 
 enum class Glass : std::uint8_t { Text = ITEM_GLASS_TEXT, Pixels = ITEM_GLASS_PIXELS };
 
+// What happened: what the display told the area (Area: where it is and how
+// large; Size: an item's size by its content; Refused: a change it did not
+// take; Shown: a step on the glass; PageFree: a canvas's page to draw in
+// again) — and what Wait heard besides: a key, the alarm come, the keyboard
+// gone, the program asked to finish.
 struct Event {
-    enum class Kind : std::uint8_t { Area, Size, Refused, Shown, PageFree };
+    enum class Kind : std::uint8_t { Area, Size, Refused, Shown, PageFree, Key, Alarm, Gone, EndAsked };
     Kind          What  = Kind::Area;
     std::uint32_t Item  = 0;        // the item, or the block
     core::PointF  Size{};           // the area's or the item's, in points
@@ -49,32 +72,15 @@ struct Event {
     error_t       Reason = 0;
     std::uint64_t Step   = 0;
     std::uint32_t Micros = 0, Pixels = 0, Bytes = 0, Records = 0;
+    std::uint32_t Own = 0;          // of a Shown frame's pixels, those this area's own changes asked for
     std::uint32_t Page   = 0;
+    tui::KeyEvent Key{};
+    std::uint64_t Moment = 0;       // the alarm's, of the ClockBoard's uptime
 };
 
-// A picture: Width x Height pixels of R, G, B, A bytes, the opacity not
-// multiplied in. Filled, then shown by the items that name it; changed, and
-// said so (Changes::BlockChanged).
-struct PictureBlock {
-    std::uint32_t          Id = 0;
-    std::uint32_t          Width = 0, Height = 0;
-    box::bay<std::byte>    Memory;
-    std::span<std::uint8_t> Pixels() noexcept;
-};
+class Frame;
 
-// A canvas of the program's own pixels: two pages, one drawn while the other
-// is shown — a page is drawn in only while it is free (Free), and given to the
-// display with Changes::BlockChanged naming it.
-struct CanvasBlock {
-    std::uint32_t       Id = 0;
-    std::uint32_t       Width = 0, Height = 0;
-    box::bay<std::byte> Memory;
-    bool                         Free(std::uint32_t Page) const noexcept;
-    std::optional<core::Canvas> Page(std::uint32_t Page) noexcept;   // to draw on, while free
-    void                         Taken(std::uint32_t Page) noexcept;  // given to the display
-};
-
-class Area : public Changes {
+class Area : public Changes, public Makes<Area> {
 public:
     // Always: shown even while the program lives behind — a clock in the
     // corner, a companion — not only while it is in front.
@@ -104,6 +110,38 @@ public:
 
     // What the display told, oldest first; none when nothing waits.
     std::optional<Event> Next();
+    // The next thing that happens, waited for while nothing has: what the
+    // display tells (Next), a key of Keys when they are given, the strand's
+    // alarm (box/alarm.h) come. The display's bell is heard from then on.
+    Event Wait(tui::Keyboard *Keys = nullptr);
+
+    // A frame described whole — what it shows this time, made in the Frame
+    // the way items are made here — and only what differs from the frame
+    // before sent, as one step.
+    template <typename Describing>
+    void Draw(Describing &&Describe)
+    {
+        Frame &Into = BeginFrame();
+        Describe(Into);
+        EndFrame();
+    }
+
+    // Items made here, kept by their objects; and, as for every Changes, the
+    // properties of an item named by its number.
+    using Makes<Area>::Text;
+    using Changes::Text;
+    using Makes<Area>::Rectangle;
+    using Changes::Rectangle;
+    using Makes<Area>::Ellipse;
+    using Changes::Ellipse;
+    using Makes<Area>::Outline;
+    using Changes::Outline;
+    using Makes<Area>::Picture;
+    using Changes::Picture;
+    using Makes<Area>::Canvas;
+    using Changes::Canvas;
+    using Makes<Area>::Cells;
+    using Changes::Cells;
     // The tag the display touches when it tells something: wait on it. Heard
     // from the opening on; a program that never waits on it lets it go
     // (Listen(false)), so the display's word does not wake it — a touch
@@ -135,7 +173,16 @@ public:
     void                                     CloseBlock(std::uint32_t Block);
 
 private:
-    Area() = default;
+    Area();
+    const std::shared_ptr<detail::Anchor> &Where() const noexcept { return Anchored; }
+    std::uint32_t                          Parent() const noexcept { return ITEM_AREA; }
+    std::optional<Event>                   Read();
+    // The bell's touches taken, and all the display told kept for Next.
+    void                                   Gather();
+    Frame                                 &BeginFrame();
+    void                                   EndFrame();
+    friend class Makes<Area>;
+    friend class gui::Canvas;
     std::expected<box::bay<std::byte>, box::error> Block(std::uint8_t Kind, std::uint32_t Width, std::uint32_t Height,
                                                          std::uint32_t Bytes, std::uint32_t &Id);
     void Tell(std::uint8_t Command, std::uint32_t What) noexcept;
@@ -153,6 +200,12 @@ private:
     TouchTag            Rung  = TOUCH_TAG_INVALID;
     std::uint64_t       Steps = 0;
     bool                Opened = false;
+    detail::Numbers                 Pool;      // its items' numbers
+    std::shared_ptr<detail::Anchor> Anchored;  // where its items' words go
+    std::deque<Event>               Queued;    // told while a canvas waited for a page
+    // The frame drawn last, and the one being described — let go by the way
+    // that made it, so a program that draws no frames carries none of it.
+    std::unique_ptr<detail::Drawer, void (*)(detail::Drawer *)> Frames{nullptr, nullptr};
 };
 
 }  // namespace painter::gui

@@ -33,7 +33,7 @@
 #include "cells_draw.h"
 #include "compositor.h"
 #include "console_model.h"
-#include "item_look.h"
+#include "painter/items/look.h"
 #include "mirror.h"
 
 class Typesetter;

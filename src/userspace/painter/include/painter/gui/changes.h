@@ -8,6 +8,11 @@
 // while it waits replaces what it said before: the last word wins, nothing is
 // lost but what was said over, and the program never waits for the display.
 //
+// What was last said of each property of each item is kept too: a property
+// said again as it was goes nowhere, so a program may say all of an item each
+// time and only what differs is written; a change the display refused is
+// forgotten, so saying it again writes it again.
+//
 // A cells item's cells are kept here as last said, each cell a word of its
 // own: only the cells that differ from what was said before are marked, and
 // each row's marked stretch goes into the ring after every other change.
@@ -194,9 +199,26 @@ public:
     // ring to hold. Counted, never written.
     std::uint64_t Refused() const noexcept { return RefusedCount; }
 
-private:
+    // What was last said of Item's Property, as the language writes it; none
+    // when it is unsaid. The properties Item says, in their order.
+    const std::vector<std::uint8_t> *Said(std::uint32_t Item, std::uint16_t Property) const noexcept;
+    std::vector<std::uint16_t>       SaidOf(std::uint32_t Item) const;
+    // Item's Property no longer known as said: the display refused it, and
+    // what it holds is what was said before.
+    void Forget(std::uint32_t Item, std::uint16_t Property);
+    // Item's Property said as the language writes it — a value Said gave
+    // back, of another item — written unless it is what was said.
+    void Say(std::uint32_t Item, std::uint16_t Property, std::span<const std::uint8_t> Value)
+    {
+        Put(Item, Property, Record(Value.begin(), Value.end()));
+    }
+
+protected:
     using Record = std::vector<std::uint8_t>;
+    // Item's Property said as Value — written unless it is what was said.
     void Put(std::uint32_t Item, std::uint16_t Property, Record Value);
+
+private:
     static Record Make(std::uint16_t Op, std::uint32_t Item, std::span<const std::uint8_t> Body);
 
     // A cells item's cells as last said, and each row's stretch [From, To)
@@ -209,7 +231,8 @@ private:
     bool FlushCells(const auto &Into, std::uint32_t Most);
 
     std::vector<std::pair<std::uint32_t, Record>>               Ordered;      // the item, and its record
-    std::map<std::pair<std::uint32_t, std::uint16_t>, Record>   Properties;   // each property's last word
+    std::map<std::pair<std::uint32_t, std::uint16_t>, Record>   Properties;   // each property's last word, waiting
+    std::map<std::pair<std::uint32_t, std::uint16_t>, Record>   Values;       // each property as last said
     std::map<std::uint32_t, KeptCells>                          Grids;        // each cells item's
     std::size_t                                                 CellsMarked = 0;   // rows with a stretch marked
     static constexpr std::uint64_t                              NoStep = ~std::uint64_t{0};

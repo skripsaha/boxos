@@ -358,7 +358,10 @@ void BlockChanged(Area &Said, std::uint32_t Id, const ItemBlockChanged &Where)
         TakePage(*Found, Where);
         const ItemPageFree Free{Where.Page & 1u, 0};
         Tell(Said, ITEM_EVENT_FREE, Id, &Free, sizeof(Free));
-        break;
+        /* What of it changed, drawn again: no more. */
+        const Rect Part{Where.X, Where.Y, Where.Width, Where.Height};
+        ForEachArea(Of, [Id, Part](Area &Each) { Each.State->Items.BlockChanged(Id, Part); });
+        return;
     }
     case ITEM_BLOCK_FONT:
         if (const error_t Why = ReadFont(Of, *Found); Why != OK) return Refuse(Why);
@@ -478,8 +481,9 @@ void AreasShown(std::uint32_t Micros, std::uint64_t Pixels) noexcept
     g_left = false;
     for (const auto &Each : g_areas) {
         if (Each->Stepped) {
-            const ItemShown Shown{Each->Step, Micros, static_cast<std::uint32_t>(std::min<std::uint64_t>(Pixels, UINT32_MAX)),
-                                  Each->Bytes, Each->Records};
+            const ItemShown Shown{Each->Step,  Micros, static_cast<std::uint32_t>(std::min<std::uint64_t>(Pixels, UINT32_MAX)),
+                                  Each->Bytes, Each->Records,
+                                  static_cast<std::uint32_t>(std::min<std::uint64_t>(Pixels ? Each->State->Composed : 0, UINT32_MAX)), 0};
             Tell(*Each, ITEM_EVENT_SHOWN, 0, &Shown, sizeof(Shown));
             Each->Stepped = false;
             Each->Bytes = Each->Records = 0;

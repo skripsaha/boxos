@@ -66,20 +66,22 @@ std::vector<std::uint8_t> Load(const char *Path)
     return std::vector<std::uint8_t>(std::istreambuf_iterator<char>(In), std::istreambuf_iterator<char>());
 }
 
-const typecase::Fonts &TreeBook()
+}  // namespace
+
+std::shared_ptr<const typecase::Fonts> TreeFonts()
 {
-    static const std::unique_ptr<typecase::Fonts> Book = [] {
-        auto Made = std::make_unique<typecase::Fonts>();
+    static const std::shared_ptr<const typecase::Fonts> Book = [] {
+        auto Made = std::make_shared<typecase::Fonts>();
         for (const char *Face : {"Inter-Regular", "Inter-Italic", "Inter-SemiBold", "Inter-Bold", "JetBrainsMonoNL-Regular"})
             if (auto Read = typecase::Font::Read(Load((std::string("src/userspace/typecase/fonts/") + Face + ".ttf").c_str())))
                 Made->Add(std::move(*Read));
         Made->SetDefault("Inter");
         return Made;
     }();
-    return *Book;
+    return Book;
 }
 
-}  // namespace
+const typecase::Fonts &TreeBook() { return *TreeFonts(); }
 
 items::ProgramState HostProgram(const items::Theme &Look, float Scale)
 {
@@ -103,6 +105,7 @@ int main(int Count, char **Words)
     stand::CheckWire(Tally);
     stand::CheckCompose(Tally);
     stand::CheckCells(Tally);
+    stand::CheckGui(Tally);
     std::printf("items stand: %d held, %d failed\n", Tally.Held, Tally.Failed);
     return Tally.Failed ? 1 : 0;
 }

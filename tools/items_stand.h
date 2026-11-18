@@ -4,12 +4,14 @@
 /* items stand — what its parts share (tools/items_stand.cpp). */
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "compositor.h"
 #include "item_reception.h"
 #include "painter/gui/changes.h"
+#include "typecase/fonts.h"
 
 namespace stand {
 
@@ -42,9 +44,15 @@ struct Bench {
 /* A program's sources on the host: the tree's fonts. */
 items::ProgramState HostProgram(const items::Theme &Look, float Scale);
 
+// The tree's own fonts, as the display's side here lays texts in them — and,
+// as the system's, a program's measuring (items_stand_gui.cpp).
+std::shared_ptr<const typecase::Fonts> TreeFonts();
+const typecase::Fonts                 &TreeBook();
+
 void CheckWire(Tally &Count);
 void CheckCompose(Tally &Count);
 void CheckCells(Tally &Count);
+void CheckGui(Tally &Count);
 bool WriteSheet(const char *Out);
 
 }  // namespace stand

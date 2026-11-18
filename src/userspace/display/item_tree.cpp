@@ -398,12 +398,22 @@ void Tree::CellsChanged(std::uint32_t Id) noexcept
     if (Item *Of = Find(Id)) MarkUp(Of->Parent);
 }
 
-void Tree::BlockChanged(std::uint32_t Block) noexcept
+void Tree::BlockChanged(std::uint32_t Block, std::optional<painter::core::Rect> Part) noexcept
 {
     const auto Found = BlockUsers.find(Block);
     if (Found == BlockUsers.end()) return;
-    for (std::uint32_t Id : Found->second)
-        if (Item *Of = Find(Id)) Mark(*Of, true, false);
+    for (std::uint32_t Id : Found->second) {
+        Item *Of = Find(Id);
+        if (!Of) continue;
+        /* A canvas's part: only where it lies is drawn again — the part
+         * joined with any changed before the frame took it. */
+        if (Part && Of->Kind == ITEM_CANVAS && !Of->Redraw) {
+            Of->Changed = Of->Changed ? Of->Changed->Join(*Part) : *Part;
+            MarkUp(Of->Parent);
+            continue;
+        }
+        Mark(*Of, true, false);
+    }
 }
 
 void Tree::RedrawAll() noexcept

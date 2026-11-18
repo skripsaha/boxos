@@ -131,8 +131,18 @@ void FractalPicture::Restart(const FractalView &Look, int Most)
     Row   = 0;
 }
 
+std::pair<int, int> FractalPicture::TakeTouched()
+{
+    const std::pair<int, int> Taken{TouchedFrom, TouchedTo};
+    TouchedFrom = TouchedTo = 0;
+    return Taken;
+}
+
 void FractalPicture::Fill(int X, int Y, float Count)
 {
+    if (TouchedFrom >= TouchedTo) TouchedFrom = Y, TouchedTo = Y;
+    TouchedFrom = std::min(TouchedFrom, Y);
+    TouchedTo   = std::max(TouchedTo, std::min(Y + Step, Height));
     for (int Dy = 0; Dy < Step && Y + Dy < Height; Dy++)
         for (int Dx = 0; Dx < Step && X + Dx < Width; Dx++)
             Counts[static_cast<std::size_t>(Y + Dy) * Width + X + Dx] = Count;
@@ -182,11 +192,14 @@ int FractalPaletteCount()
 }
 
 void FractalColour(const FractalPicture &Picture, const FractalPalette &Palette, float Spread, float Turn,
-                   std::vector<PainterColor> &Pixels)
+                   std::vector<PainterColor> &Pixels, int FromRow, int ToRow)
 {
     Pixels.resize(Picture.Counts.size());
-    float Scale = 256.0f / Spread;
-    for (std::size_t At = 0; At < Picture.Counts.size(); At++) {
+    float             Scale = 256.0f / Spread;
+    const std::size_t First = static_cast<std::size_t>(std::max(FromRow, 0)) * static_cast<std::size_t>(Picture.Width);
+    const std::size_t Past  = ToRow < 0 ? Picture.Counts.size()
+                                        : std::min(Picture.Counts.size(), static_cast<std::size_t>(ToRow) * static_cast<std::size_t>(Picture.Width));
+    for (std::size_t At = First; At < Past; At++) {
         float Count = Picture.Counts[At];
         if (Count < 0) {
             Pixels[At] = painter::core::Colors::Black;

@@ -108,25 +108,51 @@ Transform LocalOf(const Item &Of) noexcept
     return Made.Then(Transform::Translate(AX + X, AY + Y));
 }
 
+namespace {
+
+/* Area noted in rectangles reserved beforehand: in none that holds it
+ * already; past them, joined to the one it grows the least. */
+void Note(std::vector<Rect> &Into, Rect Area) noexcept
+{
+    for (const Rect &Each : Into)
+        if (Holds(Each, Area)) return;
+    if (Into.size() < Into.capacity()) {
+        Into.push_back(Area);
+        return;
+    }
+    std::size_t  Best  = 0;
+    std::int64_t Least = -1;
+    for (std::size_t I = 0; I < Into.size(); I++) {
+        const std::int64_t Grows = AreaOf(Into[I].Join(Area)) - AreaOf(Into[I]);
+        if (Least < 0 || Grows < Least) Least = Grows, Best = I;
+    }
+    if (Into.empty()) return;
+    Into[Best] = Into[Best].Join(Area);
+}
+
+/* Overlapping rectangles joined, again until none overlaps. */
+void JoinOverlapping(std::vector<Rect> &Made)
+{
+    for (bool Joined = true; Joined;) {
+        Joined = false;
+        for (std::size_t I = 0; I < Made.size() && !Joined; I++)
+            for (std::size_t J = I + 1; J < Made.size() && !Joined; J++)
+                if (!Made[I].Intersect(Made[J]).Empty() || Holds(Made[I], Made[J]) || Holds(Made[J], Made[I])) {
+                    Made[I] = Made[I].Join(Made[J]);
+                    Made.erase(Made.begin() + static_cast<std::ptrdiff_t>(J));
+                    Joined = true;
+                }
+    }
+}
+
+}  // namespace
+
 void Compositor::Damage(Rect Area) noexcept
 {
     Area = Area.Intersect(Screen);
     if (Area.Empty()) return;
-    for (const Rect &Each : Waiting)
-        if (Holds(Each, Area)) return;
-    if (Waiting.size() < Waiting.capacity()) {
-        Waiting.push_back(Area);
-        return;
-    }
-    /* Full: joined to the rectangle it grows the least. */
-    std::size_t  Best  = 0;
-    std::int64_t Least = -1;
-    for (std::size_t I = 0; I < Waiting.size(); I++) {
-        const std::int64_t Grows = AreaOf(Waiting[I].Join(Area)) - AreaOf(Waiting[I]);
-        if (Least < 0 || Grows < Least) Least = Grows, Best = I;
-    }
-    if (Waiting.empty()) return;
-    Waiting[Best] = Waiting[Best].Join(Area);
+    Note(Waiting, Area);
+    if (Owning) Note(Own, Area);
 }
 
 void Compositor::Vanish(AreaState &Area, const std::vector<std::uint32_t> &Items)
@@ -180,7 +206,14 @@ void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, 
             Damage(Of->Shown);
             Damage(Now);
             Of->Shown = Now;
+        } else if (Of->Changed && !Hidden) {
+            /* Only part of a canvas changed: where it lies on the glass, its
+             * page laid pixel for pixel — else all of it. */
+            const std::optional<painter::core::Point> Corner = CanvasCorner(*Of, Drawn, Program.From, Place);
+            Damage(Corner ? Rect{Corner->X + Of->Changed->X, Corner->Y + Of->Changed->Y, Of->Changed->Width, Of->Changed->Height}.Intersect(Now)
+                          : Now);
         }
+        Of->Changed.reset();
         if (Cellular)
             CellsChanged(*Of->Grid, *Program.From.Cells, Place, Program.From.Scale, Now, Whole || Hidden,
                          [this](Rect Where) { Damage(Where); });
@@ -227,53 +260,54 @@ void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, 
 void Compositor::Take(std::span<AreaState *const> Areas, const Theme &Look)
 {
     for (AreaState *Area : Areas) {
-        const bool Placed  = Area->Place != Area->Was || Area->Shown != Area->WasShown;
-        Area->Program.From.Look = &Look;
-        for (const Rect &Gone : Area->Items.Vacated()) Damage(Gone);
-        Area->Items.Vacated().clear();
-        if (!Placed && !Area->Items.Marked()) continue;
-        if (Placed) {
-            if (Area->WasShown) Damage(Area->Was);
-            if (Area->Shown) Damage(Area->Place);
-        }
-        Area->List.clear();
-        if (Area->Shown) {
-            const Transform Root = Transform::Scale(Area->Program.From.Scale)
-                                       .Then(Transform::Translate(static_cast<float>(Area->Place.X),
-                                                                  static_cast<float>(Area->Place.Y)));
-            try {
-                Walk(*Area, Area->Items.Top(), Root, 1.0f, Placed, true);
-            } catch (...) {
-                /* No room to compose it: the area shown as far as it was
-                 * walked, and walked again whole at the next frame. */
-                Area->Items.RedrawAll();
-                Damage(Area->Place);
-                continue;
-            }
-        } else {
-            Vanish(*Area, Area->Items.Top());
-        }
-        Area->Was      = Area->Place;
-        Area->WasShown = Area->Shown;
-        Area->Items.Taken();
+        Own.clear();
+        Owning = true;
+        TakeOne(*Area, Look);
+        Owning = false;
+        /* What its own changes cost, whatever else the frame composes. */
+        JoinOverlapping(Own);
+        Area->Composed = 0;
+        for (const Rect &Each : Own) Area->Composed += static_cast<std::uint64_t>(AreaOf(Each));
     }
+}
+
+void Compositor::TakeOne(AreaState &Area, const Theme &Look)
+{
+    const bool Placed     = Area.Place != Area.Was || Area.Shown != Area.WasShown;
+    Area.Program.From.Look = &Look;
+    for (const Rect &Gone : Area.Items.Vacated()) Damage(Gone);
+    Area.Items.Vacated().clear();
+    if (!Placed && !Area.Items.Marked()) return;
+    if (Placed) {
+        if (Area.WasShown) Damage(Area.Was);
+        if (Area.Shown) Damage(Area.Place);
+    }
+    Area.List.clear();
+    if (Area.Shown) {
+        const Transform Root = Transform::Scale(Area.Program.From.Scale)
+                                   .Then(Transform::Translate(static_cast<float>(Area.Place.X), static_cast<float>(Area.Place.Y)));
+        try {
+            Walk(Area, Area.Items.Top(), Root, 1.0f, Placed, true);
+        } catch (...) {
+            /* No room to compose it: the area shown as far as it was walked,
+             * and walked again whole at the next frame. */
+            Area.Items.RedrawAll();
+            Damage(Area.Place);
+            return;
+        }
+    } else {
+        Vanish(Area, Area.Items.Top());
+    }
+    Area.Was      = Area.Place;
+    Area.WasShown = Area.Shown;
+    Area.Items.Taken();
 }
 
 std::vector<Rect> Compositor::Rects()
 {
     std::vector<Rect> Made = Waiting;
     Waiting.clear();
-    /* Overlapping rectangles joined, again until none overlaps. */
-    for (bool Joined = true; Joined;) {
-        Joined = false;
-        for (std::size_t I = 0; I < Made.size() && !Joined; I++)
-            for (std::size_t J = I + 1; J < Made.size() && !Joined; J++)
-                if (!Made[I].Intersect(Made[J]).Empty() || Holds(Made[I], Made[J]) || Holds(Made[J], Made[I])) {
-                    Made[I] = Made[I].Join(Made[J]);
-                    Made.erase(Made.begin() + static_cast<std::ptrdiff_t>(J));
-                    Joined = true;
-                }
-    }
+    JoinOverlapping(Made);
     /* Too many: the two that grow the least joined. */
     while (Made.size() > DamageMost) {
         std::size_t  BestI = 0, BestJ = 1;
