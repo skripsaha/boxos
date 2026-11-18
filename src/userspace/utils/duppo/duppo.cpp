@@ -22,7 +22,9 @@
  * On a framebuffer Duppo is drawn in the screen's own pixels (pixels): it comes
  * out of nothing on a spring, its canvas carried smoothly between frames by
  * the display, and now and then it says a word in a bubble beside itself
- * (words) — unless the person keeps it quiet. On a text page it is drawn in
+ * (words), dressed as the person sets it — an oval, a rounded box or a box,
+ * its colours, its line, its words' size, a tail, a shadow (bubble) — unless
+ * the person keeps it quiet. On a text page it is drawn in
  * cells (picture). Either way only what Duppo stands on is painted; all else
  * is left see-through, so the screen goes on being used beneath it. */
 
@@ -69,7 +71,17 @@ BOX_SETTINGS("speed number from 20 to 300 percent default 100 \"how fast Duppo d
              "blink number from 20 to 400 percent or off default 100 \"how often Duppo blinks; off keeps the eye open\"\n"
              "smooth on-or-off default on \"Duppo's edge fades into what lies beneath; off keeps every edge whole or none\"\n"
              "fps number from 5 to 60 frames default 25 \"how many frames a second Duppo is drawn; more is smoother, the drifting is as fast\"\n"
-             "talk on-or-off default on \"Duppo says a word now and then, in a bubble beside itself; off keeps it quiet\"\n");
+             "talk on-or-off default on \"Duppo says a word now and then, in a bubble beside itself; off keeps it quiet\"\n"
+             "often number from 25 to 400 percent default 100 \"how often Duppo says a word\"\n"
+             "bubble \"the bubble Duppo's words are said in, on a framebuffer\"\n"
+             "    shape one-of oval rounded square default oval \"an oval as a comic draws one, a rounded box, or a box\"\n"
+             "    paper color default #FFFFFF \"the bubble's colour\"\n"
+             "    outline color default #1C1C1C \"the line round it\"\n"
+             "    thickness number from 0 to 8 px default 3 \"how thick that line is; 0 draws none\"\n"
+             "    ink color default #1C1C1C \"the words' colour\"\n"
+             "    size number from 10 to 32 px default 16 \"how large the words are\"\n"
+             "    tail on-or-off default on \"a tail pointing at Duppo\"\n"
+             "    shadow on-or-off default on \"a soft shadow beneath the bubble\"\n");
 
 namespace {
 
@@ -86,7 +98,27 @@ struct Look {
     bool                 Smooth;
     unsigned             Fps;
     bool                 Talk;
+    float                Often;
+    duppo::BubbleLook    Bubble;
 };
+
+duppo::BubbleLook BubbleOf()
+{
+    using box::settings;
+    const std::string Shape = settings::choice("bubble shape");
+    duppo::BubbleLook Made;
+    Made.Shape     = Shape == "rounded" ? duppo::BubbleLook::Form::Rounded
+                   : Shape == "square"  ? duppo::BubbleLook::Form::Square
+                                        : duppo::BubbleLook::Form::Oval;
+    Made.Paper     = painter::core::Color::FromRaw(settings::color("bubble paper"));
+    Made.Line      = painter::core::Color::FromRaw(settings::color("bubble outline"));
+    Made.Ink       = painter::core::Color::FromRaw(settings::color("bubble ink"));
+    Made.Thickness = static_cast<float>(settings::number("bubble thickness"));
+    Made.Size      = static_cast<float>(settings::number("bubble size"));
+    Made.Tail      = settings::on("bubble tail");
+    Made.Shadow    = settings::on("bubble shadow");
+    return Made;
+}
 
 Look ReadLook()
 {
@@ -100,7 +132,9 @@ Look ReadLook()
                 .Blink      = static_cast<float>(settings::number("blink")) / 100.0f,
                 .Smooth     = settings::on("smooth"),
                 .Fps        = static_cast<unsigned>(settings::number("fps")),
-                .Talk       = settings::on("talk")};
+                .Talk       = settings::on("talk"),
+                .Often      = static_cast<float>(settings::number("often")) / 100.0f,
+                .Bubble     = BubbleOf()};
 }
 
 float SizeOf(const Look &Set, painter::core::Size Glass)
@@ -176,7 +210,7 @@ int FloatOnPixels(painter::gui::Area Screen)
     const auto     Tune = [&] {
         Duppo.Tune(Set);
         Painter.Dress(duppo::Palette::Make(Set.Body, Set.Ring, Set.Pupil), Set.Smooth);
-        Speech.Tune(Set.Talk, Set.Speed);
+        Speech.Tune(Set.Talk, Set.Often, Set.Bubble);
     };
     Tune();
     Duppo.Begin(Set, On.Cells, Dice);

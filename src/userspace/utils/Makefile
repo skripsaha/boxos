@@ -508,7 +508,7 @@ whale.elf: $(BOXLIB_START) $(WHALE_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB
 # so that and the logo's gradients are built -O2; its words are measured, so
 # it carries Typecase.
 DUPPO_DIR  = duppo
-DUPPO_OBJS = $(addprefix $(DUPPO_DIR)/,duppo.o flight.o face.o spin.o orbit.o logo.o sampler.o picture.o pixels.o words.o)
+DUPPO_OBJS = $(addprefix $(DUPPO_DIR)/,duppo.o flight.o face.o spin.o orbit.o logo.o sampler.o picture.o pixels.o bubble.o words.o)
 
 $(DUPPO_DIR)/logo.o $(DUPPO_DIR)/sampler.o $(DUPPO_DIR)/picture.o $(DUPPO_DIR)/pixels.o: CXXFLAGS += -O2
 
