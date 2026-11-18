@@ -2,11 +2,20 @@
 
 #include "typecase/chain.h"
 
+#include <atomic>
 #include <utility>
 
 #include "typecase/code_box.h"
 
 namespace typecase {
+
+namespace {
+
+std::atomic<std::uint64_t> NextSerial{1};
+
+}  // namespace
+
+Chain::Chain() : Number(NextSerial.fetch_add(1, std::memory_order_relaxed)) {}
 
 void Chain::Add(std::unique_ptr<GlyphSource> Source)
 {

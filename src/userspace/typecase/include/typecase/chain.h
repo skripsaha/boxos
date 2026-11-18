@@ -8,6 +8,7 @@
  * so a line of a frame meets the next cell's exactly, and its fonts after;
  * running text needs only fonts. */
 
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -17,6 +18,11 @@ namespace typecase {
 
 class Chain {
 public:
+    Chain();
+
+    /* A number no other chain has: what kept pictures it drew are known by. */
+    std::uint64_t Serial() const noexcept { return Number; }
+
     /* Source, asked after every source added before it. */
     void Add(std::unique_ptr<GlyphSource> Source);
 
@@ -26,6 +32,7 @@ public:
 
 private:
     std::vector<std::unique_ptr<GlyphSource>> Sources;
+    std::uint64_t                             Number;
 };
 
 }  // namespace typecase

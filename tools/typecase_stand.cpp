@@ -62,6 +62,32 @@ int Outlines(const char *Path, std::uint32_t Index)
     const typecase::FontMetrics &M    = Font.Metrics();
     std::printf("font glyphs=%u upem=%u ascender=%d descender=%d gap=%d xheight=%d capheight=%d\n",
                 Font.GlyphCount(), M.UnitsPerEm, M.Ascender, M.Descender, M.LineGap, M.XHeight, M.CapHeight);
+    const typecase::FontStyle &Style = Font.Style();
+    std::printf("style family=%s name=%s weight=%u italic=%d\n", Style.Family.c_str(), Style.Name.c_str(), Style.Weight,
+                Style.Italic ? 1 : 0);
+    std::printf("lines underline=%d,%d strike=%d,%d\n", M.UnderlinePosition, M.UnderlineThickness, M.StrikePosition,
+                M.StrikeThickness);
+    const struct {
+        const char      *Tag;
+        typecase::Script Of;
+    } Kerned[] = {{"latn", typecase::Script::Latin}, {"cyrl", typecase::Script::Cyrillic}, {"grek", typecase::Script::Greek}};
+    std::vector<char32_t> Latin, Cyrillic{0x401}, Greek;
+    for (char32_t C = 0x21; C < 0x7F; C++) Latin.push_back(C);
+    for (char32_t C = 0x410; C < 0x450; C++) Cyrillic.push_back(C);
+    Cyrillic.push_back(0x451);
+    for (char32_t C = 0x391; C < 0x3AA; C++) Greek.push_back(C);
+    for (char32_t C = 0x3B1; C < 0x3CA; C++) Greek.push_back(C);
+    const std::vector<char32_t> *Sets[] = {&Latin, &Cyrillic, &Greek};
+    for (int S = 0; S < 3; S++)
+        for (char32_t A : *Sets[S])
+            for (char32_t B : *Sets[S]) {
+                const typecase::GlyphId GA = Font.Find(A), GB = Font.Find(B);
+                if (!GA || !GB) continue;
+                const typecase::PairKerning K = Font.KerningOf(GA, GB, Kerned[S].Of);
+                if (K == typecase::PairKerning{}) continue;
+                std::printf("kern %s U+%04X U+%04X %d %d %d %d\n", Kerned[S].Tag, static_cast<unsigned>(A),
+                            static_cast<unsigned>(B), K.FirstShift, K.FirstAdvance, K.SecondShift, K.SecondAdvance);
+            }
     for (char32_t Character = 0; Character <= 0x10FFFF; Character++)
         if (typecase::GlyphId Glyph = Font.Find(Character))
             std::printf("U+%04X %u\n", static_cast<unsigned>(Character), Glyph);
@@ -98,6 +124,8 @@ int Checks(const char *Path, const char *ForgeDir, int Mutations)
     stand::CheckSymbols(Count);
     stand::CheckImprint(Count, Font);
     stand::CheckDamage(Count, Font, Mutations);
+    stand::CheckFamily(Count, ForgeDir);
+    stand::CheckLayout(Count);
     std::printf("typecase stand: %d held, %d failed\n", Count.Held, Count.Failed);
     return Count.Failed == 0 ? 0 : 1;
 }

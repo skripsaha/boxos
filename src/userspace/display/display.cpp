@@ -52,7 +52,7 @@
  * On a framebuffer each character is drawn as the typesetter pictures it
  * (typesetter.cpp), in the font the person names in the display's settings —
  * text font, and text tags to tell files of one name apart — read once at
- * start (font_file.cpp), in cells of text size pixels tall, or of a height
+ * start (painter/core/system_fonts.h), in cells of text size pixels tall, or of a height
  * the glass shows about fifty-four rows of. They take effect at the display's
  * next start: the console's cells are counted once, and every program asks
  * for them once.
@@ -84,7 +84,7 @@
 #include "console_model.h"
 #include "easel.h"
 #include "effects.h"
-#include "font_file.h"
+#include "painter/core/system_fonts.h"
 #include "front.h"
 #include "lanes.h"
 #include "layers.h"
@@ -651,7 +651,7 @@ std::int32_t CellHeight(std::uint32_t Tall)
 std::optional<typecase::Font> PersonsFont()
 {
     const char *Name = settings_text("text font");
-    std::expected<std::vector<std::uint8_t>, std::string> Bytes = FontFileRead(Name, settings_text("text tags"));
+    std::expected<std::vector<std::uint8_t>, std::string> Bytes = painter::core::ReadFontFile(Name, settings_text("text tags"));
     if (!Bytes) {
         kdbg_print("[display] %s; the imprint draws", Bytes.error().c_str());
         return std::nullopt;

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "boxos_imprint.h"
+#include "typecase/fonts.h"
 
 namespace stand {
 
@@ -34,6 +35,18 @@ void CheckImprint(Tally &Count, const std::vector<std::uint8_t> &Font);
  * sum over every pixel of every glyph, and where three characters are. */
 void SayImprintDigest(const BoxImprint &Of);
 void CheckDamage(Tally &Count, const std::vector<std::uint8_t> &Font, int Mutations);
+
+/* The stand's own family (typecase_stand_family.cpp): Stand Sans regular,
+ * bold and italic, every glyph a box, and Stand Extra, a fallback with
+ * Cyrillic and ideographs; a book of the four. */
+struct StandFaces {
+    std::vector<std::uint8_t> Regular, Bold, Italic, Extra;
+};
+StandFaces      MakeStandFaces();
+typecase::Fonts StandBook();
+std::uint16_t   SansGlyphOf(char32_t Character);
+void            CheckFamily(Tally &Count, const char *ForgeDir);
+void            CheckLayout(Tally &Count);
 
 }  // namespace stand
 

@@ -29,8 +29,10 @@ if grep -q 'warning:' "$WORK/make.log"; then
     exit 2
 fi
 # BoxLib's NULL is its own; the host's headers have theirs.
-SOURCES="tools/draw_stand*.cpp $LIB/src/core/*.cpp"
-INCLUDES="-Isrc/include -I$LIB/include -I$LIB/src/core -Isrc/userspace/boxlib/include -Itools"
+# Painter's engine and Typecase, as BoxOS builds them; the system's fonts read
+# from the volume are the machine's, not the host's.
+SOURCES="tools/draw_stand*.cpp $(ls $LIB/src/core/*.cpp | grep -v system_fonts.cpp) src/userspace/typecase/src/*.cpp"
+INCLUDES="-Isrc/include -I$LIB/include -I$LIB/src/core -Isrc/userspace/typecase/include -Isrc/userspace/boxlib/include -Itools"
 if [ "${1:-}" = speed ]; then
     $CXX_HOST -std=c++23 -O2 -Wno-macro-redefined $INCLUDES $SOURCES -o "$WORK/speed" ||
         { echo "draw: harness failed — the stand did not build"; exit 2; }

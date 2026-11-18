@@ -17,6 +17,10 @@
 #include "painter/core/stroke.h"
 #include "painter/core/transform.h"
 
+namespace typecase {
+class Layout;
+}
+
 namespace painter::core {
 
 // Whether a canvas's light is written to the glass with a fixed pattern of
@@ -71,6 +75,18 @@ public:
                 const Transform &Place = {}, float Opacity = 1.0f);
     bool Stroke(const Path &Shape, const core::Stroke &Line, const core::Fill &With, const Transform &Place = {},
                 float Opacity = 1.0f);
+    // Text Typecase laid out (typecase/layout.h), its top left at At, filled
+    // with each of Fills — all of it, or only what is drawn in Ink. Where Place
+    // lays text upright at one size, no larger than 256 pixels to the em, every
+    // glyph is drawn once at its size and a quarter pixel's place and kept (one
+    // cache for every canvas of the program), and a line's glyphs are gathered
+    // into one coverage first, so glyphs that touch are laid once; elsewhere
+    // the text is filled as its shape (TextPath). A text whose box cuts it off
+    // is kept within its box.
+    bool FillText(const typecase::Layout &Text, PointF At, std::span<const core::Fill> Fills,
+                  const Transform &Place = {}, float Opacity = 1.0f, std::optional<std::uint32_t> Ink = std::nullopt);
+    bool FillText(const typecase::Layout &Text, PointF At, const core::Fill &With, const Transform &Place = {},
+                  float Opacity = 1.0f, std::optional<std::uint32_t> Ink = std::nullopt);
     // A mask's coverage filled, where the mask lies.
     bool FillMask(const Mask &Cover, std::span<const core::Fill> Fills, float Opacity = 1.0f);
     bool FillMask(const Mask &Cover, const core::Fill &With, float Opacity = 1.0f);
@@ -111,6 +127,8 @@ private:
     Canvas(Pixel *Memory, std::unique_ptr<Pixel[]> Own, std::uint32_t Width, std::uint32_t Height,
            std::size_t Stride);
     void Touch(Rect Area) noexcept;
+    // Cover's coverage filled with Fills laid by Place.
+    bool LayMask(const Mask &Cover, std::span<const core::Fill> Fills, const Transform &Place, float Opacity);
 
     Pixel                   *Pixels = nullptr;
     std::unique_ptr<Pixel[]> Owned;

@@ -1,20 +1,25 @@
 /*
- * font_file.cpp — the person's font file found and read. See font_file.h.
+ * system_fonts.cpp — the system's fonts, read from the volume, and the font
+ * file a person names. See painter/core/system_fonts.h.
  *
  * Every file wears the stem of its name, up to the last dot, as a tag, so
  * the files called JetBrainsMonoNL-Regular.ttf are among those that wear
- * JetBrainsMonoNL-Regular: one question asks for the stem and the person's
- * tags together, and of what answers, the files called so are the ones
- * meant. A file in the trash answers nothing: the person set it aside.
+ * JetBrainsMonoNL-Regular: one question asks for the stem and the tags
+ * together, and of what answers, the files called so are the ones meant. A
+ * file in the trash answers nothing: the person set it aside.
  */
 
-#include "font_file.h"
+#include "painter/core/system_fonts.h"
 
 #include <cstdlib>
+#include <mutex>
 #include <new>
+#include <utility>
 
 #include "box/debug.h"
 #include "box/file.h"
+
+namespace painter::core {
 
 namespace {
 
@@ -59,7 +64,7 @@ std::expected<std::vector<std::uint8_t>, std::string> ReadWhole(file_id_t File, 
 
 }  // namespace
 
-std::expected<std::vector<std::uint8_t>, std::string> FontFileRead(std::string_view NameView, std::string_view Tags)
+std::expected<std::vector<std::uint8_t>, std::string> ReadFontFile(std::string_view NameView, std::string_view Tags)
 {
     const std::string Name(NameView);
     const std::string Stem = Name.substr(0, Name.rfind('.'));
@@ -85,7 +90,38 @@ std::expected<std::vector<std::uint8_t>, std::string> FontFileRead(std::string_v
         return std::unexpected(Tags.empty() ? "no file is called " + Name
                                             : "no file called " + Name + " wears " + std::string(Tags));
     if (Matches > 1)
-        kdbg_print("[display] %d files are called %s%s%s; #%llu, the first made, is read", Matches, Name.c_str(),
+        kdbg_print("[painter] %d files are called %s%s%s; #%llu, the first made, is read", Matches, Name.c_str(),
                    Tags.empty() ? "" : " and wear ", std::string(Tags).c_str(), static_cast<unsigned long long>(First));
     return ReadWhole(First, Name);
 }
+
+std::shared_ptr<const typecase::Fonts> SystemFonts()
+{
+    static std::once_flag                         Once;
+    static std::shared_ptr<const typecase::Fonts> Kept;
+    std::call_once(Once, [] {
+        auto       Book  = std::make_shared<typecase::Fonts>();
+        file_id_t *Ids   = nullptr;
+        const int   Count = query_all_everywhere("font", nullptr, &Ids);
+        for (int Index = 0; Index < Count; Index++) {
+            FileMetadata Metadata;
+            if (FileMetadataRead(Ids[Index], &Metadata) != 0) continue;
+            const std::string Name = Metadata.Filename ? Metadata.Filename : "";
+            FileMetadataRelease(&Metadata);
+            std::expected<std::vector<std::uint8_t>, std::string> Bytes = ReadWhole(Ids[Index], Name);
+            if (!Bytes) {
+                kdbg_print("[painter] %s; it is passed over", Bytes.error().c_str());
+                continue;
+            }
+            std::expected<typecase::Font, typecase::Fault> Face = typecase::Font::Read(std::move(*Bytes));
+            if (!Face) continue;
+            Book->Add(std::move(*Face));
+        }
+        std::free(Ids);
+        Book->SetDefault(SystemTextFamily);
+        Kept = std::move(Book);
+    });
+    return Kept;
+}
+
+}  // namespace painter::core

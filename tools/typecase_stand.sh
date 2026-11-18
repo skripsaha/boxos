@@ -89,6 +89,13 @@ oracle() {
     fi
 }
 for font in $LIB/fonts/*.ttf "$WORK"/forge/*.ttf; do oracle "$font" 0; done
+# Fonts of the host's own, where it has them: real kerning of every kind —
+# GPOS and kern tables of fonts made by others.
+for font in "/System/Library/Fonts/Supplemental/Arial.ttf" "/System/Library/Fonts/Supplemental/Arial Bold Italic.ttf" \
+            "/System/Library/Fonts/Supplemental/Verdana.ttf" "/System/Library/Fonts/Supplemental/Times New Roman.ttf" \
+            "/System/Library/Fonts/Supplemental/Georgia.ttf" "/System/Library/Fonts/Supplemental/Tahoma.ttf"; do
+    [ -f "$font" ] && oracle "$font" 0
+done
 oracle "$WORK/forge/collection.ttc" 0
 oracle "$WORK/forge/collection.ttc" 1
 

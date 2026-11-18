@@ -99,8 +99,11 @@ bool Near(double Got, double Want, double Share)
 int main(int Argc, char **Argv)
 {
     if (Argc == 3 && std::strcmp(Argv[1], "sheet") == 0) return stand::WriteSheet(Argv[2]) ? 0 : 1;
+    if ((Argc == 3 || Argc == 4) && std::strcmp(Argv[1], "text-sheet") == 0)
+        return stand::WriteTextSheet(Argv[2], Argc == 4 ? Argv[3] : nullptr) ? 0 : 1;
     if (Argc == 2 && std::strcmp(Argv[1], "speed") == 0) {
         stand::SaySpeed();
+        stand::SayTextSpeed();
         return 0;
     }
     if (Argc != 2 || std::strcmp(Argv[1], "checks") != 0) {
@@ -114,6 +117,7 @@ int main(int Argc, char **Argv)
     stand::CheckEngine(Count);
     stand::CheckLanes(Count);
     stand::CheckShadows(Count);
+    stand::CheckText(Count);
     std::printf("draw stand: %d held, %d failed\n", Count.Held, Count.Failed);
     return Count.Failed ? 1 : 0;
 }

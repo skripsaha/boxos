@@ -61,6 +61,9 @@ AVX2 void LayColor(Pixel *Row, const std::uint16_t *Share, std::uint32_t Count, 
     const __m256i Above = _mm256_set1_epi64x(static_cast<long long>(Bits));
     std::uint32_t I     = 0;
     for (; I + 4u <= Count; I += 4u) {
+        std::uint64_t None;
+        __builtin_memcpy(&None, Share + I, sizeof None);
+        if (!None) continue;   /* four pixels not covered: left as they are */
         __m256i *At = reinterpret_cast<__m256i *>(Row + I);
         _mm256_storeu_si256(At, Over(_mm256_loadu_si256(At), Above, FourShares(Share + I)));
     }
@@ -72,6 +75,9 @@ AVX2 void LayPaint(Pixel *Row, const Pixel *Paint, const std::uint16_t *Share, s
 {
     std::uint32_t I = 0;
     for (; I + 4u <= Count; I += 4u) {
+        std::uint64_t None;
+        __builtin_memcpy(&None, Share + I, sizeof None);
+        if (!None) continue;
         __m256i *At = reinterpret_cast<__m256i *>(Row + I);
         _mm256_storeu_si256(At, Over(_mm256_loadu_si256(At),
                                      _mm256_loadu_si256(reinterpret_cast<const __m256i *>(Paint + I)), FourShares(Share + I)));
