@@ -45,9 +45,18 @@ struct DropDrawing {
 
 // What one program holds over all its areas, against its bounds.
 struct Budget {
-    std::uint32_t Items     = 0;
-    std::size_t   TextBytes = 0;
-    std::size_t   Cells     = 0;
+    std::uint32_t Items          = 0;
+    std::size_t   TextBytes      = 0;
+    std::size_t   Cells          = 0;
+    std::uint32_t Animations     = 0;
+    std::size_t   AnimationBytes = 0;
+};
+
+// The look an item fades from while an animation fades it into its new one
+// (animator.h), kept with it and let go with it.
+struct Leaving;
+struct DropLeaving {
+    void operator()(Leaving *Of) const noexcept;
 };
 
 struct Item {
@@ -67,6 +76,21 @@ struct Item {
     painter::core::Rect Shown{};   // where on the glass it was last drawn, its own pixels
     std::optional<painter::core::Rect> Changed;   // a canvas's pixels changed since it was drawn, when only those
     std::unique_ptr<Drawing, DropDrawing> Drawn;
+
+    // While an animation shows or hides it: how much of it is seen, 0 to 1;
+    // while one fades it from another look: that look.
+    float                                 Seen = 1;
+    std::unique_ptr<Leaving, DropLeaving> Fading;
+    // While an animation turns or scales it: its kept picture laid through
+    // its place each frame, not drawn again.
+    bool                                  Turning = false;
+};
+
+// The look an item fades from: the item as it was, its drawing too — laid
+// where the item lies now — and how far it has faded into its new look.
+struct Leaving {
+    Item  Was;
+    float Share = 0;
 };
 
 class Tree {
@@ -95,6 +119,13 @@ public:
     // Every item marked to be drawn again: what everything is drawn from
     // changed — the scale, the theme.
     void RedrawAll() noexcept;
+    // Property of an item as Value holds it, said or unsaid — an animation's
+    // value on its way, which a program never said: held to no bound, but
+    // counted. OK, or why not.
+    error_t Assign(std::uint32_t Id, std::uint16_t Property, const Properties &Value) noexcept;
+    // An item composed again where it lies: how much of it is seen, or how
+    // far it has faded, changed.
+    void Recompose(std::uint32_t Id) noexcept;
 
     Item       *Find(std::uint32_t Id) noexcept;
     const Item *Find(std::uint32_t Id) const noexcept;

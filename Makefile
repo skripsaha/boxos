@@ -901,7 +901,7 @@ UTIL_NAMES = create show files tag untag name trash delete assemble \
              timezone logsave lastsaid journey usetest faretest luggagetest headcount \
              playtime lavalamp finish taskboard memmap hexer stringview \
              calculate difference copy typer flame checksum passport aquarium \
-             nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits \
+             nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits bloom spell ripple \
              edit seek retag read rollcall handset inside settings autostart scratchpad garden gardener random sand coinflip dice casino seabattle whale hangman duppo \
              glyphs drawcheck itemcheck
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
@@ -1731,6 +1731,9 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/qr.elf "" \
 	$(UTILS_DIR)/minesweeper.elf "game,fun" \
 	$(UTILS_DIR)/eyes.elf "fun" \
+	$(UTILS_DIR)/bloom.elf "fun" \
+	$(UTILS_DIR)/spell.elf "fun" \
+	$(UTILS_DIR)/ripple.elf "fun" \
 	$(UTILS_DIR)/donut.elf "fun" \
 	$(UTILS_DIR)/slime.elf "fun" \
 	$(UTILS_DIR)/tumbleweed.elf "fun" \

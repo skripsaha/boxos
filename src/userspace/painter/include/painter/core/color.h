@@ -77,6 +77,12 @@ public:
     // colour turning into another. The screen's own colour has no triple to
     // walk: the result is whichever end is nearer.
     static Color Between(Color A, Color B, std::uint8_t Weight) noexcept;
+    // Share of the way from one colour to another as the eye sees it going —
+    // through OKLab, each end weighed by its opacity, so the middle of red to
+    // green is neither grey nor dark and a colour coming out of see-through
+    // is that colour, fainter: a colour changing over time. The screen's own
+    // colour has no triple: the result is whichever end is nearer.
+    static Color Transition(Color From, Color To, float Share) noexcept;
 
     friend constexpr bool operator==(Color, Color) noexcept = default;
 
@@ -89,6 +95,14 @@ private:
     std::uint8_t  Alpha = 255;
     bool          ScreenOwn = false;
 };
+
+// A colour as the eye sees it — OKLab: its lightness, green to red, blue to
+// yellow — from sRGB's numbers, 0 to 1 each, and back.
+struct Oklab {
+    float L = 0, A = 0, B = 0;
+};
+Oklab OklabOf(float Red, float Green, float Blue) noexcept;
+void  RgbOf(Oklab Of, float &Red, float &Green, float &Blue) noexcept;
 
 // The console's named colours (box/color.h), named for Painter.
 namespace Colors {

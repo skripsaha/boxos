@@ -98,6 +98,17 @@ void AreasInOrder(std::vector<items::AreaState *> &Into);
 // Whether anything of the areas changed since a frame last showed them.
 bool AreasWant() noexcept;
 
+// The areas' animations brought to Now (of the clock's microseconds) where
+// they are due, each number's end told to its program.
+void AreasAnimate(std::uint64_t Now) noexcept;
+// When the areas' animations are next due, of the clock's microseconds — a
+// frame while something seen moves, else a moment one begins or ends; 0 for
+// never.
+std::uint64_t AreasDue() noexcept;
+// How the person wants things to move: less motion, and at what speed, in
+// percent — from the next animation that begins.
+void AreasMotion(bool Less, std::uint32_t Speed) noexcept;
+
 // A frame showed the areas — composing took Micros and put Pixels on the
 // glass: each area whose step it showed told so, and every bell rung that
 // has news.

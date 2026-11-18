@@ -350,33 +350,34 @@ bool Read(std::uint16_t Property, Reader &From, Properties &Said, std::uint16_t 
     }
 }
 
-// Property's value moved from From into Into.
-void Take(std::uint16_t Property, Properties &From, Properties &Into) noexcept
+// Property's value carried from From into Into: moved from a value of its
+// own, copied from one kept.
+template <typename Source> void Carry(std::uint16_t Property, Source &&From, Properties &Into)
 {
     switch (Property) {
-    case ITEM_PROP_PLACE: Into.Place = From.Place; break;
-    case ITEM_PROP_SIZE: Into.Size = From.Size; break;
-    case ITEM_PROP_OPACITY: Into.Opacity = From.Opacity; break;
-    case ITEM_PROP_HIDDEN: Into.Hidden = From.Hidden; break;
-    case ITEM_PROP_TURN: Into.Turn = From.Turn; break;
-    case ITEM_PROP_SCALE: Into.Scale = From.Scale; break;
-    case ITEM_PROP_ANCHOR: Into.Anchor = From.Anchor; break;
-    case ITEM_PROP_CLIP: Into.Clip = From.Clip; break;
-    case ITEM_PROP_CORNERS: Into.Corners = From.Corners; break;
-    case ITEM_PROP_SHAPE: Into.Shape = std::move(From.Shape); break;
-    case ITEM_PROP_FILLS: Into.Fills = std::move(From.Fills); break;
-    case ITEM_PROP_STROKE: Into.Stroke = std::move(From.Stroke); break;
-    case ITEM_PROP_SHADOWS: Into.Shadows = std::move(From.Shadows); break;
-    case ITEM_PROP_TEXT: Into.Text = std::move(From.Text); break;
-    case ITEM_PROP_TEXT_STYLE: Into.Style = std::move(From.Style); break;
-    case ITEM_PROP_TEXT_SPANS: Into.Spans = std::move(From.Spans); break;
-    case ITEM_PROP_TEXT_BOX: Into.Box = From.Box; break;
-    case ITEM_PROP_SECRET: Into.Secret = From.Secret; break;
-    case ITEM_PROP_CAPTION: Into.Caption = std::move(From.Caption); break;
-    case ITEM_PROP_PICTURE: Into.Picture = From.Picture; break;
-    case ITEM_PROP_CANVAS: Into.Canvas = From.Canvas; break;
-    case ITEM_PROP_GRID: Into.Grid = From.Grid; break;
-    case ITEM_PROP_CARET: Into.Caret = From.Caret; break;
+    case ITEM_PROP_PLACE: Into.Place = std::forward<Source>(From).Place; break;
+    case ITEM_PROP_SIZE: Into.Size = std::forward<Source>(From).Size; break;
+    case ITEM_PROP_OPACITY: Into.Opacity = std::forward<Source>(From).Opacity; break;
+    case ITEM_PROP_HIDDEN: Into.Hidden = std::forward<Source>(From).Hidden; break;
+    case ITEM_PROP_TURN: Into.Turn = std::forward<Source>(From).Turn; break;
+    case ITEM_PROP_SCALE: Into.Scale = std::forward<Source>(From).Scale; break;
+    case ITEM_PROP_ANCHOR: Into.Anchor = std::forward<Source>(From).Anchor; break;
+    case ITEM_PROP_CLIP: Into.Clip = std::forward<Source>(From).Clip; break;
+    case ITEM_PROP_CORNERS: Into.Corners = std::forward<Source>(From).Corners; break;
+    case ITEM_PROP_SHAPE: Into.Shape = std::forward<Source>(From).Shape; break;
+    case ITEM_PROP_FILLS: Into.Fills = std::forward<Source>(From).Fills; break;
+    case ITEM_PROP_STROKE: Into.Stroke = std::forward<Source>(From).Stroke; break;
+    case ITEM_PROP_SHADOWS: Into.Shadows = std::forward<Source>(From).Shadows; break;
+    case ITEM_PROP_TEXT: Into.Text = std::forward<Source>(From).Text; break;
+    case ITEM_PROP_TEXT_STYLE: Into.Style = std::forward<Source>(From).Style; break;
+    case ITEM_PROP_TEXT_SPANS: Into.Spans = std::forward<Source>(From).Spans; break;
+    case ITEM_PROP_TEXT_BOX: Into.Box = std::forward<Source>(From).Box; break;
+    case ITEM_PROP_SECRET: Into.Secret = std::forward<Source>(From).Secret; break;
+    case ITEM_PROP_CAPTION: Into.Caption = std::forward<Source>(From).Caption; break;
+    case ITEM_PROP_PICTURE: Into.Picture = std::forward<Source>(From).Picture; break;
+    case ITEM_PROP_CANVAS: Into.Canvas = std::forward<Source>(From).Canvas; break;
+    case ITEM_PROP_GRID: Into.Grid = std::forward<Source>(From).Grid; break;
+    case ITEM_PROP_CARET: Into.Caret = std::forward<Source>(From).Caret; break;
     default: break;
     }
 }
@@ -393,12 +394,47 @@ error_t Decode(std::uint16_t Property, std::span<const std::uint8_t> Bytes, Prop
         std::uint16_t Said = Role;
         Reader        From(Bytes);
         if (!Read(Property, From, Fresh, Said) || !From.Whole()) return ERR_INVALID_ARGUMENT;
-        Take(Property, Fresh, Into);
+        Carry(Property, std::move(Fresh), Into);
         Role = Said;
         return OK;
     } catch (...) {
         return ERR_NO_MEMORY;
     }
+}
+
+bool IsSaid(std::uint16_t Property, const Properties &Of) noexcept
+{
+    switch (Property) {
+    case ITEM_PROP_PLACE: return Of.Place.has_value();
+    case ITEM_PROP_SIZE: return Of.Size.has_value();
+    case ITEM_PROP_OPACITY: return Of.Opacity.has_value();
+    case ITEM_PROP_HIDDEN: return Of.Hidden.has_value();
+    case ITEM_PROP_TURN: return Of.Turn.has_value();
+    case ITEM_PROP_SCALE: return Of.Scale.has_value();
+    case ITEM_PROP_ANCHOR: return Of.Anchor.has_value();
+    case ITEM_PROP_CLIP: return Of.Clip.has_value();
+    case ITEM_PROP_CORNERS: return Of.Corners.has_value();
+    case ITEM_PROP_SHAPE: return Of.Shape.has_value();
+    case ITEM_PROP_FILLS: return Of.Fills.has_value();
+    case ITEM_PROP_STROKE: return Of.Stroke.has_value();
+    case ITEM_PROP_SHADOWS: return Of.Shadows.has_value();
+    case ITEM_PROP_TEXT: return Of.Text.has_value();
+    case ITEM_PROP_TEXT_STYLE: return Of.Style.has_value();
+    case ITEM_PROP_TEXT_SPANS: return Of.Spans.has_value();
+    case ITEM_PROP_TEXT_BOX: return Of.Box.has_value();
+    case ITEM_PROP_SECRET: return Of.Secret.has_value();
+    case ITEM_PROP_CAPTION: return Of.Caption.has_value();
+    case ITEM_PROP_PICTURE: return Of.Picture.has_value();
+    case ITEM_PROP_CANVAS: return Of.Canvas.has_value();
+    case ITEM_PROP_GRID: return Of.Grid.has_value();
+    case ITEM_PROP_CARET: return Of.Caret.has_value();
+    default: return false;
+    }
+}
+
+void Assign(std::uint16_t Property, const Properties &From, Properties &Into)
+{
+    Carry(Property, From, Into);
 }
 
 error_t Unsay(std::uint16_t Property, Properties &Into) noexcept

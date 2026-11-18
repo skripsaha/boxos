@@ -117,6 +117,12 @@ error_t Decode(std::uint16_t Property, std::span<const std::uint8_t> Bytes, Prop
 // Property unsaid in Into: OK, or why not.
 error_t Unsay(std::uint16_t Property, Properties &Into) noexcept;
 
+// Property in Into as From holds it, said or unsaid; the rest as it was.
+void Assign(std::uint16_t Property, const Properties &From, Properties &Into);
+
+// Whether Of says Property.
+bool IsSaid(std::uint16_t Property, const Properties &Of) noexcept;
+
 // The bytes of text Into holds, said and in spans' families, counted against
 // the program's bound (ITEM_TEXTS_MOST).
 std::size_t TextBytes(const Properties &Of) noexcept;

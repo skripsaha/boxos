@@ -109,6 +109,8 @@ std::expected<Area, box::error> Area::Open(Placement Where, core::PointF Wish, b
     Made.PixelsPerPoint = static_cast<float>(Reply.scale) / 256.0f;
     Made.Kind           = static_cast<gui::Glass>(Reply.glass);
     Made.MosaicFlags    = Reply.mosaics;
+    Made.Less           = (Reply.motion & ITEM_MOTION_LESS) != 0;
+    Made.Speed          = Reply.speed ? Reply.speed : 100;
     Made.CaretAtOpen    = core::Point{static_cast<std::int32_t>(std::min<std::uint32_t>(Reply.caret_col, ITEM_GRID_SIDE_MOST)),
                                       static_cast<std::int32_t>(std::min<std::uint32_t>(Reply.caret_row, ITEM_GRID_SIDE_MOST))};
     Made.Memory         = box::bay<std::byte>::open(Reply.bay_tag);
@@ -309,11 +311,15 @@ std::optional<Event> Area::Read()
             Given          = core::PointF{static_cast<float>(News.Width) / ITEM_POINT, static_cast<float>(News.Height) / ITEM_POINT};
             PixelsPerPoint = News.Scale ? static_cast<float>(News.Scale) / 256.0f : PixelsPerPoint;
             Kind           = News.Glass == ITEM_GLASS_TEXT ? gui::Glass::Text : gui::Glass::Pixels;
-            Made.What  = Event::Kind::Area;
-            Made.Size  = Given;
-            Made.Scale = PixelsPerPoint;
-            Made.On    = Kind;
-            Made.Seen  = News.Shown != 0;
+            Less           = (News.Motion & ITEM_MOTION_LESS) != 0;
+            Speed          = News.Speed ? News.Speed : Speed;
+            Made.What        = Event::Kind::Area;
+            Made.Size        = Given;
+            Made.Scale       = PixelsPerPoint;
+            Made.On          = Kind;
+            Made.Seen        = News.Shown != 0;
+            Made.LessMotion  = Less;
+            Made.MotionSpeed = Speed;
             return Made;
         }
         case ITEM_EVENT_SIZE: {
@@ -356,6 +362,15 @@ std::optional<Event> Area::Read()
             std::memcpy(&Free, Body, sizeof(Free));
             Made.What = Event::Kind::PageFree;
             Made.Page = Free.Page;
+            return Made;
+        }
+        case ITEM_EVENT_ANIMATION_END: {
+            ItemAnimationEnd End{};
+            if (Bytes < sizeof(End)) continue;
+            std::memcpy(&End, Body, sizeof(End));
+            Made.What     = Event::Kind::AnimationEnd;
+            Made.Number   = End.Number;
+            Made.Finished = End.Finished != 0;
             return Made;
         }
         default:

@@ -20,7 +20,7 @@ CXXFLAGS = -std=gnu++23 -nostdinc++ -fexceptions -frtti \
          -I ../boxlib/include \
          -I ../../include
 
-SRCS = src/core/color.cpp src/core/pixel.cpp src/core/transform.cpp src/core/path.cpp src/core/gradient.cpp \
+SRCS = src/core/color.cpp src/core/easing.cpp src/core/pixel.cpp src/core/transform.cpp src/core/path.cpp src/core/gradient.cpp \
        src/core/picture.cpp src/core/fill.cpp src/core/shape_room.cpp src/core/paint.cpp src/core/blur.cpp \
        src/core/mask.cpp src/core/shadow.cpp src/core/canvas.cpp src/core/cpu_path.cpp src/core/lanes_plain.cpp \
        src/core/lanes_sse2.cpp src/core/lanes_avx2.cpp src/core/text_draw.cpp src/core/system_fonts.cpp \
@@ -28,7 +28,7 @@ SRCS = src/core/color.cpp src/core/pixel.cpp src/core/transform.cpp src/core/pat
        src/tui/cells_area.cpp src/tui/text.cpp src/tui/window.cpp \
        src/tui/mosaic.cpp src/tui/fine_canvas.cpp \
        src/gui/changes.cpp src/gui/area.cpp src/gui/items.cpp src/gui/canvas.cpp src/gui/frame.cpp src/gui/area_frames.cpp src/gui/fonts.cpp src/gui/font_opened.cpp src/gui/measure.cpp src/gui/c_face.cpp src/gui/c_measure.cpp \
-       src/items/properties.cpp src/items/look.cpp src/items/text.cpp
+       src/items/properties.cpp src/items/look.cpp src/items/between.cpp src/items/text.cpp
 OBJS = $(SRCS:.cpp=.o)
 DEPS = $(OBJS:.o=.d)
 

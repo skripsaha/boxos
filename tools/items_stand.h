@@ -27,10 +27,13 @@ std::uint32_t Random();
  * on the host: changes written as a program writes them, read as the display
  * reads them. */
 struct Bench {
-    explicit Bench(items::ProgramState &Program, std::uint32_t RingBytes = ITEM_RING_BYTES);
+    explicit Bench(items::ProgramState &Program, std::uint32_t RingBytes = ITEM_RING_BYTES,
+                   const items::Motion &Wanted = items::AsItComes);
     // What waits in the program's changes, into the ring; then every whole
-    // step read into the tree. Refusals are counted.
+    // step read into the tree at Clock. Refusals are counted.
     items::Reading Step(painter::gui::Changes &Changes);
+    // The area's animations brought to Now, each end kept in Ends.
+    void Advance(std::uint64_t Now, const items::Theme &Look);
 
     std::vector<std::uint8_t>      Memory;
     ItemAreaHeader                *Head = nullptr;
@@ -39,6 +42,8 @@ struct Bench {
     std::uint64_t                  Steps   = 0;
     std::vector<error_t>           Refusals;
     std::vector<std::uint32_t>     RefusedItems;
+    std::uint64_t                  Clock = 1;   // microseconds: when a step is read
+    std::vector<ItemAnimationEnd>  Ends;
 };
 
 /* A program's sources on the host: the tree's fonts. */
@@ -53,6 +58,7 @@ void CheckWire(Tally &Count);
 void CheckCompose(Tally &Count);
 void CheckCells(Tally &Count);
 void CheckGui(Tally &Count);
+void CheckMotion(Tally &Count);
 bool WriteSheet(const char *Out);
 
 }  // namespace stand

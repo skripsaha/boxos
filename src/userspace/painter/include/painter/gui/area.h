@@ -58,22 +58,27 @@ enum class Glass : std::uint8_t { Text = ITEM_GLASS_TEXT, Pixels = ITEM_GLASS_PI
 // What happened: what the display told the area (Area: where it is and how
 // large; Size: an item's size by its content; Refused: a change it did not
 // take; Shown: a step on the glass; PageFree: a canvas's page to draw in
-// again) — and what Wait heard besides: a key, the alarm come, the keyboard
-// gone, the program asked to finish.
+// again; AnimationEnd: the last animation of a Number ended) — and what Wait
+// heard besides: a key, the alarm come, the keyboard gone, the program asked
+// to finish.
 struct Event {
-    enum class Kind : std::uint8_t { Area, Size, Refused, Shown, PageFree, Key, Alarm, Gone, EndAsked };
+    enum class Kind : std::uint8_t { Area, Size, Refused, Shown, PageFree, Key, Alarm, Gone, EndAsked, AnimationEnd };
     Kind          What  = Kind::Area;
     std::uint32_t Item  = 0;        // the item, or the block
     core::PointF  Size{};           // the area's or the item's, in points
     float         Scale = 1;        // pixels to a point
     gui::Glass    On    = gui::Glass::Pixels;
     bool          Seen  = true;     // the area is shown, not behind
+    bool          LessMotion  = false;   // the person wants less motion
+    std::uint32_t MotionSpeed = 100;     // every animation's speed, in percent
     std::uint16_t Op = 0, Property = 0;
     error_t       Reason = 0;
     std::uint64_t Step   = 0;
     std::uint32_t Micros = 0, Pixels = 0, Bytes = 0, Records = 0;
     std::uint32_t Own = 0;          // of a Shown frame's pixels, those this area's own changes asked for
     std::uint32_t Page   = 0;
+    std::uint32_t Number   = 0;     // an animation's
+    bool          Finished = false; // every one of them ran to its end; none was cut
     tui::KeyEvent Key{};
     std::uint64_t Moment = 0;       // the alarm's, of the ClockBoard's uptime
 };
@@ -165,6 +170,11 @@ public:
     // console's caret stood when the area opened — after everything the
     // program printed before.
     std::uint8_t Mosaics() const noexcept { return MosaicFlags; }
+    // How the person wants things to move: less of it — what the program
+    // moves itself, it moves at once — and every animation's speed, in
+    // percent. Told anew in an Area event when it changes.
+    bool          LessMotion() const noexcept { return Less; }
+    std::uint32_t MotionSpeed() const noexcept { return Speed; }
     core::Point  ConsoleCaret() const noexcept { return CaretAtOpen; }
 
     std::expected<PictureBlock, box::error>  OpenPicture(std::uint32_t Width, std::uint32_t Height);
@@ -195,6 +205,8 @@ private:
     float               PixelsPerPoint = 1;
     gui::Glass          Kind  = gui::Glass::Pixels;
     std::uint8_t        MosaicFlags = 0;
+    bool                Less  = false;
+    std::uint32_t       Speed = 100;
     core::Point         CaretAtOpen{};
     TouchTagPair        BellName{};
     TouchTag            Rung  = TOUCH_TAG_INVALID;

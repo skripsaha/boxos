@@ -72,7 +72,7 @@ UTILS = create show files tag untag name trash delete assemble \
         timezone logsave lastsaid journey usetest faretest luggagetest rollcall handset headcount \
         playtime lavalamp finish taskboard memmap hexer stringview \
         calculate difference copy typer flame checksum passport aquarium \
-        nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits \
+        nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits bloom spell ripple \
         edit seek retag read inside settings autostart scratchpad garden gardener random sand coinflip dice casino seabattle whale hangman duppo \
         glyphs drawcheck itemcheck
 
@@ -311,6 +311,9 @@ MANDELBROT_OBJS = mandelbrot.o mandelbrot_paint.o
 QR_OBJS         = qr.o qr_code.o
 MINESWEEPER_OBJS = minesweeper.o minesweeper_field.o keep.o
 EYES_OBJS       = eyes.o
+BLOOM_OBJS      = bloom.o
+SPELL_OBJS      = spell.o
+RIPPLE_OBJS     = ripple.o
 DONUT_OBJS      = donut.o
 SLIME_OBJS      = slime.o
 TUMBLEWEED_OBJS = tumbleweed.o tumbleweed_world.o tumbleweed_scene.o tumbleweed_paint.o
@@ -397,6 +400,20 @@ qr.elf: $(BOXLIB_START) $(QR_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/
 
 minesweeper.elf: $(BOXLIB_START) $(MINESWEEPER_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(MINESWEEPER_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+# bloom, spell and ripple: items the display moves — painter::gui and its
+# animations — a flower, a word of letters, a pond of tiles.
+bloom.elf: $(BOXLIB_START) $(BLOOM_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(BLOOM_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+spell.elf: $(BOXLIB_START) $(SPELL_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(SPELL_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
+	@x86_64-elf-objcopy --strip-all $@
+
+ripple.elf: $(BOXLIB_START) $(RIPPLE_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(RIPPLE_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 eyes.elf: $(BOXLIB_START) $(EYES_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
@@ -486,15 +503,17 @@ $(WHALE_DIR)/figure.o $(WHALE_DIR)/picture.o: CXXFLAGS += -O2
 whale.elf: $(BOXLIB_START) $(WHALE_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(WHALE_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 
-# Duppo is C++ in parts of its own directory, each named for what it is. Its
-# picture is shaded pixel by pixel every frame, so that and the logo's gradients are built -O2.
+# Duppo is C++ in parts of its own directory, each named for what it is. It is
+# shaded pixel by pixel every frame — in cells or in the screen's own pixels —
+# so that and the logo's gradients are built -O2; its words are measured, so
+# it carries Typecase.
 DUPPO_DIR  = duppo
-DUPPO_OBJS = $(addprefix $(DUPPO_DIR)/,duppo.o flight.o face.o spin.o orbit.o logo.o picture.o)
+DUPPO_OBJS = $(addprefix $(DUPPO_DIR)/,duppo.o flight.o face.o spin.o orbit.o logo.o sampler.o picture.o pixels.o bubble.o words.o)
 
-$(DUPPO_DIR)/logo.o $(DUPPO_DIR)/picture.o: CXXFLAGS += -O2
+$(DUPPO_DIR)/logo.o $(DUPPO_DIR)/sampler.o $(DUPPO_DIR)/picture.o $(DUPPO_DIR)/pixels.o: CXXFLAGS += -O2
 
-duppo.elf: $(BOXLIB_START) $(DUPPO_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(DUPPO_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+duppo.elf: $(BOXLIB_START) $(DUPPO_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(DUPPO_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
 
 # Hangman is C++ in parts of its own directory; it keeps its ledger with keep.o.
 HANGMAN_DIR  = hangman

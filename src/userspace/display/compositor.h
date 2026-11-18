@@ -23,6 +23,7 @@
 #include <span>
 #include <vector>
 
+#include "animator.h"
 #include "item_draw.h"
 #include "item_tree.h"
 #include "painter/core/canvas.h"
@@ -51,13 +52,22 @@ struct Entry {
     float                     Opacity = 1.0f;
     painter::core::Rect       Device{};       // what it covers on the glass; a layer's, its items'
     painter::core::Rect       Hides{};        // what it covers whole and opaque; none for most
+    const Leaving            *Fade    = nullptr;   // the look it fades from, laid with it
+    bool                      Turning = false;     // it, or a group it lies in, turns or scales on its way
 };
 
+// Motion as nobody asked otherwise.
+inline const Motion AsItComes{};
+
 struct AreaState {
-    explicit AreaState(ProgramState &Of) : Program(Of), Items(Of.Held) {}
+    explicit AreaState(ProgramState &Of, const Motion &Wanted = AsItComes)
+        : Program(Of), Items(Of.Held), Moving(Items, Of.Held, Wanted)
+    {
+    }
 
     ProgramState        &Program;
     Tree                 Items;
+    Animator             Moving;
     painter::core::Rect  Place{};        // on the glass, in pixels
     painter::core::Rect  Was{};          // where it was composed last
     bool                 Shown    = false;
@@ -100,7 +110,7 @@ public:
 private:
     void TakeOne(AreaState &Area, const Theme &Look);
     void Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, const painter::core::Transform &Parent,
-              float Opacity, bool Moved, bool Plain);
+              float Opacity, bool Moved, bool Plain, bool Turning);
     void Vanish(AreaState &Area, const std::vector<std::uint32_t> &Items);
 
     /* The rectangles damage is noted in: past them, joined. */

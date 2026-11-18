@@ -94,6 +94,10 @@ public:
     void DrawShadow(const Mask &Kept, const Shadow &Cast, float Opacity = 1.0f);
     // Another canvas laid over this one, its corner at At.
     void Draw(const Canvas &Picture, Point At, float Opacity = 1.0f);
+    // Every pixel moved Share of the way to Toward's — of the same size —
+    // light and opacity alike: one picture fading into another, each counted
+    // only as much as it is seen, ignoring the clip.
+    void FadeTo(const Canvas &Toward, float Share);
     // Area blurred where it lies, as a backdrop behind frosted glass: a
     // Gaussian whose σ is half of Radius, each channel of light and the
     // opacity alike, the area's edge held, within the clip.

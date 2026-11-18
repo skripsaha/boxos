@@ -3,6 +3,7 @@
 #include "board.h"
 
 #include <algorithm>
+#include <chrono>
 #include <format>
 #include <utility>
 
@@ -64,7 +65,10 @@ void Board::Run()
             if (!CellScreen->Present()) return;
             Heard = CellScreen->Wait(Left == 0 ? 1 : Left);
         } else {
-            ItemScreen->Draw([&](painter::gui::Frame &Out) { Describe(Out); });
+            /* Described whole, and what changed moves there in time: the
+             * bars grow to the load, the selection glides, figures fade. */
+            ItemScreen->Animate(painter::gui::Animation::Out(std::chrono::milliseconds(250)),
+                                [&] { ItemScreen->Draw([&](painter::gui::Frame &Out) { Describe(Out); }); });
             /* The next reading as an alarm; the display's word on where the
              * area is draws the board again. */
             (void)alarm_set(clock_uptime_ms() + (Left == 0 ? 1 : Left));

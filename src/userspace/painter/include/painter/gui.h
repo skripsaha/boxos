@@ -44,6 +44,7 @@ enum {
     GUI_EVENT_ALARM     = 6,   /* the strand's alarm (box/alarm.h) came, at moment */
     GUI_EVENT_GONE      = 7,   /* the keyboard is gone: input is over */
     GUI_EVENT_END_ASKED = 8,   /* the program is asked to finish */
+    GUI_EVENT_ANIMATION_END = 9,   /* the last animation of a number ended: number, finished */
 };
 
 typedef struct {
@@ -55,7 +56,26 @@ typedef struct {
     uint32_t character;        /* a key's, Unicode; 0 for a key that types none */
     uint8_t  scancode, mods;
     uint64_t moment;           /* the alarm's, of the ClockBoard's uptime in ms */
+    uint32_t number;           /* an animation's */
+    int      finished;         /* every animation of it ran to its end; none was cut */
 } GuiEvent;
+
+/* How a change goes over time (box/items.h ITEM_OP_ANIMATE): a run of
+ * milliseconds along a curve (ITEM_CURVE_*) — a spring's bounce, a curve of
+ * one's own's inner points x1 y1 x2 y2 — after delay milliseconds, or once
+ * the animations of number after end; repeats times again (ITEM_FOREVER),
+ * back and forth when back is nonzero. number names it, told back as it
+ * ends. */
+typedef struct {
+    uint32_t milliseconds;
+    int      curve;
+    float    bounce;
+    int      steps;
+    float    x1, y1, x2, y2;
+    uint32_t delay;
+    uint32_t number, after, repeats;
+    int      back;
+} GuiAnimation;
 
 /* An area wished Width x Height points (0 for the display's choice) where
  * Placement says; Always: shown even while the program lives behind. NULL
@@ -67,6 +87,10 @@ float    gui_width(const GuiArea *area);
 float    gui_height(const GuiArea *area);
 float    gui_scale(const GuiArea *area);      /* pixels to a point */
 int      gui_on_text_page(const GuiArea *area);
+/* How the person wants things to move: less of it (what a program moves
+ * itself, at once), and every animation's speed in percent. */
+int      gui_less_motion(const GuiArea *area);
+uint32_t gui_motion_speed(const GuiArea *area);
 
 /* Items made under Parent — a group, or 0 for the area — of a role. */
 GuiItem gui_text(GuiArea *area, GuiItem parent, const char *utf8, int role);
@@ -85,6 +109,10 @@ void gui_set_text_size(GuiArea *area, GuiItem item, float points);
 void gui_set_text_weight(GuiArea *area, GuiItem item, int weight);
 void gui_show(GuiArea *area, GuiItem item);
 void gui_hide(GuiArea *area, GuiItem item);
+
+/* From now on every change said is reached in time as how says, played by
+ * the display; NULL: said at once again. */
+void gui_animate(GuiArea *area, const GuiAnimation *how);
 
 /* What changed sent as one step: 1 when all of it went, 0 when the rest
  * waits for the next. */

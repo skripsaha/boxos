@@ -409,6 +409,7 @@ bool Prepare(const Item &Of, const Sources &From, Drawing &Into, bool Keep)
     const ItemPoint Before = Into.Measured;
     Into.Laid.reset();
     Into.Kept.reset();
+    Into.KeptPicture.reset();
     Into.Measured = {};
     if (Of.Kind == ITEM_TEXT) {
         painter::items::LaidText Laid = painter::items::LayText(Of.Said, Of.Role, *From.Look, From.Book());
@@ -452,7 +453,7 @@ bool Prepare(const Item &Of, const Sources &From, Drawing &Into, bool Keep)
 }
 
 void Paint(const Item &Of, const Drawing &Drawn, const Sources &From, Canvas &Target, const Transform &Place,
-           float Opacity)
+           float Opacity, bool Turning)
 {
     if (Drawn.Kept && Upright(Place, Drawn.KeptScale)) {
         const PointF Corner = Place.Apply({0, 0});
@@ -460,6 +461,26 @@ void Paint(const Item &Of, const Drawing &Drawn, const Sources &From, Canvas &Ta
                     painter::core::Point{Nearest(Corner.X) + Drawn.KeptAt.X, Nearest(Corner.Y) + Drawn.KeptAt.Y},
                     Opacity);
         return;
+    }
+    if (Drawn.Kept && (Turning || Of.Turning)) {
+        const Canvas &Kept = *Drawn.Kept;
+        if (!Drawn.KeptPicture) {
+            std::vector<painter::core::Pixel> Pixels;
+            Pixels.reserve(static_cast<std::size_t>(Kept.Width()) * Kept.Height());
+            for (std::uint32_t Y = 0; Y < Kept.Height(); Y++) Pixels.insert(Pixels.end(), Kept.Row(Y), Kept.Row(Y) + Kept.Width());
+            Drawn.KeptPicture = painter::core::Picture::FromPixels(Pixels, Kept.Width(), Kept.Height(), Kept.Width());
+        }
+        if (Drawn.KeptPicture) {
+            /* The picture's pixels where the item's points lie, then where
+             * Place lays them. */
+            const Transform Laid = Transform::Translate(static_cast<float>(Drawn.KeptAt.X), static_cast<float>(Drawn.KeptAt.Y))
+                                       .Then(Transform::Scale(1.0f / Drawn.KeptScale))
+                                       .Then(Place);
+            (void)Target.Fill(painter::core::Path::Rect(painter::core::RectF{0, 0, static_cast<float>(Kept.Width()),
+                                                                             static_cast<float>(Kept.Height())}),
+                              painter::core::Fill::Picture(Drawn.KeptPicture), Laid, painter::core::FillRule::NonZero, Opacity);
+            return;
+        }
     }
     DrawStraight(Of, Drawn, From, Target, Place, Opacity);
 }

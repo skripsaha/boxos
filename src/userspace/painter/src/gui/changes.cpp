@@ -209,14 +209,45 @@ void Changes::Put(std::uint32_t Item, std::uint16_t Property, Record Value)
     const auto Known = Values.find({Item, Property});
     if (Known != Values.end() && Known->second == Value) return;
     Writer Body;
+    if (Moving) Body.Put(*Moving);
     Body.Put(ItemChange{Property, 0, static_cast<std::uint32_t>(Value.size())});
     Body.Bytes.insert(Body.Bytes.end(), Value.begin(), Value.end());
     if (sizeof(ItemRecord) + Body.Bytes.size() > ITEM_RING_BYTES / 2u) {
         RefusedCount++;
         return;
     }
-    Properties[{Item, Property}] = Make(ITEM_OP_CHANGE, Item, Body.Bytes);
-    Values[{Item, Property}]     = std::move(Value);
+    /* A plain word says over every word of the property waiting. An
+     * animation now says over the animations waiting, after the plain word
+     * that says where it starts; one that waits on another or its delay goes
+     * after them all. */
+    const bool Behind = Moving && (Moving->After != 0 || Moving->Delay != 0);
+    if (!Moving) Properties.erase(Properties.lower_bound({Item, Property, 0}), Properties.upper_bound({Item, Property, ~0u}));
+    else if (!Behind) Properties.erase(Properties.lower_bound({Item, Property, 1}), Properties.upper_bound({Item, Property, ~0u}));
+    Properties[{Item, Property, Moving ? ++Later : 0u}] = Make(Moving ? ITEM_OP_ANIMATE : ITEM_OP_CHANGE, Item, Body.Bytes);
+    Values[{Item, Property}] = std::move(Value);
+}
+
+ItemAnimation Animation::Wire() const noexcept
+{
+    const auto Milliseconds = [](std::chrono::milliseconds Of) {
+        return static_cast<std::uint32_t>(std::clamp<std::int64_t>(Of.count(), 0, ITEM_TIME_MOST));
+    };
+    const auto One = [](float Of) { return static_cast<std::int32_t>(std::lround(Of * ITEM_ONE)); };
+    ItemAnimation Made{};
+    Made.Number   = Number;
+    Made.After    = After;
+    Made.Delay    = Milliseconds(Delay);
+    Made.Duration = Milliseconds(Duration);
+    Made.Curve    = static_cast<std::uint8_t>(Curve);
+    Made.Steps    = static_cast<std::uint8_t>(std::clamp(Steps, 1, 255));
+    Made.Back     = Back ? 1 : 0;
+    Made.Repeats  = Repeats;
+    if (Curve == Ease::Spring) Made.Bend[0] = One(std::clamp(Bounce, 0.0f, 1.0f));
+    if (Curve == Ease::Own) {
+        Made.Bend[0] = One(std::clamp(Bend1.X, 0.0f, 1.0f)), Made.Bend[1] = One(std::clamp(Bend1.Y, -8.0f, 8.0f));
+        Made.Bend[2] = One(std::clamp(Bend2.X, 0.0f, 1.0f)), Made.Bend[3] = One(std::clamp(Bend2.Y, -8.0f, 8.0f));
+    }
+    return Made;
 }
 
 const std::vector<std::uint8_t> *Changes::Said(std::uint32_t Item, std::uint16_t Property) const noexcept
@@ -246,7 +277,7 @@ void Changes::Create(std::uint32_t Item, gui::Kind Kind, std::uint32_t Parent, s
 void Changes::Remove(std::uint32_t Item)
 {
     /* What it was to say goes with it, and what it said. */
-    Properties.erase(Properties.lower_bound({Item, 0}), Properties.upper_bound({Item, 0xFFFF}));
+    Properties.erase(Properties.lower_bound({Item, 0, 0}), Properties.upper_bound({Item, 0xFFFF, ~0u}));
     Values.erase(Values.lower_bound({Item, 0}), Values.upper_bound({Item, 0xFFFF}));
     if (const auto Kept = Grids.find(Item); Kept != Grids.end()) {
         for (const auto &Row : Kept->second.Marked) CellsMarked -= Row.first < Row.second;
@@ -267,7 +298,8 @@ void Changes::Reset(std::uint32_t Item, std::uint16_t Property)
     Values.erase({Item, Property});
     Writer Body;
     Body.Put(ItemChange{Property, 0, 0});
-    Properties[{Item, Property}] = Make(ITEM_OP_RESET, Item, Body.Bytes);
+    Properties.erase(Properties.lower_bound({Item, Property, 0}), Properties.upper_bound({Item, Property, ~0u}));
+    Properties[{Item, Property, 0u}] = Make(ITEM_OP_RESET, Item, Body.Bytes);
 }
 
 void Changes::BlockChanged(std::uint32_t Block, core::Rect Where, std::uint32_t Page)

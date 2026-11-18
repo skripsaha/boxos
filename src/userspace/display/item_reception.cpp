@@ -47,8 +47,11 @@ error_t Apply(const ItemRecord &Head, std::span<const std::uint8_t> Body, Tree &
         std::memcpy(&How, Body.data(), sizeof(How));
         return Items.Create(Head.Item, How);
     }
-    case ITEM_OP_REMOVE:
-        return Items.Remove(Head.Item);
+    case ITEM_OP_REMOVE: {
+        const error_t Done = Items.Remove(Head.Item);
+        if (Done == OK && Tell.Cut) Tell.Cut(Head.Item, 0);
+        return Done;
+    }
     case ITEM_OP_RESTACK: {
         ItemPlaceAmong How{};
         if (Body.size() < sizeof(How)) return ERR_INVALID_ARGUMENT;
@@ -60,9 +63,22 @@ error_t Apply(const ItemRecord &Head, std::span<const std::uint8_t> Body, Tree &
         ItemChange What{};
         if (Body.size() < sizeof(What)) return ERR_INVALID_ARGUMENT;
         std::memcpy(&What, Body.data(), sizeof(What));
-        if (Head.Op == ITEM_OP_RESET) return Items.Reset(Head.Item, What.Property);
-        if (What.Bytes > Body.size() - sizeof(What)) return ERR_INVALID_ARGUMENT;
-        return Items.Change(Head.Item, What.Property, Body.subspan(sizeof(What), What.Bytes));
+        error_t Done = ERR_INVALID_ARGUMENT;
+        if (Head.Op == ITEM_OP_RESET) Done = Items.Reset(Head.Item, What.Property);
+        else if (What.Bytes <= Body.size() - sizeof(What))
+            Done = Items.Change(Head.Item, What.Property, Body.subspan(sizeof(What), What.Bytes));
+        if (Done == OK && Tell.Cut) Tell.Cut(Head.Item, What.Property);
+        return Done;
+    }
+    case ITEM_OP_ANIMATE: {
+        ItemAnimation How{};
+        ItemChange    What{};
+        if (Body.size() < sizeof(How) + sizeof(What)) return ERR_INVALID_ARGUMENT;
+        std::memcpy(&How, Body.data(), sizeof(How));
+        std::memcpy(&What, Body.data() + sizeof(How), sizeof(What));
+        if (What.Bytes > Body.size() - sizeof(How) - sizeof(What)) return ERR_INVALID_ARGUMENT;
+        if (!Tell.Animate) return ERR_UNSUPPORTED;
+        return Tell.Animate(Head.Item, How, What.Property, Body.subspan(sizeof(How) + sizeof(What), What.Bytes));
     }
     case ITEM_OP_BLOCK: {
         ItemBlockChanged Where{};
@@ -130,10 +146,12 @@ Reading ReadSteps(ItemAreaHeader &Head, std::span<const std::uint8_t> Ring, Tree
             Record.Op == ITEM_OP_PAD ? std::span<const std::uint8_t>() : Ring.subspan(Offset + sizeof(ItemRecord), Length - sizeof(ItemRecord));
         const error_t Done = Apply(Record, Body, Items, Got, Tell);
         if (Done != OK && Tell.Refused) {
-            std::uint16_t Property = 0;
-            if ((Record.Op == ITEM_OP_CHANGE || Record.Op == ITEM_OP_RESET) && Body.size() >= sizeof(ItemChange)) {
+            std::uint16_t     Property = 0;
+            const std::size_t Skip     = Record.Op == ITEM_OP_ANIMATE ? sizeof(ItemAnimation) : 0;
+            if ((Record.Op == ITEM_OP_CHANGE || Record.Op == ITEM_OP_RESET || Record.Op == ITEM_OP_ANIMATE) &&
+                Body.size() >= Skip + sizeof(ItemChange)) {
                 ItemChange What{};
-                std::memcpy(&What, Body.data(), sizeof(What));
+                std::memcpy(&What, Body.data() + Skip, sizeof(What));
                 Property = What.Property;
             }
             Tell.Refused(Record.Item, Record.Op, Property, Done);

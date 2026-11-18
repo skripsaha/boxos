@@ -75,6 +75,7 @@
 
 #include "box/core/cabin.h"
 #include "box/alarm.h"
+#include "box/clock.h"
 #include "box/core/result.h"
 #include "box/debug.h"
 #include "box/error.h"
@@ -109,7 +110,12 @@ BOX_SETTINGS("text \"the text on a framebuffer\"\n"
              "\"tags the font's file wears besides, apart by commas, to tell files of one name apart\"\n"
              "items \"what programs draw on a framebuffer: shapes, text, pictures\"\n"
              "    scale number from 100 to 400 percent or off default off next-start "
-             "\"how large a point is drawn, as a share of a pixel; off chooses for the screen\"\n");
+             "\"how large a point is drawn, as a share of a pixel; off chooses for the screen\"\n"
+             "motion \"how things programs show move\"\n"
+             "    less on-or-off default off "
+             "\"things moved, sized, turned or reshaped at once, fades short and without bounce\"\n"
+             "    speed number from 25 to 400 percent default 100 "
+             "\"how fast every animation plays: 200 twice as fast, 50 half\"\n");
 
 namespace {
 
@@ -232,6 +238,7 @@ void HoldFrame(const ConsoleRun &Run, std::uint32_t Lane)
 // again the moment it is lifted — and each area told what it showed.
 void Present()
 {
+    AreasAnimate(clock_uptime_us());
     if (SceneOn()) return;
     AreasFlow(g_model->RowsGone());
     const bool Due = FrameDue(*g_model, AreasWant());
@@ -357,6 +364,22 @@ bool ScreenStep()
 // The moment the alarm is set for, 0 when none is.
 std::uint64_t g_alarm;
 
+// The display's settings watched: how things move takes effect at once.
+SettingsWatch *g_settings;
+
+// How the person wants things to move, as the settings say it now.
+void MotionRead() noexcept
+{
+    AreasMotion(settings_on("motion less"), static_cast<std::uint32_t>(settings_number("motion speed")));
+}
+
+bool SettingsStep()
+{
+    if (!g_settings || !settings_watch_poll(g_settings)) return false;
+    MotionRead();
+    return true;
+}
+
 // An effect over the glass: the alarm's Touches taken, a frame drawn when one
 // is due, the effect ended when its time is up. A Touch for a moment since
 // replaced is taken all the same: the step judges by the clock, not by which
@@ -379,8 +402,10 @@ bool EffectStep()
 // glass.
 void SetAlarm()
 {
-    const std::uint64_t Effect = EffectsDue(), Scene = SceneDue();
-    const std::uint64_t Due    = !Effect ? Scene : !Scene ? Effect : std::min(Effect, Scene);
+    const std::uint64_t Areas  = AreasDue();
+    std::uint64_t       Due    = 0;
+    for (const std::uint64_t Each : {EffectsDue(), SceneDue(), Areas ? (Areas + 999) / 1000 : 0})
+        if (Each != 0) Due = Due == 0 ? Each : std::min(Due, Each);
     if (Due == g_alarm) return;
     if (Due == 0) alarm_cancel();
     else alarm_set(Due);
@@ -731,6 +756,7 @@ bool Rotate()
     Moved |= FrontSpawnStep();
     Moved |= ScreenStep();
     Moved |= EffectStep();
+    Moved |= SettingsStep();
     Moved |= LaneStep();
     Moved |= RingStep();
     Moved |= IpcStep();
@@ -806,6 +832,11 @@ int main(void)
     Glass.Look    = &FrameTheme();
     Glass.Vacated = FrameVacated;
     AreasStart(Glass);
+    MotionRead();
+    if (settings_watch_begin(&g_settings) != 0) {
+        g_settings = nullptr;
+        kdbg_print("[display] its settings are not watched; how things move is read at its next start");
+    }
 
     // The scene the loader left, played on from its frame; the console waits
     // under it.

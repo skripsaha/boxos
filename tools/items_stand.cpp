@@ -34,8 +34,8 @@ std::uint32_t Random()
     return State;
 }
 
-Bench::Bench(items::ProgramState &Program, std::uint32_t Ring)
-    : Memory(sizeof(ItemAreaHeader) + Ring + ITEM_EVENT_BYTES, 0), RingBytes(Ring), Area(Program)
+Bench::Bench(items::ProgramState &Program, std::uint32_t Ring, const items::Motion &Wanted)
+    : Memory(sizeof(ItemAreaHeader) + Ring + ITEM_EVENT_BYTES, 0), RingBytes(Ring), Area(Program, Wanted)
 {
     Head             = reinterpret_cast<ItemAreaHeader *>(Memory.data());
     Head->Magic      = ITEM_AREA_MAGIC;
@@ -55,7 +55,18 @@ items::Reading Bench::Step(painter::gui::Changes &Changes)
         RefusedItems.push_back(Item);
     };
     Tell.BlockChanged = [this](std::uint32_t Block, const ItemBlockChanged &) { Area.Items.BlockChanged(Block); };
-    return items::ReadSteps(*Head, std::span<const std::uint8_t>(Ring, RingBytes), Area.Items, Tell);
+    Tell.Animate      = [this](std::uint32_t Item, const ItemAnimation &How, std::uint16_t Property,
+                          std::span<const std::uint8_t> Value) { return Area.Moving.Said(Item, How, Property, Value); };
+    Tell.Cut          = [this](std::uint32_t Item, std::uint16_t Property) { Area.Moving.Cut(Item, Property); };
+    Area.Moving.Reading(Clock);
+    const items::Reading Read = items::ReadSteps(*Head, std::span<const std::uint8_t>(Ring, RingBytes), Area.Items, Tell);
+    Area.Moving.StepWhole();
+    return Read;
+}
+
+void Bench::Advance(std::uint64_t Now, const items::Theme &Look)
+{
+    Area.Moving.Advance(Now, Look, [this](std::uint32_t, const ItemAnimationEnd &End) { Ends.push_back(End); });
 }
 
 namespace {
@@ -106,6 +117,7 @@ int main(int Count, char **Words)
     stand::CheckCompose(Tally);
     stand::CheckCells(Tally);
     stand::CheckGui(Tally);
+    stand::CheckMotion(Tally);
     std::printf("items stand: %d held, %d failed\n", Tally.Held, Tally.Failed);
     return Tally.Failed ? 1 : 0;
 }

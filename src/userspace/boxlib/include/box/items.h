@@ -49,10 +49,30 @@ extern "C" {
  * before it, and puts in the ring as room comes (painter/gui/area.h). Nothing
  * is lost but what was said over.
  *
+ * IN TIME. A change may take time: "item 7: opacity to whole in 200 ms,
+ * slowing at the end" (ITEM_OP_ANIMATE) — and the display plays it by the
+ * clock, frame by frame, while the program sleeps. It goes from where the
+ * property is when it begins to what was said, along a curve, after a delay
+ * or after another animation ends, once or again and again; a property of
+ * numbers or colours goes through the values between (colours as the eye
+ * sees them, through OKLab), one that has none between — characters, a
+ * picture, a role, a look of another make — fades from what it was into what
+ * it is, and hidden fades out or in. What is said meanwhile of that property
+ * cuts it where it stands: said plainly, it is at once what was said; said as
+ * another animation, it goes on from there, a spring keeping its speed. An
+ * item never shown takes at once a property it never said — there is nothing
+ * to go from — and one said plainly before an animation of it, in its step,
+ * is where it starts. Where
+ * the person asks for less motion, things moved, sized, turned or reshaped
+ * are at once where they go and fades are short; and every animation plays
+ * at the person's speed. On a text page every change is at once what it
+ * says. A frame is drawn only while something seen moves.
+ *
  * WHAT COMES BACK rides a second ring in the same memory, the display's
  * events: the area's size and scale, an item's size where it is sized by its
- * content, a change refused and why, a step shown and what showing it cost.
- * The display touches the area's tag (its Bay's name) when it adds one.
+ * content, a change refused and why, a step shown and what showing it cost,
+ * an animation ended. The display touches the area's tag (its Bay's name)
+ * when it adds one.
  *
  * BOUNDS. Everything a program says is held to the bounds below, per program
  * over all its areas; past one, the change is refused — told back, never a
@@ -123,6 +143,7 @@ enum {
     ITEM_OP_BLOCK   = 6,   /* ItemBlockChanged: a block's pixels changed (Item is the block) */
     ITEM_OP_STEP    = 7,   /* ItemStep: the step whole — show it */
     ITEM_OP_CELLS   = 8,   /* ItemCellsRun and its cells: a cells item's cells written along a row */
+    ITEM_OP_ANIMATE = 9,   /* ItemAnimation, then ItemChange and a value: one property said, reached in time */
 };
 
 typedef struct {
@@ -154,6 +175,42 @@ typedef struct {
 typedef struct {
     uint64_t Number;      /* the program's count of its steps */
 } ItemStep;
+
+/* How a property goes to what was said: along a curve of progress over the
+ * time it takes — slowly at first (IN), slowing at the end (OUT), both, in
+ * Steps jumps, as a spring that may bounce past its end and settles in about
+ * the time it takes, or along the program's own curve. */
+enum {
+    ITEM_CURVE_LINEAR = 0,
+    ITEM_CURVE_IN     = 1,
+    ITEM_CURVE_OUT    = 2,
+    ITEM_CURVE_IN_OUT = 3,
+    ITEM_CURVE_STEPS  = 4,   /* Steps jumps, each at the end of its share of the time */
+    ITEM_CURVE_SPRING = 5,   /* Bend[0]: how far past its end it bounces, a share of the way of ITEM_ONE; 0 none */
+    ITEM_CURVE_OWN    = 6,   /* Bend: a cubic Bézier's inner points x1, y1, x2, y2 of ITEM_ONE, x within 0 to ITEM_ONE */
+    ITEM_CURVES       = 7,
+};
+#define ITEM_FOREVER 0xFFFFFFFFu   /* repeats that never end, until it is cut */
+
+/* An animation: Number, the program's name for it — the end of the last one
+ * of that Number told back (ITEM_EVENT_ANIMATION_END), another waiting on it
+ * (After); 0 names none. It begins Delay after it is shown — or after the
+ * animations of Number After all end, finished or cut, if any are under way
+ * or waiting when its step is whole. Repeats: times again after the first;
+ * Back: each one after the first goes back the way the one before it came,
+ * and it always ends where a run forward ends — at what was said. */
+typedef struct {
+    uint32_t Number;
+    uint32_t After;
+    uint32_t Delay;       /* milliseconds */
+    uint32_t Duration;    /* milliseconds a run takes */
+    uint8_t  Curve;       /* ITEM_CURVE_* */
+    uint8_t  Steps;       /* ITEM_CURVE_STEPS: how many, at least one */
+    uint8_t  Back;
+    uint8_t  Reserved;
+    uint32_t Repeats;     /* or ITEM_FOREVER */
+    int32_t  Bend[4];
+} ItemAnimation;
 
 /* ---- Properties and their values ---------------------------------------- */
 
@@ -389,6 +446,7 @@ enum {
     ITEM_EVENT_REFUSED = 3,   /* ItemRefusal: a change not made, and why */
     ITEM_EVENT_SHOWN   = 4,   /* ItemShown: a step on the glass, and what it cost */
     ITEM_EVENT_FREE    = 5,   /* ItemPageFree: a canvas's page may be drawn in again (Item is the block) */
+    ITEM_EVENT_ANIMATION_END = 6,   /* ItemAnimationEnd: the last animation of a Number ended (Item is its item) */
 };
 
 /* The glass an area is on: a framebuffer's pixels, or a text page's cells —
@@ -396,6 +454,11 @@ enum {
  * down, a text is written into the cells a character each, a line of it a row,
  * and an item that is no text is shown by its caption. */
 enum { ITEM_GLASS_TEXT = 1, ITEM_GLASS_PIXELS = 2 };
+
+/* How the person wants things to move, told with the area and whenever it
+ * changes: less motion — a program moving things itself moves them at once
+ * and fades briefly too — and every animation's speed, in percent. */
+enum { ITEM_MOTION_LESS = 1 };
 #define ITEM_PAGE_CELL_WIDE 8
 #define ITEM_PAGE_CELL_TALL 16
 typedef struct {
@@ -404,7 +467,9 @@ typedef struct {
     uint8_t  Glass;           /* ITEM_GLASS_* */
     uint8_t  Shown;           /* 0 while it lies behind and is not seen */
     uint8_t  Mosaics;         /* ITEM_MOSAIC_*: the grids cells are drawn in exactly */
-    uint8_t  Reserved;
+    uint8_t  Motion;          /* ITEM_MOTION_* */
+    uint32_t Speed;           /* percent */
+    uint32_t Reserved;
 } ItemAreaNews;
 
 typedef struct {
@@ -423,6 +488,12 @@ typedef struct {
 } ItemShown;
 
 typedef struct { uint32_t Page; uint32_t Reserved; } ItemPageFree;
+
+typedef struct {
+    uint32_t Number;
+    uint8_t  Finished;        /* 1: every one of them ran to its end; 0: one was cut — said over, unsaid, or its item gone */
+    uint8_t  Reserved[3];
+} ItemAnimationEnd;
 
 /* ---- The area's memory -------------------------------------------------- */
 
@@ -497,6 +568,9 @@ typedef struct {
 #define ITEM_REACH            (1 << 23)        /* of ITEM_POINT: no place or size past it */
 #define ITEM_GRID_SIDE_MOST   4096u            /* a cells item's columns, and its rows */
 #define ITEM_CELLS_MOST       (1u << 20)       /* cells, over all the program's cells items */
+#define ITEM_ANIMATIONS_MOST  16384u           /* under way or waiting */
+#define ITEM_ANIMATION_BYTES_MOST (16u * 1024u * 1024u)   /* the values they go to, together */
+#define ITEM_TIME_MOST        3600000u         /* an animation's delay, and a run's time: an hour of milliseconds */
 
 /* ---- Questions and messages --------------------------------------------- */
 
@@ -557,7 +631,7 @@ typedef struct PACKED {
     uint8_t  command;         /* DISP_CMD_AREA_OPEN */
     uint8_t  glass;           /* ITEM_GLASS_* */
     uint8_t  mosaics;         /* ITEM_MOSAIC_*: the grids cells are drawn in exactly */
-    uint8_t  reserved;
+    uint8_t  motion;          /* ITEM_MOTION_* */
     int32_t  error;           /* error_t; the rest is meaningful only with 0 */
     uint32_t area;
     uint32_t display_pid;     /* where the messages go */
@@ -566,7 +640,7 @@ typedef struct PACKED {
     uint32_t scale;           /* pixels to a point, of 256 */
     uint32_t caret_col;       /* the console's caret, after everything the asker printed */
     uint32_t caret_row;
-    uint32_t reserved2;
+    uint32_t speed;           /* every animation's, in percent */
     char     bay_tag[DISPLAY_ITEM_TAG_MAX];
 } DisplayAreaOpenReply;
 
@@ -620,12 +694,13 @@ typedef struct PACKED {
 } DisplayBlockNotice;
 
 STATIC_ASSERT(sizeof(ItemRecord) == 8 && sizeof(ItemCreate) == 16 && sizeof(ItemChange) == 8 &&
-                  sizeof(ItemBlockChanged) == 24 && sizeof(ItemStep) == 8,
+                  sizeof(ItemBlockChanged) == 24 && sizeof(ItemStep) == 8 && sizeof(ItemAnimation) == 40,
               "the records of the items' language are an ABI of fixed sizes");
 STATIC_ASSERT(sizeof(ItemColor) == 8 && sizeof(ItemFill) == 8 && sizeof(ItemStop) == 12 &&
                   sizeof(ItemTextStyle) == 32 && sizeof(ItemShadow) == 28 && sizeof(ItemStroke) == 16,
               "the values of the items' language are an ABI of fixed sizes");
-STATIC_ASSERT(sizeof(ItemEvent) == 8 && sizeof(ItemAreaNews) == 16 && sizeof(ItemShown) == 32,
+STATIC_ASSERT(sizeof(ItemEvent) == 8 && sizeof(ItemAreaNews) == 24 && sizeof(ItemShown) == 32 &&
+                  sizeof(ItemAnimationEnd) == 8,
               "the events of the items' language are an ABI of fixed sizes");
 STATIC_ASSERT(sizeof(ItemAreaHeader) == 320 && sizeof(ItemBlockHeader) == 64,
               "an area's and a block's memory begin with heads of fixed sizes");

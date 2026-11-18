@@ -18,7 +18,8 @@ static_assert(static_cast<int>(gui::Event::Kind::Area) == GUI_EVENT_AREA && stat
               static_cast<int>(gui::Event::Kind::Refused) == GUI_EVENT_REFUSED && static_cast<int>(gui::Event::Kind::Shown) == GUI_EVENT_SHOWN &&
               static_cast<int>(gui::Event::Kind::PageFree) == GUI_EVENT_PAGE_FREE && static_cast<int>(gui::Event::Kind::Key) == GUI_EVENT_KEY &&
               static_cast<int>(gui::Event::Kind::Alarm) == GUI_EVENT_ALARM && static_cast<int>(gui::Event::Kind::Gone) == GUI_EVENT_GONE &&
-              static_cast<int>(gui::Event::Kind::EndAsked) == GUI_EVENT_END_ASKED,
+              static_cast<int>(gui::Event::Kind::EndAsked) == GUI_EVENT_END_ASKED &&
+                  static_cast<int>(gui::Event::Kind::AnimationEnd) == GUI_EVENT_ANIMATION_END,
               "the C face's events are painter::gui's, one for one");
 
 gui::Role RoleOf(int Role) noexcept { return static_cast<gui::Role>(Role); }
@@ -87,6 +88,8 @@ float gui_width(const GuiArea *area) { return area ? area->Screen.Size().X : 0; 
 float gui_height(const GuiArea *area) { return area ? area->Screen.Size().Y : 0; }
 float gui_scale(const GuiArea *area) { return area ? area->Screen.Scale() : 1; }
 int   gui_on_text_page(const GuiArea *area) { return area && area->Screen.On() == gui::Glass::Text; }
+int      gui_less_motion(const GuiArea *area) { return area && area->Screen.LessMotion() ? 1 : 0; }
+uint32_t gui_motion_speed(const GuiArea *area) { return area ? area->Screen.MotionSpeed() : 100u; }
 
 GuiItem gui_text(GuiArea *area, GuiItem parent, const char *utf8, int role)
 {
@@ -180,6 +183,28 @@ void gui_hide(GuiArea *area, GuiItem item)
     if (gui::Area *To = Told(area, item)) To->Hidden(item, true);
 }
 
+void gui_animate(GuiArea *area, const GuiAnimation *how)
+{
+    if (!area) return;
+    if (!how) {
+        area->Screen.Animating(std::nullopt);
+        return;
+    }
+    gui::Animation Made;
+    Made.Duration = std::chrono::milliseconds(how->milliseconds);
+    Made.Curve    = how->curve >= 0 && how->curve < ITEM_CURVES ? static_cast<gui::Animation::Ease>(how->curve) : gui::Animation::Ease::Linear;
+    Made.Bounce   = how->bounce;
+    Made.Steps    = how->steps;
+    Made.Bend1    = painter::core::PointF{how->x1, how->y1};
+    Made.Bend2    = painter::core::PointF{how->x2, how->y2};
+    Made.Delay    = std::chrono::milliseconds(how->delay);
+    Made.Number   = how->number;
+    Made.After    = how->after;
+    Made.Repeats  = how->repeats;
+    Made.Back     = how->back != 0;
+    area->Screen.Animating(Made);
+}
+
 int gui_present(GuiArea *area) { return area && area->Screen.Present() ? 1 : 0; }
 
 int gui_wait(GuiArea *area, GuiEvent *event, int keys)
@@ -201,6 +226,8 @@ int gui_wait(GuiArea *area, GuiEvent *event, int keys)
     event->scancode  = Heard.Key.Scancode;
     event->mods      = Heard.Key.Mods;
     event->moment    = Heard.Moment;
+    event->number    = Heard.Number;
+    event->finished  = Heard.Finished ? 1 : 0;
     return 0;
 }
 

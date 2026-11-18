@@ -20,9 +20,11 @@
 // Values are given in points (floats), colours as Painter's; they are written
 // to 1/256 of a point and sixteen bits a channel.
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <tuple>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -143,6 +145,58 @@ struct TextBox {
 // A size the item's content decides.
 constexpr float ByContent = -1.0f;
 
+// How a change goes over time (box/items.h ITEM_OP_ANIMATE): said once, and
+// the display plays it by the clock while the program goes on — from where
+// the property is when it begins to what was said, along its curve: straight,
+// slowly at first, slowing at the end, both, in jumps, as a spring that may
+// bounce past its end, or along a Bézier of one's own.
+struct Animation {
+    enum class Ease : std::uint8_t {
+        Linear = ITEM_CURVE_LINEAR,
+        In     = ITEM_CURVE_IN,
+        Out    = ITEM_CURVE_OUT,
+        InOut  = ITEM_CURVE_IN_OUT,
+        Steps  = ITEM_CURVE_STEPS,
+        Spring = ITEM_CURVE_SPRING,
+        Own    = ITEM_CURVE_OWN,
+    };
+    std::chrono::milliseconds Duration{250};
+    Ease                      Curve  = Ease::Out;
+    float                     Bounce = 0;                       // Spring: how far past its end, a share of the way
+    int                       Steps  = 1;                       // Steps: how many jumps
+    core::PointF              Bend1{0.25f, 0.1f}, Bend2{0.25f, 1.0f};   // Own: the curve's inner points
+    std::chrono::milliseconds Delay{0};
+    std::uint32_t             Number  = 0;      // told back when its last ends; what another waits on
+    std::uint32_t             After   = 0;      // begins once the animations of this number all end
+    std::uint32_t             Repeats = 0;      // times again after the first, or Forever
+    bool                      Back    = false;  // each again goes back the way the one before came
+
+    static constexpr std::uint32_t Forever = ITEM_FOREVER;
+
+    static Animation Linear(std::chrono::milliseconds Time) { return With(Time, Ease::Linear); }
+    static Animation In(std::chrono::milliseconds Time) { return With(Time, Ease::In); }
+    static Animation Out(std::chrono::milliseconds Time) { return With(Time, Ease::Out); }
+    static Animation InOut(std::chrono::milliseconds Time) { return With(Time, Ease::InOut); }
+    static Animation Spring(std::chrono::milliseconds Settle, float Bounce = 0)
+    {
+        Animation Made = With(Settle, Ease::Spring);
+        Made.Bounce    = Bounce;
+        return Made;
+    }
+
+    // As the language writes it.
+    ItemAnimation Wire() const noexcept;
+
+private:
+    static Animation With(std::chrono::milliseconds Time, Ease Curve)
+    {
+        Animation Made;
+        Made.Duration = Time;
+        Made.Curve    = Curve;
+        return Made;
+    }
+};
+
 class Changes {
 public:
     void Create(std::uint32_t Item, gui::Kind Kind, std::uint32_t Parent = ITEM_AREA, std::uint32_t Above = ITEM_TOP,
@@ -213,6 +267,27 @@ public:
         Put(Item, Property, Record(Value.begin(), Value.end()));
     }
 
+    // Everything said while Change runs — of objects, of frames described
+    // whole — reached in time as How says: the display plays it while the
+    // program goes on, from what was said plainly of the property before it
+    // in the step — or, of an item never shown, a property it never said
+    // taken at once. One that waits (After, Delay) goes after what was said
+    // of that property before it, not in its place.
+    template <typename Changing> void Animate(const Animation &How, Changing &&Change)
+    {
+        const std::optional<ItemAnimation> Was = Moving;
+        Moving                                 = How.Wire();
+        struct Restoring {
+            Changes                            &Of;
+            const std::optional<ItemAnimation> &To;
+            ~Restoring() { Of.Moving = To; }
+        } Restore{*this, Was};
+        Change();
+    }
+    // From now on everything said reached in time as How says; none: said at
+    // once again.
+    void Animating(std::optional<Animation> How) { Moving = How ? std::optional<ItemAnimation>(How->Wire()) : std::nullopt; }
+
 protected:
     using Record = std::vector<std::uint8_t>;
     // Item's Property said as Value — written unless it is what was said.
@@ -230,8 +305,13 @@ private:
     };
     bool FlushCells(const auto &Into, std::uint32_t Most);
 
+    // A property's words waiting: its last word, and after it, in order,
+    // animations that wait on others or their delay.
+    using Waits = std::tuple<std::uint32_t, std::uint16_t, std::uint32_t>;
     std::vector<std::pair<std::uint32_t, Record>>               Ordered;      // the item, and its record
-    std::map<std::pair<std::uint32_t, std::uint16_t>, Record>   Properties;   // each property's last word, waiting
+    std::map<Waits, Record>                                     Properties;   // each property's words, waiting
+    std::optional<ItemAnimation>                                Moving;       // how what is said goes, while it is animated
+    std::uint32_t                                               Later = 0;    // the order of words that wait
     std::map<std::pair<std::uint32_t, std::uint16_t>, Record>   Values;       // each property as last said
     std::map<std::uint32_t, KeptCells>                          Grids;        // each cells item's
     std::size_t                                                 CellsMarked = 0;   // rows with a stretch marked

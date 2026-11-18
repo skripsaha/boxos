@@ -34,6 +34,13 @@ struct Listener {
     std::function<void(std::uint32_t Item, std::uint16_t Op, std::uint16_t Property, error_t Reason)> Refused;
     // A block's pixels changed: the block, where, and a canvas's page.
     std::function<void(std::uint32_t Block, const ItemBlockChanged &Where)> BlockChanged;
+    // An animation said: OK, or why not. None takes no animation.
+    std::function<error_t(std::uint32_t Item, const ItemAnimation &How, std::uint16_t Property,
+                          std::span<const std::uint8_t> Value)>
+        Animate;
+    // A property said plainly or unsaid — or, as 0, the item gone: what
+    // animates it is cut.
+    std::function<void(std::uint32_t Item, std::uint16_t Property)> Cut;
 };
 
 // Every whole step of the ring after Head's Read applied to Items; Read moved

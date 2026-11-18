@@ -1,13 +1,15 @@
 /* itemcheck for the programmer — painter::gui as a program writes with it,
  * held on the machine: objects told what changed and what did not, a frame of
  * a list described whole — one row changed, all reordered, drawn again as it
- * was — a canvas of the program's own pixels drawn page after page, a text
- * measured beforehand against the size the display laid it at, and the C
- * face (from_c.c). See itemcheck_gui.h. */
+ * was — a canvas of the program's own pixels drawn page after page, things
+ * in time played by the display and their ends told, a text measured
+ * beforehand against the size the display laid it at, and the C face
+ * (from_c.c). See itemcheck_gui.h. */
 
 #include "itemcheck_gui.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <numeric>
@@ -15,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include "box/clock.h"
 #include "itemcheck_c.h"
 #include "painter/gui/area.h"
 #include "painter/gui/frame.h"
@@ -23,6 +26,7 @@
 
 namespace {
 
+using namespace std::chrono_literals;
 namespace gui = painter::gui;
 using painter::core::PointF;
 
@@ -126,6 +130,60 @@ bool CheckForProgrammer()
         }
         std::printf("itemcheck: a canvas of 96x64 pixels drawn %d times, its two pages taken in turn\n", Drawn);
         Holds = Holds && Drawn == 6;
+    }
+
+    /* Things in time: a plate faded in, played by the display while this
+     * waits, its end told by its time; two one after another, the second
+     * ending the moment its own time after the first; one cut, told cut. On
+     * a text page every change is at once, its end told at once. */
+    {
+        gui::Shape Plate2 = On.Rectangle(gui::Role::Panel);
+        Plate2.SetPlace({16, 100}).SetSize({120, 24}).SetOpacity(0);
+        (void)On.Present();
+        (void)ShownBy(On, On.Step(), Of);
+        const auto Numbered = [](gui::Animation How, std::uint32_t Number, std::uint32_t After = 0) {
+            How.Number = Number;
+            How.After  = After;
+            return How;
+        };
+        const auto Ending = [&](std::uint32_t Number) -> std::optional<gui::Event> {
+            for (;;) {
+                const gui::Event Each = On.Wait();
+                if (Each.What == gui::Event::Kind::Refused && Of.Refused++ == 0)
+                    std::printf("itemcheck: the display refused item %u's property %u — %d\n", Each.Item, Each.Property, static_cast<int>(Each.Reason));
+                if (Each.What == gui::Event::Kind::AnimationEnd && Each.Number == Number) return Each;
+            }
+        };
+        std::uint64_t Began = clock_uptime_us();
+        On.Animate(Numbered(gui::Animation::Linear(300ms), 71), [&] { Plate2.SetOpacity(1); });
+        (void)On.Present();
+        const std::optional<gui::Event> Faded = Ending(71);
+        const std::uint64_t             Fade  = (clock_uptime_us() - Began) / 1000;
+        Began = clock_uptime_us();
+        On.Animate(Numbered(gui::Animation::Out(200ms), 72), [&] { Plate2.SetPlace({200, 100}); });
+        On.Animate(Numbered(gui::Animation::Out(200ms), 73, 72), [&] { Plate2.SetPlace({200, 160}); });
+        (void)On.Present();
+        const std::optional<gui::Event> First = Ending(72);
+        const std::optional<gui::Event> Then  = Ending(73);
+        const std::uint64_t             Chain = (clock_uptime_us() - Began) / 1000;
+        On.Animate(Numbered(gui::Animation::Linear(1000ms), 74), [&] { Plate2.SetPlace({16, 100}); });
+        (void)On.Present();
+        Plate2.SetPlace({40, 100});
+        (void)On.Present();
+        const std::optional<gui::Event> Cut = Ending(74);
+        /* As the person wants things to move: at their speed; with less
+         * motion a fade at most 200 ms and a move at once. */
+        const std::uint64_t Speed = std::clamp<std::uint64_t>(On.MotionSpeed(), 25, 400), Most = Pixels ? 150 : 100;
+        const std::uint64_t FadeIs  = On.LessMotion() ? std::min<std::uint64_t>(200, 300 * 100 / Speed) : 300 * 100 / Speed;
+        const std::uint64_t ChainIs = On.LessMotion() ? 0 : 400 * 100 / Speed;
+        const bool Timed = Pixels ? Fade >= FadeIs && Fade <= FadeIs + Most && Chain >= ChainIs && Chain <= ChainIs + Most
+                                  : Fade <= Most && Chain <= Most;
+        const bool Told  = Faded && Faded->Finished && First && First->Finished && Then && Then->Finished && Cut && !Cut->Finished;
+        std::printf("itemcheck: in time — a plate faded in 300 ms, its end told after %llu ms; moved twice one after another, "
+                    "both ends told after %llu ms; a move said over, told cut: %s — %s motion at %llu%%\n",
+                    static_cast<unsigned long long>(Fade), static_cast<unsigned long long>(Chain), Told ? "every end as it was" : "NOT every end as it was",
+                    On.LessMotion() ? "less" : "all", static_cast<unsigned long long>(Speed));
+        Holds = Holds && Timed && Told;
     }
 
     /* A text measured beforehand, then laid by the display sized by its
