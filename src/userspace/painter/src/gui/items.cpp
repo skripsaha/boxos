@@ -79,14 +79,14 @@ Made Make(const std::shared_ptr<Anchor> &Where, std::uint32_t Parent, gui::Kind 
 /* ---- Item ------------------------------------------------------------------ */
 
 Item::Item(std::shared_ptr<detail::Anchor> WhereValue, detail::Made Made) noexcept
-    : Where(std::move(WhereValue)), Number(Made.Number), Owns(Made.Owns)
+    : Where(std::move(WhereValue)), Id(Made.Number), Owns(Made.Owns)
 {
-    if (Number == 0) Where.reset();
+    if (Id == 0) Where.reset();
 }
 
-Item::Item(Item &&Other) noexcept : Where(std::move(Other.Where)), Number(Other.Number), Owns(Other.Owns)
+Item::Item(Item &&Other) noexcept : Where(std::move(Other.Where)), Id(Other.Id), Owns(Other.Owns)
 {
-    Other.Number = 0;
+    Other.Id     = 0;
     Other.Owns   = false;
 }
 
@@ -95,39 +95,39 @@ Item &Item::operator=(Item &&Other) noexcept
     if (this == &Other) return *this;
     Remove();
     Where        = std::move(Other.Where);
-    Number       = Other.Number;
+    Id           = Other.Id;
     Owns         = Other.Owns;
-    Other.Number = 0;
+    Other.Id     = 0;
     Other.Owns   = false;
     return *this;
 }
 
 Item::~Item() { Remove(); }
 
-Item::operator bool() const noexcept { return Number != 0 && Where && (Where->Into || Where->Describing); }
+Item::operator bool() const noexcept { return Id != 0 && Where && (Where->Into || Where->Describing); }
 
 void Item::Remove()
 {
     if (Owns && Where && Where->Into && Where->Pool) {
         /* Gone with its group already: the display took it then. */
-        if (!Where->Pool->Gone(Number)) Where->Into->Remove(Number);
-        Where->Pool->Give(Number);
+        if (!Where->Pool->Gone(Id)) Where->Into->Remove(Id);
+        Where->Pool->Give(Id);
     }
     Where.reset();
-    Number = 0;
-    Owns   = false;
+    Id   = 0;
+    Owns = false;
 }
 
 Changes *Item::Into() const noexcept
 {
-    if (!Where || Number == 0) return nullptr;
+    if (!Where || Id == 0) return nullptr;
     if (Where->Describing) return &Where->Describing->Said;
     return Where->Into;
 }
 
 void Item::KeyAs(std::uint64_t Key) noexcept
 {
-    if (Where && Where->Describing && Number != 0) Where->Describing->Keyed(Number, Key);
+    if (Where && Where->Describing && Id != 0) Where->Describing->Keyed(Id, Key);
 }
 
 }  // namespace painter::gui

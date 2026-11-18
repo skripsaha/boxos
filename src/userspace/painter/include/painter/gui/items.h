@@ -109,6 +109,8 @@ public:
 
     // Made, and its area still open.
     explicit operator bool() const noexcept;
+    // Its number in the area's language: what the C face names it by.
+    std::uint32_t Number() const noexcept { return Id; }
     // Gone from the area now; the object holds nothing after.
     void Remove();
 
@@ -119,7 +121,7 @@ protected:
     void     KeyAs(std::uint64_t Key) noexcept;
 
     std::shared_ptr<detail::Anchor> Where;
-    std::uint32_t                   Number = 0;
+    std::uint32_t                   Id     = 0;
     bool                            Owns   = false;
 
     friend class Area;
@@ -132,19 +134,19 @@ protected:
 template <typename Self>
 class Words : public Item {
 public:
-    Self &SetPlace(core::PointF At) { return Say([&](Changes &To) { To.Place(Number, At); }); }
+    Self &SetPlace(core::PointF At) { return Say([&](Changes &To) { To.Place(Id, At); }); }
     // Either side ByContent: the content decides it.
-    Self &SetSize(core::PointF Size) { return Say([&](Changes &To) { To.Size(Number, Size); }); }
-    Self &SetOpacity(float Opacity) { return Say([&](Changes &To) { To.Opacity(Number, Opacity); }); }
-    Self &Show() { return Say([&](Changes &To) { To.Hidden(Number, false); }); }
-    Self &Hide() { return Say([&](Changes &To) { To.Hidden(Number, true); }); }
-    Self &SetTurn(float Degrees) { return Say([&](Changes &To) { To.Turn(Number, Degrees); }); }
-    Self &SetScale(core::PointF Scale) { return Say([&](Changes &To) { To.Scale(Number, Scale); }); }
+    Self &SetSize(core::PointF Size) { return Say([&](Changes &To) { To.Size(Id, Size); }); }
+    Self &SetOpacity(float Opacity) { return Say([&](Changes &To) { To.Opacity(Id, Opacity); }); }
+    Self &Show() { return Say([&](Changes &To) { To.Hidden(Id, false); }); }
+    Self &Hide() { return Say([&](Changes &To) { To.Hidden(Id, true); }); }
+    Self &SetTurn(float Degrees) { return Say([&](Changes &To) { To.Turn(Id, Degrees); }); }
+    Self &SetScale(core::PointF Scale) { return Say([&](Changes &To) { To.Scale(Id, Scale); }); }
     // The point it turns and scales about, from its corner, in points.
-    Self &SetAnchor(core::PointF At) { return Say([&](Changes &To) { To.Anchor(Number, At); }); }
-    Self &SetRole(gui::Role Role) { return Say([&](Changes &To) { To.Role(Number, Role); }); }
+    Self &SetAnchor(core::PointF At) { return Say([&](Changes &To) { To.Anchor(Id, At); }); }
+    Self &SetRole(gui::Role Role) { return Say([&](Changes &To) { To.Role(Id, Role); }); }
     // What it is in words, where it cannot be seen: a text page, a reader.
-    Self &SetCaption(std::string_view Utf8) { return Say([&](Changes &To) { To.Caption(Number, Utf8); }); }
+    Self &SetCaption(std::string_view Utf8) { return Say([&](Changes &To) { To.Caption(Id, Utf8); }); }
     // In a frame: which of the last frame's items this is, so an item of a
     // list stays itself when the list changes order. A kept item has none.
     Self &Key(std::uint64_t Key)
@@ -167,14 +169,14 @@ protected:
 template <typename Self>
 class PaintWords : public Words<Self> {
 public:
-    Self &SetFill(const Fill &One) { return this->Say([&](Changes &To) { To.Fills(this->Number, std::span(&One, 1)); }); }
+    Self &SetFill(const Fill &One) { return this->Say([&](Changes &To) { To.Fills(this->Id, std::span(&One, 1)); }); }
     // Fills laid one over another, the first lowest.
-    Self &SetFills(std::span<const Fill> Fills) { return this->Say([&](Changes &To) { To.Fills(this->Number, Fills); }); }
-    Self &SetStroke(const Stroke &Line) { return this->Say([&](Changes &To) { To.Stroke(this->Number, Line); }); }
-    Self &SetShadow(const Shadow &One) { return this->Say([&](Changes &To) { To.Shadows(this->Number, std::span(&One, 1)); }); }
+    Self &SetFills(std::span<const Fill> Fills) { return this->Say([&](Changes &To) { To.Fills(this->Id, Fills); }); }
+    Self &SetStroke(const Stroke &Line) { return this->Say([&](Changes &To) { To.Stroke(this->Id, Line); }); }
+    Self &SetShadow(const Shadow &One) { return this->Say([&](Changes &To) { To.Shadows(this->Id, std::span(&One, 1)); }); }
     Self &SetShadows(std::span<const Shadow> Shadows)
     {
-        return this->Say([&](Changes &To) { To.Shadows(this->Number, Shadows); });
+        return this->Say([&](Changes &To) { To.Shadows(this->Id, Shadows); });
     }
 
 protected:
@@ -184,15 +186,15 @@ protected:
 class Shape : public PaintWords<Shape> {
 public:
     Shape() = default;
-    Shape &SetRectangle() { return Say([&](Changes &To) { To.Rectangle(Number); }); }
-    Shape &SetEllipse() { return Say([&](Changes &To) { To.Ellipse(Number); }); }
+    Shape &SetRectangle() { return Say([&](Changes &To) { To.Rectangle(Id); }); }
+    Shape &SetEllipse() { return Say([&](Changes &To) { To.Ellipse(Id); }); }
     // Any outline, in the shape's own points; EvenOdd: its holes by the
     // even-odd rule, else by the winding.
     Shape &SetOutline(const core::Path &Outline, bool EvenOdd = false)
     {
-        return Say([&](Changes &To) { To.Outline(Number, Outline, EvenOdd); });
+        return Say([&](Changes &To) { To.Outline(Id, Outline, EvenOdd); });
     }
-    Shape &SetCorners(const core::Corners &Round) { return Say([&](Changes &To) { To.Corners(Number, Round); }); }
+    Shape &SetCorners(const core::Corners &Round) { return Say([&](Changes &To) { To.Corners(Id, Round); }); }
 
 private:
     using PaintWords::PaintWords;
@@ -203,15 +205,15 @@ private:
 class Text : public PaintWords<Text> {
 public:
     Text() = default;
-    Text &SetText(std::string_view Utf8) { return Say([&](Changes &To) { To.Text(Number, Utf8); }); }
+    Text &SetText(std::string_view Utf8) { return Say([&](Changes &To) { To.Text(Id, Utf8); }); }
     // Its style: only what it says over its role's.
-    Text &SetStyle(const TextStyle &Style) { return Say([&](Changes &To) { To.Style(Number, Style); }); }
+    Text &SetStyle(const TextStyle &Style) { return Say([&](Changes &To) { To.Style(Id, Style); }); }
     // Stretches of it styled otherwise, each saying only what it changes.
-    Text &SetSpans(std::span<const Span> Spans) { return Say([&](Changes &To) { To.Spans(Number, Spans); }); }
+    Text &SetSpans(std::span<const Span> Spans) { return Say([&](Changes &To) { To.Spans(Id, Spans); }); }
     // How it lies in its size: aligned, wrapped, cut.
-    Text &SetBox(const TextBox &Box) { return Say([&](Changes &To) { To.Box(Number, Box); }); }
+    Text &SetBox(const TextBox &Box) { return Say([&](Changes &To) { To.Box(Id, Box); }); }
     // Shown as stars, never said aloud nor copied.
-    Text &SetSecret(bool Secret) { return Say([&](Changes &To) { To.Secret(Number, Secret); }); }
+    Text &SetSecret(bool Secret) { return Say([&](Changes &To) { To.Secret(Id, Secret); }); }
 
 private:
     using PaintWords::PaintWords;
@@ -226,7 +228,7 @@ public:
     // pixels kept square, as pixel art is.
     Picture &SetPicture(const PictureBlock &Block, std::uint8_t Fit = ITEM_FIT_STRETCH, bool Sharp = false)
     {
-        return Say([&](Changes &To) { To.Picture(Number, Block.Id, Fit, Sharp); });
+        return Say([&](Changes &To) { To.Picture(Id, Block.Id, Fit, Sharp); });
     }
 
 private:
@@ -279,12 +281,12 @@ private:
 class Cells : public Words<Cells> {
 public:
     Cells() = default;
-    Cells &SetGrid(std::uint32_t Cols, std::uint32_t Rows) { return Say([&](Changes &To) { To.Grid(Number, Cols, Rows); }); }
+    Cells &SetGrid(std::uint32_t Cols, std::uint32_t Rows) { return Say([&](Changes &To) { To.Grid(Id, Cols, Rows); }); }
     Cells &SetCells(std::uint32_t Row, std::uint32_t Col, std::span<const ItemCell> Run)
     {
-        return Say([&](Changes &To) { To.Cells(Number, Row, Col, Run); });
+        return Say([&](Changes &To) { To.Cells(Id, Row, Col, Run); });
     }
-    Cells &SetCaret(std::optional<core::Point> At) { return Say([&](Changes &To) { To.Caret(Number, At); }); }
+    Cells &SetCaret(std::optional<core::Point> At) { return Say([&](Changes &To) { To.Caret(Id, At); }); }
 
 private:
     using Words::Words;
@@ -342,13 +344,13 @@ class Group : public Words<Group>, public Makes<Group> {
 public:
     Group() = default;
     gui::Group Subgroup(gui::Role Role = gui::Role::None) { return Makes<Group>::Group(Role); }
-    Group &SetClip(bool Clip) { return Say([&](Changes &To) { To.Clip(Number, Clip); }); }
-    Group &SetCorners(const core::Corners &Round) { return Say([&](Changes &To) { To.Corners(Number, Round); }); }
+    Group &SetClip(bool Clip) { return Say([&](Changes &To) { To.Clip(Id, Clip); }); }
+    Group &SetCorners(const core::Corners &Round) { return Say([&](Changes &To) { To.Corners(Id, Round); }); }
 
 private:
     using Words::Words;
     const std::shared_ptr<detail::Anchor> &Where() const noexcept { return Item::Where; }
-    std::uint32_t                          Parent() const noexcept { return Number; }
+    std::uint32_t                          Parent() const noexcept { return Id; }
     template <typename Self>
     friend class Makes;
 };

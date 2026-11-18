@@ -7,10 +7,15 @@
 # the screen, says a scene of every kind of item in one step, then runs of
 # steps as a program makes them — a word changed, a shape moved, a group
 # faded, a cell changed — and says what each run's frames cost as the display
-# told it back; then prints lines into the console and opens an area in its
-# flow after them, and says how long until the glass showed it all
-# (src/userspace/utils/itemcheck). The gate holds that the area opened on the
-# glass the machine has, that every run was shown and said, that the console's
+# told it back; then painter::gui as a program writes with it — objects, a
+# frame of a list, a canvas, a text measured beforehand, the C face; then
+# prints lines into the console and opens an area in its flow after them, and
+# says how long until the glass showed it all (src/userspace/utils/itemcheck).
+# The gate holds that the area opened on the glass the machine has, that every
+# run was shown and said; that objects send only what changed, a frame only
+# what differs and nothing when it is as before, a canvas is drawn page after
+# page (framebuffer), a text is measured the very size the display lays it at
+# (a cell a character on the text page), and the C face holds; that the console's
 # lines and the area in its flow were shown, that the last line says PASS —
 # every step shown, nothing refused, and on a framebuffer a word and a cell
 # changed composing a small part of the area — that the display never closed
@@ -65,6 +70,21 @@ run_itemcheck() {
         done
         [ $held = 1 ]
         chk $? "itemcheck ($name): the scene and four runs of 60 steps each shown, each frame's cost told back"
+        grep -aqE "itemcheck: objects — .* — ([0-9]|[1-5][0-9]|6[0-4]) bytes of the ring a step" "$L"
+        chk $? "itemcheck ($name): objects told all of themselves each step, only what changed going"
+        grep -aqE "itemcheck: a frame of 24 rows in a group — one row changed: [1-3] records; all reordered: [0-9]+ records; drawn again as it was: no step" "$L"
+        chk $? "itemcheck ($name): a frame of a list sending only what differs, a frame as before sending nothing"
+        if [ "$name" = framebuffer ]; then
+            grep -aq "itemcheck: a canvas of 96x64 pixels drawn 6 times, its two pages taken in turn" "$L"
+            chk $? "itemcheck ($name): a canvas of the program's own pixels drawn page after page"
+            grep -aqE "itemcheck: a text measured beforehand ([0-9.]+)x([0-9.]+) points, the display laid it at \1x\2$" "$L"
+            chk $? "itemcheck ($name): a text measured beforehand the very size the display laid it at"
+        else
+            grep -aqE "itemcheck: a text measured beforehand [0-9]+x16 points, a cell a character on the text page" "$L"
+            chk $? "itemcheck ($name): a text measured on the text page a cell a character"
+        fi
+        grep -aqE "itemcheck: from C — .*: every step shown" "$L"
+        chk $? "itemcheck ($name): painter::gui's C face held from a program's C"
         grep -aqE "itemcheck: the console, [0-9]+ lines and an area in its flow — [0-9]+ ms until the glass showed them" "$L"
         chk $? "itemcheck ($name): the console's lines and an area in its flow after them shown"
         grep -aqF "$passed" "$L"

@@ -524,7 +524,10 @@ drawcheck.elf: $(BOXLIB_START) $(DRAWCHECK_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX
 # itemcheck holds the items' language on the machine: a scene said, runs of
 # steps shown, and what each frame cost.
 ITEMCHECK_DIR  = itemcheck
-ITEMCHECK_OBJS = $(addprefix $(ITEMCHECK_DIR)/,itemcheck.o)
+ITEMCHECK_OBJS = $(addprefix $(ITEMCHECK_DIR)/,itemcheck.o gui.o from_c.o)
+
+# Its C part speaks painter::gui's C face.
+$(ITEMCHECK_DIR)/from_c.o: CFLAGS += -I../painter/include
 
 itemcheck.elf: $(BOXLIB_START) $(ITEMCHECK_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(ITEMCHECK_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)

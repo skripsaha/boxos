@@ -24,7 +24,7 @@ gui::Canvas MakeCanvas(const std::shared_ptr<Anchor> &Where, std::uint32_t Paren
     if (!Pages) return {};
     const std::uint32_t Block = Pages->Id;
     gui::Canvas         Made(Where, Make(Where, Parent, gui::Kind::Canvas, gui::Role::None), std::move(*Pages));
-    Kept.Changes::Canvas(Made.Number, Block);
+    Kept.Changes::Canvas(Made.Id, Block);
     return Made;
 }
 

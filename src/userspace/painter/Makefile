@@ -27,7 +27,7 @@ SRCS = src/core/color.cpp src/core/pixel.cpp src/core/transform.cpp src/core/pat
        src/tui/frame.cpp src/tui/stage.cpp src/tui/kept_cells.cpp src/tui/surface.cpp src/tui/console_surface.cpp src/tui/keyboard.cpp \
        src/tui/cells_area.cpp src/tui/text.cpp src/tui/window.cpp \
        src/tui/mosaic.cpp src/tui/fine_canvas.cpp \
-       src/gui/changes.cpp src/gui/area.cpp src/gui/items.cpp src/gui/canvas.cpp src/gui/frame.cpp src/gui/area_frames.cpp src/gui/fonts.cpp src/gui/font_opened.cpp src/gui/measure.cpp \
+       src/gui/changes.cpp src/gui/area.cpp src/gui/items.cpp src/gui/canvas.cpp src/gui/frame.cpp src/gui/area_frames.cpp src/gui/fonts.cpp src/gui/font_opened.cpp src/gui/measure.cpp src/gui/c_face.cpp src/gui/c_measure.cpp \
        src/items/properties.cpp src/items/look.cpp src/items/text.cpp
 OBJS = $(SRCS:.cpp=.o)
 DEPS = $(OBJS:.o=.d)
