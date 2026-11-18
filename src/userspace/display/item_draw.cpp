@@ -237,12 +237,8 @@ void DrawStraight(const Item &Of, const Drawing &Drawn, const Sources &From, Can
     case ITEM_CANVAS: {
         const Canvas *Page = Of.Said.Canvas && From.CanvasOf ? From.CanvasOf(*Of.Said.Canvas) : nullptr;
         if (!Page) break;
-        const PointF Corner = Place.Apply({0, 0});
-        if (Upright(Place, From.Scale) &&
-            std::fabs(Size.X * From.Scale - static_cast<float>(Page->Width())) < 0.5f &&
-            std::fabs(Size.Y * From.Scale - static_cast<float>(Page->Height())) < 0.5f) {
-            Target.Draw(*Page, painter::core::Point{Nearest(Corner.X), Nearest(Corner.Y)},
-                        Opacity);
+        if (const std::optional<painter::core::Point> Corner = CanvasCorner(Of, Drawn, From, Place)) {
+            Target.Draw(*Page, *Corner, Opacity);
             break;
         }
         /* Drawn at another size, or turned: its pixels as a picture. */
@@ -364,6 +360,18 @@ painter::core::Path ClipOf(const Item &Group)
 {
     if (!Group.Said.Size || Group.Said.Size->X == ITEM_BY_CONTENT || Group.Said.Size->Y == ITEM_BY_CONTENT) return {};
     return OutlineOf(Group, Points(*Group.Said.Size));
+}
+
+std::optional<painter::core::Point> CanvasCorner(const Item &Of, const Drawing &Drawn, const Sources &From, const Transform &Place)
+{
+    const Canvas *Page = Of.Kind == ITEM_CANVAS && Of.Said.Canvas && From.CanvasOf ? From.CanvasOf(*Of.Said.Canvas) : nullptr;
+    if (!Page || !Upright(Place, From.Scale)) return std::nullopt;
+    const PointF Size = SizeOf(Of, Drawn);
+    if (std::fabs(Size.X * From.Scale - static_cast<float>(Page->Width())) >= 0.5f ||
+        std::fabs(Size.Y * From.Scale - static_cast<float>(Page->Height())) >= 0.5f)
+        return std::nullopt;
+    const PointF Corner = Place.Apply({0, 0});
+    return painter::core::Point{Nearest(Corner.X), Nearest(Corner.Y)};
 }
 
 bool Upright(const Transform &Place, float Scale) noexcept

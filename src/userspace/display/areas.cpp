@@ -358,7 +358,10 @@ void BlockChanged(Area &Said, std::uint32_t Id, const ItemBlockChanged &Where)
         TakePage(*Found, Where);
         const ItemPageFree Free{Where.Page & 1u, 0};
         Tell(Said, ITEM_EVENT_FREE, Id, &Free, sizeof(Free));
-        break;
+        /* What of it changed, drawn again: no more. */
+        const Rect Part{Where.X, Where.Y, Where.Width, Where.Height};
+        ForEachArea(Of, [Id, Part](Area &Each) { Each.State->Items.BlockChanged(Id, Part); });
+        return;
     }
     case ITEM_BLOCK_FONT:
         if (const error_t Why = ReadFont(Of, *Found); Why != OK) return Refuse(Why);

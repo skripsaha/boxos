@@ -345,6 +345,60 @@ void CheckMeasure(Tally &Count)
                 "measure: on a text page a character a cell, a line a row");
 }
 
+/* ---- A canvas's part ---------------------------------------------------------- */
+
+void CheckCanvasPart(Tally &Count)
+{
+    const items::Theme    Look;
+    items::ProgramState   Program = HostProgram(Look, 1.0f);
+    painter::core::Canvas Page    = *painter::core::Canvas::Make(160, 100);
+    Page.Clear(Color::Rgb(10, 20, 30));
+    Program.From.CanvasOf = [&](std::uint32_t Block) -> const painter::core::Canvas * { return Block == 7 ? &Page : nullptr; };
+    Bench Shown(Program);
+    Shown.Area.Place = Rect{0, 0, 320, 200};
+    Shown.Area.Shown = true;
+    Changes Say;
+    Say.Create(1, gui::Kind::Canvas);
+    Say.Place(1, {40, 30});
+    Say.Canvas(1, 7);
+    (void)Shown.Step(Say);
+
+    const Rect              Whole{0, 0, 320, 200};
+    const Color             Ground = Color::Rgb(20, 22, 30);
+    items::Compositor       Composer(Whole);
+    items::AreaState *const Areas[] = {&Shown.Area};
+    painter::core::Canvas   Screen = *painter::core::Canvas::Make(320, 200);
+    Screen.Clear(Ground);
+    std::uint64_t Composed = 0;
+    const auto    Frame    = [&] {
+        Composer.Take(Areas, Look);
+        for (const Rect &Each : Composer.Rects()) {
+            Screen.Clear(Each, Ground);
+            Composer.Compose(Screen, painter::core::Point{}, Each, Areas, Look);
+            Composed += static_cast<std::uint64_t>(Each.Width) * static_cast<std::uint64_t>(Each.Height);
+        }
+    };
+    Frame();
+    bool          Alike = true;
+    std::uint64_t Said  = 0;
+    Composed            = 0;
+    for (int Round = 0; Round < 40; Round++) {
+        const Rect Part{static_cast<std::int32_t>(Random() % 140), static_cast<std::int32_t>(Random() % 80),
+                        static_cast<std::int32_t>(1 + Random() % 20), static_cast<std::int32_t>(1 + Random() % 20)};
+        Page.Clear(Part, Color::Rgb(static_cast<std::uint8_t>(Random()), static_cast<std::uint8_t>(Random()), 200));
+        Shown.Area.Items.BlockChanged(7, Part);
+        Said += static_cast<std::uint64_t>(Part.Width) * static_cast<std::uint64_t>(Part.Height);
+        Frame();
+        painter::core::Canvas Fresh = *painter::core::Canvas::Make(320, 200);
+        Fresh.Clear(Ground);
+        Composer.Compose(Fresh, painter::core::Point{}, Whole, Areas, Look);
+        Alike = Alike && SamePixels(Screen, Fresh);
+    }
+    Count.Check(Alike && Composed == Said,
+                "canvas: 40 parts of a canvas changed, each composed alone — " + std::to_string(Composed) + " pixels for the " +
+                    std::to_string(Said) + " that changed — the screen the very pixels composed whole");
+}
+
 }  // namespace
 
 void CheckGui(Tally &Count)
@@ -352,6 +406,7 @@ void CheckGui(Tally &Count)
     CheckObjects(Count);
     CheckFrames(Count);
     CheckMeasure(Count);
+    CheckCanvasPart(Count);
 }
 
 }  // namespace stand

@@ -12,6 +12,7 @@
  * pixels, then four, two, one — so a move is seen at once. */
 
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "painter/core/color.h"
@@ -41,6 +42,9 @@ public:
     bool Whole() const { return Step == 0; }
     /* The pass under way: 8, 4, 2, 1; 0 when whole. */
     int  Pass() const { return Step; }
+    /* The rows worked since this was last asked, [first, past the last);
+     * none when first is not before past. */
+    std::pair<int, int> TakeTouched();
 
     int Width = 0, Height = 0;
     /* Smooth escape counts, row by row; < 0 inside the set. */
@@ -53,6 +57,7 @@ private:
     int         Steps = 0;
     int         Step  = 0;   /* block size of the pass under way */
     int         Row   = 0;   /* next row of it */
+    int         TouchedFrom = 0, TouchedTo = 0;   /* the rows worked since asked */
 };
 
 /* A gradient of 256 colours, looped. */
@@ -64,9 +69,10 @@ struct FractalPalette {
 const FractalPalette &FractalPalettes(int Which);
 int                   FractalPaletteCount();
 
-/* The counts coloured: every `Spread` steps of the count go once round the
- * palette, which is turned by `Turn`; inside is black. */
+/* The counts of rows [FromRow, ToRow) coloured — all of them when ToRow is
+ * negative: every `Spread` steps of the count go once round the palette,
+ * which is turned by `Turn`; inside is black. */
 void FractalColour(const FractalPicture &Picture, const FractalPalette &Palette, float Spread, float Turn,
-                   std::vector<PainterColor> &Pixels);
+                   std::vector<PainterColor> &Pixels, int FromRow = 0, int ToRow = -1);
 
 #endif

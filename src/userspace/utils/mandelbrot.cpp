@@ -98,9 +98,9 @@ public:
     virtual painter::core::Size Pixels() const = 0;
     // How many characters of the bar's words go across.
     virtual int Across() const = 0;
-    // The picture, Pixels() of colours row by row; the bar's words, or none
-    // for no bar.
-    virtual void Show(const std::vector<Color> &Picture, const std::vector<Words> *Line) = 0;
+    // The picture, Pixels() of colours row by row, of which rows [first,
+    // past) changed; the bar's words, or none for no bar.
+    virtual void Show(const std::vector<Color> &Picture, std::pair<int, int> Rows, const std::vector<Words> *Line) = 0;
     virtual bool Present() = 0;
     // A key, the keyboard gone, or Ms milliseconds gone by (0: wait on).
     virtual Heard Wait(std::uint32_t Ms, KeyEvent &Key) = 0;
@@ -113,7 +113,7 @@ public:
     explicit CellsGlass(Stage Opened) : Screen(std::move(Opened)) {}
     painter::core::Size Pixels() const override { return {Screen.Size().Width, Screen.Size().Height * 2}; }
     int                 Across() const override { return Screen.Size().Width - 2; }
-    void Show(const std::vector<Color> &Picture, const std::vector<Words> *Line) override
+    void Show(const std::vector<Color> &Picture, std::pair<int, int>, const std::vector<Words> *Line) override
     {
         painter::tui::Frame &FrameBuffer = Screen.FrameBuffer();
         FrameBuffer.PutPixels(Picture);
@@ -157,16 +157,22 @@ public:
     }
     painter::core::Size Pixels() const override { return Board.Size(); }
     int                 Across() const override { return static_cast<int>(Screen.Size().X / Advance) - 2; }
-    void Show(const std::vector<Color> &Picture, const std::vector<Words> *Said) override
+    void Show(const std::vector<Color> &Picture, std::pair<int, int> Rows, const std::vector<Words> *Said) override
     {
+        /* Only the rows that changed drawn and given: the rest of the canvas
+         * is the picture shown. */
         const painter::core::Size Size = Board.Size();
-        (void)Board.Draw([&](painter::core::Canvas &Page) {
-            for (std::int32_t Y = 0; Y < Size.Height; Y++) {
-                painter::core::Pixel *Row  = Page.Row(static_cast<std::uint32_t>(Y));
-                const Color          *From = Picture.data() + static_cast<std::size_t>(Y) * static_cast<std::size_t>(Size.Width);
-                for (std::int32_t X = 0; X < Size.Width; X++) Row[X] = painter::core::Pixel::Of(From[X]);
-            }
-        });
+        const std::int32_t        From = std::clamp(Rows.first, 0, Size.Height), Past = std::clamp(Rows.second, 0, Size.Height);
+        if (From < Past)
+            (void)Board.Draw(
+                [&](painter::core::Canvas &Page) {
+                    for (std::int32_t Y = From; Y < Past; Y++) {
+                        painter::core::Pixel *Row = Page.Row(static_cast<std::uint32_t>(Y));
+                        const Color *Colours = Picture.data() + static_cast<std::size_t>(Y) * static_cast<std::size_t>(Size.Width);
+                        for (std::int32_t X = 0; X < Size.Width; X++) Row[X] = painter::core::Pixel::Of(Colours[X]);
+                    }
+                },
+                painter::core::Rect{0, From, Size.Width, Past - From});
         if (!Said) {
             Plate.Hide();
             Line.Hide();
@@ -247,6 +253,8 @@ private:
     float              Turn     = 0.0f;
     bool               Turning  = false;
     double             Detail   = 1.0;
+    bool               Recolour = true;    /* every pixel coloured anew at the next draw */
+    float              Coloured = 0.0f;    /* the spread the pixels were coloured with */
     Bar                Showing  = Bar::Keys;
     bool               Touring  = false;
     bool               Leaving  = false;   /* the tour on its way out of a sight */
@@ -361,10 +369,10 @@ bool Explorer::OnKey(const KeyEvent &Key)
     case '-':
     case '_':  Touring = false; Zoom(1 / Nearer); break;
     case 'j':  Julia(); break;
-    case 'c':  Palette = (Palette + 1) % FractalPaletteCount(); break;
+    case 'c':  Palette = (Palette + 1) % FractalPaletteCount(); Recolour = true; break;
     case 'a':  Turning = !Turning; break;
-    case ',':  Spread = std::max(4.0f, Spread / 1.25f); break;
-    case '.':  Spread = std::min(400.0f, Spread * 1.25f); break;
+    case ',':  Spread = std::max(4.0f, Spread / 1.25f); Recolour = true; break;
+    case '.':  Spread = std::min(400.0f, Spread * 1.25f); Recolour = true; break;
     case '[':  Detail = std::max(0.25, Detail / 1.4); Restart(); break;
     case ']':  Detail = std::min(16.0, Detail * 1.4); Restart(); break;
     case ' ':
@@ -389,7 +397,10 @@ void Explorer::Step(float Seconds)
 {
     if (!Picture.Whole()) Picture.Work(WorkUs);
     else if (Touring) Tour();
-    if (Turning) Turn = std::fmod(Turn + Seconds * 48.0f, 256.0f);
+    if (Turning) {
+        Turn     = std::fmod(Turn + Seconds * 48.0f, 256.0f);
+        Recolour = true;
+    }
 }
 
 std::uint32_t Explorer::Wait() const
@@ -434,15 +445,23 @@ void Explorer::Draw(float Shown)
 {
     /* Counts run longer the deeper the view: the palette spreads with them, or a
      * deep picture is colour noise from pixel to pixel. */
-    float Wider = std::sqrt(static_cast<float>(FractalSteps(View, Detail)) / 150.0f);
-    FractalColour(Picture, FractalPalettes(Palette), Spread * Wider, Turn, Pixels);
+    const float Wider = std::sqrt(static_cast<float>(FractalSteps(View, Detail)) / 150.0f);
+    /* Coloured anew where the counts changed — every pixel when the colours
+     * or how widely they spread changed. */
+    std::pair<int, int> Rows = Picture.TakeTouched();
+    if (Recolour || Spread * Wider != Coloured) {
+        Rows     = {0, Picture.Height};
+        Recolour = false;
+        Coloured = Spread * Wider;
+    }
+    if (Rows.first < Rows.second) FractalColour(Picture, FractalPalettes(Palette), Coloured, Turn, Pixels, Rows.first, Rows.second);
     if (Showing == Bar::Keys && Shown >= KeysShown) Showing = Bar::Status;
     if (Showing == Bar::Hidden) {
-        Screen->Show(Pixels, nullptr);
+        Screen->Show(Pixels, Rows, nullptr);
         return;
     }
     const std::vector<Words> Line = Showing == Bar::Keys ? KeysBar() : StatusBar();
-    Screen->Show(Pixels, &Line);
+    Screen->Show(Pixels, Rows, &Line);
 }
 
 void Say(std::string_view Text)

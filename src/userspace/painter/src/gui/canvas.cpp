@@ -38,7 +38,8 @@ Canvas::Canvas(std::shared_ptr<detail::Anchor> WhereValue, detail::Made Made, Ca
 }
 
 Canvas::Canvas(Canvas &&Other) noexcept
-    : Words(std::move(Other)), Block(std::move(Other.Block)), Drawing(Other.Drawing), Shown(Other.Shown)
+    : Words(std::move(Other)), Block(std::move(Other.Block)), Drawing(Other.Drawing), Shown(Other.Shown), Last(Other.Last),
+      Painted{Other.Painted[0], Other.Painted[1]}
 {
     Other.Block = {};
     Other.Shown = -1;
@@ -52,6 +53,9 @@ Canvas &Canvas::operator=(Canvas &&Other) noexcept
     Block       = std::move(Other.Block);
     Drawing     = Other.Drawing;
     Shown       = Other.Shown;
+    Last        = Other.Last;
+    Painted[0]  = Other.Painted[0];
+    Painted[1]  = Other.Painted[1];
     Other.Block = {};
     Other.Shown = -1;
     return *this;
@@ -88,11 +92,18 @@ std::optional<core::Canvas> Canvas::Begin(std::optional<core::Rect> Changed)
     Drawing                         = Page;
     std::optional<core::Canvas> Into = Block.Page(Page);
     if (!Into) return std::nullopt;
-    /* Only part of it to be painted: the rest is the picture shown. */
+    /* Only part of it to be painted: the rest is the picture shown — which
+     * this page holds already but for what the page shown last changed, or
+     * all of it for a page never drawn in. */
     const core::Rect Whole{0, 0, static_cast<std::int32_t>(Block.Width), static_cast<std::int32_t>(Block.Height)};
     if (Changed && Changed->Intersect(Whole) != Whole && Shown >= 0) {
-        const std::size_t Bytes = Block.PageBytes();
-        std::memcpy(Block.PageAt(Page), Block.PageAt(static_cast<std::uint32_t>(Shown)), Bytes);
+        const core::Rect   Behind = Painted[Page] ? Last.Intersect(Whole) : Whole;
+        const core::Pixel *From   = Block.PageAt(static_cast<std::uint32_t>(Shown));
+        core::Pixel       *To     = Block.PageAt(Page);
+        for (std::int32_t Y = Behind.Y; Y < Behind.Y + Behind.Height; Y++) {
+            const std::size_t Row = static_cast<std::size_t>(Y) * Block.Width + static_cast<std::size_t>(Behind.X);
+            std::memcpy(To + Row, From + Row, static_cast<std::size_t>(Behind.Width) * sizeof(core::Pixel));
+        }
     }
     return Into;
 }
@@ -105,7 +116,9 @@ bool Canvas::End(std::optional<core::Rect> Changed)
     const core::Rect Where2 = Changed ? Changed->Intersect(Whole) : Whole;
     Block.Taken(Drawing);
     Kept->BlockChanged(Block.Id, Where2, Drawing);
-    Shown = static_cast<std::int32_t>(Drawing);
+    Shown            = static_cast<std::int32_t>(Drawing);
+    Last             = Where2;
+    Painted[Drawing] = true;
     return true;
 }
 

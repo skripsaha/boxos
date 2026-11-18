@@ -250,8 +250,9 @@ public:
     // Paint draws the next picture, which the display shows once it is drawn
     // and presented: the whole canvas, every pixel of it painted, unless
     // Changed says only part of it changed — then the rest is the picture
-    // shown before. Waits, telling what the display says to the area, while
-    // the display still shows both pages. False when the area is gone.
+    // shown before, and the display takes and composes that part alone.
+    // Waits, telling what the display says to the area, while the display
+    // still holds the page. False when the area is gone.
     template <typename Painting>
     bool Draw(Painting &&Paint, std::optional<core::Rect> Changed = std::nullopt)
     {
@@ -271,6 +272,8 @@ private:
     CanvasBlock   Block;
     std::uint32_t Drawing = 0;           // the page being drawn
     std::int32_t  Shown   = -1;          // the page shown last, none yet
+    core::Rect    Last{};                // what the page shown last changed
+    bool          Painted[2] = {false, false};   // each page drawn in before
     template <typename Self>
     friend class Makes;
     friend Canvas detail::MakeCanvas(const std::shared_ptr<detail::Anchor> &, std::uint32_t, core::Size);

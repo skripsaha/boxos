@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <unordered_map>
 #include <unordered_set>
@@ -64,6 +65,7 @@ struct Item {
     bool Moved   = true;     // where or how it lies changed: it, and what is in it
     bool Within  = true;     // something inside it is marked
     painter::core::Rect Shown{};   // where on the glass it was last drawn, its own pixels
+    std::optional<painter::core::Rect> Changed;   // a canvas's pixels changed since it was drawn, when only those
     std::unique_ptr<Drawing, DropDrawing> Drawn;
 };
 
@@ -87,8 +89,9 @@ public:
     error_t Show(std::uint32_t Id, std::shared_ptr<CellGrid> Grid) noexcept;
     // A cells item's grid changed under it: looked at by the next frame.
     void CellsChanged(std::uint32_t Id) noexcept;
-    // Every item showing Block marked to be drawn again: its pixels changed.
-    void BlockChanged(std::uint32_t Block) noexcept;
+    // Every item showing Block marked to be drawn again: its pixels changed —
+    // only Part of a canvas's, in its pixels, when it says so.
+    void BlockChanged(std::uint32_t Block, std::optional<painter::core::Rect> Part = std::nullopt) noexcept;
     // Every item marked to be drawn again: what everything is drawn from
     // changed — the scale, the theme.
     void RedrawAll() noexcept;

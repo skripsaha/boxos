@@ -180,7 +180,14 @@ void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, 
             Damage(Of->Shown);
             Damage(Now);
             Of->Shown = Now;
+        } else if (Of->Changed && !Hidden) {
+            /* Only part of a canvas changed: where it lies on the glass, its
+             * page laid pixel for pixel — else all of it. */
+            const std::optional<painter::core::Point> Corner = CanvasCorner(*Of, Drawn, Program.From, Place);
+            Damage(Corner ? Rect{Corner->X + Of->Changed->X, Corner->Y + Of->Changed->Y, Of->Changed->Width, Of->Changed->Height}.Intersect(Now)
+                          : Now);
         }
+        Of->Changed.reset();
         if (Cellular)
             CellsChanged(*Of->Grid, *Program.From.Cells, Place, Program.From.Scale, Now, Whole || Hidden,
                          [this](Rect Where) { Damage(Where); });

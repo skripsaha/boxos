@@ -77,6 +77,12 @@ painter::core::Rect DeviceRect(const painter::core::RectF &Points, const painter
 // Whether Place only moves and scales by Scale: what a kept picture may be laid with.
 bool Upright(const painter::core::Transform &Place, float Scale) noexcept;
 
+// Where a canvas item's page lies on the glass pixel for pixel — upright, at
+// its own size — the pixel of its corner; none when it is drawn otherwise, or
+// has no page to show.
+std::optional<painter::core::Point> CanvasCorner(const Item &Of, const Drawing &Drawn, const Sources &From,
+                                                 const painter::core::Transform &Place);
+
 }  // namespace items
 
 #endif
