@@ -257,6 +257,13 @@ void CheckFrame(Tally &Count)
     Up.Create(2, Kind::Text, ITEM_AREA, ITEM_TOP, Role::Body);
     Up.Place(2, {12, 10});
     Up.Text(2, "over the console");
+    /* A plate that hides what lies beneath it whole: it stays still when the
+     * console scrolls under it. */
+    Up.Create(4, Kind::Shape);
+    Up.Place(4, {150, 20});
+    Up.Size(4, {60, 40});
+    const painter::gui::Fill Solid = painter::gui::Fill::Of(Color::Rgb(40, 90, 160));
+    Up.Fills(4, std::span(&Solid, 1));
     Up.Create(3, Kind::Cells, ITEM_AREA, ITEM_TOP, Role::Code);
     Up.Grid(3, 14, 3);
     std::vector<ItemCell> Mine(14 * 3);
@@ -291,7 +298,25 @@ void CheckFrame(Tally &Count)
     double ScrollMicros = 0, WholeMicros = 0;
     for (int Round = 0; Round < 120; Round++) {
         const std::uint64_t Gone = Console.RowsGone();
-        switch (Random() % 6) {
+        switch (Random() % 8) {
+        case 6: {
+            /* More than a screen at once: nothing of what the glass shows is
+             * left to move. */
+            std::string Burst;
+            for (int Line = 0; Line < 40; Line++) Burst += "burst line " + std::to_string(Line) + (Line % 3 ? "\n" : " of more words\n");
+            Say(Console, Burst);
+            break;
+        }
+        case 7:
+            if (Random() % 4 == 0) {
+                ConsoleRun Clear{};
+                Clear.kind = CONSOLE_RUN_CLEAR;
+                Clear.fg = Clear.bg = COLOR_DEFAULT;
+                Console.Apply(Clear, 1);
+            } else {
+                Say(Console, RandomText());
+            }
+            break;
         case 0:
         case 1:
         case 2: Say(Console, RandomText(), Random() % 3 ? COLOR_DEFAULT : 0x0060E0A0u); break;
@@ -304,6 +329,7 @@ void CheckFrame(Tally &Count)
         case 4:
             Up.Text(2, std::string("step ") + std::to_string(Round));
             Up.Place(1, {static_cast<float>(Random() % 60), static_cast<float>(Random() % 40)});
+            if (Random() % 2) Up.Place(4, {100.0f + static_cast<float>(Random() % 120), static_cast<float>(Random() % 90)});
             Over.Step(Up);
             break;
         default: {
@@ -343,8 +369,8 @@ void CheckFrame(Tally &Count)
         Whole  = Whole && Alike;
         Glassy = Glassy && Put;
     }
-    Count.Check(Whole, "frame: after each of 120 steps of typing, scrolling, a caret moved and areas changed, the mirror holds the "
-                       "very pixels of the glass composed whole");
+    Count.Check(Whole, "frame: after each of 120 steps of typing, scrolling, a caret moved and areas changed — a plate kept still "
+                       "over the console among them — the mirror holds the very pixels of the glass composed whole");
     Count.Check(Glassy, "frame: every pixel that changed went onto the glass");
     const std::uint64_t Pixels = static_cast<std::uint64_t>(Glass.Width) * Glass.Height;
     Count.Check(Scrolls > 5, "frame: the console scrolled " + std::to_string(Scrolls) + " times in the steps");

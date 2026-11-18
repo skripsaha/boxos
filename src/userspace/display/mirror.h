@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -34,8 +35,9 @@ public:
     // by the glass's own noise (painter/core/canvas.h CopyOut).
     void Put(const painter::core::Canvas &Picture, painter::core::Rect Area) noexcept;
     // Area moved up Up pixels, its last Up rows left as they were for a frame
-    // to put.
-    void Shift(painter::core::Rect Area, std::int32_t Up) noexcept;
+    // to put — and the pixels within Keep left where they are: what lies
+    // still over what moves.
+    void Shift(painter::core::Rect Area, std::int32_t Up, std::span<const painter::core::Rect> Keep = {}) noexcept;
     // Count rectangles of a canvas as big as the mirror put in, pixel for
     // pixel (boxos_brush.h BoxBrushShow).
     void Show(const BoxBrushCanvas &Canvas, const BoxRect *Rects, std::uint32_t Count) noexcept;
