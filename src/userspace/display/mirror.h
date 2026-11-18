@@ -4,11 +4,11 @@
 // The mirror — a framebuffer's picture kept in this program's own memory, a
 // triple a pixel: what the glass shows, or is to show once the easel puts it
 // there (easel.h). A frame is put into it where it changed (Put); where the
-// console scrolled it moves (Shift), each row compared with the row it takes
-// before it is taken, so only the pixels that came out different are to go
-// onto the glass. What waits to go is kept as each row's stretch, taken by
-// the easel when it writes the glass — so video memory is written, never
-// read, and no more of it than changed.
+// console scrolled it moves (Shift) round what stays still, each row compared
+// with the row it takes before it is taken, so only the pixels that came out
+// different are to go onto the glass. What waits to go is kept as each row's
+// stretch, taken by the easel when it writes the glass — so video memory is
+// written, never read, and no more of it than changed.
 
 #include <cstddef>
 #include <cstdint>

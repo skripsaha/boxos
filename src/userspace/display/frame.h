@@ -9,11 +9,15 @@
 //
 // On a framebuffer the compositor (compositor.h) composes what changed, tile
 // by tile on one canvas of a tile's size, from every item's drawing, each tile
-// put into the mirror of the glass (mirror.h). Where the console scrolled the
-// mirror moves instead of being drawn again: only the rows that came in, the
-// caret, and the areas over the text — where they lay and where the text
-// under them went — are composed. One caret is on the glass: the topmost
-// shown cells item's that shows one, else the console's.
+// put into the mirror of the glass (mirror.h); where nothing an area draws
+// lies over the console, its cells are written into the mirror straight. Of
+// what the console changed only the cells the mirror does not show already
+// are drawn. Where the console scrolled the mirror moves instead of being
+// drawn again — all but what an area lays opaque over it, which stays still —
+// and only the rows that came in, the caret, the areas over the text — where
+// they lay and where the text under them went — and the stripe above what
+// stayed still are composed. One caret is on the glass: the topmost shown
+// cells item's that shows one, else the console's.
 //
 // A text page has no pixels: each frame its cells are composed whole — the
 // console's, each area's cells over them, its texts written in, the rest by

@@ -9,9 +9,9 @@
 
 namespace painter::tui {
 
-/* A TUI target transaction. It paints through a private retained layer while
- * it is being assembled, then Commit() transfers the result into the target's
- * base text surface and closes the temporary transaction atomically. */
+/* A TUI target transaction. It paints through an area of its own over the
+ * console while it is being assembled, then Commit() folds the result into
+ * the console's text and closes the area atomically. */
 class ConsoleSurface {
 public:
     static std::expected<ConsoleSurface, StageError> Open(std::int32_t LeastCols = 0,

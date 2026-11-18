@@ -326,18 +326,18 @@ int display_places(DisplayPlace *places, uint32_t capacity, uint32_t *count);
  * --------------------------------------------------------------------------
  *
  * Any program may ask the display to lay an effect over everything it shows —
- * the console's text, every layer, the caret — for a while. The display only
- * changes how the picture is presented: what the programs drew, and what the
- * keeper's page colours are, stay as they are underneath, and are shown
- * as they were the moment the effect ends. Nothing a program reads back from
- * the display, a layer's cells or the console's, is touched.
+ * the console's text, every area's items, the caret — for a while. The
+ * display only changes how the picture is presented: what the programs drew,
+ * and what the keeper's page colours are, stay as they are underneath, and are
+ * shown as they were the moment the effect ends. Nothing a program reads back
+ * from the display, an area's items or the console's cells, is touched.
  *
  * What an effect is: a set of kinds, laid together, with one strength shared
  * by them, which swells in at the start and ebbs out at the end (a mirror has
  * no half-strength and comes and goes at once). Geometry first, then colour,
- * then the sparkles and the snow. A cell is the unit of every one of them: a
- * program that draws in half-block pixels has them moved and coloured by the
- * pixel pair, and the snow and the sparkles settle in the halves.
+ * then the sparkles and the snow. On a framebuffer an effect works on the
+ * glass's pixels, all of them alike, its waves, blocks, stars and flakes
+ * measured by the console's cells.
  *
  *   DISPLAY_EFFECT_SWAY      rows swing sideways (AXIS_X) and columns up and
  *                            down (AXIS_Y) in slow waves, the cells at the
@@ -351,8 +351,8 @@ int display_places(DisplayPlace *places, uint32_t capacity, uint32_t *count);
  *   DISPLAY_EFFECT_TINT      the colours seen through glass of `color`: each
  *                            of a cell's colours is multiplied by it
  *   DISPLAY_EFFECT_SHIMMER   sparkles come and go on the glass, in `color`
- *                            brightened — on the empty cells as stars, on the
- *                            text as a flash; the stronger, the more of them
+ *                            brightened — small crosses of light; the
+ *                            stronger, the more of them
  *   DISPLAY_EFFECT_RIPPLE    rings spread from the middle of the glass and the
  *                            picture is seen through them, bent outward and
  *                            inward as water bends it; the stronger, the higher
@@ -373,14 +373,16 @@ int display_places(DisplayPlace *places, uint32_t capacity, uint32_t *count);
  *   DISPLAY_EFFECT_SEPIA     an old film: the colours toned brown, the corners
  *                            darker, the light flickering, a scratch now and then
  *   DISPLAY_EFFECT_SNOW      flakes of `color` brightened fall in two layers, the
- *                            far ones slow and faint, over the empty cells and the
- *                            drawn pixels alike, the written text left alone
+ *                            far ones slow and faint, over all of the picture
  *   DISPLAY_EFFECT_PULSE     the picture breathes: it swells a little about the
  *                            middle of the glass and shrinks again
  *
  * On a text page, with its sixteen colours and its whole cells, every kind
- * is shown as nearly as that allows: a colour is quantized after the
- * effect changed it, and a swing moves whole cells.
+ * is shown as nearly as that allows: a cell is the unit of every one of them —
+ * a program that draws in half-block pixels has them moved and coloured by the
+ * pixel pair — a colour is quantized after the effect changed it, a swing
+ * moves whole cells, the sparkles are stars on the empty cells and a flash on
+ * the text, and the snow settles in the halves, the written text left alone.
  *
  * Who may ask: any program. An effect is time-limited and changes nothing but
  * the picture, so it asks no badge — and there is one at a time: a new one

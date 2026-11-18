@@ -14,8 +14,9 @@ enum class SurfaceRole {
     Notice,
 };
 
-/* A process-owned retained layer. Its cells are composed above the base scene
- * while the owner is alive and disappear when Close() or destruction occurs. */
+/* Cells a program keeps over the console, an area of its own on the screen.
+ * They are composed over what lies beneath while the owner is alive and
+ * disappear when Close() or destruction occurs. */
 class Surface {
 public:
     static std::expected<Surface, StageError> Open(std::int32_t LeastCols = 0,

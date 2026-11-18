@@ -58,10 +58,10 @@ display.elf: $(BOXLIB_START) $(OBJS) $(PAINTER) $(TYPECASE) $(BOXLIB) $(BOXCXX) 
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
 
 # An effect works out every place of the glass every frame, the cells every
-# pixel of a cell they draw, the easel every pixel of the mirror it moves, the
-# scene every pixel of the part of a frame that changed, and the areas every
-# pixel of a canvas page a program gives: built -O2, as the utilities'
-# per-pixel parts are.
+# pixel of a cell they draw, the mirror every pixel it moves, the easel every
+# pixel it puts on the glass, the scene every pixel of the part of a frame that
+# changed, and the areas every pixel of a canvas page a program gives: built
+# -O2, as the utilities' per-pixel parts are.
 effects.o effects_warp.o effects_ink.o easel.o scene.o areas.o cells_draw.o cell_grid.o frame.o mirror.o: CXXFLAGS += -O2
 
 # -MMD -MP: header dependencies, so a header edit rebuilds what read it.

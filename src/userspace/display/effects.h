@@ -13,7 +13,7 @@
 
 // The effect over the whole glass (box/display.h): at most one, laid by any
 // program for a while. It is kept here and applied as the picture goes onto
-// the glass — on a framebuffer to the mirror's pixels (easel.h), on a text
+// the glass — on a framebuffer to the mirror's pixels (mirror.h), on a text
 // page to the composed cells — what the frame composed staying as it was, so
 // the glass is the picture itself again the moment the effect ends. Time is
 // the ClockBoard's: the effect is judged where it is stepped and drawn at the

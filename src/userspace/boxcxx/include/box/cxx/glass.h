@@ -2,7 +2,7 @@
 //
 // The C++ face of display_effect and display_effect_lift (box/display.h). Any
 // program may ask the display to lay one effect over the whole glass for a
-// while — its text, every layer, the caret — and the display ends it at its
+// while — its text, every area's items, the caret — and the display ends it at its
 // time, when the asking program ends, or when it is lifted. One at a time: a
 // new effect takes the place of the one laid, whoever laid it.
 //
