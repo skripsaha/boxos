@@ -358,6 +358,15 @@ std::optional<Event> Area::Read()
             Made.Page = Free.Page;
             return Made;
         }
+        case ITEM_EVENT_ANIMATION_END: {
+            ItemAnimationEnd End{};
+            if (Bytes < sizeof(End)) continue;
+            std::memcpy(&End, Body, sizeof(End));
+            Made.What     = Event::Kind::AnimationEnd;
+            Made.Number   = End.Number;
+            Made.Finished = End.Finished != 0;
+            return Made;
+        }
         default:
             continue;   /* a pad, or what a later display says: passed over */
         }

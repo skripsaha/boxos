@@ -58,10 +58,11 @@ enum class Glass : std::uint8_t { Text = ITEM_GLASS_TEXT, Pixels = ITEM_GLASS_PI
 // What happened: what the display told the area (Area: where it is and how
 // large; Size: an item's size by its content; Refused: a change it did not
 // take; Shown: a step on the glass; PageFree: a canvas's page to draw in
-// again) — and what Wait heard besides: a key, the alarm come, the keyboard
-// gone, the program asked to finish.
+// again; AnimationEnd: the last animation of a Number ended) — and what Wait
+// heard besides: a key, the alarm come, the keyboard gone, the program asked
+// to finish.
 struct Event {
-    enum class Kind : std::uint8_t { Area, Size, Refused, Shown, PageFree, Key, Alarm, Gone, EndAsked };
+    enum class Kind : std::uint8_t { Area, Size, Refused, Shown, PageFree, Key, Alarm, Gone, EndAsked, AnimationEnd };
     Kind          What  = Kind::Area;
     std::uint32_t Item  = 0;        // the item, or the block
     core::PointF  Size{};           // the area's or the item's, in points
@@ -74,6 +75,8 @@ struct Event {
     std::uint32_t Micros = 0, Pixels = 0, Bytes = 0, Records = 0;
     std::uint32_t Own = 0;          // of a Shown frame's pixels, those this area's own changes asked for
     std::uint32_t Page   = 0;
+    std::uint32_t Number   = 0;     // an animation's
+    bool          Finished = false; // every one of them ran to its end; none was cut
     tui::KeyEvent Key{};
     std::uint64_t Moment = 0;       // the alarm's, of the ClockBoard's uptime
 };
