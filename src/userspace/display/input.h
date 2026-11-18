@@ -21,6 +21,9 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
+#include <string>
+#include <vector>
 
 #include "compositor.h"
 #include "kb_event.h"
@@ -34,6 +37,11 @@ struct InputArea {
     items::AreaState *State = nullptr;
     InputTeller       Tell;
 };
+
+// The area the keyboard is in, as the areas know it (areas.cpp): the topmost
+// seen area of the program in front holding a thing the keyboard reaches;
+// none when there is none.
+std::optional<InputArea> AreasKeyed() noexcept;
 
 // The glass: on a framebuffer the display's own area is made over Screen, in
 // points Scale pixels each, drawn in Look; on a text page there is none.
@@ -63,5 +71,14 @@ void InputFrame(std::uint64_t Now) noexcept;
 std::uint64_t InputDue() noexcept;
 // The display's own area, to compose over every other; none on a text page.
 items::AreaState *InputOverlay() noexcept;
+
+// The labels waiting to be typed, for a text page to show where they lie:
+// the area, the thing, the word.
+struct InputLabel {
+    const items::AreaState *Area = nullptr;
+    std::uint32_t           Item = 0;
+    std::string             Word;
+};
+std::vector<InputLabel> InputLabels();
 
 #endif

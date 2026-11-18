@@ -12,7 +12,6 @@
 #include <string>
 #include <vector>
 
-#include "areas.h"
 #include "item_reception.h"
 #include "painter/core/system_fonts.h"
 #include "painter/gui/changes.h"
@@ -296,9 +295,23 @@ std::string LabelWord(std::size_t N, std::size_t Of)
     return std::string{Letters[N / Letters.size() % Letters.size()], Letters[N % Letters.size()]};
 }
 
+/* A text page draws the labels itself, as it is composed again. */
+void Repage(items::AreaState *Area) noexcept
+{
+    if (g.Over || !Area) return;
+    if (const std::vector<std::uint32_t> &Top = Area->Items.Top(); !Top.empty()) Area->Items.Recompose(Top.front());
+}
+
 void HideLabels()
 {
-    if (!g.Over) return;
+    Repage(g.PointedIn);
+    if (!g.Over) {
+        g.Pointing  = false;
+        g.PointedIn = nullptr;
+        g.Typed.clear();
+        g.Labels.clear();
+        return;
+    }
     gui::Changes &Say = g.Over->Say;
     for (std::size_t N = 0; N < g.LabelsMade; N++)
         Say.Animate(gui::Animation::Out(140ms), [&] { Say.Hidden(LabelGroup(N), true); });
@@ -317,6 +330,7 @@ void ShowLabels(items::AreaState &Area)
     g.Typed.clear();
     g.Labels.clear();
     for (std::size_t N = 0; N < Things.size(); N++) g.Labels.push_back(Label{LabelWord(N, Things.size()), Things[N]});
+    Repage(&Area);
     if (!g.Over) return;
     gui::Changes &Say = g.Over->Say;
     for (std::size_t N = 0; N < g.Labels.size(); N++) {
@@ -379,6 +393,7 @@ bool LabelKey(const InputArea &To, const kb_event_t &Key)
         }
         g.Typed += static_cast<char>(C);
     }
+    Repage(&Area);
     /* The labels the typed begins, the rest put away; one typed whole is
      * reached — and pressed if it is no field. */
     gui::Changes *Say = g.Over ? &g.Over->Say : nullptr;
@@ -584,3 +599,12 @@ void InputFrame(std::uint64_t Now) noexcept
 std::uint64_t InputDue() noexcept { return g.Over ? g.Over->Area().Moving.Due(true) : 0; }
 
 items::AreaState *InputOverlay() noexcept { return g.Over ? &g.Over->Area() : nullptr; }
+
+std::vector<InputLabel> InputLabels()
+{
+    std::vector<InputLabel> Made;
+    if (!g.Pointing) return Made;
+    for (const Label &Each : g.Labels)
+        if (Each.Word.compare(0, g.Typed.size(), g.Typed) == 0) Made.push_back(InputLabel{g.PointedIn, Each.Item, Each.Word});
+    return Made;
+}

@@ -23,15 +23,17 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "box/form.h"
 #include "box/touch.h"
 
 #include "itemcheck_gui.h"
+#include "itemcheck_keys.h"
 #include "painter/gui/area.h"
 
-BOX_FORM("");
+BOX_FORM("takes optional words \"keys: the keyboard's way to a field and buttons, the keys typed from outside\"\n");
 
 namespace {
 
@@ -228,6 +230,9 @@ template <typename Change> bool Stepped(Area &On, Told &Heard, Run &Into, Change
 
 int main()
 {
+    const char *const *Words = nullptr;
+    std::size_t        Count = 0;
+    if (form_words(0, &Words, &Count) == 0 && Count == 1 && std::string_view(Words[0]) == "keys") return CheckKeys() ? 0 : 1;
     std::expected<Area, box::error> Opened = Area::Open(painter::gui::Placement::Over, PointF{Wide, High});
     if (!Opened) {
         std::printf("itemcheck: FAIL — the display opened no area: %.*s\n", static_cast<int>(Opened.error().message().size()),

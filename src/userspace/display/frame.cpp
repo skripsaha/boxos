@@ -5,6 +5,8 @@
 
 #include "frame.h"
 
+#include "input.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -335,7 +337,7 @@ std::uint32_t InkOf(const items::Item &Of)
  * finds it on pixels: its place, or the console's grid; the caret of Caret's
  * cells, where it stands on the page, into CaretX, CaretY. Throws
  * std::bad_alloc only. */
-void CellsOf(const items::AreaState &Area, std::vector<ItemCell> &Cells, std::uint32_t Cols, std::uint32_t Rows,
+void CellsOf(items::AreaState &Area, std::vector<ItemCell> &Cells, std::uint32_t Cols, std::uint32_t Rows,
              const CellGrid *Caret, std::uint32_t &CaretX, std::uint32_t &CaretY)
 {
     const Rect Place = Area.Place;
@@ -352,8 +354,10 @@ void CellsOf(const items::AreaState &Area, std::vector<ItemCell> &Cells, std::ui
     while (!Walk.empty()) {
         const auto [Id, X0, Y0] = Walk.back();
         Walk.pop_back();
-        const items::Item *Of = Area.Items.Find(Id);
-        if (!Of || items::HiddenOf(Of->Said)) continue;
+        items::Item *Of = Area.Items.Find(Id);
+        if (!Of) continue;
+        Of->Box = Rect{};
+        if (items::HiddenOf(Of->Said)) continue;
         const ItemPoint    Own = Of->Said.Place ? *Of->Said.Place : ItemPoint{0, 0};
         const std::int64_t X = X0 + Own.X, Y = Y0 + Own.Y;
         for (auto Child = Of->Children.rbegin(); Child != Of->Children.rend(); ++Child) Walk.emplace_back(*Child, X, Y);
@@ -387,14 +391,21 @@ void CellsOf(const items::AreaState &Area, std::vector<ItemCell> &Cells, std::ui
                 CaretX = static_cast<std::uint32_t>(std::max(Col + 1 + static_cast<std::int32_t>(Area.Caret), 0));
                 CaretY = static_cast<std::uint32_t>(std::max(Row, 0));
             }
-            std::u32string_view Rest = Characters;
-            for (std::int32_t Line = 0; !Rest.empty(); Line++) {
+            std::u32string_view Rest  = Characters;
+            std::int32_t        Lines = 0, Widest = 0;
+            for (; !Rest.empty(); Lines++) {
                 const std::size_t End = Rest.find(U'\n');
-                Write(Cells, Cols, Rows, Col, Row + Line, Rest.substr(0, End), Ink, Paper);
-                Rest = End == std::u32string_view::npos ? std::u32string_view() : Rest.substr(End + 1);
+                Write(Cells, Cols, Rows, Col, Row + Lines, Rest.substr(0, End), Ink, Paper);
+                Widest = std::max(Widest, static_cast<std::int32_t>(std::min(End, Rest.size())));
+                Rest   = End == std::u32string_view::npos ? std::u32string_view() : Rest.substr(End + 1);
             }
+            /* Where it lies on the page, for the keyboard to find. */
+            Of->Box = Rect{Col * PageCellWide, Row * PageCellTall, std::max(Widest, 1) * PageCellWide, std::max(Lines, 1) * PageCellTall};
         } else if (Of->Kind != ITEM_GROUP && Of->Said.Caption) {
-            Write(Cells, Cols, Rows, Col, Row, typecase::CharactersOf(*Of->Said.Caption), COLOR_DEFAULT);
+            const std::u32string Caption = typecase::CharactersOf(*Of->Said.Caption);
+            Write(Cells, Cols, Rows, Col, Row, Caption, COLOR_DEFAULT, Area.Focused == Id ? g_cells.Text : COLOR_THROUGH);
+            Of->Box = Rect{Col * PageCellWide, Row * PageCellTall, std::max<std::int32_t>(static_cast<std::int32_t>(Caption.size()), 1) * PageCellWide,
+                           PageCellTall};
         }
     }
 }
@@ -505,6 +516,13 @@ std::span<const ItemCell> FramePage(std::span<items::AreaState *const> Programs,
             const CellGrid *Mine = Holds && Holds != g_console && g_holder_area == Each ? Holds.get() : nullptr;
             if (Each->Shown) CellsOf(*Each, g_composed, Cols, Rows, Mine, X, Y);
             if (Mine) At = Caret{X, Y, Holds->CaretShown()};
+        }
+        /* The labels waiting to be typed, over what they label. */
+        for (const InputLabel &Each : InputLabels()) {
+            const items::Item *Of = Each.Area ? Each.Area->Items.Find(Each.Item) : nullptr;
+            if (!Of || Of->Box.Empty()) continue;
+            Write(g_composed, Cols, Rows, Of->Box.X / PageCellWide, Of->Box.Y / PageCellTall, typecase::CharactersOf(Each.Word),
+                  RawOf(g_theme.OnAccent), RawOf(g_theme.Accent));
         }
     } catch (...) {
         /* No room to compose: the page shows what it showed, and all of it

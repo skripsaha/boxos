@@ -100,9 +100,6 @@ void AreasInOrder(std::vector<items::AreaState *> &Into);
 // Whether anything of the areas changed since a frame last showed them.
 bool AreasWant() noexcept;
 
-// The area the keyboard is in (input.h): the topmost seen area of the program
-// in front holding a thing the keyboard reaches; none when there is none.
-std::optional<InputArea> AreasKeyed() noexcept;
 // Pixels to a point of every area.
 float AreasScale() noexcept;
 
