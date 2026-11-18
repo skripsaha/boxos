@@ -152,6 +152,7 @@ error_t Animator::Said(std::uint32_t Item, const ItemAnimation &How, std::uint16
         Made.How      = How;
         Made.Value.assign(Value.begin(), Value.end());
         Made.Serial = ++Serials;
+        Made.Fresh  = !Of->Drawn && !IsSaid(Property, Of->Said);
         All.push_back(std::move(Made));
         if (How.Number) ByNumber[How.Number].Count++;
     } catch (...) {
@@ -356,7 +357,9 @@ void Animator::Begin(std::size_t Index, std::uint64_t At, const Theme &Look)
     Of.Begins = At;
     Of.Goes   = Way::AtOnce;
 
-    if (Of.Run != 0 && Of.Property == ITEM_PROP_HIDDEN) {
+    if (Of.Fresh) {
+        /* Nothing seen to go from: at once. */
+    } else if (Of.Run != 0 && Of.Property == ITEM_PROP_HIDDEN) {
         const bool Hide = Of.To.Hidden && *Of.To.Hidden, Hidden = HiddenOf(It->Said);
         if (!Hide && Hidden) {
             /* Shown from nothing: hidden no longer, then seen more and more. */

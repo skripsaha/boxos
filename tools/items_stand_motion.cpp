@@ -433,6 +433,38 @@ void CheckWishes(Tally &Count)
                 "forever: back and forth, halfway back at 150 ms, still on after nine seconds, cut with its item and told so");
 }
 
+void CheckFresh(Tally &Count)
+{
+    /* An item made in an animated step takes its first words at once —
+     * nothing to fly in from — while one told where it starts goes from
+     * there: three plates fading in one after another. */
+    Scene On;
+    On.Say.Animate(Animation::Out(300ms), [&] {
+        On.Say.Create(1, gui::Kind::Shape);
+        On.Say.Rectangle(1);
+        On.Say.Place(1, {80, 40});
+        On.Say.Size(1, {20, 20});
+    });
+    On.At(1000 * Ms);
+    const bool AtOnce = On.Of(1).Said.Place->X == 80 * ITEM_POINT && On.Shown.Area.Moving.Count() == 0;
+    for (std::uint32_t Id = 2; Id <= 4; Id++) {
+        On.Say.Create(Id, gui::Kind::Shape);
+        On.Say.Rectangle(Id);
+        On.Say.Size(Id, {20, 20});
+        On.Say.Place(Id, {static_cast<float>(30 * Id), 100});
+        On.Say.Opacity(Id, 0);
+        Animation In = Animation::Linear(100ms);
+        In.Delay     = std::chrono::milliseconds(50 * (Id - 2));
+        On.Say.Animate(In, [&] { On.Say.Opacity(Id, 1); });
+    }
+    On.At(2000 * Ms);
+    On.Shown.Advance(2050 * Ms, On.Look);
+    const std::uint16_t A = *On.Of(2).Said.Opacity, B = *On.Of(3).Said.Opacity, C = *On.Of(4).Said.Opacity;
+    Count.Check(AtOnce && std::abs(static_cast<int>(A) - 32768) < 400 && B == 0 && C == 0,
+                "fresh: a plate made in an animated step where it was said at once; three made faint then faded in 50 ms apart — "
+                "at 50 ms the first half seen, the others not yet begun");
+}
+
 void CheckTurning(Tally &Count)
 {
     /* Turned in time: its kept picture laid through the turn while it moves
@@ -496,6 +528,7 @@ void CheckMotion(Tally &Count)
     CheckFade(Count);
     CheckWishes(Count);
     CheckTurning(Count);
+    CheckFresh(Count);
 }
 
 }  // namespace stand

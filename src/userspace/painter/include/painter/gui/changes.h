@@ -269,7 +269,9 @@ public:
 
     // Everything said while Change runs — of objects, of frames described
     // whole — reached in time as How says: the display plays it while the
-    // program goes on. One that waits (After, Delay) goes after what was said
+    // program goes on, from what was said plainly of the property before it
+    // in the step — or, of an item never shown, a property it never said
+    // taken at once. One that waits (After, Delay) goes after what was said
     // of that property before it, not in its place.
     template <typename Changing> void Animate(const Animation &How, Changing &&Change)
     {

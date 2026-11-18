@@ -59,7 +59,10 @@ extern "C" {
  * picture, a role, a look of another make — fades from what it was into what
  * it is, and hidden fades out or in. What is said meanwhile of that property
  * cuts it where it stands: said plainly, it is at once what was said; said as
- * another animation, it goes on from there, a spring keeping its speed. Where
+ * another animation, it goes on from there, a spring keeping its speed. An
+ * item never shown takes at once a property it never said — there is nothing
+ * to go from — and one said plainly before an animation of it, in its step,
+ * is where it starts. Where
  * the person asks for less motion, things moved, sized, turned or reshaped
  * are at once where they go and fades are short; and every animation plays
  * at the person's speed. On a text page every change is at once what it

@@ -402,6 +402,36 @@ error_t Decode(std::uint16_t Property, std::span<const std::uint8_t> Bytes, Prop
     }
 }
 
+bool IsSaid(std::uint16_t Property, const Properties &Of) noexcept
+{
+    switch (Property) {
+    case ITEM_PROP_PLACE: return Of.Place.has_value();
+    case ITEM_PROP_SIZE: return Of.Size.has_value();
+    case ITEM_PROP_OPACITY: return Of.Opacity.has_value();
+    case ITEM_PROP_HIDDEN: return Of.Hidden.has_value();
+    case ITEM_PROP_TURN: return Of.Turn.has_value();
+    case ITEM_PROP_SCALE: return Of.Scale.has_value();
+    case ITEM_PROP_ANCHOR: return Of.Anchor.has_value();
+    case ITEM_PROP_CLIP: return Of.Clip.has_value();
+    case ITEM_PROP_CORNERS: return Of.Corners.has_value();
+    case ITEM_PROP_SHAPE: return Of.Shape.has_value();
+    case ITEM_PROP_FILLS: return Of.Fills.has_value();
+    case ITEM_PROP_STROKE: return Of.Stroke.has_value();
+    case ITEM_PROP_SHADOWS: return Of.Shadows.has_value();
+    case ITEM_PROP_TEXT: return Of.Text.has_value();
+    case ITEM_PROP_TEXT_STYLE: return Of.Style.has_value();
+    case ITEM_PROP_TEXT_SPANS: return Of.Spans.has_value();
+    case ITEM_PROP_TEXT_BOX: return Of.Box.has_value();
+    case ITEM_PROP_SECRET: return Of.Secret.has_value();
+    case ITEM_PROP_CAPTION: return Of.Caption.has_value();
+    case ITEM_PROP_PICTURE: return Of.Picture.has_value();
+    case ITEM_PROP_CANVAS: return Of.Canvas.has_value();
+    case ITEM_PROP_GRID: return Of.Grid.has_value();
+    case ITEM_PROP_CARET: return Of.Caret.has_value();
+    default: return false;
+    }
+}
+
 void Assign(std::uint16_t Property, const Properties &From, Properties &Into)
 {
     Carry(Property, From, Into);

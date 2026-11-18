@@ -216,11 +216,14 @@ void Changes::Put(std::uint32_t Item, std::uint16_t Property, Record Value)
         RefusedCount++;
         return;
     }
-    /* A word now says over every word of the property waiting; one that
-     * waits goes after them. */
+    /* A plain word says over every word of the property waiting. An
+     * animation now says over the animations waiting, after the plain word
+     * that says where it starts; one that waits on another or its delay goes
+     * after them all. */
     const bool Behind = Moving && (Moving->After != 0 || Moving->Delay != 0);
-    if (!Behind) Properties.erase(Properties.lower_bound({Item, Property, 0}), Properties.upper_bound({Item, Property, ~0u}));
-    Properties[{Item, Property, Behind ? ++Later : 0u}] = Make(Moving ? ITEM_OP_ANIMATE : ITEM_OP_CHANGE, Item, Body.Bytes);
+    if (!Moving) Properties.erase(Properties.lower_bound({Item, Property, 0}), Properties.upper_bound({Item, Property, ~0u}));
+    else if (!Behind) Properties.erase(Properties.lower_bound({Item, Property, 1}), Properties.upper_bound({Item, Property, ~0u}));
+    Properties[{Item, Property, Moving ? ++Later : 0u}] = Make(Moving ? ITEM_OP_ANIMATE : ITEM_OP_CHANGE, Item, Body.Bytes);
     Values[{Item, Property}] = std::move(Value);
 }
 

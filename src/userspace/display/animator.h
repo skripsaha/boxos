@@ -106,6 +106,7 @@ private:
         std::vector<double>       Speed;                  // Walks: each number's, a second, as it began
         Properties                Like;                   // Walks: the form its numbers are said in
         float                     SeenFrom = 1;           // Shows, Hides: how much was seen as it began
+        bool                      Fresh    = false;       // of an item never drawn, a property it never said: at once
     };
     // The animations of a number, under way or waiting, and whether one of
     // them was cut.
