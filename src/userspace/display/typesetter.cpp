@@ -12,7 +12,7 @@
 #include <utility>
 
 #include "box/types.h"
-#include "box/display.h"
+#include "box/items.h"
 #include "boxos_imprint_data.h"
 #include "boxos_mosaic.h"
 #include "typecase/font_source.h"
@@ -45,9 +45,9 @@ std::uint8_t GridsOf(const typecase::GeometrySource &Geometry)
             return Character == U' ' || Geometry.Has(static_cast<char32_t>(Character));
         });
     };
-    return static_cast<std::uint8_t>((Whole(BoxMosaicQuadrants) ? DISPLAY_MOSAIC_QUADRANTS : 0) |
-                                     (Whole(BoxMosaicSextants) ? DISPLAY_MOSAIC_SEXTANTS : 0) |
-                                     (Whole(BoxMosaicOctants) ? DISPLAY_MOSAIC_OCTANTS : 0));
+    return static_cast<std::uint8_t>((Whole(BoxMosaicQuadrants) ? ITEM_MOSAIC_QUADRANTS : 0) |
+                                     (Whole(BoxMosaicSextants) ? ITEM_MOSAIC_SEXTANTS : 0) |
+                                     (Whole(BoxMosaicOctants) ? ITEM_MOSAIC_OCTANTS : 0));
 }
 
 }  // namespace

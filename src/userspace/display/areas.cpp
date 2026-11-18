@@ -7,14 +7,15 @@
 #include "areas.h"
 
 #include <algorithm>
-#include <chrono>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <cuchar>
 #include <memory>
 #include <optional>
 #include <string>
-#include <tuple>
+#include <string_view>
 #include <utility>
 
 #include "box/color.h"
@@ -25,11 +26,9 @@
 #include "box/ipc.h"
 #include "box/touch.h"
 
-#include "compositor.h"
 #include "front.h"
 #include "item_reception.h"
 #include "painter/core/system_fonts.h"
-#include "typecase/text.h"
 
 namespace {
 
@@ -110,6 +109,7 @@ struct Program {
     std::uint32_t                       Pid = 0, Generation = 0;   // its founding strand's: the kernel's name for it
     items::ProgramState                 State;
     typecase::Fonts                     Book;                      // the system's faces and its own
+    bool                                SystemsIn = false;         // the system's faces put in it
     std::vector<std::unique_ptr<Block>> Blocks;
     std::size_t                         BlockBytes = 0;
     std::size_t                         FontBytes  = 0;            // its own faces read, kept past their blocks
@@ -128,7 +128,9 @@ struct Area {
     std::uint32_t                     OwnerPid = 0, OwnerGeneration = 0;   // the strand that speaks for it
     Program                          *Of = nullptr;
     std::uint8_t                      Placement = DISPLAY_AREA_OVER;
+    bool                              Always    = false;   // shown even while its program lives behind
     ItemPoint                         Wish{};
+    std::uint64_t                     Line      = 0;       // in the flow: its first row of the console, as RowsGone counts
     std::uint32_t                     Number = 0;
     box::bay<std::byte>               Memory;
     ItemAreaHeader                   *Head = nullptr;
@@ -149,30 +151,20 @@ struct Area {
     }
 };
 
-/* A text page's cells as pixels, for an area's place: a point is a pixel of
- * an eighth of a cell across and a sixteenth down. */
-constexpr std::int32_t PageCellWide = 8, PageCellTall = 16;
-
-/* A side of the canvas a frame composes on, tile by tile. */
-constexpr std::int32_t TileSide = 256;
-
 /* The largest side of a picture or canvas a program may give. */
 constexpr std::uint32_t BlockSideMost = 16384;
 
 std::vector<std::unique_ptr<Program>> g_programs;
-std::vector<std::unique_ptr<Area>>    g_areas;     // in the order they opened, bottom to top
-std::vector<Rect>                     g_covered;   // where the shown areas lie
+std::vector<std::unique_ptr<Area>>    g_areas;     // in the order they opened
 Names                                 g_area_names(DISPLAY_AREA_TAG_PREFIX);
 Names                                 g_block_names(DISPLAY_BLOCK_TAG_PREFIX);
 std::uint32_t                         g_next_area = 1, g_next_block = 1;
-std::optional<items::Compositor>      g_compositor;
-std::optional<painter::core::Canvas>  g_tile;
-items::Theme                          g_theme;
-Rect                                  g_screen{}, g_console{};
-std::int32_t                          g_cell_tall = PageCellTall;
+AreasGlass                            g_glass;
+CellsLook                             g_no_cells;      // the look until the glass is known
+items::Theme                          g_no_theme;
 std::uint32_t                         g_scale     = 256;
-bool                                  g_text      = false;
-bool                                  g_left      = false;   // an area left a text page: its cells to be written again
+std::uint64_t                         g_rows_gone = 0;
+bool                                  g_left      = false;   // an area went: the frame looks again
 
 float Scale() noexcept { return static_cast<float>(g_scale) / 256.0f; }
 
@@ -190,24 +182,49 @@ void Ring(Area &Of) noexcept
     (void)touch_send(Of.Bell, &Id, sizeof(Id), 0);
 }
 
+const CellsLook    &Cells() noexcept { return g_glass.Cells ? *g_glass.Cells : g_no_cells; }
+const items::Theme &Look() noexcept { return g_glass.Look ? *g_glass.Look : g_no_theme; }
+
+/* An area's height in pixels, as wished: a part of the screen when none is
+ * wished, no taller than the screen — no taller than the console in its flow. */
+std::int32_t HeightOf(const Area &Of) noexcept
+{
+    const Rect         Screen = g_glass.Screen;
+    const std::int32_t Most   = Of.Placement == DISPLAY_AREA_FLOW ? Cells().Grid.Height - Cells().Height : Screen.Height;
+    const std::int32_t Wished = Of.Wish.Y ? static_cast<std::int32_t>(std::lround(static_cast<float>(Of.Wish.Y) / ITEM_POINT * Scale()))
+                                          : Screen.Height * 3 / 5;
+    return std::clamp(Wished, 1, std::max(Most, 1));
+}
+
+/* The rows of the console an area in its flow takes. */
+std::uint32_t RowsOf(const Area &Of) noexcept
+{
+    return static_cast<std::uint32_t>((HeightOf(Of) + Cells().Height - 1) / Cells().Height);
+}
+
 /* Where an area lies on the glass, in pixels (a text page's eighths and
  * sixteenths of a cell): the display's choice. */
-Rect PlaceOf(const Area &Of, std::uint32_t CaretRow) noexcept
+Rect PlaceOf(const Area &Of) noexcept
 {
-    if (Of.Placement == DISPLAY_AREA_WHOLE) return g_screen;
-    const float S  = Scale();
-    const auto  Px = [S](std::int32_t Points, std::int32_t Chosen) {
-        return Points ? static_cast<std::int32_t>(std::lround(static_cast<float>(Points) / ITEM_POINT * S)) : Chosen;
-    };
-    std::int32_t       W = std::clamp(Px(Of.Wish.X, g_screen.Width * 3 / 5), 1, g_screen.Width);
-    const std::int32_t H = std::clamp(Px(Of.Wish.Y, g_screen.Height * 3 / 5), 1, g_screen.Height);
+    const Rect Screen = g_glass.Screen;
+    if (Of.Placement == DISPLAY_AREA_WHOLE) return Screen;
+    const std::int32_t H = HeightOf(Of);
     if (Of.Placement == DISPLAY_AREA_FLOW) {
-        W                      = g_console.Width;
-        const std::int32_t Top = g_console.Y + static_cast<std::int32_t>(CaretRow) * g_cell_tall;
-        return Rect{g_console.X, std::clamp(Top, 0, g_screen.Height - H), W, H};
+        /* On its rows of the console, wherever they are now: above the glass
+         * once they have gone up off it. */
+        const Rect         Grid = Cells().Grid;
+        const std::int64_t Row  = static_cast<std::int64_t>(Of.Line) - static_cast<std::int64_t>(g_rows_gone);
+        const std::int64_t Top  = std::clamp<std::int64_t>(Grid.Y + Row * Cells().Height, INT32_MIN / 2, INT32_MAX / 2);
+        return Rect{Grid.X, static_cast<std::int32_t>(Top), Grid.Width, H};
     }
-    return Rect{(g_screen.Width - W) / 2, (g_screen.Height - H) / 2, W, H};
+    const std::int32_t W =
+        std::clamp(Of.Wish.X ? static_cast<std::int32_t>(std::lround(static_cast<float>(Of.Wish.X) / ITEM_POINT * Scale()))
+                             : Screen.Width * 3 / 5,
+                   1, Screen.Width);
+    return Rect{(Screen.Width - W) / 2, (Screen.Height - H) / 2, W, H};
 }
+
+bool ShownNow(const Area &Of) noexcept { return Of.Always || !FrontBehind(Of.Of->Pid, Of.Of->Generation); }
 
 ItemAreaNews NewsOf(const Area &Of) noexcept
 {
@@ -215,19 +232,30 @@ ItemAreaNews NewsOf(const Area &Of) noexcept
     const float S     = Scale();
     return ItemAreaNews{static_cast<std::int32_t>(std::lround(static_cast<float>(Place.Width) / S * ITEM_POINT)),
                         static_cast<std::int32_t>(std::lround(static_cast<float>(Place.Height) / S * ITEM_POINT)),
-                        g_scale, static_cast<std::uint8_t>(g_text ? ITEM_GLASS_TEXT : ITEM_GLASS_PIXELS),
-                        static_cast<std::uint8_t>(Of.State->Shown), 0};
+                        g_scale, static_cast<std::uint8_t>(g_glass.Text ? ITEM_GLASS_TEXT : ITEM_GLASS_PIXELS),
+                        static_cast<std::uint8_t>(Of.State->Shown), g_glass.Mosaics, 0};
 }
 
-void Cover() noexcept
+/* A program's book, the system's faces put in it first — when it first lays a
+ * text or reads a font of its own, not before: a program of cells needs none.
+ * The faces were read as the areas started (AreasStart). Throws
+ * std::bad_alloc only. */
+typecase::Fonts &BookOf(Program &Of)
 {
-    g_covered.clear();   /* room made for every area when it opened */
-    for (const auto &Each : g_areas)
-        if (Each->State->Shown) g_covered.push_back(Each->State->Place);
+    if (!Of.SystemsIn) {
+        if (const std::shared_ptr<const typecase::Fonts> System = painter::core::SystemFonts()) {
+            for (const auto &Face : System->Faces()) Of.Book.Add(Face);
+            Of.Book.SetFallback(System->Fallbacks());
+            Of.Book.SetDefault(System->Default());
+        }
+        Of.SystemsIn = true;
+    }
+    return Of.Book;
 }
 
-/* The program From names, made when it has none yet: its fonts the system's,
- * its pictures and canvases its blocks. Throws std::bad_alloc only. */
+/* The program From names, made when it has none yet: its fonts the system's
+ * and its own, its pictures and canvases its blocks. Throws std::bad_alloc
+ * only. */
 Program &ProgramOf(const AskFrom &From)
 {
     for (const auto &Each : g_programs)
@@ -235,15 +263,11 @@ Program &ProgramOf(const AskFrom &From)
     auto Made        = std::make_unique<Program>();
     Made->Pid        = From.program_pid;
     Made->Generation = From.program_generation;
-    if (const std::shared_ptr<const typecase::Fonts> System = painter::core::SystemFonts()) {
-        for (const auto &Face : System->Faces()) Made->Book.Add(Face);
-        Made->Book.SetFallback(System->Fallbacks());
-        Made->Book.SetDefault(System->Default());
-    }
     Program *Of                = Made.get();
-    Made->State.From.Look      = &g_theme;
+    Made->State.From.Look      = &Look();
     Made->State.From.Scale     = Scale();
-    Made->State.From.Book      = &Made->Book;
+    Made->State.From.Book      = [Of]() -> const typecase::Fonts & { return BookOf(*Of); };
+    Made->State.From.Cells     = &Cells();
     Made->State.From.PictureOf = [Of](std::uint32_t Id) -> std::shared_ptr<const painter::core::Picture> {
         const Block *Found = Of->Find(Id);
         return Found ? Found->Picture : nullptr;
@@ -306,7 +330,7 @@ error_t ReadFont(Program &Of, Block &Font)
     std::expected<typecase::Font, typecase::Fault> Face =
         typecase::Font::Read(std::vector<std::uint8_t>(Font.Content(), Font.Content() + Font.Bytes));
     if (!Face) return ERR_CORRUPTED;
-    Of.Book.Add(std::move(*Face));
+    BookOf(Of).Add(std::move(*Face));
     Of.FontBytes += Font.Bytes;
     Font.Read = true;
     return OK;
@@ -349,14 +373,13 @@ void BlockChanged(Area &Said, std::uint32_t Id, const ItemBlockChanged &Where)
 void Drop(std::size_t Index) noexcept
 {
     Area &Gone = *g_areas[Index];
-    if (g_compositor && Gone.State->WasShown) g_compositor->Damage(Gone.State->Was);
-    g_left = g_text;
+    if (Gone.State->WasShown && g_glass.Vacated) g_glass.Vacated(Gone.State->Was);
+    g_left = true;
     g_area_names.Give(Gone.Number);
     Program *Of = Gone.Of;
     Of->Areas--;
     g_areas.erase(g_areas.begin() + static_cast<std::ptrdiff_t>(Index));
     Forget(*Of);
-    Cover();
 }
 
 void DropBlock(Program &Of, std::uint32_t Id) noexcept
@@ -383,13 +406,14 @@ std::size_t AreaIndex(std::uint32_t Sender, std::uint32_t Generation, std::uint3
 /* An area made for the asker, its memory headed, its place chosen: null, and
  * Why, when it cannot be. Throws std::bad_alloc only. */
 std::unique_ptr<Area> MakeArea(const Result &Asked, const AskFrom &From, const DisplayAreaOpenRequest &Request,
-                               Program &Of, std::uint32_t CaretRow, error_t &Why)
+                               Program &Of, error_t &Why)
 {
     auto Made             = std::make_unique<Area>();
     Made->OwnerPid        = Asked.sender_pid;
     Made->OwnerGeneration = From.generation;
     Made->Of              = &Of;
     Made->Placement       = Request.placement;
+    Made->Always          = (Request.flags & DISPLAY_AREA_ALWAYS) != 0;
     Made->Wish            = ItemPoint{Request.width, Request.height};
     auto Memory = g_area_names.Make(sizeof(ItemAreaHeader) + ITEM_RING_BYTES + ITEM_EVENT_BYTES, From, Made->Number);
     if (!Memory) {
@@ -403,8 +427,8 @@ std::unique_ptr<Area> MakeArea(const Result &Asked, const AskFrom &From, const D
     Made->Head->Bytes      = ITEM_RING_BYTES;
     Made->Head->EventBytes = ITEM_EVENT_BYTES;
     Made->State            = std::make_unique<items::AreaState>(Of.State);
-    Made->State->Place     = PlaceOf(*Made, CaretRow);
-    Made->State->Shown     = !FrontBehind(Of.Pid, Of.Generation);
+    Made->State->Place     = PlaceOf(*Made);
+    Made->State->Shown     = ShownNow(*Made);
     Made->State->Paged     = Made->Placement == DISPLAY_AREA_WHOLE;
     Area *Raw              = Made.get();
     Made->State->Sized     = [Raw](std::uint32_t Item, ItemPoint Size) { Tell(*Raw, ITEM_EVENT_SIZE, Item, &Size, sizeof(Size)); };
@@ -413,25 +437,45 @@ std::unique_ptr<Area> MakeArea(const Result &Asked, const AskFrom &From, const D
     return Made;
 }
 
-/* The canvas a framebuffer's frame composes on, and the compositor: made when
- * the first area opens. False: no room for them. */
-bool Ready() noexcept
+/* Every whole step of the area's ring applied: false when the ring breaks
+ * the language — the area closed then, its program told. */
+bool ReadRing(std::size_t Index) noexcept
 {
-    if (g_text || g_compositor) return true;
+    Area          &Of = *g_areas[Index];
+    items::Reading Read;
     try {
-        if (!g_tile) g_tile = painter::core::Canvas::Make(TileSide, TileSide);
-        if (!g_tile) return false;
-        g_compositor.emplace(g_screen);
-        return true;
+        items::Listener Listen;
+        Listen.Refused = [&Of](std::uint32_t Item, std::uint16_t Op, std::uint16_t Property, error_t Reason) {
+            const ItemRefusal Why{Op, Property, static_cast<std::int32_t>(Reason)};
+            Tell(Of, ITEM_EVENT_REFUSED, Item, &Why, sizeof(Why));
+        };
+        Listen.BlockChanged = [&Of](std::uint32_t Block2, const ItemBlockChanged &Where) { BlockChanged(Of, Block2, Where); };
+        Read = items::ReadSteps(*Of.Head, Of.Ring(), Of.State->Items, Listen);
     } catch (...) {
+        /* No room to read it: the steps wait in the ring, read at the next
+         * message. */
+        return true;
+    }
+    if (Read.Broken) {
+        kdbg_print("[display] area %u of program %u broke the items' language; it is closed", Of.Id, Of.Of->Pid);
+        const ItemRefusal Why{0, 0, ERR_CORRUPTED};
+        Tell(Of, ITEM_EVENT_REFUSED, 0, &Why, sizeof(Why));
+        Ring(Of);
+        Drop(Index);
         return false;
     }
+    if (Read.Stepped) Of.Step = Read.Step, Of.Stepped = true;
+    Of.Bytes += Read.Bytes;
+    Of.Records += Read.Records;
+    Ring(Of);
+    return true;
 }
 
-/* Each area's step shown on the glass told to it, with what the frame cost,
- * and every bell rung that has news. */
-void TellShown(std::uint32_t Micros, std::uint64_t Pixels) noexcept
+}  // namespace
+
+void AreasShown(std::uint32_t Micros, std::uint64_t Pixels) noexcept
 {
+    g_left = false;
     for (const auto &Each : g_areas) {
         if (Each->Stepped) {
             const ItemShown Shown{Each->Step, Micros, static_cast<std::uint32_t>(std::min<std::uint64_t>(Pixels, UINT32_MAX)),
@@ -444,43 +488,45 @@ void TellShown(std::uint32_t Micros, std::uint64_t Pixels) noexcept
     }
 }
 
-}  // namespace
-
-void AreasStart(const Easel &On, std::uint32_t Scale2)
+void AreasStart(const AreasGlass &Glass)
 {
-    g_text = !On.Pixels();
-    if (g_text) {
-        g_screen    = Rect{0, 0, static_cast<std::int32_t>(On.Cols()) * PageCellWide, static_cast<std::int32_t>(On.Rows()) * PageCellTall};
-        g_console   = g_screen;
-        g_cell_tall = PageCellTall;
-        g_scale     = 256;
+    g_glass = Glass;
+    if (Glass.Text) {
+        g_scale = 256;
     } else {
-        g_screen    = Rect{0, 0, static_cast<std::int32_t>(On.PixelWidth()), static_cast<std::int32_t>(On.PixelHeight())};
-        g_console   = On.Grid();
-        g_cell_tall = On.CellHeight();
+        /* The system's fonts read now, before the scene plays on: a text
+         * page lays no text in a font, and a framebuffer's should not wait
+         * for the volume — nor the scene stand still while a program's first
+         * text has them read. Read here and not on a strand of the display's
+         * own: every strand carries the display's tag, and a question with
+         * two carriers is refused (ERR_ROUTE_AMBIGUOUS). */
+        (void)painter::core::SystemFonts();
         /* Chosen: a point a pixel on a screen 1080 tall, larger by quarters
          * as the screen is taller, four at most. */
-        const std::uint32_t Chosen = std::clamp<std::uint32_t>((On.PixelHeight() * 4u + 540u) / 1080u, 4u, 16u) * 64u;
-        g_scale                    = Scale2 ? Scale2 : Chosen;
+        const auto          Tall   = static_cast<std::uint32_t>(Glass.Screen.Height);
+        const std::uint32_t Chosen = std::clamp<std::uint32_t>((Tall * 4u + 540u) / 1080u, 4u, 16u) * 64u;
+        g_scale                    = Glass.Scale ? Glass.Scale : Chosen;
     }
-    g_theme = items::ThemeOf(On.TextColor(), On.PageColor());
 }
 
-bool AreasOpen(const Result &Asked, const AskFrom &From, const DisplayAreaOpenRequest &Request, std::uint32_t CaretRow) noexcept
+bool AreasOpen(const Result &Asked, const AskFrom &From, const DisplayAreaOpenRequest &Request, ConsoleModel &Console) noexcept
 {
     DisplayAreaOpenReply Reply{};
     Reply.command     = DISP_CMD_AREA_OPEN;
-    Reply.glass       = static_cast<std::uint8_t>(g_text ? ITEM_GLASS_TEXT : ITEM_GLASS_PIXELS);
+    Reply.glass       = static_cast<std::uint8_t>(g_glass.Text ? ITEM_GLASS_TEXT : ITEM_GLASS_PIXELS);
+    Reply.mosaics     = g_glass.Mosaics;
     Reply.display_pid = cabin_info()->pid;
+    Reply.caret_col   = Console.CursorX();
+    Reply.caret_row   = Console.CursorY();
     const auto Refuse = [&](error_t Why) {
         Reply.error = static_cast<std::int32_t>(Why);
         (void)answer(&Asked, &Reply, sizeof(Reply));
         return false;
     };
-    if (Request.placement < DISPLAY_AREA_OVER || Request.placement > DISPLAY_AREA_FLOW || Request.flags != 0 ||
-        Request.width < 0 || Request.height < 0 || Request.width > ITEM_REACH || Request.height > ITEM_REACH)
+    if (Request.placement < DISPLAY_AREA_OVER || Request.placement > DISPLAY_AREA_FLOW ||
+        (Request.flags & ~static_cast<std::uint16_t>(DISPLAY_AREA_ALWAYS)) != 0 || Request.width < 0 || Request.height < 0 ||
+        Request.width > ITEM_REACH || Request.height > ITEM_REACH)
         return Refuse(ERR_INVALID_ARGUMENT);
-    if (!Ready()) return Refuse(ERR_NO_MEMORY);
     try {
         Program &Of = ProgramOf(From);
         if (Of.Areas >= ITEM_AREAS_MOST) {
@@ -488,12 +534,17 @@ bool AreasOpen(const Result &Asked, const AskFrom &From, const DisplayAreaOpenRe
             return Refuse(ERR_QUOTA_EXCEEDED);
         }
         g_areas.reserve(g_areas.size() + 1);
-        g_covered.reserve(g_areas.size() + 1);
         error_t               Why  = OK;
-        std::unique_ptr<Area> Made = MakeArea(Asked, From, Request, Of, CaretRow, Why);
+        std::unique_ptr<Area> Made = MakeArea(Asked, From, Request, Of, Why);
         if (!Made) {
             Forget(Of);
             return Refuse(Why);
+        }
+        if (Made->Placement == DISPLAY_AREA_FLOW) {
+            /* Its rows of the console, after the text so far. */
+            Made->Line         = Console.Reserve(RowsOf(*Made));
+            g_rows_gone        = Console.RowsGone();
+            Made->State->Place = PlaceOf(*Made);
         }
         g_area_names.Spell(Made->Number, Reply.bay_tag);
         Made->Bell              = touch_intern(Reply.bay_tag);
@@ -505,7 +556,6 @@ bool AreasOpen(const Result &Asked, const AskFrom &From, const DisplayAreaOpenRe
         Tell(*Made, ITEM_EVENT_AREA, 0, &News, sizeof(News));
         Of.Areas++;
         g_areas.push_back(std::move(Made));
-        Cover();
         /* An area whose answer reached nobody — its asker died first — is
          * nobody's. */
         if (answer(&Asked, &Reply, sizeof(Reply)) != 0) {
@@ -586,36 +636,7 @@ void AreasBlockOpen(const Result &Asked, const AskFrom &From, const DisplayBlock
 void AreasStep(std::uint32_t Sender, std::uint32_t Generation, std::uint32_t Id) noexcept
 {
     const std::size_t Index = AreaIndex(Sender, Generation, Id);
-    if (Index == g_areas.size()) return;
-    Area          &Of = *g_areas[Index];
-    items::Reading Read;
-    try {
-        items::Listener Listen;
-        Listen.Refused = [&Of](std::uint32_t Item, std::uint16_t Op, std::uint16_t Property, error_t Reason) {
-            const ItemRefusal Why{Op, Property, static_cast<std::int32_t>(Reason)};
-            Tell(Of, ITEM_EVENT_REFUSED, Item, &Why, sizeof(Why));
-        };
-        Listen.BlockChanged = [&Of](std::uint32_t Block2, const ItemBlockChanged &Where) { BlockChanged(Of, Block2, Where); };
-        Read = items::ReadSteps(*Of.Head, Of.Ring(), Of.State->Items, Listen);
-    } catch (...) {
-        /* No room to read it: the steps wait in the ring, read at the next
-         * message. */
-        return;
-    }
-    if (Read.Broken) {
-        /* A ring that breaks the language: the area closed, its program told
-         * why. */
-        kdbg_print("[display] area %u of program %u broke the items' language; it is closed", Of.Id, Of.Of->Pid);
-        const ItemRefusal Why{0, 0, ERR_CORRUPTED};
-        Tell(Of, ITEM_EVENT_REFUSED, 0, &Why, sizeof(Why));
-        Ring(Of);
-        Drop(Index);
-        return;
-    }
-    if (Read.Stepped) Of.Step = Read.Step, Of.Stepped = true;
-    Of.Bytes += Read.Bytes;
-    Of.Records += Read.Records;
-    Ring(Of);
+    if (Index != g_areas.size()) (void)ReadRing(Index);
 }
 
 void AreasClose(std::uint32_t Sender, std::uint32_t Generation, std::uint32_t Id) noexcept
@@ -655,7 +676,7 @@ bool AreasSeen() noexcept
 {
     bool Changed = false;
     for (const auto &Each : g_areas) {
-        const bool Shown = !FrontBehind(Each->Of->Pid, Each->Of->Generation);
+        const bool Shown = ShownNow(*Each);
         if (Shown == Each->State->Shown) continue;
         Each->State->Shown      = Shown;
         const ItemAreaNews News = NewsOf(*Each);
@@ -663,30 +684,38 @@ bool AreasSeen() noexcept
         Ring(*Each);
         Changed = true;
     }
-    if (Changed) Cover();
     return Changed;
 }
 
-void AreasTheme(std::uint32_t Text, std::uint32_t Page) noexcept
+void AreasFlow(std::uint64_t RowsGone) noexcept
 {
-    try {
-        g_theme = items::ThemeOf(Text, Page);
-    } catch (...) {
-        return;
-    }
+    if (RowsGone == g_rows_gone) return;
+    g_rows_gone = RowsGone;
+    for (const auto &Each : g_areas)
+        if (Each->Placement == DISPLAY_AREA_FLOW) Each->State->Place = PlaceOf(*Each);
+}
+
+void AreasTheme() noexcept
+{
     for (const auto &Each : g_areas) Each->State->Items.RedrawAll();
 }
 
-std::span<const Rect> AreasCovered() noexcept { return g_covered; }
-
-void AreasDamage(const Rect &Pixels) noexcept
+void AreasInOrder(std::vector<items::AreaState *> &Into)
 {
-    if (g_compositor) g_compositor->Damage(Pixels);
+    Into.clear();
+    const auto Band = [&](auto &&In) {
+        for (const auto &Each : g_areas)
+            if (In(*Each)) Into.push_back(Each->State.get());
+    };
+    Band([](const Area &Of) { return !Of.Always && Of.Placement == DISPLAY_AREA_FLOW; });
+    Band([](const Area &Of) { return !Of.Always && Of.Placement == DISPLAY_AREA_WHOLE; });
+    Band([](const Area &Of) { return !Of.Always && Of.Placement == DISPLAY_AREA_OVER; });
+    Band([](const Area &Of) { return Of.Always; });
 }
 
 bool AreasWant() noexcept
 {
-    if (g_left || (g_compositor && g_compositor->Damaged())) return true;
+    if (g_left) return true;
     for (const auto &Each : g_areas) {
         items::AreaState &State = *Each->State;
         if (State.Items.Marked() || !State.Items.Vacated().empty() || State.Place != State.Was || State.Shown != State.WasShown)
@@ -695,128 +724,162 @@ bool AreasWant() noexcept
     return false;
 }
 
-void AreasFrame(Easel &On) noexcept
-{
-    if (!g_compositor || !g_tile || On.Lent()) return;
-    std::vector<items::AreaState *> Order;
-    std::vector<Rect>               Damaged;
-    const auto                      Start  = std::chrono::steady_clock::now();
-    std::uint64_t                   Pixels = 0;
-    try {
-        Order.reserve(g_areas.size());
-        /* Areas of the whole screen over the others. */
-        for (const auto &Each : g_areas)
-            if (Each->Placement != DISPLAY_AREA_WHOLE) Order.push_back(Each->State.get());
-        for (const auto &Each : g_areas)
-            if (Each->Placement == DISPLAY_AREA_WHOLE) Order.push_back(Each->State.get());
-        g_compositor->Take(Order, g_theme);
-        Damaged = g_compositor->Rects();
-        for (const Rect &Each : Damaged)
-            for (std::int32_t Y = Each.Y; Y < Each.Y + Each.Height; Y += TileSide)
-                for (std::int32_t X = Each.X; X < Each.X + Each.Width; X += TileSide) {
-                    const Rect Tile{X, Y, std::min(TileSide, Each.X + Each.Width - X), std::min(TileSide, Each.Y + Each.Height - Y)};
-                    const painter::core::Point Corner{Tile.X, Tile.Y};
-                    if (!g_compositor->Hidden(Tile, Order)) On.Beneath(*g_tile, Corner, Tile);
-                    g_compositor->Compose(*g_tile, Corner, Tile, Order, g_theme);
-                    On.Put(*g_tile, Tile);
-                    Pixels += static_cast<std::uint64_t>(Tile.Width) * static_cast<std::uint64_t>(Tile.Height);
-                }
-    } catch (...) {
-        /* No room to compose: what was put on the glass stays, and all of
-         * this frame's damage is composed again at the next. */
-        for (const Rect &Each : Damaged) g_compositor->Damage(Each);
-    }
-    On.Flush();
-    const auto Micros = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - Start).count();
-    TellShown(static_cast<std::uint32_t>(std::clamp<std::int64_t>(Micros, 0, UINT32_MAX)), Pixels);
-}
-
 namespace {
 
-/* Characters written into a text page's cells from a cell on, up to the
- * page's edge, in Ink. */
-void Write(std::vector<GlassCell> &Cells, std::uint32_t Cols, std::uint32_t Rows, std::int32_t Col, std::int32_t Row,
-           std::u32string_view Characters, std::uint32_t Ink) noexcept
+/* A cell's character as the log ring keeps it: its UTF-8, a cell that shows
+ * nothing as a space, and what is no character to show — a control, a
+ * surrogate, a number past U+10FFFF — as U+FFFD, the box the glass draws. */
+void Spell(std::string &Text, std::uint32_t Character)
 {
-    if (Row < 0 || Row >= static_cast<std::int32_t>(Rows)) return;
-    for (std::size_t I = 0; I < Characters.size(); I++) {
-        const std::int32_t At = Col + static_cast<std::int32_t>(I);
-        if (At < 0 || At >= static_cast<std::int32_t>(Cols)) continue;
-        GlassCell &Into = Cells[static_cast<std::size_t>(Row) * Cols + static_cast<std::size_t>(At)];
-        Into.Cell.cp    = Characters[I];
-        Into.Cell.fg    = Ink;
+    if (Character == 0) {
+        Text += ' ';
+        return;
     }
+    char           Spelled[MB_LEN_MAX];
+    std::mbstate_t State{};
+    const bool        Control = Character < 0x20u || (Character >= 0x7Fu && Character < 0xA0u);
+    const std::size_t Length  = Control ? static_cast<std::size_t>(-1) : std::c32rtomb(Spelled, static_cast<char32_t>(Character), &State);
+    Text += Length == static_cast<std::size_t>(-1) ? std::string_view{"\uFFFD"} : std::string_view{Spelled, Length};
 }
 
-/* A text item's ink on a text page: its first fill's colour. Throws
- * std::bad_alloc only. */
-std::uint32_t InkOf(const items::Item &Of)
+/* The fold's text, as the log ring will have it: what the cells themselves
+ * show — the glyph where a cell shows something, a blank where it lets the
+ * text beneath through, for that text is in the account already — each row
+ * without its trailing blanks and on a line of its own, the rows that show
+ * nothing above and below left out, and the first on a line of its own too
+ * when the caret stands inside a line; then the caret's row, when the cells
+ * put it below them, as the glass does. A caret left inside the picture has
+ * no place a line can go back to, and what follows it is said after its last
+ * row. Throws std::bad_alloc only. */
+std::string FoldText(const AreaFold &Fold, std::uint32_t ConsoleCaretX)
 {
-    const std::vector<items::Fill> Fills = items::FillsOf(Of.Said, Of.Kind, Of.Role);
-    if (Fills.empty()) return COLOR_DEFAULT;
-    const painter::core::Color C =
-        Fills[0].Kind == ITEM_FILL_THEME ? items::ThemeColor(g_theme, Fills[0].Theme) : items::ColorOf(Fills[0].Color);
-    return static_cast<std::uint32_t>(C.Red()) << 16 | static_cast<std::uint32_t>(C.Green()) << 8 | C.Blue();
-}
+    const auto Blank = [](std::uint32_t Character) { return Character == U' ' || Character == 0 || Character == U'\u00A0'; };
+    const auto At    = [&](std::uint32_t Col, std::uint32_t Row) -> const ItemCell & {
+        return Fold.Cells[static_cast<std::size_t>(Row) * Fold.Width + Col];
+    };
+    const auto Shows = [&](std::uint32_t Row) {
+        for (std::uint32_t Col = 0; Col < Fold.Width; Col++)
+            if (CellShows(At(Col, Row)) && !Blank(At(Col, Row).Character)) return true;
+        return false;
+    };
+    std::uint32_t First = 0;
+    while (First < Fold.Height && !Shows(First)) First++;
+    std::uint32_t Last = Fold.Height;
+    while (Last > First && !Shows(Last - 1u)) Last--;
 
-/* One area's items into the cells: the area's cells cleared, then each text
- * written where it lies — a secret as stars — and each other item but a group
- * by its caption. Throws std::bad_alloc only. */
-void CellsOf(const items::AreaState &Area, std::vector<GlassCell> &Cells, std::uint32_t Cols, std::uint32_t Rows)
-{
-    const Rect         Place = Area.Place;
-    const std::int32_t Right = std::min<std::int32_t>((Place.X + Place.Width) / PageCellWide, static_cast<std::int32_t>(Cols));
-    const std::int32_t Foot  = std::min<std::int32_t>((Place.Y + Place.Height) / PageCellTall, static_cast<std::int32_t>(Rows));
-    for (std::int32_t Row = Place.Y / PageCellTall; Row < Foot; Row++)
-        for (std::int32_t Col = Place.X / PageCellWide; Col < Right; Col++)
-            Cells[static_cast<std::size_t>(Row) * Cols + static_cast<std::size_t>(Col)] = GlassCell{};
-    /* Every item, with where its groups put it, in points. */
-    std::vector<std::tuple<std::uint32_t, std::int64_t, std::int64_t>> Walk;
-    for (auto It = Area.Items.Top().rbegin(); It != Area.Items.Top().rend(); ++It) Walk.emplace_back(*It, 0, 0);
-    while (!Walk.empty()) {
-        const auto [Id, X0, Y0] = Walk.back();
-        Walk.pop_back();
-        const items::Item *Of = Area.Items.Find(Id);
-        if (!Of || items::HiddenOf(Of->Said)) continue;
-        const ItemPoint    Own = Of->Said.Place ? *Of->Said.Place : ItemPoint{0, 0};
-        const std::int64_t X = X0 + Own.X, Y = Y0 + Own.Y;
-        for (auto Child = Of->Children.rbegin(); Child != Of->Children.rend(); ++Child) Walk.emplace_back(*Child, X, Y);
-        const auto Col = static_cast<std::int32_t>((Place.X + X / ITEM_POINT) / PageCellWide);
-        const auto Row = static_cast<std::int32_t>((Place.Y + Y / ITEM_POINT) / PageCellTall);
-        if (Of->Kind == ITEM_TEXT && Of->Said.Text) {
-            std::u32string Characters = typecase::CharactersOf(*Of->Said.Text);
-            if (Of->Said.Secret && *Of->Said.Secret)
-                std::replace_if(Characters.begin(), Characters.end(), [](char32_t C) { return C != U'\n'; }, U'*');
-            const std::uint32_t Ink  = InkOf(*Of);
-            std::u32string_view Rest = Characters;
-            for (std::int32_t Line = 0; !Rest.empty(); Line++) {
-                const std::size_t End = Rest.find(U'\n');
-                Write(Cells, Cols, Rows, Col, Row + Line, Rest.substr(0, End), Ink);
-                Rest = End == std::u32string_view::npos ? std::u32string_view() : Rest.substr(End + 1);
-            }
-        } else if (Of->Kind != ITEM_GROUP && Of->Said.Caption) {
-            Write(Cells, Cols, Rows, Col, Row, typecase::CharactersOf(*Of->Said.Caption), COLOR_DEFAULT);
+    std::string Text;
+    if (First < Last && ConsoleCaretX != 0) Text += '\n';
+    for (std::uint32_t Row = First; Row < Last; Row++) {
+        if (Row != First) Text += '\n';
+        std::size_t Kept = Text.size();
+        for (std::uint32_t Col = 0; Col < Fold.Width; Col++) {
+            const std::uint32_t Character = CellShows(At(Col, Row)) ? At(Col, Row).Character : U' ';
+            Spell(Text, Character);
+            if (!Blank(Character)) Kept = Text.size();
         }
+        Text.resize(Kept);
     }
+    const std::int64_t Below = static_cast<std::int64_t>(Fold.CaretY) - Fold.Y;
+    if (First < Last && Fold.Caret && Below >= static_cast<std::int64_t>(Last)) {
+        Text.append(static_cast<std::size_t>(Below - (Last - 1u)), '\n');
+        Text.append(Fold.CaretX, ' ');
+    }
+    return Text;
 }
 
 }  // namespace
 
-void AreasCells(std::vector<GlassCell> &Cells, std::uint32_t Cols, std::uint32_t Rows) noexcept
+std::expected<AreaFold, error_t> AreasCommit(std::uint32_t Pid, std::uint32_t Generation,
+                                             const DisplayAreaCommitRequest &Request, const ConsoleModel &Console) noexcept
 {
-    if (Cells.size() != static_cast<std::size_t>(Cols) * Rows) return;
-    g_left = false;
-    for (const auto &Each : g_areas) {
-        items::AreaState &State = *Each->State;
-        try {
-            if (State.Shown) CellsOf(State, Cells, Cols, Rows);
-        } catch (...) {
-            /* No room to walk it: the area shows what was written of it. */
+    const std::size_t Index = AreaIndex(Pid, Generation, Request.area);
+    if (Index == g_areas.size()) return std::unexpected(ERR_INVALID_STATE);
+    /* What the program wrote before it asked: its last steps. */
+    if (!ReadRing(Index)) return std::unexpected(ERR_CORRUPTED);
+    Area &Of = *g_areas[Index];
+    if (Request.scroll_rows > Console.Height()) return std::unexpected(ERR_INVALID_ARGUMENT);
+
+    /* Every item the area holds is cells on the console's grid: where each
+     * lies, in the console's cells. */
+    const CellsLook &Look  = Cells();
+    const float      S     = Scale();
+    const Rect       Place = Of.State->Place;
+    struct Laid {
+        const items::Item *Item;
+        std::int32_t       Col, Row;
+    };
+    std::vector<Laid> Laying;
+    try {
+        for (std::uint32_t Id : Of.State->Items.Top()) {
+            const items::Item *Each = Of.State->Items.Find(Id);
+            if (!Each || items::HiddenOf(Each->Said)) continue;
+            if (Each->Kind != ITEM_CELLS || !Each->Children.empty()) return std::unexpected(ERR_UNSUPPORTED);
+            if (!Each->Grid || (Each->Said.Turn && *Each->Said.Turn % ITEM_TURN != 0) ||
+                (Each->Said.Scale && (Each->Said.Scale->X != ITEM_ONE || Each->Said.Scale->Y != ITEM_ONE)))
+                return std::unexpected(ERR_UNSUPPORTED);
+            painter::core::Point Corner{Place.X, Place.Y};
+            if (Each->Said.Place)
+                Corner = painter::core::Point{
+                    Place.X + static_cast<std::int32_t>(std::floor(static_cast<float>(Each->Said.Place->X) / ITEM_POINT * S + 0.5f)),
+                    Place.Y + static_cast<std::int32_t>(std::floor(static_cast<float>(Each->Said.Place->Y) / ITEM_POINT * S + 0.5f))};
+            else
+                Corner = OnTheGrid(Look, Corner);
+            if ((Corner.X - Look.Grid.X) % Look.Width != 0 || (Corner.Y - Look.Grid.Y) % Look.Height != 0)
+                return std::unexpected(ERR_UNSUPPORTED);
+            Laying.push_back(Laid{Each, (Corner.X - Look.Grid.X) / Look.Width, (Corner.Y - Look.Grid.Y) / Look.Height});
         }
-        State.Items.Taken();
-        State.Items.Vacated().clear();
-        State.Was      = State.Place;
-        State.WasShown = State.Shown;
+    } catch (...) {
+        return std::unexpected(ERR_NO_MEMORY);
     }
-    TellShown(0, 0);
+
+    /* The console's cells they cover, and theirs laid there one over another. */
+    std::int32_t Left = static_cast<std::int32_t>(Console.Width()), Top = static_cast<std::int32_t>(Console.Height()), Right = 0,
+                 Foot = 0;
+    for (const Laid &Each : Laying) {
+        Left  = std::min(Left, std::max(Each.Col, 0));
+        Top   = std::min(Top, std::max(Each.Row, 0));
+        Right = std::max(Right, std::min<std::int32_t>(Each.Col + static_cast<std::int32_t>(Each.Item->Grid->Cols()),
+                                                       static_cast<std::int32_t>(Console.Width())));
+        Foot  = std::max(Foot, std::min<std::int32_t>(Each.Row + static_cast<std::int32_t>(Each.Item->Grid->Rows()),
+                                                      static_cast<std::int32_t>(Console.Height())));
+    }
+    AreaFold Fold;
+    try {
+        if (Left < Right && Top < Foot) {
+            Fold.X      = Left;
+            Fold.Y      = Top;
+            Fold.Width  = static_cast<std::uint32_t>(Right - Left);
+            Fold.Height = static_cast<std::uint32_t>(Foot - Top);
+            Fold.Cells.assign(static_cast<std::size_t>(Fold.Width) * Fold.Height, item_cell_empty());
+            for (const Laid &Each : Laying) {
+                const CellGrid &Grid = *Each.Item->Grid;
+                for (std::uint32_t Row = 0; Row < Grid.Rows(); Row++)
+                    for (std::uint32_t Col = 0; Col < Grid.Cols(); Col++) {
+                        const std::int32_t X = Each.Col + static_cast<std::int32_t>(Col) - Left;
+                        const std::int32_t Y = Each.Row + static_cast<std::int32_t>(Row) - Top;
+                        if (X < 0 || Y < 0 || X >= static_cast<std::int32_t>(Fold.Width) || Y >= static_cast<std::int32_t>(Fold.Height))
+                            continue;
+                        const ItemCell &Above = Grid.At(Col, Row);
+                        if (!CellShows(Above)) continue;
+                        ItemCell &Into = Fold.Cells[static_cast<std::size_t>(Y) * Fold.Width + static_cast<std::size_t>(X)];
+                        ItemCell  Shown;
+                        if (CellOver(Above, Into, Look.Page, Shown) || Above.Mark != ITEM_MARK_NONE) Into = Shown;
+                    }
+                /* The topmost caret shown is the one the console goes on from. */
+                const ItemCaret Caret = Grid.Caret();
+                const std::int64_t CaretX = static_cast<std::int64_t>(Each.Col) + Caret.Col, CaretY = static_cast<std::int64_t>(Each.Row) + Caret.Row;
+                if (Grid.CaretShown() && CaretX >= 0 && CaretY >= 0 && CaretX < Console.Width() && CaretY < Console.Height()) {
+                    Fold.Caret  = true;
+                    Fold.CaretX = static_cast<std::uint32_t>(CaretX);
+                    Fold.CaretY = static_cast<std::uint32_t>(CaretY);
+                }
+            }
+        }
+        Fold.ScrollRows = Request.scroll_rows;
+        Fold.Text       = FoldText(Fold, Console.CursorX());
+    } catch (...) {
+        return std::unexpected(ERR_NO_MEMORY);
+    }
+    Drop(Index);
+    return Fold;
 }

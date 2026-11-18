@@ -1,28 +1,29 @@
-#ifndef PAINTER_TUI_LAYER_CANVAS_H
-#define PAINTER_TUI_LAYER_CANVAS_H
+#ifndef PAINTER_TUI_KEPT_CELLS_H
+#define PAINTER_TUI_KEPT_CELLS_H
 
 #include <cstdint>
 #include <expected>
 #include <memory>
 
-#include "box/display.h"
+#include "cells_area.h"
 #include "painter/tui/stage.h"
 
 namespace painter::tui {
 
-/* Internal retained canvas shared by the two explicit output contracts:
- * Surface is temporary and ConsoleSurface is committed by the TUI target. */
-class LayerCanvas {
+/* Cells a program keeps on the screen over the console, see-through until
+ * something is put in them: what Surface and ConsoleSurface share. A part of
+ * a frame put in (Paint, Composite) is shown at once; ConsoleSurface's are
+ * folded into the console's text at last (Commit). */
+class KeptCells {
 public:
-    static std::expected<LayerCanvas, StageError> Open(std::int32_t LeastCols,
-                                                        std::int32_t LeastRows,
-                                                        DisplayLayerRole Role) noexcept;
+    static std::expected<KeptCells, StageError> Open(std::int32_t LeastCols, std::int32_t LeastRows,
+                                                     CellsArea::Where Shown) noexcept;
 
-    LayerCanvas(LayerCanvas &&) noexcept;
-    LayerCanvas &operator=(LayerCanvas &&) noexcept;
-    LayerCanvas(const LayerCanvas &) = delete;
-    LayerCanvas &operator=(const LayerCanvas &) = delete;
-    ~LayerCanvas();
+    KeptCells(KeptCells &&) noexcept;
+    KeptCells &operator=(KeptCells &&) noexcept;
+    KeptCells(const KeptCells &) = delete;
+    KeptCells &operator=(const KeptCells &) = delete;
+    ~KeptCells();
 
     core::Size Size() const noexcept;
     bool IsOpen() const noexcept;
@@ -38,18 +39,18 @@ public:
                           core::Rect Region) noexcept;
     box::status Clear() noexcept;
     /* The console's caret, for ConsoleSurface: where the console goes on
-     * once the layer is part of its text. */
+     * once the cells are part of its text. */
     box::status SetCursor(core::Point At) noexcept;
     box::status Commit(std::uint32_t ScrollRows = 0) noexcept;
     box::status Close() noexcept;
 
 private:
     struct Impl;
-    explicit LayerCanvas(std::unique_ptr<Impl> State) noexcept;
+    explicit KeptCells(std::unique_ptr<Impl> State) noexcept;
 
     std::unique_ptr<Impl> State;
 };
 
 }  // namespace painter::tui
 
-#endif  // PAINTER_TUI_LAYER_CANVAS_H
+#endif  // PAINTER_TUI_KEPT_CELLS_H

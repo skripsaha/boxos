@@ -7,14 +7,19 @@
 #     tools/items_stand.sh sheet OUT  a scene of items composed, a PPM
 #
 # The display's parts that need no system — the language read (item_wire),
-# the items' tree, their look, their drawing, the ring read (item_reception)
-# and the compositor — with Painter's engine, its writer of changes
-# (painter/gui/changes.h), Typecase and the ring's one rule (boxlib
+# the items' tree, their look, their drawing, the ring read (item_reception),
+# the compositor, the cells and their look (cell_grid, cells_draw), the
+# console (console_model), the mirror of the glass and the frame — with
+# Painter's engine, its writer of changes (painter/gui/changes.h), Typecase,
+# the typesetter on the imprint and the ring's one rule (boxlib
 # items_ring.c). The checks (tools/items_stand*.cpp): what a program says
 # arrives as it said it, a step whole or not at all, a full ring's last
 # words, every refusal, every bound, a lying ring broken, random rings read
-# whole, the cost of a change; and the screen composed only where it changed
-# the very pixels of the screen composed whole. The last line counts them.
+# whole, the cost of a change, a cells item's runs and caret; the screen
+# composed only where it changed the very pixels of the screen composed
+# whole; and the console scrolled under areas over it and in its flow, the
+# mirror moved rather than drawn again, the very pixels of the glass composed
+# whole, every changed pixel put on the glass. The last line counts them.
 
 set -u
 
@@ -28,9 +33,18 @@ trap 'rm -rf "$WORK"' EXIT
 D=src/userspace/display
 P=src/userspace/painter
 SOURCES="tools/items_stand*.cpp $D/item_wire.cpp $D/item_tree.cpp $D/item_look.cpp $D/item_draw.cpp $D/item_reception.cpp \
-         $D/compositor.cpp $(ls $P/src/core/*.cpp | grep -v system_fonts.cpp) $P/src/gui/changes.cpp \
+         $D/compositor.cpp $D/cell_grid.cpp $D/cells_draw.cpp $D/console_model.cpp $D/mirror.cpp $D/frame.cpp \
+         $D/typesetter.cpp $(ls $P/src/core/*.cpp | grep -v system_fonts.cpp) $P/src/gui/changes.cpp \
          src/userspace/typecase/src/*.cpp"
-INCLUDES="-Isrc/include -I$P/include -I$P/src/core -Isrc/userspace/typecase/include -Isrc/userspace/boxlib/include -I$D -Itools"
+INCLUDES="-Isrc/include -I$P/include -I$P/src/core -Isrc/userspace/typecase/include -Isrc/userspace/boxlib/include -I$D -Itools \
+          -I$WORK"
+
+# The imprint the typesetter draws with when it has no font, as the build
+# writes it (tools/imprint): the console's look on the host.
+$CXX_HOST -std=c++23 -O2 -Wall -Wextra -Isrc/userspace/typecase/include -Isrc/include -Itools tools/imprint.cpp \
+    tools/imprint_make.cpp src/userspace/typecase/src/*.cpp -o "$WORK/imprint" > "$WORK/imprint.log" 2>&1 &&
+    "$WORK/imprint" src/userspace/typecase/fonts/JetBrainsMonoNL-Regular.ttf "$WORK/boxos_imprint_data.h" >> "$WORK/imprint.log" 2>&1 ||
+    { tail -20 "$WORK/imprint.log"; echo "items: harness failed — the imprint was not made"; exit 2; }
 
 if [ "${1:-}" = sheet ]; then
     $CC_HOST -std=c11 -O2 $INCLUDES -c src/userspace/boxlib/src/items_ring.c -o "$WORK/ring.o" &&

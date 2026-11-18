@@ -7,7 +7,6 @@ extern "C" {
 
 #include "box/types.h"
 #include "key_chord.h"
-#include "text_cell.h"
 
 /*
  * Console-stream protocol between a printing strand and the display daemon.
@@ -30,9 +29,9 @@ extern "C" {
  * the display's life ends first, the kernel's -ERR_PROCESS_NOT_FOUND — and
  * who asked is the kernel's word (AskFrom heads the question: the asker's
  * generation and its program), never the asker's. What an answer hands out —
- * a lane, a layer — is taken back when the answer reaches nobody because the
- * asker died first. What needs no answer (LISTEN, a layer's FRAME and CLOSE)
- * is a plain message to the display that granted the strand its lane.
+ * a lane, an area (box/items.h) — is taken back when the answer reaches
+ * nobody because the asker died first. What needs no answer (LISTEN, an
+ * area's STEP and CLOSE) is a plain message to the display that answered.
  */
 
 /* The tag the display wears: questions are asked of it. */
@@ -327,18 +326,18 @@ int display_places(DisplayPlace *places, uint32_t capacity, uint32_t *count);
  * --------------------------------------------------------------------------
  *
  * Any program may ask the display to lay an effect over everything it shows —
- * the console's text, every layer, the caret — for a while. The display only
- * changes how the picture is presented: what the programs drew, and what the
- * keeper's page colours are, stay as they are underneath, and are shown
- * as they were the moment the effect ends. Nothing a program reads back from
- * the display, a layer's cells or the console's, is touched.
+ * the console's text, every area's items, the caret — for a while. The
+ * display only changes how the picture is presented: what the programs drew,
+ * and what the keeper's page colours are, stay as they are underneath, and are
+ * shown as they were the moment the effect ends. Nothing a program reads back
+ * from the display, an area's items or the console's cells, is touched.
  *
  * What an effect is: a set of kinds, laid together, with one strength shared
  * by them, which swells in at the start and ebbs out at the end (a mirror has
  * no half-strength and comes and goes at once). Geometry first, then colour,
- * then the sparkles and the snow. A cell is the unit of every one of them: a
- * program that draws in half-block pixels has them moved and coloured by the
- * pixel pair, and the snow and the sparkles settle in the halves.
+ * then the sparkles and the snow. On a framebuffer an effect works on the
+ * glass's pixels, all of them alike, its waves, blocks, stars and flakes
+ * measured by the console's cells.
  *
  *   DISPLAY_EFFECT_SWAY      rows swing sideways (AXIS_X) and columns up and
  *                            down (AXIS_Y) in slow waves, the cells at the
@@ -352,8 +351,8 @@ int display_places(DisplayPlace *places, uint32_t capacity, uint32_t *count);
  *   DISPLAY_EFFECT_TINT      the colours seen through glass of `color`: each
  *                            of a cell's colours is multiplied by it
  *   DISPLAY_EFFECT_SHIMMER   sparkles come and go on the glass, in `color`
- *                            brightened — on the empty cells as stars, on the
- *                            text as a flash; the stronger, the more of them
+ *                            brightened — small crosses of light; the
+ *                            stronger, the more of them
  *   DISPLAY_EFFECT_RIPPLE    rings spread from the middle of the glass and the
  *                            picture is seen through them, bent outward and
  *                            inward as water bends it; the stronger, the higher
@@ -374,14 +373,16 @@ int display_places(DisplayPlace *places, uint32_t capacity, uint32_t *count);
  *   DISPLAY_EFFECT_SEPIA     an old film: the colours toned brown, the corners
  *                            darker, the light flickering, a scratch now and then
  *   DISPLAY_EFFECT_SNOW      flakes of `color` brightened fall in two layers, the
- *                            far ones slow and faint, over the empty cells and the
- *                            drawn pixels alike, the written text left alone
+ *                            far ones slow and faint, over all of the picture
  *   DISPLAY_EFFECT_PULSE     the picture breathes: it swells a little about the
  *                            middle of the glass and shrinks again
  *
  * On a text page, with its sixteen colours and its whole cells, every kind
- * is shown as nearly as that allows: a colour is quantized after the
- * effect changed it, and a swing moves whole cells.
+ * is shown as nearly as that allows: a cell is the unit of every one of them —
+ * a program that draws in half-block pixels has them moved and coloured by the
+ * pixel pair — a colour is quantized after the effect changed it, a swing
+ * moves whole cells, the sparkles are stars on the empty cells and a flash on
+ * the text, and the snow settles in the halves, the written text left alone.
  *
  * Who may ask: any program. An effect is time-limited and changes nothing but
  * the picture, so it asks no badge — and there is one at a time: a new one
@@ -462,197 +463,6 @@ typedef struct PACKED {
 /* The kind of notice `payload` is, 0 when it is none (a key, most often). */
 uint8_t console_notice_of(const void *payload, uint32_t length);
 
-/* --------------------------------------------------------------------------
- * Display layers
- * --------------------------------------------------------------------------
- *
- * ConsoleRun is the text stream; a layer is a picture a program keeps on the
- * screen, composed by the display over the base text by role, then age. The
- * display makes the layer's shared memory for the asking program alone (a Bay
- * made for one program, box/bay.h bay_create_for) and names it in the reply;
- * the program only opens it, and nobody else can. A cell may carry a mark the
- * display draws over its glyph in a colour of its own — a line under it, a
- * bar down its left side — so a caret a program draws stands on a letter and
- * covers nothing; folded into the text, a cell keeps its glyph and colours,
- * not its mark. The names are the display's
- * own and reused — display:layer:N — so the volume, which keeps every tag it
- * is ever told, learns as many as were ever shown at once. Three publish
- * slots: the writer fills a FREE one — with none FREE, the oldest READY, a
- * frame nobody will show — and marks it READY; the display takes the newest
- * READY and frees the rest.
- *
- * What a program may hold is bounded by the screen itself: the area of its
- * layers in one role, over all its strands, never exceeds the screen's —
- * there is no more than one screen of picture to show at one depth.
- *
- * Opening a layer and folding one into the text are QUESTIONS that care about
- * the console's order, so they carry it: `order` is the asker's
- * console_order_mark() (box/print.h) — everything it printed is in its lane,
- * and that is the number of its last frame. The display draws no frame
- * numbered past a waiting question's mark until it has answered it, and
- * answers once the asker's own frames up to the mark are drawn: the caret an
- * open names stands after the asker's text, and a fold lands exactly where it
- * was asked — after everything numbered before it, before everything after.
- */
-
-/* Questions: OPEN (DisplayLayerOpenRequest → DisplayLayerOpenReply) and
- * COMMIT (DisplayLayerCommitRequest → DisplayLayerCommitReply). Messages to
- * the display that granted the asker its layer: FRAME and CLOSE. */
-#define DISP_CMD_LAYER_OPEN   0x40
-#define DISP_CMD_LAYER_FRAME  0x41
-#define DISP_CMD_LAYER_CLOSE  0x42
-#define DISP_CMD_LAYER_COMMIT 0x43
-
-#define DISPLAY_LAYER_SLOTS     3u
-#define DISPLAY_LAYER_TAG_PREFIX "display:layer:"
-#define DISPLAY_LAYER_TAG_MAX   48u
-
-typedef enum {
-    DISPLAY_LAYER_SCENE   = 1,
-    DISPLAY_LAYER_OVERLAY = 2,
-    DISPLAY_LAYER_NOTICE  = 3,
-} DisplayLayerRole;
-
-/* What the glass is, said in every answer to an open: a text page of 16
- * colours, or a framebuffer. Text is 80x25 cells of the page's own font; on
- * pixels a cell is the display's typesetter's, sized by its settings. A
- * program that draws with more than the
- * cell grid asks this, and does not guess it from the size. */
-typedef enum {
-    DISPLAY_GLASS_TEXT   = 1,
-    DISPLAY_GLASS_PIXELS = 2,
-} DisplayGlassKind;
-
-/* Which grids finer than the halves the glass draws its cells' characters in
- * exactly, said in every answer to an open as the flags of `mosaics`: the
- * quadrants (two across, two down), the sextants (three down), the octants
- * (four down), the characters of boxos_mosaic.h. A cell of two colours on a
- * grid the glass has is then drawn as its pattern says, to the pixel. A
- * program that draws finer than a cell asks this, and does not guess it from
- * the kind of glass. */
-typedef enum {
-    DISPLAY_MOSAIC_QUADRANTS = 1,
-    DISPLAY_MOSAIC_SEXTANTS  = 2,
-    DISPLAY_MOSAIC_OCTANTS   = 4,
-} DisplayMosaic;
-
-typedef enum {
-    DISPLAY_LAYER_FREE    = 0,
-    DISPLAY_LAYER_WRITING = 1,
-    DISPLAY_LAYER_READY   = 2,
-    DISPLAY_LAYER_READING = 3,
-} DisplayLayerSlotState;
-
-typedef struct PACKED {
-    uint8_t  command;         /* DISP_CMD_LAYER_OPEN */
-    uint8_t  role;            /* DisplayLayerRole */
-    uint16_t flags;           /* none defined: 0 */
-    uint32_t reserved;
-    uint64_t order;           /* the asker's console_order_mark() */
-    int32_t  x;
-    int32_t  y;
-    uint32_t width;
-    uint32_t height;
-} DisplayLayerOpenRequest;
-
-typedef struct PACKED {
-    uint8_t  command;         /* DISP_CMD_LAYER_OPEN */
-    uint8_t  glass;           /* DisplayGlassKind; given with an error as well */
-    uint8_t  mosaics;         /* DisplayMosaic flags; given with an error as well */
-    uint8_t  reserved;
-    int32_t  error;           /* error_t; the rest is meaningful only with 0 */
-    uint32_t layer_id;
-    uint32_t display_pid;     /* where FRAME and CLOSE go */
-    uint32_t cols;            /* the console, in cells */
-    uint32_t rows;
-    uint32_t cursor_x;        /* where the console's caret stands after the asker's text */
-    uint32_t cursor_y;
-    char     bay_tag[DISPLAY_LAYER_TAG_MAX];   /* the layer's memory, NUL-terminated */
-} DisplayLayerOpenReply;
-
-typedef struct PACKED {
-    uint8_t  command;         /* DISP_CMD_LAYER_COMMIT */
-    uint8_t  reserved[3];
-    uint32_t layer_id;
-    uint32_t scroll_up;       /* base rows scrolled away before the fold */
-    uint32_t reserved2;
-    uint64_t order;           /* the asker's console_order_mark() */
-} DisplayLayerCommitRequest;
-
-typedef struct PACKED {
-    uint8_t  command;         /* DISP_CMD_LAYER_COMMIT */
-    uint8_t  reserved[3];
-    int32_t  error;           /* error_t: 0 — the layer is text now, and gone */
-} DisplayLayerCommitReply;
-
-typedef struct PACKED {
-    uint8_t  command;
-    uint8_t  reserved[3];
-    uint32_t layer_id;
-    uint32_t generation;
-} DisplayLayerCloseRequest;
-
-typedef struct PACKED {
-    uint8_t  command;
-    uint8_t  reserved[3];
-    uint32_t layer_id;
-    uint32_t generation;
-} DisplayLayerFrameNotice;
-
-/* The shared Bay header is deliberately fixed-size and contains only POD
- * fields. The display writes the geometry before it answers; slot state is
- * changed with compiler atomics by both cabins. */
-typedef struct {
-    uint32_t magic;
-    uint32_t width;
-    uint32_t height;
-    uint32_t cell_count;
-    uint32_t slot_count;
-    uint32_t slot_state[DISPLAY_LAYER_SLOTS];
-    uint64_t sequence[DISPLAY_LAYER_SLOTS];
-    uint32_t cursor_x[DISPLAY_LAYER_SLOTS];
-    uint32_t cursor_y[DISPLAY_LAYER_SLOTS];
-    uint32_t cursor_visible[DISPLAY_LAYER_SLOTS];
-} DisplayLayerSharedHeader;
-
-/* What a cell's mark is: drawn in the cell's MarkColor over its glyph, on a
- * framebuffer as pixels; the text page has none, and shows a marked cell in
- * the mark's colour behind its glyph instead. */
-typedef enum {
-    DISPLAY_CELL_MARK_NONE  = 0,
-    DISPLAY_CELL_MARK_UNDER = 1,   /* a line under the glyph: the cell's two lowest pixel rows */
-    DISPLAY_CELL_MARK_BAR   = 2,   /* a bar down its left side: the cell's two leftmost pixel columns */
-} DisplayCellMark;
-
-typedef struct {
-    TextCell Cell;            /* fg and bg: #RRGGBB, COLOR_DEFAULT, COLOR_THROUGH (the
-                                 background of whatever lies beneath the cell), or a
-                                 translucent colour: #RRGGBB at an opacity over it
-                                 (top byte 0x80..0xBF, boxos_color.h) */
-    uint32_t MarkColor;       /* #RRGGBB, or COLOR_DEFAULT: the screen's text colour */
-    uint8_t  Opaque;
-    uint8_t  Mark;            /* DisplayCellMark; another is none */
-    uint8_t  Reserved[2];
-} DisplayLayerCell;
-
-#define DISPLAY_LAYER_MAGIC 0x4C594552u /* "LYER" */
-
-STATIC_ASSERT(sizeof(DisplayLayerSharedHeader) == 96,
-              "DisplayLayerSharedHeader is a Bay ABI and must stay 96 bytes");
-STATIC_ASSERT(sizeof(DisplayLayerOpenRequest) == 32,
-              "DisplayLayerOpenRequest is a question's ABI and must stay 32 bytes");
-STATIC_ASSERT(sizeof(DisplayLayerOpenReply) == 80,
-              "DisplayLayerOpenReply is an answer's ABI and must stay 80 bytes");
-STATIC_ASSERT(sizeof(DisplayLayerCommitRequest) == 24,
-              "DisplayLayerCommitRequest is a question's ABI and must stay 24 bytes");
-STATIC_ASSERT(sizeof(DisplayLayerCommitReply) == 8,
-              "DisplayLayerCommitReply is an answer's ABI and must stay 8 bytes");
-STATIC_ASSERT(sizeof(DisplayLayerCell) == 20,
-              "DisplayLayerCell is a Bay ABI and must stay 20 bytes");
-STATIC_ASSERT(sizeof(DisplayLayerCloseRequest) == 12,
-              "DisplayLayerCloseRequest is a message ABI and must stay 12 bytes");
-STATIC_ASSERT(sizeof(DisplayLayerFrameNotice) == 12,
-              "DisplayLayerFrameNotice is a message ABI and must stay 12 bytes");
 STATIC_ASSERT(sizeof(DisplayFrontRequest) == 12 && sizeof(DisplayPageRequest) == 12 &&
                   sizeof(DisplayFrontReply) == 12 && sizeof(DisplayKeysRequest) == 4 && sizeof(KeyChord) == 4 &&
                   sizeof(DisplayPlacesReply) == 4 && sizeof(DisplayPlace) == 12 &&

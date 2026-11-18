@@ -71,6 +71,12 @@ error_t Apply(const ItemRecord &Head, std::span<const std::uint8_t> Body, Tree &
         if (Tell.BlockChanged) Tell.BlockChanged(Head.Item, Where);
         return OK;
     }
+    case ITEM_OP_CELLS: {
+        ItemCellsRun Run{};
+        if (Body.size() < sizeof(Run)) return ERR_INVALID_ARGUMENT;
+        std::memcpy(&Run, Body.data(), sizeof(Run));
+        return Items.Cells(Head.Item, Run, Body.subspan(sizeof(Run)));
+    }
     case ITEM_OP_STEP: {
         ItemStep Step{};
         if (Body.size() < sizeof(Step)) return ERR_INVALID_ARGUMENT;

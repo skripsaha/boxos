@@ -6,9 +6,10 @@
  *
  * BoxOS colour is metadata, never an in-band escape sequence. A colour
  * travels the whole path as a packed 0x00RRGGBB value: printf run → console
- * lane frame → TextCell → the glass. A framebuffer renders the value exactly;
- * the VGA text page quantises to its 16-entry hardware palette AT DRAW TIME —
- * the last moment, in the one place that actually has a 4-bit limitation.
+ * lane frame → a cell (box/items.h ItemCell) → the glass. A framebuffer
+ * renders the value exactly; the VGA text page quantises to its 16-entry
+ * hardware palette AT DRAW TIME — the last moment, in the one place that
+ * actually has a 4-bit limitation.
  * Nothing upstream ever rounds. (The kernel's own lines carry no colour at
  * all, only a Tone — boxos_log_tone.h.)
  *

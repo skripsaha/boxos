@@ -1,8 +1,8 @@
 /*
  * boxos_glyph_fold.h — one contract on a character, held where the glyphs are.
  *
- * BoxOS speaks UTF-8 and a cell of the glass holds a character (text_cell.h).
- * A VGA text page draws a cell with the adapter's own 256-glyph CP437 font,
+ * BoxOS speaks UTF-8 and a cell of the glass holds a character (box/items.h
+ * ItemCell). A VGA text page draws a cell with the adapter's own 256-glyph CP437 font,
  * which cannot draw them all, so the fold from a codepoint to one of its
  * glyphs happens at the text page and nowhere upstream, in the two hands that
  * write one: the display program, a cell at a time (BoxGlyphFoldOne), and the

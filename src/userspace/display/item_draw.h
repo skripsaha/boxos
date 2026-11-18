@@ -4,8 +4,9 @@
 // An item drawn: its text laid out and its size measured where its content
 // decides it, its picture kept where drawing it again would cost — a text, a
 // shape of gradients, strokes or shadows, a canvas's page — or drawn straight
-// where the frame needs it, as a shape of plain colours, a picture and
-// anything turned or scaled are. Everything an item says is in points; it is
+// where the frame needs it, as a shape of plain colours, a picture, cells and
+// anything turned or scaled are. Cells are the console's look (cells_draw.h),
+// their size their grid's. Everything an item says is in points; it is
 // drawn at the screen's scale, through Painter's engine (painter/core), each
 // pixel as every other hand of BoxOS covers and lays it.
 
@@ -15,6 +16,7 @@
 #include <optional>
 #include <vector>
 
+#include "cells_draw.h"
 #include "item_look.h"
 #include "item_tree.h"
 #include "painter/core/canvas.h"
@@ -29,7 +31,9 @@ namespace items {
 struct Sources {
     const Theme           *Look  = nullptr;
     float                  Scale = 1.0f;     // pixels to a point
-    const typecase::Fonts *Book  = nullptr;  // the system's fonts and the program's own
+    // The system's fonts and the program's own, asked when a text is laid.
+    std::function<const typecase::Fonts &()> Book;
+    const CellsLook       *Cells = nullptr;  // the console's look, every cells item's
     // A picture block as a picture; none for a block the program does not have.
     std::function<std::shared_ptr<const painter::core::Picture>(std::uint32_t)> PictureOf;
     // A canvas block's page last shown; none likewise.

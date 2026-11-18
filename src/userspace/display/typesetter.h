@@ -17,8 +17,8 @@
 // font, then the imprint the hands that cannot read a font draw with
 // (boxos_imprint.h), and a character none of them draws shown as its code —
 // and the pictures kept for when they are asked again. It reads no file and
-// touches no pixel: the display gives it a font already read, and the easel
-// puts its pictures on the glass.
+// touches no pixel: the display gives it a font already read, and the cells
+// are drawn with its pictures (cells_draw.h).
 class Typesetter {
 public:
     // Type for cells Height pixels tall: Face's, the cell as wide as its
@@ -35,7 +35,7 @@ public:
     // cell that shows nothing. It holds until the next Glyph.
     const typecase::GlyphImage &Glyph(char32_t Character) noexcept;
 
-    // The grids of mosaics a cell draws exactly (DisplayMosaic flags).
+    // The grids of mosaics a cell draws exactly (box/items.h ITEM_MOSAIC_*).
     std::uint8_t Mosaics() const noexcept { return Grids; }
 
 private:

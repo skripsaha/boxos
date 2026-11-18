@@ -11,6 +11,9 @@
 // Every change is held to the program's bounds (box/items.h ITEM_*_MOST),
 // counted over all its areas in its Budget; a change past one is refused and
 // changes nothing.
+//
+// A cells item holds its grid (cell_grid.h) once its grid is said: its cells
+// written a run at a time, only where they changed marked for the drawing.
 
 #include <cstddef>
 #include <cstdint>
@@ -22,6 +25,7 @@
 
 #include "box/error.h"
 #include "box/items.h"
+#include "cell_grid.h"
 #include "item_wire.h"
 #include "painter/core/geometry.h"
 
@@ -38,6 +42,7 @@ struct DropDrawing {
 struct Budget {
     std::uint32_t Items     = 0;
     std::size_t   TextBytes = 0;
+    std::size_t   Cells     = 0;
 };
 
 struct Item {
@@ -48,6 +53,7 @@ struct Item {
     std::uint32_t              Depth  = 1;        // groups above it, and itself
     std::vector<std::uint32_t> Children;          // a group's, bottom to top
     Properties                 Said;
+    std::shared_ptr<CellGrid>  Grid;              // a cells item's, once its grid is said
 
     // Marked for the drawing, and taken by it.
     bool Redraw  = true;     // its look, size or content changed: its picture is drawn again
@@ -69,6 +75,14 @@ public:
     error_t Restack(std::uint32_t Id, const ItemPlaceAmong &How) noexcept;
     error_t Change(std::uint32_t Id, std::uint16_t Property, std::span<const std::uint8_t> Value) noexcept;
     error_t Reset(std::uint32_t Id, std::uint16_t Property) noexcept;
+    // A cells item's cells written along a row: Bytes holds Run.Count of
+    // them (ITEM_OP_CELLS).
+    error_t Cells(std::uint32_t Id, const ItemCellsRun &Run, std::span<const std::uint8_t> Bytes) noexcept;
+    // A cells item shows Grid, kept and written by another hand — the
+    // console's by its model; its grid said as Grid's.
+    error_t Show(std::uint32_t Id, std::shared_ptr<CellGrid> Grid) noexcept;
+    // A cells item's grid changed under it: looked at by the next frame.
+    void CellsChanged(std::uint32_t Id) noexcept;
     // Every item showing Block marked to be drawn again: its pixels changed.
     void BlockChanged(std::uint32_t Block) noexcept;
     // Every item marked to be drawn again: what everything is drawn from
@@ -91,6 +105,7 @@ private:
     void Mark(Item &Of, bool Picture, bool Place) noexcept;
     void MarkUp(std::uint32_t Parent) noexcept;
     void Forget(Item &Of) noexcept;
+    error_t Regrid(Item &Of) noexcept;
     void Uses(const Item &Of, bool Add) noexcept;
     error_t Place(std::uint32_t Id, std::uint32_t Parent, std::uint32_t Above, std::uint32_t &Depth) noexcept;
 

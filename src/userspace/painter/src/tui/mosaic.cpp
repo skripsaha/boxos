@@ -253,9 +253,9 @@ bool Uniform(const Mosaic &Wanted)
 bool Draws(std::uint8_t Mosaics, std::uint8_t Rows)
 {
     switch (Rows) {
-    case BOXOS_MOSAIC_QUADRANTS_ROWS: return (Mosaics & DISPLAY_MOSAIC_QUADRANTS) != 0;
-    case BOXOS_MOSAIC_SEXTANTS_ROWS:  return (Mosaics & DISPLAY_MOSAIC_SEXTANTS) != 0;
-    case BOXOS_MOSAIC_OCTANTS_ROWS:   return (Mosaics & DISPLAY_MOSAIC_OCTANTS) != 0;
+    case BOXOS_MOSAIC_QUADRANTS_ROWS: return (Mosaics & ITEM_MOSAIC_QUADRANTS) != 0;
+    case BOXOS_MOSAIC_SEXTANTS_ROWS:  return (Mosaics & ITEM_MOSAIC_SEXTANTS) != 0;
+    case BOXOS_MOSAIC_OCTANTS_ROWS:   return (Mosaics & ITEM_MOSAIC_OCTANTS) != 0;
     default:                          return false;
     }
 }

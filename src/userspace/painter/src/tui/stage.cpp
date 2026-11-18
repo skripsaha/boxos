@@ -6,18 +6,18 @@
 
 #include "painter/tui/keyboard.h"
 
-#include "display_client.h"
+#include "cells_area.h"
 
 namespace painter::tui {
 
 struct Stage::Impl {
-    Frame        FrameBuffer;
-    DisplayLayer Layer;
-    Keyboard     Ear;
-    bool         Opened = true;
+    Frame     FrameBuffer;
+    CellsArea Area;
+    Keyboard  Ear;
+    bool      Opened = true;
 
-    Impl(Frame FrameValue, DisplayLayer LayerValue, Keyboard EarValue) noexcept
-        : FrameBuffer(std::move(FrameValue)), Layer(std::move(LayerValue)), Ear(std::move(EarValue))
+    Impl(Frame FrameValue, CellsArea AreaValue, Keyboard EarValue) noexcept
+        : FrameBuffer(std::move(FrameValue)), Area(std::move(AreaValue)), Ear(std::move(EarValue))
     {
     }
 };
@@ -44,23 +44,23 @@ std::string StageError::Describe(std::string_view Subject) const
 
 std::expected<Stage, StageError> Stage::Open(std::int32_t LeastCols, std::int32_t LeastRows) noexcept
 {
-    std::expected<DisplayLayer, StageError> Layer = DisplayLayer::Open(LeastCols, LeastRows, DISPLAY_LAYER_SCENE);
-    if (!Layer) return std::unexpected(Layer.error());
+    std::expected<CellsArea, StageError> Area = CellsArea::Open(LeastCols, LeastRows, CellsArea::Where::Screen);
+    if (!Area) return std::unexpected(Area.error());
 
     // What goes unmade below is given back by its own destructor.
-    const core::Size Actual = Layer->Size();
+    const core::Size Actual = Area->Size();
     const core::Size Required{LeastCols, LeastRows};
     box::result<Frame> Created = Frame::Create(Actual);
     if (!Created)
         return std::unexpected(StageError{StageErrorKind::FrameUnavailable, Created.error(), Actual, Required});
-    Created->SetGlass(Layer->Glass());
-    Created->SetMosaics(Layer->Mosaics());
+    Created->SetGlass(Area->Glass());
+    Created->SetMosaics(Area->Mosaics());
 
     std::expected<Keyboard, StageError> Ear = Keyboard::Open();
     if (!Ear) return std::unexpected(Ear.error());
 
     try {
-        return Stage(std::make_unique<Impl>(std::move(*Created), std::move(*Layer), std::move(*Ear)));
+        return Stage(std::make_unique<Impl>(std::move(*Created), std::move(*Area), std::move(*Ear)));
     } catch (const std::bad_alloc &) {
         return std::unexpected(StageError{StageErrorKind::FrameUnavailable, box::error{box::errc::no_memory},
                                           Actual, Required});
@@ -86,17 +86,17 @@ Stage::~Stage()
 
 core::Size Stage::Size() const noexcept
 {
-    return State ? State->Layer.Size() : core::Size{};
+    return State ? State->Area.Size() : core::Size{};
 }
 
 GlassKind Stage::Glass() const noexcept
 {
-    return State ? State->Layer.Glass() : GlassKind::Pixels;
+    return State ? State->Area.Glass() : GlassKind::Pixels;
 }
 
 std::uint8_t Stage::Mosaics() const noexcept
 {
-    return State ? State->Layer.Mosaics() : 0;
+    return State ? State->Area.Mosaics() : 0;
 }
 
 bool Stage::IsOpen() const noexcept
@@ -117,7 +117,7 @@ const Frame &Stage::FrameBuffer() const noexcept
 box::status Stage::Present() noexcept
 {
     if (!IsOpen()) return std::unexpected(box::error{box::errc::invalid_state});
-    return State->Layer.Present(State->FrameBuffer);
+    return State->Area.Present(State->FrameBuffer);
 }
 
 Event Stage::Poll() noexcept
@@ -143,7 +143,7 @@ box::status Stage::Close() noexcept
 
     State->Opened = false;
     (void)State->Ear.Close();
-    return State->Layer.Close();
+    return State->Area.Close();
 }
 
 }  // namespace painter::tui

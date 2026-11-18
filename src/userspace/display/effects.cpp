@@ -7,6 +7,7 @@
 
 #include "box/clock.h"
 #include "box/color.h"
+#include "boxos_pixel.h"
 #include "effects_ink.h"
 #include "effects_warp.h"
 
@@ -140,8 +141,8 @@ std::uint64_t EffectsDue() noexcept
     return g_laid.On ? g_laid.NextMs : 0;
 }
 
-void EffectsApply(std::span<const GlassCell> Composed, std::vector<GlassCell> &Glass, Caret &At,
-                  std::uint32_t Cols, std::uint32_t Rows, std::uint32_t Ink, std::uint32_t Paper)
+void EffectsApply(std::span<const ItemCell> Composed, std::vector<ItemCell> &Glass, Caret &At, std::uint32_t Cols,
+                  std::uint32_t Rows, std::uint32_t Ink, std::uint32_t Paper)
 {
     static effects::Warp Plan;
     static effects::Ink Colours;
@@ -161,7 +162,7 @@ void EffectsApply(std::span<const GlassCell> Composed, std::vector<GlassCell> &G
             const std::size_t From = static_cast<std::size_t>(Taken.Y) * Cols + static_cast<std::size_t>(Taken.X);
             const std::size_t To = static_cast<std::size_t>(Y) * Cols + X;
 
-            GlassCell Cell = Composed[From];
+            ItemCell Cell = Composed[From];
             if (From == Seen && !Carried) {
                 At.X = X;
                 At.Y = Y;
@@ -176,10 +177,10 @@ void EffectsApply(std::span<const GlassCell> Composed, std::vector<GlassCell> &G
             }
             if (Colours.Any) {
                 const std::uint32_t Light = effects::InkLight(Colours, Now, static_cast<std::int32_t>(X), static_cast<std::int32_t>(Y));
-                Cell.Cell.fg = effects::InkColour(Colours, Cell.Cell.fg, Ink, static_cast<std::int32_t>(X), Light);
-                Cell.Cell.bg = effects::InkColour(Colours, Cell.Cell.bg, Paper, static_cast<std::int32_t>(X), Light);
-                if (Cell.Mark != DISPLAY_CELL_MARK_NONE)
-                    Cell.MarkColor = effects::InkColour(Colours, Cell.MarkColor, Ink, static_cast<std::int32_t>(X), Light);
+                Cell.Ink   = effects::InkColour(Colours, Cell.Ink, Ink, static_cast<std::int32_t>(X), Light);
+                Cell.Paper = effects::InkColour(Colours, Cell.Paper, Paper, static_cast<std::int32_t>(X), Light);
+                if (Cell.Mark != ITEM_MARK_NONE)
+                    Cell.MarkInk = effects::InkColour(Colours, Cell.MarkInk, Ink, static_cast<std::int32_t>(X), Light);
                 if (static_cast<std::int32_t>(X) == Colours.Scratch[0] || static_cast<std::int32_t>(X) == Colours.Scratch[1])
                     effects::InkScratch(Cell, Ink);
             }
@@ -192,4 +193,94 @@ void EffectsApply(std::span<const GlassCell> Composed, std::vector<GlassCell> &G
     }
     if (Now.Kinds & DISPLAY_EFFECT_SNOW) effects::InkSnow(Glass, Now, Ink, Paper);
     At.Visible = At.Visible && Carried;
+}
+
+void EffectsPaint(const std::uint32_t *Picture, std::size_t Stride, std::uint32_t Width, std::uint32_t Height,
+                  std::uint32_t *Glass, std::size_t GlassStride, std::uint32_t Format, std::uint32_t Ink, std::uint32_t Across,
+                  std::uint32_t Down)
+{
+    static effects::Warp       Plan;
+    static effects::Ink        Colours;
+    static std::vector<std::uint32_t> Row, Lit;
+    if (Width == 0 || Height == 0) return;
+    const effects::Moment Now{g_laid.Request.kinds, g_laid.Request.strength, g_laid.Request.color, g_laid.Request.axes,
+                              g_laid.Level,         g_laid.PhaseMs,          g_laid.Frame,         Width,
+                              Height,               1,                       std::max<std::uint32_t>(1, Across),
+                              std::max<std::uint32_t>(1, Down)};
+    effects::WarpPlan(Plan, Now);
+    effects::InkPlan(Colours, Now);
+    const bool Moves = (Now.Kinds & (DISPLAY_EFFECT_SWAY | DISPLAY_EFFECT_MIRROR | DISPLAY_EFFECT_RIPPLE | DISPLAY_EFFECT_QUAKE |
+                                     DISPLAY_EFFECT_MOSAIC | DISPLAY_EFFECT_MELT | DISPLAY_EFFECT_GLITCH | DISPLAY_EFFECT_PULSE)) != 0;
+    const auto Cols = static_cast<std::int32_t>(Width);
+    const auto At   = [&](std::int32_t X, std::int32_t Y) { return Picture[static_cast<std::size_t>(Y) * Stride + static_cast<std::size_t>(X)]; };
+    const auto Put  = [Format](std::uint32_t Colour) { return BoxPixelEncode(Colour, Format); };
+
+    /* A pixel as the effect shows it, before the stars and the snow: taken
+     * from where the picture moved, its colours come apart where a band tore,
+     * graded, lit, scratched. */
+    const auto Shown = [&](std::int32_t X, std::int32_t Y) {
+        std::int32_t FromX = X, FromY = Y;
+        if (Moves) {
+            const effects::Source Taken = effects::WarpSource(Plan, Now, X, Y);
+            FromX = Taken.X, FromY = Taken.Y;
+        }
+        std::uint32_t Colour = At(FromX, FromY);
+        if (const std::int32_t Apart = Plan.Split[static_cast<std::size_t>(Y)]; Apart != 0)
+            Colour = effects::InkApart(Colour, At(effects::Wrap(FromX - Apart, Cols), FromY), At(effects::Wrap(FromX + Apart, Cols), FromY));
+        if (Colours.Any)
+            Colour = effects::InkColour(Colours, Colour, Ink, X, effects::InkLight(Colours, Now, X, Y));
+        for (const std::int32_t Scratch : Colours.Scratch)
+            if (Scratch >= 0 && X >= Scratch && X < Scratch + Colours.ScratchWide) Colour = effects::InkScratched(Colour);
+        return Colour & 0x00FFFFFFu;
+    };
+
+    /* The stars of a shimmer: in a cell's square of pixels now and then, a
+     * small cross of light at its middle. */
+    const std::uint32_t Squares = (Width + Now.Across - 1) / Now.Across;
+    const std::int32_t  Arm     = static_cast<std::int32_t>(std::max<std::uint32_t>(1, Now.Across / 4));
+    try {
+        Row.resize(Width);
+        Lit.resize(Squares);
+    } catch (...) {
+        return;
+    }
+    std::uint32_t LitRow = UINT32_MAX;
+    for (std::uint32_t Y = 0; Y < Height; Y++) {
+        if (Colours.Sparkle != 0 && Y / Now.Down != LitRow) {
+            LitRow = Y / Now.Down;
+            for (std::uint32_t Square = 0; Square < Squares; Square++) {
+                const std::uint32_t Roll = effects::Hash((LitRow * Squares + Square) * 2654435761u + (g_laid.Frame >> 1));
+                Lit[Square] = Roll % 1000u < Colours.Sparkle ? 1u : 0u;
+            }
+        }
+        for (std::uint32_t X = 0; X < Width; X++) {
+            std::uint32_t Colour = Shown(static_cast<std::int32_t>(X), static_cast<std::int32_t>(Y));
+            if (Colours.Sparkle != 0 && Lit[X / Now.Across]) {
+                const std::int32_t DX = static_cast<std::int32_t>(X % Now.Across) - static_cast<std::int32_t>(Now.Across / 2);
+                const std::int32_t DY = static_cast<std::int32_t>(Y % Now.Down) - static_cast<std::int32_t>(Now.Down / 2);
+                if ((DY == 0 && DX >= -Arm && DX <= Arm) || (DX == 0 && DY >= -Arm && DY <= Arm)) Colour = Colours.Star;
+            }
+            Row[X] = Put(Colour);
+        }
+        std::copy(Row.begin(), Row.end(), Glass + static_cast<std::size_t>(Y) * GlassStride);
+    }
+
+    /* The snow over all of it: each flake a small round of light, laid over
+     * the pixels it falls on as the effect shows them. */
+    if (Now.Kinds & DISPLAY_EFFECT_SNOW) {
+        const std::int32_t Reach = static_cast<std::int32_t>(std::max<std::uint32_t>(1, Now.Across / 5));
+        effects::InkFlakes(Now, [&](std::int32_t X, std::int32_t Y, std::uint32_t Flake, std::uint32_t Weight) {
+            for (std::int32_t DY = -Reach; DY <= Reach; DY++)
+                for (std::int32_t DX = -Reach; DX <= Reach; DX++) {
+                    const std::int32_t Far = DX * DX + DY * DY;
+                    if (Far > Reach * Reach) continue;
+                    const std::int32_t PX = X + DX, PY = Y + DY;
+                    if (PX < 0 || PY < 0 || PX >= Cols || PY >= static_cast<std::int32_t>(Height)) continue;
+                    const std::uint32_t Soft = Weight * static_cast<std::uint32_t>(Reach * Reach + 1 - Far) /
+                                               static_cast<std::uint32_t>(Reach * Reach + 1);
+                    Glass[static_cast<std::size_t>(PY) * GlassStride + static_cast<std::size_t>(PX)] =
+                        Put(BoxColorOver(Shown(PX, PY), Flake, effects::Share(Soft)));
+                }
+        });
+    }
 }

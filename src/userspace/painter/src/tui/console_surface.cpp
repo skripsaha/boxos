@@ -3,22 +3,21 @@
 #include <new>
 #include <utility>
 
-#include "layer_canvas.h"
+#include "kept_cells.h"
 
 namespace painter::tui {
 
 struct ConsoleSurface::Impl {
-    LayerCanvas Canvas;
+    KeptCells Canvas;
     std::uint32_t ScrollRows = 0;
 
-    explicit Impl(LayerCanvas Value) noexcept : Canvas(std::move(Value)) {}
+    explicit Impl(KeptCells Value) noexcept : Canvas(std::move(Value)) {}
 };
 
 std::expected<ConsoleSurface, StageError> ConsoleSurface::Open(std::int32_t LeastCols,
                                                                 std::int32_t LeastRows) noexcept
 {
-    std::expected<LayerCanvas, StageError> Opened =
-        LayerCanvas::Open(LeastCols, LeastRows, DISPLAY_LAYER_OVERLAY);
+    std::expected<KeptCells, StageError> Opened = KeptCells::Open(LeastCols, LeastRows, CellsArea::Where::Over);
     if (!Opened) return std::unexpected(Opened.error());
     try {
         return ConsoleSurface(std::unique_ptr<Impl>(new Impl(std::move(*Opened))));

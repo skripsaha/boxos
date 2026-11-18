@@ -227,6 +227,10 @@ void Changes::Remove(std::uint32_t Item)
 {
     /* What it was to say goes with it. */
     Properties.erase(Properties.lower_bound({Item, 0}), Properties.upper_bound({Item, 0xFFFF}));
+    if (const auto Kept = Grids.find(Item); Kept != Grids.end()) {
+        for (const auto &Row : Kept->second.Marked) CellsMarked -= Row.first < Row.second;
+        Grids.erase(Kept);
+    }
     Ordered.emplace_back(Item, Make(ITEM_OP_REMOVE, Item, {}));
 }
 
@@ -443,38 +447,142 @@ void Changes::Role(std::uint32_t Item, gui::Role Role)
     Put(Item, ITEM_PROP_ROLE, std::move(Value.Bytes));
 }
 
+void Changes::Grid(std::uint32_t Item, std::uint32_t Cols, std::uint32_t Rows)
+{
+    if (Cols == 0 || Rows == 0 || Cols > ITEM_GRID_SIDE_MOST || Rows > ITEM_GRID_SIDE_MOST) {
+        RefusedCount++;
+        return;
+    }
+    Writer Value;
+    Value.Put(ItemGrid{Cols, Rows});
+    Put(Item, ITEM_PROP_GRID, std::move(Value.Bytes));
+    /* The display's grid anew shows nothing: so does the one kept here, and
+     * nothing said of the old one goes. */
+    KeptCells &Kept = Grids[Item];
+    for (const auto &Row : Kept.Marked) CellsMarked -= Row.first < Row.second;
+    Kept.Cols = Cols;
+    Kept.Rows = Rows;
+    Kept.Cells.assign(static_cast<std::size_t>(Cols) * Rows, item_cell_empty());
+    Kept.Marked.assign(Rows, {0, 0});
+}
+
+void Changes::Cells(std::uint32_t Item, std::uint32_t Row, std::uint32_t Col, std::span<const ItemCell> Cells)
+{
+    const auto Found = Grids.find(Item);
+    if (Found == Grids.end() || Row >= Found->second.Rows || Col >= Found->second.Cols) {
+        RefusedCount++;
+        return;
+    }
+    KeptCells          &Kept  = Found->second;
+    const std::uint32_t Count = static_cast<std::uint32_t>(std::min<std::size_t>(Cells.size(), Kept.Cols - Col));
+    ItemCell           *Line  = Kept.Cells.data() + static_cast<std::size_t>(Row) * Kept.Cols;
+    auto               &Mark  = Kept.Marked[Row];
+    for (std::uint32_t I = 0; I < Count; I++) {
+        if (std::memcmp(&Line[Col + I], &Cells[I], sizeof(ItemCell)) == 0) continue;
+        Line[Col + I] = Cells[I];
+        if (Mark.first == Mark.second) {
+            Mark = {Col + I, Col + I + 1};
+            CellsMarked++;
+        } else {
+            Mark = {std::min(Mark.first, Col + I), std::max(Mark.second, Col + I + 1)};
+        }
+    }
+}
+
+void Changes::Caret(std::uint32_t Item, std::optional<core::Point> At)
+{
+    Writer Value;
+    Value.Put(ItemCaret{At ? static_cast<std::uint32_t>(std::max(At->X, 0)) : 0u,
+                        At ? static_cast<std::uint32_t>(std::max(At->Y, 0)) : 0u, static_cast<std::uint8_t>(At.has_value()), {}});
+    Put(Item, ITEM_PROP_CARET, std::move(Value.Bytes));
+}
+
 std::size_t Changes::Bytes() const noexcept
 {
     std::size_t Total = 0;
     for (const auto &Each : Ordered) Total += Each.second.size();
     for (const auto &Each : Properties) Total += Each.second.size();
+    for (const auto &[Item, Kept] : Grids)
+        for (const auto &Row : Kept.Marked)
+            if (Row.first < Row.second)
+                Total += (sizeof(ItemRecord) + sizeof(ItemCellsRun) + (Row.second - Row.first) * sizeof(ItemCell) + 7u) & ~std::size_t{7};
     return Total;
+}
+
+/* Each row's marked stretch of each cells item, into the ring by Into, as
+ * far as it has room — in runs of no more than Most cells, so a run is never
+ * more than a ring can hold: true when none waits. */
+bool Changes::FlushCells(const auto &Into, std::uint32_t Most)
+{
+    for (auto &[Item, Kept] : Grids)
+        for (std::uint32_t Row = 0; Row < Kept.Rows; Row++) {
+            auto &Mark = Kept.Marked[Row];
+            if (Mark.first == Mark.second) continue;
+            while (Mark.first != Mark.second) {
+                const std::uint32_t Count = std::min(Mark.second - Mark.first, Most);
+                Writer              Body;
+                Body.Put(ItemCellsRun{Row, Mark.first, Count, 0});
+                const ItemCell *From  = Kept.Cells.data() + static_cast<std::size_t>(Row) * Kept.Cols + Mark.first;
+                const auto     *Bytes = reinterpret_cast<const std::uint8_t *>(From);
+                Body.Bytes.insert(Body.Bytes.end(), Bytes, Bytes + static_cast<std::size_t>(Count) * sizeof(ItemCell));
+                if (!Into(Make(ITEM_OP_CELLS, Item, Body.Bytes))) return false;
+                Mark.first += Count;
+            }
+            Mark = {0, 0};
+            CellsMarked--;
+        }
+    return true;
 }
 
 bool Changes::Flush(std::uint8_t *Ring, std::uint32_t Bytes, std::uint64_t &Write, std::uint64_t Read, std::uint64_t Step)
 {
+    /* A record goes in only while room stays for the step's end after it — a
+     * step record, and the pad to the ring's end it may need. */
+    constexpr std::uint32_t EndRoom = 32;
     const auto Into = [&](const Record &Made) {
-        std::uint8_t *At = item_ring_place(Ring, Bytes, &Write, Read, static_cast<std::uint32_t>(Made.size()));
-        if (!At) return false;
+        std::uint64_t Tried = Write;
+        std::uint8_t *At    = item_ring_place(Ring, Bytes, &Tried, Read, static_cast<std::uint32_t>(Made.size()));
+        if (!At || Bytes - (Tried - Read) < EndRoom) return false;
+        if (Open == NoStep) Open = Write;
         std::memcpy(At, Made.data(), Made.size());
+        Write = Tried;
         WrittenBytes += Made.size();
         return true;
     };
+    const auto End = [&] {
+        Writer Body;
+        Body.Put(ItemStep{Step});
+        const Record  Made = Make(ITEM_OP_STEP, 0, Body.Bytes);
+        std::uint8_t *At   = item_ring_place(Ring, Bytes, &Write, Read, static_cast<std::uint32_t>(Made.size()));
+        if (!At) return false;
+        std::memcpy(At, Made.data(), Made.size());
+        WrittenBytes += Made.size();
+        Open    = NoStep;
+        StepDue = false;
+        return true;
+    };
+    /* What does not fit waits for the display to read what is before it — a
+     * step whole or not at all. Only a step that alone fills the ring, with
+     * nothing before it left to read, cannot wait: what of it is in goes as a
+     * step of its own, the rest in the next. */
+    const auto Short = [&] {
+        if (Open != NoStep && Read >= Open) (void)End();
+        return false;
+    };
     if (!Empty()) StepDue = true;
     /* What makes, moves and removes items, in the order it was said; each
-     * property after it, as last said. */
+     * property after it, as last said; then the cells that changed. */
     std::size_t Done = 0;
     while (Done < Ordered.size() && Into(Ordered[Done].second)) Done++;
     Ordered.erase(Ordered.begin(), Ordered.begin() + static_cast<std::ptrdiff_t>(Done));
-    if (!Ordered.empty()) return false;
+    if (!Ordered.empty()) return Short();
     while (!Properties.empty() && Into(Properties.begin()->second)) Properties.erase(Properties.begin());
-    if (!Properties.empty()) return false;
+    if (!Properties.empty()) return Short();
+    const std::uint32_t Most = static_cast<std::uint32_t>(
+        (Bytes / 2u - EndRoom - sizeof(ItemRecord) - sizeof(ItemCellsRun)) / sizeof(ItemCell));
+    if (!FlushCells(Into, std::max<std::uint32_t>(Most, 1))) return Short();
     if (!StepDue) return true;
-    Writer Body;
-    Body.Put(ItemStep{Step});
-    if (!Into(Make(ITEM_OP_STEP, 0, Body.Bytes))) return false;
-    StepDue = false;
-    return true;
+    return End();
 }
 
 }  // namespace painter::gui

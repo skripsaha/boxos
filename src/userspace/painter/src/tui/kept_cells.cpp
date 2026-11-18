@@ -1,21 +1,20 @@
-#include "layer_canvas.h"
+#include "kept_cells.h"
 
 #include <new>
 #include <optional>
 #include <utility>
 
-#include "display_client.h"
 
 namespace painter::tui {
 
-struct LayerCanvas::Impl {
-    DisplayLayer Layer;
-    Frame        LayerCells;   /* its caret is the layer's */
-    core::Point  Cursor;       /* where the console's caret stands */
-    bool         Opened = true;
+struct KeptCells::Impl {
+    CellsArea   Area;
+    Frame       Cells;    /* its caret is the area's */
+    core::Point Cursor;   /* where the console's caret stands */
+    bool        Opened = true;
 
-    Impl(DisplayLayer LayerValue, Frame LayerCellsValue, core::Point CursorValue) noexcept
-        : Layer(std::move(LayerValue)), LayerCells(std::move(LayerCellsValue)), Cursor(CursorValue)
+    Impl(CellsArea AreaValue, Frame CellsValue, core::Point CursorValue) noexcept
+        : Area(std::move(AreaValue)), Cells(std::move(CellsValue)), Cursor(CursorValue)
     {
     }
 };
@@ -54,14 +53,13 @@ void CarryCaret(Frame &Out, core::Point Origin, const Frame &Source, core::Rect 
 
 }  // namespace
 
-std::expected<LayerCanvas, StageError> LayerCanvas::Open(std::int32_t LeastCols,
-                                                          std::int32_t LeastRows,
-                                                          DisplayLayerRole Role) noexcept
+std::expected<KeptCells, StageError> KeptCells::Open(std::int32_t LeastCols, std::int32_t LeastRows,
+                                                     CellsArea::Where Shown) noexcept
 {
-    std::expected<DisplayLayer, StageError> Opened = DisplayLayer::Open(LeastCols, LeastRows, Role);
+    std::expected<CellsArea, StageError> Opened = CellsArea::Open(LeastCols, LeastRows, Shown);
     if (!Opened) return std::unexpected(Opened.error());
 
-    // A layer that goes unmade below is closed by its own destructor.
+    // An area that goes unmade below is closed by its own destructor.
     const core::Size Actual = Opened->Size();
     const core::Size Required{LeastCols, LeastRows};
     box::result<Frame> Cells = Frame::Create(Actual);
@@ -72,21 +70,21 @@ std::expected<LayerCanvas, StageError> LayerCanvas::Open(std::int32_t LeastCols,
     const core::Point Cursor = Opened->Cursor();
     try {
         std::unique_ptr<Impl> StateValue(new Impl(std::move(*Opened), std::move(*Cells), Cursor));
-        return LayerCanvas(std::move(StateValue));
+        return KeptCells(std::move(StateValue));
     } catch (const std::bad_alloc &) {
         return std::unexpected(Error(StageErrorKind::FrameUnavailable,
                                       box::error{box::errc::no_memory}, Actual, Required));
     }
 }
 
-LayerCanvas::LayerCanvas(std::unique_ptr<Impl> StateValue) noexcept
+KeptCells::KeptCells(std::unique_ptr<Impl> StateValue) noexcept
     : State(std::move(StateValue))
 {
 }
 
-LayerCanvas::LayerCanvas(LayerCanvas &&Other) noexcept = default;
+KeptCells::KeptCells(KeptCells &&Other) noexcept = default;
 
-LayerCanvas &LayerCanvas::operator=(LayerCanvas &&Other) noexcept
+KeptCells &KeptCells::operator=(KeptCells &&Other) noexcept
 {
     if (this == &Other) return *this;
     (void)Close();
@@ -94,44 +92,44 @@ LayerCanvas &LayerCanvas::operator=(LayerCanvas &&Other) noexcept
     return *this;
 }
 
-LayerCanvas::~LayerCanvas()
+KeptCells::~KeptCells()
 {
     (void)Close();
 }
 
-core::Size LayerCanvas::Size() const noexcept
+core::Size KeptCells::Size() const noexcept
 {
-    return State ? State->Layer.Size() : core::Size{};
+    return State ? State->Area.Size() : core::Size{};
 }
 
-GlassKind LayerCanvas::Glass() const noexcept
+GlassKind KeptCells::Glass() const noexcept
 {
-    return State ? State->Layer.Glass() : GlassKind::Pixels;
+    return State ? State->Area.Glass() : GlassKind::Pixels;
 }
 
-std::uint8_t LayerCanvas::Mosaics() const noexcept
+std::uint8_t KeptCells::Mosaics() const noexcept
 {
-    return State ? State->Layer.Mosaics() : 0;
+    return State ? State->Area.Mosaics() : 0;
 }
 
-bool LayerCanvas::IsOpen() const noexcept
+bool KeptCells::IsOpen() const noexcept
 {
     return State && State->Opened;
 }
 
-std::expected<core::Point, box::error> LayerCanvas::Cursor() const noexcept
+std::expected<core::Point, box::error> KeptCells::Cursor() const noexcept
 {
     if (!IsOpen()) return std::unexpected(box::error{box::errc::invalid_state});
     return State->Cursor;
 }
 
-box::status LayerCanvas::Paint(core::Point Origin, const Frame &FrameBuffer) noexcept
+box::status KeptCells::Paint(core::Point Origin, const Frame &FrameBuffer) noexcept
 {
     return Paint(Origin, FrameBuffer,
                  {0, 0, FrameBuffer.Size().Width, FrameBuffer.Size().Height});
 }
 
-box::status LayerCanvas::Paint(core::Point Origin, const Frame &FrameBuffer,
+box::status KeptCells::Paint(core::Point Origin, const Frame &FrameBuffer,
                                core::Rect Region) noexcept
 {
     if (!IsOpen()) return std::unexpected(box::error{box::errc::invalid_state});
@@ -139,27 +137,27 @@ box::status LayerCanvas::Paint(core::Point Origin, const Frame &FrameBuffer,
     if (Region.Empty() || Region.X < 0 || Region.Y < 0 ||
         Region.X > FrameSize.Width - Region.Width ||
         Region.Y > FrameSize.Height - Region.Height || Origin.X < 0 || Origin.Y < 0 ||
-        Origin.X > State->LayerCells.Size().Width - Region.Width ||
-        Origin.Y > State->LayerCells.Size().Height - Region.Height)
+        Origin.X > State->Cells.Size().Width - Region.Width ||
+        Origin.Y > State->Cells.Size().Height - Region.Height)
         return std::unexpected(box::error{box::errc::out_of_range});
 
     for (std::int32_t Row = 0; Row < Region.Height; Row++) {
         for (std::int32_t Col = 0; Col < Region.Width; Col++) {
-            StoreCell(State->LayerCells, {Origin.X + Col, Origin.Y + Row},
+            StoreCell(State->Cells, {Origin.X + Col, Origin.Y + Row},
                       FrameBuffer.Read({Region.X + Col, Region.Y + Row}), true);
         }
     }
-    CarryCaret(State->LayerCells, Origin, FrameBuffer, Region);
-    return State->Layer.Present(State->LayerCells);
+    CarryCaret(State->Cells, Origin, FrameBuffer, Region);
+    return State->Area.Present(State->Cells);
 }
 
-box::status LayerCanvas::Composite(core::Point Origin, const Frame &FrameBuffer) noexcept
+box::status KeptCells::Composite(core::Point Origin, const Frame &FrameBuffer) noexcept
 {
     return Composite(Origin, FrameBuffer,
                      {0, 0, FrameBuffer.Size().Width, FrameBuffer.Size().Height});
 }
 
-box::status LayerCanvas::Composite(core::Point Origin, const Frame &FrameBuffer,
+box::status KeptCells::Composite(core::Point Origin, const Frame &FrameBuffer,
                                    core::Rect Region) noexcept
 {
     if (!IsOpen()) return std::unexpected(box::error{box::errc::invalid_state});
@@ -167,48 +165,48 @@ box::status LayerCanvas::Composite(core::Point Origin, const Frame &FrameBuffer,
     if (Region.Empty() || Region.X < 0 || Region.Y < 0 ||
         Region.X > FrameSize.Width - Region.Width ||
         Region.Y > FrameSize.Height - Region.Height || Origin.X < 0 || Origin.Y < 0 ||
-        Origin.X > State->LayerCells.Size().Width - Region.Width ||
-        Origin.Y > State->LayerCells.Size().Height - Region.Height)
+        Origin.X > State->Cells.Size().Width - Region.Width ||
+        Origin.Y > State->Cells.Size().Height - Region.Height)
         return std::unexpected(box::error{box::errc::out_of_range});
 
     for (std::int32_t Row = 0; Row < Region.Height; Row++) {
         for (std::int32_t Col = 0; Col < Region.Width; Col++) {
-            StoreCell(State->LayerCells, {Origin.X + Col, Origin.Y + Row},
+            StoreCell(State->Cells, {Origin.X + Col, Origin.Y + Row},
                       FrameBuffer.Read({Region.X + Col, Region.Y + Row}), false);
         }
     }
-    CarryCaret(State->LayerCells, Origin, FrameBuffer, Region);
-    return State->Layer.Present(State->LayerCells);
+    CarryCaret(State->Cells, Origin, FrameBuffer, Region);
+    return State->Area.Present(State->Cells);
 }
 
-box::status LayerCanvas::Clear() noexcept
+box::status KeptCells::Clear() noexcept
 {
     if (!IsOpen()) return std::unexpected(box::error{box::errc::invalid_state});
-    State->LayerCells.ClearTransparent();
+    State->Cells.ClearTransparent();
     return {};
 }
 
-box::status LayerCanvas::SetCursor(core::Point At) noexcept
+box::status KeptCells::SetCursor(core::Point At) noexcept
 {
     if (!IsOpen()) return std::unexpected(box::error{box::errc::invalid_state});
-    if (!State->LayerCells.SetCaret(At)) return std::unexpected(box::error{box::errc::out_of_range});
+    if (!State->Cells.SetCaret(At)) return std::unexpected(box::error{box::errc::out_of_range});
     State->Cursor = At;
-    return State->Layer.Present(State->LayerCells);
+    return State->Area.Present(State->Cells);
 }
 
-box::status LayerCanvas::Commit(std::uint32_t ScrollRows) noexcept
+box::status KeptCells::Commit(std::uint32_t ScrollRows) noexcept
 {
     if (!IsOpen()) return std::unexpected(box::error{box::errc::invalid_state});
-    const box::status Result = State->Layer.Commit(ScrollRows);
+    const box::status Result = State->Area.Commit(ScrollRows);
     if (Result) State->Opened = false;
     return Result;
 }
 
-box::status LayerCanvas::Close() noexcept
+box::status KeptCells::Close() noexcept
 {
     if (!State) return {};
     State->Opened = false;
-    return State->Layer.Close();
+    return State->Area.Close();
 }
 
 }  // namespace painter::tui

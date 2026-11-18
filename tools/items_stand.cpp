@@ -1,5 +1,6 @@
 /* items stand — the display's items (src/userspace/display: item_wire,
- * item_tree, item_look, item_draw, item_reception, compositor) and the
+ * item_tree, item_look, item_draw, item_reception, compositor), its cells and
+ * frame (cell_grid, cells_draw, console_model, mirror, frame) and the
  * program's side of the language (painter/gui/changes.h), the very sources
  * BoxOS builds, built for the host and held to what they promise
  * (tools/items_stand.sh runs it):
@@ -85,7 +86,7 @@ items::ProgramState HostProgram(const items::Theme &Look, float Scale)
     items::ProgramState Made;
     Made.From.Look  = &Look;
     Made.From.Scale = Scale;
-    Made.From.Book  = &TreeBook();
+    Made.From.Book  = []() -> const typecase::Fonts & { return TreeBook(); };
     return Made;
 }
 
@@ -101,6 +102,7 @@ int main(int Count, char **Words)
     stand::Tally Tally;
     stand::CheckWire(Tally);
     stand::CheckCompose(Tally);
+    stand::CheckCells(Tally);
     std::printf("items stand: %d held, %d failed\n", Tally.Held, Tally.Failed);
     return Tally.Failed ? 1 : 0;
 }

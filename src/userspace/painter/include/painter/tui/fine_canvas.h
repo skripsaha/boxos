@@ -3,7 +3,7 @@
 
 /* Shapes drawn finer than a cell, in the cells' own glyphs: each cell is cut
  * into sub-pixels two across and, down, as many as the glass draws exactly
- * (box/display.h DisplayMosaic): four where it draws the octants, three the
+ * (box/items.h ITEM_MOSAIC_*): four where it draws the octants, three the
  * sextants, else two, so at the least twice the precision of PutPixel across
  * and the same down. A shape covers each sub-pixel by some share, its ink is
  * blended there over what the cell shows now, and the cell is settled on the
@@ -80,7 +80,7 @@ template <class Distance>
 void FineCanvas::Cover(core::Rect Cells, core::Color Ink, Distance Outside, float Opacity)
 {
     constexpr float SubAcross = 0.5f, Step = 0.05f;
-    const std::uint8_t Grid = (Target->Mosaics() & DISPLAY_MOSAIC_OCTANTS) != 0 ? 4 : (Target->Mosaics() & DISPLAY_MOSAIC_SEXTANTS) != 0 ? 3 : 2;
+    const std::uint8_t Grid = (Target->Mosaics() & ITEM_MOSAIC_OCTANTS) != 0 ? 4 : (Target->Mosaics() & ITEM_MOSAIC_SEXTANTS) != 0 ? 3 : 2;
     const float SubDown = 2.0f / static_cast<float>(Grid);
     const core::Rect Within = Cells.Intersect(Target->Size());
     const bool Pure = Target->Glass() == GlassKind::Text;

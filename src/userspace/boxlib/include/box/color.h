@@ -18,10 +18,10 @@ extern "C" {
  * color changes occur inside.
  *
  * The full 24-bit value travels the whole path — frame, daemon, kernel op,
- * TextCell. The GOP framebuffer renders it exactly; the VGA text backend
- * quantizes to its 16-color palette at draw time, inside the kernel — the
- * one place that actually has a 4-bit limitation (boxos_color.h holds the
- * shared palette + quantizer).
+ * the console's cell (box/items.h ItemCell). The GOP framebuffer renders it
+ * exactly; the VGA text backend quantizes to its 16-color palette at draw
+ * time — the one place that actually has a 4-bit limitation (boxos_color.h
+ * holds the shared palette + quantizer).
  *
  * Reserved sentinels (defined in boxos_color.h):
  *   COLOR_DEFAULT   "use the role's default" — the screen's own: fg its text

@@ -27,4 +27,9 @@ Color Pixel::ToColor() const noexcept
                                                  light::Whole));
 }
 
+Pixel Pixel::Over(Pixel Below, Pixel Above, std::uint32_t Share) noexcept
+{
+    return light::Over(Below, Above, Share);
+}
+
 }  // namespace painter::core

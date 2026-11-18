@@ -5959,17 +5959,18 @@ run_handsetmut() {
 # Touch, then changes the word and wakes all parked on it — once. Every
 # sleeper must come back.
 # ===========================================================================
-# paint — a whole frame of colour reaches the glass through a layer, and says
-#         nothing into the log ring on the way
+# paint — a whole frame of colour reaches the glass through a program's cells,
+#         and says nothing into the log ring on the way
 # ===========================================================================
 #
 # Before HW_VGA_PAINT the only way to colour a cell was HW_VGA_PUTCHAR, which
 # is one Manifest op per cell AND one LogRingPut per cell — a global spinlock
 # and a wire kick for every one of sixteen thousand cells, twenty-five times a
 # second, burying everything the machine actually says under a screenful of
-# spaces. A layer is the program's frame in memory it shares with the display
-# and one word that it is ready; the display draws it and deliberately says
-# nothing into the ring: a picture is not speech.
+# spaces. A program's cells are an item of its area (box/items.h ITEM_CELLS):
+# what changed of its frame goes in a ring of memory it shares with the
+# display, and one word that a step is ready; the display draws it and
+# deliberately says nothing into the log ring: a picture is not speech.
 #
 # playtime is the instrument: it paints every cell of the screen every frame
 # and stops on a key. The screendump must show a painted screen (a shell
@@ -6063,24 +6064,24 @@ run_paint() {
 }
 
 paint_blind_on() {
-    mutate src/userspace/display/layers.cpp
+    mutate src/userspace/display/item_tree.cpp
     python3 - <<'EOF2'
-p = "src/userspace/display/layers.cpp"
+p = "src/userspace/display/item_tree.cpp"
 s = open(p).read()
-anchor = "            std::memcpy(Layer.Cells.data(), LayerSlot(Layer, Slot),\n                        Layer.CellCount * sizeof(DisplayLayerCell));\n"
+anchor = "        Grid.Put(Start + I, Cell);\n"
 assert s.count(anchor) == 1, "paint mutation anchor missing"
-s = s.replace(anchor, "            /* logcheck mutation: the display takes the frame and drops it */\n", 1)
+s = s.replace(anchor, "        /* logcheck mutation: the display takes the cells and drops them */\n", 1)
 open(p, "w").write(s)
 EOF2
-    mut_done src/userspace/display/layers.cpp "logcheck mutation"
+    mut_done src/userspace/display/item_tree.cpp "logcheck mutation"
 }
 
 paint_blind_off() {
-    restore src/userspace/display/layers.cpp
+    restore src/userspace/display/item_tree.cpp
 }
 
 run_paintmut() {
-    echo "== paintmut: the display takes every frame and paints nothing, and the screen must stay bare =="
+    echo "== paintmut: the display takes every program's cells and paints none, and the screen must stay bare =="
     paint_blind_on; build STRICT=on
     paint_boot paintmut "UEFI=on STRICT=on CORES=4 MEM=4G"; local booted=$?
     paint_blind_off
@@ -6677,21 +6678,22 @@ run_caret() {
 }
 
 caret_blind_on() {
-    mutate src/userspace/display/easel.cpp
+    mutate src/userspace/display/cell_grid.cpp
     python3 - <<'EOF2'
-p = "src/userspace/display/easel.cpp"
+p = "src/userspace/display/cell_grid.cpp"
 s = open(p).read()
-a = """    const bool CaretMoved = !ShownKnown || At.X != Drawn.X || At.Y != Drawn.Y ||
-                            At.Visible != Drawn.Visible;"""
+a = """    if (CaretShown()) Mark(Said.Col, Said.Row, 1);
+    Said = Now;
+    if (CaretShown()) Mark(Said.Col, Said.Row, 1);"""
 assert s.count(a) == 1, "caret mutation anchor missing"
-s = s.replace(a, """    const bool CaretMoved = !ShownKnown;   /* logcheck mutation: the caret moves and the glass is not told */""", 1)
+s = s.replace(a, """    Said = Now;   /* logcheck mutation: the caret moves and the glass is not told */""", 1)
 open(p, "w").write(s)
 EOF2
-    mut_done src/userspace/display/easel.cpp "logcheck mutation"
+    mut_done src/userspace/display/cell_grid.cpp "logcheck mutation"
 }
 
 caret_blind_off() {
-    restore src/userspace/display/easel.cpp
+    restore src/userspace/display/cell_grid.cpp
 }
 
 run_caretmut() {

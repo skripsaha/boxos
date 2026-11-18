@@ -161,22 +161,22 @@ void CheckRefusals(Tally &Count, const items::Theme &Look)
     const ItemPlaceAmong IntoItself{13, ITEM_TOP};
     Raw(On, ITEM_OP_RESTACK, 12, &IntoItself, sizeof(IntoItself));
     Raw(On, ITEM_OP_REMOVE, 77, nullptr, 0);
-    const ItemCreate Cells{ITEM_CELLS, 0, 0, ITEM_AREA, ITEM_TOP, 0};
-    Raw(On, ITEM_OP_CREATE, 21, &Cells, sizeof(Cells));
+    const ItemGrid NoCells{8, 2};
+    RawChange(On, 10, ITEM_PROP_GRID, &NoCells, sizeof(NoCells));
     const ItemStep End{5};
     Raw(On, ITEM_OP_STEP, 0, &End, sizeof(End));
     const items::Reading Got = Read(On);
 
     const std::vector<error_t> Want = {ERR_INVALID_ARGUMENT, ERR_INVALID_ARGUMENT, ERR_INVALID_ARGUMENT, ERR_UNSUPPORTED,
                                        ERR_ALREADY_EXISTS,  ERR_INVALID_ARGUMENT, ERR_INVALID_ARGUMENT, ERR_OBJECT_NOT_FOUND,
-                                       ERR_UNSUPPORTED};
+                                       ERR_INVALID_ARGUMENT};
     const items::Item *Shape = On.Area.Items.Find(10);
     Count.Check(Got.Stepped && !Got.Broken && On.Refusals == Want && Shape && !Shape->Said.Corners && !Shape->Said.Fills &&
                     !On.Area.Items.Find(11)->Said.Text && !On.Area.Items.Find(20) && On.Area.Items.Find(12)->Parent == ITEM_AREA &&
                     On.Area.Items.Count() == 4,
                 "every change past the language refused, its reason told back and nothing changed: a corner less than "
                 "none, a text longer than its record, seventeen fills, a property not known, an item made twice, an "
-                "item in a text, a group into its own, removing what is not, cells before the console comes");
+                "item in a text, a group into its own, removing what is not, a grid on what holds no cells");
 }
 
 void CheckBounds(Tally &Count, const items::Theme &Look)

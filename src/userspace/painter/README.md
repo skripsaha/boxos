@@ -21,13 +21,13 @@ surface:
 Painter hides the display path from application authors. A program
 should be able to open a `painter::tui::Stage`, draw a `Frame` using cells,
 text, glyphs, rectangles, or two-pixel-high RGB primitives, present it, and
-receive typed input without knowing about `TextCell`, `TouchTag`, Manifest,
-or the display's layer protocol.
+receive typed input without knowing about `ItemCell`, `TouchTag`, Manifest,
+or the display's items language.
 
 The first TUI implementation is synthesized from the proven utility patterns:
 
 - `Stage` screen ownership and teardown;
-- `TextCell` frame composition;
+- cell frame composition;
 - CP437 block and box glyphs;
 - RGB-to-half-block pixel mapping;
 - clipping, rectangles, text, palettes, and sprites;
@@ -42,14 +42,14 @@ command parser, game engine, widget tree, or TagFS abstraction.
 
 `Frame::Clear` creates an opaque frame and is the right operation for a full
 screen or a complete rectangular panel. `Frame::ClearTransparent` creates an
-overlay frame whose untouched cells expose the layer below. A `Surface` keeps
-one retained layer owned by its process: `Paint` replaces a rectangle with
-opaque cells, while `Composite` replaces the selected rectangle with the frame's
-coverage and clears transparent cells from that layer. `Surface::Clear` removes
-the whole retained layer without publishing an intermediate erase frame; the
-next draw publishes the replacement once. The kernel draws none of it: the
-display composes the layers, so the transparency contract and z-order are
-Painter's and the display's alone.
+overlay frame whose untouched cells expose what lies below. A `Surface` keeps
+cells of its own over the console, an area owned by its process: `Paint`
+replaces a rectangle with opaque cells, while `Composite` replaces the selected
+rectangle with the frame's coverage and clears transparent cells from it.
+`Surface::Clear` empties all of it without publishing an intermediate erase
+frame; the next draw publishes the replacement once. The kernel draws none of
+it: the display composes the areas, so the transparency contract and z-order
+are Painter's and the display's alone.
 
 The caret is part of the picture. `Frame::SetCaret` places the one mark a cell
 cannot draw — a line under the glyph where text goes — and a frame has none
@@ -57,7 +57,7 @@ until one is placed, so a picture without text input shows no caret at all. A
 `Stage` shows the caret of the frame it presents; a `Surface` keeps the caret
 of what is composited into it, and what replaces a rectangle replaces the
 caret in it. Only `ConsoleSurface` has a cursor of its own: the point where the
-console goes on once the layer is part of its text.
+console goes on once its cells are part of its text.
 
 ## Glass and finer edges
 
@@ -70,9 +70,8 @@ does not draw pixels for it: `painter::tui` is cells, half-blocks and CP437
 glyphs; real pixels are drawn on a `painter::core::Canvas`.
 
 The display also says which grids finer than the halves its glass draws
-exactly (`DisplayMosaic`: quadrants, sextants, octants), and `Mosaics()` of
-`Stage`, `Surface`, `ConsoleSurface` and `Frame` gives them; today it says
-none.
+exactly (`ITEM_MOSAIC_*` of `box/items.h`: quadrants, sextants, octants), and
+`Mosaics()` of `Stage`, `Surface`, `ConsoleSurface` and `Frame` gives them.
 
 `PutPixel` has one pixel across a cell and two down. `FineCanvas`
 (`painter/tui/fine_canvas.h`) is the opt-in finer way to draw shapes on a
@@ -130,21 +129,31 @@ when the item's look changes, an opaque item hides what lies beneath it, a
 group clips its items and is seen through as one. On a text page the texts are
 written into the cells and the rest is shown by its caption.
 
+A grid of cells is an item too (`Kind::Cells`): cells in the console's look,
+each a character, its ink and paper, and a mark, with a caret of its own, said
+as the runs of cells that changed. `painter::tui` is drawn with it: a `Stage`,
+a `Surface` and a `ConsoleSurface` are each an area holding one grid as large
+as the console and on its grid, so a program's frames go to the display as
+the cells that changed and nothing in the programs differs. The console itself
+is the lowest item on the glass; an area in its flow lies on its text and
+moves with it when it scrolls, and `Area::Commit` folds an area's cells into
+the console's text, as `ConsoleSurface::Commit` does.
+
 ## Layering
 
 ```text
 boxlib       C ABI and low-level BoxOS calls
 boxcxx       BoxOS C++ runtime and native primitives
 DisplayServer userspace console transport and composition
-Painter      user-facing graphics family and layer client
+Painter      user-facing graphics family and items client
 apps/utils   programs and their domain models
 ```
 
 `display.elf` is the single userspace DisplayServer. It owns the console lanes,
 keyboard routing, process cleanup, and final composition. Painter is a client
-library above `boxcxx`; it publishes retained scene/overlay layers and items
-to that server and does not draw through a second display path. There is no separate
-daemon and compositor binary.
+library above `boxcxx`; it publishes programs' areas of items — painter::tui's
+cells among them — to that server and does not draw through a second display
+path. There is no separate daemon and compositor binary.
 
 ## TUI plan
 

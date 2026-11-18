@@ -13,7 +13,10 @@ namespace effects {
 constexpr std::uint32_t Whole = 256;    // a level, or a mix, at its fullest
 
 // The effect as one frame shows it: what was asked, how far it has swelled in,
-// and the time of the frame — the same for every cell drawn in it.
+// and the time of the frame — the same for every place drawn in it. A place
+// is what the glass is drawn in: a cell of a text page, a framebuffer's
+// pixel — Cols x Rows of them, each Tall of its widths high, a cell Across
+// of them wide and Down of them high.
 struct Moment {
     std::uint32_t Kinds = 0;
     std::uint32_t Strength = 0;
@@ -24,6 +27,9 @@ struct Moment {
     std::uint32_t Number = 0;       // the frame's own, counted from the effect's start
     std::uint32_t Cols = 0;
     std::uint32_t Rows = 0;
+    std::uint32_t Tall = 2;         // a cell is twice as tall as wide; a pixel is square
+    std::uint32_t Across = 1;       // places to a cell's width
+    std::uint32_t Down = 1;         // and to its height
 
     // How far the effect's colours and shapes go: level and strength together, 0..Whole.
     std::uint32_t Mix() const noexcept { return Level * Strength / 255u; }

@@ -333,6 +333,18 @@ bool Read(std::uint16_t Property, Reader &From, Properties &Said, std::uint16_t 
         if (!From.Take(Of) || Of.Role >= ITEM_ROLES) return false;
         return Role = Of.Role, true;
     }
+    case ITEM_PROP_GRID: {
+        ItemGrid Grid{};
+        if (!From.Take(Grid) || Grid.Cols == 0 || Grid.Rows == 0 || Grid.Cols > ITEM_GRID_SIDE_MOST ||
+            Grid.Rows > ITEM_GRID_SIDE_MOST)
+            return false;
+        return Said.Grid = Grid, true;
+    }
+    case ITEM_PROP_CARET: {
+        ItemCaret Caret{};
+        if (!From.Take(Caret) || Caret.Shown > 1) return false;
+        return Said.Caret = Caret, true;
+    }
     default:
         return false;
     }
@@ -363,6 +375,8 @@ void Take(std::uint16_t Property, Properties &From, Properties &Into) noexcept
     case ITEM_PROP_CAPTION: Into.Caption = std::move(From.Caption); break;
     case ITEM_PROP_PICTURE: Into.Picture = From.Picture; break;
     case ITEM_PROP_CANVAS: Into.Canvas = From.Canvas; break;
+    case ITEM_PROP_GRID: Into.Grid = From.Grid; break;
+    case ITEM_PROP_CARET: Into.Caret = From.Caret; break;
     default: break;
     }
 }
@@ -411,6 +425,8 @@ error_t Unsay(std::uint16_t Property, Properties &Into) noexcept
     case ITEM_PROP_CAPTION: Into.Caption.reset(); break;
     case ITEM_PROP_PICTURE: Into.Picture.reset(); break;
     case ITEM_PROP_CANVAS: Into.Canvas.reset(); break;
+    case ITEM_PROP_GRID: Into.Grid.reset(); break;
+    case ITEM_PROP_CARET: Into.Caret.reset(); break;
     case ITEM_PROP_ROLE: break;
     default: return ERR_UNSUPPORTED;
     }

@@ -1,4 +1,4 @@
-// effects_ink.cpp — the effects that change a cell's look (box/display.h):
+// effects_ink.cpp — the effects that change a place's look (box/display.h):
 // fade, invert, tint, rainbow, sepia, spotlight, shimmer and snow.
 
 #include "effects_ink.h"
@@ -53,7 +53,7 @@ void PlanRainbow(Ink &Out, const Moment &Now)
 void PlanSpot(Ink &Out, const Moment &Now)
 {
     const std::int32_t Cols = static_cast<std::int32_t>(Now.Cols), Rows = static_cast<std::int32_t>(Now.Rows);
-    const std::int32_t Narrow = std::min(Cols, Rows * 2);
+    const std::int32_t Narrow = std::min(Cols, Rows * static_cast<std::int32_t>(Now.Tall));
     Out.Spot = true;
     Out.Dark = Between(Whole, 14, Now.Mix());
     Out.SpotX = Cols / 2 + Sine(static_cast<std::uint32_t>(Now.PhaseMs * 1024u / 4300u)) * (Cols * 2 / 5) / 1024;
@@ -69,7 +69,8 @@ void PlanFilm(Ink &Out, const Moment &Now)
     const std::uint32_t Cols = Now.Cols, Rows = Now.Rows;
     Out.Film = true;
     Out.Sepia = Now.Mix();
-    Out.FilmScale = (256u << 16) / (Cols * Cols / 4 + Rows * Rows);
+    const std::uint32_t High = Rows * Now.Tall;
+    Out.FilmScale = (256u << 16) / std::max<std::uint32_t>(1, Cols * Cols / 4 + High * High / 4);
     const std::uint32_t Flicker = Whole - Hash(Now.Number * 40503u + 1u) % 28u * Out.Sepia / Whole;
     Out.Vignette.resize(257);
     for (std::uint32_t Place = 0; Place <= 256; Place++) {
@@ -79,6 +80,7 @@ void PlanFilm(Ink &Out, const Moment &Now)
     const std::uint32_t Roll = Hash(Now.Number / 2u * 9973u + 3u);
     if (Roll % 3u != 0) Out.Scratch[0] = static_cast<std::int32_t>((Roll >> 4) % Cols);
     if (Roll % 11u == 0) Out.Scratch[1] = static_cast<std::int32_t>((Roll >> 12) % Cols);
+    Out.ScratchWide = static_cast<std::int32_t>(std::max<std::uint32_t>(1, Now.Across / 6));
 }
 
 // What fade, invert, tint and the film's toning make of a colour: the same
@@ -128,10 +130,10 @@ struct Halves {
     std::uint32_t Top, Bottom;
 };
 
-bool HalvesOf(const GlassCell &Cell, std::uint32_t Ink, std::uint32_t Paper, Halves &Out) noexcept
+bool HalvesOf(const ItemCell &Cell, std::uint32_t Ink, std::uint32_t Paper, Halves &Out) noexcept
 {
-    const std::uint32_t Fg = Own(Cell.Cell.fg, Ink), Bg = Own(Cell.Cell.bg, Paper);
-    switch (Cell.Cell.cp) {
+    const std::uint32_t Fg = Own(Cell.Ink, Ink), Bg = Own(Cell.Paper, Paper);
+    switch (Cell.Character) {
     case UpperHalf: Out = {Fg, Bg}; return true;
     case LowerHalf: Out = {Bg, Fg}; return true;
     case Full:      Out = {Fg, Fg}; return true;
@@ -141,16 +143,16 @@ bool HalvesOf(const GlassCell &Cell, std::uint32_t Ink, std::uint32_t Paper, Hal
     }
 }
 
-void Plot(GlassCell &Cell, bool Lower, std::uint32_t Colour, std::uint32_t Weight, std::uint32_t Ink,
+void Plot(ItemCell &Cell, bool Lower, std::uint32_t Colour, std::uint32_t Weight, std::uint32_t Ink,
           std::uint32_t Paper) noexcept
 {
     Halves Now;
     if (!HalvesOf(Cell, Ink, Paper, Now)) return;
     std::uint32_t &Half = Lower ? Now.Bottom : Now.Top;
     Half = BoxColorOver(Half, Colour, Share(Weight));
-    Cell.Cell.cp = UpperHalf;
-    Cell.Cell.fg = Now.Top;
-    Cell.Cell.bg = Now.Bottom;
+    Cell.Character = UpperHalf;
+    Cell.Ink       = Now.Top;
+    Cell.Paper     = Now.Bottom;
 }
 
 }  // namespace
@@ -186,7 +188,7 @@ std::uint32_t InkLight(const Ink &Plan, const Moment &Now, std::int32_t X, std::
 {
     std::uint32_t Light = Whole;
     if (Plan.Spot) {
-        const std::int32_t DeltaX = X - Plan.SpotX, DeltaY = (Y - Plan.SpotY) * 2;
+        const std::int32_t DeltaX = X - Plan.SpotX, DeltaY = (Y - Plan.SpotY) * static_cast<std::int32_t>(Now.Tall);
         const auto Far = static_cast<std::uint32_t>(DeltaX * DeltaX + DeltaY * DeltaY);
         if (Far >= Plan.SpotFar) Light = Plan.Dark;
         else if (Far > Plan.SpotNear)
@@ -194,7 +196,7 @@ std::uint32_t InkLight(const Ink &Plan, const Moment &Now, std::int32_t X, std::
     }
     if (Plan.Film) {
         const std::int32_t DeltaX = X - static_cast<std::int32_t>(Now.Cols) / 2;
-        const std::int32_t DeltaY = (Y - static_cast<std::int32_t>(Now.Rows) / 2) * 2;
+        const std::int32_t DeltaY = (Y - static_cast<std::int32_t>(Now.Rows) / 2) * static_cast<std::int32_t>(Now.Tall);
         const std::uint32_t Place = std::min<std::uint32_t>(256, static_cast<std::uint32_t>(DeltaX * DeltaX + DeltaY * DeltaY) * Plan.FilmScale >> 16);
         Light = Light * Plan.Vignette[Place] >> 8;
     }
@@ -218,36 +220,39 @@ std::uint32_t InkColour(Ink &Plan, std::uint32_t Colour, std::uint32_t Default, 
     return Colour;
 }
 
-void InkScratch(GlassCell &Cell, std::uint32_t Default) noexcept
+std::uint32_t InkScratched(std::uint32_t Colour) noexcept { return Brightened(Colour, 70); }
+
+std::uint32_t InkApart(std::uint32_t Middle, std::uint32_t Before, std::uint32_t After) noexcept
 {
-    Cell.Cell.fg = Brightened(Own(Cell.Cell.fg, Default), 70);
-    Cell.Cell.bg = Brightened(Own(Cell.Cell.bg, Default), 70);
+    return Pack(Channel(Before, 16), Channel(Middle, 8), Channel(After, 0));
 }
 
-void InkSplit(GlassCell &Cell, const GlassCell &Left, const GlassCell &Right, std::uint32_t Ink,
-              std::uint32_t Paper) noexcept
+void InkScratch(ItemCell &Cell, std::uint32_t Default) noexcept
 {
-    const auto Apart = [](std::uint32_t Middle, std::uint32_t Before, std::uint32_t After) {
-        return Pack(Channel(Before, 16), Channel(Middle, 8), Channel(After, 0));
-    };
-    Cell.Cell.fg = Apart(Own(Cell.Cell.fg, Ink), Own(Left.Cell.fg, Ink), Own(Right.Cell.fg, Ink));
-    Cell.Cell.bg = Apart(Own(Cell.Cell.bg, Paper), Own(Left.Cell.bg, Paper), Own(Right.Cell.bg, Paper));
+    Cell.Ink   = InkScratched(Own(Cell.Ink, Default));
+    Cell.Paper = InkScratched(Own(Cell.Paper, Default));
 }
 
-void InkSparkle(GlassCell &Cell, std::uint32_t Roll, std::uint32_t Star, std::uint32_t Ink) noexcept
+void InkSplit(ItemCell &Cell, const ItemCell &Left, const ItemCell &Right, std::uint32_t Ink, std::uint32_t Paper) noexcept
+{
+    Cell.Ink   = InkApart(Own(Cell.Ink, Ink), Own(Left.Ink, Ink), Own(Right.Ink, Ink));
+    Cell.Paper = InkApart(Own(Cell.Paper, Paper), Own(Left.Paper, Paper), Own(Right.Paper, Paper));
+}
+
+void InkSparkle(ItemCell &Cell, std::uint32_t Roll, std::uint32_t Star, std::uint32_t Ink) noexcept
 {
     static constexpr std::uint32_t Stars[4] = {U'*', U'+', U'.', U'\u00B7'};
-    if (Cell.Cell.cp == U' ' || Cell.Cell.cp == 0) {
-        Cell.Cell.cp = Stars[(Roll >> 12) & 3u];
-        Cell.Cell.fg = Star;
+    if (Cell.Character == U' ' || Cell.Character == 0) {
+        Cell.Character = Stars[(Roll >> 12) & 3u];
+        Cell.Ink       = Star;
     } else {
-        Cell.Cell.fg = Brightened(Own(Cell.Cell.fg, Ink), 190);
+        Cell.Ink = Brightened(Own(Cell.Ink, Ink), 190);
     }
 }
 
 // Two layers of flakes, each in a column of its own by chance: the far ones
 // slow and faint, the near ones quick and bright, all swaying a little.
-void InkSnow(std::vector<GlassCell> &Glass, const Moment &Now, std::uint32_t Ink, std::uint32_t Paper)
+void InkSnow(std::vector<ItemCell> &Glass, const Moment &Now, std::uint32_t Ink, std::uint32_t Paper)
 {
     static constexpr std::uint32_t Speeds[2] = {13, 27};
     static constexpr std::uint32_t Weights[2] = {120, 256};
@@ -262,7 +267,7 @@ void InkSnow(std::vector<GlassCell> &Glass, const Moment &Now, std::uint32_t Ink
             const std::uint32_t Pixel = Fall % High;
             const std::int32_t Sway = Sine(static_cast<std::uint32_t>(Now.PhaseMs * 1024u / 2600u) + (Roll >> 20) + Layer * 300u) * 2 / 1024;
             const std::int32_t Column = Wrap(static_cast<std::int32_t>(X) + Sway, static_cast<std::int32_t>(Now.Cols));
-            GlassCell &Cell = Glass[(Pixel / 2) * Now.Cols + static_cast<std::uint32_t>(Column)];
+            ItemCell &Cell = Glass[(Pixel / 2) * Now.Cols + static_cast<std::uint32_t>(Column)];
             Plot(Cell, (Pixel & 1u) != 0, Flake, Weights[Layer], Ink, Paper);
         }
     }

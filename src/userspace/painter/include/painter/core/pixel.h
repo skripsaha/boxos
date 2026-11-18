@@ -26,6 +26,9 @@ struct Pixel {
     // The colour nearest the pixel: its light over its opacity, written back
     // as sRGB's numbers; a clear pixel is see-through.
     Color ToColor() const noexcept;
+    // Above at Share of 65535 of itself laid over Below: its light added to
+    // what it leaves of Below's — the one way a colour is laid.
+    static Pixel Over(Pixel Below, Pixel Above, std::uint32_t Share) noexcept;
 
     friend constexpr bool operator==(Pixel, Pixel) noexcept = default;
 };

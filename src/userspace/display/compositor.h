@@ -7,11 +7,12 @@
 // Each frame it takes the areas' marks: an item whose look changed has its
 // drawing made again (item_draw.h), and where every changed item was and now
 // is becomes the frame's damage — only that is composed, from the drawings
-// kept, over what lies beneath (the console's cells, drawn there first by the
-// easel). An item a plain opaque rectangle covers wholly is not drawn at all,
-// nor is anything beneath it. A group's items are drawn within it where it
-// clips them, and through a picture of their own where the group is not wholly
-// opaque, so they show through it together and not through one another.
+// kept, over what lies beneath: the console, the lowest item, its cells drawn
+// in the console's look (cells_draw.h). An item a plain opaque rectangle
+// covers wholly is not drawn at all, nor is anything beneath it. A group's
+// items are drawn within it where it clips them, and through a picture of
+// their own where the group is not wholly opaque, so they show through it
+// together and not through one another.
 //
 // What it keeps of an item's drawing is bounded per program (KeptMost): past
 // it, an item is drawn straight each time it is needed.

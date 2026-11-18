@@ -203,7 +203,7 @@ void LayText(const Item &Of, const Sources &From, Drawing &Into)
         Box.Wrap     = Of.Said.Box->Wrap != 0;
         Box.MaxLines = Of.Said.Box->MaxLines;
     }
-    Into.Laid.emplace(typecase::Layout::Of(Text, Box, *From.Book));
+    Into.Laid.emplace(typecase::Layout::Of(Text, Box, From.Book()));
 }
 
 /* What a text is filled with: its fills said, else its style's colour, else
@@ -301,6 +301,31 @@ void DrawStraight(const Item &Of, const Drawing &Drawn, const Sources &From, Can
                     Place, painter::core::FillRule::NonZero, Opacity);
         break;
     }
+    case ITEM_CELLS: {
+        if (!Of.Grid || !From.Cells) break;
+        const PointF Corner = Place.Apply({0, 0});
+        if (Upright(Place, From.Scale)) {
+            DrawCells(*Of.Grid, *From.Cells, Target, painter::core::Point{Nearest(Corner.X), Nearest(Corner.Y)}, Opacity);
+            break;
+        }
+        /* Turned or scaled: its cells as a picture of their own, laid as it
+         * lies. */
+        const auto Wide = static_cast<std::uint32_t>(Of.Grid->Cols()) * static_cast<std::uint32_t>(From.Cells->Width);
+        const auto High = static_cast<std::uint32_t>(Of.Grid->Rows()) * static_cast<std::uint32_t>(From.Cells->Height);
+        std::optional<Canvas> Own = Canvas::Make(Wide, High);
+        if (!Own) break;
+        DrawCells(*Of.Grid, *From.Cells, *Own, painter::core::Point{0, 0}, 1.0f);
+        std::vector<painter::core::Pixel> Pixels;
+        Pixels.reserve(static_cast<std::size_t>(Wide) * High);
+        for (std::uint32_t Y = 0; Y < High; Y++) Pixels.insert(Pixels.end(), Own->Row(Y), Own->Row(Y) + Wide);
+        const auto Picture = painter::core::Picture::FromPixels(Pixels, Wide, High, Wide);
+        if (!Picture) break;
+        Target.Fill(Outline,
+                    painter::core::Fill::Picture(Picture, Fitted(ITEM_FIT_STRETCH, Size, static_cast<float>(Wide),
+                                                                 static_cast<float>(High), From.Scale)),
+                    Place, painter::core::FillRule::NonZero, Opacity);
+        break;
+    }
     default:
         break;
     }
@@ -311,10 +336,11 @@ void DrawStraight(const Item &Of, const Drawing &Drawn, const Sources &From, Can
 }
 
 /* Whether an item is drawn straight every time rather than kept: a group, a
- * picture, a canvas (its page is kept already), a shape of plain colours. */
+ * picture, a canvas (its page is kept already), cells (only those that
+ * changed are drawn again), a shape of plain colours. */
 bool Straight(const Item &Of)
 {
-    if (Of.Kind == ITEM_GROUP || Of.Kind == ITEM_PICTURE || Of.Kind == ITEM_CANVAS) return true;
+    if (Of.Kind == ITEM_GROUP || Of.Kind == ITEM_PICTURE || Of.Kind == ITEM_CANVAS || Of.Kind == ITEM_CELLS) return true;
     if (Of.Kind != ITEM_SHAPE) return false;
     Stroke Line;
     if (StrokeOf(Of.Said, Of.Role, Line) || !ShadowsOf(Of.Said, Of.Role).empty()) return false;
@@ -323,9 +349,10 @@ bool Straight(const Item &Of)
     return true;
 }
 
-/* What an item covers in its own points: its outline's box, grown by its
- * stroke and its shadows. */
-RectF CoverOf(const Item &Of, const Drawing &Drawn, PointF Size)
+/* What an item covers in its own points, drawn at Scale: its outline's box,
+ * grown by its stroke and its shadows — a shadow as far as its blur reaches on
+ * the glass. */
+RectF CoverOf(const Item &Of, const Drawing &Drawn, PointF Size, float Scale)
 {
     RectF Box{0, 0, Size.X, Size.Y};
     if (Of.Kind == ITEM_GROUP) return RectF{};
@@ -347,7 +374,8 @@ RectF CoverOf(const Item &Of, const Drawing &Drawn, PointF Size)
     RectF Whole = Box;
     for (const Shadow &Each : ShadowsOf(Of.Said, Of.Role)) {
         if (Each.Inner) continue;
-        const float Reach = static_cast<float>(Each.Blur + std::max(Each.Spread, 0)) * PerPoint;
+        const float Reach = static_cast<float>(EngineShadow(Each, Scale).Reach()) / Scale +
+                            static_cast<float>(std::max(Each.Spread, 0)) * PerPoint;
         const RectF Cast{Box.X + Each.Offset.X * PerPoint - Reach, Box.Y + Each.Offset.Y * PerPoint - Reach,
                          Box.Width + 2 * Reach, Box.Height + 2 * Reach};
         const float Left = std::min(Whole.X, Cast.X), Top = std::min(Whole.Y, Cast.Y);
@@ -405,7 +433,8 @@ painter::core::Rect DeviceRect(const RectF &Of, const Transform &Place) noexcept
 
 PointF SizeOf(const Item &Of, const Drawing &Drawn) noexcept
 {
-    const ItemPoint Said = Of.Said.Size ? *Of.Said.Size : ItemPoint{ITEM_BY_CONTENT, ITEM_BY_CONTENT};
+    /* Cells are as large as their grid, whatever is said. */
+    const ItemPoint Said = Of.Said.Size && Of.Kind != ITEM_CELLS ? *Of.Said.Size : ItemPoint{ITEM_BY_CONTENT, ITEM_BY_CONTENT};
     return PointF{(Said.X == ITEM_BY_CONTENT ? Drawn.Measured.X : Said.X) * PerPoint,
                   (Said.Y == ITEM_BY_CONTENT ? Drawn.Measured.Y : Said.Y) * PerPoint};
 }
@@ -424,13 +453,18 @@ bool Prepare(const Item &Of, const Sources &From, Drawing &Into, bool Keep)
         if (const auto Picture = From.PictureOf(Of.Said.Picture->Block))
             Into.Measured = ItemPoint{static_cast<std::int32_t>(std::lround(Picture->Width() * ITEM_POINT / From.Scale)),
                                       static_cast<std::int32_t>(std::lround(Picture->Height() * ITEM_POINT / From.Scale))};
+    } else if (Of.Kind == ITEM_CELLS && Of.Grid && From.Cells) {
+        const auto Points = [&](std::uint32_t Count, std::int32_t Pixels) {
+            return static_cast<std::int32_t>(std::lround(static_cast<double>(Count) * Pixels * ITEM_POINT / From.Scale));
+        };
+        Into.Measured = ItemPoint{Points(Of.Grid->Cols(), From.Cells->Width), Points(Of.Grid->Rows(), From.Cells->Height)};
     } else if (Of.Kind == ITEM_CANVAS && Of.Said.Canvas && From.CanvasOf) {
         if (const Canvas *Page = From.CanvasOf(*Of.Said.Canvas))
             Into.Measured = ItemPoint{static_cast<std::int32_t>(std::lround(Page->Width() * ITEM_POINT / From.Scale)),
                                       static_cast<std::int32_t>(std::lround(Page->Height() * ITEM_POINT / From.Scale))};
     }
     const PointF Size = SizeOf(Of, Into);
-    Into.Own    = CoverOf(Of, Into, Size);
+    Into.Own    = CoverOf(Of, Into, Size, From.Scale);
     Into.Opaque = OpaqueOf(Of, From);
 
     if (Keep && !Straight(Of) && !Into.Own.Empty()) {
