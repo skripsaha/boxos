@@ -481,8 +481,9 @@ void AreasShown(std::uint32_t Micros, std::uint64_t Pixels) noexcept
     g_left = false;
     for (const auto &Each : g_areas) {
         if (Each->Stepped) {
-            const ItemShown Shown{Each->Step, Micros, static_cast<std::uint32_t>(std::min<std::uint64_t>(Pixels, UINT32_MAX)),
-                                  Each->Bytes, Each->Records};
+            const ItemShown Shown{Each->Step,  Micros, static_cast<std::uint32_t>(std::min<std::uint64_t>(Pixels, UINT32_MAX)),
+                                  Each->Bytes, Each->Records,
+                                  static_cast<std::uint32_t>(std::min<std::uint64_t>(Pixels ? Each->State->Composed : 0, UINT32_MAX)), 0};
             Tell(*Each, ITEM_EVENT_SHOWN, 0, &Shown, sizeof(Shown));
             Each->Stepped = false;
             Each->Bytes = Each->Records = 0;

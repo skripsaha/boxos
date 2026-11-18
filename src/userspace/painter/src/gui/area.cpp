@@ -345,6 +345,7 @@ std::optional<Event> Area::Read()
             Made.Step    = Shown.Step;
             Made.Micros  = Shown.Micros;
             Made.Pixels  = Shown.Pixels;
+            Made.Own     = Shown.Own;
             Made.Bytes   = Shown.Bytes;
             Made.Records = Shown.Records;
             return Made;

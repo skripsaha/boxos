@@ -415,9 +415,11 @@ typedef struct {
 typedef struct {
     uint64_t Step;            /* the last step the glass shows */
     uint32_t Micros;          /* composing and putting it on the glass */
-    uint32_t Pixels;          /* the pixels put on the glass */
+    uint32_t Pixels;          /* the pixels put on the glass — for every area's changes */
     uint32_t Bytes;           /* the ring's bytes it took */
     uint32_t Records;
+    uint32_t Own;             /* of the pixels, those this area's own changes asked for */
+    uint32_t Reserved;
 } ItemShown;
 
 typedef struct { uint32_t Page; uint32_t Reserved; } ItemPageFree;
@@ -623,7 +625,7 @@ STATIC_ASSERT(sizeof(ItemRecord) == 8 && sizeof(ItemCreate) == 16 && sizeof(Item
 STATIC_ASSERT(sizeof(ItemColor) == 8 && sizeof(ItemFill) == 8 && sizeof(ItemStop) == 12 &&
                   sizeof(ItemTextStyle) == 32 && sizeof(ItemShadow) == 28 && sizeof(ItemStroke) == 16,
               "the values of the items' language are an ABI of fixed sizes");
-STATIC_ASSERT(sizeof(ItemEvent) == 8 && sizeof(ItemAreaNews) == 16 && sizeof(ItemShown) == 24,
+STATIC_ASSERT(sizeof(ItemEvent) == 8 && sizeof(ItemAreaNews) == 16 && sizeof(ItemShown) == 32,
               "the events of the items' language are an ABI of fixed sizes");
 STATIC_ASSERT(sizeof(ItemAreaHeader) == 320 && sizeof(ItemBlockHeader) == 64,
               "an area's and a block's memory begin with heads of fixed sizes");

@@ -179,11 +179,11 @@ void Scene(Area &Say, float W, float H, std::optional<std::uint32_t> Picture)
 /* One run's frames: what the display said each cost, and how long each took
  * from its step to its frame told back. */
 struct Run {
-    std::vector<std::uint32_t> Micros, Pixels, Bytes, Records, Round;
+    std::vector<std::uint32_t> Micros, Pixels, Own, Bytes, Records, Round;
 
     void Add(const Event &Shown, std::uint32_t RoundMicros)
     {
-        Micros.push_back(Shown.Micros), Pixels.push_back(Shown.Pixels), Bytes.push_back(Shown.Bytes);
+        Micros.push_back(Shown.Micros), Pixels.push_back(Shown.Pixels), Own.push_back(Shown.Own), Bytes.push_back(Shown.Bytes);
         Records.push_back(Shown.Records), Round.push_back(RoundMicros);
     }
     static std::uint64_t Mean(const std::vector<std::uint32_t> &Of)
@@ -195,10 +195,11 @@ struct Run {
     static std::uint32_t Most(const std::vector<std::uint32_t> &Of) { return Of.empty() ? 0 : *std::max_element(Of.begin(), Of.end()); }
     void Say(const char *What) const
     {
-        std::printf("itemcheck: %s, %zu steps — %llu us a frame composed and put on the glass (most %u), %llu pixels, "
-                    "%llu bytes and %llu records of the ring a step, %llu us from a step to its frame told back\n",
+        std::printf("itemcheck: %s, %zu steps — %llu us a frame composed and put on the glass (most %u), %llu pixels its own "
+                    "(%llu the frame's), %llu bytes and %llu records of the ring a step, %llu us from a step to its frame told back\n",
                     What, Micros.size(), static_cast<unsigned long long>(Mean(Micros)), Most(Micros),
-                    static_cast<unsigned long long>(Mean(Pixels)), static_cast<unsigned long long>(Mean(Bytes)),
+                    static_cast<unsigned long long>(Mean(Own)), static_cast<unsigned long long>(Mean(Pixels)),
+                    static_cast<unsigned long long>(Mean(Bytes)),
                     static_cast<unsigned long long>(Mean(Records)), static_cast<unsigned long long>(Mean(Round)));
     }
 };
@@ -273,7 +274,9 @@ int main()
                                                             : "a step was never told shown");
         return 1;
     }
-    const std::uint64_t Small = Run::Mean(Word.Pixels), Tiny = Run::Mean(Cell.Pixels);
+    /* Judged by what each step's own change cost: what other programs
+     * changed in the same frames is theirs. */
+    const std::uint64_t Small = Run::Mean(Word.Own), Tiny = Run::Mean(Cell.Own);
     if (Heard.Refused || (Seen && (Small == 0 || Small * 8 > Shown || Tiny == 0 || Tiny * 64 > Shown))) {
         std::printf("itemcheck: FAIL — %u changes refused; a word changed composed %llu pixels of the area's %llu, a cell "
                     "changed %llu\n",

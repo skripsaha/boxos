@@ -72,6 +72,7 @@ struct Event {
     error_t       Reason = 0;
     std::uint64_t Step   = 0;
     std::uint32_t Micros = 0, Pixels = 0, Bytes = 0, Records = 0;
+    std::uint32_t Own = 0;          // of a Shown frame's pixels, those this area's own changes asked for
     std::uint32_t Page   = 0;
     tui::KeyEvent Key{};
     std::uint64_t Moment = 0;       // the alarm's, of the ClockBoard's uptime
