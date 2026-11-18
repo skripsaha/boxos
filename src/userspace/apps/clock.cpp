@@ -1,20 +1,24 @@
-/* clock — a notice-layer clock at the upper-right corner, shown as the
- * person set it: `settings clock` says how, and a change is seen at once. */
+/* clock — the time in the screen's top-right corner, a notice of its own
+ * (panel.h), shown as the person set it: `settings clock` says how, and a
+ * change is seen by the next second. It wakes as each second turns, and says
+ * the display only what changed — the time's figures. */
 
-#include <chrono>
 #include <cstdint>
-#include <thread>
-#include <utility>
+#include <string>
+#include <vector>
 
+#include "box/alarm.h"
 #include "box/clock.h"
+#include "box/cxx/settings.h"
 #include "box/error.h"
 #include "box/life.h"
 #include "box/settings.h"
-#include "box/cxx/settings.h"
-
 #include "painter/core/color.h"
-#include "painter/tui/frame.h"
-#include "painter/tui/surface.h"
+#include "painter/gui/area.h"
+#include "painter/gui/items.h"
+#include "painter/gui/measure.h"
+
+#include "panel.h"
 
 BOX_LIFE("stays");
 
@@ -26,98 +30,92 @@ BOX_SETTINGS("hours one-of 24 12 default 24 \"how the hours are counted\"\n"
 
 namespace {
 
+namespace gui = painter::gui;
 using PainterColor = painter::core::Color;
-constexpr std::int32_t ClockWidth = 11;   /* the widest it is: 12:59:59 PM */
 
 /* How the person set the clock to look. */
 struct Look {
-    bool         TwelveHours;
-    bool         Seconds;
-    PainterColor Digits;
-    PainterColor Colons;
-    PainterColor Background;
+    bool         TwelveHours = false;
+    bool         Seconds     = true;
+    PainterColor Digits, Colons, Background;
 };
 
 PainterColor Rgb(std::uint32_t Value)
 {
-    return PainterColor::Rgb(static_cast<std::uint8_t>(Value >> 16), static_cast<std::uint8_t>(Value >> 8),
-                             static_cast<std::uint8_t>(Value));
+    return PainterColor::Rgb(static_cast<std::uint8_t>(Value >> 16), static_cast<std::uint8_t>(Value >> 8), static_cast<std::uint8_t>(Value));
 }
 
 Look ReadLook()
 {
-    return Look{box::settings::choice("hours") == "12", box::settings::on("seconds"),
-                Rgb(box::settings::color("digits")), Rgb(box::settings::color("colons")),
-                Rgb(box::settings::color("background"))};
+    return Look{box::settings::choice("hours") == "12", box::settings::on("seconds"), Rgb(box::settings::color("digits")),
+                Rgb(box::settings::color("colons")), Rgb(box::settings::color("background"))};
 }
 
-char Digit(std::int64_t Value)
+/* The time as it is said: hours, minutes, seconds when they are shown, AM or
+ * PM when the hours are twelve. */
+std::string TimeOf(const Look &Shown, const BoxTime &Now)
 {
-    return static_cast<char>('0' + Value);
-}
-
-bool Draw(painter::tui::Surface &Screen, painter::tui::Frame &Canvas, const Look &Shown)
-{
-    BoxTime Now{};
-    if (clock_boxtime_local(&Now) != OK) return true;
-
     std::int64_t Hour = Now.hour;
-    bool         Afternoon = Hour >= 12;
+    const bool   Afternoon = Hour >= 12;
     if (Shown.TwelveHours) {
         Hour %= 12;
         if (Hour == 0) Hour = 12;
     }
-    char         Text[ClockWidth];
-    std::int32_t Length = 0;
-    Text[Length++] = Digit(Hour / 10);
-    Text[Length++] = Digit(Hour % 10);
-    Text[Length++] = ':';
-    Text[Length++] = Digit(Now.minute / 10);
-    Text[Length++] = Digit(Now.minute % 10);
-    if (Shown.Seconds) {
-        Text[Length++] = ':';
-        Text[Length++] = Digit(Now.second / 10);
-        Text[Length++] = Digit(Now.second % 10);
-    }
-    if (Shown.TwelveHours) {
-        Text[Length++] = ' ';
-        Text[Length++] = Afternoon ? 'P' : 'A';
-        Text[Length++] = 'M';
-    }
+    const auto Two = [](std::int64_t Value) { return std::string{static_cast<char>('0' + Value / 10), static_cast<char>('0' + Value % 10)}; };
+    std::string Said = Two(Hour) + ":" + Two(Now.minute);
+    if (Shown.Seconds) Said += ":" + Two(Now.second);
+    if (Shown.TwelveHours) Said += Afternoon ? " PM" : " AM";
+    return Said;
+}
 
-    /* The time keeps to the right edge; the cells it does not need stay clear. */
-    Canvas.ClearTransparent();
-    for (std::int32_t Col = 0; Col < Length; Col++) {
-        const PainterColor Ink = Text[Col] == ':' ? Shown.Colons : Shown.Digits;
-        Canvas.Put({ClockWidth - Length + Col, 0},
-                   painter::tui::Cell{static_cast<char32_t>(Text[Col]), Ink, Shown.Background});
-    }
-    if (!Screen.Clear()) return false;
-    return static_cast<bool>(Screen.Composite({Screen.Size().Width - ClockWidth, 0}, Canvas));
+/* The notice: the time in its figures' colour, its colons in theirs, on its
+ * background, kept to the corner. */
+void Show(const gui::Area &Screen, gui::Shape &Plate, gui::Text &Time, const Look &Shown, const std::string &Said)
+{
+    gui::TextStyle Figures;
+    Figures.Color = Shown.Digits;
+    gui::TextStyle Colon;
+    Colon.Color = Shown.Colons;
+    std::vector<gui::Span> Colons;
+    for (std::uint32_t At = 0; At < Said.size(); At++)
+        if (Said[At] == ':') Colons.push_back(gui::Span{At, At + 1, Colon});
+    const float Wide = gui::Measure(Screen, Said, panel::Words).X + 2 * panel::Padding;
+    const float High = panel::Height(Screen);
+    const float Left = Screen.Size().X - panel::Margin - Wide;
+    Plate.SetPlace({Left, panel::Margin}).SetSize({Wide, High}).SetFill(gui::Fill::Of(Shown.Background));
+    Time.SetText(Said).SetStyle(Figures).SetSpans(Colons).SetPlace({Left + panel::Padding, panel::Margin + panel::Inset});
+}
+
+/* The ClockBoard's moment the next second turns at. */
+std::uint64_t NextSecond()
+{
+    const std::uint64_t IntoSecond = clock_unix_now_ns() / 1000000u % 1000u;
+    return clock_uptime_ms() + (1000u - IntoSecond) + 1u;
 }
 
 }  // namespace
 
 int main()
 {
-    std::expected<painter::tui::Surface, painter::tui::StageError> Opened =
-        painter::tui::Surface::Open(ClockWidth, 1, painter::tui::SurfaceRole::Notice);
+    std::expected<gui::Area, box::error> Opened = panel::Open();
     if (!Opened) return 1;
-    painter::tui::Surface Screen = std::move(*Opened);
-    if (Screen.Size().Width < ClockWidth || Screen.Size().Height == 0) return 1;
-
-    std::expected<painter::tui::Frame, box::error> Created =
-        painter::tui::Frame::Create({ClockWidth, 1});
-    if (!Created) return 1;
-    painter::tui::Frame Canvas = std::move(*Created);
+    gui::Area &Screen = *Opened;
+    gui::Shape Plate  = Screen.Rectangle();
+    Plate.SetCorners(painter::core::Corners::All(panel::Round));
+    gui::Text Time = Screen.Text("", panel::Words);
 
     box::settings::watch Watch;
     Look                 Shown = ReadLook();
-    auto                 Next  = std::chrono::steady_clock::now();
     for (;;) {
         if (Watch.changed()) Shown = ReadLook();
-        if (!Draw(Screen, Canvas, Shown)) return 1;
-        Next += std::chrono::milliseconds(100);
-        std::this_thread::sleep_until(Next);
+        BoxTime Now{};
+        if (clock_boxtime_local(&Now) == OK) Show(Screen, Plate, Time, Shown, TimeOf(Shown, Now));
+        (void)Screen.Present();
+        (void)alarm_set(NextSecond());
+        /* The second turned — or the screen changed, and the corner with it. */
+        for (;;) {
+            const gui::Event Heard = Screen.Wait();
+            if (Heard.What == gui::Event::Kind::Alarm || Heard.What == gui::Event::Kind::Area) break;
+        }
     }
 }
