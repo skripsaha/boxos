@@ -503,15 +503,17 @@ $(WHALE_DIR)/figure.o $(WHALE_DIR)/picture.o: CXXFLAGS += -O2
 whale.elf: $(BOXLIB_START) $(WHALE_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(WHALE_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 
-# Duppo is C++ in parts of its own directory, each named for what it is. Its
-# picture is shaded pixel by pixel every frame, so that and the logo's gradients are built -O2.
+# Duppo is C++ in parts of its own directory, each named for what it is. It is
+# shaded pixel by pixel every frame — in cells or in the screen's own pixels —
+# so that and the logo's gradients are built -O2; its words are measured, so
+# it carries Typecase.
 DUPPO_DIR  = duppo
-DUPPO_OBJS = $(addprefix $(DUPPO_DIR)/,duppo.o flight.o face.o spin.o orbit.o logo.o picture.o)
+DUPPO_OBJS = $(addprefix $(DUPPO_DIR)/,duppo.o flight.o face.o spin.o orbit.o logo.o sampler.o picture.o pixels.o words.o)
 
-$(DUPPO_DIR)/logo.o $(DUPPO_DIR)/picture.o: CXXFLAGS += -O2
+$(DUPPO_DIR)/logo.o $(DUPPO_DIR)/sampler.o $(DUPPO_DIR)/picture.o $(DUPPO_DIR)/pixels.o: CXXFLAGS += -O2
 
-duppo.elf: $(BOXLIB_START) $(DUPPO_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(DUPPO_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+duppo.elf: $(BOXLIB_START) $(DUPPO_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(DUPPO_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
 
 # Hangman is C++ in parts of its own directory; it keeps its ledger with keep.o.
 HANGMAN_DIR  = hangman
