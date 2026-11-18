@@ -32,6 +32,11 @@ typecase::GlyphCache &Kept()
 /* Larger than this, a glyph is filled as its shape each time, not kept. */
 constexpr float KeptEmMost = 256.0f;
 
+/* The pixel row or column a place falls nearest, a half always up: so a
+ * text laid in part, onto a picture of part of a canvas moved by whole
+ * pixels, lands on the very pixels it lands on laid whole. */
+std::int32_t Nearest(float Place) noexcept { return static_cast<std::int32_t>(std::floor(Place + 0.5f)); }
+
 /* Whether Place lays text upright at one size — alike across and up, and
  * moved — and that size. */
 bool Upright(const Transform &Place, float &Scale) noexcept
@@ -59,12 +64,12 @@ Landed Land(const typecase::Layout &Text, const typecase::LaidGlyph &G, PointF A
 {
     const typecase::LaidRun &Run  = Text.Runs()[G.Run];
     const float              X    = (At.X + G.X) * Scale + Move.X;
-    const auto               Y    = static_cast<std::int32_t>(std::lround((At.Y + G.Y) * Scale + Move.Y));
+    const auto               Y    = Nearest((At.Y + G.Y) * Scale + Move.Y);
     float                    Left = std::floor(X);
     auto                     Quarter = static_cast<std::int32_t>(std::lround((X - Left) * 4));
     if (Quarter == 4) Left += 1, Quarter = 0;
     if (!Run.Face) {
-        const auto Whole = static_cast<std::int32_t>(std::lround(X));
+        const auto Whole = Nearest(X);
         return Landed{&Kept().GetMissing(G.Glyph, typecase::MissingCell(G.Glyph, Run.Look.Em * Scale)), Whole, Y};
     }
     typecase::GlyphLook Look = Run.Look;
@@ -89,7 +94,7 @@ struct Bar {
 Bar BarOf(const typecase::Area &Of, PointF At, float Scale, PointF Move) noexcept
 {
     const float Left = (At.X + Of.X) * Scale + Move.X;
-    const auto  Top  = static_cast<std::int32_t>(std::lround((At.Y + Of.Y) * Scale + Move.Y));
+    const auto  Top  = Nearest((At.Y + Of.Y) * Scale + Move.Y);
     const auto  Rows = std::max<std::int32_t>(1, static_cast<std::int32_t>(std::lround(Of.Height * Scale)));
     return Bar{Left, Left + Of.Width * Scale, Top, Rows};
 }
