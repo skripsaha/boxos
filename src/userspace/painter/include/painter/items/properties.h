@@ -91,7 +91,7 @@ struct PictureOf {
 struct Properties {
     std::optional<ItemPoint>                   Place, Size, Scale, Anchor;
     std::optional<std::uint16_t>               Opacity;
-    std::optional<bool>                        Hidden, Clip, Secret;
+    std::optional<bool>                        Hidden, Clip, Secret, Focusable, Disabled;
     std::optional<std::int32_t>                Turn;
     std::optional<std::array<std::int32_t, 4>> Corners;
     std::optional<items::Shape>                Shape;

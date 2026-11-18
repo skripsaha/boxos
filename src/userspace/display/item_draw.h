@@ -44,6 +44,7 @@ struct Drawing {
     std::optional<typecase::Layout>   Laid;          // a text's
     std::vector<painter::core::Color> Inks;          // the colours its stretches say: ink 1 on
     ItemPoint                         Measured{};    // its size by its content, of ITEM_POINT
+    ItemPoint                         Inset{};       // a text's words from its corner: in from its plate's
     painter::core::RectF              Own{};         // what it covers, in its own points, its shadows too
     std::optional<painter::core::Canvas> Kept;       // its picture at the scale it was drawn at
     painter::core::Point              KeptAt{};      // the picture's corner from the item's, in pixels
@@ -74,7 +75,7 @@ void Paint(const Item &Of, const Drawing &Drawn, const Sources &From, painter::c
 
 // A group's clip: its rectangle of its size, its corners rounded; none for a
 // group of no size.
-painter::core::Path ClipOf(const Item &Group);
+painter::core::Path ClipOf(const Item &Group, const Theme &Look);
 
 // The pixels Place lays Rect of points on, whole pixels round it.
 painter::core::Rect DeviceRect(const painter::core::RectF &Points, const painter::core::Transform &Place) noexcept;

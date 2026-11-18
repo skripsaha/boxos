@@ -246,7 +246,7 @@ void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, 
         /* A group: its items within its clip, and through a picture of their
          * own where it is not wholly opaque. */
         const bool        Layered = Own < 1.0f;
-        const bool        Clipped = Of->Said.Clip && *Of->Said.Clip && !ClipOf(*Of).Empty();
+        const bool        Clipped = Of->Said.Clip && *Of->Said.Clip && !ClipOf(*Of, *Program.From.Look).Empty();
         const std::size_t Begun   = Area.List.size();
         if (Layered) Area.List.push_back(Entry{Entry::Kind::LayerBegin, Of, Place, Opacity * Own, {}, {}});
         if (Clipped) Area.List.push_back(Entry{Entry::Kind::ClipBegin, Of, Place, 1.0f, {}, {}});
@@ -416,7 +416,7 @@ void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Cor
                 break;
             }
             case Entry::Kind::ClipBegin:
-                (void)Current().PushClip(ClipOf(*One.Of), Moved(One.Place, At()));
+                (void)Current().PushClip(ClipOf(*One.Of, Look), Moved(One.Place, At()));
                 break;
             case Entry::Kind::ClipEnd:
                 Current().PopClip();

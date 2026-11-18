@@ -126,11 +126,19 @@ painter::core::Shadow EngineShadow(const Shadow &Of, float Scale)
     return Made;
 }
 
-/* A shape item's outline, a picture's or a canvas's rectangle, in its own
- * points. */
-Path OutlineOf(const Item &Of, PointF Size)
+/* The theme items are drawn in: the one their program's are, or the system's
+ * before one is given. */
+const Theme &LookOf(const Sources &From) noexcept
 {
-    const std::array<std::int32_t, 4> Round = CornersOf(Of.Said, Of.Role);
+    static const Theme System;
+    return From.Look ? *From.Look : System;
+}
+
+/* A shape item's outline, a picture's or a canvas's rectangle, a plated
+ * text's plate, in its own points. */
+Path OutlineOf(const Item &Of, PointF Size, const Theme &Look)
+{
+    const std::array<std::int32_t, 4> Round = CornersOf(Of.Said, Of.Role, Look);
     const RectF                       Box{0, 0, Size.X, Size.Y};
     const items::Shape *Form = Of.Kind == ITEM_SHAPE && Of.Said.Shape ? &*Of.Said.Shape : nullptr;
     if (Form && Form->Form == ITEM_FORM_ELLIPSE) return Path::Ellipse({Size.X / 2, Size.Y / 2}, Size.X / 2, Size.Y / 2);
@@ -171,7 +179,7 @@ std::vector<painter::core::Fill> TextFills(const Item &Of, const Sources &From)
         const TextStyle Base = StyleOf(Of.Said, Of.Role, *From.Look);
         if (Base.Said & ITEM_SAYS_COLOR) return {painter::core::Fill(ColorOf(Base.Color))};
     }
-    return EngineFills(FillsOf(Of.Said, ITEM_TEXT, Of.Role), From);
+    return EngineFills(FillsOf(Of.Said, ITEM_TEXT, Of.Role, LookOf(From)), From);
 }
 
 /* Where a picture of PictureSize pixels lies in an item of Size points, as
@@ -190,15 +198,19 @@ void DrawStraight(const Item &Of, const Drawing &Drawn, const Sources &From, Can
                   float Opacity)
 {
     if (Of.Kind == ITEM_GROUP) return;
+    const Theme              &Look    = LookOf(From);
     const PointF              Size    = SizeOf(Of, Drawn);
-    const std::vector<Shadow> Shadows = ShadowsOf(Of.Said, Of.Role);
+    const std::vector<Shadow> Shadows = ShadowsOf(Of.Said, Of.Role, Look);
     Stroke                    Line;
-    const bool                Stroked = StrokeOf(Of.Said, Of.Role, Line);
-    /* A text's outline is wanted only to stroke it or cast its shadow. */
-    const bool Outlined = Of.Kind != ITEM_TEXT || Stroked || !Shadows.empty();
+    const bool                Stroked = StrokeOf(Of.Said, Of.Role, Look, Line);
+    /* A text's outline is wanted only to stroke it or cast its shadow — a
+     * plated text's is its plate's, which it is filled, stroked and shadowed
+     * as. */
+    const bool Plate    = Plated(Of.Kind, Of.Role);
+    const bool Outlined = Of.Kind != ITEM_TEXT || Plate || Stroked || !Shadows.empty();
     const Path Outline  = !Outlined ? Path()
-                          : Of.Kind == ITEM_TEXT ? (Drawn.Laid ? painter::core::TextPath(*Drawn.Laid, {0, 0}) : Path())
-                                                 : OutlineOf(Of, Size);
+                          : Of.Kind == ITEM_TEXT && !Plate ? (Drawn.Laid ? painter::core::TextPath(*Drawn.Laid, {0, 0}) : Path())
+                                                           : OutlineOf(Of, Size, Look);
     const painter::core::FillRule Rule = Of.Kind == ITEM_SHAPE && Of.Said.Shape && Of.Said.Shape->Rule == 1
                                              ? painter::core::FillRule::EvenOdd
                                              : painter::core::FillRule::NonZero;
@@ -213,15 +225,17 @@ void DrawStraight(const Item &Of, const Drawing &Drawn, const Sources &From, Can
     Cast(false);
     switch (Of.Kind) {
     case ITEM_TEXT:
+        if (Plate) Target.Fill(Outline, EngineFills(PlateOf(Of.Role), From), Place, painter::core::FillRule::NonZero, Opacity);
         if (Drawn.Laid) {
+            const PointF                           At{Drawn.Inset.X * PerPoint, Drawn.Inset.Y * PerPoint};
             const std::vector<painter::core::Fill> Fills = TextFills(Of, From);
-            Target.FillText(*Drawn.Laid, {0, 0}, Fills, Place, Opacity, 0u);
+            Target.FillText(*Drawn.Laid, At, Fills, Place, Opacity, 0u);
             for (std::uint32_t Ink = 1; Ink <= Drawn.Inks.size(); Ink++)
-                Target.FillText(*Drawn.Laid, {0, 0}, painter::core::Fill(Drawn.Inks[Ink - 1]), Place, Opacity, Ink);
+                Target.FillText(*Drawn.Laid, At, painter::core::Fill(Drawn.Inks[Ink - 1]), Place, Opacity, Ink);
         }
         break;
     case ITEM_SHAPE:
-        Target.Fill(Outline, EngineFills(FillsOf(Of.Said, Of.Kind, Of.Role), From), Place, Rule, Opacity);
+        Target.Fill(Outline, EngineFills(FillsOf(Of.Said, Of.Kind, Of.Role, Look), From), Place, Rule, Opacity);
         break;
     case ITEM_PICTURE: {
         const std::shared_ptr<const painter::core::Picture> Picture =
@@ -291,13 +305,13 @@ void DrawStraight(const Item &Of, const Drawing &Drawn, const Sources &From, Can
 /* Whether an item is drawn straight every time rather than kept: a group, a
  * picture, a canvas (its page is kept already), cells (only those that
  * changed are drawn again), a shape of plain colours. */
-bool Straight(const Item &Of)
+bool Straight(const Item &Of, const Theme &Look)
 {
     if (Of.Kind == ITEM_GROUP || Of.Kind == ITEM_PICTURE || Of.Kind == ITEM_CANVAS || Of.Kind == ITEM_CELLS) return true;
     if (Of.Kind != ITEM_SHAPE) return false;
     Stroke Line;
-    if (StrokeOf(Of.Said, Of.Role, Line) || !ShadowsOf(Of.Said, Of.Role).empty()) return false;
-    for (const Fill &Each : FillsOf(Of.Said, Of.Kind, Of.Role))
+    if (StrokeOf(Of.Said, Of.Role, Look, Line) || !ShadowsOf(Of.Said, Of.Role, Look).empty()) return false;
+    for (const Fill &Each : FillsOf(Of.Said, Of.Kind, Of.Role, Look))
         if (Each.Kind != ITEM_FILL_COLOR && Each.Kind != ITEM_FILL_THEME) return false;
     return true;
 }
@@ -305,27 +319,27 @@ bool Straight(const Item &Of)
 /* What an item covers in its own points, drawn at Scale: its outline's box,
  * grown by its stroke and its shadows — a shadow as far as its blur reaches on
  * the glass. */
-RectF CoverOf(const Item &Of, const Drawing &Drawn, PointF Size, float Scale)
+RectF CoverOf(const Item &Of, const Drawing &Drawn, PointF Size, float Scale, const Theme &Look)
 {
     RectF Box{0, 0, Size.X, Size.Y};
     if (Of.Kind == ITEM_GROUP) return RectF{};
-    if (Of.Kind == ITEM_TEXT && Drawn.Laid) {
+    if (Of.Kind == ITEM_TEXT && Drawn.Laid && !Plated(Of.Kind, Of.Role)) {
         /* Glyphs reach past their line's box — an italic's lean, an accent
          * above a capital — by less than an em. */
         float Em = 16;
         for (const typecase::LaidRun &Run : Drawn.Laid->Runs()) Em = std::max(Em, Run.Look.Em);
         Box = RectF{-Em, -Em, Drawn.Laid->Width() + 2 * Em, Drawn.Laid->Height() + 2 * Em};
     } else if (Of.Kind == ITEM_SHAPE && Of.Said.Shape && Of.Said.Shape->Form == ITEM_FORM_PATH) {
-        Box = OutlineOf(Of, Size).Bounds();
+        Box = OutlineOf(Of, Size, Look).Bounds();
     }
     Stroke Line;
-    if (StrokeOf(Of.Said, Of.Role, Line) && Line.Align != ITEM_ALIGN_INSIDE) {
+    if (StrokeOf(Of.Said, Of.Role, Look, Line) && Line.Align != ITEM_ALIGN_INSIDE) {
         const float Reach = static_cast<float>(Line.Width) * PerPoint * (Line.Align == ITEM_ALIGN_OUTSIDE ? 1.0f : 0.5f) *
                             static_cast<float>(Line.MiterLimit) * PerPoint;
         Box = RectF{Box.X - Reach, Box.Y - Reach, Box.Width + 2 * Reach, Box.Height + 2 * Reach};
     }
     RectF Whole = Box;
-    for (const Shadow &Each : ShadowsOf(Of.Said, Of.Role)) {
+    for (const Shadow &Each : ShadowsOf(Of.Said, Of.Role, Look)) {
         if (Each.Inner) continue;
         const float Reach = static_cast<float>(EngineShadow(Each, Scale).Reach()) / Scale +
                             static_cast<float>(std::max(Each.Spread, 0)) * PerPoint;
@@ -343,11 +357,12 @@ RectF CoverOf(const Item &Of, const Drawing &Drawn, PointF Size, float Scale)
  * of square corners, opaque, filled with a colour that lets nothing through. */
 bool OpaqueOf(const Item &Of, const Sources &From)
 {
-    if (Of.Kind != ITEM_SHAPE || !Straight(Of) || OpacityOf(Of.Said) != ITEM_OPAQUE) return false;
+    const Theme &Look = LookOf(From);
+    if (Of.Kind != ITEM_SHAPE || !Straight(Of, Look) || OpacityOf(Of.Said) != ITEM_OPAQUE) return false;
     if (Of.Said.Shape && Of.Said.Shape->Form != ITEM_FORM_RECT) return false;
-    const std::array<std::int32_t, 4> Round = CornersOf(Of.Said, Of.Role);
+    const std::array<std::int32_t, 4> Round = CornersOf(Of.Said, Of.Role, Look);
     if (Round[0] || Round[1] || Round[2] || Round[3]) return false;
-    for (const Fill &Each : FillsOf(Of.Said, Of.Kind, Of.Role)) {
+    for (const Fill &Each : FillsOf(Of.Said, Of.Kind, Of.Role, Look)) {
         const painter::core::Color Color = Each.Kind == ITEM_FILL_THEME ? ThemeColor(*From.Look, Each.Theme) : ColorOf(Each.Color);
         if (Each.Opacity == ITEM_OPAQUE && Color.Opacity() == 255 && !Color.IsScreen()) return true;
     }
@@ -356,10 +371,10 @@ bool OpaqueOf(const Item &Of, const Sources &From)
 
 }  // namespace
 
-painter::core::Path ClipOf(const Item &Group)
+painter::core::Path ClipOf(const Item &Group, const Theme &Look)
 {
     if (!Group.Said.Size || Group.Said.Size->X == ITEM_BY_CONTENT || Group.Said.Size->Y == ITEM_BY_CONTENT) return {};
-    return OutlineOf(Group, Points(*Group.Said.Size));
+    return OutlineOf(Group, Points(*Group.Said.Size), Look);
 }
 
 std::optional<painter::core::Point> CanvasCorner(const Item &Of, const Drawing &Drawn, const Sources &From, const Transform &Place)
@@ -416,6 +431,7 @@ bool Prepare(const Item &Of, const Sources &From, Drawing &Into, bool Keep)
         Into.Laid.emplace(std::move(Laid.Laid));
         Into.Inks     = std::move(Laid.Inks);
         Into.Measured = Laid.Measured;
+        Into.Inset    = Laid.Inset;
     } else if (Of.Kind == ITEM_PICTURE && Of.Said.Picture && From.PictureOf) {
         if (const auto Picture = From.PictureOf(Of.Said.Picture->Block))
             Into.Measured = ItemPoint{static_cast<std::int32_t>(std::lround(Picture->Width() * ITEM_POINT / From.Scale)),
@@ -431,10 +447,10 @@ bool Prepare(const Item &Of, const Sources &From, Drawing &Into, bool Keep)
                                       static_cast<std::int32_t>(std::lround(Page->Height() * ITEM_POINT / From.Scale))};
     }
     const PointF Size = SizeOf(Of, Into);
-    Into.Own    = CoverOf(Of, Into, Size, From.Scale);
+    Into.Own    = CoverOf(Of, Into, Size, From.Scale, LookOf(From));
     Into.Opaque = OpaqueOf(Of, From);
 
-    if (Keep && !Straight(Of) && !Into.Own.Empty()) {
+    if (Keep && !Straight(Of, LookOf(From)) && !Into.Own.Empty()) {
         const painter::core::Rect Pixels = DeviceRect(Into.Own, Transform::Scale(From.Scale));
         if (Pixels.Width > 0 && Pixels.Height > 0 && static_cast<std::uint32_t>(Pixels.Width) <= KeptSideMost &&
             static_cast<std::uint32_t>(Pixels.Height) <= KeptSideMost &&

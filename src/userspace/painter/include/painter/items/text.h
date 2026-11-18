@@ -22,7 +22,8 @@ namespace painter::items {
 struct LaidText {
     typecase::Layout         Laid;
     std::vector<core::Color> Inks;         // the colours its stretches say: ink 1 on
-    ItemPoint                Measured{};   // its size by its content, of ITEM_POINT
+    ItemPoint                Measured{};   // its size by its content, of ITEM_POINT — a plate's room round it too
+    ItemPoint                Inset{};      // where its words lie from its corner: in from a plate's (look.h Plated)
 };
 
 // Said of a text item in Role, laid out in Book. Throws std::bad_alloc only.

@@ -115,21 +115,21 @@ bool SayAsShown(std::uint16_t Property, std::uint8_t Kind, std::uint16_t Role, c
         if (!Said.Turn) Said.Turn = 0;
         return true;
     case ITEM_PROP_CORNERS:
-        Said.Corners = CornersOf(Said, Role);
+        Said.Corners = CornersOf(Said, Role, Look);
         return true;
     case ITEM_PROP_SHAPE:
         if (!Said.Shape) Said.Shape = items::Shape{};
         return true;
     case ITEM_PROP_FILLS:
-        Said.Fills = FillsOf(Said, Kind, Role);
+        Said.Fills = FillsOf(Said, Kind, Role, Look);
         return true;
     case ITEM_PROP_STROKE: {
         Stroke Line;
-        if (StrokeOf(Said, Role, Line)) Said.Stroke = Line;
+        if (StrokeOf(Said, Role, Look, Line)) Said.Stroke = Line;
         return true;
     }
     case ITEM_PROP_SHADOWS:
-        Said.Shadows = ShadowsOf(Said, Role);
+        Said.Shadows = ShadowsOf(Said, Role, Look);
         return true;
     case ITEM_PROP_TEXT_STYLE:
         Said.Style = StyleOf(Said, Role, Look);

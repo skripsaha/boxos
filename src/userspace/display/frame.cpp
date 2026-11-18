@@ -313,7 +313,7 @@ void Write(std::vector<ItemCell> &Cells, std::uint32_t Cols, std::uint32_t Rows,
  * std::bad_alloc only. */
 std::uint32_t InkOf(const items::Item &Of)
 {
-    const std::vector<items::Fill> Fills = items::FillsOf(Of.Said, Of.Kind, Of.Role);
+    const std::vector<items::Fill> Fills = items::FillsOf(Of.Said, Of.Kind, Of.Role, g_theme);
     if (Fills.empty()) return COLOR_DEFAULT;
     const painter::core::Color C =
         Fills[0].Kind == ITEM_FILL_THEME ? items::ThemeColor(g_theme, Fills[0].Theme) : items::ColorOf(Fills[0].Color);

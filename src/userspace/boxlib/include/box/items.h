@@ -68,11 +68,22 @@ extern "C" {
  * at the person's speed. On a text page every change is at once what it
  * says. A frame is drawn only while something seen moves.
  *
+ * KEYS. The keyboard is the display's first: the things a program shows that
+ * the keyboard reaches — a button, a field, whatever says it is reached — are
+ * reached without the program: Tab and Shift+Tab go from one to the next,
+ * the arrows to the nearest the way they point, a chord shows a label on
+ * each to type, Enter or Space presses one, and a field is typed into by the
+ * display itself. The program hears only what it means: an item pressed, a
+ * field's text as it is now, the focus come or gone. How a thing looks
+ * reached, pressed or not to be used is the theme's, shown by the display;
+ * every key the display does not use goes to the program as before. Keys go
+ * to the program in front, never to an area shown always.
+ *
  * WHAT COMES BACK rides a second ring in the same memory, the display's
  * events: the area's size and scale, an item's size where it is sized by its
  * content, a change refused and why, a step shown and what showing it cost,
- * an animation ended. The display touches the area's tag (its Bay's name)
- * when it adds one.
+ * an animation ended, the focus come or gone, an item pressed, a field's
+ * text. The display touches the area's tag (its Bay's name) when it adds one.
  *
  * BOUNDS. Everything a program says is held to the bounds below, per program
  * over all its areas; past one, the change is refused — told back, never a
@@ -144,6 +155,7 @@ enum {
     ITEM_OP_STEP    = 7,   /* ItemStep: the step whole — show it */
     ITEM_OP_CELLS   = 8,   /* ItemCellsRun and its cells: a cells item's cells written along a row */
     ITEM_OP_ANIMATE = 9,   /* ItemAnimation, then ItemChange and a value: one property said, reached in time */
+    ITEM_OP_FOCUS   = 10,  /* the keyboard's focus to the item, of those it reaches; ITEM_AREA for none */
 };
 
 typedef struct {
@@ -239,7 +251,9 @@ enum {
     ITEM_PROP_ROLE        = 22,   /* ItemRoleOf */
     ITEM_PROP_GRID        = 23,   /* ItemGrid: a cells item's columns and rows */
     ITEM_PROP_CARET       = 24,   /* ItemCaret: where a cells item's caret stands */
-    ITEM_PROPS            = 25,
+    ITEM_PROP_FOCUSABLE   = 25,   /* ItemFlag: the keyboard reaches it — unsaid, a button's and a field's role do */
+    ITEM_PROP_DISABLED    = 26,   /* ItemFlag: seen, but not to be used: never reached, never pressed, drawn faint */
+    ITEM_PROPS            = 27,
 };
 
 typedef struct { int32_t X, Y; } ItemPoint;
@@ -287,7 +301,8 @@ enum {
     ITEM_THEME_PANEL  = 3,
     ITEM_THEME_ACCENT = 4,
     ITEM_THEME_QUIET  = 5,    /* text said quietly */
-    ITEM_THEME_COLORS = 6,
+    ITEM_THEME_ON_ACCENT = 6, /* what is drawn on the accent: a button's words */
+    ITEM_THEME_COLORS = 7,
 };
 typedef struct {
     uint8_t  Kind;
@@ -447,6 +462,9 @@ enum {
     ITEM_EVENT_SHOWN   = 4,   /* ItemShown: a step on the glass, and what it cost */
     ITEM_EVENT_FREE    = 5,   /* ItemPageFree: a canvas's page may be drawn in again (Item is the block) */
     ITEM_EVENT_ANIMATION_END = 6,   /* ItemAnimationEnd: the last animation of a Number ended (Item is its item) */
+    ITEM_EVENT_FOCUS   = 7,   /* ItemFocus: the keyboard's focus came to Item, or left it */
+    ITEM_EVENT_PRESS   = 8,   /* the person pressed Item — by Enter or Space on it, or by its label */
+    ITEM_EVENT_TEXT    = 9,   /* ItemBytes and UTF-8: a field's text as the person has edited it */
 };
 
 /* The glass an area is on: a framebuffer's pixels, or a text page's cells —
@@ -494,6 +512,11 @@ typedef struct {
     uint8_t  Finished;        /* 1: every one of them ran to its end; 0: one was cut — said over, unsaid, or its item gone */
     uint8_t  Reserved[3];
 } ItemAnimationEnd;
+
+typedef struct {
+    uint8_t  Came;            /* 1: the focus came to the item; 0: it left */
+    uint8_t  Reserved[7];
+} ItemFocus;
 
 /* ---- The area's memory -------------------------------------------------- */
 
@@ -700,7 +723,7 @@ STATIC_ASSERT(sizeof(ItemColor) == 8 && sizeof(ItemFill) == 8 && sizeof(ItemStop
                   sizeof(ItemTextStyle) == 32 && sizeof(ItemShadow) == 28 && sizeof(ItemStroke) == 16,
               "the values of the items' language are an ABI of fixed sizes");
 STATIC_ASSERT(sizeof(ItemEvent) == 8 && sizeof(ItemAreaNews) == 24 && sizeof(ItemShown) == 32 &&
-                  sizeof(ItemAnimationEnd) == 8,
+                  sizeof(ItemAnimationEnd) == 8 && sizeof(ItemFocus) == 8,
               "the events of the items' language are an ABI of fixed sizes");
 STATIC_ASSERT(sizeof(ItemAreaHeader) == 320 && sizeof(ItemBlockHeader) == 64,
               "an area's and a block's memory begin with heads of fixed sizes");
