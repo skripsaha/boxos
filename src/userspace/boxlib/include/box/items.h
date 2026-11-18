@@ -454,6 +454,11 @@ enum {
  * down, a text is written into the cells a character each, a line of it a row,
  * and an item that is no text is shown by its caption. */
 enum { ITEM_GLASS_TEXT = 1, ITEM_GLASS_PIXELS = 2 };
+
+/* How the person wants things to move, told with the area and whenever it
+ * changes: less motion — a program moving things itself moves them at once
+ * and fades briefly too — and every animation's speed, in percent. */
+enum { ITEM_MOTION_LESS = 1 };
 #define ITEM_PAGE_CELL_WIDE 8
 #define ITEM_PAGE_CELL_TALL 16
 typedef struct {
@@ -462,7 +467,9 @@ typedef struct {
     uint8_t  Glass;           /* ITEM_GLASS_* */
     uint8_t  Shown;           /* 0 while it lies behind and is not seen */
     uint8_t  Mosaics;         /* ITEM_MOSAIC_*: the grids cells are drawn in exactly */
-    uint8_t  Reserved;
+    uint8_t  Motion;          /* ITEM_MOTION_* */
+    uint32_t Speed;           /* percent */
+    uint32_t Reserved;
 } ItemAreaNews;
 
 typedef struct {
@@ -624,7 +631,7 @@ typedef struct PACKED {
     uint8_t  command;         /* DISP_CMD_AREA_OPEN */
     uint8_t  glass;           /* ITEM_GLASS_* */
     uint8_t  mosaics;         /* ITEM_MOSAIC_*: the grids cells are drawn in exactly */
-    uint8_t  reserved;
+    uint8_t  motion;          /* ITEM_MOTION_* */
     int32_t  error;           /* error_t; the rest is meaningful only with 0 */
     uint32_t area;
     uint32_t display_pid;     /* where the messages go */
@@ -633,7 +640,7 @@ typedef struct PACKED {
     uint32_t scale;           /* pixels to a point, of 256 */
     uint32_t caret_col;       /* the console's caret, after everything the asker printed */
     uint32_t caret_row;
-    uint32_t reserved2;
+    uint32_t speed;           /* every animation's, in percent */
     char     bay_tag[DISPLAY_ITEM_TAG_MAX];
 } DisplayAreaOpenReply;
 
@@ -692,7 +699,7 @@ STATIC_ASSERT(sizeof(ItemRecord) == 8 && sizeof(ItemCreate) == 16 && sizeof(Item
 STATIC_ASSERT(sizeof(ItemColor) == 8 && sizeof(ItemFill) == 8 && sizeof(ItemStop) == 12 &&
                   sizeof(ItemTextStyle) == 32 && sizeof(ItemShadow) == 28 && sizeof(ItemStroke) == 16,
               "the values of the items' language are an ABI of fixed sizes");
-STATIC_ASSERT(sizeof(ItemEvent) == 8 && sizeof(ItemAreaNews) == 16 && sizeof(ItemShown) == 32 &&
+STATIC_ASSERT(sizeof(ItemEvent) == 8 && sizeof(ItemAreaNews) == 24 && sizeof(ItemShown) == 32 &&
                   sizeof(ItemAnimationEnd) == 8,
               "the events of the items' language are an ABI of fixed sizes");
 STATIC_ASSERT(sizeof(ItemAreaHeader) == 320 && sizeof(ItemBlockHeader) == 64,

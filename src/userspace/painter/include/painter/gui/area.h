@@ -69,6 +69,8 @@ struct Event {
     float         Scale = 1;        // pixels to a point
     gui::Glass    On    = gui::Glass::Pixels;
     bool          Seen  = true;     // the area is shown, not behind
+    bool          LessMotion  = false;   // the person wants less motion
+    std::uint32_t MotionSpeed = 100;     // every animation's speed, in percent
     std::uint16_t Op = 0, Property = 0;
     error_t       Reason = 0;
     std::uint64_t Step   = 0;
@@ -168,6 +170,11 @@ public:
     // console's caret stood when the area opened — after everything the
     // program printed before.
     std::uint8_t Mosaics() const noexcept { return MosaicFlags; }
+    // How the person wants things to move: less of it — what the program
+    // moves itself, it moves at once — and every animation's speed, in
+    // percent. Told anew in an Area event when it changes.
+    bool          LessMotion() const noexcept { return Less; }
+    std::uint32_t MotionSpeed() const noexcept { return Speed; }
     core::Point  ConsoleCaret() const noexcept { return CaretAtOpen; }
 
     std::expected<PictureBlock, box::error>  OpenPicture(std::uint32_t Width, std::uint32_t Height);
@@ -198,6 +205,8 @@ private:
     float               PixelsPerPoint = 1;
     gui::Glass          Kind  = gui::Glass::Pixels;
     std::uint8_t        MosaicFlags = 0;
+    bool                Less  = false;
+    std::uint32_t       Speed = 100;
     core::Point         CaretAtOpen{};
     TouchTagPair        BellName{};
     TouchTag            Rung  = TOUCH_TAG_INVALID;

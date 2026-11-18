@@ -235,7 +235,8 @@ ItemAreaNews NewsOf(const Area &Of) noexcept
     return ItemAreaNews{static_cast<std::int32_t>(std::lround(static_cast<float>(Place.Width) / S * ITEM_POINT)),
                         static_cast<std::int32_t>(std::lround(static_cast<float>(Place.Height) / S * ITEM_POINT)),
                         g_scale, static_cast<std::uint8_t>(g_glass.Text ? ITEM_GLASS_TEXT : ITEM_GLASS_PIXELS),
-                        static_cast<std::uint8_t>(Of.State->Shown), g_glass.Mosaics, 0};
+                        static_cast<std::uint8_t>(Of.State->Shown), g_glass.Mosaics,
+                        static_cast<std::uint8_t>(g_motion.Less ? ITEM_MOTION_LESS : 0), g_motion.Speed, 0};
 }
 
 /* A program's book, the system's faces put in it first — when it first lays a
@@ -566,6 +567,8 @@ bool AreasOpen(const Result &Asked, const AskFrom &From, const DisplayAreaOpenRe
         Reply.width             = News.Width;
         Reply.height            = News.Height;
         Reply.scale             = News.Scale;
+        Reply.motion            = News.Motion;
+        Reply.speed             = News.Speed;
         Tell(*Made, ITEM_EVENT_AREA, 0, &News, sizeof(News));
         Of.Areas++;
         g_areas.push_back(std::move(Made));
@@ -750,8 +753,15 @@ std::uint64_t AreasDue() noexcept
 
 void AreasMotion(bool Less, std::uint32_t Speed) noexcept
 {
+    if (g_motion.Less == Less && g_motion.Speed == Speed) return;
     g_motion.Less  = Less;
     g_motion.Speed = Speed;
+    /* Every program told, so what it moves itself moves as the person wants. */
+    for (const auto &Each : g_areas) {
+        const ItemAreaNews News = NewsOf(*Each);
+        Tell(*Each, ITEM_EVENT_AREA, 0, &News, sizeof(News));
+        Ring(*Each);
+    }
 }
 
 bool AreasWant() noexcept

@@ -171,12 +171,18 @@ bool CheckForProgrammer()
         Plate2.SetPlace({40, 100});
         (void)On.Present();
         const std::optional<gui::Event> Cut = Ending(74);
-        const std::uint64_t Most = Pixels ? 150 : 100;
-        const bool Timed = Pixels ? Fade >= 300 && Fade <= 300 + Most && Chain >= 400 && Chain <= 400 + Most : Fade <= Most && Chain <= Most;
+        /* As the person wants things to move: at their speed; with less
+         * motion a fade at most 200 ms and a move at once. */
+        const std::uint64_t Speed = std::clamp<std::uint64_t>(On.MotionSpeed(), 25, 400), Most = Pixels ? 150 : 100;
+        const std::uint64_t FadeIs  = On.LessMotion() ? std::min<std::uint64_t>(200, 300 * 100 / Speed) : 300 * 100 / Speed;
+        const std::uint64_t ChainIs = On.LessMotion() ? 0 : 400 * 100 / Speed;
+        const bool Timed = Pixels ? Fade >= FadeIs && Fade <= FadeIs + Most && Chain >= ChainIs && Chain <= ChainIs + Most
+                                  : Fade <= Most && Chain <= Most;
         const bool Told  = Faded && Faded->Finished && First && First->Finished && Then && Then->Finished && Cut && !Cut->Finished;
         std::printf("itemcheck: in time — a plate faded in 300 ms, its end told after %llu ms; moved twice one after another, "
-                    "both ends told after %llu ms; a move said over, told cut: %s\n",
-                    static_cast<unsigned long long>(Fade), static_cast<unsigned long long>(Chain), Told ? "every end as it was" : "NOT every end as it was");
+                    "both ends told after %llu ms; a move said over, told cut: %s — %s motion at %llu%%\n",
+                    static_cast<unsigned long long>(Fade), static_cast<unsigned long long>(Chain), Told ? "every end as it was" : "NOT every end as it was",
+                    On.LessMotion() ? "less" : "all", static_cast<unsigned long long>(Speed));
         Holds = Holds && Timed && Told;
     }
 

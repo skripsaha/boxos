@@ -87,6 +87,10 @@ float    gui_width(const GuiArea *area);
 float    gui_height(const GuiArea *area);
 float    gui_scale(const GuiArea *area);      /* pixels to a point */
 int      gui_on_text_page(const GuiArea *area);
+/* How the person wants things to move: less of it (what a program moves
+ * itself, at once), and every animation's speed in percent. */
+int      gui_less_motion(const GuiArea *area);
+uint32_t gui_motion_speed(const GuiArea *area);
 
 /* Items made under Parent — a group, or 0 for the area — of a role. */
 GuiItem gui_text(GuiArea *area, GuiItem parent, const char *utf8, int role);

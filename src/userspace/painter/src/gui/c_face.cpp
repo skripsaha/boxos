@@ -88,6 +88,8 @@ float gui_width(const GuiArea *area) { return area ? area->Screen.Size().X : 0; 
 float gui_height(const GuiArea *area) { return area ? area->Screen.Size().Y : 0; }
 float gui_scale(const GuiArea *area) { return area ? area->Screen.Scale() : 1; }
 int   gui_on_text_page(const GuiArea *area) { return area && area->Screen.On() == gui::Glass::Text; }
+int      gui_less_motion(const GuiArea *area) { return area && area->Screen.LessMotion() ? 1 : 0; }
+uint32_t gui_motion_speed(const GuiArea *area) { return area ? area->Screen.MotionSpeed() : 100u; }
 
 GuiItem gui_text(GuiArea *area, GuiItem parent, const char *utf8, int role)
 {
