@@ -77,8 +77,12 @@ run_itemcheck() {
         if [ "$name" = framebuffer ]; then
             grep -aq "itemcheck: a canvas of 96x64 pixels drawn 6 times, its two pages taken in turn" "$L"
             chk $? "itemcheck ($name): a canvas of the program's own pixels drawn page after page"
-            grep -aqE "itemcheck: a text measured beforehand ([0-9.]+)x([0-9.]+) points, the display laid it at \1x\2$" "$L"
-            chk $? "itemcheck ($name): a text measured beforehand the very size the display laid it at"
+            local line measured laid
+            line=$(grep -a "itemcheck: a text measured beforehand .* the display laid it at" "$L" | tr -d '\r' | tail -1)
+            measured=$(printf '%s' "$line" | sed -E 's/.*beforehand ([0-9.]+x[0-9.]+) points.*/\1/')
+            laid=$(printf '%s' "$line" | sed -E 's/.*laid it at ([0-9.]+x[0-9.]+).*/\1/')
+            [ -n "$line" ] && [ "$measured" = "$laid" ]
+            chk $? "itemcheck ($name): a text measured beforehand the very size the display laid it at ($measured, $laid)"
         else
             grep -aqE "itemcheck: a text measured beforehand [0-9]+x16 points, a cell a character on the text page" "$L"
             chk $? "itemcheck ($name): a text measured on the text page a cell a character"
