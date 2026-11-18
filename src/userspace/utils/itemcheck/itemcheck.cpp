@@ -2,20 +2,24 @@
  * painter/gui/area.h): an area opened over the screen, a scene of every kind
  * of item said in one step — a page, a panel that clips, a heading, a text
  * sized by its content with a coloured stretch, a gradient, a group seen
- * through, a dashed outline, a picture of the program's own pixels, a clock —
- * and then runs of steps as a program makes them: a word changed, a shape
- * moved, a group faded. Each step's frame is told back with what it cost: how
- * long the display took to compose it and put it on the glass, the pixels it
- * put there, the ring's bytes and records it took; and how long from the step
- * to its frame told back. The last line says PASS when every step was shown,
- * nothing was refused and a word changed composed a small part of the area;
- * FAIL when not. The times are a guide only under TCG. */
+ * through, a dashed outline, a picture of the program's own pixels, a clock,
+ * cells in the console's look — and then runs of steps as a program makes
+ * them: a word changed, a shape moved, a group faded, a cell changed. Each
+ * step's frame is told back with what it cost: how long the display took to
+ * compose it and put it on the glass, the pixels it put there, the ring's
+ * bytes and records it took; and how long from the step to its frame told
+ * back. Then the console: lines printed, an area opened in its flow after
+ * them, and how long until the glass showed it all. The last line says PASS
+ * when every step was shown, nothing was refused, and a word and a cell
+ * changed each composed a small part of the area; FAIL when not. The times
+ * are a guide only under TCG. */
 
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -39,7 +43,9 @@ using painter::gui::Role;
 constexpr float         Wide = 640, High = 400;   // the area wished, in points
 constexpr std::uint32_t Steps = 60;               // each run's
 constexpr std::uint32_t Page = 1, Panel = 10, Card = 2, Heading = 3, Body = 4, Bubble = 5, Glass = 6, Star = 9,
-                        Checks = 11, Clock = 13;
+                        Checks = 11, Clock = 13, Cells = 14;
+constexpr std::uint32_t CellsWide = 24, CellsHigh = 4;   // the cells' grid
+constexpr std::uint32_t Lines = 400;                     // the console's lines printed
 
 /* What the display told while the steps were waited for. */
 struct Told {
@@ -152,6 +158,18 @@ void Scene(Area &Say, float W, float H, std::optional<std::uint32_t> Picture)
     Say.Create(Clock, Kind::Text, ITEM_AREA, ITEM_TOP, Role::Label);
     Say.Place(Clock, {W * 0.55f, H * 0.82f});
     Say.Text(Clock, "12:00");
+    /* Cells in the console's look, a caret in them. */
+    Say.Create(Cells, Kind::Cells, ITEM_AREA, ITEM_TOP, Role::Code);
+    Say.Place(Cells, {W * 0.05f, H * 0.80f});
+    Say.Grid(Cells, CellsWide, CellsHigh);
+    for (std::uint32_t Row = 0; Row < CellsHigh; Row++) {
+        ItemCell Line[CellsWide];
+        for (std::uint32_t Col = 0; Col < CellsWide; Col++)
+            Line[Col] = ItemCell{static_cast<std::uint32_t>(U'a' + (Row * CellsWide + Col) % 26), 0x00E0E0E0u,
+                                 Row % 2 ? 0x00203040u : COLOR_THROUGH, 0, ITEM_MARK_NONE, {0, 0, 0}};
+        Say.Cells(Cells, Row, 0, Line);
+    }
+    Say.Caret(Cells, painter::core::Point{2, 1});
 }
 
 /* One run's frames: what the display said each cost, and how long each took
@@ -214,7 +232,7 @@ int main()
     if (Seen && !Picture) std::printf("itemcheck: the display gave no block for a picture; the scene is shown without it\n");
 
     Told Heard;
-    Run  First, Word, Move, Fade;
+    Run  First, Word, Move, Fade, Cell;
     bool All = Stepped(On, Heard, First, [&] { Scene(On, On.Size().X, On.Size().Y, Picture); });
     if (All) First.Say("the scene");
     for (std::uint32_t I = 0; All && I < Steps; I++)
@@ -230,17 +248,46 @@ int main()
     for (std::uint32_t I = 0; All && I < Steps; I++)
         All = Stepped(On, Heard, Fade, [&] { On.Opacity(Glass, 0.2f + 0.8f * static_cast<float>(I) / Steps); });
     if (All) Fade.Say("a group faded");
+    for (std::uint32_t I = 0; All && I < Steps; I++)
+        All = Stepped(On, Heard, Cell, [&] {
+            const ItemCell One{static_cast<std::uint32_t>(U'0' + I % 10), 0x00FFD040u, 0x00402010u, 0, ITEM_MARK_NONE, {0, 0, 0}};
+            On.Cells(Cells, I % CellsHigh, I % CellsWide, std::span(&One, 1));
+        });
+    if (All) Cell.Say("one cell changed");
 
     if (!All) {
         std::printf("itemcheck: FAIL — a step was never told shown%s\n", Heard.Lost ? ": the area has no bell" : "");
         return 1;
     }
-    const std::uint64_t Small = Run::Mean(Word.Pixels);
-    if (Heard.Refused || (Seen && (Small == 0 || Small * 8 > Shown))) {
-        std::printf("itemcheck: FAIL — %u changes refused; a word changed composed %llu pixels of the area's %llu\n", Heard.Refused,
-                    static_cast<unsigned long long>(Small), static_cast<unsigned long long>(Shown));
+    const std::uint64_t Small = Run::Mean(Word.Pixels), Tiny = Run::Mean(Cell.Pixels);
+    if (Heard.Refused || (Seen && (Small == 0 || Small * 8 > Shown || Tiny == 0 || Tiny * 64 > Shown))) {
+        std::printf("itemcheck: FAIL — %u changes refused; a word changed composed %llu pixels of the area's %llu, a cell "
+                    "changed %llu\n",
+                    Heard.Refused, static_cast<unsigned long long>(Small), static_cast<unsigned long long>(Shown),
+                    static_cast<unsigned long long>(Tiny));
         return 1;
     }
+
+    /* The console: lines printed, then an area in its flow after them — it
+     * opens once every line before it is drawn — and its first step shown:
+     * the glass then shows them all. */
+    const auto Printing = std::chrono::steady_clock::now();
+    for (std::uint32_t I = 0; I < Lines; I++) std::printf("the console's line %u of %u, as itemcheck prints it\n", I + 1, Lines);
+    std::expected<Area, box::error> Flowing = Area::Open(painter::gui::Placement::Flow, PointF{0, 40});
+    if (!Flowing) {
+        std::printf("itemcheck: FAIL — the display opened no area in the console's flow\n");
+        return 1;
+    }
+    Flowing->Create(1, Kind::Text, ITEM_AREA, ITEM_TOP, Role::Body);
+    Flowing->Text(1, "in the console's flow");
+    (void)Flowing->Present();
+    if (!ShownTo(*Flowing, Flowing->Step(), Heard)) {
+        std::printf("itemcheck: FAIL — the area in the console's flow was never told shown\n");
+        return 1;
+    }
+    const auto Took = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - Printing).count();
+    std::printf("itemcheck: the console, %u lines and an area in its flow — %lld ms until the glass showed them\n", Lines,
+                static_cast<long long>(Took));
     std::printf("itemcheck: PASS — every step shown, nothing refused%s\n",
                 Seen ? ", a word changed composing a small part of the area" : "; a text page composes no pixels");
     return 0;

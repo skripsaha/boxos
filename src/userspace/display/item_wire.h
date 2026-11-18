@@ -103,6 +103,8 @@ struct Properties {
     std::optional<ItemTextBox>                 Box;
     std::optional<PictureOf>                   Picture;
     std::optional<std::uint32_t>               Canvas;
+    std::optional<ItemGrid>                    Grid;
+    std::optional<ItemCaret>                   Caret;
 };
 
 // Bytes, the value of Property, said into Into: OK, or why not — the

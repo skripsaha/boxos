@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "box/cxx/error.h"
-#include "box/display.h"
+#include "box/items.h"
 
 #include "painter/core/color.h"
 #include "painter/core/geometry.h"
@@ -23,12 +23,12 @@ struct TextStyle {
 };
 
 /* What the glass is that a frame will be shown on, as the display says it
- * (box/display.h DisplayGlassKind): a text page of 16 colours, or a
+ * (box/items.h ITEM_GLASS_*): a text page of 16 colours, or a
  * framebuffer. Both draw the same cells; only what a cell can look like
  * differs, so a program that softens edges asks it. */
 enum class GlassKind : std::uint8_t {
-    Text   = DISPLAY_GLASS_TEXT,
-    Pixels = DISPLAY_GLASS_PIXELS,
+    Text   = ITEM_GLASS_TEXT,
+    Pixels = ITEM_GLASS_PIXELS,
 };
 
 enum class Visibility : std::uint8_t {
@@ -38,12 +38,12 @@ enum class Visibility : std::uint8_t {
 
 /* A mark the display draws over a cell's glyph in a colour of its own, so a
  * caret can stand on a letter and cover nothing: a line under the glyph, or a
- * bar down its left side (box/display.h DisplayCellMark). It is part of the
+ * bar down its left side (box/items.h ITEM_MARK_*). It is part of the
  * picture only — folded into the console's text, a cell keeps no mark. */
 enum class CellMark : std::uint8_t {
-    None  = DISPLAY_CELL_MARK_NONE,
-    Under = DISPLAY_CELL_MARK_UNDER,
-    Bar   = DISPLAY_CELL_MARK_BAR,
+    None  = ITEM_MARK_NONE,
+    Under = ITEM_MARK_UNDER,
+    Bar   = ITEM_MARK_BAR,
 };
 
 struct Cell {
@@ -85,7 +85,7 @@ public:
     void      SetGlass(GlassKind Value) noexcept { Kind = Value; }
 
     /* The grids finer than the halves the glass draws exactly, as the display
-     * said them (box/display.h DisplayMosaic): none until told. */
+     * said them (box/items.h ITEM_MOSAIC_*): none until told. */
     std::uint8_t Mosaics() const noexcept { return MosaicFlags; }
     void         SetMosaics(std::uint8_t Value) noexcept { MosaicFlags = Value; }
 

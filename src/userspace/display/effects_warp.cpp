@@ -1,5 +1,6 @@
-// effects_warp.cpp — the effects that move cells (box/display.h): sway,
-// mirror, ripple, quake, mosaic, melt, glitch and pulse.
+// effects_warp.cpp — the effects that move what the glass shows
+// (box/display.h): sway, mirror, ripple, quake, mosaic, melt, glitch and
+// pulse — in cells on a text page, in pixels on a framebuffer.
 
 #include "effects_warp.h"
 
@@ -24,9 +25,9 @@ void PlanSway(Warp &Out, const Moment &Now)
     const std::int32_t SwingY = static_cast<std::int32_t>((1 + (WidestY - 1) * Now.Strength / 255) * Now.Level);
 
     if (Now.Axes & DISPLAY_EFFECT_AXIS_X)
-        for (std::uint32_t Y = 0; Y < Rows; Y++) Out.RowShift[Y] += (Sine(RowTurn + Y * 56u) * SwingX + Unit / 2) / Unit;
+        for (std::uint32_t Y = 0; Y < Rows; Y++) Out.RowShift[Y] += (Sine(RowTurn + Y * 56u / Now.Down) * SwingX + Unit / 2) / Unit;
     if (Now.Axes & DISPLAY_EFFECT_AXIS_Y)
-        for (std::uint32_t X = 0; X < Cols; X++) Out.ColumnShift[X] += (Sine(ColumnTurn + X * 40u) * SwingY + Unit / 2) / Unit;
+        for (std::uint32_t X = 0; X < Cols; X++) Out.ColumnShift[X] += (Sine(ColumnTurn + X * 40u / Now.Across) * SwingY + Unit / 2) / Unit;
 }
 
 // Bands of rows torn sideways, new ones every other frame, and how far the
@@ -43,7 +44,7 @@ void PlanGlitch(Warp &Out, const Moment &Now)
         const std::uint32_t From = Roll % Now.Rows;
         const std::uint32_t Height = 1 + (Roll >> 8) % Tallest;
         const std::int32_t Away = static_cast<std::int32_t>(1 + (Roll >> 16) % Farthest) * (Roll & 0x80000000u ? -1 : 1);
-        const std::int32_t Apart = static_cast<std::int32_t>(1 + (Roll >> 24) % 3u);
+        const std::int32_t Apart = static_cast<std::int32_t>((1 + (Roll >> 24) % 3u) * Now.Across);
         for (std::uint32_t Y = From; Y < std::min(Now.Rows, From + Height); Y++) {
             Out.RowShift[Y] += Away * static_cast<std::int32_t>(Mix) / static_cast<std::int32_t>(Whole);
             Out.Split[Y] = Apart;
@@ -56,8 +57,9 @@ void PlanMelt(Warp &Out, const Moment &Now)
     const std::uint32_t Turn = static_cast<std::uint32_t>(Now.PhaseMs * 1024u / 2100u);
     const std::uint32_t Mix = Now.Mix();
     for (std::uint32_t X = 0; X < Now.Cols; X++) {
-        const std::uint32_t Speed = 70u + Hash(X * 2246822519u + 3u) % 186u;
-        const std::int32_t Surge = 256 + Sine(Turn + X * 91u) / 8;
+        const std::uint32_t Strip = X / Now.Across;   // a cell's width drips together
+        const std::uint32_t Speed = 70u + Hash(Strip * 2246822519u + 3u) % 186u;
+        const std::int32_t Surge = 256 + Sine(Turn + Strip * 91u) / 8;
         const std::uint32_t Reach = Now.Rows * Mix / Whole * Speed / Whole * static_cast<std::uint32_t>(Surge) / Whole / 3;
         Out.Drip[X] = static_cast<std::int32_t>(std::min(Reach, Now.Rows - 1));
     }
@@ -81,7 +83,8 @@ void PlanShake(Warp &Out, const Moment &Now)
 void PlanRipple(Warp &Out, const Moment &Now)
 {
     const std::int32_t Cols = static_cast<std::int32_t>(Now.Cols), Rows = static_cast<std::int32_t>(Now.Rows);
-    const auto Farthest = static_cast<std::size_t>(Root(static_cast<std::uint32_t>(Cols * Cols / 4 + Rows * Rows)) * 16 + 32);
+    const std::int32_t High = Rows * static_cast<std::int32_t>(Now.Tall);
+    const auto Farthest = static_cast<std::size_t>(Root(static_cast<std::uint32_t>(Cols * Cols / 4 + High * High / 4)) * 16 + 32);
     const std::int32_t Mix = static_cast<std::int32_t>(Now.Mix());
     const std::int32_t Tall = (1 + Cols / 60) * 16 * Mix / static_cast<std::int32_t>(Whole);
     const std::uint32_t Phase = static_cast<std::uint32_t>(Now.PhaseMs * 1024u / 1100u);
@@ -91,7 +94,7 @@ void PlanRipple(Warp &Out, const Moment &Now)
     for (std::size_t Far16 = 0; Far16 < Farthest; Far16++) {
         const auto Away = static_cast<std::uint32_t>(Far16);
         const std::int32_t Fading = 256 - static_cast<std::int32_t>(std::min<std::uint32_t>(255, Away * 256u / (12u * Now.Cols)));
-        Out.RingHeight[Far16] = Sine(Away * 32u / 9u - Phase) * Tall / 1024 * Fading / 256;
+        Out.RingHeight[Far16] = Sine(Away * 32u / (9u * Now.Across) - Phase) * Tall / 1024 * Fading / 256;
         Out.RingAim[Far16] = Far16 == 0 ? 0 : (1 << 22) / static_cast<std::int32_t>(Far16);
     }
 }
@@ -101,15 +104,17 @@ void PlanRipple(Warp &Out, const Moment &Now)
 void Ripple(const Warp &Plan, const Moment &Now, std::int32_t X, std::int32_t Y, std::int32_t &FromX,
             std::int32_t &FromY) noexcept
 {
+    const std::int32_t Tall = static_cast<std::int32_t>(Now.Tall);
     const std::int32_t DeltaX = X - static_cast<std::int32_t>(Now.Cols) / 2;
-    const std::int32_t DeltaY = (Y - static_cast<std::int32_t>(Now.Rows) / 2) * 2;
-    const std::uint32_t Far16 = Root(static_cast<std::uint32_t>(DeltaX * DeltaX + DeltaY * DeltaY) * 256u);
+    const std::int32_t DeltaY = (Y - static_cast<std::int32_t>(Now.Rows) / 2) * Tall;
+    const std::uint32_t Far16 = std::min<std::uint32_t>(Root(static_cast<std::uint32_t>(DeltaX * DeltaX + DeltaY * DeltaY) * 256u),
+                                                        static_cast<std::uint32_t>(Plan.RingHeight.size() - 1));
     const std::int32_t Height = Plan.RingHeight[Far16];
     const std::int32_t Aim = Plan.RingAim[Far16];
     const std::int32_t AlongX = DeltaX * Aim >> 6;
     const std::int32_t AlongY = DeltaY * Aim >> 6;
     FromX -= (Height * AlongX + (Height * AlongX >= 0 ? 1 : -1) * 2048 * 16) / (4096 * 16);
-    FromY -= (Height * AlongY + (Height * AlongY >= 0 ? 1 : -1) * 2048 * 32) / (4096 * 32);
+    FromY -= (Height * AlongY + (Height * AlongY >= 0 ? 1 : -1) * 2048 * 16 * Tall) / (4096 * 16 * Tall);
 }
 
 }  // namespace
@@ -138,7 +143,7 @@ void WarpPlan(Warp &Out, const Moment &Now)
         const std::int32_t Breath = 1024 + Sine(static_cast<std::uint32_t>(Now.PhaseMs * 1024u / 2600u));
         BlockWidth = 1 + Cols / 32 * (Mix * Breath / 2048) / static_cast<std::int32_t>(Whole);
     }
-    const std::int32_t BlockHeight = std::max(1, BlockWidth / 2);
+    const std::int32_t BlockHeight = std::max(1, BlockWidth / static_cast<std::int32_t>(Now.Tall));
 
     Out.ColumnBase.resize(Now.Cols);
     Out.RowBase.resize(Now.Rows);

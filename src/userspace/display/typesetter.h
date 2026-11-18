@@ -35,7 +35,7 @@ public:
     // cell that shows nothing. It holds until the next Glyph.
     const typecase::GlyphImage &Glyph(char32_t Character) noexcept;
 
-    // The grids of mosaics a cell draws exactly (DisplayMosaic flags).
+    // The grids of mosaics a cell draws exactly (box/items.h ITEM_MOSAIC_*).
     std::uint8_t Mosaics() const noexcept { return Grids; }
 
 private:

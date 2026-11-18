@@ -76,7 +76,9 @@ struct CanvasBlock {
 
 class Area : public Changes {
 public:
-    static std::expected<Area, box::error> Open(Placement Where, core::PointF Wish = {});
+    // Always: shown even while the program lives behind — a clock in the
+    // corner, a companion — not only while it is in front.
+    static std::expected<Area, box::error> Open(Placement Where, core::PointF Wish = {}, bool Always = false);
 
     Area(Area &&Other) noexcept;
     Area &operator=(Area &&) = delete;
@@ -88,11 +90,26 @@ public:
     // true when all of it went; false when the ring was full — the rest waits,
     // and goes with the next Present.
     bool Present();
+    // All of what changed put in the ring, room waited for as a printer waits
+    // on its lane: the display rings the bell once it has shown a step. A
+    // program that never reads its events takes them before (Next), or the
+    // display has no room to tell it, nor rings.
+    void PresentAll();
+
+    // The area's cells items folded into the console's text where they lie,
+    // the console scrolled up ScrollRows first (box/items.h
+    // DISP_CMD_AREA_COMMIT): what changed is presented first, and the area is
+    // gone once it is done. An area holding anything but cells is not folded.
+    box::status Commit(std::uint32_t ScrollRows = 0);
 
     // What the display told, oldest first; none when nothing waits.
     std::optional<Event> Next();
-    // The tag the display touches when it tells something: wait on it.
+    // The tag the display touches when it tells something: wait on it. Heard
+    // from the opening on; a program that never waits on it lets it go
+    // (Listen(false)), so the display's word does not wake it — a touch
+    // nobody takes keeps a strand from sleeping. INVALID while not heard.
     TouchTag Bell() const noexcept { return Rung; }
+    void     Listen(bool On) noexcept;
 
     // The number of the last step put in the ring: the step a Shown event
     // names once the glass shows it.
@@ -106,6 +123,11 @@ public:
     float        Scale() const noexcept { return PixelsPerPoint; }
     gui::Glass   On() const noexcept { return Kind; }
     std::uint32_t Id() const noexcept { return AreaId; }
+    // The grids cells are drawn in exactly (ITEM_MOSAIC_*), and where the
+    // console's caret stood when the area opened — after everything the
+    // program printed before.
+    std::uint8_t Mosaics() const noexcept { return MosaicFlags; }
+    core::Point  ConsoleCaret() const noexcept { return CaretAtOpen; }
 
     std::expected<PictureBlock, box::error>  OpenPicture(std::uint32_t Width, std::uint32_t Height);
     std::expected<CanvasBlock, box::error>   OpenCanvas(std::uint32_t Width, std::uint32_t Height);
@@ -125,6 +147,9 @@ private:
     core::PointF        Given{};
     float               PixelsPerPoint = 1;
     gui::Glass          Kind  = gui::Glass::Pixels;
+    std::uint8_t        MosaicFlags = 0;
+    core::Point         CaretAtOpen{};
+    TouchTagPair        BellName{};
     TouchTag            Rung  = TOUCH_TAG_INVALID;
     std::uint64_t       Steps = 0;
     bool                Opened = false;

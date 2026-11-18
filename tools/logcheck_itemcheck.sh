@@ -6,14 +6,16 @@
 # framebuffer. Each time `itemcheck` is typed at the hub: it opens an area over
 # the screen, says a scene of every kind of item in one step, then runs of
 # steps as a program makes them — a word changed, a shape moved, a group
-# faded — and says what each run's frames cost as the display told it back
+# faded, a cell changed — and says what each run's frames cost as the display
+# told it back; then prints lines into the console and opens an area in its
+# flow after them, and says how long until the glass showed it all
 # (src/userspace/utils/itemcheck). The gate holds that the area opened on the
-# glass the machine has, that every run was shown and said, that the last
-# line says PASS — every step shown, nothing refused, and on a framebuffer a
-# word changed composing a small part of the area — that the display never
-# closed an area for breaking the language, and that the hub still answers
-# after the program is gone. The times are kept in the log, a guide only
-# under TCG.
+# glass the machine has, that every run was shown and said, that the console's
+# lines and the area in its flow were shown, that the last line says PASS —
+# every step shown, nothing refused, and on a framebuffer a word and a cell
+# changed composing a small part of the area — that the display never closed
+# an area for breaking the language, and that the hub still answers after the
+# program is gone. The times are kept in the log, a guide only under TCG.
 
 itemcheck_boot() {   # itemcheck_boot NAME [make-args…]
     local name=$1
@@ -57,11 +59,14 @@ run_itemcheck() {
         grep -aqE "itemcheck: an area of [0-9]+x[0-9]+ points at [0-9.]+ pixels a point, on $glass" "$L"
         chk $? "itemcheck ($name): an area opened over the screen, on $glass, its size and scale told"
         held=1
-        for run in "the scene, 1 steps" "one word changed, 60 steps" "a shape moved, 60 steps" "a group faded, 60 steps"; do
+        for run in "the scene, 1 steps" "one word changed, 60 steps" "a shape moved, 60 steps" "a group faded, 60 steps" \
+                   "one cell changed, 60 steps"; do
             grep -aq "itemcheck: $run — " "$L" || held=0
         done
         [ $held = 1 ]
-        chk $? "itemcheck ($name): the scene and three runs of 60 steps each shown, each frame's cost told back"
+        chk $? "itemcheck ($name): the scene and four runs of 60 steps each shown, each frame's cost told back"
+        grep -aqE "itemcheck: the console, [0-9]+ lines and an area in its flow — [0-9]+ ms until the glass showed them" "$L"
+        chk $? "itemcheck ($name): the console's lines and an area in its flow after them shown"
         grep -aqF "$passed" "$L"
         chk $? "itemcheck ($name): PASS ($(grep -aoE 'itemcheck: (PASS|FAIL)' "$L" | tail -1))"
         ! grep -aq "broke the items' language" "$L"

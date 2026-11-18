@@ -44,6 +44,7 @@ items::ProgramState HostProgram(const items::Theme &Look, float Scale);
 
 void CheckWire(Tally &Count);
 void CheckCompose(Tally &Count);
+void CheckCells(Tally &Count);
 bool WriteSheet(const char *Out);
 
 }  // namespace stand

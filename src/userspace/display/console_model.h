@@ -7,26 +7,26 @@
 #include <vector>
 
 #include "box/display.h"
+#include "cell_grid.h"
 
-// What a layer's cell shows over the cell beneath it: its own colours, with
-// each COLOR_THROUGH one replaced by the background of the cell beneath and
-// each translucent one blended with it (BoxColorBlendOver), as a triple — Page
-// where that is the screen's own, for COLOR_DEFAULT in a foreground would be
-// drawn as the text colour. No colour that leaves this is a sentinel of
-// transparency, so the glass never sees one. False when both are wholly
-// see-through and the layer's cell covers nothing: Shown is then the cell
-// beneath, untouched.
-bool ShownOver(const TextCell &Layered, const TextCell &Beneath, std::uint32_t Page, TextCell &Shown) noexcept;
-
+// The console: the programs' text from their lanes and the kernel's lines,
+// laid into its grid of cells (cell_grid.h) — the console's cells item, the
+// lowest thing on the glass — in the console's one order.
 class ConsoleModel {
 public:
-    ConsoleModel(std::uint32_t Width, std::uint32_t Height);
+    // A console of Surface's size, written into it. Throws std::bad_alloc only.
+    explicit ConsoleModel(CellGrid &Surface);
 
-    std::uint32_t Width() const noexcept { return WidthValue; }
-    std::uint32_t Height() const noexcept { return HeightValue; }
+    std::uint32_t Width() const noexcept { return Grid.Cols(); }
+    std::uint32_t Height() const noexcept { return Grid.Rows(); }
     std::uint32_t CursorX() const noexcept { return CursorColumn; }
     std::uint32_t CursorY() const noexcept { return CursorRow; }
-    const std::vector<TextCell> &Cells() const noexcept { return Surface; }
+    std::span<const ItemCell> Cells() const noexcept { return Grid.Cells(); }
+
+    // The rows gone up off the console since it began — a clearing taking all
+    // it held: a row of the console counted so is where an area in its flow
+    // stays, as the console goes on.
+    std::uint64_t RowsGone() const noexcept { return Gone; }
 
     // A frame of the lane `Lane` (numbered from 1, as FrameSink numbers them).
     void Apply(const ConsoleRun &Run, std::uint32_t Lane);
@@ -51,17 +51,23 @@ public:
     // (boxos_log_tone.h), drawn in this console's colours for that tone.
     void WriteKernel(const char *Bytes, const std::uint8_t *Tones, std::size_t Count);
 
-    // A layer folded into the text: the base scrolled up ScrollRows first,
-    // then the opaque cells laid over it, then the caret where the layer
-    // shows one. The region lies on this console, Cells is Width x Height,
-    // ScrollRows is at most Height() and the caret inside the region — the
-    // layer was checked before it was handed over (LayersCommit). Page is the
-    // screen's page colour, what a see-through cell over the page shows.
-    void CommitLayer(std::int32_t X, std::int32_t Y, std::uint32_t Width,
-                     std::uint32_t Height, std::span<const DisplayLayerCell> Cells,
-                     std::uint32_t Page, std::uint32_t ScrollRows,
-                     std::uint32_t CursorX, std::uint32_t CursorY,
-                     bool CursorVisible);
+    // Rows of the console given to an area in its flow: on a row of their
+    // own after the text so far, the console scrolled up for them as it must,
+    // the caret below them. Where they begin, counted as RowsGone counts —
+    // the first of them is that minus RowsGone() on the console.
+    std::uint64_t Reserve(std::uint32_t Rows);
+
+    // Cells folded into the text — an area's, its program done with them
+    // (DISP_CMD_AREA_COMMIT): the console scrolled up ScrollRows first, then
+    // each cell of Cells that shows something laid over the console's from
+    // X, Y on, then the caret at CaretX, CaretY when Caret. The cells lie on
+    // this console, Cells is Width x Height, ScrollRows is at most Height()
+    // and the caret on the console — all checked before (areas.h
+    // AreasCommit). Page is the screen's page colour, what a see-through cell
+    // over the page shows.
+    void Fold(std::int32_t X, std::int32_t Y, std::uint32_t Width, std::uint32_t Height,
+              std::span<const ItemCell> Cells, std::uint32_t Page, std::uint32_t ScrollRows,
+              std::uint32_t CaretX, std::uint32_t CaretY, bool Caret);
 
 private:
     template <typename Drawing>
@@ -70,11 +76,12 @@ private:
     bool Holds(std::uint32_t Lane) const noexcept;
     std::size_t Here() const noexcept;
     void MoveTo(std::size_t Linear) noexcept;
-    void Lay(const TextCell &Cell);
+    void Lay(const ItemCell &Cell);
     void Draw(const ConsoleRun &Run);
     void Folded(std::int32_t X, std::int32_t Y, std::uint32_t Width, std::uint32_t Height,
-                std::span<const DisplayLayerCell> Cells, std::uint32_t Page, std::uint32_t ScrollRows,
-                std::uint32_t CursorX, std::uint32_t CursorY, bool CursorVisible);
+                std::span<const ItemCell> Cells, std::uint32_t Page, std::uint32_t ScrollRows,
+                std::uint32_t CaretX, std::uint32_t CaretY, bool Caret);
+    void Reserved(std::uint32_t Rows);
     void Clear(std::uint32_t Foreground, std::uint32_t Background);
     void Step(std::int32_t Delta);
     void Write(const char *Bytes, std::size_t Length,
@@ -86,11 +93,10 @@ private:
     void Tab();
     void Scroll();
 
-    std::uint32_t WidthValue;
-    std::uint32_t HeightValue;
+    CellGrid     &Grid;
     std::uint32_t CursorColumn = 0;
     std::uint32_t CursorRow = 0;
-    std::vector<TextCell> Surface;
+    std::uint64_t Gone = 0;
 
     // The lane whose text was drawn last (0: the kernel's lines, or a fold),
     // and its unfinished line: where it began and how far it reaches, as cells
@@ -107,12 +113,12 @@ private:
 
     // The typing line while it is lifted off the console (AsAnother), its
     // room made once for a whole console.
-    std::vector<TextCell> Lifted;
+    std::vector<ItemCell> Lifted;
 
     // The lines of lanes gone behind while they read.
     struct Kept {
         std::uint32_t         Lane = 0;
-        std::vector<TextCell> Line;
+        std::vector<ItemCell> Line;
         std::size_t           Caret = 0;   // where the caret stood in it
     };
     std::vector<Kept> KeptLines;

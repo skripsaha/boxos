@@ -3,25 +3,22 @@
 #include <new>
 #include <utility>
 
-#include "layer_canvas.h"
+#include "kept_cells.h"
 
 namespace painter::tui {
 
 struct Surface::Impl {
-    LayerCanvas Canvas;
+    KeptCells Canvas;
 
-    explicit Impl(LayerCanvas Value) noexcept : Canvas(std::move(Value)) {}
+    explicit Impl(KeptCells Value) noexcept : Canvas(std::move(Value)) {}
 };
 
 std::expected<Surface, StageError> Surface::Open(std::int32_t LeastCols,
                                                  std::int32_t LeastRows,
                                                  SurfaceRole Role) noexcept
 {
-    const DisplayLayerRole LayerRole = Role == SurfaceRole::Notice
-                                           ? DISPLAY_LAYER_NOTICE
-                                           : DISPLAY_LAYER_OVERLAY;
-    std::expected<LayerCanvas, StageError> Opened =
-        LayerCanvas::Open(LeastCols, LeastRows, LayerRole);
+    const CellsArea::Where Shown = Role == SurfaceRole::Notice ? CellsArea::Where::Always : CellsArea::Where::Over;
+    std::expected<KeptCells, StageError> Opened = KeptCells::Open(LeastCols, LeastRows, Shown);
     if (!Opened) return std::unexpected(Opened.error());
     try {
         return Surface(std::unique_ptr<Impl>(new Impl(std::move(*Opened))));

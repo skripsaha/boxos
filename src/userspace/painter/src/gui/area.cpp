@@ -4,6 +4,7 @@
 
 #include "painter/gui/area.h"
 
+#include <algorithm>
 #include <cstring>
 #include <utility>
 
@@ -70,11 +71,12 @@ void CanvasBlock::Taken(std::uint32_t Page) noexcept
     __atomic_store_n(&Head->PageFree[Page], 0u, __ATOMIC_RELEASE);
 }
 
-std::expected<Area, box::error> Area::Open(Placement Where, core::PointF Wish)
+std::expected<Area, box::error> Area::Open(Placement Where, core::PointF Wish, bool Always)
 {
     DisplayAreaOpenRequest Request{};
     Request.command   = DISP_CMD_AREA_OPEN;
     Request.placement = static_cast<std::uint8_t>(Where);
+    Request.flags     = Always ? DISPLAY_AREA_ALWAYS : 0;
     Request.width     = Points(Wish.X);
     Request.height    = Points(Wish.Y);
     Request.order     = console_order_mark();
@@ -95,20 +97,40 @@ std::expected<Area, box::error> Area::Open(Placement Where, core::PointF Wish)
     Made.Given          = core::PointF{static_cast<float>(Reply.width) / ITEM_POINT, static_cast<float>(Reply.height) / ITEM_POINT};
     Made.PixelsPerPoint = static_cast<float>(Reply.scale) / 256.0f;
     Made.Kind           = static_cast<gui::Glass>(Reply.glass);
+    Made.MosaicFlags    = Reply.mosaics;
+    Made.CaretAtOpen    = core::Point{static_cast<std::int32_t>(std::min<std::uint32_t>(Reply.caret_col, ITEM_GRID_SIDE_MOST)),
+                                      static_cast<std::int32_t>(std::min<std::uint32_t>(Reply.caret_row, ITEM_GRID_SIDE_MOST))};
     Made.Memory         = box::bay<std::byte>::open(Reply.bay_tag);
     if (!Made.Memory) return std::unexpected(box::error{box::errc::tag_not_found});
     Made.Head = reinterpret_cast<ItemAreaHeader *>(Made.Memory.data());
     if (Made.Memory.size_bytes() < sizeof(ItemAreaHeader) + ITEM_RING_BYTES + ITEM_EVENT_BYTES ||
         Made.Head->Magic != ITEM_AREA_MAGIC || Made.Head->Bytes != ITEM_RING_BYTES || Made.Head->EventBytes != ITEM_EVENT_BYTES)
         return std::unexpected(box::error{box::errc::corrupted});
-    Made.Rung = touch_pair_choose(touch_intern(Reply.bay_tag));
-    if (Made.Rung != TOUCH_TAG_INVALID && touch_claim(Made.Rung, TOUCH_REST, 0, 0) != 0) Made.Rung = TOUCH_TAG_INVALID;
+    Made.BellName = touch_intern(Reply.bay_tag);
+    Made.Listen(true);
     return Made;
+}
+
+void Area::Listen(bool On) noexcept
+{
+    if (On == (Rung != TOUCH_TAG_INVALID)) return;
+    if (On) {
+        Rung = touch_pair_choose(BellName);
+        if (Rung != TOUCH_TAG_INVALID && touch_claim(Rung, TOUCH_REST, 0, 0) != 0) Rung = TOUCH_TAG_INVALID;
+        return;
+    }
+    /* Let go, with every touch it already brought taken. */
+    Touch Heard;
+    while (touch_try_pop_tag(Rung, &Heard)) {
+    }
+    touch_release(Rung);
+    Rung = TOUCH_TAG_INVALID;
 }
 
 Area::Area(Area &&Other) noexcept
     : Changes(std::move(Other)), AreaId(Other.AreaId), DisplayPid(Other.DisplayPid), Memory(std::move(Other.Memory)),
-      Head(Other.Head), Given(Other.Given), PixelsPerPoint(Other.PixelsPerPoint), Kind(Other.Kind), Rung(Other.Rung),
+      Head(Other.Head), Given(Other.Given), PixelsPerPoint(Other.PixelsPerPoint), Kind(Other.Kind),
+      MosaicFlags(Other.MosaicFlags), CaretAtOpen(Other.CaretAtOpen), BellName(Other.BellName), Rung(Other.Rung),
       Steps(Other.Steps), Opened(Other.Opened)
 {
     Other.Opened = false;
@@ -147,6 +169,44 @@ bool Area::Present()
     __atomic_store_n(&Head->Write, Write, __ATOMIC_RELEASE);
     Tell(DISP_CMD_AREA_STEP, AreaId);
     return All;
+}
+
+box::status Area::Commit(std::uint32_t ScrollRows)
+{
+    if (!Head || !Opened) return std::unexpected(box::error{box::errc::invalid_state});
+    /* What changed goes first, all of it: the fold takes the cells as the
+     * program last said them. The area goes, so what it told is no one's. */
+    while (Next()) {
+    }
+    PresentAll();
+    DisplayAreaCommitRequest Request{};
+    Request.command     = DISP_CMD_AREA_COMMIT;
+    Request.area        = AreaId;
+    Request.scroll_rows = ScrollRows;
+    Request.order       = console_order_mark();
+    DisplayAreaCommitReply Reply{};
+    std::uint32_t          Got  = 0;
+    const int              Code = ask(DISPLAY_TAG, &Request, sizeof(Request), &Reply, sizeof(Reply), &Got);
+    if (Code != 0) return std::unexpected(Cause(Code));
+    if (Got != sizeof(Reply) || Reply.command != DISP_CMD_AREA_COMMIT) return std::unexpected(box::error{box::errc::corrupted});
+    if (Reply.error != 0) return std::unexpected(box::error{static_cast<error_t>(Reply.error)});
+    /* The display holds the area no more. */
+    Opened = false;
+    Head   = nullptr;
+    Memory = {};
+    return {};
+}
+
+void Area::PresentAll()
+{
+    if (Present()) return;
+    const bool Heard = Rung != TOUCH_TAG_INVALID;
+    Listen(true);
+    while (!Present()) {
+        Touch Rang;
+        if (Rung == TOUCH_TAG_INVALID || !touch_wait_tag(Rung, &Rang, 0)) yield();
+    }
+    if (!Heard) Listen(false);
 }
 
 std::optional<Event> Area::Next()

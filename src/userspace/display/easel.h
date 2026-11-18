@@ -4,59 +4,31 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
-#include "box/color.h"
 #include "box/cxx/error.h"
-#include "box/display.h"
+#include "box/items.h"
 #include "box/screen.h"
 #include "box/touch.h"
 #include "boxos_brush.h"
-#include "painter/core/canvas.h"
-#include "painter/core/geometry.h"
-#include "text_cell.h"
-#include "typecase/glyph_image.h"
+#include "cell_grid.h"
+#include "mirror.h"
 
-class Typesetter;
-
-// A cell as the glass is to show it: the console's text cell — its colours a
-// triple each, or COLOR_DEFAULT for the screen's own — and the mark a layer
-// drew in it (DisplayCellMark), none in the console's own text.
-struct GlassCell {
-    TextCell      Cell{};
-    std::uint32_t MarkColor = 0;
-    std::uint8_t  Mark = DISPLAY_CELL_MARK_NONE;
-};
-
-// Where the caret stands, in cells, and whether it is shown.
-struct Caret {
-    std::uint32_t X = 0;
-    std::uint32_t Y = 0;
-    bool Visible = false;
-};
-
-// What lies over a framebuffer's cells — the programs' areas (areas.h): a cell
-// beneath any of Covered is not drawn on the glass by Present, its pixels told
-// to Changed instead, to be composed with what lies over them.
-struct Over {
-    std::span<const painter::core::Rect> Covered;
-    void (*Changed)(const painter::core::Rect &Pixels) noexcept = nullptr;
-};
-
-// The easel — where the display puts the picture on the glass: the screen the
-// kernel lends this program, and the only hand that draws on it
-// (box/screen.h). A cell is drawn into the framebuffer as the typesetter's
-// picture of its character (typesetter.h), each pixel the ink's colour and
-// the paper's mixed as light by how much of it the picture covers, or as
-// glyph and attribute into the text page; a cell is drawn only when it
-// differs from what the glass already shows, and video memory is never read.
-// The caret is drawn here too, by software: an eighth of its cell at the
-// foot on a framebuffer, the attribute turned over on the text page. So is a
-// cell's mark: a line under the glyph or a bar down its left side on a
-// framebuffer, the mark's colour behind the glyph on the text page. And the
-// screen's own colours are here: a colour no program chose (COLOR_DEFAULT) is
-// drawn as the text colour, or behind the text as the page colour.
+// The easel — the glass, and the only hand that draws on it (box/screen.h):
+// the screen the kernel lends this program.
+//
+// On a framebuffer the easel holds the glass's mirror (mirror.h): a frame is
+// put into it, and what waits in it goes onto the glass (Flush) — as it is,
+// or through an effect over the glass (FlushThrough). Video memory is
+// written, never read; the Emergency Screen given back, the mirror goes on
+// whole as it is, nothing drawn again.
+//
+// On a text page each cell is written as glyph and attribute where it
+// differs from what the page shows, the caret's attribute turned over; a
+// marked cell shows the mark's colour behind its glyph.
 class Easel {
 public:
     // The screen, claimed — after waiting for it to be free if the program
@@ -70,104 +42,78 @@ public:
     Easel &operator=(const Easel &) = delete;
     ~Easel();
 
-    std::uint32_t Cols() const noexcept { return ColsValue; }
-    std::uint32_t Rows() const noexcept { return RowsValue; }
-
     // Whether the glass is a framebuffer, not a text page.
     bool Pixels() const noexcept { return Description.kind == SCREEN_KIND_PIXELS; }
 
-    // How many pixels tall and wide a framebuffer is; 0 for a text page.
-    std::uint32_t PixelHeight() const noexcept { return Pixels() ? Description.height : 0; }
+    // A text page's cells; a framebuffer's pixels — 0 for the other glass.
+    std::uint32_t Cols() const noexcept { return Pixels() ? 0 : Description.width; }
+    std::uint32_t Rows() const noexcept { return Pixels() ? 0 : Description.height; }
     std::uint32_t PixelWidth() const noexcept { return Pixels() ? Description.width : 0; }
+    std::uint32_t PixelHeight() const noexcept { return Pixels() ? Description.height : 0; }
 
     // What the loader left on the glass, as the claim says (SCREEN_LEFT_*),
     // and the fid of the scene whose first frame it is (SCREEN_LEFT_SCENE).
     std::uint32_t Left() const noexcept { return Description.left; }
     std::uint64_t LeftScene() const noexcept { return Description.scene; }
 
-    // Count rectangles of a canvas as big as a framebuffer onto it, pixel for
-    // pixel (boxos_brush.h BoxBrushShow) — nothing while the Emergency Screen
-    // has the glass. What the console shows there is no longer known to be
-    // on it.
+    // A framebuffer's mirror, which frames are put into.
+    Mirror &Picture() noexcept { return *Kept; }
+
+    // Count rectangles of a canvas as big as a framebuffer into the mirror and
+    // onto the glass, pixel for pixel (boxos_brush.h BoxBrushShow).
     void Show(const BoxBrushCanvas &Canvas, const BoxRect *Rects, std::uint32_t Count) noexcept;
 
-    // The typesetter whose pictures a framebuffer shows, alive as long as the
-    // easel: the console as many of its cells as the glass holds, at least
-    // one — a cell past the glass's edge drawn as far as the glass goes —
-    // in the middle of the glass, the pixels round them in the page colour.
-    // Given before the first Present; until then a framebuffer has no cells.
-    // A text page has its own glyphs and cells, and is not given one.
-    void SetTypesetter(Typesetter &With);
-
-    // The screen's own colours, as COLOR_DEFAULT is drawn in them.
-    std::uint32_t TextColor() const noexcept { return TextColour; }
-    std::uint32_t PageColor() const noexcept { return PageColour; }
-
     // The screen's turns, said on the `screen` Touch: Ctrl+Alt+Esc showing the
-    // kernel's Emergency Screen (nothing is drawn while it does) and giving
-    // the glass back (all of it is drawn again). True when the next Present
-    // has something to do.
+    // kernel's Emergency Screen (nothing goes onto the glass while it does)
+    // and giving the glass back (the mirror goes on whole at the next Flush, a
+    // text page is written whole at the next Present). True when the glass
+    // was given back.
     bool Step() noexcept;
 
-    // The screen's text colour and page colour, two triples: what the glass
-    // shows in the old ones is drawn again at the next Present.
-    void Page(std::uint32_t Text, std::uint32_t PageValue) noexcept;
-
-    // Cols() x Rows() composed cells onto the glass, and the caret — on a
-    // framebuffer, those beneath what lies Above told to it instead.
-    void Present(std::span<const GlassCell> Cells, Caret At, const Over &Above) noexcept;
-
-    // Whether the kernel's Emergency Screen has the glass: nothing is put on it.
+    // Whether the kernel's Emergency Screen has the glass.
     bool Lent() const noexcept { return Away; }
 
-    // The pixels a framebuffer's cells cover, within the glass, and how tall
-    // one is.
-    painter::core::Rect Grid() const noexcept;
-    std::int32_t CellHeight() const noexcept;
-
-    // Area of a framebuffer as the console shows it — its cells as last
-    // presented, their marks and the caret, the page round them — drawn
-    // into Into, whose corner lies at Corner on the glass: what lies beneath
-    // the areas, pixel for pixel as Present draws it.
-    void Beneath(painter::core::Canvas &Into, painter::core::Point Corner, painter::core::Rect Area) noexcept;
-
-    // Area of a framebuffer put on from Picture, whose corner lies at Area's
-    // corner, dithered; and what was put on made seen.
-    void Put(const painter::core::Canvas &Picture, painter::core::Rect Area) noexcept;
+    // What waits in the mirror put onto a framebuffer — as it is, or through
+    // Paint, which writes the whole glass from the mirror itself (an effect
+    // over the glass): Paint(Mirror, MirrorStride, Width, Height, Glass,
+    // GlassStride, Format).
     void Flush() noexcept;
+    template <typename Painting>
+    void FlushThrough(Painting &&Paint) noexcept
+    {
+        if (!Kept) return;
+        Kept->Forget();
+        if (Away) return;
+        Paint(Kept->Pixels(), static_cast<std::size_t>(Kept->Width()), Kept->Width(), Kept->Height(), GlassAt(0, 0),
+              static_cast<std::size_t>(Description.stride / 4u), Description.format);
+        Fence();
+    }
+
+    // Rows() x Cols() cells onto a text page, and the caret: each written
+    // where it differs from what the page shows; Text and Page the screen's
+    // own colours, which COLOR_DEFAULT is written in.
+    void Present(std::span<const ItemCell> Cells, Caret At, std::uint32_t Text, std::uint32_t Page) noexcept;
 
 private:
-    Easel(const ScreenDescription &Description, TouchTag Turns) noexcept;
+    Easel(const ScreenDescription &Description, TouchTag Turns, std::optional<Mirror> Kept) noexcept;
 
-    // A framebuffer cell's colours and picture, worked out once for its rows.
-    struct CellLook {
-        std::uint32_t               Ink, Paper, MarkInk, CaretInk;
-        bool                        Under, Bar, CaretHere;
-        const typecase::GlyphImage *Picture;
-    };
-    CellLook LookOf(const GlassCell &Cell, bool CaretHere) const;
-    // Row Y of a cell as the glass shows it, Wide pixels of it as triples
-    // into Out: the paper, the ink over it by the share of the pixel its
-    // character's picture covers, a mark, the caret.
-    void RowOf(const CellLook &Look, std::int32_t Y, std::int32_t Wide, std::uint32_t *Out) const noexcept;
-    painter::core::Rect CellPixels(std::uint32_t Col, std::uint32_t Row) const noexcept;
-    void DrawCell(std::uint32_t Col, std::uint32_t Row, const GlassCell &Cell,
-                  bool CaretHere) noexcept;
-    void PaintMargin() noexcept;
+    std::uint32_t *GlassAt(std::uint32_t X, std::uint32_t Y) const noexcept
+    {
+        return reinterpret_cast<std::uint32_t *>(static_cast<std::uintptr_t>(Description.va) +
+                                                 static_cast<std::size_t>(Y) * Description.stride +
+                                                 static_cast<std::size_t>(X) * 4u);
+    }
+    static void Fence() noexcept;
+    void WriteCell(std::uint32_t Col, std::uint32_t Row, const ItemCell &Cell, bool CaretHere, std::uint32_t Text,
+                   std::uint32_t Page) noexcept;
 
     ScreenDescription Description{};
-    Typesetter *Type = nullptr;
     TouchTag Turns = TOUCH_TAG_INVALID;
-    std::uint32_t ColsValue = 0;
-    std::uint32_t RowsValue = 0;
-    std::uint32_t OriginX = 0;     // where a framebuffer's first cell stands
-    std::uint32_t OriginY = 0;
-    std::vector<GlassCell> Shown;  // what the glass shows now, or would beneath what lies over it
-    std::vector<std::uint32_t> Colours;   // a cell's row, worked out
-    std::uint32_t TextColour = COLOR_LIGHT_GRAY;
-    std::uint32_t PageColour = COLOR_BLACK;
-    bool ShownKnown = false;       // false: nothing on the glass is ours — draw it all
-    Caret Drawn;                   // where the caret is on the glass
+    std::optional<Mirror> Kept;    // a framebuffer's
+    std::vector<ItemCell> Shown;   // a text page's cells as the page shows them
+    bool ShownKnown = false;       // false: what the text page shows is not ours — write it all
+    std::uint32_t ShownText = 0, ShownPage = 0;   // the screen's own colours it was written in
+    Caret Drawn;                   // where the text page's caret is
     bool Away = false;
     bool Held = false;
 };

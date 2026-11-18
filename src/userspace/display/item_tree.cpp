@@ -6,6 +6,7 @@
 #include "item_tree.h"
 
 #include <algorithm>
+#include <cstring>
 #include <utility>
 
 namespace items {
@@ -51,9 +52,18 @@ std::vector<std::uint32_t> BlocksOf(const Properties &Of)
     return Blocks;
 }
 
+namespace {
+
+std::size_t CellsOf(const Item &Of) noexcept { return Of.Grid ? Of.Grid->Cells().size() : 0; }
+
+}  // namespace
+
 Tree::~Tree()
 {
-    for (const auto &[Id, Each] : All) Held.TextBytes -= TextBytes(Each.Said);
+    for (const auto &[Id, Each] : All) {
+        Held.TextBytes -= TextBytes(Each.Said);
+        Held.Cells -= CellsOf(Each);
+    }
     Held.Items -= static_cast<std::uint32_t>(All.size());
 }
 
@@ -141,7 +151,6 @@ error_t Tree::Create(std::uint32_t Id, const ItemCreate &How) noexcept
 {
     if (Id == ITEM_AREA || Id == ITEM_TOP) return ERR_INVALID_ARGUMENT;
     if (How.Kind == 0 || How.Kind >= ITEM_KINDS || How.Role >= ITEM_ROLES) return ERR_INVALID_ARGUMENT;
-    if (How.Kind == ITEM_CELLS) return ERR_UNSUPPORTED;
     if (All.count(Id)) return ERR_ALREADY_EXISTS;
     if (Held.Items >= ITEM_ITEMS_MOST) return ERR_QUOTA_EXCEEDED;
     if (How.Parent == Id) return ERR_INVALID_ARGUMENT;
@@ -181,6 +190,7 @@ void Tree::Forget(Item &Of) noexcept
     }
     Uses(Of, false);
     Held.TextBytes -= TextBytes(Of.Said);
+    Held.Cells -= CellsOf(Of);
     Held.Items--;
     const std::uint32_t Id = Of.Id;
     All.erase(Id);
@@ -262,10 +272,51 @@ error_t Tree::Restack(std::uint32_t Id, const ItemPlaceAmong &How) noexcept
     return OK;
 }
 
+/* A cells item's grid made as its grid is said — every cell of it showing
+ * nothing — or let go when it is unsaid: OK, or why not, the grid as it was. */
+error_t Tree::Regrid(Item &Of) noexcept
+{
+    const std::size_t Before = CellsOf(Of);
+    if (!Of.Said.Grid) {
+        Of.Grid.reset();
+        Held.Cells -= Before;
+        return OK;
+    }
+    const std::size_t Wanted = static_cast<std::size_t>(Of.Said.Grid->Cols) * Of.Said.Grid->Rows;
+    if (Held.Cells - Before + Wanted > ITEM_CELLS_MOST) return ERR_QUOTA_EXCEEDED;
+    try {
+        Of.Grid = std::make_shared<CellGrid>(Of.Said.Grid->Cols, Of.Said.Grid->Rows, item_cell_empty());
+    } catch (...) {
+        return ERR_NO_MEMORY;
+    }
+    Held.Cells = Held.Cells - Before + Wanted;
+    if (Of.Said.Caret) Of.Grid->SetCaret(Of.Said.Caret->Col, Of.Said.Caret->Row, Of.Said.Caret->Shown != 0);
+    return OK;
+}
+
 error_t Tree::Change(std::uint32_t Id, std::uint16_t Property, std::span<const std::uint8_t> Value) noexcept
 {
     Item *Of = Find(Id);
     if (!Of) return ERR_OBJECT_NOT_FOUND;
+    const bool Cellular = Property == ITEM_PROP_GRID || Property == ITEM_PROP_CARET;
+    if (Cellular && Of->Kind != ITEM_CELLS) return ERR_INVALID_ARGUMENT;
+    if (Cellular) {
+        const std::optional<ItemGrid> Was = Of->Said.Grid;
+        const error_t                 Decoded = Decode(Property, Value, Of->Said, Of->Role);
+        if (Decoded != OK) return Decoded;
+        if (Property == ITEM_PROP_CARET) {
+            /* Only the cells it leaves and comes to are drawn again. */
+            if (Of->Grid) Of->Grid->SetCaret(Of->Said.Caret->Col, Of->Said.Caret->Row, Of->Said.Caret->Shown != 0);
+            MarkUp(Of->Parent);
+            return OK;
+        }
+        if (const error_t Made = Regrid(*Of); Made != OK) {
+            Of->Said.Grid = Was;
+            return Made;
+        }
+        Mark(*Of, true, true);
+        return OK;
+    }
     /* A text's bytes, said or in a style, held to the bound before they are
      * taken: the value's length is never less than the text it brings. */
     const std::size_t Before = TextBytes(Of->Said);
@@ -286,6 +337,17 @@ error_t Tree::Reset(std::uint32_t Id, std::uint16_t Property) noexcept
 {
     Item *Of = Find(Id);
     if (!Of) return ERR_OBJECT_NOT_FOUND;
+    if (Property == ITEM_PROP_CARET || Property == ITEM_PROP_GRID) {
+        (void)Unsay(Property, Of->Said);
+        if (Property == ITEM_PROP_CARET) {
+            if (Of->Grid) Of->Grid->SetCaret(0, 0, false);
+            MarkUp(Of->Parent);
+            return OK;
+        }
+        (void)Regrid(*Of);
+        Mark(*Of, true, true);
+        return OK;
+    }
     const std::size_t Before = TextBytes(Of->Said);
     Uses(*Of, false);
     const error_t Unsaid = Unsay(Property, Of->Said);
@@ -296,6 +358,44 @@ error_t Tree::Reset(std::uint32_t Id, std::uint16_t Property) noexcept
     const Asks Wants = AsksOf(Property);
     Mark(*Of, Wants.Picture, Wants.Place);
     return OK;
+}
+
+error_t Tree::Cells(std::uint32_t Id, const ItemCellsRun &Run, std::span<const std::uint8_t> Bytes) noexcept
+{
+    Item *Of = Find(Id);
+    if (!Of) return ERR_OBJECT_NOT_FOUND;
+    if (Of->Kind != ITEM_CELLS || !Of->Grid) return ERR_INVALID_STATE;
+    CellGrid &Grid = *Of->Grid;
+    if (Run.Count == 0 || Run.Row >= Grid.Rows() || Run.Col >= Grid.Cols() || Run.Count > Grid.Cols() - Run.Col ||
+        Bytes.size() / sizeof(ItemCell) < Run.Count)
+        return ERR_INVALID_ARGUMENT;
+    /* Each cell copied out of the program's memory once, then laid: what it
+     * writes meanwhile is not read twice. */
+    const std::size_t Start = static_cast<std::size_t>(Run.Row) * Grid.Cols() + Run.Col;
+    for (std::uint32_t I = 0; I < Run.Count; I++) {
+        ItemCell Cell;
+        std::memcpy(&Cell, Bytes.data() + static_cast<std::size_t>(I) * sizeof(ItemCell), sizeof(Cell));
+        Grid.Put(Start + I, Cell);
+    }
+    MarkUp(Of->Parent);
+    return OK;
+}
+
+error_t Tree::Show(std::uint32_t Id, std::shared_ptr<CellGrid> Grid) noexcept
+{
+    Item *Of = Find(Id);
+    if (!Of) return ERR_OBJECT_NOT_FOUND;
+    if (Of->Kind != ITEM_CELLS || !Grid) return ERR_INVALID_ARGUMENT;
+    Held.Cells    = Held.Cells - CellsOf(*Of) + Grid->Cells().size();
+    Of->Said.Grid = ItemGrid{Grid->Cols(), Grid->Rows()};
+    Of->Grid      = std::move(Grid);
+    Mark(*Of, true, true);
+    return OK;
+}
+
+void Tree::CellsChanged(std::uint32_t Id) noexcept
+{
+    if (Item *Of = Find(Id)) MarkUp(Of->Parent);
 }
 
 void Tree::BlockChanged(std::uint32_t Block) noexcept

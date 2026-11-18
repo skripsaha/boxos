@@ -3,7 +3,7 @@
 
 /* A cell seen as sub-pixels, two across and two, three or four down, and the
  * choice of the glyph and the two colours that show them best. A glass that
- * draws a grid exactly (box/display.h DisplayMosaic, the characters of
+ * draws a grid exactly (box/items.h ITEM_MOSAIC_*, the characters of
  * boxos_mosaic.h) shows any two colours on it as one character, and nothing
  * is approximated. A glass that does not has, of the shapes a cell can take,
  * a block or a space, the upper half, the left half, and on pixels the
@@ -39,7 +39,7 @@ struct Mosaic {
 Mosaic MosaicOf(const Cell &Shown, std::uint8_t Rows) noexcept;
 
 /* The opaque cell whose picture is nearest to Wanted, on a glass that draws
- * the grids Mosaics says (DisplayMosaic flags).
+ * the grids Mosaics says (ITEM_MOSAIC_* flags).
  *
  * Where Glass is pixels and it draws the grid of Wanted.Rows, the cell is
  * exact: the two colours and the character that split the sub-pixels as

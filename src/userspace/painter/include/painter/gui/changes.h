@@ -8,6 +8,10 @@
 // while it waits replaces what it said before: the last word wins, nothing is
 // lost but what was said over, and the program never waits for the display.
 //
+// A cells item's cells are kept here as last said, each cell a word of its
+// own: only the cells that differ from what was said before are marked, and
+// each row's marked stretch goes into the ring after every other change.
+//
 // Values are given in points (floats), colours as Painter's; they are written
 // to 1/256 of a point and sixteen bits a channel.
 
@@ -33,6 +37,7 @@ enum class Kind : std::uint8_t {
     Shape   = ITEM_SHAPE,
     Picture = ITEM_PICTURE,
     Canvas  = ITEM_CANVAS,
+    Cells   = ITEM_CELLS,
 };
 
 enum class Role : std::uint16_t {
@@ -168,12 +173,20 @@ public:
     void Canvas(std::uint32_t Item, std::uint32_t Block);
     void Role(std::uint32_t Item, gui::Role Role);
 
+    // A cells item's grid, every cell of it showing nothing; its cells from
+    // Col of Row, as far as the grid goes; and its caret, none for none.
+    void Grid(std::uint32_t Item, std::uint32_t Cols, std::uint32_t Rows);
+    void Cells(std::uint32_t Item, std::uint32_t Row, std::uint32_t Col, std::span<const ItemCell> Cells);
+    void Caret(std::uint32_t Item, std::optional<core::Point> At);
+
     // Into a ring of Bytes after Write, the reader at Read: as many records as
-    // fit, then Step's end when all of them did. True when nothing waits.
+    // fit, then Step's end when all of them did — or when what is said is more
+    // than the ring holds at once: then what fit goes as a step of its own,
+    // the rest in the next. True when nothing waits.
     bool Flush(std::uint8_t *Ring, std::uint32_t Bytes, std::uint64_t &Write, std::uint64_t Read, std::uint64_t Step);
 
-    bool        Empty() const noexcept { return Ordered.empty() && Properties.empty(); }
-    std::size_t Waiting() const noexcept { return Ordered.size() + Properties.size(); }
+    bool        Empty() const noexcept { return Ordered.empty() && Properties.empty() && CellsMarked == 0; }
+    std::size_t Waiting() const noexcept { return Ordered.size() + Properties.size() + CellsMarked; }
     // The bytes of records waiting, and those ever written.
     std::size_t Bytes() const noexcept;
     std::uint64_t Written() const noexcept { return WrittenBytes; }
@@ -186,8 +199,21 @@ private:
     void Put(std::uint32_t Item, std::uint16_t Property, Record Value);
     static Record Make(std::uint16_t Op, std::uint32_t Item, std::span<const std::uint8_t> Body);
 
+    // A cells item's cells as last said, and each row's stretch [From, To)
+    // said since it was put in the ring.
+    struct KeptCells {
+        std::uint32_t                                       Cols = 0, Rows = 0;
+        std::vector<ItemCell>                               Cells;
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> Marked;
+    };
+    bool FlushCells(const auto &Into, std::uint32_t Most);
+
     std::vector<std::pair<std::uint32_t, Record>>               Ordered;      // the item, and its record
     std::map<std::pair<std::uint32_t, std::uint16_t>, Record>   Properties;   // each property's last word
+    std::map<std::uint32_t, KeptCells>                          Grids;        // each cells item's
+    std::size_t                                                 CellsMarked = 0;   // rows with a stretch marked
+    static constexpr std::uint64_t                              NoStep = ~std::uint64_t{0};
+    std::uint64_t                                               Open   = NoStep;   // where the step being written began
     bool          StepDue      = false;
     std::uint64_t WrittenBytes = 0;
     std::uint64_t RefusedCount = 0;

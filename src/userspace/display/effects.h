@@ -7,14 +7,16 @@
 
 #include "box/display.h"
 #include "box/error.h"
+#include "box/items.h"
 #include "boxos_kctx.h"
 #include "easel.h"
 
 // The effect over the whole glass (box/display.h): at most one, laid by any
-// program for a while. It is kept here and applied at present time to the
-// picture the layers composed — the composed cells stay as they were, so the
-// glass is the picture itself again the moment the effect ends. Time is the
-// ClockBoard's: the effect is judged where it is stepped and drawn at the
+// program for a while. It is kept here and applied as the picture goes onto
+// the glass — on a framebuffer to the mirror's pixels (easel.h), on a text
+// page to the composed cells — what the frame composed staying as it was, so
+// the glass is the picture itself again the moment the effect ends. Time is
+// the ClockBoard's: the effect is judged where it is stepped and drawn at the
 // phase of its last frame, so the display need be awake only when a frame or
 // an end is due (EffectsDue).
 
@@ -46,10 +48,19 @@ bool EffectsStep() noexcept;
 // uptime; 0 when none lies over the glass.
 std::uint64_t EffectsDue() noexcept;
 
-// `Composed` — Cols x Rows cells and the caret — as the effect shows it, into
-// `Glass`; Ink and Paper are the screen's own colours, which a colour no
-// program chose is drawn in. The caret goes where its cell goes.
-void EffectsApply(std::span<const GlassCell> Composed, std::vector<GlassCell> &Glass, Caret &At,
-                  std::uint32_t Cols, std::uint32_t Rows, std::uint32_t Ink, std::uint32_t Paper);
+// A text page: `Composed` — Cols x Rows cells and the caret — as the effect
+// shows it, into `Glass`; Ink and Paper are the screen's own colours, which a
+// colour no program chose is drawn in. The caret goes where its cell goes.
+void EffectsApply(std::span<const ItemCell> Composed, std::vector<ItemCell> &Glass, Caret &At, std::uint32_t Cols,
+                  std::uint32_t Rows, std::uint32_t Ink, std::uint32_t Paper);
+
+// A framebuffer: Picture — Width x Height triples, Stride apart, the mirror
+// of the glass — as the effect shows it, written onto Glass, GlassStride
+// pixels from row to row, in the layout Format (boxos_pixel.h); Ink is the
+// screen's text colour. A cell of the console is Across x Down pixels, which
+// the effect's waves, blocks, flakes and stars are measured by.
+void EffectsPaint(const std::uint32_t *Picture, std::size_t Stride, std::uint32_t Width, std::uint32_t Height,
+                  std::uint32_t *Glass, std::size_t GlassStride, std::uint32_t Format, std::uint32_t Ink, std::uint32_t Across,
+                  std::uint32_t Down);
 
 #endif

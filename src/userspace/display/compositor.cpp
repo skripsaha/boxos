@@ -51,6 +51,45 @@ Rect Inside(const painter::core::RectF &Box, const Transform &Place) noexcept
     return Rect{X, Y, static_cast<std::int32_t>(std::floor(Right)) - X, static_cast<std::int32_t>(std::floor(Bottom)) - Y};
 }
 
+/* The pixel a place falls nearest, a half always up (item_draw.cpp). */
+std::int32_t Nearest(float Place) noexcept { return static_cast<std::int32_t>(std::floor(Place + 0.5f)); }
+
+/* A cells item laid as Place lays it — on the console's grid where its own
+ * place is unsaid. */
+Transform CellsPlace(const Item &Of, const Transform &Place, const CellsLook &Look) noexcept
+{
+    if (Of.Said.Place) return Place;
+    const painter::core::PointF Corner = Place.Apply({0, 0});
+    const painter::core::Point  Grid   = OnTheGrid(Look, painter::core::Point{Nearest(Corner.X), Nearest(Corner.Y)});
+    return Place.Then(Transform::Translate(static_cast<float>(Grid.X) - Corner.X, static_cast<float>(Grid.Y) - Corner.Y));
+}
+
+/* What changed in a cells item's grid since a frame last took it: damage
+ * where its cells lie — only the cells that changed where it lies upright,
+ * all of it elsewhere — or nothing where it is drawn whole anyway. */
+template <typename Damaging>
+void CellsChanged(CellGrid &Grid, const CellsLook &Look, const Transform &Place, float Scale, Rect Now, bool Whole,
+                  Damaging &&Damage)
+{
+    (void)Grid.TakeScrolled();
+    if (Whole || !Grid.Changed()) {
+        Grid.TakeMarks([](std::uint32_t, std::uint32_t, std::uint32_t) {});
+        return;
+    }
+    if (!Upright(Place, Scale)) {
+        Grid.TakeMarks([](std::uint32_t, std::uint32_t, std::uint32_t) {});
+        Damage(Now);
+        return;
+    }
+    const painter::core::PointF Corner = Place.Apply({0, 0});
+    const std::int32_t          X = Nearest(Corner.X), Y = Nearest(Corner.Y);
+    Grid.TakeMarks([&](std::uint32_t Row, std::uint32_t From, std::uint32_t To) {
+        Damage(Rect{X + static_cast<std::int32_t>(From) * Look.Width, Y + static_cast<std::int32_t>(Row) * Look.Height,
+                    static_cast<std::int32_t>(To - From) * Look.Width, Look.Height}
+                   .Intersect(Now));
+    });
+}
+
 }  // namespace
 
 Transform LocalOf(const Item &Of) noexcept
@@ -97,6 +136,11 @@ void Compositor::Vanish(AreaState &Area, const std::vector<std::uint32_t> &Items
         if (!Of) continue;
         Damage(Of->Shown);
         Of->Shown  = {};
+        if (Of->Grid) {
+            /* What changed in cells not seen is drawn with them when they are. */
+            (void)Of->Grid->TakeScrolled();
+            Of->Grid->TakeMarks([](std::uint32_t, std::uint32_t, std::uint32_t) {});
+        }
         Of->Redraw = Of->Moved || Of->Redraw;   /* drawn again when it comes back */
         Of->Moved  = true;
         Of->Within = false;
@@ -125,15 +169,21 @@ void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, 
             Program.KeptBytes += Drawn.Bytes;
             if (Sized && Area.Sized) Area.Sized(Id, Drawn.Measured);
         }
-        const Transform Place   = LocalOf(*Of).Then(Parent);
-        const bool      Hidden  = HiddenOf(Of->Said);
-        const bool      Shifted = Moved || Of->Moved;
-        const Rect      Now     = Hidden ? Rect{} : DeviceRect(Drawn.Own, Place).Intersect(Area.Place);
-        if (Of->Redraw || Shifted) {
+        const bool      Cellular = Of->Kind == ITEM_CELLS && Of->Grid && Program.From.Cells;
+        const Transform Place    = Cellular ? CellsPlace(*Of, LocalOf(*Of).Then(Parent), *Program.From.Cells)
+                                            : LocalOf(*Of).Then(Parent);
+        const bool      Hidden   = HiddenOf(Of->Said);
+        const bool      Shifted  = Moved || Of->Moved;
+        const Rect      Now      = Hidden ? Rect{} : DeviceRect(Drawn.Own, Place).Intersect(Area.Place);
+        const bool      Whole    = Of->Redraw || Shifted;
+        if (Whole) {
             Damage(Of->Shown);
             Damage(Now);
             Of->Shown = Now;
         }
+        if (Cellular)
+            CellsChanged(*Of->Grid, *Program.From.Cells, Place, Program.From.Scale, Now, Whole || Hidden,
+                         [this](Rect Where) { Damage(Where); });
         Of->Redraw = Of->Moved = Of->Within = false;
         if (Hidden) {
             if (Shifted) Vanish(Area, Of->Children);
@@ -145,6 +195,13 @@ void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, 
             if (Plain && Drawn.Opaque && Opacity * Own >= 1.0f && Place.B == 0 && Place.C == 0) {
                 const painter::core::PointF Size = SizeOf(*Of, Drawn);
                 Made.Hides = Inside(painter::core::RectF{0, 0, Size.X, Size.Y}, Place).Intersect(Area.Place);
+            } else if (Plain && Cellular && Of->Grid->Opaque() && Opacity * Own >= 1.0f && Upright(Place, Program.From.Scale)) {
+                /* Cells whose papers all cover: their grid's pixels, whole. */
+                const painter::core::PointF Corner = Place.Apply({0, 0});
+                Made.Hides = Rect{Nearest(Corner.X), Nearest(Corner.Y),
+                                  static_cast<std::int32_t>(Of->Grid->Cols()) * Program.From.Cells->Width,
+                                  static_cast<std::int32_t>(Of->Grid->Rows()) * Program.From.Cells->Height}
+                                 .Intersect(Area.Place);
             }
             Area.List.push_back(Made);
             continue;

@@ -5,6 +5,7 @@
 extern "C" {
 #endif
 
+#include "box/color.h"
 #include "box/types.h"
 
 /*
@@ -79,7 +80,7 @@ enum {
     ITEM_SHAPE   = 3,   /* a rectangle, rounded or not, an ellipse, or any outline */
     ITEM_PICTURE = 4,   /* a picture block shown at its size */
     ITEM_CANVAS  = 5,   /* the program's own pixels: a canvas block of two pages */
-    ITEM_CELLS   = 6,   /* characters in cells — the console, a terminal (laid in with the console) */
+    ITEM_CELLS   = 6,   /* characters in cells, the console's look: the console itself, a program of cells */
     ITEM_KINDS   = 7,
 };
 
@@ -121,6 +122,7 @@ enum {
     ITEM_OP_RESET   = 5,   /* ItemChange alone: one property unsaid — the role's again */
     ITEM_OP_BLOCK   = 6,   /* ItemBlockChanged: a block's pixels changed (Item is the block) */
     ITEM_OP_STEP    = 7,   /* ItemStep: the step whole — show it */
+    ITEM_OP_CELLS   = 8,   /* ItemCellsRun and its cells: a cells item's cells written along a row */
 };
 
 typedef struct {
@@ -178,7 +180,9 @@ enum {
     ITEM_PROP_PICTURE     = 20,   /* ItemPictureOf: a picture item's block and how it fills its size */
     ITEM_PROP_CANVAS      = 21,   /* ItemBlockOf: a canvas item's block */
     ITEM_PROP_ROLE        = 22,   /* ItemRoleOf */
-    ITEM_PROPS            = 23,
+    ITEM_PROP_GRID        = 23,   /* ItemGrid: a cells item's columns and rows */
+    ITEM_PROP_CARET       = 24,   /* ItemCaret: where a cells item's caret stands */
+    ITEM_PROPS            = 25,
 };
 
 typedef struct { int32_t X, Y; } ItemPoint;
@@ -315,6 +319,61 @@ typedef struct {
     uint16_t Reserved;
 } ItemPictureOf;
 
+/* ---- Cells -------------------------------------------------------------- */
+
+/* A cells item is a grid of cells in the console's look — its font, the size
+ * of its cells — its size the grid's; where its place is unsaid it lies on
+ * the console's grid, its first cell on the first cell corner of the grid in
+ * its area, so a program of cells shows as the console does. A grid said
+ * anew holds cells that show nothing; cells are written a run along a row at
+ * a time (ITEM_OP_CELLS).
+ *
+ * A cell is a character in its ink on its paper, and a mark over it in a
+ * colour of its own: a line under the glyph, or a bar down its left side —
+ * so a caret a program draws stands on a letter and covers nothing. Its
+ * colours are the console's (box/color.h): #RRGGBB; COLOR_DEFAULT, the
+ * screen's own — its text colour for an ink, its page for a paper;
+ * COLOR_THROUGH, what lies beneath; or a triple at an opacity over it. A cell
+ * whose ink and paper are both COLOR_THROUGH and that has no mark shows
+ * nothing. The console's own cells are these. */
+enum { ITEM_MARK_NONE = 0, ITEM_MARK_UNDER = 1, ITEM_MARK_BAR = 2 };
+typedef struct {
+    uint32_t Character;   /* Unicode; 0 shows no character */
+    uint32_t Ink;
+    uint32_t Paper;
+    uint32_t MarkInk;
+    uint8_t  Mark;        /* ITEM_MARK_* */
+    uint8_t  Reserved[3];
+} ItemCell;
+
+/* A cell that shows nothing: what a grid said anew holds. */
+static inline ItemCell item_cell_empty(void)
+{
+    const ItemCell Empty = {0, COLOR_THROUGH, COLOR_THROUGH, 0, ITEM_MARK_NONE, {0, 0, 0}};
+    return Empty;
+}
+
+typedef struct { uint32_t Cols, Rows; } ItemGrid;
+
+/* The caret: drawn by the display at the foot of its cell while Shown. One
+ * caret is on the glass — the topmost shown cells item's that shows one, else
+ * the console's. */
+typedef struct {
+    uint32_t Col, Row;
+    uint8_t  Shown;
+    uint8_t  Reserved[3];
+} ItemCaret;
+
+/* Count cells written from Col of Row, an ItemCell each, after this head. */
+typedef struct { uint32_t Row, Col, Count, Reserved; } ItemCellsRun;
+
+/* Which grids finer than the halves the console's look draws a cell's
+ * character in exactly — the quadrants (two across, two down), the sextants
+ * (three down), the octants (four down), the characters of boxos_mosaic.h: a
+ * cell of two colours on a grid it has is drawn as its pattern says, to the
+ * pixel. Said with the area (DisplayAreaOpenReply, ItemAreaNews). */
+enum { ITEM_MOSAIC_QUADRANTS = 1, ITEM_MOSAIC_SEXTANTS = 2, ITEM_MOSAIC_OCTANTS = 4 };
+
 /* ---- Events: what comes back -------------------------------------------- */
 
 typedef struct {
@@ -338,7 +397,8 @@ typedef struct {
     uint32_t Scale;           /* pixels to a point, of 256 */
     uint8_t  Glass;           /* ITEM_GLASS_* */
     uint8_t  Shown;           /* 0 while it lies behind and is not seen */
-    uint16_t Reserved;
+    uint8_t  Mosaics;         /* ITEM_MOSAIC_*: the grids cells are drawn in exactly */
+    uint8_t  Reserved;
 } ItemAreaNews;
 
 typedef struct {
@@ -427,18 +487,32 @@ typedef struct {
 #define ITEM_BLOCK_BYTES_MOST (64u * 1024u * 1024u)
 #define ITEM_BLOCKS_BYTES_MOST (256u * 1024u * 1024u)
 #define ITEM_REACH            (1 << 23)        /* of ITEM_POINT: no place or size past it */
+#define ITEM_GRID_SIDE_MOST   4096u            /* a cells item's columns, and its rows */
+#define ITEM_CELLS_MOST       (1u << 20)       /* cells, over all the program's cells items */
 
 /* ---- Questions and messages --------------------------------------------- */
 
 /* An area, asked: DisplayAreaOpenRequest → DisplayAreaOpenReply. It cares
- * where in the console's order it stands, as a layer does (box/display.h), so
- * it carries the asker's console_order_mark(): it is answered once everything
- * the asker printed before is drawn, and an area in the flow lies under it. A
- * block, asked: DisplayBlockOpenRequest → DisplayBlockOpenReply. Messages to
- * the display that answered: AREA_STEP (DisplayAreaNotice) after each step,
- * AREA_CLOSE (DisplayAreaNotice), BLOCK_CLOSE (DisplayBlockNotice). */
+ * where in the console's order it stands, so it carries the asker's
+ * console_order_mark() (box/print.h): it is answered once everything the
+ * asker printed before is drawn — the console's caret it names stands after
+ * that, and an area in the flow takes the rows below it. A block, asked:
+ * DisplayBlockOpenRequest → DisplayBlockOpenReply.
+ *
+ * An area's cells, folded into the console's text, asked:
+ * DisplayAreaCommitRequest → DisplayAreaCommitReply. It carries the asker's
+ * mark too, and lands there in the console's order: the console scrolled up
+ * scroll_rows first, then every cell of the area's cells items that shows
+ * something laid over the console's where it lies, the console's caret where
+ * a shown caret of theirs stands, and what the cells say told into the log
+ * ring. The area is gone then. An area that holds anything but cells items on
+ * the console's grid is not folded, and stays (-ERR_UNSUPPORTED).
+ *
+ * Messages to the display that answered: AREA_STEP (DisplayAreaNotice) after
+ * each step, AREA_CLOSE (DisplayAreaNotice), BLOCK_CLOSE (DisplayBlockNotice). */
 #define DISP_CMD_AREA_OPEN    0x60
 #define DISP_CMD_BLOCK_OPEN   0x61
+#define DISP_CMD_AREA_COMMIT  0x62
 #define DISP_CMD_AREA_STEP    0x68
 #define DISP_CMD_AREA_CLOSE   0x69
 #define DISP_CMD_BLOCK_CLOSE  0x6A
@@ -447,17 +521,24 @@ typedef struct {
 #define DISPLAY_BLOCK_TAG_PREFIX "display:block:"
 #define DISPLAY_ITEM_TAG_MAX     48u
 
-/* Where an area is wished to lie; the display decides. */
+/* Where an area is wished to lie; the display decides. Bottom to top: the
+ * console, the areas in its flow, those of the whole screen, those over
+ * everything, and those shown always — each by its age. */
 enum {
     DISPLAY_AREA_OVER  = 1,   /* over everything, as large as wished, where the display puts it */
     DISPLAY_AREA_WHOLE = 2,   /* the whole screen, while the program is in front */
-    DISPLAY_AREA_FLOW  = 3,   /* in the console's flow, as wide as it, as tall as wished */
+    DISPLAY_AREA_FLOW  = 3,   /* in the console's flow from the caret's row, as wide as it, as tall as wished:
+                               * the console makes room, its text goes on below, and the area moves with it */
 };
+
+/* An area's flags. ALWAYS: shown even while its program lives behind — a
+ * clock in the corner, a companion — not only while it is in front. */
+enum { DISPLAY_AREA_ALWAYS = 1 };
 
 typedef struct PACKED {
     uint8_t  command;         /* DISP_CMD_AREA_OPEN */
     uint8_t  placement;       /* DISPLAY_AREA_* */
-    uint16_t flags;           /* none: 0 */
+    uint16_t flags;           /* DISPLAY_AREA_ALWAYS, or 0 */
     int32_t  width;           /* wished, of ITEM_POINT; 0 for the display's choice */
     int32_t  height;
     uint32_t reserved;
@@ -467,13 +548,16 @@ typedef struct PACKED {
 typedef struct PACKED {
     uint8_t  command;         /* DISP_CMD_AREA_OPEN */
     uint8_t  glass;           /* ITEM_GLASS_* */
-    uint16_t reserved;
+    uint8_t  mosaics;         /* ITEM_MOSAIC_*: the grids cells are drawn in exactly */
+    uint8_t  reserved;
     int32_t  error;           /* error_t; the rest is meaningful only with 0 */
     uint32_t area;
     uint32_t display_pid;     /* where the messages go */
     int32_t  width;           /* given, of ITEM_POINT */
     int32_t  height;
     uint32_t scale;           /* pixels to a point, of 256 */
+    uint32_t caret_col;       /* the console's caret, after everything the asker printed */
+    uint32_t caret_row;
     uint32_t reserved2;
     char     bay_tag[DISPLAY_ITEM_TAG_MAX];
 } DisplayAreaOpenReply;
@@ -499,6 +583,21 @@ typedef struct PACKED {
 } DisplayBlockOpenReply;
 
 typedef struct PACKED {
+    uint8_t  command;         /* DISP_CMD_AREA_COMMIT */
+    uint8_t  reserved[3];
+    uint32_t area;
+    uint32_t scroll_rows;     /* the console scrolled up first, at most its rows */
+    uint32_t reserved2;
+    uint64_t order;           /* the asker's console_order_mark() */
+} DisplayAreaCommitRequest;
+
+typedef struct PACKED {
+    uint8_t  command;         /* DISP_CMD_AREA_COMMIT */
+    uint8_t  reserved[3];
+    int32_t  error;           /* error_t: 0 — the cells are the console's text, and the area gone */
+} DisplayAreaCommitReply;
+
+typedef struct PACKED {
     uint8_t  command;         /* DISP_CMD_AREA_STEP or _CLOSE */
     uint8_t  reserved[3];
     uint32_t area;
@@ -522,7 +621,10 @@ STATIC_ASSERT(sizeof(ItemEvent) == 8 && sizeof(ItemAreaNews) == 16 && sizeof(Ite
               "the events of the items' language are an ABI of fixed sizes");
 STATIC_ASSERT(sizeof(ItemAreaHeader) == 320 && sizeof(ItemBlockHeader) == 64,
               "an area's and a block's memory begin with heads of fixed sizes");
-STATIC_ASSERT(sizeof(DisplayAreaOpenRequest) == 24 && sizeof(DisplayAreaOpenReply) == 80 &&
+STATIC_ASSERT(sizeof(ItemCell) == 20 && sizeof(ItemGrid) == 8 && sizeof(ItemCaret) == 12 && sizeof(ItemCellsRun) == 16,
+              "a cells item's values are an ABI of fixed sizes");
+STATIC_ASSERT(sizeof(DisplayAreaOpenRequest) == 24 && sizeof(DisplayAreaOpenReply) == 88 &&
+                  sizeof(DisplayAreaCommitRequest) == 24 && sizeof(DisplayAreaCommitReply) == 8 &&
                   sizeof(DisplayBlockOpenRequest) == 24 && sizeof(DisplayBlockOpenReply) == 64 &&
                   sizeof(DisplayAreaNotice) == 12 && sizeof(DisplayBlockNotice) == 12,
               "the questions and messages of areas and blocks are an ABI of fixed sizes");
