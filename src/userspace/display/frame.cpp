@@ -44,6 +44,10 @@ std::vector<items::AreaState *>      g_order;
 std::vector<ItemCell>                g_composed;     // a text page's cells
 bool                                 g_everything = true;
 
+/* Where the glass is to be composed again, said before a frame — where an
+ * area went: the glass as it was before the console moved under it. */
+std::vector<Rect> g_before;
+
 /* What the mirror shows of each of the console's cells, as last drawn —
  * Unseen where that is not known: where it lies under something, or was
  * drawn only in part — and where the console's caret was drawn. */
@@ -442,7 +446,11 @@ void FrameColours(std::uint32_t Text, std::uint32_t Page)
 
 void FrameVacated(const Rect &Where) noexcept
 {
-    if (g_compositor) g_compositor->Damage(Where);
+    try {
+        g_before.push_back(Where);
+    } catch (...) {
+        g_everything = true;   // no room to keep where: all of the glass composed again
+    }
 }
 
 void FrameEverything() noexcept { g_everything = true; }
@@ -451,7 +459,7 @@ bool FrameDue(const ConsoleModel &Console, bool Areas) noexcept
 {
     if (!g_console) return false;
     g_console->SetCaret(Console.CursorX(), Console.CursorY(), true);
-    return g_everything || g_console->Changed() || Areas || (g_compositor && g_compositor->Damaged());
+    return g_everything || g_console->Changed() || Areas || !g_before.empty() || (g_compositor && g_compositor->Damaged());
 }
 
 std::span<const ItemCell> FramePage(std::span<items::AreaState *const> Programs, Caret &At) noexcept
@@ -507,6 +515,7 @@ FrameCost FrameCompose(Mirror &Into, std::span<items::AreaState *const> Programs
      * the mirror does not show already are drawn. Under an area that hides
      * it whole, nothing of the console is seen, nor moved. */
     const std::uint32_t Scrolled = g_console->TakeScrolled();
+    std::int32_t        Up       = 0;
     std::vector<Rect>   Still;
     try {
         g_seen.resize(g_console->Count(), Unseen);
@@ -517,7 +526,7 @@ FrameCost FrameCompose(Mirror &Into, std::span<items::AreaState *const> Programs
             Still.reserve(KeptMost);
             Covers(Programs, Still);
             if (Scrolled != 0 && Scrolled < g_console->Rows()) {
-                const std::int32_t Up = static_cast<std::int32_t>(Scrolled) * g_cells.Height;
+                Up = static_cast<std::int32_t>(Scrolled) * g_cells.Height;
                 Into.Shift(g_cells.Grid, Up, Still);
                 const std::size_t Gone = static_cast<std::size_t>(Scrolled) * g_console->Cols();
                 std::move(g_seen.begin() + static_cast<std::ptrdiff_t>(Gone), g_seen.end(), g_seen.begin());
@@ -547,14 +556,23 @@ FrameCost FrameCompose(Mirror &Into, std::span<items::AreaState *const> Programs
         g_compositor->Damage(g_cells.Grid);
     }
 
-    std::vector<Rect> Damaged;
+    /* What was to be composed again before the console moved: there, and
+     * where the move took what the glass showed there. */
+    for (const Rect &Each : g_before) {
+        g_compositor->Damage(Each);
+        if (Up == 0) continue;
+        const Rect Moved = Each.Intersect(g_cells.Grid);
+        if (!Moved.Empty()) g_compositor->Damage(Rect{Moved.X, Moved.Y - Up, Moved.Width, Moved.Height}.Intersect(g_cells.Grid));
+    }
+    g_before.clear();
+
     try {
         g_order.clear();
         g_order.push_back(g_console_area.get());
         g_order.insert(g_order.end(), Programs.begin(), Programs.end());
         g_compositor->Take(g_order, g_theme);
         if (HoldCaret(Programs)) g_compositor->Take(g_order, g_theme);
-        Damaged = g_compositor->Rects();
+        const std::vector<Rect> Damaged = g_compositor->Rects();
         for (const Rect &Each : Damaged)
             for (std::int32_t Y = Each.Y; Y < Each.Y + Each.Height; Y += TileSide)
                 for (std::int32_t X = Each.X; X < Each.X + Each.Width; X += TileSide) {
@@ -580,9 +598,10 @@ FrameCost FrameCompose(Mirror &Into, std::span<items::AreaState *const> Programs
                     Pixels += static_cast<std::uint64_t>(Tile.Width) * static_cast<std::uint64_t>(Tile.Height);
                 }
     } catch (...) {
-        /* No room to compose: what the mirror holds stays, and all of this
-         * frame's damage is composed again at the next. */
-        for (const Rect &Each : Damaged) g_compositor->Damage(Each);
+        /* No room to compose: what the mirror holds stays, and all of the
+         * glass is composed again at the next — wherever the console moves
+         * meanwhile, and whatever of this frame's damage was taken. */
+        g_everything = true;
     }
 
     const auto Micros = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - Start).count();

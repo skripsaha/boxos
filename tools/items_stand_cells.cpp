@@ -284,6 +284,32 @@ void CheckFrame(Tally &Count)
     Flow.Step(Along);
 
     std::vector<items::AreaState *> Programs{&Flow.Area, &Over.Area};
+    /* An area that comes and goes, as a program's does when it opens one and
+     * ends: a panel with a shadow, below the other areas and clear of what
+     * mending them takes, gone often while the console scrolls a line. */
+    std::optional<Bench> Passing;
+    const auto Pass = [&] {
+        if (Passing) {
+            if (Passing->Area.WasShown) FrameVacated(Passing->Area.Was);
+            Programs.erase(std::find(Programs.begin(), Programs.end(), &Passing->Area));
+            Passing.reset();
+            return;
+        }
+        Passing.emplace(Program);
+        Passing->Area.Place = Rect{static_cast<std::int32_t>(20 + Random() % 380), static_cast<std::int32_t>(285 + Random() % 40), 220, 70};
+        Passing->Area.Shown = true;
+        Changes Opening;
+        Opening.Create(1, Kind::Shape, ITEM_AREA, ITEM_TOP, Role::Panel);
+        Opening.Place(1, {8, 8});
+        Opening.Size(1, {150, 34});
+        Opening.Corners(1, painter::core::Corners::All(8));
+        Opening.Shadows(1, std::vector<painter::gui::Shadow>{painter::gui::Shadow{{0, 3}, 6, 0, Color::Rgba(0, 0, 0, 140), false}});
+        Opening.Create(2, Kind::Text, ITEM_AREA, ITEM_TOP, Role::Body);
+        Opening.Place(2, {16, 14});
+        Opening.Text(2, "passing by");
+        Passing->Step(Opening);
+        Programs.push_back(&Passing->Area);
+    };
     Mirror                          Shown(Glass.Width, Glass.Height);
     std::vector<std::uint32_t>      Seen(static_cast<std::size_t>(Glass.Width) * Glass.Height, 0);
     std::uint64_t                   Written = 0, Shifted = 0, Scrolls = 0, Composed = 0;
@@ -298,7 +324,13 @@ void CheckFrame(Tally &Count)
     double ScrollMicros = 0, WholeMicros = 0;
     for (int Round = 0; Round < 120; Round++) {
         const std::uint64_t Gone = Console.RowsGone();
-        switch (Random() % 8) {
+        switch (Random() % 9) {
+        case 8:
+            /* The area comes or goes, and the console scrolls a line in the
+             * same frame. */
+            Pass();
+            Say(Console, "a line as an area comes or goes\n");
+            break;
         case 6: {
             /* More than a screen at once: nothing of what the glass shows is
              * left to move. */
@@ -385,8 +417,8 @@ void CheckFrame(Tally &Count)
     Count.Check(Plain, "frame: the console holds every colour plain — a triple or the screen's own — see-through and half "
                        "see-through ones said in its text among them");
     Count.Check(Whole, "frame: after each of 120 steps of typing in colours of every kind, scrolling, a caret moved and areas "
-                       "changed — a plate kept still over the console among them — the mirror holds the very pixels of the glass "
-                       "composed whole");
+                       "changed — a plate kept still over the console among them, an area come and gone as it scrolls — the "
+                       "mirror holds the very pixels of the glass composed whole");
     Count.Check(Glassy, "frame: every pixel that changed went onto the glass");
     const std::uint64_t Pixels = static_cast<std::uint64_t>(Glass.Width) * Glass.Height;
     Count.Check(Scrolls > 5, "frame: the console scrolled " + std::to_string(Scrolls) + " times in the steps");
@@ -396,6 +428,11 @@ void CheckFrame(Tally &Count)
                     100.0 * static_cast<double>(Shifted) / static_cast<double>(Scrolls * Pixels), ScrollMicros / static_cast<double>(Scrolls),
                     WholeMicros / 120.0);
     Count.Check(Scrolls == 0 || Shifted < Scrolls * Pixels, "frame: a scroll writes less than the whole glass");
+
+    if (Passing) {
+        Pass();
+        Frame();
+    }
 
     /* The console written straight into the mirror where nothing lies over
      * it holds the very pixels the canvas's way gives: a see-through veil

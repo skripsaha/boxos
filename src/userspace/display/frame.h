@@ -64,7 +64,9 @@ painter::core::Rect  FrameScreen() noexcept;
 // and the console drawn again in them (the areas' items: areas.h AreasTheme).
 void FrameColours(std::uint32_t Text, std::uint32_t Page);
 
-// Pixels to be composed again: something that lay there went.
+// Pixels to be composed again at the next frame: something that lay there
+// went — where it lay on the glass as the frame finds it, and where the
+// console moving under it took its pixels.
 void FrameVacated(const painter::core::Rect &Where) noexcept;
 // Everything to be composed again at the next frame.
 void FrameEverything() noexcept;
