@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,6 +26,7 @@
 #include "cells_draw.h"
 #include "compositor.h"
 #include "console_model.h"
+#include "input.h"
 #include "painter/core/geometry.h"
 
 // The glass known: its pixels (a text page's eighths and sixteenths of a
@@ -97,6 +99,9 @@ void AreasInOrder(std::vector<items::AreaState *> &Into);
 
 // Whether anything of the areas changed since a frame last showed them.
 bool AreasWant() noexcept;
+
+// Pixels to a point of every area.
+float AreasScale() noexcept;
 
 // The areas' animations brought to Now (of the clock's microseconds) where
 // they are due, each number's end told to its program.

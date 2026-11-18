@@ -70,6 +70,7 @@ enum class ThemeColor : std::uint16_t {
     Panel  = ITEM_THEME_PANEL,
     Accent = ITEM_THEME_ACCENT,
     Quiet  = ITEM_THEME_QUIET,
+    OnAccent = ITEM_THEME_ON_ACCENT,   // what is drawn on the accent: a button's words
 };
 
 struct Stop {
@@ -211,6 +212,12 @@ public:
     void Size(std::uint32_t Item, core::PointF Size);   // either ByContent
     void Opacity(std::uint32_t Item, float Opacity);
     void Hidden(std::uint32_t Item, bool Hidden);
+    // Whether the keyboard reaches Item — unsaid, a button's and a field's
+    // role do — and whether it is not to be used; the keyboard's focus asked
+    // to Item, ITEM_AREA for none.
+    void Focusable(std::uint32_t Item, bool Reached);
+    void Disabled(std::uint32_t Item, bool Disabled);
+    void Focus(std::uint32_t Item);
     void Turn(std::uint32_t Item, float Degrees);
     void Scale(std::uint32_t Item, core::PointF Scale);
     void Anchor(std::uint32_t Item, core::PointF At);
@@ -260,6 +267,12 @@ public:
     // Item's Property no longer known as said: the display refused it, and
     // what it holds is what was said before.
     void Forget(std::uint32_t Item, std::uint16_t Property);
+    // Item's Property as it is now, said by another hand — the person typing
+    // in a field — known as said, never written.
+    void Known(std::uint32_t Item, std::uint16_t Property, std::span<const std::uint8_t> Value)
+    {
+        Values[{Item, Property}] = Record(Value.begin(), Value.end());
+    }
     // Item's Property said as the language writes it — a value Said gave
     // back, of another item — written unless it is what was said.
     void Say(std::uint32_t Item, std::uint16_t Property, std::span<const std::uint8_t> Value)

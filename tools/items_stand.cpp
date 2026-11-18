@@ -118,6 +118,7 @@ int main(int Count, char **Words)
     stand::CheckCells(Tally);
     stand::CheckGui(Tally);
     stand::CheckMotion(Tally);
+    stand::CheckKeys(Tally);
     std::printf("items stand: %d held, %d failed\n", Tally.Held, Tally.Failed);
     return Tally.Failed ? 1 : 0;
 }

@@ -45,6 +45,9 @@ enum {
     GUI_EVENT_GONE      = 7,   /* the keyboard is gone: input is over */
     GUI_EVENT_END_ASKED = 8,   /* the program is asked to finish */
     GUI_EVENT_ANIMATION_END = 9,   /* the last animation of a number ended: number, finished */
+    GUI_EVENT_FOCUS     = 10,  /* the keyboard's focus came to item (came 1) or left it (came 0) */
+    GUI_EVENT_PRESS     = 11,  /* the person pressed item */
+    GUI_EVENT_TEXT      = 12,  /* field item's text as the person typed it: text, until the next gui_wait */
 };
 
 typedef struct {
@@ -58,6 +61,8 @@ typedef struct {
     uint64_t moment;           /* the alarm's, of the ClockBoard's uptime in ms */
     uint32_t number;           /* an animation's */
     int      finished;         /* every animation of it ran to its end; none was cut */
+    int      came;             /* GUI_EVENT_FOCUS: it came to the item */
+    const char *text;          /* GUI_EVENT_TEXT: the field's, UTF-8, NUL-ended */
 } GuiEvent;
 
 /* How a change goes over time (box/items.h ITEM_OP_ANIMATE): a run of
@@ -109,6 +114,14 @@ void gui_set_text_size(GuiArea *area, GuiItem item, float points);
 void gui_set_text_weight(GuiArea *area, GuiItem item, int weight);
 void gui_show(GuiArea *area, GuiItem item);
 void gui_hide(GuiArea *area, GuiItem item);
+/* The keyboard reaches the item, or not — unsaid, ITEM_ROLE_BUTTON's and
+ * ITEM_ROLE_FIELD's do; not to be used; the focus asked to it (0 for none).
+ * A text of ITEM_ROLE_BUTTON is a button and of ITEM_ROLE_FIELD a field the
+ * display edits: pressed and typed into, it is told (GUI_EVENT_PRESS,
+ * GUI_EVENT_TEXT). */
+void gui_set_focusable(GuiArea *area, GuiItem item, int reached);
+void gui_set_disabled(GuiArea *area, GuiItem item, int disabled);
+void gui_focus(GuiArea *area, GuiItem item);
 
 /* From now on every change said is reached in time as how says, played by
  * the display; NULL: said at once again. */

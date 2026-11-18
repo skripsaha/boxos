@@ -74,6 +74,8 @@ struct AreaState {
     bool                 WasShown = false;
     bool                 Paged    = false;   // the theme's page beneath it: the whole screen's
     std::uint64_t        Composed = 0;       // the pixels its own changes asked the last frame to compose
+    std::uint32_t        Focused  = ITEM_AREA;   // the item the keyboard reaches in it (input.h)
+    std::uint32_t        Caret    = 0;           // where a focused field's caret stands, before which character
     std::vector<Entry>   List;
     // An item sized by its content came to a size: told to the program.
     std::function<void(std::uint32_t, ItemPoint)> Sized;

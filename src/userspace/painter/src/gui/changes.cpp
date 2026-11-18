@@ -337,6 +337,22 @@ void Changes::Hidden(std::uint32_t Item, bool Hidden)
     Put(Item, ITEM_PROP_HIDDEN, std::move(Value.Bytes));
 }
 
+void Changes::Focusable(std::uint32_t Item, bool Reached)
+{
+    Writer Value;
+    Value.Put(ItemFlag{static_cast<std::uint8_t>(Reached), {}});
+    Put(Item, ITEM_PROP_FOCUSABLE, std::move(Value.Bytes));
+}
+
+void Changes::Disabled(std::uint32_t Item, bool Disabled)
+{
+    Writer Value;
+    Value.Put(ItemFlag{static_cast<std::uint8_t>(Disabled), {}});
+    Put(Item, ITEM_PROP_DISABLED, std::move(Value.Bytes));
+}
+
+void Changes::Focus(std::uint32_t Item) { Ordered.emplace_back(Item, Make(ITEM_OP_FOCUS, Item, {})); }
+
 void Changes::Turn(std::uint32_t Item, float Degrees)
 {
     Writer Value;

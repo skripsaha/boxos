@@ -59,6 +59,7 @@ void CheckCompose(Tally &Count);
 void CheckCells(Tally &Count);
 void CheckGui(Tally &Count);
 void CheckMotion(Tally &Count);
+void CheckKeys(Tally &Count);
 bool WriteSheet(const char *Out);
 
 }  // namespace stand

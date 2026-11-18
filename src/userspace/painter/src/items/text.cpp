@@ -5,6 +5,7 @@
 
 #include "painter/items/text.h"
 
+#include <algorithm>
 #include <cmath>
 #include <string>
 #include <utility>
@@ -49,10 +50,13 @@ LaidText LayText(const Properties &Said, std::uint16_t Role, const Theme &Look, 
             }
             Text.Spans.push_back(std::move(Made));
         }
+    /* A button's or a field's words lie within its plate, the plate's room
+     * round them. */
     typecase::TextBox Box;
-    const ItemPoint   Size = Said.Size ? *Said.Size : ItemPoint{ITEM_BY_CONTENT, ITEM_BY_CONTENT};
-    if (Size.X != ITEM_BY_CONTENT) Box.Width = static_cast<float>(Size.X) * PerPoint;
-    if (Size.Y != ITEM_BY_CONTENT) Box.Height = static_cast<float>(Size.Y) * PerPoint;
+    const ItemPoint   Inset = Plated(ITEM_TEXT, Role) ? InsetOf(Role) : ItemPoint{0, 0};
+    const ItemPoint   Size  = Said.Size ? *Said.Size : ItemPoint{ITEM_BY_CONTENT, ITEM_BY_CONTENT};
+    if (Size.X != ITEM_BY_CONTENT) Box.Width = static_cast<float>(std::max(0, Size.X - 2 * Inset.X)) * PerPoint;
+    if (Size.Y != ITEM_BY_CONTENT) Box.Height = static_cast<float>(std::max(0, Size.Y - 2 * Inset.Y)) * PerPoint;
     if (Said.Box) {
         Box.Align    = static_cast<typecase::TextAlign>(Said.Box->Align);
         Box.Overflow = static_cast<typecase::TextOverflow>(Said.Box->Overflow);
@@ -60,9 +64,9 @@ LaidText LayText(const Properties &Said, std::uint16_t Role, const Theme &Look, 
         Box.MaxLines = Said.Box->MaxLines;
     }
     typecase::Layout Laid     = typecase::Layout::Of(Text, Box, Book);
-    const ItemPoint  Measured = ItemPoint{static_cast<std::int32_t>(std::lround(Laid.Width() * ITEM_POINT)),
-                                          static_cast<std::int32_t>(std::lround(Laid.Height() * ITEM_POINT))};
-    return LaidText{std::move(Laid), std::move(Inks), Measured};
+    const ItemPoint  Measured = ItemPoint{static_cast<std::int32_t>(std::lround(Laid.Width() * ITEM_POINT)) + 2 * Inset.X,
+                                          static_cast<std::int32_t>(std::lround(Laid.Height() * ITEM_POINT)) + 2 * Inset.Y};
+    return LaidText{std::move(Laid), std::move(Inks), Measured, Inset};
 }
 
 }  // namespace painter::items

@@ -28,6 +28,7 @@
 #include "box/touch.h"
 
 #include "front.h"
+#include "input.h"
 #include "item_reception.h"
 #include "painter/core/system_fonts.h"
 
@@ -182,6 +183,16 @@ void Ring(Area &Of) noexcept
     Of.Rung = false;
     const std::uint32_t Id = Of.Id;
     (void)touch_send(Of.Bell, &Id, sizeof(Id), 0);
+}
+
+/* How the input part tells an area: an event, its bell rung at once. */
+InputTeller TellerOf(Area &Of)
+{
+    Area *To = &Of;
+    return [To](std::uint16_t Kind, std::uint32_t Item, const void *Payload, std::uint32_t Bytes) {
+        Tell(*To, Kind, Item, Payload, Bytes);
+        Ring(*To);
+    };
 }
 
 const CellsLook    &Cells() noexcept { return g_glass.Cells ? *g_glass.Cells : g_no_cells; }
@@ -379,6 +390,7 @@ void BlockChanged(Area &Said, std::uint32_t Id, const ItemBlockChanged &Where)
 void Drop(std::size_t Index) noexcept
 {
     Area &Gone = *g_areas[Index];
+    InputAreaGone(*Gone.State);
     if (Gone.State->WasShown && g_glass.Vacated) g_glass.Vacated(Gone.State->Was);
     g_left = true;
     g_area_names.Give(Gone.Number);
@@ -460,6 +472,7 @@ bool ReadRing(std::size_t Index) noexcept
         Listen.Animate = [&Moving](std::uint32_t Item, const ItemAnimation &How, std::uint16_t Property,
                                    std::span<const std::uint8_t> Value) { return Moving.Said(Item, How, Property, Value); };
         Listen.Cut = [&Moving](std::uint32_t Item, std::uint16_t Property) { Moving.Cut(Item, Property); };
+        Listen.Focus = [&Of](std::uint32_t Item) { InputFocusAsked(*Of.State, Item, TellerOf(Of)); };
         Moving.Reading(clock_uptime_us());
         Read = items::ReadSteps(*Of.Head, Of.Ring(), Of.State->Items, Listen);
         Moving.StepWhole();
@@ -727,7 +740,29 @@ void AreasInOrder(std::vector<items::AreaState *> &Into)
     Band([](const Area &Of) { return !Of.Always && Of.Placement == DISPLAY_AREA_WHOLE; });
     Band([](const Area &Of) { return !Of.Always && Of.Placement == DISPLAY_AREA_OVER; });
     Band([](const Area &Of) { return Of.Always; });
+    /* The display's own drawing for the keyboard over every area. */
+    if (items::AreaState *Own = InputOverlay()) Into.push_back(Own);
 }
+
+std::optional<InputArea> AreasKeyed() noexcept
+{
+    /* The topmost seen area of the program in front holding a thing the
+     * keyboard reaches: over everything first, then the whole screen, then
+     * the console's flow — never one shown always. */
+    for (const std::uint8_t Band : {DISPLAY_AREA_OVER, DISPLAY_AREA_WHOLE, DISPLAY_AREA_FLOW})
+        for (std::size_t I = g_areas.size(); I-- > 0;) {
+            Area &Each = *g_areas[I];
+            if (Each.Always || Each.Placement != Band || !Each.State->Shown || !InputReaches(*Each.State)) continue;
+            try {
+                return InputArea{Each.State.get(), TellerOf(Each)};
+            } catch (...) {
+                return std::nullopt;
+            }
+        }
+    return std::nullopt;
+}
+
+float AreasScale() noexcept { return Scale(); }
 
 void AreasAnimate(std::uint64_t Now) noexcept
 {

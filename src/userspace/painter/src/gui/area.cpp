@@ -364,6 +364,31 @@ std::optional<Event> Area::Read()
             Made.Page = Free.Page;
             return Made;
         }
+        case ITEM_EVENT_FOCUS: {
+            ItemFocus Focus{};
+            if (Bytes < sizeof(Focus)) continue;
+            std::memcpy(&Focus, Body, sizeof(Focus));
+            Made.What = Event::Kind::Focus;
+            Made.Came = Focus.Came != 0;
+            return Made;
+        }
+        case ITEM_EVENT_PRESS:
+            Made.What = Event::Kind::Press;
+            return Made;
+        case ITEM_EVENT_TEXT: {
+            ItemBytes Length{};
+            if (Bytes < sizeof(Length)) continue;
+            std::memcpy(&Length, Body, sizeof(Length));
+            if (Length.Bytes > Bytes - sizeof(Length)) continue;
+            Made.What = Event::Kind::Text;
+            Made.Text.assign(reinterpret_cast<const char *>(Body) + sizeof(Length), Length.Bytes);
+            /* What the person typed is what the field says now: said again,
+             * it goes nowhere; said otherwise, it is written. */
+            Changes Scratch;
+            Scratch.Text(Made.Item, Made.Text);
+            if (const std::vector<std::uint8_t> *Value = Scratch.Said(Made.Item, ITEM_PROP_TEXT)) Known(Made.Item, ITEM_PROP_TEXT, *Value);
+            return Made;
+        }
         case ITEM_EVENT_ANIMATION_END: {
             ItemAnimationEnd End{};
             if (Bytes < sizeof(End)) continue;

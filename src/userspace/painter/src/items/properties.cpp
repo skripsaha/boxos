@@ -242,10 +242,16 @@ bool Read(std::uint16_t Property, Reader &From, Properties &Said, std::uint16_t 
     }
     case ITEM_PROP_HIDDEN:
     case ITEM_PROP_CLIP:
-    case ITEM_PROP_SECRET: {
+    case ITEM_PROP_SECRET:
+    case ITEM_PROP_FOCUSABLE:
+    case ITEM_PROP_DISABLED: {
         ItemFlag Flag{};
         if (!From.Take(Flag) || Flag.On > 1) return false;
-        std::optional<bool> &Into = Property == ITEM_PROP_HIDDEN ? Said.Hidden : Property == ITEM_PROP_CLIP ? Said.Clip : Said.Secret;
+        std::optional<bool> &Into = Property == ITEM_PROP_HIDDEN      ? Said.Hidden
+                                  : Property == ITEM_PROP_CLIP        ? Said.Clip
+                                  : Property == ITEM_PROP_SECRET      ? Said.Secret
+                                  : Property == ITEM_PROP_FOCUSABLE   ? Said.Focusable
+                                                                      : Said.Disabled;
         return Into = Flag.On != 0, true;
     }
     case ITEM_PROP_TURN: {
@@ -373,6 +379,8 @@ template <typename Source> void Carry(std::uint16_t Property, Source &&From, Pro
     case ITEM_PROP_TEXT_SPANS: Into.Spans = std::forward<Source>(From).Spans; break;
     case ITEM_PROP_TEXT_BOX: Into.Box = std::forward<Source>(From).Box; break;
     case ITEM_PROP_SECRET: Into.Secret = std::forward<Source>(From).Secret; break;
+    case ITEM_PROP_FOCUSABLE: Into.Focusable = std::forward<Source>(From).Focusable; break;
+    case ITEM_PROP_DISABLED: Into.Disabled = std::forward<Source>(From).Disabled; break;
     case ITEM_PROP_CAPTION: Into.Caption = std::forward<Source>(From).Caption; break;
     case ITEM_PROP_PICTURE: Into.Picture = std::forward<Source>(From).Picture; break;
     case ITEM_PROP_CANVAS: Into.Canvas = std::forward<Source>(From).Canvas; break;
@@ -423,6 +431,8 @@ bool IsSaid(std::uint16_t Property, const Properties &Of) noexcept
     case ITEM_PROP_TEXT_SPANS: return Of.Spans.has_value();
     case ITEM_PROP_TEXT_BOX: return Of.Box.has_value();
     case ITEM_PROP_SECRET: return Of.Secret.has_value();
+    case ITEM_PROP_FOCUSABLE: return Of.Focusable.has_value();
+    case ITEM_PROP_DISABLED: return Of.Disabled.has_value();
     case ITEM_PROP_CAPTION: return Of.Caption.has_value();
     case ITEM_PROP_PICTURE: return Of.Picture.has_value();
     case ITEM_PROP_CANVAS: return Of.Canvas.has_value();
@@ -458,6 +468,8 @@ error_t Unsay(std::uint16_t Property, Properties &Into) noexcept
     case ITEM_PROP_TEXT_SPANS: Into.Spans.reset(); break;
     case ITEM_PROP_TEXT_BOX: Into.Box.reset(); break;
     case ITEM_PROP_SECRET: Into.Secret.reset(); break;
+    case ITEM_PROP_FOCUSABLE: Into.Focusable.reset(); break;
+    case ITEM_PROP_DISABLED: Into.Disabled.reset(); break;
     case ITEM_PROP_CAPTION: Into.Caption.reset(); break;
     case ITEM_PROP_PICTURE: Into.Picture.reset(); break;
     case ITEM_PROP_CANVAS: Into.Canvas.reset(); break;

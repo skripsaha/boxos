@@ -26,6 +26,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 
 #include "box/cxx/bay.h"
 #include "box/cxx/error.h"
@@ -58,11 +59,13 @@ enum class Glass : std::uint8_t { Text = ITEM_GLASS_TEXT, Pixels = ITEM_GLASS_PI
 // What happened: what the display told the area (Area: where it is and how
 // large; Size: an item's size by its content; Refused: a change it did not
 // take; Shown: a step on the glass; PageFree: a canvas's page to draw in
-// again; AnimationEnd: the last animation of a Number ended) — and what Wait
+// again; AnimationEnd: the last animation of a Number ended; Focus: the
+// keyboard's focus came to an item or left it; Press: the person pressed an
+// item; Text: a field's text as the person has typed it) — and what Wait
 // heard besides: a key, the alarm come, the keyboard gone, the program asked
 // to finish.
 struct Event {
-    enum class Kind : std::uint8_t { Area, Size, Refused, Shown, PageFree, Key, Alarm, Gone, EndAsked, AnimationEnd };
+    enum class Kind : std::uint8_t { Area, Size, Refused, Shown, PageFree, Key, Alarm, Gone, EndAsked, AnimationEnd, Focus, Press, Text };
     Kind          What  = Kind::Area;
     std::uint32_t Item  = 0;        // the item, or the block
     core::PointF  Size{};           // the area's or the item's, in points
@@ -79,6 +82,8 @@ struct Event {
     std::uint32_t Page   = 0;
     std::uint32_t Number   = 0;     // an animation's
     bool          Finished = false; // every one of them ran to its end; none was cut
+    bool          Came     = false; // Focus: it came to the item; else it left
+    std::string   Text;             // Text: the field's, UTF-8
     tui::KeyEvent Key{};
     std::uint64_t Moment = 0;       // the alarm's, of the ClockBoard's uptime
 };

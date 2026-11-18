@@ -4,6 +4,8 @@
 
 #include "painter/items/look.h"
 
+#include <algorithm>
+
 namespace painter::items {
 
 namespace {
@@ -23,14 +25,21 @@ ItemColor Gray(std::uint16_t Alpha) noexcept { return ItemColor{0, 0, 0, Alpha};
 
 }  // namespace
 
-Theme ThemeOf(std::uint32_t TextColor, std::uint32_t PageColor)
+Theme ThemeOf(std::uint32_t TextColor, std::uint32_t PageColor, const ThemeSaid &Person)
 {
     using painter::core::Color;
     Theme Made;
-    Made.Text  = Color::FromRaw(TextColor);
-    Made.Page  = Color::FromRaw(PageColor);
-    Made.Panel = Color::Over(Made.Page, Made.Text, 20);
-    Made.Quiet = Color::Over(Made.Page, Made.Text, 150);
+    Made.Text    = Color::FromRaw(TextColor);
+    Made.Page    = Color::FromRaw(PageColor);
+    Made.Panel   = Color::Over(Made.Page, Made.Text, 20);
+    Made.Quiet   = Color::Over(Made.Page, Made.Text, 150);
+    Made.Accent  = Person.Accent;
+    Made.Round   = std::max(0, Person.Round);
+    Made.Shadows = Person.Shadows;
+    Made.Insist  = Person.Insist;
+    /* Words on the accent dark on a light one, light on a dark one. */
+    const painter::core::Oklab Seen = painter::core::OklabOf(Made.Accent.Red() / 255.0f, Made.Accent.Green() / 255.0f, Made.Accent.Blue() / 255.0f);
+    Made.OnAccent = Seen.L > 0.72f ? Color::Rgb(0x14, 0x14, 0x14) : Color::Rgb(0xFF, 0xFF, 0xFF);
     return Made;
 }
 
@@ -47,14 +56,24 @@ painter::core::Color ThemeColor(const Theme &Of, std::uint16_t Which) noexcept
     case ITEM_THEME_PANEL: return Of.Panel;
     case ITEM_THEME_ACCENT: return Of.Accent;
     case ITEM_THEME_QUIET: return Of.Quiet;
+    case ITEM_THEME_ON_ACCENT: return Of.OnAccent;
     default: return Of.Text;
     }
 }
 
-std::vector<Fill> FillsOf(const Properties &Said, std::uint8_t Kind, std::uint16_t Role)
+namespace {
+
+/* Whether the theme's look stands over what an item says: where the person
+ * insists, for every item with a role. */
+bool Insisted(std::uint16_t Role, const Theme &With) noexcept { return With.Insist && Role != ITEM_ROLE_NONE; }
+
+}  // namespace
+
+std::vector<Fill> FillsOf(const Properties &Said, std::uint8_t Kind, std::uint16_t Role, const Theme &With)
 {
-    if (Said.Fills) return *Said.Fills;
-    if (Kind == ITEM_TEXT) return {ThemeFill(Role == ITEM_ROLE_HINT ? ITEM_THEME_QUIET : ITEM_THEME_TEXT)};
+    if (Said.Fills && !Insisted(Role, With)) return *Said.Fills;
+    if (Kind == ITEM_TEXT)
+        return {ThemeFill(Role == ITEM_ROLE_HINT ? ITEM_THEME_QUIET : Role == ITEM_ROLE_BUTTON ? ITEM_THEME_ON_ACCENT : ITEM_THEME_TEXT)};
     switch (Role) {
     case ITEM_ROLE_PAGE: return {ThemeFill(ITEM_THEME_PAGE)};
     case ITEM_ROLE_PANEL:
@@ -67,26 +86,29 @@ std::vector<Fill> FillsOf(const Properties &Said, std::uint8_t Kind, std::uint16
     }
 }
 
-std::array<std::int32_t, 4> CornersOf(const Properties &Said, std::uint16_t Role) noexcept
+std::array<std::int32_t, 4> CornersOf(const Properties &Said, std::uint16_t Role, const Theme &With) noexcept
 {
-    if (Said.Corners) return *Said.Corners;
-    const std::int32_t Round = Role == ITEM_ROLE_PANEL ? Pt(12) : Role == ITEM_ROLE_BUTTON ? Pt(8)
-                             : Role == ITEM_ROLE_FIELD ? Pt(6) : Role == ITEM_ROLE_SELECTION ? Pt(3) : 0;
+    if (Said.Corners && !Insisted(Role, With)) return *Said.Corners;
+    /* A button as round as the theme says; a panel half again, a field three
+     * quarters, a selection three eighths. */
+    const std::int32_t Round = Role == ITEM_ROLE_PANEL ? With.Round * 3 / 2 : Role == ITEM_ROLE_BUTTON ? With.Round
+                             : Role == ITEM_ROLE_FIELD ? With.Round * 3 / 4 : Role == ITEM_ROLE_SELECTION ? With.Round * 3 / 8 : 0;
     return {Round, Round, Round, Round};
 }
 
-std::vector<Shadow> ShadowsOf(const Properties &Said, std::uint16_t Role)
+std::vector<Shadow> ShadowsOf(const Properties &Said, std::uint16_t Role, const Theme &With)
 {
-    if (Said.Shadows) return *Said.Shadows;
+    if (Said.Shadows && !Insisted(Role, With)) return *Said.Shadows;
+    if (!With.Shadows) return {};
     if (Role == ITEM_ROLE_PANEL) return {Shadow{{0, Pt(4)}, Pt(18), 0, Gray(26000), false}};
     if (Role == ITEM_ROLE_BUTTON) return {Shadow{{0, Pt(1)}, Pt(4), 0, Gray(20000), false}};
     if (Role == ITEM_ROLE_FIELD) return {Shadow{{0, Pt(1)}, Pt(3), 0, Gray(30000), true}};
     return {};
 }
 
-bool StrokeOf(const Properties &Said, std::uint16_t Role, Stroke &Into)
+bool StrokeOf(const Properties &Said, std::uint16_t Role, const Theme &With, Stroke &Into)
 {
-    if (Said.Stroke) {
+    if (Said.Stroke && !Insisted(Role, With)) {
         Into = *Said.Stroke;
         return Into.Width > 0;
     }
@@ -119,6 +141,32 @@ TextStyle StyleOf(const Properties &Said, std::uint16_t Role, const Theme &With)
     if (Own.Said & ITEM_SAYS_COLOR) Made.Color = Own.Color, Made.Said |= ITEM_SAYS_COLOR;
     return Made;
 }
+
+bool Plated(std::uint8_t Kind, std::uint16_t Role) noexcept
+{
+    return Kind == ITEM_TEXT && (Role == ITEM_ROLE_BUTTON || Role == ITEM_ROLE_FIELD);
+}
+
+std::vector<Fill> PlateOf(std::uint16_t Role)
+{
+    return {ThemeFill(Role == ITEM_ROLE_BUTTON ? ITEM_THEME_ACCENT : ITEM_THEME_PANEL)};
+}
+
+ItemPoint InsetOf(std::uint16_t Role) noexcept
+{
+    if (Role == ITEM_ROLE_BUTTON) return ItemPoint{Pt(14), Pt(7)};
+    if (Role == ITEM_ROLE_FIELD) return ItemPoint{Pt(10), Pt(7)};
+    return ItemPoint{0, 0};
+}
+
+bool FocusableOf(const Properties &Said, std::uint8_t Kind, std::uint16_t Role) noexcept
+{
+    if (Said.Focusable) return *Said.Focusable;
+    (void)Kind;
+    return Role == ITEM_ROLE_BUTTON || Role == ITEM_ROLE_FIELD;
+}
+
+bool DisabledOf(const Properties &Said) noexcept { return Said.Disabled && *Said.Disabled; }
 
 std::uint16_t OpacityOf(const Properties &Said) noexcept { return Said.Opacity ? *Said.Opacity : ITEM_OPAQUE; }
 

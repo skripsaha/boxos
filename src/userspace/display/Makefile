@@ -52,7 +52,7 @@ all: display.elf
 include ../nameplate.mk
 
 OBJS = display.o lanes.o front.o console_model.o cell_grid.o cells_draw.o frame.o mirror.o ring.o easel.o effects.o effects_warp.o effects_ink.o \
-       typesetter.o scene.o areas.o compositor.o animator.o item_tree.o item_draw.o item_reception.o
+       typesetter.o scene.o areas.o compositor.o animator.o input.o item_tree.o item_draw.o item_reception.o
 
 display.elf: $(BOXLIB_START) $(OBJS) $(PAINTER) $(TYPECASE) $(BOXLIB) $(BOXCXX) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)

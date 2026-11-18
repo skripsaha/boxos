@@ -22,6 +22,21 @@
 # an area for breaking the language, and that the hub still answers after the
 # program is gone. The times are kept in the log, a guide only under TCG.
 
+# itemcheck keys: once it is ready, the keys a person would type — Tab to the
+# field, h i into it, Tab and → to the second button, Enter, the labels'
+# chord, s for the first — and its verdict.
+itemcheck_keys() {
+    local from key
+    from=$(wc -l < build/serial.log | tr -d ' ')
+    drawcheck_say "itemcheck keys" 'itemcheck keys: ready' "$WAIT_QUIET_S" || return 1
+    sleep 1
+    for key in tab h i tab right ret ctrl-dot s; do
+        key_press "$key" || return 1
+        sleep 0.4
+    done
+    wait_for_line -E build/serial.log 'itemcheck keys: (PASS|FAIL)' "$WAIT_QUIET_S" $((from + 1))
+}
+
 itemcheck_boot() {   # itemcheck_boot NAME [make-args…]
     local name=$1
     shift
@@ -32,6 +47,7 @@ itemcheck_boot() {   # itemcheck_boot NAME [make-args…]
     fi
     wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_S" && sleep 3 &&
         drawcheck_say "itemcheck" 'itemcheck: (PASS|FAIL)' "$WAIT_QUIET_SLOW_S" && sleep 1 &&
+        itemcheck_keys && sleep 1 &&
         drawcheck_say "bye" "$STAND_HALT_ENDS" "$WAIT_QUIET_S"
     local rc=$?
     sleep 1
@@ -101,6 +117,9 @@ run_itemcheck() {
         fi
         grep -aqE "itemcheck: from C — .*: every step shown" "$L"
         chk $? "itemcheck ($name): painter::gui's C face held from a program's C"
+        grep -aq 'itemcheck keys: the field typed "hi", pressed two by Enter then one by its label, the focus come [0-9]* times, never to the one not to be used, asked back: came' "$L" &&
+            grep -aq "itemcheck keys: PASS" "$L"
+        chk $? "itemcheck ($name): the keyboard alone reaches a field and types into it, presses one button by Enter and another by its label, never the one not to be used, and the program's focus asked comes back"
         grep -aqE "itemcheck: the console, [0-9]+ lines and an area in its flow — [0-9]+ ms until the glass showed them" "$L"
         chk $? "itemcheck ($name): the console's lines and an area in its flow after them shown"
         grep -aqF "$passed" "$L"

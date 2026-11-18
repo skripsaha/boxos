@@ -63,6 +63,9 @@ painter::core::Rect  FrameScreen() noexcept;
 // The screen's text and page colours, two triples: the theme made from them,
 // and the console drawn again in them (the areas' items: areas.h AreasTheme).
 void FrameColours(std::uint32_t Text, std::uint32_t Page);
+// What the person sets of the theme: the theme made again from it — every
+// area is to be drawn again by its caller.
+void FramePerson(const items::ThemeSaid &Said);
 
 // Pixels to be composed again at the next frame: something that lay there
 // went — where it lay on the glass as the frame finds it, and where the

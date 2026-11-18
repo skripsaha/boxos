@@ -5,6 +5,8 @@
 
 #include "frame.h"
 
+#include "input.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -32,6 +34,7 @@ constexpr std::int32_t TileSide = 256;
 constexpr std::uint32_t ConsoleItem = 1;
 
 items::Theme                         g_theme;
+items::ThemeSaid                     g_person;   // what the person sets of the theme
 CellsLook                            g_cells;
 Rect                                 g_screen{};
 bool                                 g_text = false;
@@ -297,7 +300,7 @@ void ConsoleChanged(Mirror &Into, std::span<items::AreaState *const> Programs, s
 /* Characters written into a text page's cells from a cell on, up to the
  * page's edge, in Ink. */
 void Write(std::vector<ItemCell> &Cells, std::uint32_t Cols, std::uint32_t Rows, std::int32_t Col, std::int32_t Row,
-           std::u32string_view Characters, std::uint32_t Ink) noexcept
+           std::u32string_view Characters, std::uint32_t Ink, std::uint32_t Paper = COLOR_THROUGH) noexcept
 {
     if (Row < 0 || Row >= static_cast<std::int32_t>(Rows)) return;
     for (std::size_t I = 0; I < Characters.size(); I++) {
@@ -306,14 +309,21 @@ void Write(std::vector<ItemCell> &Cells, std::uint32_t Cols, std::uint32_t Rows,
         ItemCell &Into = Cells[static_cast<std::size_t>(Row) * Cols + static_cast<std::size_t>(At)];
         Into.Character = Characters[I];
         Into.Ink       = Ink;
+        if (Paper != COLOR_THROUGH) Into.Paper = Paper;
     }
+}
+
+/* A colour as a cell carries it: #RRGGBB. */
+std::uint32_t RawOf(painter::core::Color Of) noexcept
+{
+    return static_cast<std::uint32_t>(Of.Red()) << 16 | static_cast<std::uint32_t>(Of.Green()) << 8 | Of.Blue();
 }
 
 /* A text item's ink on a text page: its first fill's colour. Throws
  * std::bad_alloc only. */
 std::uint32_t InkOf(const items::Item &Of)
 {
-    const std::vector<items::Fill> Fills = items::FillsOf(Of.Said, Of.Kind, Of.Role);
+    const std::vector<items::Fill> Fills = items::FillsOf(Of.Said, Of.Kind, Of.Role, g_theme);
     if (Fills.empty()) return COLOR_DEFAULT;
     const painter::core::Color C =
         Fills[0].Kind == ITEM_FILL_THEME ? items::ThemeColor(g_theme, Fills[0].Theme) : items::ColorOf(Fills[0].Color);
@@ -327,7 +337,7 @@ std::uint32_t InkOf(const items::Item &Of)
  * finds it on pixels: its place, or the console's grid; the caret of Caret's
  * cells, where it stands on the page, into CaretX, CaretY. Throws
  * std::bad_alloc only. */
-void CellsOf(const items::AreaState &Area, std::vector<ItemCell> &Cells, std::uint32_t Cols, std::uint32_t Rows,
+void CellsOf(items::AreaState &Area, std::vector<ItemCell> &Cells, std::uint32_t Cols, std::uint32_t Rows,
              const CellGrid *Caret, std::uint32_t &CaretX, std::uint32_t &CaretY)
 {
     const Rect Place = Area.Place;
@@ -344,8 +354,10 @@ void CellsOf(const items::AreaState &Area, std::vector<ItemCell> &Cells, std::ui
     while (!Walk.empty()) {
         const auto [Id, X0, Y0] = Walk.back();
         Walk.pop_back();
-        const items::Item *Of = Area.Items.Find(Id);
-        if (!Of || items::HiddenOf(Of->Said)) continue;
+        items::Item *Of = Area.Items.Find(Id);
+        if (!Of) continue;
+        Of->Box = Rect{};
+        if (items::HiddenOf(Of->Said)) continue;
         const ItemPoint    Own = Of->Said.Place ? *Of->Said.Place : ItemPoint{0, 0};
         const std::int64_t X = X0 + Own.X, Y = Y0 + Own.Y;
         for (auto Child = Of->Children.rbegin(); Child != Of->Children.rend(); ++Child) Walk.emplace_back(*Child, X, Y);
@@ -364,15 +376,36 @@ void CellsOf(const items::AreaState &Area, std::vector<ItemCell> &Cells, std::ui
             std::u32string Characters = typecase::CharactersOf(*Of->Said.Text);
             if (Of->Said.Secret && *Of->Said.Secret)
                 std::replace_if(Characters.begin(), Characters.end(), [](char32_t C) { return C != U'\n'; }, U'*');
-            const std::uint32_t Ink  = InkOf(*Of);
-            std::u32string_view Rest = Characters;
-            for (std::int32_t Line = 0; !Rest.empty(); Line++) {
-                const std::size_t End = Rest.find(U'\n');
-                Write(Cells, Cols, Rows, Col, Row + Line, Rest.substr(0, End), Ink);
-                Rest = End == std::u32string_view::npos ? std::u32string_view() : Rest.substr(End + 1);
+            /* A button in brackets, a field between them; what the keyboard
+             * reaches the other way round, a field's caret where it stands;
+             * what is not to be used quiet. */
+            const bool          Reached = Area.Focused == Id;
+            const bool          Plate   = items::Plated(Of->Kind, Of->Role);
+            const std::uint32_t Ink     = items::DisabledOf(Of->Said) ? RawOf(g_theme.Quiet) : Reached ? g_cells.Page : InkOf(*Of);
+            const std::uint32_t Paper   = Reached ? g_cells.Text : COLOR_THROUGH;
+            if (Plate) {
+                Characters.insert(0, Of->Role == ITEM_ROLE_BUTTON ? U"[ " : U"[");
+                Characters += Of->Role == ITEM_ROLE_BUTTON ? U" ]" : U"]";
             }
+            if (Reached && Of->Role == ITEM_ROLE_FIELD) {
+                CaretX = static_cast<std::uint32_t>(std::max(Col + 1 + static_cast<std::int32_t>(Area.Caret), 0));
+                CaretY = static_cast<std::uint32_t>(std::max(Row, 0));
+            }
+            std::u32string_view Rest  = Characters;
+            std::int32_t        Lines = 0, Widest = 0;
+            for (; !Rest.empty(); Lines++) {
+                const std::size_t End = Rest.find(U'\n');
+                Write(Cells, Cols, Rows, Col, Row + Lines, Rest.substr(0, End), Ink, Paper);
+                Widest = std::max(Widest, static_cast<std::int32_t>(std::min(End, Rest.size())));
+                Rest   = End == std::u32string_view::npos ? std::u32string_view() : Rest.substr(End + 1);
+            }
+            /* Where it lies on the page, for the keyboard to find. */
+            Of->Box = Rect{Col * PageCellWide, Row * PageCellTall, std::max(Widest, 1) * PageCellWide, std::max(Lines, 1) * PageCellTall};
         } else if (Of->Kind != ITEM_GROUP && Of->Said.Caption) {
-            Write(Cells, Cols, Rows, Col, Row, typecase::CharactersOf(*Of->Said.Caption), COLOR_DEFAULT);
+            const std::u32string Caption = typecase::CharactersOf(*Of->Said.Caption);
+            Write(Cells, Cols, Rows, Col, Row, Caption, COLOR_DEFAULT, Area.Focused == Id ? g_cells.Text : COLOR_THROUGH);
+            Of->Box = Rect{Col * PageCellWide, Row * PageCellTall, std::max<std::int32_t>(static_cast<std::int32_t>(Caption.size()), 1) * PageCellWide,
+                           PageCellTall};
         }
     }
 }
@@ -382,7 +415,7 @@ void CellsOf(const items::AreaState &Area, std::vector<ItemCell> &Cells, std::ui
 std::shared_ptr<CellGrid> FrameStart(const FrameGlass &Glass)
 {
     g_text        = Glass.Text;
-    g_theme       = items::ThemeOf(Glass.TextColour, Glass.PageColour);
+    g_theme       = items::ThemeOf(Glass.TextColour, Glass.PageColour, g_person);
     g_cells.Text  = Glass.TextColour;
     g_cells.Page  = Glass.PageColour;
     std::uint32_t Cols = 0, Rows = 0;
@@ -438,10 +471,16 @@ painter::core::Rect  FrameScreen() noexcept { return g_screen; }
 
 void FrameColours(std::uint32_t Text, std::uint32_t Page)
 {
-    g_theme      = items::ThemeOf(Text, Page);
+    g_theme      = items::ThemeOf(Text, Page, g_person);
     g_cells.Text = Text;
     g_cells.Page = Page;
     if (g_console_area) g_console_area->Items.RedrawAll();
+}
+
+void FramePerson(const items::ThemeSaid &Said)
+{
+    g_person = Said;
+    g_theme  = items::ThemeOf(g_cells.Text, g_cells.Page, g_person);
 }
 
 void FrameVacated(const Rect &Where) noexcept
@@ -477,6 +516,13 @@ std::span<const ItemCell> FramePage(std::span<items::AreaState *const> Programs,
             const CellGrid *Mine = Holds && Holds != g_console && g_holder_area == Each ? Holds.get() : nullptr;
             if (Each->Shown) CellsOf(*Each, g_composed, Cols, Rows, Mine, X, Y);
             if (Mine) At = Caret{X, Y, Holds->CaretShown()};
+        }
+        /* The labels waiting to be typed, over what they label. */
+        for (const InputLabel &Each : InputLabels()) {
+            const items::Item *Of = Each.Area ? Each.Area->Items.Find(Each.Item) : nullptr;
+            if (!Of || Of->Box.Empty()) continue;
+            Write(g_composed, Cols, Rows, Of->Box.X / PageCellWide, Of->Box.Y / PageCellTall, typecase::CharactersOf(Each.Word),
+                  RawOf(g_theme.OnAccent), RawOf(g_theme.Accent));
         }
     } catch (...) {
         /* No room to compose: the page shows what it showed, and all of it
