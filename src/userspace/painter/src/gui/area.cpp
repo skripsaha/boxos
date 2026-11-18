@@ -11,6 +11,7 @@
 #include "box/display.h"
 #include "box/error.h"
 #include "box/ipc.h"
+#include "box/print.h"
 #include "box/system.h"
 
 namespace painter::gui {
@@ -76,6 +77,7 @@ std::expected<Area, box::error> Area::Open(Placement Where, core::PointF Wish)
     Request.placement = static_cast<std::uint8_t>(Where);
     Request.width     = Points(Wish.X);
     Request.height    = Points(Wish.Y);
+    Request.order     = console_order_mark();
     DisplayAreaOpenReply Reply{};
     std::uint32_t        Got  = 0;
     const int            Code = ask(DISPLAY_TAG, &Request, sizeof(Request), &Reply, sizeof(Reply), &Got);

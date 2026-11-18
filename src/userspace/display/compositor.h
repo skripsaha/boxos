@@ -70,7 +70,7 @@ struct AreaState {
 class Compositor {
 public:
     // The screen's pixels: damage is kept within them.
-    explicit Compositor(painter::core::Rect Screen) : Screen(Screen) { Damaged.reserve(DamageKept); }
+    explicit Compositor(painter::core::Rect Screen) : Screen(Screen) { Waiting.reserve(DamageKept); }
 
     // Pixels to be composed again — something beneath the areas changed.
     void Damage(painter::core::Rect Area) noexcept;
@@ -82,10 +82,13 @@ public:
     // Whether an opaque item covers Area whole: what lies beneath it, the
     // console's cells too, need not be drawn.
     bool Hidden(painter::core::Rect Area, std::span<AreaState *const> Areas) const noexcept;
-    // Area composed onto Target from the areas' items, over what Target holds
-    // there; Areas bottom to top.
-    void Compose(painter::core::Canvas &Target, painter::core::Rect Area, std::span<AreaState *const> Areas,
-                 const Theme &Look);
+    // Whether any damage waits to be composed.
+    bool Damaged() const noexcept { return !Waiting.empty(); }
+    // Area composed onto Target, whose corner lies at Corner on the screen,
+    // from the areas' items, over what Target holds there; Areas bottom to
+    // top.
+    void Compose(painter::core::Canvas &Target, painter::core::Point Corner, painter::core::Rect Area,
+                 std::span<AreaState *const> Areas, const Theme &Look);
 
 private:
     void Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, const painter::core::Transform &Parent,
@@ -96,7 +99,7 @@ private:
     static constexpr std::size_t DamageKept = 64;
 
     painter::core::Rect              Screen;
-    std::vector<painter::core::Rect> Damaged;
+    std::vector<painter::core::Rect> Waiting;
 };
 
 // An item's own placing: its place, then its turn and scale about its anchor.

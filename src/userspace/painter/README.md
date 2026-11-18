@@ -11,12 +11,10 @@ surface:
 - `painter::tui` — the first implementation: `Frame`, `Stage`, `Surface`, regions,
   opaque and transparent cells, compositing, glyphs, half-block pixel drawing,
   palettes, and typed console input;
-- `painter::gui` — the future home for real pixel graphics, windows, paths,
-  brushes, pointer input, and other GUI-specific contracts.
-
-The GUI family belongs here from the beginning as an architectural boundary,
-but it must not be represented by empty stubs. Until a real GUI backend and
-contract exist, only `painter::tui` is implemented.
+- `painter::gui` — a program's items on the screen (see "Items" below): an
+  `Area` the display gives it, and `Changes` that say what the area shows —
+  groups, texts, shapes, pictures and canvases, each with the properties it
+  says — shown a step at a time and composed by the display.
 
 ## Purpose
 
@@ -102,6 +100,36 @@ reaches becomes opaque, and shapes drawn over one another are laid in order.
 `FineCanvas` and `PutPixel` coexist on one frame, and an existing program is
 unchanged.
 
+## Items
+
+A program that draws with pixels says what it shows, and the display keeps it
+(`box/items.h`, `painter/gui/area.h`). `Area::Open` asks for an area — over
+everything, the whole screen, or in the console's flow — and the display
+decides where it lies and how large it is, telling its size in points and its
+scale, pixels to a point. The program makes items in it, each named by a
+number of its own: a group, a text, a shape, a picture, a canvas of its own
+pixels. An item says only what differs from what its role gives it — a place
+and size in points, opacity, a turn, a clip, corners, an outline, fills, a
+stroke, shadows, a text's characters, style, coloured stretches and box — and
+what it leaves unsaid the system's theme and fonts say: Inter for text,
+JetBrains Mono for code, the screen's colours for ink and page.
+
+`Changes` keeps what was said until `Area::Present` puts it in the area's ring:
+the order of making and removing as it was said, and of each property only the
+last word, so a full ring never makes a program wait — what did not fit goes
+with the next step. The display applies a step whole or not at all, and tells
+back in a second ring: the area's size and scale, an item sized by its content,
+a change refused and why, a step shown and what its frame cost, a canvas page
+free to draw in again. Pictures, canvases and fonts go in blocks of memory the
+display makes for the program alone (`Area::OpenPicture`, `OpenCanvas`,
+`OpenFont`).
+
+The display composes only where something changed: what it keeps of each item
+— a text laid, a picture of a shape at the screen's scale — is drawn again only
+when the item's look changes, an opaque item hides what lies beneath it, a
+group clips its items and is seen through as one. On a text page the texts are
+written into the cells and the rest is shown by its caption.
+
 ## Layering
 
 ```text
@@ -114,8 +142,8 @@ apps/utils   programs and their domain models
 
 `display.elf` is the single userspace DisplayServer. It owns the console lanes,
 keyboard routing, process cleanup, and final composition. Painter is a client
-library above `boxcxx`; it publishes retained scene/overlay layers to that
-server and does not draw through a second display path. There is no separate
+library above `boxcxx`; it publishes retained scene/overlay layers and items
+to that server and does not draw through a second display path. There is no separate
 daemon and compositor binary.
 
 ## TUI plan

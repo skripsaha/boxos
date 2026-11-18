@@ -94,6 +94,14 @@ public:
     // The tag the display touches when it tells something: wait on it.
     TouchTag Bell() const noexcept { return Rung; }
 
+    // The number of the last step put in the ring: the step a Shown event
+    // names once the glass shows it.
+    std::uint64_t Step() const noexcept { return Steps; }
+
+    // The area's size in points and its pixels to a point — and, as for every
+    // Changes, an item's size and scale said.
+    using Changes::Scale;
+    using Changes::Size;
     core::PointF Size() const noexcept { return Given; }
     float        Scale() const noexcept { return PixelsPerPoint; }
     gui::Glass   On() const noexcept { return Kind; }

@@ -73,21 +73,21 @@ void Compositor::Damage(Rect Area) noexcept
 {
     Area = Area.Intersect(Screen);
     if (Area.Empty()) return;
-    for (const Rect &Each : Damaged)
+    for (const Rect &Each : Waiting)
         if (Holds(Each, Area)) return;
-    if (Damaged.size() < Damaged.capacity()) {
-        Damaged.push_back(Area);
+    if (Waiting.size() < Waiting.capacity()) {
+        Waiting.push_back(Area);
         return;
     }
     /* Full: joined to the rectangle it grows the least. */
     std::size_t  Best  = 0;
     std::int64_t Least = -1;
-    for (std::size_t I = 0; I < Damaged.size(); I++) {
-        const std::int64_t Grows = AreaOf(Damaged[I].Join(Area)) - AreaOf(Damaged[I]);
+    for (std::size_t I = 0; I < Waiting.size(); I++) {
+        const std::int64_t Grows = AreaOf(Waiting[I].Join(Area)) - AreaOf(Waiting[I]);
         if (Least < 0 || Grows < Least) Least = Grows, Best = I;
     }
-    if (Damaged.empty()) return;
-    Damaged[Best] = Damaged[Best].Join(Area);
+    if (Waiting.empty()) return;
+    Waiting[Best] = Waiting[Best].Join(Area);
 }
 
 void Compositor::Vanish(AreaState &Area, const std::vector<std::uint32_t> &Items)
@@ -204,8 +204,8 @@ void Compositor::Take(std::span<AreaState *const> Areas, const Theme &Look)
 
 std::vector<Rect> Compositor::Rects()
 {
-    std::vector<Rect> Made = Damaged;
-    Damaged.clear();
+    std::vector<Rect> Made = Waiting;
+    Waiting.clear();
     /* Overlapping rectangles joined, again until none overlaps. */
     for (bool Joined = true; Joined;) {
         Joined = false;
@@ -244,7 +244,8 @@ bool Compositor::Hidden(Rect Area, std::span<AreaState *const> Areas) const noex
     return false;
 }
 
-void Compositor::Compose(painter::core::Canvas &Target, Rect Area, std::span<AreaState *const> Areas, const Theme &Look)
+void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Corner, Rect Area,
+                         std::span<AreaState *const> Areas, const Theme &Look)
 {
     /* The topmost opaque item covering the rectangle whole: nothing beneath
      * it is drawn. */
@@ -261,13 +262,21 @@ void Compositor::Compose(painter::core::Canvas &Target, Rect Area, std::span<Are
         if (!Found && Each.Paged && Holds(Each.Place, Area)) StartArea = A, StartEntry = 0, Found = true;
     }
 
-    Target.PushClip(Area);
+    /* Every canvas drawn on lies somewhere on the screen: Target at Corner,
+     * a group's own picture at Area's corner. */
+    const auto Into = [](Rect Of, painter::core::Point At) { return Rect{Of.X - At.X, Of.Y - At.Y, Of.Width, Of.Height}; };
+    const auto Moved = [](const Transform &Place, painter::core::Point At) {
+        return At.X == 0 && At.Y == 0 ? Place
+                                      : Place.Then(Transform::Translate(-static_cast<float>(At.X), -static_cast<float>(At.Y)));
+    };
+    const painter::core::Point Picture{Area.X, Area.Y};
+    Target.PushClip(Into(Area, Corner));
     for (std::size_t A = StartArea; A < Areas.size(); A++) {
         AreaState &Each = *Areas[A];
         if (!Each.Shown || Each.Place.Intersect(Area).Empty()) continue;
-        Target.PushClip(Each.Place);
+        Target.PushClip(Into(Each.Place, Corner));
         if (Each.Paged && (A > StartArea || StartEntry == 0))
-            Target.Clear(Each.Place.Intersect(Area), Look.Page);
+            Target.Clear(Into(Each.Place.Intersect(Area), Corner), Look.Page);
         /* Groups that see through: their items onto a picture of their own,
          * laid at the group's end. */
         struct Layer {
@@ -275,26 +284,25 @@ void Compositor::Compose(painter::core::Canvas &Target, Rect Area, std::span<Are
             float                                Opacity;
         };
         std::vector<Layer> Layers;
-        const auto Current = [&]() -> painter::core::Canvas & {
+        const auto Drawn = [&]() -> Layer * {
             for (std::size_t L = Layers.size(); L-- > 0;)
-                if (Layers[L].Picture) return *Layers[L].Picture;
-            return Target;
+                if (Layers[L].Picture) return &Layers[L];
+            return nullptr;
         };
-        const auto Shifted = [&](const Transform &Place) {
-            for (const Layer &Each2 : Layers)
-                if (Each2.Picture)
-                    return Place.Then(Transform::Translate(-static_cast<float>(Area.X), -static_cast<float>(Area.Y)));
-            return Place;
+        const auto Current = [&]() -> painter::core::Canvas & {
+            Layer *On = Drawn();
+            return On ? *On->Picture : Target;
         };
+        const auto At = [&] { return Drawn() ? Picture : Corner; };
         for (std::size_t E = A == StartArea ? StartEntry : 0; E < Each.List.size(); E++) {
             const Entry &One = Each.List[E];
             switch (One.What) {
             case Entry::Kind::Draw:
                 if (!One.Device.Intersect(Area).Empty())
-                    Paint(*One.Of, *One.Of->Drawn, Each.Program.From, Current(), Shifted(One.Place), One.Opacity);
+                    Paint(*One.Of, *One.Of->Drawn, Each.Program.From, Current(), Moved(One.Place, At()), One.Opacity);
                 break;
             case Entry::Kind::ClipBegin:
-                (void)Current().PushClip(ClipOf(*One.Of), Shifted(One.Place));
+                (void)Current().PushClip(ClipOf(*One.Of), Moved(One.Place, At()));
                 break;
             case Entry::Kind::ClipEnd:
                 Current().PopClip();
@@ -310,7 +318,10 @@ void Compositor::Compose(painter::core::Canvas &Target, Rect Area, std::span<Are
                 if (Layers.empty()) break;
                 Layer Done = std::move(Layers.back());
                 Layers.pop_back();
-                if (Done.Picture) Current().Draw(*Done.Picture, painter::core::Point{Area.X, Area.Y}, Done.Opacity);
+                if (Done.Picture) {
+                    const painter::core::Point Under = At();
+                    Current().Draw(*Done.Picture, painter::core::Point{Picture.X - Under.X, Picture.Y - Under.Y}, Done.Opacity);
+                }
                 break;
             }
             }

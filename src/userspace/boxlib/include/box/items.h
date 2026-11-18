@@ -430,9 +430,12 @@ typedef struct {
 
 /* ---- Questions and messages --------------------------------------------- */
 
-/* An area, asked: DisplayAreaOpenRequest → DisplayAreaOpenReply. A block,
- * asked: DisplayBlockOpenRequest → DisplayBlockOpenReply. Messages to the
- * display that answered: AREA_STEP (DisplayAreaNotice) after each step,
+/* An area, asked: DisplayAreaOpenRequest → DisplayAreaOpenReply. It cares
+ * where in the console's order it stands, as a layer does (box/display.h), so
+ * it carries the asker's console_order_mark(): it is answered once everything
+ * the asker printed before is drawn, and an area in the flow lies under it. A
+ * block, asked: DisplayBlockOpenRequest → DisplayBlockOpenReply. Messages to
+ * the display that answered: AREA_STEP (DisplayAreaNotice) after each step,
  * AREA_CLOSE (DisplayAreaNotice), BLOCK_CLOSE (DisplayBlockNotice). */
 #define DISP_CMD_AREA_OPEN    0x60
 #define DISP_CMD_BLOCK_OPEN   0x61
@@ -458,6 +461,7 @@ typedef struct PACKED {
     int32_t  width;           /* wished, of ITEM_POINT; 0 for the display's choice */
     int32_t  height;
     uint32_t reserved;
+    uint64_t order;           /* the asker's console_order_mark() */
 } DisplayAreaOpenRequest;
 
 typedef struct PACKED {
@@ -518,7 +522,7 @@ STATIC_ASSERT(sizeof(ItemEvent) == 8 && sizeof(ItemAreaNews) == 16 && sizeof(Ite
               "the events of the items' language are an ABI of fixed sizes");
 STATIC_ASSERT(sizeof(ItemAreaHeader) == 320 && sizeof(ItemBlockHeader) == 64,
               "an area's and a block's memory begin with heads of fixed sizes");
-STATIC_ASSERT(sizeof(DisplayAreaOpenRequest) == 16 && sizeof(DisplayAreaOpenReply) == 80 &&
+STATIC_ASSERT(sizeof(DisplayAreaOpenRequest) == 24 && sizeof(DisplayAreaOpenReply) == 80 &&
                   sizeof(DisplayBlockOpenRequest) == 24 && sizeof(DisplayBlockOpenReply) == 64 &&
                   sizeof(DisplayAreaNotice) == 12 && sizeof(DisplayBlockNotice) == 12,
               "the questions and messages of areas and blocks are an ABI of fixed sizes");

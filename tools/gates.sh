@@ -30,7 +30,9 @@
 # held on the host to exact areas, the press's pixels, its clip and every
 # frame drawn where it changed being the frame drawn whole), drawcheck (the
 # drawing engine on a processor of SSE2 and on one of AVX2, every way it
-# offers drawing the plain way's very pixels), dedup (a copy laid on its
+# offers drawing the plain way's very pixels), itemcheck (a program's items
+# said and shown a step at a time, every step shown and what each frame
+# cost), dedup (a copy laid on its
 # original by the pass after a Tally), and volume-read's self-test over the
 # image the build lays.
 # Beside them the host's own stands, which no volume touches: boxasm, the
@@ -56,7 +58,10 @@
 # cache to what they promise, and every named damage of a font and a
 # thousand random ones read and drawn whole under the sanitizers; draw, the
 # shapes, strokes and paints every hand draws with held to exact areas, the
-# host's atan2 and the light pictures are mixed in.
+# host's atan2 and the light pictures are mixed in; items, the items' language
+# and the display's parts that keep and compose them — every refusal and
+# bound, rings that lie, the screen composed only where it changed, tile by
+# tile, the very pixels of the screen composed whole.
 #
 # The list is here, in the tree it judges, and not beside a session: a list
 # kept out of the tree can lose a gate without a diff saying so.
@@ -80,7 +85,7 @@ GATES_LOGCHECK="healthy unattended byname quill quillmut census lockrankmut repl
                 stand standusb standmut mkfs crewcrash fare faremut"
 GATES_POWERCUT="selftest noanchor noanchormut nextfid hog halt race overwrite logger tipin sessions
                 replug machineb spared undonecut engross dedup firstflushmut lastflushmut booknextfidmut stitchmut"
-GATES_OTHER="framerefuse bookboot loadersettings panel crossings scene drawcheck dedup volread_selftest boxasm format form recipe elf box pack inside settings typecase draw"
+GATES_OTHER="framerefuse bookboot loadersettings panel crossings scene drawcheck itemcheck dedup volread_selftest boxasm format form recipe elf box pack inside settings typecase draw items"
 GATES_LONG="loggerhour loggerhourmut"
 
 gate_names() {
@@ -113,6 +118,7 @@ gate_run() {
         settings)         tools/settings_stand.sh ;;
         typecase)         tools/typecase_stand.sh ;;
         draw)             tools/draw_stand.sh ;;
+        items)            tools/items_stand.sh ;;
         *)                tools/logcheck.sh "$1" ;;
     esac
 }
@@ -156,7 +162,7 @@ for name in $WANTED; do
     # The harness's own closing words: its count, and the caveats and harness
     # failures it owns to — each cut at its explanation.
     verdict=$(sed $'s/\x1b\\[[0-9;]*m//g' "$OUT/$name.out" \
-              | grep -E '^(logcheck|powercut|boxasm|format|form|recipe|elf|box|pack|inside|settings|typecase|draw): [0-9]+ (passed|caveat|harness)|^self-test: [0-9]+ of [0-9]+ cases' \
+              | grep -E '^(logcheck|powercut|boxasm|format|form|recipe|elf|box|pack|inside|settings|typecase|draw|items): [0-9]+ (passed|caveat|harness)|^self-test: [0-9]+ of [0-9]+ cases' \
               | sed 's/ — .*//' | paste -sd '|' - | sed 's/|/; /g')
     line="$name rc=$rc $(( $(date +%s) - t0 ))s ${verdict:-(no verdict line)}"
     echo "$line" | tee -a "$OUT/SUMMARY"

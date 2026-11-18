@@ -44,8 +44,11 @@ std::optional<BoxMatrix> MatrixOf(const Transform &Place) noexcept
         *Into[I] = static_cast<std::int32_t>(std::lround(Parts[I] * BOX_SHAPE_UNIT));
     }
     if (!(std::fabs(Place.E) <= Reach) || !(std::fabs(Place.F) <= Reach)) return std::nullopt;
-    M.E = static_cast<std::int32_t>(std::lround(Place.E * BOX_SHAPE_ONE));
-    M.F = static_cast<std::int32_t>(std::lround(Place.F * BOX_SHAPE_ONE));
+    /* Where it is put, to the nearest place, a half always up: a shape drawn
+     * onto a canvas lying elsewhere on the screen — moved by whole pixels —
+     * lands on the very places it lands on drawn where it lies. */
+    M.E = static_cast<std::int32_t>(std::floor(Place.E * BOX_SHAPE_ONE + 0.5f));
+    M.F = static_cast<std::int32_t>(std::floor(Place.F * BOX_SHAPE_ONE + 0.5f));
     return M;
 }
 

@@ -1,13 +1,15 @@
 /* items stand — the compositor: a scene of every kind of item — a page, a
  * panel raised by its shadow, texts of styles and coloured stretches, a
- * gradient, a group that clips, a group seen through, a dashed outline, a
- * picture, an item hidden, a text sized by its content — in two areas of two
- * programs, changed at random step after step; after each step the screen
- * composed only where it changed holds the very pixels of the screen composed
- * whole from nothing. And: one word changed composes about that word alone;
+ * gradient, a group that clips, a group seen through and one seen through
+ * inside it, a dashed outline, a picture, an item hidden, a text sized by its
+ * content — in two areas of two programs, changed at random step after step;
+ * after each step the screen composed only where it changed, tile by tile on
+ * a canvas of a tile's size as the display composes it, holds the very pixels
+ * of the screen composed whole from nothing. And: one word changed composes about that word alone;
  * an opaque item hides what lies beneath; a text sized by its content says
  * its size; what is kept is kept and what is plain is drawn straight. */
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <optional>
@@ -91,6 +93,14 @@ void Scene(Changes &Say, float W, float H)
     const Fill Gold = Fill::Of(Color::Rgb(255, 200, 60));
     Say.Fills(8, std::span(&Gold, 1));
     Say.Corners(8, painter::core::Corners::All(10));
+    Say.Create(14, Kind::Group, 6);
+    Say.Place(14, {50, 10});
+    Say.Opacity(14, 0.7f);
+    Say.Create(15, Kind::Shape, 14);
+    Say.Ellipse(15);
+    Say.Size(15, {44, 44});
+    const Fill Green = Fill::Of(Color::Rgb(60, 220, 120));
+    Say.Fills(15, std::span(&Green, 1));
     Say.Create(9, Kind::Shape);
     Say.Place(9, {W * 0.1f, H * 0.7f});
     Say.Outline(9, *painter::core::Path::FromSvg("M 30 0 L 37 22 L 60 22 L 41 36 L 48 58 L 30 44 L 12 58 L 19 36 L 0 22 L 23 22 Z"));
@@ -121,25 +131,37 @@ std::uint64_t Differ(const painter::core::Canvas &A, const painter::core::Canvas
     return Count;
 }
 
+/* A tile's sides: not dividing the screen, nor the areas' places. */
+constexpr std::int32_t TileWide = 100, TileHigh = 70;
+
 struct Screenful {
     Screenful(std::uint32_t W, std::uint32_t H)
-        : Screen(*painter::core::Canvas::Make(W, H)), Whole(Rect{0, 0, static_cast<std::int32_t>(W), static_cast<std::int32_t>(H)}),
-          Composer(Whole)
+        : Screen(*painter::core::Canvas::Make(W, H)), Piece(*painter::core::Canvas::Make(TileWide, TileHigh)),
+          Whole(Rect{0, 0, static_cast<std::int32_t>(W), static_cast<std::int32_t>(H)}), Composer(Whole)
     {
         Screen.Clear(Beneath);   /* what lies beneath every area, as the console's cells would */
     }
     painter::core::Canvas Screen;
+    painter::core::Canvas Piece;          /* a tile's canvas, as the display's */
     Rect                  Whole;
     items::Compositor     Composer;
     std::uint64_t         Composed = 0;   /* pixels composed, rectangle by rectangle */
 
-    /* The marks taken, and only the damage composed. */
+    /* The marks taken, and only the damage composed — tile by tile onto a
+     * canvas of a tile's size lying at the tile, then put on the screen. */
     void Frame(std::span<items::AreaState *const> Areas, const items::Theme &Look)
     {
         Composer.Take(Areas, Look);
         for (const Rect &Each : Composer.Rects()) {
-            Screen.Clear(Each, Beneath);
-            Composer.Compose(Screen, Each, Areas, Look);
+            for (std::int32_t Y = Each.Y; Y < Each.Y + Each.Height; Y += TileHigh)
+                for (std::int32_t X = Each.X; X < Each.X + Each.Width; X += TileWide) {
+                    const Rect Tile{X, Y, std::min(TileWide, Each.X + Each.Width - X), std::min(TileHigh, Each.Y + Each.Height - Y)};
+                    Piece.Clear(Rect{0, 0, Tile.Width, Tile.Height}, Beneath);
+                    Composer.Compose(Piece, painter::core::Point{Tile.X, Tile.Y}, Tile, Areas, Look);
+                    for (std::int32_t Row = 0; Row < Tile.Height; Row++)
+                        std::copy_n(Piece.Row(static_cast<std::uint32_t>(Row)), Tile.Width,
+                                    Screen.Row(static_cast<std::uint32_t>(Tile.Y + Row)) + Tile.X);
+                }
             Composed += static_cast<std::uint64_t>(Each.Width) * static_cast<std::uint64_t>(Each.Height);
         }
     }
@@ -148,7 +170,7 @@ struct Screenful {
     {
         painter::core::Canvas Made = *painter::core::Canvas::Make(Screen.Width(), Screen.Height());
         Made.Clear(Beneath);
-        Composer.Compose(Made, Whole, Areas, Look);
+        Composer.Compose(Made, painter::core::Point{}, Whole, Areas, Look);
         return Made;
     }
 };
@@ -156,7 +178,7 @@ struct Screenful {
 /* One random change of the scene. */
 void Change(Changes &Say, float W, float H, int &Made)
 {
-    const std::uint32_t Items[] = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13};
+    const std::uint32_t Items[] = {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15};
     const std::uint32_t Some    = Items[Random() % (sizeof Items / sizeof Items[0])];
     switch (Random() % 11) {
     case 0: Say.Place(Some, {static_cast<float>(Random() % static_cast<std::uint32_t>(W * 0.8f)), static_cast<float>(Random() % static_cast<std::uint32_t>(H * 0.8f))}); break;
@@ -164,7 +186,7 @@ void Change(Changes &Say, float W, float H, int &Made)
     case 2: Say.Text(13, std::to_string(Random() % 24) + ":" + std::to_string(10 + Random() % 50)); break;
     case 3: Say.Hidden(Some, Random() % 3 == 0); break;
     case 4: Say.Opacity(Some, static_cast<float>(Random() % 101) / 100.0f); break;
-    case 5: Say.Restack(Some, Some == 7 || Some == 8 ? 6 : Some == 2 || Some == 3 || Some == 4 ? 10 : ITEM_AREA, ITEM_TOP); break;
+    case 5: Say.Restack(Some, Some == 7 || Some == 8 || Some == 14 ? 6 : Some == 15 ? 14 : Some == 2 || Some == 3 || Some == 4 ? 10 : ITEM_AREA, ITEM_TOP); break;
     case 6:
         if (Made) {
             Say.Remove(50);

@@ -74,7 +74,7 @@ UTILS = create show files tag untag name trash delete assemble \
         calculate difference copy typer flame checksum passport aquarium \
         nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits \
         edit seek retag read inside settings autostart scratchpad garden gardener random sand coinflip dice casino seabattle whale hangman duppo \
-        glyphs drawcheck
+        glyphs drawcheck itemcheck
 
 .PHONY: all clean
 
@@ -520,6 +520,14 @@ $(DRAWCHECK_OBJS): CXXFLAGS += -O2
 
 drawcheck.elf: $(BOXLIB_START) $(DRAWCHECK_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(DRAWCHECK_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
+
+# itemcheck holds the items' language on the machine: a scene said, runs of
+# steps shown, and what each frame cost.
+ITEMCHECK_DIR  = itemcheck
+ITEMCHECK_OBJS = $(addprefix $(ITEMCHECK_DIR)/,itemcheck.o)
+
+itemcheck.elf: $(BOXLIB_START) $(ITEMCHECK_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(ITEMCHECK_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
 
 # glyphs is C++ in parts of its own directory; its table of Unicode's blocks
 # is written by tools/gen_unicode_blocks.py.
