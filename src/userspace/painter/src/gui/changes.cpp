@@ -206,6 +206,8 @@ Changes::Record Changes::Make(std::uint16_t Op, std::uint32_t Item, std::span<co
 
 void Changes::Put(std::uint32_t Item, std::uint16_t Property, Record Value)
 {
+    const auto Known = Values.find({Item, Property});
+    if (Known != Values.end() && Known->second == Value) return;
     Writer Body;
     Body.Put(ItemChange{Property, 0, static_cast<std::uint32_t>(Value.size())});
     Body.Bytes.insert(Body.Bytes.end(), Value.begin(), Value.end());
@@ -214,10 +216,28 @@ void Changes::Put(std::uint32_t Item, std::uint16_t Property, Record Value)
         return;
     }
     Properties[{Item, Property}] = Make(ITEM_OP_CHANGE, Item, Body.Bytes);
+    Values[{Item, Property}]     = std::move(Value);
 }
+
+const std::vector<std::uint8_t> *Changes::Said(std::uint32_t Item, std::uint16_t Property) const noexcept
+{
+    const auto Known = Values.find({Item, Property});
+    return Known == Values.end() ? nullptr : &Known->second;
+}
+
+std::vector<std::uint16_t> Changes::SaidOf(std::uint32_t Item) const
+{
+    std::vector<std::uint16_t> Made;
+    for (auto It = Values.lower_bound({Item, 0}); It != Values.end() && It->first.first == Item; ++It) Made.push_back(It->first.second);
+    return Made;
+}
+
+void Changes::Forget(std::uint32_t Item, std::uint16_t Property) { Values.erase({Item, Property}); }
 
 void Changes::Create(std::uint32_t Item, gui::Kind Kind, std::uint32_t Parent, std::uint32_t Above, gui::Role Role)
 {
+    /* A made item has said nothing yet. */
+    Values.erase(Values.lower_bound({Item, 0}), Values.upper_bound({Item, 0xFFFF}));
     Writer Body;
     Body.Put(ItemCreate{static_cast<std::uint8_t>(Kind), 0, static_cast<std::uint16_t>(Role), Parent, Above, 0});
     Ordered.emplace_back(Item, Make(ITEM_OP_CREATE, Item, Body.Bytes));
@@ -225,8 +245,9 @@ void Changes::Create(std::uint32_t Item, gui::Kind Kind, std::uint32_t Parent, s
 
 void Changes::Remove(std::uint32_t Item)
 {
-    /* What it was to say goes with it. */
+    /* What it was to say goes with it, and what it said. */
     Properties.erase(Properties.lower_bound({Item, 0}), Properties.upper_bound({Item, 0xFFFF}));
+    Values.erase(Values.lower_bound({Item, 0}), Values.upper_bound({Item, 0xFFFF}));
     if (const auto Kept = Grids.find(Item); Kept != Grids.end()) {
         for (const auto &Row : Kept->second.Marked) CellsMarked -= Row.first < Row.second;
         Grids.erase(Kept);
@@ -243,6 +264,7 @@ void Changes::Restack(std::uint32_t Item, std::uint32_t Parent, std::uint32_t Ab
 
 void Changes::Reset(std::uint32_t Item, std::uint16_t Property)
 {
+    Values.erase({Item, Property});
     Writer Body;
     Body.Put(ItemChange{Property, 0, 0});
     Properties[{Item, Property}] = Make(ITEM_OP_RESET, Item, Body.Bytes);

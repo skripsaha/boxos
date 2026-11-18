@@ -8,12 +8,16 @@
 #include <cstring>
 #include <utility>
 
+#include "box/alarm.h"
 #include "box/core/strand_self.h"
 #include "box/display.h"
 #include "box/error.h"
 #include "box/ipc.h"
 #include "box/print.h"
 #include "box/system.h"
+#include "box/turnin.h"
+#include "font_opened.h"
+#include "painter/tui/keyboard.h"
 
 namespace painter::gui {
 
@@ -59,10 +63,17 @@ bool CanvasBlock::Free(std::uint32_t Page) const noexcept
 std::optional<core::Canvas> CanvasBlock::Page(std::uint32_t Page) noexcept
 {
     if (!Free(Page)) return std::nullopt;
-    auto *Pixels = reinterpret_cast<core::Pixel *>(reinterpret_cast<std::uint8_t *>(Memory.data()) + sizeof(ItemBlockHeader) +
-                                                   static_cast<std::size_t>(Page) * HeadOf(Memory)->PageBytes);
-    return core::Canvas::Over(Pixels, Width, Height, Width);
+    return core::Canvas::Over(PageAt(Page), Width, Height, Width);
 }
+
+core::Pixel *CanvasBlock::PageAt(std::uint32_t Page) noexcept
+{
+    if (!Memory || Page > 1) return nullptr;
+    return reinterpret_cast<core::Pixel *>(reinterpret_cast<std::uint8_t *>(Memory.data()) + sizeof(ItemBlockHeader) +
+                                           static_cast<std::size_t>(Page) * HeadOf(Memory)->PageBytes);
+}
+
+std::size_t CanvasBlock::PageBytes() const noexcept { return Memory ? HeadOf(Memory)->PageBytes : 0; }
 
 void CanvasBlock::Taken(std::uint32_t Page) noexcept
 {
@@ -127,12 +138,17 @@ void Area::Listen(bool On) noexcept
     Rung = TOUCH_TAG_INVALID;
 }
 
+Area::Area() : Anchored(std::make_shared<detail::Anchor>(detail::Anchor{this, &Pool, this, nullptr})) {}
+
 Area::Area(Area &&Other) noexcept
     : Changes(std::move(Other)), AreaId(Other.AreaId), DisplayPid(Other.DisplayPid), Memory(std::move(Other.Memory)),
       Head(Other.Head), Given(Other.Given), PixelsPerPoint(Other.PixelsPerPoint), Kind(Other.Kind),
       MosaicFlags(Other.MosaicFlags), CaretAtOpen(Other.CaretAtOpen), BellName(Other.BellName), Rung(Other.Rung),
-      Steps(Other.Steps), Opened(Other.Opened)
+      Steps(Other.Steps), Opened(Other.Opened), Pool(std::move(Other.Pool)), Anchored(std::move(Other.Anchored)),
+      Queued(std::move(Other.Queued)), Frames(std::move(Other.Frames))
 {
+    /* Its items' words follow it. */
+    if (Anchored) Anchored->Into = this, Anchored->Pool = &Pool, Anchored->Owner = this;
     Other.Opened = false;
     Other.Head   = nullptr;
     Other.Rung   = TOUCH_TAG_INVALID;
@@ -140,9 +156,13 @@ Area::Area(Area &&Other) noexcept
 
 Area::~Area()
 {
+    /* Its items' objects say nothing from now. */
+    if (Anchored) Anchored->Into = nullptr, Anchored->Pool = nullptr, Anchored->Owner = nullptr;
     if (Opened) Tell(DISP_CMD_AREA_CLOSE, AreaId);
     if (Rung != TOUCH_TAG_INVALID) touch_release(Rung);
 }
+
+
 
 void Area::Tell(std::uint8_t Command, std::uint32_t What) noexcept
 {
@@ -211,6 +231,59 @@ void Area::PresentAll()
 
 std::optional<Event> Area::Next()
 {
+    if (!Queued.empty()) {
+        Event Told = Queued.front();
+        Queued.pop_front();
+        return Told;
+    }
+    return Read();
+}
+
+void Area::Gather()
+{
+    Touch Rang;
+    if (Rung != TOUCH_TAG_INVALID)
+        while (touch_try_pop_tag(Rung, &Rang)) {
+        }
+    try {
+        while (std::optional<Event> Told = Read()) Queued.push_back(*Told);
+    } catch (...) {
+        // No room to keep what it told: what is still in the ring waits there.
+    }
+}
+
+Event Area::Wait(tui::Keyboard *Keys)
+{
+    Listen(true);
+    for (;;) {
+        /* The mark first, then the look: what arrives after it wakes the
+         * turn-in (box/turnin.h). */
+        const TurnInMark Mark = box_mark();
+        Gather();
+        if (std::optional<Event> Told = Next()) return *Told;
+        if (Keys) {
+            const tui::Event Heard = Keys->Poll();
+            Event            Made;
+            switch (Heard.Kind) {
+            case tui::EventKind::Key: Made.What = Event::Kind::Key, Made.Key = Heard.Key; return Made;
+            case tui::EventKind::Gone: Made.What = Event::Kind::Gone; return Made;
+            case tui::EventKind::EndAsked: Made.What = Event::Kind::EndAsked; return Made;
+            case tui::EventKind::Quiet: break;
+            }
+        }
+        std::uint64_t Moment = 0;
+        if (alarm_heard(&Moment)) {
+            Event Made;
+            Made.What   = Event::Kind::Alarm;
+            Made.Moment = Moment;
+            return Made;
+        }
+        box_turn_in(Mark);
+    }
+}
+
+std::optional<Event> Area::Read()
+{
     if (!Head) return std::nullopt;
     for (;;) {
         const std::uint64_t Write = __atomic_load_n(&Head->EventWrite, __ATOMIC_ACQUIRE);
@@ -259,6 +332,9 @@ std::optional<Event> Area::Next()
             Made.Op       = Why.Op;
             Made.Property = Why.Property;
             Made.Reason   = static_cast<error_t>(Why.Reason);
+            /* What the display holds is what was said before: said again,
+             * it goes again. */
+            if (Why.Op == ITEM_OP_CHANGE) Forget(Head2.Item, Why.Property);
             return Made;
         }
         case ITEM_EVENT_SHOWN: {
@@ -360,8 +436,10 @@ std::expected<std::uint32_t, box::error> Area::OpenFont(std::span<const std::uin
         return std::unexpected(box::error{box::errc::corrupted});
     }
     std::memcpy(reinterpret_cast<std::uint8_t *>(Memory2->data()) + sizeof(ItemBlockHeader), Bytes.data(), Bytes.size());
-    /* The display reads it once told, with the next step. */
+    /* The display reads it once told, with the next step, into the program's
+     * fonts; texts measured here are laid in them as well. */
     BlockChanged(Id, core::Rect{0, 0, 0, 0});
+    if (detail::FontOpened) detail::FontOpened(Bytes);
     return Id;
 }
 

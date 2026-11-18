@@ -35,9 +35,10 @@ D=src/userspace/display
 P=src/userspace/painter
 SOURCES="tools/items_stand*.cpp $D/item_tree.cpp $D/item_draw.cpp $D/item_reception.cpp \
          $D/compositor.cpp $D/cell_grid.cpp $D/cells_draw.cpp $D/console_model.cpp $D/mirror.cpp $D/frame.cpp \
-         $D/typesetter.cpp $(ls $P/src/core/*.cpp | grep -v system_fonts.cpp) $P/src/gui/changes.cpp $P/src/items/*.cpp \
+         $D/typesetter.cpp $(ls $P/src/core/*.cpp | grep -v system_fonts.cpp) $P/src/gui/changes.cpp $P/src/gui/items.cpp $P/src/gui/frame.cpp $P/src/gui/measure.cpp $P/src/gui/fonts.cpp $P/src/gui/font_opened.cpp \
+         $P/src/items/*.cpp \
          src/userspace/typecase/src/*.cpp"
-INCLUDES="-Isrc/include -I$P/include -I$P/src/core -Isrc/userspace/typecase/include -Isrc/userspace/boxlib/include -I$D -Itools \
+INCLUDES="-Isrc/include -I$P/include -I$P/src/core -Isrc/userspace/typecase/include -Isrc/userspace/boxlib/include -Isrc/userspace/boxcxx/include -I$D -Itools \
           -I$WORK"
 
 # The imprint the typesetter draws with when it has no font, as the build

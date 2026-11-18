@@ -391,7 +391,13 @@ enum {
     ITEM_EVENT_FREE    = 5,   /* ItemPageFree: a canvas's page may be drawn in again (Item is the block) */
 };
 
+/* The glass an area is on: a framebuffer's pixels, or a text page's cells —
+ * where a cell is ITEM_PAGE_CELL_WIDE points across and ITEM_PAGE_CELL_TALL
+ * down, a text is written into the cells a character each, a line of it a row,
+ * and an item that is no text is shown by its caption. */
 enum { ITEM_GLASS_TEXT = 1, ITEM_GLASS_PIXELS = 2 };
+#define ITEM_PAGE_CELL_WIDE 8
+#define ITEM_PAGE_CELL_TALL 16
 typedef struct {
     int32_t  Width, Height;   /* of ITEM_POINT */
     uint32_t Scale;           /* pixels to a point, of 256 */
