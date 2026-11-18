@@ -414,6 +414,23 @@ void Canvas::Draw(const Canvas &Picture, Point At, float Opacity)
     Touch(Into);
 }
 
+void Canvas::FadeTo(const Canvas &Toward, float Share)
+{
+    const std::uint32_t Across = std::min(Wide, Toward.Wide), Down = std::min(High, Toward.High);
+    const std::int64_t  Way  = std::clamp<std::int64_t>(std::lround(Share * 65536.0f), 0, 65536);
+    const auto Walk = [Way](std::uint16_t From, std::uint16_t To) {
+        return static_cast<std::uint16_t>(From + ((static_cast<std::int64_t>(To) - From) * Way + 32768) / 65536);
+    };
+    for (std::uint32_t Y = 0; Y < Down; Y++) {
+        Pixel       *Into = Row(Y);
+        const Pixel *From = Toward.Row(Y);
+        for (std::uint32_t X = 0; X < Across; X++)
+            Into[X] = Pixel{Walk(Into[X].Red, From[X].Red), Walk(Into[X].Green, From[X].Green), Walk(Into[X].Blue, From[X].Blue),
+                            Walk(Into[X].Alpha, From[X].Alpha)};
+    }
+    Touch(Rect{0, 0, static_cast<std::int32_t>(Across), static_cast<std::int32_t>(Down)});
+}
+
 void Canvas::Blur(Rect Area, float Radius)
 {
     const engine::BlurBoxes Boxes = engine::BoxesFor(Radius / 2.0f);
