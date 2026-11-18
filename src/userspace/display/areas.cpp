@@ -21,7 +21,6 @@
 #include "box/color.h"
 #include "box/core/cabin.h"
 #include "box/cxx/bay.h"
-#include "box/cxx/strand.h"
 #include "box/debug.h"
 #include "box/error.h"
 #include "box/ipc.h"
@@ -161,7 +160,6 @@ Names                                 g_area_names(DISPLAY_AREA_TAG_PREFIX);
 Names                                 g_block_names(DISPLAY_BLOCK_TAG_PREFIX);
 std::uint32_t                         g_next_area = 1, g_next_block = 1;
 AreasGlass                            g_glass;
-std::optional<box::strand>            g_fonts;   // the system's fonts being read
 CellsLook                             g_no_cells;      // the look until the glass is known
 items::Theme                          g_no_theme;
 std::uint32_t                         g_scale     = 256;
@@ -239,9 +237,9 @@ ItemAreaNews NewsOf(const Area &Of) noexcept
 }
 
 /* A program's book, the system's faces put in it first — when it first lays a
- * text or reads a font of its own, not before: a program of cells needs none,
- * and its area opening waits on no file. Reading them waits only for what is
- * left of what AreasStart began. Throws std::bad_alloc only. */
+ * text or reads a font of its own, not before: a program of cells needs none.
+ * The faces were read as the areas started (AreasStart). Throws
+ * std::bad_alloc only. */
 typecase::Fonts &BookOf(Program &Of)
 {
     if (!Of.SystemsIn) {
@@ -496,13 +494,13 @@ void AreasStart(const AreasGlass &Glass)
     if (Glass.Text) {
         g_scale = 256;
     } else {
-        /* A text page lays no text in a font; a framebuffer's first text
-         * should not wait for the volume, nor the scene for it. */
-        try {
-            if (!g_fonts) g_fonts.emplace([] { (void)painter::core::SystemFonts(); });
-        } catch (...) {
-            // No strand: the first text reads them itself.
-        }
+        /* The system's fonts read now, before the scene plays on: a text
+         * page lays no text in a font, and a framebuffer's should not wait
+         * for the volume — nor the scene stand still while a program's first
+         * text has them read. Read here and not on a strand of the display's
+         * own: every strand carries the display's tag, and a question with
+         * two carriers is refused (ERR_ROUTE_AMBIGUOUS). */
+        (void)painter::core::SystemFonts();
         /* Chosen: a point a pixel on a screen 1080 tall, larger by quarters
          * as the screen is taller, four at most. */
         const auto          Tall   = static_cast<std::uint32_t>(Glass.Screen.Height);
