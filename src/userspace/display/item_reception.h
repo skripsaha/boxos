@@ -41,6 +41,8 @@ struct Listener {
     // A property said plainly or unsaid — or, as 0, the item gone: what
     // animates it is cut.
     std::function<void(std::uint32_t Item, std::uint16_t Property)> Cut;
+    // The focus asked to an item, ITEM_AREA for none.
+    std::function<void(std::uint32_t Item)> Focus;
 };
 
 // Every whole step of the ring after Head's Read applied to Items; Read moved

@@ -140,6 +140,11 @@ public:
     Self &SetOpacity(float Opacity) { return Say([&](Changes &To) { To.Opacity(Id, Opacity); }); }
     Self &Show() { return Say([&](Changes &To) { To.Hidden(Id, false); }); }
     Self &Hide() { return Say([&](Changes &To) { To.Hidden(Id, true); }); }
+    // The keyboard reaches it, or not — a button's and a field's role do
+    // unsaid; seen but not to be used; the keyboard's focus to it.
+    Self &SetFocusable(bool Reached) { return Say([&](Changes &To) { To.Focusable(Id, Reached); }); }
+    Self &SetDisabled(bool Disabled) { return Say([&](Changes &To) { To.Disabled(Id, Disabled); }); }
+    Self &Focus() { return Say([&](Changes &To) { To.Focus(Id); }); }
     Self &SetTurn(float Degrees) { return Say([&](Changes &To) { To.Turn(Id, Degrees); }); }
     Self &SetScale(core::PointF Scale) { return Say([&](Changes &To) { To.Scale(Id, Scale); }); }
     // The point it turns and scales about, from its corner, in points.

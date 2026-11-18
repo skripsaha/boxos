@@ -111,6 +111,14 @@ BOX_SETTINGS("text \"the text on a framebuffer\"\n"
              "items \"what programs draw on a framebuffer: shapes, text, pictures\"\n"
              "    scale number from 100 to 400 percent or off default off next-start "
              "\"how large a point is drawn, as a share of a pixel; off chooses for the screen\"\n"
+             "theme \"how the things programs show look, unless they say otherwise\"\n"
+             "    accent color default #4E8CFF \"buttons, the ring round what the keyboard reaches, what is chosen\"\n"
+             "    corners number from 0 to 24 px default 8 \"how round a button is; a field a little less, a panel more\"\n"
+             "    shadows on-or-off default on \"panels, buttons and fields raised by a soft shadow\"\n"
+             "    insist on-or-off default off "
+             "\"the theme's look over what programs say, for every button, field, panel and text with a role\"\n"
+             "keys \"how the keyboard reaches the things programs show\"\n"
+             "    point key default ctrl+. \"a label on every thing the keyboard reaches; type one to reach it\"\n"
              "motion \"how things programs show move\"\n"
              "    less on-or-off default off "
              "\"things moved, sized, turned or reshaped at once, fades short and without bounce\"\n"
@@ -238,7 +246,9 @@ void HoldFrame(const ConsoleRun &Run, std::uint32_t Lane)
 // again the moment it is lifted — and each area told what it showed.
 void Present()
 {
-    AreasAnimate(clock_uptime_us());
+    const std::uint64_t Now = clock_uptime_us();
+    AreasAnimate(Now);
+    InputFrame(Now);
     if (SceneOn()) return;
     AreasFlow(g_model->RowsGone());
     const bool Due = FrameDue(*g_model, AreasWant());
@@ -367,16 +377,31 @@ std::uint64_t g_alarm;
 // The display's settings watched: how things move takes effect at once.
 SettingsWatch *g_settings;
 
-// How the person wants things to move, as the settings say it now.
+// How the person wants things to move and to look, as the settings say it
+// now: a look said anew draws every area again.
 void MotionRead() noexcept
 {
     AreasMotion(settings_on("motion less"), static_cast<std::uint32_t>(settings_number("motion speed")));
+}
+
+void ThemeRead() noexcept
+{
+    items::ThemeSaid Said;
+    Said.Accent  = painter::core::Color::FromRaw(settings_color("theme accent"));
+    Said.Round   = static_cast<std::int32_t>(settings_number("theme corners")) * ITEM_POINT;
+    Said.Shadows = settings_on("theme shadows");
+    Said.Insist  = settings_on("theme insist");
+    FramePerson(Said);
+    AreasTheme();
+    InputPoint(settings_key("keys point"));
+    g_dirty = true;
 }
 
 bool SettingsStep()
 {
     if (!g_settings || !settings_watch_poll(g_settings)) return false;
     MotionRead();
+    ThemeRead();
     return true;
 }
 
@@ -404,7 +429,8 @@ void SetAlarm()
 {
     const std::uint64_t Areas  = AreasDue();
     std::uint64_t       Due    = 0;
-    for (const std::uint64_t Each : {EffectsDue(), SceneDue(), Areas ? (Areas + 999) / 1000 : 0})
+    const std::uint64_t Own = InputDue();
+    for (const std::uint64_t Each : {EffectsDue(), SceneDue(), Areas ? (Areas + 999) / 1000 : 0, Own ? (Own + 999) / 1000 : 0})
         if (Each != 0) Due = Due == 0 ? Each : std::min(Due, Each);
     if (Due == g_alarm) return;
     if (Due == 0) alarm_cancel();
@@ -832,7 +858,9 @@ int main(void)
     Glass.Look    = &FrameTheme();
     Glass.Vacated = FrameVacated;
     AreasStart(Glass);
+    InputStart(FrameScreen(), AreasScale(), Glass.Text, FrameTheme());
     MotionRead();
+    ThemeRead();
     if (settings_watch_begin(&g_settings) != 0) {
         g_settings = nullptr;
         kdbg_print("[display] its settings are not watched; how things move is read at its next start");

@@ -202,6 +202,8 @@ void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, 
         const bool      Shifted  = Moved || Of->Moved;
         const Leaving  *Fade     = Of->Fading && Of->Fading->Was.Drawn ? Of->Fading.get() : nullptr;
         Rect            Now      = Hidden ? Rect{} : DeviceRect(Drawn.Own, Place).Intersect(Area.Place);
+        if (const painter::core::PointF Size = SizeOf(*Of, Drawn); Hidden || Size.X <= 0 || Size.Y <= 0) Of->Box = Rect{};
+        else Of->Box = DeviceRect(painter::core::RectF{0, 0, Size.X, Size.Y}, Place);
         if (!Hidden && Fade) Now = Now.Join(DeviceRect(Fade->Was.Drawn->Own, Place).Intersect(Area.Place));
         const bool      Whole    = Of->Redraw || Shifted;
         if (Whole) {
@@ -224,7 +226,9 @@ void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, 
             if (Shifted) Vanish(Area, Of->Children);
             continue;
         }
-        const float Own = static_cast<float>(OpacityOf(Of->Said)) / ITEM_OPAQUE * std::min(Of->Seen, 1.0f);
+        /* Not to be used: as faint as the theme says. */
+        const float Own = static_cast<float>(OpacityOf(Of->Said)) / ITEM_OPAQUE * std::min(Of->Seen, 1.0f) *
+                          (DisabledOf(Of->Said) ? Program.From.Look->Faint : 1.0f);
         if (Of->Kind != ITEM_GROUP) {
             Entry Made{Entry::Kind::Draw, Of, Place, Opacity * Own, Now, {}, Fade, Turning || Of->Turning};
             if (Fade) {

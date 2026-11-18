@@ -32,6 +32,7 @@ constexpr std::int32_t TileSide = 256;
 constexpr std::uint32_t ConsoleItem = 1;
 
 items::Theme                         g_theme;
+items::ThemeSaid                     g_person;   // what the person sets of the theme
 CellsLook                            g_cells;
 Rect                                 g_screen{};
 bool                                 g_text = false;
@@ -297,7 +298,7 @@ void ConsoleChanged(Mirror &Into, std::span<items::AreaState *const> Programs, s
 /* Characters written into a text page's cells from a cell on, up to the
  * page's edge, in Ink. */
 void Write(std::vector<ItemCell> &Cells, std::uint32_t Cols, std::uint32_t Rows, std::int32_t Col, std::int32_t Row,
-           std::u32string_view Characters, std::uint32_t Ink) noexcept
+           std::u32string_view Characters, std::uint32_t Ink, std::uint32_t Paper = COLOR_THROUGH) noexcept
 {
     if (Row < 0 || Row >= static_cast<std::int32_t>(Rows)) return;
     for (std::size_t I = 0; I < Characters.size(); I++) {
@@ -306,7 +307,14 @@ void Write(std::vector<ItemCell> &Cells, std::uint32_t Cols, std::uint32_t Rows,
         ItemCell &Into = Cells[static_cast<std::size_t>(Row) * Cols + static_cast<std::size_t>(At)];
         Into.Character = Characters[I];
         Into.Ink       = Ink;
+        if (Paper != COLOR_THROUGH) Into.Paper = Paper;
     }
+}
+
+/* A colour as a cell carries it: #RRGGBB. */
+std::uint32_t RawOf(painter::core::Color Of) noexcept
+{
+    return static_cast<std::uint32_t>(Of.Red()) << 16 | static_cast<std::uint32_t>(Of.Green()) << 8 | Of.Blue();
 }
 
 /* A text item's ink on a text page: its first fill's colour. Throws
@@ -364,11 +372,25 @@ void CellsOf(const items::AreaState &Area, std::vector<ItemCell> &Cells, std::ui
             std::u32string Characters = typecase::CharactersOf(*Of->Said.Text);
             if (Of->Said.Secret && *Of->Said.Secret)
                 std::replace_if(Characters.begin(), Characters.end(), [](char32_t C) { return C != U'\n'; }, U'*');
-            const std::uint32_t Ink  = InkOf(*Of);
+            /* A button in brackets, a field between them; what the keyboard
+             * reaches the other way round, a field's caret where it stands;
+             * what is not to be used quiet. */
+            const bool          Reached = Area.Focused == Id;
+            const bool          Plate   = items::Plated(Of->Kind, Of->Role);
+            const std::uint32_t Ink     = items::DisabledOf(Of->Said) ? RawOf(g_theme.Quiet) : Reached ? g_cells.Page : InkOf(*Of);
+            const std::uint32_t Paper   = Reached ? g_cells.Text : COLOR_THROUGH;
+            if (Plate) {
+                Characters.insert(0, Of->Role == ITEM_ROLE_BUTTON ? U"[ " : U"[");
+                Characters += Of->Role == ITEM_ROLE_BUTTON ? U" ]" : U"]";
+            }
+            if (Reached && Of->Role == ITEM_ROLE_FIELD) {
+                CaretX = static_cast<std::uint32_t>(std::max(Col + 1 + static_cast<std::int32_t>(Area.Caret), 0));
+                CaretY = static_cast<std::uint32_t>(std::max(Row, 0));
+            }
             std::u32string_view Rest = Characters;
             for (std::int32_t Line = 0; !Rest.empty(); Line++) {
                 const std::size_t End = Rest.find(U'\n');
-                Write(Cells, Cols, Rows, Col, Row + Line, Rest.substr(0, End), Ink);
+                Write(Cells, Cols, Rows, Col, Row + Line, Rest.substr(0, End), Ink, Paper);
                 Rest = End == std::u32string_view::npos ? std::u32string_view() : Rest.substr(End + 1);
             }
         } else if (Of->Kind != ITEM_GROUP && Of->Said.Caption) {
@@ -382,7 +404,7 @@ void CellsOf(const items::AreaState &Area, std::vector<ItemCell> &Cells, std::ui
 std::shared_ptr<CellGrid> FrameStart(const FrameGlass &Glass)
 {
     g_text        = Glass.Text;
-    g_theme       = items::ThemeOf(Glass.TextColour, Glass.PageColour);
+    g_theme       = items::ThemeOf(Glass.TextColour, Glass.PageColour, g_person);
     g_cells.Text  = Glass.TextColour;
     g_cells.Page  = Glass.PageColour;
     std::uint32_t Cols = 0, Rows = 0;
@@ -438,10 +460,16 @@ painter::core::Rect  FrameScreen() noexcept { return g_screen; }
 
 void FrameColours(std::uint32_t Text, std::uint32_t Page)
 {
-    g_theme      = items::ThemeOf(Text, Page);
+    g_theme      = items::ThemeOf(Text, Page, g_person);
     g_cells.Text = Text;
     g_cells.Page = Page;
     if (g_console_area) g_console_area->Items.RedrawAll();
+}
+
+void FramePerson(const items::ThemeSaid &Said)
+{
+    g_person = Said;
+    g_theme  = items::ThemeOf(g_cells.Text, g_cells.Page, g_person);
 }
 
 void FrameVacated(const Rect &Where) noexcept

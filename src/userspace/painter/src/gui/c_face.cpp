@@ -19,7 +19,9 @@ static_assert(static_cast<int>(gui::Event::Kind::Area) == GUI_EVENT_AREA && stat
               static_cast<int>(gui::Event::Kind::PageFree) == GUI_EVENT_PAGE_FREE && static_cast<int>(gui::Event::Kind::Key) == GUI_EVENT_KEY &&
               static_cast<int>(gui::Event::Kind::Alarm) == GUI_EVENT_ALARM && static_cast<int>(gui::Event::Kind::Gone) == GUI_EVENT_GONE &&
               static_cast<int>(gui::Event::Kind::EndAsked) == GUI_EVENT_END_ASKED &&
-                  static_cast<int>(gui::Event::Kind::AnimationEnd) == GUI_EVENT_ANIMATION_END,
+                  static_cast<int>(gui::Event::Kind::AnimationEnd) == GUI_EVENT_ANIMATION_END &&
+                  static_cast<int>(gui::Event::Kind::Focus) == GUI_EVENT_FOCUS &&
+                  static_cast<int>(gui::Event::Kind::Press) == GUI_EVENT_PRESS && static_cast<int>(gui::Event::Kind::Text) == GUI_EVENT_TEXT,
               "the C face's events are painter::gui's, one for one");
 
 gui::Role RoleOf(int Role) noexcept { return static_cast<gui::Role>(Role); }
@@ -183,6 +185,21 @@ void gui_hide(GuiArea *area, GuiItem item)
     if (gui::Area *To = Told(area, item)) To->Hidden(item, true);
 }
 
+void gui_set_focusable(GuiArea *area, GuiItem item, int reached)
+{
+    if (gui::Area *To = Told(area, item)) To->Focusable(item, reached != 0);
+}
+
+void gui_set_disabled(GuiArea *area, GuiItem item, int disabled)
+{
+    if (gui::Area *To = Told(area, item)) To->Disabled(item, disabled != 0);
+}
+
+void gui_focus(GuiArea *area, GuiItem item)
+{
+    if (area) area->Screen.Focus(item);
+}
+
 void gui_animate(GuiArea *area, const GuiAnimation *how)
 {
     if (!area) return;
@@ -228,6 +245,9 @@ int gui_wait(GuiArea *area, GuiEvent *event, int keys)
     event->moment    = Heard.Moment;
     event->number    = Heard.Number;
     event->finished  = Heard.Finished ? 1 : 0;
+    event->came      = Heard.Came ? 1 : 0;
+    area->Said       = Heard.Text;
+    event->text      = area->Said.c_str();
     return 0;
 }
 

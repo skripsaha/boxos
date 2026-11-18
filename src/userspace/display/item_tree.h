@@ -74,6 +74,7 @@ struct Item {
     bool Moved   = true;     // where or how it lies changed: it, and what is in it
     bool Within  = true;     // something inside it is marked
     painter::core::Rect Shown{};   // where on the glass it was last drawn, its own pixels
+    painter::core::Rect Box{};     // where its own rectangle lies on the glass, its shadows not counted
     std::optional<painter::core::Rect> Changed;   // a canvas's pixels changed since it was drawn, when only those
     std::unique_ptr<Drawing, DropDrawing> Drawn;
 

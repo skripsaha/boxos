@@ -70,6 +70,10 @@ error_t Apply(const ItemRecord &Head, std::span<const std::uint8_t> Body, Tree &
         if (Done == OK && Tell.Cut) Tell.Cut(Head.Item, What.Property);
         return Done;
     }
+    case ITEM_OP_FOCUS:
+        if (Head.Item != ITEM_AREA && !Items.Find(Head.Item)) return ERR_OBJECT_NOT_FOUND;
+        if (Tell.Focus) Tell.Focus(Head.Item);
+        return OK;
     case ITEM_OP_ANIMATE: {
         ItemAnimation How{};
         ItemChange    What{};

@@ -50,6 +50,7 @@
 #include "box/touch.h"
 
 #include "front.h"
+#include "input.h"
 
 namespace {
 
@@ -343,6 +344,9 @@ bool LanesKeys() noexcept
         kb_event_t typed;
         memcpy(&typed, key.payload, sizeof(typed));
         if (FrontChord(typed)) continue;
+        /* The keys the display uses for the things programs show (input.h)
+         * go no further. */
+        if (InputKey(typed)) continue;
         try {
             g_typed.push_back(typed);
         } catch (...) {

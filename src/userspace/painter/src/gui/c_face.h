@@ -5,6 +5,7 @@
 // it, kept by their objects — groups apart, to make items in.
 
 #include <optional>
+#include <string>
 #include <unordered_map>
 
 #include "painter/gui.h"
@@ -20,6 +21,7 @@ struct GuiArea {
     std::unordered_map<GuiItem, painter::gui::Group> Groups;
     std::optional<painter::tui::Keyboard>            Keys;
     painter::gui::Area                               Screen;
+    std::string                                      Said;   // the last field's text told, for GuiEvent.text
 };
 
 #endif
