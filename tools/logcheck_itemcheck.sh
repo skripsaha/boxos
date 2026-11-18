@@ -87,6 +87,18 @@ run_itemcheck() {
             grep -aqE "itemcheck: a text measured beforehand [0-9]+x16 points, a cell a character on the text page" "$L"
             chk $? "itemcheck ($name): a text measured on the text page a cell a character"
         fi
+        local line fade chain
+        line=$(grep -a "itemcheck: in time — " "$L" | tr -d '\r' | tail -1)
+        fade=$(printf '%s' "$line" | sed -nE 's/.*its end told after ([0-9]+) ms;.*/\1/p')
+        chain=$(printf '%s' "$line" | sed -nE 's/.*both ends told after ([0-9]+) ms;.*/\1/p')
+        if [ "$name" = framebuffer ]; then
+            [ -n "$fade" ] && [ "$fade" -ge 300 ] && [ "$fade" -le 450 ] && [ "$chain" -ge 400 ] && [ "$chain" -le 550 ] &&
+                printf '%s' "$line" | grep -q "every end as it was"
+            chk $? "itemcheck ($name): things in time played by the display, each end told by its time (a fade of 300 ms: $fade; two of 200 one after another: $chain), one said over told cut"
+        else
+            [ -n "$fade" ] && [ "$fade" -le 100 ] && [ "$chain" -le 100 ] && printf '%s' "$line" | grep -q "every end as it was"
+            chk $? "itemcheck ($name): on the text page every change at once, each end told at once ($fade, $chain ms), one said over told cut"
+        fi
         grep -aqE "itemcheck: from C — .*: every step shown" "$L"
         chk $? "itemcheck ($name): painter::gui's C face held from a program's C"
         grep -aqE "itemcheck: the console, [0-9]+ lines and an area in its flow — [0-9]+ ms until the glass showed them" "$L"

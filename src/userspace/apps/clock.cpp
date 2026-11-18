@@ -1,8 +1,10 @@
 /* clock — the time in the screen's top-right corner, a notice of its own
  * (panel.h), shown as the person set it: `settings clock` says how, and a
  * change is seen by the next second. It wakes as each second turns, and says
- * the display only what changed — the time's figures. */
+ * the display only what changed — the time's figures, which the display
+ * fades into the next while it sleeps. */
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -27,6 +29,8 @@ BOX_SETTINGS("hours one-of 24 12 default 24 \"how the hours are counted\"\n"
              "digits color default #E6E6E6 \"the color of the digits\"\n"
              "colons color default #8C8C8C \"the color of the colons\"\n"
              "background color default #262626 \"the color behind the time\"\n");
+
+using namespace std::chrono_literals;
 
 namespace {
 
@@ -106,10 +110,21 @@ int main()
 
     box::settings::watch Watch;
     Look                 Shown = ReadLook();
-    for (;;) {
+    /* The notice comes in out of nothing; after, each second's figures fade
+     * into the next. */
+    Plate.SetOpacity(0);
+    Time.SetOpacity(0);
+    for (bool First = true;; First = false) {
         if (Watch.changed()) Shown = ReadLook();
         BoxTime Now{};
-        if (clock_boxtime_local(&Now) == OK) Show(Screen, Plate, Time, Shown, TimeOf(Shown, Now));
+        if (clock_boxtime_local(&Now) == OK) {
+            if (First) Show(Screen, Plate, Time, Shown, TimeOf(Shown, Now));
+            else Screen.Animate(gui::Animation::InOut(220ms), [&] { Show(Screen, Plate, Time, Shown, TimeOf(Shown, Now)); });
+        }
+        if (First) Screen.Animate(gui::Animation::Out(600ms), [&] {
+            Plate.SetOpacity(1);
+            Time.SetOpacity(1);
+        });
         (void)Screen.Present();
         (void)alarm_set(NextSecond());
         /* The second turned — or the screen changed, and the corner with it. */

@@ -2,11 +2,12 @@
  * clock: the processor's load these last beats as bars, each as tall as the
  * load and as warm, and the last as a figure; the memory in use, where the
  * screen is wide. Every half second it looks, and says the display only what
- * changed. On a text page each bar is shown by its caption — a block as tall
- * as the load. */
+ * changed, in time: the bars grow and shrink to it and the figures fade. On a
+ * text page each bar is shown by its caption — a block as tall as the load. */
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <format>
 #include <string>
@@ -25,6 +26,8 @@
 #include "panel.h"
 
 BOX_LIFE("stays");
+
+using namespace std::chrono_literals;
 
 namespace {
 
@@ -168,9 +171,25 @@ int main()
     gui::Area &Screen = *Opened;
     Notice     Shown(Screen);
     Machine    Now;
-    for (std::uint64_t Due = clock_uptime_ms();;) {
+    /* The notice comes in out of nothing; after, each beat the bars grow and
+     * shrink to the load and the figures fade into the next, the display
+     * playing it while pulse sleeps. */
+    const auto Seen = [&Shown](float Opacity) {
+        Shown.Plate.SetOpacity(Opacity);
+        Shown.Cpu.SetOpacity(Opacity);
+        Shown.Load.SetOpacity(Opacity);
+        Shown.Mem.SetOpacity(Opacity);
+        Shown.Used.SetOpacity(Opacity);
+    };
+    Seen(0);
+    for (std::uint64_t Due = clock_uptime_ms(), Beat = 0;; Beat++) {
         Now.Look();
-        Show(Screen, Shown, Now);
+        if (Beat == 0) {
+            Show(Screen, Shown, Now);
+            Screen.Animate(gui::Animation::Out(600ms), [&] { Seen(1); });
+        } else {
+            Screen.Animate(gui::Animation::Out(BeatMs * 3 / 4 * 1ms), [&] { Show(Screen, Shown, Now); });
+        }
         (void)Screen.Present();
         /* The next beat: a beat behind is not made up, only the next kept. */
         Due = std::max(Due + BeatMs, clock_uptime_ms() + 1);
