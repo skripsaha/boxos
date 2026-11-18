@@ -1,6 +1,7 @@
 /* board.h — the board: what it read of the machine, what the person chose on
- * it, and its keys. The picture is paint.cpp's; the reading is machine's,
- * programs', history's and journal's. */
+ * it, and its keys. The picture is picture.cpp's on a framebuffer — items,
+ * described a frame at a time — and paint.cpp's on a text page — cells; the
+ * reading is machine's, programs', history's and journal's. */
 #ifndef TASKBOARD_BOARD_H
 #define TASKBOARD_BOARD_H
 
@@ -12,7 +13,10 @@
 
 #include "box/cxx/settings.h"
 #include "painter/core/geometry.h"
+#include "painter/gui/area.h"
+#include "painter/gui/frame.h"
 #include "painter/tui/frame.h"
+#include "painter/tui/keyboard.h"
 #include "painter/tui/stage.h"
 
 #include "history.h"
@@ -33,8 +37,10 @@ struct Who {
 
 class Board {
 public:
-    // The board on Screen, the list kept to what Filter holds.
+    // The board on a text page's cells, or on a framebuffer's area with the
+    // keyboard — the list kept to what Filter holds.
     Board(painter::tui::Stage Screen, std::string Filter);
+    Board(painter::gui::Area Screen, painter::tui::Keyboard Keys, std::string Filter);
     // Until the person leaves, or the board is asked to finish.
     void Run();
     // The files of the programs the person marked: what it gives back.
@@ -75,8 +81,12 @@ private:
     void PaintJournal(painter::tui::Frame &Out, painter::core::Rect Area) const;
     void PaintStatus(painter::tui::Frame &Out, painter::core::Rect Area) const;
     void PaintHelp(painter::tui::Frame &Out) const;
+    // picture.cpp: the picture on a framebuffer.
+    void Describe(painter::gui::Frame &Out);
 
-    painter::tui::Stage    Screen;
+    std::optional<painter::tui::Stage>    CellScreen;   // a text page's
+    std::optional<painter::gui::Area>     ItemScreen;   // a framebuffer's
+    std::optional<painter::tui::Keyboard> Keys;         //   and its keys
     box::settings::watch   Watch;
     Look                   Shown;
     Programs               Known;

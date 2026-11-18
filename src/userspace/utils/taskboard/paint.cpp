@@ -13,6 +13,7 @@
 
 #include "board.h"
 #include "graph.h"
+#include "paint_words.h"
 
 namespace taskboard {
 
@@ -24,78 +25,11 @@ using painter::core::Point;
 using painter::core::Rect;
 
 constexpr char32_t Opened   = U'\u25BC';       // ▼ a triangle pointing down
-// Between the words of a line: a middle dot, as text.
-constexpr std::string_view Between = "\xC2\xB7";
 
 // The least of each part of the picture; below them a part is left out.
 constexpr std::int32_t LeastList    = 6;
 constexpr std::int32_t LeastJournal = 4;
 constexpr std::int32_t MeterCells   = 8;
-
-Color LivingInk(const Look &Shown, Living Where)
-{
-    switch (Where) {
-    case Living::OnScreen: return Shown.OnScreen;
-    case Living::Behind:   return Shown.Behind;
-    case Living::Keeper:   return Shown.Keeper;
-    case Living::OnItsOwn: return Shown.OnItsOwn;
-    case Living::Serving:  return Shown.Serving;
-    case Living::Task:     break;
-    }
-    return Shown.Task;
-}
-
-Color HappenedInk(const Look &Shown, Happened What)
-{
-    switch (What) {
-    case Happened::Began:  return Shown.Started;
-    case Happened::Ended:  return Shown.Ended;
-    case Happened::Fell:   return Shown.Fell;
-    case Happened::Raised: return Shown.Raised;
-    case Happened::Board:  break;
-    }
-    return Shown.Itself;
-}
-
-const char *StateName(std::uint32_t State)
-{
-    switch (State) {
-    case 0: return "new";
-    case 1: return "working";
-    case 2: return "waiting";
-    case 3: return "stopped";
-    case 4: return "done";
-    case 5: return "fell";
-    default: return "?";
-    }
-}
-
-std::string Bytes(std::uint64_t Count)
-{
-    constexpr std::uint64_t Kib = 1024, Mib = Kib * 1024, Gib = Mib * 1024;
-    const auto Tenths = [](std::uint64_t N, std::uint64_t Unit) {
-        const std::uint64_t T = N * 10 / Unit;
-        return T >= 1000 ? std::format("{}", T / 10) : std::format("{}.{}", T / 10, T % 10);
-    };
-    if (Count >= Gib) return Tenths(Count, Gib) + "G";
-    if (Count >= Mib) return Tenths(Count, Mib) + "M";
-    if (Count >= Kib) return std::format("{}K", Count / Kib);
-    return std::format("{}B", Count);
-}
-
-std::string Lasted(std::uint64_t Us)
-{
-    const std::uint64_t Seconds = Us / 1000000u, Minutes = Seconds / 60u, Hours = Minutes / 60u, Days = Hours / 24u;
-    if (Seconds < 60) return std::format("{}s", Seconds);
-    if (Minutes < 60) return std::format("{}m{:02}s", Minutes, Seconds % 60u);
-    if (Hours < 24) return std::format("{}h{:02}m", Hours, Minutes % 60u);
-    return std::format("{}d{:02}h", Days, Hours % 24u);
-}
-
-std::string Percent(double Share)
-{
-    return std::format("{}%", static_cast<long>(Share * 100.0 + 0.5));
-}
 
 std::int32_t Cells(std::string_view Text)
 {
@@ -149,23 +83,12 @@ void DrawSeparator(tui::Frame &Out, const Look &Shown, Rect Inside, std::int32_t
     Out.Put(Point{Inside.X + Inside.Width, Row}, Glyphs::TeeRight, {Shown.Frame, Shown.Panel});
 }
 
-const char *SortName(SortBy Sort)
-{
-    switch (Sort) {
-    case SortBy::Memory:    return "by memory";
-    case SortBy::Name:      return "by name";
-    case SortBy::Age:       return "by age";
-    case SortBy::Processor: break;
-    }
-    return "by processor";
-}
-
 }  // namespace
 
 void Board::Paint()
 {
-    tui::Frame              &Out  = Screen.FrameBuffer();
-    const painter::core::Size Size = Screen.Size();
+    tui::Frame              &Out  = CellScreen->FrameBuffer();
+    const painter::core::Size Size = CellScreen->Size();
     Out.Clear({Shown.Text, Shown.Page});
     if (Size.Width <= 0 || Size.Height < 3) return;
 
@@ -475,7 +398,7 @@ void Board::PaintHelp(tui::Frame &Out) const
         {"esc", "what is typed taken back, then leave"},
     };
     constexpr std::int32_t KeyWidth = 20;
-    const painter::core::Size Size = Screen.Size();
+    const painter::core::Size Size = CellScreen->Size();
     const Rect Area   = tui::Centred(Size, std::min(Size.Width - 2, 82), static_cast<std::int32_t>(std::size(Keys)) + 4);
     const Rect Inside = tui::DrawWindow(Out, Area, "the board's keys", "settings taskboard keys", "any key closes this");
     std::int32_t Row = Inside.Y + 1;

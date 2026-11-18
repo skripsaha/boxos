@@ -6,6 +6,7 @@
 #include <format>
 #include <utility>
 
+#include "box/alarm.h"
 #include "box/clock.h"
 #include "box/core/cabin.h"
 #include "box/cxx/error.h"
@@ -36,25 +37,46 @@ std::string Why(int Answer)
 
 }  // namespace
 
-Board::Board(tui::Stage Opened, std::string Kept)
-    : Screen(std::move(Opened)), Shown(ReadLook()), Filter(std::move(Kept))
+Board::Board(tui::Stage Opened, std::string Kept) : CellScreen(std::move(Opened)), Shown(ReadLook()), Filter(std::move(Kept))
+{
+    if (!Said.Hears()) Status = "programs started and ended are not heard: the journal stays empty";
+}
+
+Board::Board(painter::gui::Area Opened, tui::Keyboard Heard, std::string Kept)
+    : ItemScreen(std::move(Opened)), Keys(std::move(Heard)), Shown(ReadLook()), Filter(std::move(Kept))
 {
     if (!Said.Hears()) Status = "programs started and ended are not heard: the journal stays empty";
 }
 
 void Board::Run()
 {
-    Screen.HearEnd();
+    if (CellScreen) CellScreen->HearEnd();
+    else Keys->HearEnd();
     Read();
     NextReadUs = clock_uptime_us() + FirstReadUs;
     for (;;) {
         if (Watch.changed()) Shown = ReadLook();
-        Paint();
-        if (!Screen.Present()) return;
-
-        const std::uint64_t Now = clock_uptime_us();
+        const std::uint64_t Now  = clock_uptime_us();
         const auto          Left = NextReadUs > Now ? static_cast<std::uint32_t>((NextReadUs - Now) / 1000u) : 0u;
-        const tui::Event    Heard = Screen.Wait(Left == 0 ? 1 : Left);
+        tui::Event          Heard{tui::EventKind::Quiet, {}, {}};
+        if (CellScreen) {
+            Paint();
+            if (!CellScreen->Present()) return;
+            Heard = CellScreen->Wait(Left == 0 ? 1 : Left);
+        } else {
+            ItemScreen->Draw([&](painter::gui::Frame &Out) { Describe(Out); });
+            /* The next reading as an alarm; the display's word on where the
+             * area is draws the board again. */
+            (void)alarm_set(clock_uptime_ms() + (Left == 0 ? 1 : Left));
+            for (;;) {
+                const painter::gui::Event Told = ItemScreen->Wait(&*Keys);
+                if (Told.What == painter::gui::Event::Kind::Key) Heard = tui::Event{tui::EventKind::Key, Told.Key, {}};
+                else if (Told.What == painter::gui::Event::Kind::Gone) Heard = tui::Event{tui::EventKind::Gone, {}, {}};
+                else if (Told.What == painter::gui::Event::Kind::EndAsked) Heard = tui::Event{tui::EventKind::EndAsked, {}, {}};
+                else if (Told.What != painter::gui::Event::Kind::Alarm && Told.What != painter::gui::Event::Kind::Area) continue;
+                break;
+            }
+        }
         if (Heard.Kind == tui::EventKind::Gone || Heard.Kind == tui::EventKind::EndAsked) return;
         if (Heard.Kind == tui::EventKind::Key && !OnKey(Heard.Key)) return;
         if (clock_uptime_us() >= NextReadUs) {

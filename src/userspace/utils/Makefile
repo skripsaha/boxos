@@ -158,11 +158,11 @@ timezone.elf: $(BOXLIB_START) timezone.o $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.
 
 # The board is C++ in parts of its own directory, each named for what it is.
 TASKBOARD_DIR  = taskboard
-TASKBOARD_OBJS = $(addprefix $(TASKBOARD_DIR)/,taskboard.o board.o paint.o graph.o look.o machine.o programs.o \
-                                               history.o journal.o)
+TASKBOARD_OBJS = $(addprefix $(TASKBOARD_DIR)/,taskboard.o board.o paint.o picture.o paint_words.o graph.o look.o machine.o \
+                                               programs.o history.o journal.o)
 
-taskboard.elf: $(BOXLIB_START) $(TASKBOARD_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(TASKBOARD_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+taskboard.elf: $(BOXLIB_START) $(TASKBOARD_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(TASKBOARD_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 # The scratchpad is C++ in parts of its own directory, each named for what it is.

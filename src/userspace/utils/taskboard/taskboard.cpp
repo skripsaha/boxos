@@ -27,6 +27,8 @@
 
 #include "box/form.h"
 #include "box/print.h"
+#include "painter/gui/area.h"
+#include "painter/tui/keyboard.h"
 #include "painter/tui/stage.h"
 
 #include "board.h"
@@ -61,13 +63,25 @@ int main()
             Say("taskboard is shown on the glass: there is nothing it could put into a file through ->");
             return 1;
         }
+        const std::string Filter = Count ? std::string(Words[0]) : std::string();
+        /* A framebuffer's whole screen, drawn as items; else a text page's
+         * cells. */
+        if (std::expected<painter::gui::Area, box::error> Area = painter::gui::Area::Open(painter::gui::Placement::Whole);
+            Area && Area->On() == painter::gui::Glass::Pixels)
+            if (std::expected<painter::tui::Keyboard, painter::tui::StageError> Keys = painter::tui::Keyboard::Open()) {
+                taskboard::Board Board(std::move(*Area), std::move(*Keys), Filter);
+                Board.Run();
+                const std::vector<file_id_t> Given = Board.Given();
+                if (!Given.empty()) souvenir_things(Given.data(), Given.size());
+                return 0;
+            }
         std::expected<painter::tui::Stage, painter::tui::StageError> Opened =
             painter::tui::Stage::Open(LeastCols, LeastRows);
         if (!Opened) {
             Say(Opened.error().Describe("taskboard"));
             return 1;
         }
-        taskboard::Board Board(std::move(*Opened), Count ? std::string(Words[0]) : std::string());
+        taskboard::Board Board(std::move(*Opened), Filter);
         Board.Run();
         const std::vector<file_id_t> Given = Board.Given();
         if (!Given.empty()) souvenir_things(Given.data(), Given.size());
