@@ -1,0 +1,78 @@
+#ifndef BOXOS_DISPLAY_ITEM_DRAW_H
+#define BOXOS_DISPLAY_ITEM_DRAW_H
+
+// An item drawn: its text laid out and its size measured where its content
+// decides it, its picture kept where drawing it again would cost — a text, a
+// shape of gradients, strokes or shadows, a canvas's page — or drawn straight
+// where the frame needs it, as a shape of plain colours, a picture and
+// anything turned or scaled are. Everything an item says is in points; it is
+// drawn at the screen's scale, through Painter's engine (painter/core), each
+// pixel as every other hand of BoxOS covers and lays it.
+
+#include <cstdint>
+#include <functional>
+#include <memory>
+#include <optional>
+#include <vector>
+
+#include "item_look.h"
+#include "item_tree.h"
+#include "painter/core/canvas.h"
+#include "painter/core/picture.h"
+#include "painter/core/transform.h"
+#include "typecase/fonts.h"
+#include "typecase/layout.h"
+
+namespace items {
+
+// What a program's items are drawn from besides themselves.
+struct Sources {
+    const Theme           *Look  = nullptr;
+    float                  Scale = 1.0f;     // pixels to a point
+    const typecase::Fonts *Book  = nullptr;  // the system's fonts and the program's own
+    // A picture block as a picture; none for a block the program does not have.
+    std::function<std::shared_ptr<const painter::core::Picture>(std::uint32_t)> PictureOf;
+    // A canvas block's page last shown; none likewise.
+    std::function<const painter::core::Canvas *(std::uint32_t)> CanvasOf;
+};
+
+struct Drawing {
+    std::optional<typecase::Layout>   Laid;          // a text's
+    std::vector<painter::core::Color> Inks;          // the colours its stretches say: ink 1 on
+    ItemPoint                         Measured{};    // its size by its content, of ITEM_POINT
+    painter::core::RectF              Own{};         // what it covers, in its own points, its shadows too
+    std::optional<painter::core::Canvas> Kept;       // its picture at the scale it was drawn at
+    painter::core::Point              KeptAt{};      // the picture's corner from the item's, in pixels
+    float                             KeptScale = 0;
+    bool                              Opaque = false;   // its plain colours cover its rectangle whole
+    std::size_t                      *Held  = nullptr;  // the program's count of kept bytes
+    std::size_t                       Bytes = 0;        // of which, this picture's
+};
+
+// The item's size in points: said, or by its content.
+painter::core::PointF SizeOf(const Item &Of, const Drawing &Drawn) noexcept;
+
+// The item's drawing made again from what it says: laid out, measured, and
+// its picture kept when keeping it is worth it and Keep allows it. True when
+// its size by its content changed.
+bool Prepare(const Item &Of, const Sources &From, Drawing &Into, bool Keep);
+
+// The item drawn onto Target, its own points laid on the glass by Place, at
+// Opacity, within the target's clip: from its kept picture where Place only
+// moves it at the scale it was kept at, straight otherwise.
+void Paint(const Item &Of, const Drawing &Drawn, const Sources &From, painter::core::Canvas &Target,
+           const painter::core::Transform &Place, float Opacity);
+
+// A group's clip: its rectangle of its size, its corners rounded; none for a
+// group of no size.
+painter::core::Path ClipOf(const Item &Group);
+
+// The pixels Place lays Rect of points on, whole pixels round it.
+painter::core::Rect DeviceRect(const painter::core::RectF &Points, const painter::core::Transform &Place) noexcept;
+
+// Whether Place only moves and scales by Scale: what a kept picture may be laid with.
+bool Upright(const painter::core::Transform &Place, float Scale) noexcept;
+
+}  // namespace items
+
+#endif

@@ -115,8 +115,11 @@ public:
     // Area of the canvas onto the glass, over black — Glass the glass's pixel
     // under the canvas's corner, Stride pixels from row to row, four bytes a
     // pixel in the layout Format (BOX_PIXEL_*, boxos_pixel.h). The glass is
-    // written, never read.
-    void CopyOut(Rect Area, std::uint32_t *Glass, std::size_t Stride, std::uint32_t Format, core::Dither Mode) const;
+    // written, never read. Corner is where the canvas's corner lies on the
+    // glass: the dither's noise is the glass's, so a picture put on in pieces
+    // is dithered as it is put on whole.
+    void CopyOut(Rect Area, std::uint32_t *Glass, std::size_t Stride, std::uint32_t Format, core::Dither Mode,
+                 Point Corner = {}) const;
     // Pixels 0x00RRGGBB, whole, put onto Area — From the pixel under the
     // canvas's corner, Stride pixels from row to row: a picture another hand
     // left, taken on.

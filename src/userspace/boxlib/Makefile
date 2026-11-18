@@ -90,6 +90,7 @@ SRCS = src/core/notify.c \
        src/turnin.c \
        src/alarm.c \
        src/display_effect.c \
+       src/items_ring.c \
        src/bay.c \
        src/brook.c \
        src/memtag.c \

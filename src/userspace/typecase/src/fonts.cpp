@@ -86,6 +86,13 @@ std::vector<std::string> Fonts::Families() const
     return Said;
 }
 
+std::vector<std::shared_ptr<const Font>> Fonts::Faces() const
+{
+    std::vector<std::shared_ptr<const Font>> Said;
+    for (const Family &Each : All) Said.insert(Said.end(), Each.Faces.begin(), Each.Faces.end());
+    return Said;
+}
+
 std::string Fonts::Default() const
 {
     if (!Chosen.empty() && Find(Chosen)) return Find(Chosen)->Name;

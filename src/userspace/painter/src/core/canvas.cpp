@@ -480,7 +480,7 @@ void Canvas::PopClip()
 }
 
 void Canvas::CopyOut(Rect Area, std::uint32_t *Glass, std::size_t GlassStride, std::uint32_t Format,
-                     core::Dither Mode) const
+                     core::Dither Mode, Point Corner) const
 {
     const Rect        At  = Area.Intersect(Size{static_cast<std::int32_t>(Wide), static_cast<std::int32_t>(High)});
     const lanes::Kit &Kit = lanes::Chosen();
@@ -489,7 +489,7 @@ void Canvas::CopyOut(Rect Area, std::uint32_t *Glass, std::size_t GlassStride, s
     for (std::int32_t Y = At.Y; Y < At.Y + At.Height; Y++) {
         if (Mode == core::Dither::On)
             for (std::int32_t I = 0; I < At.Width; I++)
-                Room->Thresholds[static_cast<std::size_t>(I)] = light::DitherNoise[Y & 63][(At.X + I) & 63];
+                Room->Thresholds[static_cast<std::size_t>(I)] = light::DitherNoise[(Corner.Y + Y) & 63][(Corner.X + At.X + I) & 63];
         Kit.Show(Glass + static_cast<std::size_t>(Y) * GlassStride + static_cast<std::size_t>(At.X),
                  Row(static_cast<std::uint32_t>(Y)) + At.X, static_cast<std::uint32_t>(At.Width), Format,
                  Mode == core::Dither::On ? Room->Thresholds.data() : nullptr);

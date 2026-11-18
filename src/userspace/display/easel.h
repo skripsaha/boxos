@@ -13,7 +13,10 @@
 #include "box/screen.h"
 #include "box/touch.h"
 #include "boxos_brush.h"
+#include "painter/core/canvas.h"
+#include "painter/core/geometry.h"
 #include "text_cell.h"
+#include "typecase/glyph_image.h"
 
 class Typesetter;
 
@@ -31,6 +34,14 @@ struct Caret {
     std::uint32_t X = 0;
     std::uint32_t Y = 0;
     bool Visible = false;
+};
+
+// What lies over a framebuffer's cells — the programs' areas (areas.h): a cell
+// beneath any of Covered is not drawn on the glass by Present, its pixels told
+// to Changed instead, to be composed with what lies over them.
+struct Over {
+    std::span<const painter::core::Rect> Covered;
+    void (*Changed)(const painter::core::Rect &Pixels) noexcept = nullptr;
 };
 
 // The easel — where the display puts the picture on the glass: the screen the
@@ -102,12 +113,44 @@ public:
     // shows in the old ones is drawn again at the next Present.
     void Page(std::uint32_t Text, std::uint32_t PageValue) noexcept;
 
-    // Cols() x Rows() composed cells onto the glass, and the caret.
-    void Present(std::span<const GlassCell> Cells, Caret At) noexcept;
+    // Cols() x Rows() composed cells onto the glass, and the caret — on a
+    // framebuffer, those beneath what lies Above told to it instead.
+    void Present(std::span<const GlassCell> Cells, Caret At, const Over &Above) noexcept;
+
+    // Whether the kernel's Emergency Screen has the glass: nothing is put on it.
+    bool Lent() const noexcept { return Away; }
+
+    // The pixels a framebuffer's cells cover, within the glass, and how tall
+    // one is.
+    painter::core::Rect Grid() const noexcept;
+    std::int32_t CellHeight() const noexcept;
+
+    // Area of a framebuffer as the console shows it — its cells as last
+    // presented, their marks and the caret, the page round them — drawn
+    // into Into, whose corner lies at Corner on the glass: what lies beneath
+    // the areas, pixel for pixel as Present draws it.
+    void Beneath(painter::core::Canvas &Into, painter::core::Point Corner, painter::core::Rect Area) noexcept;
+
+    // Area of a framebuffer put on from Picture, whose corner lies at Area's
+    // corner, dithered; and what was put on made seen.
+    void Put(const painter::core::Canvas &Picture, painter::core::Rect Area) noexcept;
+    void Flush() noexcept;
 
 private:
     Easel(const ScreenDescription &Description, TouchTag Turns) noexcept;
 
+    // A framebuffer cell's colours and picture, worked out once for its rows.
+    struct CellLook {
+        std::uint32_t               Ink, Paper, MarkInk, CaretInk;
+        bool                        Under, Bar, CaretHere;
+        const typecase::GlyphImage *Picture;
+    };
+    CellLook LookOf(const GlassCell &Cell, bool CaretHere) const;
+    // Row Y of a cell as the glass shows it, Wide pixels of it as triples
+    // into Out: the paper, the ink over it by the share of the pixel its
+    // character's picture covers, a mark, the caret.
+    void RowOf(const CellLook &Look, std::int32_t Y, std::int32_t Wide, std::uint32_t *Out) const noexcept;
+    painter::core::Rect CellPixels(std::uint32_t Col, std::uint32_t Row) const noexcept;
     void DrawCell(std::uint32_t Col, std::uint32_t Row, const GlassCell &Cell,
                   bool CaretHere) noexcept;
     void PaintMargin() noexcept;
@@ -119,7 +162,8 @@ private:
     std::uint32_t RowsValue = 0;
     std::uint32_t OriginX = 0;     // where a framebuffer's first cell stands
     std::uint32_t OriginY = 0;
-    std::vector<GlassCell> Shown;  // what the glass shows now
+    std::vector<GlassCell> Shown;  // what the glass shows now, or would beneath what lies over it
+    std::vector<std::uint32_t> Colours;   // a cell's row, worked out
     std::uint32_t TextColour = COLOR_LIGHT_GRAY;
     std::uint32_t PageColour = COLOR_BLACK;
     bool ShownKnown = false;       // false: nothing on the glass is ours — draw it all

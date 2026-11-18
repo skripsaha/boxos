@@ -48,6 +48,9 @@ public:
     bool                     Empty() const noexcept { return All.empty(); }
     std::vector<std::string> Families() const;
     std::string              Default() const;
+    const std::vector<std::string> &Fallbacks() const noexcept { return Fallback; }
+    /* Every face, family by family in the order they came. */
+    std::vector<std::shared_ptr<const Font>> Faces() const;
 
     /* Every family's face for the style — the families Families names that
      * are here, in its order, then the fallback families, then the default

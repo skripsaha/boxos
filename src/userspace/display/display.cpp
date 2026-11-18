@@ -4,8 +4,9 @@
  * The kernel lends this program the screen (box/screen.h) and draws nothing
  * itself. Everything on the glass is drawn here: the programs' text from
  * their console lanes (lanes.cpp), the kernel's own lines from the log ring
- * (ring.cpp), and the layers programs keep over both (layers.cpp), onto the
- * easel (easel.cpp).
+ * (ring.cpp), the layers programs keep over both (layers.cpp), onto the easel
+ * (easel.cpp) — and over all of it the programs' areas of items (areas.cpp),
+ * composed only where they changed.
  *
  * The screen's order IS the log ring's order. A run of a program's text is
  * said into the ring before it is drawn, and the kernel's lines the ring holds
@@ -14,27 +15,28 @@
  *
  * What a program asks of the display is a question (box/ipc.h ask), and every
  * question is answered, a refusal too: the asker stands until it is. Opening a
- * layer and folding one into the text care where in the console's order they
- * stand, so they carry the asker's mark — the number of its last frame. While
- * such a question waits, no frame numbered past the lowest waiting mark is
- * drawn, and a question is answered once its asker's frames up to its mark are
- * drawn: the caret an open names stands after the asker's text, and a fold
- * lands after everything numbered before it and before everything after.
+ * layer or an area and folding a layer into the text care where in the
+ * console's order they stand, so they carry the asker's mark — the number of
+ * its last frame. While such a question waits, no frame numbered past the
+ * lowest waiting mark is drawn, and a question is answered once its asker's
+ * frames up to its mark are drawn: the caret an open names stands after the
+ * asker's text, and a fold lands after everything numbered before it and
+ * before everything after.
  * Waiting cannot stick: the lowest mark's own frames lie below the ceiling,
  * and a mark that lies holds no one but its asker.
  *
- * One event loop, no timeouts: a rotation of try-steps (keys → deaths →
- * screen turns → effect → lanes → ring → layers → IPC). A pass that moves nothing does
- * not go round again — the program turns in and stops costing a core until
- * something arrives for it. A Touch and a Result the kernel sees land, so the
- * sleep watches those cursors itself; a lane frame and a kernel line are not
- * Results, and that is what the bells are for: before going down, the program
- * hangs its pid on every lane and on the ring, and whoever adds to one rings.
- * Hang the bells BEFORE the last look, or what arrives in between is seen by
- * nobody. And every answer from the kernel is a Result, so one landing after
- * the mark refuses the sleep it was taken for: in the last look only a step
- * that has moved something calls into the kernel, and then the pass goes
- * round again rather than sleeping.
+ * One event loop, no timeouts: a rotation of try-steps (keys → deaths → screen
+ * turns → effect → lanes → ring → layers → IPC → which areas are seen). A pass
+ * that moves nothing does not go round again — the program turns in and stops
+ * costing a core until something arrives for it. A Touch and a Result the
+ * kernel sees land, so the sleep watches those cursors itself; a lane frame
+ * and a kernel line are not Results, and that is what the bells are for:
+ * before going down, the program hangs its pid on every lane and on the ring,
+ * and whoever adds to one rings. Hang the bells BEFORE the last look, or what
+ * arrives in between is seen by nobody. And every answer from the kernel is a
+ * Result, so one landing after the mark refuses the sleep it was taken for: in
+ * the last look only a step that has moved something calls into the kernel,
+ * and then the pass goes round again rather than sleeping.
  *
  * Time is the one thing nobody rings for, and an effect over the glass
  * (effects.cpp) lives by it: a frame to draw, an end to come. So the program
@@ -55,7 +57,8 @@
  * start (painter/core/system_fonts.h), in cells of text size pixels tall, or of a height
  * the glass shows about fifty-four rows of. They take effect at the display's
  * next start: the console's cells are counted once, and every program asks
- * for them once.
+ * for them once. So does items scale, how large a point of the items is drawn:
+ * a program is told its area's scale once, when it opens.
  */
 
 #include <algorithm>
@@ -81,6 +84,7 @@
 #include "box/turnin.h"
 #include "boxos_utf8.h"
 
+#include "areas.h"
 #include "console_model.h"
 #include "easel.h"
 #include "effects.h"
@@ -99,7 +103,10 @@ BOX_SETTINGS("text \"the text on a framebuffer\"\n"
              "\"how tall a cell is; off chooses for the screen\"\n"
              "    font text default JetBrainsMonoNL-Regular.ttf next-start \"the font, by its file's name\"\n"
              "    tags text default \"\" next-start "
-             "\"tags the font's file wears besides, apart by commas, to tell files of one name apart\"\n");
+             "\"tags the font's file wears besides, apart by commas, to tell files of one name apart\"\n"
+             "items \"what programs draw on a framebuffer: shapes, text, pictures\"\n"
+             "    scale number from 100 to 400 percent or off default off next-start "
+             "\"how large a point is drawn, as a share of a pixel; off chooses for the screen\"\n");
 
 namespace {
 
@@ -125,7 +132,7 @@ std::uint32_t g_said_length;
 
 // A question that cares about the console's order: asked (Asked) by the
 // strand From names, with the number of that strand's last frame (Mark), and
-// what it asks — Open or Commit, by Command.
+// what it asks — Open, Commit or Area, by Command.
 struct WaitingQuestion {
     Result Asked;
     AskFrom From;
@@ -133,6 +140,7 @@ struct WaitingQuestion {
     std::uint8_t Command;
     DisplayLayerOpenRequest Open;
     DisplayLayerCommitRequest Commit;
+    DisplayAreaOpenRequest Area;
 };
 
 // The waiting questions, lowest mark first: they are answered in that order
@@ -214,19 +222,37 @@ void HoldFrame(const ConsoleRun &Run, std::uint32_t Lane)
     g_held.push_back(HeldRun{Run, Lane});
 }
 
+// The picture on the glass: the console's cells where they changed — on a
+// text page with the areas' items written in, on a framebuffer leaving those
+// beneath the areas to the areas' frame — and the areas composed where they
+// changed.
 void Present()
 {
-    if (!g_dirty || SceneOn()) return;
-    g_dirty = false;
-    Caret At;
-    LayersCompose(*g_model, g_easel->PageColor(), g_composed, At);
-    if (!EffectsOn()) {
-        g_easel->Present(g_composed, At);
-        return;
+    if (SceneOn()) return;
+    if (!g_easel->Pixels() && AreasWant()) g_dirty = true;
+    if (g_dirty) {
+        g_dirty = false;
+        Caret At;
+        LayersCompose(*g_model, g_easel->PageColor(), g_composed, At);
+        if (!g_easel->Pixels()) AreasCells(g_composed, g_easel->Cols(), g_easel->Rows());
+        const Over Above{AreasCovered(), AreasDamage};
+        if (!EffectsOn()) {
+            g_easel->Present(g_composed, At, Above);
+        } else {
+            EffectsApply(g_composed, g_glass, At, g_easel->Cols(), g_easel->Rows(), g_easel->TextColor(),
+                         g_easel->PageColor());
+            g_easel->Present(g_glass, At, Above);
+        }
     }
-    EffectsApply(g_composed, g_glass, At, g_easel->Cols(), g_easel->Rows(), g_easel->TextColor(),
-                 g_easel->PageColor());
-    g_easel->Present(g_glass, At);
+    if (g_easel->Pixels() && AreasWant()) AreasFrame(*g_easel);
+}
+
+// The scene gone at once, the console drawn whole in its place.
+void SceneGoes()
+{
+    if (!SceneOn()) return;
+    SceneEnd();
+    g_dirty = true;
 }
 
 // The waiting questions whose askers' frames up to their marks are drawn,
@@ -242,6 +268,9 @@ bool AnswerWaiting()
             LayersOpen(Waiting.Asked, Waiting.From, Waiting.Open, *g_model,
                        g_easel->Pixels() ? DISPLAY_GLASS_PIXELS : DISPLAY_GLASS_TEXT,
                        g_typesetter ? g_typesetter->Mosaics() : 0);
+        } else if (Waiting.Command == DISP_CMD_AREA_OPEN) {
+            // A program shows something: the scene gives way to it.
+            if (AreasOpen(Waiting.Asked, Waiting.From, Waiting.Area, g_model->CursorY())) SceneGoes();
         } else {
             std::expected<LayerCommit, error_t> Taken =
                 LayersCommit(Waiting.Asked.sender_pid, Waiting.From.generation, Waiting.Commit,
@@ -278,6 +307,7 @@ bool DeathStep()
         FrontDeath(Died.pid, Died.generation);
         g_dirty |= LayersDropProcess(Died.pid, Died.generation);
         g_dirty |= EffectsDrop(Died.pid, Died.generation);
+        AreasDeath(Died.pid, Died.generation);
 
         // A dead asker's question waits for nothing now. It is answered all
         // the same — with nothing, which the kernel delivers nowhere — so the
@@ -292,14 +322,6 @@ bool DeathStep()
         }
     }
     return Did;
-}
-
-// The scene gone at once, the console drawn whole in its place.
-void SceneGoes()
-{
-    if (!SceneOn()) return;
-    SceneEnd();
-    g_dirty = true;
 }
 
 bool ScreenStep()
@@ -415,6 +437,7 @@ void AnswerPage(const Result &Asked, const AskFrom &From, const DisplayPageReque
     else if ((Request.text >> 24) != 0 || (Request.page >> 24) != 0) Error = ERR_INVALID_ARGUMENT;
     if (Error == OK) {
         g_easel->Page(Request.text, Request.page);
+        AreasTheme(Request.text, Request.page);
         g_dirty = true;
     }
     const DisplayFrontReply Reply{DISP_CMD_PAGE, 0, {0, 0}, static_cast<std::int32_t>(Error), cabin_info()->pid};
@@ -512,8 +535,19 @@ void HearQuestion(const Result &Entry)
     case DISP_CMD_EFFECT_LIFT:
         AnswerEffect(Entry, From, Question, Length);
         return;
+    case DISP_CMD_BLOCK_OPEN: {
+        DisplayBlockOpenRequest Request{};
+        if (Length < sizeof(Request)) {
+            (void)answer(&Entry, nullptr, 0);
+            return;
+        }
+        std::memcpy(&Request, Question, sizeof(Request));
+        AreasBlockOpen(Entry, From, Request);
+        return;
+    }
     case DISP_CMD_LAYER_OPEN:
-    case DISP_CMD_LAYER_COMMIT: {
+    case DISP_CMD_LAYER_COMMIT:
+    case DISP_CMD_AREA_OPEN: {
         WaitingQuestion Waiting{};
         Waiting.Asked = Entry;
         Waiting.From = From;
@@ -524,6 +558,9 @@ void HearQuestion(const Result &Entry)
         } else if (Question[0] == DISP_CMD_LAYER_COMMIT && Length >= sizeof(Waiting.Commit)) {
             std::memcpy(&Waiting.Commit, Question, sizeof(Waiting.Commit));
             Waiting.Mark = Waiting.Commit.order;
+        } else if (Question[0] == DISP_CMD_AREA_OPEN && Length >= sizeof(Waiting.Area)) {
+            std::memcpy(&Waiting.Area, Question, sizeof(Waiting.Area));
+            Waiting.Mark = Waiting.Area.order;
         } else {
             (void)answer(&Entry, nullptr, 0);
             return;
@@ -539,6 +576,11 @@ void HearQuestion(const Result &Entry)
             if (Waiting.Command == DISP_CMD_LAYER_OPEN) {
                 DisplayLayerOpenReply Refusal{};
                 Refusal.command = DISP_CMD_LAYER_OPEN;
+                Refusal.error = ERR_NO_MEMORY;
+                (void)answer(&Entry, &Refusal, sizeof(Refusal));
+            } else if (Waiting.Command == DISP_CMD_AREA_OPEN) {
+                DisplayAreaOpenReply Refusal{};
+                Refusal.command = DISP_CMD_AREA_OPEN;
                 Refusal.error = ERR_NO_MEMORY;
                 (void)answer(&Entry, &Refusal, sizeof(Refusal));
             } else {
@@ -584,6 +626,22 @@ void HearMessage(const Result &Entry)
             DisplayLayerCloseRequest Request{};
             std::memcpy(&Request, Data, sizeof(Request));
             g_dirty |= LayersClose(From, Request.generation, Request.layer_id);
+        }
+        return;
+    case DISP_CMD_AREA_STEP:
+    case DISP_CMD_AREA_CLOSE:
+        if (Length >= sizeof(DisplayAreaNotice)) {
+            DisplayAreaNotice Notice{};
+            std::memcpy(&Notice, Data, sizeof(Notice));
+            if (Data[0] == DISP_CMD_AREA_STEP) AreasStep(From, Notice.generation, Notice.area);
+            else AreasClose(From, Notice.generation, Notice.area);
+        }
+        return;
+    case DISP_CMD_BLOCK_CLOSE:
+        if (Length >= sizeof(DisplayBlockNotice)) {
+            DisplayBlockNotice Notice{};
+            std::memcpy(&Notice, Data, sizeof(Notice));
+            AreasBlockClose(From, Notice.generation, Notice.block);
         }
         return;
     case DISP_CMD_LISTEN:
@@ -682,6 +740,7 @@ bool Rotate()
     Moved |= RingStep();
     Moved |= LayerStep();
     Moved |= IpcStep();
+    Moved |= AreasSeen();
     Moved |= SceneMove();
     return Moved;
 }
@@ -730,6 +789,10 @@ int main(void)
         kdbg_print("[display] no room for a %ux%u console", g_easel->Cols(), g_easel->Rows());
         return 1;
     }
+
+    // How large a point of the items is drawn: said in hundredths, kept in
+    // 256ths.
+    AreasStart(*g_easel, static_cast<std::uint32_t>(settings_number("items scale") * 256 / 100));
 
     // The scene the loader left, played on from its frame; the console waits
     // under it.

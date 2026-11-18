@@ -11,6 +11,8 @@
 #include "boxos_pixel.h"
 #include "typesetter.h"
 
+using painter::core::Rect;
+
 namespace {
 
 bool SameCell(const GlassCell &Left, const GlassCell &Right) noexcept
@@ -32,7 +34,7 @@ bool Drawable(const ScreenDescription &D) noexcept
 {
     if (D.va == 0 || D.width == 0 || D.height == 0) return false;
     if (D.kind == SCREEN_KIND_TEXT) return D.stride >= D.width * 2u;
-    if (D.kind == SCREEN_KIND_PIXELS) return D.stride >= D.width * 4u;
+    if (D.kind == SCREEN_KIND_PIXELS) return D.stride >= D.width * 4u && D.stride % 4u == 0;
     return false;
 }
 
@@ -84,7 +86,8 @@ Easel::Easel(const ScreenDescription &DescriptionValue, TouchTag TurnsValue) noe
 
 Easel::Easel(Easel &&Other) noexcept
     : Description(Other.Description), Type(Other.Type), Turns(Other.Turns), ColsValue(Other.ColsValue),
-      RowsValue(Other.RowsValue), Shown(std::move(Other.Shown)), TextColour(Other.TextColour),
+      RowsValue(Other.RowsValue), OriginX(Other.OriginX), OriginY(Other.OriginY), Shown(std::move(Other.Shown)),
+      Colours(std::move(Other.Colours)), TextColour(Other.TextColour),
       PageColour(Other.PageColour), ShownKnown(Other.ShownKnown), Drawn(Other.Drawn), Away(Other.Away),
       Held(Other.Held)
 {
@@ -104,6 +107,7 @@ void Easel::SetTypesetter(Typesetter &With)
     const std::uint32_t Cols = std::max<std::uint32_t>(1, Description.width / static_cast<std::uint32_t>(With.Cell().Width));
     const std::uint32_t Rows = std::max<std::uint32_t>(1, Description.height / static_cast<std::uint32_t>(With.Cell().Height));
     Shown.assign(static_cast<std::size_t>(Cols) * Rows, GlassCell{});
+    Colours.assign(static_cast<std::size_t>(With.Cell().Width), 0);
     Type = &With;
     ColsValue = Cols;
     RowsValue = Rows;
@@ -176,51 +180,76 @@ void Easel::DrawCell(std::uint32_t Col, std::uint32_t Row, const GlassCell &Cell
         return;
     }
 
-    const std::uint32_t Foreground = BoxPixelEncode(Ink, Description.format);
-    const std::uint32_t Background = BoxPixelEncode(Paper, Description.format);
-    const std::uint32_t Marking = BoxPixelEncode(MarkInk, Description.format);
-    const std::uint32_t CaretInk =
-        BoxPixelEncode(Ink != Paper ? Ink : COLOR_LIGHT_GRAY, Description.format);
-
-    const typecase::Size &Fit = Type->Cell();
-    const typecase::GlyphImage &Picture = Type->Glyph(Cell.Cell.cp);
-    const std::uint32_t Left = OriginX + Col * static_cast<std::uint32_t>(Fit.Width);
-    const std::uint32_t Top = OriginY + Row * static_cast<std::uint32_t>(Fit.Height);
-    const std::int32_t Wide = static_cast<std::int32_t>(std::min<std::uint32_t>(Fit.Width, Description.width - Left));
-    const std::int32_t Tall = static_cast<std::int32_t>(std::min<std::uint32_t>(Fit.Height, Description.height - Top));
-    // The caret and a line under the glyph: an eighth of the cell at its foot,
-    // two rows at least. A bar: a quarter of its width, two pixels at least.
-    const std::int32_t Foot = Fit.Height - std::max(2, Fit.Height / 8);
-    const std::int32_t BarWide = std::max(2, Fit.Width / 4);
-    // Where the picture's first row stands in the cell: it hangs from the pen
-    // on the cell's baseline.
-    const std::int32_t PictureTop = Fit.Baseline + Picture.Top;
-
-    volatile std::uint8_t *Line = Base + static_cast<std::size_t>(Top) * Description.stride +
-                                  static_cast<std::size_t>(Left) * 4u;
-    for (std::int32_t Y = 0; Y < Tall; Y++, Line += Description.stride) {
+    const CellLook      Look       = LookOf(Cell, CaretHere);
+    const std::uint32_t Foreground = BoxPixelEncode(Look.Ink, Description.format);
+    const std::uint32_t Background = BoxPixelEncode(Look.Paper, Description.format);
+    const Rect          At         = CellPixels(Col, Row);
+    volatile std::uint8_t *Line = Base + static_cast<std::size_t>(At.Y) * Description.stride +
+                                  static_cast<std::size_t>(At.X) * 4u;
+    for (std::int32_t Y = 0; Y < At.Height; Y++, Line += Description.stride) {
         volatile std::uint32_t *Pixel = reinterpret_cast<volatile std::uint32_t *>(Line);
-        if (Y >= Foot && (CaretHere || Under)) {
-            const std::uint32_t Across = CaretHere ? CaretInk : Marking;
-            for (std::int32_t X = 0; X < Wide; X++) Pixel[X] = Across;
-            continue;
-        }
-        const std::int32_t Into = Y - PictureTop;
-        const std::uint8_t *Shares = Into >= 0 && Into < Picture.Height
-                                         ? Picture.Coverage.data() + static_cast<std::size_t>(Into) * static_cast<std::size_t>(Picture.Width)
-                                         : nullptr;
-        for (std::int32_t X = 0; X < Wide; X++) {
-            if (Bar && X < BarWide) {
-                Pixel[X] = Marking;
-                continue;
-            }
-            const std::int32_t Along = X - Picture.Left;
-            const std::uint8_t Share = Shares && Along >= 0 && Along < Picture.Width ? Shares[Along] : 0;
-            Pixel[X] = Share == 0     ? Background
-                       : Share == 255 ? Foreground
-                                      : BoxPixelEncode(BoxColorOver(Paper, Ink, Share), Description.format);
+        RowOf(Look, Y, At.Width, Colours.data());
+        for (std::int32_t X = 0; X < At.Width; X++) {
+            const std::uint32_t Colour = Colours[static_cast<std::size_t>(X)];
+            Pixel[X] = Colour == Look.Paper ? Background
+                       : Colour == Look.Ink ? Foreground
+                                            : BoxPixelEncode(Colour, Description.format);
         }
     }
+}
+
+Easel::CellLook Easel::LookOf(const GlassCell &Cell, bool CaretHere) const
+{
+    CellLook Look{};
+    Look.Ink       = Own(Cell.Cell.fg, TextColour);
+    Look.Paper     = Own(Cell.Cell.bg, PageColour);
+    Look.MarkInk   = Own(Cell.MarkColor, TextColour);
+    Look.CaretInk  = Look.Ink != Look.Paper ? Look.Ink : COLOR_LIGHT_GRAY;
+    Look.Under     = Cell.Mark == DISPLAY_CELL_MARK_UNDER;
+    Look.Bar       = Cell.Mark == DISPLAY_CELL_MARK_BAR;
+    Look.CaretHere = CaretHere;
+    Look.Picture   = &Type->Glyph(Cell.Cell.cp);
+    return Look;
+}
+
+void Easel::RowOf(const CellLook &Look, std::int32_t Y, std::int32_t Wide, std::uint32_t *Out) const noexcept
+{
+    const typecase::Size       &Fit     = Type->Cell();
+    const typecase::GlyphImage &Picture = *Look.Picture;
+    // The caret and a line under the glyph: an eighth of the cell at its foot,
+    // two rows at least. A bar: a quarter of its width, two pixels at least.
+    const std::int32_t Foot    = Fit.Height - std::max(2, Fit.Height / 8);
+    const std::int32_t BarWide = std::max(2, Fit.Width / 4);
+    if (Y >= Foot && (Look.CaretHere || Look.Under)) {
+        std::fill(Out, Out + Wide, Look.CaretHere ? Look.CaretInk : Look.MarkInk);
+        return;
+    }
+    // Where the picture's first row stands in the cell: it hangs from the pen
+    // on the cell's baseline.
+    const std::int32_t  Into   = Y - (Fit.Baseline + Picture.Top);
+    const std::uint8_t *Shares = Into >= 0 && Into < Picture.Height
+                                     ? Picture.Coverage.data() + static_cast<std::size_t>(Into) * static_cast<std::size_t>(Picture.Width)
+                                     : nullptr;
+    for (std::int32_t X = 0; X < Wide; X++) {
+        if (Look.Bar && X < BarWide) {
+            Out[X] = Look.MarkInk;
+            continue;
+        }
+        const std::int32_t Along = X - Picture.Left;
+        const std::uint8_t Share = Shares && Along >= 0 && Along < Picture.Width ? Shares[Along] : 0;
+        Out[X] = Share == 0 ? Look.Paper : Share == 255 ? Look.Ink : BoxColorOver(Look.Paper, Look.Ink, Share);
+    }
+}
+
+// A framebuffer cell's pixels, as far as the glass goes.
+Rect Easel::CellPixels(std::uint32_t Col, std::uint32_t Row) const noexcept
+{
+    const typecase::Size &Fit  = Type->Cell();
+    const std::uint32_t   Left = OriginX + Col * static_cast<std::uint32_t>(Fit.Width);
+    const std::uint32_t   Top  = OriginY + Row * static_cast<std::uint32_t>(Fit.Height);
+    return Rect{static_cast<std::int32_t>(Left), static_cast<std::int32_t>(Top),
+                static_cast<std::int32_t>(std::min<std::uint32_t>(Fit.Width, Description.width - Left)),
+                static_cast<std::int32_t>(std::min<std::uint32_t>(Fit.Height, Description.height - Top))};
 }
 
 // The framebuffer's pixels round the cells, in the page colour: what the
@@ -245,7 +274,7 @@ void Easel::PaintMargin() noexcept
     }
 }
 
-void Easel::Present(std::span<const GlassCell> Cells, Caret At) noexcept
+void Easel::Present(std::span<const GlassCell> Cells, Caret At, const Over &Above) noexcept
 {
     if (Away || Cells.size() != Shown.size()) return;
 
@@ -258,18 +287,113 @@ void Easel::Present(std::span<const GlassCell> Cells, Caret At) noexcept
     const std::size_t NewCaret = At.Visible && At.X < ColsValue && At.Y < RowsValue
                                      ? static_cast<std::size_t>(At.Y) * ColsValue + At.X
                                      : None;
+    const bool Layered = Type && Above.Changed && !Above.Covered.empty();
 
-    if (!ShownKnown && Type) PaintMargin();
+    if (!ShownKnown && Type) {
+        PaintMargin();
+        if (Layered)
+            Above.Changed(Rect{0, 0, static_cast<std::int32_t>(Description.width), static_cast<std::int32_t>(Description.height)});
+    }
+    // The cells beneath what lies over them told as runs along their rows.
+    Rect Run{};
     for (std::size_t Index = 0; Index < Cells.size(); Index++) {
         const bool CaretCell = CaretMoved && (Index == OldCaret || Index == NewCaret);
         if (ShownKnown && !CaretCell && SameCell(Cells[Index], Shown[Index])) continue;
-        DrawCell(static_cast<std::uint32_t>(Index % ColsValue),
-                 static_cast<std::uint32_t>(Index / ColsValue), Cells[Index], Index == NewCaret);
+        const auto Col = static_cast<std::uint32_t>(Index % ColsValue), Row = static_cast<std::uint32_t>(Index / ColsValue);
         Shown[Index] = Cells[Index];
+        if (Layered) {
+            const Rect Pixels = CellPixels(Col, Row);
+            const bool Beneath = std::any_of(Above.Covered.begin(), Above.Covered.end(),
+                                             [&](const Rect &Each) { return !Each.Intersect(Pixels).Empty(); });
+            if (Beneath) {
+                if (!Run.Empty() && Run.Y == Pixels.Y && Run.X + Run.Width == Pixels.X) Run.Width += Pixels.Width;
+                else {
+                    if (!Run.Empty()) Above.Changed(Run);
+                    Run = Pixels;
+                }
+                continue;
+            }
+        }
+        DrawCell(Col, Row, Cells[Index], Index == NewCaret);
     }
+    if (!Run.Empty()) Above.Changed(Run);
 
     ShownKnown = true;
     Drawn = At;
+    Flush();
+}
+
+Rect Easel::Grid() const noexcept
+{
+    if (!Type) return {};
+    return Rect{static_cast<std::int32_t>(OriginX), static_cast<std::int32_t>(OriginY),
+                static_cast<std::int32_t>(ColsValue * static_cast<std::uint32_t>(Type->Cell().Width)),
+                static_cast<std::int32_t>(RowsValue * static_cast<std::uint32_t>(Type->Cell().Height))}
+        .Intersect(Rect{0, 0, static_cast<std::int32_t>(Description.width), static_cast<std::int32_t>(Description.height)});
+}
+
+std::int32_t Easel::CellHeight() const noexcept { return Type ? Type->Cell().Height : 0; }
+
+void Easel::Beneath(painter::core::Canvas &Into, painter::core::Point Corner, Rect Area) noexcept
+{
+    if (!Type) return;
+    Area = Area.Intersect(Rect{0, 0, static_cast<std::int32_t>(Description.width), static_cast<std::int32_t>(Description.height)});
+    const auto Moved = [&](Rect Of) { return Rect{Of.X - Corner.X, Of.Y - Corner.Y, Of.Width, Of.Height}; };
+    const auto Light = [](std::uint32_t Triple) {
+        return painter::core::Pixel::Of(painter::core::Color::Rgb(static_cast<std::uint8_t>(Triple >> 16),
+                                                                  static_cast<std::uint8_t>(Triple >> 8),
+                                                                  static_cast<std::uint8_t>(Triple)));
+    };
+    /* The page round the cells: the four sides of Area the grid leaves. */
+    const Rect Cells = Grid();
+    const painter::core::Color Page = painter::core::Color::Rgb(static_cast<std::uint8_t>(PageColour >> 16),
+                                                                static_cast<std::uint8_t>(PageColour >> 8),
+                                                                static_cast<std::uint8_t>(PageColour));
+    const std::int32_t Right = Area.X + Area.Width, Bottom = Area.Y + Area.Height;
+    const std::int32_t Top   = std::clamp(Cells.Y, Area.Y, Bottom), Foot = std::clamp(Cells.Y + Cells.Height, Area.Y, Bottom);
+    const std::int32_t Left  = std::clamp(Cells.X, Area.X, Right), Side = std::clamp(Cells.X + Cells.Width, Area.X, Right);
+    for (const Rect &Margin : {Rect{Area.X, Area.Y, Area.Width, Top - Area.Y}, Rect{Area.X, Foot, Area.Width, Bottom - Foot},
+                               Rect{Area.X, Top, Left - Area.X, Foot - Top}, Rect{Side, Top, Right - Side, Foot - Top}})
+        if (!Margin.Empty()) Into.Clear(Moved(Margin), Page);
+    const Rect Inside = Cells.Intersect(Area);
+    if (Inside.Empty()) return;
+    const typecase::Size &Fit = Type->Cell();
+    const auto FirstCol = static_cast<std::uint32_t>((Inside.X - Cells.X) / Fit.Width);
+    const auto LastCol  = static_cast<std::uint32_t>((Inside.X + Inside.Width - 1 - Cells.X) / Fit.Width);
+    const auto FirstRow = static_cast<std::uint32_t>((Inside.Y - Cells.Y) / Fit.Height);
+    const auto LastRow  = static_cast<std::uint32_t>((Inside.Y + Inside.Height - 1 - Cells.Y) / Fit.Height);
+    for (std::uint32_t Row = FirstRow; Row <= LastRow && Row < RowsValue; Row++)
+        for (std::uint32_t Col = FirstCol; Col <= LastCol && Col < ColsValue; Col++) {
+            const Rect Whole = CellPixels(Col, Row), Part = Whole.Intersect(Inside);
+            if (Part.Empty()) continue;
+            const bool     CaretHere = Drawn.Visible && Drawn.X == Col && Drawn.Y == Row;
+            const CellLook Look      = LookOf(Shown[static_cast<std::size_t>(Row) * ColsValue + Col], CaretHere);
+            const painter::core::Pixel Paper = Light(Look.Paper), Ink = Light(Look.Ink);
+            for (std::int32_t Y = Part.Y; Y < Part.Y + Part.Height; Y++) {
+                RowOf(Look, Y - Whole.Y, Whole.Width, Colours.data());
+                painter::core::Pixel *Line = Into.Row(static_cast<std::uint32_t>(Y - Corner.Y)) + (Part.X - Corner.X);
+                for (std::int32_t X = 0; X < Part.Width; X++) {
+                    const std::uint32_t Colour = Colours[static_cast<std::size_t>(Part.X - Whole.X + X)];
+                    Line[X] = Colour == Look.Paper ? Paper : Colour == Look.Ink ? Ink : Light(Colour);
+                }
+            }
+        }
+}
+
+void Easel::Put(const painter::core::Canvas &Picture, Rect Area) noexcept
+{
+    if (Away || !Pixels()) return;
+    Area = Area.Intersect(Rect{0, 0, static_cast<std::int32_t>(Description.width), static_cast<std::int32_t>(Description.height)});
+    if (Area.Empty()) return;
+    auto *Glass = reinterpret_cast<std::uint32_t *>(static_cast<std::uintptr_t>(Description.va) +
+                                                    static_cast<std::size_t>(Area.Y) * Description.stride +
+                                                    static_cast<std::size_t>(Area.X) * 4u);
+    Picture.CopyOut(Rect{0, 0, Area.Width, Area.Height}, Glass, Description.stride / 4u, Description.format,
+                    painter::core::Dither::On, painter::core::Point{Area.X, Area.Y});
+}
+
+void Easel::Flush() noexcept
+{
     // Write-combining stores wait in the core's buffers until something
     // drains them; the frame is meant to be seen now.
     __asm__ volatile("sfence" ::: "memory");
