@@ -292,8 +292,11 @@ bool AnswerWaiting()
         if (!LanesDrawnTo(Waiting.Asked.sender_pid, Waiting.From.generation, Waiting.Mark)) break;
 
         if (Waiting.Command == DISP_CMD_AREA_OPEN) {
-            // A program shows something: the scene gives way to it.
-            if (AreasOpen(Waiting.Asked, Waiting.From, Waiting.Open, *g_model)) SceneGoes();
+            // A program shows something: the scene gives way to it — not to
+            // what is shown always, a clock in the corner, which waits under
+            // the scene as the console does.
+            if (AreasOpen(Waiting.Asked, Waiting.From, Waiting.Open, *g_model) && !(Waiting.Open.flags & DISPLAY_AREA_ALWAYS))
+                SceneGoes();
         } else {
             std::expected<AreaFold, error_t> Taken =
                 AreasCommit(Waiting.Asked.sender_pid, Waiting.From.generation, Waiting.Commit, *g_model);
