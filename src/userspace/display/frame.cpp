@@ -229,11 +229,13 @@ bool Within(Rect Inner, std::span<const Rect> Outers) noexcept
     return false;
 }
 
-/* Where the console changed, to be composed again: of each changed stretch
- * only the cells that differ from what the mirror shows of them — and the
- * caret's cells, where it was drawn and where it stands now — and none of
- * those under a cover kept still: they are not seen. */
-void ConsoleChanged(std::span<const Rect> Still)
+/* What the console changed, onto the mirror: of each changed stretch only
+ * the cells that differ from what the mirror shows of them — and the caret's
+ * cells, where it was drawn and where it stands now — none of those under a
+ * cover kept still, which are not seen; where nothing an area draws lies
+ * over them, written straight, each run as it is; under what an area draws,
+ * left to the compositor to compose with it. */
+void ConsoleChanged(Mirror &Into, std::span<items::AreaState *const> Programs, std::span<const Rect> Still)
 {
     const std::uint32_t Cols  = g_console->Cols();
     const auto          Caret = [&]() -> std::uint64_t {
@@ -262,7 +264,10 @@ void ConsoleChanged(std::span<const Rect> Still)
             }
             Parts.swap(Next);
         }
-        for (const Rect &Part : Parts) g_compositor->Damage(Part);
+        for (const Rect &Part : Parts) {
+            if (Lying(Part, Programs).Empty()) LayConsole(Into, Part);
+            else g_compositor->Damage(Part);
+        }
     };
     g_console->TakeMarks([&](std::uint32_t Row, std::uint32_t From, std::uint32_t To) {
         std::uint32_t Begun = To;
@@ -528,7 +533,7 @@ FrameCost FrameCompose(Mirror &Into, std::span<items::AreaState *const> Programs
                 }
                 for (const Rect &Cover : Still) g_compositor->Damage(Rect{Cover.X, Cover.Y - Up, Cover.Width, Up}.Intersect(g_cells.Grid));
             }
-            ConsoleChanged(Still);
+            ConsoleChanged(Into, Programs, Still);
         }
     } catch (...) {
         /* No room to know what the mirror shows: all of the console drawn
