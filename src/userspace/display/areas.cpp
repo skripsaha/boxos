@@ -21,6 +21,7 @@
 #include "box/color.h"
 #include "box/core/cabin.h"
 #include "box/cxx/bay.h"
+#include "box/cxx/strand.h"
 #include "box/debug.h"
 #include "box/error.h"
 #include "box/ipc.h"
@@ -109,6 +110,7 @@ struct Program {
     std::uint32_t                       Pid = 0, Generation = 0;   // its founding strand's: the kernel's name for it
     items::ProgramState                 State;
     typecase::Fonts                     Book;                      // the system's faces and its own
+    bool                                SystemsIn = false;         // the system's faces put in it
     std::vector<std::unique_ptr<Block>> Blocks;
     std::size_t                         BlockBytes = 0;
     std::size_t                         FontBytes  = 0;            // its own faces read, kept past their blocks
@@ -159,6 +161,7 @@ Names                                 g_area_names(DISPLAY_AREA_TAG_PREFIX);
 Names                                 g_block_names(DISPLAY_BLOCK_TAG_PREFIX);
 std::uint32_t                         g_next_area = 1, g_next_block = 1;
 AreasGlass                            g_glass;
+std::optional<box::strand>            g_fonts;   // the system's fonts being read
 CellsLook                             g_no_cells;      // the look until the glass is known
 items::Theme                          g_no_theme;
 std::uint32_t                         g_scale     = 256;
@@ -235,8 +238,26 @@ ItemAreaNews NewsOf(const Area &Of) noexcept
                         static_cast<std::uint8_t>(Of.State->Shown), g_glass.Mosaics, 0};
 }
 
-/* The program From names, made when it has none yet: its fonts the system's,
- * its pictures and canvases its blocks. Throws std::bad_alloc only. */
+/* A program's book, the system's faces put in it first — when it first lays a
+ * text or reads a font of its own, not before: a program of cells needs none,
+ * and its area opening waits on no file. Reading them waits only for what is
+ * left of what AreasStart began. Throws std::bad_alloc only. */
+typecase::Fonts &BookOf(Program &Of)
+{
+    if (!Of.SystemsIn) {
+        if (const std::shared_ptr<const typecase::Fonts> System = painter::core::SystemFonts()) {
+            for (const auto &Face : System->Faces()) Of.Book.Add(Face);
+            Of.Book.SetFallback(System->Fallbacks());
+            Of.Book.SetDefault(System->Default());
+        }
+        Of.SystemsIn = true;
+    }
+    return Of.Book;
+}
+
+/* The program From names, made when it has none yet: its fonts the system's
+ * and its own, its pictures and canvases its blocks. Throws std::bad_alloc
+ * only. */
 Program &ProgramOf(const AskFrom &From)
 {
     for (const auto &Each : g_programs)
@@ -244,15 +265,10 @@ Program &ProgramOf(const AskFrom &From)
     auto Made        = std::make_unique<Program>();
     Made->Pid        = From.program_pid;
     Made->Generation = From.program_generation;
-    if (const std::shared_ptr<const typecase::Fonts> System = painter::core::SystemFonts()) {
-        for (const auto &Face : System->Faces()) Made->Book.Add(Face);
-        Made->Book.SetFallback(System->Fallbacks());
-        Made->Book.SetDefault(System->Default());
-    }
     Program *Of                = Made.get();
     Made->State.From.Look      = &Look();
     Made->State.From.Scale     = Scale();
-    Made->State.From.Book      = &Made->Book;
+    Made->State.From.Book      = [Of]() -> const typecase::Fonts & { return BookOf(*Of); };
     Made->State.From.Cells     = &Cells();
     Made->State.From.PictureOf = [Of](std::uint32_t Id) -> std::shared_ptr<const painter::core::Picture> {
         const Block *Found = Of->Find(Id);
@@ -316,7 +332,7 @@ error_t ReadFont(Program &Of, Block &Font)
     std::expected<typecase::Font, typecase::Fault> Face =
         typecase::Font::Read(std::vector<std::uint8_t>(Font.Content(), Font.Content() + Font.Bytes));
     if (!Face) return ERR_CORRUPTED;
-    Of.Book.Add(std::move(*Face));
+    BookOf(Of).Add(std::move(*Face));
     Of.FontBytes += Font.Bytes;
     Font.Read = true;
     return OK;
@@ -480,6 +496,13 @@ void AreasStart(const AreasGlass &Glass)
     if (Glass.Text) {
         g_scale = 256;
     } else {
+        /* A text page lays no text in a font; a framebuffer's first text
+         * should not wait for the volume, nor the scene for it. */
+        try {
+            if (!g_fonts) g_fonts.emplace([] { (void)painter::core::SystemFonts(); });
+        } catch (...) {
+            // No strand: the first text reads them itself.
+        }
         /* Chosen: a point a pixel on a screen 1080 tall, larger by quarters
          * as the screen is taller, four at most. */
         const auto          Tall   = static_cast<std::uint32_t>(Glass.Screen.Height);

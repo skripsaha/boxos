@@ -203,7 +203,7 @@ void LayText(const Item &Of, const Sources &From, Drawing &Into)
         Box.Wrap     = Of.Said.Box->Wrap != 0;
         Box.MaxLines = Of.Said.Box->MaxLines;
     }
-    Into.Laid.emplace(typecase::Layout::Of(Text, Box, *From.Book));
+    Into.Laid.emplace(typecase::Layout::Of(Text, Box, From.Book()));
 }
 
 /* What a text is filled with: its fills said, else its style's colour, else

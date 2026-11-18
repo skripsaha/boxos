@@ -41,6 +41,9 @@ struct AreasGlass {
     const items::Theme *Look    = nullptr;
     void (*Vacated)(const painter::core::Rect &Where) noexcept = nullptr;
 };
+// The glass known, and on a framebuffer the system's fonts begun to be read
+// on a strand of their own, while the machine comes up: what a program's
+// first text waits for is only what is left of it.
 void AreasStart(const AreasGlass &Glass);
 
 // DISP_CMD_AREA_OPEN and DISP_CMD_BLOCK_OPEN, asked of this display (Asked) by

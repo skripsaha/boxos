@@ -31,7 +31,8 @@ namespace items {
 struct Sources {
     const Theme           *Look  = nullptr;
     float                  Scale = 1.0f;     // pixels to a point
-    const typecase::Fonts *Book  = nullptr;  // the system's fonts and the program's own
+    // The system's fonts and the program's own, asked when a text is laid.
+    std::function<const typecase::Fonts &()> Book;
     const CellsLook       *Cells = nullptr;  // the console's look, every cells item's
     // A picture block as a picture; none for a block the program does not have.
     std::function<std::shared_ptr<const painter::core::Picture>(std::uint32_t)> PictureOf;

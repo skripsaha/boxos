@@ -86,7 +86,7 @@ items::ProgramState HostProgram(const items::Theme &Look, float Scale)
     items::ProgramState Made;
     Made.From.Look  = &Look;
     Made.From.Scale = Scale;
-    Made.From.Book  = &TreeBook();
+    Made.From.Book  = []() -> const typecase::Fonts & { return TreeBook(); };
     return Made;
 }
 
