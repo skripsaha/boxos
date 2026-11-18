@@ -100,7 +100,7 @@ float Easing::At(float Share) const noexcept
     case Kind::Out:
         return Bezier(0, 0, 0.2f, 1, Share);
     case Kind::InOut:
-        return Bezier(0.4f, 0, 0.2f, 1, Share);
+        return Bezier(0.4f, 0, 0.6f, 1, Share);
     case Kind::Steps: {
         const int Count = std::max(1, Steps);
         return std::floor(Share * static_cast<float>(Count)) / static_cast<float>(Count);
