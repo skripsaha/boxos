@@ -198,9 +198,11 @@ void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, 
         const bool      Cellular = Of->Kind == ITEM_CELLS && Of->Grid && Program.From.Cells;
         const Transform Place    = Cellular ? CellsPlace(*Of, LocalOf(*Of).Then(Parent), *Program.From.Cells)
                                             : LocalOf(*Of).Then(Parent);
-        const bool      Hidden   = HiddenOf(Of->Said);
+        const bool      Hidden   = HiddenOf(Of->Said) || !(Of->Seen > 0.0f);
         const bool      Shifted  = Moved || Of->Moved;
-        const Rect      Now      = Hidden ? Rect{} : DeviceRect(Drawn.Own, Place).Intersect(Area.Place);
+        const Leaving  *Fade     = Of->Fading && Of->Fading->Was.Drawn ? Of->Fading.get() : nullptr;
+        Rect            Now      = Hidden ? Rect{} : DeviceRect(Drawn.Own, Place).Intersect(Area.Place);
+        if (!Hidden && Fade) Now = Now.Join(DeviceRect(Fade->Was.Drawn->Own, Place).Intersect(Area.Place));
         const bool      Whole    = Of->Redraw || Shifted;
         if (Whole) {
             Damage(Of->Shown);
@@ -222,10 +224,12 @@ void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, 
             if (Shifted) Vanish(Area, Of->Children);
             continue;
         }
-        const float Own = static_cast<float>(OpacityOf(Of->Said)) / ITEM_OPAQUE;
+        const float Own = static_cast<float>(OpacityOf(Of->Said)) / ITEM_OPAQUE * std::min(Of->Seen, 1.0f);
         if (Of->Kind != ITEM_GROUP) {
-            Entry Made{Entry::Kind::Draw, Of, Place, Opacity * Own, Now, {}};
-            if (Plain && Drawn.Opaque && Opacity * Own >= 1.0f && Place.B == 0 && Place.C == 0) {
+            Entry Made{Entry::Kind::Draw, Of, Place, Opacity * Own, Now, {}, Fade};
+            if (Fade) {
+                /* Fading from another look: it hides nothing beneath. */
+            } else if (Plain && Drawn.Opaque && Opacity * Own >= 1.0f && Place.B == 0 && Place.C == 0) {
                 const painter::core::PointF Size = SizeOf(*Of, Drawn);
                 Made.Hides = Inside(painter::core::RectF{0, 0, Size.X, Size.Y}, Place).Intersect(Area.Place);
             } else if (Plain && Cellular && Of->Grid->Opaque() && Opacity * Own >= 1.0f && Upright(Place, Program.From.Scale)) {
@@ -388,10 +392,29 @@ void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Cor
         for (std::size_t E = A == StartArea ? StartEntry : 0; E < Each.List.size(); E++) {
             const Entry &One = Each.List[E];
             switch (One.What) {
-            case Entry::Kind::Draw:
-                if (!One.Device.Intersect(Area).Empty())
+            case Entry::Kind::Draw: {
+                const Rect Part = One.Device.Intersect(Area);
+                if (Part.Empty()) break;
+                std::optional<painter::core::Canvas> Old, New;
+                if (One.Fade) {
+                    Old = painter::core::Canvas::Make(static_cast<std::uint32_t>(Part.Width), static_cast<std::uint32_t>(Part.Height));
+                    New = painter::core::Canvas::Make(static_cast<std::uint32_t>(Part.Width), static_cast<std::uint32_t>(Part.Height));
+                }
+                if (!Old || !New) {
                     Paint(*One.Of, *One.Of->Drawn, Each.Program.From, Current(), Moved(One.Place, At()), One.Opacity);
+                    break;
+                }
+                /* Fading from another look: the two looks drawn apart, the
+                 * old one walked toward the new as far as it has faded, laid
+                 * as one. */
+                const painter::core::Point Here{Part.X, Part.Y};
+                Paint(One.Fade->Was, *One.Fade->Was.Drawn, Each.Program.From, *Old, Moved(One.Place, Here), 1.0f);
+                Paint(*One.Of, *One.Of->Drawn, Each.Program.From, *New, Moved(One.Place, Here), 1.0f);
+                Old->FadeTo(*New, One.Fade->Share);
+                const painter::core::Point Under = At();
+                Current().Draw(*Old, painter::core::Point{Part.X - Under.X, Part.Y - Under.Y}, One.Opacity);
                 break;
+            }
             case Entry::Kind::ClipBegin:
                 (void)Current().PushClip(ClipOf(*One.Of), Moved(One.Place, At()));
                 break;

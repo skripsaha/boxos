@@ -559,6 +559,7 @@ typedef struct {
 #define ITEM_GRID_SIDE_MOST   4096u            /* a cells item's columns, and its rows */
 #define ITEM_CELLS_MOST       (1u << 20)       /* cells, over all the program's cells items */
 #define ITEM_ANIMATIONS_MOST  16384u           /* under way or waiting */
+#define ITEM_ANIMATION_BYTES_MOST (16u * 1024u * 1024u)   /* the values they go to, together */
 #define ITEM_TIME_MOST        3600000u         /* an animation's delay, and a run's time: an hour of milliseconds */
 
 /* ---- Questions and messages --------------------------------------------- */

@@ -416,6 +416,30 @@ void Tree::BlockChanged(std::uint32_t Block, std::optional<painter::core::Rect> 
     }
 }
 
+error_t Tree::Assign(std::uint32_t Id, std::uint16_t Property, const Properties &Value) noexcept
+{
+    Item *Of = Find(Id);
+    if (!Of) return ERR_OBJECT_NOT_FOUND;
+    const std::size_t Before = TextBytes(Of->Said);
+    Uses(*Of, false);
+    error_t Done = OK;
+    try {
+        painter::items::Assign(Property, Value, Of->Said);
+    } catch (...) {
+        Done = ERR_NO_MEMORY;
+    }
+    Uses(*Of, true);
+    Held.TextBytes = Held.TextBytes - Before + TextBytes(Of->Said);
+    const Asks Wants = AsksOf(Property);
+    Mark(*Of, Wants.Picture, Wants.Place);
+    return Done;
+}
+
+void Tree::Recompose(std::uint32_t Id) noexcept
+{
+    if (Item *Of = Find(Id)) Mark(*Of, false, true);
+}
+
 void Tree::RedrawAll() noexcept
 {
     for (auto &[Id, Each] : All) {

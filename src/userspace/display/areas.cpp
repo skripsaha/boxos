@@ -18,6 +18,7 @@
 #include <string_view>
 #include <utility>
 
+#include "box/clock.h"
 #include "box/color.h"
 #include "box/core/cabin.h"
 #include "box/cxx/bay.h"
@@ -165,6 +166,7 @@ items::Theme                          g_no_theme;
 std::uint32_t                         g_scale     = 256;
 std::uint64_t                         g_rows_gone = 0;
 bool                                  g_left      = false;   // an area went: the frame looks again
+items::Motion                         g_motion;                // how the person wants things to move
 
 float Scale() noexcept { return static_cast<float>(g_scale) / 256.0f; }
 
@@ -429,7 +431,7 @@ std::unique_ptr<Area> MakeArea(const Result &Asked, const AskFrom &From, const D
     Made->Head->Magic      = ITEM_AREA_MAGIC;
     Made->Head->Bytes      = ITEM_RING_BYTES;
     Made->Head->EventBytes = ITEM_EVENT_BYTES;
-    Made->State            = std::make_unique<items::AreaState>(Of.State);
+    Made->State            = std::make_unique<items::AreaState>(Of.State, g_motion);
     Made->State->Place     = PlaceOf(*Made);
     Made->State->Shown     = ShownNow(*Made);
     Made->State->Paged     = Made->Placement == DISPLAY_AREA_WHOLE;
@@ -453,7 +455,13 @@ bool ReadRing(std::size_t Index) noexcept
             Tell(Of, ITEM_EVENT_REFUSED, Item, &Why, sizeof(Why));
         };
         Listen.BlockChanged = [&Of](std::uint32_t Block2, const ItemBlockChanged &Where) { BlockChanged(Of, Block2, Where); };
+        items::Animator &Moving = Of.State->Moving;
+        Listen.Animate = [&Moving](std::uint32_t Item, const ItemAnimation &How, std::uint16_t Property,
+                                   std::span<const std::uint8_t> Value) { return Moving.Said(Item, How, Property, Value); };
+        Listen.Cut = [&Moving](std::uint32_t Item, std::uint16_t Property) { Moving.Cut(Item, Property); };
+        Moving.Reading(clock_uptime_us());
         Read = items::ReadSteps(*Of.Head, Of.Ring(), Of.State->Items, Listen);
+        Moving.StepWhole();
     } catch (...) {
         /* No room to read it: the steps wait in the ring, read at the next
          * message. */
@@ -494,7 +502,8 @@ void AreasShown(std::uint32_t Micros, std::uint64_t Pixels) noexcept
 
 void AreasStart(const AreasGlass &Glass)
 {
-    g_glass = Glass;
+    g_glass         = Glass;
+    g_motion.Instant = Glass.Text;
     if (Glass.Text) {
         g_scale = 256;
     } else {
@@ -715,6 +724,34 @@ void AreasInOrder(std::vector<items::AreaState *> &Into)
     Band([](const Area &Of) { return !Of.Always && Of.Placement == DISPLAY_AREA_WHOLE; });
     Band([](const Area &Of) { return !Of.Always && Of.Placement == DISPLAY_AREA_OVER; });
     Band([](const Area &Of) { return Of.Always; });
+}
+
+void AreasAnimate(std::uint64_t Now) noexcept
+{
+    for (const auto &Each : g_areas) {
+        items::Animator    &Moving = Each->State->Moving;
+        const std::uint64_t Due    = Moving.Due(Each->State->Shown);
+        if (Due == 0 || Due > Now) continue;
+        Area &Of = *Each;
+        Moving.Advance(Now, Look(), [&Of](std::uint32_t Item, const ItemAnimationEnd &End) {
+            Tell(Of, ITEM_EVENT_ANIMATION_END, Item, &End, sizeof(End));
+        });
+        Ring(Of);
+    }
+}
+
+std::uint64_t AreasDue() noexcept
+{
+    std::uint64_t Next = 0;
+    for (const auto &Each : g_areas)
+        if (const std::uint64_t Due = Each->State->Moving.Due(Each->State->Shown); Due != 0) Next = Next == 0 ? Due : std::min(Next, Due);
+    return Next;
+}
+
+void AreasMotion(bool Less, std::uint32_t Speed) noexcept
+{
+    g_motion.Less  = Less;
+    g_motion.Speed = Speed;
 }
 
 bool AreasWant() noexcept
