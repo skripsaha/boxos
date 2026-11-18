@@ -387,8 +387,8 @@ tagmap.elf: $(BOXLIB_START) $(TAGMAP_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXL
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(TAGMAP_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
-mandelbrot.elf: $(BOXLIB_START) $(MANDELBROT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(MANDELBROT_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+mandelbrot.elf: $(BOXLIB_START) $(MANDELBROT_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(MANDELBROT_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 qr.elf: $(BOXLIB_START) $(QR_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
