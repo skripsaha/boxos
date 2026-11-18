@@ -201,8 +201,8 @@ void LayConsole(Mirror &Into, Rect Tile)
             if (!Across) std::fill(Line + Right, Line + Area.X + Area.Width, Page);
         }
         LayCells(*g_console, g_cells, Pixels, Stride, Area, painter::core::Point{Grid.X, Grid.Y});
-        if (g_seen.size() == g_console->Cells().size())
-            CellsIn(Area, [](std::size_t Index, bool Whole) { g_seen[Index] = Whole ? g_console->Cells()[Index] : Unseen; });
+        if (g_seen.size() == g_console->Count())
+            CellsIn(Area, [](std::size_t Index, bool Whole) { g_seen[Index] = Whole ? g_console->At(Index) : Unseen; });
     });
 }
 
@@ -459,7 +459,8 @@ std::span<const ItemCell> FramePage(std::span<items::AreaState *const> Programs,
     const std::shared_ptr<CellGrid> Holds = g_holder.lock();
     At = Caret{g_console->Caret().Col, g_console->Caret().Row, Holds == g_console};
     try {
-        g_composed.assign(g_console->Cells().begin(), g_console->Cells().end());
+        g_composed.resize(g_console->Count());
+        for (std::size_t Index = 0; Index < g_composed.size(); Index++) g_composed[Index] = g_console->At(Index);
         for (items::AreaState *Each : Programs) {
             std::uint32_t   X = 0, Y = 0;
             const CellGrid *Mine = Holds && Holds != g_console && g_holder_area == Each ? Holds.get() : nullptr;
@@ -505,7 +506,7 @@ FrameCost FrameCompose(Mirror &Into, std::span<items::AreaState *const> Programs
     const std::uint32_t Scrolled = g_console->TakeScrolled();
     std::vector<Rect>   Still;
     try {
-        g_seen.resize(g_console->Cells().size(), Unseen);
+        g_seen.resize(g_console->Count(), Unseen);
         if (g_compositor->Hidden(g_cells.Grid, Programs)) {
             g_console->TakeMarks([](std::uint32_t, std::uint32_t, std::uint32_t) {});
             std::fill(g_seen.begin(), g_seen.end(), Unseen);
@@ -561,7 +562,7 @@ FrameCost FrameCompose(Mirror &Into, std::span<items::AreaState *const> Programs
                     if (!Lies.Empty()) {
                         g_compositor->Compose(*g_tile, painter::core::Point{Lies.X, Lies.Y}, Lies, g_order, g_theme);
                         Into.Put(*g_tile, Lies);
-                        if (g_seen.size() == g_console->Cells().size())
+                        if (g_seen.size() == g_console->Count())
                             CellsIn(Lies, [](std::size_t Index, bool) { g_seen[Index] = Unseen; });
                     }
                     const std::int32_t Right = Tile.X + Tile.Width, Bottom = Tile.Y + Tile.Height;

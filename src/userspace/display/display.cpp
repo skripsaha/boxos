@@ -781,7 +781,7 @@ int main(void)
         g_cells = FrameStart(Screen);
         g_model = new ConsoleModel(*g_cells);
         g_order.reserve(ITEM_AREAS_MOST);
-        g_glass.reserve(g_cells->Cells().size());
+        g_glass.reserve(g_cells->Count());
         EffectsFrameRate(g_easel->Pixels() ? 30 : 12);
         g_held.reserve(32);
     } catch (...) {

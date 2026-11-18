@@ -54,9 +54,9 @@ bool Same(const ItemCell &A, const ItemCell &B) { return std::memcmp(&A, &B, siz
 bool Holds(const items::AreaState &Area, std::uint32_t Item, const std::vector<ItemCell> &Want, std::uint32_t Cols)
 {
     const items::Item *Of = Area.Items.Find(Item);
-    if (!Of || !Of->Grid || Of->Grid->Cells().size() != Want.size() || Of->Grid->Cols() != Cols) return false;
+    if (!Of || !Of->Grid || Of->Grid->Count() != Want.size() || Of->Grid->Cols() != Cols) return false;
     for (std::size_t I = 0; I < Want.size(); I++)
-        if (!Same(Of->Grid->Cells()[I], Want[I])) return false;
+        if (!Same(Of->Grid->At(I), Want[I])) return false;
     return true;
 }
 

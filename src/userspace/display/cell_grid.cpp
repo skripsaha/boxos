@@ -44,7 +44,7 @@ painter::core::Rect CellGrid::Showing() const noexcept
     std::uint32_t Left = Wide, Top = High, Right = 0, Bottom = 0;
     for (std::uint32_t Row = 0; Row < High; Row++)
         for (std::uint32_t Col = 0; Col < Wide; Col++) {
-            if (!CellShows(All[static_cast<std::size_t>(Row) * Wide + Col])) continue;
+            if (!CellShows(At(Col, Row))) continue;
             Left = std::min(Left, Col), Right = std::max(Right, Col + 1);
             Top = std::min(Top, Row), Bottom = std::max(Bottom, Row + 1);
         }
@@ -76,10 +76,20 @@ void CellGrid::MarkAll() noexcept
 
 void CellGrid::Put(std::size_t Index, const ItemCell &Cell) noexcept
 {
-    if (Index >= All.size() || Same(All[Index], Cell)) return;
-    Counted(All[Index], Cell);
-    All[Index] = Cell;
-    Mark(static_cast<std::uint32_t>(Index % Wide), static_cast<std::uint32_t>(Index / Wide), 1);
+    if (Index >= All.size()) return;
+    const auto Col = static_cast<std::uint32_t>(Index % Wide), Row = static_cast<std::uint32_t>(Index / Wide);
+    ItemCell  &Into = All[Kept(Row) + Col];
+    if (Same(Into, Cell)) return;
+    Counted(Into, Cell);
+    Into = Cell;
+    Mark(Col, Row, 1);
+}
+
+void CellGrid::CopyOut(std::size_t From, std::size_t To, std::vector<ItemCell> &Into) const
+{
+    To = std::min(To, All.size());
+    Into.clear();
+    for (std::size_t Index = From; Index < To; Index++) Into.push_back(At(Index));
 }
 
 void CellGrid::Fill(std::size_t From, std::size_t To, const ItemCell &Cell) noexcept
@@ -100,10 +110,15 @@ void CellGrid::Scroll(std::uint32_t Count, const ItemCell &Blank) noexcept
 {
     if (Count == 0 || Wide == 0) return;
     Count = std::min(Count, High);
-    const std::size_t Gone = static_cast<std::size_t>(Count) * Wide;
-    for (std::size_t I = 0; I < Gone; I++) Counted(All[I], Blank);
-    std::memmove(All.data(), All.data() + Gone, (All.size() - Gone) * sizeof(ItemCell));
-    std::fill(All.end() - static_cast<std::ptrdiff_t>(Gone), All.end(), Blank);
+    /* The rows that go come in again at the foot, blank: the ring turned. */
+    for (std::uint32_t Row = 0; Row < Count; Row++) {
+        ItemCell *Line = All.data() + Kept(Row);
+        for (std::uint32_t Col = 0; Col < Wide; Col++) {
+            Counted(Line[Col], Blank);
+            Line[Col] = Blank;
+        }
+    }
+    Top = Top + Count >= High ? Top + Count - High : Top + Count;
     /* What was marked moved up with its cells; the rows come in marked. */
     for (std::uint32_t Row = 0; Row < Count; Row++) MarkedRows -= Marks[Row].first != Marks[Row].second;
     std::move(Marks.begin() + Count, Marks.end(), Marks.begin());

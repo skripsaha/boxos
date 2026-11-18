@@ -30,13 +30,13 @@ ConsoleModel::ConsoleModel(CellGrid &Surface) : Grid(Surface)
 {
     // A line is never longer than the console: lifting one never allocates,
     // so no frame drawn while a line is typed can fail for want of memory.
-    Lifted.reserve(Grid.Cells().size());
+    Lifted.reserve(Grid.Count());
     Clear(COLOR_DEFAULT, COLOR_DEFAULT);
 }
 
 void ConsoleModel::Clear(std::uint32_t Foreground, std::uint32_t Background)
 {
-    Grid.Fill(0, Grid.Cells().size(), CellOf(U' ', Foreground, Background));
+    Grid.Fill(0, Grid.Count(), CellOf(U' ', Foreground, Background));
     CursorColumn = 0;
     CursorRow = 0;
     LineStart = LineEnd = Others = 0;
@@ -190,7 +190,7 @@ std::size_t ConsoleModel::Here() const noexcept
 void ConsoleModel::MoveTo(std::size_t Linear) noexcept
 {
     if (Width() == 0 || Height() == 0) return;
-    Linear       = std::min(Linear, Grid.Cells().size() - 1u);
+    Linear       = std::min(Linear, Grid.Count() - 1u);
     CursorRow    = static_cast<std::uint32_t>(Linear / Width());
     CursorColumn = static_cast<std::uint32_t>(Linear % Width());
 }
@@ -232,9 +232,8 @@ void ConsoleModel::Begin(std::uint32_t Lane, bool Text) noexcept
 template <typename Drawing>
 void ConsoleModel::AsAnother(std::uint32_t Lane, bool Text, Drawing &&Said)
 {
-    const std::span<const ItemCell> Cells = Grid.Cells();
-    const std::size_t               End   = std::min(LineEnd, Cells.size());
-    Lifted.assign(Cells.begin() + static_cast<std::ptrdiff_t>(LineStart), Cells.begin() + static_cast<std::ptrdiff_t>(End));
+    const std::size_t End = std::min(LineEnd, Grid.Count());
+    Grid.CopyOut(LineStart, End, Lifted);
     const std::size_t Caret = std::min(Here() >= LineStart ? Here() - LineStart : 0, Lifted.size());
     Grid.Fill(LineStart, End, CellOf(U' ', COLOR_DEFAULT, COLOR_DEFAULT));
 
@@ -258,11 +257,10 @@ void ConsoleModel::Away(std::uint32_t Lane)
     Forget(Lane);
     if (TypingLane == Lane) TypingLane = 0;   // its line stays where it is, held under nothing
     if (Lane == 0 || LastLane != Lane || LineEnd <= LineStart) return;
-    const std::span<const ItemCell> Cells = Grid.Cells();
-    const std::size_t               End   = std::min(LineEnd, Cells.size());
-    Kept                            One;
+    const std::size_t End = std::min(LineEnd, Grid.Count());
+    Kept              One;
     One.Lane = Lane;
-    One.Line.assign(Cells.begin() + static_cast<std::ptrdiff_t>(LineStart), Cells.begin() + static_cast<std::ptrdiff_t>(End));
+    Grid.CopyOut(LineStart, End, One.Line);
     One.Caret = std::min(Here() >= LineStart ? Here() - LineStart : 0, One.Line.size());
     KeptLines.push_back(std::move(One));
 }
@@ -366,7 +364,7 @@ void ConsoleModel::Folded(std::int32_t X, std::int32_t Y, std::uint32_t Width, s
             const std::size_t Index = static_cast<std::size_t>(Y + static_cast<std::int32_t>(Row)) * this->Width() +
                                       static_cast<std::size_t>(X + static_cast<std::int32_t>(Col));
             ItemCell Shown;
-            if (!CellOver(Cells[static_cast<std::size_t>(Row) * Width + Col], Grid.Cells()[Index], Page, Shown)) continue;
+            if (!CellOver(Cells[static_cast<std::size_t>(Row) * Width + Col], Grid.At(Index), Page, Shown)) continue;
             Shown.Mark    = ITEM_MARK_NONE;
             Shown.MarkInk = 0;
             Grid.Put(Index, Shown);

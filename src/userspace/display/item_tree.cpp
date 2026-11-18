@@ -54,7 +54,7 @@ std::vector<std::uint32_t> BlocksOf(const Properties &Of)
 
 namespace {
 
-std::size_t CellsOf(const Item &Of) noexcept { return Of.Grid ? Of.Grid->Cells().size() : 0; }
+std::size_t CellsOf(const Item &Of) noexcept { return Of.Grid ? Of.Grid->Count() : 0; }
 
 }  // namespace
 
@@ -386,7 +386,7 @@ error_t Tree::Show(std::uint32_t Id, std::shared_ptr<CellGrid> Grid) noexcept
     Item *Of = Find(Id);
     if (!Of) return ERR_OBJECT_NOT_FOUND;
     if (Of->Kind != ITEM_CELLS || !Grid) return ERR_INVALID_ARGUMENT;
-    Held.Cells    = Held.Cells - CellsOf(*Of) + Grid->Cells().size();
+    Held.Cells    = Held.Cells - CellsOf(*Of) + Grid->Count();
     Of->Said.Grid = ItemGrid{Grid->Cols(), Grid->Rows()};
     Of->Grid      = std::move(Grid);
     Mark(*Of, true, true);

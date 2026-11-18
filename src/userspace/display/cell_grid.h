@@ -5,7 +5,8 @@
 // cells item: what each cell holds, where the caret stands, and what changed
 // since a frame last took it — each row's stretch, and how many rows the grid
 // scrolled up meanwhile, so a frame moves what the glass shows already rather
-// than drawing it again. Cells are counted from the first, row after row.
+// than drawing it again. Cells are counted from the first, row after row, as
+// they are shown; the rows are kept in a ring, so a scroll moves no cell.
 
 #include <cstddef>
 #include <cstdint>
@@ -22,13 +23,17 @@ public:
     // std::bad_alloc only.
     CellGrid(std::uint32_t Cols, std::uint32_t Rows, const ItemCell &Blank);
 
-    std::uint32_t Cols() const noexcept { return Wide; }
-    std::uint32_t Rows() const noexcept { return High; }
-    std::span<const ItemCell> Cells() const noexcept { return All; }
-    const ItemCell &At(std::uint32_t Col, std::uint32_t Row) const noexcept
+    std::uint32_t   Cols() const noexcept { return Wide; }
+    std::uint32_t   Rows() const noexcept { return High; }
+    std::size_t     Count() const noexcept { return All.size(); }
+    const ItemCell &At(std::uint32_t Col, std::uint32_t Row) const noexcept { return All[Kept(Row) + Col]; }
+    const ItemCell &At(std::size_t Index) const noexcept
     {
-        return All[static_cast<std::size_t>(Row) * Wide + Col];
+        return At(static_cast<std::uint32_t>(Index % Wide), static_cast<std::uint32_t>(Index / Wide));
     }
+    // The cells [From, To) into Into, in their order. Throws std::bad_alloc
+    // only.
+    void CopyOut(std::size_t From, std::size_t To, std::vector<ItemCell> &Into) const;
 
     // A cell; the cells [From, To); a run along a row from Col, as far as the
     // row goes; every cell — each marked where it changes.
@@ -86,8 +91,15 @@ public:
 
 private:
     void Counted(const ItemCell &Was, const ItemCell &Now) noexcept;
+    // Where row Row is kept: the ring turned by Top.
+    std::size_t Kept(std::uint32_t Row) const noexcept
+    {
+        const std::uint32_t Turned = Row + Top;
+        return static_cast<std::size_t>(Turned >= High ? Turned - High : Turned) * Wide;
+    }
 
     std::uint32_t                                       Wide = 0, High = 0;
+    std::uint32_t                                       Top  = 0;         // the row of the ring shown first
     std::vector<ItemCell>                               All;
     std::vector<std::pair<std::uint32_t, std::uint32_t>> Marks;   // each row's [From, To)
     std::uint32_t                                       MarkedRows = 0;

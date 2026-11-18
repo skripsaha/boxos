@@ -21,7 +21,6 @@ public:
     std::uint32_t Height() const noexcept { return Grid.Rows(); }
     std::uint32_t CursorX() const noexcept { return CursorColumn; }
     std::uint32_t CursorY() const noexcept { return CursorRow; }
-    std::span<const ItemCell> Cells() const noexcept { return Grid.Cells(); }
 
     // The rows gone up off the console since it began — a clearing taking all
     // it held: a row of the console counted so is where an area in its flow
