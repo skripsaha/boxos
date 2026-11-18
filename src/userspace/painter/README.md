@@ -230,6 +230,51 @@ moves as the person wants. On a text page every change is at once. A frame is
 drawn only while something seen moves; a turn or a scale on its way lays the
 picture already drawn, and draws it sharp again once still.
 
+### Keys, and the theme
+
+The keyboard is the display's first, and a program never works out what a key
+hits. A text in the role of a button is a button — it wears its plate round its
+words — and one in the role of a field is a field; any item may say the
+keyboard reaches it (`SetFocusable`), and any may be seen but not to be used
+(`SetDisabled`), drawn as faint as the theme says and never reached:
+
+```cpp
+gui::Text Name = Screen->Text("", gui::Role::Field);
+gui::Text Save = Screen->Text("Save", gui::Role::Button);
+Name.SetPlace({16, 16}).SetSize({240, gui::ByContent}).Focus();
+Save.SetPlace({16, 64});
+for (;;) {
+    const gui::Event Heard = Screen->Wait();
+    if (Heard.What == gui::Event::Kind::Text) Typed = Heard.Text;          // the field as it is now
+    if (Heard.What == gui::Event::Kind::Press && Heard.Item == Save.Number()) Keep(Typed);
+}
+```
+
+Tab and Shift+Tab go from one thing to the next in the order the program made
+them, the arrows to the nearest the way they point, Enter or Space presses what
+is reached; a field is typed into by the display itself — its caret moved with
+the arrows, Home and End, its text edited — and Escape leaves it; a chord
+(`settings display keys point`, `ctrl+.` at first) shows a short label on every
+thing reached, and typing one reaches it, and presses it if it is no field. The
+program hears what it means: `Event::Kind::Press`, `Text` and `Focus`. Keys go
+to the topmost seen area of the program in front that holds a thing the
+keyboard reaches, never to one shown always; every key the display does not
+use goes on to the program as before.
+
+How a thing looks reached or pressed is the display's to draw, never waking
+the program: a ring in the accent round what is reached that glides to the
+next, a flash where one is pressed, a field's caret blinking, the labels
+springing out — on an area of the display's own, said in the items' language
+to itself. On a text page the page shows it: what is reached the other way
+round, a button in brackets, a field between them with the caret in it, the
+labels over what they label.
+
+The theme is the person's (`settings display theme`): its accent, how round
+things are, whether they cast shadows — taken at once, every area drawn again.
+What a program says of a thing stands over the theme, unless the person
+insists (`theme insist`): then every item with a role looks as the theme draws
+that role, whatever its program says; a drawing with no role keeps its own.
+
 ### For C (`painter/gui.h`)
 
 The same areas and items for C, named plainly: `gui_open`, `gui_text`,
@@ -237,7 +282,9 @@ The same areas and items for C, named plainly: `gui_open`, `gui_text`,
 `gui_present`, `gui_wait`, `gui_measure`, `gui_close` — an item a number,
 removed with `gui_remove` or with its area; `gui_animate` makes what follows go
 in time, `GUI_EVENT_ANIMATION_END` tells its end, and `gui_less_motion` and
-`gui_motion_speed` say how the person wants things to move. A C program that measures nothing
+`gui_motion_speed` say how the person wants things to move; `gui_set_focusable`,
+`gui_set_disabled` and `gui_focus`, with `GUI_EVENT_FOCUS`, `GUI_EVENT_PRESS` and
+`GUI_EVENT_TEXT`, are the keyboard's way. A C program that measures nothing
 carries no reader of fonts.
 
 ## Layering
@@ -338,6 +385,40 @@ once; turned, slanted or larger than 256 pixels to the em it fills the text's
 shape. `TextPath` is that shape — glyph outlines and decoration lines — to
 stroke, cast a shadow or clip by. Not yet: ligatures, writings set right to
 left, input methods.
+
+## Laid in for later
+
+What the owner set out on 2026-11-17 for the language to allow from its first
+day and to be built later — none of it to be dropped without the owner's word.
+Beside each, where room is already left for it, and what is not built yet.
+
+| Laid in | Room left for it now | Not built yet |
+|---|---|---|
+| Frosted glass: what lies beneath blurred | `Canvas::Blur` in the engine | a property saying an item blurs its backdrop |
+| Things laying themselves out | groups, sizes by content, text boxes | a group that lays its items out |
+| Pointing at a thing and changing it | labels on every thing the keyboard reaches (`keys point`) | the person's edits of one thing's look, kept |
+| Reading text aloud | every item's caption; a secret never read | a voice |
+| Drawing by the GPU | the language knows nothing of who draws; the compositor is the display's one part that would change | a driver (first Intel's display engine), then composing on the GPU |
+| Real vsync, a tear-free flip | frames paced by the clock | a display-engine driver |
+| Several monitors of different scales | points everywhere, a scale told to each area | more than one glass |
+| Wide gamut, HDR | colours of 16 bits a channel with room to spare | a colour naming its space |
+| Pointer input: hovered, pressed under a pointer | meaning told, not hits: focus, pressed, disabled by the keyboard | a pointer, never relied upon |
+| Complex scripts, right to left | Typecase's runs and kerning by writing | shaping (GSUB), ligatures, bidirectional text |
+| Input with suggestions (IME) | a field typed into by the display itself | a way to compose before committing |
+| Blend modes | one rule of laying light over light | multiply, screen and the rest |
+| A field's selection, copy and paste | the layout's `Cover` and `Copy` | selecting by keys, the clipboard from a field |
+| Fonts and sizes by role in the theme | three levels of a text's style; the system's fonts | the theme's own (a program measuring must ask the same) |
+| Themes as files, switched whole and shared | the theme in one file, `settings display theme` | named themes to choose among |
+| One theme from the loader to the programs | the theme's colours by role | Gangway reading the system's theme |
+| Composing on several cores | a frame composed tile by tile | the kernel's answer to a question going to one declared strand, so the display may have workers |
+| WebP, AVIF, video | pictures given as RGBA by the program's own reader | those readers, video |
+| BIOS with a VESA framebuffer | the text page as the last fallback | stage2 setting a VBE mode |
+| The future GUI's arrangement — its own, not windows by habit | areas, never windows | the arrangement itself |
+
+Of what was to be done at once, one thing is not yet: smooth sixty frames a
+second on the Zenbook. On real hardware a frame is composed one pixel at a time
+on one core, about 85 ns a pixel there — the speed phase after this plan is to
+take it apart with measurements first.
 
 ## Future GUI boundary
 
