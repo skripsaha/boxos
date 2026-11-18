@@ -196,12 +196,48 @@ it changed.
 `painter::tui::Keyboard` given it, the strand's alarm (`box/alarm.h`) — with no
 time out: a clock sets an alarm for the next second and waits.
 
+### Things in time
+
+Any change may take time, and the display plays it by the clock while the
+program sleeps (`box/items.h` `ITEM_OP_ANIMATE`). Everything said inside
+`Animate` goes in time — of objects and of frames described whole alike:
+
+```cpp
+Screen->Animate(gui::Animation::Out(300ms), [&] {
+    Plate.SetOpacity(1).SetPlace({16, 40});
+    Time.SetText("12:47");          // the old figures fade into the new
+});
+```
+
+A property of numbers or colours goes through the values between — colours as
+the eye sees them, through OKLab; one with none between, a text's characters, a
+picture, a role, fades from its old look into the new; hidden fades out or in.
+It goes from where it stands when it begins: said again on its way it goes on
+from there, a spring keeping its speed; said plainly it is at once what was
+said. An item never shown takes its first words at once — nothing flies in from
+nowhere — and a property said plainly before an animation of it in its step is
+where it starts, so a list fades in one by one with `Delay`. `Number` names an
+animation: its end comes back as an `AnimationEnd` event, and another with
+`After` set to it begins the moment it ends. Curves: `Linear`, `In`, `Out`,
+`InOut`, `Steps`, `Spring` with its `Bounce`, a Bézier of one's own; `Repeats`
+(or `Forever`) and `Back`.
+
+The person decides how much moves: with less motion, things moved, sized,
+turned or reshaped are at once where they go and fades are short, and every
+animation plays at the person's speed (`settings display motion`). An area is
+told both (`Area::LessMotion`, `MotionSpeed`), so what a program moves itself
+moves as the person wants. On a text page every change is at once. A frame is
+drawn only while something seen moves; a turn or a scale on its way lays the
+picture already drawn, and draws it sharp again once still.
+
 ### For C (`painter/gui.h`)
 
 The same areas and items for C, named plainly: `gui_open`, `gui_text`,
 `gui_rectangle`, `gui_group`, `gui_set_text`, `gui_set_place`, `gui_set_fill`,
 `gui_present`, `gui_wait`, `gui_measure`, `gui_close` — an item a number,
-removed with `gui_remove` or with its area. A C program that measures nothing
+removed with `gui_remove` or with its area; `gui_animate` makes what follows go
+in time, `GUI_EVENT_ANIMATION_END` tells its end, and `gui_less_motion` and
+`gui_motion_speed` say how the person wants things to move. A C program that measures nothing
 carries no reader of fonts.
 
 ## Layering
@@ -264,6 +300,14 @@ Every edge is covered as the brush covers it — one text, `boxos_shape.h`,
 glyphs and this engine — and its rows are worked plain, with SSE2 or with AVX2
 (`CpuPath`), the fastest the processor offers, every way the same bits.
 `tools/draw_stand.sh` holds it on the host, `drawcheck` on the machine.
+
+Time has its part of the engine too: `Easing` is how a change goes over the
+time it takes — straight, slowly at first, slowing at the end, both, in jumps,
+a Bézier of one's own — and `Spring` a weight on a spring, settling in the time
+it is given, bouncing past its rest by as much as it is told, its speed handed
+on when it is cut (`painter/core/easing.h`); `Color::Transition` walks a colour
+to another as the eye sees it, through OKLab; `Canvas::FadeTo` fades one picture
+into another pixel for pixel.
 
 ## Text
 
