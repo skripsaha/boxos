@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <new>
 #include <vector>
 
@@ -19,6 +20,59 @@
 namespace painter::core {
 
 namespace {
+
+/* The first of Count coverages that is not none — Count when all are —
+ * read eight at a time where eight are none. */
+std::int32_t FirstCovered(const std::uint8_t *Line, std::int32_t Count) noexcept
+{
+    std::int32_t I = 0;
+    for (; I + 8 <= Count; I += 8) {
+        std::uint64_t Eight;
+        std::memcpy(&Eight, Line + I, sizeof Eight);
+        if (Eight) break;
+    }
+    while (I < Count && !Line[I]) I++;
+    return I;
+}
+
+/* Shares read four at a time: whether any of four is none, or whole. */
+constexpr std::uint64_t Ones = 0x0001000100010001ull, Highs = 0x8000800080008000ull;
+constexpr bool AnyNone(std::uint64_t Four) noexcept { return ((Four - Ones) & ~Four & Highs) != 0; }
+std::uint64_t FourAt(const std::uint16_t *Share) noexcept
+{
+    std::uint64_t Four;
+    std::memcpy(&Four, Share, sizeof Four);
+    return Four;
+}
+
+/* The first of Share[I] up to End that is not none; End when none is. */
+std::int32_t NextCovered(const std::uint16_t *Share, std::int32_t I, std::int32_t End) noexcept
+{
+    while (I + 4 <= End && !FourAt(Share + I)) I += 4;
+    while (I < End && !Share[I]) I++;
+    return I;
+}
+/* … that is none. */
+std::int32_t NextUncovered(const std::uint16_t *Share, std::int32_t I, std::int32_t End) noexcept
+{
+    while (I + 4 <= End && !AnyNone(FourAt(Share + I))) I += 4;
+    while (I < End && Share[I]) I++;
+    return I;
+}
+/* … that is whole. */
+std::int32_t NextWhole(const std::uint16_t *Share, std::int32_t I, std::int32_t End) noexcept
+{
+    while (I + 4 <= End && !AnyNone(~FourAt(Share + I))) I += 4;
+    while (I < End && Share[I] != light::Whole) I++;
+    return I;
+}
+/* … that is not whole. */
+std::int32_t NextPart(const std::uint16_t *Share, std::int32_t I, std::int32_t End) noexcept
+{
+    while (I + 4 <= End && FourAt(Share + I) == ~0ull) I += 4;
+    while (I < End && Share[I] == light::Whole) I++;
+    return I;
+}
 
 std::uint32_t ShareOf(float Opacity) noexcept
 {
@@ -83,16 +137,21 @@ struct Canvas::Work {
     {
         constexpr std::int32_t Gap = 16;
         const std::uint16_t   *Share = Shares.data();
+        const std::int32_t     Past  = Last + 1;
         Runs.clear();
-        for (std::int32_t I = First; I <= Last;) {
-            while (I <= Last && !Share[I]) I++;
-            if (I > Last) break;
-            std::int32_t End = I, Quiet = 0;
-            while (End <= Last && Quiet < Gap) {
-                Quiet = Share[End] ? 0 : Quiet + 1;
-                End++;
+        for (std::int32_t I = NextCovered(Share, First, Past); I < Past; I = NextCovered(Share, I, Past)) {
+            /* A run goes on over every stretch of none shorter than the gap. */
+            std::int32_t End = I;
+            for (;;) {
+                const std::int32_t None = NextUncovered(Share, End, Past);
+                const std::int32_t Next = NextCovered(Share, None, Past);
+                if (Next >= Past || Next - None >= Gap) {
+                    End = None;
+                    break;
+                }
+                End = Next;
             }
-            Runs.push_back({I, End - Quiet});
+            Runs.push_back({I, End});
             I = End;
         }
         const lanes::Kit &Kit = lanes::Chosen();
@@ -109,13 +168,22 @@ struct Canvas::Work {
                     Kit.LayColor(Row + Each.Begin, Share + Each.Begin, Count, Color);
                     continue;
                 }
+                /* An opaque colour wholly covering a stretch is put, not laid —
+                 * a stretch long enough to be worth it: a glyph's few whole
+                 * pixels between its edges are laid with them, as they are the
+                 * same colour laid whole. */
+                constexpr std::int32_t PutLeast = 16;
                 for (std::int32_t I = Each.Begin; I < Each.End;) {
-                    std::int32_t End   = I;
-                    const bool   Whole = Share[I] == light::Whole;
-                    while (End < Each.End && (Share[End] == light::Whole) == Whole) End++;
-                    if (Whole) std::fill(Row + I, Row + End, Color);
-                    else       Kit.LayColor(Row + I, Share + I, static_cast<std::uint32_t>(End - I), Color);
-                    I = End;
+                    std::int32_t Whole = NextWhole(Share, I, Each.End), WholeEnd = Whole;
+                    while (Whole < Each.End) {
+                        WholeEnd = NextPart(Share, Whole, Each.End);
+                        if (WholeEnd - Whole >= PutLeast) break;
+                        Whole = NextWhole(Share, WholeEnd, Each.End);
+                    }
+                    if (Whole > I) Kit.LayColor(Row + I, Share + I, static_cast<std::uint32_t>(Whole - I), Color);
+                    if (Whole >= Each.End) break;
+                    std::fill(Row + Whole, Row + WholeEnd, Color);
+                    I = WholeEnd;
                 }
             }
     }
@@ -289,17 +357,22 @@ bool Canvas::LayMask(const Mask &Cover, std::span<const core::Fill> Fills, const
     if (At.Empty() || !Share) return true;
     Room->Shares.resize(static_cast<std::size_t>(At.Width));
     Room->Paint.resize(static_cast<std::size_t>(At.Width));
-    const Mask *Clip = Room->Top().Cover.get();
+    const Mask *Clip  = Room->Top().Cover.get();
+    const bool  Plain = !Clip && Share == light::Whole;
     for (std::int32_t Y = At.Y; Y < At.Y + At.Height; Y++) {
-        const std::uint8_t *Line  = Cover.Row(Y) + (At.X - Cover.Area().X);
-        std::int32_t        First = At.Width, Last = -1;
-        for (std::int32_t I = 0; I < At.Width; I++) {
-            const std::uint32_t Kept = Room->Kept(light::Widened(Line[I]), At.X + I, Y, Share, Clip);
-            Room->Shares[static_cast<std::size_t>(I)] = static_cast<std::uint16_t>(Kept);
-            if (Kept) {
-                First = std::min(First, I);
-                Last  = I;
-            }
+        const std::uint8_t *Line = Cover.Row(Y) + (At.X - Cover.Area().X);
+        /* A row's coverage from its first pixel covered to its last: what
+         * lies outside covers nothing and is passed over unread. */
+        std::int32_t First = FirstCovered(Line, At.Width);
+        if (First == At.Width) continue;
+        std::int32_t Last = At.Width - 1;
+        while (!Line[Last]) Last--;
+        std::uint16_t *Shares = Room->Shares.data();
+        if (Plain) {
+            for (std::int32_t I = First; I <= Last; I++) Shares[I] = static_cast<std::uint16_t>(light::Widened(Line[I]));
+        } else {
+            for (std::int32_t I = First; I <= Last; I++)
+                Shares[I] = static_cast<std::uint16_t>(Room->Kept(light::Widened(Line[I]), At.X + I, Y, Share, Clip));
         }
         Room->LayRow(*this, Y, At.X, First, Last);
     }

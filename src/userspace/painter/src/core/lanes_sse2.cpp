@@ -56,6 +56,7 @@ __attribute__((target("sse2"))) void LayColor(Pixel *Row, const std::uint16_t *S
     const __m128i Above = _mm_set1_epi64x(static_cast<long long>(Bits));
     std::uint32_t I     = 0;
     for (; I + 2u <= Count; I += 2u) {
+        if (!(Share[I] | Share[I + 1])) continue;   /* two pixels not covered: left as they are */
         __m128i *At = reinterpret_cast<__m128i *>(Row + I);
         _mm_storeu_si128(At, Over(_mm_loadu_si128(At), Above, TwoShares(Share + I)));
     }
@@ -68,6 +69,7 @@ __attribute__((target("sse2"))) void LayPaint(Pixel *Row, const Pixel *Paint, co
 {
     std::uint32_t I = 0;
     for (; I + 2u <= Count; I += 2u) {
+        if (!(Share[I] | Share[I + 1])) continue;
         __m128i *At = reinterpret_cast<__m128i *>(Row + I);
         _mm_storeu_si128(At, Over(_mm_loadu_si128(At), _mm_loadu_si128(reinterpret_cast<const __m128i *>(Paint + I)),
                                   TwoShares(Share + I)));

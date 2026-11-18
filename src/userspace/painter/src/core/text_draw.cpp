@@ -100,14 +100,14 @@ Rect PlaceOf(const Bar &Of) noexcept
     return Rect{Left, Of.Top, static_cast<std::int32_t>(std::ceil(Of.Right)) - Left, Of.Rows};
 }
 
-/* Coverage laid into a mask as one more cover over what is there: the share
- * either covers, 1 − (1 − a)(1 − b). */
-void Gather(Mask &Into, std::int32_t X, std::int32_t Y, std::uint8_t Cover) noexcept
+/* Count coverages laid into a mask's row as one more cover over what is
+ * there: the share either covers, 1 − (1 − a)(1 − b). */
+void Gather(std::uint8_t *Into, const std::uint8_t *Cover, std::int32_t Count) noexcept
 {
-    const Rect Area = Into.Area();
-    if (X < Area.X || Y < Area.Y || X >= Area.X + Area.Width || Y >= Area.Y + Area.Height || !Cover) return;
-    std::uint8_t &Here = Into.Row(Y)[X - Area.X];
-    Here = static_cast<std::uint8_t>(Here + Cover - (Here * Cover + 127) / 255);
+    for (std::int32_t I = 0; I < Count; I++) {
+        const std::uint32_t Here = Into[I], More = Cover[I];
+        if (More) Into[I] = static_cast<std::uint8_t>(Here + More - (Here * More + 127) / 255);
+    }
 }
 
 /* Where Text lands on the canvas, its corner at At, Scale and Move from it. */
@@ -142,17 +142,23 @@ std::optional<Mask> LineCover(const Landing &On, const typecase::LaidLine &Line,
         const typecase::GlyphImage &Image = *Here.Image;
         for (std::int32_t Y = Lies.Y; Y < Lies.Y + Lies.Height; Y++) {
             const std::uint8_t *Row = &Image.Coverage[static_cast<std::size_t>(Y - Here.Y - Image.Top) *
-                                                      static_cast<std::size_t>(Image.Width)];
-            for (std::int32_t X = Lies.X; X < Lies.X + Lies.Width; X++) Gather(Cover, X, Y, Row[X - Here.X - Image.Left]);
+                                                          static_cast<std::size_t>(Image.Width) +
+                                                      static_cast<std::size_t>(Lies.X - Here.X - Image.Left)];
+            Gather(Cover.Row(Y) + (Lies.X - Area.X), Row, Lies.Width);
         }
     });
+    std::vector<std::uint8_t> Shares;
     for (const Bar &Under : Bars) {
         const Rect Lies = PlaceOf(Under).Intersect(Area);
+        if (Lies.Empty()) continue;
+        Shares.resize(static_cast<std::size_t>(Lies.Width));
         for (std::int32_t X = Lies.X; X < Lies.X + Lies.Width; X++) {
             const float Covered = std::min(Under.Right, static_cast<float>(X + 1)) - std::max(Under.Left, static_cast<float>(X));
-            const auto  Share   = static_cast<std::uint8_t>(std::lround(std::clamp(Covered, 0.0f, 1.0f) * 255));
-            for (std::int32_t Y = Lies.Y; Y < Lies.Y + Lies.Height; Y++) Gather(Cover, X, Y, Share);
+            Shares[static_cast<std::size_t>(X - Lies.X)] =
+                static_cast<std::uint8_t>(std::lround(std::clamp(Covered, 0.0f, 1.0f) * 255));
         }
+        for (std::int32_t Y = Lies.Y; Y < Lies.Y + Lies.Height; Y++)
+            Gather(Cover.Row(Y) + (Lies.X - Area.X), Shares.data(), Lies.Width);
     }
     return Cover;
 }

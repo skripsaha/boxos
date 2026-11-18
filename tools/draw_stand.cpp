@@ -103,6 +103,7 @@ int main(int Argc, char **Argv)
         return stand::WriteTextSheet(Argv[2], Argc == 4 ? Argv[3] : nullptr) ? 0 : 1;
     if (Argc == 2 && std::strcmp(Argv[1], "speed") == 0) {
         stand::SaySpeed();
+        stand::SayTextSpeed();
         return 0;
     }
     if (Argc != 2 || std::strcmp(Argv[1], "checks") != 0) {

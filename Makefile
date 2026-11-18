@@ -859,8 +859,12 @@ PAINTER_LIB = $(PAINTER_DIR)/libpainter.a
 # and the chain of sources a screen asks. The fonts it reads go on the volume.
 TYPECASE_DIR   = $(USERSPACE_DIR)/typecase
 TYPECASE_LIB   = $(TYPECASE_DIR)/libtypecase.a
+# JetBrains Mono for cells and code; Inter, the system's text, in six of its
+# faces — every other weight the nearest of them, or made bold (fonts.h).
+INTER_FACES    = Regular Italic Medium SemiBold Bold BoldItalic
 TYPECASE_FONTS = $(TYPECASE_DIR)/fonts/JetBrainsMonoNL-Regular.ttf $(TYPECASE_DIR)/fonts/JetBrainsMonoNL-Bold.ttf \
-                 $(TYPECASE_DIR)/fonts/JetBrainsMono-OFL.txt
+                 $(TYPECASE_DIR)/fonts/JetBrainsMono-OFL.txt \
+                 $(foreach f,$(INTER_FACES),$(TYPECASE_DIR)/fonts/Inter-$(f).ttf) $(TYPECASE_DIR)/fonts/Inter-OFL.txt
 
 # The boot scenes (boxos_scene.h): each drawing still and alive, dark and
 # light, packed from src/userspace/scenes/NAME-KIND.txt — drawn from
@@ -1667,6 +1671,13 @@ VOLUME_CONTENT = \
 	$(TYPECASE_DIR)/fonts/JetBrainsMonoNL-Regular.ttf "font" \
 	$(TYPECASE_DIR)/fonts/JetBrainsMonoNL-Bold.ttf    "font" \
 	$(TYPECASE_DIR)/fonts/JetBrainsMono-OFL.txt       "font, license" \
+	$(TYPECASE_DIR)/fonts/Inter-Regular.ttf           "font" \
+	$(TYPECASE_DIR)/fonts/Inter-Italic.ttf            "font" \
+	$(TYPECASE_DIR)/fonts/Inter-Medium.ttf            "font" \
+	$(TYPECASE_DIR)/fonts/Inter-SemiBold.ttf          "font" \
+	$(TYPECASE_DIR)/fonts/Inter-Bold.ttf              "font" \
+	$(TYPECASE_DIR)/fonts/Inter-BoldItalic.ttf        "font" \
+	$(TYPECASE_DIR)/fonts/Inter-OFL.txt               "font, license" \
 	$(BUILDDIR)/scenes/dark-alive/boot.scene           "boot, duppo, dark, animated" \
 	$(BUILDDIR)/scenes/dark-still/boot.scene           "boot, duppo, dark" \
 	$(BUILDDIR)/scenes/light-alive/boot.scene          "boot, duppo, light, animated" \

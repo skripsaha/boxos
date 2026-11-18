@@ -18,7 +18,6 @@
 
 #include "box/debug.h"
 #include "box/file.h"
-#include "box/settings.h"
 
 namespace painter::core {
 
@@ -101,9 +100,8 @@ std::shared_ptr<const typecase::Fonts> SystemFonts()
     static std::once_flag                         Once;
     static std::shared_ptr<const typecase::Fonts> Kept;
     std::call_once(Once, [] {
-        auto        Book = std::make_shared<typecase::Fonts>();
-        const char *Text = settings_text("text font");
-        file_id_t  *Ids   = nullptr;
+        auto       Book  = std::make_shared<typecase::Fonts>();
+        file_id_t *Ids   = nullptr;
         const int   Count = query_all_everywhere("font", nullptr, &Ids);
         for (int Index = 0; Index < Count; Index++) {
             FileMetadata Metadata;
@@ -117,10 +115,10 @@ std::shared_ptr<const typecase::Fonts> SystemFonts()
             }
             std::expected<typecase::Font, typecase::Fault> Face = typecase::Font::Read(std::move(*Bytes));
             if (!Face) continue;
-            if (Text && Name == Text) Book->SetDefault(Face->Style().Family);
             Book->Add(std::move(*Face));
         }
         std::free(Ids);
+        Book->SetDefault(SystemTextFamily);
         Kept = std::move(Book);
     });
     return Kept;

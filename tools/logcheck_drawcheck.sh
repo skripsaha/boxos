@@ -68,8 +68,9 @@ run_drawcheck() {
         grep -a "^drawcheck: " "$L" | tr -d '\r' | sed 's/^/  /'
         grep -aq "drawcheck: the processor offers $want — the engine works it so" "$L"
         chk $? "drawcheck ($name): the engine works the way the processor offers — $want"
-        grep -aq "drawcheck: the system's fonts — JetBrains Mono NL; text set in JetBrains Mono NL" "$L"
-        chk $? "drawcheck ($name): the system's fonts read from the volume, text set in them"
+        grep -a "drawcheck: the system's fonts — " "$L" | grep -a "Inter" | grep -a "JetBrains Mono NL" |
+            grep -aq "; text set in Inter"
+        chk $? "drawcheck ($name): the system's fonts read from the volume — Inter and JetBrains Mono — text set in Inter"
         local way held=1
         for way in $ways; do
             grep -aq "drawcheck: $way — 32 scenes, every pixel the plain way's, near and dithered" "$L" || held=0

@@ -14,11 +14,16 @@ namespace painter::core {
 
 // The system's fonts: every file on the volume tagged "font" that reads as a
 // font, gathered into one book (typecase/fonts.h) — its default family the
-// person's text font (the setting "text font"), every other family a
-// fallback. Read the first time they are asked, and kept: text a program
-// draws itself is set in them unless it says otherwise. A file that will not
-// read is said and passed over.
+// system's text, Inter (SystemTextFamily), every other family a fallback.
+// Read the first time they are asked, and kept: text a program draws itself
+// is set in them unless it says otherwise. A file that will not read is said
+// and passed over. The cells of the console keep their own font, the
+// display's setting "text font": a family for code, not for text.
 std::shared_ptr<const typecase::Fonts> SystemFonts();
+
+// The family text is set in when nothing says another — until the theme
+// names the family of each role.
+inline constexpr const char *SystemTextFamily = "Inter";
 
 // The font file called Name — and wearing every tag of Tags besides (apart by
 // commas, "" for none) — found anywhere on the volume, not only in the Use

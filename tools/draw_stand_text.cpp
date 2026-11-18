@@ -10,11 +10,13 @@
  * whole pixels at 20 to the em.
  */
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <iterator>
 #include <optional>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -38,12 +40,19 @@ std::vector<std::uint8_t> Load(const char *Path)
     return std::vector<std::uint8_t>(std::istreambuf_iterator<char>(In), std::istreambuf_iterator<char>());
 }
 
-typecase::Fonts TreeBook()
+/* The tree's JetBrains Mono — and, for text to look at, its Inter too, the
+ * system's text. */
+typecase::Fonts TreeBook(bool Text = false)
 {
     typecase::Fonts Book;
-    for (const char *Path : {"src/userspace/typecase/fonts/JetBrainsMonoNL-Regular.ttf",
-                             "src/userspace/typecase/fonts/JetBrainsMonoNL-Bold.ttf"})
-        if (auto Face = typecase::Font::Read(Load(Path))) Book.Add(std::move(*Face));
+    std::vector<std::string> Paths = {"JetBrainsMonoNL-Regular", "JetBrainsMonoNL-Bold"};
+    if (Text)
+        for (const char *Face : {"Regular", "Italic", "Medium", "SemiBold", "Bold", "BoldItalic"})
+            Paths.push_back(std::string("Inter-") + Face);
+    for (const std::string &Path : Paths)
+        if (auto Face = typecase::Font::Read(Load(("src/userspace/typecase/fonts/" + Path + ".ttf").c_str())))
+            Book.Add(std::move(*Face));
+    if (Text) Book.SetDefault("Inter");
     return Book;
 }
 
@@ -239,9 +248,31 @@ void CheckText(Tally &Count)
     }
 }
 
+void SayTextSpeed()
+{
+    const typecase::Fonts Book = TreeBook(true);
+    std::string           Said;
+    const char           *Words[] = {"BoxOS", "draws", "text", "in", "any", "font,", "size", "and", "place;",
+                                     "\xD1\x82\xD0\xB5\xD0\xBA\xD1\x81\xD1\x82", "AVATAR", "kerned", "wrapped"};
+    for (std::size_t K = 0; Said.size() < 4000; K++) Said += std::string(Words[K % 13]) + " ";
+    typecase::TextBox Box;
+    Box.Width             = 1800;
+    Box.Align             = typecase::TextAlign::Justify;
+    const auto Laid       = Lay(Book, Said.c_str(), 16, Box);
+    std::optional<Canvas> C = Canvas::Make(1920, 1080);
+    const Fill            Ink(Color::Rgb(240, 240, 240));
+    C->FillText(Laid, {40, 40}, Ink);
+    constexpr int Rounds = 20;
+    const auto    Start  = std::chrono::steady_clock::now();
+    for (int Round = 0; Round < Rounds; Round++) C->FillText(Laid, {40, 40}, Ink);
+    const double Us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - Start).count() / Rounds;
+    std::printf("  text: %zu glyphs at 16 px drawn kept in %.0f us, %.0f ns a glyph\n", Laid.Glyphs().size(), Us,
+                Us * 1000 / static_cast<double>(Laid.Glyphs().size()));
+}
+
 bool WriteTextSheet(const char *Out, const char *FontPath)
 {
-    typecase::Fonts Book = TreeBook();
+    typecase::Fonts Book = TreeBook(true);
     if (FontPath)
         if (auto Face = typecase::Font::Read(Load(FontPath))) {
             const std::string Family = Face->Style().Family;
