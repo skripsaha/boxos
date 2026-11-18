@@ -34,6 +34,7 @@
 #include <functional>
 #include <map>
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 #include "box/error.h"
@@ -115,24 +116,42 @@ private:
         bool          Cut   = false;
     };
 
+    /* A moment something is due: an animation's beginning, or its end. */
+    struct Moment {
+        std::uint64_t At;
+        bool          Ends;
+        std::uint64_t Serial;
+    };
+
     std::uint64_t DelayOf(const Animation &Of) const noexcept;
     bool          WaitsOnItself(std::uint32_t Number, std::uint32_t After) const;
-    std::size_t   IndexOf(std::uint64_t Serial) const noexcept;
-    void          Begin(std::size_t Index, std::uint64_t At, const Theme &Look);
+    void          Schedule(std::uint64_t At, bool Ends, std::uint64_t Serial);
+    bool          Stale(const Moment &Of) const noexcept;
+    void          Prune() noexcept;
+    void          Begin(std::uint64_t Serial, std::uint64_t At, const Theme &Look);
     void          Show(Animation &Of, std::uint64_t At, const Theme &Look);
     std::vector<double> SpeedOf(const Animation &Of, std::uint64_t At) const;
-    void          Finish(std::size_t Index, std::uint64_t At);
-    void          End(std::size_t Index, std::uint64_t At, bool Finished) noexcept;
+    void          Finish(std::uint64_t Serial, std::uint64_t At);
+    void          End(std::uint64_t Serial, std::uint64_t At, bool Finished) noexcept;
     float         Progress(const Animation &Of, std::uint64_t At, std::uint64_t &RunOf) const noexcept;
     void          Turns(std::uint32_t Item) noexcept;
 
     Tree                                   &Items;
     Budget                                 &Held;
     const Motion                           &Wanted;
-    std::vector<Animation>                  All;          // in the order said
-    std::map<std::uint32_t, Numbered>       ByNumber;
-    std::vector<std::pair<std::uint32_t, ItemAnimationEnd>> Told;    // to be told: the item, the end
-    std::uint64_t                           Serials = 0;
+    /* Every animation by its serial — the order it was said in — and found
+     * without a search: by its item, by the number it waits on, and by the
+     * moment it is next due, earliest first (a moment since put off is passed
+     * over as it comes up). */
+    std::unordered_map<std::uint64_t, Animation>                  All;
+    std::unordered_map<std::uint32_t, std::vector<std::uint64_t>> OfItem;
+    std::unordered_map<std::uint32_t, std::vector<std::uint64_t>> WaitingOn;
+    std::vector<std::uint64_t>                                    NewlySaid;   // in the steps being read, in order
+    std::vector<Moment>                                           Moments;     // a heap
+    std::size_t                                                   Moving = 0;  // under way
+    std::map<std::uint32_t, Numbered>                             ByNumber;
+    std::vector<std::pair<std::uint32_t, ItemAnimationEnd>>       Told;        // to be told: the item, the end
+    std::uint64_t                                                 Serials = 0;
     std::uint64_t                           ReadAt = 0;
     std::uint64_t                           Shown  = 0;   // the last moment brought to
 };

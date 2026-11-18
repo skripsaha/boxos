@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -65,8 +66,7 @@ public:
     Pond(gui::Area Opened, painter::tui::Keyboard Heard)
         : Screen(std::move(Opened)), Keys(std::move(Heard)), Page(Screen.Rectangle(gui::Role::Page)),
           Title(Screen.Text("ripple", gui::Role::Heading)),
-          Hint(Screen.Text("arrows  aim    space  drop it there    any key  a stone anywhere    c  clear    esc  leave", gui::Role::Hint)),
-          Aim(Screen.Ellipse())
+          Hint(Screen.Text("arrows  aim    space  drop it there    any key  a stone anywhere    c  clear    esc  leave", gui::Role::Hint))
     {
         Keys.HearEnd();
     }
@@ -116,7 +116,7 @@ private:
                     .SetAnchor({S / 2, S / 2})
                     .SetCorners(painter::core::Corners::All(S * 0.18f));
         const PointF At = TileAt(AimX, AimY);
-        Aim.SetPlace({At.X - 4, At.Y - 4}).SetSize({S + 8, S + 8});
+        Aim->SetPlace({At.X - 4, At.Y - 4}).SetSize({S + 8, S + 8});
     }
 
     /* The pond rises out of nothing, tile after tile from its middle. */
@@ -128,10 +128,12 @@ private:
             Made.Plate.SetFill(gui::Fill::Of(Water)).SetScale({0, 0});
             Tiles.push_back(std::move(Made));
         }
+        /* The aim above every tile. */
+        Aim = Screen.Ellipse();
         gui::Stroke Ring;
         Ring.Width = 2;
         Ring.With  = gui::Fill::Of(Color::Rgba(255, 255, 255, 170));
-        Aim.SetFills({}).SetStroke(Ring).SetOpacity(0);
+        Aim->SetFills({}).SetStroke(Ring).SetOpacity(0);
         Hint.SetOpacity(0);
         Lay();
         for (int Y = 0; Y < Down; Y++)
@@ -144,7 +146,7 @@ private:
         Late.Delay          = 600ms;
         Screen.Animate(Late, [&] {
             Hint.SetOpacity(1);
-            Aim.SetOpacity(1);
+            Aim->SetOpacity(1);
         });
         (void)Screen.Present();
     }
@@ -197,7 +199,7 @@ private:
         AimX = std::clamp(AimX + Dx, 0, Across - 1);
         AimY = std::clamp(AimY + Dy, 0, Down - 1);
         const PointF At = TileAt(AimX, AimY);
-        Screen.Animate(gui::Animation::Spring(350ms, 0.25f), [&] { Aim.SetPlace({At.X - 4, At.Y - 4}); });
+        Screen.Animate(gui::Animation::Spring(350ms, 0.25f), [&] { Aim->SetPlace({At.X - 4, At.Y - 4}); });
     }
 
     bool Key(const painter::tui::KeyEvent &Pressed)
@@ -227,8 +229,8 @@ private:
     painter::tui::Keyboard Keys;
     gui::Shape             Page;
     gui::Text              Title, Hint;
-    gui::Shape             Aim;
     std::vector<Tile>      Tiles;
+    std::optional<gui::Shape> Aim;   // made after the tiles, so it lies above them
     int                    AimX = Across / 2, AimY = Down / 2;
 };
 

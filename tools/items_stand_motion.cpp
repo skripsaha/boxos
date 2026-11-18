@@ -513,6 +513,39 @@ void CheckTurning(Tally &Count)
                     " of a hundred off the text drawn turned; once still drawn sharp, the very pixels composed whole");
 }
 
+void CheckMany(Tally &Count)
+{
+    /* Thousands at once — a pond of tiles stoned again and again: every one
+     * begun, cut by the next and ended, the work growing as they do and no
+     * faster. */
+    constexpr std::uint32_t Plates = 1500;
+    Scene On;
+    for (std::uint32_t Id = 1; Id <= Plates; Id++) {
+        On.Say.Create(Id, gui::Kind::Shape);
+        On.Say.Rectangle(Id);
+        On.Say.Size(Id, {4, 4});
+        On.Say.Opacity(Id, 0);
+    }
+    On.At(Ms);
+    const auto Began = std::chrono::steady_clock::now();
+    for (int Stone = 0; Stone < 4; Stone++) {
+        for (std::uint32_t Id = 1; Id <= Plates; Id++) {
+            Animation Ring = Animation::Out(300ms);
+            Ring.Delay     = std::chrono::milliseconds(Id % 200);
+            On.Say.Animate(Ring, [&] { On.Say.Opacity(Id, Stone % 2 ? 0.0f : 1.0f); });
+        }
+        On.At((1000 + 50 * static_cast<std::uint64_t>(Stone)) * Ms);
+        for (std::uint64_t T = 0; T < 50; T += 16) On.Shown.Advance((1000 + 50 * static_cast<std::uint64_t>(Stone) + T) * Ms, On.Look);
+    }
+    On.Shown.Advance(3000 * Ms, On.Look);
+    const double Took = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - Began).count();
+    char Said[48];
+    std::snprintf(Said, sizeof Said, "%.0f ms", Took);
+    Count.Check(On.Shown.Area.Moving.Count() == 0 && On.Shown.Area.Moving.Due(true) == 0 && Took < 2000,
+                std::string("many: 1500 plates faded four times over, each cutting the last, in ") + Said +
+                    " on the host — all ended, nothing left moving");
+}
+
 }  // namespace
 
 void CheckMotion(Tally &Count)
@@ -529,6 +562,7 @@ void CheckMotion(Tally &Count)
     CheckWishes(Count);
     CheckTurning(Count);
     CheckFresh(Count);
+    CheckMany(Count);
 }
 
 }  // namespace stand

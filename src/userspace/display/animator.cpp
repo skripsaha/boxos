@@ -111,7 +111,7 @@ std::uint64_t Times(std::uint64_t A, std::uint64_t B) noexcept
 
 Animator::~Animator()
 {
-    for (const Animation &Each : All) {
+    for (const auto &[Serial, Each] : All) {
         Held.Animations--;
         Held.AnimationBytes -= Each.Value.size();
     }
@@ -123,11 +123,49 @@ std::uint64_t Animator::DelayOf(const Animation &Of) const noexcept
     return std::uint64_t{Of.How.Delay} * 1000u * 100u / Speed;
 }
 
-std::size_t Animator::IndexOf(std::uint64_t Serial) const noexcept
+namespace {
+
+/* The heap's order: the earliest moment on top — at one moment an end before
+ * a beginning, so what waits on it begins after it. */
+struct Later {
+    template <typename Moment> bool operator()(const Moment &A, const Moment &B) const noexcept
+    {
+        return A.At != B.At ? A.At > B.At : (A.Ends != B.Ends ? !A.Ends : A.Serial > B.Serial);
+    }
+};
+
+void Forget(std::vector<std::uint64_t> &From, std::uint64_t Serial) noexcept
 {
-    for (std::size_t I = 0; I < All.size(); I++)
-        if (All[I].Serial == Serial) return I;
-    return All.size();
+    const auto Found = std::find(From.begin(), From.end(), Serial);
+    if (Found != From.end()) From.erase(Found);
+}
+
+}  // namespace
+
+void Animator::Schedule(std::uint64_t At, bool Ends, std::uint64_t Serial)
+{
+    Moments.push_back(Moment{At, Ends, Serial});
+    std::push_heap(Moments.begin(), Moments.end(), Later{});
+}
+
+/* A moment put off: its animation cut, or due otherwise now. */
+bool Animator::Stale(const Moment &Of) const noexcept
+{
+    const auto It = All.find(Of.Serial);
+    if (It == All.end()) return true;
+    const Animation &Each = It->second;
+    if (Of.Ends) return Each.Stage != State::Under || Each.Runs == 0 || Each.Begins + Times(Each.Run, Each.Runs) != Of.At;
+    return Each.Stage != State::Due || Each.Begins != Of.At;
+}
+
+/* The moments put off taken from the top, so the next one is a true one. */
+void Animator::Prune() noexcept
+{
+    if (All.empty()) Moments.clear();
+    while (!Moments.empty() && Stale(Moments.front())) {
+        std::pop_heap(Moments.begin(), Moments.end(), Later{});
+        Moments.pop_back();
+    }
 }
 
 error_t Animator::Said(std::uint32_t Item, const ItemAnimation &How, std::uint16_t Property,
@@ -153,7 +191,9 @@ error_t Animator::Said(std::uint32_t Item, const ItemAnimation &How, std::uint16
         Made.Value.assign(Value.begin(), Value.end());
         Made.Serial = ++Serials;
         Made.Fresh  = !Of->Drawn && !IsSaid(Property, Of->Said);
-        All.push_back(std::move(Made));
+        OfItem[Item].push_back(Made.Serial);
+        NewlySaid.push_back(Made.Serial);
+        All.emplace(Made.Serial, std::move(Made));
         if (How.Number) ByNumber[How.Number].Count++;
     } catch (...) {
         return ERR_NO_MEMORY;
@@ -165,17 +205,22 @@ error_t Animator::Said(std::uint32_t Item, const ItemAnimation &How, std::uint16
 
 void Animator::Cut(std::uint32_t Item, std::uint16_t Property) noexcept
 {
-    for (std::size_t I = All.size(); I-- > 0;) {
-        const Animation &Each = All[I];
-        if (Each.Item != Item || (Property != 0 && Each.Property != Property)) continue;
+    const auto Found = OfItem.find(Item);
+    if (Found == OfItem.end()) return;
+    const std::vector<std::uint64_t> Serials2 = Found->second;
+    for (std::uint64_t Serial : Serials2) {
+        const auto It = All.find(Serial);
+        if (It == All.end() || (Property != 0 && It->second.Property != Property)) continue;
+        const Animation &Each = It->second;
         /* Said plainly, a thing shown or hidden is wholly what it is now. */
         if (Property != 0 && Each.Stage == State::Under && (Each.Goes == Way::Shows || Each.Goes == Way::Hides))
             if (items::Item *Of = Items.Find(Item)) {
                 Of->Seen = 1;
                 Items.Recompose(Item);
             }
-        End(I, ReadAt, false);
+        End(Serial, ReadAt, false);
     }
+    Prune();
 }
 
 bool Animator::WaitsOnItself(std::uint32_t Number, std::uint32_t After) const
@@ -185,7 +230,7 @@ bool Animator::WaitsOnItself(std::uint32_t Number, std::uint32_t After) const
     while (!Ahead.empty()) {
         const std::uint32_t Next = Ahead.back();
         Ahead.pop_back();
-        for (const Animation &Each : All) {
+        for (const auto &[Serial, Each] : All) {
             if (Each.How.Number != Next || Each.How.After == 0 || (Each.Stage != State::Said && Each.Stage != State::Waits))
                 continue;
             if (Each.How.After == Number) return true;
@@ -200,23 +245,31 @@ bool Animator::WaitsOnItself(std::uint32_t Number, std::uint32_t After) const
 
 void Animator::StepWhole() noexcept
 {
-    for (Animation &Each : All) {
-        if (Each.Stage != State::Said) continue;
-        bool Waits = false;
-        if (Each.How.After != 0) {
-            const auto        Found = ByNumber.find(Each.How.After);
-            const std::uint32_t Own = Each.How.Number == Each.How.After ? 1u : 0u;
-            try {
+    const std::vector<std::uint64_t> Said2 = std::move(NewlySaid);
+    NewlySaid.clear();
+    for (std::uint64_t Serial : Said2) {
+        const auto It = All.find(Serial);
+        if (It == All.end() || It->second.Stage != State::Said) continue;
+        Animation &Each  = It->second;
+        bool       Waits = false;
+        try {
+            if (Each.How.After != 0) {
+                const auto          Found = ByNumber.find(Each.How.After);
+                const std::uint32_t Own   = Each.How.Number == Each.How.After ? 1u : 0u;
                 Waits = Found != ByNumber.end() && Found->second.Count > Own && !WaitsOnItself(Each.How.Number, Each.How.After);
-            } catch (...) {
-                Waits = false;
             }
-        }
-        if (Waits) {
-            Each.Stage = State::Waits;
-        } else {
-            Each.Stage  = State::Due;
-            Each.Begins = ReadAt + DelayOf(Each);
+            if (Waits) {
+                WaitingOn[Each.How.After].push_back(Serial);
+                Each.Stage = State::Waits;
+            } else {
+                Each.Stage  = State::Due;
+                Each.Begins = ReadAt + DelayOf(Each);
+                Schedule(Each.Begins, false, Serial);
+            }
+        } catch (...) {
+            // No room to keep it waiting: it is said at once.
+            (void)Items.Change(Each.Item, Each.Property, Each.Value);
+            End(Serial, ReadAt, true);
         }
     }
 }
@@ -308,11 +361,10 @@ std::vector<double> Animator::SpeedOf(const Animation &Of, std::uint64_t At) con
     return Made;
 }
 
-void Animator::Begin(std::size_t Index, std::uint64_t At, const Theme &Look)
+void Animator::Begin(std::uint64_t Serial, std::uint64_t At, const Theme &Look)
 {
-    const std::uint64_t Serial = All[Index].Serial;
     {
-        Animation &Of = All[Index];
+        Animation &Of = All.at(Serial);
         /* How long it takes, as the person wants things to move now. */
         const std::uint64_t Speed = std::clamp<std::uint32_t>(Wanted.Speed, 25, 400);
         Of.Run   = std::uint64_t{Of.How.Duration} * 1000u * 100u / Speed;
@@ -334,23 +386,26 @@ void Animator::Begin(std::size_t Index, std::uint64_t At, const Theme &Look)
      * on its speed. */
     std::vector<double>        Carried;
     std::vector<std::uint32_t> CarriedForm;
-    const std::uint32_t        Item = All[Index].Item;
-    const std::uint16_t        Property = All[Index].Property;
-    for (std::size_t J = All.size(); J-- > 0;) {
-        Animation &Other = All[J];
-        if (Other.Serial == Serial || Other.Stage != State::Under || Other.Item != Item || Other.Property != Property) continue;
-        Show(Other, At, Look);
-        if (Other.Goes == Way::Walks) {
-            Carried     = SpeedOf(Other, At);
-            CarriedForm = Other.Toward.Form;
+    const std::uint32_t        Item     = All.at(Serial).Item;
+    const std::uint16_t        Property = All.at(Serial).Property;
+    if (const auto Same = OfItem.find(Item); Same != OfItem.end()) {
+        const std::vector<std::uint64_t> Others = Same->second;
+        for (std::uint64_t Next : Others) {
+            const auto It = All.find(Next);
+            if (Next == Serial || It == All.end() || It->second.Stage != State::Under || It->second.Property != Property) continue;
+            Animation &Other = It->second;
+            Show(Other, At, Look);
+            if (Other.Goes == Way::Walks) {
+                Carried     = SpeedOf(Other, At);
+                CarriedForm = Other.Toward.Form;
+            }
+            End(Next, At, false);
         }
-        End(J, At, false);
     }
-    Index        = IndexOf(Serial);
-    Animation &Of = All[Index];
+    Animation &Of = All.at(Serial);
     items::Item *It = Items.Find(Of.Item);
     if (!It) {
-        End(Index, At, false);
+        End(Serial, At, false);
         return;
     }
     Of.Stage  = State::Under;
@@ -415,10 +470,12 @@ void Animator::Begin(std::size_t Index, std::uint64_t At, const Theme &Look)
     }
     if (Of.Goes == Way::AtOnce) {
         (void)Items.Change(Of.Item, Of.Property, Of.Value);
-        End(Index, At, true);
+        End(Serial, At, true);
         return;
     }
+    Moving++;
     if (Of.Goes == Way::Walks && items::Turns(Of.Property)) It->Turning = true;
+    if (Of.Runs != 0) Schedule(Of.Begins + Times(Of.Run, Of.Runs), true, Serial);
     Show(Of, At, Look);
 }
 
@@ -426,16 +483,19 @@ void Animator::Turns(std::uint32_t Item) noexcept
 {
     items::Item *It = Items.Find(Item);
     if (!It || !It->Turning) return;
-    for (const Animation &Each : All)
-        if (Each.Item == Item && Each.Stage == State::Under && Each.Goes == Way::Walks && items::Turns(Each.Property)) return;
+    if (const auto Same = OfItem.find(Item); Same != OfItem.end())
+        for (std::uint64_t Serial : Same->second)
+            if (const auto Each = All.find(Serial); Each != All.end() && Each->second.Stage == State::Under &&
+                                                     Each->second.Goes == Way::Walks && items::Turns(Each->second.Property))
+                return;
     /* Still at last: drawn sharp again where it lies. */
     It->Turning = false;
     Items.Recompose(Item);
 }
 
-void Animator::Finish(std::size_t Index, std::uint64_t At)
+void Animator::Finish(std::uint64_t Serial, std::uint64_t At)
 {
-    Animation &Of = All[Index];
+    Animation &Of = All.at(Serial);
     if (items::Item *It = Items.Find(Of.Item)) {
         /* Exactly what was said, said as a plain change says it — a fade's
          * new look was said as it began. */
@@ -445,42 +505,65 @@ void Animator::Finish(std::size_t Index, std::uint64_t At)
             Items.Recompose(Of.Item);
         }
     }
-    End(Index, At, true);
+    End(Serial, At, true);
 }
 
-void Animator::End(std::size_t Index, std::uint64_t At, bool Finished) noexcept
+void Animator::End(std::uint64_t Serial, std::uint64_t At, bool Finished) noexcept
 {
-    const Animation &Of = All[Index];
+    const auto Found = All.find(Serial);
+    if (Found == All.end()) return;
+    const Animation &Of = Found->second;
     if (Of.Goes == Way::Fades && Of.Stage == State::Under)
         if (items::Item *It = Items.Find(Of.Item); It && It->Fading) {
             It->Fading.reset();
             Items.Recompose(Of.Item);
         }
+    if (Of.Stage == State::Under && Of.Goes != Way::AtOnce) Moving--;
+    if (Of.Stage == State::Said) Forget(NewlySaid, Serial);
+    if (Of.Stage == State::Waits)
+        if (const auto Waits = WaitingOn.find(Of.How.After); Waits != WaitingOn.end()) {
+            Forget(Waits->second, Serial);
+            if (Waits->second.empty()) WaitingOn.erase(Waits);
+        }
     Held.Animations--;
     Held.AnimationBytes -= Of.Value.size();
     const std::uint32_t Number = Of.How.Number, Item = Of.Item;
     const bool          Turned = items::Turns(Of.Property);
-    All.erase(All.begin() + static_cast<std::ptrdiff_t>(Index));
+    All.erase(Found);
+    if (const auto Same = OfItem.find(Item); Same != OfItem.end()) {
+        Forget(Same->second, Serial);
+        if (Same->second.empty()) OfItem.erase(Same);
+    }
     if (Turned) Turns(Item);
     if (Number == 0) return;
-    const auto Found = ByNumber.find(Number);
-    if (Found == ByNumber.end()) return;
-    Found->second.Count--;
-    Found->second.Cut = Found->second.Cut || !Finished;
-    if (Found->second.Count != 0) return;
-    const bool Whole = !Found->second.Cut;
-    ByNumber.erase(Found);
+    const auto Counted = ByNumber.find(Number);
+    if (Counted == ByNumber.end()) return;
+    Counted->second.Count--;
+    Counted->second.Cut = Counted->second.Cut || !Finished;
+    if (Counted->second.Count != 0) return;
+    const bool Whole = !Counted->second.Cut;
+    ByNumber.erase(Counted);
     try {
         Told.push_back({Item, ItemAnimationEnd{Number, static_cast<std::uint8_t>(Whole), {0, 0, 0}}});
     } catch (...) {
         // No room to keep the end to tell: the program does not hear it.
     }
     /* Those waiting on the number begin from the moment it ended. */
-    for (Animation &Each : All)
-        if (Each.Stage == State::Waits && Each.How.After == Number) {
-            Each.Stage  = State::Due;
-            Each.Begins = At + DelayOf(Each);
+    const auto Waits = WaitingOn.find(Number);
+    if (Waits == WaitingOn.end()) return;
+    const std::vector<std::uint64_t> Woken = std::move(Waits->second);
+    WaitingOn.erase(Waits);
+    for (std::uint64_t Next : Woken) {
+        const auto It = All.find(Next);
+        if (It == All.end() || It->second.Stage != State::Waits) continue;
+        It->second.Stage  = State::Due;
+        It->second.Begins = At + DelayOf(It->second);
+        try {
+            Schedule(It->second.Begins, false, Next);
+        } catch (...) {
+            // No room to keep its moment: it waits until it is cut.
         }
+    }
 }
 
 void Animator::Advance(std::uint64_t Now, const Theme &Look, const Ending &Ended) noexcept
@@ -488,43 +571,41 @@ void Animator::Advance(std::uint64_t Now, const Theme &Look, const Ending &Ended
     try {
         if (Wanted.Instant) {
             /* A text page: every change at once, in the order said. */
-            while (!All.empty()) {
-                (void)Items.Change(All.front().Item, All.front().Property, All.front().Value);
-                End(0, Now, true);
+            std::vector<std::uint64_t> Order;
+            Order.reserve(All.size());
+            for (const auto &[Serial, Each] : All) Order.push_back(Serial);
+            std::sort(Order.begin(), Order.end());
+            for (std::uint64_t Serial : Order) {
+                const auto It = All.find(Serial);
+                if (It == All.end()) continue;
+                (void)Items.Change(It->second.Item, It->second.Property, It->second.Value);
+                End(Serial, Now, true);
             }
+            Moments.clear();
         } else {
-            for (std::size_t I = All.size(); I-- > 0;)
-                if (I < All.size() && !Items.Find(All[I].Item)) End(I, Now, false);
-            /* What is due by now, earliest first — an end before a beginning
-             * at one moment, so what waits on it begins after it. */
-            for (;;) {
-                std::size_t   Pick = All.size();
-                std::uint64_t When = 0;
-                bool          Ends = false;
-                for (std::size_t I = 0; I < All.size(); I++) {
-                    const Animation &Each = All[I];
-                    std::uint64_t    At   = 0;
-                    bool             Ending2 = false;
-                    if (Each.Stage == State::Due && Each.Begins <= Now) {
-                        At = Each.Begins;
-                    } else if (Each.Stage == State::Under && Each.Runs != 0 && Each.Begins + Times(Each.Run, Each.Runs) <= Now) {
-                        At = Each.Begins + Times(Each.Run, Each.Runs), Ending2 = true;
-                    } else {
-                        continue;
-                    }
-                    if (Pick == All.size() || At < When || (At == When && Ending2 && !Ends)) Pick = I, When = At, Ends = Ending2;
-                }
-                if (Pick == All.size()) break;
-                if (Ends) Finish(Pick, When);
-                else Begin(Pick, When, Look);
+            /* What animates an item that is gone is cut. */
+            std::vector<std::uint32_t> Gone;
+            for (const auto &[Item, Serials2] : OfItem)
+                if (!Items.Find(Item)) Gone.push_back(Item);
+            for (std::uint32_t Item : Gone) Cut(Item, 0);
+            /* What is due by now, earliest first; a moment since put off — its
+             * animation cut, or its beginning moved — passed over. */
+            while (!Moments.empty() && Moments.front().At <= Now) {
+                std::pop_heap(Moments.begin(), Moments.end(), Later{});
+                const Moment Next = Moments.back();
+                Moments.pop_back();
+                if (Stale(Next)) continue;
+                if (Next.Ends) Finish(Next.Serial, Next.At);
+                else Begin(Next.Serial, Next.At, Look);
             }
-            for (Animation &Each : All)
+            for (auto &[Serial, Each] : All)
                 if (Each.Stage == State::Under) Show(Each, Now, Look);
         }
     } catch (...) {
         // No room to bring them on: where they stand, brought on at the next
         // frame.
     }
+    Prune();
     Shown = Now;
     for (const auto &[Item, End2] : Told) Ended(Item, End2);
     Told.clear();
@@ -533,14 +614,8 @@ void Animator::Advance(std::uint64_t Now, const Theme &Look, const Ending &Ended
 std::uint64_t Animator::Due(bool Seen) const noexcept
 {
     if (!Told.empty() || (Wanted.Instant && !All.empty())) return 1;
-    std::uint64_t Next = 0;
-    const auto    Sooner = [&Next](std::uint64_t At) { Next = Next == 0 ? At : std::min(Next, At); };
-    for (const Animation &Each : All) {
-        if (Each.Stage == State::Due) Sooner(std::max<std::uint64_t>(Each.Begins, 1));
-        if (Each.Stage != State::Under) continue;
-        if (Each.Runs != 0) Sooner(Each.Begins + Times(Each.Run, Each.Runs));
-        if (Seen) Sooner(Shown + FrameMicros);
-    }
+    std::uint64_t Next = Moments.empty() ? 0 : std::max<std::uint64_t>(Moments.front().At, 1);
+    if (Seen && Moving != 0) Next = Next == 0 ? Shown + FrameMicros : std::min(Next, Shown + FrameMicros);
     return Next;
 }
 
