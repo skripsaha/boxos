@@ -355,6 +355,29 @@ void CheckFrame(Tally &Count)
                     WholeMicros / 120.0);
     Count.Check(Scrolls == 0 || Shifted < Scrolls * Pixels, "frame: a scroll writes less than the whole glass");
 
+    /* The console written straight into the mirror where nothing lies over
+     * it holds the very pixels the canvas's way gives: a see-through veil
+     * over the whole glass sends every tile that way. */
+    Mirror Straight(Glass.Width, Glass.Height), Canvassed(Glass.Width, Glass.Height);
+    FrameEverything();
+    (void)FrameCompose(Straight, Programs);
+    Bench   Veil(Program);
+    Changes See;
+    Veil.Area.Place = Rect{0, 0, static_cast<std::int32_t>(Glass.Width), static_cast<std::int32_t>(Glass.Height)};
+    Veil.Area.Shown = true;
+    See.Create(1, Kind::Shape);
+    See.Size(1, {static_cast<float>(Glass.Width) / 1.25f, static_cast<float>(Glass.Height) / 1.25f});
+    const painter::gui::Fill Clear = painter::gui::Fill::Of(Color::Rgba(0, 0, 0, 0));
+    See.Fills(1, std::span(&Clear, 1));
+    Veil.Step(See);
+    std::vector<items::AreaState *> Veiled{&Flow.Area, &Over.Area, &Veil.Area};
+    FrameEverything();
+    (void)FrameCompose(Canvassed, Veiled);
+    Count.Check(std::equal(Straight.Pixels(), Straight.Pixels() + Seen.size(), Canvassed.Pixels()),
+                "frame: the console written straight into the mirror, the very pixels the canvas's way gives");
+    FrameEverything();
+    (void)FrameCompose(Shown, Programs);
+
     /* One caret on the glass: the cells over the console that show one hold
      * it, the console's goes; hidden, the console's comes back. */
     const ItemCaret Console1 = Grid->Caret();

@@ -39,6 +39,17 @@ public:
     // Count rectangles of a canvas as big as the mirror put in, pixel for
     // pixel (boxos_brush.h BoxBrushShow).
     void Show(const BoxBrushCanvas &Canvas, const BoxRect *Rects, std::uint32_t Count) noexcept;
+    // Area, as far as the mirror goes, written as triples by Paint(Pixels,
+    // Stride, Area) — Pixels its corner, Stride from row to row.
+    template <typename Painting>
+    void Paint(painter::core::Rect Area, Painting &&Each)
+    {
+        Area = Clipped(Area);
+        if (Area.Empty()) return;
+        Each(All.data() + static_cast<std::size_t>(Area.Y) * Wide + static_cast<std::size_t>(Area.X), static_cast<std::size_t>(Wide),
+             Area);
+        for (std::int32_t Y = Area.Y; Y < Area.Y + Area.Height; Y++) Wait(Y, Area.X, Area.X + Area.Width);
+    }
     // All of it to go onto the glass; none of it.
     void Refresh() noexcept;
     void Forget() noexcept;

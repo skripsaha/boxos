@@ -135,6 +135,44 @@ template <typename Telling> void Drawn(const items::AreaState &Area, Telling &&E
     }
 }
 
+/* The least rectangle of Tile holding all the areas draw there — cells that
+ * show nothing draw nothing — and the page of an area of the whole screen:
+ * the console alone shows round it. */
+Rect Lying(Rect Tile, std::span<items::AreaState *const> Programs) noexcept
+{
+    Rect       Lies{};
+    const auto Add = [&](Rect Where) {
+        Where = Where.Intersect(Tile);
+        if (!Where.Empty()) Lies = Lies.Empty() ? Where : Lies.Join(Where);
+    };
+    for (const items::AreaState *Each : Programs) {
+        if (!Each->Shown) continue;
+        if (Each->Paged) Add(Each->Place);
+        Drawn(*Each, Add);
+    }
+    return Lies;
+}
+
+/* Tile as the console alone shows it, written into the mirror as triples —
+ * the page round its cells, and its cells (cells_draw.h LayCells): the very
+ * pixels composing it would put there, the canvas and its light passed by. */
+void LayConsole(Mirror &Into, Rect Tile)
+{
+    const Rect          Grid = g_cells.Grid;
+    const std::uint32_t Page = g_cells.Page;
+    Into.Paint(Tile, [&](std::uint32_t *Pixels, std::size_t Stride, Rect Area) {
+        const std::int32_t Left  = std::clamp(Grid.X, Area.X, Area.X + Area.Width);
+        const std::int32_t Right = std::clamp(Grid.X + Grid.Width, Area.X, Area.X + Area.Width);
+        for (std::int32_t Y = Area.Y; Y < Area.Y + Area.Height; Y++) {
+            std::uint32_t *Line   = Pixels + static_cast<std::size_t>(Y - Area.Y) * Stride - Area.X;
+            const bool     Across = Y < Grid.Y || Y >= Grid.Y + Grid.Height;
+            std::fill(Line + Area.X, Line + (Across ? Area.X + Area.Width : Left), Page);
+            if (!Across) std::fill(Line + Right, Line + Area.X + Area.Width, Page);
+        }
+        LayCells(*g_console, g_cells, Pixels, Stride, Area, painter::core::Point{Grid.X, Grid.Y});
+    });
+}
+
 /* ---- A text page --------------------------------------------------------- */
 
 /* Characters written into a text page's cells from a cell on, up to the
@@ -381,8 +419,22 @@ FrameCost FrameCompose(Mirror &Into, std::span<items::AreaState *const> Programs
             for (std::int32_t Y = Each.Y; Y < Each.Y + Each.Height; Y += TileSide)
                 for (std::int32_t X = Each.X; X < Each.X + Each.Width; X += TileSide) {
                     const Rect Tile{X, Y, std::min(TileSide, Each.X + Each.Width - X), std::min(TileSide, Each.Y + Each.Height - Y)};
-                    g_compositor->Compose(*g_tile, painter::core::Point{Tile.X, Tile.Y}, Tile, g_order, g_theme);
-                    Into.Put(*g_tile, Tile);
+                    /* What the areas draw composed; round it, the console
+                     * alone written straight. */
+                    const Rect Lies = g_console->Opaque() ? Lying(Tile, Programs) : Tile;
+                    if (!Lies.Empty()) {
+                        g_compositor->Compose(*g_tile, painter::core::Point{Lies.X, Lies.Y}, Lies, g_order, g_theme);
+                        Into.Put(*g_tile, Lies);
+                    }
+                    const std::int32_t Right = Tile.X + Tile.Width, Bottom = Tile.Y + Tile.Height;
+                    if (Lies.Empty()) {
+                        LayConsole(Into, Tile);
+                    } else {
+                        LayConsole(Into, Rect{Tile.X, Tile.Y, Tile.Width, Lies.Y - Tile.Y});
+                        LayConsole(Into, Rect{Tile.X, Lies.Y + Lies.Height, Tile.Width, Bottom - Lies.Y - Lies.Height});
+                        LayConsole(Into, Rect{Tile.X, Lies.Y, Lies.X - Tile.X, Lies.Height});
+                        LayConsole(Into, Rect{Lies.X + Lies.Width, Lies.Y, Right - Lies.X - Lies.Width, Lies.Height});
+                    }
                     Pixels += static_cast<std::uint64_t>(Tile.Width) * static_cast<std::uint64_t>(Tile.Height);
                 }
     } catch (...) {

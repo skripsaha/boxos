@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 #include "painter/core/pixel.h"
 #include "typesetter.h"
@@ -89,30 +90,49 @@ std::uint8_t ShareAt(const Look &Of, const Row &Line, std::int32_t X) noexcept
     return Line.Shares && Along >= 0 && Along < Of.Picture->Width ? Line.Shares[Along] : 0;
 }
 
+/* Whether a cell covers its pixels whole: every colour it draws in opaque,
+ * the whole of it laid at once. */
+bool Plain(const Look &Of, std::uint32_t Opacity) noexcept
+{
+    return Opacity == Whole && Of.Paper.Alpha == 255 && Of.Glyph.Alpha == 255 && (Of.Mark.Alpha == 255 || !(Of.Under || Of.Bar));
+}
+
+/* Row Y of a cell that covers its pixels whole, its pixels [From, To) as
+ * triples into Out: each the triple the ink and the paper mix to by the share
+ * of it the glyph covers (the system's one rule, BoxColorOver), a mark's or
+ * the caret's where they lie — what the glass shows. The one rule every
+ * opaque cell is drawn by, into a canvas or straight into the mirror. */
+void RowTriples(const Look &Of, const typecase::Size &Fit, std::int32_t Y, std::int32_t From, std::int32_t To,
+                std::uint32_t *Out) noexcept
+{
+    const std::int32_t BarWide = std::max(2, Fit.Width / 4);
+    const Row          Line    = RowOf(Of, Fit, Y);
+    for (std::int32_t X = From; X < To; X++) {
+        if (Line.What == Over::Caret) *Out++ = Of.Caret.Rgb;
+        else if (Line.What == Over::Mark || (Of.Bar && X < BarWide)) *Out++ = Of.Mark.Rgb;
+        else {
+            const std::uint8_t Share = ShareAt(Of, Line, X);
+            *Out++ = Share == 0 ? Of.Paper.Rgb : Share == 255 ? Of.Glyph.Rgb : BoxColorOver(Of.Paper.Rgb, Of.Glyph.Rgb, Share);
+        }
+    }
+}
+
 /* One cell's part Part (target pixels) drawn, the cell's corner at Corner. */
 void DrawCell(const Look &Of, const typecase::Size &Fit, painter::core::Canvas &Target, painter::core::Point Corner, Rect Part,
               std::uint32_t Opacity)
 {
     const std::int32_t BarWide = std::max(2, Fit.Width / 4);
-    const bool         Plain   = Opacity == Whole && Of.Paper.Alpha == 255 && Of.Glyph.Alpha == 255 &&
-                         (Of.Mark.Alpha == 255 || !(Of.Under || Of.Bar));
-    if (Plain) {
-        /* Opaque: each pixel the triple the ink and the paper mix to (the
-         * system's one rule, BoxColorOver), as the glass shows it. */
-        const Pixel Paper = PixelOf(Of.Paper), Glyph = PixelOf(Of.Glyph), Mark = PixelOf(Of.Mark), Caret = PixelOf(Of.Caret);
+    if (Plain(Of, Opacity)) {
+        /* Its triples, as light: the paper's and the ink's worked out once. */
+        static std::vector<std::uint32_t> Triples;
+        if (Triples.size() < static_cast<std::size_t>(Part.Width)) Triples.resize(static_cast<std::size_t>(Part.Width));
+        const Pixel Paper = PixelOf(Of.Paper), Glyph = PixelOf(Of.Glyph);
         for (std::int32_t Y = Part.Y; Y < Part.Y + Part.Height; Y++) {
-            const Row Line = RowOf(Of, Fit, Y - Corner.Y);
-            Pixel    *Out  = Target.Row(static_cast<std::uint32_t>(Y)) + Part.X;
+            RowTriples(Of, Fit, Y - Corner.Y, Part.X - Corner.X, Part.X + Part.Width - Corner.X, Triples.data());
+            Pixel *Out = Target.Row(static_cast<std::uint32_t>(Y)) + Part.X;
             for (std::int32_t X = 0; X < Part.Width; X++) {
-                const std::int32_t In = Part.X + X - Corner.X;
-                if (Line.What == Over::Caret) Out[X] = Caret;
-                else if (Line.What == Over::Mark || (Of.Bar && In < BarWide)) Out[X] = Mark;
-                else {
-                    const std::uint8_t Share = ShareAt(Of, Line, In);
-                    Out[X] = Share == 0     ? Paper
-                             : Share == 255 ? Glyph
-                                            : PixelOf(Ink{BoxColorOver(Of.Paper.Rgb, Of.Glyph.Rgb, Share), 255});
-                }
+                const std::uint32_t Triple = Triples[static_cast<std::size_t>(X)];
+                Out[X] = Triple == Of.Paper.Rgb ? Paper : Triple == Of.Glyph.Rgb ? Glyph : PixelOf(Ink{Triple, 255});
             }
         }
         return;
@@ -158,8 +178,35 @@ void DrawCells(const CellGrid &Grid, const CellsLook &Screen, painter::core::Can
             const painter::core::Point At{Corner.X + static_cast<std::int32_t>(Col) * Fit.Width,
                                           Corner.Y + static_cast<std::int32_t>(Row) * Fit.Height};
             const Rect Part = Rect{At.X, At.Y, Fit.Width, Fit.Height}.Intersect(Clip);
+            const bool Caret = Grid.CaretAt(Col, Row);
+            /* A cell that shows nothing draws nothing: what lies beneath it
+             * shows. */
+            if (Part.Empty() || (!Caret && !CellShows(Grid.At(Col, Row)))) continue;
+            DrawCell(LookOf(Grid.At(Col, Row), Screen, Caret), Fit, Target, At, Part, Share);
+        }
+}
+
+void LayCells(const CellGrid &Grid, const CellsLook &Screen, std::uint32_t *Pixels, std::size_t Stride, Rect Area,
+              painter::core::Point Corner) noexcept
+{
+    if (!Screen.Type || Grid.Cols() == 0 || Grid.Rows() == 0) return;
+    const typecase::Size &Fit  = Screen.Type->Cell();
+    const Rect            Clip = Area.Intersect(
+        Rect{Corner.X, Corner.Y, static_cast<std::int32_t>(Grid.Cols()) * Fit.Width, static_cast<std::int32_t>(Grid.Rows()) * Fit.Height});
+    if (Clip.Empty()) return;
+    const auto          First    = [](std::int32_t From, std::int32_t Step) { return static_cast<std::uint32_t>(From / Step); };
+    const std::uint32_t FirstCol = First(Clip.X - Corner.X, Fit.Width), LastCol = First(Clip.X + Clip.Width - 1 - Corner.X, Fit.Width);
+    const std::uint32_t FirstRow = First(Clip.Y - Corner.Y, Fit.Height), LastRow = First(Clip.Y + Clip.Height - 1 - Corner.Y, Fit.Height);
+    for (std::uint32_t Row = FirstRow; Row <= LastRow; Row++)
+        for (std::uint32_t Col = FirstCol; Col <= LastCol; Col++) {
+            const painter::core::Point At{Corner.X + static_cast<std::int32_t>(Col) * Fit.Width,
+                                          Corner.Y + static_cast<std::int32_t>(Row) * Fit.Height};
+            const Rect Part = Rect{At.X, At.Y, Fit.Width, Fit.Height}.Intersect(Clip);
             if (Part.Empty()) continue;
-            DrawCell(LookOf(Grid.At(Col, Row), Screen, Grid.CaretAt(Col, Row)), Fit, Target, At, Part, Share);
+            const Look Of = LookOf(Grid.At(Col, Row), Screen, Grid.CaretAt(Col, Row));
+            for (std::int32_t Y = Part.Y; Y < Part.Y + Part.Height; Y++)
+                RowTriples(Of, Fit, Y - At.Y, Part.X - At.X, Part.X + Part.Width - At.X,
+                           Pixels + static_cast<std::size_t>(Y - Area.Y) * Stride + static_cast<std::size_t>(Part.X - Area.X));
         }
 }
 

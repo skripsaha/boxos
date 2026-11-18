@@ -14,6 +14,7 @@
 // (CellOver), its mark the mark's colour behind its glyph when the easel
 // writes it.
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 
@@ -37,6 +38,13 @@ struct CellsLook {
 // at Corner on Target, the whole at Opacity.
 void DrawCells(const CellGrid &Grid, const CellsLook &Look, painter::core::Canvas &Target, painter::core::Point Corner,
                float Opacity);
+
+// Area of the glass — Pixels its corner, Stride from row to row — written as
+// triples from Grid's cells, the corner of the first at Corner on the glass:
+// every one of them opaque (CellGrid::Opaque), each pixel the very triple a
+// canvas drawn by DrawCells and put on the glass would hold.
+void LayCells(const CellGrid &Grid, const CellsLook &Look, std::uint32_t *Pixels, std::size_t Stride, painter::core::Rect Area,
+              painter::core::Point Corner) noexcept;
 
 // Grid's cells laid over a text page of Cols x Rows cells, the first at Col,
 // Row of it: each that covers something over the cell beneath it, and each
