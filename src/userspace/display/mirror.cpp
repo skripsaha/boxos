@@ -39,7 +39,7 @@ void Mirror::Write(const painter::core::Canvas &Picture, Rect Area) noexcept
                     painter::core::Point{Area.X, Area.Y});
 }
 
-void Mirror::Shift(Rect Area, std::int32_t Up, std::span<const Rect> Keep) noexcept
+void Mirror::Shift(Rect Area, std::int32_t Up, std::span<const Rect> Keep)
 {
     Area = Clipped(Area);
     if (Area.Empty() || Up <= 0 || Up >= Area.Height) return;
@@ -56,22 +56,22 @@ void Mirror::Shift(Rect Area, std::int32_t Up, std::span<const Rect> Keep) noexc
         std::memcpy(Into + First, Taken + First, static_cast<std::size_t>(Last - First) * sizeof(std::uint32_t));
         Waiting.Add(Rect{First, Y, Last - First, 1});
     };
+    /* What is kept, within the area, in order across: each row's stretches
+     * between it found in one pass along the row. */
+    std::vector<Rect> Across;
+    Across.reserve(Keep.size());
+    for (const Rect &Still : Keep)
+        if (const Rect In = Still.Intersect(Area); !In.Empty()) Across.push_back(In);
+    std::sort(Across.begin(), Across.end(), [](const Rect &A, const Rect &B) { return A.X < B.X; });
     const std::int32_t Right = Area.X + Area.Width;
     for (std::int32_t Y = Area.Y; Y < Area.Y + Area.Height - Up; Y++) {
-        /* The row's stretches between what is kept on it, left to right. */
         std::int32_t At = Area.X;
-        while (At < Right) {
-            std::int32_t Stop = Right, Resume = Right;
-            for (const Rect &Still : Keep) {
-                if (Y < Still.Y || Y >= Still.Y + Still.Height) continue;
-                const std::int32_t L = std::max(Still.X, At), R = std::min(Still.X + Still.Width, Right);
-                if (L >= R) continue;
-                if (L < Stop) Stop = L, Resume = R;
-                else if (L == Stop) Resume = std::max(Resume, R);
-            }
-            if (At < Stop) Move(Y, At, Stop);
-            At = std::max(Resume, Stop == Right ? Right : At + 1);
+        for (const Rect &Still : Across) {
+            if (Y < Still.Y || Y >= Still.Y + Still.Height) continue;
+            if (Still.X > At) Move(Y, At, Still.X);
+            At = std::max(At, Still.X + Still.Width);
         }
+        if (At < Right) Move(Y, At, Right);
     }
 }
 

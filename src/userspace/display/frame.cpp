@@ -68,10 +68,6 @@ std::vector<ItemCell> g_seen;
 std::uint64_t         g_seen_caret = ~std::uint64_t{0};
 constexpr ItemCell    Unseen{0xFFFFFFFFu, 0, 0, 0, 0xFF, {0, 0, 0}};
 
-/* The covers kept still over the console when it scrolls, at most so many:
- * past them, what lies over it moves with it and is drawn again. */
-constexpr std::size_t KeptMost = 32;
-
 /* The caret the glass shows: whose grid, in which area, by which item. */
 std::weak_ptr<CellGrid> g_holder;
 items::AreaState       *g_holder_area = nullptr;
@@ -237,7 +233,7 @@ void Covers(std::span<items::AreaState *const> Programs, std::vector<Rect> &Into
         if (!Each->WasShown || !Each->Shown || Each->Place != Each->Was) continue;
         for (const items::Entry &One : Each->List) {
             const Rect Still = One.Hides.Intersect(g_cells.Grid);
-            if (One.What != items::Entry::Kind::Draw || Still.Empty() || Into.size() == KeptMost) continue;
+            if (One.What != items::Entry::Kind::Draw || Still.Empty()) continue;
             Into.push_back(Still);
         }
     }
@@ -596,7 +592,6 @@ FrameCost FrameCompose(Mirror &Into, std::span<items::AreaState *const> Programs
             g_console->TakeMarks([](std::uint32_t, std::uint32_t, std::uint32_t) {});
             std::fill(g_seen.begin(), g_seen.end(), Unseen);
         } else {
-            Still.reserve(KeptMost);
             Covers(Programs, Still);
             if (Scrolled != 0 && Scrolled < g_console->Rows()) {
                 Up = static_cast<std::int32_t>(Scrolled) * g_cells.Height;

@@ -42,8 +42,9 @@ public:
     void Mark(painter::core::Rect Area) noexcept { Waiting.Add(Clipped(Area)); }
     // Area moved up Up pixels, its last Up rows left as they were for a frame
     // to put — and the pixels within Keep left where they are: what lies
-    // still over what moves.
-    void Shift(painter::core::Rect Area, std::int32_t Up, std::span<const painter::core::Rect> Keep = {}) noexcept;
+    // still over what moves, however much of it. Throws std::bad_alloc only,
+    // part of it moved: then all of it is to be drawn again.
+    void Shift(painter::core::Rect Area, std::int32_t Up, std::span<const painter::core::Rect> Keep = {});
     // Count rectangles of a canvas as big as the mirror put in, pixel for
     // pixel (boxos_brush.h BoxBrushShow).
     void Show(const BoxBrushCanvas &Canvas, const BoxRect *Rects, std::uint32_t Count) noexcept;
