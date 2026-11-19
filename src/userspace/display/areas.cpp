@@ -30,6 +30,7 @@
 #include "front.h"
 #include "input.h"
 #include "item_reception.h"
+#include "measure.h"
 #include "painter/core/system_fonts.h"
 
 namespace {
@@ -316,6 +317,7 @@ template <typename Work> void ForEachArea(const Program &Of, Work &&Each)
  * passes its opacity is no canvas pixel: its light is held to it. */
 void TakePage(Block &Of, const ItemBlockChanged &Where)
 {
+    const Clocked       Spent{Part::Intake};
     const std::uint32_t Page = Where.Page & 1u;
     if (!Of.Shown) Of.Shown = painter::core::Canvas::Make(Of.Width, Of.Height);
     if (Of.Shown) {
@@ -496,11 +498,45 @@ bool ReadRing(std::size_t Index) noexcept
     return true;
 }
 
+#if defined(BOX_MEASURE)
+/* In a build made to measure: each area's frames of the second that composed
+ * pixels of its own, those pixels, and its frames with something moving. */
+struct Measured {
+    std::uint32_t Pid = 0, Frames = 0, Moving = 0;
+    std::uint64_t Pixels = 0;
+};
+std::vector<std::pair<const Area *, Measured>> g_measured;
+#endif
+
 }  // namespace
+
+#if defined(BOX_MEASURE)
+void AreasMeasured() noexcept
+{
+    char Line[256];
+    int  Length = std::snprintf(Line, sizeof Line, "areas:");
+    for (const auto &[Of, Tally] : g_measured)
+        if (Tally.Frames != 0 && Length < static_cast<int>(sizeof Line) - 48)
+            Length += std::snprintf(Line + Length, sizeof Line - static_cast<std::size_t>(Length), " pid %u %u frames %llu px %u moving;",
+                                    Tally.Pid, Tally.Frames, static_cast<unsigned long long>(Tally.Pixels), Tally.Moving);
+    if (Length > 6) kdbg_print("[measure] %s", Line);
+    g_measured.clear();
+}
+#endif
 
 void AreasShown(std::uint32_t Micros, std::uint64_t Pixels) noexcept
 {
     g_left = false;
+#if defined(BOX_MEASURE)
+    for (const auto &Each : g_areas) {
+        if (Pixels == 0 || Each->State->Composed == 0) continue;
+        auto Found = std::find_if(g_measured.begin(), g_measured.end(), [&](const auto &One) { return One.first == Each.get(); });
+        if (Found == g_measured.end()) Found = g_measured.insert(g_measured.end(), {Each.get(), Measured{Each->OwnerPid, 0, 0, 0}});
+        Found->second.Frames++;
+        Found->second.Pixels += Each->State->Composed;
+        if (Each->State->Moving.Due(Each->State->Shown) != 0) Found->second.Moving++;
+    }
+#endif
     for (const auto &Each : g_areas) {
         if (Each->Stepped) {
             const ItemShown Shown{Each->Step,  Micros, static_cast<std::uint32_t>(std::min<std::uint64_t>(Pixels, UINT32_MAX)),

@@ -10,6 +10,7 @@
 #include <optional>
 #include <utility>
 
+#include "measure.h"
 #include "painter/core/path.h"
 
 namespace items {
@@ -187,6 +188,7 @@ void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, 
         }
         Drawing &Drawn = *Of->Drawn;
         if (Of->Redraw) {
+            const Clocked Spent{Part::Prepare};
             Program.KeptBytes -= Drawn.Bytes;
             Drawn.Bytes = 0;
             const bool Sized = Prepare(*Of, Program.From, Drawn, Program.KeptBytes < KeptMost);
@@ -411,6 +413,7 @@ void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Cor
                 /* Fading from another look: the two looks drawn apart, the
                  * old one walked toward the new as far as it has faded, laid
                  * as one. */
+                const Clocked              Spent{::Part::Faded};
                 const painter::core::Point Here{Part.X, Part.Y};
                 Paint(One.Fade->Was, *One.Fade->Was.Drawn, Each.Program.From, *Old, Moved(One.Place, Here), 1.0f, One.Turning);
                 Paint(*One.Of, *One.Of->Drawn, Each.Program.From, *New, Moved(One.Place, Here), 1.0f, One.Turning);
@@ -425,14 +428,17 @@ void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Cor
             case Entry::Kind::ClipEnd:
                 Current().PopClip();
                 break;
-            case Entry::Kind::LayerBegin:
+            case Entry::Kind::LayerBegin: {
+                const Clocked Spent{::Part::Layered};
                 Layers.push_back(Layer{One.Device.Intersect(Area).Empty()
                                            ? std::nullopt
                                            : painter::core::Canvas::Make(static_cast<std::uint32_t>(Area.Width),
                                                                          static_cast<std::uint32_t>(Area.Height)),
                                        One.Opacity});
                 break;
+            }
             case Entry::Kind::LayerEnd: {
+                const Clocked Spent{::Part::Layered};
                 if (Layers.empty()) break;
                 Layer Done = std::move(Layers.back());
                 Layers.pop_back();

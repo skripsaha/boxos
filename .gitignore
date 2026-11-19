@@ -45,6 +45,9 @@ tools/buildplate
 src/userspace/apps/.apps.stamp
 src/userspace/utils/.utils.stamp
 
+# The display's build key mark (`make MEASURE=on`, display/Makefile).
+src/userspace/display/.measure.*
+
 # Saved reference pages read during a session (OSDev threads and wiki copies).
 # Kept on disk on purpose — they are the material a wave of work was read
 # against — but they are somebody else's HTML, not this repository's source.

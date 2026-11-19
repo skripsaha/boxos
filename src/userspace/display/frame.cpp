@@ -5,8 +5,6 @@
 
 #include "frame.h"
 
-#include "input.h"
-
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -16,6 +14,8 @@
 #include <tuple>
 #include <vector>
 
+#include "input.h"
+#include "measure.h"
 #include "typecase/text.h"
 #include "typesetter.h"
 
@@ -197,6 +197,7 @@ Rect Lying(Rect Tile, std::span<items::AreaState *const> Programs) noexcept
  * would put there, the canvas and its light passed by. */
 void LayConsole(Mirror &Into, Rect Tile)
 {
+    const Clocked       Spent{Part::Lay};
     const Rect          Grid = g_cells.Grid;
     const std::uint32_t Page = g_cells.Page;
     Into.Paint(Tile, [&](std::uint32_t *Pixels, std::size_t Stride, Rect Area) {
@@ -548,6 +549,7 @@ FrameCost FrameCompose(Mirror &Into, std::span<items::AreaState *const> Programs
     if (!g_console || g_text || !g_compositor || !g_tile) return {};
     const auto    Start  = std::chrono::steady_clock::now();
     std::uint64_t Pixels = 0;
+    std::optional<Clocked> Console{Part::Console};
     if (g_everything) {
         g_compositor->Damage(g_screen);
         g_everything = false;
@@ -612,13 +614,16 @@ FrameCost FrameCompose(Mirror &Into, std::span<items::AreaState *const> Programs
     }
     g_before.clear();
 
+    Console.reset();
     try {
         g_order.clear();
         g_order.push_back(g_console_area.get());
         g_order.insert(g_order.end(), Programs.begin(), Programs.end());
+        std::optional<Clocked> Taking{Part::Take};
         g_compositor->Take(g_order, g_theme);
         if (HoldCaret(Programs)) g_compositor->Take(g_order, g_theme);
         const std::vector<Rect> Damaged = g_compositor->Rects();
+        Taking.reset();
         for (const Rect &Each : Damaged)
             for (std::int32_t Y = Each.Y; Y < Each.Y + Each.Height; Y += TileSide)
                 for (std::int32_t X = Each.X; X < Each.X + Each.Width; X += TileSide) {
@@ -627,8 +632,14 @@ FrameCost FrameCompose(Mirror &Into, std::span<items::AreaState *const> Programs
                      * alone written straight. */
                     const Rect Lies = Lying(Tile, Programs);
                     if (!Lies.Empty()) {
-                        g_compositor->Compose(*g_tile, painter::core::Point{Lies.X, Lies.Y}, Lies, g_order, g_theme);
-                        Into.Put(*g_tile, Lies);
+                        {
+                            const Clocked Spent{Part::Compose};
+                            g_compositor->Compose(*g_tile, painter::core::Point{Lies.X, Lies.Y}, Lies, g_order, g_theme);
+                        }
+                        {
+                            const Clocked Spent{Part::Put};
+                            Into.Put(*g_tile, Lies);
+                        }
                         if (g_seen.size() == g_console->Count())
                             CellsIn(Lies, [](std::size_t Index, bool) { g_seen[Index] = Unseen; });
                     }

@@ -1437,11 +1437,19 @@ $(HUB_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a
 	@cd $(HUB_DIR) && $(MAKE)
 	@echo "hub.elf: $$(stat -f%z $(HUB_BIN) 2>/dev/null || stat -c%s $(HUB_BIN) 2>/dev/null) bytes"
 
+# `make MEASURE=on` — a display that clocks where its time goes and says it in
+# the kernel's log (display/measure.h). Its own make keys its objects by it;
+# this mark makes that make run when the key changes on a built tree.
+MEASURE_MARK = $(BUILDDIR)/.measure.$(if $(filter on,$(MEASURE)),on,off)
+$(MEASURE_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.measure.*
+	@touch $@
+
 # Build display server
 $(DISPLAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(PAINTER_LIB) $(TYPECASE_LIB) \
-                $(IMPRINT_DATA) $(NAMEPLATE_TOOL)
+                $(IMPRINT_DATA) $(NAMEPLATE_TOOL) $(MEASURE_MARK)
 	@echo "Building display server..."
-	@cd $(DISPLAY_DIR) && $(MAKE) IMPRINT_DIR=$(abspath $(IMPRINT_DIR))
+	@cd $(DISPLAY_DIR) && $(MAKE) IMPRINT_DIR=$(abspath $(IMPRINT_DIR)) MEASURE=$(MEASURE)
 	@echo "display.elf: $$(stat -f%z $(DISPLAY_BIN) 2>/dev/null || stat -c%s $(DISPLAY_BIN) 2>/dev/null) bytes"
 
 # `timezone` carries the zone database, which is C++. Stated BEFORE the rule

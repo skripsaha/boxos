@@ -8,6 +8,7 @@
 #include <cmath>
 #include <utility>
 
+#include "measure.h"
 #include "painter/core/path.h"
 #include "painter/core/shadow.h"
 #include "painter/core/text.h"
@@ -249,6 +250,7 @@ void DrawStraight(const Item &Of, const Drawing &Drawn, const Sources &From, Can
         break;
     }
     case ITEM_CANVAS: {
+        const Clocked Spent{Part::Page};
         const Canvas *Page = Of.Said.Canvas && From.CanvasOf ? From.CanvasOf(*Of.Said.Canvas) : nullptr;
         if (!Page) break;
         if (const std::optional<painter::core::Point> Corner = CanvasCorner(Of, Drawn, From, Place)) {
@@ -472,13 +474,15 @@ void Paint(const Item &Of, const Drawing &Drawn, const Sources &From, Canvas &Ta
            float Opacity, bool Turning)
 {
     if (Drawn.Kept && Upright(Place, Drawn.KeptScale)) {
-        const PointF Corner = Place.Apply({0, 0});
+        const Clocked Spent{Part::Kept};
+        const PointF  Corner = Place.Apply({0, 0});
         Target.Draw(*Drawn.Kept,
                     painter::core::Point{Nearest(Corner.X) + Drawn.KeptAt.X, Nearest(Corner.Y) + Drawn.KeptAt.Y},
                     Opacity);
         return;
     }
     if (Drawn.Kept && (Turning || Of.Turning)) {
+        const Clocked Spent{Part::Turned};
         const Canvas &Kept = *Drawn.Kept;
         if (!Drawn.KeptPicture) {
             std::vector<painter::core::Pixel> Pixels;
@@ -498,6 +502,7 @@ void Paint(const Item &Of, const Drawing &Drawn, const Sources &From, Canvas &Ta
             return;
         }
     }
+    const Clocked Spent{Part::Straight};
     DrawStraight(Of, Drawn, From, Target, Place, Opacity);
 }
 

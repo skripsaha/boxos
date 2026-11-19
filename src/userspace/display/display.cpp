@@ -95,6 +95,7 @@
 #include "frame.h"
 #include "painter/core/system_fonts.h"
 #include "front.h"
+#include "measure.h"
 #include "lanes.h"
 #include "ring.h"
 #include "scene.h"
@@ -246,9 +247,13 @@ void HoldFrame(const ConsoleRun &Run, std::uint32_t Lane)
 // again the moment it is lifted — and each area told what it showed.
 void Present()
 {
-    const std::uint64_t Now = clock_uptime_us();
-    AreasAnimate(Now);
-    InputFrame(Now);
+    const std::uint64_t Began = MeasureTicks();
+    const std::uint64_t Now   = clock_uptime_us();
+    {
+        const Clocked Spent{Part::Animate};
+        AreasAnimate(Now);
+        InputFrame(Now);
+    }
     if (SceneOn()) return;
     AreasFlow(g_model->RowsGone());
     const bool Due = FrameDue(*g_model, AreasWant());
@@ -265,6 +270,8 @@ void Present()
     const bool       Effect = EffectsOn();
     if (g_easel->Pixels()) {
         const FrameCost Cost = FrameCompose(g_easel->Picture(), g_order);
+        MeasureFrame(Began, Cost.Pixels);
+        const Clocked Spent{Part::Flush};
         if (Effect) {
             g_easel->FlushThrough([&Look](const std::uint32_t *Picture, std::size_t Stride, std::uint32_t Width,
                                           std::uint32_t Height, std::uint32_t *Glass, std::size_t GlassStride,
@@ -276,6 +283,7 @@ void Present()
             if (g_effect_was) g_easel->Picture().Refresh();
             g_easel->Flush();
         }
+        MeasureGlassed();
         AreasShown(Cost.Micros, Cost.Pixels);
     } else {
         Caret At;
@@ -773,6 +781,7 @@ std::optional<typecase::Font> PersonsFont()
 
 bool Rotate()
 {
+    const Clocked Spent{Part::Rotate};
     bool Moved = false;
     if (LanesKeys()) {
         Moved = true;
@@ -874,6 +883,7 @@ int main(void)
     // the Emergency Screen showed until now goes on being shown.
     (void)g_ring.CatchUp(*g_model);
     Present();
+    if (g_easel->Pixels()) MeasureEngine(*g_easel);
 
     if (!LanesStart(LaneTurned)) {
         kdbg_print("[display] the keyboard's tag could not be claimed; nobody can type");
@@ -897,6 +907,7 @@ int main(void)
     const std::uint32_t Me = Info->pid;
 
     for (;;) {
+        MeasureSecond();
         const bool Moved = Rotate();
         Present();
         if (Moved) continue;
@@ -919,7 +930,10 @@ int main(void)
             LanesBellsTake();
             continue;
         }
-        box_turn_in(Mark);
+        {
+            const Clocked Spent{Part::Idle};
+            box_turn_in(Mark);
+        }
         LanesBellsTake();
     }
 }
