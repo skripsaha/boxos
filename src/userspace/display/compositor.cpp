@@ -28,17 +28,11 @@ using painter::core::Transform;
 
 constexpr float PerPoint = 1.0f / ITEM_POINT;
 
-/* The rectangles damage is kept in at most: past them, the two that grow the
- * least by it are joined. */
-constexpr std::size_t DamageMost = 24;
-
 bool Holds(Rect Outer, Rect Inner) noexcept
 {
     return Inner.X >= Outer.X && Inner.Y >= Outer.Y && Inner.X + Inner.Width <= Outer.X + Outer.Width &&
            Inner.Y + Inner.Height <= Outer.Y + Outer.Height;
 }
-
-std::int64_t AreaOf(Rect Of) noexcept { return Of.Empty() ? 0 : std::int64_t{Of.Width} * Of.Height; }
 
 /* The whole pixels inside what Place lays Box of points on: an opaque item's
  * pixels it surely covers whole. */
@@ -109,51 +103,11 @@ Transform LocalOf(const Item &Of) noexcept
     return Made.Then(Transform::Translate(AX + X, AY + Y));
 }
 
-namespace {
-
-/* Area noted in rectangles reserved beforehand: in none that holds it
- * already; past them, joined to the one it grows the least. */
-void Note(std::vector<Rect> &Into, Rect Area) noexcept
-{
-    for (const Rect &Each : Into)
-        if (Holds(Each, Area)) return;
-    if (Into.size() < Into.capacity()) {
-        Into.push_back(Area);
-        return;
-    }
-    std::size_t  Best  = 0;
-    std::int64_t Least = -1;
-    for (std::size_t I = 0; I < Into.size(); I++) {
-        const std::int64_t Grows = AreaOf(Into[I].Join(Area)) - AreaOf(Into[I]);
-        if (Least < 0 || Grows < Least) Least = Grows, Best = I;
-    }
-    if (Into.empty()) return;
-    Into[Best] = Into[Best].Join(Area);
-}
-
-/* Overlapping rectangles joined, again until none overlaps. */
-void JoinOverlapping(std::vector<Rect> &Made)
-{
-    for (bool Joined = true; Joined;) {
-        Joined = false;
-        for (std::size_t I = 0; I < Made.size() && !Joined; I++)
-            for (std::size_t J = I + 1; J < Made.size() && !Joined; J++)
-                if (!Made[I].Intersect(Made[J]).Empty() || Holds(Made[I], Made[J]) || Holds(Made[J], Made[I])) {
-                    Made[I] = Made[I].Join(Made[J]);
-                    Made.erase(Made.begin() + static_cast<std::ptrdiff_t>(J));
-                    Joined = true;
-                }
-    }
-}
-
-}  // namespace
-
 void Compositor::Damage(Rect Area) noexcept
 {
     Area = Area.Intersect(Screen);
-    if (Area.Empty()) return;
-    Note(Waiting, Area);
-    if (Owning) Note(Own, Area);
+    Waiting.Add(Area);
+    if (Owning) Own.Add(Area);
 }
 
 void Compositor::Vanish(AreaState &Area, const std::vector<std::uint32_t> &Items)
@@ -270,14 +224,12 @@ void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, 
 void Compositor::Take(std::span<AreaState *const> Areas, const Theme &Look)
 {
     for (AreaState *Area : Areas) {
-        Own.clear();
+        Own.Clear();
         Owning = true;
         TakeOne(*Area, Look);
         Owning = false;
         /* What its own changes cost, whatever else the frame composes. */
-        JoinOverlapping(Own);
-        Area->Composed = 0;
-        for (const Rect &Each : Own) Area->Composed += static_cast<std::uint64_t>(AreaOf(Each));
+        Area->Composed = Own.Pixels();
     }
 }
 
@@ -311,26 +263,6 @@ void Compositor::TakeOne(AreaState &Area, const Theme &Look)
     Area.Was      = Area.Place;
     Area.WasShown = Area.Shown;
     Area.Items.Taken();
-}
-
-std::vector<Rect> Compositor::Rects()
-{
-    std::vector<Rect> Made = Waiting;
-    Waiting.clear();
-    JoinOverlapping(Made);
-    /* Too many: the two that grow the least joined. */
-    while (Made.size() > DamageMost) {
-        std::size_t  BestI = 0, BestJ = 1;
-        std::int64_t Least = -1;
-        for (std::size_t I = 0; I < Made.size(); I++)
-            for (std::size_t J = I + 1; J < Made.size(); J++) {
-                const std::int64_t Grows = AreaOf(Made[I].Join(Made[J])) - AreaOf(Made[I]) - AreaOf(Made[J]);
-                if (Least < 0 || Grows < Least) Least = Grows, BestI = I, BestJ = J;
-            }
-        Made[BestI] = Made[BestI].Join(Made[BestJ]);
-        Made.erase(Made.begin() + static_cast<std::ptrdiff_t>(BestJ));
-    }
-    return Made;
 }
 
 bool Compositor::Hidden(Rect Area, std::span<AreaState *const> Areas) const noexcept

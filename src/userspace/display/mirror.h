@@ -6,19 +6,19 @@
 // there (easel.h). A frame is put into it where it changed (Put); where the
 // console scrolled it moves (Shift) round what stays still, each row compared
 // with the row it takes before it is taken, so only the pixels that came out
-// different are to go onto the glass. What waits to go is kept as each row's
-// stretch, taken by the easel when it writes the glass — so video memory is
-// written, never read, and no more of it than changed.
+// different are to go onto the glass. What waits to go is kept exactly, as a
+// region (region.h), taken by the easel when it writes the glass — so video
+// memory is written, never read, and no more of it than changed.
 
 #include <cstddef>
 #include <cstdint>
 #include <span>
-#include <utility>
 #include <vector>
 
 #include "boxos_brush.h"
 #include "painter/core/canvas.h"
 #include "painter/core/geometry.h"
+#include "region.h"
 
 class Mirror {
 public:
@@ -50,33 +50,36 @@ public:
         if (Area.Empty()) return;
         Each(All.data() + static_cast<std::size_t>(Area.Y) * Wide + static_cast<std::size_t>(Area.X), static_cast<std::size_t>(Wide),
              Area);
-        for (std::int32_t Y = Area.Y; Y < Area.Y + Area.Height; Y++) Wait(Y, Area.X, Area.X + Area.Width);
+        Waiting.Add(Area);
     }
     // All of it to go onto the glass; none of it.
     void Refresh() noexcept;
     void Forget() noexcept;
 
-    // Each row's stretch waiting to go onto the glass told to Each(Y, From,
-    // To), and none waiting from now on.
+    // Each stretch of a row waiting to go onto the glass told to Tell(Y,
+    // From, To), and none waiting from now on — all of it, when there is no
+    // room to know what waits.
     template <typename Stretch>
-    void TakeWaiting(Stretch &&Each)
+    void TakeWaiting(Stretch &&Tell) noexcept
     {
-        for (std::uint32_t Y = 0; Y < High; Y++) {
-            auto &Span = Waiting[Y];
-            if (Span.first == Span.second) continue;
-            const std::pair<std::int32_t, std::int32_t> Taken = Span;
-            Span                                             = {0, 0};
-            Each(Y, Taken.first, Taken.second);
+        std::vector<painter::core::Rect> Taken;
+        try {
+            Taken = Waiting.Take();
+        } catch (...) {
+            Waiting.Clear();
+            for (std::uint32_t Y = 0; Y < High; Y++) Tell(Y, 0, static_cast<std::int32_t>(Wide));
+            return;
         }
+        for (const painter::core::Rect &Each : Taken)
+            for (std::int32_t Y = Each.Y; Y < Each.Y + Each.Height; Y++) Tell(static_cast<std::uint32_t>(Y), Each.X, Each.X + Each.Width);
     }
 
 private:
-    void Wait(std::int32_t Y, std::int32_t From, std::int32_t To) noexcept;
     painter::core::Rect Clipped(painter::core::Rect Area) const noexcept;
 
-    std::uint32_t                                     Wide = 0, High = 0;
-    std::vector<std::uint32_t>                        All;
-    std::vector<std::pair<std::int32_t, std::int32_t>> Waiting;   // each row's [From, To)
+    std::uint32_t              Wide = 0, High = 0;
+    std::vector<std::uint32_t> All;
+    items::Region              Waiting;   // what is to go onto the glass
 };
 
 #endif
