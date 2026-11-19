@@ -232,10 +232,10 @@ void CheckPlayed(Tally &Count)
     On.Shown.Advance(1200 * Ms, On.Look);
     const bool Told = On.Shown.Ends.size() == 1 && On.Shown.Ends[0].Number == 5 && On.Shown.Ends[0].Finished == 1;
     Count.Check(Start == 0 && std::abs(static_cast<int>(Half) - 32768) < 400 && *On.Of(1).Said.Opacity == ITEM_OPAQUE && Told &&
-                    Frame == 1000 * Ms + items::FrameMicros && Unseen == 1200 * Ms && On.Shown.Area.Moving.Due(true) == 0 &&
+                    Frame == items::FrameAfter(1000 * Ms) && Unseen == 1200 * Ms && On.Shown.Area.Moving.Due(true) == 0 &&
                     Pixels <= 42 * 22 && Moving <= 42 * 22,
                 "played: opacity none to whole in 200 ms — none as it begins, half at 100, whole at 200 and its end told; a frame "
-                "each sixtieth of a second while it is seen, only its moment of ending while it is not, nothing once it is "
+                "on each mark of the sixtieth-of-a-second grid while it is seen, only its moment of ending while it is not, nothing once it is "
                 "still; each frame composes only the plate (" + std::to_string(Moving) + " pixels)");
 }
 
