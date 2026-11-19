@@ -782,7 +782,8 @@ static void link_block_locked(block_t *b) {
 static void* huge_backed(void* ptr, uintptr_t va, size_t len, uint8_t tag_id,
                          error_t *errcell) {
     if (!ptr || len == 0) return ptr;
-    bool backed = prefault_huge(va, (uint64_t)len) == 0;
+    const int refused = prefault_huge(va, (uint64_t)len);
+    bool backed = refused == 0;
 
     uspin_lock(&heap_lock);
     block_t *block = (block_t *)va;
@@ -794,7 +795,13 @@ static void* huge_backed(void* ptr, uintptr_t va, size_t len, uint8_t tag_id,
     uspin_unlock(&heap_lock);
 
     if (backed) return ptr;
-    *errcell = ERR_NO_MEMORY;
+    /* Said, with the kernel's own word for why: a large block refused at
+     * a program's start is the program gone, and the reason must not be
+     * lost with it. */
+    const error_t why = refused < 0 ? (error_t)-refused : (error_t)refused;
+    kdbg_print("[heap] %lu bytes at 0x%lx were not backed (error %u): the allocation is refused",
+               (unsigned long)len, (unsigned long)va, (unsigned)why);
+    *errcell = why ? why : ERR_NO_MEMORY;
     return NULL;
 }
 

@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "box/color.h"
+#include "box/debug.h"
 #include "box/error.h"
 #include "box/turnin.h"
 #include "boxos_glyph_fold.h"
@@ -62,6 +63,10 @@ std::expected<Easel, box::error> Easel::Claim() noexcept
                 try {
                     Kept.emplace(Description.width, Description.height);
                 } catch (const std::bad_alloc &) {
+                    /* The claim was made; it is the mirror there is no room
+                     * for — said apart from a claim refused. */
+                    kdbg_print("[display] no room for the mirror of the glass, %ux%u: the screen is given back",
+                               Description.width, Description.height);
                     (void)screen_release();
                     return std::unexpected(box::error{box::errc::no_memory});
                 }
