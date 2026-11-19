@@ -65,7 +65,8 @@ bool WriteSheet(const char *Out);
 bool WriteTextSheet(const char *Out, const char *FontPath);
 
 /* How long each piece of the engine's work takes, every way this processor
- * has: on the host a guide only — drawcheck says it on the machine itself. */
+ * has: on the host a guide only — `benchmark graphics` says it on the machine
+ * itself. */
 void SaySpeed();
 void SayTextSpeed();
 

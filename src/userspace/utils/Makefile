@@ -74,7 +74,7 @@ UTILS = create show files tag untag name trash delete assemble \
         calculate difference copy typer flame checksum passport aquarium \
         nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits bloom spell ripple \
         edit seek retag read inside settings autostart scratchpad garden gardener random sand coinflip dice casino seabattle whale hangman duppo \
-        glyphs drawcheck itemcheck
+        glyphs drawcheck itemcheck benchmark
 
 .PHONY: all clean
 
@@ -531,10 +531,10 @@ hangman.elf: $(BOXLIB_START) $(HANGMAN_OBJS) $(PAINTER) $(BOXCXX) $(BOXLIB) $(BO
 	@x86_64-elf-objcopy --strip-all $@
 
 # drawcheck holds the drawing engine to itself on the machine it runs on: every
-# way the processor offers draws the plain way's pixels, and how long each
-# takes. Built -O2, as the engine it measures is.
+# way the processor offers draws the plain way's pixels. Built -O2, as the
+# engine it holds is.
 DRAWCHECK_DIR  = drawcheck
-DRAWCHECK_OBJS = $(addprefix $(DRAWCHECK_DIR)/,drawcheck.o scene.o speed.o text.o)
+DRAWCHECK_OBJS = $(addprefix $(DRAWCHECK_DIR)/,drawcheck.o scene.o text.o)
 $(DRAWCHECK_OBJS): CXXFLAGS += -O2
 
 drawcheck.elf: $(BOXLIB_START) $(DRAWCHECK_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
@@ -550,6 +550,16 @@ $(ITEMCHECK_DIR)/from_c.o: CFLAGS += -I../painter/include
 
 itemcheck.elf: $(BOXLIB_START) $(ITEMCHECK_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(ITEMCHECK_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
+
+# benchmark measures how fast and how smooth the machine runs BoxOS: the
+# drawing engine, and scenes the display shows. Built -O2, so what it measures
+# is the engine's and the display's work, not its own.
+BENCHMARK_DIR  = benchmark
+BENCHMARK_OBJS = $(addprefix $(BENCHMARK_DIR)/,benchmark.o graphics.o engine.o scenes.o)
+$(BENCHMARK_OBJS): CXXFLAGS += -O2
+
+benchmark.elf: $(BOXLIB_START) $(BENCHMARK_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(BENCHMARK_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
 
 # glyphs is C++ in parts of its own directory; its table of Unicode's blocks
 # is written by tools/gen_unicode_blocks.py.
@@ -582,4 +592,4 @@ $(BOXLIB_START): $(BOXLIB_DIR)/boxlib_start.asm
 clean:
 	rm -f *.o *.d *.elf inside/*.o inside/*.d $(ASSEMBLE_DIR)/*.o $(ASSEMBLE_DIR)/*.d $(KIN_DIR)/*.o $(KIN_DIR)/*.d $(EDIT_DIR)/*.o $(EDIT_DIR)/*.d $(READ_DIR)/*.o $(READ_DIR)/*.d \
 	      $(TASKBOARD_DIR)/*.o $(TASKBOARD_DIR)/*.d $(SCRATCHPAD_DIR)/*.o $(SCRATCHPAD_DIR)/*.d $(GARDEN_DIR)/*.o $(GARDEN_DIR)/*.d $(MEMMAP_DIR)/*.o $(MEMMAP_DIR)/*.d $(WIZARD_DIR)/*.o $(WIZARD_DIR)/*.d $(RANDOM_DIR)/*.o $(RANDOM_DIR)/*.d $(SAND_DIR)/*.o $(SAND_DIR)/*.d $(FOREST_DIR)/*.o $(FOREST_DIR)/*.d $(COINFLIP_DIR)/*.o $(COINFLIP_DIR)/*.d $(DICE_DIR)/*.o $(DICE_DIR)/*.d $(ORBITS_DIR)/*.o $(ORBITS_DIR)/*.d $(CASINO_DIR)/*.o $(CASINO_DIR)/*.d $(SEABATTLE_DIR)/*.o $(SEABATTLE_DIR)/*.d $(WHALE_DIR)/*.o $(WHALE_DIR)/*.d $(HANGMAN_DIR)/*.o $(HANGMAN_DIR)/*.d $(DUPPO_DIR)/*.o $(DUPPO_DIR)/*.d \
-	      $(GLYPHS_DIR)/*.o $(GLYPHS_DIR)/*.d
+	      $(GLYPHS_DIR)/*.o $(GLYPHS_DIR)/*.d $(BENCHMARK_DIR)/*.o $(BENCHMARK_DIR)/*.d

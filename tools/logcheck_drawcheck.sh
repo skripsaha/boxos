@@ -10,8 +10,8 @@
 # to the glass, near and dithered (src/userspace/utils/drawcheck). The gate
 # holds that the engine chose the way the processor has, that the system's
 # fonts were found on the volume and text set in them, that every way below
-# it was held, and that the last line says PASS; the times each way took, and
-# setting and drawing text, are kept in the log, a guide only under TCG.
+# it was held, and that the last line says PASS. How long each way takes is
+# `benchmark graphics`'s to say (tools/logcheck_benchmark.sh).
 
 # drawcheck_say COMMAND LINE WAIT — COMMAND typed and entered, then LINE (a
 # pattern) waited for past where the log stood: the hub's prompt is not
@@ -77,8 +77,6 @@ run_drawcheck() {
         done
         [ $held = 1 ]
         chk $? "drawcheck ($name): $ways, each the plain way's very pixels in all 32 scenes of shapes and text, near and dithered"
-        grep -aq "drawcheck: text, " "$L"
-        chk $? "drawcheck ($name): a page of text set and drawn, and how long it took said"
         grep -aq "drawcheck: PASS — every way the processor offers draws the plain way's very pixels" "$L"
         chk $? "drawcheck ($name): PASS ($(grep -aoE 'drawcheck: (PASS|FAIL)' "$L" | tail -1))"
     done
