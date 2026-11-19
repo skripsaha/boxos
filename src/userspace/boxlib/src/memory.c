@@ -774,34 +774,61 @@ static void link_block_locked(block_t *b) {
 }
 
 /* Back a 2 MB reservation with large pages, outside the lock, then give it
- * its header. A reservation the kernel cannot back (PMM exhausted) becomes a
- * free block — its pages fault in one by one if a smaller allocation ever
- * takes it — and the caller gets NULL and the cause, as before. The padding
- * block alloc_locked may have left in front of it stays: a legitimate free
- * region small allocations can use. */
+ * its header. The large pages are the kernel's help, never a condition: a
+ * reservation it does not back at once is given all the same, its pages
+ * backed as they are touched — the heap's own way below 2 MB — save where the
+ * kernel says why it may not be: the machine has no memory for it (then it
+ * becomes a free block, its pages faulting in one by one if a smaller
+ * allocation ever takes it, and the caller gets NULL and the cause), or a
+ * mapping not the heap's lies in the range (then not a byte of it is
+ * touched, the range stays reserved and out of every list, and the caller is
+ * told so, to take a block past it). Each is said. The padding block
+ * alloc_locked may have left in front of it stays: a legitimate free region
+ * small allocations can use. */
 static void* huge_backed(void* ptr, uintptr_t va, size_t len, uint8_t tag_id,
                          error_t *errcell) {
     if (!ptr || len == 0) return ptr;
-    const int refused = prefault_huge(va, (uint64_t)len);
-    bool backed = refused == 0;
+    const int     refused = prefault_huge(va, (uint64_t)len);
+    const error_t why     = refused < 0 ? (error_t)-refused : (error_t)refused;
+    if (refused != 0 && why == ERR_INVALID_ADDRESS) {
+        kdbg_print("[heap] %lu bytes at 0x%lx meet a mapping not the heap's: left untouched, the block "
+                   "taken past them", (unsigned long)len, (unsigned long)va);
+        *errcell = ERR_INVALID_ADDRESS;
+        return NULL;
+    }
+    const bool none = refused != 0 && why == ERR_NO_MEMORY;
+    if (none)
+        kdbg_print("[heap] %lu bytes at 0x%lx: the machine has no memory to back them, the allocation "
+                   "is refused", (unsigned long)len, (unsigned long)va);
+    else if (refused != 0)
+        kdbg_print("[heap] %lu bytes at 0x%lx were not backed at once (error %u): they are backed as "
+                   "they are touched", (unsigned long)len, (unsigned long)va, (unsigned)why);
 
     uspin_lock(&heap_lock);
     block_t *block = (block_t *)va;
     block->size  = len - BLOCK_HDR_SIZE;
     block->magic = HEAP_MAGIC;
-    block->free  = backed ? 0 : 1;
-    block->tag   = backed ? tag_id : HEAP_TAG_NONE;
+    block->free  = none ? 1 : 0;
+    block->tag   = none ? HEAP_TAG_NONE : tag_id;
     link_block_locked(block);
     uspin_unlock(&heap_lock);
 
-    if (backed) return ptr;
-    /* Said, with the kernel's own word for why: a large block refused at
-     * a program's start is the program gone, and the reason must not be
-     * lost with it. */
-    const error_t why = refused < 0 ? (error_t)-refused : (error_t)refused;
-    kdbg_print("[heap] %lu bytes at 0x%lx were not backed (error %u): the allocation is refused",
-               (unsigned long)len, (unsigned long)va, (unsigned)why);
-    *errcell = why ? why : ERR_NO_MEMORY;
+    if (!none) return ptr;
+    *errcell = ERR_NO_MEMORY;
+    return NULL;
+}
+
+/* A block of the locked heap, a large one backed — and, where the range a
+ * large one was given meets a mapping not the heap's, given again past it. */
+static void* alloc_backed(size_t size, uint8_t tag_id, error_t *errcell) {
+    for (int tries = 0; tries < 4; tries++) {
+        uintptr_t huge_va = 0; size_t huge_len = 0;
+        uspin_lock(&heap_lock);
+        void* ptr = alloc_locked(size, tag_id, errcell, &huge_va, &huge_len);
+        uspin_unlock(&heap_lock);
+        ptr = huge_backed(ptr, huge_va, huge_len, tag_id, errcell);
+        if (ptr || *errcell != ERR_INVALID_ADDRESS) return ptr;
+    }
     return NULL;
 }
 
@@ -820,11 +847,7 @@ void* malloc(size_t size) {
     if (c == STRAND_POOL_NO_CLASS || !pool) {
         /* Oversized request, or no slab slot available — serve from the locked
          * global heap. alloc_locked records the cause in this strand's cell. */
-        uintptr_t huge_va = 0; size_t huge_len = 0;
-        uspin_lock(&heap_lock);
-        void* ptr = alloc_locked(size, HEAP_TAG_NONE, errcell, &huge_va, &huge_len);
-        uspin_unlock(&heap_lock);
-        return huge_backed(ptr, huge_va, huge_len, HEAP_TAG_NONE, errcell);
+        return alloc_backed(size, HEAP_TAG_NONE, errcell);
     }
 
     if (!pool->Heads[c]) {
@@ -875,11 +898,7 @@ void* aligned_alloc(size_t alignment, size_t size) {
     StrandPool *pool    = pool_self();
     error_t    *errcell = heap_err_cell_for(pool);
 
-    uintptr_t huge_va = 0; size_t huge_len = 0;
-    uspin_lock(&heap_lock);
-    void* p = alloc_locked(raw, HEAP_TAG_NONE, errcell, &huge_va, &huge_len);
-    uspin_unlock(&heap_lock);
-    p = huge_backed(p, huge_va, huge_len, HEAP_TAG_NONE, errcell);
+    void* p = alloc_backed(raw, HEAP_TAG_NONE, errcell);
     if (!p) return NULL;
 
     /* Split the block at the aligned address — under the lock again, and
@@ -912,15 +931,13 @@ void* malloc_tagged(size_t size, const char *tag) {
     /* pool_self() (which may claim a slot) is called BEFORE the heap lock —
      * pool_claim takes the lock itself, so resolving it here avoids re-entry. */
     error_t *errcell = heap_err_cell_for(pool_self());
-    uintptr_t huge_va = 0; size_t huge_len = 0;
     TagSay say = TAG_SAY_NOTHING;
     uspin_lock(&heap_lock);
     uint8_t tag_id = get_or_create_tag_locked(tag, &say);
-    void* ptr = alloc_locked(size, tag_id, errcell, &huge_va, &huge_len);
     uspin_unlock(&heap_lock);
     /* Outside the lock: saying it is a syscall. */
     if (say != TAG_SAY_NOTHING) heap_tag_say(say, tag);
-    return huge_backed(ptr, huge_va, huge_len, tag_id, errcell);
+    return alloc_backed(size, tag_id, errcell);
 }
 
 /* Return a block to the global heap under the lock — the slow path shared by
