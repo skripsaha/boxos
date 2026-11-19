@@ -182,7 +182,7 @@ int main()
         Shown.Used.SetOpacity(Opacity);
     };
     Seen(0);
-    for (std::uint64_t Due = clock_uptime_ms(), Beat = 0;; Beat++) {
+    for (std::uint64_t Due = clock_uptime_us(), Beat = 0;; Beat++) {
         Now.Look();
         if (Beat == 0) {
             Show(Screen, Shown, Now);
@@ -192,8 +192,8 @@ int main()
         }
         (void)Screen.Present();
         /* The next beat: a beat behind is not made up, only the next kept. */
-        Due = std::max(Due + BeatMs, clock_uptime_ms() + 1);
-        (void)alarm_set(Due);
+        Due = std::max(Due + BeatMs * 1000u, clock_uptime_us() + 1);
+        (void)alarm_set_us(Due);
         /* The beat came — or the screen changed, and the corner with it. */
         for (;;) {
             const gui::Event Heard = Screen.Wait();

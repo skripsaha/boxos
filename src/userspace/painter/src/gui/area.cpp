@@ -274,7 +274,7 @@ Event Area::Wait(tui::Keyboard *Keys)
             }
         }
         std::uint64_t Moment = 0;
-        if (alarm_heard(&Moment)) {
+        if (alarm_heard_us(&Moment)) {
             Event Made;
             Made.What   = Event::Kind::Alarm;
             Made.Moment = Moment;

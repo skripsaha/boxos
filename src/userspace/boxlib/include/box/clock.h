@@ -13,9 +13,11 @@ extern "C" {
 /*
  * box/clock.h — userspace API over the kernel-mapped ClockBoard page.
  *
- * Reads cost a single memory load; no syscall, no manifest, no ring
+ * Reads cost a few loads and the TSC; no syscall, no manifest, no ring
  * round-trip. The page is mapped read-only at a fixed VA in every
- * Cabin; the kernel writes per-tick on the BSP. If the page is missing
+ * Cabin; the kernel writes it each tick on the BSP, the clock beside the
+ * TSC, and a reader adds what the TSC ran since — so the microsecond read
+ * is the reader's own, not the tick's, and it never goes back. If the page is missing
  * (no magic) each helper falls back to the manifest path so the caller
  * still gets a correct answer — slower, but never wrong.
  */

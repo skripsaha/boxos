@@ -71,7 +71,7 @@ void Board::Run()
                                 [&] { ItemScreen->Draw([&](painter::gui::Frame &Out) { Describe(Out); }); });
             /* The next reading as an alarm; the display's word on where the
              * area is draws the board again. */
-            (void)alarm_set(clock_uptime_ms() + (Left == 0 ? 1 : Left));
+            (void)alarm_set_us(NextReadUs > Now ? NextReadUs : Now + 1);
             for (;;) {
                 const painter::gui::Event Told = ItemScreen->Wait(&*Keys);
                 if (Told.What == painter::gui::Event::Kind::Key) Heard = tui::Event{tui::EventKind::Key, Told.Key, {}};

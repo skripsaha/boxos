@@ -90,11 +90,11 @@ void Show(const gui::Area &Screen, gui::Shape &Plate, gui::Text &Time, const Loo
     Time.SetText(Said).SetStyle(Figures).SetSpans(Colons).SetPlace({Left + panel::Padding, panel::Margin + panel::Inset});
 }
 
-/* The ClockBoard's moment the next second turns at. */
+/* The ClockBoard's moment the next second turns at, in µs. */
 std::uint64_t NextSecond()
 {
-    const std::uint64_t IntoSecond = clock_unix_now_ns() / 1000000u % 1000u;
-    return clock_uptime_ms() + (1000u - IntoSecond) + 1u;
+    const std::uint64_t IntoSecond = clock_unix_now_ns() / 1000u % 1000000u;
+    return clock_uptime_us() + (1000000u - IntoSecond) + 1u;
 }
 
 }  // namespace
@@ -126,7 +126,7 @@ int main()
             Time.SetOpacity(1);
         });
         (void)Screen.Present();
-        (void)alarm_set(NextSecond());
+        (void)alarm_set_us(NextSecond());
         /* The second turned — or the screen changed, and the corner with it. */
         for (;;) {
             const gui::Event Heard = Screen.Wait();

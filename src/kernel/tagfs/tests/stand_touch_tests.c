@@ -1,26 +1,27 @@
 #include "tests.h"
 #include "stand_tests.h"
 #include "touch_queue.h"
-#include "scheduler.h"
+#include "pit.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
 // ============================================================================
-// The touch queue's tick fires its nodes in one pass
+// The touch queue fires its nodes in one pass
 //
-// The PIT tick takes every node whose tick came out of the touch queue under
-// the queue's lock, which keeps interrupts off. A tick that walked the queue
-// from its head again for every node it fired held them off for the nodes it
-// fired times the queue's depth. The nodes here are the test's own, each a
+// A pass takes every node whose moment came out of the touch queue under the
+// queue's lock, which keeps interrupts off. A pass that walked the queue from
+// its head again for every node it fired held them off for the nodes it fired
+// times the queue's depth; the queue is nearest first, so a pass looks at the
+// nodes it fires and the one after. The nodes here are the test's own, each a
 // CALL of one counting function, and every one of them is out of the queue on
-// the way out. The startup tests run before the tick does, so the test ticks
-// in its place, with the tick that fires the nodes it armed.
+// the way out. The test fires its own pass at the moment its due nodes are
+// armed for, a second ahead — long before the keeper's one-shot would.
 // ============================================================================
 
-#define STAND_TOUCH_FAR     2048u       /* nodes armed for a tick days ahead */
-#define STAND_TOUCH_DUE     256u        /* armed before them for the next ticks */
-#define STAND_TOUCH_AHEAD   2u          /* ticks from now the due nodes fire at */
-#define STAND_TOUCH_DAYS    (250ull * 86400ull * 30ull)
+#define STAND_TOUCH_FAR     2048u       /* nodes armed for a moment a month ahead */
+#define STAND_TOUCH_DUE     256u        /* armed before them for a second ahead */
+#define STAND_TOUCH_AHEAD   1000000ull  /* µs from now the due nodes fire at */
+#define STAND_TOUCH_MONTH   (1000000ull * 86400ull * 30ull)
 #define STAND_TOUCH_SLACK   64u         /* nodes of the machine's own the queue may hold */
 
 static volatile uint32_t s_touch_visits;
@@ -39,12 +40,12 @@ static uint32_t StandTouchStillArmed(const TouchQueueNode* node, uint32_t from, 
 }
 
 /*
- * 256 nodes are armed for the tick after next, and 2048 for a tick a month
- * ahead after them, so every due node lies behind every far one. The tick
- * that fires the 256 looks at no more nodes than the queue holds; one that
- * walked it again from its head for each would look at half a million.
+ * 256 nodes are armed for a second ahead, and 2048 for a month ahead after
+ * them. The pass that fires the 256 looks at no more nodes than the queue
+ * holds; one that walked it again from its head for each would look at half a
+ * million.
  */
-TestResult TestStandTouchQueueTickOnePass(void)
+TestResult TestStandTouchQueueFireOnePass(void)
 {
     TestResult      verdict = TEST_PASS;
     uint32_t        nodes   = STAND_TOUCH_FAR + STAND_TOUCH_DUE;
@@ -54,25 +55,25 @@ TestResult TestStandTouchQueueTickOnePass(void)
     memset(node, 0, sizeof(TouchQueueNode) * nodes);
     s_touch_visits = 0;
 
-    (void)TouchQueueTickMost();
-    uint64_t now = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED);
+    (void)TouchQueueFireMost();
+    uint64_t now = pit_get_uptime_us();
     for (uint32_t i = 0; i < STAND_TOUCH_DUE; i++)
         TouchQueueArmCall(&node[STAND_TOUCH_FAR + i], StandTouchVisit, now + STAND_TOUCH_AHEAD);
     for (uint32_t i = 0; i < STAND_TOUCH_FAR; i++)
-        TouchQueueArmCall(&node[i], StandTouchVisit, now + STAND_TOUCH_DAYS);
+        TouchQueueArmCall(&node[i], StandTouchVisit, now + STAND_TOUCH_MONTH);
 
-    TouchQueueTick(now + STAND_TOUCH_AHEAD);
-    uint32_t most = TouchQueueTickMost();
+    TouchQueueFireDue(now + STAND_TOUCH_AHEAD);
+    uint32_t most = TouchQueueFireMost();
 
     TEST_ASSERT_EQ(StandTouchStillArmed(node, STAND_TOUCH_FAR, STAND_TOUCH_DUE), 0,
-                   "every node whose tick came left the queue");
+                   "every node whose moment came left the queue");
     TEST_ASSERT_EQ(__atomic_load_n(&s_touch_visits, __ATOMIC_ACQUIRE), STAND_TOUCH_DUE,
                    "and each of them was called once");
     TEST_ASSERT_EQ(StandTouchStillArmed(node, 0, STAND_TOUCH_FAR), STAND_TOUCH_FAR,
                    "while every node a month ahead still waits");
-    TestEvidence("nodes the dearest tick looked at:", most);
+    TestEvidence("nodes the dearest pass looked at:", most);
     TEST_ASSERT(most <= nodes + STAND_TOUCH_SLACK,
-                "a tick looks at each node of the queue once, however many of them fire");
+                "a pass looks at each node of the queue once, however many of them fire");
 out:
     if (node) {
         for (uint32_t i = nodes; i-- > 0; )

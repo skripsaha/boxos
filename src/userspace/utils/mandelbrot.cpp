@@ -192,7 +192,7 @@ public:
     bool  Present() override { return Screen.Present(); }
     Heard Wait(std::uint32_t Ms, KeyEvent &Key) override
     {
-        if (Ms) (void)alarm_set(clock_uptime_ms() + Ms);
+        if (Ms) (void)alarm_set_us(clock_uptime_us() + std::uint64_t{Ms} * 1000u);
         else (void)alarm_cancel();
         for (;;) {
             const gui::Event Event = Screen.Wait(&Keys);

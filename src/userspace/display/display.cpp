@@ -379,7 +379,7 @@ bool ScreenStep()
     return Back;
 }
 
-// The moment the alarm is set for, 0 when none is.
+// The moment the alarm is set for, µs of uptime; 0 when none is.
 std::uint64_t g_alarm;
 
 // The display's settings watched: how things move takes effect at once.
@@ -421,8 +421,9 @@ bool EffectStep()
 {
     std::uint64_t Moment;
     bool Heard = false;
-    while (alarm_heard(&Moment)) {
+    while (alarm_heard_us(&Moment)) {
         Heard = true;
+        MeasureAlarm(Moment);
         if (Moment == g_alarm) g_alarm = 0;
     }
     const bool Changed = EffectsStep();
@@ -430,19 +431,19 @@ bool EffectStep()
     return Changed || Heard;
 }
 
-// The alarm for the effect's next frame or its end, in place of the one set:
-// only when that moment has changed, and none while no effect lies over the
-// glass.
+// The alarm for the next frame anything wants — an effect's, the scene's, an
+// animation's, the display's own — or an effect's end, in place of the one
+// set: only when that moment has changed, and none while nothing waits for
+// one. Kept to the microsecond: a frame due on the frames' grid is drawn on it.
 void SetAlarm()
 {
-    const std::uint64_t Areas  = AreasDue();
+    const std::uint64_t Effect = EffectsDue(), Scene = SceneDue();
     std::uint64_t       Due    = 0;
-    const std::uint64_t Own = InputDue();
-    for (const std::uint64_t Each : {EffectsDue(), SceneDue(), Areas ? (Areas + 999) / 1000 : 0, Own ? (Own + 999) / 1000 : 0})
+    for (const std::uint64_t Each : {Effect * 1000u, Scene * 1000u, AreasDue(), InputDue()})
         if (Each != 0) Due = Due == 0 ? Each : std::min(Due, Each);
     if (Due == g_alarm) return;
     if (Due == 0) alarm_cancel();
-    else alarm_set(Due);
+    else alarm_set_us(Due);
     g_alarm = Due;
 }
 

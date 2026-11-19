@@ -58,8 +58,8 @@ bool CheckKeys()
     std::vector<std::uint32_t> Came, Pressed;
     std::string                Typed;
     bool                       Asked = false, Late = false;
-    const std::uint64_t        Until = clock_uptime_ms() + WaitMs;
-    (void)alarm_set(Until);
+    const std::uint64_t        Until = clock_uptime_us() + WaitMs * 1000u;
+    (void)alarm_set_us(Until);
     while (!Asked && !Late) {
         const gui::Event Each = On.Wait();
         switch (Each.What) {
@@ -79,7 +79,7 @@ bool CheckKeys()
             }
             break;
         case gui::Event::Kind::Alarm:
-            Late = clock_uptime_ms() >= Until;
+            Late = clock_uptime_us() >= Until;
             break;
         default:
             break;

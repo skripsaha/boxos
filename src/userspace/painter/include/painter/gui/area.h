@@ -85,7 +85,7 @@ struct Event {
     bool          Came     = false; // Focus: it came to the item; else it left
     std::string   Text;             // Text: the field's, UTF-8
     tui::KeyEvent Key{};
-    std::uint64_t Moment = 0;       // the alarm's, of the ClockBoard's uptime
+    std::uint64_t Moment = 0;       // the alarm's, of the ClockBoard's uptime in µs
 };
 
 class Frame;

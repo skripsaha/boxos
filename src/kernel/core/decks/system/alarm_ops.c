@@ -1,7 +1,7 @@
 /*
  * alarm_ops.c — SYSTEM_OP_ALARM: time, as an event.
  *
- * A strand sets the moment it wants to be told of (uptime in ms, the
+ * A strand sets the moment it wants to be told of (uptime in µs, the
  * ClockBoard's) and the kernel puts an ordinary Touch — tag "alarm", an
  * AlarmEvent — in that strand's own TouchRing when it comes. That is all a
  * turned-in strand needs: the Touch moves the cursor Turn In watches, so the
@@ -11,7 +11,7 @@
  *
  * The deadline is kept by the machinery every timed wait already uses, and no
  * second timer exists: a TouchQueueNode embedded in the process
- * (process_t.alarm_node), fired by the PIT tick like a park's deadline. One
+ * (process_t.alarm_node), fired at its moment like a park's deadline. One
  * strand has one alarm — setting again moves the same node, a moment of 0
  * takes it out — so the cost of an alarm is a node that is already there.
  *
@@ -21,7 +21,7 @@
  * cancelled after the claim's read is not delivered at all: the exchange
  * loses to the new value.
  *
- * The tick delivers nothing itself. The Touch is written into a ring in
+ * The fire delivers nothing itself. The Touch is written into a ring in
  * memory the cabin maps, and a timer interrupt does no such work (a
  * park's timeout Result starved cores of TLB-shootdown acks). So the fire
  * passes the strand's alarm_baton (baton.h) — embedded, never dropped — to a
@@ -32,8 +32,8 @@
  * Lock ordering: SysAlarm and AlarmDeliver take no lock of their own. Arming
  * takes the touch queue's lock (TouchQueueArmAlarm), a leaf held only to
  * link a node — never with another held, and with interrupts off, as the
- * tick takes it. The tick takes that lock alone, lets it go, and only then
- * fires: AlarmFire is a compare-exchange and a baton pass, lock-free.
+ * fire takes it. The fire takes that lock alone, lets it go, and only then
+ * calls: AlarmFire is a compare-exchange and a baton pass, lock-free.
  * TouchRestDeliver runs on the K-Core with nothing held, and takes the locks
  * it always does (owed_lock, a leaf, only on a full ring). An alarm ends with
  * its strand: process_destroy disarms the node after setting `destroying`,
@@ -52,8 +52,7 @@
 #include "baton.h"
 #include "touch.h"
 #include "touch_queue.h"
-#include "clockboard.h"
-#include "scheduler.h"
+#include "pit.h"
 #include "error.h"
 #include "klib.h"
 
@@ -61,18 +60,8 @@ static TouchTag g_alarm_tag = TOUCH_TAG_INVALID;
 
 static void AlarmDeliver(void *ctx);
 
-/* The tick at which `moment_ms` has come, from `now_ms`: the tick that is at or
- * after it, and never this one — a moment already past is delivered at the next. */
-static uint64_t alarm_fire_tick(uint64_t moment_ms, uint64_t now_ms)
-{
-    uint64_t wait_ms = moment_ms > now_ms ? moment_ms - now_ms : 0;
-    uint64_t ticks   = (wait_ms * SCHEDULER_DEFAULT_TICK_HZ + 999ULL) / 1000ULL;
-    if (ticks == 0) ticks = 1;
-    return __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED) + ticks;
-}
-
 /* -------------------------------------------------------------------------
- * SysAlarm — params: [u64 moment_ms]  (8 bytes); 0 takes the alarm back.
+ * SysAlarm — params: [u64 moment_us]  (8 bytes); 0 takes the alarm back.
  * Answers nothing, as Turn In: see SYSTEM_OP_ALARM.
  * ------------------------------------------------------------------------- */
 static int SysAlarm(const ManifestOp *op, Crate *crates,
@@ -96,7 +85,7 @@ static int SysAlarm(const ManifestOp *op, Crate *crates,
     if (moment == 0)
         TouchQueueDisarm(&proc->alarm_node);
     else
-        TouchQueueArmAlarm(proc, alarm_fire_tick(moment, clockboard_uptime_ms()));
+        TouchQueueArmAlarm(proc, moment);
     return ERR_WOULD_BLOCK;
 }
 
@@ -125,14 +114,13 @@ static void AlarmDeliver(void *ctx)
 
     uint64_t moment = __atomic_load_n(&target->alarm_moment, __ATOMIC_SEQ_CST);
     if (moment != 0 && !__atomic_load_n(&target->destroying, __ATOMIC_ACQUIRE)) {
-        uint64_t now = clockboard_uptime_ms();
-        if (now < moment) {
-            /* Not yet: the tick came before the moment (its resolution), or the
-             * alarm was moved later after this fire left the queue. */
-            TouchQueueArmAlarm(target, alarm_fire_tick(moment, now));
+        if (pit_get_uptime_us() < moment) {
+            /* Not yet: the alarm was moved later after this fire left the
+             * queue. */
+            TouchQueueArmAlarm(target, moment);
         } else if (__atomic_compare_exchange_n(&target->alarm_moment, &moment, 0, false,
                                                __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
-            AlarmEvent event = { .moment_ms = moment };
+            AlarmEvent event = { .moment_us = moment };
             TouchRestDeliver(target, g_alarm_tag, &event, sizeof(event), 0, 0);
         }
     }

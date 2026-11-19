@@ -12,7 +12,7 @@
 #define ALARM_TOUCH_TAG  "alarm"
 
 typedef struct AlarmEvent {
-    uint64_t moment_ms;     /* the moment it was set for, uptime in ms as the ClockBoard counts */
+    uint64_t moment_us;     /* the moment it was set for, uptime in µs as the ClockBoard counts */
 } AlarmEvent;
 
 #endif

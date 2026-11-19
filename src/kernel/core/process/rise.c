@@ -6,15 +6,14 @@
 #include "baton.h"
 #include "cabin.h"
 #include "cabin_info.h"
-#include "kernel_clock.h"
-#include "kernel_config.h"
 #include "klib.h"
 #include "proc_exit.h"
 #include "process.h"
+#include "pit.h"
 #include "touch_queue.h"
 #include "vmm.h"
 
-#define RISE_TICKS(Seconds) ((uint64_t)(Seconds) * CONFIG_SCHED_DEFAULT_TICK_HZ)
+#define RISE_US(Seconds) ((uint64_t)(Seconds) * 1000000u)
 
 enum {
     RISE_PAUSE_FIRST_S = 1,    /* the pause before the raise after a first fall */
@@ -31,8 +30,8 @@ typedef struct Riser {
     uint64_t      file;
     uint32_t      pid;          /* its life now, by its main strand; 0 while it is down */
     uint32_t      generation;
-    uint64_t      started;      /* the tick its life now began */
-    uint64_t      due;          /* the tick it is raised again at; 0 when none is owed */
+    uint64_t      started;      /* the moment its life now began, µs of uptime */
+    uint64_t      due;          /* the moment it is raised again at; 0 when none is owed */
     uint32_t      pause_s;      /* what its next fall waits before the raise */
     uint32_t      soon;         /* falls in a row, each within RISE_SOON_S of its start */
     uint32_t      raised;       /* times raised again */
@@ -69,7 +68,7 @@ static void RiserUnlink(Riser *gone)
     }
 }
 
-/* Called by the tick: the door knocked on, nothing more — a start is no
+/* Called by the touch queue's fire: the door knocked on, nothing more — a start is no
  * interrupt's work. */
 static void RiseDue(void)
 {
@@ -87,7 +86,7 @@ static void RiseArmLocked(void)
     else TouchQueueDisarm(&g_due);
 }
 
-/* Every raise whose tick came, started: one at a time, the lock let go while
+/* Every raise whose moment came, started: one at a time, the lock let go while
  * the volume is read. Past the lock the Riser is looked for again by its file:
  * the start's own watch gives it a life, and that life may end — and free it —
  * before the lock is taken back. One still raising was not watched. */
@@ -102,7 +101,7 @@ static void RiseRun(void *ctx)
             spin_unlock(&g_lock);
             return;
         }
-        const uint64_t now = kernel_tick_get();
+        const uint64_t now = pit_get_uptime_us();
         for (Riser *r = g_risers; r && file == 0; r = r->next) {
             if (r->due == 0 || r->due > now) continue;
             r->due     = 0;
@@ -168,7 +167,7 @@ void RiseWatch(process_t *proc, uint64_t file, const char *name)
         if (r) {
             r->pid        = proc->pid;
             r->generation = proc->generation;
-            r->started    = kernel_tick_get();
+            r->started    = pit_get_uptime_us();
             r->raising    = false;
             const uint32_t raised = r->raised;
             spin_unlock(&g_lock);
@@ -207,13 +206,13 @@ void RiseProgramEnded(uint32_t pid, uint32_t generation, int32_t disposition)
         return;
     }
     r->pid = r->generation = 0;
-    const uint64_t now   = kernel_tick_get();
+    const uint64_t now   = pit_get_uptime_us();
     const uint64_t lived = now - r->started;
     if (!fell) {
         RiserUnlink(r);
         gone = r;
     } else {
-        r->soon = lived <= RISE_TICKS(RISE_SOON_S) ? r->soon + 1 : 0;
+        r->soon = lived <= RISE_US(RISE_SOON_S) ? r->soon + 1 : 0;
         if (r->soon >= RISE_SOON_FALLS) {
             RiserUnlink(r);
             gone = r;
@@ -221,10 +220,10 @@ void RiseProgramEnded(uint32_t pid, uint32_t generation, int32_t disposition)
                     "it is let be, not raised again\n", r->name, (unsigned)RISE_SOON_FALLS,
                     (unsigned)RISE_SOON_S);
         } else {
-            if (lived >= RISE_TICKS(RISE_CALM_S)) r->pause_s = RISE_PAUSE_FIRST_S;
+            if (lived >= RISE_US(RISE_CALM_S)) r->pause_s = RISE_PAUSE_FIRST_S;
             const uint32_t pause = r->pause_s;
             r->pause_s = pause * 2 < RISE_PAUSE_MOST_S ? pause * 2 : RISE_PAUSE_MOST_S;
-            r->due     = now + RISE_TICKS(pause);
+            r->due     = now + RISE_US(pause);
             RiseArmLocked();
             kprintf("[RISE] '%s' fell; it is raised again in %u s\n", r->name, pause);
         }

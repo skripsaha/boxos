@@ -1,14 +1,18 @@
 /*
- * touch_queue.c — kernel-side scheduled-touch queue (touch_queue.h).
+ * touch_queue.c — what the kernel does at a moment named in advance
+ * (touch_queue.h).
  *
- * An unsorted singly-linked list of nodes their armers own. TouchQueueTick
- * scans it each PIT tick — the depth is the number of timed waits and delayed
- * publishes in flight — and takes every node whose tick came out in that one
- * pass, under the lock, which keeps interrupts off: a tick's cost is the
- * queue's depth, never the depth times the nodes that fire. A WAKE or CALL
- * node may be armed again the moment it leaves the queue, so what its fire
- * needs is copied into the node's own fire fields as it leaves, and the tick's
- * list runs through a link no arm touches.
+ * A singly-linked list of nodes their armers own, nearest moment first, so a
+ * pass looks at the nodes that fire and one more, and the keeper's one-shot
+ * is set from the head. A pass takes every node whose moment came out in one
+ * go, under the lock, which keeps interrupts off. A WAKE or CALL node may be
+ * armed again the moment it leaves the queue, so what its fire needs is
+ * copied into the node's own fire fields as it leaves, and the pass's list
+ * runs through a link no arm touches.
+ *
+ * Lock ordering: g_lock is a leaf. Under it the keeper reads the clock and
+ * writes its own LAPIC (lapic_oneshot_after) — both lock-free — and nothing
+ * else; the IPI that tells the keeper is sent with it let go.
  */
 
 #include "touch_queue.h"
@@ -21,25 +25,47 @@
 #include "baton.h"       /* the deadline rides the process's own baton */
 #include "sync_ops.h"    /* SyncTimeoutDeliver */
 #include "alarm_ops.h"   /* AlarmFire */
+#include "amp.h"         /* the keeper: the core that ran TouchQueueInit */
+#include "irqchip.h"     /* DEADLINE_VECTOR */
+#include "lapic.h"       /* the keeper's one-shot, the IPI that tells it */
+#include "pit.h"         /* pit_get_uptime_us — the clock every moment is named in */
 
-static TouchQueueNode *g_head;
+static TouchQueueNode *g_head;           /* nearest moment first */
 static spinlock_t      g_lock;
+static uint64_t        g_set_us;         /* what the keeper's one-shot is set for; 0 nothing — under g_lock */
+static bool            g_keeping;        /* the keeper has a one-shot (written once, at init) */
+static uint8_t         g_keeper;         /* its core */
+
+/* The one-shot's longest wait. Past it the keeper is interrupted early, finds
+ * nothing due and sets it again, so a TSC whose rate is a hair off the clock's
+ * never moves a far moment by more than its share of a second. */
+#define TOUCH_QUEUE_LONGEST_US 1000000ull
+
+/* Under g_lock, on the keeper: its one-shot set for the nearest moment, or
+ * taken back when there is none. */
+static void touch_queue_set_locked(void)
+{
+    uint64_t at = g_head ? g_head->fire_us : 0;
+    g_set_us = at;
+    if (!at) {
+        lapic_oneshot_after(0);
+        return;
+    }
+    uint64_t now  = pit_get_uptime_us();
+    uint64_t wait = at > now ? at - now : 1;
+    lapic_oneshot_after(wait < TOUCH_QUEUE_LONGEST_US ? wait : TOUCH_QUEUE_LONGEST_US);
+}
 
 void TouchQueueInit(void)
 {
     spinlock_init(&g_lock);
-    g_head = NULL;
-}
-
-/* Under g_lock. */
-static void touch_queue_link(TouchQueueNode *n, uint64_t fire_tick)
-{
-    n->fire_tick = fire_tick;
-    if (n->armed)
-        return;             /* already waiting: it moves to the new tick */
-    n->armed = 1;
-    n->next  = g_head;
-    g_head   = n;
+    g_head    = NULL;
+    g_set_us  = 0;
+    g_keeper  = amp_get_core_index();
+    g_keeping = lapic_oneshot_init(DEADLINE_VECTOR);
+    if (!g_keeping)
+        kprintf("[TOUCH] no one-shot timer on core %u: a moment named in advance fires on the "
+                "tick, %u a second\n", (unsigned)g_keeper, (unsigned)SCHEDULER_DEFAULT_TICK_HZ);
 }
 
 /* Under g_lock: false when `n` is not in the list. */
@@ -56,6 +82,36 @@ static bool touch_queue_unlink(TouchQueueNode *n)
         }
     }
     return false;
+}
+
+/* Under g_lock: `n` at its moment, after every node of the same moment or
+ * nearer — a node already waiting moves. When it is now the nearest and nearer
+ * than the keeper's one-shot is set for, the one-shot is set again: here, on
+ * the keeper; true when another core must tell the keeper, its lock let go. */
+static bool touch_queue_link(TouchQueueNode *n, uint64_t fire_us)
+{
+    (void)touch_queue_unlink(n);
+    n->fire_us = fire_us;
+    n->armed   = 1;
+    TouchQueueNode **at = &g_head;
+    while (*at && (*at)->fire_us <= fire_us)
+        at = &(*at)->next;
+    n->next = *at;
+    *at     = n;
+    if (!g_keeping || g_head != n || (g_set_us != 0 && fire_us >= g_set_us))
+        return false;
+    if (amp_get_core_index() == g_keeper) {
+        touch_queue_set_locked();
+        return false;
+    }
+    return true;
+}
+
+/* A nearer moment named on another core: the keeper told to look again. */
+static void touch_queue_tell_keeper(bool tell)
+{
+    if (tell)
+        lapic_send_ipi(g_amp.cores[g_keeper].lapic_id, DEADLINE_VECTOR);
 }
 
 TouchQueueNode *TouchQueuePublishNode(uint32_t tag_id, const void *payload, uint32_t plen,
@@ -77,20 +133,21 @@ TouchQueueNode *TouchQueuePublishNode(uint32_t tag_id, const void *payload, uint
     return n;
 }
 
-void TouchQueueArm(TouchQueueNode *n, uint64_t fire_tick)
+void TouchQueueArm(TouchQueueNode *n, uint64_t fire_us)
 {
     spin_lock(&g_lock);
-    touch_queue_link(n, fire_tick);
+    bool tell = touch_queue_link(n, fire_us);
     spin_unlock(&g_lock);
+    touch_queue_tell_keeper(tell);
 }
 
-void TouchQueueArmWake(process_t *target, uint64_t fire_tick, uint32_t owes_result,
+void TouchQueueArmWake(process_t *target, uint64_t fire_us, uint32_t owes_result,
                        uint32_t park_seq)
 {
     TouchQueueNode *n = &target->park_wake;
 
     /* The reference the armed node holds, taken before the node can be seen:
-     * the tick that fires it drops it, and so does a disarm. */
+     * the pass that fires it drops it, and so does a disarm. */
     process_ref_inc(target);
     spin_lock(&g_lock);
     bool was_armed        = n->armed;
@@ -98,13 +155,14 @@ void TouchQueueArmWake(process_t *target, uint64_t fire_tick, uint32_t owes_resu
     n->u.wake.target      = target;
     n->u.wake.owes_result = owes_result;
     n->u.wake.park_seq    = park_seq;
-    touch_queue_link(n, fire_tick);
+    bool tell             = touch_queue_link(n, fire_us);
     spin_unlock(&g_lock);
+    touch_queue_tell_keeper(tell);
     if (was_armed)
         process_ref_dec(target);    /* the node already held one */
 }
 
-void TouchQueueArmAlarm(process_t *target, uint64_t fire_tick)
+void TouchQueueArmAlarm(process_t *target, uint64_t fire_us)
 {
     TouchQueueNode *n = &target->alarm_node;
 
@@ -115,19 +173,21 @@ void TouchQueueArmAlarm(process_t *target, uint64_t fire_tick)
     bool was_armed       = n->armed;
     n->kind              = TOUCH_QUEUE_ALARM;
     n->u.alarm.target    = target;
-    touch_queue_link(n, fire_tick);
+    bool tell            = touch_queue_link(n, fire_us);
     spin_unlock(&g_lock);
+    touch_queue_tell_keeper(tell);
     if (was_armed)
         process_ref_dec(target);    /* the node already held one */
 }
 
-void TouchQueueArmCall(TouchQueueNode *n, void (*call)(void), uint64_t fire_tick)
+void TouchQueueArmCall(TouchQueueNode *n, void (*call)(void), uint64_t fire_us)
 {
     spin_lock(&g_lock);
     n->kind   = TOUCH_QUEUE_CALL;
     n->u.call = call;
-    touch_queue_link(n, fire_tick);
+    bool tell = touch_queue_link(n, fire_us);
     spin_unlock(&g_lock);
+    touch_queue_tell_keeper(tell);
 }
 
 void TouchQueueDisarm(TouchQueueNode *n)
@@ -144,7 +204,8 @@ void TouchQueueDisarm(TouchQueueNode *n)
         process_ref_dec(held);
 }
 
-/* A scheduled WAKE has expired (PIT-tick / interrupt context). Two parts:
+/* A scheduled WAKE has expired (interrupt context: the keeper's one-shot, or
+ * the tick). Two parts:
  *
  *   1. The bare reschedule (PROC_WAITING -> PROC_WORKING + IPI) — done HERE, in
  *      IRQ context. It is O(1), allocation-free, touches NO VMM, and is the
@@ -177,7 +238,7 @@ static void touch_queue_fire_wake(process_t *target, uint32_t owes_result, uint3
                       __atomic_load_n(&target->park_seq, __ATOMIC_ACQUIRE) == park_seq;
 
     if (this_sleep && process_get_state(target) == PROC_WAITING) {
-        /* The deadline is the event: from this tick the answer (ERR_TIMEOUT) is
+        /* The deadline is the event: from this moment the answer (ERR_TIMEOUT) is
          * determined and the kernel owes it. Mark it due here, where the strand
          * is provably still in this park, so a delivery that never comes is a
          * chit DUE for ever, not a silence. touch_await owes no Result and
@@ -200,33 +261,33 @@ static void touch_queue_fire_wake(process_t *target, uint32_t owes_result, uint3
     }
 }
 
-static volatile uint8_t g_ticking;       /* a tick under way */
+static volatile uint8_t g_firing;        /* a pass under way */
 
 #ifdef CONFIG_VOLUME_TESTS
-static volatile uint32_t g_tick_most;
+static volatile uint32_t g_fire_most;
 
-uint32_t TouchQueueTickMost(void)
+uint32_t TouchQueueFireMost(void)
 {
-    return __atomic_exchange_n(&g_tick_most, 0u, __ATOMIC_ACQ_REL);
+    return __atomic_exchange_n(&g_fire_most, 0u, __ATOMIC_ACQ_REL);
 }
 #endif
 
-/* Every node whose tick came, out of the queue in one pass: the tick's own
- * list of them, oldest armed last. */
-static TouchQueueNode *touch_queue_take_due(uint64_t now)
+/* Every node whose moment came, out of the queue in one pass: the pass's own
+ * list of them, nearest first. The list is nearest first itself, so the pass
+ * stops at the first node still to come. */
+static TouchQueueNode *touch_queue_take_due(uint64_t now_us)
 {
     TouchQueueNode  *due    = NULL;
     TouchQueueNode **tail   = &due;
     uint32_t         looked = 0;
 
     spin_lock(&g_lock);
-    for (TouchQueueNode **cur = &g_head; *cur; looked++) {
-        TouchQueueNode *n = *cur;
-        if (now < n->fire_tick) {
-            cur = &n->next;
-            continue;
-        }
-        *cur          = n->next;
+    while (g_head) {
+        TouchQueueNode *n = g_head;
+        looked++;
+        if (now_us < n->fire_us)
+            break;
+        g_head        = n->next;
         n->next       = NULL;
         n->armed      = 0;
         n->fired_kind = n->kind;
@@ -237,21 +298,22 @@ static TouchQueueNode *touch_queue_take_due(uint64_t now)
     }
     spin_unlock(&g_lock);
 #ifdef CONFIG_VOLUME_TESTS
-    if (looked > __atomic_load_n(&g_tick_most, __ATOMIC_RELAXED))
-        __atomic_store_n(&g_tick_most, looked, __ATOMIC_RELAXED);
+    if (looked > __atomic_load_n(&g_fire_most, __ATOMIC_RELAXED))
+        __atomic_store_n(&g_fire_most, looked, __ATOMIC_RELAXED);
 #endif
     return due;
 }
 
-void TouchQueueTick(uint64_t now)
+/* The pass: false when another was under way and this one did nothing. */
+static bool touch_queue_fire_due(uint64_t now_us)
 {
-    if (__atomic_exchange_n(&g_ticking, 1u, __ATOMIC_ACQUIRE))
-        return;
+    if (__atomic_exchange_n(&g_firing, 1u, __ATOMIC_ACQUIRE))
+        return false;
 
     /* Each node's link is read before its fire: a WAKE's fire may drop the
      * last reference to the process the node lives in, and a PUBLISH's frees
      * the node. */
-    for (TouchQueueNode *n = touch_queue_take_due(now), *next; n; n = next) {
+    for (TouchQueueNode *n = touch_queue_take_due(now_us), *next; n; n = next) {
         next = n->fired_next;
         switch (n->fired_kind) {
         case TOUCH_QUEUE_WAKE:
@@ -274,5 +336,29 @@ void TouchQueueTick(uint64_t now)
             break;
         }
     }
-    __atomic_store_n(&g_ticking, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_firing, 0u, __ATOMIC_RELEASE);
+    return true;
+}
+
+void TouchQueueFireDue(uint64_t now_us)
+{
+    (void)touch_queue_fire_due(now_us);
+}
+
+/* A pass the keeper's interrupt found under way — the startup tests run one
+ * with interrupts on — leaves the next look this far out, rather than an
+ * interrupt a microsecond for as long as that pass runs. */
+#define TOUCH_QUEUE_BUSY_US 100u
+
+void TouchQueueDeadline(void)
+{
+    bool fired = touch_queue_fire_due(pit_get_uptime_us());
+    spin_lock(&g_lock);
+    if (fired) {
+        touch_queue_set_locked();
+    } else {
+        g_set_us = pit_get_uptime_us() + TOUCH_QUEUE_BUSY_US;
+        lapic_oneshot_after(TOUCH_QUEUE_BUSY_US);
+    }
+    spin_unlock(&g_lock);
 }

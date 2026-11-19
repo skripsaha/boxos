@@ -149,7 +149,7 @@ TestResult TestStandHeapLargeTakesPagesAndGivesBack(void);
 TestResult TestStandHeapClassRefusedReserveServes(void);
 
 /* The touch queue's tick (stand_touch_tests.c). */
-TestResult TestStandTouchQueueTickOnePass(void);
+TestResult TestStandTouchQueueFireOnePass(void);
 
 /* A death asked about through its teardown (stand_gone_tests.c). */
 TestResult TestStandGoneThroughTheTeardown(void);

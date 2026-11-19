@@ -52,8 +52,14 @@ struct Motion {
     bool          Instant = false;   // a text page: every change at once
 };
 
-// A frame while something seen moves: sixty a second.
-constexpr std::uint64_t FrameMicros = 16667;
+// The frames' grid while something seen moves: sixty a second, counted from
+// the clock's zero — the first mark after Us. Every area's animations step on
+// the same marks, so what they need of one moment is one frame, never two a
+// few milliseconds apart.
+constexpr std::uint64_t FrameAfter(std::uint64_t Us) noexcept
+{
+    return ((Us * 60u / 1000000u + 1u) * 1000000u + 59u) / 60u;
+}
 
 class Animator {
 public:

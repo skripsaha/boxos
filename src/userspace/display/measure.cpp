@@ -55,6 +55,8 @@ struct Account {
      * many, and how long from being said to being taken and to the glass. */
     std::vector<std::uint64_t> Waiting;
     std::uint64_t              Keys = 0, Taken = 0, TakenMost = 0, Glassed = 0, GlassedMost = 0, GlassedCount = 0;
+    /* The alarms of the second, and how late they came, in µs. */
+    std::uint64_t Alarms = 0, Late = 0, LateMost = 0;
     double        TicksPerUs = 0;   // the counter's speed, once known
 };
 Account g;
@@ -142,6 +144,15 @@ void MeasureKey(std::uint64_t Said) noexcept
     if (g.Waiting.size() < 64) g.Waiting.push_back(Said);
 }
 
+void MeasureAlarm(std::uint64_t Moment) noexcept
+{
+    const std::uint64_t Now = clock_uptime_us();
+    const std::uint64_t By  = Now > Moment ? Now - Moment : 0;
+    g.Alarms++;
+    g.Late += By;
+    g.LateMost = std::max(g.LateMost, By);
+}
+
 void MeasureGlassed() noexcept
 {
     const std::uint64_t Now = Ticks();
@@ -193,9 +204,15 @@ void MeasureSecond() noexcept
                           Fixed(static_cast<double>(g.GlassedMost) / PerMs).Text);
             Say(Line);
         }
+        if (g.Alarms != 0) {
+            std::snprintf(Line, sizeof Line, "alarms: %llu, late %llu us (most %llu)", static_cast<unsigned long long>(g.Alarms),
+                          static_cast<unsigned long long>(g.Late / g.Alarms), static_cast<unsigned long long>(g.LateMost));
+            Say(Line);
+        }
         AreasMeasured();
     }
     g.Keys = g.Taken = g.TakenMost = g.Glassed = g.GlassedMost = g.GlassedCount = 0;
+    g.Alarms = g.Late = g.LateMost = 0;
     /* A key no frame followed within the second is not waited for. */
     g.Waiting.clear();
     std::fill(std::begin(g.Spent), std::end(g.Spent), 0);

@@ -1994,8 +1994,10 @@ void IrqTheTickAnswers(void)
         /* The line, for as long as it has no interrupt of its own (serial.c). */
         WireTick();
 
-        /* Deferred touch event delivery */
-        TouchQueueTick(__atomic_load_n(&g_global_tick, __ATOMIC_RELAXED));
+        /* The moments named in advance that came: the touch queue's keeper
+         * fires them on its own one-shot (DEADLINE_VECTOR); this is the way
+         * they fire where it has none, and the net under it where it has. */
+        TouchQueueFireDue(pit_get_uptime_us());
 
         /* Nightwatch's looks that cannot wait for an idle core. */
         nightwatch_tick();
@@ -2240,6 +2242,15 @@ void irq_handler(interrupt_frame_t *frame)
     if (vector == IPI_SHOOTDOWN_VECTOR)
     {
         vmm_tlb_shootdown_handler();
+        lapic_send_eoi();
+        return;
+    }
+
+    /* The touch queue's keeper: its one-shot came at the nearest moment named
+     * in advance, or a core named a nearer one (touch_queue.h). */
+    if (vector == DEADLINE_VECTOR)
+    {
+        TouchQueueDeadline();
         lapic_send_eoi();
         return;
     }

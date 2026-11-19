@@ -47,6 +47,10 @@
 #define IPI_WAKE_VECTOR         0xF0    // 240 — wake idle AP or reschedule
 #define IPI_SHOOTDOWN_VECTOR    0xF1    // 241 — TLB shootdown
 #define IPI_HALT_VECTOR         0xF2    // 242 — every halt, a power cut's too (system_halt.c)
+// The touch queue's keeper (the BSP): its one-shot timer at the nearest
+// moment named in advance, and the IPI of a core that named a nearer one
+// (touch_queue.c) — one vector, one meaning: look at the moments again.
+#define DEADLINE_VECTOR         0xF3    // 243
 
 // Interrupt controller type
 typedef enum {

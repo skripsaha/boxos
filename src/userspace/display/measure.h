@@ -61,6 +61,8 @@ void MeasureFlushed(std::uint64_t Pixels) noexcept;
 // Touch carries it); a frame on the glass since the keys taken before it.
 void MeasureKey(std::uint64_t Said) noexcept;
 void MeasureGlassed() noexcept;
+// The alarm came, set for Moment (µs of uptime): how late.
+void MeasureAlarm(std::uint64_t Moment) noexcept;
 // The second's lines, once a second has gone.
 void MeasureSecond() noexcept;
 // What each of the engine's ways costs a pixel here, and the glass's speed —
@@ -79,6 +81,7 @@ inline void          MeasureFrame(std::uint64_t, std::uint64_t) noexcept {}
 inline void          MeasureFlushed(std::uint64_t) noexcept {}
 inline void          MeasureKey(std::uint64_t) noexcept {}
 inline void          MeasureGlassed() noexcept {}
+inline void          MeasureAlarm(std::uint64_t) noexcept {}
 inline void          MeasureSecond() noexcept {}
 inline void          MeasureEngine(Easel &) noexcept {}
 
