@@ -110,16 +110,20 @@ int main()
 
     box::settings::watch Watch;
     Look                 Shown = ReadLook();
-    /* The notice comes in out of nothing; after, each second's figures fade
-     * into the next. */
+    /* The notice comes in out of nothing; after, a minute's figures fade into
+     * the next, and a second's are simply the next — a clock at rest asks the
+     * display for one frame a second, not a fade's every second. */
     Plate.SetOpacity(0);
     Time.SetOpacity(0);
+    std::int64_t Minute = -1;
     for (bool First = true;; First = false) {
         if (Watch.changed()) Shown = ReadLook();
         BoxTime Now{};
         if (clock_boxtime_local(&Now) == OK) {
-            if (First) Show(Screen, Plate, Time, Shown, TimeOf(Shown, Now));
+            const std::int64_t This = std::int64_t{Now.hour} * 60 + Now.minute;
+            if (First || This == Minute) Show(Screen, Plate, Time, Shown, TimeOf(Shown, Now));
             else Screen.Animate(gui::Animation::InOut(220ms), [&] { Show(Screen, Plate, Time, Shown, TimeOf(Shown, Now)); });
+            Minute = This;
         }
         if (First) Screen.Animate(gui::Animation::Out(600ms), [&] {
             Plate.SetOpacity(1);
