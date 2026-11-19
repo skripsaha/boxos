@@ -89,13 +89,20 @@ AVX2 void LayPaint(Pixel *Row, const Pixel *Paint, const std::uint16_t *Share, s
 AVX2 void LayRow(Pixel *Row, const Pixel *From, std::uint32_t Count, std::uint32_t Share)
 {
     const __m256i Shares = _mm256_set1_epi16(static_cast<short>(Share));
+    const __m256i Whole  = _mm256_set1_epi16(-1);
+    const bool    Copy   = Share == light::Whole;
     std::uint32_t I      = 0;
     for (; I + 4u <= Count; I += 4u) {
-        __m256i *At = reinterpret_cast<__m256i *>(Row + I);
-        _mm256_storeu_si256(At, Over(_mm256_loadu_si256(At),
-                                     _mm256_loadu_si256(reinterpret_cast<const __m256i *>(From + I)), Shares));
+        __m256i      *At    = reinterpret_cast<__m256i *>(Row + I);
+        const __m256i Paint = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(From + I));
+        /* Four whole pixels laid whole: the paint itself (lanes_plain.cpp). */
+        if (Copy && (static_cast<std::uint32_t>(_mm256_movemask_epi8(_mm256_cmpeq_epi16(Paint, Whole))) & 0xC0C0C0C0u) == 0xC0C0C0C0u) {
+            _mm256_storeu_si256(At, Paint);
+            continue;
+        }
+        _mm256_storeu_si256(At, Over(_mm256_loadu_si256(At), Paint, Shares));
     }
-    for (; I < Count; I++) Row[I] = light::Over(Row[I], From[I], Share);
+    for (; I < Count; I++) Row[I] = Copy && From[I].Alpha == light::Whole ? From[I] : light::Over(Row[I], From[I], Share);
 }
 
 /* The tables the glass's numbers are looked up in, widened to 32 bits for

@@ -26,6 +26,13 @@ void LayPaint(Pixel *Row, const Pixel *Paint, const std::uint16_t *Share, std::u
 
 void LayRow(Pixel *Row, const Pixel *From, std::uint32_t Count, std::uint32_t Share)
 {
+    /* Whole over whole is the paint itself, to the last bit (light.h Times
+     * by 65535 gives back what it took, and leaves nothing of what was
+     * beneath): the light is copied, not worked out. */
+    if (Share == light::Whole) {
+        for (std::uint32_t I = 0; I < Count; I++) Row[I] = From[I].Alpha == light::Whole ? From[I] : light::Over(Row[I], From[I], Share);
+        return;
+    }
     for (std::uint32_t I = 0; I < Count; I++) Row[I] = light::Over(Row[I], From[I], Share);
 }
 

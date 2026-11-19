@@ -70,14 +70,21 @@ void CheckLanes(Tally &Count)
         std::vector<Pixel>         Below(Length), Paint(Length);
         std::vector<std::uint16_t> Shares(Length);
         std::vector<std::uint8_t>  Thresholds(Length);
+        /* A third of the rows a picture laid whole, mostly whole itself —
+         * the run the kits copy rather than work out — a pixel in sixteen
+         * not, so a run of them is broken where it would be. */
+        const bool Solid = I % 3u == 0;
         for (std::uint32_t K = 0; K < Length; K++) {
             Below[K]      = RandomPixel();
             Paint[K]      = RandomPixel();
             Shares[K]     = RandomShare();
             Thresholds[K] = static_cast<std::uint8_t>(Random());
+            if (Solid && Random() % 16u)
+                Paint[K] = Pixel{static_cast<std::uint16_t>(Random()), static_cast<std::uint16_t>(Random()),
+                                 static_cast<std::uint16_t>(Random()), 65535};
         }
         const Pixel         Color = RandomPixel();
-        const std::uint32_t One   = RandomShare();
+        const std::uint32_t One   = Solid ? 65535u : RandomShare();
         const std::uint32_t Format = Random() % 2u ? BOX_PIXEL_RGB : BOX_PIXEL_BGR;
         std::vector<Pixel>         Want[3];
         std::vector<std::uint32_t> Shown[2];
