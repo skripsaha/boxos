@@ -103,11 +103,21 @@ public:
     bool Damaged() const noexcept { return !Waiting.Empty(); }
     // Area composed onto Target, whose corner lies at Corner on the screen,
     // from the areas' items, over what Target holds there; Areas bottom to
-    // top.
+    // top. Nothing but Target changes: areas apart are composed on several
+    // strands at once, each its own Target.
     void Compose(painter::core::Canvas &Target, painter::core::Point Corner, painter::core::Rect Area,
-                 std::span<AreaState *const> Areas, const Theme &Look);
+                 std::span<AreaState *const> Areas, const Theme &Look) const;
+    // Whether composing Area paints glyphs from a cache one strand keeps
+    // (item_draw.h OwnGlyphs): then only the main strand composes it.
+    bool OwnGlyphs(painter::core::Rect Area, std::span<AreaState *const> Areas) const noexcept;
 
 private:
+    // Where composing a rectangle begins: the area and the entry of the
+    // topmost opaque item covering it whole, nothing beneath drawn.
+    struct From {
+        std::size_t Area = 0, Entry = 0;
+    };
+    From Lowest(painter::core::Rect Area, std::span<AreaState *const> Areas) const noexcept;
     void TakeOne(AreaState &Area, const Theme &Look);
     void Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, const painter::core::Transform &Parent,
               float Opacity, bool Moved, bool Plain, bool Turning);

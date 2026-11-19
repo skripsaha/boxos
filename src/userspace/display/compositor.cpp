@@ -187,6 +187,12 @@ void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, 
                           (DisabledOf(Of->Said) ? Program.From.Look->Faint : 1.0f);
         if (Of->Kind != ITEM_GROUP) {
             Entry Made{Entry::Kind::Draw, Of, Place, Opacity * Own, Now, {}, Fade, Turning || Of->Turning};
+            if (Made.Turning) {
+                /* What a turn or a scale lays made now: painting changes
+                 * nothing of a drawing (item_draw.h Paint). */
+                KeepTurning(Drawn);
+                if (Fade) KeepTurning(*Fade->Was.Drawn);
+            }
             if (Fade) {
                 /* Fading from another look: it hides nothing beneath. */
             } else if (Plain && Drawn.Opaque && Opacity * Own >= 1.0f && Place.B == 0 && Place.C == 0) {
@@ -277,23 +283,42 @@ bool Compositor::Hidden(Rect Area, std::span<AreaState *const> Areas) const noex
     return false;
 }
 
-void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Corner, Rect Area,
-                         std::span<AreaState *const> Areas, const Theme &Look)
+Compositor::From Compositor::Lowest(Rect Area, std::span<AreaState *const> Areas) const noexcept
 {
-    /* The topmost opaque item covering the rectangle whole: nothing beneath
-     * it is drawn. */
-    std::size_t StartArea = 0, StartEntry = 0;
-    bool        Found     = false;
-    for (std::size_t A = Areas.size(); A-- > 0 && !Found;) {
+    for (std::size_t A = Areas.size(); A-- > 0;) {
         const AreaState &Each = *Areas[A];
         if (!Each.Shown) continue;
         for (std::size_t E = Each.List.size(); E-- > 0;)
-            if (Each.List[E].What == Entry::Kind::Draw && Holds(Each.List[E].Hides, Area)) {
-                StartArea = A, StartEntry = E, Found = true;
-                break;
-            }
-        if (!Found && Each.Paged && Holds(Each.Place, Area)) StartArea = A, StartEntry = 0, Found = true;
+            if (Each.List[E].What == Entry::Kind::Draw && Holds(Each.List[E].Hides, Area)) return From{A, E};
+        if (Each.Paged && Holds(Each.Place, Area)) return From{A, 0};
     }
+    return From{0, 0};
+}
+
+bool Compositor::OwnGlyphs(Rect Area, std::span<AreaState *const> Areas) const noexcept
+{
+    const From Start = Lowest(Area, Areas);
+    for (std::size_t A = Start.Area; A < Areas.size(); A++) {
+        const AreaState &Each = *Areas[A];
+        if (!Each.Shown || Each.Place.Intersect(Area).Empty()) continue;
+        for (std::size_t E = A == Start.Area ? Start.Entry : 0; E < Each.List.size(); E++) {
+            const Entry &One = Each.List[E];
+            if (One.What != Entry::Kind::Draw || One.Device.Intersect(Area).Empty()) continue;
+            if (items::OwnGlyphs(*One.Of, *One.Of->Drawn, One.Place, One.Turning)) return true;
+            if (One.Fade && items::OwnGlyphs(One.Fade->Was, *One.Fade->Was.Drawn, One.Place, One.Turning)) return true;
+        }
+    }
+    return false;
+}
+
+void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Corner, Rect Area,
+                         std::span<AreaState *const> Areas, const Theme &Look) const
+{
+    /* The topmost opaque item covering the rectangle whole: nothing beneath
+     * it is drawn. */
+    const From        Start      = Lowest(Area, Areas);
+    const std::size_t StartArea  = Start.Area;
+    const std::size_t StartEntry = Start.Entry;
 
     /* Every canvas drawn on lies somewhere on the screen: Target at Corner,
      * a group's own picture at Area's corner. */
@@ -305,7 +330,7 @@ void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Cor
     const painter::core::Point Picture{Area.X, Area.Y};
     Target.PushClip(Into(Area, Corner));
     for (std::size_t A = StartArea; A < Areas.size(); A++) {
-        AreaState &Each = *Areas[A];
+        const AreaState &Each = *Areas[A];
         if (!Each.Shown || Each.Place.Intersect(Area).Empty()) continue;
         Target.PushClip(Into(Each.Place, Corner));
         if (Each.Paged && (A > StartArea || StartEntry == 0))

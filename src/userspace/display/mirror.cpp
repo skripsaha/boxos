@@ -24,6 +24,12 @@ Rect Mirror::Clipped(Rect Area) const noexcept
 
 void Mirror::Put(const painter::core::Canvas &Picture, Rect Area) noexcept
 {
+    Write(Picture, Area);
+    Mark(Area);
+}
+
+void Mirror::Write(const painter::core::Canvas &Picture, Rect Area) noexcept
+{
     Area = Clipped(Area);
     if (Area.Empty()) return;
     std::uint32_t *Into = All.data() + static_cast<std::size_t>(Area.Y) * Wide + static_cast<std::size_t>(Area.X);
@@ -31,7 +37,6 @@ void Mirror::Put(const painter::core::Canvas &Picture, Rect Area) noexcept
     // (boxos_pixel.h): the mirror's.
     Picture.CopyOut(Rect{0, 0, Area.Width, Area.Height}, Into, Wide, BOX_PIXEL_BGR, painter::core::Dither::On,
                     painter::core::Point{Area.X, Area.Y});
-    Waiting.Add(Area);
 }
 
 void Mirror::Shift(Rect Area, std::int32_t Up, std::span<const Rect> Keep) noexcept

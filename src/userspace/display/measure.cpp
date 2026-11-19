@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "box/clock.h"
+#include "box/core/strand_self.h"
 #include "box/debug.h"
 #include "areas.h"
 
@@ -60,14 +61,18 @@ void Say(const char *Line) noexcept { kdbg_print("[measure] %s", Line); }
 
 }  // namespace
 
-Clocked::Clocked(Part Into) noexcept : Outer(g.Now)
+/* Only the main strand's time is accounted: the display's helpers (helpers.h)
+ * compose tiles beside it, and the account is one strand's. */
+Clocked::Clocked(Part Into) noexcept : Outer(strand_info_or_null() == nullptr ? g.Now : Part::Count)
 {
+    if (Outer == Part::Count) return;
     Credit();
     g.Now = Into;
 }
 
 Clocked::~Clocked()
 {
+    if (Outer == Part::Count) return;
     Credit();
     g.Now = Outer;
 }

@@ -50,8 +50,8 @@ struct Drawing {
     painter::core::Point              KeptAt{};      // the picture's corner from the item's, in pixels
     float                             KeptScale = 0;
     // The same picture to lay through a turn or a scale while an animation
-    // turns or scales the item: made the first time it is wanted.
-    mutable std::shared_ptr<const painter::core::Picture> KeptPicture;
+    // turns or scales the item: made before a frame wants it (KeepTurning).
+    std::shared_ptr<const painter::core::Picture> KeptPicture;
     bool                              Opaque = false;   // its plain colours cover its rectangle whole
     std::size_t                      *Held  = nullptr;  // the program's count of kept bytes
     std::size_t                       Bytes = 0;        // of which, this picture's
@@ -69,9 +69,18 @@ bool Prepare(const Item &Of, const Sources &From, Drawing &Into, bool Keep);
 // Opacity, within the target's clip: from its kept picture where Place only
 // moves it at the scale it was kept at — or turns or scales it while an
 // animation does (Turning: of it, or of a group it lies in), the picture
-// laid through Place, smooth — straight otherwise.
+// laid through Place, smooth — straight otherwise. Nothing of the drawing
+// changes: tiles of a frame are painted on several strands at once.
 void Paint(const Item &Of, const Drawing &Drawn, const Sources &From, painter::core::Canvas &Target,
            const painter::core::Transform &Place, float Opacity, bool Turning = false);
+
+// The picture its kept picture is laid through a turn or a scale by, made
+// if it is not yet: before a frame that turns or scales it is painted.
+void KeepTurning(Drawing &Drawn);
+
+// Whether painting it sets glyphs from a cache one strand keeps — a cells
+// item's, a text drawn straight: only the display's main strand may.
+bool OwnGlyphs(const Item &Of, const Drawing &Drawn, const painter::core::Transform &Place, bool Turning) noexcept;
 
 // A group's clip: its rectangle of its size, its corners rounded; none for a
 // group of no size.

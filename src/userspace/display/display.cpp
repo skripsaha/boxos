@@ -98,6 +98,7 @@
 #include "measure.h"
 #include "lanes.h"
 #include "ring.h"
+#include "helpers.h"
 #include "scene.h"
 #include "typesetter.h"
 
@@ -882,6 +883,7 @@ int main(void)
     Glass.Vacated = FrameVacated;
     AreasStart(Glass);
     InputStart(FrameScreen(), AreasScale(), Glass.Text, FrameTheme());
+    if (!Glass.Text) HelpersStart();
     MotionRead();
     ThemeRead();
     if (settings_watch_begin(&g_settings) != 0) {

@@ -6,6 +6,7 @@
 #include "frame.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -42,7 +43,8 @@ std::shared_ptr<CellGrid>            g_console;
 items::ProgramState                  g_own;            // the display's: what the console is drawn from
 std::unique_ptr<items::AreaState>    g_console_area;
 std::optional<items::Compositor>     g_compositor;
-std::optional<painter::core::Canvas> g_tile;
+std::vector<painter::core::Canvas>   g_tiles;          // a tile's canvas for each hand, the main strand's first
+Hands                               *g_hands = nullptr;
 std::vector<items::AreaState *>      g_order;
 std::vector<ItemCell>                g_composed;     // a text page's cells
 bool                                 g_everything = true;
@@ -50,6 +52,14 @@ bool                                 g_everything = true;
 /* Where the glass is to be composed again, said before a frame — where an
  * area went: the glass as it was before the console moved under it. */
 std::vector<Rect> g_before;
+
+/* A frame's tiles: each, and what of it the areas draw — and of those, which
+ * the hands may compose and which the main strand alone. */
+struct Job {
+    Rect Tile, Lies;
+};
+std::vector<Job>         g_jobs;
+std::vector<std::size_t> g_spread, g_alone;
 
 /* What the mirror shows of each of the console's cells, as last drawn —
  * Unseen where that is not known: where it lies under something, or was
@@ -446,8 +456,11 @@ std::shared_ptr<CellGrid> FrameStart(const FrameGlass &Glass)
         g_cells.Height               = static_cast<std::int32_t>(CellHigh);
         g_cells.Grid = Rect{static_cast<std::int32_t>(X), static_cast<std::int32_t>(Y), static_cast<std::int32_t>(Cols * CellWide),
                             static_cast<std::int32_t>(Rows * CellHigh)};
-        g_tile = painter::core::Canvas::Make(TileSide, TileSide);
-        if (!g_tile) throw std::bad_alloc();
+        if (g_tiles.empty()) {
+            std::optional<painter::core::Canvas> Tile = painter::core::Canvas::Make(TileSide, TileSide);
+            if (!Tile) throw std::bad_alloc();
+            g_tiles.push_back(std::move(*Tile));
+        }
         g_compositor.emplace(g_screen);
         g_order.reserve(ITEM_AREAS_MOST * 4u);
     }
@@ -464,6 +477,18 @@ std::shared_ptr<CellGrid> FrameStart(const FrameGlass &Glass)
         throw std::bad_alloc();
     g_everything = true;
     return g_console;
+}
+
+void FrameUse(Hands *Of) noexcept
+{
+    g_hands = Of;
+    /* A tile's canvas for each hand, as many as there is room for: short of
+     * one for every hand, the main strand composes alone. */
+    while (Of && !g_tiles.empty() && g_tiles.size() < Of->Count()) {
+        std::optional<painter::core::Canvas> Tile = painter::core::Canvas::Make(TileSide, TileSide);
+        if (!Tile) break;
+        g_tiles.push_back(std::move(*Tile));
+    }
 }
 
 const items::Theme  &FrameTheme() noexcept { return g_theme; }
@@ -546,7 +571,7 @@ std::span<const ItemCell> FramePage(std::span<items::AreaState *const> Programs,
 
 FrameCost FrameCompose(Mirror &Into, std::span<items::AreaState *const> Programs) noexcept
 {
-    if (!g_console || g_text || !g_compositor || !g_tile) return {};
+    if (!g_console || g_text || !g_compositor || g_tiles.empty()) return {};
     const auto    Start  = std::chrono::steady_clock::now();
     std::uint64_t Pixels = 0;
     std::optional<Clocked> Console{Part::Console};
@@ -624,36 +649,65 @@ FrameCost FrameCompose(Mirror &Into, std::span<items::AreaState *const> Programs
         if (HoldCaret(Programs)) g_compositor->Take(g_order, g_theme);
         const std::vector<Rect> Damaged = g_compositor->Rects();
         Taking.reset();
+        /* Every tile of the damage, and in each what the areas draw. */
+        g_jobs.clear();
         for (const Rect &Each : Damaged)
             for (std::int32_t Y = Each.Y; Y < Each.Y + Each.Height; Y += TileSide)
                 for (std::int32_t X = Each.X; X < Each.X + Each.Width; X += TileSide) {
                     const Rect Tile{X, Y, std::min(TileSide, Each.X + Each.Width - X), std::min(TileSide, Each.Y + Each.Height - Y)};
-                    /* What the areas draw composed; round it, the console
-                     * alone written straight. */
-                    const Rect Lies = Lying(Tile, Programs);
-                    if (!Lies.Empty()) {
-                        {
-                            const Clocked Spent{Part::Compose};
-                            g_compositor->Compose(*g_tile, painter::core::Point{Lies.X, Lies.Y}, Lies, g_order, g_theme);
-                        }
-                        {
-                            const Clocked Spent{Part::Put};
-                            Into.Put(*g_tile, Lies);
-                        }
-                        if (g_seen.size() == g_console->Count())
-                            CellsIn(Lies, [](std::size_t Index, bool) { g_seen[Index] = Unseen; });
-                    }
-                    const std::int32_t Right = Tile.X + Tile.Width, Bottom = Tile.Y + Tile.Height;
-                    if (Lies.Empty()) {
-                        LayConsole(Into, Tile);
-                    } else {
-                        LayConsole(Into, Rect{Tile.X, Tile.Y, Tile.Width, Lies.Y - Tile.Y});
-                        LayConsole(Into, Rect{Tile.X, Lies.Y + Lies.Height, Tile.Width, Bottom - Lies.Y - Lies.Height});
-                        LayConsole(Into, Rect{Tile.X, Lies.Y, Lies.X - Tile.X, Lies.Height});
-                        LayConsole(Into, Rect{Lies.X + Lies.Width, Lies.Y, Right - Lies.X - Lies.Width, Lies.Height});
-                    }
-                    Pixels += static_cast<std::uint64_t>(Tile.Width) * static_cast<std::uint64_t>(Tile.Height);
+                    g_jobs.push_back(Job{Tile, Lying(Tile, Programs)});
                 }
+        /* What the areas draw composed into the mirror: the tiles any strand
+         * may compose spread over the hands, those whose glyphs come from the
+         * main strand's cache on it alone. */
+        g_spread.clear();
+        g_alone.clear();
+        for (std::size_t J = 0; J < g_jobs.size(); J++)
+            if (!g_jobs[J].Lies.Empty()) (g_compositor->OwnGlyphs(g_jobs[J].Lies, g_order) ? g_alone : g_spread).push_back(J);
+        const auto ComposeTile = [&Into](std::size_t J, painter::core::Canvas &On) {
+            const Rect Lies = g_jobs[J].Lies;
+            {
+                const Clocked Spent{Part::Compose};
+                g_compositor->Compose(On, painter::core::Point{Lies.X, Lies.Y}, Lies, g_order, g_theme);
+            }
+            const Clocked Spent{Part::Put};
+            Into.Write(On, Lies);
+        };
+        if (g_hands && g_hands->Count() > 1 && g_tiles.size() >= g_hands->Count() && g_spread.size() > 1) {
+            std::atomic<bool> Lost{false};
+            g_hands->Run(g_spread.size(), [&](std::size_t J, std::size_t Hand) {
+                try {
+                    ComposeTile(g_spread[J], g_tiles[Hand]);
+                } catch (...) {
+                    Lost.store(true);
+                }
+            });
+            if (Lost.load()) throw std::bad_alloc();
+        } else {
+            for (std::size_t J : g_spread) ComposeTile(J, g_tiles.front());
+        }
+        for (std::size_t J : g_alone) ComposeTile(J, g_tiles.front());
+        /* Each tile marked to go onto the glass, the console's cells under
+         * what the areas drew known unseen, and round it the console written
+         * straight. */
+        for (const Job &One : g_jobs) {
+            const Rect Tile = One.Tile, Lies = One.Lies;
+            if (!Lies.Empty()) {
+                Into.Mark(Lies);
+                if (g_seen.size() == g_console->Count())
+                    CellsIn(Lies, [](std::size_t Index, bool) { g_seen[Index] = Unseen; });
+            }
+            const std::int32_t Right = Tile.X + Tile.Width, Bottom = Tile.Y + Tile.Height;
+            if (Lies.Empty()) {
+                LayConsole(Into, Tile);
+            } else {
+                LayConsole(Into, Rect{Tile.X, Tile.Y, Tile.Width, Lies.Y - Tile.Y});
+                LayConsole(Into, Rect{Tile.X, Lies.Y + Lies.Height, Tile.Width, Bottom - Lies.Y - Lies.Height});
+                LayConsole(Into, Rect{Tile.X, Lies.Y, Lies.X - Tile.X, Lies.Height});
+                LayConsole(Into, Rect{Lies.X + Lies.Width, Lies.Y, Right - Lies.X - Lies.Width, Lies.Height});
+            }
+            Pixels += static_cast<std::uint64_t>(Tile.Width) * static_cast<std::uint64_t>(Tile.Height);
+        }
     } catch (...) {
         /* No room to compose: what the mirror holds stays, and all of the
          * glass is composed again at the next — wherever the console moves

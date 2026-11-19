@@ -32,8 +32,14 @@ public:
     const std::uint32_t *Row(std::uint32_t Y) const noexcept { return All.data() + static_cast<std::size_t>(Y) * Wide; }
 
     // Area put in from Picture, whose corner lies at Area's corner, dithered
-    // by the glass's own noise (painter/core/canvas.h CopyOut).
+    // by the glass's own noise (painter/core/canvas.h CopyOut), and marked to
+    // go onto the glass: Write, then Mark.
     void Put(const painter::core::Canvas &Picture, painter::core::Rect Area) noexcept;
+    // Area's pixels written from Picture as Put writes them, nothing marked:
+    // on any strand, each writing areas of its own.
+    void Write(const painter::core::Canvas &Picture, painter::core::Rect Area) noexcept;
+    // Area to go onto the glass.
+    void Mark(painter::core::Rect Area) noexcept { Waiting.Add(Clipped(Area)); }
     // Area moved up Up pixels, its last Up rows left as they were for a frame
     // to put — and the pixels within Keep left where they are: what lies
     // still over what moves.
