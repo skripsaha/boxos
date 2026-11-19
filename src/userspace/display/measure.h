@@ -6,14 +6,12 @@
 // each part's time its own — a part within another is taken out of the outer
 // one — and once a second a few lines in the kernel's log of how that second
 // went: the frames, the longest of them, the pixels composed and put on the
-// glass, and the milliseconds of every part. At start, what each of the
-// engine's ways costs a pixel on this machine, on every way of working rows
-// it has (painter/core/cpu_path.h), and how fast the glass takes pixels. In
-// any other build none of it is there, and nothing is clocked.
+// glass, and the milliseconds of every part. In any other build none of it
+// is there, and nothing is clocked. What the engine's ways cost a pixel, and
+// how smooth what programs show goes, is `benchmark graphics`'s to measure,
+// from outside: the display does its work and nothing else.
 
 #include <cstdint>
-
-class Easel;
 
 enum class Part : std::uint8_t {
     Idle,       // asleep, waiting for something to happen
@@ -65,9 +63,6 @@ void MeasureGlassed() noexcept;
 void MeasureAlarm(std::uint64_t Moment) noexcept;
 // The second's lines, once a second has gone.
 void MeasureSecond() noexcept;
-// What each of the engine's ways costs a pixel here, and the glass's speed —
-// the mirror put on it whole again, the picture it shows unchanged.
-void MeasureEngine(Easel &Glass) noexcept;
 
 #else
 
@@ -83,7 +78,6 @@ inline void          MeasureKey(std::uint64_t) noexcept {}
 inline void          MeasureGlassed() noexcept {}
 inline void          MeasureAlarm(std::uint64_t) noexcept {}
 inline void          MeasureSecond() noexcept {}
-inline void          MeasureEngine(Easel &) noexcept {}
 
 #endif
 

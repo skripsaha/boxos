@@ -897,7 +897,6 @@ int main(void)
     // the Emergency Screen showed until now goes on being shown.
     (void)g_ring.CatchUp(*g_model);
     Present();
-    if (g_easel->Pixels()) MeasureEngine(*g_easel);
 
     if (!LanesStart(LaneTurned)) {
         kdbg_print("[display] the keyboard's tag could not be claimed; nobody can type");
