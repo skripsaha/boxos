@@ -314,6 +314,8 @@ error_t ScreenClaim(struct process_t *proc, ScreenDescription *out, bool *taken)
     }
     if (!ScreenStandInReadyLocked()) {
         spin_unlock(&s_screen_turn);
+        kprintf("[SCREEN] a claim by pid %u is refused: no page for the stand-in the window leads to "
+                "while the Emergency Screen has the glass\n", proc->pid);
         return ERR_NO_MEMORY;
     }
 
@@ -326,6 +328,9 @@ error_t ScreenClaim(struct process_t *proc, ScreenDescription *out, bool *taken)
                                             w.pages, w.flags);
     if (!mapped.success) {
         spin_unlock(&s_screen_turn);
+        kprintf("[SCREEN] a claim by pid %u is refused: the window of %lu page(s) was not mapped into its "
+                "cabin (%lu mapped: %s)\n", proc->pid, (unsigned long)w.pages, (unsigned long)mapped.pages_mapped,
+                mapped.error_msg ? mapped.error_msg : "no reason given");
         return ERR_NO_MEMORY;
     }
 
