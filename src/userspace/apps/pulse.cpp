@@ -173,10 +173,12 @@ int main()
     Notice     Shown(Screen);
     Machine    Now;
     /* The notice comes in out of nothing; after, a beat whose figures moved
-     * enough to be seen — the load by five points, the memory by two — has
-     * the bars grow and shrink to it and the figures fade into the next, the
-     * display playing it while pulse sleeps; any other beat is simply shown,
-     * so a machine at rest asks the display for a frame a beat and no more. */
+     * enough to be seen — the load by fifteen points, the memory by five —
+     * when none moved so for four seconds, has the bars grow and shrink to
+     * it and the figures fade into the next, the display playing it while
+     * pulse sleeps; any other beat is simply shown. A machine at rest asks
+     * the display for a frame a beat and no more, and the load the corner's
+     * own frames put on the display never moves it into frames again. */
     const auto Seen = [&Shown](float Opacity) {
         Shown.Plate.SetOpacity(Opacity);
         Shown.Cpu.SetOpacity(Opacity);
@@ -185,11 +187,12 @@ int main()
         Shown.Used.SetOpacity(Opacity);
     };
     Seen(0);
-    int Load = -1, Used = -1;
+    int           Load = -1, Used = -1;
+    std::uint64_t Moving = 0;   /* the beat the last one in time began at */
     for (std::uint64_t Due = clock_uptime_us(), Beat = 0;; Beat++) {
         Now.Look();
         const int  LoadNow = Now.Loads().empty() ? -1 : Now.Loads().back(), UsedNow = Now.Used();
-        const bool Moved   = std::abs(LoadNow - Load) >= 5 || std::abs(UsedNow - Used) >= 2;
+        const bool Moved   = (std::abs(LoadNow - Load) >= 15 || std::abs(UsedNow - Used) >= 5) && Beat >= Moving + 8;
         if (Beat == 0) {
             Show(Screen, Shown, Now);
             Screen.Animate(gui::Animation::Out(600ms), [&] { Seen(1); });
@@ -198,7 +201,7 @@ int main()
         } else {
             Show(Screen, Shown, Now);
         }
-        if (Beat == 0 || Moved) Load = LoadNow, Used = UsedNow;
+        if (Beat == 0 || Moved) Load = LoadNow, Used = UsedNow, Moving = Beat;
         (void)Screen.Present();
         /* The next beat: a beat behind is not made up, only the next kept. */
         Due = std::max(Due + BeatMs * 1000u, clock_uptime_us() + 1);
