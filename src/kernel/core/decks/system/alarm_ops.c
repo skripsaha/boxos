@@ -5,9 +5,7 @@
  * ClockBoard's) and the kernel puts an ordinary Touch — tag "alarm", an
  * AlarmEvent — in that strand's own TouchRing when it comes. That is all a
  * turned-in strand needs: the Touch moves the cursor Turn In watches, so the
- * strand wakes with no deadline on its sleep and no helper strand to keep one
- * (a strand of the display would be a second carrier of its tag, and
- * system.ask refuses an ambiguous carrier).
+ * strand wakes with no deadline on its sleep and no helper strand to keep one.
  *
  * The deadline is kept by the machinery every timed wait already uses, and no
  * second timer exists: a TouchQueueNode embedded in the process

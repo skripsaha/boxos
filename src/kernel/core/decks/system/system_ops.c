@@ -122,6 +122,20 @@ static bool target_alive(process_t *t)
  * True means the message was TAKEN — in the ring, or held for the target's
  * next entry into the kernel. False means it was not taken at all, and the
  * caller still owns the deposit and must give it back. */
+/* Whether `iter` speaks for its program: its cabin's main strand, the one
+ * CabinInfo names. What is addressed to a tag — a question, a broadcast —
+ * reaches a program once, through it: the tags are the cabin's, so every
+ * strand of a program carries them, and a program that runs workers beside
+ * its main strand is still one carrier, never several. Its other strands are
+ * reached by their pids, never by its tags. Read under the process list's
+ * lock: CabinInfo is a page of the cabin's, read without a lock of its own. */
+static bool speaks_for_program(const process_t *iter)
+{
+    uint32_t pid = 0, generation = 0;
+    return CabinProgram(iter->cabin, &pid, &generation) && pid == iter->pid &&
+           generation == iter->generation;
+}
+
 static bool push_ipc_result(process_t *target,
                             uint32_t   sender_pid,
                             uint64_t   target_data_addr,
@@ -242,6 +256,7 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
             process_state_t s = iter->state;
             if (s == PROC_CRASHED || s == PROC_DONE) continue;
             if (!process_has_tag_id(iter, tid))      continue;
+            if (!speaks_for_program(iter))           continue;
             if (pid_count < pid_cap) pid_list[pid_count] = iter->pid;
             pid_count++;
         }
@@ -311,7 +326,8 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
  * begins with AskFrom (boxos_kctx.h): who asked, and in which program, is the
  * kernel's word, not the asker's. The cookie is the asker's, so the record
  * answers nothing of the carrier's: having a sender makes it a message
- * (kring.c, kring_answer_token). One strand must carry the tag; several is
+ * (kring.c, kring_answer_token). One program must carry the tag, and it is
+ * asked through its main strand (speaks_for_program); several programs are
  * ERR_ROUTE_AMBIGUOUS, never a guess at which of them meant to answer.
  *
  * An answer to an asker whose death is committed is written nowhere and comes
@@ -358,7 +374,8 @@ error_t QuestionSettle(Question *q, error_t rc, const void *answer, uint32_t len
     return rc;
 }
 
-/* The one strand carrying the tag, pinned — or why there is none to ask. */
+/* The main strand of the one program carrying the tag, pinned — or why there
+ * is none to ask. */
 static error_t AskCarrier(const ManifestOp *op, const process_t *asker, process_t **out)
 {
     TagSpelling tag;
@@ -375,6 +392,7 @@ static error_t AskCarrier(const ManifestOp *op, const process_t *asker, process_
         process_state_t st = iter->state;
         if (st == PROC_CRASHED || st == PROC_DONE) continue;
         if (!process_has_tag_id(iter, tid))         continue;
+        if (!speaks_for_program(iter))              continue;
         pid = iter->pid;
         carriers++;
     }

@@ -136,6 +136,8 @@ RingFollower g_ring;
 std::vector<items::AreaState *> g_order; // the areas, bottom to top, for a frame
 std::vector<ItemCell> g_glass;           // a text page's cells as an effect over the glass shows them
 bool g_dirty;                      // a frame is due whatever changed: an effect's, the glass given back
+std::uint64_t g_slot = UINT64_MAX; // the sixtieth of a second the last frame was put together in
+std::uint64_t g_withheld;          // the moment a frame held back for its sixtieth is due, µs; 0 none
 bool g_effect_was;                 // an effect lay over the glass at the last frame
 TouchTag g_died = TOUCH_TAG_INVALID;
 
@@ -258,7 +260,18 @@ void Present()
     AreasFlow(g_model->RowsGone());
     const bool Due = FrameDue(*g_model, AreasWant());
     if (!Due && !g_dirty) return;
-    g_dirty = false;
+    /* One frame a sixtieth of a second at most: what changed within one is
+     * put together once, at the next — so a program that changes a thousand
+     * times a second costs sixty frames, and the first change after a quiet
+     * moment is drawn at once. */
+    const std::uint64_t Slot = Now * 60u / 1000000u;
+    if (Slot == g_slot) {
+        g_withheld = items::FrameAfter(Now);
+        return;
+    }
+    g_slot     = Slot;
+    g_withheld = 0;
+    g_dirty    = false;
     try {
         AreasInOrder(g_order);
     } catch (...) {
@@ -439,7 +452,7 @@ void SetAlarm()
 {
     const std::uint64_t Effect = EffectsDue(), Scene = SceneDue();
     std::uint64_t       Due    = 0;
-    for (const std::uint64_t Each : {Effect * 1000u, Scene * 1000u, AreasDue(), InputDue()})
+    for (const std::uint64_t Each : {Effect * 1000u, Scene * 1000u, AreasDue(), InputDue(), g_withheld})
         if (Each != 0) Due = Due == 0 ? Each : std::min(Due, Each);
     if (Due == g_alarm) return;
     if (Due == 0) alarm_cancel();

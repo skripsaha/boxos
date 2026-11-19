@@ -560,9 +560,7 @@ void AreasStart(const AreasGlass &Glass)
         /* The system's fonts read now, before the scene plays on: a text
          * page lays no text in a font, and a framebuffer's should not wait
          * for the volume — nor the scene stand still while a program's first
-         * text has them read. Read here and not on a strand of the display's
-         * own: every strand carries the display's tag, and a question with
-         * two carriers is refused (ERR_ROUTE_AMBIGUOUS). */
+         * text has them read. */
         (void)painter::core::SystemFonts();
         /* Chosen: a point a pixel on a screen 1080 tall, larger by quarters
          * as the screen is taller, four at most. */
