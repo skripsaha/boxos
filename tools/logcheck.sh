@@ -3468,9 +3468,10 @@ run_haltslow() {
 # lasts seconds; the button goes on the first cache flush QEMU counts after an
 # anchor was said — a flush no data write makes (write_job.c, "no flush of its
 # own"), so it is the next cycle's FLUSH#1, and that cycle's stitch is still
-# to be written. And the halt says it found the cycle ("a Settle
-# cycle runs on another core"); a leg where it did not asked nothing. That
-# happens: on sixteen cores, measured once in three runs, the button met no
+# to be written. And the halt says it found the cycle — "a Settle cycle runs
+# on another core", or, the committer its own core, "a Settle cycle stands
+# between its steps on this core" —; a leg where it said neither asked
+# nothing. That happens: on sixteen cores, measured once in three runs, the button met no
 # cycle on another core — the drain found a command in the port and nobody
 # else holding the Settle, "work owed stopped falling at 2 (0 pass(es), 1 AHCI
 # command(s) still issued)", and halted clean all the same. So such a leg is
@@ -3510,6 +3511,7 @@ HALTCYCLE_BPS=2048       # two seconds a block, as haltslow's: every step well i
 HALTCYCLE_NAME=_qkeep
 HALTCYCLE_ANCHORED="keeper: $HALTCYCLE_NAME fid=[0-9]+ anchored seq=[0-9]+"
 HALTCYCLE_TRIES=3
+HALTCYCLE_FOUND='^\[HALT\] a Settle cycle (runs on another core|stands between its steps on this core)'
 
 haltcycle_flushes() {   # the boot disk's cache flushes so far, as QEMU counts them
     ./tools/qemu-input.sh raw "info blockstats" 2>/dev/null | tr -d '\r' |
@@ -3583,17 +3585,17 @@ haltcycle_leg() {
 }
 
 # haltcycle_legs TAG WHAT KEYS... — the leg run until the button meets a cycle
-# on another core, at most HALTCYCLE_TRIES times, each boot that did not said;
+# in flight, at most HALTCYCLE_TRIES times, each boot that did not said;
 # then judged. Nothing when no leg could be run at all (said by the leg).
 haltcycle_legs() {
     local tag=$1 what=$2 try=1; shift 2
     while haltcycle_leg "$tag" "$@"; do
-        if grep -aq '^\[HALT\] a Settle cycle runs on another core' "$SCRATCH/serial.haltcycle.$tag.log" ||
+        if grep -aqE "$HALTCYCLE_FOUND" "$SCRATCH/serial.haltcycle.$tag.log" ||
            [ "$try" -ge "$HALTCYCLE_TRIES" ]; then
             haltcycle_judge "$tag" "$what"
             return
         fi
-        echo "  (haltcycle: $what — boot $try of $HALTCYCLE_TRIES: the button met no cycle on another core ($(grep -aE '^\[HALT\] (work owed|Async writes|giving up)' "$SCRATCH/serial.haltcycle.$tag.log" | tr -d '\r' | head -1 | cut -c1-100)); booted again)"
+        echo "  (haltcycle: $what — boot $try of $HALTCYCLE_TRIES: the button met no cycle in flight ($(grep -aE '^\[HALT\] (work owed|Async writes|giving up)' "$SCRATCH/serial.haltcycle.$tag.log" | tr -d '\r' | head -1 | cut -c1-100)); booted again)"
         try=$((try + 1))
     done
 }
@@ -3602,8 +3604,8 @@ haltcycle_legs() {
 haltcycle_judge() {
     local tag=$1 what=$2 L="$SCRATCH/serial.haltcycle.$1.log" A="$SCRATCH/serial.haltcycle.$1.again.log"
     local fault floor seq check
-    if ! grep -aq '^\[HALT\] a Settle cycle runs on another core' "$L"; then
-        harness "haltcycle: $what — the halt found no Settle cycle on another core when the button went, so the case was not asked ($(grep -aE '^\[HALT\] (work owed|Async writes|giving up)' "$L" | head -1 | cut -c1-100))"
+    if ! grep -aqE "$HALTCYCLE_FOUND" "$L"; then
+        harness "haltcycle: $what — the halt found no Settle cycle in flight when the button went, so the case was not asked ($(grep -aE '^\[HALT\] (work owed|Async writes|giving up)' "$L" | head -1 | cut -c1-100))"
         return
     fi
     ok "haltcycle: $what — the button went while a Settle cycle ran on the committer, and the drain found it"

@@ -22,11 +22,10 @@ typedef enum {
  * only K-Core. */
 uint8_t  SettleCommitterCore(void);
 
-/* settle.c: whether a cycle is in flight, and whether it is this core's and
- * stands between two of its steps; one step of it; a cycle begun by the cadence
- * when the Scribe is free — false when another asker holds it. */
+/* settle.c: whether a cycle is in flight — whether it is this core's and
+ * stands between two of its steps settle.h says; one step of it; a cycle begun
+ * by the cadence when the Scribe is free — false when another asker holds it. */
 bool     SettleRunInFlight(void);
-bool     SettleRunBetweenStepsHere(void);
 void     SettleRunStepHere(void);
 bool     SettleRunBeginForCadence(void);
 
