@@ -3352,7 +3352,7 @@ run_slowdisk() {
 # the halt's IPI found inside one owed its stop, nothing after the window paid
 # it, and the roll call waited for that core for ever.
 #
-# Both are made on the plain BIOS machine with four cores — two K-Cores, so the
+# Both are made on the plain BIOS machine with eight cores — two K-Cores, so the
 # committer is not the core the power button's halt runs on — by holding the
 # disk's writes to a crawl (QEMU's block_set_io_throttle). The button goes once
 # the writes the case waits for have landed, counted off QEMU's own block
@@ -3387,7 +3387,7 @@ haltslow_boot() {
     local tag=$1 bps=$2 cmd=$3 want=$4 img="$SCRATCH/haltslow.$1.img" base pid off=1
     make run-stop >/dev/null 2>&1
     cp build/boxos.img "$img"
-    if ! make run-bg BOOTDISK="$img" CORES=4 MEM=4G >"$SCRATCH/runbg.haltslow.$tag.log" 2>&1; then
+    if ! make run-bg BOOTDISK="$img" CORES=8 MEM=4G >"$SCRATCH/runbg.haltslow.$tag.log" 2>&1; then
         harness "haltslow: no machine was started for $tag — $(tail -1 "$SCRATCH/runbg.haltslow.$tag.log")"
         rm -f "$img"
         return 2
@@ -3450,16 +3450,18 @@ run_haltslow() {
 #
 # A writer keeps going — `quilltest keeper` rewrites its record and anchors it,
 # again and again, each anchor said — and the power button lands while a Settle
-# cycle runs on the committer, an AP (settle.h: the first K-Core that is not
-# the BSP), and the halt's drain runs on the drain core. The drain must wait
+# cycle runs on the committer — an AP where there is a K-Core beside the BSP
+# (settle.h: the first K-Core that is not the BSP), the BSP itself where it is
+# the only one — and the halt's drain runs on the drain core. The drain must wait
 # for that cycle as long as it takes steps, then run the volume's last cycle
 # itself before any core is stopped: the machine switches itself off, says
 # "[HALT] Storage sync complete", never "giving up", and the record the
 # writer's last anchor named before the roll call is the record the volume
 # holds when it comes back — read by `quilltest verify` on the next boot, the
 # volume found consistent by volume-read in between. UEFI on q35, AHCI and the
-# WriteJob, with four cores (one committer beside the drain core) and with
-# sixteen (four K-Cores).
+# WriteJob, with four cores (one K-Core, the BSP the committer: the machines
+# the owner's laptop and desktop are), with eight (one committer beside the
+# drain core) and with sixteen (three K-Cores).
 #
 # The cycle is made to be in flight when the button goes, never hoped to be:
 # the disk's writes are held to HALTCYCLE_BPS once the writer runs, so a cycle
@@ -3625,11 +3627,12 @@ haltcycle_judge() {
 }
 
 run_haltcycle() {
-    echo "== haltcycle: the power button while the committer, an AP, settles a writer's anchor, on UEFI 4c and 16c =="
+    echo "== haltcycle: the power button while the committer settles a writer's anchor, on UEFI 4c, 8c and 16c =="
     build STRICT=on
-    haltcycle_legs uefi4 "UEFI 4c, one committer beside the drain core" UEFI=on STRICT=on CORES=4 MEM=4G
-    haltcycle_legs uefi16 "UEFI 16c, four K-Cores" UEFI=on STRICT=on CORES=16 MEM=8G
-    lockrank_judge "$SCRATCH/serial.haltcycle.uefi4.log $SCRATCH/serial.haltcycle.uefi4.again.log $SCRATCH/serial.haltcycle.uefi16.log $SCRATCH/serial.haltcycle.uefi16.again.log" "haltcycle"
+    haltcycle_legs uefi4 "UEFI 4c, one K-Core, the BSP the committer" UEFI=on STRICT=on CORES=4 MEM=4G
+    haltcycle_legs uefi8 "UEFI 8c, one committer beside the drain core" UEFI=on STRICT=on CORES=8 MEM=4G
+    haltcycle_legs uefi16 "UEFI 16c, three K-Cores" UEFI=on STRICT=on CORES=16 MEM=8G
+    lockrank_judge "$SCRATCH/serial.haltcycle.uefi4.log $SCRATCH/serial.haltcycle.uefi4.again.log $SCRATCH/serial.haltcycle.uefi8.log $SCRATCH/serial.haltcycle.uefi8.again.log $SCRATCH/serial.haltcycle.uefi16.log $SCRATCH/serial.haltcycle.uefi16.again.log" "haltcycle"
     build   # leave the tree built plain, as every scenario here does
 }
 
@@ -10365,8 +10368,54 @@ run_defragdelete() {
     buildkey_restore
 }
 
+# topology: the K-Cores counted in physical cores and laid on spare threads
+# (arch/x86-64/amp/amp.c amp_calculate_kcores, amp_choose_kcores)
+#
+# Four cores of a thread each: one K-Core, the BSP, and three App Cores — the
+# machines the owner's laptop and desktop are given. Sixteen threads on eight
+# cores, two a core (THREADS=2): two K-Cores, log2 of the eight less one — the
+# BSP, and the second thread of a core no K-Core lies on, LAPIC 3: programs keep
+# every physical core. Each machine booted to the hub and its roles read off
+# the log.
+topology_leg() {   # topology_leg NAME [make-args…]
+    local name=$1
+    shift
+    make run-stop >/dev/null 2>&1
+    if ! make run-bg UEFI=on "$@" >"$SCRATCH/topology.$name.run-bg" 2>&1; then
+        harness "topology ($name): run-bg would not start: $(tail -1 "$SCRATCH/topology.$name.run-bg")"
+        return 1
+    fi
+    wait_for_line build/serial.log "BoxOS Hub" "$WAIT_QUIET_SLOW_S"
+    local rc=$?
+    make run-stop >/dev/null 2>&1
+    tr -d '\r' < build/serial.log > "$SCRATCH/serial.topology.$name.log"
+    return $rc
+}
+
+run_topology() {
+    echo "== topology: the K-Cores counted in physical cores, laid on a core's second thread where one is free =="
+    if ! make >"$SCRATCH/build.log" 2>&1; then
+        bad "topology: make does not build: $(grep -aE 'ERROR|error' "$SCRATCH/build.log" | tail -1)"
+        return
+    fi
+    local L
+    topology_leg four CORES=4
+    L="$SCRATCH/serial.topology.four.log"
+    grep -aq "^\[AMP\] 4 logical core(s) on 4 physical core(s)$" "$L" &&
+        grep -aq "^\[AMP\] Detected 4 core(s) (1 K-core(s), 3 App Core(s))" "$L" &&
+        grep -aq "^\[AMP\] Core 0: LAPIC ID 0 \[BSP, K-Core\]" "$L" && grep -aq "AMP active (K-Cores=1 App-Cores=3)" "$L"
+    chk $? "topology: four cores of a thread each — one K-Core, the BSP, and three App Cores"
+    topology_leg threads CORES=16 THREADS=2 MEM=4G
+    L="$SCRATCH/serial.topology.threads.log"
+    grep -aq "^\[AMP\] 16 logical core(s) on 8 physical core(s): the K-Cores take a core's second thread where one is free" "$L" &&
+        grep -aq "^\[AMP\] Detected 16 core(s) (2 K-core(s), 14 App Core(s))" "$L" &&
+        grep -aq "^\[AMP\] Core 0: LAPIC ID 0 \[BSP, K-Core\]" "$L" && grep -aq "^\[AMP\] Core 3: LAPIC ID 3 \[K-Core\]" "$L" &&
+        [ "$(grep -acE '^\[AMP\] Core [0-9]+: LAPIC ID [0-9]+ \[(BSP, )?K-Core\]$' "$L")" = 2 ] && grep -aq "AMP active (K-Cores=2 App-Cores=14)" "$L"
+    chk $? "topology: sixteen threads on eight cores — two K-Cores, the BSP and LAPIC 3, a second thread on a core of its own; fourteen App Cores"
+}
+
 run_cores() {
-    run_writers; echo; run_appenders; echo; run_readdelete; echo; run_defragdelete
+    run_writers; echo; run_appenders; echo; run_readdelete; echo; run_defragdelete; echo; run_topology
 }
 
 case "${1:-both}" in
@@ -10381,6 +10430,7 @@ case "${1:-both}" in
     drawcheck) run_drawcheck ;;
     itemcheck) run_itemcheck ;;
     benchmark) run_benchmark ;;
+    topology) run_topology ;;
     dedup)    run_dedup ;;
     mkfs)     run_mkfs ;;
     uefi)     run_uefi ;;
@@ -10494,7 +10544,7 @@ case "${1:-both}" in
     cores)    run_cores ;;
     both)     run_healthy; echo; run_novolume ;;
     all)      run_healthy; echo; run_novolume; echo; run_stranger; echo; run_latearrival; echo; run_replug; echo; run_replugwritebook; echo; run_holdground; echo; run_returnfail; echo; run_nofsgsbase; echo; run_logsave; echo; run_yank; echo; run_stillthere; echo; run_sleeps; echo; run_lines; echo; run_rollcall; echo; run_handset; echo; run_handsetdeaf; echo; run_brigade; echo; run_headcount; echo; run_deadline; echo; run_byname; echo; run_stash; echo; run_wire; echo; run_knock; echo; run_knockstorm; echo; run_unattended; echo; run_kcoreclaim; echo; run_runnable; echo; run_lostwake; echo; run_chit; echo; run_turnin; echo; run_slowdisk; echo; run_haltslow; echo; run_haltcycle; echo; run_halthog; echo; run_halthogmut; echo; run_panicstop; echo; run_panicstopmut; echo; run_fullvolume; echo; run_gpt; echo; run_twoctrl; echo; run_manyports; echo; run_usbrecover; echo; run_ctrlgiveup; echo; run_enumsilence; echo; run_isoch; echo; run_seal; echo; run_uefi; echo; run_noexec; echo; run_earlyirq; echo; run_intx; echo; run_iommu; echo; run_lastsaid; echo; run_paint; echo; run_finish; echo; run_overtake; echo; run_orderlife; echo; run_caret; echo; run_growbook; echo; run_growcutbook; echo; run_quill; echo; run_mountfail; echo; run_framerefuse; echo; run_bookboot; echo; run_loadersettings; echo; run_panel; echo; run_crossings; echo; run_scene; echo; run_drawcheck; echo; run_itemcheck; echo; run_benchmark; echo; run_census; echo; run_stand; echo; run_standusb; echo; run_standmut; echo; run_quillmut; echo; run_stackguard; echo; run_lockrankmut; echo; run_turns; echo; run_turnsmut; echo; run_cores ;;
-    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|caret|caretmut|grow|growcut|growglass|growmut|loggerhour|loggerhourmut|census|stand|standusb|standmut|quill|quillmut|stackguard|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|latelaunchmut|nofsgsbase|framerefuse|bookboot|loadersettings|panel|crossings|scene|drawcheck|itemcheck|benchmark|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|halthog|halthogmut|panicstop|panicstopmut|fullvolume|roombackmut|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all|fare|faremut]"; exit 2 ;;
+    *) echo "usage: $0 [healthy|novolume|uefi|noexec|earlyirq|intx|iommu|lastsaid|paint|paintmut|finish|finishmut|overtake|overtakemut|orderlife|orderlifemut|caret|caretmut|grow|growcut|growglass|growmut|loggerhour|loggerhourmut|census|stand|standusb|standmut|quill|quillmut|stackguard|turns|turnsmut|writers|appenders|readdelete|defragdelete|cores|mountfail|holdground|returnfail|stranger|latearrival|replug|replugwrite|latelaunchmut|nofsgsbase|framerefuse|bookboot|loadersettings|panel|crossings|scene|drawcheck|itemcheck|benchmark|topology|mkfs|manyports|usbrecover|stillthere|sleeps|sleepsmut|lines|linesmut|rollcall|rollcallmut|knock|knockmut|knockstorm|knockstormmut|unattended|unattendedmut|handset|handsetmut|kcoreclaim|kcoreclaimmut|runnable|runnablemut|lostwake|lostwakemut|turnin|turninmut|slowdisk|haltcycle|halthog|halthogmut|panicstop|panicstopmut|fullvolume|roombackmut|gpt|seal|ctrlgiveup|enumsilence|isoch|both|all|fare|faremut]"; exit 2 ;;
 esac
 
 STAND_FINISHED=1

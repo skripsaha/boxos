@@ -70,7 +70,10 @@ void amp_boot_aps(void);
 uint8_t amp_get_core_index(void);
 bool amp_is_kcore(void);
 bool amp_is_appcore(void);
-uint32_t amp_calculate_kcores(uint32_t total_cores);
+/* The K-Cores a machine of Physical cores gives the system's work: one up to
+ * seven, then one more each time the cores double — log2 of them, less one.
+ * Counted in physical cores, never in the threads they run. */
+uint32_t amp_calculate_kcores(uint32_t physical_cores);
 
 /* True when the descriptor's `online` flag is set with __ATOMIC_ACQUIRE
  * semantics. Wraps the C11 atomic load so every caller (kcore submit,

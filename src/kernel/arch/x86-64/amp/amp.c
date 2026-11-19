@@ -108,14 +108,72 @@ static uint32_t log2_floor(uint32_t n)
     return result;
 }
 
-uint32_t amp_calculate_kcores(uint32_t total_cores)
+uint32_t amp_calculate_kcores(uint32_t physical_cores)
 {
-    if (total_cores <= 1)
-        return 1;
-    uint32_t k = log2_floor(total_cores);
-    if (k < 1)
-        k = 1;
-    return k;
+    const uint32_t k = log2_floor(physical_cores);
+    return k > 1 ? k - 1 : 1;
+}
+
+/* How many low bits of an APIC ID number the threads of one physical core —
+ * CPUID's extended topology, its SMT level: two logical cores whose IDs agree
+ * above those bits are threads of one core. 0 when the processor does not say
+ * so, and every logical core is then taken for a core of its own. */
+static uint32_t amp_thread_bits(void)
+{
+    uint32_t top = 0, eax = 0, ebx = 0, ecx = 0, edx = 0;
+    cpuid(CPUID_LEAF_VENDOR, &top, &ebx, &ecx, &edx);
+    if (top < CPUID_LEAF_TOPOLOGY) return 0;
+    cpuid_count(CPUID_LEAF_TOPOLOGY, 0, &eax, &ebx, &ecx, &edx);
+    if (((ecx >> 8) & 0xFFu) != 1u || (ebx & 0xFFFFu) == 0) return 0;   /* subleaf 0 is not the SMT level */
+    return eax & 0x1Fu;
+}
+
+/* The physical core a logical core is a thread of. */
+static uint32_t amp_physical_of(const CoreDescriptor *c, uint32_t bits)
+{
+    return c->lapic_id >> bits;
+}
+
+/* The physical cores the described cores are threads of. */
+static uint32_t amp_count_physical(uint32_t bits)
+{
+    uint32_t count = 0;
+    for (uint8_t i = 0; i < g_amp.total_cores; i++) {
+        bool seen = false;
+        for (uint8_t j = 0; j < i && !seen; j++)
+            seen = amp_physical_of(&g_amp.cores[j], bits) == amp_physical_of(&g_amp.cores[i], bits);
+        if (!seen) count++;
+    }
+    return count;
+}
+
+/* Whether a K-Core is a thread of physical core Physical. */
+static bool amp_physical_holds_kcore(uint32_t physical, uint32_t bits)
+{
+    for (uint8_t i = 0; i < g_amp.total_cores; i++)
+        if (g_amp.cores[i].is_kcore && amp_physical_of(&g_amp.cores[i], bits) == physical) return true;
+    return false;
+}
+
+/* The K-Cores chosen, k_count of them: the BSP always, then the cores whose
+ * time costs programs least — a core's second thread on a core no K-Core lies
+ * on yet, then any second thread, then a core of its own — the lowest of each
+ * kind first. A K-Core waits asleep for the system's work, and a thread asleep
+ * leaves the core it shares wholly to the other: programs keep every physical
+ * core the machine has. */
+static void amp_choose_kcores(uint32_t bits)
+{
+    for (uint8_t i = 0; i < g_amp.total_cores; i++) g_amp.cores[i].is_kcore = g_amp.cores[i].is_bsp;
+    uint8_t chosen = 1;
+    for (int kind = 0; kind < 3 && chosen < g_amp.k_count; kind++)
+        for (uint8_t i = 0; i < g_amp.total_cores && chosen < g_amp.k_count; i++) {
+            CoreDescriptor *c      = &g_amp.cores[i];
+            const bool      second = bits != 0 && (c->lapic_id & ((1u << bits) - 1u)) != 0;
+            if (c->is_kcore || (kind < 2 && !second)) continue;
+            if (kind == 0 && amp_physical_holds_kcore(amp_physical_of(c, bits), bits)) continue;
+            c->is_kcore = true;
+            chosen++;
+        }
 }
 
 void amp_init(void)
@@ -198,19 +256,17 @@ void amp_init(void)
     mfence();
 
     g_amp.total_cores = core_idx;
-    g_amp.k_count = (uint8_t)amp_calculate_kcores(g_amp.total_cores);
+    const uint32_t thread_bits = amp_thread_bits();
+    const uint32_t physical    = amp_count_physical(thread_bits);
+    g_amp.k_count   = (uint8_t)amp_calculate_kcores(physical);
     g_amp.app_count = g_amp.total_cores - g_amp.k_count;
-
-    // Assign K-core / App-core roles
-    // Core 0 (BSP) is always a K-core. Next k_count-1 are K-cores too.
-    for (uint8_t i = 0; i < g_amp.total_cores; i++)
-    {
-        g_amp.cores[i].is_kcore = (i < g_amp.k_count);
-    }
+    amp_choose_kcores(thread_bits);
 
     if (g_amp.total_cores < count)
         kprintf("[AMP] the person asks for %u core(s): %u of the %u the machine has are started\n",
                 asked, g_amp.total_cores, count);
+    kprintf("[AMP] %u logical core(s) on %u physical core(s)%s\n", g_amp.total_cores, physical,
+            thread_bits ? ": the K-Cores take a core's second thread where one is free" : "");
     kprintf("[AMP] Detected %u core(s) (%u K-core(s), %u App Core(s))\n",
             g_amp.total_cores, g_amp.k_count, g_amp.app_count);
 

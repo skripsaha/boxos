@@ -1976,6 +1976,7 @@ comma := ,
 
 EMU        ?= qemu
 CORES      ?= 1
+THREADS    ?= 1
 MEM        ?= 512M
 FULLSCREEN ?= off
 USB        ?= on
@@ -2256,7 +2257,7 @@ else
 		        -cpu qemu64$(comma)+fsgsbase)) \
 		-m $(MEM) \
 		-serial stdio \
-		$(if $(filter-out 1,$(CORES)),-smp $(CORES)$(comma)cores=$(CORES)$(comma)threads=1$(comma)sockets=1) \
+		$(if $(filter-out 1,$(CORES)),-smp $(CORES)$(comma)cores=$(shell expr $(CORES) / $(THREADS))$(comma)threads=$(THREADS)$(comma)sockets=1) \
 		$(if $(filter on,$(FULLSCREEN)),$(if $(filter Darwin,$(UNAME_S)),-display cocoa$(comma)full-screen=on$(comma)zoom-to-fit=on,-full-screen)) \
 		$(if $(filter on,$(USB)),-device qemu-xhci -device usb-kbd) \
 		$(if $(filter on,$(LOG)),-d int$(comma)cpu_reset -no-reboot -no-shutdown -D boxos_qemu.log) \
@@ -2320,7 +2321,7 @@ run-bg: $(RUN_BG_NEEDS)
 		-qmp unix:$(BUILDDIR)/qemu.qmp$(comma)server$(comma)nowait \
 		-serial file:$(BUILDDIR)/serial.log \
 		-display none \
-		$(if $(filter-out 1,$(CORES)),-smp $(CORES)$(comma)cores=$(CORES)$(comma)threads=1$(comma)sockets=1) \
+		$(if $(filter-out 1,$(CORES)),-smp $(CORES)$(comma)cores=$(shell expr $(CORES) / $(THREADS))$(comma)threads=$(THREADS)$(comma)sockets=1) \
 		$(if $(filter on,$(USB)),-device qemu-xhci$(comma)id=xhci1$(XHCI_PORT_ARGS) -device usb-kbd$(comma)bus=xhci1.0) \
 		$(if $(filter on,$(XHCI2)),-device qemu-xhci$(comma)id=xhci2$(if $(XHCI2ADDR),$(comma)addr=$(XHCI2ADDR))) \
 		$(if $(filter on,$(ISOCH)),-audiodev none$(comma)id=isoa -device usb-audio$(comma)audiodev=isoa) \
@@ -2625,6 +2626,7 @@ info:
 	@echo "  DEBUG=on      — enable debug output (rebuilds with CONFIG_DEBUG_ENABLED=1)"
 	@echo "  GDB=on        — QEMU: pause for gdb (-s -S); Bochs: enable gdbstub on :1234"
 	@echo "  CORES=N       — number of CPU cores (Bochs SMP needs --enable-smp)"
+	@echo "  THREADS=N     — QEMU: of them, threads a physical core (CORES a multiple of it)"
 	@echo "  MEM=size      — RAM size (e.g. 512M, 4G)"
 	@echo "  LOG=on        — verbose logging (QEMU int/cpu_reset; Bochs info/debug)"
 	@echo ""

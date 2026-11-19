@@ -9,6 +9,7 @@
 #define CPUID_LEAF_MONITOR       0x00000005   // MONITOR/MWAIT line size (EAX,EBX [15:0])
 #define CPUID_LEAF_THERMAL_PM    0x00000006   // Thermal/Power Mgmt — has ARAT bit
 #define CPUID_LEAF_EXT_FEATURES  0x00000007
+#define CPUID_LEAF_TOPOLOGY      0x0000000B   // extended topology: the SMT level's APIC ID bits
 #define CPUID_LEAF_XSAVE         0x0000000D
 #define CPUID_LEAF_EXT_MAX       0x80000000
 #define CPUID_LEAF_EXT_FEATURES2 0x80000001
