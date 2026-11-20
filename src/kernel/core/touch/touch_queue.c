@@ -2,10 +2,15 @@
  * touch_queue.c — what the kernel does at a moment named in advance
  * (touch_queue.h).
  *
- * A singly-linked list of nodes their armers own, nearest moment first, so a
- * pass looks at the nodes that fire and one more, and the keeper's one-shot
- * is set from the head. A pass takes every node whose moment came out in one
- * go, under the lock, which keeps interrupts off. A WAKE or CALL node may be
+ * A pairing heap of nodes their armers own, the nearest moment at its root:
+ * a node armed is melded in at once, and the nearest or any other is taken
+ * out in a time that grows with the log of how many wait, not with their
+ * number — a deadline armed by one strand among hundreds parked costs what it
+ * costs alone, under a lock that keeps interrupts off. Its links live in the
+ * nodes, so arming still cannot fail. A pass takes the nodes whose moment
+ * came out from the root one after another, so it looks at the nodes that
+ * fire and one more, and the keeper's one-shot is set from the root. A pass
+ * takes every node whose moment came out in one go, under the lock. A WAKE or CALL node may be
  * armed again the moment it leaves the queue, so what its fire needs is
  * copied into the node's own fire fields as it leaves, and the pass's list
  * runs through a link no arm touches.
@@ -30,7 +35,8 @@
 #include "lapic.h"       /* the keeper's one-shot, the IPI that tells it */
 #include "pit.h"         /* pit_get_uptime_us — the clock every moment is named in */
 
-static TouchQueueNode *g_head;           /* nearest moment first */
+static TouchQueueNode *g_root;           /* the nearest moment */
+static uint64_t        g_order;          /* arms counted — under g_lock */
 static spinlock_t      g_lock;
 static uint64_t        g_set_us;         /* what the keeper's one-shot is set for; 0 nothing — under g_lock */
 static bool            g_keeping;        /* the keeper has a one-shot (written once, at init) */
@@ -45,7 +51,7 @@ static uint8_t         g_keeper;         /* its core */
  * taken back when there is none. */
 static void touch_queue_set_locked(void)
 {
-    uint64_t at = g_head ? g_head->fire_us : 0;
+    uint64_t at = g_root ? g_root->fire_us : 0;
     g_set_us = at;
     if (!at) {
         lapic_oneshot_after(0);
@@ -59,7 +65,8 @@ static void touch_queue_set_locked(void)
 void TouchQueueInit(void)
 {
     spinlock_init(&g_lock);
-    g_head    = NULL;
+    g_root    = NULL;
+    g_order   = 0;
     g_set_us  = 0;
     g_keeper  = amp_get_core_index();
     g_keeping = lapic_oneshot_init(DEADLINE_VECTOR);
@@ -68,20 +75,83 @@ void TouchQueueInit(void)
                 "tick, %u a second\n", (unsigned)g_keeper, (unsigned)SCHEDULER_DEFAULT_TICK_HZ);
 }
 
-/* Under g_lock: false when `n` is not in the list. */
+/* Whether `a` fires before `b`: the nearer moment, or of one moment the
+ * first armed. */
+static bool touch_queue_before(const TouchQueueNode *a, const TouchQueueNode *b)
+{
+    return a->fire_us < b->fire_us || (a->fire_us == b->fire_us && a->order < b->order);
+}
+
+/* Two heaps, either empty, as one: the root that fires later becomes the
+ * first child of the other. */
+static TouchQueueNode *touch_queue_meld(TouchQueueNode *a, TouchQueueNode *b)
+{
+    if (!a) return b;
+    if (!b) return a;
+    if (touch_queue_before(b, a)) {
+        TouchQueueNode *held = a;
+        a = b;
+        b = held;
+    }
+    b->prev    = a;
+    b->sibling = a->child;
+    if (a->child) a->child->prev = b;
+    a->child   = b;
+    a->sibling = NULL;
+    a->prev    = NULL;
+    return a;
+}
+
+/* The heaps of a list of siblings, `first` the first, as one: melded in
+ * pairs from the first on, and the pairs melded from the last back — the
+ * pairing that keeps each take amortised to the log of the heap. */
+static TouchQueueNode *touch_queue_pairs(TouchQueueNode *first)
+{
+    TouchQueueNode *paired = NULL;
+    while (first) {
+        TouchQueueNode *a = first, *b = a->sibling;
+        first      = b ? b->sibling : NULL;
+        a->sibling = NULL;
+        a->prev    = NULL;
+        if (b) {
+            b->sibling = NULL;
+            b->prev    = NULL;
+        }
+        TouchQueueNode *made = touch_queue_meld(a, b);
+        made->sibling        = paired;
+        paired               = made;
+    }
+    TouchQueueNode *root = NULL;
+    while (paired) {
+        TouchQueueNode *next = paired->sibling;
+        paired->sibling      = NULL;
+        root                 = touch_queue_meld(root, paired);
+        paired               = next;
+    }
+    return root;
+}
+
+/* Under g_lock: `n` out of the heap — the root, or any node cut from its
+ * parent with what lies under it, melded back in; false when it is not
+ * armed. */
 static bool touch_queue_unlink(TouchQueueNode *n)
 {
     if (!n->armed)
         return false;
-    for (TouchQueueNode **cur = &g_head; *cur; cur = &(*cur)->next) {
-        if (*cur == n) {
-            *cur     = n->next;
-            n->next  = NULL;
-            n->armed = 0;
-            return true;
-        }
+    TouchQueueNode *under = touch_queue_pairs(n->child);
+    n->child              = NULL;
+    if (n == g_root) {
+        g_root = under;
+    } else {
+        if (n->prev->child == n) n->prev->child = n->sibling;
+        else                     n->prev->sibling = n->sibling;
+        if (n->sibling) n->sibling->prev = n->prev;
+        g_root = touch_queue_meld(g_root, under);
     }
-    return false;
+    n->sibling = NULL;
+    n->prev    = NULL;
+    n->armed   = 0;
+    return true;
 }
 
 /* Under g_lock: `n` at its moment, after every node of the same moment or
@@ -92,13 +162,13 @@ static bool touch_queue_link(TouchQueueNode *n, uint64_t fire_us)
 {
     (void)touch_queue_unlink(n);
     n->fire_us = fire_us;
+    n->order   = ++g_order;
+    n->child   = NULL;
+    n->sibling = NULL;
+    n->prev    = NULL;
     n->armed   = 1;
-    TouchQueueNode **at = &g_head;
-    while (*at && (*at)->fire_us <= fire_us)
-        at = &(*at)->next;
-    n->next = *at;
-    *at     = n;
-    if (!g_keeping || g_head != n || (g_set_us != 0 && fire_us >= g_set_us))
+    g_root     = touch_queue_meld(g_root, n);
+    if (!g_keeping || g_root != n || (g_set_us != 0 && fire_us >= g_set_us))
         return false;
     if (amp_get_core_index() == g_keeper) {
         touch_queue_set_locked();
@@ -273,8 +343,8 @@ uint32_t TouchQueueFireMost(void)
 #endif
 
 /* Every node whose moment came, out of the queue in one pass: the pass's own
- * list of them, nearest first. The list is nearest first itself, so the pass
- * stops at the first node still to come. */
+ * list of them, nearest first. The root is the nearest, so the pass takes the
+ * root while its moment came and stops at the first still to come. */
 static TouchQueueNode *touch_queue_take_due(uint64_t now_us)
 {
     TouchQueueNode  *due    = NULL;
@@ -282,14 +352,12 @@ static TouchQueueNode *touch_queue_take_due(uint64_t now_us)
     uint32_t         looked = 0;
 
     spin_lock(&g_lock);
-    while (g_head) {
-        TouchQueueNode *n = g_head;
+    while (g_root) {
+        TouchQueueNode *n = g_root;
         looked++;
         if (now_us < n->fire_us)
             break;
-        g_head        = n->next;
-        n->next       = NULL;
-        n->armed      = 0;
+        (void)touch_queue_unlink(n);
         n->fired_kind = n->kind;
         n->fired      = n->u;
         n->fired_next = NULL;

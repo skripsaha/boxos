@@ -79,9 +79,12 @@ typedef union {
  * (fired_kind, fired): a WAKE or CALL node armed again before its fire runs
  * changes only its queue fields, never the pass's. */
 typedef struct TouchQueueNode {
-    struct TouchQueueNode *next;
+    struct TouchQueueNode *child;    /* the queue's heap: its first child */
+    struct TouchQueueNode *sibling;  /* the next child of its parent */
+    struct TouchQueueNode *prev;     /* its parent when it is the first child, else the child before it */
     struct TouchQueueNode *fired_next;
     uint64_t               fire_us;  /* the moment it fires at, the kernel's uptime in µs */
+    uint64_t               order;    /* when it was armed: of two at one moment, the first armed fires first */
     uint8_t                kind;     /* TouchQueueKind */
     uint8_t                armed;    /* in the queue — under the queue's lock */
     uint8_t                fired_kind;
