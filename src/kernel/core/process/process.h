@@ -466,6 +466,7 @@ typedef struct process_t
     struct process_t *prev;         // global process list (backward) — O(1) unlink in process_destroy
     struct process_t *ready_next;   // intrusive link for ReadyQueue
     struct process_t *cleanup_next; // intrusive link for process cleanup queue
+    struct process_t *dead_next;    // intrusive link for the reaper's list of the dead
     atomic_u32_t      cleanup_enqueued; // one-shot 0->1 CAS guard: gates cleanup-queue enqueue (double-free defense). Zeroed by process_create's memset.
     volatile uint8_t  in_ready;     // CAS guard: 1 = currently enqueued in ReadyQueue
 
@@ -610,12 +611,15 @@ void process_force_release_locks_for_shutdown(void);
  * A strand that exits (strand_exit → PROC_DONE) or crashes (PROC_CRASHED)
  * cannot destroy itself while running, so it lingers as a zombie holding its
  * pid + process_count slot + per-strand rings. Without this, std::thread-style
- * churn would exhaust the process table. process_reap_strands scans for exited
- * corpses — both spawned strands (hammock_base != 0) AND full processes / main
- * strands (hammock_base == 0, e.g. proc_exec children that called exit()) — that
- * are no longer current on any core and process_destroy's them (feeding the
- * existing deferred-cleanup queue; the last strand's reap also tears the cabin
- * down via cabin_ref_dec). Called periodically from the K-Core run loop.
+ * churn would exhaust the process table. Every strand whose death is committed
+ * while it is listed goes, at that moment, onto a list of the dead — both
+ * spawned strands (hammock_base != 0) AND full processes / main strands
+ * (hammock_base == 0, e.g. proc_exec children that called exit()) — and
+ * process_reap_strands takes from that list alone the corpses no longer
+ * current on any core and process_destroy's them (feeding the existing
+ * deferred-cleanup queue; the last strand's reap also tears the cabin down via
+ * cabin_ref_dec): a reap costs the dead, never the living. Called
+ * periodically from the K-Core run loop.
  * Single-reaper-at-a-time (internal guard) so two cores never destroy the same
  * zombie. (Joinable std::thread strands stay zombies until join/detach clears
  * reap_blocked — their pid == thread::id must not recycle while a live handle
