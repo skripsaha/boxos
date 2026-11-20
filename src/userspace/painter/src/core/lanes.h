@@ -50,6 +50,9 @@ struct Kit {
     void (*Gradient)(Pixel *Out, const GradientWalk &Walk, std::uint32_t Count);
     /* Out[i] = the smooth picture's colour at the row's pixel i (paint_rows.h). */
     void (*Picture)(Pixel *Out, const PictureWalk &Walk, std::uint32_t Count);
+    /* Into[i] = From[i], each channel's light held to its opacity — what a
+     * pixel a canvas holds is (light::Held). */
+    void (*Held)(Pixel *Into, const Pixel *From, std::uint32_t Count);
 };
 
 const Kit &Plain() noexcept;
