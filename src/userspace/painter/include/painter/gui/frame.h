@@ -98,10 +98,22 @@ private:
         Match         By;
         std::uint32_t Number = 0;
         gui::Role     Role   = gui::Role::None;
+        bool          Again  = false;   // of the frame drawn: an item of the frame before, found again
+        bool          Found  = false;   // of the frame before: found again in the frame drawn
     };
-    std::shared_ptr<Anchor> Where;
-    std::vector<Was>        Items;        // the frame drawn last, in the order described
-    std::unique_ptr<Frame>  Describing;
+    using Placed = std::pair<std::uint32_t, std::uint32_t>;   // a parent's number, an item's place
+    std::shared_ptr<Anchor>                 Where;
+    std::vector<Was>                        Items;        // the frame drawn last, in the order described
+    std::unique_ptr<Frame>                  Describing;
+    /* What End matches with, kept from frame to frame so that a frame makes
+     * none of it anew: the frame before's items by what they are found by,
+     * the frame drawn, its numbers and the last item laid under each of its
+     * items, the items under each parent, the properties unsaid. */
+    std::vector<std::pair<Match, std::uint32_t>> Last;
+    std::vector<Was>                             Drawn;
+    std::vector<std::uint32_t>                   Numbered, Under;
+    std::vector<Placed>                          Laid, Before;
+    std::vector<std::uint16_t>                   Unsaid;
 };
 
 }  // namespace detail
