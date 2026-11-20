@@ -10,7 +10,7 @@
 #include "box/touch.h"
 #include "box/debug.h"
 #include "box/system.h"
-#include "box/core/cabin.h"
+#include "box/luggage.h"
 #include "box/core/result.h"
 #include "box/string.h"
 
@@ -52,13 +52,14 @@ static bool next_of_two(TouchTag a, TouchTag b, Touch *out, uint32_t quiet_ms)
 
 int main(void)
 {
-    CabinInfo *ci = cabin_info();
-
     /* Child role: just exit. The parent's subscribers should observe
      * a process:spawned (from our own creation) followed by a
-     * process:died when we exit below. */
-    if (ci && ci->spawner_pid != 0 && ci->spawner_pid != 2) {
-        kdbg_print("[LIFECYCLE child %lu] hello & exit", (unsigned long)ci->spawner_pid);
+     * process:died when we exit below. The role rides in the child's
+     * luggage — who started it says nothing: the hub, a script and this
+     * program's own parent are all just spawners. */
+    const char *role = luggage_word(1);
+    if (role && strcmp(role, "child") == 0) {
+        kdbg_print("[LIFECYCLE child] hello & exit");
         exit(0);
     }
 
@@ -90,7 +91,7 @@ int main(void)
         return 1;
     }
 
-    int child = proc_exec("lifecycle");
+    int child = proc_exec("lifecycle child");
     if (child < 0) {
         kdbg_print("[LIFECYCLE] FAIL: spawn child rc=%d", child);
         touch_release(spawned_tag);
