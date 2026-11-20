@@ -39,8 +39,9 @@ struct Sources {
     const CellsLook       *Cells = nullptr;  // the console's look, every cells item's
     // A picture block as a picture; none for a block the program does not have.
     std::function<std::shared_ptr<const painter::core::Picture>(std::uint32_t)> PictureOf;
-    // A canvas block's page last shown; none likewise.
-    std::function<const painter::core::Canvas *(std::uint32_t)> CanvasOf;
+    // A canvas block's page shown, where its program paints it; none likewise,
+    // or before a page is given.
+    std::function<std::optional<painter::core::Foreign>(std::uint32_t)> CanvasOf;
 };
 
 // A shadowed item's shadows' coverage, made for the place it was laid at and

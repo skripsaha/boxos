@@ -404,6 +404,43 @@ void CheckEngine(Tally &Count)
                                         Fill(Colors::White));
         Count.Check(Refused && C->Changed().Empty(), "refused whole, and nothing drawn: what a canvas or a shape cannot take — dashes of a hair along 30000 pixels too");
     }
+
+    /* Pixels another hand paints, light past opacity among them, laid where
+     * they lie: as the very canvas taken from them, held, is laid — whole,
+     * faded, under a round clip, partly off the canvas. */
+    {
+        std::uint32_t Laid = 0, Wrong = 0;
+        for (std::uint32_t Round = 0; Round < 200u; Round++) {
+            const std::uint32_t Wide = 1 + Random() % 90, High = 1 + Random() % 60, Stride = Wide + Random() % 7;
+            std::vector<Pixel>  Painted(static_cast<std::size_t>(Stride) * High);
+            for (Pixel &Each : Painted)
+                Each = Pixel{static_cast<std::uint16_t>(Random()), static_cast<std::uint16_t>(Random()),
+                             static_cast<std::uint16_t>(Random()), static_cast<std::uint16_t>(Random() % 3 == 0 ? 65535u : Random())};
+            std::optional<Canvas> Taken = Canvas::Make(Wide, High), Got = Canvas::Make(96, 72), Want = Canvas::Make(96, 72);
+            Taken->TakePixels(Rect{0, 0, static_cast<std::int32_t>(Wide), static_cast<std::int32_t>(High)}, Painted.data(), Stride);
+            const Color Ground = Color::Rgba(static_cast<std::uint8_t>(Random()), static_cast<std::uint8_t>(Random()), 90,
+                                             static_cast<std::uint8_t>(Random()));
+            Got->Clear(Ground);
+            Want->Clear(Ground);
+            if (Round % 3 == 1) {
+                Got->PushClip(Path::Circle({48, 36}, 30));
+                Want->PushClip(Path::Circle({48, 36}, 30));
+            }
+            const Point At{Within(-40, 80), Within(-30, 60)};
+            const float Opacity = Round % 4 == 0 ? 1.0f : static_cast<float>(Random() % 1000) / 1000.0f;
+            Got->Draw(Foreign{Painted.data(), Wide, High, Stride}, At, Opacity);
+            Want->Draw(*Taken, At, Opacity);
+            Laid++;
+            for (std::uint32_t Y = 0; Y < 72u; Y++)
+                if (std::memcmp(Got->Row(Y), Want->Row(Y), 96 * sizeof(Pixel)) != 0 || Got->Changed() != Want->Changed()) {
+                    Wrong++;
+                    break;
+                }
+        }
+        Count.Check(Wrong == 0, Said("pixels another hand paints laid as the canvas taken from them, held, is laid: %.0f of every "
+                                     "size, faded, clipped round, partly off the canvas, %.0f not alike",
+                                     Laid, Wrong));
+    }
 }
 
 }  // namespace stand

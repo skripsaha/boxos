@@ -429,24 +429,42 @@ void Canvas::DrawShadow(const Mask &Kept, const Shadow &Cast, float Opacity, Poi
 
 void Canvas::Draw(const Canvas &Picture, Point At, float Opacity)
 {
-    const Rect          Into  = Rect{At.X, At.Y, static_cast<std::int32_t>(Picture.Wide), static_cast<std::int32_t>(Picture.High)}
+    LayPixels(Picture.Pixels, Picture.Stride, Picture.Wide, Picture.High, At, Opacity, false);
+}
+
+void Canvas::Draw(const Foreign &Picture, Point At, float Opacity)
+{
+    if (!Picture.Pixels || Picture.Stride < Picture.Width) return;
+    LayPixels(Picture.Pixels, Picture.Stride, Picture.Width, Picture.Height, At, Opacity, true);
+}
+
+void Canvas::LayPixels(const Pixel *First, std::size_t Across, std::uint32_t Width, std::uint32_t Height, Point At, float Opacity,
+                       bool Hold)
+{
+    const Rect          Into  = Rect{At.X, At.Y, static_cast<std::int32_t>(Width), static_cast<std::int32_t>(Height)}
                                    .Intersect(Room->Top().Area);
     const std::uint32_t Share = ShareOf(Opacity);
     if (Into.Empty() || !Share) return;
     const lanes::Kit &Kit   = lanes::Chosen();
     const Mask       *Cover = Room->Top().Cover.get();
-    Room->Shares.resize(static_cast<std::size_t>(Into.Width));
+    const auto        Count = static_cast<std::uint32_t>(Into.Width);
+    Room->Shares.resize(Count);
+    if (Hold && Room->Paint.size() < Count) Room->Paint.resize(Count);
     for (std::int32_t Y = Into.Y; Y < Into.Y + Into.Height; Y++) {
         Pixel       *To   = Row(static_cast<std::uint32_t>(Y)) + Into.X;
-        const Pixel *From = Picture.Row(static_cast<std::uint32_t>(Y - At.Y)) + (Into.X - At.X);
+        const Pixel *From = First + static_cast<std::size_t>(Y - At.Y) * Across + static_cast<std::size_t>(Into.X - At.X);
+        if (Hold) {
+            Kit.Held(Room->Paint.data(), From, Count);
+            From = Room->Paint.data();
+        }
         if (!Cover) {
-            Kit.LayRow(To, From, static_cast<std::uint32_t>(Into.Width), Share);
+            Kit.LayRow(To, From, Count, Share);
             continue;
         }
         for (std::int32_t I = 0; I < Into.Width; I++)
             Room->Shares[static_cast<std::size_t>(I)] =
                 static_cast<std::uint16_t>(light::Times(Share, light::Widened(Cover->At(Into.X + I, Y))));
-        Kit.LayPaint(To, From, Room->Shares.data(), static_cast<std::uint32_t>(Into.Width));
+        Kit.LayPaint(To, From, Room->Shares.data(), Count);
     }
     Touch(Into);
 }

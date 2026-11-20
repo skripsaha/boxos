@@ -460,7 +460,7 @@ enum {
     ITEM_EVENT_SIZE    = 2,   /* ItemPoint: an item sized by its content came to this */
     ITEM_EVENT_REFUSED = 3,   /* ItemRefusal: a change not made, and why */
     ITEM_EVENT_SHOWN   = 4,   /* ItemShown: a step on the glass, and what it cost */
-    ITEM_EVENT_FREE    = 5,   /* ItemPageFree: a canvas's page may be drawn in again (Item is the block) */
+    ITEM_EVENT_FREE    = 5,   /* ItemPageFree: a canvas's page may be drawn in again — the other is held (Item is the block) */
     ITEM_EVENT_ANIMATION_END = 6,   /* ItemAnimationEnd: the last animation of a Number ended (Item is its item) */
     ITEM_EVENT_FOCUS   = 7,   /* ItemFocus: the keyboard's focus came to Item, or left it */
     ITEM_EVENT_PRESS   = 8,   /* the person pressed Item — by Enter or Space on it, or by its label */
@@ -566,7 +566,7 @@ typedef struct {
     uint32_t Width, Height;   /* pictures and canvases, in pixels */
     uint32_t Bytes;           /* a font's */
     uint32_t PageBytes;       /* a canvas page's */
-    uint32_t PageFree[2];     /* a canvas's: 1 while the program may draw in that page */
+    uint32_t PageFree[2];     /* a canvas's: 1 while the program may draw in that page — 0 from its giving till the display holds the other */
     uint8_t  Pad[32];
 } ItemBlockHeader;
 

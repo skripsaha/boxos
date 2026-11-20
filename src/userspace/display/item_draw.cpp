@@ -313,22 +313,24 @@ void DrawStraight(const Item &Of, const Drawing &Drawn, const Sources &From, Can
     }
     case ITEM_CANVAS: {
         const Clocked Spent{Part::Page};
-        const Canvas *Page = Of.Said.Canvas && From.CanvasOf ? From.CanvasOf(*Of.Said.Canvas) : nullptr;
+        const std::optional<painter::core::Foreign> Page =
+            Of.Said.Canvas && From.CanvasOf ? From.CanvasOf(*Of.Said.Canvas) : std::nullopt;
         if (!Page) break;
         if (const std::optional<painter::core::Point> Corner = CanvasCorner(Of, Drawn, From, Place)) {
             Target.Draw(*Page, *Corner, Opacity);
             break;
         }
-        /* Drawn at another size, or turned: its pixels as a picture. */
-        std::vector<painter::core::Pixel> Pixels;
-        Pixels.reserve(static_cast<std::size_t>(Page->Width()) * Page->Height());
-        for (std::uint32_t Y = 0; Y < Page->Height(); Y++)
-            Pixels.insert(Pixels.end(), Page->Row(Y), Page->Row(Y) + Page->Width());
-        const auto Picture = painter::core::Picture::FromPixels(Pixels, Page->Width(), Page->Height(), Page->Width());
+        /* Drawn at another size, or turned: its pixels, held, as a picture. */
+        std::optional<Canvas> Held = Canvas::Make(Page->Width, Page->Height);
+        if (!Held) break;
+        Held->TakePixels(painter::core::Rect{0, 0, static_cast<std::int32_t>(Page->Width), static_cast<std::int32_t>(Page->Height)},
+                         Page->Pixels, Page->Stride);
+        const auto Picture = painter::core::Picture::FromPixels(
+            std::span(Held->Row(0), static_cast<std::size_t>(Page->Width) * Page->Height), Page->Width, Page->Height, Page->Width);
         if (!Picture) break;
         Target.Fill(Outline,
-                    painter::core::Fill::Picture(Picture, Fitted(ITEM_FIT_STRETCH, Size, static_cast<float>(Page->Width()),
-                                                                 static_cast<float>(Page->Height()), From.Scale)),
+                    painter::core::Fill::Picture(Picture, Fitted(ITEM_FIT_STRETCH, Size, static_cast<float>(Page->Width),
+                                                                 static_cast<float>(Page->Height), From.Scale)),
                     Place, painter::core::FillRule::NonZero, Opacity);
         break;
     }
@@ -443,11 +445,12 @@ painter::core::Path ClipOf(const Item &Group, const Theme &Look)
 
 std::optional<painter::core::Point> CanvasCorner(const Item &Of, const Drawing &Drawn, const Sources &From, const Transform &Place)
 {
-    const Canvas *Page = Of.Kind == ITEM_CANVAS && Of.Said.Canvas && From.CanvasOf ? From.CanvasOf(*Of.Said.Canvas) : nullptr;
+    const std::optional<painter::core::Foreign> Page =
+        Of.Kind == ITEM_CANVAS && Of.Said.Canvas && From.CanvasOf ? From.CanvasOf(*Of.Said.Canvas) : std::nullopt;
     if (!Page || !Upright(Place, From.Scale)) return std::nullopt;
     const PointF Size = SizeOf(Of, Drawn);
-    if (std::fabs(Size.X * From.Scale - static_cast<float>(Page->Width())) >= 0.5f ||
-        std::fabs(Size.Y * From.Scale - static_cast<float>(Page->Height())) >= 0.5f)
+    if (std::fabs(Size.X * From.Scale - static_cast<float>(Page->Width)) >= 0.5f ||
+        std::fabs(Size.Y * From.Scale - static_cast<float>(Page->Height)) >= 0.5f)
         return std::nullopt;
     const PointF Corner = Place.Apply({0, 0});
     return painter::core::Point{Nearest(Corner.X), Nearest(Corner.Y)};
@@ -568,9 +571,9 @@ bool Prepare(const Item &Of, const Sources &From, Drawing &Into)
         };
         Into.Measured = ItemPoint{Points(Of.Grid->Cols(), From.Cells->Width), Points(Of.Grid->Rows(), From.Cells->Height)};
     } else if (Of.Kind == ITEM_CANVAS && Of.Said.Canvas && From.CanvasOf) {
-        if (const Canvas *Page = From.CanvasOf(*Of.Said.Canvas))
-            Into.Measured = ItemPoint{static_cast<std::int32_t>(std::lround(Page->Width() * ITEM_POINT / From.Scale)),
-                                      static_cast<std::int32_t>(std::lround(Page->Height() * ITEM_POINT / From.Scale))};
+        if (const std::optional<painter::core::Foreign> Page = From.CanvasOf(*Of.Said.Canvas))
+            Into.Measured = ItemPoint{static_cast<std::int32_t>(std::lround(Page->Width * ITEM_POINT / From.Scale)),
+                                      static_cast<std::int32_t>(std::lround(Page->Height * ITEM_POINT / From.Scale))};
     }
     const PointF Size = SizeOf(Of, Into);
     Into.Own    = CoverOf(Of, Into, Size, From.Scale, LookOf(From));

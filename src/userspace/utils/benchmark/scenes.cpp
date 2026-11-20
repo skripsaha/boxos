@@ -147,9 +147,12 @@ public:
     }
 
     /* The scene Name, of What, played: Step says what changed by the time
-     * given, in seconds from its beginning; its line said. False once it was
-     * stopped. */
-    bool Play(const char *Name, const char *What, const std::function<void(double)> &Step);
+     * given, in seconds from its beginning; its line said. Ahead, each step
+     * is said while the one before it is composed — the glass awaited only up
+     * to that one — as a program drawing its own pixels draws the next
+     * picture on one page while the display shows the other. False once it
+     * was stopped. */
+    bool Play(const char *Name, const char *What, const std::function<void(double)> &Step, bool Ahead = false);
 
     /* What a canvas scene's own drawing took this frame, in µs: told by the
      * scene, said beside the display's. */
@@ -161,7 +164,9 @@ public:
     Tally        Got;
 
 private:
-    std::optional<gui::Event> ShownOf(std::uint64_t Step);
+    /* What the display tells taken until the glass shows Step: each step it
+     * shows a frame, given to Each as it is told. False once stopped. */
+    bool Await(std::uint64_t Step, const std::function<void(const gui::Event &)> &Each);
 
     painter::tui::Keyboard &Keys;
     Report                 &Out;
@@ -170,28 +175,31 @@ private:
     int                     Played  = 0;
     double                  Drawing = 0;
     std::uint32_t           Drawn   = 0;
+    std::uint64_t           Seen    = 0;   // the last step the glass showed
 };
 
-std::optional<gui::Event> Stage::ShownOf(std::uint64_t Step)
+bool Stage::Await(std::uint64_t Step, const std::function<void(const gui::Event &)> &Each)
 {
-    for (;;) {
+    while (Seen < Step) {
         const gui::Event Heard = Screen.Wait(&Keys);
         switch (Heard.What) {
         case gui::Event::Kind::Shown:
-            if (Heard.Step >= Step) return Heard;
+            Seen = std::max(Seen, Heard.Step);
+            Each(Heard);
             break;
         case gui::Event::Kind::Refused: Got.Refused++; break;
         case gui::Event::Kind::Gone:
-        case gui::Event::Kind::EndAsked: return std::nullopt;
+        case gui::Event::Kind::EndAsked: return false;
         case gui::Event::Kind::Key:
-            if (!Heard.Key.IsExtended() && Heard.Key.Character == painter::tui::KeyCodes::Escape) return std::nullopt;
+            if (!Heard.Key.IsExtended() && Heard.Key.Character == painter::tui::KeyCodes::Escape) return false;
             break;
         default: break;
         }
     }
+    return true;
 }
 
-bool Stage::Play(const char *Name, const char *What, const std::function<void(double)> &Step)
+bool Stage::Play(const char *Name, const char *What, const std::function<void(double)> &Step, bool Ahead)
 {
     if (Got.Stopped) return false;
     char Title[160];
@@ -200,29 +208,17 @@ bool Stage::Play(const char *Name, const char *What, const std::function<void(do
 
     std::vector<double> Gaps, Costs;
     std::uint64_t       Pixels = 0, From = 0, Last = 0, DisplayFrom = 0, OwnFrom = 0, Saying = 0;
+    bool                Done   = false;
     const std::uint64_t Began  = clock_uptime_us();
-    for (;;) {
-        const std::uint64_t Before = Screen.Step();
-        const std::uint64_t Asked  = clock_uptime_us();
-        Step(static_cast<double>(Asked - Began) / 1e6);
-        Screen.PresentAll();
-        if (From != 0) Saying += clock_uptime_us() - Asked;
-        if (Screen.Step() == Before) continue;   // nothing changed, nothing to show
-        const std::optional<gui::Event> Shown = ShownOf(Screen.Step());
-        if (!Shown) {
-            Got.Stopped = true;
-            Out.Say("scene %s — stopped", Name);
-            return false;
-        }
+    /* A frame: a step of the scene's on the glass. */
+    const auto Frame = [&](const gui::Event &Shown) {
         const std::uint64_t At = clock_uptime_us();
+        if (Done) return;
         if (From != 0) {
             Gaps.push_back(static_cast<double>(At - Last) / 1000.0);
-            Costs.push_back(static_cast<double>(Shown->Micros) / 1000.0);
-            Pixels += Shown->Pixels;
-            if (At - From >= LengthUs) {
-                Last = At;
-                break;
-            }
+            Costs.push_back(static_cast<double>(Shown.Micros) / 1000.0);
+            Pixels += Shown.Pixels;
+            Done = At - From >= LengthUs;
         } else if (At - Began >= SettleUs) {
             From        = At;
             DisplayFrom = DisplayUs();
@@ -231,6 +227,19 @@ bool Stage::Play(const char *Name, const char *What, const std::function<void(do
             Drawn       = 0;
         }
         Last = At;
+    };
+    while (!Done) {
+        const std::uint64_t Before = Screen.Step();
+        const std::uint64_t Asked  = clock_uptime_us();
+        Step(static_cast<double>(Asked - Began) / 1e6);
+        Screen.PresentAll();
+        if (From != 0) Saying += clock_uptime_us() - Asked;
+        if (Screen.Step() == Before) continue;   // nothing changed, nothing to show
+        if (!Await(Ahead ? Before : Screen.Step(), Frame)) {
+            Got.Stopped = true;
+            Out.Say("scene %s — stopped", Name);
+            return false;
+        }
     }
 
     const double Seconds = static_cast<double>(Last - From) / 1e6;
@@ -417,7 +426,8 @@ void Pixels(Stage &On)
     const std::uint32_t Wide  = static_cast<std::uint32_t>(On.Size.X * Scale), High = static_cast<std::uint32_t>(On.Size.Y * Scale);
     gui::Canvas         Board = On.Screen.Canvas({static_cast<std::int32_t>(Wide), static_cast<std::int32_t>(High)});
     Board.SetPlace({0, 0});
-    On.Play("canvas", "the whole screen of a program's own pixels, drawn anew each frame", [&](double T) { DrawnBy(On, Board, Wide, High, T); });
+    On.Play("canvas", "the whole screen of a program's own pixels, drawn anew each frame", [&](double T) { DrawnBy(On, Board, Wide, High, T); },
+            true);
 }
 
 /* Everything at once: what a busy screen is — heavy panels moving, a pond of

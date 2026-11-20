@@ -29,6 +29,16 @@ namespace painter::core {
 // written the same, so only what changed is ever drawn again.
 enum class Dither : bool { Off, On };
 
+// Pixels another hand paints, in memory it may write while they are read — a
+// program's canvas page, shown from where it lies — Stride pixels from row to
+// row: each one's light held to its opacity as it is read, as a canvas's
+// pixel is.
+struct Foreign {
+    const Pixel  *Pixels = nullptr;
+    std::uint32_t Width = 0, Height = 0;
+    std::size_t   Stride = 0;
+};
+
 // Pixels in memory, drawn on: shapes filled and stroked with colours,
 // gradients and pictures, masks, other canvases laid over it — every edge
 // covered as the brush covers it (boxos_shape.h), every colour laid as light
@@ -97,6 +107,8 @@ public:
     void DrawShadow(const Mask &Kept, const Shadow &Cast, float Opacity = 1.0f, Point By = {});
     // Another canvas laid over this one, its corner at At.
     void Draw(const Canvas &Picture, Point At, float Opacity = 1.0f);
+    // Pixels another hand paints laid over this one, its corner at At.
+    void Draw(const Foreign &Picture, Point At, float Opacity = 1.0f);
     // Every pixel moved Share of the way to Toward's — of the same size —
     // light and opacity alike: one picture fading into another, each counted
     // only as much as it is seen, ignoring the clip.
@@ -150,6 +162,11 @@ private:
     // Coverage over Lies — Lies.Width values a row, Stride from one row to
     // the next — filled with the fills made ready, at Opacity, within the clip.
     void LayCover(const std::uint8_t *Coverage, std::size_t Stride, Rect Lies, float Opacity);
+    // Width x Height pixels from First, Stride from row to row, laid over this
+    // canvas with their corner at At — each one's light held to its opacity
+    // first when Hold.
+    void LayPixels(const Pixel *First, std::size_t Stride, std::uint32_t Width, std::uint32_t Height, Point At, float Opacity,
+                   bool Hold);
 
     Pixel                   *Pixels = nullptr;
     std::unique_ptr<Pixel[]> Owned;

@@ -98,7 +98,7 @@ struct Block {
     std::uint32_t                                 Number = 0;
     box::bay<std::byte>                           Memory;
     std::shared_ptr<const painter::core::Picture> Picture;          // a picture's, made when it is said changed
-    std::optional<painter::core::Canvas>          Shown;            // a canvas's pages as shown, kept here
+    std::int32_t                                  Held = -1;        // a canvas's page held and shown, none yet
     bool                                          Read = false;     // a font's, read into its program's book
 
     const std::uint8_t *Content() const noexcept
@@ -106,6 +106,14 @@ struct Block {
         return reinterpret_cast<const std::uint8_t *>(Memory.data()) + sizeof(ItemBlockHeader);
     }
     ItemBlockHeader *Head() noexcept { return reinterpret_cast<ItemBlockHeader *>(Memory.data()); }
+    // A canvas's page held, shown from where its program paints it.
+    std::optional<painter::core::Foreign> Page() const noexcept
+    {
+        if (Kind != ITEM_BLOCK_CANVAS || Held < 0) return std::nullopt;
+        const auto *Pixels = reinterpret_cast<const painter::core::Pixel *>(
+            Content() + static_cast<std::size_t>(Held) * Width * Height * sizeof(painter::core::Pixel));
+        return painter::core::Foreign{Pixels, Width, Height, Width};
+    }
 };
 
 struct Program {
@@ -287,9 +295,9 @@ Program &ProgramOf(const AskFrom &From)
         const Block *Found = Of->Find(Id);
         return Found ? Found->Picture : nullptr;
     };
-    Made->State.From.CanvasOf = [Of](std::uint32_t Id) -> const painter::core::Canvas * {
+    Made->State.From.CanvasOf = [Of](std::uint32_t Id) -> std::optional<painter::core::Foreign> {
         const Block *Found = Of->Find(Id);
-        return Found && Found->Shown ? &*Found->Shown : nullptr;
+        return Found ? Found->Page() : std::nullopt;
     };
     g_programs.push_back(std::move(Made));
     return *g_programs.back();
@@ -312,20 +320,25 @@ template <typename Work> void ForEachArea(const Program &Of, Work &&Each)
         if (One->Of == &Of) Each(*One);
 }
 
-/* A canvas block's page, as its program said it changed: the pixels it names
- * taken into the display's own copy, the page given back. A pixel whose light
- * passes its opacity is no canvas pixel: its light is held to it. */
-void TakePage(Block &Of, const ItemBlockChanged &Where)
+/* A canvas block's page, as its program said it changed: held and shown from
+ * where the program painted it — never copied — until it gives the other, and
+ * the page held before given back to it. A program may paint a page it does
+ * not hold: every pixel is held to its opacity as it is read (Foreign), and
+ * what it spoils is its own picture. True for the first page it gives. */
+bool HoldPage(Area &Said, Block &Of, std::uint32_t Page)
 {
-    const Clocked       Spent{Part::Intake};
-    const std::uint32_t Page = Where.Page & 1u;
-    if (!Of.Shown) Of.Shown = painter::core::Canvas::Make(Of.Width, Of.Height);
-    if (Of.Shown) {
-        const Rect  Whole{0, 0, static_cast<std::int32_t>(Of.Width), static_cast<std::int32_t>(Of.Height)};
-        const auto *Pixels = reinterpret_cast<const painter::core::Pixel *>(Of.Content() + static_cast<std::size_t>(Page) * Of.Head()->PageBytes);
-        Of.Shown->TakePixels(Rect{Where.X, Where.Y, Where.Width, Where.Height}.Intersect(Whole), Pixels, Of.Width);
+    const Clocked    Spent{Part::Intake};
+    ItemBlockHeader &Head  = *Of.Head();
+    const bool       First = Of.Held < 0;
+    __atomic_store_n(&Head.PageFree[Page], 0u, __ATOMIC_RELEASE);
+    if (!First && static_cast<std::uint32_t>(Of.Held) != Page) {
+        const auto Given = static_cast<std::uint32_t>(Of.Held);
+        __atomic_store_n(&Head.PageFree[Given], 1u, __ATOMIC_RELEASE);
+        const ItemPageFree Free{Given, 0};
+        Tell(Said, ITEM_EVENT_FREE, Of.Id, &Free, sizeof(Free));
     }
-    __atomic_store_n(&Of.Head()->PageFree[Page], 1u, __ATOMIC_RELEASE);
+    Of.Held = static_cast<std::int32_t>(Page);
+    return First;
 }
 
 /* A font block read into its program's book, once: why not, when it is no
@@ -344,8 +357,8 @@ error_t ReadFont(Program &Of, Block &Font)
 }
 
 /* A block's content changed, as its program said in a step of Said's: a
- * picture made again, a canvas's page taken and given back, a font read —
- * and every item showing it drawn again. Throws std::bad_alloc only. */
+ * picture made again, a canvas's page held and the other given back, a font
+ * read — and every item showing it drawn again. Throws std::bad_alloc only. */
 void BlockChanged(Area &Said, std::uint32_t Id, const ItemBlockChanged &Where)
 {
     Program   &Of     = *Said.Of;
@@ -362,10 +375,8 @@ void BlockChanged(Area &Said, std::uint32_t Id, const ItemBlockChanged &Where)
         if (!Found->Picture) return Refuse(ERR_NO_MEMORY);
         break;
     case ITEM_BLOCK_CANVAS: {
-        TakePage(*Found, Where);
-        const ItemPageFree Free{Where.Page & 1u, 0};
-        Tell(Said, ITEM_EVENT_FREE, Id, &Free, sizeof(Free));
-        /* What of it changed, drawn again: no more. */
+        /* What of it changed, drawn again: no more — all of it, shown first. */
+        if (HoldPage(Said, *Found, Where.Page & 1u)) break;
         const Rect Part{Where.X, Where.Y, Where.Width, Where.Height};
         ForEachArea(Of, [Id, Part](Area &Each) { Each.State->Items.BlockChanged(Id, Part); });
         return;

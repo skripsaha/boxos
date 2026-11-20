@@ -76,12 +76,15 @@ std::optional<core::Canvas> Canvas::Begin(std::optional<core::Rect> Changed)
 {
     Area *Kept = Where && !Where->Describing ? Where->Owner : nullptr;
     if (!Kept || !Block.Memory) return std::nullopt;
-    /* The page not shown last, once the display lets it go: waiting, what it
-     * tells the area is kept for the program's Wait or Next. */
+    /* The page not given last, once the display lets it go — as soon as it
+     * holds the one given after it, so what is said, that page with it, goes
+     * first. Waiting, what the display tells the area is kept for the
+     * program's Wait or Next. */
     const std::uint32_t Page  = Shown < 0 ? 0u : 1u - static_cast<std::uint32_t>(Shown);
     const bool          Heard = Kept->Bell() != TOUCH_TAG_INVALID;
     Kept->Listen(true);
     while (!Block.Free(Page)) {
+        (void)Kept->Present();
         const TurnInMark Mark = box_mark();
         Kept->Gather();
         if (Block.Free(Page)) break;
