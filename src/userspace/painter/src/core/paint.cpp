@@ -216,8 +216,9 @@ void Prepared::PictureRow(std::int32_t Y, std::int32_t X0, std::uint32_t Count, 
 {
     BoxPaintReady R = Ready;
     R.Paint         = &Paint;
-    const Pixel *Texels = Level->Pixels.data();
-    BoxPaintWalk Walk;
+    const Pixel       *Texels = Level->Pixels.data();
+    const std::int64_t Wide = Paint.PictureWidth, High = Paint.PictureHeight;
+    BoxPaintWalk       Walk;
     BoxPaintWalkBegin(&R, X0, Y, &Walk);
     for (std::uint32_t I = 0; I < Count; I++, BoxPaintWalkNext(&Walk)) {
         std::int64_t U, V;
@@ -229,6 +230,21 @@ void Prepared::PictureRow(std::int32_t Y, std::int32_t X0, std::uint32_t Count, 
             std::int64_t  TI, TJ;
             std::uint32_t FX, FY;
             BoxPaintBetween(U, V, &TI, &TJ, &FX, &FY);
+            if (TI >= 0 && TJ >= 0 && TI + 1 < Wide && TJ + 1 < High) {
+                /* All four within the picture, where every way of going on
+                 * past it leaves a pixel where it is: read straight. The
+                 * weights make 65536, so the sums keep to 32 bits. */
+                const Pixel        *Up   = Texels + static_cast<std::size_t>(TJ) * Paint.PictureStride + static_cast<std::size_t>(TI);
+                const Pixel        *Down = Up + Paint.PictureStride;
+                const std::uint32_t W0 = (256u - FX) * (256u - FY), W1 = FX * (256u - FY), W2 = (256u - FX) * FY, W3 = FX * FY;
+                const auto          Mix = [&](std::uint16_t Pixel::*C) {
+                    return static_cast<std::uint16_t>(
+                        (32768u + W0 * Up[0].*C + W1 * Up[1].*C + W2 * Down[0].*C + W3 * Down[1].*C) >> 16);
+                };
+                Out[I] = Pixel{Mix(&Pixel::Red), Mix(&Pixel::Green), Mix(&Pixel::Blue), Mix(&Pixel::Alpha)};
+                if (Opacity < light::Whole) Out[I] = light::Scaled(Out[I], Opacity);
+                continue;
+            }
             const std::uint64_t Weights[4] = {(256u - FX) * (256u - FY), FX * (256u - FY), (256u - FX) * FY, FX * FY};
             std::uint64_t       Sum[4]     = {32768u, 32768u, 32768u, 32768u};
             for (std::uint32_t K = 0; K < 4u; K++) {
