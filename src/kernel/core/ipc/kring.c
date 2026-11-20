@@ -185,6 +185,20 @@ static inline uint32_t kring_answer_token(uint32_t sender_pid, uint64_t context)
     return sender_pid == 0 ? KCTX_COOKIE24((uint32_t)context) : 0u;
 }
 
+/* Whether the slot at reply-ring position `pos` holds a published,
+ * unconsumed answer to a submit (kring_answer_token). */
+static bool kring_answer_at(process_t *proc, ResultRing *rr, uint64_t pos, uint32_t cap)
+{
+    Porthole    porthole;
+    ResultSlot *slot = kring_slot_open(&porthole, proc, result_ring_slot_uvaddr(rr, pos), false);
+    if (!slot) return false;
+    uint64_t seq     = __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE);
+    uint64_t context = slot->r.context;
+    uint32_t sender  = slot->r.sender_pid;
+    PortholeClose(&porthole);
+    return seq == 2u * (pos / cap) + 1u && kring_answer_token(sender, context) != 0;
+}
+
 /* True when the process's ResultRing holds a PUBLISHED, unconsumed entry
  * that answers a submit (kring_answer_token) — an answer to a synchronous
  * submit its owner has not read yet. Such a process must never
@@ -192,9 +206,17 @@ static inline uint32_t kring_answer_token(uint32_t sender_pid, uint64_t context)
  * touch_await, storage) ends exactly when this reply is consumed, so
  * sleeping past it is the "undelivered result" Nightwatch names — the
  * lost-wake wedge. process_set_state uses this as the final futex-style
- * re-check at the single place sleep is committed. Reads only the ring
- * header and slot seq/context; the owner's userspace is suspended for the
- * duration of the syscall that is asking, so nothing races the scan. */
+ * re-check at the single place sleep is committed, under the strand's
+ * state_lock.
+ *
+ * Only the answers the kernel noted as it published them are looked at
+ * (process_answer_published, under the same lock): the records of a ring
+ * that holds thousands of unread messages are not walked one porthole at a
+ * time on every sleep. Where more were published than there was room to
+ * note, the whole unread ring is looked at, as it always was, and the
+ * answers it finds are noted again. Reads only the ring header and slot
+ * seq/context; the owner's userspace is suspended for the duration of the
+ * syscall that is asking, so nothing races the scan. */
 bool KResultRingHasPendingReply(process_t *proc)
 {
     ResultRing *rr = kring_result_hdr(proc);
@@ -204,7 +226,25 @@ bool KResultRingHasPendingReply(process_t *proc)
 
     uint64_t head = __atomic_load_n(&rr->hdr.head, __ATOMIC_ACQUIRE);
     uint64_t tail = __atomic_load_n(&rr->hdr.tail, __ATOMIC_ACQUIRE);
-    if (head == tail) return false;
+    if (head == tail) {
+        proc->answers_noted   = 0;
+        proc->answers_spilled = 0;
+        return false;
+    }
+
+    if (!proc->answers_spilled) {
+        uint8_t kept    = 0;
+        bool    pending = false;
+        for (uint8_t i = 0; i < proc->answers_noted; i++) {
+            uint64_t pos = proc->answers_at[i];
+            if (pos < head) continue;              /* read already */
+            proc->answers_at[kept++] = pos;
+            if (!pending && kring_answer_at(proc, rr, pos, cap)) pending = true;
+        }
+        proc->answers_noted = kept;
+        return pending;
+    }
+
     /* The scan runs under the strand's state_lock, interrupts off, and every
      * bound in the header is the cabin's to write: head, tail and
      * slot_count_max. A cabin that says its ring holds four billion replies
@@ -215,20 +255,18 @@ bool KResultRingHasPendingReply(process_t *proc)
     if (scan_end - head > cap) scan_end = head + cap;
     if (scan_end - head > proc->result_ring_slots) scan_end = head + proc->result_ring_slots;
 
+    bool    pending = false;
+    uint8_t found   = 0;
+    bool    more    = false;
     for (uint64_t pos = head; pos < scan_end; pos++) {
-        Porthole    porthole;
-        ResultSlot *slot = kring_slot_open(&porthole, proc,
-                                           result_ring_slot_uvaddr(rr, pos), false);
-        if (!slot) continue;
-        uint64_t seq     = __atomic_load_n(&slot->seq, __ATOMIC_ACQUIRE);
-        uint64_t context = slot->r.context;
-        uint32_t sender  = slot->r.sender_pid;
-        PortholeClose(&porthole);
-        if (seq != 2u * (pos / cap) + 1u)
-            continue;                    /* in-flight reservation or consumed */
-        if (kring_answer_token(sender, context) != 0) return true;
+        if (!kring_answer_at(proc, rr, pos, cap)) continue;
+        pending = true;
+        if (found < PROCESS_ANSWERS_NOTED) proc->answers_at[found++] = pos;
+        else                               more = true;
     }
-    return false;
+    proc->answers_noted   = found;
+    proc->answers_spilled = more ? 1u : 0u;
+    return pending;
 }
 
 /* True when the slot at the ResultRing's HEAD is published and unconsumed —
@@ -543,7 +581,7 @@ bool KResultPush(process_t *target, const Result *r)
      * scheduler's doorbell rings it only if the strand is not on a CPU. */
     bool enqueued = false;
     if (token != 0) {
-        enqueued = process_set_state(target, PROC_WORKING);
+        enqueued = process_answer_published(target, pos, __atomic_load_n(&rr->hdr.head, __ATOMIC_ACQUIRE));
     } else if (process_get_state(target) == PROC_WAITING) {
         enqueued = process_set_state(target, PROC_WORKING);
     }

@@ -95,6 +95,23 @@ static int slab_size_class(size_t size) {
     return -1;
 }
 
+/* `page` onto the front of the chain `head`. */
+static void slab_chain_push(SlabPage** head, SlabPage* page) {
+    page->prev = NULL;
+    page->next = *head;
+    if (*head) (*head)->prev = page;
+    *head = page;
+}
+
+/* `page` out of the chain `head`, wherever in it it lies — O(1). */
+static void slab_chain_take(SlabPage** head, SlabPage* page) {
+    if (page->prev) page->prev->next = page->next;
+    else            *head = page->next;
+    if (page->next) page->next->prev = page->prev;
+    page->next = NULL;
+    page->prev = NULL;
+}
+
 // Initialize a slab page: place header at start, build free list with uint16_t offsets
 static void slab_init_page(SlabPage* page, size_t obj_size) {
     uint16_t header_size = (uint16_t)ALIGN_UP(sizeof(SlabPage), 16);
@@ -104,6 +121,7 @@ static void slab_init_page(SlabPage* page, size_t obj_size) {
     page->total_slots = slots;
     page->free_count = slots;
     page->next = NULL;
+    page->prev = NULL;
 
     // Build intrusive free list using uint16_t offsets from page start.
     // Each free slot stores the offset of the next free slot at its start.
@@ -203,7 +221,7 @@ void* SlabAllocFor(size_t size, KHeapCharge charge) {
             spin_unlock(&cls->lock);
             return NULL;
         }
-        cls->partial = page;
+        slab_chain_push(&cls->partial, page);
     }
 
     // Pop a free slot — O(1)
@@ -240,9 +258,8 @@ void* SlabAllocFor(size_t size, KHeapCharge charge) {
 
     // If page is now full, move to full list
     if (page->free_count == 0) {
-        cls->partial = page->next;
-        page->next = cls->full;
-        cls->full = page;
+        slab_chain_take(&cls->partial, page);
+        slab_chain_push(&cls->full, page);
     }
     __atomic_store_n(&cls->live_bytes, cls->live_bytes + cls->obj_size, __ATOMIC_RELAXED);
 
@@ -348,27 +365,17 @@ void slab_free(void* ptr) {
 
     // If page was full, move it back to partial list
     if (was_full) {
-        // Remove from full list
-        SlabPage** prev = &cls->full;
-        while (*prev && *prev != page) prev = &(*prev)->next;
-        if (*prev == page) *prev = page->next;
-
-        // Add to partial list
-        page->next = cls->partial;
-        cls->partial = page;
+        slab_chain_take(&cls->full, page);
+        slab_chain_push(&cls->partial, page);
     }
 
     // If page is completely free, optionally return to PMM
     if (page->free_count == page->total_slots && cls->partial != page) {
         // Only return if there's another partial page (keep at least one cached)
-        SlabPage** prev = &cls->partial;
-        while (*prev && *prev != page) prev = &(*prev)->next;
-        if (*prev == page) {
-            *prev = page->next;
-            __atomic_sub_fetch(&g_slab_charge_pages[page->charge], 1, __ATOMIC_RELAXED);
-            slab_bit_clear(page->page_phys);   /* ...and stops being one here */
-            pmm_free((void*)page->page_phys, 1);
-        }
+        slab_chain_take(&cls->partial, page);
+        __atomic_sub_fetch(&g_slab_charge_pages[page->charge], 1, __ATOMIC_RELAXED);
+        slab_bit_clear(page->page_phys);   /* ...and stops being one here */
+        pmm_free((void*)page->page_phys, 1);
     }
 
     spin_unlock(&cls->lock);
@@ -399,54 +406,25 @@ void slab_activate_pull_map(void) {
     for (int i = 0; i < KHEAP_CHARGE_COUNT * SLAB_NUM_CLASSES; i++) {
         SlabClass* cls = &g_slab.classes[i / SLAB_NUM_CLASSES][i % SLAB_NUM_CLASSES];
 
-        // Rebase partial list
-        uintptr_t page_phys = (uintptr_t)cls->partial;  // identity addr = phys addr
-        SlabPage* new_head = NULL;
-        SlabPage* new_tail = NULL;
-
-        while (page_phys) {
-            // Access the page via Pull Map (identity is gone)
-            SlabPage* rebased = (SlabPage*)vmm_phys_to_virt(page_phys);
-
-            // Save next identity pointer before we modify it
-            uintptr_t next_phys = (uintptr_t)rebased->next;
-
-            rebased->next = NULL;
-
-            if (!new_head) {
-                new_head = rebased;
-                new_tail = rebased;
-            } else {
-                new_tail->next = rebased;
-                new_tail = rebased;
+        /* Each chain rebuilt through the Pull Map, its links forward and
+         * back — identity addresses are physical ones. */
+        SlabPage** chains[2] = {&cls->partial, &cls->full};
+        for (int c = 0; c < 2; c++) {
+            uintptr_t page_phys = (uintptr_t)*chains[c];
+            SlabPage* new_head  = NULL;
+            SlabPage* new_tail  = NULL;
+            while (page_phys) {
+                SlabPage* rebased   = (SlabPage*)vmm_phys_to_virt(page_phys);
+                uintptr_t next_phys = (uintptr_t)rebased->next;
+                rebased->next = NULL;
+                rebased->prev = new_tail;
+                if (new_tail) new_tail->next = rebased;
+                else          new_head = rebased;
+                new_tail  = rebased;
+                page_phys = next_phys;
             }
-
-            page_phys = next_phys;
+            *chains[c] = new_head;
         }
-        cls->partial = new_head;
-
-        // Rebase full list (same logic)
-        page_phys = (uintptr_t)cls->full;
-        new_head = NULL;
-        new_tail = NULL;
-
-        while (page_phys) {
-            SlabPage* rebased = (SlabPage*)vmm_phys_to_virt(page_phys);
-            uintptr_t next_phys = (uintptr_t)rebased->next;
-
-            rebased->next = NULL;
-
-            if (!new_head) {
-                new_head = rebased;
-                new_tail = rebased;
-            } else {
-                new_tail->next = rebased;
-                new_tail = rebased;
-            }
-
-            page_phys = next_phys;
-        }
-        cls->full = new_head;
     }
 }
 

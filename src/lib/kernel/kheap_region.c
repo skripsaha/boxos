@@ -143,90 +143,201 @@ static void SayPeak(size_t peak, size_t largest)
 // Regions
 // ----------------------------------------------------------------------------
 
+/* Where a free block keeps its place on its list: the first bytes of its
+ * payload, every payload being at least 32 bytes. */
+typedef struct {
+    uint32_t next;     /* the next block of its list, as a distance from the region's start; 0 none */
+    uint32_t prev;     /* the one before it; 0 when it is the first */
+} FreeLinks;
+
+static inline mem_block_t *BlockAt(KHeapRegion *region, uint32_t at)
+{
+    return (mem_block_t *)((uint8_t *)region + at);
+}
+
+static inline uint32_t BlockOffset(KHeapRegion *region, mem_block_t *block)
+{
+    return (uint32_t)((uint8_t *)block - (uint8_t *)region);
+}
+
+static inline FreeLinks *LinksOf(mem_block_t *block)
+{
+    return (FreeLinks *)((uint8_t *)block + sizeof(mem_block_t));
+}
+
+/* The block just above `block` in its region; NULL past the last. */
+static inline mem_block_t *BlockAbove(KHeapRegion *region, mem_block_t *block)
+{
+    uint8_t *above = (uint8_t *)block + sizeof(mem_block_t) + block->size;
+    return above < (uint8_t *)region + region->bytes ? (mem_block_t *)above : NULL;
+}
+
+static inline uint32_t HighBit(uint32_t v)
+{
+    return 31u - (uint32_t)__builtin_clz(v);
+}
+
+/* The list a free block of `size` payload bytes is kept on: its class, the
+ * power of two of its 32-byte units, and its step within the class. */
+static void ListOf(size_t size, uint32_t *cls, uint32_t *step)
+{
+    uint32_t units = (uint32_t)(size / KLIB_BLOCK_ALIGNMENT);
+    uint32_t c     = HighBit(units);
+    *cls  = c;
+    *step = c < KHEAP_SIZE_STEP_BITS ? units - (1u << c)
+                                     : (units >> (c - KHEAP_SIZE_STEP_BITS)) & (KHEAP_SIZE_STEPS - 1u);
+}
+
+static void ListPush(KHeapRegion *region, mem_block_t *block)
+{
+    uint32_t cls, step;
+    ListOf(block->size, &cls, &step);
+    uint32_t   at    = BlockOffset(region, block);
+    uint32_t   first = region->lists[cls][step];
+    FreeLinks *links = LinksOf(block);
+    links->next = first;
+    links->prev = 0;
+    if (first) LinksOf(BlockAt(region, first))->prev = at;
+    region->lists[cls][step] = at;
+    region->steps[cls]      |= (uint8_t)(1u << step);
+    region->classes         |= 1u << cls;
+}
+
+static void ListTake(KHeapRegion *region, mem_block_t *block)
+{
+    uint32_t cls, step;
+    ListOf(block->size, &cls, &step);
+    FreeLinks *links = LinksOf(block);
+    if (links->prev) LinksOf(BlockAt(region, links->prev))->next = links->next;
+    else             region->lists[cls][step] = links->next;
+    if (links->next) LinksOf(BlockAt(region, links->next))->prev = links->prev;
+    if (!region->lists[cls][step]) {
+        region->steps[cls] &= (uint8_t)~(1u << step);
+        if (!region->steps[cls]) region->classes &= ~(1u << cls);
+    }
+}
+
+/* A free block of the region, as kmalloc found it: corruption said where it
+ * is found, not an owner later. */
+static mem_block_t *FreeChecked(KHeapRegion *region, uint32_t at)
+{
+    mem_block_t *block = BlockAt(region, at);
+    if (at < KHEAP_REGION_HEAD || at >= region->bytes)
+        panic("kmalloc corruption: free block 0x%p out of its region [0x%p - 0x%p]",
+              block, (uint8_t *)region + KHEAP_REGION_HEAD, (uint8_t *)region + region->bytes);
+    if (block->magic != KLIB_MAGIC_FREE)
+        panic("Memory corruption detected in kmalloc (magic=0x%x, expected FREE)!", block->magic);
+    return block;
+}
+
 static KHeapRegion *RegionLay(uintptr_t phys, size_t bytes, uint8_t kind)
 {
     KHeapRegion *region = (KHeapRegion *)vmm_phys_to_virt(phys);
     mem_block_t *all    = (mem_block_t *)((uint8_t *)region + KHEAP_REGION_HEAD);
 
+    if (bytes / KLIB_BLOCK_ALIGNMENT >= (1ull << KHEAP_SIZE_CLASSES))
+        panic("[HEAP] a region of %zu bytes is past what its size classes hold", bytes);
+    memset(region, 0, KHEAP_REGION_HEAD);
     region->magic = KHEAP_REGION_MAGIC;
     region->kind  = kind;
     region->bytes = bytes;
-    region->live  = 0;
-    region->next  = NULL;
 
     all->size   = bytes - KHEAP_REGION_HEAD - sizeof(mem_block_t);
-    all->next   = NULL;
+    all->below  = 0;
     all->back   = KHEAP_REGION_HEAD;
     all->magic  = KLIB_MAGIC_FREE;
     all->charge = KHEAP_CHARGE_KERNEL;
-    region->free = all;
+    ListPush(region, all);
 
     PageMapMark(&g_region_pages, phys, bytes / VMM_PAGE_SIZE, true);
     return region;
 }
 
-/* First fit in one region, oldest block address first. The caller holds the
- * lock; `size` is a multiple of KLIB_BLOCK_ALIGNMENT. */
-static mem_block_t *RegionCarve(KHeapRegion *region, size_t size)
+/* A free block of the region of at least `size` payload bytes, off its list:
+ * the first of the first list whose every block fits — the list `size` rounds
+ * up to, or any after it, found by the bitmaps — else the first that fits on
+ * the list `size` itself belongs to, whose blocks are within an eighth of it.
+ * NULL when the region has none. */
+static mem_block_t *RegionFind(KHeapRegion *region, size_t size)
 {
-    uint8_t     *lo   = (uint8_t *)region + KHEAP_REGION_HEAD;
-    uint8_t     *hi   = (uint8_t *)region + region->bytes;
-    mem_block_t *curr = region->free, *prev = NULL;
-
-    while (curr) {
-        if (curr->magic != KLIB_MAGIC_FREE)
-            panic("Memory corruption detected in kmalloc (magic=0x%x, expected FREE)!",
-                  curr->magic);
-        if ((uint8_t *)curr < lo || (uint8_t *)curr >= hi)
-            panic("kmalloc corruption: free block 0x%p out of its region [0x%p - 0x%p]",
-                  curr, lo, hi);
-
-        if (curr->size >= size) {
-            if (curr->size > size + sizeof(mem_block_t) + KLIB_BLOCK_ALIGNMENT) {
-                mem_block_t *rest = (mem_block_t *)((uint8_t *)curr + sizeof(mem_block_t) + size);
-                rest->size  = curr->size - size - sizeof(mem_block_t);
-                rest->next  = curr->next;
-                rest->back  = (uint64_t)((uint8_t *)rest - (uint8_t *)region);
-                rest->magic = KLIB_MAGIC_FREE;
-                curr->size  = size;
-                curr->next  = rest;
+    uint32_t units = (uint32_t)(size / KLIB_BLOCK_ALIGNMENT);
+    uint32_t c     = HighBit(units);
+    uint32_t up    = c < KHEAP_SIZE_STEP_BITS ? units : units + (1u << (c - KHEAP_SIZE_STEP_BITS)) - 1u;
+    uint32_t cls, step;
+    ListOf((size_t)up * KLIB_BLOCK_ALIGNMENT, &cls, &step);
+    if (cls < KHEAP_SIZE_CLASSES) {
+        uint32_t steps = region->steps[cls] & (uint32_t)(0xFFu << step);
+        if (!steps) {
+            uint32_t classes = cls + 1u < 32u ? region->classes & ~((2u << cls) - 1u) : 0u;
+            if (classes) {
+                cls   = (uint32_t)__builtin_ctz(classes);
+                steps = region->steps[cls];
             }
-            if (prev) prev->next   = curr->next;
-            else      region->free = curr->next;
-
-            curr->magic   = KLIB_MAGIC_NUMBER;
-            region->live += curr->size + sizeof(mem_block_t);
-            return curr;
         }
-        prev = curr;
-        curr = curr->next;
+        if (steps) {
+            mem_block_t *block = FreeChecked(region, region->lists[cls][__builtin_ctz(steps)]);
+            ListTake(region, block);
+            return block;
+        }
+    }
+    ListOf(size, &cls, &step);
+    for (uint32_t at = region->lists[cls][step]; at;) {
+        mem_block_t *block = FreeChecked(region, at);
+        if (block->size >= size) {
+            ListTake(region, block);
+            return block;
+        }
+        at = LinksOf(block)->next;
     }
     return NULL;
 }
 
-/* A free block back into its region's list, merged with the neighbours it
- * touches. The caller holds the lock. */
+/* A block of `size` payload bytes carved from the region — what is left past
+ * it, when it would hold a block of its own, given back to the lists — and
+ * counted live. NULL when the region has no room. The caller holds the lock;
+ * `size` is a multiple of KLIB_BLOCK_ALIGNMENT. */
+static mem_block_t *RegionCarve(KHeapRegion *region, size_t size)
+{
+    mem_block_t *block = RegionFind(region, size);
+    if (!block)
+        return NULL;
+    if (block->size > size + sizeof(mem_block_t) + KLIB_BLOCK_ALIGNMENT) {
+        mem_block_t *rest = (mem_block_t *)((uint8_t *)block + sizeof(mem_block_t) + size);
+        rest->size   = block->size - size - sizeof(mem_block_t);
+        rest->below  = sizeof(mem_block_t) + size;
+        rest->back   = (uint64_t)((uint8_t *)rest - (uint8_t *)region);
+        rest->magic  = KLIB_MAGIC_FREE;
+        rest->charge = KHEAP_CHARGE_KERNEL;
+        block->size  = size;
+        mem_block_t *above = BlockAbove(region, rest);
+        if (above) above->below = sizeof(mem_block_t) + rest->size;
+        ListPush(region, rest);
+    }
+    block->magic  = KLIB_MAGIC_NUMBER;
+    region->live += block->size + sizeof(mem_block_t);
+    return block;
+}
+
+/* A free block back onto its region's lists, merged with a free neighbour
+ * below and above. The caller holds the lock and has marked it free. */
 static void RegionRelease(KHeapRegion *region, mem_block_t *block)
 {
-    mem_block_t *curr = region->free, *prev = NULL;
-    while (curr && curr < block) {
-        prev = curr;
-        curr = curr->next;
+    mem_block_t *above = BlockAbove(region, block);
+    if (above && above->magic == KLIB_MAGIC_FREE) {
+        ListTake(region, above);
+        block->size += sizeof(mem_block_t) + above->size;
     }
-
-    if (prev && (uint8_t *)prev + sizeof(mem_block_t) + prev->size == (uint8_t *)block) {
-        prev->size += sizeof(mem_block_t) + block->size;
-        block = prev;
-    } else {
-        block->next = curr;
-        if (prev) prev->next   = block;
-        else      region->free = block;
+    if (block->below) {
+        mem_block_t *below = (mem_block_t *)((uint8_t *)block - block->below);
+        if (below->magic == KLIB_MAGIC_FREE) {
+            ListTake(region, below);
+            below->size += sizeof(mem_block_t) + block->size;
+            block = below;
+        }
     }
-
-    if (block->next && (uint8_t *)block + sizeof(mem_block_t) + block->size == (uint8_t *)block->next) {
-        block->size += sizeof(mem_block_t) + block->next->size;
-        block->next  = block->next->next;
-    }
+    above = BlockAbove(region, block);
+    if (above) above->below = (uint64_t)((uint8_t *)above - (uint8_t *)block);
+    ListPush(region, block);
 }
 
 static void RegionAppend(KHeapRegion **list, KHeapRegion *region)
@@ -569,7 +680,7 @@ void KHeapRegionsInit(void *boot, size_t bytes)
 }
 
 /* Every pointer the heap keeps moves from the identity window to the Pull
- * Map; the live blocks keep only distances. Called by vmm_init after the page
+ * Map; its blocks and their lists keep only distances. Called by vmm_init after the page
  * allocator is rebased — growth asks it for pages — single-threaded, before
  * the APs boot, so no lock is taken. From here on the heap grows. */
 void KHeapRegionsPullMap(void)
@@ -578,13 +689,6 @@ void KHeapRegionsPullMap(void)
     g_large_heads.bits  = (uint8_t *)vmm_phys_to_virt(g_large_heads.phys);
 
     g_regions = (KHeapRegion *)vmm_phys_to_virt((uintptr_t)g_regions);
-    if (g_regions->free) {
-        g_regions->free = (mem_block_t *)vmm_phys_to_virt((uintptr_t)g_regions->free);
-        for (mem_block_t *b = g_regions->free; b; b = b->next) {
-            if (b->next)
-                b->next = (mem_block_t *)vmm_phys_to_virt((uintptr_t)b->next);
-        }
-    }
     __atomic_store_n(&g_heap_grows, true, __ATOMIC_RELEASE);
 }
 

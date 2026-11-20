@@ -21,16 +21,18 @@
 #define HEAP_CANARY_MAGIC     0xDEADBEEFCAFEBABEULL
 
 /* A block of a pool region. `back` is the distance from the region's start
- * to this header — a distance, not a pointer, so a live block carries
+ * to this header, `below` the distance back to the block just below it in
+ * its region (0 for the first) — distances, not pointers, so a block carries
  * nothing that has to be moved when the Pull Map takes over from the boot
- * identity mapping. */
+ * identity mapping. A free block keeps its place on its region's free lists
+ * in the first bytes of its payload (kheap_region.c), distances too. */
 typedef struct mem_block {
-    size_t            size;       /* payload bytes that follow this header */
-    struct mem_block *next;       /* the next free block of its region (free blocks only) */
-    uint64_t          back;
-    uint32_t          magic;
-    uint8_t           charge;     /* the KHeapCharge a live block is charged to */
-    uint8_t           unused[3];
+    size_t   size;       /* payload bytes that follow this header */
+    uint64_t below;
+    uint64_t back;
+    uint32_t magic;
+    uint8_t  charge;     /* the KHeapCharge a live block is charged to */
+    uint8_t  unused[3];
 } mem_block_t;
 
 _Static_assert(sizeof(mem_block_t) == KLIB_BLOCK_ALIGNMENT,
@@ -46,12 +48,26 @@ typedef enum {
     KHEAP_REGION_RESERVE       /* the kernel's own paths'; kept for good */
 } KHeapRegionKind;
 
+/* A region's free blocks are kept by size: a list for each eighth of a power
+ * of two — for each of the KHEAP_SIZE_STEPS steps of KHEAP_SIZE_CLASSES
+ * powers of two of 32 bytes — two bitmaps saying which lists hold any, so a
+ * block that fits is found, and one freed is merged with free neighbours, in
+ * a time that does not depend on how many blocks the region holds. A list is
+ * named by the distance of its first block from the region's start, 0 when
+ * it is empty. Sixty-four MiB, the largest run the page allocator gives, is
+ * 2^21 blocks of 32 bytes: twenty-four classes hold it. */
+#define KHEAP_SIZE_CLASSES    24
+#define KHEAP_SIZE_STEP_BITS  3
+#define KHEAP_SIZE_STEPS      (1 << KHEAP_SIZE_STEP_BITS)
+
 typedef struct KHeapRegion {
     uint32_t            magic;
     uint8_t             kind;     /* KHeapRegionKind */
     size_t              bytes;    /* the whole region, this header included */
     size_t              live;     /* bytes of live blocks, their headers included */
-    mem_block_t        *free;     /* its free blocks, in address order */
+    uint32_t            classes;  /* bit c: some list of class c holds a block */
+    uint8_t             steps[KHEAP_SIZE_CLASSES];   /* bit s: list s of the class holds one */
+    uint32_t            lists[KHEAP_SIZE_CLASSES][KHEAP_SIZE_STEPS];
     struct KHeapRegion *next;     /* the next region of its list, oldest first */
 } KHeapRegion;
 

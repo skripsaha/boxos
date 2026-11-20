@@ -232,6 +232,7 @@ void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, 
 
 void Compositor::Take(std::span<AreaState *const> Areas, const Theme &Look)
 {
+    Unbin();
     for (AreaState *Area : Areas) {
         Own.Clear();
         Owning = true;
@@ -286,40 +287,108 @@ bool Compositor::Hidden(Rect Area, std::span<AreaState *const> Areas) const noex
     return false;
 }
 
-Compositor::From Compositor::Lowest(Rect Area, std::span<AreaState *const> Areas) const noexcept
+void Compositor::Bin(std::span<AreaState *const> Areas, std::int32_t Side)
 {
+    BinSide     = Side;
+    BinAcross   = Side > 0 ? (Screen.Width + Side - 1) / Side : 0;
+    BinDown     = Side > 0 ? (Screen.Height + Side - 1) / Side : 0;
+    BinnedAreas = Areas.size();
+    const std::size_t Squares = static_cast<std::size_t>(std::max(BinAcross, 0)) * static_cast<std::size_t>(std::max(BinDown, 0));
+    Bins.resize(Squares * BinnedAreas);
+    for (std::vector<std::uint32_t> &Each : Bins) Each.clear();
+    for (std::size_t A = 0; A < Areas.size(); A++) {
+        const AreaState &Each = *Areas[A];
+        if (!Each.Shown) continue;
+        for (std::size_t E = 0; E < Each.List.size(); E++) {
+            const Entry &One = Each.List[E];
+            if (One.What != Entry::Kind::Draw) {
+                /* A group's beginning or end stands in every square: what is
+                 * drawn between them in one is drawn within them. */
+                for (std::size_t S = 0; S < Squares; S++) Bins[S * BinnedAreas + A].push_back(static_cast<std::uint32_t>(E));
+                continue;
+            }
+            const Rect On = One.Device.Intersect(Screen);
+            if (On.Empty()) continue;
+            for (std::int32_t Row = (On.Y - Screen.Y) / Side; Row <= (On.Y + On.Height - 1 - Screen.Y) / Side; Row++)
+                for (std::int32_t Col = (On.X - Screen.X) / Side; Col <= (On.X + On.Width - 1 - Screen.X) / Side; Col++)
+                    Bins[(static_cast<std::size_t>(Row) * static_cast<std::size_t>(BinAcross) + static_cast<std::size_t>(Col)) * BinnedAreas + A]
+                        .push_back(static_cast<std::uint32_t>(E));
+        }
+    }
+}
+
+std::size_t Compositor::SquareOf(Rect Area) const noexcept
+{
+    if (BinSide <= 0 || Area.Empty()) return Everywhere;
+    const std::int32_t Col = (Area.X - Screen.X) / BinSide, Row = (Area.Y - Screen.Y) / BinSide;
+    if (Area.X < Screen.X || Area.Y < Screen.Y || Col >= BinAcross || Row >= BinDown ||
+        (Area.X + Area.Width - 1 - Screen.X) / BinSide != Col || (Area.Y + Area.Height - 1 - Screen.Y) / BinSide != Row)
+        return Everywhere;
+    return static_cast<std::size_t>(Row) * static_cast<std::size_t>(BinAcross) + static_cast<std::size_t>(Col);
+}
+
+std::span<const std::uint32_t> Compositor::Picked(std::size_t Square, std::size_t Index) const noexcept
+{
+    if (Square == Everywhere || Index >= BinnedAreas || (Square + 1) * BinnedAreas > Bins.size()) return {};
+    return Bins[Square * BinnedAreas + Index];
+}
+
+template <typename Visiting>
+void Compositor::Entries(const AreaState &Each, std::size_t A, std::size_t Square, std::size_t First, Visiting &&Visit) const
+{
+    if (Square == Everywhere || A >= BinnedAreas || (Square + 1) * BinnedAreas > Bins.size()) {
+        for (std::size_t E = First; E < Each.List.size(); E++)
+            if (!Visit(E)) return;
+        return;
+    }
+    const std::vector<std::uint32_t> &Mine = Bins[Square * BinnedAreas + A];
+    for (auto It = std::lower_bound(Mine.begin(), Mine.end(), static_cast<std::uint32_t>(First)); It != Mine.end(); ++It)
+        if (!Visit(static_cast<std::size_t>(*It))) return;
+}
+
+Compositor::From Compositor::Lowest(Rect Area, std::span<AreaState *const> Areas, std::size_t Square) const noexcept
+{
+    const bool Binned = Square != Everywhere && (Square + 1) * BinnedAreas <= Bins.size() && Areas.size() == BinnedAreas;
     for (std::size_t A = Areas.size(); A-- > 0;) {
         const AreaState &Each = *Areas[A];
         if (!Each.Shown) continue;
-        for (std::size_t E = Each.List.size(); E-- > 0;)
-            if (Each.List[E].What == Entry::Kind::Draw && Holds(Each.List[E].Hides, Area)) return From{A, E};
+        if (Binned) {
+            const std::vector<std::uint32_t> &Mine = Bins[Square * BinnedAreas + A];
+            for (std::size_t I = Mine.size(); I-- > 0;)
+                if (Each.List[Mine[I]].What == Entry::Kind::Draw && Holds(Each.List[Mine[I]].Hides, Area)) return From{A, Mine[I]};
+        } else {
+            for (std::size_t E = Each.List.size(); E-- > 0;)
+                if (Each.List[E].What == Entry::Kind::Draw && Holds(Each.List[E].Hides, Area)) return From{A, E};
+        }
         if (Each.Paged && Holds(Each.Place, Area)) return From{A, 0};
     }
     return From{0, 0};
 }
 
-bool Compositor::OwnGlyphs(Rect Area, std::span<AreaState *const> Areas) const noexcept
+bool Compositor::OwnGlyphs(Rect Area, std::span<AreaState *const> Areas, std::size_t Square) const noexcept
 {
-    const From Start = Lowest(Area, Areas);
-    for (std::size_t A = Start.Area; A < Areas.size(); A++) {
+    const From Start = Lowest(Area, Areas, Square);
+    bool       Own   = false;
+    for (std::size_t A = Start.Area; A < Areas.size() && !Own; A++) {
         const AreaState &Each = *Areas[A];
         if (!Each.Shown || Each.Place.Intersect(Area).Empty()) continue;
-        for (std::size_t E = A == Start.Area ? Start.Entry : 0; E < Each.List.size(); E++) {
+        Entries(Each, A, Square, A == Start.Area ? Start.Entry : 0, [&](std::size_t E) {
             const Entry &One = Each.List[E];
-            if (One.What != Entry::Kind::Draw || One.Device.Intersect(Area).Empty()) continue;
-            if (items::OwnGlyphs(*One.Of, *One.Of->Drawn, One.Place, One.Turning)) return true;
-            if (One.Fade && items::OwnGlyphs(One.Fade->Was, *One.Fade->Was.Drawn, One.Place, One.Turning)) return true;
-        }
+            if (One.What != Entry::Kind::Draw || One.Device.Intersect(Area).Empty()) return true;
+            Own = items::OwnGlyphs(*One.Of, *One.Of->Drawn, One.Place, One.Turning) ||
+                  (One.Fade && items::OwnGlyphs(One.Fade->Was, *One.Fade->Was.Drawn, One.Place, One.Turning));
+            return !Own;
+        });
     }
-    return false;
+    return Own;
 }
 
 void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Corner, Rect Area,
-                         std::span<AreaState *const> Areas, const Theme &Look) const
+                         std::span<AreaState *const> Areas, const Theme &Look, std::size_t Square) const
 {
     /* The topmost opaque item covering the rectangle whole: nothing beneath
      * it is drawn. */
-    const From        Start      = Lowest(Area, Areas);
+    const From        Start      = Lowest(Area, Areas, Square);
     const std::size_t StartArea  = Start.Area;
     const std::size_t StartEntry = Start.Entry;
 
@@ -330,7 +399,6 @@ void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Cor
         return At.X == 0 && At.Y == 0 ? Place
                                       : Place.Then(Transform::Translate(-static_cast<float>(At.X), -static_cast<float>(At.Y)));
     };
-    const painter::core::Point Picture{Area.X, Area.Y};
     Target.PushClip(Into(Area, Corner));
     for (std::size_t A = StartArea; A < Areas.size(); A++) {
         const AreaState &Each = *Areas[A];
@@ -339,10 +407,12 @@ void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Cor
         if (Each.Paged && (A > StartArea || StartEntry == 0))
             Target.Clear(Into(Each.Place.Intersect(Area), Corner), Look.Page);
         /* Groups that see through: their items onto a picture of their own,
-         * laid at the group's end. */
+         * as large as what the group covers of the rectangle and lying where
+         * that lies, laid at the group's end. */
         struct Layer {
             std::optional<painter::core::Canvas> Picture;
             float                                Opacity;
+            painter::core::Point                 Corner;
         };
         std::vector<Layer> Layers;
         const auto Drawn = [&]() -> Layer * {
@@ -354,8 +424,11 @@ void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Cor
             Layer *On = Drawn();
             return On ? *On->Picture : Target;
         };
-        const auto At = [&] { return Drawn() ? Picture : Corner; };
-        for (std::size_t E = A == StartArea ? StartEntry : 0; E < Each.List.size(); E++) {
+        const auto At = [&] {
+            const Layer *On = Drawn();
+            return On ? On->Corner : Corner;
+        };
+        Entries(Each, A, Square, A == StartArea ? StartEntry : 0, [&](std::size_t E) {
             const Entry &One = Each.List[E];
             switch (One.What) {
             case Entry::Kind::Draw: {
@@ -390,11 +463,11 @@ void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Cor
                 break;
             case Entry::Kind::LayerBegin: {
                 const Clocked Spent{::Part::Layered};
-                Layers.push_back(Layer{One.Device.Intersect(Area).Empty()
-                                           ? std::nullopt
-                                           : painter::core::Canvas::Make(static_cast<std::uint32_t>(Area.Width),
-                                                                         static_cast<std::uint32_t>(Area.Height)),
-                                       One.Opacity});
+                const Rect    Covers = One.Device.Intersect(Area);
+                Layers.push_back(Layer{Covers.Empty() ? std::nullopt
+                                                      : painter::core::Canvas::Make(static_cast<std::uint32_t>(Covers.Width),
+                                                                                    static_cast<std::uint32_t>(Covers.Height)),
+                                       One.Opacity, painter::core::Point{Covers.X, Covers.Y}});
                 break;
             }
             case Entry::Kind::LayerEnd: {
@@ -404,12 +477,14 @@ void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Cor
                 Layers.pop_back();
                 if (Done.Picture) {
                     const painter::core::Point Under = At();
-                    Current().Draw(*Done.Picture, painter::core::Point{Picture.X - Under.X, Picture.Y - Under.Y}, Done.Opacity);
+                    Current().Draw(*Done.Picture, painter::core::Point{Done.Corner.X - Under.X, Done.Corner.Y - Under.Y},
+                                   Done.Opacity);
                 }
                 break;
             }
             }
-        }
+            return true;
+        });
         Target.PopClip();
     }
     Target.PopClip();

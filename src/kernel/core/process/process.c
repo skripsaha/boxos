@@ -49,6 +49,13 @@ static volatile uint32_t process_count = 0;
 static spinlock_t process_lock;
 static process_cleanup_queue_t g_cleanup_queue;
 
+/* The dead, as they die: every strand whose death is committed while it is
+ * still listed, each held by a reference of the list's, for the reaper to take
+ * without a walk of the living (process_reap_strands). Taken under a strand's
+ * state_lock, and nothing is taken under it. */
+static spinlock_t g_dead_lock;
+static process_t *g_dead_head = NULL;
+
 // Round-robin counter for App Core assignment (multi-core only).
 static volatile uint32_t g_appcore_rr_counter = 0;
 
@@ -220,6 +227,9 @@ void process_init(void)
     g_cleanup_queue.tail = NULL;
     g_cleanup_queue.count = 0;
     spinlock_init(&g_cleanup_queue.lock);
+
+    g_dead_head = NULL;
+    spinlock_init(&g_dead_lock);
 
     memset(process_hash_table, 0, sizeof(process_hash_table));
 
@@ -693,6 +703,15 @@ uint64_t process_cpu_time_us(const process_t *proc)
     return us;
 }
 
+/* `proc` onto the list of the dead, with the reference its caller gives it. */
+static void process_dead_push(process_t *proc)
+{
+    spin_lock(&g_dead_lock);
+    proc->dead_next = g_dead_head;
+    g_dead_head     = proc;
+    spin_unlock(&g_dead_lock);
+}
+
 /* The move itself, under the state lock its caller holds: whether it enqueued. */
 static bool ProcessStateMoveLocked(process_t *proc, process_state_t new_state)
 {
@@ -746,6 +765,17 @@ static bool ProcessStateMoveLocked(process_t *proc, process_state_t new_state)
 
     proc->state = new_state;
 
+    /* Its death, the once it is committed, put where the reaper looks, with a
+     * reference of the list's that keeps the record whoever else may end it:
+     * one a destroy already took off the process list — a spawn undone, the
+     * halt's — the reaper only lets go of. */
+    if ((new_state == PROC_DONE || new_state == PROC_CRASHED) && old_state != PROC_DONE &&
+        old_state != PROC_CRASHED)
+    {
+        process_ref_inc(proc);
+        process_dead_push(proc);
+    }
+
     /* Parked while still on its CPU: on more than one core the K-Core that
      * took the submit is the one parking it, and the strand itself is spinning
      * on its App-Core in a reply wait that nothing else will end until the
@@ -791,6 +821,23 @@ bool process_set_state(process_t *proc, process_state_t new_state)
 
     spin_lock(&proc->state_lock);
     bool enqueued = ProcessStateMoveLocked(proc, new_state);
+    spin_unlock(&proc->state_lock);
+    return enqueued;
+}
+
+bool process_answer_published(process_t *proc, uint64_t pos, uint64_t head)
+{
+    if (!proc)
+        return false;
+
+    spin_lock(&proc->state_lock);
+    uint8_t kept = 0;
+    for (uint8_t i = 0; i < proc->answers_noted; i++)
+        if (proc->answers_at[i] >= head) proc->answers_at[kept++] = proc->answers_at[i];
+    proc->answers_noted = kept;
+    if (kept < PROCESS_ANSWERS_NOTED) proc->answers_at[proc->answers_noted++] = pos;
+    else                              proc->answers_spilled = 1;
+    bool enqueued = ProcessStateMoveLocked(proc, PROC_WORKING);
     spin_unlock(&proc->state_lock);
     return enqueued;
 }
@@ -2170,91 +2217,130 @@ static bool strand_stack_in_use(process_t *proc)
 }
 
 /* P5b strand reaper — single-reaper-at-a-time guard. A plain test-and-set:
- * the first K-Core to claim it does the scan + destroys; others skip this
+ * the first K-Core to claim it takes the dead + destroys; others skip this
  * tick. This serialises process_destroy across cores so two of them never
  * unlink the same zombie (which would corrupt the global list). */
 static volatile uint8_t g_strand_reaping = 0;
+
+/* Whether `proc` is still on the process list: not yet destroyed. */
+static bool process_listed(process_t *proc)
+{
+    spin_lock(&process_lock);
+    bool listed = proc->prev || proc->next || process_list_head == proc;
+    spin_unlock(&process_lock);
+    return listed;
+}
 
 void process_reap_strands(void)
 {
     if (__atomic_exchange_n(&g_strand_reaping, 1, __ATOMIC_ACQUIRE) != 0)
         return;
 
-    /* Snapshot a bounded batch of reapable strand corpses UNDER the list lock,
-     * then destroy them after releasing it (process_destroy takes process_lock
-     * itself, so it must not be called while we hold it).
+    /* The dead, all of them, taken off their list in one hold: a reap costs
+     * the dead, never a walk of the living under process_lock.
      *
-     * Pin each snapshotted corpse with a reference while it sits in the batch:
-     * process_destroy's final process_ref_dec then drops the birth ref to 1
-     * (not 0 — no free yet), and OUR process_ref_dec below drops it to 0,
-     * enqueueing the real teardown. Holding the ref makes the batch pointer
-     * self-defending — it cannot be freed between snapshot and destroy
-     * regardless of any other process_destroy caller — so the reaper does not
-     * have to rely on the (currently true but fragile) "only the reaper
-     * destroys a listed strand at runtime" invariant. On the bail path
-     * (process_destroy declines a still-current corpse) the ref_dec returns it
-     * to 1 and it is retried next tick. */
-    process_t *batch[CONFIG_STRAND_REAP_BATCH];
-    uint32_t n = 0;
+     * Each comes with the list's reference, which pins it through what
+     * follows: process_destroy's final process_ref_dec drops the birth ref to
+     * 1 (not 0 — no free yet), and the list's, let go below, drops it to 0,
+     * enqueueing the real teardown. A corpse not ready this tick goes back
+     * onto the list still holding it, and is looked at again next tick. */
+    spin_lock(&g_dead_lock);
+    process_t *dead = g_dead_head;
+    g_dead_head     = NULL;
+    spin_unlock(&g_dead_lock);
 
-    spin_lock(&process_lock);
-    for (process_t *p = process_list_head;
-         p && n < CONFIG_STRAND_REAP_BATCH;
-         p = p->next)
+    process_t *batch[CONFIG_STRAND_REAP_BATCH];
+    uint32_t   n    = 0;
+    process_t *kept = NULL;
+    while (dead)
     {
-        if (p->magic != PROCESS_MAGIC) continue;   /* listed ⇒ always live magic */
-        /* Reap exited full processes (main strand, hammock_base == 0) as well as
-         * spawned strands — every process is a strand of its cabin.  The main
-         * strand was previously skipped here, leaking its slot/pid/cabin-VMM
-         * forever once it exited (nothing else calls process_destroy on it at
-         * runtime).  Safe: the teardown chain already no-ops the strand-only
-         * steps for hammock_base == 0 (strand_rings_destroy / release_strand_slot)
-         * and cabin_ref_dec frees the cabin only as the LAST strand; and pid
-         * recycling is harmless — no caller addresses a process by a held pid
-         * past its death (SYS_PROC_KILL is self-only; death is observed via the
-         * process:died / strand:exited Touch events, never collected by pid). */
+        process_t *p = dead;
+        dead         = p->dead_next;
+        p->dead_next = NULL;
+
+        /* Destroyed by another hand — the halt's — or being destroyed: once
+         * it is off the process list nothing more is owed it than the list's
+         * hold let go. One a destroy declined is listed still, and kept. */
+        if (__atomic_load_n(&p->destroying, __ATOMIC_ACQUIRE))
+        {
+            if (process_listed(p))
+            {
+                p->dead_next = kept;
+                kept         = p;
+            }
+            else
+            {
+                process_ref_dec(p);
+            }
+            continue;
+        }
         /* destroying is written __ATOMIC_SEQ_CST in process_destroy; read it
          * the same way (not a plain access) — a hint either way, since
          * process_destroy re-checks "current on a core" authoritatively under
-         * the scheduler scan and bails (we retry next tick). */
-        if (__atomic_load_n(&p->destroying, __ATOMIC_ACQUIRE)) continue;
-        /* Zombie-until-join: a joinable std::thread strand (reap_blocked=1) is
+         * the scheduler scan and bails (we retry next tick).
+         *
+         * Zombie-until-join: a joinable std::thread strand (reap_blocked=1) is
          * NOT reclaimed even after it exits — its pid (== thread::id) must stay
          * reserved while the std::thread is still joinable, or a recycled pid
          * would collide with the live id. join()/detach() clears the flag via
          * SYSTEM_OP_STRAND_RELEASE, after which the next tick reaps it. Raw
-         * strand_spawn workers (reap_blocked=0) keep the eager-reap behavior. */
-        if (__atomic_load_n(&p->reap_blocked, __ATOMIC_ACQUIRE)) continue;
-        process_state_t st = __atomic_load_n(&p->state, __ATOMIC_ACQUIRE);
-        if (st == PROC_DONE || st == PROC_CRASHED)
+         * strand_spawn workers (reap_blocked=0) keep the eager-reap behavior.
+         *
+         * Reap-vs-switch: a corpse whose kernel stack a core may still be
+         * executing on (current somewhere, or its last core not yet dispatched
+         * past the eviction) waits — monotonic, so once safe it stays safe.
+         *
+         * Referenced-nowhere: never free a strand still linked into a
+         * runqueue — its slot would dangle and later dispatch the freed/
+         * recycled process_t. A corpse should never BE enqueued
+         * (process_set_state refuses to resurrect a dead strand, and the
+         * schedule() re-enqueue re-checks WORKING under the runqueue lock),
+         * so this is a defense-in-depth assertion of the invariant; if it
+         * ever holds we just retry next tick. rq_index is -1 exactly when
+         * not enqueued (maintained under each runqueue lock; an aligned
+         * scalar read is a safe conservative hint either way).
+         *
+         * Reaping exited full processes (main strand, hammock_base == 0) is
+         * safe: the teardown chain no-ops the strand-only steps for them
+         * (strand_rings_destroy / release_strand_slot) and cabin_ref_dec frees
+         * the cabin only as the LAST strand; pid recycling is harmless — no
+         * caller addresses a process by a held pid past its death. */
+        if (n == CONFIG_STRAND_REAP_BATCH || __atomic_load_n(&p->reap_blocked, __ATOMIC_ACQUIRE) ||
+            strand_stack_in_use(p) || p->rq_index >= 0)
         {
-            /* Reap-vs-switch: skip a corpse whose kernel stack a core may still
-             * be executing on (current somewhere, or its last core not yet
-             * dispatched past the eviction). Retried next tick once quiescent —
-             * monotonic, so once safe it stays safe. */
-            if (strand_stack_in_use(p))
-                continue;
-            /* Referenced-nowhere: never free a strand still linked into a
-             * runqueue — its slot would dangle and later dispatch the freed/
-             * recycled process_t. A corpse should never BE enqueued
-             * (process_set_state refuses to resurrect a dead strand, and the
-             * schedule() re-enqueue re-checks WORKING under the runqueue lock),
-             * so this is a defense-in-depth assertion of the invariant; if it
-             * ever holds we just retry next tick. rq_index is -1 exactly when
-             * not enqueued (maintained under each runqueue lock; an aligned
-             * scalar read is a safe conservative hint either way). */
-            if (p->rq_index >= 0)
-                continue;
-            process_ref_inc(p);
-            batch[n++] = p;
+            p->dead_next = kept;
+            kept         = p;
+            continue;
         }
+        batch[n++] = p;
     }
-    spin_unlock(&process_lock);
 
     for (uint32_t i = 0; i < n; i++)
     {
-        process_destroy(batch[i]);   /* unlink + hooks + ref_dec (→1 under our pin) */
-        process_ref_dec(batch[i]);   /* release pin → 0 triggers cleanup-queue teardown */
+        process_t *p = batch[i];
+        process_destroy(p);   /* unlink + hooks + ref_dec (→1 under the list's hold) */
+        /* A destroy that went through leaves destroying set; one declined —
+         * the corpse still current on a core after all — puts it back to 0,
+         * and the corpse waits for the next tick. */
+        if (__atomic_load_n(&p->destroying, __ATOMIC_ACQUIRE))
+        {
+            process_ref_dec(p);   /* the list's hold → 0 triggers cleanup-queue teardown */
+        }
+        else
+        {
+            p->dead_next = kept;
+            kept         = p;
+        }
+    }
+
+    if (kept)
+    {
+        process_t *tail = kept;
+        while (tail->dead_next) tail = tail->dead_next;
+        spin_lock(&g_dead_lock);
+        tail->dead_next = g_dead_head;
+        g_dead_head     = kept;
+        spin_unlock(&g_dead_lock);
     }
 
     __atomic_store_n(&g_strand_reaping, 0, __ATOMIC_RELEASE);

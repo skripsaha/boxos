@@ -35,9 +35,10 @@ public:
     // by the glass's own noise (painter/core/canvas.h CopyOut), and marked to
     // go onto the glass: Write, then Mark.
     void Put(const painter::core::Canvas &Picture, painter::core::Rect Area) noexcept;
-    // Area's pixels written from Picture as Put writes them, nothing marked:
-    // on any strand, each writing areas of its own.
-    void Write(const painter::core::Canvas &Picture, painter::core::Rect Area) noexcept;
+    // Area's pixels written from Picture, whose corner lies at Corner, as Put
+    // writes them, nothing marked: on any strand, each writing areas of its
+    // own.
+    void Write(const painter::core::Canvas &Picture, painter::core::Point Corner, painter::core::Rect Area) noexcept;
     // Area to go onto the glass.
     void Mark(painter::core::Rect Area) noexcept { Waiting.Add(Clipped(Area)); }
     // Area moved up Up pixels, its last Up rows left as they were for a frame

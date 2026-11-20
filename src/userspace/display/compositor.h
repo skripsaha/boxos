@@ -101,15 +101,31 @@ public:
     bool Hidden(painter::core::Rect Area, std::span<AreaState *const> Areas) const noexcept;
     // Whether any damage waits to be composed.
     bool Damaged() const noexcept { return !Waiting.Empty(); }
+    // No square of the grid (Bin): every entry of every area is looked at.
+    static constexpr std::size_t Everywhere = ~std::size_t{0};
+    // The areas' entries sorted onto the screen's grid of squares Side wide,
+    // for the frame to come — each square's every draw lying across it, and
+    // every group's beginning and end, in the order they are composed — so a
+    // rectangle within one square looks at the entries that may draw in it,
+    // not at all of them. Areas bottom to top, as composed after it.
+    void Bin(std::span<AreaState *const> Areas, std::int32_t Side);
+    // The bins let go: the frame composed, the areas may change.
+    void Unbin() noexcept { BinSide = 0; }
+    // The grid's square a rectangle within one square lies in.
+    std::size_t SquareOf(painter::core::Rect Area) const noexcept;
+    // Square's entries of the area at Index among those binned, by their
+    // places in its list, in order.
+    std::span<const std::uint32_t> Picked(std::size_t Square, std::size_t Index) const noexcept;
     // Area composed onto Target, whose corner lies at Corner on the screen,
     // from the areas' items, over what Target holds there; Areas bottom to
-    // top. Nothing but Target changes: areas apart are composed on several
-    // strands at once, each its own Target.
+    // top, Area within Square of the grid (Bin) or Everywhere. Nothing but
+    // Target changes: areas apart are composed on several strands at once,
+    // each its own Target.
     void Compose(painter::core::Canvas &Target, painter::core::Point Corner, painter::core::Rect Area,
-                 std::span<AreaState *const> Areas, const Theme &Look) const;
+                 std::span<AreaState *const> Areas, const Theme &Look, std::size_t Square = Everywhere) const;
     // Whether composing Area paints glyphs from a cache one strand keeps
     // (item_draw.h OwnGlyphs): then only the main strand composes it.
-    bool OwnGlyphs(painter::core::Rect Area, std::span<AreaState *const> Areas) const noexcept;
+    bool OwnGlyphs(painter::core::Rect Area, std::span<AreaState *const> Areas, std::size_t Square = Everywhere) const noexcept;
 
 private:
     // Where composing a rectangle begins: the area and the entry of the
@@ -117,7 +133,12 @@ private:
     struct From {
         std::size_t Area = 0, Entry = 0;
     };
-    From Lowest(painter::core::Rect Area, std::span<AreaState *const> Areas) const noexcept;
+    From Lowest(painter::core::Rect Area, std::span<AreaState *const> Areas, std::size_t Square) const noexcept;
+    // Area A's entries to look at in Square, from its entry First on, each
+    // given to Visit by its place in the list until Visit says enough: every
+    // one Everywhere.
+    template <typename Visiting>
+    void Entries(const AreaState &Each, std::size_t A, std::size_t Square, std::size_t First, Visiting &&Visit) const;
     void TakeOne(AreaState &Area, const Theme &Look);
     void Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, const painter::core::Transform &Parent,
               float Opacity, bool Moved, bool Plain, bool Turning);
@@ -127,6 +148,11 @@ private:
     Region              Waiting;
     Region              Own;              // the damage of the area being taken
     bool                Owning = false;
+    // The grid of the frame binned: each square's entries of each area, the
+    // square's lists one after another, an area's at Square·Areas + Index.
+    std::vector<std::vector<std::uint32_t>> Bins;
+    std::size_t                             BinnedAreas = 0;
+    std::int32_t                            BinSide = 0, BinAcross = 0, BinDown = 0;
 };
 
 // An item's own placing: its place, then its turn and scale about its anchor.

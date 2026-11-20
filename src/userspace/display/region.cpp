@@ -33,7 +33,10 @@ void Region::Add(Rect Area) noexcept
 
 /* A sweep down the rows: at every row a part begins or ends, the parts lying
  * across it are those begun and not ended, and their spans across, joined
- * where they touch, are the band's. */
+ * where they touch, are the band's. The parts across are kept in order
+ * across as the sweep goes — those that end taken out in place, those that
+ * begin put in order among themselves and merged in — so a band costs the
+ * parts across it, not a sort of them all again. */
 template <typename Telling> void Region::Bands(Telling &&Tell) const
 {
     std::vector<std::int32_t> Rows;
@@ -44,15 +47,20 @@ template <typename Telling> void Region::Bands(Telling &&Tell) const
     std::vector<Rect> ByTop = Parts;
     std::sort(ByTop.begin(), ByTop.end(), [](const Rect &A, const Rect &B) { return A.Y < B.Y; });
 
+    const auto        Leftward = [](const Rect &A, const Rect &B) { return A.X < B.X; };
     std::vector<Rect> Across;
     std::vector<Span> Spans;
     std::size_t       Next = 0;
     for (std::size_t R = 0; R + 1 < Rows.size(); R++) {
         const std::int32_t Top = Rows[R], Bottom = Rows[R + 1];
         std::erase_if(Across, [Top](const Rect &Each) { return Each.Y + Each.Height <= Top; });
+        const std::size_t Kept = Across.size();
         while (Next < ByTop.size() && ByTop[Next].Y == Top) Across.push_back(ByTop[Next++]);
         if (Across.empty()) continue;
-        std::sort(Across.begin(), Across.end(), [](const Rect &A, const Rect &B) { return A.X < B.X; });
+        if (Across.size() > Kept) {
+            std::sort(Across.begin() + static_cast<std::ptrdiff_t>(Kept), Across.end(), Leftward);
+            std::inplace_merge(Across.begin(), Across.begin() + static_cast<std::ptrdiff_t>(Kept), Across.end(), Leftward);
+        }
         Spans.clear();
         for (const Rect &Each : Across) {
             if (!Spans.empty() && Each.X <= Spans.back().To) Spans.back().To = std::max(Spans.back().To, Each.X + Each.Width);

@@ -233,8 +233,9 @@ void cabin_destroy(cabin_t *cabin)
 
     /* The deposit book; the pages it lent go with the address space below. */
     kfree(cabin->deposit_held);
-    cabin->deposit_held = cabin->deposit_lent = NULL;
+    cabin->deposit_held = cabin->deposit_lent = cabin->deposit_mapped = NULL;
     cabin->deposit_words = 0;
+    cabin->deposit_kept  = 0;
 
     ImageThreadLetGo(&cabin->thread);
 
