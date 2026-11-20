@@ -141,6 +141,11 @@ void sched_yield_turn(void);
  * or its home is this core. A wake whose state flip enqueued the strand has
  * already rung — sched_enqueue's IPI — and must not ring again. */
 void sched_ring_home(process_t *proc);
+/* The doorbell for a strand that has stopped working while it is on a CPU —
+ * parked, ended, crashed: IPI that core, its own included, so its scheduler
+ * takes the strand off now. Called after the new state is stored, with a full
+ * barrier between (process_set_state). */
+void sched_ring_running(process_t *proc);
 /* Remove proc from whichever core's runqueue holds it (referenced-nowhere
  * guarantee before process_destroy frees it). See scheduler.c. */
 void sched_dequeue_all_cores(process_t *proc);

@@ -631,9 +631,9 @@ error_t sched_enqueue(process_t *proc)
  * A strand on a CPU is not rung at all. It is running: whatever it waits on it
  * reads from memory — a spin on its ring, or UMWAIT on the very cacheline the
  * producer just wrote — and an interrupt would only take the core from it for
- * a schedule() that has nothing new to decide. A strand parked while still on
- * its CPU is told to step aside through its ring header instead
- * (KResultStepAside), which is the one it is already watching.
+ * a schedule() that has nothing new to decide. A strand that stops working
+ * while still on its CPU has that core rung by whoever stopped it
+ * (sched_ring_running).
  *
  * Ordering: every caller has published (a RELEASE store) and then passed
  * through the target's state_lock — a locked instruction, a full barrier on
@@ -648,6 +648,30 @@ void sched_ring_home(process_t *proc)
         return;
     uint8_t core = proc->home_core;
     if (core >= g_amp.total_cores || core == amp_get_core_index())
+        return;
+    lapic_send_ipi(g_amp.cores[core].lapic_id, IPI_WAKE_VECTOR);
+}
+
+/* A strand that may no longer run where it runs — parked by the K-Core
+ * serving it, ended with its program, crashed by another core — is taken off
+ * its CPU by that core's scheduler, and the core is told now: its turns end by
+ * its one-shot alone, and a strand alone on its core has none. The strand is
+ * not asked to step aside — a spin that misses the ask, or a loop that never
+ * looks, would keep the core for as long as it ran. scheduler_woken finds the
+ * strand it runs no longer working and schedules.
+ *
+ * Rung after the state is stored, with a full barrier between
+ * (process_set_state): a core claiming the strand meanwhile reads the state
+ * after its claim and lets it go itself, and a bell that lands after the
+ * strand left costs one look. Its own core is rung as any other — the bell
+ * waits in the IRR until interrupts open, and is answered with the state as it
+ * is then. One core: the guide's own schedule() follows every call. */
+void sched_ring_running(process_t *proc)
+{
+    if (!proc || g_amp.total_cores <= 1)
+        return;
+    int16_t core = __atomic_load_n(&proc->on_cpu, __ATOMIC_ACQUIRE);
+    if (core < 0 || core >= (int16_t)g_amp.total_cores)
         return;
     lapic_send_ipi(g_amp.cores[core].lapic_id, IPI_WAKE_VECTOR);
 }

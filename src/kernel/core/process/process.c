@@ -777,23 +777,23 @@ static bool ProcessStateMoveLocked(process_t *proc, process_state_t new_state)
         process_dead_push(proc);
     }
 
-    /* Parked while still on its CPU: on more than one core the K-Core that
-     * took the submit is the one parking it, and the strand itself is spinning
-     * on its App-Core in a reply wait that nothing else will end until the
-     * next tick. Asked to step aside, its spin yields at once and the
-     * scheduler takes the WAITING strand off the core.
+    /* Stopped while still on its CPU: on more than one core the K-Core that
+     * took the submit is the one parking it, while the strand spins on its
+     * App-Core in a reply wait — and a program's end, or a crash, reaches its
+     * strands wherever they run. Nothing on that core would end the strand's
+     * hold: its turns end by its one-shot, and a strand alone has none. So
+     * the core is rung, and its scheduler takes the strand off at once.
      *
      * The state is stored before on_cpu is read, with a full barrier between,
      * because a core may be claiming the strand to dispatch it right now — it
      * claims first and reads the state after (schedule()). One of the two then
-     * sees the other: that core sees WAITING and does not run it, or this read
-     * sees the claim and the strand it runs is told to step aside. Without the
-     * barrier both could read the old value, and a parked strand would run. */
-    if (new_state == PROC_WAITING)
+     * sees the other: that core sees the new state and does not run it, or
+     * this read sees the claim and that core is rung. Without the barrier both
+     * could read the old value, and a parked strand would run. */
+    if (new_state != PROC_WORKING && new_state != old_state)
     {
         __atomic_thread_fence(__ATOMIC_SEQ_CST);
-        if (__atomic_load_n(&proc->on_cpu, __ATOMIC_ACQUIRE) >= 0)
-            KResultStepAside(proc, true);
+        sched_ring_running(proc);
     }
 
     bool enqueued = false;

@@ -83,10 +83,10 @@ typedef struct PACKED {
      * gate hands it over — so nothing here has to act on the number. */
     volatile uint64_t owed;
     /* The kernel asking the strand that holds this core to yield it: another
-     * strand waits in this core's runqueue, or this one was parked while still
-     * on its CPU. Written by the kernel (kring.c KResultStepAside), read-only
-     * here. Every spin that waits on work ANOTHER strand must do ends on it —
-     * that strand may be queued behind us on this very core. */
+     * strand waits in this core's runqueue. Written by the kernel (kring.c
+     * KResultStepAside), read-only here. Every spin that waits on work ANOTHER
+     * strand must do ends on it — that strand may be queued behind us on this
+     * very core. */
     volatile uint64_t step_aside;
     uint8_t           _pad_line1[32];   /* fill cacheline 1 */
 } ResultRingHeader;

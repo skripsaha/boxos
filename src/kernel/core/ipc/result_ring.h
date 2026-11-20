@@ -97,9 +97,9 @@ typedef struct __packed {
      * up — written by the kernel, read-only for userspace.
      *
      * 1 when another strand is waiting in this core's runqueue (set when one
-     * is queued here, recomputed at every dispatch), or when this strand has
-     * been parked while still on its CPU (a K-Core took its submit and put it
-     * to sleep; only a pass through the scheduler takes it off). A spin that
+     * is queued here, recomputed at every dispatch). A strand parked while
+     * still on its CPU is not asked: its core is rung and takes it off
+     * (sched_ring_running). A spin that
      * waits on something ANOTHER strand must produce — the display daemon's
      * hot look, a Touch or Brook budget, a reply wait — cannot end on its own
      * when that strand is queued behind it on the same core: the core it waits

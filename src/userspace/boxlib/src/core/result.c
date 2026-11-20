@@ -473,9 +473,7 @@ static bool result_wait_spin(Result* out, uint32_t timeout_ms) {
         if (rdtsc() >= deadline) return false;
 
         /* The one exception to "never a yield": the kernel asking this strand
-         * to step aside. Either somebody is queued behind it on this core, or
-         * the K-Core has parked it while it spins here — and then only a
-         * pass through the scheduler takes it off the core. */
+         * to step aside, because somebody is queued behind it on this core. */
         if (result_step_aside()) { yield(); continue; }
 
         __asm__ volatile("pause");
