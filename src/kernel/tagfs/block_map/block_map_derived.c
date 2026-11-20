@@ -540,7 +540,8 @@ static bool RunGrows(uint64_t b, uint64_t n, uint32_t align, uint64_t want, uint
 }
 
 /* The first run of `want` free blocks beginning on `align` inside [lo, hi):
- * *start. A window whole free or whole taken is passed by its summary. */
+ * *start. A window whole free or whole taken is passed by its summary, and
+ * one of both is read a word of its bits at a time. */
 static bool RunAlignedIn(uint64_t lo, uint64_t hi, uint64_t want, uint32_t align, uint64_t* start)
 {
     uint64_t run = 0, at = 0;
@@ -557,12 +558,26 @@ static bool RunAlignedIn(uint64_t lo, uint64_t hi, uint64_t want, uint32_t align
             b = end;
             continue;
         }
-        for (; b < end; b++) {
-            uint32_t off = (uint32_t)(b - base);
-            if (win->bits[off / 64u] & (1ull << (off % 64u)))
+        /* A stretch at a time, read off a word of the bits at once: the
+         * blocks taken from here, or those free, as far as the word goes —
+         * the very run a block at a time finds, a free stretch growing it as
+         * its blocks one by one would. */
+        while (b < end) {
+            uint32_t off   = (uint32_t)(b - base);
+            uint32_t shift = off % 64u;
+            uint64_t word  = win->bits[off / 64u] >> shift;
+            uint64_t left  = 64u - shift < end - b ? 64u - shift : end - b;
+            if (word & 1u) {
+                uint64_t taken = ~word ? (uint64_t)__builtin_ctzll(~word) : 64u;
                 run = 0;
-            else if (RunGrows(b, 1, align, want, &at, &run))
+                b += taken < left ? taken : left;
+                continue;
+            }
+            uint64_t free = word ? (uint64_t)__builtin_ctzll(word) : 64u;
+            if (free > left) free = left;
+            if (RunGrows(b, free, align, want, &at, &run))
                 break;
+            b += free;
         }
         if (run >= want)
             break;

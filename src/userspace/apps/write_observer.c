@@ -14,7 +14,7 @@
 #include "box/file.h"
 #include "box/touch.h"
 #include "box/system.h"
-#include "box/core/cabin.h"
+#include "box/luggage.h"
 #include "box/core/result.h"
 #include "box/debug.h"
 #include "box/string.h"
@@ -45,8 +45,10 @@ static int child_role(void)
 
 int main(void)
 {
-    CabinInfo *ci = cabin_info();
-    if (ci && ci->spawner_pid != 0 && ci->spawner_pid != 2) {
+    /* The child knows itself by the word it is started with — who started
+     * it says nothing: the hub and this program alike are only spawners. */
+    const char *role = luggage_word(1);
+    if (role && strcmp(role, "child") == 0) {
         return child_role();
     }
 
@@ -58,7 +60,7 @@ int main(void)
         return 1;
     }
 
-    int kid = proc_exec("write_observer");
+    int kid = proc_exec("write_observer child");
     if (kid < 0) {
         kdbg_print("[WO] spawn child FAIL rc=%d", kid);
         touch_release(tag);

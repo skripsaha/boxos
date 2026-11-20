@@ -91,6 +91,11 @@ void     FileMapDrop(FileMap* map, uint64_t fid, RecordWhere* was);
  * across the walk and what it does with each file may change the map. */
 uint32_t FileMapFiles(FileMap* map, uint64_t from, uint64_t* out, uint32_t room);
 
+/* As FileMapFiles, of the files whose record holds Slips alone, kept as a
+ * list where a record is put or let go — UINT32_MAX when the list is not
+ * every one of them (it had no room), and a walk asks every file. */
+uint32_t FileMapSlipped(FileMap* map, uint64_t from, uint64_t* out, uint32_t room);
+
 /* The files in the map, and the bytes of kernel heap it holds for them: its
  * nodes and its records. */
 uint32_t FileMapCount(FileMap* map);

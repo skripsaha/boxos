@@ -243,7 +243,12 @@ static error_t EngrossWalk(EngrossWalkState* w, uint32_t tails, uint32_t looks, 
     TagFSState* fs = tagfs_get_state();
     uint64_t    ids[ENGROSS_BATCH];
     while (tails > 0 && looks > 0 && w->from != UINT64_MAX) {
-        uint32_t n = FileMapFiles(fs->files, w->from, ids, looks < ENGROSS_BATCH ? looks : ENGROSS_BATCH);
+        /* The files with Slips alone, where the map keeps every one of
+         * them; else every file. */
+        uint32_t batch = looks < ENGROSS_BATCH ? looks : ENGROSS_BATCH;
+        uint32_t n     = FileMapSlipped(fs->files, w->from, ids, batch);
+        if (n == UINT32_MAX)
+            n = FileMapFiles(fs->files, w->from, ids, batch);
         if (n == 0) {
             w->from = UINT64_MAX;
             break;
