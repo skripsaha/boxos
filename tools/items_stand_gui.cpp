@@ -353,7 +353,10 @@ void CheckCanvasPart(Tally &Count)
     items::ProgramState   Program = HostProgram(Look, 1.0f);
     painter::core::Canvas Page    = *painter::core::Canvas::Make(160, 100);
     Page.Clear(Color::Rgb(10, 20, 30));
-    Program.From.CanvasOf = [&](std::uint32_t Block) -> const painter::core::Canvas * { return Block == 7 ? &Page : nullptr; };
+    Program.From.CanvasOf = [&](std::uint32_t Block) -> std::optional<painter::core::Foreign> {
+        if (Block != 7) return std::nullopt;
+        return painter::core::Foreign{Page.Row(0), Page.Width(), Page.Height(), static_cast<std::size_t>(Page.Row(1) - Page.Row(0))};
+    };
     Bench Shown(Program);
     Shown.Area.Place = Rect{0, 0, 320, 200};
     Shown.Area.Shown = true;

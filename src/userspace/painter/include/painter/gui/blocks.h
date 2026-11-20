@@ -27,7 +27,8 @@ struct PictureBlock {
 
 // A canvas of the program's own pixels: two pages, one drawn while the other
 // is shown — a page is drawn in only while it is free (Free), and given to the
-// display with Changes::BlockChanged naming it.
+// display with Changes::BlockChanged naming it; the display shows it from
+// here and holds it until the other is given.
 struct CanvasBlock {
     std::uint32_t       Id = 0;
     std::uint32_t       Width = 0, Height = 0;

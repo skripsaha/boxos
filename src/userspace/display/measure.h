@@ -17,7 +17,7 @@ enum class Part : std::uint8_t {
     Idle,       // asleep, waiting for something to happen
     Other,      // awake, in none of the parts below
     Rotate,     // the keyboard, lanes, the ring, questions and messages heard
-    Intake,     // a canvas's page taken in
+    Intake,     // a canvas's page held
     Animate,    // animations brought to the frame's moment
     Console,    // what the console changed known, and where it moved
     Take,       // the areas' marks taken, what is to be composed again found

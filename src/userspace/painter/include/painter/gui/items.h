@@ -255,9 +255,12 @@ public:
     // Paint draws the next picture, which the display shows once it is drawn
     // and presented: the whole canvas, every pixel of it painted, unless
     // Changed says only part of it changed — then the rest is the picture
-    // shown before, and the display takes and composes that part alone.
-    // Waits, telling what the display says to the area, while the display
-    // still holds the page. False when the area is gone.
+    // shown before, and the display composes that part alone. The display
+    // shows a page from where it is painted and holds it until the next is
+    // given: Paint draws on the other, while the display composes the one
+    // given before. Waits, telling what the display says to the area, while
+    // the display still holds the page — presenting what is said, so that it
+    // can let it go. False when the area is gone.
     template <typename Painting>
     bool Draw(Painting &&Paint, std::optional<core::Rect> Changed = std::nullopt)
     {

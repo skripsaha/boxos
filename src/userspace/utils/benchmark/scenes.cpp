@@ -147,9 +147,12 @@ public:
     }
 
     /* The scene Name, of What, played: Step says what changed by the time
-     * given, in seconds from its beginning; its line said. False once it was
-     * stopped. */
-    bool Play(const char *Name, const char *What, const std::function<void(double)> &Step);
+     * given, in seconds from its beginning; its line said. Ahead, each step
+     * is said while the one before it is composed — the glass awaited only up
+     * to that one — as a program drawing its own pixels draws the next
+     * picture on one page while the display shows the other. False once it
+     * was stopped. */
+    bool Play(const char *Name, const char *What, const std::function<void(double)> &Step, bool Ahead = false);
 
     /* What a canvas scene's own drawing took this frame, in µs: told by the
      * scene, said beside the display's. */
@@ -191,7 +194,7 @@ std::optional<gui::Event> Stage::ShownOf(std::uint64_t Step)
     }
 }
 
-bool Stage::Play(const char *Name, const char *What, const std::function<void(double)> &Step)
+bool Stage::Play(const char *Name, const char *What, const std::function<void(double)> &Step, bool Ahead)
 {
     if (Got.Stopped) return false;
     char Title[160];
@@ -208,7 +211,7 @@ bool Stage::Play(const char *Name, const char *What, const std::function<void(do
         Screen.PresentAll();
         if (From != 0) Saying += clock_uptime_us() - Asked;
         if (Screen.Step() == Before) continue;   // nothing changed, nothing to show
-        const std::optional<gui::Event> Shown = ShownOf(Screen.Step());
+        const std::optional<gui::Event> Shown = ShownOf(Ahead ? Before : Screen.Step());
         if (!Shown) {
             Got.Stopped = true;
             Out.Say("scene %s — stopped", Name);
@@ -417,7 +420,8 @@ void Pixels(Stage &On)
     const std::uint32_t Wide  = static_cast<std::uint32_t>(On.Size.X * Scale), High = static_cast<std::uint32_t>(On.Size.Y * Scale);
     gui::Canvas         Board = On.Screen.Canvas({static_cast<std::int32_t>(Wide), static_cast<std::int32_t>(High)});
     Board.SetPlace({0, 0});
-    On.Play("canvas", "the whole screen of a program's own pixels, drawn anew each frame", [&](double T) { DrawnBy(On, Board, Wide, High, T); });
+    On.Play("canvas", "the whole screen of a program's own pixels, drawn anew each frame", [&](double T) { DrawnBy(On, Board, Wide, High, T); },
+            true);
 }
 
 /* Everything at once: what a busy screen is — heavy panels moving, a pond of
