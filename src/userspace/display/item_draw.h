@@ -79,12 +79,19 @@ struct Drawing {
 // The item's size in points: said, or by its content.
 painter::core::PointF SizeOf(const Item &Of, const Drawing &Drawn) noexcept;
 
-// The item's drawing made again from what it says: laid out, measured, and
-// its picture kept when keeping it is worth it and its program keeps fewer
-// bytes than KeptMost — drawn with the shadows it holds where they still
-// serve. Its bytes counted in its program's. True when its size by its
-// content changed.
-bool Prepare(const Item &Of, const Sources &From, Drawing &Into, std::size_t KeptMost);
+// The item's drawing made again from what it says: laid out and measured,
+// its picture let go, its bytes counted in its program's. True when its size
+// by its content changed.
+bool Prepare(const Item &Of, const Sources &From, Drawing &Into);
+
+// Its picture at its scale, made where it has none and a frame lays it where
+// a picture serves — upright at its scale, or turning or scaling on its way
+// (Turning: of it, or of a group it lies in) — and keeping it is worth it and
+// Keep allows: drawn with the shadows it holds where they still serve, before
+// that frame is painted. An item turned where it stands is drawn straight,
+// and keeps none.
+void KeepPicture(const Item &Of, Drawing &Drawn, const Sources &From, const painter::core::Transform &Place,
+                 bool Turning, bool Keep);
 
 // The item drawn onto Target, its own points laid on the glass by Place, at
 // Opacity, within the target's clip: from its kept picture where Place only

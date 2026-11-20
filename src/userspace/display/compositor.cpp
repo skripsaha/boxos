@@ -143,7 +143,7 @@ void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, 
         Drawing &Drawn = *Of->Drawn;
         if (Of->Redraw) {
             const Clocked Spent{Part::Prepare};
-            if (Prepare(*Of, Program.From, Drawn, KeptMost) && Area.Sized) Area.Sized(Id, Drawn.Measured);
+            if (Prepare(*Of, Program.From, Drawn) && Area.Sized) Area.Sized(Id, Drawn.Measured);
         }
         const bool      Cellular = Of->Kind == ITEM_CELLS && Of->Grid && Program.From.Cells;
         const Transform Place    = Cellular ? CellsPlace(*Of, LocalOf(*Of).Then(Parent), *Program.From.Cells)
@@ -181,6 +181,11 @@ void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, 
                           (DisabledOf(Of->Said) ? Program.From.Look->Faint : 1.0f);
         if (Of->Kind != ITEM_GROUP) {
             Entry Made{Entry::Kind::Draw, Of, Place, Opacity * Own, Now, {}, Fade, Turning || Of->Turning};
+            {
+                const Clocked Spent{Part::Prepare};
+                KeepPicture(*Of, Drawn, Program.From, Place, Made.Turning, Program.KeptBytes < KeptMost);
+                if (Fade) KeepPicture(Fade->Was, *Fade->Was.Drawn, Program.From, Place, Made.Turning, Program.KeptBytes < KeptMost);
+            }
             if (Made.Turning) {
                 /* What a turn or a scale lays made now: painting changes
                  * nothing of a drawing (item_draw.h Paint). */

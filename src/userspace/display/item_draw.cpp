@@ -542,17 +542,15 @@ void KeepCast(const Item &Of, Drawing &Drawn, const Sources &From, const Transfo
 
 }  // namespace
 
-bool Prepare(const Item &Of, const Sources &From, Drawing &Into, std::size_t KeptMost)
+bool Prepare(const Item &Of, const Sources &From, Drawing &Into)
 {
     const ItemPoint Before = Into.Measured;
     Into.Prepares++;
     Into.Laid.reset();
+    /* Its picture let go, made again where a frame lays it (KeepPicture);
+     * its shadows kept, for they may serve it as it is now. */
     Into.Kept.reset();
     Into.KeptPicture.reset();
-    /* Its picture let go before what it may keep is asked; its shadows kept,
-     * for they may serve it as it is now. */
-    Counted(Into);
-    const bool Keep = !Into.Held || *Into.Held < KeptMost;
     Into.Measured = {};
     if (Of.Kind == ITEM_TEXT) {
         painter::items::LaidText Laid = painter::items::LayText(Of.Said, Of.Role, *From.Look, From.Book());
@@ -578,24 +576,29 @@ bool Prepare(const Item &Of, const Sources &From, Drawing &Into, std::size_t Kep
     Into.Own    = CoverOf(Of, Into, Size, From.Scale, LookOf(From));
     Into.Opaque = OpaqueOf(Of, From);
 
-    if (Keep && !Straight(Of, LookOf(From)) && !Into.Own.Empty()) {
-        const painter::core::Rect Pixels = DeviceRect(Into.Own, Transform::Scale(From.Scale));
-        if (Pixels.Width > 0 && Pixels.Height > 0 && static_cast<std::uint32_t>(Pixels.Width) <= KeptSideMost &&
-            static_cast<std::uint32_t>(Pixels.Height) <= KeptSideMost &&
-            static_cast<std::uint64_t>(Pixels.Width) * static_cast<std::uint64_t>(Pixels.Height) <= KeptPixelsMost) {
-            Into.Kept = Canvas::Make(static_cast<std::uint32_t>(Pixels.Width), static_cast<std::uint32_t>(Pixels.Height));
-            if (Into.Kept) {
-                Into.KeptAt    = painter::core::Point{Pixels.X, Pixels.Y};
-                Into.KeptScale = From.Scale;
-                const Transform Place = Transform::Scale(From.Scale).Then(
-                    Transform::Translate(-static_cast<float>(Pixels.X), -static_cast<float>(Pixels.Y)));
-                KeepCast(Of, Into, From, Place);
-                DrawStraight(Of, Into, From, *Into.Kept, Place, 1.0f);
-            }
-        }
-    }
     Counted(Into);
     return Before.X != Into.Measured.X || Before.Y != Into.Measured.Y;
+}
+
+void KeepPicture(const Item &Of, Drawing &Drawn, const Sources &From, const Transform &Place, bool Turning, bool Keep)
+{
+    if (Drawn.Kept || !Keep || !(Turning || Of.Turning || Upright(Place, From.Scale)) || Straight(Of, LookOf(From)) ||
+        Drawn.Own.Empty())
+        return;
+    const painter::core::Rect Pixels = DeviceRect(Drawn.Own, Transform::Scale(From.Scale));
+    if (Pixels.Width <= 0 || Pixels.Height <= 0 || static_cast<std::uint32_t>(Pixels.Width) > KeptSideMost ||
+        static_cast<std::uint32_t>(Pixels.Height) > KeptSideMost ||
+        static_cast<std::uint64_t>(Pixels.Width) * static_cast<std::uint64_t>(Pixels.Height) > KeptPixelsMost)
+        return;
+    Drawn.Kept = Canvas::Make(static_cast<std::uint32_t>(Pixels.Width), static_cast<std::uint32_t>(Pixels.Height));
+    if (Drawn.Kept) {
+        Drawn.KeptAt    = painter::core::Point{Pixels.X, Pixels.Y};
+        Drawn.KeptScale = From.Scale;
+        const Transform At = Transform::Scale(From.Scale).Then(Transform::Translate(-static_cast<float>(Pixels.X), -static_cast<float>(Pixels.Y)));
+        KeepCast(Of, Drawn, From, At);
+        DrawStraight(Of, Drawn, From, *Drawn.Kept, At, 1.0f);
+    }
+    Counted(Drawn);
 }
 
 void Paint(const Item &Of, const Drawing &Drawn, const Sources &From, Canvas &Target, const Transform &Place,
