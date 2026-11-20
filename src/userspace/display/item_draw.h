@@ -20,6 +20,7 @@
 #include "item_tree.h"
 #include "painter/core/canvas.h"
 #include "painter/core/mask.h"
+#include "painter/core/path.h"
 #include "painter/core/picture.h"
 #include "painter/core/shadow.h"
 #include "painter/core/transform.h"
@@ -42,13 +43,17 @@ struct Sources {
     std::function<const painter::core::Canvas *(std::uint32_t)> CanvasOf;
 };
 
-// A shadowed item drawn straight: its shadows' coverage made for the place a
-// frame lays it at, before the frame paints it (KeepShadows), and laid on
-// every tile it falls on moved by whole pixels — not made again on each.
+// A shadowed item's shadows' coverage, made for the place it was laid at and
+// kept: laid wherever it lies whole pixels from there — on every tile a frame
+// paints it on, in the frames after while it moves by whole pixels, in its
+// kept picture drawn again in other colours — and made again only where its
+// outline or its shadows changed (KeepShadows, Prepare).
 struct KeptShadows {
     painter::core::Transform                         At{};     // the place they were made for
     std::vector<painter::core::Shadow>               Cast;     // as the engine casts them, in the order said
     std::vector<std::optional<painter::core::Mask>>  Masks;    // each one's; none where its shape was refused
+    painter::core::Path                              Outline;  // the outline they were made from
+    std::uint32_t                                    Prepares = 0;  // the drawing's Prepares they are known good for
     std::size_t                                      Bytes = 0;
 };
 
@@ -64,7 +69,8 @@ struct Drawing {
     // The same picture to lay through a turn or a scale while an animation
     // turns or scales the item: made before a frame wants it (KeepTurning).
     std::shared_ptr<const painter::core::Picture> KeptPicture;
-    std::optional<KeptShadows>        Shadows;          // drawn straight, its shadows as last laid
+    std::optional<KeptShadows>        Shadows;          // its shadows as last made
+    std::uint32_t                     Prepares = 0;     // how many times it was made again
     bool                              Opaque = false;   // its plain colours cover its rectangle whole
     std::size_t                      *Held  = nullptr;  // the program's count of kept bytes
     std::size_t                       Bytes = 0;        // of which, this picture's and its shadows'
@@ -74,9 +80,11 @@ struct Drawing {
 painter::core::PointF SizeOf(const Item &Of, const Drawing &Drawn) noexcept;
 
 // The item's drawing made again from what it says: laid out, measured, and
-// its picture kept when keeping it is worth it and Keep allows it. True when
-// its size by its content changed.
-bool Prepare(const Item &Of, const Sources &From, Drawing &Into, bool Keep);
+// its picture kept when keeping it is worth it and its program keeps fewer
+// bytes than KeptMost — drawn with the shadows it holds where they still
+// serve. Its bytes counted in its program's. True when its size by its
+// content changed.
+bool Prepare(const Item &Of, const Sources &From, Drawing &Into, std::size_t KeptMost);
 
 // The item drawn onto Target, its own points laid on the glass by Place, at
 // Opacity, within the target's clip: from its kept picture where Place only
@@ -90,9 +98,10 @@ void Paint(const Item &Of, const Drawing &Drawn, const Sources &From, painter::c
 // The picture its kept picture is laid through a turn or a scale by, made
 // if it is not yet: before a frame that turns or scales it is painted.
 void KeepTurning(Drawing &Drawn);
-// Its shadows' coverage made for Place, where a frame paints it straight and
-// they are not made for it already — before that frame is painted; let go
-// where it is not painted straight, or Keep forbids keeping more.
+// Its shadows' coverage for Place, where a frame paints it straight and the
+// ones it holds do not serve there — before that frame is painted; let go
+// where Keep forbids keeping more. Laid from its picture, it keeps the ones
+// the picture was drawn with, for the next time it is drawn.
 void KeepShadows(const Item &Of, Drawing &Drawn, const Sources &From, const painter::core::Transform &Place,
                  bool Turning, bool Keep);
 

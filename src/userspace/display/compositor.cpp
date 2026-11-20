@@ -143,13 +143,7 @@ void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, 
         Drawing &Drawn = *Of->Drawn;
         if (Of->Redraw) {
             const Clocked Spent{Part::Prepare};
-            Program.KeptBytes -= Drawn.Bytes;
-            Drawn.Bytes = 0;
-            const bool Sized = Prepare(*Of, Program.From, Drawn, Program.KeptBytes < KeptMost);
-            if (Drawn.Kept)
-                Drawn.Bytes = static_cast<std::size_t>(Drawn.Kept->Width()) * Drawn.Kept->Height() * sizeof(painter::core::Pixel);
-            Program.KeptBytes += Drawn.Bytes;
-            if (Sized && Area.Sized) Area.Sized(Id, Drawn.Measured);
+            if (Prepare(*Of, Program.From, Drawn, KeptMost) && Area.Sized) Area.Sized(Id, Drawn.Measured);
         }
         const bool      Cellular = Of->Kind == ITEM_CELLS && Of->Grid && Program.From.Cells;
         const Transform Place    = Cellular ? CellsPlace(*Of, LocalOf(*Of).Then(Parent), *Program.From.Cells)
