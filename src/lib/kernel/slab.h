@@ -23,6 +23,7 @@ typedef struct SlabPage {
     uint16_t       obj_size;     // object size for this page
     uintptr_t      page_phys;    // physical address of this PMM page
     struct SlabPage* next;       // next slab page in class chain
+    struct SlabPage* prev;       // the one before it — any page leaves its chain at once
     uint8_t        charge;       // the KHeapCharge every object of this page is charged to
 } SlabPage;
 
