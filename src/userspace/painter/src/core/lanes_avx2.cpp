@@ -374,13 +374,26 @@ AVX2 void Picture(Pixel *Out, const PictureWalk &Walk, std::uint32_t Count)
     PicturePlain(Out + I, Walk, U, V, Count - I);
 }
 
+/* Four pixels held, each channel the less of itself and its pixel's
+ * opacity. */
+AVX2 void Held(Pixel *Into, const Pixel *From, std::uint32_t Count)
+{
+    std::uint32_t I = 0;
+    for (; I + 4u <= Count; I += 4u) {
+        const __m256i Four  = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(From + I));
+        const __m256i Alpha = _mm256_shufflehi_epi16(_mm256_shufflelo_epi16(Four, 0xFF), 0xFF);
+        _mm256_storeu_si256(reinterpret_cast<__m256i *>(Into + I), _mm256_min_epu16(Four, Alpha));
+    }
+    for (; I < Count; I++) Into[I] = light::Held(From[I]);
+}
+
 #undef AVX2
 
 }  // namespace
 
 const Kit &Avx2() noexcept
 {
-    static const Kit Made{LayColor, LayPaint, LayRow, Show, Gradient, Picture};
+    static const Kit Made{LayColor, LayPaint, LayRow, Show, Gradient, Picture, Held};
     return Made;
 }
 

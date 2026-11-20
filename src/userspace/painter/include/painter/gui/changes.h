@@ -22,6 +22,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <algorithm>
 #include <cstdint>
 #include <map>
 #include <tuple>
@@ -274,11 +275,23 @@ public:
         Values[{Item, Property}] = Record(Value.begin(), Value.end());
     }
     // Item's Property said as the language writes it — a value Said gave
-    // back, of another item — written unless it is what was said.
+    // back, of another item — written unless it is what was said: told
+    // apart from it before a byte of it is copied.
     void Say(std::uint32_t Item, std::uint16_t Property, std::span<const std::uint8_t> Value)
     {
+        const Record *Known = Said(Item, Property);
+        if (Known && std::equal(Known->begin(), Known->end(), Value.begin(), Value.end())) return;
         Put(Item, Property, Record(Value.begin(), Value.end()));
     }
+    // Each property Item says, in their order, and what it says: Visit(Property, Value).
+    template <typename Visiting> void EachSaid(std::uint32_t Item, Visiting &&Visit) const
+    {
+        for (auto It = Values.lower_bound({Item, 0}); It != Values.end() && It->first.first == Item; ++It)
+            Visit(It->first.second, std::span<const std::uint8_t>(It->second));
+    }
+    // From now on what is said is remembered and nothing written: a frame's
+    // description, matched against the frame before and never sent itself.
+    void RememberOnly() noexcept { Writing = false; }
 
     // Everything said while Change runs — of objects, of frames described
     // whole — reached in time as How says: the display plays it while the
@@ -331,6 +344,7 @@ private:
     static constexpr std::uint64_t                              NoStep = ~std::uint64_t{0};
     std::uint64_t                                               Open   = NoStep;   // where the step being written began
     bool          StepDue      = false;
+    bool          Writing      = true;      // records made of what is said (RememberOnly)
     std::uint64_t WrittenBytes = 0;
     std::uint64_t RefusedCount = 0;
 };

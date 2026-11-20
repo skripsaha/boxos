@@ -98,11 +98,25 @@ __attribute__((target("sse2"))) void LayRow(Pixel *Row, const Pixel *From, std::
     for (; I < Count; I++) Row[I] = Copy && From[I].Alpha == light::Whole ? From[I] : light::Over(Row[I], From[I], Share);
 }
 
+/* Two pixels held: each channel the less of itself and its pixel's opacity —
+ * the less of two numbers of sixteen bits being the one less what it passes
+ * the other by, a saturating subtraction SSE2 has. */
+__attribute__((target("sse2"))) void Held(Pixel *Into, const Pixel *From, std::uint32_t Count)
+{
+    std::uint32_t I = 0;
+    for (; I + 2u <= Count; I += 2u) {
+        const __m128i Two   = _mm_loadu_si128(reinterpret_cast<const __m128i *>(From + I));
+        const __m128i Alpha = _mm_shufflehi_epi16(_mm_shufflelo_epi16(Two, 0xFF), 0xFF);
+        _mm_storeu_si128(reinterpret_cast<__m128i *>(Into + I), _mm_sub_epi16(Two, _mm_subs_epu16(Two, Alpha)));
+    }
+    for (; I < Count; I++) Into[I] = light::Held(From[I]);
+}
+
 }  // namespace
 
 const Kit &Sse2() noexcept
 {
-    static const Kit Made{LayColor, LayPaint, LayRow, Plain().Show, Plain().Gradient, Plain().Picture};
+    static const Kit Made{LayColor, LayPaint, LayRow, Plain().Show, Plain().Gradient, Plain().Picture, Held};
     return Made;
 }
 

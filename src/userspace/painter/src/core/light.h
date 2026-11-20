@@ -53,6 +53,13 @@ inline Pixel Scaled(Pixel Of, std::uint32_t Share) noexcept
                  static_cast<std::uint16_t>(Times(Of.Blue, Share)), static_cast<std::uint16_t>(Times(Of.Alpha, Share))};
 }
 
+/* A pixel as a canvas holds it: no channel's light past its opacity. */
+inline Pixel Held(Pixel Of) noexcept
+{
+    const auto Under = [&](std::uint16_t Light) { return Light < Of.Alpha ? Light : Of.Alpha; };
+    return Pixel{Under(Of.Red), Under(Of.Green), Under(Of.Blue), Of.Alpha};
+}
+
 /* Above at Share laid over Below: Above's light added to what it leaves of
  * Below's — the one way a colour is laid, premultiplied. */
 inline Pixel Over(Pixel Below, Pixel Above, std::uint32_t Share) noexcept

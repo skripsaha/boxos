@@ -208,6 +208,11 @@ void Changes::Put(std::uint32_t Item, std::uint16_t Property, Record Value)
 {
     const auto Known = Values.find({Item, Property});
     if (Known != Values.end() && Known->second == Value) return;
+    if (!Writing) {
+        if (Known != Values.end()) Known->second = std::move(Value);
+        else                       Values.emplace(std::make_pair(Item, Property), std::move(Value));
+        return;
+    }
     Writer Body;
     if (Moving) Body.Put(*Moving);
     Body.Put(ItemChange{Property, 0, static_cast<std::uint32_t>(Value.size())});

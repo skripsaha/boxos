@@ -66,13 +66,18 @@ void Show(std::uint32_t *Out, const Pixel *Row, std::uint32_t Count, std::uint32
 
 void Gradient(Pixel *Out, const GradientWalk &Walk, std::uint32_t Count) { GradientPlain(Out, Walk, Walk.U, Walk.V, Count); }
 
+void Held(Pixel *Into, const Pixel *From, std::uint32_t Count)
+{
+    for (std::uint32_t I = 0; I < Count; I++) Into[I] = light::Held(From[I]);
+}
+
 void Picture(Pixel *Out, const PictureWalk &Walk, std::uint32_t Count) { PicturePlain(Out, Walk, Walk.U, Walk.V, Count); }
 
 }  // namespace
 
 const Kit &Plain() noexcept
 {
-    static const Kit Made{LayColor, LayPaint, LayRow, Show, Gradient, Picture};
+    static const Kit Made{LayColor, LayPaint, LayRow, Show, Gradient, Picture, Held};
     return Made;
 }
 

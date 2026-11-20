@@ -131,6 +131,10 @@ public:
     // canvas's corner, Stride pixels from row to row: a picture another hand
     // left, taken on.
     void CopyIn(Rect Area, const std::uint32_t *From, std::size_t Stride);
+    // Area's pixels taken from pixels of the engine's own — From's row Y,
+    // Stride pixels apart, holds this canvas's row Y — each one's light held
+    // to its opacity, as a canvas's pixel is: a page another hand painted.
+    void TakePixels(Rect Area, const Pixel *From, std::size_t Stride);
 
 private:
     struct Work;

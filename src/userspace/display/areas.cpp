@@ -322,17 +322,8 @@ void TakePage(Block &Of, const ItemBlockChanged &Where)
     if (!Of.Shown) Of.Shown = painter::core::Canvas::Make(Of.Width, Of.Height);
     if (Of.Shown) {
         const Rect  Whole{0, 0, static_cast<std::int32_t>(Of.Width), static_cast<std::int32_t>(Of.Height)};
-        const Rect  Taken  = Rect{Where.X, Where.Y, Where.Width, Where.Height}.Intersect(Whole);
         const auto *Pixels = reinterpret_cast<const painter::core::Pixel *>(Of.Content() + static_cast<std::size_t>(Page) * Of.Head()->PageBytes);
-        for (std::int32_t Y = Taken.Y; Y < Taken.Y + Taken.Height; Y++) {
-            const painter::core::Pixel *From = Pixels + static_cast<std::size_t>(Y) * Of.Width + static_cast<std::size_t>(Taken.X);
-            painter::core::Pixel       *Into = Of.Shown->Row(static_cast<std::uint32_t>(Y)) + Taken.X;
-            for (std::int32_t X = 0; X < Taken.Width; X++) {
-                painter::core::Pixel P = From[X];
-                P.Red = std::min(P.Red, P.Alpha), P.Green = std::min(P.Green, P.Alpha), P.Blue = std::min(P.Blue, P.Alpha);
-                Into[X] = P;
-            }
-        }
+        Of.Shown->TakePixels(Rect{Where.X, Where.Y, Where.Width, Where.Height}.Intersect(Whole), Pixels, Of.Width);
     }
     __atomic_store_n(&Of.Head()->PageFree[Page], 1u, __ATOMIC_RELEASE);
 }

@@ -182,10 +182,16 @@ void CheckLanes(Tally &Count)
         const Pixel         Color = RandomPixel();
         const std::uint32_t One   = Solid ? 65535u : RandomShare();
         const std::uint32_t Format = Random() % 2u ? BOX_PIXEL_RGB : BOX_PIXEL_BGR;
-        std::vector<Pixel>         Want[3];
+        /* Pixels as any hand paints them, light past its opacity too. */
+        std::vector<Pixel> Painted(Length);
+        for (std::uint32_t K = 0; K < Length; K++)
+            Painted[K] = Pixel{static_cast<std::uint16_t>(Random()), static_cast<std::uint16_t>(Random()),
+                               static_cast<std::uint16_t>(Random()), static_cast<std::uint16_t>(Random())};
+        std::vector<Pixel>         Want[4];
         std::vector<std::uint32_t> Shown[2];
         for (std::size_t W = 0; W < All.size(); W++) {
-            std::vector<Pixel> Got[3] = {Below, Below, Below};
+            std::vector<Pixel> Got[4] = {Below, Below, Below, std::vector<Pixel>(Length)};
+            All[W].Kit->Held(Got[3].data(), Painted.data(), Length);
             All[W].Kit->LayColor(Got[0].data(), Shares.data(), Length, Color);
             All[W].Kit->LayPaint(Got[1].data(), Paint.data(), Shares.data(), Length);
             All[W].Kit->LayRow(Got[2].data(), Paint.data(), Length, One);
@@ -194,9 +200,9 @@ void CheckLanes(Tally &Count)
             All[W].Kit->Show(Out[1].data(), Below.data(), Length, Format, Thresholds.data());
             Rows++;
             if (W == 0) {
-                for (int K = 0; K < 3; K++) Want[K] = Got[K];
+                for (int K = 0; K < 4; K++) Want[K] = Got[K];
                 Shown[0] = Out[0], Shown[1] = Out[1];
-            } else if (Got[0] != Want[0] || Got[1] != Want[1] || Got[2] != Want[2] || Out[0] != Shown[0] ||
+            } else if (Got[0] != Want[0] || Got[1] != Want[1] || Got[2] != Want[2] || Got[3] != Want[3] || Out[0] != Shown[0] ||
                        Out[1] != Shown[1]) {
                 Wrong++;
             }
@@ -204,8 +210,8 @@ void CheckLanes(Tally &Count)
     }
     char Line[200];
     std::snprintf(Line, sizeof(Line),
-                  "SSE2 and AVX2 work every row the very bits the plain way does — laid, painted, laid whole, shown "
-                  "near and dithered: %u rows, %u not alike",
+                  "SSE2 and AVX2 work every row the very bits the plain way does — laid, painted, laid whole, held, "
+                  "shown near and dithered: %u rows, %u not alike",
                   Rows, Wrong);
     Count.Check(Wrong == 0, Line);
     CheckPaintRows(Count, All);

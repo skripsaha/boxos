@@ -558,6 +558,16 @@ void Canvas::CopyOut(Rect Area, std::uint32_t *Glass, std::size_t GlassStride, s
     }
 }
 
+void Canvas::TakePixels(Rect Area, const Pixel *From, std::size_t FromStride)
+{
+    const Rect        At  = Area.Intersect(Size{static_cast<std::int32_t>(Wide), static_cast<std::int32_t>(High)});
+    const lanes::Kit &Kit = lanes::Chosen();
+    for (std::int32_t Y = At.Y; Y < At.Y + At.Height; Y++)
+        Kit.Held(Row(static_cast<std::uint32_t>(Y)) + At.X, From + static_cast<std::size_t>(Y) * FromStride + static_cast<std::size_t>(At.X),
+                 static_cast<std::uint32_t>(At.Width));
+    Touch(At);
+}
+
 void Canvas::CopyIn(Rect Area, const std::uint32_t *From, std::size_t FromStride)
 {
     const Rect At = Area.Intersect(Size{static_cast<std::int32_t>(Wide), static_cast<std::int32_t>(High)});
