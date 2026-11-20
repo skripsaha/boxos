@@ -31,6 +31,9 @@ constexpr std::int32_t PageCellWide = ITEM_PAGE_CELL_WIDE, PageCellTall = ITEM_P
 /* A side of the canvas a frame composes on, tile by tile. */
 constexpr std::int32_t TileSide = 256;
 
+/* The pieces of a square's damage past which it is many small places. */
+constexpr std::size_t DenseMany = 8;
+
 /* The console's one item in its area. */
 constexpr std::uint32_t ConsoleItem = 1;
 
@@ -149,29 +152,40 @@ bool HoldCaret(std::span<items::AreaState *const> Programs)
  * pixels as the compositor last laid them — of cells, only those that show
  * something, and the caret the glass shows, for a cell that shows nothing
  * shows what lies beneath it. */
+/* What an entry draws, given to Each: its rectangle — cells only where they
+ * show. */
+template <typename Telling> void DrawnOf(const items::AreaState &Area, const items::Entry &One, Telling &&Each)
+{
+    if (One.What != items::Entry::Kind::Draw) return;
+    const items::Item &Of = *One.Of;
+    if (Of.Kind != ITEM_CELLS || !Of.Grid || !items::Upright(One.Place, Area.Program.From.Scale)) {
+        Each(One.Device);
+        return;
+    }
+    const painter::core::PointF Corner = One.Place.Apply({0, 0});
+    const auto                  X      = static_cast<std::int32_t>(std::floor(Corner.X + 0.5f));
+    const auto                  Y      = static_cast<std::int32_t>(std::floor(Corner.Y + 0.5f));
+    const auto                  Pixels = [&](Rect Cells) {
+        return Rect{X + Cells.X * g_cells.Width, Y + Cells.Y * g_cells.Height, Cells.Width * g_cells.Width,
+                    Cells.Height * g_cells.Height}
+            .Intersect(One.Device);
+    };
+    if (const Rect Cells = Of.Grid->Showing(); !Cells.Empty()) Each(Pixels(Cells));
+    if (Of.Grid->Holds() && Of.Grid->CaretShown()) {
+        const ItemCaret Caret = Of.Grid->Caret();
+        Each(Pixels(Rect{static_cast<std::int32_t>(Caret.Col), static_cast<std::int32_t>(Caret.Row), 1, 1}));
+    }
+}
+
 template <typename Telling> void Drawn(const items::AreaState &Area, Telling &&Each)
 {
-    for (const items::Entry &One : Area.List) {
-        if (One.What != items::Entry::Kind::Draw) continue;
-        const items::Item &Of = *One.Of;
-        if (Of.Kind != ITEM_CELLS || !Of.Grid || !items::Upright(One.Place, Area.Program.From.Scale)) {
-            Each(One.Device);
-            continue;
-        }
-        const painter::core::PointF Corner = One.Place.Apply({0, 0});
-        const auto                  X      = static_cast<std::int32_t>(std::floor(Corner.X + 0.5f));
-        const auto                  Y      = static_cast<std::int32_t>(std::floor(Corner.Y + 0.5f));
-        const auto                  Pixels = [&](Rect Cells) {
-            return Rect{X + Cells.X * g_cells.Width, Y + Cells.Y * g_cells.Height, Cells.Width * g_cells.Width,
-                        Cells.Height * g_cells.Height}
-                .Intersect(One.Device);
-        };
-        if (const Rect Cells = Of.Grid->Showing(); !Cells.Empty()) Each(Pixels(Cells));
-        if (Of.Grid->Holds() && Of.Grid->CaretShown()) {
-            const ItemCaret Caret = Of.Grid->Caret();
-            Each(Pixels(Rect{static_cast<std::int32_t>(Caret.Col), static_cast<std::int32_t>(Caret.Row), 1, 1}));
-        }
-    }
+    for (const items::Entry &One : Area.List) DrawnOf(Area, One, Each);
+}
+
+/* … of the entries Picked of its list alone. */
+template <typename Telling> void Drawn(const items::AreaState &Area, std::span<const std::uint32_t> Picked, Telling &&Each)
+{
+    for (const std::uint32_t E : Picked) DrawnOf(Area, Area.List[E], Each);
 }
 
 bool SameCell(const ItemCell &A, const ItemCell &B) noexcept { return std::memcmp(&A, &B, sizeof(ItemCell)) == 0; }
@@ -203,10 +217,16 @@ Rect Lying(Rect Tile, std::span<items::AreaState *const> Programs) noexcept
         Where = Where.Intersect(Tile);
         if (!Where.Empty()) Lies = Lies.Empty() ? Where : Lies.Join(Where);
     };
-    for (const items::AreaState *Each : Programs) {
+    /* Only what the grid's square holding the tile holds, where the frame's
+     * areas are binned (Compositor::Bin): the programs' areas follow the
+     * console's in the order binned. */
+    const std::size_t Square = g_compositor ? g_compositor->SquareOf(Tile) : items::Compositor::Everywhere;
+    for (std::size_t P = 0; P < Programs.size(); P++) {
+        const items::AreaState *Each = Programs[P];
         if (!Each->Shown) continue;
         if (Each->Paged) Add(Each->Place);
-        Drawn(*Each, Add);
+        if (Square == items::Compositor::Everywhere) Drawn(*Each, Add);
+        else                                          Drawn(*Each, g_compositor->Picked(Square, P + 1), Add);
     }
     return Lies;
 }
@@ -657,14 +677,22 @@ FrameCost FrameCompose(Mirror &Into, std::span<items::AreaState *const> Programs
         g_compositor->Take(g_order, g_theme);
         if (HoldCaret(Programs)) g_compositor->Take(g_order, g_theme);
         const std::vector<Rect> Damaged = g_compositor->Rects();
+        g_compositor->Bin(g_order, TileSide);
+        /* The bins hold for this frame's composing alone. */
+        const struct Unbinning {
+            ~Unbinning() { g_compositor->Unbin(); }
+        } Unbinned;
         Taking.reset();
         /* The damage square by square of the screen's grid. A square damaged
-         * densely — its pieces cover half of what holds them or more — is one
-         * tile, what holds its pieces, composed once: an item lying across
-         * many pieces is drawn once, not once a piece, and what lies between
-         * them, unchanged, comes out as it was. A square damaged here and
-         * there is a tile a piece. Either way only the pieces go on the
-         * glass. */
+         * densely is one tile, what holds its pieces, composed once: an item
+         * lying across many pieces is drawn once, not once a piece, and what
+         * lies between them, unchanged, comes out as it was. Densely: its
+         * pieces cover four fifths of what holds them — or half, where they
+         * are many, the leavings of many small things moved, each drawn in
+         * piece after piece. A square damaged here and there, or in a few
+         * large pieces with room between, is a tile a piece: what lies
+         * between them, perhaps dear to draw, is not drawn. Either way only
+         * the pieces go on the glass. */
         const std::int32_t Across = (g_screen.Width + TileSide - 1) / TileSide;
         const std::int32_t Down   = (g_screen.Height + TileSide - 1) / TileSide;
         g_squares.resize(static_cast<std::size_t>(std::max(Across, 0) * std::max(Down, 0)));
@@ -689,8 +717,13 @@ FrameCost FrameCompose(Mirror &Into, std::span<items::AreaState *const> Programs
         for (const std::uint32_t At : g_damaged) {
             Square &Sq = g_squares[At];
             const std::uint64_t Held = static_cast<std::uint64_t>(Sq.Around.Width) * static_cast<std::uint64_t>(Sq.Around.Height);
-            if (Held <= 2 * Sq.Pixels) {
-                g_jobs.push_back(Job{Sq.Around, Lying(Sq.Around, Programs), static_cast<std::uint32_t>(g_pieces.size()),
+            const bool Dense = 4 * Held <= 5 * Sq.Pixels || (Held <= 2 * Sq.Pixels && Sq.Pieces.size() >= DenseMany);
+            const Rect Lies  = Dense ? Lying(Sq.Around, Programs) : Rect{};
+            /* Glyphs from the main strand's cache lying in what holds the
+             * pieces would keep the whole of it to the main strand alone:
+             * then the pieces apart, those without spread over the hands. */
+            if (Dense && (Sq.Pieces.size() == 1 || !g_compositor->OwnGlyphs(Lies, g_order, g_compositor->SquareOf(Lies)))) {
+                g_jobs.push_back(Job{Sq.Around, Lies, static_cast<std::uint32_t>(g_pieces.size()),
                                      static_cast<std::uint32_t>(Sq.Pieces.size())});
                 g_pieces.insert(g_pieces.end(), Sq.Pieces.begin(), Sq.Pieces.end());
             } else {
@@ -709,14 +742,22 @@ FrameCost FrameCompose(Mirror &Into, std::span<items::AreaState *const> Programs
         g_spread.clear();
         g_alone.clear();
         for (std::size_t J = 0; J < g_jobs.size(); J++)
-            if (!g_jobs[J].Lies.Empty()) (g_compositor->OwnGlyphs(g_jobs[J].Lies, g_order) ? g_alone : g_spread).push_back(J);
+            if (!g_jobs[J].Lies.Empty())
+                (g_compositor->OwnGlyphs(g_jobs[J].Lies, g_order, g_compositor->SquareOf(g_jobs[J].Lies)) ? g_alone : g_spread).push_back(J);
+        /* The largest tiles first: the hands take tiles as they come free, and
+         * a large one taken last would hold the frame while they wait. */
+        const auto Larger = [](std::size_t A, std::size_t B) {
+            const Rect &X = g_jobs[A].Lies, &Y = g_jobs[B].Lies;
+            return static_cast<std::int64_t>(X.Width) * X.Height > static_cast<std::int64_t>(Y.Width) * Y.Height;
+        };
+        std::stable_sort(g_spread.begin(), g_spread.end(), Larger);
         const auto ComposeTile = [&Into](std::size_t J, painter::core::Canvas &On) {
             const Job  &One  = g_jobs[J];
             const Rect  Lies = One.Lies;
             const painter::core::Point Corner{Lies.X, Lies.Y};
             {
                 const Clocked Spent{Part::Compose};
-                g_compositor->Compose(On, Corner, Lies, g_order, g_theme);
+                g_compositor->Compose(On, Corner, Lies, g_order, g_theme, g_compositor->SquareOf(Lies));
             }
             const Clocked Spent{Part::Put};
             for (std::uint32_t P = One.First; P < One.First + One.Count; P++) Into.Write(On, Corner, g_pieces[P].Intersect(Lies));
