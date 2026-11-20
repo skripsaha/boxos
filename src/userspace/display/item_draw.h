@@ -19,7 +19,9 @@
 #include "cells_draw.h"
 #include "item_tree.h"
 #include "painter/core/canvas.h"
+#include "painter/core/mask.h"
 #include "painter/core/picture.h"
+#include "painter/core/shadow.h"
 #include "painter/core/transform.h"
 #include "painter/items/look.h"
 #include "typecase/fonts.h"
@@ -40,6 +42,16 @@ struct Sources {
     std::function<const painter::core::Canvas *(std::uint32_t)> CanvasOf;
 };
 
+// A shadowed item drawn straight: its shadows' coverage made for the place a
+// frame lays it at, before the frame paints it (KeepShadows), and laid on
+// every tile it falls on moved by whole pixels — not made again on each.
+struct KeptShadows {
+    painter::core::Transform                         At{};     // the place they were made for
+    std::vector<painter::core::Shadow>               Cast;     // as the engine casts them, in the order said
+    std::vector<std::optional<painter::core::Mask>>  Masks;    // each one's; none where its shape was refused
+    std::size_t                                      Bytes = 0;
+};
+
 struct Drawing {
     std::optional<typecase::Layout>   Laid;          // a text's
     std::vector<painter::core::Color> Inks;          // the colours its stretches say: ink 1 on
@@ -52,9 +64,10 @@ struct Drawing {
     // The same picture to lay through a turn or a scale while an animation
     // turns or scales the item: made before a frame wants it (KeepTurning).
     std::shared_ptr<const painter::core::Picture> KeptPicture;
+    std::optional<KeptShadows>        Shadows;          // drawn straight, its shadows as last laid
     bool                              Opaque = false;   // its plain colours cover its rectangle whole
     std::size_t                      *Held  = nullptr;  // the program's count of kept bytes
-    std::size_t                       Bytes = 0;        // of which, this picture's
+    std::size_t                       Bytes = 0;        // of which, this picture's and its shadows'
 };
 
 // The item's size in points: said, or by its content.
@@ -77,6 +90,11 @@ void Paint(const Item &Of, const Drawing &Drawn, const Sources &From, painter::c
 // The picture its kept picture is laid through a turn or a scale by, made
 // if it is not yet: before a frame that turns or scales it is painted.
 void KeepTurning(Drawing &Drawn);
+// Its shadows' coverage made for Place, where a frame paints it straight and
+// they are not made for it already — before that frame is painted; let go
+// where it is not painted straight, or Keep forbids keeping more.
+void KeepShadows(const Item &Of, Drawing &Drawn, const Sources &From, const painter::core::Transform &Place,
+                 bool Turning, bool Keep);
 
 // Whether painting it sets glyphs from a cache one strand keeps — a cells
 // item's, a text drawn straight: only the display's main strand may.

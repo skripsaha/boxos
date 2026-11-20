@@ -32,20 +32,34 @@ const GlyphImage *GlyphCache::Find(const Key &Of)
     const auto Found = Index.find(Of);
     if (Found == Index.end()) return nullptr;
     Order.splice(Order.begin(), Order, Found->second);
+    Found->second->Asked = ++Asks;
     return &Found->second->Image;
 }
 
 const GlyphImage &GlyphCache::Keep(const Key &Of, GlyphImage Image)
 {
-    Order.push_front(Kept{Of, std::move(Image)});
+    Order.push_front(Kept{Of, std::move(Image), ++Asks});
     Index.emplace(Of, Order.begin());
     Bytes += CostOf(Order.front().Image);
-    while (Bytes > Budget && Order.size() > 1) {
+    Trim();
+    return Order.front().Image;
+}
+
+void GlyphCache::Trim() noexcept
+{
+    while (Bytes > Budget && Order.size() > 1 && Order.back().Asked < HeldFrom) {
         Bytes -= CostOf(Order.back().Image);
         Index.erase(Order.back().Of);
         Order.pop_back();
     }
-    return Order.front().Image;
+}
+
+void GlyphCache::Hold() noexcept { HeldFrom = Asks + 1; }
+
+void GlyphCache::Release() noexcept
+{
+    HeldFrom = ~std::uint64_t{0};
+    Trim();
 }
 
 const GlyphImage &GlyphCache::Get(Chain &From, char32_t Character, const Size &At)

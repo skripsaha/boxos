@@ -193,6 +193,10 @@ void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, 
                 KeepTurning(Drawn);
                 if (Fade) KeepTurning(*Fade->Was.Drawn);
             }
+            /* The shadows of what is drawn straight, made now for where it
+             * lies: once, not again on every tile it falls on. */
+            KeepShadows(*Of, Drawn, Program.From, Place, Made.Turning, Program.KeptBytes < KeptMost);
+            if (Fade) KeepShadows(Fade->Was, *Fade->Was.Drawn, Program.From, Place, Made.Turning, Program.KeptBytes < KeptMost);
             if (Fade) {
                 /* Fading from another look: it hides nothing beneath. */
             } else if (Plain && Drawn.Opaque && Opacity * Own >= 1.0f && Place.B == 0 && Place.C == 0) {

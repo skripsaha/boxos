@@ -29,6 +29,15 @@ typecase::GlyphCache &Kept()
     return Cache;
 }
 
+/* The cache held while a text is drawn, let go however the drawing ends. */
+struct Holding {
+    typecase::GlyphCache &Cache;
+    explicit Holding(typecase::GlyphCache &Of) noexcept : Cache(Of) { Cache.Hold(); }
+    ~Holding() { Cache.Release(); }
+    Holding(const Holding &)            = delete;
+    Holding &operator=(const Holding &) = delete;
+};
+
 /* Larger than this, a glyph is filled as its shape each time, not kept. */
 constexpr float KeptEmMost = 256.0f;
 
@@ -124,34 +133,38 @@ struct Landing {
     std::optional<std::uint32_t>  Ink;
 };
 
-/* A line's glyphs, and the lines under and through it, gathered into one
- * coverage within Seen; none when none of it lies there. */
-std::optional<Mask> LineCover(const Landing &On, const typecase::LaidLine &Line, const std::vector<Bar> &Bars, Rect Seen)
+/* A line's glyphs where they land, each asked of the cache once: it is held
+ * while the line is drawn, so every picture stays until then. */
+void LandLine(const Landing &On, const typecase::LaidLine &Line, std::vector<Landed> &Into)
 {
-    const auto Each = [&](auto &&Work) {
-        for (std::uint32_t G = Line.FirstGlyph; G < Line.FirstGlyph + Line.GlyphCount; G++) {
-            const typecase::LaidGlyph &Glyph = On.Text.Glyphs()[G];
-            if (Wanted(On.Text.Runs()[Glyph.Run], On.Ink)) Work(Land(On.Text, Glyph, On.At, On.Scale, On.Move));
-        }
-    };
+    Into.clear();
+    for (std::uint32_t G = Line.FirstGlyph; G < Line.FirstGlyph + Line.GlyphCount; G++) {
+        const typecase::LaidGlyph &Glyph = On.Text.Glyphs()[G];
+        if (Wanted(On.Text.Runs()[Glyph.Run], On.Ink)) Into.push_back(Land(On.Text, Glyph, On.At, On.Scale, On.Move));
+    }
+}
+
+/* Glyphs, in the order given, and lines under and through them, gathered
+ * into one coverage within Seen; none when none of it lies there. */
+std::optional<Mask> Gathered(const std::vector<const Landed *> &Glyphs, const std::vector<Bar> &Bars, Rect Seen)
+{
     Rect Area{};
-    Each([&](const Landed &Here) { Area = Area.Join(PlaceOf(Here)); });
+    for (const Landed *Here : Glyphs) Area = Area.Join(PlaceOf(*Here));
     for (const Bar &Under : Bars) Area = Area.Join(PlaceOf(Under));
     Area = Area.Intersect(Seen);
     if (Area.Empty()) return std::nullopt;
 
     Mask Cover(Area);
-    /* Asked again: a picture holds only until the next is asked. */
-    Each([&](const Landed &Here) {
-        const Rect                  Lies  = PlaceOf(Here).Intersect(Area);
-        const typecase::GlyphImage &Image = *Here.Image;
+    for (const Landed *Here : Glyphs) {
+        const Rect                  Lies  = PlaceOf(*Here).Intersect(Area);
+        const typecase::GlyphImage &Image = *Here->Image;
         for (std::int32_t Y = Lies.Y; Y < Lies.Y + Lies.Height; Y++) {
-            const std::uint8_t *Row = &Image.Coverage[static_cast<std::size_t>(Y - Here.Y - Image.Top) *
+            const std::uint8_t *Row = &Image.Coverage[static_cast<std::size_t>(Y - Here->Y - Image.Top) *
                                                           static_cast<std::size_t>(Image.Width) +
-                                                      static_cast<std::size_t>(Lies.X - Here.X - Image.Left)];
+                                                      static_cast<std::size_t>(Lies.X - Here->X - Image.Left)];
             Gather(Cover.Row(Y) + (Lies.X - Area.X), Row, Lies.Width);
         }
-    });
+    }
     std::vector<std::uint8_t> Shares;
     for (const Bar &Under : Bars) {
         const Rect Lies = PlaceOf(Under).Intersect(Area);
@@ -193,11 +206,56 @@ bool Canvas::FillText(const typecase::Layout &Text, PointF At, std::span<const c
             while (Line + 1 < Lines.size() && Each.Of.Y >= Lines[Line].Top + Lines[Line].Height) Line++;
             Bars[Line].push_back(BarOf(Each.Of, At, Scale, On.Move));
         }
-        const Rect                  Seen = Clip();
+        const Rect Seen  = Clip();
+        bool       Ready = false;
+        /* The fills made ready once, before the first coverage is laid. */
+        const auto Prepared = [&] {
+            if (!Ready) Drawn = PrepareFills(Fills, Place), Ready = true;
+            return Drawn;
+        };
         std::lock_guard<std::mutex> Lock(KeptGuard);
-        for (std::size_t L = 0; L < Lines.size() && Drawn; L++)
-            if (const std::optional<Mask> Cover = LineCover(On, Lines[L], Bars[L], Seen))
-                Drawn = LayMask(*Cover, Fills, Place, Opacity);
+        const Holding               Hold(Kept());
+        std::vector<Landed>         Glyphs;
+        std::vector<const Landed *> Across, Group;
+        for (std::size_t L = 0; L < Lines.size() && Drawn; L++) {
+            LandLine(On, Lines[L], Glyphs);
+            Across.clear();
+            for (const Landed &Each : Glyphs)
+                if (!PlaceOf(Each).Empty()) Across.push_back(&Each);
+            const auto LayGathered = [&](const std::vector<const Landed *> &These, const std::vector<Bar> &Under) {
+                if (const std::optional<Mask> Cover = Gathered(These, Under, Seen); Cover && Prepared())
+                    LayCover(Cover->Row(Cover->Area().Y), static_cast<std::size_t>(Cover->Area().Width), Cover->Area(), Opacity);
+            };
+            /* A line under or through the glyphs crosses them: all of it
+             * gathered as one. */
+            if (!Bars[L].empty()) {
+                LayGathered(Across, Bars[L]);
+                continue;
+            }
+            /* Elsewhere a glyph whose picture meets no other's is laid from
+             * its picture as it is — its pixels covered by it alone — and
+             * glyphs whose pictures meet are gathered first, in the line's
+             * order, as the whole line would be. */
+            std::sort(Across.begin(), Across.end(), [](const Landed *A, const Landed *B) { return PlaceOf(*A).X < PlaceOf(*B).X; });
+            for (std::size_t First = 0; First < Across.size();) {
+                std::int32_t Reach = PlaceOf(*Across[First]).X + PlaceOf(*Across[First]).Width;
+                std::size_t  Past  = First + 1;
+                while (Past < Across.size() && PlaceOf(*Across[Past]).X < Reach) {
+                    Reach = std::max(Reach, PlaceOf(*Across[Past]).X + PlaceOf(*Across[Past]).Width);
+                    Past++;
+                }
+                if (Past == First + 1) {
+                    const typecase::GlyphImage &Image = *Across[First]->Image;
+                    if (!PlaceOf(*Across[First]).Intersect(Seen).Empty() && Prepared())
+                        LayCover(Image.Coverage.data(), static_cast<std::size_t>(Image.Width), PlaceOf(*Across[First]), Opacity);
+                } else {
+                    Group.assign(Across.begin() + static_cast<std::ptrdiff_t>(First), Across.begin() + static_cast<std::ptrdiff_t>(Past));
+                    std::sort(Group.begin(), Group.end());
+                    LayGathered(Group, {});
+                }
+                First = Past;
+            }
+        }
     }
     if (Held) PopClip();
     return Drawn;

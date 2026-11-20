@@ -346,21 +346,38 @@ bool Canvas::Stroke(const Path &Shape, const core::Stroke &Line, const core::Fil
 
 bool Canvas::FillMask(const Mask &Cover, std::span<const core::Fill> Fills, float Opacity)
 {
-    return LayMask(Cover, Fills, Transform::Identity(), Opacity);
+    return LayMask(Cover, Point{}, Fills, Transform::Identity(), Opacity);
 }
 
-bool Canvas::LayMask(const Mask &Cover, std::span<const core::Fill> Fills, const Transform &Place, float Opacity)
+bool Canvas::LayMask(const Mask &Cover, Point By, std::span<const core::Fill> Fills, const Transform &Place, float Opacity)
 {
     if (!Room->Prepare(Fills, Place, 1.0f)) return false;
-    const Rect          At    = Cover.Area().Intersect(Room->Top().Area);
+    if (!Cover.Empty())
+        LayCover(Cover.Row(Cover.Area().Y), static_cast<std::size_t>(Cover.Area().Width),
+                 Rect{Cover.Area().X + By.X, Cover.Area().Y + By.Y, Cover.Area().Width, Cover.Area().Height}, Opacity);
+    return true;
+}
+
+bool Canvas::PrepareFills(std::span<const core::Fill> Fills, const Transform &Place)
+{
+    return Room->Prepare(Fills, Place, 1.0f);
+}
+
+void Canvas::LayCover(const std::uint8_t *Coverage, std::size_t Stride, Rect Lies, float Opacity)
+{
+    const Rect          At    = Lies.Intersect(Room->Top().Area);
     const std::uint32_t Share = ShareOf(Opacity);
-    if (At.Empty() || !Share) return true;
+    if (At.Empty() || !Share) return;
     Room->Shares.resize(static_cast<std::size_t>(At.Width));
     Room->Paint.resize(static_cast<std::size_t>(At.Width));
     const Mask *Clip  = Room->Top().Cover.get();
     const bool  Plain = !Clip && Share == light::Whole;
+    /* One colour — a glyph's, a shadow's — laid from a row's first pixel
+     * covered to its last at once: the very pixels its runs would make. */
+    const bool        Solid = Room->Fills.size() == 1 && Room->Fills[0].Solid();
+    const lanes::Kit &Kit   = lanes::Chosen();
     for (std::int32_t Y = At.Y; Y < At.Y + At.Height; Y++) {
-        const std::uint8_t *Line = Cover.Row(Y) + (At.X - Cover.Area().X);
+        const std::uint8_t *Line = Coverage + static_cast<std::size_t>(Y - Lies.Y) * Stride + static_cast<std::size_t>(At.X - Lies.X);
         /* A row's coverage from its first pixel covered to its last: what
          * lies outside covers nothing and is passed over unread. */
         std::int32_t First = FirstCovered(Line, At.Width);
@@ -374,10 +391,14 @@ bool Canvas::LayMask(const Mask &Cover, std::span<const core::Fill> Fills, const
             for (std::int32_t I = First; I <= Last; I++)
                 Shares[I] = static_cast<std::uint16_t>(Room->Kept(light::Widened(Line[I]), At.X + I, Y, Share, Clip));
         }
+        if (Solid) {
+            Kit.LayColor(Row(static_cast<std::uint32_t>(Y)) + At.X + First, Shares + First,
+                         static_cast<std::uint32_t>(Last - First + 1), Room->Fills[0].Color());
+            continue;
+        }
         Room->LayRow(*this, Y, At.X, First, Last);
     }
     Touch(At);
-    return true;
 }
 
 bool Canvas::FillMask(const Mask &Cover, const core::Fill &With, float Opacity)
@@ -385,9 +406,10 @@ bool Canvas::FillMask(const Mask &Cover, const core::Fill &With, float Opacity)
     return FillMask(Cover, std::span<const core::Fill>(&With, 1), Opacity);
 }
 
-void Canvas::DrawShadow(const Mask &Kept, const Shadow &Cast, float Opacity)
+void Canvas::DrawShadow(const Mask &Kept, const Shadow &Cast, float Opacity, Point By)
 {
-    FillMask(Kept, core::Fill(Cast.Color), Opacity);
+    const core::Fill Color(Cast.Color);
+    LayMask(Kept, By, std::span<const core::Fill>(&Color, 1), Transform::Identity(), Opacity);
 }
 
 void Canvas::Draw(const Canvas &Picture, Point At, float Opacity)
