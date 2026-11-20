@@ -1947,8 +1947,6 @@ void IrqTheTickAnswers(void)
         // early; _start now clears IF for both paths, which closes the window
         // rather than making it narrower. Everything below this point is
         // safe to run without a scheduler, and must stay that way.
-        scheduler_state_t *sched = scheduler_get_state();
-        if (sched) sched->total_ticks++;
         pit_tick();
 
         /* Advance the global scheduler clock from the MONOTONIC wall-clock at a
@@ -2165,76 +2163,40 @@ void irq_handler(interrupt_frame_t *frame)
         return;
     }
 
-    /* LAPIC timer vector: per-core tick counter + scheduling.
+    /* LAPIC timer vector: an App Core's turn has come to its end — its
+     * one-shot, armed by schedule() for that moment (scheduler.c).
      *
      * Multi-core layout: BSP is a K-Core running kcore_run_loop, App
      * Cores run user processes. Only App Cores need preemptive
      * `schedule()` — calling it on a K-Core would hijack the kernel
-     * loop. Hence the `amp_is_appcore()` gate.
-     *
-     * Single-core layout (AMP NOT active, or only one core total):
-     * the BSP IS the App Core. The previous code never scheduled in
-     * that case — processes were started but never switched, the
-     * initial process held the CPU forever (audit 2026-04-30, BIOS
-     * and UEFI single-core both reproduced).
-     *
-     * Schedule when either: (a) we're an App Core in multi-core, or
-     * (b) AMP is inactive — i.e. there is no separate K-Core. */
+     * loop. Hence the `amp_is_appcore()` gate. A single core is preempted
+     * by IRQ0, and its LAPIC timer is the touch queue keeper's
+     * (DEADLINE_VECTOR), never this one. */
     if (vector == LAPIC_TIMER_VECTOR)
     {
-        /* A tick can land before there is a scheduler to count it into.
+        /* A tick can land before there is a scheduler to count it into:
          * scheduler_get_state() answers NULL until scheduler_init() has
-         * allocated the per-core array, and the timer is armed long before
-         * that — irqchip_init and hpet_start_legacy_tick both run earlier in
-         * kernel_main. An interrupt handler may never assume the init order
-         * of anything it touches; the tick is still real, it simply has
-         * nowhere to be recorded yet. */
-        scheduler_state_t *s = scheduler_get_state();
-        if (s) s->total_ticks++;
-        /* Only App Cores reschedule on timer. K-Cores must NEVER call
-         * schedule() — it would pick idle and hijack the K-Core's stack.
+         * allocated the per-core array. An interrupt handler may never assume
+         * the init order of anything it touches.
          *
          * Use total_cores (set ONCE during amp_init() before any AP boots)
          * instead of multicore_active (set LATE, after every AP comes
-         * online). The previous `!g_amp.multicore_active` check
-         * incorrectly fired for AP K-Cores whose LAPIC timer ticked
-         * during the AP-boot window — schedule() ran on the K-Core and
-         * permanently hijacked it into the per-core idle process. */
-        if (amp_is_appcore() || g_amp.total_cores == 1)
-        {
+         * online): an AP K-Core must never reach schedule(), which would
+         * pick idle and hijack the K-Core's stack. */
+        if (scheduler_get_state() && amp_is_appcore() && g_amp.total_cores > 1)
             schedule(frame);
-        }
-        /* Re-arm the next tick. No-op unless the timer runs in TSC-deadline
-         * mode (one-shot per deadline); periodic mode reloads itself. */
-        lapic_timer_rearm();
         lapic_send_eoi();
         return;
     }
 
-    // IPI_WAKE: On App Cores, reschedule to pick up newly-woken processes.
-    // On K-Cores, just ACK — the interrupt breaks HLT in kcore_run_loop.
+    /* IPI_WAKE: a strand came to this App Core's runqueue, or to the one core
+     * — whether the strand running here keeps the core a moment longer is the
+     * scheduler's (scheduler_woken). On K-Cores it is only ACKed: the
+     * interrupt breaks HLT in kcore_run_loop. */
     if (vector == IPI_WAKE_VECTOR)
     {
         if (amp_is_appcore() || g_amp.total_cores == 1)
-        {
-            /* Only when there is something to decide. The bell means "a
-             * strand became runnable here", and sched_enqueue raises the
-             * runqueue's total BEFORE it rings, so a bell that finds the queue
-             * empty, the core running a working strand and nobody else to pick
-             * has nothing new to say — and a schedule() there only rotates the
-             * running strand behind itself, XSAVE and XRSTOR included. A bell
-             * rung after this read is latched in the IRR and delivered again
-             * after the EOI below. An idle current, or one no longer WORKING
-             * (parked while still on this CPU), always reschedules. */
-            scheduler_state_t *s   = scheduler_get_state();
-            process_t         *cur = s ? __atomic_load_n(&s->current_process, __ATOMIC_ACQUIRE) : NULL;
-            if (!s || !cur || process_is_idle(cur) ||
-                RunqueueAtomicTotal(&s->runqueue) != 0 ||
-                __atomic_load_n(&cur->state, __ATOMIC_ACQUIRE) != PROC_WORKING)
-            {
-                schedule(frame);
-            }
-        }
+            scheduler_woken(frame);
         lapic_send_eoi();
         return;
     }

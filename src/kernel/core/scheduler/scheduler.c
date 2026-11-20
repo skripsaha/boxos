@@ -17,15 +17,13 @@
 #include "lapic.h"     /* lapic_send_ipi — directed reschedule IPI on cross-core enqueue */
 #include "irqchip.h"   /* IPI_WAKE_VECTOR */
 #include "kring.h"     /* KResultStepAside — the ask to yield a core */
+#include "pit.h"       /* pit_get_uptime_ms — the moment Nightwatch's next look is owed */
 
 /* TSC frequency for per-process processor-time accounting (see schedule()). */
 extern uint64_t cpu_get_tsc_freq_khz(void);
 
 uint32_t g_timer_frequency = SCHEDULER_DEFAULT_TICK_HZ;
 
-/* Ticks an App Core lets pass between two looks for work to steal: ten, and
- * one more for every two cores there are to look at. Set once, at init. */
-static uint32_t g_steal_cooldown;
 
 /* What a strand pays for the time it holds a core is its Fare: the time
  * itself, the less the more of the Use Context its cabin wears — a third of
@@ -56,8 +54,6 @@ static void sched_init_one(scheduler_state_t *s)
     memset(s, 0, sizeof(scheduler_state_t));
     s->current_process = NULL;
     spinlock_init(&s->scheduler_lock);
-    s->total_ticks = 0;
-    s->last_steal_tick = 0;
     s->is_parked = false;
     s->idle_tick_count = 0;
     s->accounting_last_tsc = rdtsc();
@@ -86,10 +82,9 @@ error_t scheduler_init(void)
     for (uint32_t i = 0; i < g_sched_core_count; i++)
         sched_init_one(&g_core_sched[i]);
 
-    g_steal_cooldown = 10 + g_sched_core_count / 2;
-
-    debug_printf("[SCHEDULER] Per-core Fare scheduler ready (%u Hz, %u cores, init_cap=%u)\n",
-                 g_timer_frequency, g_sched_core_count, RUNQUEUE_INITIAL_CAP);
+    debug_printf("[SCHEDULER] Per-core Fare scheduler ready (rounds of %u us, turns of %u us at least, "
+                 "%u cores, init_cap=%u)\n",
+                 CONFIG_SCHED_ROUND_US, CONFIG_SCHED_TURN_LEAST_US, g_sched_core_count, RUNQUEUE_INITIAL_CAP);
     return OK;
 }
 
@@ -234,7 +229,31 @@ static void scheduler_account_current(scheduler_state_t *s, uint64_t now)
         if (current && !process_is_idle(current))
             __atomic_fetch_add(&s->accounting_busy_tsc, delta, __ATOMIC_RELAXED);
     }
-    s->accounting_last_tsc = now;
+    /* Last, and released: a reader that sees this moment sees the counters
+     * that end at it. */
+    __atomic_store_n(&s->accounting_last_tsc, now, __ATOMIC_RELEASE);
+}
+
+/* A core's counters as of now: what its last entry left, and the span since
+ * — whole, and busy while a strand holds the core. A strand alone on its core
+ * enters the scheduler only when it parks, so without the span a core that
+ * computes for a minute would read idle for that minute. Taken again if the
+ * core moved its counters meanwhile. */
+static void scheduler_core_usage_now(scheduler_state_t *s, uint64_t *busy, uint64_t *total)
+{
+    for (;;) {
+        uint64_t   last  = __atomic_load_n(&s->accounting_last_tsc, __ATOMIC_ACQUIRE);
+        uint64_t   b     = __atomic_load_n(&s->accounting_busy_tsc, __ATOMIC_ACQUIRE);
+        uint64_t   t     = __atomic_load_n(&s->accounting_total_tsc, __ATOMIC_ACQUIRE);
+        process_t *cur   = __atomic_load_n(&s->current_process, __ATOMIC_ACQUIRE);
+        uint64_t   now   = rdtsc();
+        if (__atomic_load_n(&s->accounting_last_tsc, __ATOMIC_ACQUIRE) != last)
+            continue;
+        uint64_t   since = last != 0 && now > last ? now - last : 0;
+        *total = t + since;
+        *busy  = b + (cur && !process_is_idle(cur) ? since : 0);
+        return;
+    }
 }
 
 void scheduler_cpu_usage(uint64_t *busy_tsc, uint64_t *total_tsc)
@@ -242,9 +261,8 @@ void scheduler_cpu_usage(uint64_t *busy_tsc, uint64_t *total_tsc)
     uint64_t busy = 0;
     uint64_t total = 0;
     for (uint32_t i = 0; i < g_sched_core_count; i++) {
-        scheduler_state_t *s = &g_core_sched[i];
-        uint64_t core_total = __atomic_load_n(&s->accounting_total_tsc, __ATOMIC_RELAXED);
-        uint64_t core_busy = __atomic_load_n(&s->accounting_busy_tsc, __ATOMIC_RELAXED);
+        uint64_t core_busy, core_total;
+        scheduler_core_usage_now(&g_core_sched[i], &core_busy, &core_total);
         total += core_total;
         busy += core_busy;
     }
@@ -259,10 +277,12 @@ bool scheduler_core_cpu_usage(uint8_t core_idx, uint64_t *busy_tsc,
         return false;
 
     scheduler_state_t *s = &g_core_sched[core_idx];
+    uint64_t busy, total;
+    scheduler_core_usage_now(s, &busy, &total);
     if (busy_tsc)
-        *busy_tsc = __atomic_load_n(&s->accounting_busy_tsc, __ATOMIC_RELAXED);
+        *busy_tsc = busy;
     if (total_tsc)
-        *total_tsc = __atomic_load_n(&s->accounting_total_tsc, __ATOMIC_RELAXED);
+        *total_tsc = total;
     if (parked)
         *parked = __atomic_load_n(&s->is_parked, __ATOMIC_ACQUIRE);
     return true;
@@ -311,10 +331,25 @@ void scheduler_recalc_parameters(void)
 // Fare and Waterline
 // ---------------------------------------------------------------------------
 
-/* One turn on a core — an App Core's tick — in TSC cycles. */
-static inline uint64_t sched_turn(void)
+/* Microseconds in TSC cycles. */
+static inline uint64_t sched_cycles(uint64_t us)
 {
-    return (uint64_t)cpu_get_tsc_freq_khz() * 1000u / CONFIG_SCHED_APP_TICK_HZ;
+    return us * (uint64_t)cpu_get_tsc_freq_khz() / 1000u;
+}
+
+/* The most a sleep buys a strand: half a round ahead of those it comes to. */
+static inline uint64_t sched_sleep_credit(void)
+{
+    return sched_cycles(CONFIG_SCHED_ROUND_US / 2u);
+}
+
+/* The turn of a strand running while `waiting` others wait on its core: the
+ * round shared among them all, never less than the least turn. */
+static inline uint64_t sched_turn_for(uint32_t waiting)
+{
+    uint64_t turn = sched_cycles(CONFIG_SCHED_ROUND_US) / ((uint64_t)waiting + 1u);
+    uint64_t least = sched_cycles(CONFIG_SCHED_TURN_LEAST_US);
+    return turn < least ? least : turn;
 }
 
 /* The cycles over the strand's weight: one, and as much more as its Fit —
@@ -326,10 +361,57 @@ uint64_t sched_fare_for(const process_t *proc, uint64_t cycles)
            (USE_CONTEXT_FIT_FULL + (SCHED_CONTEXT_FARE_SHARE - 1) * fit);
 }
 
+/* Whether this core's turns end by its own one-shot: an App Core of a machine
+ * that has K-Cores, whose timer serves. One core alone is preempted by IRQ0,
+ * and its LAPIC timer is the touch queue keeper's. */
+static inline bool sched_turns_timed(void)
+{
+    return g_amp.total_cores > 1 && amp_is_appcore() && lapic_oneshot_ready();
+}
+
+/* Whether the strand on App Core `c` works it: one runs there that has not
+ * given the core away (given_up) and holds a core for a turn when it has one
+ * (not short_here) — a short one is gone again, asked to step aside, before a
+ * strand queued behind it would be better off on another core. Read without
+ * its locks — a hint that a wake or a steal acts on, and settles under the
+ * runqueue lock that follows. */
+static inline bool sched_core_working(uint8_t c)
+{
+    return __atomic_load_n(&g_core_sched[c].busy_here, __ATOMIC_RELAXED) &&
+           !__atomic_load_n(&g_core_sched[c].given_up, __ATOMIC_RELAXED) &&
+           !__atomic_load_n(&g_core_sched[c].short_here, __ATOMIC_RELAXED);
+}
+
+/* Whether App Core `c` is free for a strand: nobody waits there, and nobody
+ * works it — `idle` asks that nothing runs there at all, a strand that gave
+ * its core away included. */
+static inline bool sched_core_free(uint8_t c, bool idle)
+{
+    return !g_amp.cores[c].is_kcore && amp_core_online(&g_amp.cores[c]) &&
+           RunqueueAtomicTotal(&g_core_sched[c].runqueue) == 0 &&
+           (idle ? !__atomic_load_n(&g_core_sched[c].busy_here, __ATOMIC_RELAXED) : !sched_core_working(c));
+}
+
+/* A free App Core (sched_core_free), `but` aside — one awake before one
+ * parked; 0xFF when every one works. */
+static uint8_t sched_free_core(uint8_t but, bool idle)
+{
+    uint8_t parked = 0xFF;
+    for (uint8_t c = 0; c < g_sched_core_count; c++) {
+        if (c == but || !sched_core_free(c, idle))
+            continue;
+        if (!scheduler_is_core_parked(c))
+            return c;
+        if (parked == 0xFF)
+            parked = c;
+    }
+    return parked;
+}
+
 uint64_t sched_rebase(uint64_t paid, bool known, uint64_t there, uint64_t here)
 {
-    uint64_t turn   = sched_turn();
-    uint64_t lowest = here > turn ? here - turn : 0;
+    uint64_t credit = sched_sleep_credit();
+    uint64_t lowest = here > credit ? here - credit : 0;
     uint64_t level  = here;
 
     if (known) {
@@ -343,7 +425,7 @@ uint64_t sched_rebase(uint64_t paid, bool known, uint64_t there, uint64_t here)
  * A strand comes to `core` from outside its runqueue — woken, new, moved,
  * stolen, handed back — and its Fare is brought onto that core's scale
  * (sched_rebase): a strand that slept is served soon after it wakes, but a
- * long sleep buys it one turn, not the core. Under `core`'s runqueue lock,
+ * long sleep buys it half a round, not the core. Under `core`'s runqueue lock,
  * which is what this core's Waterline and a queued strand's Fare are read
  * and written under.
  */
@@ -441,6 +523,7 @@ error_t sched_enqueue(process_t *proc)
      * core: a WAITING strand is in no runqueue and nobody can dispatch it. */
     int16_t  owner       = __atomic_load_n(&proc->on_cpu, __ATOMIC_ACQUIRE);
     uint8_t  target_core = proc->home_core;
+    uint8_t  free_core   = 0xFF;
     uint64_t ticks_since_run = 0;
     uint64_t now = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED);
     if (now >= proc->last_run_time) {
@@ -452,6 +535,18 @@ error_t sched_enqueue(process_t *proc)
     }
     else if (!sched_stack_left(proc)) {
         target_core = proc->quiesce_core;
+    }
+    /* Its home works (sched_core_working) or has a strand waiting, and a core
+     * is free: there, at once, rather than a turn behind whoever runs at home.
+     * Every core of the machine shares its last cache, so what the strand
+     * leaves warm at home it finds again a level further off, not in memory.
+     * Behind a strand that only holds its core a moment, it stays home: that
+     * one is asked to step aside, and a free core is kept for one that needs
+     * it. */
+    else if (g_amp.multicore_active && !sched_core_free(target_core, false) &&
+             (free_core = sched_free_core(target_core, false)) != 0xFF) {
+        target_core     = free_core;
+        proc->home_core = free_core;
     }
     // If cache-cold (not run recently), consider load balancing
     // Only migrate if another core has ≥2 fewer processes (avoid thrashing)
@@ -512,20 +607,17 @@ error_t sched_enqueue(process_t *proc)
         spin_unlock(&ts->scheduler_lock);
     }
 
-    /* Directed reschedule IPI: if the strand landed on a REMOTE core, kick
-     * that core so it leaves MWAIT/idle and re-enters schedule() at once,
-     * instead of waiting up to one LAPIC tick (≈10 ms) — or, if the core
-     * was parked, never re-checking after scheduler_unpark_core cleared the
-     * flag without a wake.  This is the same primitive SysAddrWake /
-     * touch_queue_fire_wake use.  Without it a strand_spawn'd worker can sit
-     * unscheduled while the spawner parks, hanging the cabin until a
-     * timeout. */
-    if (result == OK && g_amp.total_cores > 1)
-    {
-        uint8_t self = amp_get_core_index();
-        if (target_core != self && target_core < g_amp.total_cores)
-            lapic_send_ipi(g_amp.cores[target_core].lapic_id, IPI_WAKE_VECTOR);
-    }
+    /* Directed reschedule IPI: the core the strand landed on is told, so it
+     * leaves MWAIT/idle and decides at once (scheduler_woken) — a core's turns
+     * end by its one-shot alone, so nothing else would tell it: an idle core
+     * sleeps without a tick, and a strand alone on its core runs without an
+     * end. Its own core too, when that is the one queuing it: the bell waits
+     * in the IRR until the locks held here are let go (spin_lock shuts
+     * interrupts). This is the same primitive SysAddrWake /
+     * touch_queue_fire_wake use. Without it a strand_spawn'd worker can sit
+     * unscheduled while the spawner parks, hanging the cabin. */
+    if (result == OK && g_amp.total_cores > 1 && target_core < g_amp.total_cores)
+        lapic_send_ipi(g_amp.cores[target_core].lapic_id, IPI_WAKE_VECTOR);
 
     return result;
 }
@@ -667,8 +759,11 @@ static process_t *sched_try_steal(uint8_t my_core)
 {
     if (!g_core_sched) return NULL;
 
+    /* The core with the most waiting behind a strand that works it — one that
+     * runs nothing, or a strand that gave the core away, is about to run what
+     * waits there itself, unless more than one waits. */
     uint8_t victim = 0xFF;
-    uint32_t max_count = 1;
+    uint32_t max_count = 0;
 
     for (uint8_t c = 0; c < g_sched_core_count; c++)
     {
@@ -678,7 +773,7 @@ static process_t *sched_try_steal(uint8_t my_core)
         if (scheduler_is_core_parked(c)) continue;
 
         uint32_t cnt = RunqueueAtomicTotal(&g_core_sched[c].runqueue);
-        if (cnt > max_count)
+        if (cnt > max_count && (sched_core_working(c) || cnt > 1))
         {
             max_count = cnt;
             victim = c;
@@ -691,7 +786,7 @@ static process_t *sched_try_steal(uint8_t my_core)
     scheduler_state_t *vs = &g_core_sched[victim];
     spin_lock(&vs->runqueue.lock);
 
-    if (RunqueueAtomicTotal(&vs->runqueue) <= 1)
+    if (RunqueueAtomicTotal(&vs->runqueue) == 0)
     {
         spin_unlock(&vs->runqueue.lock);
         return NULL;
@@ -866,6 +961,120 @@ static void sched_hand_back(process_t *proc, int16_t owner)
 }
 
 // ---------------------------------------------------------------------------
+// Turns: what an App Core's one-shot is armed for
+// ---------------------------------------------------------------------------
+
+/*
+ * This core's one-shot armed for what comes next here: the end of the turn of
+ * the strand running, while others wait for the core; the look Nightwatch owes
+ * next, while nothing runs; nothing at all for a strand alone. A moment already
+ * past — a turn ended while a span held the core (SchedulerHoldHere), or a
+ * look a walk elsewhere keeps from being taken — is put a least turn ahead:
+ * a held core is asked again, never interrupted without end. Interrupts off.
+ */
+static void sched_turn_arm(scheduler_state_t *s)
+{
+    if (!sched_turns_timed())
+        return;
+    const uint64_t now     = rdtsc();
+    const uint64_t least   = sched_cycles(CONFIG_SCHED_TURN_LEAST_US);
+    process_t     *cur     = s->current_process;
+    const bool     parked  = __atomic_load_n(&s->is_parked, __ATOMIC_ACQUIRE);
+    const uint32_t waiting = parked ? 0u : RunqueueAtomicTotal(&s->runqueue);
+    uint64_t       due     = 0;
+
+    if (waiting) {
+        due         = s->turn_began + sched_turn_for(waiting);
+        s->turn_due = due;
+    } else {
+        s->turn_due = 0;
+        uint64_t look = (!cur || process_is_idle(cur)) ? nightwatch_look_due_ms() : 0;
+        if (look) {
+            uint64_t ms = pit_get_uptime_ms();
+            due = now + sched_cycles((look > ms ? look - ms : 0u) * 1000u);
+        }
+    }
+    if (due != 0 && due < now + least && (!waiting || due <= now))
+        due = now + least;
+    lapic_oneshot_at(due);
+}
+
+/* When the strand running here, `cur`, gives the core up now that others
+ * wait: at the end of its least turn when the least of them pays less than it
+ * has paid so far — it is owed the core — else at the end of its turn. */
+static uint64_t sched_woken_due(scheduler_state_t *s, process_t *cur, uint64_t now)
+{
+    const uint32_t waiting = RunqueueAtomicTotal(&s->runqueue);
+    const uint64_t end     = s->turn_began + sched_turn_for(waiting);
+    uint64_t       owed    = 0;
+
+    spin_lock(&s->runqueue.lock);
+    const bool any = sched_least_other(&s->runqueue, cur, &owed);
+    spin_unlock(&s->runqueue.lock);
+    if (!any)
+        return end;
+
+    uint64_t paid = cur->fare;
+    if (cur->fare_tsc != 0 && now > cur->fare_tsc)
+        paid += sched_fare_for(cur, now - cur->fare_tsc);
+    if (owed >= paid)
+        return end;
+    const uint64_t least = s->turn_began + sched_cycles(CONFIG_SCHED_TURN_LEAST_US);
+    return least < end ? least : end;
+}
+
+void scheduler_woken(void *frame)
+{
+    scheduler_state_t *s   = scheduler_get_state();
+    process_t         *cur = s ? __atomic_load_n(&s->current_process, __ATOMIC_ACQUIRE) : NULL;
+
+    /* Nothing runs here, or the strand here works no more (parked while still
+     * on this CPU): the choice is to be made now. */
+    if (!s || !cur || process_is_idle(cur) || __atomic_load_n(&cur->state, __ATOMIC_ACQUIRE) != PROC_WORKING) {
+        schedule(frame);
+        return;
+    }
+    /* A bell that finds nobody waiting has nothing new to say: sched_enqueue
+     * raises the runqueue's total BEFORE it rings, and a schedule() here
+     * would only rotate the running strand behind itself, XSAVE and XRSTOR
+     * included. A bell rung after this read is latched in the IRR and
+     * delivered again after the EOI. */
+    if (RunqueueAtomicTotal(&s->runqueue) == 0)
+        return;
+    /* One core: the choice now, as ever — IRQ0 is its only tick. And a strand
+     * that gave its core away holds it only until somebody wants it. */
+    if (!sched_turns_timed() || s->given_up) {
+        schedule(frame);
+        return;
+    }
+    const uint64_t now = rdtsc();
+    const uint64_t due = sched_woken_due(s, cur, now);
+    if (due <= now) {
+        schedule(frame);
+        return;
+    }
+    if (s->turn_due == 0 || due < s->turn_due) {
+        s->turn_due = due;
+        lapic_oneshot_at(due);
+    }
+}
+
+/* Work for a core that holds nothing: a strand waits here behind the one
+ * running, so the first free App Core is rung — and finding nothing of its
+ * own, it takes one (sched_try_steal). */
+static void sched_share_waiting(scheduler_state_t *s, uint8_t me)
+{
+    if (!g_amp.multicore_active || RunqueueAtomicTotal(&s->runqueue) == 0)
+        return;
+    uint8_t free = sched_free_core(me, true);
+    if (free == 0xFF)
+        return;
+    if (scheduler_is_core_parked(free))
+        scheduler_unpark_core(free);
+    lapic_send_ipi(g_amp.cores[free].lapic_id, IPI_WAKE_VECTOR);
+}
+
+// ---------------------------------------------------------------------------
 // schedule() — per-core unified scheduling
 // ---------------------------------------------------------------------------
 
@@ -908,6 +1117,7 @@ void schedule(void *frame_ptr)
 
     // Skip scheduling on parked cores
     if (__atomic_load_n(&s->is_parked, __ATOMIC_ACQUIRE)) {
+        sched_turn_arm(s);
         return;
     }
 
@@ -919,6 +1129,7 @@ void schedule(void *frame_ptr)
      * core whose interrupts are shut — for as long as the process switched to
      * ran. Ring 3 never holds one. */
     if (frame && (frame->cs & 3) == 0 && s->held) {
+        sched_turn_arm(s);
         return;
     }
 
@@ -984,19 +1195,13 @@ void schedule(void *frame_ptr)
                           ? idle_process_get()
                           : scheduler_select_next();
 
-    // Work stealing
+    /* Nothing of its own to run: work waiting on a busier core is taken at
+     * once, not at the next look. */
     if (process_is_idle(next) && amp_is_appcore() && g_amp.multicore_active)
     {
-        uint64_t ticks_since_steal = s->total_ticks - s->last_steal_tick;
-        if (ticks_since_steal >= g_steal_cooldown)
-        {
-            s->last_steal_tick = s->total_ticks;
-            process_t *stolen = sched_try_steal(amp_get_core_index());
-            if (stolen)
-            {
-                next = stolen;
-            }
-        }
+        process_t *stolen = sched_try_steal(amp_get_core_index());
+        if (stolen)
+            next = stolen;
     }
 
     // Switch
@@ -1107,15 +1312,25 @@ void schedule(void *frame_ptr)
             const uint64_t khz = cpu_get_tsc_freq_khz();
             const uint64_t now_tsc = rdtsc();
             if (khz != 0 && now_tsc > current->cpu_tsc_stamp) {
-                const uint64_t used = ((now_tsc - current->cpu_tsc_stamp) * 1000ULL) / khz;
+                const uint64_t held = now_tsc - current->cpu_tsc_stamp;
+                const uint64_t used = (held * 1000ULL) / khz;
                 __atomic_store_n(&current->total_cpu_time,
                                  __atomic_load_n(&current->total_cpu_time, __ATOMIC_RELAXED) + used,
                                  __ATOMIC_RELAXED);
+                current->hold_mean = current->hold_mean - current->hold_mean / 4u + held / 4u;
             }
             current->cpu_tsc_stamp = 0;   /* no longer holding the core */
         }
     }
+    /* A turn begins when another strand takes the core, when the one running
+     * had no end — it was alone — or when its turn has ended. */
+    if (next != current || s->turn_due == 0 || now >= s->turn_due)
+        s->turn_began = now;
     s->current_process = next;
+    __atomic_store_n(&s->given_up, turn_given && next == current && !process_is_idle(next), __ATOMIC_RELAXED);
+    __atomic_store_n(&s->short_here,
+                     !process_is_idle(next) && next->hold_mean < sched_cycles(CONFIG_SCHED_TURN_LEAST_US),
+                     __ATOMIC_RELAXED);
     bool busy_now    = !process_is_idle(next);
     bool context_now = busy_now && UseContextFit(next) != 0;
     __atomic_store_n(&s->busy_here, busy_now, __ATOMIC_RELAXED);
@@ -1170,4 +1385,10 @@ void schedule(void *frame_ptr)
 
     // Restore context
     context_restore_to_frame(next, frame);
+
+    /* The core's one-shot for what comes next here, and a free core rung for
+     * whatever is left waiting. */
+    sched_turn_arm(s);
+    if (amp_is_appcore())
+        sched_share_waiting(s, amp_get_core_index());
 }

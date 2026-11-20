@@ -142,9 +142,18 @@ _Static_assert(CONFIG_KERNEL_STACK_PAGES * CONFIG_PAGE_SIZE >=
  *  Scheduler / runqueue / process / IPC tunables
  * ============================================================================ */
 
-/* The system tick (Hz), and an App Core's tick: one turn on a core. */
+/* The system tick (Hz): the BSP's IRQ0. */
 #define CONFIG_SCHED_DEFAULT_TICK_HZ  250
-#define CONFIG_SCHED_APP_TICK_HZ      100
+
+/* An App Core's turns, each ended by the core's one-shot at its own moment:
+ * the strands waiting on a core and the one running share a round between
+ * them — each a turn of the round over how many they are, never less than the
+ * least turn — and a strand alone on its core has no turn's end at all. A
+ * strand woken while another runs takes the core from it once that one has
+ * had its least turn, when it is owed it; a sleep buys a strand half a round
+ * ahead at most. */
+#define CONFIG_SCHED_ROUND_US         6000
+#define CONFIG_SCHED_TURN_LEAST_US    1000
 
 /* Core parking. */
 #define CONFIG_SCHED_PARK_IDLE_TICKS    100

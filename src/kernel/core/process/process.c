@@ -257,6 +257,7 @@ static void process_init_strand_fields(process_t *proc)
     proc->last_run_time    = 0;
     proc->total_cpu_time   = 0;
     proc->cpu_tsc_stamp    = 0;
+    proc->hold_mean        = 0;
     proc->fare             = 0;
     proc->fare_tsc         = 0;
     proc->fare_core        = -1;                  /* placed by its first enqueue */

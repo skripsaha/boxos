@@ -7,6 +7,7 @@
 #include "atomics.h"         // rdtsc
 #include "cpuid.h"           // g_cpu_caps.has_tsc_deadline
 #include "hourglass.h"       // the ICR wait is bounded by real time, not by spins
+#include "amp.h"             // a one-shot's state is its core's
 
 static volatile uint32_t* lapic_base_virt = NULL;
 static uintptr_t lapic_base_phys = 0;
@@ -35,19 +36,6 @@ static bool lapic_enabled = false;
  * a dead window, and on the first interrupt the ISR bit is never
  * cleared and the machine goes permanently deaf with nothing printed. */
 static bool g_x2apic_active = false;
-
-/* TSC-deadline timer state (Intel SDM Vol 3A, "TSC-Deadline Mode" — section
- * numbers are not used here because they move between SDM revisions). When
- * the CPU supports
- * the deadline timer, App Cores run the scheduler tick in deadline mode instead
- * of periodic: it is driven by the invariant TSC (exact, low-jitter) rather
- * than the bus-clock-derived LAPIC counter. The mode is one-shot per deadline,
- * so lapic_timer_rearm() reloads the next deadline from the IRQ handler.
- * g_lapic_tsc_period is the per-tick interval in TSC cycles. Both are written
- * by every App Core in lapic_timer_init() to the same values (has_tsc_deadline
- * is intersected across cores), so the shared writes are benign. */
-static bool     g_lapic_tsc_deadline = false;
-static uint64_t g_lapic_tsc_period   = 0;
 
 static inline uint64_t rdmsr(uint32_t msr) {
     uint32_t lo, hi;
@@ -294,127 +282,48 @@ bool lapic_is_mapped(void) {
     return g_x2apic_active || lapic_base_virt != NULL;
 }
 
-void lapic_timer_init(uint8_t vector, uint32_t frequency_hz) {
-    debug_printf("[LAPIC] Calibrating APIC timer for %u Hz...\n", frequency_hz);
-
-    /* Preferred on modern hardware: TSC-deadline mode. The timer is driven by
-     * the invariant TSC (exact, low-jitter) instead of the bus-clock-derived
-     * LAPIC counter, and needs no counter calibration — we derive the per-tick
-     * interval directly from the already-calibrated TSC frequency. It is a
-     * one-shot per deadline, so lapic_timer_rearm() reloads it each IRQ.
-     * Intel SDM Vol 3A, "TSC-Deadline Mode".
-     *
-     * Hard precondition: invariant TSC. Without it the TSC rate changes
-     * with P-states and the precomputed g_lapic_tsc_period drifts. Intel
-     * SDM Vol 3B, "Invariant TSC" — invariance is reported via
-     * CPUID.80000007H:EDX[8].
-     * Real silicon from Nehalem (2008) onward is invariant; QEMU TCG with
-     * `-cpu qemu64` is NOT. Fall back to periodic mode for non-invariant
-     * targets — the periodic LAPIC counter is bus-clock-derived and
-     * already independent of P-states. */
-    if (g_cpu_caps.has_tsc_deadline && g_cpu_caps.has_invariant_tsc) {
-        uint64_t cyc_per_sec = cpu_get_tsc_freq_khz() * 1000ULL;
-        g_lapic_tsc_period = (frequency_hz > 0) ? (cyc_per_sec / frequency_hz)
-                                                : cyc_per_sec;
-        if (g_lapic_tsc_period == 0)
-            g_lapic_tsc_period = cyc_per_sec;   // guard against bad calibration
-        g_lapic_tsc_deadline = true;
-
-        lapic_write(LAPIC_REG_TIMER_LVT, vector | LAPIC_LVT_TIMER_TSC_DEADLINE);
-        /* The LVT-mode store must be ordered before the first deadline write —
-         * WRMSR(IA32_TSC_DEADLINE) is not otherwise serialized against the LVT
-         * MMIO store (Intel SDM Vol 3A, "TSC-Deadline Mode"). */
-        __asm__ volatile("mfence" ::: "memory");
-        wrmsr(MSR_IA32_TSC_DEADLINE, rdtsc() + g_lapic_tsc_period);
-
-        debug_printf("[LAPIC] Timer configured: vector=%u, %u Hz TSC-deadline\n",
-                     vector, frequency_hz);
-        return;
-    }
-
-    /* Fallback: periodic mode, calibrated against the TSC, NOT PIT channel 2.
-     *
-     * Each AP runs this from per_core_init_ap() while the BSP is concurrently
-     * busy-waiting on PIT channel 2 (pit_delay_us) inside amp_boot_aps() to
-     * pace INIT/SIPI and to poll the AP-online flag. PIT channel 2 is a single
-     * shared resource (ports 0x42/0x43, gate via 0x61); two CPUs programming
-     * it at once corrupt each other's window, so the old channel-2 calibration
-     * yielded a wrong APIC timer period on real hardware (QEMU's looser timing
-     * masked it). The TSC is per-core and was already calibrated by
-     * cpu_calibrate_tsc() before any AP boots (main.c), so timing the window
-     * with rdtsc() needs no shared hardware and cannot race. */
-    #define LAPIC_CAL_MS 10u
-
-    lapic_write(LAPIC_REG_TIMER_DCR, LAPIC_TIMER_DIV_16);
-
-    // Free-run the count-down from max; the LVT stays masked so no IRQ fires
-    // during measurement.
-    lapic_write(LAPIC_REG_TIMER_ICR, 0xFFFFFFFF);
-
-    uint64_t tsc_deadline = rdtsc() + cpu_ms_to_tsc(LAPIC_CAL_MS);
-    while (rdtsc() < tsc_deadline)
-        __asm__ volatile("pause");
-
-    uint32_t elapsed = 0xFFFFFFFF - lapic_read(LAPIC_REG_TIMER_CCR);
-
-    // Stop timer
-    lapic_write(LAPIC_REG_TIMER_LVT, LAPIC_LVT_MASKED);
-
-    uint32_t ticks_per_sec    = elapsed * (1000u / LAPIC_CAL_MS);
-    uint32_t ticks_per_period = (frequency_hz > 0) ? (ticks_per_sec / frequency_hz) : 0;
-    if (ticks_per_period == 0)
-        ticks_per_period = 1;   // never load ICR=0 — that stops the timer
-
-    debug_printf("[LAPIC] Timer: %u ticks/%ums, %u ticks/s, period=%u ticks\n",
-                 elapsed, LAPIC_CAL_MS, ticks_per_sec, ticks_per_period);
-
-    // Configure periodic timer
-    lapic_write(LAPIC_REG_TIMER_DCR, LAPIC_TIMER_DIV_16);
-    lapic_write(LAPIC_REG_TIMER_LVT, vector | LAPIC_LVT_TIMER_PERIODIC);
-    lapic_write(LAPIC_REG_TIMER_ICR, ticks_per_period);
-
-    debug_printf("[LAPIC] Timer configured: vector=%u, %u Hz periodic\n",
-                 vector, frequency_hz);
-}
-
 void lapic_timer_stop(void) {
     lapic_write(LAPIC_REG_TIMER_LVT, LAPIC_LVT_MASKED);
     lapic_write(LAPIC_REG_TIMER_ICR, 0);
 }
 
-void lapic_timer_rearm(void) {
-    /* TSC-deadline is one-shot: the IA32_TSC_DEADLINE MSR self-clears when it
-     * fires, so the timer IRQ handler must program the next deadline or the
-     * tick stops. Relative to "now" (rdtsc) so it self-corrects if a tick ran
-     * long. No-op in periodic mode (the LAPIC reloads the count itself). */
-    if (g_lapic_tsc_deadline)
-        wrmsr(MSR_IA32_TSC_DEADLINE, rdtsc() + g_lapic_tsc_period);
-}
-
-/* The one-shot's way, chosen once by the core that serves with it (the
- * BSP, the touch queue's keeper): TSC-deadline, or counted down from the
- * LAPIC's counts a millisecond at divide-by-16, measured here. */
-static bool     g_oneshot_deadline      = false;
-static uint64_t g_oneshot_counts_per_ms = 0;
+/* Each core's one-shot, chosen by the core that serves with it — the touch
+ * queue's keeper, and every App Core for its turns: TSC-deadline, or counted
+ * down from the LAPIC's counts a millisecond at divide-by-16, measured here.
+ * Written and read by its own core alone. */
+typedef struct {
+    bool     ready;
+    bool     deadline;
+    uint64_t counts_per_ms;
+} LapicOneShot;
+static LapicOneShot g_oneshot[MAX_CORES];
 
 #define LAPIC_ONESHOT_CAL_MS 10u
 
 bool lapic_oneshot_init(uint8_t vector) {
     if (!lapic_is_mapped() || cpu_get_tsc_freq_khz() == 0) return false;
+    LapicOneShot *mine = &g_oneshot[amp_get_core_index()];
 
+    /* TSC-deadline where the core has it and its TSC is invariant: exact, and
+     * free of the bus clock (Intel SDM Vol 3A, "TSC-Deadline Mode"; invariance,
+     * CPUID.80000007H:EDX[8], keeps the TSC's rate through P-states — real
+     * silicon from Nehalem on; QEMU TCG with qemu64 has it not). */
     if (g_cpu_caps.has_tsc_deadline && g_cpu_caps.has_invariant_tsc) {
-        g_oneshot_deadline = true;
+        mine->deadline = true;
         lapic_write(LAPIC_REG_TIMER_LVT, vector | LAPIC_LVT_TIMER_TSC_DEADLINE);
-        /* As in lapic_timer_init: the mode is in place before any deadline is
-         * written. Nothing is armed until lapic_oneshot_after asks. */
+        /* The LVT's mode is in place before any deadline is written: WRMSR of
+         * IA32_TSC_DEADLINE is not otherwise ordered after the MMIO store.
+         * Nothing is armed until lapic_oneshot_at asks. */
         __asm__ volatile("mfence" ::: "memory");
         wrmsr(MSR_IA32_TSC_DEADLINE, 0);
-        kprintf("[LAPIC] one-shot timer: vector 0x%x, TSC-deadline\n", vector);
+        mine->ready = true;
         return true;
     }
 
     /* Counted: what the timer runs down in a span the TSC measures, masked
-     * meanwhile — the measurement lapic_timer_init makes of its period. */
+     * meanwhile. The TSC is this core's own and calibrated before any AP
+     * boots — no shared PIT channel, so cores measuring at once cannot spoil
+     * each other's window. */
     lapic_write(LAPIC_REG_TIMER_LVT, LAPIC_LVT_MASKED);
     lapic_write(LAPIC_REG_TIMER_DCR, LAPIC_TIMER_DIV_16);
     lapic_write(LAPIC_REG_TIMER_ICR, 0xFFFFFFFF);
@@ -428,29 +337,47 @@ bool lapic_oneshot_init(uint8_t vector) {
                 LAPIC_ONESHOT_CAL_MS);
         return false;
     }
-    g_oneshot_deadline      = false;
-    g_oneshot_counts_per_ms = ran / LAPIC_ONESHOT_CAL_MS;
+    mine->deadline      = false;
+    mine->counts_per_ms = ran / LAPIC_ONESHOT_CAL_MS;
     /* One-shot is the LVT's mode bits at zero. */
     lapic_write(LAPIC_REG_TIMER_LVT, vector);
-    kprintf("[LAPIC] one-shot timer: vector 0x%x, counted down (%lu counts a ms)\n", vector,
-            (unsigned long)g_oneshot_counts_per_ms);
+    mine->ready = true;
     return true;
 }
 
-void lapic_oneshot_after(uint64_t after_us) {
-    if (g_oneshot_deadline) {
+bool lapic_oneshot_ready(void) {
+    return g_oneshot[amp_get_core_index()].ready;
+}
+
+bool lapic_oneshot_counted(void) {
+    return !g_oneshot[amp_get_core_index()].deadline;
+}
+
+void lapic_oneshot_at(uint64_t tsc) {
+    const LapicOneShot *mine = &g_oneshot[amp_get_core_index()];
+    if (mine->deadline) {
         /* A deadline at or behind the counter interrupts at once; 0 disarms. */
-        uint64_t at = after_us ? rdtsc() + after_us * cpu_get_tsc_freq_khz() / 1000u + 1u : 0;
-        wrmsr(MSR_IA32_TSC_DEADLINE, at);
+        wrmsr(MSR_IA32_TSC_DEADLINE, tsc);
         return;
     }
-    if (g_oneshot_counts_per_ms == 0) return;
+    if (mine->counts_per_ms == 0) return;
+    if (tsc == 0) {
+        lapic_write(LAPIC_REG_TIMER_ICR, 0);
+        return;
+    }
     /* A wait longer than the counter holds interrupts early; whoever is
      * interrupted finds nothing due and asks again. */
-    uint64_t counts = after_us * g_oneshot_counts_per_ms / 1000u;
-    if (after_us && counts == 0) counts = 1;
+    const uint64_t now    = rdtsc();
+    const uint64_t khz    = cpu_get_tsc_freq_khz();
+    const uint64_t cycles = tsc > now ? tsc - now : 0;
+    uint64_t       counts = khz ? cycles * mine->counts_per_ms / khz : 1;
+    if (counts == 0) counts = 1;
     if (counts > 0xFFFFFFFFu) counts = 0xFFFFFFFFu;
     lapic_write(LAPIC_REG_TIMER_ICR, (uint32_t)counts);
+}
+
+void lapic_oneshot_after(uint64_t after_us) {
+    lapic_oneshot_at(after_us ? rdtsc() + after_us * cpu_get_tsc_freq_khz() / 1000u + 1u : 0);
 }
 
 bool lapic_is_x2apic_active(void) {

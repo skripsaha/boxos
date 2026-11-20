@@ -16,7 +16,7 @@ void ap_entry_c(uint64_t core_index, uint64_t stack_top) {
     //   - FPU/SSE/AVX
     //   - SYSCALL MSRs (EFER.SCE+NXE, STAR, LSTAR, SFMASK)
     //   - PerCpuData + MSR_KERNEL_GS_BASE (for swapgs)
-    //   - LAPIC enable + LAPIC timer (100Hz periodic)
+    //   - LAPIC enable + the LAPIC timer: masked on a K-Core, an App Core's one-shot for its turns
     //   - the kernel IDT, the moment the GDT and TSS it depends on are live
     per_core_init_ap((uint8_t)core_index, stack_top);
 

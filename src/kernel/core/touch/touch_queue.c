@@ -70,7 +70,10 @@ void TouchQueueInit(void)
     g_set_us  = 0;
     g_keeper  = amp_get_core_index();
     g_keeping = lapic_oneshot_init(DEADLINE_VECTOR);
-    if (!g_keeping)
+    if (g_keeping)
+        kprintf("[TOUCH] moments named in advance fire on core %u's one-shot (%s)\n", (unsigned)g_keeper,
+                lapic_oneshot_counted() ? "counted down" : "TSC-deadline");
+    else
         kprintf("[TOUCH] no one-shot timer on core %u: a moment named in advance fires on the "
                 "tick, %u a second\n", (unsigned)g_keeper, (unsigned)SCHEDULER_DEFAULT_TICK_HZ);
 }

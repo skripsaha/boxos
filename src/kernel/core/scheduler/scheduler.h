@@ -31,9 +31,14 @@ extern volatile uint64_t g_global_tick;
 typedef struct {
     process_t  *current_process;
     spinlock_t  scheduler_lock;
-    uint64_t    total_ticks;
-    uint64_t    last_steal_tick;
     RunQueue    runqueue;
+    /* This App Core's turn: the TSC moment it began — the strand running here
+     * took the core, or began another turn on it — and the moment the core's
+     * one-shot is armed for, 0 for none: a strand alone on its core has no
+     * end, and an idle core none but a look owed (scheduler.c). Written by
+     * this core alone, with its interrupts off. */
+    uint64_t    turn_began;
+    uint64_t    turn_due;
     /* The Waterline: the least Fare among this core's strands as its
      * schedule() last found them, and never lower than it was — the level a
      * strand that comes to this core is placed against (scheduler.c).
@@ -49,6 +54,16 @@ typedef struct {
      * and looks for a core to send an outsider to. */
     volatile bool busy_here;
     volatile bool context_here;
+    /* The strand running here gave its core away and, nobody else being
+     * there, took it again (given_up) — or is one that holds a core only a
+     * moment each time it has one (short_here, its hold_mean under a least
+     * turn): either holds the core only until somebody wants it, and a wake
+     * may land here as on a free core (scheduler.c). The one that gave the
+     * core away is passed at once; a short one is asked to step aside and has
+     * its least turn. Written by this core at every dispatch; read by others
+     * without a lock. */
+    volatile bool given_up;
+    volatile bool short_here;
     _Atomic bool is_parked;            // Written by BSP recalc, read by AP timer IRQ — must be atomic
     uint32_t    idle_tick_count;       // Consecutive idle ticks
     /* Quiescence sequence (reap-vs-switch safety). Bumped at the top of every
@@ -66,7 +81,9 @@ typedef struct {
      * own interrupts. */
     volatile uint32_t held;
     /* TSC accounting for system-wide CPU utilization. Each core updates its
-     * own counters at scheduler entry; readers take an atomic snapshot. */
+     * own counters at scheduler entry; readers add the span since — a strand
+     * alone on its core enters the scheduler only when it parks — and take
+     * the three together, again if the core moved them meanwhile. */
     volatile uint64_t accounting_last_tsc;
     volatile uint64_t accounting_busy_tsc;
     volatile uint64_t accounting_total_tsc;
@@ -81,6 +98,11 @@ void scheduler_init_core(uint8_t core_index);
 void scheduler_shutdown(void);
 void schedule(void *frame);
 process_t *scheduler_select_next(void);
+/* A strand came to this core's runqueue (IPI_WAKE). The strand running here
+ * keeps the core to the end of its least turn when the newcomer is owed it,
+ * else to the end of its turn — its one-shot armed for that moment — and the
+ * core is scheduled at once once it is due, or when nothing runs. */
+void scheduler_woken(void *frame);
 
 // Core parking, looked at from the BSP's timer IRQ
 void scheduler_recalc_parameters(void);
@@ -106,7 +128,7 @@ uint64_t sched_fare_for(const process_t *proc, uint64_t cycles);
 /* `paid` — a Fare or a Tip — brought from the core it was reckoned on, whose
  * Waterline is `there` (`known` false: none), to the core whose Waterline is
  * `here`: it keeps how far above or below `there` it stood, a newcomer stands
- * at `here`, and none stands more than a turn below `here`. */
+ * at `here`, and none stands more than half a round below `here`. */
 uint64_t sched_rebase(uint64_t paid, bool known, uint64_t there, uint64_t here);
 error_t sched_dequeue(process_t *proc);
 /* The strand running on this core gives its core away (GATE_YIELD): its next

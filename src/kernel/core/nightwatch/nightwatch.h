@@ -68,9 +68,16 @@
 void nightwatch_init(void);
 
 /* A core is about to sleep with nothing to run. Called from every idle site.
- * This is also the re-check point: an idle core wakes on every timer tick, so
- * the quiet period is evaluated without any timer of Nightwatch's own. */
+ * This is also the re-check point: an idle core wakes for the next look owed
+ * (nightwatch_look_due_ms) and for anything else that comes to it, so the
+ * quiet period is evaluated without any timer of Nightwatch's own. */
 void nightwatch_core_idle(uint8_t core);
+
+/* The moment the next look from an idle core is owed, in the milliseconds of
+ * pit_get_uptime_ms; 0 while the watch is not armed. An App Core sleeping
+ * with nothing to run keeps its one-shot for it (scheduler.c), and wakes for
+ * nothing else of its own. */
+uint64_t nightwatch_look_due_ms(void);
 
 /* A core has taken a real (non-idle) process. Clears this core's idle mark and
  * re-arms the report, so a system that stalls twice reports twice. */

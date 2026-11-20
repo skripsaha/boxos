@@ -140,27 +140,27 @@ bool lapic_is_enabled(void);
 uintptr_t lapic_get_base(void);
 bool lapic_is_mapped(void);
 
-// LAPIC timer
-void lapic_timer_init(uint8_t vector, uint32_t frequency_hz);
+// LAPIC timer: masked, and nothing counted — a K-Core's, which waits on doorbells.
 void lapic_timer_stop(void);
 
-/* Re-arm the LAPIC timer for the next tick. No-op unless the timer is running
- * in TSC-deadline mode (one-shot per deadline), in which case it programs the
- * next absolute TSC deadline. Called from the LAPIC timer IRQ handler. */
-void lapic_timer_rearm(void);
-
 /* This core's LAPIC timer as a one-shot: an interrupt at `vector` once the
- * time asked has passed, and none until it is asked again. In TSC-deadline
- * mode where the core has it and its TSC is invariant (exact, and free of
- * the bus clock); otherwise counted down from a count calibrated here against
- * the TSC. False when this core's timer cannot serve: then nothing is armed.
- * A core that uses it uses its timer for nothing else — the App Cores' tick
- * is lapic_timer_init's, never this. */
+ * moment asked has come, and none until it is asked again — the touch queue
+ * keeper's moments, and an App Core's turns (scheduler.c). In TSC-deadline
+ * mode where the core has it and its TSC is invariant (exact, and free of the
+ * bus clock); otherwise counted down from a count calibrated here against the
+ * TSC. False when this core's timer cannot serve: then nothing is armed. A
+ * core that uses it uses its timer for nothing else. */
 bool lapic_oneshot_init(uint8_t vector);
-/* The one-shot due `after_us` microseconds from now — a moment already past
- * still interrupts at once; 0 takes it back. Only on the core that called
+/* The one-shot due at the TSC moment `tsc` — one already past still
+ * interrupts at once; 0 takes it back. Only on the core that called
  * lapic_oneshot_init. */
+void lapic_oneshot_at(uint64_t tsc);
+/* … due `after_us` microseconds from now; 0 takes it back. */
 void lapic_oneshot_after(uint64_t after_us);
+/* Whether this core's one-shot serves — lapic_oneshot_init said so — and
+ * whether it is counted down rather than a TSC deadline. */
+bool lapic_oneshot_ready(void);
+bool lapic_oneshot_counted(void);
 
 /* Register access, mode-correct on both xAPIC and x2APIC.
  *

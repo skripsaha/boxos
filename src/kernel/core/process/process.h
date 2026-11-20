@@ -186,6 +186,12 @@ typedef struct process_t
      * what made std::clock() indistinguishable from wall time. Zero means "not
      * currently holding the core". */
     uint64_t cpu_tsc_stamp;
+    /* How long this strand holds a core each time it has one, in TSC cycles:
+     * a mean of its holds, the latest weighing a quarter, taken as each ends
+     * (scheduler.c). One that holds a least turn or more is worth a core of
+     * its own when it wakes and its home is working; a short one takes its
+     * turn at home. */
+    uint64_t hold_mean;
     /* The Fare: the time this strand has held a core, in TSC cycles, on the
      * scale of one core's Waterline — fare_core's, -1 until it is first
      * placed. A strand whose cabin wears the Use Context pays a third of it
