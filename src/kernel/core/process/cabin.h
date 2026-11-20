@@ -102,16 +102,21 @@ typedef struct cabin_t
      * the program the bytes of each message and question it receives, a page
      * at least apiece (system_deck.c). One bit a page in each map:
      * deposit_held — the place is taken, lent or being mapped or unmapped by
-     * the kernel; deposit_lent — the program holds it and may give it back.
-     * Both deposit_words long, in one kmalloc'd block, grown by doubling; no
-     * free place lies below deposit_low. All guarded by deposit_lock, a leaf:
-     * nothing is mapped, freed or allocated under it. A place given back is
-     * taken again before the window grows, so the window and its page tables
-     * are as large as the most the program ever held at once. */
+     * the kernel; deposit_lent — the program holds it and may give it back;
+     * deposit_mapped — a page of the program's is mapped at the place. All
+     * three deposit_words long, in one kmalloc'd block, grown by doubling; no
+     * free place lies below deposit_low; deposit_kept counts the free places
+     * a page is still mapped at, kept for the next deposit. All guarded by
+     * deposit_lock, a leaf: nothing is mapped, freed or allocated under it. A
+     * place given back is taken again before the window grows, so the window
+     * and its page tables are as large as the most the program ever held at
+     * once. */
     uint64_t   *deposit_held;
     uint64_t   *deposit_lent;
+    uint64_t   *deposit_mapped;
     uint32_t    deposit_words;
     uint32_t    deposit_low;
+    uint32_t    deposit_kept;
     spinlock_t  deposit_lock;
 
     uint32_t spawner_pid;

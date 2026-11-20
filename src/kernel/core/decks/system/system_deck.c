@@ -9,10 +9,15 @@
  * A deposit is lent: whole pages of the receiver's own, mapped for it and
  * written before it hears of them, and its until they are given back — a
  * question's by its answer, a message's by the program once it has read it
- * (system.give_back), and every one by the program's end. A page given back
- * goes back to the machine and its place to the next deposit, the lowest
- * free place first; so a program that lives for years and is told something
- * every frame holds only what it has not read yet.
+ * (system.give_back), and every one by the program's end. A place given back
+ * goes to the next deposit, the lowest free place first, and its page stays
+ * mapped there for it while the program keeps fewer than DEPOSIT_KEPT_MOST
+ * such pages: a program told something every frame is told it into pages
+ * already its, with no page taken from the machine, no mapping and no
+ * unmapping — which asked every core the program runs on to forget the page,
+ * one page at a time. Past that a page goes back to the machine, a run of
+ * them unmapped with one such ask; so a program that lives for years holds
+ * what it has not read yet and DEPOSIT_KEPT_MOST pages more at most.
  */
 
 #include "system_deck.h"
@@ -25,6 +30,11 @@
  * them, are 32-bit numbers — sixteen TiB of window, well below the rings
  * (cabin_layout.h). */
 #define DEPOSIT_WORDS_MAX  (0x100000000ull / 64u - 1u)
+
+/* The most pages a program keeps mapped at free places for its next
+ * deposits: 128 KiB, what a program told something every frame by a few
+ * others has in flight. */
+#define DEPOSIT_KEPT_MOST  32u
 
 static bool DepositHas(const uint64_t *map, uint32_t place)
 {
@@ -69,9 +79,9 @@ static bool DepositGrow(cabin_t *cabin, uint32_t words, uint32_t pages)
     while (grown * 64u < (uint64_t)words * 64u + pages) grown *= 2u;
     if (grown > DEPOSIT_WORDS_MAX) return false;
 
-    uint64_t *maps = kmalloc((size_t)grown * 2u * sizeof(uint64_t));
+    uint64_t *maps = kmalloc((size_t)grown * 3u * sizeof(uint64_t));
     if (!maps) return false;
-    memset(maps, 0, (size_t)grown * 2u * sizeof(uint64_t));
+    memset(maps, 0, (size_t)grown * 3u * sizeof(uint64_t));
 
     uint64_t *old = maps;
     spin_lock(&cabin->deposit_lock);
@@ -79,11 +89,13 @@ static bool DepositGrow(cabin_t *cabin, uint32_t words, uint32_t pages)
         if (words) {
             memcpy(maps, cabin->deposit_held, (size_t)words * sizeof(uint64_t));
             memcpy(maps + grown, cabin->deposit_lent, (size_t)words * sizeof(uint64_t));
+            memcpy(maps + 2u * grown, cabin->deposit_mapped, (size_t)words * sizeof(uint64_t));
         }
-        old                  = cabin->deposit_held;
-        cabin->deposit_held  = maps;
-        cabin->deposit_lent  = maps + grown;
-        cabin->deposit_words = (uint32_t)grown;
+        old                   = cabin->deposit_held;
+        cabin->deposit_held   = maps;
+        cabin->deposit_lent   = maps + grown;
+        cabin->deposit_mapped = maps + 2u * grown;
+        cabin->deposit_words  = (uint32_t)grown;
     }
     spin_unlock(&cabin->deposit_lock);
     kfree(old);
@@ -95,15 +107,32 @@ static uint32_t DepositPages(uint32_t length)
     return (uint32_t)(((uint64_t)length + PMM_PAGE_SIZE - 1) / PMM_PAGE_SIZE);
 }
 
-/* Unmap `pages` pages from `va` and give each frame back to the machine. */
-static void DepositUnmap(cabin_t *cabin, uint64_t va, uint32_t pages)
+/* A run unmapped at most this many pages at a time: their frames known
+ * before, freed after. */
+#define DEPOSIT_UNMAP_RUN  64u
+
+/* The pages at places `first` on, `pages` of them, unmapped a run at a time —
+ * one ask of every core the program runs on to forget a run, not one a page —
+ * each frame back to the machine only once no core can reach it through the
+ * program's mapping, and the places no longer mapped. The places are held by
+ * the caller, so no deposit is mapped over them meanwhile; a place no page is
+ * mapped at is passed over. */
+static void DepositUnmap(cabin_t *cabin, uint32_t first, uint32_t pages)
 {
-    for (uint32_t i = 0; i < pages; i++) {
-        uintptr_t at   = (uintptr_t)va + (uintptr_t)i * PMM_PAGE_SIZE;
-        uintptr_t phys = vmm_virt_to_phys(cabin->vmm, at);
-        vmm_unmap_page(cabin->vmm, at);
-        if (phys) pmm_free((void *)(phys & ~(uintptr_t)(PMM_PAGE_SIZE - 1)), 1);
+    uintptr_t frames[DEPOSIT_UNMAP_RUN];
+    for (uint32_t done = 0; done < pages;) {
+        uint32_t  run = pages - done < DEPOSIT_UNMAP_RUN ? pages - done : DEPOSIT_UNMAP_RUN;
+        uintptr_t va  = (uintptr_t)(cabin->aslr_buf_heap_base + (uint64_t)(first + done) * PMM_PAGE_SIZE);
+        for (uint32_t i = 0; i < run; i++)
+            frames[i] = vmm_virt_to_phys(cabin->vmm, va + (uintptr_t)i * PMM_PAGE_SIZE);
+        (void)vmm_unmap_range(cabin->vmm, va, run);
+        for (uint32_t i = 0; i < run; i++)
+            if (frames[i]) pmm_free((void *)(frames[i] & ~(uintptr_t)(PMM_PAGE_SIZE - 1)), 1);
+        done += run;
     }
+    spin_lock(&cabin->deposit_lock);
+    DepositMark(cabin->deposit_mapped, first, pages, false);
+    spin_unlock(&cabin->deposit_lock);
 }
 
 /* Places taken back into the free: lowest-first finds them again. */
@@ -115,19 +144,42 @@ static void DepositFree(cabin_t *cabin, uint32_t first, uint32_t pages)
     spin_unlock(&cabin->deposit_lock);
 }
 
+/* The places `first` on given back: their pages kept mapped for the next
+ * deposit while the program keeps fewer than DEPOSIT_KEPT_MOST, else back to
+ * the machine — and the places free. */
+static void DepositGiveBack(cabin_t *cabin, uint32_t first, uint32_t pages)
+{
+    spin_lock(&cabin->deposit_lock);
+    bool keep = cabin->deposit_kept + pages <= DEPOSIT_KEPT_MOST;
+    if (keep) {
+        cabin->deposit_kept += pages;
+        DepositMark(cabin->deposit_held, first, pages, false);
+        if (first < cabin->deposit_low) cabin->deposit_low = first;
+    }
+    spin_unlock(&cabin->deposit_lock);
+    if (keep) return;
+    DepositUnmap(cabin, first, pages);
+    DepositFree(cabin, first, pages);
+}
+
 uint64_t cabin_heap_place(process_t *target, uint32_t length)
 {
     if (!target || !target->cabin || length == 0) return 0;
     cabin_t *cabin = target->cabin;
     uint32_t pages = DepositPages(length);
 
-    uint32_t first;
+    /* The places, and which of them a kept page is mapped at already: those
+     * are the deposit's as they stand, kept no longer. */
+    uint32_t first, kept = 0;
     for (;;) {
         spin_lock(&cabin->deposit_lock);
         first = cabin->deposit_words ? DepositFind(cabin, pages) : UINT32_MAX;
         if (first != UINT32_MAX) {
             DepositMark(cabin->deposit_held, first, pages, true);
             if (first == cabin->deposit_low) cabin->deposit_low = first + pages;
+            for (uint32_t i = 0; i < pages; i++)
+                kept += DepositHas(cabin->deposit_mapped, first + i) ? 1u : 0u;
+            cabin->deposit_kept -= kept;
             spin_unlock(&cabin->deposit_lock);
             break;
         }
@@ -137,13 +189,22 @@ uint64_t cabin_heap_place(process_t *target, uint32_t length)
     }
 
     uint64_t va = cabin->aslr_buf_heap_base + (uint64_t)first * PMM_PAGE_SIZE;
+    if (kept == pages) return va;
     for (uint32_t i = 0; i < pages; i++) {
+        spin_lock(&cabin->deposit_lock);
+        bool mapped = DepositHas(cabin->deposit_mapped, first + i);
+        spin_unlock(&cabin->deposit_lock);
+        if (mapped) continue;
         void *page = pmm_alloc(1);
         if (page && vmm_map_page(cabin->vmm, va + (uint64_t)i * PMM_PAGE_SIZE, (uint64_t)page,
-                                 VMM_FLAGS_USER_RW).success)
+                                 VMM_FLAGS_USER_RW).success) {
+            spin_lock(&cabin->deposit_lock);
+            DepositMark(cabin->deposit_mapped, first + i, 1, true);
+            spin_unlock(&cabin->deposit_lock);
             continue;
+        }
         if (page) pmm_free(page, 1);
-        DepositUnmap(cabin, va, i);
+        DepositUnmap(cabin, first, pages);
         DepositFree(cabin, first, pages);
         return 0;
     }
@@ -156,8 +217,7 @@ void cabin_heap_lend(process_t *target, uint64_t addr, uint32_t length, bool wri
     uint32_t first = (uint32_t)((addr - cabin->aslr_buf_heap_base) / PMM_PAGE_SIZE);
     uint32_t pages = DepositPages(length);
     if (!written) {
-        DepositUnmap(cabin, addr, pages);
-        DepositFree(cabin, first, pages);
+        DepositGiveBack(cabin, first, pages);
         return;
     }
     spin_lock(&cabin->deposit_lock);
@@ -176,8 +236,8 @@ error_t cabin_heap_take_back(process_t *target, uint64_t addr, uint32_t length)
 
     /* Every page lent, or nothing is taken: the lent bits go first, under the
      * lock, so the same pages given back twice at once are taken once. The
-     * places stay held until the pages are gone, so no deposit is mapped over
-     * them meanwhile. */
+     * places stay held until their pages are kept or gone, so no deposit is
+     * mapped over them meanwhile. */
     spin_lock(&cabin->deposit_lock);
     bool lent = first + pages <= (uint64_t)cabin->deposit_words * 64u;
     for (uint32_t i = 0; lent && i < pages; i++)
@@ -186,8 +246,7 @@ error_t cabin_heap_take_back(process_t *target, uint64_t addr, uint32_t length)
     spin_unlock(&cabin->deposit_lock);
     if (!lent) return ERR_INVALID_ADDRESS;
 
-    DepositUnmap(cabin, addr, pages);
-    DepositFree(cabin, (uint32_t)first, pages);
+    DepositGiveBack(cabin, (uint32_t)first, pages);
     return OK;
 }
 
