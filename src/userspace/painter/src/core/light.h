@@ -77,17 +77,41 @@ struct Steps {
 };
 const Steps &StepsOfLight() noexcept;
 
+/* Where a light lies between the numbers it is written as: N the number at
+ * or below it, Part the part of the way to the next, of 256 — none at 255,
+ * past which there is no number. */
+inline void Between(std::uint32_t Light, const Steps &S, std::uint32_t &N, std::uint32_t &Part) noexcept
+{
+    N = S.Floor[Light >> 4];
+    if (N < 255u && Light >= BoxColorLight(N + 1u)) N++;
+    Part = N == 255u ? 0u : ((Light - BoxColorLight(N)) * S.Reciprocal[N]) >> 16;
+}
+
 /* The number a light is written as, dithered: the number below it, or the
  * next when the part of the way to it lies past Threshold (0 to 255) — so
  * over many pixels the numbers average the light. Undithered, the nearest is
  * BoxColorCode's. */
 inline std::uint32_t Dithered(std::uint32_t Light, const Steps &S, std::uint32_t Threshold) noexcept
 {
-    std::uint32_t N = S.Floor[Light >> 4];
-    if (N < 255u && Light >= BoxColorLight(N + 1u)) N++;
-    if (N == 255u) return 255u;
-    const std::uint32_t Part = ((Light - BoxColorLight(N)) * S.Reciprocal[N]) >> 16;
+    std::uint32_t N, Part;
+    Between(Light, S, N, Part);
     return N + (Part > Threshold ? 1u : 0u);
+}
+
+/* Every light's place between the numbers, worked out once to be looked up
+ * (Between): Part << 8 | N — and one entry past the last light, so eight
+ * entries can be gathered as 32-bit words. Made on the heap the first time
+ * it is asked, so only a program that dithers carries it; none when there
+ * was no room for it, and the numbers are then worked out as Dithered does. */
+struct DitherTable {
+    std::uint16_t Of[65537];
+};
+const DitherTable *DitherTableOfLight() noexcept;
+
+/* The number Dithered gives a light, from its entry in the table. */
+inline std::uint32_t DitheredBy(std::uint32_t Entry, std::uint32_t Threshold) noexcept
+{
+    return (Entry & 255u) + ((Entry >> 8) > Threshold ? 1u : 0u);
 }
 
 }  // namespace painter::core::light

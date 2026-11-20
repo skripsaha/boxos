@@ -1,7 +1,8 @@
 /*
  * draw stand — the ways the engine's rows are worked (painter/src/core/lanes.h):
- * SSE2 and AVX2 held to the plain way bit for bit, on rows of every length,
- * every share and every pixel a canvas can hold; and how long each takes.
+ * the dither table held to light.h for every light and threshold; SSE2 and
+ * AVX2 held to the plain way bit for bit, on rows of every length, every
+ * share and every pixel a canvas can hold; and how long each takes.
  * On a host that is not x86-64 only the plain way is there — the stand built
  * for x86-64 holds the others.
  */
@@ -16,6 +17,7 @@
 
 #include "boxos_pixel.h"
 #include "lanes.h"
+#include "light.h"
 #include "painter/core/canvas.h"
 
 namespace stand {
@@ -59,6 +61,23 @@ std::uint16_t RandomShare()
 
 void CheckLanes(Tally &Count)
 {
+    /* The table the glass's numbers are looked up in: every light, at every
+     * threshold, the number light.h works out. */
+    {
+        const light::Steps       &S     = light::StepsOfLight();
+        const light::DitherTable *Table = light::DitherTableOfLight();
+        std::uint32_t             Wrong = Table ? 0u : 1u;
+        for (std::uint32_t Light = 0; Table && Light < 65536u; Light++)
+            for (std::uint32_t Threshold = 0; Threshold < 256u; Threshold++)
+                Wrong += light::DitheredBy(Table->Of[Light], Threshold) != light::Dithered(Light, S, Threshold) ? 1u : 0u;
+        char Line[200];
+        std::snprintf(Line, sizeof(Line),
+                      "the dither table gives every light at every threshold the number light.h works out: 65536 x 256, "
+                      "%u not alike",
+                      Wrong);
+        Count.Check(Wrong == 0, Line);
+    }
+
     const std::vector<Way> All = Ways();
     if (All.size() == 1) {
         Count.Check(true, "the plain way alone on this host: the stand built for x86-64 holds SSE2 and AVX2 to it");

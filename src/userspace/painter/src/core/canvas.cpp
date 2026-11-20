@@ -504,9 +504,17 @@ void Canvas::CopyOut(Rect Area, std::uint32_t *Glass, std::size_t GlassStride, s
     if (At.Empty()) return;
     Room->Thresholds.resize(static_cast<std::size_t>(At.Width));
     for (std::int32_t Y = At.Y; Y < At.Y + At.Height; Y++) {
-        if (Mode == core::Dither::On)
-            for (std::int32_t I = 0; I < At.Width; I++)
-                Room->Thresholds[static_cast<std::size_t>(I)] = light::DitherNoise[(Corner.Y + Y) & 63][(Corner.X + At.X + I) & 63];
+        if (Mode == core::Dither::On) {
+            /* The noise's row, from where the row begins in it, over and
+             * over: it repeats every 64 pixels. */
+            const std::uint8_t *Noise = light::DitherNoise[(Corner.Y + Y) & 63];
+            std::uint32_t       Phase = static_cast<std::uint32_t>(Corner.X + At.X) & 63u;
+            for (std::uint32_t Done = 0, Width = static_cast<std::uint32_t>(At.Width); Done < Width; Phase = 0) {
+                const std::uint32_t Part = std::min(64u - Phase, Width - Done);
+                std::memcpy(Room->Thresholds.data() + Done, Noise + Phase, Part);
+                Done += Part;
+            }
+        }
         Kit.Show(Glass + static_cast<std::size_t>(Y) * GlassStride + static_cast<std::size_t>(At.X),
                  Row(static_cast<std::uint32_t>(Y)) + At.X, static_cast<std::uint32_t>(At.Width), Format,
                  Mode == core::Dither::On ? Room->Thresholds.data() : nullptr);
