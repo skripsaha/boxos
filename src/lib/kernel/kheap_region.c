@@ -507,20 +507,23 @@ void KHeapPoolGive(void *payload)
               "start, or a neighbour overflowed into its header",
               payload, (unsigned long long)block->back);
 
-    /* O(1) double-free detection via magic tombstone. */
+    KHeapRegion *back_to_machine = NULL;
+    size_t       back_bytes      = 0;
+
+    spin_lock(&g_heap_lock);
+    /* O(1) double-free detection via magic tombstone — and the tombstone laid
+     * under the lock: a neighbour given back on another core merges with a
+     * block whose magic says FREE, and takes it off its list, so a block is
+     * FREE only once it is on one. */
     if (block->magic == KLIB_MAGIC_FREE)
         panic("Double free detected (magic=FREE)!");
     if (block->magic != KLIB_MAGIC_NUMBER)
         panic("Invalid free: bad magic number!");
     block->magic = KLIB_MAGIC_FREE;
 
-    KHeapCharge  charge = (KHeapCharge)block->charge;
-    size_t       took   = block->size + sizeof(mem_block_t);
-    uint8_t      kind   = region->kind;
-    KHeapRegion *back_to_machine = NULL;
-    size_t       back_bytes      = 0;
-
-    spin_lock(&g_heap_lock);
+    KHeapCharge charge = (KHeapCharge)block->charge;
+    size_t      took   = block->size + sizeof(mem_block_t);
+    uint8_t     kind   = region->kind;
     region->live -= took;
     if (kind == KHEAP_REGION_RESERVE)
         g_reserve_live -= took;
