@@ -58,7 +58,11 @@ void spin_lock(spinlock_t *lock)
             if (PanicOwnedHere())
                 break;
             asm volatile("pause");
-        } while (__sync_lock_test_and_set(&lock->locked, 1));
+            /* Read while it is held, exchanged only once it reads free: a
+             * waiter that exchanged in a loop took the lock's line for its
+             * own on every turn, and every other waiter's turn and the
+             * holder's own release waited for the line to come back. */
+        } while (__atomic_load_n(&lock->locked, __ATOMIC_RELAXED) || __sync_lock_test_and_set(&lock->locked, 1));
     }
 
     lock->saved_flags = flags;
