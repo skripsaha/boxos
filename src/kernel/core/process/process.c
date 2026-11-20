@@ -825,6 +825,23 @@ bool process_set_state(process_t *proc, process_state_t new_state)
     return enqueued;
 }
 
+bool process_answer_published(process_t *proc, uint64_t pos, uint64_t head)
+{
+    if (!proc)
+        return false;
+
+    spin_lock(&proc->state_lock);
+    uint8_t kept = 0;
+    for (uint8_t i = 0; i < proc->answers_noted; i++)
+        if (proc->answers_at[i] >= head) proc->answers_at[kept++] = proc->answers_at[i];
+    proc->answers_noted = kept;
+    if (kept < PROCESS_ANSWERS_NOTED) proc->answers_at[proc->answers_noted++] = pos;
+    else                              proc->answers_spilled = 1;
+    bool enqueued = ProcessStateMoveLocked(proc, PROC_WORKING);
+    spin_unlock(&proc->state_lock);
+    return enqueued;
+}
+
 bool ProcessStartCreated(process_t *proc)
 {
     if (!proc)

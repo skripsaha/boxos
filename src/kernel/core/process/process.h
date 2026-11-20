@@ -149,6 +149,10 @@ _Static_assert(offsetof(ProcessContext, fpu_initialized) == 176, "ProcessContext
 _Static_assert(offsetof(ProcessContext, pl0_ssp) == 184, "ProcessContext.pl0_ssp offset mismatch with asm");
 _Static_assert(offsetof(ProcessContext, user_fsbase) == 192, "ProcessContext.user_fsbase offset mismatch with asm");
 
+/* The answers a strand's sleep check notes before it looks at its whole
+ * reply ring (process_t.answers_at). */
+#define PROCESS_ANSWERS_NOTED 8
+
 typedef struct process_t
 {
     uint32_t magic;
@@ -208,6 +212,16 @@ typedef struct process_t
 
     volatile process_state_t state;
     spinlock_t state_lock;
+
+    /* Where the kernel published answers to this strand's submits it may not
+     * have read yet (kring.c): a sleep is refused across any of them, and only
+     * these are looked at — not every record waiting in its reply ring.
+     * Spilled when more were published than there is room to note; the whole
+     * unread ring is looked at then, and what it finds noted again. Under
+     * state_lock. */
+    uint64_t answers_at[PROCESS_ANSWERS_NOTED];
+    uint8_t  answers_noted;
+    uint8_t  answers_spilled;
 
     atomic_u32_t ref_count;
 
@@ -586,6 +600,12 @@ uint64_t process_cpu_time_us(const process_t *proc);
 /* Returns true when this call made the strand runnable AND enqueued it —
  * sched_enqueue rang its core, so the caller must not ring again. */
 bool process_set_state(process_t *proc, process_state_t new_state);
+/* An answer published for `proc` at reply-ring position `pos` — `head` the
+ * ring's head as the publisher read it — noted where its sleep check looks,
+ * and the strand made runnable, in one hold of its state lock: a sleep
+ * committed before the note is ended by the move, one after it sees the
+ * note. Whether it enqueued. */
+bool process_answer_published(process_t *proc, uint64_t pos, uint64_t head);
 /* A process let run as it was made: PROC_CREATED -> PROC_WORKING under the
  * state lock, enqueued as process_set_state enqueues it. False, the state left
  * as it stands, when it is no longer as made: a stop or an end decided over it
