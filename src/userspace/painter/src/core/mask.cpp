@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 
 #include "blur.h"
 #include "shape_room.h"
@@ -31,9 +32,13 @@ std::optional<Mask> Mask::Of(const Path &Shape, const Transform &Place, FillRule
     BoxShapeSweep             Sweep;
     BoxShapeSweepBegin(&Sweep, &S, Cells.data(), Held.X, Held.X + Held.Width);
     for (std::int32_t Y = Held.Y; Y < Held.Y + Held.Height; Y++) {
-        BoxShapeSweepRow(&Sweep, Y);
         std::uint8_t *Line = Made.Row(Y);
-        std::int64_t  Run  = Cells[0];
+        if (BoxShapeSweepRow(&Sweep, Y)) {
+            /* The row before's cells: its coverage. */
+            std::memcpy(Line, Made.Row(Y - 1), static_cast<std::size_t>(Held.Width));
+            continue;
+        }
+        std::int64_t Run = Cells[0];
         for (std::int32_t X = 0; X < Held.Width; X++) {
             Run += Cells[static_cast<std::size_t>(X) + 1u];
             Line[X] = static_cast<std::uint8_t>(BoxShapeCoverage(Run, S.Rule));
