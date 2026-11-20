@@ -2,7 +2,8 @@
  * draw stand — the ways the engine's rows are worked (painter/src/core/lanes.h):
  * the dither table held to light.h for every light and threshold; SSE2 and
  * AVX2 held to the plain way bit for bit, on rows of every length, every
- * share and every pixel a canvas can hold; and how long each takes.
+ * share and every pixel a canvas can hold, and on rows of gradients and
+ * pictures every way they are seen; and how long each takes.
  * On a host that is not x86-64 only the plain way is there — the stand built
  * for x86-64 holds the others.
  */
@@ -55,6 +56,82 @@ std::uint16_t RandomShare()
 {
     const std::uint32_t Pick = Random() % 6u;
     return Pick == 0 ? 0 : Pick == 1 ? 65535 : static_cast<std::uint16_t>(Random());
+}
+
+/* A number of 64 bits, of up to Bits of them, either sign. */
+std::int64_t RandomOf(std::uint32_t Bits)
+{
+    const std::uint64_t Wide = (std::uint64_t{Random()} << 32 | Random()) & ((std::uint64_t{1} << Bits) - 1u);
+    return Random() % 2u ? static_cast<std::int64_t>(Wide) : -static_cast<std::int64_t>(Wide);
+}
+
+/* Every way colours rows of gradients and smooth pictures as the plain way
+ * does (paint_rows.h): linear and radial ones — from their middle, the way
+ * a vector works, and from a focal point — and conic, every extend, near
+ * their ends and far past them; pictures of every size, read within and
+ * past their edges every way, seen at every opacity. */
+void CheckPaintRows(Tally &Count, const std::vector<Way> &All)
+{
+    std::uint32_t Rows = 0, Wrong = 0;
+    std::vector<Pixel> Table(BOX_PAINT_GRADIENT / 16 + 2);
+    for (Pixel &Each : Table) Each = RandomPixel();
+    const BoxPaintStop Stop{0, 0};
+    for (std::uint32_t I = 0; I < 60000u; I++) {
+        const std::uint32_t Length = Random() % 70u;
+        BoxPaint            P{};
+        P.Extend    = Random() % 4u;
+        P.Stops     = &Stop;
+        P.StopCount = 1;
+        const std::uint32_t Kind = Random() % 4u;
+        P.Kind   = Kind == 0 ? BOX_PAINT_LINEAR : Kind == 3 ? BOX_PAINT_CONIC : BOX_PAINT_RADIAL;
+        P.FocalX = Kind == 2 ? static_cast<std::int32_t>(RandomOf(15)) : 0;
+        P.FocalY = Kind == 2 ? static_cast<std::int32_t>(RandomOf(15)) : 0;
+        /* Sums of a place a pixel's sixteen bits of rounding below, from near
+         * the gradient's span to far past what a screen shows. */
+        const std::uint32_t Reach = 20u + Random() % 36u;
+        const lanes::GradientWalk Walk{&P, Table.data(), RandomOf(Reach), RandomOf(Reach), RandomOf(Reach - 4u), RandomOf(Reach - 4u)};
+        std::vector<Pixel> Want(Length);
+        for (std::size_t W = 0; W < All.size(); W++) {
+            std::vector<Pixel> Got(Length);
+            All[W].Kit->Gradient(Got.data(), Walk, Length);
+            Rows++;
+            if (W == 0) Want = Got;
+            else if (std::memcmp(Got.data(), Want.data(), Length * sizeof(Pixel)) != 0) Wrong++;
+        }
+    }
+    for (std::uint32_t I = 0; I < 60000u; I++) {
+        const std::uint32_t Length = Random() % 70u;
+        BoxPaint            P{};
+        P.Kind          = BOX_PAINT_PICTURE;
+        P.Extend        = Random() % 4u;
+        P.PictureWidth  = 1u + Random() % 40u;
+        P.PictureHeight = 1u + Random() % 40u;
+        P.PictureStride = P.PictureWidth + Random() % 3u;
+        std::vector<Pixel> Texels(static_cast<std::size_t>(P.PictureStride) * P.PictureHeight + 1u);
+        for (Pixel &Each : Texels) Each = RandomPixel();
+        /* Places from a few pixels before the picture to a few past it, or
+         * now and then far away; steps of up to two pixels a pixel. */
+        const auto Place = [&](std::uint32_t Side) {
+            if (Random() % 16u == 0) return RandomOf(52);
+            return (static_cast<std::int64_t>(Random() % ((Side + 6u) * BOX_SHAPE_ONE)) - 3 * BOX_SHAPE_ONE) * BOX_SHAPE_UNIT + RandomOf(16);
+        };
+        const lanes::PictureWalk Walk{&P, Texels.data(), Place(P.PictureWidth), Place(P.PictureHeight), RandomOf(26), RandomOf(26),
+                                      Random() % 3u ? 65535u : static_cast<std::uint32_t>(Random() % 65536u)};
+        std::vector<Pixel> Want(Length);
+        for (std::size_t W = 0; W < All.size(); W++) {
+            std::vector<Pixel> Got(Length);
+            All[W].Kit->Picture(Got.data(), Walk, Length);
+            Rows++;
+            if (W == 0) Want = Got;
+            else if (std::memcmp(Got.data(), Want.data(), Length * sizeof(Pixel)) != 0) Wrong++;
+        }
+    }
+    char Line[200];
+    std::snprintf(Line, sizeof(Line),
+                  "SSE2 and AVX2 colour every row of a gradient or a smooth picture the very bits the plain way does: "
+                  "%u rows, %u not alike",
+                  Rows, Wrong);
+    Count.Check(Wrong == 0, Line);
 }
 
 }  // namespace
@@ -131,6 +208,7 @@ void CheckLanes(Tally &Count)
                   "near and dithered: %u rows, %u not alike",
                   Rows, Wrong);
     Count.Check(Wrong == 0, Line);
+    CheckPaintRows(Count, All);
 }
 
 void SaySpeed()

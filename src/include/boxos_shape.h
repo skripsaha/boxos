@@ -939,6 +939,8 @@ typedef struct BoxShapeSweep {
     int32_t   Left, End;
     uint32_t  Done;    /* the edges before this one ended above the row */
     uint32_t  Next;    /* the edges from this one begin below it */
+    int32_t   Row;     /* the row the cells are of, once Swept */
+    int       Swept;   /* a row is swept */
 } BoxShapeSweep;
 
 static inline void BoxShapeSweepBegin(BoxShapeSweep *W, BoxShape *S, int32_t *Cells, int32_t Left, int32_t End)
@@ -950,13 +952,41 @@ static inline void BoxShapeSweepBegin(BoxShapeSweep *W, BoxShape *S, int32_t *Ce
     W->End   = End;
     W->Done  = 0;
     W->Next  = 0;
+    W->Row   = 0;
+    W->Swept = 0;
+}
+
+/* Whether row Y's cells are the ones the cells hold — row Y − 1's, swept
+ * just before: no edge begins within row Y, and every edge crossing it
+ * stands upright the whole height of both rows, so it adds to each the very
+ * numbers it added to the other. A rectangle's rows between its top and its
+ * bottom are such rows, and so are a rounded one's between its corners. */
+static inline int BoxShapeSweepSame(const BoxShapeSweep *W, int32_t Y)
+{
+    if (!W->Swept || W->Row != Y - 1) return 0;
+    const int64_t       Above = ((int64_t)Y - 1) * BOX_SHAPE_ONE, Below = ((int64_t)Y + 1) * BOX_SHAPE_ONE;
+    const BoxShapeEdge *Edges = W->Shape->Edges;
+    if (W->Next < W->Shape->Count && BoxShapeEdgeTop(&Edges[W->Next]) < Below) return 0;
+    for (uint32_t I = W->Done; I < W->Next; I++) {
+        const BoxShapeEdge *E = &Edges[I];
+        if (E->X0 != E->X1 || BoxShapeEdgeTop(E) > Above || BoxShapeEdgeBottom(E) < Below) return 0;
+    }
+    return 1;
 }
 
 /* Row Y's cells — Y below every row swept before it: pixel X covers
  * |Cells[0] + Cells[1] + … + Cells[1 + X - Left]| of ONE·ONE, the shape's
- * rule saying how much of that it holds (BoxShapeCoverage). */
-static inline void BoxShapeSweepRow(BoxShapeSweep *W, int32_t Y)
+ * rule saying how much of that it holds (BoxShapeCoverage). 1 when they are
+ * the row before's, left as they were (BoxShapeSweepSame) — so what the
+ * caller made of that row is this one's too — else 0. */
+static inline int BoxShapeSweepRow(BoxShapeSweep *W, int32_t Y)
 {
+    if (BoxShapeSweepSame(W, Y)) {
+        W->Row = Y;
+        return 1;
+    }
+    W->Row   = Y;
+    W->Swept = 1;
     const int64_t Top = (int64_t)Y * BOX_SHAPE_ONE, Bottom = Top + BOX_SHAPE_ONE;
     BoxShapeEdge *Edges = W->Shape->Edges;
     while (W->Next < W->Shape->Count && BoxShapeEdgeTop(&Edges[W->Next]) < Bottom) W->Next++;
@@ -964,6 +994,7 @@ static inline void BoxShapeSweepRow(BoxShapeSweep *W, int32_t Y)
         if (BoxShapeEdgeBottom(&Edges[I]) <= Top) BoxShapeSwap(&Edges[I], &Edges[W->Done++]);
     for (int32_t C = 0; C <= W->End - W->Left; C++) W->Cells[C] = 0;
     for (uint32_t I = W->Done; I < W->Next; I++) BoxShapeRowEdge(W->Cells, W->Left, W->End, &Edges[I], Y);
+    return 0;
 }
 
 /* The running sum of a row's cells as the share of 255 of the pixel the

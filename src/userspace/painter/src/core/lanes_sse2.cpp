@@ -2,7 +2,8 @@
  * lanes_sse2.cpp — the engine's rows worked two pixels at a time with SSE2,
  * which every x86-64 has: the very numbers of light.h, bit for bit. Writing
  * to the glass looks numbers up one by one, as the plain way does, SSE2
- * having no way to look up eight at once. See lanes.h.
+ * having no way to look up eight at once, and so does colouring a row by a
+ * gradient or a picture, its every pixel looked up. See lanes.h.
  */
 
 #include "lanes.h"
@@ -101,7 +102,7 @@ __attribute__((target("sse2"))) void LayRow(Pixel *Row, const Pixel *From, std::
 
 const Kit &Sse2() noexcept
 {
-    static const Kit Made{LayColor, LayPaint, LayRow, Plain().Show};
+    static const Kit Made{LayColor, LayPaint, LayRow, Plain().Show, Plain().Gradient, Plain().Picture};
     return Made;
 }
 

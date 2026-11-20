@@ -7,7 +7,9 @@
 #include <algorithm>
 #include <cmath>
 
+#include "lanes.h"
 #include "light.h"
+#include "paint_rows.h"
 #include "shape_room.h"
 
 namespace painter::core::engine {
@@ -183,81 +185,39 @@ bool Prepared::Row(std::int32_t Y, std::int32_t X0, std::uint32_t Count, Pixel *
     return true;
 }
 
-/* The colour At of the way: between the two kept every 16 of it, straight. */
-Pixel Prepared::Along(std::uint32_t At) const noexcept
-{
-    const Pixel         A = Table[At >> 4], B = Table[(At >> 4) + 1];
-    const std::uint32_t Part = At & 15u, Rest = 16u - Part;
-    return Pixel{static_cast<std::uint16_t>((A.Red * Rest + B.Red * Part + 8u) >> 4),
-                 static_cast<std::uint16_t>((A.Green * Rest + B.Green * Part + 8u) >> 4),
-                 static_cast<std::uint16_t>((A.Blue * Rest + B.Blue * Part + 8u) >> 4),
-                 static_cast<std::uint16_t>((A.Alpha * Rest + B.Alpha * Part + 8u) >> 4)};
-}
-
 bool Prepared::GradientRow(std::int32_t Y, std::int32_t X0, std::uint32_t Count, Pixel *Out) const
 {
     BoxPaintReady R = Ready;
     R.Paint         = &Paint;
     BoxPaintWalk Walk;
     BoxPaintWalkBegin(&R, X0, Y, &Walk);
+    const lanes::GradientWalk Colours{&Paint, Table.data(), Walk.U, Walk.V, Walk.StepU, Walk.StepV};
     /* A linear gradient whose way does not change along the row: one
      * colour, the first pixel's. */
-    const bool One = Paint.Kind == BOX_PAINT_LINEAR && Walk.StepU == 0;
-    for (std::uint32_t I = 0; I < (One ? 1u : Count); I++, BoxPaintWalkNext(&Walk)) {
-        std::int64_t  U, V;
-        std::uint32_t At;
-        BoxPaintWalkAt(&Walk, &U, &V);
-        Out[I] = BoxPaintWayAt(&Paint, U, V, &At) ? Along(At) : Pixel{};
+    if (Paint.Kind == BOX_PAINT_LINEAR && Walk.StepU == 0) {
+        lanes::GradientPlain(Out, Colours, Walk.U, Walk.V, 1);
+        return true;
     }
-    return One;
+    lanes::Chosen().Gradient(Out, Colours, Count);
+    return false;
 }
 
 void Prepared::PictureRow(std::int32_t Y, std::int32_t X0, std::uint32_t Count, Pixel *Out) const
 {
     BoxPaintReady R = Ready;
     R.Paint         = &Paint;
-    const Pixel       *Texels = Level->Pixels.data();
-    const std::int64_t Wide = Paint.PictureWidth, High = Paint.PictureHeight;
-    BoxPaintWalk       Walk;
+    const Pixel *Texels = Level->Pixels.data();
+    BoxPaintWalk Walk;
     BoxPaintWalkBegin(&R, X0, Y, &Walk);
+    if (!Paint.Sharp) {
+        lanes::Chosen().Picture(Out, lanes::PictureWalk{&Paint, Texels, Walk.U, Walk.V, Walk.StepU, Walk.StepV, Opacity}, Count);
+        return;
+    }
     for (std::uint32_t I = 0; I < Count; I++, BoxPaintWalkNext(&Walk)) {
         std::int64_t U, V;
         std::size_t  Index;
         BoxPaintWalkAt(&Walk, &U, &V);
-        if (Paint.Sharp) {
-            Out[I] = BoxPaintTexel(&Paint, BoxShapePixelOf(U), BoxShapePixelOf(V), &Index) ? Texels[Index] : Pixel{};
-        } else {
-            std::int64_t  TI, TJ;
-            std::uint32_t FX, FY;
-            BoxPaintBetween(U, V, &TI, &TJ, &FX, &FY);
-            if (TI >= 0 && TJ >= 0 && TI + 1 < Wide && TJ + 1 < High) {
-                /* All four within the picture, where every way of going on
-                 * past it leaves a pixel where it is: read straight. The
-                 * weights make 65536, so the sums keep to 32 bits. */
-                const Pixel        *Up   = Texels + static_cast<std::size_t>(TJ) * Paint.PictureStride + static_cast<std::size_t>(TI);
-                const Pixel        *Down = Up + Paint.PictureStride;
-                const std::uint32_t W0 = (256u - FX) * (256u - FY), W1 = FX * (256u - FY), W2 = (256u - FX) * FY, W3 = FX * FY;
-                const auto          Mix = [&](std::uint16_t Pixel::*C) {
-                    return static_cast<std::uint16_t>(
-                        (32768u + W0 * Up[0].*C + W1 * Up[1].*C + W2 * Down[0].*C + W3 * Down[1].*C) >> 16);
-                };
-                Out[I] = Pixel{Mix(&Pixel::Red), Mix(&Pixel::Green), Mix(&Pixel::Blue), Mix(&Pixel::Alpha)};
-                if (Opacity < light::Whole) Out[I] = light::Scaled(Out[I], Opacity);
-                continue;
-            }
-            const std::uint64_t Weights[4] = {(256u - FX) * (256u - FY), FX * (256u - FY), (256u - FX) * FY, FX * FY};
-            std::uint64_t       Sum[4]     = {32768u, 32768u, 32768u, 32768u};
-            for (std::uint32_t K = 0; K < 4u; K++) {
-                if (!Weights[K] || !BoxPaintTexel(&Paint, TI + (K & 1u), TJ + (K >> 1), &Index)) continue;
-                const Pixel T = Texels[Index];
-                Sum[0] += Weights[K] * T.Red;
-                Sum[1] += Weights[K] * T.Green;
-                Sum[2] += Weights[K] * T.Blue;
-                Sum[3] += Weights[K] * T.Alpha;
-            }
-            Out[I] = Pixel{static_cast<std::uint16_t>(Sum[0] >> 16), static_cast<std::uint16_t>(Sum[1] >> 16),
-                           static_cast<std::uint16_t>(Sum[2] >> 16), static_cast<std::uint16_t>(Sum[3] >> 16)};
-        }
+        Out[I] = BoxPaintTexel(&Paint, BoxShapePixelOf(U), BoxShapePixelOf(V), &Index) ? Texels[Index] : Pixel{};
         if (Opacity < light::Whole) Out[I] = light::Scaled(Out[I], Opacity);
     }
 }

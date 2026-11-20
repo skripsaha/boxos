@@ -127,13 +127,11 @@ struct Canvas::Work {
         return Share;
     }
 
-    /* Row Y's kept shares, from X0 — First to Last of them not none — laid
-     * with every fill, run by run: where the shares are none for a stretch
-     * nothing is worked, not even a gradient's colours; a gap of a few is
-     * worked through, which costs less than stopping. A colour that hides
-     * what it covers is put, not laid, where it covers whole: the very pixels
-     * laying it would make. */
-    void LayRow(Canvas &On, std::int32_t Y, std::int32_t X0, std::int32_t First, std::int32_t Last)
+    /* The runs of a row's kept shares — First to Last of them not none:
+     * where the shares are none for a stretch nothing is worked, not even a
+     * gradient's colours; a gap of a few is worked through, which costs less
+     * than stopping. */
+    void RunsOf(std::int32_t First, std::int32_t Last)
     {
         constexpr std::int32_t Gap = 16;
         const std::uint16_t   *Share = Shares.data();
@@ -154,8 +152,16 @@ struct Canvas::Work {
             Runs.push_back({I, End});
             I = End;
         }
-        const lanes::Kit &Kit = lanes::Chosen();
-        Pixel            *Row = On.Row(static_cast<std::uint32_t>(Y)) + X0;
+    }
+
+    /* Row Y's kept shares, from X0, laid with every fill, run by run. A
+     * colour that hides what it covers is put, not laid, where it covers
+     * whole: the very pixels laying it would make. */
+    void LayRuns(Canvas &On, std::int32_t Y, std::int32_t X0)
+    {
+        const std::uint16_t *Share = Shares.data();
+        const lanes::Kit    &Kit   = lanes::Chosen();
+        Pixel               *Row   = On.Row(static_cast<std::uint32_t>(Y)) + X0;
         for (const engine::Prepared &Fill : Fills)
             for (const Run &Each : Runs) {
                 const std::uint32_t Count = static_cast<std::uint32_t>(Each.End - Each.Begin);
@@ -200,16 +206,22 @@ struct Canvas::Work {
         Cells.resize(Wide + 2u);
         Shares.resize(Wide);
         Paint.resize(Wide);
-        BoxShapeSweep Sweep, EdgeSweep;
+        BoxShapeSweep Sweep, EdgeSweep{};
         BoxShapeSweepBegin(&Sweep, &S, Cells.data(), Held.X, Held.X + Held.Width);
         if (How != Against::Nothing) {
             EdgeCells.resize(Wide + 2u);
             BoxShapeSweepBegin(&EdgeSweep, EdgeShape, EdgeCells.data(), Held.X, Held.X + Held.Width);
         }
+        const Mask *Clip = Top().Cover.get();
         for (std::int32_t Y = Held.Y; Y < Held.Y + Held.Height; Y++) {
-            BoxShapeSweepRow(&Sweep, Y);
-            if (How != Against::Nothing) BoxShapeSweepRow(&EdgeSweep, Y);
-            const Mask  *Clip = Top().Cover.get();
+            const bool SameCells = BoxShapeSweepRow(&Sweep, Y) != 0;
+            const bool SameEdge  = How == Against::Nothing || BoxShapeSweepRow(&EdgeSweep, Y) != 0;
+            /* Cells as the row before's are its shares and runs too — but
+             * where a clip's own coverage weighs each pixel. */
+            if (SameCells && SameEdge && !Clip) {
+                LayRuns(On, Y, Held.X);
+                continue;
+            }
             std::int64_t Run = Cells[0], EdgeRun = How != Against::Nothing ? EdgeCells[0] : 0;
             std::int32_t First = Held.Width, Last = -1;
             if (How == Against::Nothing && !Clip) {
@@ -228,7 +240,8 @@ struct Canvas::Work {
                     }
                     I = End;
                 }
-                LayRow(On, Y, Held.X, First, Last);
+                RunsOf(First, Last);
+                LayRuns(On, Y, Held.X);
                 continue;
             }
             for (std::size_t I = 0; I < Wide; I++) {
@@ -246,7 +259,8 @@ struct Canvas::Work {
                     Last = static_cast<std::int32_t>(I);
                 }
             }
-            LayRow(On, Y, Held.X, First, Last);
+            RunsOf(First, Last);
+            LayRuns(On, Y, Held.X);
         }
         On.Touch(Rect{Held.X, Held.Y, Held.Width, Held.Height});
     }
@@ -396,7 +410,8 @@ void Canvas::LayCover(const std::uint8_t *Coverage, std::size_t Stride, Rect Lie
                          static_cast<std::uint32_t>(Last - First + 1), Room->Fills[0].Color());
             continue;
         }
-        Room->LayRow(*this, Y, At.X, First, Last);
+        Room->RunsOf(First, Last);
+        Room->LayRuns(*this, Y, At.X);
     }
     Touch(At);
 }
