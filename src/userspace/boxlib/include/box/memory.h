@@ -16,7 +16,7 @@ extern "C" {
 
 /* How many tags a heap can tell apart, and why it is that number: a block
  * remembers its tag in one byte of its header (block_t.tag, in a header held
- * at 32 bytes by a compile-time check in memory.c), and 0xFF is spoken for by
+ * at 32 bytes by a compile-time check in box/core/heap_blocks.h), and 0xFF is spoken for by
  * HEAP_TAG_NONE. 255 is therefore not a budget anyone chose — it is every id a
  * live block can be made to carry. The names themselves have no limit: each is
  * kept on the heap at the length it was given, so two tags can never become
