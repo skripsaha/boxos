@@ -9,6 +9,7 @@
 
 #include "boxos_pixel.h"
 #include "light.h"
+#include "paint_rows.h"
 
 namespace painter::core::lanes {
 
@@ -63,11 +64,15 @@ void Show(std::uint32_t *Out, const Pixel *Row, std::uint32_t Count, std::uint32
     }
 }
 
+void Gradient(Pixel *Out, const GradientWalk &Walk, std::uint32_t Count) { GradientPlain(Out, Walk, Walk.U, Walk.V, Count); }
+
+void Picture(Pixel *Out, const PictureWalk &Walk, std::uint32_t Count) { PicturePlain(Out, Walk, Walk.U, Walk.V, Count); }
+
 }  // namespace
 
 const Kit &Plain() noexcept
 {
-    static const Kit Made{LayColor, LayPaint, LayRow, Show};
+    static const Kit Made{LayColor, LayPaint, LayRow, Show, Gradient, Picture};
     return Made;
 }
 

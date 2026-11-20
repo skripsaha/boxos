@@ -35,7 +35,6 @@ private:
     enum class Kind : std::uint8_t { Solid, Gradient, Picture };
 
     bool GradientRow(std::int32_t Y, std::int32_t X0, std::uint32_t Count, Pixel *Out) const;
-    Pixel Along(std::uint32_t At) const noexcept;
     void PictureRow(std::int32_t Y, std::int32_t X0, std::uint32_t Count, Pixel *Out) const;
 
     Kind                                 What = Kind::Solid;
