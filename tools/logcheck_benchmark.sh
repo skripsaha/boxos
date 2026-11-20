@@ -39,7 +39,7 @@ run_benchmark() {
     chk $? "benchmark: a page of text set and drawn in the system's font, and how long it took said"
     local scene measured=1
     for scene in quiet shapes panels text fades tiles canvas everything; do
-        grep -aqE "^scene $scene — .*: [0-9.]+ frames a second; a frame every [0-9.]+ ms \(95% within [0-9.]+, 99% within [0-9.]+, worst [0-9.]+\), [0-9]+ late; the display [0-9.]+ ms a frame .* processor: the display [0-9.]+ cores, benchmark [0-9.]+ — (smooth|uneven|slideshow)$" "$L" ||
+        grep -aqE "^scene $scene — .*: [0-9.]+ frames a second; a frame every [0-9.]+ ms \(95% within [0-9.]+, 99% within [0-9.]+, worst [0-9.]+\), [0-9]+ late; the display [0-9.]+ ms a frame .*; benchmark [0-9.]+ ms a frame saying it.*; processor: the display [0-9.]+ cores, benchmark [0-9.]+ — (smooth|uneven|slideshow)$" "$L" ||
             measured=0
     done
     [ $measured = 1 ]

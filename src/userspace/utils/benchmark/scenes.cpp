@@ -199,12 +199,14 @@ bool Stage::Play(const char *Name, const char *What, const std::function<void(do
     Caption.SetText(Title);
 
     std::vector<double> Gaps, Costs;
-    std::uint64_t       Pixels = 0, From = 0, Last = 0, DisplayFrom = 0, OwnFrom = 0;
+    std::uint64_t       Pixels = 0, From = 0, Last = 0, DisplayFrom = 0, OwnFrom = 0, Saying = 0;
     const std::uint64_t Began  = clock_uptime_us();
     for (;;) {
         const std::uint64_t Before = Screen.Step();
-        Step(static_cast<double>(clock_uptime_us() - Began) / 1e6);
+        const std::uint64_t Asked  = clock_uptime_us();
+        Step(static_cast<double>(Asked - Began) / 1e6);
         Screen.PresentAll();
+        if (From != 0) Saying += clock_uptime_us() - Asked;
         if (Screen.Step() == Before) continue;   // nothing changed, nothing to show
         const std::optional<gui::Event> Shown = ShownOf(Screen.Step());
         if (!Shown) {
@@ -245,10 +247,10 @@ bool Stage::Play(const char *Name, const char *What, const std::function<void(do
     char Own[96] = "";
     if (Drawn != 0) std::snprintf(Own, sizeof Own, "; benchmark drew its pixels in %.2f ms a frame", Drawing / Drawn / 1000.0);
     Out.Say("scene %s — %s: %.1f frames a second; a frame every %.1f ms (95%% within %.1f, 99%% within %.1f, worst %.1f), %ld "
-            "late; the display %.2f ms a frame (most %.2f), %.0f pixels composed a frame%s; processor: the display %.2f cores, "
-            "benchmark %.2f — %s",
+            "late; the display %.2f ms a frame (most %.2f), %.0f pixels composed a frame; benchmark %.2f ms a frame saying "
+            "it%s; processor: the display %.2f cores, benchmark %.2f — %s",
             Name, What, PerSecond, Half, Most95, Most99, Sorted.back(), static_cast<long>(Late), Cost / Frames, CostMost,
-            static_cast<double>(Pixels) / Frames, Own, static_cast<double>(DisplayUs() - DisplayFrom) / 1e6 / Seconds,
+            static_cast<double>(Pixels) / Frames, static_cast<double>(Saying) / 1000.0 / Frames, Own, static_cast<double>(DisplayUs() - DisplayFrom) / 1e6 / Seconds,
             static_cast<double>(OwnUs() - OwnFrom) / 1e6 / Seconds, Verdict);
     return true;
 }
