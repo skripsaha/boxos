@@ -51,6 +51,7 @@
 
 #include "front.h"
 #include "input.h"
+#include "measure.h"
 
 namespace {
 
@@ -341,6 +342,7 @@ bool LanesKeys() noexcept
     while (touch_try_pop_tag(g_kb, &key)) {
         did = true;
         if (key.payload_len != sizeof(kb_event_t)) continue;
+        MeasureKey(key.timestamp_tsc);
         kb_event_t typed;
         memcpy(&typed, key.payload, sizeof(typed));
         if (FrontChord(typed)) continue;

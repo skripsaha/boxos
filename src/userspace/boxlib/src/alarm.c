@@ -9,13 +9,13 @@
 #include "box/touch.h"
 #include "boxos_decks.h"
 
-int alarm_set(uint64_t moment_ms)
+int alarm_set_us(uint64_t moment_us)
 {
     uint8_t         mbuf[96];
     ManifestBuilder mb;
     if (ManifestBuilderInit(&mb, mbuf, sizeof(mbuf)) != 0) return -ERR_INVALID_ARGUMENT;
     if (ManifestBuilderAddOp(&mb, DECK_SYSTEM, SYSTEM_OP_ALARM, 0, CRATE_INDEX_NONE, CRATE_INDEX_NONE,
-                             &moment_ms, sizeof(moment_ms)) != 0)
+                             &moment_us, sizeof(moment_us)) != 0)
         return -ERR_INVALID_ARGUMENT;
     if (ManifestBuilderFinalize(&mb) != 0) return -ERR_INVALID_ARGUMENT;
 
@@ -27,10 +27,10 @@ int alarm_set(uint64_t moment_ms)
 
 int alarm_cancel(void)
 {
-    return alarm_set(0);
+    return alarm_set_us(0);
 }
 
-bool alarm_heard(uint64_t *moment_ms)
+bool alarm_heard_us(uint64_t *moment_us)
 {
     static TouchTag tag = TOUCH_TAG_INVALID;
     if (tag == TOUCH_TAG_INVALID) tag = touch_pair_choose(touch_intern(ALARM_TOUCH_TAG));
@@ -40,6 +40,6 @@ bool alarm_heard(uint64_t *moment_ms)
     AlarmEvent heard;
     if (event.payload_len < sizeof(heard)) return false;
     memcpy(&heard, event.payload, sizeof(heard));
-    if (moment_ms) *moment_ms = heard.moment_ms;
+    if (moment_us) *moment_us = heard.moment_us;
     return true;
 }

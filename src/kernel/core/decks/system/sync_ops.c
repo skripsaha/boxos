@@ -20,10 +20,10 @@
  *     addr_wake runs on the K-Core, so KResultPush (which touches the cabin VMM)
  *     is safe there. The parker's step-6 lost-wakeup recheck can also CLAIM (when
  *     the watched value already changed) and complete synchronously.
- *   - TIMEOUT: armed via TouchQueueArmWake. When the timer fires (PIT IRQ),
- *     touch_queue_fire_wake passes the process's own baton (a never-drop
- *     embedded node, baton.h) — it does NO ResultRing/VMM work in the PIT
- *     tick. SyncTimeoutDeliver then runs on a K-Core: it CLAIMS the entry by
+ *   - TIMEOUT: armed via TouchQueueArmWake. When its moment comes (the touch
+ *     queue's interrupt), touch_queue_fire_wake passes the process's own baton
+ *     (a never-drop embedded node, baton.h) — it does NO ResultRing/VMM work in
+ *     the interrupt. SyncTimeoutDeliver then runs on a K-Core: it CLAIMS the entry by
  *     its state — linked, timed, deadline passed — (arbitrating against a
  *     racing addr_wake — exactly one delivers) and, on a win, KResultPushes
  *     ONE ERR_TIMEOUT Result, so the caller's result_wait returns AT the
@@ -51,6 +51,7 @@
 #include "process.h"
 #include "vmm.h"
 #include "touch.h"
+#include "pit.h"
 #include "touch_queue.h"
 #include "kring.h"        /* KResultPush — deliver the wake completion to ResultRing */
 #include "result.h"       /* Result */
@@ -59,7 +60,7 @@
 #include "klib.h"
 #include "atomics.h"
 #include "pid_allocator.h"   /* pid_life — the monotone per-slot generation decides "gone" exactly */
-#include "scheduler.h"   /* g_global_tick, SCHEDULER_DEFAULT_TICK_HZ */
+#include "scheduler.h"   /* sched_ring_home */
 #include "boxos_decks.h"
 
 /* -------------------------------------------------------------------------
@@ -149,16 +150,12 @@ static int SysAddrPark(const ManifestOp *op, Crate *crates,
      * never observes a half-armed entry.  (Between the unlink above and this
      * link the entry is in no chain, so wakers cannot reach it.)  Previously
      * these stores sat outside the lock, correct only by statement order. */
-    /* The deadline, if the caller named one, in the tick's own clock. Fixed
-     * before the link so the entry carries it from its first instant on the
-     * chain: the delivery judges by it, under this same lock. */
+    /* The deadline, if the caller named one, a moment of the touch queue's
+     * clock. Fixed before the link so the entry carries it from its first
+     * instant on the chain: the delivery judges by it, under this same lock. */
     uint64_t fire_at = 0;
-    if (timeout_ms > 0) {
-        uint64_t delay = ((uint64_t)timeout_ms * SCHEDULER_DEFAULT_TICK_HZ)
-                         / 1000ULL;
-        if (delay == 0) delay = 1;
-        fire_at = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED) + delay;
-    }
+    if (timeout_ms > 0)
+        fire_at = pit_get_uptime_us() + (uint64_t)timeout_ms * 1000u;
 
     spin_lock(&bucket->lock);
     entry->proc          = ctx->proc;
@@ -176,7 +173,7 @@ static int SysAddrPark(const ManifestOp *op, Crate *crates,
     spin_unlock(&bucket->lock);
 
     /* Step 4: arm the deadline (same helper SysTouchAwait uses). On expiry the
-     * PIT tick reschedules us (PROC_WORKING + IPI, in-IRQ, no VMM) AND passes
+     * fire reschedules us (PROC_WORKING + IPI, in-IRQ, no VMM) AND passes
      * this process's own baton (process_t.deadline_baton) to a K-Core, where
      * SyncTimeoutDeliver claims the park by its state — linked, timed, deadline
      * passed — and KResultPushes ERR_TIMEOUT, so the caller's result_wait
@@ -433,7 +430,7 @@ void SyncTimeoutDeliver(void *ctx)
 
     __atomic_store_n(&target->deadline_passed, 0u, __ATOMIC_SEQ_CST);
 
-    uint64_t now    = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED);
+    uint64_t now    = pit_get_uptime_us();
     uint32_t cookie = 0;
     if (!target->destroying &&
         AddrWaitClaimDue(&target->addr_wait_entry, now, &cookie)) {

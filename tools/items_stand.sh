@@ -34,7 +34,7 @@ trap 'rm -rf "$WORK"' EXIT
 D=src/userspace/display
 P=src/userspace/painter
 SOURCES="tools/items_stand*.cpp $D/animator.cpp $D/input.cpp $D/item_tree.cpp $D/item_draw.cpp $D/item_reception.cpp \
-         $D/compositor.cpp $D/cell_grid.cpp $D/cells_draw.cpp $D/console_model.cpp $D/mirror.cpp $D/frame.cpp \
+         $D/compositor.cpp $D/region.cpp $D/cell_grid.cpp $D/cells_draw.cpp $D/console_model.cpp $D/mirror.cpp $D/frame.cpp \
          $D/typesetter.cpp $(ls $P/src/core/*.cpp | grep -v system_fonts.cpp) $P/src/gui/changes.cpp $P/src/gui/items.cpp $P/src/gui/frame.cpp $P/src/gui/measure.cpp $P/src/gui/fonts.cpp $P/src/gui/font_opened.cpp \
          $P/src/items/*.cpp \
          src/userspace/typecase/src/*.cpp"
@@ -56,22 +56,31 @@ if [ "${1:-}" = sheet ]; then
     exit $?
 fi
 
-FLAGS="-g -O1 -Wall -Wextra -Werror -Wno-macro-redefined -fsanitize=address,undefined -fno-sanitize-recover=all"
-ARCHES=native
+# Under the memory and undefined-behaviour sanitizers, natively and on x86_64
+# where the host runs it; and once more under the thread sanitizer, for the
+# frame's tiles composed on several threads (display/helpers.h).
+FLAGS_MEMORY="-g -O1 -Wall -Wextra -Werror -Wno-macro-redefined -fsanitize=address,undefined -fno-sanitize-recover=all"
+FLAGS_THREADS="-g -O1 -Wall -Wextra -Werror -Wno-macro-redefined -fsanitize=thread"
+ARCHES="native threads"
 if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] && arch -x86_64 /usr/bin/true 2>/dev/null; then
-    ARCHES="native x86_64"
+    ARCHES="native x86_64 threads"
 fi
 HELD=0
 FAILED=0
 for ARCH in $ARCHES; do
     ARCHFLAG=""
-    [ "$ARCH" = native ] || ARCHFLAG="-arch $ARCH"
+    FLAGS=$FLAGS_MEMORY
+    case "$ARCH" in
+        native) ;;
+        threads) FLAGS=$FLAGS_THREADS ;;
+        *) ARCHFLAG="-arch $ARCH" ;;
+    esac
     { $CC_HOST $ARCHFLAG -std=c11 $FLAGS $INCLUDES -c src/userspace/boxlib/src/items_ring.c -o "$WORK/ring.$ARCH.o" &&
       $CXX_HOST $ARCHFLAG -std=c++23 $FLAGS $INCLUDES $SOURCES "$WORK/ring.$ARCH.o" -o "$WORK/stand.$ARCH"; } \
         > "$WORK/cc.$ARCH.log" 2>&1 ||
         { cat "$WORK/cc.$ARCH.log" | head -60; echo "items: harness failed — the stand did not build ($ARCH)"; exit 2; }
     echo "== items stand, $ARCH"
-    "$WORK/stand.$ARCH" checks | tee "$WORK/checks.$ARCH.log" | grep -v '^items stand:'
+    TSAN_OPTIONS="halt_on_error=1 abort_on_error=1" "$WORK/stand.$ARCH" checks 2>&1 | tee "$WORK/checks.$ARCH.log" | grep -v '^items stand:'
     H=$(sed -n 's/^items stand: \([0-9]*\) held.*/\1/p' "$WORK/checks.$ARCH.log")
     F=$(sed -n 's/^items stand: [0-9]* held, \([0-9]*\) failed/\1/p' "$WORK/checks.$ARCH.log")
     if [ -z "$H" ] || [ -z "$F" ]; then

@@ -10,6 +10,7 @@
 #include <optional>
 #include <utility>
 
+#include "measure.h"
 #include "painter/core/path.h"
 
 namespace items {
@@ -27,17 +28,11 @@ using painter::core::Transform;
 
 constexpr float PerPoint = 1.0f / ITEM_POINT;
 
-/* The rectangles damage is kept in at most: past them, the two that grow the
- * least by it are joined. */
-constexpr std::size_t DamageMost = 24;
-
 bool Holds(Rect Outer, Rect Inner) noexcept
 {
     return Inner.X >= Outer.X && Inner.Y >= Outer.Y && Inner.X + Inner.Width <= Outer.X + Outer.Width &&
            Inner.Y + Inner.Height <= Outer.Y + Outer.Height;
 }
-
-std::int64_t AreaOf(Rect Of) noexcept { return Of.Empty() ? 0 : std::int64_t{Of.Width} * Of.Height; }
 
 /* The whole pixels inside what Place lays Box of points on: an opaque item's
  * pixels it surely covers whole. */
@@ -108,51 +103,11 @@ Transform LocalOf(const Item &Of) noexcept
     return Made.Then(Transform::Translate(AX + X, AY + Y));
 }
 
-namespace {
-
-/* Area noted in rectangles reserved beforehand: in none that holds it
- * already; past them, joined to the one it grows the least. */
-void Note(std::vector<Rect> &Into, Rect Area) noexcept
-{
-    for (const Rect &Each : Into)
-        if (Holds(Each, Area)) return;
-    if (Into.size() < Into.capacity()) {
-        Into.push_back(Area);
-        return;
-    }
-    std::size_t  Best  = 0;
-    std::int64_t Least = -1;
-    for (std::size_t I = 0; I < Into.size(); I++) {
-        const std::int64_t Grows = AreaOf(Into[I].Join(Area)) - AreaOf(Into[I]);
-        if (Least < 0 || Grows < Least) Least = Grows, Best = I;
-    }
-    if (Into.empty()) return;
-    Into[Best] = Into[Best].Join(Area);
-}
-
-/* Overlapping rectangles joined, again until none overlaps. */
-void JoinOverlapping(std::vector<Rect> &Made)
-{
-    for (bool Joined = true; Joined;) {
-        Joined = false;
-        for (std::size_t I = 0; I < Made.size() && !Joined; I++)
-            for (std::size_t J = I + 1; J < Made.size() && !Joined; J++)
-                if (!Made[I].Intersect(Made[J]).Empty() || Holds(Made[I], Made[J]) || Holds(Made[J], Made[I])) {
-                    Made[I] = Made[I].Join(Made[J]);
-                    Made.erase(Made.begin() + static_cast<std::ptrdiff_t>(J));
-                    Joined = true;
-                }
-    }
-}
-
-}  // namespace
-
 void Compositor::Damage(Rect Area) noexcept
 {
     Area = Area.Intersect(Screen);
-    if (Area.Empty()) return;
-    Note(Waiting, Area);
-    if (Owning) Note(Own, Area);
+    Waiting.Add(Area);
+    if (Owning) Own.Add(Area);
 }
 
 void Compositor::Vanish(AreaState &Area, const std::vector<std::uint32_t> &Items)
@@ -187,6 +142,7 @@ void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, 
         }
         Drawing &Drawn = *Of->Drawn;
         if (Of->Redraw) {
+            const Clocked Spent{Part::Prepare};
             Program.KeptBytes -= Drawn.Bytes;
             Drawn.Bytes = 0;
             const bool Sized = Prepare(*Of, Program.From, Drawn, Program.KeptBytes < KeptMost);
@@ -231,6 +187,16 @@ void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, 
                           (DisabledOf(Of->Said) ? Program.From.Look->Faint : 1.0f);
         if (Of->Kind != ITEM_GROUP) {
             Entry Made{Entry::Kind::Draw, Of, Place, Opacity * Own, Now, {}, Fade, Turning || Of->Turning};
+            if (Made.Turning) {
+                /* What a turn or a scale lays made now: painting changes
+                 * nothing of a drawing (item_draw.h Paint). */
+                KeepTurning(Drawn);
+                if (Fade) KeepTurning(*Fade->Was.Drawn);
+            }
+            /* The shadows of what is drawn straight, made now for where it
+             * lies: once, not again on every tile it falls on. */
+            KeepShadows(*Of, Drawn, Program.From, Place, Made.Turning, Program.KeptBytes < KeptMost);
+            if (Fade) KeepShadows(Fade->Was, *Fade->Was.Drawn, Program.From, Place, Made.Turning, Program.KeptBytes < KeptMost);
             if (Fade) {
                 /* Fading from another look: it hides nothing beneath. */
             } else if (Plain && Drawn.Opaque && Opacity * Own >= 1.0f && Place.B == 0 && Place.C == 0) {
@@ -268,14 +234,12 @@ void Compositor::Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, 
 void Compositor::Take(std::span<AreaState *const> Areas, const Theme &Look)
 {
     for (AreaState *Area : Areas) {
-        Own.clear();
+        Own.Clear();
         Owning = true;
         TakeOne(*Area, Look);
         Owning = false;
         /* What its own changes cost, whatever else the frame composes. */
-        JoinOverlapping(Own);
-        Area->Composed = 0;
-        for (const Rect &Each : Own) Area->Composed += static_cast<std::uint64_t>(AreaOf(Each));
+        Area->Composed = Own.Pixels();
     }
 }
 
@@ -311,26 +275,6 @@ void Compositor::TakeOne(AreaState &Area, const Theme &Look)
     Area.Items.Taken();
 }
 
-std::vector<Rect> Compositor::Rects()
-{
-    std::vector<Rect> Made = Waiting;
-    Waiting.clear();
-    JoinOverlapping(Made);
-    /* Too many: the two that grow the least joined. */
-    while (Made.size() > DamageMost) {
-        std::size_t  BestI = 0, BestJ = 1;
-        std::int64_t Least = -1;
-        for (std::size_t I = 0; I < Made.size(); I++)
-            for (std::size_t J = I + 1; J < Made.size(); J++) {
-                const std::int64_t Grows = AreaOf(Made[I].Join(Made[J])) - AreaOf(Made[I]) - AreaOf(Made[J]);
-                if (Least < 0 || Grows < Least) Least = Grows, BestI = I, BestJ = J;
-            }
-        Made[BestI] = Made[BestI].Join(Made[BestJ]);
-        Made.erase(Made.begin() + static_cast<std::ptrdiff_t>(BestJ));
-    }
-    return Made;
-}
-
 bool Compositor::Hidden(Rect Area, std::span<AreaState *const> Areas) const noexcept
 {
     for (std::size_t A = Areas.size(); A-- > 0;) {
@@ -343,23 +287,42 @@ bool Compositor::Hidden(Rect Area, std::span<AreaState *const> Areas) const noex
     return false;
 }
 
-void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Corner, Rect Area,
-                         std::span<AreaState *const> Areas, const Theme &Look)
+Compositor::From Compositor::Lowest(Rect Area, std::span<AreaState *const> Areas) const noexcept
 {
-    /* The topmost opaque item covering the rectangle whole: nothing beneath
-     * it is drawn. */
-    std::size_t StartArea = 0, StartEntry = 0;
-    bool        Found     = false;
-    for (std::size_t A = Areas.size(); A-- > 0 && !Found;) {
+    for (std::size_t A = Areas.size(); A-- > 0;) {
         const AreaState &Each = *Areas[A];
         if (!Each.Shown) continue;
         for (std::size_t E = Each.List.size(); E-- > 0;)
-            if (Each.List[E].What == Entry::Kind::Draw && Holds(Each.List[E].Hides, Area)) {
-                StartArea = A, StartEntry = E, Found = true;
-                break;
-            }
-        if (!Found && Each.Paged && Holds(Each.Place, Area)) StartArea = A, StartEntry = 0, Found = true;
+            if (Each.List[E].What == Entry::Kind::Draw && Holds(Each.List[E].Hides, Area)) return From{A, E};
+        if (Each.Paged && Holds(Each.Place, Area)) return From{A, 0};
     }
+    return From{0, 0};
+}
+
+bool Compositor::OwnGlyphs(Rect Area, std::span<AreaState *const> Areas) const noexcept
+{
+    const From Start = Lowest(Area, Areas);
+    for (std::size_t A = Start.Area; A < Areas.size(); A++) {
+        const AreaState &Each = *Areas[A];
+        if (!Each.Shown || Each.Place.Intersect(Area).Empty()) continue;
+        for (std::size_t E = A == Start.Area ? Start.Entry : 0; E < Each.List.size(); E++) {
+            const Entry &One = Each.List[E];
+            if (One.What != Entry::Kind::Draw || One.Device.Intersect(Area).Empty()) continue;
+            if (items::OwnGlyphs(*One.Of, *One.Of->Drawn, One.Place, One.Turning)) return true;
+            if (One.Fade && items::OwnGlyphs(One.Fade->Was, *One.Fade->Was.Drawn, One.Place, One.Turning)) return true;
+        }
+    }
+    return false;
+}
+
+void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Corner, Rect Area,
+                         std::span<AreaState *const> Areas, const Theme &Look) const
+{
+    /* The topmost opaque item covering the rectangle whole: nothing beneath
+     * it is drawn. */
+    const From        Start      = Lowest(Area, Areas);
+    const std::size_t StartArea  = Start.Area;
+    const std::size_t StartEntry = Start.Entry;
 
     /* Every canvas drawn on lies somewhere on the screen: Target at Corner,
      * a group's own picture at Area's corner. */
@@ -371,7 +334,7 @@ void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Cor
     const painter::core::Point Picture{Area.X, Area.Y};
     Target.PushClip(Into(Area, Corner));
     for (std::size_t A = StartArea; A < Areas.size(); A++) {
-        AreaState &Each = *Areas[A];
+        const AreaState &Each = *Areas[A];
         if (!Each.Shown || Each.Place.Intersect(Area).Empty()) continue;
         Target.PushClip(Into(Each.Place, Corner));
         if (Each.Paged && (A > StartArea || StartEntry == 0))
@@ -411,6 +374,7 @@ void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Cor
                 /* Fading from another look: the two looks drawn apart, the
                  * old one walked toward the new as far as it has faded, laid
                  * as one. */
+                const Clocked              Spent{::Part::Faded};
                 const painter::core::Point Here{Part.X, Part.Y};
                 Paint(One.Fade->Was, *One.Fade->Was.Drawn, Each.Program.From, *Old, Moved(One.Place, Here), 1.0f, One.Turning);
                 Paint(*One.Of, *One.Of->Drawn, Each.Program.From, *New, Moved(One.Place, Here), 1.0f, One.Turning);
@@ -425,14 +389,17 @@ void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Cor
             case Entry::Kind::ClipEnd:
                 Current().PopClip();
                 break;
-            case Entry::Kind::LayerBegin:
+            case Entry::Kind::LayerBegin: {
+                const Clocked Spent{::Part::Layered};
                 Layers.push_back(Layer{One.Device.Intersect(Area).Empty()
                                            ? std::nullopt
                                            : painter::core::Canvas::Make(static_cast<std::uint32_t>(Area.Width),
                                                                          static_cast<std::uint32_t>(Area.Height)),
                                        One.Opacity});
                 break;
+            }
             case Entry::Kind::LayerEnd: {
+                const Clocked Spent{::Part::Layered};
                 if (Layers.empty()) break;
                 Layer Done = std::move(Layers.back());
                 Layers.pop_back();

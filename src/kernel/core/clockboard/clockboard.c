@@ -3,6 +3,7 @@
 #include "vmm.h"
 #include "klib.h"
 #include "pit.h"   /* pit_get_uptime_us/ms, pit_get_ticks — the kernel's one clock */
+#include "atomics.h" /* rdtsc */
 
 /* The single shared page. Allocated once in clockboard_init, never freed. */
 static uint64_t    s_clockboard_phys = 0;
@@ -20,6 +21,7 @@ void clockboard_init(void)
     s_clockboard_phys = (uint64_t)page;
     s_clockboard_kva  = (ClockBoard *)vmm_phys_to_virt(s_clockboard_phys);
 
+    s_clockboard_kva->seq             = 0;
     s_clockboard_kva->uptime_us       = 0;
     s_clockboard_kva->uptime_ms       = 0;
     s_clockboard_kva->tick_count      = 0;
@@ -53,12 +55,20 @@ void clockboard_publish_uptime(void)
      * Single-writer by construction: the BSP's IRQ0 handler once the machine
      * is running, and kernel_main once before any Ring 3 code exists to read
      * the page. IRQ0 is addressed physically to the BSP's LAPIC, so no App
-     * Core ever enters here. Plain stores; cross-core readers see the
-     * naturally-aligned 8-byte word atomicity x86-64 guarantees. */
-    uint64_t us = pit_get_uptime_us();
-    s_clockboard_kva->uptime_us  = us;
-    s_clockboard_kva->uptime_ms  = us / 1000ULL;
-    s_clockboard_kva->tick_count = pit_get_ticks();
+     * Core ever enters here. The words are written between two steps of
+     * `seq`, odd meanwhile; x86-64 keeps stores in their order, and the
+     * volatile words keep the compiler's. The TSC is read beside the clock,
+     * so a reader's interpolation starts where the clock was read. */
+    ClockBoard    *board = s_clockboard_kva;
+    const uint64_t seq   = board->seq;
+    board->seq = seq + 1;
+    const uint64_t us  = pit_get_uptime_us();
+    const uint64_t tsc = rdtsc();
+    board->uptime_us  = us;
+    board->uptime_ms  = us / 1000ULL;
+    board->tick_count = pit_get_ticks();
+    board->tsc_at     = tsc;
+    board->seq = seq + 2;
 }
 
 uint64_t clockboard_uptime_ms(void)

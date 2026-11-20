@@ -9,11 +9,16 @@
  * did not. */
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <functional>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "frame.h"
@@ -468,12 +473,158 @@ void CheckFrame(Tally &Count)
     Count.Check(Grid->Holds() && !Over.Area.Items.Find(3)->Grid->Holds(), "frame: the cells hidden, the console's caret is the one");
 }
 
+/* The display's helpers on the host: threads that take a frame's tiles beside
+ * the caller, as the display's strands do (display/helpers.cpp). */
+class HostHands final : public Hands {
+public:
+    explicit HostHands(std::size_t Helpers)
+    {
+        for (std::size_t I = 0; I < Helpers; I++)
+            Threads.emplace_back([this, Hand = I + 1] {
+                std::uint64_t Seen = 0;
+                for (;;) {
+                    {
+                        std::unique_lock<std::mutex> Held(Lock);
+                        Wake.wait(Held, [&] { return Stop || Round != Seen; });
+                        if (Stop) return;
+                        Seen = Round;
+                    }
+                    Take(Hand);
+                }
+            });
+    }
+    ~HostHands() override
+    {
+        {
+            std::lock_guard<std::mutex> Held(Lock);
+            Stop = true;
+        }
+        Wake.notify_all();
+        for (std::thread &Each : Threads) Each.join();
+    }
+    std::size_t Count() const noexcept override { return Threads.size() + 1; }
+    void        Run(std::size_t Many, const std::function<void(std::size_t, std::size_t)> &Doing) noexcept override
+    {
+        {
+            std::lock_guard<std::mutex> Held(Lock);
+            Work = &Doing;
+            Jobs = Many;
+            Next.store(0);
+            Done.store(0);
+            Round++;
+        }
+        Wake.notify_all();
+        Take(0);
+        while (Done.load() < Many) std::this_thread::yield();
+    }
+
+private:
+    void Take(std::size_t Hand)
+    {
+        for (std::size_t Job; (Job = Next.fetch_add(1)) < Jobs;) {
+            (*Work)(Job, Hand);
+            Done.fetch_add(1);
+        }
+    }
+
+    std::vector<std::thread>                              Threads;
+    std::mutex                                            Lock;
+    std::condition_variable                               Wake;
+    std::uint64_t                                         Round = 0;
+    bool                                                  Stop  = false;
+    const std::function<void(std::size_t, std::size_t)> *Work  = nullptr;
+    std::size_t                                           Jobs  = 0;
+    std::atomic<std::size_t>                              Next{0}, Done{0};
+};
+
+/* A frame's tiles composed on several threads give the very pixels one
+ * composing them all gives: a page of panels with shadows moving, words, a
+ * group seen through, a shape turned by an animation, cells of a program's
+ * own — tiles of every kind, the cells' on the main thread alone. */
+void CheckFrameHands(Tally &Count)
+{
+    std::vector<ItemCell> Mine(12 * 3);
+    for (ItemCell &Each : Mine) Each = RandomCell();
+    const auto Run = [&Mine](Hands *With, std::vector<std::uint64_t> &Prints) {
+        Typesetter Type(std::nullopt, 16);
+        FrameGlass Glass;
+        Glass.Width  = 900;
+        Glass.Height = 600;
+        Glass.Type   = &Type;
+        std::shared_ptr<CellGrid> Grid = FrameStart(Glass);
+        FrameUse(With);
+        items::ProgramState Program = HostProgram(FrameTheme(), 1.0f);
+        Program.From.Cells          = &FrameCells();
+        Bench   On(Program);
+        Changes Say;
+        On.Area.Place = Rect{0, 0, 900, 600};
+        On.Area.Shown = true;
+        Say.Create(1, Kind::Shape, ITEM_AREA, ITEM_TOP, Role::Page);
+        Say.Size(1, {900, 600});
+        for (std::uint32_t I = 0; I < 24; I++) {
+            const std::uint32_t Id = 10 + I;
+            Say.Create(Id, Kind::Shape);
+            Say.Size(Id, {120, 70});
+            Say.Corners(Id, painter::core::Corners::All(12));
+            const painter::gui::Fill Ink = painter::gui::Fill::Of(Color::Rgb(static_cast<std::uint8_t>(40 + I * 8), 120, 200));
+            Say.Fills(Id, std::span(&Ink, 1));
+            Say.Shadows(Id, std::vector<painter::gui::Shadow>{painter::gui::Shadow{{0, 6}, 14, 0, Color::Rgba(0, 0, 0, 120), false}});
+        }
+        for (std::uint32_t I = 0; I < 8; I++) {
+            Say.Create(40 + I, Kind::Text, ITEM_AREA, ITEM_TOP, Role::Body);
+            Say.Place(40 + I, {30, 40 + 60 * static_cast<float>(I)});
+        }
+        Say.Create(60, Kind::Group);
+        Say.Place(60, {500, 300});
+        Say.Opacity(60, 0.6f);
+        Say.Create(61, Kind::Shape, 60, ITEM_TOP, Role::None);
+        Say.Size(61, {260, 160});
+        const painter::gui::Fill Veil = painter::gui::Fill::Of(Color::Rgb(220, 90, 60));
+        Say.Fills(61, std::span(&Veil, 1));
+        Say.Create(70, Kind::Cells, ITEM_AREA, ITEM_TOP, Role::Code);
+        Say.Place(70, {700, 20});
+        Say.Grid(70, 12, 3);
+        SayRows(Say, 70, Mine, 12);
+        Say.Create(80, Kind::Shape);
+        Say.Place(80, {600, 100});
+        Say.Size(80, {90, 90});
+        const painter::gui::Fill Spun = painter::gui::Fill::Of(Color::Rgb(250, 200, 60));
+        Say.Fills(80, std::span(&Spun, 1));
+        Say.Shadows(80, std::vector<painter::gui::Shadow>{painter::gui::Shadow{{0, 4}, 8, 0, Color::Rgba(0, 0, 0, 100), false}});
+        Say.Animate(painter::gui::Animation::Linear(std::chrono::milliseconds(1000)), [&] { Say.Turn(80, 90); });
+        std::vector<items::AreaState *> Programs{&On.Area};
+        Mirror Shown(Glass.Width, Glass.Height);
+        for (std::uint32_t Frame = 0; Frame < 24; Frame++) {
+            for (std::uint32_t I = 0; I < 24; I++)
+                Say.Place(10 + I, {static_cast<float>((I * 97 + Frame * (5 + I)) % 760), static_cast<float>((I * 53 + Frame * (3 + I % 5)) % 510)});
+            for (std::uint32_t I = 0; I < 8; I++) Say.Text(40 + I, "line " + std::to_string(I) + " of frame " + std::to_string(Frame));
+            On.Step(Say);
+            On.Advance(1000 + Frame * 40000, FrameTheme());
+            (void)FrameCompose(Shown, Programs);
+            std::uint64_t Print = 1469598103934665603u;
+            for (std::uint32_t Y = 0; Y < Glass.Height; Y++)
+                for (std::uint32_t X = 0; X < Glass.Width; X++) Print = (Print ^ Shown.Row(Y)[X]) * 1099511628211u;
+            Prints.push_back(Print);
+        }
+        FrameUse(nullptr);
+    };
+    std::vector<std::uint64_t> Alone, Again, Together;
+    Run(nullptr, Alone);
+    Run(nullptr, Again);
+    HostHands Three(3);
+    Run(&Three, Together);
+    Count.Check(Alone.size() == 24 && Alone == Again && Alone == Together,
+                "frame: 24 frames of panels moving, words, a group seen through, a shape turning and cells, their tiles composed on four "
+                "threads, are the very pixels one thread composes");
+}
+
 }  // namespace
 
 void CheckCells(Tally &Count)
 {
     CheckLanguage(Count);
     CheckFrame(Count);
+    CheckFrameHands(Count);
 }
 
 }  // namespace stand

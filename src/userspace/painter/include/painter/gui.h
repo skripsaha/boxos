@@ -58,7 +58,7 @@ typedef struct {
     int      seen;             /* the area is shown, not behind */
     uint32_t character;        /* a key's, Unicode; 0 for a key that types none */
     uint8_t  scancode, mods;
-    uint64_t moment;           /* the alarm's, of the ClockBoard's uptime in ms */
+    uint64_t moment;           /* the alarm's, of the ClockBoard's uptime in µs */
     uint32_t number;           /* an animation's */
     int      finished;         /* every animation of it ran to its end; none was cut */
     int      came;             /* GUI_EVENT_FOCUS: it came to the item */

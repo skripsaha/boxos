@@ -7,7 +7,7 @@
  * A StrandPool is a per-strand cache of free heap blocks layered OVER the one
  * global-locked boxlib heap (memory.c). Each strand owns exactly one pool, so
  * the malloc/free fast path is single-writer and needs no lock — yet the global
- * heap stays the single source of truth (a cached block is still `free=0`; the
+ * heap stays the single source of truth (a cached block is still USED; the
  * pool only holds a private LIFO of checked-out-but-idle blocks).
  *
  * Pools live in a cabin-persistent slab in boxlib BSS so they SURVIVE the unmap

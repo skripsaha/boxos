@@ -3,9 +3,9 @@
  * — plain, SSE2, AVX2 (painter/core/cpu_path.h) — draws the same scenes of
  * every kind of thing, and scenes of text in the system's fonts; each must
  * make the very pixels the plain way makes, and write the very numbers to
- * the glass, near and dithered. Then how long each way takes, for a frame of
- * 1920x1080, and how long setting and drawing a page of text takes. The last line says PASS when
- * every way is alike, FAIL when one is not. The host's draw stand
+ * the glass, near and dithered. The last line says PASS when every way is
+ * alike, FAIL when one is not; how long each takes is `benchmark graphics`'s
+ * to say. The host's draw stand
  * (tools/draw_stand.sh) holds the engine to the brush and to exact areas;
  * this holds it on the machine. */
 
@@ -91,12 +91,7 @@ int main()
         if (Wrong) std::printf("drawcheck: %s unlike the plain way in %u of %u scenes\n", CpuPathName(static_cast<CpuPath>(Way)), Wrong, Scenes);
         Alike = Alike && !Wrong;
     }
-    for (std::uint8_t Way = 0; Way <= static_cast<std::uint8_t>(Best); Way++) {
-        UseCpuPath(static_cast<CpuPath>(Way));
-        drawcheck::SaySpeed();
-    }
     UseCpuPath(Best);
-    drawcheck::SayTextSpeed(*Book);
     std::printf(Alike ? "drawcheck: PASS — every way the processor offers draws the plain way's very pixels\n"
                       : "drawcheck: FAIL — a way of the processor's draws other pixels than the plain way\n");
     return Alike ? 0 : 1;

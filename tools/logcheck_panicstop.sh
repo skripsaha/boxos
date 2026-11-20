@@ -30,8 +30,8 @@
 # no less whole for what came after it — a sixth the same after the dump, and
 # a seventh while the owner stands, by an injection, inside the drain at its
 # account's end: the account said whole, and on a wire gone over to its
-# interrupt not yet out. Four cores, so that a K-Core other than the BSP exists
-# (amp_calculate_kcores: log2 of the cores). STRICT, the BIOS legs panic() and
+# interrupt not yet out. Eight cores, so that a K-Core other than the BSP exists
+# (amp_calculate_kcores: log2 of the physical cores, less one). STRICT, the BIOS legs panic() and
 # the breaks inside it and the UEFI legs the dump: the accounts share the one
 # claim and the one stop, and either firmware hands the kernel the same LAPIC,
 # so each account is put once and each firmware once.
@@ -59,7 +59,7 @@
 # panicstopmut puts ten mutants of the stop, each turning a leg it weighs.
 # ---------------------------------------------------------------------------
 
-PANICSTOP_CORES=4
+PANICSTOP_CORES=8
 PANICSTOP_HELD='^\[PANICSTOP\] the BSP takes the console'
 PANICSTOP_PANIC='KERNEL PANIC'
 # The line the nested case breaks off in, up to the string that faults.

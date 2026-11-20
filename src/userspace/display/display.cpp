@@ -95,8 +95,10 @@
 #include "frame.h"
 #include "painter/core/system_fonts.h"
 #include "front.h"
+#include "measure.h"
 #include "lanes.h"
 #include "ring.h"
+#include "helpers.h"
 #include "scene.h"
 #include "typesetter.h"
 
@@ -135,6 +137,8 @@ RingFollower g_ring;
 std::vector<items::AreaState *> g_order; // the areas, bottom to top, for a frame
 std::vector<ItemCell> g_glass;           // a text page's cells as an effect over the glass shows them
 bool g_dirty;                      // a frame is due whatever changed: an effect's, the glass given back
+std::uint64_t g_slot = UINT64_MAX; // the sixtieth of a second the last frame was put together in
+std::uint64_t g_withheld;          // the moment a frame held back for its sixtieth is due, µs; 0 none
 bool g_effect_was;                 // an effect lay over the glass at the last frame
 TouchTag g_died = TOUCH_TAG_INVALID;
 
@@ -246,14 +250,29 @@ void HoldFrame(const ConsoleRun &Run, std::uint32_t Lane)
 // again the moment it is lifted — and each area told what it showed.
 void Present()
 {
-    const std::uint64_t Now = clock_uptime_us();
-    AreasAnimate(Now);
-    InputFrame(Now);
+    const std::uint64_t Began = MeasureTicks();
+    const std::uint64_t Now   = clock_uptime_us();
+    {
+        const Clocked Spent{Part::Animate};
+        AreasAnimate(Now);
+        InputFrame(Now);
+    }
     if (SceneOn()) return;
     AreasFlow(g_model->RowsGone());
     const bool Due = FrameDue(*g_model, AreasWant());
     if (!Due && !g_dirty) return;
-    g_dirty = false;
+    /* One frame a sixtieth of a second at most: what changed within one is
+     * put together once, at the next — so a program that changes a thousand
+     * times a second costs sixty frames, and the first change after a quiet
+     * moment is drawn at once. */
+    const std::uint64_t Slot = Now * 60u / 1000000u;
+    if (Slot == g_slot) {
+        g_withheld = items::FrameAfter(Now);
+        return;
+    }
+    g_slot     = Slot;
+    g_withheld = 0;
+    g_dirty    = false;
     try {
         AreasInOrder(g_order);
     } catch (...) {
@@ -265,6 +284,8 @@ void Present()
     const bool       Effect = EffectsOn();
     if (g_easel->Pixels()) {
         const FrameCost Cost = FrameCompose(g_easel->Picture(), g_order);
+        MeasureFrame(Began, Cost.Pixels);
+        const Clocked Spent{Part::Flush};
         if (Effect) {
             g_easel->FlushThrough([&Look](const std::uint32_t *Picture, std::size_t Stride, std::uint32_t Width,
                                           std::uint32_t Height, std::uint32_t *Glass, std::size_t GlassStride,
@@ -276,6 +297,7 @@ void Present()
             if (g_effect_was) g_easel->Picture().Refresh();
             g_easel->Flush();
         }
+        MeasureGlassed();
         AreasShown(Cost.Micros, Cost.Pixels);
     } else {
         Caret At;
@@ -371,7 +393,7 @@ bool ScreenStep()
     return Back;
 }
 
-// The moment the alarm is set for, 0 when none is.
+// The moment the alarm is set for, µs of uptime; 0 when none is.
 std::uint64_t g_alarm;
 
 // The display's settings watched: how things move takes effect at once.
@@ -413,8 +435,9 @@ bool EffectStep()
 {
     std::uint64_t Moment;
     bool Heard = false;
-    while (alarm_heard(&Moment)) {
+    while (alarm_heard_us(&Moment)) {
         Heard = true;
+        MeasureAlarm(Moment);
         if (Moment == g_alarm) g_alarm = 0;
     }
     const bool Changed = EffectsStep();
@@ -422,19 +445,19 @@ bool EffectStep()
     return Changed || Heard;
 }
 
-// The alarm for the effect's next frame or its end, in place of the one set:
-// only when that moment has changed, and none while no effect lies over the
-// glass.
+// The alarm for the next frame anything wants — an effect's, the scene's, an
+// animation's, the display's own — or an effect's end, in place of the one
+// set: only when that moment has changed, and none while nothing waits for
+// one. Kept to the microsecond: a frame due on the frames' grid is drawn on it.
 void SetAlarm()
 {
-    const std::uint64_t Areas  = AreasDue();
+    const std::uint64_t Effect = EffectsDue(), Scene = SceneDue();
     std::uint64_t       Due    = 0;
-    const std::uint64_t Own = InputDue();
-    for (const std::uint64_t Each : {EffectsDue(), SceneDue(), Areas ? (Areas + 999) / 1000 : 0, Own ? (Own + 999) / 1000 : 0})
+    for (const std::uint64_t Each : {Effect * 1000u, Scene * 1000u, AreasDue(), InputDue(), g_withheld})
         if (Each != 0) Due = Due == 0 ? Each : std::min(Due, Each);
     if (Due == g_alarm) return;
     if (Due == 0) alarm_cancel();
-    else alarm_set(Due);
+    else alarm_set_us(Due);
     g_alarm = Due;
 }
 
@@ -773,6 +796,7 @@ std::optional<typecase::Font> PersonsFont()
 
 bool Rotate()
 {
+    const Clocked Spent{Part::Rotate};
     bool Moved = false;
     if (LanesKeys()) {
         Moved = true;
@@ -859,6 +883,7 @@ int main(void)
     Glass.Vacated = FrameVacated;
     AreasStart(Glass);
     InputStart(FrameScreen(), AreasScale(), Glass.Text, FrameTheme());
+    if (!Glass.Text) HelpersStart();
     MotionRead();
     ThemeRead();
     if (settings_watch_begin(&g_settings) != 0) {
@@ -897,6 +922,7 @@ int main(void)
     const std::uint32_t Me = Info->pid;
 
     for (;;) {
+        MeasureSecond();
         const bool Moved = Rotate();
         Present();
         if (Moved) continue;
@@ -919,7 +945,10 @@ int main(void)
             LanesBellsTake();
             continue;
         }
-        box_turn_in(Mark);
+        {
+            const Clocked Spent{Part::Idle};
+            box_turn_in(Mark);
+        }
         LanesBellsTake();
     }
 }

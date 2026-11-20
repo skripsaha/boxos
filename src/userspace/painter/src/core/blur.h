@@ -20,14 +20,16 @@ struct BlurBoxes {
  * blur. */
 BlurBoxes BoxesFor(float Sigma) noexcept;
 
-/* Plane — Width x Height values, the blurred picture in its middle, Reach of
- * nothing round it — blurred where it lies, each value the boxes' rounded
- * mean of those round it, past the plane's edge nothing. */
+/* Plane — Width x Height values of a mask, none above 255, the blurred
+ * picture in its middle, Reach of nothing round it — blurred where it lies,
+ * each value the boxes' rounded mean of those round it, past the plane's edge
+ * nothing. */
 void BlurPlane(std::uint32_t *Plane, std::int32_t Width, std::int32_t Height, const BlurBoxes &Boxes);
 
 /* The same for each of a pixel's four channels in one plane of
- * Width x Height pixels, four values each, the plane's edge held — what lies
- * past it as its edge pixel — so a blurred backdrop keeps its edge colour. */
+ * Width x Height pixels, four values each, none above 65535, the plane's edge
+ * held — what lies past it as its edge pixel — so a blurred backdrop keeps
+ * its edge colour. */
 void BlurPixels(std::uint32_t *Plane, std::int32_t Width, std::int32_t Height, const BlurBoxes &Boxes);
 
 }  // namespace painter::core::engine

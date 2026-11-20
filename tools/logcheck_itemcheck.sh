@@ -109,11 +109,12 @@ run_itemcheck() {
         chain=$(printf '%s' "$line" | sed -nE 's/.*both ends told after ([0-9]+) ms;.*/\1/p')
         if [ "$name" = framebuffer ]; then
             [ -n "$fade" ] && [ "$fade" -ge 300 ] && [ "$fade" -le 450 ] && [ "$chain" -ge 400 ] && [ "$chain" -le 550 ] &&
-                printf '%s' "$line" | grep -q "every end as it was"
-            chk $? "itemcheck ($name): things in time played by the display, each end told by its time (a fade of 300 ms: $fade; two of 200 one after another: $chain), one said over told cut"
+                printf '%s' "$line" | grep -q "said over, told cut: every end as it was"
+            chk $? "itemcheck ($name): things in time played by the display, each end told by its time (a fade of 300 ms: $fade; two of 200 one after another: $chain), one shown and said over told cut"
         else
-            [ -n "$fade" ] && [ "$fade" -le 100 ] && [ "$chain" -le 100 ] && printf '%s' "$line" | grep -q "every end as it was"
-            chk $? "itemcheck ($name): on the text page every change at once, each end told at once ($fade, $chain ms), one said over told cut"
+            [ -n "$fade" ] && [ "$fade" -le 100 ] && [ "$chain" -le 100 ] &&
+                printf '%s' "$line" | grep -q "said over, told ended: every end as it was"
+            chk $? "itemcheck ($name): on the text page every change at once, each end told at once ($fade, $chain ms), one shown and said over told ended, as it went"
         fi
         grep -aqE "itemcheck: from C — .*: every step shown" "$L"
         chk $? "itemcheck ($name): painter::gui's C face held from a program's C"

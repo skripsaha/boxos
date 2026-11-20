@@ -32,7 +32,8 @@
 # drawing engine on a processor of SSE2 and on one of AVX2, every way it
 # offers drawing the plain way's very pixels), itemcheck (a program's items
 # said and shown a step at a time, every step shown and what each frame
-# cost), dedup (a copy laid on its
+# cost), benchmark (`benchmark graphics` run to its end: the engine every way,
+# eight scenes, nothing refused, its file read back off the image), dedup (a copy laid on its
 # original by the pass after a Tally), and volume-read's self-test over the
 # image the build lays.
 # Beside them the host's own stands, which no volume touches: boxasm, the
@@ -85,7 +86,7 @@ GATES_LOGCHECK="healthy unattended byname quill quillmut census lockrankmut repl
                 stand standusb standmut mkfs crewcrash fare faremut"
 GATES_POWERCUT="selftest noanchor noanchormut nextfid hog halt race overwrite logger tipin sessions
                 replug machineb spared undonecut engross dedup firstflushmut lastflushmut booknextfidmut stitchmut"
-GATES_OTHER="framerefuse bookboot loadersettings panel crossings scene drawcheck itemcheck dedup volread_selftest boxasm format form recipe elf box pack inside settings typecase draw items"
+GATES_OTHER="framerefuse bookboot loadersettings panel crossings scene drawcheck itemcheck benchmark dedup volread_selftest boxasm format form recipe elf box pack inside settings typecase draw items"
 GATES_LONG="loggerhour loggerhourmut"
 
 gate_names() {

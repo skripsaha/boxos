@@ -100,6 +100,9 @@ void AreasInOrder(std::vector<items::AreaState *> &Into);
 // Whether anything of the areas changed since a frame last showed them.
 bool AreasWant() noexcept;
 
+// In a build made to measure (measure.h): each area's frames and pixels of
+// the second said in the kernel's log, and forgotten.
+void AreasMeasured() noexcept;
 // Pixels to a point of every area.
 float AreasScale() noexcept;
 

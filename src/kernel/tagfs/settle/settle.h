@@ -95,6 +95,12 @@ bool     SettleHalting(void);
 void     SettleOwed(uint64_t* unsettled, bool* committer_busy, bool* sealed_clean);
 uint64_t SettleStepsTaken(void);
 
+/* Whether this core holds a cycle that stands between two of its steps: on a
+ * machine of one K-Core the committer's, its cycles stepping between pockets,
+ * found there by a halt that came in one. Nobody else steps it, and the halt's
+ * own cycle runs it to its end first (SettleAskedFor). */
+bool     SettleRunBetweenStepsHere(void);
+
 /* What the halt's last cycle answered — ERR_TAGFS_METADATA_ERROR when none
  * ran — and how many Inks no cycle has settled now. */
 error_t  SettleHaltAnswer(uint64_t* unsettled);

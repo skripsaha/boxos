@@ -89,78 +89,75 @@ AVX2 void LayPaint(Pixel *Row, const Pixel *Paint, const std::uint16_t *Share, s
 AVX2 void LayRow(Pixel *Row, const Pixel *From, std::uint32_t Count, std::uint32_t Share)
 {
     const __m256i Shares = _mm256_set1_epi16(static_cast<short>(Share));
+    const __m256i Whole  = _mm256_set1_epi16(-1);
+    const bool    Copy   = Share == light::Whole;
     std::uint32_t I      = 0;
     for (; I + 4u <= Count; I += 4u) {
-        __m256i *At = reinterpret_cast<__m256i *>(Row + I);
-        _mm256_storeu_si256(At, Over(_mm256_loadu_si256(At),
-                                     _mm256_loadu_si256(reinterpret_cast<const __m256i *>(From + I)), Shares));
+        __m256i      *At    = reinterpret_cast<__m256i *>(Row + I);
+        const __m256i Paint = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(From + I));
+        /* Four whole pixels laid whole: the paint itself (lanes_plain.cpp). */
+        if (Copy && (static_cast<std::uint32_t>(_mm256_movemask_epi8(_mm256_cmpeq_epi16(Paint, Whole))) & 0xC0C0C0C0u) == 0xC0C0C0C0u) {
+            _mm256_storeu_si256(At, Paint);
+            continue;
+        }
+        _mm256_storeu_si256(At, Over(_mm256_loadu_si256(At), Paint, Shares));
     }
-    for (; I < Count; I++) Row[I] = light::Over(Row[I], From[I], Share);
+    for (; I < Count; I++) Row[I] = Copy && From[I].Alpha == light::Whole ? From[I] : light::Over(Row[I], From[I], Share);
 }
 
-/* The tables the glass's numbers are looked up in, widened to 32 bits for
- * looking up eight at once: the nearest number of each step of sixteen, the
- * number at or below it, each number's light — and past the last, a light no
- * pixel reaches — and the reciprocal of each gap (light.h). */
+/* The nearest number of each step of sixteen, widened to 32 bits for
+ * looking up eight at once (BoxColorCode). */
 struct Lookups {
     std::int32_t Nearest[4096];
-    std::int32_t Floor[4096];
-    std::int32_t Light[257];
-    std::int32_t Reciprocal[256];
 };
 
 const Lookups &Tables() noexcept
 {
     static const Lookups Made = [] {
-        Lookups             T{};
-        const light::Steps &S = light::StepsOfLight();
-        for (std::uint32_t I = 0; I < 4096u; I++) {
-            T.Nearest[I] = static_cast<std::int32_t>(BoxColorCodeOf[I]);
-            T.Floor[I]   = S.Floor[I];
-        }
-        for (std::uint32_t N = 0; N < 256u; N++) {
-            T.Light[N]      = static_cast<std::int32_t>(BoxColorLight(N));
-            T.Reciprocal[N] = static_cast<std::int32_t>(S.Reciprocal[N]);
-        }
-        T.Light[256] = 0x7FFFFFFF;
+        Lookups T{};
+        for (std::uint32_t I = 0; I < 4096u; I++) T.Nearest[I] = static_cast<std::int32_t>(BoxColorCodeOf[I]);
         return T;
     }();
     return Made;
 }
 
-/* Eight lights' numbers: the nearest, or dithered by Thresholds. */
-AVX2 inline __m256i Codes(__m256i Light, const Lookups &T, const __m256i *Thresholds)
+/* Eight lights' numbers: the nearest, or dithered by Thresholds — each
+ * light's entry of the dither table gathered as the low half of a word. */
+AVX2 inline __m256i Codes(__m256i Light, const Lookups &T, const int *Table, const __m256i *Thresholds)
 {
-    const __m256i Step = _mm256_srli_epi32(Light, 4);
-    if (!Thresholds) return _mm256_i32gather_epi32(T.Nearest, Step, 4);
-    __m256i       N    = _mm256_i32gather_epi32(T.Floor, Step, 4);
-    const __m256i One  = _mm256_set1_epi32(1);
-    const __m256i Next = _mm256_i32gather_epi32(T.Light, _mm256_add_epi32(N, One), 4);
-    N = _mm256_sub_epi32(N, _mm256_cmpgt_epi32(_mm256_add_epi32(Light, One), Next));
-    const __m256i Low  = _mm256_i32gather_epi32(T.Light, N, 4);
-    const __m256i Gap  = _mm256_i32gather_epi32(T.Reciprocal, N, 4);
-    const __m256i Part = _mm256_srli_epi32(_mm256_mullo_epi32(_mm256_sub_epi32(Light, Low), Gap), 16);
-    return _mm256_sub_epi32(N, _mm256_cmpgt_epi32(Part, *Thresholds));
+    if (!Thresholds) return _mm256_i32gather_epi32(T.Nearest, _mm256_srli_epi32(Light, 4), 4);
+    const __m256i Entry = _mm256_and_si256(_mm256_i32gather_epi32(Table, Light, 2), _mm256_set1_epi32(0xFFFF));
+    const __m256i N     = _mm256_and_si256(Entry, _mm256_set1_epi32(255));
+    return _mm256_sub_epi32(N, _mm256_cmpgt_epi32(_mm256_srli_epi32(Entry, 8), *Thresholds));
 }
 
 AVX2 void Show(std::uint32_t *Out, const Pixel *Row, std::uint32_t Count, std::uint32_t Format,
                const std::uint8_t *Thresholds)
 {
+    const light::DitherTable *Dither = Thresholds ? light::DitherTableOfLight() : nullptr;
+    if (Thresholds && !Dither) {
+        Plain().Show(Out, Row, Count, Format, Thresholds);
+        return;
+    }
     const Lookups &T       = Tables();
-    const __m256i  Pairs   = _mm256_setr_epi32(0, 2, 4, 6, 8, 10, 12, 14);
+    const int     *Table   = Dither ? reinterpret_cast<const int *>(Dither->Of) : nullptr;
+    const __m256i  Halves  = _mm256_setr_epi32(0, 2, 4, 6, 1, 3, 5, 7);
     const __m256i  Sixteen = _mm256_set1_epi32(0xFFFF);
     const bool     Swap    = Format == BOX_PIXEL_RGB;
     std::uint32_t  I       = 0;
     for (; I + 8u <= Count; I += 8u) {
-        const int    *Base = reinterpret_cast<const int *>(Row + I);
-        const __m256i RG   = _mm256_i32gather_epi32(Base, Pairs, 4);
-        const __m256i BA   = _mm256_i32gather_epi32(Base + 1, Pairs, 4);
-        __m256i       Thr = _mm256_setzero_si256();
+        /* Eight pixels as two words each, red and green, blue and alpha:
+         * the reds-and-greens of all eight together, then the rest. */
+        const __m256i Front = _mm256_permutevar8x32_epi32(_mm256_loadu_si256(reinterpret_cast<const __m256i *>(Row + I)), Halves);
+        const __m256i Back  = _mm256_permutevar8x32_epi32(_mm256_loadu_si256(reinterpret_cast<const __m256i *>(Row + I + 4u)), Halves);
+        const __m256i RG    = _mm256_permute2x128_si256(Front, Back, 0x20);
+        const __m256i BA    = _mm256_permute2x128_si256(Front, Back, 0x31);
+        __m256i       Thr   = _mm256_setzero_si256();
         if (Thresholds) Thr = _mm256_cvtepu8_epi32(_mm_loadl_epi64(reinterpret_cast<const __m128i *>(Thresholds + I)));
         const __m256i *Th = Thresholds ? &Thr : nullptr;
-        const __m256i R   = Codes(_mm256_and_si256(RG, Sixteen), T, Th);
-        const __m256i G   = Codes(_mm256_srli_epi32(RG, 16), T, Th);
-        const __m256i B   = Codes(_mm256_and_si256(BA, Sixteen), T, Th);
+        const __m256i R   = Codes(_mm256_and_si256(RG, Sixteen), T, Table, Th);
+        const __m256i G   = Codes(_mm256_srli_epi32(RG, 16), T, Table, Th);
+        const __m256i B   = Codes(_mm256_and_si256(BA, Sixteen), T, Table, Th);
         const __m256i High = Swap ? B : R, Low = Swap ? R : B;
         const __m256i Packed =
             _mm256_or_si256(_mm256_or_si256(_mm256_slli_epi32(High, 16), _mm256_slli_epi32(G, 8)), Low);

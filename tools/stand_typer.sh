@@ -76,7 +76,12 @@ mon_shot() {
 # that line and not on `~ `, and the hour waited out the quiet window at a
 # free shell and never typed its `bye` (loggerhour, one run of two). The rule
 # is type_echoed's: a kernel line (`[Tag] ` to its end) taken out wherever it
-# landed, what stood before it going on with what comes after. A Use
+# landed, what stood before it going on with what comes after — and a
+# program's line in the kernel's log as well, which the log begins with the
+# speaker's pid (`[3] [AUTOSTART] Started 'pulse'`): a program the start set
+# launched, said after the hub's prompt, buried it, and three stands of a book
+# waited out the quiet window at a free shell (the pid's `[3] ` was taken for
+# what stood before the line, not for the line's own). A Use
 # Context's `[tags] ` is the prompt's own and never a kernel line, so a tag a
 # `~ ` follows is passed over: book_circle and bind type at `[circle,sewn] ~ `
 # on a book, where a Tally falls after it as after the plain one. The line no
@@ -93,7 +98,7 @@ prompt_at_end() {
         LC_ALL=C awk '
             function unbury(l,   at, p) {
                 l = before l; before = ""; at = 0
-                while (match(substr(l, at + 1), /\[[A-Za-z][^][]*\] /)) {
+                while (match(substr(l, at + 1), /(\[[0-9]+\] )?\[[A-Za-z][^][]*\] /)) {
                     p = at + RSTART; at = p + RLENGTH - 1
                     if (substr(l, at + 1, 2) != "~ ") { before = substr(l, 1, p - 1); return }
                 }
@@ -140,7 +145,7 @@ wait_for_prompt() {
 TYPE_ECHO_QUIET_S=${TYPE_ECHO_QUIET_S:-10}
 
 # type_echoed FROM CMD — the line, read past byte FROM with every kernel line
-# (`[Tag] ` to its end) taken out wherever it landed and what stood before it
+# (`[Tag] ` to its end, a program's `[pid] [Tag] ` too) taken out wherever it landed and what stood before it
 # going on with the line after; the log's last byte marked, so a line not yet
 # ended is not one. Read as bytes, as prompt_at_end reads the log.
 type_echoed() {
@@ -150,7 +155,7 @@ type_echoed() {
             index($0, "\001") { exit }
             {
                 l = before $0; before = ""
-                if (match(l, /\[[A-Za-z][^][]*\] /)) { before = substr(l, 1, RSTART - 1); next }
+                if (match(l, /(\[[0-9]+\] )?\[[A-Za-z][^][]*\] /)) { before = substr(l, 1, RSTART - 1); next }
                 if (length(l) >= length(c) && substr(l, length(l) - length(c) + 1) == c) { found = 1; exit }
             }
             END { exit !found }'

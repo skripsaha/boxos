@@ -81,12 +81,20 @@ __attribute__((target("sse2"))) void LayPaint(Pixel *Row, const Pixel *Paint, co
 __attribute__((target("sse2"))) void LayRow(Pixel *Row, const Pixel *From, std::uint32_t Count, std::uint32_t Share)
 {
     const __m128i Shares = _mm_set1_epi16(static_cast<short>(Share));
+    const __m128i Whole  = _mm_set1_epi16(-1);
+    const bool    Copy   = Share == light::Whole;
     std::uint32_t I      = 0;
     for (; I + 2u <= Count; I += 2u) {
-        __m128i *At = reinterpret_cast<__m128i *>(Row + I);
-        _mm_storeu_si128(At, Over(_mm_loadu_si128(At), _mm_loadu_si128(reinterpret_cast<const __m128i *>(From + I)), Shares));
+        __m128i      *At    = reinterpret_cast<__m128i *>(Row + I);
+        const __m128i Paint = _mm_loadu_si128(reinterpret_cast<const __m128i *>(From + I));
+        /* Two whole pixels laid whole: the paint itself (lanes_plain.cpp). */
+        if (Copy && (_mm_movemask_epi8(_mm_cmpeq_epi16(Paint, Whole)) & 0xC0C0) == 0xC0C0) {
+            _mm_storeu_si128(At, Paint);
+            continue;
+        }
+        _mm_storeu_si128(At, Over(_mm_loadu_si128(At), Paint, Shares));
     }
-    for (; I < Count; I++) Row[I] = light::Over(Row[I], From[I], Share);
+    for (; I < Count; I++) Row[I] = Copy && From[I].Alpha == light::Whole ? From[I] : light::Over(Row[I], From[I], Share);
 }
 
 }  // namespace

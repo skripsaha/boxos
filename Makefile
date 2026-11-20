@@ -903,7 +903,7 @@ UTIL_NAMES = create show files tag untag name trash delete assemble \
              calculate difference copy typer flame checksum passport aquarium \
              nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits bloom spell ripple \
              edit seek retag read rollcall handset inside settings autostart scratchpad garden gardener random sand coinflip dice casino seabattle whale hangman duppo \
-             glyphs drawcheck itemcheck
+             glyphs drawcheck itemcheck benchmark
 UTIL_ELFS = $(addprefix $(UTILS_DIR)/,$(addsuffix .elf,$(UTIL_NAMES)))
 
 # ==== FINAL BINARIES ====
@@ -1437,11 +1437,19 @@ $(HUB_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a
 	@cd $(HUB_DIR) && $(MAKE)
 	@echo "hub.elf: $$(stat -f%z $(HUB_BIN) 2>/dev/null || stat -c%s $(HUB_BIN) 2>/dev/null) bytes"
 
+# `make MEASURE=on` — a display that clocks where its time goes and says it in
+# the kernel's log (display/measure.h). Its own make keys its objects by it;
+# this mark makes that make run when the key changes on a built tree.
+MEASURE_MARK = $(BUILDDIR)/.measure.$(if $(filter on,$(MEASURE)),on,off)
+$(MEASURE_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.measure.*
+	@touch $@
+
 # Build display server
 $(DISPLAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(PAINTER_LIB) $(TYPECASE_LIB) \
-                $(IMPRINT_DATA) $(NAMEPLATE_TOOL)
+                $(IMPRINT_DATA) $(NAMEPLATE_TOOL) $(MEASURE_MARK)
 	@echo "Building display server..."
-	@cd $(DISPLAY_DIR) && $(MAKE) IMPRINT_DIR=$(abspath $(IMPRINT_DIR))
+	@cd $(DISPLAY_DIR) && $(MAKE) IMPRINT_DIR=$(abspath $(IMPRINT_DIR)) MEASURE=$(MEASURE)
 	@echo "display.elf: $$(stat -f%z $(DISPLAY_BIN) 2>/dev/null || stat -c%s $(DISPLAY_BIN) 2>/dev/null) bytes"
 
 # `timezone` carries the zone database, which is C++. Stated BEFORE the rule
@@ -1754,7 +1762,8 @@ VOLUME_CONTENT = \
 	$(UTILS_DIR)/duppo.elf     "fun" \
 	$(UTILS_DIR)/glyphs.elf    "" \
 	$(UTILS_DIR)/drawcheck.elf "test" \
-	$(UTILS_DIR)/itemcheck.elf "test"
+	$(UTILS_DIR)/itemcheck.elf "test" \
+	$(UTILS_DIR)/benchmark.elf ""
 
 # ‼ EVERY PROGRAM ON THE VOLUME IS A BOX. VOLUME_CONTENT names the programs as
 # the tree links them; each ELF there goes onto the volume as the box tools/pack
@@ -1967,6 +1976,7 @@ comma := ,
 
 EMU        ?= qemu
 CORES      ?= 1
+THREADS    ?= 1
 MEM        ?= 512M
 FULLSCREEN ?= off
 USB        ?= on
@@ -2247,7 +2257,7 @@ else
 		        -cpu qemu64$(comma)+fsgsbase)) \
 		-m $(MEM) \
 		-serial stdio \
-		$(if $(filter-out 1,$(CORES)),-smp $(CORES)$(comma)cores=$(CORES)$(comma)threads=1$(comma)sockets=1) \
+		$(if $(filter-out 1,$(CORES)),-smp $(CORES)$(comma)cores=$(shell expr $(CORES) / $(THREADS))$(comma)threads=$(THREADS)$(comma)sockets=1) \
 		$(if $(filter on,$(FULLSCREEN)),$(if $(filter Darwin,$(UNAME_S)),-display cocoa$(comma)full-screen=on$(comma)zoom-to-fit=on,-full-screen)) \
 		$(if $(filter on,$(USB)),-device qemu-xhci -device usb-kbd) \
 		$(if $(filter on,$(LOG)),-d int$(comma)cpu_reset -no-reboot -no-shutdown -D boxos_qemu.log) \
@@ -2311,7 +2321,7 @@ run-bg: $(RUN_BG_NEEDS)
 		-qmp unix:$(BUILDDIR)/qemu.qmp$(comma)server$(comma)nowait \
 		-serial file:$(BUILDDIR)/serial.log \
 		-display none \
-		$(if $(filter-out 1,$(CORES)),-smp $(CORES)$(comma)cores=$(CORES)$(comma)threads=1$(comma)sockets=1) \
+		$(if $(filter-out 1,$(CORES)),-smp $(CORES)$(comma)cores=$(shell expr $(CORES) / $(THREADS))$(comma)threads=$(THREADS)$(comma)sockets=1) \
 		$(if $(filter on,$(USB)),-device qemu-xhci$(comma)id=xhci1$(XHCI_PORT_ARGS) -device usb-kbd$(comma)bus=xhci1.0) \
 		$(if $(filter on,$(XHCI2)),-device qemu-xhci$(comma)id=xhci2$(if $(XHCI2ADDR),$(comma)addr=$(XHCI2ADDR))) \
 		$(if $(filter on,$(ISOCH)),-audiodev none$(comma)id=isoa -device usb-audio$(comma)audiodev=isoa) \
@@ -2616,6 +2626,7 @@ info:
 	@echo "  DEBUG=on      — enable debug output (rebuilds with CONFIG_DEBUG_ENABLED=1)"
 	@echo "  GDB=on        — QEMU: pause for gdb (-s -S); Bochs: enable gdbstub on :1234"
 	@echo "  CORES=N       — number of CPU cores (Bochs SMP needs --enable-smp)"
+	@echo "  THREADS=N     — QEMU: of them, threads a physical core (CORES a multiple of it)"
 	@echo "  MEM=size      — RAM size (e.g. 512M, 4G)"
 	@echo "  LOG=on        — verbose logging (QEMU int/cpu_reset; Bochs info/debug)"
 	@echo ""

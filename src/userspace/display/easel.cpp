@@ -6,10 +6,12 @@
 #include <utility>
 
 #include "box/color.h"
+#include "box/debug.h"
 #include "box/error.h"
 #include "box/turnin.h"
 #include "boxos_glyph_fold.h"
 #include "boxos_pixel.h"
+#include "measure.h"
 
 using painter::core::Rect;
 
@@ -61,6 +63,10 @@ std::expected<Easel, box::error> Easel::Claim() noexcept
                 try {
                     Kept.emplace(Description.width, Description.height);
                 } catch (const std::bad_alloc &) {
+                    /* The claim was made; it is the mirror there is no room
+                     * for — said apart from a claim refused. */
+                    kdbg_print("[display] no room for the mirror of the glass, %ux%u: the screen is given back",
+                               Description.width, Description.height);
                     (void)screen_release();
                     return std::unexpected(box::error{box::errc::no_memory});
                 }
@@ -157,6 +163,7 @@ void Easel::Flush() noexcept
         const std::uint32_t *Pixels = Kept->Row(Y) + From;
         std::uint32_t       *Glass  = GlassAt(static_cast<std::uint32_t>(From), Y);
         const auto           Count  = static_cast<std::size_t>(To - From);
+        MeasureFlushed(Count);
         if (Swapped)
             for (std::size_t X = 0; X < Count; X++) Glass[X] = BoxPixelEncode(Pixels[X], BOX_PIXEL_RGB);
         else

@@ -7,8 +7,9 @@
  * of sources; and a font's glyph for text, by its look (glyph_look.h), or
  * the box of a character no font has. What is kept stays within a budget of
  * bytes its owner sets; past it, the picture asked longest ago goes first,
- * and the one just asked always stays. One cache is asked by one strand at
- * a time. */
+ * and the one just asked always stays — and while the cache is held, every
+ * one asked since, so a line's glyphs can be asked once and all drawn. One
+ * cache is asked by one strand at a time. */
 
 #include <cstddef>
 #include <cstdint>
@@ -35,7 +36,11 @@ public:
      * (DrawCodeBox). */
     const GlyphImage &GetMissing(char32_t Character, const Size &Cell);
 
-    /* Each picture holds until the next Get or Clear. */
+    /* Each picture holds until the next Get or Clear — or, asked while the
+     * cache is held, until it is let go: Hold, then Release. Held, the cache
+     * may keep more than its budget; let go, it keeps to it again. */
+    void        Hold() noexcept;
+    void        Release() noexcept;
     void        Clear() noexcept;
     std::size_t Held() const noexcept { return Bytes; }   /* the bytes kept */
 
@@ -57,16 +62,22 @@ private:
         std::size_t operator()(const Key &Of) const noexcept;
     };
     struct Kept {
-        Key        Of;
-        GlyphImage Image;
+        Key           Of;
+        GlyphImage    Image;
+        std::uint64_t Asked = 0;   /* the count of asks when it was last asked */
     };
 
     static std::size_t CostOf(const GlyphImage &Image) noexcept;
     const GlyphImage  *Find(const Key &Of);
     const GlyphImage  &Keep(const Key &Of, GlyphImage Image);
+    /* The pictures asked longest ago let go while the budget is passed —
+     * none asked while held. */
+    void               Trim() noexcept;
 
     std::size_t                                                 Budget;
     std::size_t                                                 Bytes = 0;
+    std::uint64_t                                               Asks  = 0;
+    std::uint64_t                                               HeldFrom = ~std::uint64_t{0};   /* the first ask held; none */
     std::list<Kept>                                             Order;   /* the most recently asked first */
     std::unordered_map<Key, std::list<Kept>::iterator, KeyHash> Index;
     Rasterizer                                                  Pen;

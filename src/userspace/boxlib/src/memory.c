@@ -9,52 +9,29 @@
 #include "box/string.h"
 #include "box/core/notify.h"
 #include "box/core/cabin.h"
+#include "box/core/heap_blocks.h"  /* the global heap's blocks */
 #include "box/core/manifest.h"
 #include "box/core/strand_self.h"  /* strand_info_or_null / strand_self — pool selector */
 #include "box/print.h"
 #include "box/debug.h"             /* kdbg_print — a registry that refuses says so */
-#include "cabin_layout.h"
 #include "strand_pool_abi.h"       /* StrandPool layout (shared with kernel death-stamp) */
 
-/* Implicit 2 MiB heap pages.
+/* Large pages for large blocks.
  *
- * When a single allocation crosses the 2 MiB threshold we pad the heap
- * up to the next 2 MiB boundary, ask the kernel to pre-back the region
- * with 2 MiB physical pages (one PDE per chunk), and place the
- * allocation at the aligned address. Sub-2 MiB allocations stay on the
- * existing 4 KiB demand-paging path.
+ * A block of 2 MiB or more the heap grows by is laid over whole 2 MiB pages
+ * none of whose bytes it has touched (heap_blocks.c grow_huge), and the kernel
+ * is asked to back them at once with one PDE per chunk rather than hundreds
+ * of 4 KiB demand faults. Smaller blocks stay on the 4 KiB demand-paging path.
  *
  * The pre-fault is SYSTEM_OP_HEAP_PREFAULT (boxos_decks.h), answered by
  * SysHeapPrefault in bay_ops.c. */
-#include "boxos_sizes.h"
 #include "boxos_decks.h"
-#define HEAP_HUGE_THRESHOLD      LARGE_PAGE_2M_SIZE
-#define HEAP_HUGE_MASK           LARGE_PAGE_2M_MASK
 
 // ---------------------------------------------------------------------------
-// Thread-safe first-fit heap allocator with tag support and diagnostics
+// Thread-safe heap allocator with tag support and diagnostics: per-strand
+// magazines over one global heap, whose blocks are found and merged in a time
+// that does not depend on how many it holds (box/core/heap_blocks.h)
 // ---------------------------------------------------------------------------
-
-#define HEAP_MAGIC      0xA110CA7EU
-#define HEAP_ALIGN      16
-#define HEAP_MIN_SPLIT  (sizeof(block_t) + HEAP_ALIGN)
-
-typedef struct block {
-    size_t        size;       // payload size (excluding header)
-    uint32_t      magic;
-    uint32_t      free;       // 1 = free, 0 = used
-    struct block* next;
-    uint8_t       tag;        // HEAP_TAG_NONE (0xFF) = untagged
-    uint8_t       _pad[7];   // keep struct at 32 bytes
-} block_t;
-
-// Verify struct layout at compile time: 8+4+4+8+1+7 = 32 bytes
-typedef char _block_size_check[sizeof(block_t) == 32 ? 1 : -1];
-
-#define BLOCK_HDR_SIZE  ((sizeof(block_t) + (HEAP_ALIGN - 1)) & ~(HEAP_ALIGN - 1))
-
-// Verify BLOCK_HDR_SIZE is still 32 (no heap layout change)
-typedef char _hdr_size_check[BLOCK_HDR_SIZE == 32 ? 1 : -1];
 
 // ---- tag registry (all access under heap_lock) ----------------------------
 //
@@ -88,11 +65,6 @@ typedef enum {
 // ---- internal state (all access under heap_lock) --------------------------
 
 static uspin_t   heap_lock    = USPIN_INIT;
-static block_t*  free_list    = NULL;
-static uintptr_t heap_base    = 0;
-static uintptr_t heap_current = 0;
-static uintptr_t heap_max     = 0;
-static int       initialized  = 0;
 
 // ---- diagnostics ----------------------------------------------------------
 
@@ -125,58 +97,15 @@ static uint32_t stat_free_calls   = 0;
 
 // ---- helpers (called with lock held) --------------------------------------
 
-static void heap_init_locked(void) {
-    CabinInfo* ci = cabin_info();
-    if (ci->heap_base != 0 && ci->heap_max_size != 0) {
-        heap_base = ci->heap_base;
-        heap_max  = heap_base + ci->heap_max_size;
-    } else {
-        heap_base = CABIN_HEAP_BASE;
-        heap_max  = heap_base + CABIN_HEAP_MAX_SIZE;
-    }
-    heap_current = heap_base;
-    free_list    = NULL;
-    initialized  = 1;
-}
-
-static void* sbrk_locked(size_t increment) {
-    if (!initialized) return NULL;
-
-    uintptr_t new_end = heap_current + increment;
-    if (new_end > heap_max) return NULL;
-
-    uintptr_t old = heap_current;
-    heap_current  = new_end;
-    return (void*)old;
-}
-
-static size_t align_up(size_t val, size_t align) {
-    return (val + align - 1) & ~(align - 1);
-}
-
-/* Merge free neighbours — neighbours in MEMORY, checked, not merely in the
- * list: a 2 MB reservation stands between two listed blocks while its backing
- * is asked for outside the lock (huge_backed), and a merge across it would
- * fold that range into a free block that is not its own. */
-static void coalesce_locked(void) {
-    block_t* curr = free_list;
-    while (curr) {
-        if (curr->magic != HEAP_MAGIC) break;
-        if (curr->free && curr->next &&
-            curr->next->magic == HEAP_MAGIC && curr->next->free &&
-            (uintptr_t)curr + BLOCK_HDR_SIZE + curr->size == (uintptr_t)curr->next) {
-            curr->size += BLOCK_HDR_SIZE + curr->next->size;
-            curr->next  = curr->next->next;
-            continue;
-        }
-        curr = curr->next;
-    }
-}
-
-/* The heap's own allocator, defined below: the registry grows out of the heap
- * it belongs to, under the lock that heap is already holding. */
+/* A block of the global heap for the program — counted, unless it is the
+ * heap's own bookkeeping — or for the heap itself. A block that wants 2 MB
+ * backing is only RESERVED: its range comes back in *huge_va / *huge_len for
+ * the caller to pre-fault once the lock is dropped (alloc_backed). */
 static void* alloc_locked(size_t size, uint8_t tag_id, error_t *errcell,
-                          uintptr_t *huge_va, size_t *huge_len);
+                          uintptr_t *huge_va, size_t *huge_len) {
+    if (stat_housekeeping_depth == 0) stat_malloc_calls++;
+    return heap_blocks_take(size, tag_id, errcell, huge_va, huge_len);
+}
 
 /* Look up or insert a tag name. Returns the id, or HEAP_TAG_NONE when there is
  * no id left to give or no room to remember the name — and then `say` carries
@@ -272,131 +201,12 @@ static int prefault_huge(uintptr_t va_base, uint64_t size_2m_aligned) {
                    BOX_ANSWER_GUARANTEED, NULL);
 }
 
-// Core allocation logic. tag_id must already be resolved.
-// Called with heap_lock held. Returns payload pointer or NULL. A block that
-// wants 2 MB backing is only RESERVED here: its range comes back in
-// *huge_va / *huge_len for the caller to pre-fault once the lock is dropped
-// (huge_backed). Callers that never ask for that much pass NULL.
-static void* alloc_locked(size_t size, uint8_t tag_id, error_t *errcell,
-                          uintptr_t *huge_va, size_t *huge_len) {
-    if (!initialized) heap_init_locked();
-
-    if (stat_housekeeping_depth == 0) stat_malloc_calls++;
-
-    size_t orig_size = size;
-    size = align_up(size, HEAP_ALIGN);
-    if (size < orig_size) {
-        *errcell = ERR_NO_MEMORY;
-        return NULL;
-    }
-
-    // First-fit search
-    block_t* curr = free_list;
-    block_t* prev = NULL;
-    while (curr) {
-        if (curr->magic != HEAP_MAGIC) {
-            *errcell = ERR_CORRUPTED;
-            break;
-        }
-        if (curr->free && curr->size >= size) {
-            if (curr->size >= size + HEAP_MIN_SPLIT) {
-                block_t* split = (block_t*)((uint8_t*)curr + BLOCK_HDR_SIZE + size);
-                split->size  = curr->size - size - BLOCK_HDR_SIZE;
-                split->magic = HEAP_MAGIC;
-                split->free  = 1;
-                split->tag   = HEAP_TAG_NONE;
-                split->next  = curr->next;
-                curr->size   = size;
-                curr->next   = split;
-            }
-            curr->free = 0;
-            curr->tag  = tag_id;
-            *errcell = OK;
-            return (void*)((uint8_t*)curr + BLOCK_HDR_SIZE);
-        }
-        prev = curr;
-        curr = curr->next;
-    }
-
-    // Grow the heap
-    size_t total = BLOCK_HDR_SIZE + size;
-    if (total < size) {
-        *errcell = ERR_NO_MEMORY;
-        return NULL;
-    }
-
-    /* Implicit 2 MB-page growth — when this single allocation needs at
-     * least 2 MB of backing, ask the kernel to pre-back with 2 MB pages
-     * rather than spending hundreds of demand-fault syscalls. The block
-     * starts at a 2 MB boundary so the whole header+payload sits inside
-     * one PDE leaf (or spans multiple cleanly-aligned PDEs). Any gap
-     * between heap_current and the aligned base becomes a free padding
-     * block recycled by future small allocations. */
-    if (total >= HEAP_HUGE_THRESHOLD) {
-        uintptr_t cur      = heap_current;
-        uintptr_t aligned  = (cur + HEAP_HUGE_MASK) & ~HEAP_HUGE_MASK;
-        size_t    pad_size = aligned - cur;
-        size_t    huge_total   = (total + HEAP_HUGE_MASK) & ~HEAP_HUGE_MASK;
-        size_t    grow_total   = pad_size + huge_total;
-
-        if (heap_current + grow_total > heap_max) {
-            *errcell = ERR_HEAP_EXHAUSTED;
-            return NULL;
-        }
-
-        /* Insert padding free block (skip if the gap is smaller than a
-         * usable header+payload — then we simply waste those bytes of
-         * VA; physical RAM was never allocated for them). */
-        if (pad_size >= BLOCK_HDR_SIZE + HEAP_ALIGN) {
-            block_t *pad = (block_t *)cur;
-            pad->size  = pad_size - BLOCK_HDR_SIZE;
-            pad->magic = HEAP_MAGIC;
-            pad->free  = 1;
-            pad->tag   = HEAP_TAG_NONE;
-            pad->next  = NULL;
-            if (prev) {
-                prev->next = pad;
-            } else {
-                free_list = pad;
-            }
-        }
-
-        /* RESERVED here, and nothing else: the range is ours (heap_current is
-         * past it), but not a byte of it is touched — a header written now
-         * would fault a 4 KiB page in, and the kernel cannot lay a 2 MiB page
-         * over one. The caller asks for the backing after the lock and
-         * writes the header then (huge_backed). */
-        if (huge_va)  *huge_va  = aligned;
-        if (huge_len) *huge_len = huge_total;
-
-        heap_current = aligned + huge_total;
-
-        *errcell = OK;
-        return (void *)(aligned + BLOCK_HDR_SIZE);
-    }
-
-    /* Sub-2 MB growth — existing 4 KB demand-paged path. */
-    void* mem = sbrk_locked(total);
-    if (!mem) {
-        *errcell = ERR_HEAP_EXHAUSTED;
-        return NULL;
-    }
-
-    block_t* block = (block_t*)mem;
-    block->size  = size;
-    block->magic = HEAP_MAGIC;
-    block->free  = 0;
-    block->tag   = tag_id;
-    block->next  = NULL;
-
-    if (prev) {
-        prev->next = block;
-    } else {
-        free_list = block;
-    }
-
-    *errcell = OK;
-    return (void*)((uint8_t*)block + BLOCK_HDR_SIZE);
+/* The live blocks of the global heap, counted in memory order. heap_lock HELD. */
+static uint32_t live_blocks_locked(void) {
+    uint32_t live = 0;
+    for (block_t *b = heap_blocks_first(); b && b->magic == HEAP_MAGIC; b = heap_blocks_next(b))
+        if (b->state == BLOCK_USED) live++;
+    return live;
 }
 
 // ---------------------------------------------------------------------------
@@ -405,9 +215,9 @@ static void* alloc_locked(size_t size, uint8_t tag_id, error_t *errcell,
 // Each strand owns one StrandPool (a private LIFO of free blocks per size
 // class). The fast path pops/pushes its own pool with NO lock — the same
 // single-writer-per-strand model as the per-strand result stash. A cached block
-// stays free=0 (the global heap still sees it LIVE); the magazine link is stored
+// stays USED (the global heap still sees it LIVE); the magazine link is stored
 // in the block's payload first 8 bytes. The ONE global heap remains the source
-// of truth: refill calls alloc_locked N×, flush sets free=1 + one coalesce.
+// of truth: refill takes N blocks from it, flush gives them back.
 // ---------------------------------------------------------------------------
 
 static const size_t   StrandPoolClassSize[STRAND_POOL_CLASS_COUNT] =
@@ -482,25 +292,26 @@ static inline uint32_t pool_slab_hwm_clamped(void) {
     return hwm > STRAND_POOL_SLAB_MAX ? STRAND_POOL_SLAB_MAX : hwm;
 }
 
+static inline unsigned high_bit(size_t v) {
+    return 63u - (unsigned)__builtin_clzll((unsigned long long)v);
+}
+
 /* Floor map: smallest class whose size >= n (so a served block is always at
- * least as large as requested). n > 8192 → bypass to the locked global path. */
+ * least as large as requested) — 16, 32, 48, 64 by sixteens, then the powers
+ * of two to 8192. n > 8192 → bypass to the locked global path. */
 static unsigned StrandPoolSizeToClass(size_t n) {
-    for (unsigned c = 0; c < STRAND_POOL_CLASS_COUNT; c++) {
-        if (StrandPoolClassSize[c] >= n) return c;
-    }
-    return STRAND_POOL_NO_CLASS;
+    if (n <= 64) return n <= 16 ? 0u : (unsigned)((n - 1) >> 4);
+    if (n > STRAND_POOL_MAX_CLASS) return STRAND_POOL_NO_CLASS;
+    return high_bit(n - 1) - 2u;
 }
 
 /* Largest class whose size <= a freed block's actual size (s > 8192 → bypass).
  * Pairs with the floor alloc map: a block grown for class c has size >=
  * ClassSize[c], so it maps back to c or higher — never below its served class. */
 static unsigned StrandPoolClassFromBlockSize(size_t s) {
-    if (s > STRAND_POOL_MAX_CLASS) return STRAND_POOL_NO_CLASS;
-    unsigned cls = STRAND_POOL_NO_CLASS;
-    for (unsigned c = 0; c < STRAND_POOL_CLASS_COUNT; c++) {
-        if (StrandPoolClassSize[c] <= s) cls = c; else break;
-    }
-    return cls;
+    if (s < 16 || s > STRAND_POOL_MAX_CLASS) return STRAND_POOL_NO_CLASS;
+    if (s < 128) return s >= 64 ? 3u : (unsigned)(s >> 4) - 1u;
+    return high_bit(s) - 3u;
 }
 
 /* Tell the kernel which slot this strand bound, so process_destroy can stamp it
@@ -520,27 +331,31 @@ static void strand_pool_bind_kernel(StrandPool *pool, uint32_t gen) {
                   BOX_ANSWER_GUARANTEED, NULL);
 }
 
-/* Reclaim every ORPHANED slab slot: flush its cached blocks back to the global
- * heap (free=1), coalesce once, then mark the slot FREE at the next generation.
- * Called only on the slow path, with heap_lock HELD. Bounded by the slab size. */
+/* Give up to `drop` cached blocks of class c back to the global heap. heap_lock
+ * HELD. The walk is hard-bounded by Counts[c] and validates each block's magic
+ * BEFORE following its payload link, so a corrupted link can never fault under
+ * the lock or loop. */
+static void pool_flush_class_locked(StrandPool *pool, unsigned c, unsigned drop) {
+    unsigned guard = pool->Counts[c];
+    while (drop-- && guard-- && pool->Heads[c]) {
+        void *payload = pool->Heads[c];
+        block_t *block = block_of(payload);
+        if (block->magic != HEAP_MAGIC) break;
+        pool->Heads[c] = *(void **)payload;
+        pool->Counts[c]--;
+        if (block->state == BLOCK_USED) (void)heap_blocks_give(block);
+    }
+}
+
+/* Reclaim every ORPHANED slab slot: give its cached blocks back to the global
+ * heap, then mark the slot FREE at the next generation. Called only on the slow
+ * path, with heap_lock HELD. Bounded by the slab size. */
 static void reclaim_one_orphan_slot_locked(StrandPool *p, uint32_t word) {
     for (unsigned c = 0; c < STRAND_POOL_CLASS_COUNT; c++) {
-        unsigned guard = p->Counts[c];
-        void *node = p->Heads[c];
-        while (node && guard--) {
-            block_t *block = (block_t *)((uint8_t *)node - BLOCK_HDR_SIZE);
-            if (block->magic != HEAP_MAGIC) break;
-            void *next = *(void **)node;
-            if (!block->free) {
-                block->free = 1;
-                block->tag  = HEAP_TAG_NONE;
-            }
-            node = next;
-        }
+        pool_flush_class_locked(p, c, (unsigned)-1);
         p->Heads[c]  = NULL;
         p->Counts[c] = 0;
     }
-    coalesce_locked();
     p->OwnerPid = 0;
     __atomic_store_n(&p->GenState,
                      STRANDPOOL_PACK(STRANDPOOL_GEN(word) + 1, STRANDPOOL_FREE),
@@ -652,29 +467,10 @@ static void pool_refill_locked(StrandPool *pool, unsigned c) {
     }
 }
 
-/* Flush up to `drop` blocks of class c back to the global heap (free=1). One
- * coalesce afterward is the caller's job. heap_lock HELD. The walk is hard-bounded
- * by Counts[c] and validates each block's magic BEFORE following its payload link,
- * so a corrupted link can never fault under the lock or loop. */
-static void pool_flush_class_locked(StrandPool *pool, unsigned c, unsigned drop) {
-    unsigned guard = pool->Counts[c];
-    while (drop-- && guard-- && pool->Heads[c]) {
-        void *payload = pool->Heads[c];
-        block_t *block = (block_t *)((uint8_t *)payload - BLOCK_HDR_SIZE);
-        if (block->magic != HEAP_MAGIC) break;
-        pool->Heads[c] = *(void **)payload;
-        pool->Counts[c]--;
-        if (!block->free) {
-            block->free = 1;
-            block->tag  = HEAP_TAG_NONE;
-        }
-    }
-}
-
-/* Orderly flush of the calling strand's whole pool at strand/cabin exit. Drains
- * every magazine to the global heap, coalesces once, then bumps the slot's
- * generation to FREE — the bump makes the kernel death-stamp CAS miss, so no
- * unbind syscall is needed. Idempotent: a strand with no pool is a no-op. */
+/* Orderly flush of the calling strand's whole pool at strand/cabin exit. Gives
+ * every magazine back to the global heap, then bumps the slot's generation to
+ * FREE — the bump makes the kernel death-stamp CAS miss, so no unbind syscall
+ * is needed. Idempotent: a strand with no pool is a no-op. */
 void strand_pool_flush_self(void) {
     StrandInfo *si   = strand_info_or_null();
     StrandPool *pool = si ? (StrandPool *)(uintptr_t)si->strand_pool_ptr : &g_main_pool;
@@ -685,7 +481,6 @@ void strand_pool_flush_self(void) {
     uspin_lock(&heap_lock);
     for (unsigned c = 0; c < STRAND_POOL_CLASS_COUNT; c++)
         pool_flush_class_locked(pool, c, (unsigned)-1);
-    coalesce_locked();
     uint32_t word = __atomic_load_n(&pool->GenState, __ATOMIC_RELAXED);
     pool->OwnerPid = 0;
     __atomic_store_n(&pool->GenState,
@@ -698,7 +493,7 @@ void strand_pool_flush_self(void) {
 
 /* Self-test of the crash-orphan reclaim MECHANISM (not a live fault). Stages a
  * spare slab slot exactly as a crashed strand would leave it — real heap blocks
- * cached in its magazines (free=0, magazine-linked) with the slot marked
+ * cached in its magazines (USED, magazine-linked) with the slot marked
  * ORPHANED — then runs the same reclaim_orphans_scan_locked the slow path uses.
  * Returns 1 if every staged block came back to the global heap and the slot is
  * FREE again; 0 on any inconsistency. `n_blocks` is clamped to a class cap. */
@@ -720,8 +515,8 @@ int strand_pool_test_orphan_reclaim(unsigned n_blocks) {
 
     uint32_t gen = STRANDPOOL_GEN(slot->GenState);
 
-    /* Cache real blocks the way the fast path does: alloc from the global heap
-     * (free=0) and link through the payload. */
+    /* Cache real blocks the way the fast path does: take them from the global
+     * heap (USED) and link through the payload. */
     error_t staging_err = OK;
     for (unsigned k = 0; k < n_blocks; k++) {
         void *payload = alloc_locked(StrandPoolClassSize[c], HEAP_TAG_NONE, &staging_err, NULL, NULL);
@@ -733,9 +528,7 @@ int strand_pool_test_orphan_reclaim(unsigned n_blocks) {
     unsigned staged = slot->Counts[c];
 
     /* Count live blocks before reclaim, then stamp ORPHANED and reclaim. */
-    uint32_t live_before = 0;
-    for (block_t *b = free_list; b && b->magic == HEAP_MAGIC; b = b->next)
-        if (!b->free) live_before++;
+    uint32_t live_before = live_blocks_locked();
 
     slot->OwnerPid = 0;
     __atomic_store_n(&slot->GenState,
@@ -747,9 +540,7 @@ int strand_pool_test_orphan_reclaim(unsigned n_blocks) {
     __atomic_store_n(&g_strandpool_orphan_pending, 1, __ATOMIC_RELEASE);
     reclaim_orphans_scan_locked();
 
-    uint32_t live_after = 0;
-    for (block_t *b = free_list; b && b->magic == HEAP_MAGIC; b = b->next)
-        if (!b->free) live_after++;
+    uint32_t live_after = live_blocks_locked();
 
     int ok = (STRANDPOOL_STATE(slot->GenState) == STRANDPOOL_FREE) &&
              (slot->Heads[c] == NULL) && (slot->Counts[c] == 0) &&
@@ -763,38 +554,48 @@ int strand_pool_test_orphan_reclaim(unsigned n_blocks) {
 // Public API
 // ---------------------------------------------------------------------------
 
-/* Link a block into the address-ordered block list — after the last block
- * below it. coalesce_locked merges neighbours by that order, so a block put
- * anywhere else would be merged with a stranger. heap_lock HELD. */
-static void link_block_locked(block_t *b) {
-    block_t *prev = NULL;
-    for (block_t *c = free_list; c && (uintptr_t)c < (uintptr_t)b; c = c->next) prev = c;
-    if (prev) { b->next = prev->next; prev->next = b; }
-    else      { b->next = free_list;  free_list  = b; }
-}
+/* A block of the global heap, a large one backed. The large pages are the
+ * kernel's help, never a condition: a reservation it does not back at once is
+ * given all the same, its pages backed as they are touched — the heap's own
+ * way below 2 MB — save where the kernel says why it may not be: the machine
+ * has no memory for it (then it is given back, its pages faulting in one by
+ * one if a smaller allocation ever takes it, and the caller gets NULL and the
+ * cause), or a mapping not the heap's lies in the range (then not a byte of
+ * it is touched, the block is FOREIGN for good, and the block is taken again
+ * past it). Each is said, outside the lock. */
+static void* alloc_backed(size_t size, uint8_t tag_id, error_t *errcell) {
+    for (int tries = 0; tries < 4; tries++) {
+        uintptr_t huge_va = 0; size_t huge_len = 0;
+        uspin_lock(&heap_lock);
+        void* ptr = alloc_locked(size, tag_id, errcell, &huge_va, &huge_len);
+        uspin_unlock(&heap_lock);
+        if (!ptr || huge_len == 0) return ptr;
 
-/* Back a 2 MB reservation with large pages, outside the lock, then give it
- * its header. A reservation the kernel cannot back (PMM exhausted) becomes a
- * free block — its pages fault in one by one if a smaller allocation ever
- * takes it — and the caller gets NULL and the cause, as before. The padding
- * block alloc_locked may have left in front of it stays: a legitimate free
- * region small allocations can use. */
-static void* huge_backed(void* ptr, uintptr_t va, size_t len, uint8_t tag_id,
-                         error_t *errcell) {
-    if (!ptr || len == 0) return ptr;
-    bool backed = prefault_huge(va, (uint64_t)len) == 0;
-
-    uspin_lock(&heap_lock);
-    block_t *block = (block_t *)va;
-    block->size  = len - BLOCK_HDR_SIZE;
-    block->magic = HEAP_MAGIC;
-    block->free  = backed ? 0 : 1;
-    block->tag   = backed ? tag_id : HEAP_TAG_NONE;
-    link_block_locked(block);
-    uspin_unlock(&heap_lock);
-
-    if (backed) return ptr;
-    *errcell = ERR_NO_MEMORY;
+        const int     refused = prefault_huge(huge_va, (uint64_t)huge_len);
+        const error_t why     = refused < 0 ? (error_t)-refused : (error_t)refused;
+        if (refused == 0) return ptr;
+        if (why == ERR_INVALID_ADDRESS) {
+            kdbg_print("[heap] %lu bytes at 0x%lx meet a mapping not the heap's: left untouched, the block "
+                       "taken past them", (unsigned long)huge_len, (unsigned long)huge_va);
+            uspin_lock(&heap_lock);
+            heap_blocks_bar(block_of(ptr));
+            uspin_unlock(&heap_lock);
+            *errcell = ERR_INVALID_ADDRESS;
+            continue;
+        }
+        if (why == ERR_NO_MEMORY) {
+            kdbg_print("[heap] %lu bytes at 0x%lx: the machine has no memory to back them, the allocation "
+                       "is refused", (unsigned long)huge_len, (unsigned long)huge_va);
+            uspin_lock(&heap_lock);
+            (void)heap_blocks_give(block_of(ptr));
+            uspin_unlock(&heap_lock);
+            *errcell = ERR_NO_MEMORY;
+            return NULL;
+        }
+        kdbg_print("[heap] %lu bytes at 0x%lx were not backed at once (error %u): they are backed as "
+                   "they are touched", (unsigned long)huge_len, (unsigned long)huge_va, (unsigned)why);
+        return ptr;
+    }
     return NULL;
 }
 
@@ -812,12 +613,8 @@ void* malloc(size_t size) {
     unsigned c = StrandPoolSizeToClass(size);
     if (c == STRAND_POOL_NO_CLASS || !pool) {
         /* Oversized request, or no slab slot available — serve from the locked
-         * global heap. alloc_locked records the cause in this strand's cell. */
-        uintptr_t huge_va = 0; size_t huge_len = 0;
-        uspin_lock(&heap_lock);
-        void* ptr = alloc_locked(size, HEAP_TAG_NONE, errcell, &huge_va, &huge_len);
-        uspin_unlock(&heap_lock);
-        return huge_backed(ptr, huge_va, huge_len, HEAP_TAG_NONE, errcell);
+         * global heap. The cause lands in this strand's cell. */
+        return alloc_backed(size, HEAP_TAG_NONE, errcell);
     }
 
     if (!pool->Heads[c]) {
@@ -847,11 +644,10 @@ void* malloc(size_t size) {
  * exactly what boxcxx's aligned operator new does, and it works there because
  * the aligned DELETE knows to look for the stash. free() does not: it reads the
  * 32 bytes in front of the payload and expects a block header with the heap
- * magic. So this puts a REAL header there. The block found by the first-fit
- * search is split in two: the leading remainder goes back on the free list, and
- * the second half — whose header lands exactly at (aligned address − 32) — is
- * the allocation. free() then sees an ordinary block, because that is what it
- * is.
+ * magic. So this puts a REAL header there: the block taken is cut so that a
+ * header lands exactly at (aligned address − 32), what lies in front of it
+ * given back, and so is what lies past the size asked (heap_blocks_align).
+ * free() then sees an ordinary block, because that is what it is.
  *
  * The over-allocation is size + alignment + one header + HEAP_ALIGN: the last
  * term guarantees the leading remainder is itself a usable block rather than a
@@ -868,35 +664,16 @@ void* aligned_alloc(size_t alignment, size_t size) {
     StrandPool *pool    = pool_self();
     error_t    *errcell = heap_err_cell_for(pool);
 
-    uintptr_t huge_va = 0; size_t huge_len = 0;
-    uspin_lock(&heap_lock);
-    void* p = alloc_locked(raw, HEAP_TAG_NONE, errcell, &huge_va, &huge_len);
-    uspin_unlock(&heap_lock);
-    p = huge_backed(p, huge_va, huge_len, HEAP_TAG_NONE, errcell);
+    void* p = alloc_backed(raw, HEAP_TAG_NONE, errcell);
     if (!p) return NULL;
 
-    /* Split the block at the aligned address — under the lock again, and
-     * only now that the block has its header and its backing. */
+    /* Cut at the aligned address — under the lock again, and only now that
+     * the block has its backing. */
     uspin_lock(&heap_lock);
-    block_t*  b      = (block_t*)((uint8_t*)p - BLOCK_HDR_SIZE);
-    uintptr_t target = align_up((uintptr_t)p + BLOCK_HDR_SIZE + HEAP_ALIGN,
-                                alignment);
-    block_t*  n      = (block_t*)(target - BLOCK_HDR_SIZE);
-    size_t    lead   = (uintptr_t)n - (uintptr_t)p;   /* payload left to b */
-
-    n->size  = b->size - lead - BLOCK_HDR_SIZE;
-    n->magic = HEAP_MAGIC;
-    n->free  = 0;
-    n->tag   = HEAP_TAG_NONE;
-    n->next  = b->next;
-
-    b->size  = lead;
-    b->free  = 1;
-    b->tag   = HEAP_TAG_NONE;
-    b->next  = n;
-
+    void *aligned = heap_blocks_align(block_of(p), alignment, size);
     uspin_unlock(&heap_lock);
-    return (void*)target;
+    if (!aligned) *errcell = ERR_CORRUPTED;
+    return aligned;
 }
 
 void* malloc_tagged(size_t size, const char *tag) {
@@ -905,15 +682,13 @@ void* malloc_tagged(size_t size, const char *tag) {
     /* pool_self() (which may claim a slot) is called BEFORE the heap lock —
      * pool_claim takes the lock itself, so resolving it here avoids re-entry. */
     error_t *errcell = heap_err_cell_for(pool_self());
-    uintptr_t huge_va = 0; size_t huge_len = 0;
     TagSay say = TAG_SAY_NOTHING;
     uspin_lock(&heap_lock);
     uint8_t tag_id = get_or_create_tag_locked(tag, &say);
-    void* ptr = alloc_locked(size, tag_id, errcell, &huge_va, &huge_len);
     uspin_unlock(&heap_lock);
     /* Outside the lock: saying it is a syscall. */
     if (say != TAG_SAY_NOTHING) heap_tag_say(say, tag);
-    return huge_backed(ptr, huge_va, huge_len, tag_id, errcell);
+    return alloc_backed(size, tag_id, errcell);
 }
 
 /* Return a block to the global heap under the lock — the slow path shared by
@@ -924,7 +699,7 @@ static void free_global(void* ptr) {
 
     stat_free_calls++;
 
-    block_t* block = (block_t*)((uint8_t*)ptr - BLOCK_HDR_SIZE);
+    block_t* block = block_of(ptr);
 
     if (block->magic != HEAP_MAGIC) {
         *errcell = ERR_CORRUPTED;
@@ -932,31 +707,27 @@ static void free_global(void* ptr) {
         return;
     }
 
-    if (block->free) {
+    if (block->state != BLOCK_USED) {
         *errcell = ERR_INVALID_ADDRESS;
         uspin_unlock(&heap_lock);
         return;
     }
 
-    block->free = 1;
-    block->tag  = HEAP_TAG_NONE;
-    coalesce_locked();
-
-    *errcell = OK;
+    *errcell = heap_blocks_give(block);
     uspin_unlock(&heap_lock);
 }
 
 void free(void* ptr) {
     if (!ptr) return;
 
-    block_t* block = (block_t*)((uint8_t*)ptr - BLOCK_HDR_SIZE);
+    block_t* block = block_of(ptr);
 
-    /* A wild/corrupt pointer is caught here (magic is write-once); a genuinely
-     * free block (real double-free of a flushed block) and any tagged block go
-     * to the locked global path that owns those semantics. */
-    if (block->magic != HEAP_MAGIC) { free_global(ptr); return; }
-    if (block->free)                { free_global(ptr); return; }
-    if (block->tag != HEAP_TAG_NONE){ free_global(ptr); return; }
+    /* A wild/corrupt pointer is caught here (magic is write-once); a block the
+     * global heap holds as not USED (real double-free of a flushed block) and
+     * any tagged block go to the locked global path that owns those semantics. */
+    if (block->magic != HEAP_MAGIC)     { free_global(ptr); return; }
+    if (block->state != BLOCK_USED)     { free_global(ptr); return; }
+    if (block->tag != HEAP_TAG_NONE)    { free_global(ptr); return; }
 
     unsigned c = StrandPoolClassFromBlockSize(block->size);
     if (c == STRAND_POOL_NO_CLASS) { free_global(ptr); return; }
@@ -966,7 +737,7 @@ void free(void* ptr) {
     error_t *errcell = heap_err_cell_for(pool);
 
     /* Double-free of a still-cached block: scan this magazine (<= cap pointers).
-     * The global free() above cannot catch it because a cached block is free=0.
+     * The global free() above cannot catch it because a cached block is USED.
      * Bound the scan by Counts[c] and validate each node's magic BEFORE following
      * its payload link, so a corrupted cached link cannot fault or loop here. */
     unsigned guard = pool->Counts[c];
@@ -975,8 +746,7 @@ void free(void* ptr) {
             *errcell = ERR_INVALID_ADDRESS;
             return;
         }
-        block_t *b = (block_t *)((uint8_t *)node - BLOCK_HDR_SIZE);
-        if (b->magic != HEAP_MAGIC) break;
+        if (block_of(node)->magic != HEAP_MAGIC) break;
         node = *(void **)node;
     }
 
@@ -984,7 +754,6 @@ void free(void* ptr) {
         uspin_lock(&heap_lock);
         reclaim_orphans_scan_locked();
         pool_flush_class_locked(pool, c, STRAND_POOL_REFILL_BATCH);
-        coalesce_locked();
         uspin_unlock(&heap_lock);
     }
 
@@ -1020,75 +789,36 @@ void* realloc(void* ptr, size_t size) {
     error_t *errcell = heap_err_cell_for(pool_self());
     uspin_lock(&heap_lock);
 
-    block_t* block = (block_t*)((uint8_t*)ptr - BLOCK_HDR_SIZE);
+    block_t* block = block_of(ptr);
     if (block->magic != HEAP_MAGIC) {
         *errcell = ERR_CORRUPTED;
         uspin_unlock(&heap_lock);
         return NULL;
     }
+    if (block->state != BLOCK_USED) {
+        *errcell = ERR_INVALID_ADDRESS;
+        uspin_unlock(&heap_lock);
+        return NULL;
+    }
 
-    size_t aligned = align_up(size, HEAP_ALIGN);
-
-    // Shrink in-place
-    if (block->size >= aligned) {
-        if (block->size >= aligned + HEAP_MIN_SPLIT) {
-            block_t* split = (block_t*)((uint8_t*)block + BLOCK_HDR_SIZE + aligned);
-            split->size  = block->size - aligned - BLOCK_HDR_SIZE;
-            split->magic = HEAP_MAGIC;
-            split->free  = 1;
-            split->tag   = HEAP_TAG_NONE;
-            split->next  = block->next;
-            block->size  = aligned;
-            block->next  = split;
-        }
+    /* Where it stands: shrunk, or grown into a free block above it or into
+     * the heap's end. */
+    if (heap_blocks_resize(block, size)) {
         *errcell = OK;
         uspin_unlock(&heap_lock);
         return ptr;
     }
 
-    // Try to absorb the next block if it's free
-    if (block->next && block->next->magic == HEAP_MAGIC && block->next->free) {
-        size_t combined = block->size + BLOCK_HDR_SIZE + block->next->size;
-        if (combined >= aligned) {
-            block->size = combined;
-            block->next = block->next->next;
-            if (block->size >= aligned + HEAP_MIN_SPLIT) {
-                block_t* split = (block_t*)((uint8_t*)block + BLOCK_HDR_SIZE + aligned);
-                split->size  = block->size - aligned - BLOCK_HDR_SIZE;
-                split->magic = HEAP_MAGIC;
-                split->free  = 1;
-                split->tag   = HEAP_TAG_NONE;
-                split->next  = block->next;
-                block->size  = aligned;
-                block->next  = split;
-            }
-            *errcell = OK;
-            uspin_unlock(&heap_lock);
-            return ptr;
-        }
-    }
-
-    // Must relocate — save old tag and size, then drop lock
-    size_t old_size = block->size;
-    uint8_t old_tag = block->tag;
+    /* Must move — under its own tag, which a tagged block keeps. */
+    size_t  old_size = block->size;
+    uint8_t old_tag  = block->tag;
     uspin_unlock(&heap_lock);
 
-    void* new_ptr = malloc(size);
+    void* new_ptr = old_tag != HEAP_TAG_NONE ? alloc_backed(size, old_tag, errcell) : malloc(size);
     if (!new_ptr) return NULL;
 
-    memcpy(new_ptr, ptr, old_size);
+    memcpy(new_ptr, ptr, old_size < size ? old_size : size);
     free(ptr);
-
-    // Restore tag on the new block
-    if (old_tag != HEAP_TAG_NONE) {
-        uspin_lock(&heap_lock);
-        block_t* new_block = (block_t*)((uint8_t*)new_ptr - BLOCK_HDR_SIZE);
-        if (new_block->magic == HEAP_MAGIC) {
-            new_block->tag = old_tag;
-        }
-        uspin_unlock(&heap_lock);
-    }
-
     return new_ptr;
 }
 
@@ -1105,17 +835,21 @@ uint8_t heap_register_tag(const char *name) {
     return id;
 }
 
+/* The id of a registered tag name, HEAP_TAG_NONE when there is none.
+ * heap_lock HELD. */
+static uint8_t lookup_tag_locked(const char *name) {
+    for (uint8_t i = 0; i < heap_tag_count; i++) {
+        if (strcmp(heap_tag_names[i], name) == 0)
+            return i;
+    }
+    return HEAP_TAG_NONE;
+}
+
 uint8_t heap_lookup_tag(const char *name) {
     if (!name) return HEAP_TAG_NONE;
 
     uspin_lock(&heap_lock);
-    uint8_t result = HEAP_TAG_NONE;
-    for (uint8_t i = 0; i < heap_tag_count; i++) {
-        if (strcmp(heap_tag_names[i], name) == 0) {
-            result = i;
-            break;
-        }
-    }
+    uint8_t result = lookup_tag_locked(name);
     uspin_unlock(&heap_lock);
     return result;
 }
@@ -1134,22 +868,11 @@ size_t heap_count_tag(const char *tag) {
 
     uspin_lock(&heap_lock);
 
-    uint8_t tag_id = HEAP_TAG_NONE;
-    for (uint8_t i = 0; i < heap_tag_count; i++) {
-        if (strcmp(heap_tag_names[i], tag) == 0) {
-            tag_id = i;
-            break;
-        }
-    }
-
-    size_t count = 0;
+    uint8_t tag_id = lookup_tag_locked(tag);
+    size_t  count  = 0;
     if (tag_id != HEAP_TAG_NONE) {
-        block_t* curr = free_list;
-        while (curr) {
-            if (curr->magic != HEAP_MAGIC) break;
-            if (!curr->free && curr->tag == tag_id) count++;
-            curr = curr->next;
-        }
+        for (block_t *b = heap_blocks_first(); b && b->magic == HEAP_MAGIC; b = heap_blocks_next(b))
+            if (b->state == BLOCK_USED && b->tag == tag_id) count++;
     }
 
     uspin_unlock(&heap_lock);
@@ -1161,24 +884,11 @@ void heap_iterate_tag(const char *tag, HeapTagCallback cb, void *userdata) {
 
     uspin_lock(&heap_lock);
 
-    uint8_t tag_id = HEAP_TAG_NONE;
-    for (uint8_t i = 0; i < heap_tag_count; i++) {
-        if (strcmp(heap_tag_names[i], tag) == 0) {
-            tag_id = i;
-            break;
-        }
-    }
-
+    uint8_t tag_id = lookup_tag_locked(tag);
     if (tag_id != HEAP_TAG_NONE) {
-        block_t* curr = free_list;
-        while (curr) {
-            if (curr->magic != HEAP_MAGIC) break;
-            if (!curr->free && curr->tag == tag_id) {
-                void* payload = (void*)((uint8_t*)curr + BLOCK_HDR_SIZE);
-                cb(payload, curr->size, heap_tag_names[tag_id], userdata);
-            }
-            curr = curr->next;
-        }
+        for (block_t *b = heap_blocks_first(); b && b->magic == HEAP_MAGIC; b = heap_blocks_next(b))
+            if (b->state == BLOCK_USED && b->tag == tag_id)
+                cb(payload_of(b), b->size, heap_tag_names[tag_id], userdata);
     }
 
     uspin_unlock(&heap_lock);
@@ -1189,17 +899,11 @@ void heap_iterate_all_tagged(HeapTagCallback cb, void *userdata) {
 
     uspin_lock(&heap_lock);
 
-    block_t* curr = free_list;
-    while (curr) {
-        if (curr->magic != HEAP_MAGIC) break;
-        if (!curr->free && curr->tag != HEAP_TAG_NONE) {
-            void* payload = (void*)((uint8_t*)curr + BLOCK_HDR_SIZE);
-            const char *name = (curr->tag < heap_tag_count)
-                               ? heap_tag_names[curr->tag]
-                               : NULL;
-            cb(payload, curr->size, name, userdata);
+    for (block_t *b = heap_blocks_first(); b && b->magic == HEAP_MAGIC; b = heap_blocks_next(b)) {
+        if (b->state == BLOCK_USED && b->tag != HEAP_TAG_NONE) {
+            const char *name = (b->tag < heap_tag_count) ? heap_tag_names[b->tag] : NULL;
+            cb(payload_of(b), b->size, name, userdata);
         }
-        curr = curr->next;
     }
 
     uspin_unlock(&heap_lock);
@@ -1210,25 +914,20 @@ void heap_dump_tags(void) {
 
     printf("[heap] tagged live blocks:\n");
 
-    block_t* curr = free_list;
     bool found_any = false;
-    while (curr) {
-        if (curr->magic != HEAP_MAGIC) {
-            printf("[heap]   (corrupted block at 0x%x)\n", (uint32_t)(uintptr_t)curr);
+    for (block_t *b = heap_blocks_first(); b; b = heap_blocks_next(b)) {
+        if (b->magic != HEAP_MAGIC) {
+            printf("[heap]   (corrupted block at 0x%x)\n", (uint32_t)(uintptr_t)b);
             break;
         }
-        if (!curr->free && curr->tag != HEAP_TAG_NONE) {
-            const char *name = (curr->tag < heap_tag_count)
-                               ? heap_tag_names[curr->tag]
-                               : "(unknown)";
-            void* payload = (void*)((uint8_t*)curr + BLOCK_HDR_SIZE);
+        if (b->state == BLOCK_USED && b->tag != HEAP_TAG_NONE) {
+            const char *name = (b->tag < heap_tag_count) ? heap_tag_names[b->tag] : "(unknown)";
             printf("[heap]   ptr=0x%x size=%u tag=%s\n",
-                   (uint32_t)(uintptr_t)payload,
-                   (uint32_t)curr->size,
+                   (uint32_t)(uintptr_t)payload_of(b),
+                   (uint32_t)b->size,
                    name);
             found_any = true;
         }
-        curr = curr->next;
     }
 
     if (!found_any) {
@@ -1253,19 +952,16 @@ void heap_get_stats(heap_stats_t *out) {
     out->free_count      = 0;
     out->malloc_calls    = stat_malloc_calls;
     out->free_calls      = stat_free_calls;
-    out->heap_used       = (initialized) ? (heap_current - heap_base) : 0;
+    out->heap_used       = heap_blocks_grown();
 
-    block_t* curr = free_list;
-    while (curr) {
-        if (curr->magic != HEAP_MAGIC) break;
-        if (curr->free) {
-            out->total_free += curr->size;
+    for (block_t *b = heap_blocks_first(); b && b->magic == HEAP_MAGIC; b = heap_blocks_next(b)) {
+        if (b->state == BLOCK_FREE) {
+            out->total_free += b->size;
             out->free_count++;
-        } else {
-            out->total_allocated += curr->size;
+        } else if (b->state == BLOCK_USED) {
+            out->total_allocated += b->size;
             out->alloc_count++;
         }
-        curr = curr->next;
     }
 
     uspin_unlock(&heap_lock);

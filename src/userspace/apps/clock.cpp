@@ -90,11 +90,11 @@ void Show(const gui::Area &Screen, gui::Shape &Plate, gui::Text &Time, const Loo
     Time.SetText(Said).SetStyle(Figures).SetSpans(Colons).SetPlace({Left + panel::Padding, panel::Margin + panel::Inset});
 }
 
-/* The ClockBoard's moment the next second turns at. */
+/* The ClockBoard's moment the next second turns at, in µs. */
 std::uint64_t NextSecond()
 {
-    const std::uint64_t IntoSecond = clock_unix_now_ns() / 1000000u % 1000u;
-    return clock_uptime_ms() + (1000u - IntoSecond) + 1u;
+    const std::uint64_t IntoSecond = clock_unix_now_ns() / 1000u % 1000000u;
+    return clock_uptime_us() + (1000000u - IntoSecond) + 1u;
 }
 
 }  // namespace
@@ -110,23 +110,27 @@ int main()
 
     box::settings::watch Watch;
     Look                 Shown = ReadLook();
-    /* The notice comes in out of nothing; after, each second's figures fade
-     * into the next. */
+    /* The notice comes in out of nothing; after, a minute's figures fade into
+     * the next, and a second's are simply the next — a clock at rest asks the
+     * display for one frame a second, not a fade's every second. */
     Plate.SetOpacity(0);
     Time.SetOpacity(0);
+    std::int64_t Minute = -1;
     for (bool First = true;; First = false) {
         if (Watch.changed()) Shown = ReadLook();
         BoxTime Now{};
         if (clock_boxtime_local(&Now) == OK) {
-            if (First) Show(Screen, Plate, Time, Shown, TimeOf(Shown, Now));
+            const std::int64_t This = std::int64_t{Now.hour} * 60 + Now.minute;
+            if (First || This == Minute) Show(Screen, Plate, Time, Shown, TimeOf(Shown, Now));
             else Screen.Animate(gui::Animation::InOut(220ms), [&] { Show(Screen, Plate, Time, Shown, TimeOf(Shown, Now)); });
+            Minute = This;
         }
         if (First) Screen.Animate(gui::Animation::Out(600ms), [&] {
             Plate.SetOpacity(1);
             Time.SetOpacity(1);
         });
         (void)Screen.Present();
-        (void)alarm_set(NextSecond());
+        (void)alarm_set_us(NextSecond());
         /* The second turned — or the screen changed, and the corner with it. */
         for (;;) {
             const gui::Event Heard = Screen.Wait();

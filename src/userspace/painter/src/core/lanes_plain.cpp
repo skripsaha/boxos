@@ -5,6 +5,8 @@
 
 #include "lanes.h"
 
+#include <new>
+
 #include "boxos_pixel.h"
 #include "light.h"
 
@@ -26,17 +28,29 @@ void LayPaint(Pixel *Row, const Pixel *Paint, const std::uint16_t *Share, std::u
 
 void LayRow(Pixel *Row, const Pixel *From, std::uint32_t Count, std::uint32_t Share)
 {
+    /* Whole over whole is the paint itself, to the last bit (light.h Times
+     * by 65535 gives back what it took, and leaves nothing of what was
+     * beneath): the light is copied, not worked out. */
+    if (Share == light::Whole) {
+        for (std::uint32_t I = 0; I < Count; I++) Row[I] = From[I].Alpha == light::Whole ? From[I] : light::Over(Row[I], From[I], Share);
+        return;
+    }
     for (std::uint32_t I = 0; I < Count; I++) Row[I] = light::Over(Row[I], From[I], Share);
 }
 
 void Show(std::uint32_t *Out, const Pixel *Row, std::uint32_t Count, std::uint32_t Format,
           const std::uint8_t *Thresholds)
 {
-    const light::Steps &S = light::StepsOfLight();
+    const light::DitherTable *Table = Thresholds ? light::DitherTableOfLight() : nullptr;
+    const light::Steps       &S     = light::StepsOfLight();
     for (std::uint32_t I = 0; I < Count; I++) {
         const Pixel P = Row[I];
         std::uint32_t R, G, B;
-        if (Thresholds) {
+        if (Table) {
+            R = light::DitheredBy(Table->Of[P.Red], Thresholds[I]);
+            G = light::DitheredBy(Table->Of[P.Green], Thresholds[I]);
+            B = light::DitheredBy(Table->Of[P.Blue], Thresholds[I]);
+        } else if (Thresholds) {
             R = light::Dithered(P.Red, S, Thresholds[I]);
             G = light::Dithered(P.Green, S, Thresholds[I]);
             B = light::Dithered(P.Blue, S, Thresholds[I]);
@@ -76,6 +90,23 @@ const Steps &StepsOfLight() noexcept
         }
         S.Reciprocal[255] = 0;
         return S;
+    }();
+    return Made;
+}
+
+const DitherTable *DitherTableOfLight() noexcept
+{
+    static const DitherTable *const Made = []() -> const DitherTable * {
+        DitherTable *T = new (std::nothrow) DitherTable;
+        if (!T) return nullptr;
+        const Steps &S = StepsOfLight();
+        for (std::uint32_t Light = 0; Light < 65536u; Light++) {
+            std::uint32_t N, Part;
+            Between(Light, S, N, Part);
+            T->Of[Light] = static_cast<std::uint16_t>(Part << 8 | N);
+        }
+        T->Of[65536] = 0;
+        return T;
     }();
     return Made;
 }

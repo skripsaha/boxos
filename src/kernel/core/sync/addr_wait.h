@@ -57,7 +57,7 @@ typedef struct AddrWaitEntry {
      *              stall even when everything around it is asleep. */
     uint64_t              user_va;
     uint64_t              expected;
-    uint64_t              fire_at; /* the deadline, in scheduler ticks; 0 when the
+    uint64_t              fire_at; /* the deadline, µs of uptime; 0 when the
                                     * park has none. The deadline's delivery judges
                                     * by THIS, under the bucket lock: a park whose
                                     * deadline has passed and that is still linked

@@ -358,10 +358,14 @@ census_book() {
 # left the grown Tally's next_quire falls on the free run the landing's files
 # take (selftest_book_tally.py Padded: "would lie over the landings' files"),
 # so planted after it the leg was never booted; then the
-# image again under UEFI, STRICT, four cores, its seat an AHCI port — the seat
+# image again under UEFI, STRICT, eight cores, its seat an AHCI port — the seat
 # whose reads go through the port, parked on each answer, so the rotten block
 # is refused on the port's road too (stand_tally_rot_three_paths), and every
-# door below the glass is knocked at in a kernel that stops at a defect.
+# door below the glass is knocked at in a kernel that stops at a defect. Four
+# cores give the system one K-Core, the BSP, which the tests run on and the
+# committer is (the machines the owner's laptop and desktop are); eight give it
+# two, so a K-Core beside the BSP settles and reaps while the tests ask
+# (stand_gone_through_the_teardown, standing down where there is none).
 #
 # Judged: the STAND_RUN tests this tree registers walked, nothing failed,
 # nothing held; every book test ran — none stood down but on the legs
@@ -479,7 +483,8 @@ STAND_BOOK_TALLY='^\[TagFS\] a whole Tally of the book is written once the ribbo
 # STAND_BOOK_ASIDE_WORDS holds them to; the asynchronous read and the
 # roadstead's doors on any seat but an AHCI port, the flush a USB disk answers
 # anywhere but on the stick, the legacy-IDE DMA wait anywhere but on the
-# legacy channel, and the border's room on its way on a STRICT kernel.
+# legacy channel, the border's room on its way on a STRICT kernel, and the
+# teardown asked about where no K-Core beside the BSP reaps — four cores.
 STAND_BOOK_ASIDE="stand_stitch_page_atom:stand_book,stand_book_padded,stand_book_uefi
 stand_stitch_page_atom_hop:stand_book,stand_book_padded,stand_book_uefi
 stand_stitch_page_inside:stand_book,stand_book_padded,stand_book_uefi
@@ -501,7 +506,8 @@ stand_roadstead_refusal_rings_once:stand_book,stand_book_padded,stand_book_usb
 stand_medium_no_medium_flush_refused:stand_book,stand_book_padded,stand_book_uefi
 stand_medium_sync_cache_remembered:stand_book,stand_book_padded,stand_book_uefi
 stand_dma_wait_keeps_the_callers_interrupts:stand_book_uefi,stand_book_usb
-stand_room_never_an_answer:stand_book_uefi"
+stand_room_never_an_answer:stand_book_uefi
+stand_gone_through_the_teardown:stand_book,stand_book_padded,stand_book_usb"
 # TEST|WORDS — a row of STAND_BOOK_ASIDE whose test may stand down for more
 # than one reason, and the reason its legs are for: the line it stands down
 # by begins with them.
@@ -719,8 +725,8 @@ stand_book() {
     rm -f "$img" build/boxos.img
     if build_with_key VOLUME_TESTS=on STRICT=on; then
         booted=$(stand_book_census build/boxos.img)
-        stand_boot stand_book_uefi UEFI=on STRICT=on CORES=4 MEM=4G
-        [ $? = 2 ] || stand_book_judge stand_book_uefi "the book, UEFI 4c on an AHCI port, STRICT" \
+        stand_boot stand_book_uefi UEFI=on STRICT=on CORES=8 MEM=4G
+        [ $? = 2 ] || stand_book_judge stand_book_uefi "the book, UEFI 8c on an AHCI port, STRICT" \
             "$STAND_BOOK_UEFI_BLOCKFAILS" "" taken build/boxos.img "$booted"
     else
         echo "BUILD FAILED (VOLUME_TESTS=on STRICT=on) — tail:"; tail -25 "$SCRATCH/build.log"

@@ -25,12 +25,45 @@ bool clock_available(void)
     return v->magic == CLOCKBOARD_MAGIC;
 }
 
+static inline uint64_t clock_tsc(void)
+{
+    uint32_t lo, hi;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+/* The microsecond now: what the kernel published at its last tick and the
+ * TSC it read with it — taken whole, between two even steps of `seq` — and
+ * what the TSC ran since, at the board's rate. Never back: a core whose TSC
+ * stands a hair behind the BSP's, or a tick whose clock trails what was
+ * interpolated before it, gives the last microsecond again, never an earlier
+ * one. */
+static uint64_t board_now_us(const ClockBoard *v)
+{
+    uint64_t seq, us, at;
+    do {
+        seq = v->seq;
+        us  = v->uptime_us;
+        at  = v->tsc_at;
+    } while ((seq & 1u) || seq != v->seq);
+    const uint64_t khz = v->tsc_freq_khz;
+    const uint64_t tsc = clock_tsc();
+    if (at != 0 && khz != 0 && tsc > at) {
+        const uint64_t ran = tsc - at;
+        us += ran / khz * 1000u + (ran % khz) * 1000u / khz;
+    }
+    static volatile uint64_t s_last;
+    uint64_t last = __atomic_load_n(&s_last, __ATOMIC_RELAXED);
+    while (us > last &&
+           !__atomic_compare_exchange_n(&s_last, &last, us, true, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+    }
+    return us > last ? us : last;
+}
+
 uint64_t clock_uptime_us(void)
 {
     const ClockBoard *v = cb();
-    if (v->magic == CLOCKBOARD_MAGIC) {
-        return v->uptime_us;
-    }
+    if (v->magic == CLOCKBOARD_MAGIC) return board_now_us(v);
     /* Fallback: ask the kernel via the HW deck. */
     uint64_t ms = 0;
     if (time_uptime_ms(&ms) == 0) return ms * 1000ULL;
@@ -40,9 +73,7 @@ uint64_t clock_uptime_us(void)
 uint64_t clock_uptime_ms(void)
 {
     const ClockBoard *v = cb();
-    if (v->magic == CLOCKBOARD_MAGIC) {
-        return v->uptime_ms;
-    }
+    if (v->magic == CLOCKBOARD_MAGIC) return board_now_us(v) / 1000u;
     uint64_t ms = 0;
     if (time_uptime_ms(&ms) == 0) return ms;
     return 0;
@@ -52,7 +83,7 @@ uint64_t clock_unix_now(void)
 {
     const ClockBoard *v = cb();
     if (v->magic == CLOCKBOARD_MAGIC && v->boot_unix_secs != 0) {
-        return v->boot_unix_secs + (v->uptime_us / 1000000ULL);
+        return v->boot_unix_secs + (board_now_us(v) / 1000000ULL);
     }
     /* Fallback: ask the kernel directly. */
     uint64_t secs = 0;
@@ -64,10 +95,9 @@ uint64_t clock_unix_now_ns(void)
 {
     const ClockBoard *v = cb();
     if (v->magic == CLOCKBOARD_MAGIC && v->boot_unix_secs != 0) {
-        /* Single board view: boot_unix_secs is immutable post-boot and the
-         * kernel writes uptime_us as one 8-byte store, so reading both from
-         * the same snapshot keeps seconds and sub-seconds consistent. */
-        uint64_t us  = v->uptime_us;
+        /* One microsecond, split once: boot_unix_secs is immutable post-boot,
+         * so seconds and sub-seconds come from the same reading. */
+        uint64_t us  = board_now_us(v);
         uint64_t sec = v->boot_unix_secs + us / 1000000ULL;
         uint64_t sub = us % 1000000ULL;            /* leftover microseconds */
         return sec * 1000000000ULL + sub * 1000ULL;

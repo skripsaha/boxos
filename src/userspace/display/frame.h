@@ -25,7 +25,9 @@
 //
 // What goes onto the glass, and through what, is the easel's (easel.h).
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <span>
 
@@ -77,6 +79,23 @@ void FrameEverything() noexcept;
 // Whether a frame has anything to show — the console's caret taken where it
 // stands now first; Areas, whether anything of the areas changed.
 bool FrameDue(const ConsoleModel &Console, bool Areas) noexcept;
+
+// Strands that compose a frame's tiles beside the main strand (helpers.h).
+class Hands {
+public:
+    virtual ~Hands() = default;
+    // How many strands work a frame's tiles, the main one among them.
+    virtual std::size_t Count() const noexcept = 0;
+    // Work(Job, Hand) for every Job below Jobs, each once, Hand the working
+    // strand's number below Count() — the main strand's 0, for it works too;
+    // back once every one is done.
+    virtual void Run(std::size_t Jobs, const std::function<void(std::size_t, std::size_t)> &Work) noexcept = 0;
+};
+
+// The hands a frame's tiles are composed by from now on; none, and the main
+// strand composes every one. A tile a cache of the main strand's draws in
+// (compositor.h OwnGlyphs) is always the main strand's.
+void FrameUse(Hands *Of) noexcept;
 
 // A framebuffer's frame: what changed composed into Into, Programs the areas
 // bottom to top (areas.h AreasInOrder) — and what composing took, and how

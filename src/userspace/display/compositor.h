@@ -26,6 +26,7 @@
 #include "animator.h"
 #include "item_draw.h"
 #include "item_tree.h"
+#include "region.h"
 #include "painter/core/canvas.h"
 #include "painter/core/geometry.h"
 #include "painter/core/transform.h"
@@ -84,11 +85,7 @@ struct AreaState {
 class Compositor {
 public:
     // The screen's pixels: damage is kept within them.
-    explicit Compositor(painter::core::Rect Screen) : Screen(Screen)
-    {
-        Waiting.reserve(DamageKept);
-        Own.reserve(DamageKept);
-    }
+    explicit Compositor(painter::core::Rect Screen) : Screen(Screen) {}
 
     // Pixels to be composed again — something beneath the areas changed.
     void Damage(painter::core::Rect Area) noexcept;
@@ -96,32 +93,40 @@ public:
     // anything changed added to the damage — each area's own told in its
     // Composed. Areas bottom to top.
     void Take(std::span<AreaState *const> Areas, const Theme &Look);
-    // The damage as rectangles, few and apart, taken.
-    std::vector<painter::core::Rect> Rects();
+    // The damage as rectangles none of which overlaps another (region.h),
+    // taken.
+    std::vector<painter::core::Rect> Rects() { return Waiting.Take(); }
     // Whether an opaque item covers Area whole: what lies beneath it, the
     // console's cells too, need not be drawn.
     bool Hidden(painter::core::Rect Area, std::span<AreaState *const> Areas) const noexcept;
     // Whether any damage waits to be composed.
-    bool Damaged() const noexcept { return !Waiting.empty(); }
+    bool Damaged() const noexcept { return !Waiting.Empty(); }
     // Area composed onto Target, whose corner lies at Corner on the screen,
     // from the areas' items, over what Target holds there; Areas bottom to
-    // top.
+    // top. Nothing but Target changes: areas apart are composed on several
+    // strands at once, each its own Target.
     void Compose(painter::core::Canvas &Target, painter::core::Point Corner, painter::core::Rect Area,
-                 std::span<AreaState *const> Areas, const Theme &Look);
+                 std::span<AreaState *const> Areas, const Theme &Look) const;
+    // Whether composing Area paints glyphs from a cache one strand keeps
+    // (item_draw.h OwnGlyphs): then only the main strand composes it.
+    bool OwnGlyphs(painter::core::Rect Area, std::span<AreaState *const> Areas) const noexcept;
 
 private:
+    // Where composing a rectangle begins: the area and the entry of the
+    // topmost opaque item covering it whole, nothing beneath drawn.
+    struct From {
+        std::size_t Area = 0, Entry = 0;
+    };
+    From Lowest(painter::core::Rect Area, std::span<AreaState *const> Areas) const noexcept;
     void TakeOne(AreaState &Area, const Theme &Look);
     void Walk(AreaState &Area, const std::vector<std::uint32_t> &Items, const painter::core::Transform &Parent,
               float Opacity, bool Moved, bool Plain, bool Turning);
     void Vanish(AreaState &Area, const std::vector<std::uint32_t> &Items);
 
-    /* The rectangles damage is noted in: past them, joined. */
-    static constexpr std::size_t DamageKept = 64;
-
-    painter::core::Rect              Screen;
-    std::vector<painter::core::Rect> Waiting;
-    std::vector<painter::core::Rect> Own;       // the damage of the area being taken
-    bool                             Owning = false;
+    painter::core::Rect Screen;
+    Region              Waiting;
+    Region              Own;              // the damage of the area being taken
+    bool                Owning = false;
 };
 
 // An item's own placing: its place, then its turn and scale about its anchor.

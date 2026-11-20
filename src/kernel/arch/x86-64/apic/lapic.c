@@ -391,6 +391,68 @@ void lapic_timer_rearm(void) {
         wrmsr(MSR_IA32_TSC_DEADLINE, rdtsc() + g_lapic_tsc_period);
 }
 
+/* The one-shot's way, chosen once by the core that serves with it (the
+ * BSP, the touch queue's keeper): TSC-deadline, or counted down from the
+ * LAPIC's counts a millisecond at divide-by-16, measured here. */
+static bool     g_oneshot_deadline      = false;
+static uint64_t g_oneshot_counts_per_ms = 0;
+
+#define LAPIC_ONESHOT_CAL_MS 10u
+
+bool lapic_oneshot_init(uint8_t vector) {
+    if (!lapic_is_mapped() || cpu_get_tsc_freq_khz() == 0) return false;
+
+    if (g_cpu_caps.has_tsc_deadline && g_cpu_caps.has_invariant_tsc) {
+        g_oneshot_deadline = true;
+        lapic_write(LAPIC_REG_TIMER_LVT, vector | LAPIC_LVT_TIMER_TSC_DEADLINE);
+        /* As in lapic_timer_init: the mode is in place before any deadline is
+         * written. Nothing is armed until lapic_oneshot_after asks. */
+        __asm__ volatile("mfence" ::: "memory");
+        wrmsr(MSR_IA32_TSC_DEADLINE, 0);
+        kprintf("[LAPIC] one-shot timer: vector 0x%x, TSC-deadline\n", vector);
+        return true;
+    }
+
+    /* Counted: what the timer runs down in a span the TSC measures, masked
+     * meanwhile — the measurement lapic_timer_init makes of its period. */
+    lapic_write(LAPIC_REG_TIMER_LVT, LAPIC_LVT_MASKED);
+    lapic_write(LAPIC_REG_TIMER_DCR, LAPIC_TIMER_DIV_16);
+    lapic_write(LAPIC_REG_TIMER_ICR, 0xFFFFFFFF);
+    uint64_t until = rdtsc() + cpu_ms_to_tsc(LAPIC_ONESHOT_CAL_MS);
+    while (rdtsc() < until)
+        __asm__ volatile("pause");
+    uint32_t ran = 0xFFFFFFFF - lapic_read(LAPIC_REG_TIMER_CCR);
+    lapic_write(LAPIC_REG_TIMER_ICR, 0);
+    if (ran < LAPIC_ONESHOT_CAL_MS) {
+        kprintf("[LAPIC] the timer did not count in %u ms: no one-shot on this core\n",
+                LAPIC_ONESHOT_CAL_MS);
+        return false;
+    }
+    g_oneshot_deadline      = false;
+    g_oneshot_counts_per_ms = ran / LAPIC_ONESHOT_CAL_MS;
+    /* One-shot is the LVT's mode bits at zero. */
+    lapic_write(LAPIC_REG_TIMER_LVT, vector);
+    kprintf("[LAPIC] one-shot timer: vector 0x%x, counted down (%lu counts a ms)\n", vector,
+            (unsigned long)g_oneshot_counts_per_ms);
+    return true;
+}
+
+void lapic_oneshot_after(uint64_t after_us) {
+    if (g_oneshot_deadline) {
+        /* A deadline at or behind the counter interrupts at once; 0 disarms. */
+        uint64_t at = after_us ? rdtsc() + after_us * cpu_get_tsc_freq_khz() / 1000u + 1u : 0;
+        wrmsr(MSR_IA32_TSC_DEADLINE, at);
+        return;
+    }
+    if (g_oneshot_counts_per_ms == 0) return;
+    /* A wait longer than the counter holds interrupts early; whoever is
+     * interrupted finds nothing due and asks again. */
+    uint64_t counts = after_us * g_oneshot_counts_per_ms / 1000u;
+    if (after_us && counts == 0) counts = 1;
+    if (counts > 0xFFFFFFFFu) counts = 0xFFFFFFFFu;
+    lapic_write(LAPIC_REG_TIMER_ICR, (uint32_t)counts);
+}
+
 bool lapic_is_x2apic_active(void) {
     return g_x2apic_active;
 }

@@ -615,7 +615,7 @@ std::uint64_t Animator::Due(bool Seen) const noexcept
 {
     if (!Told.empty() || (Wanted.Instant && !All.empty())) return 1;
     std::uint64_t Next = Moments.empty() ? 0 : std::max<std::uint64_t>(Moments.front().At, 1);
-    if (Seen && Moving != 0) Next = Next == 0 ? Shown + FrameMicros : std::min(Next, Shown + FrameMicros);
+    if (Seen && Moving != 0) Next = Next == 0 ? FrameAfter(Shown) : std::min(Next, FrameAfter(Shown));
     return Next;
 }
 

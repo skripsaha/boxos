@@ -234,7 +234,7 @@ int FloatOnPixels(painter::gui::Area Screen)
     Screen.Animate(gui::Animation::Out(400ms), [&] { Board->SetOpacity(1); });
 
     box::settings::watch Watch;
-    std::uint64_t        Last = clock_uptime_us(), Next = clock_uptime_ms();
+    std::uint64_t        Last = clock_uptime_us(), Next = Last;
     for (;;) {
         if (Watch.changed()) {
             Set = ReadLook();
@@ -280,8 +280,8 @@ int FloatOnPixels(painter::gui::Area Screen)
 
         /* The next frame — or the glass changed under it, and Duppo begins
          * again on it. */
-        Next = std::max<std::uint64_t>(Next + static_cast<std::uint64_t>(Frame.count()), clock_uptime_ms() + 1);
-        (void)alarm_set(Next);
+        Next = std::max<std::uint64_t>(Next + 1000000u / std::max(Set.Fps, 1u), clock_uptime_us() + 1);
+        (void)alarm_set_us(Next);
         for (;;) {
             const gui::Event Heard = Screen.Wait();
             if (Heard.What == gui::Event::Kind::Alarm) break;

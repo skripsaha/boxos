@@ -11,7 +11,6 @@
 #include "kresult.h"
 #include "kring.h"
 #include "result.h"
-#include "scheduler.h"          /* g_global_tick + SCHEDULER_DEFAULT_TICK_HZ */
 #include "result_ring.h"
 #include "process.h"
 #include "klib.h"
@@ -193,14 +192,8 @@ static int SysTouchSend(const ManifestOp *op, Crate *crates,
                 (void)crate_write(out, ctx, &handed, sizeof(uint32_t));
         }
     } else {
-        /* Clock-domain rule: dispatcher reads g_global_tick (250 Hz fixed
-         * derived from hpet_now_us), NOT pit_get_ticks (dynamic PIT freq +
-         * HPET phase). Enqueue on the same clock or after_ms collapses. */
-        uint64_t delay_ticks = ((uint64_t)after_ms * SCHEDULER_DEFAULT_TICK_HZ)
-                               / 1000ULL;
-        if (delay_ticks == 0) delay_ticks = 1;
-        uint64_t fire_at = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED)
-                           + delay_ticks;
+        /* A moment of the touch queue's one clock. */
+        uint64_t fire_at = pit_get_uptime_us() + (uint64_t)after_ms * 1000u;
         /* Both nodes made before either is armed: a send the heap has no room
          * for is refused whole, never half heard. */
         bool            two  = bare_id != TOUCH_TAG_INVALID && bare_id != full_id;
@@ -279,7 +272,7 @@ static int SysTouchAwait(const ManifestOp *op, Crate *crates,
     }
 
     /* This sleep's number, claimed before anything is armed for it — the wake
-     * the tick fires reschedules only while the strand is still in THIS park.
+     * the queue fires reschedules only while the strand is still in THIS park.
      * An await that ends early (the ring re-check below, or an event) leaves
      * its wake armed, and without the number that wake would land on whatever
      * park came next. See process_t.park_seq. */
@@ -287,11 +280,7 @@ static int SysTouchAwait(const ManifestOp *op, Crate *crates,
                                            __ATOMIC_ACQ_REL);
 
     if (timeout_ms > 0) {
-        uint64_t delay = ((uint64_t)timeout_ms * SCHEDULER_DEFAULT_TICK_HZ)
-                         / 1000ULL;
-        if (delay == 0) delay = 1;
-        uint64_t fire_at = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED)
-                           + delay;
+        uint64_t fire_at = pit_get_uptime_us() + (uint64_t)timeout_ms * 1000u;
         /* owes_result=0: touch_await registers no addr_wait entry and is
          * owed no Result on expiry — only the in-IRQ reschedule (PROC_WORKING)
          * applies, and no deadline baton is passed. The await's own ring path

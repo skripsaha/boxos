@@ -405,6 +405,9 @@ static void halt_drain_async_writes(void)
      * no change begins: the work owed is what was begun before this line. */
     SettleCadenceHold(true);
     TagFSShutForHalt();
+    if (SettleRunBetweenStepsHere())
+        kprintf("[HALT] a Settle cycle stands between its steps on this core — the halt's own cycle runs it "
+                "to its end first\n");
 
     uint8_t        me        = amp_get_core_index();
     HaltDrainSeen  seen      = { .Best = UINT64_MAX, .Steps = UINT64_MAX, .Writes = UINT64_MAX };

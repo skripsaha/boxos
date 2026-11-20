@@ -150,6 +150,7 @@ static void PoolSeatTheKernelsOwn(void)
     BitSet(IPI_WAKE_VECTOR);      HolderSet((uint8_t)IPI_WAKE_VECTOR, "the wake IPI");
     BitSet(IPI_SHOOTDOWN_VECTOR); HolderSet((uint8_t)IPI_SHOOTDOWN_VECTOR, "the TLB shootdown IPI");
     BitSet(IPI_HALT_VECTOR);      HolderSet((uint8_t)IPI_HALT_VECTOR, "the halt IPI");
+    BitSet(DEADLINE_VECTOR);      HolderSet((uint8_t)DEADLINE_VECTOR, "the touch queue's deadline");
     BitSet(LAPIC_TIMER_VECTOR);   HolderSet((uint8_t)LAPIC_TIMER_VECTOR, "the LAPIC timer");
 
     /* The spurious vector gets its own sentence because the prohibition is

@@ -173,6 +173,8 @@ typer_selfcheck() {
     typer_case "the Enter lost after a prompt" "~ " "$c" "" "1 1"
     typer_case "a byte no locale reads in a kernel line inside the echo" \
         "~ " "quilltest aw[TagFS] \xff\xfe\r\naycheck _qtyper 3 32" "\r\n" "0 1"
+    typer_case "a program's line, its pid first, printed inside the echo" \
+        "~ " "quilltest aw[3] [AUTOSTART] Started 'pulse' (PID 6)\r\naycheck _qtyper 3 32" "\r\n" "0 1"
     prompt_selfcheck
 }
 
@@ -212,6 +214,11 @@ prompt_selfcheck() {
     prompt_case "a command typed at a Use Context's prompt" "$ended${used}quilltest names circle" 1
     prompt_case "a byte no locale reads early in the boot" "boot \xff\xfe\r\n$ended~ " 0
     prompt_case "a byte 1 and a NUL in the log" "\001boot\0000\r\n$ended\0000~ " 0
+    local launched="[3] [AUTOSTART] Started 'pulse' (PID 6)"
+    prompt_case "a program's line, its pid first, said after the prompt" "$ended~ $launched\r\n" 0
+    prompt_case "two programs' lines after it, the second on a line of its own" \
+        "$ended~ $launched\r\n[3] [AUTOSTART] Started 'gardener' (PID 7)\r\n" 0
+    prompt_case "a program's line after it not yet ended" "$ended~ $launched" 1
 }
 
 # latelaunch_leg MODE LOG — latearrival's machine with its late launch said

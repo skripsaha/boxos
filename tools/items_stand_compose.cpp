@@ -286,6 +286,50 @@ void CheckDamage(Tally &Count)
                 "a plain opaque page hides whatever lies beneath it — the console's cells, other areas — never past its edge");
 }
 
+/* A region: what it gives back covers every pixel added, each once and
+ * nothing besides, however many places changed. */
+void CheckRegion(Tally &Count)
+{
+    const Rect        Glass{0, 0, 1283, 797};
+    items::Region     Changed;
+    std::vector<bool> Asked(static_cast<std::size_t>(Glass.Width) * Glass.Height);
+    std::uint32_t     State = 0x2545F491u;
+    const auto        Next  = [&State] {
+        State ^= State << 13;
+        State ^= State >> 17;
+        State ^= State << 5;
+        return State;
+    };
+    for (int I = 0; I < 400; I++) {
+        const Rect One = Rect{static_cast<std::int32_t>(Next() % 1300) - 10, static_cast<std::int32_t>(Next() % 810) - 10,
+                              18 + static_cast<std::int32_t>(Next() % 6), 12 + static_cast<std::int32_t>(Next() % 6)}
+                             .Intersect(Glass);
+        Changed.Add(One);
+        for (std::int32_t Y = One.Y; Y < One.Y + One.Height; Y++)
+            for (std::int32_t X = One.X; X < One.X + One.Width; X++) Asked[static_cast<std::size_t>(Y) * Glass.Width + X] = true;
+    }
+    const std::uint64_t       Held = Changed.Pixels();
+    const std::vector<Rect>   Made = Changed.Take();
+    std::vector<std::uint8_t> Times(Asked.size());
+    for (const Rect &Each : Made)
+        for (std::int32_t Y = Each.Y; Y < Each.Y + Each.Height; Y++)
+            for (std::int32_t X = Each.X; X < Each.X + Each.Width; X++) Times[static_cast<std::size_t>(Y) * Glass.Width + X]++;
+    std::uint64_t Wanted = 0;
+    bool          Exact  = true;
+    for (std::size_t P = 0; P < Asked.size(); P++) Wanted += Asked[P], Exact = Exact && Times[P] == (Asked[P] ? 1 : 0);
+    Count.Check(Exact && Held == Wanted && Changed.Empty(),
+                "a region: 400 small places changed give " + std::to_string(Made.size()) + " rectangles of exactly the " +
+                    std::to_string(Wanted) + " pixels changed — each once, nothing besides, however many there are");
+    Changed.Add(Glass);
+    Changed.Add(Rect{100, 100, 40, 40});
+    const std::vector<Rect> Whole = Changed.Take();
+    Changed.Add(Rect{0, 0, 10, 10});
+    Changed.Add(Rect{10, 0, 10, 10});
+    const std::vector<Rect> Touching = Changed.Take();
+    Count.Check(Whole.size() == 1 && Whole[0] == Glass && Touching.size() == 1 && Touching[0] == Rect{0, 0, 20, 10},
+                "a region: the whole glass with a part inside it is the glass, one rectangle; two that touch are one");
+}
+
 }  // namespace
 
 void CheckCompose(Tally &Count)
@@ -293,6 +337,7 @@ void CheckCompose(Tally &Count)
     CheckSteps(Count, 1.0f);
     CheckSteps(Count, 1.5f);
     CheckDamage(Count);
+    CheckRegion(Count);
 }
 
 bool WriteSheet(const char *Out)

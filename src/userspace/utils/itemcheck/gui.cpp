@@ -33,10 +33,11 @@ using painter::core::PointF;
 struct Heard {
     std::uint32_t           Refused = 0;
     std::vector<gui::Event> Sizes;   // items sized by their content, as told
+    std::vector<gui::Event> Ends;    // animations' ends told while a frame was waited for
 };
 
 /* What the display tells, waited for until the frame showing Step: that
- * frame's Shown; every refusal counted, the first said. */
+ * frame's Shown; every refusal counted, the first said, the ends told kept. */
 gui::Event ShownBy(gui::Area &On, std::uint64_t Step, Heard &Of)
 {
     for (;;) {
@@ -44,6 +45,7 @@ gui::Event ShownBy(gui::Area &On, std::uint64_t Step, Heard &Of)
         if (Each.What == gui::Event::Kind::Refused && Of.Refused++ == 0)
             std::printf("itemcheck: the display refused item %u's property %u — %d\n", Each.Item, Each.Property, static_cast<int>(Each.Reason));
         if (Each.What == gui::Event::Kind::Size) Of.Sizes.push_back(Each);
+        if (Each.What == gui::Event::Kind::AnimationEnd) Of.Ends.push_back(Each);
         if (Each.What == gui::Event::Kind::Shown && Each.Step >= Step) return Each;
     }
 }
@@ -134,8 +136,10 @@ bool CheckForProgrammer()
 
     /* Things in time: a plate faded in, played by the display while this
      * waits, its end told by its time; two one after another, the second
-     * ending the moment its own time after the first; one cut, told cut. On
-     * a text page every change is at once, its end told at once. */
+     * ending the moment its own time after the first. On a text page every
+     * change is at once, its end told at once. And one shown, then said over:
+     * cut where it stands, told cut — or, where it went at once (a text page,
+     * a move with less motion), ended as it was shown, told so. */
     {
         gui::Shape Plate2 = On.Rectangle(gui::Role::Panel);
         Plate2.SetPlace({16, 100}).SetSize({120, 24}).SetOpacity(0);
@@ -147,6 +151,12 @@ bool CheckForProgrammer()
             return How;
         };
         const auto Ending = [&](std::uint32_t Number) -> std::optional<gui::Event> {
+            const auto Kept = std::find_if(Of.Ends.begin(), Of.Ends.end(), [&](const gui::Event &Each) { return Each.Number == Number; });
+            if (Kept != Of.Ends.end()) {
+                const gui::Event End = *Kept;
+                Of.Ends.erase(Kept);
+                return End;
+            }
             for (;;) {
                 const gui::Event Each = On.Wait();
                 if (Each.What == gui::Event::Kind::Refused && Of.Refused++ == 0)
@@ -168,9 +178,11 @@ bool CheckForProgrammer()
         const std::uint64_t             Chain = (clock_uptime_us() - Began) / 1000;
         On.Animate(Numbered(gui::Animation::Linear(1000ms), 74), [&] { Plate2.SetPlace({16, 100}); });
         (void)On.Present();
+        (void)ShownBy(On, On.Step(), Of);
         Plate2.SetPlace({40, 100});
         (void)On.Present();
-        const std::optional<gui::Event> Cut = Ending(74);
+        const std::optional<gui::Event> Over   = Ending(74);
+        const bool                      AtOnce = !Pixels || On.LessMotion();
         /* As the person wants things to move: at their speed; with less
          * motion a fade at most 200 ms and a move at once. */
         const std::uint64_t Speed = std::clamp<std::uint64_t>(On.MotionSpeed(), 25, 400), Most = Pixels ? 150 : 100;
@@ -178,11 +190,13 @@ bool CheckForProgrammer()
         const std::uint64_t ChainIs = On.LessMotion() ? 0 : 400 * 100 / Speed;
         const bool Timed = Pixels ? Fade >= FadeIs && Fade <= FadeIs + Most && Chain >= ChainIs && Chain <= ChainIs + Most
                                   : Fade <= Most && Chain <= Most;
-        const bool Told  = Faded && Faded->Finished && First && First->Finished && Then && Then->Finished && Cut && !Cut->Finished;
+        const bool Told  = Faded && Faded->Finished && First && First->Finished && Then && Then->Finished && Over &&
+                          Over->Finished == AtOnce;
         std::printf("itemcheck: in time — a plate faded in 300 ms, its end told after %llu ms; moved twice one after another, "
-                    "both ends told after %llu ms; a move said over, told cut: %s — %s motion at %llu%%\n",
-                    static_cast<unsigned long long>(Fade), static_cast<unsigned long long>(Chain), Told ? "every end as it was" : "NOT every end as it was",
-                    On.LessMotion() ? "less" : "all", static_cast<unsigned long long>(Speed));
+                    "both ends told after %llu ms; a move shown, then said over, told %s: %s — %s motion at %llu%%\n",
+                    static_cast<unsigned long long>(Fade), static_cast<unsigned long long>(Chain), AtOnce ? "ended" : "cut",
+                    Told ? "every end as it was" : "NOT every end as it was", On.LessMotion() ? "less" : "all",
+                    static_cast<unsigned long long>(Speed));
         Holds = Holds && Timed && Told;
     }
 

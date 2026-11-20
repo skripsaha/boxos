@@ -8,6 +8,7 @@
 #include <cmath>
 #include <utility>
 
+#include "measure.h"
 #include "painter/core/path.h"
 #include "painter/core/shadow.h"
 #include "painter/core/text.h"
@@ -126,6 +127,43 @@ painter::core::Shadow EngineShadow(const Shadow &Of, float Scale)
     return Made;
 }
 
+std::vector<painter::core::Shadow> EngineShadows(const std::vector<Shadow> &Of, float Scale)
+{
+    std::vector<painter::core::Shadow> Made;
+    Made.reserve(Of.size());
+    for (const Shadow &Each : Of) Made.push_back(EngineShadow(Each, Scale));
+    return Made;
+}
+
+bool SameShadow(const painter::core::Shadow &A, const painter::core::Shadow &B) noexcept
+{
+    return A.Offset.X == B.Offset.X && A.Offset.Y == B.Offset.Y && A.Blur == B.Blur && A.Spread == B.Spread &&
+           A.Color == B.Color && A.Inner == B.Inner;
+}
+
+bool SameCast(const std::vector<painter::core::Shadow> &A, const std::vector<painter::core::Shadow> &B) noexcept
+{
+    if (A.size() != B.size()) return false;
+    for (std::size_t I = 0; I < A.size(); I++)
+        if (!SameShadow(A[I], B[I])) return false;
+    return true;
+}
+
+/* How far, in whole pixels, Place lays what Kept was made for: none unless it
+ * is the same place moved — as a tile's corner moves it — and the same
+ * shadows. */
+std::optional<painter::core::Point> KeptMove(const KeptShadows &Kept, const std::vector<painter::core::Shadow> &Cast,
+                                             const Transform &Place) noexcept
+{
+    if (Place.A != Kept.At.A || Place.B != Kept.At.B || Place.C != Kept.At.C || Place.D != Kept.At.D) return std::nullopt;
+    const float Across = Place.E - Kept.At.E, Down = Place.F - Kept.At.F;
+    const float X = std::round(Across), Y = std::round(Down);
+    if (std::fabs(Across - X) > 1e-3f || std::fabs(Down - Y) > 1e-3f || !(std::fabs(X) < (1 << 24)) || !(std::fabs(Y) < (1 << 24)))
+        return std::nullopt;
+    if (!SameCast(Kept.Cast, Cast)) return std::nullopt;
+    return painter::core::Point{static_cast<std::int32_t>(X), static_cast<std::int32_t>(Y)};
+}
+
 /* The theme items are drawn in: the one their program's are, or the system's
  * before one is given. */
 const Theme &LookOf(const Sources &From) noexcept
@@ -193,6 +231,23 @@ Transform Fitted(std::uint8_t Fit, PointF Size, float Wide, float High, float Sc
     return Transform::Scale(X, Y).Then(Transform::Translate((Size.X - Wide * X) / 2, (Size.Y - High * Y) / 2));
 }
 
+/* The item's outline as it is filled, stroked and shadowed: a text's its
+ * glyphs' — a plated text's its plate's. */
+Path OutlineDrawn(const Item &Of, const Drawing &Drawn, PointF Size, const Theme &Look)
+{
+    if (Of.Kind == ITEM_TEXT && !Plated(Of.Kind, Of.Role))
+        return Drawn.Laid ? painter::core::TextPath(*Drawn.Laid, {0, 0}) : Path();
+    return OutlineOf(Of, Size, Look);
+}
+
+/* Whether Paint draws the item straight with Place: not from its kept
+ * picture, upright at its scale, nor through it while it turns or scales. */
+bool PaintedStraight(const Item &Of, const Drawing &Drawn, const Transform &Place, bool Turning) noexcept
+{
+    if (Drawn.Kept && Upright(Place, Drawn.KeptScale)) return false;
+    return !(Drawn.Kept && Drawn.KeptPicture && (Turning || Of.Turning));
+}
+
 /* The item drawn straight onto Target. */
 void DrawStraight(const Item &Of, const Drawing &Drawn, const Sources &From, Canvas &Target, const Transform &Place,
                   float Opacity)
@@ -208,18 +263,24 @@ void DrawStraight(const Item &Of, const Drawing &Drawn, const Sources &From, Can
      * as. */
     const bool Plate    = Plated(Of.Kind, Of.Role);
     const bool Outlined = Of.Kind != ITEM_TEXT || Plate || Stroked || !Shadows.empty();
-    const Path Outline  = !Outlined ? Path()
-                          : Of.Kind == ITEM_TEXT && !Plate ? (Drawn.Laid ? painter::core::TextPath(*Drawn.Laid, {0, 0}) : Path())
-                                                           : OutlineOf(Of, Size, Look);
+    const Path Outline  = Outlined ? OutlineDrawn(Of, Drawn, Size, Look) : Path();
     const painter::core::FillRule Rule = Of.Kind == ITEM_SHAPE && Of.Said.Shape && Of.Said.Shape->Rule == 1
                                              ? painter::core::FillRule::EvenOdd
                                              : painter::core::FillRule::NonZero;
+    /* The shadows made before the frame for this place, where they were —
+     * else made here. */
+    const std::vector<painter::core::Shadow> Engines = EngineShadows(Shadows, From.Scale);
+    const std::optional<painter::core::Point> By    = Drawn.Shadows ? KeptMove(*Drawn.Shadows, Engines, Place) : std::nullopt;
     const auto Cast = [&](bool Inner) {
-        for (const Shadow &Each : Shadows) {
-            if (Each.Inner != Inner) continue;
-            const painter::core::Shadow Engine = EngineShadow(Each, From.Scale);
-            if (const std::optional<painter::core::Mask> Kept = Engine.MaskFor(Outline, Place))
-                Target.DrawShadow(*Kept, Engine, Opacity);
+        for (std::size_t I = 0; I < Engines.size(); I++) {
+            if (Engines[I].Inner != Inner) continue;
+            if (By) {
+                if (const std::optional<painter::core::Mask> &Kept = Drawn.Shadows->Masks[I])
+                    Target.DrawShadow(*Kept, Engines[I], Opacity, *By);
+                continue;
+            }
+            if (const std::optional<painter::core::Mask> Made = Engines[I].MaskFor(Outline, Place))
+                Target.DrawShadow(*Made, Engines[I], Opacity);
         }
     };
     Cast(false);
@@ -249,6 +310,7 @@ void DrawStraight(const Item &Of, const Drawing &Drawn, const Sources &From, Can
         break;
     }
     case ITEM_CANVAS: {
+        const Clocked Spent{Part::Page};
         const Canvas *Page = Of.Said.Canvas && From.CanvasOf ? From.CanvasOf(*Of.Said.Canvas) : nullptr;
         if (!Page) break;
         if (const std::optional<painter::core::Point> Corner = CanvasCorner(Of, Drawn, From, Place)) {
@@ -425,6 +487,7 @@ bool Prepare(const Item &Of, const Sources &From, Drawing &Into, bool Keep)
     Into.Laid.reset();
     Into.Kept.reset();
     Into.KeptPicture.reset();
+    Into.Shadows.reset();
     Into.Measured = {};
     if (Of.Kind == ITEM_TEXT) {
         painter::items::LaidText Laid = painter::items::LayText(Of.Said, Of.Role, *From.Look, From.Book());
@@ -472,33 +535,73 @@ void Paint(const Item &Of, const Drawing &Drawn, const Sources &From, Canvas &Ta
            float Opacity, bool Turning)
 {
     if (Drawn.Kept && Upright(Place, Drawn.KeptScale)) {
-        const PointF Corner = Place.Apply({0, 0});
+        const Clocked Spent{Part::Kept};
+        const PointF  Corner = Place.Apply({0, 0});
         Target.Draw(*Drawn.Kept,
                     painter::core::Point{Nearest(Corner.X) + Drawn.KeptAt.X, Nearest(Corner.Y) + Drawn.KeptAt.Y},
                     Opacity);
         return;
     }
-    if (Drawn.Kept && (Turning || Of.Turning)) {
+    if (Drawn.Kept && Drawn.KeptPicture && (Turning || Of.Turning)) {
+        const Clocked Spent{Part::Turned};
         const Canvas &Kept = *Drawn.Kept;
-        if (!Drawn.KeptPicture) {
-            std::vector<painter::core::Pixel> Pixels;
-            Pixels.reserve(static_cast<std::size_t>(Kept.Width()) * Kept.Height());
-            for (std::uint32_t Y = 0; Y < Kept.Height(); Y++) Pixels.insert(Pixels.end(), Kept.Row(Y), Kept.Row(Y) + Kept.Width());
-            Drawn.KeptPicture = painter::core::Picture::FromPixels(Pixels, Kept.Width(), Kept.Height(), Kept.Width());
-        }
-        if (Drawn.KeptPicture) {
-            /* The picture's pixels where the item's points lie, then where
-             * Place lays them. */
-            const Transform Laid = Transform::Translate(static_cast<float>(Drawn.KeptAt.X), static_cast<float>(Drawn.KeptAt.Y))
-                                       .Then(Transform::Scale(1.0f / Drawn.KeptScale))
-                                       .Then(Place);
-            (void)Target.Fill(painter::core::Path::Rect(painter::core::RectF{0, 0, static_cast<float>(Kept.Width()),
-                                                                             static_cast<float>(Kept.Height())}),
-                              painter::core::Fill::Picture(Drawn.KeptPicture), Laid, painter::core::FillRule::NonZero, Opacity);
-            return;
-        }
+        /* The picture's pixels where the item's points lie, then where Place
+         * lays them. */
+        const Transform Laid = Transform::Translate(static_cast<float>(Drawn.KeptAt.X), static_cast<float>(Drawn.KeptAt.Y))
+                                   .Then(Transform::Scale(1.0f / Drawn.KeptScale))
+                                   .Then(Place);
+        (void)Target.Fill(painter::core::Path::Rect(painter::core::RectF{0, 0, static_cast<float>(Kept.Width()),
+                                                                         static_cast<float>(Kept.Height())}),
+                          painter::core::Fill::Picture(Drawn.KeptPicture), Laid, painter::core::FillRule::NonZero, Opacity);
+        return;
     }
+    const Clocked Spent{Part::Straight};
     DrawStraight(Of, Drawn, From, Target, Place, Opacity);
+}
+
+void KeepTurning(Drawing &Drawn)
+{
+    if (!Drawn.Kept || Drawn.KeptPicture) return;
+    const Canvas                     &Kept = *Drawn.Kept;
+    std::vector<painter::core::Pixel> Pixels;
+    Pixels.reserve(static_cast<std::size_t>(Kept.Width()) * Kept.Height());
+    for (std::uint32_t Y = 0; Y < Kept.Height(); Y++) Pixels.insert(Pixels.end(), Kept.Row(Y), Kept.Row(Y) + Kept.Width());
+    Drawn.KeptPicture = painter::core::Picture::FromPixels(Pixels, Kept.Width(), Kept.Height(), Kept.Width());
+}
+
+void KeepShadows(const Item &Of, Drawing &Drawn, const Sources &From, const Transform &Place, bool Turning, bool Keep)
+{
+    const std::size_t Before = Drawn.Shadows ? Drawn.Shadows->Bytes : 0;
+    const auto        Hold   = [&](std::size_t Now) {
+        Drawn.Bytes = Drawn.Bytes - Before + Now;
+        if (Drawn.Held) *Drawn.Held = *Drawn.Held - Before + Now;
+    };
+    const Theme                             &Look    = LookOf(From);
+    const std::vector<painter::core::Shadow> Engines = Of.Kind == ITEM_GROUP ? std::vector<painter::core::Shadow>{}
+                                                                              : EngineShadows(ShadowsOf(Of.Said, Of.Role, Look), From.Scale);
+    if (Engines.empty() || !Keep || !PaintedStraight(Of, Drawn, Place, Turning)) {
+        if (Drawn.Shadows) Hold(0);
+        Drawn.Shadows.reset();
+        return;
+    }
+    if (Drawn.Shadows && Drawn.Shadows->At == Place && SameCast(Drawn.Shadows->Cast, Engines)) return;
+    KeptShadows Made;
+    Made.At   = Place;
+    Made.Cast = Engines;
+    const Path Outline = OutlineDrawn(Of, Drawn, SizeOf(Of, Drawn), Look);
+    for (const painter::core::Shadow &Each : Engines) {
+        Made.Masks.push_back(Each.MaskFor(Outline, Place));
+        if (Made.Masks.back())
+            Made.Bytes += static_cast<std::size_t>(Made.Masks.back()->Area().Width) * Made.Masks.back()->Area().Height;
+    }
+    Hold(Made.Bytes);
+    Drawn.Shadows = std::move(Made);
+}
+
+bool OwnGlyphs(const Item &Of, const Drawing &Drawn, const Transform &Place, bool Turning) noexcept
+{
+    if (Of.Kind == ITEM_CELLS || Of.Grid) return true;
+    return Drawn.Laid && PaintedStraight(Of, Drawn, Place, Turning);
 }
 
 }  // namespace items
