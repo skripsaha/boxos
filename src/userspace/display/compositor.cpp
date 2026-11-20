@@ -330,7 +330,6 @@ void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Cor
         return At.X == 0 && At.Y == 0 ? Place
                                       : Place.Then(Transform::Translate(-static_cast<float>(At.X), -static_cast<float>(At.Y)));
     };
-    const painter::core::Point Picture{Area.X, Area.Y};
     Target.PushClip(Into(Area, Corner));
     for (std::size_t A = StartArea; A < Areas.size(); A++) {
         const AreaState &Each = *Areas[A];
@@ -339,10 +338,12 @@ void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Cor
         if (Each.Paged && (A > StartArea || StartEntry == 0))
             Target.Clear(Into(Each.Place.Intersect(Area), Corner), Look.Page);
         /* Groups that see through: their items onto a picture of their own,
-         * laid at the group's end. */
+         * as large as what the group covers of the rectangle and lying where
+         * that lies, laid at the group's end. */
         struct Layer {
             std::optional<painter::core::Canvas> Picture;
             float                                Opacity;
+            painter::core::Point                 Corner;
         };
         std::vector<Layer> Layers;
         const auto Drawn = [&]() -> Layer * {
@@ -354,7 +355,10 @@ void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Cor
             Layer *On = Drawn();
             return On ? *On->Picture : Target;
         };
-        const auto At = [&] { return Drawn() ? Picture : Corner; };
+        const auto At = [&] {
+            const Layer *On = Drawn();
+            return On ? On->Corner : Corner;
+        };
         for (std::size_t E = A == StartArea ? StartEntry : 0; E < Each.List.size(); E++) {
             const Entry &One = Each.List[E];
             switch (One.What) {
@@ -390,11 +394,11 @@ void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Cor
                 break;
             case Entry::Kind::LayerBegin: {
                 const Clocked Spent{::Part::Layered};
-                Layers.push_back(Layer{One.Device.Intersect(Area).Empty()
-                                           ? std::nullopt
-                                           : painter::core::Canvas::Make(static_cast<std::uint32_t>(Area.Width),
-                                                                         static_cast<std::uint32_t>(Area.Height)),
-                                       One.Opacity});
+                const Rect    Covers = One.Device.Intersect(Area);
+                Layers.push_back(Layer{Covers.Empty() ? std::nullopt
+                                                      : painter::core::Canvas::Make(static_cast<std::uint32_t>(Covers.Width),
+                                                                                    static_cast<std::uint32_t>(Covers.Height)),
+                                       One.Opacity, painter::core::Point{Covers.X, Covers.Y}});
                 break;
             }
             case Entry::Kind::LayerEnd: {
@@ -404,7 +408,8 @@ void Compositor::Compose(painter::core::Canvas &Target, painter::core::Point Cor
                 Layers.pop_back();
                 if (Done.Picture) {
                     const painter::core::Point Under = At();
-                    Current().Draw(*Done.Picture, painter::core::Point{Picture.X - Under.X, Picture.Y - Under.Y}, Done.Opacity);
+                    Current().Draw(*Done.Picture, painter::core::Point{Done.Corner.X - Under.X, Done.Corner.Y - Under.Y},
+                                   Done.Opacity);
                 }
                 break;
             }

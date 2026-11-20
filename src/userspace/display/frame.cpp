@@ -53,13 +53,27 @@ bool                                 g_everything = true;
  * area went: the glass as it was before the console moved under it. */
 std::vector<Rect> g_before;
 
-/* A frame's tiles: each, and what of it the areas draw — and of those, which
- * the hands may compose and which the main strand alone. */
+/* A frame's tiles: each, what of it the areas draw, and the pieces of the
+ * frame's damage it puts on the glass (g_pieces, First on, Count of them) —
+ * and of the tiles, which the hands may compose and which the main strand
+ * alone. */
 struct Job {
-    Rect Tile, Lies;
+    Rect          Tile, Lies;
+    std::uint32_t First, Count;
 };
 std::vector<Job>         g_jobs;
+std::vector<Rect>        g_pieces;
 std::vector<std::size_t> g_spread, g_alone;
+
+/* The frame's damage cut along the screen's grid of tiles: each square's
+ * pieces, the squares that have any in the order first met. */
+struct Square {
+    std::vector<Rect> Pieces;
+    Rect              Around{};
+    std::uint64_t     Pixels = 0;
+};
+std::vector<Square>        g_squares;
+std::vector<std::uint32_t> g_damaged;
 
 /* What the mirror shows of each of the console's cells, as last drawn —
  * Unseen where that is not known: where it lies under something, or was
@@ -644,14 +658,51 @@ FrameCost FrameCompose(Mirror &Into, std::span<items::AreaState *const> Programs
         if (HoldCaret(Programs)) g_compositor->Take(g_order, g_theme);
         const std::vector<Rect> Damaged = g_compositor->Rects();
         Taking.reset();
-        /* Every tile of the damage, and in each what the areas draw. */
-        g_jobs.clear();
-        for (const Rect &Each : Damaged)
-            for (std::int32_t Y = Each.Y; Y < Each.Y + Each.Height; Y += TileSide)
-                for (std::int32_t X = Each.X; X < Each.X + Each.Width; X += TileSide) {
-                    const Rect Tile{X, Y, std::min(TileSide, Each.X + Each.Width - X), std::min(TileSide, Each.Y + Each.Height - Y)};
-                    g_jobs.push_back(Job{Tile, Lying(Tile, Programs)});
+        /* The damage square by square of the screen's grid. A square damaged
+         * densely — its pieces cover half of what holds them or more — is one
+         * tile, what holds its pieces, composed once: an item lying across
+         * many pieces is drawn once, not once a piece, and what lies between
+         * them, unchanged, comes out as it was. A square damaged here and
+         * there is a tile a piece. Either way only the pieces go on the
+         * glass. */
+        const std::int32_t Across = (g_screen.Width + TileSide - 1) / TileSide;
+        const std::int32_t Down   = (g_screen.Height + TileSide - 1) / TileSide;
+        g_squares.resize(static_cast<std::size_t>(std::max(Across, 0) * std::max(Down, 0)));
+        g_damaged.clear();
+        for (const Rect &Each : Damaged) {
+            const Rect Seen = Each.Intersect(g_screen);
+            if (Seen.Empty()) continue;
+            for (std::int32_t Row = Seen.Y / TileSide; Row <= (Seen.Y + Seen.Height - 1) / TileSide; Row++)
+                for (std::int32_t Col = Seen.X / TileSide; Col <= (Seen.X + Seen.Width - 1) / TileSide; Col++) {
+                    const Rect Piece = Seen.Intersect(Rect{Col * TileSide, Row * TileSide, TileSide, TileSide});
+                    if (Piece.Empty()) continue;
+                    const std::uint32_t At  = static_cast<std::uint32_t>(Row * Across + Col);
+                    Square             &Sq  = g_squares[At];
+                    if (Sq.Pieces.empty()) g_damaged.push_back(At);
+                    Sq.Pieces.push_back(Piece);
+                    Sq.Around = Sq.Around.Empty() ? Piece : Sq.Around.Join(Piece);
+                    Sq.Pixels += static_cast<std::uint64_t>(Piece.Width) * static_cast<std::uint64_t>(Piece.Height);
                 }
+        }
+        g_jobs.clear();
+        g_pieces.clear();
+        for (const std::uint32_t At : g_damaged) {
+            Square &Sq = g_squares[At];
+            const std::uint64_t Held = static_cast<std::uint64_t>(Sq.Around.Width) * static_cast<std::uint64_t>(Sq.Around.Height);
+            if (Held <= 2 * Sq.Pixels) {
+                g_jobs.push_back(Job{Sq.Around, Lying(Sq.Around, Programs), static_cast<std::uint32_t>(g_pieces.size()),
+                                     static_cast<std::uint32_t>(Sq.Pieces.size())});
+                g_pieces.insert(g_pieces.end(), Sq.Pieces.begin(), Sq.Pieces.end());
+            } else {
+                for (const Rect &Piece : Sq.Pieces) {
+                    g_jobs.push_back(Job{Piece, Lying(Piece, Programs), static_cast<std::uint32_t>(g_pieces.size()), 1});
+                    g_pieces.push_back(Piece);
+                }
+            }
+            Sq.Pieces.clear();
+            Sq.Around = Rect{};
+            Sq.Pixels = 0;
+        }
         /* What the areas draw composed into the mirror: the tiles any strand
          * may compose spread over the hands, those whose glyphs come from the
          * main strand's cache on it alone. */
@@ -660,13 +711,15 @@ FrameCost FrameCompose(Mirror &Into, std::span<items::AreaState *const> Programs
         for (std::size_t J = 0; J < g_jobs.size(); J++)
             if (!g_jobs[J].Lies.Empty()) (g_compositor->OwnGlyphs(g_jobs[J].Lies, g_order) ? g_alone : g_spread).push_back(J);
         const auto ComposeTile = [&Into](std::size_t J, painter::core::Canvas &On) {
-            const Rect Lies = g_jobs[J].Lies;
+            const Job  &One  = g_jobs[J];
+            const Rect  Lies = One.Lies;
+            const painter::core::Point Corner{Lies.X, Lies.Y};
             {
                 const Clocked Spent{Part::Compose};
-                g_compositor->Compose(On, painter::core::Point{Lies.X, Lies.Y}, Lies, g_order, g_theme);
+                g_compositor->Compose(On, Corner, Lies, g_order, g_theme);
             }
             const Clocked Spent{Part::Put};
-            Into.Write(On, Lies);
+            for (std::uint32_t P = One.First; P < One.First + One.Count; P++) Into.Write(On, Corner, g_pieces[P].Intersect(Lies));
         };
         if (g_hands && g_hands->Count() > 1 && g_tiles.size() >= g_hands->Count() && g_spread.size() > 1) {
             std::atomic<bool> Lost{false};
@@ -685,24 +738,25 @@ FrameCost FrameCompose(Mirror &Into, std::span<items::AreaState *const> Programs
         /* Each tile marked to go onto the glass, the console's cells under
          * what the areas drew known unseen, and round it the console written
          * straight. */
-        for (const Job &One : g_jobs) {
-            const Rect Tile = One.Tile, Lies = One.Lies;
-            if (!Lies.Empty()) {
-                Into.Mark(Lies);
-                if (g_seen.size() == g_console->Count())
-                    CellsIn(Lies, [](std::size_t Index, bool) { g_seen[Index] = Unseen; });
+        for (const Job &One : g_jobs)
+            for (std::uint32_t P = One.First; P < One.First + One.Count; P++) {
+                const Rect Tile = g_pieces[P], Lies = One.Lies.Intersect(Tile);
+                if (!Lies.Empty()) {
+                    Into.Mark(Lies);
+                    if (g_seen.size() == g_console->Count())
+                        CellsIn(Lies, [](std::size_t Index, bool) { g_seen[Index] = Unseen; });
+                }
+                const std::int32_t Right = Tile.X + Tile.Width, Bottom = Tile.Y + Tile.Height;
+                if (Lies.Empty()) {
+                    LayConsole(Into, Tile);
+                } else {
+                    LayConsole(Into, Rect{Tile.X, Tile.Y, Tile.Width, Lies.Y - Tile.Y});
+                    LayConsole(Into, Rect{Tile.X, Lies.Y + Lies.Height, Tile.Width, Bottom - Lies.Y - Lies.Height});
+                    LayConsole(Into, Rect{Tile.X, Lies.Y, Lies.X - Tile.X, Lies.Height});
+                    LayConsole(Into, Rect{Lies.X + Lies.Width, Lies.Y, Right - Lies.X - Lies.Width, Lies.Height});
+                }
+                Pixels += static_cast<std::uint64_t>(Tile.Width) * static_cast<std::uint64_t>(Tile.Height);
             }
-            const std::int32_t Right = Tile.X + Tile.Width, Bottom = Tile.Y + Tile.Height;
-            if (Lies.Empty()) {
-                LayConsole(Into, Tile);
-            } else {
-                LayConsole(Into, Rect{Tile.X, Tile.Y, Tile.Width, Lies.Y - Tile.Y});
-                LayConsole(Into, Rect{Tile.X, Lies.Y + Lies.Height, Tile.Width, Bottom - Lies.Y - Lies.Height});
-                LayConsole(Into, Rect{Tile.X, Lies.Y, Lies.X - Tile.X, Lies.Height});
-                LayConsole(Into, Rect{Lies.X + Lies.Width, Lies.Y, Right - Lies.X - Lies.Width, Lies.Height});
-            }
-            Pixels += static_cast<std::uint64_t>(Tile.Width) * static_cast<std::uint64_t>(Tile.Height);
-        }
     } catch (...) {
         /* No room to compose: what the mirror holds stays, and all of the
          * glass is composed again at the next — wherever the console moves
