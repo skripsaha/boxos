@@ -705,7 +705,7 @@ class BookMount:
                               % fid)
             self.born.add(fid)
             fs = FileState(fid, seq, d["flags"], d["size"], d["created_ns"], d["modified_ns"], d["name"],
-                           d["tags"], d["runs"])
+                           d["tags"], d["runs"], made_by=d["made_by"])
             self._Holds(fs, tags, d["tags"])
         else:
             old = files.get(fid)

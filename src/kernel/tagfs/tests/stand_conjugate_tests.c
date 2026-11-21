@@ -39,7 +39,7 @@ static StandBinder s_conjugate_binder;
 static bool StandConjugateFile(StandFreshModel* m, const char* name, uint32_t blocks, uint64_t* fid)
 {
     m->size = 0;
-    return tagfs_create_file(name, NULL, 0, fid) == 0 &&
+    return tagfs_create_file(name, NULL, 0, 0, fid) == 0 &&
            StandFreshWrite(m, *fid, 0, blocks * TAGFS_BLOCK_SIZE, STAND_CONJUGATE_STREAM) ==
                (int)(blocks * TAGFS_BLOCK_SIZE);
 }
@@ -340,9 +340,9 @@ static TestResult TestStandConjugateKept(void)
 
     TEST_ASSERT(boot != 0 && StandConjugateBlocks(boot, 1u, kernel), "the book names the kernel's file");
     TEST_ASSERT(StandConjugateKernelBlock(boot, g_test_buffer), "its block 0 is read");
-    TEST_ASSERT(tagfs_create_file("conjugate-kernel-a.bin", NULL, 0, &a) == 0 &&
+    TEST_ASSERT(tagfs_create_file("conjugate-kernel-a.bin", NULL, 0, 0, &a) == 0 &&
                     StandWriteAt(a, 0, g_test_buffer, TAGFS_BLOCK_SIZE) == (int)TAGFS_BLOCK_SIZE &&
-                    tagfs_create_file("conjugate-kernel-b.bin", NULL, 0, &f) == 0 &&
+                    tagfs_create_file("conjugate-kernel-b.bin", NULL, 0, 0, &f) == 0 &&
                     StandWriteAt(f, 0, g_test_buffer, TAGFS_BLOCK_SIZE) == (int)TAGFS_BLOCK_SIZE,
                 "two files of its very bytes are made");
     TEST_ASSERT_OK(TagFSSettle(), "and settled");

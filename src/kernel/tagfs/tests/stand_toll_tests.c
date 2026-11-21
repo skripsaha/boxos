@@ -67,7 +67,7 @@ static TestResult TestStandTollBothWays(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, 4u * TAGFS_BLOCK_SIZE), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("toll.bin", NULL, 0, &fid), 0, "a file is made on the book");
+    TEST_ASSERT_EQ(tagfs_create_file("toll.bin", NULL, 0, 0, &fid), 0, "a file is made on the book");
     TEST_ASSERT_OK(TagFSSettle(), "and its Born settled: the last cycle's D is measured");
     BlockFailReadPace(true, STAND_TOLL_FAST, 0);
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, 2u * TAGFS_BLOCK_SIZE, 61), 2 * TAGFS_BLOCK_SIZE, "two blocks written");
@@ -138,10 +138,10 @@ static TestResult TestStandTollCheckWithinD(void)
     TEST_ASSERT(StandFreshModelMake(&m, TAGFS_BLOCK_SIZE), "room for the file's bytes");
     BlockFailReadLag(s.seat, lag);
     TEST_ASSERT(StandStitchRemount(), "the volume mounts on a medium that seeks");
-    TEST_ASSERT_EQ(tagfs_create_file("toll-seek.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("toll-seek.bin", NULL, 0, 0, &fid), 0, "a file is made");
     for (uint32_t i = 0; i < STAND_TOLL_FILES; i++) {
         ksnprintf(name, sizeof(name), "toll-seek-%u.bin", i);
-        TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, &other), 0, "and many more with it");
+        TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, 0, &other), 0, "and many more with it");
     }
     TEST_ASSERT_OK(TagFSSettle(), "one cycle bears them all");
     d    = SettleLastDUs();
@@ -210,8 +210,8 @@ static TestResult TestStandTollWeighs(void)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, TAGFS_BLOCK_SIZE) && StandFreshModelMake(&n, TAGFS_BLOCK_SIZE),
                 "room for two files' bytes");
-    TEST_ASSERT(tagfs_create_file("toll-a.bin", NULL, 0, &fid) == 0 &&
-                tagfs_create_file("toll-b.bin", NULL, 0, &other) == 0, "two files are made");
+    TEST_ASSERT(tagfs_create_file("toll-a.bin", NULL, 0, 0, &fid) == 0 &&
+                tagfs_create_file("toll-b.bin", NULL, 0, 0, &other) == 0, "two files are made");
     TEST_ASSERT_OK(TagFSSettle(), "and settled with no fresh data: the toll's D is the whole of that cycle");
     d = SettleLastDUs();
     TEST_ASSERT(d > 0, "a cycle takes the medium some time");

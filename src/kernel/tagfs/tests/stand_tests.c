@@ -53,7 +53,7 @@ bool StandMakeFile(const char* name, const void* data, uint32_t bytes, uint64_t*
     uint64_t file_id = 0;
 
     *out_file_id = 0;
-    if (tagfs_create_file(name, NULL, 0, &file_id) != 0)
+    if (tagfs_create_file(name, NULL, 0, 0, &file_id) != 0)
         return false;
     if (bytes > 0 && TestFileWrite(file_id, data, bytes) != (int)bytes) {
         tagfs_delete_file(file_id, INK_UNWARRANTED);

@@ -75,7 +75,7 @@ static TestResult TestStandParityFilesInTurn(void)
     if (aside)
         return test_steps_aside(aside);
     for (uint32_t i = 0; i < STAND_PARITY_FILES; i++)
-        TEST_ASSERT_EQ(tagfs_create_file("stand_parity_turn", NULL, 0, &fid[i]), 0, "sixteen files are made");
+        TEST_ASSERT_EQ(tagfs_create_file("stand_parity_turn", NULL, 0, 0, &fid[i]), 0, "sixteen files are made");
     for (uint32_t r = 0; r < STAND_PARITY_ROUNDS; r++) {
         if (r == STAND_PARITY_ROUNDS / 2)
             TEST_ASSERT_OK(TagFSSettle(), "a cycle half way settles what they took");

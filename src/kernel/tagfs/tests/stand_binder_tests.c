@@ -127,7 +127,7 @@ static bool StandBinderSow(StandFreshModel* m, uint64_t* data_fid)
     uint64_t           fid     = 0;
     bool               kept    = false;
     for (uint32_t i = 0; i < 3u; i++)
-        if (tagfs_create_file(names[i], NULL, 0, &fid) != 0)
+        if (tagfs_create_file(names[i], NULL, 0, 0, &fid) != 0)
             return false;
     *data_fid = fid;
     if (!StandFreshModelMake(m, 8u * TAGFS_BLOCK_SIZE) ||
@@ -445,7 +445,7 @@ static TestResult TestStandBinderParcels(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, 2u * STAND_BINDER_STRIDED * TAGFS_BLOCK_SIZE), "room for the file");
-    TEST_ASSERT_EQ(tagfs_create_file("bind-parcels.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("bind-parcels.bin", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT_OK(StandFreshSpan(&m, fid, 2u * STAND_BINDER_STRIDED * TAGFS_BLOCK_SIZE), "spanned over a hole");
     for (uint64_t k = 0; k < STAND_BINDER_STRIDED; k++)
         TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 2u * k * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 30u + k),
@@ -655,7 +655,7 @@ static TestResult StandBinderMake(uint32_t n, uint64_t* first)
     TestResult verdict = TEST_PASS;
     uint64_t   fid     = 0;
     for (uint32_t i = 0; i < n; i++) {
-        TEST_ASSERT_EQ(tagfs_create_file("bind-big.n", NULL, 0, &fid), 0, "a file is made");
+        TEST_ASSERT_EQ(tagfs_create_file("bind-big.n", NULL, 0, 0, &fid), 0, "a file is made");
         *first = *first ? *first : fid;
         if (i % STAND_BINDER_BIG_BATCH == STAND_BINDER_BIG_BATCH - 1u)
             TEST_ASSERT_OK(TagFSSettle(), "the files settle a batch at a time");
@@ -722,7 +722,7 @@ static TestResult TestStandBinderFullBack(void)
     BinderStand(&said);
     half = said.tally_blocks;
     TEST_ASSERT(StandBinderMake(STAND_BINDER_BIG_FILES / 2u, &first) == TEST_PASS, "and as many again after it");
-    TEST_ASSERT_EQ(tagfs_create_file("bind-fill.bin", NULL, 0, &fill), 0, "a file to fill the volume is made");
+    TEST_ASSERT_EQ(tagfs_create_file("bind-fill.bin", NULL, 0, 0, &fill), 0, "a file to fill the volume is made");
     TEST_ASSERT_EQ(StandBinderFill(fill), ERR_TAGFS_NO_SPACE, "and written until the volume refuses it");
     TEST_ASSERT_OK(TagFSSettle(), "every file and every byte settled");
     TestEvidence("free blocks the full volume keeps for the book", tagfs_get_state()->free_blocks);

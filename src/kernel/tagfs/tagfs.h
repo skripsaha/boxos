@@ -438,8 +438,12 @@ uint64_t tagfs_block_to_sector(uint64_t block);
 /* 0, or a negative -ERR_*: a name whose tag the registry refuses (too long,
  * the registry full) is refused with the registry's code, no file is made
  * without the tag its name gives it, and a volume that has issued every file
- * id it can is refused ERR_TAGFS_FID_EXHAUSTED (ink_book.c). */
-int  tagfs_create_file(const char* filename, const uint32_t* tag_ids, uint32_t tag_count,
+ * id it can is refused ERR_TAGFS_FID_EXHAUSTED (ink_book.c). `made_by` is the
+ * volume's id of the file of the program that makes the file — the program
+ * of the cabin that asked, CabinProgramFile — or 0 when none does (the
+ * kernel itself, a program started from bytes): the file's record remembers
+ * it for good (TAGFS_FILE_MADE_BY). */
+int  tagfs_create_file(const char* filename, const uint32_t* tag_ids, uint32_t tag_count, uint64_t made_by,
                        uint64_t* out_file_id);
 
 /* The file given up, or renamed — its old name's tag off, the new one's on.

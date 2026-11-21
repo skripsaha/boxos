@@ -193,6 +193,11 @@ bool CabinProgram(const cabin_t *cabin, uint32_t *pid, uint32_t *generation)
     return true;
 }
 
+uint64_t CabinProgramFile(const cabin_t *cabin)
+{
+    return cabin ? cabin->program_fid : 0;
+}
+
 void cabin_destroy(cabin_t *cabin)
 {
     if (!cabin)

@@ -27,6 +27,7 @@ from .selftest_book_ribbon import (RecordCases, MachineRecordCases, RecordRuleCa
 from .selftest_book_ribbon_damage import RibbonLossCases, RibbonShapeCases, RibbonBoundCases
 from .selftest_book_errata import ErrataCases
 from .selftest_book_keep import KeepCases
+from .selftest_book_made import MadeCases
 from .selftest_book_tip_in import TipInCases
 from .selftest_book_escheat import EscheatCases, LockedCases
 from .selftest_book_facsimile import FacsimileRuleCases, FacsimileReplayCases, BootSlipCases
@@ -46,7 +47,7 @@ def BookCases(bt):
                   RecordCases, MachineRecordCases, RecordRuleCases, RibbonEndCases, RibbonBranchCases,
                   RibbonFurtherCases, RibbonLossCases, RibbonCases, RibbonShapeCases, RibbonBoundCases, ErrataCases,
                   TipInCases, EscheatCases, LockedCases, FacsimileRuleCases, FacsimileReplayCases, BootSlipCases,
-                  MemoCases, BootCases, KeepCases, GroundCases, UnreadCases):
+                  MemoCases, BootCases, KeepCases, MadeCases, GroundCases, UnreadCases):
         try:
             cases += group(bt)
         except Unreadable as e:

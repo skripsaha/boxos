@@ -777,14 +777,14 @@ static TestResult TestStandRibbonMountNextRefused(void)
     RibbonCursorStand(&c);
     TEST_ASSERT(c.up && c.quire.block == w.next && !c.next.blocks,
                 "the ribbon stands in the Quire it went on into, with no next_quire past it");
-    TEST_ASSERT_EQ(tagfs_create_file("mount-next", NULL, 0, &fid), -(int)ERR_WOULD_BLOCK,
+    TEST_ASSERT_EQ(tagfs_create_file("mount-next", NULL, 0, 0, &fid), -(int)ERR_WOULD_BLOCK,
                    "a file asked for waits for a cycle: the room is still to grow, not refused for good");
     TEST_ASSERT(w.nlaid < STAND_RIBBON_LAID, "room to put back the stitch the cycle lays");
     w.laid[w.nlaid++] = (c.quire.block + c.off / TAGFS_BLOCK_SECTORS) * TAGFS_BLOCK_SECTORS;
     TEST_ASSERT_OK(TagFSSettle(), "the cycle it waits for runs");
     RibbonCursorStand(&c);
     TEST_ASSERT(c.next.blocks != 0, "and asks the map again: the ribbon names a next_quire");
-    TEST_ASSERT_EQ(tagfs_create_file("mount-next", NULL, 0, &fid), 0, "the file asked for again is made");
+    TEST_ASSERT_EQ(tagfs_create_file("mount-next", NULL, 0, 0, &fid), 0, "the file asked for again is made");
 out:
     if (armed)
         (void)RibbonStandNextRefused(false);

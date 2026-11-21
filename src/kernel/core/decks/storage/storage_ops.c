@@ -492,7 +492,7 @@ static int ObjGetInfo(const ManifestOp *op,
     }
 
     uint32_t tag_count = md.tag_count;
-    uint64_t need = 8u + 8u + 4u + 2u + filename_len + 8u;
+    uint64_t need = 8u + 8u + 4u + 2u + filename_len + 8u + 8u;
     for (uint32_t i = 0; i < tag_count; i++)
         need = info_tag_record(NULL, need, md.tag_ids[i]);
 
@@ -507,7 +507,8 @@ static int ObjGetInfo(const ManifestOp *op,
     if (rc == OK) {
         /* What a file is — a note, anything else — is the tags it
          * wears, and only they say it: the answer carries no bits beside them
-         * but one the volume's own word, the time a deleted file is kept until. */
+         * but the volume's own words: the time a deleted file is kept until,
+         * and the file of the program that made it. */
         memcpy(kp + pos, &file_id,    8); pos += 8;   /* the id asked: the record's own */
         memcpy(kp + pos, &md.size,    8); pos += 8;
         memcpy(kp + pos, &tag_count,  4); pos += 4;
@@ -518,6 +519,8 @@ static int ObjGetInfo(const ManifestOp *op,
         /* The last eight bytes: when a deleted file is let go, 0 for one that is not. */
         const uint64_t kept_until = (md.flags & TAGFS_FILE_DELETED) ? md.keep_until : 0;
         memcpy(kp + pos, &kept_until, 8); pos += 8;
+        /* And the last: the program that made the file, 0 when none did. */
+        memcpy(kp + pos, &md.made_by, 8); pos += 8;
     }
     tagfs_leave();
     tagfs_metadata_free(&md);
@@ -1045,7 +1048,8 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     }
 
     uint64_t made_id = 0;
-    int made = tagfs_create_file(filename, tag_ids, total, &made_id);
+    int made = tagfs_create_file(filename, tag_ids, total,
+                                 CabinProgramFile(ctx && ctx->proc ? ctx->proc->cabin : NULL), &made_id);
     kfree(filename);
     kfree(tag_ids);
     if (-made == ERR_WOULD_BLOCK)

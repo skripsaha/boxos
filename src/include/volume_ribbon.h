@@ -529,12 +529,15 @@ static inline int RibbonShape(uint64_t off, uint64_t left, uint64_t hop, uint64_
 /*
  * Born — a file born, its whole state: fid · flags · size · created_ns ·
  * mtime_z · name · tags (count, rising) · nruns · runs (from cursor 0) ·
- * digests · slip. A run covers exactly the blocks its size needs, holes
- * written as HOLE runs; the digests are those of every block its DATA runs
- * put in (RibbonRunDigests), and the slip lays the tail of a file shorter than
- * its last block (§2.8, H-7). The writer gives `tags` and `runs` as their
- * bytes already laid (RibbonIdsPut's body after the count, RibbonRunPut each);
- * the reader finds them pointed at where they stand.
+ * digests · slip · [made_by]. A run covers exactly the blocks its size needs,
+ * holes written as HOLE runs; the digests are those of every block its DATA
+ * runs put in (RibbonRunDigests), and the slip lays the tail of a file shorter
+ * than its last block (§2.8, H-7). made_by is there when, and only when, the
+ * flags carry TALLY_FILE_MADE_BY: the file of the program that made the file,
+ * never 0 (TallyFileHead says the same of a header). The writer gives `tags`
+ * and `runs` as their bytes already laid (RibbonIdsPut's body after the
+ * count, RibbonRunPut each); the reader finds them pointed at where they
+ * stand.
  */
 typedef struct {
     uint64_t       fid;
@@ -554,6 +557,7 @@ typedef struct {
     uint64_t       ndigests;
     const uint8_t *digests;
     RibbonSlip     slip;
+    uint64_t       made_by;      /* 0 unless TALLY_FILE_MADE_BY */
 } RibbonBorn;
 
 static inline uint32_t RibbonBornBodyPut(uint8_t *out, const RibbonBorn *r)
@@ -570,14 +574,15 @@ static inline uint32_t RibbonBornBodyPut(uint8_t *out, const RibbonBorn *r)
     at += BookVarintPut(out + at, r->nruns);
     at += TallyBytesPut(out + at, r->runs, r->runs_bytes);
     at += TallyBytesPut(out + at, r->digests, r->ndigests * 8u);
-    return at + RibbonSlipPut(out + at, &r->slip);
+    at += RibbonSlipPut(out + at, &r->slip);
+    return (r->flags & TALLY_FILE_MADE_BY) ? at + BookVarintPut(out + at, r->made_by) : at;
 }
 
 static inline int RibbonBornGet(const uint8_t *b, uint32_t len, uint64_t seq, RibbonBorn *r, uint32_t *used)
 {
     uint32_t at = 0, from;
     uint64_t z, cursor = 0;
-    r->blocks = r->ndigests = 0;
+    r->blocks = r->ndigests = r->made_by = 0;
     if (!TallyTake(b, len, &at, &r->fid) || !TallyTake(b, len, &at, &r->flags) ||
         !TallyTake(b, len, &at, &r->size) || !TallyTake(b, len, &at, &r->created_ns) ||
         !TallyTake(b, len, &at, &z) || !TallyTake(b, len, &at, &r->name_len) ||
@@ -593,6 +598,8 @@ static inline int RibbonBornGet(const uint8_t *b, uint32_t len, uint64_t seq, Ri
         return TALLY_BODY_BROKEN;
     r->runs_bytes = at - from;
     if (!RibbonDigestsTake(b, len, &at, r->ndigests, &r->digests) || !RibbonSlipTake(b, len, &at, &r->slip))
+        return TALLY_BODY_BROKEN;
+    if ((r->flags & TALLY_FILE_MADE_BY) && (!TallyTake(b, len, &at, &r->made_by) || !r->made_by))
         return TALLY_BODY_BROKEN;
     *used = at;
     return TallyBodyEnd(at, len);
@@ -699,7 +706,8 @@ static inline int RibbonShapedGet(const uint8_t *b, uint32_t len, uint64_t seq, 
  * stitch.
  *
  * KEEP is the one verb of deletion, and TALLY_FILE_DELETED is never a bit of
- * `set` or `clear` — a Labeled that names it there does not read: keep_ns
+ * `set` or `clear` — a Labeled that names it there does not read, nor does
+ * one that names TALLY_FILE_MADE_BY, which no change of a file moves: keep_ns
  * above 0 deletes the file, kept until that time (a file deleted already has
  * its term moved), and keep_ns 0 brings it back. The bit in the file's flags
  * is what the verb leaves, put there by the one reader and the other alike.
@@ -761,7 +769,7 @@ static inline int RibbonLabeledGet(const uint8_t *b, uint32_t len, RibbonLabeled
     if ((r->what & LABEL_TAGS) && (!RibbonIdsTake(b, len, &at, &r->nadd, &r->add, &r->add_bytes) ||
                                    !RibbonIdsTake(b, len, &at, &r->ndrop, &r->drop, &r->drop_bytes)))
         return TALLY_BODY_BROKEN;
-    if (((r->what & LABEL_FLAGS) && ((r->set | r->clear) & TALLY_FILE_DELETED)) ||
+    if (((r->what & LABEL_FLAGS) && ((r->set | r->clear) & (TALLY_FILE_DELETED | TALLY_FILE_MADE_BY))) ||
         ((r->what & LABEL_KEEP) && !TallyTake(b, len, &at, &r->keep_ns)))
         return TALLY_BODY_BROKEN;
     *used = at;

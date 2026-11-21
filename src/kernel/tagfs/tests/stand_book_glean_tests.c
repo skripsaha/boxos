@@ -40,7 +40,7 @@ static bool StandBookGleanMake(const char* stem, uint32_t n)
     uint64_t fid = 0;
     for (uint32_t i = 0; i < n; i++) {
         ksnprintf(name, sizeof(name), "%s-%05u-of-a-name-long-enough-to-fill-leaves.txt", stem, i);
-        if (tagfs_create_file(name, NULL, 0, &fid) != 0)
+        if (tagfs_create_file(name, NULL, 0, 0, &fid) != 0)
             return false;
     }
     return TagFSSettle() == OK;
@@ -107,7 +107,7 @@ static TestResult TestStandBookGleanQuires(void)
     TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
     TEST_ASSERT(StandBookGleanMake("glean", STAND_BOOK_GLEAN_FILES), "files whose nodes no line changes");
     TEST_ASSERT_OK(BinderRunWhole(), "a Tally of them written");
-    TEST_ASSERT_EQ(tagfs_create_file("glean-logger.log", NULL, 0, &fid), 0, "the logger's file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("glean-logger.log", NULL, 0, 0, &fid), 0, "the logger's file is made");
     TEST_ASSERT(StandFreshModelMake(&m, (uint64_t)STAND_BOOK_GLEAN_MOST * TAGFS_BLOCK_SIZE), "room for its lines");
     q    = RibbonCursorNow()->quire_blocks ? RibbonCursorNow()->quire_blocks : 1u;
     pair = g_binder.pair_a;
@@ -313,7 +313,7 @@ static TestResult TestStandBookGleanCopies(void)
     TEST_ASSERT(StandBinderKeep(&b, TallyPtrBlock(&leaf.ptr, 1)), "its second copy's first block kept as found");
     TEST_ASSERT(StandBookGleanSpoil(&b, &leaf),
                 "and written over with zeros: no Tally of the leaf reads it, and none writes it");
-    TEST_ASSERT_EQ(tagfs_create_file("proof-logger.log", NULL, 0, &fid), 0, "a logger's file is made after them");
+    TEST_ASSERT_EQ(tagfs_create_file("proof-logger.log", NULL, 0, 0, &fid), 0, "a logger's file is made after them");
     round = StandBookGleanLeaves() + 8u;
     TEST_ASSERT(StandFreshModelMake(&m, (uint64_t)STAND_BOOK_COPY_ROUNDS * round * TAGFS_BLOCK_SIZE),
                 "room for its lines");

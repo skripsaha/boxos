@@ -140,7 +140,7 @@ static bool StandDogEarMake(uint32_t from, uint32_t n, uint64_t* first)
     uint64_t fid = 0;
     for (uint32_t i = 0; i < n; i++) {
         ksnprintf(name, sizeof(name), "dogear-%05u-of-a-name-long-enough.txt", from + i);
-        if (tagfs_create_file(name, NULL, 0, &fid) != 0)
+        if (tagfs_create_file(name, NULL, 0, 0, &fid) != 0)
             return false;
         if (i == 0)
             *first = fid;
@@ -270,7 +270,7 @@ static TestResult TestStandDogEarStrictBites(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
-    TEST_ASSERT_EQ(tagfs_create_file("dogear-strict.txt", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("dogear-strict.txt", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT_OK(TagFSSettle(), "and settled");
     TEST_ASSERT_OK(BinderRunWhole(), "a Tally of it is written: every element it changed lies in DogEar");
     BinderStand(&said);
@@ -301,7 +301,7 @@ static bool StandDogEarTallied(StandFreshModel* m, const char* name, uint64_t* d
     uint64_t empty = 0;
     char     none[64];
     ksnprintf(none, sizeof(none), "%s.none", name);
-    if (tagfs_create_file(name, NULL, 0, data) != 0 || (e && tagfs_create_file(none, NULL, 0, &empty) != 0) ||
+    if (tagfs_create_file(name, NULL, 0, 0, data) != 0 || (e && tagfs_create_file(none, NULL, 0, 0, &empty) != 0) ||
         !StandFreshModelMake(m, bytes) || StandFreshWrite(m, *data, 0, bytes, 61) != (int)bytes ||
         TagFSSettle() != OK || BinderRunWhole() != OK || !StandStitchRemount() || TagFSSettle() != OK)
         return false;
@@ -439,7 +439,7 @@ static TestResult TestStandDogEarReplayed(void)
         return test_steps_aside(aside);
     TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
     TEST_ASSERT(StandDogEarMake(0, STAND_DOG_EAR_MANY, &first), "files enough for FILES to take two leaves");
-    TEST_ASSERT_EQ(tagfs_create_file("dogear-data.bin", NULL, 0, &data), 0, "a file for data is made");
+    TEST_ASSERT_EQ(tagfs_create_file("dogear-data.bin", NULL, 0, 0, &data), 0, "a file for data is made");
     TEST_ASSERT(StandFreshModelMake(&m, 12u * TAGFS_BLOCK_SIZE) &&
                 StandFreshWrite(&m, data, 0, 6u * TAGFS_BLOCK_SIZE, 31) == 6 * TAGFS_BLOCK_SIZE, "and written");
     TEST_ASSERT_OK(TagFSSettle(), "everything settled");
@@ -458,7 +458,7 @@ static TestResult TestStandDogEarReplayed(void)
     gone = first + STAND_DOG_EAR_MANY - 1u;
     TEST_ASSERT(tagfs_delete_file(gone, INK_UNWARRANTED) == 0 && TagFSSettle() == OK, "the last file given up, settled");
     TEST_ASSERT(StandStitchSay("dogear: the word", 16, 1, &kept) == OK && kept, "a word said, settled");
-    TEST_ASSERT(tagfs_create_file("dogear-born.txt", NULL, 0, &born) == 0 && TagFSSettle() == OK,
+    TEST_ASSERT(tagfs_create_file("dogear-born.txt", NULL, 0, 0, &born) == 0 && TagFSSettle() == OK,
                 "a file born, settled");
     StandDogEarStateOf(&before);
     TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
@@ -527,7 +527,7 @@ static TestResult TestStandDogEarStitched(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
-    TEST_ASSERT_EQ(tagfs_create_file("dogear-stitched.txt", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("dogear-stitched.txt", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT(TagFSSettle() == OK && BinderRunWhole() == OK, "settled, and a Tally of it written");
     TEST_ASSERT(tagfs_tag_intern("dogear:stitched", &tag) == OK && tagfs_add_tag(fid, tag) == 0 &&
                 TagFSSettle() == OK, "a tag coined and given the file, settled — the volume not mounted between");
@@ -717,7 +717,7 @@ static TestResult TestStandDogEarDigestMended(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
-    TEST_ASSERT_EQ(tagfs_create_file("dogear-digest.bin", NULL, 0, &fid), 0, "a file for data is made");
+    TEST_ASSERT_EQ(tagfs_create_file("dogear-digest.bin", NULL, 0, 0, &fid), 0, "a file for data is made");
     TEST_ASSERT(StandFreshModelMake(&m, 4u * TAGFS_BLOCK_SIZE) &&
                 StandFreshWrite(&m, fid, 0, 3u * TAGFS_BLOCK_SIZE, 51) == 3 * TAGFS_BLOCK_SIZE, "and written");
     TEST_ASSERT_OK(TagFSSettle(), "settled");

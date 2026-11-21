@@ -279,11 +279,12 @@ error_t DocketBirths(const DocketTaken* t, uint64_t seq, uint64_t* fid_most)
 #define JOT_RUN_MOST          18u    /* head 5, start 10, a run SHARED's list of extensions 3 (RibbonSharedList) */
 
 /* The body of a Born of `now` at the most: its fields, its runs, a digest a
- * block of them, and the empty Slip. */
+ * block of them, the empty Slip, and the program that made it when a program
+ * did. */
 static uint64_t JotBornMost(const FileRecord* now)
 {
     return 8u * JOT_VARINT_MOST + now->name_len + JOT_ID_MOST * (uint64_t)now->tag_count +
-           JOT_RUN_MOST * now->strip_count + 8u * now->blocks + 2u;
+           JOT_RUN_MOST * now->strip_count + 8u * now->blocks + 2u + (now->made_by ? JOT_VARINT_MOST : 0u);
 }
 
 /* The body of the record a change of `kind` from `was` to `now` becomes, at
@@ -511,7 +512,7 @@ static uint32_t JotBornPut(const Jot* j, uint8_t* body, uint32_t* scratch, uint8
         .modified_ns = f->modified_time, .name = (const uint8_t*)f->name, .name_len = f->name_len,
         .ntags = n, .tags = ids, .tags_bytes = TallyIdsPut(ids, scratch, n), .nruns = f->strip_count,
         .runs = a->runs, .runs_bytes = a->runs_bytes, .ndigests = a->ndigests, .digests = a->digests,
-        .slip = JotSlipPut(j, a),
+        .slip = JotSlipPut(j, a), .made_by = f->made_by,
     };
     return RibbonBornBodyPut(body, &b);
 }

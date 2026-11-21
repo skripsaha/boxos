@@ -11,7 +11,7 @@ static TestResult test_tagfs_create_file(void)
     uint64_t   file_id = 0;
     uint32_t   tag_ids[2] = {1, 2};
 
-    TEST_ASSERT_EQ(tagfs_create_file("test_file", tag_ids, 2, &file_id), 0,
+    TEST_ASSERT_EQ(tagfs_create_file("test_file", tag_ids, 2, 0, &file_id), 0,
                    "tagfs_create_file should succeed");
     TEST_ASSERT(file_id > 0, "File ID should be > 0");
 out:
@@ -26,7 +26,7 @@ static TestResult test_tagfs_write_read(void)
     uint64_t   file_id = 0;
     uint32_t   tag_ids[1] = {1};
 
-    TEST_ASSERT_EQ(tagfs_create_file("test_rw", tag_ids, 1, &file_id), 0,
+    TEST_ASSERT_EQ(tagfs_create_file("test_rw", tag_ids, 1, 0, &file_id), 0,
                    "tagfs_create_file should succeed");
 
     fill_random(g_test_buffer, TAGFS_BLOCK_SIZE);

@@ -43,6 +43,13 @@ static void RecordRuns(FileRecord* rec, const Tract* tract)
     rec->bytes      += tract ? tract->bytes : 0;
 }
 
+/* `flags` with TAGFS_FILE_MADE_BY as `made_by` says: the bit and the field are
+ * one fact, so every record is made to hold them alike. */
+static uint32_t FlagsMadeBy(uint32_t flags, uint64_t made_by)
+{
+    return made_by ? flags | TAGFS_FILE_MADE_BY : flags & ~(uint32_t)TAGFS_FILE_MADE_BY;
+}
+
 /* The record of `meta` over `tract`, built by `rc` — a reference the record
  * takes over: NULL, `tract` let go, when the build or the header failed. */
 static FileRecord* RecordOf(const TagFSMetadata* meta, const Tract* tract, error_t rc)
@@ -74,11 +81,12 @@ static FileRecord* RecordOf(const TagFSMetadata* meta, const Tract* tract, error
         return NULL;
     }
     rec->file_id       = meta->file_id;
-    rec->flags         = meta->flags;
+    rec->flags         = FlagsMadeBy(meta->flags, meta->made_by);
     rec->size          = meta->size;
     rec->created_time  = meta->created_time;
     rec->modified_time = meta->modified_time;
     rec->keep_until    = meta->keep_until;
+    rec->made_by       = meta->made_by;
     RecordRuns(rec, tract);
     return rec;
 }
@@ -105,11 +113,12 @@ FileRecord* FileRecordRelabel(const FileRecord* old, const char* name, const uin
     if (!rec)
         return NULL;
     rec->file_id       = old->file_id;
-    rec->flags         = flags;
+    rec->flags         = FlagsMadeBy(flags, old->made_by);
     rec->size          = old->size;
     rec->created_time  = old->created_time;
     rec->modified_time = old->modified_time;
     rec->keep_until    = keep_until;
+    rec->made_by       = old->made_by;
     rec->gen           = __atomic_load_n(&old->gen, __ATOMIC_RELAXED);
     rec->slip          = TailSlipHold(old->slip);
     TractHold(old->tract);
@@ -281,6 +290,7 @@ error_t FileRecordSplice(const FileRecord* old, const BookSplice* sp, uint64_t c
     rec->created_time  = old->created_time;
     rec->modified_time = mtime;
     rec->keep_until    = old->keep_until;
+    rec->made_by       = old->made_by;
     rec->gen           = old->gen;
     RecordRuns(rec, root);
     /* The Slips go on only by their one rule — the replay's and the Ink's
@@ -457,6 +467,7 @@ int FileRecordCopyOut(const FileRecord* rec, TagFSMetadata* out)
     out->created_time  = rec->created_time;
     out->modified_time = rec->modified_time;
     out->keep_until    = rec->keep_until;
+    out->made_by       = rec->made_by;
 
     if (rec->tag_count) {
         out->tag_ids = kmalloc(sizeof(uint32_t) * rec->tag_count);

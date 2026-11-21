@@ -398,8 +398,10 @@ int file_info(file_id_t file_id, file_info_t *info)
         }
         pos += kl + vl;
     }
-    if (out_actual >= pos + 8u)
-        memcpy(&info->deleted_until, out + out_actual - 8u, 8);
+    if (out_actual >= pos + 16u) {
+        memcpy(&info->deleted_until, out + out_actual - 16u, 8);
+        memcpy(&info->made_by,       out + out_actual - 8u,  8);
+    }
     return 0;
 }
 

@@ -135,7 +135,7 @@ static TestResult TestStandSlipLogger(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, STAND_SLIP_ROOM), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("slip-log.bin", NULL, 0, &fid), 0, "a file is made on the book");
+    TEST_ASSERT_EQ(tagfs_create_file("slip-log.bin", NULL, 0, 0, &fid), 0, "a file is made on the book");
     TEST_ASSERT_OK(TagFSSettle(), "and its Born settled");
     laid = StandSlipLaid();
     run  = BoardroomSeatRun(s.seat);
@@ -179,7 +179,7 @@ static TestResult TestStandSlipMiddle(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, STAND_SLIP_ROOM), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("slip-mid.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("slip-mid.bin", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, TAGFS_BLOCK_SIZE + 100u, 0x5200u), TAGFS_BLOCK_SIZE + 100,
                    "a block and 100 bytes are written: both blocks, the write not lying in the last alone");
     TEST_ASSERT_OK(TagFSSettle(), "and settled");
@@ -217,7 +217,7 @@ static TestResult TestStandSlipNewFile(void)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, STAND_SLIP_ROOM), "room for the file's bytes");
     laid = StandSlipLaid();
-    TEST_ASSERT_EQ(tagfs_create_file("slip-new.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("slip-new.bin", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, 100, 0x5300u), 100, "and 100 bytes written to it");
     TEST_ASSERT(StandSlipTailIs(fid, true, STRIP_HOLE) && StandSlipLaid() == laid,
                 "its one block is a hole with a Slip over it: no block written");
@@ -252,7 +252,7 @@ static TestResult TestStandSlipCutOverHole(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, STAND_SLIP_ROOM), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("slip-cut.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("slip-cut.bin", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, 100, 0x5400u), 100, "100 bytes are written");
     TEST_ASSERT(StandSlipTailIs(fid, true, STRIP_HOLE), "a hole with a Slip over it");
     TEST_ASSERT_OK(TagFSSettle(), "settled");
@@ -284,7 +284,7 @@ static TestResult TestStandSlipCutOverData(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, STAND_SLIP_ROOM), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("slip-cut-data.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("slip-cut-data.bin", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, TAGFS_BLOCK_SIZE + 100u, 0x5500u), TAGFS_BLOCK_SIZE + 100,
                    "a block and 100 bytes are written");
     TEST_ASSERT_OK(TagFSSettle(), "settled");
@@ -318,7 +318,7 @@ static TestResult TestStandSlipGuarded(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, STAND_SLIP_ROOM), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("slip-sys.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("slip-sys.bin", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, 100, 0x5600u), 100, "100 bytes are written");
     TEST_ASSERT(StandSlipTailIs(fid, true, STRIP_HOLE), "a hole with a Slip over it");
     TEST_ASSERT_OK(TagFSSettle(), "settled");
@@ -349,7 +349,7 @@ static TestResult TestStandSlipTallyWaits(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, STAND_SLIP_ROOM), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("slip-tally.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("slip-tally.bin", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, 100, 0x5700u), 100, "100 bytes are written");
     TEST_ASSERT(StandSlipTailIs(fid, true, STRIP_HOLE), "a hole with a Slip over it");
     TEST_ASSERT_OK(TagFSSettle(), "settled");
@@ -380,7 +380,7 @@ static TestResult TestStandSlipTallyWhole(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, STAND_SLIP_ROOM), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("slip-whole.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("slip-whole.bin", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, 100, 0x5800u), 100, "100 bytes are written");
     TEST_ASSERT(StandSlipTailIs(fid, true, STRIP_HOLE), "a hole with a Slip over it");
     TEST_ASSERT_OK(TagFSSettle(), "settled");
@@ -411,7 +411,7 @@ static TestResult TestStandSlipHolderEngrosses(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, STAND_SLIP_ROOM), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("slip-holder.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("slip-holder.bin", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, STAND_SLIP_LINE, 0x5900u), STAND_SLIP_LINE, "a line is written");
     TEST_ASSERT(StandSlipTailIs(fid, true, STRIP_HOLE), "a hole with a Slip over it");
     TEST_ASSERT_OK(TagFSSettle(), "settled");
@@ -459,7 +459,7 @@ static TestResult TestStandSlipEngrossCut(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, STAND_SLIP_ROOM), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("slip-c22.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("slip-c22.bin", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, 100, 0x5A00u), 100, "100 bytes are written");
     TEST_ASSERT(StandSlipTailIs(fid, true, STRIP_HOLE), "a hole with a Slip over it");
     TEST_ASSERT_OK(TagFSSettle(), "settled");
@@ -513,7 +513,7 @@ static TestResult TestStandSlipPort(void)
     TEST_ASSERT(StandFreshModelMake(&m, STAND_SLIP_ROOM + TagFSRunBlocks() * TAGFS_BLOCK_SIZE),
                 "room for the file's bytes");
     TEST_ASSERT(WriteJobSeatRunsAsync(s.seat), "a program's write on this seat goes through the port");
-    TEST_ASSERT_EQ(tagfs_create_file("slip-port.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("slip-port.bin", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT_OK(TagFSSettle(), "and its Born settled");
     laid = StandSlipLaid();
     TEST_ASSERT_OK(StandFreshPortWrite(&m, fid, 0, 100), "100 bytes are written through the port");
@@ -566,7 +566,7 @@ static TestResult TestStandSlipCutRegrowClaimed(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, STAND_SLIP_ROOM), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("slip-regrow.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("slip-regrow.bin", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, 4000u, 0x5b00u), 4000, "4000 bytes are written");
     TEST_ASSERT(StandSlipTailIs(fid, true, STRIP_HOLE), "a hole with a Slip over it");
     TEST_ASSERT_OK(TagFSSettle(), "settled");
@@ -605,12 +605,12 @@ static TestResult TestStandSlipRefusedTail(void)
     memset(&mb, 0, sizeof(mb));
     TEST_ASSERT(StandFreshModelMake(&ma, STAND_SLIP_ROOM) && StandFreshModelMake(&mb, STAND_SLIP_ROOM),
                 "room for the files' bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("slip-unread.bin", NULL, 0, &fa), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("slip-unread.bin", NULL, 0, 0, &fa), 0, "a file is made");
     TEST_ASSERT_EQ(StandFreshWrite(&ma, fa, 0, TAGFS_BLOCK_SIZE + 100u, 0x5c00u), TAGFS_BLOCK_SIZE + 100,
                    "a block and 100 bytes are written to it");
     TEST_ASSERT_OK(TagFSSettle(), "settled");
     TEST_ASSERT_EQ(StandFreshWrite(&ma, fa, ma.size, 50, 0x5c01u), 50, "50 bytes ride a Slip at its end");
-    TEST_ASSERT_EQ(tagfs_create_file("slip-after.bin", NULL, 0, &fb), 0, "a second file is made after it");
+    TEST_ASSERT_EQ(tagfs_create_file("slip-after.bin", NULL, 0, 0, &fb), 0, "a second file is made after it");
     TEST_ASSERT_EQ(StandFreshWrite(&mb, fb, 0, 100, 0x5c02u), 100, "100 bytes ride a Slip over a hole");
     TEST_ASSERT_OK(TagFSSettle(), "settled");
     TEST_ASSERT(StandStitchRemount(), "the volume is mounted again: nothing of the files held in memory");
@@ -658,7 +658,7 @@ static TestResult TestStandSlipHeldWakes(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, STAND_SLIP_ROOM), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("slip-wakes.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("slip-wakes.bin", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, STAND_SLIP_LINE, 0x5d00u), STAND_SLIP_LINE, "a line is written");
     TEST_ASSERT_OK(TagFSSettle(), "settled");
     TEST_ASSERT((h = tagfs_open(fid, TAGFS_HANDLE_WRITE)) != NULL, "a writer opens it");

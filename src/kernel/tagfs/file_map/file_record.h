@@ -15,6 +15,7 @@ STATIC_ASSERT(TAGFS_FILE_ROLE_SYSTEM == TALLY_FILE_ROLE_SYSTEM, "TAGFS_FILE_ROLE
 STATIC_ASSERT(TAGFS_FILE_ROLE_BOOT   == TALLY_FILE_ROLE_BOOT,   "TAGFS_FILE_ROLE_BOOT is the book's TALLY_FILE_ROLE_BOOT");
 STATIC_ASSERT(TAGFS_FILE_ROLE_KERNEL == TALLY_FILE_ROLE_KERNEL, "TAGFS_FILE_ROLE_KERNEL is the book's TALLY_FILE_ROLE_KERNEL");
 STATIC_ASSERT(TAGFS_FILE_DELETED     == TALLY_FILE_DELETED,     "TAGFS_FILE_DELETED is the book's TALLY_FILE_DELETED");
+STATIC_ASSERT(TAGFS_FILE_MADE_BY     == TALLY_FILE_MADE_BY,     "TAGFS_FILE_MADE_BY is the book's TALLY_FILE_MADE_BY");
 
 /*
  * FileRecord — what memory knows of one live file: a header (name, tags,
@@ -80,6 +81,11 @@ typedef struct FileRecord {
     /* With TAGFS_FILE_DELETED, the time — a book's nanoseconds, as created_time
      * is — until which the file is kept deleted; 0 for a file that is not. */
     uint64_t           keep_until;
+    /* With TAGFS_FILE_MADE_BY, the volume's id of the file of the program that
+     * made this file; 0 for a file no program of the volume made. Set once,
+     * when the file is made, and the same in every record of the file after:
+     * the builders here keep it and the flag one (FileRecordBuild). */
+    uint64_t           made_by;
     /* When the Ink that made this record was a small append — its data cost
      * the medium less than a Settle cycle does — in the cadence's
      * microseconds; 0 for any other change. Memory only: the cadence asks it
@@ -150,7 +156,8 @@ typedef struct {
 
 /* The record `meta` describes — its Strips cut into Parcels — with one
  * reference: NULL when there is no memory, or when a Strip of it names no
- * block (count 0). Every allocation is made here, with no lock held. */
+ * block (count 0). Its flags hold TAGFS_FILE_MADE_BY exactly when meta->made_by
+ * is not 0. Every allocation is made here, with no lock held. */
 FileRecord* FileRecordBuild(const TagFSMetadata* meta);
 
 /* The same, its Strips cut as `cut` gives — the Strips of each Parcel, `ncut`
@@ -158,8 +165,9 @@ FileRecord* FileRecordBuild(const TagFSMetadata* meta);
 FileRecord* FileRecordBuildCut(const TagFSMetadata* meta, const uint32_t* cut, uint64_t ncut, bool* recut);
 
 /* A record with a new header — `name`, `tags`, `flags`, `keep_until` — and every one of the
- * old record's runs, shared rather than copied; its times, size and file id
- * the old one's. NULL when there is no memory. */
+ * old record's runs, shared rather than copied; its times, size, file id and
+ * made_by the old one's (`flags` has TAGFS_FILE_MADE_BY as the old record's
+ * made_by says, whatever the caller gave). NULL when there is no memory. */
 FileRecord* FileRecordRelabel(const FileRecord* old, const char* name, const uint32_t* tags,
                               uint32_t tag_count, uint32_t flags, uint64_t keep_until);
 

@@ -353,9 +353,13 @@
 #define STORAGE_OBJ_DELETE          0x07
 #define STORAGE_OBJ_RENAME          0x08
 /* obj.getinfo — params = [u64 fid]; out_crate = [u64 fid][u64 size][u32 tags]
- * [u16 name_len][name][tag records]…[u64 kept_until]: the last eight bytes are
- * the time, in nanoseconds of the wall clock, at which the volume lets a
- * deleted file go (obj.keep), 0 for a file that is not deleted. */
+ * [u16 name_len][name][tag records]…[u64 kept_until][u64 made_by]: the eight
+ * bytes before the last are the time, in nanoseconds of the wall clock, at
+ * which the volume lets a deleted file go (obj.keep), 0 for a file that is not
+ * deleted; the last eight are the volume's id of the file of the program that
+ * made this file, 0 when no program of the volume did (the system's own, or a
+ * program started from bytes). The program's file is no promise of a file
+ * still there: it may have been deleted since. */
 #define STORAGE_OBJ_GET_INFO        0x09
 /* obj.span — a file made exactly `size` bytes long. params =
  * [u64 file_id][u64 size][u32 flags], the flags word optional (0). Shorter:

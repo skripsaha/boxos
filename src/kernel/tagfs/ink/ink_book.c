@@ -149,13 +149,17 @@ static error_t InkBookNewLocked(const uint32_t* tags, uint32_t count, FileRecord
 
 /* The file is born empty, its times a book's own — nanoseconds (§2.8), as the
  * mount reads them back — and its id the lock's to give: the stakes are taken
- * for the id the lock showed, and taken again when another create took it. */
-error_t InkBookNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t* out_fid, InkReceipt* out)
+ * for the id the lock showed, and taken again when another create took it.
+ * `made_by` is the file of the program that makes it, 0 for none: it is in the
+ * record from its birth, and in the Born that carries it. */
+error_t InkBookNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t made_by, uint64_t* out_fid,
+                   InkReceipt* out)
 {
     TagFSState*   fs   = InkState();
     uint64_t      now  = rtc_get_unix64() * 1000000000ull;
     TagFSMetadata meta = { .flags = TAGFS_FILE_ACTIVE, .created_time = now, .modified_time = now,
-                           .filename = (char*)name, .tag_ids = (uint32_t*)tags, .tag_count = count };
+                           .filename = (char*)name, .tag_ids = (uint32_t*)tags, .tag_count = count,
+                           .made_by = made_by };
     FileRecord*   rec  = FileRecordBuild(&meta);
     error_t       rc   = rec ? INK_AGAIN : ERR_NO_MEMORY;
     uint64_t      claim = rec ? DocketClaimOf(JOT_BORN, NULL, rec) : 0;

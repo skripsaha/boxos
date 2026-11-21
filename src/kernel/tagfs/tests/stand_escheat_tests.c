@@ -145,7 +145,7 @@ static TestResult StandEscheatTailWaits(StandBinder* b, StandFreshModel* m, uint
     error_t     rc = OK;
 
     TEST_ASSERT(StandFreshModelMake(m, STAND_ESCHEAT_ROOM), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("escheat-tail.bin", NULL, 0, fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("escheat-tail.bin", NULL, 0, 0, fid), 0, "a file is made");
     TEST_ASSERT_EQ(StandFreshWrite(m, *fid, 0, TAGFS_BLOCK_SIZE + 100u, 0x6e00u), TAGFS_BLOCK_SIZE + 100,
                    "a block and 100 bytes are written to it");
     TEST_ASSERT_OK(TagFSSettle(), "settled");

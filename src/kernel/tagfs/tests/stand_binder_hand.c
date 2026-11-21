@@ -191,7 +191,7 @@ TestResult StandBinderRot(StandBinder* b, uint64_t* files)
 
     for (uint32_t i = 0; i < STAND_BINDER_MANY; i++) {
         ksnprintf(name, sizeof(name), "bind-rot-%04u-of-a-name-long-enough.txt", i);
-        TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, &fid), 0, "a file is made");
+        TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, 0, &fid), 0, "a file is made");
     }
     TEST_ASSERT_OK(TagFSSettle(), "the files settled");
     TEST_ASSERT_OK(BinderRunWhole(), "a Tally of them written");

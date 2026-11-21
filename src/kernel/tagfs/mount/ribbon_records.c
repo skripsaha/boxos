@@ -266,6 +266,7 @@ static FileRecord* RibbonBornRecord(RibbonStage* st, const RibbonBorn* b, uint64
         meta.size          = b->size;
         meta.created_time  = b->created_ns;
         meta.modified_time = b->modified_ns;
+        meta.made_by       = b->made_by;
         meta.extent_count  = (uint32_t)nstrips;
         if ((rec = FileRecordBuild(&meta)) != NULL && RibbonHighSet(st, b->fid, (uint32_t)(b->flags >> 32)) != OK) {
             FileRecordRelease(rec);
