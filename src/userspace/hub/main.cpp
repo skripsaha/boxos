@@ -13,6 +13,7 @@
 #include "boxos_symbols.h"
 
 #include "hub.h"
+#include "programs.h"
 #include "say.h"
 #include "session.h"
 
@@ -31,6 +32,9 @@ int main()
         hub::Say(" BoxOS Hub — help shows what there is\n");
     }
 
+    // The commands found before the first line, so its first key is not
+    // what reads the volume to find them.
+    hub::programs::EachCommand([](file_id_t, std::string_view) {});
     if (!hub::Converse(Self)) {
         hub::Say("hub: no keyboard can be heard here, so nothing can be typed; the hub ends\n");
         return 1;

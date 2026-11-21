@@ -6,7 +6,9 @@
 
 #include "programs.h"
 
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "box/error.h"
@@ -50,6 +52,25 @@ int CommandOf(const volume::Record &File)
     return Kind != PROGRAM_NONE || ItineraryFile(File) ? 1 : 0;
 }
 
+// What a file was found to be, as the hub last read it: its name and size
+// then, and whether it was a command. The rule stays what the file holds
+// (CommandOf); a file is read again only when it is new to the hub or its
+// name or size has changed. A line typed at the prompt read the first bytes of
+// every file on the volume, and an unknown command read them all again for
+// its guess — two hundred and more reads of the medium before a key was
+// echoed or the answer said. A file rewritten to the same size in place is
+// listed as it was until it changes again; starting one is never stale — Pick
+// reads the files the name means. The jobs' keeping strand asks too, hence
+// the lock.
+struct KnownFile {
+    std::string   Name;
+    std::uint64_t Size    = 0;
+    bool          Command = false;
+};
+
+std::mutex                               KnownHeld;
+std::unordered_map<file_id_t, KnownFile> Known;
+
 // One of Ids, asked for when there are several.
 Picked ChooseOne(const Look &Shown, std::string_view Word, const std::vector<file_id_t> &Ids)
 {
@@ -90,12 +111,32 @@ std::size_t StemLength(std::string_view FileName)
 
 void EachCommand(const std::function<void(file_id_t, std::string_view)> &Visit)
 {
-    file_id_t *Ids   = nullptr;
-    const int  Count = query_all_everywhere(nullptr, nullptr, &Ids);
-    for (file_id_t File : volume::Taken(Ids, Count)) {
-        const std::expected<volume::Record, int> Held = volume::Record::Of(File);
-        if (Held && !Held->Name().empty() && CommandOf(*Held) == 1) Visit(File, Held->Name());
+    file_id_t                                      *Ids   = nullptr;
+    const int                                       Count = query_all_everywhere(nullptr, nullptr, &Ids);
+    std::vector<std::pair<file_id_t, std::string>> Commands;
+    {
+        const std::lock_guard<std::mutex>        Guard(KnownHeld);
+        std::unordered_map<file_id_t, KnownFile> Now;
+        for (file_id_t File : volume::Taken(Ids, Count)) {
+            const std::expected<volume::Record, int> Held = volume::Record::Of(File);
+            if (!Held || Held->Name().empty()) continue;
+            KnownFile  Is{std::string(Held->Name()), Held->Size(), false};
+            const auto Was = Known.find(File);
+            if (Was != Known.end() && Was->second.Name == Is.Name && Was->second.Size == Is.Size) {
+                Is.Command = Was->second.Command;
+            } else {
+                // A file whose first bytes could not be read is not
+                // remembered: it is read again the next time.
+                const int Rc = CommandOf(*Held);
+                if (Rc < 0) continue;
+                Is.Command = Rc == 1;
+            }
+            if (Is.Command) Commands.emplace_back(File, Is.Name);
+            Now.emplace(File, std::move(Is));
+        }
+        Known = std::move(Now);
     }
+    for (const auto &[File, Name] : Commands) Visit(File, Name);
 }
 
 Picked Pick(const Look &Shown, std::string_view Name)
