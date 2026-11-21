@@ -1095,8 +1095,10 @@ void process_destroy(process_t *proc)
 static error_t process_wear_asked(process_t *proc, uint32_t asked)
 {
     static const struct { uint32_t Bit; const char *Key; } keys[] = {
-        { AUTH_TAG_UTILITY, "utility" },
-        { AUTH_TAG_NETWORK, "network" },
+        { AUTH_TAG_UTILITY,     "utility" },
+        { AUTH_TAG_NETWORK,     "network" },
+        { AUTH_TAG_SEE_TAGS,    "see-tags" },
+        { AUTH_TAG_CHANGE_TAGS, "change-tags" },
     };
     for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
         if (!(asked & keys[i].Bit))

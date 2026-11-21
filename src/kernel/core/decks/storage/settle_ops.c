@@ -89,10 +89,13 @@ static uint64_t op_file_id(const ManifestOp *op)
     return file_id;
 }
 
-/* The anchor's Touch fan-out: every tag of the file, and the bare "anchor" tag
- * that generic listeners hold — resolved by the reader door, never named into
- * the Logbook, so publisher and subscriber meet on the same id whoever spoke
- * first (box::tagfs::on_anchor subscribes by name). */
+/* The anchor's Touch fan-out: every one of the person's tags the file wears,
+ * and the bare "anchor" tag that generic listeners hold — resolved by the
+ * reader door, never named into the Logbook, so publisher and subscriber meet
+ * on the same id whoever spoke first (box::tagfs::on_anchor subscribes by
+ * name). Touch speaks the person's tags; a program's own tags are its alone
+ * (tagfs.h, TagOwner), and an event on one would tell every listener what the
+ * program keeps to itself. */
 static void AnchorPublish(uint64_t file_id, uint32_t pid)
 {
     struct __attribute__((packed)) {
@@ -106,8 +109,12 @@ static void AnchorPublish(uint64_t file_id, uint32_t pid)
         TagFSMetadata meta;
         memset(&meta, 0, sizeof(meta));
         if (tagfs_get_metadata(file_id, &meta) == OK) {
-            for (uint32_t i = 0; i < meta.tag_count; i++)
-                TouchPublishId(meta.tag_ids[i], &ev, sizeof(ev), pid, TOUCH_FLAG_TAGFS);
+            for (uint32_t i = 0; i < meta.tag_count; i++) {
+                TagSpelling spelled;
+                TagOwner    owner;
+                if (TagFSTagSpelling(meta.tag_ids[i], &spelled, NULL, &owner) && owner.kind == TAG_OWNER_PERSON)
+                    TouchPublishId(meta.tag_ids[i], &ev, sizeof(ev), pid, TOUCH_FLAG_TAGFS);
+            }
             tagfs_metadata_free(&meta);
         }
         tagfs_leave();

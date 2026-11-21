@@ -676,7 +676,8 @@ error_t BoxLoad(vmm_context_t *vmm, const ImageSource *source, const char *name,
         if (rc == OK && (verdict = BoxAsksRead(held.Bytes, part.Size, &asks, NULL)) != BOX_OK)
             rc = BoxRefuse(&load, verdict, &part);
         if (rc == OK)
-            loaded->Asks = (asks.Utility ? AUTH_TAG_UTILITY : 0u) | (asks.Network ? AUTH_TAG_NETWORK : 0u);
+            loaded->Asks = (asks.Utility ? AUTH_TAG_UTILITY : 0u) | (asks.Network ? AUTH_TAG_NETWORK : 0u) |
+                           (asks.SeeTags ? AUTH_TAG_SEE_TAGS : 0u) | (asks.ChangeTags ? AUTH_TAG_CHANGE_TAGS : 0u);
         BoxLetGo(&held);
     }
     if (rc == OK && BoxPartOfKind(&load.Table, BOX_KIND_DOORS, &part)) {

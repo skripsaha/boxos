@@ -102,6 +102,7 @@ typedef uint32_t error_t;
     X(TAGFS_BEYOND_SIZE,             tagfs_beyond_size,             861,  "tagfs write past the size",     "tagfs") \
     X(TAGFS_RECORD_FULL,             tagfs_record_full,             862,  "tagfs file record full",        "tagfs") \
     X(TAGFS_FID_EXHAUSTED,           tagfs_fid_exhausted,           863,  "tagfs file ids exhausted",      "tagfs") \
+    X(TAGFS_NO_OWN_TAGS,             tagfs_no_own_tags,             864,  "this program keeps no tags of its own", "tagfs") \
     /* Pocket / IPC (900-904) */ \
     X(POCKET_RING_FULL,              pocket_ring_full,              900,  "pocket ring full",              "ipc") \
     X(INVALID_POCKET,                invalid_pocket,                901,  "invalid pocket",                "ipc") \

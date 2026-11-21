@@ -169,6 +169,8 @@ const char* ErrorString(error_t err) {
             return "TagFS file record full";
         case ERR_TAGFS_FID_EXHAUSTED:
             return "TagFS file ids exhausted";
+        case ERR_TAGFS_NO_OWN_TAGS:
+            return "TagFS: this program keeps no tags of its own";
 
         // TagFS Module Errors
         case ERR_TAGFS_NOT_LANDED:

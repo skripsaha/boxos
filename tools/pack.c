@@ -432,8 +432,8 @@ static size_t WriteAsks(char *text, size_t room, char **words, int count)
         Refuse("it asks for the same thing twice, or for a word that is no word");
     if (unknown != 0) {
         char why[200];
-        snprintf(why, sizeof(why), "it asks for a word nobody who starts a program knows (line %llu): utility or network",
-                 (unsigned long long)unknown);
+        snprintf(why, sizeof(why), "it asks for a word nobody who starts a program knows (line %llu): utility, "
+                 "network, see-tags or change-tags", (unsigned long long)unknown);
         Refuse(why);
     }
     return used;

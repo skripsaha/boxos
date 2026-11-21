@@ -126,6 +126,11 @@ typedef enum {
      * back as a signed 64-bit number — and a volume never issues one twice
      * (ink_book.c). */
     ERR_TAGFS_FID_EXHAUSTED = 863,
+    /* A call in a program's own tags from a program that has none: one not
+     * started from a file of the volume — an image held in memory — or whose
+     * file the volume no longer holds. A program's own tags are named by its
+     * file (tagfs.h, TagOwner), and without it there is nothing to name them by. */
+    ERR_TAGFS_NO_OWN_TAGS = 864,
 
     // TagFS Module Errors (1000-1099)
     /* A write the book's mount found never reached the medium: the stitch that

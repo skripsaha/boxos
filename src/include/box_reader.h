@@ -930,9 +930,19 @@ static inline BoxVerdict BoxLifeRead(const uint8_t *bytes, uint64_t size, BoxLif
  *
  * What a program asks to be allowed, a line each after "asks":
  *
- *   ask utility [why]   to start other programs, to read the machine's log,
- *                       to flush a disk and to defragment a file
- *   ask network [why]   to use the network
+ *   ask utility [why]      to start other programs, to read the machine's log,
+ *                          to flush a disk and to defragment a file
+ *   ask network [why]      to use the network
+ *   ask see-tags [why]     to see the person's tags — the labels the person
+ *                          finds files by — on files and in questions
+ *   ask change-tags [why]  to put the person's tags on and take them off, and
+ *                          a program's own off a file as the person's hands;
+ *                          seeing them with it
+ *
+ * Every program has tags of its own without asking: its own words for its own
+ * files, which no other program meets (tagfs.h, TagOwner). The person's are
+ * the person's, and a program that has not asked for them neither sees nor
+ * changes one.
  *
  * The why is words for the person and is not read. What a program does not ask
  * it is not given: a box with no `asks` part may use storage and the other
@@ -947,14 +957,18 @@ static inline BoxVerdict BoxLifeRead(const uint8_t *bytes, uint64_t size, BoxLif
 typedef struct {
     uint8_t Utility;
     uint8_t Network;
+    uint8_t SeeTags;
+    uint8_t ChangeTags;
 } BoxAsks;
 
 static inline BoxVerdict BoxAsksRead(const uint8_t *bytes, uint64_t size, BoxAsks *out, uint64_t *unknown)
 {
     BoxText    text;
     BoxVerdict verdict = BoxTextBegin(bytes, size, BOX_KIND_ASKS, &text);
-    out->Utility = 0;
-    out->Network = 0;
+    out->Utility    = 0;
+    out->Network    = 0;
+    out->SeeTags    = 0;
+    out->ChangeTags = 0;
     if (unknown) *unknown = 0;
     if (verdict != BOX_OK) return verdict;
 
@@ -965,8 +979,10 @@ static inline BoxVerdict BoxAsksRead(const uint8_t *bytes, uint64_t size, BoxAsk
         if (!BoxTextWord(line, length, &at, &word, &word_length) || !BoxSpanIs(word, word_length, "ask"))
             return BOX_TEXT_LAYOUT;
         if (!BoxTextWord(line, length, &at, &word, &word_length)) return BOX_TEXT_LAYOUT;
-        uint8_t *asked = BoxSpanIs(word, word_length, "utility") ? &out->Utility
-                       : BoxSpanIs(word, word_length, "network") ? &out->Network : NULL;
+        uint8_t *asked = BoxSpanIs(word, word_length, "utility")       ? &out->Utility
+                       : BoxSpanIs(word, word_length, "network")       ? &out->Network
+                       : BoxSpanIs(word, word_length, "see-tags")      ? &out->SeeTags
+                       : BoxSpanIs(word, word_length, "change-tags")   ? &out->ChangeTags : NULL;
         if (!asked) {
             if (unknown && *unknown == 0) {
                 uint64_t number = 1;

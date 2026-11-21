@@ -921,6 +921,17 @@ static void TestAsks(void)
           "asks: a part of another kind is refused, and asks for nothing");
     Check(AsksOf("asks\nask network\n", &asks, NULL) == BOX_OK && asks.Network,
           "asks: read without asking what it passed over");
+    Check(AsksOf("asks\nask see-tags to find the person's files\n", &asks, &unknown) == BOX_OK && asks.SeeTags &&
+              !asks.ChangeTags && !asks.Utility && unknown == 0,
+          "asks: see-tags, the person's tags to see");
+    Check(AsksOf("asks\nask change-tags\nask see-tags\n", &asks, &unknown) == BOX_OK && asks.SeeTags &&
+              asks.ChangeTags,
+          "asks: change-tags beside see-tags, each its own word");
+    Check(AsksOf("asks\nask change-tags\nask change-tags\n", &asks, &unknown) == BOX_TEXT_LAYOUT,
+          "asks: change-tags said twice");
+    Check(AsksOf("asks\nask tags\n", &asks, &unknown) == BOX_OK && !asks.SeeTags && !asks.ChangeTags &&
+              unknown == 2,
+          "asks: a word near them is no word, passed over and never granted");
 }
 
 static void TestTexts(void)
