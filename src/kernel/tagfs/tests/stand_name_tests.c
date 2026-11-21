@@ -366,6 +366,33 @@ out:
     return verdict;
 }
 
+/* Names are not unique: a volume may hold tens of thousands of files of one
+ * name, all in one chain of the index. Making them, putting their records
+ * again and letting them go must not cost a walk of the chain each. */
+static TestResult TestStandNameManyOfOneName(void)
+{
+    TestResult verdict = TEST_PASS;
+    FileMap*   map     = FileMapCreate();
+    uint64_t   first   = 0;
+
+    TEST_ASSERT(map != NULL, "a map of the test's own");
+    for (uint32_t k = 0; k < STAND_NAME_GROWN; k++)
+        TEST_ASSERT(StandNamePut(map, k, "same.dat", 1), "a file called same.dat is put in the map");
+    TEST_ASSERT_EQ(StandNameMapCount(map, "same", &first), STAND_NAME_GROWN, "the stem finds them all");
+    TEST_ASSERT_EQ(first, 1u, "the least id first");
+    for (uint32_t k = STAND_NAME_GROWN; k-- > 0;)
+        TEST_ASSERT(StandNamePut(map, k, "same.dat", 2), "a record of each is put again, the last first");
+    TEST_ASSERT_EQ(FileMapNameLinks(map), 2u * STAND_NAME_GROWN, "and no link is left behind");
+    TEST_ASSERT_EQ(StandNameMapCount(map, "same.dat", &first), STAND_NAME_GROWN, "the whole name finds them all");
+    for (uint32_t k = 0; k < STAND_NAME_GROWN; k += 2)
+        FileMapDrop(map, 1 + k, NULL);
+    TEST_ASSERT_EQ(StandNameMapCount(map, "same", &first), STAND_NAME_GROWN / 2u, "half let go, half are found");
+    TEST_ASSERT_EQ(first, 2u, "from the least id left");
+out:
+    FileMapDestroy(map);
+    return verdict;
+}
+
 static const TestCase g_stand_name_tests[] = {
     { .name = "stand_name_finds_by_whole_name_or_stem", .func = TestStandNameFindsByWholeNameOrStem,
       .reach = TEST_WRITES_TO_VOLUME },
@@ -374,6 +401,8 @@ static const TestCase g_stand_name_tests[] = {
     { .name = "stand_name_survives_a_mount", .func = TestStandNameSurvivesAMount,
       .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_name_map_grows_and_holds_no_stale_link", .func = TestStandNameMapGrowsAndHoldsNoStaleLink,
+      .reach = TEST_READS_ONLY },
+    { .name = "stand_name_many_of_one_name", .func = TestStandNameManyOfOneName,
       .reach = TEST_READS_ONLY },
 };
 

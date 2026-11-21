@@ -537,7 +537,7 @@ static error_t StakeGrow(FileMap* m, FileMapStake* s, uint64_t fid, uint32_t nee
  * chains longer and every answer as exact as it was. */
 static void MapNamesGrow(FileMap* m, uint32_t buckets)
 {
-    NameLink** table = NameIndexTableMake(buckets);
+    NameBucket* table = NameIndexTableMake(buckets);
     if (!table)
         return;
     TagFSLockTake(&m->lock);
@@ -750,7 +750,7 @@ size_t FileMapBytes(FileMap* map)
 {
     TagFSLockTake(&map->lock);
     size_t bytes = (size_t)map->nodes * sizeof(FileMapNode) + (size_t)map->record_bytes +
-                   (size_t)map->names.buckets * sizeof(NameLink*);
+                   (size_t)map->names.buckets * sizeof(NameBucket);
     TagFSLockDrop(&map->lock);
     return bytes;
 }
