@@ -848,22 +848,29 @@ static bool StandOwnedFinds(TagOwner owner, const TagSpelling* tag, uint64_t fid
            found == fid;
 }
 
-/* Whether `owner`'s list of the tags files wear names `tag` — and no other of the same key. */
+/* Whether `owner`'s list of the tags files wear names `tag` — and no other of
+ * the same key — read page after page to its end: the stand's volume wears
+ * more tags than one page holds. */
 static bool StandOwnedListed(TagOwner owner, const TagSpelling* tag)
 {
     uint8_t  out[512];
-    uint32_t used = 0, delivered = 0, next = 0, named = 0;
-    if (TagFSTagPage(owner, NULL, 0, NULL, 0, 0, out, sizeof(out), &used, &delivered, &next) != OK)
-        return false;
-    for (uint32_t at = 0, k = 0; k < delivered; k++) {
-        uint8_t  key_len   = out[at + 5];
-        uint16_t value_len = 0;
-        memcpy(&value_len, out + at + 6, sizeof(value_len));
-        const uint8_t* key = out + at + STORAGE_TAG_LISTED_HEAD;
-        if (key_len == tag->key_len && memcmp(key, tag->key, key_len) == 0)
-            named += value_len == tag->value_len && memcmp(key + key_len, tag->value, value_len) == 0 ? 1u : 100u;
-        at += STORAGE_TAG_LISTED_HEAD + key_len + value_len;
-    }
+    uint32_t named = 0, from = 0;
+    do {
+        uint32_t used = 0, delivered = 0, next = 0;
+        if (TagFSTagPage(owner, NULL, 0, NULL, 0, from, out, sizeof(out), &used, &delivered, &next) != OK)
+            return false;
+        for (uint32_t at = 0, k = 0; k < delivered; k++) {
+            uint8_t  key_len   = out[at + 5];
+            uint16_t value_len = 0;
+            memcpy(&value_len, out + at + 6, sizeof(value_len));
+            const uint8_t* key = out + at + STORAGE_TAG_LISTED_HEAD;
+            if (key_len == tag->key_len && memcmp(key, tag->key, key_len) == 0)
+                named += value_len == tag->value_len && memcmp(key + key_len, tag->value, value_len) == 0 ? 1u
+                                                                                                          : 100u;
+            at += STORAGE_TAG_LISTED_HEAD + key_len + value_len;
+        }
+        from = next;
+    } while (from != 0);
     return named == 1;
 }
 
