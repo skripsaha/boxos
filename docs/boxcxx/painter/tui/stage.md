@@ -1,709 +1,391 @@
-# painter::tui::stage — сцена и общие типы событий
+# painter::tui::stage
 
 ## Назначение
 
-[Заголовок](../../../../src/userspace/painter/include/painter/tui/stage.h),
-[реализация](../../../../src/userspace/painter/src/tui/stage.cpp).
+Заголовок: [`painter/tui/stage.h`](../../../../src/userspace/painter/include/painter/tui/stage.h).
+Реализация: [`src/tui/stage.cpp`](../../../../src/userspace/painter/src/tui/stage.cpp).
 
-`Stage` объединяет полноэкранную сцену, [кадр](frame.md) и
-[клавиатуру](keyboard.md). Здесь же объявлены типы ошибок, событий и
-именованные коды клавиш, которыми пользуются остальные поверхности.
+`Stage` — полноэкранная сцена: кадр размером с консоль, область дисплея,
+которая занимает весь экран, пока программа впереди, и встроенная
+клавиатура. Это основной вход для игр и полноэкранных утилит.
 
-Сцена рисуется через DisplayServer. Перерисовка строится в памяти программы;
-`Present()` публикует её отдельно. Блокировок для одновременных вызовов
-одного Stage нет: синхронизируйте доступ извне.
+В этом же заголовке объявлены общие для всех поверхностей типы: ошибка
+открытия `StageError` и событие ввода `Event`. Сам заголовок подключает
+[key](key.md) (`KeyEvent`, `KeyCodes`, `Modifiers`) и [frame](frame.md).
 
-## Владение и время жизни
+Жизненный цикл: `Open` → рисование в `FrameBuffer()` → `Present()` →
+`Wait()`/`Poll()` → … → `Close()` (или деструктор).
 
-### `Stage::Stage(Stage &&)`
-
-**Краткое описание:** Передайте владение при создании нового объекта.
-
-**Параметры:** `Other` (`Stage &&`, in-out); перемещающий конструктор объявлен `noexcept`.
-
-**Возвращает:** Неприменимо: конструктор.
-
-**Побочные эффекты:** Передаёт ресурсы новому объекту.
-
-**Как работает:** Передаёт внутреннее состояние; ресурс не открывается заново.
-
-**Примечания:** У источника отсутствует состояние; IsOpen возвращает false.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/stage.h"
-#include <utility>
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-tui::Stage Example(tui::Stage &&Other) { return tui::Stage(std::move(Other)); }
-```
-
-### `Stage::operator=`
-
-**Краткое описание:** Замените владение ресурсами перемещением.
-
-**Параметры:** `Other` (`Stage &&`, in-out); `Stage &operator=(Stage &&Other) noexcept`.
-
-**Возвращает:** `Stage &`: текущий объект.
-
-**Побочные эффекты:** Освобождает или закрывает прежние ресурсы, принимает новые.
-
-**Как работает:** При самоприсваивании сразу возвращает *this. Иначе вызывает Close для прежнего ресурса, игнорирует его статус и передаёт владение из Other.
-
-**Примечания:** Если результат закрытия важен, явно вызовите и проверьте Close до присваивания.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/stage.h"
-#include <utility>
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-void Example(tui::Stage &Target, tui::Stage &&Other) { Target = std::move(Other); }
-```
-
-### `Stage::~Stage`
-
-**Краткое описание:** Освободите принадлежащие объекту ресурсы при завершении времени жизни.
-
-**Параметры:** Нет.
-
-**Возвращает:** Неприменимо: деструктор.
-
-**Побочные эффекты:** Вызывает Close, игнорируя статус, и освобождает состояние.
-
-**Как работает:** RAII обеспечивает вызов Close при обычном выходе из области видимости и раскрутке стека.
-
-**Примечания:** Когда результат закрытия важен, вызовите Close явно и проверьте его статус до уничтожения объекта.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/stage.h"
-#include <utility>
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-void Example(tui::Stage) {}
-```
-
-## Справочник
+## Ошибки открытия
 
 ### `StageErrorKind`
 
-**Краткое описание:** Различайте причины отказа открытия поверхности.
+**Краткое описание:** Называет причину, по которой поверхность или клавиатуру не удалось открыть.
 
-**Параметры:** Перечисление: `DimensionsUnavailable`, `NoConsole`, `TooSmall`, `FrameUnavailable`, `KeyboardUnavailable`, `InvalidState`.
+**Параметры:**
+- `DimensionsUnavailable`: дисплей не сообщил размер консоли (`display_size` вернул ошибку).
+- `NoConsole`: консоль нулевого размера — выводить некуда.
+- `TooSmall`: консоль меньше запрошенного минимума, или минимум отрицательный.
+- `FrameUnavailable`: не хватило памяти, либо консоль больше предела сетки (`ITEM_GRID_SIDE_MOST`, 4096 по стороне).
+- `KeyboardUnavailable`: нет способа слушать клавиши.
+- `InvalidState`: дисплей отказал в области.
 
-**Возвращает:** Неприменимо.
+**Возвращает:** Неприменимо: перечисление.
 
 **Побочные эффекты:** Нет.
 
-**Примечания:** `TooSmall` также используется для отрицательного минимального размера; `FrameUnavailable` охватывает ошибки размеров и выделения памяти. `InvalidState` при открытии может содержать транспортную или протокольную причину.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/stage.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-tui::StageErrorKind Kind = tui::StageErrorKind::TooSmall;
-```
+**Пример:** См. `StageError::Describe`.
 
 ### `StageError`
 
-**Краткое описание:** Сохраните категорию ошибки, причину и размеры.
+**Краткое описание:** Описывает неудачное открытие поверхности: причину, код ошибки и размеры.
 
-**Параметры:** Агрегат: `Kind` (`StageErrorKind`) = `InvalidState`; `Cause` (`box::error`); `Actual`, `Required` (`core::Size`).
+**Параметры:**
+- `Kind` (`StageErrorKind`): вид ошибки, по умолчанию `InvalidState`.
+- `Cause` (`box::error`): исходный код ошибки, если он есть.
+- `Actual` (`core::Size`): фактический размер консоли, если он известен.
+- `Required` (`core::Size`): запрошенный минимум.
 
-**Возвращает:** Неприменимо.
+**Возвращает:** Неприменимо: агрегат.
 
 **Побочные эффекты:** Нет.
 
-**Примечания:** Смысл заполненных размеров зависит от места отказа; проверяйте `Kind` и `Cause`.
+**Примечания:** Возвращается фабриками `Stage::Open`, `Surface::Open`, `ConsoleSurface::Open`, `Keyboard::Open`. У `Surface` и `ConsoleSurface` при нехватке памяти на последнем шаге `Actual` и `Required` оба равны запрошенному минимуму.
 
-**Пример:**
-
-```cpp
-#include "painter/tui/stage.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-tui::StageError Failure{};
-```
+**Пример:** См. `StageError::Describe`.
 
 ### `StageError::Describe`
 
-**Краткое описание:** Сформируйте сообщение об ошибке открытия.
+**Краткое описание:** Возвращает понятное человеку описание ошибки на английском.
 
-**Параметры:** `Subject` (`std::string_view`, in): название программы; `std::string Describe(std::string_view Subject) const`.
+**Параметры:**
+- `Subject` (`std::string_view`): чем является открываемое, например имя программы; подставляется в текст.
 
-**Возвращает:** `std::string`: сообщение на английском языке.
+**Возвращает:** (`std::string`) фраза вида «This screen is 80 by 25 rows; tetris needs at least 40 by 30.».
 
-**Побочные эффекты:** Может выделять память и передавать исключения строковых операций.
+**Побочные эффекты:** Выделяет память под строку; может бросить `std::bad_alloc` и исключения `std::format`.
 
-**Как работает:** Выбирает текст по `Kind`; для `TooSmall` включает фактический и требуемый размеры, для некоторых категорий — `Cause`. Не все сообщения содержат исходную причину.
+**Как работает:** Для каждого `Kind` своя фраза; для `TooSmall` подставляются `Actual` и `Required`, для `DimensionsUnavailable` и `FrameUnavailable` — `Cause`.
 
-**Пример:**
-
-```cpp
-#include "painter/tui/stage.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-std::string Example(const tui::StageError &Failure) { return Failure.Describe("demo"); }
-```
-
-### `Modifiers`
-
-**Краткое описание:** Используйте именованные битовые маски модификаторов.
-
-**Параметры:** `Shift`, `Ctrl`, `Alt`, `Extended` (`inline constexpr std::uint8_t`) соответствуют `KB_MOD_*` из `box/keyboard.h`.
-
-**Возвращает:** Неприменимо: пространство имён констант.
-
-**Побочные эффекты:** Нет.
+**Типичное применение:** Напечатать причину и выйти, если сцена не открылась.
 
 **Пример:**
-
 ```cpp
-#include "painter/tui/stage.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-std::uint8_t Mods = tui::Modifiers::Ctrl;
-```
-
-### `KeyCodes`
-
-**Краткое описание:** Используйте именованные коды клавиш BoxOS.
-
-**Параметры:** `Escape`, `Backspace`, `Enter`, `Tab` имеют тип `char`; `Home`, `Up`, `PageUp`, `Left`, `Right`, `End`, `Down`, `PageDown`, `Insert`, `Delete` — `std::uint8_t`; значения соответствуют `KEY_*` из `box/keyboard.h`.
-
-**Возвращает:** Неприменимо.
-
-**Побочные эффекты:** Нет.
-
-**Примечания:** Расширенные клавиши различайте по `Scancode` с учётом `IsExtended()`; `KeyCodes` не является Unicode-набором.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/stage.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-bool Example(const tui::KeyEvent &Key) { return Key.Character == tui::KeyCodes::Escape; }
-```
-
-### `KeyEvent`
-
-**Краткое описание:** Получите символ Unicode, сканкод и модификаторы клавиши.
-
-**Параметры:** Агрегат: `Character` (`char32_t`) = `0`, `Scancode` и `Mods` (`std::uint8_t`) = `0`.
-
-**Возвращает:** Неприменимо.
-
-**Побочные эффекты:** Нет.
-
-**Примечания:** `Character` — сам символ Unicode, который печатает клавиша, а не номер кодовой страницы; ненулевой может быть управляющим кодом. Его запись UTF-8 даёт `Spelling()`, печатный ли он — `IsPrintable()`.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/stage.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-tui::KeyEvent Key{};
-```
-
-### `KeyEvent::HasCharacter`
-
-**Краткое описание:** Проверьте, что клавиша печатает символ.
-
-**Параметры:** Нет; `bool HasCharacter() const noexcept`.
-
-**Возвращает:** `bool`: результат `Character != 0`.
-
-**Побочные эффекты:** Нет.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/stage.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-bool Example(const tui::KeyEvent &Key) { return Key.HasCharacter(); }
-```
-
-### `KeyEvent::IsPrintable`
-
-**Краткое описание:** Проверьте, что символ показывается: не управляющий код C0 или C1, не DEL и не суррогат.
-
-**Параметры:** Нет; `bool IsPrintable() const noexcept`.
-
-**Возвращает:** `bool`: `true` для символа, который можно вставить в текст.
-
-**Побочные эффекты:** Нет.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/stage.h"
-
-namespace tui = painter::tui;
-
-bool Example(const tui::KeyEvent &Key) { return Key.IsPrintable(); }
-```
-
-### `KeyEvent::Spelling`
-
-**Краткое описание:** Получите символ клавиши записью UTF-8 — то, что хранит строка текста, в которую он набран.
-
-**Параметры:** Нет; `std::string Spelling() const`.
-
-**Возвращает:** `std::string`: от одного до четырёх байтов UTF-8; пустая строка для клавиши без символа.
-
-**Побочные эффекты:** Нет.
-
-**Пример:**
-
-```cpp
-#include <string>
+#include <print>
 
 #include "painter/tui/stage.h"
 
-namespace tui = painter::tui;
-
-void Example(const tui::KeyEvent &Key, std::string &Line) { if (Key.IsPrintable()) Line += Key.Spelling(); }
+int main()
+{
+    auto Screen = painter::tui::Stage::Open(40, 30);
+    if (!Screen) {
+        std::println("{}", Screen.error().Describe("tetris"));
+        return 1;
+    }
+    return 0;
+}
 ```
 
-### `KeyEvent::IsExtended`
-
-**Краткое описание:** Проверьте бит `Modifiers::Extended`.
-
-**Параметры:** Нет; `bool IsExtended() const noexcept`.
-
-**Возвращает:** `bool`: результат `(Mods & Modifiers::Extended) != 0`.
-
-**Побочные эффекты:** Нет.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/stage.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-bool Example(const tui::KeyEvent &Key) { return Key.IsExtended(); }
-```
-
-### `KeyEvent::IsShift`
-
-**Краткое описание:** Проверьте бит `Modifiers::Shift`.
-
-**Параметры:** Нет; `bool IsShift() const noexcept`.
-
-**Возвращает:** `bool`: результат `(Mods & Modifiers::Shift) != 0`.
-
-**Побочные эффекты:** Нет.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/stage.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-bool Example(const tui::KeyEvent &Key) { return Key.IsShift(); }
-```
-
-### `KeyEvent::IsCtrl`
-
-**Краткое описание:** Проверьте бит `Modifiers::Ctrl`.
-
-**Параметры:** Нет; `bool IsCtrl() const noexcept`.
-
-**Возвращает:** `bool`: результат `(Mods & Modifiers::Ctrl) != 0`.
-
-**Побочные эффекты:** Нет.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/stage.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-bool Example(const tui::KeyEvent &Key) { return Key.IsCtrl(); }
-```
-
-### `KeyEvent::IsAlt`
-
-**Краткое описание:** Проверьте бит `Modifiers::Alt`.
-
-**Параметры:** Нет; `bool IsAlt() const noexcept`.
-
-**Возвращает:** `bool`: результат `(Mods & Modifiers::Alt) != 0`.
-
-**Побочные эффекты:** Нет.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/stage.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-bool Example(const tui::KeyEvent &Key) { return Key.IsAlt(); }
-```
+## События
 
 ### `EventKind`
 
-**Краткое описание:** Различайте клавишу, отсутствие события и завершение ввода.
+**Краткое описание:** Называет вид события ввода.
 
-**Параметры:** `Key`, `Quiet`, `Gone`, `EndAsked`.
+**Параметры:**
+- `Key`: нажата клавиша; подробности в `Event::Key`.
+- `Quiet`: ничего не произошло — `Poll` без клавиш или `Wait` с истёкшим таймаутом.
+- `Gone`: ввода больше не будет (клавиатура закрыта, ошибка ожидания, или программу попросили завершиться, а она не слушает эту просьбу сама).
+- `EndAsked`: программу просят завершиться (Ctrl+Alt+End над ней); приходит только после `HearEnd()`.
 
-**Возвращает:** Неприменимо.
+**Возвращает:** Неприменимо: перечисление.
 
 **Побочные эффекты:** Нет.
 
-**Примечания:** `Quiet` не завершает цикл. `Gone` означает завершённый ввод или ошибку; проверяйте `Cause`. `EndAsked` — запрос завершиться, доступный после `HearEnd()`.
+**Как работает:** Просьбу завершиться передаёт её хранитель через дисплей. Если программа не вызвала `HearEnd()`, Painter отмечает конец ввода для всего процесса (`console_input_ends`), и все последующие чтения — этой клавиатуры, другой клавиатуры, `readline` — сразу сообщают конец ввода. Программа тогда завершается так же, как при закрытом вводе.
 
-**Пример:**
+**Примечания:** `Gone` с пустым `Cause` — нормальный конец ввода; с непустым — ошибка.
 
-```cpp
-#include "painter/tui/stage.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-tui::EventKind Kind = tui::EventKind::Quiet;
-```
+**Пример:** См. `Stage::Wait`.
 
 ### `Event`
 
-**Краткое описание:** Передайте результат чтения ввода без исключений.
+**Краткое описание:** Описывает одно событие ввода.
 
-**Параметры:** Агрегат: `Kind` (`EventKind`) = `Gone`; `Key` (`KeyEvent`); `Cause` (`box::error`).
+**Параметры:**
+- `Kind` (`EventKind`): вид, по умолчанию `Gone`.
+- `Key` (`KeyEvent`): клавиша — только для `Kind == Key`.
+- `Cause` (`box::error`): причина — для `Gone` при ошибке, либо `errc::invalid_state` при вызове на закрытом объекте.
 
-**Возвращает:** Неприменимо.
+**Возвращает:** Неприменимо: агрегат.
 
 **Побочные эффекты:** Нет.
 
-**Примечания:** `Key` имеет смысл при `Kind == Key`; успешное событие `Gone` может иметь пустую причину.
+**Пример:** См. `Stage::Wait`.
 
-**Пример:**
-
-```cpp
-#include "painter/tui/stage.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-tui::Event Result{};
-```
+## Класс Stage
 
 ### `Stage`
 
-**Краткое описание:** Управляйте полноэкранным слоем, кадром и подпиской клавиатуры.
+**Краткое описание:** Владеет полноэкранной областью дисплея, её кадром и клавиатурной подпиской.
 
-**Параметры:** Открывается через `Open`; копирование запрещено, перемещение разрешено (`noexcept`).
+**Параметры:** Создаётся только через `Stage::Open`.
 
-**Возвращает:** Неприменимо: владеющий класс.
+**Возвращает:** Неприменимо: класс.
 
-**Побочные эффекты:** Открытие создаёт слой и подписку, уничтожение вызывает `Close()`.
+**Побочные эффекты:** Пока объект открыт, область занимает весь экран, когда программа впереди; клавиши текущего потока приходят этой сцене.
 
-**Как работает:** Состояние содержит `Frame`, внутренний `DisplayLayer` роли `SCENE` и `Keyboard`. Перемещающее присваивание сначала закрывает прежнее состояние; ошибки такого закрытия и деструктора не возвращаются.
+**Как работает:** Внутри — `Frame`, `CellsArea` (область `Placement::Whole` с одной сеткой ячеек, см. [CellsArea](internal/cells_area.md)) и `Keyboard`. Объект можно перемещать, копировать нельзя. Перемещающее присваивание сначала закрывает прежнюю сцену получателя. Деструктор вызывает `Close()` и игнорирует результат.
 
-**Примечания:** Для интерактивного временного слоя используйте отдельные `Surface` и `Keyboard`.
+**Примечания:** Размер сцены фиксируется при открытии и потом не меняется (размер ячейки дисплея задаётся настройками, которые применяются при следующем запуске системы). Сценой пользуется поток, который её открыл.
 
-**Пример:**
+**Типичное применение:** Одна сцена на программу, открытая в начале `main`.
 
-```cpp
-#include "painter/tui/stage.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-auto Example() { return tui::Stage::Open(20, 4); }
-```
+**Пример:** См. [README](README.md), «Полноэкранная программа».
 
 ### `Stage::Open`
 
-**Краткое описание:** Откройте сцену размером с доступную консоль.
+**Краткое описание:** Открывает полноэкранную сцену, если консоль не меньше заданного размера.
 
-**Параметры:** `LeastCols`, `LeastRows` (`std::int32_t`, in): минимальные размеры; `static std::expected<Stage, StageError> Open(std::int32_t LeastCols, std::int32_t LeastRows) noexcept`.
+**Параметры:**
+- `LeastCols` (`std::int32_t`): минимальная ширина консоли в ячейках; 0 — без требования.
+- `LeastRows` (`std::int32_t`): минимальная высота.
 
-**Возвращает:** `std::expected<Stage, StageError>`.
+**Возвращает:** (`std::expected<Stage, StageError>`) открытая сцена размером с консоль или ошибка (см. `StageErrorKind`).
 
-**Побочные эффекты:** Обращается к DisplayServer, выделяет память, открывает клавиатурную подписку.
+**Побочные эффекты:** Запрашивает у дисплея размер консоли, открывает область на весь экран, выделяет кадр, подписывается на клавиши (`console_listen`).
 
-**Как работает:** Открывает слой, создаёт кадр полного фактического размера и назначает ему `Glass()` и `Mosaics()` сервера. Затем открывает `Keyboard` и состояние Stage; при отказе ранее созданные ресурсы освобождаются деструкторами.
+**Как работает:** Сначала открывается область ячеек: проверяются размер и минимум, создаются элемент-сетка и его размер. Затем создаётся кадр того же размера; ему передаются вид стекла и мозаики. Последней открывается клавиатура. Если какой-то шаг не удался, уже открытое закрывается своими деструкторами.
 
-**Примечания:** Аргументы задают минимум, а не размер области. Открытие само по себе не вызывает `Present`.
+**Примечания:** Кадр после открытия содержит ячейки по умолчанию (непрозрачные пробелы), но на экран ничего не отправлено до первого `Present()`.
 
 **Пример:**
-
 ```cpp
 #include "painter/tui/stage.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-auto Example() { return tui::Stage::Open(40, 10); }
+std::expected<painter::tui::Stage, painter::tui::StageError> OpenGame() { return painter::tui::Stage::Open(44, 22); }
 ```
 
 ### `Stage::Size`
 
-**Краткое описание:** Получите фактические размеры сцены.
+**Краткое описание:** Возвращает размер сцены в ячейках.
 
-**Параметры:** Нет; `core::Size Size() const noexcept`.
+**Параметры:** Нет.
 
-**Возвращает:** `core::Size`: размеры слоя, либо `{}` без состояния.
+**Возвращает:** (`core::Size`) размер консоли на момент открытия; `{0, 0}` у перемещённого объекта.
 
 **Побочные эффекты:** Нет.
 
-**Примечания:** После `Close()` сохранённое состояние остаётся, поэтому размеры не обязаны стать нулевыми.
-
 **Пример:**
-
 ```cpp
 #include "painter/tui/stage.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-core::Size Example(const tui::Stage &Screen) { return Screen.Size(); }
+bool Wide(const painter::tui::Stage &Screen) { return Screen.Size().Width >= 100; }
 ```
 
 ### `Stage::IsOpen`
 
-**Краткое описание:** Проверьте локальное состояние открытия сцены.
+**Краткое описание:** Сообщает, открыта ли сцена.
 
-**Параметры:** Нет; `bool IsOpen() const noexcept`.
+**Параметры:** Нет.
 
-**Возвращает:** `bool`: наличие состояния и флаг открытия.
+**Возвращает:** (`bool`) `false` после `Close()` и у перемещённого объекта.
 
 **Побочные эффекты:** Нет.
 
-**Примечания:** Не проверяет доступность DisplayServer.
-
 **Пример:**
-
 ```cpp
 #include "painter/tui/stage.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-bool Example(const tui::Stage &Screen) { return Screen.IsOpen(); }
+void Finish(painter::tui::Stage &Screen) { if (Screen.IsOpen()) (void)Screen.Close(); }
 ```
 
 ### `Stage::Glass`
 
-**Краткое описание:** Получите тип устройства вывода сцены.
+**Краткое описание:** Возвращает вид стекла: текстовая страница или пиксели.
 
-**Параметры:** Нет; `GlassKind Glass() const noexcept`.
+**Параметры:** Нет.
 
-**Возвращает:** `GlassKind`: режим сервера или `Pixels` без состояния.
+**Возвращает:** (`GlassKind`) так, как его сообщил дисплей; у перемещённого объекта — `Pixels`.
 
 **Побочные эффекты:** Нет.
 
-**Пример:**
+**Примечания:** То же значение уже записано в кадр сцены (`FrameBuffer().Glass()`).
 
+**Пример:**
 ```cpp
 #include "painter/tui/stage.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-tui::GlassKind Example(const tui::Stage &Screen) { return Screen.Glass(); }
+painter::tui::GlassKind Kind(const painter::tui::Stage &Screen) { return Screen.Glass(); }
 ```
 
 ### `Stage::Mosaics`
 
-**Краткое описание:** Получите сетки тоньше половин, которые рисует стекло.
+**Краткое описание:** Возвращает сетки мельче половинок, которые стекло рисует точно.
 
-**Параметры:** Нет; `std::uint8_t Mosaics() const noexcept`.
+**Параметры:** Нет.
 
-**Возвращает:** `std::uint8_t`: флаги `DisplayMosaic`, как их сказал сервер, либо 0 без состояния.
+**Возвращает:** (`std::uint8_t`) флаги `ITEM_MOSAIC_*`; 0 на текстовой странице и у перемещённого объекта.
 
 **Побочные эффекты:** Нет.
 
 **Пример:**
-
 ```cpp
 #include "painter/tui/stage.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-std::uint8_t Example(const tui::Stage &Screen) { return Screen.Mosaics(); }
+bool Octants(const painter::tui::Stage &Screen) { return (Screen.Mosaics() & ITEM_MOSAIC_OCTANTS) != 0; }
 ```
 
 ### `Stage::FrameBuffer`
 
-**Краткое описание:** Получите ссылку на принадлежащий сцене кадр.
+**Краткое описание:** Возвращает кадр сцены для рисования.
 
-**Параметры:** Нет; перегрузки `Frame &FrameBuffer() noexcept` и `const Frame &FrameBuffer() const noexcept`.
+**Параметры:** Нет.
 
-**Возвращает:** `Frame &` или `const Frame &`.
+**Возвращает:** (`Frame &` или `const Frame &`) кадр размером со сцену.
 
-**Побочные эффекты:** Получение ссылки не меняет кадр.
+**Побочные эффекты:** Нет.
 
-**Примечания:** Требуется наличие состояния: не вызывайте у перемещённого объекта. Ссылка зависит от времени жизни состояния Stage; вызов не отправляет рисунок.
-
-**Типичное применение:** Обычно очистка, рисование, затем `Present`.
+**Примечания:** У перемещённого объекта вызов — неопределённое поведение (внутреннего состояния нет). Ссылка действительна, пока жив объект `Stage` и он не перемещён. Кадр сохраняет содержимое между `Present()`: можно перерисовывать только изменившееся.
 
 **Пример:**
-
 ```cpp
 #include "painter/tui/stage.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-void Example(tui::Stage &Screen) { Screen.FrameBuffer().Clear(); }
+void Draw(painter::tui::Stage &Screen)
+{
+    painter::tui::Frame &Out = Screen.FrameBuffer();
+    Out.Clear();
+    (void)Out.Write({0, 0}, "Счёт: 0");
+}
 ```
 
 ### `Stage::Present`
 
-**Краткое описание:** Опубликуйте текущий кадр сцены.
+**Краткое описание:** Показывает текущее содержимое кадра сцены.
 
-**Параметры:** Нет; `box::status Present() noexcept`.
+**Параметры:** Нет.
 
-**Возвращает:** `box::status`: успех или ошибка, включая `invalid_state` для закрытого Stage.
+**Возвращает:** (`box::status`) успех, `errc::invalid_state` — сцена закрыта, `errc::no_memory` — не хватило памяти.
 
-**Побочные эффекты:** Копирует кадр в общую память и отправляет уведомление DisplayServer.
+**Побочные эффекты:** Передаёт дисплею изменившиеся с прошлого показа ячейки и каретку одним шагом; может ждать места в кольце области.
 
-**Как работает:** Проверяет `IsOpen()` и передаёт кадр внутреннему `DisplayLayer::Present`. Протокол допускает замену кадра, ещё не взятого сервером, более новым.
+**Как работает:** Кадр построчно переводится в ячейки языка элементов; для каждой строки запоминается отрезок от первой до последней ячейки, отличающейся от уже отправленного, и только эти отрезки уходят дисплею. Перед отправкой забираются ответы дисплея, чтобы у него было место для следующих, затем шаг уходит целиком (`PresentAll`): половина кадра никогда не показывается.
 
-**Примечания:** Успех не подтверждает физический показ каждого кадра. При ошибке уведомления слот уже может быть опубликован.
+**Примечания:** Кадр без изменений ничего не отправляет. Успех означает передачу шага дисплею, а не подтверждение показа.
+
+**Типичное применение:** Один вызов в конце каждой итерации цикла отрисовки.
 
 **Пример:**
-
 ```cpp
 #include "painter/tui/stage.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-box::status Example(tui::Stage &Screen) { return Screen.Present(); }
+bool DrawScore(painter::tui::Stage &Screen, int Score)
+{
+    painter::tui::Frame &Out = Screen.FrameBuffer();
+    Out.Clear();
+    (void)Out.Write({0, 0}, Score > 0 ? "Есть очки" : "Пока пусто");
+    return Screen.Present().has_value();
+}
 ```
 
 ### `Stage::Poll`
 
-**Краткое описание:** Прочитайте доступное событие без ожидания клавиши.
+**Краткое описание:** Возвращает следующее событие ввода, не ожидая.
 
-**Параметры:** Нет; `Event Poll() noexcept`.
+**Параметры:** Нет.
 
-**Возвращает:** `Event`; для закрытой сцены — `Gone` с `invalid_state`.
+**Возвращает:** (`Event`) `Key`, `EndAsked`, `Gone` или `Quiet`, если клавиш нет; на закрытой сцене — `Gone` с `errc::invalid_state`.
 
-**Побочные эффекты:** Может извлекать события подписки.
+**Побочные эффекты:** Забирает из очереди одно событие (и пропускает сообщения, которые событиями не являются).
 
-**Как работает:** После проверки открытия делегирует `Keyboard::Poll`. Правила `Quiet`, `Gone` и `EndAsked` описаны в [keyboard](keyboard.md).
+**Типичное применение:** Анимация: на каждом кадре разобрать все ожидающие клавиши циклом до `Quiet`, затем рисовать.
 
 **Пример:**
-
 ```cpp
 #include "painter/tui/stage.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-tui::Event Example(tui::Stage &Screen) { return Screen.Poll(); }
+bool Drain(painter::tui::Stage &Screen, int &Direction)
+{
+    for (;;) {
+        const painter::tui::Event Heard = Screen.Poll();
+        if (Heard.Kind == painter::tui::EventKind::Quiet) return true;
+        if (Heard.Kind != painter::tui::EventKind::Key) return false;
+        if (Heard.Key.Scancode == painter::tui::KeyCodes::Left) Direction = -1;
+        if (Heard.Key.Scancode == painter::tui::KeyCodes::Right) Direction = 1;
+    }
+}
 ```
 
 ### `Stage::Wait`
 
-**Краткое описание:** Ожидайте событие с заданным временем ожидания.
+**Краткое описание:** Ждёт следующее событие ввода.
 
-**Параметры:** `TimeoutMs` (`std::uint32_t`, in) = `0`: без ограничения; `Event Wait(std::uint32_t TimeoutMs = 0) noexcept`.
+**Параметры:**
+- `TimeoutMs` (`std::uint32_t`): предел ожидания в миллисекундах; 0 — ждать без предела.
 
-**Возвращает:** `Event`; таймаут даёт `Quiet`.
+**Возвращает:** (`Event`) `Key`, `EndAsked`, `Gone`, или `Quiet` по истечении таймаута.
 
-**Побочные эффекты:** Может приостанавливать выполнение и извлекать события.
+**Побочные эффекты:** Блокирует поток до события или таймаута.
 
-**Как работает:** Проверяет состояние и делегирует `Keyboard::Wait(TimeoutMs)`. У закрытого Stage возвращает `Gone` с `invalid_state`.
+**Как работает:** Ожидание идёт на Touch-теге клавиатуры (`touch_await`). Сообщение, которое не является ни клавишей, ни просьбой завершиться, при ограниченном ожидании возвращается как `Quiet`, а при неограниченном пропускается, и ожидание продолжается.
+
+**Примечания:** `Quiet` при `TimeoutMs != 0` может прийти раньше таймаута (из-за постороннего сообщения) — не считайте его точным отсчётом времени. Для анимации по часам используйте собственное время.
+
+**Типичное применение:** Пошаговые программы (меню, головоломки) ждут без таймаута; анимации — с таймаутом в длину кадра.
 
 **Пример:**
-
 ```cpp
 #include "painter/tui/stage.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-tui::Event Example(tui::Stage &Screen) { return Screen.Wait(100); }
+int Loop(painter::tui::Stage &Screen)
+{
+    namespace tui = painter::tui;
+    for (;;) {
+        const tui::Event Heard = Screen.Wait();
+        if (Heard.Kind == tui::EventKind::Gone) return Heard.Cause ? 1 : 0;
+        if (Heard.Kind == tui::EventKind::EndAsked) return 0;
+        if (Heard.Kind == tui::EventKind::Key && Heard.Key.Character == U'q') return 0;
+    }
+}
 ```
 
 ### `Stage::HearEnd`
 
-**Краткое описание:** Включите самостоятельную обработку запроса завершения.
+**Краткое описание:** Объявляет, что программа сама отвечает на просьбу завершиться.
 
-**Параметры:** Нет; `void HearEnd() noexcept`.
+**Параметры:** Нет.
 
 **Возвращает:** `void`.
 
-**Побочные эффекты:** Меняет режим чтения клавиатуры.
+**Побочные эффекты:** После вызова просьба завершиться приходит событием `EndAsked`, а не `Gone`, и ввод процесса не закрывается.
 
-**Как работает:** При наличии состояния вызывает `Keyboard::HearEnd`. После этого запрос завершения приходит как `EndAsked`, и программа сама решает, когда завершить работу.
+**Как работает:** Без `HearEnd` клавиатура при просьбе завершиться отмечает конец ввода процесса и сообщает `Gone`. С `HearEnd` она только передаёт `EndAsked`, и программа может, например, спросить «Сохранить?».
 
-**Примечания:** Обратного переключателя в API нет.
+**Примечания:** Вызывайте сразу после открытия. Ответив на `EndAsked`, программа должна действительно завершиться: её об этом попросил человек.
 
 **Пример:**
-
 ```cpp
 #include "painter/tui/stage.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-void Example(tui::Stage &Screen) { Screen.HearEnd(); }
+void Prepare(painter::tui::Stage &Screen) { Screen.HearEnd(); }
 ```
 
 ### `Stage::Close`
 
-**Краткое описание:** Закройте подписку и сцену.
+**Краткое описание:** Закрывает сцену: отписывается от клавиш и убирает область с экрана.
 
-**Параметры:** Нет; `box::status Close() noexcept`.
+**Параметры:** Нет.
 
-**Возвращает:** `box::status`: результат закрытия слоя; повторное закрытие успешно.
+**Возвращает:** (`box::status`) всегда успех в текущей реализации; повторный вызов ничего не делает.
 
-**Побочные эффекты:** Снимает подписку и отправляет закрытие слоя; помечает Stage закрытым.
+**Побочные эффекты:** Возвращает клавиатуру дисплею (`console_unlisten`), закрывает область — её ячейки исчезают с экрана.
 
-**Как работает:** Сначала сбрасывает локальный флаг, затем закрывает клавиатуру, игнорируя её статус, и возвращает статус слоя. Память состояния и кадра остаётся до уничтожения или замены объекта.
-
-**Примечания:** Даже при ошибке закрытия повторный `Close()` не повторяет отправку.
+**Примечания:** После `Close` `Present` возвращает `invalid_state`, `Poll`/`Wait` — `Gone` с `invalid_state`. Кадр остаётся доступен через `FrameBuffer()` до уничтожения объекта.
 
 **Пример:**
-
 ```cpp
 #include "painter/tui/stage.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-box::status Example(tui::Stage &Screen) { return Screen.Close(); }
+int Leave(painter::tui::Stage &Screen) { return Screen.Close() ? 0 : 1; }
 ```

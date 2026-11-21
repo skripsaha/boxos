@@ -1,229 +1,121 @@
-# painter::tui::window — оформление текстового окна
+# painter::tui::window
 
 ## Назначение
 
-[Заголовок](../../../../src/userspace/painter/include/painter/tui/window.h),
-[реализация](../../../../src/userspace/painter/src/tui/window.cpp).
+Заголовок: [`painter/tui/window.h`](../../../../src/userspace/painter/include/painter/tui/window.h).
+Реализация: [`src/tui/window.cpp`](../../../../src/userspace/painter/src/tui/window.cpp).
 
-Модуль рисует общее оформление окна на готовом кадре: фон, рамку,
-подписи и тень. Он не владеет поверхностью и не содержит дерева элементов,
-фокуса или событий. Перерисовка, размещение содержимого и ввод остаются
-в программе.
+Единый вид текстового окна для всех программ: тёмная «бумага», рамка из
+тонких линий, заголовок в верхней кромке и примечание справа от него,
+подсказка в нижней кромке и тень снизу-справа, которая отделяет окно от
+того, что под ним. Так выглядят окна `edit`, `read` и хаба. Используйте
+эти функции, чтобы окна новой программы не отличались от системных.
 
-Подписи обрабатываются как UTF-8 через [text](text.md). Многоточие
-автоматически не добавляется. Тень меняет уже нарисованный кадр; повторное
-рисование без восстановления фона повторно затемняет подложку. Для
-изменяемого кадра используйте внешнюю синхронизацию.
+Все функции рисуют в [Frame](frame.md) и ничего не показывают сами.
 
-## Справочник
+## Цвета
 
-### `WindowPaper`
+### `WindowPaper`, `WindowRule`, `WindowInk`, `TitleInk`, `HintInk`, `ChosenPaper`
 
-**Краткое описание:** Используйте установленный цвет оформления: фон окна.
+**Краткое описание:** Задают цвета окна.
 
-**Параметры:** Нет; `inline constexpr core::Color WindowPaper = core::Color::Rgb(0x24, 0x24, 0x24)`.
+**Параметры:**
+- `WindowPaper` = #242424 — фон окна.
+- `WindowRule` = #9A9A9A — линии рамки.
+- `WindowInk` = #D4D4D4 — обычный текст.
+- `TitleInk` = #F4F4F4 — заголовок.
+- `HintInk` = #8C8C8C — примечание и подсказка.
+- `ChosenPaper` = #2E4A6A — фон выбранной строки списка.
 
-**Возвращает:** Неприменимо: константа.
-
-**Побочные эффекты:** Нет.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/window.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-core::Color Ink = tui::WindowPaper;
-```
-
-### `WindowRule`
-
-**Краткое описание:** Используйте установленный цвет оформления: линии рамки.
-
-**Параметры:** Нет; `inline constexpr core::Color WindowRule = core::Color::Rgb(0x9A, 0x9A, 0x9A)`.
-
-**Возвращает:** Неприменимо: константа.
+**Возвращает:** Неприменимо: константы `core::Color`.
 
 **Побочные эффекты:** Нет.
 
 **Пример:**
-
 ```cpp
+#include "painter/tui/text.h"
 #include "painter/tui/window.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-core::Color Ink = tui::WindowRule;
+void Item(painter::tui::Frame &Out, painter::core::Rect Inside, std::int32_t Row, std::string_view Name, bool Chosen)
+{
+    namespace tui = painter::tui;
+    const painter::core::Color Paper = Chosen ? tui::ChosenPaper : tui::WindowPaper;
+    (void)Out.Fill({Inside.X, Inside.Y + Row, Inside.Width, 1}, U' ', {tui::WindowInk, Paper});
+    (void)tui::PutText(Out, {Inside.X, Inside.Y + Row}, Name, Inside.Width, tui::WindowInk, Paper);
+}
 ```
 
-### `WindowInk`
-
-**Краткое описание:** Используйте установленный цвет оформления: обычный текст.
-
-**Параметры:** Нет; `inline constexpr core::Color WindowInk = core::Color::Rgb(0xD4, 0xD4, 0xD4)`.
-
-**Возвращает:** Неприменимо: константа.
-
-**Побочные эффекты:** Нет.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/window.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-core::Color Ink = tui::WindowInk;
-```
-
-### `TitleInk`
-
-**Краткое описание:** Используйте установленный цвет оформления: заголовок.
-
-**Параметры:** Нет; `inline constexpr core::Color TitleInk = core::Color::Rgb(0xF4, 0xF4, 0xF4)`.
-
-**Возвращает:** Неприменимо: константа.
-
-**Побочные эффекты:** Нет.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/window.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-core::Color Ink = tui::TitleInk;
-```
-
-### `HintInk`
-
-**Краткое описание:** Используйте установленный цвет оформления: подсказка и примечание.
-
-**Параметры:** Нет; `inline constexpr core::Color HintInk = core::Color::Rgb(0x8C, 0x8C, 0x8C)`.
-
-**Возвращает:** Неприменимо: константа.
-
-**Побочные эффекты:** Нет.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/window.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-core::Color Ink = tui::HintInk;
-```
-
-### `ChosenPaper`
-
-**Краткое описание:** Используйте установленный цвет оформления: фон выбранной строки.
-
-**Параметры:** Нет; `inline constexpr core::Color ChosenPaper = core::Color::Rgb(0x2E, 0x4A, 0x6A)`.
-
-**Возвращает:** Неприменимо: константа.
-
-**Побочные эффекты:** Нет.
-
-**Примечания:** DrawWindow не выбирает строки: константа доступна программе для собственного списка.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/window.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-core::Color Ink = tui::ChosenPaper;
-```
+## Функции
 
 ### `Centred`
 
-**Краткое описание:** Разместите прямоугольник по центру указанного размера экрана.
+**Краткое описание:** Возвращает прямоугольник заданного размера по центру экрана.
 
-**Параметры:** `Screen` (`core::Size`, in); `Width`, `Height` (`std::int32_t`, in): желаемый размер; `core::Rect Centred(core::Size Screen, std::int32_t Width, std::int32_t Height) noexcept`.
+**Параметры:**
+- `Screen` (`core::Size`): размер экрана или кадра.
+- `Width` (`std::int32_t`): желаемая ширина.
+- `Height` (`std::int32_t`): желаемая высота.
 
-**Возвращает:** `core::Rect`: рассчитанная область.
+**Возвращает:** (`core::Rect`) прямоугольник по центру; ширина и высота ограничены диапазоном от 1 до размера экрана.
 
 **Побочные эффекты:** Нет.
 
-**Как работает:** Ограничивает каждую сторону диапазоном от 1 до `max(1, Screen.side)`. Начало вычисляет как половину разности размера экрана и ограниченной стороны.
-
-**Примечания:** Для неположительного Screen результат всё равно имеет минимум 1 × 1 и не гарантирует вхождения в экран.
-
 **Пример:**
-
 ```cpp
 #include "painter/tui/window.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-core::Rect Example() { return tui::Centred({80, 25}, 40, 10); }
+painter::core::Rect Dialog(const painter::tui::Frame &Out) { return painter::tui::Centred(Out.Size(), 50, 12); }
 ```
 
 ### `DrawWindow`
 
-**Краткое описание:** Нарисуйте окно с рамкой, подписями и тенью.
+**Краткое описание:** Рисует окно с рамкой, заголовком, примечанием, подсказкой и тенью и возвращает его внутреннюю область.
 
-**Параметры:** `Out` (`Frame &`, in-out); `Area` (`core::Rect`, in); `Title`, `Note`, `Hint` (`std::string_view`, in); `core::Rect DrawWindow(Frame &Out, core::Rect Area, std::string_view Title, std::string_view Note, std::string_view Hint)`.
+**Параметры:**
+- `Out` (`Frame &`, out): кадр.
+- `Area` (`core::Rect`): внешний прямоугольник окна, включая рамку.
+- `Title` (`std::string_view`): заголовок слева в верхней кромке; пустая строка — без заголовка.
+- `Note` (`std::string_view`): примечание справа в верхней кромке; пустая — без него.
+- `Hint` (`std::string_view`): подсказка слева в нижней кромке; пустая — без неё.
 
-**Возвращает:** `core::Rect`: `{Area.X + 2, Area.Y + 1, Area.Width - 4, Area.Height - 2}`.
+**Возвращает:** (`core::Rect`) внутренняя область: `{Area.X + 2, Area.Y + 1, Area.Width − 4, Area.Height − 2}` — по одной ячейке отступа от вертикальных линий.
 
-**Побочные эффекты:** Затемняет ячейки справа и снизу, заполняет окно, заменяет рамку и подписи; форматирование может выделять память и передавать исключения.
+**Побочные эффекты:** Затемняет ячейки тени, заливает `Area` фоном, рисует рамку и подписи.
 
-**Как работает:** Тень смешивает оба цвета прежних ячеек с чёрным при весе 72 из 255. Затем рисует фон и рамку глифами, выводит Title и Hint через PutText с пробелами вокруг; Note помещает справа только если после Title хватает места с зазором. Возвращает внутреннюю область с боковым отступом в две ячейки.
+**Как работает:**
+- Тень — строка под окном (сдвинутая на ячейку вправо) и столбец справа от него: цвета символа и фона существующих ячеек смешиваются с чёрным на 103/255 как свет, поэтому текст под тенью остаётся читаемым.
+- Подписи обрамляются пробелами (`" Заголовок "`) и не выходят за `Area.Width − 4` ячеек; примечание рисуется, только если помещается справа от заголовка с промежутком в ячейку.
+- Подписи пишутся через `PutText`: длинные обрезаются без многоточия.
 
-**Примечания:** Не создаёт слой, окно GUI, обработчик ввода или сохранённую подложку. Отдельные записи отсекаются Frame, но возвращённый Inside не отсекается. Для непустого Inside задавайте Width >= 5 и Height >= 3; координаты с запасом под тень должны быть представимы в int32_t.
+**Примечания:** Окно должно быть не меньше 4×3 ячеек, иначе внутренняя область пуста или отрицательна. Тень рисуется за пределами `Area` — оставьте для неё строку и столбец, если окно у края кадра (вне кадра тень просто обрезается).
 
-**Типичное применение:** Используйте Centred → DrawWindow → собственное содержимое Inside; публикация выполняется поверхностью.
+**Типичное применение:** Диалоги, списки выбора, окна помощи поверх сцены.
 
 **Пример:**
-
 ```cpp
+#include "painter/tui/text.h"
 #include "painter/tui/window.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-core::Rect Example(tui::Frame &Out) {
-    return tui::DrawWindow(Out, tui::Centred(Out.Size(), 40, 10),
-                           "Painter", "demo", "esc closes");
+void Help(painter::tui::Frame &Out)
+{
+    namespace tui = painter::tui;
+    const painter::core::Rect Inside = tui::DrawWindow(Out, tui::Centred(Out.Size(), 40, 8), "Помощь", "1/2", "Esc — закрыть");
+    (void)tui::PutText(Out, {Inside.X, Inside.Y}, "Стрелки — двигать", Inside.Width, tui::WindowInk, tui::WindowPaper);
+    tui::DrawRule(Out, Inside, Inside.Y + 2);
 }
 ```
 
 ### `DrawRule`
 
-**Краткое описание:** Проведите разделитель с соединением с рамкой окна.
+**Краткое описание:** Рисует горизонтальный разделитель внутри окна, соединённый с его рамкой.
 
-**Параметры:** `Out` (`Frame &`, in-out); `Inside` (`core::Rect`, in): результат DrawWindow; `Row` (`std::int32_t`, in): абсолютная строка кадра; `void DrawRule(Frame &Out, core::Rect Inside, std::int32_t Row)`.
+**Параметры:**
+- `Out` (`Frame &`, out): кадр.
+- `Inside` (`core::Rect`): внутренняя область, которую вернул `DrawWindow`.
+- `Row` (`std::int32_t`): строка кадра (абсолютная, не относительно `Inside`).
 
 **Возвращает:** `void`.
 
-**Побочные эффекты:** Заменяет ячейки разделителя и два соединения с рамкой.
+**Побочные эффекты:** Пишет линию `─` от левой до правой стенки и примыкания `├` и `┤` на месте вертикальных линий рамки.
 
-**Как работает:** Восстанавливает левую рамку как `Inside.X - 2`, правую как `Inside.X + Inside.Width + 1`. Между ними ставит RuleAcross, на концах TeeLeft и TeeRight.
-
-**Примечания:** Не проверяет Row на попадание во внутреннюю область окна: отсечение выполняется только границами кадра.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/window.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-void Example(tui::Frame &Out) {
-    const auto Inside = tui::DrawWindow(Out, {1, 1, 20, 8}, "Title", "", "");
-    tui::DrawRule(Out, Inside, Inside.Y + 2);
-}
-```
+**Пример:** См. `DrawWindow`.

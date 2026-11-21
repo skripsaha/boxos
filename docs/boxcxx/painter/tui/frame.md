@@ -1,750 +1,569 @@
-# painter::tui::frame — кадр и ячейки
+# painter::tui::frame
 
 ## Назначение
 
-[Заголовок](../../../../src/userspace/painter/include/painter/tui/frame.h),
-[реализация](../../../../src/userspace/painter/src/tui/frame.cpp).
+Заголовок: [`painter/tui/frame.h`](../../../../src/userspace/painter/include/painter/tui/frame.h).
+Реализация: [`src/tui/frame.cpp`](../../../../src/userspace/painter/src/tui/frame.cpp).
 
-`Frame` владеет прямоугольным массивом `Cell` в памяти программы. Рисование
-меняет этот массив; показ выполняет [Stage](stage.md), [Surface](surface.md)
-или [ConsoleSurface](console_surface.md). Размер фиксируется при создании.
+`Frame` — прямоугольный массив ячеек в памяти программы. Все операции
+рисования меняют только этот массив; на экран кадр попадает через
+[Stage](stage.md), [Surface](surface.md) или
+[ConsoleSurface](console_surface.md). Размер кадра задаётся при создании и
+не меняется.
 
-Одна ячейка содержит один символ Unicode, два цвета и отметку. Клеточные
-координаты отсчитываются от левого верхнего угла. Полублочные операции
-используют тот же X и удвоенный Y: на ячейку приходится одна точка по
-горизонтали и две по вертикали. Это псевдографика шрифта, а не доступ к
-физическим пикселям.
+Есть две системы координат:
 
-Все примеры — самостоятельные единицы трансляции C++23. Функции с аргументом
-`Frame &` предполагают успешно созданный, не перемещённый кадр. Доступ к одному
-изменяемому кадру из нескольких потоков требует внешней синхронизации.
+- ячейки — `{X, Y}`, столбец и строка;
+- полублочные точки — тот же X и удвоенный Y: в ячейке одна точка по горизонтали и две по вертикали (верхняя половина — чётный Y, нижняя — нечётный).
 
-## Владение и время жизни
+Полублочные точки — это символ ▀ с двумя цветами, а не физические пиксели.
 
-### `Frame::Frame(Frame &&)`
+Все операции записи обрезаются границами кадра и сообщают, записано ли
+что-нибудь. Доступ к одному кадру из нескольких потоков требует внешней
+синхронизации.
 
-**Краткое описание:** Передайте владение при создании нового объекта.
-
-**Параметры:** `Other` (`Frame &&`, in-out); перемещающий конструктор объявлен `noexcept`.
-
-**Возвращает:** Неприменимо: конструктор.
-
-**Побочные эффекты:** Передаёт ресурсы новому объекту.
-
-**Как работает:** Стандартное перемещение передаёт вектор ячеек, сохраняя значения остальных полей согласно их операциям перемещения.
-
-**Примечания:** Исходный Frame больше не используйте для чтения и рисования: размеры могут остаться прежними при перемещённом массиве.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/frame.h"
-#include <utility>
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-tui::Frame Example(tui::Frame &&Other) { return tui::Frame(std::move(Other)); }
-```
-
-### `Frame::operator=`
-
-**Краткое описание:** Замените владение ресурсами перемещением.
-
-**Параметры:** `Other` (`Frame &&`, in-out); `Frame &operator=(Frame &&Other) noexcept`.
-
-**Возвращает:** `Frame &`: текущий объект.
-
-**Побочные эффекты:** Освобождает или закрывает прежние ресурсы, принимает новые.
-
-**Как работает:** Выполняет стандартное перемещающее присваивание полей, включая вектор ячеек.
-
-**Примечания:** Не рассчитывайте на содержимое перемещённого источника.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/frame.h"
-#include <utility>
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-void Example(tui::Frame &Target, tui::Frame &&Other) { Target = std::move(Other); }
-```
-
-### `Frame::~Frame`
-
-**Краткое описание:** Освободите принадлежащие объекту ресурсы при завершении времени жизни.
-
-**Параметры:** Нет.
-
-**Возвращает:** Неприменимо: деструктор.
-
-**Побочные эффекты:** Уничтожает вектор ячеек.
-
-**Как работает:** Стандартный деструктор освобождает память через деструктор вектора.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/frame.h"
-#include <utility>
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-void Example(tui::Frame) {}
-```
-
-## Справочник
+## Типы
 
 ### `TextStyle`
 
-**Краткое описание:** Задайте цвета текста и фона для клеточных операций.
+**Краткое описание:** Задаёт цвет символа и цвет фона для текстовых операций кадра.
 
-**Параметры:** Агрегат: `Foreground` (`core::Color`) = `Colors::LightGray`; `Background` (`core::Color`) = `Colors::Black`.
+**Параметры:**
+- `Foreground` (`core::Color`): цвет символа, по умолчанию `Colors::LightGray`.
+- `Background` (`core::Color`): цвет фона, по умолчанию `Colors::Black`.
 
-**Возвращает:** Неприменимо: структура значений.
+**Возвращает:** Неприменимо: агрегат.
 
 **Побочные эффекты:** Нет.
 
-**Пример:**
+**Типичное применение:** Передаётся последним аргументом в `Put`, `Fill`, `Write`, `Centre`; `{}` даёт светло-серый на чёрном.
 
+**Пример:**
 ```cpp
 #include "painter/tui/frame.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-tui::TextStyle Style{core::Colors::White, core::Colors::Blue};
+const painter::tui::TextStyle Warning{painter::core::Colors::Yellow, painter::core::Colors::DarkRed};
 ```
 
 ### `GlassKind`
 
-**Краткое описание:** Выберите режим интерпретации рисунка ячейки.
+**Краткое описание:** Называет вид устройства вывода, на котором будет показан кадр.
 
-**Параметры:** Значения `Text` = `DISPLAY_GLASS_TEXT`, `Pixels` = `DISPLAY_GLASS_PIXELS`; базовый тип `std::uint8_t`.
+**Параметры:**
+- `Text` (= `ITEM_GLASS_TEXT`): текстовая страница VGA, 16 цветов.
+- `Pixels` (= `ITEM_GLASS_PIXELS`): framebuffer.
 
-**Возвращает:** Неприменимо: перечисление.
+**Возвращает:** Неприменимо: перечисление с базовым типом `std::uint8_t`.
 
 **Побочные эффекты:** Нет.
 
-**Примечания:** `Pixels` означает framebuffer как устройство вывода; TUI продолжает рисовать глифами. Режим сообщает DisplayServer.
+**Как работает:** Значения совпадают с константами `box/items.h`, которыми дисплей сообщает вид стекла при открытии области. Оба вида рисуют одни и те же ячейки; различается только то, как может выглядеть ячейка: на текстовой странице нет смешанных цветов и штриховок как текстуры.
+
+**Примечания:** `Pixels` не даёт доступа к пикселям — `painter::tui` остаётся текстом. Вид стекла узнают у поверхности (`Glass()`), а не по размеру экрана.
 
 **Пример:**
-
 ```cpp
 #include "painter/tui/frame.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-tui::GlassKind Glass = tui::GlassKind::Text;
+bool SoftEdges(const painter::tui::Frame &Out) { return Out.Glass() == painter::tui::GlassKind::Pixels; }
 ```
 
 ### `Visibility`
 
-**Краткое описание:** Укажите участие всей ячейки в композиции.
+**Краткое описание:** Указывает, закрывает ли ячейка то, что лежит под ней.
 
-**Параметры:** `Transparent`, `Opaque`; базовый тип `std::uint8_t`.
+**Параметры:**
+- `Transparent`: ячейка ничего не показывает; при переносе в поверхность сквозь неё видно нижележащее.
+- `Opaque`: ячейка показывает свой символ и цвета.
 
 **Возвращает:** Неприменимо: перечисление.
 
 **Побочные эффекты:** Нет.
 
-**Примечания:** Прозрачность ячейки и прозрачность её цветов — разные свойства.
+**Примечания:** Прозрачная ячейка уходит к дисплею как пустая (`item_cell_empty()`), независимо от её символа и цветов. Ячейка `Opaque` с цветом `Through()` или полупрозрачным цветом тоже частично пропускает нижележащее — так рисуются мягкие края.
 
 **Пример:**
-
 ```cpp
 #include "painter/tui/frame.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-tui::Visibility Coverage = tui::Visibility::Transparent;
+painter::tui::Cell Hole = painter::tui::Cell::TransparentCell();   // Hole.VisibilityMode == Visibility::Transparent
 ```
 
 ### `CellMark`
 
-**Краткое описание:** Выберите отметку поверх глифа ячейки.
+**Краткое описание:** Задаёт отметку, которую дисплей рисует поверх символа ячейки своим цветом.
 
-**Параметры:** `None`, `Under` (линия снизу), `Bar` (линия слева); соответствуют `DISPLAY_CELL_MARK_*`. Базовый тип `std::uint8_t`.
+**Параметры:**
+- `None` (= `ITEM_MARK_NONE`): отметки нет.
+- `Under` (= `ITEM_MARK_UNDER`): линия под символом.
+- `Bar` (= `ITEM_MARK_BAR`): вертикальная черта по левому краю.
 
 **Возвращает:** Неприменимо: перечисление.
 
 **Побочные эффекты:** Нет.
 
-**Примечания:** `MarkColor` задаёт собственный цвет отметки. При переносе в текст консоли отметка не сохраняется.
+**Как работает:** Отметка рисуется цветом `Cell::MarkColor` поверх глифа и ничего не закрывает, поэтому курсор может стоять на букве.
+
+**Примечания:** Отметка — только часть рисунка: при фиксации ячеек в текст консоли (`ConsoleSurface::Commit`) она не сохраняется. Для единственной каретки удобнее `Frame::SetCaret`; `CellMark` нужен, когда отметок несколько или нужна черта.
 
 **Пример:**
-
 ```cpp
 #include "painter/tui/frame.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-tui::CellMark Mark = tui::CellMark::Under;
+void MarkInsert(painter::tui::Frame &Out, painter::core::Point At)
+{
+    painter::tui::Cell Here = Out.Read(At);
+    Here.Mark      = painter::tui::CellMark::Bar;
+    Here.MarkColor = painter::core::Colors::Amber;
+    (void)Out.Put(At, Here);
+}
 ```
 
 ### `Cell`
 
-**Краткое описание:** Опишите символ, цвета, видимость и отметку одной ячейки.
+**Краткое описание:** Описывает одну ячейку: символ, два цвета, видимость и отметку.
 
-**Параметры:** Агрегат: `Glyph` (`char32_t`) = `U' '`; `Foreground` = `LightGray`, `Background` = `Black`; `VisibilityMode` = `Opaque`; `Mark` = `None`; `MarkColor` = `LightGray`. Все три цвета имеют тип `core::Color`.
+**Параметры:**
+- `Glyph` (`char32_t`): символ Unicode, который показывает ячейка, по умолчанию пробел. Это символ, а не номер глифа шрифта.
+- `Foreground` (`core::Color`): цвет символа, по умолчанию `LightGray`.
+- `Background` (`core::Color`): цвет фона, по умолчанию `Black`.
+- `VisibilityMode` (`Visibility`): по умолчанию `Opaque`.
+- `Mark` (`CellMark`): по умолчанию `None`.
+- `MarkColor` (`core::Color`): цвет отметки, по умолчанию `LightGray`.
 
-**Возвращает:** Неприменимо: структура данных.
+**Возвращает:** Неприменимо: агрегат. Сравнение `==` поэлементное.
 
 **Побочные эффекты:** Нет.
 
-**Примечания:** `Glyph` — символ Unicode, а не номер глифа шрифта: глиф выбирает дисплей. `operator==` сравнивает все поля, включая цвета скрытой ячейки.
+**Примечания:** Какой глиф нарисует символ, решает дисплей (см. [README](README.md), «Модель ячейки»). На проводе ячейка занимает 20 байт (`ItemCell`).
 
 **Пример:**
-
 ```cpp
 #include "painter/tui/frame.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-tui::Cell Value{'A', core::Colors::White, core::Colors::Black};
+const painter::tui::Cell Heart{U'♥', painter::core::Colors::Red, painter::core::Colors::Black};
 ```
 
 ### `Cell::TransparentCell`
 
-**Краткое описание:** Создайте ячейку, показывающую содержимое нижнего слоя.
+**Краткое описание:** Возвращает ячейку, которая ничего не показывает.
 
-**Параметры:** Нет; `static constexpr Cell TransparentCell() noexcept`.
+**Параметры:** Нет.
 
-**Возвращает:** `Cell`: пробел, оба цвета `Color::Through()`, видимость `Transparent`, отметка `None`.
+**Возвращает:** (`Cell`) пробел с цветами `Through()` и видимостью `Transparent`.
 
 **Побочные эффекты:** Нет.
 
-**Пример:**
+**Как работает:** Оба цвета прозрачные, поэтому полублочная точка, поставленная в такую ячейку, делает её непрозрачной, но вторая половина остаётся прозрачной и показывает нижележащее.
 
+**Пример:**
 ```cpp
 #include "painter/tui/frame.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-tui::Cell Empty = tui::Cell::TransparentCell();
+void Erase(painter::tui::Frame &Out, painter::core::Rect Area)
+{
+    (void)Out.Fill(Area, painter::tui::Cell::TransparentCell());
+}
 ```
 
 ### `Cell::IsTransparent`
 
-**Краткое описание:** Проверьте прозрачность всей ячейки.
+**Краткое описание:** Сообщает, прозрачна ли ячейка.
 
-**Параметры:** Нет; `bool IsTransparent() const noexcept`.
+**Параметры:** Нет.
 
-**Возвращает:** `bool`: равно ли `VisibilityMode` значению `Transparent`.
-
-**Побочные эффекты:** Нет.
-
-**Примечания:** Цвета и отметка в проверке не участвуют.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/frame.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-bool Example(const tui::Cell &Value) { return Value.IsTransparent(); }
-```
-
-### `Cell::operator==`
-
-**Краткое описание:** Сравните все поля двух ячеек.
-
-**Параметры:** Два аргумента `const Cell &`, in; `friend bool operator==(const Cell &, const Cell &) noexcept = default`.
-
-**Возвращает:** `bool`: равны ли глиф, цвета, видимость, отметка и её цвет.
+**Возвращает:** (`bool`) `true`, если `VisibilityMode == Visibility::Transparent`.
 
 **Побочные эффекты:** Нет.
 
-**Примечания:** Равенство полей не является сравнением видимого изображения; разные коды и цвета могут выглядеть одинаково на конкретном устройстве.
+**Примечания:** Смотрит только на `VisibilityMode`; непрозрачная ячейка с цветами `Through()` вернёт `false`.
 
 **Пример:**
-
 ```cpp
 #include "painter/tui/frame.h"
 
-bool Example(const painter::tui::Cell &A, const painter::tui::Cell &B)
-{
-    return A == B;
-}
+bool Painted(const painter::tui::Frame &Out, painter::core::Point At) { return !Out.Read(At).IsTransparent(); }
 ```
 
-### `Frame`
-
-**Краткое описание:** Храните прямоугольный кадр и необязательную позицию каретки.
-
-**Параметры:** Создаётся фабрикой `Create`; копирование запрещено, перемещение разрешено (`noexcept`), деструктор стандартный.
-
-**Возвращает:** Неприменимо: владеющий класс.
-
-**Побочные эффекты:** Создание выделяет память, уничтожение освобождает её.
-
-**Примечания:** Кадр не открывает слой и не рисует экран. Внутренних блокировок нет. После перемещения используйте исходный объект для уничтожения или присваивания: согласованность его размеров и перемещённого массива для рисования не гарантируется.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/frame.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-auto Example() { return tui::Frame::Create({20, 4}); }
-```
+## Создание
 
 ### `Frame::Create`
 
-**Краткое описание:** Создайте кадр заданного размера.
+**Краткое описание:** Создаёт кадр заданного размера.
 
-**Параметры:** `Bounds` (`core::Size`, in): положительные ширина и высота в ячейках; `static box::result<Frame> Create(core::Size Bounds) noexcept`.
+**Параметры:**
+- `Bounds` (`core::Size`): ширина и высота в ячейках.
 
-**Возвращает:** `box::result<Frame>`: кадр или `out_of_range` / `no_memory`.
+**Возвращает:** (`box::result<Frame>`) кадр, или ошибку: `errc::out_of_range` — размер пустой, слишком большой (высота больше `INT32_MAX / 2` или число ячеек не помещается в `size_t`); `errc::no_memory` — не хватило памяти.
 
-**Побочные эффекты:** Выделяет массив `Cell`.
+**Побочные эффекты:** Выделяет память под `Width × Height` ячеек.
 
-**Как работает:** Проверяет пустой размер, возможность удвоения высоты и число ячеек. Создаёт вектор из стандартных `Cell`, переводя `bad_alloc` в `no_memory`, а `length_error` в `out_of_range`.
+**Как работает:** Все ячейки создаются со значениями `Cell` по умолчанию: непрозрачный пробел, светло-серый на чёрном. Каретки нет, вид стекла — `Pixels`, мозаик нет. Исключения выделения памяти перехватываются и превращаются в ошибку.
 
-**Примечания:** Начальные ячейки непрозрачны, каретки нет, `Glass()` равен `Pixels`.
+**Примечания:** `Frame` нельзя копировать, можно перемещать. Перемещённый кадр больше не используйте. Кадр сцены создаёт `Stage` сам — отдельный `Create` нужен для рисунков, которые переносятся в `Surface` или `ConsoleSurface`, и для заготовок.
+
+**Типичное применение:** Создать кадр размером с рисунок, передать ему `Glass()` и `Mosaics()` поверхности, нарисовать, перенести.
 
 **Пример:**
-
 ```cpp
 #include "painter/tui/frame.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-auto Example() { return tui::Frame::Create({80, 25}); }
+bool DrawCard()
+{
+    auto Card = painter::tui::Frame::Create({24, 6});
+    if (!Card) return false;          // Card.error(): out_of_range или no_memory
+    Card->Clear();
+    (void)Card->Write({1, 1}, "Карточка");
+    return true;
+}
 ```
+
+## Свойства
 
 ### `Frame::Size`
 
-**Краткое описание:** Получите размер кадра в ячейках.
+**Краткое описание:** Возвращает размер кадра в ячейках.
 
-**Параметры:** Нет; `core::Size Size() const noexcept`.
+**Параметры:** Нет.
 
-**Возвращает:** `core::Size`: сохранённые ширина и высота.
+**Возвращает:** (`core::Size`) ширина и высота, заданные при создании.
 
 **Побочные эффекты:** Нет.
 
 **Пример:**
-
 ```cpp
 #include "painter/tui/frame.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-core::Size Example(const tui::Frame &Out) { return Out.Size(); }
+std::int32_t LastRow(const painter::tui::Frame &Out) { return Out.Size().Height - 1; }
 ```
 
 ### `Frame::PixelHeight`
 
-**Краткое описание:** Получите высоту кадра в единицах полублоков.
+**Краткое описание:** Возвращает высоту кадра в полублочных точках.
 
-**Параметры:** Нет; `std::int32_t PixelHeight() const noexcept`.
+**Параметры:** Нет.
 
-**Возвращает:** `std::int32_t`: `Size().Height * 2`.
-
-**Побочные эффекты:** Нет.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/frame.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-std::int32_t Example(const tui::Frame &Out) { return Out.PixelHeight(); }
-```
-
-### `Frame::Glass`
-
-**Краткое описание:** Получите назначенный кадру режим вывода.
-
-**Параметры:** Нет; `GlassKind Glass() const noexcept`.
-
-**Возвращает:** `GlassKind`: текущий режим.
+**Возвращает:** (`std::int32_t`) `Size().Height * 2`.
 
 **Побочные эффекты:** Нет.
 
-**Пример:**
+**Типичное применение:** Граница цикла по Y при рисовании точками `PutPixel`.
 
+**Пример:**
 ```cpp
 #include "painter/tui/frame.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-tui::GlassKind Example(const tui::Frame &Out) { return Out.Glass(); }
+void Gradient(painter::tui::Frame &Out)
+{
+    for (std::int32_t Y = 0; Y < Out.PixelHeight(); Y++)
+        for (std::int32_t X = 0; X < Out.Size().Width; X++)
+            (void)Out.PutPixel({X, Y}, painter::core::Color::Rgb(0, 0, static_cast<std::uint8_t>(Y * 255 / Out.PixelHeight())));
+}
 ```
 
-### `Frame::SetGlass`
+### `Frame::Glass` / `Frame::SetGlass`
 
-**Краткое описание:** Назначьте режим для выбора способов аппроксимации рисунка.
+**Краткое описание:** Возвращает и задаёт вид стекла, для которого рисуется кадр.
 
-**Параметры:** `Value` (`GlassKind`, in); `void SetGlass(GlassKind Value) noexcept`.
+**Параметры:**
+- `Value` (`GlassKind`): для `SetGlass` — новый вид.
 
-**Возвращает:** `void`.
+**Возвращает:** `Glass` — (`GlassKind`) текущий вид; `SetGlass` — `void`.
 
-**Побочные эффекты:** Меняет метаданные кадра.
+**Побочные эффекты:** `SetGlass` меняет поле кадра; ячейки не трогает.
 
-**Примечания:** Не меняет видеорежим и не перерисовывает существующие ячейки. Самостоятельному кадру назначайте `Surface::Glass()` или `ConsoleSurface::Glass()` (и `SetMosaics`) перед работой `FineCanvas`.
+**Как работает:** Вид стекла читают `FineCanvas` и `ResolveMosaic`, чтобы решить, можно ли смешивать цвета и использовать штриховки. Кадр, созданный `Frame::Create`, считается кадром для `Pixels`.
+
+**Примечания:** Кадру `Stage` вид передаётся при открытии сцены. Отдельному кадру — вручную, иначе на текстовой странице `FineCanvas` выберет цвета, которых там нет.
 
 **Пример:**
-
 ```cpp
 #include "painter/tui/frame.h"
+#include "painter/tui/surface.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-void Example(tui::Frame &Out) { Out.SetGlass(tui::GlassKind::Text); }
+void Prepare(painter::tui::Frame &Picture, const painter::tui::Surface &Screen)
+{
+    Picture.SetGlass(Screen.Glass());
+    Picture.SetMosaics(Screen.Mosaics());
+}
 ```
 
-### `Frame::Mosaics`
+### `Frame::Mosaics` / `Frame::SetMosaics`
 
-**Краткое описание:** Получите сетки тоньше половин, которые стекло рисует точно.
+**Краткое описание:** Возвращает и задаёт набор сеток мельче половинок, которые стекло рисует точно.
 
-**Параметры:** Нет; `std::uint8_t Mosaics() const noexcept`.
+**Параметры:**
+- `Value` (`std::uint8_t`): для `SetMosaics` — флаги `ITEM_MOSAIC_QUADRANTS | ITEM_MOSAIC_SEXTANTS | ITEM_MOSAIC_OCTANTS`.
 
-**Возвращает:** `std::uint8_t`: флаги `DisplayMosaic` (`DISPLAY_MOSAIC_QUADRANTS`, `DISPLAY_MOSAIC_SEXTANTS`, `DISPLAY_MOSAIC_OCTANTS`) так, как их назвал дисплей; по умолчанию 0.
+**Возвращает:** `Mosaics` — (`std::uint8_t`) флаги; `SetMosaics` — `void`.
 
-**Побочные эффекты:** Нет.
+**Побочные эффекты:** `SetMosaics` меняет поле кадра.
 
-**Пример:**
+**Как работает:** `FineCanvas` выбирает по этим флагам число строк подпикселей в ячейке: 4 при октантах, 3 при секстантах, иначе 2. Новый кадр не знает ни одной сетки (0).
 
-```cpp
-#include "painter/tui/frame.h"
+**Пример:** См. пример `Frame::SetGlass`.
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-std::uint8_t Example(const tui::Frame &Out) { return Out.Mosaics(); }
-```
-
-### `Frame::SetMosaics`
-
-**Краткое описание:** Назначьте кадру сетки, которые рисует стекло.
-
-**Параметры:** `Value` (`std::uint8_t`, in): флаги `DisplayMosaic`; `void SetMosaics(std::uint8_t Value) noexcept`.
-
-**Возвращает:** `void`.
-
-**Побочные эффекты:** Меняет метаданные кадра.
-
-**Примечания:** Не перерисовывает существующие ячейки. Самостоятельному кадру назначайте `Surface::Mosaics()` или `ConsoleSurface::Mosaics()` вместе с `SetGlass` перед работой `FineCanvas`.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/frame.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-void Example(tui::Frame &Out, const tui::Surface &Screen) { Out.SetMosaics(Screen.Mosaics()); }
-```
+## Очистка
 
 ### `Frame::Clear`
 
-**Краткое описание:** Заполните кадр непрозрачными пробелами и уберите каретку.
+**Краткое описание:** Заполняет весь кадр непрозрачными пробелами заданных цветов и снимает каретку.
 
-**Параметры:** `Style` (`TextStyle`, in), по умолчанию `{}`; `void Clear(TextStyle Style = {})`.
+**Параметры:**
+- `Style` (`TextStyle`): цвета; по умолчанию светло-серый на чёрном.
 
 **Возвращает:** `void`.
 
-**Побочные эффекты:** Заменяет все ячейки, сбрасывает отметки ячеек и `Caret()`.
+**Побочные эффекты:** Перезаписывает все ячейки (отметки тоже сбрасываются), удаляет каретку.
 
-**Как работает:** Линейно заполняет вектор значением `Cell{' ', Style.Foreground, Style.Background}`. Позиция каретки сбрасывается отдельно.
+**Типичное применение:** Начало каждого кадра полноэкранной программы или непрозрачной панели.
 
 **Пример:**
-
 ```cpp
 #include "painter/tui/frame.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-void Example(tui::Frame &Out) { Out.Clear({core::Colors::White, core::Colors::Blue}); }
+void Begin(painter::tui::Frame &Out) { Out.Clear({painter::core::Colors::White, painter::core::Color::Screen()}); }
 ```
 
 ### `Frame::ClearTransparent`
 
-**Краткое описание:** Очистите кадр прозрачными ячейками и уберите каретку.
+**Краткое описание:** Делает все ячейки кадра прозрачными и снимает каретку.
 
-**Параметры:** Нет; `void ClearTransparent() noexcept`.
+**Параметры:** Нет.
 
 **Возвращает:** `void`.
 
-**Побочные эффекты:** Заменяет все ячейки и сбрасывает каретку.
+**Побочные эффекты:** Перезаписывает все ячейки значением `Cell::TransparentCell()`, удаляет каретку.
 
-**Как работает:** Заполняет вектор значениями `Cell::TransparentCell()`. Это подготовка буфера, а не команда удаления серверного слоя.
-
-**Типичное применение:** Используйте перед рисованием фигуры для `Surface::Composite`.
+**Типичное применение:** Кадр для `Surface::Composite`: нетронутые ячейки останутся прозрачными, и сквозь них будет видна консоль или сцена ниже.
 
 **Пример:**
-
 ```cpp
 #include "painter/tui/frame.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-void Example(tui::Frame &Out) { Out.ClearTransparent(); }
+void BeginOverlay(painter::tui::Frame &Out) { Out.ClearTransparent(); }
 ```
+
+## Ячейки и текст
 
 ### `Frame::Put`
 
-**Краткое описание:** Замените одну ячейку внутри кадра.
+**Краткое описание:** Записывает одну ячейку.
 
-**Параметры:** `At` (`core::Point`, in), `Value` (`Cell`, in); перегрузка `bool Put(core::Point At, char32_t Glyph, TextStyle Style = {})` создаёт непрозрачную ячейку без отметки.
+**Параметры:**
+- `At` (`core::Point`): ячейка.
+- `Value` (`Cell`): полное значение ячейки — для первой перегрузки.
+- `Glyph` (`char32_t`): символ — для второй перегрузки.
+- `Style` (`TextStyle`): цвета — для второй перегрузки.
 
-**Возвращает:** `bool`: `true`, если координата внутри кадра.
+**Возвращает:** (`bool`) `true`, если ячейка внутри кадра и записана; `false` — вне кадра, ничего не изменено.
 
-**Побочные эффекты:** Заменяет ячейку при допустимых координатах.
+**Побочные эффекты:** Меняет одну ячейку.
 
-**Как работает:** Проверяет обе координаты; вне кадра возвращает `false` без записи. Перегрузка с `Cell` сохраняет все переданные поля.
-
-**Примечания:** Каретка кадра не меняется.
+**Примечания:** Вторая перегрузка создаёт непрозрачную ячейку без отметки — прежняя отметка в этой ячейке пропадает.
 
 **Пример:**
-
 ```cpp
 #include "painter/tui/frame.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-bool Example(tui::Frame &Out) { return Out.Put({1, 1}, 'A'); }
+void Star(painter::tui::Frame &Out, painter::core::Point At) { (void)Out.Put(At, U'★', {painter::core::Colors::Yellow}); }
 ```
 
 ### `Frame::Fill`
 
-**Краткое описание:** Заполните пересечение прямоугольника с кадром.
+**Краткое описание:** Заполняет прямоугольник одной ячейкой.
 
-**Параметры:** `Area` (`core::Rect`, in), `Value` (`Cell`, in); перегрузка `std::size_t Fill(core::Rect Area, char32_t Glyph, TextStyle Style = {})`.
+**Параметры:**
+- `Area` (`core::Rect`): прямоугольник в ячейках; обрезается кадром.
+- `Value` (`Cell`): ячейка — для первой перегрузки.
+- `Glyph` (`char32_t`), `Style` (`TextStyle`): символ и цвета — для второй.
 
-**Возвращает:** `std::size_t`: число заменённых ячеек; `0` для пустого пересечения.
+**Возвращает:** (`std::size_t`) число записанных ячеек; 0, если прямоугольник вне кадра или пуст.
 
-**Побочные эффекты:** Изменяет ячейки пересечения.
-
-**Как работает:** Сначала вычисляет `Area.Intersect(Size())`, затем проходит строки и столбцы пересечения. С `char32_t` создаются непрозрачные ячейки без отметок.
-
-**Примечания:** Не сбрасывает `Caret()`.
+**Побочные эффекты:** Перезаписывает ячейки пересечения `Area` с кадром.
 
 **Пример:**
-
 ```cpp
 #include "painter/tui/frame.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-std::size_t Example(tui::Frame &Out) { return Out.Fill({-1, 0, 4, 2}, ' '); }
+void Panel(painter::tui::Frame &Out) { (void)Out.Fill({2, 1, 20, 5}, U' ', {painter::core::Colors::White, painter::core::Colors::DarkBlue}); }
 ```
 
 ### `Frame::Write`
 
-**Краткое описание:** Запишите текст UTF-8 в одну строку кадра.
+**Краткое описание:** Пишет строку UTF-8 в ячейки, начиная с заданной.
 
-**Параметры:** `At` (`core::Point`, in), `Text` (`std::string_view`, in), `Style` (`TextStyle`, in) = `{}`; `std::size_t Write(core::Point At, std::string_view Text, TextStyle Style = {})`.
+**Параметры:**
+- `At` (`core::Point`): ячейка первого символа; X может быть отрицательным — левая часть строки тогда отрезается.
+- `Text` (`std::string_view`): текст в UTF-8.
+- `Style` (`TextStyle`): цвета.
 
-**Возвращает:** `std::size_t`: число действительно записанных ячеек.
+**Возвращает:** (`std::size_t`) число записанных ячеек.
 
-**Побочные эффекты:** Заменяет ячейки непрозрачными символами с указанными цветами и без отметок.
+**Побочные эффекты:** Перезаписывает ячейки строки `At.Y` от `At.X` вправо.
 
-**Как работает:** Раскладывает UTF-8 по правилам [GlyphAt](text.md): символ на ячейку, табуляция до следующего шага `TabStop`, управляющий символ или байт, не начинающий символа, — U+FFFD. Шаги табуляции отсчитываются от начала текста, а не от `At.X`. Слева пропускает ячейки отрицательных столбцов; справа прекращает запись. Недопустимая строка `At.Y` сразу даёт `0`.
+**Как работает:** Текст разбирается так же, как в [text](text.md): один символ — одна ячейка, табуляция заполняет пробелами до следующей позиции, кратной 4 (считая от начала строки текста, а не от столбца кадра), управляющий символ или байт, не начинающий корректную последовательность UTF-8, становится U+FFFD. Запись останавливается на правом краю кадра. Строка вне кадра по Y не пишет ничего.
 
-**Примечания:** Не переносит строки. В отличие от [PutText](text.md), не ограничивает ширину бюджетом и пишет U+FFFD цветом `Style.Foreground`, а не `OddInk`.
+**Примечания:** Перевод строки `\n` не переносит текст — он станет U+FFFD. В отличие от `PutText`, U+FFFD пишется цветом `Style`, а не `OddInk`, и ширина не ограничивается.
 
 **Пример:**
-
 ```cpp
 #include "painter/tui/frame.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-std::size_t Example(tui::Frame &Out) { return Out.Write({0, 0}, "Painter"); }
+void Status(painter::tui::Frame &Out, std::string_view Name)
+{
+    (void)Out.Write({1, Out.Size().Height - 1}, Name, {painter::core::Colors::Cyan});
+}
 ```
 
 ### `Frame::Centre`
 
-**Краткое описание:** Запишите текст UTF-8 с горизонтальным центрированием.
+**Краткое описание:** Пишет строку UTF-8 по центру заданной строки кадра.
 
-**Параметры:** `Row` (`std::int32_t`, in), `Text` (`std::string_view`, in), `Style` (`TextStyle`, in) = `{}`; `std::size_t Centre(std::int32_t Row, std::string_view Text, TextStyle Style = {})`.
+**Параметры:**
+- `Row` (`std::int32_t`): строка.
+- `Text` (`std::string_view`): текст в UTF-8.
+- `Style` (`TextStyle`): цвета.
 
-**Возвращает:** `std::size_t`: результат `Write`.
+**Возвращает:** (`std::size_t`) число записанных ячеек.
 
-**Побочные эффекты:** Заменяет ячейки строки.
+**Побочные эффекты:** Как у `Write`.
 
-**Как работает:** Если `CellsOf(Text)` меньше ширины кадра, выбирает начало `(Width - CellsOf(Text)) / 2`; иначе начинает с нуля. Вызывает `Write`, который отсекает правый остаток.
-
-**Примечания:** Центрирование считает ячейки, а не байты, поэтому текст UTF-8 центрируется верно.
+**Как работает:** Ширина считается `CellsOf`. Если текст уже кадра, начало — `(ширина кадра − ширина текста) / 2`, иначе текст пишется с нулевого столбца и обрезается справа.
 
 **Пример:**
-
 ```cpp
 #include "painter/tui/frame.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-std::size_t Example(tui::Frame &Out) { return Out.Centre(0, "Painter"); }
-```
-
-### `Frame::PutPixel`
-
-**Краткое описание:** Задайте цвет одной половины ячейки.
-
-**Параметры:** `Pixel` (`core::Point`, in): X в столбцах, Y в полустро́ках; `Ink` (`core::Color`, in); `bool PutPixel(core::Point Pixel, core::Color Ink)`.
-
-**Возвращает:** `bool`: находится ли точка внутри `Width × PixelHeight()`.
-
-**Побочные эффекты:** Меняет глиф на `Glyphs::UpperHalf`, видимость на `Opaque` и один цвет.
-
-**Как работает:** Чётный Y заменяет `Foreground`, нечётный — `Background` ячейки `{X, Y / 2}`. Второй цвет сохраняется, даже если ранее ячейка содержала текст.
-
-**Примечания:** Отметка и каретка сохраняются. После `ClearTransparent` незатронутая половина остаётся `Through`.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/frame.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-bool Example(tui::Frame &Out) { return Out.PutPixel({2, 3}, core::Colors::Red); }
-```
-
-### `Frame::BlendPixel`
-
-**Краткое описание:** Смешайте цвет с одной половиной ячейки.
-
-**Параметры:** `Pixel` (`core::Point`, in), `Ink` (`core::Color`, in), `Weight` (`std::uint8_t`, in): вес 0–255; `bool BlendPixel(core::Point Pixel, core::Color Ink, std::uint8_t Weight)`.
-
-**Возвращает:** `bool`: допустима ли координата.
-
-**Побочные эффекты:** Устанавливает верхний полублок и `Opaque`, смешивает выбранный цвет.
-
-**Как работает:** Выбирает половину по чётности Y, как `PutPixel`, и присваивает ей `Color::Mix(Current, Ink, Weight)`. Смешивание учитывает непрозрачность цветов.
-
-**Примечания:** Даже нулевой вес при допустимой координате меняет глиф и видимость.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/frame.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-bool Example(tui::Frame &Out) { return Out.BlendPixel({2, 3}, core::Colors::Red, 128); }
-```
-
-### `Frame::PutPixels`
-
-**Краткое описание:** Замените цвета всех половин кадра из построчного массива.
-
-**Параметры:** `Pixels` (`std::span<const core::Color>`, in): ровно `Width * Height * 2` цветов; `bool PutPixels(std::span<const core::Color> Pixels)`.
-
-**Возвращает:** `bool`: совпадает ли длина массива с требуемой.
-
-**Побочные эффекты:** Для всего кадра ставит верхний полублок, `Opaque` и оба цвета.
-
-**Как работает:** Пара строк пиксельного массива образует строку ячеек: верхняя строка даёт `Foreground`, нижняя — `Background`. Несовпадение размера возвращает `false` до изменения кадра.
-
-**Примечания:** Отметки ячеек и `Caret()` не сбрасываются.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/frame.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-bool Example(tui::Frame &Out, std::span<const core::Color> Pixels) { return Out.PutPixels(Pixels); }
+void Title(painter::tui::Frame &Out) { (void)Out.Centre(0, "Сапёр", {painter::core::Colors::White}); }
 ```
 
 ### `Frame::Read`
 
-**Краткое описание:** Получите копию ячейки по координате.
+**Краткое описание:** Возвращает ячейку кадра.
 
-**Параметры:** `At` (`core::Point`, in); `Cell Read(core::Point At) const noexcept`.
+**Параметры:**
+- `At` (`core::Point`): ячейка.
 
-**Возвращает:** `Cell`: ячейка кадра или `Cell{}` вне его границ.
-
-**Побочные эффекты:** Нет.
-
-**Примечания:** Значение вне границ — непрозрачный пробел стандартных цветов, а не прозрачная ячейка.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/frame.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-tui::Cell Example(const tui::Frame &Out) { return Out.Read({0, 0}); }
-```
-
-### `Frame::SetCaret`
-
-**Краткое описание:** Установите или снимите единственную каретку кадра.
-
-**Параметры:** `At` (`std::optional<core::Point>`, in); `bool SetCaret(std::optional<core::Point> At) noexcept`.
-
-**Возвращает:** `bool`: `true` для допустимой координаты и `std::nullopt`; `false` вне кадра.
-
-**Побочные эффекты:** Меняет позицию каретки.
-
-**Как работает:** Недопустимая координата снимает прежнюю каретку, а не оставляет её на месте. Содержимое ячеек не меняется.
-
-**Примечания:** Это позиция каретки слоя; `CellMark` — отдельная отметка конкретной ячейки.
-
-**Пример:**
-
-```cpp
-#include "painter/tui/frame.h"
-
-namespace tui = painter::tui;
-namespace core = painter::core;
-
-bool Example(tui::Frame &Out) { return Out.SetCaret(core::Point{1, 0}); }
-```
-
-### `Frame::Caret`
-
-**Краткое описание:** Получите текущую позицию каретки.
-
-**Параметры:** Нет; `std::optional<core::Point> Caret() const noexcept`.
-
-**Возвращает:** `std::optional<core::Point>`: позиция или `std::nullopt`.
+**Возвращает:** (`Cell`) копия ячейки; вне кадра — `Cell{}` (непрозрачный пробел по умолчанию).
 
 **Побочные эффекты:** Нет.
 
-**Пример:**
+**Типичное применение:** Изменить одно поле ячейки (цвет, отметку) и записать её обратно через `Put`.
 
+**Пример:**
 ```cpp
 #include "painter/tui/frame.h"
 
-namespace tui = painter::tui;
-namespace core = painter::core;
+void Dim(painter::tui::Frame &Out, painter::core::Point At)
+{
+    painter::tui::Cell Here = Out.Read(At);
+    Here.Foreground = painter::core::Colors::DarkGray;
+    (void)Out.Put(At, Here);
+}
+```
 
-auto Example(const tui::Frame &Out) { return Out.Caret(); }
+## Полублочные точки
+
+### `Frame::PutPixel`
+
+**Краткое описание:** Ставит одну полублочную точку заданного цвета.
+
+**Параметры:**
+- `Pixel` (`core::Point`): X — столбец, Y — полустрока (`0 … PixelHeight() − 1`).
+- `Ink` (`core::Color`): цвет точки; цвет с непрозрачностью ставится как есть.
+
+**Возвращает:** (`bool`) `true`, если точка внутри кадра.
+
+**Побочные эффекты:** Ячейка `{X, Y / 2}` становится непрозрачной с символом ▀; при чётном Y меняется её `Foreground`, при нечётном — `Background`.
+
+**Как работает:** Символ ▀ закрашивает верхнюю половину цветом символа, нижнюю — цветом фона, поэтому два цвета ячейки дают две точки. Вторая половина сохраняет прежний цвет соответствующего поля.
+
+**Примечания:** Если в ячейке был текст, вторая половина получит старый цвет символа или фона этой ячейки, а символ пропадёт. В ячейке после `ClearTransparent` вторая половина остаётся `Through()` и показывает нижележащее.
+
+**Типичное применение:** Растровые сцены: фракталы, пламя, частицы.
+
+**Пример:**
+```cpp
+#include "painter/tui/frame.h"
+
+void Dot(painter::tui::Frame &Out, std::int32_t X, std::int32_t Y) { (void)Out.PutPixel({X, Y}, painter::core::Colors::Coral); }
+```
+
+### `Frame::BlendPixel`
+
+**Краткое описание:** Накладывает цвет на полублочную точку с заданным весом.
+
+**Параметры:**
+- `Pixel` (`core::Point`): точка в полублочных координатах.
+- `Ink` (`core::Color`): накладываемый цвет.
+- `Weight` (`std::uint8_t`): доля из 255 от собственной непрозрачности `Ink`.
+
+**Возвращает:** (`bool`) `true`, если точка внутри кадра.
+
+**Побочные эффекты:** Ячейка становится непрозрачной с символом ▀; соответствующая половина получает `Color::Over(прежний, Ink, Weight)`.
+
+**Как работает:** Смешивание идёт как свет (Porter-Duff «over», `BoxColorOverPart`). Над прозрачной половиной результат — `Ink` с непрозрачностью, равной весу; над полупрозрачной — композиция двух.
+
+**Типичное применение:** Сглаженные точки, следы частиц, затухание.
+
+**Пример:**
+```cpp
+#include "painter/tui/frame.h"
+
+void Glow(painter::tui::Frame &Out, painter::core::Point At) { (void)Out.BlendPixel(At, painter::core::Colors::Amber, 96); }
+```
+
+### `Frame::PutPixels`
+
+**Краткое описание:** Заменяет весь кадр растром полублочных точек.
+
+**Параметры:**
+- `Pixels` (`std::span<const core::Color>`): ровно `Width × PixelHeight()` цветов построчно сверху вниз.
+
+**Возвращает:** (`bool`) `true`, если размер совпал и кадр записан; `false` — неверный размер, ничего не изменено.
+
+**Побочные эффекты:** Каждая ячейка становится непрозрачной ▀ с цветами двух соответствующих точек.
+
+**Типичное применение:** Программа считает изображение в свой буфер (`std::vector<core::Color>`) и выкладывает его одним вызовом.
+
+**Пример:**
+```cpp
+#include <vector>
+
+#include "painter/tui/frame.h"
+
+bool Show(painter::tui::Frame &Out, const std::vector<painter::core::Color> &Picture) { return Out.PutPixels(Picture); }
+```
+
+## Каретка
+
+### `Frame::SetCaret` / `Frame::Caret`
+
+**Краткое описание:** Ставит или снимает каретку кадра и возвращает её место.
+
+**Параметры:**
+- `At` (`std::optional<core::Point>`): ячейка каретки; `std::nullopt` снимает каретку.
+
+**Возвращает:** `SetCaret` — (`bool`) `false`, если точка вне кадра (каретка тогда снимается); `Caret` — (`std::optional<core::Point>`) текущее место или пусто.
+
+**Побочные эффекты:** Меняет каретку кадра; ячейки не трогает.
+
+**Как работает:** Каретка — линия под символом, которую нельзя выразить символом ячейки. Она хранится отдельно и уходит дисплею вместе с ячейками. `Clear` и `ClearTransparent` снимают её, поэтому кадр без ввода текста каретки не показывает.
+
+**Примечания:** У кадра одна каретка. Цвет выбирает дисплей. При переносе прямоугольника в `Surface`/`ConsoleSurface` каретка внутри него переносится вместе с ячейкой.
+
+**Типичное применение:** Поле ввода: после рисования строки поставить каретку после последнего введённого символа.
+
+**Пример:**
+```cpp
+#include "painter/tui/frame.h"
+#include "painter/tui/text.h"
+
+void Field(painter::tui::Frame &Out, std::string_view Typed)
+{
+    const auto Used = static_cast<std::int32_t>(painter::tui::CellsOf(Typed));
+    (void)Out.Write({2, 3}, Typed);
+    (void)Out.SetCaret(painter::core::Point{2 + Used, 3});
+}
 ```
