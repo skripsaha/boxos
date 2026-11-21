@@ -581,9 +581,8 @@ def TagDecode(c, what, glass):
 
 
 def TagGlass(tid, ts, glass):
-    """What of a tag this kernel cannot carry on (§16.1 п.2, §6.4)."""
-    if ts.flags & TAG_RETIRED:
-        glass.append("tag id %u is RETIRED — this kernel gives no id twice" % tid)
+    """What of a tag this kernel cannot carry on (§16.1 п.2, §6.4). A RETIRED
+    tag is held as retired: known, given no more, worn by nothing."""
     if tid >= KERNEL_TAG_END:
         glass.append("tag id %u is past 2^31 - 2, the last this kernel gives" % tid)
     if len(ts.key) > TAG_KEY_WIDTH or len(ts.key) + len(ts.value or b"") > TAG_TEXT_ROOM:

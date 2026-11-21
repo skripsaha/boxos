@@ -785,12 +785,6 @@ bool BookTagHeld(uint64_t tid, const TallyTag* t)
 {
     char words[192];
     bool held = true;
-    if (t->flags & TALLY_TAG_RETIRED) {
-        ksnprintf(words, sizeof(words), "tag id %llu is RETIRED — this kernel gives no id twice",
-                  (unsigned long long)tid);
-        TagFSUnderGlass(words);
-        held = false;
-    }
     if (tid > TAGFS_MAX_TAG_ID) {
         ksnprintf(words, sizeof(words), "tag id %llu is past 2^31 - 2, the last this kernel gives",
                   (unsigned long long)tid);
@@ -873,6 +867,8 @@ static error_t LeavesTag(void* ctx, TallyKey key, const uint8_t* body, uint32_t 
         g_book.next_tag = key.k1 + 1u;
     if (!BookTagHeld(key.k1, &t))
         return BookTagAsideNoted(key.k1, &t);
+    if (t.flags & TALLY_TAG_RETIRED)
+        return RegistryCoinRetired(tagfs_get_state()->registry, (uint32_t)key.k1);
     error_t rc = RegistryCoin(tagfs_get_state()->registry, (uint32_t)key.k1,
                               (t.flags & TALLY_TAG_HAS_VALUE) ? TAGFS_TAG_FLAG_HAS_VALUE : 0, TagRegistryOwnerOf(&t),
                               t.key, (uint8_t)t.key_len, t.value, (uint16_t)t.value_len);

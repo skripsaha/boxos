@@ -282,13 +282,13 @@ static error_t FilesNext(BinderWork* w, BinderItem* it, bool* got)
 static error_t TagsNext(BinderWork* w, BinderItem* it, bool* got)
 {
     BinderItems* p = &w->items;
-    TagSpelling  sp;
-    TagOwner     owner;
+    TagRolled    rolled;
     uint32_t     id = 0;
     for (;;) {
-        *got = TagRoll(tagfs_get_state()->registry, p->tag, w->tag_hi, &id, &sp, &owner);
+        *got = TagRoll(tagfs_get_state()->registry, p->tag, w->tag_hi, &rolled);
         if (!*got)
             return OK;
+        id = rolled.id;
         const BinderKept* k = BINDER_CHECKS && !w->measuring ? NULL : BinderKeptAt(w, (TallyKey){ id, 0 });
         if (!k || k->rotten || k->margin)
             break;
@@ -299,7 +299,7 @@ static error_t TagsNext(BinderWork* w, BinderItem* it, bool* got)
         p->tag = (uint32_t)k->at.hi.k1;
     }
     p->tag = id + 1u;
-    TallyTag t       = TagRegistryBookForm(&sp, owner);
+    TallyTag t       = TagRolledBookForm(&rolled, w->tag_gen);
     uint64_t carried = TallyTagCarried(&t);
     if (!ItemRoom(p, TallyTagBytes(&t)))
         return ERR_NO_MEMORY;

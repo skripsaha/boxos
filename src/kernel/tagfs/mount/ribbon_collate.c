@@ -42,6 +42,7 @@ static const char* const g_ribbon_codes[RIBBON_CODES] = {
     [RIBBON_CODE_NOT_LANDED]      = "NOT_LANDED",
     [RIBBON_CODE_BASE_MISMATCH]   = "BASE_MISMATCH",
     [RIBBON_CODE_EXTENT_OUTSIDE]  = "EXTENT_OUTSIDE",
+    [RIBBON_CODE_RETIRED_WORN]    = "RETIRED_WORN",
 };
 
 void RibbonSay(RibbonWalk* w, RibbonCode code, const char* fmt, ...)

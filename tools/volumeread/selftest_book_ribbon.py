@@ -74,6 +74,23 @@ def RecordCases(bt):
     again = stitch.Born(fid=bt.S.fid, flags=ondisk.FILE_ACTIVE, size=0, created_ns=1, modified_ns=1,
                         name=b"again", tags=(), runs=[], digests=[])
 
+    def Later(*stitches):
+        """Each list of records a stitch of its own, in order."""
+        def Plant(o):
+            pen = bt.Pen(o)
+            for records in stitches:
+                pen.Sew(records, flags=stitch.DATA_FLUSHED)
+        return Plant
+
+    def Wearing(tag):
+        """A file of no data born wearing `tag`."""
+        return stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=0, created_ns=1, modified_ns=1, name=b"wearer",
+                           tags=(tag,), runs=[], digests=[])
+
+    def Retires(tag):
+        """The id held as retired and the volume not read only."""
+        return lambda c: not c.mount.glass and bool(c.mount.tags[tag].flags & tally.TAG_RETIRED)
+
     def Quitclaimed(o):
         d = bt.Fresh(o, 0, 2, 2)
         bt.Pen(o).Sew([Born(bt.F, f1, d[:1], b"a"), Born(bt.F + 1, f2, d[1:], b"b"),
@@ -118,8 +135,37 @@ def RecordCases(bt):
                      ("and nothing is said", lambda c: not c.findings)]),
         Case("B14 a Frozen in a stitch", One([stitch.Frozen(1, 0, [], b"snap")]), must={"UNDER_GLASS"},
              checks=[("the volume is read only: a bookmark", lambda c: Glass(c, "Frozen"))]),
-        Case("B15 a Coined RETIRED", One([stitch.Coined(bt.tag, retired=True)]), must={"UNDER_GLASS"},
-             checks=[("the volume is read only: an id retired", lambda c: Glass(c, "RETIRED"))]),
+        Case("B15 a Coined RETIRED of an id the book never named", One([stitch.Coined(bt.tag, retired=True)]),
+             checks=[("the id is held as retired: known, and the volume is not read only", Retires(bt.tag)),
+                     ("and never given again", lambda c: c.mount.counts["next_tag"] == bt.tag + 1),
+                     ("and nothing is said", lambda c: not c.findings)]),
+        Case("B15d a tag coined and retired in one stitch", One([stitch.Coined(bt.tag, b"once"),
+                                                                stitch.Coined(bt.tag, retired=True)]),
+             checks=[("the id is held as retired, its text forgotten", lambda c: Retires(bt.tag)(c) and
+                      c.mount.tags[bt.tag].key == b""),
+                     ("and nothing is said", lambda c: not c.findings)]),
+        Case("B15e a tag retired by a stitch after the one that coined it", Later([stitch.Coined(bt.tag, b"once")],
+                                                                                [stitch.Coined(bt.tag, retired=True)]),
+             checks=[("the id is held as retired, its text forgotten", lambda c: Retires(bt.tag)(c) and
+                      c.mount.tags[bt.tag].key == b""),
+                     ("and the kernel of this tree mounts it so", lambda c: c.kernel["mounts"] is True and
+                      c.kernel["glass"] == 0 and c.kernel["next_tag"] == bt.tag + 1)]),
+        Case("B15f a Coined naming a retired id a tag", Later([stitch.Coined(bt.tag, retired=True)],
+                                                             [stitch.Coined(bt.tag, b"again")]),
+             must={"UNDER_GLASS"}, checks=[
+                 ("the second stitch is not applied: an id retired is given no more",
+                  lambda c: Glass(c, "RETIRED") and c.mount.tags[bt.tag].flags & tally.TAG_RETIRED)]),
+        Case("B15g a Born wearing a retired tag", Later([stitch.Coined(bt.tag, b"once")],
+                                                       [stitch.Coined(bt.tag, retired=True)], [Wearing(bt.tag)]),
+             must={"BASE_MISMATCH"}, checks=[
+                 ("the Born does not fit: a retired tag is worn by nothing",
+                  lambda c: Found(c, "BASE_MISMATCH", "fid %u" % f1, "RETIRED") and f1 not in c.mount.files)]),
+        Case("B15h a tag retired while a file wears it", One([stitch.Coined(bt.tag, b"worn"), Wearing(bt.tag),
+                                                             stitch.Coined(bt.tag, retired=True)]),
+             must={"RETIRED_WORN"}, checks=[
+                 ("said, the file stays as it is", lambda c: Found(c, "RETIRED_WORN", "fid %u" % f1) and
+                  f1 in c.mount.files),
+                 ("and the kernel of this tree says it once", lambda c: c.kernel["ribbon"].get("RETIRED_WORN") == 1)]),
         Case("B16 a tag id of 2^31", One([stitch.Coined(1 << 31, b"wide")]), must={"UNDER_GLASS"}, checks=[
             ("the volume is read only: an id wider than the kernel gives", lambda c: Glass(c, "2^31")),
             ("and that id is never given again", lambda c: c.mount.counts["next_tag"] == (1 << 31) + 1)]),
