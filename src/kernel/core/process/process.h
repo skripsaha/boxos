@@ -245,6 +245,12 @@ typedef struct process_t
     bool started;
     uint8_t home_core;              // App Core index for scheduling (RunQueue lives here)
     volatile uint8_t kcore_pending; // 1 = already in a K-Core queue, 0 = free (atomic CAS)
+#ifdef CONFIG_MEASURE
+    /* When this strand's call came to the gate and when it was taken to be
+     * served, TSC — the stopwatch its answer carries (kring.h). */
+    uint64_t call_gate;
+    uint64_t call_taken;
+#endif
 
     volatile wait_reason_t wait_reason;
     uint64_t wait_start_time; // TSC timestamp when waiting (0 = not waiting)

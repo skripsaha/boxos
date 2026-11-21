@@ -41,6 +41,22 @@ uint32_t KPocketCount(process_t *proc);
  *                   allocation failure. */
 bool KResultPush(process_t *target, const Result *r);
 
+/* The stopwatch (make MEASURE=on; nothing at all in any other build): the
+ * moment `proc`'s call came to the gate (KCallGate), the moment it was taken
+ * to be served — by a K-Core, or on one core by the gate itself (KCallTaken)
+ * — and, just before the answer to it is pushed, those two and the moment it
+ * was answered onto its reply ring's stopwatch line (KCallAnswered,
+ * result_ring.h). */
+#ifdef CONFIG_MEASURE
+void KCallGate(process_t *proc);
+void KCallTaken(process_t *proc);
+void KCallAnswered(process_t *proc);
+#else
+static inline void KCallGate(process_t *proc)     { (void)proc; }
+static inline void KCallTaken(process_t *proc)    { (void)proc; }
+static inline void KCallAnswered(process_t *proc) { (void)proc; }
+#endif
+
 /* Push, or take the answer as a DEBT — the entry point for a message whose
  * payload has ALREADY been deposited in the target's cabin heap (system_ops.c,
  * push_ipc_result). Returns true when the answer has been TAKEN: either it is

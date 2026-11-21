@@ -84,6 +84,7 @@ int execution_deck_handler(Pocket *pocket, process_t *proc)
     result.sender_pid  = 0;
     /* Echo the submit's cloakroom token — the waiter adopts only its own. */
     result.context     = KCTX_PACK24(KCTX_GUIDE, PocketCookie24(pocket));
+    KCallAnswered(target);
 
     if (!KResultPush(target, &result))
     {

@@ -165,6 +165,29 @@ static ResultRing *kring_result_hdr(process_t *proc)
     return (ResultRing *)vmm_phys_to_virt(proc->result_ring_phys);
 }
 
+#ifdef CONFIG_MEASURE
+void KCallGate(process_t *proc)
+{
+    if (proc) proc->call_gate = rdtsc();
+}
+
+void KCallTaken(process_t *proc)
+{
+    if (proc) proc->call_taken = rdtsc();
+}
+
+/* Before the push: the slot's release store publishes the answer, and the
+ * stopwatch with it. */
+void KCallAnswered(process_t *proc)
+{
+    ResultRing *rr = kring_result_hdr(proc);
+    if (!rr) return;
+    rr->hdr.call_gate     = proc->call_gate;
+    rr->hdr.call_taken    = proc->call_taken;
+    rr->hdr.call_answered = rdtsc();
+}
+#endif
+
 /* A porthole onto one ResultSlot of `target`'s cabin; NULL when the slot is
  * not the cabin's to read — or, for_write, to write. */
 static ResultSlot *kring_slot_open(Porthole *porthole, process_t *target,

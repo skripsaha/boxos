@@ -378,6 +378,7 @@ static void kcore_process_entry(struct process_t* proc)
     debug_printf("[K%u] Processing PID %u\n", core_idx, proc->pid);
 
     uint64_t began = rdtsc();
+    KCallTaken(proc);
     guide_process_one(proc);
     proc->tip += sched_fare_for(proc, rdtsc() - began);
 

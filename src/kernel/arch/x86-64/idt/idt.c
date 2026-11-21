@@ -2401,6 +2401,8 @@ void irq_handler(interrupt_frame_t *frame)
 // Sync path: process Pockets immediately on the calling core (N=1).
 static void sync_syscall_dispatch(process_t *proc, interrupt_frame_t *frame)
 {
+    KCallGate(proc);
+    KCallTaken(proc);   /* one core: the gate serves the call itself */
     context_save_from_frame(proc, frame);
     ready_queue_push(&g_ready_queue, proc);
     /* Being served is a state of the counter, not of the passenger, and it
@@ -2455,6 +2457,7 @@ static void async_syscall_dispatch(process_t *proc, interrupt_frame_t *frame)
 {
     (void)frame; // not needed — process continues running
 
+    KCallGate(proc);
     uint8_t core_idx = amp_get_core_index();
 
     // CAS: only submit if not already queued (dedup)

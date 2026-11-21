@@ -89,10 +89,21 @@ typedef struct PACKED {
      * very core. */
     volatile uint64_t step_aside;
     uint8_t           _pad_line1[32];   /* fill cacheline 1 */
+
+    /* Cacheline 2 — the stopwatch (a kernel built MEASURE=on; zero
+     * otherwise): when the call answered last came to the gate, when a K-Core
+     * took it and when it was answered, TSC. Written before that answer is
+     * published, so it goes with the answer just taken. */
+    volatile uint64_t call_gate;
+    volatile uint64_t call_taken;
+    volatile uint64_t call_answered;
+    uint8_t           _pad_line2[40];   /* fill cacheline 2 */
 } ResultRingHeader;
 
-STATIC_ASSERT(sizeof(ResultRingHeader) == 128,
-              "ResultRingHeader must be 128 bytes (two cachelines)");
+STATIC_ASSERT(sizeof(ResultRingHeader) == 192,
+              "ResultRingHeader must be 192 bytes (three cachelines)");
+STATIC_ASSERT(OFFSETOF(ResultRingHeader, call_gate) == 128,
+              "ResultRingHeader.call_gate must sit at offset 128 (kernel agrees)");
 STATIC_ASSERT(OFFSETOF(ResultRingHeader, awaiting) == 72,
               "ResultRingHeader.awaiting must sit at offset 72 (kernel agrees)");
 STATIC_ASSERT(OFFSETOF(ResultRingHeader, owed) == 80,

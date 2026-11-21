@@ -57,6 +57,7 @@
 #include "box/core/crate.h"
 #include "box/core/cabin.h"
 #include "box/core/result.h"
+#include "box/core/result.h"
 #include "box/error.h"
 #include "box/display.h"
 #include "box/touch.h"
@@ -334,6 +335,66 @@ static int b_least_call(uint32_t i, void *ctx)
     uint8_t out[8];
     return MfCall1(DECK_OPERATIONS, OP_BUF_FILL, &fill, 1, NULL, 0, out, sizeof(out), NULL,
                    BOX_ANSWER_GUARANTEED, NULL) == 0 ? 0 : -1;
+}
+
+/* (5) The least call told apart by the stopwatch a kernel built MEASURE=on
+ *     puts on its answer (box/core/result.h): made and come to the gate,
+ *     taken by a K-Core (on one core, by the gate), served, and its answer
+ *     taken by the caller — each stage's own spread over the same calls.
+ *     Nothing when the kernel keeps no stopwatch. A call whose moments are
+ *     not in order is left out and counted: the cores' TSCs not in step. */
+static void print_kv_u64(const char *label, uint64_t v, const char *unit);
+
+#define STAGES 4
+static uint64_t s_stage[STAGES][BENCH_MAX_SAMPLES];
+
+static void bench_call_stages(const char *title, uint32_t n, uint32_t rest_us)
+{
+    static const char *const names[STAGES] = {
+        "  made, at the gate", "  gate to taken", "  served", "  answered to caller",
+    };
+    volatile ResultRingHeader *h = &result_ring()->hdr;
+    const uint64_t khz = cpu_get_tsc_freq_khz();
+    if (n > BENCH_MAX_SAMPLES)
+        n = BENCH_MAX_SAMPLES;
+    for (uint32_t i = 0; i < WARMUP_ITERS; i++)
+        if (b_least_call(i, NULL) < 0)
+            return;
+    if (h->call_answered == 0)
+        return;
+
+    uint32_t got = 0, out_of_order = 0;
+    for (uint32_t i = 0; i < n; i++)
+    {
+        if (rest_us)
+            bench_quiet(rest_us, khz);
+        uint64_t made = cpu_rdtsc();
+        if (b_least_call(i, NULL) < 0)
+            return;
+        uint64_t seen     = cpu_rdtsc_end();
+        uint64_t gate     = h->call_gate;
+        uint64_t taken    = h->call_taken;
+        uint64_t answered = h->call_answered;
+        if (!(made <= gate && gate <= taken && taken <= answered && answered <= seen))
+        {
+            out_of_order++;
+            continue;
+        }
+        s_stage[0][got] = gate - made;
+        s_stage[1][got] = taken - gate;
+        s_stage[2][got] = answered - taken;
+        s_stage[3][got] = seen - answered;
+        got++;
+    }
+    println(title);
+    for (uint32_t k = 0; k < STAGES; k++)
+    {
+        bench_stats_t st = {0};
+        compute_stats(s_stage[k], got, &st);
+        print_row(names[k], &st);
+    }
+    if (out_of_order)
+        print_kv_u64("  left out, moments not in order:", out_of_order, "calls");
 }
 
 /* (6) Cross-process IPC roundtrip: broadcast a 1-byte DISP_CMD_PING,
@@ -690,6 +751,8 @@ int main(void)
      * K-Core asleep, woken by the call */
     bench_run("1-op Manifest (ops.fill)", b_least_call, NULL, 1000);
     bench_run_rested("1-op Manifest after 2 ms quiet", b_least_call, NULL, 500, 2000);
+    bench_call_stages("1-op Manifest, its stages:", 1000, 0);
+    bench_call_stages("1-op Manifest after 2 ms quiet, its stages:", 500, 2000);
 
     /* One strand waiting on another's work, through the kernel */
     bench_pingpong("strand ping-pong (park/wake, rtt)", 1000);
@@ -719,5 +782,7 @@ int main(void)
     println("  - chain median / 1000 ≈ per-Manifest-op amortised cost");
     println("  - 'after 2 ms quiet': the K-Core asleep, woken by the call itself");
     println("  - App Cores have no tick: max is what else ran meanwhile");
+    println("  - stages: a kernel built MEASURE=on stamps when the call came to the");
+    println("    gate, was taken and was answered; the rows are absent otherwise");
     return 0;
 }
