@@ -72,7 +72,7 @@ UTILS = create show files tag untag name trash delete assemble \
         timezone logsave lastsaid journey usetest faretest luggagetest rollcall handset headcount \
         playtime lavalamp finish taskboard memmap hexer stringview \
         calculate difference copy typer flame checksum passport aquarium \
-        nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits bloom spell ripple \
+        nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits bloom spell ripple flappybird \
         edit seek retag read inside settings autostart scratchpad garden gardener random sand coinflip dice casino seabattle whale hangman duppo \
         glyphs drawcheck itemcheck benchmark
 
@@ -514,6 +514,16 @@ $(DUPPO_DIR)/logo.o $(DUPPO_DIR)/sampler.o $(DUPPO_DIR)/picture.o $(DUPPO_DIR)/p
 
 duppo.elf: $(BOXLIB_START) $(DUPPO_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(DUPPO_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
+
+# Flappybird is C++ in parts of its own directory: items the display moves
+# (painter::gui), the best score kept with keep.o.
+FLAPPYBIRD_DIR  = flappybird
+FLAPPYBIRD_OBJS = $(addprefix $(FLAPPYBIRD_DIR)/,flappybird.o game.o world.o scene.o skyline.o bird.o boards.o) keep.o
+
+$(FLAPPYBIRD_OBJS): CXXFLAGS += -I.
+
+flappybird.elf: $(BOXLIB_START) $(FLAPPYBIRD_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(FLAPPYBIRD_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
 
 # Hangman is C++ in parts of its own directory; it keeps its ledger with keep.o.
 HANGMAN_DIR  = hangman
