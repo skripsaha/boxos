@@ -45,10 +45,15 @@
  */
 #define NIGHTWATCH_LOOK_MS  10000u
 
-/* Per-core idle marks. A plain byte per core rather than a bitmask: MAX_CORES
- * is 256, so no single word covers it, and a byte store needs no atomic. */
-static volatile uint8_t  g_core_idle[MAX_CORES];
-static volatile uint32_t g_idle_cores;
+/* Per-core idle marks, a cache line each: a core marks itself at every sleep
+ * and every wake — on a K-Core, around nearly every call — and a mark sharing
+ * a line, or a count of them all, had every core's sleep take a line from the
+ * others. A plain store each; the rare reader walks them. */
+typedef struct {
+    volatile uint8_t idle;
+} __attribute__((aligned(64))) NightwatchIdleMark;
+
+static NightwatchIdleMark g_core_idle[MAX_CORES];
 static volatile uint8_t  g_armed;         /* init done */
 static volatile uint64_t g_last_look_ms;   /* rate limit for the proof pass */
 static volatile uint8_t  g_walking;        /* a core is inside nightwatch_verdict */
@@ -208,21 +213,23 @@ static bool nightwatch_suspect_stuck(uint32_t pid, uint32_t gen, uint64_t mark,
 static bool nightwatch_any_kcore_idle(void)
 {
     for (uint8_t c = 0; c < g_amp.total_cores; c++)
-        if (g_amp.cores[c].is_kcore && g_core_idle[c])
+        if (g_amp.cores[c].is_kcore && g_core_idle[c].idle)
             return true;
     return false;
 }
 
 static bool nightwatch_any_core_idle(void)
 {
-    return __atomic_load_n(&g_idle_cores, __ATOMIC_ACQUIRE) > 0;
+    for (uint8_t c = 0; c < g_amp.total_cores; c++)
+        if (g_core_idle[c].idle)
+            return true;
+    return false;
 }
 
 void nightwatch_init(void)
 {
     for (uint32_t i = 0; i < MAX_CORES; i++)
-        g_core_idle[i] = 0;
-    g_idle_cores = 0;
+        g_core_idle[i].idle = 0;
 
     uint32_t online = 0;
     for (uint8_t c = 0; c < g_amp.total_cores; c++)
@@ -816,10 +823,9 @@ void nightwatch_core_idle(uint8_t core)
     if (!__atomic_load_n(&g_armed, __ATOMIC_ACQUIRE)) return;
     if (core >= MAX_CORES) return;
 
-    if (!g_core_idle[core])
+    if (!g_core_idle[core].idle)
     {
-        g_core_idle[core] = 1;
-        __atomic_add_fetch(&g_idle_cores, 1, __ATOMIC_ACQ_REL);
+        g_core_idle[core].idle = 1;
         return;   /* just went quiet — nothing to judge yet */
     }
 
@@ -909,8 +915,7 @@ void nightwatch_core_busy(uint8_t core)
 {
     if (!__atomic_load_n(&g_armed, __ATOMIC_ACQUIRE)) return;
     if (core >= MAX_CORES) return;
-    if (!g_core_idle[core]) return;
+    if (!g_core_idle[core].idle) return;
 
-    g_core_idle[core] = 0;
-    __atomic_sub_fetch(&g_idle_cores, 1, __ATOMIC_ACQ_REL);
+    g_core_idle[core].idle = 0;
 }

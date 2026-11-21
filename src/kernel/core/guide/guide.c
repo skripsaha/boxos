@@ -60,13 +60,30 @@ void guide_init(void)
  * envelope vs named by address. Surfaced via system.perf.dump. The split is
  * the runtime witness that the enclosure path actually runs (a green result
  * with zero enclosed dispatches would mean the path was never exercised). */
-static volatile uint64_t g_dispatch_enclosed;
-static volatile uint64_t g_dispatch_addressed;
+/* Counted by the core that serves, on a line of its own — a count every
+ * K-Core bumped was a line they took from each other at every pocket — and
+ * summed when asked. */
+typedef struct {
+    volatile uint64_t enclosed;
+    volatile uint64_t addressed;
+} __attribute__((aligned(64))) GuideDispatchCount;
+
+static GuideDispatchCount g_dispatch_counts[MAX_CORES];
+
+static inline void guide_count_dispatch(bool enclosed)
+{
+    GuideDispatchCount *c = &g_dispatch_counts[amp_get_core_index()];
+    if (enclosed) __atomic_store_n(&c->enclosed,  c->enclosed  + 1u, __ATOMIC_RELAXED);
+    else          __atomic_store_n(&c->addressed, c->addressed + 1u, __ATOMIC_RELAXED);
+}
 
 void guide_dispatch_stats(uint64_t out[2])
 {
-    out[0] = __atomic_load_n(&g_dispatch_enclosed,  __ATOMIC_RELAXED);
-    out[1] = __atomic_load_n(&g_dispatch_addressed, __ATOMIC_RELAXED);
+    out[0] = out[1] = 0;
+    for (uint32_t c = 0; c < g_amp.total_cores; c++) {
+        out[0] += __atomic_load_n(&g_dispatch_counts[c].enclosed,  __ATOMIC_RELAXED);
+        out[1] += __atomic_load_n(&g_dispatch_counts[c].addressed, __ATOMIC_RELAXED);
+    }
 }
 
 /*
@@ -181,7 +198,7 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
         }
         m_kbuf = (uint8_t *)grant.kbuf;
         memcpy(m_kbuf, pocket->enclosure, manifest_size);
-        __atomic_add_fetch(&g_dispatch_enclosed, 1, __ATOMIC_RELAXED);
+        guide_count_dispatch(true);
     } else {
         if (manifest_uaddr == 0 || manifest_size < sizeof(Manifest)) {
             pocket->error_code = ERR_INVALID_ARGUMENT;
@@ -217,7 +234,7 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
             execution_deck_handler(pocket, proc);
             return;
         }
-        __atomic_add_fetch(&g_dispatch_addressed, 1, __ATOMIC_RELAXED);
+        guide_count_dispatch(false);
     }
 
     /* Crate staging is identical for both modes — async handlers still pin
