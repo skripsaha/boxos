@@ -364,6 +364,10 @@ void kcore_wake(uint8_t core_idx)
  * waits for it (kcore_process_entry). */
 #define KCORE_SERVE_ON_US 50u
 
+/* How long pockets may keep a K-Core from a whole round of its services
+ * (kcore_run_loop). */
+#define KCORE_SERVICES_DUE_US 50u
+
 static void kcore_process_entry(struct process_t* proc)
 {
     if (!proc)
@@ -398,7 +402,7 @@ static void kcore_process_entry(struct process_t* proc)
     const uint64_t began = rdtsc();
     const uint64_t until = began + cpu_us_to_tsc(KCORE_SERVE_ON_US);
     for (;;) {
-        KCallTaken(proc);
+        KCallTaken(proc, q->woke_at);
         guide_process_one(proc);
         if (KPocketIsEmpty(proc) || kcore_queue_depth(core_idx) != 0 ||
             rdtsc() >= until || proc->magic != PROCESS_MAGIC)
@@ -485,6 +489,95 @@ bool kcore_cpu_usage(uint8_t core_idx, uint64_t* busy_tsc, uint64_t* total_tsc)
     return true;
 }
 
+/* The services a K-Core keeps between pockets, in the order it looks at
+ * them — each one load when it has nothing to do (kcore_services). */
+static void (*const g_kcore_services[])(void) = {
+    /* USB hubs, when one has reported a change on its ports.
+     *
+     * Finding out what a hub means by that takes control transfers, and
+     * those have to be waited for — which the interrupt handler that
+     * received the report cannot do. This is the same reasoning that puts
+     * the deferred IRQ work above in this loop, and the same context.
+     *
+     * It is here rather than in the idle loop because on a multi-core
+     * machine the idle loop is not where the cores are: they are here.
+     * Measured — a hub reported, the flag was raised, and cpu_idle was not
+     * reached once in eight seconds.
+     *
+     * The check is one atomic load when there is nothing to do, which is
+     * every iteration but the ones after somebody touched a socket. */
+    xhci_hub_service_if_pending,
+
+    /* And USB devices that have been unplugged. Taking one down means
+     * waiting for the controller to say it has let go of the device
+     * context and for whatever was mid-transfer to come out — and it is
+     * here for the same reason the hubs are, which had to be measured
+     * twice: the first attempt hung this on cpu_idle, where the cores are
+     * parked in MWAIT, and sixty-three devices came and went without a
+     * single one of them being taken down. */
+    xhci_slot_service_if_pending,
+
+    /* And a controller that has stopped itself. Host Controller Error and
+     * Host System Error both mean it has halted and will not start again
+     * on its own; the answer is a reset, which takes up to a second and so
+     * cannot happen where the error was noticed. The same call now also
+     * takes back a command ring that has stopped answering, which the
+     * specification allows the controller five seconds to let go of — and
+     * five seconds is what the timer interrupt that noticed would have
+     * spent not sending its end-of-interrupt. One core does both and the
+     * rest go away. One load of a flag per controller when nothing has
+     * failed. */
+    xhci_recover_if_needed,
+
+    /* And, in a build made with USBRECOVER=on and in no other, the one
+     * proof that the repair above actually works: the hardware deck is
+     * asked, by name, to put a controller back in service, once, on a
+     * machine that has one and a volume to lose. Not a call at all when
+     * the switch is off. */
+    HardwareDeckUsbRecoverProof,
+
+    /* And a read on a USB disk that nobody is standing over and that was
+     * never answered: giving up on one means resetting the transport, and
+     * a Bulk-Only Transport reset is three control transfers. Same
+     * reasoning, same context; it compares a TSC deadline, so it does not
+     * care how often it is asked. */
+    xhci_msd_watchdog,
+
+    /* And a medium that arrived after the room was called to order — a
+     * stick pushed in while the machine runs, or the one it booted from
+     * coming back after its controller was reset. Seating it means asking
+     * it how large it is and whether it is ready, which is transfers, so
+     * it belongs here for the same reason as the three above. */
+    BoardroomAttendIfPending,
+
+    /* And the volume: the work of a file's Helm listed for a service point
+     * — a write's next window, a USB disk's next step — a step of the
+     * Settle cycle this core runs or the start of one that is due, and a
+     * volume that was shut when its medium left and could not be let go
+     * of, because somebody was still inside it. It is here for the same
+     * reason as everything above: none of it can happen where it was
+     * noticed, and on a multi-core machine this loop is where the cores
+     * actually are. One atomic load a duty when there is nothing to do. */
+    TagFSServiceIfPending,
+
+    /* And the Use Context's verdicts, when one went stale: the recount for
+     * cabins that never enter the kernel. One load when none is owed. */
+    UseContextServiceIfPending,
+};
+
+/* One round of the services. With `pockets_first`, a pocket that has come
+ * meanwhile is served before the rest of the round, which the next round
+ * begins again; false when the round is owed whole. True for a whole round. */
+static bool kcore_services(uint8_t my_idx, bool pockets_first)
+{
+    for (uint32_t i = 0; i < sizeof(g_kcore_services) / sizeof(g_kcore_services[0]); i++) {
+        if (pockets_first && kcore_queue_depth(my_idx) != 0)
+            return false;
+        g_kcore_services[i]();
+    }
+    return true;
+}
+
 void kcore_run_loop(void)
 {
     uint8_t my_idx = amp_get_core_index();
@@ -493,12 +586,14 @@ void kcore_run_loop(void)
 
     kprintf("[KCORE] Core %u guide loop started\n", (uint32_t)my_idx);
     q->count_mark = rdtsc();
+    const uint64_t services_due = cpu_us_to_tsc(KCORE_SERVICES_DUE_US);
+    uint64_t       whole_at     = rdtsc();   /* the last whole round of the services */
 
     __asm__ volatile("sti");
 
     for (;;) {
         /*
-         * ‼ ONE POCKET A TURN, AND THEN THE WHOLE LOOP (RT-11).
+         * ‼ ONE POCKET A TURN, AND THEN THE BATONS AND THE SERVICES (RT-11).
          *
          * The boundary is the pocket, never the program. This used to pop until
          * the queue was empty, and the guide served each program's ring until
@@ -512,8 +607,10 @@ void kcore_run_loop(void)
          * mount promises was not kept. Now one pocket is served — a program
          * with more is queued again behind the others (kcore_process_entry) —
          * and everything below has its turn before the next: the batons and a
-         * halt's one-way pass, the services, the volume's Helm work and a step
-         * of its Settle cycle. Whether pockets still wait is what holds a
+         * halt's one-way pass after every pocket; the services, the volume's
+         * Helm work and a step of its Settle cycle after every pocket that
+         * finds no other waiting, and whole at least every
+         * KCORE_SERVICES_DUE_US. Whether pockets still wait is what holds a
          * cycle Lull merely permits back (settle.h): it never stands before
          * work already handed in.
          */
@@ -537,86 +634,24 @@ void kcore_run_loop(void)
          * end itself (settle.h). */
         BatonPumpAtRest(my_idx);
 
-        /* USB hubs, when one has reported a change on its ports.
-         *
-         * Finding out what a hub means by that takes control transfers, and
-         * those have to be waited for — which the interrupt handler that
-         * received the report cannot do. This is the same reasoning that puts
-         * the deferred IRQ work above in this loop, and the same context.
-         *
-         * It is here rather than in the idle loop because on a multi-core
-         * machine the idle loop is not where the cores are: they are here.
-         * Measured — a hub reported, the flag was raised, and cpu_idle was not
-         * reached once in eight seconds.
-         *
-         * The check is one atomic load when there is nothing to do, which is
-         * every iteration but the ones after somebody touched a socket. */
-        xhci_hub_service_if_pending();
-
-        /* And USB devices that have been unplugged. Taking one down means
-         * waiting for the controller to say it has let go of the device
-         * context and for whatever was mid-transfer to come out — and it is
-         * here for the same reason the hubs are, which had to be measured
-         * twice: the first attempt hung this on cpu_idle, where the cores are
-         * parked in MWAIT, and sixty-three devices came and went without a
-         * single one of them being taken down. */
-        xhci_slot_service_if_pending();
-
-        /* And a controller that has stopped itself. Host Controller Error and
-         * Host System Error both mean it has halted and will not start again
-         * on its own; the answer is a reset, which takes up to a second and so
-         * cannot happen where the error was noticed. The same call now also
-         * takes back a command ring that has stopped answering, which the
-         * specification allows the controller five seconds to let go of — and
-         * five seconds is what the timer interrupt that noticed would have
-         * spent not sending its end-of-interrupt. One core does both and the
-         * rest go away. One load of a flag per controller when nothing has
-         * failed. */
-        xhci_recover_if_needed();
-
-        /* And, in a build made with USBRECOVER=on and in no other, the one
-         * proof that the repair above actually works: the hardware deck is
-         * asked, by name, to put a controller back in service, once, on a
-         * machine that has one and a volume to lose. Not a call at all when
-         * the switch is off. */
-        HardwareDeckUsbRecoverProof();
-
-        /* And a read on a USB disk that nobody is standing over and that was
-         * never answered: giving up on one means resetting the transport, and
-         * a Bulk-Only Transport reset is three control transfers. Same
-         * reasoning, same context; it compares a TSC deadline, so it does not
-         * care how often it is asked. */
-        xhci_msd_watchdog();
-
-        /* And a medium that arrived after the room was called to order — a
-         * stick pushed in while the machine runs, or the one it booted from
-         * coming back after its controller was reset. Seating it means asking
-         * it how large it is and whether it is ready, which is transfers, so
-         * it belongs here for the same reason as the three above. */
-        BoardroomAttendIfPending();
-
-        /* And the volume: the work of a file's Helm listed for a service point
-         * — a write's next window, a USB disk's next step — a step of the
-         * Settle cycle this core runs or the start of one that is due, and a
-         * volume that was shut when its medium left and could not be let go
-         * of, because somebody was still inside it. It is here for the same
-         * reason as everything above: none of it can happen where it was
-         * noticed, and on a multi-core machine this loop is where the cores
-         * actually are. One atomic load a duty when there is nothing to do. */
-        TagFSServiceIfPending();
-
-        /* And the Use Context's verdicts, when one went stale: the recount for
-         * cabins that never enter the kernel. One load when none is owed. */
-        UseContextServiceIfPending();
-
-        if ((++loop_count % 10) == 0) {
-            /* P5b: reclaim exited strands (PROC_DONE/CRASHED zombies) before
-             * draining the cleanup queue, so a reaped strand's process_destroy
-             * → cleanup-queue enqueue is freed in this same tick. Without the
-             * reaper, std::thread-style strand churn would exhaust the process
-             * table. Serialised internally so multiple K-Cores cooperate. */
-            process_reap_strands();
-            process_cleanup_deferred();
+        /* The services: a pocket that comes while they are looked at is
+         * served first, and does not wait out a round begun just before it
+         * came — and the round is whole at least every KCORE_SERVICES_DUE_US,
+         * however the pockets come. The batons above are not passed over: a completion or a
+         * deadline is work handed in, as a pocket is. */
+        const bool owed_whole = rdtsc() - whole_at >= services_due;
+        if (kcore_services(my_idx, !owed_whole)) {
+            whole_at = rdtsc();
+            if ((++loop_count % 10) == 0) {
+                /* P5b: reclaim exited strands (PROC_DONE/CRASHED zombies)
+                 * before draining the cleanup queue, so a reaped strand's
+                 * process_destroy → cleanup-queue enqueue is freed in this
+                 * same round. Without the reaper, std::thread-style strand
+                 * churn would exhaust the process table. Serialised
+                 * internally so multiple K-Cores cooperate. */
+                process_reap_strands();
+                process_cleanup_deferred();
+            }
         }
 
         /* Pockets still wait: the next turn, with no look at sleeping. */
@@ -683,6 +718,7 @@ void kcore_run_loop(void)
             else
                 __asm__ volatile("sti; hlt");
             kcore_count(q, false);          /* asleep until now: counted before it says it woke */
+            q->woke_at = rdtsc();
             __atomic_store_n(&q->asleep, KCORE_AWAKE, __ATOMIC_RELEASE);
         }
     }

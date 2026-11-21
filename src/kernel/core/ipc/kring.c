@@ -178,9 +178,11 @@ void KCallGate(process_t *proc)
     if (proc) proc->call_gate = rdtsc();
 }
 
-void KCallTaken(process_t *proc)
+void KCallTaken(process_t *proc, uint64_t kcore_woke)
 {
-    if (proc) proc->call_taken = rdtsc();
+    if (!proc) return;
+    proc->call_taken = rdtsc();
+    proc->call_woke  = kcore_woke;
 }
 
 /* Before the push: the slot's release store publishes the answer, and the
@@ -205,6 +207,7 @@ void KCallAnswered(process_t *proc)
         in_order = in_order && at[k] <= at[k + 1] && at[k + 1] - at[k] <= UINT32_MAX;
     for (uint32_t k = 0; k <= KCALL_MARKS; k++)
         rr->hdr.call_part[k] = in_order ? (uint32_t)(at[k + 1] - at[k]) : 0u;
+    rr->hdr.call_woke     = proc->call_woke;
     rr->hdr.call_gate     = proc->call_gate;
     rr->hdr.call_taken    = proc->call_taken;
     rr->hdr.call_answered = answered;

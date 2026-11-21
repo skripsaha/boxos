@@ -349,6 +349,9 @@ static void print_kv_u64(const char *label, uint64_t v, const char *unit);
 #define STAGES 4
 #define PARTS  6
 static uint64_t s_stage[STAGES + PARTS][BENCH_MAX_SAMPLES];
+/* gate to taken, told apart: the K-Core asleep — to its waking, waking to
+ * taken — or at work, all of it. */
+static uint64_t s_found[3][BENCH_MAX_SAMPLES];
 
 static void bench_call_stages(const char *title, uint32_t n, uint32_t rest_us)
 {
@@ -367,7 +370,7 @@ static void bench_call_stages(const char *title, uint32_t n, uint32_t rest_us)
     if (h->call_answered == 0)
         return;
 
-    uint32_t got = 0, out_of_order = 0, parted = 0;
+    uint32_t got = 0, out_of_order = 0, parted = 0, asleep = 0, awake = 0;
     for (uint32_t i = 0; i < n; i++)
     {
         if (rest_us)
@@ -384,6 +387,15 @@ static void bench_call_stages(const char *title, uint32_t n, uint32_t rest_us)
             out_of_order++;
             continue;
         }
+        const uint64_t woke = h->call_woke;
+        if (gate <= woke && woke <= taken)
+        {
+            s_found[0][asleep] = woke - gate;
+            s_found[1][asleep] = taken - woke;
+            asleep++;
+        }
+        else
+            s_found[2][awake++] = taken - gate;
         s_stage[0][got] = gate - made;
         s_stage[1][got] = taken - gate;
         s_stage[2][got] = answered - taken;
@@ -405,6 +417,22 @@ static void bench_call_stages(const char *title, uint32_t n, uint32_t rest_us)
         bench_stats_t st = {0};
         compute_stats(s_stage[k], k < STAGES ? got : parted, &st);
         print_row(names[k], &st);
+        if (k == 1)
+        {
+            static const char *const found[3] = {
+                "    K-Core asleep: gate to its waking", "    K-Core asleep: waking to taken",
+                "    K-Core at work: gate to taken",
+            };
+            for (uint32_t f = 0; f < 3; f++)
+            {
+                const uint32_t n_found = f < 2 ? asleep : awake;
+                if (n_found == 0)
+                    continue;
+                bench_stats_t fs = {0};
+                compute_stats(s_found[f], n_found, &fs);
+                print_row(found[f], &fs);
+            }
+        }
     }
     if (out_of_order)
         print_kv_u64("  left out, moments not in order:", out_of_order, "calls");

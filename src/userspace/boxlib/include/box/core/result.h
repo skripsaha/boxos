@@ -116,7 +116,11 @@ typedef struct PACKED {
     volatile uint32_t went_turnin_refused_touch;
     volatile uint32_t went_turnin_refused_result;
     volatile uint32_t went_turnin_refused_owed;
-    uint8_t           _pad_line3[44];   /* fill cacheline 3 */
+    uint32_t          _pad_word3;
+    /* When the K-Core that took the call last woke: between the gate and the
+     * taking, the call found it asleep. */
+    volatile uint64_t call_woke;
+    uint8_t           _pad_line3[32];   /* fill cacheline 3 */
 } ResultRingHeader;
 
 STATIC_ASSERT(sizeof(ResultRingHeader) == 256,

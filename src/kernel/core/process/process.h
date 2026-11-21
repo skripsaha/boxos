@@ -250,6 +250,7 @@ typedef struct process_t
      * served, TSC — the stopwatch its answer carries (kring.h). */
     uint64_t call_gate;
     uint64_t call_taken;
+    uint64_t call_woke;      /* when the K-Core that took it last woke */
     uint64_t call_mark[5];   /* peeked, manifest, staged, executed, committed (KCallMark) */
     /* Its asks to sleep (SysTurnIn), as KCallTurnIn counts them. */
     uint32_t turnin_count[5];

@@ -2402,7 +2402,7 @@ void irq_handler(interrupt_frame_t *frame)
 static void sync_syscall_dispatch(process_t *proc, interrupt_frame_t *frame)
 {
     KCallGate(proc);
-    KCallTaken(proc);   /* one core: the gate serves the call itself */
+    KCallTaken(proc, 0);   /* one core: the gate serves the call itself */
     context_save_from_frame(proc, frame);
     ready_queue_push(&g_ready_queue, proc);
     /* Being served is a state of the counter, not of the passenger, and it

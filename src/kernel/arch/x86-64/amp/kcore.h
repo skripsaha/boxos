@@ -53,6 +53,9 @@ typedef struct {
      * `count` are both full barriers, so either the gate sees the claim or
      * the producer sees how it sleeps. */
     volatile uint32_t asleep;
+    /* When this K-Core last woke from its sleep, TSC: the stopwatch tells a
+     * call that found it asleep from one that found it at work. Its own. */
+    uint64_t          woke_at;
     /* The strands this K-Core has taken out of `slots` and holds until it
      * serves them, the least Tip first: a binary heap only this K-Core
      * touches, so it takes no lock and needs no slot index — a held strand's

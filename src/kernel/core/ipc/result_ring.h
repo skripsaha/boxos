@@ -140,7 +140,11 @@ typedef struct __packed {
     volatile uint32_t went_turnin_refused_touch;
     volatile uint32_t went_turnin_refused_result;
     volatile uint32_t went_turnin_refused_owed;
-    uint8_t           _pad_line3[44];   /* fill cacheline 3                */
+    uint32_t          _pad_word3;
+    /* When the K-Core that took the answer's call last woke from its sleep:
+     * between the gate and the taking, the call found it asleep. */
+    volatile uint64_t call_woke;
+    uint8_t           _pad_line3[32];   /* fill cacheline 3                */
 } ResultRingHeader;
 
 _Static_assert(sizeof(ResultRingHeader) == 256,

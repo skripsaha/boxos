@@ -63,13 +63,14 @@ void KPocketRingInHand(process_t *proc, bool in_hand);
 
 /* The stopwatch (make MEASURE=on; nothing at all in any other build): the
  * moment `proc`'s call came to the gate (KCallGate), the moment it was taken
- * to be served — by a K-Core, or on one core by the gate itself (KCallTaken)
+ * to be served — by a K-Core, which last woke at `kcore_woke`, or on one core
+ * by the gate itself, 0 (KCallTaken)
  * — and, just before the answer to it is pushed, those two and the moment it
  * was answered onto its reply ring's stopwatch line (KCallAnswered,
  * result_ring.h). */
 #ifdef CONFIG_MEASURE
 void KCallGate(process_t *proc);
-void KCallTaken(process_t *proc);
+void KCallTaken(process_t *proc, uint64_t kcore_woke);
 void KCallAnswered(process_t *proc);
 /* `proc` gave its core away and `to` took it: counted on proc's stopwatch
  * line, with who took it. */
@@ -80,7 +81,7 @@ void KCallMark(process_t *proc, uint32_t which);
 void KCallTurnIn(process_t *proc, uint32_t outcome);
 #else
 static inline void KCallGate(process_t *proc)     { (void)proc; }
-static inline void KCallTaken(process_t *proc)    { (void)proc; }
+static inline void KCallTaken(process_t *proc, uint64_t kcore_woke) { (void)proc; (void)kcore_woke; }
 static inline void KCallAnswered(process_t *proc) { (void)proc; }
 static inline void KCallYieldWentTo(process_t *proc, process_t *to) { (void)proc; (void)to; }
 static inline void KCallMark(process_t *proc, uint32_t which) { (void)proc; (void)which; }
