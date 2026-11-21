@@ -29,6 +29,7 @@
 #include "amp.h"
 #include "scheduler.h"   /* sched_ring_home — one transition, one bell */
 #include "system_deck.h" /* cabin_heap_take_back — an owed deposit goes with its record */
+#include "idle.h"        /* process_is_idle — a yield that went to nobody */
 
 void KRingPocketInitAt(PocketRing *hdr, uint64_t slots_base, uint32_t slot_count_max)
 {
@@ -191,6 +192,14 @@ void KCallAnswered(process_t *proc)
     rr->hdr.call_gate     = proc->call_gate;
     rr->hdr.call_taken    = proc->call_taken;
     rr->hdr.call_answered = rdtsc();
+}
+
+void KCallYieldWentTo(process_t *proc, process_t *to)
+{
+    ResultRing *rr = kring_result_hdr(proc);
+    if (!rr) return;
+    rr->hdr.yields_given_away = rr->hdr.yields_given_away + 1u;
+    rr->hdr.yield_went_to     = process_is_idle(to) ? UINT32_MAX : to->pid;
 }
 #endif
 

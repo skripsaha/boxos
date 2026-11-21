@@ -119,7 +119,11 @@ typedef struct __packed {
     volatile uint64_t call_gate;
     volatile uint64_t call_taken;
     volatile uint64_t call_answered;
-    uint8_t           _pad_line2[40];   /* fill cacheline 2                */
+    /* And the strand's yields that gave its core to another: how many, and
+     * the PID of the one it went to last (UINT32_MAX the idle strand). */
+    volatile uint32_t yields_given_away;
+    volatile uint32_t yield_went_to;
+    uint8_t           _pad_line2[32];   /* fill cacheline 2                */
 } ResultRingHeader;
 
 _Static_assert(sizeof(ResultRingHeader) == 192,

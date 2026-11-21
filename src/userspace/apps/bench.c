@@ -57,6 +57,7 @@
 #include "box/core/crate.h"
 #include "box/core/cabin.h"
 #include "box/core/result.h"
+#include "box/memory.h"
 #include "box/core/result.h"
 #include "box/error.h"
 #include "box/display.h"
@@ -395,6 +396,38 @@ static void bench_call_stages(const char *title, uint32_t n, uint32_t rest_us)
     }
     if (out_of_order)
         print_kv_u64("  left out, moments not in order:", out_of_order, "calls");
+}
+
+/* (5b) Whom the yields gave the core to: a kernel built MEASURE=on counts,
+ *      on the stopwatch line, a strand's yields that gave its core to
+ *      another and names the strand that took it last. A yield that keeps
+ *      the core costs the gate alone; one that gives it away, a switch there
+ *      and back and whatever the other did meanwhile. Said only when the
+ *      kernel keeps the stopwatch. */
+static void bench_yield_went_to(uint32_t given, uint32_t of, uint32_t went_to)
+{
+    if (result_ring()->hdr.call_answered == 0)
+        return;
+    println("yield, whom the core went to:");
+    print_kv_u64("  yields that gave it to another strand:", given, "");
+    print_kv_u64("  of yields:", of, "");
+    if (given == 0)
+        return;
+    if (went_to == UINT32_MAX) {
+        println("  the last went to the idle strand");
+        return;
+    }
+    print_kv_u64("  the last went to strand", went_to, "");
+    RosterProgram *programs = NULL;
+    const int count = proc_roster(&programs, NULL);
+    for (int p = 0; p < count; p++)
+        for (uint32_t k = 0; k < programs[p].strand_count; k++)
+            if (programs[p].strands[k].pid == went_to) {
+                print_kv_u64("  of the program whose main strand is", programs[p].pid, "");
+                println(programs[p].tags ? programs[p].tags : "  (no tags)");
+            }
+    if (programs)
+        free(programs);
 }
 
 /* (6) Cross-process IPC roundtrip: broadcast a 1-byte DISP_CMD_PING,
@@ -746,7 +779,10 @@ int main(void)
     bench_run("cabin_info() read (no syscall)", b_cabin_info, NULL, 2000);
 
     /* Pure syscall costs */
+    const uint32_t given_before = result_ring()->hdr.yields_given_away;
     bench_run("yield (notify pocket)", b_yield, NULL, 2000);
+    const uint32_t yields_given  = result_ring()->hdr.yields_given_away - given_before;
+    const uint32_t yield_went_to = result_ring()->hdr.yield_went_to;
 
     /* Manifest dispatch costs: back to back, and after 2 ms of quiet — the
      * K-Core asleep, woken by the call */
@@ -754,6 +790,7 @@ int main(void)
     bench_run_rested("1-op Manifest after 2 ms quiet", b_least_call, NULL, 500, 2000);
     bench_call_stages("1-op Manifest, its stages:", 1000, 0);
     bench_call_stages("1-op Manifest after 2 ms quiet, its stages:", 500, 2000);
+    bench_yield_went_to(yields_given, 2000 + WARMUP_ITERS, yield_went_to);
 
     /* One strand waiting on another's work, through the kernel */
     bench_pingpong("strand ping-pong (park/wake, rtt)", 1000);

@@ -57,10 +57,14 @@ void KPocketRingInHand(process_t *proc, bool in_hand);
 void KCallGate(process_t *proc);
 void KCallTaken(process_t *proc);
 void KCallAnswered(process_t *proc);
+/* `proc` gave its core away and `to` took it: counted on proc's stopwatch
+ * line, with who took it. */
+void KCallYieldWentTo(process_t *proc, process_t *to);
 #else
 static inline void KCallGate(process_t *proc)     { (void)proc; }
 static inline void KCallTaken(process_t *proc)    { (void)proc; }
 static inline void KCallAnswered(process_t *proc) { (void)proc; }
+static inline void KCallYieldWentTo(process_t *proc, process_t *to) { (void)proc; (void)to; }
 #endif
 
 /* Push, or take the answer as a DEBT — the entry point for a message whose

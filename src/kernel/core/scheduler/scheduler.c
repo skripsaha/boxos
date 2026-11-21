@@ -1429,6 +1429,8 @@ void schedule(void *frame_ptr)
      * had no end — it was alone — or when its turn has ended. */
     if (next != current || s->turn_due == 0 || now >= s->turn_due)
         s->turn_began = now;
+    if (turn_given && current && next != current && !process_is_idle(current))
+        KCallYieldWentTo(current, next);
     s->current_process = next;
     __atomic_store_n(&s->given_up, turn_given && next == current && !process_is_idle(next), __ATOMIC_RELAXED);
     __atomic_store_n(&s->short_here,
