@@ -55,10 +55,24 @@ typedef struct __packed {
     /* Cacheline 1 — producer cursor (userspace). */
     volatile uint64_t tail;             /* producer cursor (userspace)     */
     uint8_t           _pad_line1[56];   /* fill cacheline 1                */
+
+    /* Cacheline 2 — the ring in the kernel's hand: 1 from the moment the
+     * strand is put in a K-Core's queue (kcore_pending won) until the K-Core
+     * that serves it lets it go — and before letting go it looks at the ring
+     * once more. A pocket pushed meanwhile is served without a word, so the
+     * strand rings the gate only when this reads 0, after its push and a full
+     * barrier (boxlib pocket_submit). Written by the kernel alone and NEVER
+     * read by it: kcore_pending is the truth, this its mirror for the strand,
+     * which can mislead nobody but itself by writing it. */
+    volatile uint64_t in_hand;
+    uint8_t           _pad_line2[56];   /* fill cacheline 2                */
 } PocketRingHeader;
 
-_Static_assert(sizeof(PocketRingHeader) == 128,
-               "PocketRingHeader must be 128 bytes (two cachelines)");
+_Static_assert(sizeof(PocketRingHeader) == 192,
+               "PocketRingHeader must be 192 bytes (three cachelines)");
+_Static_assert(__builtin_offsetof(PocketRingHeader, in_hand) == 128,
+               "PocketRingHeader.in_hand must start cacheline 2 — boxlib's "
+               "mirror agrees");
 _Static_assert(__builtin_offsetof(PocketRingHeader, head) == 0,
                "PocketRingHeader.head must start at offset 0");
 _Static_assert(__builtin_offsetof(PocketRingHeader, tail) == 64,

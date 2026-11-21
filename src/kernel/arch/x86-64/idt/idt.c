@@ -2464,6 +2464,7 @@ static void async_syscall_dispatch(process_t *proc, interrupt_frame_t *frame)
     if (atomic_cas_u8(&proc->kcore_pending, 0, 1))
     {
         debug_printf("[A%u] ASYNC submit PID %u to K-Core\n", core_idx, proc->pid);
+        KPocketRingInHand(proc, true);   /* before the queue: the K-Core clears it */
         kcore_submit(proc);
     }
     else
@@ -2498,17 +2499,15 @@ void idt_set_syscall_mode(bool multicore)
 
 void syscall_handler(interrupt_frame_t *frame)
 {
-    scheduler_state_t *sched_state = scheduler_get_state();
-
-    spin_lock(&sched_state->scheduler_lock);
-    process_t *proc = sched_state->current_process;
+    /* The strand this core runs: written by this core alone, with its
+     * interrupts off (schedule, process_start_initial), and they are off here
+     * too — SFMASK carries IF — so it is read as it stands, with no lock. */
+    process_t *proc = scheduler_get_state()->current_process;
     if (!proc || proc->magic != PROCESS_MAGIC)
     {
-        spin_unlock(&sched_state->scheduler_lock);
         frame->rax = (uint64_t)-1;
         return;
     }
-    spin_unlock(&sched_state->scheduler_lock);
 
     frame->rax = 0;
 

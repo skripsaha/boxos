@@ -158,6 +158,12 @@ bool KPocketPopAt(process_t *proc, uint64_t pos)
  * ResultRing producer
  * ------------------------------------------------------------------------- */
 
+void KPocketRingInHand(process_t *proc, bool in_hand)
+{
+    PocketRing *r = kring_pocket_hdr(proc);
+    if (r) __atomic_store_n(&r->hdr.in_hand, in_hand ? 1u : 0u, __ATOMIC_RELEASE);
+}
+
 static ResultRing *kring_result_hdr(process_t *proc)
 {
     /* P5a: per-strand ResultRing (see kring_pocket_hdr). */

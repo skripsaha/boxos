@@ -24,7 +24,14 @@ int pocket_submit(Pocket* p) {
         yield();
     }
 
-    __notify();
+    /* A ring in the kernel's hand is looked at once more before it is let
+     * go, so the gate is rung only for one that is not. The push, a full
+     * barrier and this look pair with the K-Core's letting go, barrier and
+     * look at the ring (kcore.c): one of the two sees the other — the pocket
+     * is served without a word, or the gate is rung. */
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (!ring->hdr.in_hand)
+        __notify();
     return 0;
 }
 

@@ -41,6 +41,12 @@ uint32_t KPocketCount(process_t *proc);
  *                   allocation failure. */
 bool KResultPush(process_t *target, const Result *r);
 
+/* The mirror of kcore_pending in `proc`'s pocket ring (PocketRingHeader
+ * in_hand): set before the strand goes into a K-Core's queue, cleared before
+ * the K-Core lets it go and looks at its ring once more. Never read by the
+ * kernel. */
+void KPocketRingInHand(process_t *proc, bool in_hand);
+
 /* The stopwatch (make MEASURE=on; nothing at all in any other build): the
  * moment `proc`'s call came to the gate (KCallGate), the moment it was taken
  * to be served — by a K-Core, or on one core by the gate itself (KCallTaken)

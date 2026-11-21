@@ -166,9 +166,10 @@ static struct process_t* kcore_queue_pop(KCorePocketQueue* q)
     struct process_t* proc = __atomic_load_n(&q->slots[h], __ATOMIC_ACQUIRE);
     if (!proc) return NULL;
 
+    /* The slot emptied before the head moves past it — two stores, which
+     * x86 keeps in order; nothing here is read back. */
     q->slots[h] = NULL;
-    mfence();
-    q->head = (h + 1) & KCORE_QUEUE_MASK;
+    __atomic_store_n(&q->head, (h + 1) & KCORE_QUEUE_MASK, __ATOMIC_RELEASE);
     /* `count` stays: the strand still waits, held now (kcore_hold), and is
      * counted off when it is served (kcore_next). */
     return proc;
@@ -382,8 +383,14 @@ static void kcore_process_entry(struct process_t* proc)
     guide_process_one(proc);
     proc->tip += sched_fare_for(proc, rdtsc() - began);
 
+    /* Let go: the mirror first, so a gate that wins kcore_pending after the
+     * store below sets it after this clears it; then the full barrier
+     * between letting go and the look at the ring that follows — the
+     * strand's own push, barrier and look at the mirror pair with it, so a
+     * pocket pushed now is seen by one side or the other. The stores
+     * themselves stay in order on x86 without one. */
     __atomic_store_n(&q->serving, NULL, __ATOMIC_RELEASE);
-    mfence();
+    KPocketRingInHand(proc, false);
     atomic_store_u8(&proc->kcore_pending, 0);
     mfence();
 
@@ -403,6 +410,7 @@ static void kcore_process_entry(struct process_t* proc)
      * kcore_process_entry. No locks held across this. */
     if (!KPocketIsEmpty(proc)) {
         if (atomic_cas_u8(&proc->kcore_pending, 0, 1)) {
+            KPocketRingInHand(proc, true);
             kcore_submit(proc);
         }
     }
