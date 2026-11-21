@@ -97,7 +97,7 @@ error_t scheduler_init(void);
 void scheduler_init_core(uint8_t core_index);
 void scheduler_shutdown(void);
 void schedule(void *frame);
-process_t *scheduler_select_next(void);
+process_t *scheduler_select_next(process_t *passed);
 /* A strand came to this core's runqueue (IPI_WAKE). The strand running here
  * keeps the core to the end of its least turn when the newcomer is owed it,
  * else to the end of its turn — its one-shot armed for that moment — and the
@@ -132,9 +132,9 @@ uint64_t sched_fare_for(const process_t *proc, uint64_t cycles);
 uint64_t sched_rebase(uint64_t paid, bool known, uint64_t there, uint64_t here);
 error_t sched_dequeue(process_t *proc);
 /* The strand running on this core gives its core away (GATE_YIELD): its next
- * schedule() stands it behind the strand this core runs next, so the one it
- * steps aside for runs first and a waiter looks at its answer again one turn
- * later, not a round later. */
+ * schedule() passes it once for the least Fare queued after it, at the Fare it
+ * has paid, so the one it steps aside for runs first and a waiter looks at its
+ * answer again one turn later, not a round later. */
 void sched_yield_turn(void);
 /* The doorbell for a strand that is runnable but may be waiting its turn: IPI
  * its home core, unless it is on a CPU right now (it reads its rings itself)

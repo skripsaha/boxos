@@ -744,7 +744,14 @@ static inline bool SchedMayDispatch(process_t *proc)
            !__atomic_load_n(&proc->destroying, __ATOMIC_ACQUIRE);
 }
 
-process_t *scheduler_select_next(void)
+/* The strand this core runs next: the least Fare queued — `passed` aside this
+ * once when anyone else is queued. A strand that gave its turn away is passed
+ * at the Fare it has paid, not charged more: it was standing behind a strand
+ * that paid more, at that strand's Fare, and kept that place through a sleep —
+ * it woke a millisecond behind the strand it waits on, which on one core then
+ * sent it more than its rings hold (touch_test TT 23). As EEVDF's yield moves
+ * a deadline and leaves the lag (kernel/sched/fair.c, yield_task_fair). */
+process_t *scheduler_select_next(process_t *passed)
 {
     scheduler_state_t *s = scheduler_get_state();
     if (!s) return idle_process_get();
@@ -762,6 +769,15 @@ process_t *scheduler_select_next(void)
     process_t *next = runqueue_dequeue_best(&s->runqueue);
     while (next && !SchedMayDispatch(next))
         next = runqueue_dequeue_best(&s->runqueue);
+    if (next && next == passed) {
+        process_t *other = runqueue_dequeue_best(&s->runqueue);
+        while (other && !SchedMayDispatch(other))
+            other = runqueue_dequeue_best(&s->runqueue);
+        if (other && runqueue_enqueue(&s->runqueue, passed))
+            next = other;
+        else if (other)
+            (void)runqueue_enqueue(&s->runqueue, other);
+    }
     if (next)
         sched_raise_waterline(s, next->fare);
 
@@ -1171,22 +1187,17 @@ void schedule(void *frame_ptr)
         }
     }
 
-    /* The strand switched out pays its Fare for the time it held this core —
-     * and one that gave its turn away stands behind the strand that pays the
-     * least — and goes back among this core's strands at what it now owes,
-     * while it still works. Paid under the runqueue lock: a strand woken while
-     * it still held this core is queued here already (sched_enqueue), and its
-     * slot follows its Fare. */
+    /* The strand switched out pays its Fare for the time it held this core,
+     * and goes back among this core's strands at what it now owes, while it
+     * still works. Paid under the runqueue lock: a strand woken while it still
+     * held this core is queued here already (sched_enqueue), and its slot
+     * follows its Fare. */
     if (current && !process_is_idle(current))
     {
         uint8_t me = amp_get_core_index();
         spin_lock(&s->runqueue.lock);
         if (current->fare_tsc != 0 && now > current->fare_tsc)
             current->fare += sched_fare_for(current, now - current->fare_tsc);
-        uint64_t next_fare;
-        if (turn_given && sched_least_other(&s->runqueue, current, &next_fare) &&
-            current->fare <= next_fare)
-            current->fare = next_fare + 1;
         /* Re-check state UNDER the runqueue lock before committing the enqueue.
          * process_set_state's WORKING→non-WORKING transition takes THIS same
          * runqueue lock for its sched_dequeue (the core a running strand's
@@ -1217,7 +1228,7 @@ void schedule(void *frame_ptr)
     /* RT-10: on one core idle may be owed the next quantum (idle.c, IdleOwed). */
     process_t *next = (current && !process_is_idle(current) && IdleOwed())
                           ? idle_process_get()
-                          : scheduler_select_next();
+                          : scheduler_select_next(turn_given ? current : NULL);
 
     /* Nothing of its own to run: work waiting on a busier core is taken at
      * once, not at the next look. */
