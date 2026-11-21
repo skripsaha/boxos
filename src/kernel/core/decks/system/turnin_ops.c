@@ -7,7 +7,9 @@
  * ring"; a submit's result_wait says "wake me on my answer". A strand whose work
  * can arrive on EITHER had to keep both eyes open, which on this machine meant a
  * yield loop: the display daemon and the shell's readline between them burned
- * roughly one whole core with the box doing nothing at all.
+ * roughly one whole core with the box doing nothing at all. A strand waiting on
+ * one of them alone marks the other unwatched (SYSTEM_TURN_IN_UNWATCHED): a
+ * Touch wait is not kept awake by answers it is not taking.
  *
  * WHY A CURSOR AND NOT "THE RING IS EMPTY". Emptiness cannot tell "nothing came"
  * from "it came and I already took it". The caller takes its mark, looks at
@@ -104,10 +106,10 @@ static uint64_t turnin_result_tail(process_t *proc)
 static bool turnin_arrival_pending(process_t *proc,
                                    uint64_t touch_seen, uint64_t result_seen)
 {
-    return turnin_touch_tail(proc)  != touch_seen  ||
-           turnin_result_tail(proc) != result_seen ||
-           KResultRingHasUnreadAtHead(proc)        ||
-           KTouchRingHasUnreadAtHead(proc);
+    const bool touch  = touch_seen  != SYSTEM_TURN_IN_UNWATCHED;
+    const bool result = result_seen != SYSTEM_TURN_IN_UNWATCHED;
+    return (touch  && (turnin_touch_tail(proc)  != touch_seen  || KTouchRingHasUnreadAtHead(proc))) ||
+           (result && (turnin_result_tail(proc) != result_seen || KResultRingHasUnreadAtHead(proc)));
 }
 
 /* -------------------------------------------------------------------------
@@ -123,6 +125,8 @@ static int SysTurnIn(const ManifestOp *op, Crate *crates,
     uint64_t touch_seen, result_seen;
     memcpy(&touch_seen,  op->params,     sizeof(uint64_t));
     memcpy(&result_seen, op->params + 8, sizeof(uint64_t));
+    if (touch_seen == SYSTEM_TURN_IN_UNWATCHED && result_seen == SYSTEM_TURN_IN_UNWATCHED)
+        return ERR_INVALID_ARGUMENT;
 
     process_t *proc = ctx->proc;
 
