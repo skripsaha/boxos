@@ -67,16 +67,11 @@ std::expected<std::vector<std::uint8_t>, std::string> ReadWhole(file_id_t File, 
 std::expected<std::vector<std::uint8_t>, std::string> ReadFontFile(std::string_view NameView, std::string_view Tags)
 {
     const std::string Name(NameView);
-    const std::string Stem = Name.substr(0, Name.rfind('.'));
-    if (Stem.empty()) return std::unexpected(Name.empty() ? std::string("no font file is named") :
-                                                            "a file called " + Name + " has no stem to be found by");
-    if (Stem.find_first_of(":,") != std::string::npos)
-        return std::unexpected("a file called " + Name + " cannot be asked for by its name");
+    if (Name.empty()) return std::unexpected("no font file is named");
 
-    std::string Asked = Stem;
-    if (!Tags.empty()) Asked += ", " + std::string(Tags);
-    file_id_t *Ids   = nullptr;
-    const int  Count = query_all_everywhere(Asked.c_str(), nullptr, &Ids);
+    const std::string Wearing(Tags);
+    file_id_t        *Ids   = nullptr;
+    const int         Count = query_name_all_everywhere(Name.c_str(), Wearing.c_str(), nullptr, &Ids);
     if (Count < 0) return std::unexpected("the volume would not say which files are called " + Name + Code(Count));
     file_id_t First   = 0;
     int       Matches = 0;

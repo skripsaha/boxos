@@ -1519,7 +1519,8 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
     uint64_t          from       = 1;
     uint64_t          found_id   = 0;
     do {
-        error_t asked = TagFSNamedPage(name, name_len, NULL, 0, from, page_ids, ARRAY_SIZE(page_ids), false, &page);
+        error_t asked = TagFSNamedPage(name, name_len, NULL, 0, NULL, 0, from, page_ids, ARRAY_SIZE(page_ids),
+                                       false, &page);
         if (asked == ERR_TAGFS_NOT_INITIALIZED) return ERR_FILE_NOT_FOUND;
         if (asked != OK) return asked;
         for (uint32_t i = 0; i < page.delivered && found_id == 0; i++) {

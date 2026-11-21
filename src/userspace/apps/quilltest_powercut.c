@@ -456,7 +456,7 @@ bool QuillNumber(const char *word, uint32_t *out)
 }
 
 /* "crowd" and the number in ten digits: every name one length whatever the
- * number, so the tag a name gives its file is a registry record of one size
+ * number, so the tag a crowd file wears is a registry record of one size
  * the host can count on — tools/powercut.sh chaingrow brings a volume to the
  * edge of a registry block with them. */
 static void QuillCrowdName(uint32_t number, char out[QUILL_CROWD_NAME])
@@ -469,7 +469,7 @@ static void QuillCrowdName(uint32_t number, char out[QUILL_CROWD_NAME])
     out[15] = '\0';
 }
 
-/* The tag a crowd name gives its file is the name itself (it has no dot), so
+/* The tag a crowd file is made to wear is the name itself (it has no dot), so
  * before the file is made no other may wear it: a file of this very name — an
  * earlier crowd's — is deleted, and one of any other name is the case's FAIL,
  * because the tag would then not be the new file's own. Returns 0 once none
@@ -497,8 +497,8 @@ static int QuillCrowdClear(const char *name, uint32_t *deleted, file_id_t *other
 }
 
 /* N files crowdNNNNNNNNNN numbered from FROM, each wearing one tag no other
- * file on the volume wears — its name — so each adds one record to the tag
- * registry, flushed as the file is made (tagfs.c, "The name is a tag"), and
+ * file on the volume wears — its name, put on it — so each adds one record to
+ * the tag registry, flushed as the file is made, and
  * one row to the file table, which the anchor after the last one writes. A
  * name an earlier crowd made is made again, its old file deleted first: that
  * spends a file id and adds no record, and the verdict counts those apart.
@@ -529,7 +529,7 @@ QuillVerdict QuillCrowd(const char *const *args)
         file_id_t other   = 0;
         QuillCrowdName(from + i, name);
         int crc = QuillCrowdClear(name, &deleted, &other);
-        int64_t fid = crc == 0 ? create_everywhere(name, NULL) : 0;
+        int64_t fid = crc == 0 ? create_everywhere(name, name) : 0;
         if (fid <= 0) {
             int arc = unanchored ? 0 : anchor(0);
             const char *how = unanchored ? "left unanchored, anchors asked:" : "anchor answered";

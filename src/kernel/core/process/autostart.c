@@ -84,7 +84,8 @@ static uint64_t autostart_find(const char *name)
     TagFSPage page;
     uint64_t  from = 1;
     do {
-        if (TagFSNamedPage(name, strlen(name), NULL, 0, from, file_ids, ARRAY_SIZE(file_ids), false, &page) != OK)
+        if (TagFSNamedPage(name, strlen(name), NULL, 0, NULL, 0, from, file_ids, ARRAY_SIZE(file_ids), false,
+                           &page) != OK)
             return 0;
         for (uint32_t i = 0; i < page.delivered; i++) {
             TagFSMetadata meta;

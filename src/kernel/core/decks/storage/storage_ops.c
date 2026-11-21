@@ -686,7 +686,8 @@ static error_t storage_query_into(const TagSpelling *tags, uint32_t count, const
         uint32_t  room = most - hdr[0] < STORAGE_QUERY_PIECE ? most - hdr[0] : STORAGE_QUERY_PIECE;
         TagFSPage page;
         if (word)
-            rc = TagFSNamedPage(word, word_len, tags, count, from, piece, room, first, &page);
+            rc = TagFSNamedPage(word, word_len, tags, count, without, without_count, from, piece, room, first,
+                                &page);
         else if (kept)
             rc = TagFSQueryKeptPage(tags, count, without, without_count, from, piece, room, first, &page);
         else
@@ -788,10 +789,10 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     return OK;
 }
 
-/* STORAGE_NAME_QUERY  params (optional): [u8 scope] — inside the Use Context
- *                     (absent, STORAGE_SCOPE_USE: the files called the word
- *                     that wear the context's tags too) or STORAGE_SCOPE_
- *                     EVERYWHERE. in_crate: the word, its bytes whole.
+/* STORAGE_NAME_QUERY  params (optional): [u8 scope][tags set aside] — as
+ *                     STORAGE_TAG_QUERY's, but for the one scope it does not
+ *                     take, DELETED. in_crate: the word, its bytes whole, and
+ *                     after a NUL the tags the files must wear too.
  *                     out_crate: as STORAGE_TAG_QUERY's. */
 static int ObjNameQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx)
 {
@@ -808,27 +809,46 @@ static int ObjNameQuery(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     TagFSState *state = tagfs_get_state();
     if (!state || !state->initialized) return ERR_NOT_INITIALIZED;
 
-    char  *word     = NULL;
-    size_t word_len = 0;
-    rc = storage_crate_text(op, crates, ctx, &word, &word_len);
+    char  *text     = NULL;
+    size_t text_len = 0;
+    rc = storage_crate_text(op, crates, ctx, &text, &text_len);
     if (rc != OK) return rc;
-    if (word_len == 0) return ERR_INVALID_ARGUMENT;
+
+    size_t word_len = 0;
+    while (word_len < text_len && text[word_len] != '\0') word_len++;
+    if (word_len == 0) {
+        crate_buf_free(text);
+        return ERR_INVALID_ARGUMENT;
+    }
+    const bool   tagged   = word_len < text_len;
+    const char  *tag_text = tagged ? text + word_len + 1 : NULL;
+    const size_t tag_len  = tagged ? text_len - word_len - 1 : 0;
+
+    TagSpelling *without       = NULL;
+    uint32_t     without_count = 0;
+    rc = storage_without_spelled(op, 1, &without, &without_count);
+    if (rc != OK) {
+        crate_buf_free(text);
+        return rc;
+    }
 
     TagSpelling *tags  = NULL;
     UseList     *use   = NULL;
     uint32_t     own   = 0;
     uint32_t     total = 0;
-    rc = storage_tags_spelled(scope, NULL, 0, &tags, &use, &own, &total);
+    rc = storage_tags_spelled(scope, tag_text, tag_len, &tags, &use, &own, &total);
     if (rc != OK) {
-        crate_buf_free(word);
+        kfree(without);
+        crate_buf_free(text);
         return rc;
     }
 
     uint32_t hdr[2] = { 0, 0 };   /* delivered, total */
-    rc = storage_query_into(tags, total, NULL, 0, false, word, word_len, out, ctx, hdr);
+    rc = storage_query_into(tags, total, without, without_count, false, text, word_len, out, ctx, hdr);
     kfree(tags);
+    kfree(without);
     UseListDrop(use);
-    crate_buf_free(word);
+    crate_buf_free(text);
     if (rc != OK) return rc;
 
     int crc = crate_out_commit_at(out, ctx, 0, hdr, sizeof(hdr));

@@ -13,6 +13,20 @@
 #include "klib.h"
 #include "touch.h"
 
+void StorageFileSays(const TagFSMetadata *meta, const void *event, size_t size, uint32_t pid)
+{
+    for (uint32_t i = 0; i < meta->tag_count; i++)
+        TouchPublishId(meta->tag_ids[i], event, size, pid, TOUCH_FLAG_TAGFS);
+
+    size_t   lengths[2];
+    uint32_t words = TagFSNameWords(meta->filename, strlen(meta->filename), lengths);
+    for (uint32_t i = 0; i < words; i++) {
+        TouchTag full, bare;
+        if (TouchTagResolve(meta->filename, lengths[i], &full, &bare) == OK)
+            TouchPublishPair(full, bare, event, size, pid, TOUCH_FLAG_TAGFS);
+    }
+}
+
 void storage_deck_init(void)
 {
     kprintf("[Storage Deck] Initializing...\n");

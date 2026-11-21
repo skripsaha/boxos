@@ -25,24 +25,29 @@ static bool Indexed(const FileRecord* rec)
     return rec && !(rec->flags & TAGFS_FILE_DELETED);
 }
 
-/* The bytes of the record's name that link `which` stands for: the whole name
- * (0), or its stem (1). False when there is nothing to match: no name, no
- * stem before the last dot, or no dot, when the stem is the name already. */
-static bool KeyLength(const FileRecord* rec, uint32_t which, uint32_t* length)
+uint32_t TagFSNameWords(const char* name, size_t length, size_t lengths[2])
 {
-    if (rec->name_len == 0)
-        return false;
-    if (which == 0) {
-        *length = rec->name_len;
-        return true;
-    }
-    for (uint32_t at = rec->name_len; at > 0; at--) {
-        if (rec->name[at - 1] == '.') {
-            *length = at - 1;
-            return at - 1 > 0;
+    if (length == 0)
+        return 0;
+    lengths[0] = length;
+    for (size_t at = length; at > 1; at--) {
+        if (name[at - 1] == '.') {
+            lengths[1] = at - 1;
+            return 2;
         }
     }
-    return false;
+    return 1;
+}
+
+/* The bytes of the record's name that link `which` stands for: the whole name
+ * (0), or its stem (1). False when there is nothing to match. */
+static bool KeyLength(const FileRecord* rec, uint32_t which, uint32_t* length)
+{
+    size_t lengths[2];
+    if (which >= TagFSNameWords(rec->name, rec->name_len, lengths))
+        return false;
+    *length = (uint32_t)lengths[which];
+    return true;
 }
 
 static void LinkIn(NameLink** bucket, uint32_t buckets, NameLink* link)

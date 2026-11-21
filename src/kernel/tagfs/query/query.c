@@ -274,10 +274,11 @@ static bool WearsAsked(const TagFSState* fs, uint64_t fid, const uint32_t* tag_i
 }
 
 /* The files the index names for the word, a batch at a time from `from` on,
- * each onto the page when it wears the asked tags. */
+ * each onto the page when it wears the asked tags and none of `unless`. */
 static void NamedPageInside(const char* word, size_t length, const uint32_t* tag_ids, uint32_t tag_count,
-                            const TagIdList* groups, uint32_t group_count, uint64_t from, uint64_t* out,
-                            uint32_t room, bool want_total, TagFSPage* page)
+                            const TagIdList* groups, uint32_t group_count, const uint32_t* unless,
+                            uint32_t unless_count, uint64_t from, uint64_t* out, uint32_t room,
+                            bool want_total, TagFSPage* page)
 {
     TagFSState* fs = tagfs_get_state();
     uint64_t    batch[QUERY_BATCH];
@@ -285,40 +286,50 @@ static void NamedPageInside(const char* word, size_t length, const uint32_t* tag
     uint64_t    next;
     do {
         uint32_t n = FileMapNamed(fs->files, word, length, at, batch, QUERY_BATCH, &next);
-        for (uint32_t i = 0; i < n; i++)
-            if (WearsAsked(fs, batch[i], tag_ids, tag_count, groups, group_count) &&
+        for (uint32_t i = 0; i < n; i++) {
+            bool aside = false;
+            for (uint32_t u = 0; u < unless_count && !aside; u++)
+                aside = TagBitmapHas(fs->bitmap_index, unless[u], batch[i]);
+            if (!aside && WearsAsked(fs, batch[i], tag_ids, tag_count, groups, group_count) &&
                 !PageTake(page, out, room, want_total, batch[i]))
                 return;
+        }
         at = next;
     } while (next != 0);
 }
 
 error_t TagFSNamedPage(const char* word, size_t length, const TagSpelling* tags, uint32_t count,
-                       uint64_t from, uint64_t* out, uint32_t room, bool want_total, TagFSPage* page)
+                       const TagSpelling* without, uint32_t without_count, uint64_t from, uint64_t* out,
+                       uint32_t room, bool want_total, TagFSPage* page)
 {
     memset(page, 0, sizeof(*page));
-    if (!word || length == 0 || (count && !tags) || (room && !out))
+    if (!word || length == 0 || (count && !tags) || (without_count && !without) || (room && !out))
         return ERR_INVALID_ARGUMENT;
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
 
-    uint32_t    tag_count   = 0;
-    uint32_t    group_count = 0;
-    bool        wearable    = false;
-    error_t     rc          = OK;
-    uint32_t*   tag_ids     = kmalloc(sizeof(uint32_t) * ((size_t)count + 1u));
-    TagIdList*  groups      = count ? kmalloc(sizeof(TagIdList) * count) : NULL;
+    uint32_t    tag_count    = 0;
+    uint32_t    group_count  = 0;
+    uint32_t*   unless       = NULL;
+    uint32_t    unless_count = 0;
+    bool        wearable     = false;
+    error_t     rc           = OK;
+    uint32_t*   tag_ids      = kmalloc(sizeof(uint32_t) * ((size_t)count + 1u));
+    TagIdList*  groups       = count ? kmalloc(sizeof(TagIdList) * count) : NULL;
     if (!tag_ids || (count && !groups))
         rc = ERR_NO_MEMORY;
     else
         rc = QueryResolve(tags, count, tag_ids, &tag_count, groups, &group_count, &wearable);
     if (rc == OK && wearable)
-        NamedPageInside(word, length, tag_ids, tag_count, groups, group_count, from, out, room, want_total,
-                        page);
+        rc = QueryUnless(without, without_count, false, &unless, &unless_count);
+    if (rc == OK && wearable)
+        NamedPageInside(word, length, tag_ids, tag_count, groups, group_count, unless, unless_count, from, out,
+                        room, want_total, page);
     for (uint32_t g = 0; g < group_count; g++)
         kfree(groups[g].ids);
     kfree(tag_ids);
     kfree(groups);
+    kfree(unless);
     tagfs_leave();
     return rc;
 }

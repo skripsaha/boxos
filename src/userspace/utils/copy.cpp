@@ -75,16 +75,8 @@ std::string Grouped(std::uint64_t Number)
     return Result;
 }
 
-/* The name up to its last dot: the tag every file wears for its name. */
-std::string_view StemOf(std::string_view Name)
-{
-    std::size_t Dot = Name.rfind('.');
-    return Dot == std::string_view::npos ? Name : Name.substr(0, Dot);
-}
-
-/* A file's tags as the person is told them: all but the one it wears for its
- * own name. */
-std::string ShownTags(const char *Tags, std::string_view Name)
+/* A file's tags as the person is told them. */
+std::string ShownTags(const char *Tags)
 {
     std::string Shown;
     if (!Tags) return "no tags";
@@ -93,7 +85,7 @@ std::string ShownTags(const char *Tags, std::string_view Name)
         std::size_t      Comma = Rest.find(',');
         std::string_view Tag   = Rest.substr(0, Comma);
         Rest = Comma == std::string_view::npos ? std::string_view() : Rest.substr(Comma + 1);
-        if (Tag.empty() || Tag == StemOf(Name)) continue;
+        if (Tag.empty()) continue;
         if (!Shown.empty()) Shown += ", ";
         Shown += Tag;
     }
@@ -105,18 +97,17 @@ struct CarriedTags {
     std::vector<std::string> Kept;
 };
 
-/* The source's tags but its name's own, which the new name makes afresh. */
-CarriedTags TagsToCarry(const char *Tags, std::string_view SourceName)
+/* The source's tags, every one: the name is no tag, and the copy has its own. */
+CarriedTags TagsToCarry(const char *Tags)
 {
     CarriedTags Carried;
     if (!Tags) return Carried;
     std::string_view Rest = Tags;
-    std::string_view Stem = StemOf(SourceName);
     while (!Rest.empty()) {
         std::size_t     Comma = Rest.find(',');
         std::string_view Tag  = Rest.substr(0, Comma);
         Rest = Comma == std::string_view::npos ? std::string_view() : Rest.substr(Comma + 1);
-        if (Tag.empty() || Tag == Stem) continue;
+        if (Tag.empty()) continue;
         if (!Carried.Joined.empty()) Carried.Joined += ',';
         Carried.Joined += Tag;
         Carried.Kept.emplace_back(Tag);
@@ -198,7 +189,7 @@ NameSettled SettleTakenName(std::string_view NewName)
                                       NewName);
         return Settled;
     }
-    std::string Tags = ShownTags(Old.Tags, NewName);
+    std::string Tags = ShownTags(Old.Tags);
     FileMetadataRelease(&Old);
 
     switch (AskReplace(NewName, Tags)) {
@@ -371,7 +362,7 @@ int CopyFile(file_id_t Source, std::string_view NewName)
     }
     std::string   SourceName = Metadata.Filename ? Metadata.Filename : "a file with no name";
     std::uint64_t Size       = Metadata.Size;
-    CarriedTags   Carried    = TagsToCarry(Metadata.Tags, SourceName);
+    CarriedTags   Carried    = TagsToCarry(Metadata.Tags);
     FileMetadataRelease(&Metadata);
 
     std::string Refusal = NameRefusal(NewName, SourceName);

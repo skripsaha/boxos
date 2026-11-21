@@ -54,14 +54,12 @@ int settings_file_find(const char *program, file_id_t *file, char **saying)
 
     *file = 0;
     if (saying) *saying = NULL;
-    /* A name too long for a file name, or one that cannot be asked as a tag,
-     * has no settings file. */
-    if (strlen(program) > SETTINGS_NAME_MAX || strchr(program, ':') || strchr(program, ',')) return 0;
+    /* A name too long for a file name has no settings file. */
+    if (strlen(program) > SETTINGS_NAME_MAX) return 0;
     snprintf(name, sizeof(name), "%s.settings", program);
-    /* Every file wears the stem of its name as a tag: clock.settings wears
-     * clock. A settings file in the trash says nothing: the person set it
-     * aside. */
-    int count = query_all_everywhere(program, NULL, &ids);
+    /* Asked of the name index by the whole name. A settings file in the trash
+     * says nothing: the person set it aside. */
+    int count = query_name_all_everywhere(name, NULL, NULL, &ids);
     if (count < 0) return count;
     for (int i = 0; i < count; i++) {
         if (!file_called(ids[i], name)) continue;

@@ -369,8 +369,9 @@ static void role_die_indexed(uint32_t parent_pid, uint32_t code)
 }
 
 /* T16 child: report which of its two expected tags landed. "spawn:aug" is the
- * caller augment proc_exec_tagged folded in; "touch_test" is the file's own
- * name-stem tag. Both present proves child = file-tags ∪ caller-tags. */
+ * caller augment proc_exec_tagged folded in; "touch_test" is the key the
+ * file's name gives the program (ProgramKeys). Both present proves child =
+ * the program's keys ∪ caller-tags. */
 static void role_tag_report(uint32_t parent_pid)
 {
     bool has_aug = false, has_file = false;

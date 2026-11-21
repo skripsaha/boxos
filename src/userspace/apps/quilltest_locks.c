@@ -122,8 +122,8 @@ static uint32_t       g_abba_watcher[QUILL_ABBA_ROLES];
  * ========================================================================= */
 
 /* NAME is 1 to QUILL_ABBA_NAME_MAX letters, digits, '_' or '-': every name
- * made from it is one word on a command line and one tag key, with no dot to
- * cut a stem short and no colon to read as a value. */
+ * made from it is one word on a command line and one tag key, with no colon
+ * to read as a value. */
 static bool QuillAbbaNameOk(const char *name)
 {
     size_t len = name ? strlen(name) : 0;
@@ -221,8 +221,8 @@ static int QuillAbbaPair(QuillAbbaRole role, file_id_t fid, const char *a, const
 /* The worker's two names, and the file id of the file it works on (0 for
  * create, which makes its own): rename turns NAMEra into NAMErb and back,
  * create makes NAMEc.tmp and deletes it, tag puts NAMEtk on NAMEt and takes
- * it off. The driver laid all of them down and put every stem and the tag in
- * the registry first, so no call of a worker's adds a record to it. */
+ * it off. The driver laid down the files and put the tag in the registry
+ * first, so no call of a worker's adds a record to it. */
 static int QuillAbbaWorkerFile(QuillAbbaRole role, const char *name, char a[QUILL_ABBA_NAME_CAP],
                                char b[QUILL_ABBA_NAME_CAP], file_id_t *fid)
 {
@@ -334,16 +334,16 @@ static void QuillAbbaBoardDown(QuillAbbaBoard *board, TouchTag heard)
     bay_release(board);
 }
 
-/* The workers' files laid down, and every stem and the tag they use put in
- * the registry. Returns the run's number — the rename file's id, which no
+/* The workers' files laid down, and the tag they use put in the registry.
+ * Returns the run's number — the rename file's id, which no
  * earlier run was given — and in *highest the last file id this gave out; 0
  * with *what saying which name would not be laid down, *rc its answer. */
 static file_id_t QuillAbbaLayDown(const char *name, file_id_t *highest, char what[QUILL_ABBA_NAME_CAP],
                                  int *rc)
 {
-    static const char *const made[] = { "rb", "c.tmp", "ra", "t" };
-    file_id_t fids[4] = { 0, 0, 0, 0 };
-    for (uint32_t i = 0; i < 4; i++) {
+    static const char *const made[] = { "ra", "t" };
+    file_id_t fids[2] = { 0, 0 };
+    for (uint32_t i = 0; i < 2; i++) {
         QuillAbbaName(what, name, made[i]);
         int64_t fid = QuillCreate(what);
         if (fid <= 0) {
@@ -352,17 +352,11 @@ static file_id_t QuillAbbaLayDown(const char *name, file_id_t *highest, char wha
         }
         fids[i] = (file_id_t)fid;
     }
-    /* NAMErb and NAMEc.tmp only had to put their stems in the registry. */
-    for (uint32_t i = 0; i < 2; i++) {
-        QuillAbbaName(what, name, made[i]);
-        if ((*rc = delete(fids[i])) != 0)
-            return 0;
-    }
     QuillAbbaName(what, name, "tk");
-    if ((*rc = tag_add(fids[3], what)) != 0 || (*rc = tag_remove(fids[3], what)) != 0)
+    if ((*rc = tag_add(fids[1], what)) != 0 || (*rc = tag_remove(fids[1], what)) != 0)
         return 0;
-    *highest = fids[3];
-    return fids[2];
+    *highest = fids[1];
+    return fids[0];
 }
 
 /* A worker's end, heard: process_gone asked as a state, so a worker already

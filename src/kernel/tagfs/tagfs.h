@@ -528,14 +528,22 @@ error_t  TagFSQueryKeptPage(const TagSpelling* tags, uint32_t count, const TagSp
 /*
  * The live files called `word` — its `length` bytes are the whole of the
  * file's name or its stem, the name up to its last dot — that wear all of
- * `tags` (none asked: every file so called), a page at a time and in file id
- * order, as TagFSQueryPage gives them. A name is no tag: the question is
- * answered by the name index (file_map/name_index.h), kept exact by every
- * change to a file. The files kept deleted are not met. ERR_INVALID_ARGUMENT
- * for a word of no bytes; the rest as TagFSQueryPage.
+ * `tags` and none of `without` (as TagFSQueryPage reads them; none asked:
+ * every file so called), a page at a time and in file id order, as
+ * TagFSQueryPage gives them. A name is no tag: the question is answered by
+ * the name index (file_map/name_index.h), kept exact by every change to a
+ * file. The files kept deleted are not met. ERR_INVALID_ARGUMENT for a word of
+ * no bytes; the rest as TagFSQueryPage.
  */
 error_t  TagFSNamedPage(const char* word, size_t length, const TagSpelling* tags, uint32_t count,
-                        uint64_t from, uint64_t* out, uint32_t room, bool want_total, TagFSPage* page);
+                        const TagSpelling* without, uint32_t without_count, uint64_t from, uint64_t* out,
+                        uint32_t room, bool want_total, TagFSPage* page);
+/* The words a name answers to, as the name index takes them: the whole name
+ * (lengths[0], its `length`) and, when the name has a dot with something
+ * before it, its stem — the bytes up to the last dot (lengths[1]). How many
+ * words there are: 2, 1 for a name with no stem (`kernel`, `.profile`), 0 for
+ * a name of no bytes. Every word starts at `name`. */
+uint32_t TagFSNameWords(const char* name, size_t length, size_t lengths[2]);
 /*
  * The tags files wear, a page at a time and in the order of their numbers
  * (query/query.c): from the tag numbered `from` on, every tag at least one

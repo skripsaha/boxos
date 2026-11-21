@@ -21,43 +21,21 @@ typedef struct {
     size_t         ReadCapacity;
 } AssembleVolumeState;
 
-/* The name is a tag: the volume stamps every file with the stem of its name,
- * up to the last dot, so the index answers who is called so in one ask,
- * every answer then held to the whole name. A stem the tag grammar cannot
- * spell (a ':' or a ',' in it) is asked by the other tags alone. */
+/* The files called Name that wear every one of Tags: the name index finds who
+ * is called so in one ask, whatever the tags it is asked with, and every
+ * answer is held to the whole name. */
 static int VolumeFind(BoxAsmFiles *Files, const char *Name, const char *Tags, uint64_t **Ids)
 {
-    const char *Dot = strrchr(Name, '.');
-    size_t Stem = Dot ? (size_t)(Dot - Name) : strlen(Name);
-    size_t TagLength = strlen(Tags);
-    size_t Index;
-    char *Ask;
     file_id_t *Found = NULL;
-    int Spelled = Stem != 0;
     int Count;
     int Kept = 0;
+    int Index;
 
     (void)Files;
-    for (Index = 0; Index < Stem; Index++)
-        if (Name[Index] == ':' || Name[Index] == ',')
-            Spelled = 0;
-    if (!(Ask = (char *)malloc(Stem + TagLength + 2u)))
-        return -ERR_NO_MEMORY;
-    Ask[0] = '\0';
-    if (Spelled) {
-        memcpy(Ask, Name, Stem);
-        Ask[Stem] = '\0';
-    }
-    if (TagLength != 0) {
-        if (Ask[0] != '\0')
-            strcat(Ask, ",");
-        strcat(Ask, Tags);
-    }
-    Count = query_all_everywhere(Ask, NULL, &Found);
-    free(Ask);
+    Count = query_name_all_everywhere(Name, Tags, NULL, &Found);
     if (Count < 0)
         return Count;
-    for (Index = 0; Index < (size_t)Count; Index++) {
+    for (Index = 0; Index < Count; Index++) {
         FileMetadata Metadata;
 
         memset(&Metadata, 0, sizeof(Metadata));

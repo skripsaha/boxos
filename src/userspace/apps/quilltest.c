@@ -170,8 +170,8 @@ uint64_t QuillReadBack(file_id_t fid, uint32_t seed, uint64_t size, int64_t *err
  *  Files by name, on the whole volume
  * ========================================================================= */
 
-/* The name up to its last dot — the tag TagFS stamps on every file it
- * creates (tagfs.c, "The name is a tag"), and so the way to ask for it. */
+/* The name up to its last dot — the word a file's events are said on beside
+ * its whole name (StorageFileSays), and so the word to listen on for them. */
 void QuillStem(const char *name, char *out, size_t cap)
 {
     size_t len = strlen(name);
@@ -191,11 +191,8 @@ void QuillStem(const char *name, char *out, size_t cap)
  * there are (the first `max` of them in ids) or a negative -error_t. */
 int QuillFindEverywhere(const char *name, file_id_t *ids, int max)
 {
-    char stem[64];
-    QuillStem(name, stem, sizeof(stem));
-
     file_id_t *all = NULL;
-    int n = query_all_everywhere(stem, NULL, &all);
+    int n = query_name_all_everywhere(name, NULL, NULL, &all);
     if (n < 0)
         return n;
 

@@ -165,7 +165,7 @@ QuillVerdict QuillInterleave(const char *const *args)
  *  fidhistory — file ids spent on files that are gone
  * ========================================================================= */
 
-/* One name throughout, so the only tag this interns is its stem. What the
+/* One name throughout, so this interns no tag of its own. What the
  * spent ids cost is not something this program can see: the next mount says
  * it, in its "this mount keeps" line, and the host reads the slope between
  * two mounts. */

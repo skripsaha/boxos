@@ -137,16 +137,13 @@ static file_id_t FindProgram(const char *name, const char **why)
 {
     bool   whole  = strrchr(name, '.') != NULL;
     size_t length = StemLength(name);
-    char   stem[64];
-    if (length == 0 || length >= sizeof(stem)) {
+    if (length == 0) {
         *why = "that is no program's name";
         return 0;
     }
-    memcpy(stem, name, length);
-    stem[length] = '\0';
 
     file_id_t *ids   = NULL;
-    int        count = query_all_everywhere(stem, NULL, &ids);
+    int        count = query_name_all_everywhere(name, NULL, NULL, &ids);
     if (count < 0) {
         *why = "the volume did not answer";
         return 0;
