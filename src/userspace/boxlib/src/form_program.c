@@ -242,7 +242,7 @@ static int join_words(FormFieldValue *field)
 
 static int read_filled(const BoxForm *form, FormValues *values)
 {
-    Luggage l = luggage();
+    Luggage l = luggage_carried();
     file_id_t screen;
     int rc = l.length ? form_records_decode(form->Declared ? form : NULL, l.bytes, l.length,
                                             values, &screen)

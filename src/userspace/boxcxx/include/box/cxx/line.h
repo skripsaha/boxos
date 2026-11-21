@@ -14,12 +14,14 @@
 //   box::line<T>::to(pid)        — the PEER flavor: send() routes to one strand by
 //                                  pid (::send). peer() is that pid, group() null.
 //   box::line<T>::on("group")    — the GROUP flavor: send() fans out to every
-//                                  strand that carries the tag (::broadcast). The
-//                                  sender is never one of its own recipients, and
-//                                  a receiver must itself CARRY the tag (box::
-//                                  tag_scope / box::this_process::add_tag) for a
-//                                  group message to land in its ring — membership
-//                                  is the tag, not a subscription on the line.
+//                                  program that carries the tag (::broadcast),
+//                                  once each, into its main strand's ring — the
+//                                  tags are the program's, so its strands are one
+//                                  carrier. The sender's program is never one of
+//                                  its own recipients, and a receiver must itself
+//                                  CARRY the tag (box::tag_scope / box::
+//                                  this_process::add_tag) — membership is the
+//                                  tag, not a subscription on the line.
 //
 //   auto l = box::line<Tick>::to(peer_pid);
 //   l.send(t);                          // FALLIBLE -> box::status (real cause)
@@ -81,8 +83,9 @@ public:
         l.peer_ = peer_pid;
         return l;
     }
-    // GROUP flavor — send broadcasts to every strand carrying group_tag. The tag
-    // string must outlive the line (it is held by reference, like a tag name).
+    // GROUP flavor — send broadcasts to every other program carrying group_tag,
+    // through its main strand. The tag string must outlive the line (it is held
+    // by reference, like a tag name).
     static line on(const char *group_tag) noexcept
     {
         line l;

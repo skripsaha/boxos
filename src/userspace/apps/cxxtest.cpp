@@ -9668,8 +9668,12 @@ void Phase51()
               "phase51 echo worker received the request seq");
     }
 
-    // scenario 2b: box::line<T>::on(tag) GROUP flavor — positive delivery + recv +
-    // broadcaster self-exclusion. A worker joins the tag, main broadcasts once.
+    // scenario 2b: box::line<T>::on(tag) GROUP flavor within one program. The tags
+    // are the program's: a worker that joins one makes its program a carrier,
+    // once, and what reaches a tag reaches a program through its main strand —
+    // so what the program's own main strand sends to the tag finds no carrier
+    // but itself, and is refused, and the worker hears nothing by the program's
+    // tags (a worker is reached by its pid).
     {
         while (box::receive()) { }   // main inbox quiescent
         g_p51_grp_in.store(0, std::memory_order_relaxed);
@@ -9683,16 +9687,16 @@ void Phase51()
         Check(g_p51_grp_ready.load(std::memory_order_acquire),
               "phase51 line::on group member joined the tag");
 
-        box::tag_scope    main_member("p51:grp");                  // main also carries the tag
         box::line<P51Msg> grp = box::line<P51Msg>::on("p51:grp");
         box::status       gs  = grp.send(P51Msg{ 0x6060u, 0x6u });
-        Check(static_cast<bool>(gs), "phase51 line::on group send accepted (>=1 subscriber)");
+        Check(!gs && gs.error().code() == box::errc::route_no_subscribers,
+              "phase51 line::on a program is not a recipient of its own group message");
         Check(!grp.try_recv().has_value() && !box::receive().has_value(),
               "phase51 line::on broadcaster does NOT receive its own group message (self-exclusion)");
 
         w.join();
-        Check(g_p51_grp_in.load(std::memory_order_acquire) == 0x6060u,
-              "phase51 line::on group member received the broadcast");
+        Check(g_p51_grp_in.load(std::memory_order_acquire) == 0u,
+              "phase51 line::on a worker is not reached by its program's tags");
     }
 
     // scenario 3a: co_await box::line<T>::recv() on the executor (block-path delivery).

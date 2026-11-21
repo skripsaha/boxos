@@ -103,13 +103,13 @@ bool form_records_here(const char *bytes, size_t length)
 
 bool form_souvenir_wanted(void)
 {
-    Luggage l = luggage();
+    Luggage l = luggage_carried();
     return l.length != 0 && form_records_souvenir(l.bytes, l.length);
 }
 
 bool form_person_here(void)
 {
-    Luggage l = luggage();
+    Luggage l = luggage_carried();
     return l.length != 0 && form_records_here(l.bytes, l.length);
 }
 
@@ -120,7 +120,7 @@ file_id_t form_screen_file(void)
 
     if (__atomic_load_n(&known, __ATOMIC_ACQUIRE)) return screen;
 
-    Luggage l = luggage();
+    Luggage l = luggage_carried();
     screen = l.length ? form_records_screen(l.bytes, l.length) : 0;
     __atomic_store_n(&known, 1u, __ATOMIC_RELEASE);
     return screen;
