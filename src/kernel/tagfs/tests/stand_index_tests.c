@@ -309,7 +309,7 @@ static int StandIndexDeckQuery(const char* text, uint32_t room, uint64_t* out_si
 }
 
 /* Every page of the question, walked: each id the next of ours, in order. */
-static bool StandIndexWalkQuery(const TagSpelling* name, uint32_t made, uint32_t* out_seen)
+static bool StandIndexWalkQuery(const char* name, uint32_t made, uint32_t* out_seen)
 {
     TagFSPage page;
     uint64_t  from = 1;
@@ -362,14 +362,12 @@ static TestResult TestStandIndexCursorPast1024(void)
     uint64_t    said    = 0;
     uint32_t    head[2] = { 0, 0 };   /* the answer's delivered and total */
     const char* name    = "stand_index_many";
-    TagSpelling spelled;
 
     for (; made < STAND_INDEX_MANY; made++)
         TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, &s_made[made]), 0,
                        "a file of the name is made");
-    TEST_ASSERT_OK(TagSpellKey(name, strlen(name), &spelled), "the name spells as a key");
 
-    TEST_ASSERT(StandIndexWalkQuery(&spelled, made, &seen),
+    TEST_ASSERT(StandIndexWalkQuery(name, made, &seen),
                 "the question's pages give every file of the name once, in id order, and "
                 "its first page counts them all");
     TEST_ASSERT_EQ(seen, STAND_INDEX_MANY, "all 1100 of them, past the 1024 a query once held");
