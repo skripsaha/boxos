@@ -612,7 +612,7 @@ rise
 ## Вход и результат: form
 
 ```text
-form 1
+form
 takes things Sources "the files to read"
 takes optional text Note "a note for the result"
 gives things
@@ -647,7 +647,7 @@ Form описывает контракт, а не заполненные зна�
 записываются. `gives text` описывает текстовый результат.
 
 В C/C++ `BOX_FORM(Text)` из `box/form.h` создаёт `.boxos.form` и добавляет
-`form 1` самостоятельно. `BOX_FORM("")` допустим и означает отсутствие
+заголовок `form` самостоятельно. `BOX_FORM("")` допустим и означает отсутствие
 входных полей. Упаковщик удаляет завершающие NUL секции и переносит текст
 в часть `form` с `LOAD_AT_START`.
 
