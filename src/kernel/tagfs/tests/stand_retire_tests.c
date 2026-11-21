@@ -5,7 +5,6 @@
 #include "../ink/ink.h"
 #include "../keep/keep.h"
 #include "../retire/retire.h"
-#include "../settle/binder.h"
 #include "../settle/settle.h"
 #include "../tag_registry/tag_registry.h"
 
@@ -213,7 +212,7 @@ static TestResult StandRetireAfterMount(StandRetire* r, bool tally)
     TEST_ASSERT_EQ(n, 2, "both");
     TEST_ASSERT_OK(TagFSSettle(), "a cycle lays the Coineds RETIRED and the files without the tags");
     if (tally)
-        TEST_ASSERT_OK(BinderRunWhole(), "and a Tally lays TAGS with the two ids RETIRED");
+        TEST_ASSERT_OK(StandBinderTallies(1), "and a Tally lays TAGS with the two ids RETIRED");
     TEST_ASSERT(StandStitchRemount(), "the volume is mounted afresh");
     TEST_ASSERT(StandRetireHolds(r), "its book says the same: held as retired, found by no lookup, worn by no file");
     TEST_ASSERT_EQ(tagfs_get_state()->registry->program_tags, 0, "and no program's tag is owed");

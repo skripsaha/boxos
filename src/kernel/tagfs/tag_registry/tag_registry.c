@@ -270,6 +270,7 @@ static error_t RegistryEnter(TagRegistry* reg, TagOwner owner, const TagSpelling
     entry->flags     = flags;
     entry->tag_id    = tag_id;
     entry->owner     = owner;
+    entry->retired_gen = 0;
 
     uint32_t bucket = RegistryHashOf(owner, tag) % reg->bucket_count;
     node->tag_id = tag_id;
