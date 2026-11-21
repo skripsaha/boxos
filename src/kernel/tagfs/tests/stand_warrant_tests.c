@@ -429,7 +429,8 @@ static TestResult TestStandWarrantDeckReadsTheCabin(void)
         { AUTH_TAG_SYSTEM | AUTH_TAG_UTILITY,  INK_WARRANTED   },
     };
     TestResult verdict = TEST_PASS;
-    uint64_t   file_id = 0;
+    uint64_t   file_id = 0, kernel_id = 0;
+    TagFSPage  page;
     OpContext  ctx;
 
     memset(&ctx, 0, sizeof(ctx));
