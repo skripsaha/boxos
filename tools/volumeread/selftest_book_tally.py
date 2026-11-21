@@ -206,6 +206,17 @@ def RangeCases(bt):
             raise Unreadable("400 more tags still make one TAGS leaf")
         bt.RotNode(o, leaves[-1])
 
+    program = min(bt.content.files)
+
+    def Owned(o):
+        """A Tally whose TAGS names the person's `save:slot` and program fid
+        `program`'s own of the same text, each under its own id."""
+        content = tally.Content.Copy(bt.content)
+        content.tags[bt.tag] = tally.TagState(tally.TAG_HAS_VALUE, b"save", b"slot")
+        content.tags[bt.tag + 1] = tally.TagState(tally.TAG_HAS_VALUE | tally.TAG_OWNED, b"save", b"slot", program)
+        content.next_tag = bt.tag + 2
+        binder.BindWrite(o, bt.ground, binder.Bind(content, bt.ground, a=bt.plan.a))
+
     def Within(c, lo):
         """Is every block from `lo` to the far Deed that no living owner
         names held?"""
@@ -219,6 +230,12 @@ def RangeCases(bt):
              any(n.level >= 1 for n in c.mount.tally.trees[tally.FILES].nodes)),
             ("and the kernel of this tree mounts it with every file",
              lambda c: c.kernel["mounts"] is True and c.kernel["files"] == len(content.files))]),
+        Case("B4o a TAGS of the person's tag and a program's own of the same text", Owned, checks=[
+            ("not one finding", lambda c: not c.findings),
+            ("both are read, each under its id and its owner",
+             lambda c: (c.mount.tags[bt.tag].owner, c.mount.tags[bt.tag + 1].owner) == (0, program) and
+             c.mount.tags[bt.tag].Text() == c.mount.tags[bt.tag + 1].Text() == b"save:slot"),
+            ("and the kernel of this tree mounts it", lambda c: c.kernel["mounts"] is True)]),
         Case("B4 a FILES leaf rotten in both copies", RotFiles,
              must={"RANGE_ROTTEN", "HELD_BLOCKS"}, checks=[
                  ("the files of the range are locked, %u by the parent's count" % len(whole),

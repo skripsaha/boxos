@@ -430,6 +430,30 @@ out:
     return verdict;
 }
 
+/* A Coined of a program's own tag: the owner rides inside the tag as TAGS
+ * carries it (volume_tally.h TallyTagTake), so the record reads back whose the
+ * tag is, the bytes it used are the whole body, and an owner of fid 0 refuses
+ * the record as it refuses a TAGS element. */
+static TestResult TestRibbonCoinedOwned(void)
+{
+    TestResult verdict = TEST_PASS;
+    uint8_t    body[64];
+    TallyTag   put = { .flags = TALLY_TAG_OWNED, .owner_kind = TALLY_OWNER_PROGRAM, .owner_id = 300,
+                       .key = (const uint8_t*)"save", .key_len = 4 }, got;
+    uint64_t   id = 0;
+    uint32_t   len, used = 0;
+    len = RibbonCoinedBodyPut(body, 77, &put);
+    TEST_ASSERT_EQ(RibbonCoinedGet(body, len, &id, &got, &used), TALLY_BODY_KNOWN, "a program's Coined reads");
+    TEST_ASSERT(id == 77 && used == len && got.owner_kind == TALLY_OWNER_PROGRAM && got.owner_id == 300 &&
+                got.key_len == 4 && got.key[3] == 'e', "its id, whose it is and its key");
+    put.owner_id = 0;
+    len = RibbonCoinedBodyPut(body, 77, &put);
+    TEST_ASSERT_EQ(RibbonCoinedGet(body, len, &id, &got, &used), TALLY_BODY_BROKEN,
+                   "a program's Coined naming fid 0 does not read");
+out:
+    return verdict;
+}
+
 static const TestCase g_ribbon_tests[] = {
     { .name = "golden_stitch",   .func = TestRibbonGoldenStitch,  .reach = TEST_READS_ONLY },
     { .name = "records_cut",     .func = TestRibbonRecordsCut,    .reach = TEST_READS_ONLY },
@@ -438,6 +462,7 @@ static const TestCase g_ribbon_tests[] = {
     { .name = "unit_names",      .func = TestRibbonUnitNames,     .reach = TEST_READS_ONLY },
     { .name = "undone_wide",     .func = TestRibbonUndoneWide,    .reach = TEST_READS_ONLY },
     { .name = "keep",            .func = TestRibbonKeep,          .reach = TEST_READS_ONLY },
+    { .name = "coined_owned",    .func = TestRibbonCoinedOwned,   .reach = TEST_READS_ONLY },
 };
 
 const TestSuite g_ribbon_suite = {

@@ -717,6 +717,16 @@ def RecordRuleCases(bt):
         Case("B15c a Coined of a known id with its own text",
              Sewn(lambda q, d: [stitch.Coined(known, ts.key, ts.value)]), checks=[
                  ("it is taken, and nothing is said", lambda c: not c.findings and not c.mount.glass)]),
+        Case("B15d a Coined giving a known id of the person's to a program",
+             Sewn(lambda q, d: [stitch.Coined(known, ts.key, ts.value, owner=S.fid)]), must={"UNDER_GLASS"},
+             checks=[("the stitch is not applied: one text of two owners is two tags, never one id",
+                      lambda c: Glass(c, "gives id %u" % known) and c.mount.tags[known].owner == 0)]),
+        Case("B15e a program's own tag beside the person's of the same text",
+             Sewn(lambda q, d: [stitch.Coined(bt.tag, b"save", b"slot"),
+                                stitch.Coined(bt.tag + 1, b"save", b"slot", owner=S.fid)]),
+             checks=[("both are tags, the person's and program fid %u's, each by its own id" % S.fid,
+                      lambda c: (c.mount.tags[bt.tag].owner, c.mount.tags[bt.tag + 1].owner) == (0, S.fid)),
+                     ("and nothing is said", lambda c: not c.findings and not c.mount.glass)]),
         Case("B21b an Undone after another record", Sewn(lambda q, d: [
             Born(bt.F, f1, d[:1], b"before"), stitch.Undone(seq_back=1, why=1, fids=[S.fid])]),
              must={"UNDER_GLASS"}, checks=[

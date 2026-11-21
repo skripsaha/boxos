@@ -8,6 +8,7 @@
 #include "../file_map/file_map.h"
 #include "../block_map/block_map_derived.h"
 #include "../tag_registry/tag_registry.h"
+#include "boxos_decks.h"   /* STORAGE_TAG_LISTED_HEAD: the tag list's records */
 #include "block_fail.h"
 
 #ifdef CONFIG_VOLUME_TESTS
@@ -828,8 +829,106 @@ out:
 
 // ----------------------------------------------------------------------------
 
+// ----------------------------------------------------------------------------
+// A program's own tag: one text, two owners — through the ribbon and a Tally
+//
+// The person's `bind:owned` and program fid P's `bind:owned` are two tags (tagfs.h,
+// TagOwner): a question in either owner's tags meets that owner's file alone,
+// and the list of the person's tags is the person's. Both come back the same
+// from the stitch that coins them (a Coined OWNED) and from the Tally that lays
+// them (TAGS) — the same ids, the same owners, the same answers.
+// ----------------------------------------------------------------------------
+
+/* The file `owner`'s `tag` names, alone of the volume: true when exactly `fid` wears it. */
+static bool StandOwnedFinds(TagOwner owner, const TagSpelling* tag, uint64_t fid)
+{
+    uint64_t  found = 0;
+    TagFSPage page;
+    return TagFSQueryPage(owner, tag, 1, NULL, 0, 1, &found, 1, true, &page) == OK && page.total == 1 &&
+           found == fid;
+}
+
+/* Whether `owner`'s list of the tags files wear names `tag` — and no other of the same key. */
+static bool StandOwnedListed(TagOwner owner, const TagSpelling* tag)
+{
+    uint8_t  out[512];
+    uint32_t used = 0, delivered = 0, next = 0, named = 0;
+    if (TagFSTagPage(owner, NULL, 0, NULL, 0, 0, out, sizeof(out), &used, &delivered, &next) != OK)
+        return false;
+    for (uint32_t at = 0, k = 0; k < delivered; k++) {
+        uint8_t  key_len   = out[at + 5];
+        uint16_t value_len = 0;
+        memcpy(&value_len, out + at + 6, sizeof(value_len));
+        const uint8_t* key = out + at + STORAGE_TAG_LISTED_HEAD;
+        if (key_len == tag->key_len && memcmp(key, tag->key, key_len) == 0)
+            named += value_len == tag->value_len && memcmp(key + key_len, tag->value, value_len) == 0 ? 1u : 100u;
+        at += STORAGE_TAG_LISTED_HEAD + key_len + value_len;
+    }
+    return named == 1;
+}
+
+/* The two tags known by the ids they were given, each finding its owner's file alone. */
+static bool StandOwnedStand(const TagSpelling* tag, TagOwner game, uint32_t theirs, uint32_t mine,
+                            uint64_t person_fid, uint64_t game_fid)
+{
+    TagRegistry* reg = tagfs_get_state()->registry;
+    return TagRegistryLookup(reg, TagOwnerPerson(), tag) == theirs && TagRegistryLookup(reg, game, tag) == mine &&
+           StandOwnedFinds(TagOwnerPerson(), tag, person_fid) && StandOwnedFinds(game, tag, game_fid) &&
+           StandOwnedListed(TagOwnerPerson(), tag) && StandOwnedListed(game, tag);
+}
+
+static TestResult TestStandBinderOwnedTags(void)
+{
+    TestResult         verdict = TEST_PASS;
+    static StandBinder b;
+    StandBinderState   before, after;
+    TagSpelling        tag;
+    uint64_t           person_fid = 0, game_fid = 0, program = 0;
+    uint32_t           theirs = TAGFS_INVALID_TAG_ID, mine = TAGFS_INVALID_TAG_ID;
+    static const char  text[] = "bind:owned";
+    const char*        aside = StandBinderAside(&b);
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT_OK(TagSpell(text, sizeof(text) - 1u, &tag), "a tag is spelled");
+    TEST_ASSERT(tagfs_create_file("owned-program.box", NULL, 0, &program) == 0 &&
+                tagfs_create_file("owned-person.txt", NULL, 0, &person_fid) == 0 &&
+                tagfs_create_file("owned-game.sav", NULL, 0, &game_fid) == 0, "a program's file and two more are made");
+    const TagOwner game = TagOwnerProgram(program);
+    TEST_ASSERT_OK(tagfs_add_tag_string(TagOwnerPerson(), person_fid, &tag), "the person tags one");
+    TEST_ASSERT_OK(tagfs_add_tag_string(game, game_fid, &tag), "the program tags the other with its own of the same text");
+    TagRegistry* reg = tagfs_get_state()->registry;
+    theirs = TagRegistryLookup(reg, TagOwnerPerson(), &tag);
+    mine   = TagRegistryLookup(reg, game, &tag);
+    TEST_ASSERT(theirs != TAGFS_INVALID_TAG_ID && mine != TAGFS_INVALID_TAG_ID && theirs != mine,
+                "two owners, two tags, two ids");
+    TEST_ASSERT(StandOwnedStand(&tag, game, theirs, mine, person_fid, game_fid),
+                "each owner's question meets its own file alone, and each owner's list names its own");
+    TEST_ASSERT_EQ(tagfs_remove_tag_string(TagOwnerPerson(), game_fid, &tag), -(int)ERR_TAGFS_TAG_NOT_FOUND,
+                   "the person's text takes nothing off the program's file: it wears no tag of the person's");
+
+    TEST_ASSERT_OK(TagFSSettle(), "a cycle settles both: the program's coined OWNED");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts again, the stitch replayed");
+    TEST_ASSERT(StandOwnedStand(&tag, game, theirs, mine, person_fid, game_fid),
+                "and the stitch gives back both tags, their ids and their owners");
+
+    TEST_ASSERT_OK(TagFSSettle(), "a cycle of this mount settles");
+    StandBinderStateOf(&before);
+    TEST_ASSERT_OK(BinderRunWhole(), "a whole Tally is written, the program's tag in its TAGS");
+    TEST_ASSERT(StandStitchRemount(), "the volume mounts again on the Tally");
+    StandBinderStateOf(&after);
+    TEST_ASSERT(StandBinderSame(&before, &after), "the state it mounts is the one the stitches left, owners and all");
+    TEST_ASSERT(StandOwnedStand(&tag, game, theirs, mine, person_fid, game_fid),
+                "and the Tally gives back both tags, their ids and their owners");
+out:
+    STAND_BINDER_PUT_BACK(&b);
+    return verdict;
+}
+
 static const TestCase g_stand_binder_tests[] = {
     { .name = "stand_binder_whole", .func = TestStandBinderWhole,
+      .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_binder_owned_tags", .func = TestStandBinderOwnedTags,
       .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_binder_node_refused", .func = TestStandBinderNodeRefused,
       .reach = TEST_WRITES_TO_VOLUME },
