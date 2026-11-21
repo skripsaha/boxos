@@ -309,4 +309,23 @@ static inline uint8_t cpuid_get_maxvirtaddr(void) {
     return virt_bits;
 }
 
+/* MONITOR the line that holds `addr` (Intel SDM Vol 2B, MONITOR): a store to
+ * it by another agent ends a following MWAIT. Ordered as a load, so a look
+ * after it cannot pass it. Asked only where g_cpu_caps.has_mwait_c1. */
+static inline void cpu_monitor(const volatile void *addr)
+{
+    __asm__ volatile(".byte 0x0f,0x01,0xc8"            /* monitor rax,rcx,rdx */
+                     : : "a"(addr), "c"(0), "d"(0) : "memory");
+}
+
+/* Interrupts on and MWAIT C1 (hint 0x00) in one step: STI's one-instruction
+ * shadow covers the MWAIT, so an interrupt held under CLI ends the wait
+ * rather than being taken before it — as STI;HLT. On silicon the same C1 as
+ * HLT, the LAPIC timer running (Intel SDM Vol 3A). */
+static inline void cpu_sti_mwait_c1(void)
+{
+    __asm__ volatile("sti; .byte 0x0f,0x01,0xc9"       /* sti; mwait eax,ecx */
+                     : : "a"(0u), "c"(0u) : "memory");
+}
+
 #endif // ARCH_X86_64_CPUID_H

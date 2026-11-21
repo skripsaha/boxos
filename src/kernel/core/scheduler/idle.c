@@ -286,17 +286,9 @@ void cpu_idle(void) {
          * Taken only where leaf 05H enumerates a C1 sub-state (cpuid.c,
          * mwait_c1_enumerated): QEMU TCG does not, and on more than one vCPU
          * runs MWAIT as PAUSE — an idle core there would spin a host thread. */
-        uint32_t mwait_eax = 0x00;
-
         volatile uint8_t monitor_cell;
-        __asm__ volatile(".byte 0x0f,0x01,0xc8"        /* monitor rax,rcx,rdx */
-                         :
-                         : "a"(&monitor_cell), "c"(0), "d"(0)
-                         : "memory");
-        __asm__ volatile("sti; .byte 0x0f,0x01,0xc9"   /* sti; mwait eax,ecx   */
-                         :
-                         : "a"(mwait_eax), "c"(0u)
-                         : "memory");
+        cpu_monitor(&monitor_cell);
+        cpu_sti_mwait_c1();
     } else {
         /* No MWAIT: HLT is C1 and always keeps the LAPIC timer running. */
         __asm__ volatile("sti; hlt");
