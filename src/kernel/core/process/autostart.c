@@ -75,20 +75,16 @@ bool AutostartStartedBy(const process_t *spawner)
 }
 
 /* The live file named `name` — the first of them, by file id — or 0 when the
- * volume holds none. Asked of the volume by the stem of the name, the label
- * every file is made with, and held to the whole name here. */
+ * volume holds none. Asked of the volume's name index by the whole name, which
+ * answers for every file whose name or stem it is, and held to the whole name
+ * here. */
 static uint64_t autostart_find(const char *name)
 {
-    const char *dot    = strrchr(name, '.');
-    size_t      length = dot ? (size_t)(dot - name) : strlen(name);
-    TagSpelling stem;
-    if (TagSpellKey(name, length, &stem) != OK) return 0;
-
     uint64_t  file_ids[32];
     TagFSPage page;
     uint64_t  from = 1;
     do {
-        if (TagFSQueryPage(&stem, 1, NULL, 0, from, file_ids, ARRAY_SIZE(file_ids), false, &page) != OK)
+        if (TagFSNamedPage(name, strlen(name), NULL, 0, from, file_ids, ARRAY_SIZE(file_ids), false, &page) != OK)
             return 0;
         for (uint32_t i = 0; i < page.delivered; i++) {
             TagFSMetadata meta;

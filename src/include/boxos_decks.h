@@ -443,6 +443,19 @@
  * nothing, for a file that is not deleted. */
 #define STORAGE_OBJ_RESTORE         0x26
 
+/* name.query — the files called a word. A file's name is a field of its card,
+ * not a tag, and this is the one question that finds files by it: the word
+ * matches a file when it is the whole of the file's name or its stem (the name
+ * up to its last dot, so `slot3` finds `slot3.sav`), byte for byte; a file
+ * kept deleted (obj.keep) is not met. params = [u8 scope] (absent = USE), as
+ * tag.query's: inside the Use Context the files called the word that wear the
+ * context's tags too, or STORAGE_SCOPE_EVERYWHERE; STORAGE_SCOPE_DELETED is
+ * refused. in_crate = the word, its bytes whole (no tag spelling: a ':' or ','
+ * is a byte like any other); an empty word is refused ERR_INVALID_ARGUMENT.
+ * out_crate = [u32 delivered][u32 total][u64 file_ids[delivered]] in file id
+ * order, as tag.query's. */
+#define STORAGE_NAME_QUERY          0x27
+
 /* The scope byte storage.query and storage.create carry in their params.
  *
  * By default a query is asked, and a file is created, INSIDE the Use Context:
