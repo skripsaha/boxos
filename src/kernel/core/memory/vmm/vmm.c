@@ -21,6 +21,15 @@
 #include "hypervisor.h"  /* hv_present, hv_vendor_name — LA57 dance gate */
 
 static vmm_context_t *kernel_context = NULL;
+
+/* Every context's map_gen is drawn from here, so no two contexts ever hold the
+ * same value — not even one built where another was freed (PortholeMemo). */
+static volatile uint64_t g_vmm_map_gens;
+
+static inline uint64_t VmmNextMapGen(void)
+{
+    return __atomic_add_fetch(&g_vmm_map_gens, 1u, __ATOMIC_RELAXED);
+}
 static vmm_context_t *current_context = NULL;
 static bool vmm_initialized = false;
 static bool g_pull_map_active = false;
@@ -1718,8 +1727,13 @@ void vmm_shootdown_pages(vmm_context_t *ctx, uintptr_t virt_addr, size_t page_co
      * stop it. Every caller cleared the entries before calling, so the
      * portholes still open onto this cabin are exactly the ones that may have
      * read them; they are waited out first, on one core as on many. */
-    if (ctx && ctx != kernel_context)
+    if (ctx && ctx != kernel_context) {
+        /* What any core remembers of this cabin's entries is stale from here:
+         * stored before PortholesShut's fence, so a porthole opened after it
+         * sees the new count, and one opened before it is waited out. */
+        __atomic_store_n(&ctx->map_gen, VmmNextMapGen(), __ATOMIC_RELEASE);
         PortholesShut(ctx);
+    }
 
     // Single-core: local invalidation only
     if (!g_amp.multicore_active || g_amp.total_cores <= 1)
@@ -2242,6 +2256,7 @@ vmm_context_t *vmm_create_context(void)
     }
 
     memset(ctx, 0, sizeof(vmm_context_t));
+    ctx->map_gen = VmmNextMapGen();
 
     uintptr_t pml4_phys = vmm_alloc_page_table();
     if (!pml4_phys)
@@ -5440,16 +5455,9 @@ int vmm_map_touch_ring(vmm_context_t *ctx, uintptr_t phys_page)
  *    non-writable ELF text has the kernel overwrite it on the app's
  *    behalf — a W^X and shared-page bypass needing no privilege.
  */
-static bool vmm_user_window(vmm_context_t *ctx, uintptr_t user_vaddr,
-                            bool for_write, uintptr_t *out_phys, size_t *out_span)
+static bool vmm_user_leaf_window(pte_t entry, uint8_t level, uintptr_t user_vaddr,
+                                 bool for_write, uintptr_t *out_phys, size_t *out_span)
 {
-    uint8_t level = 0;
-    pte_t *leaf = vmm_get_leaf_pte(ctx, user_vaddr, &level);
-    if (!leaf || level == 0) return false;
-
-    /* One read of the entry: a concurrent unmap on another core must not
-     * split the permission checks from the frame this call returns. */
-    pte_t entry = __atomic_load_n(leaf, __ATOMIC_ACQUIRE);
     if (!(entry & VMM_FLAG_PRESENT) || !(entry & VMM_FLAG_USER))
         return false;
     if (for_write && !(entry & VMM_FLAG_WRITABLE))
@@ -5477,6 +5485,25 @@ static bool vmm_user_window(vmm_context_t *ctx, uintptr_t user_vaddr,
 
     *out_phys = frame + offset;
     *out_span = (size_t)(page_size - offset);
+    return true;
+}
+
+/* The walk to the leaf, and the leaf's one read: a concurrent unmap on another
+ * core must not split the permission checks from the frame returned. The leaf's
+ * place and what it read are handed back for PortholeMemo. */
+static bool vmm_user_window(vmm_context_t *ctx, uintptr_t user_vaddr, bool for_write,
+                            uintptr_t *out_phys, size_t *out_span,
+                            pte_t **out_leaf, pte_t *out_entry, uint8_t *out_level)
+{
+    uint8_t level = 0;
+    pte_t *leaf = vmm_get_leaf_pte(ctx, user_vaddr, &level);
+    if (!leaf || level == 0) return false;
+    pte_t entry = __atomic_load_n(leaf, __ATOMIC_ACQUIRE);
+    if (!vmm_user_leaf_window(entry, level, user_vaddr, for_write, out_phys, out_span))
+        return false;
+    *out_leaf  = leaf;
+    *out_entry = entry;
+    *out_level = level;
     return true;
 }
 
@@ -5520,6 +5547,77 @@ typedef struct {
 
 static PortholeBadge g_porthole_badges[MAX_CORES];
 
+/*
+ * PortholeMemo — where a core last found a cabin's leaves, so that a porthole
+ * onto the same page skips the walk down four levels to it: a K-Core serving a
+ * call looks into the same few pages of the caller's every time — its pocket
+ * ring, its result ring, the stack its crates are on.
+ *
+ * What is remembered is the leaf's PLACE and what it read, not the frame. A
+ * porthole that remembers still loads the leaf itself, after its badge's
+ * fence, as one that walks does, and goes on only if it reads what was read
+ * before — so the argument PortholeBadge rests on is untouched, and an entry
+ * rewritten in place with no shootdown (vmm_map_page's remap of a present
+ * user page flushes its own core only) is seen. The place stays in the
+ * cabin's page table for the cabin's life: a live context's tables are freed
+ * by nothing but its teardown, and a large page is laid only where no entry
+ * stood (vmm_map_huge_2m). map_gen guards the rest: it moves at every
+ * shootdown — an unmap, a table rebuilt, a large page split — and no two
+ * contexts share a value, so a context built where a dead one stood never
+ * finds the dead one's places.
+ *
+ * Per core, read and written only with interrupts off and a badge on: no lock.
+ */
+#define PORTHOLE_MEMO_WAYS 8u
+
+typedef struct {
+    vmm_context_t *cabin;
+    uint64_t       map_gen;
+    uintptr_t      vpage_level;   /* the 4 KiB page, its leaf's level in the low bits */
+    pte_t         *leaf;
+    pte_t          entry;
+} PortholeMemoWay;
+
+typedef struct {
+    PortholeMemoWay way[PORTHOLE_MEMO_WAYS];
+} __attribute__((aligned(64))) PortholeMemo;
+
+static PortholeMemo g_porthole_memos[MAX_CORES];
+
+/* The frame behind `user_vaddr` for this core's open porthole: through the
+ * leaf it remembers, while the cabin's map_gen and the leaf read as they did,
+ * else by the walk — whose finding it then remembers. */
+static bool PortholeLook(vmm_context_t *ctx, uintptr_t user_vaddr, bool for_write,
+                         uintptr_t *out_phys, size_t *out_span)
+{
+    const uintptr_t vpage = user_vaddr & ~(uintptr_t)(VMM_PAGE_SIZE - 1);
+    const uint64_t  gen   = __atomic_load_n(&ctx->map_gen, __ATOMIC_ACQUIRE);
+    PortholeMemoWay *w =
+        &g_porthole_memos[amp_get_core_index()]
+             .way[((vpage >> 12) ^ (vpage >> 21)) & (PORTHOLE_MEMO_WAYS - 1u)];
+
+    if (w->cabin == ctx && w->map_gen == gen &&
+        (w->vpage_level & ~(uintptr_t)(VMM_PAGE_SIZE - 1)) == vpage)
+    {
+        const pte_t entry = __atomic_load_n(w->leaf, __ATOMIC_ACQUIRE);
+        if (entry == w->entry)
+            return vmm_user_leaf_window(entry, (uint8_t)(w->vpage_level & (VMM_PAGE_SIZE - 1)),
+                                        user_vaddr, for_write, out_phys, out_span);
+    }
+
+    pte_t  *leaf  = NULL;
+    pte_t   entry = 0;
+    uint8_t level = 0;
+    if (!vmm_user_window(ctx, user_vaddr, for_write, out_phys, out_span, &leaf, &entry, &level))
+        return false;
+    w->cabin       = ctx;
+    w->map_gen     = gen;
+    w->vpage_level = vpage | level;
+    w->leaf        = leaf;
+    w->entry       = entry;
+    return true;
+}
+
 void *PortholeOpen(Porthole *porthole, vmm_context_t *ctx, uintptr_t user_vaddr,
                    size_t size, bool for_write)
 {
@@ -5543,7 +5641,7 @@ void *PortholeOpen(Porthole *porthole, vmm_context_t *ctx, uintptr_t user_vaddr,
 
     uintptr_t phys = 0;
     size_t    span = 0;
-    if (!vmm_user_window(ctx, user_vaddr, for_write, &phys, &span) || size > span)
+    if (!PortholeLook(ctx, user_vaddr, for_write, &phys, &span) || size > span)
     {
         __atomic_store_n(&badge->looks, looks + 2, __ATOMIC_RELEASE);
         asm volatile("push %0; popfq" :: "r"(rflags) : "memory", "cc");

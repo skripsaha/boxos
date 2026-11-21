@@ -205,6 +205,12 @@ typedef struct {
     VmmStack *stacks;
     uint32_t stack_count;
     uint32_t stack_capacity;
+
+    /* Moves at every change to this cabin's translations that is shot down
+     * (vmm_shootdown_pages), from a count no two contexts share however one
+     * reuses another's memory: what a core remembers of where this cabin's
+     * entries lie is good only while this reads as it did (PortholeMemo). */
+    volatile uint64_t map_gen;
 } vmm_context_t;
 
 typedef struct {
