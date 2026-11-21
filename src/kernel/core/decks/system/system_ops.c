@@ -1426,7 +1426,7 @@ static error_t cabin_luggage_give(process_t *child, const uint8_t *bytes, uint32
 }
 
 static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext *ctx,
-                            const TagSpelling *name,
+                            const char *name, size_t name_len,
                             const uint8_t *luggage, uint32_t luggage_len);
 static int SysProcExecFound(const ManifestOp *op, Crate *crates, const OpContext *ctx,
                             uint64_t found_id,
@@ -1454,16 +1454,13 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
     uint8_t *raw = crate_in_buf(src, ctx);
     if (!raw) return ERR_INVALID_ADDRESS;
 
-    /* The name ends at the first NUL, or at the end of the crate, and is the
-     * name's tag: a key, spelled in place, as a created file's stem is. */
+    /* The name ends at the first NUL, or at the end of the crate: the word
+     * the volume's name index is asked for, its bytes whole. */
     uint64_t name_len = 0;
     while (name_len < src->size && raw[name_len] != '\0') name_len++;
-
-    TagSpelling name;
-    error_t spelled = TagSpellKey((const char *)raw, (size_t)name_len, &name);
-    if (spelled != OK) {
+    if (name_len == 0) {
         crate_buf_free(raw);
-        return spelled == ERR_TAGFS_INVALID_TAG ? ERR_INVALID_ARGUMENT : spelled;
+        return ERR_INVALID_ARGUMENT;
     }
 
     const uint8_t *luggage     = NULL;
@@ -1473,7 +1470,7 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
         luggage_len = (uint32_t)(src->size - name_len - 1);
     }
 
-    int rc = SysProcExecNamed(op, crates, ctx, &name, luggage, luggage_len);
+    int rc = SysProcExecNamed(op, crates, ctx, (const char *)raw, (size_t)name_len, luggage, luggage_len);
     crate_buf_free(raw);
     return rc;
 }
@@ -1500,7 +1497,7 @@ static bool SysExecCandidate(uint64_t file_id)
 }
 
 static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext *ctx,
-                            const TagSpelling *name,
+                            const char *name, size_t name_len,
                             const uint8_t *luggage, uint32_t luggage_len)
 {
     /* Optional caller-tag augment rides in op->params, a comma list of any
@@ -1509,19 +1506,21 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
     const char *augment = (const char *)op->params;
     size_t      aug_len = op->param_size;
 
-    /* Locate the file by its name: every file that carries the name as a tag,
-     * asked of the index a page at a time until one is a program. What stood here first was a scan of the first 256 files of the
-     * volume, so the 257th program was "not found" — and nothing said so; and
-     * then one array as long as every id the volume had ever issued. A program
-     * the person has deleted is not started by its name: no question meets a
-     * file kept deleted (the volume's own state of its record, not a tag),
-     * and SysExecCandidate asks the record again. */
+    /* Locate the file by its name: every file called the word — its whole
+     * name or its stem — asked of the name index a page at a time until one
+     * is a program. What stood here first was a scan of the first 256 files of
+     * the volume, so the 257th program was "not found" — and nothing said so;
+     * and then one array as long as every id the volume had ever issued. A
+     * program the person has deleted is not started by its name: no question
+     * meets a file kept deleted (the volume's own state of its record), and
+     * SysExecCandidate asks the record again. */
     uint64_t          page_ids[32];
     TagFSPage         page;
     uint64_t          from       = 1;
     uint64_t          found_id   = 0;
     do {
-        error_t asked = TagFSQueryPage(TagOwnerPerson(), name, 1, NULL, 0, from, page_ids, ARRAY_SIZE(page_ids), false, &page);
+        error_t asked = TagFSNamedPage(TagOwnerPerson(), name, name_len, NULL, 0, NULL, 0, from, page_ids,
+                                       ARRAY_SIZE(page_ids), false, &page);
         if (asked == ERR_TAGFS_NOT_INITIALIZED) return ERR_FILE_NOT_FOUND;
         if (asked != OK) return asked;
         for (uint32_t i = 0; i < page.delivered && found_id == 0; i++) {

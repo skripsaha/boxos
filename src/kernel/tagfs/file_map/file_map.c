@@ -1,4 +1,5 @@
 #include "file_map.h"
+#include "name_index.h"
 
 /*
  * A B+-tree of order 32: a node holds up to 32 keys, and every node but the
@@ -43,6 +44,9 @@ struct FileMap {
     uint64_t*    slipped;
     uint32_t     slipped_count, slipped_room;
     bool         slipped_short;
+    /* The files by the word their name is, or its stem is (name_index.h):
+     * put and let go with the records, under the lock. */
+    NameIndex    names;
     bool         said_short;     /* a refusal is said once, until the heap gives again */
 };
 
@@ -470,6 +474,7 @@ static void MapLetGoEntry(FileMap* m, uint64_t key, FileMapEntry* e, FileMapLeft
     if (e->record) {
         m->record_bytes -= e->record->bytes;
         MapSlipsMet(m, key, e->record, NULL);
+        NameIndexPut(&m->names, key, e->record, NULL);
         left->record = e->record;
     }
     MapRemove(m, key, left);
@@ -527,12 +532,30 @@ static error_t StakeGrow(FileMap* m, FileMapStake* s, uint64_t fid, uint32_t nee
     return OK;
 }
 
+/* The name index made room for the file about to be added, with no lock held
+ * while the larger table is made: a table that could not be had leaves the
+ * chains longer and every answer as exact as it was. */
+static void MapNamesGrow(FileMap* m, uint32_t buckets)
+{
+    NameLink** table = NameIndexTableMake(buckets);
+    if (!table)
+        return;
+    TagFSLockTake(&m->lock);
+    table = NameIndexAdopt(&m->names, table, buckets);
+    TagFSLockDrop(&m->lock);
+    kfree(table);
+}
+
 error_t FileMapStakeFor(FileMap* map, uint64_t fid, FileMapStake* stake)
 {
     stake->count = 0;
     TagFSLockTake(&map->lock);
-    uint32_t need = MapFind(map, fid) ? 0 : MapNodesToInsert(map, fid);
+    bool     added   = !MapFind(map, fid);
+    uint32_t need    = added ? MapNodesToInsert(map, fid) : 0;
+    uint32_t buckets = added ? NameIndexRoom(&map->names, 1) : 0;
     TagFSLockDrop(&map->lock);
+    if (buckets)
+        MapNamesGrow(map, buckets);
     return StakeGrow(map, stake, fid, need);
 }
 
@@ -575,6 +598,10 @@ FileMap* FileMapCreate(void)
     if (!map)
         return NULL;
     memset(map, 0, sizeof(*map));
+    if (!NameIndexOpen(&map->names)) {
+        kfree(map);
+        return NULL;
+    }
     TagFSLockInit(&map->lock, "files", LOCK_RANK_LEAF);
     return map;
 }
@@ -598,6 +625,7 @@ void FileMapDestroy(FileMap* map)
     if (map->root)
         MapFreeNode(map->root);
     kfree(map->slipped);
+    NameIndexClose(&map->names);
     kfree(map);
 }
 
@@ -616,6 +644,7 @@ error_t FileMapRecordPut(FileMap* map, uint64_t fid, FileRecord* rec,
         *was = e->where;
     }
     MapSlipsMet(map, fid, e->record, rec);
+    NameIndexPut(&map->names, fid, e->record, rec);
     map->record_bytes += rec->bytes;
     e->record = rec;
     e->where  = *where;
@@ -672,6 +701,15 @@ uint32_t FileMapFiles(FileMap* map, uint64_t from, uint64_t* out, uint32_t room)
     return n;
 }
 
+uint32_t FileMapNamed(FileMap* map, const char* word, size_t length, uint64_t from, uint64_t* out,
+                      uint32_t room, uint64_t* next)
+{
+    TagFSLockTake(&map->lock);
+    uint32_t n = NameIndexFind(&map->names, word, length, from, out, room, next);
+    TagFSLockDrop(&map->lock);
+    return n;
+}
+
 uint32_t FileMapSlipped(FileMap* map, uint64_t from, uint64_t* out, uint32_t room)
 {
     TagFSLockTake(&map->lock);
@@ -693,6 +731,16 @@ uint32_t FileMapCount(FileMap* map)
     return files;
 }
 
+#ifdef CONFIG_VOLUME_TESTS
+uint32_t FileMapNameLinks(FileMap* map)
+{
+    TagFSLockTake(&map->lock);
+    uint32_t links = map->names.links;
+    TagFSLockDrop(&map->lock);
+    return links;
+}
+#endif
+
 uint64_t FileMapSlips(const FileMap* map)
 {
     return map ? __atomic_load_n(&map->slips, __ATOMIC_ACQUIRE) : 0;
@@ -701,7 +749,8 @@ uint64_t FileMapSlips(const FileMap* map)
 size_t FileMapBytes(FileMap* map)
 {
     TagFSLockTake(&map->lock);
-    size_t bytes = (size_t)map->nodes * sizeof(FileMapNode) + (size_t)map->record_bytes;
+    size_t bytes = (size_t)map->nodes * sizeof(FileMapNode) + (size_t)map->record_bytes +
+                   (size_t)map->names.buckets * sizeof(NameLink*);
     TagFSLockDrop(&map->lock);
     return bytes;
 }

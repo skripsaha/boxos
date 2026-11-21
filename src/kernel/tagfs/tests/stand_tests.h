@@ -98,14 +98,24 @@ uint64_t StandTallyQuires(uint64_t q, uint64_t** marks, uint64_t* nquire);
 void StandSettleTurn(void);
 
 /* A file of `bytes` bytes of `data`, created and written through the handle
- * API, named `name` and carrying no tag but its name's. False — with nothing
- * left behind — when either step did not answer in full. */
+ * API, named `name` and carrying no tag. False — with nothing left behind —
+ * when either step did not answer in full. */
 bool StandMakeFile(const char* name, const void* data, uint32_t bytes, uint64_t* out_file_id);
 
 /* Whether the file's record says it was made by the program whose file is
  * `made_by` — 0: by none — the field and TAGFS_FILE_MADE_BY agreeing, as a
  * record always holds them. False too for a file the volume does not have. */
 bool StandMadeByIs(uint64_t file_id, uint64_t made_by);
+/* The same, the file wearing `tag` (interned for it) — none for NULL. */
+bool StandMakeTaggedFile(const char* name, const char* tag, const void* data, uint32_t bytes,
+                         uint64_t* out_file_id);
+
+/* Whether the name index answers, for every word the name of a live file gives
+ * it, exactly the files a walk of every card finds called so — none kept
+ * deleted, none let go, none twice — and holds exactly the links those files
+ * give it (stand_name_tests.c). Every test that changes the files a volume
+ * holds may end by asking. */
+bool StandNamesExact(void);
 
 /* The file kept in `role` (TAGFS_FILE_ROLE_*; TAGFS_FILE_ROLE_ORDINARY lets it
  * go), as the image builder keeps a file — the stand's own way, since no call

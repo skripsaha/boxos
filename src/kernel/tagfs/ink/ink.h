@@ -72,9 +72,8 @@ typedef struct {
  * stitch needs is on its way. */
 error_t TagFSInkPlot(Plot* p, InkReceipt* out);
 
-/* A file's name and tags. `name` non-NULL renames it, and the name's tag
- * moves with it: the tag of the name it had comes off, `add` (the new name's,
- * already interned) goes on first. Otherwise `add` goes on and `drop` comes
+/* A file's name and tags. `name` non-NULL renames it — the name is a field of
+ * the file's card, and no tag moves with it. `add` goes on and `drop` comes
  * off (TAGFS_INVALID_TAG_ID for neither). No tag asks a warrant, whatever its
  * key: a file's tags are its user's, and what the system keeps a file as is
  * its record's role (TAGFS_FILE_ROLE_*), which no tag puts on or takes off.
@@ -198,19 +197,6 @@ void     InkReadOnlyLift(void);
  * after the interning, inside the same stay behind the door. */
 error_t InkBookRefuses(TagOwner owner, const TagSpelling* tags, uint32_t count, uint64_t* held);
 void    InkBookHeldLetGo(uint64_t held);
-
-/* The stem of a name as a key, read in place: OK with out->key NULL for a
- * name with no stem, ERR_TAGFS_TAG_TOO_LONG for one longer than a key. */
-error_t InkNameStem(const char* name, TagSpelling* out);
-
-/* The tag a file's name gives it — the stem, up to the last dot, as a key —
- * interned, and on the medium before any file wears it: OK and the id
- * (TAGFS_INVALID_TAG_ID for a name with no stem), or the registry's refusal.
- * With no TagFS lock held: a new tag is written to the medium. */
-error_t InkNameTagIntern(const char* name, uint32_t* out_tag);
-
-/* The tag a name gives, when the registry already has it; else invalid. */
-uint32_t InkNameTagLookup(const char* name);
 
 /* The one guard of a change to a file (see above), asked with the flags the
  * file's record carries, the runs it names and the caller's warrant: OK,

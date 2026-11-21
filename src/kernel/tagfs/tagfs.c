@@ -2665,6 +2665,17 @@ size_t tagfs_tag_text(uint32_t tag_id, char *out, size_t out_size)
     return len;
 }
 
+bool TagFSTagIsPersons(uint32_t tag_id)
+{
+    if (!tagfs_enter())
+        return false;
+    TagSpelling tag;
+    TagOwner    owner;
+    bool persons = TagFSTagSpelling(tag_id, &tag, NULL, &owner) && owner.kind == TAG_OWNER_PERSON;
+    tagfs_leave();
+    return persons;
+}
+
 bool TagFSTagMatches(uint32_t tag_id, const TagSpelling *pattern)
 {
     if (!tagfs_enter())

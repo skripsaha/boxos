@@ -41,21 +41,19 @@
 // zeros on the ribbon take back.
 // ============================================================================
 
-/* Whether file `fid`, as memory holds it, is called `name`, wears its name's
- * tag, and wears `tag` — or not, `wears` false. */
+/* Whether file `fid`, as memory holds it, is called `name` and wears `tag` — or
+ * not, `wears` false. */
 static bool StandDocketHolds(uint64_t fid, const char* name, const TagSpelling* tag, bool wears)
 {
     TagFSState* fs   = tagfs_get_state();
     FileRecord* rec  = FileMapRecordHold(fs->files, fid, NULL);
-    uint32_t    stem = InkNameTagLookup(name), id = TagRegistryLookup(fs->registry, TagOwnerPerson(), tag);
-    bool        has_stem = false, has_tag = false;
+    uint32_t    id   = TagRegistryLookup(fs->registry, TagOwnerPerson(), tag);
+    bool        has_tag = false;
     if (!rec)
         return false;
-    for (uint32_t i = 0; i < rec->tag_count; i++) {
-        has_stem |= rec->tags[i] == stem;
-        has_tag  |= rec->tags[i] == id;
-    }
-    bool holds = strcmp(rec->name, name) == 0 && has_stem && has_tag == wears;
+    for (uint32_t i = 0; i < rec->tag_count; i++)
+        has_tag |= rec->tags[i] == id;
+    bool holds = strcmp(rec->name, name) == 0 && has_tag == wears;
     FileRecordRelease(rec);
     return holds;
 }
@@ -154,7 +152,7 @@ static TestResult TestStandDocketEachChangeMountsAgain(void)
     TEST_ASSERT_EQ(tagfs_create_file("docket-a.txt", NULL, 0, 0, &fid), 0, "a file is made on the book");
     TEST_ASSERT_OK(tagfs_add_tag_string(TagOwnerPerson(), fid, &tag), "and tagged with a tag new to the volume");
     TEST_ASSERT(StandDocketSettledAndBack(), "its cycle settles, and the volume mounts again");
-    TEST_ASSERT(StandDocketHolds(fid, "docket-a.txt", &tag, true), "holding the file, its name's tag and the tag");
+    TEST_ASSERT(StandDocketHolds(fid, "docket-a.txt", &tag, true), "holding the file and the tag");
     TEST_ASSERT_EQ(tagfs_rename_file(fid, "docket-b.txt"), 0, "the file is renamed");
     TEST_ASSERT(StandDocketSettledAndBack() && StandDocketHolds(fid, "docket-b.txt", &tag, true),
                 "and mounted again it holds the new name and its tag, the tag kept");
@@ -254,7 +252,7 @@ static error_t StandDocketRoom(void)
  * own wait for room writes where the measure grew past the last Tally or a
  * Tally gives the ring's ground back, the ring not turned since a change was
  * given room — and refused no-space at once where none can give; nothing
- * holds a Tally back here. Not made either way: its name's tag not interned,
+ * holds a Tally back here. Not made either way: no tag interned for it,
  * no stitch laid for it, and a wait it is told is on that Tally, asked of it.
  * *first the answer.
  */
@@ -276,7 +274,7 @@ static TestResult StandDocketShutAsk(const char* name, uint64_t* fid, int* first
     TEST_ASSERT_EQ(*first, waits ? -(int)ERR_WOULD_BLOCK : -(int)ERR_TAGFS_NO_SPACE,
                    "a file is not made where its Born has no room on the ribbon: told to wait on the Tally that "
                    "gives the ribbon its Quires back where one may, refused where none can");
-    TEST_ASSERT_EQ(fs->registry->next_id, next, "and its name's tag is not interned");
+    TEST_ASSERT_EQ(fs->registry->next_id, next, "and no tag is interned for it");
     TEST_ASSERT(now.off == was.off && now.last == was.last, "and no stitch was laid for it");
     TEST_ASSERT(*first != -(int)ERR_WOULD_BLOCK || BinderRoomAwaited(),
                 "told to wait, it waits on that Tally, asked of its own wait for room — on nothing else");

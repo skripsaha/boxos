@@ -191,9 +191,8 @@ int TestFileRead(uint64_t file_id, void* buffer, uint32_t capacity)
 // the count, and what is left is what files hold: a test that leaves a block
 // behind, or hands back one that was never its own, moves it.
 //
-// Not the tag count: a tag is interned for good (every created file interns
-// the stem of its name), so the tests keep to names they have always used and
-// the guard does not count tags.
+// Not the tag count: a tag is interned for good, so the tests keep to tags
+// they have always used and the guard does not count tags.
 // ============================================================================
 
 #ifdef CONFIG_VOLUME_TESTS

@@ -202,13 +202,10 @@ static int BoxAsmReadTags(BoxAsmFiles *Files, BoxAsmFound *Found)
 }
 
 /* The first tag the file Self wears that no other found file wears and the
- * line does not already say — the name's own stem aside, which every file of
- * that name wears. 0 when it wears none of its own. */
+ * line does not already say. 0 when it wears none of its own. */
 static int BoxAsmOwnTag(const BoxAsmFound *Found, int Self, const BoxAsmLookup *Lookup,
                         BoxAsmTag *Out)
 {
-    const char *Dot = strrchr(Lookup->Name, '.');
-    size_t Stem = Dot ? (size_t)(Dot - Lookup->Name) : strlen(Lookup->Name);
     BoxAsmTag Tag;
     size_t At = 0;
 
@@ -216,8 +213,7 @@ static int BoxAsmOwnTag(const BoxAsmFound *Found, int Self, const BoxAsmLookup *
         int Other;
         int Shared = 0;
 
-        if ((!Tag.Value && Tag.KeyLength == Stem && memcmp(Tag.Key, Lookup->Name, Stem) == 0) ||
-            BoxAsmTagsHold(Lookup->Tags, &Tag, 0))
+        if (BoxAsmTagsHold(Lookup->Tags, &Tag, 0))
             continue;
         for (Other = 0; Other < Found->Count && !Shared; Other++)
             Shared = Other != Self && BoxAsmTagsHold(Found->Tags[Other], &Tag, 0);

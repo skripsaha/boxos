@@ -29,7 +29,7 @@ leaves the kernel not attested only when no block is found broken (§16.7 п.4).
 from . import bookread, ondisk, tally
 from .bookground import BookGround
 from .bookread import Short
-from .bootbook import BootBook, Scene
+from .bootbook import BootBook, NameAnswers, Scene
 from .ondisk import BLOCK
 
 WHO = "the kernel the deed names"
@@ -245,12 +245,14 @@ class Succession:
 
     def _Picked(self, tags, pick):
         """The scene followed that the book does not keep deleted and that
-        wears, for every tag asked, a tag of the ids TAGS and the ribbon give
-        it — the one `pick` falls on counted by fid — and how many do."""
+        matches every word asked — wears a tag of the ids TAGS and the ribbon
+        give it, or is called it, by the whole name or its stem — the one
+        `pick` falls on counted by fid — and how many do."""
         ids = [self.book.TagIds(word) for word in tags]
         wear = sorted(fid for fid, fs in self.book.files.items()
                       if not fs.flags & ondisk.FILE_DELETED and Scene(bytes(fs.name)[:NAME_KEPT]) and
-                      all(set(fs.tags) & word for word in ids))
+                      all(set(fs.tags) & found or NameAnswers(bytes(fs.name)[:NAME_KEPT], word)
+                          for word, found in zip(tags, ids)))
         return (wear[pick % len(wear)] if wear else None), len(wear)
 
     def _Called(self, called, most, asked=None):

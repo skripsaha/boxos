@@ -6,8 +6,8 @@
 static const char KeyApp[]    = "app";
 static const char KeySystem[] = "system";
 
-/* How much of the name is the stem: up to its last dot, as the volume stamps
- * a file's name (edit.box is called edit). */
+/* How much of the name is the stem: up to its last dot, as the volume's name
+ * index takes it (edit.box is called edit). */
 static size_t StemLength(const char *filename)
 {
     size_t length = strlen(filename);

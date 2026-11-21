@@ -386,9 +386,9 @@ static int ObjSpan(const ManifestOp *op,
 }
 
 /* -------------------------------------------------------------------------
- * OBJ_RENAME — params carry the new name inline. The old name's tag comes
- * off with the old name, and the new name's goes on: tags like any other,
- * asking no warrant.
+ * OBJ_RENAME — params carry the new name inline. The name is a field of the
+ * file's card and no tag: the file wears the tags it wore, and the rename
+ * asks no warrant.
  * ------------------------------------------------------------------------- */
 
 static int ObjRename(const ManifestOp *op,
@@ -664,7 +664,8 @@ static error_t storage_crate_text(const ManifestOp *op, Crate *crates, const OpC
 #define STORAGE_QUERY_PIECE 512u
 
 /*
- * The files `tags` match (every file, for none), written into the out crate
+ * The files `tags` match (every file, for none) — or, with a `word`, those of
+ * them that are called it (TagFSNamedPage) — written into the out crate
  * after its 8-byte header a piece at a time, straight from the index's pages:
  * the kernel holds one piece and never the whole answer, and the crate is
  * given as many ids as it has room for, each the u64 the index holds. hdr[0]
@@ -673,8 +674,8 @@ static error_t storage_crate_text(const ManifestOp *op, Crate *crates, const OpC
  * is delivered too.
  */
 static error_t storage_query_into(const TagSpelling *tags, uint32_t count, const TagSpelling *without,
-                                  uint32_t without_count, bool kept, const Crate *out, const OpContext *ctx,
-                                  uint32_t hdr[2])
+                                  uint32_t without_count, bool kept, const char *word, size_t word_len,
+                                  const Crate *out, const OpContext *ctx, uint32_t hdr[2])
 {
     uint64_t room_ids = (out->capacity - 8) / sizeof(uint64_t);
     uint32_t most     = room_ids > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)room_ids;
@@ -687,8 +688,15 @@ static error_t storage_query_into(const TagSpelling *tags, uint32_t count, const
     for (;;) {
         uint32_t  room = most - hdr[0] < STORAGE_QUERY_PIECE ? most - hdr[0] : STORAGE_QUERY_PIECE;
         TagFSPage page;
-        rc = kept ? TagFSQueryKeptPage(TagOwnerPerson(), tags, count, without, without_count, from, piece, room, first, &page)
-                  : TagFSQueryPage(TagOwnerPerson(), tags, count, without, without_count, from, piece, room, first, &page);
+        if (word)
+            rc = TagFSNamedPage(TagOwnerPerson(), word, word_len, tags, count, without, without_count, from, piece,
+                                room, first, &page);
+        else if (kept)
+            rc = TagFSQueryKeptPage(TagOwnerPerson(), tags, count, without, without_count, from, piece, room, first,
+                                    &page);
+        else
+            rc = TagFSQueryPage(TagOwnerPerson(), tags, count, without, without_count, from, piece, room, first,
+                                &page);
         if (rc != OK) break;
         if (first) hdr[1] = page.total;
         first = false;
@@ -771,7 +779,8 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     }
 
     uint32_t hdr[2] = { 0, 0 };   /* delivered, total */
-    rc = storage_query_into(tags, total, without, without_count, scope == STORAGE_SCOPE_DELETED, out, ctx, hdr);
+    rc = storage_query_into(tags, total, without, without_count, scope == STORAGE_SCOPE_DELETED, NULL, 0, out, ctx,
+                            hdr);
     kfree(tags);
     kfree(without);
     UseListDrop(use);
@@ -781,6 +790,74 @@ static int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     /* The header last: a crate whose ids did not all go in says nothing. */
     int crc = crate_out_commit_at(out, ctx, 0, hdr, sizeof(hdr));
     if (crc != OK) return crc;   /* fail closed: leave out->size unset */
+    out->size = sizeof(hdr) + (uint64_t)hdr[0] * sizeof(uint64_t);
+    return OK;
+}
+
+/* STORAGE_NAME_QUERY  params (optional): [u8 scope][tags set aside] — as
+ *                     STORAGE_TAG_QUERY's, but for the one scope it does not
+ *                     take, DELETED. in_crate: the word, its bytes whole, and
+ *                     after a NUL the tags the files must wear too.
+ *                     out_crate: as STORAGE_TAG_QUERY's. */
+static int ObjNameQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx)
+{
+    (void)crate_count;
+    if (op->out_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+
+    Crate *out = &crates[op->out_crate];
+    if (out->capacity < 8) return ERR_BUFFER_TOO_SMALL;
+
+    uint8_t scope;
+    error_t rc = storage_scope_of(op, 0, false, &scope);
+    if (rc != OK) return rc;
+
+    TagFSState *state = tagfs_get_state();
+    if (!state || !state->initialized) return ERR_NOT_INITIALIZED;
+
+    char  *text     = NULL;
+    size_t text_len = 0;
+    rc = storage_crate_text(op, crates, ctx, &text, &text_len);
+    if (rc != OK) return rc;
+
+    size_t word_len = 0;
+    while (word_len < text_len && text[word_len] != '\0') word_len++;
+    if (word_len == 0) {
+        crate_buf_free(text);
+        return ERR_INVALID_ARGUMENT;
+    }
+    const bool   tagged   = word_len < text_len;
+    const char  *tag_text = tagged ? text + word_len + 1 : NULL;
+    const size_t tag_len  = tagged ? text_len - word_len - 1 : 0;
+
+    TagSpelling *without       = NULL;
+    uint32_t     without_count = 0;
+    rc = storage_without_spelled(op, 1, &without, &without_count);
+    if (rc != OK) {
+        crate_buf_free(text);
+        return rc;
+    }
+
+    TagSpelling *tags  = NULL;
+    UseList     *use   = NULL;
+    uint32_t     own   = 0;
+    uint32_t     total = 0;
+    rc = storage_tags_spelled(scope, tag_text, tag_len, &tags, &use, &own, &total);
+    if (rc != OK) {
+        kfree(without);
+        crate_buf_free(text);
+        return rc;
+    }
+
+    uint32_t hdr[2] = { 0, 0 };   /* delivered, total */
+    rc = storage_query_into(tags, total, without, without_count, false, text, word_len, out, ctx, hdr);
+    kfree(tags);
+    kfree(without);
+    UseListDrop(use);
+    crate_buf_free(text);
+    if (rc != OK) return rc;
+
+    int crc = crate_out_commit_at(out, ctx, 0, hdr, sizeof(hdr));
+    if (crc != OK) return crc;
     out->size = sizeof(hdr) + (uint64_t)hdr[0] * sizeof(uint64_t);
     return OK;
 }
@@ -991,8 +1068,8 @@ static error_t StorageCreateInterned(const TagSpelling *tags, uint32_t count, ui
  *                     in_crate (optional): tag string
  *                     out_crate (optional): u64 file_id
  *                     Inside the context the new file is stamped with the
- *                     user's tags as well as its own. Every tag is spelled,
- *                     and the name's own tag with them, before any is
+ *                     user's tags as well as the ones it was given; its name
+ *                     is no tag. Every tag is spelled before any is
  *                     interned; a tag that does not spell or intern refuses
  *                     the create: no file is made without a tag it was asked
  *                     to wear, least of all its context's. Room on its way —
@@ -1030,10 +1107,7 @@ static int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     uint32_t     own     = 0;
     uint32_t     total   = 0;
     uint32_t    *tag_ids = NULL;
-    TagSpelling stem;
     rc = storage_tags_spelled(scope, text, tlen, &tags, &use, &own, &total);
-    if (rc == OK)
-        rc = InkNameStem(filename, &stem);
     if (rc == OK)
         rc = StorageCreateInterned(tags, total, &tag_ids);
     kfree(tags);
@@ -1079,6 +1153,7 @@ error_t StorageDeckRegister(void)
         /* Read-only / cooperative: app+ (any process can list and read). */
         { STORAGE_TAG_QUERY,    ObjQuery,        OP_AUTH_APP, "storage.query"    },
         { STORAGE_TAG_LIST,     ObjTagList,      OP_AUTH_APP, "storage.tag.list" },
+        { STORAGE_NAME_QUERY,   ObjNameQuery,    OP_AUTH_APP, "storage.name.query" },
         { STORAGE_OBJ_READ,     ObjRead,         OP_AUTH_APP, "storage.read"     },
         { STORAGE_OBJ_GET_INFO, ObjGetInfo,      OP_AUTH_APP, "storage.getinfo"  },
         /* Mutating: app+ — TagFS context further restricts what's visible. */

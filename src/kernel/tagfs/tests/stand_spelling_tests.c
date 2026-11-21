@@ -272,8 +272,8 @@ static bool StandListed(const TagSpelling* tags, uint32_t count, const TagSpelli
  * 1ULL << id, which is 0 for every id past 63: a file wearing one numbered
  * that high was listed with everything else. The volume leaves out nothing of
  * its own accord now, and a question names what it sets aside: a tag numbered
- * past 63 must leave out the file that wears it — from a question of its name
- * and from one of no tags at all — and only that file; and a file wearing
+ * past 63 must leave out the file that wears it — from a question of its own
+ * tag and from one of no tags at all — and only that file; and a file wearing
  * trashed is a file like any other to a question that sets nothing aside,
  * the tag said whole in what storage.getinfo answers. */
 static TestResult TestStandAsidePastTag63(void)
@@ -285,7 +285,8 @@ static TestResult TestStandAsidePastTag63(void)
 
     TEST_ASSERT(StandHighTag(s_aside_text, sizeof(s_aside_text), &high), "a tag numbered past 63");
     for (uint32_t i = 0; i < 3; i++)
-        TEST_ASSERT(StandMakeFile(names[i], NULL, 0, &files[i]), "a file of the test's own");
+        TEST_ASSERT(StandMakeTaggedFile(names[i], names[i], NULL, 0, &files[i]),
+                    "a file of the test's own, wearing its name's key as a tag");
     const TagSpelling trashed = TagSpellingOfKey("trashed");
     TEST_ASSERT_EQ(tagfs_add_tag(files[0], high), 0, "the first wears the tag");
     TEST_ASSERT_OK(tagfs_add_tag_string(TagOwnerPerson(), files[2], &trashed), "the third wears trashed");
@@ -318,21 +319,16 @@ out:
 // The create, tag and info stations
 // ----------------------------------------------------------------------------
 
-/* A name whose stem is longer than a key used to be cut to 127 bytes and worn
- * as that shorter tag; a create whose tag list held a tag past 255 made the
- * file without it. Both are refused now, and no file is made. */
+/* A create whose tag list held a tag past 255 made the file without it. It is
+ * refused now, and no file is made. (A long name is no tag, and is no reason
+ * to refuse: stand_name_tests.c.) */
 static TestResult TestStandCreateRefusesWhatItCannotTag(void)
 {
     TestResult  verdict = TEST_PASS;
     VolumeTally before, after;
-    uint64_t    file_id = 0;
     uint64_t    said    = 0;
 
     TEST_ASSERT(VolumeTallyTake(&before), "the volume's files are counted");
-
-    memset(s_text, 'n', STAND_VALUE_BYTES);
-    memcpy(s_text + STAND_VALUE_BYTES, ".txt", 5);
-    int made = tagfs_create_file(s_text, NULL, 0, 0, &file_id);
 
     uint8_t params[33] = { 0 };
     memcpy(params, "stand_spell_c", 13);
@@ -346,14 +342,12 @@ static TestResult TestStandCreateRefusesWhatItCannotTag(void)
 
     TEST_ASSERT(VolumeTallyTake(&after), "and counted again");
     TestEvidence("files made with a tag they could not wear", after.files - before.files);
-    if (made == 0 || deck == OK) {
-        if (made == 0) tagfs_delete_file(file_id, INK_UNWARRANTED);
-        if (deck == OK && said == sizeof(created)) tagfs_delete_file(created, INK_UNWARRANTED);
+    if (deck == OK) {
+        if (said == sizeof(created)) tagfs_delete_file(created, INK_UNWARRANTED);
         verdict = TEST_DEFECT;
         goto out;
     }
-    TEST_ASSERT_EQ(made, -(int)ERR_TAGFS_TAG_TOO_LONG, "a 300-byte stem is refused as too long");
-    TEST_ASSERT_EQ(deck, ERR_TAGFS_TAG_TOO_LONG, "and so is a create with a 256-byte tag");
+    TEST_ASSERT_EQ(deck, ERR_TAGFS_TAG_TOO_LONG, "a create with a 256-byte tag is refused as too long");
     TEST_ASSERT_EQ(after.files, before.files, "and no file was made");
 out:
     return verdict;
@@ -454,8 +448,7 @@ static const TestCase g_stand_spelling_tests[] = {
                        "volume leaves out a trashed file no question set aside" },
     { .name  = "stand_create_refuses_what_it_cannot_tag",
       .func  = TestStandCreateRefusesWhatItCannotTag, .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_defect = "a create cuts its name's tag to 127 bytes, or makes the file without a tag "
-                       "it could not read" },
+      .caveat_defect = "a create makes the file without a tag it could not read" },
     { .name  = "stand_tag_set_wears_what_it_was_given",
       .func  = TestStandTagSetWearsWhatItWasGiven, .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "tag add cuts a value past 63 bytes and puts a different tag on the file" },

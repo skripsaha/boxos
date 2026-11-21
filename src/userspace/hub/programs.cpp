@@ -141,8 +141,9 @@ void EachCommand(const std::function<void(file_id_t, std::string_view)> &Visit)
 
 Picked Pick(const Look &Shown, std::string_view Name)
 {
+    if (Name.empty()) return std::unexpected(-ERR_FILE_NOT_FOUND);
     file_id_t *Ids   = nullptr;
-    const int  Total = query_all_everywhere(std::string(Name).c_str(), nullptr, &Ids);
+    const int  Total = query_name_all_everywhere(std::string(Name).c_str(), nullptr, nullptr, &Ids);
     if (Total < 0) return std::unexpected(Total);
 
     // A name whose files the volume will not show — its medium gone — is

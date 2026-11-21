@@ -91,15 +91,31 @@ void     FileMapDrop(FileMap* map, uint64_t fid, RecordWhere* was);
  * across the walk and what it does with each file may change the map. */
 uint32_t FileMapFiles(FileMap* map, uint64_t from, uint64_t* out, uint32_t room);
 
+/* The files called `word` — its `length` bytes are the whole of the file's
+ * name or of its stem, name_index.h — from file id `from` on, the live ones
+ * alone, in file id order: up to `room` ids into `out`, how many were
+ * written. *next is the first match past `room`, 0 for none. Exact whatever
+ * puts or lets go a record: the index is the map's, kept in the same hold of
+ * its lock. */
+uint32_t FileMapNamed(FileMap* map, const char* word, size_t length, uint64_t from, uint64_t* out,
+                      uint32_t room, uint64_t* next);
+
 /* As FileMapFiles, of the files whose record holds Slips alone, kept as a
  * list where a record is put or let go — UINT32_MAX when the list is not
  * every one of them (it had no room), and a walk asks every file. */
 uint32_t FileMapSlipped(FileMap* map, uint64_t from, uint64_t* out, uint32_t room);
 
 /* The files in the map, and the bytes of kernel heap it holds for them: its
- * nodes and its records. */
+ * nodes, its records and the table of its name index. */
 uint32_t FileMapCount(FileMap* map);
 size_t   FileMapBytes(FileMap* map);
+
+#ifdef CONFIG_VOLUME_TESTS
+/* How many links the name index holds — one for the whole of the name of each
+ * file in it and one for its stem, where it has one: the stand's measure that
+ * no record put or let go left a link behind (stand_name_tests.c). */
+uint32_t FileMapNameLinks(FileMap* map);
+#endif
 
 /* The files whose record holds Slips (tail_slip.h) — each keeps a block
  * promised to the Engross that lays its tail (block_map.h, AllotmentPromised):

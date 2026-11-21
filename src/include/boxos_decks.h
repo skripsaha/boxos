@@ -377,8 +377,10 @@
  * Answered once every change made before it is settled and lies in a block
  * the volume never writes again; the caller waits behind its Chit, never
  * inside the kernel. file_id == 0 publishes a generic "anchor" Touch event.
- * Non-zero additionally fans out the event on every tag of that file, so
- * observers keyed by tag (Touch REST) wake with payload {file_id, op=2, ...}.
+ * Non-zero additionally fans out the event on every tag of that file and on
+ * the words its name answers to (the whole name, and its stem — the name is no
+ * tag, but a program is known to those who watch its files by it), so
+ * observers keyed by either (Touch REST) wake with payload {file_id, op=2, ...}.
  * No POSIX equivalent — fsync() returns silently and offers no notification
  * side-channel. */
 #define STORAGE_OBJ_ANCHOR          0x20
@@ -446,6 +448,22 @@
  * when the volume holds no such file or its term has ended; OK, changing
  * nothing, for a file that is not deleted. */
 #define STORAGE_OBJ_RESTORE         0x26
+
+/* name.query — the files called a word. A file's name is a field of its card,
+ * not a tag, and this is the one question that finds files by it: the word
+ * matches a file when it is the whole of the file's name or its stem (the name
+ * up to its last dot, so `slot3` finds `slot3.sav`), byte for byte; a file
+ * kept deleted (obj.keep) is not met. params = [u8 scope][tags set aside], as
+ * tag.query's: inside the Use Context (absent, STORAGE_SCOPE_USE) the files
+ * called the word that wear the context's tags too, or STORAGE_SCOPE_
+ * EVERYWHERE; STORAGE_SCOPE_DELETED is refused; after the scope, a comma list
+ * of tags no file of the answer wears. in_crate = the word, its bytes whole
+ * (no tag spelling: a ':' or ',' is a byte like any other), and — after one
+ * NUL — a comma list of tags the files called so must wear too; an empty word
+ * is refused ERR_INVALID_ARGUMENT.
+ * out_crate = [u32 delivered][u32 total][u64 file_ids[delivered]] in file id
+ * order, as tag.query's. */
+#define STORAGE_NAME_QUERY          0x27
 
 /* The scope byte storage.query and storage.create carry in their params.
  *

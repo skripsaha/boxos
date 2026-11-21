@@ -5,12 +5,52 @@
 #include "box/string.h"
 #include "box/system.h"
 
-BOX_FORM("takes optional words \"the tags to look for\"\n"
+BOX_FORM("takes optional words \"the tags or names to look for\"\n"
          "gives things\n");
 
 /* Names are padded to the column the listing has always kept; a longer one
  * pushes its tags along. */
 #define FILES_NAME_COLUMN 32u
+
+/* The files every word finds — a word finds a file that wears it as a tag and
+ * one that is called it (query_word_all) — as a list in file id order the
+ * caller frees; no words find every file in the Use Context. The count, or a
+ * negative -error_t. */
+static int files_found(const char *const *words, size_t word_count, file_id_t **out)
+{
+    if (word_count == 0)
+        return query_all(NULL, NULL, out);
+
+    file_id_t *found = NULL;
+    int        count = query_word_all(words[0], &found);
+    for (size_t i = 1; count > 0 && i < word_count; i++)
+    {
+        file_id_t *next       = NULL;
+        int        next_count = query_word_all(words[i], &next);
+        if (next_count < 0)
+        {
+            free(found);
+            return next_count;
+        }
+        int kept = 0;
+        for (int a = 0, b = 0; a < count && b < next_count;)
+        {
+            if (found[a] < next[b])      a++;
+            else if (next[b] < found[a]) b++;
+            else                         { found[kept++] = found[a]; a++; b++; }
+        }
+        free(next);
+        count = kept;
+    }
+    if (count <= 0)
+    {
+        free(found);
+        *out = NULL;
+        return count;
+    }
+    *out = found;
+    return count;
+}
 
 int main(void)
 {
@@ -23,36 +63,10 @@ int main(void)
         return 1;
     }
 
-    /* Every word is a tag; joined with commas into a list sized to what was
-     * typed, so no tag is ever dropped. */
-    char *query_tags = NULL;
-    if (word_count > 0)
-    {
-        size_t total = 0;
-        for (size_t i = 0; i < word_count; i++) total += strlen(words[i]) + 1;
-        query_tags = malloc(total);
-        if (!query_tags)
-        {
-            println("Error: no memory for the tag list");
-            exit(1);
-            return 1;
-        }
-        size_t pos = 0;
-        for (size_t i = 0; i < word_count; i++)
-        {
-            size_t len = strlen(words[i]);
-            if (pos > 0) query_tags[pos++] = ',';
-            memcpy(query_tags + pos, words[i], len);
-            pos += len;
-        }
-        query_tags[pos] = '\0';
-    }
-
     /* Every file that answers, however many: the kernel says how many there
      * are and the list is sized to that. */
     file_id_t *s_file_ids = NULL;
-    int count = query_all(query_tags && *query_tags ? query_tags : NULL, NULL, &s_file_ids);
-    free(query_tags);
+    int count = files_found(words, word_count, &s_file_ids);
 
     if (count < 0)
     {

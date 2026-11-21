@@ -35,7 +35,7 @@ static inline uint64_t TrashTermSeconds(void)
 {
     uint64_t   Days  = TRASH_TERM_DEFAULT_DAYS;
     file_id_t *Ids   = NULL;
-    int        Count = query_all_everywhere("hub", NULL, &Ids);
+    int        Count = query_name_all_everywhere("hub", NULL, NULL, &Ids);
 
     for (int I = 0; I < Count; I++) {
         if (!TrashTermIsHub(Ids[I])) continue;

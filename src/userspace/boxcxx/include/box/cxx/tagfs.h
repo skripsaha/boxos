@@ -504,6 +504,26 @@ inline std::vector<file> query_everywhere(const char *tagspec, const char *witho
 }
 inline std::vector<file> all_everywhere(const char *without) { return query_everywhere(nullptr, without); }
 
+// ── the files called a word ─────────────────────────────────────────────
+// A file's name is a field of its card, never a tag, so query() does not find
+// a file by it. These ask the volume's name index: a word matches a file when
+// it is the whole of the file's name or its stem, the name up to its last dot
+// (`slot3` finds slot3.sav), byte for byte. `tags` (nullptr for none) the tags
+// the files must wear too, `without` as for query(). Inside the Use Context, or
+// everywhere.
+inline std::vector<file> query_name(const char *word, const char *tags, const char *without)
+{
+    file_id_t *ids = nullptr;
+    int        n   = ::query_name_all(word, tags, without, &ids);
+    return _detail::files_of(n, ids);
+}
+inline std::vector<file> query_name_everywhere(const char *word, const char *tags, const char *without)
+{
+    file_id_t *ids = nullptr;
+    int        n   = ::query_name_all_everywhere(word, tags, without, &ids);
+    return _detail::files_of(n, ids);
+}
+
 inline box::result<file> create_everywhere(const char *name, std::initializer_list<const char *> tags)
 {
     std::string spec;

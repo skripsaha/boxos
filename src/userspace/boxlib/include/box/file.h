@@ -85,6 +85,23 @@ int query_all_everywhere(const char* tags, const char* without, file_id_t** out_
  * whole volume — the Use Context left out. */
 int query_deleted(const char* tags, const char* without, file_id_t* file_ids, size_t max_files);
 int query_all_deleted(const char* tags, const char* without, file_id_t** out_ids);
+/* The files called `word` — a file's name is a field of its card and no tag, so
+ * the tag questions never find one by it. A word matches a file when it is the
+ * whole of the file's name or its stem, the name up to its last dot (`slot3`
+ * finds slot3.sav; `slot3.sav` finds it too), byte for byte: the word is not
+ * spelled as a tag, so a ':' in it is a byte like any other. As query_all,
+ * only those wearing every tag of `tags` (NULL or "" for none), inside the Use
+ * Context or everywhere, those wearing a tag of `without` left out, the
+ * deleted never met; the count, and a malloc'd list the caller frees (NULL for
+ * none), or a negative -error_t — -ERR_INVALID_ARGUMENT for an empty word. */
+int query_name_all(const char* word, const char* tags, const char* without, file_id_t** out_ids);
+int query_name_all_everywhere(const char* word, const char* tags, const char* without, file_id_t** out_ids);
+/* The files a typed word finds: those that wear it as a tag, and those that are
+ * called it — a search looks at both the labels and the name, so `slot3` finds
+ * the file tagged slot3 and slot3.sav alike. Inside the Use Context; each file
+ * once, in file id order; the count and a malloc'd list the caller frees (NULL
+ * for none), or a negative -error_t. */
+int query_word_all(const char* word, file_id_t** out_ids);
 int file_info(file_id_t file_id, file_info_t* info);
 /* Return the byte count transferred (0..4 GiB, short-transfer: a request > 4 GiB
  * is capped to one syscall — loop for more), or a negative -error_t on failure.
@@ -153,7 +170,7 @@ typedef struct {
 int tag_list(const char *without, TagListed **out, size_t *count);
 int tag_list_everywhere(const char *without, TagListed **out, size_t *count);
 
-/* Every file called `filename`, inside the Use Context, but those wearing a
+/* Every file named `filename` whole, inside the Use Context, but those wearing a
  * tag of `without` (as query). Returns how many there are; the first `max` of
  * them are written to file_ids (and out_infos, when given). Asked with max ==
  * 0 it only counts. */
@@ -171,7 +188,8 @@ int find_file_by_name(const char* filename, const char* without, file_id_t* file
  *   touch_claim("anchor", REST, 0, 0); ... fwrite(...); anchor(fid);
  *                       — observers subscribed on "anchor" wake up
  *                         with payload {file_id, op=2, ...}, plus on
- *                         every tag of the anchored file. So a
+ *                         every tag of the anchored file and on the
+ *                         words its name answers to. So a
  *                         monitor app can confirm durability without
  *                         polling.
  *

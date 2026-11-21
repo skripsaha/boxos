@@ -221,8 +221,8 @@ struct BoxFormLookup {
     size_t              GivenCount;
 };
 
-/* The volume as BoxLib sees it — names by their stem tag, held to the whole
- * name, in the Use Context or everywhere; `all` the Use Context — the same
+/* The volume as BoxLib sees it — names by the name index (query_name_all),
+ * held to the whole name, in the Use Context or everywhere; `all` the Use Context — the same
  * lookups a program filling its own Form uses. Them is left empty: the
  * shell sets it. */
 void form_lookup_volume(BoxFormLookup *lookup);

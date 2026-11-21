@@ -67,9 +67,22 @@ typedef struct Parcel   Parcel;
 typedef struct Tract    Tract;
 typedef struct TailSlip TailSlip;
 
+/* Where a record stands in the map's name index (name_index.h): one link for
+ * the whole name, one for its stem. Written by the map alone, under its lock,
+ * as the record is put in the map and let go of it — never by a reader, and
+ * zero in a record no map holds. */
+typedef struct NameLink {
+    struct NameLink* next;
+    uint64_t         file_id;
+    uint32_t         hash;
+    bool             linked;
+    uint8_t          which;          /* 0 the whole name, 1 its stem */
+} NameLink;
+
 /* One allocation for the header, its tags and its name; the runs are the
- * Tract's. Never changed once it is in the map: shared by reference and freed
- * with its last one, the Tract's references let go with it. */
+ * Tract's. Never changed once it is in the map, its name links apart: shared
+ * by reference and freed with its last one, the Tract's references let go
+ * with it. */
 typedef struct FileRecord {
     volatile uint32_t  refs;
     uint32_t           flags;
@@ -111,6 +124,7 @@ typedef struct FileRecord {
      * (tail_slip.h), shared by every record that keeps them; NULL for none. */
     uint64_t           gen;
     const TailSlip*    slip;
+    NameLink           name_link[2];
     const uint32_t*    tags;         /* these two point into the header's allocation */
     const char*        name;         /* NUL-terminated */
 #ifdef CONFIG_VOLUME_TESTS

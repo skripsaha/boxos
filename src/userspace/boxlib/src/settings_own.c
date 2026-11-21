@@ -261,10 +261,10 @@ bool settings_reload(void)
 
 /* ---- the watch ---------------------------------------------------------- */
 
-/* Saved is the program's own name: every file wears the stem of its name, so
- * <program>.settings wears it whoever made the file — the utility settings,
- * edit, any program — as settings_file_find finds it by. No other tag of the
- * file is asked, here or there. */
+/* Saved is the program's own name: an anchored file is said on the words its
+ * name answers to, so <program>.settings is heard on it whoever made the file
+ * — the utility settings, edit, any program — as settings_file_find finds it
+ * by its name. No tag of the file is asked, here or there. */
 struct SettingsWatch {
     TouchTag Saved;     /* the program's name: a file of that stem anchored */
     TouchTag Context;   /* USE_TOUCH_TAG: the Use Context changed */

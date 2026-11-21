@@ -48,6 +48,21 @@ def Scene(name):
     return name is not None and len(bytes(name)) > len(SCENE_SUFFIX) and bytes(name).endswith(SCENE_SUFFIX)
 
 
+def NameAnswers(name, word):
+    """Whether `word` is the whole of `name` or its stem — the name up to its
+    last dot, when something stands before it — as the kernel's name index
+    takes a word (TagFSNameWords; gangway_lectern_book.h LecternNameAnswers)."""
+    name, word = bytes(name), bytes(word)
+    if not word:
+        return False
+    stem = 0
+    for at in range(len(name), 1, -1):
+        if name[at - 1] == ord("."):
+            stem = at - 1
+            break
+    return word == name or (stem > 0 and word == name[:stem])
+
+
 def Spelling(word):
     """A tag as a person spells it (tag_spelling.h): (key, value or None) —
     blanks around it not part of it, the first ':' splitting the two, "key:"

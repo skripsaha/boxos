@@ -7004,16 +7004,16 @@ run_headcountmut() {
 
 
 # ===========================================================================
-# byname — a file is found by its name through the index, and the name's tag
+# byname — a file is found by its name through the name index, and the index
 # follows a rename
 # ===========================================================================
 #
-# The volume stamps every file with the stem of its name as a tag, and that is
-# how by-name lookup (find_file_by_name, boxcxx fopen) and proc_exec find a
-# file — the index, not a walk of the first 255 files. rename used to change
-# the string and leave the tag, so a renamed file answered to its old name and
-# not its new one. The scenario creates a file, renames it, and asks the volume
-# by tag and by name; then trashes it and empties the trash with delete,
+# A file's name is a field of its card, never a tag, and the volume's name index
+# is how by-name lookup (find_file_by_name, boxcxx fopen) and proc_exec find a
+# file — the index, not a walk of the first 255 files. A rename that left the
+# index as it was would answer to the old name and not the new one. The
+# scenario creates a file, renames it, and asks the volume by name; then trashes
+# it and empties the trash with delete,
 # which takes what `trash list` gave (a plain listing leaves the files kept
 # deleted out on purpose) and goes only on a yes.
 #
@@ -7068,13 +7068,13 @@ byname_judge() {
     grep -q "alpha.txt is now called beta.txt" "$L" \
         && ok "$name: the file was renamed" \
         || bad "$name: rename did not answer"
-    # `files beta` asks by tag: the renamed file must carry its new name's tag
+    # `files beta` asks the name index too: the renamed file is called beta now
     sed -n '/~ files beta/,/~ files alpha/p' "$L" | grep -q "^beta.txt" \
-        && ok "$name: asked by its new name's tag, the volume answers with the file" \
-        || bad "$name: the tag did not follow the name — 'files beta' does not list beta.txt"
+        && ok "$name: asked by its new name, the volume answers with the file" \
+        || bad "$name: the index did not follow the name — 'files beta' does not list beta.txt"
     sed -n '/~ files alpha/,/~ info beta.txt/p' "$L" | grep -q "No files found" \
-        && ok "$name: the old name's tag is gone" \
-        || bad "$name: the file still answers to its old name's tag"
+        && ok "$name: the old name finds nothing" \
+        || bad "$name: the file still answers to its old name"
     sed -n '/~ info beta.txt/,/~ info alpha.txt/p' "$L" | grep -q "beta.txt" \
         && ok "$name: found by its new name" \
         || bad "$name: 'info beta.txt' did not find the file"
@@ -7119,7 +7119,7 @@ byname_judge() {
 }
 
 run_byname() {
-    echo "== byname: a file is found by its name through the index, and the tag follows a rename =="
+    echo "== byname: a file is found by its name through the index, and the index follows a rename =="
     rm -f build/boxos.img   # a fresh volume: the host listing judges this session's files alone
     build STRICT=on
     if ! byname_session byname "STRICT=on CORES=4 MEM=4G"; then
@@ -7128,36 +7128,37 @@ run_byname() {
     byname_judge byname
 }
 
-# The oracle measured against itself: rename leaves the tag where it was, and
-# the renamed file must stop answering to its new name.
+# The oracle measured against itself: a record put in the map is taken for one
+# of the same name whatever its name, so rename leaves the index where it was,
+# and the renamed file must stop answering to its new name.
 byname_mut_on() {
-    mutate src/kernel/tagfs/ink/ink.c
+    mutate src/kernel/tagfs/file_map/name_index.c
     python3 - <<'EOF2'
-p = "src/kernel/tagfs/ink/ink.c"
+p = "src/kernel/tagfs/file_map/name_index.c"
 s = open(p).read()
-anchor = "    uint32_t old_name = name ? InkNameTagLookup(cur->name) : TAGFS_INVALID_TAG_ID;\n"
+anchor = "    bool same   = before && after && was->name_len == now->name_len &&\n                  memcmp(was->name, now->name, was->name_len) == 0;\n"
 assert s.count(anchor) == 1, "byname mutation anchor missing"
-s = s.replace(anchor, "    uint32_t old_name = TAGFS_INVALID_TAG_ID;   /* logcheck mutation: the tag stays behind */\n    if (name)\n        add = TAGFS_INVALID_TAG_ID;\n", 1)
+s = s.replace(anchor, "    bool same   = before && after;   /* logcheck mutation: the link stays behind */\n", 1)
 open(p, "w").write(s)
 EOF2
-    mut_done src/kernel/tagfs/ink/ink.c "logcheck mutation"
+    mut_done src/kernel/tagfs/file_map/name_index.c "logcheck mutation"
 }
 
 byname_mut_off() {
-    restore src/kernel/tagfs/ink/ink.c
+    restore src/kernel/tagfs/file_map/name_index.c
 }
 
 run_bynamemut() {
-    echo "== bynamemut: rename leaves the tag behind, and the oracle must see the file answer to the wrong name =="
+    echo "== bynamemut: rename leaves the index behind, and the oracle must see the file answer to the wrong name =="
     byname_mut_on; build STRICT=on
     byname_session bynamemut "STRICT=on CORES=4 MEM=4G"; local booted=$?
     byname_mut_off
     if [ $booted -ne 0 ]; then bad "bynamemut: never reached a shell"; build; return; fi
     L="$SCRATCH/serial.bynamemut.log"
     if sed -n '/~ files beta/,/~ files alpha/p' "$L" | grep -q "^beta.txt"; then
-        bad "bynamemut: the tag was left behind and 'files beta' STILL lists beta.txt — the oracle cannot see that defect"
+        bad "bynamemut: the index was left behind and 'files beta' STILL lists beta.txt — the oracle cannot see that defect"
     else
-        ok "bynamemut: the tag left behind, and the oracle sees the file gone from its new name"
+        ok "bynamemut: the index left behind, and the oracle sees the file gone from its new name"
     fi
     build   # leave the tree built from clean sources
 }

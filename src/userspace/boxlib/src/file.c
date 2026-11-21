@@ -83,9 +83,22 @@ static uint8_t *question_params(const void *head, uint32_t head_size, const char
     return params;
 }
 
-static int query_scoped(const char *tags, const char *without, file_id_t *file_ids, size_t max_files,
-                        uint8_t scope, uint32_t *out_total)
+/* One question of the storage deck that answers file ids: the tag query, whose
+ * text is the tags asked, or the name query, whose text is the word and, after
+ * a NUL, the tags the files called so must wear. */
+typedef struct {
+    uint8_t     op;
+    const char *text;       /* the tags, or the word; NULL or "" asks no tags */
+    const char *without;    /* tags set aside; NULL or "" for none */
+    uint8_t     scope;
+    const char *tags;       /* the name query's: tags worn too; NULL or "" for none */
+} Question;
+
+static int ask_files(const Question *question, file_id_t *file_ids, size_t max_files, uint32_t *out_total)
 {
+    const char *without = question->without;
+    const char *text    = question->text;
+    uint8_t     scope   = question->scope;
     if (max_files > 0 && !file_ids) return -ERR_INVALID_ARGUMENT;
     if (max_files > (UINT32_MAX - 8u) / sizeof(file_id_t)) return -ERR_INVALID_ARGUMENT;
 
@@ -99,18 +112,30 @@ static int query_scoped(const char *tags, const char *without, file_id_t *file_i
 
     const void *in = NULL;
     uint32_t    in_size = 0;
-    if (tags && tags[0] != '\0') {
-        in = tags;
-        in_size = (uint32_t)strlen(tags);
+    char       *joined  = NULL;
+    if (text && text[0] != '\0') {
+        in = text;
+        in_size = (uint32_t)strlen(text);
+    }
+    if (in && question->tags && question->tags[0] != '\0') {
+        size_t tags_len = strlen(question->tags);
+        joined = malloc(in_size + 1u + tags_len);
+        if (!joined) { free(params); free(out); return -ERR_NO_MEMORY; }
+        memcpy(joined, text, in_size);
+        joined[in_size] = '\0';
+        memcpy(joined + in_size + 1u, question->tags, tags_len);
+        in = joined;
+        in_size += 1u + (uint32_t)tags_len;
     }
 
     uint32_t out_actual = 0;
-    int rc = MfCall1(DECK_STORAGE, STORAGE_TAG_QUERY,
+    int rc = MfCall1(DECK_STORAGE, question->op,
                      params, params_size,
                      in, in_size,
                      out, out_cap, &out_actual,
                      BOX_ANSWER_GUARANTEED, NULL);
     free(params);
+    free(joined);
     if (rc != 0) { free(out); return box_fail(rc); }
     if (out_actual < 8) { free(out); return -ERR_INTERNAL; }
 
@@ -241,24 +266,26 @@ int tag_list_everywhere(const char *without, TagListed **out, size_t *count)
 
 int query(const char *tags, const char *without, file_id_t *file_ids, size_t max_files)
 {
-    return query_scoped(tags, without, file_ids, max_files, STORAGE_SCOPE_USE, NULL);
+    Question question = { STORAGE_TAG_QUERY, tags, without, STORAGE_SCOPE_USE, NULL };
+    return ask_files(&question, file_ids, max_files, NULL);
 }
 
 int query_everywhere(const char *tags, const char *without, file_id_t *file_ids, size_t max_files)
 {
-    return query_scoped(tags, without, file_ids, max_files, STORAGE_SCOPE_EVERYWHERE, NULL);
+    Question question = { STORAGE_TAG_QUERY, tags, without, STORAGE_SCOPE_EVERYWHERE, NULL };
+    return ask_files(&question, file_ids, max_files, NULL);
 }
 
 /* Every match, however many: ask how many there are, then ask for that many.
  * The volume may grow between the two asks — then the second answer says so,
  * and the ask is repeated with room for the new count. */
-static int query_all_scoped(const char *tags, const char *without, file_id_t **out_ids, uint8_t scope)
+static int ask_all(const Question *question, file_id_t **out_ids)
 {
     if (!out_ids) return -ERR_INVALID_ARGUMENT;
     *out_ids = NULL;
 
     uint32_t total = 0;
-    int rc = query_scoped(tags, without, NULL, 0, scope, &total);
+    int rc = ask_files(question, NULL, 0, &total);
     if (rc < 0) return rc;
 
     for (;;) {
@@ -266,7 +293,7 @@ static int query_all_scoped(const char *tags, const char *without, file_id_t **o
         file_id_t *ids = malloc(total * sizeof(file_id_t));
         if (!ids) return -ERR_NO_MEMORY;
         uint32_t now = 0;
-        rc = query_scoped(tags, without, ids, total, scope, &now);
+        rc = ask_files(question, ids, total, &now);
         if (rc < 0) { free(ids); return rc; }
         if (now <= total) { *out_ids = ids; return rc; }
         free(ids);
@@ -276,22 +303,68 @@ static int query_all_scoped(const char *tags, const char *without, file_id_t **o
 
 int query_all(const char *tags, const char *without, file_id_t **out_ids)
 {
-    return query_all_scoped(tags, without, out_ids, STORAGE_SCOPE_USE);
+    Question question = { STORAGE_TAG_QUERY, tags, without, STORAGE_SCOPE_USE, NULL };
+    return ask_all(&question, out_ids);
 }
 
 int query_all_everywhere(const char *tags, const char *without, file_id_t **out_ids)
 {
-    return query_all_scoped(tags, without, out_ids, STORAGE_SCOPE_EVERYWHERE);
+    Question question = { STORAGE_TAG_QUERY, tags, without, STORAGE_SCOPE_EVERYWHERE, NULL };
+    return ask_all(&question, out_ids);
 }
 
 int query_deleted(const char *tags, const char *without, file_id_t *file_ids, size_t max_files)
 {
-    return query_scoped(tags, without, file_ids, max_files, STORAGE_SCOPE_DELETED, NULL);
+    Question question = { STORAGE_TAG_QUERY, tags, without, STORAGE_SCOPE_DELETED, NULL };
+    return ask_files(&question, file_ids, max_files, NULL);
 }
 
 int query_all_deleted(const char *tags, const char *without, file_id_t **out_ids)
 {
-    return query_all_scoped(tags, without, out_ids, STORAGE_SCOPE_DELETED);
+    Question question = { STORAGE_TAG_QUERY, tags, without, STORAGE_SCOPE_DELETED, NULL };
+    return ask_all(&question, out_ids);
+}
+
+int query_name_all(const char *word, const char *tags, const char *without, file_id_t **out_ids)
+{
+    if (!word || word[0] == '\0') return -ERR_INVALID_ARGUMENT;
+    Question question = { STORAGE_NAME_QUERY, word, without, STORAGE_SCOPE_USE, tags };
+    return ask_all(&question, out_ids);
+}
+
+int query_name_all_everywhere(const char *word, const char *tags, const char *without, file_id_t **out_ids)
+{
+    if (!word || word[0] == '\0') return -ERR_INVALID_ARGUMENT;
+    Question question = { STORAGE_NAME_QUERY, word, without, STORAGE_SCOPE_EVERYWHERE, tags };
+    return ask_all(&question, out_ids);
+}
+
+int query_word_all(const char *word, file_id_t **out_ids)
+{
+    if (!out_ids) return -ERR_INVALID_ARGUMENT;
+    *out_ids = NULL;
+    if (!word || word[0] == '\0') return -ERR_INVALID_ARGUMENT;
+
+    file_id_t *worn = NULL;
+    int worn_count = query_all(word, NULL, &worn);
+    if (worn_count < 0) return worn_count;
+    file_id_t *called = NULL;
+    int called_count = query_name_all(word, NULL, NULL, &called);
+    if (called_count < 0) { free(worn); return called_count; }
+
+    file_id_t *both = malloc(((size_t)worn_count + (size_t)called_count + 1u) * sizeof(file_id_t));
+    if (!both) { free(worn); free(called); return -ERR_NO_MEMORY; }
+    int a = 0, b = 0, n = 0;
+    while (a < worn_count || b < called_count) {
+        if (b == called_count || (a < worn_count && worn[a] < called[b])) both[n++] = worn[a++];
+        else if (a == worn_count || called[b] < worn[a])                  both[n++] = called[b++];
+        else { both[n++] = worn[a++]; b++; }
+    }
+    free(worn);
+    free(called);
+    if (n == 0) { free(both); return 0; }
+    *out_ids = both;
+    return n;
 }
 
 /* =========================================================================
@@ -581,28 +654,12 @@ int find_file_by_name(const char *filename, const char *without, file_id_t *file
     if (!filename || filename[0] == '\0') return -ERR_INVALID_ARGUMENT;
     if (max > 0 && !file_ids) return -ERR_INVALID_ARGUMENT;
 
-    /* The name is a tag. The volume stamps every file with the stem of its
-     * name — up to the last dot — as its first tag, so the index answers "who
-     * is called this" in one ask, however many files there are. What stood
-     * here walked the first 255 files of the volume and asked each its name.
-     * A stem the tag grammar cannot spell (a ':' or ',' inside it) is asked
-     * the old way: every file in the context, compared by name. */
-    char   stem[sizeof(((file_info_t *)0)->filename)];
-    size_t len = strlen(filename);
-    size_t cut = len;
-    for (size_t i = len; i > 0; i--) {
-        if (filename[i - 1] == '.') { cut = i - 1; break; }
-    }
-    if (cut >= sizeof(stem)) cut = sizeof(stem) - 1;
-    memcpy(stem, filename, cut);
-    stem[cut] = '\0';
-    bool by_tag = stem[0] != '\0';
-    for (size_t i = 0; i < cut && by_tag; i++) {
-        if (stem[i] == ':' || stem[i] == ',') by_tag = false;
-    }
-
+    /* The name index answers for every file whose name or stem is the word, so
+     * the whole name asked for finds its files in one ask, however many files
+     * there are; the names are held to the whole of it here. What stood here
+     * once walked the first 255 files of the volume and asked each its name. */
     file_id_t *ids = NULL;
-    int n = query_all(by_tag ? stem : NULL, without, &ids);
+    int n = query_name_all(filename, NULL, without, &ids);
     if (n < 0) return n;
 
     int found = 0;

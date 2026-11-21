@@ -200,6 +200,7 @@ static TestResult TestStandEscheatTail(void)
     TEST_ASSERT(StandStitchRemount() && StandEscheatSize(fid) == TAGFS_BLOCK_SIZE && StandFreshHolds(&m, fid),
                 "mounted again, the same");
     TEST_ASSERT(StandMadeByIs(fid, STAND_ESCHEAT_MADE_BY), "and made by the same program");
+    TEST_ASSERT(StandNamesExact(), "and the name index agrees with every card, the file's record put again");
 out:
     BlockFailDisarm();
     StandFreshModelLetGo(&m);

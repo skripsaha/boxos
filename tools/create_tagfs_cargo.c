@@ -3,8 +3,9 @@
  * shipment's pedigree.
  *
  * The vocabulary is interned the kernel's way — the reserved keys at ids
- * 0..6, a file's stem first — and the pedigree stamped into the Deed: the
- * part of a volume that is not its book, said once, here.
+ * 0..6, then the tags the files are given, and nothing for their names: a
+ * name is a field of the file's card, never a tag — and the pedigree stamped
+ * into the Deed: the part of a volume that is not its book, said once, here.
  */
 
 #include "create_tagfs.h"
@@ -186,21 +187,6 @@ VolumePacked PackedStamp(int file_count, char* argv[], int first,
     return packed;
 }
 
-/* A file name's stem — "kernel.bin" is "kernel", "files.elf" "files" — in
- * a string of its own; NULL when there is no memory for it. */
-static char* StemOf(const char* filename) {
-    const char* base = strrchr(filename, '/');
-    base = base ? base + 1 : filename;
-    const char* dot = strrchr(base, '.');
-    size_t len = dot ? (size_t)(dot - base) : strlen(base);
-    char* stem = malloc(len + 1);
-    if (stem) {
-        memcpy(stem, base, len);
-        stem[len] = '\0';
-    }
-    return stem;
-}
-
 /* The file the volume's maker named as the kernel (--kernel): the one the
  * Deed's BOOT stamp points a loader at. NULL when none was named. */
 static const char* g_kernel_file = NULL;
@@ -297,14 +283,14 @@ static int TagTake(char* token, const char* whose, uint32_t* ids, uint32_t* coun
 
 /*
  * A file's role (RoleOf) and its tags — of the file at `path`, however it is
- * named in the volume — its name's stem first, then a
- * comma-separated list like "memory,fun", each once. The tags are the
- * file's user's words and decide nothing; the role comes from the kernel
- * file named and from the file's box. 0, or -1 having said why.
+ * named in the volume — a comma-separated list like "memory,fun", each once.
+ * The tags are the file's user's words and decide nothing, and the file's name
+ * is none of them; the role comes from the kernel file named and from the
+ * file's box. 0, or -1 having said why.
  *
  * ‼ THE LIST IS TAKEN WHOLE. It was copied into 4096 bytes and the rest cut
- * off, its tags counted into 256 and the rest dropped, the stem cut at 255 —
- * each without a word, and the volume made of what was left. Now every tag
+ * off, its tags counted into 256 and the rest dropped — each without a word,
+ * and the volume made of what was left. Now every tag
  * given is interned or the volume is refused: a file carries as many as it
  * is given (the book has no width for them), and how wide one can be is the
  * kernel's to judge (TAG_KEY_WIDTH, TAG_KEY_VALUE_WIDTH).
@@ -312,20 +298,14 @@ static int TagTake(char* token, const char* whose, uint32_t* ids, uint32_t* coun
 int parse_tags(const char* tag_string, const char* path, uint32_t** out_ids, uint32_t* out_count,
                uint32_t* out_role) {
     if (RoleOf(path, out_role) != 0) return -1;
-    uint32_t  room  = 2;   /* the stem, and one more tag than there are commas */
+    uint32_t  room  = 1;   /* one more tag than there are commas */
     uint32_t  count = 0;
     for (const char* c = tag_string; *c; c++) room += *c == ',';
-    char*     stem  = StemOf(path);
     char*     list  = strdup(tag_string);
     uint32_t* ids   = malloc(sizeof(uint32_t) * room);
-    int       taken = stem && list && ids;
+    int       taken = list && ids;
     if (!taken) fprintf(stderr, "%s: no memory for its tags\n", path);
 
-    /* The stem is a key whole, never split at ':' (tag_spelling.h, TagSpellKey). */
-    if (taken && stem[0] != '\0') {
-        taken = intern_tag(stem, NULL, path, &ids[0]) == 0;
-        count = taken ? 1u : 0u;
-    }
     for (char* token = taken ? strtok(list, ",") : NULL; token; token = strtok(NULL, ",")) {
         while (*token == ' ') token++;
         if (TagTake(token, path, ids, &count) != 0) {
@@ -333,7 +313,6 @@ int parse_tags(const char* tag_string, const char* path, uint32_t** out_ids, uin
             break;
         }
     }
-    free(stem);
     free(list);
     if (!taken) {
         free(ids);

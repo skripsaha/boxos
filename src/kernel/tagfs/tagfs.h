@@ -571,6 +571,26 @@ error_t  TagFSQueryKeptPage(TagOwner owner, const TagSpelling* tags, uint32_t co
                             uint32_t without_count, uint64_t from, uint64_t* out, uint32_t room,
                             bool want_total, TagFSPage* page);
 /*
+ * The live files called `word` — its `length` bytes are the whole of the
+ * file's name or its stem, the name up to its last dot — that wear all of
+ * `tags` and none of `without`, `owner`'s tags (as TagFSQueryPage reads them;
+ * none asked: every file so called), a page at a time and in file id order,
+ * as TagFSQueryPage gives them. A name is no tag and no one's: every asker
+ * meets every file so called, and the question is answered by the name index
+ * (file_map/name_index.h), kept exact by every change to a file. The files
+ * kept deleted are not met. ERR_INVALID_ARGUMENT for a word of no bytes; the
+ * rest as TagFSQueryPage.
+ */
+error_t  TagFSNamedPage(TagOwner owner, const char* word, size_t length, const TagSpelling* tags, uint32_t count,
+                        const TagSpelling* without, uint32_t without_count, uint64_t from, uint64_t* out,
+                        uint32_t room, bool want_total, TagFSPage* page);
+/* The words a name answers to, as the name index takes them: the whole name
+ * (lengths[0], its `length`) and, when the name has a dot with something
+ * before it, its stem — the bytes up to the last dot (lengths[1]). How many
+ * words there are: 2, 1 for a name with no stem (`kernel`, `.profile`), 0 for
+ * a name of no bytes. Every word starts at `name`. */
+uint32_t TagFSNameWords(const char* name, size_t length, size_t lengths[2]);
+/*
  * `owner`'s tags files wear, a page at a time and in the order of their numbers
  * (query/query.c): from the tag numbered `from` on, every tag of `owner`'s at
  * least one live file wears — one of the files that wear all of `within` and
@@ -714,6 +734,10 @@ error_t  TagFSInternSpelling(const TagSpelling* tag, uint32_t* out_id);
  * for: a caller that must have it measures first (out NULL, size 0). 0 when
  * the volume has no such tag, or there is no volume. */
 size_t   tagfs_tag_text(uint32_t tag_id, char* out, size_t out_size);
+
+/* Whether tag `tag_id` is one of the person's (TagOwner): false for a
+ * program's own, an id the volume has not, and with no volume. */
+bool     TagFSTagIsPersons(uint32_t tag_id);
 
 /* Whether tag `tag_id` is one of the person's a pattern names
  * (TagPatternMatches), read in place in the volume's registry: a pattern is

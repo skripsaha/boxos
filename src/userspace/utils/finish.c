@@ -1,9 +1,9 @@
 /* finish — end a running program by the tag that names it, never by a number.
  *
- * A person knows what is running by its name. Every file on the volume wears
- * the stem of its filename as its first tag and a program inherits its file's
- * tags, so "finish playtime" is the ordinary spelling and there is nothing to
- * look up first. A tag names a role, and several cabins may wear one — here
+ * A person knows what is running by its name. A program started from a file
+ * wears the stem of the file's name as a key of its cabin, so "finish
+ * playtime" is the ordinary spelling and there is nothing to look up first.
+ * A tag names a role, and several cabins may wear one — here
  * that is the normal case, not the exception, so this ends the whole crew of
  * a tag rather than an individual.
  *

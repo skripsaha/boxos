@@ -290,8 +290,9 @@ def BootCases(bt):
                                    name=CALLED, tags=[], runs=[stitch.Hole(1)], digests=[], slip=(0, text))],
                       flags=stitch.DATA_FLUSHED)
 
-    mine = Note(bt, bt.fid, 0, b"a scene of mine\n", name=b"mine.scene", tags=[bt.tag])
-    plain = Note(bt, bt.fid, 0, b"a scene of mine\n", name=b"mine.scene")
+    mine = Note(bt, bt.fid, 0, b"a scene of mine\n", name=b"picked.scene", tags=[bt.tag])
+    plain = Note(bt, bt.fid, 0, b"a scene of mine\n", name=b"picked.scene")
+    textual = Note(bt, bt.fid, 0, b"a scene of mine\n", name=b"picked.txt")
     drafted = Note(bt, bt.fid, 0, b"a scene of mine\n", name=b"mine.txt", tags=[bt.tag])
     coin = [(bt.tag, MINE)]
     picked = "1 scene carries mine — fid %u, the one picked, is read" % bt.fid
@@ -315,7 +316,22 @@ def BootCases(bt):
         """The scene picked by MINE, read and attested."""
         s = Scened(c)
         return picked in s.lines and s.found.get(SCENE) == "held" and \
-            s.lines[-1] == "mine.scene (fid %u) is attested by the book: 1 block(s)" % bt.fid
+            s.lines[-1] == "picked.scene (fid %u) is attested by the book: 1 block(s)" % bt.fid
+
+    def PickedBy(word):
+        """The scene picked by a word that is no tag it wears: its name's stem,
+        or its whole name."""
+        def Check(c):
+            s = Succession(BookGround(c.medium), ASKED, {1: ((word,), 0)})
+            return "1 scene carries %s — fid %u, the one picked, is read" % (word.decode(), bt.fid) in s.lines and \
+                s.found.get(SCENE) == "held"
+        return Check
+
+    def NamePicksNone(c):
+        """A word that is the stem of a file no scene is: none picked, said,
+        and boot.scene read by its name in its place."""
+        s = Succession(BookGround(c.medium), ASKED, {1: ((b"picked",), 0)})
+        return "no scene on this volume carries picked — %s is read in its place" % SCENE.decode() in s.lines
 
     def NonePicked(c):
         """None wears the tag: said, and the scene read by its name in its
@@ -427,7 +443,7 @@ def BootCases(bt):
             ("asked by the tag, the loader picks it, reads it and attests it", Picked)]),
         Case("A24 a scene born on the ribbon, wearing a tag coined there", SceneBorn, checks=[
             ("the loader takes the tag's id from the Coined and picks the scene", Picked)]),
-        Case("A25 a file of another name renamed a scene on the ribbon", SceneLabeled(drafted, name=b"mine.scene"),
+        Case("A25 a file of another name renamed a scene on the ribbon", SceneLabeled(drafted, name=b"picked.scene"),
              checks=[("the loader follows it from the Tally on and picks it", Picked)]),
         Case("A26 the tag taken off the scene on the ribbon", SceneLabeled(mine, drop=[bt.tag]), checks=[
             ("no scene wears it: said, and boot.scene read by its name in its place", NonePicked)]),
@@ -442,4 +458,10 @@ def BootCases(bt):
              "one not worn — the file stays as it last matched" % bt.fid in Scened(c).lines and Picked(c))]),
         Case("A30 the tag retired on the ribbon", Retired, checks=[
             ("a retired tag is worn by nothing the loader picks: boot.scene is read in its place", NonePicked)]),
+        Case("A31 a scene wearing no tag, asked by its name's stem", BoundNotes(bt, [plain], coin), checks=[
+            ("the name is no tag, and a word that is its stem picks the scene all the same", PickedBy(b"picked"))]),
+        Case("A32 a scene wearing no tag, asked by its whole name", BoundNotes(bt, [plain], coin), checks=[
+            ("a word that is the whole of its name picks it", PickedBy(b"picked.scene"))]),
+        Case("A33 a file that is no scene, called by the word", BoundNotes(bt, [textual], coin), checks=[
+            ("only a scene is picked, whatever it is called: boot.scene is read in its place", NamePicksNone)]),
     ]

@@ -59,20 +59,17 @@ static bool runnable(file_id_t file)
  * command, by its name before the dot — on the whole volume. */
 static int find_program(const char *word, file_id_t *out)
 {
-    char       stem[32];
     const char *dot = strrchr(word, '.');
     size_t      length = dot ? (size_t)(dot - word) : strlen(word);
     file_id_t  *ids = NULL;
     file_id_t   found[8];
     int         count = 0;
 
-    if (length == 0 || length >= sizeof(stem)) {
+    if (length == 0) {
         printf("settings: %s names no program\n", word);
         return -ERR_INVALID_ARGUMENT;
     }
-    memcpy(stem, word, length);
-    stem[length] = '\0';
-    int n = query_all_everywhere(stem, NULL, &ids);
+    int n = query_name_all_everywhere(word, NULL, NULL, &ids);
     for (int i = 0; i < n; i++) {
         FileMetadata metadata;
         if (FileMetadataRead(ids[i], &metadata) != 0) continue;
@@ -80,7 +77,7 @@ static int find_program(const char *word, file_id_t *out)
         const char *its_dot = strrchr(name, '.');
         size_t      its_length = its_dot ? (size_t)(its_dot - name) : strlen(name);
         bool        named = dot ? strcmp(name, word) == 0
-                                : its_length == length && memcmp(name, stem, length) == 0;
+                                : its_length == length && memcmp(name, word, length) == 0;
         if (named && runnable(ids[i]) &&
             count < (int)(sizeof(found) / sizeof(found[0])))
             found[count++] = ids[i];

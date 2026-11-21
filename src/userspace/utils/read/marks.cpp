@@ -16,8 +16,6 @@ namespace read {
 namespace {
 
 constexpr std::string_view FileName = "read.marks";
-/* The tag a file is found by its name with: the name before its last dot. */
-constexpr std::string_view NameTag  = "read";
 /* The words a bookmark keeps: enough to find its paragraph again among the
  * others, few enough that read.marks stays a file a person can read. */
 constexpr std::size_t      WordsBytes = 40;
@@ -26,7 +24,7 @@ constexpr std::size_t      WordsBytes = 40;
 file_id_t Find()
 {
     file_id_t *Ids   = nullptr;
-    const int  Count = query_all_everywhere(std::string(NameTag).c_str(), nullptr, &Ids);
+    const int  Count = query_name_all_everywhere(std::string(FileName).c_str(), nullptr, nullptr, &Ids);
     file_id_t  Found = 0;
     for (int Index = 0; Index < Count && Found == 0; Index++) {
         std::expected<kin::FileFacts, std::string> Facts = kin::ReadFacts(Ids[Index]);

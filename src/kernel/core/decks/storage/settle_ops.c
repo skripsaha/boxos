@@ -16,9 +16,11 @@
  * (settle.h). The medium's lasting refusal answers with its code; one that may
  * pass waits for the seat to say it answers again.
  *
- * An anchor that is answered OK then says so on the file's tags and on the
- * bare "anchor" tag, so an observer keyed by either wakes: a file announced
- * durable is a file that is.
+ * An anchor that is answered OK then says so on the file's tags, on the words
+ * its name answers to (the name index's: the whole name and its stem — the
+ * name is no tag of the file, but it is how a program is known to the ones
+ * that watch its files) and on the bare "anchor" tag, so an observer keyed by
+ * any of them wakes: a file announced durable is a file that is.
  *
  * ‼ ROOM ON ITS WAY IS WAITED FOR, AND THE OPERATION ASKED AGAIN (RT-06/07,
  * RT-17). A create, a rename, a tag put on or taken off, a delete: each is a
@@ -33,6 +35,7 @@
  */
 
 #include "settle_ops.h"
+#include "storage_deck.h"
 #include "klib.h"
 #include "chit.h"
 #include "crate_stage.h"
@@ -90,12 +93,10 @@ static uint64_t op_file_id(const ManifestOp *op)
 }
 
 /* The anchor's Touch fan-out: every one of the person's tags the file wears,
- * and the bare "anchor" tag that generic listeners hold — resolved by the
- * reader door, never named into the Logbook, so publisher and subscriber meet
- * on the same id whoever spoke first (box::tagfs::on_anchor subscribes by
- * name). Touch speaks the person's tags; a program's own tags are its alone
- * (tagfs.h, TagOwner), and an event on one would tell every listener what the
- * program keeps to itself. */
+ * each word its name answers to, and the bare "anchor" tag that generic
+ * listeners hold (StorageFileSays) — resolved by the reader door, never named
+ * into the Logbook, so publisher and subscriber meet on the same id whoever
+ * spoke first (box::tagfs::on_anchor subscribes by name). */
 static void AnchorPublish(uint64_t file_id, uint32_t pid)
 {
     struct __attribute__((packed)) {
@@ -109,12 +110,7 @@ static void AnchorPublish(uint64_t file_id, uint32_t pid)
         TagFSMetadata meta;
         memset(&meta, 0, sizeof(meta));
         if (tagfs_get_metadata(file_id, &meta) == OK) {
-            for (uint32_t i = 0; i < meta.tag_count; i++) {
-                TagSpelling spelled;
-                TagOwner    owner;
-                if (TagFSTagSpelling(meta.tag_ids[i], &spelled, NULL, &owner) && owner.kind == TAG_OWNER_PERSON)
-                    TouchPublishId(meta.tag_ids[i], &ev, sizeof(ev), pid, TOUCH_FLAG_TAGFS);
-            }
+            StorageFileSays(&meta, &ev, sizeof(ev), pid);
             tagfs_metadata_free(&meta);
         }
         tagfs_leave();

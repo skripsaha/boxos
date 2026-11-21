@@ -372,32 +372,25 @@ error_t TagFSInkPlot(Plot* p, InkReceipt* out)
 
 /* The tags the file wears after the change, into a list of its own; false
  * for no memory. */
-static bool InkFieldsTags(const FileRecord* cur, const char* name, uint32_t add, uint32_t drop,
-                          InkFieldsPlan* f)
+static bool InkFieldsTags(const FileRecord* cur, uint32_t add, uint32_t drop, InkFieldsPlan* f)
 {
-    uint32_t old_name = name ? InkNameTagLookup(cur->name) : TAGFS_INVALID_TAG_ID;
     memset(f, 0, sizeof(*f));
     f->tags = kmalloc(sizeof(uint32_t) * (cur->tag_count + 1u));
     if (!f->tags)
         return false;
 
     bool worn = false;
-    if (name && add != TAGFS_INVALID_TAG_ID)
-        f->tags[f->count++] = add;
     for (uint32_t i = 0; i < cur->tag_count; i++) {
         uint32_t t = cur->tags[i];
-        if (t == add) {
+        if (t == add)
             worn = true;
-            if (name)
-                continue;               /* it went first already */
-        }
-        if ((t == drop || (t == old_name && t != add)) && t != TAGFS_INVALID_TAG_ID) {
+        if (t == drop && t != TAGFS_INVALID_TAG_ID) {
             f->dropped[f->drops++ & 1u] = t;
             continue;
         }
         f->tags[f->count++] = t;
     }
-    if (!name && add != TAGFS_INVALID_TAG_ID && !worn)
+    if (add != TAGFS_INVALID_TAG_ID && !worn)
         f->tags[f->count++] = add;
     f->adds = add != TAGFS_INVALID_TAG_ID && !worn;
     return true;
@@ -421,7 +414,7 @@ static error_t InkFieldsOnce(uint64_t fid, const char* name, uint32_t add, uint3
     error_t       rc = InkVolumeBegins();
     if (rc == OK && (cur->flags & TAGFS_FILE_DELETED))
         rc = ERR_FILE_NOT_FOUND;
-    if (!InkFieldsTags(cur, name, add, drop, &f)) {
+    if (!InkFieldsTags(cur, add, drop, &f)) {
         FileRecordRelease(cur);
         return ERR_NO_MEMORY;
     }
@@ -467,7 +460,7 @@ static error_t InkUndoneOnce(uint64_t fid, InkReceipt* out)
     error_t rc = InkVolumeBegins();
     if (rc == OK && (cur->flags & TAGFS_FILE_UNDONE))
         out->gen = was.gen;
-    else if (rc == OK && !InkFieldsTags(cur, NULL, TAGFS_INVALID_TAG_ID, TAGFS_INVALID_TAG_ID, &f))
+    else if (rc == OK && !InkFieldsTags(cur, TAGFS_INVALID_TAG_ID, TAGFS_INVALID_TAG_ID, &f))
         rc = ERR_NO_MEMORY;
     else if (rc == OK)
         rc = InkBookFields(fid, cur, &was, &f, cur->name, TAGFS_INVALID_TAG_ID, cur->flags | TAGFS_FILE_UNDONE,
@@ -511,7 +504,7 @@ static error_t InkKeepOnce(uint64_t fid, uint64_t until, InkWarrant warrant, Ink
         out->gen = was.gen;
         goto out;
     }
-    if (!InkFieldsTags(cur, NULL, TAGFS_INVALID_TAG_ID, TAGFS_INVALID_TAG_ID, &f)) {
+    if (!InkFieldsTags(cur, TAGFS_INVALID_TAG_ID, TAGFS_INVALID_TAG_ID, &f)) {
         rc = ERR_NO_MEMORY;
         goto out;
     }
