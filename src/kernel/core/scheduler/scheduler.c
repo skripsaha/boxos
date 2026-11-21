@@ -352,13 +352,17 @@ static inline uint64_t sched_turn_for(uint32_t waiting)
     return turn < least ? least : turn;
 }
 
-/* The cycles over the strand's weight: one, and as much more as its Fit —
- * up to SCHED_CONTEXT_FARE_SHARE. */
+/* The strand's weight, as the divisor of USE_CONTEXT_FIT_FULL: one, and as
+ * much more as its Fit — up to SCHED_CONTEXT_FARE_SHARE. */
+static inline uint64_t sched_price(const process_t *proc)
+{
+    return USE_CONTEXT_FIT_FULL + (SCHED_CONTEXT_FARE_SHARE - 1) * UseContextFit(proc);
+}
+
+/* The cycles over the strand's weight. */
 uint64_t sched_fare_for(const process_t *proc, uint64_t cycles)
 {
-    uint64_t fit = UseContextFit(proc);
-    return cycles * USE_CONTEXT_FIT_FULL /
-           (USE_CONTEXT_FIT_FULL + (SCHED_CONTEXT_FARE_SHARE - 1) * fit);
+    return cycles * USE_CONTEXT_FIT_FULL / sched_price(proc);
 }
 
 /* Whether this core's turns end by its own one-shot: an App Core of a machine
@@ -421,31 +425,95 @@ uint64_t sched_rebase(uint64_t paid, bool known, uint64_t there, uint64_t here)
     return level < lowest ? lowest : level;
 }
 
-/*
- * A strand comes to `core` from outside its runqueue — woken, new, moved,
- * stolen, handed back — and its Fare is brought onto that core's scale
- * (sched_rebase): a strand that slept is served soon after it wakes, but a
- * long sleep buys it half a round, not the core. Under `core`'s runqueue lock,
- * which is what this core's Waterline and a queued strand's Fare are read
- * and written under.
- */
-static void sched_place(process_t *proc, uint8_t core)
-{
-    int16_t  from  = proc->fare_core;
-    bool     known = from >= 0 && (uint32_t)from < g_sched_core_count;
-    uint64_t there = known ? __atomic_load_n(&g_core_sched[from].waterline, __ATOMIC_RELAXED) : 0;
-
-    proc->fare = sched_rebase(proc->fare, known, there, g_core_sched[core].waterline);
-    __atomic_store_n(&proc->fare_core, (int16_t)core, __ATOMIC_RELAXED);
-}
-
 /* The Waterline rises to the Fare of the strand this core dispatches from its
- * runqueue — the least there, the strand it switched out among them — and
- * never falls. Under this core's runqueue lock. */
+ * runqueue — the least there, the strand it switched out among them — and to
+ * what the strand running there owes when a strand is placed (sched_place),
+ * and never falls. Under this core's runqueue lock. */
 static inline void sched_raise_waterline(scheduler_state_t *s, uint64_t fare)
 {
     if (fare > s->waterline)
         __atomic_store_n(&s->waterline, fare, __ATOMIC_RELAXED);
+}
+
+/* This core dispatches `next`: what it owes, from when and at what weight,
+ * for any core to count what it has run since (sched_running_owes) — nothing
+ * for idle. Interrupts off, this core alone writing. */
+static void sched_publish_running(scheduler_state_t *s, process_t *next)
+{
+    const bool idle = process_is_idle(next);
+    __atomic_store_n(&s->run_seq, s->run_seq + 1u, __ATOMIC_RELAXED);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    __atomic_store_n(&s->run_fare,  idle ? 0u : next->fare,     __ATOMIC_RELAXED);
+    __atomic_store_n(&s->run_since, idle ? 0u : next->fare_tsc, __ATOMIC_RELAXED);
+    __atomic_store_n(&s->run_price, idle ? USE_CONTEXT_FIT_FULL : (uint32_t)sched_price(next), __ATOMIC_RELAXED);
+    __atomic_store_n(&s->run_seq, s->run_seq + 1u, __ATOMIC_RELEASE);
+}
+
+/* What the strand running on `s`'s core owes this moment — what it owed when
+ * it was dispatched and what it has run since; false while idle runs there.
+ * Read again if that core was dispatching meanwhile. */
+static bool sched_running_owes(const scheduler_state_t *s, uint64_t *owes)
+{
+    uint32_t seq;
+    uint64_t fare, since, price;
+    do {
+        seq   = __atomic_load_n(&s->run_seq, __ATOMIC_ACQUIRE);
+        fare  = __atomic_load_n(&s->run_fare, __ATOMIC_RELAXED);
+        since = __atomic_load_n(&s->run_since, __ATOMIC_RELAXED);
+        price = __atomic_load_n(&s->run_price, __ATOMIC_RELAXED);
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    } while ((seq & 1u) || seq != __atomic_load_n(&s->run_seq, __ATOMIC_RELAXED));
+    if (!since)
+        return false;
+    const uint64_t now = rdtsc();
+    *owes = fare + (now > since ? (now - since) * USE_CONTEXT_FIT_FULL / price : 0u);
+    return true;
+}
+
+/* `core`'s Waterline as it stands now: raised to the least of what the strand
+ * running there owes this moment and the least Fare queued there. A strand
+ * alone on its core enters no schedule() while it runs, and the Waterline its
+ * dispatch left stays behind it as it runs — a strand placed against that
+ * stood ahead of it by all of its run, a newcomer took the core for as long
+ * as its maker had run, and one woken onto a core held for seconds took it
+ * for seconds. As CFS's min_vruntime counts the running task
+ * (kernel/sched/fair.c, update_curr, update_min_vruntime). Under `core`'s
+ * runqueue lock. */
+static uint64_t sched_waterline_now(uint8_t core)
+{
+    scheduler_state_t *s = &g_core_sched[core];
+    uint64_t owes;
+    if (sched_running_owes(s, &owes)) {
+        const process_t *first = runqueue_at(&s->runqueue, 0);
+        sched_raise_waterline(s, first && first->fare < owes ? first->fare : owes);
+    }
+    return s->waterline;
+}
+
+/*
+ * A strand comes to `core` from outside its runqueue — woken, new, moved,
+ * stolen, handed back — and its Fare is brought onto that core's scale
+ * (sched_rebase) as it stands now (sched_waterline_now): a strand that slept
+ * is served soon after it wakes, but a long sleep buys it half a round, not
+ * the core. One still running there — woken before its core switched it out —
+ * never left: its Fare is that core's, and what it has run since it was
+ * dispatched is charged by that core's next schedule(), not counted here as
+ * well. Under `core`'s runqueue lock, which is what this core's Waterline and
+ * a queued strand's Fare are read and written under.
+ */
+static void sched_place(process_t *proc, uint8_t core)
+{
+    int16_t from  = proc->fare_core;
+    bool    known = from >= 0 && (uint32_t)from < g_sched_core_count;
+    if (known && from == (int16_t)core &&
+        __atomic_load_n(&proc->on_cpu, __ATOMIC_ACQUIRE) == (int16_t)core)
+        return;
+
+    uint64_t here  = sched_waterline_now(core);
+    uint64_t there = !known ? 0 : from == (int16_t)core ? here
+                   : __atomic_load_n(&g_core_sched[from].waterline, __ATOMIC_RELAXED);
+    proc->fare = sched_rebase(proc->fare, known, there, here);
+    __atomic_store_n(&proc->fare_core, (int16_t)core, __ATOMIC_RELAXED);
 }
 
 /* The least Fare queued on this core, `proc` aside; false when nobody else is
@@ -1412,6 +1480,7 @@ void schedule(void *frame_ptr)
     next->last_run_time = __atomic_load_n(&g_global_tick, __ATOMIC_RELAXED);
     /* What it pays from here: charged at this core's next schedule(). */
     if (!process_is_idle(next)) next->fare_tsc = rdtsc();
+    sched_publish_running(s, next);
     /* Start of this strand's processor-time slice. Only when it is actually
      * taking the core from someone else: on a consecutive run the slice never
      * ended, and restamping would discard the part already served. The idle

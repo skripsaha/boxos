@@ -39,11 +39,21 @@ typedef struct {
      * this core alone, with its interrupts off. */
     uint64_t    turn_began;
     uint64_t    turn_due;
-    /* The Waterline: the least Fare among this core's strands as its
-     * schedule() last found them, and never lower than it was — the level a
-     * strand that comes to this core is placed against (scheduler.c).
-     * Written by this core under its runqueue lock; read by others without. */
+    /* The Waterline: the least Fare among this core's strands — the one
+     * running at what it owes now — and never lower than it was: the level a
+     * strand that comes to this core is placed against (scheduler.c). Written
+     * under this core's runqueue lock; read by others without. */
     volatile uint64_t waterline;
+    /* The strand running here as this core dispatched it: what it owed then
+     * (run_fare), that moment (run_since, 0 while idle runs) and its weight
+     * (run_price, scheduler.c's sched_price) — for the Waterline to count what
+     * it has run since. Written by this core alone at every dispatch, its
+     * interrupts off, between two steps of run_seq — odd while it writes;
+     * read by any core. */
+    volatile uint32_t run_seq;
+    uint32_t          run_price;
+    uint64_t          run_fare;
+    uint64_t          run_since;
     /* The strand running here gave its core away (sched_yield_turn): its
      * next schedule() stands it behind the next one. This core's alone. */
     bool        turn_given;
