@@ -141,8 +141,16 @@ playtime.elf: $(BOXLIB_START) playtime.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) playtime.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
-lavalamp.elf: $(BOXLIB_START) lavalamp.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) lavalamp.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+# The lava lamp is C++ in parts of its own directory: the lamp in the screen's
+# pixels (painter::gui) or in the console's cells (painter::tui). The field and
+# the colours are worked out for every pixel of every frame: built -O2.
+LAVALAMP_DIR  = lavalamp
+LAVALAMP_OBJS = $(addprefix $(LAVALAMP_DIR)/,lavalamp.o composition.o look.o lamp.o field.o shades.o tuning.o pixels.o panel.o cells.o)
+
+$(addprefix $(LAVALAMP_DIR)/,lamp.o field.o shades.o pixels.o cells.o): CXXFLAGS += -O2
+
+lavalamp.elf: $(BOXLIB_START) $(LAVALAMP_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(LAVALAMP_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 # The zone database is C++, so `timezone` is. An explicit rule, which overrides
