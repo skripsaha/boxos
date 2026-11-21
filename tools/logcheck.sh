@@ -1090,19 +1090,19 @@ mce:migration:completed apei:memory:error apei:ghes:ready"
 # every test it counts is one this tree registers. The numbers are the code's,
 # not a run's (K9): a build without VOLUME_TESTS walks the eight suites of
 # tests.h TEST_SUITES not under VOLUME_TESTS_ONLY — core 2, stress 2,
-# braid 2, boxhash 6, book 15, book_judge 5, ribbon 7, use_context 5
-# TestCases, 44 run; the 5 whose reach is TEST_WRITES_TO_VOLUME are skipped
-# (tests.c, g_volume_tests_allowed), and the 39 that only read pass — on this
+# braid 2, boxhash 6, book 16, book_judge 5, ribbon 8, use_context 5
+# TestCases, 46 run; the 5 whose reach is TEST_WRITES_TO_VOLUME are skipped
+# (tests.c, g_volume_tests_allowed), and the 41 that only read pass — on this
 # stand's fresh image, whose first file wears a tag (use_context_narrows). A
 # test added or taken out moves this line in the same commit.
 healthy_startup_tests() {
     local L=$1
     grep -qE "TagFS: [0-9]+ run, [0-9]+ passed, 0 failed" "$L"; chk $? "TagFS startup tests: 0 failed"
-    local said want="TagFS: 44 run, 39 passed, 0 failed, 5 skipped, 0 held under a caveat"
-    local told="39 reads passed and 5 writes stood down"
+    local said want="TagFS: 46 run, 41 passed, 0 failed, 5 skipped, 0 held under a caveat"
+    local told="41 reads passed and 5 writes stood down"
     said=$(stand_summary "$L")
     [ "$said" = "$want" ]
-    chk $? "TagFS startup tests: the 44 this tree registers ran, $told (${said:-no summary})"
+    chk $? "TagFS startup tests: the 46 this tree registers ran, $told (${said:-no summary})"
 }
 
 run_healthy() {
@@ -8045,14 +8045,14 @@ STAND_HELD="
 "
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
-# suite in tests.h TEST_SUITES — the plain build's 44 (healthy says how) and
-# the 323 of the stand's own forty-five suites: stand 25, stand_lock 1,
+# suite in tests.h TEST_SUITES — the plain build's 46 (healthy says how) and
+# the 324 of the stand's own forty-five suites: stand 25, stand_lock 1,
 # stand_spelling 6, stand_roadstead 4, stand_plot 3, stand_index 6,
 # stand_helm 6, stand_port 1, stand_use 2, stand_settle 9, stand_read 6,
 # stand_run 4, stand_medium 13, stand_warrant 7, stand_room 1, frame 2,
 # width 4, parcel 13, tract 1, record_splices 4, stand_tally 15,
 # stand_ribbon 8, stand_stitch 14, stand_stitch_edge 12, stand_docket 14,
-# stand_fresh 7, stand_fresh_ground 5, stand_fresh_change 5, stand_binder 13,
+# stand_fresh 7, stand_fresh_ground 5, stand_fresh_change 5, stand_binder 14,
 # stand_endpaper 6, stand_book_room 13, stand_errata 8, stand_keep 5,
 # stand_toll 4, stand_dog_ear 9, stand_slip 14, stand_away 15,
 # stand_tip_in 10, stand_slip_promise 5, stand_book_glean 2, stand_escheat 7,
@@ -8061,7 +8061,7 @@ STAND_HELD="
 # a test that stopped covering anything, and the count is where that shows.
 # How many of them pass and how many stand down is the road's — said, not
 # pinned.
-STAND_RUN=367
+STAND_RUN=370
 
 # What a VOLUME_TESTS kernel says of a record that names a run of no blocks
 # (file_record.c, FileRecordBuild), and of a Tract about to stand taller than
