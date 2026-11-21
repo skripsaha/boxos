@@ -240,6 +240,7 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
     /* Crate staging is identical for both modes — async handlers still pin
      * the staged kbuf into async_ctx and call crate_stage_commit_and_release
      * at I/O completion. */
+    KCallMark(proc, KCALL_MANIFEST);
     Crate *crates_kp = NULL;
     if (crate_count > 0) {
         rc = crate_stage_in(proc->cabin->vmm, crates_uaddr, crate_count, &crates_kp);
@@ -399,6 +400,7 @@ static void guide_process_pocket(process_t *proc)
     uint64_t pos;
     Pocket pocket;
     if (!KPocketPeek(proc, &pos, &pocket)) return;
+    KCallMark(proc, KCALL_PEEKED);
 
     /* Kernel sets pid (security: userspace can't forge it). */
     pocket.pid = proc->pid;

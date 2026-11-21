@@ -47,9 +47,19 @@ bool KResultPush(process_t *target, const Result *r);
  * kernel. */
 void KPocketRingInHand(process_t *proc, bool in_hand);
 
-#define KCALL_STAGED     0u   /* the call's crates staged in */
-#define KCALL_EXECUTED   1u   /* its ops run */
-#define KCALL_COMMITTED  2u   /* its crates written back */
+#define KCALL_PEEKED     0u   /* the call's pocket read off its ring */
+#define KCALL_MANIFEST   1u   /* its Manifest staged */
+#define KCALL_STAGED     2u   /* its crates staged in */
+#define KCALL_EXECUTED   3u   /* its ops run */
+#define KCALL_COMMITTED  4u   /* its crates written back */
+#define KCALL_MARKS      5u
+
+/* What became of a strand's ask to sleep (SysTurnIn), for KCallTurnIn. */
+#define KTURNIN_ASKED            0u
+#define KTURNIN_PARKED           1u
+#define KTURNIN_REFUSED_TOUCH    2u
+#define KTURNIN_REFUSED_RESULT   3u
+#define KTURNIN_REFUSED_OWED     4u
 
 /* The stopwatch (make MEASURE=on; nothing at all in any other build): the
  * moment `proc`'s call came to the gate (KCallGate), the moment it was taken
@@ -66,12 +76,15 @@ void KCallAnswered(process_t *proc);
 void KCallYieldWentTo(process_t *proc, process_t *to);
 /* The moment the Guide reached a part of serving `proc`'s call. */
 void KCallMark(process_t *proc, uint32_t which);
+/* One more of `proc`'s asks to sleep that came to `outcome` (KTURNIN_*). */
+void KCallTurnIn(process_t *proc, uint32_t outcome);
 #else
 static inline void KCallGate(process_t *proc)     { (void)proc; }
 static inline void KCallTaken(process_t *proc)    { (void)proc; }
 static inline void KCallAnswered(process_t *proc) { (void)proc; }
 static inline void KCallYieldWentTo(process_t *proc, process_t *to) { (void)proc; (void)to; }
 static inline void KCallMark(process_t *proc, uint32_t which) { (void)proc; (void)which; }
+static inline void KCallTurnIn(process_t *proc, uint32_t outcome) { (void)proc; (void)outcome; }
 #endif
 
 /* Push, or take the answer as a DEBT — the entry point for a message whose

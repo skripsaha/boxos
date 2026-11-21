@@ -187,7 +187,7 @@ void KCallTaken(process_t *proc)
  * stopwatch with it. */
 void KCallMark(process_t *proc, uint32_t which)
 {
-    if (proc && which < 3u) proc->call_mark[which] = rdtsc();
+    if (proc && which < KCALL_MARKS) proc->call_mark[which] = rdtsc();
 }
 
 void KCallAnswered(process_t *proc)
@@ -195,13 +195,15 @@ void KCallAnswered(process_t *proc)
     ResultRing *rr = kring_result_hdr(proc);
     if (!rr) return;
     const uint64_t answered = rdtsc();
-    const uint64_t at[5] = { proc->call_taken, proc->call_mark[KCALL_STAGED],
-                             proc->call_mark[KCALL_EXECUTED], proc->call_mark[KCALL_COMMITTED],
-                             answered };
+    uint64_t at[KCALL_MARKS + 2];
+    at[0] = proc->call_taken;
+    for (uint32_t k = 0; k < KCALL_MARKS; k++)
+        at[k + 1] = proc->call_mark[k];
+    at[KCALL_MARKS + 1] = answered;
     bool in_order = true;
-    for (uint32_t k = 0; k < 4u; k++)
+    for (uint32_t k = 0; k <= KCALL_MARKS; k++)
         in_order = in_order && at[k] <= at[k + 1] && at[k + 1] - at[k] <= UINT32_MAX;
-    for (uint32_t k = 0; k < 4u; k++)
+    for (uint32_t k = 0; k <= KCALL_MARKS; k++)
         rr->hdr.call_part[k] = in_order ? (uint32_t)(at[k + 1] - at[k]) : 0u;
     rr->hdr.call_gate     = proc->call_gate;
     rr->hdr.call_taken    = proc->call_taken;
@@ -213,7 +215,22 @@ void KCallYieldWentTo(process_t *proc, process_t *to)
     ResultRing *rr = kring_result_hdr(proc);
     if (!rr) return;
     rr->hdr.yields_given_away = rr->hdr.yields_given_away + 1u;
-    rr->hdr.yield_went_to     = process_is_idle(to) ? UINT32_MAX : to->pid;
+    if (process_is_idle(to)) {
+        rr->hdr.yield_went_to = UINT32_MAX;
+        return;
+    }
+    rr->hdr.yield_went_to              = to->pid;
+    rr->hdr.went_turnin_asked          = to->turnin_count[KTURNIN_ASKED];
+    rr->hdr.went_turnin_parked         = to->turnin_count[KTURNIN_PARKED];
+    rr->hdr.went_turnin_refused_touch  = to->turnin_count[KTURNIN_REFUSED_TOUCH];
+    rr->hdr.went_turnin_refused_result = to->turnin_count[KTURNIN_REFUSED_RESULT];
+    rr->hdr.went_turnin_refused_owed   = to->turnin_count[KTURNIN_REFUSED_OWED];
+}
+
+void KCallTurnIn(process_t *proc, uint32_t outcome)
+{
+    if (proc && outcome < 5u)
+        __atomic_add_fetch(&proc->turnin_count[outcome], 1u, __ATOMIC_RELAXED);
 }
 #endif
 
