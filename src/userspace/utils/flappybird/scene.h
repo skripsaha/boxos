@@ -7,7 +7,6 @@
 
 #include <vector>
 
-#include "painter/core/path.h"
 #include "painter/gui/area.h"
 #include "painter/gui/items.h"
 

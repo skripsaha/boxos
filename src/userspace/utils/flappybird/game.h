@@ -33,6 +33,7 @@ private:
     bool Moving() const;
     void Step();
     void CountUp();
+    bool OnEvent(const gui::Event &Told, std::uint64_t &Seen);
     bool OnKey(const painter::tui::KeyEvent &Key);
     void OnArea(const gui::Event &Told);
     void Flap();

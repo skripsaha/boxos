@@ -82,25 +82,41 @@ void Game::Run()
         /* A frame said: the next once the glass shows it. Nothing moving,
          * only what comes next — a key, the display's word — wakes it. */
         const bool Framed = Screen.Step() != Before && Moving();
+        /* What the display told and what was typed meanwhile taken first —
+         * the display tells something every frame, and keys waited for only
+         * behind it would wait long — then the next thing waited for. */
+        bool Woken = false;
         for (;;) {
-            const gui::Event Told = Screen.Wait(&Keys);
-            switch (Told.What) {
-            case gui::Event::Kind::Gone:
-            case gui::Event::Kind::EndAsked: return;
-            case gui::Event::Kind::Key:
-                if (!OnKey(Told.Key)) return;
-                break;
-            case gui::Event::Kind::Area: OnArea(Told); break;
-            case gui::Event::Kind::Shown: Seen = std::max(Seen, Told.Step); break;
-            case gui::Event::Kind::Alarm: break;
-            case gui::Event::Kind::AnimationEnd:
-                if (Told.Number == CurtainClosed) Again();
-                break;
-            default: break;
+            while (const std::optional<gui::Event> Told = Screen.Next()) {
+                if (!OnEvent(*Told, Seen)) return;
+                Woken = true;
             }
-            if (!Framed || Seen >= Screen.Step()) break;
+            for (painter::tui::Event Typed = Keys.Poll(); Typed.Kind != painter::tui::EventKind::Quiet; Typed = Keys.Poll()) {
+                if (Typed.Kind != painter::tui::EventKind::Key || !OnKey(Typed.Key)) return;
+                Woken = true;
+            }
+            if (Framed ? Seen >= Screen.Step() : Woken) break;
+            if (!OnEvent(Screen.Wait(&Keys), Seen)) return;
+            Woken = true;
         }
     }
+}
+
+/* False to leave. */
+bool Game::OnEvent(const gui::Event &Told, std::uint64_t &Seen)
+{
+    switch (Told.What) {
+    case gui::Event::Kind::Gone:
+    case gui::Event::Kind::EndAsked: return false;
+    case gui::Event::Kind::Key: return OnKey(Told.Key);
+    case gui::Event::Kind::Area: OnArea(Told); break;
+    case gui::Event::Kind::Shown: Seen = std::max(Seen, Told.Step); break;
+    case gui::Event::Kind::AnimationEnd:
+        if (Told.Number == CurtainClosed) Again();
+        break;
+    default: break;
+    }
+    return true;
 }
 
 bool Game::Moving() const

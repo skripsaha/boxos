@@ -6,7 +6,7 @@
 #define FLAPPYBIRD_BOARDS_H
 
 #include <cstdint>
-#include <vector>
+#include <string_view>
 
 #include "painter/gui/area.h"
 #include "painter/gui/items.h"
