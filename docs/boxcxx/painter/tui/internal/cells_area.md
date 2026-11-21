@@ -52,8 +52,13 @@
 
 **Пример:**
 ```cpp
-// Внутри painter/src/tui:
-auto Area = painter::tui::CellsArea::Open(0, 0, painter::tui::CellsArea::Where::Over);
+#include "cells_area.h"   // внутренний заголовок painter/src/tui
+
+bool Overlay()
+{
+    auto Area = painter::tui::CellsArea::Open(0, 0, painter::tui::CellsArea::Where::Over);
+    return Area.has_value();
+}
 ```
 
 ### `CellsArea::Size` / `IsOpen` / `Glass` / `Mosaics` / `Cursor`
@@ -68,8 +73,9 @@ auto Area = painter::tui::CellsArea::Open(0, 0, painter::tui::CellsArea::Where::
 
 **Пример:**
 ```cpp
-// Внутри painter/src/tui:
-painter::core::Point Start = Area.Cursor();
+#include "cells_area.h"   // внутренний заголовок painter/src/tui
+
+painter::core::Point Start(const painter::tui::CellsArea &Area) { return Area.Cursor(); }
 ```
 
 ### `CellsArea::Present`
@@ -87,8 +93,13 @@ painter::core::Point Start = Area.Cursor();
 
 **Пример:**
 ```cpp
-// Внутри painter/src/tui:
-if (auto Shown = Area.Present(Picture); !Shown) return Shown;
+#include "cells_area.h"   // внутренний заголовок painter/src/tui
+
+box::status Show(painter::tui::CellsArea &Area, const painter::tui::Frame &Picture)
+{
+    if (auto Shown = Area.Present(Picture); !Shown) return Shown;
+    return {};
+}
 ```
 
 ### `CellsArea::Commit`
@@ -104,8 +115,13 @@ if (auto Shown = Area.Present(Picture); !Shown) return Shown;
 
 **Пример:**
 ```cpp
-// Внутри painter/src/tui:
-if (auto Done = Area.Commit(Scrolled); !Done) return Done;
+#include "cells_area.h"   // внутренний заголовок painter/src/tui
+
+box::status Keep(painter::tui::CellsArea &Area, std::uint32_t Scrolled)
+{
+    if (auto Done = Area.Commit(Scrolled); !Done) return Done;
+    return {};
+}
 ```
 
 ### `CellsArea::Close`
@@ -122,6 +138,7 @@ if (auto Done = Area.Commit(Scrolled); !Done) return Done;
 
 **Пример:**
 ```cpp
-// Внутри painter/src/tui:
-(void)Area.Close();
+#include "cells_area.h"   // внутренний заголовок painter/src/tui
+
+void Drop(painter::tui::CellsArea &Area) { (void)Area.Close(); }
 ```

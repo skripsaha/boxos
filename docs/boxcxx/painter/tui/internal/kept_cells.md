@@ -31,8 +31,13 @@
 
 **Пример:**
 ```cpp
-// Внутри painter/src/tui:
-auto Kept = painter::tui::KeptCells::Open(0, 0, painter::tui::CellsArea::Where::Over);
+#include "kept_cells.h"   // внутренний заголовок painter/src/tui
+
+bool Open()
+{
+    auto Kept = painter::tui::KeptCells::Open(0, 0, painter::tui::CellsArea::Where::Over);
+    return Kept.has_value();
+}
 ```
 
 ### `KeptCells::Paint` / `KeptCells::Composite`
@@ -52,8 +57,12 @@ auto Kept = painter::tui::KeptCells::Open(0, 0, painter::tui::CellsArea::Where::
 
 **Пример:**
 ```cpp
-// Внутри painter/src/tui:
-return Kept.Composite(Origin, Picture);
+#include "kept_cells.h"   // внутренний заголовок painter/src/tui
+
+box::status Lay(painter::tui::KeptCells &Kept, painter::core::Point Origin, const painter::tui::Frame &Picture)
+{
+    return Kept.Composite(Origin, Picture);
+}
 ```
 
 ### `KeptCells::Clear`
@@ -68,8 +77,9 @@ return Kept.Composite(Origin, Picture);
 
 **Пример:**
 ```cpp
-// Внутри painter/src/tui:
-(void)Kept.Clear();
+#include "kept_cells.h"   // внутренний заголовок painter/src/tui
+
+void Wipe(painter::tui::KeptCells &Kept) { (void)Kept.Clear(); }
 ```
 
 ### `KeptCells::SetCursor` / `KeptCells::Cursor`
@@ -87,8 +97,9 @@ return Kept.Composite(Origin, Picture);
 
 **Пример:**
 ```cpp
-// Внутри painter/src/tui:
-(void)Kept.SetCursor({0, Row + 1});
+#include "kept_cells.h"   // внутренний заголовок painter/src/tui
+
+void Below(painter::tui::KeptCells &Kept, std::int32_t Row) { (void)Kept.SetCursor({0, Row + 1}); }
 ```
 
 ### `KeptCells::Commit`
@@ -104,8 +115,9 @@ return Kept.Composite(Origin, Picture);
 
 **Пример:**
 ```cpp
-// Внутри painter/src/tui:
-return Kept.Commit(ScrollRows);
+#include "kept_cells.h"   // внутренний заголовок painter/src/tui
+
+box::status Fold(painter::tui::KeptCells &Kept, std::uint32_t ScrollRows) { return Kept.Commit(ScrollRows); }
 ```
 
 ### `KeptCells::Close` и свойства
@@ -122,6 +134,7 @@ return Kept.Commit(ScrollRows);
 
 **Пример:**
 ```cpp
-// Внутри painter/src/tui:
-(void)Kept.Close();
+#include "kept_cells.h"   // внутренний заголовок painter/src/tui
+
+void Drop(painter::tui::KeptCells &Kept) { (void)Kept.Close(); }
 ```
