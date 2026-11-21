@@ -2169,10 +2169,9 @@ void irq_handler(interrupt_frame_t *frame)
      * Multi-core layout: BSP is a K-Core running kcore_run_loop, App
      * Cores run user processes. Only App Cores need preemptive
      * `schedule()` — calling it on a K-Core would hijack the kernel
-     * loop. Hence the `amp_is_appcore()` gate. A single core has no turns:
-     * its strands change at the syscall gate, whose guide schedules after
-     * every call, and at a wake (IPI_WAKE below); its LAPIC timer is the
-     * touch queue keeper's (DEADLINE_VECTOR), never this one. */
+     * loop. Hence the `amp_is_appcore()` gate. A single core's turns end
+     * at IRQ0 (IrqTheTickAnswers); its LAPIC timer is the touch queue
+     * keeper's (DEADLINE_VECTOR), never this one. */
     if (vector == LAPIC_TIMER_VECTOR)
     {
         /* A tick can land before there is a scheduler to count it into:

@@ -746,11 +746,11 @@ static inline bool SchedMayDispatch(process_t *proc)
 
 /* The strand this core runs next: the least Fare queued — `passed` aside this
  * once when anyone else is queued. A strand that gave its turn away is passed
- * at the Fare it has paid, not charged more: it was standing behind a strand
- * that paid more, at that strand's Fare, and kept that place through a sleep —
- * it woke a millisecond behind the strand it waits on, which on one core then
- * sent it more than its rings hold (touch_test TT 23). As EEVDF's yield moves
- * a deadline and leaves the lag (kernel/sched/fair.c, yield_task_fair). */
+ * at the Fare it has paid, not charged more: it was stood behind the strand
+ * that paid the least, at that strand's Fare, and kept that place through a
+ * sleep — a strand that yielded on its way to a park woke behind the strands
+ * it had yielded to. As EEVDF's yield moves a deadline and leaves the lag
+ * (kernel/sched/fair.c, yield_task_fair). */
 process_t *scheduler_select_next(process_t *passed)
 {
     scheduler_state_t *s = scheduler_get_state();

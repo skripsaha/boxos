@@ -279,12 +279,9 @@ static bool touch_wait_pause(Touch *out, uint32_t timeout_ms)
  *
  * A wait with no deadline looked, yielded and looked again for as long as it
  * waited — or sat in UMWAIT on its own ring, holding the core. Either way the
- * waiter held a core it had nothing to do on, and was charged for it: on one
- * core a strand waiting for a burst stood behind the strands it had yielded to
- * and woke a whole millisecond of Fare behind its publisher, which in that
- * millisecond sent it more than a ring and a ring owed, and the rest were
- * dropped (touch_test TT 23, one core, about one run in ten). result_wait_spin
- * learned the same for answers.
+ * waiter held a core it had nothing to do on, and paid the Fare of it — every
+ * GUI area waiting for its present among them. result_wait_spin learned the
+ * same for answers.
  *
  * So it looks hot, and turns in on its Touch ring alone: it costs nothing until
  * an event arrives, and wakes then at the front of those waiting (a sleep's
