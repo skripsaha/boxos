@@ -12,6 +12,7 @@
 #include "per_core.h"   // PerCpuData layout + g_per_core_active for the gs fast path
 #include "cpu_calibrate.h" // cpu_get_tsc_freq_khz() — the timebase that cannot be absent
 #include "cpuid.h"         // rdtsc()
+#include "tsc_sync.h"       // TscSyncServe — an AP's TSC held to this core's
 
 AmpLayout g_amp;
 
@@ -599,6 +600,7 @@ void amp_boot_aps(void)
         const uint32_t SIPI1_POLL_MAX = 1; /* >=200 µs minimum window */
         bool ap_up = amp_core_online(c);
         while (!ap_up && sipi1_polls < SIPI1_POLL_MAX) {
+            TscSyncServe(c->core_index);
             amp_delay_us(200);
             sipi1_polls++;
             ap_up = amp_core_online(c);
@@ -626,6 +628,9 @@ void amp_boot_aps(void)
         uint32_t waited_iters = 0;
         ap_up = amp_core_online(c);
         while (!ap_up && waited_iters < LONG_WAIT_ITERATIONS) {
+            /* The AP asks to meet before it comes online: its TSC is held
+             * to this core's (tsc_sync.h). */
+            TscSyncServe(c->core_index);
             amp_delay_us(LONG_WAIT_GRANULARITY_US);
             waited_iters++;
             ap_up = amp_core_online(c);

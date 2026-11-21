@@ -62,6 +62,7 @@
 #include "memtag.h"
 #include "mce.h"
 #include "op_registry.h"
+#include "tsc_sync.h"
 #include "manifest.h"
 #include "manifest_selftest.h"
 #include "crate_io_selftest.h"
@@ -636,11 +637,9 @@ void kernel_main(void)
      * in cpuid.h cpu_test_ctl_init declaration. */
     cpu_test_ctl_init();
 
-    /* Capture the BSP TSC anchor for per-AP TSC sync. Must be after
-     * cpu_calibrate_tsc (we need tsc_freq_khz published) and before
-     * amp_boot_aps (each AP reads the anchor in per_core_init_ap).
-     * Uses the current pit_uptime_us as the wall-clock pinpoint. */
-    per_core_record_bsp_tsc_anchor(pit_get_uptime_us());
+    /* The BSP's IA32_TSC_ADJUST, which every AP takes before it meets the
+     * BSP to hold its TSC to the BSP's (tsc_sync.h). Before amp_boot_aps. */
+    TscSyncRecordBsp();
 
     // Initialize idle process (PID 0) before process system
     kprintf("[INIT] Idle Process...\n");
