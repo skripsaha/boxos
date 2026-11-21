@@ -91,7 +91,7 @@ static bool StandCardAnswers(uint64_t fid, const char* word, size_t length)
 /* How many of the live files the cards say answer `word`. */
 static uint64_t StandCardsAnswering(const char* word, size_t length)
 {
-    uint64_t files[64], count = 0, from = 1;
+    uint64_t files[STAND_NAME_PAGE], count = 0, from = 1;
     uint32_t n;
     while ((n = FileMapFiles(tagfs_get_state()->files, from, files, ARRAY_SIZE(files))) > 0) {
         for (uint32_t i = 0; i < n; i++)
@@ -104,7 +104,7 @@ static uint64_t StandCardsAnswering(const char* word, size_t length)
 bool StandNamesExact(void)
 {
     TagFSState* fs      = tagfs_get_state();
-    uint64_t    files[64];
+    uint64_t    files[STAND_NAME_PAGE];
     uint64_t    from    = 1;
     uint32_t    n, links = 0;
     bool        exact   = true;
