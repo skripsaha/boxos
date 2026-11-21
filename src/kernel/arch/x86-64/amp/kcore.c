@@ -662,16 +662,18 @@ void kcore_run_loop(void)
          * a cycle due, or one owed later that no Lull is armed yet to wake
          * this core for. */
         /* Where MWAIT C1 is to be had, the K-Core sleeps watching its queue's
-         * line: armed before it says so and before the last look, a push from
-         * then on ends the wait, and one before it is seen by the look — no
-         * doorbell, no interrupt to enter and leave, for the wake every call
-         * to a quiet K-Core pays. Elsewhere HLT, and the doorbell. */
+         * line: a push after the watch is armed ends the wait, and one before
+         * it is seen by the last look, which comes after it — no doorbell, no
+         * interrupt to enter and leave, for the wake every call to a quiet
+         * K-Core pays. Elsewhere HLT, and the doorbell. The watch is armed
+         * after this core's own last store to that line (`asleep`, and
+         * kcore_count's beside it): a store of its own may end the watch. */
         const uint32_t way = g_cpu_caps.has_mwait_c1 ? KCORE_ASLEEP_WATCHING : KCORE_ASLEEP_DEAF;
         __asm__ volatile("cli");
         kcore_count(q, true);               /* awake until the sleep */
+        __atomic_store_n(&q->asleep, way, __ATOMIC_SEQ_CST);  /* before the last look */
         if (way == KCORE_ASLEEP_WATCHING)
             cpu_monitor(&q->tail);
-        __atomic_store_n(&q->asleep, way, __ATOMIC_SEQ_CST);  /* before the last look */
         if (kcore_queue_depth(my_idx) != 0 || BatonPending(my_idx) || TagFSStepOwedHere()) {
             __atomic_store_n(&q->asleep, KCORE_AWAKE, __ATOMIC_RELEASE);
             __asm__ volatile("sti");        /* raced submit — loop, don't sleep */
