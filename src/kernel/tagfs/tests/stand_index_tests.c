@@ -22,7 +22,7 @@
 
 #define STAND_INDEX_FILES     64u
 #define STAND_INDEX_SPREAD    (1u << 20)
-#define STAND_INDEX_PER_FILE  256u     /* what the map may cost a live file, its record included */
+#define STAND_INDEX_PER_FILE  320u     /* what the map may cost a live file, its record and the links of its name included */
 #define STAND_INDEX_PER_MEMBER 64u     /* what a member of a spread tag may cost the index */
 #define STAND_INDEX_MANY      1100u    /* more files than TAGFS_MAX_FILES (1024) held */
 #define STAND_INDEX_PAGE      100u
@@ -83,7 +83,7 @@ static TestResult TestStandIndexMapCostsTheLive(void)
     size_t far_bytes  = FileMapBytes(far);
     TEST_ASSERT_EQ(far_bytes, near_bytes, "ids a million apart cost what ids side by side do");
     TEST_ASSERT(far_bytes <= (size_t)STAND_INDEX_FILES * STAND_INDEX_PER_FILE,
-                "and no more than 256 bytes a live file, where a dense mirror paid for every id");
+                "and no more than 320 bytes a live file, where a dense mirror paid for every id");
 
     TEST_ASSERT_EQ(FileMapFiles(far, 1, s_rows, ARRAY_SIZE(s_rows)), STAND_INDEX_FILES,
                    "the rows are the 64 live files and nothing for the ids between them");
@@ -286,7 +286,7 @@ out:
  * `room` ids: the handler's answer. */
 static int StandIndexDeckQuery(const char* text, uint32_t room, uint64_t* out_size)
 {
-    const OpRegistration* reg   = OpRegistryLookup(OP_KIND(DECK_STORAGE, STORAGE_TAG_QUERY));
+    const OpRegistration* reg   = OpRegistryLookup(OP_KIND(DECK_STORAGE, STORAGE_NAME_QUERY));
     ManifestOp*           op    = (ManifestOp*)s_query_op;
     uint8_t               scope = STORAGE_SCOPE_EVERYWHERE;
 
@@ -294,7 +294,7 @@ static int StandIndexDeckQuery(const char* text, uint32_t room, uint64_t* out_si
     if (!reg)
         return ERR_NOT_INITIALIZED;
     memset(s_query_op, 0, sizeof(s_query_op));
-    op->op_kind    = OP_KIND(DECK_STORAGE, STORAGE_TAG_QUERY);
+    op->op_kind    = OP_KIND(DECK_STORAGE, STORAGE_NAME_QUERY);
     op->param_size = 1;
     op->in_crate   = 0;
     op->out_crate  = 1;
@@ -315,7 +315,8 @@ static bool StandIndexWalkQuery(const TagSpelling* name, uint32_t made, uint32_t
     uint64_t  from = 1;
     uint32_t  seen = 0;
     do {
-        if (TagFSQueryPage(name, 1, NULL, 0, from, s_page, STAND_INDEX_PAGE, seen == 0, &page) != OK)
+        if (TagFSNamedPage(name, strlen(name), NULL, 0, NULL, 0, from, s_page, STAND_INDEX_PAGE, seen == 0,
+                           &page) != OK)
             return false;
         if (seen == 0 && page.total != made)
             return false;
@@ -375,12 +376,12 @@ static TestResult TestStandIndexCursorPast1024(void)
     TEST_ASSERT(StandIndexWalkList(made, &seen), "the list's pages rise through the volume");
     TEST_ASSERT_EQ(seen, STAND_INDEX_MANY, "and carry every one of the 1100");
 
-    TEST_ASSERT_OK(StandIndexDeckQuery(name, 16, &said), "storage.query with room for 16");
+    TEST_ASSERT_OK(StandIndexDeckQuery(name, 16, &said), "storage.name.query with room for 16");
     memcpy(head, s_crate, sizeof(head));
     TEST_ASSERT(head[0] == 16 && head[1] == STAND_INDEX_MANY,
                 "fills its room and says the whole count");
     TEST_ASSERT_EQ(said, 8 + 16 * sizeof(uint64_t), "the crate holds what it says it holds");
-    TEST_ASSERT_OK(StandIndexDeckQuery(name, STAND_INDEX_CRATE, &said), "storage.query with room for all");
+    TEST_ASSERT_OK(StandIndexDeckQuery(name, STAND_INDEX_CRATE, &said), "storage.name.query with room for all");
     memcpy(head, s_crate, sizeof(head));
     TEST_ASSERT(head[0] == STAND_INDEX_MANY && head[1] == STAND_INDEX_MANY,
                 "delivers every file of the name");
