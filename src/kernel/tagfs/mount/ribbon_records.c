@@ -171,7 +171,8 @@ static bool RibbonTagKnown(RibbonStage* st, uint64_t id)
     for (uint32_t i = 0; i < st->ncoins; i++)
         if (st->coins[i].id == id)
             return true;
-    return (id <= TAGFS_MAX_TAG_ID && TagRegistrySpelling(tagfs_get_state()->registry, (uint32_t)id, &sp, NULL)) ||
+    return (id <= TAGFS_MAX_TAG_ID &&
+            TagRegistrySpelling(tagfs_get_state()->registry, (uint32_t)id, &sp, NULL, NULL)) ||
            BookTagAsideOf(id) != NULL;
 }
 
@@ -687,25 +688,26 @@ static error_t RibbonQuitclaimApplied(RibbonReplay* rp, RibbonStage* st, const R
 // Coined, UseContext, the bookmarks, and a record of each kind
 // ----------------------------------------------------------------------------
 
-/* Whether `a` and `b` spell one tag. */
-static bool RibbonTagSame(const TallyTag* a, const uint8_t* key, uint64_t key_len, const uint8_t* value,
-                          uint64_t value_len, bool has_value)
+/* Whether `a` and `b` are one tag: one owner, one text. */
+static bool RibbonTagSame(const TallyTag* a, const TallyTag* b)
 {
-    bool a_value = (a->flags & TALLY_TAG_HAS_VALUE) != 0;
-    return a->key_len == key_len && !memcmp(a->key, key, key_len) && a_value == has_value &&
-           (!has_value || (a->value_len == value_len && !memcmp(a->value, value, value_len)));
+    bool a_value = (a->flags & TALLY_TAG_HAS_VALUE) != 0, b_value = (b->flags & TALLY_TAG_HAS_VALUE) != 0;
+    return TagOwnerSame(TagRegistryOwnerOf(a), TagRegistryOwnerOf(b)) && a->key_len == b->key_len &&
+           !memcmp(a->key, b->key, a->key_len) && a_value == b_value &&
+           (!a_value || (a->value_len == b->value_len && !memcmp(a->value, b->value, a->value_len)));
 }
 
-/* Coined (§2.8, §3.7): the id not known, or known with the same text — by the
- * stitch, the registry, or the book's tags set aside. What of it this kernel
+/* Coined (§2.8, §3.7): the id not known, or known as the same tag — owner and
+ * text — by the stitch, the registry, or the book's tags set aside. What of it this kernel
  * cannot carry on is said whatever the stitch comes to; a tag the registry
  * cannot hold is coined all the same, aside (BookTagAsideNoted), and known to
  * the records after it. */
 static error_t RibbonCoinedApplied(RibbonStage* st, const RibbonRecord* r)
 {
-    TallyTag        t;
+    TallyTag        t, registered;
     const TallyTag* have = NULL;
     TagSpelling     sp;
+    TagOwner        owner;
     uint64_t        id = 0;
     uint32_t        used = 0;
     bool            staged = false;
@@ -722,16 +724,17 @@ static error_t RibbonCoinedApplied(RibbonStage* st, const RibbonRecord* r)
         }
     }
     bool known = !have && id <= TAGFS_MAX_TAG_ID &&
-                 TagRegistrySpelling(tagfs_get_state()->registry, (uint32_t)id, &sp, NULL);
-    if (!have && !known)
+                 TagRegistrySpelling(tagfs_get_state()->registry, (uint32_t)id, &sp, NULL, &owner);
+    if (known) {
+        registered = TagRegistryBookForm(&sp, owner);
+        have       = &registered;
+    }
+    if (!have)
         have = BookTagAsideOf(id);
-    bool same = have ? RibbonTagSame(have, t.key, t.key_len, t.value, t.value_len, (t.flags & TALLY_TAG_HAS_VALUE) != 0)
-              : known ? RibbonTagSame(&t, (const uint8_t*)sp.key, sp.key_len, (const uint8_t*)sp.value,
-                                      sp.value_len, sp.value != NULL)
-                      : true;
-    if (!same) {
-        RibbonRefuse(st, "its Coined gives id %llu to '%.*s', which the volume knows as another text",
-                     (unsigned long long)id, (int)t.key_len, (const char*)t.key);
+    if (have && !RibbonTagSame(have, &t)) {
+        RibbonRefuse(st, "its Coined gives id %llu to '%.*s' of %s, which the volume knows as another tag",
+                     (unsigned long long)id, (int)t.key_len, (const char*)t.key,
+                     (t.flags & TALLY_TAG_OWNED) ? "a program" : "the person");
         return OK;
     }
     if (known || staged)

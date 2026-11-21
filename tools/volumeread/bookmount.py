@@ -86,6 +86,11 @@ def LastBlock(fs):
     return n - 1, "beyond its runs"
 
 
+def _Whose(ts):
+    """Whose a tag is, in the words a refusal says it in."""
+    return "program fid %u" % ts.owner if ts.owner else "the person"
+
+
 def _Reach(r):
     """The keys of rotten range `r` Facsimile weighs and takes, by their first
     part, [lo, hi) — hi None to the tree's end: of FILES every fid the range
@@ -690,9 +695,10 @@ class BookMount:
         if ts.flags & tally.TAG_RETIRED:
             return
         have = tags.get(tid)
-        if have is not None and (have.key, have.value) != (ts.key, ts.value):
-            raise Refused("its Coined gives id %u to '%s', which the volume knows as '%s'"
-                          % (tid, ts.Text().decode("utf-8", "replace"), have.Text().decode("utf-8", "replace")))
+        if have is not None and (have.key, have.value, have.owner) != (ts.key, ts.value, ts.owner):
+            raise Refused("its Coined gives id %u to '%s' of %s, which the volume knows as '%s' of %s"
+                          % (tid, ts.Text().decode("utf-8", "replace"), _Whose(ts),
+                             have.Text().decode("utf-8", "replace"), _Whose(have)))
         tags[tid] = ts
 
     def _File(self, u, kind, d, files, tags, fallow, overlay):

@@ -22,7 +22,7 @@ static error_t intern_god_high(uint32_t *out_god_id)
         ksnprintf(filler, sizeof(filler), "authdec.filler.%u", i);
         TagSpelling filler_tag = TagSpellingOfKey(filler);
         uint32_t    filler_id;
-        if (TagRegistryIntern(&reg, &filler_tag, &filler_id) != OK) {
+        if (TagRegistryIntern(&reg, TagOwnerPerson(), &filler_tag, &filler_id) != OK) {
             kprintf("[AUTHDEC] FAIL: filler intern %u\n", i);
             tag_registry_destroy(&reg);
             return ERR_INTERNAL;
@@ -31,7 +31,7 @@ static error_t intern_god_high(uint32_t *out_god_id)
 
     TagSpelling god    = TagSpellingOfKey("god");
     uint32_t    god_id = TAGFS_INVALID_TAG_ID;
-    error_t     named  = TagRegistryIntern(&reg, &god, &god_id);
+    error_t     named  = TagRegistryIntern(&reg, TagOwnerPerson(), &god, &god_id);
     tag_registry_destroy(&reg);
 
     if (named != OK) {

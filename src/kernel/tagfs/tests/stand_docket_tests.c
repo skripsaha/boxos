@@ -47,7 +47,7 @@ static bool StandDocketHolds(uint64_t fid, const char* name, const TagSpelling* 
 {
     TagFSState* fs   = tagfs_get_state();
     FileRecord* rec  = FileMapRecordHold(fs->files, fid, NULL);
-    uint32_t    stem = InkNameTagLookup(name), id = TagRegistryLookup(fs->registry, tag);
+    uint32_t    stem = InkNameTagLookup(name), id = TagRegistryLookup(fs->registry, TagOwnerPerson(), tag);
     bool        has_stem = false, has_tag = false;
     if (!rec)
         return false;
@@ -152,13 +152,13 @@ static TestResult TestStandDocketEachChangeMountsAgain(void)
         return test_steps_aside(aside);
     TEST_ASSERT(TagSpell("docket:x", 8u, &tag) == OK, "a tag is spelled");
     TEST_ASSERT_EQ(tagfs_create_file("docket-a.txt", NULL, 0, &fid), 0, "a file is made on the book");
-    TEST_ASSERT_OK(tagfs_add_tag_string(fid, &tag), "and tagged with a tag new to the volume");
+    TEST_ASSERT_OK(tagfs_add_tag_string(TagOwnerPerson(), fid, &tag), "and tagged with a tag new to the volume");
     TEST_ASSERT(StandDocketSettledAndBack(), "its cycle settles, and the volume mounts again");
     TEST_ASSERT(StandDocketHolds(fid, "docket-a.txt", &tag, true), "holding the file, its name's tag and the tag");
     TEST_ASSERT_EQ(tagfs_rename_file(fid, "docket-b.txt"), 0, "the file is renamed");
     TEST_ASSERT(StandDocketSettledAndBack() && StandDocketHolds(fid, "docket-b.txt", &tag, true),
                 "and mounted again it holds the new name and its tag, the tag kept");
-    TEST_ASSERT_EQ(tagfs_remove_tag_string(fid, &tag), 0, "the tag is taken off");
+    TEST_ASSERT_EQ(tagfs_remove_tag_string(TagOwnerPerson(), fid, &tag), 0, "the tag is taken off");
     TEST_ASSERT(StandDocketSettledAndBack() && StandDocketHolds(fid, "docket-b.txt", &tag, false),
                 "and mounted again the file wears it no more");
     TEST_ASSERT_EQ(tagfs_delete_file(fid, INK_UNWARRANTED), 0, "the file is given up");
@@ -801,7 +801,7 @@ static TestResult TestStandDocketWarrant(void)
                    "it is not given up by a call with no warrant");
     TEST_ASSERT_EQ(tagfs_create_file("warrant.txt", NULL, 0, &fid), 0, "a file is made");
     TEST_ASSERT(TagSpell("system:docket", 13u, &tag) == OK, "a tag of key system is spelled");
-    TEST_ASSERT_OK(tagfs_add_tag_string(fid, &tag), "and is put on by any call: a file's tags are its user's");
+    TEST_ASSERT_OK(tagfs_add_tag_string(TagOwnerPerson(), fid, &tag), "and is put on by any call: a file's tags are its user's");
     TEST_ASSERT(StandDocketSettledAndBack(), "the cycle settles, and the volume mounts again");
     TEST_ASSERT(StandDocketLive(kept), "with the kept file");
     FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);

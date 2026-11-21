@@ -479,11 +479,11 @@ static error_t RibbonStageLaid(RibbonReplay* rp, RibbonStage* st)
             continue;
         }
         rc = RegistryCoin(tagfs_get_state()->registry, (uint32_t)st->coins[i].id,
-                          (t->flags & TALLY_TAG_HAS_VALUE) ? TAGFS_TAG_FLAG_HAS_VALUE : 0, t->key,
-                          (uint8_t)t->key_len, t->value, (uint16_t)t->value_len);
+                          (t->flags & TALLY_TAG_HAS_VALUE) ? TAGFS_TAG_FLAG_HAS_VALUE : 0, TagRegistryOwnerOf(t),
+                          t->key, (uint8_t)t->key_len, t->value, (uint16_t)t->value_len);
         if (rc == ERR_ALREADY_EXISTS) {
-            ksnprintf(why, sizeof(why), "tag id %llu's text is another id's too, or its id another text's — the "
-                      "registry cannot hold the two at once", (unsigned long long)st->coins[i].id);
+            ksnprintf(why, sizeof(why), "tag id %llu's owner and text are another id's too, or its id another "
+                      "tag's — the registry cannot hold the two at once", (unsigned long long)st->coins[i].id);
             TagFSUnderGlass(why);
             rc = OK;
         }

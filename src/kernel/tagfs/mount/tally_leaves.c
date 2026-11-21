@@ -854,18 +854,6 @@ error_t BookTagAsideNoted(uint64_t tid, const TallyTag* t)
     return OK;
 }
 
-/* The bytes of a TAGS body this reader knows. */
-static uint32_t LeavesTagKnown(const TallyTag* t)
-{
-    uint32_t n = TallyVarintBytes(t->flags);
-    if (t->flags & TALLY_TAG_RETIRED)
-        return n;
-    n += TallyVarintBytes(t->key_len) + (uint32_t)t->key_len;
-    if (t->flags & TALLY_TAG_HAS_VALUE)
-        n += TallyVarintBytes(t->value_len) + (uint32_t)t->value_len;
-    return n;
-}
-
 static error_t LeavesTag(void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
 {
     TallyTag t;
@@ -880,23 +868,23 @@ static error_t LeavesTag(void* ctx, TallyKey key, const uint8_t* body, uint32_t 
     }
     ksnprintf(words, sizeof(words), "the TAGS element of id %llu", (unsigned long long)key.k1);
     if (got == TALLY_BODY_LONGER)
-        LeavesLonger(words, len - LeavesTagKnown(&t));
+        LeavesLonger(words, len - TallyTagBytes(&t));
     if (key.k1 + 1u > g_book.next_tag)
         g_book.next_tag = key.k1 + 1u;
     if (!BookTagHeld(key.k1, &t))
         return BookTagAsideNoted(key.k1, &t);
     error_t rc = RegistryCoin(tagfs_get_state()->registry, (uint32_t)key.k1,
-                              (t.flags & TALLY_TAG_HAS_VALUE) ? TAGFS_TAG_FLAG_HAS_VALUE : 0, t.key,
-                              (uint8_t)t.key_len, t.value, (uint16_t)t.value_len);
+                              (t.flags & TALLY_TAG_HAS_VALUE) ? TAGFS_TAG_FLAG_HAS_VALUE : 0, TagRegistryOwnerOf(&t),
+                              t.key, (uint8_t)t.key_len, t.value, (uint16_t)t.value_len);
     if (rc == ERR_ALREADY_EXISTS) {
-        ksnprintf(words, sizeof(words), "tag id %llu's text is another id's too, or its id another "
-                  "text's — the registry cannot hold the two at once", (unsigned long long)key.k1);
+        ksnprintf(words, sizeof(words), "tag id %llu's owner and text are another id's too, or its id "
+                  "another tag's — the registry cannot hold the two at once", (unsigned long long)key.k1);
         TagFSUnderGlass(words);
         return OK;
     }
     if (rc == OK) {
-        EndpaperLaidTag(&g_book.laid, (uint64_t)t.key_len + t.value_len);
-        FoliationLeafHolds(TALLY_TAGS, 1u, (uint64_t)t.key_len + t.value_len);
+        EndpaperLaidTag(&g_book.laid, TallyTagCarried(&t));
+        FoliationLeafHolds(TALLY_TAGS, 1u, TallyTagCarried(&t));
     }
     return rc;
 }

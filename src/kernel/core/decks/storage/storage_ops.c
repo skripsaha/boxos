@@ -445,7 +445,7 @@ static uint64_t info_tag_record(uint8_t *kp, uint64_t pos, uint32_t tag_id)
     /* A tag the volume no longer knows still takes its place in the list:
      * the count in the header says how many records follow, so skipping one
      * would leave the reader parsing the next tag's bytes as this one's. */
-    (void)TagFSTagSpelling(tag_id, &tag, &is_system);
+    (void)TagFSTagSpelling(tag_id, &tag, &is_system, NULL);
     uint16_t kl = (uint16_t)tag.key_len;
     uint16_t vl = (uint16_t)tag.value_len;
     if (kp) {
@@ -684,8 +684,8 @@ static error_t storage_query_into(const TagSpelling *tags, uint32_t count, const
     for (;;) {
         uint32_t  room = most - hdr[0] < STORAGE_QUERY_PIECE ? most - hdr[0] : STORAGE_QUERY_PIECE;
         TagFSPage page;
-        rc = kept ? TagFSQueryKeptPage(tags, count, without, without_count, from, piece, room, first, &page)
-                  : TagFSQueryPage(tags, count, without, without_count, from, piece, room, first, &page);
+        rc = kept ? TagFSQueryKeptPage(TagOwnerPerson(), tags, count, without, without_count, from, piece, room, first, &page)
+                  : TagFSQueryPage(TagOwnerPerson(), tags, count, without, without_count, from, piece, room, first, &page);
         if (rc != OK) break;
         if (first) hdr[1] = page.total;
         first = false;
@@ -840,7 +840,7 @@ static int ObjTagList(const ManifestOp *op, Crate *crates, uint16_t crate_count,
         const uint64_t left = out->capacity - written;
         const uint32_t room = left < STORAGE_TAG_LIST_PIECE ? (uint32_t)left : STORAGE_TAG_LIST_PIECE;
         uint32_t used = 0, delivered = 0, next = 0;
-        rc = TagFSTagPage(within, count, without, without_count, from, piece, room, &used, &delivered, &next);
+        rc = TagFSTagPage(TagOwnerPerson(), within, count, without, without_count, from, piece, room, &used, &delivered, &next);
         if (rc == ERR_BUFFER_TOO_SMALL && hdr[0] > 0) {
             hdr[1] = next;              /* the crate is full: the rest from here */
             rc     = OK;
@@ -914,7 +914,7 @@ static int ObjTagSet(const ManifestOp *op, Crate *crates, uint16_t crate_count,
     TagSpelling tag;
     error_t     rc = storage_one_tag(op, crates, ctx, &text, &tag);
     if (rc != OK) return rc;
-    rc = tagfs_add_tag_string(param_u64(op, 0), &tag);
+    rc = tagfs_add_tag_string(TagOwnerPerson(), param_u64(op, 0), &tag);
     crate_buf_free(text);
     if (rc == ERR_WOULD_BLOCK)
         return SettleOpForRoom(op, crates, crate_count, ctx, param_u64(op, 0));
@@ -935,7 +935,7 @@ static int ObjTagUnset(const ManifestOp *op, Crate *crates, uint16_t crate_count
     TagSpelling tag;
     error_t     rc = storage_one_tag(op, crates, ctx, &text, &tag);
     if (rc != OK) return rc;
-    int removed = tagfs_remove_tag_string(param_u64(op, 0), &tag);
+    int removed = tagfs_remove_tag_string(TagOwnerPerson(), param_u64(op, 0), &tag);
     crate_buf_free(text);
     if (-removed == ERR_WOULD_BLOCK)
         return SettleOpForRoom(op, crates, crate_count, ctx, param_u64(op, 0));
@@ -974,7 +974,7 @@ static error_t StorageCreateInterned(const TagSpelling *tags, uint32_t count, ui
     *out_ids = NULL;
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc = InkBookRefuses(tags, count, &held);
+    error_t rc = InkBookRefuses(TagOwnerPerson(), tags, count, &held);
     if (rc == OK)
         rc = storage_intern_all(tags, count, out_ids);
     InkBookHeldLetGo(held);

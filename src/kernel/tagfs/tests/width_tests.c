@@ -180,7 +180,7 @@ static TestResult TestWidthTagIndexCostsTheLive(void)
     for (uint32_t k = 0; k < WIDTH_LIVE_TAGS; k++) {
         ksnprintf(name, sizeof(name), "width.live.%u", k);
         TagSpelling one = TagSpellingOfKey(name);
-        TEST_ASSERT_OK(TagRegistryIntern(scratch, &one, &id), "a tag is issued past the numbers");
+        TEST_ASSERT_OK(TagRegistryIntern(scratch, TagOwnerPerson(), &one, &id), "a tag is issued past the numbers");
     }
     TEST_ASSERT_EQ(id, WIDTH_ISSUED_TAGS - 1u, "the tenth at 99 999");
     TEST_ASSERT_EQ(scratch->bucket_count, buckets,

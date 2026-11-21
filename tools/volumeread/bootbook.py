@@ -58,10 +58,12 @@ def Spelling(word):
 
 
 def Spells(spelling, ts):
-    """Whether the book's tag `ts` (tally.TagState) is the one spelled: a
-    retired tag is none."""
+    """Whether the book's tag `ts` (tally.TagState) is the one the person
+    spelled: a retired tag is none, and neither is a program's own — the
+    settings are the person's words, and a program's tag of the same text is
+    another word (gangway_lectern_tree.c, LecternSpell)."""
     key, value = spelling
-    return not ts.flags & tally.TAG_RETIRED and ts.key == key and ts.value == value
+    return not ts.flags & (tally.TAG_RETIRED | tally.TAG_OWNED) and ts.key == key and ts.value == value
 
 
 def Role(flags):

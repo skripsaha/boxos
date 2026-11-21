@@ -265,7 +265,7 @@ static TestResult TestStandDedupKept(void)
                     StandKeepInRole(s2, TAGFS_FILE_ROLE_BOOT) == OK,
                 "a second of its very bytes after it, kept in the boot role");
     TEST_ASSERT(StandDedupFile(&m, "dedup-kept-f.bin", STAND_DEDUP_BLOCKS, STAND_DEDUP_STREAM, &f) &&
-                    tagfs_add_tag_string(f, &system) == OK,
+                    tagfs_add_tag_string(TagOwnerPerson(), f, &system) == OK,
                 "and a third of those bytes, wearing only the word system, which keeps nothing");
     TEST_ASSERT_OK(TagFSSettle(), "settled");
     TEST_ASSERT(StandDedupBlocks(s1, STAND_DEDUP_BLOCKS, m1) && StandDedupBlocks(s2, STAND_DEDUP_BLOCKS, m2) &&

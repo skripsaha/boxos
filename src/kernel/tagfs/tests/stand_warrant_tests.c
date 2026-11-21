@@ -69,7 +69,7 @@ static error_t StandPutOn(uint64_t file_id, const char* text)
 {
     TagSpelling tag;
     error_t     rc = TagSpell(text, strlen(text), &tag);
-    return rc == OK ? tagfs_add_tag_string(file_id, &tag) : rc;
+    return rc == OK ? tagfs_add_tag_string(TagOwnerPerson(), file_id, &tag) : rc;
 }
 
 /* The tag `text` spells taken off the file: 0 or -ERR_*. */
@@ -77,7 +77,7 @@ static int StandTakeOff(uint64_t file_id, const char* text)
 {
     TagSpelling tag;
     error_t     rc = TagSpell(text, strlen(text), &tag);
-    return rc == OK ? tagfs_remove_tag_string(file_id, &tag) : -(int)rc;
+    return rc == OK ? tagfs_remove_tag_string(TagOwnerPerson(), file_id, &tag) : -(int)rc;
 }
 
 /* The file's size, how many extents its record names, and where its first one
@@ -282,7 +282,7 @@ static TestResult TestStandWarrantBootRunRefusedToBoth(void)
         return test_steps_aside(aside);
 
     TEST_ASSERT(fs->boot.kernel_blocks > 0, "the Deed names the blocks the loader reads");
-    TEST_ASSERT_OK(TagFSQueryPage(&key, 1, NULL, 0, 1, &kernel, 1, false, &page), "the kernel is asked for");
+    TEST_ASSERT_OK(TagFSQueryPage(TagOwnerPerson(), &key, 1, NULL, 0, 1, &kernel, 1, false, &page), "the kernel is asked for");
     TEST_ASSERT_EQ(page.delivered, 1, "and found");
     TEST_ASSERT(StandBlockOf(kernel, 0, &block) &&
                 block == fs->boot.kernel_block,

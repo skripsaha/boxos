@@ -292,14 +292,15 @@ typedef struct {
     uint64_t fresh;        /* and their blocks: what a mount's check reads */
 } StitchLoad;
 
-/* Tag `id` as a Coined carries it: false when the registry gave no tag that id. */
+/* Tag `id` as a Coined carries it, whose it is with it: false when the
+ * registry gave no tag that id. */
 static bool StitchCoinedTag(uint32_t id, TallyTag* t)
 {
     TagSpelling sp;
-    if (!TagRegistrySpelling(tagfs_get_state()->registry, id, &sp, NULL))
+    TagOwner    owner;
+    if (!TagRegistrySpelling(tagfs_get_state()->registry, id, &sp, NULL, &owner))
         return false;
-    *t = (TallyTag){ .flags = sp.value ? TALLY_TAG_HAS_VALUE : 0u, .key = (const uint8_t*)sp.key,
-                     .key_len = sp.key_len, .value = (const uint8_t*)sp.value, .value_len = sp.value_len };
+    *t = TagRegistryBookForm(&sp, owner);
     return true;
 }
 
@@ -319,7 +320,7 @@ static error_t StitchMeasure(StitchSnap* s, StitchLoad* l)
         TallyTag t;
         if (!StitchCoinedTag(id, &t))
             continue;
-        uint64_t body = STITCH_COINED_MOST - STITCH_RECORD_HEAD_MOST + t.key_len + t.value_len;
+        uint64_t body = STITCH_COINED_MOST - STITCH_RECORD_HEAD_MOST + TallyTagCarried(&t);
         l->coined++;
         l->records++;
         l->bytes += STITCH_RECORD_HEAD_MOST + body;

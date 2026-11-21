@@ -251,10 +251,10 @@ static TestResult TestStandIndexRegistryRehash(void)
         TagSpelling one;
         ksnprintf(text, sizeof(text), "many:%u", i);
         TEST_ASSERT_OK(TagSpell(text, strlen(text), &one), "a tag of the key many");
-        TEST_ASSERT_OK(TagRegistryIntern(scratch, &one, &id), "is interned");
+        TEST_ASSERT_OK(TagRegistryIntern(scratch, TagOwnerPerson(), &one, &id), "is interned");
         ksnprintf(text, sizeof(text), "key%u", i);
         TEST_ASSERT_OK(TagSpellKey(text, strlen(text), &one), "a key of its own");
-        TEST_ASSERT_OK(TagRegistryIntern(scratch, &one, &id), "is interned");
+        TEST_ASSERT_OK(TagRegistryIntern(scratch, TagOwnerPerson(), &one, &id), "is interned");
     }
     TEST_ASSERT(scratch->bucket_count >= scratch->total_tags,
                 "the hash of tags has grown to a bucket a tag");
@@ -265,10 +265,10 @@ static TestResult TestStandIndexRegistryRehash(void)
         TagSpelling one;
         ksnprintf(text, sizeof(text), "many:%u", i);
         TEST_ASSERT_OK(TagSpell(text, strlen(text), &one), "the tag spells again");
-        TEST_ASSERT(TagRegistryLookup(scratch, &one) != TAGFS_INVALID_TAG_ID,
+        TEST_ASSERT(TagRegistryLookup(scratch, TagOwnerPerson(), &one) != TAGFS_INVALID_TAG_ID,
                     "every tag is found after the hash moved");
     }
-    TEST_ASSERT_OK(TagRegistryKeyIds(scratch, "many", 4, &ids), "the key's tags are asked for");
+    TEST_ASSERT_OK(TagRegistryKeyIds(scratch, TagOwnerPerson(), "many", 4, &ids), "the key's tags are asked for");
     TEST_ASSERT_EQ(ids.count, STAND_INDEX_TAGS, "and every one of them answers to its key");
 out:
     kfree(ids.ids);
@@ -315,7 +315,7 @@ static bool StandIndexWalkQuery(const TagSpelling* name, uint32_t made, uint32_t
     uint64_t  from = 1;
     uint32_t  seen = 0;
     do {
-        if (TagFSQueryPage(name, 1, NULL, 0, from, s_page, STAND_INDEX_PAGE, seen == 0, &page) != OK)
+        if (TagFSQueryPage(TagOwnerPerson(), name, 1, NULL, 0, from, s_page, STAND_INDEX_PAGE, seen == 0, &page) != OK)
             return false;
         if (seen == 0 && page.total != made)
             return false;
@@ -439,7 +439,7 @@ static TestResult TestStandRegistryKeyIdsAreCopies(void)
     for (uint32_t v = 0; v < STAND_GROUP_FIRST; v++)
         TEST_ASSERT_OK(tagfs_tag_intern(StandGroupTag(k, v), &s_group_ids[v]),
                        "a tag of a key no tag had is interned");
-    TEST_ASSERT_OK(TagRegistryKeyIds(fs->registry, s_group_key, strlen(s_group_key), &copy),
+    TEST_ASSERT_OK(TagRegistryKeyIds(fs->registry, TagOwnerPerson(), s_group_key, strlen(s_group_key), &copy),
                    "the key's ids are asked for");
     TEST_ASSERT_EQ(copy.count, STAND_GROUP_FIRST, "and all of them come back");
     TEST_ASSERT(memcmp(copy.ids, s_group_ids, sizeof(uint32_t) * STAND_GROUP_FIRST) == 0,
@@ -447,7 +447,7 @@ static TestResult TestStandRegistryKeyIdsAreCopies(void)
 
     for (uint32_t v = 0; v < STAND_GROUP_FIRST; v++)
         copy.ids[v] = TAGFS_INVALID_TAG_ID;
-    TEST_ASSERT_OK(TagRegistryKeyIds(fs->registry, s_group_key, strlen(s_group_key), &again),
+    TEST_ASSERT_OK(TagRegistryKeyIds(fs->registry, TagOwnerPerson(), s_group_key, strlen(s_group_key), &again),
                    "the key's ids are asked for again");
     bool shared = again.count != STAND_GROUP_FIRST ||
                   memcmp(again.ids, s_group_ids, sizeof(uint32_t) * STAND_GROUP_FIRST) != 0;
@@ -470,7 +470,7 @@ static TestResult TestStandRegistryKeyIdsAreCopies(void)
     TEST_ASSERT(copy.count == STAND_GROUP_FIRST &&
                 memcmp(copy.ids, s_group_ids, sizeof(uint32_t) * STAND_GROUP_FIRST) == 0,
                 "and the copy taken before says what it said");
-    TEST_ASSERT_OK(TagRegistryKeyIds(fs->registry, s_group_key, strlen(s_group_key), &again),
+    TEST_ASSERT_OK(TagRegistryKeyIds(fs->registry, TagOwnerPerson(), s_group_key, strlen(s_group_key), &again),
                    "a copy taken now");
     TEST_ASSERT(again.count == 2 * STAND_GROUP_FIRST &&
                 memcmp(again.ids, s_group_ids, sizeof(uint32_t) * 2 * STAND_GROUP_FIRST) == 0,

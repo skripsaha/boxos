@@ -85,6 +85,15 @@
 #define TALLY_FILE_DELETED   16u     /* deleted, kept until a time its header names (TallyFileHead.keep_ns) — never a tag */
 #define TALLY_TAG_HAS_VALUE  1u
 #define TALLY_TAG_RETIRED    2u
+#define TALLY_TAG_OWNED      4u      /* a program's own tag: whose it is follows the flags (TallyTag) */
+
+/* Whose a tag OWNED is. A tag without OWNED is the person's — the words the
+ * person labels files with, and the language Touch, the processes and the Use
+ * Context speak — and carries no owner at all, so a volume of none but the
+ * person's tags is written byte for byte as before tags had owners. A program
+ * is named by the file it is started from (its fid): the one name of it the
+ * volume can vouch for, which no other program can take. */
+#define TALLY_OWNER_PROGRAM  1u
 
 /* A Sheet's room for a node's stream: its eight sectors' payloads. */
 #define TALLY_SHEET_PAYLOAD  3904u
@@ -643,10 +652,14 @@ static inline uint32_t TallyParcelPut(uint8_t *out, const TallyRun *runs, uint32
 /* TAGS, USE, DIGESTS, and an inner node's items                             */
 /* ------------------------------------------------------------------------- */
 
-/* A tag's text as TAGS and Coined carry it: flags, then — unless RETIRED,
- * which names no text — key_len · key · [value_len · value when HAS_VALUE]. */
+/* A tag as TAGS and Coined carry it: flags, then — unless RETIRED, which names
+ * no tag — whose it is when OWNED (owner_kind · owner_id), then key_len · key ·
+ * [value_len · value when HAS_VALUE]. A tag that is not OWNED is the person's:
+ * owner_kind and owner_id read 0. */
 typedef struct {
     uint64_t       flags;
+    uint64_t       owner_kind;   /* with OWNED: TALLY_OWNER_PROGRAM */
+    uint64_t       owner_id;     /* with OWNED: the fid of the program's file, never 0 */
     const uint8_t *key;
     uint64_t       key_len;
     const uint8_t *value;
@@ -657,6 +670,10 @@ static inline uint32_t TallyTagPut(uint8_t *out, const TallyTag *t)
 {
     uint32_t at = BookVarintPut(out, t->flags);
     if (t->flags & TALLY_TAG_RETIRED) return at;
+    if (t->flags & TALLY_TAG_OWNED) {
+        at += BookVarintPut(out + at, t->owner_kind);
+        at += BookVarintPut(out + at, t->owner_id);
+    }
     at += BookVarintPut(out + at, t->key_len);
     at += TallyBytesPut(out + at, t->key, t->key_len);
     if (!(t->flags & TALLY_TAG_HAS_VALUE)) return at;
@@ -664,20 +681,52 @@ static inline uint32_t TallyTagPut(uint8_t *out, const TallyTag *t)
     return at + TallyBytesPut(out + at, t->value, t->value_len);
 }
 
+/* The tag at b[*at], *at moved past it: 1, or 0 when a field is cut short or
+ * the tag is written in a way the book never writes one — RETIRED and OWNED
+ * together (a retired tag names no owner, as it names no text), an owner of no
+ * kind this format has, or a program's tag naming fid 0, which no file has. */
+static inline int TallyTagTake(const uint8_t *b, uint32_t len, uint32_t *at, TallyTag *t)
+{
+    t->owner_kind = t->owner_id = 0;
+    t->key = t->value = (const uint8_t *)0;
+    t->key_len = t->value_len = 0;
+    if (!TallyTake(b, len, at, &t->flags)) return 0;
+    if (t->flags & TALLY_TAG_RETIRED) return !(t->flags & TALLY_TAG_OWNED);
+    if ((t->flags & TALLY_TAG_OWNED) &&
+        (!TallyTake(b, len, at, &t->owner_kind) || !TallyTake(b, len, at, &t->owner_id) ||
+         t->owner_kind != TALLY_OWNER_PROGRAM || t->owner_id == 0))
+        return 0;
+    if (!TallyTake(b, len, at, &t->key_len) || !TallyTakeBytes(b, len, at, t->key_len, &t->key))
+        return 0;
+    return !(t->flags & TALLY_TAG_HAS_VALUE) ||
+           (TallyTake(b, len, at, &t->value_len) && TallyTakeBytes(b, len, at, t->value_len, &t->value));
+}
+
 static inline int TallyTagGet(const uint8_t *b, uint32_t len, TallyTag *t)
 {
     uint32_t at = 0;
-    t->key = t->value = (const uint8_t *)0;
-    t->key_len = t->value_len = 0;
-    if (!TallyTake(b, len, &at, &t->flags)) return TALLY_BODY_BROKEN;
-    if (!(t->flags & TALLY_TAG_RETIRED)) {
-        if (!TallyTake(b, len, &at, &t->key_len) || !TallyTakeBytes(b, len, &at, t->key_len, &t->key))
-            return TALLY_BODY_BROKEN;
-        if ((t->flags & TALLY_TAG_HAS_VALUE) &&
-            (!TallyTake(b, len, &at, &t->value_len) || !TallyTakeBytes(b, len, &at, t->value_len, &t->value)))
-            return TALLY_BODY_BROKEN;
-    }
+    if (!TallyTagTake(b, len, &at, t)) return TALLY_BODY_BROKEN;
     return TallyBodyEnd(at, len);
+}
+
+/* What a tag carries past the fields every tag has — its key, its value and,
+ * when OWNED, whose it is: the one measure a TAGS tree and the ribbon's
+ * Coineds are sized by (tag_registry.c, endpaper.c, sewing.c). */
+static inline uint64_t TallyTagCarried(const TallyTag *t)
+{
+    uint64_t n = t->key_len + t->value_len;
+    if (t->flags & TALLY_TAG_OWNED) n += TallyVarintBytes(t->owner_kind) + TallyVarintBytes(t->owner_id);
+    return n;
+}
+
+/* The bytes TallyTagPut writes for `t`. */
+static inline uint32_t TallyTagBytes(const TallyTag *t)
+{
+    uint32_t n = TallyVarintBytes(t->flags);
+    if (t->flags & TALLY_TAG_RETIRED) return n;
+    n += TallyVarintBytes(t->key_len) + (uint32_t)TallyTagCarried(t);
+    if (t->flags & TALLY_TAG_HAS_VALUE) n += TallyVarintBytes(t->value_len);
+    return n;
 }
 
 /* The Use Context (§7): len · text. */

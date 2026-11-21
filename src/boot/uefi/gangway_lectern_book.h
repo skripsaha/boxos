@@ -161,10 +161,12 @@ static inline void LecternSpell(const char *word, LecternSpelling *s)
     s->has_value = s->value_len != 0;
 }
 
-/* Whether the book's tag `t` is the one `s` spells: a retired tag is none. */
+/* Whether the book's tag `t` is the one the person spelled in `s`: a retired
+ * tag is none, and neither is a program's own (OWNED) — the settings speak the
+ * person's words, and a program's tag of the same text is another word. */
 static inline int LecternSpells(const LecternSpelling *s, const TallyTag *t)
 {
-    if ((t->flags & TALLY_TAG_RETIRED) || t->key_len != s->key_len ||
+    if ((t->flags & (TALLY_TAG_RETIRED | TALLY_TAG_OWNED)) || t->key_len != s->key_len ||
         !(t->flags & TALLY_TAG_HAS_VALUE) != !s->has_value || (s->has_value && t->value_len != s->value_len))
         return 0;
     for (uint64_t i = 0; i < s->key_len; i++)

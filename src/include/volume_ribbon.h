@@ -785,8 +785,8 @@ static inline int RibbonQuitclaimGet(const uint8_t *b, uint32_t len, uint64_t *f
 }
 
 /* Coined — a tag given its id on the volume: id · the tag as TAGS carries it
- * (volume_tally.h TallyTag: flags, then the key and the value unless
- * RETIRED). */
+ * (volume_tally.h TallyTag: flags, then whose it is when OWNED and the key and
+ * the value, unless RETIRED). */
 static inline uint32_t RibbonCoinedBodyPut(uint8_t *out, uint64_t id, const TallyTag *t)
 {
     uint32_t at = BookVarintPut(out, id);
@@ -796,17 +796,7 @@ static inline uint32_t RibbonCoinedBodyPut(uint8_t *out, uint64_t id, const Tall
 static inline int RibbonCoinedGet(const uint8_t *b, uint32_t len, uint64_t *id, TallyTag *t, uint32_t *used)
 {
     uint32_t at = 0;
-    if (!TallyTake(b, len, &at, id)) return TALLY_BODY_BROKEN;
-    t->key = t->value = (const uint8_t *)0;
-    t->key_len = t->value_len = 0;
-    if (!TallyTake(b, len, &at, &t->flags)) return TALLY_BODY_BROKEN;
-    if (!(t->flags & TALLY_TAG_RETIRED)) {
-        if (!TallyTake(b, len, &at, &t->key_len) || !TallyTakeBytes(b, len, &at, t->key_len, &t->key))
-            return TALLY_BODY_BROKEN;
-        if ((t->flags & TALLY_TAG_HAS_VALUE) &&
-            (!TallyTake(b, len, &at, &t->value_len) || !TallyTakeBytes(b, len, &at, t->value_len, &t->value)))
-            return TALLY_BODY_BROKEN;
-    }
+    if (!TallyTake(b, len, &at, id) || !TallyTagTake(b, len, &at, t)) return TALLY_BODY_BROKEN;
     *used = at;
     return TallyBodyEnd(at, len);
 }

@@ -36,8 +36,8 @@ static bool StandKeepAmong(uint64_t fid, bool kept)
     TagSpelling stem = { .key = s_stem, .key_len = sizeof(s_stem) - 1u };
     uint64_t    ids[STAND_KEEP_PAGE];
     TagFSPage   page;
-    error_t     rc = kept ? TagFSQueryKeptPage(&stem, 1, NULL, 0, 1, ids, STAND_KEEP_PAGE, false, &page)
-                          : TagFSQueryPage(&stem, 1, NULL, 0, 1, ids, STAND_KEEP_PAGE, false, &page);
+    error_t     rc = kept ? TagFSQueryKeptPage(TagOwnerPerson(), &stem, 1, NULL, 0, 1, ids, STAND_KEEP_PAGE, false, &page)
+                          : TagFSQueryPage(TagOwnerPerson(), &stem, 1, NULL, 0, 1, ids, STAND_KEEP_PAGE, false, &page);
     for (uint32_t i = 0; rc == OK && i < page.delivered; i++)
         if (ids[i] == fid)
             return true;

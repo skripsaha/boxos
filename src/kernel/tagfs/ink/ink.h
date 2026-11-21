@@ -186,7 +186,7 @@ void     InkDropAll(void);
 void     InkReadOnlyLift(void);
 
 /* Whether a book takes the change about to be made, asked before the `count`
- * tags it brings are interned: refused by a volume that takes no change (read
+ * tags of `owner`'s it brings are interned: refused by a volume that takes no change (read
  * only, its medium gone, the halt begun), or where its ribbon has no room for
  * the Coineds of the ones the registry does not hold yet — ERR_WOULD_BLOCK
  * while room can come, ERR_TAGFS_NO_SPACE when none can (settle/sewing.h) —
@@ -194,7 +194,7 @@ void     InkReadOnlyLift(void);
  * has: OK holds those Coineds' bytes on the ribbon (*held) until the tags hold
  * their ids and the registry counts them, InkBookHeldLetGo letting the hold go
  * after the interning, inside the same stay behind the door. */
-error_t InkBookRefuses(const TagSpelling* tags, uint32_t count, uint64_t* held);
+error_t InkBookRefuses(TagOwner owner, const TagSpelling* tags, uint32_t count, uint64_t* held);
 void    InkBookHeldLetGo(uint64_t held);
 
 /* The stem of a name as a key, read in place: OK with out->key NULL for a

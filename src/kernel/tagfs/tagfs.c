@@ -1789,7 +1789,7 @@ static void tagfs_stamp_reserved_tags(void)
     // dirty flag, so this re-derivation never forces a write.
     for (size_t i = 0; i < sizeof(TagFsReservedKeys) / sizeof(TagFsReservedKeys[0]); i++) {
         TagSpelling reserved = TagSpellingOfKey(TagFsReservedKeys[i]);
-        uint32_t    tid      = TagRegistryLookup(reg, &reserved);
+        uint32_t    tid      = TagRegistryLookup(reg, TagOwnerPerson(), &reserved);
         if (tid != TAGFS_INVALID_TAG_ID)
             tag_registry_mark_system(reg, tid);
     }
@@ -2602,7 +2602,7 @@ uint32_t TagFSLookupSpelling(const TagSpelling *tag)
 {
     if (!tagfs_enter())
         return TAGFS_INVALID_TAG_ID;
-    uint32_t id = TagRegistryLookup(g_state.registry, tag);
+    uint32_t id = TagRegistryLookup(g_state.registry, TagOwnerPerson(), tag);
     tagfs_leave();
     return id;
 }
@@ -2612,7 +2612,7 @@ error_t TagFSInternSpelling(const TagSpelling *tag, uint32_t *out_id)
     *out_id = TAGFS_INVALID_TAG_ID;
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc = TagRegistryIntern(g_state.registry, tag, out_id);
+    error_t rc = TagRegistryIntern(g_state.registry, TagOwnerPerson(), tag, out_id);
     if (rc == OK)   /* inside the door: bound before this book can go */
         UseContextBindTag(tag, *out_id);
     tagfs_leave();
@@ -2642,9 +2642,9 @@ error_t tagfs_tag_intern(const char *tag, uint32_t *out_id)
     return TagFSInternSpelling(&spelled, out_id);
 }
 
-bool TagFSTagSpelling(uint32_t tag_id, TagSpelling *out, bool *is_system)
+bool TagFSTagSpelling(uint32_t tag_id, TagSpelling *out, bool *is_system, TagOwner *owner)
 {
-    return g_state.registry && TagRegistrySpelling(g_state.registry, tag_id, out, is_system);
+    return g_state.registry && TagRegistrySpelling(g_state.registry, tag_id, out, is_system, owner);
 }
 
 size_t tagfs_tag_text(uint32_t tag_id, char *out, size_t out_size)
@@ -2656,7 +2656,7 @@ size_t tagfs_tag_text(uint32_t tag_id, char *out, size_t out_size)
 
     TagSpelling tag;
     size_t      len = 0;
-    if (TagFSTagSpelling(tag_id, &tag, NULL)) {
+    if (TagFSTagSpelling(tag_id, &tag, NULL, NULL)) {
         len = TagSpellingTextLength(&tag);
         if (out && len < out_size)
             TagSpellingText(&tag, out);
@@ -2670,7 +2670,9 @@ bool TagFSTagMatches(uint32_t tag_id, const TagSpelling *pattern)
     if (!tagfs_enter())
         return false;
     TagSpelling tag;
-    bool matches = TagFSTagSpelling(tag_id, &tag, NULL) && TagPatternMatches(pattern, &tag);
+    TagOwner    owner;
+    bool matches = TagFSTagSpelling(tag_id, &tag, NULL, &owner) && owner.kind == TAG_OWNER_PERSON &&
+                   TagPatternMatches(pattern, &tag);
     tagfs_leave();
     return matches;
 }

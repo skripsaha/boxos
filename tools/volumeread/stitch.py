@@ -17,7 +17,7 @@ from .bookread import (Crc32c, Cursor, EntryNext, EntryPut, IdsPut, Short, UnitS
                        HEAD_BYTES, PAYLOAD_BYTES, SECTOR_HEAD, UNIT_STITCH)
 from .ondisk import SECTORS_PER_BLOCK
 from . import bookread, ondisk, tally
-from .tally import Run, RunsGet, RunsPut, TagDecode, TagEncode, TagState, TAG_HAS_VALUE, TAG_RETIRED
+from .tally import Run, RunsGet, RunsPut, TagDecode, TagEncode, TagState, TAG_HAS_VALUE, TAG_OWNED, TAG_RETIRED
 
 # The kinds of a stitch's records (§2.7, §2.8)
 STITCH_HEAD, CLASP, UNDONE, BORN, SHAPED, LABELED, QUITCLAIM, COINED, USE_CONTEXT, FROZEN, THAWED = \
@@ -121,9 +121,12 @@ def Quitclaim(fid, base):
     return Record(QUITCLAIM, VarintPut(fid) + VarintPut(base))
 
 
-def Coined(tid, key=b"", value=None, retired=False):
-    flags = (TAG_RETIRED if retired else 0) | (TAG_HAS_VALUE if value is not None and not retired else 0)
-    return Record(COINED, VarintPut(tid) + TagEncode(TagState(flags, key, value)))
+def Coined(tid, key=b"", value=None, retired=False, owner=0):
+    """A tag given its id; `owner` the fid of the program whose own tag it is,
+    0 for the person's."""
+    flags = (TAG_RETIRED if retired else
+             (TAG_HAS_VALUE if value is not None else 0) | (TAG_OWNED if owner else 0))
+    return Record(COINED, VarintPut(tid) + TagEncode(TagState(flags, key, value, owner)))
 
 
 def UseContext(text):
@@ -255,7 +258,7 @@ def RecordAgain(kind, d):
         return Quitclaim(d["fid"], d["base"])
     if kind == COINED:
         t = d["tag"]
-        return Coined(d["tid"], t.key, t.value, bool(t.flags & TAG_RETIRED))
+        return Coined(d["tid"], t.key, t.value, bool(t.flags & TAG_RETIRED), t.owner)
     if kind == USE_CONTEXT:
         return UseContext(d["text"])
     if kind == UNDONE:

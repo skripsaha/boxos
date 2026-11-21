@@ -107,7 +107,7 @@ static void StandConjugateMeddles(void* ctx)
 {
     StandConjugateMeddle* w = ctx;
     if (!w->write)
-        w->rc = tagfs_add_tag_string(w->fid, &s_note);
+        w->rc = tagfs_add_tag_string(TagOwnerPerson(), w->fid, &s_note);
     else
         w->rc = StandWriteAt(w->fid, 0, w->m->bytes, TAGFS_BLOCK_SIZE) == (int)TAGFS_BLOCK_SIZE ? OK : ERR_WRITE_FAILED;
 }
@@ -196,7 +196,7 @@ static TestResult TestStandConjugateChanged(void)
                 "nothing is touched: B on its own blocks, nothing rests, no block in common");
     TEST_ASSERT(tagfs_has_tag(f, tagfs_tag_lookup("note")), "B wears the tag the change put on");
     TEST_ASSERT(StandFreshHolds(&m, f) && StandFreshHolds(&m, a), "both read their bytes");
-    TEST_ASSERT_OK(tagfs_remove_tag_string(f, &s_note), "the tag comes off B");
+    TEST_ASSERT_OK(tagfs_remove_tag_string(TagOwnerPerson(), f, &s_note), "the tag comes off B");
 
     w = (StandConjugateMeddle){ .fid = a, .m = &m, .write = true, .rc = ERR_UNKNOWN };
     ConjugateStandBetween(StandConjugateMeddles, &w);
@@ -368,7 +368,7 @@ static TestResult TestStandConjugateKept(void)
     TEST_ASSERT_EQ(said.why, CONJUGATE_KEPT, "for the role it is kept in");
     TEST_ASSERT(StandConjugateUntouched(f, mine, theirs, 1u, resting), "nothing is touched");
     TEST_ASSERT_OK(StandKeepInRole(f, TAGFS_FILE_ROLE_ORDINARY), "B's role is let go");
-    TEST_ASSERT_OK(tagfs_add_tag_string(f, &system), "and B wears the word system, a tag like any other");
+    TEST_ASSERT_OK(tagfs_add_tag_string(TagOwnerPerson(), f, &system), "and B wears the word system, a tag like any other");
     TEST_ASSERT_OK(TagFSConjugate(INK_WARRANTED, &ask, &said), "B is laid on A's, the word keeping nothing");
 out:
     if (f)

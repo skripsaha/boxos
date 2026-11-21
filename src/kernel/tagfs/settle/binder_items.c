@@ -283,9 +283,10 @@ static error_t TagsNext(BinderWork* w, BinderItem* it, bool* got)
 {
     BinderItems* p = &w->items;
     TagSpelling  sp;
+    TagOwner     owner;
     uint32_t     id = 0;
     for (;;) {
-        *got = TagRoll(tagfs_get_state()->registry, p->tag, w->tag_hi, &id, &sp);
+        *got = TagRoll(tagfs_get_state()->registry, p->tag, w->tag_hi, &id, &sp, &owner);
         if (!*got)
             return OK;
         const BinderKept* k = BINDER_CHECKS && !w->measuring ? NULL : BinderKeptAt(w, (TallyKey){ id, 0 });
@@ -298,13 +299,13 @@ static error_t TagsNext(BinderWork* w, BinderItem* it, bool* got)
         p->tag = (uint32_t)k->at.hi.k1;
     }
     p->tag = id + 1u;
-    if (!ItemRoom(p, 30u + sp.key_len + sp.value_len))
+    TallyTag t       = TagRegistryBookForm(&sp, owner);
+    uint64_t carried = TallyTagCarried(&t);
+    if (!ItemRoom(p, TallyTagBytes(&t)))
         return ERR_NO_MEMORY;
-    EndpaperLaidTag(&w->laid, (uint64_t)sp.key_len + sp.value_len);
-    TallyTag t = { .flags = sp.value ? TALLY_TAG_HAS_VALUE : 0u, .key = (const uint8_t*)sp.key,
-                   .key_len = sp.key_len, .value = (const uint8_t*)sp.value, .value_len = sp.value_len };
+    EndpaperLaidTag(&w->laid, carried);
     *it = (BinderItem){ .key = { id, 0 }, .count = 1, .body = p->buf, .len = TallyTagPut(p->buf, &t),
-                        .text = sp.key_len + sp.value_len };
+                        .text = carried };
     return OK;
 }
 

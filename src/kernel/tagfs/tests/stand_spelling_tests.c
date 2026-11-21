@@ -164,7 +164,7 @@ static TestResult TestStandLongKeyRefusedBeforeAllocation(void)
     TagSpelling unjudged = { s_long, NULL, STAND_LONG_BYTES, 0 };
     HeapFailArm(me, 1);
     armed = true;
-    error_t  rc   = TagRegistryIntern(scratch, &unjudged, &id);
+    error_t  rc   = TagRegistryIntern(scratch, TagOwnerPerson(), &unjudged, &id);
     uint32_t seen = HeapFailSeen();
     HeapFailDisarm();
     armed = false;
@@ -179,13 +179,13 @@ static TestResult TestStandLongKeyRefusedBeforeAllocation(void)
     TEST_ASSERT_EQ(id, TAGFS_INVALID_TAG_ID, "and gives it no number");
 
     TagSpelling widest = { s_long, NULL, TAG_KEY_WIDTH, 0 };
-    TEST_ASSERT_OK(TagRegistryIntern(scratch, &widest, &id), "a 255-byte key is a tag");
+    TEST_ASSERT_OK(TagRegistryIntern(scratch, TagOwnerPerson(), &widest, &id), "a 255-byte key is a tag");
     size_t      room = TAG_KEY_VALUE_WIDTH - 1;
     TagSpelling full = { "w", s_text, 1, room };
     memset(s_text, 'v', room + 1);
-    TEST_ASSERT_OK(TagRegistryIntern(scratch, &full, &id), "a value to the tag's full width is one");
+    TEST_ASSERT_OK(TagRegistryIntern(scratch, TagOwnerPerson(), &full, &id), "a value to the tag's full width is one");
     full.value_len = room + 1;
-    TEST_ASSERT_EQ(TagRegistryIntern(scratch, &full, &id), ERR_TAGFS_TAG_TOO_LONG,
+    TEST_ASSERT_EQ(TagRegistryIntern(scratch, TagOwnerPerson(), &full, &id), ERR_TAGFS_TAG_TOO_LONG,
                    "and a byte more is refused");
 out:
     if (armed)
@@ -215,7 +215,7 @@ static TestResult TestStandFullRegistryRefusesLoudly(void)
     scratch->next_id = TAGFS_MAX_TAG_ID + 1u;
 
     TagSpelling tag = TagSpellingOfKey("stand_full");
-    error_t     rc  = TagRegistryIntern(scratch, &tag, &id);
+    error_t     rc  = TagRegistryIntern(scratch, TagOwnerPerson(), &tag, &id);
     TestEvidence("new tags a registry with every number given out numbered", rc == OK ? 1 : 0);
     if (rc == OK) {
         verdict = TEST_DEFECT;
@@ -224,7 +224,7 @@ static TestResult TestStandFullRegistryRefusesLoudly(void)
     TEST_ASSERT_EQ(rc, ERR_TAGFS_REGISTRY_FULL, "the registry refuses it as full");
     TEST_ASSERT_EQ(id, TAGFS_INVALID_TAG_ID, "with no number");
     TEST_ASSERT(scratch->said_full, "and has said so");
-    TEST_ASSERT_EQ(TagRegistryIntern(scratch, &tag, &id), ERR_TAGFS_REGISTRY_FULL,
+    TEST_ASSERT_EQ(TagRegistryIntern(scratch, TagOwnerPerson(), &tag, &id), ERR_TAGFS_REGISTRY_FULL,
                    "the next ask is refused the same way");
 out:
     if (built) {
@@ -264,7 +264,7 @@ static bool StandListed(const TagSpelling* tags, uint32_t count, const TagSpelli
 {
     TagFSPage page;
     uint64_t  first = 0;
-    return TagFSQueryPage(tags, count, aside, aside_count, file_id, &first, 1, false, &page) == OK &&
+    return TagFSQueryPage(TagOwnerPerson(), tags, count, aside, aside_count, file_id, &first, 1, false, &page) == OK &&
            page.delivered == 1 && first == file_id;
 }
 
@@ -288,7 +288,7 @@ static TestResult TestStandAsidePastTag63(void)
         TEST_ASSERT(StandMakeFile(names[i], NULL, 0, &files[i]), "a file of the test's own");
     const TagSpelling trashed = TagSpellingOfKey("trashed");
     TEST_ASSERT_EQ(tagfs_add_tag(files[0], high), 0, "the first wears the tag");
-    TEST_ASSERT_OK(tagfs_add_tag_string(files[2], &trashed), "the third wears trashed");
+    TEST_ASSERT_OK(tagfs_add_tag_string(TagOwnerPerson(), files[2], &trashed), "the third wears trashed");
 
     TagSpelling named[3], aside;
     for (uint32_t i = 0; i < 3; i++)
@@ -422,7 +422,7 @@ static TestResult TestStandTagSetWearsWhatItWasGiven(void)
 
     len = StandTagText("stand_info", 'i', STAND_VALUE_BYTES);
     TEST_ASSERT_OK(TagSpell(s_text, len, &spelled), "a tag with a 300-byte value spells");
-    TEST_ASSERT_OK(tagfs_add_tag_string(file_id, &spelled),
+    TEST_ASSERT_OK(tagfs_add_tag_string(TagOwnerPerson(), file_id, &spelled),
                    "and is put on the file");
     TEST_ASSERT(StandInfoHasWhole(file_id, s_text), "and its info carries all 300 bytes of it");
 out:

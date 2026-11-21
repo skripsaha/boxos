@@ -201,7 +201,7 @@ error_t InkVolumeBegins(void)
  * bringing none new, whether a record would (RibbonClaim, nothing claimed): a
  * create, a name or a tag refused there interns nothing for the next stitch to
  * lay down as a Coined, and every tag interned has its Coined's room. */
-error_t InkBookRefuses(const TagSpelling* tags, uint32_t count, uint64_t* held)
+error_t InkBookRefuses(TagOwner owner, const TagSpelling* tags, uint32_t count, uint64_t* held)
 {
     TagFSState* fs    = InkState();
     uint64_t    bytes = 0;
@@ -209,9 +209,12 @@ error_t InkBookRefuses(const TagSpelling* tags, uint32_t count, uint64_t* held)
     error_t rc = InkVolumeBegins();
     if (rc != OK)
         return rc;
-    for (uint32_t i = 0; i < count; i++)
-        if (tags[i].key && TagRegistryLookup(fs->registry, &tags[i]) == TAGFS_INVALID_TAG_ID)
-            bytes += STITCH_COINED_MOST + tags[i].key_len + tags[i].value_len;
+    for (uint32_t i = 0; i < count; i++) {
+        if (!tags[i].key || TagRegistryLookup(fs->registry, owner, &tags[i]) != TAGFS_INVALID_TAG_ID)
+            continue;
+        TallyTag t = TagRegistryBookForm(&tags[i], owner);
+        bytes += STITCH_COINED_MOST + TallyTagCarried(&t);
+    }
     TagFSLockTake(&fs->lock);
     rc = bytes ? RibbonReserve(bytes) : RibbonClaim(0, false);
     TagFSLockDrop(&fs->lock);

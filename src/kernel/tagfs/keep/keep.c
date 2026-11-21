@@ -41,7 +41,7 @@ uint32_t KeepSweepNow(uint64_t now_ns)
     uint32_t let_go  = 0;
     for (;;) {
         TagFSPage page;
-        if (TagFSQueryKeptPage(NULL, 0, NULL, 0, from, ids, KEEP_PAGE, false, &page) != OK)
+        if (TagFSQueryKeptPage(TagOwnerPerson(), NULL, 0, NULL, 0, from, ids, KEEP_PAGE, false, &page) != OK)
             break;
         for (uint32_t i = 0; i < page.delivered; i++) {
             InkReceipt receipt;

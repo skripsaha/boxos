@@ -56,7 +56,7 @@ error_t InkNameTagIntern(const char* name, uint32_t* out_tag)
     error_t rc = InkNameStem(name, &stem);
     if (rc != OK || !stem.key)
         return rc;
-    rc = TagRegistryIntern(OpsRegistry(), &stem, out_tag);
+    rc = TagRegistryIntern(OpsRegistry(), TagOwnerPerson(), &stem, out_tag);
     if (rc != OK)
         return rc;
     UseContextBindTag(&stem, *out_tag);
@@ -68,7 +68,7 @@ uint32_t InkNameTagLookup(const char* name)
     TagSpelling stem;
     if (!name || InkNameStem(name, &stem) != OK || !stem.key)
         return TAGFS_INVALID_TAG_ID;
-    return TagRegistryLookup(OpsRegistry(), &stem);
+    return TagRegistryLookup(OpsRegistry(), TagOwnerPerson(), &stem);
 }
 
 // ----------------------------------------------------------------------------
@@ -120,7 +120,7 @@ static error_t CreateInside(const char* filename, const uint32_t* tag_ids, uint3
     TagSpelling stem;
     error_t     rc = InkNameStem(filename, &stem);
     if (rc == OK)
-        rc = InkBookRefuses(&stem, stem.key ? 1u : 0u, &held);
+        rc = InkBookRefuses(TagOwnerPerson(), &stem, stem.key ? 1u : 0u, &held);
     if (rc == OK)
         rc = InkNameTagIntern(filename, &name_tag);
     InkBookHeldLetGo(held);
@@ -202,7 +202,7 @@ int tagfs_rename_file(uint64_t file_id, const char* new_filename)
     TagSpelling stem;
     error_t     rc = InkNameStem(new_filename, &stem);
     if (rc == OK)
-        rc = InkBookRefuses(&stem, stem.key ? 1u : 0u, &held);
+        rc = InkBookRefuses(TagOwnerPerson(), &stem, stem.key ? 1u : 0u, &held);
     if (rc == OK)
         rc = InkNameTagIntern(new_filename, &name_tag);
     InkBookHeldLetGo(held);
@@ -247,19 +247,21 @@ bool tagfs_has_tag(uint64_t file_id, uint32_t tag_id)
 
 /* The id is the registry's of this mounting, and is worn inside the same stay
  * behind the door: a volume read again between the two would number another
- * tag with it. */
-error_t tagfs_add_tag_string(uint64_t file_id, const TagSpelling* tag)
+ * tag with it. Only the person's tags are words of the Use Context, so only
+ * they are bound to it. */
+error_t tagfs_add_tag_string(TagOwner owner, uint64_t file_id, const TagSpelling* tag)
 {
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
     uint32_t tag_id;
     uint64_t held = 0;
-    error_t  rc   = InkBookRefuses(tag, 1, &held);
+    error_t  rc   = InkBookRefuses(owner, tag, 1, &held);
     if (rc == OK)
-        rc = TagRegistryIntern(OpsRegistry(), tag, &tag_id);
+        rc = TagRegistryIntern(OpsRegistry(), owner, tag, &tag_id);
     InkBookHeldLetGo(held);
     if (rc == OK) {
-        UseContextBindTag(tag, tag_id);
+        if (owner.kind == TAG_OWNER_PERSON)
+            UseContextBindTag(tag, tag_id);
         int added = tagfs_add_tag(file_id, tag_id);
         rc        = added == 0 ? OK : (error_t)-added;
     }
@@ -267,12 +269,14 @@ error_t tagfs_add_tag_string(uint64_t file_id, const TagSpelling* tag)
     return rc;
 }
 
-/* Whether the file's tag `tag_id` is what `tag` names: that exact tag when it
- * has a value, and any tag of its key when it is bare. */
-static bool TagNamedBy(uint32_t tag_id, const TagSpelling* tag)
+/* Whether the file's tag `tag_id` is what `owner`'s `tag` names: that exact
+ * tag when it has a value, and any of `owner`'s tags of its key when it is
+ * bare — never another owner's, whatever its text. */
+static bool TagNamedBy(uint32_t tag_id, TagOwner owner, const TagSpelling* tag)
 {
     TagSpelling worn;
-    if (!TagRegistrySpelling(OpsRegistry(), tag_id, &worn, NULL))
+    TagOwner    whose;
+    if (!TagRegistrySpelling(OpsRegistry(), tag_id, &worn, NULL, &whose) || !TagOwnerSame(whose, owner))
         return false;
     if (worn.key_len != tag->key_len || memcmp(worn.key, tag->key, tag->key_len) != 0)
         return false;
@@ -288,7 +292,7 @@ static bool TagNamedBy(uint32_t tag_id, const TagSpelling* tag)
  * after the tail turned beneath the walk (another core's Ink, a cycle's close)
  * with no Spare to be had: the caller asks again once a cycle gave ground
  * back, and what the text names is then what is still on. */
-int tagfs_remove_tag_string(uint64_t file_id, const TagSpelling* tag)
+int tagfs_remove_tag_string(TagOwner owner, uint64_t file_id, const TagSpelling* tag)
 {
     if (!tagfs_enter())
         return -(int)ERR_TAGFS_NOT_INITIALIZED;
@@ -300,7 +304,7 @@ int tagfs_remove_tag_string(uint64_t file_id, const TagSpelling* tag)
     uint32_t removed = 0;
     bool     room    = false;
     for (uint32_t i = 0; i < meta.tag_count && !room; i++) {
-        if (!TagNamedBy(meta.tag_ids[i], tag))
+        if (!TagNamedBy(meta.tag_ids[i], owner, tag))
             continue;
         int rc = tagfs_remove_tag(file_id, meta.tag_ids[i]);
         if (rc == 0)

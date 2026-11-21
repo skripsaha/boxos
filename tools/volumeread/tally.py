@@ -43,7 +43,8 @@ NODE_HEAD = 1
 RUN_HOLE, RUN_EXT = 1, 2
 EXT_CODEC, EXT_SHARED, EXT_COPY = 1, 2, 3
 
-TAG_HAS_VALUE, TAG_RETIRED = 1, 2    # Coined / TAGS flags (§2.8, §6.4)
+TAG_HAS_VALUE, TAG_RETIRED, TAG_OWNED = 1, 2, 4    # Coined / TAGS flags (§2.8, §6.4); OWNED: a program's own
+OWNER_PROGRAM = 1                    # volume_tally.h TALLY_OWNER_PROGRAM: an OWNED tag's owner, the program's fid
 KERNEL_TAG_END = 1 << 31             # §6.4: the kernel gives ids below bit 31 (TAGFS_MAX_TAG_ID 0x7FFFFFFE)
 TAG_KEY_WIDTH = 255                  # tag_spelling.h:33 TAG_KEY_WIDTH
 TAG_TEXT_ROOM = 4074                 # tag_spelling.h:39 TAG_TEXT_WIDTH less the ':' — key and value
@@ -133,10 +134,12 @@ class FileState:
 
 
 class TagState:
-    __slots__ = ("flags", "key", "value")
+    """A tag as the book names it. `owner` is the fid of the program whose own
+    tag it is (OWNED), 0 for the person's — the tags people label files with."""
+    __slots__ = ("flags", "key", "value", "owner")
 
-    def __init__(self, flags, key, value):
-        self.flags, self.key, self.value = flags, key, value
+    def __init__(self, flags, key, value, owner=0):
+        self.flags, self.key, self.value, self.owner = flags, key, value, owner
 
     def Text(self):
         return self.key + (b":" + self.value if self.value is not None else b"")
@@ -549,20 +552,32 @@ def TagEncode(ts):
     V = VarintPut
     if ts.flags & TAG_RETIRED:
         return V(ts.flags)
-    out = V(ts.flags) + V(len(ts.key)) + ts.key
+    out = V(ts.flags)
+    if ts.flags & TAG_OWNED:
+        out += V(OWNER_PROGRAM) + V(ts.owner)
+    out += V(len(ts.key)) + ts.key
     return out + V(len(ts.value)) + ts.value if ts.flags & TAG_HAS_VALUE else out
 
 
 def TagDecode(c, what, glass):
-    """A tag's text as a TAGS element and a Coined record carry it: flags,
-    then — unless RETIRED, which names no text — the key and the value when
-    HAS_VALUE."""
+    """A tag as a TAGS element and a Coined record carry it: flags, then —
+    unless RETIRED, which names no tag — whose it is when OWNED, then the key
+    and the value when HAS_VALUE. A retired tag naming an owner, an owner of
+    no kind the format has, and a program's tag naming fid 0 are written as
+    the book never writes a tag (volume_tally.h TallyTagTake)."""
     flags = c.V()
     if flags & TAG_RETIRED:
+        if flags & TAG_OWNED:
+            raise Short("%s: a RETIRED tag names an owner" % what)
         return TagState(flags, b"", None)
+    owner = 0
+    if flags & TAG_OWNED:
+        kind, owner = c.V(), c.V()
+        if kind != OWNER_PROGRAM or owner == 0:
+            raise Short("%s: an OWNED tag's owner is kind %u, id %u" % (what, kind, owner))
     key = c.Take(c.V())
     value = c.Take(c.V()) if flags & TAG_HAS_VALUE else None
-    return TagState(flags, key, value)
+    return TagState(flags, key, value, owner)
 
 
 def TagGlass(tid, ts, glass):
@@ -896,6 +911,7 @@ def TallyCheck(defines):
                   (SPINE_COUNTS, "SPINE_COUNTS"), (SPINE_FLAGS, "SPINE_FLAGS"),
                   (SPINE_MEDIUM_LIED, "SPINE_MEDIUM_LIED"), (NODE_HEAD, "NODE_HEAD"), (RUN_HOLE, "RUN_HOLE"),
                   (RUN_EXT, "RUN_EXT"), (TAG_HAS_VALUE, "TALLY_TAG_HAS_VALUE"), (TAG_RETIRED, "TALLY_TAG_RETIRED"),
+                  (TAG_OWNED, "TALLY_TAG_OWNED"), (OWNER_PROGRAM, "TALLY_OWNER_PROGRAM"),
                   (ondisk.FILE_ACTIVE, "TALLY_FILE_ACTIVE"),
                   (ondisk.FILE_UNDONE, "TALLY_FILE_UNDONE"), (ondisk.FILE_DELETED, "TALLY_FILE_DELETED"),
                   (ondisk.FILE_ROLE_MASK, "TALLY_FILE_ROLE_MASK"),

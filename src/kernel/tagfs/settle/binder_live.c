@@ -88,7 +88,8 @@ static bool TagsLive(const TallyPlace* p, bool first)
     uint64_t    to   = p->has_hi && p->hi.k1 < UINT32_MAX ? p->hi.k1 : UINT32_MAX;
     uint32_t    id   = 0;
     TagSpelling sp;
-    return from < to && TagRoll(tagfs_get_state()->registry, (uint32_t)from, (uint32_t)to, &id, &sp);
+    TagOwner    owner;
+    return from < to && TagRoll(tagfs_get_state()->registry, (uint32_t)from, (uint32_t)to, &id, &sp, &owner);
 }
 
 static bool UseLives(void)
