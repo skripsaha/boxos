@@ -319,18 +319,20 @@ static int b_yield(uint32_t i, void *ctx)
     return 0;
 }
 
-/* (4) The least call: one op in a Manifest — the hardware deck's timer read,
- *     a u64 written into the out crate — served by a K-Core, its Result
- *     posted and taken. The whole Manifest pipeline (build, validate,
- *     dispatch, result push, result pop) and no I/O. Asked by MfCall1 itself:
- *     time_uptime_ms reads the ClockBoard page and enters no kernel at all,
- *     and this row timed that — a load, 0 ns. */
+/* (4) The least call: one op in a Manifest — ops.fill of an 8-byte crate,
+ *     memory alone — served by a K-Core, its Result posted and taken. The
+ *     whole Manifest pipeline (build, validate, dispatch, result push, result
+ *     pop) and nothing else, and the same op the 1000-op chain carries: this
+ *     row less the chain's cost of one op is the price of a call. Not
+ *     time_uptime_ms, which reads the ClockBoard page and enters no kernel
+ *     (0 ns), nor the hardware deck's timer read, which reads the HPET — three
+ *     uncached reads of a device, microseconds on a board. */
 static int b_least_call(uint32_t i, void *ctx)
 {
-    (void)i;
     (void)ctx;
-    uint8_t ms[8];
-    return MfCall1(DECK_HARDWARE, HW_TIMER_GET_MS, NULL, 0, NULL, 0, ms, sizeof(ms), NULL,
+    uint8_t fill = (uint8_t)i;
+    uint8_t out[8];
+    return MfCall1(DECK_OPERATIONS, OP_BUF_FILL, &fill, 1, NULL, 0, out, sizeof(out), NULL,
                    BOX_ANSWER_GUARANTEED, NULL) == 0 ? 0 : -1;
 }
 
@@ -686,7 +688,7 @@ int main(void)
 
     /* Manifest dispatch costs: back to back, and after 2 ms of quiet — the
      * K-Core asleep, woken by the call */
-    bench_run("1-op Manifest (timer read)", b_least_call, NULL, 1000);
+    bench_run("1-op Manifest (ops.fill)", b_least_call, NULL, 1000);
     bench_run_rested("1-op Manifest after 2 ms quiet", b_least_call, NULL, 500, 2000);
 
     /* One strand waiting on another's work, through the kernel */
