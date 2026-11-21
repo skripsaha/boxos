@@ -60,6 +60,7 @@ static inline bool auth_level_permits(uint32_t auth_bits, uint32_t level)
     return (auth_bits & allowed) != 0;
 }
 
-bool ManifestOpAuthorize(uint32_t op_kind, const OpContext *ctx);
+/* `reg` is the op's registration, as the caller has looked it up already. */
+bool ManifestOpAuthorize(const OpRegistration *reg, const OpContext *ctx);
 
 #endif /* MANIFEST_AUTH_H */

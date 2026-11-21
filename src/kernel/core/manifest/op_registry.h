@@ -89,7 +89,6 @@ typedef struct OpRegistration {
 
 /* Lifecycle */
 error_t OpRegistryInit(void);
-void    OpRegistryShutdown(void);
 
 /* Registration — called by decks at init. Returns ERR_ALREADY_EXISTS if
  * op_kind is already registered (protects against accidental double-register).
@@ -99,10 +98,14 @@ error_t OpRegistryRegister(uint32_t    op_kind,
                            uint32_t    security_mask,
                            const char *name);
 
-/* Lookup — returns NULL if not found. Pointer is stable across concurrent
- * readers; only OpRegistryShutdown invalidates it.
- */
+/* Lookup — returns NULL if not found. The pointer is good for ever. With
+ * no lock once the table is sealed. */
 const OpRegistration *OpRegistryLookup(uint32_t op_kind);
+
+/* The decks have registered: the table is not written again, and a lookup
+ * takes no lock from here on. Called once, before the first program can make
+ * a call (main.c); a registration after it is refused as a defect. */
+void OpRegistrySeal(void);
 
 /* Statistics & introspection */
 uint32_t OpRegistryCount(void);

@@ -32,7 +32,6 @@
 #include "crate_io.h"
 #include "operations_deck.h"
 #include "vmm.h"
-#include "pmm.h"
 #include "process.h"
 
 /*
@@ -103,21 +102,12 @@ static int OpBufFill(const ManifestOp *op,
 
     vmm_context_t *vmm = op_vmm(ctx);
     if (vmm) {
-        /* One page of the fill byte committed across the user output in
-         * page-sized chunks: kernel memory stays a single page no matter how
-         * large dst->capacity is (it is attacker-controlled and unbounded), so
-         * a giant capacity cannot force a giant kmalloc+memset. */
-        uint8_t *page = kmalloc(PMM_PAGE_SIZE);
-        if (!page) return ERR_NO_MEMORY;
-        memset(page, fill_byte, PMM_PAGE_SIZE);
-        for (uint64_t off = 0; off < n; off += PMM_PAGE_SIZE) {
-            uint64_t chunk = n - off;
-            if (chunk > PMM_PAGE_SIZE) chunk = PMM_PAGE_SIZE;
-            error_t rc = vmm_user_buf_commit_out(vmm, (uintptr_t)dst->addr + off,
-                                                 page, (size_t)chunk);
-            if (rc != OK) { kfree(page); return rc; }   /* fail closed */
-        }
-        kfree(page);
+        /* Set where it lies, a page's porthole at a time: no kernel memory
+         * at all, however large the attacker-controlled capacity. It used to
+         * take a page from the heap, set all of it and give it back for every
+         * fill — of eight bytes too. */
+        error_t rc = vmm_user_buf_fill_out(vmm, (uintptr_t)dst->addr, fill_byte, (size_t)n);
+        if (rc != OK) return rc;   /* fail closed */
     } else {
         memset((void *)(uintptr_t)dst->addr, fill_byte, (size_t)n);
     }

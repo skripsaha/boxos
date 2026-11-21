@@ -1061,6 +1061,9 @@ void kernel_main(void)
     }
 #endif
 
+    /* Every deck has registered its ops; no program has made a call yet. */
+    OpRegistrySeal();
+
 #if CONFIG_START_USERSPACE
     kprintf("Starting userspace...\n");
     kprintf("\n");

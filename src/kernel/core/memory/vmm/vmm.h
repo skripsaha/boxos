@@ -979,6 +979,10 @@ error_t vmm_user_buf_in_into(vmm_context_t *ctx, uintptr_t user_vaddr,
 void   *vmm_user_buf_alloc_out(size_t size);
 error_t vmm_user_buf_commit_out(vmm_context_t *ctx, uintptr_t user_vaddr,
                                  const void *kbuf, size_t size);
+/* Every byte of the user range set to `byte`, written as commit_out writes —
+ * straight through each page's porthole, with no kernel buffer. */
+error_t vmm_user_buf_fill_out(vmm_context_t *ctx, uintptr_t user_vaddr,
+                               uint8_t byte, size_t size);
 void    vmm_user_buf_free(void *kbuf);
 int vmm_setup_null_trap(vmm_context_t* ctx);
 
