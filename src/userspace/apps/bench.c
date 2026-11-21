@@ -566,11 +566,12 @@ static int bench_setup_touch(void)
 
 static void bench_drain_touches(void)
 {
-    /* Use a tiny timeout (1ms). touch_await(timeout=0) treats 0 as
-     * "use default 30s" — hangs us when the ring is empty. With 1ms
-     * the drain returns quickly once we've consumed all queued touches. */
+    /* What the ring holds, taken without a wait. It ran inside the timed
+     * window of every 16th publish and ended in a wait of 1 ms on the ring it
+     * had emptied: six samples in a hundred were a millisecond long, and the
+     * row's p99 of 1.03 ms on every machine was that wait, not a send. */
     Touch t;
-    while (touch_await(s_rtt_tag, &t, 1) == 0) { /* discard */ }
+    while (touch_try_pop_tag(s_rtt_tag, &t)) { /* discard */ }
 }
 
 /* Pure publish: send only, do NOT await. The kernel still delivers the
@@ -585,8 +586,8 @@ static int b_touch_publish_only(uint32_t i, void *ctx)
     (void)ctx;
     if (bench_setup_touch() != 0) return -1;
     /* Drain accumulated unconsumed Touches every 16 iters so the ring
-     * doesn't overflow; the drain itself runs OUTSIDE the timed window
-     * for the iterations where i & 15 != 0. */
+     * doesn't overflow — inside the timed window of those iterations, and
+     * at no more than the pops of what is there. */
     if ((i & 15) == 0) bench_drain_touches();
     uint32_t payload = i;
     return touch_send(s_rtt_pair, &payload, sizeof(payload), 0);
