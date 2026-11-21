@@ -24,6 +24,7 @@
 #include "settle/settle.h"
 #include "helm/helm.h"
 #include "keep/keep.h"
+#include "retire/retire.h"
 #include "mount/away.h"
 #include "mount/perambulation.h"
 #include "mount/hold_ground.h"
@@ -2326,6 +2327,7 @@ void TagFSServiceIfPending(void)
     HelmRunReady();
     SettleServiceIfPending();
     KeepServe();
+    RetireServe();
     tagfs_attend_owed_arrival();
     tagfs_ask_for_the_mount_again();
 

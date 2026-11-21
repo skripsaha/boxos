@@ -109,6 +109,19 @@ error_t InkUndone(uint64_t fid, InkReceipt* out);
  * go at its term (keep/keep.h): InkQuitclaim, as ever. */
 error_t InkKeep(uint64_t fid, uint64_t until, InkWarrant warrant, InkReceipt* out);
 
+/* The `count` tags of `tags` taken off file `fid` — live or kept deleted — in
+ * one Ink, those it wears; OK, and OK with no Ink for a file that wears none
+ * of them, or the refusal: ERR_FILE_NOT_FOUND, the volume's, the ribbon's room
+ * (ERR_WOULD_BLOCK while it can come), ERR_NO_MEMORY. */
+error_t InkTagsOff(uint64_t fid, const uint32_t* tags, uint32_t count, InkReceipt* out);
+
+/* The `count` tags of `tags` retired — closed already (TagRegistryRetire) and
+ * worn by no file: each lies in a Coined RETIRED of the next stitch. OK, or
+ * ERR_BUSY while a file wears one — the Ink that took it off is yet to come —
+ * or the refusal of room for the Coineds (ERR_WOULD_BLOCK while it can come),
+ * of the volume, or ERR_NO_MEMORY. Inside the door. */
+error_t InkTagsRetire(const uint32_t* tags, uint32_t count, InkReceipt* out);
+
 /* A new file named `name`, wearing the `count` tags in `tags` (the name's
  * first, no two alike). OK and its id, or the refusal with no file made and no
  * trace of one — the id it would have taken is taken by the next. */
