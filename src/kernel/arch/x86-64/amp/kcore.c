@@ -19,6 +19,7 @@
 #include "nightwatch.h"
 #include "baton.h"  /* Never-drop MPSC: async storage continuations */
 #include "cpuid.h"  /* has_mwait_c1, cpu_monitor — sleeping watching the queue */
+#include "cpu_calibrate.h"  /* cpu_us_to_tsc — the serving turn */
 #include "tagfs.h"
 #include "use_context.h"
 #include "scheduler.h"  /* sched_fare_for, sched_rebase — a Tip is priced and placed as a Fare is */
@@ -359,6 +360,10 @@ void kcore_wake(uint8_t core_idx)
         lapic_send_ipi(g_amp.cores[core_idx].lapic_id, IPI_WAKE_VECTOR);
 }
 
+/* How long a K-Core serves one strand's pockets on end while nobody else
+ * waits for it (kcore_process_entry). */
+#define KCORE_SERVE_ON_US 50u
+
 static void kcore_process_entry(struct process_t* proc)
 {
     if (!proc)
@@ -383,9 +388,22 @@ static void kcore_process_entry(struct process_t* proc)
     __atomic_store_n(&q->serving, proc, __ATOMIC_RELEASE);
     debug_printf("[K%u] Processing PID %u\n", core_idx, proc->pid);
 
-    uint64_t began = rdtsc();
-    KCallTaken(proc);
-    guide_process_one(proc);
+    /* One pocket a turn (RT-11) is fairness among the strands waiting for
+     * this K-Core. With nobody else waiting there is nobody to be fair to,
+     * and the strand's next pocket is served here and now instead of after a
+     * trip out through the queue and back — for as long as nobody else comes
+     * and the turn lasts (KCORE_SERVE_ON_US: the loop below this serves
+     * batons, buses and the volume between turns). `count` is what waits
+     * besides this strand: kcore_next counted it off. */
+    const uint64_t began = rdtsc();
+    const uint64_t until = began + cpu_us_to_tsc(KCORE_SERVE_ON_US);
+    for (;;) {
+        KCallTaken(proc);
+        guide_process_one(proc);
+        if (KPocketIsEmpty(proc) || kcore_queue_depth(core_idx) != 0 ||
+            rdtsc() >= until || proc->magic != PROCESS_MAGIC)
+            break;
+    }
     proc->tip += sched_fare_for(proc, rdtsc() - began);
 
     /* Let go: the mirror first, so a gate that wins kcore_pending after the
@@ -399,8 +417,9 @@ static void kcore_process_entry(struct process_t* proc)
     atomic_store_u8(&proc->kcore_pending, 0);
     mfence();
 
-    /* The guide served one pocket (RT-11), so a ring that still holds some
-     * is the common case here, not a race: the strand goes back into a queue
+    /* The guide served the strand's turn — one pocket, or more while nobody
+     * else waited — so a ring that still holds some is the common case here,
+     * not a race: the strand goes back into a queue
      * — the least loaded, behind whatever waits there — and its next pocket
      * is served when its turn comes round again, by whichever K-Core that
      * is. Its pockets stay in order: only the K-Core that holds
