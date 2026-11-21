@@ -119,11 +119,36 @@ typedef struct __packed {
     volatile uint64_t call_gate;
     volatile uint64_t call_taken;
     volatile uint64_t call_answered;
-    uint8_t           _pad_line2[40];   /* fill cacheline 2                */
+    /* And the strand's yields that gave its core to another: how many, and
+     * the PID of the one it went to last (UINT32_MAX the idle strand). */
+    volatile uint32_t yields_given_away;
+    volatile uint32_t yield_went_to;
+    /* What the K-Core spent serving that answer, in TSC cycles: taken to its
+     * pocket read, its Manifest staged, its crates staged in, its ops, its
+     * crates written back, and on to the answer — all 0 where the marks are
+     * not in order (a pocket refused before its crates were staged). */
+    volatile uint32_t call_part[6];
+    uint8_t           _pad_line2[8];    /* fill cacheline 2                */
+
+    /* Cacheline 3 — the stopwatch's look at the strand this strand's yield
+     * gave its core to last, as it stood then: its asks to sleep (system.turn
+     * .in), how many laid it down, and how many were refused because of an
+     * arrival on its Touch ring, on its reply ring, or events the kernel
+     * held for it. */
+    volatile uint32_t went_turnin_asked;
+    volatile uint32_t went_turnin_parked;
+    volatile uint32_t went_turnin_refused_touch;
+    volatile uint32_t went_turnin_refused_result;
+    volatile uint32_t went_turnin_refused_owed;
+    uint32_t          _pad_word3;
+    /* When the K-Core that took the answer's call last woke from its sleep:
+     * between the gate and the taking, the call found it asleep. */
+    volatile uint64_t call_woke;
+    uint8_t           _pad_line3[32];   /* fill cacheline 3                */
 } ResultRingHeader;
 
-_Static_assert(sizeof(ResultRingHeader) == 192,
-               "ResultRingHeader must be 192 bytes (three cachelines)");
+_Static_assert(sizeof(ResultRingHeader) == 256,
+               "ResultRingHeader must be 256 bytes (four cachelines)");
 _Static_assert(__builtin_offsetof(ResultRingHeader, call_gate) == 128,
                "ResultRingHeader.call_gate must start cacheline 2 — boxlib's "
                "mirror agrees");

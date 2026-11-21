@@ -25,6 +25,10 @@ _Static_assert((KCORE_QUEUE_CAPACITY & (KCORE_QUEUE_CAPACITY - 1)) == 0,
 
 struct process_t;
 
+#define KCORE_AWAKE            0u
+#define KCORE_ASLEEP_DEAF      1u
+#define KCORE_ASLEEP_WATCHING  2u
+
 typedef struct {
     struct process_t* volatile slots[KCORE_QUEUE_CAPACITY];
     volatile uint32_t head;
@@ -38,13 +42,20 @@ typedef struct {
      * however long that takes (a proc_exec reads its image inside the call);
      * one standing there with nobody serving it is unserved. */
     struct process_t* volatile serving;
-    /* 1 while this K-Core is committed to HLT: set by the sleep gate BEFORE
-     * its last look at the queue, cleared when it wakes. kcore_submit rings
-     * the doorbell only when it reads 1 — an awake K-Core finds the pocket
-     * on its next pop. Dekker pairing: the gate's store and the producer's
-     * lock xadd on `count` are both full barriers, so either the gate sees
-     * the claim or the producer sees the flag. */
-    volatile uint32_t in_hlt;
+    /* How this K-Core sleeps, KCORE_AWAKE while it does not: set by the
+     * sleep gate BEFORE its last look at the queue, cleared when it wakes.
+     * KCORE_ASLEEP_WATCHING: in MWAIT on the line `tail` and `count` share,
+     * which every push writes — a pocket wakes it by being pushed, and
+     * kcore_submit rings nothing. KCORE_ASLEEP_DEAF: in HLT (no MWAIT C1 on
+     * this machine) — only the doorbell wakes it. Either way any interrupt
+     * does, so kcore_wake, for work that is not a pocket, rings for both.
+     * Dekker pairing: the gate's store and the producer's lock xadd on
+     * `count` are both full barriers, so either the gate sees the claim or
+     * the producer sees how it sleeps. */
+    volatile uint32_t asleep;
+    /* When this K-Core last woke from its sleep, TSC: the stopwatch tells a
+     * call that found it asleep from one that found it at work. Its own. */
+    uint64_t          woke_at;
     /* The strands this K-Core has taken out of `slots` and holds until it
      * serves them, the least Tip first: a binary heap only this K-Core
      * touches, so it takes no lock and needs no slot index — a held strand's
@@ -61,7 +72,7 @@ typedef struct {
     /* Where this K-Core's time goes, counted by its own loop, which no
      * scheduler sees: the TSC ticks it spent awake — serving, pumping,
      * servicing — and in all, up to `count_mark`; the time since the mark is
-     * awake unless in_hlt says it sleeps (kcore_cpu_usage). Written by this
+     * awake unless `asleep` says it sleeps (kcore_cpu_usage). Written by this
      * K-Core alone, under `count_seq`, odd while it writes. */
     volatile uint32_t  count_seq;
     volatile uint64_t  count_mark;

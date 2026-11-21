@@ -30,12 +30,13 @@
  *
  *   Ownership protocol
  *   ──────────────────
- *   1. Dispatcher calls crate_stage_in() — kmalloc + page-walked copy
+ *   1. Dispatcher calls crate_stage_in() — an array (the shelf's, or the
+ *      heap's) + page-walked copy
  *      from user PT. Returns Crate*.
  *   2. Dispatcher hands the buffer to ManifestExecuteOnce → handler.
  *   3. SYNC handlers: write crates[i].size etc. directly into the kbuf,
  *      return OK. Dispatcher calls crate_stage_commit_and_release →
- *      vmm_user_buf_commit_out + kfree.
+ *      vmm_user_buf_commit_out + release.
  *   4. ASYNC handlers: BEFORE returning ERR_WOULD_BLOCK + setting
  *      PROC_WAITING, stash (kbuf, count, cabin, uaddr) into their
  *      async_ctx. Dispatcher detects async-park and skips both commit
@@ -49,11 +50,9 @@
  *
  *   Allocation strategy
  *   ───────────────────
- *   Pure kmalloc. No scratch tier — crates are small (40 B × N), the
- *   sub-page allocations satisfy quickly from the slab without touching
- *   the buddy directly. Lifetime is bounded: ≥ one dispatch (sync) or
- *   ≤ one async I/O round-trip (async). No NUMA-direct path needed at
- *   this size class.
+ *   A block from this core's shelf for a call of up to eight crates, the
+ *   heap beyond (crate_stage.c, "The shelf"). Lifetime is bounded:
+ *   ≥ one dispatch (sync) or ≤ one async I/O round-trip (async).
  */
 error_t crate_stage_in(vmm_context_t        *cabin,
                         uint64_t              user_uaddr,
@@ -82,5 +81,17 @@ error_t crate_stage_commit_and_release(Crate                *crates,
  * handler never ran, so no descriptor mutations need write-back.
  */
 void crate_stage_release_no_commit(Crate *crates);
+
+/*
+ * An array for `count` crates, taken as crate_stage_in takes one — from this
+ * core's shelf when it holds that many, else the heap — and released only
+ * through crate_stage_commit_and_release or crate_stage_release_no_commit.
+ * For a caller that builds its crates in the kernel (touch.c).
+ */
+Crate *crate_stage_alloc(uint16_t count);
+
+/* The shelf of crate arrays (crate_stage.c), laid out once at boot, after the
+ * cores are counted. Without it every array comes from the heap. */
+error_t CrateShelfInit(void);
 
 #endif /* CRATE_STAGE_H */

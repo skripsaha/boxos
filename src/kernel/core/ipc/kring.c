@@ -29,6 +29,7 @@
 #include "amp.h"
 #include "scheduler.h"   /* sched_ring_home — one transition, one bell */
 #include "system_deck.h" /* cabin_heap_take_back — an owed deposit goes with its record */
+#include "idle.h"        /* process_is_idle — a yield that went to nobody */
 
 void KRingPocketInitAt(PocketRing *hdr, uint64_t slots_base, uint32_t slot_count_max)
 {
@@ -177,20 +178,62 @@ void KCallGate(process_t *proc)
     if (proc) proc->call_gate = rdtsc();
 }
 
-void KCallTaken(process_t *proc)
+void KCallTaken(process_t *proc, uint64_t kcore_woke)
 {
-    if (proc) proc->call_taken = rdtsc();
+    if (!proc) return;
+    proc->call_taken = rdtsc();
+    proc->call_woke  = kcore_woke;
 }
 
 /* Before the push: the slot's release store publishes the answer, and the
  * stopwatch with it. */
+void KCallMark(process_t *proc, uint32_t which)
+{
+    if (proc && which < KCALL_MARKS) proc->call_mark[which] = rdtsc();
+}
+
 void KCallAnswered(process_t *proc)
 {
     ResultRing *rr = kring_result_hdr(proc);
     if (!rr) return;
+    const uint64_t answered = rdtsc();
+    uint64_t at[KCALL_MARKS + 2];
+    at[0] = proc->call_taken;
+    for (uint32_t k = 0; k < KCALL_MARKS; k++)
+        at[k + 1] = proc->call_mark[k];
+    at[KCALL_MARKS + 1] = answered;
+    bool in_order = true;
+    for (uint32_t k = 0; k <= KCALL_MARKS; k++)
+        in_order = in_order && at[k] <= at[k + 1] && at[k + 1] - at[k] <= UINT32_MAX;
+    for (uint32_t k = 0; k <= KCALL_MARKS; k++)
+        rr->hdr.call_part[k] = in_order ? (uint32_t)(at[k + 1] - at[k]) : 0u;
+    rr->hdr.call_woke     = proc->call_woke;
     rr->hdr.call_gate     = proc->call_gate;
     rr->hdr.call_taken    = proc->call_taken;
-    rr->hdr.call_answered = rdtsc();
+    rr->hdr.call_answered = answered;
+}
+
+void KCallYieldWentTo(process_t *proc, process_t *to)
+{
+    ResultRing *rr = kring_result_hdr(proc);
+    if (!rr) return;
+    rr->hdr.yields_given_away = rr->hdr.yields_given_away + 1u;
+    if (process_is_idle(to)) {
+        rr->hdr.yield_went_to = UINT32_MAX;
+        return;
+    }
+    rr->hdr.yield_went_to              = to->pid;
+    rr->hdr.went_turnin_asked          = to->turnin_count[KTURNIN_ASKED];
+    rr->hdr.went_turnin_parked         = to->turnin_count[KTURNIN_PARKED];
+    rr->hdr.went_turnin_refused_touch  = to->turnin_count[KTURNIN_REFUSED_TOUCH];
+    rr->hdr.went_turnin_refused_result = to->turnin_count[KTURNIN_REFUSED_RESULT];
+    rr->hdr.went_turnin_refused_owed   = to->turnin_count[KTURNIN_REFUSED_OWED];
+}
+
+void KCallTurnIn(process_t *proc, uint32_t outcome)
+{
+    if (proc && outcome < 5u)
+        __atomic_add_fetch(&proc->turnin_count[outcome], 1u, __ATOMIC_RELAXED);
 }
 #endif
 

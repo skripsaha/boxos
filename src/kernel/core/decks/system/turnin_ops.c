@@ -112,6 +112,20 @@ static bool turnin_arrival_pending(process_t *proc,
            (result && (turnin_result_tail(proc) != result_seen || KResultRingHasUnreadAtHead(proc)));
 }
 
+/* The stopwatch (make MEASURE=on): an ask refused for an arrival, counted by
+ * the ring it is on. Nothing in any other build. */
+static inline void turnin_note_refused(process_t *proc, uint64_t touch_seen, uint64_t result_seen)
+{
+#ifdef CONFIG_MEASURE
+    const bool touch = touch_seen != SYSTEM_TURN_IN_UNWATCHED &&
+                       (turnin_touch_tail(proc) != touch_seen || KTouchRingHasUnreadAtHead(proc));
+    (void)result_seen;
+    KCallTurnIn(proc, touch ? KTURNIN_REFUSED_TOUCH : KTURNIN_REFUSED_RESULT);
+#else
+    (void)proc; (void)touch_seen; (void)result_seen;
+#endif
+}
+
 /* -------------------------------------------------------------------------
  * SysTurnIn — params: [u64 touch_tail_seen][u64 result_tail_seen]  (16 bytes)
  * ------------------------------------------------------------------------- */
@@ -129,11 +143,13 @@ static int SysTurnIn(const ManifestOp *op, Crate *crates,
         return ERR_INVALID_ARGUMENT;
 
     process_t *proc = ctx->proc;
+    KCallTurnIn(proc, KTURNIN_ASKED);
 
     /* Look before lying down. Cheap, and it keeps a strand that was overtaken
      * between its own mark and this handler from paying for a park it is about
      * to undo. Not load-bearing — the re-check after the park is. */
     if (turnin_arrival_pending(proc, touch_seen, result_seen)) {
+        turnin_note_refused(proc, touch_seen, result_seen);
         ChitGive(ctx, "system.turn.in", 0);
         return ERR_WOULD_BLOCK;
     }
@@ -162,6 +178,7 @@ static int SysTurnIn(const ManifestOp *op, Crate *crates,
 
     if (turnin_arrival_pending(proc, touch_seen, result_seen)) {
         process_set_state(proc, PROC_WORKING);
+        turnin_note_refused(proc, touch_seen, result_seen);
     }
 
     /* An answer that is OWED is an answer. Events the kernel accepted but could
@@ -170,7 +187,10 @@ static int SysTurnIn(const ManifestOp *op, Crate *crates,
      * asleep. Same reasoning, same words, as SysTouchAwait. */
     else if (__atomic_load_n(&proc->owed_count, __ATOMIC_RELAXED) != 0) {
         process_set_state(proc, PROC_WORKING);
+        KCallTurnIn(proc, KTURNIN_REFUSED_OWED);
     }
+    else
+        KCallTurnIn(proc, KTURNIN_PARKED);
 
     /* Answer nothing — see the file header. Turn In is submitted without a
      * token, so ChitGive raises the flag and leaves no chit. */

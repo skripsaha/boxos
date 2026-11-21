@@ -1,4 +1,5 @@
 #include "touch.h"
+#include "crate_stage.h"   /* crate_stage_alloc — a react delivery's crate */
 #include "sync_ops.h"   /* ProcessGoneDeliver — a death pays its named waiters */
 #include "logbook.h"
 #include "touch_queue.h"
@@ -697,26 +698,26 @@ static void touch_react_deliver(process_t *proc, TouchSub *sub,
     if (vaddr == 0) goto out_dec;
 
     /*
-     * Stage the Crate descriptor in a kmalloc'd buffer so async-capable
+     * Stage the Crate descriptor in a crate_stage array so async-capable
      * ops (storage.read, write_job, …) can pin the descriptor pointer
      * into their async_ctx without it disappearing the moment this
      * function returns. The on-stack Crate of the previous design was a
      * latent UAF for any REACT manifest that included an async op.
      *
      * Ownership protocol — mirrors guide.c:
-     *   sync handler  → async_owned stays false → we kfree at exit
+     *   sync handler  → async_owned stays false → we release it at exit
      *   async-park    → handler sets *async_owned = true via
      *                   ctx->async_owns_crates → handler's completion
      *                   path owns the kbuf and frees via
-     *                   crate_stage_commit_and_release. We skip the kfree.
+     *                   crate_stage_commit_and_release. We skip the release.
      *
      * crates_uaddr = 0 is the kernel-internal sentinel: the subscriber's
      * manifest never asked for a user write-back of the Crate descriptor,
      * so crate_stage_commit_and_release will recognise the 0 sentinel
-     * and skip its vmm_user_buf_commit_out step — pure kfree.
+     * and skip its vmm_user_buf_commit_out step — a release alone.
      */
     uint64_t total = sizeof(Touch) + plen;
-    Crate *crates_kbuf = (Crate *)kmalloc(sizeof(Crate));
+    Crate *crates_kbuf = crate_stage_alloc(1);
     if (!crates_kbuf) goto out_dec;
     *crates_kbuf = (Crate){
         .magic    = CRATE_MAGIC,
@@ -743,9 +744,9 @@ static void touch_react_deliver(process_t *proc, TouchSub *sub,
     ManifestExecute(sub->u.manifest, crates_kbuf, 1, &ctx, &exec_result);
 
     if (!async_owned) {
-        kfree(crates_kbuf);
+        crate_stage_release_no_commit(crates_kbuf);
     }
-    /* else: handler kfrees via crate_stage_commit_and_release at I/O completion. */
+    /* else: the handler releases it via crate_stage_commit_and_release at I/O completion. */
 
 out_dec:
     touch_depth_leave(core);

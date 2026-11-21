@@ -18,6 +18,8 @@
 #include "kring.h"  /* KPocketIsEmpty for re-arm after pending clear */
 #include "nightwatch.h"
 #include "baton.h"  /* Never-drop MPSC: async storage continuations */
+#include "cpuid.h"  /* has_mwait_c1, cpu_monitor — sleeping watching the queue */
+#include "cpu_calibrate.h"  /* cpu_us_to_tsc — the serving turn */
 #include "tagfs.h"
 #include "use_context.h"
 #include "scheduler.h"  /* sched_fare_for, sched_rebase — a Tip is priced and placed as a Fare is */
@@ -331,28 +333,36 @@ submitted:
     debug_printf("[%s%u] KCORE submit PID %u -> K%u (depth=%u)\n",
                  my_type, my_core, proc->pid, target, kcore_queue_depth(target));
 
-    /* The doorbell only for a K-Core in HLT (see `in_hlt`, kcore.h). An awake
-     * one — serving, pumping batons, or on its way round the loop — reaches
-     * the pocket on its next pop, and an interrupt would only break into the
-     * work it is doing. Never to ourselves: a K-Core submits only from the
-     * re-arm inside its own pop loop. The push above ended in a lock xadd on
-     * `count` and an mfence, so this read cannot pass the claim. */
+    /* The doorbell only for a K-Core asleep in HLT (see `asleep`, kcore.h).
+     * One asleep in MWAIT watches the line the push above wrote and is awake
+     * already; an awake one — serving, pumping batons, or on its way round
+     * the loop — reaches the pocket on its next pop, and an interrupt would
+     * only break into the work it is doing. Never to ourselves: a K-Core
+     * submits only from the re-arm inside its own pop loop. The push above
+     * ended in a lock xadd on `count` and an mfence, so this read cannot pass
+     * the claim. */
     if (target != my_core &&
-        __atomic_load_n(&g_kcore_queues[target].in_hlt, __ATOMIC_SEQ_CST))
+        __atomic_load_n(&g_kcore_queues[target].asleep, __ATOMIC_SEQ_CST) == KCORE_ASLEEP_DEAF)
         lapic_send_ipi(g_amp.cores[target].lapic_id, IPI_WAKE_VECTOR);
     return OK;
 }
 
-/* The gate's store of in_hlt and its last look are both sequentially
+/* The gate's store of `asleep` and its last look are both sequentially
  * consistent, and so is this load after the caller published its work: either
- * the gate sees the work, or this sees the core committed to its HLT. */
+ * the gate sees the work, or this sees the core committed to its sleep. Work
+ * that is not a pocket writes no line a K-Core watches, so the doorbell rings
+ * for either way of sleeping: an interrupt ends MWAIT as it ends HLT. */
 void kcore_wake(uint8_t core_idx)
 {
     if (!g_kcore_queues || core_idx >= g_amp.total_cores || core_idx == amp_get_core_index())
         return;
-    if (__atomic_load_n(&g_kcore_queues[core_idx].in_hlt, __ATOMIC_SEQ_CST))
+    if (__atomic_load_n(&g_kcore_queues[core_idx].asleep, __ATOMIC_SEQ_CST) != KCORE_AWAKE)
         lapic_send_ipi(g_amp.cores[core_idx].lapic_id, IPI_WAKE_VECTOR);
 }
+
+/* How long a K-Core serves one strand's pockets on end while nobody else
+ * waits for it (kcore_process_entry). */
+#define KCORE_SERVE_ON_US 50u
 
 static void kcore_process_entry(struct process_t* proc)
 {
@@ -378,9 +388,22 @@ static void kcore_process_entry(struct process_t* proc)
     __atomic_store_n(&q->serving, proc, __ATOMIC_RELEASE);
     debug_printf("[K%u] Processing PID %u\n", core_idx, proc->pid);
 
-    uint64_t began = rdtsc();
-    KCallTaken(proc);
-    guide_process_one(proc);
+    /* One pocket a turn (RT-11) is fairness among the strands waiting for
+     * this K-Core. With nobody else waiting there is nobody to be fair to,
+     * and the strand's next pocket is served here and now instead of after a
+     * trip out through the queue and back — for as long as nobody else comes
+     * and the turn lasts (KCORE_SERVE_ON_US: the loop below this serves
+     * batons, buses and the volume between turns). `count` is what waits
+     * besides this strand: kcore_next counted it off. */
+    const uint64_t began = rdtsc();
+    const uint64_t until = began + cpu_us_to_tsc(KCORE_SERVE_ON_US);
+    for (;;) {
+        KCallTaken(proc, q->woke_at);
+        guide_process_one(proc);
+        if (KPocketIsEmpty(proc) || kcore_queue_depth(core_idx) != 0 ||
+            rdtsc() >= until || proc->magic != PROCESS_MAGIC)
+            break;
+    }
     proc->tip += sched_fare_for(proc, rdtsc() - began);
 
     /* Let go: the mirror first, so a gate that wins kcore_pending after the
@@ -394,8 +417,9 @@ static void kcore_process_entry(struct process_t* proc)
     atomic_store_u8(&proc->kcore_pending, 0);
     mfence();
 
-    /* The guide served one pocket (RT-11), so a ring that still holds some
-     * is the common case here, not a race: the strand goes back into a queue
+    /* The guide served the strand's turn — one pocket, or more while nobody
+     * else waited — so a ring that still holds some is the common case here,
+     * not a race: the strand goes back into a queue
      * — the least loaded, behind whatever waits there — and its next pocket
      * is served when its turn comes round again, by whichever K-Core that
      * is. Its pockets stay in order: only the K-Core that holds
@@ -445,7 +469,7 @@ bool kcore_cpu_usage(uint8_t core_idx, uint64_t* busy_tsc, uint64_t* total_tsc)
         mark     = q->count_mark;
         awake    = q->count_awake;
         total    = q->count_total;
-        sleeping = __atomic_load_n(&q->in_hlt, __ATOMIC_RELAXED) != 0;
+        sleeping = __atomic_load_n(&q->asleep, __ATOMIC_RELAXED) != KCORE_AWAKE;
         __atomic_thread_fence(__ATOMIC_ACQUIRE);
         if (__atomic_load_n(&q->count_seq, __ATOMIC_RELAXED) == before) break;
     }
@@ -599,9 +623,11 @@ void kcore_run_loop(void)
         if (kcore_queue_depth(my_idx) != 0)
             continue;
 
-        /* Sleep race-free. kcore_submit() pushes a pocket THEN sends IPI_WAKE;
-         * since the K-Core LAPIC timer is masked (App Cores carry preemption),
-         * that IPI is the ONLY pocket wakeup — so a bare HLT here has a classic
+        /* Sleep race-free. kcore_submit() pushes a pocket THEN, to a K-Core
+         * asleep in HLT, sends IPI_WAKE; since the K-Core LAPIC timer is masked
+         * (App Cores carry preemption), that IPI — or, to one watching its
+         * queue in MWAIT, the push itself — is the ONLY pocket wakeup — so a
+         * bare sleep here has a classic
          * lost-wakeup: a submit landing between the drain above and the HLT can
          * have its IPI consumed before we sleep, stranding us in HLT with a
          * queued pocket forever (the symptom: a command hangs with no crash,
@@ -635,16 +661,30 @@ void kcore_run_loop(void)
          * above, after the list was looked at — a step of this core's cycle,
          * a cycle due, or one owed later that no Lull is armed yet to wake
          * this core for. */
+        /* Where MWAIT C1 is to be had, the K-Core sleeps watching its queue's
+         * line: a push after the watch is armed ends the wait, and one before
+         * it is seen by the last look, which comes after it — no doorbell, no
+         * interrupt to enter and leave, for the wake every call to a quiet
+         * K-Core pays. Elsewhere HLT, and the doorbell. The watch is armed
+         * after this core's own last store to that line (`asleep`, and
+         * kcore_count's beside it): a store of its own may end the watch. */
+        const uint32_t way = g_cpu_caps.has_mwait_c1 ? KCORE_ASLEEP_WATCHING : KCORE_ASLEEP_DEAF;
         __asm__ volatile("cli");
         kcore_count(q, true);               /* awake until the sleep */
-        __atomic_store_n(&q->in_hlt, 1u, __ATOMIC_SEQ_CST);  /* before the last look */
+        __atomic_store_n(&q->asleep, way, __ATOMIC_SEQ_CST);  /* before the last look */
+        if (way == KCORE_ASLEEP_WATCHING)
+            cpu_monitor(&q->tail);
         if (kcore_queue_depth(my_idx) != 0 || BatonPending(my_idx) || TagFSStepOwedHere()) {
-            __atomic_store_n(&q->in_hlt, 0u, __ATOMIC_RELEASE);
+            __atomic_store_n(&q->asleep, KCORE_AWAKE, __ATOMIC_RELEASE);
             __asm__ volatile("sti");        /* raced submit — loop, don't sleep */
         } else {
-            __asm__ volatile("sti; hlt");   /* atomic arm-and-sleep */
+            if (way == KCORE_ASLEEP_WATCHING)
+                cpu_sti_mwait_c1();         /* atomic arm-and-sleep, as STI;HLT */
+            else
+                __asm__ volatile("sti; hlt");
             kcore_count(q, false);          /* asleep until now: counted before it says it woke */
-            __atomic_store_n(&q->in_hlt, 0u, __ATOMIC_RELEASE);
+            q->woke_at = rdtsc();
+            __atomic_store_n(&q->asleep, KCORE_AWAKE, __ATOMIC_RELEASE);
         }
     }
 }

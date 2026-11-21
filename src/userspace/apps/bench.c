@@ -57,6 +57,7 @@
 #include "box/core/crate.h"
 #include "box/core/cabin.h"
 #include "box/core/result.h"
+#include "box/memory.h"
 #include "box/core/result.h"
 #include "box/error.h"
 #include "box/display.h"
@@ -346,12 +347,18 @@ static int b_least_call(uint32_t i, void *ctx)
 static void print_kv_u64(const char *label, uint64_t v, const char *unit);
 
 #define STAGES 4
-static uint64_t s_stage[STAGES][BENCH_MAX_SAMPLES];
+#define PARTS  6
+static uint64_t s_stage[STAGES + PARTS][BENCH_MAX_SAMPLES];
+/* gate to taken, told apart: the K-Core asleep — to its waking, waking to
+ * taken — or at work, all of it. */
+static uint64_t s_found[3][BENCH_MAX_SAMPLES];
 
 static void bench_call_stages(const char *title, uint32_t n, uint32_t rest_us)
 {
-    static const char *const names[STAGES] = {
+    static const char *const names[STAGES + PARTS] = {
         "  made, at the gate", "  gate to taken", "  served", "  answered to caller",
+        "    served: pocket read", "    served: Manifest staged", "    served: crates in",
+        "    served: ops", "    served: crates out", "    served: to the answer",
     };
     volatile ResultRingHeader *h = &result_ring()->hdr;
     const uint64_t khz = cpu_get_tsc_freq_khz();
@@ -363,7 +370,7 @@ static void bench_call_stages(const char *title, uint32_t n, uint32_t rest_us)
     if (h->call_answered == 0)
         return;
 
-    uint32_t got = 0, out_of_order = 0;
+    uint32_t got = 0, out_of_order = 0, parted = 0, asleep = 0, awake = 0;
     for (uint32_t i = 0; i < n; i++)
     {
         if (rest_us)
@@ -380,21 +387,93 @@ static void bench_call_stages(const char *title, uint32_t n, uint32_t rest_us)
             out_of_order++;
             continue;
         }
+        const uint64_t woke = h->call_woke;
+        if (gate <= woke && woke <= taken)
+        {
+            s_found[0][asleep] = woke - gate;
+            s_found[1][asleep] = taken - woke;
+            asleep++;
+        }
+        else
+            s_found[2][awake++] = taken - gate;
         s_stage[0][got] = gate - made;
         s_stage[1][got] = taken - gate;
         s_stage[2][got] = answered - taken;
         s_stage[3][got] = seen - answered;
         got++;
+        uint32_t any = 0;
+        for (uint32_t k = 0; k < PARTS; k++)
+            any |= h->call_part[k];
+        if (any)
+        {
+            for (uint32_t k = 0; k < PARTS; k++)
+                s_stage[STAGES + k][parted] = h->call_part[k];
+            parted++;
+        }
     }
     println(title);
-    for (uint32_t k = 0; k < STAGES; k++)
+    for (uint32_t k = 0; k < STAGES + PARTS; k++)
     {
         bench_stats_t st = {0};
-        compute_stats(s_stage[k], got, &st);
+        compute_stats(s_stage[k], k < STAGES ? got : parted, &st);
         print_row(names[k], &st);
+        if (k == 1)
+        {
+            static const char *const found[3] = {
+                "    K-Core asleep: gate to its waking", "    K-Core asleep: waking to taken",
+                "    K-Core at work: gate to taken",
+            };
+            for (uint32_t f = 0; f < 3; f++)
+            {
+                const uint32_t n_found = f < 2 ? asleep : awake;
+                if (n_found == 0)
+                    continue;
+                bench_stats_t fs = {0};
+                compute_stats(s_found[f], n_found, &fs);
+                print_row(found[f], &fs);
+            }
+        }
     }
     if (out_of_order)
         print_kv_u64("  left out, moments not in order:", out_of_order, "calls");
+}
+
+/* (5b) Whom the yields gave the core to: a kernel built MEASURE=on counts,
+ *      on the stopwatch line, a strand's yields that gave its core to
+ *      another and names the strand that took it last. A yield that keeps
+ *      the core costs the gate alone; one that gives it away, a switch there
+ *      and back and whatever the other did meanwhile. Said only when the
+ *      kernel keeps the stopwatch. */
+static void bench_yield_went_to(uint32_t given, uint32_t of, uint32_t went_to)
+{
+    if (result_ring()->hdr.call_answered == 0)
+        return;
+    println("yield, whom the core went to:");
+    print_kv_u64("  yields that gave it to another strand:", given, "");
+    print_kv_u64("  of yields:", of, "");
+    if (given == 0)
+        return;
+    if (went_to == UINT32_MAX) {
+        println("  the last went to the idle strand");
+        return;
+    }
+    print_kv_u64("  the last went to strand", went_to, "");
+    volatile ResultRingHeader *h = &result_ring()->hdr;
+    print_kv_u64("  its asks to sleep:", h->went_turnin_asked, "");
+    print_kv_u64("    laid it down:", h->went_turnin_parked, "");
+    print_kv_u64("    refused, its Touch ring had news:", h->went_turnin_refused_touch, "");
+    print_kv_u64("    refused, its reply ring had news:", h->went_turnin_refused_result, "");
+    print_kv_u64("    refused, the kernel held events for it:", h->went_turnin_refused_owed, "");
+    RosterProgram *programs = NULL;
+    const int count = proc_roster(&programs, NULL);
+    for (int p = 0; p < count; p++)
+        for (uint32_t k = 0; k < programs[p].strand_count; k++)
+            if (programs[p].strands[k].pid == went_to) {
+                print_kv_u64("  of the program whose main strand is", programs[p].pid, "");
+                println(programs[p].tags ? programs[p].tags : "  (no tags)");
+            }
+    if (programs)
+        free(programs);
 }
 
 /* (6) Cross-process IPC roundtrip: broadcast a 1-byte DISP_CMD_PING,
@@ -509,6 +588,81 @@ static int b_strand_pingpong(uint32_t i, void *ctx)
     return 0;
 }
 
+/* (7b) The machine's own floor for our model: one word handed between two
+ *      strands on two cores through memory alone, no kernel — what moving a
+ *      cache line there and back costs on this silicon. A call to a K-Core
+ *      moves at least one line there and one back; everything else in its
+ *      time is ours. A strand that waits long yields, so two strands that
+ *      share a core still finish — at a yield's price, which the row shows. */
+#define LINE_END        UINT64_MAX
+#define LINE_SPIN_YIELD (1u << 16)
+
+static volatile uint64_t s_line_word __attribute__((aligned(64)));
+static volatile uint64_t s_line_gone __attribute__((aligned(64)));
+static uint64_t          s_line_ping;
+
+static void line_partner(void *arg)
+{
+    (void)arg;
+    uint32_t spins = 0;
+    for (;;)
+    {
+        const uint64_t v = __atomic_load_n(&s_line_word, __ATOMIC_ACQUIRE);
+        if (v == LINE_END)
+            break;
+        if (v & 1u)
+        {
+            __atomic_store_n(&s_line_word, v + 1u, __ATOMIC_RELEASE);
+            spins = 0;
+            continue;
+        }
+        __builtin_ia32_pause();
+        if (++spins == LINE_SPIN_YIELD)
+        {
+            spins = 0;
+            yield();
+        }
+    }
+    __atomic_store_n(&s_line_gone, 1u, __ATOMIC_RELEASE);
+    (void)addr_wake(&s_line_gone, 0);
+}
+
+static int b_line_rtt(uint32_t i, void *ctx)
+{
+    (void)i;
+    (void)ctx;
+    s_line_ping += 2u;
+    __atomic_store_n(&s_line_word, s_line_ping, __ATOMIC_RELEASE);
+    uint32_t spins = 0;
+    while (__atomic_load_n(&s_line_word, __ATOMIC_ACQUIRE) != s_line_ping + 1u)
+    {
+        __builtin_ia32_pause();
+        if (++spins == LINE_SPIN_YIELD)
+        {
+            spins = 0;
+            yield();
+        }
+    }
+    return 0;
+}
+
+static void bench_line(const char *name, uint32_t iters)
+{
+    s_line_word = 0;
+    s_line_gone = 0;
+    s_line_ping = UINT64_MAX;   /* the first ping is 1 */
+    if (strand_spawn(line_partner, NULL) == 0)
+    {
+        bench_stats_t none = {0};
+        print_row(name, &none);
+        return;
+    }
+    bench_run(name, b_line_rtt, NULL, iters);
+    __atomic_store_n(&s_line_word, LINE_END, __ATOMIC_RELEASE);
+    while (__atomic_load_n(&s_line_gone, __ATOMIC_ACQUIRE) == 0)
+        (void)addr_park(&s_line_gone, 0, 0);
+}
+
 /* The partner started before the row and ended after it. */
 static void bench_pingpong(const char *name, uint32_t iters)
 {
@@ -566,11 +720,12 @@ static int bench_setup_touch(void)
 
 static void bench_drain_touches(void)
 {
-    /* Use a tiny timeout (1ms). touch_await(timeout=0) treats 0 as
-     * "use default 30s" — hangs us when the ring is empty. With 1ms
-     * the drain returns quickly once we've consumed all queued touches. */
+    /* What the ring holds, taken without a wait. It ran inside the timed
+     * window of every 16th publish and ended in a wait of 1 ms on the ring it
+     * had emptied: six samples in a hundred were a millisecond long, and the
+     * row's p99 of 1.03 ms on every machine was that wait, not a send. */
     Touch t;
-    while (touch_await(s_rtt_tag, &t, 1) == 0) { /* discard */ }
+    while (touch_try_pop_tag(s_rtt_tag, &t)) { /* discard */ }
 }
 
 /* Pure publish: send only, do NOT await. The kernel still delivers the
@@ -585,8 +740,8 @@ static int b_touch_publish_only(uint32_t i, void *ctx)
     (void)ctx;
     if (bench_setup_touch() != 0) return -1;
     /* Drain accumulated unconsumed Touches every 16 iters so the ring
-     * doesn't overflow; the drain itself runs OUTSIDE the timed window
-     * for the iterations where i & 15 != 0. */
+     * doesn't overflow — inside the timed window of those iterations, and
+     * at no more than the pops of what is there. */
     if ((i & 15) == 0) bench_drain_touches();
     uint32_t payload = i;
     return touch_send(s_rtt_pair, &payload, sizeof(payload), 0);
@@ -745,7 +900,13 @@ int main(void)
     bench_run("cabin_info() read (no syscall)", b_cabin_info, NULL, 2000);
 
     /* Pure syscall costs */
+    const uint32_t given_before = result_ring()->hdr.yields_given_away;
     bench_run("yield (notify pocket)", b_yield, NULL, 2000);
+    const uint32_t yields_given  = result_ring()->hdr.yields_given_away - given_before;
+    const uint32_t yield_went_to = result_ring()->hdr.yield_went_to;
+
+    /* The floor: a cache line between two cores and back, no kernel */
+    bench_line("cache line, core to core (rtt)", 1000);
 
     /* Manifest dispatch costs: back to back, and after 2 ms of quiet — the
      * K-Core asleep, woken by the call */
@@ -753,6 +914,7 @@ int main(void)
     bench_run_rested("1-op Manifest after 2 ms quiet", b_least_call, NULL, 500, 2000);
     bench_call_stages("1-op Manifest, its stages:", 1000, 0);
     bench_call_stages("1-op Manifest after 2 ms quiet, its stages:", 500, 2000);
+    bench_yield_went_to(yields_given, 2000 + WARMUP_ITERS, yield_went_to);
 
     /* One strand waiting on another's work, through the kernel */
     bench_pingpong("strand ping-pong (park/wake, rtt)", 1000);
@@ -782,6 +944,8 @@ int main(void)
     println("  - chain median / 1000 ≈ per-Manifest-op amortised cost");
     println("  - 'after 2 ms quiet': the K-Core asleep, woken by the call itself");
     println("  - App Cores have no tick: max is what else ran meanwhile");
+    println("  - 'cache line, core to core': the machine's floor; a call to a K-Core");
+    println("    moves at least one line there and one back");
     println("  - stages: a kernel built MEASURE=on stamps when the call came to the");
     println("    gate, was taken and was answered; the rows are absent otherwise");
     return 0;

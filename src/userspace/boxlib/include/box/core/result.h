@@ -97,11 +97,34 @@ typedef struct PACKED {
     volatile uint64_t call_gate;
     volatile uint64_t call_taken;
     volatile uint64_t call_answered;
-    uint8_t           _pad_line2[40];   /* fill cacheline 2 */
+    /* The strand's yields that gave its core to another, and the PID of the
+     * one it went to last (UINT32_MAX the idle strand). */
+    volatile uint32_t yields_given_away;
+    volatile uint32_t yield_went_to;
+    /* What the K-Core spent serving that answer, TSC cycles: pocket read,
+     * Manifest staged, crates staged in, ops, crates written back, on to the
+     * answer (0 where unknown). */
+    volatile uint32_t call_part[6];
+    uint8_t           _pad_line2[8];    /* fill cacheline 2 */
+
+    /* Cacheline 3 — the strand this strand's yield gave its core to last, as
+     * it stood then: its asks to sleep, those that laid it down, and those
+     * refused for an arrival on its Touch ring, on its reply ring, or for
+     * events the kernel held for it. */
+    volatile uint32_t went_turnin_asked;
+    volatile uint32_t went_turnin_parked;
+    volatile uint32_t went_turnin_refused_touch;
+    volatile uint32_t went_turnin_refused_result;
+    volatile uint32_t went_turnin_refused_owed;
+    uint32_t          _pad_word3;
+    /* When the K-Core that took the call last woke: between the gate and the
+     * taking, the call found it asleep. */
+    volatile uint64_t call_woke;
+    uint8_t           _pad_line3[32];   /* fill cacheline 3 */
 } ResultRingHeader;
 
-STATIC_ASSERT(sizeof(ResultRingHeader) == 192,
-              "ResultRingHeader must be 192 bytes (three cachelines)");
+STATIC_ASSERT(sizeof(ResultRingHeader) == 256,
+              "ResultRingHeader must be 256 bytes (four cachelines)");
 STATIC_ASSERT(OFFSETOF(ResultRingHeader, call_gate) == 128,
               "ResultRingHeader.call_gate must sit at offset 128 (kernel agrees)");
 STATIC_ASSERT(OFFSETOF(ResultRingHeader, awaiting) == 72,

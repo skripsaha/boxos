@@ -1,4 +1,5 @@
 #include "manifest.h"
+#include "crate_stage.h"
 #include "manifest_auth.h"
 #include "atomics.h"
 #include "process.h"
@@ -227,6 +228,10 @@ error_t ManifestSubsystemInit(void)
 
     error_t rc = manifest_table_grow_locked(MANIFEST_TABLE_INITIAL_CAP);
     if (rc != OK) return rc;
+
+    /* No shelf is no fault: every crate array then comes from the heap. */
+    if (CrateShelfInit() != OK)
+        kprintf("[Manifest] no memory for the crate shelf — crate arrays come from the heap\n");
 
     g_manifest_table.initialized = true;
     debug_printf("[Manifest] subsystem ready (initial capacity=%u)\n",
