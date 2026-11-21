@@ -31,14 +31,29 @@ extern volatile uint64_t g_global_tick;
 typedef struct {
     process_t  *current_process;
     spinlock_t  scheduler_lock;
-    uint64_t    total_ticks;
-    uint64_t    last_steal_tick;
     RunQueue    runqueue;
-    /* The Waterline: the least Fare among this core's strands as its
-     * schedule() last found them, and never lower than it was — the level a
-     * strand that comes to this core is placed against (scheduler.c).
-     * Written by this core under its runqueue lock; read by others without. */
+    /* This App Core's turn: the TSC moment it began — the strand running here
+     * took the core, or began another turn on it — and the moment the core's
+     * one-shot is armed for, 0 for none: a strand alone on its core has no
+     * end, and an idle core none but a look owed (scheduler.c). Written by
+     * this core alone, with its interrupts off. */
+    uint64_t    turn_began;
+    uint64_t    turn_due;
+    /* The Waterline: the least Fare among this core's strands — the one
+     * running at what it owes now — and never lower than it was: the level a
+     * strand that comes to this core is placed against (scheduler.c). Written
+     * under this core's runqueue lock; read by others without. */
     volatile uint64_t waterline;
+    /* The strand running here as this core dispatched it: what it owed then
+     * (run_fare), that moment (run_since, 0 while idle runs) and its weight
+     * (run_price, scheduler.c's sched_price) — for the Waterline to count what
+     * it has run since. Written by this core alone at every dispatch, its
+     * interrupts off, between two steps of run_seq — odd while it writes;
+     * read by any core. */
+    volatile uint32_t run_seq;
+    uint32_t          run_price;
+    uint64_t          run_fare;
+    uint64_t          run_since;
     /* The strand running here gave its core away (sched_yield_turn): its
      * next schedule() stands it behind the next one. This core's alone. */
     bool        turn_given;
@@ -49,6 +64,16 @@ typedef struct {
      * and looks for a core to send an outsider to. */
     volatile bool busy_here;
     volatile bool context_here;
+    /* The strand running here gave its core away and, nobody else being
+     * there, took it again (given_up) — or is one that holds a core only a
+     * moment each time it has one (short_here, its hold_mean under a least
+     * turn): either holds the core only until somebody wants it, and a wake
+     * may land here as on a free core (scheduler.c). The one that gave the
+     * core away is passed at once; a short one is asked to step aside and has
+     * its least turn. Written by this core at every dispatch; read by others
+     * without a lock. */
+    volatile bool given_up;
+    volatile bool short_here;
     _Atomic bool is_parked;            // Written by BSP recalc, read by AP timer IRQ — must be atomic
     uint32_t    idle_tick_count;       // Consecutive idle ticks
     /* Quiescence sequence (reap-vs-switch safety). Bumped at the top of every
@@ -66,7 +91,9 @@ typedef struct {
      * own interrupts. */
     volatile uint32_t held;
     /* TSC accounting for system-wide CPU utilization. Each core updates its
-     * own counters at scheduler entry; readers take an atomic snapshot. */
+     * own counters at scheduler entry; readers add the span since — a strand
+     * alone on its core enters the scheduler only when it parks — and take
+     * the three together, again if the core moved them meanwhile. */
     volatile uint64_t accounting_last_tsc;
     volatile uint64_t accounting_busy_tsc;
     volatile uint64_t accounting_total_tsc;
@@ -80,7 +107,12 @@ error_t scheduler_init(void);
 void scheduler_init_core(uint8_t core_index);
 void scheduler_shutdown(void);
 void schedule(void *frame);
-process_t *scheduler_select_next(void);
+process_t *scheduler_select_next(process_t *passed);
+/* A strand came to this core's runqueue (IPI_WAKE). The strand running here
+ * keeps the core to the end of its least turn when the newcomer is owed it,
+ * else to the end of its turn — its one-shot armed for that moment — and the
+ * core is scheduled at once once it is due, or when nothing runs. */
+void scheduler_woken(void *frame);
 
 // Core parking, looked at from the BSP's timer IRQ
 void scheduler_recalc_parameters(void);
@@ -106,19 +138,24 @@ uint64_t sched_fare_for(const process_t *proc, uint64_t cycles);
 /* `paid` — a Fare or a Tip — brought from the core it was reckoned on, whose
  * Waterline is `there` (`known` false: none), to the core whose Waterline is
  * `here`: it keeps how far above or below `there` it stood, a newcomer stands
- * at `here`, and none stands more than a turn below `here`. */
+ * at `here`, and none stands more than half a round below `here`. */
 uint64_t sched_rebase(uint64_t paid, bool known, uint64_t there, uint64_t here);
 error_t sched_dequeue(process_t *proc);
 /* The strand running on this core gives its core away (GATE_YIELD): its next
- * schedule() stands it behind the strand this core runs next, so the one it
- * steps aside for runs first and a waiter looks at its answer again one turn
- * later, not a round later. */
+ * schedule() passes it once for the least Fare queued after it, at the Fare it
+ * has paid, so the one it steps aside for runs first and a waiter looks at its
+ * answer again one turn later, not a round later. */
 void sched_yield_turn(void);
 /* The doorbell for a strand that is runnable but may be waiting its turn: IPI
  * its home core, unless it is on a CPU right now (it reads its rings itself)
  * or its home is this core. A wake whose state flip enqueued the strand has
  * already rung — sched_enqueue's IPI — and must not ring again. */
 void sched_ring_home(process_t *proc);
+/* The doorbell for a strand that has stopped working while it is on a CPU —
+ * parked, ended, crashed: IPI that core, its own included, so its scheduler
+ * takes the strand off now. Called after the new state is stored, with a full
+ * barrier between (process_set_state). */
+void sched_ring_running(process_t *proc);
 /* Remove proc from whichever core's runqueue holds it (referenced-nowhere
  * guarantee before process_destroy frees it). See scheduler.c. */
 void sched_dequeue_all_cores(process_t *proc);

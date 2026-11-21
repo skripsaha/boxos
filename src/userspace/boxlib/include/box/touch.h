@@ -240,10 +240,11 @@ bool touch_pop(Touch *out);
 
 /* Block until a Touch arrives or `timeout_ms` elapses (0 = wait forever).
  *
- * Implementation: cooperative spin with WAITPKG UMWAIT fallback when
- * supported (Intel SDM Vol 2A). The kernel KTouchPush flips us from
- * PROC_WAITING to PROC_WORKING the moment a slot is published, so the
- * wait latency is bounded by the producer's release-store + IPI hop. */
+ * With no deadline the strand looks hot for a moment and then turns in on its
+ * Touch ring (box/turnin.h): it holds no core while it waits, and the kernel's
+ * KTouchPush wakes it the moment a slot is published. With a deadline it
+ * waits on the core — UMWAIT where the core has WAITPKG (Intel SDM Vol 2A), a
+ * short pause and a yield where it has not — for no longer than asked. */
 bool touch_wait(Touch *out, uint32_t timeout_ms);
 
 /* True if TouchRing has at least one published slot waiting to be

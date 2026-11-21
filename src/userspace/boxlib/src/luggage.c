@@ -77,12 +77,24 @@ static struct {
     uint32_t          count;
 } g_luggage;
 
-Luggage luggage(void)
+Luggage luggage_carried(void)
 {
     const CabinInfo *ci = cabin_info();
     Luggage l;
     l.bytes  = ci->luggage_length ? (const char *)(uintptr_t)ci->luggage_addr : NULL;
     l.length = ci->luggage_length;
+    return l;
+}
+
+/* The line ends at the first NUL: a program its Form started carries that
+ * Form's records after it (form_luggage.c), and they are not what was typed. */
+Luggage luggage(void)
+{
+    Luggage l = luggage_carried();
+    uint32_t n = 0;
+    while (n < l.length && l.bytes[n] != '\0') n++;
+    l.length = n;
+    if (n == 0) l.bytes = NULL;
     return l;
 }
 

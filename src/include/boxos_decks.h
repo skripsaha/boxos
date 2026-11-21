@@ -274,6 +274,10 @@
  * the work in its hands. It carries no deadline, because there is no honest
  * one to guess — the caller loops and asks again. */
 #define SYSTEM_OP_TURN_IN           0xC6  /* (u64 touch_tail_seen)(u64 result_tail_seen) — answers nothing */
+/* A mark that watches no ring: the strand waits on the other one alone — a
+ * Touch wait does not wake for good on answers and messages it is not taking.
+ * Both unwatched is refused: that would be a sleep nothing can end. */
+#define SYSTEM_TURN_IN_UNWATCHED    0xFFFFFFFFFFFFFFFFull
 
 /* ─── Bell — wake a strand, and say nothing ──────────────────────────── */
 /* Brook's two ends wake each other across a shared page the kernel never

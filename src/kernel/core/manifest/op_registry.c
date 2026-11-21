@@ -7,14 +7,18 @@
  *
  * Bucket count is always a power of two; index = mix(op_kind) & (cap - 1).
  *
- * The table is owned by a single global OpRegistryState. Concurrency is
- * protected by a spinlock for the rare write paths (register, resize) and
- * by stable-pointer reads for the hot path (lookup).
+ * The table is owned by a single global OpRegistryState. The decks register
+ * at boot, under the lock, and the kernel seals the table before the first
+ * program can make a call (OpRegistrySeal): from then on nothing writes it,
+ * and a lookup — every op of every Manifest, on every K-Core — walks it with
+ * no lock at all. Before the seal a lookup takes the lock, so a walk never
+ * follows a chain a resize is relinking.
  *
  * Memory ownership:
- *   - Each OpRegistryNode is kmalloc'd on register and lives until shutdown.
- *   - The buckets array is kmalloc'd and reallocated on resize.
- *   - name is pointer-only; caller guarantees lifetime ≥ shutdown.
+ *   - Each OpRegistryNode is kmalloc'd on register and lives for good.
+ *   - The buckets array is kmalloc'd and reallocated on resize, before the
+ *     seal only.
+ *   - name is pointer-only; the caller keeps it for good.
  */
 
 #define OP_REGISTRY_INITIAL_BUCKETS 64u
@@ -33,6 +37,7 @@ typedef struct {
     uint32_t         entry_count;
     spinlock_t       lock;
     bool             initialized;
+    bool             sealed;
 } OpRegistryState;
 
 static OpRegistryState g_op_registry;
@@ -101,27 +106,6 @@ error_t OpRegistryInit(void)
     return OK;
 }
 
-void OpRegistryShutdown(void)
-{
-    if (!g_op_registry.initialized) return;
-
-    spin_lock(&g_op_registry.lock);
-    for (uint32_t b = 0; b < g_op_registry.bucket_count; b++) {
-        OpRegistryNode *n = g_op_registry.buckets[b];
-        while (n) {
-            OpRegistryNode *next = n->next;
-            kfree(n);
-            n = next;
-        }
-    }
-    kfree(g_op_registry.buckets);
-    g_op_registry.buckets      = NULL;
-    g_op_registry.bucket_count = 0;
-    g_op_registry.entry_count  = 0;
-    g_op_registry.initialized  = false;
-    spin_unlock(&g_op_registry.lock);
-}
-
 error_t OpRegistryRegister(uint32_t    op_kind,
                            OpHandler   handler,
                            uint32_t    security_mask,
@@ -131,6 +115,13 @@ error_t OpRegistryRegister(uint32_t    op_kind,
     if (!handler)                   return ERR_NULL_POINTER;
 
     spin_lock(&g_op_registry.lock);
+    if (g_op_registry.sealed) {
+        spin_unlock(&g_op_registry.lock);
+        kprintf("[OpRegistry] DEFECT: op_kind 0x%08x (%s) registered after the seal — "
+                "a lookup walks the table with no lock now, and it is not written again\n",
+                op_kind, name ? name : "unnamed");
+        return ERR_INVALID_STATE;
+    }
 
     /* Reject duplicates. */
     uint32_t b = bucket_of(op_kind, g_op_registry.bucket_count);
@@ -168,25 +159,35 @@ error_t OpRegistryRegister(uint32_t    op_kind,
     return OK;
 }
 
+static const OpRegistration *op_registry_find(uint32_t op_kind)
+{
+    uint32_t b = bucket_of(op_kind, g_op_registry.bucket_count);
+    for (OpRegistryNode *n = g_op_registry.buckets[b]; n; n = n->next) {
+        if (n->entry.op_kind == op_kind)
+            return &n->entry;
+    }
+    return NULL;
+}
+
 const OpRegistration *OpRegistryLookup(uint32_t op_kind)
 {
-    if (!g_op_registry.initialized) return NULL;
+    /* Sealed: the seal's release store made every write before it visible
+     * to this acquire, and nothing writes the table after it. */
+    if (__atomic_load_n(&g_op_registry.sealed, __ATOMIC_ACQUIRE))
+        return op_registry_find(op_kind);
 
-    /* Read-only fast path; we still take the lock to be safe under concurrent
-     * resize. A future optimization can move to RCU semantics with a stable
-     * snapshot pointer; for now correctness over micro-optimization.
-     */
+    if (!g_op_registry.initialized) return NULL;
     spin_lock(&g_op_registry.lock);
-    uint32_t b = bucket_of(op_kind, g_op_registry.bucket_count);
-    const OpRegistration *result = NULL;
-    for (OpRegistryNode *n = g_op_registry.buckets[b]; n; n = n->next) {
-        if (n->entry.op_kind == op_kind) {
-            result = &n->entry;
-            break;
-        }
-    }
+    const OpRegistration *result = op_registry_find(op_kind);
     spin_unlock(&g_op_registry.lock);
     return result;
+}
+
+void OpRegistrySeal(void)
+{
+    spin_lock(&g_op_registry.lock);
+    __atomic_store_n(&g_op_registry.sealed, true, __ATOMIC_RELEASE);
+    spin_unlock(&g_op_registry.lock);
 }
 
 uint32_t OpRegistryCount(void)

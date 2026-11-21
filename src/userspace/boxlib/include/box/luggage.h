@@ -28,6 +28,9 @@ typedef struct {
 
 /* The whole line, verbatim, straight from the cabin page. */
 Luggage luggage(void);
+/* All the cabin carries: the line, and after its NUL the records the Form that
+ * started the program filled (box/form.h) — for the Form's own readers. */
+Luggage luggage_carried(void);
 
 /* How many words the line has. */
 uint32_t luggage_word_count(void);

@@ -352,6 +352,17 @@ endif
 # objects it already had and boots a kernel with no ring in it.
 PRINTTOFILE_MARK = $(BUILDDIR)/.printtofile.$(if $(filter on,$(PRINTTOFILE)),on,off)
 
+# `make MEASURE=on` — a system that clocks where its time goes. The display
+# says it in the kernel's log (display/measure.h; its own make keys its objects
+# by it), and the kernel stamps every answer to a strand's own call with when
+# the call came to the gate, when a K-Core took it and when it was answered
+# (the reply ring's stopwatch line, kring.h) — bench tells a call's time apart
+# by them.
+ifeq ($(MEASURE),on)
+CFLAGS += -DCONFIG_MEASURE=1
+endif
+MEASURE_MARK = $(BUILDDIR)/.measure.$(if $(filter on,$(MEASURE)),on,off)
+
 # Prove, on the machine, that the hardware deck can put a USB controller back in
 # service — the whole eleven-step repair the driver keeps for a controller that
 # has stopped itself, asked for by name through hw.usb.reset.
@@ -738,6 +749,7 @@ BUILD_KEYS_SET := $(strip \
   $(if $(filter on,$(WEDGETEST)),WEDGETEST=on,) \
   $(if $(filter on,$(VOLUME_TESTS)),VOLUME_TESTS=on,) \
   $(if $(filter on,$(PRINTTOFILE)),PRINTTOFILE=on,) \
+  $(if $(filter on,$(MEASURE)),MEASURE=on,) \
   $(if $(filter on,$(USBRECOVER)),USBRECOVER=on,) \
   $(if $(filter on,$(CTRLGIVEUP)),CTRLGIVEUP=on,) \
   $(if $(filter on,$(INTX)),INTX=on,) \
@@ -1155,6 +1167,10 @@ $(PRINTTOFILE_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.printtofile.*
 	@touch $@
 
+$(MEASURE_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.measure.*
+	@touch $@
+
 $(USBRECOVER_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.usbrecover.*
 	@touch $@
@@ -1243,7 +1259,7 @@ $(STRICT_MARK): | $(BUILDDIR)
 #
 # Adding a key: a *_MARK beside its ifeq, a rule above, and a name HERE.
 # Nowhere else.
-BUILD_KEY_MARKS := $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(USBRECOVER_MARK) \
+BUILD_KEY_MARKS := $(VOLUME_TESTS_MARK) $(PRINTTOFILE_MARK) $(MEASURE_MARK) $(USBRECOVER_MARK) \
                    $(CTRLGIVEUP_MARK) $(NOEXEC_MARK) $(EARLYIRQ_MARK) \
                    $(MOUNTFAIL_MARK) $(HOLDGROUND_MARK) $(RETURNFAIL_MARK) \
                    $(SETTLECUT_MARK) $(IOMMU_MARK) $(INTX_MARK) $(DEBUG_MARK) \
@@ -1436,14 +1452,6 @@ $(HUB_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a
 	@echo "Building the hub..."
 	@cd $(HUB_DIR) && $(MAKE)
 	@echo "hub.elf: $$(stat -f%z $(HUB_BIN) 2>/dev/null || stat -c%s $(HUB_BIN) 2>/dev/null) bytes"
-
-# `make MEASURE=on` — a display that clocks where its time goes and says it in
-# the kernel's log (display/measure.h). Its own make keys its objects by it;
-# this mark makes that make run when the key changes on a built tree.
-MEASURE_MARK = $(BUILDDIR)/.measure.$(if $(filter on,$(MEASURE)),on,off)
-$(MEASURE_MARK): | $(BUILDDIR)
-	@rm -f $(BUILDDIR)/.measure.*
-	@touch $@
 
 # Build display server
 $(DISPLAY_BIN): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(PAINTER_LIB) $(TYPECASE_LIB) \

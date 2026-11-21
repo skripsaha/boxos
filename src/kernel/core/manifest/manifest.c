@@ -198,7 +198,7 @@ static error_t manifest_resolve_handlers(const uint8_t           *bytes,
             kfree(handlers);
             return ERR_INVALID_OPCODE;
         }
-        if (!ManifestOpAuthorize(op->op_kind, &compile_ctx)) {
+        if (!ManifestOpAuthorize(reg, &compile_ctx)) {
             debug_printf("[Manifest] op %u: auth level %u denied for PID %u\n",
                          i, reg->security_mask,
                          owner ? owner->pid : 0);

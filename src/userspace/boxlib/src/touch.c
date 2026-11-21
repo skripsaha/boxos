@@ -11,6 +11,7 @@
 #include "box/string.h"
 #include "box/memory.h"            /* malloc / free — per-strand stash heap-backing */
 #include "box/core/stash.h"
+#include "box/turnin.h"             /* box_turn_in — a wait with no deadline lies down */
 #include "box/debug.h"             /* kdbg_nowait — no room must be said, not waited on */
 #include "box/error.h"
 #include "boxos_decks.h"  /* DECK_SYSTEM + SYSTEM_OP_TOUCH_* — single source */
@@ -197,6 +198,7 @@ static inline uint64_t touch_rdtsc(void)
 
 void yield(void);  /* boxlib (yield.c) — declared here to avoid pulling sync.h */
 
+/* A wait with a deadline, where the core has WAITPKG. */
 static bool touch_wait_umwait(Touch *out, uint32_t timeout_ms)
 {
     TouchRing *rr = touch_ring();
@@ -207,13 +209,10 @@ static bool touch_wait_umwait(Touch *out, uint32_t timeout_ms)
     volatile uint64_t *tail_addr = (volatile uint64_t *)
         ((uintptr_t)rr + OFFSETOF(TouchRing, hdr.tail));
 
-    /* Absolute ceiling for the owed-hand-over loop below. The UMWAIT branch
-     * re-arms its own slice each turn and reports the deadline through
-     * umwait's wake reason, but the hand-over branch never reaches UMWAIT —
-     * without this a bounded wait would yield past its own timeout for as long
-     * as the kernel held anything. 0 == wait forever, and forever means it. */
-    uint64_t owed_deadline = timeout_ms
-                             ? touch_rdtsc() + cpu_ms_to_tsc(timeout_ms) : 0;
+    /* The deadline holds the owed-hand-over loop below too: the UMWAIT branch
+     * reports the deadline through umwait's wake reason, but the hand-over
+     * branch never reaches UMWAIT. */
+    const uint64_t deadline = touch_rdtsc() + cpu_ms_to_tsc(timeout_ms);
 
     while (1) {
         __sync_synchronize();
@@ -230,47 +229,35 @@ static bool touch_wait_umwait(Touch *out, uint32_t timeout_ms)
          * for a knock that cannot come. Open the door instead — a yield is a
          * syscall, and the gate hands the rest over on the way in. */
         if (touch_owed() != 0) {
-            if (owed_deadline != 0 && touch_rdtsc() >= owed_deadline) return false;
+            if (touch_rdtsc() >= deadline) return false;
             yield();
             continue;
         }
 
-        uint64_t deadline_tsc;
-        if (timeout_ms == 0) {
-            deadline_tsc = 0xFFFFFFFFFFFFFFFFULL;
-        } else {
-            deadline_tsc = touch_rdtsc() + cpu_ms_to_tsc(timeout_ms);
-        }
-
-        int wake_reason = umwait(0, deadline_tsc);
-
-        if (wake_reason == 1 && timeout_ms > 0) {
+        if (umwait(0, deadline) == 1) {
             __sync_synchronize();
             if (!touch_available()) return false;   /* deadline elapsed */
         }
     }
 }
 
-/* Cooperative pause/yield fallback (no WAITPKG). A sibling strand may be the
- * Touch producer and share this App-Core, so a pure PAUSE-spin would starve it
- * (it can never be scheduled while we hold the core). Pause a small budget, then
- * yield — mirrors brook_wait_cycle and result_wait_ipc_yield so the no-WAITPKG
- * path is single-core-safe, never a hard spin. */
+/* A wait with a deadline, without WAITPKG. A sibling strand may be the Touch
+ * producer and share this App-Core, so a pure PAUSE-spin would starve it (it
+ * can never be scheduled while we hold the core). Pause a small budget, then
+ * yield — mirrors brook_wait_cycle and result_wait_ipc_yield, never a hard
+ * spin. */
 #define TOUCH_SPIN_BUDGET 2048u
 
 static bool touch_wait_pause(Touch *out, uint32_t timeout_ms)
 {
-    uint64_t deadline = 0;
-    if (timeout_ms > 0) {
-        deadline = touch_rdtsc() + cpu_ms_to_tsc(timeout_ms);
-    }
+    const uint64_t deadline = touch_rdtsc() + cpu_ms_to_tsc(timeout_ms);
 
     uint32_t spin = 0;
     while (1) {
         __sync_synchronize();
         if (touch_pop(out)) return true;
 
-        if (timeout_ms > 0 && touch_rdtsc() >= deadline) return false;
+        if (touch_rdtsc() >= deadline) return false;
         /* Same door as the UMWAIT path: events the ring refused are handed
          * over in the guide, so go there now rather than spend the whole spin
          * budget waiting for a tail that cannot move. */
@@ -288,14 +275,41 @@ static bool touch_wait_pause(Touch *out, uint32_t timeout_ms)
     }
 }
 
+/* ‼ AN EVENT THAT MAY NEVER COME IS NOT WAITED FOR ON A CORE.
+ *
+ * A wait with no deadline looked, yielded and looked again for as long as it
+ * waited — or sat in UMWAIT on its own ring, holding the core. Either way the
+ * waiter held a core it had nothing to do on, and paid the Fare of it — every
+ * GUI area waiting for its present among them. result_wait_spin learned the
+ * same for answers.
+ *
+ * So it looks hot, and turns in on its Touch ring alone: it costs nothing until
+ * an event arrives, and wakes then at the front of those waiting (a sleep's
+ * credit). Answers and messages are not what it waits for — they may wait in
+ * the reply ring unread, as long as the strand likes — so the reply ring is not
+ * watched (box_mark_touch); a delivery there still wakes the strand, which
+ * looks and lies down again. */
+static bool touch_wait_forever(Touch *out)
+{
+    for (;;) {
+        TurnInMark mark = box_mark_touch();
+        __sync_synchronize();
+        if (touch_pop(out)) return true;
+        /* The door, as above: what the kernel holds is handed over at the gate. */
+        if (touch_owed() != 0) { yield(); continue; }
+        box_turn_in(mark);
+    }
+}
+
 bool touch_wait(Touch *out, uint32_t timeout_ms)
 {
     if (!out) return false;
     /* Fast initial drain — if a slot is already published, skip the
-     * UMWAIT setup entirely. */
+     * wait's setup entirely. */
     if (touch_pop(out)) return true;
 
-    if (cpu_has_waitpkg()) return touch_wait_umwait(out, timeout_ms);
+    if (timeout_ms == 0)    return touch_wait_forever(out);
+    if (cpu_has_waitpkg())  return touch_wait_umwait(out, timeout_ms);
     return touch_wait_pause(out, timeout_ms);
 }
 

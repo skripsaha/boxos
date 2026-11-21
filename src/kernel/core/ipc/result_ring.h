@@ -97,9 +97,9 @@ typedef struct __packed {
      * up — written by the kernel, read-only for userspace.
      *
      * 1 when another strand is waiting in this core's runqueue (set when one
-     * is queued here, recomputed at every dispatch), or when this strand has
-     * been parked while still on its CPU (a K-Core took its submit and put it
-     * to sleep; only a pass through the scheduler takes it off). A spin that
+     * is queued here, recomputed at every dispatch). A strand parked while
+     * still on its CPU is not asked: its core is rung and takes it off
+     * (sched_ring_running). A spin that
      * waits on something ANOTHER strand must produce — the display daemon's
      * hot look, a Touch or Brook budget, a reply wait — cannot end on its own
      * when that strand is queued behind it on the same core: the core it waits
@@ -109,10 +109,24 @@ typedef struct __packed {
      * stirred by the store that sets it. */
     volatile uint64_t step_aside;
     uint8_t           _pad_line1[32];   /* fill cacheline 1                */
+
+    /* Cacheline 2 — the stopwatch (make MEASURE=on; zero in any other build).
+     * The answer to the strand's own call pushed last, as the kernel saw it:
+     * when the call came to the gate, when a K-Core took it and when it was
+     * answered, in TSC cycles. Written by the kernel before it publishes that
+     * answer, so a strand that has the answer reads the moments that go with
+     * it; a line of its own, so neither cursor's line is touched for it. */
+    volatile uint64_t call_gate;
+    volatile uint64_t call_taken;
+    volatile uint64_t call_answered;
+    uint8_t           _pad_line2[40];   /* fill cacheline 2                */
 } ResultRingHeader;
 
-_Static_assert(sizeof(ResultRingHeader) == 128,
-               "ResultRingHeader must be 128 bytes (two cachelines)");
+_Static_assert(sizeof(ResultRingHeader) == 192,
+               "ResultRingHeader must be 192 bytes (three cachelines)");
+_Static_assert(__builtin_offsetof(ResultRingHeader, call_gate) == 128,
+               "ResultRingHeader.call_gate must start cacheline 2 — boxlib's "
+               "mirror agrees");
 _Static_assert(__builtin_offsetof(ResultRingHeader, head) == 0,
                "ResultRingHeader.head must start at offset 0");
 _Static_assert(__builtin_offsetof(ResultRingHeader, tail) == 64,

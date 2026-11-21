@@ -48,10 +48,18 @@ typedef struct PACKED {
     /* Cacheline 1 — producer cursor (userspace). */
     volatile uint64_t tail;             /* userspace cursor */
     uint8_t           _pad_line1[56];   /* fill cacheline 1 */
+
+    /* Cacheline 2 — the ring in the kernel's hand (written by the kernel
+     * only): 1 while a K-Core will look at this ring again before it lets it
+     * go, so a pocket pushed now needs no ring at the gate (pocket_submit). */
+    volatile uint64_t in_hand;
+    uint8_t           _pad_line2[56];   /* fill cacheline 2 */
 } PocketRingHeader;
 
-STATIC_ASSERT(sizeof(PocketRingHeader) == 128,
-              "PocketRingHeader must be 128 bytes (two cachelines)");
+STATIC_ASSERT(sizeof(PocketRingHeader) == 192,
+              "PocketRingHeader must be 192 bytes (three cachelines)");
+STATIC_ASSERT(OFFSETOF(PocketRingHeader, in_hand) == 128,
+              "PocketRingHeader.in_hand must sit at offset 128 (kernel agrees)");
 
 typedef struct PACKED {
     PocketRingHeader hdr;

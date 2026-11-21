@@ -168,7 +168,9 @@ bool IdleOwed(void)
 // One idle wait, executed each iteration of idle_loop (idle_loop.asm).
 void cpu_idle(void) {
     /* Nightwatch: this core has nothing to run. Also its re-check point — an
-     * idle core wakes on every tick, so no timer of its own is needed. */
+     * idle App Core wakes for the look owed (its one-shot, scheduler.c) and for
+     * whatever comes to it, one core on every IRQ0, so no timer of
+     * Nightwatch's own is needed. */
     nightwatch_core_idle(amp_get_core_index());
 
     /* The batons — a park deadline's Result, a storage completion, the
@@ -190,9 +192,10 @@ void cpu_idle(void) {
      * Multi-core is already served: the drain core pumps in kcore_run_loop,
      * and this loop is not where that core is.
      *
-     * Work posted between this drain and the MWAIT below waits for the next
-     * tick — a few milliseconds at 250 Hz, and never longer, because the tick
-     * arrives regardless of what this core is doing. */
+     * On one core, work posted between this drain and the MWAIT below waits
+     * for the next IRQ0 — a few milliseconds at 250 Hz, and never longer,
+     * because the tick arrives regardless of what the core is doing. A pass
+     * for an App Core rings it (BatonPass), which ends the wait. */
     BatonPumpAtRest(amp_get_core_index());
 
     /* Periodic TSC recalibration. Runs out of IRQ context so the

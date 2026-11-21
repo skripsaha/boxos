@@ -61,10 +61,18 @@ TurnInMark box_mark(void)
     return m;
 }
 
+TurnInMark box_mark_touch(void)
+{
+    TurnInMark m = box_mark();
+    m.result = SYSTEM_TURN_IN_UNWATCHED;
+    return m;
+}
+
 bool box_mark_moved(TurnInMark seen)
 {
     TurnInMark now = box_mark();
-    return now.result != seen.result || now.touch != seen.touch;
+    return (seen.result != SYSTEM_TURN_IN_UNWATCHED && now.result != seen.result) ||
+           (seen.touch  != SYSTEM_TURN_IN_UNWATCHED && now.touch  != seen.touch);
 }
 
 /* Ask the kernel for the sleep. Fire-and-forget: this op answers nothing (see
@@ -102,8 +110,8 @@ static void turn_in_submit(TurnInMark seen)
 static bool turn_in_arrival(TurnInMark seen)
 {
     return box_mark_moved(seen) ||
-           result_published_at_head() ||
-           touch_ring_published_at_head();
+           (seen.result != SYSTEM_TURN_IN_UNWATCHED && result_published_at_head()) ||
+           (seen.touch  != SYSTEM_TURN_IN_UNWATCHED && touch_ring_published_at_head());
 }
 
 void box_turn_in(TurnInMark seen)

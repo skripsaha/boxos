@@ -21,7 +21,8 @@ extern "C" {
 void pocket_prepare(Pocket* p);
 
 /*
- * Submit a Pocket to the PocketRing and notify the kernel. Used internally
+ * Submit a Pocket to the PocketRing and notify the kernel — unless a K-Core
+ * has the ring in hand and will see the pocket anyway. Used internally
  * by ManifestSubmit. Application code should call MfCall1 or the higher
  * level wrappers, not build Pockets directly.
  */

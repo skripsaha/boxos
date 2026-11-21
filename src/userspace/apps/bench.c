@@ -18,10 +18,18 @@
  *      shows the typical cost. p99 surfaces tail latency.
  *
  * The whole loop runs inside one process (no other userspace contention
- * if you start bench from shell with no other apps running). The kernel
- * idle process and the display daemon will still steal cycles via the
- * 500 Hz PIT IRQ; that contributes the high-end of the distribution and
- * is exactly what you should care about.
+ * if you start bench from shell with no other apps running). An App Core
+ * has no tick — a strand alone on its core is not interrupted — so what
+ * lands in the high end of the distribution is what else ran: the display,
+ * a device's interrupt, the K-Core serving someone else. That is exactly
+ * what you should care about.
+ *
+ * Warm and cold. A K-Core with nothing queued sleeps at once (HLT, kcore.c)
+ * and a call wakes it with an IPI, so a call's price depends on whether the
+ * K-Core was busy. Calls back to back find it just gone to sleep or still
+ * awake; a call after a quiet moment — the App Core spinning without a
+ * call, as a program computes between two — finds it asleep, as a key
+ * pressed after a pause does (bench_run_rested).
  *
  * RDTSC vs RTC
  * ------------
@@ -49,9 +57,13 @@
 #include "box/core/crate.h"
 #include "box/core/cabin.h"
 #include "box/core/result.h"
+#include "box/core/result.h"
 #include "box/error.h"
 #include "box/display.h"
 #include "box/touch.h"
+#include "box/strand.h"
+#include "box/sync.h"
+#include "box/timeouts.h"
 
 /* -------------------------------------------------------------------------
  *  Stats engine
@@ -210,8 +222,19 @@ typedef int (*bench_fn)(uint32_t iter, void *ctx);
 
 #define WARMUP_ITERS 64
 
-static bench_stats_t bench_run_raw(bench_fn fn, void *ctx, uint32_t n)
+/* `us` microseconds on this App Core without a call: the K-Cores are left
+ * nothing of ours to do. */
+static void bench_quiet(uint32_t us, uint64_t khz)
 {
+    const uint64_t until = cpu_rdtsc() + (uint64_t)us * khz / 1000u;
+    while (cpu_rdtsc() < until)
+        __builtin_ia32_pause();
+}
+
+/* Each sample after `rest_us` of quiet (0: back to back), not counted. */
+static bench_stats_t bench_run_raw(bench_fn fn, void *ctx, uint32_t n, uint32_t rest_us)
+{
+    const uint64_t khz = cpu_get_tsc_freq_khz();
     bench_stats_t st = {0};
     if (n > BENCH_MAX_SAMPLES)
         n = BENCH_MAX_SAMPLES;
@@ -230,6 +253,8 @@ static bench_stats_t bench_run_raw(bench_fn fn, void *ctx, uint32_t n)
     /* Sampling */
     for (uint32_t i = 0; i < n; i++)
     {
+        if (rest_us)
+            bench_quiet(rest_us, khz);
         uint64_t t0 = cpu_rdtsc();
         int rc = fn(i, ctx);
         uint64_t t1 = cpu_rdtsc_end();
@@ -248,7 +273,13 @@ static bench_stats_t bench_run_raw(bench_fn fn, void *ctx, uint32_t n)
 
 static void bench_run(const char *name, bench_fn fn, void *ctx, uint32_t iters)
 {
-    bench_stats_t s = bench_run_raw(fn, ctx, iters);
+    bench_stats_t s = bench_run_raw(fn, ctx, iters, 0);
+    print_row(name, &s);
+}
+
+static void bench_run_rested(const char *name, bench_fn fn, void *ctx, uint32_t iters, uint32_t rest_us)
+{
+    bench_stats_t s = bench_run_raw(fn, ctx, iters, rest_us);
     print_row(name, &s);
 }
 
@@ -289,16 +320,81 @@ static int b_yield(uint32_t i, void *ctx)
     return 0;
 }
 
-/* (4) HW deck minimal: time_uptime_ms — single-op Manifest, kernel reads
- *     PIT counter, writes a u64 into the out crate, posts a Result. Includes
- *     the entire Manifest pipeline (build, validate, dispatch, result push,
- *     result pop) but no I/O. */
-static int b_uptime_ms(uint32_t i, void *ctx)
+/* (4) The least call: one op in a Manifest — ops.fill of an 8-byte crate,
+ *     memory alone — served by a K-Core, its Result posted and taken. The
+ *     whole Manifest pipeline (build, validate, dispatch, result push, result
+ *     pop) and nothing else, and the same op the 1000-op chain carries: this
+ *     row less the chain's cost of one op is the price of a call. Not
+ *     time_uptime_ms, which reads the ClockBoard page and enters no kernel
+ *     (0 ns), nor the hardware deck's timer read, which reads the HPET — three
+ *     uncached reads of a device, microseconds on a board. */
+static int b_least_call(uint32_t i, void *ctx)
 {
-    (void)i;
     (void)ctx;
-    uint64_t ms = 0;
-    return time_uptime_ms(&ms);
+    uint8_t fill = (uint8_t)i;
+    uint8_t out[8];
+    return MfCall1(DECK_OPERATIONS, OP_BUF_FILL, &fill, 1, NULL, 0, out, sizeof(out), NULL,
+                   BOX_ANSWER_GUARANTEED, NULL) == 0 ? 0 : -1;
+}
+
+/* (5) The least call told apart by the stopwatch a kernel built MEASURE=on
+ *     puts on its answer (box/core/result.h): made and come to the gate,
+ *     taken by a K-Core (on one core, by the gate), served, and its answer
+ *     taken by the caller — each stage's own spread over the same calls.
+ *     Nothing when the kernel keeps no stopwatch. A call whose moments are
+ *     not in order is left out and counted: the cores' TSCs not in step. */
+static void print_kv_u64(const char *label, uint64_t v, const char *unit);
+
+#define STAGES 4
+static uint64_t s_stage[STAGES][BENCH_MAX_SAMPLES];
+
+static void bench_call_stages(const char *title, uint32_t n, uint32_t rest_us)
+{
+    static const char *const names[STAGES] = {
+        "  made, at the gate", "  gate to taken", "  served", "  answered to caller",
+    };
+    volatile ResultRingHeader *h = &result_ring()->hdr;
+    const uint64_t khz = cpu_get_tsc_freq_khz();
+    if (n > BENCH_MAX_SAMPLES)
+        n = BENCH_MAX_SAMPLES;
+    for (uint32_t i = 0; i < WARMUP_ITERS; i++)
+        if (b_least_call(i, NULL) < 0)
+            return;
+    if (h->call_answered == 0)
+        return;
+
+    uint32_t got = 0, out_of_order = 0;
+    for (uint32_t i = 0; i < n; i++)
+    {
+        if (rest_us)
+            bench_quiet(rest_us, khz);
+        uint64_t made = cpu_rdtsc();
+        if (b_least_call(i, NULL) < 0)
+            return;
+        uint64_t seen     = cpu_rdtsc_end();
+        uint64_t gate     = h->call_gate;
+        uint64_t taken    = h->call_taken;
+        uint64_t answered = h->call_answered;
+        if (!(made <= gate && gate <= taken && taken <= answered && answered <= seen))
+        {
+            out_of_order++;
+            continue;
+        }
+        s_stage[0][got] = gate - made;
+        s_stage[1][got] = taken - gate;
+        s_stage[2][got] = answered - taken;
+        s_stage[3][got] = seen - answered;
+        got++;
+    }
+    println(title);
+    for (uint32_t k = 0; k < STAGES; k++)
+    {
+        bench_stats_t st = {0};
+        compute_stats(s_stage[k], got, &st);
+        print_row(names[k], &st);
+    }
+    if (out_of_order)
+        print_kv_u64("  left out, moments not in order:", out_of_order, "calls");
 }
 
 /* (6) Cross-process IPC roundtrip: broadcast a 1-byte DISP_CMD_PING,
@@ -364,6 +460,71 @@ static int b_chain_bulk(uint32_t i, void *ctx)
     if (rc != 0 || r.error_code != 0)
         return -1;
     return 0;
+}
+
+/* (7b) Strand ping-pong: a strand of this program and the main strand hand a
+ *      word back and forth, each parked on it in the kernel until the other
+ *      wakes it — two addr_wake calls, two parks and two wakes of a strand on
+ *      another App Core (woken onto a free core) per round trip. The real
+ *      cost of one strand waiting on another's work.
+ *
+ * Linux comparison: two threads on two cores handing a futex back and forth
+ * (FUTEX_WAKE / FUTEX_WAIT) — a few microseconds a round trip on a desktop
+ * processor, as lmbench's and the futex papers' figures put it; not measured
+ * on this machine. */
+#define PP_IDLE 0u
+#define PP_SERVE 1u
+#define PP_SERVED 2u
+#define PP_END 3u
+static volatile uint64_t s_pp_word __attribute__((aligned(8)));
+static volatile uint64_t s_pp_gone __attribute__((aligned(8)));
+
+static void pp_partner(void *arg)
+{
+    (void)arg;
+    for (;;)
+    {
+        uint64_t v;
+        while ((v = __atomic_load_n(&s_pp_word, __ATOMIC_ACQUIRE)) != PP_SERVE && v != PP_END)
+            (void)addr_park(&s_pp_word, v, 0);
+        if (v == PP_END)
+            break;
+        __atomic_store_n(&s_pp_word, PP_SERVED, __ATOMIC_RELEASE);
+        (void)addr_wake(&s_pp_word, 1);
+    }
+    __atomic_store_n(&s_pp_gone, 1u, __ATOMIC_RELEASE);
+    (void)addr_wake(&s_pp_gone, 0);
+}
+
+static int b_strand_pingpong(uint32_t i, void *ctx)
+{
+    (void)i;
+    (void)ctx;
+    __atomic_store_n(&s_pp_word, PP_SERVE, __ATOMIC_RELEASE);
+    if (addr_wake(&s_pp_word, 1) != OK)
+        return -1;
+    uint64_t v;
+    while ((v = __atomic_load_n(&s_pp_word, __ATOMIC_ACQUIRE)) != PP_SERVED)
+        (void)addr_park(&s_pp_word, v, 0);
+    return 0;
+}
+
+/* The partner started before the row and ended after it. */
+static void bench_pingpong(const char *name, uint32_t iters)
+{
+    s_pp_word = PP_IDLE;
+    s_pp_gone = 0;
+    if (strand_spawn(pp_partner, NULL) == 0)
+    {
+        bench_stats_t none = {0};
+        print_row(name, &none);
+        return;
+    }
+    bench_run(name, b_strand_pingpong, NULL, iters);
+    __atomic_store_n(&s_pp_word, PP_END, __ATOMIC_RELEASE);
+    (void)addr_wake(&s_pp_word, 0);
+    while (__atomic_load_n(&s_pp_gone, __ATOMIC_ACQUIRE) == 0)
+        (void)addr_park(&s_pp_gone, 0, 0);
 }
 
 /* (8a) Touch: tag-multicast event delivery to self.
@@ -586,8 +747,15 @@ int main(void)
     /* Pure syscall costs */
     bench_run("yield (notify pocket)", b_yield, NULL, 2000);
 
-    /* Manifest dispatch costs */
-    bench_run("time_uptime_ms (HW deck)", b_uptime_ms, NULL, 1000);
+    /* Manifest dispatch costs: back to back, and after 2 ms of quiet — the
+     * K-Core asleep, woken by the call */
+    bench_run("1-op Manifest (ops.fill)", b_least_call, NULL, 1000);
+    bench_run_rested("1-op Manifest after 2 ms quiet", b_least_call, NULL, 500, 2000);
+    bench_call_stages("1-op Manifest, its stages:", 1000, 0);
+    bench_call_stages("1-op Manifest after 2 ms quiet, its stages:", 500, 2000);
+
+    /* One strand waiting on another's work, through the kernel */
+    bench_pingpong("strand ping-pong (park/wake, rtt)", 1000);
 
     /* IPC */
     bench_run("display PING + reply (cross-proc IPC)", b_display_ping, NULL, 500);
@@ -612,6 +780,9 @@ int main(void)
     println("notes:");
     println("  - 'min' is the cleanest sample (no IRQ during the window)");
     println("  - chain median / 1000 ≈ per-Manifest-op amortised cost");
-    println("  - IRQ tick is 500 Hz → max ≈ med + ~2 ms when an IRQ lands");
+    println("  - 'after 2 ms quiet': the K-Core asleep, woken by the call itself");
+    println("  - App Cores have no tick: max is what else ran meanwhile");
+    println("  - stages: a kernel built MEASURE=on stamps when the call came to the");
+    println("    gate, was taken and was answered; the rows are absent otherwise");
     return 0;
 }

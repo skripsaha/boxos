@@ -48,6 +48,10 @@ typedef struct {
 
 /* Snapshot both delivery cursors. Two relaxed loads, no syscall. */
 TurnInMark box_mark(void);
+/* The Touch ring's cursor alone, the reply ring's unwatched
+ * (SYSTEM_TURN_IN_UNWATCHED): for a strand waiting on events and nothing else,
+ * whose answers and messages wait for it unread. */
+TurnInMark box_mark_touch(void);
 
 /* True once anything has arrived since the mark was taken. */
 bool box_mark_moved(TurnInMark seen);

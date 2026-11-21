@@ -113,33 +113,55 @@ notify_entry:
     add rsp, 16                         ; skip vector + error_code
 
     ; =================================================================
-    ; Return to user mode.
+    ; Return.
     ;
-    ; IRETQ is always safe: it restores RIP, CS, RFLAGS, RSP and SS from
-    ; the hardware frame on the stack, and all GPRs have already been
-    ; restored by the pops above.  In particular, RCX is the value the
-    ; user process had when it was last saved — which may be a live data
-    ; pointer (e.g. a memset loop counter) rather than a return address.
+    ; SYSRETQ wherever it restores exactly what IRETQ would, IRETQ elsewhere.
+    ; SYSRETQ takes RIP from RCX and RFLAGS from R11, loads the user
+    ; selectors STAR names (CS 0x23, SS 0x1B) and leaves RSP alone. So:
     ;
-    ; Why NOT SYSRETQ here:
-    ;   SYSRETQ requires that RCX already hold the return RIP before the
-    ;   instruction executes.  To set up RCX we would have to overwrite it
-    ;   with [frame->rip].  If the process was timer-interrupted (not via
-    ;   SYSCALL), its live RCX is a data register and overwriting it with
-    ;   a code address causes the next pointer-dereference to land inside
-    ;   .text → write page-fault.  That was the root cause of the
-    ;   RCX=0x10e70 / CR2=weird crash pattern (audit 2026-04-30).
+    ;   - to ring 3, with those very selectors in the frame;
+    ;   - the frame's own RCX equal to its RIP and its R11 to its RFLAGS —
+    ;     then setting RIP and RFLAGS from them loses nothing the strand
+    ;     holds. A strand that came in through SYSCALL and goes back to its
+    ;     next instruction has them so (SYSCALL put them there); one that was
+    ;     interrupted, whose frame schedule() put here, almost never, and
+    ;     takes IRETQ. SYSRETQ used to load RCX from the frame's RIP for every
+    ;     return, and a strand whose live RCX was a pointer went on with a
+    ;     code address in it (RCX=0x10e70 / CR2 crash, audit 2026-04-30);
+    ;   - no RF or VM in RFLAGS, which SYSRETQ clears;
+    ;   - a RIP in the lower half: SYSRETQ to a non-canonical RCX faults in
+    ;     ring 0 on Intel, on the user's stack (CVE-2012-0217). The look
+    ;     shifts RCX and pops it back: POP leaves the flags alone.
     ;
-    ;   Performance: IRETQ costs ≈ 30-50 cycles more than SYSRETQ but the
-    ;   notify path already pays hundreds of cycles for guide() processing,
-    ;   so the difference is negligible.
+    ; The user RSP is loaded last, interrupts off; NMI, #MC, #DB, #DF and #SS
+    ; run on stacks of their own (IST), so nothing lands on the user's stack
+    ; in ring 0.
     ; =================================================================
+    cmp qword [rsp+8], GDT_USER_CODE    ; cs
+    jne .notify_iret
+    cmp qword [rsp+32], GDT_USER_DATA   ; ss
+    jne .notify_iret
+    cmp rcx, [rsp]                      ; rcx == rip
+    jne .notify_iret
+    cmp r11, [rsp+16]                   ; r11 == rflags
+    jne .notify_iret
+    test r11, (1 << 16) | (1 << 17)     ; RF | VM
+    jnz .notify_iret
+    push rcx
+    shr rcx, 47                         ; lower half: bits 63..47 clear
+    pop rcx
+    jnz .notify_iret
+    cli
+    swapgs
+    mov rsp, [rsp+24]                   ; user rsp
+    o64 sysret
 
     ; Conditional swapgs: syscall_handler may have rescheduled to a ring-0
     ; kernel process (e.g. the idle task), in which case the rewritten frame
     ; carries a kernel CS and we must KEEP the per-cpu GS base. Only swap back
     ; to the user GS base when actually returning to ring 3.
     ; After `add rsp,16` the stack top is the CPU frame: rip(+0) cs(+8) ...
+.notify_iret:
     test byte [rsp+8], 3                ; CS.RPL == 3 ?  (returning to user)
     jz .notify_ret_kernel
     swapgs

@@ -1373,10 +1373,18 @@ void TouchPublishIrqPair(TouchTag full_id, TouchTag bare_id,
  * Subscribe / unsubscribe — O(1) link/unlink.
  * ──────────────────────────────────────────────────────────────────────── */
 
+/* This strand's own subscription to `tag_id`. The list is its cabin's, shared
+ * by every strand of it (TouchCleanupProcess), and a sibling's subscription to
+ * the same tag is the sibling's. Matched on the tag alone, a strand's claim
+ * found a sibling's and changed it instead of making its own — and the strand
+ * heard nothing of the tag once that sibling ended (touch_test TT 24, one
+ * core) — a release took the sibling's away, an ack cleared it, and an
+ * interrupt owed to this strand was delivered with the sibling's handler and
+ * stack. */
 static TouchSub *find_proc_sub(process_t *proc, TouchTag tag_id)
 {
     for (TouchSub *s = (TouchSub *)proc->cabin->subs_head; s; s = s->proc_next) {
-        if (s->tag_id == tag_id) return s;
+        if (s->proc == proc && s->tag_id == tag_id) return s;
     }
     return NULL;
 }

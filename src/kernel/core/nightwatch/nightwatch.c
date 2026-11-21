@@ -804,6 +804,13 @@ static void nightwatch_verdict(void)
     kfree(probe);
 }
 
+uint64_t nightwatch_look_due_ms(void)
+{
+    if (!__atomic_load_n(&g_armed, __ATOMIC_ACQUIRE)) return 0;
+    const uint64_t last = __atomic_load_n(&g_last_look_ms, __ATOMIC_ACQUIRE);
+    return (last != 0 ? last : pit_get_uptime_ms()) + NIGHTWATCH_LOOK_MS;
+}
+
 void nightwatch_core_idle(uint8_t core)
 {
     if (!__atomic_load_n(&g_armed, __ATOMIC_ACQUIRE)) return;
@@ -816,9 +823,9 @@ void nightwatch_core_idle(uint8_t core)
         return;   /* just went quiet — nothing to judge yet */
     }
 
-    /* Already marked idle: this is a wake-up (a timer tick, or simply the next
-     * turn round the idle loop), the natural moment to look without a timer of
-     * our own. */
+    /* Already marked idle: this is a wake-up (the look owed, which an idle App
+     * Core's one-shot is armed for, anything else that came to the core, or
+     * simply the next turn round the idle loop), the natural moment to look. */
     uint64_t now = pit_get_uptime_ms();
 
     /* No clock, no look. This is the HPET main counter where there is one,

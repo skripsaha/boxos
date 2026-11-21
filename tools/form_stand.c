@@ -191,7 +191,7 @@ void StandMetadataRelease(FileMetadata *metadata)
 static const char *g_luggage_bytes;
 static uint32_t    g_luggage_length;
 
-Luggage luggage(void)
+Luggage luggage_carried(void)
 {
     Luggage l = { g_luggage_bytes, g_luggage_length };
     return l;

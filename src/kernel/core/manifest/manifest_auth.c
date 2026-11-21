@@ -5,14 +5,12 @@
 #include "manifest_auth.h"
 #include "process.h"
 
-bool ManifestOpAuthorize(uint32_t op_kind, const OpContext *ctx)
+bool ManifestOpAuthorize(const OpRegistration *reg, const OpContext *ctx)
 {
     /* Kernel-internal manifests (selftest, init paths) bypass auth — they
      * never carry a process. (Guard the cabin too so the auth_bits read below
      * is never reached with a half-built context.) */
     if (!ctx || !ctx->proc || !ctx->proc->cabin) return true;
-
-    const OpRegistration *reg = OpRegistryLookup(op_kind);
     if (!reg) return false;
 
     /* Authority is the cabin's FIXED auth_bits (auth_tags.h), independent of

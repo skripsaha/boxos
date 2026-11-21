@@ -63,7 +63,7 @@ static error_t dispatch_op(const OpRegistration *reg,
     /* Tag-based authorization: deny if the calling process lacks the auth
      * level the op was registered with. Kernel-internal manifests (proc==NULL)
      * always pass. */
-    if (!ManifestOpAuthorize(op->op_kind, ctx)) {
+    if (!ManifestOpAuthorize(reg, ctx)) {
         return ERR_ACCESS_DENIED;
     }
 
@@ -226,7 +226,7 @@ error_t ManifestExecuteOnce(const void              *manifest_kp,
             continue;
         }
 
-        if (!ManifestOpAuthorize(op->op_kind, ctx)) {
+        if (!ManifestOpAuthorize(reg, ctx)) {
             if (first_error == OK) {
                 first_error           = ERR_ACCESS_DENIED;
                 result.error_code     = (uint32_t)first_error;

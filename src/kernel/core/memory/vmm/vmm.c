@@ -5823,9 +5823,10 @@ uintptr_t vmm_virt_to_phys_huge_2m(vmm_context_t *ctx, uintptr_t virt_addr)
  * page through a porthole of its own. The frames behind a contiguous user range
  * need not be neighbours, and a porthole holds its core for a page of work and
  * no more, so a copy of any length keeps a cabin's pages waiting on it for a
- * page at most (see Porthole). Exactly one of `kdst` and `ksrc` is given: kdst
- * for a copy out of the cabin, ksrc for a copy into it — which needs R/W on
- * every leaf it writes (vmm_user_window).
+ * page at most (see Porthole). Exactly one of `kdst`, `ksrc` and `fill` is
+ * given: kdst for a copy out of the cabin, ksrc for a copy into it, fill for
+ * every byte of the range set to *fill — the two that write need R/W on every
+ * leaf they write (vmm_user_window).
  *
  * Where a page is not there, the page the cabin's own first touch would bring
  * in is brought in (VmmFirstTouch) and looked at once more. A program's buffer
@@ -5846,9 +5847,9 @@ uintptr_t vmm_virt_to_phys_huge_2m(vmm_context_t *ctx, uintptr_t virt_addr)
  * which it never will.
  */
 static error_t VmmPortholeCopy(vmm_context_t *ctx, uintptr_t user_vaddr, size_t size,
-                               void *kdst, const void *ksrc)
+                               void *kdst, const void *ksrc, const uint8_t *fill)
 {
-    bool to_cabin = (ksrc != NULL);
+    bool to_cabin = (ksrc != NULL || fill != NULL);
     size_t done = 0;
     while (done < size)
     {
@@ -5871,7 +5872,9 @@ static error_t VmmPortholeCopy(vmm_context_t *ctx, uintptr_t user_vaddr, size_t 
                 return ERR_INVALID_ADDRESS;
         }
 
-        if (to_cabin)
+        if (fill)
+            memset(window, *fill, chunk);
+        else if (to_cabin)
             memcpy(window, (const uint8_t *)ksrc + done, chunk);
         else
             memcpy((uint8_t *)kdst + done, window, chunk);
@@ -5901,7 +5904,7 @@ error_t vmm_user_buf_in_into(vmm_context_t *ctx, uintptr_t user_vaddr,
                               size_t size, void *kbuf)
 {
     if (!ctx || !kbuf || size == 0) return ERR_INVALID_ARGUMENT;
-    return VmmPortholeCopy(ctx, user_vaddr, size, kbuf, NULL);
+    return VmmPortholeCopy(ctx, user_vaddr, size, kbuf, NULL, NULL);
 }
 
 void *vmm_user_buf_in(vmm_context_t *ctx, uintptr_t user_vaddr, size_t size)
@@ -5930,7 +5933,14 @@ error_t vmm_user_buf_commit_out(vmm_context_t *ctx, uintptr_t user_vaddr,
                                  const void *kbuf, size_t size)
 {
     if (!ctx || !kbuf || size == 0) return ERR_INVALID_ARGUMENT;
-    return VmmPortholeCopy(ctx, user_vaddr, size, NULL, kbuf);
+    return VmmPortholeCopy(ctx, user_vaddr, size, NULL, kbuf, NULL);
+}
+
+error_t vmm_user_buf_fill_out(vmm_context_t *ctx, uintptr_t user_vaddr,
+                               uint8_t byte, size_t size)
+{
+    if (!ctx || size == 0) return ERR_INVALID_ARGUMENT;
+    return VmmPortholeCopy(ctx, user_vaddr, size, NULL, NULL, &byte);
 }
 
 void vmm_user_buf_free(void *kbuf)

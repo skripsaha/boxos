@@ -534,15 +534,22 @@ static void msd_give_back(XhciMsdUnit* u)
  * Armed when such a job takes the turn and disarmed when it gives it back, so
  * the window watched is exactly the window in which the device owes an answer.
  */
+/* The watches armed on every unit, counted as each turns from none to a job
+ * and back — so the watchdog, asked on every turn of a K-Core's loop, says no
+ * without its lock while no job is watched, which is nearly always. */
+static volatile uint32_t g_msd_watches_armed;
+
 static void msd_watch_arm(XhciMsdUnit* u, struct MsdJob* j)
 {
     __atomic_store_n(&u->watched_since, rdtsc(), __ATOMIC_RELAXED);
-    __atomic_store_n(&u->watched, j, __ATOMIC_RELEASE);
+    if (!__atomic_exchange_n(&u->watched, j, __ATOMIC_ACQ_REL))
+        __atomic_add_fetch(&g_msd_watches_armed, 1u, __ATOMIC_RELEASE);
 }
 
 static void msd_watch_disarm(XhciMsdUnit* u)
 {
-    __atomic_store_n(&u->watched, NULL, __ATOMIC_RELEASE);
+    if (__atomic_exchange_n(&u->watched, NULL, __ATOMIC_ACQ_REL))
+        __atomic_sub_fetch(&g_msd_watches_armed, 1u, __ATOMIC_RELEASE);
 }
 
 static void msd_async_begin(XhciMsdUnit* u, RoadsteadBerth* b);
@@ -2103,6 +2110,12 @@ void xhci_msd_watchdog(void)
     if (!g_units_lock_ready) {
         return;
     }
+    /* No job watched: nothing to give up on. A watch armed a moment after
+     * this look is looked at on the next turn — its patience is
+     * milliseconds. */
+    if (__atomic_load_n(&g_msd_watches_armed, __ATOMIC_ACQUIRE) == 0) {
+        return;
+    }
 
     /*
      * The list is walked under its lock and the giving-up is done outside it:
@@ -2143,10 +2156,14 @@ void xhci_msd_watchdog(void)
             continue;
         }
         /* Claimed here, so a second pass on another core cannot give up on the
-         * same job twice. */
-        if (__atomic_exchange_n(&u->watched, NULL, __ATOMIC_ACQ_REL) != j) {
+         * same job twice — and only if it is still this job: an exchange used
+         * to take down the watch of a job that had taken the turn since. */
+        MsdJob* expected = j;
+        if (!__atomic_compare_exchange_n(&u->watched, &expected, NULL, false,
+                                         __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
             continue;
         }
+        __atomic_sub_fetch(&g_msd_watches_armed, 1u, __ATOMIC_RELEASE);
         late_job  = j;
         late_unit = u;
         gone      = !here;

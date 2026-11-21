@@ -186,6 +186,12 @@ typedef struct process_t
      * what made std::clock() indistinguishable from wall time. Zero means "not
      * currently holding the core". */
     uint64_t cpu_tsc_stamp;
+    /* How long this strand holds a core each time it has one, in TSC cycles:
+     * a mean of its holds, the latest weighing a quarter, taken as each ends
+     * (scheduler.c). One that holds a least turn or more is worth a core of
+     * its own when it wakes and its home is working; a short one takes its
+     * turn at home. */
+    uint64_t hold_mean;
     /* The Fare: the time this strand has held a core, in TSC cycles, on the
      * scale of one core's Waterline — fare_core's, -1 until it is first
      * placed. A strand whose cabin wears the Use Context pays a third of it
@@ -239,6 +245,12 @@ typedef struct process_t
     bool started;
     uint8_t home_core;              // App Core index for scheduling (RunQueue lives here)
     volatile uint8_t kcore_pending; // 1 = already in a K-Core queue, 0 = free (atomic CAS)
+#ifdef CONFIG_MEASURE
+    /* When this strand's call came to the gate and when it was taken to be
+     * served, TSC — the stopwatch its answer carries (kring.h). */
+    uint64_t call_gate;
+    uint64_t call_taken;
+#endif
 
     volatile wait_reason_t wait_reason;
     uint64_t wait_start_time; // TSC timestamp when waiting (0 = not waiting)
