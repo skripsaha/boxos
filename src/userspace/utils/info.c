@@ -40,6 +40,23 @@ static void print_tags(const char *tags) {
     }
 }
 
+/* Who made the file: the program's file, by its name while that file is on the
+ * volume, and an honest word when it is not (a file id is never given twice).
+ * Nothing for a file no program of the volume made. */
+static void print_maker(file_id_t maker) {
+    if (maker == 0) return;
+    FileMetadata program;
+    if (FileMetadataRead(maker, &program) != 0) {
+        println("  Made by a program that is no longer on the volume");
+        return;
+    }
+    if (program.KeptUntil != 0)
+        println("  Made by a program that is no longer on the volume");
+    else
+        printf("  Made by the program %s\n", program.Filename);
+    FileMetadataRelease(&program);
+}
+
 /* What a program made here was made from, by which tool and in which Use
  * Context, and how each of those files stands now. Nothing for a file that
  * carries no Recipe. */
@@ -95,7 +112,9 @@ int main(void) {
     printf("  Filename: %s\n", metadata.Filename);
     printf("  Size: %u bytes\n", (unsigned)metadata.Size);
     print_tags(metadata.Tags);
+    const file_id_t maker = metadata.MadeBy;
     FileMetadataRelease(&metadata);
+    print_maker(maker);
     print_recipe(file[0]);
 
     souvenir_things(file, 1);
