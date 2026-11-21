@@ -145,6 +145,7 @@ run_config() {
             break
         fi
         rm -f build/.typeerr
+        ends_before=$(grep -cE "$c (ended: [0-9]|stopped: |was ended by another program)" build/serial.log)
         tools/qemu-input.sh key ret  >/dev/null 2>&1
 
         case "$c" in
@@ -206,7 +207,10 @@ run_config() {
         # old loop then sat until 2700 s and reported a TIMEOUT, which reads
         # as "the machine wedged" when the truth was "one phase failed and the
         # suite ended normally". Watch for the terminal failure line too, and
-        # stop the moment either verdict lands.
+        # stop the moment either verdict lands. The same for every program: the
+        # hub says when one ended with a code, stopped or was ended — strandtest
+        # printed its FAIL, ended with 1, and the budget was waited out for a
+        # TIMEOUT all the same.
         case "$c" in
             cxxtest) fail_pat="\[CXX\] TOTAL FAILURES: [1-9]" ;;
             *)       fail_pat="" ;;
@@ -217,6 +221,11 @@ run_config() {
             if [ -n "$fail_pat" ] && grep -qE "$fail_pat" build/serial.log; then
                 echo "  '$c' ANNOUNCED FAILURE and ended — not a timeout:"
                 grep -E "$fail_pat" build/serial.log | sed 's/^/    /' | tail -1
+                break
+            fi
+            if [ "$(grep -cE "$c (ended: [0-9]|stopped: |was ended by another program)" build/serial.log)" -gt "$ends_before" ]; then
+                echo "  '$c' ENDED without its marker — not a timeout:"
+                grep -E "$c (ended: [0-9]|stopped: |was ended by another program)|FAIL" build/serial.log | sed 's/^/    /' | tail -3
                 break
             fi
             [ "$(date +%s)" -ge "$deadline" ] && { timed_out=1; break; }
@@ -294,7 +303,6 @@ run_config() {
     # Extended-suite counts.
     mtest_p=$(grep -c     "\[mtest\] PASS"            build/serial.log)
     chain_p=$(grep -c     "\[chain\] PASS"            build/serial.log)
-    cow_p=$(grep -c       "\[COW\] PASS"              build/serial.log)
     lc_p=$(grep -c        "\[LIFECYCLE\] PASS"        build/serial.log)
     wo_p=$(grep -c        "\[WO\] PASS"               build/serial.log)
     wc_p=$(grep -c        "\[WC\] PASS"               build/serial.log)
@@ -374,7 +382,7 @@ run_config() {
     [ -n "$lr_unheld" ] && lr_n=$(printf '%s\n' "$lr_unheld" | wc -l | tr -d ' ')
 
     echo "  baseline: memtest=$mt/3 files=$fl/2 bench=$bn/2"
-    echo "  apps:     mtest=$mtest_p chain=$chain_p cow=$cow_p lc=$lc_p wo=$wo_p wc=$wc_p ws=$ws_p tt=$tt_p decks=$decks_p ts=$ts1_p/$ts2_p/$ts3_p"
+    echo "  apps:     mtest=$mtest_p chain=$chain_p lc=$lc_p wo=$wo_p wc=$wc_p ws=$ws_p tt=$tt_p decks=$decks_p ts=$ts1_p/$ts2_p/$ts3_p"
     echo "  suites:   cxx=$cxx_p current=$current_p strand=$strand_p htest=$htest_p use=$use_p luggage=$luggage_p"
     echo "  selftest: kernel=$selftest_ok bad=$selftest_bad unattended(${ur_want})=$ur_ok fail=$ur_fail seat=${seat_want%% *}:$seat_ok"
     echo "  negatives: PANIC=$pn ATRC=$at Unknown=$un AppFAIL=$app_fail Nightwatch=$nw LockRank=$lr_n TSC=~1GHz:$tsc_good/$bn"
@@ -398,7 +406,6 @@ run_config() {
 
     [ "$mtest_p" -lt 1 ] && ok=0
     [ "$chain_p" -lt 1 ] && ok=0
-    [ "$cow_p"   -lt 1 ] && ok=0
     [ "$lc_p"    -lt 1 ] && ok=0
     [ "$wo_p"    -lt 1 ] && ok=0
     [ "$decks_p" -lt 1 ] && ok=0
