@@ -347,12 +347,14 @@ static int b_least_call(uint32_t i, void *ctx)
 static void print_kv_u64(const char *label, uint64_t v, const char *unit);
 
 #define STAGES 4
-static uint64_t s_stage[STAGES][BENCH_MAX_SAMPLES];
+#define PARTS  4
+static uint64_t s_stage[STAGES + PARTS][BENCH_MAX_SAMPLES];
 
 static void bench_call_stages(const char *title, uint32_t n, uint32_t rest_us)
 {
-    static const char *const names[STAGES] = {
+    static const char *const names[STAGES + PARTS] = {
         "  made, at the gate", "  gate to taken", "  served", "  answered to caller",
+        "    served: crates in", "    served: ops", "    served: crates out", "    served: to the answer",
     };
     volatile ResultRingHeader *h = &result_ring()->hdr;
     const uint64_t khz = cpu_get_tsc_freq_khz();
@@ -364,7 +366,7 @@ static void bench_call_stages(const char *title, uint32_t n, uint32_t rest_us)
     if (h->call_answered == 0)
         return;
 
-    uint32_t got = 0, out_of_order = 0;
+    uint32_t got = 0, out_of_order = 0, parted = 0;
     for (uint32_t i = 0; i < n; i++)
     {
         if (rest_us)
@@ -386,12 +388,18 @@ static void bench_call_stages(const char *title, uint32_t n, uint32_t rest_us)
         s_stage[2][got] = answered - taken;
         s_stage[3][got] = seen - answered;
         got++;
+        if (h->call_part[0] | h->call_part[1] | h->call_part[2] | h->call_part[3])
+        {
+            for (uint32_t k = 0; k < PARTS; k++)
+                s_stage[STAGES + k][parted] = h->call_part[k];
+            parted++;
+        }
     }
     println(title);
-    for (uint32_t k = 0; k < STAGES; k++)
+    for (uint32_t k = 0; k < STAGES + PARTS; k++)
     {
         bench_stats_t st = {0};
-        compute_stats(s_stage[k], got, &st);
+        compute_stats(s_stage[k], k < STAGES ? got : parted, &st);
         print_row(names[k], &st);
     }
     if (out_of_order)

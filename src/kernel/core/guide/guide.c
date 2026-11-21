@@ -234,6 +234,7 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
             return;
         }
     }
+    KCallMark(proc, KCALL_STAGED);
 
     bool async_owns_crates = false;
 
@@ -256,6 +257,7 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
                                   &ctx, &result);
     }
     pocket->error_code = (uint32_t)rc;
+    KCallMark(proc, KCALL_EXECUTED);
 
 
     if (rc != OK && proc->pid >= 3) {
@@ -328,6 +330,7 @@ static void guide_process_manifest_pocket(Pocket *pocket, process_t *proc)
         crate_stage_commit_and_release(crates_kp, crate_count,
                                         proc->cabin->vmm, crates_uaddr);
     }
+    KCallMark(proc, KCALL_COMMITTED);
 
     /* Release scratch + handle pin (both no-ops if respective mode was
      * inactive) BEFORE the sync Result push to maximize K-Core throughput. */

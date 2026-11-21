@@ -185,13 +185,27 @@ void KCallTaken(process_t *proc)
 
 /* Before the push: the slot's release store publishes the answer, and the
  * stopwatch with it. */
+void KCallMark(process_t *proc, uint32_t which)
+{
+    if (proc && which < 3u) proc->call_mark[which] = rdtsc();
+}
+
 void KCallAnswered(process_t *proc)
 {
     ResultRing *rr = kring_result_hdr(proc);
     if (!rr) return;
+    const uint64_t answered = rdtsc();
+    const uint64_t at[5] = { proc->call_taken, proc->call_mark[KCALL_STAGED],
+                             proc->call_mark[KCALL_EXECUTED], proc->call_mark[KCALL_COMMITTED],
+                             answered };
+    bool in_order = true;
+    for (uint32_t k = 0; k < 4u; k++)
+        in_order = in_order && at[k] <= at[k + 1] && at[k + 1] - at[k] <= UINT32_MAX;
+    for (uint32_t k = 0; k < 4u; k++)
+        rr->hdr.call_part[k] = in_order ? (uint32_t)(at[k + 1] - at[k]) : 0u;
     rr->hdr.call_gate     = proc->call_gate;
     rr->hdr.call_taken    = proc->call_taken;
-    rr->hdr.call_answered = rdtsc();
+    rr->hdr.call_answered = answered;
 }
 
 void KCallYieldWentTo(process_t *proc, process_t *to)

@@ -123,7 +123,12 @@ typedef struct __packed {
      * the PID of the one it went to last (UINT32_MAX the idle strand). */
     volatile uint32_t yields_given_away;
     volatile uint32_t yield_went_to;
-    uint8_t           _pad_line2[32];   /* fill cacheline 2                */
+    /* What the K-Core spent serving that answer, in TSC cycles: taken to its
+     * crates staged in, its ops, its crates written back, and on to the
+     * answer — each 0 where its marks are not in order (a pocket refused
+     * before its crates were staged). */
+    volatile uint32_t call_part[4];
+    uint8_t           _pad_line2[16];   /* fill cacheline 2                */
 } ResultRingHeader;
 
 _Static_assert(sizeof(ResultRingHeader) == 192,

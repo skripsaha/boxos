@@ -101,7 +101,10 @@ typedef struct PACKED {
      * one it went to last (UINT32_MAX the idle strand). */
     volatile uint32_t yields_given_away;
     volatile uint32_t yield_went_to;
-    uint8_t           _pad_line2[32];   /* fill cacheline 2 */
+    /* What the K-Core spent serving that answer, TSC cycles: crates staged
+     * in, ops, crates written back, on to the answer (0 where unknown). */
+    volatile uint32_t call_part[4];
+    uint8_t           _pad_line2[16];   /* fill cacheline 2 */
 } ResultRingHeader;
 
 STATIC_ASSERT(sizeof(ResultRingHeader) == 192,

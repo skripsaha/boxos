@@ -250,6 +250,7 @@ typedef struct process_t
      * served, TSC — the stopwatch its answer carries (kring.h). */
     uint64_t call_gate;
     uint64_t call_taken;
+    uint64_t call_mark[3];   /* staged, executed, committed (KCallMark) */
 #endif
 
     volatile wait_reason_t wait_reason;

@@ -47,6 +47,10 @@ bool KResultPush(process_t *target, const Result *r);
  * kernel. */
 void KPocketRingInHand(process_t *proc, bool in_hand);
 
+#define KCALL_STAGED     0u   /* the call's crates staged in */
+#define KCALL_EXECUTED   1u   /* its ops run */
+#define KCALL_COMMITTED  2u   /* its crates written back */
+
 /* The stopwatch (make MEASURE=on; nothing at all in any other build): the
  * moment `proc`'s call came to the gate (KCallGate), the moment it was taken
  * to be served — by a K-Core, or on one core by the gate itself (KCallTaken)
@@ -60,11 +64,14 @@ void KCallAnswered(process_t *proc);
 /* `proc` gave its core away and `to` took it: counted on proc's stopwatch
  * line, with who took it. */
 void KCallYieldWentTo(process_t *proc, process_t *to);
+/* The moment the Guide reached a part of serving `proc`'s call. */
+void KCallMark(process_t *proc, uint32_t which);
 #else
 static inline void KCallGate(process_t *proc)     { (void)proc; }
 static inline void KCallTaken(process_t *proc)    { (void)proc; }
 static inline void KCallAnswered(process_t *proc) { (void)proc; }
 static inline void KCallYieldWentTo(process_t *proc, process_t *to) { (void)proc; (void)to; }
+static inline void KCallMark(process_t *proc, uint32_t which) { (void)proc; (void)which; }
 #endif
 
 /* Push, or take the answer as a DEBT — the entry point for a message whose
