@@ -102,6 +102,11 @@ void StandSettleTurn(void);
  * left behind — when either step did not answer in full. */
 bool StandMakeFile(const char* name, const void* data, uint32_t bytes, uint64_t* out_file_id);
 
+/* Whether the file's record says it was made by the program whose file is
+ * `made_by` — 0: by none — the field and TAGFS_FILE_MADE_BY agreeing, as a
+ * record always holds them. False too for a file the volume does not have. */
+bool StandMadeByIs(uint64_t file_id, uint64_t made_by);
+
 /* The file kept in `role` (TAGFS_FILE_ROLE_*; TAGFS_FILE_ROLE_ORDINARY lets it
  * go), as the image builder keeps a file — the stand's own way, since no call
  * a program makes puts a role on a file (helm/engross.h, EngrossRoled: the
