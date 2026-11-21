@@ -43,7 +43,7 @@ static StandBinder s_dedup_binder;
 static bool StandDedupFile(StandFreshModel* m, const char* name, uint32_t blocks, uint64_t stream, uint64_t* fid)
 {
     m->size = 0;
-    return tagfs_create_file(name, NULL, 0, fid) == 0 &&
+    return tagfs_create_file(name, NULL, 0, 0, fid) == 0 &&
            StandFreshWrite(m, *fid, 0, blocks * TAGFS_BLOCK_SIZE, stream) == (int)(blocks * TAGFS_BLOCK_SIZE);
 }
 

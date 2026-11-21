@@ -21,6 +21,7 @@ typedef struct {
     char filename[32];
     tag_t tags[5];
     uint64_t deleted_until;   // the wall clock's nanoseconds a deleted file is kept until; 0 for one that is not
+    file_id_t made_by;        // the file of the program that made this file; 0 for none (it may be gone since)
 } file_info_t;
 
 /* Full metadata for tools that must preserve a file exactly.  file_info_t is
@@ -37,6 +38,7 @@ typedef struct {
     char     *Filename;
     char     *Tags;
     uint64_t  KeptUntil;      /* the wall clock's nanoseconds a deleted file is kept until; 0 for one that is not */
+    file_id_t MadeBy;         /* the file of the program that made this file; 0 for none (it may be gone since) */
 } FileMetadata;
 
 /* Read the complete self-describing metadata record.  The response buffer is

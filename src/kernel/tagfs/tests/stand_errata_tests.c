@@ -298,7 +298,7 @@ static TestResult TestStandErrataBornUndone(void)
                 "its stitch carries the Undone of the Born, first");
     RibbonUnitLetGo(u);
     u = NULL;
-    TEST_ASSERT_EQ(tagfs_create_file("errata-after.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("errata-after.bin", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT(fid > w.fid + 1u, "with an id past the one burned: an id is never given twice");
 out:
     RibbonUnitLetGo(u);

@@ -115,9 +115,9 @@ static bool StandTipInParcel(uint64_t fid, uint32_t which, uint64_t* from, uint6
  * as boxlib waits it out; the answer after that cycle is the answer. */
 static int StandTipInCreate(const char* name, uint64_t* fid)
 {
-    int rc = tagfs_create_file(name, NULL, 0, fid);
+    int rc = tagfs_create_file(name, NULL, 0, 0, fid);
     if (rc == -(int)ERR_WOULD_BLOCK && TagFSSettle() == OK)
-        rc = tagfs_create_file(name, NULL, 0, fid);
+        rc = tagfs_create_file(name, NULL, 0, 0, fid);
     return rc;
 }
 
@@ -153,7 +153,7 @@ static TestResult TestStandTipInParcel(void)
         return test_steps_aside(aside);
     TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
     TEST_ASSERT(StandFreshModelMake(&m, 2u * STAND_TIP_IN_STRIDED * TAGFS_BLOCK_SIZE), "room for the file");
-    TEST_ASSERT_EQ(tagfs_create_file("tipin-parcels.bin", NULL, 0, &fid), 0, "a file is made first");
+    TEST_ASSERT_EQ(tagfs_create_file("tipin-parcels.bin", NULL, 0, 0, &fid), 0, "a file is made first");
     TEST_ASSERT_OK(StandFreshSpan(&m, fid, 2u * STAND_TIP_IN_STRIDED * TAGFS_BLOCK_SIZE), "spanned over a hole");
     for (uint64_t k = 0; k < STAND_TIP_IN_STRIDED; k++)
         TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 2u * k * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 70u + k),
@@ -243,7 +243,7 @@ static TestResult TestStandTipInParcelsAsTheyLie(void)
         return test_steps_aside(aside);
     TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
     TEST_ASSERT(StandFreshModelMake(&m, 2u * STAND_TIP_IN_STRIDED * TAGFS_BLOCK_SIZE), "room for the file");
-    TEST_ASSERT_EQ(tagfs_create_file("tipin-cut.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("tipin-cut.bin", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT_OK(StandFreshSpan(&m, fid, 2u * STAND_TIP_IN_STRIDED * TAGFS_BLOCK_SIZE), "spanned over a hole");
     for (uint64_t k = 0; k < STAND_TIP_IN_STRIDED; k++)
         TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 2u * k * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 70u + k),
@@ -364,7 +364,7 @@ static TestResult TestStandTipInHealsDigests(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
-    TEST_ASSERT_EQ(tagfs_create_file("tipin-digest.bin", NULL, 0, &fid), 0, "a file for data is made");
+    TEST_ASSERT_EQ(tagfs_create_file("tipin-digest.bin", NULL, 0, 0, &fid), 0, "a file for data is made");
     TEST_ASSERT(StandFreshModelMake(&m, 4u * TAGFS_BLOCK_SIZE) &&
                 StandFreshWrite(&m, fid, 0, 3u * TAGFS_BLOCK_SIZE, 61) == 3 * TAGFS_BLOCK_SIZE, "and written");
     TEST_ASSERT_OK(TagFSSettle(), "settled");
@@ -465,12 +465,12 @@ static TestResult TestStandTipInEmptied(void)
     TEST_ASSERT(held0 != UINT64_MAX, "the slots' ground counted");
     for (uint32_t i = 0; i < STAND_TIP_IN_FILLED; i++) {
         ksnprintf(name, sizeof(name), "tipin-fill-%05u.n", i);
-        TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, &fid), 0, "a file is made");
+        TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, 0, &fid), 0, "a file is made");
         first = first ? first : fid;
         if (i % 1000u == 999u)
             TEST_ASSERT_OK(TagFSSettle(), "the files settle a batch at a time");
     }
-    TEST_ASSERT_EQ(tagfs_create_file("tipin-fill.bin", NULL, 0, &data), 0, "a file for data is made");
+    TEST_ASSERT_EQ(tagfs_create_file("tipin-fill.bin", NULL, 0, 0, &data), 0, "a file for data is made");
     TEST_ASSERT(StandFreshModelMake(&m, STAND_TIP_IN_FILL_MB * 1024u * 1024u), "room for its bytes");
     for (uint32_t k = 0; k < STAND_TIP_IN_FILL_MB * 256u; k += 64u)
         TEST_ASSERT_EQ(StandFreshWrite(&m, data, (uint64_t)k * TAGFS_BLOCK_SIZE, 64u * TAGFS_BLOCK_SIZE, 300u + k),
@@ -598,7 +598,7 @@ static TestResult TestStandTipInQuiresHeld(void)
     q = RibbonCursorNow()->quire_blocks ? RibbonCursorNow()->quire_blocks : 1u;
     for (uint32_t k = 0; k <= g_binder.ring; k++) {
         ksnprintf(name, sizeof(name), "tipin-quire-tail-%u.txt", k);
-        TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, &fid), 0, "a file more is made at the tail");
+        TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, 0, &fid), 0, "a file more is made at the tail");
         TEST_ASSERT(TagFSSettle() == OK && BinderRunWhole() == OK, "a Tally laid in over it");
     }
     StandTipInNamedAll(&named, seq, q);
@@ -736,7 +736,7 @@ static TestResult TestStandTipInRottenPast(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
-    TEST_ASSERT_EQ(tagfs_create_file("tipin-rot-data.bin", NULL, 0, &fid), 0, "a file for data is made");
+    TEST_ASSERT_EQ(tagfs_create_file("tipin-rot-data.bin", NULL, 0, 0, &fid), 0, "a file for data is made");
     TEST_ASSERT(StandFreshModelMake(&data, (uint64_t)STAND_TIP_IN_DATA_MB << 20) &&
                 StandFreshWrite(&data, fid, 0, STAND_TIP_IN_DATA_MB << 20, 71) == (int)(STAND_TIP_IN_DATA_MB << 20),
                 "and written: DIGESTS takes leaves");
@@ -749,7 +749,7 @@ static TestResult TestStandTipInRottenPast(void)
     TEST_ASSERT(StandBinderWrite(&b, last.ptr.block[0], g_test_output) &&
                 StandBinderWrite(&b, last.ptr.block[1], g_test_output), "both its copies written over with zeros");
     TEST_ASSERT(StandStitchRemount(), "the volume mounts again: the leaf rots when a read reaches it");
-    TEST_ASSERT_EQ(tagfs_create_file("tipin-rot-past.bin", NULL, 0, &pfid), 0, "a file is made after");
+    TEST_ASSERT_EQ(tagfs_create_file("tipin-rot-past.bin", NULL, 0, 0, &pfid), 0, "a file is made after");
     TEST_ASSERT(StandFreshModelMake(&past, (uint64_t)STAND_TIP_IN_PAST_MOST * TAGFS_BLOCK_SIZE), "its model");
     TEST_ASSERT(StandTipInHoldBelow(&held, last.lo.k1 + 1u, STAND_TIP_IN_PAST_MOST),
                 "the free ground up to the rotten leaf's first key held while it is written");

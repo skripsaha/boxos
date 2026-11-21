@@ -332,7 +332,7 @@ static TestResult TestStandCreateRefusesWhatItCannotTag(void)
 
     memset(s_text, 'n', STAND_VALUE_BYTES);
     memcpy(s_text + STAND_VALUE_BYTES, ".txt", 5);
-    int made = tagfs_create_file(s_text, NULL, 0, &file_id);
+    int made = tagfs_create_file(s_text, NULL, 0, 0, &file_id);
 
     uint8_t params[33] = { 0 };
     memcpy(params, "stand_spell_c", 13);

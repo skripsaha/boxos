@@ -8046,7 +8046,7 @@ STAND_HELD="
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
 # suite in tests.h TEST_SUITES — the plain build's 44 (healthy says how) and
-# the 323 of the stand's own forty-five suites: stand 25, stand_lock 1,
+# the 327 of the stand's own forty-six suites: stand 25, stand_lock 1,
 # stand_spelling 6, stand_roadstead 4, stand_plot 3, stand_index 6,
 # stand_helm 6, stand_port 1, stand_use 2, stand_settle 9, stand_read 6,
 # stand_run 4, stand_medium 13, stand_warrant 7, stand_room 1, frame 2,
@@ -8056,12 +8056,13 @@ STAND_HELD="
 # stand_endpaper 6, stand_book_room 13, stand_errata 8, stand_keep 5,
 # stand_toll 4, stand_dog_ear 9, stand_slip 14, stand_away 15,
 # stand_tip_in 10, stand_slip_promise 5, stand_book_glean 2, stand_escheat 7,
-# stand_parity 2, stand_commonhold 1, stand_conjugate 5, stand_dedup 6.
+# stand_parity 2, stand_commonhold 1, stand_conjugate 5, stand_dedup 6,
+# stand_made_by 4.
 # Counted off the code, not a run (K9): a suite that drops out of the walk is
 # a test that stopped covering anything, and the count is where that shows.
 # How many of them pass and how many stand down is the road's — said, not
 # pinned.
-STAND_RUN=367
+STAND_RUN=371
 
 # What a VOLUME_TESTS kernel says of a record that names a run of no blocks
 # (file_record.c, FileRecordBuild), and of a Tract about to stand taller than
@@ -8407,7 +8408,7 @@ stand_leak_on() {
 p = "src/kernel/tagfs/tests/core_tests.c"
 s = open(p).read()
 inc = "#include \"../tagfs.h\"\n"
-a = "    uint32_t   tag_ids[2] = {1, 2};\n\n    TEST_ASSERT_EQ(tagfs_create_file(\"test_file\", tag_ids, 2, &file_id), 0,\n"
+a = "    uint32_t   tag_ids[2] = {1, 2};\n\n    TEST_ASSERT_EQ(tagfs_create_file(\"test_file\", tag_ids, 2, 0, &file_id), 0,\n"
 assert s.count(inc) == 1 and s.count(a) == 1, "stand leak anchor missing"
 s = s.replace(inc, inc +
     "#include \"../block_map/block_map.h\"   /* logcheck mutation */\n"
@@ -8420,7 +8421,7 @@ open(p, "w").write(s.replace(a,
     "\n"
     "    TEST_ASSERT_EQ(AllotmentTakeBookRun(1ull << 62, 1, 0, EndpaperDataKeeps(false), &leaked), 0,\n"
     "                   \"a block is taken\");\n"
-    "    TEST_ASSERT_EQ(tagfs_create_file(\"test_file\", tag_ids, 2, &file_id), 0,\n", 1))
+    "    TEST_ASSERT_EQ(tagfs_create_file(\"test_file\", tag_ids, 2, 0, &file_id), 0,\n", 1))
 EOF
     mut_done src/kernel/tagfs/tests/core_tests.c "logcheck mutation" 3
 }

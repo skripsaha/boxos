@@ -53,7 +53,7 @@ bool StandMakeFile(const char* name, const void* data, uint32_t bytes, uint64_t*
     uint64_t file_id = 0;
 
     *out_file_id = 0;
-    if (tagfs_create_file(name, NULL, 0, &file_id) != 0)
+    if (tagfs_create_file(name, NULL, 0, 0, &file_id) != 0)
         return false;
     if (bytes > 0 && TestFileWrite(file_id, data, bytes) != (int)bytes) {
         tagfs_delete_file(file_id, INK_UNWARRANTED);
@@ -61,6 +61,16 @@ bool StandMakeFile(const char* name, const void* data, uint32_t bytes, uint64_t*
     }
     *out_file_id = file_id;
     return true;
+}
+
+bool StandMadeByIs(uint64_t file_id, uint64_t made_by)
+{
+    TagFSMetadata md;
+    if (tagfs_get_metadata(file_id, &md) != 0)
+        return false;
+    bool is = md.made_by == made_by && ((md.flags & TAGFS_FILE_MADE_BY) != 0) == (made_by != 0);
+    tagfs_metadata_free(&md);
+    return is;
 }
 
 error_t StandKeepInRole(uint64_t file_id, uint32_t role)

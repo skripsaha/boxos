@@ -32,6 +32,7 @@
 // ============================================================================
 
 #define STAND_ESCHEAT_ROOM      (4u * TAGFS_BLOCK_SIZE)
+#define STAND_ESCHEAT_MADE_BY   5150u    /* the program the tail's file is made by: the cut leaves it */
 #define STAND_ESCHEAT_BOUND_MS  10000u   /* a hang's guard: the act's walk is one turn of the service */
 
 static StandBinder s_escheat_binder;
@@ -145,7 +146,7 @@ static TestResult StandEscheatTailWaits(StandBinder* b, StandFreshModel* m, uint
     error_t     rc = OK;
 
     TEST_ASSERT(StandFreshModelMake(m, STAND_ESCHEAT_ROOM), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("escheat-tail.bin", NULL, 0, fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("escheat-tail.bin", NULL, 0, STAND_ESCHEAT_MADE_BY, fid), 0, "a file is made");
     TEST_ASSERT_EQ(StandFreshWrite(m, *fid, 0, TAGFS_BLOCK_SIZE + 100u, 0x6e00u), TAGFS_BLOCK_SIZE + 100,
                    "a block and 100 bytes are written to it");
     TEST_ASSERT_OK(TagFSSettle(), "settled");
@@ -195,8 +196,10 @@ static TestResult TestStandEscheatTail(void)
     StandBlockFailRaced("stand_escheat");
     m.size = TAGFS_BLOCK_SIZE;
     TEST_ASSERT(StandFreshHolds(&m, fid), "and reads the block before the tail");
+    TEST_ASSERT(StandMadeByIs(fid, STAND_ESCHEAT_MADE_BY), "the cut left the program that made the file");
     TEST_ASSERT(StandStitchRemount() && StandEscheatSize(fid) == TAGFS_BLOCK_SIZE && StandFreshHolds(&m, fid),
                 "mounted again, the same");
+    TEST_ASSERT(StandMadeByIs(fid, STAND_ESCHEAT_MADE_BY), "and made by the same program");
 out:
     BlockFailDisarm();
     StandFreshModelLetGo(&m);

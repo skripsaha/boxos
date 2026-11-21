@@ -84,11 +84,13 @@ def _Digests(digests):
     return b"".join(d.to_bytes(8, "little") for d in digests)
 
 
-def Born(fid, flags, size, created_ns, modified_ns, name, tags, runs, digests, slip=None):
+def Born(fid, flags, size, created_ns, modified_ns, name, tags, runs, digests, slip=None, made_by=0):
+    """made_by is written after the slip when the flags carry FILE_MADE_BY, and only then."""
     V = VarintPut
-    return Record(BORN, V(fid) + V(flags) + V(size) + V(created_ns) + V(Zigzag(modified_ns - created_ns)) +
-                  V(len(name)) + name + IdsPut(sorted(tags)) + V(len(runs)) + RunsPut(runs, 0, False)[0] +
-                  _Digests(digests) + _Slip(slip))
+    body = (V(fid) + V(flags) + V(size) + V(created_ns) + V(Zigzag(modified_ns - created_ns)) +
+            V(len(name)) + name + IdsPut(sorted(tags)) + V(len(runs)) + RunsPut(runs, 0, False)[0] +
+            _Digests(digests) + _Slip(slip))
+    return Record(BORN, body + V(made_by) if flags & ondisk.FILE_MADE_BY else body)
 
 
 def Shaped(fid, base, size, mtime_ns, splices, digests, slip=None):
@@ -208,6 +210,9 @@ def RecordDecode(kind, body, seq):
         d["runs"] = RunsGet(c, c.V(), seq, False)[0]
         d["digests"] = [c.Fixed("<Q") for _ in range(DigestCount(d["runs"]))]
         d["slip"] = _SlipGet(c)
+        d["made_by"] = c.V() if d["flags"] & ondisk.FILE_MADE_BY else 0
+        if d["flags"] & ondisk.FILE_MADE_BY and not d["made_by"]:
+            raise Short("its Born is made by a program and names none")
     elif kind == SHAPED:
         d.update(fid=c.V(), base=c.V(), size=c.V(), mtime_ns=c.V())
         splices, cursor = [], 0
@@ -226,6 +231,8 @@ def RecordDecode(kind, body, seq):
         d["keep"] = c.V() if d["what"] & LABEL_KEEP else None
         if d["flags"] and (d["flags"][0] | d["flags"][1]) & ondisk.FILE_DELETED:
             raise Short("its Labeled names the deleted bit in FLAGS — the bit is KEEP's to put on and take off")
+        if d["flags"] and (d["flags"][0] | d["flags"][1]) & ondisk.FILE_MADE_BY:
+            raise Short("its Labeled names the made-by bit in FLAGS — no change of a file moves who made it")
     elif kind == QUITCLAIM:
         d.update(fid=c.V(), base=c.V())
     elif kind == COINED:
@@ -249,7 +256,7 @@ def RecordAgain(kind, d):
     """The record a decoded dict says, written again (the circle)."""
     if kind == BORN:
         return Born(d["fid"], d["flags"], d["size"], d["created_ns"], d["modified_ns"], d["name"], d["tags"],
-                    d["runs"], d["digests"], d["slip"])
+                    d["runs"], d["digests"], d["slip"], d["made_by"])
     if kind == SHAPED:
         return Shaped(d["fid"], d["base"], d["size"], d["mtime_ns"], d["splices"], d["digests"], d["slip"])
     if kind == LABELED:

@@ -76,6 +76,16 @@
  * wears. The bit is what the ribbon's Labeled KEEP leaves and what puts the
  * header's keep_ns in the Tally (volume_ribbon.h, volume_tally.h). */
 #define TAGFS_FILE_DELETED          (1 << 4)
+/* Made by a program of the volume: the record's made_by is the volume's id of
+ * that program's file (FileRecord.made_by, nothing in the record names it
+ * without this bit). Bit 6 — bit 5 is left to the golden node of the book's
+ * tests, which wears it as a bit no kernel names — put on by the create that a
+ * program's cabin asks (storage_ops.c) and by nothing else, never taken off
+ * and never a tag: who made a file is the volume's word, set once and carried
+ * by every change the file goes through. The bit is what puts made_by after
+ * the header's keep_ns in the Tally and after the slip of the ribbon's Born
+ * (volume_tally.h, volume_ribbon.h). */
+#define TAGFS_FILE_MADE_BY          (1 << 6)
 
 // Handle flags
 #define TAGFS_HANDLE_READ           (1 << 0)

@@ -83,7 +83,7 @@ static TestResult TestStandBookRoomGatherOneRun(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, bytes), "room for the file");
-    TEST_ASSERT_EQ(tagfs_create_file("book-gather.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("book-gather.bin", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, bytes, 0x31u), (int)bytes, "written whole");
     TEST_ASSERT_OK(TagFSSettle(), "and settled");
     for (uint32_t k = 1; k < STAND_BOOK_ROOM_GATHER; k += 2u)
@@ -144,7 +144,7 @@ static bool StandBookRoomScattered(StandFreshModel* m, const char* name, uint64_
     const uint32_t B = TAGFS_BLOCK_SIZE;
     uint64_t       start = 0;
     uint32_t       window = 0;
-    if (tagfs_create_file(name, NULL, 0, fid) != 0)
+    if (tagfs_create_file(name, NULL, 0, 0, fid) != 0)
         return false;
     if (StandFreshWrite(m, *fid, 0, STAND_BOOK_ROOM_GATHER * B, 0x31u) != (int)(STAND_BOOK_ROOM_GATHER * B) ||
         TagFSSettle() != OK)
@@ -446,7 +446,7 @@ static TestResult TestStandBookRoomTallyGivesRoom(void)
     epoch = tagfs_mount_epoch();
     bytes = (uint32_t)(2u * q * TAGFS_BLOCK_SIZE);
     TEST_ASSERT(StandFreshModelMake(&m, bytes), "room for the file");
-    TEST_ASSERT_EQ(tagfs_create_file("book-room-t.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("book-room-t.bin", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, bytes, 0xA5u), (int)bytes, "two Quires of it written");
     TEST_ASSERT_OK(TagFSSettle(), "and settled past the newest Tally");
     before   = TallyCostBlocks();
@@ -620,7 +620,7 @@ static TestResult TestStandBookRoomWaitBounded(void)
     epoch = tagfs_mount_epoch();
     bytes = (uint32_t)(q * TAGFS_BLOCK_SIZE);
     TEST_ASSERT(StandFreshModelMake(&m, bytes), "room for the file");
-    TEST_ASSERT_EQ(tagfs_create_file("book-room-w.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("book-room-w.bin", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, bytes, 0x5Au), (int)bytes, "a Quire of it written");
     TEST_ASSERT_OK(TagFSSettle(), "and settled");
     for (rounds = 0; rounds < STAND_BOOK_ROOM_ROUNDS; rounds++) {
@@ -665,7 +665,7 @@ static TestResult StandBookRoomGivenUp(StandFreshModel* m, const char* name)
     TestResult verdict = TEST_PASS;
     uint64_t   fid     = 0;
     TEST_ASSERT(StandFreshModelMake(m, TAGFS_BLOCK_SIZE), "room for the file");
-    TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT_EQ(StandFreshWrite(m, fid, 0, TAGFS_BLOCK_SIZE, 0x3Cu), (int)TAGFS_BLOCK_SIZE,
                    "a block of it written");
     TEST_ASSERT_OK(TagFSSettle(), "and settled");
@@ -718,11 +718,11 @@ static TestResult TestStandBookRoomBarWaitsTally(void)
                 "the ribbon stands in its next_quire with none past it: every free Quire lies on ground kept from it");
     tallies = g_binder.tallies;
     last    = c.last;
-    rc      = tagfs_create_file("book-room-y.bin", NULL, 0, &made);
+    rc      = tagfs_create_file("book-room-y.bin", NULL, 0, 0, &made);
     TEST_ASSERT_EQ(rc, -(int)ERR_WOULD_BLOCK, "a file asked for waits for room on the ribbon");
     for (waits = 0; rc == -(int)ERR_WOULD_BLOCK && waits < g_binder.ring; waits++) {
         TEST_ASSERT_OK(SettleForRoom(), "its wait for room ends");
-        rc = tagfs_create_file("book-room-y.bin", NULL, 0, &made);
+        rc = tagfs_create_file("book-room-y.bin", NULL, 0, 0, &made);
     }
     TestEvidence("waits for room the file asked for took", waits);
     TEST_ASSERT(g_binder.tallies > tallies, "its wait for room writes the Tally past the delete");
@@ -799,13 +799,13 @@ static TestResult TestStandBookRoomRibbonWaitsUnderWay(void)
     under = true;
     epoch = tagfs_mount_epoch();
     TEST_ASSERT(StandBookRoomRibbonShut(epoch, &promised) == TEST_PASS, "the ribbon is shut past the reserve");
-    rc = tagfs_create_file("book-room-v.bin", NULL, 0, &made);
+    rc = tagfs_create_file("book-room-v.bin", NULL, 0, 0, &made);
     TEST_ASSERT_EQ(rc, -(int)ERR_WOULD_BLOCK, "a file asked for waits on the Tally under way, not refused at once");
     TEST_ASSERT_OK(SettleForRoom(), "its wait for room ends");
     under = BinderHoldsGround();
     TEST_ASSERT(!under, "and ends the Tally under way");
     for (uint32_t waits = 0; rc == -(int)ERR_WOULD_BLOCK && waits <= g_binder.ring; waits++) {
-        rc = tagfs_create_file("book-room-v.bin", NULL, 0, &made);
+        rc = tagfs_create_file("book-room-v.bin", NULL, 0, 0, &made);
         if (rc == -(int)ERR_WOULD_BLOCK)
             TEST_ASSERT_OK(SettleForRoom(), "each wait for room ends");
     }
@@ -864,7 +864,7 @@ static TestResult TestStandBookRoomRibbonWaitsGrown(void)
         return test_steps_aside(aside);
     TEST_ASSERT(StandBookRoomQuiet(), "the volume mounted afresh, the lag's stitches settled past it");
     TEST_ASSERT(StandFreshModelMake(&m, TAGFS_BLOCK_SIZE), "room for the file");
-    TEST_ASSERT_EQ(tagfs_create_file("book-room-g.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("book-room-g.bin", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, TAGFS_BLOCK_SIZE, 0x6Bu), (int)TAGFS_BLOCK_SIZE,
                    "a block of it written");
     TEST_ASSERT_OK(TagFSSettle(), "and settled past the newest Tally");
@@ -873,14 +873,14 @@ static TestResult TestStandBookRoomRibbonWaitsGrown(void)
     TEST_ASSERT(EndpaperGrown() && !BinderHoldsGround(),
                 "the reserve is measured from above past the newest Tally, and no Tally is under way");
     tallies = g_binder.tallies;
-    rc      = tagfs_create_file("book-room-h.bin", NULL, 0, &made);
+    rc      = tagfs_create_file("book-room-h.bin", NULL, 0, 0, &made);
     TEST_ASSERT_EQ(rc, -(int)ERR_WOULD_BLOCK,
                    "a file asked for waits on the Tally that makes the measure exact, not refused at once");
     TEST_ASSERT(BinderRoomAwaited(), "that Tally asked of its own wait for room");
     TEST_ASSERT_OK(SettleForRoom(), "its wait for room ends");
     TEST_ASSERT(g_binder.tallies > tallies, "and writes the Tally");
     for (waits = 0; rc == -(int)ERR_WOULD_BLOCK && waits <= g_binder.ring; waits++) {
-        rc = tagfs_create_file("book-room-h.bin", NULL, 0, &made);
+        rc = tagfs_create_file("book-room-h.bin", NULL, 0, 0, &made);
         if (rc == -(int)ERR_WOULD_BLOCK)
             TEST_ASSERT_OK(SettleForRoom(), "each wait for room ends");
     }

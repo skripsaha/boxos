@@ -1189,6 +1189,7 @@ error_t process_load_binary(process_t *proc, const ImageSource *source, const ch
     ci->luggage_addr     = 0;
     ci->luggage_length   = 0;
     ci->raised           = 0;
+    proc->cabin->program_fid = source->FileId;
     ci->program_file     = source->FileId;
     ci->image_base       = loaded.ImageBase;
     ci->parts_addr       = loaded.PartsVa;

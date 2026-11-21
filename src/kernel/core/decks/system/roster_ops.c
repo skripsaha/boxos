@@ -121,7 +121,7 @@ static RosterPut RosterPutProgram(uint8_t *at, uint64_t room, const RosterSeen *
     uint32_t         raised = 0;
     (void)CabinProgram(cabin, &pid, &generation);
     if (cabin_info_valid(info)) {
-        file   = info->program_file;
+        file   = CabinProgramFile(cabin);
         raised = info->raised;
     }
     const uint64_t memory   = cabin->vmm ? (uint64_t)cabin->vmm->user_pages * PAGE_SIZE : 0;

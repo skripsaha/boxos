@@ -238,9 +238,11 @@ int FileMetadataRead(file_id_t FileId, FileMetadata *Out)
             TagPosition += ValueLength;
         }
     }
-    if (BlobSize - Position == sizeof(Out->KeptUntil)) {
+    if (BlobSize - Position == sizeof(Out->KeptUntil) + sizeof(Out->MadeBy)) {
         memcpy(&Out->KeptUntil, Blob + Position, sizeof(Out->KeptUntil));
         Position += sizeof(Out->KeptUntil);
+        memcpy(&Out->MadeBy, Blob + Position, sizeof(Out->MadeBy));
+        Position += sizeof(Out->MadeBy);
     }
     if (Position != BlobSize || TagPosition != TagBytes) {
         free(Tags);

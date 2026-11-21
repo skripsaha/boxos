@@ -192,6 +192,15 @@ typedef struct cabin_t
     /* Its box says `rise`: when the system started it, a fall raises it again
      * (rise.h). Set by the load, before the program runs. */
     uint8_t  rise;
+
+    /* The program's identity is its file: the volume's id of the file this
+     * cabin was started from, 0 for a program started from bytes held by
+     * another (an image of no file). Written once, by the load of its image
+     * (process_load_binary), before the program runs and before any other
+     * core can see the cabin — never inherited from the spawner, never
+     * changed after, and kept here, in memory only the kernel writes, so no
+     * program can speak as another. Read it by CabinProgramFile. */
+    uint64_t program_fid;
 } cabin_t;
 
 _Static_assert(sizeof(cabin_t) < 4096, "cabin_t must fit in one page");
@@ -262,6 +271,11 @@ void CabinEnd(struct process_t *named, int32_t disposition);
  * something per program, and a Bay made for one, name the program by this.
  * False while the cabin has no program loaded into it yet. */
 bool CabinProgram(const cabin_t *cabin, uint32_t *pid, uint32_t *generation);
+
+/* The volume's id of the file the program of `cabin` was started from: who
+ * the program is where a file's maker, or a file's own tags, are in question.
+ * 0 for a program with no file (started from bytes), and for no cabin. */
+uint64_t CabinProgramFile(const cabin_t *cabin);
 
 /* Reference counting on strand_count. */
 void cabin_ref_inc(cabin_t *cabin);

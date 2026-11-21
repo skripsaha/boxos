@@ -110,9 +110,11 @@ error_t InkUndone(uint64_t fid, InkReceipt* out);
 error_t InkKeep(uint64_t fid, uint64_t until, InkWarrant warrant, InkReceipt* out);
 
 /* A new file named `name`, wearing the `count` tags in `tags` (the name's
- * first, no two alike). OK and its id, or the refusal with no file made and no
- * trace of one — the id it would have taken is taken by the next. */
-error_t InkNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t* out_fid,
+ * first, no two alike), made by the program whose file is `made_by` — 0 when
+ * no program of the volume makes it. OK and its id, or the refusal with no
+ * file made and no trace of one — the id it would have taken is taken by the
+ * next. */
+error_t InkNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t made_by, uint64_t* out_fid,
                InkReceipt* out);
 
 /* The file given up: a Quitclaim kept for the next stitch, its extents to

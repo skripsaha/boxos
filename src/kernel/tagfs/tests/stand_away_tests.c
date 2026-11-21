@@ -949,7 +949,7 @@ static TestResult TestStandAwayVerdict(void)
     RibbonCursorStand(&c);
     TEST_ASSERT(w.nlaid < STAND_RIBBON_LAID, "room to put back the stitch the next cycle lays");
     w.laid[w.nlaid++] = (c.quire.block + c.off / TAGFS_BLOCK_SECTORS) * TAGFS_BLOCK_SECTORS;
-    TEST_ASSERT_EQ(tagfs_create_file("away-verdict", NULL, 0, &fid), 0, "a file is made on what it holds");
+    TEST_ASSERT_EQ(tagfs_create_file("away-verdict", NULL, 0, 0, &fid), 0, "a file is made on what it holds");
     TEST_ASSERT_OK(TagFSSettle(), "the session's first cycle settles, the file born in it");
     TEST_ASSERT(StandStitchRead(&u), "and its stitch reads back");
     TEST_ASSERT(u->nrecords > 0 && u->records[0].kind != RIBBON_UNDONE, "and its stitch carries no Undone: none twice");

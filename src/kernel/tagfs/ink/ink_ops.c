@@ -106,7 +106,7 @@ static error_t CreateTags(uint32_t name_tag, const uint32_t* tag_ids, uint32_t t
     return OK;
 }
 
-static error_t CreateInside(const char* filename, const uint32_t* tag_ids, uint32_t tag_count,
+static error_t CreateInside(const char* filename, const uint32_t* tag_ids, uint32_t tag_count, uint64_t made_by,
                             uint64_t* out_file_id)
 {
     /* A volume under glass makes no file, and no name of one is interned for
@@ -132,19 +132,19 @@ static error_t CreateInside(const char* filename, const uint32_t* tag_ids, uint3
     InkReceipt receipt;
     rc = CreateTags(name_tag, tag_ids, tag_count, &tags, &count);
     if (rc == OK)
-        rc = InkNew(filename, tags, count, out_file_id, &receipt);
+        rc = InkNew(filename, tags, count, made_by, out_file_id, &receipt);
     kfree(tags);
     return rc;
 }
 
-int tagfs_create_file(const char* filename, const uint32_t* tag_ids, uint32_t tag_count,
+int tagfs_create_file(const char* filename, const uint32_t* tag_ids, uint32_t tag_count, uint64_t made_by,
                       uint64_t* out_file_id)
 {
     if (!filename || !out_file_id)
         return -(int)ERR_INVALID_ARGUMENT;
     if (!tagfs_enter())
         return -(int)ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc = CreateInside(filename, tag_ids, tag_count, out_file_id);
+    error_t rc = CreateInside(filename, tag_ids, tag_count, made_by, out_file_id);
     tagfs_leave();
     return rc == OK ? 0 : -(int)rc;
 }

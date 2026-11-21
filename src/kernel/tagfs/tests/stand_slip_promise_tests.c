@@ -102,7 +102,7 @@ static bool StandPromiseHolds(uint64_t fid, uint32_t bytes)
 static bool StandPromiseFilled(const StandStitch* s, uint64_t* fids, uint32_t n, uint64_t room, bool* shrunk)
 {
     for (uint32_t i = 0; i < n; i++)
-        if (tagfs_create_file("promise.bin", NULL, 0, &fids[i]) != 0)
+        if (tagfs_create_file("promise.bin", NULL, 0, 0, &fids[i]) != 0)
             return false;
     if (TagFSSettle() != OK || SettleForRoom() != OK)
         return false;
@@ -321,7 +321,7 @@ static TestResult TestStandSlipPromiseRemount(void)
     if (aside)
         return test_steps_aside(aside);
     for (uint32_t i = 0; i < 4u; i++)
-        TEST_ASSERT_EQ(tagfs_create_file("promise.bin", NULL, 0, &fids[i]), 0, "a file is made");
+        TEST_ASSERT_EQ(tagfs_create_file("promise.bin", NULL, 0, 0, &fids[i]), 0, "a file is made");
     TEST_ASSERT(StandPromiseWrite(fids[0], 0, STAND_PROMISE_LINE) == OK &&
                 StandPromiseWrite(fids[1], 0, STAND_PROMISE_LINE) == OK, "a line is written to each of two");
     TEST_ASSERT_OK(TagFSSettle(), "settled");

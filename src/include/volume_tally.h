@@ -83,6 +83,9 @@
 #define TALLY_FILE_ROLE_BOOT    8u
 #define TALLY_FILE_ROLE_KERNEL  12u  /* the loader's first choice; then boot, then system */
 #define TALLY_FILE_DELETED   16u     /* deleted, kept until a time its header names (TallyFileHead.keep_ns) — never a tag */
+/* Bit 5 stays unnamed: the golden node's header wears it as the bit no kernel
+ * names (TALLY_GOLDEN_NODE_CRC), and a header keeps such a bit as it was laid. */
+#define TALLY_FILE_MADE_BY   64u     /* made by a program of the volume, its file named by the header (TallyFileHead.made_by) — never a tag */
 #define TALLY_TAG_HAS_VALUE  1u
 #define TALLY_TAG_RETIRED    2u
 #define TALLY_TAG_OWNED      4u      /* a program's own tag: whose it is follows the flags (TallyTag) */
@@ -494,7 +497,7 @@ static inline int TallyIdNext(const uint8_t *p, uint32_t end, uint32_t *at, uint
 
 /*
  * A file's header: gen · flags · size · created_ns · mtime_z · name_len ·
- * name · ntags · tags · [keep_ns]. mtime_z is zigzag(modified_ns -
+ * name · ntags · tags · [keep_ns] · [made_by]. mtime_z is zigzag(modified_ns -
  * created_ns): a clock may run backwards. The name and the tags are pointed
  * at where they stand; a writer points them at what it writes from — `tags`
  * the ids after their count, as TallyIdsPut writes them, `tags_bytes` long.
@@ -504,6 +507,12 @@ static inline int TallyIdNext(const uint8_t *p, uint32_t end, uint32_t *at, uint
  * file is kept deleted and can be brought back — never 0. A reader that does
  * not know the bit finds bytes left past the tags and takes the header for a
  * newer writer's (TALLY_BODY_LONGER), which stands the volume under glass.
+ *
+ * made_by follows it, there when, and only when, the flags carry
+ * TALLY_FILE_MADE_BY: the volume's id of the file of the program that made
+ * this file — never 0, and never changed after the file is made. A file no
+ * program of the volume made carries neither the bit nor the field, so its
+ * header is the bytes it was before the field was.
  */
 typedef struct {
     uint64_t       gen;
@@ -517,6 +526,7 @@ typedef struct {
     const uint8_t *tags;
     uint32_t       tags_bytes;
     uint64_t       keep_ns;      /* 0 unless TALLY_FILE_DELETED */
+    uint64_t       made_by;      /* 0 unless TALLY_FILE_MADE_BY */
 } TallyFileHead;
 
 static inline uint32_t TallyFileHeadPut(uint8_t *out, const TallyFileHead *h)
@@ -530,7 +540,9 @@ static inline uint32_t TallyFileHeadPut(uint8_t *out, const TallyFileHead *h)
     at += TallyBytesPut(out + at, h->name, h->name_len);
     at += BookVarintPut(out + at, h->ntags);
     at += TallyBytesPut(out + at, h->tags, h->tags_bytes);
-    return (h->flags & TALLY_FILE_DELETED) ? at + BookVarintPut(out + at, h->keep_ns) : at;
+    if (h->flags & TALLY_FILE_DELETED)
+        at += BookVarintPut(out + at, h->keep_ns);
+    return (h->flags & TALLY_FILE_MADE_BY) ? at + BookVarintPut(out + at, h->made_by) : at;
 }
 
 /* A header read back: BROKEN as well for one that is not ACTIVE — such an
@@ -552,7 +564,10 @@ static inline int TallyFileHeadGet(const uint8_t *b, uint32_t len, TallyFileHead
         if (!TallyIdNext(b, len, &at, &id, k == 0)) return TALLY_BODY_BROKEN;
     h->tags_bytes = at - from;
     h->keep_ns    = 0;
+    h->made_by    = 0;
     if ((h->flags & TALLY_FILE_DELETED) && (!TallyTake(b, len, &at, &h->keep_ns) || !h->keep_ns))
+        return TALLY_BODY_BROKEN;
+    if ((h->flags & TALLY_FILE_MADE_BY) && (!TallyTake(b, len, &at, &h->made_by) || !h->made_by))
         return TALLY_BODY_BROKEN;
     if (!(h->flags & TALLY_FILE_ACTIVE)) return TALLY_BODY_BROKEN;
     return TallyBodyEnd(at, len);

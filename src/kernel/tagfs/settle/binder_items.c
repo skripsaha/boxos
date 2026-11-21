@@ -106,7 +106,7 @@ static error_t FileHeadItem(BinderWork* w, const BinderFile* f, BinderItem* it)
                 "refused\n", (unsigned long long)f->fid);
         return ERR_BUSY;
     }
-    uint64_t          need = 80u + rec->name_len + 10u * (uint64_t)rec->tag_count;
+    uint64_t          need = 90u + rec->name_len + 10u * (uint64_t)rec->tag_count;
     uint64_t          ids  = (uint64_t)rec->tag_count * sizeof(uint32_t);
     if (!ItemRoom(p, need + ids))
         return ERR_NO_MEMORY;
@@ -124,6 +124,8 @@ static error_t FileHeadItem(BinderWork* w, const BinderFile* f, BinderItem* it)
     at += TallyIdsPut(b + at, sorted, rec->tag_count);
     if (rec->flags & TALLY_FILE_DELETED)
         at += BookVarintPut(b + at, rec->keep_until);
+    if (rec->flags & TALLY_FILE_MADE_BY)
+        at += BookVarintPut(b + at, rec->made_by);
     *it = (BinderItem){ .key = { f->fid, 0 }, .count = 1, .body = b, .len = at };
     return OK;
 }
@@ -172,7 +174,7 @@ static error_t KeptHeadItem(BinderWork* w, const BookKeptFile* k, BinderItem* it
     BinderItems*         p   = &w->items;
     const TagFSMetadata* m   = &k->meta;
     uint64_t             len = m->filename ? strlen(m->filename) : 0;
-    if (!ItemRoom(p, 80u + len + 10u * (uint64_t)m->tag_count))
+    if (!ItemRoom(p, 90u + len + 10u * (uint64_t)m->tag_count))
         return ERR_NO_MEMORY;
     uint8_t* b  = p->buf;
     uint32_t at = BookVarintPut(b, k->gen);
@@ -186,6 +188,8 @@ static error_t KeptHeadItem(BinderWork* w, const BookKeptFile* k, BinderItem* it
     at += TallyIdsPut(b + at, m->tag_ids, m->tag_count);
     if (m->flags & TALLY_FILE_DELETED)
         at += BookVarintPut(b + at, m->keep_until);
+    if (m->flags & TALLY_FILE_MADE_BY)
+        at += BookVarintPut(b + at, m->made_by);
     *it = (BinderItem){ .key = { k->fid, 0 }, .count = 1, .body = b, .len = at };
     return OK;
 }

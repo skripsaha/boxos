@@ -260,6 +260,8 @@ static void FileItemsAs(const FileRecord* rec, uint64_t fid, uint64_t gen, uint6
         body += TallyVarintBytes(rec->tags[i]);
     if (rec->flags & TALLY_FILE_DELETED)
         body += TallyVarintBytes(rec->keep_until);
+    if (rec->flags & TALLY_FILE_MADE_BY)
+        body += TallyVarintBytes(rec->made_by);
     ItemsPut(it, TallyVarintBytes(fid) + 1u, body, grid);
     if (runs == 0)
         return;

@@ -82,7 +82,8 @@ static uint32_t BookHeadKnown(const TallyFileHead* h)
            TallyVarintBytes(h->created_ns) +
            TallyVarintBytes(BookZigzag((int64_t)(h->modified_ns - h->created_ns))) +
            TallyVarintBytes(h->name_len) + (uint32_t)h->name_len + TallyVarintBytes(h->ntags) +
-           h->tags_bytes;
+           h->tags_bytes + ((h->flags & TALLY_FILE_DELETED) ? TallyVarintBytes(h->keep_ns) : 0u) +
+           ((h->flags & TALLY_FILE_MADE_BY) ? TallyVarintBytes(h->made_by) : 0u);
 }
 
 /* The header of `f->fid` into the gathering: its name and its tags copied out
@@ -128,6 +129,7 @@ static error_t BookFileHead(BookFile* f, const uint8_t* body, uint32_t len)
     f->meta.created_time  = h.created_ns;
     f->meta.modified_time = h.modified_ns;
     f->meta.keep_until    = h.keep_ns;
+    f->meta.made_by       = h.made_by;
     f->head = true;
     return OK;
 }

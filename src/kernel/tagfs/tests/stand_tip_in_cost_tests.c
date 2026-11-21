@@ -215,7 +215,7 @@ TestResult TestStandTipInCostLives(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
-    TEST_ASSERT_EQ(tagfs_create_file("tipin-lives.bin", NULL, 0, &fid), 0, "a file for data is made");
+    TEST_ASSERT_EQ(tagfs_create_file("tipin-lives.bin", NULL, 0, 0, &fid), 0, "a file for data is made");
     memset(g_test_buffer, 0x5a, sizeof(g_test_buffer));
     for (uint64_t k = 0; k < blocks; k += sizeof(g_test_buffer) / TAGFS_BLOCK_SIZE) {
         TEST_ASSERT_EQ(StandWriteAt(fid, k * TAGFS_BLOCK_SIZE, g_test_buffer, sizeof(g_test_buffer)),
@@ -277,9 +277,9 @@ out:
 
 static int StandCostCreate(const char* name, uint64_t* fid)
 {
-    int rc = tagfs_create_file(name, NULL, 0, fid);
+    int rc = tagfs_create_file(name, NULL, 0, 0, fid);
     if (rc == -(int)ERR_WOULD_BLOCK && TagFSSettle() == OK)
-        rc = tagfs_create_file(name, NULL, 0, fid);
+        rc = tagfs_create_file(name, NULL, 0, 0, fid);
     return rc;
 }
 

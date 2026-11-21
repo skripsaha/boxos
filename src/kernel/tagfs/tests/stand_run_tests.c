@@ -64,7 +64,7 @@ static bool StandRunMake(uint64_t *out_file_id)
     uint64_t file_id = 0;
 
     *out_file_id = 0;
-    if (tagfs_create_file("test_file", NULL, 0, &file_id) != 0)
+    if (tagfs_create_file("test_file", NULL, 0, 0, &file_id) != 0)
         return false;
     if (tagfs_span_file(file_id, STAND_RUN_BYTES) != OK) {
         tagfs_delete_file(file_id, INK_UNWARRANTED);
@@ -289,7 +289,7 @@ static TestResult StandRunRefusedFresh(bool port)
     back = kmalloc((uint64_t)N * B);
     TEST_ASSERT(data && back, "room for a window's worth and for reading it back");
     TestFillAt(data, N * B, 0x4E1D0E00u + (port ? 1u : 0u), 0);
-    TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0, "a file is made on the book");
+    TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, 0, &file_id), 0, "a file is made on the book");
     TEST_ASSERT(BlockMapDerivedRunFree(0, N, file_id, &first),
                 "the first run of free ground a window's worth long is found: the write's to take");
 

@@ -32,7 +32,7 @@ static TestResult test_stress_many_files(void)
 
     for (uint32_t i = 0; i < STRESS_FILE_COUNT; i++) {
         ksnprintf(name, sizeof(name), "stress_file_%u", i);
-        TEST_ASSERT_EQ(tagfs_create_file(name, tag_ids, 2, &s_stress_ids[i]), 0,
+        TEST_ASSERT_EQ(tagfs_create_file(name, tag_ids, 2, 0, &s_stress_ids[i]), 0,
                        "tagfs_create_file should succeed");
     }
 
@@ -70,7 +70,7 @@ static TestResult test_stress_large_file(void)
     TagFSFileHandle* handle     = NULL;
     FileRecord*      rec        = NULL;
 
-    TEST_ASSERT_EQ(tagfs_create_file("large_file", tag_ids, 1, &file_id), 0,
+    TEST_ASSERT_EQ(tagfs_create_file("large_file", tag_ids, 1, 0, &file_id), 0,
                    "tagfs_create_file should succeed");
 
     handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);

@@ -539,13 +539,13 @@ error_t InkKeep(uint64_t fid, uint64_t until, InkWarrant warrant, InkReceipt* ou
 // A new file
 // ----------------------------------------------------------------------------
 
-error_t InkNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t* out_fid,
+error_t InkNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t made_by, uint64_t* out_fid,
                InkReceipt* out)
 {
     error_t rc = InkVolumeBegins();
     if (rc != OK)
         return rc;
-    return InkBookNew(name, tags, count, out_fid, out);
+    return InkBookNew(name, tags, count, made_by, out_fid, out);
 }
 
 // ----------------------------------------------------------------------------

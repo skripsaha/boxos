@@ -194,7 +194,7 @@ static TestResult TestStandFreshEachChange(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, 12u * TAGFS_BLOCK_SIZE), "room for the file's bytes as they must read");
-    TEST_ASSERT_EQ(tagfs_create_file("fresh-each.bin", NULL, 0, &fid), 0, "a file is made on the book");
+    TEST_ASSERT_EQ(tagfs_create_file("fresh-each.bin", NULL, 0, 0, &fid), 0, "a file is made on the book");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, 3u * TAGFS_BLOCK_SIZE + 100u, 1), 3 * TAGFS_BLOCK_SIZE + 100,
                    "three blocks and a tail are written");
     TEST_ASSERT(StandFreshSettledAndBack(&m, fid), "settled and mounted again, the file reads them, on its ground");
@@ -245,7 +245,7 @@ static TestResult StandFreshNotLanded(uint32_t at, uint32_t bytes)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, 2u * TAGFS_BLOCK_SIZE) && StandFreshModelMake(&old, 2u * TAGFS_BLOCK_SIZE),
                 "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("fresh-c15.bin", NULL, 0, &fid), 0, "a file is made on the book");
+    TEST_ASSERT_EQ(tagfs_create_file("fresh-c15.bin", NULL, 0, 0, &fid), 0, "a file is made on the book");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, 2u * TAGFS_BLOCK_SIZE, 11), 2 * TAGFS_BLOCK_SIZE, "two blocks written");
     TEST_ASSERT(StandFreshSettledAndBack(&m, fid) && StandBlockOf(fid, 0, &was), "settled, block 0 lies somewhere");
     memcpy(old.bytes, m.bytes, 2u * TAGFS_BLOCK_SIZE);
@@ -289,7 +289,7 @@ static TestResult TestStandFreshRefusedNamesNothing(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, 4u * TAGFS_BLOCK_SIZE), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("fresh-c1.bin", NULL, 0, &fid), 0, "a file is made on the book");
+    TEST_ASSERT_EQ(tagfs_create_file("fresh-c1.bin", NULL, 0, 0, &fid), 0, "a file is made on the book");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, TAGFS_BLOCK_SIZE, 21), TAGFS_BLOCK_SIZE, "a block is written");
     TEST_ASSERT(StandFreshSettledAndBack(&m, fid), "and settled");
     free    = fs->free_blocks;
@@ -342,7 +342,7 @@ static TestResult TestStandFreshFlushesFirst(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, 4u * TAGFS_BLOCK_SIZE), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("fresh-flush.bin", NULL, 0, &fid), 0, "a file is made on the book");
+    TEST_ASSERT_EQ(tagfs_create_file("fresh-flush.bin", NULL, 0, 0, &fid), 0, "a file is made on the book");
     TEST_ASSERT_OK(TagFSSettle(), "and its Born settled");
     BlockFailReadPace(true, 1, 1000000u);
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, 2u * TAGFS_BLOCK_SIZE, 31), 2 * TAGFS_BLOCK_SIZE, "two blocks written");
@@ -436,7 +436,7 @@ static TestResult TestStandFreshDigestHeld(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, 2u * TAGFS_BLOCK_SIZE), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("fresh-gloss.bin", NULL, 0, &fid), 0, "a file is made on the book");
+    TEST_ASSERT_EQ(tagfs_create_file("fresh-gloss.bin", NULL, 0, 0, &fid), 0, "a file is made on the book");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, 2u * TAGFS_BLOCK_SIZE, 41), 2 * TAGFS_BLOCK_SIZE, "two blocks written");
     TEST_ASSERT(StandBlockOf(fid, 1, &block) && GlossFind(block, &digest), "the digest of its block 1 is held at once");
     verdict = StandFreshThreeRoads(&m, fid, OK);
@@ -476,7 +476,7 @@ static TestResult TestStandFreshWritesInternNothing(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, 2u * TAGFS_BLOCK_SIZE), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("fresh-intern.bin", NULL, 0, &fid), 0, "a file made on the book");
+    TEST_ASSERT_EQ(tagfs_create_file("fresh-intern.bin", NULL, 0, 0, &fid), 0, "a file made on the book");
     next = tagfs_get_state()->registry->next_id;
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, TAGFS_BLOCK_SIZE + 1u, 51), TAGFS_BLOCK_SIZE + 1, "takes its bytes");
     TEST_ASSERT_EQ(tagfs_get_state()->registry->next_id, next, "and a write gives no tag an id");

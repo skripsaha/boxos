@@ -111,6 +111,7 @@ FILE_ROLE_SYSTEM = 1 << 2               # TAGFS_FILE_ROLE_SYSTEM
 FILE_ROLE_BOOT = 1 << 3                 # TAGFS_FILE_ROLE_BOOT
 FILE_ROLE_KERNEL = 12                   # TAGFS_FILE_ROLE_KERNEL: the loader's first choice, then boot, then system
 FILE_DELETED = 1 << 4                   # tagfs_constants.h TAGFS_FILE_DELETED: deleted, kept until the keep_ns of its header
+FILE_MADE_BY = 1 << 6                   # tagfs_constants.h TAGFS_FILE_MADE_BY: made by a program, whose file the header's made_by names
 FILE_LAID_BIT = 1 << 5                  # a header flag no kernel names, kept as laid (book_tests.c BOOK_TEST_LAID_BIT)
 
 # ---------------------------------------------------------------------------

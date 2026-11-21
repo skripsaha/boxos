@@ -246,7 +246,7 @@ class BootBook:
             if old is not None:
                 return old
             fs = tally.FileState(d["fid"], seq, d["flags"], d["size"], d["created_ns"], d["modified_ns"], d["name"],
-                                 d["tags"], d["runs"])
+                                 d["tags"], d["runs"], made_by=d["made_by"])
         else:
             at = (seq - d["base"]) % (1 << 64)
             if old is None or old.gen != at:

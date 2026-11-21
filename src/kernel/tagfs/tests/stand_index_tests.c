@@ -364,7 +364,7 @@ static TestResult TestStandIndexCursorPast1024(void)
     TagSpelling spelled;
 
     for (; made < STAND_INDEX_MANY; made++)
-        TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, &s_made[made]), 0,
+        TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, 0, &s_made[made]), 0,
                        "a file of the name is made");
     TEST_ASSERT_OK(TagSpellKey(name, strlen(name), &spelled), "the name spells as a key");
 

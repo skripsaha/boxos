@@ -157,7 +157,7 @@ static TestResult StandCreateOnce(uint32_t n, uint32_t stem, bool* fired, bool* 
 
     HeapFailArm(amp_get_core_index(), n);
     armed = true;
-    int rc = tagfs_create_file("test_file", NULL, 0, &made);
+    int rc = tagfs_create_file("test_file", NULL, 0, 0, &made);
     *fired = HeapFailFired();
     HeapFailDisarm();
     armed = false;
@@ -203,7 +203,7 @@ TestResult TestStandCreateAllOrNothing(void)
      * by it and stays split, and what the name's members need for one more
      * file is taken and given back by each create alike (tag_bitmap.c,
      * file_map/). */
-    TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0,
+    TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, 0, &file_id), 0,
                    "a create before the sweep interns the name");
     TEST_ASSERT_EQ(tagfs_delete_file(file_id, INK_UNWARRANTED), 0, "and its file is deleted");
     file_id = 0;
@@ -269,7 +269,7 @@ static TestResult StandWriteOnce(uint32_t n, StandWriteSweep* sweep, bool* fired
 
     memset(&before, 0, sizeof(before));
     memset(&after, 0, sizeof(after));
-    TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0,
+    TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, 0, &file_id), 0,
                    "a file to write into is created");
     handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
     TEST_ASSERT(handle != NULL, "and opened");

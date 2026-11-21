@@ -148,7 +148,7 @@ static TestResult TestStandPlotRunMerges(void)
     if (aside)
         return test_steps_aside(aside);
 
-    TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0, "a file is created");
+    TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, 0, &file_id), 0, "a file is created");
     handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
     TEST_ASSERT(handle != NULL, "and opened");
     for (uint64_t at = 0; at < STAND_PLOT_RUN_BYTES; at += TAGFS_BLOCK_SIZE) {
