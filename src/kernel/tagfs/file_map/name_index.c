@@ -1,7 +1,7 @@
 #include "name_index.h"
 #include "klib.h"
 
-#define NAME_INDEX_FIRST_BUCKETS 256u
+#define NAME_INDEX_FIRST_BUCKETS 64u
 
 /* FNV-1a, 32 bits, of the bytes of a name or a word. */
 static uint32_t NameHash(const char* text, size_t length)

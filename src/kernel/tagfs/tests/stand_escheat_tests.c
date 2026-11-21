@@ -197,6 +197,7 @@ static TestResult TestStandEscheatTail(void)
     TEST_ASSERT(StandFreshHolds(&m, fid), "and reads the block before the tail");
     TEST_ASSERT(StandStitchRemount() && StandEscheatSize(fid) == TAGFS_BLOCK_SIZE && StandFreshHolds(&m, fid),
                 "mounted again, the same");
+    TEST_ASSERT(StandNamesExact(), "and the name index agrees with every card, the file's record put again");
 out:
     BlockFailDisarm();
     StandFreshModelLetGo(&m);

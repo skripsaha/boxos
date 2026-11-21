@@ -517,8 +517,8 @@ def RibbonCases(bt):
 
     def Slip(o):
         """A file of 100 bytes born a hole and a Slip, and 50 more by a second
-        Slip — its stem coined and worn as every file of the volume wears its
-        own, so the guest finds it by name."""
+        Slip — a tag coined with it and worn, so the guest finds it by the
+        tag as well as by its name."""
         pen = bt.Pen(o)
         pen.Sew([stitch.Coined(bt.tag, b"slip"),
                  stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=100, created_ns=1, modified_ns=1,

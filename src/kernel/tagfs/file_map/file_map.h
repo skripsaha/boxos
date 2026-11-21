@@ -106,9 +106,16 @@ uint32_t FileMapNamed(FileMap* map, const char* word, size_t length, uint64_t fr
 uint32_t FileMapSlipped(FileMap* map, uint64_t from, uint64_t* out, uint32_t room);
 
 /* The files in the map, and the bytes of kernel heap it holds for them: its
- * nodes and its records. */
+ * nodes, its records and the table of its name index. */
 uint32_t FileMapCount(FileMap* map);
 size_t   FileMapBytes(FileMap* map);
+
+#ifdef CONFIG_VOLUME_TESTS
+/* How many links the name index holds — one for the whole of the name of each
+ * file in it and one for its stem, where it has one: the stand's measure that
+ * no record put or let go left a link behind (stand_name_tests.c). */
+uint32_t FileMapNameLinks(FileMap* map);
+#endif
 
 /* The files whose record holds Slips (tail_slip.h) — each keeps a block
  * promised to the Engross that lays its tail (block_map.h, AllotmentPromised):

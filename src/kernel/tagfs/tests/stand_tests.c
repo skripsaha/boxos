@@ -50,10 +50,19 @@ const char* StandStepsAsideFor(void)
 
 bool StandMakeFile(const char* name, const void* data, uint32_t bytes, uint64_t* out_file_id)
 {
+    return StandMakeTaggedFile(name, NULL, data, bytes, out_file_id);
+}
+
+bool StandMakeTaggedFile(const char* name, const char* tag, const void* data, uint32_t bytes,
+                         uint64_t* out_file_id)
+{
     uint64_t file_id = 0;
+    uint32_t tag_id  = TAGFS_INVALID_TAG_ID;
 
     *out_file_id = 0;
-    if (tagfs_create_file(name, NULL, 0, &file_id) != 0)
+    if (tag && tagfs_tag_intern(tag, &tag_id) != OK)
+        return false;
+    if (tagfs_create_file(name, tag ? &tag_id : NULL, tag ? 1 : 0, &file_id) != 0)
         return false;
     if (bytes > 0 && TestFileWrite(file_id, data, bytes) != (int)bytes) {
         tagfs_delete_file(file_id, INK_UNWARRANTED);

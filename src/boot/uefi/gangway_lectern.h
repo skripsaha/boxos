@@ -123,15 +123,16 @@ typedef enum {
  * A file the loader asks the volume for — beside the kernel, in the same
  * reading of the book: by its `name` (NUL-terminated) — the first made (the
  * least fid) of the files the book names so that it does not keep deleted —
- * or, with `ntags` of `tags`, by the tags the person asked for: of the scenes
+ * or, with `ntags` of `tags`, by the words the person asked for: of the scenes
  * (files called *.scene, BOX_SCENE_SUFFIX) the book does not keep deleted
- * that carry every one of them, the one `pick` falls on, counted by fid. The
+ * that match every one of them — wear it as a tag, or are called it, the
+ * whole name or its stem — the one `pick` falls on, counted by fid. The
  * most bytes `most` it takes, asked; what it is found to be, answered — when
  * it is read, its `size` bytes in `bytes`, the desk's room of `room` bytes,
  * the caller's to give back, and its `fid`. Its blocks are held to the book
  * as a kernel's are and the Slips of the ribbon laid on its last. No two
  * asked by name are called the same. A tag is the person's: none is read but
- * those a person's settings ask for.
+ * those a person's settings ask for, and a name is no tag.
  */
 typedef struct LecternCalled {
     const char        *name;

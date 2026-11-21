@@ -203,12 +203,12 @@ out:
 // ----------------------------------------------------------------------------
 // A delete of a file the system keeps: by its role, and no tag
 //
-// The file is named system.standw — its name's tag is the bare key system — and
-// wears system:standwarrant besides: words of its user's, which keep nothing. A
-// rename takes its name's tag off and an untag of the key both, with no warrant,
-// and a delete of the file is taken. Kept in the system's role, the same file
-// is refused its delete without the warrant, and an untag or a rename changes
-// nothing of that.
+// The file is named system.standw — a name is a field of its card and wears no
+// tag, the bare key system no more than another — and wears system:standwarrant:
+// words of its user's, which keep nothing. A rename and an untag of the key
+// are taken with no warrant, and a delete of the file is taken. Kept in the
+// system's role, the same file is refused its delete without the warrant, and
+// an untag or a rename changes nothing of that.
 // ----------------------------------------------------------------------------
 
 static TestResult TestStandWarrantDeleteUntagRename(void)
@@ -217,7 +217,7 @@ static TestResult TestStandWarrantDeleteUntagRename(void)
     uint64_t   file_id = 0;
 
     TEST_ASSERT(StandMakeFile("system.standw", NULL, 0, &file_id), "a file named system.standw");
-    TEST_ASSERT(StandWears(file_id, "system"), "its name's tag is system");
+    TEST_ASSERT(!StandWears(file_id, "system"), "its name is no tag: it wears none of the key system");
     TEST_ASSERT_OK(StandPutOn(file_id, "system:standwarrant"), "and it wears system:standwarrant");
     TEST_ASSERT_EQ(tagfs_delete_file(file_id, INK_UNWARRANTED), 0,
                    "a delete with no warrant is taken: the words keep nothing");
@@ -227,8 +227,8 @@ static TestResult TestStandWarrantDeleteUntagRename(void)
     TEST_ASSERT_OK(StandPutOn(file_id, "system:standwarrant"), "wearing system:standwarrant");
     TEST_ASSERT_OK(StandKeepInRole(file_id, TAGFS_FILE_ROLE_SYSTEM), "kept in the system's role");
     TEST_ASSERT_EQ(tagfs_rename_file(file_id, "standwarrant.r"), 0, "a rename with no warrant is taken");
-    TEST_ASSERT(!StandWears(file_id, "system") && StandWears(file_id, "standwarrant"),
-                "its name's tag moved with it");
+    TEST_ASSERT(!StandWears(file_id, "system") && !StandWears(file_id, "standwarrant"),
+                "a rename moves no tag: the file wears neither name's key");
     TEST_ASSERT_EQ(StandTakeOff(file_id, "system"), 0, "an untag of the key system is taken");
     TEST_ASSERT(!StandWears(file_id, "system:standwarrant"), "and the file wears no tag of it");
     TEST_ASSERT_EQ(tagfs_delete_file(file_id, INK_UNWARRANTED), -(int)ERR_PERMISSION_DENIED,
@@ -466,8 +466,8 @@ out:
 // Any tag goes on any file, with no warrant
 //
 // The words system, boot and god, with a value or none, are tags a user may put
-// on any file, through the volume's road and the deck's, and a rename whose
-// name's tag is system is a rename: none of them makes the file one the system
+// on any file, through the volume's road and the deck's, and a rename to
+// system.standt is a rename: none of them makes the file one the system
 // keeps, and the file stays its owner's — it is written with no warrant. Only
 // the role of its record keeps a file, and the role is put on by the system
 // alone (StandKeepInRole stands for the image builder): then the same write is
@@ -490,9 +490,8 @@ static TestResult TestStandWarrantAnyTagPutOn(void)
         TEST_ASSERT(StandWears(file_id, words[i]), "and the file wears it");
     }
     TEST_ASSERT_EQ(tagfs_rename_file(file_id, "system.standt"), 0,
-                   "a rename whose name's tag is system, with no warrant, is taken too");
-    TEST_ASSERT(StandWears(file_id, "system") && !StandWears(file_id, "stand_warrant_t"),
-                "and the file's name's tag is system");
+                   "a rename to system.standt, with no warrant, is taken too");
+    TEST_ASSERT(StandWears(file_id, "system"), "and the file wears the tags it wore: a name is no tag");
     TEST_ASSERT_EQ(StandWarrantJob(WRITE_JOB_WRITE, file_id, INK_UNWARRANTED, g_test_output,
                                    TAGFS_BLOCK_SIZE, 0),
                    OK, "the file is still its owner's: a write with no warrant is taken");

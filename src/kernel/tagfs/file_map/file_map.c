@@ -731,6 +731,16 @@ uint32_t FileMapCount(FileMap* map)
     return files;
 }
 
+#ifdef CONFIG_VOLUME_TESTS
+uint32_t FileMapNameLinks(FileMap* map)
+{
+    TagFSLockTake(&map->lock);
+    uint32_t links = map->names.links;
+    TagFSLockDrop(&map->lock);
+    return links;
+}
+#endif
+
 uint64_t FileMapSlips(const FileMap* map)
 {
     return map ? __atomic_load_n(&map->slips, __ATOMIC_ACQUIRE) : 0;
@@ -739,7 +749,8 @@ uint64_t FileMapSlips(const FileMap* map)
 size_t FileMapBytes(FileMap* map)
 {
     TagFSLockTake(&map->lock);
-    size_t bytes = (size_t)map->nodes * sizeof(FileMapNode) + (size_t)map->record_bytes;
+    size_t bytes = (size_t)map->nodes * sizeof(FileMapNode) + (size_t)map->record_bytes +
+                   (size_t)map->names.buckets * sizeof(NameLink*);
     TagFSLockDrop(&map->lock);
     return bytes;
 }
