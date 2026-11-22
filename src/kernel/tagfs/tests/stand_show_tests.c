@@ -5,6 +5,12 @@
 #include "../tagfs.h"
 #include "../retire/retire.h"
 #include "../settle/settle.h"
+#include "storage_tags.h"   /* StorageMaySpeak, StorageViewAll — the deck's one judge */
+#include "op_registry.h"
+#include "boxos_decks.h"
+#include "process.h"
+#include "cabin.h"
+#include "auth_tags.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -20,10 +26,17 @@
 // a reader that leaves taken out of the lists, a program that leaves taking
 // its list with it. And the asks: a note a pair, gone with the answer — yes,
 // no, yes to every program —, with either program leaving, and with a mount.
+// And the deck's judge, asked as a cabin of the editor asks it: its own tags,
+// another program's seen when shown and by the person's eyes, taken off by
+// the person's hands, put on by nobody else; the view of every owner it may
+// see; and storage.tag.show itself.
 // ============================================================================
 
 #define STAND_SHOW_TERM_S  3600ull
 #define STAND_SHOW_ROOM    8u
+
+static process_t s_show_proc;
+static cabin_t   s_show_cabin;
 
 typedef struct {
     uint64_t editor;
@@ -280,6 +293,151 @@ out:
     return verdict;
 }
 
+/* A caller of the deck that is the program `program` of the volume mounted,
+ * its box asking `auth`. */
+static OpContext StandShowCaller(uint64_t program, uint32_t auth)
+{
+    OpContext ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    memset(&s_show_proc, 0, sizeof(s_show_proc));
+    memset(&s_show_cabin, 0, sizeof(s_show_cabin));
+    s_show_cabin.program_fid = program;
+    s_show_cabin.auth_bits   = auth;
+    memcpy(s_show_cabin.program_volume, tagfs_get_state()->uuid, sizeof(s_show_cabin.program_volume));
+    s_show_proc.cabin = &s_show_cabin;
+    ctx.proc          = &s_show_proc;
+    return ctx;
+}
+
+static TestResult TestStandShowJudge(void)
+{
+    TestResult verdict = TEST_PASS;
+    StandShow  s;
+    TEST_ASSERT(StandShowMake(&s), "an editor, a player, a converter and another program");
+    OpContext      ctx    = StandShowCaller(s.editor, AUTH_TAG_APP);
+    const TagOwner own    = TagOwnerProgram(s.editor);
+    const TagOwner player = TagOwnerProgram(s.player);
+    TEST_ASSERT(StorageMaySpeak(&ctx, own, STORAGE_SEE) == OK && StorageMaySpeak(&ctx, own, STORAGE_PUT) == OK &&
+                StorageMaySpeak(&ctx, own, STORAGE_TAKE) == OK, "the editor speaks its own tags every way");
+    TEST_ASSERT(StorageMaySpeak(&ctx, player, STORAGE_SEE) == ERR_ACCESS_DENIED &&
+                StorageMaySpeak(&ctx, player, STORAGE_PUT) == ERR_ACCESS_DENIED &&
+                StorageMaySpeak(&ctx, player, STORAGE_TAKE) == ERR_ACCESS_DENIED,
+                "the player's tags it neither sees, puts on nor takes off");
+    TEST_ASSERT(StorageMaySpeak(&ctx, TagOwnerPerson(), STORAGE_SEE) == ERR_ACCESS_DENIED,
+                "nor sees the person's, its box asking nothing");
+    TEST_ASSERT_OK(TagFSShowTags(s.player, s.editor, true), "the player shows its tags to the editor");
+    TEST_ASSERT(StorageMaySpeak(&ctx, player, STORAGE_SEE) == OK &&
+                StorageMaySpeak(&ctx, player, STORAGE_PUT) == ERR_ACCESS_DENIED &&
+                StorageMaySpeak(&ctx, player, STORAGE_TAKE) == ERR_ACCESS_DENIED,
+                "shown them, the editor sees them, and still puts on and takes off none");
+    ctx = StandShowCaller(s.editor, AUTH_TAG_APP | AUTH_TAG_SEE_TAGS);
+    TEST_ASSERT(StorageMaySpeak(&ctx, TagOwnerProgram(s.converter), STORAGE_SEE) == OK &&
+                StorageMaySpeak(&ctx, TagOwnerPerson(), STORAGE_SEE) == OK &&
+                StorageMaySpeak(&ctx, TagOwnerProgram(s.converter), STORAGE_TAKE) == ERR_ACCESS_DENIED &&
+                StorageMaySpeak(&ctx, TagOwnerPerson(), STORAGE_PUT) == ERR_ACCESS_DENIED,
+                "the person's eyes see every program's tags and the person's, and change none");
+    ctx = StandShowCaller(s.editor, AUTH_TAG_APP | AUTH_TAG_CHANGE_TAGS);
+    TEST_ASSERT(StorageMaySpeak(&ctx, TagOwnerProgram(s.converter), STORAGE_TAKE) == OK &&
+                StorageMaySpeak(&ctx, TagOwnerProgram(s.converter), STORAGE_PUT) == ERR_ACCESS_DENIED &&
+                StorageMaySpeak(&ctx, TagOwnerPerson(), STORAGE_PUT) == OK,
+                "the person's hands take a program's mark off, put none on, and change the person's");
+    ctx = StandShowCaller(0, AUTH_TAG_APP);
+    TEST_ASSERT(StorageMaySpeak(&ctx, TagOwnerProgram(0), STORAGE_SEE) == ERR_TAGFS_NO_OWN_TAGS &&
+                StorageMaySpeak(&ctx, player, STORAGE_SEE) == ERR_ACCESS_DENIED,
+                "a program started from bytes has no tags of its own, and none shown it");
+    ctx = StandShowCaller(s.editor, AUTH_TAG_APP);
+    s_show_cabin.program_volume[0] ^= 0xFFu;
+    TEST_ASSERT(StorageMaySpeak(&ctx, own, STORAGE_SEE) == ERR_TAGFS_NO_OWN_TAGS &&
+                StorageMaySpeak(&ctx, player, STORAGE_SEE) == ERR_ACCESS_DENIED,
+                "nor one started from another volume, whose file this one's id does not name");
+out:
+    StandShowClean(&s);
+    return verdict;
+}
+
+static TestResult TestStandShowViewAll(void)
+{
+    TestResult verdict = TEST_PASS;
+    StandShow  s;
+    TagView    view;
+    uint64_t*  shown = NULL;
+    TEST_ASSERT(StandShowMake(&s), "an editor, a player, a converter and another program");
+    TEST_ASSERT_OK(TagFSShowTags(s.player, s.editor, true), "the player shows its tags to the editor");
+    TEST_ASSERT_OK(TagFSShowTags(s.converter, 0, true), "the converter to every program");
+    OpContext ctx = StandShowCaller(s.editor, AUTH_TAG_APP);
+    TEST_ASSERT_OK(StorageViewAll(&ctx, &view, &shown), "the editor's view of every owner it may see");
+    TEST_ASSERT(TagViewLets(&view, TagOwnerProgram(s.editor)) && TagViewLets(&view, TagOwnerProgram(s.player)) &&
+                TagViewLets(&view, TagOwnerProgram(s.converter)), "its own, and those shown it by name and to all");
+    TEST_ASSERT(!TagViewLets(&view, TagOwnerProgram(s.other)) && !TagViewLets(&view, TagOwnerPerson()),
+                "and not the other program's, nor the person's");
+    kfree(shown);
+    shown = NULL;
+    ctx = StandShowCaller(s.editor, AUTH_TAG_APP | AUTH_TAG_SEE_TAGS);
+    TEST_ASSERT_OK(StorageViewAll(&ctx, &view, &shown), "the view with the person's eyes");
+    TEST_ASSERT(TagViewLets(&view, TagOwnerProgram(s.other)) && TagViewLets(&view, TagOwnerPerson()),
+                "every program's and the person's");
+out:
+    kfree(shown);
+    StandShowClean(&s);
+    return verdict;
+}
+
+static TestResult TestStandShowDeck(void)
+{
+    TestResult verdict = TEST_PASS;
+    StandShow  s;
+    uint8_t    params[17];
+    TagFSPage  page;
+    uint64_t   asked[1];
+    TEST_ASSERT(StandShowMake(&s), "an editor, a player, a converter and another program");
+    OpContext ctx = StandShowCaller(s.editor, AUTH_TAG_APP);
+    params[0]     = STORAGE_SHOW_TO;
+    memcpy(params + 1, &s.player, 8);
+    TEST_ASSERT_OK(StandDeckAsk(STORAGE_TAG_SHOW, params, 9, NULL, 0, &ctx), "the editor shows the player its tags");
+    TEST_ASSERT(TagFSShows(s.editor, s.player), "and the player is shown");
+    params[0] = STORAGE_HIDE_FROM;
+    TEST_ASSERT_OK(StandDeckAsk(STORAGE_TAG_SHOW, params, 9, NULL, 0, &ctx), "and hides them again");
+    TEST_ASSERT(!TagFSShows(s.editor, s.player), "and the player is not shown");
+    params[0] = 7;
+    TEST_ASSERT_EQ(StandDeckAsk(STORAGE_TAG_SHOW, params, 9, NULL, 0, &ctx), ERR_INVALID_ARGUMENT,
+                   "an act the deck does not know is refused");
+    ctx       = StandShowCaller(s.player, AUTH_TAG_APP);
+    params[0] = STORAGE_ASK_TO_SEE;
+    memcpy(params + 1, &s.editor, 8);
+    TEST_ASSERT_OK(StandDeckAsk(STORAGE_TAG_SHOW, params, 9, NULL, 0, &ctx), "the player asks the editor");
+    TEST_ASSERT(TagFSAsksPage(s.editor, 1, asked, 1, false, &page) == OK && page.delivered == 1 &&
+                asked[0] == s.player, "and the editor holds its note");
+    ctx = StandShowCaller(0, AUTH_TAG_APP | AUTH_TAG_CHANGE_TAGS);
+    TEST_ASSERT_EQ(StandDeckAsk(STORAGE_TAG_SHOW, params, 9, NULL, 0, &ctx), ERR_TAGFS_NO_OWN_TAGS,
+                   "a program started from bytes has no list to show nor a name to ask by, whatever its box asks");
+
+    /* tag.set and tag.unset judge before they read the tag they bring: one
+     * the judge lets through is refused for the tag it did not bring. */
+    ctx = StandShowCaller(s.editor, AUTH_TAG_APP);
+    memcpy(params, &s.converter, 8);
+    params[8] = STORAGE_TAGS_PROGRAM;
+    memcpy(params + 9, &s.player, 8);
+    TEST_ASSERT_EQ(StandDeckAsk(STORAGE_TAG_SET, params, 17, NULL, 0, &ctx), ERR_ACCESS_DENIED,
+                   "the editor puts none of the player's tags on a file");
+    TEST_ASSERT_EQ(StandDeckAsk(STORAGE_TAG_UNSET, params, 17, NULL, 0, &ctx), ERR_ACCESS_DENIED,
+                   "nor takes one off");
+    ctx = StandShowCaller(s.editor, AUTH_TAG_APP | AUTH_TAG_CHANGE_TAGS);
+    TEST_ASSERT_EQ(StandDeckAsk(STORAGE_TAG_UNSET, params, 17, NULL, 0, &ctx), ERR_INVALID_ARGUMENT,
+                   "the person's hands take it off: past the judge, refused for the tag they did not name");
+    TEST_ASSERT_EQ(StandDeckAsk(STORAGE_TAG_SET, params, 17, NULL, 0, &ctx), ERR_ACCESS_DENIED,
+                   "and put none on");
+    params[8] = STORAGE_TAGS_ALL;
+    TEST_ASSERT_EQ(StandDeckAsk(STORAGE_TAG_UNSET, params, 9, NULL, 0, &ctx), ERR_INVALID_ARGUMENT,
+                   "every owner's at once is no owner to take a tag of");
+    params[8] = STORAGE_TAGS_PROGRAM;
+    memset(params + 9, 0, 8);
+    TEST_ASSERT_EQ(StandDeckAsk(STORAGE_TAG_UNSET, params, 17, NULL, 0, &ctx), ERR_INVALID_ARGUMENT,
+                   "nor program 0");
+out:
+    StandShowClean(&s);
+    return verdict;
+}
+
 /* The card through a mount: off the ribbon, then — `tally` — off a Tally. */
 static TestResult StandShowAfterMount(bool tally)
 {
@@ -329,6 +487,9 @@ static const TestCase g_stand_show_tests[] = {
     { .name = "stand_show_asks", .func = TestStandShowAsks, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_show_asks_every", .func = TestStandShowAsksEvery, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_show_asks_forgotten", .func = TestStandShowAsksForgotten, .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_show_judge", .func = TestStandShowJudge, .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_show_view_all", .func = TestStandShowViewAll, .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_show_deck", .func = TestStandShowDeck, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_show_ribbon_replay", .func = TestStandShowRibbonReplay, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_show_tally_holds", .func = TestStandShowTallyHolds, .reach = TEST_WRITES_TO_VOLUME },
 };

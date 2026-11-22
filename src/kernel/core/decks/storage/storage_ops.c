@@ -406,9 +406,11 @@ error_t StorageDeckRegister(void)
         { STORAGE_NAME_QUERY,   ObjNameQuery,    OP_AUTH_APP, "storage.name.query" },
         { STORAGE_OBJ_READ,     ObjRead,         OP_AUTH_APP, "storage.read"     },
         { STORAGE_OBJ_GET_INFO, ObjGetInfo,      OP_AUTH_APP, "storage.getinfo"  },
+        { STORAGE_TAG_SHOWN,    ObjTagShown,     OP_AUTH_APP, "storage.tag.shown" },
         /* Mutating: app+ — TagFS context further restricts what's visible. */
         { STORAGE_TAG_SET,      ObjTagSet,       OP_AUTH_APP, "storage.tag.set"  },
         { STORAGE_TAG_UNSET,    ObjTagUnset,     OP_AUTH_APP, "storage.tag.unset"},
+        { STORAGE_TAG_SHOW,     ObjTagShow,      OP_AUTH_APP, "storage.tag.show" },
         { STORAGE_OBJ_WRITE,    ObjWrite,        OP_AUTH_APP, "storage.write"    },
         { STORAGE_OBJ_CREATE,   ObjCreate,       OP_AUTH_APP, "storage.create"   },
         { STORAGE_OBJ_DELETE,   ObjDelete,       OP_AUTH_APP, "storage.delete"   },

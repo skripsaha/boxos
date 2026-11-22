@@ -79,6 +79,54 @@ static inline bool TagOwnerSame(TagOwner a, TagOwner b)
     return a.kind == b.kind && a.id == b.id;
 }
 
+/* The owner as the deck's answers name it (boxos_decks.h): 0 the person, a
+ * program its file's id. */
+static inline uint64_t TagOwnerWord(TagOwner owner)
+{
+    return owner.kind == TAG_OWNER_PROGRAM ? owner.id : 0;
+}
+
+/*
+ * Whose tags a list lets in. One owner's (`all` false: `owner`), or every
+ * owner its asker may see (`all`): the asker's own — `reader`, its program's
+ * file, 0 for none —, those of the programs that show their tags to it
+ * (`shown`, rising, `nshown` of them), and with `everyone` the person's and
+ * every program's: the person's eyes (storage_tags.c).
+ */
+typedef struct {
+    bool            all;
+    bool            everyone;
+    TagOwner        owner;
+    uint64_t        reader;
+    const uint64_t* shown;
+    uint32_t        nshown;
+} TagView;
+
+static inline TagView TagViewOf(TagOwner owner)
+{
+    return (TagView){ .all = false, .owner = owner };
+}
+
+/* Whether `view` lets `owner`'s tags in. */
+static inline bool TagViewLets(const TagView* view, TagOwner owner)
+{
+    if (!view->all)
+        return TagOwnerSame(owner, view->owner);
+    if (view->everyone)
+        return true;
+    if (owner.kind != TAG_OWNER_PROGRAM)
+        return false;
+    if (view->reader && owner.id == view->reader)
+        return true;
+    uint32_t lo = 0, hi = view->nshown;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2u;
+        if (view->shown[mid] < owner.id) lo = mid + 1u;
+        else                             hi = mid;
+    }
+    return lo < view->nshown && view->shown[lo] == owner.id;
+}
+
 /* key and value are NUL-terminated copies, their lengths kept beside them so
  * a record is packed from what was measured once, never cut by a cast. */
 typedef struct TagRegistryEntry {
@@ -607,10 +655,12 @@ error_t  TagFSNamedPage(TagOwner owner, const char* word, size_t length, const T
  * a name of no bytes. Every word starts at `name`. */
 uint32_t TagFSNameWords(const char* name, size_t length, size_t lengths[2]);
 /*
- * `owner`'s tags files wear, a page at a time and in the order of their numbers
- * (query/query.c): from the tag numbered `from` on, every tag of `owner`'s at
- * least one live file wears — one of the files that wear all of `within` and
- * none of `without`, as TagFSQueryPage asks — with how many of them do, written into
+ * The tags of `view` files wear, a page at a time and in the order of their
+ * numbers (query/query.c): from the tag numbered `from` on, every tag `view`
+ * lets in at least one live file wears — of one owner's, one of the files
+ * that wear all of `within` and none of `without`, that owner's tags, as
+ * TagFSQueryPage asks; a view of every owner asks neither
+ * (ERR_INVALID_ARGUMENT) — with how many of them do and whose it is, written into
  * `out` as STORAGE_TAG_LIST records (boxos_decks.h) while they fit its `room`
  * bytes. A tag no such file wears — a process's, a Touch's, a Bay's, which the
  * registry names too — is passed over. *used the bytes written, *delivered the
@@ -618,7 +668,7 @@ uint32_t TagFSNameWords(const char* name, size_t length, size_t lengths[2]);
  * OK, or the refusal: ERR_TAGFS_NOT_INITIALIZED with no volume, ERR_NO_MEMORY,
  * or ERR_BUFFER_TOO_SMALL when not even the first record fits.
  */
-error_t  TagFSTagPage(TagOwner owner, const TagSpelling* within, uint32_t within_count,
+error_t  TagFSTagPage(const TagView* view, const TagSpelling* within, uint32_t within_count,
                       const TagSpelling* without, uint32_t without_count, uint32_t from, uint8_t* out,
                       uint32_t room, uint32_t* used, uint32_t* delivered, uint32_t* next);
 /* The file id the next create takes — no id of this volume has reached it.
