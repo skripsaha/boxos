@@ -36,6 +36,7 @@
 #include <string>
 #include <string_view>
 
+#include "box/cxx/whose.h"
 #include "box/error.h"
 #include "box/file.h"
 #include "box/form.h"
@@ -78,7 +79,8 @@ std::string Why(std::int64_t Code)
 std::expected<std::string, std::string> ReadText(file_id_t File)
 {
     FileMetadata Metadata;
-    if (const int Code = FileMetadataRead(File, &Metadata); Code != 0) return std::unexpected("it could not be looked at: " + Why(Code));
+    if (const int Code = FileMetadataRead(box::tagfs::my_tags, File, &Metadata); Code != 0)
+        return std::unexpected("it could not be looked at: " + Why(Code));
     const std::uint64_t Size = Metadata.Size;
     FileMetadataRelease(&Metadata);
     std::string Text(static_cast<std::size_t>(std::min<std::uint64_t>(Size, 64 * 1024)), '\0');
@@ -118,28 +120,30 @@ bool TakeWords(const char *const *Words, std::size_t Count, Composition &Lamp)
     return true;
 }
 
-/* Where the lamp goes when it is kept: the file of that name when it is a
- * lamp kept before, 0 for one to be made. A sentence when the name is taken
- * by something else, or by more than one file. */
+/* Where the lamp goes when it is kept: the file of that name on the volume
+ * when it is a lamp kept before, 0 for one to be made. A sentence when the
+ * name is taken by something else, or by more than one file. A name looked up
+ * alone speaks nobody's tags. */
 std::expected<file_id_t, std::string> KeepingPlace(const std::string &Name)
 {
     file_id_t Found[2];
-    const int Count = find_file_by_name(Name.c_str(), nullptr, Found, nullptr, 2);
+    const int Count = find_file_by_name(box::tagfs::my_tags, Name.c_str(), nullptr, Found, nullptr, 2);
     if (Count < 0) return std::unexpected(std::format("could not look for {}: {}", Name, Why(Count)));
     if (Count == 0) return file_id_t{0};
-    if (Count > 1) return std::unexpected(std::format("{} files are called {} here: give the lamp another name", Count, Name));
+    if (Count > 1)
+        return std::unexpected(std::format("{} files are called {} on the volume: give the lamp another name", Count, Name));
     const std::expected<std::string, std::string> Text = ReadText(Found[0]);
     if (!Text) return std::unexpected(std::format("{} is here and {}", Name, Text.error()));
     if (!IsLamp(*Text)) return std::unexpected(std::format("{} is here and is not a lamp: give the lamp another name", Name));
     return Found[0];
 }
 
-/* The lamp written into its file — made in the Use Context when there is
- * none — settled on the medium, and given back. */
+/* The lamp written into its file — made, wearing no tag, when there is none —
+ * settled on the medium, and given back. */
 std::optional<std::string> Keep(const std::string &Name, file_id_t File, const Composition &Lamp)
 {
     if (File == 0) {
-        const std::int64_t Made = create(Name.c_str(), nullptr);
+        const std::int64_t Made = create(box::tagfs::my_tags, Name.c_str(), nullptr);
         if (Made <= 0) return std::format("{} was not made: {}", Name, Why(Made));
         File = static_cast<file_id_t>(Made);
     }
