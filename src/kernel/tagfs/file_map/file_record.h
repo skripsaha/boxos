@@ -139,9 +139,10 @@ typedef struct FileRecord {
     /* With TAGFS_FILE_HEAD, the file's first bytes: min(size, TAGFS_HEAD_MOST)
      * of them, exact through every change of what the file holds — the Ink
      * that makes the change sets them (FileRecordHeadSet) before the record is
-     * shared; head_len 0 for a file of no bytes. */
-    uint8_t            head[TAGFS_HEAD_MOST];
+     * shared; head_len 0 for a file of no bytes. Laid beside shown_count, in
+     * the room it leaves before the pointers. */
     uint8_t            head_len;
+    uint8_t            head[TAGFS_HEAD_MOST];
     const uint32_t*    tags;         /* these three point into the header's allocation */
     const char*        name;         /* NUL-terminated */
 #ifdef CONFIG_VOLUME_TESTS
