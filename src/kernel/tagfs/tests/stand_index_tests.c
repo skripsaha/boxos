@@ -288,17 +288,17 @@ static int StandIndexDeckQuery(const char* text, uint32_t room, uint64_t* out_si
 {
     const OpRegistration* reg   = OpRegistryLookup(OP_KIND(DECK_STORAGE, STORAGE_NAME_QUERY));
     ManifestOp*           op    = (ManifestOp*)s_query_op;
-    uint8_t               scope = STORAGE_SCOPE_EVERYWHERE;
+    const uint8_t         head[2] = { STORAGE_SCOPE_EVERYWHERE, STORAGE_TAGS_PERSON };
 
     *out_size = 0;
     if (!reg)
         return ERR_NOT_INITIALIZED;
     memset(s_query_op, 0, sizeof(s_query_op));
     op->op_kind    = OP_KIND(DECK_STORAGE, STORAGE_NAME_QUERY);
-    op->param_size = 1;
+    op->param_size = sizeof(head);
     op->in_crate   = 0;
     op->out_crate  = 1;
-    memcpy(op->params, &scope, 1);
+    memcpy(op->params, head, sizeof(head));
     s_query_crates[0] = (Crate){ .magic = CRATE_MAGIC, .addr = (uint64_t)(uintptr_t)text,
                                  .size = strlen(text), .capacity = strlen(text) };
     s_query_crates[1] = (Crate){ .magic = CRATE_MAGIC, .addr = (uint64_t)(uintptr_t)s_crate,

@@ -484,8 +484,9 @@ static TestResult TestRibbonShown(void)
     TEST_ASSERT(got.what == put.what && got.keep_ns == put.keep_ns && got.nshown == 3 && ids[0] == 0 &&
                 ids[1] == 77 && ids[2] == 900 && used == len, "its list after its term, every program first");
     TEST_ASSERT_EQ(RibbonLabeledGet(body, len - 1u, &got, &used), TALLY_BODY_BROKEN, "SHOWN cut short does not read");
-    put.what   = LABEL_SHOWN;
-    put.nshown = 0;
+    put.what        = LABEL_SHOWN;
+    put.nshown      = 0;
+    put.shown_bytes = 0;
     len = RibbonLabeledBodyPut(body, &put);
     TEST_ASSERT(RibbonLabeledGet(body, len, &got, &used) == TALLY_BODY_KNOWN && got.nshown == 0,
                 "a list of none reads: the file shows nothing");

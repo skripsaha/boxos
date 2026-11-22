@@ -43,11 +43,16 @@ uint64_t StorageReader(const OpContext *ctx)
 /* Whether the caller's box asked to see the person's tags — `change` to
  * change them — read off its authority as it stands when the call is taken:
  * the person's eyes see every mark on the person's files, and the person's
- * hands take one off. */
+ * hands take one off. A call no cabin makes is the kernel's own — every
+ * program's call comes through its cabin —, and the kernel speaks as the
+ * system, the person's eyes and hands its own; it has no tags of its own,
+ * being no program (StorageMaySpeak). */
 bool StoragePersonSays(const OpContext *ctx, bool change)
 {
     const cabin_t *cabin = ctx && ctx->proc ? ctx->proc->cabin : NULL;
-    uint32_t       auth  = cabin ? __atomic_load_n(&cabin->auth_bits, __ATOMIC_RELAXED) : 0;
+    if (!cabin)
+        return true;
+    uint32_t auth = __atomic_load_n(&cabin->auth_bits, __ATOMIC_RELAXED);
     return (auth & (change ? AUTH_TAG_CHANGE_TAGS : (AUTH_TAG_SEE_TAGS | AUTH_TAG_CHANGE_TAGS))) != 0;
 }
 
@@ -106,13 +111,12 @@ static error_t StorageWhose(const ManifestOp *op, size_t at, const OpContext *ct
  * (TagFSShows) and by the person's eyes, taken off a file by the person's
  * hands, put on by nobody but that program. The person's: seen by the
  * person's eyes, changed by the person's hands (StoragePersonSays):
- * ERR_ACCESS_DENIED otherwise.
+ * ERR_ACCESS_DENIED otherwise. The kernel's own call — no cabin — is the
+ * person's eyes and hands, and has no tags of its own.
  */
 error_t StorageMaySpeak(const OpContext *ctx, TagOwner owner, StorageSpeech speech)
 {
     const cabin_t *cabin = ctx && ctx->proc ? ctx->proc->cabin : NULL;
-    if (!cabin)
-        return ERR_ACCESS_DENIED;
     if (owner.kind == TAG_OWNER_PERSON)
         return StoragePersonSays(ctx, speech != STORAGE_SEE) ? OK : ERR_ACCESS_DENIED;
     uint64_t self = CabinProgramFile(cabin);
