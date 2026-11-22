@@ -22,7 +22,7 @@
 
 #define STAND_INDEX_FILES     64u
 #define STAND_INDEX_SPREAD    (1u << 20)
-#define STAND_INDEX_PER_FILE  320u     /* what the map may cost a live file, its record and the links of its name included */
+#define STAND_INDEX_PER_FILE  352u     /* what the map may cost a live file: its record (made_by in it), the links of its name and its share of the nodes and the name buckets */
 #define STAND_INDEX_PER_MEMBER 64u     /* what a member of a spread tag may cost the index */
 #define STAND_INDEX_MANY      1100u    /* more files than TAGFS_MAX_FILES (1024) held */
 #define STAND_INDEX_PAGE      100u

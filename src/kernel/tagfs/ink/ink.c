@@ -278,8 +278,6 @@ error_t InkMayChange(uint64_t fid, uint32_t flags, const Strip* runs, uint32_t r
     error_t rc = InkVolumeBegins();
     if (rc != OK)
         return rc;
-    if (flags & TAGFS_FILE_DELETED)
-        return ERR_FILE_NOT_FOUND;
     return InkGuard(fid, flags, runs, run_count, NULL, 0, warrant);
 }
 

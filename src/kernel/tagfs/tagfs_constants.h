@@ -95,6 +95,7 @@
 #define TAGFS_HANDLE_READ           (1 << 0)
 #define TAGFS_HANDLE_WRITE          (1 << 1)
 #define TAGFS_HANDLE_APPEND         (1 << 2)   /* every write lands at the file's size */
+#define TAGFS_HANDLE_KEPT           (1 << 3)   /* the volume's own, reaching a file kept in the trash (PlotLoadKept) */
 
 // Registry constants
 #define TAGFS_REG_BUCKETS           512
