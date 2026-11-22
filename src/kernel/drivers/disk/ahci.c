@@ -1275,30 +1275,11 @@ static int ahci_port_init(uint8_t port_num) {
     ahci_id_string(id, 10, 10, port->serial);
     ahci_id_string(id, 23,  4, port->firmware);
 
-    /* Logical sector size: IDENTIFY word 106 is valid when bit 14 is set and
-     * bit 15 clear; bit 12 then says words 117-118 carry the logical sector
-     * size in 16-bit words. Otherwise the logical sector is 256 words. */
-    uint32_t logical = 512;
-    if ((id[106] & (1u << 14)) && !(id[106] & (1u << 15)) && (id[106] & (1u << 12))) {
-        uint32_t words = (uint32_t)id[117] | ((uint32_t)id[118] << 16);
-        if (words >= 256) {
-            logical = words * 2u;
-        }
-    }
-    port->logical_sector_size = logical;
-
-    /* And the physical one. Same word: bit 13 says the drive has more than one
-     * logical sector per physical, and bits 3:0 are the exponent — one
-     * physical block holds 2^N logical ones (ATA8-ACS §7.16.7.74). This is
-     * what a 512e drive uses to say "I am addressed in 512 and built from
-     * 4096", which nothing in this kernel asked until now. */
-    port->physical_sector_size = logical;
-    if ((id[106] & (1u << 14)) && !(id[106] & (1u << 15)) && (id[106] & (1u << 13))) {
-        uint32_t exponent = id[106] & 0x0Fu;
-        if (exponent < 16 && logical <= (0xFFFFFFFFu >> exponent)) {
-            port->physical_sector_size = logical << exponent;
-        }
-    }
+    /* What it is addressed in and built from (ata_identify.h) — a 512e drive
+     * says 512 and 4096, a 4Kn drive 4096 and 4096. */
+    uint32_t logical = AtaIdentifyLogicalBytes(id);
+    port->logical_sector_size  = logical;
+    port->physical_sector_size = AtaIdentifyPhysicalBytes(id, logical);
     port->first_aligned = AtaIdentifyFirstAligned(id, logical, port->physical_sector_size);
 
     port->lba48 = (id[83] & (1u << 10)) != 0;

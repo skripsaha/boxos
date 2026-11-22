@@ -113,6 +113,20 @@ KERNEL_MAX_BYTES    = 33554432  # 32MB (sanity check; bootloader places page tab
 MEDIUM_GRAIN_SECTORS = 2048
 ESP_START_SECTOR     = 2048
 
+# ‼ THE BLOCK THE MEDIUM IS ADDRESSED IN: 512, or MEDIUM_BLOCK=4096 for an
+# image laid out for a 4Kn disk or stick. Every number of its tables counts in
+# that block — the MBR's entries (tools/make_mbr.py --block) and the ESP's FAT,
+# whose sector is the medium's (tools/make_esp.py --sector; the smallest FAT32
+# of 4096-byte sectors is some 260 MB, as on every 4Kn disk) — and the volume
+# is read back in it (volume-read --block). The shape above is in 512-byte
+# sectors either way: every grain of it is whole 4096-byte blocks. `make usb`
+# refuses a medium addressed otherwise than the image was laid out for.
+MEDIUM_BLOCK ?= 512
+MEDIUM_PER    = $(shell echo $$(( $(MEDIUM_BLOCK) / 512 )))
+ifeq ($(filter 512 4096,$(MEDIUM_BLOCK)),)
+$(error MEDIUM_BLOCK=$(MEDIUM_BLOCK): a medium is laid out for 512- or 4096-byte blocks)
+endif
+
 ASM_INCLUDE    = -I$(SRCDIR)/kernel/arch/x86-64/gdt/
 ASMFLAGS       =  -g -f bin
 # Layout facts the image build owns, handed to the assembler rather than
@@ -622,6 +636,10 @@ endif
 
 TOLL_MARK = $(BUILDDIR)/.toll.$(if $(TOLL),$(TOLL),unset)
 
+# The medium's block reaches no compiler: its marker remakes the ESP and the
+# image it is laid out in, and nothing else.
+MEDIUM_BLOCK_MARK = $(BUILDDIR)/.medium_block.$(MEDIUM_BLOCK)
+
 # ── SEEKLAG=<us> ───────────────────────────────────────────────────────────
 #
 # A seek the stand's medium does not make: from the first startup test that
@@ -768,7 +786,8 @@ BUILD_KEYS_SET := $(strip \
   $(if $(PANICSTOP),PANICSTOP=$(PANICSTOP),) \
   $(if $(filter on,$(STRICT)),STRICT=on,) \
   $(if $(filter off,$(NOEXEC)),NOEXEC=off,) \
-  $(if $(filter off,$(IOMMU)),IOMMU=off,))
+  $(if $(filter off,$(IOMMU)),IOMMU=off,) \
+  $(if $(filter 4096,$(MEDIUM_BLOCK)),MEDIUM_BLOCK=4096,))
 BUILD_KEYS := $(if $(BUILD_KEYS_SET),$(BUILD_KEYS_SET),all defaults)
 # LDFLAGS — kernel link
 #   -z max-page-size=0x1000    align segments to page (kernel mappings)
@@ -1231,6 +1250,10 @@ $(SETTLECUT_MARK): | $(BUILDDIR)
 
 $(TOLL_MARK): | $(BUILDDIR)
 	@rm -f $(BUILDDIR)/.toll.*
+	@touch $@
+
+$(MEDIUM_BLOCK_MARK): | $(BUILDDIR)
+	@rm -f $(BUILDDIR)/.medium_block.*
 	@touch $@
 
 $(SEEKLAG_MARK): | $(BUILDDIR)
@@ -1857,7 +1880,7 @@ endef
 $(foreach elf,$(VOLUME_ELFS),$(eval $(call BoxRule,$(elf))))
 
 $(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_BIN) $(HUB_BIN) $(PROCA_BIN) $(PROCB_BIN) $(TODAY_BIN) $(MEMTEST_BIN) $(MTEST_BIN) $(CHAIN_BIN) $(DECKS_BIN) $(BENCH_BIN) $(TOUCH_TEST_BIN) $(TOUCH_STRESS_BIN) $(LIFECYCLE_BIN) $(PERSIST_BIN) $(WRITE_STRESS_BIN) $(WRITE_CONC_BIN) $(WRITE_OBS_BIN) $(ANCHOR_TEST_BIN) $(BAY_TEST_BIN) $(BROOK_TEST_BIN) $(CURRENT_TEST_BIN) $(HTEST_BIN) $(CXXTEST_BIN) $(STRANDTEST_BIN) $(BROOKSTRAND_BIN) $(BROOKEXEC_BIN) $(CURRENTEXEC_BIN) $(CLOCK_BIN) $(PULSE_BIN) $(CALENDAR_BIN) $(BONSAI_BIN) $(BIGCLOCK_BIN) $(SNAKE_BIN) $(HACKER_BIN) $(PIPES_BIN) $(WORDLE_BIN) $(STRANDPARK_BIN) $(CHILDSPIN_BIN) $(PRINT_STRESS_BIN) $(QUIETPRINT_BIN) $(EXITPATHS_BIN) $(QUILLTEST_BIN) $(DISPLAY_BIN) $(UTIL_ELFS) $(TESTBIN_EMPTY) $(TYPECASE_FONTS) $(SCENE_FILES) $(TAGFS_TOOL) \
-         tools/crossings.py $(SRCDIR)/include/boxos_crossings.h
+         tools/crossings.py $(SRCDIR)/include/boxos_crossings.h tools/make_mbr.py $(MEDIUM_BLOCK_MARK)
 	@GROUND=$$($(TAGFS_TOOL) --ground --kernel $(KERNEL_BIN) $(VOLUME_LAID)); \
 	ESP_RAW=$$(( ( $$(stat -f%z $(UEFI_ESP_IMG) 2>/dev/null || stat -c%s $(UEFI_ESP_IMG)) + 511 ) / 512 )); \
 	ESP=$$(( ( $$ESP_RAW + $(MEDIUM_GRAIN_SECTORS) - 1 ) / $(MEDIUM_GRAIN_SECTORS) * $(MEDIUM_GRAIN_SECTORS) )); \
@@ -1872,13 +1895,13 @@ $(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_B
 	echo "  Embedding EFI System Partition at sector $(ESP_START_SECTOR)..."; \
 	dd if=$(UEFI_ESP_IMG) of=$@ bs=512 seek=$(ESP_START_SECTOR) conv=notrunc status=none; \
 	echo "  Writing the partition table (the ESP, then the volume's ground)..."; \
-	python3 tools/make_mbr.py $@ \
+	python3 tools/make_mbr.py $@ --block $(MEDIUM_BLOCK) \
 	    $$START,$$GROUND,7f,boot \
 	    $(ESP_START_SECTOR),$$ESP,ef; \
 	echo "  Laying the crossings in the front (src/include/boxos_crossings.h)..."; \
-	python3 tools/crossings.py lay $@
+	python3 tools/crossings.py lay $@ --block $(MEDIUM_BLOCK)
 	@echo "  Making the volume on it..."
-	@$(TAGFS_TOOL) --kernel $(KERNEL_BIN) $@ $(VOLUME_LAID)
+	@$(TAGFS_TOOL) --block $(MEDIUM_BLOCK) --kernel $(KERNEL_BIN) $@ $(VOLUME_LAID)
 	@# ‼ AND WHAT IT WROTE IS READ BACK BEFORE ANYTHING BOOTS IT.
 	@#
 	@# volume-read is the format's second reader, written apart from the tool
@@ -1900,7 +1923,7 @@ $(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_B
 	@# a format this tree writes before its kernel reads it. The census says
 	@# so in a line of its own, and the build says it after the verdict, so
 	@# that `make ... run` is not the first to tell.
-	@VERDICT=$$(python3 tools/volume-read.py $@ check 2>&1); RC=$$?; \
+	@VERDICT=$$(python3 tools/volume-read.py --block $(MEDIUM_BLOCK) $@ check 2>&1); RC=$$?; \
 	LAST=$$(printf '%s\n' "$$VERDICT" | tail -1); \
 	if [ $$RC -ne 0 ] || [ "$$LAST" != "check: consistent — 0 damage, 0 leak, 0 note" ]; then \
 		printf '%s\n' "$$VERDICT"; \
@@ -1913,7 +1936,7 @@ $(IMAGE): $(VOLUME_BOXES) $(UEFI_ESP_IMG) $(STAGE1_BIN) $(STAGE2_BIN) $(KERNEL_B
 	@# (gangway_attest.c, gangway_succession.c). The oracle reads the image as
 	@# the loader will, so a kernel the book does not attest fails the build
 	@# here — not at the first UEFI boot of the image.
-	@BOOT=$$(python3 tools/volume-read.py $@ boot 2>&1); \
+	@BOOT=$$(python3 tools/volume-read.py --block $(MEDIUM_BLOCK) $@ boot 2>&1); \
 	KERNEL=$$(printf '%s\n' "$$BOOT" | grep -E '^boot: (the kernel the deed names|kernel fid [0-9]+) is attested by the book' | head -1); \
 	if [ -z "$$KERNEL" ]; then \
 		printf '%s\n' "$$BOOT"; \
@@ -2226,9 +2249,9 @@ $(BUILDDIR)/edk2-vars.fd: | $(BUILDDIR)
 # from it. It no longer depends on edk2-vars.fd — NVRAM belongs to running a
 # virtual machine, not to building a filesystem, and the image needs this even
 # when no OVMF is installed.
-$(UEFI_ESP_IMG): $(GANGWAY_EFI) | $(BUILDDIR)
-	@echo "Creating UEFI ESP image (FAT32) for sector $(ESP_START_SECTOR)..."
-	@python3 tools/make_esp.py $(GANGWAY_EFI) $@ $(ESP_START_SECTOR)
+$(UEFI_ESP_IMG): $(GANGWAY_EFI) $(MEDIUM_BLOCK_MARK) tools/make_esp.py | $(BUILDDIR)
+	@echo "Creating UEFI ESP image (FAT32 of $(MEDIUM_BLOCK)-byte sectors) for sector $(ESP_START_SECTOR)..."
+	@python3 tools/make_esp.py $(GANGWAY_EFI) $@ $$(( $(ESP_START_SECTOR) / $(MEDIUM_PER) )) --sector $(MEDIUM_BLOCK)
 
 # The two run-bg keys, refused here before anything is built: an interactive
 # run would boot build/boxos.img unrecorded and let the key pass unheard.
@@ -2478,6 +2501,23 @@ usb: $(BUILDPLATE_TOOL)
 	esac
 	@if [ ! -e "$(DEV)" ]; then \
 		echo "ERROR: $(DEV) does not exist."; exit 1; \
+	fi
+	@# The stick's own block against the one the image was laid out for — the
+	@# ESP's FAT sector, a mebibyte in whatever the block (MEDIUM_BLOCK): a
+	@# table read in the wrong unit names nothing that is there.
+	@IMG_BLOCK=$$(python3 -c 'import struct, sys; f = open(sys.argv[1], "rb"); f.seek(int(sys.argv[2]) * 512 + 11); print(struct.unpack("<H", f.read(2))[0])' $(IMAGE) $(ESP_START_SECTOR)); \
+	if [ "$(UNAME_S)" = "Darwin" ]; then \
+		DEV_BLOCK=$$(diskutil info $(DEV) | awk -F: '/Device Block Size/ { gsub(/[^0-9]/, "", $$2); print $$2 }'); \
+	else \
+		DEV_BLOCK=$$(blockdev --getss $(DEV) 2>/dev/null); \
+	fi; \
+	if [ -z "$$DEV_BLOCK" ]; then \
+		echo "  $(DEV) does not say what block it is addressed in; the image is laid out for $$IMG_BLOCK-byte blocks"; \
+	elif [ "$$DEV_BLOCK" != "$$IMG_BLOCK" ]; then \
+		echo "REFUSED: $(DEV) is addressed in $$DEV_BLOCK-byte blocks and $(IMAGE) is laid out for $$IMG_BLOCK —"; \
+		echo "         every table on it would be read in the wrong unit. Run 'make MEDIUM_BLOCK=$$DEV_BLOCK'"; \
+		echo "         and flash what it makes."; \
+		exit 1; \
 	fi
 	@IMG_SIZE=$$(stat -f%z $(IMAGE) 2>/dev/null || stat -c%s $(IMAGE)); \
 	IMG_MB=$$((IMG_SIZE / 1024 / 1024)); \

@@ -555,19 +555,11 @@ int ata_identify(uint8_t drive_idx, ATADevice* device) {
     uint16_t id[256];
     for (int i = 0; i < 256; i++) id[i] = inw(ch->cmd_base + ATA_REG_DATA);
 
-    /* Logical sector size (ATA8-ACS §7.16.7.74-75): word 106 bit 14=1 +
-     * bit 15=0 marks the field valid; bit 12 = logical sector > 256
-     * words. words 117-118 then hold the size in 16-bit words. A drive
-     * addressed in larger blocks than the room's sectors — 4096 on 4Kn — is
-     * spoken to in them (ata_program_lba), a block at a time through the PIO
-     * loop; one that is no whole number of sectors, or larger than the room
-     * seats, is left. */
-    uint32_t logical = 512;
-    if ((id[106] & (1u << 14)) && !(id[106] & (1u << 15)) &&
-        (id[106] & (1u << 12))) {
-        uint32_t words = (uint32_t)id[117] | ((uint32_t)id[118] << 16);
-        if (words >= 256) logical = words * 2u;
-    }
+    /* What it is addressed in (ata_identify.h). A drive addressed in larger
+     * blocks than the room's sectors — 4096 on 4Kn — is spoken to in them
+     * (ata_program_lba), a block at a time through the PIO loop; one that is
+     * no whole number of sectors, or larger than the room seats, is left. */
+    uint32_t logical = AtaIdentifyLogicalBytes(id);
     if (logical % 512u != 0 || logical > BOARDROOM_LOGICAL_MOST) {
         kprintf("[ATA] drive %u: %u-byte logical blocks — a disk is seated in whole "
                 "512-byte sectors up to %u bytes a block — not using it\n",
@@ -576,18 +568,10 @@ int ata_identify(uint8_t drive_idx, ATADevice* device) {
     }
     device->logical_sector_size = logical;
 
-    /* Word 106 again: bit 13 marks a drive with more than one logical sector
-     * per physical, and bits 3:0 are the exponent. A 512e drive says 512 and
-     * 4096 here, and a volume that was laid out for the smaller of the two
-     * wears it twice as fast for every metadata write. */
-    device->physical_sector_size = logical;
-    if ((id[106] & (1u << 14)) && !(id[106] & (1u << 15)) &&
-        (id[106] & (1u << 13))) {
-        uint32_t exponent = id[106] & 0x0Fu;
-        if (exponent < 16 && logical <= (0xFFFFFFFFu >> exponent)) {
-            device->physical_sector_size = logical << exponent;
-        }
-    }
+    /* And what it is built from: a 512e drive says 512 and 4096 here, and a
+     * volume laid out for the smaller of the two wears it twice as fast for
+     * every metadata write. */
+    device->physical_sector_size = AtaIdentifyPhysicalBytes(id, logical);
     device->first_aligned = AtaIdentifyFirstAligned(id, logical, device->physical_sector_size);
 
     /* How big the medium is, asked of the words the standard says are worth

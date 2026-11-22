@@ -24,6 +24,7 @@
  * place; hand the tool a disk that is not ours and it writes nothing at all.
  * ==================================================================== */
 
+uint32_t g_medium_block = TAGFS_SECTOR_BYTES;   /* every number of its partition table counts in it */
 uint64_t g_ground_start;    /* first sector of the volume's ground */
 uint64_t g_ground_sectors;  /* how far it runs */
 
@@ -125,8 +126,9 @@ static uint64_t le64(const uint8_t* p) {
 }
 
 static int ground_from_gpt(FILE* disk) {
-    uint8_t header[TAGFS_SECTOR_BYTES];
-    if (read_at_sector(disk, GPT_HEADER_LBA, header, sizeof(header)) != 0) {
+    const uint64_t per = g_medium_block / TAGFS_SECTOR_BYTES;
+    uint8_t header[TAGFS_BLOCK_SIZE];
+    if (read_at_sector(disk, GPT_HEADER_LBA * per, header, g_medium_block) != 0) {
         fprintf(stderr, "This image says it is a GPT and has no header behind it\n");
         return -1;
     }
@@ -136,13 +138,13 @@ static int ground_from_gpt(FILE* disk) {
     }
 
     uint32_t header_bytes = le32(header + GPT_HEADER_SIZE_OFFSET);
-    if (header_bytes < GPT_HEADER_MIN_BYTES || header_bytes > TAGFS_SECTOR_BYTES) {
+    if (header_bytes < GPT_HEADER_MIN_BYTES || header_bytes > g_medium_block) {
         fprintf(stderr, "Its GPT header states a length of %u, which cannot be one\n",
                 header_bytes);
         return -1;
     }
 
-    uint8_t probe[TAGFS_SECTOR_BYTES];
+    uint8_t probe[TAGFS_BLOCK_SIZE];
     memcpy(probe, header, header_bytes);
     memset(probe + GPT_HEADER_CRC_OFFSET, 0, 4);
     if (tagfs_crc32(probe, header_bytes) != le32(header + GPT_HEADER_CRC_OFFSET)) {
@@ -150,7 +152,7 @@ static int ground_from_gpt(FILE* disk) {
         return -1;
     }
 
-    uint64_t entry_lba   = le64(header + GPT_ENTRY_LBA_OFFSET);
+    uint64_t entry_lba   = le64(header + GPT_ENTRY_LBA_OFFSET) * per;
     uint32_t entry_count = le32(header + GPT_ENTRY_COUNT_OFFSET);
     uint32_t entry_bytes = le32(header + GPT_ENTRY_BYTES_OFFSET);
 
@@ -184,10 +186,11 @@ static int ground_from_gpt(FILE* disk) {
         uint64_t last  = le64(e + GPT_ENTRY_LAST_OFFSET);
         if (last < first) continue;
 
-        g_ground_start   = first;
-        g_ground_sectors = last - first + 1;    /* GPT's last is inclusive */
+        g_ground_start   = first * per;
+        g_ground_sectors = (last - first + 1) * per;    /* GPT's last is inclusive */
         printf("  Ground:        sectors %llu..%llu, from GPT entry %u\n",
-               (unsigned long long)first, (unsigned long long)last, i);
+               (unsigned long long)g_ground_start,
+               (unsigned long long)(g_ground_start + g_ground_sectors - 1), i);
         rc = 0;
         goto done;
     }
@@ -226,8 +229,8 @@ static int survey_ground(FILE* disk) {
         const uint8_t* e = sector0 + MBR_TABLE_OFFSET + i * MBR_ENTRY_BYTES;
         if (e[MBR_ENTRY_TYPE] != GROUND_MBR_TYPE_BOXOS) continue;
 
-        uint64_t start = le32(e + MBR_ENTRY_START_LBA);
-        uint64_t count = le32(e + MBR_ENTRY_SECTORS);
+        uint64_t start = le32(e + MBR_ENTRY_START_LBA) * (g_medium_block / TAGFS_SECTOR_BYTES);
+        uint64_t count = le32(e + MBR_ENTRY_SECTORS) * (g_medium_block / TAGFS_SECTOR_BYTES);
         if (count == 0) continue;
 
         g_ground_start   = start;

@@ -135,6 +135,8 @@ STAND_NAME=logcheck
 . "$(dirname "$0")/logcheck_dedup.sh"
 # The mkfs scenario: tools/logcheck_mkfs.sh.
 . "$(dirname "$0")/logcheck_mkfs.sh"
+# The block4096 scenario: tools/logcheck_block.sh.
+. "$(dirname "$0")/logcheck_block.sh"
 # The book's census and the stand's road on a book: tools/logcheck_book.sh,
 # its USB road tools/logcheck_book_usb.sh, the book the kernel writes read back
 # by both readers tools/logcheck_book_circle.sh; the kernel's Tallies of a book:
@@ -1090,16 +1092,16 @@ mce:migration:completed apei:memory:error apei:ghes:ready"
 # every test it counts is one this tree registers. The numbers are the code's,
 # not a run's (K9): a build without VOLUME_TESTS walks the eight suites of
 # tests.h TEST_SUITES not under VOLUME_TESTS_ONLY — core 2, stress 2,
-# braid 2, boxhash 6, book 16, book_judge 5, ribbon 11, use_context 5
-# TestCases, 49 run; the 5 whose reach is TEST_WRITES_TO_VOLUME are skipped
-# (tests.c, g_volume_tests_allowed), and the 44 that only read pass — on this
+# braid 2, boxhash 6, book 17, book_judge 5, ribbon 11, use_context 5
+# TestCases, 50 run; the 5 whose reach is TEST_WRITES_TO_VOLUME are skipped
+# (tests.c, g_volume_tests_allowed), and the 45 that only read pass — on this
 # stand's fresh image, whose first file wears a tag (use_context_narrows). A
 # test added or taken out moves this line in the same commit.
 healthy_startup_tests() {
     local L=$1
     grep -qE "TagFS: [0-9]+ run, [0-9]+ passed, 0 failed" "$L"; chk $? "TagFS startup tests: 0 failed"
-    local said want="TagFS: 49 run, 44 passed, 0 failed, 5 skipped, 0 held under a caveat"
-    local told="44 reads passed and 5 writes stood down"
+    local said want="TagFS: 50 run, 45 passed, 0 failed, 5 skipped, 0 held under a caveat"
+    local told="45 reads passed and 5 writes stood down"
     said=$(stand_summary "$L")
     [ "$said" = "$want" ]
     chk $? "TagFS startup tests: the 46 this tree registers ran, $told (${said:-no summary})"
@@ -8046,7 +8048,7 @@ STAND_HELD="
 "
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
-# suite in tests.h TEST_SUITES — the plain build's 49 (healthy says how) and
+# suite in tests.h TEST_SUITES — the plain build's 50 (healthy says how) and
 # the 362 of the stand's own fifty suites: stand 25, stand_lock 1,
 # stand_spelling 6, stand_roadstead 4, stand_plot 3, stand_index 6,
 # stand_helm 6, stand_port 1, stand_use 2, stand_settle 9, stand_read 6,
@@ -8063,7 +8065,7 @@ STAND_HELD="
 # a test that stopped covering anything, and the count is where that shows.
 # How many of them pass and how many stand down is the road's — said, not
 # pinned.
-STAND_RUN=411
+STAND_RUN=412
 
 # What a VOLUME_TESTS kernel says of a record that names a run of no blocks
 # (file_record.c, FileRecordBuild), and of a Tract about to stand taller than
@@ -10437,6 +10439,7 @@ case "${1:-both}" in
     topology) run_topology ;;
     dedup)    run_dedup ;;
     mkfs)     run_mkfs ;;
+    block4096) run_block4096 ;;
     uefi)     run_uefi ;;
     footing)  run_footing ;;
     stranger) run_stranger ;;

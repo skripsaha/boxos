@@ -38,6 +38,10 @@ Usage:
   count  — length in 512-byte sectors (decimal)
   type   — MBR partition type byte (hex, e.g. ef for an ESP)
   boot   — the literal word "boot" to set the 0x80 active flag
+  --block N — the block the medium is addressed in, in bytes (4096 for a 4Kn
+           medium; 512 by default). Starts and counts are given in 512-byte
+           sectors and written in the medium's blocks, as every table on such
+           a medium counts — each a whole number of them, or refused.
 """
 import sys
 import os
@@ -94,12 +98,27 @@ def parse(spec):
 
 
 def main(argv):
+    block = SECTOR
+    if '--block' in argv:
+        at = argv.index('--block')
+        block = int(argv[at + 1], 0)
+        argv = argv[:at] + argv[at + 2:]
+    if block % SECTOR or not SECTOR <= block <= 4096:
+        sys.stderr.write(f"ERROR: a medium is addressed in whole {SECTOR}-byte sectors up to 4096 bytes a "
+                         f"block, not {block}\n")
+        return 1
+    per = block // SECTOR
     if len(argv) < 3:
         sys.stderr.write(__doc__)
         return 2
 
     image = argv[1]
     specs = [parse(s) for s in argv[2:]]
+    for i, (start, count, _, _) in enumerate(specs):
+        if start % per or count % per:
+            sys.stderr.write(f"ERROR: partition {i+1} ({start}+{count} sectors) is not whole {block}-byte "
+                             f"blocks of the medium\n")
+            return 1
 
     if len(specs) > MAX_ENTRIES:
         sys.stderr.write(f"ERROR: an MBR holds {MAX_ENTRIES} partitions, given {len(specs)}\n")
@@ -152,13 +171,14 @@ def main(argv):
 
         table = bytearray(64)
         for i, (start, count, ptype, boot) in enumerate(specs):
+            first, blocks = start // per, count // per      # in the medium's own blocks
             e = bytearray(ENTRY_SIZE)
             e[0] = 0x80 if boot else 0x00
-            e[1:4] = chs(start)
+            e[1:4] = chs(first)
             e[4] = ptype
-            e[5:8] = chs(start + count - 1)
-            e[8:12] = start.to_bytes(4, 'little')
-            e[12:16] = count.to_bytes(4, 'little')
+            e[5:8] = chs(first + blocks - 1)
+            e[8:12] = first.to_bytes(4, 'little')
+            e[12:16] = blocks.to_bytes(4, 'little')
             table[i * ENTRY_SIZE:(i + 1) * ENTRY_SIZE] = e
 
         sector0[TABLE_OFFSET:510] = table
@@ -167,7 +187,8 @@ def main(argv):
 
     for i, (start, count, ptype, boot) in enumerate(specs):
         mb = count * SECTOR / (1024 * 1024)
-        sys.stdout.write(f"    p{i+1}: LBA {start}..{start + count - 1}  "
+        sys.stdout.write(f"    p{i+1}: LBA {start // per}..{(start + count) // per - 1}"
+                         f"{'' if per == 1 else f' of {block}-byte blocks'}  "
                          f"({mb:.1f} MB)  type 0x{ptype:02X}"
                          f"{'  [bootable]' if boot else ''}\n")
     return 0
