@@ -88,12 +88,10 @@ void PixelLamp::Retune()
     }
     RoundCol.resize(static_cast<std::size_t>(Wide));
     BulbCol.resize(static_cast<std::size_t>(Wide));
-    SheenCol.resize(static_cast<std::size_t>(Wide));
     for (int X = 0; X < Wide; X++) {
         const float Across = (static_cast<float>(X) + 0.5f) / static_cast<float>(Wide);
         RoundCol[static_cast<std::size_t>(X)] = Colours.Round(Across);
         BulbCol[static_cast<std::size_t>(X)]  = Colours.BulbAcross(Across);
-        SheenCol[static_cast<std::size_t>(X)] = Colours.Sheen(Across);
     }
     Whole = 2;
 }
@@ -166,8 +164,7 @@ void PixelLamp::PaintCell(painter::core::Canvas &Page, int Col, int Row)
                 const float S = static_cast<float>(X - X0) * Inv;
                 Out           = Colours.Over(Out, Mix(CL, CR, S), LL + (LR - LL) * S, EL + (ER - EL) * S);
             }
-            const float Sheen = SheenCol[C];
-            Line[X]           = PixelOf(Rgb{Out.R + Sheen, Out.G + Sheen, Out.B + Sheen});
+            Line[X] = PixelOf(Out);
         }
     }
 }

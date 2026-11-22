@@ -65,12 +65,8 @@ void CellLamp::Retune()
     SlopeBy = SlopeOf * Wax.BlobSize();
     Behind.resize(static_cast<std::size_t>(Grid.Across()) * Grid.Down());
     for (int Y = 0; Y < Grid.Down(); Y++)
-        for (int X = 0; X < Grid.Across(); X++) {
-            const float U = Grid.X(X) / Wax.Aspect();
-            const Rgb   Back = Colours.Behind(U, Grid.Y(Y));
-            const float Sheen = Colours.Sheen(U);
-            Behind[static_cast<std::size_t>(Y) * Grid.Across() + X] = Rgb{Back.R + Sheen, Back.G + Sheen, Back.B + Sheen};
-        }
+        for (int X = 0; X < Grid.Across(); X++)
+            Behind[static_cast<std::size_t>(Y) * Grid.Across() + X] = Colours.Behind(Grid.X(X) / Wax.Aspect(), Grid.Y(Y));
     Whole = true;
 }
 

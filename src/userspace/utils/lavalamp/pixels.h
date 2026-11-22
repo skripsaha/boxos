@@ -63,7 +63,7 @@ private:
     float                  SlopeBy = 1;      // a level's fall a pixel, to its slope
     std::vector<Rgb>       LiquidRow, Points;   // the liquid's colour a row; the wax's at each point
     std::vector<float>     Edges;               // how much the level changes across a pixel, at each point
-    std::vector<float>     BulbRow, RoundCol, BulbCol, SheenCol;
+    std::vector<float>     BulbRow, RoundCol, BulbCol;
     std::vector<std::uint8_t> Lit, WasLit, LongLit;   // the cells the wax reached now, a frame and two frames before
     int                    Whole  = 2;       // frames still to draw every pixel of: one for each page
     bool                   Hidden = false;

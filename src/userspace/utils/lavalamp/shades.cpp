@@ -82,11 +82,6 @@ float Shades::BulbUp(float Y) const
     return std::exp(-(1.0f - Y) / 0.16f);
 }
 
-float Shades::Sheen(float U) const
-{
-    return 0.045f * Bell(U, 0.13f, 0.011f) + 0.016f * Bell(U, 0.185f, 0.04f) + 0.025f * Bell(U, 0.885f, 0.006f);
-}
-
 Rgb Shades::Wax(float Heat, float Level, const Light &Lit, float Y) const
 {
     Rgb Body = Mix(Cool, Hot, Smooth(0.08f, 0.92f, Heat));

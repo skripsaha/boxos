@@ -1,6 +1,6 @@
 /* shades.h — the lamp's colours, worked out from a composition: the liquid
  * behind the wax, dark under the cap and lit by the bulb below, the glass
- * curving away at its sides with light lying on it; and the wax — the rim's
+ * curving away at its sides; and the wax — the rim's
  * colour where it is cool, the wax's where it is warm, brighter deep inside,
  * lit from above as a round thing is, the bulb's light caught along its
  * underside, and its glow on the liquid round it. Both faces colour with it,
@@ -58,8 +58,6 @@ public:
     float BulbAcross(float U) const;
     float BulbUp(float Y) const;
     Rgb   BulbLight() const noexcept { return Lamp; }
-    /* The light on the glass, laid over all. */
-    float Sheen(float U) const;
     Rgb   Behind(float U, float Y) const { return Plus(Times(Liquid(Y), Round(U)), Times(Lamp, BulbAcross(U) * BulbUp(Y))); }
     /* The wax at a point: as warm as Heat, Level deep, lit as Lit says, at
      * height Y. */
