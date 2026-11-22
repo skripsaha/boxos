@@ -152,7 +152,7 @@ def Wide(work):
         return
     c, laid = Laid(img)
     m = c.mount
-    want = {"wide%04u.bin" % i: {b"wide%04u" % i} | {t.encode() for t in tags} for i, tags in enumerate(lists)}
+    want = {"wide%04u.bin" % i: {t.encode() for t in tags} for i, tags in enumerate(lists)}
     wrong = []
     for fs in m.files.values():
         have = {m.tags[t].Text() for t in fs.tags}

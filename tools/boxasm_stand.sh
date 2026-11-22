@@ -1252,31 +1252,31 @@ several.asm:5:10: math.asm could be any of 2 files in demo
     %include "math.asm"
              ^
   say which by a tag only it wears:
-    %include "math.asm" fast    for the one wearing math, demo, fast
-    %include "math.asm" old     for the one wearing math, demo, old
+    %include "math.asm" fast    for the one wearing demo, fast
+    %include "math.asm" old     for the one wearing demo, old
 EOF
 volume_says include_meaning_unworn slow.asm <<'EOF'
 slow.asm:5:10: no math.asm in demo wears slow
     %include "math.asm" slow
              ^
   they wear:
-    math, demo, fast
-    math, demo, old
+    demo, fast
+    demo, old
 EOF
 volume_says include_meaning_together both.asm <<'EOF'
 both.asm:5:10: no math.asm in demo wears all of fast, old
     %include "math.asm" fast old
              ^
   they wear:
-    math, demo, fast
-    math, demo, old
+    demo, fast
+    demo, old
 EOF
 volume_says include_outside outside.asm <<'EOF'
 outside.asm:5:10: there is no lone.asm in demo
     %include "lone.asm"
              ^
   outside it, reached by:
-    %include "lone.asm" game everywhere    for the one wearing lone, game
+    %include "lone.asm" game everywhere    for the one wearing game
   or let it wear demo too
 EOF
 volume_says include_circle circle.asm <<'EOF'
@@ -1310,14 +1310,14 @@ EOF
 volume_says source_several twice.asm <<'EOF'
 assemble: twice.asm could be any of 2 files in demo
   they wear:
-    twice, demo, one
-    twice, demo, two
+    demo, one
+    demo, two
   narrow the context with use
 EOF
 volume_says source_outside away.asm <<'EOF'
 assemble: there is no away.asm in demo
   outside it, wearing:
-    away, game
+    game
   change the context with use
 EOF
 assembly_refuses include_no_volume "$HEAD"$'%include "math.asm"\n' \

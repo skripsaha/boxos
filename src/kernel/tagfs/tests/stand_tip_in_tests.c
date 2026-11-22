@@ -518,7 +518,7 @@ out:
 // The ring written over the slot that laid a node: its Quire still held
 // ----------------------------------------------------------------------------
 
-#define STAND_TIP_IN_QUIRED   12000u   /* files: a whole Tally of FILES and TAGS past a Tally-Quire of 256 */
+#define STAND_TIP_IN_QUIRED   16000u   /* files: a whole Tally of FILES past a Tally-Quire of 256 */
 
 /* Whether every block of every copy of `p` lies in ground a slot holds. */
 static bool StandTipInPlaceHeld(const TallyPlace* p, const Strip* ground, uint32_t n)
