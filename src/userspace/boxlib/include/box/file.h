@@ -21,19 +21,48 @@ extern "C" {
  *                words of the Use Context. A program sees them only when its
  *                box asks `see-tags`, and changes them only when it asks
  *                `change-tags` (-ERR_ACCESS_DENIED otherwise).
+ *   PROGRAM_TAGS(program)
+ *                another program's own, the program named by its file: seen
+ *                when it shows them to this one (show_tags_to below) or when
+ *                this one's box asks `see-tags` or `change-tags` — the person
+ *                sees every mark on the person's files —, taken off a file
+ *                only when it asks `change-tags` — the person's hands —, and
+ *                put on by nobody but that program (-ERR_ACCESS_DENIED
+ *                otherwise). This program named so is MY_TAGS.
+ *   ALL_TAGS     every tag this program may see, each with whose it is (the
+ *                owner beside it): its own, those of the programs that show it
+ *                theirs, and with `see-tags` or `change-tags` the person's and
+ *                every program's. For file_info, FileMetadataRead and tag_list
+ *                alone: a question, a create or a change is of one owner's
+ *                tags (-ERR_INVALID_ARGUMENT).
  *
  * A call that names no tag at all — a name looked up alone — asks nothing,
- * whichever it says. (boxos_decks.h, STORAGE_TAGS_MINE / STORAGE_TAGS_PERSON.)
+ * whichever it says. (boxos_decks.h, STORAGE_TAGS_*.)
  */
-typedef enum {
-    MY_TAGS     = 0,
-    PERSON_TAGS = 1,
+typedef struct {
+    uint8_t   whose;      /* the deck's whose byte (boxos_decks.h, STORAGE_TAGS_*) */
+    file_id_t program;    /* PROGRAM_TAGS' program; 0 for the rest */
 } TagsOf;
 
+#ifdef __cplusplus
+#define TAGS_OF_(whose, program) (TagsOf{ (uint8_t)(whose), (file_id_t)(program) })
+#else
+#define TAGS_OF_(whose, program) ((TagsOf){ (uint8_t)(whose), (file_id_t)(program) })
+#endif
+#define MY_TAGS                TAGS_OF_(0, 0)
+#define PERSON_TAGS            TAGS_OF_(1, 0)
+#define PROGRAM_TAGS(program)  TAGS_OF_(2, (program))
+#define ALL_TAGS               TAGS_OF_(3, 0)
+
+/* Whose a tag is, in the answers that say it: 0 the person's, a program's
+ * file id that program's own. */
+#define PERSON_OWNS            ((file_id_t)0)
+
 typedef struct {
-    uint8_t type;        // 0=user, 1=system
-    char key[11];
-    char value[12];
+    uint8_t   type;      // 0=user, 1=system
+    char      key[11];
+    char      value[12];
+    file_id_t owner;     // whose it is: PERSON_OWNS, or the file of the program whose own it is
 } tag_t;
 
 typedef struct {
@@ -52,13 +81,14 @@ typedef struct {
  *
  * Filename and Tags are heap-owned by the value.  Tags is a comma-separated
  * list of complete tag spellings, or NULL when the file has no tags.  The
- * caller releases both with FileMetadataRelease(). */
+ * caller releases them with FileMetadataRelease(). */
 typedef struct {
     file_id_t FileId;
     uint64_t  Size;
     uint32_t  TagCount;
     char     *Filename;
     char     *Tags;
+    file_id_t *Owners;        /* whose each tag of Tags is, in its order (tag_t.owner); NULL with none */
     uint64_t  KeptUntil;      /* the wall clock's nanoseconds a deleted file is kept until; 0 for one that is not */
     file_id_t MadeBy;         /* the file of the program that made this file; 0 for none (it may be gone since) */
 } FileMetadata;
@@ -184,9 +214,10 @@ int tag_remove(TagsOf whose, file_id_t file_id, const char* key);
 /* A tag files wear, and how many of them wear it: one entry of the volume's
  * own list of its tags (storage.tag.list), not a walk of its files. */
 typedef struct {
-    char    *Tag;       /* "key" or "key:value", as the volume spells it */
-    uint32_t Files;     /* how many files wear it — inside the Use Context, of its files */
-    bool     System;    /* a tag the system keeps */
+    char     *Tag;      /* "key" or "key:value", as the volume spells it */
+    uint32_t  Files;    /* how many files wear it — inside the Use Context, of its files */
+    bool      System;   /* a tag the system keeps */
+    file_id_t Owner;    /* whose it is: PERSON_OWNS, or the file of the program whose own it is */
 } TagListed;
 
 /* Every tag of `whose` a file wears, each with how many files wear it, in the
@@ -198,6 +229,38 @@ typedef struct {
  * negative -error_t. */
 int tag_list(TagsOf whose, const char *without, TagListed **out, size_t *count);
 int tag_list_everywhere(TagsOf whose, const char *without, TagListed **out, size_t *count);
+
+/*
+ * A program's own tags shown to other programs. This program shows every tag
+ * of its own — those to come too — to a program named by its file, or to
+ * EVERY_PROGRAM; one shown them sees them on files, finds files by them and
+ * lists them (PROGRAM_TAGS), and never puts them on nor takes them off.
+ * hide_tags_from takes a program — or EVERY_PROGRAM, the ones named staying —
+ * out of the list. ask_to_see_tags asks a program to show this one its tags:
+ * a note the system holds until that program answers — shows or hides them
+ * —, either leaves, or the volume is mounted again; when a note is left, the
+ * Touch word "tags-asked" says so, its payload the file_id_t of the program
+ * asked and nothing of who asked, so a program that wants to hear its asks
+ * claims the word (touch_claim) and reads asks_to_see_tags when its own id is
+ * said. The list is the card of this program's own file: one started from
+ * bytes has none (-ERR_TAGFS_NO_OWN_TAGS); a program the volume has not is
+ * -ERR_FILE_NOT_FOUND, one shown or asked to show to itself
+ * -ERR_INVALID_ARGUMENT. 0, or a negative -error_t. A program that left is
+ * taken off every list by the volume.
+ */
+#define EVERY_PROGRAM          ((file_id_t)0)
+int show_tags_to(file_id_t program);
+int hide_tags_from(file_id_t program);
+int ask_to_see_tags(file_id_t program);
+
+/* The programs that show this one their tags (by name or to every program);
+ * the programs `program` shows its tags to, EVERY_PROGRAM first — asked by
+ * that program itself or by one whose box asks `see-tags` or `change-tags`;
+ * the programs that asked this one and are not answered. The count and a
+ * malloc'd list the caller frees (NULL for none), or a negative -error_t. */
+int tags_shown_to_me(file_id_t **out_programs);
+int tags_shown_by(file_id_t program, file_id_t **out_programs);
+int asks_to_see_tags(file_id_t **out_programs);
 
 /* Every file named `filename` whole, but those wearing a tag of `whose` of
  * `without` (as query) — inside the Use Context for the person's. Returns how many there are; the first `max` of

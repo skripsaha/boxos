@@ -19,8 +19,23 @@
 #include "box/timeouts.h"   /* BOX_ANSWER_GUARANTEED */
 #include "boxos_decks.h"    /* STORAGE_* opcodes + STORAGE_SCOPE_* — single source */
 
-_Static_assert(MY_TAGS == STORAGE_TAGS_MINE && PERSON_TAGS == STORAGE_TAGS_PERSON,
-               "TagsOf is the deck's whose byte");
+_Static_assert(STORAGE_TAGS_MINE == 0 && STORAGE_TAGS_PERSON == 1 && STORAGE_TAGS_PROGRAM == 2 &&
+               STORAGE_TAGS_ALL == 3, "TagsOf's whose is the deck's whose byte (box/file.h)");
+_Static_assert(STORAGE_TAG_LISTED_HEAD == 16, "a tag list's record: its counts, then its owner, then its text");
+
+/* The whose of a call's params (boxos_decks.h): its byte, and with
+ * PROGRAM_TAGS the program's file id after it. The bytes it took: 1 or 9. */
+static size_t whose_put(uint8_t *out, TagsOf whose)
+{
+    out[0] = whose.whose;
+    if (whose.whose != STORAGE_TAGS_PROGRAM)
+        return 1;
+    memcpy(out + 1, &whose.program, sizeof(whose.program));
+    return 1 + sizeof(whose.program);
+}
+
+/* The most bytes a whose takes. */
+#define WHOSE_MOST 9u
 
 /* =========================================================================
  *  CREATE / QUERY — inside the Use Context, or everywhere
@@ -32,11 +47,11 @@ static int64_t create_scoped(TagsOf whose, const char *filename, const char *tag
     size_t fn_len = strlen(filename);
     if (fn_len >= 32) return -ERR_INVALID_ARGUMENT;
 
-    /* params: 32 bytes of NUL-padded filename, then the scope and whose bytes. */
-    uint8_t params[34] = {0};
+    /* params: 32 bytes of NUL-padded filename, then the scope and the whose. */
+    uint8_t params[33 + WHOSE_MOST] = {0};
     memcpy(params, filename, fn_len);
     params[32] = scope;
-    params[33] = (uint8_t)whose;
+    size_t params_size = 33 + whose_put(params + 33, whose);
 
     /* in_crate: tag list (optional). */
     const void *in = NULL;
@@ -48,7 +63,7 @@ static int64_t create_scoped(TagsOf whose, const char *filename, const char *tag
 
     file_id_t file_id = 0;
     int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_CREATE,
-                     params, sizeof(params),
+                     params, (uint32_t)params_size,
                      in, in_size,
                      &file_id, sizeof(file_id), NULL,
                      BOX_ANSWER_GUARANTEED, NULL);
@@ -103,12 +118,13 @@ static int ask_files(const Question *question, file_id_t *file_ids, size_t max_f
 {
     const char *without = question->without;
     const char *text    = question->text;
-    uint8_t     head[2] = { question->scope, (uint8_t)question->whose };
+    uint8_t     head[1 + WHOSE_MOST] = { question->scope };
+    size_t      head_size = 1 + whose_put(head + 1, question->whose);
     if (max_files > 0 && !file_ids) return -ERR_INVALID_ARGUMENT;
     if (max_files > (UINT32_MAX - 8u) / sizeof(file_id_t)) return -ERR_INVALID_ARGUMENT;
 
     uint16_t params_size = 0;
-    uint8_t *params = question_params(head, sizeof(head), without, &params_size);
+    uint8_t *params = question_params(head, head_size, without, &params_size);
     if (!params) return without && strlen(without) >= UINT16_MAX ? -ERR_INVALID_ARGUMENT : -ERR_NO_MEMORY;
 
     uint32_t out_cap = (uint32_t)(8 + max_files * sizeof(file_id_t));
@@ -191,12 +207,12 @@ static int tag_list_scoped(TagsOf whose, uint8_t scope, const char *without, Tag
     uint32_t from = 0;
     int      rc = 0;
     for (;;) {
-        uint8_t head[6];
+        uint8_t head[5 + WHOSE_MOST];
         memcpy(head, &from, sizeof(from));
         head[4] = scope;
-        head[5] = (uint8_t)whose;
+        size_t   head_size   = 5 + whose_put(head + 5, whose);
         uint16_t params_size = 0;
-        uint8_t *params = question_params(head, sizeof(head), without, &params_size);
+        uint8_t *params = question_params(head, head_size, without, &params_size);
         if (!params) { rc = -ERR_NO_MEMORY; break; }
         rc = MfCall1(DECK_STORAGE, STORAGE_TAG_LIST, params, params_size, NULL, 0,
                      page, TAG_LIST_PAGE, NULL, BOX_ANSWER_GUARANTEED, NULL);
@@ -242,6 +258,7 @@ static int tag_list_scoped(TagsOf whose, uint8_t scope, const char *without, Tag
         uint16_t       value_len;
         memcpy(&list[i].Files, record, sizeof(list[i].Files));
         memcpy(&value_len, record + 6, sizeof(value_len));
+        memcpy(&list[i].Owner, record + 8, sizeof(list[i].Owner));
         list[i].System = (record[4] & STORAGE_TAG_LISTED_SYSTEM) != 0;
         list[i].Tag    = pen;
         memcpy(pen, record + STORAGE_TAG_LISTED_HEAD, record[5]);
@@ -404,13 +421,13 @@ int file_info(TagsOf whose, file_id_t file_id, file_info_t *info)
 
     if (!info) return -ERR_INVALID_ARGUMENT;
 
-    uint8_t  params[9];
+    uint8_t  params[8 + WHOSE_MOST];
     memcpy(params, &file_id, sizeof(file_id));
-    params[8] = (uint8_t)whose;
+    size_t   params_size = 8 + whose_put(params + 8, whose);
     uint8_t  out[1024];
     uint32_t out_actual = 0;
     int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_GET_INFO,
-                     params, sizeof(params),
+                     params, (uint32_t)params_size,
                      NULL, 0,
                      out, sizeof(out), &out_actual,
                      BOX_ANSWER_GUARANTEED, NULL);
@@ -451,11 +468,13 @@ int file_info(TagsOf whose, file_id_t file_id, file_info_t *info)
                    file_id, (unsigned)tag_count_raw, (unsigned)slots);
 
     for (uint32_t i = 0; i < tag_count_raw; i++) {
-        if (pos + 5 > out_actual) break;
-        uint16_t kl = 0, vl = 0;
+        if (pos + 13 > out_actual) break;
+        uint16_t  kl = 0, vl = 0;
+        file_id_t owner = 0;
         memcpy(&kl, out + pos, 2); pos += 2;
         memcpy(&vl, out + pos, 2); pos += 2;
         uint8_t type = out[pos]; pos += 1;   /* 1 = system, 0 = user */
+        memcpy(&owner, out + pos, 8); pos += 8;
         if (pos + kl + vl > out_actual) break;
 
         if (i < slots) {
@@ -467,7 +486,8 @@ int file_info(TagsOf whose, file_id_t file_id, file_info_t *info)
             info->tags[i].key[kc] = '\0';
             memcpy(info->tags[i].value, out + pos + kl,  vc);
             info->tags[i].value[vc] = '\0';
-            info->tags[i].type = type;
+            info->tags[i].type  = type;
+            info->tags[i].owner = owner;
 
             if ((kl > kc || vl > vc) &&
                 !__atomic_exchange_n(&said_text, 1, __ATOMIC_RELAXED))
@@ -615,21 +635,21 @@ int file_span(file_id_t file_id, uint64_t size, uint32_t flags)
  *  TAGS
  * ========================================================================= */
 
-/* tag.set and tag.unset's params: the file, then whose. */
-static void tag_params(file_id_t file_id, TagsOf whose, uint8_t params[9])
+/* tag.set and tag.unset's params: the file, then whose. The bytes they take. */
+static size_t tag_params(file_id_t file_id, TagsOf whose, uint8_t params[8 + WHOSE_MOST])
 {
     memcpy(params, &file_id, sizeof(file_id));
-    params[8] = (uint8_t)whose;
+    return 8 + whose_put(params + 8, whose);
 }
 
 int tag_add(TagsOf whose, file_id_t file_id, const char *tag)
 {
     if (!tag || tag[0] == '\0') return -ERR_INVALID_ARGUMENT;
     size_t  tag_len = strlen(tag);
-    uint8_t params[9];
-    tag_params(file_id, whose, params);
+    uint8_t params[8 + WHOSE_MOST];
+    size_t  params_size = tag_params(file_id, whose, params);
     int rc = MfCall1(DECK_STORAGE, STORAGE_TAG_SET,
-                     params, sizeof(params),
+                     params, (uint32_t)params_size,
                      tag, (uint32_t)tag_len,
                      NULL, 0, NULL,
                      BOX_ANSWER_GUARANTEED, NULL);
@@ -640,10 +660,10 @@ int tag_remove(TagsOf whose, file_id_t file_id, const char *key)
 {
     if (!key || key[0] == '\0') return -ERR_INVALID_ARGUMENT;
     size_t  kl = strlen(key);
-    uint8_t params[9];
-    tag_params(file_id, whose, params);
+    uint8_t params[8 + WHOSE_MOST];
+    size_t  params_size = tag_params(file_id, whose, params);
     int rc = MfCall1(DECK_STORAGE, STORAGE_TAG_UNSET,
-                     params, sizeof(params),
+                     params, (uint32_t)params_size,
                      key, (uint32_t)kl,
                      NULL, 0, NULL,
                      BOX_ANSWER_GUARANTEED, NULL);
@@ -667,6 +687,102 @@ int file_restore(file_id_t file_id)
                      NULL, 0, NULL, 0, NULL,
                      BOX_ANSWER_GUARANTEED, NULL);
     return box_fail(rc);
+}
+
+/* =========================================================================
+ *  A PROGRAM'S OWN TAGS SHOWN TO OTHERS
+ * ========================================================================= */
+
+static int tag_show(uint8_t act, file_id_t program)
+{
+    uint8_t params[9];
+    params[0] = act;
+    memcpy(params + 1, &program, sizeof(program));
+    int rc = MfCall1(DECK_STORAGE, STORAGE_TAG_SHOW, params, sizeof(params), NULL, 0,
+                     NULL, 0, NULL, BOX_ANSWER_GUARANTEED, NULL);
+    return box_fail(rc);
+}
+
+int show_tags_to(file_id_t program)
+{
+    return tag_show(STORAGE_SHOW_TO, program);
+}
+
+int hide_tags_from(file_id_t program)
+{
+    return tag_show(STORAGE_HIDE_FROM, program);
+}
+
+int ask_to_see_tags(file_id_t program)
+{
+    return tag_show(STORAGE_ASK_TO_SEE, program);
+}
+
+/* One list of tag.shown into `ids`, room for `room`: *total how many there
+ * are. 0, or a negative -error_t. */
+static int tags_shown_page(uint8_t which, file_id_t program, file_id_t *ids, uint32_t room, uint32_t *total)
+{
+    uint8_t  params[17] = { which };
+    uint64_t from       = 0;
+    memcpy(params + 1, &program, sizeof(program));
+    memcpy(params + 9, &from, sizeof(from));
+    uint32_t out_cap = 8u + room * (uint32_t)sizeof(file_id_t);
+    uint8_t *out     = malloc(out_cap);
+    if (!out) return -ERR_NO_MEMORY;
+    uint32_t actual = 0;
+    int rc = MfCall1(DECK_STORAGE, STORAGE_TAG_SHOWN, params, sizeof(params), NULL, 0,
+                     out, out_cap, &actual, BOX_ANSWER_GUARANTEED, NULL);
+    uint32_t delivered = 0;
+    if (rc == 0 && actual >= 8u) {
+        memcpy(&delivered, out, sizeof(delivered));
+        memcpy(total, out + 4, sizeof(*total));
+        if (delivered > room || actual < 8u + delivered * sizeof(file_id_t))
+            rc = ERR_INTERNAL;
+        else if (delivered)
+            memcpy(ids, out + 8, delivered * sizeof(file_id_t));
+    } else if (rc == 0) {
+        rc = ERR_INTERNAL;
+    }
+    free(out);
+    return rc == 0 ? 0 : box_fail(rc);
+}
+
+/* The whole list: its count asked first, then a list of room for it — asked
+ * again when it grew between the two. */
+static int tags_shown_all(uint8_t which, file_id_t program, file_id_t **out_programs)
+{
+    if (!out_programs) return -ERR_INVALID_ARGUMENT;
+    *out_programs = NULL;
+    uint32_t total = 0;
+    int rc = tags_shown_page(which, program, NULL, 0, &total);
+    while (rc == 0 && total > 0) {
+        file_id_t *ids = malloc(total * sizeof(file_id_t));
+        uint32_t   now = 0;
+        if (!ids) return -ERR_NO_MEMORY;
+        rc = tags_shown_page(which, program, ids, total, &now);
+        if (rc == 0 && now <= total) {
+            *out_programs = ids;
+            return (int)now;
+        }
+        free(ids);
+        total = now;
+    }
+    return rc;
+}
+
+int tags_shown_to_me(file_id_t **out_programs)
+{
+    return tags_shown_all(STORAGE_SHOWN_TO_ME, 0, out_programs);
+}
+
+int tags_shown_by(file_id_t program, file_id_t **out_programs)
+{
+    return tags_shown_all(STORAGE_SHOWN_BY, program, out_programs);
+}
+
+int asks_to_see_tags(file_id_t **out_programs)
+{
+    return tags_shown_all(STORAGE_ASKS_TO_SEE, 0, out_programs);
 }
 
 int find_file_by_name(TagsOf whose, const char *filename, const char *without, file_id_t *file_ids,
