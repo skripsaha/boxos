@@ -135,13 +135,16 @@ static TestResult TestStandWarrantUntagAnswersItsReason(void)
 
     TEST_ASSERT(StandMakeFile("stand_warrant_u", NULL, 0, &file_id), "a file of the test's own");
     TEST_ASSERT_OK(StandPutOn(file_id, "system"), "it wears the word system, a tag like any other");
-    uint64_t fid  = file_id;                 /* a program's file_id_t */
-    uint64_t gone = tagfs_file_ceiling();    /* the next id, as a program names it */
-    TEST_ASSERT_EQ(StandDeckAsk(STORAGE_TAG_UNSET, &fid, sizeof(fid), "standnone", 9, NULL),
+    uint8_t  fid[9], gone[9];                /* a program's file_id_t, and whose: the person's */
+    uint64_t next = tagfs_file_ceiling();    /* the next id, as a program names it */
+    memcpy(fid, &file_id, 8);
+    memcpy(gone, &next, 8);
+    fid[8] = gone[8] = STORAGE_TAGS_PERSON;
+    TEST_ASSERT_EQ(StandDeckAsk(STORAGE_TAG_UNSET, fid, sizeof(fid), "standnone", 9, NULL),
                    ERR_TAGFS_TAG_NOT_FOUND, "unset of a tag the file does not wear says so");
-    TEST_ASSERT_EQ(StandDeckAsk(STORAGE_TAG_UNSET, &gone, sizeof(gone), "standnone", 9, NULL),
+    TEST_ASSERT_EQ(StandDeckAsk(STORAGE_TAG_UNSET, gone, sizeof(gone), "standnone", 9, NULL),
                    ERR_FILE_NOT_FOUND, "and of a file that is not there, that");
-    TEST_ASSERT_OK(StandDeckAsk(STORAGE_TAG_UNSET, &fid, sizeof(fid), "system", 6, NULL),
+    TEST_ASSERT_OK(StandDeckAsk(STORAGE_TAG_UNSET, fid, sizeof(fid), "system", 6, NULL),
                    "and of system, by a caller with no warrant, taken");
     TEST_ASSERT(!StandWears(file_id, "system"), "and the file wears it no more");
 out:
@@ -484,8 +487,10 @@ static TestResult TestStandWarrantAnyTagPutOn(void)
     uint64_t   file_id = 0;
 
     TEST_ASSERT(StandMakeFile("stand_warrant_t", NULL, 0, &file_id), "a file of the test's own");
-    uint64_t fid = file_id;    /* a program's file_id_t */
-    TEST_ASSERT_OK(StandDeckAsk(STORAGE_TAG_SET, &fid, sizeof(fid), "system:standdeck", 16, NULL),
+    uint8_t fid[9];            /* a program's file_id_t, and whose: the person's */
+    memcpy(fid, &file_id, 8);
+    fid[8] = STORAGE_TAGS_PERSON;
+    TEST_ASSERT_OK(StandDeckAsk(STORAGE_TAG_SET, fid, sizeof(fid), "system:standdeck", 16, NULL),
                    "the deck's tag set of system:standdeck, by a caller with no warrant, is taken");
     TEST_ASSERT(StandWears(file_id, "system:standdeck"), "and the file wears it");
     for (uint32_t i = 0; i < ARRAY_SIZE(words); i++) {
@@ -505,7 +510,7 @@ static TestResult TestStandWarrantAnyTagPutOn(void)
                    ERR_PERMISSION_DENIED, "a write with no warrant is refused: the role keeps it");
     TEST_ASSERT_OK(StandPutOn(file_id, "standnote"),
                    "an ordinary tag goes on a file the system keeps with no warrant");
-    TEST_ASSERT_OK(StandDeckAsk(STORAGE_TAG_SET, &fid, sizeof(fid), "standmark", 9, NULL),
+    TEST_ASSERT_OK(StandDeckAsk(STORAGE_TAG_SET, fid, sizeof(fid), "standmark", 9, NULL),
                    "and through the deck, by a caller with no warrant");
     TEST_ASSERT(StandWears(file_id, "standnote") && StandWears(file_id, "standmark"),
                 "the file wears both");

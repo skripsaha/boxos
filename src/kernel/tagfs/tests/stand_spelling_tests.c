@@ -72,8 +72,8 @@ static int StandStorageOp(uint16_t opcode, const void* params, uint16_t param_si
  * answer, and in s_answer [delivered][total][ids…]. */
 static int StandQuery(const char* tags, size_t len, uint64_t* out_size)
 {
-    uint8_t scope = STORAGE_SCOPE_EVERYWHERE;
-    return StandStorageOp(STORAGE_TAG_QUERY, &scope, 1, tags, len,
+    const uint8_t head[2] = { STORAGE_SCOPE_EVERYWHERE, STORAGE_TAGS_PERSON };
+    return StandStorageOp(STORAGE_TAG_QUERY, head, sizeof(head), tags, len,
                           s_answer, sizeof(s_answer), out_size);
 }
 
@@ -330,9 +330,10 @@ static TestResult TestStandCreateRefusesWhatItCannotTag(void)
 
     TEST_ASSERT(VolumeTallyTake(&before), "the volume's files are counted");
 
-    uint8_t params[33] = { 0 };
+    uint8_t params[34] = { 0 };
     memcpy(params, "stand_spell_c", 13);
     params[32] = STORAGE_SCOPE_EVERYWHERE;
+    params[33] = STORAGE_TAGS_PERSON;
     memset(s_long, 'k', STAND_LONG_BYTES);
     s_long[STAND_LONG_BYTES] = '\0';
     size_t len = (size_t)ksnprintf(s_text, sizeof(s_text), "stand_spell,%s", s_long);
@@ -353,17 +354,19 @@ out:
     return verdict;
 }
 
-/* Whether storage.getinfo gives back the tag `text` spells whole: its key and
- * value, each at its own length. The record is [u64 id][u64 size][u32 tags]
- * [u16 name_len][name], then per tag [u16 key_len][u16 val_len][u8 type][key]
- * [val]. */
+/* Whether storage.getinfo gives back the person's tag `text` spells whole:
+ * its key and value, each at its own length. The record is [u64 id][u64 size]
+ * [u32 tags][u16 name_len][name], then per tag [u16 key_len][u16 val_len]
+ * [u8 type][u64 owner][key][val]. */
 static bool StandInfoHasWhole(uint64_t file_id, const char* text)
 {
     TagSpelling tag;
     uint64_t    said = 0;
-    uint64_t    id   = file_id;   /* a program's file_id_t */
+    uint8_t     params[9];
+    memcpy(params, &file_id, sizeof(file_id));    /* a program's file_id_t */
+    params[8] = STORAGE_TAGS_PERSON;
     if (TagSpell(text, strlen(text), &tag) != OK ||
-        StandStorageOp(STORAGE_OBJ_GET_INFO, &id, sizeof(id), NULL, 0,
+        StandStorageOp(STORAGE_OBJ_GET_INFO, params, sizeof(params), NULL, 0,
                        s_info, sizeof(s_info), &said) != OK || said < 22)
         return false;
 
@@ -371,15 +374,17 @@ static bool StandInfoHasWhole(uint64_t file_id, const char* text)
     uint16_t name_len;
     memcpy(&tags, s_info + 16, 4);
     memcpy(&name_len, s_info + 20, 2);
-    for (uint64_t at = 22u + name_len, t = 0; t < tags && at + 5 <= said; t++) {
+    for (uint64_t at = 22u + name_len, t = 0; t < tags && at + 13 <= said; t++) {
         uint16_t kl, vl;
+        uint64_t owner;
         memcpy(&kl, s_info + at, 2);
         memcpy(&vl, s_info + at + 2, 2);
-        if (kl == tag.key_len && vl == tag.value_len && at + 5 + kl + vl <= said &&
-            memcmp(s_info + at + 5, tag.key, kl) == 0 &&
-            memcmp(s_info + at + 5 + kl, tag.value, vl) == 0)
+        memcpy(&owner, s_info + at + 5, 8);
+        if (owner == 0 && kl == tag.key_len && vl == tag.value_len && at + 13 + kl + vl <= said &&
+            memcmp(s_info + at + 13, tag.key, kl) == 0 &&
+            memcmp(s_info + at + 13 + kl, tag.value, vl) == 0)
             return true;
-        at += 5u + kl + vl;
+        at += 13u + kl + vl;
     }
     return false;
 }
@@ -397,8 +402,10 @@ static TestResult TestStandTagSetWearsWhatItWasGiven(void)
 
     TEST_ASSERT(StandMakeFile("stand_spell_s", NULL, 0, &file_id), "a file of the test's own");
     size_t   len  = StandTagText("stand_spell", 's', STAND_SET_VALUE);
-    uint64_t fid  = file_id;   /* a program's file_id_t */
-    int      set  = StandStorageOp(STORAGE_TAG_SET, &fid, sizeof(fid), s_text, len, NULL, 0, &said);
+    uint8_t  fid[9];           /* a program's file_id_t, and whose */
+    memcpy(fid, &file_id, 8);
+    fid[8] = STORAGE_TAGS_PERSON;
+    int      set  = StandStorageOp(STORAGE_TAG_SET, fid, sizeof(fid), s_text, len, NULL, 0, &said);
     uint32_t want = tagfs_tag_lookup(s_text);
     bool     worn = want != TAGFS_INVALID_TAG_ID && tagfs_has_tag(file_id, want);
     TestEvidence("tag adds of a 100-byte value that put some other tag on the file", set == OK && !worn);
@@ -410,7 +417,7 @@ static TestResult TestStandTagSetWearsWhatItWasGiven(void)
     TEST_ASSERT(worn, "and the file wears exactly it");
     TEST_ASSERT(StandInfoHasWhole(file_id, s_text), "its info carries the tag whole");
 
-    TEST_ASSERT_OK(StandStorageOp(STORAGE_TAG_UNSET, &fid, sizeof(fid), s_text, len, NULL, 0, &said),
+    TEST_ASSERT_OK(StandStorageOp(STORAGE_TAG_UNSET, fid, sizeof(fid), s_text, len, NULL, 0, &said),
                    "unset of the same text is taken");
     TEST_ASSERT(!tagfs_has_tag(file_id, want), "and takes exactly that tag off");
 
