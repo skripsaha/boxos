@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <initializer_list>
+#include <new>
 
 #include "paint.h"
 #include "skyline.h"
@@ -22,14 +23,24 @@ constexpr float StripeEvery = 24;   // the grass's stripes, in units
 constexpr float Grass       = 13;   // how deep the grass is
 constexpr float Rim         = 2;    // the dark line along the ground's top
 
-/* A share of a speed, read slow to fast: the clouds alone in the sky, the
- * far bank, the near one, the city, the trees and the bushes. */
-constexpr float FloatShare = 0.03f, FarShare = 0.045f, CloudShare = 0.07f, CityShare = 0.16f, BushShare = 0.36f;
+/* A share of a speed, read slow to fast: the banks of clouds, the city, the
+ * trees and the bushes. The small clouds high in the sky stand still. */
+constexpr float StillShare = 0, CloudShare = 0.06f, CityShare = 0.16f, BushShare = 0.36f;
+
+/* Below this the bushes' band hides whatever is behind: the clouds and the
+ * city need not be drawn lower. */
+constexpr float Hidden = 386;
+
+painter::core::Fill Solid(Color Of)
+{
+    return painter::core::Fill(Of);
+}
 
 }  // namespace
 
 Scene::Scene(gui::Area &On, const World &Game, const Sky &Shown)
-    : Screen(On), Scale(On.Size().Y / field::Tall), Wide(Game.Wide() * Scale)
+    : Screen(On), Scale(On.Size().Y / field::Tall), Wide(Game.Wide() * Scale), Pixels(Scale * On.Scale()),
+      Apart(std::round(skyline::Period * Pixels))
 {
     MakeSky(Shown);
     MakeSkyline(Shown);
@@ -39,6 +50,13 @@ Scene::Scene(gui::Area &On, const World &Game, const Sky &Shown)
     MakeGround(Shown);
     MakeBird();
     Lay(Game);
+}
+
+Scene::~Scene()
+{
+    /* The pictures go before the blocks they show. */
+    Skyline.clear();
+    for (const gui::PictureBlock &One : Blocks) Screen.CloseBlock(One.Id);
 }
 
 void Scene::MakeSky(const Sky &Shown)
@@ -58,47 +76,73 @@ void Scene::MakeSky(const Sky &Shown)
 
 void Scene::MakeSkyline(const Sky &Shown)
 {
-    const int  Count = static_cast<int>(std::ceil(Wide / (skyline::Period * Scale))) + 1;
-    const auto Layer = [&](float Share) -> gui::Group & {
-        Skyline.push_back(Scene::Layer{Screen.Group(), Share});
-        return Skyline.back().Whole;
+    const auto Layer = [&](float Share, std::initializer_list<Piece> Pieces, float Top, float Bottom) {
+        Skyline.push_back(Scene::Layer{Painted(Pieces, Top, Bottom), Share, Top * Scale, -1});
     };
-    const auto Paint = [&](gui::Group &Into, const skyline::Pattern &Of, gui::Fill With) {
-        Keep(Into.Outline(skyline::Tiled(Of, Scale, Count))).SetFill(std::move(With));
-    };
-    /* Clumps: the pattern in its shade, its lights over it, and their lights
+    Skyline.reserve(4);
+
+    const skyline::Pattern Small = skyline::Floating(), SmallLit = skyline::Lights(Small, 0.74f);
+    Layer(StillShare, {{Small, Solid(Shown.CloudShade)}, {SmallLit, Solid(Shown.Cloud)}}, skyline::Top(Small) - 1, skyline::Bottom(Small) + 1);
+
+    /* The far bank behind the near one, in one picture: what moves every few
+     * frames is laid once over, not twice. */
+    const skyline::Pattern Far = skyline::FarClouds(), Bank = skyline::Clouds(), BankLit = skyline::Lights(Bank, 0.74f);
+    const float            Top  = skyline::Top(Far) - 1;
+    const Color            Haze = Color::Transition(Shown.CloudFar, Shown.Horizon, 0.5f);
+    Layer(CloudShare,
+          {{Far, painter::core::Gradient::Linear({0, (280 - Top) * Pixels}, {0, (330 - Top) * Pixels}, {{0, Shown.CloudFar}, {1, Haze}})},
+           {Bank, Solid(Shown.CloudShade)},
+           {BankLit, Solid(Shown.Cloud)}},
+          Top, Hidden);
+
+    const skyline::Pattern Houses = skyline::City(), Windows = skyline::Windows(Houses);
+    Layer(CityShare, {{Houses, Solid(Shown.City)}, {Windows, Solid(Shown.Windows)}}, skyline::Top(Houses) - 1, Hidden);
+
+    /* Clumps: a pattern in its shade, its lights over it, and their lights
      * over them. */
-    const auto Clumps = [&](gui::Group &Into, const skyline::Pattern &Of, float Share, Color Shade, Color Lit, Color Light) {
-        const skyline::Pattern Lights = skyline::Lights(Of, Share);
-        Paint(Into, Of, gui::Fill::Of(Shade));
-        Paint(Into, Lights, gui::Fill::Of(Lit));
-        Paint(Into, skyline::Lights(Lights, 0.5f), gui::Fill::Of(Light));
-    };
-    Skyline.reserve(5);
+    const skyline::Woods   Trees    = skyline::Trees();
+    const skyline::Pattern CrownLit = skyline::Lights(Trees.Crowns, 0.66f), CrownLight = skyline::Lights(CrownLit, 0.5f);
+    const skyline::Pattern Bushes = skyline::Bushes(), BushLit = skyline::Lights(Bushes, 0.64f), BushLight = skyline::Lights(BushLit, 0.5f);
+    Layer(BushShare,
+          {{Trees.Trunks, Solid(Shown.Trunk)}, {Trees.Crowns, Solid(Shown.Crown)}, {CrownLit, Solid(Shown.CrownLit)},
+           {CrownLight, Solid(Shown.CrownLight)}, {Bushes, Solid(Shown.Bush)}, {BushLit, Solid(Shown.BushLit)},
+           {BushLight, Solid(Shown.BushLight)}},
+          std::min(skyline::Top(Trees.Crowns), skyline::Top(Bushes)) - 1, field::Ground);
+}
 
-    gui::Group            &High  = Layer(FloatShare);
-    const skyline::Pattern Small = skyline::Floating();
-    Paint(High, Small, gui::Fill::Of(Shown.CloudShade));
-    Paint(High, skyline::Lights(Small, 0.74f), gui::Fill::Of(Shown.Cloud));
-
-    Paint(Layer(FarShare), skyline::FarClouds(),
-          paint::Down(280 * Scale, 330 * Scale, {{0, Shown.CloudFar}, {1, Color::Transition(Shown.CloudFar, Shown.Horizon, 0.5f)}}));
-
-    gui::Group            &Near = Layer(CloudShare);
-    const skyline::Pattern Bank = skyline::Clouds();
-    Paint(Near, Bank, gui::Fill::Of(Shown.CloudShade));
-    Paint(Near, skyline::Lights(Bank, 0.74f), gui::Fill::Of(Shown.Cloud));
-
-    gui::Group            &City   = Layer(CityShare);
-    const skyline::Pattern Houses = skyline::City();
-    Paint(City, Houses, gui::Fill::Of(Shown.City));
-    Paint(City, skyline::Windows(Houses), gui::Fill::Of(Shown.Windows));
-
-    gui::Group          &Green = Layer(BushShare);
-    const skyline::Woods Trees = skyline::Trees();
-    Paint(Green, Trees.Trunks, gui::Fill::Of(Shown.Trunk));
-    Clumps(Green, Trees.Crowns, 0.66f, Shown.Crown, Shown.CrownLit, Shown.CrownLight);
-    Clumps(Green, skyline::Bushes(), 0.64f, Shown.Bush, Shown.BushLit, Shown.BushLight);
+gui::Picture Scene::Painted(std::initializer_list<Piece> Pieces, float Top, float Bottom)
+{
+    const float         Across = Wide / Scale * Pixels + Apart;   // the screen and a period, in pixels
+    const std::uint32_t W      = static_cast<std::uint32_t>(std::ceil(Across)) + 1;
+    const std::uint32_t H      = static_cast<std::uint32_t>(std::ceil((Bottom - Top) * Pixels));
+    std::optional<painter::core::Canvas>         Page  = painter::core::Canvas::Make(W, H);
+    std::expected<gui::PictureBlock, box::error> Block = Screen.OpenPicture(W, H);
+    if (!Page || !Block) throw std::bad_alloc();
+    const int Count = static_cast<int>(std::ceil(Across / Apart)) + 1;
+    for (const Piece &One : Pieces) (void)Page->Fill(skyline::Tiled(One.Of, Pixels, Count, Apart, Top), One.With);
+    /* The canvas's light is multiplied by its opacity; a picture's is not. */
+    std::span<std::uint8_t> Bytes = Block->Pixels();
+    for (std::uint32_t Y = 0; Y < H; Y++) {
+        const painter::core::Pixel *Row = Page->Row(Y);
+        std::uint8_t              *Out = &Bytes[static_cast<std::size_t>(Y) * W * 4];
+        for (std::uint32_t X = 0; X < W; X++, Out += 4) {
+            const painter::core::Pixel One = Row[X];
+            if (One.Alpha == 0) {
+                Out[0] = Out[1] = Out[2] = Out[3] = 0;
+                continue;
+            }
+            const auto Light = [&](std::uint16_t Of) {
+                return static_cast<std::uint8_t>(std::min<std::uint32_t>(255, (static_cast<std::uint32_t>(Of) * 255 + One.Alpha / 2) / One.Alpha));
+            };
+            Out[0] = Light(One.Red), Out[1] = Light(One.Green), Out[2] = Light(One.Blue);
+            Out[3] = static_cast<std::uint8_t>((static_cast<std::uint32_t>(One.Alpha) * 255 + 32767) / 65535);
+        }
+    }
+    Screen.BlockChanged(Block->Id, painter::core::Rect{0, 0, static_cast<std::int32_t>(W), static_cast<std::int32_t>(H)});
+    gui::Picture Made = Screen.Picture(*Block, ITEM_FIT_STRETCH, true);
+    Made.SetPlace({0, Top * Scale}).SetSize({static_cast<float>(W) / Screen.Scale(), static_cast<float>(H) / Screen.Scale()});
+    Blocks.push_back(std::move(*Block));
+    return Made;
 }
 
 void Scene::MakeGround(const Sky &Shown)
@@ -139,7 +183,14 @@ gui::Shape &Scene::Keep(gui::Shape Made)
 void Scene::Lay(const World &Game)
 {
     const float Gone = Game.Travelled();
-    for (Layer &One : Skyline) One.Whole.SetPlace({-std::fmod(Gone * One.Share, skyline::Period) * Scale, 0});
+    /* A layer moves only when it has come a whole pixel: the display lays it
+     * again only then. */
+    for (Layer &One : Skyline) {
+        const int Shift = static_cast<int>(std::lround(std::fmod(Gone * One.Share * Pixels, Apart)));
+        if (Shift == One.Shifted) continue;
+        One.Shifted = Shift;
+        One.Image.SetPlace({-static_cast<float>(Shift) / Screen.Scale(), One.Top});
+    }
     Stripes.SetPlace({-std::fmod(Gone, StripeEvery) * Scale, 0});
 
     const std::vector<Pipe> &Row = Game.Pipes();

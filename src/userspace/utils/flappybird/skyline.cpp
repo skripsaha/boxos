@@ -83,14 +83,16 @@ void Fir(Woods &Into, Dice &Roll, float X)
     Into.Trunks.Boxes.push_back(Box{X - 1.5f, Base - 3, 3, field::Ground - Base + 3});
 }
 
-void Lay(painter::core::Path &Into, const Pattern &Once, float Unit, float From)
+/* The pattern laid From pixels across, Above the field's height at the top. */
+void Lay(painter::core::Path &Into, const Pattern &Once, float Unit, float From, float Above)
 {
-    for (const Round &One : Once.Rounds) Into.AddCircle({(From + One.X) * Unit, One.Y * Unit}, One.R * Unit);
-    for (const Box &One : Once.Boxes) Into.AddRect({(From + One.X) * Unit, One.Y * Unit, One.Wide * Unit, One.Tall * Unit});
+    for (const Round &One : Once.Rounds) Into.AddCircle({From + One.X * Unit, (One.Y - Above) * Unit}, One.R * Unit);
+    for (const Box &One : Once.Boxes) Into.AddRect({From + One.X * Unit, (One.Y - Above) * Unit, One.Wide * Unit, One.Tall * Unit});
     /* Wound as the boxes are, so the shapes of one path add up. */
     for (const Spire &One : Once.Spires) {
-        const float Middle = (From + One.X) * Unit, Half = One.Wide / 2 * Unit, In = One.Wide * 0.14f * Unit;
-        const float Base = One.Base * Unit, Top = (One.Base - One.Tall) * Unit, Bend = (One.Base - One.Tall * 0.28f) * Unit;
+        const float Middle = From + One.X * Unit, Half = One.Wide / 2 * Unit, In = One.Wide * 0.14f * Unit;
+        const float Base = (One.Base - Above) * Unit, Top = (One.Base - One.Tall - Above) * Unit;
+        const float Bend = (One.Base - One.Tall * 0.28f - Above) * Unit;
         Into.MoveTo({Middle - Half, Base}).QuadTo({Middle - In, Bend}, {Middle, Top});
         if (One.Lit) Into.LineTo({Middle + One.Wide * 0.04f * Unit, Base});
         else Into.QuadTo({Middle + In, Bend}, {Middle + Half, Base});
@@ -208,17 +210,35 @@ Pattern Stars(float Wide, float Low)
     return Made;
 }
 
+float Top(const Pattern &Of)
+{
+    float Most = field::Ground;
+    for (const Round &One : Of.Rounds) Most = std::min(Most, One.Y - One.R);
+    for (const Box &One : Of.Boxes) Most = std::min(Most, One.Y);
+    for (const Spire &One : Of.Spires) Most = std::min(Most, One.Base - One.Tall);
+    return Most;
+}
+
+float Bottom(const Pattern &Of)
+{
+    float Least = 0;
+    for (const Round &One : Of.Rounds) Least = std::max(Least, One.Y + One.R);
+    for (const Box &One : Of.Boxes) Least = std::max(Least, One.Y + One.Tall);
+    for (const Spire &One : Of.Spires) Least = std::max(Least, One.Base);
+    return Least;
+}
+
 painter::core::Path Placed(const Pattern &Once, float Unit)
 {
     painter::core::Path Made;
-    Lay(Made, Once, Unit, 0);
+    Lay(Made, Once, Unit, 0, 0);
     return Made;
 }
 
-painter::core::Path Tiled(const Pattern &Once, float Unit, int Count)
+painter::core::Path Tiled(const Pattern &Once, float Unit, int Count, float Apart, float Above)
 {
     painter::core::Path Made;
-    for (int Turn = -1; Turn < Count; Turn++) Lay(Made, Once, Unit, static_cast<float>(Turn) * Period);
+    for (int Turn = -1; Turn < Count; Turn++) Lay(Made, Once, Unit, static_cast<float>(Turn) * Apart, Above);
     return Made;
 }
 

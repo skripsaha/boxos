@@ -1,8 +1,9 @@
 /* skyline.h — the pictures behind the pipes: the clouds, the city and its
  * windows, the trees and the bushes and the night's stars, each worked out
  * once as rounds, boxes and spires in units of the field and made a path of
- * points. All but the stars are a picture Period units wide that goes on into
- * itself, so a layer laid many times over slides along with no seam.
+ * pixels. All but the stars are a picture Period units wide that goes on into
+ * itself, so a layer laid many times over, a whole number of pixels apart,
+ * slides along with no seam.
  *
  * What is round is lit from the top left: Lights makes, of every round, a
  * smaller one up and to the left inside it, and of every spire its left half,
@@ -66,11 +67,16 @@ Pattern Lights(const Pattern &Of, float Share);
 /* Stars over a sky Wide units across, down to Low. */
 Pattern Stars(float Wide, float Low);
 
-/* The pattern as a path of points, a unit Unit points: Placed once where it
- * is; Tiled Count times a Period apart, and once more before the first, so
- * what reaches over into the next period is there at the start too. */
+/* The highest and the lowest the pattern reaches, in units. */
+float Top(const Pattern &Of);
+float Bottom(const Pattern &Of);
+
+/* The pattern as a path, a unit Unit pixels: Placed once where it is; Tiled
+ * Count times Apart pixels apart, and once more before the first, so what
+ * reaches over into the next period is there at the start too — the field's
+ * height Above at the path's top. */
 painter::core::Path Placed(const Pattern &Once, float Unit);
-painter::core::Path Tiled(const Pattern &Once, float Unit, int Count);
+painter::core::Path Tiled(const Pattern &Once, float Unit, int Count, float Apart, float Above);
 
 }  // namespace flappybird::skyline
 
