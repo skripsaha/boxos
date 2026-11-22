@@ -299,6 +299,14 @@ error_t  PlotSourcePull(const PlotSource *src, uint64_t at, void *dst, uint32_t 
  * landed before it: the blocks of a stretch before a refused one are laid. */
 error_t  PlotWriteBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *out_done);
 
+/* `count` bytes at `bytes` that landed at the file's byte `at`: those of them
+ * that lie under TAGFS_HEAD_MOST made the Plot's record of the file's first
+ * bytes (meta.head), which the Ink's record keeps (InkBookPlotBuilt). Every
+ * road a write's bytes land by says them here — PlotWriteBlocks the source's,
+ * the port the image of the file's first block it laid — and nothing reads
+ * the medium for them. */
+void     PlotHeadLanded(Plot *p, uint64_t at, const uint8_t *bytes, uint64_t count);
+
 /*
  * PlotConveyance — what the Plot did to the runs it was loaded with, as the
  * splices of the record `cur` it loaded them from (file_record.h, BookSplice):

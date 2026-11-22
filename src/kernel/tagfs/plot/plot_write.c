@@ -148,12 +148,19 @@ static error_t PlotLayBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64
     return rc;
 }
 
+void PlotHeadLanded(Plot *p, uint64_t at, const uint8_t *bytes, uint64_t count)
+{
+    if (at >= TAGFS_HEAD_MOST)
+        return;
+    uint64_t under = TAGFS_HEAD_MOST - at;
+    memcpy(p->meta.head + at, bytes, (size_t)(count < under ? count : under));
+}
+
 /* The bytes of the file's first TAGFS_HEAD_MOST a write gives are taken from
  * its source before a byte moves — a source that does not read now would not
  * read for the write either — and those of them that landed go into the
- * Plot's record of them (meta.head), which the Ink's record keeps
- * (InkBookPlotBuilt): a file's first bytes change with the write that changes
- * them, and nothing reads the medium for them. */
+ * Plot's record of them (PlotHeadLanded): a file's first bytes change with the
+ * write that changes them. */
 error_t PlotWriteBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *out_done)
 {
     uint8_t  first[TAGFS_HEAD_MOST];
@@ -166,9 +173,7 @@ error_t PlotWriteBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *o
         return rc;
     rc = p->slip ? PlotSlipWrite(p, at, src, out_done)    /* its bytes ride the stitch: no block moves */
                  : PlotLayBlocks(p, at, src, out_done);
-    uint64_t landed = *out_done < want ? *out_done : want;
-    if (landed)
-        memcpy(p->meta.head + at, first, (size_t)landed);
+    PlotHeadLanded(p, at, first, *out_done < want ? *out_done : want);
     return rc;
 }
 
