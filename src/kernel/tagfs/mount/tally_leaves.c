@@ -869,11 +869,16 @@ static error_t LeavesTag(void* ctx, TallyKey key, const uint8_t* body, uint32_t 
         g_book.next_tag = key.k1 + 1u;
     if (!BookTagHeld(key.k1, &t))
         return BookTagAsideNoted(key.k1, &t);
-    if (t.flags & TALLY_TAG_RETIRED)
-        return RegistryCoinRetired(tagfs_get_state()->registry, (uint32_t)key.k1);
-    error_t rc = RegistryCoin(tagfs_get_state()->registry, (uint32_t)key.k1,
-                              (t.flags & TALLY_TAG_HAS_VALUE) ? TAGFS_TAG_FLAG_HAS_VALUE : 0, TagRegistryOwnerOf(&t),
-                              t.key, (uint8_t)t.key_len, t.value, (uint16_t)t.value_len);
+    /* A retired id is an element of the tree as a tag is — one item, its text
+     * none — and is counted as the Tally's writer counted it (binder_items.c,
+     * TagsNext): the measures of the tree the mount stands on are the ones
+     * its writer laid. */
+    error_t rc = (t.flags & TALLY_TAG_RETIRED)
+                     ? RegistryCoinRetired(tagfs_get_state()->registry, (uint32_t)key.k1)
+                     : RegistryCoin(tagfs_get_state()->registry, (uint32_t)key.k1,
+                                    (t.flags & TALLY_TAG_HAS_VALUE) ? TAGFS_TAG_FLAG_HAS_VALUE : 0,
+                                    TagRegistryOwnerOf(&t), t.key, (uint8_t)t.key_len, t.value,
+                                    (uint16_t)t.value_len);
     if (rc == ERR_ALREADY_EXISTS) {
         ksnprintf(words, sizeof(words), "tag id %llu's owner and text are another id's too, or its id "
                   "another tag's — the registry cannot hold the two at once", (unsigned long long)key.k1);

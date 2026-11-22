@@ -6,6 +6,7 @@
 #include "../keep/keep.h"
 #include "../retire/retire.h"
 #include "../settle/settle.h"
+#include "../settle/endpaper_fact.h"
 #include "../tag_registry/tag_registry.h"
 
 #ifdef CONFIG_VOLUME_TESTS
@@ -204,6 +205,7 @@ static TestResult StandRetireAfterMount(StandRetire* r, bool tally)
     static StandBinder b;
     const char* aside = tally ? StandBinderAside(&b) : NULL;
     uint32_t    n = 0;
+    uint64_t    laid[3] = { 0 }, stood[3] = { 0 };
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandRetireMake(r, 3), "a program, three files and tags of its own on all of them");
@@ -211,9 +213,16 @@ static TestResult StandRetireAfterMount(StandRetire* r, bool tally)
     TEST_ASSERT_OK(RetireSweepNow(&n), "the duty retires its tags");
     TEST_ASSERT_EQ(n, 2, "both");
     TEST_ASSERT_OK(TagFSSettle(), "a cycle lays the Coineds RETIRED and the files without the tags");
-    if (tally)
+    if (tally) {
         TEST_ASSERT_OK(StandBinderTallies(1), "and a Tally lays TAGS with the two ids RETIRED");
+        EndpaperFactMost(&laid[0], &laid[1], &laid[2]);
+    }
     TEST_ASSERT(StandStitchRemount(), "the volume is mounted afresh");
+    if (tally) {
+        EndpaperFactMost(&stood[0], &stood[1], &stood[2]);
+        TEST_ASSERT(laid[2] == stood[2] && laid[0] == stood[0],
+                    "the mount measures TAGS and FILES as the Tally's writer did, a retired id one element of TAGS");
+    }
     TEST_ASSERT(StandRetireHolds(r), "its book says the same: held as retired, found by no lookup, worn by no file");
     TEST_ASSERT_EQ(tagfs_get_state()->registry->program_tags, 0, "and no program's tag is owed");
     TEST_ASSERT(StandRetireNeverAgain(r), "no id of the book is given twice");
