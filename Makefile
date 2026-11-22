@@ -1116,6 +1116,20 @@ $(TAGFS_TOOL): tools/create_tagfs.c tools/create_tagfs_ground.c tools/create_tag
 # the host's). Its prerequisites are every file it is made of, the format's
 # headers among them, so a change to the format remakes the tool and then
 # every box.
+# ‼ WHO MADE A PROGRAM is its box's signature (the part `signature`,
+# box_format.h): every box of the tree is signed by BoxOS — whoever builds the
+# tree — as the program its file is called, and the kernel trusts that author
+# by birth (box_trust.c). The key is the building machine's and never the
+# tree's: kept outside it, made by the first build that finds none, so no copy
+# of the tree carries a key that signs for it. The kernel is told its public
+# half alone (BOX_AUTHOR_HEADER), and so is inside, which says whose seal
+# a box carries. Anybody may sign their own programs with a
+# key of their own; a program by an author the kernel does not trust, or one
+# signed by nobody, still starts — as a guest.
+BOX_SIGN_KEY      ?= $(HOME)/.boxos/sign/boxos.pem
+BOX_AUTHOR_HEADER  = $(BUILDDIR)/include/box_author.h
+PackSign = --sign $(BOX_SIGN_KEY) --as $(basename $(notdir $(1)))
+
 PACK_TOOL   = $(BUILDDIR)/pack
 PACK_SHA256 = $(BUILDDIR)/pack_sha256.o
 
@@ -1137,9 +1151,10 @@ $(PACK_TOOL): tools/pack.c tools/box_host.h $(SRCDIR)/include/box_format.h \
 $(INSIDE_TOOL): tools/inside.c tools/box_host.h $(UTILS_DIR)/inside/inside_show.c \
                 $(UTILS_DIR)/inside/inside_show.h $(SRCDIR)/include/box_format.h \
                 $(SRCDIR)/include/box_reader.h $(SRCDIR)/include/nameplate_format.h \
-                $(SRCDIR)/include/settings_reader.h $(SRCDIR)/include/key_chord.h $(PACK_SHA256) | $(BUILDDIR)
+                $(SRCDIR)/include/settings_reader.h $(SRCDIR)/include/key_chord.h $(PACK_SHA256) \
+                $(BOX_AUTHOR_HEADER) | $(BUILDDIR)
 	@echo "Compiling the inside tool for $(UNAME_S) ($(UNAME_M))..."
-	@$(CC_HOST) -std=gnu11 -O2 -Wall -Wextra -DINSIDE_HOST -I$(SRCDIR)/include -Itools \
+	@$(CC_HOST) -std=gnu11 -O2 -Wall -Wextra -DINSIDE_HOST -I$(SRCDIR)/include -I$(dir $(BOX_AUTHOR_HEADER)) -Itools \
 	    -I$(UTILS_DIR)/inside tools/inside.c $(UTILS_DIR)/inside/inside_show.c $(PACK_SHA256) -o $@
 
 # parcel-host: tools/parcel_host.mk (a host test, its own file).
@@ -1484,9 +1499,9 @@ $(shell rm -f $(UTILS_STAMP))
 endif
 
 $(UTILS_STAMP): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(PAINTER_LIB) $(TYPECASE_LIB) $(UTILS_INPUTS) \
-                $(NAMEPLATE_TOOL)
+                $(NAMEPLATE_TOOL) $(BOX_AUTHOR_HEADER)
 	@echo "Building utilities..."
-	@cd $(UTILS_DIR) && $(MAKE)
+	@cd $(UTILS_DIR) && $(MAKE) BOX_AUTHOR_DIR=$(abspath $(dir $(BOX_AUTHOR_HEADER)))
 	@touch $@
 
 $(UTIL_ELFS): $(UTILS_STAMP)
@@ -1819,18 +1834,6 @@ PackAsks = $(if $(filter $(basename $(notdir $(1))),$(PACK_ASKS_NOTHING)),,--ask
 PACK_SYSTEM = display hub pulse quilltest autostart reboot bye escheat timezone memtag hw usetest faretest logsave lastsaid journey finish taskboard memmap passport gardener
 PackRole = $(if $(filter $(basename $(notdir $(1))),$(PACK_SYSTEM)),--role system)
 
-# ‼ WHO MADE A PROGRAM is its box's signature (the part `signature`,
-# box_format.h): every box of the tree is signed by BoxOS — whoever builds the
-# tree — as the program its file is called, and the kernel trusts that author
-# by birth (box_trust.c). The key is the building machine's and never the
-# tree's: kept outside it, made by the first build that finds none, so no copy
-# of the tree carries a key that signs for it. The kernel is told its public
-# half alone (BOX_AUTHOR_HEADER). Anybody may sign their own programs with a
-# key of their own; a program by an author the kernel does not trust, or one
-# signed by nobody, still starts — as a guest.
-BOX_SIGN_KEY      ?= $(HOME)/.boxos/sign/boxos.pem
-BOX_AUTHOR_HEADER  = $(BUILDDIR)/include/box_author.h
-PackSign = --sign $(BOX_SIGN_KEY) --as $(basename $(notdir $(1)))
 
 $(BOX_SIGN_KEY):
 	@mkdir -p $(dir $@) && chmod 700 $(dir $@)

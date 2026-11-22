@@ -98,8 +98,11 @@ include ../nameplate.mk
 	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) $*.o $(BOXLIB))
 
 # inside is its one source shared with tools/inside (inside/inside_show.c) and
-# the utility's own main.
+# the utility's own main; it says whose seal a box carries by the public half
+# of BoxOS's own, which the build makes outside the tree (box_author.h).
 INSIDE_OBJS = inside.o inside/inside_show.o
+BOX_AUTHOR_DIR ?= $(abspath ../../../build/include)
+inside/inside_show.o: CFLAGS += -I$(BOX_AUTHOR_DIR)
 
 inside.elf: $(BOXLIB_START) $(INSIDE_OBJS) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CC),$(LDFLAGS),$(BOXLIB_START) $(INSIDE_OBJS) $(BOXLIB))

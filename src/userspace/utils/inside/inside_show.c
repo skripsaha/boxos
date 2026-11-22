@@ -21,6 +21,7 @@
 #include "inside_show.h"
 #include "nameplate_format.h"
 #include "settings_reader.h"
+#include "box_author.h"   /* BOX_AUTHOR_BOXOS_MODULUS: the public half of BoxOS's own seal (made by the build) */
 
 /* How much of a part is held at a time while its hash is taken. */
 #define INSIDE_CHUNK       (64u * 1024u)
@@ -150,6 +151,9 @@ static bool GapZero(const InsideFile *file, uint64_t from, uint64_t to, uint8_t 
 }
 
 /* ---- what a part is and says --------------------------------------------- */
+
+/* The seal of BoxOS — the one author the kernel trusts by birth (box_trust.c). */
+static const uint8_t s_boxos_seal[BOX_SIGN_RSA2048_BYTES] = BOX_AUTHOR_BOXOS_MODULUS;
 
 static bool KindIsText(BoxKind kind)
 {
@@ -374,13 +378,56 @@ static bool SayNames(const InsideFile *file, const BoxPart *part, const uint8_t 
     return true;
 }
 
+/* A seal as a person compares two: the first eight bytes of the SHA-256 of
+ * its key, in four groups. */
+static void SaySeal(const InsideFile *file, const uint8_t *key, uint64_t bytes)
+{
+    static const char hex[] = "0123456789abcdef";
+    uint8_t digest[BOX_HASH_BYTES];
+    char    text[19];
+    file->Hasher->Begin(file->Hasher->State);
+    file->Hasher->Add(file->Hasher->State, key, bytes);
+    file->Hasher->End(file->Hasher->State, digest);
+    for (unsigned i = 0, at = 0; i < 8; i++) {
+        if (i && i % 2 == 0) text[at++] = ' ';
+        text[at++] = hex[digest[i] >> 4];
+        text[at++] = hex[digest[i] & 0xFu];
+    }
+    file->Say(file->Context, text, sizeof(text));
+}
+
+/* Who signed the box and as which program — what the signature says; that it
+ * holds is the kernel's to check, at every start of the program. */
+static bool SaySignature(const InsideFile *file, const BoxPart *part, const uint8_t *bytes)
+{
+    BoxSignature signature;
+    if (BoxSignatureRead(bytes, part->Size, &signature) != BOX_OK) return false;
+    SayUnder(file);
+    if (signature.How != BOX_SIGN_RSA2048_SHA256) {
+        Say(file, "signed in a way this reader does not know: to the kernel, a box signed by no one\n");
+        return true;
+    }
+    Say(file, "signed as ");
+    SaySpan(file, signature.Name, signature.NameLength);
+    if (signature.KeyBytes == sizeof(s_boxos_seal) && memcmp(signature.Key, s_boxos_seal, sizeof(s_boxos_seal)) == 0)
+        Say(file, ", with the seal of BoxOS ");
+    else
+        Say(file, ", with its author's own seal ");
+    SaySeal(file, signature.Key, signature.KeyBytes);
+    Say(file, "\n");
+    SayUnder(file);
+    Say(file, "the kernel checks it at every start: held, it is this program in every copy of it; one by BoxOS "
+              "has what its box asks, any other is started as a guest\n");
+    return true;
+}
+
 /* How many of a part's bytes its description reads. */
 static uint64_t DescribedBytes(const BoxPart *part)
 {
     if (part->Kind == BOX_KIND_NAMES)
         return part->Size < sizeof(NameplateHeader) ? part->Size : sizeof(NameplateHeader);
     if (part->Kind == BOX_KIND_FIXUPS || part->Kind == BOX_KIND_DOORS || part->Kind == BOX_KIND_THREAD ||
-        KindIsText(part->Kind))
+        part->Kind == BOX_KIND_SIGNATURE || KindIsText(part->Kind))
         return part->Size;
     return 0;
 }
@@ -421,6 +468,7 @@ static bool Describe(const InsideFile *file, const BoxTable *table, const BoxPar
     case BOX_KIND_NAMES:  written = SayNames(file, part, bytes); break;
     case BOX_KIND_SETTINGS: written = SaySettings(file, part, bytes); break;
     case BOX_KIND_LIFE:   written = SayLife(file, part, bytes); break;
+    case BOX_KIND_SIGNATURE: written = SaySignature(file, part, bytes); break;
     default:              written = SayText(file, part, bytes); break;
     }
     free(bytes);
