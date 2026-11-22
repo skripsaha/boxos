@@ -22,8 +22,9 @@ constexpr float StripeEvery = 24;   // the grass's stripes, in units
 constexpr float Grass       = 13;   // how deep the grass is
 constexpr float Rim         = 2;    // the dark line along the ground's top
 
-/* A share of a speed, read slow to fast: the clouds, the city, the bushes. */
-constexpr float CloudShare = 0.06f, CityShare = 0.16f, BushShare = 0.36f;
+/* A share of a speed, read slow to fast: the clouds alone in the sky, the
+ * far bank, the near one, the city, the trees and the bushes. */
+constexpr float FloatShare = 0.03f, FarShare = 0.045f, CloudShare = 0.07f, CityShare = 0.16f, BushShare = 0.36f;
 
 }  // namespace
 
@@ -46,7 +47,7 @@ void Scene::MakeSky(const Sky &Shown)
     Backdrop        = Screen.Rectangle();
     Backdrop.SetPlace({0, 0}).SetSize({Wide, Low}).SetFill(paint::Down(0, Low * 0.8f, {{0, Shown.Top}, {1, Shown.Horizon}}));
     if (!Shown.Stars) return;
-    Stars = Screen.Outline(skyline::Tiled(skyline::Stars(Wide / Scale, field::Ground * 0.62f), Scale, 1));
+    Stars = Screen.Outline(skyline::Placed(skyline::Stars(Wide / Scale, field::Ground * 0.62f), Scale));
     Stars.SetFill(gui::Fill::Of(ink::White));
     /* The stars breathe, slowly, the display keeping time. */
     gui::Animation Twinkle = gui::Animation::InOut(2400ms);
@@ -57,26 +58,47 @@ void Scene::MakeSky(const Sky &Shown)
 
 void Scene::MakeSkyline(const Sky &Shown)
 {
-    const int   Count = static_cast<int>(std::ceil(Wide / (skyline::Period * Scale))) + 1;
-    const float Low   = field::Ground * Scale;
-    const auto  Layer = [&](float Share) -> gui::Group & {
+    const int  Count = static_cast<int>(std::ceil(Wide / (skyline::Period * Scale))) + 1;
+    const auto Layer = [&](float Share) -> gui::Group & {
         Skyline.push_back(Scene::Layer{Screen.Group(), Share});
         return Skyline.back().Whole;
     };
-    Skyline.reserve(3);
+    const auto Paint = [&](gui::Group &Into, const skyline::Pattern &Of, gui::Fill With) {
+        Keep(Into.Outline(skyline::Tiled(Of, Scale, Count))).SetFill(std::move(With));
+    };
+    /* Clumps: the pattern in its shade, its lights over it, and their lights
+     * over them. */
+    const auto Clumps = [&](gui::Group &Into, const skyline::Pattern &Of, float Share, Color Shade, Color Lit, Color Light) {
+        const skyline::Pattern Lights = skyline::Lights(Of, Share);
+        Paint(Into, Of, gui::Fill::Of(Shade));
+        Paint(Into, Lights, gui::Fill::Of(Lit));
+        Paint(Into, skyline::Lights(Lights, 0.5f), gui::Fill::Of(Light));
+    };
+    Skyline.reserve(5);
 
-    gui::Group &Clouds = Layer(CloudShare);
-    Keep(Clouds.Outline(skyline::Tiled(skyline::Clouds(), Scale, Count)))
-        .SetFill(paint::Down(296 * Scale, Low, {{0, Shown.Cloud}, {1, Shown.CloudFoot}}));
+    gui::Group            &High  = Layer(FloatShare);
+    const skyline::Pattern Small = skyline::Floating();
+    Paint(High, Small, gui::Fill::Of(Shown.CloudShade));
+    Paint(High, skyline::Lights(Small, 0.74f), gui::Fill::Of(Shown.Cloud));
+
+    Paint(Layer(FarShare), skyline::FarClouds(),
+          paint::Down(280 * Scale, 330 * Scale, {{0, Shown.CloudFar}, {1, Color::Transition(Shown.CloudFar, Shown.Horizon, 0.5f)}}));
+
+    gui::Group            &Near = Layer(CloudShare);
+    const skyline::Pattern Bank = skyline::Clouds();
+    Paint(Near, Bank, gui::Fill::Of(Shown.CloudShade));
+    Paint(Near, skyline::Lights(Bank, 0.74f), gui::Fill::Of(Shown.Cloud));
 
     gui::Group            &City   = Layer(CityShare);
     const skyline::Pattern Houses = skyline::City();
-    Keep(City.Outline(skyline::Tiled(Houses, Scale, Count))).SetFill(gui::Fill::Of(Shown.City));
-    Keep(City.Outline(skyline::Tiled(skyline::Windows(Houses), Scale, Count))).SetFill(gui::Fill::Of(Shown.Windows));
+    Paint(City, Houses, gui::Fill::Of(Shown.City));
+    Paint(City, skyline::Windows(Houses), gui::Fill::Of(Shown.Windows));
 
-    gui::Group &Bushes = Layer(BushShare);
-    Keep(Bushes.Outline(skyline::Tiled(skyline::Bushes(), Scale, Count)))
-        .SetFill(paint::Down(366 * Scale, Low, {{0, Shown.Bush}, {1, Shown.BushEdge}}));
+    gui::Group          &Green = Layer(BushShare);
+    const skyline::Woods Trees = skyline::Trees();
+    Paint(Green, Trees.Trunks, gui::Fill::Of(Shown.Trunk));
+    Clumps(Green, Trees.Crowns, 0.66f, Shown.Crown, Shown.CrownLit, Shown.CrownLight);
+    Clumps(Green, skyline::Bushes(), 0.64f, Shown.Bush, Shown.BushLit, Shown.BushLight);
 }
 
 void Scene::MakeGround(const Sky &Shown)
