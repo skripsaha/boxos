@@ -67,13 +67,13 @@ from volumeread.medium import (Medium, Unreadable, find_ground,  # noqa: E402
                                find_the_stick, permission_advice, read_deed)
 
 
-def OpenDevice(device):
+def OpenDevice(device, block=None):
     if device == "auto":
         device, medium = find_the_stick()
         print(f"[volume-read] {device}", file=sys.stderr)
         return device, medium
     try:
-        return device, Medium(device)
+        return device, Medium(device, block)
     except PermissionError:
         sys.exit(permission_advice(device))
     except OSError as e:
@@ -363,6 +363,10 @@ def Main():
     start.add_argument("--start", type=int, default=argparse.SUPPRESS,
                        help="ground start in 512-byte sectors, when the "
                             "partition table cannot be trusted")
+    start.add_argument("--block", type=int, default=argparse.SUPPRESS,
+                       help="the block an image file was laid out for, in bytes "
+                            "(4096 for a 4Kn medium; 512 by default) — a device "
+                            "says its own")
     ap = argparse.ArgumentParser(
         description="Read a BoxOS volume from the host, and judge it. Read only.",
         parents=[start])
@@ -413,7 +417,7 @@ def Main():
                                     or args.check):
         ap.error("--keep, --subset-bits, --tear, --out and --check go with --epoch")
 
-    args.device, medium = OpenDevice(args.device)
+    args.device, medium = OpenDevice(args.device, getattr(args, "block", None))
     if args.command == "deed":
         return CmdDeed(args, medium)
     if args.command in ("list", "get"):

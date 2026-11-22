@@ -126,7 +126,7 @@ FILE_LAID_BIT = 1 << 5                  # a header flag no kernel names, kept as
 MBR_TYPE_BOXOS = 0x7F                   # ground.c:17 GROUND_MBR_TYPE
 MBR_TYPE_PROTECTIVE = 0xEE              # ground.c:27 GROUND_MBR_TYPE_PROTECTIVE
 GPT_ARRAY_MAX_BYTES = 128 * 1024        # ground.c:83 GPT_ARRAY_MAX_BYTES
-GPT_BLOCK_MAX_BYTES = 4096              # ground.c:122 GPT_BLOCK_MAX_BYTES
+LOGICAL_MOST = 4096                     # boardroom.h BOARDROOM_LOGICAL_MOST: the largest block a medium is seated with
 GROUND_MAX_PER_MEDIUM = 8               # ground.h:42 GROUND_MAX_PER_MEDIUM
 BOXOS_TYPE_GUID = bytes([               # ground.c:19-22, gangway_medium.c — as on the medium
     0x9a, 0xe4, 0x8a, 0xcf, 0x6a, 0xd2, 0x59, 0x49,

@@ -1,5 +1,6 @@
 #include "ata_identify.h"
 #include "ata.h"
+#include "boardroom.h"   /* BOARDROOM_LOGICAL_MOST — the largest block a disk is seated with */
 #include "ata_async.h"
 #include "klib.h"
 #include "io.h"
@@ -556,18 +557,21 @@ int ata_identify(uint8_t drive_idx, ATADevice* device) {
 
     /* Logical sector size (ATA8-ACS §7.16.7.74-75): word 106 bit 14=1 +
      * bit 15=0 marks the field valid; bit 12 = logical sector > 256
-     * words. words 117-118 then hold the size in 16-bit words. The PIO
-     * transfer loop uses 256-word (512-byte) bursts, so refuse anything
-     * else rather than silently corrupt LBA arithmetic. */
+     * words. words 117-118 then hold the size in 16-bit words. A drive
+     * addressed in larger blocks than the room's sectors — 4096 on 4Kn — is
+     * spoken to in them (ata_program_lba), a block at a time through the PIO
+     * loop; one that is no whole number of sectors, or larger than the room
+     * seats, is left. */
     uint32_t logical = 512;
     if ((id[106] & (1u << 14)) && !(id[106] & (1u << 15)) &&
         (id[106] & (1u << 12))) {
         uint32_t words = (uint32_t)id[117] | ((uint32_t)id[118] << 16);
         if (words >= 256) logical = words * 2u;
     }
-    if (logical != 512) {
-        kprintf("[ATA] drive %u: %u-byte logical sectors, and this stack is "
-                "built on 512 — not using it\n", drive_idx, logical);
+    if (logical % 512u != 0 || logical > BOARDROOM_LOGICAL_MOST) {
+        kprintf("[ATA] drive %u: %u-byte logical blocks — a disk is seated in whole "
+                "512-byte sectors up to %u bytes a block — not using it\n",
+                drive_idx, logical, BOARDROOM_LOGICAL_MOST);
         return ATA_ERR_NO_DEVICE;
     }
     device->logical_sector_size = logical;
@@ -658,7 +662,7 @@ int ata_identify(uint8_t drive_idx, ATADevice* device) {
         return ATA_ERR_NO_DEVICE;
     }
 
-    device->size_mb = device->total_sectors / 2048;
+    device->size_mb = device->total_sectors * device->logical_sector_size / (1024u * 1024u);
 
     memcpy(device->model, &id[27], 40);
     ata_string_fixup(device->model, 40);
@@ -694,6 +698,21 @@ int ata_identify(uint8_t drive_idx, ATADevice* device) {
 /* ---------------------------------------------------------------------
  *  Read / Write sectors
  * ------------------------------------------------------------------ */
+uint32_t ata_block_sectors(uint8_t drive_idx)
+{
+    uint32_t logical = drive_idx < ATA_DRIVE_COUNT ? g_ata_devices[drive_idx].logical_sector_size : 0;
+    return logical >= ATA_SECTOR_SIZE ? logical / ATA_SECTOR_SIZE : 1u;
+}
+
+/* Whether `count` sectors from `lba` are whole blocks of the drive and on it:
+ * the room cuts every request so (boardroom.h); one that is not came round it. */
+static bool ata_whole(uint8_t drive_idx, uint64_t lba, uint16_t count)
+{
+    const ATADevice* d   = &g_ata_devices[drive_idx];
+    const uint32_t   per = ata_block_sectors(drive_idx);
+    return lba % per == 0 && count % per == 0 && lba + count <= d->total_sectors * per;
+}
+
 /* Non-static — also invoked from ata_async.c::bmide_kick to program the
  * drive side of a DMA submit. */
 int ata_program_lba(uint8_t drive_idx, uint64_t lba, uint16_t count,
@@ -701,6 +720,12 @@ int ata_program_lba(uint8_t drive_idx, uint64_t lba, uint16_t count,
 {
     AtaChannel* ch = drive_channel_ptr(drive_idx);
     ATADevice*  d  = &g_ata_devices[drive_idx];
+
+    /* The room's 512-byte sectors in, the drive's own blocks out — 4096 on a
+     * 4Kn drive; every caller hands over whole blocks (ata_whole). */
+    const uint32_t per = ata_block_sectors(drive_idx);
+    lba   /= per;
+    count  = (uint16_t)(count / per);
 
     bool use48 = d->lba48_supported && (lba > 0x0FFFFFFFULL || count > 256);
     uint8_t drv_bit = drive_is_slave(drive_idx) ? 0x10 : 0x00;
@@ -800,7 +825,7 @@ int ata_read_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, uint8_t* b
     AtaChannel* ch = drive_channel_ptr(drive_idx);
 
     if (!d->exists || !ch->present) return ATA_ERR_NO_DEVICE;
-    if (lba + count > d->total_sectors) return ATA_ERR_LBA_OUT_OF_BOUNDS;
+    if (!ata_whole(drive_idx, lba, count)) return ATA_ERR_LBA_OUT_OF_BOUNDS;
 
     /* Fast path: IRQ-driven Bus-Master DMA via ata_async, which owns the
      * channel for each of its commands from the kick to the retire. The PIO
@@ -823,7 +848,9 @@ int ata_read_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, uint8_t* b
     }
     ata_program_lba(drive_idx, lba, count, ATA_CMD_READ_SECTORS, ATA_CMD_READ_SECTORS_EXT);
 
-    for (uint16_t sec = 0; sec < count; sec++) {
+    /* A block of the drive a DRQ: 256 words on a 512-byte drive, 2048 on 4Kn. */
+    const uint32_t words = d->logical_sector_size / 2u;
+    for (uint16_t sec = 0; sec < count / ata_block_sectors(drive_idx); sec++) {
         int rc = ata_wait_drq(drive_idx);
         /* ERR with UNC is the drive's own word on the sector it reached. */
         if (rc == ATA_ERR_DRIVE_FAULT && (ata_read_error(drive_idx) & ATA_ER_UNC))
@@ -832,8 +859,8 @@ int ata_read_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, uint8_t* b
             AtaChannelGive(drive_channel(drive_idx), held);
             return rc;
         }
-        uint16_t* buf16 = (uint16_t*)(buffer + (uint32_t)sec * ATA_SECTOR_SIZE);
-        for (int i = 0; i < 256; i++)
+        uint16_t* buf16 = (uint16_t*)(buffer + (uint32_t)sec * d->logical_sector_size);
+        for (uint32_t i = 0; i < words; i++)
             buf16[i] = inw(ch->cmd_base + ATA_REG_DATA);
     }
 
@@ -862,7 +889,7 @@ int ata_write_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, const uin
                      (unsigned long)lba);
         return ATA_ERR_PROTECTED_SECTOR;
     }
-    if (lba + count > d->total_sectors) return ATA_ERR_LBA_OUT_OF_BOUNDS;
+    if (!ata_whole(drive_idx, lba, count)) return ATA_ERR_LBA_OUT_OF_BOUNDS;
 
     /* DMA fast path — same gate as ata_read_sectors, and the same division
      * of the channel: the engine's for each DMA, taken whole for the PIO
@@ -883,14 +910,15 @@ int ata_write_sectors(uint8_t drive_idx, uint64_t lba, uint16_t count, const uin
     }
     ata_program_lba(drive_idx, lba, count, ATA_CMD_WRITE_SECTORS, ATA_CMD_WRITE_SECTORS_EXT);
 
-    for (uint16_t sec = 0; sec < count; sec++) {
+    const uint32_t words = d->logical_sector_size / 2u;
+    for (uint16_t sec = 0; sec < count / ata_block_sectors(drive_idx); sec++) {
         int rc = ata_wait_drq(drive_idx);
         if (rc != 0) {
             AtaChannelGive(drive_channel(drive_idx), held);
             return rc;
         }
-        const uint16_t* buf16 = (const uint16_t*)(buffer + (uint32_t)sec * ATA_SECTOR_SIZE);
-        for (int i = 0; i < 256; i++)
+        const uint16_t* buf16 = (const uint16_t*)(buffer + (uint32_t)sec * d->logical_sector_size);
+        for (uint32_t i = 0; i < words; i++)
             outw(ch->cmd_base + ATA_REG_DATA, buf16[i]);
     }
 

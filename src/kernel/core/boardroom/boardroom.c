@@ -685,14 +685,65 @@ uint32_t BoardroomSeatPhysicalBytes(uint8_t seat)
     }
 }
 
+/* What the medium on `s` is addressed in, in bytes — its logical block: 512,
+ * or 4096 on a 4Kn medium; 0 when nobody sits there. Every driver seats only
+ * a block that is a whole number of the room's sectors and no larger than
+ * 4096 (BOARDROOM_LOGICAL_MOST). */
+static uint32_t seat_logical_bytes(const BoardSeat* s)
+{
+    switch (s->kind) {
+    case BOARD_USB:
+        return xhci_msd_unit_logical_bytes(s->index);
+    case BOARD_AHCI: {
+        ahci_port_t* p = ahci_get_port_state(s->index);
+        return p ? p->logical_sector_size : 0;
+    }
+    case BOARD_ATA:
+        return s->index < 4 ? g_ata_devices[s->index].logical_sector_size : 0;
+    default:
+        return 0;
+    }
+}
+
+uint32_t BoardroomSeatLogicalBytes(uint8_t seat)
+{
+    BoardSeat* s = seat_taken(seat);
+    return s ? seat_logical_bytes(s) : 0;
+}
+
+/* The room's sectors one of the medium's blocks holds: 1, or 8 on 4Kn. */
+static uint32_t seat_grain(const BoardSeat* s)
+{
+    uint32_t logical = seat_logical_bytes(s);
+    return logical >= BOARDROOM_SECTOR_BYTES ? logical / BOARDROOM_SECTOR_BYTES : 1u;
+}
+
+/* Whether `count` sectors from `lba` are whole blocks of the medium on `s`. */
+static bool seat_whole(const BoardSeat* s, uint64_t lba, uint32_t count)
+{
+    uint32_t g = seat_grain(s);
+    return lba % g == 0 && count % g == 0;
+}
+
+/* A write — or a read nobody stands over — that does not cover whole blocks
+ * of the medium, refused before any of it reaches the medium and said: the
+ * room never reads a block to patch part of it, so whoever asked has cut its
+ * run wrong, and that is to be seen. */
+static error_t seat_refused_unaligned(const BoardSeat* s, uint8_t seat, const char* what, uint64_t lba,
+                                      uint32_t count)
+{
+    kprintf("[Boardroom] seat %u: a %s of sectors %llu..%llu is not whole %u-byte blocks of the medium, and "
+            "none of it is issued (ERR_UNALIGNED)\n", seat, what, (unsigned long long)lba,
+            (unsigned long long)(lba + count - 1u), seat_logical_bytes(s));
+    return ERR_UNALIGNED;
+}
+
 /*
- * A medium's own logical sectors, in the 512-byte ones this room speaks.
- *
- * Almost always the identity: both disk drivers refuse anything but 512-byte
- * logical sectors, and the USB path converts before it answers. It is written
- * out anyway because "the number the device gave" and "the number this room
- * means" are different quantities, and the one place they are the same is
- * exactly where nobody notices when they stop being.
+ * A medium's own logical sectors, in the 512-byte ones this room speaks: the
+ * identity on a medium addressed in 512, eight to one on a 4Kn medium. "The
+ * number the device gave" and "the number this room means" are different
+ * quantities, and the one place they are the same is exactly where nobody
+ * notices when they stop being.
  */
 static uint64_t seat_sectors_in_512(uint64_t total, uint32_t logical)
 {
@@ -790,7 +841,11 @@ uint32_t BoardroomSeatRun(uint8_t seat)
     if (run > 65535u) {
         run = 65535u;
     }
-    return run;
+    /* Whole blocks of the medium in every run, so a run cut from a whole
+     * request is whole too. */
+    uint32_t grain = seat_grain(s);
+    run -= run % grain;
+    return run ? run : grain;
 }
 
 #ifdef CONFIG_VOLUME_TESTS
@@ -864,18 +919,11 @@ static int BoardSeatRead(const BoardSeat* s, uint64_t lba, uint32_t run, uint8_t
     }
 }
 
-int BoardroomRead(uint8_t seat, uint64_t lba, uint32_t count, void* buffer)
+/* Whole blocks of the medium read, a run the seat takes at a time: the answer. */
+static int BoardReadWhole(const BoardSeat* s, uint8_t seat, uint64_t lba, uint32_t count, uint8_t* out)
 {
-    LockRankWitness("read", (uintptr_t)__builtin_return_address(0));
-    BoardSeat* s = seat_taken(seat);
-    if (!s || !buffer || count == 0) {
-        return -1;
-    }
-
-    const uint32_t seating = __atomic_load_n(&s->seating, __ATOMIC_ACQUIRE);
-    const uint32_t most    = BoardroomSeatRun(seat);
-    uint8_t*       out     = (uint8_t*)buffer;
-    int            rc      = 0;
+    const uint32_t most = BoardroomSeatRun(seat);
+    int            rc   = 0;
     while (count > 0) {
         uint32_t run = (count > most) ? most : count;
         uint64_t t0  = rdtsc();
@@ -902,6 +950,59 @@ int BoardroomRead(uint8_t seat, uint64_t lba, uint32_t count, void* buffer)
         lba   += run;
         count -= run;
     }
+    return rc;
+}
+
+/* A read that begins or ends inside one of the medium's blocks: every block
+ * it touches read whole — those in the middle straight into the caller's
+ * buffer, the one at either end into one of the room's own — and the caller's
+ * sectors copied out of it. A medium is only ever asked for whole blocks. */
+static int BoardReadPartial(const BoardSeat* s, uint8_t seat, uint64_t lba, uint32_t count, uint8_t* out)
+{
+    const uint32_t grain = seat_grain(s);
+    uint8_t*       block = kmalloc((size_t)grain * BOARDROOM_SECTOR_BYTES);
+    if (!block) {
+        return (int)ERR_NO_MEMORY;
+    }
+    int      rc   = 0;
+    uint32_t head = (uint32_t)(lba % grain);
+    if (head) {
+        uint32_t take = grain - head < count ? grain - head : count;
+        rc = BoardReadWhole(s, seat, lba - head, grain, block);
+        if (rc == 0) {
+            memcpy(out, block + (size_t)head * BOARDROOM_SECTOR_BYTES, (size_t)take * BOARDROOM_SECTOR_BYTES);
+        }
+        out   += (size_t)take * BOARDROOM_SECTOR_BYTES;
+        lba   += take;
+        count -= take;
+    }
+    uint32_t middle = count - count % grain;
+    if (rc == 0 && middle) {
+        rc     = BoardReadWhole(s, seat, lba, middle, out);
+        out   += (size_t)middle * BOARDROOM_SECTOR_BYTES;
+        lba   += middle;
+        count -= middle;
+    }
+    if (rc == 0 && count) {
+        rc = BoardReadWhole(s, seat, lba, grain, block);
+        if (rc == 0) {
+            memcpy(out, block, (size_t)count * BOARDROOM_SECTOR_BYTES);
+        }
+    }
+    kfree(block);
+    return rc;
+}
+
+int BoardroomRead(uint8_t seat, uint64_t lba, uint32_t count, void* buffer)
+{
+    LockRankWitness("read", (uintptr_t)__builtin_return_address(0));
+    BoardSeat* s = seat_taken(seat);
+    if (!s || !buffer || count == 0) {
+        return -1;
+    }
+    const uint32_t seating = __atomic_load_n(&s->seating, __ATOMIC_ACQUIRE);
+    int            rc      = seat_whole(s, lba, count) ? BoardReadWhole(s, seat, lba, count, (uint8_t*)buffer)
+                                                       : BoardReadPartial(s, seat, lba, count, (uint8_t*)buffer);
     /* A sector the medium cannot read is the seat answering: no bell owed. */
     BoardSeatAnswered(s, seating, rc == 0 || rc == (int)ERR_BAD_SECTOR);
     return rc;
@@ -928,6 +1029,9 @@ int BoardroomWrite(uint8_t seat, uint64_t lba, uint32_t count, const void* buffe
     BoardSeat* s = seat_taken(seat);
     if (!s || !buffer || count == 0) {
         return -1;
+    }
+    if (!seat_whole(s, lba, count)) {
+        return (int)seat_refused_unaligned(s, seat, "write", lba, count);
     }
 
     const uint32_t seating = __atomic_load_n(&s->seating, __ATOMIC_ACQUIRE);
@@ -1107,7 +1211,12 @@ static error_t seat_async(uint8_t seat, uint64_t lba, uint32_t count, void* dma_
     if (!s || !dma_phys || count == 0 || !cb || !berth) {
         return ERR_INVALID_ARGUMENT;
     }
-
+    /* Into or out of the caller's own pages: no block of the room's stands
+     * between, so a run nobody stands over is whole blocks or nothing. */
+    if (!seat_whole(s, lba, count)) {
+        return seat_refused_unaligned(s, seat, write ? "write nobody stands over" : "read nobody stands over",
+                                      lba, count);
+    }
     memset(berth, 0, sizeof(*berth));
     berth->lba        = lba;
     berth->sectors    = count;

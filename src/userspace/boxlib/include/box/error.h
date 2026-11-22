@@ -62,6 +62,7 @@ typedef uint32_t error_t;
     X(STREAM_CLOSED,                 stream_closed,                 204,  "stream closed",                 "io") \
     X(BAD_SECTOR,                    bad_sector,                    205,  "bad sector",                    "io") \
     X(IO_CANCELLED,                  io_cancelled,                  206,  "i/o cancelled",                 "io") \
+    X(UNALIGNED,                     unaligned,                     207,  "not whole blocks of the medium", "io") \
     /* Filesystem (300-304) */ \
     X(FILE_NOT_FOUND,                file_not_found,                300,  "file not found",                "storage") \
     X(OBJECT_NOT_FOUND,              object_not_found,              301,  "object not found",              "storage") \

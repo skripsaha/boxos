@@ -74,7 +74,14 @@ static void BookRibbonAtom(uint8_t seat, uint64_t base, uint64_t first)
  * block for each — so a writer would not take it, and this kernel reads it
  * under glass (§1.5). QEMU says L0 = 0 and 512-byte blocks: the vector the
  * predicate is held to lives in the startup suite (book, ata_first_aligned).
+ * A medium addressed in larger blocks than 512 — 4096 on 4Kn — takes whole
+ * ones only (boardroom.h), and A is never smaller than the largest block the
+ * room seats: ground on an atom is ground every write of the book covers
+ * whole blocks of.
  */
+STATIC_ASSERT(BOARDROOM_LOGICAL_MOST <= TAGFS_BLOCK_SIZE,
+              "every atom of the book covers whole blocks of any medium the room seats");
+
 static void BookGroundAtom(uint8_t seat)
 {
     uint32_t physical = 0;

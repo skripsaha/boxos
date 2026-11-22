@@ -1305,7 +1305,9 @@ error_t bmide_watchdog_selftest(void) {
     AtaAsyncCh *aa  = &g_ata_async[ch];
     uint8_t     gsi = g_ata_channels[ch].irq_gsi;
 
-    void *buf = kmalloc(ATA_SECTOR_SIZE);
+    /* One whole block of the drive: a 4Kn drive reads no part of one. */
+    const uint16_t block = (uint16_t)ata_block_sectors(drive);
+    void *buf = kmalloc((size_t)block * ATA_SECTOR_SIZE);
     if (!buf) { kprintf("[BMIDE-WD] TIER-1 self-test skipped (no mem)\n"); return OK; }
 
     AtaCmd cmd;
@@ -1313,7 +1315,7 @@ error_t bmide_watchdog_selftest(void) {
     cmd.drive_idx    = drive;
     cmd.channel      = ch;
     cmd.lba          = 0;                 /* boot sector — read-only, non-destructive */
-    cmd.count        = 1;
+    cmd.count        = block;
     cmd.is_write     = false;
     cmd.user_buf     = buf;
     cmd.sync_rc      = OK;
@@ -1392,7 +1394,8 @@ error_t bmide_wedge_selftest(void) {
 
     uint8_t     ch  = drive_channel(drive);
     AtaAsyncCh *aa  = &g_ata_async[ch];
-    void *vbuf = kmalloc(ATA_SECTOR_SIZE);
+    const uint16_t block = (uint16_t)ata_block_sectors(drive);
+    void *vbuf = kmalloc((size_t)block * ATA_SECTOR_SIZE);
     if (!vbuf) { kprintf("[BMIDE-WD] TIER-2 self-test skipped (no mem)\n"); return OK; }
 
     AtaCmd fake;
@@ -1400,7 +1403,7 @@ error_t bmide_wedge_selftest(void) {
     fake.drive_idx    = drive;
     fake.channel      = ch;
     fake.lba          = 0;
-    fake.count        = 1;
+    fake.count        = block;
     fake.is_write     = false;
     fake.user_buf     = vbuf;
     fake.sync_rc      = OK;

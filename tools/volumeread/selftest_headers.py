@@ -76,7 +76,8 @@ def ConstantsCheck(src):
     paths = {"deed": os.path.join(inc, "volume_deed.h"), "pen": os.path.join(inc, "deed_pen.h"),
              "consts": os.path.join(fs, "tagfs_constants.h"),
              "ground": os.path.join(src, "kernel", "core", "boardroom", "ground.c"),
-             "groundh": os.path.join(src, "kernel", "core", "boardroom", "ground.h")}
+             "groundh": os.path.join(src, "kernel", "core", "boardroom", "ground.h"),
+             "boardroom": os.path.join(src, "kernel", "core", "boardroom", "boardroom.h")}
     if not all(os.path.exists(p) for p in paths.values()):
         return None, "self-test needs the source tree beside the tool (src/ next to tools/)"
     text = {k: open(p, encoding="utf-8", errors="replace").read() for k, p in paths.items()}
@@ -103,7 +104,7 @@ def ConstantsCheck(src):
                   ("FILE_ROLE_MASK", "TAGFS_FILE_ROLE_MASK"), ("FILE_ROLE_SYSTEM", "TAGFS_FILE_ROLE_SYSTEM"),
                   ("FILE_ROLE_BOOT", "TAGFS_FILE_ROLE_BOOT"), ("FILE_ROLE_KERNEL", "TAGFS_FILE_ROLE_KERNEL"),
                   ("MBR_TYPE_BOXOS", "GROUND_MBR_TYPE"), ("MBR_TYPE_PROTECTIVE", "GROUND_MBR_TYPE_PROTECTIVE"),
-                  ("GPT_ARRAY_MAX_BYTES", "GPT_ARRAY_MAX_BYTES"), ("GPT_BLOCK_MAX_BYTES", "GPT_BLOCK_MAX_BYTES"),
+                  ("GPT_ARRAY_MAX_BYTES", "GPT_ARRAY_MAX_BYTES"), ("LOGICAL_MOST", "BOARDROOM_LOGICAL_MOST"),
                   ("GROUND_MAX_PER_MEDIUM", "GROUND_MAX_PER_MEDIUM")):
         Eq(c, getattr(ondisk, py), d.get(c))
     guid = re.search(r"g_boxos_type_guid\[16\]\s*=\s*\{(.*?)\}", text["ground"], re.S)

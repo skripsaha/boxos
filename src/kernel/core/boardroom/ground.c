@@ -96,30 +96,13 @@ static const uint8_t g_boxos_type_guid[16] = {
  * or enclosure chooses 4096.
  *
  * This room is addressed in 512-byte sectors on every seat, and a medium that
- * addresses itself in larger blocks is translated by the driver that knows
- * about it: a 4Kn stick is seated as eight times as many sectors and each
- * read is turned back into the device's own blocks. That translation is exact
- * and linear, and it is invisible here — what it leaves behind is a table
- * whose every number is in 4096-byte units being read by a reader whose every
- * number is in 512-byte ones. The header would be looked for at byte 512 and
- * be at byte 4096, and the disk would be reported as carrying no BoxOS ground
- * at all: not mounted, and nothing said beyond "no ground".
- *
- * The room cannot be asked which unit a seat is addressed in. What it hands
- * out is the PHYSICAL block size, which is 4096 on the 512-byte-addressed
- * flash everybody owns, so it cannot tell the two apart. But the table states
- * it itself: a GPT header carries the number of the block it is IN, under its
- * own CRC — so a header found at byte offset B saying it lives at block 1 is a
- * header on a medium whose blocks are B bytes long, and nothing about it has
- * been guessed. That is the same field that already catches a primary header
- * copied to the wrong sector, used for the other thing it knows.
- *
- * The sizes tried are the powers of two from one sector up to 4096, where ATA
- * and SCSI stop: 4Kn is the largest logical block either presents, and a
- * medium addressed in anything that is not a whole number of 512-byte sectors
- * is refused by the driver and never reaches a seat.
+ * addresses itself in larger blocks says so when it is seated
+ * (BoardroomSeatLogicalBytes): every number in its tables — a GPT's, an
+ * MBR's — is in those blocks, and is multiplied here into the room's sectors.
+ * Nothing about it is guessed: the medium is the one that knows. A table laid
+ * in another unit than its medium's — a 512-byte image copied onto a 4Kn
+ * stick — is no table its firmware reads either, and is not taken for one.
  */
-#define GPT_BLOCK_MAX_BYTES     4096u
 
 static const uint8_t g_gpt_signature[8] = { 'E','F','I',' ','P','A','R','T' };
 
@@ -556,12 +539,12 @@ done:
     return verdict;
 }
 
-/* Said once, when a table turns out to be written in the medium's own larger
- * blocks: which grid the numbers on that disk are on is the kind of fact a
- * person standing at the machine has to be able to read off the screen. */
+/* Said once, of a medium addressed in larger blocks than the room's sectors:
+ * which grid the numbers on that disk are on is the kind of fact a person
+ * standing at the machine has to be able to read off the screen. */
 static void ground_say_unit(uint8_t seat, uint32_t block_bytes)
 {
-    kprintf("[Ground] seat %u: its GPT is written in %u-byte blocks — that is "
+    kprintf("[Ground] seat %u: its table is written in %u-byte blocks — that is "
             "how the medium addresses itself, this room addresses it in "
             "512-byte sectors, and every number in that table is multiplied "
             "by %u (UEFI 2.10 5.3)\n",
@@ -583,69 +566,53 @@ static void ground_say_unit(uint8_t seat, uint32_t block_bytes)
  * is damaged and whose size is unknown is one where nothing more can be tried,
  * and a person reading the screen should be told which of the two it was.
  *
- * And both copies are looked for in each unit the medium could be addressing
- * itself in, finest first — see GPT_BLOCK_MAX_BYTES above for why that is a
- * question at all, and why the medium's own table is what answers it.
+ * Both copies are read in the blocks the medium is addressed in — the unit
+ * every number in the table is in (see above).
  */
 static uint8_t ground_survey_gpt(uint8_t seat, MediumGround *out, uint8_t max,
                                  bool *refused)
 {
-    const uint64_t medium   = BoardroomSeatSectors(seat);
-    uint8_t        found    = 0;
-    bool           said_far = false;
+    const uint64_t medium = BoardroomSeatSectors(seat);
+    const uint32_t block  = BoardroomSeatLogicalBytes(seat);
+    const uint64_t ratio  = block / BOARDROOM_SECTOR_BYTES;
+    uint8_t        found  = 0;
+    if (block < BOARDROOM_SECTOR_BYTES || (medium != 0 && medium < 2u * ratio)) {
+        kprintf("[Ground] seat %u: the medium says no block a GPT could be read in — "
+                "not reading it\n", seat);
+        return 0;
+    }
 
-    for (uint32_t block = BOARDROOM_SECTOR_BYTES;
-         block <= GPT_BLOCK_MAX_BYTES;
-         block *= 2u) {
-        const uint64_t ratio = block / BOARDROOM_SECTOR_BYTES;
+    GptVerdict v = gpt_read_one(seat, GPT_HEADER_LBA, block, medium, out, max, &found);
+    if (v == GPT_TABLE_READ) {
+        if (block != BOARDROOM_SECTOR_BYTES) ground_say_unit(seat, block);
+        return found;
+    }
+    if (v == GPT_TABLE_REFUSED) *refused = true;
 
-        /* A medium with no room for a block 1 is not addressed in blocks this
-         * large, and asking a driver to read past the end of it is not a way
-         * to find that out. */
-        if (medium != 0 && medium < 2u * ratio) break;
-
+    /*
+     * ‼ A HEADER THAT IS NOT THERE IS AS MUCH DAMAGE AS ONE THAT IS WRONG.
+     *
+     * This is only reached because sector 0 carries a protective entry,
+     * which is the disk saying "my real table is a GPT". If the header is
+     * then missing, the disk is contradicting itself — and that is exactly
+     * what one dead erase block under sector 1 looks like, which is the
+     * commonest way a GPT is lost. Treating it as "no GPT here" and
+     * stopping would leave the good copy at the other end unread, which is
+     * the whole fault this was written to close. The far copy is in the
+     * last block of the medium.
+     */
+    if (medium != 0) {
+        /* A disk whose table was made for a smaller medium keeps its copy
+         * somewhere else — said by the primary read above while it could
+         * still be read, and unknowable once it cannot. */
+        kprintf("[Ground] seat %u: its GPT %s — reading the copy at the "
+                "far end, sector %llu (UEFI 2.10 5.3.2)\n", seat,
+                (v == GPT_TABLE_ABSENT)  ? "is not where the disk says it is" :
+                (v == GPT_TABLE_REFUSED) ? "would not be read"
+                                         : "is damaged",
+                (unsigned long long)(medium - ratio));
         found = 0;
-        GptVerdict v = gpt_read_one(seat, GPT_HEADER_LBA, block, medium,
-                                    out, max, &found);
-        if (v == GPT_TABLE_READ) {
-            if (block != BOARDROOM_SECTOR_BYTES) ground_say_unit(seat, block);
-            return found;
-        }
-        if (v == GPT_TABLE_REFUSED) *refused = true;
-
-        /*
-         * ‼ A HEADER THAT IS NOT THERE IS AS MUCH DAMAGE AS ONE THAT IS WRONG.
-         *
-         * This is only reached because sector 0 carries a protective entry,
-         * which is the disk saying "my real table is a GPT". If the header is
-         * then missing, the disk is contradicting itself — and that is exactly
-         * what one dead erase block under sector 1 looks like, which is the
-         * commonest way a GPT is lost. Treating it as "no GPT here" and
-         * stopping would leave the good copy at the other end unread, which is
-         * the whole fault this was written to close.
-         *
-         * The far copy is in the last BLOCK of the medium, so where it is
-         * depends on the unit being tried — which is why it is tried here,
-         * beside the primary of the same unit, and not in a pass of its own.
-         */
-        if (medium == 0) continue;
-
-        if (!said_far) {
-            /* A disk whose table was made for a smaller medium keeps its copy
-             * somewhere else — said by the primary read above while it could
-             * still be read, and unknowable once it cannot. */
-            kprintf("[Ground] seat %u: its GPT %s — reading the copy at the "
-                    "far end, sector %llu (UEFI 2.10 5.3.2)\n", seat,
-                    (v == GPT_TABLE_ABSENT)  ? "is not where the disk says it is" :
-                    (v == GPT_TABLE_REFUSED) ? "would not be read"
-                                             : "is damaged",
-                    (unsigned long long)(medium - ratio));
-            said_far = true;
-        }
-
-        found = 0;
-        v = gpt_read_one(seat, medium / ratio - 1, block, medium,
-                         out, max, &found);
+        v = gpt_read_one(seat, medium / ratio - 1, block, medium, out, max, &found);
         if (v == GPT_TABLE_READ) {
             kprintf("[Ground] seat %u: the copy at the far end is good — this "
                     "disk is readable after all\n", seat);
@@ -654,7 +621,6 @@ static uint8_t ground_survey_gpt(uint8_t seat, MediumGround *out, uint8_t max,
         }
         if (v == GPT_TABLE_REFUSED) *refused = true;
     }
-
     if (*refused) {
         kprintf("[Ground] seat %u: the medium refused reads its GPT needs, and "
                 "no copy was read — where its ground lies is not known until "
@@ -664,9 +630,8 @@ static uint8_t ground_survey_gpt(uint8_t seat, MediumGround *out, uint8_t max,
                 "say how far it runs — so the copy at the far end cannot be "
                 "found\n", seat);
     } else {
-        kprintf("[Ground] seat %u: neither copy of its GPT could be read, in "
-                "any unit this medium could be addressed in — it has no table "
-                "left to read\n", seat);
+        kprintf("[Ground] seat %u: neither copy of its GPT could be read — it "
+                "has no table left to read\n", seat);
     }
     return 0;
 }
@@ -712,13 +677,17 @@ static uint8_t ground_survey_medium(uint8_t seat, MediumGround *out, bool *refus
         }
     }
 
+    /* An MBR counts in the medium's own blocks, as a GPT does: 4096 bytes
+     * each on a 4Kn medium. */
+    const uint32_t block = BoardroomSeatLogicalBytes(seat);
+    const uint64_t ratio = block >= BOARDROOM_SECTOR_BYTES ? block / BOARDROOM_SECTOR_BYTES : 1u;
     uint8_t found = 0;
     for (uint32_t i = 0; i < MBR_ENTRY_COUNT; i++) {
         const uint8_t *e = sector0 + MBR_TABLE_OFFSET + i * MBR_ENTRY_BYTES;
         if (e[MBR_ENTRY_TYPE] != GROUND_MBR_TYPE) continue;
 
-        uint64_t start = le32(e + MBR_ENTRY_START_LBA);
-        uint64_t count = le32(e + MBR_ENTRY_SECTORS);
+        uint64_t start = le32(e + MBR_ENTRY_START_LBA) * ratio;
+        uint64_t count = le32(e + MBR_ENTRY_SECTORS) * ratio;
         if (count == 0) {
             kprintf("[Ground] seat %u: MBR entry %u claims no sectors\n",
                     seat, i);
@@ -747,6 +716,8 @@ static uint8_t ground_survey_medium(uint8_t seat, MediumGround *out, bool *refus
         out[found].entry        = (uint8_t)i;
         found++;
     }
+
+    if (found && ratio != 1) ground_say_unit(seat, block);
 
     if (found == 0) {
         kprintf("[Ground] seat %u: MBR table read, no BoxOS ground on it — "

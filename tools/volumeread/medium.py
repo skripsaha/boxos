@@ -20,7 +20,7 @@ from . import ondisk
 from .ondisk import (SECTOR, BLOCK, DEED_MAGIC, DEED_SECTORS,
                      DEED_ROLE_HEAD, DEED_ROLE_TAIL, BOXOS_TYPE_GUID,
                      MBR_TYPE_BOXOS, MBR_TYPE_PROTECTIVE, GPT_ARRAY_MAX_BYTES,
-                     GPT_BLOCK_MAX_BYTES, GROUND_MAX_PER_MEDIUM)
+                     LOGICAL_MOST, GROUND_MAX_PER_MEDIUM)
 
 
 class Unreadable(Exception):
@@ -36,21 +36,51 @@ class MediumError(IOError):
     which says neither, and is taken as a read refused."""
 
 
-class Medium:
-    """The device, read in whole sectors and never written."""
+def DeviceBlockBytes(f):
+    """The block a raw device is addressed in, as its system says — macOS's
+    DKIOCGETBLOCKSIZE, Linux's BLKSSZGET — or None where it will not say."""
+    import fcntl
+    for request in (0x40046418, 0x1268):
+        try:
+            got = fcntl.ioctl(f.fileno(), request, b"\0" * 4)
+        except OSError:
+            continue
+        block = struct.unpack("<I", got)[0]
+        if block:
+            return block
+    return None
 
-    def __init__(self, path):
+
+class Medium:
+    """The device, read in whole sectors and never written — counted, as the
+    kernel counts them, in 512-byte sectors whatever block the medium is
+    addressed in. `block` is that block: a device's own, as its system says,
+    and an image file's as the caller says (--block), 512 when it says
+    nothing. A medium addressed in larger blocks is read in whole ones."""
+
+    def __init__(self, path, block=None):
         self.path = path
         self.f = open(path, "rb")
+        st = os.fstat(self.f.fileno())
+        self.block = block or (None if stat.S_ISREG(st.st_mode) else DeviceBlockBytes(self.f)) or SECTOR
+        if self.block % SECTOR or not SECTOR <= self.block <= LOGICAL_MOST:
+            raise IOError("%s is addressed in %u-byte blocks — a medium is read in whole %u-byte sectors up to %u "
+                          "bytes a block" % (path, self.block, SECTOR, LOGICAL_MOST))
+
+    def LogicalBytes(self):
+        """The block the medium is addressed in: every number of its tables is in it."""
+        return self.block
 
     def sectors(self, lba, count):
-        self.f.seek(lba * SECTOR)
-        data = self.f.read(count * SECTOR)
-        if len(data) != count * SECTOR:
+        per = self.block // SECTOR
+        first, last = lba // per * per, -(-(lba + count) // per) * per
+        self.f.seek(first * SECTOR)
+        data = self.f.read((last - first) * SECTOR)
+        if len(data) != (last - first) * SECTOR:
             raise IOError(
                 f"the medium ended inside sector {lba}+{count} "
-                f"(got {len(data)} of {count * SECTOR} bytes)")
-        return data
+                f"(got {len(data)} of {(last - first) * SECTOR} bytes)")
+        return data[(lba - first) * SECTOR:(lba - first + count) * SECTOR]
 
     def SizeSectors(self):
         """How far the medium runs, in sectors — for a regular file. A device
@@ -117,6 +147,9 @@ class OverlayMedium:
 
     def SizeSectors(self):
         return self.base.SizeSectors()
+
+    def LogicalBytes(self):
+        return self.base.LogicalBytes()
 
     def WriteOut(self, out_path, never=()):
         """The overlaid medium as a new file: the base cloned (`cp -c`, a
@@ -359,10 +392,10 @@ def KernelGround(medium):
     gpt_read_one) as this tree has it: [(start, sectors, how)] — every run of
     the medium the kernel would stand on, in 512-byte sectors, in its order —
     and the kernel's own sentences for every table, copy and entry it will not
-    use. The GPT is tried in every unit the medium could be addressed in,
-    512 to 4096 bytes, the primary and then, when the medium says how far it
-    runs, the copy at the far end; the first table that checks out is the only
-    one the kernel reads."""
+    use. Every number of a table is in the block the medium is addressed in
+    (Medium.LogicalBytes); the GPT is read in it, the primary and then, when
+    the medium says how far it runs, the copy at the far end; the first table
+    that checks out is the only one the kernel reads."""
     said, medium_sectors = [], medium.SizeSectors() or 0
     try:
         mbr = medium.sectors(0, 1)
@@ -371,32 +404,28 @@ def KernelGround(medium):
     if mbr[510:512] != b"\x55\xaa":
         return [], ["the medium carries no partition table"]
     entries = [mbr[446 + i * 16:446 + (i + 1) * 16] for i in range(4)]
+    block = medium.LogicalBytes()
+    ratio = block // SECTOR
+    unit = "" if block == SECTOR else ", in %u-byte blocks" % block
     if any(e[4] == MBR_TYPE_PROTECTIVE for e in entries):
-        block = SECTOR
-        while block <= GPT_BLOCK_MAX_BYTES:
-            ratio = block // SECTOR
-            if medium_sectors and medium_sectors < 2 * ratio:
-                break
-            unit = "" if block == SECTOR else ", in %u-byte blocks" % block
-            verdict, found = _GptReadOne(medium, 1, block, medium_sectors, said)
+        if medium_sectors and medium_sectors < 2 * ratio:
+            return [], ["the medium says no block a GPT could be read in"]
+        verdict, found = _GptReadOne(medium, 1, block, medium_sectors, said)
+        if verdict == "read":
+            return [(s, n, "GPT entry %u (BoxOS type)%s" % (i, unit)) for s, n, i in found], said
+        if medium_sectors:
+            verdict, found = _GptReadOne(medium, medium_sectors // ratio - 1, block, medium_sectors, said)
             if verdict == "read":
-                return [(s, n, "GPT entry %u (BoxOS type)%s" % (i, unit)) for s, n, i in found], said
-            if medium_sectors:
-                far = medium_sectors // ratio - 1
-                verdict, found = _GptReadOne(medium, far, block, medium_sectors, said)
-                if verdict == "read":
-                    return [(s, n, "GPT entry %u (BoxOS type), from the copy at the far end%s"
-                             % (i, unit)) for s, n, i in found], said
-            block *= 2
-        said.append("neither copy of its GPT could be read, in any unit this medium could be "
-                    "addressed in" if medium_sectors else
+                return [(s, n, "GPT entry %u (BoxOS type), from the copy at the far end%s"
+                         % (i, unit)) for s, n, i in found], said
+        said.append("neither copy of its GPT could be read" if medium_sectors else
                     "its GPT is damaged, and the medium will not say how far it runs")
         return [], said
     grounds = []
     for i, e in enumerate(entries):
         if e[4] != MBR_TYPE_BOXOS:
             continue
-        start, count = struct.unpack_from("<II", e, 8)
+        start, count = (n * ratio for n in struct.unpack_from("<II", e, 8))
         if count == 0:
             said.append("MBR entry %u claims no sectors" % i)
             continue
