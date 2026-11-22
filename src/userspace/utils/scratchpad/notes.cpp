@@ -7,6 +7,7 @@
 #include <format>
 #include <string_view>
 
+#include "box/cxx/whose.h"
 #include "box/clock.h"
 #include "box/error.h"
 #include "box/file.h"
@@ -95,7 +96,7 @@ std::string NameFrom(const NoteText &Text)
 std::string Unused(const std::string &Name)
 {
     std::string Try = Name;
-    for (int Number = 2; find_file_by_name(Try.c_str(), nullptr, nullptr, nullptr, 0) > 0; Number++)
+    for (int Number = 2; find_file_by_name(box::tagfs::my_tags, Try.c_str(), nullptr, nullptr, nullptr, 0) > 0; Number++)
         Try = std::format("{}-{}", Name, Number);
     return Try;
 }
@@ -105,7 +106,7 @@ std::string Unused(const std::string &Name)
 std::expected<Note, std::string> Note::Read(file_id_t File, const Look &Shown)
 {
     FileMetadata Info;
-    if (const int Code = FileMetadataRead(File, &Info); Code != 0)
+    if (const int Code = FileMetadataRead(box::tagfs::my_tags, File, &Info); Code != 0)
         return std::unexpected(Refused("a file could not be looked at", Code));
     Note        Made;
     Made.Held   = File;
@@ -185,15 +186,15 @@ std::optional<std::string> Note::Write()
 std::optional<std::string> Note::Retag()
 {
     if (!Worn) {
-        if (const int Code = tag_add(Held, NoteTag); Code != 0) return Refused(std::format("{} could not be tagged", Called), Code);
+        if (const int Code = tag_add(box::tagfs::my_tags, Held, NoteTag); Code != 0) return Refused(std::format("{} could not be tagged", Called), Code);
         Worn = true;
     }
     if (Stored) {
-        (void)tag_remove(Held, "paper");
-        (void)tag_remove(Held, "ink");
+        (void)tag_remove(box::tagfs::my_tags, Held, "paper");
+        (void)tag_remove(box::tagfs::my_tags, Held, "ink");
     }
     for (const std::string &Tag : {PaperTag(Colors.Paper, "paper"), PaperTag(Colors.Ink, "ink")})
-        if (const int Code = tag_add(Held, Tag.c_str()); Code != 0)
+        if (const int Code = tag_add(box::tagfs::my_tags, Held, Tag.c_str()); Code != 0)
             return Refused(std::format("{} could not be given its colors", Called), Code);
     Stored  = true;
     Changed = false;
@@ -208,7 +209,7 @@ std::optional<std::string> Note::Save()
         if (Called.empty()) Called = NameFrom(Text);
         Called = Unused(Called);
         const std::string Tags = std::string(NoteTag) + "," + SheetTags(Colors);
-        const std::int64_t Id = create(Called.c_str(), Tags.c_str());
+        const std::int64_t Id = create(box::tagfs::my_tags, Called.c_str(), Tags.c_str());
         if (Id <= 0) return Refused(std::format("the volume would not make {}", Called), Id);
         Held   = static_cast<file_id_t>(Id);
         Stored = Worn = true;
@@ -236,7 +237,7 @@ std::optional<std::string> Note::Trash()
 std::expected<std::vector<file_id_t>, std::string> AllNotes()
 {
     file_id_t *Ids   = nullptr;
-    const int  Count = query_all_everywhere(NoteTag, nullptr, &Ids);
+    const int  Count = query_all_everywhere(box::tagfs::my_tags, NoteTag, nullptr, &Ids);
     if (Count < 0) return std::unexpected(Refused("the volume would not list the notes", Count));
     std::vector<file_id_t> Found(Ids, Ids + Count);
     free(Ids);

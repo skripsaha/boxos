@@ -11,7 +11,7 @@ static inline char *name_of_file(file_id_t id)
 {
     FileMetadata metadata;
     const char  *name = "a file that is gone";
-    bool         read = FileMetadataRead(id, &metadata) == 0;
+    bool         read = FileMetadataRead(MY_TAGS, id, &metadata) == 0;
     if (read && metadata.Filename) name = metadata.Filename;
 
     size_t length = strlen(name);
@@ -21,13 +21,14 @@ static inline char *name_of_file(file_id_t id)
     return copy;
 }
 
-/* The one file in the Use Context called exactly Name, or 0 when there is
- * none or more than one. A name is held to every byte: the name index finds
- * the candidates and the whole name picks among them. */
+/* The one file on the volume called exactly Name, or 0 when there is none or
+ * more than one — as a Current opens a file by its name (box/current.h). A
+ * name is held to every byte: the name index finds the candidates and the
+ * whole name picks among them. */
 static inline file_id_t file_named(const char *name)
 {
     file_id_t found[2];
-    return find_file_by_name(name, NULL, found, NULL, 2) == 1 ? found[0] : 0;
+    return find_file_by_name(MY_TAGS, name, NULL, found, NULL, 2) == 1 ? found[0] : 0;
 }
 
 #endif

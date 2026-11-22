@@ -7,6 +7,7 @@
 #include <format>
 #include <new>
 
+#include "box/cxx/whose.h"
 #include "box/cxx/error.h"
 #include "box/error.h"
 #include "box/memory.h"
@@ -36,7 +37,7 @@ bool Holds(const std::vector<std::string> &List, std::string_view Tag)
 std::expected<FileFacts, std::string> ReadFacts(file_id_t File)
 {
     FileMetadata Metadata;
-    const int    Answer = FileMetadataRead(File, &Metadata);
+    const int    Answer = FileMetadataRead(box::tagfs::person_tags, File, &Metadata);
     if (Answer != 0) return std::unexpected(std::format("the volume would not say what it is: {}", Why(Answer)));
 
     FileFacts Facts;
@@ -51,7 +52,7 @@ std::expected<FileFacts, std::string> ReadFacts(file_id_t File)
 bool FileGone(file_id_t File)
 {
     FileMetadata Metadata;
-    const int    Answer = FileMetadataRead(File, &Metadata);
+    const int    Answer = FileMetadataRead(box::tagfs::my_tags, File, &Metadata);
     if (Answer == 0) FileMetadataRelease(&Metadata);
     return box_errno_of(Answer) == ERR_FILE_NOT_FOUND;
 }
@@ -81,8 +82,8 @@ std::expected<std::string, std::string> ReadBytes(file_id_t File, std::uint64_t 
 std::expected<file_id_t, std::string> MakeFile(std::string_view Name, Scope Looking)
 {
     const std::string  Text(Name);
-    const std::int64_t Made = Looking == Scope::InContext ? create(Text.c_str(), "")
-                                                          : create_everywhere(Text.c_str(), "");
+    const std::int64_t Made = Looking == Scope::InContext ? create(box::tagfs::person_tags, Text.c_str(), "")
+                                                          : create_everywhere(box::tagfs::person_tags, Text.c_str(), "");
     if (Made <= 0) return std::unexpected(std::format("the volume would not make {}: {}", Name, Why(Made)));
     return static_cast<file_id_t>(Made);
 }
@@ -130,12 +131,12 @@ std::optional<std::string> Retag(file_id_t File, const std::vector<std::string> 
     for (const std::string &Tag : Had) {
         if (Holds(Wanted, Tag)) continue;
         const std::string Key(KeyOf(Tag));
-        if (const int Answer = tag_remove(File, Key.c_str()); Answer != 0)
+        if (const int Answer = tag_remove(box::tagfs::person_tags, File, Key.c_str()); Answer != 0)
             return std::format("{} would not come off: {}", Tag, Why(Answer));
     }
     for (const std::string &Tag : Wanted) {
         if (Holds(Had, Tag)) continue;
-        if (const int Answer = tag_add(File, Tag.c_str()); Answer != 0)
+        if (const int Answer = tag_add(box::tagfs::person_tags, File, Tag.c_str()); Answer != 0)
             return std::format("{} would not go on: {}", Tag, Why(Answer));
     }
     return std::nullopt;
@@ -144,7 +145,7 @@ std::optional<std::string> Retag(file_id_t File, const std::vector<std::string> 
 std::expected<std::vector<file_id_t>, std::string> FilesSeen(Scope Looking)
 {
     file_id_t *Ids   = nullptr;
-    const int  Count = Looking == Scope::InContext ? query_all(nullptr, nullptr, &Ids) : query_all_everywhere(nullptr, nullptr, &Ids);
+    const int  Count = Looking == Scope::InContext ? query_all(box::tagfs::person_tags, nullptr, nullptr, &Ids) : query_all_everywhere(box::tagfs::person_tags, nullptr, nullptr, &Ids);
     if (Count < 0) return std::unexpected(std::format("the volume would not say what files it has: {}", Why(Count)));
     std::vector<file_id_t> Seen(Ids, Ids + Count);
     free(Ids);
@@ -154,7 +155,8 @@ std::expected<std::vector<file_id_t>, std::string> FilesSeen(Scope Looking)
 std::vector<box::tagfs::tag_count> TagsWorn(Scope Looking)
 {
     std::vector<box::tagfs::tag_count> Worn =
-        Looking == Scope::InContext ? box::tagfs::tags(nullptr) : box::tagfs::tags_everywhere(nullptr);
+        Looking == Scope::InContext ? box::tagfs::tags(box::tagfs::person_tags, nullptr)
+                                     : box::tagfs::tags_everywhere(box::tagfs::person_tags, nullptr);
     std::stable_sort(Worn.begin(), Worn.end(), [](const box::tagfs::tag_count &A, const box::tagfs::tag_count &B) {
         return A.files != B.files ? A.files > B.files : Spelled(A.what) < Spelled(B.what);
     });

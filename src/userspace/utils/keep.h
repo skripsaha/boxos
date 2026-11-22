@@ -3,10 +3,11 @@
 
 /* keep — a program's own small file on the volume: a record, a list.
  *
- * Found by its tags on the whole volume and made there with the _everywhere
- * calls, so whatever Use Context the person has said neither hides it nor
- * stamps it with tags of its own. What is written is settled on the medium
- * before the call returns. A refusal is a sentence for the person. */
+ * Found by the program's own words — its tags, which no other program meets —
+ * on the whole volume, and made wearing them: the Use Context is the person's
+ * words, and whatever the person has said neither hides the file nor stamps
+ * it. What is written is settled on the medium before the call returns. A
+ * refusal is a sentence for the person. */
 
 #include <optional>
 #include <string>

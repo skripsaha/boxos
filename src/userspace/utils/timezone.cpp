@@ -1,7 +1,8 @@
 // timezone — show or set the reckoning of time this machine keeps.
 //
-// The reading half of `clock:zone` lives in the library: std::chrono's
-// current_zone() consults the tag on every call. This is the other half, and
+// The reading half of the setting lives in the library: std::chrono's
+// current_zone() reads the file that begins "timezone 1" on every call
+// (box/cxx/clock.h). This is the other half, and
 // it is a C++ program rather than a shell builtin for one reason — the shell is
 // C and the zone database is not, so a builtin could only write whatever name
 // it was handed. A name the database does not know reads back as Etc/UTC, and

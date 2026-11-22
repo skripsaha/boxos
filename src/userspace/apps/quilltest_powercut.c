@@ -221,7 +221,7 @@ static int64_t QuillCarryOn(const char *mode, const char *name, uint32_t *seq)
         fid  = (int64_t)ids[0];
         *seq = QuillReadSeq(ids[0]) + 1;
     } else {
-        fid = create_everywhere(name, NULL);
+        fid = create_everywhere(MY_TAGS, name, NULL);
     }
     if (fid <= 0)
         printf("[QUILL] %s: FAIL — %s could not be found or created (answers %d, %ld)\n",
@@ -479,11 +479,11 @@ static void QuillCrowdName(uint32_t number, char out[QUILL_CROWD_NAME])
 static int QuillCrowdClear(const char *name, uint32_t *deleted, file_id_t *other)
 {
     file_id_t *ids = NULL;
-    int n  = query_all_everywhere(name, NULL, &ids);
+    int n  = query_all_everywhere(MY_TAGS, name, NULL, &ids);
     int rc = n < 0 ? n : 0;
     for (int i = 0; i < n && rc == 0; i++) {
         file_info_t info;
-        rc = file_info(ids[i], &info);
+        rc = file_info(MY_TAGS, ids[i], &info);
         if (rc == 0 && strcmp(info.filename, name) != 0) {
             *other = ids[i];
             rc = 1;
@@ -529,7 +529,7 @@ QuillVerdict QuillCrowd(const char *const *args)
         file_id_t other   = 0;
         QuillCrowdName(from + i, name);
         int crc = QuillCrowdClear(name, &deleted, &other);
-        int64_t fid = crc == 0 ? create_everywhere(name, name) : 0;
+        int64_t fid = crc == 0 ? create_everywhere(MY_TAGS, name, name) : 0;
         if (fid <= 0) {
             int arc = unanchored ? 0 : anchor(0);
             const char *how = unanchored ? "left unanchored, anchors asked:" : "anchor answered";

@@ -43,7 +43,7 @@ int main(void)
 
     file_id_t file_id = file[0];
     FileMetadata metadata;
-    if (FileMetadataRead(file_id, &metadata) != 0)
+    if (FileMetadataRead(MY_TAGS, file_id, &metadata) != 0)
     {
         println("Could not look at that file; it may have been erased");
         exit(1);

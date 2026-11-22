@@ -1,9 +1,10 @@
-/* notes.h — a note and its file. A note is a file of the volume wearing the
- * tag "scratchpad", its text the file's bytes, its colors two tags beside it:
- * paper:RRGGBB and ink:RRGGBB. So every other program sees a note as the text
- * it is, and `files scratchpad` lists the notes. A note not yet saved has no
- * file; the first save makes it, named as the person said or by the words its
- * first line begins with. */
+/* notes.h — a note and its file. A note is a file of the volume wearing
+ * scratchpad's own word "scratchpad", its text the file's bytes, its colors
+ * two more of its own words beside it: paper:RRGGBB and ink:RRGGBB. So every
+ * other program sees a note as the text it is, and the person sees the marks
+ * among the program's on the file (info). A note not yet saved has no file;
+ * the first save makes it, named as the person said or by the words its first
+ * line begins with. */
 #ifndef SCRATCHPAD_NOTES_H
 #define SCRATCHPAD_NOTES_H
 
@@ -62,8 +63,9 @@ private:
     bool        Follows = false;
 };
 
-// Every note on the volume, whatever the Use Context, but those in the trash:
-// the program itself wears the tag too, by its name, and it is a utility.
+// Every note on the volume, but those in the trash: the files wearing
+// scratchpad's own word, which is asked of the whole volume — the Use Context
+// is the person's.
 std::expected<std::vector<file_id_t>, std::string> AllNotes();
 
 }  // namespace scratchpad

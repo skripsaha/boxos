@@ -7,6 +7,7 @@
 #include <optional>
 #include <string_view>
 
+#include "box/cxx/whose.h"
 #include "box/file.h"
 
 namespace random_pick {
@@ -33,7 +34,7 @@ std::optional<std::int64_t> Whole(std::string_view Word)
 std::string NameOf(file_id_t File)
 {
     FileMetadata Facts;
-    if (FileMetadataRead(File, &Facts) != 0) return {};
+    if (FileMetadataRead(box::tagfs::my_tags, File, &Facts) != 0) return {};
     std::string Name = Facts.Filename ? Facts.Filename : "";
     FileMetadataRelease(&Facts);
     return Name;

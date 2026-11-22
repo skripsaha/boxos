@@ -1,10 +1,11 @@
-/* typer_store.cpp — the record file on the volume: typer.record, tagged
- * typer,record, one line to a run. It is found and made with the _everywhere
- * calls so the Use Context, whatever the person has said to use, neither hides
- * it nor stamps it with tags of its own. */
+/* typer_store.cpp — the record file on the volume: typer.record, wearing
+ * typer's own words typer,record, one line to a run. A program's own words are
+ * asked of the whole volume, so the Use Context, whatever the person has said
+ * to use, neither hides it nor stamps it. */
 
 #include <format>
 
+#include "box/cxx/whose.h"
 #include "box/file.h"
 #include "box/memory.h"
 
@@ -20,7 +21,7 @@ constexpr std::uint64_t TailMost     = 262144;
 int FindRecord(file_id_t &Id)
 {
     file_id_t *Ids   = nullptr;
-    int        Count = query_all_everywhere(RecordTags, nullptr, &Ids);
+    int        Count = query_all_everywhere(box::tagfs::my_tags, RecordTags, nullptr, &Ids);
     if (Count > 0) Id = Ids[0];
     free(Ids);
     return Count > 0 ? 1 : Count;
@@ -34,7 +35,7 @@ std::string Refused(std::string_view What, std::int64_t Code)
 std::optional<std::string> SizeOf(file_id_t Id, std::uint64_t &Size)
 {
     FileMetadata Metadata;
-    int          Code = FileMetadataRead(Id, &Metadata);
+    int          Code = FileMetadataRead(box::tagfs::my_tags, Id, &Metadata);
     if (Code != 0) return Refused("the record file could not be looked at", Code);
     Size = Metadata.Size;
     FileMetadataRelease(&Metadata);
@@ -81,7 +82,7 @@ std::optional<std::string> AppendRecordLine(std::string_view Line)
     int       Found = FindRecord(Id);
     if (Found < 0) return Refused("the volume would not list its files, so the run was not recorded", Found);
     if (Found == 0) {
-        std::int64_t Made = create_everywhere(RecordName, RecordTags);
+        std::int64_t Made = create_everywhere(box::tagfs::my_tags, RecordName, RecordTags);
         if (Made <= 0) return Refused("the volume would not make the record file", Made);
         Id = static_cast<file_id_t>(Made);
     }

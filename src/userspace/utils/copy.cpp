@@ -26,6 +26,7 @@
 #include <string_view>
 #include <vector>
 
+#include "box/cxx/whose.h"
 #include "box/cxx/error.h"
 #include "box/display.h"
 #include "box/file.h"
@@ -171,7 +172,7 @@ NameSettled SettleTakenName(std::string_view NewName)
     NameSettled Settled;
     std::string Name(NewName);
     file_id_t   Found[2];
-    int         Count = find_file_by_name(Name.c_str(), nullptr, Found, nullptr, 2);
+    int         Count = find_file_by_name(box::tagfs::person_tags, Name.c_str(), nullptr, Found, nullptr, 2);
     if (Count < 0) {
         Settled.Refusal = std::format("could not look for a file called {}: {}", NewName, Why(Count));
         return Settled;
@@ -184,7 +185,7 @@ NameSettled SettleTakenName(std::string_view NewName)
     }
 
     FileMetadata Old;
-    if (FileMetadataRead(Found[0], &Old) != 0) {
+    if (FileMetadataRead(box::tagfs::person_tags, Found[0], &Old) != 0) {
         Settled.Refusal = std::format("{} is here, but that file would not be looked at; it may be being erased",
                                       NewName);
         return Settled;
@@ -356,7 +357,7 @@ void ReportCopied(std::string_view From, std::string_view To, std::uint64_t Size
 int CopyFile(file_id_t Source, std::string_view NewName)
 {
     FileMetadata Metadata;
-    if (FileMetadataRead(Source, &Metadata) != 0) {
+    if (FileMetadataRead(box::tagfs::person_tags, Source, &Metadata) != 0) {
         Say("copy: could not look at that file; it may have been erased");
         return 1;
     }
@@ -393,7 +394,7 @@ int CopyFile(file_id_t Source, std::string_view NewName)
     }
 
     std::string Name(NewName);
-    std::int64_t Made = create(Name.c_str(), Carried.Joined.c_str());
+    std::int64_t Made = create(box::tagfs::person_tags, Name.c_str(), Carried.Joined.c_str());
     if (Made < 0) {
         Say(std::format("copy: {} was not made: {}.{}", NewName, Why(Made), TakeBack(Old, NewName)));
         return 1;

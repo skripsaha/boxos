@@ -25,7 +25,7 @@
 
 static int child_role(void)
 {
-    int64_t fid = create(WO_NAME, WO_TAG);
+    int64_t fid = create(PERSON_TAGS, WO_NAME, WO_TAG);
     if (fid < 0) {
         kdbg_print("[WO child] create rc=%ld", fid);
         return 1;

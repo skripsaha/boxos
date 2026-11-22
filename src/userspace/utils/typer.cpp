@@ -19,6 +19,7 @@
 #include <format>
 #include <new>
 
+#include "box/cxx/whose.h"
 #include "box/clock.h"
 #include "box/file.h"
 #include "box/form.h"
@@ -57,7 +58,7 @@ void Say(std::string_view Text)
 std::optional<std::string> LoadFile(file_id_t File, Prepared &Text, std::string &Note)
 {
     FileMetadata Metadata;
-    if (FileMetadataRead(File, &Metadata) != 0) return std::string("typer: could not look at that file; it may have been erased");
+    if (FileMetadataRead(box::tagfs::my_tags, File, &Metadata) != 0) return std::string("typer: could not look at that file; it may have been erased");
     std::uint64_t Size = std::min<std::uint64_t>(Metadata.Size, FileBytesMost);
     FileMetadataRelease(&Metadata);
 

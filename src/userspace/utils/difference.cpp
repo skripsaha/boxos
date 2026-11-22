@@ -31,6 +31,7 @@
 #include <string_view>
 #include <vector>
 
+#include "box/cxx/whose.h"
 #include "box/file.h"
 #include "box/form.h"
 #include "box/print.h"
@@ -66,7 +67,7 @@ void Say(const std::string &Text)
 bool Look(file_id_t Id, std::string_view Which, Loaded &File)
 {
     FileMetadata Metadata;
-    if (FileMetadataRead(Id, &Metadata) != 0) {
+    if (FileMetadataRead(box::tagfs::my_tags, Id, &Metadata) != 0) {
         Say("difference: could not look at the " + std::string(Which) + " file; it may have been erased");
         return false;
     }

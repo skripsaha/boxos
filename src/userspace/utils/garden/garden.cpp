@@ -27,6 +27,7 @@
 #include <string_view>
 #include <vector>
 
+#include "box/cxx/whose.h"
 #include "box/file.h"
 #include "box/form.h"
 #include "box/print.h"
@@ -59,12 +60,12 @@ std::vector<file_id_t> ProgramsNamed(const std::vector<std::string> &Named)
     std::vector<file_id_t> Files;
     for (const std::string &Plant : Named) {
         file_id_t *Ids   = nullptr;
-        const int  Count = query_name_all_everywhere(Plant.c_str(), nullptr, nullptr, &Ids);
+        const int  Count = query_name_all_everywhere(box::tagfs::my_tags, Plant.c_str(), nullptr, nullptr, &Ids);
         for (int At = 0; At < Count; At++) {
             ProgramKind Kind = PROGRAM_NONE;
             if (program_kind(Ids[At], &Kind) != 0 || Kind == PROGRAM_NONE) continue;
             FileMetadata Metadata;
-            if (FileMetadataRead(Ids[At], &Metadata) != 0) continue;
+            if (FileMetadataRead(box::tagfs::my_tags, Ids[At], &Metadata) != 0) continue;
             std::string Name = Metadata.Filename ? Metadata.Filename : "";
             FileMetadataRelease(&Metadata);
             if (const std::size_t Dot = Name.rfind('.'); Dot != std::string::npos && Dot > 0) Name.resize(Dot);

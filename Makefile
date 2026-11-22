@@ -1792,7 +1792,19 @@ VOLUME_LAID  = $(foreach word,$(VOLUME_CONTENT),$(if $(filter %.elf,$(word)),$(c
 # system's, it says it is (the part `role`), and only create_tagfs, laying
 # these boxes on the volume it makes, reads that.
 PACK_ASKS_NOTHING = proca procb
-PackAsks = $(if $(filter $(basename $(notdir $(1))),$(PACK_ASKS_NOTHING)),,--ask utility)
+# ‼ THE PERSON'S TAGS are asked for by the programs that work on them as the
+# person's eyes or hands, and by no other: every program has words of its own
+# for its own files without asking, and sees none of the person's (box_reader.h,
+# `ask see-tags`, `ask change-tags`). change-tags: the programs that put the
+# person's tags on and take them off, or make a file in the person's Use
+# Context, which stamps it — seeing them comes with it. see-tags: the programs
+# that show the person's tags, find files by them, or look inside the Use
+# Context.
+PACK_ASKS_CHANGE_TAGS = hub tag untag retag create copy edit read assemble usetest write_observer cxxtest
+PACK_ASKS_SEE_TAGS    = files seek tagmap info delete hexer stringview passport display
+PackTagsAsk = $(if $(filter $(1),$(PACK_ASKS_CHANGE_TAGS)),--ask change-tags,$(if $(filter $(1),$(PACK_ASKS_SEE_TAGS)),--ask see-tags))
+PackAsks = $(if $(filter $(basename $(notdir $(1))),$(PACK_ASKS_NOTHING)),,--ask utility) \
+           $(call PackTagsAsk,$(basename $(notdir $(1))))
 
 # ‼ WHAT A PROGRAM IS TO THE MACHINE is said in its box too (the part `role`,
 # tools/pack --role): the programs the machine runs on say `system`, and the

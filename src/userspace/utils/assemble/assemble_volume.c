@@ -32,14 +32,14 @@ static int VolumeFind(BoxAsmFiles *Files, const char *Name, const char *Tags, ui
     int Index;
 
     (void)Files;
-    Count = query_name_all_everywhere(Name, Tags, NULL, &Found);
+    Count = query_name_all_everywhere(PERSON_TAGS, Name, Tags, NULL, &Found);
     if (Count < 0)
         return Count;
     for (Index = 0; Index < Count; Index++) {
         FileMetadata Metadata;
 
         memset(&Metadata, 0, sizeof(Metadata));
-        if (FileMetadataRead(Found[Index], &Metadata) != 0)
+        if (FileMetadataRead(PERSON_TAGS, Found[Index], &Metadata) != 0)
             continue;
         if (Metadata.Filename && strcmp(Metadata.Filename, Name) == 0)
             Found[Kept++] = Found[Index];
@@ -57,7 +57,7 @@ static int VolumeTags(BoxAsmFiles *Files, uint64_t Id, char **Out)
 
     (void)Files;
     memset(&Metadata, 0, sizeof(Metadata));
-    if ((Rc = FileMetadataRead(Id, &Metadata)) != 0)
+    if ((Rc = FileMetadataRead(PERSON_TAGS, Id, &Metadata)) != 0)
         return Rc;
     Tags = Metadata.Tags ? Metadata.Tags : "";
     *Out = BoxAsmCopyText(Tags, strlen(Tags));
@@ -106,7 +106,7 @@ static int VolumeRead(BoxAsmFiles *Files, uint64_t Id, size_t Limit, char **Out,
     int Rc;
 
     memset(&Metadata, 0, sizeof(Metadata));
-    if ((Rc = FileMetadataRead(Id, &Metadata)) != 0)
+    if ((Rc = FileMetadataRead(PERSON_TAGS, Id, &Metadata)) != 0)
         return Rc;
     Length = Metadata.Size;
     if (Length > Limit || Length > SIZE_MAX - 1u) {

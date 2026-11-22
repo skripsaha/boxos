@@ -6,6 +6,7 @@
 #include <charconv>
 #include <format>
 
+#include "box/cxx/whose.h"
 #include "box/memory.h"
 
 #include "kin/look.h"
@@ -24,7 +25,7 @@ constexpr std::size_t      WordsBytes = 40;
 file_id_t Find()
 {
     file_id_t *Ids   = nullptr;
-    const int  Count = query_name_all_everywhere(std::string(FileName).c_str(), nullptr, nullptr, &Ids);
+    const int  Count = query_name_all_everywhere(box::tagfs::my_tags, std::string(FileName).c_str(), nullptr, nullptr, &Ids);
     file_id_t  Found = 0;
     for (int Index = 0; Index < Count && Found == 0; Index++) {
         std::expected<kin::FileFacts, std::string> Facts = kin::ReadFacts(Ids[Index]);

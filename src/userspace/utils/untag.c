@@ -40,7 +40,7 @@ static bool wears(const char *worn, const char *word)
 static Outcome take_tags_off(file_id_t file, const char *const *tags, size_t tag_count)
 {
     FileMetadata metadata;
-    if (FileMetadataRead(file, &metadata) != 0) {
+    if (FileMetadataRead(PERSON_TAGS, file, &metadata) != 0) {
         println("Could not look at a file to take its tags off");
         return COULD_NOT;
     }
@@ -48,7 +48,7 @@ static Outcome take_tags_off(file_id_t file, const char *const *tags, size_t tag
     Outcome outcome = WORE_NONE;
     for (size_t t = 0; t < tag_count && outcome != COULD_NOT; t++) {
         if (!wears(metadata.Tags, tags[t])) continue;
-        if (tag_remove(file, tags[t]) == 0) {
+        if (tag_remove(PERSON_TAGS, file, tags[t]) == 0) {
             outcome = TOOK_OFF;
             continue;
         }

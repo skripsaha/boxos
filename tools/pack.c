@@ -5,7 +5,8 @@
  *
  * What a program may do is what its box asks for (the part `asks`, box_reader.h
  * BoxAsksRead), and the program's maker says it: each --ask is one word the box
- * asks for — utility or network. A box packed with none asks for nothing.
+ * asks for — utility, network, see-tags or change-tags. A box packed with none
+ * asks for nothing.
  *
  * What a program is to the machine it is laid on is what its box says of itself
  * (the part `role`, BoxRoleRead): --role system for a program the machine runs

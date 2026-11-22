@@ -19,14 +19,14 @@ BOX_FORM("takes optional words \"the tags or names to look for\"\n"
 static int files_found(const char *const *words, size_t word_count, file_id_t **out)
 {
     if (word_count == 0)
-        return query_all(NULL, NULL, out);
+        return query_all(PERSON_TAGS, NULL, NULL, out);
 
     file_id_t *found = NULL;
-    int        count = query_word_all(words[0], &found);
+    int        count = query_word_all(PERSON_TAGS, words[0], &found);
     for (size_t i = 1; count > 0 && i < word_count; i++)
     {
         file_id_t *next       = NULL;
-        int        next_count = query_word_all(words[i], &next);
+        int        next_count = query_word_all(PERSON_TAGS, words[i], &next);
         if (next_count < 0)
         {
             free(found);
@@ -96,7 +96,7 @@ int main(void)
 
     for (int i = 0; i < count; i++)
     {
-        if (FileMetadataRead(s_file_ids[i], &s_metadata[i]) != 0)
+        if (FileMetadataRead(PERSON_TAGS, s_file_ids[i], &s_metadata[i]) != 0)
             s_metadata[i].Filename = NULL;
     }
 

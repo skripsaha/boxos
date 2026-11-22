@@ -25,6 +25,7 @@
 #include <string_view>
 #include <vector>
 
+#include "box/cxx/whose.h"
 #include "box/file.h"
 #include "box/form.h"
 #include "box/print.h"
@@ -418,7 +419,7 @@ int main()
 
         file_id_t    File = Files[0];
         FileMetadata Metadata;
-        if (FileMetadataRead(File, &Metadata) != 0) {
+        if (FileMetadataRead(box::tagfs::person_tags, File, &Metadata) != 0) {
             Say("hexer: could not look at that file; it may have been erased");
             return 1;
         }

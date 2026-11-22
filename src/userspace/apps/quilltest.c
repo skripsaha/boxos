@@ -192,14 +192,14 @@ void QuillStem(const char *name, char *out, size_t cap)
 int QuillFindEverywhere(const char *name, file_id_t *ids, int max)
 {
     file_id_t *all = NULL;
-    int n = query_name_all_everywhere(name, NULL, NULL, &all);
+    int n = query_name_all_everywhere(MY_TAGS, name, NULL, NULL, &all);
     if (n < 0)
         return n;
 
     int found = 0;
     for (int i = 0; i < n; i++) {
         file_info_t info;
-        if (file_info(all[i], &info) != 0 || strcmp(info.filename, name) != 0)
+        if (file_info(MY_TAGS, all[i], &info) != 0 || strcmp(info.filename, name) != 0)
             continue;
         if (found < max)
             ids[found] = all[i];
@@ -232,13 +232,13 @@ int64_t QuillCreate(const char *name)
     int rc = QuillForget(name);
     if (rc < 0)
         return rc;
-    return create_everywhere(name, NULL);
+    return create_everywhere(MY_TAGS, name, NULL);
 }
 
 uint64_t QuillSize(file_id_t fid)
 {
     file_info_t info;
-    return file_info(fid, &info) == 0 ? info.size : 0;
+    return file_info(MY_TAGS, fid, &info) == 0 ? info.size : 0;
 }
 
 /* =========================================================================
@@ -256,14 +256,14 @@ static QuillVerdict QuillLongQuery(const char *const *args)
     static char tag[QUILL_LONG_TAG_BYTES + 1];
     file_id_t  *ids = NULL;
 
-    int all = query_all_everywhere(NULL, NULL, &ids);
+    int all = query_all_everywhere(MY_TAGS, NULL, NULL, &ids);
     free(ids);
     if (all <= 0) {
         printf("[QUILL] longquery: FAIL — a query for every file answered %d, so there is "
                "nothing to compare with\n", all);
         return QUILL_FAIL;
     }
-    int none = query_all_everywhere("quillnosuchtag", NULL, &ids);
+    int none = query_all_everywhere(MY_TAGS, "quillnosuchtag", NULL, &ids);
     free(ids);
     if (none != 0) {
         printf("[QUILL] longquery: FAIL — a query for quillnosuchtag, a tag no file wears, "
@@ -273,7 +273,7 @@ static QuillVerdict QuillLongQuery(const char *const *args)
 
     memset(tag, 'q', QUILL_LONG_TAG_BYTES);
     tag[QUILL_LONG_TAG_BYTES] = '\0';
-    int got = query_all_everywhere(tag, NULL, &ids);
+    int got = query_all_everywhere(MY_TAGS, tag, NULL, &ids);
     free(ids);
 
     if (got == all) {

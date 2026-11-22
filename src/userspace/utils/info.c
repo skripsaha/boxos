@@ -3,6 +3,7 @@
 #include "box/file.h"
 #include "box/memory.h"
 #include "box/recipe.h"
+#include "box/string.h"
 #include "box/system.h"
 
 BOX_FORM("takes optional thing \"the file to tell about\"\n"
@@ -29,15 +30,58 @@ static int system_summary(void) {
     return 0;
 }
 
-/* One tag a line: the comma list the volume keeps, split at its commas. */
-static void print_tags(const char *tags) {
-    println("  Tags:");
-    while (tags && *tags) {
-        const char *end = tags;
-        while (*end && *end != ',') end++;
-        printf("    %.*s\n", (int)(end - tags), tags);
-        tags = *end ? end + 1 : end;
+/* The name of a program's file while it is on the volume — a heap copy — and
+ * NULL when it is not (a file id is never given twice) or memory is out. */
+static char *program_named(file_id_t program) {
+    FileMetadata metadata;
+    if (FileMetadataRead(MY_TAGS, program, &metadata) != 0) return NULL;
+    char *name = NULL;
+    if (metadata.KeptUntil == 0 && metadata.Filename) {
+        size_t length = strlen(metadata.Filename);
+        name          = malloc(length + 1);
+        if (name) memcpy(name, metadata.Filename, length + 1);
     }
+    FileMetadataRelease(&metadata);
+    return name;
+}
+
+/* Each tag `owner` owns of the comma list the volume keeps, one a line. */
+static void print_owned(const FileMetadata *metadata, file_id_t owner) {
+    const char *tag = metadata->Tags;
+    for (uint32_t i = 0; tag && *tag; i++) {
+        const char *end = tag;
+        while (*end && *end != ',') end++;
+        if ((metadata->Owners ? metadata->Owners[i] : PERSON_OWNS) == owner)
+            printf("    %.*s\n", (int)(end - tag), tag);
+        tag = *end ? end + 1 : end;
+    }
+}
+
+/* The person's tags, then the marks each program put on the file for itself,
+ * under the program's name: the person sees every mark on the file. */
+static void print_tags(const FileMetadata *metadata) {
+    println("  Tags:");
+    print_owned(metadata, PERSON_OWNS);
+    for (uint32_t i = 0; metadata->Owners && i < metadata->TagCount; i++) {
+        file_id_t owner = metadata->Owners[i];
+        bool      told  = owner == PERSON_OWNS;
+        for (uint32_t j = 0; j < i && !told; j++) told = metadata->Owners[j] == owner;
+        if (told) continue;
+        char *name = program_named(owner);
+        if (name) printf("  Marks of the program %s:\n", name);
+        else      println("  Marks of a program no longer on the volume:");
+        free(name);
+        print_owned(metadata, owner);
+    }
+}
+
+/* What the system keeps the file as, when it is more than an ordinary file. */
+static void print_role(uint8_t role) {
+    const char *as = role == FILE_ROLE_SYSTEM ? "a system file"
+                     : role == FILE_ROLE_BOOT ? "a boot file"
+                     : role == FILE_ROLE_KERNEL ? "the kernel"
+                                                : NULL;
+    if (as) printf("  Kept by the system as %s\n", as);
 }
 
 /* Who made the file: the program's file, by its name while that file is on the
@@ -45,16 +89,10 @@ static void print_tags(const char *tags) {
  * Nothing for a file no program of the volume made. */
 static void print_maker(file_id_t maker) {
     if (maker == 0) return;
-    FileMetadata program;
-    if (FileMetadataRead(maker, &program) != 0) {
-        println("  Made by a program that is no longer on the volume");
-        return;
-    }
-    if (program.KeptUntil != 0)
-        println("  Made by a program that is no longer on the volume");
-    else
-        printf("  Made by the program %s\n", program.Filename);
-    FileMetadataRelease(&program);
+    char *name = program_named(maker);
+    if (name) printf("  Made by the program %s\n", name);
+    else      println("  Made by a program that is no longer on the volume");
+    free(name);
 }
 
 /* What a program made here was made from, by which tool and in which Use
@@ -102,7 +140,7 @@ int main(void) {
     }
 
     FileMetadata metadata;
-    if (FileMetadataRead(file[0], &metadata) != 0) {
+    if (FileMetadataRead(ALL_TAGS, file[0], &metadata) != 0) {
         println("Could not look at that file; it may have been erased");
         exit(1);
         return 1;
@@ -111,7 +149,8 @@ int main(void) {
     println("File Info:");
     printf("  Filename: %s\n", metadata.Filename);
     printf("  Size: %u bytes\n", (unsigned)metadata.Size);
-    print_tags(metadata.Tags);
+    print_role(metadata.Role);
+    print_tags(&metadata);
     const file_id_t maker = metadata.MadeBy;
     FileMetadataRelease(&metadata);
     print_maker(maker);

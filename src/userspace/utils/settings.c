@@ -69,10 +69,10 @@ static int find_program(const char *word, file_id_t *out)
         printf("settings: %s names no program\n", word);
         return -ERR_INVALID_ARGUMENT;
     }
-    int n = query_name_all_everywhere(word, NULL, NULL, &ids);
+    int n = query_name_all_everywhere(MY_TAGS, word, NULL, NULL, &ids);
     for (int i = 0; i < n; i++) {
         FileMetadata metadata;
-        if (FileMetadataRead(ids[i], &metadata) != 0) continue;
+        if (FileMetadataRead(MY_TAGS, ids[i], &metadata) != 0) continue;
         const char *name = metadata.Filename ? metadata.Filename : "";
         const char *its_dot = strrchr(name, '.');
         size_t      its_length = its_dot ? (size_t)(its_dot - name) : strlen(name);
@@ -96,7 +96,7 @@ static int find_program(const char *word, file_id_t *out)
         printf("settings: %s could be any of these — say its whole name:\n", word);
         for (int i = 0; i < count; i++) {
             FileMetadata metadata;
-            if (FileMetadataRead(found[i], &metadata) != 0) continue;
+            if (FileMetadataRead(MY_TAGS, found[i], &metadata) != 0) continue;
             printf("  %s\n", metadata.Filename);
             FileMetadataRelease(&metadata);
         }

@@ -143,7 +143,7 @@ static file_id_t FindProgram(const char *name, const char **why)
     }
 
     file_id_t *ids   = NULL;
-    int        count = query_name_all_everywhere(name, NULL, NULL, &ids);
+    int        count = query_name_all_everywhere(MY_TAGS, name, NULL, NULL, &ids);
     if (count < 0) {
         *why = "the volume did not answer";
         return 0;
@@ -153,7 +153,7 @@ static file_id_t FindProgram(const char *name, const char **why)
     int       matches = 0;
     for (int i = 0; i < count; i++) {
         FileMetadata metadata;
-        if (FileMetadataRead(ids[i], &metadata) != 0) continue;
+        if (FileMetadataRead(MY_TAGS, ids[i], &metadata) != 0) continue;
         bool named = whole ? strcmp(metadata.Filename, name) == 0
                            : StemLength(metadata.Filename) == length && memcmp(metadata.Filename, name, length) == 0;
         if (named && IsProgram(ids[i])) {
@@ -175,7 +175,7 @@ static file_id_t FindProgram(const char *name, const char **why)
 static char *NameOf(file_id_t program)
 {
     FileMetadata metadata;
-    if (FileMetadataRead(program, &metadata) != 0) return NULL;
+    if (FileMetadataRead(MY_TAGS, program, &metadata) != 0) return NULL;
 
     char       *name = Copy(metadata.Filename, StemLength(metadata.Filename));
     const char *why;
@@ -475,10 +475,9 @@ static void Offer(Change change)
     }
 
     file_id_t *ids   = NULL;
-    int        count = query_all_everywhere(NULL, NULL, &ids);
+    int        count = program_files(&ids);
     printf("programs not on the list:");
     for (int i = 0; i < count; i++) {
-        if (!IsProgram(ids[i])) continue;
         char *name = NameOf(ids[i]);
         bool  on   = false;
         for (size_t at = 0; name && at < list.Count && !on; at++) on = strcmp(list.Items[at], name) == 0;

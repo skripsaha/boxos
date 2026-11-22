@@ -202,18 +202,18 @@ static int QuillAbbaPair(QuillAbbaRole role, file_id_t fid, const char *a, const
         *which = 1;
         return file_rename(fid, a);
     case QUILL_ABBA_CREATE: {
-        int64_t made = create_everywhere(a, NULL);
+        int64_t made = create_everywhere(MY_TAGS, a, NULL);
         if (made <= 0)
             return made ? (int)made : -1;
         *which = 1;
         return delete((uint32_t)made);
     }
     case QUILL_ABBA_TAG:
-        rc = tag_add(fid, b);
+        rc = tag_add(MY_TAGS, fid, b);
         if (rc != 0)
             return rc;
         *which = 1;
-        return tag_remove(fid, b);
+        return tag_remove(MY_TAGS, fid, b);
     }
     return -1;
 }
@@ -353,7 +353,7 @@ static file_id_t QuillAbbaLayDown(const char *name, file_id_t *highest, char wha
         fids[i] = (file_id_t)fid;
     }
     QuillAbbaName(what, name, "tk");
-    if ((*rc = tag_add(fids[1], what)) != 0 || (*rc = tag_remove(fids[1], what)) != 0)
+    if ((*rc = tag_add(MY_TAGS, fids[1], what)) != 0 || (*rc = tag_remove(MY_TAGS, fids[1], what)) != 0)
         return 0;
     *highest = fids[1];
     return fids[0];
@@ -487,7 +487,7 @@ static void QuillAbbaGrow(QuillAbbaBoard *board, const char *name, file_id_t run
             g->refused = "names";
             return;
         }
-        int64_t fid = create_everywhere(g->name, NULL);
+        int64_t fid = create_everywhere(MY_TAGS, g->name, NULL);
         if (fid <= 0) {
             g->refusal = fid ? (int)fid : -1;
             g->refused = "create";
