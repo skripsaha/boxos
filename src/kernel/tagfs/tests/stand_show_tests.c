@@ -18,7 +18,8 @@
 // what is asked, refused where it cannot be; the same through a mount off the
 // ribbon and off a Tally; the programs a reader is shown by, a page at a time;
 // a reader that leaves taken out of the lists, a program that leaves taking
-// its list with it.
+// its list with it. And the asks: a note a pair, gone with the answer — yes,
+// no, yes to every program —, with either program leaving, and with a mount.
 // ============================================================================
 
 #define STAND_SHOW_TERM_S  3600ull
@@ -71,6 +72,20 @@ static bool StandShowShownTo(uint64_t reader, const uint64_t* want, uint32_t n)
     TagFSPage page;
     if (TagFSShownToPage(reader, 1, got, STAND_SHOW_ROOM, true, &page) != OK || page.delivered != n ||
         page.total != n)
+        return false;
+    for (uint32_t i = 0; i < n; i++)
+        if (got[i] != want[i])
+            return false;
+    return true;
+}
+
+/* Whether the programs that asked `owner` and are not answered are exactly
+ * `want`. */
+static bool StandShowAsked(uint64_t owner, const uint64_t* want, uint32_t n)
+{
+    uint64_t  got[STAND_SHOW_ROOM];
+    TagFSPage page;
+    if (TagFSAsksPage(owner, 1, got, STAND_SHOW_ROOM, true, &page) != OK || page.delivered != n || page.total != n)
         return false;
     for (uint32_t i = 0; i < n; i++)
         if (got[i] != want[i])
@@ -193,6 +208,78 @@ out:
     return verdict;
 }
 
+static TestResult TestStandShowAsks(void)
+{
+    TestResult verdict = TEST_PASS;
+    StandShow  s;
+    bool       noted = false;
+    TEST_ASSERT(StandShowMake(&s), "an editor, a player, a converter and another program");
+    TEST_ASSERT(StandShowAsked(s.editor, NULL, 0), "nobody asked the editor anything");
+    TEST_ASSERT(TagFSAskToSee(s.player, s.editor, &noted) == OK && noted, "the player asks the editor: a note");
+    TEST_ASSERT(TagFSAskToSee(s.player, s.editor, &noted) == OK && !noted, "asked again: the note stands, one");
+    TEST_ASSERT(TagFSAskToSee(s.converter, s.editor, &noted) == OK && noted, "the converter asks too");
+    const uint64_t both[] = { s.player, s.converter };
+    TEST_ASSERT(StandShowAsked(s.editor, both, 2) && StandShowAsked(s.player, NULL, 0),
+                "the editor holds both asks, rising, and they are its alone");
+    TEST_ASSERT_OK(TagFSShowTags(s.editor, s.player, true), "the editor answers the player yes");
+    const uint64_t conv[] = { s.converter };
+    TEST_ASSERT(StandShowAsked(s.editor, conv, 1) && TagFSShows(s.editor, s.player),
+                "the player's note is gone with the answer, and it is shown");
+    TEST_ASSERT(TagFSAskToSee(s.player, s.editor, &noted) == OK && !noted, "one shown already leaves no note asking");
+    TEST_ASSERT_OK(TagFSShowTags(s.editor, s.converter, false), "the editor answers the converter no");
+    TEST_ASSERT(StandShowAsked(s.editor, NULL, 0) && !TagFSShows(s.editor, s.converter),
+                "its note is gone too, and it is not shown");
+    TEST_ASSERT_EQ(TagFSAskToSee(s.editor, s.editor, &noted), ERR_INVALID_ARGUMENT, "a program asking itself is refused");
+    TEST_ASSERT_EQ(TagFSAskToSee(s.player, s.other + 1000000u, &noted), ERR_FILE_NOT_FOUND,
+                   "and one asking a program the volume has not");
+out:
+    StandShowClean(&s);
+    return verdict;
+}
+
+static TestResult TestStandShowAsksEvery(void)
+{
+    TestResult verdict = TEST_PASS;
+    StandShow  s;
+    bool       noted = false;
+    TEST_ASSERT(StandShowMake(&s), "an editor, a player, a converter and another program");
+    TEST_ASSERT(TagFSAskToSee(s.player, s.editor, &noted) == OK && noted, "the player asks the editor");
+    TEST_ASSERT(TagFSAskToSee(s.converter, s.editor, &noted) == OK && noted, "and the converter");
+    TEST_ASSERT(TagFSAskToSee(s.player, s.converter, &noted) == OK && noted, "the player asks the converter too");
+    TEST_ASSERT_OK(TagFSShowTags(s.editor, 0, true), "the editor shows its tags to every program");
+    const uint64_t player[] = { s.player };
+    TEST_ASSERT(StandShowAsked(s.editor, NULL, 0) && StandShowAsked(s.converter, player, 1),
+                "every ask of the editor is answered, the converter's ask stands");
+    TEST_ASSERT(TagFSAskToSee(s.other, s.editor, &noted) == OK && !noted, "a program shown by every-program asks nothing");
+out:
+    StandShowClean(&s);
+    return verdict;
+}
+
+static TestResult TestStandShowAsksForgotten(void)
+{
+    TestResult verdict = TEST_PASS;
+    StandShow  s;
+    bool       noted = false;
+    uint32_t   n = 0;
+    TEST_ASSERT(StandShowMake(&s), "an editor, a player, a converter and another program");
+    TEST_ASSERT(TagFSAskToSee(s.player, s.editor, &noted) == OK && noted, "the player asks the editor");
+    TEST_ASSERT(TagFSAskToSee(s.converter, s.editor, &noted) == OK && noted, "and the converter");
+    TEST_ASSERT(TagFSAskToSee(s.player, s.other, &noted) == OK && noted, "the player asks the other program");
+    TEST_ASSERT_EQ(tagfs_delete_file(s.converter, INK_WARRANTED), 0, "the converter leaves");
+    TEST_ASSERT_EQ(tagfs_delete_file(s.other, INK_WARRANTED), 0, "and the other program");
+    TEST_ASSERT_OK(RetireSweepNow(&n), "the duty looks");
+    const uint64_t player[] = { s.player };
+    TEST_ASSERT(StandShowAsked(s.editor, player, 1) && StandShowAsked(s.other, NULL, 0),
+                "the notes of a program that left — asking or asked — are gone, the rest stand");
+    TEST_ASSERT_OK(TagFSSettle(), "a cycle settles");
+    TEST_ASSERT(StandStitchRemount(), "the volume is mounted afresh");
+    TEST_ASSERT(StandShowAsked(s.editor, NULL, 0), "a mount forgets every note: an ask is asked again");
+out:
+    StandShowClean(&s);
+    return verdict;
+}
+
 /* The card through a mount: off the ribbon, then — `tally` — off a Tally. */
 static TestResult StandShowAfterMount(bool tally)
 {
@@ -239,6 +326,9 @@ static const TestCase g_stand_show_tests[] = {
     { .name = "stand_show_shown_to", .func = TestStandShowShownTo, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_show_reader_left", .func = TestStandShowReaderLeft, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_show_program_left", .func = TestStandShowProgramLeft, .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_show_asks", .func = TestStandShowAsks, .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_show_asks_every", .func = TestStandShowAsksEvery, .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_show_asks_forgotten", .func = TestStandShowAsksForgotten, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_show_ribbon_replay", .func = TestStandShowRibbonReplay, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_show_tally_holds", .func = TestStandShowTallyHolds, .reach = TEST_WRITES_TO_VOLUME },
 };

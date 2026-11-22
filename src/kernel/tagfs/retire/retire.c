@@ -1,6 +1,7 @@
 #include "retire.h"
 #include "../file_map/file_map.h"
 #include "../ink/ink.h"
+#include "../show/show.h"
 #include "../mount/book_mount.h"
 #include "../settle/settle_internal.h"
 #include "../tag_registry/tag_registry.h"
@@ -134,6 +135,8 @@ static error_t RetireSweep(uint32_t* retired)
     kfree(tags);
     if (rc == OK)
         rc = RetireReaders();
+    if (rc == OK)
+        rc = ShowAsksForgetGone();
     return rc;
 }
 

@@ -802,6 +802,20 @@ error_t  TagFSShownToPage(uint64_t reader, uint64_t from, uint64_t* out, uint32_
  * ERR_FILE_NOT_FOUND for a program the volume has not. */
 error_t  TagFSShownBy(uint64_t program, uint64_t* out, uint32_t room, uint32_t* count);
 
+/* Program `asker` asks program `owner` to show it its tags: a note the
+ * kernel holds (show/show.h) until `owner` answers — TagFSShowTags of the
+ * asker either way, or of every program — or either leaves. *noted true for
+ * a note left now; OK leaving none when one stands already, or `owner` shows
+ * its tags to the asker already. ERR_INVALID_ARGUMENT for program 0 or one
+ * asking itself; ERR_FILE_NOT_FOUND for a program the volume has not;
+ * ERR_NO_MEMORY. */
+error_t  TagFSAskToSee(uint64_t asker, uint64_t owner, bool* noted);
+
+/* The programs that asked `owner` to show them its tags and are not answered
+ * yet, a page at a time in file id order (TagFSPage). */
+error_t  TagFSAsksPage(uint64_t owner, uint64_t from, uint64_t* out, uint32_t room, bool want_total,
+                       TagFSPage* page);
+
 /* Whether tag `tag_id` is one of the person's a pattern names
  * (TagPatternMatches), read in place in the volume's registry: a pattern is
  * spoken in the person's tags, and a program's own is never one it names. */
