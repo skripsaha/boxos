@@ -14,7 +14,9 @@
  * deleted alike, and is then RETIRED: its id is never given again, its text
  * and its owner are forgotten, and a Coined RETIRED of it lies in the next
  * stitch (tag_registry.h). While the file is only in the trash its tags live
- * and restoring it brings it back whole.
+ * and restoring it brings it back whole. And it is taken out of every list
+ * of the programs that showed it their tags (FileRecord.shown_to); the list
+ * its own card held went with the card.
  *
  * ‼ THE DUTY IS ONE RULE, DERIVED, NEVER A LIST OF WHAT HAPPENED. A program's
  * tag whose program's file is not in the volume — no record, and no file
@@ -37,6 +39,11 @@
  * microseconds: a tag put on by a process of a program already gone is never
  * told of. */
 #define RETIRE_LOOK_US  10000000ull
+
+/* Whether file `fid` is gone for good: no record in the volume — a file kept
+ * deleted has one — and none locked by name, which stands only unreadable; a
+ * file Escheat lost is neither (BookFileLocked). Inside the door. */
+bool RetireFileGone(uint64_t fid);
 
 /* Something was given up: the next service point looks. From any context. */
 void RetireOwed(void);

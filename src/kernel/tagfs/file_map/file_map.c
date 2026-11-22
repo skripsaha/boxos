@@ -27,6 +27,18 @@ struct FileMapNode {
     } u;
 };
 
+/* The files whose record bears a mark, by id in order — a list the map keeps
+ * where a record is put or let go, under its lock. `marked` counts them,
+ * written under the lock and read with none where its reader says so — one
+ * word, stored whole. The list is short when one had no room in it, and so
+ * not every one, until no record bears the mark again. */
+typedef struct {
+    uint64_t*         fid;
+    uint32_t          count, room;
+    bool              short_of_room;
+    volatile uint64_t marked;
+} FileMapMarked;
+
 struct FileMap {
     TagFSLock    lock;
     FileMapNode* root;
@@ -34,16 +46,12 @@ struct FileMap {
     uint32_t     files;
     uint32_t     nodes;
     uint64_t     record_bytes;
-    /* The files whose record holds Slips: written under the lock, read with
-     * none (FileMapSlips) — one word, stored whole, the order of its reads
-     * and of the takes beside it kept by the reader (allotment.c). */
-    volatile uint64_t slips;
-    /* Those files, by id in order (FileMapSlipped): under the lock. Short
-     * when one had no room in the list, which then is not every one — until
-     * none holds Slips again. */
-    uint64_t*    slipped;
-    uint32_t     slipped_count, slipped_room;
-    bool         slipped_short;
+    /* The files whose record holds Slips (FileMapSlipped), their count read
+     * with no lock (FileMapSlips) — the order of its reads and of the takes
+     * beside it kept by the reader (allotment.c). */
+    FileMapMarked slipped;
+    /* The files of programs that show their tags (FileMapShowing). */
+    FileMapMarked showing;
     /* The files by the word their name is, or its stem is (name_index.h):
      * put and let go with the records, under the lock. */
     NameIndex    names;
@@ -404,76 +412,93 @@ static void MapRemove(FileMap* m, uint64_t key, FileMapLeftover* left)
     }
 }
 
-/* Where `fid` is, or goes, in the list of files with Slips. */
-static uint32_t SlippedAt(const FileMap* m, uint64_t fid)
+/* Where `fid` is, or goes, in the list. */
+static uint32_t MarkedAt(const FileMapMarked* l, uint64_t fid)
 {
-    uint32_t lo = 0, hi = m->slipped_count;
+    uint32_t lo = 0, hi = l->count;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2u;
-        if (m->slipped[mid] < fid) lo = mid + 1u;
-        else                       hi = mid;
+        if (l->fid[mid] < fid) lo = mid + 1u;
+        else                   hi = mid;
     }
     return lo;
 }
 
-/* `fid` into the list of files with Slips, or the list short when there is
- * no room for it. */
-static void SlippedAdd(FileMap* m, uint64_t fid)
+/* `fid` into the list, or the list short when there is no room for it. */
+static void MarkedAdd(FileMapMarked* l, uint64_t fid)
 {
-    if (m->slipped_short)
+    if (l->short_of_room)
         return;
-    uint32_t at = SlippedAt(m, fid);
-    if (at < m->slipped_count && m->slipped[at] == fid)
+    uint32_t at = MarkedAt(l, fid);
+    if (at < l->count && l->fid[at] == fid)
         return;
-    if (m->slipped_count == m->slipped_room) {
-        uint32_t  room = m->slipped_room ? m->slipped_room * 2u : 16u;
-        uint64_t* made = room > m->slipped_room ? kmalloc((size_t)room * sizeof(uint64_t)) : NULL;
+    if (l->count == l->room) {
+        uint32_t  room = l->room ? l->room * 2u : 16u;
+        uint64_t* made = room > l->room ? kmalloc((size_t)room * sizeof(uint64_t)) : NULL;
         if (!made) {
-            m->slipped_short = true;
+            l->short_of_room = true;
             return;
         }
-        if (m->slipped_count)
-            memcpy(made, m->slipped, (size_t)m->slipped_count * sizeof(uint64_t));
-        kfree(m->slipped);
-        m->slipped      = made;
-        m->slipped_room = room;
+        if (l->count)
+            memcpy(made, l->fid, (size_t)l->count * sizeof(uint64_t));
+        kfree(l->fid);
+        l->fid  = made;
+        l->room = room;
     }
-    memmove(m->slipped + at + 1u, m->slipped + at, (size_t)(m->slipped_count - at) * sizeof(uint64_t));
-    m->slipped[at] = fid;
-    m->slipped_count++;
+    memmove(l->fid + at + 1u, l->fid + at, (size_t)(l->count - at) * sizeof(uint64_t));
+    l->fid[at] = fid;
+    l->count++;
 }
 
-static void SlippedTake(FileMap* m, uint64_t fid)
+static void MarkedTake(FileMapMarked* l, uint64_t fid)
 {
-    uint32_t at = SlippedAt(m, fid);
-    if (at < m->slipped_count && m->slipped[at] == fid) {
-        memmove(m->slipped + at, m->slipped + at + 1u, (size_t)(m->slipped_count - at - 1u) * sizeof(uint64_t));
-        m->slipped_count--;
+    uint32_t at = MarkedAt(l, fid);
+    if (at < l->count && l->fid[at] == fid) {
+        memmove(l->fid + at, l->fid + at + 1u, (size_t)(l->count - at - 1u) * sizeof(uint64_t));
+        l->count--;
     }
-    if (m->slips == 0) {
-        /* None holds Slips: the list, empty, is every one again. */
-        m->slipped_count = 0;
-        m->slipped_short = false;
+    if (l->marked == 0) {
+        /* None bears the mark: the list, empty, is every one again. */
+        l->count         = 0;
+        l->short_of_room = false;
     }
 }
 
-/* The files whose record holds Slips, counted and listed, as `fid`'s `was`
- * becomes `now` (NULL for none). */
-static void MapSlipsMet(FileMap* m, uint64_t fid, const FileRecord* was, const FileRecord* now)
+/* The list as `fid`'s record bears the mark `before` and `after`. */
+static void MarkedMet(FileMapMarked* l, uint64_t fid, bool before, bool after)
 {
-    bool before = was && was->slip, after = now && now->slip;
     if (before == after)
         return;
-    __atomic_store_n(&m->slips, m->slips + (after ? 1u : 0u) - (before ? 1u : 0u), __ATOMIC_RELEASE);
-    if (after) SlippedAdd(m, fid);
-    else       SlippedTake(m, fid);
+    __atomic_store_n(&l->marked, l->marked + (after ? 1u : 0u) - (before ? 1u : 0u), __ATOMIC_RELEASE);
+    if (after) MarkedAdd(l, fid);
+    else       MarkedTake(l, fid);
+}
+
+/* From `from` on, the files of the list into `out`, `room` of them at the
+ * most — UINT32_MAX when it is short. Under the lock. */
+static uint32_t MarkedPage(const FileMapMarked* l, uint64_t from, uint64_t* out, uint32_t room)
+{
+    if (l->short_of_room)
+        return UINT32_MAX;
+    uint32_t n = 0;
+    for (uint32_t at = MarkedAt(l, from); at < l->count && n < room; at++)
+        out[n++] = l->fid[at];
+    return n;
+}
+
+/* The map's lists as `fid`'s `was` becomes `now` (NULL for none): the files
+ * with Slips, the files that show their tags. */
+static void MapMarksMet(FileMap* m, uint64_t fid, const FileRecord* was, const FileRecord* now)
+{
+    MarkedMet(&m->slipped, fid, was && was->slip, now && now->slip);
+    MarkedMet(&m->showing, fid, was && was->shown_count, now && now->shown_count);
 }
 
 static void MapLetGoEntry(FileMap* m, uint64_t key, FileMapEntry* e, FileMapLeftover* left)
 {
     if (e->record) {
         m->record_bytes -= e->record->bytes;
-        MapSlipsMet(m, key, e->record, NULL);
+        MapMarksMet(m, key, e->record, NULL);
         NameIndexPut(&m->names, key, e->record, NULL);
         left->record = e->record;
     }
@@ -624,7 +649,8 @@ void FileMapDestroy(FileMap* map)
         return;
     if (map->root)
         MapFreeNode(map->root);
-    kfree(map->slipped);
+    kfree(map->slipped.fid);
+    kfree(map->showing.fid);
     NameIndexClose(&map->names);
     kfree(map);
 }
@@ -643,7 +669,7 @@ error_t FileMapRecordPut(FileMap* map, uint64_t fid, FileRecord* rec,
         map->record_bytes -= e->record->bytes;
         *was = e->where;
     }
-    MapSlipsMet(map, fid, e->record, rec);
+    MapMarksMet(map, fid, e->record, rec);
     NameIndexPut(&map->names, fid, e->record, rec);
     map->record_bytes += rec->bytes;
     e->record = rec;
@@ -713,12 +739,15 @@ uint32_t FileMapNamed(FileMap* map, const char* word, size_t length, uint64_t fr
 uint32_t FileMapSlipped(FileMap* map, uint64_t from, uint64_t* out, uint32_t room)
 {
     TagFSLockTake(&map->lock);
-    uint32_t n = UINT32_MAX;
-    if (!map->slipped_short) {
-        n = 0;
-        for (uint32_t at = SlippedAt(map, from); at < map->slipped_count && n < room; at++)
-            out[n++] = map->slipped[at];
-    }
+    uint32_t n = MarkedPage(&map->slipped, from, out, room);
+    TagFSLockDrop(&map->lock);
+    return n;
+}
+
+uint32_t FileMapShowing(FileMap* map, uint64_t from, uint64_t* out, uint32_t room)
+{
+    TagFSLockTake(&map->lock);
+    uint32_t n = MarkedPage(&map->showing, from, out, room);
     TagFSLockDrop(&map->lock);
     return n;
 }
@@ -743,7 +772,7 @@ uint32_t FileMapNameLinks(FileMap* map)
 
 uint64_t FileMapSlips(const FileMap* map)
 {
-    return map ? __atomic_load_n(&map->slips, __ATOMIC_ACQUIRE) : 0;
+    return map ? __atomic_load_n(&map->slipped.marked, __ATOMIC_ACQUIRE) : 0;
 }
 
 size_t FileMapBytes(FileMap* map)

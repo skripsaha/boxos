@@ -20,10 +20,7 @@ void RetireOwed(void)
     __atomic_store_n(&s_owed, 1u, __ATOMIC_RELEASE);
 }
 
-/* Whether the program's file is gone for good: no record in the volume — a
- * file kept deleted has one — and none locked by name, which stands only
- * unreadable; a file Escheat lost is neither (BookFileLocked). */
-static bool RetireFileGone(uint64_t fid)
+bool RetireFileGone(uint64_t fid)
 {
     FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
     FileRecordRelease(rec);
@@ -71,6 +68,36 @@ static error_t RetireProgram(const uint32_t* ids, uint32_t count)
     return rc;
 }
 
+/* Every program that left taken out of the lists of the programs that show
+ * their tags to it (FileRecord.shown_to): one Ink a reader a list, the files
+ * that show asked of the map's list of them — of every file when it is short
+ * of room. A list whose program left went with its card. */
+static error_t RetireReaders(void)
+{
+    FileMap* map = tagfs_get_state()->files;
+    uint64_t files[RETIRE_PAGE];
+    for (uint64_t from = 0;;) {
+        uint32_t n = FileMapShowing(map, from, files, RETIRE_PAGE);
+        if (n == UINT32_MAX)
+            n = FileMapFiles(map, from, files, RETIRE_PAGE);
+        if (n == 0)
+            return OK;
+        for (uint32_t k = 0; k < n; k++) {
+            FileRecord* rec = FileMapRecordHold(map, files[k], NULL);
+            error_t     rc  = OK;
+            for (uint32_t i = 0; rc == OK && rec && i < rec->shown_count; i++) {
+                InkReceipt receipt;
+                if (rec->shown_to[i] && RetireFileGone(rec->shown_to[i]))
+                    rc = InkShown(files[k], rec->shown_to[i], false, &receipt);
+            }
+            FileRecordRelease(rec);
+            if (rc != OK && rc != ERR_FILE_NOT_FOUND)
+                return rc;
+        }
+        from = files[n - 1u] + 1u;
+    }
+}
+
 static int RetireByProgram(const void* a, const void* b, void* ctx)
 {
     const TagProgramTag* x = a;
@@ -105,6 +132,8 @@ static error_t RetireSweep(uint32_t* retired)
     }
     kfree(ids);
     kfree(tags);
+    if (rc == OK)
+        rc = RetireReaders();
     return rc;
 }
 

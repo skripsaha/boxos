@@ -767,6 +767,41 @@ bool     TagFSHoldsProgram(const uint8_t volume[16], uint64_t fid);
  * program's own, an id the volume has not, and with no volume. */
 bool     TagFSTagIsPersons(uint32_t tag_id);
 
+/*
+ * A program's own tags shown to other programs (show/show.c). A program
+ * shows all its tags, those to come too, to another program — named by its
+ * file — or to every program (reader 0); one shown them sees them, finds the
+ * files by them and lists them, and never puts them on nor takes them off.
+ * Whom a program shows them to is the card of its own file (FileRecord.
+ * shown_to), so the file let go takes it with it, and a reader that left is
+ * taken out of every list by the volume's duty (retire/retire.c). Who may ask
+ * which is the caller's to judge (storage_tags.c): a program changes its own
+ * list alone.
+ */
+
+/* Program `program`'s card shows its tags to `reader` (0: every program), or
+ * — `show` false — no longer does. OK, and OK changing nothing for what
+ * stands already; ERR_INVALID_ARGUMENT for program 0 or a program shown to
+ * itself; ERR_FILE_NOT_FOUND for a program, or a reader shown to, the volume
+ * has not, and a program kept deleted that would show to one more; the
+ * Ink's refusal; ERR_TAGFS_NOT_INITIALIZED with no volume. */
+error_t  TagFSShowTags(uint64_t program, uint64_t reader, bool show);
+
+/* Whether `program`'s file shows its tags to `reader` — by name, or to every
+ * program. False for a program the volume has not, and with no volume. */
+bool     TagFSShows(uint64_t program, uint64_t reader);
+
+/* The programs that show their tags to `reader` — by name or to every
+ * program, `reader` itself left out — a page at a time in file id order, from
+ * `from` on (TagFSPage). ERR_TAGFS_NOT_INITIALIZED with no volume. */
+error_t  TagFSShownToPage(uint64_t reader, uint64_t from, uint64_t* out, uint32_t room, bool want_total,
+                          TagFSPage* page);
+
+/* The programs `program` shows its tags to, rising, 0 first for every
+ * program: as many as fit `room` into `out`, and *count how many there are.
+ * ERR_FILE_NOT_FOUND for a program the volume has not. */
+error_t  TagFSShownBy(uint64_t program, uint64_t* out, uint32_t room, uint32_t* count);
+
 /* Whether tag `tag_id` is one of the person's a pattern names
  * (TagPatternMatches), read in place in the volume's registry: a pattern is
  * spoken in the person's tags, and a program's own is never one it names. */
