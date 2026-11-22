@@ -14,7 +14,7 @@ namespace KeyCodes = painter::tui::KeyCodes;
 
 constexpr float HueStep = 0.2618f;   // a colour's turn round the wheel for one key: 15 degrees
 
-constexpr std::string_view Names[Rows] = {"palette", "wax", "rim", "glass", "blobs", "size", "flow", "glow"};
+constexpr std::string_view Names[Rows] = {"palette", "wax", "rim", "glass", "blobs", "size", "flow", "glow", "light", "tui", "remember"};
 
 struct Range {
     int Least, Most, Step;
@@ -43,6 +43,11 @@ int &NumberOf(Row Of, Composition &Lamp)
 Color &PaintOf(Row Of, Composition &Lamp)
 {
     return Of == Row::Wax ? Lamp.Wax : Of == Row::Rim ? Lamp.Rim : Lamp.Glass;
+}
+
+bool &SwitchOf(Row Of, Look &Now)
+{
+    return Of == Row::Light ? Now.Lamp.Light : Of == Row::Tui ? Now.Cells : Now.Remember;
 }
 
 /* A colour turned round the wheel as the eye sees it — its lightness and how
@@ -76,8 +81,10 @@ std::string_view Tuning::Name(Row Of)
     return Names[static_cast<int>(Of)];
 }
 
-std::string Tuning::Value(Row Of, const Composition &Lamp)
+std::string Tuning::Value(Row Of, const Look &Now)
 {
+    const Composition &Lamp = Now.Lamp;
+    if (IsSwitch(Of)) return On(Of, Now) ? "on" : "off";
     switch (Of) {
     case Row::Palette: return Lamp.PaletteName();
     case Row::Wax: return Spelled(Lamp.Wax);
@@ -90,33 +97,41 @@ std::string Tuning::Value(Row Of, const Composition &Lamp)
     }
 }
 
-float Tuning::Share(Row Of, const Composition &Lamp)
+float Tuning::Share(Row Of, const Look &Now)
 {
-    if (Of == Row::Palette || IsColor(Of)) return 0;
+    if (!IsNumber(Of)) return 0;
     const Range Within = RangeOf(Of);
-    Composition Read   = Lamp;
+    Composition Read   = Now.Lamp;
     return static_cast<float>(NumberOf(Of, Read) - Within.Least) / static_cast<float>(Within.Most - Within.Least);
 }
 
-Color Tuning::ColorOf(Row Of, const Composition &Lamp)
+bool Tuning::On(Row Of, const Look &Now)
 {
-    Composition Read = Lamp;
+    if (!IsSwitch(Of)) return false;
+    Look Read = Now;
+    return SwitchOf(Of, Read);
+}
+
+Color Tuning::ColorOf(Row Of, const Look &Now)
+{
+    Composition Read = Now.Lamp;
     return PaintOf(Of, Read);
 }
 
 std::string_view Tuning::Hint() const noexcept
 {
     if (Editing) return "#rrggbb, enter takes it    esc leaves it as it was";
+    if (Shown && IsSwitch(At)) return "↑ ↓ choose    ← → off, on    enter turns it over    esc closes";
     if (Shown) return "↑ ↓ choose    ← → change    enter types a colour    esc closes";
     return "enter tunes the lamp    ← → palette    ↑ ↓ flow    esc leaves";
 }
 
-Heard Tuning::Key(const painter::tui::KeyEvent &Key, Composition &Lamp)
+Heard Tuning::Key(const painter::tui::KeyEvent &Key, Look &Now)
 {
     if (Leaves(Key)) return Heard::Leave;
-    if (Editing) return OnTyping(Key, Lamp);
-    if (Shown) return OnPanel(Key, Lamp);
-    return OnLamp(Key, Lamp);
+    if (Editing) return OnTyping(Key, Now.Lamp);
+    if (Shown) return OnPanel(Key, Now);
+    return OnLamp(Key, Now.Lamp);
 }
 
 /* The panel closed: the palettes and the flow are at hand all the same. */
@@ -154,7 +169,7 @@ Heard Tuning::OnLamp(const painter::tui::KeyEvent &Key, Composition &Lamp)
     }
 }
 
-Heard Tuning::OnPanel(const painter::tui::KeyEvent &Key, Composition &Lamp)
+Heard Tuning::OnPanel(const painter::tui::KeyEvent &Key, Look &Now)
 {
     /* A note answers the last key, so each key clears it first. */
     Said.clear();
@@ -162,8 +177,8 @@ Heard Tuning::OnPanel(const painter::tui::KeyEvent &Key, Composition &Lamp)
         switch (Key.Scancode) {
         case KeyCodes::Up: Choose(-1); return Heard::Panel;
         case KeyCodes::Down: Choose(1); return Heard::Panel;
-        case KeyCodes::Left: return Change(-1, Lamp);
-        case KeyCodes::Right: return Change(1, Lamp);
+        case KeyCodes::Left: return Change(-1, Now);
+        case KeyCodes::Right: return Change(1, Now);
         default: return Heard::Panel;
         }
     }
@@ -172,10 +187,14 @@ Heard Tuning::OnPanel(const painter::tui::KeyEvent &Key, Composition &Lamp)
     case U'q':
     case U'Q': return Heard::Leave;
     case KeyCodes::Tab: Choose(Key.IsShift() ? -1 : 1); return Heard::Panel;
-    case U'-': return Change(-1, Lamp);
+    case U'-': return Change(-1, Now);
     case U'+':
-    case U'=': return Change(1, Lamp);
+    case U'=': return Change(1, Now);
+    case U' ':
+        if (IsSwitch(At)) return Turn(0, Now);
+        return Heard::Panel;
     case KeyCodes::Enter:
+        if (IsSwitch(At)) return Turn(0, Now);
         if (IsColor(At)) {
             Editing = true;
             Text    = "#";
@@ -219,8 +238,10 @@ void Tuning::Choose(int By)
     At = static_cast<Row>((static_cast<int>(At) + By + Rows) % Rows);
 }
 
-Heard Tuning::Change(int By, Composition &Lamp)
+Heard Tuning::Change(int By, Look &Now)
 {
+    if (IsSwitch(At)) return Turn(By, Now);
+    Composition &Lamp = Now.Lamp;
     if (At == Row::Palette) {
         const int Count = static_cast<int>(Palettes.size());
         Lamp.Take(Lamp.Palette == Own ? (By > 0 ? 0 : Count - 1) : (Lamp.Palette + By + Count) % Count);
@@ -242,6 +263,19 @@ Heard Tuning::Change(int By, Composition &Lamp)
     const int   Was    = Number;
     Number             = std::clamp(Number + By * Within.Step, Within.Least, Within.Most);
     return Number == Was ? Heard::Panel : Heard::Lamp;
+}
+
+Heard Tuning::Turn(int By, Look &Now)
+{
+    bool      &Switch = SwitchOf(At, Now);
+    const bool Was    = Switch;
+    Switch            = By < 0 ? false : By > 0 ? true : !Switch;
+    if (Switch == Was) return Heard::Panel;
+    switch (At) {
+    case Row::Tui: return Heard::Face;
+    case Row::Remember: return Heard::Remember;
+    default: return Heard::Lamp;
+    }
 }
 
 }  // namespace lavalamp

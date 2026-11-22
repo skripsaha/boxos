@@ -17,6 +17,7 @@ using painter::core::Corners;
 constexpr float Margin = 40, Wide = 340, RowTall = 34, RowsTop = 58;
 constexpr float Tall   = RowsTop + Rows * RowTall + 40;
 constexpr float Middle = 150, BarLong = 110, ValueAt = 180, ValueWide = 138;
+constexpr float SwitchLong = 36, SwitchTall = 18, Knob = 14;
 
 const Color Faint = Color::Rgba(255, 255, 255, 48);
 
@@ -81,6 +82,11 @@ Panel::Panel(gui::Area &On) : Screen(On)
         if (Of == Row::Palette || Tuning::IsColor(Of)) {
             One.Track.Hide();
             One.Bar.Hide();
+        } else if (Tuning::IsSwitch(Of)) {
+            /* A switch: a pill the theme's accent fills when it is on, its
+             * knob gliding to that end. */
+            One.Track.SetPlace({Middle, RowY(At) + (RowTall - SwitchTall) / 2}).SetSize({SwitchLong, SwitchTall}).SetCorners(Corners::All(SwitchTall / 2));
+            One.Bar.SetSize({Knob, Knob}).SetCorners(Corners::All(Knob / 2)).SetFill(gui::Fill::Of(Color::Rgb(0xFF, 0xFF, 0xFF)));
         } else {
             One.Track.SetPlace({Middle, RowY(At) + 14}).SetSize({BarLong, 6}).SetCorners(Corners::All(3)).SetFill(gui::Fill::Of(Faint));
             One.Bar.SetPlace({Middle, RowY(At) + 14}).SetCorners(Corners::All(3)).SetFill(gui::Fill::OfTheme(gui::ThemeColor::Accent));
@@ -102,7 +108,7 @@ void Panel::Place()
     Keys.SetPlace({0, Size.Y - 44}).SetSize({Size.X, gui::ByContent});
 }
 
-void Panel::ShowLine(int At, const Tuning &State, const Composition &Lamp)
+void Panel::ShowLine(int At, const Tuning &State, const Look &Now)
 {
     Line     &One = Lines[static_cast<std::size_t>(At)];
     const Row Of  = static_cast<Row>(At);
@@ -110,15 +116,23 @@ void Panel::ShowLine(int At, const Tuning &State, const Composition &Lamp)
         gui::TextStyle Typed;
         Typed.Color = Color::Rgb(0xFF, 0xFF, 0xFF);
         One.Value.SetText(std::string(State.Typed()) + "|").SetStyle(Typed);
-    } else One.Value.SetText(Tuning::Value(Of, Lamp)).SetStyle({});
-    if (Of == Row::Palette) One.Swatch.SetFill(Strip(Lamp, 64));
-    else if (Tuning::IsColor(Of)) One.Swatch.SetFill(gui::Fill::Of(Tuning::ColorOf(Of, Lamp)));
-    else One.Bar.SetSize({std::max(6.0f, BarLong * Tuning::Share(Of, Lamp)), 6});
+    } else One.Value.SetText(Tuning::Value(Of, Now)).SetStyle({});
+    if (Of == Row::Palette) One.Swatch.SetFill(Strip(Now.Lamp, 64));
+    else if (Tuning::IsColor(Of)) One.Swatch.SetFill(gui::Fill::Of(Tuning::ColorOf(Of, Now)));
+    else if (Tuning::IsSwitch(Of)) {
+        const bool  On   = Tuning::On(Of, Now);
+        const float Edge = (SwitchTall - Knob) / 2;
+        One.Track.SetFill(On ? gui::Fill::OfTheme(gui::ThemeColor::Accent) : gui::Fill::Of(Faint));
+        const painter::core::PointF Place{Middle + (On ? SwitchLong - Knob - Edge : Edge), RowY(At) + (RowTall - Knob) / 2};
+        if (!Started) One.Bar.SetPlace(Place);
+        else if (On != One.On) Screen.Animate(gui::Animation::Spring(240ms, 0.1f), [&] { One.Bar.SetPlace(Place); });
+        One.On = On;
+    } else One.Bar.SetSize({std::max(6.0f, BarLong * Tuning::Share(Of, Now)), 6});
 }
 
-void Panel::Show(const Tuning &State, const Composition &Lamp)
+void Panel::Show(const Tuning &State, const Look &Now)
 {
-    for (int At = 0; At < Rows; At++) ShowLine(At, State, Lamp);
+    for (int At = 0; At < Rows; At++) ShowLine(At, State, Now);
     Note.SetText(State.Note());
     if (State.Chosen() != Marked) {
         Marked = State.Chosen();

@@ -145,7 +145,7 @@ playtime.elf: $(BOXLIB_START) playtime.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB
 # pixels (painter::gui) or in the console's cells (painter::tui). The field and
 # the colours are worked out for every pixel of every frame: built -O2.
 LAVALAMP_DIR  = lavalamp
-LAVALAMP_OBJS = $(addprefix $(LAVALAMP_DIR)/,lavalamp.o composition.o look.o lamp.o field.o shades.o tuning.o pixels.o panel.o cells.o)
+LAVALAMP_OBJS = $(addprefix $(LAVALAMP_DIR)/,lavalamp.o composition.o look.o setup.o lamp.o field.o shades.o tuning.o pixels.o panel.o cells.o)
 
 $(addprefix $(LAVALAMP_DIR)/,lamp.o field.o shades.o pixels.o cells.o): CXXFLAGS += -O2
 

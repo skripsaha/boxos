@@ -1,11 +1,11 @@
 /* shades.h — the lamp's colours, worked out from a composition: the liquid
  * behind the wax, dark under the cap and lit by the bulb below, the glass
- * curving away at its sides; and the wax — the rim's
- * colour where it is cool, the wax's where it is warm, brighter deep inside,
- * lit from above as a round thing is, the bulb's light caught along its
- * underside, and its glow on the liquid round it. Both faces colour with it,
- * so the cells show the same lamp the pixels do. Colours are sRGB's numbers,
- * 0 to 1. */
+ * curving away at its sides; and the wax — the rim's colour where it is
+ * cool, the wax's where it is warm, brighter deep inside, lit from above as a
+ * round thing is, the bulb's light caught along its underside, and its glow
+ * on the liquid round it. With the light off the liquid is its one colour and
+ * the wax only its warmth's. Both faces colour with it, so the cells show the
+ * same lamp the pixels do. Colours are sRGB's numbers, 0 to 1. */
 #ifndef LAVALAMP_SHADES_H
 #define LAVALAMP_SHADES_H
 
@@ -59,6 +59,8 @@ public:
     float BulbUp(float Y) const;
     Rgb   BulbLight() const noexcept { return Lamp; }
     Rgb   Behind(float U, float Y) const { return Plus(Times(Liquid(Y), Round(U)), Times(Lamp, BulbAcross(U) * BulbUp(Y))); }
+    /* The lamp is lit at all: its wax's light worth working out. */
+    bool  Lighted() const noexcept { return Lit; }
     /* The wax at a point: as warm as Heat, Level deep, lit as Lit says, at
      * height Y. */
     Rgb   Wax(float Heat, float Level, const Light &Lit, float Y) const;
@@ -76,6 +78,7 @@ public:
 private:
     Rgb   Hot, Cool, Bright, Deep, Lamp;
     float Glow;
+    bool  Lit;
 };
 
 }  // namespace lavalamp

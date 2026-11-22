@@ -30,6 +30,7 @@ constexpr std::uint64_t KeysUs   = 5000000;   // the line of keys, so long after
 constexpr float         Faint    = 0.002f;
 constexpr float         Sharp    = 0.02f;
 constexpr int           BarCells = 10;
+constexpr int           SwitchCells = 4;
 
 painter::core::Color ColorOf(Rgb C)
 {
@@ -45,9 +46,9 @@ int PartsOf(const tui::Stage &On)
 
 }  // namespace
 
-CellLamp::CellLamp(tui::Stage Opened, const Composition &Start)
-    : Screen(std::move(Opened)), Current(Start), Wax(static_cast<float>(Screen.Size().Width) / (2.0f * static_cast<float>(Screen.Size().Height)), Start),
-      Colours(Start)
+CellLamp::CellLamp(tui::Stage Opened, Setup &With, bool Text)
+    : Screen(std::move(Opened)), Set(With), Forced(Text),
+      Wax(static_cast<float>(Screen.Size().Width) / (2.0f * static_cast<float>(Screen.Size().Height)), With.Now().Lamp), Colours(With.Now().Lamp)
 {
     Cols  = Screen.Size().Width;
     Rows  = Screen.Size().Height;
@@ -60,8 +61,8 @@ CellLamp::CellLamp(tui::Stage Opened, const Composition &Start)
 
 void CellLamp::Retune()
 {
-    Wax.Tune(Current);
-    Colours = Shades(Current);
+    Wax.Tune(Set.Now().Lamp);
+    Colours = Shades(Set.Now().Lamp);
     SlopeBy = SlopeOf * Wax.BlobSize();
     Behind.resize(static_cast<std::size_t>(Grid.Across()) * Grid.Down());
     for (int Y = 0; Y < Grid.Down(); Y++)
@@ -82,7 +83,7 @@ void CellLamp::Paint()
             float             Most = 0;
             for (int Part = 0; Part < 2 * Parts; Part++) Most = std::max(Most, Grid.Level(Col * 2 + Part % 2, Row * Parts + Part / 2));
             Lit[Cell] = Most > Faint;
-            const bool Shaded = Tuned.Open() && Col >= Window.X && Col < Window.X + Window.Width && Row >= Window.Y && Row < Window.Y + Window.Height;
+            const bool Shaded = Set.Panel().Open() && Col >= Window.X && Col < Window.X + Window.Width && Row >= Window.Y && Row < Window.Y + Window.Height;
             if (!Whole && !Lit[Cell] && !WasLit[Cell] && !Shaded) continue;
             tui::Mosaic Wanted;
             Wanted.Rows = static_cast<std::uint8_t>(Parts);
@@ -97,7 +98,7 @@ void CellLamp::Paint()
                 const int   L = std::max(X - 1, 0), R = std::min(X + 1, Wide - 1), T = std::max(Y - 1, 0), B = std::min(Y + 1, High - 1);
                 const float AcrossBy = Grid.Level(R, Y) - Grid.Level(L, Y), DownBy = Grid.Level(X, B) - Grid.Level(X, T);
                 const float Edge = std::max(Sharp, std::max(std::fabs(AcrossBy), std::fabs(DownBy)) / 2);
-                const Rgb   Waxen = Colours.Wax(Grid.Heat(X, Y), Level, LightOf(Level, AcrossBy * PerX, DownBy * PerY), Grid.Y(Y));
+                const Rgb   Waxen = Colours.Wax(Grid.Heat(X, Y), Level, Colours.Lighted() ? LightOf(Level, AcrossBy * PerX, DownBy * PerY) : Light{}, Grid.Y(Y));
                 Wanted.At[Part]   = ColorOf(Colours.Over(Back, Waxen, Level, Edge));
             }
             (void)Fine.PutMosaic({Col, Row}, Wanted);
@@ -110,7 +111,9 @@ void CellLamp::Paint()
  * of — its name, a swatch or a bar, its value — the chosen one marked. */
 void CellLamp::PaintPanel()
 {
-    tui::Frame &Out = Screen.FrameBuffer();
+    tui::Frame   &Out   = Screen.FrameBuffer();
+    const Tuning &Tuned = Set.Panel();
+    const Look   &Now   = Set.Now();
     if (!Tuned.Open()) {
         (void)Out.SetCaret(std::nullopt);
         return;
@@ -130,17 +133,22 @@ void CellLamp::PaintPanel()
         (void)Out.Put({Inside.X, Y}, Marked ? U'>' : U' ', {Ink, Paper});
         (void)tui::PutText(Out, {Inside.X + 2, Y}, Tuning::Name(Of), 9, Ink, Paper);
         if (Of == Row::Palette) {
-            const painter::core::Color Three[] = {Current.Wax, Current.Rim, Current.Glass};
+            const painter::core::Color Three[] = {Now.Lamp.Wax, Now.Lamp.Rim, Now.Lamp.Glass};
             for (int Cell = 0; Cell < 3; Cell++) (void)Out.Put({Swatch + Cell, Y}, U' ', {Ink, Three[Cell]});
         } else if (Tuning::IsColor(Of)) {
-            (void)Out.Fill({Swatch, Y, 3, 1}, U' ', {Ink, Tuning::ColorOf(Of, Current)});
+            (void)Out.Fill({Swatch, Y, 3, 1}, U' ', {Ink, Tuning::ColorOf(Of, Now)});
+        } else if (Tuning::IsSwitch(Of)) {
+            /* A switch: its knob at the end it is set to. */
+            const bool On = Tuning::On(Of, Now);
+            for (int Cell = 0; Cell < SwitchCells; Cell++) (void)Out.Put({Swatch + Cell, Y}, On ? U'═' : U'─', {On ? painter::core::Colors::Amber : tui::HintInk, Paper});
+            (void)Out.Put({Swatch + (On ? SwitchCells - 1 : 0), Y}, U'■', {On ? painter::core::Colors::Amber : Ink, Paper});
         } else {
-            const int Filled = std::max(1, static_cast<int>(std::lround(Tuning::Share(Of, Current) * BarCells)));
+            const int Filled = std::max(1, static_cast<int>(std::lround(Tuning::Share(Of, Now) * BarCells)));
             for (int Cell = 0; Cell < BarCells; Cell++)
                 (void)Out.Put({Swatch + Cell, Y}, Cell < Filled ? U'═' : U'─', {Cell < Filled ? painter::core::Colors::Amber : tui::HintInk, Paper});
         }
         const bool        Typing = Tuned.Typing() && Marked;
-        const std::string Value  = Typing ? std::string(Tuned.Typed()) : Tuning::Value(Of, Current);
+        const std::string Value  = Typing ? std::string(Tuned.Typed()) : Tuning::Value(Of, Now);
         const std::int32_t From  = Right - static_cast<std::int32_t>(tui::CellsOf(Value));
         (void)tui::PutText(Out, {From, Y}, Value, static_cast<std::int32_t>(tui::CellsOf(Value)), Typing ? painter::core::Colors::Amber : Ink, Paper);
         if (Typing) (void)Out.SetCaret(painter::core::Point{Right, Y});
@@ -155,7 +163,8 @@ void CellLamp::PaintPanel()
  * closes. */
 void CellLamp::PaintKeys()
 {
-    const bool Shown = !Tuned.Open() && clock_uptime_us() < KeysUntilUs;
+    const Tuning &Tuned = Set.Panel();
+    const bool    Shown = !Tuned.Open() && clock_uptime_us() < KeysUntilUs;
     /* Gone, the line leaves the lamp's cells under it to be drawn again. */
     if (KeysShown && !Shown) Whole = true;
     KeysShown = Shown;
@@ -164,19 +173,44 @@ void CellLamp::PaintKeys()
     (void)Out.Centre(Rows - 1, std::string(" ") + std::string(Tuned.Hint()) + " ", {tui::WindowInk, tui::WindowPaper});
 }
 
-Composition CellLamp::Run(bool &Closed)
+void CellLamp::Take(Heard What, bool WasOpen)
+{
+    switch (What) {
+    case Heard::Nothing: return;
+    case Heard::Leave: Going = false; return;
+    case Heard::Face:
+        if (!Set.Now().Cells) {
+            if (!Forced) {
+                ToPixels = true;
+                Going    = false;
+                return;
+            }
+            Set.Panel().Say("this screen shows only text: the lamp stays in cells");
+        }
+        break;
+    case Heard::Lamp: Retune(); break;
+    default: break;
+    }
+    /* Closed, the panel leaves the cells under it to be drawn again. */
+    if (WasOpen && !Set.Panel().Open()) {
+        KeysUntilUs = clock_uptime_us() + KeysUs;
+        Whole       = true;
+    }
+    NextUs = clock_uptime_us();
+}
+
+bool CellLamp::Run(bool &Closed)
 {
     Screen.HearEnd();
     Retune();
-    std::uint64_t Last = clock_uptime_us(), Next = Last;
+    std::uint64_t Last = clock_uptime_us();
+    NextUs             = Last;
     KeysUntilUs        = Last + KeysUs;
-    for (bool Going = true; Going;) {
-        if (Watch.changed()) {
-            Current = ReadLook().Lamp;
-            Retune();
-        }
+    while (Going) {
+        Take(Set.Reread(), Set.Panel().Open());
+        if (!Going) break;
         const std::uint64_t Now = clock_uptime_us();
-        if (Now >= Next) {
+        if (Now >= NextUs) {
             Wax.Advance(static_cast<float>(Now - Last) / 1e6f);
             Last = Now;
             Grid.Fill(Wax);
@@ -187,29 +221,17 @@ Composition CellLamp::Run(bool &Closed)
             /* The next frame from the clock after this one is drawn: on a
              * wide screen a frame may take longer than a frame's time, and
              * the keys must still be heard between them. */
-            Next = clock_uptime_us() + FrameUs;
+            NextUs = clock_uptime_us() + FrameUs;
             continue;
         }
-        const tui::Event Heard = Screen.Wait(static_cast<std::uint32_t>(std::max<std::uint64_t>(1, (Next - Now) / 1000)));
+        const tui::Event Heard = Screen.Wait(static_cast<std::uint32_t>(std::max<std::uint64_t>(1, (NextUs - Now) / 1000)));
         if (Heard.Kind == tui::EventKind::Gone || Heard.Kind == tui::EventKind::EndAsked) break;
         if (Heard.Kind != tui::EventKind::Key) continue;
-        const bool Open = Tuned.Open();
-        switch (Tuned.Key(Heard.Key, Current)) {
-        case lavalamp::Heard::Leave: Going = false; break;
-        case lavalamp::Heard::Lamp: Retune(); [[fallthrough]];
-        case lavalamp::Heard::Panel:
-            /* Closed, the panel leaves the cells under it to be drawn again. */
-            if (Open && !Tuned.Open()) {
-                KeysUntilUs = clock_uptime_us() + KeysUs;
-                Whole       = true;
-            }
-            Next = Now;
-            break;
-        case lavalamp::Heard::Nothing: break;
-        }
+        const bool WasOpen = Set.Panel().Open();
+        Take(Set.Key(Heard.Key), WasOpen);
     }
     Closed = static_cast<bool>(Screen.Close());
-    return Current;
+    return ToPixels;
 }
 
 }  // namespace lavalamp

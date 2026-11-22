@@ -1,6 +1,6 @@
 /* composition.h — what a lamp is made of, as a person tunes it: its colours,
  * a palette's or its own, how many blobs of wax and how large, how fast they
- * flow and how far they glow. The settings give the first one (look.h), the
+ * flow, how far they glow and whether they are lit. The settings give the first one (look.h), the
  * line and a lamp kept before change it, the panel on the screen changes it
  * as it runs, and a lamp is kept in a file as the text of one. */
 #ifndef LAVALAMP_COMPOSITION_H
@@ -51,6 +51,7 @@ struct Composition {
     int   Size  = 100;
     int   Flow  = 5;
     int   Glow  = 60;
+    bool  Light = true;     // shaded, with highlights and the bulb's light; off, flat colour
 
     /* The palette's colours taken, by its place among Palettes. */
     void        Take(int Which);

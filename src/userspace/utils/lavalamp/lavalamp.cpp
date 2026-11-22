@@ -13,14 +13,19 @@
  *
  * While it flows: enter opens the panel that tunes this lamp — the palette,
  * the wax's, the rim's and the liquid's colours, how many blobs, their size,
- * the flow, the glow; left and right go through the palettes, up and down
- * set the flow; esc leaves. settings lavalamp sets the lamp it begins as.
+ * the flow, the glow, the light — and the settings' tui, which draws it the
+ * other way at once, and remember, which writes what the panel changes to
+ * the settings so the lamp begins so the next time; left and right go
+ * through the palettes, up and down set the flow; esc leaves. settings
+ * lavalamp sets the lamp it begins as.
  *
  * What it is made of: composition (what a lamp is: palettes, colours,
- * numbers, its file's text), look (the settings), lamp (the wax's motion),
- * field (the wax over a grid), shades (the colours), tuning (the keys and
- * the panel's rows), pixels and panel (the lamp in pixels), cells (the lamp
- * in cells). This part reads the line, lights the lamp and keeps it. */
+ * numbers, its file's text), look (the settings, read and written), setup
+ * (the lamp now and the settings, shared by both faces), lamp (the wax's
+ * motion), field (the wax over a grid), shades (the colours), tuning (the
+ * keys and the panel's rows), pixels and panel (the lamp in pixels), cells
+ * (the lamp in cells). This part reads the line, lights the lamp and keeps
+ * it. */
 
 #include <charconv>
 #include <cstdlib>
@@ -43,6 +48,7 @@
 #include "composition.h"
 #include "look.h"
 #include "pixels.h"
+#include "setup.h"
 
 BOX_FORM("takes optional thing \"a lamp kept before, to light it again\"\n"
          "takes optional words \"how it begins: a palette (lava, magma, ocean, lime, violet, sunset) and how many blobs, 2 to 24\"\n"
@@ -150,24 +156,29 @@ std::optional<std::string> Keep(const std::string &Name, file_id_t File, const C
     return std::nullopt;
 }
 
-/* The lamp lit, in pixels or in cells, until the person leaves it; none when
- * it could not be lit. */
-std::optional<Composition> Light(const Look &Shown, const Composition &Lamp)
+/* The lamp lit, in pixels or in cells — and drawn the other way each time
+ * the person turns tui over — until they leave it; none when it could not be
+ * lit. Cells where the screen shows only text, whatever tui says. */
+std::optional<Composition> Light(Setup &Lamp)
 {
-    if (!Shown.Cells)
-        if (std::expected<painter::gui::Area, box::error> Area = painter::gui::Area::Open(painter::gui::Placement::Whole);
-            Area && Area->On() == painter::gui::Glass::Pixels)
-            if (std::expected<painter::tui::Keyboard, painter::tui::StageError> Keys = painter::tui::Keyboard::Open())
-                return PixelLamp(std::move(*Area), std::move(*Keys), Lamp).Run();
-    std::expected<painter::tui::Stage, painter::tui::StageError> Opened = painter::tui::Stage::Open(LeastCols, LeastRows);
-    if (!Opened) {
-        Say(Opened.error().Describe("lavalamp"));
-        return std::nullopt;
+    for (;;) {
+        if (!Lamp.Now().Cells)
+            if (std::expected<painter::gui::Area, box::error> Area = painter::gui::Area::Open(painter::gui::Placement::Whole);
+                Area && Area->On() == painter::gui::Glass::Pixels)
+                if (std::expected<painter::tui::Keyboard, painter::tui::StageError> Keys = painter::tui::Keyboard::Open()) {
+                    if (!PixelLamp(std::move(*Area), std::move(*Keys), Lamp).Run()) return Lamp.Now().Lamp;
+                    continue;
+                }
+        std::expected<painter::tui::Stage, painter::tui::StageError> Opened = painter::tui::Stage::Open(LeastCols, LeastRows);
+        if (!Opened) {
+            Say(Opened.error().Describe("lavalamp"));
+            return std::nullopt;
+        }
+        bool       Closed   = true;
+        const bool ToPixels = CellLamp(std::move(*Opened), Lamp, !Lamp.Now().Cells).Run(Closed);
+        if (!Closed) Say("lavalamp: the screen was not given back as it should have been");
+        if (!ToPixels) return Lamp.Now().Lamp;
     }
-    bool              Closed = true;
-    const Composition Left   = CellLamp(std::move(*Opened), Lamp).Run(Closed);
-    if (!Closed) Say("lavalamp: the screen was not given back as it should have been");
-    return Left;
 }
 
 int Run()
@@ -184,8 +195,9 @@ int Run()
         return 1;
     }
 
-    const Look  Shown = ReadLook();
-    Composition Lamp  = Shown.Lamp;
+    const Look Settings = ReadLook();
+    Look       Begin    = Settings;
+    Composition &Lamp   = Begin.Lamp;
     if (FileCount > 0) {
         const std::expected<std::string, std::string> Text = ReadText(Files[0]);
         const std::expected<Composition, std::string> Kept =
@@ -210,7 +222,8 @@ int Run()
         }
     }
 
-    const std::optional<Composition> Left = Light(Shown, Lamp);
+    Setup                            Lit(Begin, Settings);
+    const std::optional<Composition> Left = Light(Lit);
     if (!Left) return 1;
     if (KeepName.empty()) return 0;
     if (const std::optional<std::string> Refused = Keep(KeepName, *Place, *Left)) {

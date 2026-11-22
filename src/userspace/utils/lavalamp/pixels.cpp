@@ -14,7 +14,6 @@
 #include <utility>
 
 #include "box/clock.h"
-#include "look.h"
 
 namespace lavalamp {
 
@@ -46,8 +45,9 @@ painter::core::Pixel PixelOf(Rgb C)
 
 }  // namespace
 
-PixelLamp::PixelLamp(gui::Area Opened, painter::tui::Keyboard Heard, const Composition &Start)
-    : Screen(std::move(Opened)), Keys(std::move(Heard)), Current(Start), Wax(Screen.Size().X / Screen.Size().Y, Start), Colours(Start)
+PixelLamp::PixelLamp(gui::Area Opened, painter::tui::Keyboard Heard, Setup &With)
+    : Screen(std::move(Opened)), Keys(std::move(Heard)), Set(With), Wax(Screen.Size().X / Screen.Size().Y, With.Now().Lamp),
+      Colours(With.Now().Lamp)
 {
     Under = Screen.Group();
     Pane.emplace(Screen);
@@ -76,8 +76,8 @@ void PixelLamp::Build()
 
 void PixelLamp::Retune()
 {
-    Wax.Tune(Current);
-    Colours = Shades(Current);
+    Wax.Tune(Set.Now().Lamp);
+    Colours = Shades(Set.Now().Lamp);
     SlopeBy = SlopeOf * Wax.BlobSize() * static_cast<float>(High);
     LiquidRow.resize(static_cast<std::size_t>(High));
     BulbRow.resize(static_cast<std::size_t>(High));
@@ -133,7 +133,7 @@ void PixelLamp::ColourPoints(painter::core::Rect Cells)
             const int   L = std::max(X - 1, 0), R = std::min(X + 1, Cols), T = std::max(Y - 1, 0), B = std::min(Y + 1, CellRows);
             const float AcrossBy = (Grid.Level(R, Y) - Grid.Level(L, Y)) / static_cast<float>((R - L) * Step);
             const float DownBy   = (Grid.Level(X, B) - Grid.Level(X, T)) / static_cast<float>((B - T) * Step);
-            Points[At] = Colours.Wax(Grid.Heat(X, Y), Level, LightOf(Level, AcrossBy * SlopeBy, DownBy * SlopeBy), Grid.Y(Y));
+            Points[At] = Colours.Wax(Grid.Heat(X, Y), Level, Colours.Lighted() ? LightOf(Level, AcrossBy * SlopeBy, DownBy * SlopeBy) : Light{}, Grid.Y(Y));
             Edges[At]  = std::max(Sharp, std::sqrt(AcrossBy * AcrossBy + DownBy * DownBy));
         }
 }
@@ -203,14 +203,7 @@ bool PixelLamp::OnEvent(const gui::Event &Told)
     switch (Told.What) {
     case gui::Event::Kind::Gone:
     case gui::Event::Kind::EndAsked: return false;
-    case gui::Event::Kind::Key:
-        switch (Tuned.Key(Told.Key, Current)) {
-        case lavalamp::Heard::Leave: return false;
-        case lavalamp::Heard::Lamp: Retune(); [[fallthrough]];
-        case lavalamp::Heard::Panel: Pane->Show(Tuned, Current); break;
-        case lavalamp::Heard::Nothing: break;
-        }
-        return true;
+    case gui::Event::Kind::Key: return Take(Set.Key(Told.Key));
     case gui::Event::Kind::Area: {
         const float Scale = Screen.Scale();
         if (std::lround(Told.Size.X * Scale) != Wide || std::lround(Told.Size.Y * Scale) != High) {
@@ -227,18 +220,31 @@ bool PixelLamp::OnEvent(const gui::Event &Told)
     }
 }
 
-Composition PixelLamp::Run()
+bool PixelLamp::Take(Heard What)
+{
+    switch (What) {
+    case Heard::Leave: return false;
+    case Heard::Face:
+        if (Set.Now().Cells) {
+            ToCells = true;
+            return false;
+        }
+        break;
+    case Heard::Lamp: Retune(); break;
+    default: break;
+    }
+    if (What != Heard::Nothing) Pane->Show(Set.Panel(), Set.Now());
+    return true;
+}
+
+bool PixelLamp::Run()
 {
     Keys.HearEnd();
     Build();
-    Pane->Show(Tuned, Current);
+    Pane->Show(Set.Panel(), Set.Now());
     LastUs = clock_uptime_us();
     for (;;) {
-        if (Watch.changed()) {
-            Current = ReadLook().Lamp;
-            Retune();
-            Pane->Show(Tuned, Current);
-        }
+        if (!Take(Set.Reread())) return ToCells;
         /* The frame said, the next one waits only for the glass to show the
          * one before it: it is drawn while the display shows this one. */
         const std::uint64_t Before = Screen.Step();
@@ -249,11 +255,11 @@ Composition PixelLamp::Run()
          * for only behind it would never be heard — then the glass waited for. */
         for (;;) {
             while (const std::optional<gui::Event> Told = Screen.Next())
-                if (!OnEvent(*Told)) return Current;
+                if (!OnEvent(*Told)) return ToCells;
             for (painter::tui::Event Typed = Keys.Poll(); Typed.Kind != painter::tui::EventKind::Quiet; Typed = Keys.Poll())
-                if (!OnEvent(AsEvent(Typed))) return Current;
+                if (!OnEvent(AsEvent(Typed))) return ToCells;
             if (!Hidden && Seen >= Before) break;
-            if (!OnEvent(Screen.Wait(&Keys))) return Current;
+            if (!OnEvent(Screen.Wait(&Keys))) return ToCells;
         }
     }
 }
