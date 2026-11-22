@@ -19,6 +19,7 @@ using painter::core::Corners;
 using painter::core::PointF;
 
 constexpr float FrameShare = 0.42f;   // the frame, of a square
+constexpr float BrassShare = 0.16f;   // the brass line in from the frame's edge, of the frame
 constexpr Kind  Promotions[4] = {Queen, Rook, Bishop, Knight};
 
 gui::Fill Diagonal(float Long, Color From, Color To)
@@ -111,8 +112,7 @@ BoardView::BoardView(gui::Area &On, float Square, PointF At, bool Flipped) : Scr
     Pointer.SetSize({S, S})
         .SetCorners(Corners::All(S * 0.08f))
         .SetFill(gui::Fill::Of(Color::Through()))
-        .SetStroke(Line(std::max(2.0f, S * 0.05f), ink::Cursor))
-        .SetShadow(gui::Shadow{{0, 0}, S * 0.18f, 0, Color::Rgba(0x6F, 0xD0, 0xFF, 0xA0), false})
+        .SetStroke(Line(std::max(2.5f, S * 0.055f), ink::Cursor))
         .Hide();
 
     Offered = Whole.Subgroup();
@@ -136,9 +136,9 @@ void BoardView::MakeFrame()
         .SetFill(Diagonal(All, ink::FrameLit, ink::FrameDim))
         .SetShadow(gui::Shadow{{0, S * 0.2f}, S * 0.7f, 0, Color::Rgba(0, 0, 0, 0x90), false});
     gui::Shape &Brass = Still.emplace_back(Whole.Rectangle());
-    Brass.SetPlace({F * 0.62f, F * 0.62f})
-        .SetSize({All - F * 1.24f, All - F * 1.24f})
-        .SetCorners(Corners::All(F * 0.12f))
+    Brass.SetPlace({F * BrassShare, F * BrassShare})
+        .SetSize({All - 2 * F * BrassShare, All - 2 * F * BrassShare})
+        .SetCorners(Corners::All(F * 0.25f))
         .SetFill(gui::Fill::Of(Color::Through()))
         .SetStroke(Line(std::max(1.5f, S * 0.022f), ink::Brass));
 }
@@ -162,21 +162,21 @@ void BoardView::MakeSquares()
 }
 
 /* The files along the bottom and the ranks up the left, as the board is
- * turned. */
+ * turned: each in the middle of the band between the brass and the squares. */
 void BoardView::Label()
 {
-    const float Size = std::max(10.0f, S * 0.2f);
+    const float Size = std::max(10.0f, S * 0.2f), Band = F * (1 - BrassShare), Tall = Size * 1.25f;
     for (int Col = 0; Col < 8; Col++) {
         const int File = Turned ? 7 - Col : Col;
         Names[static_cast<std::size_t>(Col)]
             .SetText(std::string(1, static_cast<char>('a' + File)))
-            .SetPlace({F + Col * S, F + 8 * S + (F - Size * 1.25f) / 2})
+            .SetPlace({F + Col * S, F + 8 * S + (Band - Tall) / 2})
             .SetSize({S, gui::ByContent});
         const int Rank = Turned ? Col : 7 - Col;
         Names[static_cast<std::size_t>(8 + Col)]
             .SetText(std::string(1, static_cast<char>('1' + Rank)))
-            .SetPlace({0, F + Col * S + (S - Size * 1.25f) / 2})
-            .SetSize({F, gui::ByContent});
+            .SetPlace({F * BrassShare, F + Col * S + (S - Tall) / 2})
+            .SetSize({Band, gui::ByContent});
     }
 }
 
@@ -313,13 +313,13 @@ void BoardView::Pick(std::optional<Square> From, const MoveList &Reach, const Po
     Mark(Picked, From);
     std::size_t Used = 0;
     if (From)
-        for (const Move One : Reach) {
+        for (int At_ = 0; At_ < Reach.Count; At_++) {
+            const Move One = Reach.At[static_cast<std::size_t>(At_)];
             if (One.From != *From) continue;
+            /* A pawn's four promotions go to one square: one mark. */
             bool Again = false;
-            for (const Move Before : Reach) {
-                if (&Before == &One) break;
-                Again |= Before.From == One.From && Before.To == One.To;
-            }
+            for (int Before = 0; Before < At_; Before++)
+                Again |= Reach.At[static_cast<std::size_t>(Before)].From == One.From && Reach.At[static_cast<std::size_t>(Before)].To == One.To;
             if (Again) continue;
             if (Used == Dots.size()) Dots.push_back(Reaches.Ellipse());
             gui::Shape  &Dot    = Dots[Used++];

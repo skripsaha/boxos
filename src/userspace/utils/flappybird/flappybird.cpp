@@ -2,8 +2,8 @@
  * one point for each pair it gets past, and the first touch of a pipe or the
  * ground ends the round. Drawn in the screen's pixels as items the display
  * moves (painter::gui): a sky of the day or of the night as the machine's
- * clock says, clouds, a city and bushes going by slower than the ground, the
- * bird tilting as it climbs and dives; bronze, silver, gold and platinum at
+ * clock says, clouds, a city, trees and bushes going by slower than the
+ * ground, the bird — a finch of its own — tilting as it climbs and dives; bronze, silver, gold and platinum at
  * ten, twenty, thirty and forty; the best score kept in flappybird.record.
  *
  *   space, up, enter, w     flap — the first one starts the round
