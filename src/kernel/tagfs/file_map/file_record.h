@@ -73,6 +73,7 @@ typedef struct TailSlip TailSlip;
  * zero in a record no map holds. */
 typedef struct NameLink {
     struct NameLink* next;
+    struct NameLink* prev;
     uint64_t         file_id;
     uint32_t         hash;
     bool             linked;

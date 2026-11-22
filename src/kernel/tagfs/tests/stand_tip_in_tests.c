@@ -518,7 +518,7 @@ out:
 // The ring written over the slot that laid a node: its Quire still held
 // ----------------------------------------------------------------------------
 
-#define STAND_TIP_IN_QUIRED   12000u   /* files: a whole Tally of FILES and TAGS past a Tally-Quire of 256 */
+#define STAND_TIP_IN_QUIRED   16000u   /* files: a whole Tally of FILES past a Tally-Quire of 256 */
 
 /* Whether every block of every copy of `p` lies in ground a slot holds. */
 static bool StandTipInPlaceHeld(const TallyPlace* p, const Strip* ground, uint32_t n)
@@ -597,9 +597,16 @@ static TestResult TestStandTipInQuiresHeld(void)
         seq = f.place.ptr.seq > seq ? f.place.ptr.seq : seq;
     q = RibbonCursorNow()->quire_blocks ? RibbonCursorNow()->quire_blocks : 1u;
     for (uint32_t k = 0; k <= g_binder.ring; k++) {
-        ksnprintf(name, sizeof(name), "tipin-quire-tail-%u.txt", k);
-        TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, 0, &fid), 0, "a file more is made at the tail");
-        TEST_ASSERT(TagFSSettle() == OK && BinderRunWhole() == OK, "a Tally laid in over it");
+        bool laid = false;
+        /* A stitch that ends on its Quire's last sector leaves no ribbon for a
+         * Tally to go on from until the next stitch: one more file is then
+         * made, and the Tally asked for again. */
+        for (uint32_t again = 0; again < 2 && !laid; again++) {
+            ksnprintf(name, sizeof(name), "tipin-quire-tail-%u-%u.txt", k, again);
+            TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, 0, &fid), 0, "a file more is made at the tail");
+            laid = TagFSSettle() == OK && BinderRunWhole() == OK;
+        }
+        TEST_ASSERT(laid, "a Tally laid in over it");
     }
     StandTipInNamedAll(&named, seq, q);
     TestEvidence("nodes the first Tally laid that the last names as they lie", named.older);

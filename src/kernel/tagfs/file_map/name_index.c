@@ -50,22 +50,39 @@ static bool KeyLength(const FileRecord* rec, uint32_t which, uint32_t* length)
     return true;
 }
 
-static void LinkIn(NameLink** bucket, uint32_t buckets, NameLink* link)
+/* The link into its chain, after the last link of a file id no greater than
+ * its own: a file made takes the next id, so it comes at the tail. */
+static void LinkIn(NameBucket* bucket, uint32_t buckets, NameLink* link)
 {
-    NameLink** at = &bucket[link->hash & (buckets - 1u)];
-    while (*at && (*at)->file_id < link->file_id)
-        at = &(*at)->next;
-    link->next = *at;
-    *at        = link;
+    NameBucket* chain = &bucket[link->hash & (buckets - 1u)];
+    NameLink*   after = chain->tail;
+    while (after && after->file_id > link->file_id)
+        after = after->prev;
+    link->prev = after;
+    link->next = after ? after->next : chain->head;
+    if (link->next)
+        link->next->prev = link;
+    else
+        chain->tail = link;
+    if (after)
+        after->next = link;
+    else
+        chain->head = link;
 }
 
 static void LinkOut(NameIndex* index, NameLink* link)
 {
-    NameLink** at = &index->bucket[link->hash & (index->buckets - 1u)];
-    while (*at != link)
-        at = &(*at)->next;
-    *at          = link->next;
+    NameBucket* chain = &index->bucket[link->hash & (index->buckets - 1u)];
+    if (link->prev)
+        link->prev->next = link->next;
+    else
+        chain->head = link->next;
+    if (link->next)
+        link->next->prev = link->prev;
+    else
+        chain->tail = link->prev;
     link->next   = NULL;
+    link->prev   = NULL;
     link->linked = false;
     index->links--;
 }
@@ -73,13 +90,19 @@ static void LinkOut(NameIndex* index, NameLink* link)
 /* `now`'s link takes the place of `was`'s: the same file's, the same key. */
 static void LinkReplace(NameIndex* index, NameLink* was, NameLink* now)
 {
-    NameLink** at = &index->bucket[was->hash & (index->buckets - 1u)];
-    while (*at != was)
-        at = &(*at)->next;
-    *now         = *was;
-    *at          = now;
-    was->next    = NULL;
-    was->linked  = false;
+    NameBucket* chain = &index->bucket[was->hash & (index->buckets - 1u)];
+    *now = *was;
+    if (now->prev)
+        now->prev->next = now;
+    else
+        chain->head = now;
+    if (now->next)
+        now->next->prev = now;
+    else
+        chain->tail = now;
+    was->next   = NULL;
+    was->prev   = NULL;
+    was->linked = false;
 }
 
 static void LinkMake(NameIndex* index, FileRecord* rec, uint32_t which, uint64_t fid)
@@ -120,21 +143,21 @@ uint32_t NameIndexRoom(const NameIndex* index, uint32_t more)
     return wanted > index->buckets ? wanted : 0;
 }
 
-NameLink** NameIndexTableMake(uint32_t buckets)
+NameBucket* NameIndexTableMake(uint32_t buckets)
 {
-    NameLink** table = kmalloc(sizeof(NameLink*) * buckets);
+    NameBucket* table = kmalloc(sizeof(NameBucket) * buckets);
     if (table)
-        memset(table, 0, sizeof(NameLink*) * buckets);
+        memset(table, 0, sizeof(NameBucket) * buckets);
     return table;
 }
 
-NameLink** NameIndexAdopt(NameIndex* index, NameLink** table, uint32_t buckets)
+NameBucket* NameIndexAdopt(NameIndex* index, NameBucket* table, uint32_t buckets)
 {
     if (buckets <= index->buckets)
         return table;
-    NameLink** old = index->bucket;
+    NameBucket* old = index->bucket;
     for (uint32_t b = 0; b < index->buckets; b++) {
-        NameLink* link = old[b];
+        NameLink* link = old[b].head;
         while (link) {
             NameLink* next = link->next;
             LinkIn(table, buckets, link);
@@ -148,6 +171,8 @@ NameLink** NameIndexAdopt(NameIndex* index, NameLink** table, uint32_t buckets)
 
 void NameIndexPut(NameIndex* index, uint64_t fid, FileRecord* was, FileRecord* now)
 {
+    if (was == now)
+        return;
     bool before = Indexed(was);
     bool after  = Indexed(now);
     bool same   = before && after && was->name_len == now->name_len &&
@@ -181,7 +206,7 @@ uint32_t NameIndexFind(const NameIndex* index, const char* word, size_t length, 
     uint32_t hash  = NameHash(word, length);
     uint32_t given = 0;
     *next = 0;
-    for (const NameLink* link = index->bucket[hash & (index->buckets - 1u)]; link; link = link->next) {
+    for (const NameLink* link = index->bucket[hash & (index->buckets - 1u)].head; link; link = link->next) {
         if (link->hash != hash || link->file_id < from || !LinkSays(link, word, length))
             continue;
         if (given < room)

@@ -23,7 +23,11 @@
  * A hash table of links that live in the records themselves (NameLink), so
  * that putting a record never allocates: an Ink puts its record under the
  * volume's lock, with nothing in hand to allocate with. Each chain is kept in
- * file id order, which is what makes a page of answers a walk of one chain.
+ * file id order, which is what makes a page of answers a walk of one chain, and
+ * is doubly linked with its tail known: files are not called uniquely — a
+ * volume may hold tens of thousands of one name, all in one chain — so a file
+ * made (the next id, at the tail), a record put again and a file let go cost
+ * the same however long the chain is.
  * The table grows by taking a larger one made with no lock held (NameIndexRoom)
  * and relinking into it; a table that could not grow only has longer chains.
  *
@@ -32,9 +36,14 @@
  */
 
 typedef struct {
-    NameLink** bucket;
-    uint32_t   buckets;          /* a power of two */
-    uint32_t   links;
+    NameLink* head;
+    NameLink* tail;
+} NameBucket;
+
+typedef struct {
+    NameBucket* bucket;
+    uint32_t    buckets;         /* a power of two */
+    uint32_t    links;
 } NameIndex;
 
 /* The first table, made; false for no memory. */
@@ -46,11 +55,11 @@ void       NameIndexClose(NameIndex* index);
 uint32_t   NameIndexRoom(const NameIndex* index, uint32_t more);
 /* A table of `buckets` empty buckets, made with no lock held; NULL for no
  * memory. */
-NameLink** NameIndexTableMake(uint32_t buckets);
+NameBucket* NameIndexTableMake(uint32_t buckets);
 /* The table is taken in place of the one the index has — every link moved
  * into it — when it has more buckets; the table now unused, to be freed with
  * no lock held, comes back (the one given, if it was not taken). */
-NameLink** NameIndexAdopt(NameIndex* index, NameLink** table, uint32_t buckets);
+NameBucket* NameIndexAdopt(NameIndex* index, NameBucket* table, uint32_t buckets);
 
 /* File `fid`'s record `was` (NULL for none) becomes `now` (NULL for none) in
  * the index: the links of `was` taken out, those of `now` put in — a record

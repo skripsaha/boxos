@@ -273,7 +273,6 @@ static TestResult TestStandWarrantBootRunRefusedToBoth(void)
     uint32_t    extents = 0;
     bool        armed   = false, loaded = false;
     Plot        plot;
-    TagSpelling key     = TagSpellingOfKey("kernel");
     TagFSPage   page;
     TagFSState* fs      = tagfs_get_state();
     const char* aside   = StandStepsAsideFor();
@@ -282,7 +281,8 @@ static TestResult TestStandWarrantBootRunRefusedToBoth(void)
         return test_steps_aside(aside);
 
     TEST_ASSERT(fs->boot.kernel_blocks > 0, "the Deed names the blocks the loader reads");
-    TEST_ASSERT_OK(TagFSQueryPage(TagOwnerPerson(), &key, 1, NULL, 0, 1, &kernel, 1, false, &page), "the kernel is asked for");
+    TEST_ASSERT_OK(TagFSNamedPage(TagOwnerPerson(), "kernel", 6, NULL, 0, NULL, 0, 1, &kernel, 1, false, &page),
+                   "the kernel is asked for by its name");
     TEST_ASSERT_EQ(page.delivered, 1, "and found");
     TEST_ASSERT(StandBlockOf(kernel, 0, &block) &&
                 block == fs->boot.kernel_block,
@@ -428,7 +428,8 @@ static TestResult TestStandWarrantDeckReadsTheCabin(void)
         { AUTH_TAG_SYSTEM | AUTH_TAG_UTILITY,  INK_WARRANTED   },
     };
     TestResult verdict = TEST_PASS;
-    uint64_t   file_id = 0;
+    uint64_t   file_id = 0, kernel_id = 0;
+    TagFSPage  page;
     OpContext  ctx;
 
     memset(&ctx, 0, sizeof(ctx));
@@ -451,7 +452,9 @@ static TestResult TestStandWarrantDeckReadsTheCabin(void)
     s_deck_cabin.auth_bits = AUTH_TAG_UTILITY | AUTH_TAG_APP;
     TEST_ASSERT_EQ(StandDeckAsk(STORAGE_OBJ_DELETE, &fid, sizeof(fid), NULL, 0, &ctx),
                    ERR_PERMISSION_DENIED, "the deck's delete for a utility's cabin is refused");
-    TEST_ASSERT(tagfs_has_tag(file_id, tagfs_tag_lookup("stand_warrant_d")), "and the file is still there");
+    TEST_ASSERT_OK(TagFSNamedPage(TagOwnerPerson(), "stand_warrant_d", 15, NULL, 0, NULL, 0, 1, &kernel_id, 1, false, &page),
+                   "the file is asked for by its name");
+    TEST_ASSERT_EQ(kernel_id, file_id, "and it is still there");
     s_deck_cabin.auth_bits = AUTH_TAG_SYSTEM;
     TEST_ASSERT_OK(StandDeckAsk(STORAGE_OBJ_DELETE, &fid, sizeof(fid), NULL, 0, &ctx),
                    "and for a cabin that holds system, taken");
