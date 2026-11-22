@@ -137,7 +137,7 @@ static TestResult TestStandHeadLaidAndMounted(void)
     TEST_ASSERT(StandStitchRemount(), "the volume is mounted afresh, the ribbon replayed");
     TEST_ASSERT(StandHeadIs(small, "a note of mine", 14) && StandHeadIs(other, "another, longer ", 16),
                 "the cards keep what the ribbon laid");
-    TEST_ASSERT_OK(BinderRunWhole(), "a Tally is written, the tails laid in their blocks first");
+    TEST_ASSERT_OK(StandBinderTallies(1u), "a Tally is written, the tails laid in their blocks first");
     TEST_ASSERT(StandHeadIs(small, "a note of mine", 14), "a tail laid in its block changes no byte of the file");
     TEST_ASSERT(StandStitchRemount(), "mounted again, off the Tally");
     TEST_ASSERT(StandHeadIs(small, "a note of mine", 14) && StandHeadIs(other, "another, longer ", 16) &&

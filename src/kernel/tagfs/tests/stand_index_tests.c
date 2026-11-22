@@ -22,7 +22,7 @@
 
 #define STAND_INDEX_FILES     64u
 #define STAND_INDEX_SPREAD    (1u << 20)
-#define STAND_INDEX_PER_FILE  352u     /* what the map may cost a live file: its record (made_by in it), the links of its name and its share of the nodes and the name buckets */
+#define STAND_INDEX_PER_FILE  384u     /* what the map may cost a live file: its record (made_by, the list it shows its tags to and its first bytes in it), the links of its name and its share of the nodes and the name buckets — 353 measured */
 #define STAND_INDEX_PER_MEMBER 64u     /* what a member of a spread tag may cost the index */
 #define STAND_INDEX_MANY      1100u    /* more files than TAGFS_MAX_FILES (1024) held */
 #define STAND_INDEX_PAGE      100u
@@ -83,7 +83,7 @@ static TestResult TestStandIndexMapCostsTheLive(void)
     size_t far_bytes  = FileMapBytes(far);
     TEST_ASSERT_EQ(far_bytes, near_bytes, "ids a million apart cost what ids side by side do");
     TEST_ASSERT(far_bytes <= (size_t)STAND_INDEX_FILES * STAND_INDEX_PER_FILE,
-                "and no more than 320 bytes a live file, where a dense mirror paid for every id");
+                "and no more than STAND_INDEX_PER_FILE bytes a live file, where a dense mirror paid for every id");
 
     TEST_ASSERT_EQ(FileMapFiles(far, 1, s_rows, ARRAY_SIZE(s_rows)), STAND_INDEX_FILES,
                    "the rows are the 64 live files and nothing for the ids between them");
