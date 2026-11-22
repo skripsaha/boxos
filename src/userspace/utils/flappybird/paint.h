@@ -73,7 +73,7 @@ inline gui::TextStyle Words(float Size, Color With, std::uint16_t Weight = 700)
 /* The dark under the game's words, as if cut out of card. */
 inline gui::Shadow Under(float Unit)
 {
-    return gui::Shadow{{0, 2.5f * Unit}, 0, 1.2f * Unit, ink::Outline, false};
+    return gui::Shadow{{0, 1.3f * Unit}, 0, 0.55f * Unit, ink::Outline, false};
 }
 
 }  // namespace flappybird::paint

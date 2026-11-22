@@ -61,6 +61,11 @@ std::optional<std::string> TakeLine(std::string_view Name, std::string_view Valu
     if (Name == "size") return Number(Into.Size, limits::LeastSize, limits::MostSize);
     if (Name == "flow") return Number(Into.Flow, limits::LeastFlow, limits::MostFlow);
     if (Name == "glow") return Number(Into.Glow, limits::LeastGlow, limits::MostGlow);
+    if (Name == "light") {
+        if (Value != "on" && Value != "off") return std::format("light wants on or off, not {}", Value);
+        Into.Light = Value == "on";
+        return std::nullopt;
+    }
     return std::format("a lamp has no {}", Name);
 }
 
@@ -105,8 +110,9 @@ std::string Written(const Composition &Lamp)
 {
     /* The colours are written whatever the palette: a palette's colours may
      * change in a later lamp, and the file says the lamp as it was seen. */
-    return std::format("{}\npalette {}\nwax {}\nrim {}\nglass {}\nblobs {}\nsize {}\nflow {}\nglow {}\n", FirstLine, Lamp.PaletteName(),
-                       Spelled(Lamp.Wax), Spelled(Lamp.Rim), Spelled(Lamp.Glass), Lamp.Blobs, Lamp.Size, Lamp.Flow, Lamp.Glow);
+    return std::format("{}\npalette {}\nwax {}\nrim {}\nglass {}\nblobs {}\nsize {}\nflow {}\nglow {}\nlight {}\n", FirstLine,
+                       Lamp.PaletteName(), Spelled(Lamp.Wax), Spelled(Lamp.Rim), Spelled(Lamp.Glass), Lamp.Blobs, Lamp.Size, Lamp.Flow,
+                       Lamp.Glow, Lamp.Light ? "on" : "off");
 }
 
 bool IsLamp(std::string_view Text)

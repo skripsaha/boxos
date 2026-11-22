@@ -12,7 +12,6 @@
 #include <optional>
 #include <vector>
 
-#include "box/cxx/settings.h"
 #include "painter/core/canvas.h"
 #include "painter/gui/area.h"
 #include "painter/gui/items.h"
@@ -22,17 +21,17 @@
 #include "field.h"
 #include "lamp.h"
 #include "panel.h"
+#include "setup.h"
 #include "shades.h"
-#include "tuning.h"
 
 namespace lavalamp {
 
 class PixelLamp {
 public:
-    PixelLamp(gui::Area Screen, painter::tui::Keyboard Keys, const Composition &Start);
+    PixelLamp(gui::Area Screen, painter::tui::Keyboard Keys, Setup &With);
 
-    /* Until the person leaves; the lamp as it was then. */
-    Composition Run();
+    /* Until the person leaves — false — or turns tui on: true. */
+    bool Run();
 
 private:
     /* The canvas, the grid and the tables for the screen as it is now. */
@@ -47,15 +46,15 @@ private:
     std::optional<painter::core::Rect> Mark();
     void ColourPoints(painter::core::Rect Cells);
     bool OnEvent(const gui::Event &Told);
+    /* What a key or the settings did: false to stop. */
+    bool Take(Heard What);
 
     gui::Area              Screen;
     painter::tui::Keyboard Keys;
-    box::settings::watch   Watch;
-    Composition            Current;
+    Setup                 &Set;
     Lamp                   Wax;
     Field                  Grid;
     Shades                 Colours;
-    Tuning                 Tuned;
     gui::Group             Under;            // the canvas, beneath the panel
     gui::Canvas            Board;
     std::optional<Panel>   Pane;
@@ -63,12 +62,13 @@ private:
     float                  SlopeBy = 1;      // a level's fall a pixel, to its slope
     std::vector<Rgb>       LiquidRow, Points;   // the liquid's colour a row; the wax's at each point
     std::vector<float>     Edges;               // how much the level changes across a pixel, at each point
-    std::vector<float>     BulbRow, RoundCol, BulbCol, SheenCol;
+    std::vector<float>     BulbRow, RoundCol, BulbCol;
     std::vector<std::uint8_t> Lit, WasLit, LongLit;   // the cells the wax reached now, a frame and two frames before
     int                    Whole  = 2;       // frames still to draw every pixel of: one for each page
     bool                   Hidden = false;
     std::uint64_t          LastUs = 0;
     std::uint64_t          Seen   = 0;       // the last step the glass showed
+    bool                   ToCells = false;  // stopped for tui turned on
 };
 
 }  // namespace lavalamp

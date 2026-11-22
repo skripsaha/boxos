@@ -1,6 +1,6 @@
-/* skyline.cpp — the clouds, the city, the bushes and the stars. See skyline.h.
- * Each is drawn from dice that are the same every game, so the city is the
- * player's city: the same houses each time it goes by. */
+/* skyline.cpp — the clouds, the city, the trees, the bushes and the stars.
+ * See skyline.h. Each is drawn from dice that are the same every game, so the
+ * city is the player's city: the same houses each time it goes by. */
 
 #include "skyline.h"
 
@@ -28,25 +28,105 @@ private:
     std::uint32_t State;
 };
 
-/* Rounds along the period, each Step apart give or take, their tops about
- * Top; the last one rounds off into the first of the next period. */
-void Puffs(Pattern &Into, Dice &Roll, float Top, float Step, float Least, float Most)
+/* A heaped cloud standing on Base about X: one big round, and on either side
+ * two smaller ones, lower, each a size down from the one before. */
+void Head(Pattern &Into, Dice &Roll, float X, float Base, float Big)
 {
-    for (float X = 0; X < Period; X += Roll.Between(Step * 0.7f, Step * 1.3f)) {
-        const float R = Roll.Between(Least, Most);
-        Into.Rounds.push_back(Round{X, Top + R + Roll.Between(-6, 6), R});
+    const float R = Roll.Between(Big * 0.85f, Big * 1.15f);
+    Into.Rounds.push_back(Round{X, Base - R * 0.55f, R});
+    for (const float Side : {-1.0f, 1.0f}) {
+        float At = X, Size = R;
+        for (int Puff = 0; Puff < 2; Puff++) {
+            const float Next = Size * Roll.Between(0.55f, 0.72f);
+            At += Side * (Size + Next) * Roll.Between(0.48f, 0.6f);
+            Into.Rounds.push_back(Round{At, Base - Next * 0.45f, Next});
+            Size = Next;
+        }
     }
-    Into.Rounds.push_back(Round{Period, Into.Rounds.front().Y, Into.Rounds.front().R});
+}
+
+/* A bank of heads along the period, Apart give or take, low rounds between
+ * them, and under them all a band down to the ground. */
+Pattern Bank(std::uint32_t Seed, float Base, float Apart, float Big)
+{
+    Pattern Made;
+    Dice    Roll(Seed);
+    for (float X = Roll.Between(0, Apart / 4); X < Period; X += Roll.Between(Apart * 0.8f, Apart * 1.2f)) {
+        Head(Made, Roll, X, Base, Big);
+        const float Low = Roll.Between(Big * 0.36f, Big * 0.5f);
+        Made.Rounds.push_back(Round{X + Apart / 2, Base - Low * 0.2f, Low});
+    }
+    Made.Boxes.push_back(Box{0, Base - 2, Period, field::Ground - Base + 2});
+    return Made;
+}
+
+/* A round tree: a crown of four rounds, the biggest on top, on a trunk. */
+void Leafy(Woods &Into, Dice &Roll, float X)
+{
+    const float Top = Roll.Between(318, 336), R = Roll.Between(11, 14);
+    Into.Crowns.Rounds.push_back(Round{X, Top + R, R});
+    Into.Crowns.Rounds.push_back(Round{X - 0.78f * R, Top + 1.6f * R, 0.74f * R});
+    Into.Crowns.Rounds.push_back(Round{X + 0.8f * R, Top + 1.55f * R, 0.72f * R});
+    Into.Crowns.Rounds.push_back(Round{X - 0.08f * R, Top + 2.0f * R, 0.8f * R});
+    const float From = Top + 2.2f * R;
+    Into.Trunks.Boxes.push_back(Box{X - 1.8f, From, 3.6f, field::Ground - From});
+}
+
+/* A fir: three tiers, each narrower and higher than the one under it. */
+void Fir(Woods &Into, Dice &Roll, float X)
+{
+    const float Base = Roll.Between(372, 380), Tall = Roll.Between(50, 64), Wide = Roll.Between(22, 28);
+    for (int Tier = 0; Tier < 3; Tier++) {
+        const float Up = static_cast<float>(Tier);
+        Into.Crowns.Spires.push_back(Spire{X, Base - Up * Tall * 0.26f, Wide * (1 - 0.24f * Up), Tall * (0.46f - 0.06f * Up), false});
+    }
+    Into.Trunks.Boxes.push_back(Box{X - 1.5f, Base - 3, 3, field::Ground - Base + 3});
+}
+
+void Lay(painter::core::Path &Into, const Pattern &Once, float Unit, float From)
+{
+    for (const Round &One : Once.Rounds) Into.AddCircle({(From + One.X) * Unit, One.Y * Unit}, One.R * Unit);
+    for (const Box &One : Once.Boxes) Into.AddRect({(From + One.X) * Unit, One.Y * Unit, One.Wide * Unit, One.Tall * Unit});
+    /* Wound as the boxes are, so the shapes of one path add up. */
+    for (const Spire &One : Once.Spires) {
+        const float Middle = (From + One.X) * Unit, Half = One.Wide / 2 * Unit, In = One.Wide * 0.14f * Unit;
+        const float Base = One.Base * Unit, Top = (One.Base - One.Tall) * Unit, Bend = (One.Base - One.Tall * 0.28f) * Unit;
+        Into.MoveTo({Middle - Half, Base}).QuadTo({Middle - In, Bend}, {Middle, Top});
+        if (One.Lit) Into.LineTo({Middle + One.Wide * 0.04f * Unit, Base});
+        else Into.QuadTo({Middle + In, Bend}, {Middle + Half, Base});
+        Into.Close();
+    }
 }
 
 }  // namespace
 
+Pattern FarClouds()
+{
+    return Bank(0xFA2C10u, 322, 60, 24);
+}
+
 Pattern Clouds()
 {
+    return Bank(0x5EEDC10Du, 344, 84, 26);
+}
+
+/* Two small clouds a period, high in the sky: a flat foot of little rounds
+ * and a head on it. */
+Pattern Floating()
+{
     Pattern Made;
-    Dice    Roll(0x5EEDC10Du);
-    Puffs(Made, Roll, 300, 34, 18, 30);
-    Made.Boxes.push_back(Box{0, 336, Period, field::Ground - 336});
+    Dice    Roll(0xF10A7u);
+    for (int One = 0; One < 2; One++) {
+        const float X = static_cast<float>(One) * Period / 2 + Roll.Between(10, 90);
+        const float Base = Roll.Between(110, 230), Wide = Roll.Between(36, 60);
+        for (float At = X; At <= X + Wide; At += 6) Made.Rounds.push_back(Round{At, Base - 6.5f, 6.5f});
+        const float Middle = X + Wide * Roll.Between(0.35f, 0.6f), R = Roll.Between(11, 15);
+        Made.Rounds.push_back(Round{Middle, Base - R * 0.9f, R});
+        for (const float Side : {-1.0f, 1.0f}) {
+            const float Small = R * Roll.Between(0.6f, 0.72f);
+            Made.Rounds.push_back(Round{Middle + Side * R * 0.95f, Base - Small * 0.8f, Small});
+        }
+    }
     return Made;
 }
 
@@ -74,12 +154,48 @@ Pattern Windows(const Pattern &City)
     return Made;
 }
 
+/* Four trees a period, each in its own quarter of it, two round to every
+ * fir or so. */
+Woods Trees()
+{
+    Woods Made;
+    Dice  Roll(0x7EE5u);
+    for (int Quarter = 0; Quarter < 4; Quarter++) {
+        const float X = (static_cast<float>(Quarter) + Roll.Between(0.25f, 0.75f)) * Period / 4;
+        if (Roll.Between(0, 1) < 0.45f) Fir(Made, Roll, X);
+        else Leafy(Made, Roll, X);
+    }
+    return Made;
+}
+
+/* Bushes shoulder to shoulder, each four rounds heaped, their feet in a band
+ * down to the ground. */
 Pattern Bushes()
 {
     Pattern Made;
     Dice    Roll(0xB005u);
-    Puffs(Made, Roll, 368, 20, 11, 17);
-    Made.Boxes.push_back(Box{0, 388, Period, field::Ground - 388});
+    for (float X = 0; X < Period; X += Roll.Between(22, 34)) {
+        const float Top = Roll.Between(364, 374), R = Roll.Between(8, 11);
+        Made.Rounds.push_back(Round{X, Top + R, R});
+        Made.Rounds.push_back(Round{X - 0.9f * R, Top + 1.5f * R, 0.75f * R});
+        Made.Rounds.push_back(Round{X + 0.95f * R, Top + 1.45f * R, 0.72f * R});
+        Made.Rounds.push_back(Round{X + 0.1f * R, Top + 1.9f * R, 0.85f * R});
+    }
+    Made.Boxes.push_back(Box{0, 384, Period, field::Ground - 384});
+    return Made;
+}
+
+/* Up and to the left inside each round by as much as stays inside it. A lit
+ * half has no lights of its own. */
+Pattern Lights(const Pattern &Of, float Share)
+{
+    Pattern Made;
+    for (const Round &One : Of.Rounds) {
+        const float By = (1 - Share) * 0.9f * One.R;
+        Made.Rounds.push_back(Round{One.X - 0.6f * By, One.Y - 0.8f * By, Share * One.R});
+    }
+    for (const Spire &One : Of.Spires)
+        if (!One.Lit) Made.Spires.push_back(Spire{One.X, One.Base, One.Wide, One.Tall, true});
     return Made;
 }
 
@@ -92,14 +208,17 @@ Pattern Stars(float Wide, float Low)
     return Made;
 }
 
+painter::core::Path Placed(const Pattern &Once, float Unit)
+{
+    painter::core::Path Made;
+    Lay(Made, Once, Unit, 0);
+    return Made;
+}
+
 painter::core::Path Tiled(const Pattern &Once, float Unit, int Count)
 {
     painter::core::Path Made;
-    for (int Turn = 0; Turn < Count; Turn++) {
-        const float From = static_cast<float>(Turn) * Period;
-        for (const Round &One : Once.Rounds) Made.AddCircle({(From + One.X) * Unit, One.Y * Unit}, One.R * Unit);
-        for (const Box &One : Once.Boxes) Made.AddRect({(From + One.X) * Unit, One.Y * Unit, One.Wide * Unit, One.Tall * Unit});
-    }
+    for (int Turn = -1; Turn < Count; Turn++) Lay(Made, Once, Unit, static_cast<float>(Turn) * Period);
     return Made;
 }
 

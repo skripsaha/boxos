@@ -54,12 +54,13 @@ Light LightOf(float Level, float SlopeX, float SlopeY)
 
 Shades::Shades(const Composition &Made)
     : Hot(Of(Made.Wax)), Cool(Of(Made.Rim)), Bright(Mix(Of(Made.Wax), White, 0.2f)), Deep(Of(Made.Glass)),
-      Lamp(Mix(Of(Made.Wax), White, 0.3f)), Glow(static_cast<float>(Made.Glow) / 100.0f)
+      Lamp(Mix(Of(Made.Wax), White, 0.3f)), Glow(static_cast<float>(Made.Glow) / 100.0f), Lit(Made.Light)
 {
 }
 
 Rgb Shades::Liquid(float Y) const
 {
+    if (!Lit) return Deep;
     const Rgb Top    = Times(Deep, 0.45f);
     const Rgb Warmed = Times(Mix(Deep, Hot, 0.3f), 1.25f);
     const Rgb Middle = Mix(Top, Deep, Smooth(0.0f, 0.55f, Y));
@@ -69,11 +70,13 @@ Rgb Shades::Liquid(float Y) const
 
 float Shades::Round(float U) const
 {
+    if (!Lit) return 1;
     return 0.62f + 0.38f * std::sqrt(std::max(0.0f, std::sin(3.14159265f * std::clamp(U, 0.0f, 1.0f))));
 }
 
 float Shades::BulbAcross(float U) const
 {
+    if (!Lit) return 0;
     return 0.5f * Bell(U, 0.5f, 0.32f);
 }
 
@@ -82,14 +85,10 @@ float Shades::BulbUp(float Y) const
     return std::exp(-(1.0f - Y) / 0.16f);
 }
 
-float Shades::Sheen(float U) const
-{
-    return 0.045f * Bell(U, 0.13f, 0.011f) + 0.016f * Bell(U, 0.185f, 0.04f) + 0.025f * Bell(U, 0.885f, 0.006f);
-}
-
 Rgb Shades::Wax(float Heat, float Level, const Light &Lit, float Y) const
 {
     Rgb Body = Mix(Cool, Hot, Smooth(0.08f, 0.92f, Heat));
+    if (!this->Lit) return Body;
     Body     = Mix(Body, Bright, 0.35f * Smooth(1.3f, 3.4f, Level));
     Body     = Times(Body, (1.0f + 0.12f * Smooth(0.55f, 1.0f, Y)) * Lit.Lit);
     return Plus(Plus(Body, Times(Bright, 0.35f * Lit.Under)), Times(White, 0.65f * Lit.Shine));
