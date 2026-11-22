@@ -2571,8 +2571,10 @@ void tagfs_metadata_free(TagFSMetadata *meta)
     if (meta->filename) { kfree(meta->filename); meta->filename = NULL; }
     if (meta->tag_ids)  { kfree(meta->tag_ids);  meta->tag_ids  = NULL; }
     if (meta->extents)  { kfree(meta->extents);  meta->extents  = NULL; }
+    if (meta->shown_to) { kfree(meta->shown_to); meta->shown_to = NULL; }
     meta->tag_count    = 0;
     meta->extent_count = 0;
+    meta->shown_count  = 0;
 }
 
 TagFSState *tagfs_get_state(void)

@@ -7,23 +7,30 @@
  * record that names them.
  */
 
-/* A header of the record's own, its tags and its name copied in after it,
- * naming no runs yet: NULL for no memory. */
-static FileRecord* RecordHeader(const char* name, const uint32_t* tags, uint32_t tag_count)
+/* A header of the record's own, the programs it shows its tags to, its tags
+ * and its name copied in after it, naming no runs yet: NULL for no memory. */
+static FileRecord* RecordHeader(const char* name, const uint32_t* tags, uint32_t tag_count,
+                                const uint64_t* shown, uint32_t shown_count)
 {
     uint32_t    name_len = name ? (uint32_t)strlen(name) : 0;
-    size_t      bytes    = sizeof(FileRecord) + (size_t)tag_count * sizeof(uint32_t) + name_len + 1u;
+    size_t      bytes    = sizeof(FileRecord) + (size_t)shown_count * sizeof(uint64_t) +
+                           (size_t)tag_count * sizeof(uint32_t) + name_len + 1u;
     FileRecord* rec      = kmalloc(bytes);
     if (!rec)
         return NULL;
 
     uint8_t* at = (uint8_t*)(rec + 1);
     memset(rec, 0, sizeof(*rec));
-    rec->refs      = 1;
-    rec->bytes     = bytes;
-    rec->tag_count = tag_count;
-    rec->name_len  = name_len;
-    rec->tags      = (const uint32_t*)at;
+    rec->refs        = 1;
+    rec->bytes       = bytes;
+    rec->tag_count   = tag_count;
+    rec->name_len    = name_len;
+    rec->shown_count = shown_count;
+    rec->shown_to    = shown_count ? (const uint64_t*)at : NULL;
+    if (shown_count)
+        memcpy(at, shown, (size_t)shown_count * sizeof(uint64_t));
+    at        += (size_t)shown_count * sizeof(uint64_t);
+    rec->tags  = (const uint32_t*)at;
     if (tag_count)
         memcpy(at, tags, (size_t)tag_count * sizeof(uint32_t));
     at += (size_t)tag_count * sizeof(uint32_t);
@@ -43,11 +50,13 @@ static void RecordRuns(FileRecord* rec, const Tract* tract)
     rec->bytes      += tract ? tract->bytes : 0;
 }
 
-/* `flags` with TAGFS_FILE_MADE_BY as `made_by` says: the bit and the field are
- * one fact, so every record is made to hold them alike. */
-static uint32_t FlagsMadeBy(uint32_t flags, uint64_t made_by)
+/* `flags` with TAGFS_FILE_MADE_BY as `made_by` says and TAGFS_FILE_SHOWN as
+ * `shown_count` does: each bit and its field are one fact, so every record is
+ * made to hold them alike. */
+static uint32_t FlagsOfFields(uint32_t flags, uint64_t made_by, uint32_t shown_count)
 {
-    return made_by ? flags | TAGFS_FILE_MADE_BY : flags & ~(uint32_t)TAGFS_FILE_MADE_BY;
+    flags = made_by ? flags | TAGFS_FILE_MADE_BY : flags & ~(uint32_t)TAGFS_FILE_MADE_BY;
+    return shown_count ? flags | TAGFS_FILE_SHOWN : flags & ~(uint32_t)TAGFS_FILE_SHOWN;
 }
 
 /* The record of `meta` over `tract`, built by `rc` — a reference the record
@@ -74,14 +83,14 @@ static FileRecord* RecordOf(const TagFSMetadata* meta, const Tract* tract, error
     if (rc != OK)
         return NULL;
 
-    FileRecord* rec = RecordHeader(meta->filename, meta->tag_ids,
-                                   meta->tag_ids ? meta->tag_count : 0);
+    FileRecord* rec = RecordHeader(meta->filename, meta->tag_ids, meta->tag_ids ? meta->tag_count : 0,
+                                   meta->shown_to, meta->shown_to ? meta->shown_count : 0);
     if (!rec) {
         TractLetGo(tract);
         return NULL;
     }
     rec->file_id       = meta->file_id;
-    rec->flags         = FlagsMadeBy(meta->flags, meta->made_by);
+    rec->flags         = FlagsOfFields(meta->flags, meta->made_by, rec->shown_count);
     rec->size          = meta->size;
     rec->created_time  = meta->created_time;
     rec->modified_time = meta->modified_time;
@@ -107,13 +116,14 @@ FileRecord* FileRecordBuildCut(const TagFSMetadata* meta, const uint32_t* cut, u
 }
 
 FileRecord* FileRecordRelabel(const FileRecord* old, const char* name, const uint32_t* tags,
-                              uint32_t tag_count, uint32_t flags, uint64_t keep_until)
+                              uint32_t tag_count, const uint64_t* shown, uint32_t shown_count,
+                              uint32_t flags, uint64_t keep_until)
 {
-    FileRecord* rec = RecordHeader(name, tags, tag_count);
+    FileRecord* rec = RecordHeader(name, tags, tag_count, shown, shown_count);
     if (!rec)
         return NULL;
     rec->file_id       = old->file_id;
-    rec->flags         = FlagsMadeBy(flags, old->made_by);
+    rec->flags         = FlagsOfFields(flags, old->made_by, shown_count);
     rec->size          = old->size;
     rec->created_time  = old->created_time;
     rec->modified_time = old->modified_time;
@@ -273,7 +283,7 @@ error_t FileRecordSplice(const FileRecord* old, const BookSplice* sp, uint64_t c
     error_t rc = SplicesInOrder(old, sp, count);
     if (rc == OK)
         rc = SplicesApplied(old, sp, count, freed ? &took : NULL, &gave, &root);
-    if (rc == OK && !(rec = RecordHeader(old->name, old->tags, old->tag_count)))
+    if (rc == OK && !(rec = RecordHeader(old->name, old->tags, old->tag_count, old->shown_to, old->shown_count)))
         rc = ERR_NO_MEMORY;
     if (rc == OK && freed)
         rc = GroundLess(&took, &gave, freed, nfreed);
@@ -469,6 +479,13 @@ int FileRecordCopyOut(const FileRecord* rec, TagFSMetadata* out)
     out->keep_until    = rec->keep_until;
     out->made_by       = rec->made_by;
 
+    if (rec->shown_count) {
+        out->shown_to = kmalloc(sizeof(uint64_t) * rec->shown_count);
+        if (!out->shown_to)
+            goto refused;
+        memcpy(out->shown_to, rec->shown_to, sizeof(uint64_t) * rec->shown_count);
+        out->shown_count = rec->shown_count;
+    }
     if (rec->tag_count) {
         out->tag_ids = kmalloc(sizeof(uint32_t) * rec->tag_count);
         if (!out->tag_ids)
@@ -483,6 +500,7 @@ int FileRecordCopyOut(const FileRecord* rec, TagFSMetadata* out)
     return 0;
 
 refused:
+    kfree(out->shown_to);
     kfree(out->tag_ids);
     memset(out, 0, sizeof(*out));
     return -1;

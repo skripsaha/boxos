@@ -391,7 +391,9 @@ static bool InkFieldsTags(const FileRecord* cur, uint32_t add, const uint32_t* d
     f->tags = kmalloc(sizeof(uint32_t) * (2u * cur->tag_count + 2u));
     if (!f->tags)
         return false;
-    f->dropped = f->tags + cur->tag_count + 1u;
+    f->dropped     = f->tags + cur->tag_count + 1u;
+    f->shown       = cur->shown_to;
+    f->shown_count = cur->shown_count;
 
     bool worn = false;
     for (uint32_t i = 0; i < cur->tag_count; i++) {

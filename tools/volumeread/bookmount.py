@@ -18,7 +18,7 @@ from . import bookread, dog_ear, ondisk, stitch, stitch_ribbon, tally
 from .bookread import Short
 from .ondisk import BLOCK, RunsNormal
 from .stitch import (BORN, COINED, FROZEN, LABELED, QUITCLAIM, SHAPED, THAWED, UNDONE, USE_CONTEXT,
-                     DATA_FLUSHED, KIND_NAMES, LABEL_FLAGS, LABEL_KEEP, LABEL_NAME, LABEL_TAGS)
+                     DATA_FLUSHED, KIND_NAMES, LABEL_FLAGS, LABEL_KEEP, LABEL_NAME, LABEL_SHOWN, LABEL_TAGS)
 from .tally import FileState, Run
 
 
@@ -715,7 +715,7 @@ class BookMount:
                               % fid)
             self.born.add(fid)
             fs = FileState(fid, seq, d["flags"], d["size"], d["created_ns"], d["modified_ns"], d["name"],
-                           d["tags"], d["runs"], made_by=d["made_by"])
+                           d["tags"], d["runs"], made_by=d["made_by"], shown=d["shown"])
             self._Holds(fs, tags, d["tags"])
         else:
             old = files.get(fid)
@@ -779,6 +779,9 @@ class BookMount:
         if d["what"] & LABEL_KEEP:
             fs.keep_ns = d["keep"]
             fs.flags = fs.flags | ondisk.FILE_DELETED if d["keep"] else fs.flags & ~ondisk.FILE_DELETED
+        if d["what"] & LABEL_SHOWN:
+            fs.shown = list(d["shown"])
+            fs.flags = fs.flags | ondisk.FILE_SHOWN if d["shown"] else fs.flags & ~ondisk.FILE_SHOWN
         if d["what"] & LABEL_TAGS:
             worn = set(fs.tags)
             if any(t in worn for t in d["add"]) or any(t not in worn for t in d["drop"]):
