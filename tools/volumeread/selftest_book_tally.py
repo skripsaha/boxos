@@ -9,7 +9,7 @@ from . import binder, bookread, ondisk, stitch, stitch_pen, tally
 from .bookground import BookGround
 from .medium import Unreadable
 from .ondisk import BLOCK, SECTORS_PER_BLOCK, RunsIntersect, RunsNormal
-from .selftest_book import LANDING_ROOM, PADDING, Born, Case, Found, FrameDeed, Glass, Label
+from .selftest_book import LANDING_ROOM, PADDING, Case, Found, FrameDeed, Glass, Label
 
 
 def Pristine(bt):
@@ -63,10 +63,11 @@ def Circles(bt):
         seq = pen.next_seq
         first = pen.Sew([
             stitch.Coined(bt.tag, b"circle", b"value"), stitch.UseContext(b"tag:a,tag:b"),
-            Born(bt.F, bt.fid, d[:1], b"circle"),
+            bt.Born(bt.F, bt.fid, d[:1], b"circle"),
             stitch.Shaped(fid=S.fid, base=seq - S.gen, size=n * BLOCK + 1, mtime_ns=7,
                           splices=[(0, 1, [stitch.Data(bt.F + 1, 1)]), (n - 1, 0, [stitch.Hole(1)])],
                           digests=d[1:], slip=(0, b"\x01")),
+            stitch.Labeled(fid=S.fid, base=0, head=bt.Block(bt.F + 1)[:ondisk.HEAD_MOST]),
             stitch.Labeled(fid=L.fid, base=seq - L.gen, name=b"renamed", flags=(ondisk.FILE_LAID_BIT, 0),
                            add=[bt.tag], drop=list(L.tags[:1])),
             stitch.Quitclaim(fid=gone, base=seq - 1)], flags=stitch.DATA_FLUSHED)
@@ -139,9 +140,10 @@ def Padded(bt):
         content = tally.Content.Copy(bt.content)
         for i in range(PADDING):
             fid = bt.maxfid + 1 + i
-            content.files[fid] = tally.FileState(fid, 1, ondisk.FILE_ACTIVE, BLOCK, 1, 1,
+            content.files[fid] = tally.FileState(fid, 1, ondisk.FILE_ACTIVE | ondisk.FILE_HEAD, BLOCK, 1, 1,
                                                  b"pad-%03u-" % i + b"p" * (first if i == 0 else 40), [],
-                                                 [tally.Run(False, bt.F + i, 1, 1)])
+                                                 [tally.Run(False, bt.F + i, 1, 1)],
+                                                 head=bt.Pattern(i)[:ondisk.HEAD_MOST])
             content.digests[bt.F + i] = bookread.Integrity(bt.Pattern(i), bt.lanes)
         content.next_fid = bt.maxfid + 1 + PADDING
         plan = binder.Bind(content, bt.ground, a=bt.plan.a)
@@ -188,8 +190,8 @@ def RangeCases(bt):
         RotFiles(o)
         pen = bt.Pen(o)
         pen.Sew([stitch.Labeled(fid=whole[0], base=pen.next_seq - 1, name=b"renamed"),
-                 stitch.Born(fid=content.next_fid, flags=ondisk.FILE_ACTIVE, size=BLOCK, created_ns=1,
-                             modified_ns=1, name=b"anew", tags=(), runs=[stitch.Hole(1)], digests=[])],
+                 bt.Headed(stitch.Born(fid=content.next_fid, flags=ondisk.FILE_ACTIVE, size=BLOCK, created_ns=1,
+                                       modified_ns=1, name=b"anew", tags=(), runs=[stitch.Hole(1)], digests=[]))],
                 flags=stitch.DATA_FLUSHED)
 
     dig = bt.Node(tally.DIGESTS)
@@ -520,8 +522,13 @@ def ElementCases(bt):
     run = S.runs[0]
 
     def Parcel(o, runs, key=(S.fid, 1)):
-        bt.Reitem(o, sleaf, lambda items: [(key, tally.ParcelEncode(runs, bt.plan.seq))
-                                           if k == (S.fid, 1) else (k, b) for k, b in items])
+        """S's Parcel laid anew as `runs`, its header's first bytes those its first run now names — as a
+        kernel's record of the runs would hold them."""
+        named = S.Copy()
+        named.head = (bytes(BLOCK) if runs[0].hole else bt.Block(runs[0].start))[:len(S.head)]
+        bt.Reitem(o, sleaf, lambda items: [(key, tally.ParcelEncode(runs, bt.plan.seq)) if k == (S.fid, 1) else
+                                           (k, tally.FileHeadEncode(named)) if k == (S.fid, 0) else (k, b)
+                                           for k, b in items])
 
     def Longer(o):
         bt.Reitem(o, sleaf, lambda items: [(k, b + b"\0") if k == (S.fid, 0) else (k, b) for k, b in items])

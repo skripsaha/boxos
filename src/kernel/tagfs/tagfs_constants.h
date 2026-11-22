@@ -100,6 +100,15 @@
  * Tally's header and in the ribbon's Born, and what the ribbon's Labeled
  * SHOWN leaves (volume_tally.h, volume_ribbon.h). */
 #define TAGFS_FILE_SHOWN            (1 << 7)
+/* The file holds a byte, and its record keeps its first ones (FileRecord.head,
+ * TAGFS_HEAD_MOST at the most): what a file is is told by them, by whoever
+ * knows what they mean — the volume keeps them exact and knows no format. Bit
+ * 8 — put on, taken off and its bytes changed by the Ink of every change of
+ * what the file holds, never by a flag a caller names, and never a tag. The
+ * bit is what puts the bytes after the list in the Tally's header and in the
+ * ribbon's Born, and what the ribbon's Labeled HEAD leaves. */
+#define TAGFS_FILE_HEAD             (1 << 8)
+#define TAGFS_HEAD_MOST             16u
 
 // Handle flags
 #define TAGFS_HANDLE_READ           (1 << 0)

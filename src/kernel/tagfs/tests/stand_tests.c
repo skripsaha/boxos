@@ -151,6 +151,7 @@ bool StandBlockInUse(uint64_t block)
 /* Room for the widest params a program lays: a write's, a ferry's waybill after it. */
 static uint8_t s_deck_op[sizeof(ManifestOp) + 28] __attribute__((aligned(8)));
 static Crate   s_deck_crate;
+static Crate   s_deck_crates[2];
 
 int StandDeckAsk(uint16_t opcode, const void* params, uint16_t param_size, const void* in,
                  uint64_t in_size, const OpContext* ctx)
@@ -171,6 +172,34 @@ int StandDeckAsk(uint16_t opcode, const void* params, uint16_t param_size, const
         op->in_crate = 0;
     }
     return reg->handler(op, &s_deck_crate, in ? 1 : 0, ctx);
+}
+
+int StandDeckAnswer(uint16_t opcode, const void* params, uint16_t param_size, const void* in, uint64_t in_size,
+                    void* out, uint64_t out_room, uint64_t* out_size, const OpContext* ctx)
+{
+    const OpRegistration* reg = OpRegistryLookup(OP_KIND(DECK_STORAGE, opcode));
+    ManifestOp*           op  = (ManifestOp*)s_deck_op;
+    uint16_t              n   = 0;
+    *out_size = 0;
+    if (!reg || param_size > sizeof(s_deck_op) - sizeof(ManifestOp))
+        return ERR_NOT_INITIALIZED;
+    memset(s_deck_op, 0, sizeof(s_deck_op));
+    op->op_kind    = OP_KIND(DECK_STORAGE, opcode);
+    op->param_size = param_size;
+    op->in_crate   = CRATE_INDEX_NONE;
+    op->out_crate  = CRATE_INDEX_NONE;
+    if (param_size)
+        memcpy(op->params, params, param_size);
+    if (in) {
+        s_deck_crates[n] = (Crate){ .magic = CRATE_MAGIC, .addr = (uint64_t)(uintptr_t)in,
+                                    .size = in_size, .capacity = in_size };
+        op->in_crate = (uint8_t)n++;
+    }
+    s_deck_crates[n] = (Crate){ .magic = CRATE_MAGIC, .addr = (uint64_t)(uintptr_t)out, .capacity = out_room };
+    op->out_crate    = (uint8_t)n++;
+    int rc           = reg->handler(op, s_deck_crates, n, ctx);
+    *out_size        = s_deck_crates[op->out_crate].size;
+    return rc;
 }
 
 // ----------------------------------------------------------------------------

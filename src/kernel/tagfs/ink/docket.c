@@ -292,14 +292,24 @@ static uint64_t JotShownChangeMost(const FileRecord* was, const FileRecord* now)
     return now->shown_count ? JotShownMost(now) : was->shown_count ? JOT_VARINT_MOST : 0u;
 }
 
+/* Whether `was` and `now` keep the same first bytes. */
+static bool JotHeadSame(const FileRecord* was, const FileRecord* now)
+{
+    return was->head_len == now->head_len && memcmp(was->head, now->head, now->head_len) == 0;
+}
+
+/* The first bytes of a record as a Born or a Labeled HEAD lays them, at the
+ * most: their count and them. */
+#define JOT_HEAD_MOST (1u + TAGFS_HEAD_MOST)
+
 /* The body of a Born of `now` at the most: its fields, its runs, a digest a
  * block of them, the empty Slip, the program that made it when a program did,
- * and the programs it shows its tags to. */
+ * the programs it shows its tags to, and its first bytes. */
 static uint64_t JotBornMost(const FileRecord* now)
 {
     return 8u * JOT_VARINT_MOST + now->name_len + JOT_ID_MOST * (uint64_t)now->tag_count +
            JOT_RUN_MOST * now->strip_count + 8u * now->blocks + 2u + (now->made_by ? JOT_VARINT_MOST : 0u) +
-           JotShownMost(now);
+           JotShownMost(now) + (now->head_len ? JOT_HEAD_MOST : 0u);
 }
 
 /* The body of the record a change of `kind` from `was` to `now` becomes, at
@@ -312,7 +322,7 @@ static uint64_t JotBodyMostOf(JotKind kind, const FileRecord* was, const FileRec
     case JOT_LABELED:
     case JOT_SHAPED:
         return 7u * JOT_VARINT_MOST + now->name_len + JOT_ID_MOST * ((uint64_t)now->tag_count + was->tag_count) +
-               JotShownChangeMost(was, now);
+               JotShownChangeMost(was, now) + (JotHeadSame(was, now) ? 0u : JOT_HEAD_MOST);
     case JOT_QUITCLAIM:
         return 2u * JOT_VARINT_MOST;
     default:
@@ -530,7 +540,8 @@ static uint32_t JotBornPut(const Jot* j, uint8_t* body, uint32_t* scratch, uint8
         .ntags = n, .tags = ids, .tags_bytes = TallyIdsPut(ids, scratch, n), .nruns = f->strip_count,
         .runs = a->runs, .runs_bytes = a->runs_bytes, .ndigests = a->ndigests, .digests = a->digests,
         .slip = JotSlipPut(j, a), .made_by = f->made_by, .nshown = f->shown_count, .shown = a->shown,
-        .shown_bytes = TallyFidsPut(a->shown, f->shown_to, f->shown_count),
+        .shown_bytes = TallyFidsPut(a->shown, f->shown_to, f->shown_count), .head_len = f->head_len,
+        .head = f->head,
     };
     return RibbonBornBodyPut(body, &b);
 }
@@ -569,9 +580,10 @@ static bool JotShownSame(const FileRecord* was, const FileRecord* now)
 
 /* A Labeled of what differs between `was` and `now` — the name, the flags set
  * and cleared (never the deleted bit: the term says that, KEEP; nor the shown
- * one: the list says that, SHOWN), the tags put on and taken off, the time
- * the file is kept deleted until, the programs it shows its tags to — over
- * the file at `base`, or 0 when nothing does. `shown` is room for that list. */
+ * one: the list says that, SHOWN; nor the head one: the bytes say that,
+ * HEAD), the tags put on and taken off, the time the file is kept deleted
+ * until, the programs it shows its tags to, its first bytes — over the file
+ * at `base`, or 0 when nothing does. `shown` is room for that list. */
 static uint32_t JotLabeledPut(const Jot* j, uint64_t base, uint8_t* body, uint32_t* scratch, uint8_t* ids,
                               uint8_t* shown)
 {
@@ -590,8 +602,9 @@ static uint32_t JotLabeledPut(const Jot* j, uint64_t base, uint8_t* body, uint32
         l.name     = (const uint8_t*)now->name;
         l.name_len = now->name_len;
     }
-    l.set   = now->flags & ~was->flags & ~(uint32_t)(TAGFS_FILE_DELETED | TAGFS_FILE_SHOWN);
-    l.clear = was->flags & ~now->flags & ~(uint32_t)(TAGFS_FILE_DELETED | TAGFS_FILE_SHOWN);
+    const uint32_t own = TAGFS_FILE_DELETED | TAGFS_FILE_SHOWN | TAGFS_FILE_HEAD;   /* the verbs' bits */
+    l.set   = now->flags & ~was->flags & ~own;
+    l.clear = was->flags & ~now->flags & ~own;
     if (l.set || l.clear)
         l.what |= LABEL_FLAGS;
     if (was->keep_until != now->keep_until) {
@@ -603,6 +616,11 @@ static uint32_t JotLabeledPut(const Jot* j, uint64_t base, uint8_t* body, uint32
         l.nshown      = now->shown_count;
         l.shown       = shown;
         l.shown_bytes = TallyFidsPut(shown, now->shown_to, now->shown_count);
+    }
+    if (!JotHeadSame(was, now)) {
+        l.what    |= LABEL_HEAD;
+        l.head_len = now->head_len;
+        l.head     = now->head;
     }
     if (na || nd) {
         l.what      |= LABEL_TAGS;

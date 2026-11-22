@@ -91,6 +91,14 @@ void     FileMapDrop(FileMap* map, uint64_t fid, RecordWhere* was);
  * across the walk and what it does with each file may change the map. */
 uint32_t FileMapFiles(FileMap* map, uint64_t from, uint64_t* out, uint32_t room);
 
+/* The live files whose first bytes begin with the `length` of `bytes`
+ * (FileRecord.head) — never one kept deleted — from `from` on, in id order:
+ * up to `room` ids into `out`, how many were written; *next the first match
+ * past the room, 0 for none; *total, when asked for, every match from `from`
+ * on. One walk under the lock, reading the records alone. */
+uint32_t FileMapStartingWith(FileMap* map, const uint8_t* bytes, uint32_t length, uint64_t from, uint64_t* out,
+                             uint32_t room, uint64_t* next, uint32_t* total);
+
 /* The files called `word` — its `length` bytes are the whole of the file's
  * name or of its stem, name_index.h — from file id `from` on, the live ones
  * alone, in file id order: up to `room` ids into `out`, how many were

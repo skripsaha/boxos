@@ -53,10 +53,22 @@ static void RecordRuns(FileRecord* rec, const Tract* tract)
 /* `flags` with TAGFS_FILE_MADE_BY as `made_by` says and TAGFS_FILE_SHOWN as
  * `shown_count` does: each bit and its field are one fact, so every record is
  * made to hold them alike. */
-static uint32_t FlagsOfFields(uint32_t flags, uint64_t made_by, uint32_t shown_count)
+static uint32_t FlagsOfFields(uint32_t flags, uint64_t made_by, uint32_t shown_count, uint32_t head_len)
 {
     flags = made_by ? flags | TAGFS_FILE_MADE_BY : flags & ~(uint32_t)TAGFS_FILE_MADE_BY;
-    return shown_count ? flags | TAGFS_FILE_SHOWN : flags & ~(uint32_t)TAGFS_FILE_SHOWN;
+    flags = shown_count ? flags | TAGFS_FILE_SHOWN : flags & ~(uint32_t)TAGFS_FILE_SHOWN;
+    return head_len ? flags | TAGFS_FILE_HEAD : flags & ~(uint32_t)TAGFS_FILE_HEAD;
+}
+
+void FileRecordHeadSet(FileRecord* rec, const uint8_t* head, uint32_t len)
+{
+    if (len > TAGFS_HEAD_MOST)
+        len = TAGFS_HEAD_MOST;
+    memset(rec->head, 0, sizeof(rec->head));
+    if (len)
+        memcpy(rec->head, head, len);
+    rec->head_len = (uint8_t)len;
+    rec->flags    = FlagsOfFields(rec->flags, rec->made_by, rec->shown_count, len);
 }
 
 /* The record of `meta` over `tract`, built by `rc` — a reference the record
@@ -90,12 +102,13 @@ static FileRecord* RecordOf(const TagFSMetadata* meta, const Tract* tract, error
         return NULL;
     }
     rec->file_id       = meta->file_id;
-    rec->flags         = FlagsOfFields(meta->flags, meta->made_by, rec->shown_count);
+    rec->flags         = FlagsOfFields(meta->flags, meta->made_by, rec->shown_count, 0);
     rec->size          = meta->size;
     rec->created_time  = meta->created_time;
     rec->modified_time = meta->modified_time;
     rec->keep_until    = meta->keep_until;
     rec->made_by       = meta->made_by;
+    FileRecordHeadSet(rec, meta->head, meta->head_len);
     RecordRuns(rec, tract);
     return rec;
 }
@@ -123,12 +136,14 @@ FileRecord* FileRecordRelabel(const FileRecord* old, const char* name, const uin
     if (!rec)
         return NULL;
     rec->file_id       = old->file_id;
-    rec->flags         = FlagsOfFields(flags, old->made_by, shown_count);
+    rec->flags         = FlagsOfFields(flags, old->made_by, shown_count, old->head_len);
     rec->size          = old->size;
     rec->created_time  = old->created_time;
     rec->modified_time = old->modified_time;
     rec->keep_until    = keep_until;
     rec->made_by       = old->made_by;
+    rec->head_len      = old->head_len;
+    memcpy(rec->head, old->head, sizeof(rec->head));
     rec->gen           = __atomic_load_n(&old->gen, __ATOMIC_RELAXED);
     rec->slip          = TailSlipHold(old->slip);
     TractHold(old->tract);
@@ -301,6 +316,8 @@ error_t FileRecordSplice(const FileRecord* old, const BookSplice* sp, uint64_t c
     rec->modified_time = mtime;
     rec->keep_until    = old->keep_until;
     rec->made_by       = old->made_by;
+    rec->head_len      = old->head_len;
+    memcpy(rec->head, old->head, sizeof(rec->head));
     rec->gen           = old->gen;
     RecordRuns(rec, root);
     /* The Slips go on only by their one rule — the replay's and the Ink's
@@ -478,6 +495,8 @@ int FileRecordCopyOut(const FileRecord* rec, TagFSMetadata* out)
     out->modified_time = rec->modified_time;
     out->keep_until    = rec->keep_until;
     out->made_by       = rec->made_by;
+    out->head_len      = rec->head_len;
+    memcpy(out->head, rec->head, rec->head_len);
 
     if (rec->shown_count) {
         out->shown_to = kmalloc(sizeof(uint64_t) * rec->shown_count);

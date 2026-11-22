@@ -104,10 +104,10 @@ class FileState:
     on its last block, in the order of their stitches."""
 
     __slots__ = ("fid", "gen", "flags", "size", "created_ns", "modified_ns", "name", "tags", "runs",
-                 "parcels", "slips", "keep_ns", "made_by", "shown")
+                 "parcels", "slips", "keep_ns", "made_by", "shown", "head")
 
     def __init__(self, fid, gen, flags, size, created_ns, modified_ns, name, tags, runs, parcels=None,
-                 slips=None, keep_ns=0, made_by=0, shown=()):
+                 slips=None, keep_ns=0, made_by=0, shown=(), head=b""):
         self.fid, self.gen, self.flags, self.size = fid, gen, flags, size
         self.created_ns, self.modified_ns, self.name = created_ns, modified_ns, bytes(name)
         self.tags, self.runs = list(tags), list(runs)
@@ -115,11 +115,12 @@ class FileState:
         self.keep_ns = keep_ns      # with FILE_DELETED: the nanoseconds the file is kept until; 0 otherwise
         self.made_by = made_by      # with FILE_MADE_BY: the volume's id of the program's file that made it; 0 otherwise
         self.shown = list(shown)    # with FILE_SHOWN: the programs this program's file shows its tags to, rising; [] otherwise
+        self.head = bytes(head)     # with FILE_HEAD: the file's first bytes, HEAD_MOST at the most; b"" otherwise
 
     def Copy(self):
         return FileState(self.fid, self.gen, self.flags, self.size, self.created_ns, self.modified_ns,
                          self.name, self.tags, self.runs, self.parcels, self.slips, self.keep_ns, self.made_by,
-                         self.shown)
+                         self.shown, self.head)
 
     def Blocks(self):
         return sum(r.count for r in self.runs)
@@ -524,7 +525,16 @@ def FileHeadEncode(fs):
         head += V(fs.keep_ns)
     if fs.flags & ondisk.FILE_MADE_BY:
         head += V(fs.made_by)
-    return head + IdsPut(fs.shown) if fs.flags & ondisk.FILE_SHOWN else head
+    if fs.flags & ondisk.FILE_SHOWN:
+        head += IdsPut(fs.shown)
+    return head + V(len(fs.head)) + fs.head if fs.flags & ondisk.FILE_HEAD else head
+
+
+def HeadTake(c, size):
+    """A file's first bytes as a header, a Born and a Labeled HEAD lay them: their count, then them — None
+    when there are more than HEAD_MOST or than the file's size."""
+    n = c.V()
+    return c.Take(n) if n <= ondisk.HEAD_MOST and n <= size else None
 
 
 def FileHeadDecode(fid, body, glass):
@@ -542,11 +552,15 @@ def FileHeadDecode(fid, body, glass):
     shown = c.Ids() if flags & ondisk.FILE_SHOWN else []
     if flags & ondisk.FILE_SHOWN and not shown:
         raise Short("the header of fid %u shows its tags and names no program" % fid)
+    first = HeadTake(c, size) if flags & ondisk.FILE_HEAD else b""
+    if flags & ondisk.FILE_HEAD and not first:
+        raise Short("the header of fid %u carries first bytes it does not hold — none, or past its size or %u"
+                    % (fid, ondisk.HEAD_MOST))
     _Exact(c, "the FILES header of fid %u" % fid, glass)
     if not flags & ondisk.FILE_ACTIVE:
         raise Short("the header of fid %u is not ACTIVE" % fid)
     return FileState(fid, gen, flags, size, created, modified, name, tags, [], parcels=[], keep_ns=keep,
-                     made_by=made_by, shown=shown)
+                     made_by=made_by, shown=shown, head=first)
 
 
 def ParcelEncode(runs, seq):
@@ -928,6 +942,7 @@ def TallyCheck(defines):
                   (ondisk.FILE_ACTIVE, "TALLY_FILE_ACTIVE"),
                   (ondisk.FILE_UNDONE, "TALLY_FILE_UNDONE"), (ondisk.FILE_DELETED, "TALLY_FILE_DELETED"),
                   (ondisk.FILE_MADE_BY, "TALLY_FILE_MADE_BY"), (ondisk.FILE_SHOWN, "TALLY_FILE_SHOWN"),
+                  (ondisk.FILE_HEAD, "TALLY_FILE_HEAD"), (ondisk.HEAD_MOST, "TALLY_HEAD_MOST"),
                   (ondisk.FILE_ROLE_MASK, "TALLY_FILE_ROLE_MASK"),
                   (ondisk.FILE_ROLE_SYSTEM, "TALLY_FILE_ROLE_SYSTEM"), (ondisk.FILE_ROLE_BOOT, "TALLY_FILE_ROLE_BOOT"),
                   (ondisk.FILE_ROLE_KERNEL, "TALLY_FILE_ROLE_KERNEL"), (SHEET_PAYLOAD, "TALLY_SHEET_PAYLOAD")):

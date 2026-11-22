@@ -298,7 +298,7 @@ int ObjGetInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count, const 
     }
 
     uint32_t tag_count = 0;
-    uint64_t need = 8u + 8u + 4u + 2u + filename_len + 8u + 8u;
+    uint64_t need = 8u + 8u + 4u + 2u + filename_len + 8u + 8u + 2u + md.head_len;
     for (uint32_t i = 0; i < md.tag_count; i++) {
         if (!InfoTagOf(md.tag_ids[i], &view))
             continue;
@@ -330,8 +330,13 @@ int ObjGetInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count, const 
         /* The last eight bytes: when a deleted file is let go, 0 for one that is not. */
         const uint64_t kept_until = (md.flags & TAGFS_FILE_DELETED) ? md.keep_until : 0;
         memcpy(kp + pos, &kept_until, 8); pos += 8;
-        /* And the last: the program that made the file, 0 when none did. */
+        /* The program that made the file, 0 when none did. */
         memcpy(kp + pos, &md.made_by, 8); pos += 8;
+        /* What the system keeps the file as, and its first bytes: what a
+         * file is, told by the volume and by the file itself. */
+        kp[pos++] = (uint8_t)((md.flags & TAGFS_FILE_ROLE_MASK) >> 2);
+        kp[pos++] = md.head_len;
+        if (md.head_len) { memcpy(kp + pos, md.head, md.head_len); pos += md.head_len; }
     }
     tagfs_leave();
     tagfs_metadata_free(&md);

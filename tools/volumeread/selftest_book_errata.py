@@ -16,7 +16,7 @@ names again, finds nothing more to undo; and a stitch undone for both
 reasons is undone once (§2.8: one Undone a stitch undone)."""
 
 from . import stitch
-from .selftest_book import Born, Case, Found
+from .selftest_book import Case, Found
 
 # An Undone of the stitch one back, why 1, over fids 5 and 2^32 + 7: the bytes
 # the kernel's ribbon suite lays with its own codec (tests/ribbon_tests.c).
@@ -48,7 +48,7 @@ def ErrataCases(bt):
         bt.Fresh(o, 0, 1, 22)
         pen = bt.Pen(o)
         seqs["born"] = pen.next_seq
-        pen.Sew([Born(bt.F, f2, [0x2222], b"unlanded")], flags=0)
+        pen.Sew([bt.Born(bt.F, f2, [0x2222], b"unlanded")], flags=0)
 
     def Rot(o):
         pen = bt.Pen(o)
@@ -62,8 +62,8 @@ def ErrataCases(bt):
         pen = bt.Pen(o)
         lied = stitch.DATA_FLUSHED | stitch.MEDIUM_LIED
         seqs["lied"] = pen.next_seq
-        pen.Sew([Born(bt.F, f1, [0x3131], b"lied-a")], flags=lied)
-        pen.Sew([Born(bt.F + 1, f2, [0x3232], b"lied-b")], flags=lied)
+        pen.Sew([bt.Born(bt.F, f1, [0x3131], b"lied-a")], flags=lied)
+        pen.Sew([bt.Born(bt.F + 1, f2, [0x3232], b"lied-b")], flags=lied)
         return pen
 
     def RotLate(o):
@@ -95,7 +95,7 @@ def ErrataCases(bt):
         bt.Fresh(o, 0, 1, 26)
         pen = bt.Pen(o)
         seqs["both"] = pen.next_seq
-        pen.Sew([Born(bt.F, f2, [0x2626], b"both"), stitch.Labeled(fid=S.fid, base=1, name=b"stray")], flags=0)
+        pen.Sew([bt.Born(bt.F, f2, [0x2626], b"both"), stitch.Labeled(fid=S.fid, base=1, name=b"stray")], flags=0)
 
     def Wide(o):
         """A file of id 2^32 + 5 born, and an Undone of the next stitch over
@@ -103,7 +103,7 @@ def ErrataCases(bt):
         d = bt.Fresh(o, 0, 1, 24)
         wide = (1 << 32) + 5
         pen = bt.Pen(o)
-        pen.Sew([Born(bt.F, wide, d, b"wide")], flags=stitch.DATA_FLUSHED)
+        pen.Sew([bt.Born(bt.F, wide, d, b"wide")], flags=stitch.DATA_FLUSHED)
         pen.Sew([stitch.Undone(1, 1, [wide])], flags=stitch.DATA_FLUSHED)
 
     errata = lambda c: c.mount.errata

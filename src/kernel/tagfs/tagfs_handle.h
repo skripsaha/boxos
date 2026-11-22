@@ -115,6 +115,8 @@ typedef struct {
     uint64_t    made_by;         /* with TAGFS_FILE_MADE_BY: the volume's id of the program's file that made it */
     uint64_t*   shown_to;        /* with TAGFS_FILE_SHOWN: the programs a program's file shows its tags to, rising */
     uint32_t    shown_count;
+    uint8_t     head[16];        /* with TAGFS_FILE_HEAD: the file's first bytes, head_len of them */
+    uint8_t     head_len;
     char*       filename;
     uint32_t*   tag_ids;
     uint32_t    tag_count;

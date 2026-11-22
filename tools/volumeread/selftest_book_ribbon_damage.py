@@ -9,7 +9,7 @@ from . import bookread, ondisk, stitch, tally
 from .bookground import BookGround
 from .medium import Unreadable
 from .ondisk import BLOCK, SECTORS_PER_BLOCK, RunsNormal
-from .selftest_book import Born, Case, Errata, Found, Glass, Label
+from .selftest_book import Case, Errata, Found, Glass, Label
 
 
 def RibbonLossCases(bt):
@@ -25,7 +25,7 @@ def RibbonLossCases(bt):
         one byte of sector 2 flipped; or 4 and 5 torn, 5's StitchHead naming 4."""
         d = bt.Fresh(o, 0, 3, 8)
         pen = bt.Pen(o)
-        out = [pen.Sew([Born(bt.F + k, bt.fid + k, d[k:k + 1], b"t%u" % k)], flags=flushed)
+        out = [pen.Sew([bt.Born(bt.F + k, bt.fid + k, d[k:k + 1], b"t%u" % k)], flags=flushed)
                for k in range(2 if whole else 3)]
         if whole:
             bt.Rot(o, out[1].vlbas[2])
@@ -46,8 +46,8 @@ def RibbonLossCases(bt):
         s3 = pen.Sew([stitch.UseContext(b"y" * 1000),
                       stitch.Shaped(fid=S.fid, base=q - S.gen, size=S.size, mtime_ns=2,
                                     splices=[(0, n, [stitch.Data(bt.F, n)])], digests=d)], flags=flushed)
-        pen.Sew([stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=n * BLOCK, created_ns=1, modified_ns=1,
-                             name=b"taker", tags=(), runs=[stitch.Data(old[0], n)], digests=mine)], flags=flushed)
+        pen.Sew([bt.Headed(stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=n * BLOCK, created_ns=1, modified_ns=1,
+                             name=b"taker", tags=(), runs=[stitch.Data(old[0], n)], digests=mine))], flags=flushed)
         pen.Sew([stitch.Labeled(fid=S.fid, base=2, name=b"renamed")], flags=flushed)
         bt.Rot(o, s3.vlbas[s3.starts[2] // bookread.PAYLOAD_BYTES])
 
@@ -92,7 +92,7 @@ def RibbonShapeCases(bt):
 
     def Leads(o):
         d = bt.Fresh(o, 0, 1, 15)
-        s = bt.Pen(o).Sew([Born(bt.F, f1, d, b"leads")], flags=stitch.DATA_FLUSHED)
+        s = bt.Pen(o).Sew([bt.Born(bt.F, f1, d, b"leads")], flags=stitch.DATA_FLUSHED)
         bt.BumpLead(o, s.vlbas[0])
 
     return [
@@ -168,16 +168,16 @@ def RibbonBoundCases(bt):
     def Coded(o):
         d = bt.Fresh(o, 0, 1, 21)
         codec = bookread.EntryPut(tally.EXT_CODEC, bookread.VarintPut(1) + bookread.VarintPut(1))
-        bt.Pen(o).Sew([stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=BLOCK, created_ns=1, modified_ns=1,
-                                   name=b"coded", tags=(), runs=[stitch.Data(bt.F, huge, codec)], digests=d)])
+        bt.Pen(o).Sew([bt.Headed(stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=BLOCK, created_ns=1, modified_ns=1,
+                                   name=b"coded", tags=(), runs=[stitch.Data(bt.F, huge, codec)], digests=d))])
 
     def Miscounted(o):
         bt.Fresh(o, 0, 1, 22)
-        bt.Pen(o).Sew([Born(bt.F, f1, [0x1234], b"miscounted")], fresh=9)
+        bt.Pen(o).Sew([bt.Born(bt.F, f1, [0x1234], b"miscounted")], fresh=9)
 
     def Gap(q, d):
-        return [stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=BLOCK, created_ns=1, modified_ns=1, name=b"gap",
-                            tags=(), runs=[stitch.Hole(huge)], digests=[])]
+        return [bt.Headed(stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=BLOCK, created_ns=1, modified_ns=1, name=b"gap",
+                            tags=(), runs=[stitch.Hole(huge)], digests=[]))]
 
     def Widened(q, d):
         return [stitch.Shaped(fid=S.fid, base=q - S.gen, size=S.size, mtime_ns=1,
@@ -192,10 +192,10 @@ def RibbonBoundCases(bt):
 
     wide = 1 << 31
     worn = lambda q, d: [stitch.Coined(wide, b"wide"),
-                         stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=BLOCK, created_ns=1, modified_ns=1,
-                                     name=b"worn", tags=(wide,), runs=[stitch.Data(bt.F, 1)], digests=d)]
+                         bt.Headed(stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=BLOCK, created_ns=1, modified_ns=1,
+                                     name=b"worn", tags=(wide,), runs=[stitch.Data(bt.F, 1)], digests=d))]
     past = g.data_end + 1
-    gone = lambda q, d: [Born(past, f1, d, b"past")]
+    gone = lambda q, d: [bt.Born(past, f1, d, b"past")]
 
     grain = bt.ground.grain
     q1, q2 = tuple(bt.plan.ribbon), tuple(bt.plan.next)
@@ -230,9 +230,9 @@ def RibbonBoundCases(bt):
         renaming the last file it bore — found among the stitch's own."""
         pen = bt.Pen(o)
         for s in range(40):
-            pen.Sew([stitch.Born(fid=f1 + 1999 - (s * 50 + i), flags=ondisk.FILE_ACTIVE, size=BLOCK, created_ns=1,
+            pen.Sew([bt.Headed(stitch.Born(fid=f1 + 1999 - (s * 50 + i), flags=ondisk.FILE_ACTIVE, size=BLOCK, created_ns=1,
                                  modified_ns=1, name=b"m%04u" % (s * 50 + i), tags=(), runs=[stitch.Hole(1)],
-                                 digests=[]) for i in range(50)] +
+                                 digests=[])) for i in range(50)] +
                     ([stitch.Labeled(fid=f1, base=0, name=b"relabeled")] if s == 39 else []), flags=flushed)
 
     return [

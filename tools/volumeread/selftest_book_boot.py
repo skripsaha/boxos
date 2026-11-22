@@ -82,10 +82,13 @@ class Spare:
         for k, raw in enumerate(self.data):
             bt.PutBlock(o, self.start + k, raw)
 
+    def Head(self):
+        return self.data[0][:min(self.size, ondisk.HEAD_MOST)]
+
     def Born(self):
-        return stitch.Born(fid=self.fid, flags=ondisk.FILE_ACTIVE | ondisk.FILE_ROLE_BOOT, size=self.size,
-                           created_ns=1, modified_ns=1, name=b"spare.bin", tags=[],
-                           runs=[stitch.Data(self.start, self.blocks)], digests=self.digests)
+        return stitch.Born(fid=self.fid, flags=ondisk.FILE_ACTIVE | ondisk.FILE_ROLE_BOOT | ondisk.FILE_HEAD,
+                           size=self.size, created_ns=1, modified_ns=1, name=b"spare.bin", tags=[],
+                           runs=[stitch.Data(self.start, self.blocks)], digests=self.digests, head=self.Head())
 
     def Records(self):
         return [self.Born()]
@@ -105,12 +108,13 @@ class Note:
         bt.PutBlock(o, self.block, self.raw)
 
     def State(self):
-        return tally.FileState(self.fid, 1, ondisk.FILE_ACTIVE, len(self.text), 1, 1, self.name, self.tags,
-                               [tally.Run(False, self.block, 1, 1)])
+        return tally.FileState(self.fid, 1, ondisk.FILE_ACTIVE | ondisk.FILE_HEAD, len(self.text), 1, 1, self.name,
+                               self.tags, [tally.Run(False, self.block, 1, 1)], head=self.text[:ondisk.HEAD_MOST])
 
     def Born(self):
-        return stitch.Born(fid=self.fid, flags=ondisk.FILE_ACTIVE, size=len(self.text), created_ns=1, modified_ns=1,
-                           name=self.name, tags=self.tags, runs=[stitch.Data(self.block, 1)], digests=[self.digest])
+        return stitch.Born(fid=self.fid, flags=ondisk.FILE_ACTIVE | ondisk.FILE_HEAD, size=len(self.text),
+                           created_ns=1, modified_ns=1, name=self.name, tags=self.tags,
+                           runs=[stitch.Data(self.block, 1)], digests=[self.digest], head=self.text[:ondisk.HEAD_MOST])
 
 
 def BoundNotes(bt, notes, tags=()):
@@ -155,8 +159,9 @@ def BoundSpare(bt, sp):
     """The base's Tally bound again where it lies with the spare in it, as
     mkfs binds a volume it lays two kernels on: (content, plan)."""
     content = tally.Content.Copy(bt.content)
-    content.files[sp.fid] = tally.FileState(sp.fid, 1, ondisk.FILE_ACTIVE | ondisk.FILE_ROLE_BOOT, sp.size, 1, 1,
-                                            b"spare.bin", [], [tally.Run(False, sp.start, sp.blocks, 1)])
+    content.files[sp.fid] = tally.FileState(sp.fid, 1, ondisk.FILE_ACTIVE | ondisk.FILE_ROLE_BOOT | ondisk.FILE_HEAD,
+                                            sp.size, 1, 1, b"spare.bin", [], [tally.Run(False, sp.start, sp.blocks, 1)],
+                                            head=sp.Head())
     content.next_fid = sp.fid + 1
     for k, d in enumerate(sp.digests):
         content.digests[sp.start + k] = d
@@ -286,8 +291,9 @@ def BootCases(bt):
         bt.Rot(o, note.block * SECTORS_PER_BLOCK, 10)
 
     def NoteSlipped(o):
-        bt.Pen(o).Sew([stitch.Born(fid=note.fid, flags=ondisk.FILE_ACTIVE, size=len(text), created_ns=1, modified_ns=1,
-                                   name=CALLED, tags=[], runs=[stitch.Hole(1)], digests=[], slip=(0, text))],
+        bt.Pen(o).Sew([stitch.Born(fid=note.fid, flags=ondisk.FILE_ACTIVE | ondisk.FILE_HEAD, size=len(text),
+                                   created_ns=1, modified_ns=1, name=CALLED, tags=[], runs=[stitch.Hole(1)],
+                                   digests=[], slip=(0, text), head=text[:ondisk.HEAD_MOST])],
                       flags=stitch.DATA_FLUSHED)
 
     mine = Note(bt, bt.fid, 0, b"a scene of mine\n", name=b"picked.scene", tags=[bt.tag])

@@ -271,7 +271,10 @@ static FileRecord* RibbonBornRecord(RibbonStage* st, const RibbonBorn* b, uint64
         meta.modified_time = b->modified_ns;
         meta.made_by       = b->made_by;
         meta.shown_count   = (uint32_t)b->nshown;
+        meta.head_len      = (uint8_t)b->head_len;
         meta.extent_count  = (uint32_t)nstrips;
+        if (b->head_len)
+            memcpy(meta.head, b->head, b->head_len);
         if (b->nshown)
             TallyFidsOut(b->shown, b->shown_bytes, b->nshown, meta.shown_to);
         if ((rec = FileRecordBuild(&meta)) != NULL && RibbonHighSet(st, b->fid, (uint32_t)(b->flags >> 32)) != OK) {
@@ -596,8 +599,8 @@ static error_t RibbonLabelTags(RibbonReplay* rp, RibbonStage* st, const RibbonLa
                                        "TAGS names or that are RETIRED", unknown);
 }
 
-/* The Labeled applied to `now`: its name, flags, tags, term and the programs
- * it shows its tags to. */
+/* The Labeled applied to `now`: its name, flags, tags, term, the programs it
+ * shows its tags to and its first bytes. */
 static error_t RibbonLabelRecord(RibbonReplay* rp, RibbonStage* st, const RibbonLabeled* d, const FileRecord* now)
 {
     uint64_t  flags  = RibbonFlagsOf(rp, st, now);
@@ -642,6 +645,8 @@ static error_t RibbonLabelRecord(RibbonReplay* rp, RibbonStage* st, const Ribbon
             memcpy(name, now->name, now->name_len);
         name[d->what & LABEL_NAME ? d->name_len : now->name_len] = '\0';
         FileRecord* rec = FileRecordRelabel(now, name, tags, n, shown, nshown, (uint32_t)flags, keep);
+        if (rec && (d->what & LABEL_HEAD))
+            FileRecordHeadSet(rec, d->head, (uint32_t)d->head_len);
         if (!rec || RibbonHighSet(st, d->fid, (uint32_t)(flags >> 32)) != OK) {
             FileRecordRelease(rec);
             rc = ERR_NO_MEMORY;

@@ -648,6 +648,14 @@ error_t  TagFSQueryKeptPage(TagOwner owner, const TagSpelling* tags, uint32_t co
 error_t  TagFSNamedPage(TagOwner owner, const char* word, size_t length, const TagSpelling* tags, uint32_t count,
                         const TagSpelling* without, uint32_t without_count, uint64_t from, uint64_t* out,
                         uint32_t room, bool want_total, TagFSPage* page);
+/* The live files whose first bytes begin with `bytes`, `length` of them (1 to
+ * TAGFS_HEAD_MOST) — what a file is is told by them, and each file's record
+ * keeps them exact (FileRecord.head) — a page at a time in file id order, as
+ * TagFSQueryPage gives them; a file kept deleted is not met. No file's bytes
+ * are read: the records answer. ERR_INVALID_ARGUMENT for no bytes or more
+ * than a record keeps; ERR_TAGFS_NOT_INITIALIZED with no volume. */
+error_t  TagFSStartingWithPage(const uint8_t* bytes, uint32_t length, uint64_t from, uint64_t* out, uint32_t room,
+                               bool want_total, TagFSPage* page);
 /* The words a name answers to, as the name index takes them: the whole name
  * (lengths[0], its `length`) and, when the name has a dot with something
  * before it, its stem — the bytes up to the last dot (lengths[1]). How many

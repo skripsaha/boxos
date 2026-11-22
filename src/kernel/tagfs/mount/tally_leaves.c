@@ -85,7 +85,8 @@ static uint32_t BookHeadKnown(const TallyFileHead* h)
            TallyVarintBytes(h->name_len) + (uint32_t)h->name_len + TallyVarintBytes(h->ntags) +
            h->tags_bytes + ((h->flags & TALLY_FILE_DELETED) ? TallyVarintBytes(h->keep_ns) : 0u) +
            ((h->flags & TALLY_FILE_MADE_BY) ? TallyVarintBytes(h->made_by) : 0u) +
-           ((h->flags & TALLY_FILE_SHOWN) ? TallyVarintBytes(h->nshown) + h->shown_bytes : 0u);
+           ((h->flags & TALLY_FILE_SHOWN) ? TallyVarintBytes(h->nshown) + h->shown_bytes : 0u) +
+           ((h->flags & TALLY_FILE_HEAD) ? TallyVarintBytes(h->head_len) + (uint32_t)h->head_len : 0u);
 }
 
 /* The header of `f->fid` into the gathering: its name and its tags copied out
@@ -137,6 +138,9 @@ static error_t BookFileHead(BookFile* f, const uint8_t* body, uint32_t len)
     f->meta.modified_time = h.modified_ns;
     f->meta.keep_until    = h.keep_ns;
     f->meta.made_by       = h.made_by;
+    f->meta.head_len      = (uint8_t)h.head_len;
+    if (h.head_len)
+        memcpy(f->meta.head, h.head, h.head_len);
     f->head = true;
     return OK;
 }
