@@ -16,7 +16,8 @@
 // (retire/retire.h)
 //
 // A program's own tags are its labels for itself, and the program is the file
-// it was started from. The tests make a "program" of a file, put tags of its
+// it was started from. A volume a boot before left holds the tags of the
+// programs it ran, which the tests count beside their own. The tests make a "program" of a file, put tags of its
 // own on several files — live ones and one kept deleted — and a person's tag
 // of the same text on one of them, then let the program go in every way the
 // volume lets a file go: every tag it owned comes off every file and is
@@ -198,16 +199,29 @@ out:
     return verdict;
 }
 
+/* The tags of the programs the volume holds besides the test's, none owed:
+ * the programs a boot before this one ran keep tags of their own on it. */
+static bool StandRetireOthers(uint32_t* others)
+{
+    uint32_t n = 0;
+    if (RetireSweepNow(&n) != OK)
+        return false;
+    *others = tagfs_get_state()->registry->program_tags;
+    return true;
+}
+
 /* The state a retirement leaves, read where the volume was mounted afresh. */
 static TestResult StandRetireAfterMount(StandRetire* r, bool tally)
 {
     TestResult  verdict = TEST_PASS;
     static StandBinder b;
     const char* aside = tally ? StandBinderAside(&b) : NULL;
-    uint32_t    n = 0;
+    uint32_t    n = 0, others = 0;
     uint64_t    laid[3] = { 0 }, stood[3] = { 0 };
     if (aside)
         return test_steps_aside(aside);
+    memset(r, 0, sizeof(*r));
+    TEST_ASSERT(StandRetireOthers(&others), "the other programs' tags counted, none owed");
     TEST_ASSERT(StandRetireMake(r, 3), "a program, three files and tags of its own on all of them");
     TEST_ASSERT_EQ(tagfs_delete_file(r->program, INK_WARRANTED), 0, "the program's file is deleted");
     TEST_ASSERT_OK(RetireSweepNow(&n), "the duty retires its tags");
@@ -224,7 +238,7 @@ static TestResult StandRetireAfterMount(StandRetire* r, bool tally)
                     "the mount measures TAGS and FILES as the Tally's writer did, a retired id one element of TAGS");
     }
     TEST_ASSERT(StandRetireHolds(r), "its book says the same: held as retired, found by no lookup, worn by no file");
-    TEST_ASSERT_EQ(tagfs_get_state()->registry->program_tags, 0, "and no program's tag is owed");
+    TEST_ASSERT_EQ(tagfs_get_state()->registry->program_tags, others, "and no program's tag is owed");
     TEST_ASSERT(StandRetireNeverAgain(r), "no id of the book is given twice");
     TEST_ASSERT_OK(RetireSweepNow(&n), "the tag put on since is retired");
     TEST_ASSERT_EQ(n, 1, "by the duty, as before the mount");
@@ -253,8 +267,9 @@ static TestResult TestStandRetireTallyHolds(void)
 static TestResult StandRetireAfterCut(bool cleared)
 {
     TestResult  verdict = TEST_PASS;
-    StandRetire r;
-    uint32_t    n = 0;
+    StandRetire r = { 0 };
+    uint32_t    n = 0, others = 0;
+    TEST_ASSERT(StandRetireOthers(&others), "the other programs' tags counted, none owed");
     TEST_ASSERT(StandRetireMake(&r, 3), "a program, three files and tags of its own on all of them");
     TEST_ASSERT_EQ(tagfs_delete_file(r.program, INK_WARRANTED), 0, "the program's file is deleted");
     for (uint32_t i = 0; cleared && i < 3; i++) {
@@ -263,13 +278,14 @@ static TestResult StandRetireAfterCut(bool cleared)
     }
     TEST_ASSERT_OK(TagFSSettle(), "the book holds the file gone, the tags in their Coineds");
     TEST_ASSERT(StandStitchRemount(), "the volume is mounted afresh: the duty never ran");
-    TEST_ASSERT_EQ(tagfs_get_state()->registry->program_tags, 2, "the registry holds the program's two tags, owed");
+    TEST_ASSERT_EQ(tagfs_get_state()->registry->program_tags, others + 2u,
+                   "the registry holds the program's two tags, owed");
     TEST_ASSERT_OK(RetireSweepNow(&n), "the duty the mount owes");
     TEST_ASSERT_EQ(n, 2, "retires both");
     TEST_ASSERT(StandRetireHolds(&r), "off every file, found by no lookup");
     TEST_ASSERT_OK(TagFSSettle(), "the cycle lays them");
     TEST_ASSERT(StandStitchRemount(), "and the volume is mounted afresh again");
-    TEST_ASSERT(StandRetireHolds(&r) && tagfs_get_state()->registry->program_tags == 0, "retired, none owed");
+    TEST_ASSERT(StandRetireHolds(&r) && tagfs_get_state()->registry->program_tags == others, "retired, none owed");
 out:
     StandRetireClean(&r);
     return verdict;
