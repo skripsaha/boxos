@@ -104,10 +104,10 @@ class FileState:
     on its last block, in the order of their stitches."""
 
     __slots__ = ("fid", "gen", "flags", "size", "created_ns", "modified_ns", "name", "tags", "runs",
-                 "parcels", "slips", "keep_ns", "made_by", "shown", "head")
+                 "parcels", "slips", "keep_ns", "made_by", "shown", "head", "passport")
 
     def __init__(self, fid, gen, flags, size, created_ns, modified_ns, name, tags, runs, parcels=None,
-                 slips=None, keep_ns=0, made_by=0, shown=(), head=b""):
+                 slips=None, keep_ns=0, made_by=0, shown=(), head=b"", passport=0):
         self.fid, self.gen, self.flags, self.size = fid, gen, flags, size
         self.created_ns, self.modified_ns, self.name = created_ns, modified_ns, bytes(name)
         self.tags, self.runs = list(tags), list(runs)
@@ -116,11 +116,12 @@ class FileState:
         self.made_by = made_by      # with FILE_MADE_BY: the volume's id of the program's file that made it; 0 otherwise
         self.shown = list(shown)    # with FILE_SHOWN: the programs this program's file shows its tags to, rising; [] otherwise
         self.head = bytes(head)     # with FILE_HEAD: the file's first bytes, HEAD_MOST at the most; b"" otherwise
+        self.passport = passport    # with FILE_PASSPORT: the passport of the signed program it holds; 0 otherwise
 
     def Copy(self):
         return FileState(self.fid, self.gen, self.flags, self.size, self.created_ns, self.modified_ns,
                          self.name, self.tags, self.runs, self.parcels, self.slips, self.keep_ns, self.made_by,
-                         self.shown, self.head)
+                         self.shown, self.head, self.passport)
 
     def Blocks(self):
         return sum(r.count for r in self.runs)
@@ -527,7 +528,9 @@ def FileHeadEncode(fs):
         head += V(fs.made_by)
     if fs.flags & ondisk.FILE_SHOWN:
         head += IdsPut(fs.shown)
-    return head + V(len(fs.head)) + fs.head if fs.flags & ondisk.FILE_HEAD else head
+    if fs.flags & ondisk.FILE_HEAD:
+        head += V(len(fs.head)) + fs.head
+    return head + V(fs.passport) if fs.flags & ondisk.FILE_PASSPORT else head
 
 
 def HeadTake(c, size):
@@ -535,6 +538,13 @@ def HeadTake(c, size):
     when there are more than HEAD_MOST or than the file's size."""
     n = c.V()
     return c.Take(n) if n <= ondisk.HEAD_MOST and n <= size else None
+
+
+def PassportTake(c):
+    """A passport as a header, a Born and a Labeled PASSPORT lay it — None when it is no passport (its bit
+    63 not set)."""
+    p = c.V()
+    return p if p & ondisk.PASSPORT_BIT else None
 
 
 def FileHeadDecode(fid, body, glass):
@@ -556,11 +566,14 @@ def FileHeadDecode(fid, body, glass):
     if flags & ondisk.FILE_HEAD and not first:
         raise Short("the header of fid %u carries first bytes it does not hold — none, or past its size or %u"
                     % (fid, ondisk.HEAD_MOST))
+    passport = PassportTake(c) if flags & ondisk.FILE_PASSPORT else 0
+    if flags & ondisk.FILE_PASSPORT and passport is None:
+        raise Short("the header of fid %u carries a passport without the bit every passport carries" % fid)
     _Exact(c, "the FILES header of fid %u" % fid, glass)
     if not flags & ondisk.FILE_ACTIVE:
         raise Short("the header of fid %u is not ACTIVE" % fid)
     return FileState(fid, gen, flags, size, created, modified, name, tags, [], parcels=[], keep_ns=keep,
-                     made_by=made_by, shown=shown, head=first)
+                     made_by=made_by, shown=shown, head=first, passport=passport)
 
 
 def ParcelEncode(runs, seq):

@@ -115,6 +115,8 @@ FILE_MADE_BY = 1 << 6                   # tagfs_constants.h TAGFS_FILE_MADE_BY: 
 FILE_SHOWN = 1 << 7                     # tagfs_constants.h TAGFS_FILE_SHOWN: a program's file that shows its tags to the programs the header names
 FILE_HEAD = 1 << 8                      # tagfs_constants.h TAGFS_FILE_HEAD: the header carries the file's first bytes
 HEAD_MOST = 16                          # tagfs_constants.h TAGFS_HEAD_MOST: as many first bytes as a card keeps
+FILE_PASSPORT = 1 << 9                  # tagfs_constants.h TAGFS_FILE_PASSPORT: the header carries a signed program's passport
+PASSPORT_BIT = 1 << 63                  # volume_tally.h TALLY_PASSPORT_BIT: every passport carries it, so none is a file id
 FILE_LAID_BIT = 1 << 5                  # a header flag no kernel names, kept as laid (book_tests.c BOOK_TEST_LAID_BIT)
 
 # ---------------------------------------------------------------------------

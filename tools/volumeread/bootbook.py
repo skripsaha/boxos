@@ -261,7 +261,7 @@ class BootBook:
             if old is not None:
                 return old
             fs = tally.FileState(d["fid"], seq, d["flags"], d["size"], d["created_ns"], d["modified_ns"], d["name"],
-                                 d["tags"], d["runs"], made_by=d["made_by"], shown=d["shown"], head=d["head"])
+                                 d["tags"], d["runs"], made_by=d["made_by"], shown=d["shown"], head=d["head"], passport=d["passport"])
         else:
             at = (seq - d["base"]) % (1 << 64)
             if old is None or old.gen != at:
@@ -290,6 +290,9 @@ class BootBook:
                 if d["what"] & LABEL_HEAD:
                     fs.head = bytes(d["head"])
                     fs.flags = fs.flags | ondisk.FILE_HEAD if d["head"] else fs.flags & ~ondisk.FILE_HEAD
+                if d["what"] & stitch.LABEL_PASSPORT:
+                    fs.passport = d["passport"]
+                    fs.flags |= ondisk.FILE_PASSPORT
                 return fs
             before = LastBlock(old)
             for at, remove, runs in Absolute(d["splices"]):

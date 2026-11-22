@@ -92,6 +92,13 @@ VolumeGeometry DeedGeometry(void);
 void         seed_reserved_tags(void);
 int          parse_tags(const char* tag_string, const char* path,
                         uint32_t** out_ids, uint32_t* out_count, uint32_t* out_role);
+
+/* The passport of the signed program the box `filename` is — the SHA-256 of its
+ * author's key and its name, TALLY_PASSPORT_BIT set, as the kernel makes it
+ * (box_trust.c) — into *passport; 0 for a file that is no signed box. The
+ * signature is not checked: the kernel checks it when it starts the program.
+ * 0, or -1 having said why. */
+int PassportOf(const char* filename, uint64_t* passport);
 void         CargoNameKernel(const char* path);
 VolumePacked PackedStamp(int file_count, char* argv[], int first,
                          const char* kernel_path);

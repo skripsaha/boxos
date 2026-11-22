@@ -270,6 +270,7 @@ static FileRecord* RibbonBornRecord(RibbonStage* st, const RibbonBorn* b, uint64
         meta.created_time  = b->created_ns;
         meta.modified_time = b->modified_ns;
         meta.made_by       = b->made_by;
+        meta.passport      = b->passport;
         meta.shown_count   = (uint32_t)b->nshown;
         meta.head_len      = (uint8_t)b->head_len;
         meta.extent_count  = (uint32_t)nstrips;
@@ -647,6 +648,8 @@ static error_t RibbonLabelRecord(RibbonReplay* rp, RibbonStage* st, const Ribbon
         FileRecord* rec = FileRecordRelabel(now, name, tags, n, shown, nshown, (uint32_t)flags, keep);
         if (rec && (d->what & LABEL_HEAD))
             FileRecordHeadSet(rec, d->head, (uint32_t)d->head_len);
+        if (rec && (d->what & LABEL_PASSPORT))
+            FileRecordPassportSet(rec, d->passport);
         if (!rec || RibbonHighSet(st, d->fid, (uint32_t)(flags >> 32)) != OK) {
             FileRecordRelease(rec);
             rc = ERR_NO_MEMORY;

@@ -136,12 +136,14 @@ def Padded(bt):
     if room < PADDING:
         raise Unreadable("the free run at block %u holds %u blocks and %u more files take one each"
                          % (bt.F, room, PADDING))
-    for first in range(128):
+    # The names' lengths are searched, the rest's as well as the first's: where the leaf ends hangs on how
+    # long every header of the image is, and a field the image's headers carry moves it.
+    for rest, first in ((rest, first) for rest in range(40, 72) for first in range(128)):
         content = tally.Content.Copy(bt.content)
         for i in range(PADDING):
             fid = bt.maxfid + 1 + i
             content.files[fid] = tally.FileState(fid, 1, ondisk.FILE_ACTIVE | ondisk.FILE_HEAD, BLOCK, 1, 1,
-                                                 b"pad-%03u-" % i + b"p" * (first if i == 0 else 40), [],
+                                                 b"pad-%03u-" % i + b"p" * (first if i == 0 else rest), [],
                                                  [tally.Run(False, bt.F + i, 1, 1)],
                                                  head=bt.Pattern(i)[:ondisk.HEAD_MOST])
             content.digests[bt.F + i] = bookread.Integrity(bt.Pattern(i), bt.lanes)

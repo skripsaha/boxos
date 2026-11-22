@@ -109,6 +109,16 @@
  * ribbon's Born, and what the ribbon's Labeled HEAD leaves. */
 #define TAGFS_FILE_HEAD             (1 << 8)
 #define TAGFS_HEAD_MOST             16u
+/* The file holds a signed program, and its record keeps the program's
+ * passport (FileRecord.passport): who the program is across every copy and
+ * version of it, its author and its name (box_trust.h), bit 63 set so it is
+ * never a file's id. Bit 9 — laid by the volume's maker and by the Ink a
+ * program's start makes when its passport is another (InkPassport); a change
+ * of what the file holds leaves it, so a program written over with its next
+ * version stays itself. Never a flag a caller names, and never a tag. The bit
+ * is what puts the passport after the head in the Tally's header and in the
+ * ribbon's Born, and what the ribbon's Labeled PASSPORT leaves. */
+#define TAGFS_FILE_PASSPORT         (1 << 9)
 
 // Handle flags
 #define TAGFS_HANDLE_READ           (1 << 0)

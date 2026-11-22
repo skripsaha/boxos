@@ -715,7 +715,7 @@ class BookMount:
                               % fid)
             self.born.add(fid)
             fs = FileState(fid, seq, d["flags"], d["size"], d["created_ns"], d["modified_ns"], d["name"],
-                           d["tags"], d["runs"], made_by=d["made_by"], shown=d["shown"], head=d["head"])
+                           d["tags"], d["runs"], made_by=d["made_by"], shown=d["shown"], head=d["head"], passport=d["passport"])
             self._Holds(fs, tags, d["tags"])
         else:
             old = files.get(fid)
@@ -785,6 +785,9 @@ class BookMount:
         if d["what"] & LABEL_HEAD:
             fs.head = bytes(d["head"])
             fs.flags = fs.flags | ondisk.FILE_HEAD if d["head"] else fs.flags & ~ondisk.FILE_HEAD
+        if d["what"] & stitch.LABEL_PASSPORT:
+            fs.passport = d["passport"]
+            fs.flags |= ondisk.FILE_PASSPORT
         if d["what"] & LABEL_TAGS:
             worn = set(fs.tags)
             if any(t in worn for t in d["add"]) or any(t not in worn for t in d["drop"]):

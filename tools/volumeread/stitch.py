@@ -30,7 +30,7 @@ KIND_NAMES = {STITCH_HEAD: "StitchHead", CLASP: "Clasp", UNDONE: "Undone", BORN:
 DATA_FLUSHED, CLEAN, MEDIUM_LIED = 1, 2, 4
 
 # Labeled.what (§2.8)
-LABEL_NAME, LABEL_FLAGS, LABEL_TAGS, LABEL_KEEP, LABEL_SHOWN, LABEL_HEAD = 1, 2, 4, 8, 16, 32
+LABEL_NAME, LABEL_FLAGS, LABEL_TAGS, LABEL_KEEP, LABEL_SHOWN, LABEL_HEAD, LABEL_PASSPORT = 1, 2, 4, 8, 16, 32, 64
 
 # The longest stream of a stitch a reader holds: its offsets are 32 bits
 # (volume_ribbon.h RIBBON_STREAM_MOST).
@@ -85,10 +85,10 @@ def _Digests(digests):
 
 
 def Born(fid, flags, size, created_ns, modified_ns, name, tags, runs, digests, slip=None, made_by=0, shown=(),
-         head=b""):
+         head=b"", passport=0):
     """made_by is written after the slip when the flags carry FILE_MADE_BY, and only then; the programs the
-    file shows its tags to after it when they carry FILE_SHOWN, and only then; its first bytes last when they
-    carry FILE_HEAD."""
+    file shows its tags to after it when they carry FILE_SHOWN, and only then; its first bytes when they
+    carry FILE_HEAD; and the passport of the signed program it holds last, when they carry FILE_PASSPORT."""
     V = VarintPut
     body = (V(fid) + V(flags) + V(size) + V(created_ns) + V(Zigzag(modified_ns - created_ns)) +
             V(len(name)) + name + IdsPut(sorted(tags)) + V(len(runs)) + RunsPut(runs, 0, False)[0] +
@@ -97,7 +97,9 @@ def Born(fid, flags, size, created_ns, modified_ns, name, tags, runs, digests, s
         body += V(made_by)
     if flags & ondisk.FILE_SHOWN:
         body += IdsPut(sorted(shown))
-    return Record(BORN, body + V(len(head)) + head if flags & ondisk.FILE_HEAD else body)
+    if flags & ondisk.FILE_HEAD:
+        body += V(len(head)) + head
+    return Record(BORN, body + V(passport) if flags & ondisk.FILE_PASSPORT else body)
 
 
 def Shaped(fid, base, size, mtime_ns, splices, digests, slip=None):
@@ -109,13 +111,15 @@ def Shaped(fid, base, size, mtime_ns, splices, digests, slip=None):
     return Record(SHAPED, b"".join(out) + _Digests(digests) + _Slip(slip))
 
 
-def Labeled(fid, base, name=None, flags=None, add=(), drop=(), keep=None, shown=None, head=None):
+def Labeled(fid, base, name=None, flags=None, add=(), drop=(), keep=None, shown=None, head=None, passport=None):
     """keep is the deletion's one verb: the nanoseconds a file is kept until, or 0 to bring it back; shown
-    the one verb of the programs a program's file shows its tags to, the whole list anew ([] for none)."""
+    the one verb of the programs a program's file shows its tags to, the whole list anew ([] for none);
+    passport the one verb of the passport of the signed program the file holds, laid anew."""
     V = VarintPut
     what = (LABEL_NAME if name is not None else 0) | (LABEL_FLAGS if flags is not None else 0) | \
         (LABEL_TAGS if add or drop else 0) | (LABEL_KEEP if keep is not None else 0) | \
-        (LABEL_SHOWN if shown is not None else 0) | (LABEL_HEAD if head is not None else 0)
+        (LABEL_SHOWN if shown is not None else 0) | (LABEL_HEAD if head is not None else 0) | \
+        (LABEL_PASSPORT if passport is not None else 0)
     out = V(fid) + V(base) + V(what)
     if name is not None:
         out += V(len(name)) + name
@@ -129,6 +133,8 @@ def Labeled(fid, base, name=None, flags=None, add=(), drop=(), keep=None, shown=
         out += IdsPut(sorted(shown))
     if what & LABEL_HEAD:
         out += V(len(head)) + head
+    if what & LABEL_PASSPORT:
+        out += V(passport)
     return Record(LABELED, out)
 
 
@@ -232,6 +238,9 @@ def RecordDecode(kind, body, seq):
         d["head"] = tally.HeadTake(c, d["size"]) if d["flags"] & ondisk.FILE_HEAD else b""
         if d["flags"] & ondisk.FILE_HEAD and not d["head"]:
             raise Short("its Born carries first bytes it does not hold")
+        d["passport"] = tally.PassportTake(c) if d["flags"] & ondisk.FILE_PASSPORT else 0
+        if d["passport"] is None:
+            raise Short("its Born carries a passport without the bit every passport carries")
     elif kind == SHAPED:
         d.update(fid=c.V(), base=c.V(), size=c.V(), mtime_ns=c.V())
         splices, cursor = [], 0
@@ -252,6 +261,11 @@ def RecordDecode(kind, body, seq):
         d["head"] = tally.HeadTake(c, ondisk.HEAD_MOST) if d["what"] & LABEL_HEAD else None
         if d["what"] & LABEL_HEAD and d["head"] is None:
             raise Short("its Labeled HEAD carries more first bytes than a card keeps")
+        d["passport"] = tally.PassportTake(c) if d["what"] & LABEL_PASSPORT else 0
+        if d["passport"] is None:
+            raise Short("its Labeled PASSPORT carries no passport — a number without the bit every passport carries")
+        if d["flags"] and (d["flags"][0] | d["flags"][1]) & ondisk.FILE_PASSPORT:
+            raise Short("its Labeled names the passport bit in FLAGS — the bit is PASSPORT's to put on")
         if d["flags"] and (d["flags"][0] | d["flags"][1]) & ondisk.FILE_HEAD:
             raise Short("its Labeled names the head bit in FLAGS — the bit is HEAD's to put on and take off")
         if d["flags"] and (d["flags"][0] | d["flags"][1]) & ondisk.FILE_SHOWN:
@@ -283,12 +297,12 @@ def RecordAgain(kind, d):
     """The record a decoded dict says, written again (the circle)."""
     if kind == BORN:
         return Born(d["fid"], d["flags"], d["size"], d["created_ns"], d["modified_ns"], d["name"], d["tags"],
-                    d["runs"], d["digests"], d["slip"], d["made_by"], d["shown"], d["head"])
+                    d["runs"], d["digests"], d["slip"], d["made_by"], d["shown"], d["head"], d["passport"])
     if kind == SHAPED:
         return Shaped(d["fid"], d["base"], d["size"], d["mtime_ns"], d["splices"], d["digests"], d["slip"])
     if kind == LABELED:
         return Labeled(d["fid"], d["base"], d["name"], d["flags"], d["add"], d["drop"], d["keep"], d["shown"],
-                       d["head"])
+                       d["head"], d["passport"] if d["what"] & LABEL_PASSPORT else None)
     if kind == QUITCLAIM:
         return Quitclaim(d["fid"], d["base"])
     if kind == COINED:
@@ -651,7 +665,7 @@ RIBBON_NUMBERS = (
     ("RIBBON_THAWED", THAWED), ("RIBBON_KINDS_KNOWN", max(KIND_NAMES)), ("STITCH_DATA_FLUSHED", DATA_FLUSHED),
     ("STITCH_CLEAN", CLEAN), ("STITCH_MEDIUM_LIED", MEDIUM_LIED), ("LABEL_NAME", LABEL_NAME),
     ("LABEL_FLAGS", LABEL_FLAGS), ("LABEL_TAGS", LABEL_TAGS), ("LABEL_KEEP", LABEL_KEEP),
-    ("LABEL_SHOWN", LABEL_SHOWN), ("LABEL_HEAD", LABEL_HEAD), ("RUN_EXT_CODEC", tally.EXT_CODEC),
+    ("LABEL_SHOWN", LABEL_SHOWN), ("LABEL_HEAD", LABEL_HEAD), ("LABEL_PASSPORT", LABEL_PASSPORT), ("RUN_EXT_CODEC", tally.EXT_CODEC),
     ("RUN_EXT_SHARED", tally.EXT_SHARED), ("RUN_EXT_COPY", tally.EXT_COPY), ("UNDONE_NOT_LANDED", 1),
     ("UNDONE_ROT", 2), ("RIBBON_STREAM_MOST", STREAM_MOST))
 

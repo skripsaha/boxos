@@ -12,7 +12,8 @@
 #include "buildplate_format.h"   /* the verdict this volume copies out of the kernel it packs */
 #include "tagfs_reserved.h"      /* the reserved keys, the last id, the widths: the kernel's (-I src/include) */
 #include <stdbool.h>
-#include "box_reader.h"          /* the box a program is, read for its role (-I src/include) */
+#include "box_reader.h"          /* the box a program is, read for its role and its signature (-I src/include) */
+#include "box/sha256.h"           /* the passport of a signed program, made as the kernel makes it */
 
 TagEntry* g_tags       = NULL;
 uint32_t  g_tag_count  = 0;
@@ -195,14 +196,16 @@ void CargoNameKernel(const char* path) {
     g_kernel_file = path;
 }
 
-/* The box's part `role`, read from the file `filename` when it is a box: its
- * first bytes are a box's, the table and names hold, and the part is written
- * as a role is (box_reader.h BoxRoleRead). A file that is not a box — the
- * kernel, a text, an ELF — says no role. 0 with *role set, or -1 having said
- * why. The seal and the hashes are not checked here: the builder lays boxes
- * it has just packed, and the kernel holds every box to them when it starts it. */
-static int BoxRoleOf(const char* filename, BoxRole* role) {
-    *role = BOX_ROLE_ORDINARY;
+/* The bytes of the box's part of `kind`, read from the file `filename` when
+ * it is a box: its first bytes are a box's, and the table and names hold. A
+ * file that is not a box — the kernel, a text, an ELF — or a box without the
+ * part gives none (*bytes NULL). 0, or -1 having said why; *bytes is the
+ * caller's to free. The seal and the hashes are not checked here: the builder
+ * lays boxes it has just packed, and the kernel holds every box to them, and
+ * to its signature, when it starts it. */
+static int BoxPartBytes(const char* filename, BoxKind kind, uint8_t** bytes, uint64_t* size) {
+    *bytes = NULL;
+    *size  = 0;
     FILE* file = fopen(filename, "rb");
     if (!file) { fprintf(stderr, "%s: cannot be opened\n", filename); return -1; }
 
@@ -229,23 +232,59 @@ static int BoxRoleOf(const char* filename, BoxRole* role) {
         fprintf(stderr, "%s: it is a box that would not be read: %s\n", filename, BoxVerdictText(verdict));
         goto done;
     }
-    if (!BoxPartOfKind(&table, BOX_KIND_ROLE, &part)) { rc = 0; goto done; }
+    if (!BoxPartOfKind(&table, kind, &part)) { rc = 0; goto done; }
 
     part_at = malloc(part.Size ? part.Size : 1);
     if (!part_at || fseek(file, (long)part.Offset, SEEK_SET) != 0 || fread(part_at, 1, part.Size, file) != part.Size) {
-        fprintf(stderr, "%s: its role part cannot be read\n", filename);
+        fprintf(stderr, "%s: its part %s cannot be read\n", filename, BoxKindWord(kind));
         goto done;
     }
-    uint64_t unknown;
-    if (BoxRoleRead(part_at, part.Size, role, &unknown) != BOX_OK || unknown != 0) {
-        fprintf(stderr, "%s: its role is not written as one: system or boot, one word\n", filename);
-        goto done;
-    }
-    rc = 0;
+    *bytes  = part_at;
+    *size   = part.Size;
+    part_at = NULL;
+    rc      = 0;
 done:
     free(part_at);
     free(prefix);
     fclose(file);
+    return rc;
+}
+
+/* The box's part `role` (box_reader.h BoxRoleRead): what a box says it is, or
+ * ordinary for a file that is no box or says nothing. 0, or -1 having said why. */
+static int BoxRoleOf(const char* filename, BoxRole* role) {
+    uint8_t* bytes;
+    uint64_t size, unknown;
+    *role = BOX_ROLE_ORDINARY;
+    if (BoxPartBytes(filename, BOX_KIND_ROLE, &bytes, &size) != 0) return -1;
+    int rc = !bytes || (BoxRoleRead(bytes, size, role, &unknown) == BOX_OK && unknown == 0) ? 0 : -1;
+    if (rc != 0) fprintf(stderr, "%s: its role is not written as one: system or boot, one word\n", filename);
+    free(bytes);
+    return rc;
+}
+
+int PassportOf(const char* filename, uint64_t* passport) {
+    uint8_t*     bytes;
+    uint64_t     size;
+    BoxSignature signature;
+    *passport = 0;
+    if (BoxPartBytes(filename, BOX_KIND_SIGNATURE, &bytes, &size) != 0) return -1;
+    if (!bytes) return 0;
+    int rc = BoxSignatureRead(bytes, size, &signature) == BOX_OK ? 0 : -1;
+    if (rc != 0) {
+        fprintf(stderr, "%s: its signature is not laid out as a signature is\n", filename);
+    } else if (signature.How == BOX_SIGN_RSA2048_SHA256) {
+        Sha256  state;
+        uint8_t digest[SHA256_BYTES];
+        sha256_begin(&state);
+        sha256_add(&state, signature.Key, signature.KeyBytes);
+        sha256_add(&state, signature.Name, signature.NameLength);
+        sha256_end(&state, digest);
+        for (unsigned i = 0; i < 8; i++)
+            *passport = *passport << 8 | digest[i];
+        *passport |= TALLY_PASSPORT_BIT;
+    }
+    free(bytes);
     return rc;
 }
 

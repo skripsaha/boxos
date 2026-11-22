@@ -273,7 +273,7 @@ static int FileOf(BindFile* f, uint64_t fid, const char* path, const char* tags)
     f->fid    = fid;
     f->size   = (uint64_t)size;
     f->blocks = (f->size + TAGFS_BLOCK_SIZE - 1u) / TAGFS_BLOCK_SIZE;
-    if (parse_tags(tags, f->path, &ids, &n, &f->role) != 0) return -1;
+    if (parse_tags(tags, f->path, &ids, &n, &f->role) != 0 || PassportOf(f->path, &f->passport) != 0) return -1;
     qsort(ids, n, sizeof(uint32_t), IdOrder);
     f->tags  = ids;
     f->ntags = n;
@@ -377,13 +377,14 @@ static int FileLeaves(Binding* v) {
     for (int i = 0; i < v->count; i++) {
         const BindFile* f    = &v->files[i];
         uint8_t*        ids  = BindBody(l, 10u * (uint64_t)f->ntags);
-        uint8_t*        body = BindBody(l, 97u + strlen(f->name) + 10u * (uint64_t)f->ntags);
+        uint8_t*        body = BindBody(l, 107u + strlen(f->name) + 10u * (uint64_t)f->ntags);
         if (!ids || !body) return -1;
-        TallyFileHead h = { .gen = FIRST_TALLY_SEQ, .flags = TALLY_FILE_ACTIVE | f->role |
-                                                              (f->head_len ? TALLY_FILE_HEAD : 0u),
+        TallyFileHead h = { .gen = FIRST_TALLY_SEQ,
+                            .flags = TALLY_FILE_ACTIVE | f->role | (f->head_len ? TALLY_FILE_HEAD : 0u) |
+                                     (f->passport ? TALLY_FILE_PASSPORT : 0u),
                             .size = f->size, .created_ns = ns, .modified_ns = ns, .name = (const uint8_t*)f->name,
                             .name_len = strlen(f->name), .ntags = f->ntags, .tags = ids,
-                            .head_len = f->head_len, .head = f->head };
+                            .head_len = f->head_len, .head = f->head, .passport = f->passport };
         h.tags_bytes = TallyIdsPut(ids, f->tags, f->ntags);
         if (BindAdd(l, TALLY_FILES, (TallyKey){ f->fid, 0 }, body, TallyFileHeadPut(body, &h), 1) != 0)
             return -1;

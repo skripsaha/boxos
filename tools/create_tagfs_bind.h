@@ -28,6 +28,7 @@ typedef struct {
     uint32_t    role;          /* TALLY_FILE_ROLE_*: what the system keeps it as, 0 for none */
     uint8_t     head[TALLY_HEAD_MOST];   /* its first bytes, head_len of them: min(size, TALLY_HEAD_MOST) */
     uint32_t    head_len;
+    uint64_t    passport;      /* the signed program it is, 0 for none (PassportOf) */
 } BindFile;
 
 /* One element of a node: its key, its body and what it counts toward its

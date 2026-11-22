@@ -117,6 +117,7 @@ typedef struct {
     uint32_t    shown_count;
     uint8_t     head[16];        /* with TAGFS_FILE_HEAD: the file's first bytes, head_len of them */
     uint8_t     head_len;
+    uint64_t    passport;        /* with TAGFS_FILE_PASSPORT: the passport of the signed program it holds */
     char*       filename;
     uint32_t*   tag_ids;
     uint32_t    tag_count;

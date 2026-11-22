@@ -105,6 +105,10 @@ typedef struct FileRecord {
      * when the file is made, and the same in every record of the file after:
      * the builders here keep it and the flag one (FileRecordBuild). */
     uint64_t           made_by;
+    /* With TAGFS_FILE_PASSPORT, the passport of the signed program the file
+     * holds (box_trust.h); 0 for a file none was known in. Kept by every
+     * change of the file but the Ink that lays it anew (FileRecordPassportSet). */
+    uint64_t           passport;
     /* When the Ink that made this record was a small append — its data cost
      * the medium less than a Settle cycle does — in the cadence's
      * microseconds; 0 for any other change. Memory only: the cadence asks it
@@ -189,8 +193,9 @@ typedef struct {
 /* The record `meta` describes — its Strips cut into Parcels — with one
  * reference: NULL when there is no memory, or when a Strip of it names no
  * block (count 0). Its flags hold TAGFS_FILE_MADE_BY exactly when meta->made_by
- * is not 0, TAGFS_FILE_SHOWN exactly when meta->shown_count is, and
- * TAGFS_FILE_HEAD exactly when meta->head_len is. Every allocation is made
+ * is not 0, TAGFS_FILE_SHOWN exactly when meta->shown_count is,
+ * TAGFS_FILE_HEAD exactly when meta->head_len is and TAGFS_FILE_PASSPORT
+ * exactly when meta->passport is. Every allocation is made
  * here, with no lock held. */
 FileRecord* FileRecordBuild(const TagFSMetadata* meta);
 
@@ -200,10 +205,10 @@ FileRecord* FileRecordBuildCut(const TagFSMetadata* meta, const uint32_t* cut, u
 
 /* A record with a new header — `name`, `tags`, the programs it shows its
  * tags to (`shown`, rising), `flags`, `keep_until` — and every one of the old
- * record's runs, shared rather than copied; its times, size, file id, made_by
- * and first bytes the old one's (`flags` has TAGFS_FILE_MADE_BY and
- * TAGFS_FILE_HEAD as the old record's fields say and TAGFS_FILE_SHOWN as
- * `shown_count` does, whatever the caller gave). NULL when there is no
+ * record's runs, shared rather than copied; its times, size, file id, made_by,
+ * first bytes and passport the old one's (`flags` has TAGFS_FILE_MADE_BY,
+ * TAGFS_FILE_HEAD and TAGFS_FILE_PASSPORT as the old record's fields say and
+ * TAGFS_FILE_SHOWN as `shown_count` does, whatever the caller gave). NULL when there is no
  * memory. */
 FileRecord* FileRecordRelabel(const FileRecord* old, const char* name, const uint32_t* tags,
                               uint32_t tag_count, const uint64_t* shown, uint32_t shown_count,
@@ -228,6 +233,10 @@ FileRecord* FileRecordRelabel(const FileRecord* old, const char* name, const uin
  * nobody else sees — made `head`, `len` of them (TAGFS_HEAD_MOST at the most),
  * TAGFS_FILE_HEAD on exactly when there are any. */
 void        FileRecordHeadSet(FileRecord* rec, const uint8_t* head, uint32_t len);
+
+/* The passport of `rec` — a record just built, that no map holds yet and
+ * nobody else sees — made `passport` (bit 63 set), TAGFS_FILE_PASSPORT on. */
+void        FileRecordPassportSet(FileRecord* rec, uint64_t passport);
 
 error_t     FileRecordSplice(const FileRecord* old, const BookSplice* sp, uint64_t count,
                              uint64_t size, uint64_t mtime, FileRecord** out,

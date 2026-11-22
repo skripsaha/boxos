@@ -88,8 +88,8 @@ static void IdsSorted(const FileRecord* rec, uint32_t* ids)
 }
 
 /* The header of file `f`, (fid, 0), counting one file: gen · flags · size ·
- * created · mtime_z · name · tags · [keep] · [made_by] · [shown] · [head], as
- * TallyFileHeadPut lays one. */
+ * created · mtime_z · name · tags · [keep] · [made_by] · [shown] · [head] ·
+ * [passport], as TallyFileHeadPut lays one. */
 static error_t FileHeadItem(BinderWork* w, const BinderFile* f, BinderItem* it)
 {
     BinderItems*      p    = &w->items;
@@ -107,7 +107,7 @@ static error_t FileHeadItem(BinderWork* w, const BinderFile* f, BinderItem* it)
                 "refused\n", (unsigned long long)f->fid);
         return ERR_BUSY;
     }
-    uint64_t          need = 91u + TALLY_HEAD_MOST + rec->name_len +
+    uint64_t          need = 101u + TALLY_HEAD_MOST + rec->name_len +
                              10u * ((uint64_t)rec->tag_count + rec->shown_count);
     uint64_t          ids  = (uint64_t)rec->tag_count * sizeof(uint32_t);
     if (!ItemRoom(p, need + ids))
@@ -136,6 +136,8 @@ static error_t FileHeadItem(BinderWork* w, const BinderFile* f, BinderItem* it)
         at += BookVarintPut(b + at, rec->head_len);
         at += TallyBytesPut(b + at, rec->head, rec->head_len);
     }
+    if (rec->flags & TALLY_FILE_PASSPORT)
+        at += BookVarintPut(b + at, rec->passport);
     *it = (BinderItem){ .key = { f->fid, 0 }, .count = 1, .body = b, .len = at };
     return OK;
 }
@@ -184,7 +186,7 @@ static error_t KeptHeadItem(BinderWork* w, const BookKeptFile* k, BinderItem* it
     BinderItems*         p   = &w->items;
     const TagFSMetadata* m   = &k->meta;
     uint64_t             len = m->filename ? strlen(m->filename) : 0;
-    if (!ItemRoom(p, 91u + TALLY_HEAD_MOST + len + 10u * ((uint64_t)m->tag_count + m->shown_count)))
+    if (!ItemRoom(p, 101u + TALLY_HEAD_MOST + len + 10u * ((uint64_t)m->tag_count + m->shown_count)))
         return ERR_NO_MEMORY;
     uint8_t* b  = p->buf;
     uint32_t at = BookVarintPut(b, k->gen);
@@ -208,6 +210,8 @@ static error_t KeptHeadItem(BinderWork* w, const BookKeptFile* k, BinderItem* it
         at += BookVarintPut(b + at, m->head_len);
         at += TallyBytesPut(b + at, m->head, m->head_len);
     }
+    if (m->flags & TALLY_FILE_PASSPORT)
+        at += BookVarintPut(b + at, m->passport);
     *it = (BinderItem){ .key = { k->fid, 0 }, .count = 1, .body = b, .len = at };
     return OK;
 }

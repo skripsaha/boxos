@@ -89,6 +89,8 @@
 #define TALLY_FILE_SHOWN     128u    /* the file of a program that shows its own tags to the programs its header names (TallyFileHead.shown) — never a tag */
 #define TALLY_FILE_HEAD      256u    /* the header carries the file's first bytes (TallyFileHead.head) — every file that holds a byte */
 #define TALLY_HEAD_MOST      16u     /* the first bytes of a file its card keeps: the file's own, all of a shorter one */
+#define TALLY_FILE_PASSPORT  512u    /* the file holds a signed program: its passport (TallyFileHead.passport) — never a tag */
+#define TALLY_PASSPORT_BIT   (1ull << 63)   /* every passport carries it, so none is a file's id */
 #define TALLY_TAG_HAS_VALUE  1u
 #define TALLY_TAG_RETIRED    2u
 #define TALLY_TAG_OWNED      4u      /* a program's own tag: whose it is follows the flags (TallyTag) */
@@ -546,7 +548,7 @@ static inline void TallyFidsOut(const uint8_t *ids, uint32_t bytes, uint64_t n, 
 
 /*
  * A file's header: gen · flags · size · created_ns · mtime_z · name_len ·
- * name · ntags · tags · [keep_ns] · [made_by] · [nshown · shown] · [head_len · head].
+ * name · ntags · tags · [keep_ns] · [made_by] · [nshown · shown] · [head_len · head] · [passport].
  * mtime_z is zigzag(modified_ns -
  * created_ns): a clock may run backwards. The name and the tags are pointed
  * at where they stand; a writer points them at what it writes from — `tags`
@@ -575,6 +577,16 @@ static inline void TallyFidsOut(const uint8_t *ids, uint32_t bytes, uint64_t n, 
  * of them — never 0, never more than the file's size. What a file is is told
  * by them, by whoever knows what they mean: the book keeps them and knows no
  * format. A file of no bytes carries neither the bit nor the field.
+ *
+ * The passport of the signed program the file holds closes it, there when,
+ * and only when, the flags carry TALLY_FILE_PASSPORT: who the program is
+ * across every copy and version of it — its author and its name, as the
+ * kernel makes it of the program's signature (box_trust.h) — TALLY_PASSPORT_BIT
+ * set, so it is never a file's id. Laid by the volume's maker and by the
+ * kernel when a program is started from the file and its passport is
+ * another; a change of what the file holds does not take it off, so a program
+ * written over with its next version stays itself. A file no signed program
+ * was known in carries neither the bit nor the field.
  */
 typedef struct {
     uint64_t       gen;
@@ -594,6 +606,7 @@ typedef struct {
     uint32_t       shown_bytes;
     uint64_t       head_len;     /* 0 unless TALLY_FILE_HEAD */
     const uint8_t *head;
+    uint64_t       passport;     /* 0 unless TALLY_FILE_PASSPORT */
 } TallyFileHead;
 
 static inline uint32_t TallyFileHeadPut(uint8_t *out, const TallyFileHead *h)
@@ -619,7 +632,16 @@ static inline uint32_t TallyFileHeadPut(uint8_t *out, const TallyFileHead *h)
         at += BookVarintPut(out + at, h->head_len);
         at += TallyBytesPut(out + at, h->head, h->head_len);
     }
+    if (h->flags & TALLY_FILE_PASSPORT)
+        at += BookVarintPut(out + at, h->passport);
     return at;
+}
+
+/* A passport as a header, a Born and a Labeled PASSPORT lay it, from *at: 0
+ * when it does not read or is no passport. */
+static inline int TallyPassportTake(const uint8_t *p, uint32_t end, uint32_t *at, uint64_t *passport)
+{
+    return TallyTake(p, end, at, passport) && (*passport & TALLY_PASSPORT_BIT);
 }
 
 /* A file's first bytes as a header, a Born and a Labeled HEAD lay them —
@@ -657,6 +679,7 @@ static inline int TallyFileHeadGet(const uint8_t *b, uint32_t len, TallyFileHead
     h->shown_bytes = 0;
     h->head_len    = 0;
     h->head        = (const uint8_t *)0;
+    h->passport    = 0;
     if ((h->flags & TALLY_FILE_DELETED) && (!TallyTake(b, len, &at, &h->keep_ns) || !h->keep_ns))
         return TALLY_BODY_BROKEN;
     if ((h->flags & TALLY_FILE_MADE_BY) && (!TallyTake(b, len, &at, &h->made_by) || !h->made_by))
@@ -666,6 +689,8 @@ static inline int TallyFileHeadGet(const uint8_t *b, uint32_t len, TallyFileHead
         return TALLY_BODY_BROKEN;
     if ((h->flags & TALLY_FILE_HEAD) &&
         (!TallyHeadTake(b, len, &at, h->size, &h->head_len, &h->head) || !h->head_len))
+        return TALLY_BODY_BROKEN;
+    if ((h->flags & TALLY_FILE_PASSPORT) && !TallyPassportTake(b, len, &at, &h->passport))
         return TALLY_BODY_BROKEN;
     if (!(h->flags & TALLY_FILE_ACTIVE)) return TALLY_BODY_BROKEN;
     return TallyBodyEnd(at, len);

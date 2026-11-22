@@ -578,6 +578,52 @@ out:
     return verdict;
 }
 
+/* The passport of the signed program a file holds: a Born and a header carry
+ * it last, a Labeled PASSPORT lays it anew, and one without bit 63 — a
+ * number that could be a file's id — does not read anywhere. */
+static TestResult TestRibbonPassport(void)
+{
+    static uint8_t        body[96], head[96], tags[1];
+    static RibbonLabeled  put, got;
+    static RibbonBorn     born, again;
+    static TallyFileHead  h, back;
+    const uint64_t        game    = TALLY_PASSPORT_BIT | 0x123456789Aull;
+    TestResult            verdict = TEST_PASS;
+    uint32_t              len, used;
+    put  = (RibbonLabeled){ .fid = 9, .base = 3, .what = LABEL_PASSPORT, .passport = game };
+    born = (RibbonBorn){ .fid = 9, .flags = TALLY_FILE_ACTIVE | TALLY_FILE_PASSPORT, .size = 0,
+                         .name = (const uint8_t*)"game", .name_len = 4, .passport = game };
+    h    = (TallyFileHead){ .gen = 4, .flags = TALLY_FILE_ACTIVE | TALLY_FILE_PASSPORT, .size = 0, .created_ns = 5,
+                            .modified_ns = 6, .name = (const uint8_t*)"game", .name_len = 4, .tags = tags,
+                            .passport = game };
+    len = RibbonLabeledBodyPut(body, &put);
+    TEST_ASSERT(RibbonLabeledGet(body, len, &got, &used) == TALLY_BODY_KNOWN && got.passport == game && used == len,
+                "a Labeled PASSPORT reads its passport");
+    TEST_ASSERT_EQ(RibbonLabeledGet(body, len - 1u, &got, &used), TALLY_BODY_BROKEN, "PASSPORT cut short does not read");
+    put.passport = 0x123456789Aull;
+    len = RibbonLabeledBodyPut(body, &put);
+    TEST_ASSERT_EQ(RibbonLabeledGet(body, len, &got, &used), TALLY_BODY_BROKEN, "one without bit 63 does not");
+    put = (RibbonLabeled){ .fid = 9, .base = 3, .what = LABEL_FLAGS, .set = TALLY_FILE_PASSPORT };
+    len = RibbonLabeledBodyPut(body, &put);
+    TEST_ASSERT_EQ(RibbonLabeledGet(body, len, &got, &used), TALLY_BODY_BROKEN,
+                   "the passport bit in FLAGS does not read");
+    len = RibbonBornBodyPut(body, &born);
+    TEST_ASSERT(RibbonBornGet(body, len, 1, &again, &used) == TALLY_BODY_KNOWN && again.passport == game,
+                "a Born carries it last");
+    born.passport = 7;
+    len = RibbonBornBodyPut(body, &born);
+    TEST_ASSERT_EQ(RibbonBornGet(body, len, 1, &again, &used), TALLY_BODY_BROKEN, "and no Born one without bit 63");
+    len = TallyFileHeadPut(head, &h);
+    TEST_ASSERT(TallyFileHeadGet(head, len, &back) == TALLY_BODY_KNOWN && back.passport == game,
+                "a header carries it last");
+    h.flags = TALLY_FILE_ACTIVE;
+    len = TallyFileHeadPut(head, &h);
+    TEST_ASSERT(TallyFileHeadGet(head, len, &back) == TALLY_BODY_KNOWN && back.passport == 0,
+                "a header of a file no signed program was known in carries no field");
+out:
+    return verdict;
+}
+
 static const TestCase g_ribbon_tests[] = {
     { .name = "golden_stitch",   .func = TestRibbonGoldenStitch,  .reach = TEST_READS_ONLY },
     { .name = "records_cut",     .func = TestRibbonRecordsCut,    .reach = TEST_READS_ONLY },
@@ -589,6 +635,7 @@ static const TestCase g_ribbon_tests[] = {
     { .name = "coined_owned",    .func = TestRibbonCoinedOwned,   .reach = TEST_READS_ONLY },
     { .name = "shown",           .func = TestRibbonShown,         .reach = TEST_READS_ONLY },
     { .name = "head",            .func = TestRibbonHead,          .reach = TEST_READS_ONLY },
+    { .name = "passport",        .func = TestRibbonPassport,      .reach = TEST_READS_ONLY },
 };
 
 const TestSuite g_ribbon_suite = {
