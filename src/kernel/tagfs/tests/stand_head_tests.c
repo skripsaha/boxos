@@ -5,6 +5,7 @@
 #include "../tagfs.h"
 #include "../settle/binder.h"
 #include "../settle/settle.h"
+#include "boxos_decks.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -19,6 +20,9 @@
 // ribbon and off a Tally; a change that leaves what the file holds as it was
 // (its tail laid in its block) leaves them; and every live file of the
 // volume, the image builder's among them, is held to what a read of it gives.
+// The question of the files that begin with given bytes is answered off the
+// records — the deck's storage.head.query too — and obj.getinfo says what
+// the system keeps a file as and how it begins.
 // ============================================================================
 
 #define STAND_HEAD_MOST  TAGFS_HEAD_MOST
@@ -145,6 +149,107 @@ out:
     return verdict;
 }
 
+/* Files the question tells apart: two that begin alike, one that begins
+ * otherwise, one too short for the bytes asked, one kept deleted. */
+typedef struct {
+    uint64_t alike[2];
+    uint64_t other;
+    uint64_t shorter;
+    uint64_t kept;
+} StandHeads;
+
+static const char s_head_mark[] = "\x01stand-head:";    /* a beginning no other file has */
+
+static bool StandHeadsMake(StandHeads* h)
+{
+    memset(h, 0, sizeof(*h));
+    return StandMakeFile("head-a.dat", "\x01stand-head:a, the first", 25, &h->alike[0]) &&
+           StandMakeFile("head-c.dat", "\x01stand-head:b, the second", 26, &h->alike[1]) &&
+           StandMakeFile("head-o.dat", "\x01stand-tail: the other", 23, &h->other) &&
+           StandMakeFile("head-s.dat", "\x01stand-head", 11, &h->shorter) &&
+           StandMakeFile("head-k.dat", "\x01stand-head:k, kept", 20, &h->kept) &&
+           tagfs_keep_file(h->kept, 3600u, INK_WARRANTED) == 0;
+}
+
+static void StandHeadsClean(const StandHeads* h)
+{
+    const uint64_t all[] = { h->alike[0], h->alike[1], h->other, h->shorter, h->kept };
+    for (uint32_t i = 0; i < ARRAY_SIZE(all); i++)
+        (void)tagfs_delete_file(all[i], INK_WARRANTED);
+}
+
+static TestResult TestStandHeadStartingWith(void)
+{
+    TestResult verdict = TEST_PASS;
+    StandHeads h;
+    uint64_t   got[4];
+    TagFSPage  page;
+    TEST_ASSERT(StandHeadsMake(&h), "two files begin alike, one otherwise, one too short, one kept deleted");
+    TEST_ASSERT_OK(TagFSStartingWithPage((const uint8_t*)s_head_mark, sizeof(s_head_mark) - 1u, 1, got, 4, true,
+                                         &page), "the files that begin with the mark are asked");
+    TEST_ASSERT(page.delivered == 2 && page.total == 2 && page.next == 0 && got[0] == h.alike[0] &&
+                got[1] == h.alike[1], "the two, in id order: not the other, not the short one, not the kept one");
+    TEST_ASSERT_OK(TagFSStartingWithPage((const uint8_t*)s_head_mark, sizeof(s_head_mark) - 1u, 1, got, 1, false,
+                                         &page), "a page of one");
+    TEST_ASSERT(page.delivered == 1 && got[0] == h.alike[0] && page.next == h.alike[1], "the first, the rest after");
+    TEST_ASSERT_OK(TagFSStartingWithPage((const uint8_t*)"\x01stand-head:a, t", TAGFS_HEAD_MOST, 1, got, 4, false,
+                                         &page), "all sixteen bytes a record keeps");
+    TEST_ASSERT(page.delivered == 1 && got[0] == h.alike[0], "the one that begins with every one of them");
+    TEST_ASSERT_OK(tagfs_restore_file(h.kept, INK_WARRANTED), "the kept file is brought back");
+    TEST_ASSERT_OK(TagFSStartingWithPage((const uint8_t*)s_head_mark, sizeof(s_head_mark) - 1u, 1, got, 4, true,
+                                         &page), "asked again");
+    TEST_ASSERT(page.total == 3, "and it is met");
+    TEST_ASSERT_EQ(TagFSStartingWithPage((const uint8_t*)s_head_mark, 0, 1, got, 4, false, &page),
+                   ERR_INVALID_ARGUMENT, "no bytes is no question");
+    TEST_ASSERT_EQ(TagFSStartingWithPage((const uint8_t*)"0123456789abcdefg", TAGFS_HEAD_MOST + 1u, 1, got, 4,
+                                         false, &page),
+                   ERR_INVALID_ARGUMENT, "nor more than a record keeps");
+out:
+    StandHeadsClean(&h);
+    return verdict;
+}
+
+/* The deck's head question, and what obj.getinfo says of a file: asked as the
+ * kernel asks it, its crates its own memory. */
+static TestResult TestStandHeadDeck(void)
+{
+    static uint8_t answer[256];
+    TestResult     verdict = TEST_PASS;
+    StandHeads     h;
+    uint64_t       said = 0, ids[2];
+    uint32_t       head[2];
+    TEST_ASSERT(StandHeadsMake(&h), "two files begin alike, one otherwise, one too short, one kept deleted");
+    TEST_ASSERT_OK(StandDeckAnswer(STORAGE_HEAD_QUERY, NULL, 0, s_head_mark, sizeof(s_head_mark) - 1u, answer,
+                                   sizeof(answer), &said, NULL), "storage.head.query of the mark");
+    memcpy(head, answer, sizeof(head));
+    memcpy(ids, answer + 8, sizeof(ids));
+    TEST_ASSERT(said == 8u + 2u * sizeof(uint64_t) && head[0] == 2 && head[1] == 2 && ids[0] == h.alike[0] &&
+                ids[1] == h.alike[1], "answers the two alike, in id order");
+    TEST_ASSERT_EQ(StandDeckAnswer(STORAGE_HEAD_QUERY, NULL, 0, "0123456789abcdefg", TAGFS_HEAD_MOST + 1u, answer,
+                                   sizeof(answer), &said, NULL),
+                   ERR_INVALID_ARGUMENT, "more bytes than a record keeps are refused");
+
+    TEST_ASSERT_OK(StandKeepInRole(h.other, TAGFS_FILE_ROLE_SYSTEM), "the other is kept in the system's role");
+    uint8_t params[9];
+    memcpy(params, &h.other, 8);
+    params[8] = STORAGE_TAGS_PERSON;
+    TEST_ASSERT_OK(StandDeckAnswer(STORAGE_OBJ_GET_INFO, params, sizeof(params), NULL, 0, answer, sizeof(answer),
+                                   &said, NULL), "its obj.getinfo");
+    const uint8_t* tail = answer + said - (2u + TAGFS_HEAD_MOST);
+    TEST_ASSERT(said > 2u + TAGFS_HEAD_MOST && tail[0] == 1 && tail[1] == TAGFS_HEAD_MOST &&
+                memcmp(tail + 2, "\x01stand-tail: the", TAGFS_HEAD_MOST) == 0,
+                "ends with its role, a system file, and its first sixteen bytes");
+    memcpy(params, &h.shorter, 8);
+    TEST_ASSERT_OK(StandDeckAnswer(STORAGE_OBJ_GET_INFO, params, sizeof(params), NULL, 0, answer, sizeof(answer),
+                                   &said, NULL), "the short one's");
+    tail = answer + said - (2u + 11u);
+    TEST_ASSERT(tail[0] == 0 && tail[1] == 11 && memcmp(tail + 2, "\x01stand-head", 11) == 0,
+                "an ordinary file of eleven bytes, all eleven of them");
+out:
+    StandHeadsClean(&h);
+    return verdict;
+}
+
 /* Every live file of the volume — the image builder's, and every one the
  * tests before left — keeps what a read of it begins with. */
 static TestResult TestStandHeadEveryFile(void)
@@ -180,6 +285,8 @@ static const TestCase g_stand_head_tests[] = {
     { .name = "stand_head_blocks", .func = TestStandHeadBlocks, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_head_spans", .func = TestStandHeadSpans, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_head_laid_and_mounted", .func = TestStandHeadLaidAndMounted, .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_head_starting_with", .func = TestStandHeadStartingWith, .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_head_deck", .func = TestStandHeadDeck, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_head_every_file", .func = TestStandHeadEveryFile, .reach = TEST_WRITES_TO_VOLUME },
 };
 

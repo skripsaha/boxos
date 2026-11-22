@@ -158,6 +158,12 @@ struct OpContext;
 int StandDeckAsk(uint16_t opcode, const void* params, uint16_t param_size, const void* in,
                  uint64_t in_size, const struct OpContext* ctx);
 
+/* The same op answered into `out`, `out_room` bytes of the kernel's memory —
+ * for a caller in the kernel, whose crates are read and written in place:
+ * *out_size the bytes the answer took. */
+int StandDeckAnswer(uint16_t opcode, const void* params, uint16_t param_size, const void* in, uint64_t in_size,
+                    void* out, uint64_t out_room, uint64_t* out_size, const struct OpContext* ctx);
+
 /* The kernel heap (stand_heap_tests.c). */
 TestResult TestStandHeapGrowsByRegionsAndGivesBack(void);
 TestResult TestStandHeapLargeTakesPagesAndGivesBack(void);

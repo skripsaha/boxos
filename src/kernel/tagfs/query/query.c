@@ -338,6 +338,24 @@ error_t TagFSNamedPage(TagOwner owner, const char* word, size_t length, const Ta
 }
 
 // ----------------------------------------------------------------------------
+// The files that begin with given bytes
+// ----------------------------------------------------------------------------
+
+error_t TagFSStartingWithPage(const uint8_t* bytes, uint32_t length, uint64_t from, uint64_t* out, uint32_t room,
+                              bool want_total, TagFSPage* page)
+{
+    memset(page, 0, sizeof(*page));
+    if (!bytes || length == 0 || length > TAGFS_HEAD_MOST || (room && !out))
+        return ERR_INVALID_ARGUMENT;
+    if (!tagfs_enter())
+        return ERR_TAGFS_NOT_INITIALIZED;
+    page->delivered = FileMapStartingWith(tagfs_get_state()->files, bytes, length, from, out, room, &page->next,
+                                          want_total ? &page->total : NULL);
+    tagfs_leave();
+    return OK;
+}
+
+// ----------------------------------------------------------------------------
 // The tags files wear
 // ----------------------------------------------------------------------------
 

@@ -727,6 +727,32 @@ uint32_t FileMapFiles(FileMap* map, uint64_t from, uint64_t* out, uint32_t room)
     return n;
 }
 
+uint32_t FileMapStartingWith(FileMap* map, const uint8_t* bytes, uint32_t length, uint64_t from, uint64_t* out,
+                             uint32_t room, uint64_t* next, uint32_t* total)
+{
+    uint32_t n = 0, pos = 0;
+    *next = 0;
+    if (total)
+        *total = 0;
+    TagFSLockTake(&map->lock);
+    for (FileMapNode* leaf = MapFrom(map, from, &pos); leaf && !(*next && !total); leaf = leaf->next, pos = 0) {
+        for (; pos < leaf->count && !(*next && !total); pos++) {
+            const FileRecord* rec = leaf->u.entry[pos].record;
+            if (!rec || (rec->flags & TAGFS_FILE_DELETED) || rec->head_len < length ||
+                memcmp(rec->head, bytes, length) != 0)
+                continue;
+            if (total)
+                (*total)++;
+            if (n < room)
+                out[n++] = leaf->key[pos];
+            else if (!*next)
+                *next = leaf->key[pos];
+        }
+    }
+    TagFSLockDrop(&map->lock);
+    return n;
+}
+
 uint32_t FileMapNamed(FileMap* map, const char* word, size_t length, uint64_t from, uint64_t* out,
                       uint32_t room, uint64_t* next)
 {

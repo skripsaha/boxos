@@ -363,13 +363,18 @@
  * the tags are those of `whose` the file wears (STORAGE_TAGS_* below) —
  * STORAGE_TAGS_ALL every one its caller may see —, each record [u16 key_len]
  * [u16 value_len][u8 1 for a tag the system keeps, else 0][u64 owner][key]
- * [value], owner 0 the person's and a program's file id a program's; the eight
+ * [value], owner 0 the person's and a program's file id a program's — and
+ * after them [u64 kept_until][u64 made_by][u8 role][u8 head_len][head]: the
+ * eight
  * bytes before the last are the time, in nanoseconds of the wall clock, at
  * which the volume lets a deleted file go (obj.keep), 0 for a file that is not
  * deleted; the last eight are the volume's id of the file of the program that
  * made this file, 0 when no program of the volume did (the system's own, or a
- * program started from bytes). The program's file is no promise of a file
- * still there: it may have been deleted since. */
+ * program started from bytes) — the program's file no promise of a file still
+ * there: it may have been deleted since; then what the system keeps the file
+ * as, 0 an ordinary file, 1 a system file, 2 a boot file, 3 the kernel; and
+ * the file's first bytes, as storage.head.query asks them, head_len of them
+ * (0 to STORAGE_HEAD_MOST). */
 #define STORAGE_OBJ_GET_INFO        0x09
 /* obj.span — a file made exactly `size` bytes long. params =
  * [u64 file_id][u64 size][u32 flags], the flags word optional (0). Shorter:
@@ -511,6 +516,18 @@
  * delivered][u32 total][u64 ids[delivered]], as storage.query's. A caller
  * with no program of its own (tag.show) asking of its own: ERR_TAGFS_NO_OWN_TAGS. */
 #define STORAGE_TAG_SHOWN           0x29
+
+/* head.query — the files that begin with given bytes. What a file is is told
+ * by its first bytes, by whoever knows what they mean — a box's, a font's, an
+ * itinerary's — and every file's card keeps them, STORAGE_HEAD_MOST at the
+ * most, exact through every change of what the file holds: no file is read,
+ * and the question asks nothing of anybody, as a file's name and size are
+ * anybody's to see. in_crate = the bytes, 1 to STORAGE_HEAD_MOST of them
+ * (ERR_INVALID_ARGUMENT otherwise); no params. out_crate = [u32 delivered]
+ * [u32 total][u64 file_ids[delivered]] in file id order, as storage.query's;
+ * a file kept deleted (obj.keep) is not met. */
+#define STORAGE_HEAD_QUERY          0x2A
+#define STORAGE_HEAD_MOST           16u
 #define STORAGE_SHOWN_TO_ME         0
 #define STORAGE_SHOWN_BY            1
 #define STORAGE_ASKS_TO_SEE         2

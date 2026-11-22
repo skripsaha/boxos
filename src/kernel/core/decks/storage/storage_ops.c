@@ -48,6 +48,10 @@
 #include "plot.h"     /* PlotFind, PlotSource — the write's bytes where they are */
 #include "settle_ops.h"  /* anchor, obj.write.settled — the waits for the Settle */
 
+STATIC_ASSERT(STORAGE_HEAD_MOST == TAGFS_HEAD_MOST, "head.query asks as many first bytes as a record keeps");
+STATIC_ASSERT(TAGFS_FILE_ROLE_SYSTEM >> 2 == 1 && TAGFS_FILE_ROLE_BOOT >> 2 == 2 && TAGFS_FILE_ROLE_KERNEL >> 2 == 3,
+              "obj.getinfo's role is the record's role bits, shifted down");
+
 /* -------------------------------------------------------------------------
  * Crate I/O lives in crate_io.{h,c}: crate_read / crate_write move a fixed
  * payload between a user Crate and a kernel buffer, and crate_in_buf /
@@ -363,6 +367,58 @@ static int ObjSpan(const ManifestOp *op,
  * asks no warrant.
  * ------------------------------------------------------------------------- */
 
+/* The ids a head question moves to the caller's crate at a time. */
+#define STORAGE_HEAD_PIECE 64u
+
+/* STORAGE_HEAD_QUERY  in_crate: the bytes a file begins with, 1 to
+ *                     STORAGE_HEAD_MOST of them; out_crate: [u32 delivered]
+ *                     [u32 total][u64 file_ids[delivered]], as storage.query's.
+ *                     What a file is is told by its first bytes, and every
+ *                     file's record keeps them: no file is read, and no tag is
+ *                     spoken — the question asks nothing of anybody, as a
+ *                     file's name and size are anybody's to see. */
+static int ObjHeadQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx)
+{
+    (void)crate_count;
+    if (op->out_crate == CRATE_INDEX_NONE || op->in_crate == CRATE_INDEX_NONE) return ERR_INVALID_ARGUMENT;
+    const Crate *in  = &crates[op->in_crate];
+    Crate       *out = &crates[op->out_crate];
+    if (in->size == 0 || in->size > STORAGE_HEAD_MOST) return ERR_INVALID_ARGUMENT;
+    if (out->capacity < 8) return ERR_BUFFER_TOO_SMALL;
+
+    uint8_t *bytes = crate_in_buf(in, ctx);
+    if (!bytes) return ERR_INVALID_ADDRESS;
+    uint64_t room_ids = (out->capacity - 8) / sizeof(uint64_t);
+    uint32_t most     = room_ids > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)room_ids;
+    uint64_t piece[STORAGE_HEAD_PIECE];
+    uint32_t hdr[2]   = { 0, 0 };   /* delivered, total */
+    uint64_t from     = 1;
+    error_t  rc       = OK;
+    for (bool first = true; rc == OK && hdr[0] < most; first = false) {
+        uint32_t  room = most - hdr[0] < STORAGE_HEAD_PIECE ? most - hdr[0] : STORAGE_HEAD_PIECE;
+        TagFSPage page;
+        rc = TagFSStartingWithPage(bytes, (uint32_t)in->size, from, piece, room, first, &page);
+        if (rc != OK)
+            break;
+        if (first)
+            hdr[1] = page.total;
+        if (page.delivered)
+            rc = (error_t)crate_out_commit_at(out, ctx, 8 + (uint64_t)hdr[0] * sizeof(uint64_t), piece,
+                                              (uint64_t)page.delivered * sizeof(uint64_t));
+        hdr[0] += page.delivered;
+        if (!page.next)
+            break;
+        from = page.next;
+    }
+    crate_buf_free(bytes);
+    if (rc != OK) return rc;
+    if (hdr[1] < hdr[0]) hdr[1] = hdr[0];
+    int crc = crate_out_commit_at(out, ctx, 0, hdr, sizeof(hdr));
+    if (crc != OK) return crc;
+    out->size = sizeof(hdr) + (uint64_t)hdr[0] * sizeof(uint64_t);
+    return OK;
+}
+
 static int ObjRename(const ManifestOp *op,
                      Crate            *crates,
                      uint16_t          crate_count,
@@ -404,6 +460,7 @@ error_t StorageDeckRegister(void)
         { STORAGE_TAG_QUERY,    ObjQuery,        OP_AUTH_APP, "storage.query"    },
         { STORAGE_TAG_LIST,     ObjTagList,      OP_AUTH_APP, "storage.tag.list" },
         { STORAGE_NAME_QUERY,   ObjNameQuery,    OP_AUTH_APP, "storage.name.query" },
+        { STORAGE_HEAD_QUERY,   ObjHeadQuery,    OP_AUTH_APP, "storage.head.query" },
         { STORAGE_OBJ_READ,     ObjRead,         OP_AUTH_APP, "storage.read"     },
         { STORAGE_OBJ_GET_INFO, ObjGetInfo,      OP_AUTH_APP, "storage.getinfo"  },
         { STORAGE_TAG_SHOWN,    ObjTagShown,     OP_AUTH_APP, "storage.tag.shown" },
