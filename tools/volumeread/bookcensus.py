@@ -32,7 +32,7 @@ import os
 import re
 import struct
 
-from . import bookread, stitch, tally
+from . import bookread, ondisk, stitch, tally
 from .bookmount import BookMount, Blocks
 from .bookground import BookGround
 from .ground_owners import BOOK_OWNERS, BOOK_OWNER_ALONE
@@ -287,6 +287,7 @@ class BookCensus:
         if m.refusal is None:
             self._Boot()
             self._Digests()
+            self._Heads()
         self.free_runs = RunsSubtract([(g.data_block, g.data_end - g.data_block)],
                                       RunsNormal([r for c in self.claims for r in c.runs]))
         self.counted = m.tally is None or not BookmarksNamed(m)
@@ -471,6 +472,7 @@ class BookCensus:
         ribbon's for fresh data, the Tally's DIGESTS for the rest; a block in
         a rotten DIGESTS range reads unchecked (§4.5 п.3)."""
         m, lanes = self.mount, bookread.SeedLanes(self.g.uuid)
+        self.misread = set()
         rotten = [r for r in m.tally.rotten if r.tree == tally.DIGESTS]
         digests = dict(m.tally.content.digests)
         digests.update(m.overlay)
@@ -488,8 +490,25 @@ class BookCensus:
             for runs, what in ((RunsNormal(wrong), "do not match their digests"),
                                (RunsNormal(none), "carry no digest in the Tally or the ribbon")):
                 if runs:
+                    self.misread.add(fid)
                     self.Say("DIGEST_MISMATCH", "damage", "%s: block(s) %s %s — a read of them answers "
                              "ERR_CHECKSUM" % (self.Label(fid), RunsText(runs), what), runs)
+
+    def _Heads(self):
+        """Every live file's card held to what the file holds: its first bytes, as many as it has up to
+        HEAD_MOST, and the head bit exactly when it has any (tagfs_constants.h TAGFS_FILE_HEAD) — what a file
+        is is asked of them, and a card that says otherwise answers wrong. A file whose blocks do not read as
+        they were written is held to nothing here: DIGEST_MISMATCH says it, and its card's bytes are the
+        written ones."""
+        for fid in sorted(self.mount.files):
+            fs, data = self.mount.files[fid], self.Content(fid)
+            if data is None or fid in self.misread:
+                continue
+            want = data[:ondisk.HEAD_MOST]
+            if fs.head != want or bool(fs.flags & ondisk.FILE_HEAD) != bool(want):
+                self.Say("HEAD_MISMATCH", "damage", "%s: its card says it begins %s and it begins %s — a question "
+                         "of what it is answers wrong" % (self.Label(fid), fs.head.hex() or "with nothing",
+                                                          want.hex() or "with nothing"))
 
     # --- the files -----------------------------------------------------------
 
@@ -609,6 +628,7 @@ class BookCensus:
         fs = self.mount.files[fid]
         return {"fid": fid, "state": state, "name": fs.name.decode("utf-8", "replace"), "size": fs.size,
                 "gen": fs.gen, "flags": fs.flags, "keep_ns": fs.keep_ns, "made_by": fs.made_by, "shown": list(fs.shown),
+                "head": fs.head.hex(),
                 "tags": list(fs.tags),
                 "tag_text": [self.mount.tags[t].Text().decode("utf-8", "replace") for t in fs.tags if t in self.mount.tags],
                 "runs": [["hole" if r.hole else "shared" if tally.RunShared(r) else "data", r.start, r.count, r.birth]

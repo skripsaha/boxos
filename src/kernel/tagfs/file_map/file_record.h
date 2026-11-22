@@ -17,6 +17,9 @@ STATIC_ASSERT(TAGFS_FILE_ROLE_KERNEL == TALLY_FILE_ROLE_KERNEL, "TAGFS_FILE_ROLE
 STATIC_ASSERT(TAGFS_FILE_DELETED     == TALLY_FILE_DELETED,     "TAGFS_FILE_DELETED is the book's TALLY_FILE_DELETED");
 STATIC_ASSERT(TAGFS_FILE_MADE_BY     == TALLY_FILE_MADE_BY,     "TAGFS_FILE_MADE_BY is the book's TALLY_FILE_MADE_BY");
 STATIC_ASSERT(TAGFS_FILE_SHOWN       == TALLY_FILE_SHOWN,       "TAGFS_FILE_SHOWN is the book's TALLY_FILE_SHOWN");
+STATIC_ASSERT(TAGFS_FILE_HEAD        == TALLY_FILE_HEAD,        "TAGFS_FILE_HEAD is the book's TALLY_FILE_HEAD");
+STATIC_ASSERT(TAGFS_HEAD_MOST        == TALLY_HEAD_MOST,        "a record keeps as many first bytes as the book does");
+STATIC_ASSERT(TAGFS_HEAD_MOST        <= sizeof(((TagFSMetadata*)0)->head), "and TagFSMetadata room for them");
 
 /*
  * FileRecord — what memory knows of one live file: a header (name, tags,
@@ -133,6 +136,12 @@ typedef struct FileRecord {
      * `shown_count` of them, never 0 with the bit and 0 without it. */
     const uint64_t*    shown_to;
     uint32_t           shown_count;
+    /* With TAGFS_FILE_HEAD, the file's first bytes: min(size, TAGFS_HEAD_MOST)
+     * of them, exact through every change of what the file holds — the Ink
+     * that makes the change sets them (FileRecordHeadSet) before the record is
+     * shared; head_len 0 for a file of no bytes. */
+    uint8_t            head[TAGFS_HEAD_MOST];
+    uint8_t            head_len;
     const uint32_t*    tags;         /* these three point into the header's allocation */
     const char*        name;         /* NUL-terminated */
 #ifdef CONFIG_VOLUME_TESTS
@@ -179,8 +188,9 @@ typedef struct {
 /* The record `meta` describes — its Strips cut into Parcels — with one
  * reference: NULL when there is no memory, or when a Strip of it names no
  * block (count 0). Its flags hold TAGFS_FILE_MADE_BY exactly when meta->made_by
- * is not 0, and TAGFS_FILE_SHOWN exactly when meta->shown_count is. Every
- * allocation is made here, with no lock held. */
+ * is not 0, TAGFS_FILE_SHOWN exactly when meta->shown_count is, and
+ * TAGFS_FILE_HEAD exactly when meta->head_len is. Every allocation is made
+ * here, with no lock held. */
 FileRecord* FileRecordBuild(const TagFSMetadata* meta);
 
 /* The same, its Strips cut as `cut` gives — the Strips of each Parcel, `ncut`
@@ -189,10 +199,11 @@ FileRecord* FileRecordBuildCut(const TagFSMetadata* meta, const uint32_t* cut, u
 
 /* A record with a new header — `name`, `tags`, the programs it shows its
  * tags to (`shown`, rising), `flags`, `keep_until` — and every one of the old
- * record's runs, shared rather than copied; its times, size, file id and
- * made_by the old one's (`flags` has TAGFS_FILE_MADE_BY as the old record's
- * made_by says and TAGFS_FILE_SHOWN as `shown_count` does, whatever the
- * caller gave). NULL when there is no memory. */
+ * record's runs, shared rather than copied; its times, size, file id, made_by
+ * and first bytes the old one's (`flags` has TAGFS_FILE_MADE_BY and
+ * TAGFS_FILE_HEAD as the old record's fields say and TAGFS_FILE_SHOWN as
+ * `shown_count` does, whatever the caller gave). NULL when there is no
+ * memory. */
 FileRecord* FileRecordRelabel(const FileRecord* old, const char* name, const uint32_t* tags,
                               uint32_t tag_count, const uint64_t* shown, uint32_t shown_count,
                               uint32_t flags, uint64_t keep_until);
@@ -212,6 +223,11 @@ FileRecord* FileRecordRelabel(const FileRecord* old, const char* name, const uin
  * back by another, each Strip DATA or SHARED as it was named — in a new array
  * the caller frees, *nfreed of them. A hole owns no ground and is never in it.
  */
+/* The first bytes of `rec` — a record just built, that no map holds yet and
+ * nobody else sees — made `head`, `len` of them (TAGFS_HEAD_MOST at the most),
+ * TAGFS_FILE_HEAD on exactly when there are any. */
+void        FileRecordHeadSet(FileRecord* rec, const uint8_t* head, uint32_t len);
+
 error_t     FileRecordSplice(const FileRecord* old, const BookSplice* sp, uint64_t count,
                              uint64_t size, uint64_t mtime, FileRecord** out,
                              Strip** freed, uint64_t* nfreed);

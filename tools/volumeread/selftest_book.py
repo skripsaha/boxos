@@ -117,17 +117,50 @@ class BookTargets:
                              "files" % LANDING_ROOM)
         self.fid, self.tag = self.content.next_fid, self.content.next_tag
         self.maxfid = max(self.content.files)
+        self.written = {}
+
+    def Born(self, b, fs, digests, name, size=None):
+        """A Born of a new file `fs` (fid) whose one DATA run is at block `b` (Headed)."""
+        size = BLOCK * len(digests) if size is None else size
+        return self.Headed(stitch.Born(fid=fs, flags=ondisk.FILE_ACTIVE, size=size, created_ns=1, modified_ns=1,
+                                       name=name, tags=(), runs=[stitch.Data(b, len(digests))], digests=digests))
+
+    def Block(self, b):
+        """Block `b` as the landing laid it (PutBlock, Fresh), or as the image holds it — zeros past the
+        volume's ground, where no block is."""
+        if b in self.written:
+            return self.written[b]
+        return (self.ground.Block(b) if 0 <= b <= self.ground.data_end else None) or bytes(BLOCK)
+
+    def Headed(self, born):
+        """`born`, a Born a landing writes by hand, carrying the first bytes of the file it gives birth to as
+        a kernel's Born does: its first run's block as the landing laid it or the image holds it — a hole's
+        zeros —, its Slip over them when its last block is its first (§16.5 п.13)."""
+        d = stitch.RecordDecode(stitch.BORN, born.body, 1)
+        if d["size"] == 0:
+            return born
+        run = d["runs"][0] if d["runs"] else None
+        raw = bytearray(bytes(BLOCK) if run is None or run.hole else self.Block(run.start))
+        off, data = d["slip"]
+        if data and d["size"] <= BLOCK:
+            raw[off:off + len(data)] = data
+        d["flags"] |= ondisk.FILE_HEAD
+        d["head"] = bytes(raw[:min(d["size"], ondisk.HEAD_MOST)])
+        return stitch.RecordAgain(stitch.BORN, d)
 
     def Fork(self):
         o = OverlayMedium(self.base.base)
         o.over = dict(self.base.over)
+        self.written = {}
         return o
 
     def Pen(self, o):
         return stitch_pen.StitchPen(o, BookGround(o))
 
     def PutBlock(self, o, b, data):
-        o.Put(self.ground.base + b * SECTORS_PER_BLOCK, bytes(data).ljust(BLOCK, b"\0"))
+        raw = bytes(data).ljust(BLOCK, b"\0")
+        self.written[b] = raw
+        o.Put(self.ground.base + b * SECTORS_PER_BLOCK, raw)
 
     @staticmethod
     def Pattern(seed):
@@ -199,8 +232,3 @@ def Found(c, code, *words):
     return any(x.code == code and all(w in x.text for w in words) for x in c.findings)
 
 
-def Born(b, fs, digests, name, size=None):
-    """A Born of a new file `fs` (fid) whose one DATA run is at F + b."""
-    size = BLOCK * len(digests) if size is None else size
-    return stitch.Born(fid=fs, flags=ondisk.FILE_ACTIVE, size=size, created_ns=1, modified_ns=1,
-                       name=name, tags=(), runs=[stitch.Data(b, len(digests))], digests=digests)

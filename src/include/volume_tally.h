@@ -87,6 +87,8 @@
  * names (TALLY_GOLDEN_NODE_CRC), and a header keeps such a bit as it was laid. */
 #define TALLY_FILE_MADE_BY   64u     /* made by a program of the volume, its file named by the header (TallyFileHead.made_by) — never a tag */
 #define TALLY_FILE_SHOWN     128u    /* the file of a program that shows its own tags to the programs its header names (TallyFileHead.shown) — never a tag */
+#define TALLY_FILE_HEAD      256u    /* the header carries the file's first bytes (TallyFileHead.head) — every file that holds a byte */
+#define TALLY_HEAD_MOST      16u     /* the first bytes of a file its card keeps: the file's own, all of a shorter one */
 #define TALLY_TAG_HAS_VALUE  1u
 #define TALLY_TAG_RETIRED    2u
 #define TALLY_TAG_OWNED      4u      /* a program's own tag: whose it is follows the flags (TallyTag) */
@@ -544,7 +546,8 @@ static inline void TallyFidsOut(const uint8_t *ids, uint32_t bytes, uint64_t n, 
 
 /*
  * A file's header: gen · flags · size · created_ns · mtime_z · name_len ·
- * name · ntags · tags · [keep_ns] · [made_by] · [nshown · shown]. mtime_z is zigzag(modified_ns -
+ * name · ntags · tags · [keep_ns] · [made_by] · [nshown · shown] · [head_len · head].
+ * mtime_z is zigzag(modified_ns -
  * created_ns): a clock may run backwards. The name and the tags are pointed
  * at where they stand; a writer points them at what it writes from — `tags`
  * the ids after their count, as TallyIdsPut writes them, `tags_bytes` long.
@@ -566,6 +569,12 @@ static inline void TallyFidsOut(const uint8_t *ids, uint32_t bytes, uint64_t n, 
  * card of the program's own file: its count, never 0, and the ids rising
  * (TallyFidsPut), 0 first for every program. A file that shows nothing
  * carries neither the bit nor the list.
+ *
+ * The file's first bytes close it, there when, and only when, the flags carry
+ * TALLY_FILE_HEAD: as many as the file holds up to TALLY_HEAD_MOST, its first
+ * of them — never 0, never more than the file's size. What a file is is told
+ * by them, by whoever knows what they mean: the book keeps them and knows no
+ * format. A file of no bytes carries neither the bit nor the field.
  */
 typedef struct {
     uint64_t       gen;
@@ -583,6 +592,8 @@ typedef struct {
     uint64_t       nshown;       /* 0 unless TALLY_FILE_SHOWN */
     const uint8_t *shown;
     uint32_t       shown_bytes;
+    uint64_t       head_len;     /* 0 unless TALLY_FILE_HEAD */
+    const uint8_t *head;
 } TallyFileHead;
 
 static inline uint32_t TallyFileHeadPut(uint8_t *out, const TallyFileHead *h)
@@ -604,7 +615,21 @@ static inline uint32_t TallyFileHeadPut(uint8_t *out, const TallyFileHead *h)
         at += BookVarintPut(out + at, h->nshown);
         at += TallyBytesPut(out + at, h->shown, h->shown_bytes);
     }
+    if (h->flags & TALLY_FILE_HEAD) {
+        at += BookVarintPut(out + at, h->head_len);
+        at += TallyBytesPut(out + at, h->head, h->head_len);
+    }
     return at;
+}
+
+/* A file's first bytes as a header, a Born and a Labeled HEAD lay them —
+ * their count, then them —, from *at: 0 when they do not read, or are more
+ * than TALLY_HEAD_MOST or than `size`. */
+static inline int TallyHeadTake(const uint8_t *p, uint32_t end, uint32_t *at, uint64_t size, uint64_t *len,
+                                const uint8_t **head)
+{
+    return TallyTake(p, end, at, len) && *len <= TALLY_HEAD_MOST && *len <= size &&
+           TallyTakeBytes(p, end, at, *len, head);
 }
 
 /* A header read back: BROKEN as well for one that is not ACTIVE — such an
@@ -630,12 +655,17 @@ static inline int TallyFileHeadGet(const uint8_t *b, uint32_t len, TallyFileHead
     h->nshown      = 0;
     h->shown       = (const uint8_t *)0;
     h->shown_bytes = 0;
+    h->head_len    = 0;
+    h->head        = (const uint8_t *)0;
     if ((h->flags & TALLY_FILE_DELETED) && (!TallyTake(b, len, &at, &h->keep_ns) || !h->keep_ns))
         return TALLY_BODY_BROKEN;
     if ((h->flags & TALLY_FILE_MADE_BY) && (!TallyTake(b, len, &at, &h->made_by) || !h->made_by))
         return TALLY_BODY_BROKEN;
     if ((h->flags & TALLY_FILE_SHOWN) &&
         (!TallyFidsTake(b, len, &at, &h->nshown, &h->shown, &h->shown_bytes) || !h->nshown))
+        return TALLY_BODY_BROKEN;
+    if ((h->flags & TALLY_FILE_HEAD) &&
+        (!TallyHeadTake(b, len, &at, h->size, &h->head_len, &h->head) || !h->head_len))
         return TALLY_BODY_BROKEN;
     if (!(h->flags & TALLY_FILE_ACTIVE)) return TALLY_BODY_BROKEN;
     return TallyBodyEnd(at, len);

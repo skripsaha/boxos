@@ -522,6 +522,62 @@ out:
     return verdict;
 }
 
+/* A file's first bytes (§2.8, volume_ribbon.h): the Labeled's HEAD verb —
+ * none reads, more than TALLY_HEAD_MOST does not —, the last field of a Born
+ * and of the header that carries it in the Tally, there exactly when the
+ * flags carry the bit, never more than the file's size nor none with the bit,
+ * and the bit in a Labeled's FLAGS does not read. */
+static TestResult TestRibbonHead(void)
+{
+    static const uint8_t  first[] = "0123456789abcdefXYZ";
+    static uint8_t        body[96], head[96], tags[1];
+    static RibbonLabeled  put, got;
+    static RibbonBorn     born, again;
+    static TallyFileHead  h, back;
+    TestResult            verdict = TEST_PASS;
+    uint32_t              len, used;
+    put  = (RibbonLabeled){ .fid = 9, .base = 3, .what = LABEL_HEAD, .head_len = 5, .head = first };
+    born = (RibbonBorn){ .fid = 9, .flags = TALLY_FILE_ACTIVE | TALLY_FILE_HEAD, .size = 4096,
+                         .name = (const uint8_t*)"file", .name_len = 4, .head_len = TALLY_HEAD_MOST, .head = first };
+    h    = (TallyFileHead){ .gen = 4, .flags = TALLY_FILE_ACTIVE | TALLY_FILE_HEAD, .size = 3, .created_ns = 5,
+                            .modified_ns = 6, .name = (const uint8_t*)"file", .name_len = 4, .tags = tags,
+                            .head_len = 3, .head = first };
+    len = RibbonLabeledBodyPut(body, &put);
+    TEST_ASSERT(RibbonLabeledGet(body, len, &got, &used) == TALLY_BODY_KNOWN && got.head_len == 5 &&
+                memcmp(got.head, first, 5) == 0 && used == len, "a Labeled HEAD reads its new first bytes");
+    TEST_ASSERT_EQ(RibbonLabeledGet(body, len - 1u, &got, &used), TALLY_BODY_BROKEN, "HEAD cut short does not read");
+    put.head_len = 0;
+    len = RibbonLabeledBodyPut(body, &put);
+    TEST_ASSERT(RibbonLabeledGet(body, len, &got, &used) == TALLY_BODY_KNOWN && got.head_len == 0,
+                "none reads: the file holds none");
+    put.head_len = TALLY_HEAD_MOST + 1u;
+    len = RibbonLabeledBodyPut(body, &put);
+    TEST_ASSERT_EQ(RibbonLabeledGet(body, len, &got, &used), TALLY_BODY_BROKEN, "more than a card keeps does not");
+    put = (RibbonLabeled){ .fid = 9, .base = 3, .what = LABEL_FLAGS, .clear = TALLY_FILE_HEAD };
+    len = RibbonLabeledBodyPut(body, &put);
+    TEST_ASSERT_EQ(RibbonLabeledGet(body, len, &got, &used), TALLY_BODY_BROKEN, "the head bit in FLAGS does not read");
+    len = RibbonBornBodyPut(body, &born);
+    TEST_ASSERT(RibbonBornGet(body, len, 1, &again, &used) == TALLY_BODY_KNOWN && again.head_len == TALLY_HEAD_MOST &&
+                memcmp(again.head, first, TALLY_HEAD_MOST) == 0, "a Born carries them last");
+    born.head_len = 0;
+    len = RibbonBornBodyPut(body, &born);
+    TEST_ASSERT_EQ(RibbonBornGet(body, len, 1, &again, &used), TALLY_BODY_BROKEN, "and with the bit, at least one");
+    len = TallyFileHeadPut(head, &h);
+    TEST_ASSERT(TallyFileHeadGet(head, len, &back) == TALLY_BODY_KNOWN && back.head_len == 3 &&
+                memcmp(back.head, first, 3) == 0, "a header of a file of three bytes carries the three");
+    h.head_len = 4;
+    len = TallyFileHeadPut(head, &h);
+    TEST_ASSERT_EQ(TallyFileHeadGet(head, len, &back), TALLY_BODY_BROKEN, "and no more than the file holds");
+    h.flags    = TALLY_FILE_ACTIVE;
+    h.size     = 0;
+    h.head_len = 0;
+    len = TallyFileHeadPut(head, &h);
+    TEST_ASSERT(TallyFileHeadGet(head, len, &back) == TALLY_BODY_KNOWN && back.head_len == 0,
+                "a file of no bytes carries no field");
+out:
+    return verdict;
+}
+
 static const TestCase g_ribbon_tests[] = {
     { .name = "golden_stitch",   .func = TestRibbonGoldenStitch,  .reach = TEST_READS_ONLY },
     { .name = "records_cut",     .func = TestRibbonRecordsCut,    .reach = TEST_READS_ONLY },
@@ -532,6 +588,7 @@ static const TestCase g_ribbon_tests[] = {
     { .name = "keep",            .func = TestRibbonKeep,          .reach = TEST_READS_ONLY },
     { .name = "coined_owned",    .func = TestRibbonCoinedOwned,   .reach = TEST_READS_ONLY },
     { .name = "shown",           .func = TestRibbonShown,         .reach = TEST_READS_ONLY },
+    { .name = "head",            .func = TestRibbonHead,          .reach = TEST_READS_ONLY },
 };
 
 const TestSuite g_ribbon_suite = {
