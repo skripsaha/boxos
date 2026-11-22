@@ -1,0 +1,1330 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Архитектура ядра BoxOS</title>
+<meta name="description" content="Архитектура ядра BoxOS: асимметричные ядра процессора, асинхронный вызов ядра через кольца, Manifest и деки, события по тегам, память, TagFS, загрузка.">
+<style>
+:root{
+  --bg:#fbfbf9; --fg:#1d1d1f; --muted:#5d6166; --line:#d3d3ce; --card:#ffffff; --code:#f0f0ec;
+  --userb:#f1f5fc; --user:#e2ecfb; --kernb:#fdf7ec; --kern:#fbebcd; --hw:#e9e9e7; --ring:#d9f1e2;
+  --ro:#ece3f7; --sh:#fbf1bf;
+  --acc:#c2410c; --ans:#1d4ed8; --evt:#7e22ce;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#141416; --fg:#e7e7ea; --muted:#a3a3ab; --line:#3b3b42; --card:#1c1c20; --code:#232328;
+    --userb:#161d29; --user:#1d2b44; --kernb:#211b12; --kern:#3b2d15; --hw:#2b2b30; --ring:#163a2b;
+    --ro:#2e2442; --sh:#3a3313;
+    --acc:#fb923c; --ans:#7fa8ff; --evt:#c89cff;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#141416; --fg:#e7e7ea; --muted:#a3a3ab; --line:#3b3b42; --card:#1c1c20; --code:#232328;
+  --userb:#161d29; --user:#1d2b44; --kernb:#211b12; --kern:#3b2d15; --hw:#2b2b30; --ring:#163a2b;
+  --ro:#2e2442; --sh:#3a3313;
+  --acc:#fb923c; --ans:#7fa8ff; --evt:#c89cff;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+main{max-width:1240px;margin:0 auto;padding:32px 16px 80px}
+.text{max-width:860px}
+h1{font-size:34px;line-height:1.2;margin:0 0 8px}
+h2{font-size:25px;line-height:1.25;margin:56px 0 12px;padding-top:12px;border-top:1px solid var(--line)}
+h3{font-size:18px;margin:28px 0 8px}
+p,ul,ol{margin:0 0 12px}
+li{margin:2px 0}
+a{color:var(--ans)}
+code{font:13.5px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--code);
+  padding:1px 5px;border-radius:4px;white-space:nowrap}
+.lead{font-size:17px;color:var(--muted);margin-bottom:20px}
+.meta{font-size:14px;color:var(--muted)}
+table{border-collapse:collapse;margin:8px 0 16px;font-size:14.5px;width:100%}
+th,td{border:1px solid var(--line);padding:6px 9px;text-align:left;vertical-align:top}
+th{background:var(--code);font-weight:600}
+.tbl{overflow-x:auto;max-width:100%}
+.toc{columns:2;column-gap:40px;font-size:15px;padding-left:20px}
+.toc li{break-inside:avoid}
+.note{border-left:3px solid var(--acc);padding:6px 12px;background:var(--card);margin:12px 0;font-size:15px}
+figure{margin:20px 0 28px;padding:14px;background:var(--card);border:1px solid var(--line);border-radius:10px}
+figure svg{display:block;width:100%;height:auto;color:var(--fg);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}
+figcaption{font-size:14px;color:var(--muted);margin-top:10px;line-height:1.5}
+figcaption b{color:var(--fg)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13px;color:var(--muted);margin-top:8px}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.sw{display:inline-block;width:14px;height:14px;border:1px solid var(--line);border-radius:3px}
+.sl{display:inline-block;width:22px;height:0;border-top:2px solid}
+
+/* SVG */
+svg text{fill:currentColor;font-size:12px}
+svg .t{font-size:13px;font-weight:600}
+svg .ttl{font-size:14px;font-weight:700}
+svg .s{font-size:11px;fill:var(--muted)}
+svg .cap{font-size:11px;font-weight:700;letter-spacing:.07em;fill:var(--muted)}
+svg .lbl{paint-order:stroke;stroke:var(--card);stroke-width:4px;stroke-linejoin:round}
+svg .b{stroke:currentColor;stroke-width:1.1}
+svg .bl{stroke:var(--line);stroke-width:1}
+svg .fc{fill:var(--card)} svg .fu{fill:var(--user)} svg .fub{fill:var(--userb)}
+svg .fk{fill:var(--kern)} svg .fkb{fill:var(--kernb)} svg .fh{fill:var(--hw)}
+svg .fr{fill:var(--ring)} svg .fro{fill:var(--ro)} svg .fsh{fill:var(--sh)} svg .fn{fill:none}
+svg .ln{stroke:currentColor;stroke-width:1.3;fill:none}
+svg .lc{stroke:var(--acc);stroke-width:1.9;fill:none}
+svg .la{stroke:var(--ans);stroke-width:1.9;fill:none}
+svg .le{stroke:var(--evt);stroke-width:1.9;fill:none}
+svg .dash{stroke-dasharray:5 4}
+svg .life{stroke:var(--muted);stroke-width:1;stroke-dasharray:3 4;fill:none}
+svg .mk{fill:currentColor} svg .mkc{fill:var(--acc)} svg .mka{fill:var(--ans)} svg .mke{fill:var(--evt)}
+svg .tc{fill:var(--acc)} svg .ta{fill:var(--ans)} svg .te{fill:var(--evt)}
+svg .tick{stroke:var(--muted);stroke-width:1}
+
+@media (max-width:700px){ .toc{columns:1} h1{font-size:28px} }
+@media print{
+  :root{--bg:#fff;--card:#fff}
+  main{max-width:none;padding:0}
+  h2{break-before:page;border-top:none}
+  figure{break-inside:avoid;border-color:#bbb}
+}
+</style>
+</head>
+<body>
+<main>
+
+<header class="text">
+<h1>Архитектура ядра BoxOS</h1>
+<p class="lead">Как устроено ядро: роли ядер процессора, путь вызова от программы до обработчика и обратно, события, память, файловая система и загрузка. Каждая схема сопровождается текстом; в конце — карта исходников и словарь.</p>
+<p class="meta">Состояние кода: ветка <code>boxmetal</code>, коммит <code>20098684</code>, 22.11.2026. Ядро — x86-64, C и ассемблер: ≈222 тыс. строк в <code>src/kernel</code>, <code>src/include</code>, <code>src/lib/kernel</code> (без тестов TagFS), ≈14,5 тыс. строк загрузчиков.</p>
+</header>
+
+<section class="text">
+<h3>Содержание</h3>
+<ol class="toc">
+<li><a href="#overview">Главная схема</a></li>
+<li><a href="#principles">Принципы</a></li>
+<li><a href="#amp">Ядра процессора: AMP</a></li>
+<li><a href="#cabin">Программа: Cabin и Strand</a></li>
+<li><a href="#call">Вызов ядра: вся цепочка</a></li>
+<li><a href="#formats">Форматы: Pocket, Manifest, Crate, Result</a></li>
+<li><a href="#wait">Ответ, ожидание, состояния потока</a></li>
+<li><a href="#decks">Деки, операции, права</a></li>
+<li><a href="#channels">Обмен: Touch, Brook, Bay, сообщения</a></li>
+<li><a href="#irq">Прерывания и отложенная работа</a></li>
+<li><a href="#sched">Планировщик</a></li>
+<li><a href="#memory">Память</a></li>
+<li><a href="#tagfs">Хранение: TagFS и Boardroom</a></li>
+<li><a href="#boot">Загрузка</a></li>
+<li><a href="#userspace">Системные программы и библиотеки</a></li>
+<li><a href="#notbuilt">Объявлено, но не задействовано</a></li>
+<li><a href="#source">Карта исходников</a></li>
+<li><a href="#glossary">Словарь</a></li>
+</ol>
+</section>
+
+<h2 id="overview">1. Главная схема</h2>
+
+<figure>
+<svg viewBox="0 0 1200 1000" role="img" aria-label="Главная схема BoxOS: программы в кольце 3 кладут Pocket в свои кольца и входят в ядро через Notify; App Core ставит поток в очередь K-Core; K-Core через Guide, Manifest и OpRegistry вызывает обработчик дека; ответ Result возвращается в ResultRing программы; прерывания устройств приходят на BSP и передаются K-Core через Baton.">
+<defs>
+<marker id="f1k" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk"/></marker>
+<marker id="f1c" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mkc"/></marker>
+<marker id="f1a" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mka"/></marker>
+<marker id="f1e" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mke"/></marker>
+</defs>
+
+<!-- bands -->
+<rect x="10" y="10" width="1180" height="244" rx="10" class="fub bl"/>
+<rect x="10" y="254" width="1180" height="556" rx="0" class="fkb bl"/>
+<rect x="10" y="822" width="1180" height="168" rx="10" class="fh bl"/>
+<text x="26" y="31" class="cap">ПОЛЬЗОВАТЕЛЬСКОЕ ПРОСТРАНСТВО · КОЛЬЦО 3</text>
+<text x="1174" y="322" class="cap" text-anchor="end">ЯДРО · КОЛЬЦО 0</text>
+<text x="26" y="843" class="cap">ДРАЙВЕРЫ (КОЛЬЦО 0) И ОБОРУДОВАНИЕ</text>
+
+<!-- Cabin 1 -->
+<rect x="30" y="42" width="360" height="156" rx="8" class="fc b"/>
+<text x="46" y="63" class="ttl">Cabin — программа</text>
+<text x="46" y="80" class="s">boxlib/boxcxx: Manifest → Pocket, ждёт Result</text>
+<rect x="54" y="88" width="290" height="46" rx="6" class="fu b"/>
+<rect x="46" y="94" width="290" height="46" rx="6" class="fu b"/>
+<text x="191" y="114" text-anchor="middle" class="t">Strand — поток программы</text>
+<text x="191" y="130" text-anchor="middle" class="s">у каждого Strand свои три кольца</text>
+
+<!-- Cabin 2 -->
+<rect x="420" y="42" width="360" height="156" rx="8" class="fc b"/>
+<text x="436" y="63" class="ttl">Cabin — display</text>
+<text x="436" y="80" class="s">единственный, кто рисует на экране</text>
+<rect x="436" y="94" width="104" height="46" rx="6" class="fu b"/>
+<text x="488" y="114" text-anchor="middle" class="t">консоль</text>
+<text x="488" y="130" text-anchor="middle" class="s">полосы Brook</text>
+<rect x="548" y="94" width="104" height="46" rx="6" class="fu b"/>
+<text x="600" y="114" text-anchor="middle" class="t">области GUI</text>
+<text x="600" y="130" text-anchor="middle" class="s">память — Bay</text>
+<rect x="660" y="94" width="104" height="46" rx="6" class="fu b"/>
+<text x="712" y="114" text-anchor="middle" class="t">композитор</text>
+<text x="712" y="130" text-anchor="middle" class="s">кадр на экран</text>
+<text x="436" y="166" class="s">экран выдан ядром (hw.screen.claim),</text>
+<text x="436" y="182" class="s">клавиатура приходит как Touch</text>
+
+<!-- Cabin 3 -->
+<rect x="810" y="42" width="370" height="156" rx="8" class="fc b"/>
+<text x="826" y="63" class="ttl">Cabin — hub</text>
+<text x="826" y="80" class="s">оболочка: команды человека</text>
+<rect x="826" y="94" width="108" height="46" rx="6" class="fu b"/>
+<text x="880" y="114" text-anchor="middle" class="t">строка ввода</text>
+<text x="880" y="130" text-anchor="middle" class="s">readline</text>
+<rect x="942" y="94" width="108" height="46" rx="6" class="fu b"/>
+<text x="996" y="114" text-anchor="middle" class="t">запуск .box</text>
+<text x="996" y="130" text-anchor="middle" class="s">proc.exec</text>
+<rect x="1058" y="94" width="108" height="46" rx="6" class="fu b"/>
+<text x="1112" y="114" text-anchor="middle" class="t">Use Context</text>
+<text x="1112" y="130" text-anchor="middle" class="s">чем занят человек</text>
+<text x="826" y="166" class="s">любая программа устроена так же:</text>
+<text x="826" y="182" class="s">Cabin, в ней Strand'ы, у каждого кольца</text>
+
+<!-- rings: straddle the boundary -->
+<g>
+<rect x="46" y="222" width="96" height="58" rx="4" class="fr b"/><text x="94" y="239" text-anchor="middle" class="t tc">PocketRing</text>
+<rect x="150" y="222" width="96" height="58" rx="4" class="fr b"/><text x="198" y="239" text-anchor="middle" class="t ta">ResultRing</text>
+<rect x="254" y="222" width="96" height="58" rx="4" class="fr b"/><text x="302" y="239" text-anchor="middle" class="t te">TouchRing</text>
+<rect x="436" y="222" width="96" height="58" rx="4" class="fr b"/><text x="484" y="239" text-anchor="middle" class="t tc">PocketRing</text>
+<rect x="546" y="222" width="96" height="58" rx="4" class="fr b"/><text x="594" y="239" text-anchor="middle" class="t ta">ResultRing</text>
+<rect x="656" y="222" width="96" height="58" rx="4" class="fr b"/><text x="704" y="239" text-anchor="middle" class="t te">TouchRing</text>
+<rect x="826" y="222" width="96" height="58" rx="4" class="fr b"/><text x="874" y="239" text-anchor="middle" class="t tc">PocketRing</text>
+<rect x="936" y="222" width="96" height="58" rx="4" class="fr b"/><text x="984" y="239" text-anchor="middle" class="t ta">ResultRing</text>
+<rect x="1046" y="222" width="96" height="58" rx="4" class="fr b"/><text x="1094" y="239" text-anchor="middle" class="t te">TouchRing</text>
+<path class="tick" d="M56 250v20M66 250v20M76 250v20M86 250v20M96 250v20M106 250v20M116 250v20M126 250v20M136 250v20
+M160 250v20M170 250v20M180 250v20M190 250v20M200 250v20M210 250v20M220 250v20M230 250v20M240 250v20
+M264 250v20M274 250v20M284 250v20M294 250v20M304 250v20M314 250v20M324 250v20M334 250v20M344 250v20
+M446 250v20M456 250v20M466 250v20M476 250v20M486 250v20M496 250v20M506 250v20M516 250v20M526 250v20
+M556 250v20M566 250v20M576 250v20M586 250v20M596 250v20M606 250v20M616 250v20M626 250v20M636 250v20
+M666 250v20M676 250v20M686 250v20M696 250v20M706 250v20M716 250v20M726 250v20M736 250v20M746 250v20
+M836 250v20M846 250v20M856 250v20M866 250v20M876 250v20M886 250v20M896 250v20M906 250v20M916 250v20
+M946 250v20M956 250v20M966 250v20M976 250v20M986 250v20M996 250v20M1006 250v20M1016 250v20M1026 250v20
+M1056 250v20M1066 250v20M1076 250v20M1086 250v20M1096 250v20M1106 250v20M1116 250v20M1126 250v20M1136 250v20"/>
+</g>
+
+<!-- user-side arrows -->
+<path d="M94 140V221" class="lc" marker-end="url(#f1c)"/>
+<text x="100" y="172" class="s tc">① Pocket</text>
+<path d="M198 222V141" class="la" marker-end="url(#f1a)"/>
+<text x="204" y="172" class="s ta">⑦ Result</text>
+<path d="M302 222V141" class="le" marker-end="url(#f1e)"/>
+<text x="308" y="172" class="s te">Touch</text>
+
+<!-- Notify -->
+<path d="M46 117H36V394H45" class="lc" marker-end="url(#f1c)"/>
+
+<!-- Pocket read path -->
+<path d="M94 280V312H520V381" class="lc" marker-end="url(#f1c)"/>
+<text x="356" y="326" class="s tc lbl">④ K-Core копирует Pocket</text>
+
+<!-- answer path -->
+<path d="M1174 468H1184V292H198V281" class="la" marker-end="url(#f1a)"/>
+<text x="795" y="308" text-anchor="middle" class="s ta">⑦ Result</text>
+
+<!-- App Cores -->
+<rect x="30" y="330" width="300" height="160" rx="8" class="fk b"/>
+<text x="46" y="352" class="ttl">App Core × N</text>
+<text x="46" y="369" class="s">исполняют потоки программ</text>
+<rect x="46" y="380" width="268" height="28" rx="5" class="fc b"/>
+<text x="56" y="399" class="tc">② ворота: поток → очередь K-Core</text>
+<rect x="46" y="414" width="268" height="28" rx="5" class="fc b"/>
+<text x="56" y="433">планировщик: очередь по Fare</text>
+<rect x="46" y="448" width="268" height="28" rx="5" class="fc b"/>
+<text x="56" y="467">конец хода: LAPIC one-shot</text>
+
+<path d="M314 394H375" class="lc" marker-end="url(#f1c)"/>
+<text x="345" y="388" text-anchor="middle" class="s tc">③</text>
+
+<!-- K-Cores -->
+<rect x="360" y="330" width="420" height="160" rx="8" class="fk b"/>
+<text x="376" y="352" class="ttl">K-Core × K</text>
+<text x="376" y="369" class="s">служба ядра; BSP — тоже K-Core</text>
+<rect x="376" y="382" width="88" height="40" rx="5" class="fc b"/>
+<text x="420" y="398" text-anchor="middle" class="t">очередь</text><text x="420" y="413" text-anchor="middle" class="s">по Tip</text>
+<rect x="476" y="382" width="88" height="40" rx="5" class="fc b"/>
+<text x="520" y="398" text-anchor="middle" class="t">Guide</text><text x="520" y="413" text-anchor="middle" class="s">берёт Pocket</text>
+<rect x="576" y="382" width="88" height="40" rx="5" class="fc b"/>
+<text x="620" y="398" text-anchor="middle" class="t">Manifest</text><text x="620" y="413" text-anchor="middle" class="s">⑤ проверка</text>
+<rect x="676" y="382" width="88" height="40" rx="5" class="fc b"/>
+<text x="720" y="398" text-anchor="middle" class="t">OpRegistry</text><text x="720" y="413" text-anchor="middle" class="s">→ обработчик</text>
+<path d="M464 402H475" class="lc" marker-end="url(#f1c)"/><path d="M564 402H575" class="lc" marker-end="url(#f1c)"/><path d="M664 402H675" class="lc" marker-end="url(#f1c)"/>
+<text x="376" y="450" class="s">между ходами: Baton, USB, носители, TagFS, уборка</text>
+<text x="376" y="468" class="s">нет работы — сон: MWAIT на строке очереди или HLT</text>
+
+<path d="M764 402H825" class="lc" marker-end="url(#f1c)"/>
+<text x="795" y="396" text-anchor="middle" class="s tc">⑥</text>
+
+<!-- Decks -->
+<rect x="810" y="330" width="370" height="160" rx="8" class="fk b"/>
+<text x="826" y="352" class="ttl">Деки — владельцы операций</text>
+<text x="826" y="369" class="s">≈130 операций в одной таблице</text>
+<rect x="826" y="378" width="170" height="32" rx="5" class="fc b"/><text x="911" y="399" text-anchor="middle" class="t">System · 0xFF</text>
+<rect x="1004" y="378" width="170" height="32" rx="5" class="fc b"/><text x="1089" y="399" text-anchor="middle" class="t">Storage · 0x02</text>
+<rect x="826" y="416" width="170" height="32" rx="5" class="fc b"/><text x="911" y="437" text-anchor="middle" class="t">Hardware · 0x03</text>
+<rect x="1004" y="416" width="170" height="32" rx="5" class="fc b"/><text x="1089" y="437" text-anchor="middle" class="t">Operations · 0x01</text>
+<rect x="826" y="454" width="348" height="28" rx="5" class="fc b"/><text x="1000" y="473" text-anchor="middle" class="ta">Execution: Result → ResultRing</text>
+
+<!-- K2 subsystems -->
+<text x="30" y="522" class="cap">ПОДСИСТЕМЫ — ИХ ВЫЗЫВАЮТ ОБРАБОТЧИКИ ДЕКОВ</text>
+<g>
+<rect x="30" y="536" width="132" height="54" rx="6" class="fc b"/><text x="96" y="558" text-anchor="middle" class="t">Touch</text><text x="96" y="576" text-anchor="middle" class="s">события → TouchRing</text>
+<rect x="173" y="536" width="132" height="54" rx="6" class="fc b"/><text x="239" y="558" text-anchor="middle" class="t">Bay</text><text x="239" y="576" text-anchor="middle" class="s">общая память</text>
+<rect x="316" y="536" width="132" height="54" rx="6" class="fc b"/><text x="382" y="558" text-anchor="middle" class="t">Brook</text><text x="382" y="576" text-anchor="middle" class="s">поток кадров</text>
+<rect x="459" y="536" width="132" height="54" rx="6" class="fc b"/><text x="525" y="558" text-anchor="middle" class="t">Процессы</text><text x="525" y="576" text-anchor="middle" class="s">Cabin · Strand</text>
+<rect x="602" y="536" width="132" height="54" rx="6" class="fc b"/><text x="668" y="558" text-anchor="middle" class="t">Ожидание</text><text x="668" y="576" text-anchor="middle" class="s">сон до события</text>
+<rect x="745" y="536" width="132" height="54" rx="6" class="fc b"/><text x="811" y="558" text-anchor="middle" class="t">Сообщения</text><text x="811" y="576" text-anchor="middle" class="s">route · ask · answer</text>
+<rect x="888" y="536" width="132" height="54" rx="6" class="fc b"/><text x="954" y="558" text-anchor="middle" class="t">Use Context</text><text x="954" y="576" text-anchor="middle" class="s">чем занят человек</text>
+<rect x="1031" y="536" width="132" height="54" rx="6" class="fc b"/><text x="1097" y="558" text-anchor="middle" class="t">MemTag</text><text x="1097" y="576" text-anchor="middle" class="s">теги на ОЗУ</text>
+</g>
+
+<!-- K3 -->
+<rect x="30" y="624" width="200" height="150" rx="8" class="fc b"/>
+<text x="46" y="646" class="ttl">TagFS</text>
+<text x="46" y="668" class="s">файл = id + теги key:value</text>
+<text x="46" y="686" class="s">Helm → Plot → Ink (память)</text>
+<text x="46" y="704" class="s">Settle: стежки на носитель</text>
+<text x="46" y="722" class="s">Dedup · Integrity · Deed</text>
+<text x="46" y="740" class="s">путей нет — запрос по тегам</text>
+<path d="M230 700H241" class="ln" marker-end="url(#f1k)"/>
+<rect x="242" y="624" width="150" height="150" rx="8" class="fc b"/>
+<text x="258" y="646" class="ttl">Boardroom</text>
+<text x="258" y="668" class="s">места носителей</text>
+<text x="258" y="686" class="s">одна дверь к секторам</text>
+<text x="258" y="704" class="s">приход и уход флешек</text>
+<rect x="404" y="624" width="170" height="150" rx="8" class="fc b"/>
+<text x="420" y="646" class="ttl">Nightwatch · Chit</text>
+<text x="420" y="668" class="s">долги ответов (Chit)</text>
+<text x="420" y="686" class="s">ищет противоречия</text>
+<text x="420" y="704" class="s">только сообщает</text>
+<rect x="586" y="624" width="170" height="150" rx="8" class="fc b"/>
+<text x="602" y="646" class="ttl">Baton · Knock</text>
+<text x="602" y="668" class="s">IRQ → K-Core</text>
+<text x="602" y="686" class="s">узел внутри задания —</text>
+<text x="602" y="704" class="s">передача не теряется</text>
+<rect x="768" y="624" width="402" height="150" rx="8" class="fc b"/>
+<text x="784" y="646" class="ttl">Память</text>
+<text x="784" y="668" class="s">PMM (buddy) → VMM: таблицы страниц каждой Cabin</text>
+<text x="784" y="686" class="s">Pull Map: вся физическая память в верхней половине</text>
+<text x="784" y="704" class="s">куча ядра: slab, учёт по классам программ</text>
+<text x="784" y="722" class="s">MemTag · NX · SMAP · PKU · CET · TME · IOMMU</text>
+
+<path d="M597 624V491" class="ln" marker-end="url(#f1k)"/>
+<text x="603" y="610" class="s lbl">продолжения</text>
+
+<!-- drivers -->
+<g>
+<rect x="30" y="852" width="154" height="50" rx="6" class="fc b"/><text x="107" y="872" text-anchor="middle" class="t">AHCI · ATA</text><text x="107" y="890" text-anchor="middle" class="s">диски SATA/IDE</text>
+<rect x="194" y="852" width="154" height="50" rx="6" class="fc b"/><text x="271" y="872" text-anchor="middle" class="t">xHCI</text><text x="271" y="890" text-anchor="middle" class="s">USB: хабы, HID, флешки</text>
+<rect x="358" y="852" width="154" height="50" rx="6" class="fc b"/><text x="435" y="872" text-anchor="middle" class="t">PS/2 · COM</text><text x="435" y="890" text-anchor="middle" class="s">клавиатура, консоль</text>
+<rect x="522" y="852" width="154" height="50" rx="6" class="fc b"/><text x="599" y="872" text-anchor="middle" class="t">HPET · PIT · LAPIC</text><text x="599" y="890" text-anchor="middle" class="s">время, такт 250 Гц</text>
+<rect x="686" y="852" width="154" height="50" rx="6" class="fc b"/><text x="763" y="872" text-anchor="middle" class="t">ACPI · EFI</text><text x="763" y="890" text-anchor="middle" class="s">таблицы, AML, питание</text>
+<rect x="850" y="852" width="154" height="50" rx="6" class="fc b"/><text x="927" y="872" text-anchor="middle" class="t">PCI · IOMMU</text><text x="927" y="890" text-anchor="middle" class="s">шины, защита DMA</text>
+<rect x="1014" y="852" width="154" height="50" rx="6" class="fc b"/><text x="1091" y="872" text-anchor="middle" class="t">framebuffer</text><text x="1091" y="890" text-anchor="middle" class="s">GOP или текст VGA</text>
+</g>
+<rect x="30" y="916" width="1138" height="56" rx="6" class="fc bl"/>
+<text x="599" y="949" text-anchor="middle" class="t">Оборудование x86-64: ядра процессора, ОЗУ, контроллеры, носители, экран</text>
+
+<path d="M317 774V851" class="ln" marker-end="url(#f1k)"/>
+<text x="323" y="815" class="s lbl">сектора</text>
+<path d="M650 852V775" class="ln dash" marker-end="url(#f1k)"/>
+<text x="656" y="815" class="s lbl">прерывания → BSP</text>
+</svg>
+<figcaption><b>Как читать.</b> Сверху — программы (кольцо 3), посередине — ядро (кольцо 0), внизу — драйверы и оборудование. Зелёные кольца лежат на границе: это страницы, общие для программы и ядра. Оранжевая линия — запрос, синяя — ответ, фиолетовая — события. Шаги: ① поток кладёт Pocket в свой PocketRing; ② одной инструкцией SYSCALL (Notify) входит в ядро на своём App Core; ③ ворота ставят поток в очередь наименее загруженного K-Core и сразу возвращают управление; ④ K-Core копирует Pocket; ⑤ Manifest проверяется, операции ищутся в OpRegistry; ⑥ вызываются обработчики деков, они обращаются к подсистемам; ⑦ Result приходит в ResultRing потока. Прерывания устройств принимает BSP и через Baton передаёт продолжение циклу K-Core.</figcaption>
+<div class="legend">
+<span><i class="sw" style="background:var(--user)"></i>код программ</span>
+<span><i class="sw" style="background:var(--ring)"></i>общие кольца программа↔ядро</span>
+<span><i class="sw" style="background:var(--kern)"></i>ядро</span>
+<span><i class="sl" style="border-color:var(--acc)"></i>запрос</span>
+<span><i class="sl" style="border-color:var(--ans)"></i>ответ</span>
+<span><i class="sl" style="border-color:var(--evt)"></i>событие</span>
+</div>
+</figure>
+
+<section class="text">
+<h2 id="principles">2. Принципы</h2>
+<ul>
+<li><b>Ядра процессора разделены по ролям (AMP).</b> Несколько ядер (K-Core) выполняют работу ядра ОС, остальные (App Core) — только программы. Программа не выполняет код ядра в своём потоке, кроме короткого входа и выхода, планировщика и обработки исключений.</li>
+<li><b>Вызов ядра асинхронный.</b> Программа не передаёт номер вызова в регистре. Она пишет конверт (<i>Pocket</i>) в кольцо в общей памяти, а инструкция SYSCALL означает только «загляни в кольцо». Работу делает K-Core, ответ (<i>Result</i>) приходит в другое кольцо. Пока ответа нет, поток может работать дальше.</li>
+<li><b>Запрос — декларация.</b> Содержимое конверта — <i>Manifest</i>: упорядоченный список операций «дек, код операции, параметры» с буферами (<i>Crate</i>). Каждая операция зарегистрирована в одной таблице (<i>OpRegistry</i>); дек — владелец набора операций, а не обработчик-переключатель.</li>
+<li><b>Имена — теги <code>key:value</code>.</b> Файлы находятся по тегам (путей и каталогов нет). События адресуются тегом, общая память и потоки открываются по тегу, права программы — это фиксированные ключи.</li>
+<li><b>Ожидание кончается событием.</b> В основных путях нет «подождать N миллисекунд и проверить». Поток спит до ответа, касания, изменения слова в памяти или будильника. Обещанный ответ учитывается (<i>Chit</i>), его потерю ищет <i>Nightwatch</i>.</li>
+<li><b>Прерывание ничего не теряет.</b> Работа из прерывания передаётся K-Core через <i>Baton</i>: узел встроен в само задание, поэтому передаче не нужна память и свободный слот.</li>
+<li><b>Ядро не рисует.</b> Экран выдан одной программе — <i>display</i>. Ядро пишет только в кольцо журнала, display выводит его на экран в том же порядке.</li>
+<li><b>Отказ называется.</b> Ни одна операция не делает вид, что умеет то, чего не умеет: неподдерживаемое возвращает ошибку, а не пустой успех.</li>
+</ul>
+</section>
+
+<h2 id="amp">3. Ядра процессора: AMP</h2>
+
+<figure>
+<svg viewBox="0 0 1100 420" role="img" aria-label="Распределение ролей ядер на примере 8 физических ядер по 2 потока: два K-Core (BSP и второй поток ядра 1), четырнадцать App Core.">
+<text x="30" y="26" class="t">Пример: 8 физических ядер × 2 потока = 16 логических; K-Core = log₂(8) − 1 = 2</text>
+<g>
+<rect x="30" y="40" width="124" height="120" rx="8" class="fc b"/><text x="92" y="58" text-anchor="middle" class="t">ядро 0</text>
+<rect x="38" y="68" width="108" height="38" rx="5" class="fk b"/><text x="92" y="84" text-anchor="middle" class="t">BSP · K-Core</text><text x="92" y="99" text-anchor="middle" class="s">поток 0</text>
+<rect x="38" y="114" width="108" height="38" rx="5" class="fu b"/><text x="92" y="130" text-anchor="middle">App Core</text><text x="92" y="145" text-anchor="middle" class="s">поток 1</text>
+
+<rect x="162" y="40" width="124" height="120" rx="8" class="fc b"/><text x="224" y="58" text-anchor="middle" class="t">ядро 1</text>
+<rect x="170" y="68" width="108" height="38" rx="5" class="fu b"/><text x="224" y="84" text-anchor="middle">App Core</text><text x="224" y="99" text-anchor="middle" class="s">поток 0</text>
+<rect x="170" y="114" width="108" height="38" rx="5" class="fk b"/><text x="224" y="130" text-anchor="middle" class="t">K-Core</text><text x="224" y="145" text-anchor="middle" class="s">поток 1</text>
+
+<rect x="294" y="40" width="124" height="120" rx="8" class="fc b"/><text x="356" y="58" text-anchor="middle" class="t">ядро 2</text>
+<rect x="302" y="68" width="108" height="38" rx="5" class="fu b"/><text x="356" y="91" text-anchor="middle">App Core</text>
+<rect x="302" y="114" width="108" height="38" rx="5" class="fu b"/><text x="356" y="137" text-anchor="middle">App Core</text>
+
+<rect x="426" y="40" width="124" height="120" rx="8" class="fc b"/><text x="488" y="58" text-anchor="middle" class="t">ядро 3</text>
+<rect x="434" y="68" width="108" height="38" rx="5" class="fu b"/><text x="488" y="91" text-anchor="middle">App Core</text>
+<rect x="434" y="114" width="108" height="38" rx="5" class="fu b"/><text x="488" y="137" text-anchor="middle">App Core</text>
+
+<rect x="558" y="40" width="124" height="120" rx="8" class="fc b"/><text x="620" y="58" text-anchor="middle" class="t">ядро 4</text>
+<rect x="566" y="68" width="108" height="38" rx="5" class="fu b"/><text x="620" y="91" text-anchor="middle">App Core</text>
+<rect x="566" y="114" width="108" height="38" rx="5" class="fu b"/><text x="620" y="137" text-anchor="middle">App Core</text>
+
+<rect x="690" y="40" width="124" height="120" rx="8" class="fc b"/><text x="752" y="58" text-anchor="middle" class="t">ядро 5</text>
+<rect x="698" y="68" width="108" height="38" rx="5" class="fu b"/><text x="752" y="91" text-anchor="middle">App Core</text>
+<rect x="698" y="114" width="108" height="38" rx="5" class="fu b"/><text x="752" y="137" text-anchor="middle">App Core</text>
+
+<rect x="822" y="40" width="124" height="120" rx="8" class="fc b"/><text x="884" y="58" text-anchor="middle" class="t">ядро 6</text>
+<rect x="830" y="68" width="108" height="38" rx="5" class="fu b"/><text x="884" y="91" text-anchor="middle">App Core</text>
+<rect x="830" y="114" width="108" height="38" rx="5" class="fu b"/><text x="884" y="137" text-anchor="middle">App Core</text>
+
+<rect x="954" y="40" width="124" height="120" rx="8" class="fc b"/><text x="1016" y="58" text-anchor="middle" class="t">ядро 7</text>
+<rect x="962" y="68" width="108" height="38" rx="5" class="fu b"/><text x="1016" y="91" text-anchor="middle">App Core</text>
+<rect x="962" y="114" width="108" height="38" rx="5" class="fu b"/><text x="1016" y="137" text-anchor="middle">App Core</text>
+</g>
+
+<rect x="30" y="196" width="330" height="200" rx="8" class="fk b"/>
+<text x="46" y="220" class="ttl">K-Core (здесь 2)</text>
+<text x="46" y="246">цикл службы ядра: Pocket'ы всех программ</text>
+<text x="46" y="268">между ними — Baton, USB, носители, TagFS</text>
+<text x="46" y="290">спит в MWAIT на строке своей очереди</text>
+<text x="46" y="312">(или в HLT): будит запись в очередь</text>
+<text x="46" y="334">таймер LAPIC выключен — вытеснять</text>
+<text x="46" y="356">на K-Core некого</text>
+
+<rect x="385" y="196" width="330" height="200" rx="8" class="fk b"/>
+<text x="401" y="220" class="ttl">BSP — первый K-Core, плюс</text>
+<text x="401" y="246">все прерывания устройств (IOAPIC, MSI)</text>
+<text x="401" y="268">системный такт 250 Гц (HPET или PIT)</text>
+<text x="401" y="290">единственная очередь Baton</text>
+<text x="401" y="312">страница часов ClockBoard</text>
+<text x="401" y="334">при равной загрузке Pocket уходит</text>
+<text x="401" y="356">другому K-Core</text>
+
+<rect x="740" y="196" width="338" height="200" rx="8" class="fu b"/>
+<text x="756" y="220" class="ttl">App Core (здесь 14)</text>
+<text x="756" y="246">исполняют Strand'ы программ</text>
+<text x="756" y="268">у каждого своя очередь и планировщик</text>
+<text x="756" y="290">конец хода — таймер LAPIC one-shot</text>
+<text x="756" y="312">пустое ядро забирает поток у соседа</text>
+<text x="756" y="334">будятся IPI_WAKE (вектор 0xF0)</text>
+<text x="756" y="356">простаивающие ядра «паркуются»</text>
+</svg>
+<figcaption><b>Роли ядер.</b> K-Core выбираются так, чтобы отнять у программ как можно меньше: сначала BSP, затем второй поток физического ядра, на котором ещё нет K-Core, затем любой второй поток, и только потом целое ядро. Спящий K-Core-поток отдаёт физическое ядро соседнему потоку целиком, поэтому программам остаются все физические ядра.</figcaption>
+<div class="legend"><span><i class="sw" style="background:var(--kern)"></i>K-Core</span><span><i class="sw" style="background:var(--user)"></i>App Core</span></div>
+</figure>
+
+<section class="text">
+<p>При старте ядро читает таблицу MADT, считает логические и физические ядра (уровень SMT берётся из CPUID) и делит их на две роли. Число K-Core растёт логарифмически от числа <b>физических</b> ядер: <code>K = log₂(P) − 1</code>, но не меньше одного.</p>
+<div class="tbl"><table>
+<tr><th>Физических ядер</th><th>2–7</th><th>8–15</th><th>16–31</th><th>32–63</th><th>64–127</th></tr>
+<tr><td>K-Core</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td></tr>
+</table></div>
+<ul>
+<li><b>K-Core</b> выполняет бесконечный цикл <code>kcore_run_loop</code> (см. <a href="#irq">раздел 10</a>): обслуживает вызовы программ по одному Pocket за ход, а между ними — отложенную работу прерываний, USB, носители, TagFS и уборку завершившихся потоков. Процессов на K-Core нет.</li>
+<li><b>App Core</b> исполняет только Strand'ы программ. Вход в ядро на App Core — это ворота вызова, планировщик, исключения и обработка IPI. Работа вызова уходит на K-Core.</li>
+<li><b>Межпроцессорные прерывания:</b> <code>IPI_WAKE</code> (0xF0) — разбудить ядро или пересмотреть очередь; <code>IPI_SHOOTDOWN</code> (0xF1) — сброс TLB после изменения таблиц страниц; <code>IPI_HALT</code> (0xF2) — остановка при выключении. Каждое ядро подтверждает остановку собственным флагом, поэтому выключение ждёт факта, а не угаданной паузы.</li>
+<li><b>Один процессор.</b> Если ядро одно, K-Core нет. Ворота вызова сами выполняют работу (синхронный путь: сохранить контекст, вызвать Guide, вызвать планировщик). ABI для программ одинаков в обоих режимах.</li>
+<li><b>Время.</b> Счётчики TSC всех ядер выравниваются по BSP (IA32_TSC_ADJUST) до запуска AP. Время программы читают со страницы ClockBoard без вызова ядра.</li>
+</ul>
+</section>
+
+<h2 id="cabin">4. Программа: Cabin и Strand</h2>
+
+<section class="text">
+<p><b>Cabin</b> — запущенная программа: адресное пространство (свой CR3), права (<code>auth_bits</code>), теги процесса, подписки Touch, открытые Bay и Brook, окно депозитов для входящих сообщений, ASLR-смещения. <b>Strand</b> — поток исполнения внутри Cabin, единица планирования (в коде — <code>process_t</code>). Strand назван парой <code>(pid, generation)</code>: pid переиспользуется, поколение — нет, поэтому старая ссылка на умерший поток не попадёт в новый с тем же номером. Предел — 4096 Strand'ов одновременно.</p>
+<p>У каждого Strand <b>свои три кольца</b>: PocketRing (запросы), ResultRing (ответы и сообщения), TouchRing (события). У главного потока кольца лежат по фиксированным низким адресам, у каждого дополнительного — в его слоте <b>Hammock</b> вместе со стеком, теневым стеком CET и блоком <code>StrandInfo</code>. Поэтому потоки одной программы не делят кольца и не мешают друг другу в ожидании ответа.</p>
+</section>
+
+<figure>
+<svg viewBox="0 0 1100 600" role="img" aria-label="Карта адресного пространства Cabin: от ловушки NULL и страниц ядра внизу до слотов колец, окон Bay, Brook, Hammock и главного стека вверху.">
+<text x="288" y="14" text-anchor="end" class="cap">АДРЕС</text>
+<text x="656" y="14" class="cap">НАЗНАЧЕНИЕ</text>
+<g>
+<rect x="300" y="20" width="340" height="26" class="fu b"/><text x="470" y="37" text-anchor="middle" class="t">главный стек ↓ · теневой стек CET</text>
+<rect x="300" y="46" width="340" height="26" class="fu b"/><text x="470" y="63" text-anchor="middle" class="t">Hammock: слот на каждый доп. Strand</text>
+<rect x="300" y="72" width="340" height="26" class="fsh b"/><text x="470" y="89" text-anchor="middle" class="t">окно Brook</text>
+<rect x="300" y="98" width="340" height="26" class="fsh b"/><text x="470" y="115" text-anchor="middle" class="t">окно Bay · 32 ТиБ</text>
+<rect x="300" y="124" width="340" height="26" class="fsh b"/><text x="470" y="141" text-anchor="middle" class="t">окно экрана</text>
+<rect x="300" y="150" width="340" height="26" class="fr b"/><text x="470" y="167" text-anchor="middle" class="t">слоты TouchRing · 1 МиБ</text>
+<rect x="300" y="176" width="340" height="26" class="fr b"/><text x="470" y="193" text-anchor="middle" class="t">слоты ResultRing · 1 МиБ</text>
+<rect x="300" y="202" width="340" height="26" class="fr b"/><text x="470" y="219" text-anchor="middle" class="t">слоты PocketRing · 1 МиБ</text>
+</g>
+<path d="M300 240h340" class="ln dash"/><text x="470" y="246" text-anchor="middle" class="s lbl">свободные адреса</text>
+<g>
+<rect x="300" y="252" width="340" height="26" class="fro b"/><text x="470" y="269" text-anchor="middle" class="t">CpuCaps</text>
+<rect x="300" y="278" width="340" height="26" class="fu b"/><text x="470" y="295" text-anchor="middle" class="t">буферная куча · окно депозитов</text>
+<rect x="300" y="304" width="340" height="26" class="fu b"/><text x="470" y="321" text-anchor="middle" class="t">куча программы</text>
+<rect x="300" y="330" width="340" height="26" class="fu b"/><text x="470" y="347" text-anchor="middle" class="t">код и данные</text>
+<rect x="300" y="356" width="340" height="26" class="fr b"/><text x="470" y="373" text-anchor="middle" class="t">заголовок TouchRing</text>
+<rect x="300" y="382" width="340" height="26" class="fro b"/><text x="470" y="399" text-anchor="middle" class="t">ClockBoard</text>
+<rect x="300" y="408" width="340" height="26" class="fr b"/><text x="470" y="425" text-anchor="middle" class="t">заголовок ResultRing</text>
+<rect x="300" y="434" width="340" height="26" class="fr b"/><text x="470" y="451" text-anchor="middle" class="t">заголовок PocketRing</text>
+<rect x="300" y="460" width="340" height="26" class="fro b"/><text x="470" y="477" text-anchor="middle" class="t">CabinInfo</text>
+<rect x="300" y="486" width="340" height="26" class="fh b"/><text x="470" y="503" text-anchor="middle" class="t">ловушка NULL</text>
+</g>
+<g style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">
+<text x="288" y="37" text-anchor="end">0x7FFF_FFFF_E000 − ASLR</text>
+<text x="288" y="63" text-anchor="end">0x7F00_0000_0000</text>
+<text x="288" y="89" text-anchor="end">0x6000_0000_0000</text>
+<text x="288" y="115" text-anchor="end">0x4001_0000_0000</text>
+<text x="288" y="141" text-anchor="end">0x4000_8000_0000</text>
+<text x="288" y="167" text-anchor="end">0x4000_0020_0000</text>
+<text x="288" y="193" text-anchor="end">0x4000_0010_0000</text>
+<text x="288" y="219" text-anchor="end">0x4000_0000_0000</text>
+<text x="288" y="269" text-anchor="end">0x7FFF_F000</text>
+<text x="288" y="295" text-anchor="end">0x4000_0000 + ASLR</text>
+<text x="288" y="321" text-anchor="end">0x1000_0000 + ASLR</text>
+<text x="288" y="347" text-anchor="end">0xC000</text>
+<text x="288" y="373" text-anchor="end">0x5000</text>
+<text x="288" y="399" text-anchor="end">0x4000</text>
+<text x="288" y="425" text-anchor="end">0x3000</text>
+<text x="288" y="451" text-anchor="end">0x2000</text>
+<text x="288" y="477" text-anchor="end">0x1000</text>
+<text x="288" y="503" text-anchor="end">0x0000</text>
+</g>
+<g class="s">
+<text x="656" y="37" class="s">резерв до 8 МиБ, страницы появляются при касании</text>
+<text x="656" y="63" class="s">стек, теневой стек, свои 3 кольца, StrandInfo</text>
+<text x="656" y="89" class="s">потоки кадров, открытые по тегу</text>
+<text x="656" y="115" class="s">общая память, открытая по тегу</text>
+<text x="656" y="141" class="s">кадровый буфер — только у display</text>
+<text x="656" y="167" class="s">8 192 слота по 128 Б</text>
+<text x="656" y="193" class="s">32 768 слотов по 32 Б</text>
+<text x="656" y="219" class="s">8 192 слота по 128 Б; адреса зарезервированы, страницы — по касанию</text>
+<text x="656" y="269" class="s">что умеет процессор; только чтение</text>
+<text x="656" y="295" class="s">сюда ядро кладёт байты входящих сообщений</text>
+<text x="656" y="321" class="s">malloc; рост от 2 МиБ — огромными страницами</text>
+<text x="656" y="347" class="s">части code, const, data из файла .box</text>
+<text x="656" y="373" class="s">курсоры head/tail, долг ядра owed</text>
+<text x="656" y="399" class="s">время без вызова ядра — одна загрузка из памяти</text>
+<text x="656" y="425" class="s">head/tail, awaiting, step_aside</text>
+<text x="656" y="451" class="s">head пишет ядро, tail — программа; in_hand</text>
+<text x="656" y="477" class="s">кто я: pid, поколение, программа; только чтение</text>
+<text x="656" y="503" class="s">не отображена: обращение по NULL — исключение</text>
+</g>
+<rect x="300" y="540" width="14" height="14" class="fu b"/><text x="320" y="552" class="s">память программы</text>
+<rect x="440" y="540" width="14" height="14" class="fr b"/><text x="460" y="552" class="s">кольца программа ↔ ядро</text>
+<rect x="620" y="540" width="14" height="14" class="fro b"/><text x="640" y="552" class="s">пишет ядро, программа читает</text>
+<rect x="830" y="540" width="14" height="14" class="fsh b"/><text x="850" y="552" class="s">общее: другие Cabin, экран</text>
+</svg>
+<figcaption><b>Адресное пространство Cabin</b> (масштаб не соблюдён, сверху — старшие адреса). Нижние страницы фиксированы для всех программ: по ним boxlib находит свои кольца и часы без вызова ядра. Кольца разделены на заголовок (одна страница внизу) и слоты (резерв по 1 МиБ на 0x4000_0000_0000): физическая страница слотов выделяется только при первом касании, поэтому простаивающая программа платит только за заголовки. Выше — окна, которые ядро заполняет при открытии Bay, Brook и экрана.</figcaption>
+</figure>
+
+<section class="text">
+<h3>Жизнь программы</h3>
+<ol>
+<li><b>Запуск</b> — операция <code>system.proc.exec</code> (или <code>proc.exec.file</code> по id файла). Ядро читает файл <code>.box</code> из TagFS, проверяет печать SHA-256 и части, создаёт Cabin (<code>cabin_create</code>: таблицы страниц, кольца, ASLR, теги), загружает части code/const/data и ставит главный Strand в очередь его домашнего App Core.</li>
+<li><b>Права</b> берутся не из тегов файла (теги — слова пользователя), а из трёх источников: каждой программе — <code>app</code>; то, что просит сам файл <code>.box</code> (<code>utility</code>, <code>network</code>); роль файла в системе (<code>system</code>). Порождённая программа не может получить права, которых нет у родителя.</li>
+<li><b>Потоки</b> — <code>system.strand.spawn</code>: новый Strand получает слот Hammock (стек, теневой стек, три кольца, StrandInfo) и делит с остальными адресное пространство.</li>
+<li><b>Конец</b> — выход, исключение или <code>kill</code> завершают программу целиком (<code>CabinEnd</code>): все её Strand'ы, затем главный. Смерть объявляется событием Touch <code>process:died</code>. Освобождение делает уборщик на K-Core, когда ни одно ядро уже не стоит на стеке потока. Программа с пометкой <code>rise</code>, запущенная системой, при падении запускается снова.</li>
+</ol>
+</section>
+
+<h2 id="call">5. Вызов ядра: вся цепочка</h2>
+
+<figure>
+<svg viewBox="0 0 1200 760" role="img" aria-label="Диаграмма последовательности вызова ядра в многоядерном режиме: Strand пишет Pocket, делает SYSCALL, ворота ставят поток в очередь K-Core и возвращают управление; K-Core через Guide копирует Pocket, исполняет Manifest, вызывает обработчик дека, пишет выходные Crate и Result; поток забирает Result по своему cookie.">
+<defs>
+<marker id="f4k" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk"/></marker>
+<marker id="f4c" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mkc"/></marker>
+<marker id="f4a" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mka"/></marker>
+</defs>
+<g>
+<rect x="15" y="14" width="130" height="46" rx="6" class="fu b"/><text x="80" y="34" text-anchor="middle" class="t">Strand</text><text x="80" y="50" text-anchor="middle" class="s">App Core, кольцо 3</text>
+<rect x="165" y="14" width="130" height="46" rx="6" class="fr b"/><text x="230" y="34" text-anchor="middle" class="t">PocketRing</text><text x="230" y="50" text-anchor="middle" class="s">общая память</text>
+<rect x="315" y="14" width="130" height="46" rx="6" class="fk b"/><text x="380" y="34" text-anchor="middle" class="t">ворота</text><text x="380" y="50" text-anchor="middle" class="s">App Core, кольцо 0</text>
+<rect x="465" y="14" width="130" height="46" rx="6" class="fk b"/><text x="530" y="34" text-anchor="middle" class="t">очередь</text><text x="530" y="50" text-anchor="middle" class="s">K-Core</text>
+<rect x="615" y="14" width="130" height="46" rx="6" class="fk b"/><text x="680" y="34" text-anchor="middle" class="t">Guide</text><text x="680" y="50" text-anchor="middle" class="s">K-Core</text>
+<rect x="765" y="14" width="130" height="46" rx="6" class="fk b"/><text x="830" y="34" text-anchor="middle" class="t">Manifest</text><text x="830" y="50" text-anchor="middle" class="s">+ OpRegistry</text>
+<rect x="915" y="14" width="130" height="46" rx="6" class="fk b"/><text x="980" y="34" text-anchor="middle" class="t">обработчик</text><text x="980" y="50" text-anchor="middle" class="s">дека</text>
+<rect x="1055" y="14" width="130" height="46" rx="6" class="fr b"/><text x="1120" y="34" text-anchor="middle" class="t">ResultRing</text><text x="1120" y="50" text-anchor="middle" class="s">общая память</text>
+</g>
+<path d="M80 60V740M230 60V740M380 60V740M530 60V740M680 60V740M830 60V740M980 60V740M1120 60V740" class="life"/>
+<rect x="76" y="218" width="8" height="448" class="fu"/>
+<rect x="675" y="262" width="10" height="372" class="fk b"/>
+
+<path d="M80 96H229" class="lc" marker-end="url(#f4c)"/>
+<text x="88" y="89" class="lbl tc">① Pocket в слот tail; tail + 1</text>
+<path d="M80 140H379" class="lc" marker-end="url(#f4c)"/>
+<text x="88" y="133" class="lbl tc">② SYSCALL, если in_hand = 0</text>
+<path d="M380 184H529" class="lc" marker-end="url(#f4c)"/>
+<text x="388" y="177" class="lbl tc">③ CAS pending 0→1, поток в очередь K-Core; IPI — только спящему в HLT</text>
+<path d="M380 218H81" class="ln dash" marker-end="url(#f4k)"/>
+<text x="88" y="211" class="lbl">IRETQ — поток работает дальше</text>
+<path d="M530 262H674" class="lc" marker-end="url(#f4c)"/>
+<text x="538" y="255" class="lbl tc">④ ход: поток с наименьшим Tip</text>
+<path d="M675 306H231" class="lc" marker-end="url(#f4c)"/>
+<text x="238" y="299" class="lbl tc">⑤ копия всех 128 Б слота (через porthole)</text>
+<path d="M685 350H829" class="lc" marker-end="url(#f4c)"/>
+<text x="692" y="343" class="lbl tc">⑥ Manifest → scratch, Crate[] → kmalloc</text>
+<path d="M830 384H872V414H831" class="lc" marker-end="url(#f4c)"/>
+<text x="880" y="403" class="lbl tc">⑦ проверка · поиск в OpRegistry · право OP_AUTH</text>
+<path d="M830 450H979" class="lc" marker-end="url(#f4c)"/>
+<text x="838" y="443" class="lbl tc">⑧ обработчик(op, crates, ctx)</text>
+<path d="M980 490H831" class="ln dash" marker-end="url(#f4k)"/>
+<text x="838" y="483" class="lbl">OK · код ошибки · ERR_WOULD_BLOCK + Chit</text>
+<path d="M675 534H85" class="la" marker-end="url(#f4a)"/>
+<text x="92" y="527" class="lbl ta">⑨ выходные Crate записаны в память программы</text>
+<path d="M685 578H1119" class="la" marker-end="url(#f4a)"/>
+<text x="692" y="571" class="lbl ta">⑩ Result: код, длина, cookie (Execution)</text>
+<path d="M675 622H231" class="ln" marker-end="url(#f4k)"/>
+<text x="238" y="615" class="lbl">⑪ head + 1 — слот свободен</text>
+<path d="M1120 666H85" class="la" marker-end="url(#f4a)"/>
+<text x="92" y="659" class="lbl ta">⑫ result_wait: Result со своим cookie</text>
+<path d="M530 700H570V730H531" class="ln" marker-end="url(#f4k)"/>
+<text x="578" y="719" class="lbl">⑬ поток отпущен; в кольце ещё Pocket — снова в очередь</text>
+</svg>
+<figcaption><b>Вызов ядра в многоядерном режиме.</b> Светлая полоса на линии Strand — поток продолжает исполняться, пока K-Core работает. Тёмная полоса на Guide — K-Core занят этим потоком. Если обработчик не может ответить сразу (диск, смерть другого процесса, ожидание адреса), он оставляет Chit и возвращает <code>ERR_WOULD_BLOCK</code>: K-Core свободен, а ответ ⑩ позже отправит продолжение из Baton.</figcaption>
+</figure>
+
+<section class="text">
+<h3>Шаги</h3>
+<ol>
+<li><b>Pocket.</b> boxlib собирает Manifest и массив Crate, присваивает запросу ненулевой 24-битный <i>cookie</i> (жетон гардероба) и пишет Pocket в слот <code>tail % 8192</code>, затем увеличивает <code>tail</code>. Manifest до 88 байт едет внутри конверта (<code>POCKET_FLAG_ENCLOSED</code>), больший — по адресу в памяти программы, заранее скомпилированный — по handle. Полное кольцо не даёт отказа: поток уступает ядро (yield) и пишет снова.</li>
+<li><b>Notify.</b> После полного барьера boxlib смотрит в заголовок кольца: если <code>in_hand = 1</code>, кольцо уже в руках K-Core и вход в ядро не нужен. Иначе — <code>SYSCALL</code>. Точка входа <code>notify_entry</code> делает <code>swapgs</code>, переключается на стек ядра из <code>PerCpuData</code>, строит кадр и вызывает <code>syscall_handler</code>. Выход всегда через <code>IRETQ</code>. Значение 1 в RDI (<code>GATE_YIELD</code>) — не вызов, а уступка ядра.</li>
+<li><b>Ворота.</b> Сначала ядро отдаёт потоку то, что не влезло в его кольца раньше (очереди «долга» Touch и Result). Затем атомарно ставит <code>kcore_pending</code> 0→1: поток занимает не больше одного места во всех очередях K-Core, поэтому очередь размером с предел процессов (4096) переполниться не может. Поток уходит в очередь наименее загруженного работающего K-Core (глубина плюс занятость; при равенстве BSP проигрывает). IPI посылается, только если K-Core спит в HLT: спящего в MWAIT будит сама запись в очередь.</li>
+<li><b>Ход K-Core.</b> K-Core переносит поступившие потоки в свою кучу по <i>Tip</i> (сколько потоку уже служили) и берёт поток с наименьшим Tip. Он обслуживает один Pocket, а если больше никто не ждёт — следующие того же потока, до 50 мкс подряд.</li>
+<li><b>Копия конверта.</b> Guide копирует все 128 байт слота через временное отображение (<i>porthole</i>) — у K-Core активен не CR3 программы. Ядро ничего не пишет обратно в слот и не перечитывает его: программа не может подменить поля после проверки. Поле <code>pid</code> ядро ставит само.</li>
+<li><b>Перенос на сторону ядра.</b> Вложенный Manifest копируется из уже сделанной копии; адресный — постранично в буфер scratch этого K-Core (64 КиБ по умолчанию, предел Manifest — 1 МиБ); handle разрешается в скомпилированную форму с проверкой владельца. Массив Crate копируется в kmalloc (<code>crate_stage_in</code>). Вся память, которую ядро выделяет при обслуживании, записывается на класс прав программы.</li>
+<li><b>Проверка.</b> <code>ManifestExecuteOnce</code> проверяет структуру, для каждой операции находит регистрацию в OpRegistry (таблица запечатана при старте, поиск без блокировки) и сверяет уровень права операции с <code>auth_bits</code> программы.</li>
+<li><b>Обработчик</b> получает операцию, массив Crate и контекст (<code>OpContext</code>: инициатор, адресат, cookie). Данные буферов он читает и пишет постранично (<code>crate_io</code>). Операции идут строго по порядку; после ошибки следующие пропускаются, если не помечены <code>OPTIONAL</code> или <code>SKIP_ON_ERROR</code>.</li>
+<li><b>Выходные Crate.</b> Изменённые описатели (например, сколько байт прочитано) записываются обратно в память программы, временные буферы освобождаются.</li>
+<li><b>Result.</b> Execution формирует Result: код ошибки, длина, адрес данных и <code>context</code> = вид ответа (8 бит) | cookie (24 бита). Сообщения другим программам — это отдельные операции (<code>system.route</code>, <code>ask</code>, см. <a href="#channels">раздел 9</a>); их обработчики сами кладут Result в кольцо адресата.</li>
+<li><b>Освобождение слота.</b> <code>head + 1</code> в PocketRing.</li>
+<li><b>Доставка.</b> <code>KResultPush</code> занимает слот ResultRing, пишет данные и публикует их счётчиком <code>seq</code>; если поток спал (<code>PROC_WAITING</code>), он переводится в <code>PROC_WORKING</code> и ставится в очередь своего App Core с IPI. Поток принимает только Result со своим cookie, чужие откладывает.</li>
+<li><b>Отпуск.</b> K-Core снимает <code>in_hand</code> и <code>kcore_pending</code>, ставит барьер и смотрит в кольцо ещё раз: Pocket, пришедший в этот момент, не теряется — поток снова встаёт в очередь.</li>
+</ol>
+<div class="note">Все переходы между программой и K-Core держатся на парах «запись → полный барьер → чтение чужого флага» (Деккер): либо программа видит, что кольцо в руках ядра, либо K-Core видит новый Pocket. Поэтому одного SYSCALL на пачку запросов достаточно, а лишних входов в ядро нет.</div>
+</section>
+
+<h2 id="formats">6. Форматы: Pocket, Manifest, Crate, Result</h2>
+
+<figure>
+<svg viewBox="0 0 1100 460" role="img" aria-label="Байтовые раскладки: Pocket 128 байт (конверт 40 и вложение 88), Manifest (заголовок 14 байт и операции по 12 байт плюс параметры), Crate 40 байт, слот ResultRing 32 байта.">
+<text x="30" y="32" class="t">Pocket — 128 Б, один слот PocketRing</text>
+<g>
+<rect x="30" y="42" width="56" height="40" class="fc b"/><text x="58" y="66" text-anchor="middle">pid</text>
+<rect x="86" y="42" width="66" height="40" class="fc b"/><text x="119" y="66" text-anchor="middle">target</text>
+<rect x="152" y="42" width="66" height="40" class="fc b"/><text x="185" y="66" text-anchor="middle">error</text>
+<rect x="218" y="42" width="42" height="40" class="fc b"/><text x="239" y="66" text-anchor="middle">flags</text>
+<rect x="260" y="42" width="58" height="40" class="fsh b"/><text x="289" y="66" text-anchor="middle">cookie</text>
+<rect x="318" y="42" width="70" height="40" class="fc b"/><text x="353" y="66" text-anchor="middle">m.size</text>
+<rect x="388" y="42" width="62" height="40" class="fc b"/><text x="419" y="66" text-anchor="middle">crates#</text>
+<rect x="450" y="42" width="48" height="40" class="fc b"/><text x="474" y="66" text-anchor="middle">pier</text>
+<rect x="498" y="42" width="76" height="40" class="fc b"/><text x="536" y="66" text-anchor="middle">m.addr</text>
+<rect x="574" y="42" width="76" height="40" class="fc b"/><text x="612" y="66" text-anchor="middle">crates</text>
+<rect x="650" y="42" width="420" height="40" class="fr b"/><text x="860" y="66" text-anchor="middle">enclosure — Manifest целиком, если он ≤ 88 Б</text>
+</g>
+<g class="s">
+<text x="30" y="98" text-anchor="middle" class="s">0</text><text x="86" y="98" text-anchor="middle" class="s">4</text><text x="152" y="98" text-anchor="middle" class="s">8</text><text x="218" y="98" text-anchor="middle" class="s">12</text><text x="260" y="98" text-anchor="middle" class="s">13</text><text x="318" y="98" text-anchor="middle" class="s">16</text><text x="388" y="98" text-anchor="middle" class="s">20</text><text x="450" y="98" text-anchor="middle" class="s">22</text><text x="498" y="98" text-anchor="middle" class="s">24</text><text x="574" y="98" text-anchor="middle" class="s">32</text><text x="650" y="98" text-anchor="middle" class="s">40</text><text x="1070" y="98" text-anchor="middle" class="s">128</text>
+</g>
+<text x="30" y="116" class="s">конверт — 40 Б: кто, кому, флаги режима, cookie, где Manifest и массив Crate</text>
+
+<text x="30" y="150" class="t">Manifest — заголовок 14 Б, затем операции переменной длины</text>
+<g>
+<rect x="30" y="160" width="70" height="40" class="fro b"/><text x="65" y="184" text-anchor="middle">magic</text>
+<rect x="100" y="160" width="60" height="40" class="fro b"/><text x="130" y="184" text-anchor="middle">ops</text>
+<rect x="160" y="160" width="60" height="40" class="fro b"/><text x="190" y="184" text-anchor="middle">flags</text>
+<rect x="220" y="160" width="70" height="40" class="fro b"/><text x="255" y="184" text-anchor="middle">size</text>
+<rect x="290" y="160" width="110" height="40" class="fc b"/><text x="345" y="184" text-anchor="middle">op_kind</text>
+<rect x="400" y="160" width="52" height="40" class="fc b"/><text x="426" y="184" text-anchor="middle">flags</text>
+<rect x="452" y="160" width="52" height="40" class="fc b"/><text x="478" y="184" text-anchor="middle">in</text>
+<rect x="504" y="160" width="52" height="40" class="fc b"/><text x="530" y="184" text-anchor="middle">out</text>
+<rect x="556" y="160" width="62" height="40" class="fc b"/><text x="587" y="184" text-anchor="middle">p.size</text>
+<rect x="618" y="160" width="132" height="40" class="fc b"/><text x="684" y="184" text-anchor="middle">params[p.size]</text>
+<rect x="750" y="160" width="170" height="40" class="fc b"/><text x="835" y="184" text-anchor="middle">операция 2</text>
+<rect x="920" y="160" width="150" height="40" class="fc b"/><text x="995" y="184" text-anchor="middle">… операция N</text>
+</g>
+<text x="30" y="218" class="s">MNOS, число операций,</text><text x="30" y="234" class="s">флаги, полный размер</text>
+<text x="300" y="218" class="s">op_kind = дек &lt;&lt; 16 | код операции; in / out — индекс в массиве Crate (0xFFFF — нет)</text>
+<text x="300" y="234" class="s">одна операция = 12 Б заголовка + p.size байт параметров</text>
+
+<text x="30" y="266" class="t">Crate — 40 Б, описатель буфера в памяти программы</text>
+<g>
+<rect x="30" y="276" width="60" height="40" class="fc b"/><text x="60" y="300" text-anchor="middle">magic</text>
+<rect x="90" y="276" width="60" height="40" class="fc b"/><text x="120" y="300" text-anchor="middle">flags</text>
+<rect x="150" y="276" width="150" height="40" class="fc b"/><text x="225" y="300" text-anchor="middle">addr</text>
+<rect x="300" y="276" width="150" height="40" class="fc b"/><text x="375" y="300" text-anchor="middle">size</text>
+<rect x="450" y="276" width="150" height="40" class="fc b"/><text x="525" y="300" text-anchor="middle">capacity</text>
+<rect x="600" y="276" width="60" height="40" class="fc b"/><text x="630" y="300" text-anchor="middle">kind</text>
+<rect x="660" y="276" width="60" height="40" class="fh b"/><text x="690" y="300" text-anchor="middle" class="s">выравн.</text>
+</g>
+<text x="740" y="292" class="s">kind: INPUT · OUTPUT · INOUT</text>
+<text x="740" y="308" class="s">ядро копирует данные по страницам</text>
+<text x="30" y="334" class="s">addr — адрес данных; size — сколько их; capacity — сколько влезает (выходной буфер ядро заполняет и пишет новый size)</text>
+
+<text x="30" y="370" class="t">Слот ResultRing — 32 Б: Result 24 Б + seq 8 Б</text>
+<g>
+<rect x="30" y="380" width="100" height="40" class="fc b"/><text x="80" y="404" text-anchor="middle">error_code</text>
+<rect x="130" y="380" width="100" height="40" class="fc b"/><text x="180" y="404" text-anchor="middle">data_len</text>
+<rect x="230" y="380" width="150" height="40" class="fc b"/><text x="305" y="404" text-anchor="middle">data_addr</text>
+<rect x="380" y="380" width="100" height="40" class="fc b"/><text x="430" y="404" text-anchor="middle">sender</text>
+<rect x="480" y="380" width="170" height="40" class="fsh b"/><text x="565" y="404" text-anchor="middle">context: вид | cookie</text>
+<rect x="650" y="380" width="110" height="40" class="fr b"/><text x="705" y="404" text-anchor="middle">seq</text>
+</g>
+<text x="780" y="396" class="s">seq = 2r — слот свободен для круга r</text>
+<text x="780" y="412" class="s">2r+1 — записан, 2r+2 — прочитан</text>
+<text x="30" y="440" class="s">context: младшие 8 бит — кто ответил (Guide, IPC, Touch…), старшие 24 — cookie запроса; sender = 0 — ответ ядра, иначе pid отправителя сообщения</text>
+</svg>
+<figcaption><b>Раскладки ABI</b> (общие заголовки <code>boxos_pocket.h</code>, <code>boxos_manifest.h</code>, <code>boxos_crate.h</code>, <code>result.h</code>). Жёлтым отмечен cookie: программа кладёт его в Pocket, ядро возвращает в <code>context</code> ответа — по нему поток узнаёт свой Result. Размер слота делит страницу 4 КиБ, а начало области слотов выровнено по странице, поэтому слот никогда не пересекает границу страницы и читается одним отображением.</figcaption>
+</figure>
+
+<section class="text">
+<ul>
+<li><b>Три способа передать Manifest.</b> Вложенный: байты в самом слоте, их жизнь гарантирует кольцо — слот не переиспользуется, пока ядро не сдвинет <code>head</code>; отправитель свободен сразу после записи. По адресу: память должна жить до ответа (синхронный вызов ждёт; асинхронный держит байты в своём объекте). По handle: Manifest один раз компилируется операцией <code>system.manifest.compile</code> (проверка структуры, прав и поиск обработчиков), дальше исполняется без проверок; handle принадлежит программе и освобождается при её смерти.</li>
+<li><b>Crate вместо структур.</b> Ни одна операция не имеет буфера фиксированного размера на стеке ядра: размеры данных задаются во время исполнения, ядро копирует по страницам. Выходной Crate ядро заполняет и пишет в него фактический размер.</li>
+<li><b>Ответ гарантирован.</b> Последние <i>N</i> слотов ResultRing (где <i>N</i> — ёмкость PocketRing этого потока) зарезервированы под ответы: у потока не может быть больше незавершённых запросов, чем Pocket'ов в кольце, поэтому ответ всегда найдёт место. Сообщения других программ используют только остальную часть; что не поместилось, ядро держит у себя как долг и отдаёт при следующем входе потока в ядро. Поэтому синхронный вызов ждёт ответа без таймаута.</li>
+</ul>
+</section>
+
+<h2 id="wait">7. Ответ, ожидание, состояния потока</h2>
+
+<figure>
+<svg viewBox="0 0 1100 290" role="img" aria-label="Состояния Strand: CREATED, WORKING, WAITING, DONE, CRASHED и уборка; переход в WAITING — когда ответ отложен или поток лёг спать, обратно — когда опубликован Result или Touch.">
+<defs>
+<marker id="f6k" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk"/></marker>
+<marker id="f6a" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mka"/></marker>
+</defs>
+<rect x="30" y="120" width="130" height="50" rx="8" class="fc b"/><text x="95" y="141" text-anchor="middle" class="t">CREATED</text><text x="95" y="158" text-anchor="middle" class="s">создан</text>
+<rect x="230" y="120" width="170" height="50" rx="8" class="fu b"/><text x="315" y="141" text-anchor="middle" class="t">WORKING</text><text x="315" y="158" text-anchor="middle" class="s">в очереди или исполняется</text>
+<rect x="590" y="120" width="170" height="50" rx="8" class="fk b"/><text x="675" y="141" text-anchor="middle" class="t">WAITING</text><text x="675" y="158" text-anchor="middle" class="s">спит до события</text>
+<rect x="850" y="40" width="150" height="50" rx="8" class="fc b"/><text x="925" y="61" text-anchor="middle" class="t">DONE</text><text x="925" y="78" text-anchor="middle" class="s">завершён</text>
+<rect x="850" y="220" width="150" height="50" rx="8" class="fc b"/><text x="925" y="241" text-anchor="middle" class="t">CRASHED</text><text x="925" y="258" text-anchor="middle" class="s">упал</text>
+<rect x="1030" y="120" width="60" height="50" rx="8" class="fh b"/><text x="1060" y="149" text-anchor="middle" class="s">уборка</text>
+
+<path d="M160 145H229" class="ln" marker-end="url(#f6k)"/><text x="195" y="138" text-anchor="middle" class="s">запуск</text>
+<path d="M400 135H589" class="ln" marker-end="url(#f6k)"/><text x="495" y="128" text-anchor="middle" class="s lbl">ответ отложен · Turn In · park</text>
+<path d="M590 160H401" class="la" marker-end="url(#f6a)"/><text x="495" y="182" text-anchor="middle" class="s ta lbl">Result · Touch · адрес → IPI</text>
+<path d="M315 120V65H849" class="ln" marker-end="url(#f6k)"/><path d="M675 120V65" class="ln"/><circle cx="675" cy="65" r="3" class="mk"/>
+<text x="560" y="58" text-anchor="middle" class="s lbl">выход · kill · конец программы</text>
+<path d="M315 170V245H849" class="ln" marker-end="url(#f6k)"/>
+<text x="560" y="262" text-anchor="middle" class="s lbl">исключение (#PF, #GP, …)</text>
+<path d="M1000 65H1060V119" class="ln" marker-end="url(#f6k)"/>
+<path d="M1000 245H1060V171" class="ln" marker-end="url(#f6k)"/>
+</svg>
+<figcaption><b>Состояния Strand.</b> <code>PROC_WAITING</code> ставит только обработчик, который обещал ответ позже, и только публикация (Result или Touch в кольцо потока) возвращает поток в <code>PROC_WORKING</code>. Отдельное состояние <code>STOPPED</code> включается тегом <code>stopped</code> (операции такого процесса отклоняются) и снимается снятием тега. Уборку делает K-Core, когда ни одно ядро уже не стоит на стеке потока.</figcaption>
+</figure>
+
+<section class="text">
+<h3>Как поток ждёт</h3>
+<div class="tbl"><table>
+<tr><th>Чего ждёт</th><th>Механизм</th><th>Как кончается</th></tr>
+<tr><td>ответа на свой вызов</td><td><code>result_wait(cookie)</code> в boxlib: пишет cookie в <code>awaiting</code> заголовка ResultRing, затем UMWAIT на строке кэша с <code>tail</code> (если есть WAITPKG), иначе PAUSE; чужие Result откладывает</td><td>запись Result в кольцо меняет строку и будит; флаг <code>step_aside</code> просит уступить ядро, если на нём ждёт другой поток</td></tr>
+<tr><td>чего угодно, без срока</td><td><b>Turn In</b> — <code>system.turn.in</code>: поток передаёт последние увиденные <code>tail</code> своих TouchRing и ResultRing</td><td>ядро укладывает поток, только если после этих курсоров ничего не пришло (и слот в голове кольца не опубликован); любая доставка будит</td></tr>
+<tr><td>изменения слова в памяти</td><td><code>system.addr.park</code> / <code>addr.wake</code> — сон, пока слово равно ожидаемому; ключ — физический адрес</td><td>wake от другого потока или срок (ERR_TIMEOUT доставляет K-Core через Baton)</td></tr>
+<tr><td>момента времени</td><td><code>system.alarm</code> — будильник</td><td>событие Touch в назначенный момент</td></tr>
+<tr><td>того, что не кольцо</td><td><code>system.bell</code> — позвонить потоку</td><td>поток просыпается; полезной нагрузки нет (так display будят полосы консоли)</td></tr>
+<tr><td>конца другой программы</td><td><code>system.process.gone(pid, generation)</code></td><td>ответ при смерти именно этого поколения, с кодом завершения</td></tr>
+</table></div>
+<p>В основных путях ожидания нет таймеров «на всякий случай». Если ответ обещан, он учитывается в <a href="#irq">Chit</a>, а не страхуется сроком.</p>
+</section>
+
+<h2 id="decks">8. Деки, операции, права</h2>
+
+<section class="text">
+<p><b>Дек</b> — владелец словаря операций. Обработчик-переключатель в деке не нужен: при старте каждый дек регистрирует свои операции в <b>OpRegistry</b> — одной хеш-таблице <code>op_kind → {обработчик, уровень права, имя}</code>. После регистрации всех деков таблица запечатывается (<code>OpRegistrySeal</code>), и поиск идёт без блокировок. Новая операция — это одна запись в таблице дека, а не правка общего заголовка с номерами вызовов.</p>
+<div class="tbl"><table>
+<tr><th>Дек</th><th>ID</th><th>Отвечает за</th><th>Примеры операций</th><th>Операций</th></tr>
+<tr><td>System</td><td>0xFF</td><td>процессы и потоки, теги процессов, сообщения, Touch, Bay, Brook, ожидание, MemTag, Clipboard, Use Context, сведения о системе, компиляция Manifest</td><td><code>proc.exec</code>, <code>proc.kill</code>, <code>strand.spawn</code>, <code>route</code>, <code>ask</code>/<code>answer</code>, <code>touch.claim</code>/<code>await</code>, <code>bay.open</code>, <code>brook.open</code>, <code>addr.park</code>, <code>turn.in</code>, <code>alarm</code>, <code>roster</code>, <code>manifest.compile</code></td><td>≈78</td></tr>
+<tr><td>Storage</td><td>0x02</td><td>файлы TagFS</td><td><code>tag.query</code>, <code>tag.set</code>/<code>unset</code>/<code>list</code>, <code>obj.read</code>/<code>write</code>/<code>create</code>/<code>delete</code>/<code>rename</code>/<code>span</code>/<code>get_info</code>, <code>obj.anchor</code></td><td>17</td></tr>
+<tr><td>Hardware</td><td>0x03</td><td>устройства и машина</td><td>таймер и RTC, <code>disk.flush</code>/<code>info</code>, <code>screen.claim</code>/<code>release</code>, перезагрузка и выключение, журнал ядра, USB</td><td>24</td></tr>
+<tr><td>Operations</td><td>0x01</td><td>вычисления над буферами Crate внутри одного Manifest</td><td><code>buf.move</code>, <code>fill</code>, <code>xor</code>, <code>hash</code>, <code>cmp</code>, <code>find</code>, <code>pack</code>/<code>unpack</code>, <code>bit.swap</code>, <code>val.add</code></td><td>10</td></tr>
+<tr><td>Execution</td><td>0x00</td><td>не словарь: доставка Result отправителю</td><td>—</td><td>—</td></tr>
+<tr><td>Network</td><td>0x04</td><td>номер зарезервирован, дека нет</td><td>—</td><td>0</td></tr>
+</table></div>
+<p>Подсистемы <b>Touch, Bay, Brook</b> — не деки: это примитивы ядра своего уровня, а их операции живут в деке System, чтобы деков было мало.</p>
+
+<h3>Права</h3>
+<p>У каждой Cabin есть 32-битное поле <code>auth_bits</code>: по одному фиксированному биту на зарезервированный ключ. Биты не зависят от номеров тегов в реестре тома, поэтому право существует и без смонтированного тома.</p>
+<div class="tbl"><table>
+<tr><th>Ключ</th><th>Смысл</th><th>Откуда берётся</th></tr>
+<tr><td><code>app</code></td><td>обычная программа</td><td>есть у каждой программы</td></tr>
+<tr><td><code>utility</code></td><td>служебная программа</td><td>просит файл <code>.box</code></td></tr>
+<tr><td><code>network</code></td><td>доступ к сети (дека пока нет)</td><td>просит файл <code>.box</code></td></tr>
+<tr><td><code>system</code></td><td>системная программа</td><td>роль файла программы на томе</td></tr>
+<tr><td><code>bypass</code></td><td>проходит проверки, как system</td><td>выдаётся системой</td></tr>
+<tr><td><code>god</code></td><td>проходит любую проверку</td><td>выдаётся системой</td></tr>
+<tr><td><code>stopped</code></td><td>процесс заморожен: отказ во всём</td><td>тег, поставленный процессу</td></tr>
+</table></div>
+<p>Каждая операция объявляет уровень: <code>NONE</code> (любой), <code>APP</code>, <code>UTILITY</code>, <code>SYSTEM</code>, <code>NETWORK</code>. Перед вызовом обработчика <code>ManifestOpAuthorize</code> сверяет уровень с <code>auth_bits</code>; отказ — <code>ERR_ACCESS_DENIED</code> для этой операции. Тот же предикат проверяет порождение: дочерняя программа не получает права, которого нет у родителя. Теги файлов на права не влияют никогда. Память, которую ядро выделяет, обслуживая вызов, записывается на класс программы (god, system, utility, app, прочие), и класс не может занять больше, чем у машины осталось свободным.</p>
+</section>
+
+<h2 id="channels">9. Обмен: Touch, Brook, Bay, сообщения</h2>
+
+<figure>
+<svg viewBox="0 0 1150 600" role="img" aria-label="Четыре способа обмена: Touch рассылает событие по тегу подписчикам в трёх режимах; Brook — кольцо кадров в общих страницах двух Cabin без входа в ядро; Bay — одни и те же физические страницы в двух Cabin; сообщения и вопросы — ядро копирует байты в окно депозитов получателя и кладёт Result в его кольцо.">
+<defs>
+<marker id="f7k" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk"/></marker>
+<marker id="f7e" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mke"/></marker>
+<marker id="f7a" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mka"/></marker>
+<marker id="f7c" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mkc"/></marker>
+</defs>
+<rect x="15" y="15" width="555" height="280" rx="10" class="fn bl"/>
+<rect x="580" y="15" width="555" height="280" rx="10" class="fn bl"/>
+<rect x="15" y="305" width="555" height="280" rx="10" class="fn bl"/>
+<rect x="580" y="305" width="555" height="280" rx="10" class="fn bl"/>
+
+<!-- Touch -->
+<text x="31" y="40" class="ttl">Touch — событие по тегу</text>
+<rect x="31" y="70" width="130" height="48" rx="6" class="fc b"/><text x="96" y="90" text-anchor="middle" class="t">издатель</text><text x="96" y="107" text-anchor="middle" class="s">ядро или программа</text>
+<rect x="196" y="70" width="150" height="48" rx="6" class="fk b"/><text x="271" y="90" text-anchor="middle" class="t">корзина тега</text><text x="271" y="107" text-anchor="middle" class="s">radix по tag_id</text>
+<rect x="396" y="58" width="160" height="40" rx="6" class="fc b"/><text x="476" y="74" text-anchor="middle" class="t">REST</text><text x="476" y="89" text-anchor="middle" class="s">→ TouchRing подписчика</text>
+<rect x="396" y="108" width="160" height="40" rx="6" class="fc b"/><text x="476" y="124" text-anchor="middle" class="t">REACT</text><text x="476" y="139" text-anchor="middle" class="s">ядро исполняет Manifest</text>
+<rect x="396" y="158" width="160" height="40" rx="6" class="fc b"/><text x="476" y="174" text-anchor="middle" class="t">INTERRUPT</text><text x="476" y="189" text-anchor="middle" class="s">свой обработчик и стек</text>
+<path d="M161 94H195" class="le" marker-end="url(#f7e)"/>
+<path d="M346 94H372M372 78V178" class="le"/>
+<path d="M372 78H395" class="le" marker-end="url(#f7e)"/><path d="M372 128H395" class="le" marker-end="url(#f7e)"/><path d="M372 178H395" class="le" marker-end="url(#f7e)"/>
+<text x="31" y="228" class="s">политики: EDGE · LEVEL · LATCHED (последнее значение ждёт подтверждения)</text>
+<text x="31" y="248" class="s">доступ к тегу: OPEN · OWNERS · KERNEL_ONLY; нагрузка ≤ 96 Б прямо в слоте</text>
+<text x="31" y="268" class="s">публикация обходит только корзину своего тега, без общего списка процессов</text>
+
+<!-- Brook -->
+<text x="596" y="40" class="ttl">Brook — упорядоченный поток кадров</text>
+<rect x="596" y="70" width="120" height="56" rx="6" class="fu b"/><text x="656" y="94" text-anchor="middle" class="t">Cabin A</text><text x="656" y="111" text-anchor="middle" class="s">писатель</text>
+<rect x="760" y="62" width="200" height="72" rx="6" class="fr b"/><text x="860" y="80" text-anchor="middle" class="t">заголовок + слоты</text>
+<path d="M772 92h176v26h-176z M794 92v26 M816 92v26 M838 92v26 M860 92v26 M882 92v26 M904 92v26 M926 92v26" class="ln"/>
+<text x="860" y="152" text-anchor="middle" class="s">одни и те же страницы в обеих Cabin</text>
+<rect x="1004" y="70" width="120" height="56" rx="6" class="fu b"/><text x="1064" y="94" text-anchor="middle" class="t">Cabin B</text><text x="1064" y="111" text-anchor="middle" class="s">читатель</text>
+<path d="M716 98H759" class="ln" marker-end="url(#f7k)"/><text x="737" y="90" text-anchor="middle" class="s">push</text>
+<path d="M960 98H1003" class="ln" marker-end="url(#f7k)"/><text x="982" y="90" text-anchor="middle" class="s">pop</text>
+<rect x="596" y="168" width="528" height="40" rx="6" class="fk b"/><text x="860" y="193" text-anchor="middle">ядро: открыть по тегу · закрыть · смерть партнёра</text>
+<path d="M656 126V167M1064 126V167" class="ln dash"/>
+<text x="596" y="232" class="s">один писатель и один читатель; push и pop — без входа в ядро</text>
+<text x="596" y="252" class="s">ожидание — UMWAIT или PAUSE на курсоре; кадры фиксированного размера</text>
+<text x="596" y="272" class="s">смерть писателя: ERR_STREAM_CLOSED после дочитывания, а не «конец файла»</text>
+
+<!-- Bay -->
+<text x="31" y="330" class="ttl">Bay — общая память по тегу</text>
+<rect x="31" y="350" width="170" height="56" rx="6" class="fu b"/><text x="116" y="374" text-anchor="middle" class="t">Cabin A</text><text x="116" y="391" text-anchor="middle" class="s">bay_open("video:frame")</text>
+<rect x="384" y="350" width="170" height="56" rx="6" class="fu b"/><text x="469" y="374" text-anchor="middle" class="t">Cabin B</text><text x="469" y="391" text-anchor="middle" class="s">bay_open("video:frame")</text>
+<rect x="207" y="440" width="170" height="50" rx="6" class="fh b"/><text x="292" y="461" text-anchor="middle" class="t">физические страницы</text><text x="292" y="478" text-anchor="middle" class="s">по 4 КиБ или 2 МиБ</text>
+<path d="M116 406V465H206" class="ln" marker-end="url(#f7k)"/>
+<path d="M469 406V465H378" class="ln" marker-end="url(#f7k)"/>
+<text x="122" y="436" class="s">отображение</text>
+<text x="463" y="436" text-anchor="end" class="s">отображение</text>
+<text x="31" y="522" class="s">произвольный доступ, а не поток; учёт открытий по Cabin</text>
+<text x="31" y="542" class="s">последнее закрытие или смерть Cabin — страницы возвращаются</text>
+<text x="31" y="562" class="s">Bay можно создать для другой программы — так display даёт память областям</text>
+
+<!-- Messages -->
+<text x="596" y="330" class="ttl">Сообщения и вопросы</text>
+<rect x="596" y="356" width="140" height="56" rx="6" class="fu b"/><text x="666" y="380" text-anchor="middle" class="t">отправитель</text><text x="666" y="397" text-anchor="middle" class="s">route · route_tag · ask</text>
+<rect x="790" y="356" width="150" height="56" rx="6" class="fk b"/><text x="865" y="380" text-anchor="middle" class="t">ядро</text><text x="865" y="397" text-anchor="middle" class="s">копирует байты</text>
+<rect x="990" y="356" width="134" height="56" rx="6" class="fu b"/><text x="1057" y="380" text-anchor="middle" class="t">получатель</text><text x="1057" y="397" text-anchor="middle" class="s">ResultRing</text>
+<path d="M736 372H789" class="lc" marker-end="url(#f7c)"/><text x="762" y="364" text-anchor="middle" class="s tc">запрос</text>
+<path d="M940 372H989" class="la" marker-end="url(#f7a)"/><text x="964" y="364" text-anchor="middle" class="s ta">Result</text>
+<path d="M989 398H941" class="ln dash" marker-end="url(#f7k)"/>
+<path d="M789 398H737" class="ln dash" marker-end="url(#f7k)"/>
+<text x="865" y="430" text-anchor="middle" class="s">answer · give_back</text>
+<text x="596" y="460" class="s">route — одному Strand по pid; route_tag — всем, кто носит тег</text>
+<text x="596" y="480" class="s">байты кладутся в окно депозитов получателя, Result несёт их адрес</text>
+<text x="596" y="500" class="s">прочитав, получатель возвращает страницы операцией give_back</text>
+<text x="596" y="520" class="s">ask — вопрос с гарантированным ответом: answer или смерть адресата</text>
+<text x="596" y="540" class="s">ответ на ask уходит в выходной Crate спросившего, по его cookie</text>
+</svg>
+<figcaption><b>Четыре формы обмена</b> и чем они различаются: Touch — объявление (маленькое событие многим), Brook — упорядоченный поток от одного к одному, Bay — общая память с произвольным доступом, сообщение и вопрос — пакет байтов конкретному получателю через ядро. Все четыре находят собеседника по тегу или pid, а не по номеру дескриптора.</figcaption>
+</figure>
+
+<section class="text">
+<div class="tbl"><table>
+<tr><th>Нужно</th><th>Механизм</th><th>Где данные</th><th>Участие ядра</th></tr>
+<tr><td>сообщить многим, что что-то случилось</td><td><b>Touch</b></td><td>слот TouchRing подписчика (до 96 Б)</td><td>на каждой публикации</td></tr>
+<tr><td>передать поток байтов или кадров по порядку</td><td><b>Brook</b></td><td>общие страницы двух Cabin</td><td>только открыть, закрыть, смерть партнёра</td></tr>
+<tr><td>работать с общими данными на месте</td><td><b>Bay</b></td><td>одни и те же физические страницы</td><td>только открыть и закрыть</td></tr>
+<tr><td>отправить пакет конкретной программе или всем с тегом</td><td><b>route / route_tag</b></td><td>окно депозитов получателя</td><td>копирует байты, кладёт Result</td></tr>
+<tr><td>спросить и обязательно получить ответ</td><td><b>ask / answer</b></td><td>вопрос — у отвечающего, ответ — в Crate спросившего</td><td>держит вопрос до ответа или смерти адресата</td></tr>
+</table></div>
+<ul>
+<li><b>Touch.</b> Подписка — запись в корзине тега (корзины адресуются четырёхуровневым radix-деревом по 32-битному id тега). Режимы: <i>REST</i> — событие в TouchRing подписчика; <i>REACT</i> — ядро само исполняет заранее скомпилированный Manifest подписчика, поток не просыпается; <i>INTERRUPT</i> — пользовательский обработчик на своём стеке, лишние события копятся до его возврата. Политики: <i>EDGE</i> — каждое событие, <i>LEVEL</i> — состояние, <i>LATCHED</i> — последнее значение держится до подтверждения, поэтому опоздавший подписчик его не теряет. Подписка на <code>key</code> ловит все <code>key:value</code>. Внутри ядра есть слушатели без процесса (<i>TouchWatch</i>).</li>
+<li><b>Brook.</b> Оба конца открывают Brook одним тегом с ролью писателя или читателя; вторая попытка той же роли получает <code>ERR_BUSY</code>. Передача кадра — запись в слот и сдвиг курсора в общей странице, без ядра. Роль можно передать другому потоку той же Cabin.</li>
+<li><b>Bay.</b> Открытие по тегу отображает одни и те же физические страницы в окно Bay каждой Cabin; от 2 МиБ — огромными страницами. Открытие принадлежит Cabin, а не потоку: завершение одного потока отображение не снимает.</li>
+<li><b>Current</b> (boxlib, не ядро) — единый интерфейс каналов по тегу поверх существующих примитивов: <code>screen</code> и <code>keyboard</code> — консоль, <code>log:serial</code> и <code>log:file</code> — журнал ядра, <code>file:ИМЯ</code> — файл TagFS, любой другой тег — Brook. Возможности канала узнаются через <code>current_caps()</code>; операция, которой у канала нет, возвращает ошибку. Bay и Touch намеренно не Current: это другие формы обмена.</li>
+</ul>
+</section>
+
+<h2 id="irq">10. Прерывания и отложенная работа</h2>
+
+<figure>
+<svg viewBox="0 0 1150 470" role="img" aria-label="Прерывание устройства обрабатывается на BSP коротко; продолжение передаётся через Baton или Knock в цикл K-Core; цикл K-Core на шаге Baton выполняет продолжения: доставляет Result, публикует Touch, ведёт дисковые задания, доставляет таймаут.">
+<defs>
+<marker id="f8k" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk"/></marker>
+<marker id="f8e" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mke"/></marker>
+</defs>
+<rect x="30" y="40" width="170" height="50" rx="6" class="fh b"/><text x="115" y="60" text-anchor="middle" class="t">устройство</text><text x="115" y="77" text-anchor="middle" class="s">диск, USB, таймер, кнопка</text>
+<rect x="30" y="130" width="170" height="40" rx="6" class="fh b"/><text x="115" y="155" text-anchor="middle" class="t">IOAPIC · MSI</text>
+<rect x="30" y="210" width="170" height="60" rx="6" class="fk b"/><text x="115" y="234" text-anchor="middle" class="t">обработчик IRQ</text><text x="115" y="252" text-anchor="middle" class="s">на BSP, коротко</text>
+<path d="M115 90V129" class="le" marker-end="url(#f8e)"/><path d="M115 170V209" class="le" marker-end="url(#f8e)"/>
+<text x="30" y="306" class="s">у каждого контроллера свой вектор</text>
+
+<rect x="250" y="140" width="220" height="76" rx="6" class="fk b"/><text x="360" y="162" text-anchor="middle" class="t">Baton</text><text x="360" y="180" text-anchor="middle" class="s">очередь MPSC; узел встроен</text><text x="360" y="196" text-anchor="middle" class="s">в само задание — не теряется</text>
+<rect x="250" y="260" width="220" height="60" rx="6" class="fk b"/><text x="360" y="284" text-anchor="middle" class="t">Knock</text><text x="360" y="301" text-anchor="middle" class="s">стук: клавиша, порт, GHES</text>
+<path d="M200 230H225V178H249" class="le" marker-end="url(#f8e)"/>
+<path d="M200 250H225V290H249" class="le" marker-end="url(#f8e)"/>
+<path d="M360 260V217" class="ln" marker-end="url(#f8k)"/><text x="366" y="244" class="s">едет на Baton</text>
+
+<rect x="540" y="24" width="340" height="430" rx="10" class="fkb b"/>
+<text x="556" y="46" class="ttl">цикл K-Core — один круг</text>
+<g>
+<rect x="556" y="60" width="310" height="32" rx="5" class="fc b"/><text x="566" y="81">① поступившие потоки — в кучу по Tip</text>
+<rect x="556" y="102" width="310" height="32" rx="5" class="fc b"/><text x="566" y="123">② один поток: Pocket (до 50 мкс подряд)</text>
+<rect x="556" y="144" width="310" height="32" rx="5" class="fc b"/><text x="566" y="165" class="t te">③ Baton: продолжения из прерываний</text>
+<rect x="556" y="186" width="310" height="32" rx="5" class="fc b"/><text x="566" y="207">④ USB: хабы, отключения, восстановление</text>
+<rect x="556" y="228" width="310" height="32" rx="5" class="fc b"/><text x="566" y="249">⑤ Boardroom: новые носители</text>
+<rect x="556" y="270" width="310" height="32" rx="5" class="fc b"/><text x="566" y="291">⑥ TagFS: работа Helm, шаг Settle</text>
+<rect x="556" y="312" width="310" height="32" rx="5" class="fc b"/><text x="566" y="333">⑦ Use Context: устаревшие оценки</text>
+<rect x="556" y="354" width="310" height="32" rx="5" class="fc b"/><text x="566" y="375">⑧ каждый 10-й круг — уборка потоков</text>
+<rect x="556" y="396" width="310" height="32" rx="5" class="fc b"/><text x="566" y="417">⑨ пусто — сон: MWAIT или HLT</text>
+</g>
+<path d="M556 412H548V76H555" class="ln" marker-end="url(#f8k)"/>
+<path d="M470 178H510V160H555" class="le" marker-end="url(#f8e)"/>
+<text x="476" y="232" class="s">будит K-Core</text>
+
+<path d="M866 160H890M890 100V250" class="ln"/>
+<path d="M890 100H909" class="ln" marker-end="url(#f8k)"/><path d="M890 150H909" class="ln" marker-end="url(#f8k)"/><path d="M890 200H909" class="ln" marker-end="url(#f8k)"/><path d="M890 250H909" class="ln" marker-end="url(#f8k)"/>
+<rect x="910" y="80" width="220" height="40" rx="6" class="fc b"/><text x="1020" y="96" text-anchor="middle" class="t">KResultPush</text><text x="1020" y="112" text-anchor="middle" class="s">→ ResultRing ждущего потока</text>
+<rect x="910" y="130" width="220" height="40" rx="6" class="fc b"/><text x="1020" y="146" text-anchor="middle" class="t">TouchPublish</text><text x="1020" y="162" text-anchor="middle" class="s">→ TouchRing подписчиков</text>
+<rect x="910" y="180" width="220" height="40" rx="6" class="fc b"/><text x="1020" y="196" text-anchor="middle" class="t">ReadJob · WriteJob</text><text x="1020" y="212" text-anchor="middle" class="s">следующий шаг дискового задания</text>
+<rect x="910" y="230" width="220" height="40" rx="6" class="fc b"/><text x="1020" y="246" text-anchor="middle" class="t">ERR_TIMEOUT</text><text x="1020" y="262" text-anchor="middle" class="s">срок addr.park истёк</text>
+
+<rect x="910" y="300" width="220" height="154" rx="6" class="fc b"/>
+<text x="926" y="322" class="t">Chit — учёт обещаний</text>
+<text x="926" y="344" class="s">PENDING — событие должен мир</text>
+<text x="926" y="362" class="s">DUE — ответ готов, должно ядро</text>
+<text x="926" y="380" class="s">KEPT — ответ доставлен</text>
+<text x="926" y="404" class="s">Nightwatch: DUE дольше двух</text>
+<text x="926" y="420" class="s">проверок — ответ потерян,</text>
+<text x="926" y="436" class="s">назван поток и жетон</text>
+</svg>
+<figcaption><b>Путь прерывания.</b> Обработчик на BSP делает минимум и передаёт продолжение. Baton — интрузивная очередь Вьюкова: узел лежит внутри самого задания (дисковое задание, передача xHCI, срок ожидания потока, источник ошибок GHES, слот переноса страницы при MCE), поэтому передача не требует памяти и свободного слота и не может потеряться. Для событий без собственного объекта (клавиша, событие порта) служит Knock — один «стук» на кольцо события; сколько бы раз ни стучали, визит один, и читатель забирает всё накопившееся.</figcaption>
+</figure>
+
+<section class="text">
+<ul>
+<li><b>Куда приходят прерывания.</b> Все прерывания устройств (IOAPIC и MSI) направлены на BSP; у каждого контроллера свой вектор MSI, поэтому прерывание называет источник. Системный такт (250 Гц, HPET или PIT) тоже на BSP: он обновляет ClockBoard и ведёт сроки. App Core получают только свои таймеры хода и IPI.</li>
+<li><b>Правило без взаимоблокировок.</b> Очередь Baton разбирает только её ядро (сейчас все передачи идут на BSP). Это безопасно, потому что никто не крутится в ожидании продолжения, удерживая блокировку: ждущий продолжения спит в <code>PROC_WAITING</code>.</li>
+<li><b>Публикация из прерывания.</b> Обычная публикация Touch может брать блокировки и выделять память, поэтому из прерывания используется отдельный безопасный путь или Knock.</li>
+<li><b>Chit</b> — запись ядра об обещанном ответе. Обработчик, который откладывает ответ, оставляет Chit (<code>ChitGive</code>) до возврата <code>ERR_WOULD_BLOCK</code>; событие делает его DUE, доставка — KEPT. Без Chit отложенный ответ считается дефектом и сообщается сразу.</li>
+<li><b>Nightwatch</b> — не сторожевой таймер. Он не измеряет время и ничего не перезапускает, а ищет противоречия, истинные в момент проверки: <i>LOST WAKE</i> (поток спит на адресе, слово уже изменилось, и через полную проверку всё так же), <i>ANSWER OWED</i> (поток ждёт ответа, который ядро должно, но не доставило), Pocket в кольце, который никто не обслуживает. Находка печатается с именем потока; машина не трогается, чтобы не стереть улику.</li>
+</ul>
+</section>
+
+<h2 id="sched">11. Планировщик</h2>
+
+<figure>
+<svg viewBox="0 0 1150 330" role="img" aria-label="Планировщик: на App Core ядро получает поток с наименьшим Fare, новый поток ставится к Waterline; на K-Core обслуживается поток с наименьшим Tip.">
+<defs>
+<marker id="f9k" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk"/></marker>
+<marker id="f9c" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mkc"/></marker>
+</defs>
+<rect x="15" y="15" width="555" height="300" rx="10" class="fn bl"/>
+<rect x="580" y="15" width="555" height="300" rx="10" class="fn bl"/>
+
+<text x="31" y="40" class="ttl">App Core: кому отдать ядро</text>
+<path d="M45 150H545" class="ln" marker-end="url(#f9k)"/>
+<text x="545" y="186" text-anchor="end" class="s">Fare — оплаченное время →</text>
+<path d="M120 84V196" class="la dash"/><text x="120" y="78" text-anchor="middle" class="s ta">Waterline</text>
+<circle cx="155" cy="150" r="14" class="fu b"/><text x="155" y="155" text-anchor="middle" class="t">A</text>
+<circle cx="240" cy="150" r="14" class="fu b"/><text x="240" y="155" text-anchor="middle" class="t">B</text>
+<circle cx="335" cy="150" r="14" class="fu b"/><text x="335" y="155" text-anchor="middle" class="t">C</text>
+<circle cx="460" cy="150" r="14" class="fu b"/><text x="460" y="155" text-anchor="middle" class="t">D</text>
+<path d="M155 104V133" class="lc" marker-end="url(#f9c)"/><text x="163" y="118" class="s tc">следующий</text>
+<circle cx="70" cy="104" r="11" class="fc b dash"/><text x="70" y="108" text-anchor="middle" class="s">N</text>
+<path d="M80 110L112 138" class="ln dash" marker-end="url(#f9k)"/>
+<text x="62" y="86" class="s">новый</text>
+<text x="31" y="225" class="s">очередь ядра — куча по Fare; ядро получает поток с наименьшим</text>
+<text x="31" y="245" class="s">ход = 6 мс / (ожидающих + 1), но не меньше 1 мс; конец — LAPIC one-shot</text>
+<text x="31" y="265" class="s">Fare растёт на время / вес; Use Context делает вес до 3 раз больше</text>
+<text x="31" y="285" class="s">новый и проснувшийся встают к Waterline, не ниже её − 3 мс</text>
+
+<text x="596" y="40" class="ttl">K-Core: чей вызов обслужить</text>
+<path d="M610 150H1110" class="ln" marker-end="url(#f9k)"/>
+<text x="1110" y="186" text-anchor="end" class="s">Tip — сколько потоку уже служили →</text>
+<path d="M685 84V196" class="la dash"/><text x="685" y="78" text-anchor="middle" class="s ta">Waterline</text>
+<circle cx="720" cy="150" r="14" class="fu b"/><text x="720" y="155" text-anchor="middle" class="t">P</text>
+<circle cx="805" cy="150" r="14" class="fu b"/><text x="805" y="155" text-anchor="middle" class="t">Q</text>
+<circle cx="910" cy="150" r="14" class="fu b"/><text x="910" y="155" text-anchor="middle" class="t">R</text>
+<circle cx="1025" cy="150" r="14" class="fu b"/><text x="1025" y="155" text-anchor="middle" class="t">S</text>
+<path d="M720 104V133" class="lc" marker-end="url(#f9c)"/><text x="728" y="118" class="s tc">обслуживается</text>
+<text x="596" y="225" class="s">поступившие потоки — в кучу по Tip; служат наименьшему</text>
+<text x="596" y="245" class="s">один Pocket за ход; если никто не ждёт — до 50 мкс подряд</text>
+<text x="596" y="265" class="s">Tip растёт на время обслуживания / вес — та же цена, что Fare</text>
+<text x="596" y="285" class="s">лёгкий вызов не стоит за тяжёлыми вызовами соседа</text>
+</svg>
+<figcaption><b>Одна мера справедливости на обеих ролях.</b> Поток платит за время ядра: на App Core — Fare, на K-Core — Tip. Цена одна и та же (<code>sched_fare_for</code>): время, делённое на вес, а вес больше у программ, которые носят теги текущего Use Context. Waterline — наименьший долг на ядре, он не убывает; по нему ставятся потоки, пришедшие извне очереди.</figcaption>
+</figure>
+
+<section class="text">
+<ul>
+<li><b>Очереди.</b> У каждого App Core своя очередь — двоичная куча по Fare. Поток имеет домашнее ядро; пробуждение ставит его в очередь домашнего ядра и посылает IPI. Свободное ядро забирает поток у соседа; простаивающие ядра «паркуются» по решению BSP.</li>
+<li><b>Ход.</b> Раунд 6 мс делится между ожидающими на ядре: ход = 6 мс / (ожидающих + 1), но не меньше 1 мс. Конец хода назначает одноразовый таймер LAPIC; поток, оставшийся на ядре один, таймера не имеет. При одном процессоре ход завершает системный такт.</li>
+<li><b>Переход между ядрами.</b> Fare потока переносится относительно Waterline старого и нового ядра (<code>sched_rebase</code>): поток сохраняет своё положение, а долгий сон даёт не больше половины раунда форы.</li>
+<li><b>Уступка.</b> <code>yield</code> (SYSCALL с <code>GATE_YIELD</code>) ставит поток за следующим. Если на ядре ждёт другой поток, ядро выставляет в заголовке ResultRing флаг <code>step_aside</code>: поток, крутящийся в ожидании, видит его и уступает — иначе он ждал бы работы того, кто стоит за ним в очереди того же ядра.</li>
+<li><b>K-Core.</b> Принцип «один Pocket за ход» не даёт программе, которая шлёт вызовы быстрее, чем их обслуживают, занять K-Core навсегда: после каждого хода цикл проходит Baton, USB, носители и TagFS.</li>
+<li><b>Use Context</b> — одна на машину декларация того, чем занят человек, в тегах (например, <code>use code cpp</code>). Её задаёт оболочка или системная программа. Планировщик делает дешевле время программ с этими тегами (до трёх раз), TagFS сужает запросы по тегам до контекста и ставит его теги на новые файлы. Смена объявляется событием <code>use:changed</code> и запоминается на томе.</li>
+</ul>
+</section>
+
+<h2 id="memory">12. Память</h2>
+
+<figure>
+<svg viewBox="0 0 1150 490" role="img" aria-label="Память: слева виртуальное пространство — образ ядра, Pull Map со всей физической памятью, теневые стеки, MMIO, куча ядра и нижняя половина текущей Cabin; справа путь физических страниц от карты E820 через PMM к куче ядра, страницам Cabin и общим областям.">
+<defs>
+<marker id="f10k" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk"/></marker>
+</defs>
+<text x="30" y="24" class="cap">ВИРТУАЛЬНОЕ ПРОСТРАНСТВО</text>
+<rect x="30" y="36" width="430" height="46" class="fk b"/><text x="46" y="55" class="t">образ ядра</text><text x="46" y="72" class="s" style="font-family:ui-monospace,Menlo,monospace">0xFFFF_FFFF_8010_0000 · физ. адрес 1 МиБ</text>
+<path d="M30 90h430" class="ln dash"/>
+<rect x="30" y="96" width="430" height="46" class="fk b"/><text x="46" y="115" class="t">Pull Map: вся физическая память</text><text x="46" y="132" class="s" style="font-family:ui-monospace,Menlo,monospace">0xFFFF_8800_0000_0000 · до 512 ГиБ</text>
+<path d="M30 150h430" class="ln dash"/>
+<rect x="30" y="156" width="430" height="46" class="fk b"/><text x="46" y="175" class="t">теневые стеки CET — страница на pid</text><text x="46" y="192" class="s" style="font-family:ui-monospace,Menlo,monospace">0xFFFF_8001_0000_0000</text>
+<rect x="30" y="202" width="430" height="46" class="fk b"/><text x="46" y="221" class="t">MMIO устройств · 3 ГиБ</text><text x="46" y="238" class="s" style="font-family:ui-monospace,Menlo,monospace">0xFFFF_8000_4000_0000</text>
+<rect x="30" y="248" width="430" height="46" class="fk b"/><text x="46" y="267" class="t">куча ядра · 1 ГиБ</text><text x="46" y="284" class="s" style="font-family:ui-monospace,Menlo,monospace">0xFFFF_8000_0000_0000</text>
+<path d="M30 304h430" class="ln dash"/><text x="245" y="309" text-anchor="middle" class="s lbl">неканонические адреса</text>
+<rect x="30" y="318" width="430" height="58" class="fu b"/><text x="46" y="340" class="t">Cabin текущего потока — свой CR3</text><text x="46" y="358" class="s" style="font-family:ui-monospace,Menlo,monospace">0x0 … 0x7FFF_FFFF_FFFF (раздел 4)</text>
+<text x="30" y="400" class="s">верхняя половина общая для всех Cabin;</text>
+<text x="30" y="418" class="s">нижняя — своя у каждой программы</text>
+
+<rect x="560" y="36" width="200" height="44" rx="6" class="fh b"/><text x="660" y="54" text-anchor="middle" class="t">карта E820</text><text x="660" y="71" text-anchor="middle" class="s">от загрузчика</text>
+<path d="M660 80V109" class="ln" marker-end="url(#f10k)"/>
+<rect x="560" y="110" width="360" height="60" rx="6" class="fk b"/><text x="740" y="131" text-anchor="middle" class="t">PMM — buddy-аллокатор</text><text x="740" y="148" text-anchor="middle" class="s">блоки от 4 КиБ до 64 МиБ</text><text x="740" y="163" text-anchor="middle" class="s">подсказки зон: DMA32 &lt; 1 ГиБ · USER &lt; 4 ГиБ · HIGH</text>
+<path d="M460 119H510V140H559" class="ln dash" marker-end="url(#f10k)"/>
+<text x="470" y="160" class="s">ядро видит</text><text x="470" y="174" class="s">любую страницу</text>
+<path d="M740 170V196M580 196H1020" class="ln"/>
+<path d="M580 196V219" class="ln" marker-end="url(#f10k)"/><path d="M800 196V219" class="ln" marker-end="url(#f10k)"/><path d="M1020 196V219" class="ln" marker-end="url(#f10k)"/>
+<rect x="480" y="220" width="200" height="64" rx="6" class="fk b"/><text x="580" y="240" text-anchor="middle" class="t">куча ядра</text><text x="580" y="257" text-anchor="middle" class="s">kmalloc, slab 16–2048 Б</text><text x="580" y="272" text-anchor="middle" class="s">учёт по классам программ</text>
+<rect x="700" y="220" width="200" height="64" rx="6" class="fk b"/><text x="800" y="240" text-anchor="middle" class="t">страницы Cabin</text><text x="800" y="257" text-anchor="middle" class="s">по касанию (#PF)</text><text x="800" y="272" text-anchor="middle" class="s">стеки, слоты колец, куча</text>
+<rect x="920" y="220" width="200" height="64" rx="6" class="fk b"/><text x="1020" y="240" text-anchor="middle" class="t">Bay · Brook · экран</text><text x="1020" y="257" text-anchor="middle" class="s">одни страницы в</text><text x="1020" y="272" text-anchor="middle" class="s">нескольких Cabin, по 2 МиБ</text>
+
+<rect x="480" y="306" width="640" height="54" rx="6" class="fc b"/>
+<text x="496" y="327" class="t">MemTag — теги на областях ОЗУ</text>
+<text x="496" y="347" class="s">zone:*, purpose:*, cache:*, pku:N, guard → отбор областей, права Cabin, ключ PKU в записи таблицы</text>
+<rect x="480" y="372" width="640" height="104" rx="6" class="fc b"/>
+<text x="496" y="393" class="t">Защита</text>
+<text x="496" y="413" class="s">NX включается до первой таблицы страниц · SMAP/SMEP: память программы — только через uaccess</text>
+<text x="496" y="431" class="s">PKU — права на страницы без вызова ядра · CET — теневые стеки программ и ядра</text>
+<text x="496" y="449" class="s">TME-MK — шифрование областей процессором · IOMMU — DMA устройств только по таблицам</text>
+<text x="496" y="467" class="s">MCE — отравленная страница копируется и подменяется во всех Cabin, где отображена</text>
+</svg>
+<figcaption><b>Виртуальная и физическая память.</b> Pull Map отображает всё физическое адресное пространство из карты памяти по постоянному смещению глобальными страницами (ОЗУ — с кэшированием, устройства — без) и после загрузки не меняется; тождественного отображения нет. Физические страницы выдаёт PMM; куча ядра, таблицы и страницы программ, общие области — его потребители.</figcaption>
+</figure>
+
+<section class="text">
+<ul>
+<li><b>PMM</b> — buddy-аллокатор (порядки 0–14: от 4 КиБ до 64 МиБ). Подсказка зоны — диапазон адресов, а не смысл; смысл областей выражает MemTag.</li>
+<li><b>Куча ядра</b> — 1 ГиБ виртуальных адресов: slab-классы 16–2048 Б и крупные куски. Всё, что ядро держит ради программы, записано на её класс прав; класс получает отказ с числами, а не молча вытесняет других. Пути самого ядра, которые обязаны завершиться при нехватке памяти (цикл записи тома), берут из отдельного резерва.</li>
+<li><b>VMM</b> — свои таблицы страниц у каждой Cabin, верхняя половина общая. Слоты колец, стеки и куча отображаются по первому касанию. Рост кучи от 2 МиБ, Bay и Brook получают огромные страницы, если PMM их даёт. После изменения отображений ядра, где работает программа, получают IPI сброса TLB.</li>
+<li><b>Доступ ядра к памяти программы.</b> Чтение и запись — только через <code>uaccess</code> (скобки STAC/CLAC и таблица исправлений: ошибка страницы внутри копирования превращается в код ошибки). K-Core, у которого активен чужой CR3, обращается к памяти программы через временное окно (<i>porthole</i>) постранично.</li>
+<li><b>ClockBoard и CpuCaps</b> — две страницы только для чтения в каждой Cabin: время (обновляется тактом BSP) и пересечение возможностей всех ядер процессора. Чтение — одна загрузка из памяти, без вызова ядра.</li>
+</ul>
+</section>
+
+<h2 id="tagfs">13. Хранение: TagFS и Boardroom</h2>
+
+<section class="text">
+<p><b>TagFS</b> — файловая система без путей и каталогов. Файл — это 64-битный id и набор тегов <code>key:value</code>; имя файла — тоже тег. Файлы находят запросом по тегам: какие теги обязательны, какие допустимы, каких быть не должно. Изменения сначала делаются в памяти, а на носитель их переносит фоновый цикл <b>Settle</b> — по одному «стежку» за цикл в журнал тома.</p>
+</section>
+
+<figure>
+<svg viewBox="0 0 1200 620" role="img" aria-label="TagFS: запись проходит Helm, Plot, данные на носитель и Ink в памяти; цикл Settle переносит изменения стежками в Ribbon на носителе; том состоит из Deed, Spine, Tally, блоков данных и Ribbon; чтение идёт через индекс тегов, карту файлов, Boardroom и проверку Integrity.">
+<defs>
+<marker id="f11k" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk"/></marker>
+<marker id="f11c" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mkc"/></marker>
+<marker id="f11a" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mka"/></marker>
+</defs>
+<text x="30" y="30" class="cap">ЗАПИСЬ</text>
+<rect x="30" y="44" width="150" height="64" rx="6" class="fc b"/><text x="105" y="70" text-anchor="middle" class="t">obj.write</text><text x="105" y="88" text-anchor="middle" class="s">дек Storage</text>
+<rect x="205" y="44" width="160" height="64" rx="6" class="fk b"/><text x="285" y="66" text-anchor="middle" class="t">Helm</text><text x="285" y="83" text-anchor="middle" class="s">один держатель файла</text><text x="285" y="98" text-anchor="middle" class="s">очередь FIFO, без спина</text>
+<rect x="390" y="44" width="160" height="64" rx="6" class="fk b"/><text x="470" y="66" text-anchor="middle" class="t">Plot</text><text x="470" y="83" text-anchor="middle" class="s">экстенты в памяти</text><text x="470" y="98" text-anchor="middle" class="s">новые блоки — Stakes</text>
+<rect x="575" y="44" width="150" height="64" rx="6" class="fk b"/><text x="650" y="66" text-anchor="middle" class="t">данные</text><text x="650" y="83" text-anchor="middle" class="s">на носитель</text><text x="650" y="98" text-anchor="middle" class="s">через Boardroom</text>
+<rect x="750" y="44" width="180" height="64" rx="6" class="fk b"/><text x="840" y="66" text-anchor="middle" class="t">Ink</text><text x="840" y="83" text-anchor="middle" class="s">изменение записи в памяти:</text><text x="840" y="98" text-anchor="middle" class="s">карта, индекс, Docket</text>
+<path d="M180 76H204" class="lc" marker-end="url(#f11c)"/><path d="M365 76H389" class="lc" marker-end="url(#f11c)"/><path d="M550 76H574" class="lc" marker-end="url(#f11c)"/><path d="M725 76H749" class="lc" marker-end="url(#f11c)"/><path d="M930 76H959" class="lc" marker-end="url(#f11c)"/>
+
+<rect x="960" y="36" width="210" height="210" rx="8" class="fk b"/>
+<text x="976" y="58" class="ttl">цикл Settle</text>
+<text x="976" y="84">TAKE — что накоплено</text>
+<text x="976" y="106">BUILD — стежок в памяти</text>
+<text x="976" y="128">FIRST_FLUSH — данные легли</text>
+<text x="976" y="150">STITCH — запись стежка</text>
+<text x="976" y="172">LAST_FLUSH — сброс кэша</text>
+<text x="976" y="194">DONE — ответы ждущим</text>
+<text x="976" y="220" class="s">шаги по одному между ходами</text>
+<text x="976" y="236" class="s">K-Core; замков через носитель нет</text>
+
+<text x="30" y="150" class="cap">В ПАМЯТИ — СОБИРАЕТСЯ ПРИ МОНТИРОВАНИИ</text>
+<rect x="30" y="160" width="200" height="60" rx="6" class="fc b"/><text x="130" y="184" text-anchor="middle" class="t">TagRegistry</text><text x="130" y="202" text-anchor="middle" class="s">текст тега ↔ id</text>
+<rect x="245" y="160" width="200" height="60" rx="6" class="fc b"/><text x="345" y="184" text-anchor="middle" class="t">TagBitmapIndex</text><text x="345" y="202" text-anchor="middle" class="s">тег → файлы (битмап)</text>
+<rect x="460" y="160" width="200" height="60" rx="6" class="fc b"/><text x="560" y="184" text-anchor="middle" class="t">FileMap</text><text x="560" y="202" text-anchor="middle" class="s">id файла → запись</text>
+<rect x="675" y="160" width="130" height="60" rx="6" class="fc b"/><text x="740" y="184" text-anchor="middle" class="t">Docket</text><text x="740" y="202" text-anchor="middle" class="s">изменения до стежка</text>
+<rect x="815" y="160" width="120" height="60" rx="6" class="fc b"/><text x="875" y="184" text-anchor="middle" class="t">Fallow</text><text x="875" y="202" text-anchor="middle" class="s">освобождённое ждёт</text>
+<path d="M790 108V159" class="ln" marker-end="url(#f11k)"/><path d="M875 108V159" class="ln" marker-end="url(#f11k)"/>
+
+<text x="30" y="322" class="cap">НА НОСИТЕЛЕ — ОБЛАСТЬ ТОМА В РАЗДЕЛЕ MBR/GPT</text>
+<rect x="30" y="330" width="1140" height="110" rx="8" class="fh bl"/>
+<rect x="46" y="346" width="90" height="78" rx="5" class="fc b"/><text x="91" y="370" text-anchor="middle" class="t">Deed</text><text x="91" y="388" text-anchor="middle" class="s">что за том;</text><text x="91" y="403" text-anchor="middle" class="s">пишется раз</text>
+<rect x="146" y="346" width="120" height="78" rx="5" class="fc b"/><text x="206" y="370" text-anchor="middle" class="t">Spine</text><text x="206" y="388" text-anchor="middle" class="s">слоты-корни:</text><text x="206" y="403" text-anchor="middle" class="s">новейший целый</text>
+<rect x="276" y="346" width="190" height="78" rx="5" class="fc b"/><text x="371" y="370" text-anchor="middle" class="t">Tally</text><text x="371" y="388" text-anchor="middle" class="s">полный снимок метаданных</text><text x="371" y="403" text-anchor="middle" class="s">+ дайджесты блоков</text>
+<rect x="476" y="346" width="230" height="78" rx="5" class="fc b"/><text x="591" y="370" text-anchor="middle" class="t">блоки данных</text><text x="591" y="388" text-anchor="middle" class="s">файлы по экстентам;</text><text x="591" y="403" text-anchor="middle" class="s">одинаковые — общие (Dedup)</text>
+<rect x="716" y="346" width="330" height="78" rx="5" class="fc b"/><text x="881" y="370" text-anchor="middle" class="t">Ribbon</text><text x="881" y="388" text-anchor="middle" class="s">стежки после Tally: файлы, записи,</text><text x="881" y="403" text-anchor="middle" class="s">имена, теги, Use Context</text>
+<rect x="1056" y="346" width="100" height="78" rx="5" class="fc b"/><text x="1106" y="370" text-anchor="middle" class="t">Deed</text><text x="1106" y="388" text-anchor="middle" class="s">копия на</text><text x="1106" y="403" text-anchor="middle" class="s">другом конце</text>
+<path d="M667 108V345" class="lc" marker-end="url(#f11c)"/>
+<path d="M1065 246V300H881V345" class="lc" marker-end="url(#f11c)"/>
+<text x="890" y="294" class="s tc lbl">стежок за цикл; время от времени — новый Tally</text>
+<text x="30" y="462" class="s">монтирование: Deed → новейший целый слот Spine → Tally → повтор стежков Ribbon → структуры в памяти; при монтировании ничего не пишется</text>
+
+<text x="30" y="494" class="cap">ЧТЕНИЕ</text>
+<rect x="30" y="504" width="165" height="56" rx="6" class="fc b"/><text x="112" y="527" text-anchor="middle" class="t">tag.query</text><text x="112" y="544" text-anchor="middle" class="s">obj.read</text>
+<rect x="215" y="504" width="200" height="56" rx="6" class="fc b"/><text x="315" y="527" text-anchor="middle" class="t">TagBitmapIndex</text><text x="315" y="544" text-anchor="middle" class="s">файлы по тегам (+ Use Context)</text>
+<rect x="435" y="504" width="150" height="56" rx="6" class="fc b"/><text x="510" y="527" text-anchor="middle" class="t">FileMap</text><text x="510" y="544" text-anchor="middle" class="s">экстенты файла</text>
+<rect x="605" y="504" width="170" height="56" rx="6" class="fc b"/><text x="690" y="527" text-anchor="middle" class="t">Boardroom</text><text x="690" y="544" text-anchor="middle" class="s">чтение секторов</text>
+<rect x="795" y="504" width="190" height="56" rx="6" class="fc b"/><text x="890" y="527" text-anchor="middle" class="t">Integrity</text><text x="890" y="544" text-anchor="middle" class="s">BoxHash-64 каждого блока</text>
+<rect x="1005" y="504" width="165" height="56" rx="6" class="fc b"/><text x="1087" y="527" text-anchor="middle" class="t">выходной Crate</text><text x="1087" y="544" text-anchor="middle" class="s">данные программе</text>
+<path d="M195 532H214" class="la" marker-end="url(#f11a)"/><path d="M415 532H434" class="la" marker-end="url(#f11a)"/><path d="M585 532H604" class="la" marker-end="url(#f11a)"/><path d="M775 532H794" class="la" marker-end="url(#f11a)"/><path d="M985 532H1004" class="la" marker-end="url(#f11a)"/>
+<text x="30" y="586" class="s">чтение не берёт Helm: оно идёт по копии записи, взятой при открытии; блоки, освобождённые под читателем, ждут в Fallow, пока он не закроет файл</text>
+<text x="30" y="604" class="s">после каждого Tally — Dedup: серии блоков с равным дайджестом сверяются побайтно и ложатся на самый старый оригинал</text>
+</svg>
+<figcaption><b>Запись, долговечность, чтение.</b> Запись держит Helm файла всё время работы (включая носитель), но не держит замок с выключенными прерываниями: остальные ждут в очереди, программа — запаркованной. Ink меняет только память и только целиком: всё, что может отказать, делается до замка. На носитель изменения переносит Settle: сначала данные, потом стежок, который их называет, потом сброс кэша носителя. Порядок частей тома на схеме условный: Deed указывает, где что лежит.</figcaption>
+</figure>
+
+<section class="text">
+<ul>
+<li><b>Helm → Plot → Ink.</b> Helm — единственный держатель экстентов файла на время записи, изменения длины (<code>span</code>) или дефрагментации; остальные стоят в FIFO. Plot загружает запись файла и работает с экстентами в памяти: новые блоки — заявки (<i>Stakes</i>); то, что не попало в итоговую запись, возвращается. Запись дальше конца файла отклоняется: файл растёт только явно, а разрыв, созданный <code>span</code>, читается нулями. Ink вносит изменение в карту файлов, индекс тегов и <i>Docket</i>; много записей одного файла между циклами сливаются в одну.</li>
+<li><b>Settle.</b> Один цикл за раз; шаги идут по одному между ходами K-Core: TAKE (снять накопленное под замком состояния, только память), BUILD, FIRST_FLUSH (данные легли на носитель раньше, чем их назовёт стежок), STITCH (стежок записан в Ribbon), LAST_FLUSH (сброс кэша носителя), DONE (ответы ждущим; Fallow отдаёт отдохнувшие блоки). Отказ на любом шаге ничего не объявляет сохранённым: следующий цикл повторит те же изменения. Время от времени цикл пишет новый Tally — полный снимок — и отмечает его новым слотом Spine.</li>
+<li><b>Монтирование</b> читает Deed, выбирает новейший целый слот Spine, читает Tally и повторяет стежки Ribbon после него. При монтировании на носитель ничего не пишется.</li>
+<li><b>Целостность.</b> У каждого блока данных есть 64-битный дайджест BoxHash (зависит от UUID тома). Каждое чтение сверяется с ним; несовпадение — ошибка <code>ERR_CHECKSUM</code>, запись в журнал и событие Touch <code>integrity</code>.</li>
+<li><b>Dedup</b> работает после каждого Tally: блоки, записанные с прошлого Tally, сравниваются по дайджесту, затем побайтно, и копия становится ссылкой на самый старый оригинал. Только сериями (короткие совпадения не делятся), никогда внутри одного файла и никогда для системных файлов и ядра.</li>
+<li><b>Защищённые файлы.</b> Файл с ролью (system, boot, kernel) меняется только вызовом с правом system или god; файл ядра, на который указывает Deed, не меняется никаким вызовом. Роль хранится в записи файла, а не в тегах: теги — слова пользователя и ничего не решают.</li>
+<li><b>Boardroom</b> — единая точка доступа к секторам. Каждый носитель, ответивший при опросе, получает место (<i>Seat</i>); какой под ним контроллер (AHCI, ATA, USB), знает только Boardroom. Флешка, вставленная во время работы, отмечается прерыванием и сажается в цикле K-Core; уход носителя объявляется сразу. Номер посадки отличает вернувшуюся флешку от прежней. Раздел (<i>Ground</i>) ищется в таблице MBR или GPT; все номера блоков тома считаются от его начала, поэтому том можно положить куда угодно.</li>
+</ul>
+<h3>Три книги номеров тегов</h3>
+<p>Язык тегов один — <code>key:value</code>, но номера тегам выдают три реестра, потому что у них разная жизнь:</p>
+<div class="tbl"><table>
+<tr><th>Реестр</th><th>Что в нём нумеруется</th><th>Почему отдельно</th></tr>
+<tr><td>реестр тома (TagFS)</td><td>теги файлов и процессов, пользовательские теги Touch, Bay, Brook, рассылки, Use Context</td><td>хранится на томе и уходит вместе с ним</td></tr>
+<tr><td>Logbook ядра</td><td>имена событий ядра (старший бит id = 1); словарь <i>Muster</i> известен заранее</td><td>ядро должно говорить и без тома</td></tr>
+<tr><td>реестр MemTag</td><td>теги областей ОЗУ</td><td>память размечается до появления тома</td></tr>
+</table></div>
+<p>Права (<code>auth_bits</code>) не входят ни в один реестр — это фиксированные биты.</p>
+</section>
+
+<h2 id="boot">14. Загрузка</h2>
+
+<figure>
+<svg viewBox="0 0 1200 470" role="img" aria-label="Загрузка: BIOS через stage1 и stage2 или UEFI через Gangway приводят в точку входа ядра с boot_info и Boarding Pass; затем kernel_main выполняет двенадцать фаз инициализации и BSP входит в цикл K-Core.">
+<defs>
+<marker id="f12k" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk"/></marker>
+</defs>
+<rect x="30" y="30" width="100" height="44" rx="6" class="fh b"/><text x="80" y="57" text-anchor="middle" class="t">BIOS</text>
+<rect x="160" y="30" width="170" height="44" rx="6" class="fc b"/><text x="245" y="49" text-anchor="middle" class="t">stage1</text><text x="245" y="65" text-anchor="middle" class="s">MBR, 512 Б</text>
+<rect x="360" y="30" width="300" height="44" rx="6" class="fc b"/><text x="510" y="49" text-anchor="middle" class="t">stage2</text><text x="510" y="65" text-anchor="middle" class="s">реальный → защищённый → длинный режим</text>
+<rect x="30" y="96" width="100" height="44" rx="6" class="fh b"/><text x="80" y="123" text-anchor="middle" class="t">UEFI</text>
+<rect x="160" y="96" width="500" height="44" rx="6" class="fc b"/><text x="410" y="115" text-anchor="middle" class="t">Gangway — загрузчик UEFI</text><text x="410" y="131" text-anchor="middle" class="s">панель настроек, сцена загрузки, том по Deed, кадровый буфер GOP</text>
+<path d="M130 52H159" class="ln" marker-end="url(#f12k)"/><path d="M330 52H359" class="ln" marker-end="url(#f12k)"/><path d="M130 118H159" class="ln" marker-end="url(#f12k)"/>
+<path d="M660 52H690V75H719" class="ln" marker-end="url(#f12k)"/><path d="M660 118H690V95H719" class="ln" marker-end="url(#f12k)"/>
+<rect x="720" y="50" width="200" height="70" rx="6" class="fk b"/><text x="820" y="72" text-anchor="middle" class="t">ядро: _start</text><text x="820" y="89" text-anchor="middle" class="s" style="font-family:ui-monospace,Menlo,monospace">0xFFFF_FFFF_8010_0000</text><text x="820" y="105" text-anchor="middle" class="s">прерывания выключены</text>
+<rect x="950" y="30" width="220" height="110" rx="6" class="fc b"/>
+<text x="966" y="52" class="t">ядру передаётся</text>
+<text x="966" y="74" class="s">boot_info — о машине:</text>
+<text x="966" y="89" class="s">E820, кадровый буфер, ACPI</text>
+<text x="966" y="111" class="s">Boarding Pass — о пути:</text>
+<text x="966" y="126" class="s">какой том, носитель, загрузчик</text>
+<path d="M949 85H921" class="ln" marker-end="url(#f12k)"/>
+
+<text x="30" y="176" class="cap">KERNEL_MAIN — ПОРЯДОК ИНИЦИАЛИЗАЦИИ</text>
+<g>
+<rect x="30" y="186" width="180" height="96" rx="6" class="fk b"/><text x="38" y="206" class="t">1 · экран и журнал</text><text x="38" y="226" class="s">BuildPlate: что за ядро</text><text x="38" y="242" class="s">Boarding Pass, LogKeep</text><text x="38" y="258" class="s">COM-порт</text>
+<rect x="222" y="186" width="180" height="96" rx="6" class="fk b"/><text x="230" y="206" class="t">2 · процессор</text><text x="230" y="226" class="s">CPUID, бит NX</text><text x="230" y="242" class="s">FPU, SSE, AVX</text><text x="230" y="258" class="s">GDT, TSS, IDT</text><text x="230" y="274" class="s">Notify (MSR LSTAR)</text>
+<rect x="414" y="186" width="180" height="96" rx="6" class="fk b"/><text x="422" y="206" class="t">3 · память</text><text x="422" y="226" class="s">E820 → PMM</text><text x="422" y="242" class="s">куча ядра</text><text x="422" y="258" class="s">VMM: Pull Map</text><text x="422" y="274" class="s">кадровый буфер</text>
+<rect x="606" y="186" width="180" height="96" rx="6" class="fk b"/><text x="614" y="206" class="t">4 · защита</text><text x="614" y="226" class="s">MemTag, MCE</text><text x="614" y="242" class="s">PKU, LAM, TME, CET</text><text x="614" y="258" class="s">самопроверки памяти</text>
+<rect x="798" y="186" width="180" height="96" rx="6" class="fk b"/><text x="806" y="206" class="t">5 · прошивка</text><text x="806" y="226" class="s">EFI runtime, Secure Boot</text><text x="806" y="242" class="s">ACPI, APEI</text><text x="806" y="258" class="s">IOMMU: поиск блоков</text><text x="806" y="274" class="s">APIC вместо PIC</text>
+<rect x="990" y="186" width="180" height="96" rx="6" class="fk b"/><text x="998" y="206" class="t">6 · ядра и время</text><text x="998" y="226" class="s">AMP: роли ядер</text><text x="998" y="242" class="s">Baton, ClockBoard</text><text x="998" y="258" class="s">HPET/PIT 250 Гц, RTC</text><text x="998" y="274" class="s">калибровка TSC</text>
+
+<rect x="990" y="316" width="180" height="96" rx="6" class="fk b"/><text x="998" y="336" class="t">7 · процессы</text><text x="998" y="356" class="s">idle, ASLR</text><text x="998" y="372" class="s">таблица процессов</text><text x="998" y="388" class="s">планировщик</text>
+<rect x="798" y="316" width="180" height="96" rx="6" class="fk b"/><text x="806" y="336" class="t">8 · Guide</text><text x="806" y="356" class="s">Touch, Bay, Brook</text><text x="806" y="372" class="s">ManifestStage</text><text x="806" y="388" class="s">перенос страниц MCE</text><text x="806" y="404" class="s">CET для ядра</text>
+<rect x="606" y="316" width="180" height="96" rx="6" class="fk b"/><text x="614" y="336" class="t">9 · операции</text><text x="614" y="356" class="s">OpRegistry, Manifest</text><text x="614" y="372" class="s">самопроверки ABI</text><text x="614" y="388" class="s">деки Operations,</text><text x="614" y="404" class="s">Hardware, System</text>
+<rect x="414" y="316" width="180" height="96" rx="6" class="fk b"/><text x="422" y="336" class="t">10 · многоядерность</text><text x="422" y="356" class="s">очереди K-Core</text><text x="422" y="372" class="s">асинхронный вызов</text><text x="422" y="388" class="s">запуск AP</text><text x="422" y="404" class="s">Nightwatch</text>
+<rect x="222" y="316" width="180" height="96" rx="6" class="fk b"/><text x="230" y="336" class="t">11 · устройства, том</text><text x="230" y="356" class="s">PCI; IOMMU включается</text><text x="230" y="372" class="s">AHCI, ATA, xHCI</text><text x="230" y="388" class="s">Boardroom, TagFS</text><text x="230" y="404" class="s">дек Storage, клавиатура</text>
+<rect x="30" y="316" width="180" height="96" rx="6" class="fu b"/><text x="38" y="336" class="t">12 · старт</text><text x="38" y="356" class="s">OpRegistry запечатан</text><text x="38" y="372" class="s">display, hub, autostart</text><text x="38" y="388" class="s">потоки — на App Core</text><text x="38" y="404" class="s">BSP → цикл K-Core</text>
+</g>
+<path d="M210 234H221" class="ln" marker-end="url(#f12k)"/><path d="M402 234H413" class="ln" marker-end="url(#f12k)"/><path d="M594 234H605" class="ln" marker-end="url(#f12k)"/><path d="M786 234H797" class="ln" marker-end="url(#f12k)"/><path d="M978 234H989" class="ln" marker-end="url(#f12k)"/>
+<path d="M1080 282V315" class="ln" marker-end="url(#f12k)"/>
+<path d="M990 364H979" class="ln" marker-end="url(#f12k)"/><path d="M798 364H787" class="ln" marker-end="url(#f12k)"/><path d="M606 364H595" class="ln" marker-end="url(#f12k)"/><path d="M414 364H403" class="ln" marker-end="url(#f12k)"/><path d="M222 364H211" class="ln" marker-end="url(#f12k)"/>
+<text x="30" y="444" class="s">Порядок важен: Touch нельзя публиковать до Guide (реестр тегов ещё не готов), IOMMU включается после PCI и до первых передач DMA, клавиатура — после TagFS (её тег берётся из реестра тома).</text>
+</svg>
+<figcaption><b>От включения до первой программы.</b> Оба загрузчика приводят в одну точку входа и передают два блока: <code>boot_info</code> описывает машину, <i>Boarding Pass</i> — путь (с какого тома и носителя загружено ядро, каким загрузчиком). Boarding Pass состоит из штампов с длиной: неизвестный штамп пропускается, поэтому загрузчик и ядро не обязаны обновляться вместе.</figcaption>
+</figure>
+
+<section class="text">
+<ul>
+<li><b>BIOS:</b> stage1 в MBR загружает stage2; stage2 переводит процессор из реального режима в защищённый и длинный, читает ядро с тома и передаёт управление. <b>UEFI:</b> Gangway — приложение UEFI со своей панелью настроек и сценой загрузки; читает том по Deed, получает кадровый буфер через GOP, строит таблицы страниц и прыгает в ядро.</li>
+<li>Первое, что печатает ядро, — <i>BuildPlate</i>: из чего собрано это ядро, чтобы журнал любого запуска можно было соотнести с кодом.</li>
+<li><code>_start</code> выключает прерывания сразу, независимо от того, в каком состоянии их оставил загрузчик. Прерывания становятся допустимыми после инициализации планировщика.</li>
+<li>Программы запуска (<code>display.box</code>, <code>hub.box</code>, <code>autostart.box</code>) берутся с тома. Если тома ещё нет, ядро ждёт и запускает их, когда том появится. Затем потоки ставятся в очереди App Core, ядрам посылается <code>IPI_WAKE</code>, и BSP навсегда входит в цикл K-Core.</li>
+</ul>
+</section>
+
+<h2 id="userspace">15. Системные программы и библиотеки</h2>
+
+<figure>
+<svg viewBox="0 0 1150 350" role="img" aria-label="display — единственная программа, которая рисует: текст программ приходит по полосам Brook, области GUI открываются вопросом и получают память Bay, клавиши приходят от ядра как Touch и раздаются слушающей программе, кадр выводится на экран, выданный ядром.">
+<defs>
+<marker id="f13k" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mk"/></marker>
+<marker id="f13e" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mke"/></marker>
+<marker id="f13c" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="mkc"/></marker>
+</defs>
+<rect x="30" y="40" width="180" height="54" rx="6" class="fu b"/><text x="120" y="62" text-anchor="middle" class="t">программа</text><text x="120" y="79" text-anchor="middle" class="s">print, readline</text>
+<rect x="30" y="150" width="180" height="54" rx="6" class="fu b"/><text x="120" y="172" text-anchor="middle" class="t">программа с GUI</text><text x="120" y="189" text-anchor="middle" class="s">painter::gui</text>
+<rect x="30" y="260" width="180" height="54" rx="6" class="fu b"/><text x="120" y="282" text-anchor="middle" class="t">hub</text><text x="120" y="299" text-anchor="middle" class="s">оболочка; запускает .box</text>
+
+<rect x="430" y="30" width="290" height="270" rx="8" class="fu b"/>
+<text x="446" y="54" class="ttl">display</text>
+<rect x="446" y="66" width="258" height="36" rx="5" class="fc b"/><text x="456" y="89">консоль: клетки, порядок журнала</text>
+<rect x="446" y="112" width="258" height="36" rx="5" class="fc b"/><text x="456" y="135">ухо клавиатуры</text>
+<rect x="446" y="158" width="258" height="36" rx="5" class="fc b"/><text x="456" y="181">области GUI программ</text>
+<rect x="446" y="204" width="258" height="36" rx="5" class="fc b"/><text x="456" y="227">композитор: кадр, где изменилось</text>
+<rect x="446" y="250" width="258" height="36" rx="5" class="fc b"/><text x="456" y="273">сцена загрузки, эффекты</text>
+
+<rect x="880" y="40" width="240" height="50" rx="6" class="fk b"/><text x="1000" y="60" text-anchor="middle" class="t">кольцо журнала ядра</text><text x="1000" y="77" text-anchor="middle" class="s">всё, что сказало ядро</text>
+<rect x="880" y="110" width="240" height="50" rx="6" class="fk b"/><text x="1000" y="130" text-anchor="middle" class="t">клавиатура</text><text x="1000" y="147" text-anchor="middle" class="s">IRQ → Touch «keyboard»</text>
+<rect x="880" y="198" width="240" height="50" rx="6" class="fk b"/><text x="1000" y="218" text-anchor="middle" class="t">экран</text><text x="1000" y="235" text-anchor="middle" class="s">выдан ядром: hw.screen.claim</text>
+<rect x="880" y="266" width="240" height="50" rx="6" class="fk b"/><text x="1000" y="286" text-anchor="middle" class="t">будильник</text><text x="1000" y="303" text-anchor="middle" class="s">Touch в момент кадра</text>
+
+<path d="M210 80H445" class="ln" marker-end="url(#f13k)"/><text x="230" y="73" class="s">Brook «console:N» — текст</text>
+<path d="M445 130H240V90H211" class="le" marker-end="url(#f13e)"/><text x="248" y="124" class="s te">Touch на теге полосы</text>
+<path d="M210 172H445" class="lc" marker-end="url(#f13c)"/><text x="230" y="166" class="s tc">ask: открыть область</text>
+<path d="M445 190H211" class="ln dash" marker-end="url(#f13k)"/><text x="230" y="206" class="s">память области — Bay</text>
+<path d="M880 72H705" class="ln" marker-end="url(#f13k)"/>
+<path d="M880 135H705" class="le" marker-end="url(#f13e)"/>
+<path d="M705 222H879" class="ln" marker-end="url(#f13k)"/>
+<path d="M880 291H800V268H705" class="le" marker-end="url(#f13e)"/>
+</svg>
+<figcaption><b>Ядро не рисует.</b> Экран выдан одной программе — display. Текст каждой программы идёт в display по её полосе Brook и сначала записывается в кольцо журнала, поэтому экран, последовательный порт и сохранённый журнал показывают одно и то же в одном порядке. Клавиши ядро публикует как Touch; display раздаёт их той программе, чья полоса сейчас слушает. Области GUI программа открывает вопросом (<code>ask</code>), а их память — Bay, созданный display для этой программы. Без работы display засыпает через Turn In, а для эффектов ставит будильник.</figcaption>
+</figure>
+
+<section class="text">
+<div class="tbl"><table>
+<tr><th>Компонент</th><th>Роль</th></tr>
+<tr><td><b>display</b></td><td>владелец экрана: консоль, области программ, композиция кадра, приём клавиатуры, сцена загрузки и эффекты. Один цикл событий без таймаутов.</td></tr>
+<tr><td><b>hub</b></td><td>оболочка: строка ввода, команды, запуск программ (<code>proc.exec</code>), установка Use Context.</td></tr>
+<tr><td><b>autostart</b></td><td>запускает программы из своего списка (настройка <code>programs</code>), когда его запускает система; запущенный человеком — показывает и меняет список.</td></tr>
+<tr><td><b>boxlib</b></td><td>библиотека C: сборка Manifest, кольца, ожидание, файлы, Touch, Bay, Brook, Current, потоки, куча.</td></tr>
+<tr><td><b>boxcxx</b></td><td>стандартная библиотека C++ для BoxOS и обёртки <code>box::</code> (executor, strand, line, call, result, bay…).</td></tr>
+<tr><td><b>painter</b></td><td>рисование для программ: <code>painter::tui</code> (текст и клетки), <code>painter::gui</code> (области с элементами).</td></tr>
+<tr><td><b>typecase</b></td><td>шрифты и раскладка символов для display и программ.</td></tr>
+<tr><td><b>.box</b></td><td>формат исполняемого файла: заголовок, таблица частей по именам, части (код, данные, настройки, описание, имена функций). Печать SHA-256 покрывает таблицу, а таблица — хеш каждой части. Неизвестная часть пропускается, если не помечена обязательной; тогда загрузка отклоняется с названием того, чего не хватает.</td></tr>
+</table></div>
+</section>
+
+<section class="text">
+<h2 id="notbuilt">16. Объявлено, но не задействовано</h2>
+<p>Эти имена есть в заголовках ABI, но в текущем коде ничего не делают. На них нельзя полагаться.</p>
+<div class="tbl"><table>
+<tr><th>Что</th><th>Что обещает имя</th><th>Что на самом деле</th></tr>
+<tr><td><code>MANIFEST_FLAG_TRANSACTIONAL</code></td><td>откат всех изменений при отказе</td><td>отката нет</td></tr>
+<tr><td><code>MANIFEST_FLAG_PARALLEL_OK</code>, <code>OP_FLAG_PARALLEL_BARRIER</code></td><td>параллельное исполнение операций</td><td>операции исполняются строго по порядку</td></tr>
+<tr><td><code>MANIFEST_FLAG_PINNED</code>, <code>OP_FLAG_RETRY</code>, <code>OP_FLAG_TERMINAL</code></td><td>резидентность, повтор, явный конец</td><td>не читаются</td></tr>
+<tr><td><code>CRATE_FLAG_*</code> (GROWABLE, DMA_OK, ZERO_COPY, PINNED)</td><td>свойства буфера</td><td>не читаются</td></tr>
+<tr><td><code>pier_id</code> в Pocket</td><td>полоса срочности</td><td>передаётся в контекст операции, полос нет</td></tr>
+<tr><td><code>DECK_NETWORK</code>, ключ <code>network</code></td><td>сетевой дек</td><td>номер и право есть, дека нет</td></tr>
+<tr><td>Braid (TagFS)</td><td>избыточность тома на нескольких носителях</td><td>код есть, при монтировании не подключается</td></tr>
+</table></div>
+
+<h2 id="source">17. Карта исходников</h2>
+<div class="tbl"><table>
+<tr><th>Каталог</th><th>Что там</th></tr>
+<tr><td><code>src/boot/stage1</code>, <code>stage2</code></td><td>загрузчик BIOS</td></tr>
+<tr><td><code>src/boot/uefi</code></td><td>Gangway — загрузчик UEFI</td></tr>
+<tr><td><code>src/kernel/entry</code>, <code>src/kernel/main.c</code></td><td>точка входа, скрипт компоновки, порядок инициализации</td></tr>
+<tr><td><code>src/kernel/arch/x86-64/amp</code></td><td>роли ядер, запуск AP, цикл K-Core (<code>kcore.c</code>), выравнивание TSC</td></tr>
+<tr><td><code>src/kernel/arch/x86-64/notify</code>, <code>idt</code></td><td>вход SYSCALL, исключения, прерывания, ворота вызова (<code>syscall_handler</code>)</td></tr>
+<tr><td><code>src/kernel/arch/x86-64/apic</code>, <code>irqchip</code>, <code>gdt</code>, <code>pic</code></td><td>контроллеры прерываний, сегменты</td></tr>
+<tr><td><code>src/kernel/core/ipc</code></td><td>кольца Pocket, Result, Touch; долги колец; Chit</td></tr>
+<tr><td><code>src/kernel/core/guide</code></td><td>Guide</td></tr>
+<tr><td><code>src/kernel/core/manifest</code></td><td>исполнение Manifest, права, стейджинг, Crate, OpRegistry</td></tr>
+<tr><td><code>src/kernel/core/decks</code></td><td>деки System, Storage, Hardware, Operations, Execution</td></tr>
+<tr><td><code>src/kernel/core/process</code></td><td>Cabin, Strand, загрузка <code>.box</code>, автозапуск, перезапуск упавших</td></tr>
+<tr><td><code>src/kernel/core/scheduler</code></td><td>планировщик App Core, idle</td></tr>
+<tr><td><code>src/kernel/core/touch</code>, <code>bay</code>, <code>brook</code></td><td>Touch (с Logbook и Muster), Bay, Brook</td></tr>
+<tr><td><code>src/kernel/core/baton</code></td><td>Baton и Knock</td></tr>
+<tr><td><code>src/kernel/core/memory</code></td><td>PMM, VMM, MemTag, uaccess, TME, ASLR</td></tr>
+<tr><td><code>src/kernel/core/boardroom</code>, <code>boarding</code></td><td>носители и раздел тома; Boarding Pass</td></tr>
+<tr><td><code>src/kernel/core/nightwatch</code>, <code>use_context</code>, <code>clipboard</code></td><td>Nightwatch, Use Context, буфер обмена машины</td></tr>
+<tr><td><code>src/kernel/core/clockboard</code>, <code>cpu_caps</code></td><td>страницы времени и возможностей процессора</td></tr>
+<tr><td><code>src/kernel/core/iommu</code>, <code>mce</code>, <code>cet</code>, <code>fpu</code>, <code>cpu</code></td><td>IOMMU, ошибки машины, теневые стеки, FPU, процессор</td></tr>
+<tr><td><code>src/kernel/core/system_halt</code></td><td>выключение и перезагрузка</td></tr>
+<tr><td><code>src/kernel/tagfs</code></td><td>TagFS: helm, plot, ink, settle, scribe, mount, deed, dedup, integrity…</td></tr>
+<tr><td><code>src/kernel/drivers</code></td><td>ACPI, EFI, PCI, диски (AHCI, ATA), USB (xHCI), клавиатура, таймеры, COM, видео</td></tr>
+<tr><td><code>src/lib/kernel</code></td><td>klib, куча ядра, slab, кольцо журнала, криптография</td></tr>
+<tr><td><code>src/include</code></td><td>общие заголовки ABI ядра и программ</td></tr>
+<tr><td><code>src/userspace</code></td><td>boxlib, boxcxx, display, hub, painter, typecase, утилиты, программы</td></tr>
+<tr><td><code>tools</code></td><td>сборка тома, стенды и проверки на хосте</td></tr>
+</table></div>
+
+<h2 id="glossary">18. Словарь</h2>
+<div class="tbl"><table>
+<tr><th>Термин</th><th>Значение</th></tr>
+<tr><td>AMP</td><td>асимметричная многопроцессорность: ядра процессора разделены на K-Core и App Core</td></tr>
+<tr><td>App Core</td><td>ядро процессора, исполняющее потоки программ</td></tr>
+<tr><td>Baton</td><td>передача работы из прерывания в K-Core; узел встроен в задание, поэтому не теряется</td></tr>
+<tr><td>Bay</td><td>общая память нескольких программ, открываемая по тегу</td></tr>
+<tr><td>Boardroom, Seat</td><td>единая точка доступа к носителям; место конкретного носителя</td></tr>
+<tr><td>Boarding Pass</td><td>штампы загрузчика для ядра: с какого тома и носителя загружено</td></tr>
+<tr><td>BoxHash</td><td>семейство хешей: 64-битный для проверки блоков, 256-битный для содержимого, SHA-256</td></tr>
+<tr><td>Brook</td><td>упорядоченный поток кадров от одного писателя одному читателю через общие страницы</td></tr>
+<tr><td>BSP</td><td>первое ядро процессора; в BoxOS — K-Core, принимающий все прерывания устройств</td></tr>
+<tr><td>Cabin</td><td>запущенная программа: адресное пространство, права, ресурсы</td></tr>
+<tr><td>Chit</td><td>запись ядра об обещанном ответе: PENDING, DUE, KEPT</td></tr>
+<tr><td>ClockBoard, CpuCaps</td><td>страницы только для чтения в каждой Cabin: время и возможности процессора</td></tr>
+<tr><td>cookie</td><td>24-битный жетон запроса; по нему поток узнаёт свой Result</td></tr>
+<tr><td>Crate</td><td>описатель буфера в памяти программы (адрес, размер, ёмкость, направление)</td></tr>
+<tr><td>Current</td><td>каналы ввода-вывода по тегу в boxlib (консоль, журнал, файл, Brook)</td></tr>
+<tr><td>Deck (дек)</td><td>владелец набора операций: System, Storage, Hardware, Operations</td></tr>
+<tr><td>Deed</td><td>паспорт тома: пишется при создании, две копии на противоположных концах</td></tr>
+<tr><td>Docket, Fallow</td><td>изменения файлов, ожидающие стежка; освобождённые блоки, ожидающие безопасного повторного использования</td></tr>
+<tr><td>Fare, Tip, Waterline</td><td>оплаченное время потока на App Core и на K-Core; наименьший долг на ядре</td></tr>
+<tr><td>Gangway</td><td>загрузчик UEFI</td></tr>
+<tr><td>Ground</td><td>раздел носителя, на котором лежит том</td></tr>
+<tr><td>Guide</td><td>часть K-Core, которая забирает Pocket и запускает исполнение Manifest</td></tr>
+<tr><td>Hammock</td><td>слот адресного пространства дополнительного Strand: стек, теневой стек, кольца, StrandInfo</td></tr>
+<tr><td>Helm, Plot, Ink</td><td>держатель файла на время записи; экстенты файла в памяти; единственный способ изменить запись файла</td></tr>
+<tr><td>K-Core</td><td>ядро процессора, выполняющее службу ядра ОС</td></tr>
+<tr><td>Knock</td><td>«стук» в кольцо события из прерывания; визит один, сколько бы ни стучали</td></tr>
+<tr><td>Logbook, Muster</td><td>реестр имён событий ядра; заранее известный словарь этих имён</td></tr>
+<tr><td>Manifest</td><td>запрос к ядру: упорядоченный список операций с параметрами и индексами Crate</td></tr>
+<tr><td>MemTag</td><td>теги на областях ОЗУ</td></tr>
+<tr><td>Nightwatch</td><td>наблюдатель, сообщающий о доказанных противоречиях (потерянное пробуждение, недоставленный ответ)</td></tr>
+<tr><td>Notify</td><td>вход в ядро инструкцией SYSCALL: «загляни в кольцо»</td></tr>
+<tr><td>OpRegistry</td><td>единая таблица операций: код → обработчик, уровень права, имя</td></tr>
+<tr><td>Pocket</td><td>128-байтный конверт запроса в PocketRing</td></tr>
+<tr><td>porthole</td><td>временное окно, через которое ядро читает и пишет память программы, чей CR3 не активен</td></tr>
+<tr><td>Pull Map</td><td>отображение всей физической памяти в верхней половине адресов по постоянному смещению</td></tr>
+<tr><td>Result</td><td>24-байтный ответ или сообщение в ResultRing</td></tr>
+<tr><td>Settle, Ribbon, Tally, Spine</td><td>цикл переноса изменений на носитель; журнал стежков; полный снимок метаданных; слоты-корни, указывающие на снимок</td></tr>
+<tr><td>Strand</td><td>поток исполнения внутри Cabin, единица планирования; имя — (pid, generation)</td></tr>
+<tr><td>TagFS</td><td>файловая система по тегам, без путей</td></tr>
+<tr><td>Touch</td><td>событие, рассылаемое по тегу подписчикам</td></tr>
+<tr><td>Turn In</td><td>сон потока до любой доставки в его кольца, без срока</td></tr>
+<tr><td>Use Context</td><td>декларация в тегах того, чем занят человек; влияет на планировщик и TagFS</td></tr>
+</table></div>
+</section>
+
+<footer class="text meta" style="margin-top:48px;border-top:1px solid var(--line);padding-top:12px">
+Документ составлен по исходному коду ветки <code>boxmetal</code> (коммит <code>20098684</code>). Числа и имена взяты из кода; при изменении кода документ нужно сверять заново.
+</footer>
+
+</main>
+</body>
+</html>
