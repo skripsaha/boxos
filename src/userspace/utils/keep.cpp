@@ -19,13 +19,17 @@ std::string Refused(std::string_view What, std::int64_t Code)
 }
 
 /* 1 with Id filled, 0 when there is none, a negative error otherwise: the one
- * called by its name among the files wearing its tags, not in the trash. */
+ * called by its name among the files wearing its tags — or, of a file
+ * programs share, among those that begin as it does, the last made — not in
+ * the trash. */
 int Find(const Keep &File, file_id_t &Id)
 {
     file_id_t *Ids   = nullptr;
-    int        Count = query_all_everywhere(box::tagfs::my_tags, File.Tags, nullptr, &Ids);
+    const int  Count = File.Beginning ? files_starting_with(File.Beginning, std::strlen(File.Beginning), &Ids)
+                                      : query_all_everywhere(box::tagfs::my_tags, File.Tags, nullptr, &Ids);
     int        Found = Count < 0 ? Count : 0;
-    for (int At = 0; At < Count && Found == 0; At++) {
+    for (int Seen = 0; Seen < Count && Found == 0; Seen++) {
+        const int    At = File.Beginning ? Count - 1 - Seen : Seen;
         FileMetadata Metadata;
         if (FileMetadataRead(box::tagfs::my_tags, Ids[At], &Metadata) != 0) continue;
         if (Metadata.Filename && std::strcmp(Metadata.Filename, File.Name) == 0) {
@@ -75,7 +79,7 @@ std::optional<std::string> KeepWrite(const Keep &File, std::string_view Text)
     int       Found = Find(File, Id);
     if (Found < 0) return Refused(std::format("the volume would not list its files, so {} was not kept", File.Name), Found);
     if (Found == 0) {
-        std::int64_t Made = create_everywhere(box::tagfs::my_tags, File.Name, File.Tags);
+        std::int64_t Made = create_everywhere(box::tagfs::my_tags, File.Name, File.Beginning ? "" : File.Tags);
         if (Made <= 0) return Refused(std::format("the volume would not make {}", File.Name), Made);
         Id = static_cast<file_id_t>(Made);
     }

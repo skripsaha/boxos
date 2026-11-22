@@ -167,8 +167,9 @@ QuillVerdict QuillBookNames(const char *const *args)
     QuillBookName(k, name, false, 0, "-kept.n");
     QuillBookName(b, name, false, 0, "-b.n");
     int  nk   = QuillBookFind(k, &found), nb = QuillBookFind(b, &found);
+    /* Its one tag taken off, the kept file wears none: a name is no tag. */
     int  tags = file_info(MY_TAGS, (file_id_t)kept, &info) == 0 ? (int)info.tag_count : -1;
-    if (nk == 1 && nb == 0 && tags == 1) {
+    if (nk == 1 && nb == 0 && tags == 0) {
         printf("[QUILL] names: PASS — %s (fid %lld) made, tagged, renamed and its tag taken off, %s (fid %lld) "
                "tagged and given up, each round anchored\n", k, (long long)kept, b, (long long)gone);
         return QUILL_PASS;

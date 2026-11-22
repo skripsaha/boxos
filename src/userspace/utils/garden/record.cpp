@@ -11,8 +11,11 @@ namespace garden {
 
 namespace {
 
-constexpr Keep             PlantsFile{"garden.plants", "garden,plants"};
-constexpr std::string_view Heading = "garden 1";
+// The file's first line — what the gardener and the garden, two programs, both
+// find it by: neither meets the other's own words.
+constexpr char             HeadingLine[] = "garden 1\n";
+constexpr std::string_view Heading(HeadingLine, sizeof HeadingLine - 2);
+constexpr Keep             PlantsFile{"garden.plants", nullptr, HeadingLine};
 constexpr std::size_t      Fields  = 5;
 
 // A name that holds nothing a line could not.

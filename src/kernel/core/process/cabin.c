@@ -68,10 +68,14 @@ static int cabin_set_tag_bit(cabin_t *cabin, uint32_t tag_id)
 
 /*
  * The cabin's tags, read by the one spelling (tag_spelling.h) out of the
- * comma list in place. A tag that does not spell, or that the volume refuses a
- * number, refuses the cabin: a process is never started without a tag it was
- * given. With no volume up there is no number to have, and the tag is only
- * not a membership yet — the cabin is made.
+ * comma list in place. A tag that does not spell, or that the volume refuses
+ * for any other reason, refuses the cabin: a process is never started without
+ * a tag it was given. With no number to have — no volume up, or a volume that
+ * has given out every number its book can carry (said once, by the registry) —
+ * the tag is only not a membership, and the cabin is made: what a process may
+ * do is in its authority, whose keys are numbered always (the reserved
+ * vocabulary), and a volume that can number nothing new still starts the
+ * programs it holds, the shell first.
  */
 static error_t cabin_wear_tags(cabin_t *cabin, const char *tags)
 {
@@ -88,7 +92,7 @@ static error_t cabin_wear_tags(cabin_t *cabin, const char *tags)
          * names this tag and had none for it yet. */
         uint32_t tid;
         rc = TagFSInternSpelling(&tag, &tid);
-        if (rc == ERR_TAGFS_NOT_INITIALIZED)
+        if (rc == ERR_TAGFS_NOT_INITIALIZED || rc == ERR_TAGFS_REGISTRY_FULL)
             continue;
         if (rc != OK)
             return rc;
