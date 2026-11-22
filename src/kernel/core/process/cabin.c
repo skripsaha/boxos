@@ -198,6 +198,11 @@ uint64_t CabinProgramFile(const cabin_t *cabin)
     return cabin ? cabin->program_fid : 0;
 }
 
+const uint8_t *CabinProgramVolume(const cabin_t *cabin)
+{
+    return cabin ? cabin->program_volume : NULL;
+}
+
 void cabin_destroy(cabin_t *cabin)
 {
     if (!cabin)

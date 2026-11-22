@@ -201,6 +201,11 @@ typedef struct cabin_t
      * changed after, and kept here, in memory only the kernel writes, so no
      * program can speak as another. Read it by CabinProgramFile. */
     uint64_t program_fid;
+    /* Which volume that file is on — its Deed's uuid, written with
+     * program_fid: a file id names a file of one volume, and a program
+     * started from a medium since taken out must not be taken for whatever
+     * file of another volume has the same id. Read it by CabinProgramVolume. */
+    uint8_t  program_volume[16];
 } cabin_t;
 
 _Static_assert(sizeof(cabin_t) < 4096, "cabin_t must fit in one page");
@@ -276,6 +281,10 @@ bool CabinProgram(const cabin_t *cabin, uint32_t *pid, uint32_t *generation);
  * the program is where a file's maker, or a file's own tags, are in question.
  * 0 for a program with no file (started from bytes), and for no cabin. */
 uint64_t CabinProgramFile(const cabin_t *cabin);
+
+/* The uuid of the volume that file is on — 16 bytes, all zero for a program
+ * with no file — or NULL for no cabin. */
+const uint8_t *CabinProgramVolume(const cabin_t *cabin);
 
 /* Reference counting on strand_count. */
 void cabin_ref_inc(cabin_t *cabin);

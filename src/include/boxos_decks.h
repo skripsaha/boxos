@@ -329,13 +329,19 @@
  *  Read by the kernel handler table (decks/storage/storage_ops.c) and by the
  *  boxlib wrappers (boxlib/src/file.c); never mirrored in a *.c file.
  * ============================================================================ */
-/* tag.query — every file carrying the asked tags. params = [u8 scope] (see
- * STORAGE_SCOPE_* below), in_crate = comma-separated tags (absent = all).
+/* tag.query — every file carrying the asked tags. params = [u8 scope][u8 whose]
+ * (STORAGE_SCOPE_* and STORAGE_TAGS_* below) and after them the tags set aside,
+ * in_crate = comma-separated tags of `whose` (absent = all).
  * out_crate = [u32 delivered][u32 total][u64 file_ids[delivered]]: `total` is
  * how many files match, `delivered` how many of them fit the crate — so a
  * caller with too small a crate learns the true count and can ask again with
  * room for it, instead of being handed the smaller number as the answer. */
 #define STORAGE_TAG_QUERY           0x01
+/* tag.set — params = [u64 file_id][u8 whose], in_crate = one tag, "key" or
+ * "key:value", of `whose` (STORAGE_TAGS_* below): the file wears exactly that
+ * tag, or the call is refused. tag.unset — the same params; in_crate "key"
+ * takes off every one of `whose`'s tags of the key, "key:value" that one tag
+ * alone — never another owner's of the same text. */
 #define STORAGE_TAG_SET             0x02
 #define STORAGE_TAG_UNSET           0x03
 #define STORAGE_OBJ_READ            0x04
@@ -352,8 +358,9 @@
 #define STORAGE_OBJ_CREATE          0x06
 #define STORAGE_OBJ_DELETE          0x07
 #define STORAGE_OBJ_RENAME          0x08
-/* obj.getinfo — params = [u64 fid]; out_crate = [u64 fid][u64 size][u32 tags]
- * [u16 name_len][name][tag records]…[u64 kept_until][u64 made_by]: the eight
+/* obj.getinfo — params = [u64 fid][u8 whose]; out_crate = [u64 fid][u64 size]
+ * [u32 tags][u16 name_len][name][tag records]…[u64 kept_until][u64 made_by]:
+ * the tags are those of `whose` the file wears (STORAGE_TAGS_* below); the eight
  * bytes before the last are the time, in nanoseconds of the wall clock, at
  * which the volume lets a deleted file go (obj.keep), 0 for a file that is not
  * deleted; the last eight are the volume's id of the file of the program that
@@ -403,10 +410,11 @@
  * refused (ERR_ACCESS_DENIED at the gate, ERR_PERMISSION_DENIED past it).
  * ERR_OBJECT_NOT_FOUND when there is nothing to let go. */
 #define STORAGE_OBJ_ESCHEAT         0x22
-/* tag.list — the tags files wear, each with how many files wear it, in the
- * order of the volume's numbers for them. The volume's registry names more
- * than files' tags — a process's, a Touch's, a Bay's — and a tag no file wears
- * is left out. params = [u32 from][u8 scope][tags set aside]: from the tag
+/* tag.list — the tags of `whose` files wear, each with how many files wear it,
+ * in the order of the volume's numbers for them. The volume's registry names
+ * more than files' tags — a process's, a Touch's, a Bay's, another owner's —
+ * and a tag no file wears is left out. params = [u32 from][u8 scope][u8 whose]
+ * [tags set aside]: from the tag
  * numbered `from` on (0: the first), the files counted inside the Use Context
  * (STORAGE_SCOPE_USE, the files that wear its tags) or on the whole volume,
  * those wearing a tag the comma list after the scope names left uncounted, as
@@ -453,34 +461,57 @@
  * not a tag, and this is the one question that finds files by it: the word
  * matches a file when it is the whole of the file's name or its stem (the name
  * up to its last dot, so `slot3` finds `slot3.sav`), byte for byte; a file
- * kept deleted (obj.keep) is not met. params = [u8 scope][tags set aside], as
- * tag.query's: inside the Use Context (absent, STORAGE_SCOPE_USE) the files
+ * kept deleted (obj.keep) is not met. params = [u8 scope][u8 whose][tags set
+ * aside], as tag.query's — a name is no one's, `whose` the owner of the tags
+ * asked beside it: inside the Use Context (STORAGE_SCOPE_USE) the files
  * called the word that wear the context's tags too, or STORAGE_SCOPE_
  * EVERYWHERE; STORAGE_SCOPE_DELETED is refused; after the scope, a comma list
  * of tags no file of the answer wears. in_crate = the word, its bytes whole
  * (no tag spelling: a ':' or ',' is a byte like any other), and — after one
- * NUL — a comma list of tags the files called so must wear too; an empty word
+ * NUL — a comma list of `whose`'s tags the files called so must wear too; an empty word
  * is refused ERR_INVALID_ARGUMENT.
  * out_crate = [u32 delivered][u32 total][u64 file_ids[delivered]] in file id
  * order, as tag.query's. */
 #define STORAGE_NAME_QUERY          0x27
 
-/* The scope byte storage.query and storage.create carry in their params.
+/* The scope byte storage.query, storage.name.query, storage.tag.list and
+ * storage.create carry in their params.
  *
- * By default a query is asked, and a file is created, INSIDE the Use Context:
- * the user said `use code cpp`, so "project,year:2026" means code AND cpp AND
- * project AND year:2026, and a new file is stamped code and cpp along with
- * whatever tags it was given. EVERYWHERE asks the same thing of the whole
- * volume, the context left out. query: params = [u8 scope], absent = USE.
- * create: params = [char filename[32]][u8 scope], a 32-byte params = USE.
+ * A question in the person's tags is asked, and a file the person's tags are
+ * put on is created, INSIDE the Use Context: the user said `use code cpp`, so
+ * "project,year:2026" means code AND cpp AND project AND year:2026, and a new
+ * file is stamped code and cpp along with whatever tags it was given.
+ * EVERYWHERE asks the same thing of the whole volume, the context left out.
+ * The Use Context is the person's lens: a call in a program's own tags is
+ * asked of the whole volume whatever its scope says. query: params =
+ * [u8 scope][u8 whose]. create: params = [char filename[32]][u8 scope][u8 whose].
  *
  * DELETED asks storage.query for the files kept deleted (obj.keep) alone —
  * the whole volume's, the Use Context left out, and only those: the one
- * explicit question that sees them. It is no scope for storage.create or
- * storage.tag.list. */
+ * explicit question that sees them. It is no scope for storage.create,
+ * storage.name.query or storage.tag.list. */
 #define STORAGE_SCOPE_USE           0
 #define STORAGE_SCOPE_EVERYWHERE    1
 #define STORAGE_SCOPE_DELETED       2
+
+/* The whose byte every call that speaks tags carries, after the bytes its
+ * params lay out before it (storage.query, storage.name.query, storage.tag.
+ * list, storage.tag.set, storage.tag.unset, storage.create, obj.getinfo):
+ *
+ *   STORAGE_TAGS_MINE    the program's own tags — its words for its own files,
+ *                        which no other program meets, and which it needs no
+ *                        asking for. A program started from bytes held in
+ *                        memory, or whose file is no longer on the volume it
+ *                        was started from, has none: ERR_TAGFS_NO_OWN_TAGS.
+ *   STORAGE_TAGS_PERSON  the person's tags — the labels the person finds
+ *                        files by, and the Use Context's words: seen only by a
+ *                        program whose box asks `see-tags` or `change-tags`,
+ *                        put on and taken off only by one that asks
+ *                        `change-tags` (ERR_ACCESS_DENIED otherwise).
+ *
+ * Absent, or any other value: ERR_INVALID_ARGUMENT. */
+#define STORAGE_TAGS_MINE           0
+#define STORAGE_TAGS_PERSON         1
 
 /* ============================================================================
  *  Hardware deck opcodes — the same single source, for the kernel's handler

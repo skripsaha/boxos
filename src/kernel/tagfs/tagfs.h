@@ -744,12 +744,24 @@ uint32_t TagFSLookupSpelling(const TagSpelling* tag);
 error_t  tagfs_tag_intern(const char* tag, uint32_t* out_id);
 error_t  TagFSInternSpelling(const TagSpelling* tag, uint32_t* out_id);
 
+/* The same for `owner`'s tag — a program's own, or the person's — for the
+ * storage deck, which speaks for whichever its caller names (boxos_decks.h,
+ * STORAGE_TAGS_*). The person's alone are words of the Use Context, and only
+ * they are bound to it. */
+error_t  TagFSInternOwned(TagOwner owner, const TagSpelling* tag, uint32_t* out_id);
+
 /* The whole text of a tag id — "app:editor" — and its length. It is written
  * into `out` only when it fits whole, NUL and all, and `out` is left empty
  * otherwise, so a caller is never handed a shorter tag than the one it asked
  * for: a caller that must have it measures first (out NULL, size 0). 0 when
  * the volume has no such tag, or there is no volume. */
 size_t   tagfs_tag_text(uint32_t tag_id, char* out, size_t out_size);
+
+/* Whether the volume mounted is the one `volume` names (its Deed's uuid) and
+ * holds file `fid` — live, or kept deleted: a program's own tags are named by
+ * its file (TagOwner), and are its only while that file is on the volume it
+ * was started from. False with no volume. */
+bool     TagFSHoldsProgram(const uint8_t volume[16], uint64_t fid);
 
 /* Whether tag `tag_id` is one of the person's (TagOwner): false for a
  * program's own, an id the volume has not, and with no volume. */

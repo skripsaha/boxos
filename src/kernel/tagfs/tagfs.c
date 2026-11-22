@@ -2611,11 +2611,16 @@ uint32_t TagFSLookupSpelling(const TagSpelling *tag)
 
 error_t TagFSInternSpelling(const TagSpelling *tag, uint32_t *out_id)
 {
+    return TagFSInternOwned(TagOwnerPerson(), tag, out_id);
+}
+
+error_t TagFSInternOwned(TagOwner owner, const TagSpelling *tag, uint32_t *out_id)
+{
     *out_id = TAGFS_INVALID_TAG_ID;
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc = TagRegistryIntern(g_state.registry, TagOwnerPerson(), tag, out_id);
-    if (rc == OK)   /* inside the door: bound before this book can go */
+    error_t rc = TagRegistryIntern(g_state.registry, owner, tag, out_id);
+    if (rc == OK && owner.kind == TAG_OWNER_PERSON)   /* inside the door: bound before this book can go */
         UseContextBindTag(tag, *out_id);
     tagfs_leave();
     return rc;
@@ -2665,6 +2670,18 @@ size_t tagfs_tag_text(uint32_t tag_id, char *out, size_t out_size)
     }
     tagfs_leave();
     return len;
+}
+
+bool TagFSHoldsProgram(const uint8_t volume[16], uint64_t fid)
+{
+    if (!volume || fid == 0 || !tagfs_enter())
+        return false;
+    bool        here = memcmp(volume, g_state.uuid, sizeof(g_state.uuid)) == 0;
+    FileRecord* rec  = here ? FileMapRecordHold(g_state.files, fid, NULL) : NULL;
+    if (rec)
+        FileRecordRelease(rec);
+    tagfs_leave();
+    return rec != NULL;
 }
 
 bool TagFSTagIsPersons(uint32_t tag_id)
