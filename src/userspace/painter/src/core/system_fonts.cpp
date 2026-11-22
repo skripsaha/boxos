@@ -2,20 +2,23 @@
  * system_fonts.cpp — the system's fonts, read from the volume, and the font
  * file a person names. See painter/core/system_fonts.h.
  *
- * Every file wears the stem of its name, up to the last dot, as a tag, so
- * the files called JetBrainsMonoNL-Regular.ttf are among those that wear
- * JetBrainsMonoNL-Regular: one question asks for the stem and the tags
- * together, and of what answers, the files called so are the ones meant. A
- * file in the trash answers nothing: the person set it aside.
+ * A font file is told by what it begins with (typecase::FontBeginnings), which
+ * the volume keeps on every file's card and answers without reading one. A
+ * file's name is a field of its card: one question asks for the files a name
+ * calls — whole or by its stem — wearing the person's tags given, and of what
+ * answers, the files called so whole are the ones meant. A file in the trash
+ * answers nothing: the person set it aside.
  */
 
 #include "painter/core/system_fonts.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <mutex>
 #include <new>
 #include <utility>
 
+#include "box/cxx/tagfs.h"
 #include "box/debug.h"
 #include "box/file.h"
 
@@ -27,7 +30,7 @@ namespace {
 bool Called(file_id_t File, const std::string &Name) noexcept
 {
     FileMetadata Metadata;
-    if (FileMetadataRead(File, &Metadata) != 0) return false;
+    if (FileMetadataRead(box::tagfs::my_tags, File, &Metadata) != 0) return false;
     const bool Same = Metadata.Filename && Name == Metadata.Filename;
     FileMetadataRelease(&Metadata);
     return Same;
@@ -42,7 +45,7 @@ std::string Code(std::int64_t Refusal)
 std::expected<std::vector<std::uint8_t>, std::string> ReadWhole(file_id_t File, const std::string &Name)
 {
     FileMetadata Metadata;
-    const int    Described = FileMetadataRead(File, &Metadata);
+    const int    Described = FileMetadataRead(box::tagfs::my_tags, File, &Metadata);
     if (Described != 0) return std::unexpected(Name + " could not be described" + Code(Described));
     const std::uint64_t Size = Metadata.Size;
     FileMetadataRelease(&Metadata);
@@ -71,7 +74,8 @@ std::expected<std::vector<std::uint8_t>, std::string> ReadFontFile(std::string_v
 
     const std::string Wearing(Tags);
     file_id_t        *Ids   = nullptr;
-    const int         Count = query_name_all_everywhere(Name.c_str(), Wearing.c_str(), nullptr, &Ids);
+    const int         Count =
+        query_name_all_everywhere(box::tagfs::person_tags, Name.c_str(), Wearing.c_str(), nullptr, &Ids);
     if (Count < 0) return std::unexpected("the volume would not say which files are called " + Name + Code(Count));
     file_id_t First   = 0;
     int       Matches = 0;
@@ -95,15 +99,17 @@ std::shared_ptr<const typecase::Fonts> SystemFonts()
     static std::once_flag                         Once;
     static std::shared_ptr<const typecase::Fonts> Kept;
     std::call_once(Once, [] {
-        auto       Book  = std::make_shared<typecase::Fonts>();
-        file_id_t *Ids   = nullptr;
-        const int   Count = query_all_everywhere("font", nullptr, &Ids);
-        for (int Index = 0; Index < Count; Index++) {
+        auto                   Book = std::make_shared<typecase::Fonts>();
+        std::vector<file_id_t> Files;
+        for (std::string_view Beginning : typecase::FontBeginnings)
+            for (const box::tagfs::file &Each : box::tagfs::files_starting_with(Beginning)) Files.push_back(Each.id());
+        std::sort(Files.begin(), Files.end());   // in the order the volume made them, as one question would give
+        for (file_id_t File : Files) {
             FileMetadata Metadata;
-            if (FileMetadataRead(Ids[Index], &Metadata) != 0) continue;
+            if (FileMetadataRead(box::tagfs::my_tags, File, &Metadata) != 0) continue;
             const std::string Name = Metadata.Filename ? Metadata.Filename : "";
             FileMetadataRelease(&Metadata);
-            std::expected<std::vector<std::uint8_t>, std::string> Bytes = ReadWhole(Ids[Index], Name);
+            std::expected<std::vector<std::uint8_t>, std::string> Bytes = ReadWhole(File, Name);
             if (!Bytes) {
                 kdbg_print("[painter] %s; it is passed over", Bytes.error().c_str());
                 continue;
@@ -112,7 +118,6 @@ std::shared_ptr<const typecase::Fonts> SystemFonts()
             if (!Face) continue;
             Book->Add(std::move(*Face));
         }
-        std::free(Ids);
         Book->SetDefault(SystemTextFamily);
         Kept = std::move(Book);
     });

@@ -23,25 +23,41 @@
 //     stay plain values: they read info() once and report a sensible neutral on
 //     the error arm. bytes(role) stays a stream (an open channel, not a scalar).
 //
-//   * box::tagfs::create(name, {tags…}) / query(tagspec, without) / all(without)
-//     / find(name, without) — creation and tag-query, `without` the tags whose
-//     files the asker leaves out (nullptr: none; the volume leaves out nothing
-//     of its own accord); box::tagfs::tags(without) — the tags files wear, each
-//     with how many files wear it. The return types are honestly asymmetric: find /
+//   * Whose tags a call speaks is its first argument, never assumed: my_tags —
+//     the program's own words for its own files, which no other program meets;
+//     person_tags — the person's labels, seen when the program's box asks
+//     `see-tags` and changed when it asks `change-tags`; program_tags(p) —
+//     another program's own, seen when it shows them to this one; all_tags —
+//     every tag this program may see, each with its owner (tag::owner), for a
+//     file's tags, the volume's tags and find alone. A call that names no tag —
+//     a name looked up alone — asks nothing, whichever it says (box/file.h).
+//
+//   * box::tagfs::create(whose, name, {tags…}) / query(whose, tagspec, without)
+//     / all(whose, without) / find(whose, name, without) — creation and
+//     tag-query, `without` the tags whose files the asker leaves out (nullptr:
+//     none; the volume leaves out nothing of its own accord);
+//     box::tagfs::tags(whose, without) — the tags files wear, each with how
+//     many files wear it; files_starting_with(bytes) — the files that begin
+//     with given bytes, which is what a file IS (its first bytes, kept by the
+//     system on the file's card: no file read). The return types are honestly asymmetric: find /
 //     find_all hand back box::tagfs::record — an immutable metadata snapshot,
 //     because the kernel already returned the descriptor — while query / all
 //     hand back live box::tagfs::file handles, because the C query returns ids
 //     only. A record reads its captured fields with zero syscalls; reach a live
 //     handle for mutations or a fresh read through record::live(). Richer
 //     predicates compose over either result with std::views:
-//         for (auto& f : box::tagfs::query("video:cam0", nullptr)
+//         for (auto& f : box::tagfs::query(box::tagfs::my_tags, "video:cam0", nullptr)
 //                        | std::views::filter([](auto& f){ return f.size() > 0; }))
 //
-//   * The Use Context (box/cxx/use.h) is the user's, one per machine, and
-//     every query / create above is asked INSIDE it — `use code cpp` makes
-//     query("project") mean code AND cpp AND project, and stamps a created file
-//     code and cpp. query_everywhere / all_everywhere / create_everywhere ask
-//     the same of the whole volume, the context left out.
+//   * The Use Context (box/cxx/use.h) is the person's, one per machine, and
+//     every query / create in person_tags is asked INSIDE it — `use code cpp`
+//     makes query(person_tags, "project") mean code AND cpp AND project, and
+//     stamps a created file code and cpp. query_everywhere / all_everywhere /
+//     create_everywhere ask the same of the whole volume, the context left
+//     out. A program's own words are asked of the whole volume always.
+//
+//   * show_tags_to / hide_tags_from / ask_to_see_tags — a program's own tags
+//     shown to another program, or asked of one (box/file.h).
 //
 //   * box::tagfs::on_anchor() — a box::touch subscription that delivers
 //     durability (anchor) events, read through box::tagfs::anchor_event.
@@ -66,6 +82,7 @@
 #include <vector>
 
 #include "box/file.h"
+#include "box/cxx/whose.h"    // box::tagfs::whose, my_tags, person_tags, program_tags, all_tags
 #include "box/cxx/current.h"  // box::byte_current, box::role, box::file(), CURRENT_CREATE
 #include "box/cxx/error.h"    // box::result / box::status / box::error / box_errno_of
 #include "box/cxx/touch.h"    // box::tag, box::touch, box::subscription (anchor observer)
@@ -86,7 +103,7 @@ inline std::string_view field_view(const char *p, std::size_t cap) noexcept
     return std::string_view(p, n);
 }
 
-// One of a file's tags: key[:value], user or system.
+// One of a file's tags: key[:value], user or system, and whose it is.
 struct tag {
     std::string key;
     std::string value;
@@ -94,6 +111,7 @@ struct tag {
                                  // key the kernel stamps system at mount; a
                                  // value-bearing key (e.g. "system:foo") is never
                                  // system, nor is an auto-label / user tag
+    file_id_t   owner = person_owns;
 
     // Read the value as an integer (or bool) — the typed inverse of file's
     // add_tag<T>. On success the parsed T; the error arm carries the cause —
@@ -132,8 +150,32 @@ inline box::result<tag> tag_from_info(const file_info_t &i, const char *key)
         if (field_view(i.tags[k].key, sizeof(i.tags[k].key)) == key)
             return tag{std::string(field_view(i.tags[k].key, sizeof(i.tags[k].key))),
                        std::string(field_view(i.tags[k].value, sizeof(i.tags[k].value))),
-                       i.tags[k].type == 1};
+                       i.tags[k].type == 1, i.tags[k].owner};
     return std::unexpected(box::error{box::errc::tag_not_found});
+}
+
+// Every tag a captured file_info_t carries.
+inline std::vector<tag> tags_from_info(const file_info_t &i)
+{
+    std::vector<tag> out;
+    unsigned         n = i.tag_count;
+    if (n > 5) n = 5;  // file_info_t carries at most 5 tags
+    out.reserve(n);
+    for (unsigned k = 0; k < n; ++k) {
+        const tag_t &t = i.tags[k];
+        out.push_back(tag{std::string(field_view(t.key, sizeof(t.key))),
+                          std::string(field_view(t.value, sizeof(t.value))), t.type == 1, t.owner});
+    }
+    return out;
+}
+
+inline bool wears(const file_info_t &i, const char *key) noexcept
+{
+    unsigned n = i.tag_count;
+    if (n > 5) n = 5;
+    for (unsigned k = 0; k < n; ++k)
+        if (field_view(i.tags[k].key, sizeof(i.tags[k].key)) == key) return true;
+    return false;
 }
 }  // namespace _detail
 
@@ -147,62 +189,49 @@ public:
     file_id_t id() const noexcept { return id_; }
     explicit operator bool() const noexcept { return id_ != 0; }
 
-    // Full metadata snapshot (one syscall). On success the descriptor; the error
-    // arm carries the recovered cause — invalid_argument for an empty handle, or
-    // the kernel error_t (e.g. object_not_found once the file is gone). The
-    // convenience accessors below each take their own snapshot — call info() once
-    // if you need several fields.
-    box::result<file_info_t> info() const
+    // Full metadata snapshot (one syscall), the tags `of` whose it carries. On
+    // success the descriptor; the error arm carries the recovered cause —
+    // invalid_argument for an empty handle, or the kernel error_t (e.g.
+    // object_not_found once the file is gone, access_denied for the person's
+    // tags to a program whose box does not ask to see them). The convenience
+    // accessors below each take their own snapshot — call info() once if you
+    // need several fields.
+    box::result<file_info_t> info(whose of) const
     {
         if (!id_) return std::unexpected(box::error{box::errc::invalid_argument});
         file_info_t inf{};
-        int rc = ::file_info(id_, &inf);
+        int rc = ::file_info(of, id_, &inf);
         if (rc != 0) return std::unexpected(box::error{box_errno_of(rc)});
         return inf;
     }
 
+    // The name and the size speak no tag: anybody's to see.
     std::string name() const
     {
-        auto i = info();
+        auto i = info(my_tags);
         return i ? std::string(field_view(i->filename, sizeof(i->filename))) : std::string{};
     }
-    std::uint64_t size()  const { auto i = info(); return i ? i->size  : 0u; }
+    std::uint64_t size()  const { auto i = info(my_tags); return i ? i->size  : 0u; }
 
-    std::vector<tag> tags() const
+    std::vector<tag> tags(whose of) const
     {
-        std::vector<tag> out;
-        auto i = info();
-        if (!i) return out;
-        unsigned n = i->tag_count;
-        if (n > 5) n = 5;  // file_info_t carries at most 5 tags
-        out.reserve(n);
-        for (unsigned k = 0; k < n; ++k) {
-            const tag_t &t = i->tags[k];
-            out.push_back(tag{std::string(field_view(t.key, sizeof(t.key))),
-                              std::string(field_view(t.value, sizeof(t.value))),
-                              t.type == 1});
-        }
-        return out;
+        auto i = info(of);
+        return i ? _detail::tags_from_info(*i) : std::vector<tag>{};
     }
 
-    bool has_tag(const char *key) const
+    bool has_tag(whose of, const char *key) const
     {
-        auto i = info();
-        if (!i) return false;
-        unsigned n = i->tag_count;
-        if (n > 5) n = 5;
-        for (unsigned k = 0; k < n; ++k)
-            if (field_view(i->tags[k].key, sizeof(i->tags[k].key)) == key) return true;
-        return false;
+        auto i = info(of);
+        return i && _detail::wears(*i, key);
     }
 
     // One named tag, typed-read-ready (pair with tag::as<T>). Takes one info()
     // snapshot, then scans it; the error arm carries the cause — info()'s error
     // (empty handle / object_not_found), else tag_not_found when the key isn't
     // present.
-    box::result<tag> tag_named(const char *key) const
+    box::result<tag> tag_named(whose of, const char *key) const
     {
-        auto i = info();
+        auto i = info(of);
         if (!i) return std::unexpected(i.error());
         return _detail::tag_from_info(*i, key);
     }
@@ -210,19 +239,19 @@ public:
     // ── tag mutations & lifecycle ────────────────────────────────────────
     // Empty status on success; the error arm carries the real kernel cause
     // (invalid_argument for an empty handle, else the recovered error_t — e.g.
-    // tag_limit_exceeded, already_exists, object_not_found).
-    box::status add_tag(const char *tag)
+    // tag_limit_exceeded, already_exists, object_not_found, access_denied).
+    box::status add_tag(whose of, const char *tag)
     {
-        return id_ ? box::_detail::from_status(::tag_add(id_, tag))
+        return id_ ? box::_detail::from_status(::tag_add(of, id_, tag))
                    : std::unexpected(box::error{box::errc::invalid_argument});
     }
     // Typed value write — the inverse of tag::as<T>. Formats the integer (or
     // bool as "0"/"1") and adds "key:value" through the raw overload above.
     // buffer_too_small when the formatted value won't fit the tag value field
     // (11 chars + NUL); the two overloads differ in arity, so this never hijacks
-    // the raw add_tag(const char*).
+    // the raw add_tag(whose, const char*).
     template <class T>
-    box::status add_tag(const char *key, T v)
+    box::status add_tag(whose of, const char *key, T v)
     {
         static_assert(std::is_integral_v<T>,
                       "add_tag<T>: integer or bool only — for a string value use add_tag(\"key:value\")");
@@ -242,11 +271,11 @@ public:
         std::string spec(key);
         spec.push_back(':');
         spec.append(val, static_cast<std::size_t>(vlen));
-        return add_tag(spec.c_str());
+        return add_tag(of, spec.c_str());
     }
-    box::status remove_tag(const char *key)
+    box::status remove_tag(whose of, const char *key)
     {
-        return id_ ? box::_detail::from_status(::tag_remove(id_, key))
+        return id_ ? box::_detail::from_status(::tag_remove(of, id_, key))
                    : std::unexpected(box::error{box::errc::invalid_argument});
     }
     box::status rename(const char *new_name)
@@ -355,7 +384,7 @@ public:
     // read_at / write_at.
     box::byte_current bytes(box::role r) const
     {
-        auto i = info();
+        auto i = info(my_tags);
         if (!i) return {};
         std::string nm(field_view(i->filename, sizeof(i->filename)));
         box::opening fl = (r == box::role::write) ? box::opening::create : box::opening::none;
@@ -368,14 +397,16 @@ public:
 // syscall, a record captures the descriptor once and reads it back with zero
 // syscalls — the speed win when a lookup already returned the metadata (find /
 // find_all do). It is a plain trivially-copyable value; mutate or re-read fresh
-// through live(), and re-capture the snapshot through reread().
+// through live(), and re-capture the snapshot — the tags of whose it was
+// captured with — through reread().
 class record {
     file_id_t   id_ = 0;
     file_info_t info_{};
+    whose       of_ = my_tags;
 
 public:
     record() noexcept = default;
-    record(file_id_t id, const file_info_t &i) noexcept : id_(id), info_(i) {}
+    record(file_id_t id, const file_info_t &i, whose of) noexcept : id_(id), info_(i), of_(of) {}
 
     file_id_t id() const noexcept { return id_; }
     explicit operator bool() const noexcept { return id_ != 0; }
@@ -390,7 +421,7 @@ public:
     {
         if (!id_) return std::unexpected(box::error{box::errc::invalid_argument});
         file_info_t ni{};
-        int         rc = ::file_info(id_, &ni);
+        int         rc = ::file_info(of_, id_, &ni);
         if (rc != 0) return std::unexpected(box::error{box_errno_of(rc)});
         info_ = ni;
         return {};
@@ -411,58 +442,46 @@ public:
 static_assert(std::is_trivially_copyable_v<record>,
               "box::tagfs::record stays a trivially-copyable snapshot");
 
-inline std::vector<tag> record::tags() const
-{
-    std::vector<tag> out;
-    unsigned         n = info_.tag_count;
-    if (n > 5) n = 5;
-    out.reserve(n);
-    for (unsigned k = 0; k < n; ++k) {
-        const tag_t &t = info_.tags[k];
-        out.push_back(tag{std::string(field_view(t.key, sizeof(t.key))),
-                          std::string(field_view(t.value, sizeof(t.value))),
-                          t.type == 1});
-    }
-    return out;
-}
-inline bool record::has_tag(const char *key) const noexcept
-{
-    unsigned n = info_.tag_count;
-    if (n > 5) n = 5;
-    for (unsigned k = 0; k < n; ++k)
-        if (field_view(info_.tags[k].key, sizeof(info_.tags[k].key)) == key) return true;
-    return false;
-}
+inline std::vector<tag> record::tags() const { return _detail::tags_from_info(info_); }
+inline bool record::has_tag(const char *key) const noexcept { return _detail::wears(info_, key); }
 inline box::result<tag> record::tag_named(const char *key) const
 {
     return _detail::tag_from_info(info_, key);
 }
 
 // ── creation ────────────────────────────────────────────────────────────
-// create(name, {"key:value", "bare", ...}) — the tag list is joined with the
-// comma separator the TagFS create expects. On success a live file; the error
-// arm carries the recovered cause — invalid_argument for an empty/over-long
-// name (boxlib create() validates it), or the kernel error_t (e.g.
-// already_exists). The boxlib create returns a positive file_id in an int64,
-// box_fail(rc) < 0 on failure; id == 0 cannot happen → internal.
-inline box::result<file> create(const char *name, std::initializer_list<const char *> tags)
+// create(whose, name, {"key:value", "bare", ...}) — the tags, of whose they
+// are, joined with the comma separator the TagFS create expects. On success a
+// live file; the error arm carries the recovered cause — invalid_argument for
+// an empty/over-long name (boxlib create() validates it), or the kernel
+// error_t (e.g. already_exists, access_denied). The boxlib create returns a
+// positive file_id in an int64, box_fail(rc) < 0 on failure; id == 0 cannot
+// happen → internal.
+namespace _detail {
+inline std::string joined(std::initializer_list<const char *> tags)
 {
     std::string spec;
     for (const char *t : tags) {
         if (!spec.empty()) spec.push_back(',');
         spec += t;
     }
-    std::int64_t id = ::create(name, spec.c_str());
+    return spec;
+}
+
+inline box::result<file> made(std::int64_t id)
+{
     if (id > 0) return file(static_cast<file_id_t>(id));
     return std::unexpected(box::error{
         id < 0 ? box_errno_of(static_cast<int>(id)) : static_cast<::error_t>(ERR_INTERNAL)});
 }
-inline box::result<file> create(const char *name, const char *tagspec = "")
+}  // namespace _detail
+inline box::result<file> create(whose of, const char *name, std::initializer_list<const char *> tags)
 {
-    std::int64_t id = ::create(name, tagspec);
-    if (id > 0) return file(static_cast<file_id_t>(id));
-    return std::unexpected(box::error{
-        id < 0 ? box_errno_of(static_cast<int>(id)) : static_cast<::error_t>(ERR_INTERNAL)});
+    return _detail::made(::create(of, name, _detail::joined(tags).c_str()));
+}
+inline box::result<file> create(whose of, const char *name, const char *tagspec = "")
+{
+    return _detail::made(::create(of, name, tagspec));
 }
 
 // ── tag query → range of files ──────────────────────────────────────────
@@ -485,24 +504,41 @@ inline std::vector<file> files_of(int n, file_id_t *ids)
     return out;
 }
 } // namespace _detail
-inline std::vector<file> query(const char *tagspec, const char *without)
+inline std::vector<file> query(whose of, const char *tagspec, const char *without)
 {
     file_id_t *ids = nullptr;
-    int        n   = ::query_all(tagspec, without, &ids);
+    int        n   = ::query_all(of, tagspec, without, &ids);
     return _detail::files_of(n, ids);
 }
-inline std::vector<file> all(const char *without) { return query(nullptr, without); }
+inline std::vector<file> all(whose of, const char *without) { return query(of, nullptr, without); }
 
-// ── the same, of the whole volume — the user's Use Context left out ─────
-// query / all / create above are asked inside the Use Context; these ask the
-// same question of everything on the volume. See box/cxx/use.h.
-inline std::vector<file> query_everywhere(const char *tagspec, const char *without)
+// ── the same, of the whole volume — the person's Use Context left out ───
+// query / all / create above, in person_tags, are asked inside the Use
+// Context; these ask the same question of everything on the volume. See
+// box/cxx/use.h.
+inline std::vector<file> query_everywhere(whose of, const char *tagspec, const char *without)
 {
     file_id_t *ids = nullptr;
-    int        n   = ::query_all_everywhere(tagspec, without, &ids);
+    int        n   = ::query_all_everywhere(of, tagspec, without, &ids);
     return _detail::files_of(n, ids);
 }
-inline std::vector<file> all_everywhere(const char *without) { return query_everywhere(nullptr, without); }
+inline std::vector<file> all_everywhere(whose of, const char *without)
+{
+    return query_everywhere(of, nullptr, without);
+}
+
+// ── what a file is: the files that begin with given bytes ───────────────
+// What a file is is told by its first bytes — a box's magic, a font's tag, a
+// zone table's — and the system keeps them on every file's card, exact through
+// every change of what the file holds: the question reads no file and asks
+// nothing of anybody. 1 to FILE_HEAD_MOST bytes; in file id order, a deleted
+// file never met. A refusal is an empty list, as query()'s is.
+inline std::vector<file> files_starting_with(std::string_view bytes)
+{
+    file_id_t *ids = nullptr;
+    int        n   = ::files_starting_with(bytes.data(), bytes.size(), &ids);
+    return _detail::files_of(n, ids);
+}
 
 // ── the files called a word ─────────────────────────────────────────────
 // A file's name is a field of its card, never a tag, so query() does not find
@@ -511,37 +547,26 @@ inline std::vector<file> all_everywhere(const char *without) { return query_ever
 // (`slot3` finds slot3.sav), byte for byte. `tags` (nullptr for none) the tags
 // the files must wear too, `without` as for query(). Inside the Use Context, or
 // everywhere.
-inline std::vector<file> query_name(const char *word, const char *tags, const char *without)
+inline std::vector<file> query_name(whose of, const char *word, const char *tags, const char *without)
 {
     file_id_t *ids = nullptr;
-    int        n   = ::query_name_all(word, tags, without, &ids);
+    int        n   = ::query_name_all(of, word, tags, without, &ids);
     return _detail::files_of(n, ids);
 }
-inline std::vector<file> query_name_everywhere(const char *word, const char *tags, const char *without)
+inline std::vector<file> query_name_everywhere(whose of, const char *word, const char *tags, const char *without)
 {
     file_id_t *ids = nullptr;
-    int        n   = ::query_name_all_everywhere(word, tags, without, &ids);
+    int        n   = ::query_name_all_everywhere(of, word, tags, without, &ids);
     return _detail::files_of(n, ids);
 }
 
-inline box::result<file> create_everywhere(const char *name, std::initializer_list<const char *> tags)
+inline box::result<file> create_everywhere(whose of, const char *name, std::initializer_list<const char *> tags)
 {
-    std::string spec;
-    for (const char *t : tags) {
-        if (!spec.empty()) spec.push_back(',');
-        spec += t;
-    }
-    std::int64_t id = ::create_everywhere(name, spec.c_str());
-    if (id > 0) return file(static_cast<file_id_t>(id));
-    return std::unexpected(box::error{
-        id < 0 ? box_errno_of(static_cast<int>(id)) : static_cast<::error_t>(ERR_INTERNAL)});
+    return _detail::made(::create_everywhere(of, name, _detail::joined(tags).c_str()));
 }
-inline box::result<file> create_everywhere(const char *name, const char *tagspec = "")
+inline box::result<file> create_everywhere(whose of, const char *name, const char *tagspec = "")
 {
-    std::int64_t id = ::create_everywhere(name, tagspec);
-    if (id > 0) return file(static_cast<file_id_t>(id));
-    return std::unexpected(box::error{
-        id < 0 ? box_errno_of(static_cast<int>(id)) : static_cast<::error_t>(ERR_INTERNAL)});
+    return _detail::made(::create_everywhere(of, name, tagspec));
 }
 
 // ── the volume's tags ───────────────────────────────────────────────────
@@ -566,7 +591,7 @@ inline std::vector<tag_count> tags_of(int rc, TagListed *list, std::size_t n)
             const std::size_t      colon = text.find(':');
             tag what{std::string(text.substr(0, colon)),
                      colon == std::string_view::npos ? std::string() : std::string(text.substr(colon + 1)),
-                     list[i].System};
+                     list[i].System, list[i].Owner};
             out.push_back(tag_count{std::move(what), list[i].Files});
         }
     }
@@ -574,19 +599,60 @@ inline std::vector<tag_count> tags_of(int rc, TagListed *list, std::size_t n)
     return out;
 }
 }  // namespace _detail
-inline std::vector<tag_count> tags(const char *without)
+inline std::vector<tag_count> tags(whose of, const char *without)
 {
     TagListed  *list = nullptr;
     std::size_t n    = 0;
-    int         rc   = ::tag_list(without, &list, &n);
+    int         rc   = ::tag_list(of, without, &list, &n);
     return _detail::tags_of(rc, list, n);
 }
-inline std::vector<tag_count> tags_everywhere(const char *without)
+inline std::vector<tag_count> tags_everywhere(whose of, const char *without)
 {
     TagListed  *list = nullptr;
     std::size_t n    = 0;
-    int         rc   = ::tag_list_everywhere(without, &list, &n);
+    int         rc   = ::tag_list_everywhere(of, without, &list, &n);
     return _detail::tags_of(rc, list, n);
+}
+
+// ── a program's own tags shown to other programs ────────────────────────
+// show_tags_to shows every tag of this program's own — those to come too — to
+// a program named by its file, or to every_program; hide_tags_from takes one
+// out of the list; ask_to_see_tags leaves a program a note asking to see its
+// own (box/file.h). Empty status, or the cause: tagfs_no_own_tags for a program
+// started from bytes, file_not_found for a program the volume has not.
+inline box::status show_tags_to(file_id_t program) { return box::_detail::from_status(::show_tags_to(program)); }
+inline box::status hide_tags_from(file_id_t program) { return box::_detail::from_status(::hide_tags_from(program)); }
+inline box::status ask_to_see_tags(file_id_t program) { return box::_detail::from_status(::ask_to_see_tags(program)); }
+
+// The programs that show this one their tags; the programs `program` shows its
+// own to, every_program first; the programs that asked this one and are not
+// answered — each as its file, in id order, or the cause.
+namespace _detail {
+inline box::result<std::vector<file_id_t>> programs_of(int n, file_id_t *ids)
+{
+    if (n < 0) return std::unexpected(box::error{box_errno_of(n)});
+    std::vector<file_id_t> out(ids, ids + n);
+    ::free(ids);
+    return out;
+}
+}  // namespace _detail
+inline box::result<std::vector<file_id_t>> tags_shown_to_me()
+{
+    file_id_t *ids = nullptr;
+    int        n   = ::tags_shown_to_me(&ids);
+    return _detail::programs_of(n, ids);
+}
+inline box::result<std::vector<file_id_t>> tags_shown_by(file_id_t program)
+{
+    file_id_t *ids = nullptr;
+    int        n   = ::tags_shown_by(program, &ids);
+    return _detail::programs_of(n, ids);
+}
+inline box::result<std::vector<file_id_t>> asks_to_see_tags()
+{
+    file_id_t *ids = nullptr;
+    int        n   = ::asks_to_see_tags(&ids);
+    return _detail::programs_of(n, ids);
 }
 
 // ── lookup by name (TagFS names are not unique; find returns the first) ──
@@ -598,12 +664,12 @@ inline std::vector<tag_count> tags_everywhere(const char *without)
 // "no file by that name" (n == 0) is file_not_found, a queryable cause rather
 // than a transport error. (For every same-named match use find_all.) Files
 // wearing a tag of `without` are not matched, as query() leaves them out.
-inline box::result<record> find(const char *name, const char *without)
+inline box::result<record> find(whose of, const char *name, const char *without)
 {
     file_id_t   ids[1];
     file_info_t infos[1];
-    int         n = ::find_file_by_name(name, without, ids, infos, 1);
-    if (n > 0) return record(ids[0], infos[0]);
+    int         n = ::find_file_by_name(of, name, without, ids, infos, 1);
+    if (n > 0) return record(ids[0], infos[0], of);
     if (n < 0) return std::unexpected(box::error{box_errno_of(n)});
     return std::unexpected(box::error{box::errc::file_not_found});
 }
@@ -613,16 +679,16 @@ inline box::result<record> find(const char *name, const char *without)
 // the second answer larger, and the ask is repeated with room for it. A
 // transport failure is reported as an empty range, consistent with
 // query()/all(); use find() when you need the recovered cause of a lookup.
-inline std::vector<record> find_all(const char *name, const char *without)
+inline std::vector<record> find_all(whose of, const char *name, const char *without)
 {
     std::vector<record> out;
-    int n = ::find_file_by_name(name, without, nullptr, nullptr, 0);
+    int n = ::find_file_by_name(of, name, without, nullptr, nullptr, 0);
     while (n > 0) {
         std::vector<file_id_t>   ids(static_cast<std::size_t>(n));
         std::vector<file_info_t> infos(static_cast<std::size_t>(n));
-        int got = ::find_file_by_name(name, without, ids.data(), infos.data(), ids.size());
+        int got = ::find_file_by_name(of, name, without, ids.data(), infos.data(), ids.size());
         if (got <= n) {
-            for (int i = 0; i < got; ++i) out.emplace_back(ids[i], infos[i]);
+            for (int i = 0; i < got; ++i) out.emplace_back(ids[i], infos[i], of);
             break;
         }
         n = got;

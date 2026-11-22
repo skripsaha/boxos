@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstring>
 
+#include "box/cxx/whose.h"
 #include "box/file.h"
 #include "box/memory.h"
 
@@ -44,7 +45,8 @@ void View::ReadFiles(bool Everywhere)
     if (FilesRead[Everywhere]) return;
     FilesRead[Everywhere] = true;
     file_id_t *Ids   = nullptr;
-    const int  Found = Everywhere ? query_all_everywhere(nullptr, nullptr, &Ids) : query_all(nullptr, nullptr, &Ids);
+    const int  Found = Everywhere ? query_all_everywhere(box::tagfs::person_tags, nullptr, nullptr, &Ids)
+                                  : query_all(box::tagfs::person_tags, nullptr, nullptr, &Ids);
     for (file_id_t Id : volume::Taken(Ids, Found)) {
         const std::expected<volume::Record, int> Held = volume::Record::Of(Id);
         if (Held && !Held->Name().empty())
@@ -84,7 +86,8 @@ void View::ReadTags(bool Everywhere)
     TagsRead[Everywhere] = true;
     TagListed  *Listed = nullptr;
     std::size_t Count  = 0;
-    const int   Rc     = Everywhere ? tag_list_everywhere(nullptr, &Listed, &Count) : tag_list(nullptr, &Listed, &Count);
+    const int   Rc     = Everywhere ? tag_list_everywhere(box::tagfs::person_tags, nullptr, &Listed, &Count)
+                                    : tag_list(box::tagfs::person_tags, nullptr, &Listed, &Count);
     const HeldHeap<TagListed> Held(Listed);
     if (Rc == 0)
         for (std::size_t I = 0; I < Count; I++) TagList[Everywhere].emplace_back(Listed[I].Tag);

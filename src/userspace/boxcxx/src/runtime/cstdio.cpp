@@ -26,6 +26,7 @@
 
 #include "box/current.h"
 #include "box/file.h"
+#include "box/cxx/whose.h"   // box::tagfs::my_tags — a name looked up alone speaks no tag
 
 namespace {
 
@@ -296,7 +297,7 @@ FILE *fopen(const char *filename, const char *mode) noexcept
         else if (*p == 'x') {
             file_id_t   ids[1];
             file_info_t infos[1];
-            if (::find_file_by_name(filename, nullptr, ids, infos, 1) > 0) return nullptr;
+            if (::find_file_by_name(box::tagfs::my_tags, filename, nullptr, ids, infos, 1) > 0) return nullptr;
         }
     }
 
@@ -656,7 +657,7 @@ int remove(const char *filename) noexcept
     if (!filename) return -1;
     file_id_t   ids[1];
     file_info_t infos[1];
-    if (::find_file_by_name(filename, nullptr, ids, infos, 1) <= 0) return -1;
+    if (::find_file_by_name(box::tagfs::my_tags, filename, nullptr, ids, infos, 1) <= 0) return -1;
     return ::file_delete(ids[0]) == 0 ? 0 : -1;
 }
 
@@ -665,7 +666,7 @@ int rename(const char *old_p, const char *new_p) noexcept
     if (!old_p || !new_p) return -1;
     file_id_t   ids[1];
     file_info_t infos[1];
-    if (::find_file_by_name(old_p, nullptr, ids, infos, 1) <= 0) return -1;
+    if (::find_file_by_name(box::tagfs::my_tags, old_p, nullptr, ids, infos, 1) <= 0) return -1;
     return ::file_rename(ids[0], new_p) == 0 ? 0 : -1;
 }
 
@@ -691,7 +692,7 @@ char *tmpnam(char *s) noexcept
         *p = '\0';
         file_id_t   ids[1];
         file_info_t infos[1];
-        if (::find_file_by_name(out, nullptr, ids, infos, 1) <= 0) return out;
+        if (::find_file_by_name(box::tagfs::my_tags, out, nullptr, ids, infos, 1) <= 0) return out;
     }
     return nullptr;
 }

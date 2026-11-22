@@ -6,12 +6,14 @@
  * write the volume lays after whatever another hub added meanwhile
  * (file_append), and then read back from where this hub had read to: its own
  * line and every other hub's come in by the same road, in the file's order.
- * Every write to the file is said on its tags, so a hub learns that another
- * added a line without asking. A file the person erased is made again with
- * the next line. */
+ * Every write to the file is said on the words its name answers to, so a hub
+ * learns that another added a line without asking. The file wears the hub's
+ * own words, which no other program meets. A file the person erased is made
+ * again with the next line. */
 
 #include "history.h"
 
+#include "box/cxx/whose.h"
 #include "box/error.h"
 #include "box/file.h"
 
@@ -34,12 +36,12 @@ bool Usable(std::string_view Text)
     return true;
 }
 
-// The file on the whole volume: called history, wearing both tags. 0 when
-// there is none.
+// The file on the whole volume: called history, wearing both of the hub's own
+// words. 0 when there is none.
 file_id_t Find()
 {
     file_id_t *Ids = nullptr;
-    const int  Count = query_all_everywhere(FileTags, nullptr, &Ids);
+    const int  Count = query_all_everywhere(box::tagfs::my_tags, FileTags, nullptr, &Ids);
     for (file_id_t Id : volume::Taken(Ids, Count)) {
         const std::expected<volume::Record, int> Held = volume::Record::Of(Id);
         if (Held && Held->Name() == FileName) return Id;
@@ -102,14 +104,15 @@ void History::Catch()
     if (File != 0) ReadOn();
 }
 
-// The file found, or made when there is none — outside the Use Context, so it
-// wears only its own tags. Not reached: the volume's refusal.
+// The file found, or made when there is none, wearing the hub's own words —
+// which no Use Context stamps: the context is the person's. Not reached: the
+// volume's refusal.
 std::expected<file_id_t, int> History::Reach()
 {
     if (File != 0) return File;
     File = Find();
     if (File != 0) return File;
-    const int64_t Made = create_everywhere(FileName, FileTags);
+    const int64_t Made = create_everywhere(box::tagfs::my_tags, FileName, FileTags);
     if (Made < 0) return std::unexpected(static_cast<int>(Made));
     File = static_cast<file_id_t>(Made);
     if (File == 0) return std::unexpected(-ERR_UNKNOWN);   // create answers an id or a refusal, never 0
