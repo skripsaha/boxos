@@ -745,7 +745,7 @@ static size_t arrow_put_locked(file_id_t file, const char *bytes, size_t len)
 {
     if (!g_arrow.found) {
         FileMetadata metadata;
-        if (FileMetadataRead(file, &metadata) != 0) return 0;
+        if (FileMetadataRead(MY_TAGS, file, &metadata) != 0) return 0;
         g_arrow.offset = metadata.Size;
         g_arrow.found  = true;
         FileMetadataRelease(&metadata);

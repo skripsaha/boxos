@@ -19,20 +19,24 @@
 #include "box/timeouts.h"   /* BOX_ANSWER_GUARANTEED */
 #include "boxos_decks.h"    /* STORAGE_* opcodes + STORAGE_SCOPE_* — single source */
 
+_Static_assert(MY_TAGS == STORAGE_TAGS_MINE && PERSON_TAGS == STORAGE_TAGS_PERSON,
+               "TagsOf is the deck's whose byte");
+
 /* =========================================================================
  *  CREATE / QUERY — inside the Use Context, or everywhere
  * ========================================================================= */
 
-static int64_t create_scoped(const char *filename, const char *tags, uint8_t scope)
+static int64_t create_scoped(TagsOf whose, const char *filename, const char *tags, uint8_t scope)
 {
     if (!filename || filename[0] == '\0') return -ERR_INVALID_ARGUMENT;
     size_t fn_len = strlen(filename);
     if (fn_len >= 32) return -ERR_INVALID_ARGUMENT;
 
-    /* params: 32 bytes of NUL-padded filename, then the scope byte. */
-    uint8_t params[33] = {0};
+    /* params: 32 bytes of NUL-padded filename, then the scope and whose bytes. */
+    uint8_t params[34] = {0};
     memcpy(params, filename, fn_len);
     params[32] = scope;
+    params[33] = (uint8_t)whose;
 
     /* in_crate: tag list (optional). */
     const void *in = NULL;
@@ -52,14 +56,14 @@ static int64_t create_scoped(const char *filename, const char *tags, uint8_t sco
     return (int64_t)file_id;
 }
 
-int64_t create(const char *filename, const char *tags)
+int64_t create(TagsOf whose, const char *filename, const char *tags)
 {
-    return create_scoped(filename, tags, STORAGE_SCOPE_USE);
+    return create_scoped(whose, filename, tags, STORAGE_SCOPE_USE);
 }
 
-int64_t create_everywhere(const char *filename, const char *tags)
+int64_t create_everywhere(TagsOf whose, const char *filename, const char *tags)
 {
-    return create_scoped(filename, tags, STORAGE_SCOPE_EVERYWHERE);
+    return create_scoped(whose, filename, tags, STORAGE_SCOPE_EVERYWHERE);
 }
 
 /* The kernel answers [u32 delivered][u32 total][u64 ids[delivered]]: how many
@@ -88,6 +92,7 @@ static uint8_t *question_params(const void *head, uint32_t head_size, const char
  * a NUL, the tags the files called so must wear. */
 typedef struct {
     uint8_t     op;
+    TagsOf      whose;      /* whose tags `text`, `without` and `tags` are */
     const char *text;       /* the tags, or the word; NULL or "" asks no tags */
     const char *without;    /* tags set aside; NULL or "" for none */
     uint8_t     scope;
@@ -98,12 +103,12 @@ static int ask_files(const Question *question, file_id_t *file_ids, size_t max_f
 {
     const char *without = question->without;
     const char *text    = question->text;
-    uint8_t     scope   = question->scope;
+    uint8_t     head[2] = { question->scope, (uint8_t)question->whose };
     if (max_files > 0 && !file_ids) return -ERR_INVALID_ARGUMENT;
     if (max_files > (UINT32_MAX - 8u) / sizeof(file_id_t)) return -ERR_INVALID_ARGUMENT;
 
     uint16_t params_size = 0;
-    uint8_t *params = question_params(&scope, sizeof(scope), without, &params_size);
+    uint8_t *params = question_params(head, sizeof(head), without, &params_size);
     if (!params) return without && strlen(without) >= UINT16_MAX ? -ERR_INVALID_ARGUMENT : -ERR_NO_MEMORY;
 
     uint32_t out_cap = (uint32_t)(8 + max_files * sizeof(file_id_t));
@@ -172,7 +177,7 @@ static size_t tag_list_page_bytes(const uint8_t *page, uint32_t delivered, size_
 
 /* Every page asked for in turn, its records gathered; then the list and the
  * text laid out in one block. */
-static int tag_list_scoped(uint8_t scope, const char *without, TagListed **out, size_t *count)
+static int tag_list_scoped(TagsOf whose, uint8_t scope, const char *without, TagListed **out, size_t *count)
 {
     if (!out || !count) return -ERR_INVALID_ARGUMENT;
     *out   = NULL;
@@ -186,9 +191,10 @@ static int tag_list_scoped(uint8_t scope, const char *without, TagListed **out, 
     uint32_t from = 0;
     int      rc = 0;
     for (;;) {
-        uint8_t head[5];
+        uint8_t head[6];
         memcpy(head, &from, sizeof(from));
         head[4] = scope;
+        head[5] = (uint8_t)whose;
         uint16_t params_size = 0;
         uint8_t *params = question_params(head, sizeof(head), without, &params_size);
         if (!params) { rc = -ERR_NO_MEMORY; break; }
@@ -254,25 +260,25 @@ static int tag_list_scoped(uint8_t scope, const char *without, TagListed **out, 
     return 0;
 }
 
-int tag_list(const char *without, TagListed **out, size_t *count)
+int tag_list(TagsOf whose, const char *without, TagListed **out, size_t *count)
 {
-    return tag_list_scoped(STORAGE_SCOPE_USE, without, out, count);
+    return tag_list_scoped(whose, STORAGE_SCOPE_USE, without, out, count);
 }
 
-int tag_list_everywhere(const char *without, TagListed **out, size_t *count)
+int tag_list_everywhere(TagsOf whose, const char *without, TagListed **out, size_t *count)
 {
-    return tag_list_scoped(STORAGE_SCOPE_EVERYWHERE, without, out, count);
+    return tag_list_scoped(whose, STORAGE_SCOPE_EVERYWHERE, without, out, count);
 }
 
-int query(const char *tags, const char *without, file_id_t *file_ids, size_t max_files)
+int query(TagsOf whose, const char *tags, const char *without, file_id_t *file_ids, size_t max_files)
 {
-    Question question = { STORAGE_TAG_QUERY, tags, without, STORAGE_SCOPE_USE, NULL };
+    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_USE, NULL };
     return ask_files(&question, file_ids, max_files, NULL);
 }
 
-int query_everywhere(const char *tags, const char *without, file_id_t *file_ids, size_t max_files)
+int query_everywhere(TagsOf whose, const char *tags, const char *without, file_id_t *file_ids, size_t max_files)
 {
-    Question question = { STORAGE_TAG_QUERY, tags, without, STORAGE_SCOPE_EVERYWHERE, NULL };
+    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_EVERYWHERE, NULL };
     return ask_files(&question, file_ids, max_files, NULL);
 }
 
@@ -301,55 +307,56 @@ static int ask_all(const Question *question, file_id_t **out_ids)
     }
 }
 
-int query_all(const char *tags, const char *without, file_id_t **out_ids)
+int query_all(TagsOf whose, const char *tags, const char *without, file_id_t **out_ids)
 {
-    Question question = { STORAGE_TAG_QUERY, tags, without, STORAGE_SCOPE_USE, NULL };
+    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_USE, NULL };
     return ask_all(&question, out_ids);
 }
 
-int query_all_everywhere(const char *tags, const char *without, file_id_t **out_ids)
+int query_all_everywhere(TagsOf whose, const char *tags, const char *without, file_id_t **out_ids)
 {
-    Question question = { STORAGE_TAG_QUERY, tags, without, STORAGE_SCOPE_EVERYWHERE, NULL };
+    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_EVERYWHERE, NULL };
     return ask_all(&question, out_ids);
 }
 
-int query_deleted(const char *tags, const char *without, file_id_t *file_ids, size_t max_files)
+int query_deleted(TagsOf whose, const char *tags, const char *without, file_id_t *file_ids, size_t max_files)
 {
-    Question question = { STORAGE_TAG_QUERY, tags, without, STORAGE_SCOPE_DELETED, NULL };
+    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_DELETED, NULL };
     return ask_files(&question, file_ids, max_files, NULL);
 }
 
-int query_all_deleted(const char *tags, const char *without, file_id_t **out_ids)
+int query_all_deleted(TagsOf whose, const char *tags, const char *without, file_id_t **out_ids)
 {
-    Question question = { STORAGE_TAG_QUERY, tags, without, STORAGE_SCOPE_DELETED, NULL };
+    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_DELETED, NULL };
     return ask_all(&question, out_ids);
 }
 
-int query_name_all(const char *word, const char *tags, const char *without, file_id_t **out_ids)
-{
-    if (!word || word[0] == '\0') return -ERR_INVALID_ARGUMENT;
-    Question question = { STORAGE_NAME_QUERY, word, without, STORAGE_SCOPE_USE, tags };
-    return ask_all(&question, out_ids);
-}
-
-int query_name_all_everywhere(const char *word, const char *tags, const char *without, file_id_t **out_ids)
+int query_name_all(TagsOf whose, const char *word, const char *tags, const char *without, file_id_t **out_ids)
 {
     if (!word || word[0] == '\0') return -ERR_INVALID_ARGUMENT;
-    Question question = { STORAGE_NAME_QUERY, word, without, STORAGE_SCOPE_EVERYWHERE, tags };
+    Question question = { STORAGE_NAME_QUERY, whose, word, without, STORAGE_SCOPE_USE, tags };
     return ask_all(&question, out_ids);
 }
 
-int query_word_all(const char *word, file_id_t **out_ids)
+int query_name_all_everywhere(TagsOf whose, const char *word, const char *tags, const char *without,
+                              file_id_t **out_ids)
+{
+    if (!word || word[0] == '\0') return -ERR_INVALID_ARGUMENT;
+    Question question = { STORAGE_NAME_QUERY, whose, word, without, STORAGE_SCOPE_EVERYWHERE, tags };
+    return ask_all(&question, out_ids);
+}
+
+int query_word_all(TagsOf whose, const char *word, file_id_t **out_ids)
 {
     if (!out_ids) return -ERR_INVALID_ARGUMENT;
     *out_ids = NULL;
     if (!word || word[0] == '\0') return -ERR_INVALID_ARGUMENT;
 
     file_id_t *worn = NULL;
-    int worn_count = query_all(word, NULL, &worn);
+    int worn_count = query_all(whose, word, NULL, &worn);
     if (worn_count < 0) return worn_count;
     file_id_t *called = NULL;
-    int called_count = query_name_all(word, NULL, NULL, &called);
+    int called_count = query_name_all(whose, word, NULL, NULL, &called);
     if (called_count < 0) { free(worn); return called_count; }
 
     file_id_t *both = malloc(((size_t)worn_count + (size_t)called_count + 1u) * sizeof(file_id_t));
@@ -388,7 +395,7 @@ int query_word_all(const char *word, file_id_t **out_ids)
  *  volume would otherwise bury the log it is meant to explain.
  * ========================================================================= */
 
-int file_info(file_id_t file_id, file_info_t *info)
+int file_info(TagsOf whose, file_id_t file_id, file_info_t *info)
 {
     /* One line each, the first time this program meets that kind of cut. */
     static uint8_t said_name  = 0;
@@ -397,10 +404,13 @@ int file_info(file_id_t file_id, file_info_t *info)
 
     if (!info) return -ERR_INVALID_ARGUMENT;
 
+    uint8_t  params[9];
+    memcpy(params, &file_id, sizeof(file_id));
+    params[8] = (uint8_t)whose;
     uint8_t  out[1024];
     uint32_t out_actual = 0;
     int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_GET_INFO,
-                     &file_id, sizeof(file_id),
+                     params, sizeof(params),
                      NULL, 0,
                      out, sizeof(out), &out_actual,
                      BOX_ANSWER_GUARANTEED, NULL);
@@ -605,24 +615,35 @@ int file_span(file_id_t file_id, uint64_t size, uint32_t flags)
  *  TAGS
  * ========================================================================= */
 
-int tag_add(file_id_t file_id, const char *tag)
+/* tag.set and tag.unset's params: the file, then whose. */
+static void tag_params(file_id_t file_id, TagsOf whose, uint8_t params[9])
+{
+    memcpy(params, &file_id, sizeof(file_id));
+    params[8] = (uint8_t)whose;
+}
+
+int tag_add(TagsOf whose, file_id_t file_id, const char *tag)
 {
     if (!tag || tag[0] == '\0') return -ERR_INVALID_ARGUMENT;
-    size_t tag_len = strlen(tag);
+    size_t  tag_len = strlen(tag);
+    uint8_t params[9];
+    tag_params(file_id, whose, params);
     int rc = MfCall1(DECK_STORAGE, STORAGE_TAG_SET,
-                     &file_id, sizeof(file_id),
+                     params, sizeof(params),
                      tag, (uint32_t)tag_len,
                      NULL, 0, NULL,
                      BOX_ANSWER_GUARANTEED, NULL);
     return box_fail(rc);
 }
 
-int tag_remove(file_id_t file_id, const char *key)
+int tag_remove(TagsOf whose, file_id_t file_id, const char *key)
 {
     if (!key || key[0] == '\0') return -ERR_INVALID_ARGUMENT;
-    size_t kl = strlen(key);
+    size_t  kl = strlen(key);
+    uint8_t params[9];
+    tag_params(file_id, whose, params);
     int rc = MfCall1(DECK_STORAGE, STORAGE_TAG_UNSET,
-                     &file_id, sizeof(file_id),
+                     params, sizeof(params),
                      key, (uint32_t)kl,
                      NULL, 0, NULL,
                      BOX_ANSWER_GUARANTEED, NULL);
@@ -648,7 +669,7 @@ int file_restore(file_id_t file_id)
     return box_fail(rc);
 }
 
-int find_file_by_name(const char *filename, const char *without, file_id_t *file_ids,
+int find_file_by_name(TagsOf whose, const char *filename, const char *without, file_id_t *file_ids,
                       file_info_t *out_infos, size_t max)
 {
     if (!filename || filename[0] == '\0') return -ERR_INVALID_ARGUMENT;
@@ -659,13 +680,13 @@ int find_file_by_name(const char *filename, const char *without, file_id_t *file
      * there are; the names are held to the whole of it here. What stood here
      * once walked the first 255 files of the volume and asked each its name. */
     file_id_t *ids = NULL;
-    int n = query_name_all(filename, NULL, without, &ids);
+    int n = query_name_all(whose, filename, NULL, without, &ids);
     if (n < 0) return n;
 
     int found = 0;
     for (int i = 0; i < n; i++) {
         file_info_t info;
-        if (file_info(ids[i], &info) != 0) continue;
+        if (file_info(whose, ids[i], &info) != 0) continue;
         if (strcmp(info.filename, filename) != 0) continue;
         if ((size_t)found < max) {
             file_ids[found] = ids[i];

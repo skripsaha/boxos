@@ -37,7 +37,7 @@ static int digest_now(file_id_t file, uint64_t size, uint8_t *piece, uint8_t dig
 static int state_of(const BoxRecipeFile *file, uint8_t *piece, uint8_t *state)
 {
     FileMetadata metadata;
-    int rc = FileMetadataRead(file->Id, &metadata);
+    int rc = FileMetadataRead(MY_TAGS, file->Id, &metadata);
     if (rc == -ERR_FILE_NOT_FOUND) {
         *state = RECIPE_GONE;
         return 0;

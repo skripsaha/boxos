@@ -17,15 +17,18 @@
 
 #define FILE_METADATA_FIRST_CAPACITY 512u
 
-static int ReadMetadataBlob(file_id_t FileId, uint8_t **OutBlob,
+static int ReadMetadataBlob(TagsOf Whose, file_id_t FileId, uint8_t **OutBlob,
                             uint32_t *OutSize)
 {
     uint32_t Capacity = FILE_METADATA_FIRST_CAPACITY;
+    uint8_t  Params[9];
 
     if (!OutBlob || !OutSize)
         return -ERR_INVALID_ARGUMENT;
     *OutBlob = NULL;
     *OutSize = 0;
+    memcpy(Params, &FileId, sizeof(FileId));
+    Params[8] = (uint8_t)Whose;
 
     for (;;) {
         uint8_t *Blob = (uint8_t *)malloc(Capacity);
@@ -36,7 +39,7 @@ static int ReadMetadataBlob(file_id_t FileId, uint8_t **OutBlob,
             return -ERR_NO_MEMORY;
 
         Rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_GET_INFO,
-                     &FileId, sizeof(FileId),
+                     Params, sizeof(Params),
                      NULL, 0,
                      Blob, Capacity, &Actual,
                      BOX_ANSWER_GUARANTEED, NULL);
@@ -137,7 +140,7 @@ static int MetadataTagBytes(const uint8_t *Blob, uint32_t Size,
     return 0;
 }
 
-int FileMetadataRead(file_id_t FileId, FileMetadata *Out)
+int FileMetadataRead(TagsOf Whose, file_id_t FileId, FileMetadata *Out)
 {
     uint8_t *Blob = NULL;
     uint32_t BlobSize = 0;
@@ -155,7 +158,7 @@ int FileMetadataRead(file_id_t FileId, FileMetadata *Out)
         return -ERR_INVALID_ARGUMENT;
     memset(Out, 0, sizeof(*Out));
 
-    Rc = ReadMetadataBlob(FileId, &Blob, &BlobSize);
+    Rc = ReadMetadataBlob(Whose, FileId, &Blob, &BlobSize);
     if (Rc != 0)
         return Rc;
 

@@ -312,7 +312,7 @@ static bool own_file(file_id_t file)
     snprintf(name, sizeof(name), "%s.settings", g_own.Program);
     bool named = g_own.Program[0] != '\0';
     umutex_unlock(&g_lock);
-    if (mine || !named || FileMetadataRead(file, &metadata) != 0) return mine;
+    if (mine || !named || FileMetadataRead(MY_TAGS, file, &metadata) != 0) return mine;
     mine = metadata.Filename && strcmp(metadata.Filename, name) == 0;
     FileMetadataRelease(&metadata);
     return mine;

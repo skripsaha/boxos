@@ -55,10 +55,12 @@ static error_t StorageWhose(const ManifestOp *op, size_t at, const OpContext *ct
  * Whether the caller may speak `owner`'s tags; `change` says it puts them on
  * or takes them off. One rule for every program, none let in by its name.
  *
- * Its own: named by the file it was started from (CabinProgramFile), and only
- * while that file is on the volume it was started from — a program started
- * from bytes held in memory has no file to name its tags by, and one whose
- * file is gone has none to speak (the volume retires them, tagfs/retire):
+ * Its own: named by the file it was started from (CabinProgramFile). To be
+ * seen they ask nothing — a program with none, started from bytes held in
+ * memory, is answered that it has none, which is so. To be put on or taken
+ * off they ask that the file be on the volume the program was started from —
+ * one started from memory has no file to name a tag by, and one whose file is
+ * gone has no tags left to change (the volume retires them, tagfs/retire):
  * ERR_TAGFS_NO_OWN_TAGS. The person's: only for a cabin whose box asked —
  * see-tags to see them, change-tags to change and see — read off its
  * authority as it stands when the call is taken: ERR_ACCESS_DENIED otherwise.
@@ -69,10 +71,28 @@ static error_t StorageMaySpeak(const OpContext *ctx, TagOwner owner, bool change
     if (!cabin)
         return ERR_ACCESS_DENIED;
     if (owner.kind == TAG_OWNER_PROGRAM)
-        return TagFSHoldsProgram(CabinProgramVolume(cabin), owner.id) ? OK : ERR_TAGFS_NO_OWN_TAGS;
+        return !change || TagFSHoldsProgram(CabinProgramVolume(cabin), owner.id) ? OK : ERR_TAGFS_NO_OWN_TAGS;
     uint32_t auth = __atomic_load_n(&cabin->auth_bits, __ATOMIC_RELAXED);
     uint32_t may  = change ? AUTH_TAG_CHANGE_TAGS : (AUTH_TAG_SEE_TAGS | AUTH_TAG_CHANGE_TAGS);
     return (auth & may) ? OK : ERR_ACCESS_DENIED;
+}
+
+/* The scope a call is asked in: the Use Context is the person's lens, and a
+ * call in a program's own tags is asked of the whole volume whatever its
+ * scope says — a game finds its saves wherever the person is working. */
+static uint8_t StorageLens(uint8_t scope, TagOwner owner)
+{
+    return owner.kind == TAG_OWNER_PERSON || scope == STORAGE_SCOPE_DELETED ? scope : STORAGE_SCOPE_EVERYWHERE;
+}
+
+/* Whether a call speaks tags at all: it asks or puts `tags` of them, sets
+ * `without` aside, or is asked through the person's lens — a call in the
+ * person's tags inside the Use Context speaks them whether the context says
+ * anything this moment or not, so whether it is let in never turns on what
+ * the person happens to be working on. */
+static bool StorageSpeaks(uint8_t scope, TagOwner owner, uint32_t tags, uint32_t without)
+{
+    return tags || without || StorageLens(scope, owner) == STORAGE_SCOPE_USE;
 }
 
 /* Whose tags a call speaks, judged at once: the calls that always speak some. */
@@ -236,14 +256,6 @@ static error_t storage_scope_of(const ManifestOp *op, size_t at, bool deleted_to
         return ERR_INVALID_ARGUMENT;
     *out_scope = scope;
     return OK;
-}
-
-/* The scope a call is asked in: the Use Context is the person's lens, and a
- * call in a program's own tags is asked of the whole volume whatever its
- * scope says — a game finds its saves wherever the person is working. */
-static uint8_t StorageLens(uint8_t scope, TagOwner owner)
-{
-    return owner.kind == TAG_OWNER_PERSON || scope == STORAGE_SCOPE_DELETED ? scope : STORAGE_SCOPE_EVERYWHERE;
 }
 
 /*
@@ -462,7 +474,7 @@ int ObjQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count, const Op
     uint32_t     own   = 0;
     uint32_t     total = 0;
     rc = storage_tags_spelled(StorageLens(scope, owner), text, tlen, &tags, &use, &own, &total);
-    if (rc == OK && (total || without_count))
+    if (rc == OK && StorageSpeaks(scope, owner, total, without_count))
         rc = StorageMaySpeak(ctx, owner, false);
     if (rc != OK) {
         kfree(tags);
@@ -540,7 +552,7 @@ int ObjNameQuery(const ManifestOp *op, Crate *crates, uint16_t crate_count, cons
     uint32_t     own   = 0;
     uint32_t     total = 0;
     rc = storage_tags_spelled(StorageLens(scope, owner), tag_text, tag_len, &tags, &use, &own, &total);
-    if (rc == OK && (total || without_count))
+    if (rc == OK && StorageSpeaks(scope, owner, total, without_count))
         rc = StorageMaySpeak(ctx, owner, false);
     if (rc != OK) {
         kfree(tags);
@@ -819,7 +831,7 @@ int ObjCreate(const ManifestOp *op, Crate *crates, uint16_t crate_count, const O
     uint32_t     total   = 0;
     uint32_t    *tag_ids = NULL;
     rc = storage_tags_spelled(StorageLens(scope, owner), text, tlen, &tags, &use, &own, &total);
-    if (rc == OK && total)
+    if (rc == OK && StorageSpeaks(scope, owner, total, 0))
         rc = StorageMaySpeak(ctx, owner, true);
     if (rc == OK)
         rc = StorageCreateInterned(owner, tags, total, &tag_ids);

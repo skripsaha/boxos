@@ -145,7 +145,7 @@ int image_section_read(file_id_t file, const char *name, size_t limit, char **by
     *size  = 0;
 
     FileMetadata metadata;
-    int rc = FileMetadataRead(file, &metadata);
+    int rc = FileMetadataRead(MY_TAGS, file, &metadata);
     if (rc != 0) return rc;
     uint64_t file_size = metadata.Size;
     FileMetadataRelease(&metadata);

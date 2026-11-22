@@ -126,7 +126,7 @@ static bool elf_image(const uint8_t *first, uint64_t look, uint64_t file_size)
 static int kind_of(file_id_t file, uint64_t *file_size, uint8_t first[8], uint64_t *look, ProgramKind *kind)
 {
     FileMetadata metadata;
-    int rc = FileMetadataRead(file, &metadata);
+    int rc = FileMetadataRead(MY_TAGS, file, &metadata);
     if (rc != 0) return rc;
     *file_size = metadata.Size;
     FileMetadataRelease(&metadata);
