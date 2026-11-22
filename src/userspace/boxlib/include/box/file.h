@@ -25,7 +25,7 @@ extern "C" {
  *                another program's own, the program named by its file: seen
  *                when it shows them to this one (show_tags_to below) or when
  *                this one's box asks `see-tags` or `change-tags` — the person
- *                sees every mark on the person's files —, taken off a file
+ *                sees every tag on the person's files —, taken off a file
  *                only when it asks `change-tags` — the person's hands —, and
  *                put on by nobody but that program (-ERR_ACCESS_DENIED
  *                otherwise). This program named so is MY_TAGS.

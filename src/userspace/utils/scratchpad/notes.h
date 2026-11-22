@@ -1,8 +1,8 @@
 /* notes.h — a note and its file. A note is a file of the volume wearing
  * scratchpad's own word "scratchpad", its text the file's bytes, its colors
  * two more of its own words beside it: paper:RRGGBB and ink:RRGGBB. So every
- * other program sees a note as the text it is, and the person sees the marks
- * among the program's on the file (info). A note not yet saved has no file;
+ * other program sees a note as the text it is, and the person sees those tags
+ * in info, under the program's name. A note not yet saved has no file;
  * the first save makes it, named as the person said or by the words its first
  * line begins with. */
 #ifndef SCRATCHPAD_NOTES_H

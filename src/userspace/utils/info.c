@@ -57,8 +57,8 @@ static void print_owned(const FileMetadata *metadata, file_id_t owner) {
     }
 }
 
-/* The person's tags, then the marks each program put on the file for itself,
- * under the program's name: the person sees every mark on the file. */
+/* The person's tags, then the tags each program put on the file for itself,
+ * under the program's name: the person sees every tag on the file, whoever's. */
 static void print_tags(const FileMetadata *metadata) {
     println("  Tags:");
     print_owned(metadata, PERSON_OWNS);
@@ -68,8 +68,8 @@ static void print_tags(const FileMetadata *metadata) {
         for (uint32_t j = 0; j < i && !told; j++) told = metadata->Owners[j] == owner;
         if (told) continue;
         char *name = program_named(owner);
-        if (name) printf("  Marks of the program %s:\n", name);
-        else      println("  Marks of a program no longer on the volume:");
+        if (name) printf("  Tags of the program %s:\n", name);
+        else      println("  Tags of a program no longer on the volume:");
         free(name);
         print_owned(metadata, owner);
     }
