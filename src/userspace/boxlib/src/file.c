@@ -22,6 +22,7 @@
 _Static_assert(STORAGE_TAGS_MINE == 0 && STORAGE_TAGS_PERSON == 1 && STORAGE_TAGS_PROGRAM == 2 &&
                STORAGE_TAGS_ALL == 3, "TagsOf's whose is the deck's whose byte (box/file.h)");
 _Static_assert(STORAGE_TAG_LISTED_HEAD == 16, "a tag list's record: its counts, then its owner, then its text");
+_Static_assert(FILE_HEAD_MOST == STORAGE_HEAD_MOST, "the first bytes a file_info holds are those the system keeps");
 
 /* The whose of a call's params (boxos_decks.h): its byte, and with
  * PROGRAM_TAGS the program's file id after it. The bytes it took: 1 or 9. */
@@ -501,9 +502,16 @@ int file_info(TagsOf whose, file_id_t file_id, file_info_t *info)
         }
         pos += kl + vl;
     }
-    if (out_actual >= pos + 16u) {
-        memcpy(&info->deleted_until, out + out_actual - 16u, 8);
-        memcpy(&info->made_by,       out + out_actual - 8u,  8);
+    /* After the tags: [u64 kept_until][u64 made_by][u8 role][u8 head_len][head]. */
+    if (out_actual >= pos + 18u) {
+        memcpy(&info->deleted_until, out + pos, 8);
+        memcpy(&info->made_by,       out + pos + 8u, 8);
+        info->role = out[pos + 16u];
+        uint8_t len = out[pos + 17u];
+        if (len <= FILE_HEAD_MOST && out_actual >= pos + 18u + len) {
+            memcpy(info->head, out + pos + 18u, len);
+            info->head_len = len;
+        }
     }
     return 0;
 }
@@ -687,6 +695,56 @@ int file_restore(file_id_t file_id)
                      NULL, 0, NULL, 0, NULL,
                      BOX_ANSWER_GUARANTEED, NULL);
     return box_fail(rc);
+}
+
+/* =========================================================================
+ *  WHAT A FILE IS: THE FILES THAT BEGIN WITH GIVEN BYTES
+ * ========================================================================= */
+
+/* The files beginning with `length` bytes at `bytes`, into `ids` — room for
+ * `room` — *total how many there are. 0, or a negative -error_t. */
+static int files_starting_page(const void *bytes, size_t length, file_id_t *ids, uint32_t room, uint32_t *total)
+{
+    uint32_t out_cap = 8u + room * (uint32_t)sizeof(file_id_t);
+    uint8_t *out     = malloc(out_cap);
+    if (!out) return -ERR_NO_MEMORY;
+    uint32_t actual = 0, delivered = 0;
+    int rc = MfCall1(DECK_STORAGE, STORAGE_HEAD_QUERY, NULL, 0, bytes, (uint32_t)length,
+                     out, out_cap, &actual, BOX_ANSWER_GUARANTEED, NULL);
+    if (rc == 0 && actual >= 8u) {
+        memcpy(&delivered, out, sizeof(delivered));
+        memcpy(total, out + 4, sizeof(*total));
+        if (delivered > room || actual < 8u + delivered * sizeof(file_id_t))
+            rc = ERR_INTERNAL;
+        else if (delivered)
+            memcpy(ids, out + 8, delivered * sizeof(file_id_t));
+    } else if (rc == 0) {
+        rc = ERR_INTERNAL;
+    }
+    free(out);
+    return rc == 0 ? 0 : box_fail(rc);
+}
+
+int files_starting_with(const void *bytes, size_t length, file_id_t **out_ids)
+{
+    if (!out_ids) return -ERR_INVALID_ARGUMENT;
+    *out_ids = NULL;
+    if (!bytes || length == 0 || length > FILE_HEAD_MOST) return -ERR_INVALID_ARGUMENT;
+    uint32_t total = 0;
+    int rc = files_starting_page(bytes, length, NULL, 0, &total);
+    while (rc == 0 && total > 0) {
+        file_id_t *ids = malloc(total * sizeof(file_id_t));
+        uint32_t   now = 0;
+        if (!ids) return -ERR_NO_MEMORY;
+        rc = files_starting_page(bytes, length, ids, total, &now);
+        if (rc == 0 && now <= total) {
+            *out_ids = ids;
+            return (int)now;
+        }
+        free(ids);
+        total = now;
+    }
+    return rc;
 }
 
 /* =========================================================================

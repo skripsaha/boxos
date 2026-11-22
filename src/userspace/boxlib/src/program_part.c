@@ -121,21 +121,22 @@ static bool elf_image(const uint8_t *first, uint64_t look, uint64_t file_size)
 
 /* ---- which kind ---------------------------------------------------------- */
 
-/* What the file is, by its first bytes: its size, its first bytes in `first`
- * (`look` of them) and the kind they say. 0, or why the file could not be read. */
+/* What the file is, by its first bytes — the ones the system keeps of it
+ * (FileMetadata.Head): no byte of the file is read. Its size, its first bytes
+ * in `first` (`look` of them, 8 at the most) and the kind they say. 0, or why
+ * the file's card could not be read. */
 static int kind_of(file_id_t file, uint64_t *file_size, uint8_t first[8], uint64_t *look, ProgramKind *kind)
 {
     FileMetadata metadata;
     int rc = FileMetadataRead(MY_TAGS, file, &metadata);
     if (rc != 0) return rc;
     *file_size = metadata.Size;
+    *look      = metadata.HeadLength < 8 ? metadata.HeadLength : 8;
+    memcpy(first, metadata.Head, (size_t)*look);
     FileMetadataRelease(&metadata);
 
     static const uint8_t box_magic[8] = { BOX_MAGIC_0, BOX_MAGIC_1, BOX_MAGIC_2, BOX_MAGIC_3,
                                           BOX_MAGIC_4, BOX_MAGIC_5, BOX_MAGIC_6, BOX_MAGIC_7 };
-    *look = *file_size < 8 ? *file_size : 8;
-    rc = read_exact(file, 0, first, (size_t)*look);
-    if (rc != 0) return rc;
 
     if (*look == 8 && memcmp(first, box_magic, 8) == 0) *kind = PROGRAM_BOX;
     else if (elf_image(first, *look, *file_size)) *kind = PROGRAM_ELF;

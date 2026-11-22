@@ -248,11 +248,20 @@ int FileMetadataRead(TagsOf Whose, file_id_t FileId, FileMetadata *Out)
             TagPosition += ValueLength;
         }
     }
-    if (BlobSize - Position == sizeof(Out->KeptUntil) + sizeof(Out->MadeBy)) {
+    /* After the tags: [u64 kept_until][u64 made_by][u8 role][u8 head_len][head]. */
+    if (BlobSize - Position >= sizeof(Out->KeptUntil) + sizeof(Out->MadeBy) + 2u) {
         memcpy(&Out->KeptUntil, Blob + Position, sizeof(Out->KeptUntil));
         Position += sizeof(Out->KeptUntil);
         memcpy(&Out->MadeBy, Blob + Position, sizeof(Out->MadeBy));
         Position += sizeof(Out->MadeBy);
+        Out->Role       = Blob[Position++];
+        Out->HeadLength = Blob[Position++];
+        if (Out->HeadLength <= FILE_HEAD_MOST && BlobSize - Position >= Out->HeadLength) {
+            memcpy(Out->Head, Blob + Position, Out->HeadLength);
+            Position += Out->HeadLength;
+        } else {
+            Position = BlobSize + 1u;      /* a head past its room: no answer to read */
+        }
     }
     if (Position != BlobSize || TagPosition != TagBytes) {
         free(Tags);

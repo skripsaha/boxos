@@ -65,6 +65,20 @@ typedef struct {
     file_id_t owner;     // whose it is: PERSON_OWNS, or the file of the program whose own it is
 } tag_t;
 
+/*
+ * What a file is, as the system says it: what it keeps the file as (role), and
+ * the file's first bytes (head) — whoever knows what they mean tells from them
+ * what the file is: a box begins with its magic, a font with its tag, an
+ * itinerary with its line. The system keeps them exact through every change of
+ * what the file holds and knows no format; files_starting_with asks which files
+ * begin so, and no file is read for it.
+ */
+#define FILE_HEAD_MOST      16u   /* the first bytes the system keeps of a file: all of a shorter one */
+#define FILE_ROLE_ORDINARY  0u
+#define FILE_ROLE_SYSTEM    1u
+#define FILE_ROLE_BOOT      2u
+#define FILE_ROLE_KERNEL    3u
+
 typedef struct {
     file_id_t file_id;
     uint64_t size;
@@ -73,6 +87,9 @@ typedef struct {
     tag_t tags[5];
     uint64_t deleted_until;   // the wall clock's nanoseconds a deleted file is kept until; 0 for one that is not
     file_id_t made_by;        // the file of the program that made this file; 0 for none (it may be gone since)
+    uint8_t role;             // what the system keeps it as: FILE_ROLE_*
+    uint8_t head_len;         // how many first bytes head holds: min(size, FILE_HEAD_MOST)
+    uint8_t head[FILE_HEAD_MOST];
 } file_info_t;
 
 /* Full metadata for tools that must preserve a file exactly.  file_info_t is
@@ -91,6 +108,9 @@ typedef struct {
     file_id_t *Owners;        /* whose each tag of Tags is, in its order (tag_t.owner); NULL with none */
     uint64_t  KeptUntil;      /* the wall clock's nanoseconds a deleted file is kept until; 0 for one that is not */
     file_id_t MadeBy;         /* the file of the program that made this file; 0 for none (it may be gone since) */
+    uint8_t   Role;           /* what the system keeps it as: FILE_ROLE_* */
+    uint8_t   HeadLength;     /* how many first bytes Head holds: min(Size, FILE_HEAD_MOST) */
+    uint8_t   Head[FILE_HEAD_MOST];
 } FileMetadata;
 
 /* Read the complete self-describing metadata record — the tags `Whose` of
@@ -158,6 +178,12 @@ int query_name_all_everywhere(TagsOf whose, const char* word, const char* tags, 
  * Context; each file once, in file id order; the count and a malloc'd list the
  * caller frees (NULL for none), or a negative -error_t. */
 int query_word_all(TagsOf whose, const char* word, file_id_t** out_ids);
+/* The files that begin with `length` bytes at `bytes` (1 to FILE_HEAD_MOST) —
+ * the box magic, a font's tag, "itinerary 1\n" — each in file id order, the
+ * deleted never met; no file is read, and nothing is asked of anybody. The
+ * count and a malloc'd list the caller frees (NULL for none), or a negative
+ * -error_t — -ERR_INVALID_ARGUMENT for no bytes or more than FILE_HEAD_MOST. */
+int files_starting_with(const void* bytes, size_t length, file_id_t** out_ids);
 /* A file's card: its name, size and the tags `whose` of them it wears. */
 int file_info(TagsOf whose, file_id_t file_id, file_info_t* info);
 /* Return the byte count transferred (0..4 GiB, short-transfer: a request > 4 GiB
