@@ -502,8 +502,16 @@ static error_t InkBookPlotBuilt(const Plot* p, const FileRecord* cur, InkBookWor
     if (rc == OK)
         rc = FileRecordSplice(cur, w->sp, w->nsp, p->size, rtc_get_unix64() * 1000000000ull, &w->rec, &freed,
                               &nfreed);
-    if (rc == OK)
+    if (rc == OK) {
         InkBookPlotFolded(p, w->rec);
+        /* The file's first bytes as the Plot left them — a write's laid over
+         * the loaded ones, a cut's cut, a growth's the zeros of a hole — as
+         * many as its size holds. */
+        uint8_t  first[TAGFS_HEAD_MOST] = { 0 };
+        uint32_t len = p->size < TAGFS_HEAD_MOST ? (uint32_t)p->size : TAGFS_HEAD_MOST;
+        memcpy(first, p->meta.head, len);
+        FileRecordHeadSet(w->rec, first, len);
+    }
 #if CONFIG_STRICT || defined(CONFIG_VOLUME_TESTS)
     if (rc == OK)
         (void)InkBookFreedAgrees(p, freed, nfreed);
