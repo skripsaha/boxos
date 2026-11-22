@@ -225,6 +225,15 @@ static TestResult TestStandHeadDeck(void)
     memcpy(ids, answer + 8, sizeof(ids));
     TEST_ASSERT(said == 8u + 2u * sizeof(uint64_t) && head[0] == 2 && head[1] == 2 && ids[0] == h.alike[0] &&
                 ids[1] == h.alike[1], "answers the two alike, in id order");
+    TEST_ASSERT_OK(StandDeckAnswer(STORAGE_HEAD_QUERY, NULL, 0, s_head_mark, sizeof(s_head_mark) - 1u, answer, 8,
+                                   &said, NULL), "asked with room for none");
+    memcpy(head, answer, sizeof(head));
+    TEST_ASSERT(said == 8 && head[0] == 0 && head[1] == 2, "it says how many there are: two");
+    TEST_ASSERT_OK(StandDeckAnswer(STORAGE_HEAD_QUERY, NULL, 0, s_head_mark, sizeof(s_head_mark) - 1u, answer,
+                                   8u + sizeof(uint64_t), &said, NULL), "asked with room for one");
+    memcpy(head, answer, sizeof(head));
+    memcpy(ids, answer + 8, sizeof(uint64_t));
+    TEST_ASSERT(said == 16 && head[0] == 1 && head[1] == 2 && ids[0] == h.alike[0], "the first, of two");
     TEST_ASSERT_EQ(StandDeckAnswer(STORAGE_HEAD_QUERY, NULL, 0, "0123456789abcdefg", TAGFS_HEAD_MOST + 1u, answer,
                                    sizeof(answer), &said, NULL),
                    ERR_INVALID_ARGUMENT, "more bytes than a record keeps are refused");

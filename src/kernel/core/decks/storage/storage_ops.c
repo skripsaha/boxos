@@ -394,7 +394,9 @@ static int ObjHeadQuery(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     uint32_t hdr[2]   = { 0, 0 };   /* delivered, total */
     uint64_t from     = 1;
     error_t  rc       = OK;
-    for (bool first = true; rc == OK && hdr[0] < most; first = false) {
+    /* Asked once whatever the room, as storage.query is: a caller with room
+     * for none asks how many there are. */
+    for (bool first = true; rc == OK; first = false) {
         uint32_t  room = most - hdr[0] < STORAGE_HEAD_PIECE ? most - hdr[0] : STORAGE_HEAD_PIECE;
         TagFSPage page;
         rc = TagFSStartingWithPage(bytes, (uint32_t)in->size, from, piece, room, first, &page);
@@ -406,7 +408,7 @@ static int ObjHeadQuery(const ManifestOp *op, Crate *crates, uint16_t crate_coun
             rc = (error_t)crate_out_commit_at(out, ctx, 8 + (uint64_t)hdr[0] * sizeof(uint64_t), piece,
                                               (uint64_t)page.delivered * sizeof(uint64_t));
         hdr[0] += page.delivered;
-        if (!page.next)
+        if (!page.next || hdr[0] == most)
             break;
         from = page.next;
     }

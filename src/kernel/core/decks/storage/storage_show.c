@@ -111,7 +111,9 @@ int ObjTagShown(const ManifestOp *op, Crate *crates, uint16_t crate_count, const
             rc = (error_t)crate_out_commit_at(out, ctx, 8, all + at, (uint64_t)hdr[0] * sizeof(uint64_t));
         kfree(all);
     } else {
-        for (bool first = true; rc == OK && hdr[0] < most; first = false) {
+        /* Asked once whatever the room, as storage.query is: a caller with
+         * room for none asks how many there are. */
+        for (bool first = true; rc == OK; first = false) {
             uint32_t  room = most - hdr[0] < STORAGE_SHOWN_ANSWER_PIECE ? most - hdr[0] : STORAGE_SHOWN_ANSWER_PIECE;
             TagFSPage page;
             rc = which == STORAGE_SHOWN_TO_ME ? TagFSShownToPage(self, from, piece, room, first, &page)
@@ -124,7 +126,7 @@ int ObjTagShown(const ManifestOp *op, Crate *crates, uint16_t crate_count, const
                 rc = (error_t)crate_out_commit_at(out, ctx, 8 + (uint64_t)hdr[0] * sizeof(uint64_t), piece,
                                                   (uint64_t)page.delivered * sizeof(uint64_t));
             hdr[0] += page.delivered;
-            if (!page.next)
+            if (!page.next || hdr[0] == most)
                 break;
             from = page.next;
         }

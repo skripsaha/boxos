@@ -472,11 +472,13 @@ out:
 
 static TestResult TestStandShowDeck(void)
 {
-    TestResult verdict = TEST_PASS;
-    StandShow  s;
-    uint8_t    params[17];
-    TagFSPage  page;
-    uint64_t   asked[1];
+    static uint8_t answer[64];
+    TestResult     verdict = TEST_PASS;
+    StandShow      s;
+    uint8_t        params[17];
+    TagFSPage      page;
+    uint64_t       asked[1], said = 0;
+    uint32_t       head[2];
     TEST_ASSERT(StandShowMake(&s), "an editor, a player, a converter and another program");
     OpContext ctx = StandShowCaller(s.editor, AUTH_TAG_APP);
     params[0]     = STORAGE_SHOW_TO;
@@ -495,6 +497,20 @@ static TestResult TestStandShowDeck(void)
     TEST_ASSERT_OK(StandDeckAsk(STORAGE_TAG_SHOW, params, 9, NULL, 0, &ctx), "the player asks the editor");
     TEST_ASSERT(TagFSAsksPage(s.editor, 1, asked, 1, false, &page) == OK && page.delivered == 1 &&
                 asked[0] == s.player, "and the editor holds its note");
+    ctx = StandShowCaller(s.editor, AUTH_TAG_APP);
+    memset(params, 0, sizeof(params));
+    params[0] = STORAGE_ASKS_TO_SEE;
+    TEST_ASSERT_OK(StandDeckAnswer(STORAGE_TAG_SHOWN, params, 17, NULL, 0, answer, 8, &said, &ctx),
+                   "tag.shown with room for none");
+    memcpy(head, answer, sizeof(head));
+    TEST_ASSERT(said == 8 && head[0] == 0 && head[1] == 1, "says how many asked: one");
+    TEST_ASSERT_OK(StandDeckAnswer(STORAGE_TAG_SHOWN, params, 17, NULL, 0, answer, sizeof(answer), &said, &ctx),
+                   "and with room");
+    memcpy(head, answer, sizeof(head));
+    memcpy(asked, answer + 8, sizeof(asked));
+    TEST_ASSERT(said == 16 && head[0] == 1 && head[1] == 1 && asked[0] == s.player, "names the player");
+    params[0] = STORAGE_ASK_TO_SEE;
+    memcpy(params + 1, &s.editor, 8);
     ctx = StandShowCaller(0, AUTH_TAG_APP | AUTH_TAG_CHANGE_TAGS);
     TEST_ASSERT_EQ(StandDeckAsk(STORAGE_TAG_SHOW, params, 9, NULL, 0, &ctx), ERR_TAGFS_NO_OWN_TAGS,
                    "a program started from bytes has no list to show nor a name to ask by, whatever its box asks");
