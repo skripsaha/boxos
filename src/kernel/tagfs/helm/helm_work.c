@@ -27,7 +27,8 @@ bool HelmRoomCameBack(error_t *rc)
 }
 
 /* The file's record for this call's Plot: ERR_FILE_NOT_FOUND at once for a
- * file a Quitclaim gave up, with nothing loaded. A handle that holds no runs of
+ * file a Quitclaim gave up, with nothing loaded; a file kept in the trash is
+ * loaded for the volume's own handle alone (PlotLoadKept). A handle that holds no runs of
  * the record — opened only to write, or onto a file of none — views the file
  * from this load on, not from its open: what a holder before it freed is not
  * this one's to keep resting. The Plot is the Helm's holder's, guarded with the
@@ -40,7 +41,8 @@ static error_t HelmPlotLoad(TagFSFileHandle *handle, Plot *plot)
     }
     if (!handle->rec || handle->rec->strip_count == 0)
         HelmViewTake(handle);
-    error_t rc = PlotLoad(plot, handle->file_id, handle->warrant);
+    error_t rc = (handle->flags & TAGFS_HANDLE_KEPT) ? PlotLoadKept(plot, handle->file_id, handle->warrant)
+                                                    : PlotLoad(plot, handle->file_id, handle->warrant);
     if (rc == OK)
         plot->helm = &handle->ofe->helm;
     return rc;

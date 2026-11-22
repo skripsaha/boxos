@@ -33,12 +33,14 @@
 // the one span they cover; a growth past it); cut to the size by a cut; folded
 // into a block before a file comes to wear system, boot or god, and before a
 // Tally takes its slice (Engross) — by the service of the Helm for a file
-// nobody writes, by the holder itself while a Tally is owed.
+// nobody writes, a file kept in the trash among them, by the holder itself
+// while a Tally is owed.
 // ============================================================================
 
 #define STAND_SLIP_LINES  100u
 #define STAND_SLIP_LINE   40u
 #define STAND_SLIP_ROOM   (3u * TAGFS_BLOCK_SIZE)
+#define STAND_SLIP_TERM_S 3600ull     /* a term of the trash no test outlives */
 
 /* The Spine and the ribbon as a Tally test found them: too large for a stack. */
 static StandBinder s_slip_binder;
@@ -394,6 +396,45 @@ out:
     return verdict;
 }
 
+/* A file kept in the trash whose tail lies in a Slip: the Tally lays it in its
+ * block as any file's — no change of what the file holds — and the file stays
+ * kept, its term the same, through a mount; brought back, it reads its bytes. */
+static TestResult TestStandSlipTallyKept(void)
+{
+    TestResult      verdict = TEST_PASS;
+    StandBinder*    b = &s_slip_binder;
+    StandFreshModel m;
+    TagFSMetadata   md;
+    uint64_t        fid = 0, until = 0;
+    const char*     aside = StandBinderAside(b);
+
+    if (aside)
+        return test_steps_aside(aside);
+    TEST_ASSERT(StandFreshModelMake(&m, STAND_SLIP_ROOM), "room for the file's bytes");
+    TEST_ASSERT_EQ(tagfs_create_file("slip-kept.bin", NULL, 0, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, 100, 0x5900u), 100, "100 bytes are written");
+    TEST_ASSERT(StandSlipTailIs(fid, true, STRIP_HOLE), "a hole with a Slip over it");
+    TEST_ASSERT_EQ(tagfs_keep_file(fid, STAND_SLIP_TERM_S, INK_WARRANTED), 0, "the file goes to the trash");
+    TEST_ASSERT_EQ(tagfs_get_metadata(fid, &md), 0, "its record is there");
+    until = md.keep_until;
+    tagfs_metadata_free(&md);
+    TEST_ASSERT_OK(TagFSSettle(), "settled");
+    TEST_ASSERT_OK(BinderRunWhole(), "a Tally is asked for and written");
+    TEST_ASSERT(StandSlipTailIs(fid, false, STRIP_DATA), "the kept file's tail was laid in a block before it");
+    TEST_ASSERT(StandStitchRemount(), "mounted again on it");
+    TEST_ASSERT_EQ(tagfs_get_metadata(fid, &md), 0, "the record is there");
+    TEST_ASSERT((md.flags & TAGFS_FILE_DELETED) && md.keep_until == until, "still kept, its term the same");
+    tagfs_metadata_free(&md);
+    TEST_ASSERT(StandSlipTailIs(fid, false, STRIP_DATA), "its tail in its block");
+    TEST_ASSERT_EQ(tagfs_restore_file(fid, INK_WARRANTED), 0, "the file is brought back");
+    TEST_ASSERT(StandFreshHolds(&m, fid), "and reads its 100 bytes");
+out:
+    (void)tagfs_delete_file(fid, INK_WARRANTED);
+    StandFreshModelLetGo(&m);
+    STAND_BINDER_PUT_BACK(b);
+    return verdict;
+}
+
 /* A frequent writer holding its file's Helm, and a Tally owed: the service
  * cannot take the Helm, and the writer lays its own tail in a block with its
  * next write — no Slip is given while a Tally is owed — so the Tally goes. */
@@ -701,6 +742,8 @@ static const TestCase g_stand_slip_tests[] = {
     { .name = "stand_slip_tally_waits", .func = TestStandSlipTallyWaits,
       .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_slip_tally_whole", .func = TestStandSlipTallyWhole,
+      .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_slip_tally_kept", .func = TestStandSlipTallyKept,
       .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_slip_holder_engrosses", .func = TestStandSlipHolderEngrosses,
       .reach = TEST_WRITES_TO_VOLUME },
