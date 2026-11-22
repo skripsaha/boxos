@@ -59,9 +59,11 @@ typedef struct {
  * main stack is prepared: what a box's hints ask, held between
  * CONFIG_USER_STACK_RESERVE_MIN and _MAX, CONFIG_USER_STACK_RESERVE otherwise —
  * whether its life part says `rise` (rise.h): false for an image that is
- * no box, or says nothing of how it lives — and the authority its asks part
+ * no box, or says nothing of how it lives — the authority its asks part
  * asks for, as the AuthTagBit of each word (auth_tags.h): 0 for an image that
- * is no box, or asks for nothing. */
+ * is no box, or asks for nothing — and what its signature says (box_trust.h):
+ * whether an author the system trusts signed it, and its passport, 0 for an
+ * image no signature that holds is over. */
 typedef struct {
     uintptr_t   Entry;
     uintptr_t   NameplateVa;
@@ -73,6 +75,8 @@ typedef struct {
     uint64_t    StackReserve;
     bool        Rise;
     uint32_t    Asks;
+    bool        Trusted;
+    uint64_t    Passport;
 } ImageLoaded;
 
 /* Whether the image begins as a box or as an ELF — the two kinds this kernel

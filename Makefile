@@ -1840,6 +1840,8 @@ $(BOX_AUTHOR_HEADER): $(BOX_SIGN_KEY) tools/box_author.py
 	@mkdir -p $(dir $@)
 	@python3 tools/box_author.py $(BOX_SIGN_KEY) > $@.tmp && mv $@.tmp $@
 
+$(BUILDDIR)/kernel/core/process/box_trust.o: $(BOX_AUTHOR_HEADER)
+
 define BoxRule
 $(call Box,$(1)): $(1) $(PACK_TOOL) $(BOX_SIGN_KEY)
 	@mkdir -p $$(dir $$@)
