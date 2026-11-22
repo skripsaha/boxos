@@ -52,16 +52,20 @@
  * Use Context speak, which the person's Use Context is matched against. A
  * program's own tags are its labels for itself: a game's `save` is not the
  * person's `save`, and the two are two tags with two ids, so neither ever
- * meets the other's files. A program is named by the file it was started from
- * (its fid): the one name of it the volume vouches for, which no other program
- * can take. TAG_OWNER_PROGRAM is the book's TALLY_OWNER_PROGRAM.
+ * meets the other's files. A program is who it is as no other program can
+ * be: a signed one its passport — its author and its name, as its box's
+ * signature proves them (box_trust.h), the same program in every file and
+ * every version of it —, any other the file it was started from (its fid),
+ * the one name of it the volume vouches for. A passport carries bit 63
+ * (TAGFS_PASSPORT_BIT), which no file's id does. TAG_OWNER_PROGRAM is the
+ * book's TALLY_OWNER_PROGRAM.
  */
 #define TAG_OWNER_PERSON   0u
 #define TAG_OWNER_PROGRAM  1u
 
 typedef struct {
     uint8_t  kind;   /* TAG_OWNER_PERSON or TAG_OWNER_PROGRAM */
-    uint64_t id;     /* the program's fid; 0 for the person */
+    uint64_t id;     /* the program's passport, or its fid; 0 for the person */
 } TagOwner;
 
 static inline TagOwner TagOwnerPerson(void)
@@ -80,11 +84,9 @@ static inline bool TagOwnerSame(TagOwner a, TagOwner b)
 }
 
 /* The owner as the deck's answers name it (boxos_decks.h): 0 the person, a
- * program its file's id. */
-static inline uint64_t TagOwnerWord(TagOwner owner)
-{
-    return owner.kind == TAG_OWNER_PROGRAM ? owner.id : 0;
-}
+ * program the file it is named by (TagFSProgramCard) — who it is, while it is
+ * no more on the volume and its tags not yet retired. */
+uint64_t TagOwnerWord(TagOwner owner);
 
 /*
  * Whose tags a list lets in. One owner's (`all` false: `owner`), or every
@@ -815,11 +817,31 @@ error_t  TagFSInternOwned(TagOwner owner, const TagSpelling* tag, uint32_t* out_
  * the volume has no such tag, or there is no volume. */
 size_t   tagfs_tag_text(uint32_t tag_id, char* out, size_t out_size);
 
-/* Whether the volume mounted is the one `volume` names (its Deed's uuid) and
- * holds file `fid` — live, or kept deleted: a program's own tags are named by
- * its file (TagOwner), and are its only while that file is on the volume it
- * was started from. False with no volume. */
-bool     TagFSHoldsProgram(const uint8_t volume[16], uint64_t fid);
+/* Whether program `owner` (TagOwner) is on the volume mounted, so that its
+ * own tags are its: a signed program's passport while a file of it is — live,
+ * or kept deleted; a program named by its file while the volume is the one
+ * `volume` names (its Deed's uuid) and holds that file, holding no signed
+ * program since. False with no volume. */
+bool     TagFSHoldsProgram(const uint8_t volume[16], uint64_t owner);
+
+/* Who a program is, as its own tags are owned (TagOwner): a signed program
+ * its passport (box_trust.h, bit 63 set), any other the file it is. Programs
+ * name programs by a file of them, and these speak between the two: the
+ * program file `fid` holds — the passport its record keeps, else `fid`
+ * itself, 0 for a file the volume has not —; the file program `owner` is
+ * named by — its own, or of a passport the least live file that keeps it,
+ * else the least kept deleted —; and every file of it, live or kept deleted,
+ * rising: how many, the first `room` written to `out`. A program that is no
+ * more on the volume has none: 0, as with no volume. */
+uint64_t TagFSProgramOf(uint64_t fid);
+uint64_t TagFSProgramCard(uint64_t owner);
+uint32_t TagFSProgramFiles(uint64_t owner, uint64_t* out, uint32_t room);
+
+/* The card of file `fid` laid with who the program it holds is, once one is
+ * started from it: the passport its signature gives it, or 0 for a program
+ * with no signature that holds — one Ink when the card says another, none
+ * when it says the same (InkPassport). */
+error_t  TagFSPassportLay(uint64_t fid, uint64_t passport);
 
 /* Whether tag `tag_id` is one of the person's (TagOwner): false for a
  * program's own, an id the volume has not, and with no volume. */
@@ -827,38 +849,41 @@ bool     TagFSTagIsPersons(uint32_t tag_id);
 
 /*
  * A program's own tags shown to other programs (show/show.c). A program
- * shows all its tags, those to come too, to another program — named by its
- * file — or to every program (reader 0); one shown them sees them, finds the
- * files by them and lists them, and never puts them on nor takes them off.
- * Whom a program shows them to is the card of its own file (FileRecord.
- * shown_to), so the file let go takes it with it, and a reader that left is
- * taken out of every list by the volume's duty (retire/retire.c). Who may ask
- * which is the caller's to judge (storage_tags.c): a program changes its own
- * list alone.
+ * shows all its tags, those to come too, to another program or to every
+ * program (reader 0); one shown them sees them, finds the files by them and
+ * lists them, and never puts them on nor takes them off. Whom a program shows
+ * them to is the cards of its files (FileRecord.shown_to) — every file of a
+ * signed program holds the one list, and a card that comes to be one of its
+ * takes it (InkPassport) — so the last file let go takes it with it, and a
+ * reader that left is taken out of every list by the volume's duty
+ * (retire/retire.c). Who may ask which is the caller's to judge
+ * (storage_tags.c): a program changes its own list alone. A program is asked
+ * of here as who it is (TagOwner) and named in every list by its card
+ * (TagFSProgramCard), as programs name programs.
  */
 
-/* Program `program`'s card shows its tags to `reader` (0: every program), or
- * — `show` false — no longer does. OK, and OK changing nothing for what
- * stands already; ERR_INVALID_ARGUMENT for program 0 or a program shown to
- * itself; ERR_FILE_NOT_FOUND for a program, or a reader shown to, the volume
- * has not, and a program kept deleted that would show to one more; the
- * Ink's refusal; ERR_TAGFS_NOT_INITIALIZED with no volume. */
+/* Program `program`'s files show its tags to `reader` (0: every program), or
+ * — `show` false — no longer do. OK, and OK changing nothing for what stands
+ * already; ERR_INVALID_ARGUMENT for program 0 or a program shown to itself;
+ * ERR_FILE_NOT_FOUND for a program, or a reader shown to, the volume has not,
+ * and a program kept deleted, every file of it, that would show to one more;
+ * the Ink's refusal; ERR_TAGFS_NOT_INITIALIZED with no volume. */
 error_t  TagFSShowTags(uint64_t program, uint64_t reader, bool show);
 
-/* Whether `program`'s file shows its tags to `reader` — by name, or to every
+/* Whether `program` shows its tags to `reader` — by name, or to every
  * program. False for a program the volume has not, and with no volume. */
 bool     TagFSShows(uint64_t program, uint64_t reader);
 
 /* The programs that show their tags to `reader` — by name or to every
- * program, `reader` itself left out — a page at a time in file id order, from
- * `from` on (TagFSPage). ERR_TAGFS_NOT_INITIALIZED with no volume. */
+ * program, `reader` itself left out — a page at a time in the order of their
+ * cards, from `from` on (TagFSPage). ERR_TAGFS_NOT_INITIALIZED with no volume. */
 error_t  TagFSShownToPage(uint64_t reader, uint64_t from, uint64_t* out, uint32_t room, bool want_total,
                           TagFSPage* page);
 
 /* The programs `program` shows its tags to, rising, 0 first for every
- * program: as many as fit `room` into `out`, and *count how many there are.
- * ERR_FILE_NOT_FOUND for a program the volume has not. */
-error_t  TagFSShownBy(uint64_t program, uint64_t* out, uint32_t room, uint32_t* count);
+ * program: *out the list — the caller's to kfree, NULL for none — *count how
+ * many. ERR_FILE_NOT_FOUND for a program the volume has not, ERR_NO_MEMORY. */
+error_t  TagFSShownBy(uint64_t program, uint64_t** out, uint32_t* count);
 
 /* Program `asker` asks program `owner` to show it its tags: a note the
  * kernel holds (show/show.h) until `owner` answers — TagFSShowTags of the
@@ -870,7 +895,8 @@ error_t  TagFSShownBy(uint64_t program, uint64_t* out, uint32_t room, uint32_t* 
 error_t  TagFSAskToSee(uint64_t asker, uint64_t owner, bool* noted);
 
 /* The programs that asked `owner` to show them its tags and are not answered
- * yet, a page at a time in file id order (TagFSPage). */
+ * yet, a page at a time in the order of their cards (TagFSPage); OK, or
+ * ERR_NO_MEMORY. */
 error_t  TagFSAsksPage(uint64_t owner, uint64_t from, uint64_t* out, uint32_t room, bool want_total,
                        TagFSPage* page);
 

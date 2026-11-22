@@ -5,6 +5,7 @@
 #include "../tagfs.h"
 #include "../retire/retire.h"
 #include "../settle/settle.h"
+#include "../tag_registry/tag_registry.h"
 #include "storage_tags.h"   /* StorageMaySpeak, StorageViewAll — the deck's one judge */
 #include "op_registry.h"
 #include "boxos_decks.h"
@@ -24,7 +25,7 @@
 // what is asked, refused where it cannot be; the same through a mount off the
 // ribbon and off a Tally; the programs a reader is shown by, a page at a time;
 // a reader that leaves taken out of the lists, a program that leaves taking
-// its list with it. And the asks: a note a pair, gone with the answer — yes,
+// its list with it; a signed program one program in every file of it. And the asks: a note a pair, gone with the answer — yes,
 // no, yes to every program —, with either program leaving, and with a mount.
 // And the deck's judge, asked as a cabin of the editor asks it: its own tags,
 // another program's seen when shown and by the person's eyes, taken off by
@@ -66,15 +67,20 @@ static void StandShowClean(const StandShow* s)
  * bit exactly when it names any. */
 static bool StandShowList(uint64_t program, const uint64_t* want, uint32_t n)
 {
-    uint64_t      list[STAND_SHOW_ROOM];
+    uint64_t*     list  = NULL;
     uint32_t      count = 0;
     TagFSMetadata md;
-    if (TagFSShownBy(program, list, STAND_SHOW_ROOM, &count) != OK || count != n || tagfs_get_metadata(program, &md))
+    bool          same  = TagFSShownBy(program, &list, &count) == OK && count == n &&
+                          tagfs_get_metadata(program, &md) == 0;
+    if (!same) {
+        kfree(list);
         return false;
-    bool same = md.shown_count == n && ((md.flags & TAGFS_FILE_SHOWN) != 0) == (n != 0);
+    }
+    same = md.shown_count == n && ((md.flags & TAGFS_FILE_SHOWN) != 0) == (n != 0);
     for (uint32_t i = 0; same && i < n; i++)
         same = list[i] == want[i] && md.shown_to[i] == want[i];
     tagfs_metadata_free(&md);
+    kfree(list);
     return same;
 }
 
@@ -221,6 +227,86 @@ out:
     return verdict;
 }
 
+/* Whether file `fid`'s card names exactly `want`, `n` of them. */
+static bool StandShowCardNames(uint64_t fid, const uint64_t* want, uint32_t n)
+{
+    TagFSMetadata md;
+    if (tagfs_get_metadata(fid, &md) != 0)
+        return false;
+    bool same = md.shown_count == n;
+    for (uint32_t i = 0; same && i < n; i++)
+        same = md.shown_to[i] == want[i];
+    tagfs_metadata_free(&md);
+    return same;
+}
+
+/* Whether file `fid` wears program `owner`'s tag `tag`. */
+static bool StandShowWears(uint64_t fid, uint64_t owner, const TagSpelling* tag)
+{
+    uint32_t      id = TagRegistryLookup(tagfs_get_state()->registry, TagOwnerProgram(owner), tag);
+    TagFSMetadata md;
+    bool          worn = false;
+    if (id == TAGFS_INVALID_TAG_ID || tagfs_get_metadata(fid, &md) != 0)
+        return false;
+    for (uint32_t i = 0; i < md.tag_count; i++)
+        worn = worn || md.tag_ids[i] == id;
+    tagfs_metadata_free(&md);
+    return worn;
+}
+
+/* A signed program is its passport in every file of it (InkPassport): a copy
+ * of the editor started is the editor, its card taking the list the first
+ * holds; the program is named by its least live file, shows through both,
+ * is named once where it shows, and keeps its tags and its list while one
+ * copy stays. The passport taken off the last — a program with no signature
+ * written over it and started — the card names its file again and holds no
+ * list, and the signed program's tags are retired. */
+static TestResult TestStandShowSigned(void)
+{
+    static const TagSpelling draft  = { .key = "draft", .key_len = 5 };
+    const uint64_t           editor = TAGFS_PASSPORT_BIT | 0xED170Bull;
+    TestResult               verdict = TEST_PASS;
+    StandShow                s;
+    uint64_t                 copy = 0, files[3];
+    uint32_t                 n = 0;
+    TEST_ASSERT(StandShowMake(&s), "an editor, a player, a converter and another program");
+    TEST_ASSERT(StandMakeFile("show_editor2.box", "edit", 4, &copy), "and a second copy of the editor");
+    TEST_ASSERT_OK(RetireSweepNow(&n), "nothing owed before");
+    TEST_ASSERT_OK(TagFSPassportLay(s.editor, editor), "the editor is started: its card keeps its passport");
+    TEST_ASSERT(TagFSProgramOf(s.editor) == editor && TagFSProgramOf(copy) == copy &&
+                TagFSProgramCard(editor) == s.editor && TagFSProgramCard(s.editor) == 0,
+                "its file names the program, the copy not started yet is a program of its own");
+    TEST_ASSERT_OK(TagFSShowTags(editor, s.player, true), "the editor shows its tags to the player");
+    TEST_ASSERT_OK(tagfs_add_tag_string(TagOwnerProgram(editor), s.other, &draft), "and wears one on a file");
+    TEST_ASSERT_OK(TagFSPassportLay(copy, editor), "the copy is started: its card keeps the same passport");
+    TEST_ASSERT(TagFSProgramFiles(editor, files, 3) == 2 && files[0] == s.editor && files[1] == copy,
+                "the program is both files");
+    const uint64_t player[] = { s.player };
+    TEST_ASSERT(StandShowCardNames(copy, player, 1), "the copy's card took the list the first one holds");
+    TEST_ASSERT_OK(TagFSShowTags(editor, s.converter, true), "the editor shows its tags to the converter as well");
+    const uint64_t both[] = { s.player, s.converter };
+    TEST_ASSERT(StandShowCardNames(s.editor, both, 2) && StandShowCardNames(copy, both, 2), "both cards hold it");
+    const uint64_t card[] = { s.editor };
+    TEST_ASSERT(StandShowShownTo(s.player, card, 1) && TagFSShows(editor, s.converter),
+                "the player is shown by the editor once, named by its card");
+    TEST_ASSERT_EQ(tagfs_keep_file(s.editor, STAND_SHOW_TERM_S, INK_WARRANTED), 0, "the first copy goes to the trash");
+    TEST_ASSERT_EQ(TagFSProgramCard(editor), copy, "the program is named by the live copy");
+    TEST_ASSERT_EQ(tagfs_delete_file(s.editor, INK_WARRANTED), 0, "the first copy is let go for good");
+    TEST_ASSERT_OK(RetireSweepNow(&n), "the duty looks");
+    TEST_ASSERT(n == 0 && TagFSShows(editor, s.player) && StandShowWears(s.other, editor, &draft),
+                "a copy stays: the tags and the list stay");
+    TEST_ASSERT_OK(TagFSPassportLay(copy, 0), "a program with no signature written over the copy is started");
+    TEST_ASSERT(TagFSProgramOf(copy) == copy && TagFSProgramFiles(editor, NULL, 0) == 0 &&
+                StandShowCardNames(copy, NULL, 0) && !TagFSShows(editor, s.player),
+                "the card names its file again, and holds no list: the signed program is gone");
+    TEST_ASSERT_OK(RetireSweepNow(&n), "the duty looks again");
+    TEST_ASSERT(n == 1 && !StandShowWears(s.other, editor, &draft), "and the signed program's tag is retired");
+out:
+    (void)tagfs_delete_file(copy, INK_WARRANTED);
+    StandShowClean(&s);
+    return verdict;
+}
+
 static TestResult TestStandShowAsks(void)
 {
     TestResult verdict = TEST_PASS;
@@ -301,8 +387,9 @@ static OpContext StandShowCaller(uint64_t program, uint32_t auth)
     memset(&ctx, 0, sizeof(ctx));
     memset(&s_show_proc, 0, sizeof(s_show_proc));
     memset(&s_show_cabin, 0, sizeof(s_show_cabin));
-    s_show_cabin.program_fid = program;
-    s_show_cabin.auth_bits   = auth;
+    s_show_cabin.program_fid   = program;
+    s_show_cabin.program_owner = program;
+    s_show_cabin.auth_bits     = auth;
     memcpy(s_show_cabin.program_volume, tagfs_get_state()->uuid, sizeof(s_show_cabin.program_volume));
     s_show_proc.cabin = &s_show_cabin;
     ctx.proc          = &s_show_proc;
@@ -485,6 +572,7 @@ static const TestCase g_stand_show_tests[] = {
     { .name = "stand_show_shown_to", .func = TestStandShowShownTo, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_show_reader_left", .func = TestStandShowReaderLeft, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_show_program_left", .func = TestStandShowProgramLeft, .reach = TEST_WRITES_TO_VOLUME },
+    { .name = "stand_show_signed", .func = TestStandShowSigned, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_show_asks", .func = TestStandShowAsks, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_show_asks_every", .func = TestStandShowAsksEvery, .reach = TEST_WRITES_TO_VOLUME },
     { .name = "stand_show_asks_forgotten", .func = TestStandShowAsksForgotten, .reach = TEST_WRITES_TO_VOLUME },

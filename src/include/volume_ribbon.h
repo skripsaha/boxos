@@ -67,7 +67,7 @@
 #define LABEL_KEEP   8u   /* the file's deletion, and the time it is kept until (0: brought back) */
 #define LABEL_SHOWN  16u  /* the programs a program's file shows its own tags to, the whole list anew (0 of them: none) */
 #define LABEL_HEAD   32u  /* the file's first bytes anew, as a change of what it holds left them (none: it holds none) */
-#define LABEL_PASSPORT 64u  /* the passport of the signed program the file holds, anew (never 0) */
+#define LABEL_PASSPORT 64u  /* the passport of the signed program the file holds, anew — 0: none now */
 
 /* The extensions a run may carry (§8), a TLV list after its head: CODEC's body
  * is the codec and the blocks it stores; SHARED names ground another owns. */
@@ -757,8 +757,9 @@ static inline int RibbonShapedGet(const uint8_t *b, uint32_t len, uint64_t seq, 
  * `clear`: it follows a change of what the file holds — after the Shaped of
  * it — with the bytes as the change left them, none taking the bit off.
  * PASSPORT is the one verb of the passport of the program the file holds, and
- * TALLY_FILE_PASSPORT no bit of `set` or `clear`: it lays one anew — a
- * passport, never 0 — and the bit with it; nothing takes it off but the file.
+ * TALLY_FILE_PASSPORT no bit of `set` or `clear`: it lays one anew and the bit
+ * with it, or — 0 — takes them off, once a program with no signature that
+ * holds was started from the file; any other number is no passport.
  */
 typedef struct {
     uint64_t       fid;
@@ -839,7 +840,8 @@ static inline int RibbonLabeledGet(const uint8_t *b, uint32_t len, RibbonLabeled
         ((r->what & LABEL_KEEP) && !TallyTake(b, len, &at, &r->keep_ns)) ||
         ((r->what & LABEL_SHOWN) && !TallyFidsTake(b, len, &at, &r->nshown, &r->shown, &r->shown_bytes)) ||
         ((r->what & LABEL_HEAD) && !TallyHeadTake(b, len, &at, TALLY_HEAD_MOST, &r->head_len, &r->head)) ||
-        ((r->what & LABEL_PASSPORT) && !TallyPassportTake(b, len, &at, &r->passport)))
+        ((r->what & LABEL_PASSPORT) && !(TallyTake(b, len, &at, &r->passport) &&
+                                          (r->passport == 0 || (r->passport & TALLY_PASSPORT_BIT)))))
         return TALLY_BODY_BROKEN;
     *used = at;
     return TallyBodyEnd(at, len);

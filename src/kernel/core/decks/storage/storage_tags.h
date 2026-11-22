@@ -22,9 +22,14 @@ int ObjGetInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count, const 
 int ObjTagShow(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx);
 int ObjTagShown(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx);
 
-/* The caller's program on the volume mounted — the file it was started from,
- * while it is on the volume it was started from — or 0 for none. */
+/* The caller's program on the volume mounted — who it is (TagOwner), while
+ * it is on the volume (TagFSHoldsProgram) — or 0 for none. */
 uint64_t StorageReader(const OpContext *ctx);
+
+/* The program a program names by a file of it — the one that file holds
+ * (TagFSProgramOf) — or the number itself for a file the volume has not; 0
+ * stays 0. */
+uint64_t StorageProgramNamed(uint64_t program);
 
 /* Whether the caller's box asked `see-tags` or `change-tags` — with
  * `change`, `change-tags` — as its authority stands: the person's eyes, and

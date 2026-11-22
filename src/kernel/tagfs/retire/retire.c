@@ -21,11 +21,10 @@ void RetireOwed(void)
     __atomic_store_n(&s_owed, 1u, __ATOMIC_RELEASE);
 }
 
-bool RetireFileGone(uint64_t fid)
+bool RetireProgramGone(uint64_t owner)
 {
-    FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
-    FileRecordRelease(rec);
-    return !rec && !BookFileLocked(fid);
+    return FileMapProgramFiles(tagfs_get_state()->files, owner, NULL, 0, NULL) == 0 &&
+           !(owner & TAGFS_PASSPORT_BIT ? BookAnyLocked() : BookFileLocked(owner));
 }
 
 /* Every file that wears one of `ids`, each given one Ink that takes them all
@@ -88,7 +87,7 @@ static error_t RetireReaders(void)
             error_t     rc  = OK;
             for (uint32_t i = 0; rc == OK && rec && i < rec->shown_count; i++) {
                 InkReceipt receipt;
-                if (rec->shown_to[i] && RetireFileGone(rec->shown_to[i]))
+                if (rec->shown_to[i] && RetireProgramGone(rec->shown_to[i]))
                     rc = InkShown(files[k], rec->shown_to[i], false, &receipt);
             }
             FileRecordRelease(rec);
@@ -104,8 +103,8 @@ static int RetireByProgram(const void* a, const void* b, void* ctx)
     const TagProgramTag* x = a;
     const TagProgramTag* y = b;
     (void)ctx;
-    if (x->fid != y->fid)
-        return x->fid < y->fid ? -1 : 1;
+    if (x->owner != y->owner)
+        return x->owner < y->owner ? -1 : 1;
     return x->id < y->id ? -1 : x->id > y->id;
 }
 
@@ -123,9 +122,9 @@ static error_t RetireSweep(uint32_t* retired)
             ids[i] = tags[i].id;
     }
     for (uint32_t from = 0, to; rc == OK && from < count; from = to) {
-        for (to = from; to < count && tags[to].fid == tags[from].fid;)
+        for (to = from; to < count && tags[to].owner == tags[from].owner;)
             to++;
-        if (!RetireFileGone(tags[from].fid))
+        if (!RetireProgramGone(tags[from].owner))
             continue;
         rc = RetireProgram(&ids[from], to - from);
         if (rc == OK)

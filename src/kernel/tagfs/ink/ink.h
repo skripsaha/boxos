@@ -120,6 +120,15 @@ error_t InkKeep(uint64_t fid, uint64_t until, InkWarrant warrant, InkReceipt* ou
  * that left (retire/retire.c). */
 error_t InkShown(uint64_t fid, uint64_t reader, bool show, InkReceipt* out);
 
+/* The passport of the signed program file `fid` holds laid on its record —
+ * or, 0, taken off it: a program with no signature that holds — one Labeled
+ * PASSPORT when it is another, and with it the list of the programs the
+ * program shows its tags to, as another card of it holds it, or none; the
+ * record as it is when it is the same. ERR_INVALID_ARGUMENT for a number that
+ * is no passport (bit 63), ERR_FILE_NOT_FOUND for a file the volume has not;
+ * a volume that takes no change answers as for any Ink. */
+error_t InkPassport(uint64_t fid, uint64_t passport, InkReceipt* out);
+
 /* The `count` tags of `tags` taken off file `fid` — live or kept deleted — in
  * one Ink, those it wears; OK, and OK with no Ink for a file that wears none
  * of them, or the refusal: ERR_FILE_NOT_FOUND, the volume's, the ribbon's room

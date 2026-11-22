@@ -363,7 +363,7 @@
  * the tags are those of `whose` the file wears (STORAGE_TAGS_* below) —
  * STORAGE_TAGS_ALL every one its caller may see —, each record [u16 key_len]
  * [u16 value_len][u8 1 for a tag the system keeps, else 0][u64 owner][key]
- * [value], owner 0 the person's and a program's file id a program's — and
+ * [value], owner 0 the person's and a program's a file id of it — and
  * after them [u64 kept_until][u64 made_by][u8 role][u8 head_len][head]: the
  * eight
  * bytes before the last are the time, in nanoseconds of the wall clock, at
@@ -494,10 +494,11 @@
  * program to show the caller its tags: a note the kernel holds until the
  * program shows them to the caller or hides them from it, either leaves, or
  * the volume is mounted again — and when it leaves a note, the kernel says
- * so on the Touch word "tags-asked", its payload the [u64] file id of the
- * program asked, and nothing of who asked. The list is the card of the
- * program's own file: a program started from bytes, or whose file is not on
- * the volume it was started from, has none — ERR_TAGFS_NO_OWN_TAGS. A program
+ * so on the Touch word "tags-asked" once for every file of the program asked,
+ * its payload the [u64] file id, and nothing of who asked. The list is the
+ * program's, kept on the cards of its files — a signed program's on every
+ * file of it: a program started from bytes, or none of whose files is on the
+ * volume, has none — ERR_TAGFS_NO_OWN_TAGS. A program
  * the volume has not: ERR_FILE_NOT_FOUND; one shown or asked to show to
  * itself, or asked as 0: ERR_INVALID_ARGUMENT. */
 #define STORAGE_TAG_SHOW            0x28
@@ -555,21 +556,24 @@
 /* The whose byte every call that speaks tags carries, after the bytes its
  * params lay out before it (storage.query, storage.name.query, storage.tag.
  * list, storage.tag.set, storage.tag.unset, storage.create, obj.getinfo) —
- * with STORAGE_TAGS_PROGRAM, the [u64] file id of the program right after it,
+ * with STORAGE_TAGS_PROGRAM, the [u64] file id of the program right after it
+ * — the program that file holds; a signed program is one program in every
+ * file of it —,
  * and the params that follow the whose after that:
  *
  *   STORAGE_TAGS_MINE    the program's own tags — its words for its own files,
  *                        which no other program meets, and which it needs no
- *                        asking for. A program started from bytes held in
- *                        memory, or whose file is no longer on the volume it
- *                        was started from, has none: ERR_TAGFS_NO_OWN_TAGS.
+ *                        asking for — a signed program's, in every file of it.
+ *                        A program started from bytes held in memory, or none
+ *                        of whose files is on the volume any longer, has
+ *                        none: ERR_TAGFS_NO_OWN_TAGS.
  *   STORAGE_TAGS_PERSON  the person's tags — the labels the person finds
  *                        files by, and the Use Context's words: seen only by a
  *                        program whose box asks `see-tags` or `change-tags`,
  *                        put on and taken off only by one that asks
  *                        `change-tags` (ERR_ACCESS_DENIED otherwise).
- *   STORAGE_TAGS_PROGRAM another program's own tags, the program named by its
- *                        file: seen by one it shows them to (storage.tag.show)
+ *   STORAGE_TAGS_PROGRAM another program's own tags, the program named by a
+ *                        file of it: seen by one it shows them to (storage.tag.show)
  *                        and by one whose box asks `see-tags` or `change-tags`
  *                        — the person sees every mark on his files —, taken
  *                        off a file only by one that asks `change-tags` — the

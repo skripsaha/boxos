@@ -2,6 +2,7 @@
 #include "../mount/book_mount.h"
 #include "../settle/sewing.h"
 #include "../helm/engross.h"
+#include "../retire/retire.h"
 #include "boardroom.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
@@ -394,6 +395,7 @@ static bool InkFieldsTags(const FileRecord* cur, uint32_t add, const uint32_t* d
     f->dropped     = f->tags + cur->tag_count + 1u;
     f->shown       = cur->shown_to;
     f->shown_count = cur->shown_count;
+    f->passport    = cur->passport;
 
     bool worn = false;
     for (uint32_t i = 0; i < cur->tag_count; i++) {
@@ -630,8 +632,6 @@ static error_t InkShownOnce(uint64_t fid, uint64_t reader, bool show, InkReceipt
     if (!cur)
         return ERR_FILE_NOT_FOUND;
     error_t rc = InkVolumeBegins();
-    if (rc == OK && show && (cur->flags & TAGFS_FILE_DELETED))
-        rc = ERR_FILE_NOT_FOUND;
     if (rc == OK && InkShowsTo(cur, reader) == show) {
         out->gen = was.gen;
     } else if (rc == OK) {
@@ -656,6 +656,61 @@ error_t InkShown(uint64_t fid, uint64_t reader, bool show, InkReceipt* out)
     do {
         rc = InkShownOnce(fid, reader, show, out);
     } while (rc != OK && InkGoesRound(&rc));
+    return rc;
+}
+
+/* Another card of the program `passport` than `fid`'s, held — the one it is
+ * named by when that is not `fid` — or NULL when no other keeps it. */
+static FileRecord* InkOtherCarrier(uint64_t fid, uint64_t passport)
+{
+    uint64_t files[2], card = 0;
+    uint32_t n = passport ? FileMapProgramFiles(InkState()->files, passport, files, 2, &card) : 0;
+    uint64_t other = card != fid ? card : (n > 1 ? files[files[0] == fid ? 1 : 0] : 0);
+    return other ? FileMapRecordHold(InkState()->files, other, NULL) : NULL;
+}
+
+/* One round of InkPassport. */
+static error_t InkPassportOnce(uint64_t fid, uint64_t passport, InkReceipt* out)
+{
+    RecordWhere   was;
+    InkFieldsPlan f     = { 0 };
+    FileRecord*   cur   = FileMapRecordHold(InkState()->files, fid, &was);
+    FileRecord*   other = NULL;
+    if (!cur)
+        return ERR_FILE_NOT_FOUND;
+    error_t rc = InkVolumeBegins();
+    if (rc == OK && cur->passport == passport) {
+        out->gen = was.gen;
+    } else if (rc == OK) {
+        if (!InkFieldsTags(cur, TAGFS_INVALID_TAG_ID, NULL, 0, &f)) {
+            rc = ERR_NO_MEMORY;
+        } else {
+            /* Whom the program shows its tags to is the program's, not the
+             * file's: the card takes the list another card of it holds, or
+             * none — the list of the program it held went with it. */
+            other         = InkOtherCarrier(fid, passport);
+            f.shown       = other ? other->shown_to : NULL;
+            f.shown_count = other ? other->shown_count : 0;
+            f.passport    = passport;
+            rc = InkBookFields(fid, cur, &was, &f, cur->name, TAGFS_INVALID_TAG_ID, cur->flags, cur->keep_until, out);
+        }
+    }
+    kfree(f.tags);
+    FileRecordRelease(other);
+    FileRecordRelease(cur);
+    return rc;
+}
+
+error_t InkPassport(uint64_t fid, uint64_t passport, InkReceipt* out)
+{
+    if (passport && !(passport & TAGFS_PASSPORT_BIT))
+        return ERR_INVALID_ARGUMENT;
+    error_t rc;
+    do {
+        rc = InkPassportOnce(fid, passport, out);
+    } while (rc != OK && InkGoesRound(&rc));
+    if (rc == OK)
+        RetireOwed();    /* the program the card named may have left with it */
     return rc;
 }
 

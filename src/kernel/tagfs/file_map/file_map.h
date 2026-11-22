@@ -99,6 +99,14 @@ uint32_t FileMapFiles(FileMap* map, uint64_t from, uint64_t* out, uint32_t room)
 uint32_t FileMapStartingWith(FileMap* map, const uint8_t* bytes, uint32_t length, uint64_t from, uint64_t* out,
                              uint32_t room, uint64_t* next, uint32_t* total);
 
+/* The files of program `owner` (tagfs.h, TagOwner), live or kept deleted,
+ * rising: of a passport every file whose record keeps it — asked of the map's
+ * list of the files that keep one, of every file when it is short of room —,
+ * of a file itself while its record keeps none. How many there are, the first
+ * `room` of them written to `out`; *card, when given, the one the program is
+ * named by, the least live one, else the least kept deleted, 0 for none. */
+uint32_t FileMapProgramFiles(FileMap* map, uint64_t owner, uint64_t* out, uint32_t room, uint64_t* card);
+
 /* The files called `word` — its `length` bytes are the whole of the file's
  * name or of its stem, name_index.h — from file id `from` on, the live ones
  * alone, in file id order: up to `room` ids into `out`, how many were

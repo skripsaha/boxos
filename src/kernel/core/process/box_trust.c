@@ -20,7 +20,7 @@ static uint64_t PassportOf(const BoxSignature *signature)
     KSha256Final(&ctx, digest);
     for (unsigned i = 0; i < 8; i++)
         passport = passport << 8 | digest[i];
-    return passport | BOX_PASSPORT_BIT;
+    return passport | TAGFS_PASSPORT_BIT;
 }
 
 BoxSigned BoxTrustCheck(const BoxSignature *signature, const uint8_t digest[BOX_HASH_BYTES])

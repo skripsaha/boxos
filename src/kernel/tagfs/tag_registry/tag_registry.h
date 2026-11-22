@@ -116,10 +116,10 @@ bool         TagRegistryRetiredId(TagRegistry* reg, uint32_t id);
  * settles, so the same stitch asking again is answered the same. */
 bool         TagRegistryRetiringNext(TagRegistry* reg, uint32_t* at, uint32_t below, uint64_t gen, uint32_t* id);
 
-/* A program's tag: its id and the fid of the program. */
+/* A program's tag: its id and the program (TagOwner.id). */
 typedef struct {
     uint32_t id;
-    uint64_t fid;
+    uint64_t owner;
 } TagProgramTag;
 
 /* Every program's tag whose retirement is not finished, COPIED: *out is the

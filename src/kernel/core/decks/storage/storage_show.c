@@ -2,12 +2,13 @@
  * Storage Deck — a program's own tags shown to other programs: storage.tag.show
  * and storage.tag.shown (boxos_decks.h, where both layouts are said once).
  *
- * The caller is its program — the file it was started from, on the volume it
- * was started from (StorageReader) — and a program changes, asks for and is
- * asked by nobody but as itself: a program started from bytes has no tags of
- * its own to show nor a name to be shown by, ERR_TAGFS_NO_OWN_TAGS. Whom a
- * program shows its tags to is read by itself and by the person's eyes
- * (StoragePersonSays) alone.
+ * The caller is its program — who it is, while a file of it is on the volume
+ * (StorageReader) — and a program changes, asks for and is asked by nobody
+ * but as itself: a program with no file of it there has no tags of its own to
+ * show nor a name to be shown by, ERR_TAGFS_NO_OWN_TAGS. Programs name the
+ * others by a file of them (StorageProgramNamed), and every list names them
+ * by the one each is named by. Whom a program shows its tags to is read by
+ * itself and by the person's eyes (StoragePersonSays) alone.
  */
 
 #include "klib.h"
@@ -22,17 +23,26 @@
 #include "touch.h"
 
 /* The word a program asked to show its tags hears on (boxos_decks.h,
- * STORAGE_ASK_TO_SEE): its payload the asked program's file, nothing of who
- * asked — every program listening hears it, and the one asked knows itself. */
+ * STORAGE_ASK_TO_SEE): its payload a file of the asked program, nothing of
+ * who asked — every program listening hears it, and the one asked knows
+ * itself by the file it was started from. */
 static const char s_tags_asked[] = "tags-asked";
 
-/* A note was left for `owner`: said on the word, once. */
+/* A note was left for `owner`: said on the word once for every file of it,
+ * whichever of them a running copy of it was started from — none said when
+ * the heap gives no room to list them, the note standing all the same. */
 static void StorageAskSaid(uint64_t owner, const OpContext *ctx)
 {
     TouchTag full, bare;
-    if (TouchTagResolve(s_tags_asked, sizeof(s_tags_asked) - 1u, &full, &bare) == OK)
-        TouchPublishPair(full, bare, &owner, sizeof(owner), ctx && ctx->proc ? ctx->proc->pid : 0,
+    if (TouchTagResolve(s_tags_asked, sizeof(s_tags_asked) - 1u, &full, &bare) != OK)
+        return;
+    uint32_t  want  = TagFSProgramFiles(owner, NULL, 0);
+    uint64_t *files = want ? kmalloc(sizeof(uint64_t) * want) : NULL;
+    uint32_t  n     = files ? TagFSProgramFiles(owner, files, want) : 0;
+    for (uint32_t i = 0; i < n && i < want; i++)
+        TouchPublishPair(full, bare, &files[i], sizeof(files[i]), ctx && ctx->proc ? ctx->proc->pid : 0,
                          TOUCH_FLAG_TAGFS);
+    kfree(files);
 }
 
 /* STORAGE_TAG_SHOW  params: [u8 act][u64 program] — the caller's program
@@ -44,7 +54,7 @@ int ObjTagShow(const ManifestOp *op, Crate *crates, uint16_t crate_count, const 
     (void)crate_count;
     if (op->param_size < 9) return ERR_INVALID_ARGUMENT;
     uint8_t  act     = op->params[0];
-    uint64_t program = param_u64(op, 1);
+    uint64_t program = StorageProgramNamed(param_u64(op, 1));
     uint64_t self    = StorageReader(ctx);
     if (act != STORAGE_SHOW_TO && act != STORAGE_HIDE_FROM && act != STORAGE_ASK_TO_SEE)
         return ERR_INVALID_ARGUMENT;
@@ -72,7 +82,7 @@ int ObjTagShown(const ManifestOp *op, Crate *crates, uint16_t crate_count, const
     if (out->capacity < 8) return ERR_BUFFER_TOO_SMALL;
 
     uint8_t  which   = op->params[0];
-    uint64_t program = param_u64(op, 1);
+    uint64_t program = StorageProgramNamed(param_u64(op, 1));
     uint64_t from    = op->param_size >= 25 ? param_u64(op, 9) : 0;
     uint64_t self    = StorageReader(ctx);
     if (which != STORAGE_SHOWN_TO_ME && which != STORAGE_SHOWN_BY && which != STORAGE_ASKS_TO_SEE)
@@ -91,11 +101,7 @@ int ObjTagShown(const ManifestOp *op, Crate *crates, uint16_t crate_count, const
         /* A program's own list, whole: from `from` on, as the others page. */
         uint64_t *all   = NULL;
         uint32_t  count = 0;
-        rc = TagFSShownBy(program, NULL, 0, &count);
-        if (rc == OK && count && !(all = kmalloc(sizeof(uint64_t) * count)))
-            rc = ERR_NO_MEMORY;
-        if (rc == OK && count)
-            rc = TagFSShownBy(program, all, count, &count);
+        rc = TagFSShownBy(program, &all, &count);
         uint32_t at = 0;
         while (rc == OK && at < count && all[at] < from)
             at++;

@@ -114,7 +114,7 @@ def Shaped(fid, base, size, mtime_ns, splices, digests, slip=None):
 def Labeled(fid, base, name=None, flags=None, add=(), drop=(), keep=None, shown=None, head=None, passport=None):
     """keep is the deletion's one verb: the nanoseconds a file is kept until, or 0 to bring it back; shown
     the one verb of the programs a program's file shows its tags to, the whole list anew ([] for none);
-    passport the one verb of the passport of the signed program the file holds, laid anew."""
+    passport the one verb of the passport of the signed program the file holds, laid anew — 0 takes it off."""
     V = VarintPut
     what = (LABEL_NAME if name is not None else 0) | (LABEL_FLAGS if flags is not None else 0) | \
         (LABEL_TAGS if add or drop else 0) | (LABEL_KEEP if keep is not None else 0) | \
@@ -143,7 +143,7 @@ def Quitclaim(fid, base):
 
 
 def Coined(tid, key=b"", value=None, retired=False, owner=0):
-    """A tag given its id; `owner` the fid of the program whose own tag it is,
+    """A tag given its id; `owner` the program whose own tag it is — its passport, or its file's fid —,
     0 for the person's."""
     flags = (TAG_RETIRED if retired else
              (TAG_HAS_VALUE if value is not None else 0) | (TAG_OWNED if owner else 0))
@@ -261,8 +261,8 @@ def RecordDecode(kind, body, seq):
         d["head"] = tally.HeadTake(c, ondisk.HEAD_MOST) if d["what"] & LABEL_HEAD else None
         if d["what"] & LABEL_HEAD and d["head"] is None:
             raise Short("its Labeled HEAD carries more first bytes than a card keeps")
-        d["passport"] = tally.PassportTake(c) if d["what"] & LABEL_PASSPORT else 0
-        if d["passport"] is None:
+        d["passport"] = c.V() if d["what"] & LABEL_PASSPORT else 0
+        if d["passport"] and not d["passport"] & ondisk.PASSPORT_BIT:
             raise Short("its Labeled PASSPORT carries no passport — a number without the bit every passport carries")
         if d["flags"] and (d["flags"][0] | d["flags"][1]) & ondisk.FILE_PASSPORT:
             raise Short("its Labeled names the passport bit in FLAGS — the bit is PASSPORT's to put on")

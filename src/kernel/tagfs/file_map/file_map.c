@@ -52,6 +52,8 @@ struct FileMap {
     FileMapMarked slipped;
     /* The files of programs that show their tags (FileMapShowing). */
     FileMapMarked showing;
+    /* The files whose record keeps a passport (FileMapProgramFiles). */
+    FileMapMarked carrying;
     /* The files by the word their name is, or its stem is (name_index.h):
      * put and let go with the records, under the lock. */
     NameIndex    names;
@@ -487,11 +489,12 @@ static uint32_t MarkedPage(const FileMapMarked* l, uint64_t from, uint64_t* out,
 }
 
 /* The map's lists as `fid`'s `was` becomes `now` (NULL for none): the files
- * with Slips, the files that show their tags. */
+ * with Slips, the files that show their tags, the files that keep a passport. */
 static void MapMarksMet(FileMap* m, uint64_t fid, const FileRecord* was, const FileRecord* now)
 {
     MarkedMet(&m->slipped, fid, was && was->slip, now && now->slip);
     MarkedMet(&m->showing, fid, was && was->shown_count, now && now->shown_count);
+    MarkedMet(&m->carrying, fid, was && was->passport, now && now->passport);
 }
 
 static void MapLetGoEntry(FileMap* m, uint64_t key, FileMapEntry* e, FileMapLeftover* left)
@@ -651,6 +654,7 @@ void FileMapDestroy(FileMap* map)
         MapFreeNode(map->root);
     kfree(map->slipped.fid);
     kfree(map->showing.fid);
+    kfree(map->carrying.fid);
     NameIndexClose(&map->names);
     kfree(map);
 }
@@ -750,6 +754,52 @@ uint32_t FileMapStartingWith(FileMap* map, const uint8_t* bytes, uint32_t length
         }
     }
     TagFSLockDrop(&map->lock);
+    return n;
+}
+
+/* One file met by FileMapProgramFiles: counted, written while there is room, and
+ * the card it names taken — the least live one, else the least kept deleted. */
+static void CarrierMet(uint64_t fid, const FileRecord* rec, uint64_t* out, uint32_t room, uint32_t* n,
+                       uint64_t* card, bool* card_live)
+{
+    bool live = !(rec->flags & TAGFS_FILE_DELETED);
+    if (*n < room)
+        out[*n] = fid;
+    (*n)++;
+    if (!*card || (live && !*card_live)) {
+        *card      = fid;
+        *card_live = live;
+    }
+}
+
+uint32_t FileMapProgramFiles(FileMap* map, uint64_t owner, uint64_t* out, uint32_t room, uint64_t* card)
+{
+    uint32_t n    = 0;
+    uint64_t best = 0;
+    bool     live = false;
+    TagFSLockTake(&map->lock);
+    if (!(owner & TAGFS_PASSPORT_BIT)) {
+        const FileMapEntry* e = owner ? MapFind(map, owner) : NULL;
+        if (e && e->record && !e->record->passport)
+            CarrierMet(owner, e->record, out, room, &n, &best, &live);
+    } else if (!map->carrying.short_of_room) {
+        for (uint32_t at = 0; at < map->carrying.count; at++) {
+            const FileMapEntry* e = MapFind(map, map->carrying.fid[at]);
+            if (e && e->record && e->record->passport == owner)
+                CarrierMet(map->carrying.fid[at], e->record, out, room, &n, &best, &live);
+        }
+    } else {
+        uint32_t pos = 0;
+        for (FileMapNode* leaf = MapFrom(map, 1, &pos); leaf; leaf = leaf->next, pos = 0)
+            for (; pos < leaf->count; pos++) {
+                const FileRecord* rec = leaf->u.entry[pos].record;
+                if (rec && rec->passport == owner)
+                    CarrierMet(leaf->key[pos], rec, out, room, &n, &best, &live);
+            }
+    }
+    TagFSLockDrop(&map->lock);
+    if (card)
+        *card = best;
     return n;
 }
 

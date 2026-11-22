@@ -579,8 +579,9 @@ out:
 }
 
 /* The passport of the signed program a file holds: a Born and a header carry
- * it last, a Labeled PASSPORT lays it anew, and one without bit 63 — a
- * number that could be a file's id — does not read anywhere. */
+ * it last, a Labeled PASSPORT lays it anew or — 0 — takes it off, and one
+ * without bit 63 — a number that could be a file's id — does not read
+ * anywhere. */
 static TestResult TestRibbonPassport(void)
 {
     static uint8_t        body[96], head[96], tags[1];
@@ -600,6 +601,10 @@ static TestResult TestRibbonPassport(void)
     TEST_ASSERT(RibbonLabeledGet(body, len, &got, &used) == TALLY_BODY_KNOWN && got.passport == game && used == len,
                 "a Labeled PASSPORT reads its passport");
     TEST_ASSERT_EQ(RibbonLabeledGet(body, len - 1u, &got, &used), TALLY_BODY_BROKEN, "PASSPORT cut short does not read");
+    put.passport = 0;
+    len = RibbonLabeledBodyPut(body, &put);
+    TEST_ASSERT(RibbonLabeledGet(body, len, &got, &used) == TALLY_BODY_KNOWN && got.passport == 0,
+                "one of 0 reads: it takes the passport off");
     put.passport = 0x123456789Aull;
     len = RibbonLabeledBodyPut(body, &put);
     TEST_ASSERT_EQ(RibbonLabeledGet(body, len, &got, &used), TALLY_BODY_BROKEN, "one without bit 63 does not");

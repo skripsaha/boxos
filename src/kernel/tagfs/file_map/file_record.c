@@ -62,6 +62,8 @@ static uint32_t FlagsOfFields(uint32_t flags, uint64_t made_by, uint32_t shown_c
     return head_len ? flags | TAGFS_FILE_HEAD : flags & ~(uint32_t)TAGFS_FILE_HEAD;
 }
 
+STATIC_ASSERT(TAGFS_PASSPORT_BIT == TALLY_PASSPORT_BIT, "a passport carries the bit the book reads one by");
+
 void FileRecordPassportSet(FileRecord* rec, uint64_t passport)
 {
     rec->passport = passport;

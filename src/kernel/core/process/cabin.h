@@ -206,6 +206,12 @@ typedef struct cabin_t
      * started from a medium since taken out must not be taken for whatever
      * file of another volume has the same id. Read it by CabinProgramVolume. */
     uint8_t  program_volume[16];
+    /* Who the program is, as its own tags are owned (TagOwner): the passport
+     * its box's signature gives it when the signature holds (box_trust.h) —
+     * the same program in every copy and version of it — and otherwise its
+     * file, program_fid. Written with program_fid, never changed after. Read
+     * it by CabinProgramOwner. */
+    uint64_t program_owner;
 } cabin_t;
 
 _Static_assert(sizeof(cabin_t) < 4096, "cabin_t must fit in one page");
@@ -281,6 +287,10 @@ bool CabinProgram(const cabin_t *cabin, uint32_t *pid, uint32_t *generation);
  * the program is where a file's maker, or a file's own tags, are in question.
  * 0 for a program with no file (started from bytes), and for no cabin. */
 uint64_t CabinProgramFile(const cabin_t *cabin);
+
+/* Who the program of `cabin` is (cabin_t.program_owner): its passport, or its
+ * file; 0 for a program of no file and no signature, or no cabin. */
+uint64_t CabinProgramOwner(const cabin_t *cabin);
 
 /* The uuid of the volume that file is on — 16 bytes, all zero for a program
  * with no file — or NULL for no cabin. */

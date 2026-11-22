@@ -3,6 +3,7 @@
 
 #include "ktypes.h"
 #include "box_reader.h"
+#include "tagfs_constants.h"   /* TAGFS_PASSPORT_BIT */
 
 /*
  * A box's signature, checked (box_format.h, the part `signature`): whether it
@@ -18,16 +19,15 @@
  * carries no signature, still starts: as a guest, given what every program
  * has and nothing its box asks for, and never the system's.
  *
- * A passport has bit 63 set, so it is never a file's id (which a volume gives
- * from 1 up): the owner of a guest's own tags is its file, a signed program's
- * its passport.
+ * A passport has bit 63 set (TAGFS_PASSPORT_BIT), so it is never a file's id
+ * (which a volume gives from 1 up): the owner of a guest's own tags is its
+ * file, a signed program's its passport.
  */
-#define BOX_PASSPORT_BIT  (1ull << 63)
 
 typedef struct {
     bool     Holds;      /* the signature is the author's over this box */
     bool     Trusted;    /* ... and the author is one this system trusts */
-    uint64_t Passport;   /* the author and the name, BOX_PASSPORT_BIT set; 0 when it does not hold */
+    uint64_t Passport;   /* the author and the name, TAGFS_PASSPORT_BIT set; 0 when it does not hold */
 } BoxSigned;
 
 /* The signature read from a box (BoxSignatureRead), checked against the

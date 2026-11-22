@@ -202,6 +202,11 @@ uint64_t CabinProgramFile(const cabin_t *cabin)
     return cabin ? cabin->program_fid : 0;
 }
 
+uint64_t CabinProgramOwner(const cabin_t *cabin)
+{
+    return cabin ? cabin->program_owner : 0;
+}
+
 const uint8_t *CabinProgramVolume(const cabin_t *cabin)
 {
     return cabin ? cabin->program_volume : NULL;

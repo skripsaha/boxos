@@ -2674,16 +2674,62 @@ size_t tagfs_tag_text(uint32_t tag_id, char *out, size_t out_size)
     return len;
 }
 
-bool TagFSHoldsProgram(const uint8_t volume[16], uint64_t fid)
+bool TagFSHoldsProgram(const uint8_t volume[16], uint64_t owner)
 {
-    if (!volume || fid == 0 || !tagfs_enter())
+    if (!volume || owner == 0 || !tagfs_enter())
         return false;
-    bool        here = memcmp(volume, g_state.uuid, sizeof(g_state.uuid)) == 0;
-    FileRecord* rec  = here ? FileMapRecordHold(g_state.files, fid, NULL) : NULL;
-    if (rec)
-        FileRecordRelease(rec);
+    bool here  = (owner & TAGFS_PASSPORT_BIT) || memcmp(volume, g_state.uuid, sizeof(g_state.uuid)) == 0;
+    bool holds = here && FileMapProgramFiles(g_state.files, owner, NULL, 0, NULL) > 0;
     tagfs_leave();
-    return rec != NULL;
+    return holds;
+}
+
+uint64_t TagFSProgramOf(uint64_t fid)
+{
+    if (fid == 0 || !tagfs_enter())
+        return 0;
+    FileRecord* rec   = FileMapRecordHold(g_state.files, fid, NULL);
+    uint64_t    owner = rec ? (rec->passport ? rec->passport : fid) : 0;
+    FileRecordRelease(rec);
+    tagfs_leave();
+    return owner;
+}
+
+uint64_t TagFSProgramCard(uint64_t owner)
+{
+    uint64_t card = 0;
+    if (owner && tagfs_enter()) {
+        FileMapProgramFiles(g_state.files, owner, NULL, 0, &card);
+        tagfs_leave();
+    }
+    return card;
+}
+
+uint64_t TagOwnerWord(TagOwner owner)
+{
+    if (owner.kind != TAG_OWNER_PROGRAM)
+        return 0;
+    uint64_t card = TagFSProgramCard(owner.id);
+    return card ? card : owner.id;
+}
+
+uint32_t TagFSProgramFiles(uint64_t owner, uint64_t* out, uint32_t room)
+{
+    if ((room && !out) || !tagfs_enter())
+        return 0;
+    uint32_t n = FileMapProgramFiles(g_state.files, owner, out, room, NULL);
+    tagfs_leave();
+    return n;
+}
+
+error_t TagFSPassportLay(uint64_t fid, uint64_t passport)
+{
+    if (!tagfs_enter())
+        return ERR_TAGFS_NOT_INITIALIZED;
+    InkReceipt receipt;
+    error_t    rc = InkPassport(fid, passport, &receipt);
+    tagfs_leave();
+    return rc;
 }
 
 bool TagFSTagIsPersons(uint32_t tag_id)

@@ -99,8 +99,10 @@
  * person labels files with, and the language Touch, the processes and the Use
  * Context speak — and carries no owner at all, so a volume of none but the
  * person's tags is written byte for byte as before tags had owners. A program
- * is named by the file it is started from (its fid): the one name of it the
- * volume can vouch for, which no other program can take. */
+ * is its passport when it is signed — the same program in every file of it,
+ * bit 63 set (TALLY_PASSPORT_BIT) — and otherwise the file it is started from
+ * (its fid): the one name of it the volume can vouch for, which no other
+ * program can take. */
 #define TALLY_OWNER_PROGRAM  1u
 
 /* A Sheet's room for a node's stream: its eight sectors' payloads. */
@@ -797,7 +799,7 @@ static inline uint32_t TallyParcelPut(uint8_t *out, const TallyRun *runs, uint32
 typedef struct {
     uint64_t       flags;
     uint64_t       owner_kind;   /* with OWNED: TALLY_OWNER_PROGRAM */
-    uint64_t       owner_id;     /* with OWNED: the fid of the program's file, never 0 */
+    uint64_t       owner_id;     /* with OWNED: the program's passport or file's fid, never 0 */
     const uint8_t *key;
     uint64_t       key_len;
     const uint8_t *value;

@@ -27,17 +27,24 @@
 #include "use_context.h"   /* the person's tags — folded into a call in them */
 #include "ink.h"           /* InkBookRefuses — a create a book refuses interns nothing */
 #include "process.h"
-#include "cabin.h"         /* CabinProgramFile — who the program is */
+#include "cabin.h"         /* CabinProgramOwner — who the program is */
 #include "settle_ops.h"    /* SettleOpForRoom — room on the ribbon waited for */
 
-/* The caller's program as the volume mounted knows it: its file — or 0 for a
- * program started from bytes held in memory, from another volume, or whose
- * file is gone, which no other program can show its tags to. */
+/* The caller's program as the volume mounted knows it: who it is — or 0 for
+ * a program with no file of it on the volume (started from bytes held in
+ * memory and signed by none, from another volume, or whose files are gone),
+ * which no other program can show its tags to. */
 uint64_t StorageReader(const OpContext *ctx)
 {
     const cabin_t *cabin = ctx && ctx->proc ? ctx->proc->cabin : NULL;
-    uint64_t       fid   = CabinProgramFile(cabin);
-    return fid && TagFSHoldsProgram(CabinProgramVolume(cabin), fid) ? fid : 0;
+    uint64_t       owner = CabinProgramOwner(cabin);
+    return owner && TagFSHoldsProgram(CabinProgramVolume(cabin), owner) ? owner : 0;
+}
+
+uint64_t StorageProgramNamed(uint64_t program)
+{
+    uint64_t owner = program ? TagFSProgramOf(program) : 0;
+    return owner ? owner : program;
 }
 
 /* Whether the caller's box asked to see the person's tags — `change` to
@@ -62,7 +69,8 @@ bool StoragePersonSays(const OpContext *ctx, bool change)
  * some — asks for tags, sets some aside, puts or takes one, shows a file's,
  * lists them, or folds in the Use Context — so a question of no tags, a name
  * looked up alone, asks nothing of anybody. *width the bytes the whose took:
- * its byte, and a program's file id after it. *all for STORAGE_TAGS_ALL,
+ * its byte, and a program's file id after it — the program it names that
+ * file holds (StorageProgramNamed). *all for STORAGE_TAGS_ALL,
  * which a call takes only when `all_ok` — it shows tags, it never asks by
  * them nor changes them.
  */
@@ -75,7 +83,7 @@ static error_t StorageWhose(const ManifestOp *op, size_t at, const OpContext *ct
         return ERR_INVALID_ARGUMENT;
     switch (op->params[at]) {
     case STORAGE_TAGS_MINE:
-        *out = TagOwnerProgram(CabinProgramFile(ctx && ctx->proc ? ctx->proc->cabin : NULL));
+        *out = TagOwnerProgram(CabinProgramOwner(ctx && ctx->proc ? ctx->proc->cabin : NULL));
         return OK;
     case STORAGE_TAGS_PERSON:
         *out = TagOwnerPerson();
@@ -84,7 +92,7 @@ static error_t StorageWhose(const ManifestOp *op, size_t at, const OpContext *ct
         uint64_t program = op->param_size >= at + 9u ? param_u64(op, at + 1u) : 0;
         if (!program)
             return ERR_INVALID_ARGUMENT;
-        *out   = TagOwnerProgram(program);
+        *out   = TagOwnerProgram(StorageProgramNamed(program));
         *width = 9;
         return OK;
     }
@@ -101,13 +109,13 @@ static error_t StorageWhose(const ManifestOp *op, size_t at, const OpContext *ct
  * Whether the caller may speak `owner`'s tags so. One rule for every
  * program, none let in by its name.
  *
- * Its own: named by the file it was started from (CabinProgramFile). To be
- * seen they ask nothing — a program with none, started from bytes held in
- * memory, is answered that it has none, which is so. To be put on or taken
- * off they ask that the file be on the volume the program was started from —
- * one started from memory has no file to name a tag by, and one whose file is
- * gone has no tags left to change (the volume retires them, tagfs/retire):
- * ERR_TAGFS_NO_OWN_TAGS. Another program's: seen by one it shows them to
+ * Its own: who it is (CabinProgramOwner) — its passport, or the file it was
+ * started from. To be seen they ask nothing — a program with none, started
+ * from bytes held in memory, is answered that it has none, which is so. To be
+ * put on or taken off they ask that a file of it be on the volume
+ * (TagFSHoldsProgram) — one started from memory and signed by none has no
+ * file to name a tag by, and one whose files are gone has no tags left to
+ * change (the volume retires them, tagfs/retire): ERR_TAGFS_NO_OWN_TAGS. Another program's: seen by one it shows them to
  * (TagFSShows) and by the person's eyes, taken off a file by the person's
  * hands, put on by nobody but that program. The person's: seen by the
  * person's eyes, changed by the person's hands (StoragePersonSays):
@@ -119,7 +127,7 @@ error_t StorageMaySpeak(const OpContext *ctx, TagOwner owner, StorageSpeech spee
     const cabin_t *cabin = ctx && ctx->proc ? ctx->proc->cabin : NULL;
     if (owner.kind == TAG_OWNER_PERSON)
         return StoragePersonSays(ctx, speech != STORAGE_SEE) ? OK : ERR_ACCESS_DENIED;
-    uint64_t self = CabinProgramFile(cabin);
+    uint64_t self = CabinProgramOwner(cabin);
     if (owner.id == 0 || owner.id == self)
         return speech == STORAGE_SEE || (owner.id && TagFSHoldsProgram(CabinProgramVolume(cabin), owner.id))
                    ? OK

@@ -594,6 +594,16 @@ bool BookFileLocked(uint64_t fid)
     return !live && BookRotLocks(fid);
 }
 
+bool BookAnyLocked(void)
+{
+    if (g_book.nrot)
+        return true;
+    for (uint32_t i = 0; i < g_book.nlocked; i++)
+        if (!EscheatLost(g_book.locked[i]))
+            return true;
+    return false;
+}
+
 /* Whether a rotten range of FILES holds `fid`. */
 static bool BookInRot(uint64_t fid)
 {

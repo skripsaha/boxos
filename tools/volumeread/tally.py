@@ -44,7 +44,7 @@ RUN_HOLE, RUN_EXT = 1, 2
 EXT_CODEC, EXT_SHARED, EXT_COPY = 1, 2, 3
 
 TAG_HAS_VALUE, TAG_RETIRED, TAG_OWNED = 1, 2, 4    # Coined / TAGS flags (§2.8, §6.4); OWNED: a program's own
-OWNER_PROGRAM = 1                    # volume_tally.h TALLY_OWNER_PROGRAM: an OWNED tag's owner, the program's fid
+OWNER_PROGRAM = 1                    # volume_tally.h TALLY_OWNER_PROGRAM: an OWNED tag's owner, its passport or fid
 KERNEL_TAG_END = 1 << 31             # §6.4: the kernel gives ids below bit 31 (TAGFS_MAX_TAG_ID 0x7FFFFFFE)
 TAG_KEY_WIDTH = 255                  # tag_spelling.h:33 TAG_KEY_WIDTH
 TAG_TEXT_ROOM = 4074                 # tag_spelling.h:39 TAG_TEXT_WIDTH less the ':' — key and value
@@ -139,8 +139,8 @@ class FileState:
 
 
 class TagState:
-    """A tag as the book names it. `owner` is the fid of the program whose own
-    tag it is (OWNED), 0 for the person's — the tags people label files with."""
+    """A tag as the book names it. `owner` is the program whose own tag it is (OWNED) — its passport,
+    bit 63 set, or its file's fid —, 0 for the person's — the tags people label files with."""
     __slots__ = ("flags", "key", "value", "owner")
 
     def __init__(self, flags, key, value, owner=0):

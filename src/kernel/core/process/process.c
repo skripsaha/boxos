@@ -1189,9 +1189,16 @@ error_t process_load_binary(process_t *proc, const ImageSource *source, const ch
     ci->luggage_addr     = 0;
     ci->luggage_length   = 0;
     ci->raised           = 0;
-    proc->cabin->program_fid = source->FileId;
+    proc->cabin->program_fid   = source->FileId;
+    proc->cabin->program_owner = loaded.Passport ? loaded.Passport : source->FileId;
     if (source->FileId)
         memcpy(proc->cabin->program_volume, tagfs_get_state()->uuid, sizeof(proc->cabin->program_volume));
+    /* The card of the program's file keeps who the program is: laid anew when
+     * it is another — a program written over with another, signed or not —, as
+     * far as the volume takes a change now; one it does not take leaves the
+     * program none of its own tags until it does (TagFSHoldsProgram). */
+    if (source->FileId)
+        (void)TagFSPassportLay(source->FileId, loaded.Passport);
     ci->program_file     = source->FileId;
     ci->image_base       = loaded.ImageBase;
     ci->parts_addr       = loaded.PartsVa;

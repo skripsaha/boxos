@@ -44,9 +44,9 @@ void     InkDataNeedRaiseLocked(uint64_t need);
 error_t  InkVolumeTakes(void);
 error_t  InkGuardSays(uint64_t fid, bool boot, uint32_t flags, InkWarrant warrant);
 
-/* What a change of a file's fields does to its tags, and the programs it
- * shows its tags to after it (ink.c): the record's own unless the change is
- * of them (InkShown). */
+/* What a change of a file's fields does to its tags, the programs it shows
+ * its tags to after it and its passport (ink.c): the record's own unless the
+ * change is of them (InkShown, InkPassport). */
 typedef struct {
     uint32_t*       tags;
     uint32_t        count;
@@ -55,6 +55,7 @@ typedef struct {
     bool            adds;         /* `add` goes onto the index */
     const uint64_t* shown;
     uint32_t        shown_count;
+    uint64_t        passport;
 } InkFieldsPlan;
 
 /* The room a new file's insert needs, taken before the lock. */

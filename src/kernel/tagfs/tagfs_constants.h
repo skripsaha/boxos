@@ -119,6 +119,9 @@
  * is what puts the passport after the head in the Tally's header and in the
  * ribbon's Born, and what the ribbon's Labeled PASSPORT leaves. */
 #define TAGFS_FILE_PASSPORT         (1 << 9)
+/* Every passport carries bit 63, so no passport is a file's id (which a
+ * volume gives from 1 up) — the book's TALLY_PASSPORT_BIT. */
+#define TAGFS_PASSPORT_BIT          (1ull << 63)
 
 // Handle flags
 #define TAGFS_HANDLE_READ           (1 << 0)

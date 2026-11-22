@@ -88,7 +88,11 @@ def LastBlock(fs):
 
 def _Whose(ts):
     """Whose a tag is, in the words a refusal says it in."""
-    return "program fid %u" % ts.owner if ts.owner else "the person"
+    if not ts.owner:
+        return "the person"
+    if ts.owner & ondisk.PASSPORT_BIT:
+        return "the program of passport %016x" % ts.owner
+    return "program fid %u" % ts.owner
 
 
 def _Reach(r):
@@ -787,7 +791,7 @@ class BookMount:
             fs.flags = fs.flags | ondisk.FILE_HEAD if d["head"] else fs.flags & ~ondisk.FILE_HEAD
         if d["what"] & stitch.LABEL_PASSPORT:
             fs.passport = d["passport"]
-            fs.flags |= ondisk.FILE_PASSPORT
+            fs.flags = fs.flags | ondisk.FILE_PASSPORT if d["passport"] else fs.flags & ~ondisk.FILE_PASSPORT
         if d["what"] & LABEL_TAGS:
             worn = set(fs.tags)
             if any(t in worn for t in d["add"]) or any(t not in worn for t in d["drop"]):

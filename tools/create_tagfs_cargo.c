@@ -13,7 +13,7 @@
 #include "tagfs_reserved.h"      /* the reserved keys, the last id, the widths: the kernel's (-I src/include) */
 #include <stdbool.h>
 #include "box_reader.h"          /* the box a program is, read for its role and its signature (-I src/include) */
-#include "box/sha256.h"           /* the passport of a signed program, made as the kernel makes it */
+#include "box_host.h"            /* BoxLib's SHA-256 on the build machine: the passport, made as the kernel makes it */
 
 TagEntry* g_tags       = NULL;
 uint32_t  g_tag_count  = 0;
@@ -274,15 +274,21 @@ int PassportOf(const char* filename, uint64_t* passport) {
     if (rc != 0) {
         fprintf(stderr, "%s: its signature is not laid out as a signature is\n", filename);
     } else if (signature.How == BOX_SIGN_RSA2048_SHA256) {
-        Sha256  state;
-        uint8_t digest[SHA256_BYTES];
-        sha256_begin(&state);
-        sha256_add(&state, signature.Key, signature.KeyBytes);
-        sha256_add(&state, signature.Name, signature.NameLength);
-        sha256_end(&state, digest);
-        for (unsigned i = 0; i < 8; i++)
-            *passport = *passport << 8 | digest[i];
-        *passport |= TALLY_PASSPORT_BIT;
+        size_t   both   = (size_t)signature.KeyBytes + signature.NameLength;
+        uint8_t *joined = malloc(both);
+        uint8_t  digest[32];
+        if (!joined) {
+            fprintf(stderr, "%s: no memory for its passport\n", filename);
+            rc = -1;
+        } else {
+            memcpy(joined, signature.Key, signature.KeyBytes);
+            memcpy(joined + signature.KeyBytes, signature.Name, signature.NameLength);
+            sha256(joined, both, digest);
+            free(joined);
+            for (unsigned i = 0; i < 8; i++)
+                *passport = *passport << 8 | digest[i];
+            *passport |= TALLY_PASSPORT_BIT;
+        }
     }
     free(bytes);
     return rc;

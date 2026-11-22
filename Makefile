@@ -1103,10 +1103,10 @@ $(TAGFS_TOOL): tools/create_tagfs.c tools/create_tagfs_ground.c tools/create_tag
                $(SRCDIR)/include/volume_digest.h \
                $(SRCDIR)/include/deed_pen.h $(SRCDIR)/include/buildplate_format.h \
                $(SRCDIR)/include/boxos_magic.h \
-               $(SRCDIR)/include/box_format.h $(SRCDIR)/include/box_reader.h \
+               $(SRCDIR)/include/box_format.h $(SRCDIR)/include/box_reader.h tools/box_host.h \
                $(PACK_SHA256) $(TAGFS_OS_SIGNATURE) | $(BUILDDIR)
 	@echo "Compiling TagFS tool for $(UNAME_S) ($(UNAME_M))..."
-	@$(CC_HOST) -I$(SRCDIR)/include -I$(USERSPACE_DIR)/boxlib/include -o $@ $(filter %.c,$^) $(PACK_SHA256) \
+	@$(CC_HOST) -I$(SRCDIR)/include -o $@ $(filter %.c,$^) $(PACK_SHA256) \
 	    -Wall -Wextra
 	@echo "TagFS tool built: $@"
 

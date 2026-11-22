@@ -16,13 +16,16 @@ extern "C" {
  *                other program meets — a game's `save` is never the person's
  *                `save`. Every program started from a file has them without
  *                asking; one started from bytes held in memory has none
- *                (-ERR_TAGFS_NO_OWN_TAGS).
+ *                (-ERR_TAGFS_NO_OWN_TAGS). A signed program is one program in
+ *                every file of it — its author and its name, as its box's
+ *                signature proves them —, so a copy and a new version of it
+ *                have its tags, which leave with the last file of it.
  *   PERSON_TAGS  the person's: the labels the person finds files by, and the
  *                words of the Use Context. A program sees them only when its
  *                box asks `see-tags`, and changes them only when it asks
  *                `change-tags` (-ERR_ACCESS_DENIED otherwise).
  *   PROGRAM_TAGS(program)
- *                another program's own, the program named by its file: seen
+ *                another program's own, the program named by a file of it: seen
  *                when it shows them to this one (show_tags_to below) or when
  *                this one's box asks `see-tags` or `change-tags` — the person
  *                sees every tag on the person's files —, taken off a file
@@ -269,8 +272,12 @@ int tag_list_everywhere(TagsOf whose, const char *without, TagListed **out, size
  * Touch word "tags-asked" says so, its payload the file_id_t of the program
  * asked and nothing of who asked, so a program that wants to hear its asks
  * claims the word (touch_claim) and reads asks_to_see_tags when its own id is
- * said. The list is the card of this program's own file: one started from
- * bytes has none (-ERR_TAGFS_NO_OWN_TAGS); a program the volume has not is
+ * said: the word is said once for every file of the program asked, so each
+ * running copy hears the file it was started from (cabin_info()->
+ * program_file). Every list names a program by one file of it — a signed
+ * program in many files by the same one. The list is the program's, kept on
+ * the cards of its files: one started from bytes has none
+ * (-ERR_TAGFS_NO_OWN_TAGS); a program the volume has not is
  * -ERR_FILE_NOT_FOUND, one shown or asked to show to itself
  * -ERR_INVALID_ARGUMENT. 0, or a negative -error_t. A program that left is
  * taken off every list by the volume.
