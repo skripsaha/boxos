@@ -72,7 +72,7 @@ UTILS = create show files tag untag name trash delete assemble \
         timezone logsave lastsaid journey usetest faretest luggagetest rollcall handset headcount \
         playtime lavalamp finish taskboard memmap hexer stringview \
         calculate difference copy typer flame checksum passport aquarium \
-        nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits bloom spell ripple \
+        nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits bloom spell ripple flappybird \
         edit seek retag read inside settings autostart scratchpad garden gardener random sand coinflip dice casino seabattle whale hangman duppo \
         glyphs drawcheck itemcheck benchmark
 
@@ -141,8 +141,16 @@ playtime.elf: $(BOXLIB_START) playtime.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) playtime.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
-lavalamp.elf: $(BOXLIB_START) lavalamp.o $(PAINTER) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
-	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) lavalamp.o $(PAINTER) $(BOXCXX) $(BOXLIB) -lgcc)
+# The lava lamp is C++ in parts of its own directory: the lamp in the screen's
+# pixels (painter::gui) or in the console's cells (painter::tui). The field and
+# the colours are worked out for every pixel of every frame: built -O2.
+LAVALAMP_DIR  = lavalamp
+LAVALAMP_OBJS = $(addprefix $(LAVALAMP_DIR)/,lavalamp.o composition.o look.o lamp.o field.o shades.o tuning.o pixels.o panel.o cells.o)
+
+$(addprefix $(LAVALAMP_DIR)/,lamp.o field.o shades.o pixels.o cells.o): CXXFLAGS += -O2
+
+lavalamp.elf: $(BOXLIB_START) $(LAVALAMP_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(LAVALAMP_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
 	@x86_64-elf-objcopy --strip-all $@
 
 # The zone database is C++, so `timezone` is. An explicit rule, which overrides
@@ -514,6 +522,16 @@ $(DUPPO_DIR)/logo.o $(DUPPO_DIR)/sampler.o $(DUPPO_DIR)/picture.o $(DUPPO_DIR)/p
 
 duppo.elf: $(BOXLIB_START) $(DUPPO_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(DUPPO_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
+
+# Flappybird is C++ in parts of its own directory: items the display moves
+# (painter::gui), the best score kept with keep.o.
+FLAPPYBIRD_DIR  = flappybird
+FLAPPYBIRD_OBJS = $(addprefix $(FLAPPYBIRD_DIR)/,flappybird.o game.o world.o scene.o skyline.o bird.o boards.o) keep.o
+
+$(FLAPPYBIRD_OBJS): CXXFLAGS += -I.
+
+flappybird.elf: $(BOXLIB_START) $(FLAPPYBIRD_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(FLAPPYBIRD_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
 
 # Hangman is C++ in parts of its own directory; it keeps its ledger with keep.o.
 HANGMAN_DIR  = hangman
