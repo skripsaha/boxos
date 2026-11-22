@@ -108,6 +108,18 @@ error_t InkUndone(uint64_t fid, InkReceipt* out);
  * go at its term (keep/keep.h): InkQuitclaim, as ever. */
 error_t InkKeep(uint64_t fid, uint64_t until, InkWarrant warrant, InkReceipt* out);
 
+/* The card of program file `fid` showing its tags to `reader` — a program's
+ * file, or 0 for every program — put in the list it shows them to (`show`) or
+ * taken out of it, by one Ink of its fields, its name, tags and term as they
+ * are (TAGFS_FILE_SHOWN as the list leaves it). A list is a rising one, each
+ * reader once. OK — and OK with no Ink for a call that changes nothing — or
+ * the refusal: ERR_FILE_NOT_FOUND (a file kept deleted shows to nobody new,
+ * though one is taken out of its list), the volume's, the ribbon's room
+ * (ERR_WOULD_BLOCK while it can come), ERR_NO_MEMORY. Who may ask it is the
+ * caller's to judge: the program itself, or the volume's duty for a reader
+ * that left (retire/retire.c). */
+error_t InkShown(uint64_t fid, uint64_t reader, bool show, InkReceipt* out);
+
 /* The `count` tags of `tags` taken off file `fid` — live or kept deleted — in
  * one Ink, those it wears; OK, and OK with no Ink for a file that wears none
  * of them, or the refusal: ERR_FILE_NOT_FOUND, the volume's, the ribbon's room

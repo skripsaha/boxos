@@ -105,6 +105,10 @@ uint32_t FileMapNamed(FileMap* map, const char* word, size_t length, uint64_t fr
  * every one of them (it had no room), and a walk asks every file. */
 uint32_t FileMapSlipped(FileMap* map, uint64_t from, uint64_t* out, uint32_t room);
 
+/* The same of the files of programs that show their tags to other programs
+ * (FileRecord.shown_to): the question every list of them asks first. */
+uint32_t FileMapShowing(FileMap* map, uint64_t from, uint64_t* out, uint32_t room);
+
 /* The files in the map, and the bytes of kernel heap it holds for them: its
  * nodes, its records and the table of its name index. */
 uint32_t FileMapCount(FileMap* map);

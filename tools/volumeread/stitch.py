@@ -30,7 +30,7 @@ KIND_NAMES = {STITCH_HEAD: "StitchHead", CLASP: "Clasp", UNDONE: "Undone", BORN:
 DATA_FLUSHED, CLEAN, MEDIUM_LIED = 1, 2, 4
 
 # Labeled.what (§2.8)
-LABEL_NAME, LABEL_FLAGS, LABEL_TAGS, LABEL_KEEP = 1, 2, 4, 8
+LABEL_NAME, LABEL_FLAGS, LABEL_TAGS, LABEL_KEEP, LABEL_SHOWN = 1, 2, 4, 8, 16
 
 # The longest stream of a stitch a reader holds: its offsets are 32 bits
 # (volume_ribbon.h RIBBON_STREAM_MOST).
@@ -84,13 +84,16 @@ def _Digests(digests):
     return b"".join(d.to_bytes(8, "little") for d in digests)
 
 
-def Born(fid, flags, size, created_ns, modified_ns, name, tags, runs, digests, slip=None, made_by=0):
-    """made_by is written after the slip when the flags carry FILE_MADE_BY, and only then."""
+def Born(fid, flags, size, created_ns, modified_ns, name, tags, runs, digests, slip=None, made_by=0, shown=()):
+    """made_by is written after the slip when the flags carry FILE_MADE_BY, and only then; the programs the
+    file shows its tags to after it when they carry FILE_SHOWN, and only then."""
     V = VarintPut
     body = (V(fid) + V(flags) + V(size) + V(created_ns) + V(Zigzag(modified_ns - created_ns)) +
             V(len(name)) + name + IdsPut(sorted(tags)) + V(len(runs)) + RunsPut(runs, 0, False)[0] +
             _Digests(digests) + _Slip(slip))
-    return Record(BORN, body + V(made_by) if flags & ondisk.FILE_MADE_BY else body)
+    if flags & ondisk.FILE_MADE_BY:
+        body += V(made_by)
+    return Record(BORN, body + IdsPut(sorted(shown)) if flags & ondisk.FILE_SHOWN else body)
 
 
 def Shaped(fid, base, size, mtime_ns, splices, digests, slip=None):
@@ -102,11 +105,13 @@ def Shaped(fid, base, size, mtime_ns, splices, digests, slip=None):
     return Record(SHAPED, b"".join(out) + _Digests(digests) + _Slip(slip))
 
 
-def Labeled(fid, base, name=None, flags=None, add=(), drop=(), keep=None):
-    """keep is the deletion's one verb: the nanoseconds a file is kept until, or 0 to bring it back."""
+def Labeled(fid, base, name=None, flags=None, add=(), drop=(), keep=None, shown=None):
+    """keep is the deletion's one verb: the nanoseconds a file is kept until, or 0 to bring it back; shown
+    the one verb of the programs a program's file shows its tags to, the whole list anew ([] for none)."""
     V = VarintPut
     what = (LABEL_NAME if name is not None else 0) | (LABEL_FLAGS if flags is not None else 0) | \
-        (LABEL_TAGS if add or drop else 0) | (LABEL_KEEP if keep is not None else 0)
+        (LABEL_TAGS if add or drop else 0) | (LABEL_KEEP if keep is not None else 0) | \
+        (LABEL_SHOWN if shown is not None else 0)
     out = V(fid) + V(base) + V(what)
     if name is not None:
         out += V(len(name)) + name
@@ -116,6 +121,8 @@ def Labeled(fid, base, name=None, flags=None, add=(), drop=(), keep=None):
         out += IdsPut(sorted(add)) + IdsPut(sorted(drop))
     if what & LABEL_KEEP:
         out += V(keep)
+    if what & LABEL_SHOWN:
+        out += IdsPut(sorted(shown))
     return Record(LABELED, out)
 
 
@@ -213,6 +220,9 @@ def RecordDecode(kind, body, seq):
         d["made_by"] = c.V() if d["flags"] & ondisk.FILE_MADE_BY else 0
         if d["flags"] & ondisk.FILE_MADE_BY and not d["made_by"]:
             raise Short("its Born is made by a program and names none")
+        d["shown"] = c.Ids() if d["flags"] & ondisk.FILE_SHOWN else []
+        if d["flags"] & ondisk.FILE_SHOWN and not d["shown"]:
+            raise Short("its Born shows its tags and names no program")
     elif kind == SHAPED:
         d.update(fid=c.V(), base=c.V(), size=c.V(), mtime_ns=c.V())
         splices, cursor = [], 0
@@ -229,6 +239,9 @@ def RecordDecode(kind, body, seq):
         d["flags"] = (c.V(), c.V()) if d["what"] & LABEL_FLAGS else None
         d["add"], d["drop"] = (c.Ids(), c.Ids()) if d["what"] & LABEL_TAGS else ([], [])
         d["keep"] = c.V() if d["what"] & LABEL_KEEP else None
+        d["shown"] = c.Ids() if d["what"] & LABEL_SHOWN else None
+        if d["flags"] and (d["flags"][0] | d["flags"][1]) & ondisk.FILE_SHOWN:
+            raise Short("its Labeled names the shown bit in FLAGS — the bit is SHOWN's to put on and take off")
         if d["flags"] and (d["flags"][0] | d["flags"][1]) & ondisk.FILE_DELETED:
             raise Short("its Labeled names the deleted bit in FLAGS — the bit is KEEP's to put on and take off")
         if d["flags"] and (d["flags"][0] | d["flags"][1]) & ondisk.FILE_MADE_BY:
@@ -256,11 +269,11 @@ def RecordAgain(kind, d):
     """The record a decoded dict says, written again (the circle)."""
     if kind == BORN:
         return Born(d["fid"], d["flags"], d["size"], d["created_ns"], d["modified_ns"], d["name"], d["tags"],
-                    d["runs"], d["digests"], d["slip"], d["made_by"])
+                    d["runs"], d["digests"], d["slip"], d["made_by"], d["shown"])
     if kind == SHAPED:
         return Shaped(d["fid"], d["base"], d["size"], d["mtime_ns"], d["splices"], d["digests"], d["slip"])
     if kind == LABELED:
-        return Labeled(d["fid"], d["base"], d["name"], d["flags"], d["add"], d["drop"])
+        return Labeled(d["fid"], d["base"], d["name"], d["flags"], d["add"], d["drop"], d["keep"], d["shown"])
     if kind == QUITCLAIM:
         return Quitclaim(d["fid"], d["base"])
     if kind == COINED:
@@ -622,7 +635,8 @@ RIBBON_NUMBERS = (
     ("RIBBON_COINED", COINED), ("RIBBON_USE_CONTEXT", USE_CONTEXT), ("RIBBON_FROZEN", FROZEN),
     ("RIBBON_THAWED", THAWED), ("RIBBON_KINDS_KNOWN", max(KIND_NAMES)), ("STITCH_DATA_FLUSHED", DATA_FLUSHED),
     ("STITCH_CLEAN", CLEAN), ("STITCH_MEDIUM_LIED", MEDIUM_LIED), ("LABEL_NAME", LABEL_NAME),
-    ("LABEL_FLAGS", LABEL_FLAGS), ("LABEL_TAGS", LABEL_TAGS), ("LABEL_KEEP", LABEL_KEEP), ("RUN_EXT_CODEC", tally.EXT_CODEC),
+    ("LABEL_FLAGS", LABEL_FLAGS), ("LABEL_TAGS", LABEL_TAGS), ("LABEL_KEEP", LABEL_KEEP),
+    ("LABEL_SHOWN", LABEL_SHOWN), ("RUN_EXT_CODEC", tally.EXT_CODEC),
     ("RUN_EXT_SHARED", tally.EXT_SHARED), ("RUN_EXT_COPY", tally.EXT_COPY), ("UNDONE_NOT_LANDED", 1),
     ("UNDONE_ROT", 2), ("RIBBON_STREAM_MOST", STREAM_MOST))
 

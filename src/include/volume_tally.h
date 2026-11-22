@@ -86,6 +86,7 @@
 /* Bit 5 stays unnamed: the golden node's header wears it as the bit no kernel
  * names (TALLY_GOLDEN_NODE_CRC), and a header keeps such a bit as it was laid. */
 #define TALLY_FILE_MADE_BY   64u     /* made by a program of the volume, its file named by the header (TallyFileHead.made_by) — never a tag */
+#define TALLY_FILE_SHOWN     128u    /* the file of a program that shows its own tags to the programs its header names (TallyFileHead.shown) — never a tag */
 #define TALLY_TAG_HAS_VALUE  1u
 #define TALLY_TAG_RETIRED    2u
 #define TALLY_TAG_OWNED      4u      /* a program's own tag: whose it is follows the flags (TallyTag) */
@@ -495,9 +496,55 @@ static inline int TallyIdNext(const uint8_t *p, uint32_t end, uint32_t *at, uint
     return 1;
 }
 
+/* A rising list of the volume's file ids after its count, laid as TallyIdsPut
+ * lays tag ids — the ids of the programs a program's file shows its tags to
+ * (TALLY_FILE_SHOWN), 0 first when it shows them to every program. */
+static inline uint32_t TallyFidsPut(uint8_t *out, const uint64_t *ids, uint64_t n)
+{
+    uint32_t at = 0;
+    for (uint64_t i = 0; i < n; i++)
+        at += BookVarintPut(out + at, i ? ids[i] - ids[i - 1] - 1u : ids[0]);
+    return at;
+}
+
+/* The bytes TallyFidsPut lays the list in, its count left out. */
+static inline uint32_t TallyFidsBytes(const uint64_t *ids, uint64_t n)
+{
+    uint32_t bytes = 0;
+    for (uint64_t i = 0; i < n; i++)
+        bytes += TallyVarintBytes(i ? ids[i] - ids[i - 1] - 1u : ids[0]);
+    return bytes;
+}
+
+/* Such a list, its count first, from *at: *n of them pointed at in *ids, *bytes
+ * long. 0 when it does not read. */
+static inline int TallyFidsTake(const uint8_t *p, uint32_t end, uint32_t *at, uint64_t *n, const uint8_t **ids,
+                                uint32_t *bytes)
+{
+    uint64_t id = 0;
+    if (!TallyTake(p, end, at, n) || *n > end - *at) return 0;
+    *ids = p + *at;
+    uint32_t from = *at;
+    for (uint64_t k = 0; k < *n; k++)
+        if (!TallyIdNext(p, end, at, &id, k == 0)) return 0;
+    *bytes = *at - from;
+    return 1;
+}
+
+/* The ids of a list TallyFidsTake read, into `out` — room for its `n`. */
+static inline void TallyFidsOut(const uint8_t *ids, uint32_t bytes, uint64_t n, uint64_t *out)
+{
+    uint32_t at = 0;
+    uint64_t id = 0;
+    for (uint64_t k = 0; k < n; k++) {
+        TallyIdNext(ids, bytes, &at, &id, k == 0);
+        out[k] = id;
+    }
+}
+
 /*
  * A file's header: gen · flags · size · created_ns · mtime_z · name_len ·
- * name · ntags · tags · [keep_ns] · [made_by]. mtime_z is zigzag(modified_ns -
+ * name · ntags · tags · [keep_ns] · [made_by] · [nshown · shown]. mtime_z is zigzag(modified_ns -
  * created_ns): a clock may run backwards. The name and the tags are pointed
  * at where they stand; a writer points them at what it writes from — `tags`
  * the ids after their count, as TallyIdsPut writes them, `tags_bytes` long.
@@ -513,6 +560,12 @@ static inline int TallyIdNext(const uint8_t *p, uint32_t end, uint32_t *at, uint
  * this file — never 0, and never changed after the file is made. A file no
  * program of the volume made carries neither the bit nor the field, so its
  * header is the bytes it was before the field was.
+ *
+ * The list of the programs a program shows its own tags to closes it, there
+ * when, and only when, the flags carry TALLY_FILE_SHOWN — the header is the
+ * card of the program's own file: its count, never 0, and the ids rising
+ * (TallyFidsPut), 0 first for every program. A file that shows nothing
+ * carries neither the bit nor the list.
  */
 typedef struct {
     uint64_t       gen;
@@ -527,6 +580,9 @@ typedef struct {
     uint32_t       tags_bytes;
     uint64_t       keep_ns;      /* 0 unless TALLY_FILE_DELETED */
     uint64_t       made_by;      /* 0 unless TALLY_FILE_MADE_BY */
+    uint64_t       nshown;       /* 0 unless TALLY_FILE_SHOWN */
+    const uint8_t *shown;
+    uint32_t       shown_bytes;
 } TallyFileHead;
 
 static inline uint32_t TallyFileHeadPut(uint8_t *out, const TallyFileHead *h)
@@ -542,7 +598,13 @@ static inline uint32_t TallyFileHeadPut(uint8_t *out, const TallyFileHead *h)
     at += TallyBytesPut(out + at, h->tags, h->tags_bytes);
     if (h->flags & TALLY_FILE_DELETED)
         at += BookVarintPut(out + at, h->keep_ns);
-    return (h->flags & TALLY_FILE_MADE_BY) ? at + BookVarintPut(out + at, h->made_by) : at;
+    if (h->flags & TALLY_FILE_MADE_BY)
+        at += BookVarintPut(out + at, h->made_by);
+    if (h->flags & TALLY_FILE_SHOWN) {
+        at += BookVarintPut(out + at, h->nshown);
+        at += TallyBytesPut(out + at, h->shown, h->shown_bytes);
+    }
+    return at;
 }
 
 /* A header read back: BROKEN as well for one that is not ACTIVE — such an
@@ -563,11 +625,17 @@ static inline int TallyFileHeadGet(const uint8_t *b, uint32_t len, TallyFileHead
     for (uint64_t k = 0; k < h->ntags; k++)
         if (!TallyIdNext(b, len, &at, &id, k == 0)) return TALLY_BODY_BROKEN;
     h->tags_bytes = at - from;
-    h->keep_ns    = 0;
-    h->made_by    = 0;
+    h->keep_ns     = 0;
+    h->made_by     = 0;
+    h->nshown      = 0;
+    h->shown       = (const uint8_t *)0;
+    h->shown_bytes = 0;
     if ((h->flags & TALLY_FILE_DELETED) && (!TallyTake(b, len, &at, &h->keep_ns) || !h->keep_ns))
         return TALLY_BODY_BROKEN;
     if ((h->flags & TALLY_FILE_MADE_BY) && (!TallyTake(b, len, &at, &h->made_by) || !h->made_by))
+        return TALLY_BODY_BROKEN;
+    if ((h->flags & TALLY_FILE_SHOWN) &&
+        (!TallyFidsTake(b, len, &at, &h->nshown, &h->shown, &h->shown_bytes) || !h->nshown))
         return TALLY_BODY_BROKEN;
     if (!(h->flags & TALLY_FILE_ACTIVE)) return TALLY_BODY_BROKEN;
     return TallyBodyEnd(at, len);

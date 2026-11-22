@@ -75,11 +75,12 @@ static bool EngrossOwedBy(uint64_t fid, uint64_t* gen)
 
 /* The file opened for the kernel's own change of it: one that lays a tail
  * where it already is the file's carries the warrant a file the system keeps
- * asks for. NULL and *rc for one the mount locked (ERR_TAGFS_CORRUPTED, as
- * its open answers every caller) or no memory. */
+ * asks for, and reaches a file kept in the trash — a Tally waits for its tail
+ * as for any (TAGFS_HANDLE_KEPT). NULL and *rc for one the mount locked
+ * (ERR_TAGFS_CORRUPTED, as its open answers every caller) or no memory. */
 static TagFSFileHandle* EngrossOpen(uint64_t fid, error_t* rc)
 {
-    TagFSFileHandle* h = tagfs_open(fid, TAGFS_HANDLE_WRITE);
+    TagFSFileHandle* h = tagfs_open(fid, TAGFS_HANDLE_WRITE | TAGFS_HANDLE_KEPT);
     *rc = h ? OK : BookFileLocked(fid) ? ERR_TAGFS_CORRUPTED : ERR_NO_MEMORY;
     if (h)
         h->warrant = INK_WARRANTED;

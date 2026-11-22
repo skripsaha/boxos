@@ -104,20 +104,22 @@ class FileState:
     on its last block, in the order of their stitches."""
 
     __slots__ = ("fid", "gen", "flags", "size", "created_ns", "modified_ns", "name", "tags", "runs",
-                 "parcels", "slips", "keep_ns", "made_by")
+                 "parcels", "slips", "keep_ns", "made_by", "shown")
 
     def __init__(self, fid, gen, flags, size, created_ns, modified_ns, name, tags, runs, parcels=None,
-                 slips=None, keep_ns=0, made_by=0):
+                 slips=None, keep_ns=0, made_by=0, shown=()):
         self.fid, self.gen, self.flags, self.size = fid, gen, flags, size
         self.created_ns, self.modified_ns, self.name = created_ns, modified_ns, bytes(name)
         self.tags, self.runs = list(tags), list(runs)
         self.parcels, self.slips = parcels, list(slips or [])
         self.keep_ns = keep_ns      # with FILE_DELETED: the nanoseconds the file is kept until; 0 otherwise
         self.made_by = made_by      # with FILE_MADE_BY: the volume's id of the program's file that made it; 0 otherwise
+        self.shown = list(shown)    # with FILE_SHOWN: the programs this program's file shows its tags to, rising; [] otherwise
 
     def Copy(self):
         return FileState(self.fid, self.gen, self.flags, self.size, self.created_ns, self.modified_ns,
-                         self.name, self.tags, self.runs, self.parcels, self.slips, self.keep_ns, self.made_by)
+                         self.name, self.tags, self.runs, self.parcels, self.slips, self.keep_ns, self.made_by,
+                         self.shown)
 
     def Blocks(self):
         return sum(r.count for r in self.runs)
@@ -520,7 +522,9 @@ def FileHeadEncode(fs):
             V(Zigzag(fs.modified_ns - fs.created_ns)) + V(len(fs.name)) + fs.name + IdsPut(fs.tags))
     if fs.flags & ondisk.FILE_DELETED:
         head += V(fs.keep_ns)
-    return head + V(fs.made_by) if fs.flags & ondisk.FILE_MADE_BY else head
+    if fs.flags & ondisk.FILE_MADE_BY:
+        head += V(fs.made_by)
+    return head + IdsPut(fs.shown) if fs.flags & ondisk.FILE_SHOWN else head
 
 
 def FileHeadDecode(fid, body, glass):
@@ -535,11 +539,14 @@ def FileHeadDecode(fid, body, glass):
     made_by = c.V() if flags & ondisk.FILE_MADE_BY else 0
     if flags & ondisk.FILE_MADE_BY and not made_by:
         raise Short("the header of fid %u is made by a program and names none" % fid)
+    shown = c.Ids() if flags & ondisk.FILE_SHOWN else []
+    if flags & ondisk.FILE_SHOWN and not shown:
+        raise Short("the header of fid %u shows its tags and names no program" % fid)
     _Exact(c, "the FILES header of fid %u" % fid, glass)
     if not flags & ondisk.FILE_ACTIVE:
         raise Short("the header of fid %u is not ACTIVE" % fid)
     return FileState(fid, gen, flags, size, created, modified, name, tags, [], parcels=[], keep_ns=keep,
-                     made_by=made_by)
+                     made_by=made_by, shown=shown)
 
 
 def ParcelEncode(runs, seq):
@@ -920,7 +927,7 @@ def TallyCheck(defines):
                   (TAG_OWNED, "TALLY_TAG_OWNED"), (OWNER_PROGRAM, "TALLY_OWNER_PROGRAM"),
                   (ondisk.FILE_ACTIVE, "TALLY_FILE_ACTIVE"),
                   (ondisk.FILE_UNDONE, "TALLY_FILE_UNDONE"), (ondisk.FILE_DELETED, "TALLY_FILE_DELETED"),
-                  (ondisk.FILE_MADE_BY, "TALLY_FILE_MADE_BY"),
+                  (ondisk.FILE_MADE_BY, "TALLY_FILE_MADE_BY"), (ondisk.FILE_SHOWN, "TALLY_FILE_SHOWN"),
                   (ondisk.FILE_ROLE_MASK, "TALLY_FILE_ROLE_MASK"),
                   (ondisk.FILE_ROLE_SYSTEM, "TALLY_FILE_ROLE_SYSTEM"), (ondisk.FILE_ROLE_BOOT, "TALLY_FILE_ROLE_BOOT"),
                   (ondisk.FILE_ROLE_KERNEL, "TALLY_FILE_ROLE_KERNEL"), (SHEET_PAYLOAD, "TALLY_SHEET_PAYLOAD")):

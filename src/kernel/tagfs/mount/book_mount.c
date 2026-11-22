@@ -676,6 +676,7 @@ void BookKeptLetGo(BookKeptFile* k)
         kfree(k->parcel_body[p]);
     kfree(k->meta.filename);
     kfree(k->meta.tag_ids);
+    kfree(k->meta.shown_to);
     kfree(k->parcel_b);
     kfree(k->parcel_body);
     kfree(k->parcel_len);

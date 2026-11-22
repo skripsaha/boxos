@@ -104,7 +104,8 @@ error_t InkBookFields(uint64_t fid, FileRecord* cur, const RecordWhere* was, con
     TagFSState*     fs    = InkState();
     TagBitmapStake* stake = NULL;
     Jot*            spent = NULL;
-    FileRecord*     rec   = FileRecordRelabel(cur, name, f->tags, f->count, flags, keep_until);
+    FileRecord*     rec   = FileRecordRelabel(cur, name, f->tags, f->count, f->shown, f->shown_count, flags,
+                                                keep_until);
     Jot*            j     = rec ? JotMake(JOT_LABELED, fid, NULL, NULL) : NULL;
     error_t         rc    = j ? OK : ERR_NO_MEMORY;
     if (rc == OK && f->adds)

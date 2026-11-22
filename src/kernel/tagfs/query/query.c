@@ -344,17 +344,19 @@ error_t TagFSNamedPage(TagOwner owner, const char* word, size_t length, const Ta
 /* One tag's STORAGE_TAG_LIST record after the `*used` bytes of `out`; false
  * when it does not fit the `room` left. */
 static bool TagRecordPut(uint8_t* out, uint32_t room, uint32_t* used, const TagSpelling* tag,
-                         uint32_t files, bool system)
+                         uint32_t files, bool system, TagOwner owner)
 {
     const uint64_t need = STORAGE_TAG_LISTED_HEAD + (uint64_t)tag->key_len + tag->value_len;
     if (need > room - *used)
         return false;
     uint8_t*       at        = out + *used;
     const uint16_t value_len = (uint16_t)tag->value_len;
+    const uint64_t whose     = TagOwnerWord(owner);
     memcpy(at, &files, sizeof(files));
     at[4] = system ? STORAGE_TAG_LISTED_SYSTEM : 0;
     at[5] = (uint8_t)tag->key_len;
     memcpy(at + 6, &value_len, sizeof(value_len));
+    memcpy(at + 8, &whose, sizeof(whose));
     memcpy(at + STORAGE_TAG_LISTED_HEAD, tag->key, tag->key_len);
     if (tag->value_len)
         memcpy(at + STORAGE_TAG_LISTED_HEAD + tag->key_len, tag->value, tag->value_len);
@@ -362,21 +364,24 @@ static bool TagRecordPut(uint8_t* out, uint32_t room, uint32_t* used, const TagS
     return true;
 }
 
-/* Each of `owner`'s tags the registry holds is put to the index as one more
+/* Each tag of the registry's `view` lets in is put to the index as one more
  * asked tag beside `within`, and the answer's count alone is wanted: how many
- * of the files that wear `within` wear it too. Another owner's tag is passed
- * over whatever files wear it — the person's list is the person's tags, and a
- * program's its own. The registry's spellings are its own and live while the
- * volume is entered, so they are copied out before it is left. */
-error_t TagFSTagPage(TagOwner owner, const TagSpelling* within, uint32_t within_count, const TagSpelling* without,
+ * of the files that wear `within` wear it too. A tag the view does not let in
+ * is passed over whatever files wear it — the person's list is the person's
+ * tags, a program's its own and those shown it. The registry's spellings are
+ * its own and live while the volume is entered, so they are copied out before
+ * it is left. */
+error_t TagFSTagPage(const TagView* view, const TagSpelling* within, uint32_t within_count, const TagSpelling* without,
                      uint32_t without_count, uint32_t from, uint8_t* out, uint32_t room, uint32_t* used,
                      uint32_t* delivered, uint32_t* next)
 {
     *used      = 0;
     *delivered = 0;
     *next      = 0;
-    if ((within_count && !within) || (without_count && !without) || (room && !out))
+    if ((within_count && !within) || (without_count && !without) || (room && !out) ||
+        (view->all && (within_count || without_count)))
         return ERR_INVALID_ARGUMENT;
+    const TagOwner owner = view->all ? TagOwnerPerson() : view->owner;   /* whose `within` and `without` are */
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
 
@@ -406,7 +411,7 @@ error_t TagFSTagPage(TagOwner owner, const TagSpelling* within, uint32_t within_
     TagSpelling tag;
     for (uint32_t at = from; TagRoll(fs->registry, at, UINT32_MAX, &rolled); at = rolled.id + 1) {
         uint32_t id = rolled.id;
-        if (rolled.retired || !TagOwnerSame(rolled.owner, owner))
+        if (rolled.retired || !TagViewLets(view, rolled.owner))
             continue;
         tag_ids[tag_count] = id;
         TagFSPage page;
@@ -420,7 +425,7 @@ error_t TagFSTagPage(TagOwner owner, const TagSpelling* within, uint32_t within_
 
         bool system = false;
         (void)TagRegistrySpelling(fs->registry, id, &tag, &system, NULL);
-        if (!TagRecordPut(out, room, used, &tag, page.total, system)) {
+        if (!TagRecordPut(out, room, used, &tag, page.total, system, rolled.owner)) {
             *next = id;
             if (*delivered == 0)
                 rc = ERR_BUFFER_TOO_SMALL;

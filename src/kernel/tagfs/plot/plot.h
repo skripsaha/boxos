@@ -113,6 +113,14 @@ typedef struct {
  * after the load. */
 error_t  PlotLoad(Plot *p, uint64_t fid, InkWarrant warrant);
 
+/* The same for the volume's own change of a file — its tail laid in its block
+ * (Engross), or cut by Escheat — which says nothing new of what the file
+ * holds: a file kept in the trash is loaded as a live one is, where PlotLoad
+ * answers ERR_FILE_NOT_FOUND; every other guard is PlotLoad's. Asked by a
+ * handle the volume opens for itself alone (TAGFS_HANDLE_KEPT), never by a
+ * program's. */
+error_t  PlotLoadKept(Plot *p, uint64_t fid, InkWarrant warrant);
+
 /* Everything the Plot holds let go; every Stake still standing is given back
  * first (PlotPullStakes). Safe on a Plot PlotLoad refused. */
 void     PlotRelease(Plot *p);

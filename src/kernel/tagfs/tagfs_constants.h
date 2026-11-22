@@ -90,11 +90,22 @@
  * the header's keep_ns in the Tally and after the slip of the ribbon's Born
  * (volume_tally.h, volume_ribbon.h). */
 #define TAGFS_FILE_MADE_BY          (1 << 6)
+/* The file of a program that shows its own tags to other programs: the
+ * record's shown_to names them (FileRecord.shown_to, 0 for every program; no
+ * record names any without this bit). Bit 7 — put on and taken off with the
+ * list by the one Ink of it, InkShown, which the program itself asks through
+ * the deck (storage_tags.c), and never a tag: whom a program shows its tags
+ * to is the volume's word on the program's own file, and the file let go
+ * takes it with it. The bit is what puts the list after made_by in the
+ * Tally's header and in the ribbon's Born, and what the ribbon's Labeled
+ * SHOWN leaves (volume_tally.h, volume_ribbon.h). */
+#define TAGFS_FILE_SHOWN            (1 << 7)
 
 // Handle flags
 #define TAGFS_HANDLE_READ           (1 << 0)
 #define TAGFS_HANDLE_WRITE          (1 << 1)
 #define TAGFS_HANDLE_APPEND         (1 << 2)   /* every write lands at the file's size */
+#define TAGFS_HANDLE_KEPT           (1 << 3)   /* the volume's own, reaching a file kept in the trash (PlotLoadKept) */
 
 // Registry constants
 #define TAGFS_REG_BUCKETS           512

@@ -358,9 +358,12 @@
 #define STORAGE_OBJ_CREATE          0x06
 #define STORAGE_OBJ_DELETE          0x07
 #define STORAGE_OBJ_RENAME          0x08
-/* obj.getinfo — params = [u64 fid][u8 whose]; out_crate = [u64 fid][u64 size]
+/* obj.getinfo — params = [u64 fid][whose]; out_crate = [u64 fid][u64 size]
  * [u32 tags][u16 name_len][name][tag records]…[u64 kept_until][u64 made_by]:
- * the tags are those of `whose` the file wears (STORAGE_TAGS_* below); the eight
+ * the tags are those of `whose` the file wears (STORAGE_TAGS_* below) —
+ * STORAGE_TAGS_ALL every one its caller may see —, each record [u16 key_len]
+ * [u16 value_len][u8 1 for a tag the system keeps, else 0][u64 owner][key]
+ * [value], owner 0 the person's and a program's file id a program's; the eight
  * bytes before the last are the time, in nanoseconds of the wall clock, at
  * which the volume lets a deleted file go (obj.keep), 0 for a file that is not
  * deleted; the last eight are the volume's id of the file of the program that
@@ -418,14 +421,17 @@
  * numbered `from` on (0: the first), the files counted inside the Use Context
  * (STORAGE_SCOPE_USE, the files that wear its tags) or on the whole volume,
  * those wearing a tag the comma list after the scope names left uncounted, as
- * a query leaves them out. out_crate = [u32 delivered]
+ * a query leaves them out. With STORAGE_TAGS_ALL — every tag its caller may
+ * see, each with whose it is — the scope is the whole volume's and no tag is
+ * set aside. out_crate = [u32 delivered]
  * [u32 next], then `delivered` records [u32 files][u8 flags][u8 key_len]
- * [u16 value_len][key][value] while they fit; `next` is the number to ask from
+ * [u16 value_len][u64 owner][key][value] while they fit, owner as obj.getinfo
+ * says; `next` is the number to ask from
  * for the rest, 0 when there are none. A crate too small for even the first
  * record is refused ERR_BUFFER_TOO_SMALL. */
 #define STORAGE_TAG_LIST            0x23
 #define STORAGE_TAG_LIST_HEAD       8u      /* [u32 delivered][u32 next] */
-#define STORAGE_TAG_LISTED_HEAD     8u      /* a record before its text */
+#define STORAGE_TAG_LISTED_HEAD     16u     /* a record before its text */
 #define STORAGE_TAG_LISTED_SYSTEM   0x01u   /* flags: a tag the system keeps */
 /* obj.conjugate — Conjugate, a duplicate laid on the blocks it duplicates:
  * `count` blocks of file `fid` from its block
@@ -474,6 +480,41 @@
  * order, as tag.query's. */
 #define STORAGE_NAME_QUERY          0x27
 
+/* tag.show — a program's own tags shown to another program: params = [u8 act]
+ * [u64 program]. STORAGE_SHOW_TO puts the program — a program's file, or 0
+ * for every program, those to come too — in the list the caller's program
+ * shows all its tags to, STORAGE_HIDE_FROM takes it out; one shown them sees
+ * them on files, finds files by them and lists them (STORAGE_TAGS_PROGRAM),
+ * and never puts them on nor takes them off. STORAGE_ASK_TO_SEE asks the
+ * program to show the caller its tags: a note the kernel holds until the
+ * program shows them to the caller or hides them from it, either leaves, or
+ * the volume is mounted again — and when it leaves a note, the kernel says
+ * so on the Touch word "tags-asked", its payload the [u64] file id of the
+ * program asked, and nothing of who asked. The list is the card of the
+ * program's own file: a program started from bytes, or whose file is not on
+ * the volume it was started from, has none — ERR_TAGFS_NO_OWN_TAGS. A program
+ * the volume has not: ERR_FILE_NOT_FOUND; one shown or asked to show to
+ * itself, or asked as 0: ERR_INVALID_ARGUMENT. */
+#define STORAGE_TAG_SHOW            0x28
+#define STORAGE_SHOW_TO             0
+#define STORAGE_HIDE_FROM           1
+#define STORAGE_ASK_TO_SEE          2
+
+/* tag.shown — the lists of tag.show: params = [u8 which][u64 program][u64 from].
+ * STORAGE_SHOWN_TO_ME: the programs that show their tags to the caller's, by
+ * name or to every program. STORAGE_SHOWN_BY: the programs `program` shows its
+ * tags to, 0 first for every program — asked by the program itself or by one
+ * whose box asks `see-tags` or `change-tags` (ERR_ACCESS_DENIED otherwise).
+ * STORAGE_ASKS_TO_SEE: the programs that asked the caller's to show them its
+ * tags and are not answered. `program` is read for SHOWN_BY alone. Each in
+ * file id order from `from` on (1, or 0, for the first). out_crate = [u32
+ * delivered][u32 total][u64 ids[delivered]], as storage.query's. A caller
+ * with no program of its own (tag.show) asking of its own: ERR_TAGFS_NO_OWN_TAGS. */
+#define STORAGE_TAG_SHOWN           0x29
+#define STORAGE_SHOWN_TO_ME         0
+#define STORAGE_SHOWN_BY            1
+#define STORAGE_ASKS_TO_SEE         2
+
 /* The scope byte storage.query, storage.name.query, storage.tag.list and
  * storage.create carry in their params.
  *
@@ -496,7 +537,9 @@
 
 /* The whose byte every call that speaks tags carries, after the bytes its
  * params lay out before it (storage.query, storage.name.query, storage.tag.
- * list, storage.tag.set, storage.tag.unset, storage.create, obj.getinfo):
+ * list, storage.tag.set, storage.tag.unset, storage.create, obj.getinfo) —
+ * with STORAGE_TAGS_PROGRAM, the [u64] file id of the program right after it,
+ * and the params that follow the whose after that:
  *
  *   STORAGE_TAGS_MINE    the program's own tags — its words for its own files,
  *                        which no other program meets, and which it needs no
@@ -508,10 +551,26 @@
  *                        program whose box asks `see-tags` or `change-tags`,
  *                        put on and taken off only by one that asks
  *                        `change-tags` (ERR_ACCESS_DENIED otherwise).
+ *   STORAGE_TAGS_PROGRAM another program's own tags, the program named by its
+ *                        file: seen by one it shows them to (storage.tag.show)
+ *                        and by one whose box asks `see-tags` or `change-tags`
+ *                        — the person sees every mark on his files —, taken
+ *                        off a file only by one that asks `change-tags` — the
+ *                        person's hands —, and put on by none but the program
+ *                        itself (ERR_ACCESS_DENIED otherwise). The caller's
+ *                        own program named so is STORAGE_TAGS_MINE.
+ *   STORAGE_TAGS_ALL     every tag its caller may see, each with whose it is:
+ *                        its own, those of the programs that show it theirs,
+ *                        and with `see-tags` or `change-tags` the person's and
+ *                        every program's — for obj.getinfo and storage.tag.
+ *                        list alone; a question, a create or a change is of
+ *                        one owner's tags (ERR_INVALID_ARGUMENT).
  *
- * Absent, or any other value: ERR_INVALID_ARGUMENT. */
+ * Absent, program 0, or any other value: ERR_INVALID_ARGUMENT. */
 #define STORAGE_TAGS_MINE           0
 #define STORAGE_TAGS_PERSON         1
+#define STORAGE_TAGS_PROGRAM        2
+#define STORAGE_TAGS_ALL            3
 
 /* ============================================================================
  *  Hardware deck opcodes — the same single source, for the kernel's handler

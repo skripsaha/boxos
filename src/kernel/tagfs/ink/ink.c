@@ -278,8 +278,6 @@ error_t InkMayChange(uint64_t fid, uint32_t flags, const Strip* runs, uint32_t r
     error_t rc = InkVolumeBegins();
     if (rc != OK)
         return rc;
-    if (flags & TAGFS_FILE_DELETED)
-        return ERR_FILE_NOT_FOUND;
     return InkGuard(fid, flags, runs, run_count, NULL, 0, warrant);
 }
 
@@ -393,7 +391,9 @@ static bool InkFieldsTags(const FileRecord* cur, uint32_t add, const uint32_t* d
     f->tags = kmalloc(sizeof(uint32_t) * (2u * cur->tag_count + 2u));
     if (!f->tags)
         return false;
-    f->dropped = f->tags + cur->tag_count + 1u;
+    f->dropped     = f->tags + cur->tag_count + 1u;
+    f->shown       = cur->shown_to;
+    f->shown_count = cur->shown_count;
 
     bool worn = false;
     for (uint32_t i = 0; i < cur->tag_count; i++) {
@@ -585,6 +585,76 @@ error_t InkKeep(uint64_t fid, uint64_t until, InkWarrant warrant, InkReceipt* ou
     error_t rc;
     do {
         rc = InkKeepOnce(fid, until, warrant, out);
+    } while (rc != OK && InkGoesRound(&rc));
+    return rc;
+}
+
+/* `cur`'s list of the programs it shows its tags to with `reader` put in
+ * (`show`) or taken out, rising, into `list` — room for one more than it
+ * holds: how many it holds then. */
+static uint32_t InkShownList(const FileRecord* cur, uint64_t reader, bool show, uint64_t* list)
+{
+    uint32_t n   = 0;
+    bool     put = !show;
+    for (uint32_t i = 0; i < cur->shown_count; i++) {
+        uint64_t id = cur->shown_to[i];
+        if (!put && reader < id) {
+            list[n++] = reader;
+            put       = true;
+        }
+        if (id != reader)
+            list[n++] = id;
+    }
+    if (!put)
+        list[n++] = reader;
+    return n;
+}
+
+/* Whether `cur` shows its tags to `reader` by name — 0 by name too: every
+ * program. */
+static bool InkShowsTo(const FileRecord* cur, uint64_t reader)
+{
+    for (uint32_t i = 0; i < cur->shown_count; i++)
+        if (cur->shown_to[i] == reader)
+            return true;
+    return false;
+}
+
+/* One round of InkShown. */
+static error_t InkShownOnce(uint64_t fid, uint64_t reader, bool show, InkReceipt* out)
+{
+    RecordWhere   was;
+    InkFieldsPlan f    = { 0 };
+    uint64_t*     list = NULL;
+    FileRecord*   cur  = FileMapRecordHold(InkState()->files, fid, &was);
+    if (!cur)
+        return ERR_FILE_NOT_FOUND;
+    error_t rc = InkVolumeBegins();
+    if (rc == OK && show && (cur->flags & TAGFS_FILE_DELETED))
+        rc = ERR_FILE_NOT_FOUND;
+    if (rc == OK && InkShowsTo(cur, reader) == show) {
+        out->gen = was.gen;
+    } else if (rc == OK) {
+        list = kmalloc(sizeof(uint64_t) * (cur->shown_count + 1u));
+        if (!list || !InkFieldsTags(cur, TAGFS_INVALID_TAG_ID, NULL, 0, &f)) {
+            rc = ERR_NO_MEMORY;
+        } else {
+            f.shown_count = InkShownList(cur, reader, show, list);
+            f.shown       = list;
+            rc = InkBookFields(fid, cur, &was, &f, cur->name, TAGFS_INVALID_TAG_ID, cur->flags, cur->keep_until, out);
+        }
+    }
+    kfree(list);
+    kfree(f.tags);
+    FileRecordRelease(cur);
+    return rc;
+}
+
+error_t InkShown(uint64_t fid, uint64_t reader, bool show, InkReceipt* out)
+{
+    error_t rc;
+    do {
+        rc = InkShownOnce(fid, reader, show, out);
     } while (rc != OK && InkGoesRound(&rc));
     return rc;
 }

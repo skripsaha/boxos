@@ -853,17 +853,22 @@ static bool StandOwnedFinds(TagOwner owner, const TagSpelling* tag, uint64_t fid
  * more tags than one page holds. */
 static bool StandOwnedListed(TagOwner owner, const TagSpelling* tag)
 {
-    uint8_t  out[512];
-    uint32_t named = 0, from = 0;
+    uint8_t       out[512];
+    uint32_t      named = 0, from = 0;
+    const TagView view  = TagViewOf(owner);
     do {
         uint32_t used = 0, delivered = 0, next = 0;
-        if (TagFSTagPage(owner, NULL, 0, NULL, 0, from, out, sizeof(out), &used, &delivered, &next) != OK)
+        if (TagFSTagPage(&view, NULL, 0, NULL, 0, from, out, sizeof(out), &used, &delivered, &next) != OK)
             return false;
         for (uint32_t at = 0, k = 0; k < delivered; k++) {
             uint8_t  key_len   = out[at + 5];
             uint16_t value_len = 0;
+            uint64_t whose     = 0;
             memcpy(&value_len, out + at + 6, sizeof(value_len));
+            memcpy(&whose, out + at + 8, sizeof(whose));
             const uint8_t* key = out + at + STORAGE_TAG_LISTED_HEAD;
+            if (whose != TagOwnerWord(owner))
+                return false;
             if (key_len == tag->key_len && memcmp(key, tag->key, key_len) == 0)
                 named += value_len == tag->value_len && memcmp(key + key_len, tag->value, value_len) == 0 ? 1u
                                                                                                           : 100u;

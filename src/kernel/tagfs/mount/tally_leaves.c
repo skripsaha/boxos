@@ -61,6 +61,7 @@ void BookFileForget(BookFile* f)
 {
     kfree(f->meta.filename);
     kfree(f->meta.tag_ids);
+    kfree(f->meta.shown_to);
     kfree(f->strips);
     kfree(f->cut);
     BookParcelsForget(f);
@@ -83,7 +84,8 @@ static uint32_t BookHeadKnown(const TallyFileHead* h)
            TallyVarintBytes(BookZigzag((int64_t)(h->modified_ns - h->created_ns))) +
            TallyVarintBytes(h->name_len) + (uint32_t)h->name_len + TallyVarintBytes(h->ntags) +
            h->tags_bytes + ((h->flags & TALLY_FILE_DELETED) ? TallyVarintBytes(h->keep_ns) : 0u) +
-           ((h->flags & TALLY_FILE_MADE_BY) ? TallyVarintBytes(h->made_by) : 0u);
+           ((h->flags & TALLY_FILE_MADE_BY) ? TallyVarintBytes(h->made_by) : 0u) +
+           ((h->flags & TALLY_FILE_SHOWN) ? TallyVarintBytes(h->nshown) + h->shown_bytes : 0u);
 }
 
 /* The header of `f->fid` into the gathering: its name and its tags copied out
@@ -103,8 +105,13 @@ static error_t BookFileHead(BookFile* f, const uint8_t* body, uint32_t len)
 
     f->meta.filename = kmalloc(h.name_len + 1u);
     f->meta.tag_ids  = kmalloc(sizeof(uint32_t) * (h.ntags ? h.ntags : 1u));
-    if (!f->meta.filename || !f->meta.tag_ids)
+    f->meta.shown_to = h.nshown ? kmalloc(sizeof(uint64_t) * h.nshown) : NULL;
+    if (!f->meta.filename || !f->meta.tag_ids || (h.nshown && !f->meta.shown_to))
         return ERR_NO_MEMORY;
+    if (h.nshown) {
+        TallyFidsOut(h.shown, h.shown_bytes, h.nshown, f->meta.shown_to);
+        f->meta.shown_count = (uint32_t)h.nshown;
+    }
     memcpy(f->meta.filename, h.name, h.name_len);
     f->meta.filename[h.name_len] = '\0';
 
@@ -433,6 +440,7 @@ static void BookFileKept(BookFile* f)
                                                   .nparcels = f->nparcels };
     f->meta.filename = NULL;
     f->meta.tag_ids  = NULL;
+    f->meta.shown_to = NULL;
     f->parcel_b      = NULL;
     f->parcel_body   = NULL;
     f->parcel_len    = NULL;

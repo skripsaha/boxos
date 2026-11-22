@@ -31,7 +31,7 @@ from . import ondisk, stitch, tally
 from .bookmount import Blocks, BookMount, LastBlock, Mismatch, Splice
 from .bookread import Short
 from .stitch import (BORN, COINED, LABELED, QUITCLAIM, SHAPED, UNDONE, KIND_NAMES, LABEL_FLAGS, LABEL_KEEP, LABEL_NAME,
-                     LABEL_TAGS)
+                     LABEL_SHOWN, LABEL_TAGS)
 from .stitch_ribbon import Ribbon
 
 # The roles a kernel is looked for by, in the order they are asked (§16.7 п.3).
@@ -261,7 +261,7 @@ class BootBook:
             if old is not None:
                 return old
             fs = tally.FileState(d["fid"], seq, d["flags"], d["size"], d["created_ns"], d["modified_ns"], d["name"],
-                                 d["tags"], d["runs"], made_by=d["made_by"])
+                                 d["tags"], d["runs"], made_by=d["made_by"], shown=d["shown"])
         else:
             at = (seq - d["base"]) % (1 << 64)
             if old is None or old.gen != at:
@@ -284,6 +284,9 @@ class BootBook:
                 if d["what"] & LABEL_KEEP:
                     fs.keep_ns = d["keep"]
                     fs.flags = fs.flags | ondisk.FILE_DELETED if d["keep"] else fs.flags & ~ondisk.FILE_DELETED
+                if d["what"] & LABEL_SHOWN:
+                    fs.shown = list(d["shown"])
+                    fs.flags = fs.flags | ondisk.FILE_SHOWN if d["shown"] else fs.flags & ~ondisk.FILE_SHOWN
                 return fs
             before = LastBlock(old)
             for at, remove, runs in Absolute(d["splices"]):
