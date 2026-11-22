@@ -784,6 +784,12 @@ SRCDIR      = src
 BUILDDIR    = build
 # What a program file is made of, said on the build machine (tools/inside.c).
 INSIDE_TOOL = $(BUILDDIR)/inside
+# The packer of boxes and BoxLib's SHA-256 built for the build machine, which
+# the volume's maker links too (tools/create_tagfs_cargo.c): named here, before
+# any rule lists them among what it is made of — a prerequisite is read as the
+# rule is, and a name defined after it is no file at all there.
+PACK_TOOL   = $(BUILDDIR)/pack
+PACK_SHA256 = $(BUILDDIR)/pack_sha256.o
 BOOTDIR     = $(SRCDIR)/boot
 KERNELDIR   = $(SRCDIR)/kernel
 ENTRYDIR    = $(KERNELDIR)/entry
@@ -1129,9 +1135,6 @@ $(TAGFS_TOOL): tools/create_tagfs.c tools/create_tagfs_ground.c tools/create_tag
 BOX_SIGN_KEY      ?= $(HOME)/.boxos/sign/boxos.pem
 BOX_AUTHOR_HEADER  = $(BUILDDIR)/include/box_author.h
 PackSign = --sign $(BOX_SIGN_KEY) --as $(basename $(notdir $(1)))
-
-PACK_TOOL   = $(BUILDDIR)/pack
-PACK_SHA256 = $(BUILDDIR)/pack_sha256.o
 
 $(PACK_SHA256): $(USERSPACE_DIR)/boxlib/src/sha256.c $(USERSPACE_DIR)/boxlib/include/box/sha256.h \
                 $(TAGFS_OS_SIGNATURE) | $(BUILDDIR)
