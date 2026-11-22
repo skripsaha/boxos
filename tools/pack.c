@@ -1,7 +1,7 @@
 /*
  * pack — a program as the tree links it, an ELF, made a box (src/include/box_format.h).
  *
- *     tools/pack [--ask WORD]... [--role WORD] PROGRAM.elf PROGRAM.box
+ *     tools/pack [--ask WORD]... [--role WORD] [--sign KEY --as NAME] PROGRAM.elf PROGRAM.box
  *
  * What a program may do is what its box asks for (the part `asks`, box_reader.h
  * BoxAsksRead), and the program's maker says it: each --ask is one word the box
@@ -14,6 +14,15 @@
  * trusts it — tools/create_tagfs, which makes the volume from boxes it has just
  * packed — and nothing running reads it for a grant. A box packed with no role
  * is an ordinary program.
+ *
+ * Who made it is the box's signature (the part `signature`, box_format.h):
+ * --sign KEY --as NAME signs it with the author's private key KEY, a PEM file
+ * of an RSA key of 2048 bits, as the program called NAME — the author's name
+ * for it, which a system knows the program by beside the author. The signing
+ * is OpenSSL's on the build machine (`openssl pkeyutl`), the key never read
+ * here: what is signed is the digest the reader makes (BoxSignedDigest), and
+ * the box is sealed again around the signature and read back. A box packed
+ * without them carries no signature, and a system starts it as a guest.
  *
  * The ELF stays on the build machine, for the debugger; the box is what goes
  * on the volume. What goes where:
@@ -32,6 +41,7 @@
  *   .boxos.recipe      recipe   the text, its C string's zeros dropped
  *   --ask WORD         asks     the words, a line each after `asks`
  *   --role WORD        role     the one word, after `role`
+ *   --sign KEY --as N  signature the author's key, N, and the signature over the box
  *
  * An executable linked at a fixed address (ET_EXEC) keeps its addresses: its
  * box has no fixups and is loaded where it was linked. A static PIE (ET_DYN)
@@ -51,6 +61,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "box_pen.h"
 #include "box_host.h"
@@ -468,6 +479,120 @@ static void AddLoadable(BoxPenPart *parts, uint32_t *count, const char *name, co
         Add(parts, count, name, part->Bytes, part->Size, part->Memory, part->Place, BOX_FLAG_MUST_UNDERSTAND);
 }
 
+static uint8_t *ReadWhole(const char *path, uint64_t *size);
+
+/* ── the signature ───────────────────────────────────────────────────────── */
+
+/* `text` in single quotes for the shell, a quote inside it closed and opened
+ * again around an escaped one. */
+static void Quoted(char *out, size_t room, const char *text)
+{
+    size_t at = 0;
+    out[at++] = '\'';
+    for (; *text && at + 5 < room; text++) {
+        if (*text == '\'') {
+            memcpy(out + at, "'\\''", 4);
+            at += 4;
+        } else {
+            out[at++] = *text;
+        }
+    }
+    if (*text) Refuse("a key's path too long to be said to OpenSSL");
+    out[at++] = '\'';
+    out[at]   = '\0';
+}
+
+/* The public modulus of the RSA key in the PEM file `key`, big-endian, into
+ * `modulus`: OpenSSL says it as hex. */
+static void KeyModulus(const char *key, uint8_t modulus[BOX_SIGN_RSA2048_BYTES])
+{
+    char quoted[1100], command[1200], line[1100];
+    Quoted(quoted, sizeof(quoted), key);
+    snprintf(command, sizeof(command), "openssl rsa -in %s -noout -modulus 2>/dev/null", quoted);
+    FILE *said = popen(command, "r");
+    bool  read = said && fgets(line, sizeof(line), said) != NULL;
+    int   rc   = said ? pclose(said) : -1;
+    if (!read || rc != 0 || strncmp(line, "Modulus=", 8) != 0)
+        Refuse("its signing key cannot be read: OpenSSL says no RSA modulus of it");
+    const char *hex = line + 8;
+    size_t      digits = strspn(hex, "0123456789ABCDEFabcdef");
+    if (digits != 2u * BOX_SIGN_RSA2048_BYTES) Refuse("its signing key is no RSA key of 2048 bits");
+    for (size_t i = 0; i < BOX_SIGN_RSA2048_BYTES; i++) {
+        unsigned byte;
+        sscanf(hex + 2 * i, "%2x", &byte);
+        modulus[i] = (uint8_t)byte;
+    }
+}
+
+/* The `digest` signed with the private key in `key` — RSASSA-PKCS1-v1_5 over
+ * SHA-256, OpenSSL's — into `signature`. */
+static void SignDigest(const char *key, const uint8_t digest[BOX_HASH_BYTES],
+                       uint8_t signature[BOX_SIGN_RSA2048_BYTES])
+{
+    const char *dir = getenv("TMPDIR");
+    char        in[512], out[512], quoted[1100], command[3400];
+    snprintf(in, sizeof(in), "%s/pack-digest-XXXXXX", dir && *dir ? dir : "/tmp");
+    snprintf(out, sizeof(out), "%s/pack-signature-XXXXXX", dir && *dir ? dir : "/tmp");
+    int in_fd = mkstemp(in), out_fd = mkstemp(out);
+    if (in_fd < 0 || out_fd < 0) Refuse("no room to hand its digest to OpenSSL");
+    bool wrote = write(in_fd, digest, BOX_HASH_BYTES) == (ssize_t)BOX_HASH_BYTES;
+    close(in_fd);
+    close(out_fd);
+    Quoted(quoted, sizeof(quoted), key);
+    snprintf(command, sizeof(command),
+             "openssl pkeyutl -sign -inkey %s -pkeyopt digest:sha256 -in '%s' -out '%s' 2>/dev/null", quoted, in,
+             out);
+    bool     signed_ = wrote && system(command) == 0;
+    uint64_t size    = 0;
+    uint8_t *made    = signed_ ? ReadWhole(out, &size) : NULL;
+    unlink(in);
+    unlink(out);
+    if (!made || size != BOX_SIGN_RSA2048_BYTES) Refuse("OpenSSL would not sign its digest with its key");
+    memcpy(signature, made, BOX_SIGN_RSA2048_BYTES);
+    free(made);
+}
+
+/* The part `signature` as it is before it is signed: the author's key and
+ * the name, the signature itself zeros. A heap block of *size bytes. */
+static uint8_t *SignatureUnsigned(const char *key, const char *name, uint64_t *size)
+{
+    size_t length = strlen(name);
+    if (length == 0 || length > BOX_SIGN_NAME_MAX || !BoxNameSpelled((const uint8_t *)name, length))
+        Refuse("the name it is signed as is no name a box's signature carries");
+    *size          = BOX_SIGN_HEAD_BYTES + length + 2u * BOX_SIGN_RSA2048_BYTES;
+    uint8_t *bytes = calloc(1, *size);
+    if (!bytes) Refuse("no memory for its signature");
+    bytes[0] = BOX_SIGN_RSA2048_SHA256;
+    bytes[1] = (uint8_t)length;
+    BoxPut16(bytes + 2, BOX_SIGN_RSA2048_BYTES);
+    BoxPut16(bytes + 4, BOX_SIGN_RSA2048_BYTES);
+    memcpy(bytes + BOX_SIGN_HEAD_BYTES, name, length);
+    KeyModulus(key, bytes + BOX_SIGN_HEAD_BYTES + length);
+    return bytes;
+}
+
+/* The written box signed: its digest signed into the part `signature`, the
+ * part hashed and the box sealed again, and the whole read back. */
+static void SignBox(uint8_t *box, uint64_t bytes, const char *key, const BoxHasher *hasher)
+{
+    BoxHead      head;
+    BoxTable     table;
+    BoxPart      part;
+    BoxSignature signature;
+    uint8_t      digest[BOX_HASH_BYTES];
+    if (BoxReadHead(box, bytes, bytes, &head) != BOX_OK || BoxRead(box, bytes, &head, &table) != BOX_OK ||
+        !BoxPartOfKind(&table, BOX_KIND_SIGNATURE, &part) ||
+        BoxSignatureRead(box + part.Offset, part.Size, &signature) != BOX_OK)
+        Refuse("the box it was written in carries no signature to make");
+    BoxSignedDigest(&table, &part, &signature, hasher, digest);
+    SignDigest(key, digest, (uint8_t *)signature.Signature);
+    BoxPenReseal(box, part.Index, hasher);
+    if (BoxReadHead(box, bytes, bytes, &head) != BOX_OK || BoxRead(box, bytes, &head, &table) != BOX_OK ||
+        !BoxSealHolds(&table, hasher) || !BoxPartOfKind(&table, BOX_KIND_SIGNATURE, &part) ||
+        !BoxPartHolds(&part, box + part.Offset, hasher))
+        Refuse("the box would not be read once it was signed");
+}
+
 static uint8_t *ReadWhole(const char *path, uint64_t *size)
 {
     FILE *file = fopen(path, "rb");
@@ -491,21 +616,27 @@ static uint8_t *ReadWhole(const char *path, uint64_t *size)
 int main(int argc, char **argv)
 {
     char       *words[8];
-    const char *role_word = NULL;
+    const char *role_word = NULL, *sign_key = NULL, *sign_name = NULL;
     int         word_count = 0, at = 1;
-    while (at + 1 < argc && word_count < 8 && (strcmp(argv[at], "--ask") == 0 || strcmp(argv[at], "--role") == 0)) {
-        if (argv[at][2] == 'a') {
+    for (; at + 1 < argc && argv[at][0] == '-'; at += 2) {
+        const char *flag = argv[at], *value = argv[at + 1];
+        if (strcmp(flag, "--ask") == 0 && word_count < 8) {
             words[word_count++] = argv[at + 1];
-        } else if (role_word) {
-            fprintf(stderr, "pack: a program has one role\n");
-            return 2;
+        } else if (strcmp(flag, "--role") == 0 && !role_word) {
+            role_word = value;
+        } else if (strcmp(flag, "--sign") == 0 && !sign_key) {
+            sign_key = value;
+        } else if (strcmp(flag, "--as") == 0 && !sign_name) {
+            sign_name = value;
         } else {
-            role_word = argv[at + 1];
+            fprintf(stderr, "pack: %s is no word pack takes here — a program has one role, one signature, "
+                            "at most 8 asks\n", flag);
+            return 2;
         }
-        at += 2;
     }
-    if (argc - at != 2) {
-        fprintf(stderr, "usage: pack [--ask WORD]... [--role WORD] PROGRAM.elf PROGRAM.box\n");
+    if (argc - at != 2 || !sign_key != !sign_name) {
+        fprintf(stderr, "usage: pack [--ask WORD]... [--role WORD] [--sign KEY --as NAME] PROGRAM.elf "
+                        "PROGRAM.box\n");
         return 2;
     }
     const char *elf_path = argv[at], *box_path = argv[at + 1];
@@ -606,6 +737,11 @@ int main(int argc, char **argv)
         Add(parts, &count, "role", (const uint8_t *)role_text, role_size, role_size, 0, 0);
     }
 
+    uint64_t signature_size  = 0;
+    uint8_t *signature_bytes = sign_key ? SignatureUnsigned(sign_key, sign_name, &signature_size) : NULL;
+    if (signature_bytes)
+        Add(parts, &count, "signature", signature_bytes, signature_size, signature_size, 0, 0);
+
     BoxHostHash state  = { 0 };
     BoxHasher   hasher = BoxHostHasher(&state);
     uint64_t    bytes;
@@ -622,6 +758,8 @@ int main(int argc, char **argv)
             snprintf(why, sizeof(why), "the box would not be read: %s", BoxVerdictText(verdict));
         Refuse(why);
     }
+    if (sign_key)
+        SignBox(box, bytes, sign_key, &hasher);
 
     FILE *out = fopen(box_path, "wb");
     if (!out || fwrite(box, 1, bytes, out) != bytes || fclose(out) != 0) {
@@ -630,6 +768,7 @@ int main(int argc, char **argv)
     }
 
     free(box);
+    free(signature_bytes);
     free(fixups_bytes);
     free(thread_bytes);
     free(doors_bytes);

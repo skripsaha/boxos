@@ -71,6 +71,7 @@ typedef enum {
     BOX_FIXUP_ORDER,
     BOX_FIXUP_OUTSIDE,
     BOX_TEXT_LAYOUT,
+    BOX_SIGNATURE_LAYOUT,
     BOX_VERDICT_COUNT
 } BoxVerdict;
 
@@ -1052,6 +1053,78 @@ static inline BoxVerdict BoxRoleRead(const uint8_t *bytes, uint64_t size, BoxRol
     return BOX_OK;
 }
 
+/* ── signature ───────────────────────────────────────────────────────────── */
+
+typedef struct {
+    uint8_t        How;             /* BOX_SIGN_RSA2048_SHA256, or one this reader cannot check */
+    const uint8_t *Name;            /* the program's name as its author gives it */
+    uint8_t        NameLength;
+    const uint8_t *Key;             /* the author's public modulus, big-endian */
+    uint16_t       KeyBytes;
+    const uint8_t *Signature;       /* big-endian */
+    uint16_t       SignatureBytes;
+} BoxSignature;
+
+/* The `signature` part's `size` bytes at `bytes`: BOX_OK, or
+ * BOX_SIGNATURE_LAYOUT. A how this reader cannot check is read no further than
+ * its first byte (How alone is set) and is BOX_OK: a box signed another way is,
+ * to this system, a box that carries no signature. */
+static inline BoxVerdict BoxSignatureRead(const uint8_t *bytes, uint64_t size, BoxSignature *out)
+{
+    *out = (BoxSignature){ 0 };
+    if (size < BOX_SIGN_HEAD_BYTES) return BOX_SIGNATURE_LAYOUT;
+    out->How = bytes[0];
+    if (out->How != BOX_SIGN_RSA2048_SHA256) return BOX_OK;
+
+    uint8_t  name = bytes[1];
+    uint16_t key  = BoxU16(bytes + 2), sig = BoxU16(bytes + 4);
+    if (name == 0 || name > BOX_SIGN_NAME_MAX || key != BOX_SIGN_RSA2048_BYTES || sig != BOX_SIGN_RSA2048_BYTES ||
+        BoxU16(bytes + 6) != 0 || size != (uint64_t)BOX_SIGN_HEAD_BYTES + name + key + sig ||
+        !BoxNameSpelled(bytes + BOX_SIGN_HEAD_BYTES, name))
+        return BOX_SIGNATURE_LAYOUT;
+    out->Name           = bytes + BOX_SIGN_HEAD_BYTES;
+    out->NameLength     = name;
+    out->Key            = out->Name + name;
+    out->KeyBytes       = key;
+    out->Signature      = out->Key + key;
+    out->SignatureBytes = sig;
+    return BOX_OK;
+}
+
+/* The seal a signature is over: the box's, made with the `signature` part's
+ * own hash in the table read as zeros beside the seal's own 32 bytes — the
+ * hash of bytes the signature is part of cannot be in what it signs. */
+static inline void BoxSignedSeal(const BoxTable *table, const BoxPart *signature, const BoxHasher *hasher,
+                                 uint8_t seal[BOX_HASH_BYTES])
+{
+    static const uint8_t zeros[BOX_HASH_BYTES] = { 0 };
+    const uint8_t *prefix  = table->Prefix;
+    uint64_t       seal_to = BOX_AT_SEAL + BOX_SEAL_BYTES;
+    uint64_t       hash_at = table->Head.TableAt + (uint64_t)signature->Index * BOX_ENTRY_BYTES + BOX_ENTRY_HASH;
+    hasher->Begin(hasher->State);
+    hasher->Add(hasher->State, prefix, BOX_AT_SEAL);
+    hasher->Add(hasher->State, zeros, BOX_SEAL_BYTES);
+    hasher->Add(hasher->State, prefix + seal_to, hash_at - seal_to);
+    hasher->Add(hasher->State, zeros, BOX_HASH_BYTES);
+    hasher->Add(hasher->State, prefix + hash_at + BOX_HASH_BYTES,
+                table->Head.PrefixBytes - hash_at - BOX_HASH_BYTES);
+    hasher->End(hasher->State, seal);
+}
+
+/* What the signature is over: the SHA-256 of the signed seal followed by the
+ * program's name — the digest the author's key signs and a checker verifies
+ * (box_format.h). */
+static inline void BoxSignedDigest(const BoxTable *table, const BoxPart *part, const BoxSignature *signature,
+                                   const BoxHasher *hasher, uint8_t digest[BOX_HASH_BYTES])
+{
+    uint8_t seal[BOX_HASH_BYTES];
+    BoxSignedSeal(table, part, hasher, seal);
+    hasher->Begin(hasher->State);
+    hasher->Add(hasher->State, seal, BOX_HASH_BYTES);
+    hasher->Add(hasher->State, signature->Name, signature->NameLength);
+    hasher->End(hasher->State, digest);
+}
+
 /* ── words for a refusal ─────────────────────────────────────────────────── */
 
 /* The reason a verdict refuses, said so it follows "is not started: "; a
@@ -1095,6 +1168,7 @@ static inline const char *BoxVerdictText(BoxVerdict verdict)
     case BOX_FIXUP_ORDER:           return "its fixups do not rise";
     case BOX_FIXUP_OUTSIDE:         return "a fixup lies outside the bytes of its image";
     case BOX_TEXT_LAYOUT:           return "a part written as text is not written as such a part is";
+    case BOX_SIGNATURE_LAYOUT:      return "its signature is not laid out as a signature is";
     case BOX_VERDICT_COUNT:         break;
     }
     return "it was refused for a reason this system has no words for";

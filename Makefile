@@ -207,6 +207,9 @@ CFLAGS         = -Os -m64 -ffreestanding -nostdlib -mno-red-zone -mno-sse -mno-m
 # Kernel directories first to ensure correct header resolution
 INCLUDE_DIRS   := src $(shell find src/kernel -type d) $(shell find src/lib -type d) $(shell find src/boot -type d) $(shell find src/include -type d) $(shell find src/userspace -type d)
 CFLAGS         += $(addprefix -I,$(INCLUDE_DIRS))
+# What the build makes for the kernel to include and the tree does not keep:
+# the public half of the key the tree's programs are signed with (box_author.h).
+CFLAGS         += -I$(BUILDDIR)/include
 
 # Debug configuration (must be after CFLAGS definition)
 ifeq ($(DEBUG),on)
@@ -1815,10 +1818,32 @@ PackAsks = $(if $(filter $(basename $(notdir $(1))),$(PACK_ASKS_NOTHING)),,--ask
 PACK_SYSTEM = display hub pulse quilltest autostart reboot bye escheat timezone memtag hw usetest faretest logsave lastsaid journey finish taskboard memmap passport gardener
 PackRole = $(if $(filter $(basename $(notdir $(1))),$(PACK_SYSTEM)),--role system)
 
+# ‼ WHO MADE A PROGRAM is its box's signature (the part `signature`,
+# box_format.h): every box of the tree is signed by BoxOS — whoever builds the
+# tree — as the program its file is called, and the kernel trusts that author
+# by birth (box_trust.c). The key is the building machine's and never the
+# tree's: kept outside it, made by the first build that finds none, so no copy
+# of the tree carries a key that signs for it. The kernel is told its public
+# half alone (BOX_AUTHOR_HEADER). Anybody may sign their own programs with a
+# key of their own; a program by an author the kernel does not trust, or one
+# signed by nobody, still starts — as a guest.
+BOX_SIGN_KEY      ?= $(HOME)/.boxos/sign/boxos.pem
+BOX_AUTHOR_HEADER  = $(BUILDDIR)/include/box_author.h
+PackSign = --sign $(BOX_SIGN_KEY) --as $(basename $(notdir $(1)))
+
+$(BOX_SIGN_KEY):
+	@mkdir -p $(dir $@) && chmod 700 $(dir $@)
+	@openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out $@ 2>/dev/null && chmod 600 $@
+	@echo "  made the key this machine signs the tree's programs with: $@"
+
+$(BOX_AUTHOR_HEADER): $(BOX_SIGN_KEY) tools/box_author.py
+	@mkdir -p $(dir $@)
+	@python3 tools/box_author.py $(BOX_SIGN_KEY) > $@.tmp && mv $@.tmp $@
+
 define BoxRule
-$(call Box,$(1)): $(1) $(PACK_TOOL)
+$(call Box,$(1)): $(1) $(PACK_TOOL) $(BOX_SIGN_KEY)
 	@mkdir -p $$(dir $$@)
-	@$(PACK_TOOL) $(call PackAsks,$(1)) $(call PackRole,$(1)) $(1) $$@
+	@$(PACK_TOOL) $(call PackAsks,$(1)) $(call PackRole,$(1)) $(call PackSign,$(1)) $(1) $$@
 endef
 $(foreach elf,$(VOLUME_ELFS),$(eval $(call BoxRule,$(elf))))
 

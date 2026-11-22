@@ -934,6 +934,144 @@ static void TestAsks(void)
           "asks: a word near them is no word, passed over and never granted");
 }
 
+/* ── the signature ───────────────────────────────────────────────────────── */
+
+/* A signature part of the layout box_format.h gives: `name`, a key and a
+ * signature of made-up bytes — the layout is the reader's to hold, the
+ * arithmetic the checker's. *size its bytes. */
+static uint8_t *SignatureMade(const char *name, uint64_t *size)
+{
+    size_t   length = strlen(name);
+    uint8_t *bytes  = calloc(1, BOX_SIGN_HEAD_BYTES + length + 2u * BOX_SIGN_RSA2048_BYTES);
+    *size           = BOX_SIGN_HEAD_BYTES + length + 2u * BOX_SIGN_RSA2048_BYTES;
+    bytes[0]        = BOX_SIGN_RSA2048_SHA256;
+    bytes[1]        = (uint8_t)length;
+    BoxPut16(bytes + 2, BOX_SIGN_RSA2048_BYTES);
+    BoxPut16(bytes + 4, BOX_SIGN_RSA2048_BYTES);
+    memcpy(bytes + BOX_SIGN_HEAD_BYTES, name, length);
+    for (unsigned i = 0; i < 2u * BOX_SIGN_RSA2048_BYTES; i++) bytes[BOX_SIGN_HEAD_BYTES + length + i] = (uint8_t)(i * 7 + 3);
+    return bytes;
+}
+
+static BoxVerdict SignatureOf(const uint8_t *bytes, uint64_t size, BoxSignature *out)
+{
+    uint8_t   *copy    = Exact(bytes, size);
+    BoxVerdict verdict = BoxSignatureRead(copy, size, out);
+    free(copy);
+    return verdict;
+}
+
+/* The signed seal and the digest of the box at `box`, `bytes` long. */
+static void SignedOf(const uint8_t *box, uint64_t bytes, uint8_t seal[BOX_HASH_BYTES], uint8_t digest[BOX_HASH_BYTES])
+{
+    BoxHead      head;
+    BoxTable     table;
+    BoxPart      part;
+    BoxSignature signature;
+    BoxReadHead(box, bytes, bytes, &head);
+    BoxRead(box, bytes, &head, &table);
+    BoxPartOfKind(&table, BOX_KIND_SIGNATURE, &part);
+    BoxSignatureRead(box + part.Offset, part.Size, &signature);
+    BoxSignedSeal(&table, &part, &g_hasher, seal);
+    BoxSignedDigest(&table, &part, &signature, &g_hasher, digest);
+}
+
+static void TestSignature(void)
+{
+    Sample       sample;
+    BoxSignature signature;
+    BoxVerdict   verdict;
+    const char  *refused;
+    uint64_t     size, bytes;
+    uint8_t     *made = SignatureMade("edit", &size);
+    char         where[64];
+
+    uint8_t *exact = Exact(made, size);
+    Check(BoxSignatureRead(exact, size, &signature) == BOX_OK && signature.How == BOX_SIGN_RSA2048_SHA256 &&
+              signature.NameLength == 4 && signature.Name == exact + BOX_SIGN_HEAD_BYTES &&
+              memcmp(signature.Name, "edit", 4) == 0 && signature.Key == signature.Name + 4 &&
+              signature.KeyBytes == BOX_SIGN_RSA2048_BYTES &&
+              signature.Signature == signature.Key + BOX_SIGN_RSA2048_BYTES &&
+              signature.SignatureBytes == BOX_SIGN_RSA2048_BYTES,
+          "signature: read, its name, key and signature where the layout puts them");
+    free(exact);
+    Check(SignatureOf(made, BOX_SIGN_HEAD_BYTES - 1, &signature) == BOX_SIGNATURE_LAYOUT,
+          "signature: shorter than its head");
+    Check(SignatureOf(made, size - 1, &signature) == BOX_SIGNATURE_LAYOUT, "signature: a byte short");
+    made[1] = 0;
+    Check(SignatureOf(made, size, &signature) == BOX_SIGNATURE_LAYOUT, "signature: no name");
+    made[1] = BOX_SIGN_NAME_MAX + 1;
+    Check(SignatureOf(made, size, &signature) == BOX_SIGNATURE_LAYOUT, "signature: a name past its most");
+    made[1] = 4;
+    BoxPut16(made + 2, 128);
+    Check(SignatureOf(made, size, &signature) == BOX_SIGNATURE_LAYOUT, "signature: a key of another width");
+    BoxPut16(made + 2, BOX_SIGN_RSA2048_BYTES);
+    BoxPut16(made + 4, 255);
+    Check(SignatureOf(made, size, &signature) == BOX_SIGNATURE_LAYOUT, "signature: a signature of another width");
+    BoxPut16(made + 4, BOX_SIGN_RSA2048_BYTES);
+    made[6] = 1;
+    Check(SignatureOf(made, size, &signature) == BOX_SIGNATURE_LAYOUT, "signature: its zero is not zero");
+    made[6] = 0;
+    made[BOX_SIGN_HEAD_BYTES + 1] = ' ';
+    Check(SignatureOf(made, size, &signature) == BOX_SIGNATURE_LAYOUT, "signature: a name not spelled as one");
+    made[BOX_SIGN_HEAD_BYTES + 1] = 'd';
+    made[0] = 9;
+    Check(SignatureOf(made, size, &signature) == BOX_OK && signature.How == 9 && signature.NameLength == 0,
+          "signature: signed another way — read no further, as a box that carries none");
+    made[0] = BOX_SIGN_RSA2048_SHA256;
+
+    SampleMake(&sample);
+    Add(&sample, "signature", made, size, size, 0, 0);
+    uint8_t *box = Write(&sample, &bytes, &verdict, &refused);
+    snprintf(where, sizeof(where), "signature: the box carrying it is written (%s)", BoxVerdictText(verdict));
+    Check(box && verdict == BOX_OK, where);
+    if (!box || verdict != BOX_OK) return;
+
+    BoxHead  head;
+    BoxTable table;
+    BoxPart  part, code;
+    uint8_t  seal[BOX_HASH_BYTES], digest[BOX_HASH_BYTES], seal2[BOX_HASH_BYTES], digest2[BOX_HASH_BYTES];
+    SignedOf(box, bytes, seal, digest);
+    BoxReadHead(box, bytes, bytes, &head);
+    BoxRead(box, bytes, &head, &table);
+    BoxPartOfKind(&table, BOX_KIND_SIGNATURE, &part);
+    BoxPartOfKind(&table, BOX_KIND_CODE, &code);
+
+    /* What the signature is over leaves its own bytes out: signed again, the
+     * box sealed again around it, the digest is the one it signs. */
+    box[part.Offset + part.Size - 1] ^= 0x5A;
+    BoxPenReseal(box, part.Index, &g_hasher);
+    SignedOf(box, bytes, seal2, digest2);
+    BoxReadHead(box, bytes, bytes, &head);
+    BoxRead(box, bytes, &head, &table);
+    Check(BoxSealHolds(&table, &g_hasher) && BoxPartHolds(&part, box + part.Offset, &g_hasher) &&
+              memcmp(seal, seal2, BOX_HASH_BYTES) == 0 && memcmp(digest, digest2, BOX_HASH_BYTES) == 0,
+          "signature: its own bytes changed and the box sealed again — the seal holds, and what is signed is the same");
+    Check(memcmp(seal, box + BOX_AT_SEAL, BOX_HASH_BYTES) != 0,
+          "signature: the signed seal is not the box's own, which covers the signature's hash");
+
+    /* Anything else changed, the box made whole again as a forger would: what
+     * is signed is not what was signed. */
+    box[code.Offset + 7] ^= 0x01;
+    BoxPenReseal(box, code.Index, &g_hasher);
+    SignedOf(box, bytes, seal2, digest2);
+    BoxRead(box, bytes, &head, &table);
+    Check(BoxSealHolds(&table, &g_hasher) && memcmp(seal, seal2, BOX_HASH_BYTES) != 0 &&
+              memcmp(digest, digest2, BOX_HASH_BYTES) != 0,
+          "signature: a byte of code changed and the box sealed again — what is signed differs");
+    box[code.Offset + 7] ^= 0x01;
+    BoxPenReseal(box, code.Index, &g_hasher);
+
+    /* The name it is signed as is in what is signed. */
+    box[part.Offset + BOX_SIGN_HEAD_BYTES] = 'a';
+    BoxPenReseal(box, part.Index, &g_hasher);
+    SignedOf(box, bytes, seal2, digest2);
+    Check(memcmp(seal, seal2, BOX_HASH_BYTES) == 0 && memcmp(digest, digest2, BOX_HASH_BYTES) != 0,
+          "signature: the name it is signed as changed — what is signed differs");
+    free(box);
+    free(made);
+}
+
 static void TestTexts(void)
 {
     const char *fallback = BoxVerdictText(BOX_VERDICT_COUNT);
@@ -986,6 +1124,7 @@ int main(void)
     TestLife();
     TestAsks();
     TestRole();
+    TestSignature();
     TestWritten();
     TestTexts();
 
