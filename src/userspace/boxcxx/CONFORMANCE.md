@@ -481,8 +481,8 @@ and line — is recorded there.
   into the image, the whole of [time.zone], and the 27 leap seconds — see §2
   `<chrono>` for what that cost and what it chose. `chrono::parse` and
   `from_stream` came with it, so the library reads back every format it writes,
-  and **`__cpp_lib_chrono` is defined** at last (§1.3). The `clock:tzdb` door
-  and the `clock:zone` writer followed, so [time.zone.db.remote] is a working
+  and **`__cpp_lib_chrono` is defined** at last (§1.3). The door of a table
+  laid on the volume and the zone setting's writer followed, so [time.zone.db.remote] is a working
   clause here rather than a truthful stub — see §2 `<chrono>`.
 
 ## 1.3 Feature-test macros
@@ -1040,7 +1040,9 @@ looks identical and is not; see there.
   `locate_zone` makes no syscall, touches no disk and cannot fail for want of
   a file.
 - `✓` **[time.zone.db.remote] works, through TagFS rather than through a
-  network.** Lay a table under the tag `clock:tzdb` and `remote_version()`
+  network.** Lay a table on the volume — a file is one by what it begins
+  with, the table's magic, which the volume keeps on every file's card; the
+  one laid last is behind the door — and `remote_version()`
   reports its version and `reload_tzdb()` loads it, pushing a new `tzdb` onto
   the front of the list exactly as the clause describes. With nothing behind
   that door the newest database in reach IS the one in the image, and both
@@ -1071,14 +1073,15 @@ looks identical and is not; see there.
   release is a thing a person does. Comparing for difference obeys them;
   comparing for newer would ignore them silently, and they would find out from
   a wrong clock. Owner's decision, recorded here rather than left as a gap.
-- `~` **`current_zone()` reads the `clock:zone` tag and answers `Etc/UTC` when
-  nothing has set it.** A machine that has not been told where it is has no
+- `~` **`current_zone()` reads the zone setting — the file that begins
+  "timezone 1", the zone's name on its next line, the one made last — and
+  answers `Etc/UTC` when nothing has set it.** A machine that has not been told where it is has no
   local time to report, and UTC is the same fact `<ctime>` records when it says
   `localtime` IS `gmtime`. Every named zone still works: `locate_zone` answers
-  for all 598. The tag is read on every call rather than cached, so the answer
+  for all 598. The setting is read on every call rather than cached, so the answer
   is current because it looked and not because something remembered to
   invalidate.
-  **The other half of that tag is `box::clock::set_zone` (§5) and the
+  **The other half of that setting is `box::clock::set_zone` (§5) and the
   `timezone` command**, which no standard has a spelling for because setting
   the zone is a question about the machine, not about time. It resolves the
   name against the database before writing and stores the canonical spelling,
@@ -4907,7 +4910,7 @@ for them.
 | Memory | `heap.h`, `bay.h`, `bay_memory_resource.h`, `memtag.h`, `pku.h`, `hw.h` | Tagged allocation and accounting, cross-cabin shared memory, tagged-RAM introspection, protection keys, LAM/TME. |
 | Storage | `tagfs.h` | Tag-addressed files: query by tags, RAII contexts, anchor events. |
 | Clipboard | `clipboard.h` | The machine's list of what was copied: clips under numbers never given twice, newest first, taken by number, never let go on their own; terms for secrets (a count of whole takes, the putter's lifetime). |
-| Time | `clock.h` | Which reckoning of time the machine keeps: validate a zone name against the database, store it under `clock:zone`, announce the change. Reading it is `std::chrono::current_zone()`; only the writing half needed a name. |
+| Time | `clock.h` | Which reckoning of time the machine keeps: validate a zone name against the database, store it in the file that begins "timezone 1", announce the change on `clock:zone`. Reading it is `std::chrono::current_zone()`; only the writing half needed a name. |
 | Messaging | `message.h`, `brook.h` | Process-to-process messages and ordered SPSC streams. |
 | Launch | `luggage.h`, `form.h` | The line a program was started with, and its Form: the fields the shell (or BoxLib) filled — files, words, text — and the files it gives back as `them`. Failures are `box::result`; a line that could not be filled answers `invalid_argument`. |
 | System | `process.h`, `child.h`, `system.h`, `manifest.h`, `cpu.h` | Process and cabin identity, child supervision, firmware/EFI introspection, the expert syscall builder. |

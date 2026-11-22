@@ -21,6 +21,7 @@
 #include <new>
 #include <vector>
 
+#include "box/cxx/whose.h"
 #include "box/clock.h"
 #include "box/debug.h"
 #include "box/file.h"
@@ -56,7 +57,7 @@ Easel                   *g_on = nullptr;
 const char *ReadScene(file_id_t Fid, std::vector<std::uint8_t> &Bytes)
 {
     FileMetadata Metadata;
-    if (FileMetadataRead(Fid, &Metadata) != 0) return "its file could not be described";
+    if (FileMetadataRead(box::tagfs::my_tags, Fid, &Metadata) != 0) return "its file could not be described";
     const std::uint64_t Size = Metadata.Size;
     FileMetadataRelease(&Metadata);
     if (Size > BOX_SCENE_FILE_MOST) return "its file is bigger than a scene is read";

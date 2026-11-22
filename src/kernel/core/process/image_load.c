@@ -197,6 +197,8 @@ error_t ImageLoad(vmm_context_t *vmm, const ImageSource *source, const char *nam
     loaded->StackReserve   = CONFIG_USER_STACK_RESERVE;
     loaded->Rise           = false;
     loaded->Asks           = 0;
+    loaded->Trusted        = false;
+    loaded->Passport       = 0;
 
     error_t rc = ImageSourceRead(source, 0, head, look, name);
     if (rc != OK)

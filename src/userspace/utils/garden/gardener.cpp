@@ -17,6 +17,7 @@
 #include <string>
 #include <string_view>
 
+#include "box/cxx/whose.h"
 #include "box/clock.h"
 #include "box/core/cabin.h"
 #include "box/debug.h"
@@ -86,7 +87,7 @@ std::optional<Named> NameOf(std::uint32_t Pid, std::uint32_t Generation)
 {
     const Aboard    Program = AboardOf(Pid, Generation);
     FileMetadata    Metadata;
-    if (Program.File == 0 || FileMetadataRead(Program.File, &Metadata) != 0) return std::nullopt;
+    if (Program.File == 0 || FileMetadataRead(box::tagfs::my_tags, Program.File, &Metadata) != 0) return std::nullopt;
     Named Found{Metadata.Filename ? Metadata.Filename : "", Program.System};
     FileMetadataRelease(&Metadata);
     if (const std::size_t Dot = Found.Name.rfind('.'); Dot != std::string::npos && Dot > 0) Found.Name.resize(Dot);

@@ -53,33 +53,10 @@ static void own_form_text(const char **text, size_t *size)
 
 /* ---- the lookups ------------------------------------------------------- */
 
-#define STEM_MAX 31u
-
-/* The name's tag, as find_file_by_name takes it: the name up to its last dot.
- * NULL when that cannot be asked as a tag, and every file is asked. */
-static const char *stem_tag(const char *name, char *stem)
-{
-    size_t length = strlen(name);
-    size_t cut = length;
-    for (size_t i = length; i > 0; i--) {
-        if (name[i - 1] == '.') {
-            cut = i - 1;
-            break;
-        }
-    }
-    if (cut == 0 || cut > STEM_MAX) return NULL;
-    for (size_t i = 0; i < cut; i++) {
-        if (name[i] == ':' || name[i] == ',') return NULL;
-    }
-    memcpy(stem, name, cut);
-    stem[cut] = '\0';
-    return stem;
-}
-
 static bool called(file_id_t id, const char *name)
 {
     FileMetadata metadata;
-    if (FileMetadataRead(id, &metadata) != 0) return false;
+    if (FileMetadataRead(MY_TAGS, id, &metadata) != 0) return false;
     bool same = metadata.Filename && strcmp(metadata.Filename, name) == 0;
     FileMetadataRelease(&metadata);
     return same;
@@ -89,12 +66,12 @@ static bool called(file_id_t id, const char *name)
  * not it. */
 static int lookup_find(BoxFormLookup *lookup, const char *name, bool everywhere, file_id_t **ids)
 {
-    char       stem[STEM_MAX + 1];
     file_id_t *found = NULL;
     *ids = NULL;
+    if (name[0] == '\0') return 0;
 
-    const char *tag = stem_tag(name, stem);
-    int n = everywhere ? query_all_everywhere(tag, NULL, &found) : query_all(tag, NULL, &found);
+    int n = everywhere ? query_name_all_everywhere(PERSON_TAGS, name, NULL, NULL, &found)
+                       : query_name_all(PERSON_TAGS, name, NULL, NULL, &found);
     if (n < 0) return n;
 
     int kept = 0;
@@ -115,14 +92,14 @@ static int lookup_all(BoxFormLookup *lookup, bool everywhere, file_id_t **ids, b
     *ids = NULL;
     if (everywhere) {
         *bounded = false;
-        return query_all_everywhere(NULL, NULL, ids);
+        return query_all_everywhere(PERSON_TAGS, NULL, NULL, ids);
     }
 
     char   tags[256];
     size_t needed = 0;
     int    tag_count = use_get(tags, sizeof(tags), &needed);
     *bounded = tag_count > 0 || needed > 1;
-    return query_all(NULL, NULL, ids);
+    return query_all(PERSON_TAGS, NULL, NULL, ids);
 }
 
 void form_lookup_volume(BoxFormLookup *lookup)

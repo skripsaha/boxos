@@ -31,7 +31,7 @@ from . import ondisk, stitch, tally
 from .bookmount import Blocks, BookMount, LastBlock, Mismatch, Splice
 from .bookread import Short
 from .stitch import (BORN, COINED, LABELED, QUITCLAIM, SHAPED, UNDONE, KIND_NAMES, LABEL_FLAGS, LABEL_KEEP, LABEL_NAME,
-                     LABEL_TAGS)
+                     LABEL_HEAD, LABEL_SHOWN, LABEL_TAGS)
 from .stitch_ribbon import Ribbon
 
 # The roles a kernel is looked for by, in the order they are asked (§16.7 п.3).
@@ -48,6 +48,21 @@ def Scene(name):
     return name is not None and len(bytes(name)) > len(SCENE_SUFFIX) and bytes(name).endswith(SCENE_SUFFIX)
 
 
+def NameAnswers(name, word):
+    """Whether `word` is the whole of `name` or its stem — the name up to its
+    last dot, when something stands before it — as the kernel's name index
+    takes a word (TagFSNameWords; gangway_lectern_book.h LecternNameAnswers)."""
+    name, word = bytes(name), bytes(word)
+    if not word:
+        return False
+    stem = 0
+    for at in range(len(name), 1, -1):
+        if name[at - 1] == ord("."):
+            stem = at - 1
+            break
+    return word == name or (stem > 0 and word == name[:stem])
+
+
 def Spelling(word):
     """A tag as a person spells it (tag_spelling.h): (key, value or None) —
     blanks around it not part of it, the first ':' splitting the two, "key:"
@@ -58,10 +73,12 @@ def Spelling(word):
 
 
 def Spells(spelling, ts):
-    """Whether the book's tag `ts` (tally.TagState) is the one spelled: a
-    retired tag is none."""
+    """Whether the book's tag `ts` (tally.TagState) is the one the person
+    spelled: a retired tag is none, and neither is a program's own — the
+    settings are the person's words, and a program's tag of the same text is
+    another word (gangway_lectern_tree.c, LecternSpell)."""
     key, value = spelling
-    return not ts.flags & tally.TAG_RETIRED and ts.key == key and ts.value == value
+    return not ts.flags & (tally.TAG_RETIRED | tally.TAG_OWNED) and ts.key == key and ts.value == value
 
 
 def Role(flags):
@@ -244,7 +261,7 @@ class BootBook:
             if old is not None:
                 return old
             fs = tally.FileState(d["fid"], seq, d["flags"], d["size"], d["created_ns"], d["modified_ns"], d["name"],
-                                 d["tags"], d["runs"])
+                                 d["tags"], d["runs"], made_by=d["made_by"], shown=d["shown"], head=d["head"], passport=d["passport"])
         else:
             at = (seq - d["base"]) % (1 << 64)
             if old is None or old.gen != at:
@@ -267,6 +284,15 @@ class BootBook:
                 if d["what"] & LABEL_KEEP:
                     fs.keep_ns = d["keep"]
                     fs.flags = fs.flags | ondisk.FILE_DELETED if d["keep"] else fs.flags & ~ondisk.FILE_DELETED
+                if d["what"] & LABEL_SHOWN:
+                    fs.shown = list(d["shown"])
+                    fs.flags = fs.flags | ondisk.FILE_SHOWN if d["shown"] else fs.flags & ~ondisk.FILE_SHOWN
+                if d["what"] & LABEL_HEAD:
+                    fs.head = bytes(d["head"])
+                    fs.flags = fs.flags | ondisk.FILE_HEAD if d["head"] else fs.flags & ~ondisk.FILE_HEAD
+                if d["what"] & stitch.LABEL_PASSPORT:
+                    fs.passport = d["passport"]
+                    fs.flags |= ondisk.FILE_PASSPORT
                 return fs
             before = LastBlock(old)
             for at, remove, runs in Absolute(d["splices"]):

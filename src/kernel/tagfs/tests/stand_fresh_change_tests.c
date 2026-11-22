@@ -67,7 +67,7 @@ static TestResult TestStandChangeNamesOnlyNew(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, 16u * TAGFS_BLOCK_SIZE), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("fresh-new.bin", NULL, 0, &fid), 0, "a file is made on the book");
+    TEST_ASSERT_EQ(tagfs_create_file("fresh-new.bin", NULL, 0, 0, &fid), 0, "a file is made on the book");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, 10u * TAGFS_BLOCK_SIZE, 1), 10 * TAGFS_BLOCK_SIZE, "ten blocks written");
     runs = StandFreshForcedRuns(fid, false);
     TEST_ASSERT(runs >= 1, "in one run, but where ground another owner holds breaks it (Allotment 1) — judged "
@@ -208,7 +208,7 @@ static TestResult TestStandChangeCutIntoHole(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, 10u * TAGFS_BLOCK_SIZE), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("fresh-hole.bin", NULL, 0, &fid), 0, "a file is made on the book");
+    TEST_ASSERT_EQ(tagfs_create_file("fresh-hole.bin", NULL, 0, 0, &fid), 0, "a file is made on the book");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, TAGFS_BLOCK_SIZE, 21), TAGFS_BLOCK_SIZE, "a block is written");
     TEST_ASSERT_OK(StandFreshSpan(&m, fid, 10u * TAGFS_BLOCK_SIZE), "the file is grown across a hole of nine blocks");
     TEST_ASSERT(StandFreshSettledAndBack(&m, fid), "and settled");
@@ -282,7 +282,7 @@ static TestResult TestStandChangeGivenUpBetween(void)
         return test_steps_aside(aside);
     memset(&p, 0, sizeof(p));
     TEST_ASSERT(StandFreshModelMake(&m, TAGFS_BLOCK_SIZE), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("fresh-gone.bin", NULL, 0, &fid), 0, "a file is made on the book");
+    TEST_ASSERT_EQ(tagfs_create_file("fresh-gone.bin", NULL, 0, 0, &fid), 0, "a file is made on the book");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, TAGFS_BLOCK_SIZE, 31), TAGFS_BLOCK_SIZE, "and written");
     TEST_ASSERT_OK(PlotLoad(&p, fid, INK_UNWARRANTED), "a Plot of it is loaded");
     loaded = true;

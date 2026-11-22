@@ -72,8 +72,8 @@ static int StandStorageOp(uint16_t opcode, const void* params, uint16_t param_si
  * answer, and in s_answer [delivered][total][ids…]. */
 static int StandQuery(const char* tags, size_t len, uint64_t* out_size)
 {
-    uint8_t scope = STORAGE_SCOPE_EVERYWHERE;
-    return StandStorageOp(STORAGE_TAG_QUERY, &scope, 1, tags, len,
+    const uint8_t head[2] = { STORAGE_SCOPE_EVERYWHERE, STORAGE_TAGS_PERSON };
+    return StandStorageOp(STORAGE_TAG_QUERY, head, sizeof(head), tags, len,
                           s_answer, sizeof(s_answer), out_size);
 }
 
@@ -164,7 +164,7 @@ static TestResult TestStandLongKeyRefusedBeforeAllocation(void)
     TagSpelling unjudged = { s_long, NULL, STAND_LONG_BYTES, 0 };
     HeapFailArm(me, 1);
     armed = true;
-    error_t  rc   = TagRegistryIntern(scratch, &unjudged, &id);
+    error_t  rc   = TagRegistryIntern(scratch, TagOwnerPerson(), &unjudged, &id);
     uint32_t seen = HeapFailSeen();
     HeapFailDisarm();
     armed = false;
@@ -179,13 +179,13 @@ static TestResult TestStandLongKeyRefusedBeforeAllocation(void)
     TEST_ASSERT_EQ(id, TAGFS_INVALID_TAG_ID, "and gives it no number");
 
     TagSpelling widest = { s_long, NULL, TAG_KEY_WIDTH, 0 };
-    TEST_ASSERT_OK(TagRegistryIntern(scratch, &widest, &id), "a 255-byte key is a tag");
+    TEST_ASSERT_OK(TagRegistryIntern(scratch, TagOwnerPerson(), &widest, &id), "a 255-byte key is a tag");
     size_t      room = TAG_KEY_VALUE_WIDTH - 1;
     TagSpelling full = { "w", s_text, 1, room };
     memset(s_text, 'v', room + 1);
-    TEST_ASSERT_OK(TagRegistryIntern(scratch, &full, &id), "a value to the tag's full width is one");
+    TEST_ASSERT_OK(TagRegistryIntern(scratch, TagOwnerPerson(), &full, &id), "a value to the tag's full width is one");
     full.value_len = room + 1;
-    TEST_ASSERT_EQ(TagRegistryIntern(scratch, &full, &id), ERR_TAGFS_TAG_TOO_LONG,
+    TEST_ASSERT_EQ(TagRegistryIntern(scratch, TagOwnerPerson(), &full, &id), ERR_TAGFS_TAG_TOO_LONG,
                    "and a byte more is refused");
 out:
     if (armed)
@@ -215,7 +215,7 @@ static TestResult TestStandFullRegistryRefusesLoudly(void)
     scratch->next_id = TAGFS_MAX_TAG_ID + 1u;
 
     TagSpelling tag = TagSpellingOfKey("stand_full");
-    error_t     rc  = TagRegistryIntern(scratch, &tag, &id);
+    error_t     rc  = TagRegistryIntern(scratch, TagOwnerPerson(), &tag, &id);
     TestEvidence("new tags a registry with every number given out numbered", rc == OK ? 1 : 0);
     if (rc == OK) {
         verdict = TEST_DEFECT;
@@ -224,7 +224,7 @@ static TestResult TestStandFullRegistryRefusesLoudly(void)
     TEST_ASSERT_EQ(rc, ERR_TAGFS_REGISTRY_FULL, "the registry refuses it as full");
     TEST_ASSERT_EQ(id, TAGFS_INVALID_TAG_ID, "with no number");
     TEST_ASSERT(scratch->said_full, "and has said so");
-    TEST_ASSERT_EQ(TagRegistryIntern(scratch, &tag, &id), ERR_TAGFS_REGISTRY_FULL,
+    TEST_ASSERT_EQ(TagRegistryIntern(scratch, TagOwnerPerson(), &tag, &id), ERR_TAGFS_REGISTRY_FULL,
                    "the next ask is refused the same way");
 out:
     if (built) {
@@ -264,7 +264,7 @@ static bool StandListed(const TagSpelling* tags, uint32_t count, const TagSpelli
 {
     TagFSPage page;
     uint64_t  first = 0;
-    return TagFSQueryPage(tags, count, aside, aside_count, file_id, &first, 1, false, &page) == OK &&
+    return TagFSQueryPage(TagOwnerPerson(), tags, count, aside, aside_count, file_id, &first, 1, false, &page) == OK &&
            page.delivered == 1 && first == file_id;
 }
 
@@ -272,8 +272,8 @@ static bool StandListed(const TagSpelling* tags, uint32_t count, const TagSpelli
  * 1ULL << id, which is 0 for every id past 63: a file wearing one numbered
  * that high was listed with everything else. The volume leaves out nothing of
  * its own accord now, and a question names what it sets aside: a tag numbered
- * past 63 must leave out the file that wears it — from a question of its name
- * and from one of no tags at all — and only that file; and a file wearing
+ * past 63 must leave out the file that wears it — from a question of its own
+ * tag and from one of no tags at all — and only that file; and a file wearing
  * trashed is a file like any other to a question that sets nothing aside,
  * the tag said whole in what storage.getinfo answers. */
 static TestResult TestStandAsidePastTag63(void)
@@ -285,10 +285,11 @@ static TestResult TestStandAsidePastTag63(void)
 
     TEST_ASSERT(StandHighTag(s_aside_text, sizeof(s_aside_text), &high), "a tag numbered past 63");
     for (uint32_t i = 0; i < 3; i++)
-        TEST_ASSERT(StandMakeFile(names[i], NULL, 0, &files[i]), "a file of the test's own");
+        TEST_ASSERT(StandMakeTaggedFile(names[i], names[i], NULL, 0, &files[i]),
+                    "a file of the test's own, wearing its name's key as a tag");
     const TagSpelling trashed = TagSpellingOfKey("trashed");
     TEST_ASSERT_EQ(tagfs_add_tag(files[0], high), 0, "the first wears the tag");
-    TEST_ASSERT_OK(tagfs_add_tag_string(files[2], &trashed), "the third wears trashed");
+    TEST_ASSERT_OK(tagfs_add_tag_string(TagOwnerPerson(), files[2], &trashed), "the third wears trashed");
 
     TagSpelling named[3], aside;
     for (uint32_t i = 0; i < 3; i++)
@@ -318,25 +319,21 @@ out:
 // The create, tag and info stations
 // ----------------------------------------------------------------------------
 
-/* A name whose stem is longer than a key used to be cut to 127 bytes and worn
- * as that shorter tag; a create whose tag list held a tag past 255 made the
- * file without it. Both are refused now, and no file is made. */
+/* A create whose tag list held a tag past 255 made the file without it. It is
+ * refused now, and no file is made. (A long name is no tag, and is no reason
+ * to refuse: stand_name_tests.c.) */
 static TestResult TestStandCreateRefusesWhatItCannotTag(void)
 {
     TestResult  verdict = TEST_PASS;
     VolumeTally before, after;
-    uint64_t    file_id = 0;
     uint64_t    said    = 0;
 
     TEST_ASSERT(VolumeTallyTake(&before), "the volume's files are counted");
 
-    memset(s_text, 'n', STAND_VALUE_BYTES);
-    memcpy(s_text + STAND_VALUE_BYTES, ".txt", 5);
-    int made = tagfs_create_file(s_text, NULL, 0, &file_id);
-
-    uint8_t params[33] = { 0 };
+    uint8_t params[34] = { 0 };
     memcpy(params, "stand_spell_c", 13);
     params[32] = STORAGE_SCOPE_EVERYWHERE;
+    params[33] = STORAGE_TAGS_PERSON;
     memset(s_long, 'k', STAND_LONG_BYTES);
     s_long[STAND_LONG_BYTES] = '\0';
     size_t len = (size_t)ksnprintf(s_text, sizeof(s_text), "stand_spell,%s", s_long);
@@ -346,30 +343,30 @@ static TestResult TestStandCreateRefusesWhatItCannotTag(void)
 
     TEST_ASSERT(VolumeTallyTake(&after), "and counted again");
     TestEvidence("files made with a tag they could not wear", after.files - before.files);
-    if (made == 0 || deck == OK) {
-        if (made == 0) tagfs_delete_file(file_id, INK_UNWARRANTED);
-        if (deck == OK && said == sizeof(created)) tagfs_delete_file(created, INK_UNWARRANTED);
+    if (deck == OK) {
+        if (said == sizeof(created)) tagfs_delete_file(created, INK_UNWARRANTED);
         verdict = TEST_DEFECT;
         goto out;
     }
-    TEST_ASSERT_EQ(made, -(int)ERR_TAGFS_TAG_TOO_LONG, "a 300-byte stem is refused as too long");
-    TEST_ASSERT_EQ(deck, ERR_TAGFS_TAG_TOO_LONG, "and so is a create with a 256-byte tag");
+    TEST_ASSERT_EQ(deck, ERR_TAGFS_TAG_TOO_LONG, "a create with a 256-byte tag is refused as too long");
     TEST_ASSERT_EQ(after.files, before.files, "and no file was made");
 out:
     return verdict;
 }
 
-/* Whether storage.getinfo gives back the tag `text` spells whole: its key and
- * value, each at its own length. The record is [u64 id][u64 size][u32 tags]
- * [u16 name_len][name], then per tag [u16 key_len][u16 val_len][u8 type][key]
- * [val]. */
+/* Whether storage.getinfo gives back the person's tag `text` spells whole:
+ * its key and value, each at its own length. The record is [u64 id][u64 size]
+ * [u32 tags][u16 name_len][name], then per tag [u16 key_len][u16 val_len]
+ * [u8 type][u64 owner][key][val]. */
 static bool StandInfoHasWhole(uint64_t file_id, const char* text)
 {
     TagSpelling tag;
     uint64_t    said = 0;
-    uint64_t    id   = file_id;   /* a program's file_id_t */
+    uint8_t     params[9];
+    memcpy(params, &file_id, sizeof(file_id));    /* a program's file_id_t */
+    params[8] = STORAGE_TAGS_PERSON;
     if (TagSpell(text, strlen(text), &tag) != OK ||
-        StandStorageOp(STORAGE_OBJ_GET_INFO, &id, sizeof(id), NULL, 0,
+        StandStorageOp(STORAGE_OBJ_GET_INFO, params, sizeof(params), NULL, 0,
                        s_info, sizeof(s_info), &said) != OK || said < 22)
         return false;
 
@@ -377,15 +374,17 @@ static bool StandInfoHasWhole(uint64_t file_id, const char* text)
     uint16_t name_len;
     memcpy(&tags, s_info + 16, 4);
     memcpy(&name_len, s_info + 20, 2);
-    for (uint64_t at = 22u + name_len, t = 0; t < tags && at + 5 <= said; t++) {
+    for (uint64_t at = 22u + name_len, t = 0; t < tags && at + 13 <= said; t++) {
         uint16_t kl, vl;
+        uint64_t owner;
         memcpy(&kl, s_info + at, 2);
         memcpy(&vl, s_info + at + 2, 2);
-        if (kl == tag.key_len && vl == tag.value_len && at + 5 + kl + vl <= said &&
-            memcmp(s_info + at + 5, tag.key, kl) == 0 &&
-            memcmp(s_info + at + 5 + kl, tag.value, vl) == 0)
+        memcpy(&owner, s_info + at + 5, 8);
+        if (owner == 0 && kl == tag.key_len && vl == tag.value_len && at + 13 + kl + vl <= said &&
+            memcmp(s_info + at + 13, tag.key, kl) == 0 &&
+            memcmp(s_info + at + 13 + kl, tag.value, vl) == 0)
             return true;
-        at += 5u + kl + vl;
+        at += 13u + kl + vl;
     }
     return false;
 }
@@ -403,8 +402,10 @@ static TestResult TestStandTagSetWearsWhatItWasGiven(void)
 
     TEST_ASSERT(StandMakeFile("stand_spell_s", NULL, 0, &file_id), "a file of the test's own");
     size_t   len  = StandTagText("stand_spell", 's', STAND_SET_VALUE);
-    uint64_t fid  = file_id;   /* a program's file_id_t */
-    int      set  = StandStorageOp(STORAGE_TAG_SET, &fid, sizeof(fid), s_text, len, NULL, 0, &said);
+    uint8_t  fid[9];           /* a program's file_id_t, and whose */
+    memcpy(fid, &file_id, 8);
+    fid[8] = STORAGE_TAGS_PERSON;
+    int      set  = StandStorageOp(STORAGE_TAG_SET, fid, sizeof(fid), s_text, len, NULL, 0, &said);
     uint32_t want = tagfs_tag_lookup(s_text);
     bool     worn = want != TAGFS_INVALID_TAG_ID && tagfs_has_tag(file_id, want);
     TestEvidence("tag adds of a 100-byte value that put some other tag on the file", set == OK && !worn);
@@ -416,13 +417,13 @@ static TestResult TestStandTagSetWearsWhatItWasGiven(void)
     TEST_ASSERT(worn, "and the file wears exactly it");
     TEST_ASSERT(StandInfoHasWhole(file_id, s_text), "its info carries the tag whole");
 
-    TEST_ASSERT_OK(StandStorageOp(STORAGE_TAG_UNSET, &fid, sizeof(fid), s_text, len, NULL, 0, &said),
+    TEST_ASSERT_OK(StandStorageOp(STORAGE_TAG_UNSET, fid, sizeof(fid), s_text, len, NULL, 0, &said),
                    "unset of the same text is taken");
     TEST_ASSERT(!tagfs_has_tag(file_id, want), "and takes exactly that tag off");
 
     len = StandTagText("stand_info", 'i', STAND_VALUE_BYTES);
     TEST_ASSERT_OK(TagSpell(s_text, len, &spelled), "a tag with a 300-byte value spells");
-    TEST_ASSERT_OK(tagfs_add_tag_string(file_id, &spelled),
+    TEST_ASSERT_OK(tagfs_add_tag_string(TagOwnerPerson(), file_id, &spelled),
                    "and is put on the file");
     TEST_ASSERT(StandInfoHasWhole(file_id, s_text), "and its info carries all 300 bytes of it");
 out:
@@ -454,8 +455,7 @@ static const TestCase g_stand_spelling_tests[] = {
                        "volume leaves out a trashed file no question set aside" },
     { .name  = "stand_create_refuses_what_it_cannot_tag",
       .func  = TestStandCreateRefusesWhatItCannotTag, .reach = TEST_WRITES_TO_VOLUME,
-      .caveat_defect = "a create cuts its name's tag to 127 bytes, or makes the file without a tag "
-                       "it could not read" },
+      .caveat_defect = "a create makes the file without a tag it could not read" },
     { .name  = "stand_tag_set_wears_what_it_was_given",
       .func  = TestStandTagSetWearsWhatItWasGiven, .reach = TEST_WRITES_TO_VOLUME,
       .caveat_defect = "tag add cuts a value past 63 bytes and puts a different tag on the file" },

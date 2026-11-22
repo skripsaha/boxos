@@ -213,9 +213,15 @@ CENSUS_BOOK_EOF
 # "slipped") read in the guest by `show`: its bytes, the Slips laid over its
 # base, held byte for byte to volume-read's own read of the file (Content) —
 # escaped as `show` escapes what does not print, and as the bytes reach the
-# log: the '\r' and '\t' `show` passes are dropped by the console daemon,
-# which keeps no byte below 0x20 but '\n' and '\b' (display.c), and each '\n'
-# goes out on the wire as "\r\n" (serial.c), so the log is read as it lies.
+# log: the display says what it draws into the log ring as the program gave
+# it (display.cpp, Utter), the '\r' and '\t' `show` passes among it, and each
+# '\n' goes out on the wire as "\r\n" (serial.c), so the log is read as it lies.
+# The wire carries the kernel's log beside the console — a program's kdbg, the
+# kernel's own account — and those lines fall among the console's wherever
+# they come, a prompt's "~ " ending the line one of them then starts: the
+# console's text is read out of the log first, every logged line taken out and
+# a buried prompt kept with what was typed after it, as prompt_at_end reads it
+# (stand_typer.sh).
 # `show` gives a file's first 4096 bytes and no more (show.c): of a file whose
 # Slips lie past them — the kernel's own on B65 — the line says that those are
 # what it read.
@@ -236,12 +242,22 @@ print(" ".join(f["name"] for f in json.load(open(sys.argv[1]))["kernel"].get("sl
     make run-stop >/dev/null 2>&1
     cp build/serial.log "$SCRATCH/serial.$1.slipped.log"
     python3 - "$json" "$SCRATCH/serial.$1.slipped.log" >"$SCRATCH/census.$1.slipped.verdict" 2>&1 <<'SLIPPED_EOF'
-import json, sys
+import json, re, sys
 SHOWN = 4096    # the bytes of a file `show` gives (show.c)
+LOGGED = re.compile(r"(\[[0-9]+\] )?\[[A-Za-z][^][]*\] ")    # a line of the log, as prompt_at_end knows one
+def console(log):
+    kept, prompt = [], ""
+    for line in log.split("\n"):
+        if line.startswith("~ ") and LOGGED.match(line, 2):
+            prompt = "~ "
+        elif not LOGGED.match(line):
+            kept.append(prompt + line)
+            prompt = ""
+    return "\n".join(kept)
 k = json.load(open(sys.argv[1]))["kernel"]
-log = open(sys.argv[2], errors="replace", newline="").read()
+log = console(open(sys.argv[2], errors="replace", newline="").read())
 for f in k.get("slipped", []):
-    want = "".join(c if 32 <= ord(c) < 127 or c == "\n" else "" if c in "\r\t" else "\\x%02x" % ord(c)
+    want = "".join(c if 32 <= ord(c) < 127 or c in "\n\r\t" else "\\x%02x" % ord(c)
                    for c in f["content"][:SHOWN]).replace("\n", "\r\n")
     at = log.find("~ show %s" % f["name"])
     got = log[at:].split("\n", 1)[1] if at >= 0 and "\n" in log[at:] else ""

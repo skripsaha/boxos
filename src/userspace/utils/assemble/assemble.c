@@ -151,7 +151,7 @@ static int RecipeSourceThere(const BoxRecipe *Recipe, const char *Program)
     int Trashed;
 
     memset(&Metadata, 0, sizeof(Metadata));
-    Rc = FileMetadataRead(Recipe->Files[0].Id, &Metadata);
+    Rc = FileMetadataRead(PERSON_TAGS, Recipe->Files[0].Id, &Metadata);
     if (Rc != 0 && Rc != -ERR_FILE_NOT_FOUND) {
         AssembleSayError(Recipe->Files[0].Name, Rc, NULL);
         return Rc;
@@ -206,7 +206,7 @@ static int FollowRecipe(AssembleRequest *Request)
     if (!Recipe.Image)
         return 0;
     memset(&Metadata, 0, sizeof(Metadata));
-    if ((Rc = FileMetadataRead(Request->SourceId, &Metadata)) != 0) {
+    if ((Rc = FileMetadataRead(PERSON_TAGS, Request->SourceId, &Metadata)) != 0) {
         recipe_release(&Recipe);
         AssembleSayError("program metadata", Rc, NULL);
         return Rc;
@@ -264,7 +264,7 @@ static int LoadSource(AssembleRequest *Request)
         return Rc;
     }
     memset(&Metadata, 0, sizeof(Metadata));
-    Rc = FileMetadataRead(Request->SourceId, &Metadata);
+    Rc = FileMetadataRead(PERSON_TAGS, Request->SourceId, &Metadata);
     if (Rc != 0) {
         AssembleSayError("source metadata", Rc, NULL);
         return Rc;

@@ -13,7 +13,7 @@ BOX_FORM("takes things \"the files to tag\"\n"
 static bool give_tags(file_id_t file, const char *const *tags, size_t tag_count)
 {
     for (size_t t = 0; t < tag_count; t++) {
-        if (tag_add(file, tags[t]) == 0) continue;
+        if (tag_add(PERSON_TAGS, file, tags[t]) == 0) continue;
         char *name = name_of_file(file);
         printf("Could not give the tag %s to %s\n", tags[t], name ? name : "a file");
         free(name);

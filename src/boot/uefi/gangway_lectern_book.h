@@ -137,6 +137,32 @@ static inline int LecternSceneNamed(const uint8_t *name, uint64_t len)
     return 1;
 }
 
+/* Whether `word` (NUL-terminated) is the whole of `name` (`len` bytes) or its
+ * stem — the name up to its last dot, when something stands before it — as the
+ * kernel's name index takes a word (TagFSNameWords): a name is no tag of its
+ * file, and a word a person's settings ask a scene by is a tag it wears or the
+ * name it is called. */
+static inline int LecternNameAnswers(const uint8_t *name, uint64_t len, const char *word)
+{
+    uint64_t asked = 0, stem = 0;
+    while (word[asked]) asked++;
+    if (asked == 0) return 0;
+    for (uint64_t at = len; at > 1; at--) {
+        if (name[at - 1] == (uint8_t)'.') {
+            stem = at - 1;
+            break;
+        }
+    }
+    for (int whole = 1; whole >= 0; whole--) {
+        uint64_t n = whole ? len : stem;
+        uint64_t i = 0;
+        if (n != asked) continue;
+        while (i < n && name[i] == (uint8_t)word[i]) i++;
+        if (i == n) return 1;
+    }
+    return 0;
+}
+
 /* A tag as a person spells it — "key" or "key:value", blanks around it not
  * part of it, the first ':' splitting the two and "key:" "key" (tag_spelling.h)
  * — in place in the word it was read from. */
@@ -161,10 +187,12 @@ static inline void LecternSpell(const char *word, LecternSpelling *s)
     s->has_value = s->value_len != 0;
 }
 
-/* Whether the book's tag `t` is the one `s` spells: a retired tag is none. */
+/* Whether the book's tag `t` is the one the person spelled in `s`: a retired
+ * tag is none, and neither is a program's own (OWNED) — the settings speak the
+ * person's words, and a program's tag of the same text is another word. */
 static inline int LecternSpells(const LecternSpelling *s, const TallyTag *t)
 {
-    if ((t->flags & TALLY_TAG_RETIRED) || t->key_len != s->key_len ||
+    if ((t->flags & (TALLY_TAG_RETIRED | TALLY_TAG_OWNED)) || t->key_len != s->key_len ||
         !(t->flags & TALLY_TAG_HAS_VALUE) != !s->has_value || (s->has_value && t->value_len != s->value_len))
         return 0;
     for (uint64_t i = 0; i < s->key_len; i++)

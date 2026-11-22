@@ -4,6 +4,7 @@
 
 #include <utility>
 
+#include "box/cxx/whose.h"
 #include "box/memory.h"
 
 namespace hub::volume {
@@ -18,7 +19,7 @@ constexpr std::uint64_t Piece = 64 * 1024;
 std::expected<Record, int> Record::Of(file_id_t File)
 {
     Record Found;
-    const int Rc = FileMetadataRead(File, &Found.Held);
+    const int Rc = FileMetadataRead(box::tagfs::person_tags, File, &Found.Held);
     if (Rc != 0) return std::unexpected(Rc < 0 ? Rc : -Rc);
     return Found;
 }

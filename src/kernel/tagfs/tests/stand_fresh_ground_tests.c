@@ -167,7 +167,7 @@ static TestResult TestStandFreshAppendsKeepOneRun(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, (uint64_t)STAND_FRESH_APPENDS * TAGFS_BLOCK_SIZE), "room for the log's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("fresh-log.txt", NULL, 0, &fid), 0, "a log is made on the book");
+    TEST_ASSERT_EQ(tagfs_create_file("fresh-log.txt", NULL, 0, 0, &fid), 0, "a log is made on the book");
     TEST_ASSERT(StandFreshAppends(&m, fid, STAND_FRESH_APPENDS, TAGFS_BLOCK_SIZE, &passed),
                 "a thousand blocks are appended, each named by the log's record as it lands");
     runs = StandFreshRuns(fid, false, NULL);
@@ -178,7 +178,7 @@ static TestResult TestStandFreshAppendsKeepOneRun(void)
                 "ground — a run broken only by ground another owner holds");
     TEST_ASSERT(StandFreshLogStrips(fid, runs, false), "and its record a Strip a cycle on each run, not one an append");
     TEST_ASSERT(StandFreshSettledAndBack(&m, fid), "settled and mounted again, it reads them all");
-    TEST_ASSERT_EQ(tagfs_create_file("fresh-lines.txt", NULL, 0, &fid), 0, "a second log is made");
+    TEST_ASSERT_EQ(tagfs_create_file("fresh-lines.txt", NULL, 0, 0, &fid), 0, "a second log is made");
     m.size = 0;
     TEST_ASSERT(StandFreshAppends(&m, fid, STAND_FRESH_APPENDS, 333u, &passed),
                 "a thousand lines of 333 bytes are appended, each block they fill named as it lands");
@@ -209,7 +209,7 @@ static TestResult TestStandFreshOverwriteOneRun(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, STAND_FRESH_SPAN_BLOCKS * TAGFS_BLOCK_SIZE), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("fresh-over.bin", NULL, 0, &fid), 0, "a file is made on the book");
+    TEST_ASSERT_EQ(tagfs_create_file("fresh-over.bin", NULL, 0, 0, &fid), 0, "a file is made on the book");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, STAND_FRESH_SPAN_BLOCKS * TAGFS_BLOCK_SIZE, 61),
                    (int)(STAND_FRESH_SPAN_BLOCKS * TAGFS_BLOCK_SIZE), "64 blocks are written");
     TEST_ASSERT(StandFreshSettledAndBack(&m, fid) && StandBlockOf(fid, 8, &old), "and settled");
@@ -359,7 +359,7 @@ static TestResult TestStandFreshParcelCopied(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, (uint64_t)STAND_FRESH_PARCEL_BLOCKS * TAGFS_BLOCK_SIZE), "room for 32 MiB");
-    TEST_ASSERT_EQ(tagfs_create_file("fresh-parcels.bin", NULL, 0, &fid), 0, "a file is made on the book");
+    TEST_ASSERT_EQ(tagfs_create_file("fresh-parcels.bin", NULL, 0, 0, &fid), 0, "a file is made on the book");
     TEST_ASSERT(StandFreshManyRuns(&m, fid), "32 MiB written, and one block of every sixteen written over");
     FileRecord* rec = FileMapRecordHold(fs->files, fid, NULL);
     uint64_t    parcels = rec ? rec->strip_count / PARCEL_STRIPS_MOST : 0;
@@ -451,7 +451,7 @@ static TestResult TestStandFreshFillAndEmpty(void)
     quires = __atomic_load_n(&RibbonCursorNow()->quires, __ATOMIC_ACQUIRE);
     TestFillAt(g_test_buffer, sizeof(g_test_buffer), 81, 0);
     while (made < STAND_FRESH_FILL_MOST && rc == OK) {
-        TEST_ASSERT_EQ(tagfs_create_file("fresh-fill.bin", NULL, 0, &fids[made]), 0, "a file is made");
+        TEST_ASSERT_EQ(tagfs_create_file("fresh-fill.bin", NULL, 0, 0, &fids[made]), 0, "a file is made");
         rc = StandFreshFill(fids[made++]);
         uint64_t went = __atomic_load_n(&RibbonCursorNow()->quires, __ATOMIC_ACQUIRE) - quires;
         TEST_ASSERT(fs->free_blocks + went * s.at.quire_blocks >= kept,
@@ -493,7 +493,7 @@ static TestResult TestStandFreshBigWrite(void)
         STAND_STITCH_PUT_BACK(&s);
         return test_steps_aside("the heap holds no 16 MiB for the write's bytes");
     }
-    TEST_ASSERT_EQ(tagfs_create_file("fresh-big.bin", NULL, 0, &fid), 0, "a file is made on the book");
+    TEST_ASSERT_EQ(tagfs_create_file("fresh-big.bin", NULL, 0, 0, &fid), 0, "a file is made on the book");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, STAND_FRESH_BIG_BYTES, 91), (int)STAND_FRESH_BIG_BYTES,
                    "16 MiB are written in one call");
     TEST_ASSERT(StandFreshSettledAndBack(&m, fid), "settled and mounted again, every byte reads back");

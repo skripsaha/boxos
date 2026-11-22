@@ -2,6 +2,7 @@
 
 #include "fill.h"
 
+#include "box/cxx/whose.h"
 #include "box/error.h"
 #include "box/file.h"
 
@@ -79,7 +80,7 @@ int ArrowScreen(BoxFormFiller *Filler, std::string_view Who, file_id_t &Screen)
     const char *Make = nullptr;
     const int   Rc   = form_fill_arrow(Filler, &Screen, &Make);
     if (Rc < 0 || !Make) return Rc;
-    const int64_t Made = create(Make, nullptr);
+    const int64_t Made = create(box::tagfs::person_tags, Make, nullptr);   // in the person's Use Context
     if (Made <= 0) {
         Say("{}: cannot make the file after -> ({})\n", Who, Reason(Made < 0 ? static_cast<int>(Made) : -ERR_UNKNOWN));
         return Stopped;

@@ -18,7 +18,7 @@ from . import bookread, dog_ear, ondisk, stitch, stitch_ribbon, tally
 from .bookread import Short
 from .ondisk import BLOCK, RunsNormal
 from .stitch import (BORN, COINED, FROZEN, LABELED, QUITCLAIM, SHAPED, THAWED, UNDONE, USE_CONTEXT,
-                     DATA_FLUSHED, KIND_NAMES, LABEL_FLAGS, LABEL_KEEP, LABEL_NAME, LABEL_TAGS)
+                     DATA_FLUSHED, KIND_NAMES, LABEL_FLAGS, LABEL_HEAD, LABEL_KEEP, LABEL_NAME, LABEL_SHOWN, LABEL_TAGS)
 from .tally import FileState, Run
 
 
@@ -84,6 +84,15 @@ def LastBlock(fs):
             return n - 1, (None if r.hole else r.start + (n - 1 - pos))
         pos += r.count
     return n - 1, "beyond its runs"
+
+
+def _Whose(ts):
+    """Whose a tag is, in the words a refusal says it in."""
+    if not ts.owner:
+        return "the person"
+    if ts.owner & ondisk.PASSPORT_BIT:
+        return "the program of passport %016x" % ts.owner
+    return "program fid %u" % ts.owner
 
 
 def _Reach(r):
@@ -687,12 +696,17 @@ class BookMount:
     def _Coined(self, u, d, tags):
         tid, ts = d["tid"], d["tag"]
         tally.TagGlass(tid, ts, self.glass)
-        if ts.flags & tally.TAG_RETIRED:
-            return
         have = tags.get(tid)
-        if have is not None and (have.key, have.value) != (ts.key, ts.value):
-            raise Refused("its Coined gives id %u to '%s', which the volume knows as '%s'"
-                          % (tid, ts.Text().decode("utf-8", "replace"), have.Text().decode("utf-8", "replace")))
+        if ts.flags & tally.TAG_RETIRED:
+            tags[tid] = ts
+            return
+        if have is not None and have.flags & tally.TAG_RETIRED:
+            raise Refused("its Coined gives id %u to '%s' of %s, which the volume has RETIRED — an id is given no "
+                          "more" % (tid, ts.Text().decode("utf-8", "replace"), _Whose(ts)))
+        if have is not None and (have.key, have.value, have.owner) != (ts.key, ts.value, ts.owner):
+            raise Refused("its Coined gives id %u to '%s' of %s, which the volume knows as '%s' of %s"
+                          % (tid, ts.Text().decode("utf-8", "replace"), _Whose(ts),
+                             have.Text().decode("utf-8", "replace"), _Whose(have)))
         tags[tid] = ts
 
     def _File(self, u, kind, d, files, tags, fallow, overlay):
@@ -705,7 +719,7 @@ class BookMount:
                               % fid)
             self.born.add(fid)
             fs = FileState(fid, seq, d["flags"], d["size"], d["created_ns"], d["modified_ns"], d["name"],
-                           d["tags"], d["runs"])
+                           d["tags"], d["runs"], made_by=d["made_by"], shown=d["shown"], head=d["head"], passport=d["passport"])
             self._Holds(fs, tags, d["tags"])
         else:
             old = files.get(fid)
@@ -755,9 +769,9 @@ class BookMount:
 
     @staticmethod
     def _Holds(fs, tags, wears):
-        unknown = [t for t in wears if t not in tags]
+        unknown = [t for t in wears if t not in tags or tags[t].flags & tally.TAG_RETIRED]
         if unknown:
-            raise Mismatch("it wears tag id(s) %s no Coined or TAGS names" % unknown)
+            raise Mismatch("it wears tag id(s) %s that no Coined or TAGS names or that are RETIRED" % unknown)
 
     def _Label(self, fs, d, tags):
         if d["what"] & LABEL_NAME:
@@ -769,6 +783,15 @@ class BookMount:
         if d["what"] & LABEL_KEEP:
             fs.keep_ns = d["keep"]
             fs.flags = fs.flags | ondisk.FILE_DELETED if d["keep"] else fs.flags & ~ondisk.FILE_DELETED
+        if d["what"] & LABEL_SHOWN:
+            fs.shown = list(d["shown"])
+            fs.flags = fs.flags | ondisk.FILE_SHOWN if d["shown"] else fs.flags & ~ondisk.FILE_SHOWN
+        if d["what"] & LABEL_HEAD:
+            fs.head = bytes(d["head"])
+            fs.flags = fs.flags | ondisk.FILE_HEAD if d["head"] else fs.flags & ~ondisk.FILE_HEAD
+        if d["what"] & stitch.LABEL_PASSPORT:
+            fs.passport = d["passport"]
+            fs.flags = fs.flags | ondisk.FILE_PASSPORT if d["passport"] else fs.flags & ~ondisk.FILE_PASSPORT
         if d["what"] & LABEL_TAGS:
             worn = set(fs.tags)
             if any(t in worn for t in d["add"]) or any(t not in worn for t in d["drop"]):
@@ -806,6 +829,11 @@ class BookMount:
         but SHARED alone and flags past 32 bits are what this kernel cannot
         carry on; a Slip it carries on (§16.5 п.13)."""
         g = self.g
+        for fid in sorted(self.files):
+            worn = [t for t in self.files[fid].tags if t in self.tags and self.tags[t].flags & tally.TAG_RETIRED]
+            if worn:
+                self.Say("RETIRED_WORN", "damage", "fid %u wears tag id(s) %s, RETIRED — no file wears a retired id; "
+                         "the file stays as it is" % (fid, worn))
         for fid in sorted(self.files):
             fs = self.files[fid]
             out = [r for r in fs.Ground() if r[0] < g.data_block or r[0] + r[1] > g.data_end]

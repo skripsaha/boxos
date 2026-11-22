@@ -35,7 +35,7 @@
 #define WIDTH_PER_TAG        256u          /* what a tag of one member may cost the index */
 
 static char    s_width_name[] = "w";
-static uint8_t s_width_op[sizeof(ManifestOp) + 8] __attribute__((aligned(8)));
+static uint8_t s_width_op[sizeof(ManifestOp) + 16] __attribute__((aligned(8)));
 
 /* A record of file `fid` naming `count` Strips, its name one byte. */
 static TagFSMetadata WidthRecord(Strip* strips, uint32_t count, uint64_t fid)
@@ -50,7 +50,7 @@ static TagFSMetadata WidthRecord(Strip* strips, uint32_t count, uint64_t fid)
     return meta;
 }
 
-/* storage.getinfo of `fid`, its params as a program's file_info lays them,
+/* storage.getinfo of `fid` in the person's tags, its params as a program's file_info lays them,
  * into a crate with no room: the handler's answer. A record it finds is
  * measured against the crate and refused as too big for it — never written. */
 static int WidthDeckInfo(uint64_t fid)
@@ -63,10 +63,12 @@ static int WidthDeckInfo(uint64_t fid)
         return ERR_NOT_INITIALIZED;
     memset(s_width_op, 0, sizeof(s_width_op));
     op->op_kind    = OP_KIND(DECK_STORAGE, STORAGE_OBJ_GET_INFO);
-    op->param_size = sizeof(fid);
+    op->param_size = sizeof(fid) + 1u;
     op->in_crate   = CRATE_INDEX_NONE;
     op->out_crate  = 0;
+    const uint8_t whose = STORAGE_TAGS_PERSON;
     memcpy(op->params, &fid, sizeof(fid));
+    memcpy(op->params + sizeof(fid), &whose, sizeof(whose));
     return reg->handler(op, &crate, 1, NULL);
 }
 
@@ -180,7 +182,7 @@ static TestResult TestWidthTagIndexCostsTheLive(void)
     for (uint32_t k = 0; k < WIDTH_LIVE_TAGS; k++) {
         ksnprintf(name, sizeof(name), "width.live.%u", k);
         TagSpelling one = TagSpellingOfKey(name);
-        TEST_ASSERT_OK(TagRegistryIntern(scratch, &one, &id), "a tag is issued past the numbers");
+        TEST_ASSERT_OK(TagRegistryIntern(scratch, TagOwnerPerson(), &one, &id), "a tag is issued past the numbers");
     }
     TEST_ASSERT_EQ(id, WIDTH_ISSUED_TAGS - 1u, "the tenth at 99 999");
     TEST_ASSERT_EQ(scratch->bucket_count, buckets,

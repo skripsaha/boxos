@@ -206,7 +206,8 @@ static error_t TallySliceTake(BinderRun* r)
     DogEarTake();
     g_binder.cost_known = 0;
     TagRegistryCoinedRange(tagfs_get_state()->registry, &lo, &hi);
-    w->tag_hi = lo;
+    w->tag_hi  = lo;
+    w->tag_gen = SettledGen();
     w->use    = tagfs_recall_use_context(NULL);
     w->grid   = g_book.atom > TAGFS_BLOCK_SIZE ? g_book.atom / TAGFS_BLOCK_SIZE : 1u;
     w->seq    = RibbonSeqNext();

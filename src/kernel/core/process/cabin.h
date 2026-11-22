@@ -192,6 +192,26 @@ typedef struct cabin_t
     /* Its box says `rise`: when the system started it, a fall raises it again
      * (rise.h). Set by the load, before the program runs. */
     uint8_t  rise;
+
+    /* The program's identity is its file: the volume's id of the file this
+     * cabin was started from, 0 for a program started from bytes held by
+     * another (an image of no file). Written once, by the load of its image
+     * (process_load_binary), before the program runs and before any other
+     * core can see the cabin — never inherited from the spawner, never
+     * changed after, and kept here, in memory only the kernel writes, so no
+     * program can speak as another. Read it by CabinProgramFile. */
+    uint64_t program_fid;
+    /* Which volume that file is on — its Deed's uuid, written with
+     * program_fid: a file id names a file of one volume, and a program
+     * started from a medium since taken out must not be taken for whatever
+     * file of another volume has the same id. Read it by CabinProgramVolume. */
+    uint8_t  program_volume[16];
+    /* Who the program is, as its own tags are owned (TagOwner): the passport
+     * its box's signature gives it when the signature holds (box_trust.h) —
+     * the same program in every copy and version of it — and otherwise its
+     * file, program_fid. Written with program_fid, never changed after. Read
+     * it by CabinProgramOwner. */
+    uint64_t program_owner;
 } cabin_t;
 
 _Static_assert(sizeof(cabin_t) < 4096, "cabin_t must fit in one page");
@@ -262,6 +282,19 @@ void CabinEnd(struct process_t *named, int32_t disposition);
  * something per program, and a Bay made for one, name the program by this.
  * False while the cabin has no program loaded into it yet. */
 bool CabinProgram(const cabin_t *cabin, uint32_t *pid, uint32_t *generation);
+
+/* The volume's id of the file the program of `cabin` was started from: who
+ * the program is where a file's maker, or a file's own tags, are in question.
+ * 0 for a program with no file (started from bytes), and for no cabin. */
+uint64_t CabinProgramFile(const cabin_t *cabin);
+
+/* Who the program of `cabin` is (cabin_t.program_owner): its passport, or its
+ * file; 0 for a program of no file and no signature, or no cabin. */
+uint64_t CabinProgramOwner(const cabin_t *cabin);
+
+/* The uuid of the volume that file is on — 16 bytes, all zero for a program
+ * with no file — or NULL for no cabin. */
+const uint8_t *CabinProgramVolume(const cabin_t *cabin);
 
 /* Reference counting on strand_count. */
 void cabin_ref_inc(cabin_t *cabin);

@@ -54,6 +54,7 @@
 
 namespace std::__boxcxx::tzdata {
 
+inline constexpr char      kMagic[8]   = {'B', 'O', 'X', 'T', 'Z', 'D', 'B', '1'};  // what a table begins with
 inline constexpr int       kNoLink     = -1;
 inline constexpr long long kBeginning  = -4611686018427387904LL;  // -2^62
 inline constexpr long long kForever    =  4611686018427387904LL;  //  2^62
@@ -790,9 +791,8 @@ constexpr bool Validate(const unsigned char *b, unsigned long long size) noexcep
 {
     if (!b || size < 44) return false;
 
-    const char magic[8] = {'B', 'O', 'X', 'T', 'Z', 'D', 'B', '1'};
     for (int i = 0; i < 8; ++i)
-        if (b[i] != static_cast<unsigned char>(magic[i])) return false;
+        if (b[i] != static_cast<unsigned char>(kMagic[i])) return false;
 
     const Head h = ReadHead(b);
     const unsigned long long n_names  = h.n_names;

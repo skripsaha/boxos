@@ -22,6 +22,7 @@
 #include <string_view>
 #include <vector>
 
+#include "box/cxx/whose.h"
 #include "box/clock.h"
 #include "box/error.h"
 #include "box/file.h"
@@ -221,7 +222,7 @@ void WaitForSampleWindow(uint32_t Milliseconds)
 int CountFiles(bool Everywhere)
 {
     file_id_t *Ids   = nullptr;
-    int        Count = Everywhere ? query_all_everywhere(nullptr, nullptr, &Ids) : query_all(nullptr, nullptr, &Ids);
+    int        Count = Everywhere ? query_all_everywhere(box::tagfs::person_tags, nullptr, nullptr, &Ids) : query_all(box::tagfs::person_tags, nullptr, nullptr, &Ids);
     free(Ids);
     return Count;
 }

@@ -37,8 +37,8 @@ std::optional<std::string> NameOf(file_id_t File);
 std::size_t StemLength(std::string_view FileName);
 
 // Every command on the volume — each program's and Itinerary's file — once,
-// with its file's name. A file's first bytes are read only when it is new to
-// the hub or its name or size has changed since; the rest is remembered.
+// with its file's name, in id order: the volume answers which files begin as
+// one (their cards keep their first bytes), and no file is read.
 void EachCommand(const std::function<void(file_id_t File, std::string_view FileName)> &Visit);
 
 // How a pick ended when it found nothing to start: the person was told why

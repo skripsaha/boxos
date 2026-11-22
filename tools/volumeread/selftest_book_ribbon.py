@@ -10,7 +10,7 @@ from . import bookread, ondisk, stitch, stitch_ribbon, tally
 from .bookground import BookGround
 from .medium import Unreadable
 from .ondisk import BLOCK, SECTORS_PER_BLOCK, RunsNormal
-from .selftest_book import Born, Case, Errata, Found, FrameDeed, Glass, Label
+from .selftest_book import Case, Errata, Found, FrameDeed, Glass, Label
 from .selftest_book_tally import PlantBookmark
 
 # A growth past the image the base was read from, by 4096 blocks: ground no
@@ -64,7 +64,7 @@ def RecordCases(bt):
     def Foreign(kind, ignorable):
         def Plant(o):
             d = bt.Fresh(o, 0, 1, 5)
-            bt.Pen(o).Sew([Born(bt.F, f1, d, b"kind%u" % kind), stitch.Unknown(kind, ignorable, b"\x07\x07")],
+            bt.Pen(o).Sew([bt.Born(bt.F, f1, d, b"kind%u" % kind), stitch.Unknown(kind, ignorable, b"\x07\x07")],
                           flags=stitch.DATA_FLUSHED)
         return Plant
 
@@ -74,9 +74,26 @@ def RecordCases(bt):
     again = stitch.Born(fid=bt.S.fid, flags=ondisk.FILE_ACTIVE, size=0, created_ns=1, modified_ns=1,
                         name=b"again", tags=(), runs=[], digests=[])
 
+    def Later(*stitches):
+        """Each list of records a stitch of its own, in order."""
+        def Plant(o):
+            pen = bt.Pen(o)
+            for records in stitches:
+                pen.Sew(records, flags=stitch.DATA_FLUSHED)
+        return Plant
+
+    def Wearing(tag):
+        """A file of no data born wearing `tag`."""
+        return stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=0, created_ns=1, modified_ns=1, name=b"wearer",
+                           tags=(tag,), runs=[], digests=[])
+
+    def Retires(tag):
+        """The id held as retired and the volume not read only."""
+        return lambda c: not c.mount.glass and bool(c.mount.tags[tag].flags & tally.TAG_RETIRED)
+
     def Quitclaimed(o):
         d = bt.Fresh(o, 0, 2, 2)
-        bt.Pen(o).Sew([Born(bt.F, f1, d[:1], b"a"), Born(bt.F + 1, f2, d[1:], b"b"),
+        bt.Pen(o).Sew([bt.Born(bt.F, f1, d[:1], b"a"), bt.Born(bt.F + 1, f2, d[1:], b"b"),
                        stitch.Quitclaim(fid=f2, base=0)], flags=stitch.DATA_FLUSHED)
 
     def Shared(both):
@@ -85,11 +102,11 @@ def RecordCases(bt):
         fallow once when its last owner goes (§8.2)."""
         def Plant(o):
             d = bt.Fresh(o, 0, 1, 4)
-            sharer = stitch.Born(fid=f2, flags=ondisk.FILE_ACTIVE, size=BLOCK, created_ns=1, modified_ns=1,
+            sharer = bt.Headed(stitch.Born(fid=f2, flags=ondisk.FILE_ACTIVE, size=BLOCK, created_ns=1, modified_ns=1,
                                  name=b"sharer", tags=(), digests=[],
-                                 runs=[stitch.Data(bt.F, 1, bookread.EntryPut(tally.EXT_SHARED, b""))])
+                                 runs=[stitch.Data(bt.F, 1, bookread.EntryPut(tally.EXT_SHARED, b""))]))
             gone = [stitch.Quitclaim(fid=f1, base=0)] + ([stitch.Quitclaim(fid=f2, base=0)] if both else [])
-            bt.Pen(o).Sew([Born(bt.F, f1, d, b"owner"), sharer] + gone, flags=stitch.DATA_FLUSHED)
+            bt.Pen(o).Sew([bt.Born(bt.F, f1, d, b"owner"), sharer] + gone, flags=stitch.DATA_FLUSHED)
         return Plant
 
     def Fallow(c):
@@ -100,7 +117,7 @@ def RecordCases(bt):
         sewn without DATA_FLUSHED — and, `torn`, a stitch after it torn."""
         bt.Fresh(o, 0, 1, 9)
         pen = bt.Pen(o)
-        pen.Sew([Born(bt.F, f2, [0x1234], b"unlanded")], flags=0)
+        pen.Sew([bt.Born(bt.F, f2, [0x1234], b"unlanded")], flags=0)
         if torn:
             s = pen.Sew([stitch.UseContext(b"next")], flags=0)
             bt.Zero(o, s.vlbas[4], s.of - 4)
@@ -118,8 +135,37 @@ def RecordCases(bt):
                      ("and nothing is said", lambda c: not c.findings)]),
         Case("B14 a Frozen in a stitch", One([stitch.Frozen(1, 0, [], b"snap")]), must={"UNDER_GLASS"},
              checks=[("the volume is read only: a bookmark", lambda c: Glass(c, "Frozen"))]),
-        Case("B15 a Coined RETIRED", One([stitch.Coined(bt.tag, retired=True)]), must={"UNDER_GLASS"},
-             checks=[("the volume is read only: an id retired", lambda c: Glass(c, "RETIRED"))]),
+        Case("B15 a Coined RETIRED of an id the book never named", One([stitch.Coined(bt.tag, retired=True)]),
+             checks=[("the id is held as retired: known, and the volume is not read only", Retires(bt.tag)),
+                     ("and never given again", lambda c: c.mount.counts["next_tag"] == bt.tag + 1),
+                     ("and nothing is said", lambda c: not c.findings)]),
+        Case("B15d a tag coined and retired in one stitch", One([stitch.Coined(bt.tag, b"once"),
+                                                                stitch.Coined(bt.tag, retired=True)]),
+             checks=[("the id is held as retired, its text forgotten", lambda c: Retires(bt.tag)(c) and
+                      c.mount.tags[bt.tag].key == b""),
+                     ("and nothing is said", lambda c: not c.findings)]),
+        Case("B15e a tag retired by a stitch after the one that coined it", Later([stitch.Coined(bt.tag, b"once")],
+                                                                                [stitch.Coined(bt.tag, retired=True)]),
+             checks=[("the id is held as retired, its text forgotten", lambda c: Retires(bt.tag)(c) and
+                      c.mount.tags[bt.tag].key == b""),
+                     ("and the kernel of this tree mounts it so", lambda c: c.kernel["mounts"] is True and
+                      c.kernel["glass"] == 0 and c.kernel["next_tag"] == bt.tag + 1)]),
+        Case("B15f a Coined naming a retired id a tag", Later([stitch.Coined(bt.tag, retired=True)],
+                                                             [stitch.Coined(bt.tag, b"again")]),
+             must={"UNDER_GLASS"}, checks=[
+                 ("the second stitch is not applied: an id retired is given no more",
+                  lambda c: Glass(c, "RETIRED") and c.mount.tags[bt.tag].flags & tally.TAG_RETIRED)]),
+        Case("B15g a Born wearing a retired tag", Later([stitch.Coined(bt.tag, b"once")],
+                                                       [stitch.Coined(bt.tag, retired=True)], [Wearing(bt.tag)]),
+             must={"BASE_MISMATCH"}, checks=[
+                 ("the Born does not fit: a retired tag is worn by nothing",
+                  lambda c: Found(c, "BASE_MISMATCH", "fid %u" % f1, "RETIRED") and f1 not in c.mount.files)]),
+        Case("B15h a tag retired while a file wears it", One([stitch.Coined(bt.tag, b"worn"), Wearing(bt.tag),
+                                                             stitch.Coined(bt.tag, retired=True)]),
+             must={"RETIRED_WORN"}, checks=[
+                 ("said, the file stays as it is", lambda c: Found(c, "RETIRED_WORN", "fid %u" % f1) and
+                  f1 in c.mount.files),
+                 ("and the kernel of this tree says it once", lambda c: c.kernel["ribbon"].get("RETIRED_WORN") == 1)]),
         Case("B16 a tag id of 2^31", One([stitch.Coined(1 << 31, b"wide")]), must={"UNDER_GLASS"}, checks=[
             ("the volume is read only: an id wider than the kernel gives", lambda c: Glass(c, "2^31")),
             ("and that id is never given again", lambda c: c.mount.counts["next_tag"] == (1 << 31) + 1)]),
@@ -194,7 +240,7 @@ def MachineRecordCases(bt):
 
     def Recorded(o):
         d = bt.Fresh(o, 0, 2, 5)
-        bt.Pen(o).Sew([Born(F, f1, d, b"recorded")], flags=stitch.DATA_FLUSHED)
+        bt.Pen(o).Sew([bt.Born(F, f1, d, b"recorded")], flags=stitch.DATA_FLUSHED)
 
     def Named(c):
         k = RecordKinds(g, bt.base, LandingRecord(c, bt.base, also=Again(leaf.blocks[0], leaf.sheets) +
@@ -207,7 +253,7 @@ def MachineRecordCases(bt):
         the stitch, F + 2 written with no stitch after it."""
         bt.Fresh(o, 0, 1, 21)
         d = bt.Fresh(o, 1, 1, 22)
-        bt.Pen(o).Sew([Born(F + 1, f1, d, b"unnamed")], flags=stitch.DATA_FLUSHED)
+        bt.Pen(o).Sew([bt.Born(F + 1, f1, d, b"unnamed")], flags=stitch.DATA_FLUSHED)
         bt.Fresh(o, 2, 1, 23)
 
     def UnnamedKinds(c):
@@ -270,9 +316,9 @@ def RibbonEndCases(bt):
         first four sectors (`tear`), or never landed at all (`lose`)."""
         d = bt.Fresh(o, 0, 3, 3)
         pen = bt.Pen(o)
-        s3 = pen.Sew([Born(bt.F, f1, d[:1], b"one")], flags=stitch.DATA_FLUSHED)
-        s4 = pen.Sew([Born(bt.F + 1, f2, d[1:2], b"two")], flags=stitch.DATA_FLUSHED, write=not lose)
-        s5 = pen.Sew([Born(bt.F + 2, f3, d[2:], b"three")], flags=stitch.DATA_FLUSHED) if lose else None
+        s3 = pen.Sew([bt.Born(bt.F, f1, d[:1], b"one")], flags=stitch.DATA_FLUSHED)
+        s4 = pen.Sew([bt.Born(bt.F + 1, f2, d[1:2], b"two")], flags=stitch.DATA_FLUSHED, write=not lose)
+        s5 = pen.Sew([bt.Born(bt.F + 2, f3, d[2:], b"three")], flags=stitch.DATA_FLUSHED) if lose else None
         if tear:
             bt.Zero(o, s4.vlbas[4], s4.of - 4)
         sewn.update(s3=s3, s4=s4, s5=s5)
@@ -280,9 +326,9 @@ def RibbonEndCases(bt):
     def Rot(o):
         d = bt.Fresh(o, 0, 2, 4)
         pen = bt.Pen(o)
-        s3 = pen.Sew([stitch.UseContext(b"x" * 1000), Born(bt.F, f1, d[:1], b"kept")],
+        s3 = pen.Sew([stitch.UseContext(b"x" * 1000), bt.Born(bt.F, f1, d[:1], b"kept")],
                      flags=stitch.DATA_FLUSHED)
-        pen.Sew([Born(bt.F + 1, f2, d[1:], b"after")], flags=stitch.DATA_FLUSHED)
+        pen.Sew([bt.Born(bt.F + 1, f2, d[1:], b"after")], flags=stitch.DATA_FLUSHED)
         bt.Rot(o, s3.vlbas[1])
         sewn.update(s3=s3)
 
@@ -291,15 +337,15 @@ def RibbonEndCases(bt):
         of another seq inside a settled one, and a later stitch landed."""
         d = bt.Fresh(o, 0, 2, 4)
         pen = bt.Pen(o)
-        s3 = pen.Sew([stitch.UseContext(b"x" * 1000), Born(bt.F, f1, d[:1], b"kept")], flags=stitch.DATA_FLUSHED)
-        s4 = pen.Sew([Born(bt.F + 1, f2, d[1:], b"after")], flags=stitch.DATA_FLUSHED)
+        s3 = pen.Sew([stitch.UseContext(b"x" * 1000), bt.Born(bt.F, f1, d[:1], b"kept")], flags=stitch.DATA_FLUSHED)
+        s4 = pen.Sew([bt.Born(bt.F + 1, f2, d[1:], b"after")], flags=stitch.DATA_FLUSHED)
         o.Put(bt.ground.base + s3.vlbas[1], bookread.SectorSeal(s4.sectors[0], bt.ground.uuid, s3.vlbas[1]))
 
     def Stranger(o):
         d = bt.Fresh(o, 0, 2, 6)
         pen = bt.Pen(o)
-        pen.Sew([Born(bt.F, f1, d[:1], b"sewn")], flags=stitch.DATA_FLUSHED)
-        pen.Sew([Born(bt.F + 1, f2, d[1:], b"stranger")], flags=stitch.DATA_FLUSHED, seq=9,
+        pen.Sew([bt.Born(bt.F, f1, d[:1], b"sewn")], flags=stitch.DATA_FLUSHED)
+        pen.Sew([bt.Born(bt.F + 1, f2, d[1:], b"stranger")], flags=stitch.DATA_FLUSHED, seq=9,
                 prev_clasp=0xDEADBEEF)
 
     def Settled(o):
@@ -307,7 +353,7 @@ def RibbonEndCases(bt):
         once 5 had settled, and 5 once 4 had."""
         d = bt.Fresh(o, 0, 4, 8)
         pen = bt.Pen(o)
-        out = [pen.Sew([Born(bt.F + k, bt.fid + k, d[k:k + 1], b"s%u" % k)], flags=stitch.DATA_FLUSHED)
+        out = [pen.Sew([bt.Born(bt.F + k, bt.fid + k, d[k:k + 1], b"s%u" % k)], flags=stitch.DATA_FLUSHED)
                for k in range(4)]
         for s in out[1:3]:
             bt.Zero(o, s.vlbas[4], s.of - 4)
@@ -318,7 +364,7 @@ def RibbonEndCases(bt):
         d = bt.Fresh(o, 0, 5, 8)
         pen = bt.Pen(o)
         for k in range(5):
-            pen.Sew([Born(bt.F + k, bt.fid + k, d[k:k + 1], b"h%u" % k)], flags=stitch.DATA_FLUSHED,
+            pen.Sew([bt.Born(bt.F + k, bt.fid + k, d[k:k + 1], b"h%u" % k)], flags=stitch.DATA_FLUSHED,
                     write=k not in (1, 2))
 
     def SlotBetween(o):
@@ -327,14 +373,14 @@ def RibbonEndCases(bt):
         7 never landed, 8 laid over the hole naming 7."""
         g, d = bt.ground, bt.Fresh(o, 0, 4, 8)
         pen = bt.Pen(o)
-        s3 = pen.Sew([Born(bt.F, f1, d[:1], b"t0")], flags=stitch.DATA_FLUSHED)
+        s3 = pen.Sew([bt.Born(bt.F, f1, d[:1], b"t0")], flags=stitch.DATA_FLUSHED)
         slot = tally.SlotRead(g, 0)
         slot.tally_seq, slot.stitch_seq, slot.stitch_clasp = 4, s3.seq, s3.clasp
         slot.ribbon = dict(slot.ribbon, at=s3.vlbas[-1] // SECTORS_PER_BLOCK + 1)
         o.Put(g.base + tally.SlotBlock(g, 1) * SECTORS_PER_BLOCK, b"".join(tally.SlotSectors(g, 1, 5, slot)))
         pen.tally_seq = 4
         for k, seq in enumerate((6, 7, 8)):
-            pen.Sew([Born(bt.F + 1 + k, bt.fid + 1 + k, d[1 + k:2 + k], b"t%u" % (k + 1))],
+            pen.Sew([bt.Born(bt.F + 1 + k, bt.fid + 1 + k, d[1 + k:2 + k], b"t%u" % (k + 1))],
                     flags=stitch.DATA_FLUSHED, seq=seq, write=seq == 8)
 
     def Island(o):
@@ -342,7 +388,7 @@ def RibbonEndCases(bt):
         torn to half its sectors; 7 landed whole, naming 6 — one branch."""
         d = bt.Fresh(o, 0, 5, 8)
         pen = bt.Pen(o)
-        out = [pen.Sew([Born(bt.F + k, bt.fid + k, d[k:k + 1], b"i%u" % k)], flags=stitch.DATA_FLUSHED,
+        out = [pen.Sew([bt.Born(bt.F + k, bt.fid + k, d[k:k + 1], b"i%u" % k)], flags=stitch.DATA_FLUSHED,
                        write=k != 1) for k in range(5)]
         bt.Zero(o, out[3].vlbas[4], out[3].of - 4)
 
@@ -352,7 +398,7 @@ def RibbonEndCases(bt):
         sectors — one branch, nineteen lost, each alone."""
         d = bt.Fresh(o, 0, 39, 8)
         pen = bt.Pen(o)
-        out = [pen.Sew([Born(bt.F + k, bt.fid + k, d[k:k + 1], b"c%u" % k)], flags=stitch.DATA_FLUSHED,
+        out = [pen.Sew([bt.Born(bt.F + k, bt.fid + k, d[k:k + 1], b"c%u" % k)], flags=stitch.DATA_FLUSHED,
                        write=k != 1) for k in range(39)]
         for s in out[3::2]:
             bt.Zero(o, s.vlbas[4], s.of - 4)
@@ -511,19 +557,19 @@ def RibbonCases(bt):
     def Undone(o):
         d = bt.Fresh(o, 0, 2, 7)
         pen = bt.Pen(o)
-        pen.Sew([Born(bt.F, f1, d[:1], b"undone"), Born(bt.F + 1, f2, d[1:], b"stands")],
+        pen.Sew([bt.Born(bt.F, f1, d[:1], b"undone"), bt.Born(bt.F + 1, f2, d[1:], b"stands")],
                 flags=stitch.DATA_FLUSHED)
         pen.Sew([stitch.Undone(seq_back=1, why=1, fids=[f1])], flags=stitch.DATA_FLUSHED)
 
     def Slip(o):
         """A file of 100 bytes born a hole and a Slip, and 50 more by a second
-        Slip — its stem coined and worn as every file of the volume wears its
-        own, so the guest finds it by name."""
+        Slip — a tag coined with it and worn, so the guest finds it by the
+        tag as well as by its name."""
         pen = bt.Pen(o)
         pen.Sew([stitch.Coined(bt.tag, b"slip"),
-                 stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=100, created_ns=1, modified_ns=1,
+                 bt.Headed(stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=100, created_ns=1, modified_ns=1,
                              name=b"slip", tags=(bt.tag,), runs=[stitch.Hole(1)], digests=[],
-                             slip=(0, b"a" * 100))], flags=stitch.DATA_FLUSHED)
+                             slip=(0, b"a" * 100)))], flags=stitch.DATA_FLUSHED)
         pen.Sew([stitch.Shaped(fid=f1, base=1, size=150, mtime_ns=2, splices=[], digests=[],
                                slip=(100, b"b" * 50))], flags=stitch.DATA_FLUSHED)
 
@@ -541,8 +587,9 @@ def RibbonCases(bt):
             now.update(zip(range(size, size + LOG_LINE), LogLine(i)))
             slip = stitch.SlipDelta(tail, now, size + LOG_LINE)
             splices = [] if size else [(0, 0, [stitch.Hole(1)])]
+            first = [] if size else [stitch.Labeled(fid=f1, base=0, head=LogLine(i)[:ondisk.HEAD_MOST])]
             sewn.setdefault("log", []).append(pen.Sew([stitch.Shaped(
-                fid=f1, base=1, size=size + LOG_LINE, mtime_ns=2 + i, splices=splices, digests=[], slip=slip)],
+                fid=f1, base=1, size=size + LOG_LINE, mtime_ns=2 + i, splices=splices, digests=[], slip=slip)] + first,
                 flags=stitch.DATA_FLUSHED))
             tail, size = now, size + LOG_LINE
 
@@ -551,9 +598,9 @@ def RibbonCases(bt):
         splice, grown to 80 by another: the overlay is cut by the size, and
         what grew reads as the hole's zeros (§16.5 п.13)."""
         pen = bt.Pen(o)
-        pen.Sew([stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=100, created_ns=1, modified_ns=1,
+        pen.Sew([bt.Headed(stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=100, created_ns=1, modified_ns=1,
                              name=b"cut", tags=(), runs=[stitch.Hole(1)], digests=[],
-                             slip=(0, b"a" * 100))], flags=stitch.DATA_FLUSHED)
+                             slip=(0, b"a" * 100)))], flags=stitch.DATA_FLUSHED)
         pen.Sew([stitch.Shaped(fid=f1, base=1, size=50, mtime_ns=2, splices=[], digests=[])],
                 flags=stitch.DATA_FLUSHED)
         pen.Sew([stitch.Shaped(fid=f1, base=1, size=80, mtime_ns=3, splices=[], digests=[])],
@@ -564,11 +611,12 @@ def RibbonCases(bt):
         the splice that changes the block lets the overlay go (§2.8)."""
         d = bt.Fresh(o, 0, 1, 10)
         pen = bt.Pen(o)
-        pen.Sew([stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=100, created_ns=1, modified_ns=1,
+        pen.Sew([bt.Headed(stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=100, created_ns=1, modified_ns=1,
                              name=b"folded", tags=(), runs=[stitch.Hole(1)], digests=[],
-                             slip=(0, b"a" * 100))], flags=stitch.DATA_FLUSHED)
+                             slip=(0, b"a" * 100)))], flags=stitch.DATA_FLUSHED)
         pen.Sew([stitch.Shaped(fid=f1, base=1, size=150, mtime_ns=2, splices=[(0, 1, [stitch.Data(bt.F, 1)])],
-                               digests=d)], flags=stitch.DATA_FLUSHED)
+                               digests=d),
+                 stitch.Labeled(fid=f1, base=0, head=bt.Block(bt.F)[:ondisk.HEAD_MOST])], flags=stitch.DATA_FLUSHED)
 
     def Crossing(o):
         """A first stitch that leaves one atom of the ribbon Quire, a second of
@@ -584,17 +632,17 @@ def RibbonCases(bt):
         the start of the next_quire (M-6), naming 3."""
         d = bt.Fresh(o, 0, 2, 9)
         pen = bt.Pen(o)
-        s3 = pen.Sew([Born(bt.F, f1, d[:1], b"before")], flags=stitch.DATA_FLUSHED)
-        pen.Sew([Born(bt.F + 1, f2, d[1:], b"refused")], flags=stitch.DATA_FLUSHED, write=False)
+        s3 = pen.Sew([bt.Born(bt.F, f1, d[:1], b"before")], flags=stitch.DATA_FLUSHED)
+        pen.Sew([bt.Born(bt.F + 1, f2, d[1:], b"refused")], flags=stitch.DATA_FLUSHED, write=False)
         pen.Hop(back_to=s3)
-        pen.Sew([Born(bt.F + 1, f3, d[1:], b"again")], flags=stitch.DATA_FLUSHED)
+        pen.Sew([bt.Born(bt.F + 1, f3, d[1:], b"again")], flags=stitch.DATA_FLUSHED)
 
     def OnTally(o):
         """A stitch whose StitchHead names Tally-Quire A as its next_quire."""
         d = bt.Fresh(o, 0, 1, 16)
         pen = bt.Pen(o)
         pen.next = (bt.plan.a, bt.ground.grain)
-        pen.Sew([Born(bt.F, f1, d, b"named")], flags=stitch.DATA_FLUSHED)
+        pen.Sew([bt.Born(bt.F, f1, d, b"named")], flags=stitch.DATA_FLUSHED)
 
     def Fallen(o):
         """Stitch 3 born f1; slot 1 at seq 4, a Tally that took stitch 3 in —
@@ -603,7 +651,7 @@ def RibbonCases(bt):
         3, and replays it (§4.5 п.5: the older ribbon is whole while a slot
         names it)."""
         d = bt.Fresh(o, 0, 1, 12)
-        s3 = bt.Pen(o).Sew([Born(bt.F, f1, d, b"fallen")], flags=stitch.DATA_FLUSHED)
+        s3 = bt.Pen(o).Sew([bt.Born(bt.F, f1, d, b"fallen")], flags=stitch.DATA_FLUSHED)
         g = BookGround(o)
         slot = tally.SlotRead(g, 0)
         slot.stitch_seq, slot.stitch_clasp = s3.seq, s3.clasp
@@ -698,13 +746,13 @@ def RecordRuleCases(bt):
         first's block holds what its digest does not name (M-2)."""
         d = bt.Fresh(o, 0, 2, 13)
         pen = bt.Pen(o)
-        pen.Sew([Born(bt.F, f1, [0x1234], b"unlanded")], flags=flushed | stitch.MEDIUM_LIED)
-        pen.Sew([Born(bt.F + 1, f2, d[1:], b"landed")], flags=flushed | stitch.MEDIUM_LIED)
+        pen.Sew([bt.Born(bt.F, f1, [0x1234], b"unlanded")], flags=flushed | stitch.MEDIUM_LIED)
+        pen.Sew([bt.Born(bt.F + 1, f2, d[1:], b"landed")], flags=flushed | stitch.MEDIUM_LIED)
 
-    inactive = lambda q, d: [stitch.Born(fid=f1, flags=0, size=BLOCK, created_ns=1, modified_ns=1,
-                                         name=b"inactive", tags=(), runs=[stitch.Data(bt.F, 1)], digests=d[:1])]
-    past = lambda q, d: [stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=100, created_ns=1, modified_ns=1,
-                                     name=b"past", tags=(), runs=[stitch.Hole(1)], digests=[], slip=(50, b"a" * 100))]
+    inactive = lambda q, d: [bt.Headed(stitch.Born(fid=f1, flags=0, size=BLOCK, created_ns=1, modified_ns=1,
+                                         name=b"inactive", tags=(), runs=[stitch.Data(bt.F, 1)], digests=d[:1]))]
+    past = lambda q, d: [bt.Headed(stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=100, created_ns=1, modified_ns=1,
+                                     name=b"past", tags=(), runs=[stitch.Hole(1)], digests=[], slip=(50, b"a" * 100)))]
     front = bt.ground.data_block - 1
     return [
         Case("B11b a Born not ACTIVE", Sewn(inactive), must={"UNDER_GLASS"}, checks=[
@@ -717,8 +765,18 @@ def RecordRuleCases(bt):
         Case("B15c a Coined of a known id with its own text",
              Sewn(lambda q, d: [stitch.Coined(known, ts.key, ts.value)]), checks=[
                  ("it is taken, and nothing is said", lambda c: not c.findings and not c.mount.glass)]),
+        Case("B15d a Coined giving a known id of the person's to a program",
+             Sewn(lambda q, d: [stitch.Coined(known, ts.key, ts.value, owner=S.fid)]), must={"UNDER_GLASS"},
+             checks=[("the stitch is not applied: one text of two owners is two tags, never one id",
+                      lambda c: Glass(c, "gives id %u" % known) and c.mount.tags[known].owner == 0)]),
+        Case("B15e a program's own tag beside the person's of the same text",
+             Sewn(lambda q, d: [stitch.Coined(bt.tag, b"save", b"slot"),
+                                stitch.Coined(bt.tag + 1, b"save", b"slot", owner=S.fid)]),
+             checks=[("both are tags, the person's and program fid %u's, each by its own id" % S.fid,
+                      lambda c: (c.mount.tags[bt.tag].owner, c.mount.tags[bt.tag + 1].owner) == (0, S.fid)),
+                     ("and nothing is said", lambda c: not c.findings and not c.mount.glass)]),
         Case("B21b an Undone after another record", Sewn(lambda q, d: [
-            Born(bt.F, f1, d[:1], b"before"), stitch.Undone(seq_back=1, why=1, fids=[S.fid])]),
+            bt.Born(bt.F, f1, d[:1], b"before"), stitch.Undone(seq_back=1, why=1, fids=[S.fid])]),
              must={"UNDER_GLASS"}, checks=[
                  ("the stitch is not applied: an Undone stands first in its stitch (§2.8)",
                   lambda c: Glass(c, "an Undone after another record") and f1 not in c.mount.files and
@@ -747,15 +805,15 @@ def RecordRuleCases(bt):
              checks=[("the stitch is not applied: a file leaves by Quitclaim, not by losing ACTIVE (§2.8)",
                       lambda c: Glass(c, "takes ACTIVE off") and c.mount.files[S.fid].flags & ondisk.FILE_ACTIVE)]),
         Case("B28b a Born on the front of the volume", Sewn(lambda q, d: [
-            stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=BLOCK, created_ns=1, modified_ns=1, name=b"front",
-                        tags=(), runs=[stitch.Data(front, 1)], digests=d[:1])]), must={"EXTENT_OUTSIDE", "UNDER_GLASS"},
+            bt.Headed(stitch.Born(fid=f1, flags=ondisk.FILE_ACTIVE, size=BLOCK, created_ns=1, modified_ns=1, name=b"front",
+                        tags=(), runs=[stitch.Data(front, 1)], digests=d[:1]))]), must={"EXTENT_OUTSIDE", "UNDER_GLASS"},
              checks=[
             ("%u names block %u, before the data run, and is locked" % (f1, front),
              lambda c: Found(c, "EXTENT_OUTSIDE", "fid %u" % f1) and f1 in c.mount.locked),
             ("and the volume is under glass: no Tally names it as it lay",
              lambda c: Glass(c, "locked by the replay of the ribbon"))]),
         Case("B23e a Clasp that counts fresh blocks its records do not name",
-             Sewn(lambda q, d: [Born(bt.F, f1, d[:1], b"fresh")], fresh=9), must={"UNDER_GLASS"}, checks=[
+             Sewn(lambda q, d: [bt.Born(bt.F, f1, d[:1], b"fresh")], fresh=9), must={"UNDER_GLASS"}, checks=[
                  ("the stitch is not applied: its Clasp names 9 fresh blocks and its records 1",
                   lambda c: Glass(c, "fresh") and f1 not in c.mount.files)]),
     ]
@@ -775,10 +833,10 @@ def RibbonBranchCases(bt):
         ("one" or "clasp") rotten, F naming `f_names` ("s3") in place of U."""
         d = bt.Fresh(o, 0, 3, seed)
         pen = bt.Pen(o)
-        s3 = pen.Sew([Born(bt.F, f1, d[:1], b"own")], flags=flushed)
-        u = pen.Sew([stitch.UseContext(b"x" * 1000), Born(bt.F + 1, f2, d[1:2], b"u")], flags=flushed,
+        s3 = pen.Sew([bt.Born(bt.F, f1, d[:1], b"own")], flags=flushed)
+        u = pen.Sew([stitch.UseContext(b"x" * 1000), bt.Born(bt.F + 1, f2, d[1:2], b"u")], flags=flushed,
                     prev_clasp=0xDEADBEEF if foreign else None)
-        pen.Sew([Born(bt.F + 2, f3, d[2:], b"f")], flags=flushed, names=s3 if f_names else None)
+        pen.Sew([bt.Born(bt.F + 2, f3, d[2:], b"f")], flags=flushed, names=s3 if f_names else None)
         if rot:
             bt.Rot(o, u.vlbas[1 if rot == "one" else u.starts[-1] // bookread.PAYLOAD_BYTES])
 
@@ -788,22 +846,22 @@ def RibbonBranchCases(bt):
         naming 3 — its from_quire this Quire, or none — and 6 after it."""
         d = bt.Fresh(o, 0, 3, 9)
         pen = bt.Pen(o)
-        s3 = pen.Sew([Born(bt.F, f1, d[:1], b"before")], flags=flushed)
-        pen.Sew([Born(bt.F + 1, f2, d[1:2], b"refused")], flags=flushed, write=came)
+        s3 = pen.Sew([bt.Born(bt.F, f1, d[:1], b"before")], flags=flushed)
+        pen.Sew([bt.Born(bt.F + 1, f2, d[1:2], b"refused")], flags=flushed, write=came)
         pen.Hop(back_to=s3)
         if not came:
             pen.came = None
-        pen.Sew([Born(bt.F + 1, f3, d[1:2], b"again")], flags=flushed)
-        pen.Sew([Born(bt.F + 2, f4, d[2:], b"after")], flags=flushed)
+        pen.Sew([bt.Born(bt.F + 1, f3, d[1:2], b"again")], flags=flushed)
+        pen.Sew([bt.Born(bt.F + 2, f4, d[2:], b"after")], flags=flushed)
 
     def Fork(o):
         """3 and 4 sewn on; 5, whole, names 3 by its Clasp and lies right
         after 4 — two stitches name one, and 5 is not where the ribbon goes."""
         d = bt.Fresh(o, 0, 3, 11)
         pen = bt.Pen(o)
-        s3 = pen.Sew([Born(bt.F, f1, d[:1], b"base")], flags=flushed)
-        pen.Sew([Born(bt.F + 1, f2, d[1:2], b"one")], flags=flushed)
-        pen.Sew([Born(bt.F + 2, f3, d[2:], b"other")], flags=flushed, names=s3)
+        s3 = pen.Sew([bt.Born(bt.F, f1, d[:1], b"base")], flags=flushed)
+        pen.Sew([bt.Born(bt.F + 1, f2, d[1:2], b"one")], flags=flushed)
+        pen.Sew([bt.Born(bt.F + 2, f3, d[2:], b"other")], flags=flushed, names=s3)
 
     chain = lambda c: [s.seq for s in c.mount.ribbon.stitches]
     return [
@@ -865,16 +923,16 @@ def RibbonFurtherCases(bt):
         that lands, naming 3, and 2 more after it."""
         d = bt.Fresh(o, 0, 3, 13)
         pen = bt.Pen(o)
-        s3 = pen.Sew([Born(bt.F, f1, d[:1], b"before")], flags=flushed)
-        pen.Sew([Born(bt.F + 1, f2, d[1:2], b"again")], flags=flushed, write=landed)
+        s3 = pen.Sew([bt.Born(bt.F, f1, d[:1], b"before")], flags=flushed)
+        pen.Sew([bt.Born(bt.F + 1, f2, d[1:2], b"again")], flags=flushed, write=landed)
         pen.Hop(back_to=s3)
         for landed in tries:
-            t = pen.Sew([Born(bt.F + 1, f2, d[1:2], b"again")], flags=flushed, write=landed != "none")
+            t = pen.Sew([bt.Born(bt.F + 1, f2, d[1:2], b"again")], flags=flushed, write=landed != "none")
             if landed == "first":
                 bt.Zero(o, t.vlbas[1], t.of - 1)
             pen.Again(back_to=s3)
-        pen.Sew([Born(bt.F + 1, f2, d[1:2], b"again")], flags=flushed)
-        pen.Sew([Born(bt.F + 2, f3, d[2:], b"after")], flags=flushed)
+        pen.Sew([bt.Born(bt.F + 1, f2, d[1:2], b"again")], flags=flushed)
+        pen.Sew([bt.Born(bt.F + 2, f3, d[2:], b"after")], flags=flushed)
 
     def RunOut(o):
         """3; 4 refused in its Quire; every try after it refused in the
@@ -882,12 +940,12 @@ def RibbonFurtherCases(bt):
         sector alone: the next_quire has run out."""
         d = bt.Fresh(o, 0, 2, 15)
         pen = bt.Pen(o)
-        s3 = pen.Sew([Born(bt.F, f1, d[:1], b"before")], flags=flushed)
-        pen.Sew([Born(bt.F + 1, f2, d[1:], b"again")], flags=flushed, write=False)
+        s3 = pen.Sew([bt.Born(bt.F, f1, d[:1], b"before")], flags=flushed)
+        pen.Sew([bt.Born(bt.F + 1, f2, d[1:], b"again")], flags=flushed, write=False)
         pen.Hop(back_to=s3)
         while True:
             last = pen.place.Left() <= SECTORS_PER_BLOCK
-            t = pen.Sew([Born(bt.F + 1, f2, d[1:], b"again")], flags=flushed, write=last)
+            t = pen.Sew([bt.Born(bt.F + 1, f2, d[1:], b"again")], flags=flushed, write=last)
             if last:
                 bt.Zero(o, t.vlbas[1], t.of - 1)
                 return

@@ -430,6 +430,205 @@ out:
     return verdict;
 }
 
+/* A Coined of a program's own tag: the owner rides inside the tag as TAGS
+ * carries it (volume_tally.h TallyTagTake), so the record reads back whose the
+ * tag is, the bytes it used are the whole body, and an owner of fid 0 refuses
+ * the record as it refuses a TAGS element. */
+static TestResult TestRibbonCoinedOwned(void)
+{
+    TestResult verdict = TEST_PASS;
+    uint8_t    body[64];
+    TallyTag   put = { .flags = TALLY_TAG_OWNED, .owner_kind = TALLY_OWNER_PROGRAM, .owner_id = 300,
+                       .key = (const uint8_t*)"save", .key_len = 4 }, got;
+    uint64_t   id = 0;
+    uint32_t   len, used = 0;
+    len = RibbonCoinedBodyPut(body, 77, &put);
+    TEST_ASSERT_EQ(RibbonCoinedGet(body, len, &id, &got, &used), TALLY_BODY_KNOWN, "a program's Coined reads");
+    TEST_ASSERT(id == 77 && used == len && got.owner_kind == TALLY_OWNER_PROGRAM && got.owner_id == 300 &&
+                got.key_len == 4 && got.key[3] == 'e', "its id, whose it is and its key");
+    put.owner_id = 0;
+    len = RibbonCoinedBodyPut(body, 77, &put);
+    TEST_ASSERT_EQ(RibbonCoinedGet(body, len, &id, &got, &used), TALLY_BODY_BROKEN,
+                   "a program's Coined naming fid 0 does not read");
+out:
+    return verdict;
+}
+
+/* The programs a program's file shows its tags to (§2.8, volume_ribbon.h): the
+ * Labeled's SHOWN verb, the whole list anew after the term — a list of none
+ * reads, a list cut short does not — the list after made_by in a Born and in
+ * the header that carries it in the Tally, there exactly when the flags carry
+ * the bit, which no Labeled's FLAGS names, and a Born or a header that carries
+ * it names a program. */
+static TestResult TestRibbonShown(void)
+{
+    static const uint64_t shown[] = { 0, 77, 900 };
+    static uint8_t        body[96], head[96], list[32], tags[1], out[96];
+    static RibbonLabeled  put, got;
+    static RibbonBorn     born, again;
+    static TallyFileHead  h, back;
+    TestResult            verdict = TEST_PASS;
+    uint64_t              ids[3] = { 0 };
+    uint32_t              len, used, bytes = TallyFidsPut(list, shown, 3);
+    put  = (RibbonLabeled){ .fid = 9, .base = 3, .what = LABEL_KEEP | LABEL_SHOWN, .keep_ns = 1700000000123456789ull,
+                            .nshown = 3, .shown = list, .shown_bytes = bytes };
+    born = (RibbonBorn){ .fid = 9, .flags = TALLY_FILE_ACTIVE | TALLY_FILE_MADE_BY | TALLY_FILE_SHOWN,
+                         .name = (const uint8_t*)"prog", .name_len = 4, .made_by = 41, .nshown = 3,
+                         .shown = list, .shown_bytes = bytes };
+    h    = (TallyFileHead){ .gen = 4, .flags = TALLY_FILE_ACTIVE | TALLY_FILE_MADE_BY | TALLY_FILE_SHOWN, .size = 7,
+                            .created_ns = 5, .modified_ns = 6, .name = (const uint8_t*)"prog", .name_len = 4,
+                            .tags = tags, .made_by = 41, .nshown = 3, .shown = list, .shown_bytes = bytes };
+    len = RibbonLabeledBodyPut(body, &put);
+    TEST_ASSERT_EQ(RibbonLabeledGet(body, len, &got, &used), TALLY_BODY_KNOWN, "a Labeled with SHOWN reads");
+    TallyFidsOut(got.shown, got.shown_bytes, got.nshown, ids);
+    TEST_ASSERT(got.what == put.what && got.keep_ns == put.keep_ns && got.nshown == 3 && ids[0] == 0 &&
+                ids[1] == 77 && ids[2] == 900 && used == len, "its list after its term, every program first");
+    TEST_ASSERT_EQ(RibbonLabeledGet(body, len - 1u, &got, &used), TALLY_BODY_BROKEN, "SHOWN cut short does not read");
+    put.what        = LABEL_SHOWN;
+    put.nshown      = 0;
+    put.shown_bytes = 0;
+    len = RibbonLabeledBodyPut(body, &put);
+    TEST_ASSERT(RibbonLabeledGet(body, len, &got, &used) == TALLY_BODY_KNOWN && got.nshown == 0,
+                "a list of none reads: the file shows nothing");
+    put.what = LABEL_FLAGS;
+    put.set  = TALLY_FILE_SHOWN;
+    len = RibbonLabeledBodyPut(body, &put);
+    TEST_ASSERT_EQ(RibbonLabeledGet(body, len, &got, &used), TALLY_BODY_BROKEN, "the shown bit in FLAGS does not read");
+    len = RibbonBornBodyPut(body, &born);
+    TEST_ASSERT_EQ(RibbonBornGet(body, len, 1, &again, &used), TALLY_BODY_KNOWN, "a Born that shows reads");
+    TEST_ASSERT(again.made_by == 41 && again.nshown == 3 && again.shown_bytes == bytes &&
+                memcmp(again.shown, list, bytes) == 0, "its list after made_by");
+    born.nshown = 0;
+    len = RibbonBornBodyPut(body, &born);
+    TEST_ASSERT_EQ(RibbonBornGet(body, len, 1, &again, &used), TALLY_BODY_BROKEN,
+                   "a Born with the bit and no program does not read");
+    len = TallyFileHeadPut(head, &h);
+    TEST_ASSERT_EQ(TallyFileHeadGet(head, len, &back), TALLY_BODY_KNOWN, "a header that shows reads");
+    TEST_ASSERT(back.made_by == 41 && back.nshown == 3 && back.shown_bytes == bytes &&
+                memcmp(back.shown, list, bytes) == 0, "its list after made_by");
+    TEST_ASSERT_EQ(TallyFileHeadGet(head, len - 1u, &back), TALLY_BODY_BROKEN, "its list cut short does not read");
+    h.flags &= ~(uint64_t)TALLY_FILE_SHOWN;
+    uint32_t plain = TallyFileHeadPut(out, &h);
+    uint32_t wider = TallyVarintBytes(h.flags | TALLY_FILE_SHOWN) - TallyVarintBytes(h.flags);
+    TEST_ASSERT(plain + wider + 1u + bytes == len &&
+                TallyFileHeadGet(out, plain, &back) == TALLY_BODY_KNOWN && back.nshown == 0,
+                "a header that shows nothing carries no list, its bytes as they were");
+    h.flags |= TALLY_FILE_SHOWN;
+    h.nshown = 0;
+    len = TallyFileHeadPut(head, &h);
+    TEST_ASSERT_EQ(TallyFileHeadGet(head, len, &back), TALLY_BODY_BROKEN,
+                   "a header with the bit and no program does not read");
+out:
+    return verdict;
+}
+
+/* A file's first bytes (§2.8, volume_ribbon.h): the Labeled's HEAD verb —
+ * none reads, more than TALLY_HEAD_MOST does not —, the last field of a Born
+ * and of the header that carries it in the Tally, there exactly when the
+ * flags carry the bit, never more than the file's size nor none with the bit,
+ * and the bit in a Labeled's FLAGS does not read. */
+static TestResult TestRibbonHead(void)
+{
+    static const uint8_t  first[] = "0123456789abcdefXYZ";
+    static uint8_t        body[96], head[96], tags[1];
+    static RibbonLabeled  put, got;
+    static RibbonBorn     born, again;
+    static TallyFileHead  h, back;
+    TestResult            verdict = TEST_PASS;
+    uint32_t              len, used;
+    put  = (RibbonLabeled){ .fid = 9, .base = 3, .what = LABEL_HEAD, .head_len = 5, .head = first };
+    born = (RibbonBorn){ .fid = 9, .flags = TALLY_FILE_ACTIVE | TALLY_FILE_HEAD, .size = 4096,
+                         .name = (const uint8_t*)"file", .name_len = 4, .head_len = TALLY_HEAD_MOST, .head = first };
+    h    = (TallyFileHead){ .gen = 4, .flags = TALLY_FILE_ACTIVE | TALLY_FILE_HEAD, .size = 3, .created_ns = 5,
+                            .modified_ns = 6, .name = (const uint8_t*)"file", .name_len = 4, .tags = tags,
+                            .head_len = 3, .head = first };
+    len = RibbonLabeledBodyPut(body, &put);
+    TEST_ASSERT(RibbonLabeledGet(body, len, &got, &used) == TALLY_BODY_KNOWN && got.head_len == 5 &&
+                memcmp(got.head, first, 5) == 0 && used == len, "a Labeled HEAD reads its new first bytes");
+    TEST_ASSERT_EQ(RibbonLabeledGet(body, len - 1u, &got, &used), TALLY_BODY_BROKEN, "HEAD cut short does not read");
+    put.head_len = 0;
+    len = RibbonLabeledBodyPut(body, &put);
+    TEST_ASSERT(RibbonLabeledGet(body, len, &got, &used) == TALLY_BODY_KNOWN && got.head_len == 0,
+                "none reads: the file holds none");
+    put.head_len = TALLY_HEAD_MOST + 1u;
+    len = RibbonLabeledBodyPut(body, &put);
+    TEST_ASSERT_EQ(RibbonLabeledGet(body, len, &got, &used), TALLY_BODY_BROKEN, "more than a card keeps does not");
+    put = (RibbonLabeled){ .fid = 9, .base = 3, .what = LABEL_FLAGS, .clear = TALLY_FILE_HEAD };
+    len = RibbonLabeledBodyPut(body, &put);
+    TEST_ASSERT_EQ(RibbonLabeledGet(body, len, &got, &used), TALLY_BODY_BROKEN, "the head bit in FLAGS does not read");
+    len = RibbonBornBodyPut(body, &born);
+    TEST_ASSERT(RibbonBornGet(body, len, 1, &again, &used) == TALLY_BODY_KNOWN && again.head_len == TALLY_HEAD_MOST &&
+                memcmp(again.head, first, TALLY_HEAD_MOST) == 0, "a Born carries them last");
+    born.head_len = 0;
+    len = RibbonBornBodyPut(body, &born);
+    TEST_ASSERT_EQ(RibbonBornGet(body, len, 1, &again, &used), TALLY_BODY_BROKEN, "and with the bit, at least one");
+    len = TallyFileHeadPut(head, &h);
+    TEST_ASSERT(TallyFileHeadGet(head, len, &back) == TALLY_BODY_KNOWN && back.head_len == 3 &&
+                memcmp(back.head, first, 3) == 0, "a header of a file of three bytes carries the three");
+    h.head_len = 4;
+    len = TallyFileHeadPut(head, &h);
+    TEST_ASSERT_EQ(TallyFileHeadGet(head, len, &back), TALLY_BODY_BROKEN, "and no more than the file holds");
+    h.flags    = TALLY_FILE_ACTIVE;
+    h.size     = 0;
+    h.head_len = 0;
+    len = TallyFileHeadPut(head, &h);
+    TEST_ASSERT(TallyFileHeadGet(head, len, &back) == TALLY_BODY_KNOWN && back.head_len == 0,
+                "a file of no bytes carries no field");
+out:
+    return verdict;
+}
+
+/* The passport of the signed program a file holds: a Born and a header carry
+ * it last, a Labeled PASSPORT lays it anew or — 0 — takes it off, and one
+ * without bit 63 — a number that could be a file's id — does not read
+ * anywhere. */
+static TestResult TestRibbonPassport(void)
+{
+    static uint8_t        body[96], head[96], tags[1];
+    static RibbonLabeled  put, got;
+    static RibbonBorn     born, again;
+    static TallyFileHead  h, back;
+    const uint64_t        game    = TALLY_PASSPORT_BIT | 0x123456789Aull;
+    TestResult            verdict = TEST_PASS;
+    uint32_t              len, used;
+    put  = (RibbonLabeled){ .fid = 9, .base = 3, .what = LABEL_PASSPORT, .passport = game };
+    born = (RibbonBorn){ .fid = 9, .flags = TALLY_FILE_ACTIVE | TALLY_FILE_PASSPORT, .size = 0,
+                         .name = (const uint8_t*)"game", .name_len = 4, .passport = game };
+    h    = (TallyFileHead){ .gen = 4, .flags = TALLY_FILE_ACTIVE | TALLY_FILE_PASSPORT, .size = 0, .created_ns = 5,
+                            .modified_ns = 6, .name = (const uint8_t*)"game", .name_len = 4, .tags = tags,
+                            .passport = game };
+    len = RibbonLabeledBodyPut(body, &put);
+    TEST_ASSERT(RibbonLabeledGet(body, len, &got, &used) == TALLY_BODY_KNOWN && got.passport == game && used == len,
+                "a Labeled PASSPORT reads its passport");
+    TEST_ASSERT_EQ(RibbonLabeledGet(body, len - 1u, &got, &used), TALLY_BODY_BROKEN, "PASSPORT cut short does not read");
+    put.passport = 0;
+    len = RibbonLabeledBodyPut(body, &put);
+    TEST_ASSERT(RibbonLabeledGet(body, len, &got, &used) == TALLY_BODY_KNOWN && got.passport == 0,
+                "one of 0 reads: it takes the passport off");
+    put.passport = 0x123456789Aull;
+    len = RibbonLabeledBodyPut(body, &put);
+    TEST_ASSERT_EQ(RibbonLabeledGet(body, len, &got, &used), TALLY_BODY_BROKEN, "one without bit 63 does not");
+    put = (RibbonLabeled){ .fid = 9, .base = 3, .what = LABEL_FLAGS, .set = TALLY_FILE_PASSPORT };
+    len = RibbonLabeledBodyPut(body, &put);
+    TEST_ASSERT_EQ(RibbonLabeledGet(body, len, &got, &used), TALLY_BODY_BROKEN,
+                   "the passport bit in FLAGS does not read");
+    len = RibbonBornBodyPut(body, &born);
+    TEST_ASSERT(RibbonBornGet(body, len, 1, &again, &used) == TALLY_BODY_KNOWN && again.passport == game,
+                "a Born carries it last");
+    born.passport = 7;
+    len = RibbonBornBodyPut(body, &born);
+    TEST_ASSERT_EQ(RibbonBornGet(body, len, 1, &again, &used), TALLY_BODY_BROKEN, "and no Born one without bit 63");
+    len = TallyFileHeadPut(head, &h);
+    TEST_ASSERT(TallyFileHeadGet(head, len, &back) == TALLY_BODY_KNOWN && back.passport == game,
+                "a header carries it last");
+    h.flags = TALLY_FILE_ACTIVE;
+    len = TallyFileHeadPut(head, &h);
+    TEST_ASSERT(TallyFileHeadGet(head, len, &back) == TALLY_BODY_KNOWN && back.passport == 0,
+                "a header of a file no signed program was known in carries no field");
+out:
+    return verdict;
+}
+
 static const TestCase g_ribbon_tests[] = {
     { .name = "golden_stitch",   .func = TestRibbonGoldenStitch,  .reach = TEST_READS_ONLY },
     { .name = "records_cut",     .func = TestRibbonRecordsCut,    .reach = TEST_READS_ONLY },
@@ -438,6 +637,10 @@ static const TestCase g_ribbon_tests[] = {
     { .name = "unit_names",      .func = TestRibbonUnitNames,     .reach = TEST_READS_ONLY },
     { .name = "undone_wide",     .func = TestRibbonUndoneWide,    .reach = TEST_READS_ONLY },
     { .name = "keep",            .func = TestRibbonKeep,          .reach = TEST_READS_ONLY },
+    { .name = "coined_owned",    .func = TestRibbonCoinedOwned,   .reach = TEST_READS_ONLY },
+    { .name = "shown",           .func = TestRibbonShown,         .reach = TEST_READS_ONLY },
+    { .name = "head",            .func = TestRibbonHead,          .reach = TEST_READS_ONLY },
+    { .name = "passport",        .func = TestRibbonPassport,      .reach = TEST_READS_ONLY },
 };
 
 const TestSuite g_ribbon_suite = {

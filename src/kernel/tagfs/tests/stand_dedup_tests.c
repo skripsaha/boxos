@@ -43,7 +43,7 @@ static StandBinder s_dedup_binder;
 static bool StandDedupFile(StandFreshModel* m, const char* name, uint32_t blocks, uint64_t stream, uint64_t* fid)
 {
     m->size = 0;
-    return tagfs_create_file(name, NULL, 0, fid) == 0 &&
+    return tagfs_create_file(name, NULL, 0, 0, fid) == 0 &&
            StandFreshWrite(m, *fid, 0, blocks * TAGFS_BLOCK_SIZE, stream) == (int)(blocks * TAGFS_BLOCK_SIZE);
 }
 
@@ -265,7 +265,7 @@ static TestResult TestStandDedupKept(void)
                     StandKeepInRole(s2, TAGFS_FILE_ROLE_BOOT) == OK,
                 "a second of its very bytes after it, kept in the boot role");
     TEST_ASSERT(StandDedupFile(&m, "dedup-kept-f.bin", STAND_DEDUP_BLOCKS, STAND_DEDUP_STREAM, &f) &&
-                    tagfs_add_tag_string(f, &system) == OK,
+                    tagfs_add_tag_string(TagOwnerPerson(), f, &system) == OK,
                 "and a third of those bytes, wearing only the word system, which keeps nothing");
     TEST_ASSERT_OK(TagFSSettle(), "settled");
     TEST_ASSERT(StandDedupBlocks(s1, STAND_DEDUP_BLOCKS, m1) && StandDedupBlocks(s2, STAND_DEDUP_BLOCKS, m2) &&

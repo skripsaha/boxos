@@ -18,7 +18,7 @@ from . import blklog, ondisk, stitch, tally
 from .bookcensus import BookCensus
 from .medium import Unreadable
 from .ondisk import SECTOR, BLOCK, SECTORS_PER_BLOCK
-from .selftest_book import Born, Case, Found, Label
+from .selftest_book import Case, Found, Label
 
 
 # ---------------------------------------------------------------------------
@@ -136,8 +136,8 @@ def UnreadCases(bt):
         stitch 4 after it, born f2: stitch 3's sector 1 will not read."""
         d = bt.Fresh(o, 0, 2, 4)
         pen = bt.Pen(o)
-        s3 = pen.Sew([stitch.UseContext(b"x" * 1000), Born(bt.F, f1, d[:1], b"kept")], flags=stitch.DATA_FLUSHED)
-        pen.Sew([Born(bt.F + 1, f2, d[1:], b"after")], flags=stitch.DATA_FLUSHED)
+        s3 = pen.Sew([stitch.UseContext(b"x" * 1000), bt.Born(bt.F, f1, d[:1], b"kept")], flags=stitch.DATA_FLUSHED)
+        pen.Sew([bt.Born(bt.F + 1, f2, d[1:], b"after")], flags=stitch.DATA_FLUSHED)
         Bad(o, s3.vlbas[1])
         sewn.update(s3=s3)
 

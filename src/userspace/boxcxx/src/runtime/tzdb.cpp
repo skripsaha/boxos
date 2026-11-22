@@ -14,7 +14,7 @@
 // against libstdc++ and against tzcode's own zdump over 919 417 instants.
 // What this file adds is the standard's shape — strings, vectors, exceptions —
 // and the two things only BoxOS can answer: which zone this machine is in, and
-// whether a newer table has been laid in TagFS.
+// whether a newer table has been laid on the volume.
 //
 // The text of the two [time.zone.exception] classes is NOT here, and the split
 // is load-bearing rather than cosmetic. Those messages render dates, so they
@@ -27,8 +27,9 @@
 // ── The door ────────────────────────────────────────────────────────────────
 // A table baked into an image is a table that cannot be updated, and a zone
 // database that cannot be updated is wrong the first time a country moves its
-// clocks. So `clock:tzdb` in TagFS is a door: lay a table behind it and
-// reload_tzdb() loads it. What arrives through that door is the only untrusted
+// clocks. So a table laid on the volume is a door: a file is a table by what
+// it begins with (tzdata::kMagic), which the volume keeps on every file's card
+// and answers without reading one, and reload_tzdb() loads the one laid last. What arrives through that door is the only untrusted
 // input this library has, and tzdata::Validate is the gate — measured by
 // corrupting the real table 300 000 ways on a host under ASan, where every
 // truncation and every unsorted index was refused and everything admitted was
@@ -51,6 +52,7 @@
 #include <utility>
 #include <vector>
 
+#include <box/cxx/clock.h>
 #include <box/cxx/tagfs.h>
 
 namespace tz = std::__boxcxx::tzdata;
@@ -149,57 +151,37 @@ const typename Vec::value_type *find_by_name(const Vec &v, string_view name)
 }
 
 // ── the machine's own zone, and the door ────────────────────────────────
-// `clock:*` rather than `system:*`: the space beside time, not the space
-// beside switching the machine off. The two tags in it are the setting and
-// the table.
-constexpr const char *kZoneTag      = "clock:zone";
-constexpr const char *kTzdbTag      = "clock:tzdb";
 constexpr const char *kZoneFallback = "Etc/UTC";
-
-string trimmed(const char *p, size_t n)
-{
-    string_view text(p, n);
-    while (!text.empty() && (text.back() == '\n' || text.back() == '\r'
-                             || text.back() == ' ' || text.back() == '\t'))
-        text.remove_suffix(1);
-    while (!text.empty() && (text.front() == ' ' || text.front() == '\t'))
-        text.remove_prefix(1);
-    return string(text);
-}
 
 // Read on every call rather than cached, and that is a decision. The Touch
 // multicast the `timezone` command sends on `clock:zone` exists so a program
 // that wants to be TOLD the machine moved can subscribe; a program that merely
 // asks gets the current answer because this looked, not because something
-// remembered to invalidate a cache. The zone name is a few dozen bytes and
-// current_zone() hands back a pointer the caller keeps.
+// remembered to invalidate a cache. The setting is box::clock's to read — the
+// one reader of the file set_zone writes — and current_zone() hands back a
+// pointer the caller keeps.
 string configured_zone()
 {
-    auto files = box::tagfs::query(kZoneTag, nullptr);
-    if (files.empty()) return kZoneFallback;
-
-    char buf[64] = {};
-    auto got = files.front().read_at(0, buf, sizeof buf - 1);
-    if (!got || *got == 0) return kZoneFallback;
-
-    string name = trimmed(buf, *got);
+    string name = box::clock::zone_setting();
     return name.empty() ? string(kZoneFallback) : name;
 }
 
-// Whatever is behind the door, if it is a table. An empty vector means either
-// nothing was laid there or what was laid there did not survive the gate —
-// which are the same thing to every caller, because in both cases the newest
-// database in reach is the one already loaded.
+// Whatever is behind the door, if it is a table: the file laid last of those
+// that begin as one. An empty vector means either nothing was laid there or
+// what was laid there did not survive the gate — which are the same thing to
+// every caller, because in both cases the newest database in reach is the one
+// already loaded.
 vector<unsigned char> door_blob()
 {
-    auto files = box::tagfs::query(kTzdbTag, nullptr);
+    auto files = box::tagfs::files_starting_with(string_view(tz::kMagic, sizeof tz::kMagic));
     if (files.empty()) return {};
+    const box::tagfs::file table = files.back();
 
-    const uint64_t n = files.front().size();
+    const uint64_t n = table.size();
     if (n < 44) return {};             // smaller than the header: not a table
 
     vector<unsigned char> blob(static_cast<size_t>(n));
-    auto got = files.front().read_at(0, blob.data(), blob.size());
+    auto got = table.read_at(0, blob.data(), blob.size());
     if (!got || *got != blob.size()) return {};
     if (!tz::Validate(blob.data(), blob.size())) return {};
     return blob;

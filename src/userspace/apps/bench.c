@@ -819,7 +819,7 @@ static int b_file_cycle(uint32_t i, void *ctx)
         name[p++] = rev[--rl];
     name[p] = '\0';
 
-    int64_t file_id = create(name, "");
+    int64_t file_id = create(MY_TAGS, name, "");
     if (file_id < 0)
         return (int)file_id;
 

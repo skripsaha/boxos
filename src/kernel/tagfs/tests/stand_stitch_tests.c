@@ -410,8 +410,8 @@ static TestResult TestStandStitchCoined(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT_OK(TagSpell(text, sizeof(text) - 1u, &tag), "a tag is spelled");
-    TEST_ASSERT_EQ(TagRegistryLookup(reg, &tag), TAGFS_INVALID_TAG_ID, "the volume does not know it");
-    TEST_ASSERT_OK(TagRegistryIntern(reg, &tag, &tid), "it is given an id");
+    TEST_ASSERT_EQ(TagRegistryLookup(reg, TagOwnerPerson(), &tag), TAGFS_INVALID_TAG_ID, "the volume does not know it");
+    TEST_ASSERT_OK(TagRegistryIntern(reg, TagOwnerPerson(), &tag, &tid), "it is given an id");
     BlockFailArm(s.seat, BLOCK_FAIL_WRITE, 0, 0, BLOCK_FAIL_NEVER);
     TEST_ASSERT_OK(TagRegistryIdGiven(reg, tid), "the id is the registry's at once");
     TEST_ASSERT_EQ(BlockFailSeen(), 0, "with not one write: a book's registry is laid down by the cycle");
@@ -426,7 +426,7 @@ static TestResult TestStandStitchCoined(void)
     u = NULL;
     TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
     reg = tagfs_get_state()->registry;
-    TEST_ASSERT_EQ(TagRegistryLookup(reg, &tag), tid, "and knows the tag by the id it was given");
+    TEST_ASSERT_EQ(TagRegistryLookup(reg, TagOwnerPerson(), &tag), tid, "and knows the tag by the id it was given");
 out:
     RibbonUnitLetGo(u);
     BlockFailDisarm();
@@ -813,7 +813,7 @@ static TestResult TestStandStitchTallyCost(void)
         uint32_t    n   = (uint32_t)ksnprintf(text, sizeof(text), "stitch:%03u-", i);
         memset(text + n, 'x', sizeof(text) - n - 1u);
         text[sizeof(text) - 1u] = '\0';
-        TEST_ASSERT(TagSpell(text, sizeof(text) - 1u, &tag) == OK && TagRegistryIntern(reg, &tag, &tid) == OK,
+        TEST_ASSERT(TagSpell(text, sizeof(text) - 1u, &tag) == OK && TagRegistryIntern(reg, TagOwnerPerson(), &tag, &tid) == OK,
                     "tags are given ids");
     }
     uint64_t more = TallyCostBlocks();

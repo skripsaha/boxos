@@ -4,14 +4,22 @@
 // current_zone() answers what zone the machine is in, and system_clock answers
 // what moment it is. What no standard has a spelling for is SETTING it, because
 // setting it is not a question about time — it is a question about this
-// machine. So it lives here, in box::, beside the tag it writes.
+// machine. So it lives here, in box::, beside the file it writes.
 //
 //   box::clock::set_zone("Europe/Moscow")   — validate, store, announce
 //   box::clock::zone_setting()              — the stored name, or empty
 //
-// The tag is `clock:zone`, and the namespace is its mirror: the machine's
-// reckoning of time is a space beside time, not beside switching the machine
-// off, which is why none of this is in box::system next to reboot().
+// The machine's reckoning of time is a space beside time, not beside switching
+// the machine off, which is why none of this is in box::system next to
+// reboot().
+//
+// ── Where it is stored ──────────────────────────────────────────────────────
+// In a file of its own kind, told by what it begins with: the line
+// "timezone 1", then the zone's name on the next. What a file is is told by
+// its first bytes, which the volume keeps on every file's card, so any program
+// finds the setting by asking which files begin so — no file is read for it
+// and nobody's tags are asked for. Of several, the one made last is the
+// machine's: the one set_zone writes and every reader reads.
 //
 // ── Why setting it validates ────────────────────────────────────────────────
 // A name the zone database does not know reads back as Etc/UTC. Storing one
@@ -33,8 +41,10 @@
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "box/cxx/error.h"
 #include "box/cxx/tagfs.h"
@@ -43,9 +53,11 @@
 namespace box {
 namespace clock {
 
-// The tag the setting lives under, and the name of the object that carries it.
-inline constexpr const char *zone_tag  = "clock:zone";
-inline constexpr const char *zone_file = "zone";
+// What the setting's file begins with, the name a new one is given, and the
+// Touch tag a change of the zone is announced on.
+inline constexpr std::string_view zone_header = "timezone 1\n";
+inline constexpr const char      *zone_file   = "zone";
+inline constexpr const char      *zone_tag    = "clock:zone";
 
 // The longest name in IANA 2026c is 32 characters; this is the buffer the
 // setting is read through, generous enough that a longer one in some future
@@ -65,6 +77,14 @@ inline std::string trimmed(const char *p, std::size_t n)
     return std::string(text);
 }
 
+// The setting's file: the one made last of those that begin as one.
+inline std::optional<box::tagfs::file> setting_file()
+{
+    std::vector<box::tagfs::file> files = box::tagfs::files_starting_with(zone_header);
+    if (files.empty()) return std::nullopt;
+    return files.back();
+}
+
 }  // namespace _detail
 
 // What is STORED, which is not always what the machine uses: a setting naming
@@ -73,13 +93,14 @@ inline std::string trimmed(const char *p, std::size_t n)
 // command say so instead of hiding it. Empty when nothing has been set.
 inline std::string zone_setting()
 {
-    auto files = box::tagfs::query(zone_tag, nullptr);
-    if (files.empty()) return {};
+    std::optional<box::tagfs::file> f = _detail::setting_file();
+    if (!f) return {};
 
-    char buf[zone_name_max + 1] = {};
-    auto got = files.front().read_at(0, buf, sizeof buf - 1);
-    if (!got || *got == 0) return {};
-    return _detail::trimmed(buf, *got);
+    char buf[zone_header.size() + zone_name_max + 1] = {};
+    auto got = f->read_at(0, buf, sizeof buf - 1);
+    if (!got || *got <= zone_header.size() || std::string_view(buf, zone_header.size()) != zone_header) return {};
+    std::string_view name(buf + zone_header.size(), *got - zone_header.size());
+    return _detail::trimmed(name.data(), name.substr(0, name.find('\n')).size());
 }
 
 // Set the zone this machine keeps.
@@ -100,22 +121,25 @@ inline box::status set_zone(std::string_view name)
     // it resolves to and the setting never has to be resolved twice.
     const std::string canonical(tz->name());
 
-    auto files = box::tagfs::query(zone_tag, nullptr);
-    box::result<box::tagfs::file> f =
-        files.empty() ? box::tagfs::create(zone_file, zone_tag)
-                      : box::result<box::tagfs::file>(files.front());
+    // A new setting's file is the program's own and wears no tag: what it is
+    // is what it begins with.
+    std::optional<box::tagfs::file> found = _detail::setting_file();
+    box::result<box::tagfs::file>   f     = found ? box::result<box::tagfs::file>(*found)
+                                                  : box::tagfs::create(box::tagfs::my_tags, zone_file);
     if (!f) return std::unexpected(f.error());
 
-    // Emptied first. A shorter name written over a longer one would otherwise
-    // leave the tail of the old one behind — "Etc/UTC" over "Europe/Moscow"
-    // reads back as "Etc/UTCe/Moscow". TagFS learned to shorten a file in Ф36;
-    // before that this could not have been written correctly at all.
-    if (auto shortened = f->span(0); !shortened) return shortened;
-
-    auto wrote = f->write_at(0, canonical.data(), canonical.size());
+    // Written whole, then cut to its length. A shorter name written over a
+    // longer one would otherwise leave the tail of the old one behind —
+    // "Etc/UTC" over "Europe/Moscow" reads back as "Etc/UTCe/Moscow" — and
+    // cutting after the write, not before, keeps the file beginning as a
+    // setting at every moment, so no reader meanwhile finds none and no other
+    // set_zone makes a second.
+    const std::string text = std::string(zone_header) + canonical + "\n";
+    auto wrote = f->write_at(0, text.data(), text.size());
     if (!wrote) return std::unexpected(wrote.error());
-    if (*wrote != canonical.size())
+    if (*wrote != text.size())
         return std::unexpected(box::error{box::errc::write_failed});
+    if (auto cut = f->span(text.size()); !cut) return cut;
 
     // Tell whoever is already running. Best-effort on purpose: the setting is
     // stored and correct whether or not anybody was listening, and failing the

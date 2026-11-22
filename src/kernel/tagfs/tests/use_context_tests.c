@@ -224,7 +224,7 @@ static TestResult test_use_context_walls(void)
     now = UseContextHold();
     TEST_ASSERT_EQ(UseListCount(now), 1, "one tag");
     TEST_ASSERT(use_spelled(now), "the context's tags spell");
-    TEST_ASSERT_OK(TagFSQueryPage(s_spelled, 1, NULL, 0, 1, ids, ARRAY_SIZE(ids), true, &page),
+    TEST_ASSERT_OK(TagFSQueryPage(TagOwnerPerson(), s_spelled, 1, NULL, 0, 1, ids, ARRAY_SIZE(ids), true, &page),
                    "the context's question is put to the volume");
     TEST_ASSERT_EQ(page.total, 0, "inside walls nobody has built, nothing is visible");
 
@@ -258,12 +258,22 @@ static TestResult test_use_context_narrows(void)
     TagFSPage     page;
     TagFSMetadata meta;
 
-    TEST_ASSERT_OK(TagFSListPage(1, first, 1, false, &page), "the volume's files are listed");
-    TEST_ASSERT_EQ(page.delivered, 1, "a volume with at least one file");
-    TEST_ASSERT(tagfs_get_metadata(first[0], &meta) == 0, "the first file's metadata");
-    have_meta = true;
-    if (meta.tag_count == 0) {
-        verdict = test_steps_aside("the first file on this volume carries no tag, "
+    /* The first file that wears a tag: a file wears none unless it was given
+     * one, and its name is no tag. */
+    uint64_t from = 1;
+    do {
+        TEST_ASSERT_OK(TagFSListPage(from, first, 1, false, &page), "the volume's files are listed");
+        if (page.delivered == 0)
+            break;
+        if (have_meta)
+            tagfs_metadata_free(&meta);
+        have_meta = false;
+        TEST_ASSERT(tagfs_get_metadata(first[0], &meta) == 0, "a file's metadata");
+        have_meta = true;
+        from = page.next;
+    } while (meta.tag_count == 0 && from != 0);
+    if (!have_meta || meta.tag_count == 0) {
+        verdict = test_steps_aside("no file on this volume carries a tag, "
                                    "and a Use Context narrows by tags — there was "
                                    "nothing here to narrow by");
         goto out;
@@ -281,7 +291,7 @@ static TestResult test_use_context_narrows(void)
     now = UseContextHold();
 
     TEST_ASSERT(use_spelled(now), "the context's tags spell");
-    TEST_ASSERT_OK(TagFSQueryPage(s_spelled, UseListCount(now), NULL, 0, 1, s_inside,
+    TEST_ASSERT_OK(TagFSQueryPage(TagOwnerPerson(), s_spelled, UseListCount(now), NULL, 0, 1, s_inside,
                                   ARRAY_SIZE(s_inside), true, &page),
                    "the context's question is put to the volume");
     uint32_t n_inside = page.total;

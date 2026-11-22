@@ -67,7 +67,7 @@ static bool from_trash(Going *going, const file_id_t *trashed, int total, const 
     int       count = 0;
     for (int i = 0; i < total; i++) {
         FileMetadata metadata;
-        if (FileMetadataRead(trashed[i], &metadata) != 0) continue;
+        if (FileMetadataRead(MY_TAGS, trashed[i], &metadata) != 0) continue;
         if (metadata.Filename && strcmp(metadata.Filename, name) == 0) {
             found = trashed[i];
             count++;
@@ -102,7 +102,7 @@ static void show_going(const Going *going)
     size_t out = 0, programs = 0;
     for (size_t i = 0; i < going->Count; i++) {
         FileMetadata metadata;
-        bool         read = FileMetadataRead(going->Ids[i], &metadata) == 0;
+        bool         read = FileMetadataRead(PERSON_TAGS, going->Ids[i], &metadata) == 0;
         bool         kept    = read && metadata.KeptUntil != 0;
         ProgramKind  kind    = PROGRAM_NONE;
         bool         program = read && program_kind(going->Ids[i], &kind) == 0 && kind != PROGRAM_NONE;
@@ -160,7 +160,7 @@ static bool delete_all(const Going *going)
     size_t deleted = 0, stayed = 0;
     for (size_t i = 0; i < going->Count; i++) {
         FileMetadata metadata;
-        bool         named = FileMetadataRead(going->Ids[i], &metadata) == 0 && metadata.Filename;
+        bool         named = FileMetadataRead(MY_TAGS, going->Ids[i], &metadata) == 0 && metadata.Filename;
         const char  *name  = named ? metadata.Filename : "a file";
         int          rc    = delete(going->Ids[i]);
         if (rc == 0) {
@@ -196,7 +196,7 @@ int main(void)
     for (size_t i = 0; i < thing_count && whole; i++) whole = going_add(&going, things[i]);
 
     file_id_t *trashed = NULL;
-    int        total   = word_count ? query_all_deleted(NULL, NULL, &trashed) : 0;
+    int        total   = word_count ? query_all_deleted(MY_TAGS, NULL, NULL, &trashed) : 0;
     if (total < 0) {
         println("delete: the trash could not be looked in");
         whole = false;

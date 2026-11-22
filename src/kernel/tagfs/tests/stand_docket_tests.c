@@ -41,21 +41,19 @@
 // zeros on the ribbon take back.
 // ============================================================================
 
-/* Whether file `fid`, as memory holds it, is called `name`, wears its name's
- * tag, and wears `tag` — or not, `wears` false. */
+/* Whether file `fid`, as memory holds it, is called `name` and wears `tag` — or
+ * not, `wears` false. */
 static bool StandDocketHolds(uint64_t fid, const char* name, const TagSpelling* tag, bool wears)
 {
     TagFSState* fs   = tagfs_get_state();
     FileRecord* rec  = FileMapRecordHold(fs->files, fid, NULL);
-    uint32_t    stem = InkNameTagLookup(name), id = TagRegistryLookup(fs->registry, tag);
-    bool        has_stem = false, has_tag = false;
+    uint32_t    id   = TagRegistryLookup(fs->registry, TagOwnerPerson(), tag);
+    bool        has_tag = false;
     if (!rec)
         return false;
-    for (uint32_t i = 0; i < rec->tag_count; i++) {
-        has_stem |= rec->tags[i] == stem;
-        has_tag  |= rec->tags[i] == id;
-    }
-    bool holds = strcmp(rec->name, name) == 0 && has_stem && has_tag == wears;
+    for (uint32_t i = 0; i < rec->tag_count; i++)
+        has_tag |= rec->tags[i] == id;
+    bool holds = strcmp(rec->name, name) == 0 && has_tag == wears;
     FileRecordRelease(rec);
     return holds;
 }
@@ -151,14 +149,14 @@ static TestResult TestStandDocketEachChangeMountsAgain(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(TagSpell("docket:x", 8u, &tag) == OK, "a tag is spelled");
-    TEST_ASSERT_EQ(tagfs_create_file("docket-a.txt", NULL, 0, &fid), 0, "a file is made on the book");
-    TEST_ASSERT_OK(tagfs_add_tag_string(fid, &tag), "and tagged with a tag new to the volume");
+    TEST_ASSERT_EQ(tagfs_create_file("docket-a.txt", NULL, 0, 0, &fid), 0, "a file is made on the book");
+    TEST_ASSERT_OK(tagfs_add_tag_string(TagOwnerPerson(), fid, &tag), "and tagged with a tag new to the volume");
     TEST_ASSERT(StandDocketSettledAndBack(), "its cycle settles, and the volume mounts again");
-    TEST_ASSERT(StandDocketHolds(fid, "docket-a.txt", &tag, true), "holding the file, its name's tag and the tag");
+    TEST_ASSERT(StandDocketHolds(fid, "docket-a.txt", &tag, true), "holding the file and the tag");
     TEST_ASSERT_EQ(tagfs_rename_file(fid, "docket-b.txt"), 0, "the file is renamed");
     TEST_ASSERT(StandDocketSettledAndBack() && StandDocketHolds(fid, "docket-b.txt", &tag, true),
                 "and mounted again it holds the new name and its tag, the tag kept");
-    TEST_ASSERT_EQ(tagfs_remove_tag_string(fid, &tag), 0, "the tag is taken off");
+    TEST_ASSERT_EQ(tagfs_remove_tag_string(TagOwnerPerson(), fid, &tag), 0, "the tag is taken off");
     TEST_ASSERT(StandDocketSettledAndBack() && StandDocketHolds(fid, "docket-b.txt", &tag, false),
                 "and mounted again the file wears it no more");
     TEST_ASSERT_EQ(tagfs_delete_file(fid, INK_UNWARRANTED), 0, "the file is given up");
@@ -169,7 +167,7 @@ static TestResult TestStandDocketEachChangeMountsAgain(void)
     TEST_ASSERT_EQ(tagfs_delete_file(plain, INK_UNWARRANTED), 0, "is given up, its blocks with it");
     TEST_ASSERT(StandDocketSettledAndBack(), "its cycle settles, and the volume mounts again");
     TEST_ASSERT(StandDocketGone(plain), "without it");
-    TEST_ASSERT_EQ(tagfs_create_file("docket-c.txt", NULL, 0, &given), 0, "a file made after the mount");
+    TEST_ASSERT_EQ(tagfs_create_file("docket-c.txt", NULL, 0, 0, &given), 0, "a file made after the mount");
     TEST_ASSERT(given > fid, "takes an id past every one the book names");
 out:
     STAND_STITCH_PUT_BACK(&s);
@@ -189,12 +187,12 @@ static TestResult TestStandDocketMerges(void)
 
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT_EQ(tagfs_create_file("docket-first.txt", NULL, 0, &kept), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("docket-first.txt", NULL, 0, 0, &kept), 0, "a file is made");
     TEST_ASSERT_EQ(tagfs_rename_file(kept, "docket-kept.txt"), 0, "and renamed before a cycle");
     TEST_ASSERT_OK(TagFSSettle(), "the cycle settles");
     TEST_ASSERT(StandDocketCarries(RIBBON_BORN) == 1 && StandDocketCarries(RIBBON_LABELED) == 0,
                 "its stitch carries one Born — of the last name — and no Labeled");
-    TEST_ASSERT_EQ(tagfs_create_file("docket-gone.txt", NULL, 0, &gone), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("docket-gone.txt", NULL, 0, 0, &gone), 0, "a file is made");
     TEST_ASSERT_EQ(tagfs_delete_file(gone, INK_UNWARRANTED), 0, "and given up before a cycle named it");
     TEST_ASSERT_EQ(tagfs_rename_file(kept, "docket-once.txt"), 0, "the settled file is renamed");
     TEST_ASSERT_EQ(tagfs_rename_file(kept, "docket-last.txt"), 0, "and renamed again");
@@ -254,7 +252,7 @@ static error_t StandDocketRoom(void)
  * own wait for room writes where the measure grew past the last Tally or a
  * Tally gives the ring's ground back, the ring not turned since a change was
  * given room — and refused no-space at once where none can give; nothing
- * holds a Tally back here. Not made either way: its name's tag not interned,
+ * holds a Tally back here. Not made either way: no tag interned for it,
  * no stitch laid for it, and a wait it is told is on that Tally, asked of it.
  * *first the answer.
  */
@@ -271,12 +269,12 @@ static TestResult StandDocketShutAsk(const char* name, uint64_t* fid, int* first
     TEST_ASSERT(under || __atomic_load_n(&g_binder.may_not, __ATOMIC_ACQUIRE) == NULL,
                 "nothing holds a Tally back: one may be begun");
     RibbonCursorStand(&was);
-    *first = tagfs_create_file(name, NULL, 0, fid);
+    *first = tagfs_create_file(name, NULL, 0, 0, fid);
     RibbonCursorStand(&now);
     TEST_ASSERT_EQ(*first, waits ? -(int)ERR_WOULD_BLOCK : -(int)ERR_TAGFS_NO_SPACE,
                    "a file is not made where its Born has no room on the ribbon: told to wait on the Tally that "
                    "gives the ribbon its Quires back where one may, refused where none can");
-    TEST_ASSERT_EQ(fs->registry->next_id, next, "and its name's tag is not interned");
+    TEST_ASSERT_EQ(fs->registry->next_id, next, "and no tag is interned for it");
     TEST_ASSERT(now.off == was.off && now.last == was.last, "and no stitch was laid for it");
     TEST_ASSERT(*first != -(int)ERR_WOULD_BLOCK || BinderRoomAwaited(),
                 "told to wait, it waits on that Tally, asked of its own wait for room — on nothing else");
@@ -294,7 +292,7 @@ static TestResult StandDocketShutWaited(const char* name, uint64_t* fid, int* rc
     uint32_t   waits   = 0;
     for (; *rc == -(int)ERR_WOULD_BLOCK && waits <= g_binder.ring; waits++) {
         (void)StandDocketRoom();
-        *rc = tagfs_create_file(name, NULL, 0, fid);
+        *rc = tagfs_create_file(name, NULL, 0, 0, fid);
     }
     TestEvidence("waits for room the file asked for took", waits);
     TEST_ASSERT(*rc == 0 || *rc == -(int)ERR_TAGFS_NO_SPACE,
@@ -413,12 +411,12 @@ static TestResult TestStandDocketClaimRefused(void)
     BlockMapDerivedStandGrow();
     held = false;
     named = RibbonCursorNow()->next.blocks != 0;
-    TEST_ASSERT_EQ(tagfs_create_file("docket-full.txt", NULL, 0, &fid), named ? 0 : -(int)ERR_WOULD_BLOCK,
+    TEST_ASSERT_EQ(tagfs_create_file("docket-full.txt", NULL, 0, 0, &fid), named ? 0 : -(int)ERR_WOULD_BLOCK,
                    "with ground back, a create waits for the cycle that gives the ribbon its next_quire — made at "
                    "once where a Tally gave it one");
     if (!named) {
         TEST_ASSERT_OK(TagFSSettle(), "that cycle settles");
-        TEST_ASSERT_EQ(tagfs_create_file("docket-full.txt", NULL, 0, &fid), 0, "and the file is made");
+        TEST_ASSERT_EQ(tagfs_create_file("docket-full.txt", NULL, 0, 0, &fid), 0, "and the file is made");
     }
     TEST_ASSERT_OK(TagFSSettle(), "its Born settles");
 out:
@@ -483,7 +481,7 @@ static TestResult TestStandDocketClaimAcross(void)
     uint64_t left = now.quire.blocks * TAGFS_BLOCK_SECTORS - now.off;
     TEST_ASSERT(left > 2u * now.atom && now.next.blocks, "the ribbon has more than two atoms of its Quire, and a next");
     TEST_ASSERT_OK(StandStitchSayFilling(left - 2u * now.atom, 'w', 70, &kept), "a word leaves two atoms of it");
-    TEST_ASSERT_EQ(tagfs_create_file("across.txt", NULL, 0, &fid), 0, "a file is made: its Born claims its room");
+    TEST_ASSERT_EQ(tagfs_create_file("across.txt", NULL, 0, 0, &fid), 0, "a file is made: its Born claims its room");
     TEST_ASSERT_OK(StandStitchSayFilling(4u * now.atom, 'x', 71, &kept), "a word four atoms long is said");
     RibbonCursorStand(&now);
     TEST_ASSERT(RibbonQuireSame(&now.quire, &b.s.at.next) && !now.next.blocks && SettledGen() == InkedGen(),
@@ -691,11 +689,11 @@ static TestResult TestStandDocketClosedDamaged(void)
 
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT_EQ(tagfs_create_file("c13-a.txt", NULL, 0, &a), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("c13-a.txt", NULL, 0, 0, &a), 0, "a file is made");
     TEST_ASSERT(StandStitchSayLong(1500u, 'q', 30, &kept) == OK && kept,
                 "and a word of 1500 bytes said: one stitch carries the file's Born past the word");
     RibbonCursorStand(&one);
-    TEST_ASSERT_EQ(tagfs_create_file("c13-b.txt", NULL, 0, &b), 0, "a second file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("c13-b.txt", NULL, 0, 0, &b), 0, "a second file is made");
     TEST_ASSERT_OK(TagFSSettle(), "and its stitch sewn after the first");
     RibbonCursorStand(&two);
     TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of");
@@ -799,9 +797,9 @@ static TestResult TestStandDocketWarrant(void)
     TEST_ASSERT(StandDocketGuardedFile(&kept), "the book holds a file the system keeps");
     TEST_ASSERT_EQ(tagfs_delete_file(kept, INK_UNWARRANTED), -(int)ERR_PERMISSION_DENIED,
                    "it is not given up by a call with no warrant");
-    TEST_ASSERT_EQ(tagfs_create_file("warrant.txt", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("warrant.txt", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT(TagSpell("system:docket", 13u, &tag) == OK, "a tag of key system is spelled");
-    TEST_ASSERT_OK(tagfs_add_tag_string(fid, &tag), "and is put on by any call: a file's tags are its user's");
+    TEST_ASSERT_OK(tagfs_add_tag_string(TagOwnerPerson(), fid, &tag), "and is put on by any call: a file's tags are its user's");
     TEST_ASSERT(StandDocketSettledAndBack(), "the cycle settles, and the volume mounts again");
     TEST_ASSERT(StandDocketLive(kept), "with the kept file");
     FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);

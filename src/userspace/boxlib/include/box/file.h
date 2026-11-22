@@ -8,11 +8,79 @@ extern "C" {
 #include "box/defs.h"
 #include "box/types.h"
 
+/*
+ * Whose tags a call speaks — the first argument of every call below that
+ * speaks tags:
+ *
+ *   MY_TAGS      the program's own: its words for its own files, which no
+ *                other program meets — a game's `save` is never the person's
+ *                `save`. Every program started from a file has them without
+ *                asking; one started from bytes held in memory has none
+ *                (-ERR_TAGFS_NO_OWN_TAGS). A signed program is one program in
+ *                every file of it — its author and its name, as its box's
+ *                signature proves them —, so a copy and a new version of it
+ *                have its tags, which leave with the last file of it.
+ *   PERSON_TAGS  the person's: the labels the person finds files by, and the
+ *                words of the Use Context. A program sees them only when its
+ *                box asks `see-tags`, and changes them only when it asks
+ *                `change-tags` (-ERR_ACCESS_DENIED otherwise).
+ *   PROGRAM_TAGS(program)
+ *                another program's own, the program named by a file of it: seen
+ *                when it shows them to this one (show_tags_to below) or when
+ *                this one's box asks `see-tags` or `change-tags` — the person
+ *                sees every tag on the person's files —, taken off a file
+ *                only when it asks `change-tags` — the person's hands —, and
+ *                put on by nobody but that program (-ERR_ACCESS_DENIED
+ *                otherwise). This program named so is MY_TAGS.
+ *   ALL_TAGS     every tag this program may see, each with whose it is (the
+ *                owner beside it): its own, those of the programs that show it
+ *                theirs, and with `see-tags` or `change-tags` the person's and
+ *                every program's. For file_info, FileMetadataRead and tag_list
+ *                alone: a question, a create or a change is of one owner's
+ *                tags (-ERR_INVALID_ARGUMENT).
+ *
+ * A call that names no tag at all — a name looked up alone — asks nothing,
+ * whichever it says. (boxos_decks.h, STORAGE_TAGS_*.)
+ */
 typedef struct {
-    uint8_t type;        // 0=user, 1=system
-    char key[11];
-    char value[12];
+    uint8_t   whose;      /* the deck's whose byte (boxos_decks.h, STORAGE_TAGS_*) */
+    file_id_t program;    /* PROGRAM_TAGS' program; 0 for the rest */
+} TagsOf;
+
+#ifdef __cplusplus
+#define TAGS_OF_(whose, program) (TagsOf{ (uint8_t)(whose), (file_id_t)(program) })
+#else
+#define TAGS_OF_(whose, program) ((TagsOf){ (uint8_t)(whose), (file_id_t)(program) })
+#endif
+#define MY_TAGS                TAGS_OF_(0, 0)
+#define PERSON_TAGS            TAGS_OF_(1, 0)
+#define PROGRAM_TAGS(program)  TAGS_OF_(2, (program))
+#define ALL_TAGS               TAGS_OF_(3, 0)
+
+/* Whose a tag is, in the answers that say it: 0 the person's, a program's
+ * file id that program's own. */
+#define PERSON_OWNS            ((file_id_t)0)
+
+typedef struct {
+    uint8_t   type;      // 0=user, 1=system
+    char      key[11];
+    char      value[12];
+    file_id_t owner;     // whose it is: PERSON_OWNS, or the file of the program whose own it is
 } tag_t;
+
+/*
+ * What a file is, as the system says it: what it keeps the file as (role), and
+ * the file's first bytes (head) — whoever knows what they mean tells from them
+ * what the file is: a box begins with its magic, a font with its tag, an
+ * itinerary with its line. The system keeps them exact through every change of
+ * what the file holds and knows no format; files_starting_with asks which files
+ * begin so, and no file is read for it.
+ */
+#define FILE_HEAD_MOST      16u   /* the first bytes the system keeps of a file: all of a shorter one */
+#define FILE_ROLE_ORDINARY  0u
+#define FILE_ROLE_SYSTEM    1u
+#define FILE_ROLE_BOOT      2u
+#define FILE_ROLE_KERNEL    3u
 
 typedef struct {
     file_id_t file_id;
@@ -21,6 +89,10 @@ typedef struct {
     char filename[32];
     tag_t tags[5];
     uint64_t deleted_until;   // the wall clock's nanoseconds a deleted file is kept until; 0 for one that is not
+    file_id_t made_by;        // the file of the program that made this file; 0 for none (it may be gone since)
+    uint8_t role;             // what the system keeps it as: FILE_ROLE_*
+    uint8_t head_len;         // how many first bytes head holds: min(size, FILE_HEAD_MOST)
+    uint8_t head[FILE_HEAD_MOST];
 } file_info_t;
 
 /* Full metadata for tools that must preserve a file exactly.  file_info_t is
@@ -29,42 +101,51 @@ typedef struct {
  *
  * Filename and Tags are heap-owned by the value.  Tags is a comma-separated
  * list of complete tag spellings, or NULL when the file has no tags.  The
- * caller releases both with FileMetadataRelease(). */
+ * caller releases them with FileMetadataRelease(). */
 typedef struct {
     file_id_t FileId;
     uint64_t  Size;
     uint32_t  TagCount;
     char     *Filename;
     char     *Tags;
+    file_id_t *Owners;        /* whose each tag of Tags is, in its order (tag_t.owner); NULL with none */
     uint64_t  KeptUntil;      /* the wall clock's nanoseconds a deleted file is kept until; 0 for one that is not */
+    file_id_t MadeBy;         /* the file of the program that made this file; 0 for none (it may be gone since) */
+    uint8_t   Role;           /* what the system keeps it as: FILE_ROLE_* */
+    uint8_t   HeadLength;     /* how many first bytes Head holds: min(Size, FILE_HEAD_MOST) */
+    uint8_t   Head[FILE_HEAD_MOST];
 } FileMetadata;
 
-/* Read the complete self-describing metadata record.  The response buffer is
- * grown until the kernel can return every byte; no field is truncated. */
-int FileMetadataRead(file_id_t FileId, FileMetadata *Out);
+/* Read the complete self-describing metadata record — the tags `Whose` of
+ * them the file wears.  The response buffer is grown until the kernel can
+ * return every byte; no field is truncated. */
+int FileMetadataRead(TagsOf Whose, file_id_t FileId, FileMetadata *Out);
 
 /* Release all heap-owned members and reset Out to its empty state. */
 void FileMetadataRelease(FileMetadata *Metadata);
 
-/* Whether the file wears a tag whose key is `Key`, bare or with a value:
- * "note", "log:file". A tag is the person's own label for finding a file, and
- * this is for a program that finds the files its person labelled for it (the
- * notes finding notes); what a file IS — a program, a settings file, kept by
- * the system — is never read from its tags. */
+/* Whether the file wears a tag whose key is `Key`, bare or with a value —
+ * "note", "log:file" — among the tags of the owner `Metadata` was read with: a
+ * program's own words on its own files (the notes finding notes), or the
+ * person's labels for a program that works on them. What a file IS — a
+ * program, a settings file, kept by the system — is never read from its tags:
+ * it is told by its first bytes (Head). */
 bool FileMetadataWears(const FileMetadata *Metadata, const char *Key);
 
 /*
- * Inside the Use Context by default. When the user has said `use code cpp`,
- * query("project") asks for files that are code AND cpp AND project, and
- * create() stamps the new file code and cpp along with the tags it was given.
- * The _everywhere spellings ask the same of the whole volume, the user's
- * context left out. See box/use.h.
+ * In the person's tags, inside the Use Context by default. When the user has
+ * said `use code cpp`, query(PERSON_TAGS, "project", ...) asks for files that
+ * are code AND cpp AND project, and create(PERSON_TAGS, ...) stamps the new
+ * file code and cpp along with the tags it was given. The _everywhere
+ * spellings ask the same of the whole volume, the user's context left out. A
+ * call in MY_TAGS is the program's own and asked of the whole volume always:
+ * the Use Context is the person's. See box/use.h.
  *
  * create answers the new file's id (> 0), or a negative -error_t — one int64
  * the way fread answers a count, so a whole 64-bit id is never cut to an int.
  */
-int64_t create(const char* filename, const char* tags);
-int64_t create_everywhere(const char* filename, const char* tags);
+int64_t create(TagsOf whose, const char* filename, const char* tags);
+int64_t create_everywhere(TagsOf whose, const char* filename, const char* tags);
 /* The files that wear every tag of `tags` (every file, for NULL or "") and
  * none of `without` (a comma list too; NULL or "" sets nothing aside). The
  * volume sets aside no file of its own accord but the deleted ones — which
@@ -75,15 +156,40 @@ int64_t create_everywhere(const char* filename, const char* tags);
  * that wants every match asks query_all: it learns the count from the kernel,
  * hands back a malloc'd list of that many ids (NULL when there are none) and
  * returns the count; the caller frees the list. */
-int query(const char* tags, const char* without, file_id_t* file_ids, size_t max_files);
-int query_everywhere(const char* tags, const char* without, file_id_t* file_ids, size_t max_files);
-int query_all(const char* tags, const char* without, file_id_t** out_ids);
-int query_all_everywhere(const char* tags, const char* without, file_id_t** out_ids);
+int query(TagsOf whose, const char* tags, const char* without, file_id_t* file_ids, size_t max_files);
+int query_everywhere(TagsOf whose, const char* tags, const char* without, file_id_t* file_ids, size_t max_files);
+int query_all(TagsOf whose, const char* tags, const char* without, file_id_t** out_ids);
+int query_all_everywhere(TagsOf whose, const char* tags, const char* without, file_id_t** out_ids);
 /* The same question asked of the files kept deleted (file_keep) alone, over the
  * whole volume — the Use Context left out. */
-int query_deleted(const char* tags, const char* without, file_id_t* file_ids, size_t max_files);
-int query_all_deleted(const char* tags, const char* without, file_id_t** out_ids);
-int file_info(file_id_t file_id, file_info_t* info);
+int query_deleted(TagsOf whose, const char* tags, const char* without, file_id_t* file_ids, size_t max_files);
+int query_all_deleted(TagsOf whose, const char* tags, const char* without, file_id_t** out_ids);
+/* The files called `word` — a file's name is a field of its card and no tag, so
+ * the tag questions never find one by it. A word matches a file when it is the
+ * whole of the file's name or its stem, the name up to its last dot (`slot3`
+ * finds slot3.sav; `slot3.sav` finds it too), byte for byte: the word is not
+ * spelled as a tag, so a ':' in it is a byte like any other. As query_all,
+ * only those wearing every tag of `tags` (NULL or "" for none), inside the Use
+ * Context or everywhere, those wearing a tag of `without` left out, the
+ * deleted never met; the count, and a malloc'd list the caller frees (NULL for
+ * none), or a negative -error_t — -ERR_INVALID_ARGUMENT for an empty word. */
+int query_name_all(TagsOf whose, const char* word, const char* tags, const char* without, file_id_t** out_ids);
+int query_name_all_everywhere(TagsOf whose, const char* word, const char* tags, const char* without,
+                              file_id_t** out_ids);
+/* The files a typed word finds: those that wear it as a tag of `whose`, and
+ * those that are called it — a search looks at both the labels and the name,
+ * so `slot3` finds the file tagged slot3 and slot3.sav alike. Inside the Use
+ * Context; each file once, in file id order; the count and a malloc'd list the
+ * caller frees (NULL for none), or a negative -error_t. */
+int query_word_all(TagsOf whose, const char* word, file_id_t** out_ids);
+/* The files that begin with `length` bytes at `bytes` (1 to FILE_HEAD_MOST) —
+ * the box magic, a font's tag, "itinerary 1\n" — each in file id order, the
+ * deleted never met; no file is read, and nothing is asked of anybody. The
+ * count and a malloc'd list the caller frees (NULL for none), or a negative
+ * -error_t — -ERR_INVALID_ARGUMENT for no bytes or more than FILE_HEAD_MOST. */
+int files_starting_with(const void* bytes, size_t length, file_id_t** out_ids);
+/* A file's card: its name, size and the tags `whose` of them it wears. */
+int file_info(TagsOf whose, file_id_t file_id, file_info_t* info);
 /* Return the byte count transferred (0..4 GiB, short-transfer: a request > 4 GiB
  * is capped to one syscall — loop for more), or a negative -error_t on failure.
  * fwrite writes at `offset` no further than the file's size: past it the
@@ -130,32 +236,71 @@ int file_rename(file_id_t file_id, const char* new_filename);
  * of the old and the new size), bytes = how many were cut or added. */
 int file_span(file_id_t file_id, uint64_t size, uint32_t flags);
 
-int tag_add(file_id_t file_id, const char* tag);
-int tag_remove(file_id_t file_id, const char* key);
+/* A tag of `whose` put on a file, or taken off — "key" every one of the key,
+ * "key:value" that one; never another owner's of the same text. */
+int tag_add(TagsOf whose, file_id_t file_id, const char* tag);
+int tag_remove(TagsOf whose, file_id_t file_id, const char* key);
 
 /* A tag files wear, and how many of them wear it: one entry of the volume's
  * own list of its tags (storage.tag.list), not a walk of its files. */
 typedef struct {
-    char    *Tag;       /* "key" or "key:value", as the volume spells it */
-    uint32_t Files;     /* how many files wear it — inside the Use Context, of its files */
-    bool     System;    /* a tag the system keeps */
+    char     *Tag;      /* "key" or "key:value", as the volume spells it */
+    uint32_t  Files;    /* how many files wear it — inside the Use Context, of its files */
+    bool      System;   /* a tag the system keeps */
+    file_id_t Owner;    /* whose it is: PERSON_OWNS, or the file of the program whose own it is */
 } TagListed;
 
-/* Every tag a file wears, each with how many files wear it, in the order the
- * volume first knew them: inside the Use Context, counted among the files that
+/* Every tag of `whose` a file wears, each with how many files wear it, in the
+ * order the volume first knew them: inside the Use Context, counted among the files that
  * wear its tags, or on the whole volume — the files wearing a tag of `without`
  * left uncounted, as a query leaves them out. A tag no file wears — a
  * process's, a Touch's — is not listed. The list and the text of every Tag are
  * one heap block the caller frees (NULL when nothing is listed). 0, or a
  * negative -error_t. */
-int tag_list(const char *without, TagListed **out, size_t *count);
-int tag_list_everywhere(const char *without, TagListed **out, size_t *count);
+int tag_list(TagsOf whose, const char *without, TagListed **out, size_t *count);
+int tag_list_everywhere(TagsOf whose, const char *without, TagListed **out, size_t *count);
 
-/* Every file called `filename`, inside the Use Context, but those wearing a
- * tag of `without` (as query). Returns how many there are; the first `max` of
+/*
+ * A program's own tags shown to other programs. This program shows every tag
+ * of its own — those to come too — to a program named by its file, or to
+ * EVERY_PROGRAM; one shown them sees them on files, finds files by them and
+ * lists them (PROGRAM_TAGS), and never puts them on nor takes them off.
+ * hide_tags_from takes a program — or EVERY_PROGRAM, the ones named staying —
+ * out of the list. ask_to_see_tags asks a program to show this one its tags:
+ * a note the system holds until that program answers — shows or hides them
+ * —, either leaves, or the volume is mounted again; when a note is left, the
+ * Touch word "tags-asked" says so, its payload the file_id_t of the program
+ * asked and nothing of who asked, so a program that wants to hear its asks
+ * claims the word (touch_claim) and reads asks_to_see_tags when its own id is
+ * said: the word is said once for every file of the program asked, so each
+ * running copy hears the file it was started from (cabin_info()->
+ * program_file). Every list names a program by one file of it — a signed
+ * program in many files by the same one. The list is the program's, kept on
+ * the cards of its files: one started from bytes has none
+ * (-ERR_TAGFS_NO_OWN_TAGS); a program the volume has not is
+ * -ERR_FILE_NOT_FOUND, one shown or asked to show to itself
+ * -ERR_INVALID_ARGUMENT. 0, or a negative -error_t. A program that left is
+ * taken off every list by the volume.
+ */
+#define EVERY_PROGRAM          ((file_id_t)0)
+int show_tags_to(file_id_t program);
+int hide_tags_from(file_id_t program);
+int ask_to_see_tags(file_id_t program);
+
+/* The programs that show this one their tags (by name or to every program);
+ * the programs `program` shows its tags to, EVERY_PROGRAM first — asked by
+ * that program itself or by one whose box asks `see-tags` or `change-tags`;
+ * the programs that asked this one and are not answered. The count and a
+ * malloc'd list the caller frees (NULL for none), or a negative -error_t. */
+int tags_shown_to_me(file_id_t **out_programs);
+int tags_shown_by(file_id_t program, file_id_t **out_programs);
+int asks_to_see_tags(file_id_t **out_programs);
+
+/* Every file named `filename` whole, but those wearing a tag of `whose` of
+ * `without` (as query) — inside the Use Context for the person's. Returns how many there are; the first `max` of
  * them are written to file_ids (and out_infos, when given). Asked with max ==
  * 0 it only counts. */
-int find_file_by_name(const char* filename, const char* without, file_id_t* file_ids,
+int find_file_by_name(TagsOf whose, const char* filename, const char* without, file_id_t* file_ids,
                       file_info_t* out_infos, size_t max);
 
 /*
@@ -169,7 +314,8 @@ int find_file_by_name(const char* filename, const char* without, file_id_t* file
  *   touch_claim("anchor", REST, 0, 0); ... fwrite(...); anchor(fid);
  *                       — observers subscribed on "anchor" wake up
  *                         with payload {file_id, op=2, ...}, plus on
- *                         every tag of the anchored file. So a
+ *                         every tag of the anchored file and on the
+ *                         words its name answers to. So a
  *                         monitor app can confirm durability without
  *                         polling.
  *

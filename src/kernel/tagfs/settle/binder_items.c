@@ -88,7 +88,8 @@ static void IdsSorted(const FileRecord* rec, uint32_t* ids)
 }
 
 /* The header of file `f`, (fid, 0), counting one file: gen · flags · size ·
- * created · mtime_z · name · tags, as TallyFileHeadPut lays one. */
+ * created · mtime_z · name · tags · [keep] · [made_by] · [shown] · [head] ·
+ * [passport], as TallyFileHeadPut lays one. */
 static error_t FileHeadItem(BinderWork* w, const BinderFile* f, BinderItem* it)
 {
     BinderItems*      p    = &w->items;
@@ -106,7 +107,8 @@ static error_t FileHeadItem(BinderWork* w, const BinderFile* f, BinderItem* it)
                 "refused\n", (unsigned long long)f->fid);
         return ERR_BUSY;
     }
-    uint64_t          need = 80u + rec->name_len + 10u * (uint64_t)rec->tag_count;
+    uint64_t          need = 101u + TALLY_HEAD_MOST + rec->name_len +
+                             10u * ((uint64_t)rec->tag_count + rec->shown_count);
     uint64_t          ids  = (uint64_t)rec->tag_count * sizeof(uint32_t);
     if (!ItemRoom(p, need + ids))
         return ERR_NO_MEMORY;
@@ -124,6 +126,18 @@ static error_t FileHeadItem(BinderWork* w, const BinderFile* f, BinderItem* it)
     at += TallyIdsPut(b + at, sorted, rec->tag_count);
     if (rec->flags & TALLY_FILE_DELETED)
         at += BookVarintPut(b + at, rec->keep_until);
+    if (rec->flags & TALLY_FILE_MADE_BY)
+        at += BookVarintPut(b + at, rec->made_by);
+    if (rec->flags & TALLY_FILE_SHOWN) {
+        at += BookVarintPut(b + at, rec->shown_count);
+        at += TallyFidsPut(b + at, rec->shown_to, rec->shown_count);
+    }
+    if (rec->flags & TALLY_FILE_HEAD) {
+        at += BookVarintPut(b + at, rec->head_len);
+        at += TallyBytesPut(b + at, rec->head, rec->head_len);
+    }
+    if (rec->flags & TALLY_FILE_PASSPORT)
+        at += BookVarintPut(b + at, rec->passport);
     *it = (BinderItem){ .key = { f->fid, 0 }, .count = 1, .body = b, .len = at };
     return OK;
 }
@@ -172,7 +186,7 @@ static error_t KeptHeadItem(BinderWork* w, const BookKeptFile* k, BinderItem* it
     BinderItems*         p   = &w->items;
     const TagFSMetadata* m   = &k->meta;
     uint64_t             len = m->filename ? strlen(m->filename) : 0;
-    if (!ItemRoom(p, 80u + len + 10u * (uint64_t)m->tag_count))
+    if (!ItemRoom(p, 101u + TALLY_HEAD_MOST + len + 10u * ((uint64_t)m->tag_count + m->shown_count)))
         return ERR_NO_MEMORY;
     uint8_t* b  = p->buf;
     uint32_t at = BookVarintPut(b, k->gen);
@@ -186,6 +200,18 @@ static error_t KeptHeadItem(BinderWork* w, const BookKeptFile* k, BinderItem* it
     at += TallyIdsPut(b + at, m->tag_ids, m->tag_count);
     if (m->flags & TALLY_FILE_DELETED)
         at += BookVarintPut(b + at, m->keep_until);
+    if (m->flags & TALLY_FILE_MADE_BY)
+        at += BookVarintPut(b + at, m->made_by);
+    if (m->flags & TALLY_FILE_SHOWN) {
+        at += BookVarintPut(b + at, m->shown_count);
+        at += TallyFidsPut(b + at, m->shown_to, m->shown_count);
+    }
+    if (m->flags & TALLY_FILE_HEAD) {
+        at += BookVarintPut(b + at, m->head_len);
+        at += TallyBytesPut(b + at, m->head, m->head_len);
+    }
+    if (m->flags & TALLY_FILE_PASSPORT)
+        at += BookVarintPut(b + at, m->passport);
     *it = (BinderItem){ .key = { k->fid, 0 }, .count = 1, .body = b, .len = at };
     return OK;
 }
@@ -282,12 +308,13 @@ static error_t FilesNext(BinderWork* w, BinderItem* it, bool* got)
 static error_t TagsNext(BinderWork* w, BinderItem* it, bool* got)
 {
     BinderItems* p = &w->items;
-    TagSpelling  sp;
+    TagRolled    rolled;
     uint32_t     id = 0;
     for (;;) {
-        *got = TagRoll(tagfs_get_state()->registry, p->tag, w->tag_hi, &id, &sp);
+        *got = TagRoll(tagfs_get_state()->registry, p->tag, w->tag_hi, &rolled);
         if (!*got)
             return OK;
+        id = rolled.id;
         const BinderKept* k = BINDER_CHECKS && !w->measuring ? NULL : BinderKeptAt(w, (TallyKey){ id, 0 });
         if (!k || k->rotten || k->margin)
             break;
@@ -298,13 +325,13 @@ static error_t TagsNext(BinderWork* w, BinderItem* it, bool* got)
         p->tag = (uint32_t)k->at.hi.k1;
     }
     p->tag = id + 1u;
-    if (!ItemRoom(p, 30u + sp.key_len + sp.value_len))
+    TallyTag t       = TagRolledBookForm(&rolled, w->tag_gen);
+    uint64_t carried = TallyTagCarried(&t);
+    if (!ItemRoom(p, TallyTagBytes(&t)))
         return ERR_NO_MEMORY;
-    EndpaperLaidTag(&w->laid, (uint64_t)sp.key_len + sp.value_len);
-    TallyTag t = { .flags = sp.value ? TALLY_TAG_HAS_VALUE : 0u, .key = (const uint8_t*)sp.key,
-                   .key_len = sp.key_len, .value = (const uint8_t*)sp.value, .value_len = sp.value_len };
+    EndpaperLaidTag(&w->laid, carried);
     *it = (BinderItem){ .key = { id, 0 }, .count = 1, .body = p->buf, .len = TallyTagPut(p->buf, &t),
-                        .text = sp.key_len + sp.value_len };
+                        .text = carried };
     return OK;
 }
 

@@ -58,7 +58,7 @@ static TestResult StandEndpaperMake(uint32_t n, uint64_t* first)
     TestResult verdict = TEST_PASS;
     uint64_t   fid     = 0;
     for (uint32_t i = 0; i < n; i++) {
-        TEST_ASSERT_EQ(tagfs_create_file("endpaper.n", NULL, 0, &fid), 0, "a file is made");
+        TEST_ASSERT_EQ(tagfs_create_file("endpaper.n", NULL, 0, 0, &fid), 0, "a file is made");
         *first = *first ? *first : fid;
         if (i % STAND_ENDPAPER_BATCH == STAND_ENDPAPER_BATCH - 1u)
             TEST_ASSERT_OK(TagFSSettle(), "the files settle a batch at a time");
@@ -96,13 +96,13 @@ static TestResult TestStandEndpaperOwed(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, STAND_ENDPAPER_BLOCKS * TAGFS_BLOCK_SIZE), "room for the data");
-    TEST_ASSERT_EQ(tagfs_create_file("endpaper-owed.bin", NULL, 0, &data), 0, "a file for the data is made");
+    TEST_ASSERT_EQ(tagfs_create_file("endpaper-owed.bin", NULL, 0, 0, &data), 0, "a file for the data is made");
     TEST_ASSERT_OK(TagFSSettle(), "and settled");
     StandEndpaperOf(&before, "before");
     TEST_ASSERT(before.files != UINT64_MAX && before.digests != UINT64_MAX,
                 "the volume stands on a Tally the measure knows");
     for (uint32_t i = 0; i < STAND_ENDPAPER_BATCH; i++) {
-        TEST_ASSERT_EQ(tagfs_create_file("endpaper-owed.n", NULL, 0, &fid), 0, "a file is made");
+        TEST_ASSERT_EQ(tagfs_create_file("endpaper-owed.n", NULL, 0, 0, &fid), 0, "a file is made");
         first = first ? first : fid;
     }
     TEST_ASSERT_EQ(StandFreshWrite(&m, data, 0, STAND_ENDPAPER_BLOCKS * TAGFS_BLOCK_SIZE, 7u),
@@ -140,7 +140,7 @@ static TestResult TestStandEndpaperLabeledCarries(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, (1u + STAND_ENDPAPER_BLOCKS) * TAGFS_BLOCK_SIZE), "room for the data");
-    TEST_ASSERT_EQ(tagfs_create_file("endpaper-lab.bin", NULL, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("endpaper-lab.bin", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, TAGFS_BLOCK_SIZE, 11u), TAGFS_BLOCK_SIZE, "a block of it written");
     TEST_ASSERT_OK(TagFSSettle(), "and settled");
     StandEndpaperOf(&settled, "with the file settled");
@@ -291,7 +291,7 @@ static TestResult StandEndpaperStrided(StandFreshModel* m, uint64_t* fid)
 {
     TestResult verdict = TEST_PASS;
     TEST_ASSERT(StandFreshModelMake(m, 2u * STAND_ENDPAPER_STRIDED * TAGFS_BLOCK_SIZE), "room for the file");
-    TEST_ASSERT_EQ(tagfs_create_file("endpaper-kept.bin", NULL, 0, fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file("endpaper-kept.bin", NULL, 0, 0, fid), 0, "a file is made");
     TEST_ASSERT_OK(StandFreshSpan(m, *fid, 2u * STAND_ENDPAPER_STRIDED * TAGFS_BLOCK_SIZE), "spanned over a hole");
     for (uint64_t k = 0; k < STAND_ENDPAPER_STRIDED; k++)
         TEST_ASSERT_EQ(StandFreshWrite(m, *fid, 2u * k * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 40u + k),

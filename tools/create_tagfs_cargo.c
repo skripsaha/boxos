@@ -3,15 +3,17 @@
  * shipment's pedigree.
  *
  * The vocabulary is interned the kernel's way — the reserved keys at ids
- * 0..6, a file's stem first — and the pedigree stamped into the Deed: the
- * part of a volume that is not its book, said once, here.
+ * 0..6, then the tags the files are given, and nothing for their names: a
+ * name is a field of the file's card, never a tag — and the pedigree stamped
+ * into the Deed: the part of a volume that is not its book, said once, here.
  */
 
 #include "create_tagfs.h"
 #include "buildplate_format.h"   /* the verdict this volume copies out of the kernel it packs */
 #include "tagfs_reserved.h"      /* the reserved keys, the last id, the widths: the kernel's (-I src/include) */
 #include <stdbool.h>
-#include "box_reader.h"          /* the box a program is, read for its role (-I src/include) */
+#include "box_reader.h"          /* the box a program is, read for its role and its signature (-I src/include) */
+#include "box_host.h"            /* BoxLib's SHA-256 on the build machine: the passport, made as the kernel makes it */
 
 TagEntry* g_tags       = NULL;
 uint32_t  g_tag_count  = 0;
@@ -186,21 +188,6 @@ VolumePacked PackedStamp(int file_count, char* argv[], int first,
     return packed;
 }
 
-/* A file name's stem — "kernel.bin" is "kernel", "files.elf" "files" — in
- * a string of its own; NULL when there is no memory for it. */
-static char* StemOf(const char* filename) {
-    const char* base = strrchr(filename, '/');
-    base = base ? base + 1 : filename;
-    const char* dot = strrchr(base, '.');
-    size_t len = dot ? (size_t)(dot - base) : strlen(base);
-    char* stem = malloc(len + 1);
-    if (stem) {
-        memcpy(stem, base, len);
-        stem[len] = '\0';
-    }
-    return stem;
-}
-
 /* The file the volume's maker named as the kernel (--kernel): the one the
  * Deed's BOOT stamp points a loader at. NULL when none was named. */
 static const char* g_kernel_file = NULL;
@@ -209,14 +196,16 @@ void CargoNameKernel(const char* path) {
     g_kernel_file = path;
 }
 
-/* The box's part `role`, read from the file `filename` when it is a box: its
- * first bytes are a box's, the table and names hold, and the part is written
- * as a role is (box_reader.h BoxRoleRead). A file that is not a box — the
- * kernel, a text, an ELF — says no role. 0 with *role set, or -1 having said
- * why. The seal and the hashes are not checked here: the builder lays boxes
- * it has just packed, and the kernel holds every box to them when it starts it. */
-static int BoxRoleOf(const char* filename, BoxRole* role) {
-    *role = BOX_ROLE_ORDINARY;
+/* The bytes of the box's part of `kind`, read from the file `filename` when
+ * it is a box: its first bytes are a box's, and the table and names hold. A
+ * file that is not a box — the kernel, a text, an ELF — or a box without the
+ * part gives none (*bytes NULL). 0, or -1 having said why; *bytes is the
+ * caller's to free. The seal and the hashes are not checked here: the builder
+ * lays boxes it has just packed, and the kernel holds every box to them, and
+ * to its signature, when it starts it. */
+static int BoxPartBytes(const char* filename, BoxKind kind, uint8_t** bytes, uint64_t* size) {
+    *bytes = NULL;
+    *size  = 0;
     FILE* file = fopen(filename, "rb");
     if (!file) { fprintf(stderr, "%s: cannot be opened\n", filename); return -1; }
 
@@ -243,23 +232,65 @@ static int BoxRoleOf(const char* filename, BoxRole* role) {
         fprintf(stderr, "%s: it is a box that would not be read: %s\n", filename, BoxVerdictText(verdict));
         goto done;
     }
-    if (!BoxPartOfKind(&table, BOX_KIND_ROLE, &part)) { rc = 0; goto done; }
+    if (!BoxPartOfKind(&table, kind, &part)) { rc = 0; goto done; }
 
     part_at = malloc(part.Size ? part.Size : 1);
     if (!part_at || fseek(file, (long)part.Offset, SEEK_SET) != 0 || fread(part_at, 1, part.Size, file) != part.Size) {
-        fprintf(stderr, "%s: its role part cannot be read\n", filename);
+        fprintf(stderr, "%s: its part %s cannot be read\n", filename, BoxKindWord(kind));
         goto done;
     }
-    uint64_t unknown;
-    if (BoxRoleRead(part_at, part.Size, role, &unknown) != BOX_OK || unknown != 0) {
-        fprintf(stderr, "%s: its role is not written as one: system or boot, one word\n", filename);
-        goto done;
-    }
-    rc = 0;
+    *bytes  = part_at;
+    *size   = part.Size;
+    part_at = NULL;
+    rc      = 0;
 done:
     free(part_at);
     free(prefix);
     fclose(file);
+    return rc;
+}
+
+/* The box's part `role` (box_reader.h BoxRoleRead): what a box says it is, or
+ * ordinary for a file that is no box or says nothing. 0, or -1 having said why. */
+static int BoxRoleOf(const char* filename, BoxRole* role) {
+    uint8_t* bytes;
+    uint64_t size, unknown;
+    *role = BOX_ROLE_ORDINARY;
+    if (BoxPartBytes(filename, BOX_KIND_ROLE, &bytes, &size) != 0) return -1;
+    int rc = !bytes || (BoxRoleRead(bytes, size, role, &unknown) == BOX_OK && unknown == 0) ? 0 : -1;
+    if (rc != 0) fprintf(stderr, "%s: its role is not written as one: system or boot, one word\n", filename);
+    free(bytes);
+    return rc;
+}
+
+int PassportOf(const char* filename, uint64_t* passport) {
+    uint8_t*     bytes;
+    uint64_t     size;
+    BoxSignature signature;
+    *passport = 0;
+    if (BoxPartBytes(filename, BOX_KIND_SIGNATURE, &bytes, &size) != 0) return -1;
+    if (!bytes) return 0;
+    int rc = BoxSignatureRead(bytes, size, &signature) == BOX_OK ? 0 : -1;
+    if (rc != 0) {
+        fprintf(stderr, "%s: its signature is not laid out as a signature is\n", filename);
+    } else if (signature.How == BOX_SIGN_RSA2048_SHA256) {
+        size_t   both   = (size_t)signature.KeyBytes + signature.NameLength;
+        uint8_t *joined = malloc(both);
+        uint8_t  digest[32];
+        if (!joined) {
+            fprintf(stderr, "%s: no memory for its passport\n", filename);
+            rc = -1;
+        } else {
+            memcpy(joined, signature.Key, signature.KeyBytes);
+            memcpy(joined + signature.KeyBytes, signature.Name, signature.NameLength);
+            sha256(joined, both, digest);
+            free(joined);
+            for (unsigned i = 0; i < 8; i++)
+                *passport = *passport << 8 | digest[i];
+            *passport |= TALLY_PASSPORT_BIT;
+        }
+    }
+    free(bytes);
     return rc;
 }
 
@@ -297,14 +328,14 @@ static int TagTake(char* token, const char* whose, uint32_t* ids, uint32_t* coun
 
 /*
  * A file's role (RoleOf) and its tags — of the file at `path`, however it is
- * named in the volume — its name's stem first, then a
- * comma-separated list like "memory,fun", each once. The tags are the
- * file's user's words and decide nothing; the role comes from the kernel
- * file named and from the file's box. 0, or -1 having said why.
+ * named in the volume — a comma-separated list like "memory,fun", each once.
+ * The tags are the file's user's words and decide nothing, and the file's name
+ * is none of them; the role comes from the kernel file named and from the
+ * file's box. 0, or -1 having said why.
  *
  * ‼ THE LIST IS TAKEN WHOLE. It was copied into 4096 bytes and the rest cut
- * off, its tags counted into 256 and the rest dropped, the stem cut at 255 —
- * each without a word, and the volume made of what was left. Now every tag
+ * off, its tags counted into 256 and the rest dropped — each without a word,
+ * and the volume made of what was left. Now every tag
  * given is interned or the volume is refused: a file carries as many as it
  * is given (the book has no width for them), and how wide one can be is the
  * kernel's to judge (TAG_KEY_WIDTH, TAG_KEY_VALUE_WIDTH).
@@ -312,20 +343,14 @@ static int TagTake(char* token, const char* whose, uint32_t* ids, uint32_t* coun
 int parse_tags(const char* tag_string, const char* path, uint32_t** out_ids, uint32_t* out_count,
                uint32_t* out_role) {
     if (RoleOf(path, out_role) != 0) return -1;
-    uint32_t  room  = 2;   /* the stem, and one more tag than there are commas */
+    uint32_t  room  = 1;   /* one more tag than there are commas */
     uint32_t  count = 0;
     for (const char* c = tag_string; *c; c++) room += *c == ',';
-    char*     stem  = StemOf(path);
     char*     list  = strdup(tag_string);
     uint32_t* ids   = malloc(sizeof(uint32_t) * room);
-    int       taken = stem && list && ids;
+    int       taken = list && ids;
     if (!taken) fprintf(stderr, "%s: no memory for its tags\n", path);
 
-    /* The stem is a key whole, never split at ':' (tag_spelling.h, TagSpellKey). */
-    if (taken && stem[0] != '\0') {
-        taken = intern_tag(stem, NULL, path, &ids[0]) == 0;
-        count = taken ? 1u : 0u;
-    }
     for (char* token = taken ? strtok(list, ",") : NULL; token; token = strtok(NULL, ",")) {
         while (*token == ' ') token++;
         if (TagTake(token, path, ids, &count) != 0) {
@@ -333,7 +358,6 @@ int parse_tags(const char* tag_string, const char* path, uint32_t** out_ids, uin
             break;
         }
     }
-    free(stem);
     free(list);
     if (!taken) {
         free(ids);

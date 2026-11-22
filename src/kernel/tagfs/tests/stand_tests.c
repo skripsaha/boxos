@@ -50,10 +50,19 @@ const char* StandStepsAsideFor(void)
 
 bool StandMakeFile(const char* name, const void* data, uint32_t bytes, uint64_t* out_file_id)
 {
+    return StandMakeTaggedFile(name, NULL, data, bytes, out_file_id);
+}
+
+bool StandMakeTaggedFile(const char* name, const char* tag, const void* data, uint32_t bytes,
+                         uint64_t* out_file_id)
+{
     uint64_t file_id = 0;
+    uint32_t tag_id  = TAGFS_INVALID_TAG_ID;
 
     *out_file_id = 0;
-    if (tagfs_create_file(name, NULL, 0, &file_id) != 0)
+    if (tag && tagfs_tag_intern(tag, &tag_id) != OK)
+        return false;
+    if (tagfs_create_file(name, tag ? &tag_id : NULL, tag ? 1 : 0, 0, &file_id) != 0)
         return false;
     if (bytes > 0 && TestFileWrite(file_id, data, bytes) != (int)bytes) {
         tagfs_delete_file(file_id, INK_UNWARRANTED);
@@ -61,6 +70,16 @@ bool StandMakeFile(const char* name, const void* data, uint32_t bytes, uint64_t*
     }
     *out_file_id = file_id;
     return true;
+}
+
+bool StandMadeByIs(uint64_t file_id, uint64_t made_by)
+{
+    TagFSMetadata md;
+    if (tagfs_get_metadata(file_id, &md) != 0)
+        return false;
+    bool is = md.made_by == made_by && ((md.flags & TAGFS_FILE_MADE_BY) != 0) == (made_by != 0);
+    tagfs_metadata_free(&md);
+    return is;
 }
 
 error_t StandKeepInRole(uint64_t file_id, uint32_t role)
@@ -132,6 +151,7 @@ bool StandBlockInUse(uint64_t block)
 /* Room for the widest params a program lays: a write's, a ferry's waybill after it. */
 static uint8_t s_deck_op[sizeof(ManifestOp) + 28] __attribute__((aligned(8)));
 static Crate   s_deck_crate;
+static Crate   s_deck_crates[2];
 
 int StandDeckAsk(uint16_t opcode, const void* params, uint16_t param_size, const void* in,
                  uint64_t in_size, const OpContext* ctx)
@@ -152,6 +172,34 @@ int StandDeckAsk(uint16_t opcode, const void* params, uint16_t param_size, const
         op->in_crate = 0;
     }
     return reg->handler(op, &s_deck_crate, in ? 1 : 0, ctx);
+}
+
+int StandDeckAnswer(uint16_t opcode, const void* params, uint16_t param_size, const void* in, uint64_t in_size,
+                    void* out, uint64_t out_room, uint64_t* out_size, const OpContext* ctx)
+{
+    const OpRegistration* reg = OpRegistryLookup(OP_KIND(DECK_STORAGE, opcode));
+    ManifestOp*           op  = (ManifestOp*)s_deck_op;
+    uint16_t              n   = 0;
+    *out_size = 0;
+    if (!reg || param_size > sizeof(s_deck_op) - sizeof(ManifestOp))
+        return ERR_NOT_INITIALIZED;
+    memset(s_deck_op, 0, sizeof(s_deck_op));
+    op->op_kind    = OP_KIND(DECK_STORAGE, opcode);
+    op->param_size = param_size;
+    op->in_crate   = CRATE_INDEX_NONE;
+    op->out_crate  = CRATE_INDEX_NONE;
+    if (param_size)
+        memcpy(op->params, params, param_size);
+    if (in) {
+        s_deck_crates[n] = (Crate){ .magic = CRATE_MAGIC, .addr = (uint64_t)(uintptr_t)in,
+                                    .size = in_size, .capacity = in_size };
+        op->in_crate = (uint8_t)n++;
+    }
+    s_deck_crates[n] = (Crate){ .magic = CRATE_MAGIC, .addr = (uint64_t)(uintptr_t)out, .capacity = out_room };
+    op->out_crate    = (uint8_t)n++;
+    int rc           = reg->handler(op, s_deck_crates, n, ctx);
+    *out_size        = s_deck_crates[op->out_crate].size;
+    return rc;
 }
 
 // ----------------------------------------------------------------------------

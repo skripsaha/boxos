@@ -43,6 +43,10 @@
  */
 
 #define TALLY_FILE_HEAD_MOST  60u    /* gen, flags, size, created, mtime_z (10 each), name and tag counts (5 each) */
+#define TALLY_FILE_MADE_BY_MOST 10u  /* made_by, which the header of a file a program made has besides */
+#define TALLY_FILE_SHOWN_MOST  10u   /* the count, and each id, of the programs a program's file shows its tags to */
+#define TALLY_FILE_HEAD_BYTES  (1u + TALLY_HEAD_MOST)   /* a file's first bytes and their count */
+#define TALLY_FILE_PASSPORT_MOST 10u  /* the passport of the signed program a file holds */
 #define TALLY_TAG_MOST         5u    /* a tag id, written as its distance from the one before */
 #define TALLY_USE_BODY_MOST   10u    /* the Use Context's length */
 
@@ -92,7 +96,12 @@ static uint64_t TallyTreeBlocks(const TallyTreeCost* t, uint64_t atom)
  * and one more for each window of DIGEST_ITEM_MOST a run crosses. */
 static void TallyFileCost(const FileRecord* rec, TallyTreeCost* files, TallyTreeCost* digests)
 {
-    TallyItemCost(files, TALLY_FILE_HEAD_MOST + rec->name_len + (uint64_t)rec->tag_count * TALLY_TAG_MOST);
+    TallyItemCost(files, TALLY_FILE_HEAD_MOST + rec->name_len + (uint64_t)rec->tag_count * TALLY_TAG_MOST +
+                             ((rec->flags & TALLY_FILE_MADE_BY) ? TALLY_FILE_MADE_BY_MOST : 0u) +
+                             ((rec->flags & TALLY_FILE_SHOWN) ? (1u + (uint64_t)rec->shown_count) *
+                                                                    TALLY_FILE_SHOWN_MOST : 0u) +
+                             ((rec->flags & TALLY_FILE_HEAD) ? TALLY_FILE_HEAD_BYTES : 0u) +
+                             ((rec->flags & TALLY_FILE_PASSPORT) ? TALLY_FILE_PASSPORT_MOST : 0u));
     uint64_t runs    = rec->strip_count;
     uint64_t parcels = (runs + PARCEL_STRIPS_LEAST - 1u) / PARCEL_STRIPS_LEAST;
     files->bytes += parcels * (TALLY_ITEM_HEAD_MOST + TALLY_PARCEL_HEAD_MOST) + runs * TALLY_RUN_MOST;

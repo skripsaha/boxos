@@ -1,12 +1,17 @@
 #include "tag_registry.h"
 #include "../tagfs_constants.h"
 
+STATIC_ASSERT(TAG_OWNER_PROGRAM == TALLY_OWNER_PROGRAM, "a program's tag is the book's TALLY_OWNER_PROGRAM");
+
 /*
  * The volume's tags in memory: every tag the book names, and every one given
  * since. A tag is never renamed or taken back, and its id is what every file
  * on the volume carries, so an id is given once and stays its tag's. The book
  * holds them — its Tally's TAGS, and the Coineds of the stitches settled since
- * (settle/sewing.c) — and nothing here touches the medium. Everything is the
+ * (settle/sewing.c) — and nothing here touches the medium. A tag is its owner
+ * and its text (tagfs.h, TagOwner): every hash below is keyed by both, so one
+ * text of two owners is two tags, and a person's tag hashes as it did before
+ * tags had owners. Everything is the
  * instance's own: a registry built beside the volume's — a test's, the
  * manifest's self-test — shares nothing with it but the code.
  *
@@ -19,6 +24,7 @@
  */
 
 struct TagKeyGroup {
+    TagOwner            owner;
     char*               key;
     uint32_t*           tag_ids;
     uint32_t            count;
@@ -26,9 +32,29 @@ struct TagKeyGroup {
     struct TagKeyGroup* next;
 };
 
-static uint32_t key_hash(const char* key, size_t key_len, uint32_t bucket_count) {
+/* What an owner adds to a hash: nothing for the person, so the person's tags
+ * fall where they always fell; a program's fid spread over the bits, so the
+ * same `save` of many programs lands in many buckets. */
+static uint32_t OwnerMix(TagOwner owner) {
+    return owner.kind == TAG_OWNER_PERSON ? 0u
+                                          : (uint32_t)((owner.id * 0x9E3779B97F4A7C15ull) >> 32) ^ owner.kind;
+}
+
+static uint32_t RegistryHashOf(TagOwner owner, const TagSpelling* tag) {
+    return TagSpellingHash(tag) ^ OwnerMix(owner);
+}
+
+static uint32_t key_hash(TagOwner owner, const char* key, size_t key_len, uint32_t bucket_count) {
     TagSpelling bare = { key, NULL, key_len, 0 };
-    return TagSpellingHash(&bare) % bucket_count;
+    return RegistryHashOf(owner, &bare) % bucket_count;
+}
+
+/* What `owner`'s tag of that key and value carries past the fields every tag
+ * has, as the book writes it (volume_tally.h TallyTagCarried). */
+static uint64_t TagCarried(TagOwner owner, uint64_t key_len, uint64_t value_len) {
+    TagSpelling sized = { NULL, NULL, key_len, value_len };
+    TallyTag    t     = TagRegistryBookForm(&sized, owner);
+    return TallyTagCarried(&t);
 }
 
 /* The entry of `id` in an id's hash of `buckets` buckets; NULL when no tag
@@ -41,10 +67,11 @@ static TagRegistryEntry* RegistryById(TagRegistryEntry* const* by_id, uint32_t b
     return entry;
 }
 
-/* Whether an entry is the tag spelled: the same key, and the same value or
- * none on both sides. */
-static bool entry_is(const TagRegistryEntry* entry, const TagSpelling* tag) {
-    if (entry->key_len != tag->key_len || memcmp(entry->key, tag->key, tag->key_len) != 0)
+/* Whether an entry is `owner`'s tag spelled: the same owner, the same key, and
+ * the same value or none on both sides. */
+static bool entry_is(const TagRegistryEntry* entry, TagOwner owner, const TagSpelling* tag) {
+    if (!TagOwnerSame(entry->owner, owner) || entry->key_len != tag->key_len ||
+        memcmp(entry->key, tag->key, tag->key_len) != 0)
         return false;
     if (!entry->value || !tag->value)
         return !entry->value && !tag->value;
@@ -70,12 +97,13 @@ static bool add_to_key_group(TagKeyGroup* group, uint32_t tag_id) {
     return true;
 }
 
-static TagKeyGroup* find_or_create_key_group(TagRegistry* reg, const char* key, size_t key_len) {
-    uint32_t bucket = key_hash(key, key_len, reg->key_bucket_count);
+static TagKeyGroup* find_or_create_key_group(TagRegistry* reg, TagOwner owner, const char* key,
+                                             size_t key_len) {
+    uint32_t bucket = key_hash(owner, key, key_len, reg->key_bucket_count);
     TagKeyGroup* group = reg->key_buckets[bucket];
 
     while (group) {
-        if (TagSpanIs(group->key, key, key_len)) return group;
+        if (TagOwnerSame(group->owner, owner) && TagSpanIs(group->key, key, key_len)) return group;
         group = group->next;
     }
 
@@ -100,6 +128,7 @@ static TagKeyGroup* find_or_create_key_group(TagRegistry* reg, const char* key, 
         return NULL;
     }
 
+    new_group->owner    = owner;
     new_group->count    = 0;
     new_group->capacity = 8;
     new_group->next     = reg->key_buckets[bucket];
@@ -162,7 +191,7 @@ static void RegistryRehash(TagRegistry* reg) {
             for (TagRegistryNode* node = reg->buckets[b], *next; node; node = next) {
                 const TagRegistryEntry* entry = RegistryById(id_table, want, node->tag_id);
                 TagSpelling spelled = { entry->key, entry->value, entry->key_len, entry->value_len };
-                uint32_t    at      = TagSpellingHash(&spelled) % want;
+                uint32_t    at      = RegistryHashOf(entry->owner, &spelled) % want;
                 next       = node->next;
                 node->next = table[at];
                 table[at]  = node;
@@ -179,7 +208,7 @@ static void RegistryRehash(TagRegistry* reg) {
     if (key_table && reg->key_bucket_count == key_buckets) {
         for (uint32_t b = 0; b < key_buckets; b++) {
             for (TagKeyGroup* group = reg->key_buckets[b], *next; group; group = next) {
-                uint32_t at = key_hash(group->key, strlen(group->key), key_want);
+                uint32_t at = key_hash(group->owner, group->key, strlen(group->key), key_want);
                 next          = group->next;
                 group->next   = key_table[at];
                 key_table[at] = group;
@@ -196,12 +225,12 @@ static void RegistryRehash(TagRegistry* reg) {
     kfree(key_table);
 }
 
-static uint32_t lookup_unlocked(TagRegistry* reg, const TagSpelling* tag) {
-    uint32_t bucket = TagSpellingHash(tag) % reg->bucket_count;
+static uint32_t lookup_unlocked(TagRegistry* reg, TagOwner owner, const TagSpelling* tag) {
+    uint32_t bucket = RegistryHashOf(owner, tag) % reg->bucket_count;
     TagRegistryNode* node = reg->buckets[bucket];
 
     while (node) {
-        if (entry_is(RegistryById(reg->by_id, reg->bucket_count, node->tag_id), tag)) {
+        if (entry_is(RegistryById(reg->by_id, reg->bucket_count, node->tag_id), owner, tag)) {
             return node->tag_id;
         }
         node = node->next;
@@ -211,11 +240,12 @@ static uint32_t lookup_unlocked(TagRegistry* reg, const TagSpelling* tag) {
 }
 
 /*
- * The entry for a tag under `tag_id`, linked into every index: the text's
- * hash, the id's and the key's group. Everything is allocated before anything
- * is linked, so ERR_NO_MEMORY leaves the registry as it was. Under reg->lock.
+ * The entry for `owner`'s tag under `tag_id`, linked into every index: the
+ * text's hash, the id's and the key's group. Everything is allocated before
+ * anything is linked, so ERR_NO_MEMORY leaves the registry as it was. Under
+ * reg->lock.
  */
-static error_t RegistryEnter(TagRegistry* reg, const TagSpelling* tag, uint32_t tag_id,
+static error_t RegistryEnter(TagRegistry* reg, TagOwner owner, const TagSpelling* tag, uint32_t tag_id,
                              uint8_t flags) {
     TagRegistryEntry* entry = kmalloc(sizeof(TagRegistryEntry));
     TagRegistryNode*  node  = kmalloc(sizeof(TagRegistryNode));
@@ -224,7 +254,7 @@ static error_t RegistryEnter(TagRegistry* reg, const TagSpelling* tag, uint32_t 
     TagKeyGroup*      group = NULL;
 
     if (entry && node && key && (!tag->value || value))
-        group = find_or_create_key_group(reg, tag->key, tag->key_len);
+        group = find_or_create_key_group(reg, owner, tag->key, tag->key_len);
     if (!group || !add_to_key_group(group, tag_id)) {
         kfree(value);
         kfree(key);
@@ -239,8 +269,10 @@ static error_t RegistryEnter(TagRegistry* reg, const TagSpelling* tag, uint32_t 
     entry->value_len = (uint16_t)tag->value_len;
     entry->flags     = flags;
     entry->tag_id    = tag_id;
+    entry->owner     = owner;
+    entry->retired_gen = 0;
 
-    uint32_t bucket = TagSpellingHash(tag) % reg->bucket_count;
+    uint32_t bucket = RegistryHashOf(owner, tag) % reg->bucket_count;
     node->tag_id = tag_id;
     node->next   = reg->buckets[bucket];
     reg->buckets[bucket] = node;
@@ -249,35 +281,100 @@ static error_t RegistryEnter(TagRegistry* reg, const TagSpelling* tag, uint32_t 
 
     if (tag_id >= reg->next_id) reg->next_id = tag_id + 1;
     reg->total_tags++;
-    reg->text_bytes += (uint64_t)entry->key_len + entry->value_len;
+    reg->text_bytes += TagCarried(owner, entry->key_len, entry->value_len);
+    if (owner.kind == TAG_OWNER_PROGRAM)
+        reg->program_tags++;
     return OK;
 }
 
 /*
+ * ‼ A TAG RETIRED LEAVES EVERY INDEX BUT THE ID'S. The id stays known — never
+ * given again, a Coined RETIRED of it owed to the book — and nothing else of
+ * the tag does: its node in the text's hash and its place in its key's group
+ * are taken out under the lock and let go of after it. The entry keeps its
+ * text, which no lookup reaches, for the reason TagRegistrySpelling gives:
+ * spans of it handed out before hold as long as the registry does.
+ */
+typedef struct {
+    TagRegistryNode* node;
+    TagKeyGroup*     group;
+} TagDetached;
+
+static void TagDetachedLetGo(TagDetached* gone) {
+    kfree(gone->node);
+    if (gone->group) {
+        kfree(gone->group->key);
+        kfree(gone->group->tag_ids);
+        kfree(gone->group);
+    }
+}
+
+/* `entry` out of the text's hash and its key's group; a group left with no tag
+ * goes with it. Under reg->lock. */
+static void EntryDetachLocked(TagRegistry* reg, TagRegistryEntry* entry, TagDetached* gone) {
+    TagSpelling       spelled = { entry->key, entry->value, entry->key_len, entry->value_len };
+    TagRegistryNode** link    = &reg->buckets[RegistryHashOf(entry->owner, &spelled) % reg->bucket_count];
+    TagKeyGroup**     held    = &reg->key_buckets[key_hash(entry->owner, entry->key, entry->key_len,
+                                                           reg->key_bucket_count)];
+    memset(gone, 0, sizeof(*gone));
+    while (*link && (*link)->tag_id != entry->tag_id)
+        link = &(*link)->next;
+    if (*link) {
+        gone->node = *link;
+        *link      = gone->node->next;
+    }
+    while (*held && !(TagOwnerSame((*held)->owner, entry->owner) && TagSpanIs((*held)->key, entry->key, entry->key_len)))
+        held = &(*held)->next;
+    TagKeyGroup* group = *held;
+    if (!group)
+        return;
+    for (uint32_t i = 0; i < group->count; i++) {
+        if (group->tag_ids[i] != entry->tag_id)
+            continue;
+        memmove(&group->tag_ids[i], &group->tag_ids[i + 1u], sizeof(uint32_t) * (group->count - i - 1u));
+        group->count--;
+        break;
+    }
+    if (group->count == 0) {
+        *held       = group->next;
+        gone->group = group;
+        reg->key_groups--;
+    }
+}
+
+/* Entry `entry` of the id's hash is no longer a program's live tag. Under
+ * reg->lock. */
+static void EntryProgramLeft(TagRegistry* reg, const TagRegistryEntry* entry) {
+    if (entry->owner.kind == TAG_OWNER_PROGRAM && reg->program_tags > 0)
+        reg->program_tags--;
+}
+
+/*
  * ‼ A BOOK'S TAG IS TAKEN WITH A VERDICT, NEVER DROPPED. A book's TAGS name
- * each id once and each text once; one whose text is another id's, or whose
- * id another text holds, is a book this kernel cannot hold as it is, and the
+ * each id once and each owner's text once; one whose owner and text are
+ * another id's, or whose id another tag holds, is a book this kernel cannot
+ * hold as it is, and the
  * caller is told so (ERR_ALREADY_EXISTS), so the volume stands under glass
  * with the reason rather than with one of the two names quietly lost. The
  * width is the caller's to have judged (tag_spelling.h).
  */
-error_t RegistryCoin(TagRegistry* reg, uint32_t tag_id, uint8_t flags, const uint8_t* key_at,
+error_t RegistryCoin(TagRegistry* reg, uint32_t tag_id, uint8_t flags, TagOwner owner, const uint8_t* key_at,
                      uint8_t key_len, const uint8_t* value_at, uint16_t value_len)
 {
     TagSpelling tag = { (const char*)key_at, (flags & TAGFS_TAG_FLAG_HAS_VALUE) ? (const char*)value_at : NULL,
                         key_len, value_len };
     if (tag_id > TAGFS_MAX_TAG_ID)
         return ERR_INVALID_ARGUMENT;
-    if (lookup_unlocked(reg, &tag) != TAGFS_INVALID_TAG_ID ||
+    if (lookup_unlocked(reg, owner, &tag) != TAGFS_INVALID_TAG_ID ||
         RegistryById(reg->by_id, reg->bucket_count, tag_id))
         return ERR_ALREADY_EXISTS;
-    return RegistryEnter(reg, &tag, tag_id, flags);
+    return RegistryEnter(reg, owner, &tag, tag_id, flags);
 }
 
-/* The tag's id, a new one under next_id when the registry has none. Under
- * reg->lock; the caller has judged the widths. */
-static error_t intern_unlocked(TagRegistry* reg, const TagSpelling* tag, uint32_t* out_id) {
-    uint32_t existing = lookup_unlocked(reg, tag);
+/* The id of `owner`'s tag, a new one under next_id when the registry has none.
+ * Under reg->lock; the caller has judged the widths. */
+static error_t intern_unlocked(TagRegistry* reg, TagOwner owner, const TagSpelling* tag, uint32_t* out_id) {
+    uint32_t existing = lookup_unlocked(reg, owner, tag);
     if (existing != TAGFS_INVALID_TAG_ID) {
         *out_id = existing;
         return OK;
@@ -286,11 +383,11 @@ static error_t intern_unlocked(TagRegistry* reg, const TagSpelling* tag, uint32_
         return ERR_TAGFS_REGISTRY_FULL;
 
     uint32_t id = reg->next_id;
-    error_t  rc = RegistryEnter(reg, tag, id, tag->value ? TAGFS_TAG_FLAG_HAS_VALUE : 0);
+    error_t  rc = RegistryEnter(reg, owner, tag, id, tag->value ? TAGFS_TAG_FLAG_HAS_VALUE : 0);
     if (rc == OK) {
         *out_id = id;
         if (id >= reg->coined_next)
-            reg->coined_text += (uint64_t)tag->key_len + tag->value_len;
+            reg->coined_text += TagCarried(owner, tag->key_len, tag->value_len);
     }
     return rc;
 }
@@ -333,6 +430,10 @@ int tag_registry_init(TagRegistry* reg) {
     reg->coined_next      = 0;
     reg->coined_text      = 0;
     reg->said_full        = false;
+    reg->program_tags     = 0;
+    reg->retiring         = NULL;
+    reg->retiring_count   = 0;
+    reg->retiring_cap     = 0;
 
     TagFSLockInit(&reg->lock, "registry", LOCK_RANK_LEAF);
 
@@ -381,11 +482,13 @@ void tag_registry_destroy(TagRegistry* reg) {
     }
     kfree(reg->key_buckets);
     reg->key_buckets = NULL;
+    kfree(reg->retiring);
+    reg->retiring = NULL;
 
     debug_printf("[TagRegistry] destroyed\n");
 }
 
-error_t TagRegistryIntern(TagRegistry* reg, const TagSpelling* tag, uint32_t* out_id) {
+error_t TagRegistryIntern(TagRegistry* reg, TagOwner owner, const TagSpelling* tag, uint32_t* out_id) {
     if (!out_id) return ERR_NULL_POINTER;
     *out_id = TAGFS_INVALID_TAG_ID;
     if (!reg || !tag || !tag->key) return ERR_NULL_POINTER;
@@ -397,7 +500,7 @@ error_t TagRegistryIntern(TagRegistry* reg, const TagSpelling* tag, uint32_t* ou
         return rc;
 
     TagFSLockTake(&reg->lock);
-    rc = intern_unlocked(reg, tag, out_id);
+    rc = intern_unlocked(reg, owner, tag, out_id);
     bool crowded = RegistryCrowded(reg);
     TagFSLockDrop(&reg->lock);
     if (crowded)
@@ -413,18 +516,21 @@ error_t TagRegistryIntern(TagRegistry* reg, const TagSpelling* tag, uint32_t* ou
     return rc;
 }
 
-uint32_t TagRegistryLookup(TagRegistry* reg, const TagSpelling* tag) {
+uint32_t TagRegistryLookup(TagRegistry* reg, TagOwner owner, const TagSpelling* tag) {
     if (!reg || !tag || !tag->key) return TAGFS_INVALID_TAG_ID;
     TagFSLockTake(&reg->lock);
-    uint32_t id = lookup_unlocked(reg, tag);
+    uint32_t id = lookup_unlocked(reg, owner, tag);
     TagFSLockDrop(&reg->lock);
     return id;
 }
 
-bool TagRegistrySpelling(TagRegistry* reg, uint32_t tag_id, TagSpelling* out, bool* is_system) {
+bool TagRegistrySpelling(TagRegistry* reg, uint32_t tag_id, TagSpelling* out, bool* is_system,
+                         TagOwner* owner) {
     if (!reg || !out) return false;
     TagFSLockTake(&reg->lock);
     const TagRegistryEntry* entry = RegistryById(reg->by_id, reg->bucket_count, tag_id);
+    if (entry && (entry->flags & TAGFS_TAG_FLAG_RETIRED))
+        entry = NULL;
     if (entry) {
         out->key       = entry->key;
         out->key_len   = entry->key_len;
@@ -432,6 +538,8 @@ bool TagRegistrySpelling(TagRegistry* reg, uint32_t tag_id, TagSpelling* out, bo
         out->value_len = entry->value_len;
         if (is_system)
             *is_system = (entry->flags & TAGFS_TAG_FLAG_SYSTEM) != 0;
+        if (owner)
+            *owner = entry->owner;
     }
     TagFSLockDrop(&reg->lock);
     return entry != NULL;
@@ -468,38 +576,41 @@ static uint32_t TagRollLeast(TagRegistry* reg, uint32_t from, uint32_t hi)
     return best;
 }
 
-/* The tag of `t`, when one has it, into *id and *out. */
-static bool TagRollAt(TagRegistry* reg, uint32_t t, uint32_t* id, TagSpelling* out)
+/* The id `t`, when the registry knows it, into *out. */
+static bool TagRollAt(TagRegistry* reg, uint32_t t, TagRolled* out)
 {
     const TagRegistryEntry* entry = RegistryById(reg->by_id, reg->bucket_count, t);
     if (!entry)
         return false;
-    *id            = t;
-    out->key       = entry->key;
-    out->key_len   = entry->key_len;
-    out->value     = entry->value;
-    out->value_len = entry->value_len;
+    out->id                = t;
+    out->owner             = entry->owner;
+    out->spelling.key      = entry->key;
+    out->spelling.key_len  = entry->key_len;
+    out->spelling.value    = entry->value;
+    out->spelling.value_len = entry->value_len;
+    out->retired           = (entry->flags & TAGFS_TAG_FLAG_RETIRED) != 0;
+    out->retired_gen       = entry->retired_gen;
     return true;
 }
 
-bool TagRoll(TagRegistry* reg, uint32_t from, uint32_t hi, uint32_t* id, TagSpelling* out) {
+bool TagRoll(TagRegistry* reg, uint32_t from, uint32_t hi, TagRolled* out) {
     if (!reg || !out || from >= hi) return false;
     uint32_t end   = hi - from > TAG_ROLL_SPAN ? from + TAG_ROLL_SPAN : hi;
     bool     found = false;
     TagFSLockTake(&reg->lock);
     for (uint32_t t = from; t < end && !found; t++)
-        found = TagRollAt(reg, t, id, out);
+        found = TagRollAt(reg, t, out);
     TagFSLockDrop(&reg->lock);
     if (found || end == hi) return found;
     uint32_t least = TagRollLeast(reg, end, hi);
     if (least == UINT32_MAX) return false;
     TagFSLockTake(&reg->lock);
-    found = TagRollAt(reg, least, id, out);
+    found = TagRollAt(reg, least, out);
     TagFSLockDrop(&reg->lock);
     return found;
 }
 
-error_t TagRegistryKeyIds(TagRegistry* reg, const char* key, size_t key_len, TagIdList* out) {
+error_t TagRegistryKeyIds(TagRegistry* reg, TagOwner owner, const char* key, size_t key_len, TagIdList* out) {
     if (!out) return ERR_NULL_POINTER;
     out->ids      = NULL;
     out->count    = 0;
@@ -512,8 +623,8 @@ error_t TagRegistryKeyIds(TagRegistry* reg, const char* key, size_t key_len, Tag
      * TagIdList counts. */
     error_t rc = OK;
     TagFSLockTake(&reg->lock);
-    TagKeyGroup* group = reg->key_buckets[key_hash(key, key_len, reg->key_bucket_count)];
-    while (group && !TagSpanIs(group->key, key, key_len))
+    TagKeyGroup* group = reg->key_buckets[key_hash(owner, key, key_len, reg->key_bucket_count)];
+    while (group && !(TagOwnerSame(group->owner, owner) && TagSpanIs(group->key, key, key_len)))
         group = group->next;
     if (group && group->count > 0) {
         out->ids = kmalloc(sizeof(uint32_t) * group->count);
@@ -550,16 +661,20 @@ void tag_registry_mark_system(TagRegistry* reg, uint32_t tag_id) {
  * Whether `id` is one the registry gave: a tag lies in the stitch of the cycle
  * that settles the record wearing it, as a Coined ahead of the record — the
  * cycle takes every id given before the record's Ink (TagRegistryCoinedRange)
- * — so nothing is written here. A volume under glass takes no write, and a tag
- * it does not hold yet is one no record of it may wear. Called with no TagFS
- * lock held.
+ * — so nothing is written here. A volume under glass takes no write, a tag
+ * it does not hold yet is one no record of it may wear, and neither is a tag
+ * retired. Called with no TagFS lock held.
  */
 error_t TagRegistryIdGiven(TagRegistry* reg, uint32_t id) {
     if (!reg) return ERR_NULL_POINTER;
     if (TagFSIsUnderGlass()) return ERR_TAGFS_READ_ONLY;
     TagFSLockTake(&reg->lock);
-    bool given = id < reg->next_id;
+    const TagRegistryEntry* entry = RegistryById(reg->by_id, reg->bucket_count, id);
+    bool given   = id < reg->next_id;
+    bool retired = entry && (entry->flags & TAGFS_TAG_FLAG_RETIRED);
     TagFSLockDrop(&reg->lock);
+    if (retired)
+        return ERR_TAGFS_INVALID_TAG;
     return given ? OK : ERR_TAGFS_METADATA_ERROR;
 }
 
@@ -592,13 +707,30 @@ void TagRegistryCoinedRange(TagRegistry* reg, uint32_t* lo, uint32_t* hi) {
     TagFSLockDrop(&reg->lock);
 }
 
-void TagRegistryCoinedUpTo(TagRegistry* reg, uint32_t hi) {
+/* The retirements a settled stitch of every Ink up to `gen` laid below `hi`
+ * are the book's: out of the list the registry owes, their text off the
+ * bytes a Tally's TAGS is measured by. Under reg->lock. */
+static void RetiringLaidLocked(TagRegistry* reg, uint32_t hi, uint64_t gen) {
+    for (uint32_t i = 0; i < reg->retiring_count;) {
+        const TagRegistryEntry* e = RegistryById(reg->by_id, reg->bucket_count, reg->retiring[i]);
+        if (reg->retiring[i] >= hi || e->retired_gen > gen) {
+            i++;
+            continue;
+        }
+        uint64_t text    = TagCarried(e->owner, e->key_len, e->value_len);
+        reg->text_bytes  = reg->text_bytes > text ? reg->text_bytes - text : 0;
+        reg->retiring[i] = reg->retiring[--reg->retiring_count];
+    }
+}
+
+void TagRegistryCoinedUpTo(TagRegistry* reg, uint32_t hi, uint64_t gen) {
     TagFSLockTake(&reg->lock);
     for (uint32_t id = reg->coined_next; id < hi && id < reg->next_id; id++) {
         const TagRegistryEntry* e = RegistryById(reg->by_id, reg->bucket_count, id);
-        uint64_t                text = e ? (uint64_t)e->key_len + e->value_len : 0;
+        uint64_t                text = e ? TagCarried(e->owner, e->key_len, e->value_len) : 0;
         reg->coined_text = reg->coined_text > text ? reg->coined_text - text : 0;
     }
+    RetiringLaidLocked(reg, hi, gen);
     if (hi > reg->coined_next)
         reg->coined_next = hi;
     TagFSLockDrop(&reg->lock);
@@ -606,7 +738,7 @@ void TagRegistryCoinedUpTo(TagRegistry* reg, uint32_t hi) {
 
 void TagRegistryCoinedHeld(TagRegistry* reg, uint32_t* count, uint64_t* text) {
     TagFSLockTake(&reg->lock);
-    *count = reg->next_id > reg->coined_next ? reg->next_id - reg->coined_next : 0;
+    *count = (reg->next_id > reg->coined_next ? reg->next_id - reg->coined_next : 0) + reg->retiring_count;
     *text  = reg->coined_text;
     TagFSLockDrop(&reg->lock);
 }
@@ -616,4 +748,162 @@ void TagRegistryTextBytes(TagRegistry* reg, uint64_t* tags, uint64_t* bytes) {
     *tags  = reg->total_tags;
     *bytes = reg->text_bytes;
     TagFSLockDrop(&reg->lock);
+}
+
+// ----------------------------------------------------------------------------
+// Retirement
+// ----------------------------------------------------------------------------
+
+error_t TagRegistryRetire(TagRegistry* reg, uint32_t id) {
+    TagDetached gone = { 0 };
+    TagFSLockTake(&reg->lock);
+    TagRegistryEntry* entry = RegistryById(reg->by_id, reg->bucket_count, id);
+    error_t           rc    = entry ? OK : ERR_TAGFS_TAG_NOT_FOUND;
+    if (entry && !(entry->flags & TAGFS_TAG_FLAG_RETIRED)) {
+        EntryDetachLocked(reg, entry, &gone);
+        entry->flags      |= TAGFS_TAG_FLAG_RETIRED;
+        entry->retired_gen = TAG_RETIRING_OPEN;
+    }
+    TagFSLockDrop(&reg->lock);
+    TagDetachedLetGo(&gone);
+    return rc;
+}
+
+error_t TagRegistryRetireRoom(TagRegistry* reg, uint32_t count) {
+    for (;;) {
+        TagFSLockTake(&reg->lock);
+        uint32_t held = reg->retiring_count, cap = reg->retiring_cap;
+        TagFSLockDrop(&reg->lock);
+        if (cap - held >= count)
+            return OK;
+        uint32_t  want = held + count;
+        uint32_t* more = kmalloc(sizeof(uint32_t) * want);
+        if (!more)
+            return ERR_NO_MEMORY;
+        TagFSLockTake(&reg->lock);
+        uint32_t* old = reg->retiring;
+        bool      fit = reg->retiring_cap == cap && reg->retiring_count <= want;
+        if (fit) {
+            if (reg->retiring_count)
+                memcpy(more, old, sizeof(uint32_t) * reg->retiring_count);
+            reg->retiring     = more;
+            reg->retiring_cap = want;
+        }
+        TagFSLockDrop(&reg->lock);
+        kfree(fit ? old : more);
+        if (fit)
+            return OK;
+    }
+}
+
+error_t TagRegistryRetireAt(TagRegistry* reg, uint32_t id, uint64_t gen) {
+    TagFSLockTake(&reg->lock);
+    TagRegistryEntry* entry = RegistryById(reg->by_id, reg->bucket_count, id);
+    error_t           rc    = entry && (entry->flags & TAGFS_TAG_FLAG_RETIRED) ? OK : ERR_TAGFS_TAG_NOT_FOUND;
+    if (rc == OK && entry->retired_gen == TAG_RETIRING_OPEN) {
+        if (reg->retiring_count == reg->retiring_cap) {
+            rc = ERR_NO_MEMORY;
+        } else {
+            entry->retired_gen                    = gen;
+            reg->retiring[reg->retiring_count++] = id;
+            EntryProgramLeft(reg, entry);
+        }
+    }
+    TagFSLockDrop(&reg->lock);
+    return rc;
+}
+
+error_t RegistryCoinRetired(TagRegistry* reg, uint32_t id) {
+    if (id > TAGFS_MAX_TAG_ID)
+        return ERR_INVALID_ARGUMENT;
+    TagRegistryEntry* fresh = kmalloc(sizeof(TagRegistryEntry));
+    TagDetached       gone  = { 0 };
+    if (!fresh)
+        return ERR_NO_MEMORY;
+    TagFSLockTake(&reg->lock);
+    TagRegistryEntry* entry = RegistryById(reg->by_id, reg->bucket_count, id);
+    if (entry && !(entry->flags & TAGFS_TAG_FLAG_RETIRED)) {
+        uint64_t text    = TagCarried(entry->owner, entry->key_len, entry->value_len);
+        EntryDetachLocked(reg, entry, &gone);
+        EntryProgramLeft(reg, entry);
+        entry->flags      |= TAGFS_TAG_FLAG_RETIRED;
+        entry->retired_gen = 0;
+        reg->text_bytes    = reg->text_bytes > text ? reg->text_bytes - text : 0;
+    } else if (!entry) {
+        memset(fresh, 0, sizeof(*fresh));
+        fresh->tag_id      = id;
+        fresh->flags       = TAGFS_TAG_FLAG_RETIRED;
+        fresh->owner       = TagOwnerPerson();
+        fresh->id_next     = reg->by_id[id % reg->bucket_count];
+        reg->by_id[id % reg->bucket_count] = fresh;
+        fresh = NULL;
+        if (id >= reg->next_id)
+            reg->next_id = id + 1u;
+        reg->total_tags++;
+    }
+    TagFSLockDrop(&reg->lock);
+    kfree(fresh);
+    TagDetachedLetGo(&gone);
+    return OK;
+}
+
+bool TagRegistryRetiredId(TagRegistry* reg, uint32_t id) {
+    TagFSLockTake(&reg->lock);
+    const TagRegistryEntry* entry = RegistryById(reg->by_id, reg->bucket_count, id);
+    bool                    gone  = entry && (entry->flags & TAGFS_TAG_FLAG_RETIRED);
+    TagFSLockDrop(&reg->lock);
+    return gone;
+}
+
+bool TagRegistryRetiringNext(TagRegistry* reg, uint32_t* at, uint32_t below, uint64_t gen, uint32_t* id) {
+    bool found = false;
+    TagFSLockTake(&reg->lock);
+    while (!found && *at < reg->retiring_count) {
+        uint32_t                retired = reg->retiring[(*at)++];
+        const TagRegistryEntry* entry   = RegistryById(reg->by_id, reg->bucket_count, retired);
+        if (retired < below && entry->retired_gen <= gen) {
+            *id   = retired;
+            found = true;
+        }
+    }
+    TagFSLockDrop(&reg->lock);
+    return found;
+}
+
+/* Every program's tag, a span of the id's hash a hold of the lock, in the
+ * room the registry counted for them: one the counting did not see — a tag
+ * given meanwhile — is for the next look. */
+error_t TagRegistryProgramTags(TagRegistry* reg, TagProgramTag** out, uint32_t* count) {
+    *out   = NULL;
+    *count = 0;
+    TagFSLockTake(&reg->lock);
+    uint32_t room = reg->program_tags;
+    TagFSLockDrop(&reg->lock);
+    if (room == 0)
+        return OK;
+    TagProgramTag* list = kmalloc(sizeof(TagProgramTag) * room);
+    if (!list)
+        return ERR_NO_MEMORY;
+    uint32_t buckets = 0, b = 0, n = 0;
+    for (bool done = false; !done;) {
+        TagFSLockTake(&reg->lock);
+        if (buckets != reg->bucket_count) {
+            buckets = reg->bucket_count;
+            b       = 0;
+            n       = 0;
+        }
+        uint32_t end = buckets - b > TAG_ROLL_SPAN ? b + TAG_ROLL_SPAN : buckets;
+        for (; b < end; b++) {
+            for (const TagRegistryEntry* e = reg->by_id[b]; e && n < room; e = e->id_next) {
+                bool finished = (e->flags & TAGFS_TAG_FLAG_RETIRED) && e->retired_gen != TAG_RETIRING_OPEN;
+                if (e->owner.kind == TAG_OWNER_PROGRAM && !finished)
+                    list[n++] = (TagProgramTag){ e->tag_id, e->owner.id };
+            }
+        }
+        done = b == buckets;
+        TagFSLockDrop(&reg->lock);
+    }
+    *out   = list;
+    *count = n;
+    return OK;
 }

@@ -62,7 +62,7 @@ int main(void)
     }
 
     FileMetadata metadata;
-    if (FileMetadataRead(files[0], &metadata) != 0) {
+    if (FileMetadataRead(MY_TAGS, files[0], &metadata) != 0) {
         println("inside: that file could not be looked at; it may have been erased");
         exit(INSIDE_UNREAD);
         return INSIDE_UNREAD;

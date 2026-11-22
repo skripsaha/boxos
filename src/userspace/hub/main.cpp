@@ -31,10 +31,6 @@ int main()
         hub::SayIn(BOXOS_DUPPO_PINK, BOXOS_SYMBOL_DUPPO_TEXT);
         hub::Say(" BoxOS Hub — help shows what there is\n");
     }
-
-    // The commands found before the first line, so its first key is not
-    // what reads the volume to find them.
-    hub::programs::EachCommand([](file_id_t, std::string_view) {});
     if (!hub::Converse(Self)) {
         hub::Say("hub: no keyboard can be heard here, so nothing can be typed; the hub ends\n");
         return 1;

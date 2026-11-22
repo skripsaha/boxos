@@ -335,7 +335,7 @@ static uint64_t StandEdgeTagLeaves(const TagRegistry* reg)
     TallyKey first = { 0, 0 }, prev = { 0, 0 };
     for (uint32_t id = 0; id < reg->next_id; id++) {
         TagSpelling sp;
-        if (!TagRegistrySpelling((TagRegistry*)reg, id, &sp, NULL))
+        if (!TagRegistrySpelling((TagRegistry*)reg, id, &sp, NULL, NULL))
             continue;
         uint32_t body = TallyVarintBytes(sp.value ? TALLY_TAG_HAS_VALUE : 0u) + TallyVarintBytes(sp.key_len) +
                         sp.key_len + (sp.value ? TallyVarintBytes(sp.value_len) + sp.value_len : 0u);
@@ -384,7 +384,7 @@ static bool StandEdgeTag(TagRegistry* reg, char letter, uint32_t n, uint32_t len
     uint32_t    at  = (uint32_t)ksnprintf(s_edge_text, sizeof(s_edge_text), "stitch:%c%05u-", letter, n);
     memset(s_edge_text + at, 'x', len > at ? len - at : 0u);
     s_edge_text[len > at ? len : at] = '\0';
-    return TagSpell(s_edge_text, len > at ? len : at, &tag) == OK && TagRegistryIntern(reg, &tag, &tid) == OK;
+    return TagSpell(s_edge_text, len > at ? len : at, &tag) == OK && TagRegistryIntern(reg, TagOwnerPerson(), &tag, &tid) == OK;
 }
 
 static TestResult TestStandStitchTallyCostLong(void)
@@ -430,7 +430,7 @@ static TestResult TestStandRegistryCountsFromNothing(void)
     TagRegistryCoinedRange(scratch, &lo, &hi);
     TEST_ASSERT(tags == 0 && text == 0 && lo == 0 && hi == 0,
                 "it holds no tag, no byte of text, and no id it gave that a book has not laid down");
-    TEST_ASSERT(TagSpell("stitch:edge", 11u, &tag) == OK && TagRegistryIntern(scratch, &tag, &tid) == OK,
+    TEST_ASSERT(TagSpell("stitch:edge", 11u, &tag) == OK && TagRegistryIntern(scratch, TagOwnerPerson(), &tag, &tid) == OK,
                 "a tag is given an id");
     TagRegistryTextBytes(scratch, &tags, &text);
     TagRegistryCoinedRange(scratch, &lo, &hi);

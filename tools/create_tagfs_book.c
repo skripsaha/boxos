@@ -259,9 +259,12 @@ static int FileOf(BindFile* f, uint64_t fid, const char* path, const char* tags)
     }
     fseek(src, 0, SEEK_END);
     long size = ftell(src);
+    f->head_len = size < 0 ? 0u : size < (long)TALLY_HEAD_MOST ? (uint32_t)size : TALLY_HEAD_MOST;
+    fseek(src, 0, SEEK_SET);
+    size_t got = fread(f->head, 1, f->head_len, src);
     fclose(src);
-    if (size < 0) {
-        fprintf(stderr, "Cannot tell how long %s is\n", path);
+    if (size < 0 || got != f->head_len) {
+        fprintf(stderr, "Cannot tell how long %s is, or read its first bytes\n", path);
         return -1;
     }
     const char* base = strrchr(path, '/');
@@ -270,7 +273,7 @@ static int FileOf(BindFile* f, uint64_t fid, const char* path, const char* tags)
     f->fid    = fid;
     f->size   = (uint64_t)size;
     f->blocks = (f->size + TAGFS_BLOCK_SIZE - 1u) / TAGFS_BLOCK_SIZE;
-    if (parse_tags(tags, f->path, &ids, &n, &f->role) != 0) return -1;
+    if (parse_tags(tags, f->path, &ids, &n, &f->role) != 0 || PassportOf(f->path, &f->passport) != 0) return -1;
     qsort(ids, n, sizeof(uint32_t), IdOrder);
     f->tags  = ids;
     f->ntags = n;
@@ -366,18 +369,22 @@ static int BindingDigests(Binding* v, int read) {
 }
 
 /* FILES: each file's header — gen 1, ACTIVE, its size, made and modified at
- * BORN, its name and tags — and its one run as its Parcels (§2.9). */
+ * BORN, its name and tags, its first bytes — and its one run as its Parcels
+ * (§2.9). */
 static int FileLeaves(Binding* v) {
     BindLeaves* l  = &v->leaves;
     uint64_t    ns = v->made_at * 1000000000ull;
     for (int i = 0; i < v->count; i++) {
         const BindFile* f    = &v->files[i];
         uint8_t*        ids  = BindBody(l, 10u * (uint64_t)f->ntags);
-        uint8_t*        body = BindBody(l, 80u + strlen(f->name) + 10u * (uint64_t)f->ntags);
+        uint8_t*        body = BindBody(l, 107u + strlen(f->name) + 10u * (uint64_t)f->ntags);
         if (!ids || !body) return -1;
-        TallyFileHead h = { .gen = FIRST_TALLY_SEQ, .flags = TALLY_FILE_ACTIVE | f->role, .size = f->size,
-                            .created_ns = ns, .modified_ns = ns, .name = (const uint8_t*)f->name,
-                            .name_len = strlen(f->name), .ntags = f->ntags, .tags = ids };
+        TallyFileHead h = { .gen = FIRST_TALLY_SEQ,
+                            .flags = TALLY_FILE_ACTIVE | f->role | (f->head_len ? TALLY_FILE_HEAD : 0u) |
+                                     (f->passport ? TALLY_FILE_PASSPORT : 0u),
+                            .size = f->size, .created_ns = ns, .modified_ns = ns, .name = (const uint8_t*)f->name,
+                            .name_len = strlen(f->name), .ntags = f->ntags, .tags = ids,
+                            .head_len = f->head_len, .head = f->head, .passport = f->passport };
         h.tags_bytes = TallyIdsPut(ids, f->tags, f->ntags);
         if (BindAdd(l, TALLY_FILES, (TallyKey){ f->fid, 0 }, body, TallyFileHeadPut(body, &h), 1) != 0)
             return -1;

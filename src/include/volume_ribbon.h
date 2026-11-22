@@ -65,6 +65,9 @@
 #define LABEL_FLAGS  2u
 #define LABEL_TAGS   4u
 #define LABEL_KEEP   8u   /* the file's deletion, and the time it is kept until (0: brought back) */
+#define LABEL_SHOWN  16u  /* the programs a program's file shows its own tags to, the whole list anew (0 of them: none) */
+#define LABEL_HEAD   32u  /* the file's first bytes anew, as a change of what it holds left them (none: it holds none) */
+#define LABEL_PASSPORT 64u  /* the passport of the signed program the file holds, anew — 0: none now */
 
 /* The extensions a run may carry (§8), a TLV list after its head: CODEC's body
  * is the codec and the blocks it stores; SHARED names ground another owns. */
@@ -529,12 +532,19 @@ static inline int RibbonShape(uint64_t off, uint64_t left, uint64_t hop, uint64_
 /*
  * Born — a file born, its whole state: fid · flags · size · created_ns ·
  * mtime_z · name · tags (count, rising) · nruns · runs (from cursor 0) ·
- * digests · slip. A run covers exactly the blocks its size needs, holes
- * written as HOLE runs; the digests are those of every block its DATA runs
- * put in (RibbonRunDigests), and the slip lays the tail of a file shorter than
- * its last block (§2.8, H-7). The writer gives `tags` and `runs` as their
- * bytes already laid (RibbonIdsPut's body after the count, RibbonRunPut each);
- * the reader finds them pointed at where they stand.
+ * digests · slip · [made_by] · [nshown · shown] · [head_len · head] · [passport]. A run covers exactly the blocks its size needs,
+ * holes written as HOLE runs; the digests are those of every block its DATA
+ * runs put in (RibbonRunDigests), and the slip lays the tail of a file shorter
+ * than its last block (§2.8, H-7). made_by is there when, and only when, the
+ * flags carry TALLY_FILE_MADE_BY: the file of the program that made the file,
+ * never 0 (TallyFileHead says the same of a header); the programs it shows
+ * its own tags to follow, there when, and only when, the flags carry
+ * TALLY_FILE_SHOWN — the count never 0, the ids rising (TallyFidsPut); and
+ * its first bytes, when they carry TALLY_FILE_HEAD, and the passport of the
+ * signed program it holds, when they carry TALLY_FILE_PASSPORT (TallyFileHead
+ * says how of both). The writer gives `tags`, `runs` and `shown` as their bytes already laid
+ * (RibbonIdsPut's body after the count, RibbonRunPut each, TallyFidsPut); the
+ * reader finds them pointed at where they stand.
  */
 typedef struct {
     uint64_t       fid;
@@ -554,6 +564,13 @@ typedef struct {
     uint64_t       ndigests;
     const uint8_t *digests;
     RibbonSlip     slip;
+    uint64_t       made_by;      /* 0 unless TALLY_FILE_MADE_BY */
+    uint64_t       nshown;       /* 0 unless TALLY_FILE_SHOWN */
+    const uint8_t *shown;
+    uint32_t       shown_bytes;
+    uint64_t       head_len;     /* 0 unless TALLY_FILE_HEAD */
+    const uint8_t *head;
+    uint64_t       passport;     /* 0 unless TALLY_FILE_PASSPORT */
 } RibbonBorn;
 
 static inline uint32_t RibbonBornBodyPut(uint8_t *out, const RibbonBorn *r)
@@ -570,14 +587,29 @@ static inline uint32_t RibbonBornBodyPut(uint8_t *out, const RibbonBorn *r)
     at += BookVarintPut(out + at, r->nruns);
     at += TallyBytesPut(out + at, r->runs, r->runs_bytes);
     at += TallyBytesPut(out + at, r->digests, r->ndigests * 8u);
-    return at + RibbonSlipPut(out + at, &r->slip);
+    at += RibbonSlipPut(out + at, &r->slip);
+    if (r->flags & TALLY_FILE_MADE_BY)
+        at += BookVarintPut(out + at, r->made_by);
+    if (r->flags & TALLY_FILE_SHOWN) {
+        at += BookVarintPut(out + at, r->nshown);
+        at += TallyBytesPut(out + at, r->shown, r->shown_bytes);
+    }
+    if (r->flags & TALLY_FILE_HEAD) {
+        at += BookVarintPut(out + at, r->head_len);
+        at += TallyBytesPut(out + at, r->head, r->head_len);
+    }
+    if (r->flags & TALLY_FILE_PASSPORT)
+        at += BookVarintPut(out + at, r->passport);
+    return at;
 }
 
 static inline int RibbonBornGet(const uint8_t *b, uint32_t len, uint64_t seq, RibbonBorn *r, uint32_t *used)
 {
     uint32_t at = 0, from;
     uint64_t z, cursor = 0;
-    r->blocks = r->ndigests = 0;
+    r->blocks = r->ndigests = r->made_by = r->nshown = r->head_len = r->passport = 0;
+    r->shown       = r->head = (const uint8_t *)0;
+    r->shown_bytes = 0;
     if (!TallyTake(b, len, &at, &r->fid) || !TallyTake(b, len, &at, &r->flags) ||
         !TallyTake(b, len, &at, &r->size) || !TallyTake(b, len, &at, &r->created_ns) ||
         !TallyTake(b, len, &at, &z) || !TallyTake(b, len, &at, &r->name_len) ||
@@ -593,6 +625,16 @@ static inline int RibbonBornGet(const uint8_t *b, uint32_t len, uint64_t seq, Ri
         return TALLY_BODY_BROKEN;
     r->runs_bytes = at - from;
     if (!RibbonDigestsTake(b, len, &at, r->ndigests, &r->digests) || !RibbonSlipTake(b, len, &at, &r->slip))
+        return TALLY_BODY_BROKEN;
+    if ((r->flags & TALLY_FILE_MADE_BY) && (!TallyTake(b, len, &at, &r->made_by) || !r->made_by))
+        return TALLY_BODY_BROKEN;
+    if ((r->flags & TALLY_FILE_SHOWN) &&
+        (!TallyFidsTake(b, len, &at, &r->nshown, &r->shown, &r->shown_bytes) || !r->nshown))
+        return TALLY_BODY_BROKEN;
+    if ((r->flags & TALLY_FILE_HEAD) &&
+        (!TallyHeadTake(b, len, &at, r->size, &r->head_len, &r->head) || !r->head_len))
+        return TALLY_BODY_BROKEN;
+    if ((r->flags & TALLY_FILE_PASSPORT) && !TallyPassportTake(b, len, &at, &r->passport))
         return TALLY_BODY_BROKEN;
     *used = at;
     return TallyBodyEnd(at, len);
@@ -691,18 +733,33 @@ static inline int RibbonShapedGet(const uint8_t *b, uint32_t len, uint64_t seq, 
 }
 
 /*
- * Labeled — a file's name, flags, tags or deletion: fid · base · what · [name]
- * · [set · clear] · [add (count, rising) · drop (count, rising)] · [keep_ns].
+ * Labeled — a file's name, flags, tags, deletion, the programs it shows its
+ * tags to, its first bytes or its passport: fid · base · what · [name] ·
+ * [set · clear] · [add (count, rising) · drop (count, rising)] · [keep_ns] ·
+ * [nshown · shown] · [head_len · head] · [passport].
  * A bit of `what` this reader does not know carries no field: it is a
  * writer's, and a reader that finds bytes left past the fields it knows takes
  * the record for a newer writer's (TALLY_BODY_LONGER) and does not apply the
  * stitch.
  *
  * KEEP is the one verb of deletion, and TALLY_FILE_DELETED is never a bit of
- * `set` or `clear` — a Labeled that names it there does not read: keep_ns
+ * `set` or `clear` — a Labeled that names it there does not read, nor does
+ * one that names TALLY_FILE_MADE_BY, which no change of a file moves: keep_ns
  * above 0 deletes the file, kept until that time (a file deleted already has
  * its term moved), and keep_ns 0 brings it back. The bit in the file's flags
  * is what the verb leaves, put there by the one reader and the other alike.
+ *
+ * SHOWN is the one verb of the list a program's file shows its tags to, and
+ * TALLY_FILE_SHOWN is never a bit of `set` or `clear` either: the list comes
+ * whole, rising (TallyFidsPut), 0 first for every program — a list of none
+ * shows nothing and takes the bit off, any other puts it on. HEAD is the one
+ * verb of a file's first bytes, and TALLY_FILE_HEAD no bit of `set` or
+ * `clear`: it follows a change of what the file holds — after the Shaped of
+ * it — with the bytes as the change left them, none taking the bit off.
+ * PASSPORT is the one verb of the passport of the program the file holds, and
+ * TALLY_FILE_PASSPORT no bit of `set` or `clear`: it lays one anew and the bit
+ * with it, or — 0 — takes them off, once a program with no signature that
+ * holds was started from the file; any other number is no passport.
  */
 typedef struct {
     uint64_t       fid;
@@ -719,6 +776,12 @@ typedef struct {
     const uint8_t *drop;
     uint32_t       drop_bytes;
     uint64_t       keep_ns;      /* with LABEL_KEEP */
+    uint64_t       nshown;       /* with LABEL_SHOWN */
+    const uint8_t *shown;
+    uint32_t       shown_bytes;
+    uint64_t       head_len;     /* with LABEL_HEAD */
+    const uint8_t *head;
+    uint64_t       passport;     /* with LABEL_PASSPORT */
 } RibbonLabeled;
 
 static inline uint32_t RibbonLabeledBodyPut(uint8_t *out, const RibbonLabeled *r)
@@ -742,15 +805,25 @@ static inline uint32_t RibbonLabeledBodyPut(uint8_t *out, const RibbonLabeled *r
     }
     if (r->what & LABEL_KEEP)
         at += BookVarintPut(out + at, r->keep_ns);
+    if (r->what & LABEL_SHOWN) {
+        at += BookVarintPut(out + at, r->nshown);
+        at += TallyBytesPut(out + at, r->shown, r->shown_bytes);
+    }
+    if (r->what & LABEL_HEAD) {
+        at += BookVarintPut(out + at, r->head_len);
+        at += TallyBytesPut(out + at, r->head, r->head_len);
+    }
+    if (r->what & LABEL_PASSPORT)
+        at += BookVarintPut(out + at, r->passport);
     return at;
 }
 
 static inline int RibbonLabeledGet(const uint8_t *b, uint32_t len, RibbonLabeled *r, uint32_t *used)
 {
     uint32_t at = 0;
-    r->name = r->add = r->drop = (const uint8_t *)0;
-    r->name_len = r->set = r->clear = r->nadd = r->ndrop = r->keep_ns = 0;
-    r->add_bytes = r->drop_bytes = 0;
+    r->name = r->add = r->drop = r->shown = r->head = (const uint8_t *)0;
+    r->name_len = r->set = r->clear = r->nadd = r->ndrop = r->keep_ns = r->nshown = r->head_len = r->passport = 0;
+    r->add_bytes = r->drop_bytes = r->shown_bytes = 0;
     if (!TallyTake(b, len, &at, &r->fid) || !TallyTake(b, len, &at, &r->base) || !TallyTake(b, len, &at, &r->what))
         return TALLY_BODY_BROKEN;
     if ((r->what & LABEL_NAME) &&
@@ -761,8 +834,14 @@ static inline int RibbonLabeledGet(const uint8_t *b, uint32_t len, RibbonLabeled
     if ((r->what & LABEL_TAGS) && (!RibbonIdsTake(b, len, &at, &r->nadd, &r->add, &r->add_bytes) ||
                                    !RibbonIdsTake(b, len, &at, &r->ndrop, &r->drop, &r->drop_bytes)))
         return TALLY_BODY_BROKEN;
-    if (((r->what & LABEL_FLAGS) && ((r->set | r->clear) & TALLY_FILE_DELETED)) ||
-        ((r->what & LABEL_KEEP) && !TallyTake(b, len, &at, &r->keep_ns)))
+    if (((r->what & LABEL_FLAGS) &&
+         ((r->set | r->clear) &
+          (TALLY_FILE_DELETED | TALLY_FILE_MADE_BY | TALLY_FILE_SHOWN | TALLY_FILE_HEAD | TALLY_FILE_PASSPORT))) ||
+        ((r->what & LABEL_KEEP) && !TallyTake(b, len, &at, &r->keep_ns)) ||
+        ((r->what & LABEL_SHOWN) && !TallyFidsTake(b, len, &at, &r->nshown, &r->shown, &r->shown_bytes)) ||
+        ((r->what & LABEL_HEAD) && !TallyHeadTake(b, len, &at, TALLY_HEAD_MOST, &r->head_len, &r->head)) ||
+        ((r->what & LABEL_PASSPORT) && !(TallyTake(b, len, &at, &r->passport) &&
+                                          (r->passport == 0 || (r->passport & TALLY_PASSPORT_BIT)))))
         return TALLY_BODY_BROKEN;
     *used = at;
     return TallyBodyEnd(at, len);
@@ -785,8 +864,8 @@ static inline int RibbonQuitclaimGet(const uint8_t *b, uint32_t len, uint64_t *f
 }
 
 /* Coined — a tag given its id on the volume: id · the tag as TAGS carries it
- * (volume_tally.h TallyTag: flags, then the key and the value unless
- * RETIRED). */
+ * (volume_tally.h TallyTag: flags, then whose it is when OWNED and the key and
+ * the value, unless RETIRED). */
 static inline uint32_t RibbonCoinedBodyPut(uint8_t *out, uint64_t id, const TallyTag *t)
 {
     uint32_t at = BookVarintPut(out, id);
@@ -796,17 +875,7 @@ static inline uint32_t RibbonCoinedBodyPut(uint8_t *out, uint64_t id, const Tall
 static inline int RibbonCoinedGet(const uint8_t *b, uint32_t len, uint64_t *id, TallyTag *t, uint32_t *used)
 {
     uint32_t at = 0;
-    if (!TallyTake(b, len, &at, id)) return TALLY_BODY_BROKEN;
-    t->key = t->value = (const uint8_t *)0;
-    t->key_len = t->value_len = 0;
-    if (!TallyTake(b, len, &at, &t->flags)) return TALLY_BODY_BROKEN;
-    if (!(t->flags & TALLY_TAG_RETIRED)) {
-        if (!TallyTake(b, len, &at, &t->key_len) || !TallyTakeBytes(b, len, &at, t->key_len, &t->key))
-            return TALLY_BODY_BROKEN;
-        if ((t->flags & TALLY_TAG_HAS_VALUE) &&
-            (!TallyTake(b, len, &at, &t->value_len) || !TallyTakeBytes(b, len, &at, t->value_len, &t->value)))
-            return TALLY_BODY_BROKEN;
-    }
+    if (!TallyTake(b, len, &at, id) || !TallyTagTake(b, len, &at, t)) return TALLY_BODY_BROKEN;
     *used = at;
     return TallyBodyEnd(at, len);
 }

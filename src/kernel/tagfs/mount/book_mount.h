@@ -90,6 +90,11 @@ void    MountBookLetGo(void);
 bool    TagFSFileLocked(uint64_t file_id);
 bool    BookFileLocked(uint64_t file_id);
 
+/* Whether any file stands locked — one by name that Escheat did not let go,
+ * or a rotten range of FILES: a card the volume cannot read, which may keep
+ * anything. Inside the door, as BookFileLocked. */
+bool    BookAnyLocked(void);
+
 /* What the mount of the book said, in numbers. */
 typedef struct {
     uint32_t slot;          /* the Spine slot it stands on */

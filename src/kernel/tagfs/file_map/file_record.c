@@ -7,23 +7,30 @@
  * record that names them.
  */
 
-/* A header of the record's own, its tags and its name copied in after it,
- * naming no runs yet: NULL for no memory. */
-static FileRecord* RecordHeader(const char* name, const uint32_t* tags, uint32_t tag_count)
+/* A header of the record's own, the programs it shows its tags to, its tags
+ * and its name copied in after it, naming no runs yet: NULL for no memory. */
+static FileRecord* RecordHeader(const char* name, const uint32_t* tags, uint32_t tag_count,
+                                const uint64_t* shown, uint32_t shown_count)
 {
     uint32_t    name_len = name ? (uint32_t)strlen(name) : 0;
-    size_t      bytes    = sizeof(FileRecord) + (size_t)tag_count * sizeof(uint32_t) + name_len + 1u;
+    size_t      bytes    = sizeof(FileRecord) + (size_t)shown_count * sizeof(uint64_t) +
+                           (size_t)tag_count * sizeof(uint32_t) + name_len + 1u;
     FileRecord* rec      = kmalloc(bytes);
     if (!rec)
         return NULL;
 
     uint8_t* at = (uint8_t*)(rec + 1);
     memset(rec, 0, sizeof(*rec));
-    rec->refs      = 1;
-    rec->bytes     = bytes;
-    rec->tag_count = tag_count;
-    rec->name_len  = name_len;
-    rec->tags      = (const uint32_t*)at;
+    rec->refs        = 1;
+    rec->bytes       = bytes;
+    rec->tag_count   = tag_count;
+    rec->name_len    = name_len;
+    rec->shown_count = shown_count;
+    rec->shown_to    = shown_count ? (const uint64_t*)at : NULL;
+    if (shown_count)
+        memcpy(at, shown, (size_t)shown_count * sizeof(uint64_t));
+    at        += (size_t)shown_count * sizeof(uint64_t);
+    rec->tags  = (const uint32_t*)at;
     if (tag_count)
         memcpy(at, tags, (size_t)tag_count * sizeof(uint32_t));
     at += (size_t)tag_count * sizeof(uint32_t);
@@ -41,6 +48,37 @@ static void RecordRuns(FileRecord* rec, const Tract* tract)
     rec->strip_count = tract ? tract->strips : 0;
     rec->blocks      = TractBlocks(tract);
     rec->bytes      += tract ? tract->bytes : 0;
+}
+
+/* `flags` with TAGFS_FILE_MADE_BY as `made_by` says, TAGFS_FILE_SHOWN as
+ * `shown_count` does, and so the head's and the passport's: each bit and its
+ * field are one fact, so every record is made to hold them alike. */
+static uint32_t FlagsOfFields(uint32_t flags, uint64_t made_by, uint32_t shown_count, uint32_t head_len,
+                              uint64_t passport)
+{
+    flags = made_by ? flags | TAGFS_FILE_MADE_BY : flags & ~(uint32_t)TAGFS_FILE_MADE_BY;
+    flags = shown_count ? flags | TAGFS_FILE_SHOWN : flags & ~(uint32_t)TAGFS_FILE_SHOWN;
+    flags = passport ? flags | TAGFS_FILE_PASSPORT : flags & ~(uint32_t)TAGFS_FILE_PASSPORT;
+    return head_len ? flags | TAGFS_FILE_HEAD : flags & ~(uint32_t)TAGFS_FILE_HEAD;
+}
+
+STATIC_ASSERT(TAGFS_PASSPORT_BIT == TALLY_PASSPORT_BIT, "a passport carries the bit the book reads one by");
+
+void FileRecordPassportSet(FileRecord* rec, uint64_t passport)
+{
+    rec->passport = passport;
+    rec->flags    = FlagsOfFields(rec->flags, rec->made_by, rec->shown_count, rec->head_len, passport);
+}
+
+void FileRecordHeadSet(FileRecord* rec, const uint8_t* head, uint32_t len)
+{
+    if (len > TAGFS_HEAD_MOST)
+        len = TAGFS_HEAD_MOST;
+    memset(rec->head, 0, sizeof(rec->head));
+    if (len)
+        memcpy(rec->head, head, len);
+    rec->head_len = (uint8_t)len;
+    rec->flags    = FlagsOfFields(rec->flags, rec->made_by, rec->shown_count, len, rec->passport);
 }
 
 /* The record of `meta` over `tract`, built by `rc` — a reference the record
@@ -67,18 +105,21 @@ static FileRecord* RecordOf(const TagFSMetadata* meta, const Tract* tract, error
     if (rc != OK)
         return NULL;
 
-    FileRecord* rec = RecordHeader(meta->filename, meta->tag_ids,
-                                   meta->tag_ids ? meta->tag_count : 0);
+    FileRecord* rec = RecordHeader(meta->filename, meta->tag_ids, meta->tag_ids ? meta->tag_count : 0,
+                                   meta->shown_to, meta->shown_to ? meta->shown_count : 0);
     if (!rec) {
         TractLetGo(tract);
         return NULL;
     }
     rec->file_id       = meta->file_id;
-    rec->flags         = meta->flags;
+    rec->flags         = FlagsOfFields(meta->flags, meta->made_by, rec->shown_count, 0, meta->passport);
     rec->size          = meta->size;
     rec->created_time  = meta->created_time;
     rec->modified_time = meta->modified_time;
     rec->keep_until    = meta->keep_until;
+    rec->made_by       = meta->made_by;
+    rec->passport      = meta->passport;
+    FileRecordHeadSet(rec, meta->head, meta->head_len);
     RecordRuns(rec, tract);
     return rec;
 }
@@ -99,17 +140,22 @@ FileRecord* FileRecordBuildCut(const TagFSMetadata* meta, const uint32_t* cut, u
 }
 
 FileRecord* FileRecordRelabel(const FileRecord* old, const char* name, const uint32_t* tags,
-                              uint32_t tag_count, uint32_t flags, uint64_t keep_until)
+                              uint32_t tag_count, const uint64_t* shown, uint32_t shown_count,
+                              uint32_t flags, uint64_t keep_until)
 {
-    FileRecord* rec = RecordHeader(name, tags, tag_count);
+    FileRecord* rec = RecordHeader(name, tags, tag_count, shown, shown_count);
     if (!rec)
         return NULL;
     rec->file_id       = old->file_id;
-    rec->flags         = flags;
+    rec->flags         = FlagsOfFields(flags, old->made_by, shown_count, old->head_len, old->passport);
     rec->size          = old->size;
     rec->created_time  = old->created_time;
     rec->modified_time = old->modified_time;
     rec->keep_until    = keep_until;
+    rec->made_by       = old->made_by;
+    rec->passport      = old->passport;
+    rec->head_len      = old->head_len;
+    memcpy(rec->head, old->head, sizeof(rec->head));
     rec->gen           = __atomic_load_n(&old->gen, __ATOMIC_RELAXED);
     rec->slip          = TailSlipHold(old->slip);
     TractHold(old->tract);
@@ -264,7 +310,7 @@ error_t FileRecordSplice(const FileRecord* old, const BookSplice* sp, uint64_t c
     error_t rc = SplicesInOrder(old, sp, count);
     if (rc == OK)
         rc = SplicesApplied(old, sp, count, freed ? &took : NULL, &gave, &root);
-    if (rc == OK && !(rec = RecordHeader(old->name, old->tags, old->tag_count)))
+    if (rc == OK && !(rec = RecordHeader(old->name, old->tags, old->tag_count, old->shown_to, old->shown_count)))
         rc = ERR_NO_MEMORY;
     if (rc == OK && freed)
         rc = GroundLess(&took, &gave, freed, nfreed);
@@ -281,6 +327,10 @@ error_t FileRecordSplice(const FileRecord* old, const BookSplice* sp, uint64_t c
     rec->created_time  = old->created_time;
     rec->modified_time = mtime;
     rec->keep_until    = old->keep_until;
+    rec->made_by       = old->made_by;
+    rec->passport      = old->passport;
+    rec->head_len      = old->head_len;
+    memcpy(rec->head, old->head, sizeof(rec->head));
     rec->gen           = old->gen;
     RecordRuns(rec, root);
     /* The Slips go on only by their one rule — the replay's and the Ink's
@@ -457,7 +507,18 @@ int FileRecordCopyOut(const FileRecord* rec, TagFSMetadata* out)
     out->created_time  = rec->created_time;
     out->modified_time = rec->modified_time;
     out->keep_until    = rec->keep_until;
+    out->made_by       = rec->made_by;
+    out->passport      = rec->passport;
+    out->head_len      = rec->head_len;
+    memcpy(out->head, rec->head, rec->head_len);
 
+    if (rec->shown_count) {
+        out->shown_to = kmalloc(sizeof(uint64_t) * rec->shown_count);
+        if (!out->shown_to)
+            goto refused;
+        memcpy(out->shown_to, rec->shown_to, sizeof(uint64_t) * rec->shown_count);
+        out->shown_count = rec->shown_count;
+    }
     if (rec->tag_count) {
         out->tag_ids = kmalloc(sizeof(uint32_t) * rec->tag_count);
         if (!out->tag_ids)
@@ -472,6 +533,7 @@ int FileRecordCopyOut(const FileRecord* rec, TagFSMetadata* out)
     return 0;
 
 refused:
+    kfree(out->shown_to);
     kfree(out->tag_ids);
     memset(out, 0, sizeof(*out));
     return -1;

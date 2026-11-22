@@ -113,6 +113,14 @@ typedef struct {
  * after the load. */
 error_t  PlotLoad(Plot *p, uint64_t fid, InkWarrant warrant);
 
+/* The same for the volume's own change of a file — its tail laid in its block
+ * (Engross), or cut by Escheat — which says nothing new of what the file
+ * holds: a file kept in the trash is loaded as a live one is, where PlotLoad
+ * answers ERR_FILE_NOT_FOUND; every other guard is PlotLoad's. Asked by a
+ * handle the volume opens for itself alone (TAGFS_HANDLE_KEPT), never by a
+ * program's. */
+error_t  PlotLoadKept(Plot *p, uint64_t fid, InkWarrant warrant);
+
 /* Everything the Plot holds let go; every Stake still standing is given back
  * first (PlotPullStakes). Safe on a Plot PlotLoad refused. */
 void     PlotRelease(Plot *p);
@@ -290,6 +298,14 @@ error_t  PlotSourcePull(const PlotSource *src, uint64_t at, void *dst, uint32_t 
  * file's order — a read, the source's pages, a write — and *out_done is what
  * landed before it: the blocks of a stretch before a refused one are laid. */
 error_t  PlotWriteBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *out_done);
+
+/* `count` bytes at `bytes` that landed at the file's byte `at`: those of them
+ * that lie under TAGFS_HEAD_MOST made the Plot's record of the file's first
+ * bytes (meta.head), which the Ink's record keeps (InkBookPlotBuilt). Every
+ * road a write's bytes land by says them here — PlotWriteBlocks the source's,
+ * the port the image of the file's first block it laid — and nothing reads
+ * the medium for them. */
+void     PlotHeadLanded(Plot *p, uint64_t at, const uint8_t *bytes, uint64_t count);
 
 /*
  * PlotConveyance — what the Plot did to the runs it was loaded with, as the

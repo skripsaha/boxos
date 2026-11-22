@@ -37,6 +37,10 @@
 //               (bit 1; re-derived, never the reason for a disk write).
 #define TAGFS_TAG_FLAG_HAS_VALUE    0x01
 #define TAGFS_TAG_FLAG_SYSTEM       0x02
+//   RETIRED   — the tag is retired (bit 2): its id is known and given no more,
+//               no lookup finds it and no file may wear it (tag_registry.c,
+//               TagRegistryRetire).
+#define TAGFS_TAG_FLAG_RETIRED      0x04
 
 // File flags — dense until the first release; from it on, a bit once given is
 // never given again.
@@ -76,11 +80,54 @@
  * wears. The bit is what the ribbon's Labeled KEEP leaves and what puts the
  * header's keep_ns in the Tally (volume_ribbon.h, volume_tally.h). */
 #define TAGFS_FILE_DELETED          (1 << 4)
+/* Made by a program of the volume: the record's made_by is the volume's id of
+ * that program's file (FileRecord.made_by, nothing in the record names it
+ * without this bit). Bit 6 — bit 5 is left to the golden node of the book's
+ * tests, which wears it as a bit no kernel names — put on by the create that a
+ * program's cabin asks (storage_ops.c) and by nothing else, never taken off
+ * and never a tag: who made a file is the volume's word, set once and carried
+ * by every change the file goes through. The bit is what puts made_by after
+ * the header's keep_ns in the Tally and after the slip of the ribbon's Born
+ * (volume_tally.h, volume_ribbon.h). */
+#define TAGFS_FILE_MADE_BY          (1 << 6)
+/* The file of a program that shows its own tags to other programs: the
+ * record's shown_to names them (FileRecord.shown_to, 0 for every program; no
+ * record names any without this bit). Bit 7 — put on and taken off with the
+ * list by the one Ink of it, InkShown, which the program itself asks through
+ * the deck (storage_tags.c), and never a tag: whom a program shows its tags
+ * to is the volume's word on the program's own file, and the file let go
+ * takes it with it. The bit is what puts the list after made_by in the
+ * Tally's header and in the ribbon's Born, and what the ribbon's Labeled
+ * SHOWN leaves (volume_tally.h, volume_ribbon.h). */
+#define TAGFS_FILE_SHOWN            (1 << 7)
+/* The file holds a byte, and its record keeps its first ones (FileRecord.head,
+ * TAGFS_HEAD_MOST at the most): what a file is is told by them, by whoever
+ * knows what they mean — the volume keeps them exact and knows no format. Bit
+ * 8 — put on, taken off and its bytes changed by the Ink of every change of
+ * what the file holds, never by a flag a caller names, and never a tag. The
+ * bit is what puts the bytes after the list in the Tally's header and in the
+ * ribbon's Born, and what the ribbon's Labeled HEAD leaves. */
+#define TAGFS_FILE_HEAD             (1 << 8)
+#define TAGFS_HEAD_MOST             16u
+/* The file holds a signed program, and its record keeps the program's
+ * passport (FileRecord.passport): who the program is across every copy and
+ * version of it, its author and its name (box_trust.h), bit 63 set so it is
+ * never a file's id. Bit 9 — laid by the volume's maker and by the Ink a
+ * program's start makes when its passport is another (InkPassport); a change
+ * of what the file holds leaves it, so a program written over with its next
+ * version stays itself. Never a flag a caller names, and never a tag. The bit
+ * is what puts the passport after the head in the Tally's header and in the
+ * ribbon's Born, and what the ribbon's Labeled PASSPORT leaves. */
+#define TAGFS_FILE_PASSPORT         (1 << 9)
+/* Every passport carries bit 63, so no passport is a file's id (which a
+ * volume gives from 1 up) — the book's TALLY_PASSPORT_BIT. */
+#define TAGFS_PASSPORT_BIT          (1ull << 63)
 
 // Handle flags
 #define TAGFS_HANDLE_READ           (1 << 0)
 #define TAGFS_HANDLE_WRITE          (1 << 1)
 #define TAGFS_HANDLE_APPEND         (1 << 2)   /* every write lands at the file's size */
+#define TAGFS_HANDLE_KEPT           (1 << 3)   /* the volume's own, reaching a file kept in the trash (PlotLoadKept) */
 
 // Registry constants
 #define TAGFS_REG_BUCKETS           512

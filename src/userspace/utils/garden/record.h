@@ -1,6 +1,7 @@
 /* record.h — what the gardener keeps and the garden shows: for every program
  * ever started, how often, and when first and last. One file on the volume,
- * garden.plants, a line to a program; nothing of the screen. */
+ * garden.plants, found by its first line, "garden 1", and a line to a program
+ * after it; nothing of the screen. */
 #ifndef GARDEN_RECORD_H
 #define GARDEN_RECORD_H
 

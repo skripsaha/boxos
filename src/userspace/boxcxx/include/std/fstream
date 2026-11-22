@@ -72,6 +72,7 @@
 
 #include "box/current.h"  // the file backing is a Current, not a descriptor
 #include "box/file.h"     // find_file_by_name — the noreplace ("x") question
+#include "box/cxx/whose.h"   // box::tagfs::my_tags — a name looked up alone speaks no tag
 
 // [version.syn] names this header as an owner of the macro below.
 #define BOXCXX_OWNS_fstream_native_handle
@@ -272,7 +273,7 @@ public:
         if (p.exclusive) {
             file_id_t   ids[1];
             file_info_t infos[1];
-            if (::find_file_by_name(s, nullptr, ids, infos, 1) > 0) return nullptr;
+            if (::find_file_by_name(box::tagfs::my_tags, s, nullptr, ids, infos, 1) > 0) return nullptr;
         }
 
         uint32_t role = 0;

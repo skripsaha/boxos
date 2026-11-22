@@ -40,7 +40,7 @@ bool PlotRoom(void **array, uint32_t *room, uint32_t have, uint64_t need, size_t
     return true;
 }
 
-error_t PlotLoad(Plot *p, uint64_t fid, InkWarrant warrant)
+static error_t PlotLoadAs(Plot *p, uint64_t fid, InkWarrant warrant, bool kept)
 {
     memset(p, 0, sizeof(*p));
     p->fid         = fid;
@@ -70,11 +70,25 @@ error_t PlotLoad(Plot *p, uint64_t fid, InkWarrant warrant)
                 (unsigned long long)p->size, (unsigned long long)p->blocks);
         return ERR_METADATA_CORRUPTED;
     }
-    /* A file the system keeps, to a call with no warrant; the kernel the
-     * loader reads by its blocks, or a volume whose medium left, to every
-     * call: refused here, before a byte of the call moves. The kernel's file
-     * is known by its id (ink.c). */
+    /* A file kept in the trash takes no change of what it holds — but its
+     * tail is laid in its block, or cut, as any file's (PlotLoadKept). A file
+     * the system keeps, to a call with no warrant; the kernel the loader reads
+     * by its blocks, or a volume whose medium left, to every call: refused
+     * here, before a byte of the call moves. The kernel's file is known by its
+     * id (ink.c). */
+    if ((p->meta.flags & TAGFS_FILE_DELETED) && !kept)
+        return ERR_FILE_NOT_FOUND;
     return InkMayChange(fid, p->meta.flags, p->runs, p->run_count, warrant);
+}
+
+error_t PlotLoad(Plot *p, uint64_t fid, InkWarrant warrant)
+{
+    return PlotLoadAs(p, fid, warrant, false);
+}
+
+error_t PlotLoadKept(Plot *p, uint64_t fid, InkWarrant warrant)
+{
+    return PlotLoadAs(p, fid, warrant, true);
 }
 
 int PlotGiveBack(const Plot *p, uint64_t start, uint32_t count)

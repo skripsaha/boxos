@@ -60,7 +60,7 @@ static TestResult StandBookRoomLaid(StandFreshModel* m, const char* name, uint64
     TestResult verdict = TEST_PASS;
     uint32_t   bytes   = (uint32_t)(2u * q * TAGFS_BLOCK_SIZE);
     TEST_ASSERT(StandFreshModelMake(m, bytes), "room for the file");
-    TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, 0, fid), 0, "a file is made");
     TEST_ASSERT_EQ(StandFreshWrite(m, *fid, 0, bytes, 0x5Au), (int)bytes, "two Quires of it written");
     TEST_ASSERT_OK(TagFSSettle(), "and settled");
     TEST_ASSERT_OK(StandBinderTallies(1u), "a Tally of it is written: the newest slot names its ground");

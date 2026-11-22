@@ -27,7 +27,7 @@ static int s1_multi_block(void)
 {
     for (uint32_t i = 0; i < S1_BYTES; i++) g_buf[i] = (char)(i & 0xFF);
 
-    int64_t fid = create("_wstress_mb", "wstress");
+    int64_t fid = create(MY_TAGS, "_wstress_mb", "wstress");
     if (fid < 0) {
         kdbg_print("[WS S1] create rc=%ld", fid);
         return 1;
@@ -63,7 +63,7 @@ static int s1_multi_block(void)
 
 static int s2_overwrite_churn(void)
 {
-    int64_t fid = create("_wstress_ov", "wstress");
+    int64_t fid = create(MY_TAGS, "_wstress_ov", "wstress");
     if (fid < 0) {
         kdbg_print("[WS S2] create rc=%ld", fid);
         return 1;
@@ -108,7 +108,7 @@ static int s2_overwrite_churn(void)
 
 static int s3_append(void)
 {
-    int64_t fid = create("_wstress_ap", "wstress");
+    int64_t fid = create(MY_TAGS, "_wstress_ap", "wstress");
     if (fid < 0) {
         kdbg_print("[WS S3] create rc=%ld", fid);
         return 1;
@@ -121,7 +121,7 @@ static int s3_append(void)
         }
 
         file_info_t info;
-        if (file_info((file_id_t)fid, &info) != 0) {
+        if (file_info(MY_TAGS, (file_id_t)fid, &info) != 0) {
             kdbg_print("[WS S3] file_info FAIL at iter=%d", n);
             delete((file_id_t)fid);
             return 1;
@@ -136,7 +136,7 @@ static int s3_append(void)
     }
 
     file_info_t info;
-    if (file_info((file_id_t)fid, &info) != 0) {
+    if (file_info(MY_TAGS, (file_id_t)fid, &info) != 0) {
         delete((file_id_t)fid);
         return 1;
     }

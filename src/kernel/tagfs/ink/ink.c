@@ -2,6 +2,7 @@
 #include "../mount/book_mount.h"
 #include "../settle/sewing.h"
 #include "../helm/engross.h"
+#include "../retire/retire.h"
 #include "boardroom.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
@@ -201,7 +202,18 @@ error_t InkVolumeBegins(void)
  * bringing none new, whether a record would (RibbonClaim, nothing claimed): a
  * create, a name or a tag refused there interns nothing for the next stitch to
  * lay down as a Coined, and every tag interned has its Coined's room. */
-error_t InkBookRefuses(const TagSpelling* tags, uint32_t count, uint64_t* held)
+static error_t InkBookReserves(uint64_t bytes, uint64_t* held)
+{
+    TagFSState* fs = InkState();
+    TagFSLockTake(&fs->lock);
+    error_t rc = bytes ? RibbonReserve(bytes) : RibbonClaim(0, false);
+    TagFSLockDrop(&fs->lock);
+    rc = RibbonClaimSay(rc);
+    *held = rc == OK ? bytes : 0;
+    return rc;
+}
+
+error_t InkBookRefuses(TagOwner owner, const TagSpelling* tags, uint32_t count, uint64_t* held)
 {
     TagFSState* fs    = InkState();
     uint64_t    bytes = 0;
@@ -209,16 +221,13 @@ error_t InkBookRefuses(const TagSpelling* tags, uint32_t count, uint64_t* held)
     error_t rc = InkVolumeBegins();
     if (rc != OK)
         return rc;
-    for (uint32_t i = 0; i < count; i++)
-        if (tags[i].key && TagRegistryLookup(fs->registry, &tags[i]) == TAGFS_INVALID_TAG_ID)
-            bytes += STITCH_COINED_MOST + tags[i].key_len + tags[i].value_len;
-    TagFSLockTake(&fs->lock);
-    rc = bytes ? RibbonReserve(bytes) : RibbonClaim(0, false);
-    TagFSLockDrop(&fs->lock);
-    rc = RibbonClaimSay(rc);
-    if (rc == OK)
-        *held = bytes;
-    return rc;
+    for (uint32_t i = 0; i < count; i++) {
+        if (!tags[i].key || TagRegistryLookup(fs->registry, owner, &tags[i]) != TAGFS_INVALID_TAG_ID)
+            continue;
+        TallyTag t = TagRegistryBookForm(&tags[i], owner);
+        bytes += STITCH_COINED_MOST + TallyTagCarried(&t);
+    }
+    return InkBookReserves(bytes, held);
 }
 
 void InkBookHeldLetGo(uint64_t held)
@@ -270,8 +279,6 @@ error_t InkMayChange(uint64_t fid, uint32_t flags, const Strip* runs, uint32_t r
     error_t rc = InkVolumeBegins();
     if (rc != OK)
         return rc;
-    if (flags & TAGFS_FILE_DELETED)
-        return ERR_FILE_NOT_FOUND;
     return InkGuard(fid, flags, runs, run_count, NULL, 0, warrant);
 }
 
@@ -367,34 +374,41 @@ error_t TagFSInkPlot(Plot* p, InkReceipt* out)
 // A file's name and tags
 // ----------------------------------------------------------------------------
 
-/* The tags the file wears after the change, into a list of its own; false
- * for no memory. */
-static bool InkFieldsTags(const FileRecord* cur, const char* name, uint32_t add, uint32_t drop,
+static bool InkTagIn(uint32_t tag, const uint32_t* list, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; i++)
+        if (list[i] == tag)
+            return true;
+    return false;
+}
+
+/* The tags the file wears after the change, into a list of its own — the
+ * tags that come off the index too, after them in the same memory; false for
+ * no memory. `drop`, `ndrop` of them, are the tags the change takes off. */
+static bool InkFieldsTags(const FileRecord* cur, uint32_t add, const uint32_t* drop, uint32_t ndrop,
                           InkFieldsPlan* f)
 {
-    uint32_t old_name = name ? InkNameTagLookup(cur->name) : TAGFS_INVALID_TAG_ID;
     memset(f, 0, sizeof(*f));
-    f->tags = kmalloc(sizeof(uint32_t) * (cur->tag_count + 1u));
+    f->tags = kmalloc(sizeof(uint32_t) * (2u * cur->tag_count + 2u));
     if (!f->tags)
         return false;
+    f->dropped     = f->tags + cur->tag_count + 1u;
+    f->shown       = cur->shown_to;
+    f->shown_count = cur->shown_count;
+    f->passport    = cur->passport;
 
     bool worn = false;
-    if (name && add != TAGFS_INVALID_TAG_ID)
-        f->tags[f->count++] = add;
     for (uint32_t i = 0; i < cur->tag_count; i++) {
         uint32_t t = cur->tags[i];
-        if (t == add) {
+        if (t == add)
             worn = true;
-            if (name)
-                continue;               /* it went first already */
-        }
-        if ((t == drop || (t == old_name && t != add)) && t != TAGFS_INVALID_TAG_ID) {
-            f->dropped[f->drops++ & 1u] = t;
+        if (InkTagIn(t, drop, ndrop) && t != TAGFS_INVALID_TAG_ID) {
+            f->dropped[f->drops++] = t;
             continue;
         }
         f->tags[f->count++] = t;
     }
-    if (!name && add != TAGFS_INVALID_TAG_ID && !worn)
+    if (add != TAGFS_INVALID_TAG_ID && !worn)
         f->tags[f->count++] = add;
     f->adds = add != TAGFS_INVALID_TAG_ID && !worn;
     return true;
@@ -418,7 +432,7 @@ static error_t InkFieldsOnce(uint64_t fid, const char* name, uint32_t add, uint3
     error_t       rc = InkVolumeBegins();
     if (rc == OK && (cur->flags & TAGFS_FILE_DELETED))
         rc = ERR_FILE_NOT_FOUND;
-    if (!InkFieldsTags(cur, name, add, drop, &f)) {
+    if (!InkFieldsTags(cur, add, &drop, drop != TAGFS_INVALID_TAG_ID ? 1u : 0u, &f)) {
         FileRecordRelease(cur);
         return ERR_NO_MEMORY;
     }
@@ -464,7 +478,7 @@ static error_t InkUndoneOnce(uint64_t fid, InkReceipt* out)
     error_t rc = InkVolumeBegins();
     if (rc == OK && (cur->flags & TAGFS_FILE_UNDONE))
         out->gen = was.gen;
-    else if (rc == OK && !InkFieldsTags(cur, NULL, TAGFS_INVALID_TAG_ID, TAGFS_INVALID_TAG_ID, &f))
+    else if (rc == OK && !InkFieldsTags(cur, TAGFS_INVALID_TAG_ID, NULL, 0, &f))
         rc = ERR_NO_MEMORY;
     else if (rc == OK)
         rc = InkBookFields(fid, cur, &was, &f, cur->name, TAGFS_INVALID_TAG_ID, cur->flags | TAGFS_FILE_UNDONE,
@@ -480,6 +494,51 @@ error_t InkUndone(uint64_t fid, InkReceipt* out)
     do {
         rc = InkUndoneOnce(fid, out);
     } while (rc != OK && InkGoesRound(&rc));
+    return rc;
+}
+
+/* One round of InkTagsOff. A file kept deleted is one too: a program that
+ * left takes its tags off the files it kept (retire/retire.c), whatever state
+ * those are in. */
+static error_t InkTagsOffOnce(uint64_t fid, const uint32_t* tags, uint32_t count, InkReceipt* out)
+{
+    RecordWhere   was;
+    InkFieldsPlan f   = { 0 };
+    FileRecord*   cur = FileMapRecordHold(InkState()->files, fid, &was);
+    if (!cur)
+        return ERR_FILE_NOT_FOUND;
+    error_t rc = InkVolumeBegins();
+    if (rc == OK && !InkFieldsTags(cur, TAGFS_INVALID_TAG_ID, tags, count, &f))
+        rc = ERR_NO_MEMORY;
+    if (rc == OK && f.drops == 0)
+        out->gen = was.gen;
+    else if (rc == OK)
+        rc = InkBookFields(fid, cur, &was, &f, cur->name, TAGFS_INVALID_TAG_ID, cur->flags, cur->keep_until, out);
+    kfree(f.tags);
+    FileRecordRelease(cur);
+    return rc;
+}
+
+error_t InkTagsOff(uint64_t fid, const uint32_t* tags, uint32_t count, InkReceipt* out)
+{
+    error_t rc;
+    do {
+        rc = InkTagsOffOnce(fid, tags, count, out);
+    } while (rc != OK && InkGoesRound(&rc));
+    return rc;
+}
+
+error_t InkTagsRetire(const uint32_t* tags, uint32_t count, InkReceipt* out)
+{
+    uint64_t held = 0;
+    error_t  rc   = InkVolumeBegins();
+    if (rc == OK)
+        rc = InkBookReserves((uint64_t)count * STITCH_COINED_MOST, &held);
+    if (rc == OK)
+        rc = TagRegistryRetireRoom(InkState()->registry, count);
+    if (rc == OK)
+        rc = InkBookRetire(tags, count, out);
+    InkBookHeldLetGo(held);
     return rc;
 }
 
@@ -508,7 +567,7 @@ static error_t InkKeepOnce(uint64_t fid, uint64_t until, InkWarrant warrant, Ink
         out->gen = was.gen;
         goto out;
     }
-    if (!InkFieldsTags(cur, NULL, TAGFS_INVALID_TAG_ID, TAGFS_INVALID_TAG_ID, &f)) {
+    if (!InkFieldsTags(cur, TAGFS_INVALID_TAG_ID, NULL, 0, &f)) {
         rc = ERR_NO_MEMORY;
         goto out;
     }
@@ -532,17 +591,140 @@ error_t InkKeep(uint64_t fid, uint64_t until, InkWarrant warrant, InkReceipt* ou
     return rc;
 }
 
+/* `cur`'s list of the programs it shows its tags to with `reader` put in
+ * (`show`) or taken out, rising, into `list` — room for one more than it
+ * holds: how many it holds then. */
+static uint32_t InkShownList(const FileRecord* cur, uint64_t reader, bool show, uint64_t* list)
+{
+    uint32_t n   = 0;
+    bool     put = !show;
+    for (uint32_t i = 0; i < cur->shown_count; i++) {
+        uint64_t id = cur->shown_to[i];
+        if (!put && reader < id) {
+            list[n++] = reader;
+            put       = true;
+        }
+        if (id != reader)
+            list[n++] = id;
+    }
+    if (!put)
+        list[n++] = reader;
+    return n;
+}
+
+/* Whether `cur` shows its tags to `reader` by name — 0 by name too: every
+ * program. */
+static bool InkShowsTo(const FileRecord* cur, uint64_t reader)
+{
+    for (uint32_t i = 0; i < cur->shown_count; i++)
+        if (cur->shown_to[i] == reader)
+            return true;
+    return false;
+}
+
+/* One round of InkShown. */
+static error_t InkShownOnce(uint64_t fid, uint64_t reader, bool show, InkReceipt* out)
+{
+    RecordWhere   was;
+    InkFieldsPlan f    = { 0 };
+    uint64_t*     list = NULL;
+    FileRecord*   cur  = FileMapRecordHold(InkState()->files, fid, &was);
+    if (!cur)
+        return ERR_FILE_NOT_FOUND;
+    error_t rc = InkVolumeBegins();
+    if (rc == OK && InkShowsTo(cur, reader) == show) {
+        out->gen = was.gen;
+    } else if (rc == OK) {
+        list = kmalloc(sizeof(uint64_t) * (cur->shown_count + 1u));
+        if (!list || !InkFieldsTags(cur, TAGFS_INVALID_TAG_ID, NULL, 0, &f)) {
+            rc = ERR_NO_MEMORY;
+        } else {
+            f.shown_count = InkShownList(cur, reader, show, list);
+            f.shown       = list;
+            rc = InkBookFields(fid, cur, &was, &f, cur->name, TAGFS_INVALID_TAG_ID, cur->flags, cur->keep_until, out);
+        }
+    }
+    kfree(list);
+    kfree(f.tags);
+    FileRecordRelease(cur);
+    return rc;
+}
+
+error_t InkShown(uint64_t fid, uint64_t reader, bool show, InkReceipt* out)
+{
+    error_t rc;
+    do {
+        rc = InkShownOnce(fid, reader, show, out);
+    } while (rc != OK && InkGoesRound(&rc));
+    return rc;
+}
+
+/* Another card of the program `passport` than `fid`'s, held — the one it is
+ * named by when that is not `fid` — or NULL when no other keeps it. */
+static FileRecord* InkOtherCarrier(uint64_t fid, uint64_t passport)
+{
+    uint64_t files[2], card = 0;
+    uint32_t n = passport ? FileMapProgramFiles(InkState()->files, passport, files, 2, &card) : 0;
+    uint64_t other = card != fid ? card : (n > 1 ? files[files[0] == fid ? 1 : 0] : 0);
+    return other ? FileMapRecordHold(InkState()->files, other, NULL) : NULL;
+}
+
+/* One round of InkPassport. */
+static error_t InkPassportOnce(uint64_t fid, uint64_t passport, InkReceipt* out)
+{
+    RecordWhere   was;
+    InkFieldsPlan f     = { 0 };
+    FileRecord*   cur   = FileMapRecordHold(InkState()->files, fid, &was);
+    FileRecord*   other = NULL;
+    if (!cur)
+        return ERR_FILE_NOT_FOUND;
+    error_t rc = InkVolumeBegins();
+    if (rc == OK && cur->passport == passport) {
+        out->gen = was.gen;
+    } else if (rc == OK) {
+        if (!InkFieldsTags(cur, TAGFS_INVALID_TAG_ID, NULL, 0, &f)) {
+            rc = ERR_NO_MEMORY;
+        } else {
+            /* Whom the program shows its tags to is the program's, not the
+             * file's: the card takes the list another card of it holds, or
+             * none — the list of the program it held went with it. */
+            other         = InkOtherCarrier(fid, passport);
+            f.shown       = other ? other->shown_to : NULL;
+            f.shown_count = other ? other->shown_count : 0;
+            f.passport    = passport;
+            rc = InkBookFields(fid, cur, &was, &f, cur->name, TAGFS_INVALID_TAG_ID, cur->flags, cur->keep_until, out);
+        }
+    }
+    kfree(f.tags);
+    FileRecordRelease(other);
+    FileRecordRelease(cur);
+    return rc;
+}
+
+error_t InkPassport(uint64_t fid, uint64_t passport, InkReceipt* out)
+{
+    if (passport && !(passport & TAGFS_PASSPORT_BIT))
+        return ERR_INVALID_ARGUMENT;
+    error_t rc;
+    do {
+        rc = InkPassportOnce(fid, passport, out);
+    } while (rc != OK && InkGoesRound(&rc));
+    if (rc == OK)
+        RetireOwed();    /* the program the card named may have left with it */
+    return rc;
+}
+
 // ----------------------------------------------------------------------------
 // A new file
 // ----------------------------------------------------------------------------
 
-error_t InkNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t* out_fid,
+error_t InkNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t made_by, uint64_t* out_fid,
                InkReceipt* out)
 {
     error_t rc = InkVolumeBegins();
     if (rc != OK)
         return rc;
-    return InkBookNew(name, tags, count, out_fid, out);
+    return InkBookNew(name, tags, count, made_by, out_fid, out);
 }
 
 // ----------------------------------------------------------------------------

@@ -111,35 +111,51 @@ static const char *elf_section_of(const char *name)
     return NULL;
 }
 
-/* Whether a file of `file_size` bytes beginning with `first` is an ELF64
- * little-endian image, as image_section.c reads one: its whole header there. */
-static bool elf_image(const uint8_t *first, uint64_t look, uint64_t file_size)
-{
-    return file_size >= 64 && look >= 6 && memcmp(first, "\x7f" "ELF", 4) == 0 && first[4] == 2 &&
-           first[5] == 1;
-}
-
 /* ---- which kind ---------------------------------------------------------- */
 
-/* What the file is, by its first bytes: its size, its first bytes in `first`
- * (`look` of them) and the kind they say. 0, or why the file could not be read. */
+/* What a program's file begins with, and the fewest bytes a file of its kind
+ * holds: a box's magic; an ELF64 little-endian image's, as image_section.c
+ * reads one, its whole header there. The system keeps every file's first
+ * bytes on its card (FileMetadata.Head), so these are what program_kind tells
+ * a program by and what program_files asks the volume for. */
+typedef struct {
+    ProgramKind Kind;
+    uint8_t     Length;
+    uint8_t     Least;
+    uint8_t     Bytes[8];
+} ProgramBeginning;
+
+static const ProgramBeginning beginnings[] = {
+    { PROGRAM_BOX, 8, 8,
+      { BOX_MAGIC_0, BOX_MAGIC_1, BOX_MAGIC_2, BOX_MAGIC_3, BOX_MAGIC_4, BOX_MAGIC_5, BOX_MAGIC_6, BOX_MAGIC_7 } },
+    { PROGRAM_ELF, 6, 64, { 0x7f, 'E', 'L', 'F', 2, 1 } },
+};
+#define BEGINNINGS (sizeof beginnings / sizeof beginnings[0])
+
+/* What a file of `file_size` bytes beginning with `first` (`look` of them) is. */
+static ProgramKind kind_by(const uint8_t *first, uint64_t look, uint64_t file_size)
+{
+    for (size_t i = 0; i < BEGINNINGS; i++)
+        if (look >= beginnings[i].Length && file_size >= beginnings[i].Least &&
+            memcmp(first, beginnings[i].Bytes, beginnings[i].Length) == 0)
+            return beginnings[i].Kind;
+    return PROGRAM_NONE;
+}
+
+/* What the file is, by its first bytes — the ones the system keeps of it
+ * (FileMetadata.Head): no byte of the file is read. Its size, its first bytes
+ * in `first` (`look` of them, 8 at the most) and the kind they say. 0, or why
+ * the file's card could not be read. */
 static int kind_of(file_id_t file, uint64_t *file_size, uint8_t first[8], uint64_t *look, ProgramKind *kind)
 {
     FileMetadata metadata;
-    int rc = FileMetadataRead(file, &metadata);
+    int rc = FileMetadataRead(MY_TAGS, file, &metadata);
     if (rc != 0) return rc;
     *file_size = metadata.Size;
+    *look      = metadata.HeadLength < 8 ? metadata.HeadLength : 8;
+    memcpy(first, metadata.Head, (size_t)*look);
     FileMetadataRelease(&metadata);
-
-    static const uint8_t box_magic[8] = { BOX_MAGIC_0, BOX_MAGIC_1, BOX_MAGIC_2, BOX_MAGIC_3,
-                                          BOX_MAGIC_4, BOX_MAGIC_5, BOX_MAGIC_6, BOX_MAGIC_7 };
-    *look = *file_size < 8 ? *file_size : 8;
-    rc = read_exact(file, 0, first, (size_t)*look);
-    if (rc != 0) return rc;
-
-    if (*look == 8 && memcmp(first, box_magic, 8) == 0) *kind = PROGRAM_BOX;
-    else if (elf_image(first, *look, *file_size)) *kind = PROGRAM_ELF;
-    else *kind = PROGRAM_NONE;
+    *kind = kind_by(first, *look, *file_size);
     return 0;
 }
 
@@ -149,6 +165,56 @@ int program_kind(file_id_t file, ProgramKind *kind)
     uint8_t  first[8];
     *kind = PROGRAM_NONE;
     return kind_of(file, &size, first, &look, kind);
+}
+
+/* The ids of `a` (`na` of them) and of `b` (`nb`), each rising, as one rising
+ * list; `a` let go. NULL with no memory. */
+static file_id_t *merged(file_id_t *a, int na, const file_id_t *b, int nb)
+{
+    file_id_t *out = malloc(((size_t)na + (size_t)nb) * sizeof(file_id_t));
+    if (out) {
+        int i = 0, j = 0, k = 0;
+        while (i < na || j < nb) out[k++] = j >= nb || (i < na && a[i] < b[j]) ? a[i++] : b[j++];
+    }
+    free(a);
+    return out;
+}
+
+int program_files(file_id_t **out_ids)
+{
+    if (!out_ids) return -ERR_INVALID_ARGUMENT;
+    *out_ids = NULL;
+    file_id_t *found = NULL;
+    int        count = 0;
+    for (size_t i = 0; i < BEGINNINGS; i++) {
+        file_id_t *ids = NULL;
+        int        n   = files_starting_with(beginnings[i].Bytes, beginnings[i].Length, &ids);
+        if (n < 0) {
+            free(found);
+            return n;
+        }
+        /* A file holds at least as many bytes as it begins with; one of a
+         * kind that must hold more is asked how many it holds. */
+        int kept = 0;
+        for (int at = 0; at < n; at++) {
+            ProgramKind kind = PROGRAM_NONE;
+            if (beginnings[i].Least > beginnings[i].Length &&
+                (program_kind(ids[at], &kind) != 0 || kind != beginnings[i].Kind))
+                continue;
+            ids[kept++] = ids[at];
+        }
+        if (kept) {
+            found = merged(found, count, ids, kept);
+            if (!found) {
+                free(ids);
+                return -ERR_NO_MEMORY;
+            }
+            count += kept;
+        }
+        free(ids);
+    }
+    *out_ids = found;
+    return count;
 }
 
 int program_part_read(file_id_t file, const char *name, size_t limit, char **bytes, size_t *size,

@@ -34,6 +34,13 @@ typedef enum {
  * could not be read. */
 int program_kind(file_id_t file, ProgramKind *kind);
 
+/* Every program on the volume — every file that is a box or an ELF image, told
+ * by its first bytes as program_kind tells one — in file id order, the deleted
+ * never met: the volume answers off the files' cards, and no file is read. The
+ * count and a malloc'd list the caller frees (NULL for none), or a negative
+ * -error_t. */
+int program_files(file_id_t **out_ids);
+
 /* The part called Name of the program File. 1: found, *Bytes a heap copy with
  * a NUL after it (NULL when the part is empty), *Size its size. 0: the program
  * has no such part, or the file is no program. Negative: a program that cannot

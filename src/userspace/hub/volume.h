@@ -17,7 +17,8 @@
 
 namespace hub::volume {
 
-// A file's record — its name, tags, flags and size — read whole.
+// A file's record — its name, the person's tags, its size and its first bytes
+// — read whole, as the person sees it.
 class Record {
 public:
     // The record of File; not read: the volume's refusal, a negative -error_t.
@@ -33,6 +34,10 @@ public:
     std::string_view Name() const noexcept { return Held.Filename ? Held.Filename : ""; }
     std::string_view Tags() const noexcept { return Held.Tags ? Held.Tags : ""; }
     std::uint64_t    Size() const noexcept { return Held.Size; }
+    std::string_view Head() const noexcept
+    {
+        return {reinterpret_cast<const char *>(Held.Head), Held.HeadLength};
+    }
 
 private:
     Record() = default;

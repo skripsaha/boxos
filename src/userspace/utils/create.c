@@ -42,7 +42,7 @@ int main(void) {
         tags[pos] = '\0';
     }
 
-    int64_t file_id = create(name[0], tags);
+    int64_t file_id = create(PERSON_TAGS, name[0], tags);
     free(tags);
 
     if (file_id < 0) {

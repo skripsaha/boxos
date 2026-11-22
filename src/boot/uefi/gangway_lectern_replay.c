@@ -596,6 +596,12 @@ static int LabeledApplied(LecternBook *b, LecternHand *h, const LecternRead *d, 
     if (r->what & LABEL_FLAGS) h->f.flags = (h->f.flags | r->set) & ~r->clear;
     if (r->what & LABEL_KEEP)
         h->f.flags = r->keep_ns ? h->f.flags | TALLY_FILE_DELETED : h->f.flags & ~(uint64_t)TALLY_FILE_DELETED;
+    if (r->what & LABEL_SHOWN)
+        h->f.flags = r->nshown ? h->f.flags | TALLY_FILE_SHOWN : h->f.flags & ~(uint64_t)TALLY_FILE_SHOWN;
+    if (r->what & LABEL_HEAD)
+        h->f.flags = r->head_len ? h->f.flags | TALLY_FILE_HEAD : h->f.flags & ~(uint64_t)TALLY_FILE_HEAD;
+    if (r->what & LABEL_PASSPORT)
+        h->f.flags |= TALLY_FILE_PASSPORT;
     return 1;
 }
 

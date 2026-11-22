@@ -106,6 +106,7 @@ typedef struct {
     uint64_t    made_ns;
     uint32_t    coined_lo;    /* the tags laid down as Coineds: [lo, hi) */
     uint32_t    coined_hi;
+    bool        retires;      /* a tag the book has was retired by an Ink up to the target: a Coined RETIRED is owed */
     bool        use_owed;     /* a word the person said is owed the medium */
     UseText*    use;          /* that word, held; NULL says none */
     uint64_t    use_ticket;
@@ -180,7 +181,7 @@ bool StitchMarksVerdict(void)
 static void StitchCloseForRoom(StitchSnap* s, bool awaits)
 {
     if (awaits && s->claimed == 0 && s->jots.count == 0 && !s->use_owed && s->coined_lo == s->coined_hi &&
-        RibbonCloseEarly())
+        !s->retires && RibbonCloseEarly())
         RibbonNextGiven();
 }
 
@@ -224,6 +225,8 @@ static void StitchTake(StitchSnap* s)
      * after the range holds every Coined in it. The registry's lock is a
      * leaf, taken under the state lock (lock_rank.h). */
     TagRegistryCoinedRange(fs->registry, &s->coined_lo, &s->coined_hi);
+    uint32_t retiring = 0, retired = 0;
+    s->retires = TagRegistryRetiringNext(fs->registry, &retiring, s->coined_lo, s->target, &retired);
     TagRegistryCoinedHeld(fs->registry, &coined, &text);
     s->flight = StitchFlight(s, coined, text);
     RibbonFlightBegins(s->flight);
@@ -292,14 +295,36 @@ typedef struct {
     uint64_t fresh;        /* and their blocks: what a mount's check reads */
 } StitchLoad;
 
-/* Tag `id` as a Coined carries it: false when the registry gave no tag that id. */
-static bool StitchCoinedTag(uint32_t id, TallyTag* t)
+/*
+ * The Coineds a stitch lays, one after another: every id of its range as it
+ * is — a tag retired by an Ink up to the target as RETIRED — and then, of the
+ * ids the book has already, every one that was retired by such an Ink
+ * (TagRegistryRetiringNext). An id the registry gave no tag lies in no
+ * Coined. The same walk measures the stitch and lays it, so the two cannot
+ * differ.
+ */
+typedef struct {
+    uint32_t id;       /* the next id of the range */
+    uint32_t at;       /* the next place of the retirements the registry owes */
+} StitchCoinedWalk;
+
+static bool StitchCoinedNext(const StitchSnap* s, StitchCoinedWalk* walk, uint32_t* id, TallyTag* t)
 {
-    TagSpelling sp;
-    if (!TagRegistrySpelling(tagfs_get_state()->registry, id, &sp, NULL))
+    TagRegistry* reg = tagfs_get_state()->registry;
+    TagRolled    rolled;
+    if (walk->id == 0)
+        walk->id = s->coined_lo;
+    while (walk->id < s->coined_hi) {
+        uint32_t next = walk->id++;
+        if (TagRoll(reg, next, next + 1u, &rolled)) {
+            *id = next;
+            *t  = TagRolledBookForm(&rolled, s->target);
+            return true;
+        }
+    }
+    if (!TagRegistryRetiringNext(reg, &walk->at, s->coined_lo, s->target, id))
         return false;
-    *t = (TallyTag){ .flags = sp.value ? TALLY_TAG_HAS_VALUE : 0u, .key = (const uint8_t*)sp.key,
-                     .key_len = sp.key_len, .value = (const uint8_t*)sp.value, .value_len = sp.value_len };
+    *t = (TallyTag){ .flags = TALLY_TAG_RETIRED };
     return true;
 }
 
@@ -315,11 +340,11 @@ static error_t StitchMeasure(StitchSnap* s, StitchLoad* l)
     l->body    = STITCH_HEAD_MOST > STITCH_CLASP_MOST ? STITCH_HEAD_MOST : STITCH_CLASP_MOST;
     l->body    = ErrataBodyMost() > l->body ? ErrataBodyMost() : l->body;
     l->records = ErrataUndones();
-    for (uint32_t id = s->coined_lo; id < s->coined_hi; id++) {
-        TallyTag t;
-        if (!StitchCoinedTag(id, &t))
-            continue;
-        uint64_t body = STITCH_COINED_MOST - STITCH_RECORD_HEAD_MOST + t.key_len + t.value_len;
+    StitchCoinedWalk walk = { 0 };
+    uint32_t         id;
+    TallyTag         t;
+    while (StitchCoinedNext(s, &walk, &id, &t)) {
+        uint64_t body = STITCH_COINED_MOST - STITCH_RECORD_HEAD_MOST + TallyTagCarried(&t);
         l->coined++;
         l->records++;
         l->bytes += STITCH_RECORD_HEAD_MOST + body;
@@ -429,10 +454,10 @@ static error_t StitchStream(StitchSnap* s, const StitchLoad* l, uint8_t* out, ui
     uint32_t n = 0, coined = 0, at = RibbonRecordPut(out, RIBBON_STITCH_HEAD, 0, body, StitchHeadBodyPut(body, &h));
     starts[n++] = 0;
     at = ErrataLay(out, at, s->seq, body, starts, &n);
-    for (uint32_t id = s->coined_lo; id < s->coined_hi && coined < l->coined; id++) {
-        TallyTag t;
-        if (!StitchCoinedTag(id, &t))
-            continue;
+    StitchCoinedWalk walk = { 0 };
+    uint32_t         id;
+    TallyTag         t;
+    while (coined < l->coined && StitchCoinedNext(s, &walk, &id, &t)) {
         starts[n++] = at;
         at += RibbonRecordPut(out + at, RIBBON_COINED, 0, body, RibbonCoinedBodyPut(body, id, &t));
         coined++;
@@ -832,10 +857,20 @@ const char* StitchRunStage(void)
     return s_stitch.stage ? s_stitch.stage : "the stitch's snapshot";
 }
 
+/* The tags the settled stitch retired of those the book had, into DogEar —
+ * before the registry lets them go from what it owes. */
+static void StitchRetiredDogEared(const StitchSnap* s)
+{
+    TagRegistry* reg = tagfs_get_state()->registry;
+    uint32_t     at  = 0, id;
+    while (s->retires && TagRegistryRetiringNext(reg, &at, s->coined_lo, s->target, &id))
+        DogEarPut(TALLY_TAGS, (TallyKey){ id, 0 }, (TallyKey){ id + 1u, 0 });
+}
+
 /* What the settled stitch changed of the book's trees, into DogEar (dog_ear.h):
- * every file it carried a record of, the tags it coined, the Use Context when
- * it carried one or forgot the book's — what the next Tally lays anew of the
- * state it leaves. */
+ * every file it carried a record of, the tags it coined and retired, the Use
+ * Context when it carried one or forgot the book's — what the next Tally lays
+ * anew of the state it leaves. */
 static void StitchDogEared(const StitchSnap* s)
 {
     for (const Jot* j = s->jots.first; j; j = j->next[0])
@@ -899,7 +934,8 @@ void StitchRunEnd(error_t rc)
         FallowNodesFree(nodes);
         GlossTrim();
         BirthsTrim();
-        TagRegistryCoinedUpTo(fs->registry, s->coined_hi);
+        StitchRetiredDogEared(s);
+        TagRegistryCoinedUpTo(fs->registry, s->coined_hi, s->target);
         uint64_t fid_most = 0;
         error_t  births   = DocketBirths(&s->jots, s->seq, &fid_most);
         StitchDogEared(s);

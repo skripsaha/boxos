@@ -225,7 +225,7 @@ static uint32_t QuillRoomEmpties(const char *mode, file_id_t *ids, uint32_t coun
         return 0;
     ids[0] = (file_id_t)first;
     for (uint32_t i = 1; i < count; i++) {
-        int64_t fid = create_everywhere("_qre.bin", NULL);
+        int64_t fid = create_everywhere(MY_TAGS, "_qre.bin", NULL);
         if (fid <= 0) {
             *refusal = (int)fid;
             return i;

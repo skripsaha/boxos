@@ -358,6 +358,10 @@ static bool w_block_done(WriteJob *j)
     }
     if (landed)
         VolumeWriteSeen();
+    /* The file's first block, laid whole — the old bytes around the write read
+     * into it, the Slips over it laid on — gives the file's first bytes. */
+    if (landed && j->st.k == 0)
+        PlotHeadLanded(&j->plot, 0, wjob_page(j, 0), TAGFS_BLOCK_SIZE);
     j->plot.data_us += cpu_tsc_to_us(rdtsc() - j->if_submit_tsc);
     j->bytes_done   += PlotStretchBytes(&j->st, landed);
 

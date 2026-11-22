@@ -26,6 +26,7 @@
 #include <string_view>
 #include <vector>
 
+#include "box/cxx/whose.h"
 #include "box/cxx/error.h"
 #include "box/color.h"
 #include "box/display.h"
@@ -146,7 +147,7 @@ struct Summed {
 bool SumFile(file_id_t Id, const checksum::Kind &Kind, std::uint8_t *Chunk, Summed &Done)
 {
     FileMetadata Metadata;
-    if (FileMetadataRead(Id, &Metadata) != 0) {
+    if (FileMetadataRead(box::tagfs::my_tags, Id, &Metadata) != 0) {
         Say("checksum: could not look at a file; it may have been erased");
         return false;
     }

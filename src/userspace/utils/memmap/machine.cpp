@@ -8,6 +8,7 @@
 #include <memory>
 #include <string_view>
 
+#include "box/cxx/whose.h"
 #include "box/clock.h"
 #include "box/file.h"
 #include "box/memory.h"
@@ -93,7 +94,7 @@ std::string Machine::NameOf(file_id_t File, const std::string &FirstTag)
     if (File != 0) {
         if (const auto Known = Names.find(File); Known != Names.end()) return Known->second;
         FileMetadata Metadata;
-        if (FileMetadataRead(File, &Metadata) == 0) {
+        if (FileMetadataRead(box::tagfs::my_tags, File, &Metadata) == 0) {
             std::string Name = Metadata.Filename ? Metadata.Filename : "";
             FileMetadataRelease(&Metadata);
             if (const std::size_t Dot = Name.rfind('.'); Dot != std::string::npos && Dot > 0) Name.resize(Dot);

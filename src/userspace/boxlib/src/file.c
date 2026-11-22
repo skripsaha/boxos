@@ -19,20 +19,40 @@
 #include "box/timeouts.h"   /* BOX_ANSWER_GUARANTEED */
 #include "boxos_decks.h"    /* STORAGE_* opcodes + STORAGE_SCOPE_* — single source */
 
+_Static_assert(STORAGE_TAGS_MINE == 0 && STORAGE_TAGS_PERSON == 1 && STORAGE_TAGS_PROGRAM == 2 &&
+               STORAGE_TAGS_ALL == 3, "TagsOf's whose is the deck's whose byte (box/file.h)");
+_Static_assert(STORAGE_TAG_LISTED_HEAD == 16, "a tag list's record: its counts, then its owner, then its text");
+_Static_assert(FILE_HEAD_MOST == STORAGE_HEAD_MOST, "the first bytes a file_info holds are those the system keeps");
+
+/* The whose of a call's params (boxos_decks.h): its byte, and with
+ * PROGRAM_TAGS the program's file id after it. The bytes it took: 1 or 9. */
+static size_t whose_put(uint8_t *out, TagsOf whose)
+{
+    out[0] = whose.whose;
+    if (whose.whose != STORAGE_TAGS_PROGRAM)
+        return 1;
+    memcpy(out + 1, &whose.program, sizeof(whose.program));
+    return 1 + sizeof(whose.program);
+}
+
+/* The most bytes a whose takes. */
+#define WHOSE_MOST 9u
+
 /* =========================================================================
  *  CREATE / QUERY — inside the Use Context, or everywhere
  * ========================================================================= */
 
-static int64_t create_scoped(const char *filename, const char *tags, uint8_t scope)
+static int64_t create_scoped(TagsOf whose, const char *filename, const char *tags, uint8_t scope)
 {
     if (!filename || filename[0] == '\0') return -ERR_INVALID_ARGUMENT;
     size_t fn_len = strlen(filename);
     if (fn_len >= 32) return -ERR_INVALID_ARGUMENT;
 
-    /* params: 32 bytes of NUL-padded filename, then the scope byte. */
-    uint8_t params[33] = {0};
+    /* params: 32 bytes of NUL-padded filename, then the scope and the whose. */
+    uint8_t params[33 + WHOSE_MOST] = {0};
     memcpy(params, filename, fn_len);
     params[32] = scope;
+    size_t params_size = 33 + whose_put(params + 33, whose);
 
     /* in_crate: tag list (optional). */
     const void *in = NULL;
@@ -44,7 +64,7 @@ static int64_t create_scoped(const char *filename, const char *tags, uint8_t sco
 
     file_id_t file_id = 0;
     int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_CREATE,
-                     params, sizeof(params),
+                     params, (uint32_t)params_size,
                      in, in_size,
                      &file_id, sizeof(file_id), NULL,
                      BOX_ANSWER_GUARANTEED, NULL);
@@ -52,14 +72,14 @@ static int64_t create_scoped(const char *filename, const char *tags, uint8_t sco
     return (int64_t)file_id;
 }
 
-int64_t create(const char *filename, const char *tags)
+int64_t create(TagsOf whose, const char *filename, const char *tags)
 {
-    return create_scoped(filename, tags, STORAGE_SCOPE_USE);
+    return create_scoped(whose, filename, tags, STORAGE_SCOPE_USE);
 }
 
-int64_t create_everywhere(const char *filename, const char *tags)
+int64_t create_everywhere(TagsOf whose, const char *filename, const char *tags)
 {
-    return create_scoped(filename, tags, STORAGE_SCOPE_EVERYWHERE);
+    return create_scoped(whose, filename, tags, STORAGE_SCOPE_EVERYWHERE);
 }
 
 /* The kernel answers [u32 delivered][u32 total][u64 ids[delivered]]: how many
@@ -83,14 +103,29 @@ static uint8_t *question_params(const void *head, uint32_t head_size, const char
     return params;
 }
 
-static int query_scoped(const char *tags, const char *without, file_id_t *file_ids, size_t max_files,
-                        uint8_t scope, uint32_t *out_total)
+/* One question of the storage deck that answers file ids: the tag query, whose
+ * text is the tags asked, or the name query, whose text is the word and, after
+ * a NUL, the tags the files called so must wear. */
+typedef struct {
+    uint8_t     op;
+    TagsOf      whose;      /* whose tags `text`, `without` and `tags` are */
+    const char *text;       /* the tags, or the word; NULL or "" asks no tags */
+    const char *without;    /* tags set aside; NULL or "" for none */
+    uint8_t     scope;
+    const char *tags;       /* the name query's: tags worn too; NULL or "" for none */
+} Question;
+
+static int ask_files(const Question *question, file_id_t *file_ids, size_t max_files, uint32_t *out_total)
 {
+    const char *without = question->without;
+    const char *text    = question->text;
+    uint8_t     head[1 + WHOSE_MOST] = { question->scope };
+    size_t      head_size = 1 + whose_put(head + 1, question->whose);
     if (max_files > 0 && !file_ids) return -ERR_INVALID_ARGUMENT;
     if (max_files > (UINT32_MAX - 8u) / sizeof(file_id_t)) return -ERR_INVALID_ARGUMENT;
 
     uint16_t params_size = 0;
-    uint8_t *params = question_params(&scope, sizeof(scope), without, &params_size);
+    uint8_t *params = question_params(head, head_size, without, &params_size);
     if (!params) return without && strlen(without) >= UINT16_MAX ? -ERR_INVALID_ARGUMENT : -ERR_NO_MEMORY;
 
     uint32_t out_cap = (uint32_t)(8 + max_files * sizeof(file_id_t));
@@ -99,18 +134,30 @@ static int query_scoped(const char *tags, const char *without, file_id_t *file_i
 
     const void *in = NULL;
     uint32_t    in_size = 0;
-    if (tags && tags[0] != '\0') {
-        in = tags;
-        in_size = (uint32_t)strlen(tags);
+    char       *joined  = NULL;
+    if (text && text[0] != '\0') {
+        in = text;
+        in_size = (uint32_t)strlen(text);
+    }
+    if (in && question->tags && question->tags[0] != '\0') {
+        size_t tags_len = strlen(question->tags);
+        joined = malloc(in_size + 1u + tags_len);
+        if (!joined) { free(params); free(out); return -ERR_NO_MEMORY; }
+        memcpy(joined, text, in_size);
+        joined[in_size] = '\0';
+        memcpy(joined + in_size + 1u, question->tags, tags_len);
+        in = joined;
+        in_size += 1u + (uint32_t)tags_len;
     }
 
     uint32_t out_actual = 0;
-    int rc = MfCall1(DECK_STORAGE, STORAGE_TAG_QUERY,
+    int rc = MfCall1(DECK_STORAGE, question->op,
                      params, params_size,
                      in, in_size,
                      out, out_cap, &out_actual,
                      BOX_ANSWER_GUARANTEED, NULL);
     free(params);
+    free(joined);
     if (rc != 0) { free(out); return box_fail(rc); }
     if (out_actual < 8) { free(out); return -ERR_INTERNAL; }
 
@@ -147,7 +194,7 @@ static size_t tag_list_page_bytes(const uint8_t *page, uint32_t delivered, size_
 
 /* Every page asked for in turn, its records gathered; then the list and the
  * text laid out in one block. */
-static int tag_list_scoped(uint8_t scope, const char *without, TagListed **out, size_t *count)
+static int tag_list_scoped(TagsOf whose, uint8_t scope, const char *without, TagListed **out, size_t *count)
 {
     if (!out || !count) return -ERR_INVALID_ARGUMENT;
     *out   = NULL;
@@ -161,11 +208,12 @@ static int tag_list_scoped(uint8_t scope, const char *without, TagListed **out, 
     uint32_t from = 0;
     int      rc = 0;
     for (;;) {
-        uint8_t head[5];
+        uint8_t head[5 + WHOSE_MOST];
         memcpy(head, &from, sizeof(from));
         head[4] = scope;
+        size_t   head_size   = 5 + whose_put(head + 5, whose);
         uint16_t params_size = 0;
-        uint8_t *params = question_params(head, sizeof(head), without, &params_size);
+        uint8_t *params = question_params(head, head_size, without, &params_size);
         if (!params) { rc = -ERR_NO_MEMORY; break; }
         rc = MfCall1(DECK_STORAGE, STORAGE_TAG_LIST, params, params_size, NULL, 0,
                      page, TAG_LIST_PAGE, NULL, BOX_ANSWER_GUARANTEED, NULL);
@@ -211,6 +259,7 @@ static int tag_list_scoped(uint8_t scope, const char *without, TagListed **out, 
         uint16_t       value_len;
         memcpy(&list[i].Files, record, sizeof(list[i].Files));
         memcpy(&value_len, record + 6, sizeof(value_len));
+        memcpy(&list[i].Owner, record + 8, sizeof(list[i].Owner));
         list[i].System = (record[4] & STORAGE_TAG_LISTED_SYSTEM) != 0;
         list[i].Tag    = pen;
         memcpy(pen, record + STORAGE_TAG_LISTED_HEAD, record[5]);
@@ -229,36 +278,38 @@ static int tag_list_scoped(uint8_t scope, const char *without, TagListed **out, 
     return 0;
 }
 
-int tag_list(const char *without, TagListed **out, size_t *count)
+int tag_list(TagsOf whose, const char *without, TagListed **out, size_t *count)
 {
-    return tag_list_scoped(STORAGE_SCOPE_USE, without, out, count);
+    return tag_list_scoped(whose, STORAGE_SCOPE_USE, without, out, count);
 }
 
-int tag_list_everywhere(const char *without, TagListed **out, size_t *count)
+int tag_list_everywhere(TagsOf whose, const char *without, TagListed **out, size_t *count)
 {
-    return tag_list_scoped(STORAGE_SCOPE_EVERYWHERE, without, out, count);
+    return tag_list_scoped(whose, STORAGE_SCOPE_EVERYWHERE, without, out, count);
 }
 
-int query(const char *tags, const char *without, file_id_t *file_ids, size_t max_files)
+int query(TagsOf whose, const char *tags, const char *without, file_id_t *file_ids, size_t max_files)
 {
-    return query_scoped(tags, without, file_ids, max_files, STORAGE_SCOPE_USE, NULL);
+    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_USE, NULL };
+    return ask_files(&question, file_ids, max_files, NULL);
 }
 
-int query_everywhere(const char *tags, const char *without, file_id_t *file_ids, size_t max_files)
+int query_everywhere(TagsOf whose, const char *tags, const char *without, file_id_t *file_ids, size_t max_files)
 {
-    return query_scoped(tags, without, file_ids, max_files, STORAGE_SCOPE_EVERYWHERE, NULL);
+    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_EVERYWHERE, NULL };
+    return ask_files(&question, file_ids, max_files, NULL);
 }
 
 /* Every match, however many: ask how many there are, then ask for that many.
  * The volume may grow between the two asks — then the second answer says so,
  * and the ask is repeated with room for the new count. */
-static int query_all_scoped(const char *tags, const char *without, file_id_t **out_ids, uint8_t scope)
+static int ask_all(const Question *question, file_id_t **out_ids)
 {
     if (!out_ids) return -ERR_INVALID_ARGUMENT;
     *out_ids = NULL;
 
     uint32_t total = 0;
-    int rc = query_scoped(tags, without, NULL, 0, scope, &total);
+    int rc = ask_files(question, NULL, 0, &total);
     if (rc < 0) return rc;
 
     for (;;) {
@@ -266,7 +317,7 @@ static int query_all_scoped(const char *tags, const char *without, file_id_t **o
         file_id_t *ids = malloc(total * sizeof(file_id_t));
         if (!ids) return -ERR_NO_MEMORY;
         uint32_t now = 0;
-        rc = query_scoped(tags, without, ids, total, scope, &now);
+        rc = ask_files(question, ids, total, &now);
         if (rc < 0) { free(ids); return rc; }
         if (now <= total) { *out_ids = ids; return rc; }
         free(ids);
@@ -274,24 +325,71 @@ static int query_all_scoped(const char *tags, const char *without, file_id_t **o
     }
 }
 
-int query_all(const char *tags, const char *without, file_id_t **out_ids)
+int query_all(TagsOf whose, const char *tags, const char *without, file_id_t **out_ids)
 {
-    return query_all_scoped(tags, without, out_ids, STORAGE_SCOPE_USE);
+    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_USE, NULL };
+    return ask_all(&question, out_ids);
 }
 
-int query_all_everywhere(const char *tags, const char *without, file_id_t **out_ids)
+int query_all_everywhere(TagsOf whose, const char *tags, const char *without, file_id_t **out_ids)
 {
-    return query_all_scoped(tags, without, out_ids, STORAGE_SCOPE_EVERYWHERE);
+    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_EVERYWHERE, NULL };
+    return ask_all(&question, out_ids);
 }
 
-int query_deleted(const char *tags, const char *without, file_id_t *file_ids, size_t max_files)
+int query_deleted(TagsOf whose, const char *tags, const char *without, file_id_t *file_ids, size_t max_files)
 {
-    return query_scoped(tags, without, file_ids, max_files, STORAGE_SCOPE_DELETED, NULL);
+    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_DELETED, NULL };
+    return ask_files(&question, file_ids, max_files, NULL);
 }
 
-int query_all_deleted(const char *tags, const char *without, file_id_t **out_ids)
+int query_all_deleted(TagsOf whose, const char *tags, const char *without, file_id_t **out_ids)
 {
-    return query_all_scoped(tags, without, out_ids, STORAGE_SCOPE_DELETED);
+    Question question = { STORAGE_TAG_QUERY, whose, tags, without, STORAGE_SCOPE_DELETED, NULL };
+    return ask_all(&question, out_ids);
+}
+
+int query_name_all(TagsOf whose, const char *word, const char *tags, const char *without, file_id_t **out_ids)
+{
+    if (!word || word[0] == '\0') return -ERR_INVALID_ARGUMENT;
+    Question question = { STORAGE_NAME_QUERY, whose, word, without, STORAGE_SCOPE_USE, tags };
+    return ask_all(&question, out_ids);
+}
+
+int query_name_all_everywhere(TagsOf whose, const char *word, const char *tags, const char *without,
+                              file_id_t **out_ids)
+{
+    if (!word || word[0] == '\0') return -ERR_INVALID_ARGUMENT;
+    Question question = { STORAGE_NAME_QUERY, whose, word, without, STORAGE_SCOPE_EVERYWHERE, tags };
+    return ask_all(&question, out_ids);
+}
+
+int query_word_all(TagsOf whose, const char *word, file_id_t **out_ids)
+{
+    if (!out_ids) return -ERR_INVALID_ARGUMENT;
+    *out_ids = NULL;
+    if (!word || word[0] == '\0') return -ERR_INVALID_ARGUMENT;
+
+    file_id_t *worn = NULL;
+    int worn_count = query_all(whose, word, NULL, &worn);
+    if (worn_count < 0) return worn_count;
+    file_id_t *called = NULL;
+    int called_count = query_name_all(whose, word, NULL, NULL, &called);
+    if (called_count < 0) { free(worn); return called_count; }
+
+    file_id_t *both = malloc(((size_t)worn_count + (size_t)called_count + 1u) * sizeof(file_id_t));
+    if (!both) { free(worn); free(called); return -ERR_NO_MEMORY; }
+    int a = 0, b = 0, n = 0;
+    while (a < worn_count || b < called_count) {
+        if (b == called_count || (a < worn_count && worn[a] < called[b])) both[n++] = worn[a++];
+        else if (a == worn_count || called[b] < worn[a])                  both[n++] = called[b++];
+        else { both[n++] = worn[a++]; b++; }
+    }
+    free(worn);
+    free(called);
+    if (n == 0) { free(both); return 0; }
+    *out_ids = both;
+    return n;
 }
 
 /* =========================================================================
@@ -315,7 +413,7 @@ int query_all_deleted(const char *tags, const char *without, file_id_t **out_ids
  *  volume would otherwise bury the log it is meant to explain.
  * ========================================================================= */
 
-int file_info(file_id_t file_id, file_info_t *info)
+int file_info(TagsOf whose, file_id_t file_id, file_info_t *info)
 {
     /* One line each, the first time this program meets that kind of cut. */
     static uint8_t said_name  = 0;
@@ -324,10 +422,13 @@ int file_info(file_id_t file_id, file_info_t *info)
 
     if (!info) return -ERR_INVALID_ARGUMENT;
 
+    uint8_t  params[8 + WHOSE_MOST];
+    memcpy(params, &file_id, sizeof(file_id));
+    size_t   params_size = 8 + whose_put(params + 8, whose);
     uint8_t  out[1024];
     uint32_t out_actual = 0;
     int rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_GET_INFO,
-                     &file_id, sizeof(file_id),
+                     params, (uint32_t)params_size,
                      NULL, 0,
                      out, sizeof(out), &out_actual,
                      BOX_ANSWER_GUARANTEED, NULL);
@@ -368,11 +469,13 @@ int file_info(file_id_t file_id, file_info_t *info)
                    file_id, (unsigned)tag_count_raw, (unsigned)slots);
 
     for (uint32_t i = 0; i < tag_count_raw; i++) {
-        if (pos + 5 > out_actual) break;
-        uint16_t kl = 0, vl = 0;
+        if (pos + 13 > out_actual) break;
+        uint16_t  kl = 0, vl = 0;
+        file_id_t owner = 0;
         memcpy(&kl, out + pos, 2); pos += 2;
         memcpy(&vl, out + pos, 2); pos += 2;
         uint8_t type = out[pos]; pos += 1;   /* 1 = system, 0 = user */
+        memcpy(&owner, out + pos, 8); pos += 8;
         if (pos + kl + vl > out_actual) break;
 
         if (i < slots) {
@@ -384,7 +487,8 @@ int file_info(file_id_t file_id, file_info_t *info)
             info->tags[i].key[kc] = '\0';
             memcpy(info->tags[i].value, out + pos + kl,  vc);
             info->tags[i].value[vc] = '\0';
-            info->tags[i].type = type;
+            info->tags[i].type  = type;
+            info->tags[i].owner = owner;
 
             if ((kl > kc || vl > vc) &&
                 !__atomic_exchange_n(&said_text, 1, __ATOMIC_RELAXED))
@@ -398,8 +502,17 @@ int file_info(file_id_t file_id, file_info_t *info)
         }
         pos += kl + vl;
     }
-    if (out_actual >= pos + 8u)
-        memcpy(&info->deleted_until, out + out_actual - 8u, 8);
+    /* After the tags: [u64 kept_until][u64 made_by][u8 role][u8 head_len][head]. */
+    if (out_actual >= pos + 18u) {
+        memcpy(&info->deleted_until, out + pos, 8);
+        memcpy(&info->made_by,       out + pos + 8u, 8);
+        info->role = out[pos + 16u];
+        uint8_t len = out[pos + 17u];
+        if (len <= FILE_HEAD_MOST && out_actual >= pos + 18u + len) {
+            memcpy(info->head, out + pos + 18u, len);
+            info->head_len = len;
+        }
+    }
     return 0;
 }
 
@@ -530,24 +643,35 @@ int file_span(file_id_t file_id, uint64_t size, uint32_t flags)
  *  TAGS
  * ========================================================================= */
 
-int tag_add(file_id_t file_id, const char *tag)
+/* tag.set and tag.unset's params: the file, then whose. The bytes they take. */
+static size_t tag_params(file_id_t file_id, TagsOf whose, uint8_t params[8 + WHOSE_MOST])
+{
+    memcpy(params, &file_id, sizeof(file_id));
+    return 8 + whose_put(params + 8, whose);
+}
+
+int tag_add(TagsOf whose, file_id_t file_id, const char *tag)
 {
     if (!tag || tag[0] == '\0') return -ERR_INVALID_ARGUMENT;
-    size_t tag_len = strlen(tag);
+    size_t  tag_len = strlen(tag);
+    uint8_t params[8 + WHOSE_MOST];
+    size_t  params_size = tag_params(file_id, whose, params);
     int rc = MfCall1(DECK_STORAGE, STORAGE_TAG_SET,
-                     &file_id, sizeof(file_id),
+                     params, (uint32_t)params_size,
                      tag, (uint32_t)tag_len,
                      NULL, 0, NULL,
                      BOX_ANSWER_GUARANTEED, NULL);
     return box_fail(rc);
 }
 
-int tag_remove(file_id_t file_id, const char *key)
+int tag_remove(TagsOf whose, file_id_t file_id, const char *key)
 {
     if (!key || key[0] == '\0') return -ERR_INVALID_ARGUMENT;
-    size_t kl = strlen(key);
+    size_t  kl = strlen(key);
+    uint8_t params[8 + WHOSE_MOST];
+    size_t  params_size = tag_params(file_id, whose, params);
     int rc = MfCall1(DECK_STORAGE, STORAGE_TAG_UNSET,
-                     &file_id, sizeof(file_id),
+                     params, (uint32_t)params_size,
                      key, (uint32_t)kl,
                      NULL, 0, NULL,
                      BOX_ANSWER_GUARANTEED, NULL);
@@ -573,40 +697,170 @@ int file_restore(file_id_t file_id)
     return box_fail(rc);
 }
 
-int find_file_by_name(const char *filename, const char *without, file_id_t *file_ids,
+/* =========================================================================
+ *  WHAT A FILE IS: THE FILES THAT BEGIN WITH GIVEN BYTES
+ * ========================================================================= */
+
+/* The files beginning with `length` bytes at `bytes`, into `ids` — room for
+ * `room` — *total how many there are. 0, or a negative -error_t. */
+static int files_starting_page(const void *bytes, size_t length, file_id_t *ids, uint32_t room, uint32_t *total)
+{
+    uint32_t out_cap = 8u + room * (uint32_t)sizeof(file_id_t);
+    uint8_t *out     = malloc(out_cap);
+    if (!out) return -ERR_NO_MEMORY;
+    uint32_t actual = 0, delivered = 0;
+    int rc = MfCall1(DECK_STORAGE, STORAGE_HEAD_QUERY, NULL, 0, bytes, (uint32_t)length,
+                     out, out_cap, &actual, BOX_ANSWER_GUARANTEED, NULL);
+    if (rc == 0 && actual >= 8u) {
+        memcpy(&delivered, out, sizeof(delivered));
+        memcpy(total, out + 4, sizeof(*total));
+        if (delivered > room || actual < 8u + delivered * sizeof(file_id_t))
+            rc = ERR_INTERNAL;
+        else if (delivered)
+            memcpy(ids, out + 8, delivered * sizeof(file_id_t));
+    } else if (rc == 0) {
+        rc = ERR_INTERNAL;
+    }
+    free(out);
+    return rc == 0 ? 0 : box_fail(rc);
+}
+
+int files_starting_with(const void *bytes, size_t length, file_id_t **out_ids)
+{
+    if (!out_ids) return -ERR_INVALID_ARGUMENT;
+    *out_ids = NULL;
+    if (!bytes || length == 0 || length > FILE_HEAD_MOST) return -ERR_INVALID_ARGUMENT;
+    uint32_t total = 0;
+    int rc = files_starting_page(bytes, length, NULL, 0, &total);
+    while (rc == 0 && total > 0) {
+        file_id_t *ids = malloc(total * sizeof(file_id_t));
+        uint32_t   now = 0;
+        if (!ids) return -ERR_NO_MEMORY;
+        rc = files_starting_page(bytes, length, ids, total, &now);
+        if (rc == 0 && now <= total) {
+            *out_ids = ids;
+            return (int)now;
+        }
+        free(ids);
+        total = now;
+    }
+    return rc;
+}
+
+/* =========================================================================
+ *  A PROGRAM'S OWN TAGS SHOWN TO OTHERS
+ * ========================================================================= */
+
+static int tag_show(uint8_t act, file_id_t program)
+{
+    uint8_t params[9];
+    params[0] = act;
+    memcpy(params + 1, &program, sizeof(program));
+    int rc = MfCall1(DECK_STORAGE, STORAGE_TAG_SHOW, params, sizeof(params), NULL, 0,
+                     NULL, 0, NULL, BOX_ANSWER_GUARANTEED, NULL);
+    return box_fail(rc);
+}
+
+int show_tags_to(file_id_t program)
+{
+    return tag_show(STORAGE_SHOW_TO, program);
+}
+
+int hide_tags_from(file_id_t program)
+{
+    return tag_show(STORAGE_HIDE_FROM, program);
+}
+
+int ask_to_see_tags(file_id_t program)
+{
+    return tag_show(STORAGE_ASK_TO_SEE, program);
+}
+
+/* One list of tag.shown into `ids`, room for `room`: *total how many there
+ * are. 0, or a negative -error_t. */
+static int tags_shown_page(uint8_t which, file_id_t program, file_id_t *ids, uint32_t room, uint32_t *total)
+{
+    uint8_t  params[17] = { which };
+    uint64_t from       = 0;
+    memcpy(params + 1, &program, sizeof(program));
+    memcpy(params + 9, &from, sizeof(from));
+    uint32_t out_cap = 8u + room * (uint32_t)sizeof(file_id_t);
+    uint8_t *out     = malloc(out_cap);
+    if (!out) return -ERR_NO_MEMORY;
+    uint32_t actual = 0;
+    int rc = MfCall1(DECK_STORAGE, STORAGE_TAG_SHOWN, params, sizeof(params), NULL, 0,
+                     out, out_cap, &actual, BOX_ANSWER_GUARANTEED, NULL);
+    uint32_t delivered = 0;
+    if (rc == 0 && actual >= 8u) {
+        memcpy(&delivered, out, sizeof(delivered));
+        memcpy(total, out + 4, sizeof(*total));
+        if (delivered > room || actual < 8u + delivered * sizeof(file_id_t))
+            rc = ERR_INTERNAL;
+        else if (delivered)
+            memcpy(ids, out + 8, delivered * sizeof(file_id_t));
+    } else if (rc == 0) {
+        rc = ERR_INTERNAL;
+    }
+    free(out);
+    return rc == 0 ? 0 : box_fail(rc);
+}
+
+/* The whole list: its count asked first, then a list of room for it — asked
+ * again when it grew between the two. */
+static int tags_shown_all(uint8_t which, file_id_t program, file_id_t **out_programs)
+{
+    if (!out_programs) return -ERR_INVALID_ARGUMENT;
+    *out_programs = NULL;
+    uint32_t total = 0;
+    int rc = tags_shown_page(which, program, NULL, 0, &total);
+    while (rc == 0 && total > 0) {
+        file_id_t *ids = malloc(total * sizeof(file_id_t));
+        uint32_t   now = 0;
+        if (!ids) return -ERR_NO_MEMORY;
+        rc = tags_shown_page(which, program, ids, total, &now);
+        if (rc == 0 && now <= total) {
+            *out_programs = ids;
+            return (int)now;
+        }
+        free(ids);
+        total = now;
+    }
+    return rc;
+}
+
+int tags_shown_to_me(file_id_t **out_programs)
+{
+    return tags_shown_all(STORAGE_SHOWN_TO_ME, 0, out_programs);
+}
+
+int tags_shown_by(file_id_t program, file_id_t **out_programs)
+{
+    return tags_shown_all(STORAGE_SHOWN_BY, program, out_programs);
+}
+
+int asks_to_see_tags(file_id_t **out_programs)
+{
+    return tags_shown_all(STORAGE_ASKS_TO_SEE, 0, out_programs);
+}
+
+int find_file_by_name(TagsOf whose, const char *filename, const char *without, file_id_t *file_ids,
                       file_info_t *out_infos, size_t max)
 {
     if (!filename || filename[0] == '\0') return -ERR_INVALID_ARGUMENT;
     if (max > 0 && !file_ids) return -ERR_INVALID_ARGUMENT;
 
-    /* The name is a tag. The volume stamps every file with the stem of its
-     * name — up to the last dot — as its first tag, so the index answers "who
-     * is called this" in one ask, however many files there are. What stood
-     * here walked the first 255 files of the volume and asked each its name.
-     * A stem the tag grammar cannot spell (a ':' or ',' inside it) is asked
-     * the old way: every file in the context, compared by name. */
-    char   stem[sizeof(((file_info_t *)0)->filename)];
-    size_t len = strlen(filename);
-    size_t cut = len;
-    for (size_t i = len; i > 0; i--) {
-        if (filename[i - 1] == '.') { cut = i - 1; break; }
-    }
-    if (cut >= sizeof(stem)) cut = sizeof(stem) - 1;
-    memcpy(stem, filename, cut);
-    stem[cut] = '\0';
-    bool by_tag = stem[0] != '\0';
-    for (size_t i = 0; i < cut && by_tag; i++) {
-        if (stem[i] == ':' || stem[i] == ',') by_tag = false;
-    }
-
+    /* The name index answers for every file whose name or stem is the word, so
+     * the whole name asked for finds its files in one ask, however many files
+     * there are; the names are held to the whole of it here. What stood here
+     * once walked the first 255 files of the volume and asked each its name. */
     file_id_t *ids = NULL;
-    int n = query_all(by_tag ? stem : NULL, without, &ids);
+    int n = query_name_all(whose, filename, NULL, without, &ids);
     if (n < 0) return n;
 
     int found = 0;
     for (int i = 0; i < n; i++) {
         file_info_t info;
-        if (file_info(ids[i], &info) != 0) continue;
+        if (file_info(whose, ids[i], &info) != 0) continue;
         if (strcmp(info.filename, filename) != 0) continue;
         if ((size_t)found < max) {
             file_ids[found] = ids[i];

@@ -1090,19 +1090,19 @@ mce:migration:completed apei:memory:error apei:ghes:ready"
 # every test it counts is one this tree registers. The numbers are the code's,
 # not a run's (K9): a build without VOLUME_TESTS walks the eight suites of
 # tests.h TEST_SUITES not under VOLUME_TESTS_ONLY — core 2, stress 2,
-# braid 2, boxhash 6, book 15, book_judge 5, ribbon 7, use_context 5
-# TestCases, 44 run; the 5 whose reach is TEST_WRITES_TO_VOLUME are skipped
-# (tests.c, g_volume_tests_allowed), and the 39 that only read pass — on this
+# braid 2, boxhash 6, book 16, book_judge 5, ribbon 11, use_context 5
+# TestCases, 49 run; the 5 whose reach is TEST_WRITES_TO_VOLUME are skipped
+# (tests.c, g_volume_tests_allowed), and the 44 that only read pass — on this
 # stand's fresh image, whose first file wears a tag (use_context_narrows). A
 # test added or taken out moves this line in the same commit.
 healthy_startup_tests() {
     local L=$1
     grep -qE "TagFS: [0-9]+ run, [0-9]+ passed, 0 failed" "$L"; chk $? "TagFS startup tests: 0 failed"
-    local said want="TagFS: 44 run, 39 passed, 0 failed, 5 skipped, 0 held under a caveat"
-    local told="39 reads passed and 5 writes stood down"
+    local said want="TagFS: 49 run, 44 passed, 0 failed, 5 skipped, 0 held under a caveat"
+    local told="44 reads passed and 5 writes stood down"
     said=$(stand_summary "$L")
     [ "$said" = "$want" ]
-    chk $? "TagFS startup tests: the 44 this tree registers ran, $told (${said:-no summary})"
+    chk $? "TagFS startup tests: the 46 this tree registers ran, $told (${said:-no summary})"
 }
 
 run_healthy() {
@@ -7004,16 +7004,16 @@ run_headcountmut() {
 
 
 # ===========================================================================
-# byname — a file is found by its name through the index, and the name's tag
+# byname — a file is found by its name through the name index, and the index
 # follows a rename
 # ===========================================================================
 #
-# The volume stamps every file with the stem of its name as a tag, and that is
-# how by-name lookup (find_file_by_name, boxcxx fopen) and proc_exec find a
-# file — the index, not a walk of the first 255 files. rename used to change
-# the string and leave the tag, so a renamed file answered to its old name and
-# not its new one. The scenario creates a file, renames it, and asks the volume
-# by tag and by name; then trashes it and empties the trash with delete,
+# A file's name is a field of its card, never a tag, and the volume's name index
+# is how by-name lookup (find_file_by_name, boxcxx fopen) and proc_exec find a
+# file — the index, not a walk of the first 255 files. A rename that left the
+# index as it was would answer to the old name and not the new one. The
+# scenario creates a file, renames it, and asks the volume by name; then trashes
+# it and empties the trash with delete,
 # which takes what `trash list` gave (a plain listing leaves the files kept
 # deleted out on purpose) and goes only on a yes.
 #
@@ -7068,13 +7068,13 @@ byname_judge() {
     grep -q "alpha.txt is now called beta.txt" "$L" \
         && ok "$name: the file was renamed" \
         || bad "$name: rename did not answer"
-    # `files beta` asks by tag: the renamed file must carry its new name's tag
+    # `files beta` asks the name index too: the renamed file is called beta now
     sed -n '/~ files beta/,/~ files alpha/p' "$L" | grep -q "^beta.txt" \
-        && ok "$name: asked by its new name's tag, the volume answers with the file" \
-        || bad "$name: the tag did not follow the name — 'files beta' does not list beta.txt"
+        && ok "$name: asked by its new name, the volume answers with the file" \
+        || bad "$name: the index did not follow the name — 'files beta' does not list beta.txt"
     sed -n '/~ files alpha/,/~ info beta.txt/p' "$L" | grep -q "No files found" \
-        && ok "$name: the old name's tag is gone" \
-        || bad "$name: the file still answers to its old name's tag"
+        && ok "$name: the old name finds nothing" \
+        || bad "$name: the file still answers to its old name"
     sed -n '/~ info beta.txt/,/~ info alpha.txt/p' "$L" | grep -q "beta.txt" \
         && ok "$name: found by its new name" \
         || bad "$name: 'info beta.txt' did not find the file"
@@ -7119,7 +7119,7 @@ byname_judge() {
 }
 
 run_byname() {
-    echo "== byname: a file is found by its name through the index, and the tag follows a rename =="
+    echo "== byname: a file is found by its name through the index, and the index follows a rename =="
     rm -f build/boxos.img   # a fresh volume: the host listing judges this session's files alone
     build STRICT=on
     if ! byname_session byname "STRICT=on CORES=4 MEM=4G"; then
@@ -7128,36 +7128,37 @@ run_byname() {
     byname_judge byname
 }
 
-# The oracle measured against itself: rename leaves the tag where it was, and
-# the renamed file must stop answering to its new name.
+# The oracle measured against itself: a record put in the map is taken for one
+# of the same name whatever its name, so rename leaves the index where it was,
+# and the renamed file must stop answering to its new name.
 byname_mut_on() {
-    mutate src/kernel/tagfs/ink/ink.c
+    mutate src/kernel/tagfs/file_map/name_index.c
     python3 - <<'EOF2'
-p = "src/kernel/tagfs/ink/ink.c"
+p = "src/kernel/tagfs/file_map/name_index.c"
 s = open(p).read()
-anchor = "    uint32_t old_name = name ? InkNameTagLookup(cur->name) : TAGFS_INVALID_TAG_ID;\n"
+anchor = "    bool same   = before && after && was->name_len == now->name_len &&\n                  memcmp(was->name, now->name, was->name_len) == 0;\n"
 assert s.count(anchor) == 1, "byname mutation anchor missing"
-s = s.replace(anchor, "    uint32_t old_name = TAGFS_INVALID_TAG_ID;   /* logcheck mutation: the tag stays behind */\n    if (name)\n        add = TAGFS_INVALID_TAG_ID;\n", 1)
+s = s.replace(anchor, "    bool same   = before && after;   /* logcheck mutation: the link stays behind */\n", 1)
 open(p, "w").write(s)
 EOF2
-    mut_done src/kernel/tagfs/ink/ink.c "logcheck mutation"
+    mut_done src/kernel/tagfs/file_map/name_index.c "logcheck mutation"
 }
 
 byname_mut_off() {
-    restore src/kernel/tagfs/ink/ink.c
+    restore src/kernel/tagfs/file_map/name_index.c
 }
 
 run_bynamemut() {
-    echo "== bynamemut: rename leaves the tag behind, and the oracle must see the file answer to the wrong name =="
+    echo "== bynamemut: rename leaves the index behind, and the oracle must see the file answer to the wrong name =="
     byname_mut_on; build STRICT=on
     byname_session bynamemut "STRICT=on CORES=4 MEM=4G"; local booted=$?
     byname_mut_off
     if [ $booted -ne 0 ]; then bad "bynamemut: never reached a shell"; build; return; fi
     L="$SCRATCH/serial.bynamemut.log"
     if sed -n '/~ files beta/,/~ files alpha/p' "$L" | grep -q "^beta.txt"; then
-        bad "bynamemut: the tag was left behind and 'files beta' STILL lists beta.txt — the oracle cannot see that defect"
+        bad "bynamemut: the index was left behind and 'files beta' STILL lists beta.txt — the oracle cannot see that defect"
     else
-        ok "bynamemut: the tag left behind, and the oracle sees the file gone from its new name"
+        ok "bynamemut: the index left behind, and the oracle sees the file gone from its new name"
     fi
     build   # leave the tree built from clean sources
 }
@@ -8045,23 +8046,24 @@ STAND_HELD="
 "
 
 # How many startup tests a VOLUME_TESTS boot runs: every TestCase of every
-# suite in tests.h TEST_SUITES — the plain build's 44 (healthy says how) and
-# the 323 of the stand's own forty-five suites: stand 25, stand_lock 1,
+# suite in tests.h TEST_SUITES — the plain build's 49 (healthy says how) and
+# the 362 of the stand's own fifty suites: stand 25, stand_lock 1,
 # stand_spelling 6, stand_roadstead 4, stand_plot 3, stand_index 6,
 # stand_helm 6, stand_port 1, stand_use 2, stand_settle 9, stand_read 6,
 # stand_run 4, stand_medium 13, stand_warrant 7, stand_room 1, frame 2,
 # width 4, parcel 13, tract 1, record_splices 4, stand_tally 15,
 # stand_ribbon 8, stand_stitch 14, stand_stitch_edge 12, stand_docket 14,
-# stand_fresh 7, stand_fresh_ground 5, stand_fresh_change 5, stand_binder 13,
+# stand_fresh 7, stand_fresh_ground 5, stand_fresh_change 5, stand_binder 14,
 # stand_endpaper 6, stand_book_room 13, stand_errata 8, stand_keep 5,
-# stand_toll 4, stand_dog_ear 9, stand_slip 14, stand_away 15,
-# stand_tip_in 10, stand_slip_promise 5, stand_book_glean 2, stand_escheat 7,
-# stand_parity 2, stand_commonhold 1, stand_conjugate 5, stand_dedup 6.
+# stand_name 5, stand_retire 7, stand_show 14, stand_head 7, stand_toll 4,
+# stand_dog_ear 9, stand_slip 15, stand_away 15, stand_tip_in 10,
+# stand_slip_promise 5, stand_book_glean 2, stand_escheat 7, stand_parity 2,
+# stand_commonhold 1, stand_conjugate 5, stand_dedup 6, stand_made_by 4.
 # Counted off the code, not a run (K9): a suite that drops out of the walk is
 # a test that stopped covering anything, and the count is where that shows.
 # How many of them pass and how many stand down is the road's — said, not
 # pinned.
-STAND_RUN=367
+STAND_RUN=411
 
 # What a VOLUME_TESTS kernel says of a record that names a run of no blocks
 # (file_record.c, FileRecordBuild), and of a Tract about to stand taller than
@@ -8407,7 +8409,7 @@ stand_leak_on() {
 p = "src/kernel/tagfs/tests/core_tests.c"
 s = open(p).read()
 inc = "#include \"../tagfs.h\"\n"
-a = "    uint32_t   tag_ids[2] = {1, 2};\n\n    TEST_ASSERT_EQ(tagfs_create_file(\"test_file\", tag_ids, 2, &file_id), 0,\n"
+a = "    uint32_t   tag_ids[2] = {1, 2};\n\n    TEST_ASSERT_EQ(tagfs_create_file(\"test_file\", tag_ids, 2, 0, &file_id), 0,\n"
 assert s.count(inc) == 1 and s.count(a) == 1, "stand leak anchor missing"
 s = s.replace(inc, inc +
     "#include \"../block_map/block_map.h\"   /* logcheck mutation */\n"
@@ -8420,7 +8422,7 @@ open(p, "w").write(s.replace(a,
     "\n"
     "    TEST_ASSERT_EQ(AllotmentTakeBookRun(1ull << 62, 1, 0, EndpaperDataKeeps(false), &leaked), 0,\n"
     "                   \"a block is taken\");\n"
-    "    TEST_ASSERT_EQ(tagfs_create_file(\"test_file\", tag_ids, 2, &file_id), 0,\n", 1))
+    "    TEST_ASSERT_EQ(tagfs_create_file(\"test_file\", tag_ids, 2, 0, &file_id), 0,\n", 1))
 EOF
     mut_done src/kernel/tagfs/tests/core_tests.c "logcheck mutation" 3
 }

@@ -229,9 +229,9 @@ static TestResult StandBookOpen(StandBook* b, const char* name)
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0xB0u);
     TEST_ASSERT(StandMakeFile(name, g_test_buffer, TAGFS_BLOCK_SIZE, &b->file_id),
                 "a file is made and written");
-    TEST_ASSERT_OK(tagfs_add_tag_string(b->file_id, StandBookTag()),
+    TEST_ASSERT_OK(tagfs_add_tag_string(TagOwnerPerson(), b->file_id, StandBookTag()),
                    "it wears stand_book");
-    b->tag = TagRegistryLookup(tagfs_get_state()->registry, StandBookTag());
+    b->tag = TagRegistryLookup(tagfs_get_state()->registry, TagOwnerPerson(), StandBookTag());
     TEST_ASSERT_OK(TagFSSettle(), "and a cycle settles it, every write it saw kept");
 
     b->holder  = tagfs_open(b->file_id, TAGFS_HANDLE_WRITE | TAGFS_HANDLE_APPEND);
@@ -571,17 +571,17 @@ static TestResult TestStandMediumNumbersPastTheTable(void)
     uint32_t next = 100000u;
     TagRegistryNumbersFrom(scratch, next);
     TEST_ASSERT_EQ(scratch->next_id, next, "its numbers move to the first id past the ones the records wear");
-    TEST_ASSERT(!TagRegistrySpelling(scratch, next - 1u, &spelled, NULL),
+    TEST_ASSERT(!TagRegistrySpelling(scratch, next - 1u, &spelled, NULL, NULL),
                 "an id under the numbers that no tag has spells nothing");
-    TEST_ASSERT(!TagRegistrySpelling(scratch, TAGFS_MAX_TAG_ID, &spelled, NULL),
+    TEST_ASSERT(!TagRegistrySpelling(scratch, TAGFS_MAX_TAG_ID, &spelled, NULL, NULL),
                 "nor does the highest id there is");
 
     TagSpelling fresh = TagSpellingOfKey("stand.numbers.past");
     uint32_t    id    = TAGFS_INVALID_TAG_ID;
-    TEST_ASSERT_OK(TagRegistryIntern(scratch, &fresh, &id), "a new tag is interned past them");
+    TEST_ASSERT_OK(TagRegistryIntern(scratch, TagOwnerPerson(), &fresh, &id), "a new tag is interned past them");
     TestEvidence("the id it is given", id);
     TEST_ASSERT_EQ(id, next, "with the first number past them — wider than 16 bits");
-    TEST_ASSERT(TagRegistrySpelling(scratch, id, &spelled, NULL) &&
+    TEST_ASSERT(TagRegistrySpelling(scratch, id, &spelled, NULL, NULL) &&
                 TagSpanIs("stand.numbers.past", spelled.key, spelled.key_len),
                 "and spells itself by that number");
 out:

@@ -142,16 +142,16 @@ static bool QuillBookRounds(const char *name, int64_t *kept, int64_t *gone)
     *kept = QuillCreate(a);
     *gone = QuillCreate(b);
     if (!QuillBookStep("the first create", *kept) || !QuillBookStep("the second create", *gone) ||
-        !QuillBookStep("the tag of the first", tag_add((file_id_t)*kept, tag)) ||
+        !QuillBookStep("the tag of the first", tag_add(MY_TAGS, (file_id_t)*kept, tag)) ||
         !QuillBookStep("the first anchor", anchor(0)))
         return false;
     QuillBookName(tag, name, false, 0, ":b");
     if (!QuillBookStep("the rename", file_rename((file_id_t)*kept, k)) ||
-        !QuillBookStep("the tag put on", tag_add((file_id_t)*gone, tag)) ||
+        !QuillBookStep("the tag put on", tag_add(MY_TAGS, (file_id_t)*gone, tag)) ||
         !QuillBookStep("the second anchor", anchor(0)))
         return false;
     return QuillBookStep("the delete", delete((file_id_t)*gone)) &&
-           QuillBookStep("the tag taken off", tag_remove((file_id_t)*kept, name)) &&
+           QuillBookStep("the tag taken off", tag_remove(MY_TAGS, (file_id_t)*kept, name)) &&
            QuillBookStep("the third anchor", anchor(0));
 }
 
@@ -167,8 +167,9 @@ QuillVerdict QuillBookNames(const char *const *args)
     QuillBookName(k, name, false, 0, "-kept.n");
     QuillBookName(b, name, false, 0, "-b.n");
     int  nk   = QuillBookFind(k, &found), nb = QuillBookFind(b, &found);
-    int  tags = file_info((file_id_t)kept, &info) == 0 ? (int)info.tag_count : -1;
-    if (nk == 1 && nb == 0 && tags == 1) {
+    /* Its one tag taken off, the kept file wears none: a name is no tag. */
+    int  tags = file_info(MY_TAGS, (file_id_t)kept, &info) == 0 ? (int)info.tag_count : -1;
+    if (nk == 1 && nb == 0 && tags == 0) {
         printf("[QUILL] names: PASS — %s (fid %lld) made, tagged, renamed and its tag taken off, %s (fid %lld) "
                "tagged and given up, each round anchored\n", k, (long long)kept, b, (long long)gone);
         return QUILL_PASS;
@@ -190,7 +191,7 @@ static int64_t QuillBookPadded(const char *name, uint32_t r, char file[QUILL_BOO
         size_t at = strlen(s_pad);
         memset(s_pad + at, 'a' + (int)((r + t) % 26u), QUILL_BOOK_PAD);
         s_pad[at + QUILL_BOOK_PAD] = '\0';
-        int rc = tag_add((file_id_t)fid, s_pad);
+        int rc = tag_add(MY_TAGS, (file_id_t)fid, s_pad);
         if (rc < 0)
             fid = rc;
     }
@@ -285,7 +286,7 @@ QuillVerdict QuillBookGround(const char *const *args)
     file_info_t info;
     if (!QuillBookNameFits("ground", name))
         return QUILL_FAIL;
-    if (QuillBookFind(file, &fid) != 1 || file_info(fid, &info) != 0 || info.size == 0) {
+    if (QuillBookFind(file, &fid) != 1 || file_info(MY_TAGS, fid, &info) != 0 || info.size == 0) {
         printf("[QUILL] ground: FAIL — %s is not one file with bytes of its own\n", file);
         return QUILL_FAIL;
     }
@@ -407,7 +408,7 @@ QuillVerdict QuillBookData(const char *const *args)
     }
     file_info_t info;
     int64_t     got = fread((file_id_t)fid, 0, s_data_back, sizeof(s_data_back));
-    if (file_info((file_id_t)fid, &info) != 0 || info.size != size || got != (int64_t)size ||
+    if (file_info(MY_TAGS, (file_id_t)fid, &info) != 0 || info.size != size || got != (int64_t)size ||
         memcmp(s_data_back, s_data, size) != 0) {
         printf("[QUILL] data: FAIL — %s reads %lld byte(s) back, %s, and should be %llu\n", file, (long long)got,
                got == (int64_t)size ? "not the bytes the rounds wrote" : "not as many", (unsigned long long)size);

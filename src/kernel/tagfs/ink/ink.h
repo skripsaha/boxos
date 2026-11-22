@@ -72,9 +72,8 @@ typedef struct {
  * stitch needs is on its way. */
 error_t TagFSInkPlot(Plot* p, InkReceipt* out);
 
-/* A file's name and tags. `name` non-NULL renames it, and the name's tag
- * moves with it: the tag of the name it had comes off, `add` (the new name's,
- * already interned) goes on first. Otherwise `add` goes on and `drop` comes
+/* A file's name and tags. `name` non-NULL renames it — the name is a field of
+ * the file's card, and no tag moves with it. `add` goes on and `drop` comes
  * off (TAGFS_INVALID_TAG_ID for neither). No tag asks a warrant, whatever its
  * key: a file's tags are its user's, and what the system keeps a file as is
  * its record's role (TAGFS_FILE_ROLE_*), which no tag puts on or takes off.
@@ -109,10 +108,46 @@ error_t InkUndone(uint64_t fid, InkReceipt* out);
  * go at its term (keep/keep.h): InkQuitclaim, as ever. */
 error_t InkKeep(uint64_t fid, uint64_t until, InkWarrant warrant, InkReceipt* out);
 
+/* The card of program file `fid` showing its tags to `reader` — a program's
+ * file, or 0 for every program — put in the list it shows them to (`show`) or
+ * taken out of it, by one Ink of its fields, its name, tags and term as they
+ * are (TAGFS_FILE_SHOWN as the list leaves it). A list is a rising one, each
+ * reader once. OK — and OK with no Ink for a call that changes nothing — or
+ * the refusal: ERR_FILE_NOT_FOUND (a file kept deleted shows to nobody new,
+ * though one is taken out of its list), the volume's, the ribbon's room
+ * (ERR_WOULD_BLOCK while it can come), ERR_NO_MEMORY. Who may ask it is the
+ * caller's to judge: the program itself, or the volume's duty for a reader
+ * that left (retire/retire.c). */
+error_t InkShown(uint64_t fid, uint64_t reader, bool show, InkReceipt* out);
+
+/* The passport of the signed program file `fid` holds laid on its record —
+ * or, 0, taken off it: a program with no signature that holds — one Labeled
+ * PASSPORT when it is another, and with it the list of the programs the
+ * program shows its tags to, as another card of it holds it, or none; the
+ * record as it is when it is the same. ERR_INVALID_ARGUMENT for a number that
+ * is no passport (bit 63), ERR_FILE_NOT_FOUND for a file the volume has not;
+ * a volume that takes no change answers as for any Ink. */
+error_t InkPassport(uint64_t fid, uint64_t passport, InkReceipt* out);
+
+/* The `count` tags of `tags` taken off file `fid` — live or kept deleted — in
+ * one Ink, those it wears; OK, and OK with no Ink for a file that wears none
+ * of them, or the refusal: ERR_FILE_NOT_FOUND, the volume's, the ribbon's room
+ * (ERR_WOULD_BLOCK while it can come), ERR_NO_MEMORY. */
+error_t InkTagsOff(uint64_t fid, const uint32_t* tags, uint32_t count, InkReceipt* out);
+
+/* The `count` tags of `tags` retired — closed already (TagRegistryRetire) and
+ * worn by no file: each lies in a Coined RETIRED of the next stitch. OK, or
+ * ERR_BUSY while a file wears one — the Ink that took it off is yet to come —
+ * or the refusal of room for the Coineds (ERR_WOULD_BLOCK while it can come),
+ * of the volume, or ERR_NO_MEMORY. Inside the door. */
+error_t InkTagsRetire(const uint32_t* tags, uint32_t count, InkReceipt* out);
+
 /* A new file named `name`, wearing the `count` tags in `tags` (the name's
- * first, no two alike). OK and its id, or the refusal with no file made and no
- * trace of one — the id it would have taken is taken by the next. */
-error_t InkNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t* out_fid,
+ * first, no two alike), made by the program whose file is `made_by` — 0 when
+ * no program of the volume makes it. OK and its id, or the refusal with no
+ * file made and no trace of one — the id it would have taken is taken by the
+ * next. */
+error_t InkNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t made_by, uint64_t* out_fid,
                InkReceipt* out);
 
 /* The file given up: a Quitclaim kept for the next stitch, its extents to
@@ -186,7 +221,7 @@ void     InkDropAll(void);
 void     InkReadOnlyLift(void);
 
 /* Whether a book takes the change about to be made, asked before the `count`
- * tags it brings are interned: refused by a volume that takes no change (read
+ * tags of `owner`'s it brings are interned: refused by a volume that takes no change (read
  * only, its medium gone, the halt begun), or where its ribbon has no room for
  * the Coineds of the ones the registry does not hold yet — ERR_WOULD_BLOCK
  * while room can come, ERR_TAGFS_NO_SPACE when none can (settle/sewing.h) —
@@ -194,21 +229,8 @@ void     InkReadOnlyLift(void);
  * has: OK holds those Coineds' bytes on the ribbon (*held) until the tags hold
  * their ids and the registry counts them, InkBookHeldLetGo letting the hold go
  * after the interning, inside the same stay behind the door. */
-error_t InkBookRefuses(const TagSpelling* tags, uint32_t count, uint64_t* held);
+error_t InkBookRefuses(TagOwner owner, const TagSpelling* tags, uint32_t count, uint64_t* held);
 void    InkBookHeldLetGo(uint64_t held);
-
-/* The stem of a name as a key, read in place: OK with out->key NULL for a
- * name with no stem, ERR_TAGFS_TAG_TOO_LONG for one longer than a key. */
-error_t InkNameStem(const char* name, TagSpelling* out);
-
-/* The tag a file's name gives it — the stem, up to the last dot, as a key —
- * interned, and on the medium before any file wears it: OK and the id
- * (TAGFS_INVALID_TAG_ID for a name with no stem), or the registry's refusal.
- * With no TagFS lock held: a new tag is written to the medium. */
-error_t InkNameTagIntern(const char* name, uint32_t* out_tag);
-
-/* The tag a name gives, when the registry already has it; else invalid. */
-uint32_t InkNameTagLookup(const char* name);
 
 /* The one guard of a change to a file (see above), asked with the flags the
  * file's record carries, the runs it names and the caller's warrant: OK,

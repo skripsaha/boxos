@@ -278,12 +278,38 @@ error_t DocketBirths(const DocketTaken* t, uint64_t seq, uint64_t* fid_most)
 #define JOT_ID_MOST           5u
 #define JOT_RUN_MOST          18u    /* head 5, start 10, a run SHARED's list of extensions 3 (RibbonSharedList) */
 
+/* The list of the programs `rec` shows its tags to at the most — its count
+ * and each id — or 0 for a record that shows none. */
+static uint64_t JotShownMost(const FileRecord* rec)
+{
+    return rec->shown_count ? JOT_VARINT_MOST * (1u + (uint64_t)rec->shown_count) : 0u;
+}
+
+/* The same of a Labeled from `was` to `now`: `now`'s list, and its count alone
+ * when it shows none and `was` showed some. */
+static uint64_t JotShownChangeMost(const FileRecord* was, const FileRecord* now)
+{
+    return now->shown_count ? JotShownMost(now) : was->shown_count ? JOT_VARINT_MOST : 0u;
+}
+
+/* Whether `was` and `now` keep the same first bytes. */
+static bool JotHeadSame(const FileRecord* was, const FileRecord* now)
+{
+    return was->head_len == now->head_len && memcmp(was->head, now->head, now->head_len) == 0;
+}
+
+/* The first bytes of a record as a Born or a Labeled HEAD lays them, at the
+ * most: their count and them. */
+#define JOT_HEAD_MOST (1u + TAGFS_HEAD_MOST)
+
 /* The body of a Born of `now` at the most: its fields, its runs, a digest a
- * block of them, and the empty Slip. */
+ * block of them, the empty Slip, the program that made it when a program did,
+ * the programs it shows its tags to, its first bytes and its passport. */
 static uint64_t JotBornMost(const FileRecord* now)
 {
     return 8u * JOT_VARINT_MOST + now->name_len + JOT_ID_MOST * (uint64_t)now->tag_count +
-           JOT_RUN_MOST * now->strip_count + 8u * now->blocks + 2u;
+           JOT_RUN_MOST * now->strip_count + 8u * now->blocks + 2u + (now->made_by ? JOT_VARINT_MOST : 0u) +
+           JotShownMost(now) + (now->head_len ? JOT_HEAD_MOST : 0u) + (now->passport ? JOT_VARINT_MOST : 0u);
 }
 
 /* The body of the record a change of `kind` from `was` to `now` becomes, at
@@ -295,7 +321,9 @@ static uint64_t JotBodyMostOf(JotKind kind, const FileRecord* was, const FileRec
         return JotBornMost(now);
     case JOT_LABELED:
     case JOT_SHAPED:
-        return 7u * JOT_VARINT_MOST + now->name_len + JOT_ID_MOST * ((uint64_t)now->tag_count + was->tag_count);
+        return 7u * JOT_VARINT_MOST + now->name_len + JOT_ID_MOST * ((uint64_t)now->tag_count + was->tag_count) +
+               JotShownChangeMost(was, now) + (JotHeadSame(was, now) ? 0u : JOT_HEAD_MOST) +
+               (was->passport != now->passport ? JOT_VARINT_MOST : 0u);
     case JOT_QUITCLAIM:
         return 2u * JOT_VARINT_MOST;
     default:
@@ -457,6 +485,7 @@ typedef struct {
     uint64_t ndigests;
     uint64_t cursor;     /* the end of the last DATA run laid, as the ribbon's form counts from it */
     uint8_t* tail;       /* a block's room for the bytes of its Slip */
+    uint8_t* shown;      /* room for the list of the programs a record shows its tags to */
 } JotApart;
 
 /* The Slip a record of `j` lays: the span of the last block changed since
@@ -511,7 +540,9 @@ static uint32_t JotBornPut(const Jot* j, uint8_t* body, uint32_t* scratch, uint8
         .modified_ns = f->modified_time, .name = (const uint8_t*)f->name, .name_len = f->name_len,
         .ntags = n, .tags = ids, .tags_bytes = TallyIdsPut(ids, scratch, n), .nruns = f->strip_count,
         .runs = a->runs, .runs_bytes = a->runs_bytes, .ndigests = a->ndigests, .digests = a->digests,
-        .slip = JotSlipPut(j, a),
+        .slip = JotSlipPut(j, a), .made_by = f->made_by, .nshown = f->shown_count, .shown = a->shown,
+        .shown_bytes = TallyFidsPut(a->shown, f->shown_to, f->shown_count), .head_len = f->head_len,
+        .head = f->head, .passport = f->passport,
     };
     return RibbonBornBodyPut(body, &b);
 }
@@ -541,11 +572,21 @@ static uint32_t JotShapedPut(const Jot* j, uint64_t seq, uint8_t* body, JotApart
     return RibbonShapedBodyPut(body, &sh);
 }
 
+/* Whether `was` and `now` show their tags to the same programs. */
+static bool JotShownSame(const FileRecord* was, const FileRecord* now)
+{
+    return was->shown_count == now->shown_count &&
+           (!now->shown_count || memcmp(was->shown_to, now->shown_to, sizeof(uint64_t) * now->shown_count) == 0);
+}
+
 /* A Labeled of what differs between `was` and `now` — the name, the flags set
- * and cleared (never the deleted bit: the term says that, KEEP), the tags put
- * on and taken off, the time the file is kept deleted until — over the file at `base`, or 0
- * when nothing does. */
-static uint32_t JotLabeledPut(const Jot* j, uint64_t base, uint8_t* body, uint32_t* scratch, uint8_t* ids)
+ * and cleared (never the deleted bit: the term says that, KEEP; nor the shown
+ * one: the list says that, SHOWN; nor the head one: the bytes say that,
+ * HEAD; nor the passport's, PASSPORT), the tags put on and taken off, the time
+ * the file is kept deleted until, the programs it shows its tags to, its first
+ * bytes, its passport — over the file at `base`, or 0 when nothing does. `shown` is room for that list. */
+static uint32_t JotLabeledPut(const Jot* j, uint64_t base, uint8_t* body, uint32_t* scratch, uint8_t* ids,
+                              uint8_t* shown)
 {
     const FileRecord* was = j->was;
     const FileRecord* now = j->now;
@@ -562,13 +603,29 @@ static uint32_t JotLabeledPut(const Jot* j, uint64_t base, uint8_t* body, uint32
         l.name     = (const uint8_t*)now->name;
         l.name_len = now->name_len;
     }
-    l.set   = now->flags & ~was->flags & ~(uint32_t)TAGFS_FILE_DELETED;
-    l.clear = was->flags & ~now->flags & ~(uint32_t)TAGFS_FILE_DELETED;
+    const uint32_t own = TAGFS_FILE_DELETED | TAGFS_FILE_SHOWN | TAGFS_FILE_HEAD | TAGFS_FILE_PASSPORT;   /* the verbs' bits */
+    l.set   = now->flags & ~was->flags & ~own;
+    l.clear = was->flags & ~now->flags & ~own;
     if (l.set || l.clear)
         l.what |= LABEL_FLAGS;
     if (was->keep_until != now->keep_until) {
         l.what   |= LABEL_KEEP;
         l.keep_ns = now->keep_until;
+    }
+    if (!JotShownSame(was, now)) {
+        l.what       |= LABEL_SHOWN;
+        l.nshown      = now->shown_count;
+        l.shown       = shown;
+        l.shown_bytes = TallyFidsPut(shown, now->shown_to, now->shown_count);
+    }
+    if (!JotHeadSame(was, now)) {
+        l.what    |= LABEL_HEAD;
+        l.head_len = now->head_len;
+        l.head     = now->head;
+    }
+    if (was->passport != now->passport) {
+        l.what    |= LABEL_PASSPORT;
+        l.passport = now->passport;
     }
     if (na || nd) {
         l.what      |= LABEL_TAGS;
@@ -601,7 +658,7 @@ static void JotChangedPut(Jot* j, uint64_t seq, uint8_t* out, uint32_t* at, uint
         j->carried = true;
         base       = 0;
     }
-    uint32_t len = JotLabeledPut(j, base, body, scratch, ids);
+    uint32_t len = JotLabeledPut(j, base, body, scratch, ids, a->shown);
     if (len) {
         JotRecordPut(out, at, starts, n, RIBBON_LABELED, body, len);
         j->carried = true;
@@ -618,8 +675,12 @@ error_t DocketLay(DocketTaken* t, uint64_t seq, uint32_t tags, uint8_t* out, uin
         room = j->nsplices && JotShapedMost(j) > room ? JotShapedMost(j) : room;
     uint32_t* scratch = kmalloc(sizeof(uint32_t) * 2u * ((uint64_t)tags + 1u));
     uint8_t*  ids     = kmalloc((uint64_t)JOT_ID_MOST * tags + 1u);
-    JotApart  a       = { .runs = kmalloc(room + 1u), .digests = kmalloc(room + 1u), .tail = kmalloc(TAGFS_BLOCK_SIZE) };
-    error_t   rc      = scratch && ids && a.runs && a.digests && a.tail ? OK : ERR_NO_MEMORY;
+    /* A record's list of the programs it shows its tags to is counted in its
+     * body at the most (JotShownMost, JotShownChangeMost): room for the body
+     * is room for it. */
+    JotApart  a       = { .runs = kmalloc(room + 1u), .digests = kmalloc(room + 1u), .tail = kmalloc(TAGFS_BLOCK_SIZE),
+                          .shown = kmalloc(room + 1u) };
+    error_t   rc      = scratch && ids && a.runs && a.digests && a.tail && a.shown ? OK : ERR_NO_MEMORY;
     for (Jot* j = t->first; rc == OK && j; j = j->next[0]) {
         a.runs_bytes = 0;
         a.ndigests   = 0;
@@ -646,5 +707,6 @@ error_t DocketLay(DocketTaken* t, uint64_t seq, uint32_t tags, uint8_t* out, uin
     kfree(a.runs);
     kfree(a.digests);
     kfree(a.tail);
+    kfree(a.shown);
     return rc;
 }

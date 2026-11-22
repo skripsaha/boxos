@@ -638,6 +638,52 @@ out:
 }
 
 /*
+ * A program's own tag (TALLY_TAG_OWNED): whose it is rides between its flags
+ * and its key, and a tag of the person's is written byte for byte as before
+ * tags had owners — the bytes of every volume of none but the person's tags,
+ * mkfs's among them, must not move. The measures (TallyTagBytes, the bytes
+ * written; TallyTagCarried, what sizes a TAGS tree and a Coined) agree with
+ * what is written, and the three ways an owner is never written are refused.
+ */
+static TestResult TestTallyOwnedTags(void)
+{
+    TestResult     verdict = TEST_PASS;
+    uint8_t       *b = g_test_output;
+    TallyTag       t, got;
+    static const uint8_t person[10] = { 0x01, 0x04, 't', 'y', 'p', 'e', 0x03, 'e', 'l', 'f' };
+    static const uint8_t lone[5] = { 0x04, 0x01, 0x05, 0x01, 'a' }, kind2[5] = { 0x04, 0x02, 0x05, 0x01, 'a' },
+                         fid0[5] = { 0x04, 0x01, 0x00, 0x01, 'a' }, retired_owned[1] = { 0x06 };
+
+    t = (TallyTag){ .flags = TALLY_TAG_HAS_VALUE, .key = (const uint8_t *)"type", .key_len = 4,
+                    .value = (const uint8_t *)"elf", .value_len = 3 };
+    uint32_t len = TallyTagPut(b, &t);
+    TEST_ASSERT(len == sizeof(person) && memcmp(b, person, sizeof(person)) == 0,
+                "the person's tag is written as it always was, no owner in it");
+    TEST_ASSERT(TallyTagBytes(&t) == len && TallyTagCarried(&t) == 7u, "and measured as its key and value");
+
+    t.flags     |= TALLY_TAG_OWNED;
+    t.owner_kind = TALLY_OWNER_PROGRAM;
+    t.owner_id   = 0x12345u;
+    len = TallyTagPut(b, &t);
+    TEST_ASSERT_EQ(TallyTagGet(b, len, &got), TALLY_BODY_KNOWN, "a program's own tag reads back");
+    TEST_ASSERT(got.owner_kind == TALLY_OWNER_PROGRAM && got.owner_id == 0x12345u && got.key_len == 4 &&
+                got.value_len == 3 && got.key[0] == 't' && got.value[0] == 'e', "whose it is, its key and its value");
+    TEST_ASSERT(TallyTagBytes(&t) == len && len == sizeof(person) + 1u + TallyVarintBytes(0x12345u),
+                "its owner takes its kind and its fid's varint, nothing more");
+    TEST_ASSERT_EQ(TallyTagCarried(&t), 7u + 1u + TallyVarintBytes(0x12345u), "and is carried with its text");
+    TEST_ASSERT_EQ(TallyTagGet(b, len - 1u, &got), TALLY_BODY_BROKEN, "a byte less is broken");
+
+    TEST_ASSERT(TallyTagGet(lone, sizeof(lone), &got) == TALLY_BODY_KNOWN && got.owner_id == 5 && got.key_len == 1,
+                "program fid 5's bare key reads");
+    TEST_ASSERT_EQ(TallyTagGet(kind2, sizeof(kind2), &got), TALLY_BODY_BROKEN, "an owner of no kind is refused");
+    TEST_ASSERT_EQ(TallyTagGet(fid0, sizeof(fid0), &got), TALLY_BODY_BROKEN, "a program's tag of fid 0 is refused");
+    TEST_ASSERT_EQ(TallyTagGet(retired_owned, sizeof(retired_owned), &got), TALLY_BODY_BROKEN,
+                   "a RETIRED tag that names an owner is refused");
+out:
+    return verdict;
+}
+
+/*
  * Every other rule by which the codec refuses what the book never writes
  * (§2.8-§2.9), each from bytes laid by hand that break that rule alone — the
  * bytes beside them, one number less, read. A mount stands on these: a rule
@@ -906,6 +952,7 @@ static const TestCase g_book_tests[] = {
     { .name = "golden_node",    .func = TestGoldenNode,    .reach = TEST_READS_ONLY },
     { .name = "node_circle",    .func = TestTallyNodeCircle, .reach = TEST_READS_ONLY },
     { .name = "tally_elements", .func = TestTallyElements, .reach = TEST_READS_ONLY },
+    { .name = "tally_owned_tags", .func = TestTallyOwnedTags, .reach = TEST_READS_ONLY },
     { .name = "tally_refusals", .func = TestTallyRefusals, .reach = TEST_READS_ONLY },
     { .name = "digest_item_most", .func = TestDigestItemMost, .reach = TEST_READS_ONLY },
     { .name = "golden_slot",    .func = TestGoldenSlot,    .reach = TEST_READS_ONLY },

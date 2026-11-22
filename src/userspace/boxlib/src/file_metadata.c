@@ -17,15 +17,23 @@
 
 #define FILE_METADATA_FIRST_CAPACITY 512u
 
-static int ReadMetadataBlob(file_id_t FileId, uint8_t **OutBlob,
+static int ReadMetadataBlob(TagsOf Whose, file_id_t FileId, uint8_t **OutBlob,
                             uint32_t *OutSize)
 {
     uint32_t Capacity = FILE_METADATA_FIRST_CAPACITY;
+    uint8_t  Params[17];
+    uint32_t ParamsSize = 9;
 
     if (!OutBlob || !OutSize)
         return -ERR_INVALID_ARGUMENT;
     *OutBlob = NULL;
     *OutSize = 0;
+    memcpy(Params, &FileId, sizeof(FileId));
+    Params[8] = Whose.whose;
+    if (Whose.whose == STORAGE_TAGS_PROGRAM) {
+        memcpy(Params + 9, &Whose.program, sizeof(Whose.program));
+        ParamsSize = 17;
+    }
 
     for (;;) {
         uint8_t *Blob = (uint8_t *)malloc(Capacity);
@@ -36,7 +44,7 @@ static int ReadMetadataBlob(file_id_t FileId, uint8_t **OutBlob,
             return -ERR_NO_MEMORY;
 
         Rc = MfCall1(DECK_STORAGE, STORAGE_OBJ_GET_INFO,
-                     &FileId, sizeof(FileId),
+                     Params, ParamsSize,
                      NULL, 0,
                      Blob, Capacity, &Actual,
                      BOX_ANSWER_GUARANTEED, NULL);
@@ -109,7 +117,7 @@ static int MetadataTagBytes(const uint8_t *Blob, uint32_t Size,
         if (ReadU16(Blob, Size, &Position, &KeyLength) != 0 ||
             ReadU16(Blob, Size, &Position, &ValueLength) != 0)
             return -ERR_INTERNAL;
-        if (ReadBytes(Blob, Size, &Position, 1u, &Ignored) != 0)
+        if (ReadBytes(Blob, Size, &Position, 1u + sizeof(file_id_t), &Ignored) != 0)   /* its type and owner */
             return -ERR_INTERNAL;
         if (KeyLength == 0)
             return -ERR_INTERNAL;
@@ -137,7 +145,7 @@ static int MetadataTagBytes(const uint8_t *Blob, uint32_t Size,
     return 0;
 }
 
-int FileMetadataRead(file_id_t FileId, FileMetadata *Out)
+int FileMetadataRead(TagsOf Whose, file_id_t FileId, FileMetadata *Out)
 {
     uint8_t *Blob = NULL;
     uint32_t BlobSize = 0;
@@ -148,6 +156,7 @@ int FileMetadataRead(file_id_t FileId, FileMetadata *Out)
     size_t TagBytes = 0;
     char *Filename = NULL;
     char *Tags = NULL;
+    file_id_t *Owners = NULL;
     uint32_t Index;
     int Rc;
 
@@ -155,7 +164,7 @@ int FileMetadataRead(file_id_t FileId, FileMetadata *Out)
         return -ERR_INVALID_ARGUMENT;
     memset(Out, 0, sizeof(*Out));
 
-    Rc = ReadMetadataBlob(FileId, &Blob, &BlobSize);
+    Rc = ReadMetadataBlob(Whose, FileId, &Blob, &BlobSize);
     if (Rc != 0)
         return Rc;
 
@@ -194,8 +203,11 @@ int FileMetadataRead(file_id_t FileId, FileMetadata *Out)
     Filename[FilenameLength] = '\0';
 
     if (TagBytes != 0) {
-        Tags = (char *)malloc(TagBytes + 1u);
-        if (!Tags) {
+        Tags   = (char *)malloc(TagBytes + 1u);
+        Owners = (file_id_t *)malloc(sizeof(file_id_t) * TagCount);
+        if (!Tags || !Owners) {
+            free(Tags);
+            free(Owners);
             free(Filename);
             free(Blob);
             return -ERR_NO_MEMORY;
@@ -209,24 +221,22 @@ int FileMetadataRead(file_id_t FileId, FileMetadata *Out)
         uint16_t ValueLength;
         const uint8_t *Key;
         const uint8_t *Value;
+        const uint8_t *Owner;
 
         if (ReadU16(Blob, BlobSize, &Position, &KeyLength) != 0 ||
             ReadU16(Blob, BlobSize, &Position, &ValueLength) != 0 ||
             ReadBytes(Blob, BlobSize, &Position, 1u, &Value) != 0 ||
+            ReadBytes(Blob, BlobSize, &Position, sizeof(file_id_t), &Owner) != 0 ||
             ReadBytes(Blob, BlobSize, &Position, KeyLength, &Key) != 0 ||
-            ReadBytes(Blob, BlobSize, &Position, ValueLength, &Value) != 0) {
+            ReadBytes(Blob, BlobSize, &Position, ValueLength, &Value) != 0 ||
+            KeyLength == 0) {
             free(Tags);
+            free(Owners);
             free(Filename);
             free(Blob);
             return -ERR_INTERNAL;
         }
-
-        if (KeyLength == 0) {
-            free(Tags);
-            free(Filename);
-            free(Blob);
-            return -ERR_INTERNAL;
-        }
+        memcpy(&Owners[Index], Owner, sizeof(file_id_t));
 
         if (Index != 0)
             Tags[TagPosition++] = ',';
@@ -238,12 +248,24 @@ int FileMetadataRead(file_id_t FileId, FileMetadata *Out)
             TagPosition += ValueLength;
         }
     }
-    if (BlobSize - Position == sizeof(Out->KeptUntil)) {
+    /* After the tags: [u64 kept_until][u64 made_by][u8 role][u8 head_len][head]. */
+    if (BlobSize - Position >= sizeof(Out->KeptUntil) + sizeof(Out->MadeBy) + 2u) {
         memcpy(&Out->KeptUntil, Blob + Position, sizeof(Out->KeptUntil));
         Position += sizeof(Out->KeptUntil);
+        memcpy(&Out->MadeBy, Blob + Position, sizeof(Out->MadeBy));
+        Position += sizeof(Out->MadeBy);
+        Out->Role       = Blob[Position++];
+        Out->HeadLength = Blob[Position++];
+        if (Out->HeadLength <= FILE_HEAD_MOST && BlobSize - Position >= Out->HeadLength) {
+            memcpy(Out->Head, Blob + Position, Out->HeadLength);
+            Position += Out->HeadLength;
+        } else {
+            Position = BlobSize + 1u;      /* a head past its room: no answer to read */
+        }
     }
     if (Position != BlobSize || TagPosition != TagBytes) {
         free(Tags);
+        free(Owners);
         free(Filename);
         free(Blob);
         return -ERR_INTERNAL;
@@ -254,6 +276,7 @@ int FileMetadataRead(file_id_t FileId, FileMetadata *Out)
     Out->TagCount = TagCount;
     Out->Filename = Filename;
     Out->Tags = Tags;
+    Out->Owners = Owners;
     free(Blob);
     return 0;
 }
@@ -264,6 +287,7 @@ void FileMetadataRelease(FileMetadata *Metadata)
         return;
     free(Metadata->Filename);
     free(Metadata->Tags);
+    free(Metadata->Owners);
     memset(Metadata, 0, sizeof(*Metadata));
 }
 

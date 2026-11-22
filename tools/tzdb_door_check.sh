@@ -1,5 +1,5 @@
 #!/bin/sh
-# tzdb_door_check.sh — run the `clock:tzdb` gate stand on the build host.
+# tzdb_door_check.sh — run the zone-table door's gate stand on the build host.
 #
 # The blob behind that door is the only untrusted input boxcxx has, and
 # tzdata::Validate is what stands between it and a reader that follows offsets

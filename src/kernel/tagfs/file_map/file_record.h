@@ -15,6 +15,11 @@ STATIC_ASSERT(TAGFS_FILE_ROLE_SYSTEM == TALLY_FILE_ROLE_SYSTEM, "TAGFS_FILE_ROLE
 STATIC_ASSERT(TAGFS_FILE_ROLE_BOOT   == TALLY_FILE_ROLE_BOOT,   "TAGFS_FILE_ROLE_BOOT is the book's TALLY_FILE_ROLE_BOOT");
 STATIC_ASSERT(TAGFS_FILE_ROLE_KERNEL == TALLY_FILE_ROLE_KERNEL, "TAGFS_FILE_ROLE_KERNEL is the book's TALLY_FILE_ROLE_KERNEL");
 STATIC_ASSERT(TAGFS_FILE_DELETED     == TALLY_FILE_DELETED,     "TAGFS_FILE_DELETED is the book's TALLY_FILE_DELETED");
+STATIC_ASSERT(TAGFS_FILE_MADE_BY     == TALLY_FILE_MADE_BY,     "TAGFS_FILE_MADE_BY is the book's TALLY_FILE_MADE_BY");
+STATIC_ASSERT(TAGFS_FILE_SHOWN       == TALLY_FILE_SHOWN,       "TAGFS_FILE_SHOWN is the book's TALLY_FILE_SHOWN");
+STATIC_ASSERT(TAGFS_FILE_HEAD        == TALLY_FILE_HEAD,        "TAGFS_FILE_HEAD is the book's TALLY_FILE_HEAD");
+STATIC_ASSERT(TAGFS_HEAD_MOST        == TALLY_HEAD_MOST,        "a record keeps as many first bytes as the book does");
+STATIC_ASSERT(TAGFS_HEAD_MOST        <= sizeof(((TagFSMetadata*)0)->head), "and TagFSMetadata room for them");
 
 /*
  * FileRecord — what memory knows of one live file: a header (name, tags,
@@ -66,9 +71,24 @@ typedef struct Parcel   Parcel;
 typedef struct Tract    Tract;
 typedef struct TailSlip TailSlip;
 
-/* One allocation for the header, its tags and its name; the runs are the
- * Tract's. Never changed once it is in the map: shared by reference and freed
- * with its last one, the Tract's references let go with it. */
+/* Where a record stands in the map's name index (name_index.h): one link for
+ * the whole name, one for its stem. Written by the map alone, under its lock,
+ * as the record is put in the map and let go of it — never by a reader, and
+ * zero in a record no map holds. */
+typedef struct NameLink {
+    struct NameLink* next;
+    struct NameLink* prev;
+    uint64_t         file_id;
+    uint32_t         hash;
+    bool             linked;
+    uint8_t          which;          /* 0 the whole name, 1 its stem */
+} NameLink;
+
+/* One allocation for the header, its tags, the programs it shows its tags to
+ * and its name; the runs are the
+ * Tract's. Never changed once it is in the map, its name links apart: shared
+ * by reference and freed with its last one, the Tract's references let go
+ * with it. */
 typedef struct FileRecord {
     volatile uint32_t  refs;
     uint32_t           flags;
@@ -80,6 +100,15 @@ typedef struct FileRecord {
     /* With TAGFS_FILE_DELETED, the time — a book's nanoseconds, as created_time
      * is — until which the file is kept deleted; 0 for a file that is not. */
     uint64_t           keep_until;
+    /* With TAGFS_FILE_MADE_BY, the volume's id of the file of the program that
+     * made this file; 0 for a file no program of the volume made. Set once,
+     * when the file is made, and the same in every record of the file after:
+     * the builders here keep it and the flag one (FileRecordBuild). */
+    uint64_t           made_by;
+    /* With TAGFS_FILE_PASSPORT, the passport of the signed program the file
+     * holds (box_trust.h); 0 for a file none was known in. Kept by every
+     * change of the file but the Ink that lays it anew (FileRecordPassportSet). */
+    uint64_t           passport;
     /* When the Ink that made this record was a small append — its data cost
      * the medium less than a Settle cycle does — in the cadence's
      * microseconds; 0 for any other change. Memory only: the cadence asks it
@@ -105,7 +134,20 @@ typedef struct FileRecord {
      * (tail_slip.h), shared by every record that keeps them; NULL for none. */
     uint64_t           gen;
     const TailSlip*    slip;
-    const uint32_t*    tags;         /* these two point into the header's allocation */
+    NameLink           name_link[2];
+    /* With TAGFS_FILE_SHOWN, the programs this file — a program's — shows its
+     * own tags to: their files' ids, rising, 0 first for every program;
+     * `shown_count` of them, never 0 with the bit and 0 without it. */
+    const uint64_t*    shown_to;
+    uint32_t           shown_count;
+    /* With TAGFS_FILE_HEAD, the file's first bytes: min(size, TAGFS_HEAD_MOST)
+     * of them, exact through every change of what the file holds — the Ink
+     * that makes the change sets them (FileRecordHeadSet) before the record is
+     * shared; head_len 0 for a file of no bytes. Laid beside shown_count, in
+     * the room it leaves before the pointers. */
+    uint8_t            head_len;
+    uint8_t            head[TAGFS_HEAD_MOST];
+    const uint32_t*    tags;         /* these three point into the header's allocation */
     const char*        name;         /* NUL-terminated */
 #ifdef CONFIG_VOLUME_TESTS
     /* Every step FileRecordFind has taken on this record, down the Tract and
@@ -150,18 +192,27 @@ typedef struct {
 
 /* The record `meta` describes — its Strips cut into Parcels — with one
  * reference: NULL when there is no memory, or when a Strip of it names no
- * block (count 0). Every allocation is made here, with no lock held. */
+ * block (count 0). Its flags hold TAGFS_FILE_MADE_BY exactly when meta->made_by
+ * is not 0, TAGFS_FILE_SHOWN exactly when meta->shown_count is,
+ * TAGFS_FILE_HEAD exactly when meta->head_len is and TAGFS_FILE_PASSPORT
+ * exactly when meta->passport is. Every allocation is made
+ * here, with no lock held. */
 FileRecord* FileRecordBuild(const TagFSMetadata* meta);
 
 /* The same, its Strips cut as `cut` gives — the Strips of each Parcel, `ncut`
  * of them, as a Tally laid them (tract.h TractOfParcels): a book's mount. */
 FileRecord* FileRecordBuildCut(const TagFSMetadata* meta, const uint32_t* cut, uint64_t ncut, bool* recut);
 
-/* A record with a new header — `name`, `tags`, `flags`, `keep_until` — and every one of the
- * old record's runs, shared rather than copied; its times, size and file id
- * the old one's. NULL when there is no memory. */
+/* A record with a new header — `name`, `tags`, the programs it shows its
+ * tags to (`shown`, rising), `flags`, `keep_until` — and every one of the old
+ * record's runs, shared rather than copied; its times, size, file id, made_by,
+ * first bytes and passport the old one's (`flags` has TAGFS_FILE_MADE_BY,
+ * TAGFS_FILE_HEAD and TAGFS_FILE_PASSPORT as the old record's fields say and
+ * TAGFS_FILE_SHOWN as `shown_count` does, whatever the caller gave). NULL when there is no
+ * memory. */
 FileRecord* FileRecordRelabel(const FileRecord* old, const char* name, const uint32_t* tags,
-                              uint32_t tag_count, uint32_t flags, uint64_t keep_until);
+                              uint32_t tag_count, const uint64_t* shown, uint32_t shown_count,
+                              uint32_t flags, uint64_t keep_until);
 
 /*
  * The old record with `count` splices applied, its size `size` and its
@@ -178,6 +229,15 @@ FileRecord* FileRecordRelabel(const FileRecord* old, const char* name, const uin
  * back by another, each Strip DATA or SHARED as it was named — in a new array
  * the caller frees, *nfreed of them. A hole owns no ground and is never in it.
  */
+/* The first bytes of `rec` — a record just built, that no map holds yet and
+ * nobody else sees — made `head`, `len` of them (TAGFS_HEAD_MOST at the most),
+ * TAGFS_FILE_HEAD on exactly when there are any. */
+void        FileRecordHeadSet(FileRecord* rec, const uint8_t* head, uint32_t len);
+
+/* The passport of `rec` — a record just built, that no map holds yet and
+ * nobody else sees — made `passport` (bit 63 set), TAGFS_FILE_PASSPORT on. */
+void        FileRecordPassportSet(FileRecord* rec, uint64_t passport);
+
 error_t     FileRecordSplice(const FileRecord* old, const BookSplice* sp, uint64_t count,
                              uint64_t size, uint64_t mtime, FileRecord** out,
                              Strip** freed, uint64_t* nfreed);

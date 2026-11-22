@@ -70,8 +70,7 @@ static bool StandCostFiles(const TallyKey* lo, const TallyKey* hi)
 /* Whether a key of the state lies in [lo, hi) of `tree`, counted here. */
 static bool StandCostKeeps(uint64_t tree, const TallyKey* lo, const TallyKey* hi)
 {
-    uint32_t    id = 0;
-    TagSpelling sp;
+    TagRolled   rolled;
     UseText*    u    = NULL;
     bool        live = false;
     uint64_t    a    = lo && lo->k1 > g_book.frame.data_block ? lo->k1 : g_book.frame.data_block;
@@ -81,7 +80,7 @@ static bool StandCostKeeps(uint64_t tree, const TallyKey* lo, const TallyKey* hi
         return StandCostFiles(lo, hi);
     case TALLY_TAGS:
         return TagRoll(tagfs_get_state()->registry, lo ? (uint32_t)lo->k1 : 0,
-                       hi && hi->k1 < UINT32_MAX ? (uint32_t)hi->k1 : UINT32_MAX, &id, &sp);
+                       hi && hi->k1 < UINT32_MAX ? (uint32_t)hi->k1 : UINT32_MAX, &rolled);
     case TALLY_USE:
         u    = tagfs_recall_use_context(NULL);
         live = u && u->bytes;
@@ -214,7 +213,7 @@ TestResult TestStandTipInCostLives(void)
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
-    TEST_ASSERT_EQ(tagfs_create_file("tipin-lives.bin", NULL, 0, &fid), 0, "a file for data is made");
+    TEST_ASSERT_EQ(tagfs_create_file("tipin-lives.bin", NULL, 0, 0, &fid), 0, "a file for data is made");
     memset(g_test_buffer, 0x5a, sizeof(g_test_buffer));
     for (uint64_t k = 0; k < blocks; k += sizeof(g_test_buffer) / TAGFS_BLOCK_SIZE) {
         TEST_ASSERT_EQ(StandWriteAt(fid, k * TAGFS_BLOCK_SIZE, g_test_buffer, sizeof(g_test_buffer)),
@@ -276,9 +275,9 @@ out:
 
 static int StandCostCreate(const char* name, uint64_t* fid)
 {
-    int rc = tagfs_create_file(name, NULL, 0, fid);
+    int rc = tagfs_create_file(name, NULL, 0, 0, fid);
     if (rc == -(int)ERR_WOULD_BLOCK && TagFSSettle() == OK)
-        rc = tagfs_create_file(name, NULL, 0, fid);
+        rc = tagfs_create_file(name, NULL, 0, 0, fid);
     return rc;
 }
 

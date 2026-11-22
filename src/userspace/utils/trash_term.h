@@ -21,7 +21,7 @@
 static inline bool TrashTermIsHub(file_id_t Id)
 {
     FileMetadata Metadata;
-    if (FileMetadataRead(Id, &Metadata) != 0) return false;
+    if (FileMetadataRead(MY_TAGS, Id, &Metadata) != 0) return false;
     const char *Dot  = Metadata.Filename ? strrchr(Metadata.Filename, '.') : NULL;
     size_t      Stem = Dot ? (size_t)(Dot - Metadata.Filename) : (Metadata.Filename ? strlen(Metadata.Filename) : 0);
     bool        Is   = Stem == 3 && memcmp(Metadata.Filename, "hub", 3) == 0;
@@ -35,7 +35,7 @@ static inline uint64_t TrashTermSeconds(void)
 {
     uint64_t   Days  = TRASH_TERM_DEFAULT_DAYS;
     file_id_t *Ids   = NULL;
-    int        Count = query_all_everywhere("hub", NULL, &Ids);
+    int        Count = query_name_all_everywhere(MY_TAGS, "hub", NULL, NULL, &Ids);
 
     for (int I = 0; I < Count; I++) {
         if (!TrashTermIsHub(Ids[I])) continue;

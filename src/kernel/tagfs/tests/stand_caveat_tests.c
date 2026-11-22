@@ -23,8 +23,7 @@
 // the volume too ("[TagFS FSCK] Bitmap mismatch"). What the volume keeps from
 // this suite is burned file ids and the chain blocks any writer lays down for
 // good (tests.c, the residue guard) — and no tag: every file here is called
-// test_file, the name the core suite has always used, because a create
-// interns its name's stem for good.
+// test_file, the name the core suite has always used, and wears none.
 // ============================================================================
 
 #define STAND_SWEEP_MAX 64u     /* allocations a sweep may refuse, one per try */
@@ -108,12 +107,23 @@ out:
 // A create with one of its allocations refused
 // ----------------------------------------------------------------------------
 
-/* Does the tag index count this file id among the name's? Asked of the index
- * itself, so neither a Use Context nor a tag a question sets aside can
- * stand between the question and the answer. */
-static bool StandNameFinds(uint32_t stem, uint64_t file_id)
+/* Does the name index count this file id among those called `name`? Asked of
+ * the volume itself, so neither a Use Context nor a tag a question sets aside
+ * can stand between the question and the answer. */
+static bool StandNameFinds(const char* name, uint64_t file_id)
 {
-    return TagBitmapHas(tagfs_get_state()->bitmap_index, stem, file_id);
+    uint64_t  ids[16];
+    uint64_t  from = 1;
+    TagFSPage page;
+    while (TagFSNamedPage(TagOwnerPerson(), name, strlen(name), NULL, 0, NULL, 0, from, ids, 16, false, &page) == OK) {
+        for (uint32_t i = 0; i < page.delivered; i++)
+            if (ids[i] == file_id)
+                return true;
+        if (!page.next)
+            break;
+        from = page.next;
+    }
+    return false;
 }
 
 static bool StandVolumeNames(uint64_t file_id)
@@ -127,27 +137,14 @@ static bool StandVolumeNames(uint64_t file_id)
     return true;
 }
 
-/* The file's id out from under the name's tag, the way an Ink takes it out:
- * under the volume's state lock, under which alone the index changes shape. */
-static void StandNameLetGo(uint32_t stem, uint64_t id)
-{
-    TagFSState* fs = tagfs_get_state();
-    TagFSLockTake(&fs->lock);
-    TagBitmapLeave(fs->bitmap_index, stem, id);
-    TagFSLockDrop(&fs->lock);
-}
-
 /* One create, allocation n refused, judged whole or not. A create is whole
  * when it either made the file — named by the volume, found by its name, and
- * after its delete found by nothing — or made nothing at all. The name's row
- * is put back when a deleted file lingers in it: nothing else would ever
- * clear that bit, and the next test would inherit a name that finds a file
- * that is not there.
+ * after its delete found by nothing — or made nothing at all.
  *
  * The file a create made is deleted on every path out, and by the id the
  * create answered — `id` is only the one it should have taken, and may be
  * another creator's. A refused create that left a record behind is failed. */
-static TestResult StandCreateOnce(uint32_t n, uint32_t stem, bool* fired, bool* whole)
+static TestResult StandCreateOnce(uint32_t n, bool* fired, bool* whole)
 {
     TestResult verdict = TEST_PASS;
     uint64_t   id      = tagfs_file_ceiling();      /* the id this create takes */
@@ -157,17 +154,15 @@ static TestResult StandCreateOnce(uint32_t n, uint32_t stem, bool* fired, bool* 
 
     HeapFailArm(amp_get_core_index(), n);
     armed = true;
-    int rc = tagfs_create_file("test_file", NULL, 0, &made);
+    int rc = tagfs_create_file("test_file", NULL, 0, 0, &made);
     *fired = HeapFailFired();
     HeapFailDisarm();
     armed = false;
 
     bool named = StandVolumeNames(id);
-    bool found = StandNameFinds(stem, id);
+    bool found = StandNameFinds("test_file", id);
     if (rc != 0) {
         TEST_ASSERT(!named, "a refused create leaves no record behind");
-        if (found)
-            StandNameLetGo(stem, id);
         *whole = !found;
         goto out;
     }
@@ -176,9 +171,7 @@ static TestResult StandCreateOnce(uint32_t n, uint32_t stem, bool* fired, bool* 
     TEST_ASSERT_EQ(made, id, "a create takes the next id");
     TEST_ASSERT_EQ(tagfs_delete_file(made, INK_UNWARRANTED), 0, "the file a create made can be deleted");
     owned = 0;
-    bool lingers = StandNameFinds(stem, made);
-    if (lingers)
-        StandNameLetGo(stem, made);
+    bool lingers = StandNameFinds("test_file", made);
     *whole = named && found && !lingers;
 out:
     if (armed)
@@ -196,24 +189,20 @@ TestResult TestStandCreateAllOrNothing(void)
     uint32_t   broken_at = 0;
     bool       swept     = false;
 
-    /* The name's tag is made, if no test before made it, by one create before
-     * the sweep — the sweep measures a create, not the first create of a name.
-     * That create also leaves the index and the map of live files as every
-     * create of the sweep finds them: a leaf of the map that was full is split
-     * by it and stays split, and what the name's members need for one more
-     * file is taken and given back by each create alike (tag_bitmap.c,
-     * file_map/). */
-    TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0,
-                   "a create before the sweep interns the name");
+    /* One create before the sweep — the sweep measures a create, not the
+     * first create of a name. That create leaves the map of live files and
+     * its name index as every create of the sweep finds them: a leaf of the
+     * map that was full is split by it and stays split, and what the name
+     * index needs for one more file is taken and given back by each create
+     * alike (file_map/). */
+    TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, 0, &file_id), 0, "a create before the sweep is made");
     TEST_ASSERT_EQ(tagfs_delete_file(file_id, INK_UNWARRANTED), 0, "and its file is deleted");
     file_id = 0;
-    uint32_t stem = tagfs_tag_lookup("test_file");
-    TEST_ASSERT(stem != TAGFS_INVALID_TAG_ID, "the name has a tag");
 
     for (uint32_t n = 1; n <= STAND_SWEEP_MAX; n++) {
         bool fired = false;
         bool whole = true;
-        TestResult once = StandCreateOnce(n, stem, &fired, &whole);
+        TestResult once = StandCreateOnce(n, &fired, &whole);
         if (once != TEST_PASS) {
             verdict = once;
             goto out;
@@ -269,7 +258,7 @@ static TestResult StandWriteOnce(uint32_t n, StandWriteSweep* sweep, bool* fired
 
     memset(&before, 0, sizeof(before));
     memset(&after, 0, sizeof(after));
-    TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, &file_id), 0,
+    TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, 0, &file_id), 0,
                    "a file to write into is created");
     handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
     TEST_ASSERT(handle != NULL, "and opened");

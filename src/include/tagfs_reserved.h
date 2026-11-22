@@ -17,8 +17,9 @@
  * leaves its id unused. */
 #define TAGFS_RESERVED_KEYS(X) \
     X(SYSTEM,"system") X(UTILITY,"utility") X(APP,"app") X(GOD,"god") \
-    X(STOPPED,"stopped") X(BYPASS,"bypass") X(NETWORK,"network")
-#define TAGFS_RESERVED_COUNT 7
+    X(STOPPED,"stopped") X(BYPASS,"bypass") X(NETWORK,"network") \
+    X(SEE_TAGS,"see-tags") X(CHANGE_TAGS,"change-tags")
+#define TAGFS_RESERVED_COUNT 9
 
 /* Volume tag ids stop one short of bit 31. Bit 31 belongs to the kernel's
  * Logbook (core/touch/logbook.h) — the vocabulary of occurrences, which must

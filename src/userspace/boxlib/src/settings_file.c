@@ -20,7 +20,7 @@
 int settings_program_name(file_id_t program, char out[32])
 {
     FileMetadata metadata;
-    int          rc = FileMetadataRead(program, &metadata);
+    int          rc = FileMetadataRead(MY_TAGS, program, &metadata);
     if (rc != 0) return rc;
     const char *name = metadata.Filename ? metadata.Filename : "";
     const char *dot  = strrchr(name, '.');
@@ -39,7 +39,7 @@ int settings_program_name(file_id_t program, char out[32])
 static bool file_called(file_id_t file, const char *name)
 {
     FileMetadata metadata;
-    if (FileMetadataRead(file, &metadata) != 0) return false;
+    if (FileMetadataRead(MY_TAGS, file, &metadata) != 0) return false;
     bool called = metadata.Filename && strcmp(metadata.Filename, name) == 0;
     FileMetadataRelease(&metadata);
     return called;
@@ -54,14 +54,12 @@ int settings_file_find(const char *program, file_id_t *file, char **saying)
 
     *file = 0;
     if (saying) *saying = NULL;
-    /* A name too long for a file name, or one that cannot be asked as a tag,
-     * has no settings file. */
-    if (strlen(program) > SETTINGS_NAME_MAX || strchr(program, ':') || strchr(program, ',')) return 0;
+    /* A name too long for a file name has no settings file. */
+    if (strlen(program) > SETTINGS_NAME_MAX) return 0;
     snprintf(name, sizeof(name), "%s.settings", program);
-    /* Every file wears the stem of its name as a tag: clock.settings wears
-     * clock. A settings file in the trash says nothing: the person set it
-     * aside. */
-    int count = query_all_everywhere(program, NULL, &ids);
+    /* Asked of the name index by the whole name. A settings file in the trash
+     * says nothing: the person set it aside. */
+    int count = query_name_all_everywhere(MY_TAGS, name, NULL, NULL, &ids);
     if (count < 0) return count;
     for (int i = 0; i < count; i++) {
         if (!file_called(ids[i], name)) continue;
@@ -83,7 +81,7 @@ int settings_file_find(const char *program, file_id_t *file, char **saying)
 int settings_file_read(file_id_t file, char **bytes, size_t *size)
 {
     FileMetadata metadata;
-    int          rc = FileMetadataRead(file, &metadata);
+    int          rc = FileMetadataRead(MY_TAGS, file, &metadata);
     *bytes = NULL;
     *size  = 0;
     if (rc != 0) return rc;
@@ -221,7 +219,7 @@ static int change_file(BoxSettings *settings, const SettingsChangeAsked *change)
     if (settings->File == 0) {
         char    file_name[32];
         snprintf(file_name, sizeof(file_name), "%s.settings", settings->Program);
-        int64_t made = create_everywhere(file_name, NULL);
+        int64_t made = create_everywhere(MY_TAGS, file_name, NULL);
         if (made < 0) {
             free(bytes);
             return (int)made;

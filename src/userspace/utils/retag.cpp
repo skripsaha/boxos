@@ -31,6 +31,7 @@
 #include <utility>
 #include <vector>
 
+#include "box/cxx/whose.h"
 #include "box/color.h"
 #include "box/cxx/error.h"
 #include "box/display.h"
@@ -185,7 +186,7 @@ struct Plan {
 std::optional<Plan> PlanFor(file_id_t File, const Change &Asked)
 {
     FileMetadata Facts;
-    if (FileMetadataRead(File, &Facts) != 0) return std::nullopt;
+    if (FileMetadataRead(box::tagfs::person_tags, File, &Facts) != 0) return std::nullopt;
     Plan One;
     One.File        = File;
     One.Name        = Facts.Filename ? Facts.Filename : "";
@@ -304,7 +305,7 @@ std::optional<std::string> Apply(const Plan &One)
     const auto TakeOff = [&]() -> std::optional<std::string> {
         for (const Move &Each : One.Moves) {
             const std::string Text   = Each.Old.Spelled();
-            const int         Answer = tag_remove(One.File, Text.c_str());
+            const int         Answer = tag_remove(box::tagfs::person_tags, One.File, Text.c_str());
             if (Answer != 0 && box_errno_of(Answer) != ERR_TAGFS_TAG_NOT_FOUND)
                 return std::format("{} would not come off: {}", Text, Why(Answer));
         }
@@ -313,7 +314,7 @@ std::optional<std::string> Apply(const Plan &One)
     const auto PutOn = [&](const std::vector<Tag> &Tags) -> std::optional<std::string> {
         for (const Tag &Each : Tags) {
             const std::string Text = Each.Spelled();
-            if (const int Answer = tag_add(One.File, Text.c_str()); Answer != 0)
+            if (const int Answer = tag_add(box::tagfs::person_tags, One.File, Text.c_str()); Answer != 0)
                 return std::format("{} would not go on: {}", Text, Why(Answer));
         }
         return std::nullopt;
@@ -361,7 +362,7 @@ int Retag(const std::vector<std::string> &Words, std::vector<file_id_t> Where, b
     } else {
         const std::string Text  = From->Spelled();
         file_id_t        *Ids   = nullptr;
-        const int         Count = query_all(Text.c_str(), nullptr, &Ids);
+        const int         Count = query_all(box::tagfs::person_tags, Text.c_str(), nullptr, &Ids);
         if (Count < 0) {
             Say(std::format("retag: the volume would not say which files wear {}: {}\n", Text, Why(Count)));
             return 1;

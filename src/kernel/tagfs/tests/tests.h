@@ -134,6 +134,10 @@ typedef struct {
     VOLUME_TESTS_ONLY(SUITE(stand_book_room)) \
     VOLUME_TESTS_ONLY(SUITE(stand_errata)) \
     VOLUME_TESTS_ONLY(SUITE(stand_keep)) \
+    VOLUME_TESTS_ONLY(SUITE(stand_name)) \
+    VOLUME_TESTS_ONLY(SUITE(stand_retire)) \
+    VOLUME_TESTS_ONLY(SUITE(stand_show)) \
+    VOLUME_TESTS_ONLY(SUITE(stand_head)) \
     VOLUME_TESTS_ONLY(SUITE(stand_toll)) \
     VOLUME_TESTS_ONLY(SUITE(stand_dog_ear)) \
     VOLUME_TESTS_ONLY(SUITE(stand_slip)) \
@@ -146,6 +150,7 @@ typedef struct {
     VOLUME_TESTS_ONLY(SUITE(stand_commonhold)) \
     VOLUME_TESTS_ONLY(SUITE(stand_conjugate)) \
     VOLUME_TESTS_ONLY(SUITE(stand_dedup)) \
+    VOLUME_TESTS_ONLY(SUITE(stand_made_by)) \
     /* the walk ends here; a new suite's line goes above */
 
 #define TEST_SUITE_DECLARED(name) extern const TestSuite g_##name##_suite;

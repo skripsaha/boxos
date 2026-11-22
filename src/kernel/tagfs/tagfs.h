@@ -44,6 +44,91 @@
 // In-Memory Structures: Tag Registry
 // ----------------------------------------------------------------------------
 
+/*
+ * ‼ A TAG IS ITS TEXT AND WHOSE IT IS.
+ *
+ * Every tag has an owner. The person's tags are the labels people put on
+ * files to find them again — and the language Touch, the processes and the
+ * Use Context speak, which the person's Use Context is matched against. A
+ * program's own tags are its labels for itself: a game's `save` is not the
+ * person's `save`, and the two are two tags with two ids, so neither ever
+ * meets the other's files. A program is who it is as no other program can
+ * be: a signed one its passport — its author and its name, as its box's
+ * signature proves them (box_trust.h), the same program in every file and
+ * every version of it —, any other the file it was started from (its fid),
+ * the one name of it the volume vouches for. A passport carries bit 63
+ * (TAGFS_PASSPORT_BIT), which no file's id does. TAG_OWNER_PROGRAM is the
+ * book's TALLY_OWNER_PROGRAM.
+ */
+#define TAG_OWNER_PERSON   0u
+#define TAG_OWNER_PROGRAM  1u
+
+typedef struct {
+    uint8_t  kind;   /* TAG_OWNER_PERSON or TAG_OWNER_PROGRAM */
+    uint64_t id;     /* the program's passport, or its fid; 0 for the person */
+} TagOwner;
+
+static inline TagOwner TagOwnerPerson(void)
+{
+    return (TagOwner){ TAG_OWNER_PERSON, 0 };
+}
+
+static inline TagOwner TagOwnerProgram(uint64_t fid)
+{
+    return (TagOwner){ TAG_OWNER_PROGRAM, fid };
+}
+
+static inline bool TagOwnerSame(TagOwner a, TagOwner b)
+{
+    return a.kind == b.kind && a.id == b.id;
+}
+
+/* The owner as the deck's answers name it (boxos_decks.h): 0 the person, a
+ * program the file it is named by (TagFSProgramCard) — who it is, while it is
+ * no more on the volume and its tags not yet retired. */
+uint64_t TagOwnerWord(TagOwner owner);
+
+/*
+ * Whose tags a list lets in. One owner's (`all` false: `owner`), or every
+ * owner its asker may see (`all`): the asker's own — `reader`, its program's
+ * file, 0 for none —, those of the programs that show their tags to it
+ * (`shown`, rising, `nshown` of them), and with `everyone` the person's and
+ * every program's: the person's eyes (storage_tags.c).
+ */
+typedef struct {
+    bool            all;
+    bool            everyone;
+    TagOwner        owner;
+    uint64_t        reader;
+    const uint64_t* shown;
+    uint32_t        nshown;
+} TagView;
+
+static inline TagView TagViewOf(TagOwner owner)
+{
+    return (TagView){ .all = false, .owner = owner };
+}
+
+/* Whether `view` lets `owner`'s tags in. */
+static inline bool TagViewLets(const TagView* view, TagOwner owner)
+{
+    if (!view->all)
+        return TagOwnerSame(owner, view->owner);
+    if (view->everyone)
+        return true;
+    if (owner.kind != TAG_OWNER_PROGRAM)
+        return false;
+    if (view->reader && owner.id == view->reader)
+        return true;
+    uint32_t lo = 0, hi = view->nshown;
+    while (lo < hi) {
+        uint32_t mid = lo + (hi - lo) / 2u;
+        if (view->shown[mid] < owner.id) lo = mid + 1u;
+        else                             hi = mid;
+    }
+    return lo < view->nshown && view->shown[lo] == owner.id;
+}
+
 /* key and value are NUL-terminated copies, their lengths kept beside them so
  * a record is packed from what was measured once, never cut by a cast. */
 typedef struct TagRegistryEntry {
@@ -54,20 +139,29 @@ typedef struct TagRegistryEntry {
     uint8_t                  key_len;
     uint8_t                  flags;
     uint32_t                 tag_id;
+    TagOwner                 owner;
+    uint64_t                 retired_gen;   /* RETIRED: the Ink the book holds it retired from — 0 for one
+                                             * the book already holds retired, TAG_RETIRING_OPEN while the
+                                             * files are still being cleared of it */
 } TagRegistryEntry;
+
+/* A tag whose retirement has begun and is not yet laid in a stitch the book
+ * settled: retired_gen is TAG_RETIRING_OPEN until its files are clear of it. */
+#define TAG_RETIRING_OPEN  UINT64_MAX
 
 typedef struct TagRegistryNode {
     uint32_t                tag_id;
     struct TagRegistryNode* next;
 } TagRegistryNode;
 
-/* Every tag of one key. Its inside is tag_registry.c's alone: a key group's
- * array is freed by the next tag of its key, so nothing outside the registry's
- * lock may hold a pointer into one (MP-D11) — TagRegistryKeyIds copies. */
+/* Every tag of one key and one owner. Its inside is tag_registry.c's alone: a
+ * key group's array is freed by the next tag of its key, so nothing outside
+ * the registry's lock may hold a pointer into one (MP-D11) — TagRegistryKeyIds
+ * copies. */
 typedef struct TagKeyGroup TagKeyGroup;
 
-/* The three hashes — tags by their text, tags by their id, and a key's every
- * tag — start at TAGFS_REG_BUCKETS and TAGFS_KEY_BUCKETS buckets and double as
+/* The three hashes — tags by their owner and text, tags by their id, and an
+ * owner's key's every tag — start at TAGFS_REG_BUCKETS and TAGFS_KEY_BUCKETS buckets and double as
  * they fill: a new table is built outside the lock and swapped in under it.
  * The id's hash holds the entries that exist and nothing for an id no tag has,
  * so it costs what the registry holds, never the highest id it ever gave; it
@@ -78,8 +172,10 @@ typedef struct {
 
     TagRegistryEntry** by_id;
 
-    uint32_t total_tags;
-    uint64_t text_bytes;     /* the keys' and values' bytes of every tag held */
+    uint32_t total_tags;     /* every id the registry knows: the tags it holds and the ones retired */
+    uint64_t text_bytes;     /* the bytes every tag the book has not yet laid retired carries past its fixed
+                              * fields: key, value, owner */
+    uint32_t program_tags;   /* the tags of programs whose retirement is not yet finished */
     uint32_t next_id;
 
     TagKeyGroup** key_buckets;
@@ -93,6 +189,13 @@ typedef struct {
     uint32_t          coined_next;
     uint64_t          coined_text;    /* what the ribbon's room holds for them (settle/ribbon.c, RibbonHeld) */
     bool              said_full;      /* every id issued: said once, the first time a tag is refused */
+
+    /* The ids retired since the last stitch that settled their Coined RETIRED, each wearing its
+     * retired_gen: a stitch lays one when the Ink it was retired at is among its own (settle/sewing.c).
+     * Under `lock`. */
+    uint32_t*         retiring;
+    uint32_t          retiring_count;
+    uint32_t          retiring_cap;
 } TagRegistry;
 
 // ----------------------------------------------------------------------------
@@ -173,24 +276,26 @@ typedef struct {
 int          tag_registry_init(TagRegistry* reg);
 void         tag_registry_destroy(TagRegistry* reg);
 
-/* The id of a tag, issued when the registry has none yet. The widths are
- * judged before anything is allocated (ERR_TAGFS_TAG_TOO_LONG); a registry
+/* The id of `owner`'s tag, issued when the registry has none yet. The widths
+ * are judged before anything is allocated (ERR_TAGFS_TAG_TOO_LONG); a registry
  * that has issued every id refuses with ERR_TAGFS_REGISTRY_FULL and says so
  * once; ERR_NO_MEMORY when memory ran out. */
-error_t      TagRegistryIntern(TagRegistry* reg, const TagSpelling* tag, uint32_t* out_id);
-uint32_t     TagRegistryLookup(TagRegistry* reg, const TagSpelling* tag);
+error_t      TagRegistryIntern(TagRegistry* reg, TagOwner owner, const TagSpelling* tag, uint32_t* out_id);
+uint32_t     TagRegistryLookup(TagRegistry* reg, TagOwner owner, const TagSpelling* tag);
 void         tag_registry_mark_system(TagRegistry* reg, uint32_t tag_id);
 
-/* A tag's key and value as spans into the registry's own copies, and whether
- * the volume calls it its own. A tag's text never changes and is freed only
- * with the registry, so the spans hold for as long as the registry does. */
+/* A tag's key and value as spans into the registry's own copies, whether the
+ * volume calls it its own, and whose it is (`owner` when not NULL). A tag's
+ * text never changes and is freed only with the registry, so the spans hold
+ * for as long as the registry does. */
 bool         TagRegistrySpelling(TagRegistry* reg, uint32_t tag_id, TagSpelling* out,
-                                 bool* is_system);
+                                 bool* is_system, TagOwner* owner);
 
-/* The id of every tag whose key is the key_len bytes at `key`, COPIED:
- * out->ids is the caller's to kfree, never the registry's own array. No such
- * key: NULL and 0. */
-error_t      TagRegistryKeyIds(TagRegistry* reg, const char* key, size_t key_len, TagIdList* out);
+/* The id of every tag of `owner`'s whose key is the key_len bytes at `key`,
+ * COPIED: out->ids is the caller's to kfree, never the registry's own array.
+ * No such key: NULL and 0. */
+error_t      TagRegistryKeyIds(TagRegistry* reg, TagOwner owner, const char* key, size_t key_len,
+                               TagIdList* out);
 
 // ----------------------------------------------------------------------------
 // Bitmap Index API
@@ -438,8 +543,12 @@ uint64_t tagfs_block_to_sector(uint64_t block);
 /* 0, or a negative -ERR_*: a name whose tag the registry refuses (too long,
  * the registry full) is refused with the registry's code, no file is made
  * without the tag its name gives it, and a volume that has issued every file
- * id it can is refused ERR_TAGFS_FID_EXHAUSTED (ink_book.c). */
-int  tagfs_create_file(const char* filename, const uint32_t* tag_ids, uint32_t tag_count,
+ * id it can is refused ERR_TAGFS_FID_EXHAUSTED (ink_book.c). `made_by` is the
+ * volume's id of the file of the program that makes the file — the program
+ * of the cabin that asked, CabinProgramFile — or 0 when none does (the
+ * kernel itself, a program started from bytes): the file's record remembers
+ * it for good (TAGFS_FILE_MADE_BY). */
+int  tagfs_create_file(const char* filename, const uint32_t* tag_ids, uint32_t tag_count, uint64_t made_by,
                        uint64_t* out_file_id);
 
 /* The file given up, or renamed — its old name's tag off, the new one's on.
@@ -485,26 +594,28 @@ int  tagfs_add_tag(uint64_t file_id, uint32_t tag_id);
 int  tagfs_remove_tag(uint64_t file_id, uint32_t tag_id);
 bool tagfs_has_tag(uint64_t file_id, uint32_t tag_id);
 
-/* The tag a spelling names, interned and put on the file, both inside one
- * mounting of the volume: OK, or the real refusal — the registry's (the tag
- * too long, the registry full), or the Ink's: ERR_FILE_NOT_FOUND,
+/* `owner`'s tag a spelling names, interned and put on the file, both inside
+ * one mounting of the volume: OK, or the real refusal — the registry's (the
+ * tag too long, the registry full), or the Ink's: ERR_FILE_NOT_FOUND,
  * ERR_DEVICE_NOT_READY, ERR_TAGFS_READ_ONLY, ERR_NO_MEMORY;
  * ERR_TAGFS_NOT_INITIALIZED with no volume. */
-error_t tagfs_add_tag_string(uint64_t file_id, const TagSpelling* tag);
-/* What the spelling names comes off the file: that tag when it has a value,
- * every tag of its key when it is bare. 0 once one of them came off, or a
+error_t tagfs_add_tag_string(TagOwner owner, uint64_t file_id, const TagSpelling* tag);
+/* What `owner`'s spelling names comes off the file: that tag when it has a
+ * value, every tag of its key when it is bare — `owner`'s, never another's of
+ * the same text. 0 once one of them came off, or a
  * negative -ERR_*: -ERR_TAGFS_TAG_NOT_FOUND when the file wore none of them,
  * -ERR_FILE_NOT_FOUND when there is no such file, or the first refusal of
  * taking one off — -ERR_DEVICE_NOT_READY, -ERR_TAGFS_READ_ONLY or
  * -ERR_NO_MEMORY. */
-int  tagfs_remove_tag_string(uint64_t file_id, const TagSpelling* tag);
+int  tagfs_remove_tag_string(TagOwner owner, uint64_t file_id, const TagSpelling* tag);
 
 bool tagfs_key_is_reserved(const char *key, size_t key_len);
 
 /*
  * The live files a question matches, a page at a time and in file id order
  * (query/query.c): every file wearing all of `tags` and none of `without`
- * ("key:..." is any tag of the key, in either list) — a question of no tags is
+ * ("key:..." is any tag of the key, in either list), both of them `owner`'s
+ * tags and never another's of the same text — a question of no tags is
  * every file but those `without` names, and of neither every file,
  * TagFSListPage. Every tag is a tag like any other: which files are set aside
  * is the asker's to say. The one files the volume leaves out of its own accord
@@ -515,21 +626,51 @@ bool tagfs_key_is_reserved(const char *key, size_t key_len);
  * refusal: ERR_TAGFS_NOT_INITIALIZED with no volume, ERR_NO_MEMORY when the
  * question could not be put to the index.
  */
-error_t  TagFSQueryPage(const TagSpelling* tags, uint32_t count, const TagSpelling* without,
+error_t  TagFSQueryPage(TagOwner owner, const TagSpelling* tags, uint32_t count, const TagSpelling* without,
                         uint32_t without_count, uint64_t from, uint64_t* out, uint32_t room,
                         bool want_total, TagFSPage* page);
 error_t  TagFSListPage(uint64_t from, uint64_t* out, uint32_t room, bool want_total,
                        TagFSPage* page);
 /* The same question asked of the files kept deleted alone: those that wear all
  * of `tags` and none of `without`, a question of neither every one of them. */
-error_t  TagFSQueryKeptPage(const TagSpelling* tags, uint32_t count, const TagSpelling* without,
+error_t  TagFSQueryKeptPage(TagOwner owner, const TagSpelling* tags, uint32_t count, const TagSpelling* without,
                             uint32_t without_count, uint64_t from, uint64_t* out, uint32_t room,
                             bool want_total, TagFSPage* page);
 /*
- * The tags files wear, a page at a time and in the order of their numbers
- * (query/query.c): from the tag numbered `from` on, every tag at least one
- * live file wears — one of the files that wear all of `within` and none of
- * `without`, as TagFSQueryPage asks — with how many of them do, written into
+ * The live files called `word` — its `length` bytes are the whole of the
+ * file's name or its stem, the name up to its last dot — that wear all of
+ * `tags` and none of `without`, `owner`'s tags (as TagFSQueryPage reads them;
+ * none asked: every file so called), a page at a time and in file id order,
+ * as TagFSQueryPage gives them. A name is no tag and no one's: every asker
+ * meets every file so called, and the question is answered by the name index
+ * (file_map/name_index.h), kept exact by every change to a file. The files
+ * kept deleted are not met. ERR_INVALID_ARGUMENT for a word of no bytes; the
+ * rest as TagFSQueryPage.
+ */
+error_t  TagFSNamedPage(TagOwner owner, const char* word, size_t length, const TagSpelling* tags, uint32_t count,
+                        const TagSpelling* without, uint32_t without_count, uint64_t from, uint64_t* out,
+                        uint32_t room, bool want_total, TagFSPage* page);
+/* The live files whose first bytes begin with `bytes`, `length` of them (1 to
+ * TAGFS_HEAD_MOST) — what a file is is told by them, and each file's record
+ * keeps them exact (FileRecord.head) — a page at a time in file id order, as
+ * TagFSQueryPage gives them; a file kept deleted is not met. No file's bytes
+ * are read: the records answer. ERR_INVALID_ARGUMENT for no bytes or more
+ * than a record keeps; ERR_TAGFS_NOT_INITIALIZED with no volume. */
+error_t  TagFSStartingWithPage(const uint8_t* bytes, uint32_t length, uint64_t from, uint64_t* out, uint32_t room,
+                               bool want_total, TagFSPage* page);
+/* The words a name answers to, as the name index takes them: the whole name
+ * (lengths[0], its `length`) and, when the name has a dot with something
+ * before it, its stem — the bytes up to the last dot (lengths[1]). How many
+ * words there are: 2, 1 for a name with no stem (`kernel`, `.profile`), 0 for
+ * a name of no bytes. Every word starts at `name`. */
+uint32_t TagFSNameWords(const char* name, size_t length, size_t lengths[2]);
+/*
+ * The tags of `view` files wear, a page at a time and in the order of their
+ * numbers (query/query.c): from the tag numbered `from` on, every tag `view`
+ * lets in at least one live file wears — of one owner's, one of the files
+ * that wear all of `within` and none of `without`, that owner's tags, as
+ * TagFSQueryPage asks; a view of every owner asks neither
+ * (ERR_INVALID_ARGUMENT) — with how many of them do and whose it is, written into
  * `out` as STORAGE_TAG_LIST records (boxos_decks.h) while they fit its `room`
  * bytes. A tag no such file wears — a process's, a Touch's, a Bay's, which the
  * registry names too — is passed over. *used the bytes written, *delivered the
@@ -537,9 +678,9 @@ error_t  TagFSQueryKeptPage(const TagSpelling* tags, uint32_t count, const TagSp
  * OK, or the refusal: ERR_TAGFS_NOT_INITIALIZED with no volume, ERR_NO_MEMORY,
  * or ERR_BUFFER_TOO_SMALL when not even the first record fits.
  */
-error_t  TagFSTagPage(const TagSpelling* within, uint32_t within_count, const TagSpelling* without,
-                      uint32_t without_count, uint32_t from, uint8_t* out, uint32_t room, uint32_t* used,
-                      uint32_t* delivered, uint32_t* next);
+error_t  TagFSTagPage(const TagView* view, const TagSpelling* within, uint32_t within_count,
+                      const TagSpelling* without, uint32_t without_count, uint32_t from, uint8_t* out,
+                      uint32_t room, uint32_t* used, uint32_t* delivered, uint32_t* next);
 /* The file id the next create takes — no id of this volume has reached it.
  * 0 when no volume is mounted. */
 uint64_t tagfs_file_ceiling(void);
@@ -651,7 +792,9 @@ int      tagfs_volume_write(uint64_t vlba, uint32_t count, const void* buffer);
  * of the name rather than a pointer into the volume. Each takes the door for
  * the length of its answer, so none of them can be holding the registry when
  * it goes. TAGFS_INVALID_TAG_ID / false is the answer when there is no volume.
- * A tag's text is read by the one spelling (tag_spelling.h).
+ * A tag's text is read by the one spelling (tag_spelling.h). These speak the
+ * person's tags — the language Touch, the processes, Bay, Brook and the Use
+ * Context share — and never a program's own (TagOwner).
  */
 uint32_t tagfs_tag_lookup(const char* tag);
 uint32_t TagFSLookupSpelling(const TagSpelling* tag);
@@ -661,6 +804,12 @@ uint32_t TagFSLookupSpelling(const TagSpelling* tag);
 error_t  tagfs_tag_intern(const char* tag, uint32_t* out_id);
 error_t  TagFSInternSpelling(const TagSpelling* tag, uint32_t* out_id);
 
+/* The same for `owner`'s tag — a program's own, or the person's — for the
+ * storage deck, which speaks for whichever its caller names (boxos_decks.h,
+ * STORAGE_TAGS_*). The person's alone are words of the Use Context, and only
+ * they are bound to it. */
+error_t  TagFSInternOwned(TagOwner owner, const TagSpelling* tag, uint32_t* out_id);
+
 /* The whole text of a tag id — "app:editor" — and its length. It is written
  * into `out` only when it fits whole, NUL and all, and `out` is left empty
  * otherwise, so a caller is never handed a shorter tag than the one it asked
@@ -668,16 +817,100 @@ error_t  TagFSInternSpelling(const TagSpelling* tag, uint32_t* out_id);
  * the volume has no such tag, or there is no volume. */
 size_t   tagfs_tag_text(uint32_t tag_id, char* out, size_t out_size);
 
-/* Whether tag `tag_id` is one a pattern names (TagPatternMatches), read in
- * place in the volume's registry. */
+/* Whether program `owner` (TagOwner) is on the volume mounted, so that its
+ * own tags are its: a signed program's passport while a file of it is — live,
+ * or kept deleted; a program named by its file while the volume is the one
+ * `volume` names (its Deed's uuid) and holds that file, holding no signed
+ * program since. False with no volume. */
+bool     TagFSHoldsProgram(const uint8_t volume[16], uint64_t owner);
+
+/* Who a program is, as its own tags are owned (TagOwner): a signed program
+ * its passport (box_trust.h, bit 63 set), any other the file it is. Programs
+ * name programs by a file of them, and these speak between the two: the
+ * program file `fid` holds — the passport its record keeps, else `fid`
+ * itself, 0 for a file the volume has not —; the file program `owner` is
+ * named by — its own, or of a passport the least live file that keeps it,
+ * else the least kept deleted —; and every file of it, live or kept deleted,
+ * rising: how many, the first `room` written to `out`. A program that is no
+ * more on the volume has none: 0, as with no volume. */
+uint64_t TagFSProgramOf(uint64_t fid);
+uint64_t TagFSProgramCard(uint64_t owner);
+uint32_t TagFSProgramFiles(uint64_t owner, uint64_t* out, uint32_t room);
+
+/* The card of file `fid` laid with who the program it holds is, once one is
+ * started from it: the passport its signature gives it, or 0 for a program
+ * with no signature that holds — one Ink when the card says another, none
+ * when it says the same (InkPassport). */
+error_t  TagFSPassportLay(uint64_t fid, uint64_t passport);
+
+/* Whether tag `tag_id` is one of the person's (TagOwner): false for a
+ * program's own, an id the volume has not, and with no volume. */
+bool     TagFSTagIsPersons(uint32_t tag_id);
+
+/*
+ * A program's own tags shown to other programs (show/show.c). A program
+ * shows all its tags, those to come too, to another program or to every
+ * program (reader 0); one shown them sees them, finds the files by them and
+ * lists them, and never puts them on nor takes them off. Whom a program shows
+ * them to is the cards of its files (FileRecord.shown_to) — every file of a
+ * signed program holds the one list, and a card that comes to be one of its
+ * takes it (InkPassport) — so the last file let go takes it with it, and a
+ * reader that left is taken out of every list by the volume's duty
+ * (retire/retire.c). Who may ask which is the caller's to judge
+ * (storage_tags.c): a program changes its own list alone. A program is asked
+ * of here as who it is (TagOwner) and named in every list by its card
+ * (TagFSProgramCard), as programs name programs.
+ */
+
+/* Program `program`'s files show its tags to `reader` (0: every program), or
+ * — `show` false — no longer do. OK, and OK changing nothing for what stands
+ * already; ERR_INVALID_ARGUMENT for program 0 or a program shown to itself;
+ * ERR_FILE_NOT_FOUND for a program, or a reader shown to, the volume has not,
+ * and a program kept deleted, every file of it, that would show to one more;
+ * the Ink's refusal; ERR_TAGFS_NOT_INITIALIZED with no volume. */
+error_t  TagFSShowTags(uint64_t program, uint64_t reader, bool show);
+
+/* Whether `program` shows its tags to `reader` — by name, or to every
+ * program. False for a program the volume has not, and with no volume. */
+bool     TagFSShows(uint64_t program, uint64_t reader);
+
+/* The programs that show their tags to `reader` — by name or to every
+ * program, `reader` itself left out — a page at a time in the order of their
+ * cards, from `from` on (TagFSPage). ERR_TAGFS_NOT_INITIALIZED with no volume. */
+error_t  TagFSShownToPage(uint64_t reader, uint64_t from, uint64_t* out, uint32_t room, bool want_total,
+                          TagFSPage* page);
+
+/* The programs `program` shows its tags to, rising, 0 first for every
+ * program: *out the list — the caller's to kfree, NULL for none — *count how
+ * many. ERR_FILE_NOT_FOUND for a program the volume has not, ERR_NO_MEMORY. */
+error_t  TagFSShownBy(uint64_t program, uint64_t** out, uint32_t* count);
+
+/* Program `asker` asks program `owner` to show it its tags: a note the
+ * kernel holds (show/show.h) until `owner` answers — TagFSShowTags of the
+ * asker either way, or of every program — or either leaves. *noted true for
+ * a note left now; OK leaving none when one stands already, or `owner` shows
+ * its tags to the asker already. ERR_INVALID_ARGUMENT for program 0 or one
+ * asking itself; ERR_FILE_NOT_FOUND for a program the volume has not;
+ * ERR_NO_MEMORY. */
+error_t  TagFSAskToSee(uint64_t asker, uint64_t owner, bool* noted);
+
+/* The programs that asked `owner` to show them its tags and are not answered
+ * yet, a page at a time in the order of their cards (TagFSPage); OK, or
+ * ERR_NO_MEMORY. */
+error_t  TagFSAsksPage(uint64_t owner, uint64_t from, uint64_t* out, uint32_t room, bool want_total,
+                       TagFSPage* page);
+
+/* Whether tag `tag_id` is one of the person's a pattern names
+ * (TagPatternMatches), read in place in the volume's registry: a pattern is
+ * spoken in the person's tags, and a program's own is never one it names. */
 bool     TagFSTagMatches(uint32_t tag_id, const TagSpelling* pattern);
 
 
-/* A tag's key and value as spans into the volume's registry, and whether the
- * volume calls the tag its own — no copy, for a caller that is INSIDE THE
- * DOOR (tagfs_enter) and reads them before it leaves: the registry is freed
- * only once the last caller is out. */
-bool     TagFSTagSpelling(uint32_t tag_id, TagSpelling* out, bool* is_system);
+/* A tag's key and value as spans into the volume's registry, whether the
+ * volume calls the tag its own, and whose it is (`owner` when not NULL) — no
+ * copy, for a caller that is INSIDE THE DOOR (tagfs_enter) and reads them
+ * before it leaves: the registry is freed only once the last caller is out. */
+bool     TagFSTagSpelling(uint32_t tag_id, TagSpelling* out, bool* is_system, TagOwner* owner);
 
 // Accessor Functions
 // ============================================================================

@@ -6,6 +6,7 @@
 #include "../settle/binder.h"
 #include "../dedup/dedup.h"
 #include "../keep/keep.h"
+#include "../retire/retire.h"
 #include "../mount/away.h"
 #include "../integrity/integrity.h"
 #include "boardroom.h"
@@ -191,9 +192,8 @@ int TestFileRead(uint64_t file_id, void* buffer, uint32_t capacity)
 // the count, and what is left is what files hold: a test that leaves a block
 // behind, or hands back one that was never its own, moves it.
 //
-// Not the tag count: a tag is interned for good (every created file interns
-// the stem of its name), so the tests keep to names they have always used and
-// the guard does not count tags.
+// Not the tag count: a tag is interned for good, so the tests keep to tags
+// they have always used and the guard does not count tags.
 // ============================================================================
 
 #ifdef CONFIG_VOLUME_TESTS
@@ -695,10 +695,12 @@ error_t TagFS_RunAllTests(TestStats* stats)
      * it go and holds it again. Nor does the Keep service look at the kept
      * files (keep.h): a look under way on another core is a caller inside the
      * door when a test lets the volume go and mounts it again, and the volume
-     * waits for it to leave. */
+     * waits for it to leave — nor the Retire service, for the same reason
+     * (retire/retire.h). */
     SettleCadenceHold(true);
     (void)DedupHold(true);
     (void)KeepHold(true);
+    (void)RetireHold(true);
     for (uint32_t s = 0; s < ARRAY_SIZE(g_suites); s++) {
         const TestSuite* suite = g_suites[s];
         for (uint32_t i = 0; i < suite->count; i++) {
@@ -730,6 +732,7 @@ error_t TagFS_RunAllTests(TestStats* stats)
             TestRun(test, registered, stats);
         }
     }
+    (void)RetireHold(false);
     (void)KeepHold(false);
     (void)DedupHold(false);
     SettleCadenceHold(false);

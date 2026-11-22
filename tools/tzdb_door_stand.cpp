@@ -1,4 +1,4 @@
-// tzdb_door_stand — the `clock:tzdb` gate, attacked on the build host.
+// tzdb_door_stand — the gate of the zone-table door, attacked on the build host.
 //
 // Everything that arrives through the TagFS door goes through
 // std::__boxcxx::tzdata::Validate and then through the SAME reader the image's

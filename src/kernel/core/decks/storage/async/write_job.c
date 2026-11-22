@@ -99,6 +99,7 @@
 #include "boxos_manifest.h"
 #include "boxos_crate.h"
 #include "touch.h"
+#include "storage_deck.h"   /* StorageFileSays */
 #include "ink.h"         /* TagFSInkPlot — the one way the file changes */
 #include "settle.h"      /* SettleHalting — a stopping machine begins no job */
 #include "run.h"         /* TagFSRunBlocks, TagFSDataCostWrite */
@@ -304,7 +305,8 @@ static bool wjob_span_changed(const WriteJob *j)
     return j->span_was != UINT64_MAX && j->final_size != j->span_was;
 }
 
-/* A change to a file's bytes, said on every tag it wears — one 40-byte shape
+/* A change to a file's bytes, said on every tag it wears and on the words its
+ * name answers to (StorageFileSays) — one 40-byte shape
  * for every road that changes them, so one listener reads them all: op 1 a
  * write (the bytes written at offset), op 3 a span (the bytes cut or added
  * from offset, the old or the new size, whichever is less — the size it left,
@@ -353,9 +355,7 @@ static void wjob_publish(const WriteJob *j)
         .bytes      = bytes,
         .final_size = final_size,
     };
-    uint32_t pid = j->target ? j->target->pid : 0;
-    for (uint32_t ti = 0; ti < meta.tag_count; ti++)
-        TouchPublishId(meta.tag_ids[ti], &ev, sizeof(ev), pid, TOUCH_FLAG_TAGFS);
+    StorageFileSays(&meta, &ev, sizeof(ev), j->target ? j->target->pid : 0);
     tagfs_metadata_free(&meta);
 }
 

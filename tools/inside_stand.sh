@@ -6,7 +6,8 @@
 #     tools/inside_stand.sh
 #
 # a box with a part of every kind inside says something of (tools/inside_stand.c),
-# said whole; one with one of each thing it counts, said in the singular; then
+# said whole; two signed, with the stand's seal of BoxOS and with an author's
+# own; one with one of each thing it counts, said in the singular; then
 # the first box damaged one way at a time — a byte of its code, a byte of its
 # table, a byte between two parts, its last byte cut off — each said where it
 # does not hold; a Form that is no text and settings without a default; an
@@ -28,7 +29,13 @@ harness() { echo "inside: harness failed — $1"; exit 2; }
 FLAGS="-std=gnu11 -g -O1 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=undefined"
 $CC_HOST $FLAGS -fno-builtin -I$LIB/include -Isrc/include -c $LIB/src/sha256.c -o "$WORK/sha256.o" \
     > "$WORK/cc.log" 2>&1 || { cat "$WORK/cc.log"; harness "sha256.c did not build"; }
-$CC_HOST $FLAGS -DINSIDE_HOST -Isrc/include -Itools -Isrc/userspace/utils/inside tools/inside.c \
+# The stand's own BoxOS seal: a modulus no key has, the one its boxes name.
+python3 -I - "$WORK/box_author.h" <<'PY' || harness "the stand's seal was not written"
+import sys
+rows = ", ".join("0x%02x" % (0xB0 ^ i) for i in range(256))
+open(sys.argv[1], "w").write("#define BOX_AUTHOR_BOXOS_MODULUS { %s }\n" % rows)
+PY
+$CC_HOST $FLAGS -DINSIDE_HOST -Isrc/include -I"$WORK" -Itools -Isrc/userspace/utils/inside tools/inside.c \
     src/userspace/utils/inside/inside_show.c "$WORK/sha256.o" -o "$WORK/inside" > "$WORK/cc.log" 2>&1 ||
     { cat "$WORK/cc.log"; harness "inside did not build"; }
 $CC_HOST $FLAGS -Isrc/include -Itools tools/inside_stand.c "$WORK/sha256.o" -o "$WORK/inside_stand" \
@@ -118,6 +125,15 @@ look "a box with a part of every kind" "$WORK/full.box" 0 \
     "role                    12 bytes, holds to its hash" "system" \
     "— the table and its names hold to it" \
     "whole: the seal holds, every part holds to its hash, and only zeros lie between them"
+
+look "a box signed with the seal of BoxOS" "$WORK/boxos.box" 0 \
+    "525 bytes, holds to its hash" \
+    "signed as clock, with the seal of BoxOS " \
+    "the kernel checks it at every start: held, it is this program in every copy of it"
+
+look "a box signed with its author's own seal" "$WORK/guest.box" 0 \
+    "signed as clock, with its author's own seal " \
+    "one by BoxOS has what its box asks, any other is started as a guest"
 
 look "a box with one of each thing counted" "$WORK/single.box" 0 \
     "1 place the base is added to: the kernel places the box where it chooses" \

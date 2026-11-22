@@ -111,7 +111,7 @@ typedef enum {
     BOX_KIND_DOORS,         /* named ways in; `start` required */
     BOX_KIND_THREAD,        /* the template of each thread's local storage */
     BOX_KIND_NAMES,         /* the program's names for its functions (a Nameplate) */
-    BOX_KIND_SIGNATURE,     /* an author's signature over the seal — not yet read */
+    BOX_KIND_SIGNATURE,     /* its author's signature over the box (below) */
     BOX_KIND_NEEDS,         /* text: what the program needs of the processor */
     BOX_KIND_HINTS,         /* text: what it usually needs; never a limit raised */
     BOX_KIND_LIFE,          /* text: how it lives — task, stays, serves */
@@ -150,6 +150,36 @@ typedef enum {
  */
 #define BOX_THREAD_HEAD_BYTES  32u
 #define BOX_THREAD_ALIGN_MAX   4096u
+
+/* ── signature ───────────────────────────────────────────────────────────── *
+ *
+ * Who made the program, and that nobody changed it since: its author's
+ * signature over the box. Anyone may have a key of their own and sign with
+ * it, freely; what a system does with a program follows from whether it
+ * trusts the author, and a program it does not — or one that carries no
+ * signature — is still started, given only what every program has.
+ *
+ *   u8  how          BOX_SIGN_RSA2048_SHA256: RSASSA-PKCS1-v1_5 over SHA-256,
+ *                    the public exponent 65537; another how is a signature
+ *                    this system cannot read, and the box is as one unsigned
+ *   u8  name_length  1 to BOX_SIGN_NAME_MAX
+ *   u16 key_bytes    BOX_SIGN_RSA2048_BYTES: the author's public modulus,
+ *                    big-endian
+ *   u16 sig_bytes    BOX_SIGN_RSA2048_BYTES: the signature, big-endian
+ *   u16 zero
+ *   the program's name as its author gives it — spelled as a part's name is —
+ *   the key, the signature, back to back
+ *
+ * What is signed is the SHA-256 of the box's seal as it is made with this
+ * part's own hash in the table read as zeros too — beside the seal's own 32
+ * bytes — followed by the program's name: every other part, every name and
+ * the author's name for the program (BoxSignedDigest). The seal in the header
+ * covers this part's hash, as any part's. A box carries at most one.
+ */
+#define BOX_SIGN_HEAD_BYTES      8u
+#define BOX_SIGN_RSA2048_SHA256  1u
+#define BOX_SIGN_RSA2048_BYTES   256u
+#define BOX_SIGN_NAME_MAX        64u
 
 /* ── fixups ──────────────────────────────────────────────────────────────── *
  *

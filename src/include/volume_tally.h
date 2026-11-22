@@ -83,8 +83,27 @@
 #define TALLY_FILE_ROLE_BOOT    8u
 #define TALLY_FILE_ROLE_KERNEL  12u  /* the loader's first choice; then boot, then system */
 #define TALLY_FILE_DELETED   16u     /* deleted, kept until a time its header names (TallyFileHead.keep_ns) — never a tag */
+/* Bit 5 stays unnamed: the golden node's header wears it as the bit no kernel
+ * names (TALLY_GOLDEN_NODE_CRC), and a header keeps such a bit as it was laid. */
+#define TALLY_FILE_MADE_BY   64u     /* made by a program of the volume, its file named by the header (TallyFileHead.made_by) — never a tag */
+#define TALLY_FILE_SHOWN     128u    /* the file of a program that shows its own tags to the programs its header names (TallyFileHead.shown) — never a tag */
+#define TALLY_FILE_HEAD      256u    /* the header carries the file's first bytes (TallyFileHead.head) — every file that holds a byte */
+#define TALLY_HEAD_MOST      16u     /* the first bytes of a file its card keeps: the file's own, all of a shorter one */
+#define TALLY_FILE_PASSPORT  512u    /* the file holds a signed program: its passport (TallyFileHead.passport) — never a tag */
+#define TALLY_PASSPORT_BIT   (1ull << 63)   /* every passport carries it, so none is a file's id */
 #define TALLY_TAG_HAS_VALUE  1u
 #define TALLY_TAG_RETIRED    2u
+#define TALLY_TAG_OWNED      4u      /* a program's own tag: whose it is follows the flags (TallyTag) */
+
+/* Whose a tag OWNED is. A tag without OWNED is the person's — the words the
+ * person labels files with, and the language Touch, the processes and the Use
+ * Context speak — and carries no owner at all, so a volume of none but the
+ * person's tags is written byte for byte as before tags had owners. A program
+ * is its passport when it is signed — the same program in every file of it,
+ * bit 63 set (TALLY_PASSPORT_BIT) — and otherwise the file it is started from
+ * (its fid): the one name of it the volume can vouch for, which no other
+ * program can take. */
+#define TALLY_OWNER_PROGRAM  1u
 
 /* A Sheet's room for a node's stream: its eight sectors' payloads. */
 #define TALLY_SHEET_PAYLOAD  3904u
@@ -483,9 +502,56 @@ static inline int TallyIdNext(const uint8_t *p, uint32_t end, uint32_t *at, uint
     return 1;
 }
 
+/* A rising list of the volume's file ids after its count, laid as TallyIdsPut
+ * lays tag ids — the ids of the programs a program's file shows its tags to
+ * (TALLY_FILE_SHOWN), 0 first when it shows them to every program. */
+static inline uint32_t TallyFidsPut(uint8_t *out, const uint64_t *ids, uint64_t n)
+{
+    uint32_t at = 0;
+    for (uint64_t i = 0; i < n; i++)
+        at += BookVarintPut(out + at, i ? ids[i] - ids[i - 1] - 1u : ids[0]);
+    return at;
+}
+
+/* The bytes TallyFidsPut lays the list in, its count left out. */
+static inline uint32_t TallyFidsBytes(const uint64_t *ids, uint64_t n)
+{
+    uint32_t bytes = 0;
+    for (uint64_t i = 0; i < n; i++)
+        bytes += TallyVarintBytes(i ? ids[i] - ids[i - 1] - 1u : ids[0]);
+    return bytes;
+}
+
+/* Such a list, its count first, from *at: *n of them pointed at in *ids, *bytes
+ * long. 0 when it does not read. */
+static inline int TallyFidsTake(const uint8_t *p, uint32_t end, uint32_t *at, uint64_t *n, const uint8_t **ids,
+                                uint32_t *bytes)
+{
+    uint64_t id = 0;
+    if (!TallyTake(p, end, at, n) || *n > end - *at) return 0;
+    *ids = p + *at;
+    uint32_t from = *at;
+    for (uint64_t k = 0; k < *n; k++)
+        if (!TallyIdNext(p, end, at, &id, k == 0)) return 0;
+    *bytes = *at - from;
+    return 1;
+}
+
+/* The ids of a list TallyFidsTake read, into `out` — room for its `n`. */
+static inline void TallyFidsOut(const uint8_t *ids, uint32_t bytes, uint64_t n, uint64_t *out)
+{
+    uint32_t at = 0;
+    uint64_t id = 0;
+    for (uint64_t k = 0; k < n; k++) {
+        TallyIdNext(ids, bytes, &at, &id, k == 0);
+        out[k] = id;
+    }
+}
+
 /*
  * A file's header: gen · flags · size · created_ns · mtime_z · name_len ·
- * name · ntags · tags · [keep_ns]. mtime_z is zigzag(modified_ns -
+ * name · ntags · tags · [keep_ns] · [made_by] · [nshown · shown] · [head_len · head] · [passport].
+ * mtime_z is zigzag(modified_ns -
  * created_ns): a clock may run backwards. The name and the tags are pointed
  * at where they stand; a writer points them at what it writes from — `tags`
  * the ids after their count, as TallyIdsPut writes them, `tags_bytes` long.
@@ -495,6 +561,34 @@ static inline int TallyIdNext(const uint8_t *p, uint32_t end, uint32_t *at, uint
  * file is kept deleted and can be brought back — never 0. A reader that does
  * not know the bit finds bytes left past the tags and takes the header for a
  * newer writer's (TALLY_BODY_LONGER), which stands the volume under glass.
+ *
+ * made_by follows it, there when, and only when, the flags carry
+ * TALLY_FILE_MADE_BY: the volume's id of the file of the program that made
+ * this file — never 0, and never changed after the file is made. A file no
+ * program of the volume made carries neither the bit nor the field, so its
+ * header is the bytes it was before the field was.
+ *
+ * The list of the programs a program shows its own tags to closes it, there
+ * when, and only when, the flags carry TALLY_FILE_SHOWN — the header is the
+ * card of the program's own file: its count, never 0, and the ids rising
+ * (TallyFidsPut), 0 first for every program. A file that shows nothing
+ * carries neither the bit nor the list.
+ *
+ * The file's first bytes close it, there when, and only when, the flags carry
+ * TALLY_FILE_HEAD: as many as the file holds up to TALLY_HEAD_MOST, its first
+ * of them — never 0, never more than the file's size. What a file is is told
+ * by them, by whoever knows what they mean: the book keeps them and knows no
+ * format. A file of no bytes carries neither the bit nor the field.
+ *
+ * The passport of the signed program the file holds closes it, there when,
+ * and only when, the flags carry TALLY_FILE_PASSPORT: who the program is
+ * across every copy and version of it — its author and its name, as the
+ * kernel makes it of the program's signature (box_trust.h) — TALLY_PASSPORT_BIT
+ * set, so it is never a file's id. Laid by the volume's maker and by the
+ * kernel when a program is started from the file and its passport is
+ * another; a change of what the file holds does not take it off, so a program
+ * written over with its next version stays itself. A file no signed program
+ * was known in carries neither the bit nor the field.
  */
 typedef struct {
     uint64_t       gen;
@@ -508,6 +602,13 @@ typedef struct {
     const uint8_t *tags;
     uint32_t       tags_bytes;
     uint64_t       keep_ns;      /* 0 unless TALLY_FILE_DELETED */
+    uint64_t       made_by;      /* 0 unless TALLY_FILE_MADE_BY */
+    uint64_t       nshown;       /* 0 unless TALLY_FILE_SHOWN */
+    const uint8_t *shown;
+    uint32_t       shown_bytes;
+    uint64_t       head_len;     /* 0 unless TALLY_FILE_HEAD */
+    const uint8_t *head;
+    uint64_t       passport;     /* 0 unless TALLY_FILE_PASSPORT */
 } TallyFileHead;
 
 static inline uint32_t TallyFileHeadPut(uint8_t *out, const TallyFileHead *h)
@@ -521,7 +622,38 @@ static inline uint32_t TallyFileHeadPut(uint8_t *out, const TallyFileHead *h)
     at += TallyBytesPut(out + at, h->name, h->name_len);
     at += BookVarintPut(out + at, h->ntags);
     at += TallyBytesPut(out + at, h->tags, h->tags_bytes);
-    return (h->flags & TALLY_FILE_DELETED) ? at + BookVarintPut(out + at, h->keep_ns) : at;
+    if (h->flags & TALLY_FILE_DELETED)
+        at += BookVarintPut(out + at, h->keep_ns);
+    if (h->flags & TALLY_FILE_MADE_BY)
+        at += BookVarintPut(out + at, h->made_by);
+    if (h->flags & TALLY_FILE_SHOWN) {
+        at += BookVarintPut(out + at, h->nshown);
+        at += TallyBytesPut(out + at, h->shown, h->shown_bytes);
+    }
+    if (h->flags & TALLY_FILE_HEAD) {
+        at += BookVarintPut(out + at, h->head_len);
+        at += TallyBytesPut(out + at, h->head, h->head_len);
+    }
+    if (h->flags & TALLY_FILE_PASSPORT)
+        at += BookVarintPut(out + at, h->passport);
+    return at;
+}
+
+/* A passport as a header, a Born and a Labeled PASSPORT lay it, from *at: 0
+ * when it does not read or is no passport. */
+static inline int TallyPassportTake(const uint8_t *p, uint32_t end, uint32_t *at, uint64_t *passport)
+{
+    return TallyTake(p, end, at, passport) && (*passport & TALLY_PASSPORT_BIT);
+}
+
+/* A file's first bytes as a header, a Born and a Labeled HEAD lay them —
+ * their count, then them —, from *at: 0 when they do not read, or are more
+ * than TALLY_HEAD_MOST or than `size`. */
+static inline int TallyHeadTake(const uint8_t *p, uint32_t end, uint32_t *at, uint64_t size, uint64_t *len,
+                                const uint8_t **head)
+{
+    return TallyTake(p, end, at, len) && *len <= TALLY_HEAD_MOST && *len <= size &&
+           TallyTakeBytes(p, end, at, *len, head);
 }
 
 /* A header read back: BROKEN as well for one that is not ACTIVE — such an
@@ -542,8 +674,25 @@ static inline int TallyFileHeadGet(const uint8_t *b, uint32_t len, TallyFileHead
     for (uint64_t k = 0; k < h->ntags; k++)
         if (!TallyIdNext(b, len, &at, &id, k == 0)) return TALLY_BODY_BROKEN;
     h->tags_bytes = at - from;
-    h->keep_ns    = 0;
+    h->keep_ns     = 0;
+    h->made_by     = 0;
+    h->nshown      = 0;
+    h->shown       = (const uint8_t *)0;
+    h->shown_bytes = 0;
+    h->head_len    = 0;
+    h->head        = (const uint8_t *)0;
+    h->passport    = 0;
     if ((h->flags & TALLY_FILE_DELETED) && (!TallyTake(b, len, &at, &h->keep_ns) || !h->keep_ns))
+        return TALLY_BODY_BROKEN;
+    if ((h->flags & TALLY_FILE_MADE_BY) && (!TallyTake(b, len, &at, &h->made_by) || !h->made_by))
+        return TALLY_BODY_BROKEN;
+    if ((h->flags & TALLY_FILE_SHOWN) &&
+        (!TallyFidsTake(b, len, &at, &h->nshown, &h->shown, &h->shown_bytes) || !h->nshown))
+        return TALLY_BODY_BROKEN;
+    if ((h->flags & TALLY_FILE_HEAD) &&
+        (!TallyHeadTake(b, len, &at, h->size, &h->head_len, &h->head) || !h->head_len))
+        return TALLY_BODY_BROKEN;
+    if ((h->flags & TALLY_FILE_PASSPORT) && !TallyPassportTake(b, len, &at, &h->passport))
         return TALLY_BODY_BROKEN;
     if (!(h->flags & TALLY_FILE_ACTIVE)) return TALLY_BODY_BROKEN;
     return TallyBodyEnd(at, len);
@@ -643,10 +792,14 @@ static inline uint32_t TallyParcelPut(uint8_t *out, const TallyRun *runs, uint32
 /* TAGS, USE, DIGESTS, and an inner node's items                             */
 /* ------------------------------------------------------------------------- */
 
-/* A tag's text as TAGS and Coined carry it: flags, then — unless RETIRED,
- * which names no text — key_len · key · [value_len · value when HAS_VALUE]. */
+/* A tag as TAGS and Coined carry it: flags, then — unless RETIRED, which names
+ * no tag — whose it is when OWNED (owner_kind · owner_id), then key_len · key ·
+ * [value_len · value when HAS_VALUE]. A tag that is not OWNED is the person's:
+ * owner_kind and owner_id read 0. */
 typedef struct {
     uint64_t       flags;
+    uint64_t       owner_kind;   /* with OWNED: TALLY_OWNER_PROGRAM */
+    uint64_t       owner_id;     /* with OWNED: the program's passport or file's fid, never 0 */
     const uint8_t *key;
     uint64_t       key_len;
     const uint8_t *value;
@@ -657,6 +810,10 @@ static inline uint32_t TallyTagPut(uint8_t *out, const TallyTag *t)
 {
     uint32_t at = BookVarintPut(out, t->flags);
     if (t->flags & TALLY_TAG_RETIRED) return at;
+    if (t->flags & TALLY_TAG_OWNED) {
+        at += BookVarintPut(out + at, t->owner_kind);
+        at += BookVarintPut(out + at, t->owner_id);
+    }
     at += BookVarintPut(out + at, t->key_len);
     at += TallyBytesPut(out + at, t->key, t->key_len);
     if (!(t->flags & TALLY_TAG_HAS_VALUE)) return at;
@@ -664,20 +821,52 @@ static inline uint32_t TallyTagPut(uint8_t *out, const TallyTag *t)
     return at + TallyBytesPut(out + at, t->value, t->value_len);
 }
 
+/* The tag at b[*at], *at moved past it: 1, or 0 when a field is cut short or
+ * the tag is written in a way the book never writes one — RETIRED and OWNED
+ * together (a retired tag names no owner, as it names no text), an owner of no
+ * kind this format has, or a program's tag naming fid 0, which no file has. */
+static inline int TallyTagTake(const uint8_t *b, uint32_t len, uint32_t *at, TallyTag *t)
+{
+    t->owner_kind = t->owner_id = 0;
+    t->key = t->value = (const uint8_t *)0;
+    t->key_len = t->value_len = 0;
+    if (!TallyTake(b, len, at, &t->flags)) return 0;
+    if (t->flags & TALLY_TAG_RETIRED) return !(t->flags & TALLY_TAG_OWNED);
+    if ((t->flags & TALLY_TAG_OWNED) &&
+        (!TallyTake(b, len, at, &t->owner_kind) || !TallyTake(b, len, at, &t->owner_id) ||
+         t->owner_kind != TALLY_OWNER_PROGRAM || t->owner_id == 0))
+        return 0;
+    if (!TallyTake(b, len, at, &t->key_len) || !TallyTakeBytes(b, len, at, t->key_len, &t->key))
+        return 0;
+    return !(t->flags & TALLY_TAG_HAS_VALUE) ||
+           (TallyTake(b, len, at, &t->value_len) && TallyTakeBytes(b, len, at, t->value_len, &t->value));
+}
+
 static inline int TallyTagGet(const uint8_t *b, uint32_t len, TallyTag *t)
 {
     uint32_t at = 0;
-    t->key = t->value = (const uint8_t *)0;
-    t->key_len = t->value_len = 0;
-    if (!TallyTake(b, len, &at, &t->flags)) return TALLY_BODY_BROKEN;
-    if (!(t->flags & TALLY_TAG_RETIRED)) {
-        if (!TallyTake(b, len, &at, &t->key_len) || !TallyTakeBytes(b, len, &at, t->key_len, &t->key))
-            return TALLY_BODY_BROKEN;
-        if ((t->flags & TALLY_TAG_HAS_VALUE) &&
-            (!TallyTake(b, len, &at, &t->value_len) || !TallyTakeBytes(b, len, &at, t->value_len, &t->value)))
-            return TALLY_BODY_BROKEN;
-    }
+    if (!TallyTagTake(b, len, &at, t)) return TALLY_BODY_BROKEN;
     return TallyBodyEnd(at, len);
+}
+
+/* What a tag carries past the fields every tag has — its key, its value and,
+ * when OWNED, whose it is: the one measure a TAGS tree and the ribbon's
+ * Coineds are sized by (tag_registry.c, endpaper.c, sewing.c). */
+static inline uint64_t TallyTagCarried(const TallyTag *t)
+{
+    uint64_t n = t->key_len + t->value_len;
+    if (t->flags & TALLY_TAG_OWNED) n += TallyVarintBytes(t->owner_kind) + TallyVarintBytes(t->owner_id);
+    return n;
+}
+
+/* The bytes TallyTagPut writes for `t`. */
+static inline uint32_t TallyTagBytes(const TallyTag *t)
+{
+    uint32_t n = TallyVarintBytes(t->flags);
+    if (t->flags & TALLY_TAG_RETIRED) return n;
+    n += TallyVarintBytes(t->key_len) + (uint32_t)TallyTagCarried(t);
+    if (t->flags & TALLY_TAG_HAS_VALUE) n += TallyVarintBytes(t->value_len);
+    return n;
 }
 
 /* The Use Context (§7): len · text. */

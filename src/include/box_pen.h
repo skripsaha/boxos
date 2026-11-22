@@ -204,6 +204,18 @@ static inline BoxVerdict BoxPenWrite(const BoxPenPart *parts, uint32_t count, ui
     return BOX_OK;
 }
 
+/* The part at `index` of the box at `out`, written by BoxPenWrite and its
+ * bytes changed since, hashed again into its entry, and the box sealed again:
+ * for a part made after the box it is in — a signature over it. The caller
+ * reads the box back. */
+static inline void BoxPenReseal(uint8_t *out, uint32_t index, const BoxHasher *hasher)
+{
+    uint8_t *entry = out + BoxU64(out + BOX_AT_TABLE) + (uint64_t)index * BOX_ENTRY_BYTES;
+    BoxHashBytes(hasher, out + BoxU64(entry + BOX_ENTRY_OFFSET), BoxU64(entry + BOX_ENTRY_SIZE),
+                 entry + BOX_ENTRY_HASH);
+    BoxSealCompute(out, BoxU64(out + BOX_AT_NAMES) + BoxU64(out + BOX_AT_NAMES_SIZE), hasher, out + BOX_AT_SEAL);
+}
+
 /* ── doors ───────────────────────────────────────────────────────────────── */
 
 /* The `doors` part of `count` doors, sorted by name in place: measured into

@@ -52,6 +52,25 @@ static bool Write(const char *dir, const char *name)
     return ok;
 }
 
+/* A signature part as pack lays one (box_format.h): signed as `name` with
+ * the key of 256 bytes `key`, its signature bytes not checked by inside. */
+static uint64_t Signature(uint8_t *out, const char *name, uint8_t key)
+{
+    uint8_t length = (uint8_t)strlen(name);
+    out[0] = BOX_SIGN_RSA2048_SHA256;
+    out[1] = length;
+    out[2] = BOX_SIGN_RSA2048_BYTES & 0xFF;
+    out[3] = BOX_SIGN_RSA2048_BYTES >> 8;
+    out[4] = BOX_SIGN_RSA2048_BYTES & 0xFF;
+    out[5] = BOX_SIGN_RSA2048_BYTES >> 8;
+    out[6] = out[7] = 0;
+    memcpy(out + BOX_SIGN_HEAD_BYTES, name, length);
+    for (unsigned i = 0; i < BOX_SIGN_RSA2048_BYTES; i++)
+        out[BOX_SIGN_HEAD_BYTES + length + i] = key ? (uint8_t)(key ^ i) : (uint8_t)i;
+    memset(out + BOX_SIGN_HEAD_BYTES + length + BOX_SIGN_RSA2048_BYTES, 0x5A, BOX_SIGN_RSA2048_BYTES);
+    return BOX_SIGN_HEAD_BYTES + length + 2u * BOX_SIGN_RSA2048_BYTES;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) {
@@ -106,6 +125,23 @@ int main(int argc, char **argv)
     Text("paint:brushes", "brushes", 0);
     if (!Write(argv[1], "full.box")) {
         fprintf(stderr, "inside_stand: full.box was not written\n");
+        return 2;
+    }
+
+    /* Signed as clock: with the stand's seal of BoxOS, and with another. */
+    uint8_t signature[BOX_SIGN_HEAD_BYTES + 5u + 2u * BOX_SIGN_RSA2048_BYTES];
+    uint64_t signed_bytes = Signature(signature, "clock", 0xB0);
+    g_count = 0;
+    Part("code", code, sizeof(code), sizeof(code), 0, must);
+    Part("doors", doors, doors_bytes, doors_bytes, 0, must);
+    Part("signature", signature, signed_bytes, signed_bytes, 0, 0);
+    if (!Write(argv[1], "boxos.box")) {
+        fprintf(stderr, "inside_stand: boxos.box was not written\n");
+        return 2;
+    }
+    signed_bytes = Signature(signature, "clock", 0x11);
+    if (!Write(argv[1], "guest.box")) {
+        fprintf(stderr, "inside_stand: guest.box was not written\n");
         return 2;
     }
 

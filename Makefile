@@ -207,6 +207,9 @@ CFLAGS         = -Os -m64 -ffreestanding -nostdlib -mno-red-zone -mno-sse -mno-m
 # Kernel directories first to ensure correct header resolution
 INCLUDE_DIRS   := src $(shell find src/kernel -type d) $(shell find src/lib -type d) $(shell find src/boot -type d) $(shell find src/include -type d) $(shell find src/userspace -type d)
 CFLAGS         += $(addprefix -I,$(INCLUDE_DIRS))
+# What the build makes for the kernel to include and the tree does not keep:
+# the public half of the key the tree's programs are signed with (box_author.h).
+CFLAGS         += -I$(BUILDDIR)/include
 
 # Debug configuration (must be after CFLAGS definition)
 ifeq ($(DEBUG),on)
@@ -1100,10 +1103,11 @@ $(TAGFS_TOOL): tools/create_tagfs.c tools/create_tagfs_ground.c tools/create_tag
                $(SRCDIR)/include/volume_digest.h \
                $(SRCDIR)/include/deed_pen.h $(SRCDIR)/include/buildplate_format.h \
                $(SRCDIR)/include/boxos_magic.h \
-               $(SRCDIR)/include/box_format.h $(SRCDIR)/include/box_reader.h \
-               $(TAGFS_OS_SIGNATURE) | $(BUILDDIR)
+               $(SRCDIR)/include/box_format.h $(SRCDIR)/include/box_reader.h tools/box_host.h \
+               $(PACK_SHA256) $(TAGFS_OS_SIGNATURE) | $(BUILDDIR)
 	@echo "Compiling TagFS tool for $(UNAME_S) ($(UNAME_M))..."
-	@$(CC_HOST) -I$(SRCDIR)/include -o $@ $(filter %.c,$^) -Wall -Wextra
+	@$(CC_HOST) -I$(SRCDIR)/include -o $@ $(filter %.c,$^) $(PACK_SHA256) \
+	    -Wall -Wextra
 	@echo "TagFS tool built: $@"
 
 # tools/pack — a program as the tree links it made a box (box_format.h), the
@@ -1112,6 +1116,20 @@ $(TAGFS_TOOL): tools/create_tagfs.c tools/create_tagfs_ground.c tools/create_tag
 # the host's). Its prerequisites are every file it is made of, the format's
 # headers among them, so a change to the format remakes the tool and then
 # every box.
+# ‼ WHO MADE A PROGRAM is its box's signature (the part `signature`,
+# box_format.h): every box of the tree is signed by BoxOS — whoever builds the
+# tree — as the program its file is called, and the kernel trusts that author
+# by birth (box_trust.c). The key is the building machine's and never the
+# tree's: kept outside it, made by the first build that finds none, so no copy
+# of the tree carries a key that signs for it. The kernel is told its public
+# half alone (BOX_AUTHOR_HEADER), and so is inside, which says whose seal
+# a box carries. Anybody may sign their own programs with a
+# key of their own; a program by an author the kernel does not trust, or one
+# signed by nobody, still starts — as a guest.
+BOX_SIGN_KEY      ?= $(HOME)/.boxos/sign/boxos.pem
+BOX_AUTHOR_HEADER  = $(BUILDDIR)/include/box_author.h
+PackSign = --sign $(BOX_SIGN_KEY) --as $(basename $(notdir $(1)))
+
 PACK_TOOL   = $(BUILDDIR)/pack
 PACK_SHA256 = $(BUILDDIR)/pack_sha256.o
 
@@ -1133,9 +1151,10 @@ $(PACK_TOOL): tools/pack.c tools/box_host.h $(SRCDIR)/include/box_format.h \
 $(INSIDE_TOOL): tools/inside.c tools/box_host.h $(UTILS_DIR)/inside/inside_show.c \
                 $(UTILS_DIR)/inside/inside_show.h $(SRCDIR)/include/box_format.h \
                 $(SRCDIR)/include/box_reader.h $(SRCDIR)/include/nameplate_format.h \
-                $(SRCDIR)/include/settings_reader.h $(SRCDIR)/include/key_chord.h $(PACK_SHA256) | $(BUILDDIR)
+                $(SRCDIR)/include/settings_reader.h $(SRCDIR)/include/key_chord.h $(PACK_SHA256) \
+                $(BOX_AUTHOR_HEADER) | $(BUILDDIR)
 	@echo "Compiling the inside tool for $(UNAME_S) ($(UNAME_M))..."
-	@$(CC_HOST) -std=gnu11 -O2 -Wall -Wextra -DINSIDE_HOST -I$(SRCDIR)/include -Itools \
+	@$(CC_HOST) -std=gnu11 -O2 -Wall -Wextra -DINSIDE_HOST -I$(SRCDIR)/include -I$(dir $(BOX_AUTHOR_HEADER)) -Itools \
 	    -I$(UTILS_DIR)/inside tools/inside.c $(UTILS_DIR)/inside/inside_show.c $(PACK_SHA256) -o $@
 
 # parcel-host: tools/parcel_host.mk (a host test, its own file).
@@ -1480,9 +1499,9 @@ $(shell rm -f $(UTILS_STAMP))
 endif
 
 $(UTILS_STAMP): $(USERSPACE_DIR)/boxlib/libbox.a $(USERSPACE_DIR)/boxcxx/libboxcxx.a $(PAINTER_LIB) $(TYPECASE_LIB) $(UTILS_INPUTS) \
-                $(NAMEPLATE_TOOL)
+                $(NAMEPLATE_TOOL) $(BOX_AUTHOR_HEADER)
 	@echo "Building utilities..."
-	@cd $(UTILS_DIR) && $(MAKE)
+	@cd $(UTILS_DIR) && $(MAKE) BOX_AUTHOR_DIR=$(abspath $(dir $(BOX_AUTHOR_HEADER)))
 	@touch $@
 
 $(UTIL_ELFS): $(UTILS_STAMP)
@@ -1794,7 +1813,19 @@ VOLUME_LAID  = $(foreach word,$(VOLUME_CONTENT),$(if $(filter %.elf,$(word)),$(c
 # system's, it says it is (the part `role`), and only create_tagfs, laying
 # these boxes on the volume it makes, reads that.
 PACK_ASKS_NOTHING = proca procb
-PackAsks = $(if $(filter $(basename $(notdir $(1))),$(PACK_ASKS_NOTHING)),,--ask utility)
+# ‼ THE PERSON'S TAGS are asked for by the programs that work on them as the
+# person's eyes or hands, and by no other: every program has words of its own
+# for its own files without asking, and sees none of the person's (box_reader.h,
+# `ask see-tags`, `ask change-tags`). change-tags: the programs that put the
+# person's tags on and take them off, or make a file in the person's Use
+# Context, which stamps it — seeing them comes with it. see-tags: the programs
+# that show the person's tags, find files by them, or look inside the Use
+# Context.
+PACK_ASKS_CHANGE_TAGS = hub tag untag retag create copy edit read assemble usetest write_observer cxxtest
+PACK_ASKS_SEE_TAGS    = files seek tagmap info delete hexer stringview passport display
+PackTagsAsk = $(if $(filter $(1),$(PACK_ASKS_CHANGE_TAGS)),--ask change-tags,$(if $(filter $(1),$(PACK_ASKS_SEE_TAGS)),--ask see-tags))
+PackAsks = $(if $(filter $(basename $(notdir $(1))),$(PACK_ASKS_NOTHING)),,--ask utility) \
+           $(call PackTagsAsk,$(basename $(notdir $(1))))
 
 # ‼ WHAT A PROGRAM IS TO THE MACHINE is said in its box too (the part `role`,
 # tools/pack --role): the programs the machine runs on say `system`, and the
@@ -1803,10 +1834,22 @@ PackAsks = $(if $(filter $(basename $(notdir $(1))),$(PACK_ASKS_NOTHING)),,--ask
 PACK_SYSTEM = display hub pulse quilltest autostart reboot bye escheat timezone memtag hw usetest faretest logsave lastsaid journey finish taskboard memmap passport gardener
 PackRole = $(if $(filter $(basename $(notdir $(1))),$(PACK_SYSTEM)),--role system)
 
+
+$(BOX_SIGN_KEY):
+	@mkdir -p $(dir $@) && chmod 700 $(dir $@)
+	@openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out $@ 2>/dev/null && chmod 600 $@
+	@echo "  made the key this machine signs the tree's programs with: $@"
+
+$(BOX_AUTHOR_HEADER): $(BOX_SIGN_KEY) tools/box_author.py
+	@mkdir -p $(dir $@)
+	@python3 tools/box_author.py $(BOX_SIGN_KEY) > $@.tmp && mv $@.tmp $@
+
+$(BUILDDIR)/kernel/core/process/box_trust.o: $(BOX_AUTHOR_HEADER)
+
 define BoxRule
-$(call Box,$(1)): $(1) $(PACK_TOOL)
+$(call Box,$(1)): $(1) $(PACK_TOOL) $(BOX_SIGN_KEY)
 	@mkdir -p $$(dir $$@)
-	@$(PACK_TOOL) $(call PackAsks,$(1)) $(call PackRole,$(1)) $(1) $$@
+	@$(PACK_TOOL) $(call PackAsks,$(1)) $(call PackRole,$(1)) $(call PackSign,$(1)) $(1) $$@
 endef
 $(foreach elf,$(VOLUME_ELFS),$(eval $(call BoxRule,$(elf))))
 

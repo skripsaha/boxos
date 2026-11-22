@@ -20,6 +20,7 @@
 #include <string_view>
 #include <vector>
 
+#include "box/cxx/whose.h"
 #include "box/color.h"
 #include "box/display.h"
 #include "box/file.h"
@@ -275,7 +276,7 @@ int Seek(const std::vector<std::string> &Words, std::vector<file_id_t> Where, bo
         Place = "among " + Plural(Where.size(), "file given", "files given");
     } else {
         file_id_t *Ids   = nullptr;
-        const int  Count = query_all(nullptr, nullptr, &Ids);
+        const int  Count = query_all(box::tagfs::person_tags, nullptr, nullptr, &Ids);
         if (Count < 0) {
             Print("seek: the volume would not say what files it has\n");
             return 1;
@@ -292,7 +293,7 @@ int Seek(const std::vector<std::string> &Words, std::vector<file_id_t> Where, bo
     std::size_t            LineCount = 0, NoText = 0, Unread = 0;
     for (const file_id_t File : Where) {
         FileMetadata Facts;
-        if (FileMetadataRead(File, &Facts) != 0) {
+        if (FileMetadataRead(box::tagfs::my_tags, File, &Facts) != 0) {
             Unread++;
             continue;
         }

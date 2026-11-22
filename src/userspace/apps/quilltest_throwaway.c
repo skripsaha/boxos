@@ -165,7 +165,7 @@ QuillVerdict QuillInterleave(const char *const *args)
  *  fidhistory — file ids spent on files that are gone
  * ========================================================================= */
 
-/* One name throughout, so the only tag this interns is its stem. What the
+/* One name throughout, so this interns no tag of its own. What the
  * spent ids cost is not something this program can see: the next mount says
  * it, in its "this mount keeps" line, and the host reads the slope between
  * two mounts. */
@@ -173,7 +173,7 @@ QuillVerdict QuillFidHistory(const char *const *args)
 {
     (void)args;
     file_id_t *ids = NULL;
-    int before = query_all_everywhere(NULL, NULL, &ids);
+    int before = query_all_everywhere(MY_TAGS, NULL, NULL, &ids);
     free(ids);
     if (before < 0) {
         printf("[QUILL] fidhistory: FAIL — counting the live files answered %d\n", before);
@@ -184,7 +184,7 @@ QuillVerdict QuillFidHistory(const char *const *args)
     uint32_t  spent = 0;
     int broke = 0;
     for (uint32_t i = 0; i < QUILL_FID_CYCLES; i++) {
-        int64_t fid = create_everywhere("quillfid.tmp", NULL);
+        int64_t fid = create_everywhere(MY_TAGS, "quillfid.tmp", NULL);
         if (fid <= 0 || (file_id_t)fid <= last) {
             broke = fid <= 0 ? (int)fid : -1;
             break;
@@ -214,7 +214,7 @@ QuillVerdict QuillFidHistory(const char *const *args)
                    spent, QUILL_FID_CYCLES, last);
     }
     int arc = anchor(0);
-    int after = query_all_everywhere(NULL, NULL, &ids);
+    int after = query_all_everywhere(MY_TAGS, NULL, NULL, &ids);
     free(ids);
 
     if (broke != 0 || arc != 0 || after != before) {

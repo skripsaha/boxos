@@ -14,10 +14,10 @@
  *   w             weigh by size, or by how many files
  *   q, ESC        leave
  *
- * A file is in every tag it wears, so a tag is as big as all its files. Two
- * kinds of tag say nothing on a map and are left off it: one every file here
- * wears (the Use Context's, mostly — the header says which), and a name tag,
- * worn only by files whose name it is. A file with no other is "untagged". */
+ * A file is in every tag it wears, so a tag is as big as all its files. A tag
+ * every file here wears says nothing on a map and is left off it (the Use
+ * Context's, mostly — the header says which). A file with no other is
+ * "untagged". */
 
 #include <algorithm>
 #include <format>
@@ -25,6 +25,7 @@
 #include <new>
 #include <optional>
 
+#include "box/cxx/whose.h"
 #include "box/file.h"
 #include "box/form.h"
 #include "box/memory.h"
@@ -110,12 +111,6 @@ std::vector<std::string> Split(std::string_view Tags)
     return Out;
 }
 
-std::string Stem(const std::string &Name)
-{
-    std::size_t Dot = Name.rfind('.');
-    return Dot == std::string::npos ? Name : Name.substr(0, Dot);
-}
-
 std::string Joined(const std::vector<std::string> &Words)
 {
     std::string Out;
@@ -157,7 +152,7 @@ std::optional<std::string> Map::Gather(const file_id_t *Given, std::size_t Count
 {
     file_id_t *Owned = nullptr;
     if (Count == 0) {
-        int Found = query_all(nullptr, nullptr, &Owned);
+        int Found = query_all(box::tagfs::person_tags, nullptr, nullptr, &Owned);
         if (Found < 0) return std::format("the volume would not list its files (error {})", -Found);
         Given = Owned;
         Count = static_cast<std::size_t>(Found);
@@ -168,7 +163,7 @@ std::optional<std::string> Map::Gather(const file_id_t *Given, std::size_t Count
     }
     for (std::size_t At = 0; At < Count; At++) {
         FileMetadata Metadata;
-        if (FileMetadataRead(Given[At], &Metadata) != 0) continue;
+        if (FileMetadataRead(box::tagfs::person_tags, Given[At], &Metadata) != 0) continue;
         if (Metadata.Filename)
             Files.push_back({Given[At], Metadata.Filename, Metadata.Size, Split(Metadata.Tags ? Metadata.Tags : "")});
         FileMetadataRelease(&Metadata);
@@ -195,8 +190,6 @@ Level Map::Root()
             Common.push_back(Tag);
             continue;
         }
-        bool Named = std::all_of(Holders.begin(), Holders.end(), [&](std::size_t At) { return Stem(Files[At].Name) == Tag; });
-        if (Named) continue;
         Entry One{Kind::Tag, Tag, 0, Holders};
         for (std::size_t At : Holders) {
             One.Bytes += Files[At].Bytes;

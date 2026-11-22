@@ -2,15 +2,17 @@
  *
  * What a file is comes from what it holds, never from the tags its person
  * gave it: a program holds a box or an ELF image (box/program_part.h), an
- * Itinerary begins with its header line (itinerary.h). */
+ * Itinerary begins with its header line (itinerary.h). The volume keeps every
+ * file's first bytes on its card, so each is told without reading a file, and
+ * the volume answers which files begin so. */
 
 #include "programs.h"
 
-#include <mutex>
+#include <algorithm>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
+#include "box/cxx/whose.h"
 #include "box/error.h"
 #include "box/file.h"
 #include "box/form.h"
@@ -33,17 +35,19 @@ bool ProgramFile(const volume::Record &File)
     return program_kind(File.Id(), &Kind) == 0 && Kind != PROGRAM_NONE;
 }
 
+// What an Itinerary begins with: its header line, ended either way.
+static_assert(itinerary::Header.size() + 1 <= FILE_HEAD_MOST, "an Itinerary is told by the first bytes a card keeps");
+const std::string ItineraryBeginnings[] = {std::string(itinerary::Header) + '\n',
+                                           std::string(itinerary::Header) + '\r'};
+
 bool ItineraryFile(const volume::Record &File)
 {
-    constexpr std::string_view Header = itinerary::Header;
-    const std::expected<std::string, int> Head = volume::Read(File.Id(), 0, Header.size() + 1);
-    return Head && Head->size() == Header.size() + 1 && std::string_view(*Head).starts_with(Header) &&
-           (Head->back() == '\n' || Head->back() == '\r');
+    return std::any_of(std::begin(ItineraryBeginnings), std::end(ItineraryBeginnings),
+                       [&](const std::string &Beginning) { return File.Head().starts_with(Beginning); });
 }
 
 // Whether File is a command — a program or an Itinerary: 1 or 0, told by its
-// first bytes; or the negative -error_t that kept them from being read, its
-// medium gone — a file that may well be a command, not one that is none.
+// first bytes; or the negative -error_t that kept its card from being read.
 int CommandOf(const volume::Record &File)
 {
     ProgramKind Kind = PROGRAM_NONE;
@@ -52,24 +56,21 @@ int CommandOf(const volume::Record &File)
     return Kind != PROGRAM_NONE || ItineraryFile(File) ? 1 : 0;
 }
 
-// What a file was found to be, as the hub last read it: its name and size
-// then, and whether it was a command. The rule stays what the file holds
-// (CommandOf); a file is read again only when it is new to the hub or its
-// name or size has changed. A line typed at the prompt read the first bytes of
-// every file on the volume, and an unknown command read them all again for
-// its guess — two hundred and more reads of the medium before a key was
-// echoed or the answer said. A file rewritten to the same size in place is
-// listed as it was until it changes again; starting one is never stale — Pick
-// reads the files the name means. The jobs' keeping strand asks too, hence
-// the lock.
-struct KnownFile {
-    std::string   Name;
-    std::uint64_t Size    = 0;
-    bool          Command = false;
-};
-
-std::mutex                               KnownHeld;
-std::unordered_map<file_id_t, KnownFile> Known;
+// Every command's file on the volume, each once, in id order: the programs
+// and the Itineraries, as the volume answers which files begin so.
+std::vector<file_id_t> CommandFiles()
+{
+    file_id_t             *Ids   = nullptr;
+    std::vector<file_id_t> Files = volume::Taken(Ids, program_files(&Ids));
+    for (const std::string &Beginning : ItineraryBeginnings) {
+        Ids = nullptr;
+        const int Count = files_starting_with(Beginning.data(), Beginning.size(), &Ids);
+        for (file_id_t File : volume::Taken(Ids, Count)) Files.push_back(File);
+    }
+    std::sort(Files.begin(), Files.end());
+    Files.erase(std::unique(Files.begin(), Files.end()), Files.end());
+    return Files;
+}
 
 // One of Ids, asked for when there are several.
 Picked ChooseOne(const Look &Shown, std::string_view Word, const std::vector<file_id_t> &Ids)
@@ -111,38 +112,18 @@ std::size_t StemLength(std::string_view FileName)
 
 void EachCommand(const std::function<void(file_id_t, std::string_view)> &Visit)
 {
-    file_id_t                                      *Ids   = nullptr;
-    const int                                       Count = query_all_everywhere(nullptr, nullptr, &Ids);
-    std::vector<std::pair<file_id_t, std::string>> Commands;
-    {
-        const std::lock_guard<std::mutex>        Guard(KnownHeld);
-        std::unordered_map<file_id_t, KnownFile> Now;
-        for (file_id_t File : volume::Taken(Ids, Count)) {
-            const std::expected<volume::Record, int> Held = volume::Record::Of(File);
-            if (!Held || Held->Name().empty()) continue;
-            KnownFile  Is{std::string(Held->Name()), Held->Size(), false};
-            const auto Was = Known.find(File);
-            if (Was != Known.end() && Was->second.Name == Is.Name && Was->second.Size == Is.Size) {
-                Is.Command = Was->second.Command;
-            } else {
-                // A file whose first bytes could not be read is not
-                // remembered: it is read again the next time.
-                const int Rc = CommandOf(*Held);
-                if (Rc < 0) continue;
-                Is.Command = Rc == 1;
-            }
-            if (Is.Command) Commands.emplace_back(File, Is.Name);
-            Now.emplace(File, std::move(Is));
-        }
-        Known = std::move(Now);
+    for (file_id_t File : CommandFiles()) {
+        const std::expected<volume::Record, int> Held = volume::Record::Of(File);
+        if (Held && !Held->Name().empty()) Visit(File, Held->Name());
     }
-    for (const auto &[File, Name] : Commands) Visit(File, Name);
 }
 
 Picked Pick(const Look &Shown, std::string_view Name)
 {
+    if (Name.empty()) return std::unexpected(-ERR_FILE_NOT_FOUND);
     file_id_t *Ids   = nullptr;
-    const int  Total = query_all_everywhere(std::string(Name).c_str(), nullptr, &Ids);
+    const int  Total =
+        query_name_all_everywhere(box::tagfs::my_tags, std::string(Name).c_str(), nullptr, nullptr, &Ids);
     if (Total < 0) return std::unexpected(Total);
 
     // A name whose files the volume will not show — its medium gone — is

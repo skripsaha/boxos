@@ -9,7 +9,7 @@ from . import binder, bookread, ondisk, stitch, stitch_pen, tally
 from .bookground import BookGround
 from .medium import Unreadable
 from .ondisk import BLOCK, SECTORS_PER_BLOCK, RunsIntersect, RunsNormal
-from .selftest_book import LANDING_ROOM, PADDING, Born, Case, Found, FrameDeed, Glass, Label
+from .selftest_book import LANDING_ROOM, PADDING, Case, Found, FrameDeed, Glass, Label
 
 
 def Pristine(bt):
@@ -63,10 +63,11 @@ def Circles(bt):
         seq = pen.next_seq
         first = pen.Sew([
             stitch.Coined(bt.tag, b"circle", b"value"), stitch.UseContext(b"tag:a,tag:b"),
-            Born(bt.F, bt.fid, d[:1], b"circle"),
+            bt.Born(bt.F, bt.fid, d[:1], b"circle"),
             stitch.Shaped(fid=S.fid, base=seq - S.gen, size=n * BLOCK + 1, mtime_ns=7,
                           splices=[(0, 1, [stitch.Data(bt.F + 1, 1)]), (n - 1, 0, [stitch.Hole(1)])],
                           digests=d[1:], slip=(0, b"\x01")),
+            stitch.Labeled(fid=S.fid, base=0, head=bt.Block(bt.F + 1)[:ondisk.HEAD_MOST]),
             stitch.Labeled(fid=L.fid, base=seq - L.gen, name=b"renamed", flags=(ondisk.FILE_LAID_BIT, 0),
                            add=[bt.tag], drop=list(L.tags[:1])),
             stitch.Quitclaim(fid=gone, base=seq - 1)], flags=stitch.DATA_FLUSHED)
@@ -135,13 +136,16 @@ def Padded(bt):
     if room < PADDING:
         raise Unreadable("the free run at block %u holds %u blocks and %u more files take one each"
                          % (bt.F, room, PADDING))
-    for first in range(128):
+    # The names' lengths are searched, the rest's as well as the first's: where the leaf ends hangs on how
+    # long every header of the image is, and a field the image's headers carry moves it.
+    for rest, first in ((rest, first) for rest in range(40, 72) for first in range(128)):
         content = tally.Content.Copy(bt.content)
         for i in range(PADDING):
             fid = bt.maxfid + 1 + i
-            content.files[fid] = tally.FileState(fid, 1, ondisk.FILE_ACTIVE, BLOCK, 1, 1,
-                                                 b"pad-%03u-" % i + b"p" * (first if i == 0 else 40), [],
-                                                 [tally.Run(False, bt.F + i, 1, 1)])
+            content.files[fid] = tally.FileState(fid, 1, ondisk.FILE_ACTIVE | ondisk.FILE_HEAD, BLOCK, 1, 1,
+                                                 b"pad-%03u-" % i + b"p" * (first if i == 0 else rest), [],
+                                                 [tally.Run(False, bt.F + i, 1, 1)],
+                                                 head=bt.Pattern(i)[:ondisk.HEAD_MOST])
             content.digests[bt.F + i] = bookread.Integrity(bt.Pattern(i), bt.lanes)
         content.next_fid = bt.maxfid + 1 + PADDING
         plan = binder.Bind(content, bt.ground, a=bt.plan.a)
@@ -188,8 +192,8 @@ def RangeCases(bt):
         RotFiles(o)
         pen = bt.Pen(o)
         pen.Sew([stitch.Labeled(fid=whole[0], base=pen.next_seq - 1, name=b"renamed"),
-                 stitch.Born(fid=content.next_fid, flags=ondisk.FILE_ACTIVE, size=BLOCK, created_ns=1,
-                             modified_ns=1, name=b"anew", tags=(), runs=[stitch.Hole(1)], digests=[])],
+                 bt.Headed(stitch.Born(fid=content.next_fid, flags=ondisk.FILE_ACTIVE, size=BLOCK, created_ns=1,
+                                       modified_ns=1, name=b"anew", tags=(), runs=[stitch.Hole(1)], digests=[]))],
                 flags=stitch.DATA_FLUSHED)
 
     dig = bt.Node(tally.DIGESTS)
@@ -206,6 +210,30 @@ def RangeCases(bt):
             raise Unreadable("400 more tags still make one TAGS leaf")
         bt.RotNode(o, leaves[-1])
 
+    program = min(bt.content.files)
+
+    def Owned(o):
+        """A Tally whose TAGS names the person's `save:slot` and program fid
+        `program`'s own of the same text, each under its own id."""
+        content = tally.Content.Copy(bt.content)
+        content.tags[bt.tag] = tally.TagState(tally.TAG_HAS_VALUE, b"save", b"slot")
+        content.tags[bt.tag + 1] = tally.TagState(tally.TAG_HAS_VALUE | tally.TAG_OWNED, b"save", b"slot", program)
+        content.next_tag = bt.tag + 2
+        binder.BindWrite(o, bt.ground, binder.Bind(content, bt.ground, a=bt.plan.a))
+    def Retired(worn):
+        """A Tally whose TAGS names id bt.tag RETIRED — and, `worn`, whose
+        first file wears it."""
+        def Plant(o):
+            laid = tally.Content.Copy(bt.content)
+            laid.tags[bt.tag] = tally.TagState(tally.TAG_RETIRED, b"", None)
+            laid.next_tag = bt.tag + 1
+            if worn:
+                fid = sorted(laid.files)[0]
+                laid.files[fid] = wearer = laid.files[fid].Copy()
+                wearer.tags = sorted(wearer.tags + [bt.tag])
+            binder.BindWrite(o, bt.ground, binder.Bind(laid, bt.ground, a=bt.plan.a))
+        return Plant
+
     def Within(c, lo):
         """Is every block from `lo` to the far Deed that no living owner
         names held?"""
@@ -219,6 +247,12 @@ def RangeCases(bt):
              any(n.level >= 1 for n in c.mount.tally.trees[tally.FILES].nodes)),
             ("and the kernel of this tree mounts it with every file",
              lambda c: c.kernel["mounts"] is True and c.kernel["files"] == len(content.files))]),
+        Case("B4o a TAGS of the person's tag and a program's own of the same text", Owned, checks=[
+            ("not one finding", lambda c: not c.findings),
+            ("both are read, each under its id and its owner",
+             lambda c: (c.mount.tags[bt.tag].owner, c.mount.tags[bt.tag + 1].owner) == (0, program) and
+             c.mount.tags[bt.tag].Text() == c.mount.tags[bt.tag + 1].Text() == b"save:slot"),
+            ("and the kernel of this tree mounts it", lambda c: c.kernel["mounts"] is True)]),
         Case("B4 a FILES leaf rotten in both copies", RotFiles,
              must={"RANGE_ROTTEN", "HELD_BLOCKS"}, checks=[
                  ("the files of the range are locked, %u by the parent's count" % len(whole),
@@ -245,6 +279,17 @@ def RangeCases(bt):
              lambda c: Found(c, "RANGE_ROTTEN", "TAGS") and set(c.mount.files) == set(bt.content.files)),
             ("no tag id of the range is given again: the next tag id is %u" % (bt.tag + 400),
              lambda c: c.mount.counts["next_tag"] == bt.tag + 400)]),
+        Case("B5b a TAGS element RETIRED, worn by no file", Retired(False), checks=[
+            ("the id is held as retired and the volume is not read only",
+             lambda c: not c.mount.glass and c.mount.tags[bt.tag].flags & tally.TAG_RETIRED),
+            ("it is never given again: the next tag id is %u" % (bt.tag + 1),
+             lambda c: c.mount.counts["next_tag"] == bt.tag + 1),
+            ("and nothing is said, the kernel of this tree mounting it so",
+             lambda c: not c.findings and c.kernel["mounts"] is True and c.kernel["glass"] == 0)]),
+        Case("B5c a TAGS element RETIRED, worn by a file", Retired(True), must={"RETIRED_WORN"}, checks=[
+            ("the file is said and stays, the volume not read only",
+             lambda c: Found(c, "RETIRED_WORN", "fid %u" % sorted(bt.content.files)[0]) and not c.mount.glass),
+            ("and the kernel of this tree says it once", lambda c: c.kernel["ribbon"].get("RETIRED_WORN") == 1)]),
         Case("B6 the last DIGESTS leaf rotten in both copies", lambda o: bt.RotNode(o, dig),
              must={"RANGE_ROTTEN"}, checks=[
                  ("its blocks are read unchecked", lambda c: Found(c, "RANGE_ROTTEN", "DIGESTS", "unchecked")),
@@ -479,8 +524,13 @@ def ElementCases(bt):
     run = S.runs[0]
 
     def Parcel(o, runs, key=(S.fid, 1)):
-        bt.Reitem(o, sleaf, lambda items: [(key, tally.ParcelEncode(runs, bt.plan.seq))
-                                           if k == (S.fid, 1) else (k, b) for k, b in items])
+        """S's Parcel laid anew as `runs`, its header's first bytes those its first run now names — as a
+        kernel's record of the runs would hold them."""
+        named = S.Copy()
+        named.head = (bytes(BLOCK) if runs[0].hole else bt.Block(runs[0].start))[:len(S.head)]
+        bt.Reitem(o, sleaf, lambda items: [(key, tally.ParcelEncode(runs, bt.plan.seq)) if k == (S.fid, 1) else
+                                           (k, tally.FileHeadEncode(named)) if k == (S.fid, 0) else (k, b)
+                                           for k, b in items])
 
     def Longer(o):
         bt.Reitem(o, sleaf, lambda items: [(k, b + b"\0") if k == (S.fid, 0) else (k, b) for k, b in items])

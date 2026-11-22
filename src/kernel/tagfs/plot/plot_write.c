@@ -110,12 +110,9 @@ static error_t PlotLayStretch(Plot *p, const PlotStretch *s, const PlotSource *s
     return rc != OK ? rc : stop;
 }
 
-error_t PlotWriteBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *out_done)
+/* The write's blocks laid stretch by stretch (PlotWriteBlocks). */
+static error_t PlotLayBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *out_done)
 {
-    *out_done = 0;
-    if (p->slip)
-        return PlotSlipWrite(p, at, src, out_done);   /* its bytes ride the stitch: no block moves */
-
     uint32_t most = TagFSRunBlocks();
     uint8_t *buf  = PlotRunBuffer(&most);
     uint64_t done = 0;
@@ -148,6 +145,35 @@ error_t PlotWriteBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *o
     if (done > 0)
         p->data_need = VolumeFlushNeed();
     *out_done = done;
+    return rc;
+}
+
+void PlotHeadLanded(Plot *p, uint64_t at, const uint8_t *bytes, uint64_t count)
+{
+    if (at >= TAGFS_HEAD_MOST)
+        return;
+    uint64_t under = TAGFS_HEAD_MOST - at;
+    memcpy(p->meta.head + at, bytes, (size_t)(count < under ? count : under));
+}
+
+/* The bytes of the file's first TAGFS_HEAD_MOST a write gives are taken from
+ * its source before a byte moves — a source that does not read now would not
+ * read for the write either — and those of them that landed go into the
+ * Plot's record of them (PlotHeadLanded): a file's first bytes change with the
+ * write that changes them. */
+error_t PlotWriteBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *out_done)
+{
+    uint8_t  first[TAGFS_HEAD_MOST];
+    uint64_t want = at < TAGFS_HEAD_MOST ? TAGFS_HEAD_MOST - at : 0;
+    *out_done     = 0;
+    if (want > src->bytes)
+        want = src->bytes;
+    error_t rc = want ? PlotSourcePull(src, 0, first, (uint32_t)want) : OK;
+    if (rc != OK)
+        return rc;
+    rc = p->slip ? PlotSlipWrite(p, at, src, out_done)    /* its bytes ride the stitch: no block moves */
+                 : PlotLayBlocks(p, at, src, out_done);
+    PlotHeadLanded(p, at, first, *out_done < want ? *out_done : want);
     return rc;
 }
 

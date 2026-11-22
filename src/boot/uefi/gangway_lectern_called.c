@@ -7,8 +7,9 @@
  * said when there are more. By the tags a person's settings ask for, when the
  * desk asks so (LecternDesk.ask): among the scenes the Lectern follows (every
  * file called *.scene, its tags as the book and the ribbon leave them), those
- * the book does not keep deleted that wear, for each tag asked, a tag of the
- * ids TAGS and the ribbon's Coined give it (LecternTagIds), the one `pick`
+ * the book does not keep deleted that match each word asked — wear a tag of
+ * the ids TAGS and the ribbon's Coined give it (LecternTagIds), or are called
+ * it, by the whole name or its stem (LecternNameAnswers) — the one `pick`
  * falls on, counted by fid — said, with how many there were. What may be read of it — no run of an extension
  * this loader does not read, no ground outside the data run, no more bytes
  * than asked — its blocks read as the medium gives them and held to the book
@@ -68,9 +69,10 @@ static void TagsPut(LecternLine *l, const LecternCalled *c)
     }
 }
 
-/* The scene followed that the book does not keep deleted and that wears a tag
- * of every one asked, the one `pick` falls on counted by fid, and how many
- * do; NULL when none does, or with no room (b->starved). */
+/* The scene followed that the book does not keep deleted and that matches
+ * every word asked — wears a tag of it, or is called it — the one `pick` falls
+ * on counted by fid, and how many do; NULL when none does, or with no room
+ * (b->starved). */
 static LecternFile *Picked(LecternBook *b, const LecternCalled *c, uint64_t *count)
 {
     const uint64_t words  = c->ntags;
@@ -93,7 +95,7 @@ static LecternFile *Picked(LecternBook *b, const LecternCalled *c, uint64_t *cou
             int                wears = !f->gone && !(f->flags & TALLY_FILE_DELETED) &&
                         LecternSceneNamed((const uint8_t *)f->name, f->name_len);
             for (uint64_t k = 0; wears && k < words; k++) {
-                int one = 0;
+                int one = LecternNameAnswers((const uint8_t *)f->name, f->name_len, c->tags[k]);
                 for (uint64_t j = 0; !one && j < n[k]; j++) one = LecternListHas(f->tags, f->ntags, ids[k][j]);
                 wears = one;
             }

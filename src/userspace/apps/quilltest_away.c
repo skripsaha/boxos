@@ -274,7 +274,7 @@ static void QuillAwayRead(file_id_t fid, uint32_t first, uint32_t count, QuillAw
 {
     file_info_t info;
     memset(walk, 0, sizeof(*walk));
-    int frc = file_info(fid, &info);
+    int frc = file_info(MY_TAGS, fid, &info);
     if (frc != 0) {
         walk->refused = frc;
         return;

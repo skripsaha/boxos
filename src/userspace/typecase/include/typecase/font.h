@@ -22,6 +22,7 @@
 #include <expected>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "typecase/outline.h"
@@ -36,6 +37,12 @@ using GlyphId = std::uint16_t;
 struct Fault {
     std::string Said;
 };
+
+/* What a font file Read takes begins with: a TrueType font's version
+ * (0x00010000), Apple's ('true'), a collection's tag ('ttcf'). A file that
+ * begins otherwise is no font this reader reads; one that begins so may still
+ * be a Fault. Whoever looks for fonts asks for the files that begin so. */
+inline constexpr std::string_view FontBeginnings[] = {std::string_view("\0\1\0\0", 4), "true", "ttcf"};
 
 /* The line's measures, in the font's units. Ascender up from the baseline,
  * Descender down from it (negative), LineGap the lead between lines; the

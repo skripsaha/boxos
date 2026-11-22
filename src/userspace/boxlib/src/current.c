@@ -224,11 +224,11 @@ Current *current_open_ex(const char *tag, uint32_t role, uint32_t item_size,
          * its place when the open may make one. */
         file_id_t   ids[4];
         file_info_t infos[4];
-        int n = find_file_by_name(name, NULL, ids, infos, 4);
+        int n = find_file_by_name(MY_TAGS, name, NULL, ids, infos, 4);
         if (n > 0) {
             c->file_id = ids[0];
         } else if ((role & CURRENT_WRITE) && (flags & CURRENT_CREATE)) {
-            int64_t fid = create(name, "");
+            int64_t fid = create(MY_TAGS, name, "");
             if (fid < 0) { free(c); CUR_FAIL(box_errno_of((int)fid)); }
             c->file_id = (file_id_t)fid;
         } else {
@@ -544,7 +544,7 @@ int64_t current_size(const Current *c)
     if (!(c->caps & CURRENT_CAP_RESIZABLE)) return -ERR_INVALID_OPERATION;
 
     file_info_t info;
-    int rc = file_info(c->file_id, &info);
+    int rc = file_info(MY_TAGS, c->file_id, &info);
     if (rc < 0)  return (int64_t)rc;      /* already a negative -error_t */
     if (rc != 0) return -ERR_IO;
     return (int64_t)info.size;

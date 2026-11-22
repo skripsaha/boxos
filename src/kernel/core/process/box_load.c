@@ -2,6 +2,7 @@
 #include "box_reader.h"
 #include "box_needs.h"
 #include "box_loaded.h"
+#include "box_trust.h"
 #include "auth_tags.h"
 #include "nameplate_format.h"
 #include "cabin_layout.h"
@@ -646,7 +647,27 @@ error_t BoxLoad(vmm_context_t *vmm, const ImageSource *source, const char *name,
     bool    movable = false;
     uint64_t start  = 0;
 
-    if (BoxPartOfKind(&load.Table, BOX_KIND_NEEDS, &part)) {
+    /* Who made it: its signature checked against what the box is (box_trust.h).
+     * One that does not hold is said, and the box is as one unsigned. */
+    if (BoxPartOfKind(&load.Table, BOX_KIND_SIGNATURE, &part)) {
+        BoxSignature signature;
+        rc = BoxHoldPart(&load, &part, &held);
+        if (rc == OK && (verdict = BoxSignatureRead(held.Bytes, part.Size, &signature)) != BOX_OK)
+            rc = BoxRefuse(&load, verdict, &part);
+        if (rc == OK) {
+            uint8_t digest[BOX_HASH_BYTES];
+            BoxSignedDigest(&load.Table, &part, &signature, &load.Hasher, digest);
+            const BoxSigned said = BoxTrustCheck(&signature, digest);
+            loaded->Trusted      = said.Trusted;
+            loaded->Passport     = said.Passport;
+            if (signature.How == BOX_SIGN_RSA2048_SHA256 && !said.Holds)
+                kprintf("[BOX] %s: its signature is not its author's over it — it is started as one "
+                        "signed by nobody\n", name);
+        }
+        BoxLetGo(&held);
+    }
+
+    if (rc == OK && BoxPartOfKind(&load.Table, BOX_KIND_NEEDS, &part)) {
         rc = BoxHoldPart(&load, &part, &held);
         if (rc == OK)
             rc = BoxCheckNeeds(&load, &part, held.Bytes);
@@ -676,7 +697,8 @@ error_t BoxLoad(vmm_context_t *vmm, const ImageSource *source, const char *name,
         if (rc == OK && (verdict = BoxAsksRead(held.Bytes, part.Size, &asks, NULL)) != BOX_OK)
             rc = BoxRefuse(&load, verdict, &part);
         if (rc == OK)
-            loaded->Asks = (asks.Utility ? AUTH_TAG_UTILITY : 0u) | (asks.Network ? AUTH_TAG_NETWORK : 0u);
+            loaded->Asks = (asks.Utility ? AUTH_TAG_UTILITY : 0u) | (asks.Network ? AUTH_TAG_NETWORK : 0u) |
+                           (asks.SeeTags ? AUTH_TAG_SEE_TAGS : 0u) | (asks.ChangeTags ? AUTH_TAG_CHANGE_TAGS : 0u);
         BoxLetGo(&held);
     }
     if (rc == OK && BoxPartOfKind(&load.Table, BOX_KIND_DOORS, &part)) {

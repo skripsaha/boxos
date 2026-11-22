@@ -39,7 +39,7 @@ static StandBinder s_conjugate_binder;
 static bool StandConjugateFile(StandFreshModel* m, const char* name, uint32_t blocks, uint64_t* fid)
 {
     m->size = 0;
-    return tagfs_create_file(name, NULL, 0, fid) == 0 &&
+    return tagfs_create_file(name, NULL, 0, 0, fid) == 0 &&
            StandFreshWrite(m, *fid, 0, blocks * TAGFS_BLOCK_SIZE, STAND_CONJUGATE_STREAM) ==
                (int)(blocks * TAGFS_BLOCK_SIZE);
 }
@@ -107,7 +107,7 @@ static void StandConjugateMeddles(void* ctx)
 {
     StandConjugateMeddle* w = ctx;
     if (!w->write)
-        w->rc = tagfs_add_tag_string(w->fid, &s_note);
+        w->rc = tagfs_add_tag_string(TagOwnerPerson(), w->fid, &s_note);
     else
         w->rc = StandWriteAt(w->fid, 0, w->m->bytes, TAGFS_BLOCK_SIZE) == (int)TAGFS_BLOCK_SIZE ? OK : ERR_WRITE_FAILED;
 }
@@ -196,7 +196,7 @@ static TestResult TestStandConjugateChanged(void)
                 "nothing is touched: B on its own blocks, nothing rests, no block in common");
     TEST_ASSERT(tagfs_has_tag(f, tagfs_tag_lookup("note")), "B wears the tag the change put on");
     TEST_ASSERT(StandFreshHolds(&m, f) && StandFreshHolds(&m, a), "both read their bytes");
-    TEST_ASSERT_OK(tagfs_remove_tag_string(f, &s_note), "the tag comes off B");
+    TEST_ASSERT_OK(tagfs_remove_tag_string(TagOwnerPerson(), f, &s_note), "the tag comes off B");
 
     w = (StandConjugateMeddle){ .fid = a, .m = &m, .write = true, .rc = ERR_UNKNOWN };
     ConjugateStandBetween(StandConjugateMeddles, &w);
@@ -340,9 +340,9 @@ static TestResult TestStandConjugateKept(void)
 
     TEST_ASSERT(boot != 0 && StandConjugateBlocks(boot, 1u, kernel), "the book names the kernel's file");
     TEST_ASSERT(StandConjugateKernelBlock(boot, g_test_buffer), "its block 0 is read");
-    TEST_ASSERT(tagfs_create_file("conjugate-kernel-a.bin", NULL, 0, &a) == 0 &&
+    TEST_ASSERT(tagfs_create_file("conjugate-kernel-a.bin", NULL, 0, 0, &a) == 0 &&
                     StandWriteAt(a, 0, g_test_buffer, TAGFS_BLOCK_SIZE) == (int)TAGFS_BLOCK_SIZE &&
-                    tagfs_create_file("conjugate-kernel-b.bin", NULL, 0, &f) == 0 &&
+                    tagfs_create_file("conjugate-kernel-b.bin", NULL, 0, 0, &f) == 0 &&
                     StandWriteAt(f, 0, g_test_buffer, TAGFS_BLOCK_SIZE) == (int)TAGFS_BLOCK_SIZE,
                 "two files of its very bytes are made");
     TEST_ASSERT_OK(TagFSSettle(), "and settled");
@@ -368,7 +368,7 @@ static TestResult TestStandConjugateKept(void)
     TEST_ASSERT_EQ(said.why, CONJUGATE_KEPT, "for the role it is kept in");
     TEST_ASSERT(StandConjugateUntouched(f, mine, theirs, 1u, resting), "nothing is touched");
     TEST_ASSERT_OK(StandKeepInRole(f, TAGFS_FILE_ROLE_ORDINARY), "B's role is let go");
-    TEST_ASSERT_OK(tagfs_add_tag_string(f, &system), "and B wears the word system, a tag like any other");
+    TEST_ASSERT_OK(tagfs_add_tag_string(TagOwnerPerson(), f, &system), "and B wears the word system, a tag like any other");
     TEST_ASSERT_OK(TagFSConjugate(INK_WARRANTED, &ask, &said), "B is laid on A's, the word keeping nothing");
 out:
     if (f)

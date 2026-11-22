@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cctype>
 
+#include "box/cxx/whose.h"
 #include "box/file.h"
 #include "box/life.h"
 
@@ -94,7 +95,7 @@ std::string Programs::NameOf(const ProgramSeen &Seen)
     if (Seen.File != 0) {
         if (const auto Known = Names.find(Seen.File); Known != Names.end()) return Known->second;
         FileMetadata Metadata;
-        if (FileMetadataRead(Seen.File, &Metadata) == 0) {
+        if (FileMetadataRead(box::tagfs::my_tags, Seen.File, &Metadata) == 0) {
             std::string Name = Metadata.Filename ? Metadata.Filename : "";
             FileMetadataRelease(&Metadata);
             if (const std::size_t Dot = Name.rfind('.'); Dot != std::string::npos && Dot > 0) Name.resize(Dot);

@@ -61,6 +61,7 @@ void BookFileForget(BookFile* f)
 {
     kfree(f->meta.filename);
     kfree(f->meta.tag_ids);
+    kfree(f->meta.shown_to);
     kfree(f->strips);
     kfree(f->cut);
     BookParcelsForget(f);
@@ -82,7 +83,11 @@ static uint32_t BookHeadKnown(const TallyFileHead* h)
            TallyVarintBytes(h->created_ns) +
            TallyVarintBytes(BookZigzag((int64_t)(h->modified_ns - h->created_ns))) +
            TallyVarintBytes(h->name_len) + (uint32_t)h->name_len + TallyVarintBytes(h->ntags) +
-           h->tags_bytes;
+           h->tags_bytes + ((h->flags & TALLY_FILE_DELETED) ? TallyVarintBytes(h->keep_ns) : 0u) +
+           ((h->flags & TALLY_FILE_MADE_BY) ? TallyVarintBytes(h->made_by) : 0u) +
+           ((h->flags & TALLY_FILE_SHOWN) ? TallyVarintBytes(h->nshown) + h->shown_bytes : 0u) +
+           ((h->flags & TALLY_FILE_HEAD) ? TallyVarintBytes(h->head_len) + (uint32_t)h->head_len : 0u) +
+           ((h->flags & TALLY_FILE_PASSPORT) ? TallyVarintBytes(h->passport) : 0u);
 }
 
 /* The header of `f->fid` into the gathering: its name and its tags copied out
@@ -102,8 +107,13 @@ static error_t BookFileHead(BookFile* f, const uint8_t* body, uint32_t len)
 
     f->meta.filename = kmalloc(h.name_len + 1u);
     f->meta.tag_ids  = kmalloc(sizeof(uint32_t) * (h.ntags ? h.ntags : 1u));
-    if (!f->meta.filename || !f->meta.tag_ids)
+    f->meta.shown_to = h.nshown ? kmalloc(sizeof(uint64_t) * h.nshown) : NULL;
+    if (!f->meta.filename || !f->meta.tag_ids || (h.nshown && !f->meta.shown_to))
         return ERR_NO_MEMORY;
+    if (h.nshown) {
+        TallyFidsOut(h.shown, h.shown_bytes, h.nshown, f->meta.shown_to);
+        f->meta.shown_count = (uint32_t)h.nshown;
+    }
     memcpy(f->meta.filename, h.name, h.name_len);
     f->meta.filename[h.name_len] = '\0';
 
@@ -128,6 +138,11 @@ static error_t BookFileHead(BookFile* f, const uint8_t* body, uint32_t len)
     f->meta.created_time  = h.created_ns;
     f->meta.modified_time = h.modified_ns;
     f->meta.keep_until    = h.keep_ns;
+    f->meta.made_by       = h.made_by;
+    f->meta.passport      = h.passport;
+    f->meta.head_len      = (uint8_t)h.head_len;
+    if (h.head_len)
+        memcpy(f->meta.head, h.head, h.head_len);
     f->head = true;
     return OK;
 }
@@ -431,6 +446,7 @@ static void BookFileKept(BookFile* f)
                                                   .nparcels = f->nparcels };
     f->meta.filename = NULL;
     f->meta.tag_ids  = NULL;
+    f->meta.shown_to = NULL;
     f->parcel_b      = NULL;
     f->parcel_body   = NULL;
     f->parcel_len    = NULL;
@@ -785,12 +801,6 @@ bool BookTagHeld(uint64_t tid, const TallyTag* t)
 {
     char words[192];
     bool held = true;
-    if (t->flags & TALLY_TAG_RETIRED) {
-        ksnprintf(words, sizeof(words), "tag id %llu is RETIRED — this kernel gives no id twice",
-                  (unsigned long long)tid);
-        TagFSUnderGlass(words);
-        held = false;
-    }
     if (tid > TAGFS_MAX_TAG_ID) {
         ksnprintf(words, sizeof(words), "tag id %llu is past 2^31 - 2, the last this kernel gives",
                   (unsigned long long)tid);
@@ -854,18 +864,6 @@ error_t BookTagAsideNoted(uint64_t tid, const TallyTag* t)
     return OK;
 }
 
-/* The bytes of a TAGS body this reader knows. */
-static uint32_t LeavesTagKnown(const TallyTag* t)
-{
-    uint32_t n = TallyVarintBytes(t->flags);
-    if (t->flags & TALLY_TAG_RETIRED)
-        return n;
-    n += TallyVarintBytes(t->key_len) + (uint32_t)t->key_len;
-    if (t->flags & TALLY_TAG_HAS_VALUE)
-        n += TallyVarintBytes(t->value_len) + (uint32_t)t->value_len;
-    return n;
-}
-
 static error_t LeavesTag(void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
 {
     TallyTag t;
@@ -880,23 +878,30 @@ static error_t LeavesTag(void* ctx, TallyKey key, const uint8_t* body, uint32_t 
     }
     ksnprintf(words, sizeof(words), "the TAGS element of id %llu", (unsigned long long)key.k1);
     if (got == TALLY_BODY_LONGER)
-        LeavesLonger(words, len - LeavesTagKnown(&t));
+        LeavesLonger(words, len - TallyTagBytes(&t));
     if (key.k1 + 1u > g_book.next_tag)
         g_book.next_tag = key.k1 + 1u;
     if (!BookTagHeld(key.k1, &t))
         return BookTagAsideNoted(key.k1, &t);
-    error_t rc = RegistryCoin(tagfs_get_state()->registry, (uint32_t)key.k1,
-                              (t.flags & TALLY_TAG_HAS_VALUE) ? TAGFS_TAG_FLAG_HAS_VALUE : 0, t.key,
-                              (uint8_t)t.key_len, t.value, (uint16_t)t.value_len);
+    /* A retired id is an element of the tree as a tag is — one item, its text
+     * none — and is counted as the Tally's writer counted it (binder_items.c,
+     * TagsNext): the measures of the tree the mount stands on are the ones
+     * its writer laid. */
+    error_t rc = (t.flags & TALLY_TAG_RETIRED)
+                     ? RegistryCoinRetired(tagfs_get_state()->registry, (uint32_t)key.k1)
+                     : RegistryCoin(tagfs_get_state()->registry, (uint32_t)key.k1,
+                                    (t.flags & TALLY_TAG_HAS_VALUE) ? TAGFS_TAG_FLAG_HAS_VALUE : 0,
+                                    TagRegistryOwnerOf(&t), t.key, (uint8_t)t.key_len, t.value,
+                                    (uint16_t)t.value_len);
     if (rc == ERR_ALREADY_EXISTS) {
-        ksnprintf(words, sizeof(words), "tag id %llu's text is another id's too, or its id another "
-                  "text's — the registry cannot hold the two at once", (unsigned long long)key.k1);
+        ksnprintf(words, sizeof(words), "tag id %llu's owner and text are another id's too, or its id "
+                  "another tag's — the registry cannot hold the two at once", (unsigned long long)key.k1);
         TagFSUnderGlass(words);
         return OK;
     }
     if (rc == OK) {
-        EndpaperLaidTag(&g_book.laid, (uint64_t)t.key_len + t.value_len);
-        FoliationLeafHolds(TALLY_TAGS, 1u, (uint64_t)t.key_len + t.value_len);
+        EndpaperLaidTag(&g_book.laid, TallyTagCarried(&t));
+        FoliationLeafHolds(TALLY_TAGS, 1u, TallyTagCarried(&t));
     }
     return rc;
 }

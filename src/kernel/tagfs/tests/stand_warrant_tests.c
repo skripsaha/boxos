@@ -69,7 +69,7 @@ static error_t StandPutOn(uint64_t file_id, const char* text)
 {
     TagSpelling tag;
     error_t     rc = TagSpell(text, strlen(text), &tag);
-    return rc == OK ? tagfs_add_tag_string(file_id, &tag) : rc;
+    return rc == OK ? tagfs_add_tag_string(TagOwnerPerson(), file_id, &tag) : rc;
 }
 
 /* The tag `text` spells taken off the file: 0 or -ERR_*. */
@@ -77,7 +77,7 @@ static int StandTakeOff(uint64_t file_id, const char* text)
 {
     TagSpelling tag;
     error_t     rc = TagSpell(text, strlen(text), &tag);
-    return rc == OK ? tagfs_remove_tag_string(file_id, &tag) : -(int)rc;
+    return rc == OK ? tagfs_remove_tag_string(TagOwnerPerson(), file_id, &tag) : -(int)rc;
 }
 
 /* The file's size, how many extents its record names, and where its first one
@@ -135,13 +135,16 @@ static TestResult TestStandWarrantUntagAnswersItsReason(void)
 
     TEST_ASSERT(StandMakeFile("stand_warrant_u", NULL, 0, &file_id), "a file of the test's own");
     TEST_ASSERT_OK(StandPutOn(file_id, "system"), "it wears the word system, a tag like any other");
-    uint64_t fid  = file_id;                 /* a program's file_id_t */
-    uint64_t gone = tagfs_file_ceiling();    /* the next id, as a program names it */
-    TEST_ASSERT_EQ(StandDeckAsk(STORAGE_TAG_UNSET, &fid, sizeof(fid), "standnone", 9, NULL),
+    uint8_t  fid[9], gone[9];                /* a program's file_id_t, and whose: the person's */
+    uint64_t next = tagfs_file_ceiling();    /* the next id, as a program names it */
+    memcpy(fid, &file_id, 8);
+    memcpy(gone, &next, 8);
+    fid[8] = gone[8] = STORAGE_TAGS_PERSON;
+    TEST_ASSERT_EQ(StandDeckAsk(STORAGE_TAG_UNSET, fid, sizeof(fid), "standnone", 9, NULL),
                    ERR_TAGFS_TAG_NOT_FOUND, "unset of a tag the file does not wear says so");
-    TEST_ASSERT_EQ(StandDeckAsk(STORAGE_TAG_UNSET, &gone, sizeof(gone), "standnone", 9, NULL),
+    TEST_ASSERT_EQ(StandDeckAsk(STORAGE_TAG_UNSET, gone, sizeof(gone), "standnone", 9, NULL),
                    ERR_FILE_NOT_FOUND, "and of a file that is not there, that");
-    TEST_ASSERT_OK(StandDeckAsk(STORAGE_TAG_UNSET, &fid, sizeof(fid), "system", 6, NULL),
+    TEST_ASSERT_OK(StandDeckAsk(STORAGE_TAG_UNSET, fid, sizeof(fid), "system", 6, NULL),
                    "and of system, by a caller with no warrant, taken");
     TEST_ASSERT(!StandWears(file_id, "system"), "and the file wears it no more");
 out:
@@ -203,12 +206,12 @@ out:
 // ----------------------------------------------------------------------------
 // A delete of a file the system keeps: by its role, and no tag
 //
-// The file is named system.standw — its name's tag is the bare key system — and
-// wears system:standwarrant besides: words of its user's, which keep nothing. A
-// rename takes its name's tag off and an untag of the key both, with no warrant,
-// and a delete of the file is taken. Kept in the system's role, the same file
-// is refused its delete without the warrant, and an untag or a rename changes
-// nothing of that.
+// The file is named system.standw — a name is a field of its card and wears no
+// tag, the bare key system no more than another — and wears system:standwarrant:
+// words of its user's, which keep nothing. A rename and an untag of the key
+// are taken with no warrant, and a delete of the file is taken. Kept in the
+// system's role, the same file is refused its delete without the warrant, and
+// an untag or a rename changes nothing of that.
 // ----------------------------------------------------------------------------
 
 static TestResult TestStandWarrantDeleteUntagRename(void)
@@ -217,7 +220,7 @@ static TestResult TestStandWarrantDeleteUntagRename(void)
     uint64_t   file_id = 0;
 
     TEST_ASSERT(StandMakeFile("system.standw", NULL, 0, &file_id), "a file named system.standw");
-    TEST_ASSERT(StandWears(file_id, "system"), "its name's tag is system");
+    TEST_ASSERT(!StandWears(file_id, "system"), "its name is no tag: it wears none of the key system");
     TEST_ASSERT_OK(StandPutOn(file_id, "system:standwarrant"), "and it wears system:standwarrant");
     TEST_ASSERT_EQ(tagfs_delete_file(file_id, INK_UNWARRANTED), 0,
                    "a delete with no warrant is taken: the words keep nothing");
@@ -227,8 +230,8 @@ static TestResult TestStandWarrantDeleteUntagRename(void)
     TEST_ASSERT_OK(StandPutOn(file_id, "system:standwarrant"), "wearing system:standwarrant");
     TEST_ASSERT_OK(StandKeepInRole(file_id, TAGFS_FILE_ROLE_SYSTEM), "kept in the system's role");
     TEST_ASSERT_EQ(tagfs_rename_file(file_id, "standwarrant.r"), 0, "a rename with no warrant is taken");
-    TEST_ASSERT(!StandWears(file_id, "system") && StandWears(file_id, "standwarrant"),
-                "its name's tag moved with it");
+    TEST_ASSERT(!StandWears(file_id, "system") && !StandWears(file_id, "standwarrant"),
+                "a rename moves no tag: the file wears neither name's key");
     TEST_ASSERT_EQ(StandTakeOff(file_id, "system"), 0, "an untag of the key system is taken");
     TEST_ASSERT(!StandWears(file_id, "system:standwarrant"), "and the file wears no tag of it");
     TEST_ASSERT_EQ(tagfs_delete_file(file_id, INK_UNWARRANTED), -(int)ERR_PERMISSION_DENIED,
@@ -273,7 +276,6 @@ static TestResult TestStandWarrantBootRunRefusedToBoth(void)
     uint32_t    extents = 0;
     bool        armed   = false, loaded = false;
     Plot        plot;
-    TagSpelling key     = TagSpellingOfKey("kernel");
     TagFSPage   page;
     TagFSState* fs      = tagfs_get_state();
     const char* aside   = StandStepsAsideFor();
@@ -282,7 +284,8 @@ static TestResult TestStandWarrantBootRunRefusedToBoth(void)
         return test_steps_aside(aside);
 
     TEST_ASSERT(fs->boot.kernel_blocks > 0, "the Deed names the blocks the loader reads");
-    TEST_ASSERT_OK(TagFSQueryPage(&key, 1, NULL, 0, 1, &kernel, 1, false, &page), "the kernel is asked for");
+    TEST_ASSERT_OK(TagFSNamedPage(TagOwnerPerson(), "kernel", 6, NULL, 0, NULL, 0, 1, &kernel, 1, false, &page),
+                   "the kernel is asked for by its name");
     TEST_ASSERT_EQ(page.delivered, 1, "and found");
     TEST_ASSERT(StandBlockOf(kernel, 0, &block) &&
                 block == fs->boot.kernel_block,
@@ -428,7 +431,8 @@ static TestResult TestStandWarrantDeckReadsTheCabin(void)
         { AUTH_TAG_SYSTEM | AUTH_TAG_UTILITY,  INK_WARRANTED   },
     };
     TestResult verdict = TEST_PASS;
-    uint64_t   file_id = 0;
+    uint64_t   file_id = 0, kernel_id = 0;
+    TagFSPage  page;
     OpContext  ctx;
 
     memset(&ctx, 0, sizeof(ctx));
@@ -451,7 +455,9 @@ static TestResult TestStandWarrantDeckReadsTheCabin(void)
     s_deck_cabin.auth_bits = AUTH_TAG_UTILITY | AUTH_TAG_APP;
     TEST_ASSERT_EQ(StandDeckAsk(STORAGE_OBJ_DELETE, &fid, sizeof(fid), NULL, 0, &ctx),
                    ERR_PERMISSION_DENIED, "the deck's delete for a utility's cabin is refused");
-    TEST_ASSERT(tagfs_has_tag(file_id, tagfs_tag_lookup("stand_warrant_d")), "and the file is still there");
+    TEST_ASSERT_OK(TagFSNamedPage(TagOwnerPerson(), "stand_warrant_d", 15, NULL, 0, NULL, 0, 1, &kernel_id, 1, false, &page),
+                   "the file is asked for by its name");
+    TEST_ASSERT_EQ(kernel_id, file_id, "and it is still there");
     s_deck_cabin.auth_bits = AUTH_TAG_SYSTEM;
     TEST_ASSERT_OK(StandDeckAsk(STORAGE_OBJ_DELETE, &fid, sizeof(fid), NULL, 0, &ctx),
                    "and for a cabin that holds system, taken");
@@ -466,8 +472,8 @@ out:
 // Any tag goes on any file, with no warrant
 //
 // The words system, boot and god, with a value or none, are tags a user may put
-// on any file, through the volume's road and the deck's, and a rename whose
-// name's tag is system is a rename: none of them makes the file one the system
+// on any file, through the volume's road and the deck's, and a rename to
+// system.standt is a rename: none of them makes the file one the system
 // keeps, and the file stays its owner's — it is written with no warrant. Only
 // the role of its record keeps a file, and the role is put on by the system
 // alone (StandKeepInRole stands for the image builder): then the same write is
@@ -481,8 +487,10 @@ static TestResult TestStandWarrantAnyTagPutOn(void)
     uint64_t   file_id = 0;
 
     TEST_ASSERT(StandMakeFile("stand_warrant_t", NULL, 0, &file_id), "a file of the test's own");
-    uint64_t fid = file_id;    /* a program's file_id_t */
-    TEST_ASSERT_OK(StandDeckAsk(STORAGE_TAG_SET, &fid, sizeof(fid), "system:standdeck", 16, NULL),
+    uint8_t fid[9];            /* a program's file_id_t, and whose: the person's */
+    memcpy(fid, &file_id, 8);
+    fid[8] = STORAGE_TAGS_PERSON;
+    TEST_ASSERT_OK(StandDeckAsk(STORAGE_TAG_SET, fid, sizeof(fid), "system:standdeck", 16, NULL),
                    "the deck's tag set of system:standdeck, by a caller with no warrant, is taken");
     TEST_ASSERT(StandWears(file_id, "system:standdeck"), "and the file wears it");
     for (uint32_t i = 0; i < ARRAY_SIZE(words); i++) {
@@ -490,9 +498,8 @@ static TestResult TestStandWarrantAnyTagPutOn(void)
         TEST_ASSERT(StandWears(file_id, words[i]), "and the file wears it");
     }
     TEST_ASSERT_EQ(tagfs_rename_file(file_id, "system.standt"), 0,
-                   "a rename whose name's tag is system, with no warrant, is taken too");
-    TEST_ASSERT(StandWears(file_id, "system") && !StandWears(file_id, "stand_warrant_t"),
-                "and the file's name's tag is system");
+                   "a rename to system.standt, with no warrant, is taken too");
+    TEST_ASSERT(StandWears(file_id, "system"), "and the file wears the tags it wore: a name is no tag");
     TEST_ASSERT_EQ(StandWarrantJob(WRITE_JOB_WRITE, file_id, INK_UNWARRANTED, g_test_output,
                                    TAGFS_BLOCK_SIZE, 0),
                    OK, "the file is still its owner's: a write with no warrant is taken");
@@ -503,7 +510,7 @@ static TestResult TestStandWarrantAnyTagPutOn(void)
                    ERR_PERMISSION_DENIED, "a write with no warrant is refused: the role keeps it");
     TEST_ASSERT_OK(StandPutOn(file_id, "standnote"),
                    "an ordinary tag goes on a file the system keeps with no warrant");
-    TEST_ASSERT_OK(StandDeckAsk(STORAGE_TAG_SET, &fid, sizeof(fid), "standmark", 9, NULL),
+    TEST_ASSERT_OK(StandDeckAsk(STORAGE_TAG_SET, fid, sizeof(fid), "standmark", 9, NULL),
                    "and through the deck, by a caller with no warrant");
     TEST_ASSERT(StandWears(file_id, "standnote") && StandWears(file_id, "standmark"),
                 "the file wears both");

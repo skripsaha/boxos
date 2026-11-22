@@ -29,7 +29,7 @@
 static bool StandShareFile(StandFreshModel* m, const char* name, uint64_t* fid)
 {
     m->size = 0;
-    return tagfs_create_file(name, NULL, 0, fid) == 0 &&
+    return tagfs_create_file(name, NULL, 0, 0, fid) == 0 &&
            StandFreshWrite(m, *fid, 0, STAND_SHARE_BLOCKS * TAGFS_BLOCK_SIZE, STAND_SHARE_STREAM) ==
                (int)(STAND_SHARE_BLOCKS * TAGFS_BLOCK_SIZE);
 }

@@ -24,6 +24,7 @@
 #include "settle/settle.h"
 #include "helm/helm.h"
 #include "keep/keep.h"
+#include "retire/retire.h"
 #include "mount/away.h"
 #include "mount/perambulation.h"
 #include "mount/hold_ground.h"
@@ -1789,7 +1790,7 @@ static void tagfs_stamp_reserved_tags(void)
     // dirty flag, so this re-derivation never forces a write.
     for (size_t i = 0; i < sizeof(TagFsReservedKeys) / sizeof(TagFsReservedKeys[0]); i++) {
         TagSpelling reserved = TagSpellingOfKey(TagFsReservedKeys[i]);
-        uint32_t    tid      = TagRegistryLookup(reg, &reserved);
+        uint32_t    tid      = TagRegistryLookup(reg, TagOwnerPerson(), &reserved);
         if (tid != TAGFS_INVALID_TAG_ID)
             tag_registry_mark_system(reg, tid);
     }
@@ -2326,6 +2327,7 @@ void TagFSServiceIfPending(void)
     HelmRunReady();
     SettleServiceIfPending();
     KeepServe();
+    RetireServe();
     tagfs_attend_owed_arrival();
     tagfs_ask_for_the_mount_again();
 
@@ -2569,8 +2571,10 @@ void tagfs_metadata_free(TagFSMetadata *meta)
     if (meta->filename) { kfree(meta->filename); meta->filename = NULL; }
     if (meta->tag_ids)  { kfree(meta->tag_ids);  meta->tag_ids  = NULL; }
     if (meta->extents)  { kfree(meta->extents);  meta->extents  = NULL; }
+    if (meta->shown_to) { kfree(meta->shown_to); meta->shown_to = NULL; }
     meta->tag_count    = 0;
     meta->extent_count = 0;
+    meta->shown_count  = 0;
 }
 
 TagFSState *tagfs_get_state(void)
@@ -2602,18 +2606,23 @@ uint32_t TagFSLookupSpelling(const TagSpelling *tag)
 {
     if (!tagfs_enter())
         return TAGFS_INVALID_TAG_ID;
-    uint32_t id = TagRegistryLookup(g_state.registry, tag);
+    uint32_t id = TagRegistryLookup(g_state.registry, TagOwnerPerson(), tag);
     tagfs_leave();
     return id;
 }
 
 error_t TagFSInternSpelling(const TagSpelling *tag, uint32_t *out_id)
 {
+    return TagFSInternOwned(TagOwnerPerson(), tag, out_id);
+}
+
+error_t TagFSInternOwned(TagOwner owner, const TagSpelling *tag, uint32_t *out_id)
+{
     *out_id = TAGFS_INVALID_TAG_ID;
     if (!tagfs_enter())
         return ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc = TagRegistryIntern(g_state.registry, tag, out_id);
-    if (rc == OK)   /* inside the door: bound before this book can go */
+    error_t rc = TagRegistryIntern(g_state.registry, owner, tag, out_id);
+    if (rc == OK && owner.kind == TAG_OWNER_PERSON)   /* inside the door: bound before this book can go */
         UseContextBindTag(tag, *out_id);
     tagfs_leave();
     return rc;
@@ -2642,9 +2651,9 @@ error_t tagfs_tag_intern(const char *tag, uint32_t *out_id)
     return TagFSInternSpelling(&spelled, out_id);
 }
 
-bool TagFSTagSpelling(uint32_t tag_id, TagSpelling *out, bool *is_system)
+bool TagFSTagSpelling(uint32_t tag_id, TagSpelling *out, bool *is_system, TagOwner *owner)
 {
-    return g_state.registry && TagRegistrySpelling(g_state.registry, tag_id, out, is_system);
+    return g_state.registry && TagRegistrySpelling(g_state.registry, tag_id, out, is_system, owner);
 }
 
 size_t tagfs_tag_text(uint32_t tag_id, char *out, size_t out_size)
@@ -2656,7 +2665,7 @@ size_t tagfs_tag_text(uint32_t tag_id, char *out, size_t out_size)
 
     TagSpelling tag;
     size_t      len = 0;
-    if (TagFSTagSpelling(tag_id, &tag, NULL)) {
+    if (TagFSTagSpelling(tag_id, &tag, NULL, NULL)) {
         len = TagSpellingTextLength(&tag);
         if (out && len < out_size)
             TagSpellingText(&tag, out);
@@ -2665,12 +2674,83 @@ size_t tagfs_tag_text(uint32_t tag_id, char *out, size_t out_size)
     return len;
 }
 
+bool TagFSHoldsProgram(const uint8_t volume[16], uint64_t owner)
+{
+    if (!volume || owner == 0 || !tagfs_enter())
+        return false;
+    bool here  = (owner & TAGFS_PASSPORT_BIT) || memcmp(volume, g_state.uuid, sizeof(g_state.uuid)) == 0;
+    bool holds = here && FileMapProgramFiles(g_state.files, owner, NULL, 0, NULL) > 0;
+    tagfs_leave();
+    return holds;
+}
+
+uint64_t TagFSProgramOf(uint64_t fid)
+{
+    if (fid == 0 || !tagfs_enter())
+        return 0;
+    FileRecord* rec   = FileMapRecordHold(g_state.files, fid, NULL);
+    uint64_t    owner = rec ? (rec->passport ? rec->passport : fid) : 0;
+    FileRecordRelease(rec);
+    tagfs_leave();
+    return owner;
+}
+
+uint64_t TagFSProgramCard(uint64_t owner)
+{
+    uint64_t card = 0;
+    if (owner && tagfs_enter()) {
+        FileMapProgramFiles(g_state.files, owner, NULL, 0, &card);
+        tagfs_leave();
+    }
+    return card;
+}
+
+uint64_t TagOwnerWord(TagOwner owner)
+{
+    if (owner.kind != TAG_OWNER_PROGRAM)
+        return 0;
+    uint64_t card = TagFSProgramCard(owner.id);
+    return card ? card : owner.id;
+}
+
+uint32_t TagFSProgramFiles(uint64_t owner, uint64_t* out, uint32_t room)
+{
+    if ((room && !out) || !tagfs_enter())
+        return 0;
+    uint32_t n = FileMapProgramFiles(g_state.files, owner, out, room, NULL);
+    tagfs_leave();
+    return n;
+}
+
+error_t TagFSPassportLay(uint64_t fid, uint64_t passport)
+{
+    if (!tagfs_enter())
+        return ERR_TAGFS_NOT_INITIALIZED;
+    InkReceipt receipt;
+    error_t    rc = InkPassport(fid, passport, &receipt);
+    tagfs_leave();
+    return rc;
+}
+
+bool TagFSTagIsPersons(uint32_t tag_id)
+{
+    if (!tagfs_enter())
+        return false;
+    TagSpelling tag;
+    TagOwner    owner;
+    bool persons = TagFSTagSpelling(tag_id, &tag, NULL, &owner) && owner.kind == TAG_OWNER_PERSON;
+    tagfs_leave();
+    return persons;
+}
+
 bool TagFSTagMatches(uint32_t tag_id, const TagSpelling *pattern)
 {
     if (!tagfs_enter())
         return false;
     TagSpelling tag;
-    bool matches = TagFSTagSpelling(tag_id, &tag, NULL) && TagPatternMatches(pattern, &tag);
+    TagOwner    owner;
+    bool matches = TagFSTagSpelling(tag_id, &tag, NULL, &owner) && owner.kind == TAG_OWNER_PERSON &&
+                   TagPatternMatches(pattern, &tag);
     tagfs_leave();
     return matches;
 }

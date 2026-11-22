@@ -37,11 +37,11 @@ int main(void)
 {
     file_id_t  fids[4];
     file_info_t infos[4];
-    int found = find_file_by_name(AT_NAME, NULL, fids, infos, 4);
+    int found = find_file_by_name(MY_TAGS, AT_NAME, NULL, fids, infos, 4);
 
     if (found <= 0) {
         /* Phase A — write, anchor, exit (no bye). */
-        int64_t fid = create(AT_NAME, AT_TAG);
+        int64_t fid = create(MY_TAGS, AT_NAME, AT_TAG);
         if (fid < 0) {
             kdbg_print("[ANCHOR] create rc=%ld", fid);
             return 1;

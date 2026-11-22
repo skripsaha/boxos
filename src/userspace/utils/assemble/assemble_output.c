@@ -76,7 +76,7 @@ static void ReleaseCandidates(AssembleCandidate *List, int Count)
 static int GatherCandidates(const AssembleRequest *Request,
                             AssembleCandidate **OutList, int *OutCount)
 {
-    int Count = find_file_by_name(Request->OutputName, NULL, NULL, NULL, 0);
+    int Count = find_file_by_name(PERSON_TAGS, Request->OutputName, NULL, NULL, NULL, 0);
     file_id_t *Ids;
     AssembleCandidate *List;
     int Found;
@@ -90,7 +90,7 @@ static int GatherCandidates(const AssembleRequest *Request,
     Ids = (file_id_t *)malloc((size_t)Count * sizeof(file_id_t));
     if (!Ids)
         return -ERR_NO_MEMORY;
-    Found = find_file_by_name(Request->OutputName, NULL, Ids, NULL, (size_t)Count);
+    Found = find_file_by_name(PERSON_TAGS, Request->OutputName, NULL, Ids, NULL, (size_t)Count);
     if (Found < 0) {
         free(Ids);
         return Found;
@@ -107,7 +107,7 @@ static int GatherCandidates(const AssembleRequest *Request,
         int Rc;
 
         memset(Candidate, 0, sizeof(*Candidate));
-        Rc = FileMetadataRead(Ids[Index], &Candidate->Metadata);
+        Rc = FileMetadataRead(PERSON_TAGS, Ids[Index], &Candidate->Metadata);
         if (Rc == -ERR_FILE_NOT_FOUND)
             continue;
         if (Rc != 0) {
@@ -265,7 +265,7 @@ static int ChooseReplaced(const AssembleRequest *Request, const AssembleCandidat
 static int WriteImage(const char *OutputName, const char *Tags,
                       const BoxAsmBlob *Image, file_id_t *OutFile)
 {
-    int64_t FileId = create(OutputName, Tags);
+    int64_t FileId = create(PERSON_TAGS, OutputName, Tags);
     uint64_t Offset = 0;
     int Rc;
 
@@ -334,7 +334,7 @@ static void SayPublished(const AssembleRequest *Request, file_id_t FileId,
     printf("assembled %s -> %s%s\n", Request->SourceName, Request->OutputName,
            Replaced ? ", in place of the one before" : "");
     memset(&Metadata, 0, sizeof(Metadata));
-    if (FileMetadataRead(FileId, &Metadata) == 0) {
+    if (FileMetadataRead(PERSON_TAGS, FileId, &Metadata) == 0) {
         printf("tags: %s\n", Metadata.Tags ? Metadata.Tags : "(none)");
         FileMetadataRelease(&Metadata);
     }
@@ -350,7 +350,7 @@ static int RemakeInPlace(const AssembleRequest *Request, const BoxAsmBlob *Image
 
     memset(&Old, 0, sizeof(Old));
     Old.Id = Request->Remake;
-    Rc = FileMetadataRead(Old.Id, &Old.Metadata);
+    Rc = FileMetadataRead(PERSON_TAGS, Old.Id, &Old.Metadata);
     if (Rc != 0) {
         AssembleSayError(Request->RemakeName, Rc, NULL);
         return Rc;

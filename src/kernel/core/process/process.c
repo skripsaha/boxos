@@ -1095,8 +1095,10 @@ void process_destroy(process_t *proc)
 static error_t process_wear_asked(process_t *proc, uint32_t asked)
 {
     static const struct { uint32_t Bit; const char *Key; } keys[] = {
-        { AUTH_TAG_UTILITY, "utility" },
-        { AUTH_TAG_NETWORK, "network" },
+        { AUTH_TAG_UTILITY,     "utility" },
+        { AUTH_TAG_NETWORK,     "network" },
+        { AUTH_TAG_SEE_TAGS,    "see-tags" },
+        { AUTH_TAG_CHANGE_TAGS, "change-tags" },
     };
     for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
         if (!(asked & keys[i].Bit))
@@ -1187,12 +1189,41 @@ error_t process_load_binary(process_t *proc, const ImageSource *source, const ch
     ci->luggage_addr     = 0;
     ci->luggage_length   = 0;
     ci->raised           = 0;
+    proc->cabin->program_fid   = source->FileId;
+    proc->cabin->program_owner = loaded.Passport ? loaded.Passport : source->FileId;
+    if (source->FileId)
+        memcpy(proc->cabin->program_volume, tagfs_get_state()->uuid, sizeof(proc->cabin->program_volume));
+    /* The card of the program's file keeps who the program is: laid anew when
+     * it is another — a program written over with another, signed or not —, as
+     * far as the volume takes a change now; one it does not take leaves the
+     * program none of its own tags until it does (TagFSHoldsProgram). */
+    if (source->FileId)
+        (void)TagFSPassportLay(source->FileId, loaded.Passport);
     ci->program_file     = source->FileId;
     ci->image_base       = loaded.ImageBase;
     ci->parts_addr       = loaded.PartsVa;
 
     proc->cabin->code_size = (size_t)source->Bytes;
     proc->cabin->rise      = loaded.Rise;
+
+    /* A program no author this system trusts signed is a guest: it has what
+     * every program has, and nothing its box asks for — nor the system's
+     * authority, which the role of the file it was read from gives only to a
+     * program the system trusts (box_trust.h). */
+    if (!loaded.Trusted) {
+        bool system = (__atomic_load_n(&proc->cabin->auth_bits, __ATOMIC_RELAXED) & AUTH_TAG_SYSTEM) != 0;
+        if (loaded.Asks || system)
+            kprintf("[PROCESS] %s is started as a guest: no author this system trusts signed it, so "
+                    "what its box asks for is not given%s\n", name,
+                    system ? ", nor the system's authority its file's role would give" : "");
+        loaded.Asks = 0;
+        if (system) {
+            /* The authority is the bit; the membership goes with it where a
+             * volume holds one. */
+            (void)process_remove_tag(proc, "system");
+            __atomic_and_fetch(&proc->cabin->auth_bits, ~AUTH_TAG_SYSTEM, __ATOMIC_RELAXED);
+        }
+    }
 
     error_t worn = process_wear_asked(proc, loaded.Asks);
     if (worn != OK)

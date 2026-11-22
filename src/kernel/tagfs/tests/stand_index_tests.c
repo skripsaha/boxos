@@ -22,7 +22,7 @@
 
 #define STAND_INDEX_FILES     64u
 #define STAND_INDEX_SPREAD    (1u << 20)
-#define STAND_INDEX_PER_FILE  256u     /* what the map may cost a live file, its record included */
+#define STAND_INDEX_PER_FILE  384u     /* what the map may cost a live file: its record (made_by, the list it shows its tags to and its first bytes in it), the links of its name and its share of the nodes and the name buckets — 353 measured */
 #define STAND_INDEX_PER_MEMBER 64u     /* what a member of a spread tag may cost the index */
 #define STAND_INDEX_MANY      1100u    /* more files than TAGFS_MAX_FILES (1024) held */
 #define STAND_INDEX_PAGE      100u
@@ -83,7 +83,7 @@ static TestResult TestStandIndexMapCostsTheLive(void)
     size_t far_bytes  = FileMapBytes(far);
     TEST_ASSERT_EQ(far_bytes, near_bytes, "ids a million apart cost what ids side by side do");
     TEST_ASSERT(far_bytes <= (size_t)STAND_INDEX_FILES * STAND_INDEX_PER_FILE,
-                "and no more than 256 bytes a live file, where a dense mirror paid for every id");
+                "and no more than STAND_INDEX_PER_FILE bytes a live file, where a dense mirror paid for every id");
 
     TEST_ASSERT_EQ(FileMapFiles(far, 1, s_rows, ARRAY_SIZE(s_rows)), STAND_INDEX_FILES,
                    "the rows are the 64 live files and nothing for the ids between them");
@@ -251,10 +251,10 @@ static TestResult TestStandIndexRegistryRehash(void)
         TagSpelling one;
         ksnprintf(text, sizeof(text), "many:%u", i);
         TEST_ASSERT_OK(TagSpell(text, strlen(text), &one), "a tag of the key many");
-        TEST_ASSERT_OK(TagRegistryIntern(scratch, &one, &id), "is interned");
+        TEST_ASSERT_OK(TagRegistryIntern(scratch, TagOwnerPerson(), &one, &id), "is interned");
         ksnprintf(text, sizeof(text), "key%u", i);
         TEST_ASSERT_OK(TagSpellKey(text, strlen(text), &one), "a key of its own");
-        TEST_ASSERT_OK(TagRegistryIntern(scratch, &one, &id), "is interned");
+        TEST_ASSERT_OK(TagRegistryIntern(scratch, TagOwnerPerson(), &one, &id), "is interned");
     }
     TEST_ASSERT(scratch->bucket_count >= scratch->total_tags,
                 "the hash of tags has grown to a bucket a tag");
@@ -265,10 +265,10 @@ static TestResult TestStandIndexRegistryRehash(void)
         TagSpelling one;
         ksnprintf(text, sizeof(text), "many:%u", i);
         TEST_ASSERT_OK(TagSpell(text, strlen(text), &one), "the tag spells again");
-        TEST_ASSERT(TagRegistryLookup(scratch, &one) != TAGFS_INVALID_TAG_ID,
+        TEST_ASSERT(TagRegistryLookup(scratch, TagOwnerPerson(), &one) != TAGFS_INVALID_TAG_ID,
                     "every tag is found after the hash moved");
     }
-    TEST_ASSERT_OK(TagRegistryKeyIds(scratch, "many", 4, &ids), "the key's tags are asked for");
+    TEST_ASSERT_OK(TagRegistryKeyIds(scratch, TagOwnerPerson(), "many", 4, &ids), "the key's tags are asked for");
     TEST_ASSERT_EQ(ids.count, STAND_INDEX_TAGS, "and every one of them answers to its key");
 out:
     kfree(ids.ids);
@@ -286,19 +286,19 @@ out:
  * `room` ids: the handler's answer. */
 static int StandIndexDeckQuery(const char* text, uint32_t room, uint64_t* out_size)
 {
-    const OpRegistration* reg   = OpRegistryLookup(OP_KIND(DECK_STORAGE, STORAGE_TAG_QUERY));
+    const OpRegistration* reg   = OpRegistryLookup(OP_KIND(DECK_STORAGE, STORAGE_NAME_QUERY));
     ManifestOp*           op    = (ManifestOp*)s_query_op;
-    uint8_t               scope = STORAGE_SCOPE_EVERYWHERE;
+    const uint8_t         head[2] = { STORAGE_SCOPE_EVERYWHERE, STORAGE_TAGS_PERSON };
 
     *out_size = 0;
     if (!reg)
         return ERR_NOT_INITIALIZED;
     memset(s_query_op, 0, sizeof(s_query_op));
-    op->op_kind    = OP_KIND(DECK_STORAGE, STORAGE_TAG_QUERY);
-    op->param_size = 1;
+    op->op_kind    = OP_KIND(DECK_STORAGE, STORAGE_NAME_QUERY);
+    op->param_size = sizeof(head);
     op->in_crate   = 0;
     op->out_crate  = 1;
-    memcpy(op->params, &scope, 1);
+    memcpy(op->params, head, sizeof(head));
     s_query_crates[0] = (Crate){ .magic = CRATE_MAGIC, .addr = (uint64_t)(uintptr_t)text,
                                  .size = strlen(text), .capacity = strlen(text) };
     s_query_crates[1] = (Crate){ .magic = CRATE_MAGIC, .addr = (uint64_t)(uintptr_t)s_crate,
@@ -309,13 +309,14 @@ static int StandIndexDeckQuery(const char* text, uint32_t room, uint64_t* out_si
 }
 
 /* Every page of the question, walked: each id the next of ours, in order. */
-static bool StandIndexWalkQuery(const TagSpelling* name, uint32_t made, uint32_t* out_seen)
+static bool StandIndexWalkQuery(const char* name, uint32_t made, uint32_t* out_seen)
 {
     TagFSPage page;
     uint64_t  from = 1;
     uint32_t  seen = 0;
     do {
-        if (TagFSQueryPage(name, 1, NULL, 0, from, s_page, STAND_INDEX_PAGE, seen == 0, &page) != OK)
+        if (TagFSNamedPage(TagOwnerPerson(), name, strlen(name), NULL, 0, NULL, 0, from, s_page, STAND_INDEX_PAGE,
+                           seen == 0, &page) != OK)
             return false;
         if (seen == 0 && page.total != made)
             return false;
@@ -361,26 +362,24 @@ static TestResult TestStandIndexCursorPast1024(void)
     uint64_t    said    = 0;
     uint32_t    head[2] = { 0, 0 };   /* the answer's delivered and total */
     const char* name    = "stand_index_many";
-    TagSpelling spelled;
 
     for (; made < STAND_INDEX_MANY; made++)
-        TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, &s_made[made]), 0,
+        TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, 0, &s_made[made]), 0,
                        "a file of the name is made");
-    TEST_ASSERT_OK(TagSpellKey(name, strlen(name), &spelled), "the name spells as a key");
 
-    TEST_ASSERT(StandIndexWalkQuery(&spelled, made, &seen),
+    TEST_ASSERT(StandIndexWalkQuery(name, made, &seen),
                 "the question's pages give every file of the name once, in id order, and "
                 "its first page counts them all");
     TEST_ASSERT_EQ(seen, STAND_INDEX_MANY, "all 1100 of them, past the 1024 a query once held");
     TEST_ASSERT(StandIndexWalkList(made, &seen), "the list's pages rise through the volume");
     TEST_ASSERT_EQ(seen, STAND_INDEX_MANY, "and carry every one of the 1100");
 
-    TEST_ASSERT_OK(StandIndexDeckQuery(name, 16, &said), "storage.query with room for 16");
+    TEST_ASSERT_OK(StandIndexDeckQuery(name, 16, &said), "storage.name.query with room for 16");
     memcpy(head, s_crate, sizeof(head));
     TEST_ASSERT(head[0] == 16 && head[1] == STAND_INDEX_MANY,
                 "fills its room and says the whole count");
     TEST_ASSERT_EQ(said, 8 + 16 * sizeof(uint64_t), "the crate holds what it says it holds");
-    TEST_ASSERT_OK(StandIndexDeckQuery(name, STAND_INDEX_CRATE, &said), "storage.query with room for all");
+    TEST_ASSERT_OK(StandIndexDeckQuery(name, STAND_INDEX_CRATE, &said), "storage.name.query with room for all");
     memcpy(head, s_crate, sizeof(head));
     TEST_ASSERT(head[0] == STAND_INDEX_MANY && head[1] == STAND_INDEX_MANY,
                 "delivers every file of the name");
@@ -439,7 +438,7 @@ static TestResult TestStandRegistryKeyIdsAreCopies(void)
     for (uint32_t v = 0; v < STAND_GROUP_FIRST; v++)
         TEST_ASSERT_OK(tagfs_tag_intern(StandGroupTag(k, v), &s_group_ids[v]),
                        "a tag of a key no tag had is interned");
-    TEST_ASSERT_OK(TagRegistryKeyIds(fs->registry, s_group_key, strlen(s_group_key), &copy),
+    TEST_ASSERT_OK(TagRegistryKeyIds(fs->registry, TagOwnerPerson(), s_group_key, strlen(s_group_key), &copy),
                    "the key's ids are asked for");
     TEST_ASSERT_EQ(copy.count, STAND_GROUP_FIRST, "and all of them come back");
     TEST_ASSERT(memcmp(copy.ids, s_group_ids, sizeof(uint32_t) * STAND_GROUP_FIRST) == 0,
@@ -447,7 +446,7 @@ static TestResult TestStandRegistryKeyIdsAreCopies(void)
 
     for (uint32_t v = 0; v < STAND_GROUP_FIRST; v++)
         copy.ids[v] = TAGFS_INVALID_TAG_ID;
-    TEST_ASSERT_OK(TagRegistryKeyIds(fs->registry, s_group_key, strlen(s_group_key), &again),
+    TEST_ASSERT_OK(TagRegistryKeyIds(fs->registry, TagOwnerPerson(), s_group_key, strlen(s_group_key), &again),
                    "the key's ids are asked for again");
     bool shared = again.count != STAND_GROUP_FIRST ||
                   memcmp(again.ids, s_group_ids, sizeof(uint32_t) * STAND_GROUP_FIRST) != 0;
@@ -470,7 +469,7 @@ static TestResult TestStandRegistryKeyIdsAreCopies(void)
     TEST_ASSERT(copy.count == STAND_GROUP_FIRST &&
                 memcmp(copy.ids, s_group_ids, sizeof(uint32_t) * STAND_GROUP_FIRST) == 0,
                 "and the copy taken before says what it said");
-    TEST_ASSERT_OK(TagRegistryKeyIds(fs->registry, s_group_key, strlen(s_group_key), &again),
+    TEST_ASSERT_OK(TagRegistryKeyIds(fs->registry, TagOwnerPerson(), s_group_key, strlen(s_group_key), &again),
                    "a copy taken now");
     TEST_ASSERT(again.count == 2 * STAND_GROUP_FIRST &&
                 memcmp(again.ids, s_group_ids, sizeof(uint32_t) * 2 * STAND_GROUP_FIRST) == 0,

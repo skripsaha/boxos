@@ -43,7 +43,8 @@ NODE_HEAD = 1
 RUN_HOLE, RUN_EXT = 1, 2
 EXT_CODEC, EXT_SHARED, EXT_COPY = 1, 2, 3
 
-TAG_HAS_VALUE, TAG_RETIRED = 1, 2    # Coined / TAGS flags (§2.8, §6.4)
+TAG_HAS_VALUE, TAG_RETIRED, TAG_OWNED = 1, 2, 4    # Coined / TAGS flags (§2.8, §6.4); OWNED: a program's own
+OWNER_PROGRAM = 1                    # volume_tally.h TALLY_OWNER_PROGRAM: an OWNED tag's owner, its passport or fid
 KERNEL_TAG_END = 1 << 31             # §6.4: the kernel gives ids below bit 31 (TAGFS_MAX_TAG_ID 0x7FFFFFFE)
 TAG_KEY_WIDTH = 255                  # tag_spelling.h:33 TAG_KEY_WIDTH
 TAG_TEXT_ROOM = 4074                 # tag_spelling.h:39 TAG_TEXT_WIDTH less the ':' — key and value
@@ -103,19 +104,24 @@ class FileState:
     on its last block, in the order of their stitches."""
 
     __slots__ = ("fid", "gen", "flags", "size", "created_ns", "modified_ns", "name", "tags", "runs",
-                 "parcels", "slips", "keep_ns")
+                 "parcels", "slips", "keep_ns", "made_by", "shown", "head", "passport")
 
     def __init__(self, fid, gen, flags, size, created_ns, modified_ns, name, tags, runs, parcels=None,
-                 slips=None, keep_ns=0):
+                 slips=None, keep_ns=0, made_by=0, shown=(), head=b"", passport=0):
         self.fid, self.gen, self.flags, self.size = fid, gen, flags, size
         self.created_ns, self.modified_ns, self.name = created_ns, modified_ns, bytes(name)
         self.tags, self.runs = list(tags), list(runs)
         self.parcels, self.slips = parcels, list(slips or [])
         self.keep_ns = keep_ns      # with FILE_DELETED: the nanoseconds the file is kept until; 0 otherwise
+        self.made_by = made_by      # with FILE_MADE_BY: the volume's id of the program's file that made it; 0 otherwise
+        self.shown = list(shown)    # with FILE_SHOWN: the programs this program's file shows its tags to, rising; [] otherwise
+        self.head = bytes(head)     # with FILE_HEAD: the file's first bytes, HEAD_MOST at the most; b"" otherwise
+        self.passport = passport    # with FILE_PASSPORT: the passport of the signed program it holds; 0 otherwise
 
     def Copy(self):
         return FileState(self.fid, self.gen, self.flags, self.size, self.created_ns, self.modified_ns,
-                         self.name, self.tags, self.runs, self.parcels, self.slips, self.keep_ns)
+                         self.name, self.tags, self.runs, self.parcels, self.slips, self.keep_ns, self.made_by,
+                         self.shown, self.head, self.passport)
 
     def Blocks(self):
         return sum(r.count for r in self.runs)
@@ -133,10 +139,12 @@ class FileState:
 
 
 class TagState:
-    __slots__ = ("flags", "key", "value")
+    """A tag as the book names it. `owner` is the program whose own tag it is (OWNED) — its passport,
+    bit 63 set, or its file's fid —, 0 for the person's — the tags people label files with."""
+    __slots__ = ("flags", "key", "value", "owner")
 
-    def __init__(self, flags, key, value):
-        self.flags, self.key, self.value = flags, key, value
+    def __init__(self, flags, key, value, owner=0):
+        self.flags, self.key, self.value, self.owner = flags, key, value, owner
 
     def Text(self):
         return self.key + (b":" + self.value if self.value is not None else b"")
@@ -514,7 +522,29 @@ def FileHeadEncode(fs):
     V = VarintPut
     head = (V(fs.gen) + V(fs.flags) + V(fs.size) + V(fs.created_ns) +
             V(Zigzag(fs.modified_ns - fs.created_ns)) + V(len(fs.name)) + fs.name + IdsPut(fs.tags))
-    return head + V(fs.keep_ns) if fs.flags & ondisk.FILE_DELETED else head
+    if fs.flags & ondisk.FILE_DELETED:
+        head += V(fs.keep_ns)
+    if fs.flags & ondisk.FILE_MADE_BY:
+        head += V(fs.made_by)
+    if fs.flags & ondisk.FILE_SHOWN:
+        head += IdsPut(fs.shown)
+    if fs.flags & ondisk.FILE_HEAD:
+        head += V(len(fs.head)) + fs.head
+    return head + V(fs.passport) if fs.flags & ondisk.FILE_PASSPORT else head
+
+
+def HeadTake(c, size):
+    """A file's first bytes as a header, a Born and a Labeled HEAD lay them: their count, then them — None
+    when there are more than HEAD_MOST or than the file's size."""
+    n = c.V()
+    return c.Take(n) if n <= ondisk.HEAD_MOST and n <= size else None
+
+
+def PassportTake(c):
+    """A passport as a header, a Born and a Labeled PASSPORT lay it — None when it is no passport (its bit
+    63 not set)."""
+    p = c.V()
+    return p if p & ondisk.PASSPORT_BIT else None
 
 
 def FileHeadDecode(fid, body, glass):
@@ -526,10 +556,24 @@ def FileHeadDecode(fid, body, glass):
     keep = c.V() if flags & ondisk.FILE_DELETED else 0
     if flags & ondisk.FILE_DELETED and not keep:
         raise Short("the header of fid %u is deleted and names no term" % fid)
+    made_by = c.V() if flags & ondisk.FILE_MADE_BY else 0
+    if flags & ondisk.FILE_MADE_BY and not made_by:
+        raise Short("the header of fid %u is made by a program and names none" % fid)
+    shown = c.Ids() if flags & ondisk.FILE_SHOWN else []
+    if flags & ondisk.FILE_SHOWN and not shown:
+        raise Short("the header of fid %u shows its tags and names no program" % fid)
+    first = HeadTake(c, size) if flags & ondisk.FILE_HEAD else b""
+    if flags & ondisk.FILE_HEAD and not first:
+        raise Short("the header of fid %u carries first bytes it does not hold — none, or past its size or %u"
+                    % (fid, ondisk.HEAD_MOST))
+    passport = PassportTake(c) if flags & ondisk.FILE_PASSPORT else 0
+    if flags & ondisk.FILE_PASSPORT and passport is None:
+        raise Short("the header of fid %u carries a passport without the bit every passport carries" % fid)
     _Exact(c, "the FILES header of fid %u" % fid, glass)
     if not flags & ondisk.FILE_ACTIVE:
         raise Short("the header of fid %u is not ACTIVE" % fid)
-    return FileState(fid, gen, flags, size, created, modified, name, tags, [], parcels=[], keep_ns=keep)
+    return FileState(fid, gen, flags, size, created, modified, name, tags, [], parcels=[], keep_ns=keep,
+                     made_by=made_by, shown=shown, head=first, passport=passport)
 
 
 def ParcelEncode(runs, seq):
@@ -549,26 +593,37 @@ def TagEncode(ts):
     V = VarintPut
     if ts.flags & TAG_RETIRED:
         return V(ts.flags)
-    out = V(ts.flags) + V(len(ts.key)) + ts.key
+    out = V(ts.flags)
+    if ts.flags & TAG_OWNED:
+        out += V(OWNER_PROGRAM) + V(ts.owner)
+    out += V(len(ts.key)) + ts.key
     return out + V(len(ts.value)) + ts.value if ts.flags & TAG_HAS_VALUE else out
 
 
 def TagDecode(c, what, glass):
-    """A tag's text as a TAGS element and a Coined record carry it: flags,
-    then — unless RETIRED, which names no text — the key and the value when
-    HAS_VALUE."""
+    """A tag as a TAGS element and a Coined record carry it: flags, then —
+    unless RETIRED, which names no tag — whose it is when OWNED, then the key
+    and the value when HAS_VALUE. A retired tag naming an owner, an owner of
+    no kind the format has, and a program's tag naming fid 0 are written as
+    the book never writes a tag (volume_tally.h TallyTagTake)."""
     flags = c.V()
     if flags & TAG_RETIRED:
+        if flags & TAG_OWNED:
+            raise Short("%s: a RETIRED tag names an owner" % what)
         return TagState(flags, b"", None)
+    owner = 0
+    if flags & TAG_OWNED:
+        kind, owner = c.V(), c.V()
+        if kind != OWNER_PROGRAM or owner == 0:
+            raise Short("%s: an OWNED tag's owner is kind %u, id %u" % (what, kind, owner))
     key = c.Take(c.V())
     value = c.Take(c.V()) if flags & TAG_HAS_VALUE else None
-    return TagState(flags, key, value)
+    return TagState(flags, key, value, owner)
 
 
 def TagGlass(tid, ts, glass):
-    """What of a tag this kernel cannot carry on (§16.1 п.2, §6.4)."""
-    if ts.flags & TAG_RETIRED:
-        glass.append("tag id %u is RETIRED — this kernel gives no id twice" % tid)
+    """What of a tag this kernel cannot carry on (§16.1 п.2, §6.4). A RETIRED
+    tag is held as retired: known, given no more, worn by nothing."""
     if tid >= KERNEL_TAG_END:
         glass.append("tag id %u is past 2^31 - 2, the last this kernel gives" % tid)
     if len(ts.key) > TAG_KEY_WIDTH or len(ts.key) + len(ts.value or b"") > TAG_TEXT_ROOM:
@@ -896,8 +951,11 @@ def TallyCheck(defines):
                   (SPINE_COUNTS, "SPINE_COUNTS"), (SPINE_FLAGS, "SPINE_FLAGS"),
                   (SPINE_MEDIUM_LIED, "SPINE_MEDIUM_LIED"), (NODE_HEAD, "NODE_HEAD"), (RUN_HOLE, "RUN_HOLE"),
                   (RUN_EXT, "RUN_EXT"), (TAG_HAS_VALUE, "TALLY_TAG_HAS_VALUE"), (TAG_RETIRED, "TALLY_TAG_RETIRED"),
+                  (TAG_OWNED, "TALLY_TAG_OWNED"), (OWNER_PROGRAM, "TALLY_OWNER_PROGRAM"),
                   (ondisk.FILE_ACTIVE, "TALLY_FILE_ACTIVE"),
                   (ondisk.FILE_UNDONE, "TALLY_FILE_UNDONE"), (ondisk.FILE_DELETED, "TALLY_FILE_DELETED"),
+                  (ondisk.FILE_MADE_BY, "TALLY_FILE_MADE_BY"), (ondisk.FILE_SHOWN, "TALLY_FILE_SHOWN"),
+                  (ondisk.FILE_HEAD, "TALLY_FILE_HEAD"), (ondisk.HEAD_MOST, "TALLY_HEAD_MOST"),
                   (ondisk.FILE_ROLE_MASK, "TALLY_FILE_ROLE_MASK"),
                   (ondisk.FILE_ROLE_SYSTEM, "TALLY_FILE_ROLE_SYSTEM"), (ondisk.FILE_ROLE_BOOT, "TALLY_FILE_ROLE_BOOT"),
                   (ondisk.FILE_ROLE_KERNEL, "TALLY_FILE_ROLE_KERNEL"), (SHEET_PAYLOAD, "TALLY_SHEET_PAYLOAD")):

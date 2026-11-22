@@ -16,7 +16,7 @@ BOX_FORM("takes optional things \"the files to put in the trash\"\n"
  * `them` for the next command (delete them, to give them up for good). Exit 0. */
 static int list_trash(void) {
     file_id_t *kept  = NULL;
-    int        total = query_all_deleted(NULL, NULL, &kept);
+    int        total = query_all_deleted(MY_TAGS, NULL, NULL, &kept);
     if (total < 0) {
         println("The trash could not be looked in");
         return 1;
@@ -30,7 +30,7 @@ static int list_trash(void) {
     size_t listed = 0;
     for (int i = 0; i < total; i++) {
         FileMetadata metadata;
-        if (FileMetadataRead(kept[i], &metadata) != 0) continue;
+        if (FileMetadataRead(MY_TAGS, kept[i], &metadata) != 0) continue;
         printf("%s  %llu bytes\n", metadata.Filename ? metadata.Filename : "(no name)",
                (unsigned long long)metadata.Size);
         FileMetadataRelease(&metadata);
@@ -45,7 +45,7 @@ static int list_trash(void) {
  * called so brought back. Says what it could not. Exit 0 when all came back. */
 static int restore_named(const char *const *names, size_t name_count) {
     file_id_t *kept  = NULL;
-    int        total = query_all_deleted(NULL, NULL, &kept);
+    int        total = query_all_deleted(MY_TAGS, NULL, NULL, &kept);
     int        failed = total < 0;
     if (failed) println("The trash could not be looked in");
 
@@ -54,7 +54,7 @@ static int restore_named(const char *const *names, size_t name_count) {
         int       count = 0;
         for (int i = 0; i < total; i++) {
             FileMetadata metadata;
-            if (FileMetadataRead(kept[i], &metadata) != 0) continue;
+            if (FileMetadataRead(MY_TAGS, kept[i], &metadata) != 0) continue;
             if (metadata.Filename && strcmp(metadata.Filename, names[n]) == 0) {
                 found = kept[i];
                 count++;

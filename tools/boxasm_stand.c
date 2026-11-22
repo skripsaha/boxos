@@ -89,7 +89,7 @@ static int Load(const char *Path, BoxAsmBlob *Blob)
 typedef struct {
     uint64_t Id;
     char    *Name;
-    char    *Tags;     /* as the volume says them: the name's stem first */
+    char    *Tags;     /* as the volume says them: the ones put on the file */
 } StandFile;
 
 typedef struct {
@@ -172,7 +172,7 @@ static int StandRead(BoxAsmFiles *Files, uint64_t Id, size_t Limit, char **Out, 
     return 0;
 }
 
-/* <dir>/volume read: "<id> <name> <tags>" a line, the stem put first. */
+/* <dir>/volume read: "<id> <name> <tags>" a line. */
 static int StandMount(StandVolume *Volume, const char *Dir)
 {
     char Path[4096];
@@ -190,8 +190,6 @@ static int StandMount(StandVolume *Volume, const char *Dir)
     while (fgets(Line, sizeof(Line), List)) {
         char *Name = strchr(Line, ' ');
         char *Tags;
-        char *Dot;
-        size_t Stem;
         StandFile *File;
 
         Line[strcspn(Line, "\n")] = '\0';
@@ -205,15 +203,7 @@ static int StandMount(StandVolume *Volume, const char *Dir)
         File = &Volume->List[Volume->Count++];
         File->Id = strtoull(Line, NULL, 10);
         File->Name = StandCopy(Name, strlen(Name));
-        Dot = strrchr(Name, '.');
-        Stem = Dot ? (size_t)(Dot - Name) : strlen(Name);
-        File->Tags = malloc(Stem + (Tags ? strlen(Tags) : 0) + 2u);
-        memcpy(File->Tags, Name, Stem);
-        File->Tags[Stem] = '\0';
-        if (Tags && *Tags) {
-            strcat(File->Tags, Stem ? "," : "");
-            strcat(File->Tags, Tags);
-        }
+        File->Tags = StandCopy(Tags ? Tags : "", Tags ? strlen(Tags) : 0);
     }
     fclose(List);
     return 1;
