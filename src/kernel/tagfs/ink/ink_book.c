@@ -5,6 +5,7 @@
 #include "../file_map/tail_slip.h"
 #include "../helm/engross.h"
 #include "../mount/perambulation.h"
+#include "../retire/retire.h"
 
 /*
  * The second half of an Ink (ink_internal.h): the writer's half of BookPut.
@@ -43,6 +44,18 @@
 // A file's name and tags
 // ----------------------------------------------------------------------------
 
+/* A tag no file may wear any more — retired — is put on no record: the
+ * registry closes a tag before the files are cleared of it, and a retirement
+ * is laid only under this lock with none wearing it (InkBookRetireLocked), so
+ * no record laid under it wears a tag once retired. */
+static error_t InkBookWearable(const uint32_t* tags, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; i++)
+        if (TagRegistryRetiredId(InkState()->registry, tags[i]))
+            return ERR_TAGFS_INVALID_TAG;
+    return OK;
+}
+
 static error_t InkBookFieldsLocked(uint64_t fid, const RecordWhere* was, const InkFieldsPlan* f, uint32_t add,
                                    FileRecord** rec, Jot* j, TagBitmapStake* stake, uint64_t claim, Jot** spent,
                                    InkReceipt* out)
@@ -55,6 +68,10 @@ static error_t InkBookFieldsLocked(uint64_t fid, const RecordWhere* was, const I
     FileRecord* still = FileMapRecordHold(fs->files, fid, &now);
     if (!still)
         return ERR_FILE_NOT_FOUND;
+    if (f->adds && (rc = InkBookWearable(&add, 1)) != OK) {
+        FileRecordRelease(still);
+        return rc;
+    }
     if (now.gen != was->gen || (f->adds && !TagBitmapStakeCovers(fs->bitmap_index, &add, 1, fid, stake)))
         rc = INK_AGAIN;
     else
@@ -73,7 +90,7 @@ static error_t InkBookFieldsLocked(uint64_t fid, const RecordWhere* was, const I
     DocketPutLocked(j, spent);
     if (f->adds)
         TagBitmapAddCovered(fs->bitmap_index, &add, 1, fid);
-    for (uint32_t i = 0; i < f->drops && i < 2; i++)
+    for (uint32_t i = 0; i < f->drops; i++)
         TagBitmapLeave(fs->bitmap_index, f->dropped[i], fid);
     InkGenLaidLocked(gen);
     out->gen = gen;
@@ -101,13 +118,50 @@ error_t InkBookFields(uint64_t fid, FileRecord* cur, const RecordWhere* was, con
     }
     if (rc == OK) {
         SettleInked(out->gen, false);
-        TagBitmapShrink(fs->bitmap_index, &fs->lock, f->dropped, f->drops < 2 ? f->drops : 2, fid);
+        TagBitmapShrink(fs->bitmap_index, &fs->lock, f->dropped, f->drops, fid);
     } else {
         JotsLetGo(j);
     }
     JotsLetGo(spent);
     FileRecordRelease(rec);
     TagBitmapStakeLetGo(stake);
+    return rc;
+}
+
+/* The tags retired at a gen of their own, which is no file's: the stitch that
+ * takes it up to its target lays each one's Coined RETIRED. Only once no file
+ * wears one — asked under the lock every record that puts a tag on is laid
+ * under — so none ever wears a tag the book holds retired. */
+static error_t InkBookRetireLocked(const uint32_t* tags, uint32_t count, InkReceipt* out)
+{
+    TagFSState* fs = InkState();
+    error_t     rc = InkVolumeTakes();
+    if (rc != OK)
+        return rc;
+    for (uint32_t i = 0; i < count; i++) {
+        uint64_t  worn;
+        TagFSPage page;
+        if (TagBitmapQueryPage(fs->bitmap_index, &tags[i], 1, NULL, 0, NULL, 0, 0, &worn, 1, false, &page) != 0)
+            return ERR_TAGFS_NOT_INITIALIZED;
+        if (page.delivered)
+            return ERR_BUSY;
+    }
+    uint64_t gen = InkGenNextLocked();
+    for (uint32_t i = 0; i < count && rc == OK; i++)
+        rc = TagRegistryRetireAt(fs->registry, tags[i], gen);
+    InkGenLaidLocked(gen);
+    out->gen = gen;
+    return rc;
+}
+
+error_t InkBookRetire(const uint32_t* tags, uint32_t count, InkReceipt* out)
+{
+    TagFSState* fs = InkState();
+    TagFSLockTake(&fs->lock);
+    error_t rc = InkBookRetireLocked(tags, count, out);
+    TagFSLockDrop(&fs->lock);
+    if (rc == OK)
+        SettleInked(out->gen, false);
     return rc;
 }
 
@@ -125,6 +179,8 @@ static error_t InkBookNewLocked(const uint32_t* tags, uint32_t count, FileRecord
         return rc;
     if (fid > INK_BOOK_FID_MOST)
         return ERR_TAGFS_FID_EXHAUSTED;
+    if ((rc = InkBookWearable(tags, count)) != OK)
+        return rc;
     if (FileMapNodesToAdd(fs->files, fid) > st->map.count ||
         !TagBitmapStakeCovers(fs->bitmap_index, tags, count, fid, st->index))
         return INK_AGAIN;
@@ -252,6 +308,7 @@ error_t InkBookQuitclaim(uint64_t fid, const RecordWhere* was, const FileRecord*
     }
     if (rc == OK) {
         SettleInked(out->gen, false);
+        RetireOwed();
         TagBitmapShrink(fs->bitmap_index, &fs->lock, cur->tags, cur->tag_count, fid);
         if (cur->flags & TAGFS_FILE_DELETED) {
             const uint32_t members = TAGFS_DELETED_MEMBERS;

@@ -90,7 +90,14 @@ typedef struct TagRegistryEntry {
     uint8_t                  flags;
     uint32_t                 tag_id;
     TagOwner                 owner;
+    uint64_t                 retired_gen;   /* RETIRED: the Ink the book holds it retired from — 0 for one
+                                             * the book already holds retired, TAG_RETIRING_OPEN while the
+                                             * files are still being cleared of it */
 } TagRegistryEntry;
+
+/* A tag whose retirement has begun and is not yet laid in a stitch the book
+ * settled: retired_gen is TAG_RETIRING_OPEN until its files are clear of it. */
+#define TAG_RETIRING_OPEN  UINT64_MAX
 
 typedef struct TagRegistryNode {
     uint32_t                tag_id;
@@ -115,8 +122,10 @@ typedef struct {
 
     TagRegistryEntry** by_id;
 
-    uint32_t total_tags;
-    uint64_t text_bytes;     /* the bytes every tag held carries past its fixed fields: key, value, owner */
+    uint32_t total_tags;     /* every id the registry knows: the tags it holds and the ones retired */
+    uint64_t text_bytes;     /* the bytes every tag the book has not yet laid retired carries past its fixed
+                              * fields: key, value, owner */
+    uint32_t program_tags;   /* the tags of programs whose retirement is not yet finished */
     uint32_t next_id;
 
     TagKeyGroup** key_buckets;
@@ -130,6 +139,13 @@ typedef struct {
     uint32_t          coined_next;
     uint64_t          coined_text;    /* what the ribbon's room holds for them (settle/ribbon.c, RibbonHeld) */
     bool              said_full;      /* every id issued: said once, the first time a tag is refused */
+
+    /* The ids retired since the last stitch that settled their Coined RETIRED, each wearing its
+     * retired_gen: a stitch lays one when the Ink it was retired at is among its own (settle/sewing.c).
+     * Under `lock`. */
+    uint32_t*         retiring;
+    uint32_t          retiring_count;
+    uint32_t          retiring_cap;
 } TagRegistry;
 
 // ----------------------------------------------------------------------------

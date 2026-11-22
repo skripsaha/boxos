@@ -402,11 +402,11 @@ error_t TagFSTagPage(TagOwner owner, const TagSpelling* within, uint32_t within_
     if (rc != OK)
         goto out;
 
-    uint32_t    id = 0;
+    TagRolled   rolled;
     TagSpelling tag;
-    TagOwner    whose;
-    for (uint32_t at = from; TagRoll(fs->registry, at, UINT32_MAX, &id, &tag, &whose); at = id + 1) {
-        if (!TagOwnerSame(whose, owner))
+    for (uint32_t at = from; TagRoll(fs->registry, at, UINT32_MAX, &rolled); at = rolled.id + 1) {
+        uint32_t id = rolled.id;
+        if (rolled.retired || !TagOwnerSame(rolled.owner, owner))
             continue;
         tag_ids[tag_count] = id;
         TagFSPage page;

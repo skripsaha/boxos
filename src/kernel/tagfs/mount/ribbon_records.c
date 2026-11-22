@@ -161,16 +161,17 @@ static bool RibbonLocked(RibbonStage* st, uint64_t fid)
     return RibbonLockedByName(fid) || (!live && BookRotLocks(fid));
 }
 
-/* Whether tag `id` is known: coined earlier in the stitch, held by the
- * registry, or named by the book and set aside — a tag the registry cannot
- * hold is a tag all the same (bookmount.py keeps every one TAGS and a Coined
- * name, BookTagAsideOf). */
+/* Whether tag `id` is one a record may wear: coined earlier in the stitch,
+ * held by the registry, or named by the book and set aside — a tag the
+ * registry cannot hold is a tag all the same (bookmount.py keeps every one
+ * TAGS and a Coined name, BookTagAsideOf) — and not retired, which is an id
+ * and no tag. */
 static bool RibbonTagKnown(RibbonStage* st, uint64_t id)
 {
     TagSpelling sp;
     for (uint32_t i = 0; i < st->ncoins; i++)
         if (st->coins[i].id == id)
-            return true;
+            return !(st->coins[i].tag.flags & TALLY_TAG_RETIRED);
     return (id <= TAGFS_MAX_TAG_ID &&
             TagRegistrySpelling(tagfs_get_state()->registry, (uint32_t)id, &sp, NULL, NULL)) ||
            BookTagAsideOf(id) != NULL;
@@ -332,7 +333,8 @@ static error_t RibbonBornApplied(RibbonReplay* rp, RibbonStage* st, const Ribbon
         return rc;
     RibbonTagsUnknown(st, b.tags, b.tags_bytes, b.ntags, unknown, sizeof(unknown));
     if (unknown[0])
-        return RibbonMismatch(rp, st, RIBBON_BORN, b.fid, "it wears tag id(s) %s no Coined or TAGS names", unknown);
+        return RibbonMismatch(rp, st, RIBBON_BORN, b.fid, "it wears tag id(s) %s that no Coined or TAGS names or that are "
+                              "RETIRED", unknown);
     /* Before a Strip is counted or an array of them asked for: a hole of
      * 2^62 blocks is a record that does not fit, not a want of memory. */
     if (b.blocks != RibbonBlocksOf(b.size))
@@ -585,8 +587,8 @@ static error_t RibbonLabelTags(RibbonReplay* rp, RibbonStage* st, const RibbonLa
                               "not worn");
     RibbonTagsUnknown(st, d->add, d->add_bytes, d->nadd, unknown, sizeof(unknown));
     *fits = !unknown[0];
-    return *fits ? OK : RibbonMismatch(rp, st, RIBBON_LABELED, d->fid, "it wears tag id(s) %s no Coined or TAGS "
-                                       "names", unknown);
+    return *fits ? OK : RibbonMismatch(rp, st, RIBBON_LABELED, d->fid, "it wears tag id(s) %s that no Coined or "
+                                       "TAGS names or that are RETIRED", unknown);
 }
 
 /* The Labeled applied to `now`: its name, flags and tags. */
@@ -698,11 +700,40 @@ static bool RibbonTagSame(const TallyTag* a, const TallyTag* b)
            (!a_value || (a->value_len == b->value_len && !memcmp(a->value, b->value, a->value_len)));
 }
 
+/* The coin of `id` the stitch holds, or NULL. */
+static RibbonCoin* RibbonCoinStaged(RibbonStage* st, uint64_t id)
+{
+    for (uint32_t i = 0; i < st->ncoins; i++)
+        if (st->coins[i].id == id)
+            return &st->coins[i];
+    return NULL;
+}
+
+/* A Coined of a tag the stitch, the registry and the book's tags set aside do
+ * not know: held for the registry, or — a Coined RETIRED taking the id the
+ * stitch coined before — in place of what was coined. */
+static error_t RibbonCoinStage(RibbonStage* st, uint64_t id, const TallyTag* t, bool held)
+{
+    RibbonCoin* staged = RibbonCoinStaged(st, id);
+    if (staged) {
+        staged->tag = *t;
+        return OK;
+    }
+    uint64_t cap = st->capcoins;
+    if (!RibbonGrow((void**)&st->coins, st->ncoins, &cap, sizeof(RibbonCoin)))
+        return ERR_NO_MEMORY;
+    st->capcoins = (uint32_t)cap;
+    st->coins[st->ncoins++] = (RibbonCoin){ id, *t, held };
+    return OK;
+}
+
 /* Coined (§2.8, §3.7): the id not known, or known as the same tag — owner and
  * text — by the stitch, the registry, or the book's tags set aside. What of it this kernel
  * cannot carry on is said whatever the stitch comes to; a tag the registry
  * cannot hold is coined all the same, aside (BookTagAsideNoted), and known to
- * the records after it. */
+ * the records after it. A Coined RETIRED retires the id, whatever it was —
+ * and an id retired is given no more: a Coined naming it a tag refuses the
+ * stitch. */
 static error_t RibbonCoinedApplied(RibbonStage* st, const RibbonRecord* r)
 {
     TallyTag        t, registered;
@@ -711,19 +742,23 @@ static error_t RibbonCoinedApplied(RibbonStage* st, const RibbonRecord* r)
     TagOwner        owner;
     uint64_t        id = 0;
     uint32_t        used = 0;
-    bool            staged = false;
     if (!RibbonBodyTaken(st, RIBBON_COINED, RibbonCoinedGet(st->u->stream + r->body, r->len, &id, &t, &used),
                          r->len, used))
         return OK;
-    bool held = BookTagHeld(id, &t);
+    bool         held   = BookTagHeld(id, &t);
+    RibbonCoin*  staged = RibbonCoinStaged(st, id);
     if (t.flags & TALLY_TAG_RETIRED)
+        return RibbonCoinStage(st, id, &t, held);
+    bool retired = staged ? (staged->tag.flags & TALLY_TAG_RETIRED) != 0
+                          : id <= TAGFS_MAX_TAG_ID && TagRegistryRetiredId(tagfs_get_state()->registry, (uint32_t)id);
+    if (retired) {
+        RibbonRefuse(st, "its Coined gives id %llu to '%.*s' of %s, which the volume has RETIRED — an id is given "
+                     "no more", (unsigned long long)id, (int)t.key_len, (const char*)t.key,
+                     (t.flags & TALLY_TAG_OWNED) ? "a program" : "the person");
         return OK;
-    for (uint32_t i = 0; i < st->ncoins; i++) {
-        if (st->coins[i].id == id) {
-            have   = &st->coins[i].tag;
-            staged = true;
-        }
     }
+    if (staged)
+        have = &staged->tag;
     bool known = !have && id <= TAGFS_MAX_TAG_ID &&
                  TagRegistrySpelling(tagfs_get_state()->registry, (uint32_t)id, &sp, NULL, &owner);
     if (known) {
@@ -738,14 +773,7 @@ static error_t RibbonCoinedApplied(RibbonStage* st, const RibbonRecord* r)
                      (t.flags & TALLY_TAG_OWNED) ? "a program" : "the person");
         return OK;
     }
-    if (known || staged)
-        return OK;
-    uint64_t cap = st->capcoins;
-    if (!RibbonGrow((void**)&st->coins, st->ncoins, &cap, sizeof(RibbonCoin)))
-        return ERR_NO_MEMORY;
-    st->capcoins = (uint32_t)cap;
-    st->coins[st->ncoins++] = (RibbonCoin){ id, t, held };
-    return OK;
+    return known || staged ? OK : RibbonCoinStage(st, id, &t, held);
 }
 
 /* Whether a record is of a kind this reader does not know as a stitch's

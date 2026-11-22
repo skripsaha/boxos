@@ -6,6 +6,7 @@
 #include "../helm/engross.h"
 #include "../integrity/gloss.h"
 #include "../box_hash/box_hash.h"
+#include "../retire/retire.h"
 #include "boardroom.h"
 
 /*
@@ -532,6 +533,7 @@ static void EscheatLostKept(void)
     s_rot      = NULL;
     s_nrot     = 0;
     __atomic_store_n(&s_gone, 1u, __ATOMIC_RELEASE);
+    RetireOwed();       /* a program it lost leaves its tags owed (retire/retire.h) */
 }
 
 /* What the Tally under way took let go — the files lost and the whole held

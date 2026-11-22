@@ -31,7 +31,7 @@ from .bootread import ASKED, CALLED, CALLED_MOST, SCENE, WHO, BootRead, Loaded, 
 from .bookground import BookGround
 from .medium import Unreadable
 from .ondisk import BLOCK, SECTOR, SECTORS_PER_BLOCK
-from .selftest_book import LANDING_ROOM, Case
+from .selftest_book import LANDING_ROOM, Case, Found
 
 STOPS = "no kernel on this volume may be jumped into: "
 
@@ -456,8 +456,9 @@ def BootCases(bt):
             ("the Labeled does not fit, said — the scene as it last matched, picked",
              lambda c: "stitch 3's Labeled of fid %u does not fit the file: it puts on a tag already worn or takes off "
              "one not worn — the file stays as it last matched" % bt.fid in Scened(c).lines and Picked(c))]),
-        Case("A30 the tag retired on the ribbon", Retired, checks=[
-            ("a retired tag is worn by nothing the loader picks: boot.scene is read in its place", NonePicked)]),
+        Case("A30 the tag retired on the ribbon", Retired, must={"RETIRED_WORN"}, checks=[
+            ("a retired tag is worn by nothing the loader picks: boot.scene is read in its place", NonePicked),
+            ("the scene that wore it is said, and stays", lambda c: Found(c, "RETIRED_WORN", "fid %u" % bt.fid))]),
         Case("A31 a scene wearing no tag, asked by its name's stem", BoundNotes(bt, [plain], coin), checks=[
             ("the name is no tag, and a word that is its stem picks the scene all the same", PickedBy(b"picked"))]),
         Case("A32 a scene wearing no tag, asked by its whole name", BoundNotes(bt, [plain], coin), checks=[

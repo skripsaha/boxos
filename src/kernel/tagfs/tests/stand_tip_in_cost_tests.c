@@ -70,9 +70,7 @@ static bool StandCostFiles(const TallyKey* lo, const TallyKey* hi)
 /* Whether a key of the state lies in [lo, hi) of `tree`, counted here. */
 static bool StandCostKeeps(uint64_t tree, const TallyKey* lo, const TallyKey* hi)
 {
-    uint32_t    id = 0;
-    TagSpelling sp;
-    TagOwner    owner;
+    TagRolled   rolled;
     UseText*    u    = NULL;
     bool        live = false;
     uint64_t    a    = lo && lo->k1 > g_book.frame.data_block ? lo->k1 : g_book.frame.data_block;
@@ -82,7 +80,7 @@ static bool StandCostKeeps(uint64_t tree, const TallyKey* lo, const TallyKey* hi
         return StandCostFiles(lo, hi);
     case TALLY_TAGS:
         return TagRoll(tagfs_get_state()->registry, lo ? (uint32_t)lo->k1 : 0,
-                       hi && hi->k1 < UINT32_MAX ? (uint32_t)hi->k1 : UINT32_MAX, &id, &sp, &owner);
+                       hi && hi->k1 < UINT32_MAX ? (uint32_t)hi->k1 : UINT32_MAX, &rolled);
     case TALLY_USE:
         u    = tagfs_recall_use_context(NULL);
         live = u && u->bytes;

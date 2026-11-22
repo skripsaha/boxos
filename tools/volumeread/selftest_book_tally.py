@@ -216,6 +216,19 @@ def RangeCases(bt):
         content.tags[bt.tag + 1] = tally.TagState(tally.TAG_HAS_VALUE | tally.TAG_OWNED, b"save", b"slot", program)
         content.next_tag = bt.tag + 2
         binder.BindWrite(o, bt.ground, binder.Bind(content, bt.ground, a=bt.plan.a))
+    def Retired(worn):
+        """A Tally whose TAGS names id bt.tag RETIRED — and, `worn`, whose
+        first file wears it."""
+        def Plant(o):
+            laid = tally.Content.Copy(bt.content)
+            laid.tags[bt.tag] = tally.TagState(tally.TAG_RETIRED, b"", None)
+            laid.next_tag = bt.tag + 1
+            if worn:
+                fid = sorted(laid.files)[0]
+                laid.files[fid] = wearer = laid.files[fid].Copy()
+                wearer.tags = sorted(wearer.tags + [bt.tag])
+            binder.BindWrite(o, bt.ground, binder.Bind(laid, bt.ground, a=bt.plan.a))
+        return Plant
 
     def Within(c, lo):
         """Is every block from `lo` to the far Deed that no living owner
@@ -262,6 +275,17 @@ def RangeCases(bt):
              lambda c: Found(c, "RANGE_ROTTEN", "TAGS") and set(c.mount.files) == set(bt.content.files)),
             ("no tag id of the range is given again: the next tag id is %u" % (bt.tag + 400),
              lambda c: c.mount.counts["next_tag"] == bt.tag + 400)]),
+        Case("B5b a TAGS element RETIRED, worn by no file", Retired(False), checks=[
+            ("the id is held as retired and the volume is not read only",
+             lambda c: not c.mount.glass and c.mount.tags[bt.tag].flags & tally.TAG_RETIRED),
+            ("it is never given again: the next tag id is %u" % (bt.tag + 1),
+             lambda c: c.mount.counts["next_tag"] == bt.tag + 1),
+            ("and nothing is said, the kernel of this tree mounting it so",
+             lambda c: not c.findings and c.kernel["mounts"] is True and c.kernel["glass"] == 0)]),
+        Case("B5c a TAGS element RETIRED, worn by a file", Retired(True), must={"RETIRED_WORN"}, checks=[
+            ("the file is said and stays, the volume not read only",
+             lambda c: Found(c, "RETIRED_WORN", "fid %u" % sorted(bt.content.files)[0]) and not c.mount.glass),
+            ("and the kernel of this tree says it once", lambda c: c.kernel["ribbon"].get("RETIRED_WORN") == 1)]),
         Case("B6 the last DIGESTS leaf rotten in both copies", lambda o: bt.RotNode(o, dig),
              must={"RANGE_ROTTEN"}, checks=[
                  ("its blocks are read unchecked", lambda c: Found(c, "RANGE_ROTTEN", "DIGESTS", "unchecked")),

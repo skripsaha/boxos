@@ -692,9 +692,13 @@ class BookMount:
     def _Coined(self, u, d, tags):
         tid, ts = d["tid"], d["tag"]
         tally.TagGlass(tid, ts, self.glass)
-        if ts.flags & tally.TAG_RETIRED:
-            return
         have = tags.get(tid)
+        if ts.flags & tally.TAG_RETIRED:
+            tags[tid] = ts
+            return
+        if have is not None and have.flags & tally.TAG_RETIRED:
+            raise Refused("its Coined gives id %u to '%s' of %s, which the volume has RETIRED — an id is given no "
+                          "more" % (tid, ts.Text().decode("utf-8", "replace"), _Whose(ts)))
         if have is not None and (have.key, have.value, have.owner) != (ts.key, ts.value, ts.owner):
             raise Refused("its Coined gives id %u to '%s' of %s, which the volume knows as '%s' of %s"
                           % (tid, ts.Text().decode("utf-8", "replace"), _Whose(ts),
@@ -761,9 +765,9 @@ class BookMount:
 
     @staticmethod
     def _Holds(fs, tags, wears):
-        unknown = [t for t in wears if t not in tags]
+        unknown = [t for t in wears if t not in tags or tags[t].flags & tally.TAG_RETIRED]
         if unknown:
-            raise Mismatch("it wears tag id(s) %s no Coined or TAGS names" % unknown)
+            raise Mismatch("it wears tag id(s) %s that no Coined or TAGS names or that are RETIRED" % unknown)
 
     def _Label(self, fs, d, tags):
         if d["what"] & LABEL_NAME:
@@ -812,6 +816,11 @@ class BookMount:
         but SHARED alone and flags past 32 bits are what this kernel cannot
         carry on; a Slip it carries on (§16.5 п.13)."""
         g = self.g
+        for fid in sorted(self.files):
+            worn = [t for t in self.files[fid].tags if t in self.tags and self.tags[t].flags & tally.TAG_RETIRED]
+            if worn:
+                self.Say("RETIRED_WORN", "damage", "fid %u wears tag id(s) %s, RETIRED — no file wears a retired id; "
+                         "the file stays as it is" % (fid, worn))
         for fid in sorted(self.files):
             fs = self.files[fid]
             out = [r for r in fs.Ground() if r[0] < g.data_block or r[0] + r[1] > g.data_end]

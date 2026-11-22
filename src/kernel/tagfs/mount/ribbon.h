@@ -46,6 +46,7 @@ typedef enum {
     RIBBON_CODE_NOT_LANDED,
     RIBBON_CODE_BASE_MISMATCH,
     RIBBON_CODE_EXTENT_OUTSIDE,
+    RIBBON_CODE_RETIRED_WORN,
     RIBBON_CODES
 } RibbonCode;
 
@@ -324,7 +325,8 @@ typedef struct {
     FileRecord* rec;
 } RibbonStaged;
 
-/* A tag a stitch coins, and whether the registry can hold it (BookTagHeld). */
+/* A tag a stitch coins — or retires, its flags RETIRED — and whether the registry can hold it
+ * (BookTagHeld). */
 typedef struct {
     uint64_t id;
     TallyTag tag;

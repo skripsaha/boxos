@@ -48,7 +48,7 @@ error_t  InkGuardSays(uint64_t fid, bool boot, uint32_t flags, InkWarrant warran
 typedef struct {
     uint32_t* tags;
     uint32_t  count;
-    uint32_t  dropped[2];   /* the tags that come off the index */
+    uint32_t* dropped;      /* the tags that come off the index: room for every one the file wears */
     uint32_t  drops;
     bool      adds;         /* `add` goes onto the index */
 } InkFieldsPlan;
@@ -75,6 +75,10 @@ bool     InkGoesRound(const error_t* rc);
 error_t  InkBookFields(uint64_t fid, FileRecord* cur, const RecordWhere* was, const InkFieldsPlan* f,
                        const char* name, uint32_t add, uint32_t flags, uint64_t keep_until,
                        InkReceipt* out);
+/* The tags `count` of them retired, once no file wears one: a gen of their
+ * own, no record (the registry owes the book a Coined RETIRED of each, which
+ * the stitch that takes the gen lays). ERR_BUSY when a file wears one still. */
+error_t  InkBookRetire(const uint32_t* tags, uint32_t count, InkReceipt* out);
 error_t  InkBookNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t made_by, uint64_t* out_fid,
                     InkReceipt* out);
 error_t  InkBookQuitclaim(uint64_t fid, const RecordWhere* was, const FileRecord* cur, FallowNode* fallow,

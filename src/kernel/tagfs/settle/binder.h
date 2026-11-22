@@ -614,6 +614,7 @@ typedef struct {
     BinderFiles*  files;         /* the slice, by fid */
     uint64_t      nfiles;
     uint32_t      tag_hi;        /* the tags below it are the book's */
+    uint64_t      tag_gen;       /* ... as of this Ink, the settled stitch's: a tag retired by it is laid RETIRED */
     UseText*      use;
     BinderGround* ground;        /* by first block: what DIGESTS names — laid in, in the leaves it lays and */
     uint64_t      nground;       /* ... offers; a STRICT kernel's every block of the state, and ... */

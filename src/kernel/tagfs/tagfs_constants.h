@@ -37,6 +37,10 @@
 //               (bit 1; re-derived, never the reason for a disk write).
 #define TAGFS_TAG_FLAG_HAS_VALUE    0x01
 #define TAGFS_TAG_FLAG_SYSTEM       0x02
+//   RETIRED   — the tag is retired (bit 2): its id is known and given no more,
+//               no lookup finds it and no file may wear it (tag_registry.c,
+//               TagRegistryRetire).
+#define TAGFS_TAG_FLAG_RETIRED      0x04
 
 // File flags — dense until the first release; from it on, a bit once given is
 // never given again.

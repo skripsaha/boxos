@@ -478,6 +478,10 @@ static error_t RibbonStageLaid(RibbonReplay* rp, RibbonStage* st)
             rc = BookTagAsideNoted(st->coins[i].id, t);
             continue;
         }
+        if (t->flags & TALLY_TAG_RETIRED) {
+            rc = RegistryCoinRetired(tagfs_get_state()->registry, (uint32_t)st->coins[i].id);
+            continue;
+        }
         rc = RegistryCoin(tagfs_get_state()->registry, (uint32_t)st->coins[i].id,
                           (t->flags & TALLY_TAG_HAS_VALUE) ? TAGFS_TAG_FLAG_HAS_VALUE : 0, TagRegistryOwnerOf(t),
                           t->key, (uint8_t)t->key_len, t->value, (uint16_t)t->value_len);
@@ -638,6 +642,37 @@ static bool RibbonOnOthers(const FileRecord* rec)
     return false;
 }
 
+/* The live files that wear a tag the book holds retired — an id no file may
+ * wear — said, each file as it is: the retirement is laid only once no file
+ * wears the tag (ink/ink_book.c), so a book that shows one has been damaged
+ * since (bookmount.py _Settle). */
+static void RibbonRetiredWorn(RibbonWalk* w)
+{
+    TagFSState* fs   = tagfs_get_state();
+    uint64_t    from = 0, ids[16];
+    uint32_t    n;
+    while ((n = FileMapFiles(fs->files, from, ids, 16)) > 0) {
+        for (uint32_t i = 0; i < n; i++) {
+            FileRecord* rec = FileMapRecordHold(fs->files, ids[i], NULL);
+            char        worn[160];
+            size_t      at = 0;
+            if (!rec)
+                continue;
+            for (uint32_t t = 0; t < rec->tag_count; t++)
+                if (TagRegistryRetiredId(fs->registry, rec->tags[t]) && at + 24u < sizeof(worn))
+                    at += (size_t)ksnprintf(worn + at, sizeof(worn) - at, at ? ", %llu" : "[%llu",
+                                            (unsigned long long)rec->tags[t]);
+            FileRecordRelease(rec);
+            if (!at)
+                continue;
+            ksnprintf(worn + at, sizeof(worn) - at, "]");
+            RibbonSay(w, RIBBON_CODE_RETIRED_WORN, "fid %llu wears tag id(s) %s, RETIRED — no file wears a retired "
+                      "id; the file stays as it is", (unsigned long long)ids[i], worn);
+        }
+        from = ids[n - 1] + 1;
+    }
+}
+
 /* A file the replay changed that stands outside the data run: said, locked. */
 static error_t RibbonOutsideLocked(RibbonWalk* w, uint64_t fid)
 {
@@ -710,6 +745,7 @@ static error_t RibbonSettled(RibbonReplay* rp)
     RibbonListSorted(rp->touched, &rp->ntouched);
     RibbonListSorted(rp->mismatched, &rp->nmismatched);
     RibbonListSorted(rp->ext, &rp->next);
+    RibbonRetiredWorn(rp->w);
     for (uint32_t i = 0; rc == OK && i < rp->ntouched; i++)
         rc = RibbonOutsideLocked(rp->w, rp->touched[i]);
     for (uint32_t i = 0; rc == OK && i < rp->nmismatched; i++) {
