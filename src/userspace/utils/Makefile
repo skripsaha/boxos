@@ -72,7 +72,7 @@ UTILS = create show files tag untag name trash delete assemble \
         timezone logsave lastsaid journey usetest faretest luggagetest rollcall handset headcount \
         playtime lavalamp finish taskboard memmap hexer stringview \
         calculate difference copy typer flame checksum passport aquarium \
-        nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits bloom spell ripple flappybird \
+        nyancat fireworks 2048 tetris todo tagmap mandelbrot qr minesweeper eyes donut slime tumbleweed crab wizard forest orbits bloom spell ripple flappybird chess \
         edit seek retag read inside settings autostart scratchpad garden gardener random sand coinflip dice casino seabattle whale hangman duppo \
         glyphs drawcheck itemcheck benchmark
 
@@ -532,6 +532,16 @@ $(FLAPPYBIRD_OBJS): CXXFLAGS += -I.
 
 flappybird.elf: $(BOXLIB_START) $(FLAPPYBIRD_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
 	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(FLAPPYBIRD_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
+
+# Chess is C++ in parts of its own directory; the rules and the engine are built
+# fast, the computer's search being most of what it does.
+CHESS_DIR  = chess
+CHESS_OBJS = $(addprefix $(CHESS_DIR)/,chess.o game.o position.o engine.o thinker.o pieces.o board.o panel.o cards.o)
+
+$(addprefix $(CHESS_DIR)/,position.o engine.o): CXXFLAGS += -O2
+
+chess.elf: $(BOXLIB_START) $(CHESS_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) $(BOXLIB_DIR)/user.ld $(NAMEPLATE_TOOL)
+	$(call NameplateLink,$(CXX),$(LDFLAGS),$(BOXLIB_START) $(CHESS_OBJS) $(PAINTER) $(TYPECASE) $(BOXCXX) $(BOXLIB) -lgcc)
 
 # Hangman is C++ in parts of its own directory; it keeps its ledger with keep.o.
 HANGMAN_DIR  = hangman
