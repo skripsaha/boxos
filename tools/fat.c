@@ -6,7 +6,8 @@
  *   fat IMG lay SIZE|least [--label L] [--id N]   a FAT32 on all of SIZE (512M,
  *                                                 2G) — or the smallest there is
  *                                                 in its sector — the file made
- *                                                 or cut to it
+ *                                                 as long as that when it is
+ *                                                 shorter, never cut
  *   fat IMG put PATH FILE                         FILE's bytes as PATH
  *   fat IMG zeros PATH BYTES                      BYTES of zeros as PATH
  *   fat IMG mkdir PATH                            every directory of PATH
@@ -128,7 +129,9 @@ static int Lay(Image* im, FatMedium* m, int argc, char** argv, uint64_t hidden)
     }
     if (!sectors)
         return Usage();
-    if (ftruncate(fileno(im->file), (off_t)((im->at + sectors) * im->sector)) != 0) {
+    fseeko(im->file, 0, SEEK_END);
+    off_t want = (off_t)((im->at + sectors) * im->sector);
+    if (ftello(im->file) < want && ftruncate(fileno(im->file), want) != 0) {
         fprintf(stderr, "fat: the image could not be made %llu sectors long\n", (unsigned long long)sectors);
         return 1;
     }
