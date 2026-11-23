@@ -28,8 +28,10 @@ int Find(const Keep &File, file_id_t &Id)
     const int  Count = File.Beginning ? files_starting_with(File.Beginning, std::strlen(File.Beginning), &Ids)
                                       : query_all_everywhere(box::tagfs::my_tags, File.Tags, nullptr, &Ids);
     int        Found = Count < 0 ? Count : 0;
-    for (int Seen = 0; Seen < Count && Found == 0; Seen++) {
-        const int    At = File.Beginning ? Count - 1 - Seen : Seen;
+    /* The record is the machine's: the home volume's (files_home_first). */
+    const int  Near  = Count < 0 ? 0 : (int)files_home_first(Ids, (size_t)Count);
+    for (int Seen = 0; Seen < Near && Found == 0; Seen++) {
+        const int    At = File.Beginning ? Near - 1 - Seen : Seen;
         FileMetadata Metadata;
         if (FileMetadataRead(box::tagfs::my_tags, Ids[At], &Metadata) != 0) continue;
         if (Metadata.Filename && std::strcmp(Metadata.Filename, File.Name) == 0) {

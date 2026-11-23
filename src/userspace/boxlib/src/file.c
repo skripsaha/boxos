@@ -177,6 +177,19 @@ int volume_list(VolumeListed **out, size_t *count)
     }
 }
 
+size_t files_home_first(file_id_t *files, size_t count)
+{
+    uint32_t nearest = UINT32_MAX;
+    for (size_t i = 0; i < count; i++)
+        if (volume_of(files[i]) < nearest)
+            nearest = volume_of(files[i]);
+    size_t kept = 0;
+    for (size_t i = 0; i < count; i++)
+        if (volume_of(files[i]) == nearest)
+            files[kept++] = files[i];
+    return kept;
+}
+
 int volume_info(uint32_t number, VolumeListed **out)
 {
     if (!out) return -ERR_INVALID_ARGUMENT;

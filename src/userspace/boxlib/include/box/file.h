@@ -179,6 +179,12 @@ static inline uint32_t volume_of(file_id_t file)
 {
     return (uint32_t)((file >> STORAGE_VOLUME_FILE_SHIFT) & 0x7FFFu);
 }
+/* Of `count` files, the ones on the nearest volume among them — the home
+ * volume when any lies there, else the one numbered lowest — kept at the
+ * front in their order: how many. A name a program of the machine's own
+ * volume answers to is that program's, whatever a stick carries of the same
+ * name; only files of one volume are ever a choice to ask about. */
+size_t files_home_first(file_id_t *files, size_t count);
 /* The files that wear every tag of `tags` (every file, for NULL or "") and
  * none of `without` (a comma list too; NULL or "" sets nothing aside). The
  * volume sets aside no file of its own accord but the deleted ones — which

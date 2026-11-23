@@ -173,7 +173,7 @@ string configured_zone()
 // already loaded.
 vector<unsigned char> door_blob()
 {
-    auto files = box::tagfs::files_starting_with(string_view(tz::kMagic, sizeof tz::kMagic));
+    auto files = box::tagfs::home_first(box::tagfs::files_starting_with(string_view(tz::kMagic, sizeof tz::kMagic)));
     if (files.empty()) return {};
     const box::tagfs::file table = files.back();
 

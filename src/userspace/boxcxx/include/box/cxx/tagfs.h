@@ -69,6 +69,7 @@
 #ifndef BOXCXX_BOX_TAGFS_H
 #define BOXCXX_BOX_TAGFS_H
 
+#include <algorithm>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
@@ -538,6 +539,18 @@ inline std::vector<file> files_starting_with(std::string_view bytes)
     file_id_t *ids = nullptr;
     int        n   = ::files_starting_with(bytes.data(), bytes.size(), &ids);
     return _detail::files_of(n, ids);
+}
+
+// The files of `files` on the nearest volume among them — the home volume's
+// when any lies there (box/file.h, files_home_first) — in their order. What
+// the machine keeps of its own — its zone, its time table, a program's
+// record — is the home volume's, whatever a stick carries of the same kind.
+inline std::vector<file> home_first(std::vector<file> files)
+{
+    std::uint32_t nearest = UINT32_MAX;
+    for (const file &f : files) nearest = std::min(nearest, ::volume_of(f.id()));
+    std::erase_if(files, [nearest](const file &f) { return ::volume_of(f.id()) != nearest; });
+    return files;
 }
 
 // ── the files called a word ─────────────────────────────────────────────

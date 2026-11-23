@@ -72,12 +72,16 @@ std::vector<file_id_t> CommandFiles()
     return Files;
 }
 
-// One of Ids, asked for when there are several.
+// One of Ids — the home volume's first (files_home_first) — asked for when
+// that leaves several.
 Picked ChooseOne(const Look &Shown, std::string_view Word, const std::vector<file_id_t> &Ids)
 {
-    if (Ids.size() == 1) return Ids[0];
+    // The home volume's first: a choice is only ever among one volume's.
+    std::vector<file_id_t> Near = Ids;
+    Near.resize(files_home_first(Near.data(), Near.size()));
+    if (Near.size() == 1) return Near[0];
     file_id_t      Chosen = 0;
-    asking::Answer Asked  = asking::Which(Shown, Word, Ids, Chosen);
+    asking::Answer Asked  = asking::Which(Shown, Word, Near, Chosen);
     if (Asked == asking::Answer::Given) return Chosen;
     asking::SayCancelled(Word, Asked);
     return std::unexpected(Said);

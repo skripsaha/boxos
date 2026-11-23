@@ -80,7 +80,7 @@ inline std::string trimmed(const char *p, std::size_t n)
 // The setting's file: the one made last of those that begin as one.
 inline std::optional<box::tagfs::file> setting_file()
 {
-    std::vector<box::tagfs::file> files = box::tagfs::files_starting_with(zone_header);
+    std::vector<box::tagfs::file> files = box::tagfs::home_first(box::tagfs::files_starting_with(zone_header));
     if (files.empty()) return std::nullopt;
     return files.back();
 }

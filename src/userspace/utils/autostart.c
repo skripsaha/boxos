@@ -149,24 +149,25 @@ static file_id_t FindProgram(const char *name, const char **why)
         return 0;
     }
 
-    file_id_t found   = 0;
-    int       matches = 0;
+    /* The programs called so, kept where the ids were: the home volume's
+     * first, a stick's of the same name no choice to make. */
+    size_t matches = 0;
     for (int i = 0; i < count; i++) {
         FileMetadata metadata;
         if (FileMetadataRead(MY_TAGS, ids[i], &metadata) != 0) continue;
         bool named = whole ? strcmp(metadata.Filename, name) == 0
                            : StemLength(metadata.Filename) == length && memcmp(metadata.Filename, name, length) == 0;
-        if (named && IsProgram(ids[i])) {
-            found = ids[i];
-            matches++;
-        }
+        if (named && IsProgram(ids[i]))
+            ids[matches++] = ids[i];
         FileMetadataRelease(&metadata);
     }
+    matches = files_home_first(ids, matches);
+    file_id_t found = matches == 1 ? ids[0] : 0;
     free(ids);
 
     *why = matches == 0 ? "the volume holds no such program"
          : matches > 1  ? "more than one program has that name — say its whole name" : "";
-    return matches == 1 ? found : 0;
+    return found;
 }
 
 /* How the list names a program: its name before the dot, as the shell names a

@@ -88,6 +88,7 @@ static int find_program(const char *word, file_id_t *out)
         printf("settings: the volume did not answer for %s\n", word);
         return n;
     }
+    count = (int)files_home_first(found, (size_t)count);   /* the home volume's first */
     if (count == 0) {
         printf("settings: there is no program called %s\n", word);
         return -ERR_FILE_NOT_FOUND;

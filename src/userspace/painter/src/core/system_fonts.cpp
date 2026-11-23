@@ -102,7 +102,8 @@ std::shared_ptr<const typecase::Fonts> SystemFonts()
         auto                   Book = std::make_shared<typecase::Fonts>();
         std::vector<file_id_t> Files;
         for (std::string_view Beginning : typecase::FontBeginnings)
-            for (const box::tagfs::file &Each : box::tagfs::files_starting_with(Beginning)) Files.push_back(Each.id());
+            for (const box::tagfs::file &Each : box::tagfs::home_first(box::tagfs::files_starting_with(Beginning)))
+                Files.push_back(Each.id());
         std::sort(Files.begin(), Files.end());   // in the order the volume made them, as one question would give
         for (file_id_t File : Files) {
             FileMetadata Metadata;
