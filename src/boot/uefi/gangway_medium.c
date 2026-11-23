@@ -7,6 +7,7 @@
 
 #include "gangway.h"
 #include "boxos_disks.h"
+#include "boxos_esp.h"
 
 /* =========================================================================
  * Block IO: read sectors from disk
@@ -167,6 +168,18 @@ static int DeedAt(EFI_BLOCK_IO_PROTOCOL *bio, uint64_t lba, uint32_t want_role,
  *
  * On success, sets the ground and leaves the Deed's block in `deed_out`.
  */
+/* The volume the boot option that started this loader names (boxos_esp.h
+ * EspVolumeAsked, its LoadOptions), when it names one: only a ground whose
+ * Deed is that volume's is taken. */
+static uint8_t g_asked_uuid[16];
+static int     g_asked;
+
+/* Whether the Deed in `deed` is the volume asked for, or none is. */
+static int DeedAsked(const uint8_t *deed)
+{
+    return !g_asked || MemEqual(((const VolumeDeed *)deed)->uuid, g_asked_uuid, 16);
+}
+
 static int FindGroundOn(EFI_BLOCK_IO_PROTOCOL *bio, uint8_t *deed_out,
                         uint64_t *out_start, uint64_t *out_sectors)
 {
@@ -195,12 +208,13 @@ static int FindGroundOn(EFI_BLOCK_IO_PROTOCOL *bio, uint8_t *deed_out,
             if (count < 8) continue;
 
             if (DeedAt(bio, start, VOLUME_DEED_ROLE_HEAD, deed_out)) {
+                if (!DeedAsked(deed_out)) continue;
                 *out_start = start; *out_sectors = count; return 1;
             }
             /* The head is gone; the copy at the far end of the ground is the
              * volume's own second opinion, and it says the same things. */
             uint64_t tail = start + ((count / 8) - 1) * 8;
-            if (DeedAt(bio, tail, VOLUME_DEED_ROLE_TAIL, deed_out)) {
+            if (DeedAt(bio, tail, VOLUME_DEED_ROLE_TAIL, deed_out) && DeedAsked(deed_out)) {
                 Print("Gangway: read the deed from the far end of the volume\r\n");
                 *out_start = start; *out_sectors = count; return 1;
             }
@@ -259,10 +273,11 @@ static int FindGroundOn(EFI_BLOCK_IO_PROTOCOL *bio, uint8_t *deed_out,
         first *= ratio;
 
         if (DeedAt(bio, first, VOLUME_DEED_ROLE_HEAD, deed_out)) {
+            if (!DeedAsked(deed_out)) continue;
             *out_start = first; *out_sectors = count; return 1;
         }
         uint64_t tail = first + ((count / 8) - 1) * 8;
-        if (DeedAt(bio, tail, VOLUME_DEED_ROLE_TAIL, deed_out)) {
+        if (DeedAt(bio, tail, VOLUME_DEED_ROLE_TAIL, deed_out) && DeedAsked(deed_out)) {
             Print("Gangway: read the deed from the far end of the volume\r\n");
             *out_start = first; *out_sectors = count; return 1;
         }
@@ -340,7 +355,49 @@ static void SayDiskFound(void)
  * The probe is safe: it reads a partition table and, at most, one 4 KiB block
  * from a disk that may have nothing of ours on it, and writes nothing.
  */
+static EFI_STATUS BlockIoSearch(EFI_HANDLE image_handle);
+
+/*
+ * The medium the volume is on: the one the boot option that started this
+ * loader names by its uuid (LoadOptions, boxos_esp.h), searched for on every
+ * disk; with none named — a start by the removable-media default, or a boot
+ * option another hand made — the device this loader came from, then every
+ * disk. A volume named that no disk here carries is said, and the first
+ * volume found is booted in its place.
+ */
 EFI_STATUS BlockIoFindDevice(EFI_HANDLE image_handle)
+{
+    EFI_GUID                   loaded_image_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
+    EFI_LOADED_IMAGE_PROTOCOL *loaded_image      = NULL;
+    if (!EFI_ERROR(g_bs->handle_protocol(image_handle, &loaded_image_guid, (void **)&loaded_image)) &&
+        loaded_image && loaded_image->load_options && loaded_image->load_options_size >= sizeof(EspVolumeAsked)) {
+        const EspVolumeAsked *asked = loaded_image->load_options;
+        if (MemEqual(asked->magic, ESP_VOLUME_MAGIC, sizeof(asked->magic))) {
+            MemCopy(g_asked_uuid, asked->uuid, 16);
+            g_asked = 1;
+            static const char hex[] = "0123456789abcdef";
+            char              text[33];
+            for (int i = 0; i < 16; i++) {
+                text[2 * i]     = hex[asked->uuid[i] >> 4];
+                text[2 * i + 1] = hex[asked->uuid[i] & 15];
+            }
+            text[32] = '\0';
+            Print("Gangway: the boot option names the volume ");
+            Print(text);
+            Print("\r\n");
+        }
+    }
+    EFI_STATUS found = BlockIoSearch(image_handle);
+    if (EFI_ERROR(found) && g_asked) {
+        Print("Gangway: no disk here carries the volume the boot option names — the first volume found is "
+              "booted\r\n");
+        g_asked = 0;
+        found   = BlockIoSearch(image_handle);
+    }
+    return found;
+}
+
+static EFI_STATUS BlockIoSearch(EFI_HANDLE image_handle)
 {
     EFI_GUID loaded_image_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
     EFI_GUID block_io_guid     = EFI_BLOCK_IO_PROTOCOL_GUID;

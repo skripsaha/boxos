@@ -22,9 +22,9 @@
 # what was laid; every medium a cut could leave of a change — the blank stick
 # laid, an ESP put on it, Windows' disk given its partition, the damaged table
 # mended — reads as the old table or the new, whole; and a second boot reads
-# one such cut — the far copy of the ESP's change landed, the first not — as
-# the kernel must: the two copies differ and the first, the old, is read; it is
-# mended to it.
+# one such cut — the ESP's FAT32 and the far copy of its table landed, the
+# first not — as the kernel must: the two copies differ and the first, the
+# old, is read; it is mended to it.
 # ---------------------------------------------------------------------------
 
 DISKS_STICKS="d512 d4k win dmg small"
@@ -226,8 +226,10 @@ sys.exit(0 if a["copies"] == 1 and b["copies"] == 0 and a["parts"] == b["parts"]
         chk $? "disks: every cut of ${s% *} → ${s#* } leaves the old table or the new ($(tail -1 "$SCRATCH/disks.cuts.log"))"
     done
 
-    # A cut the kernel reads: the ESP's far copy landed, its first copy not.
-    python3 tools/disks.py cut "$SCRATCH/disks.d512.laid" "$SCRATCH/disks.d512.esp" "$SCRATCH/disks.d512.img" 2
+    # A cut the kernel reads: the ESP's FAT32 and its table's far copy landed —
+    # the three writes before the first copy's (disks.py regions) — the first
+    # copy not.
+    python3 tools/disks.py cut "$SCRATCH/disks.d512.laid" "$SCRATCH/disks.d512.esp" "$SCRATCH/disks.d512.img" 3
     rc=1
     if disks_boot again d512 && disks_ask "disks"; then
         n=$(disks_number "315 MB")

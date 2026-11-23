@@ -986,7 +986,7 @@ GANGWAY_SRC    = src/boot/uefi/gangway.c src/boot/uefi/gangway_bytes.c src/boot/
                  src/boot/uefi/gangway_panel.c src/boot/uefi/gangway_panel_look.c \
                  src/boot/uefi/gangway_panel_log.c \
                  src/boot/uefi/gangway_crossings.c src/boot/uefi/gangway_scene.c
-GANGWAY_HDRS   = src/boot/uefi/gangway.h src/boot/uefi/uefi.h \
+GANGWAY_HDRS   = src/boot/uefi/gangway.h src/boot/uefi/uefi.h src/include/boxos_esp.h \
                  src/boot/uefi/gangway_lectern.h src/boot/uefi/gangway_lectern_book.h \
                  src/include/boot_info.h src/include/boarding_pass.h \
                  src/include/volume_deed.h src/include/volume_book.h \
@@ -2239,12 +2239,17 @@ OVMF_FD := $(firstword $(foreach p,$(OVMF_PATHS),$(wildcard $(p))))
 # holds EFI/BOOT/BOOTX64.EFI, then pass it as a second drive alongside the
 # BoxOS disk image (which still holds the TagFS data).
 
-# UEFI NVRAM variables image — writable copy of the OVMF vars template.
-# Searched in common locations; falls back to an empty 256 KB file if no
-# template is found (OVMF will initialise it on first boot).
+# UEFI NVRAM variables image — writable copy of the OVMF vars template, so
+# what the firmware is told — a boot option, its order — outlives the machine
+# as on real hardware. QEMU ships the x86_64 firmware's variable store as
+# edk2-i386-vars.fd (its docs pair edk2-x86_64-code.fd with it). With no
+# template found the image is zeros, which OVMF does not take as a store: it
+# keeps its variables in memory, and nothing it is told survives a run.
 OVMF_VARS_PATHS := \
     /opt/homebrew/share/qemu/edk2-x86_64-vars.fd \
     $(wildcard /opt/homebrew/Cellar/qemu/*/share/qemu/edk2-x86_64-vars.fd) \
+    /opt/homebrew/share/qemu/edk2-i386-vars.fd \
+    $(wildcard /opt/homebrew/Cellar/qemu/*/share/qemu/edk2-i386-vars.fd) \
     /usr/share/OVMF/OVMF_VARS.fd \
     /usr/share/qemu/OVMF_VARS.fd \
     /usr/local/share/ovmf/OVMF_VARS.fd \
