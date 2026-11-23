@@ -8,6 +8,7 @@
 #include "../mount/book_mount.h"
 #include "../mount/tally_read.h"
 #include "../file_map/file_map.h"
+#include "tagfs_volume.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -42,9 +43,9 @@
 #define STAND_TIP_IN_BATCH    100u     /* writes a stitch carries */
 
 /* The Tally the mount stands on: its seq. */
-static uint64_t StandTipInStood(void)
+static uint64_t StandTipInStood(TagFSVolume* vol)
 {
-    return g_book.stood ? g_book.stood->head.tally_seq : 0;
+    return vol->book.stood ? vol->book.stood->head.tally_seq : 0;
 }
 
 /* Whether the keys [lo, hi) of a leaf's place meet [a, b). */
@@ -83,9 +84,9 @@ static void StandTipInFilesOf(uint64_t seq, TallyKey a, TallyKey b, StandTipInFi
 
 /* Parcel `which` of the record of `fid`: the file block it begins at and the
  * blocks it covers. */
-static bool StandTipInParcel(uint64_t fid, uint32_t which, uint64_t* from, uint64_t* blocks)
+static bool StandTipInParcel(TagFSVolume* vol, uint64_t fid, uint32_t which, uint64_t* from, uint64_t* blocks)
 {
-    FileRecord*  rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    FileRecord*  rec = FileMapRecordHold(vol->state.files, fid, NULL);
     StripWalk    w;
     const Strip* s = NULL;
     uint32_t     n = 0, at = 0;
@@ -113,25 +114,25 @@ static bool StandTipInParcel(uint64_t fid, uint32_t which, uint64_t* from, uint6
  * claimed since the last stitch fill the ribbon's room, and its next Quire is
  * on its way — waited out by the cycle that lays them and brings the room,
  * as boxlib waits it out; the answer after that cycle is the answer. */
-static int StandTipInCreate(const char* name, uint64_t* fid)
+static int StandTipInCreate(TagFSVolume* vol, const char* name, uint64_t* fid)
 {
-    int rc = tagfs_create_file(name, NULL, 0, 0, fid);
-    if (rc == -(int)ERR_WOULD_BLOCK && TagFSSettle() == OK)
-        rc = tagfs_create_file(name, NULL, 0, 0, fid);
+    int rc = tagfs_create_file(vol, name, NULL, 0, 0, fid);
+    if (rc == -(int)ERR_WOULD_BLOCK && TagFSSettle(vol) == OK)
+        rc = tagfs_create_file(vol, name, NULL, 0, 0, fid);
     return rc;
 }
 
 /* `n` files of a long name made from `from` on, settled. */
-static bool StandTipInMake(uint32_t from, uint32_t n)
+static bool StandTipInMake(TagFSVolume* vol, uint32_t from, uint32_t n)
 {
     char     name[80];
     uint64_t fid = 0;
     for (uint32_t i = 0; i < n; i++) {
         ksnprintf(name, sizeof(name), "tipin-%05u-of-a-name-long-enough-to-fill-leaves.txt", from + i);
-        if (StandTipInCreate(name, &fid) != 0)
+        if (StandTipInCreate(vol, name, &fid) != 0)
             return false;
     }
-    return TagFSSettle() == OK;
+    return TagFSSettle(vol) == OK;
 }
 
 // ----------------------------------------------------------------------------
@@ -141,46 +142,47 @@ static bool StandTipInMake(uint32_t from, uint32_t n)
 
 static TestResult TestStandTipInParcel(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     static StandBinder b;
     StandFreshModel    m;
     StandTipInFiles    whole, laid;
     uint64_t           fid = 0, from = 0, blocks = 0, seed = 0x5DEECE66Dull;
-    const char*        aside = StandBinderAside(&b);
+    const char*        aside = StandBinderAside(vol, &b);
 
     memset(&m, 0, sizeof(m));
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
+    TEST_ASSERT(StandStitchRemount(vol) && TagFSSettle(vol) == OK, "the volume mounted afresh, a stitch of it settled");
     TEST_ASSERT(StandFreshModelMake(&m, 2u * STAND_TIP_IN_STRIDED * TAGFS_BLOCK_SIZE), "room for the file");
-    TEST_ASSERT_EQ(tagfs_create_file("tipin-parcels.bin", NULL, 0, 0, &fid), 0, "a file is made first");
-    TEST_ASSERT_OK(StandFreshSpan(&m, fid, 2u * STAND_TIP_IN_STRIDED * TAGFS_BLOCK_SIZE), "spanned over a hole");
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "tipin-parcels.bin", NULL, 0, 0, &fid), 0, "a file is made first");
+    TEST_ASSERT_OK(StandFreshSpan(vol, &m, fid, 2u * STAND_TIP_IN_STRIDED * TAGFS_BLOCK_SIZE), "spanned over a hole");
     for (uint64_t k = 0; k < STAND_TIP_IN_STRIDED; k++)
-        TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 2u * k * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 70u + k),
+        TEST_ASSERT_EQ(StandFreshWrite(vol, &m, fid, 2u * k * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 70u + k),
                        TAGFS_BLOCK_SIZE, "every other block written");
-    TEST_ASSERT(StandTipInMake(0, STAND_TIP_IN_MANY), "and files of long names after it, settled");
-    TEST_ASSERT(StandTipInParcel(fid, 2u, &from, &blocks), "the file has a third Parcel");
-    TEST_ASSERT(StandTipInParcel(fid, 1u, &from, &blocks) && blocks >= 4u, "the middle Parcel, its blocks");
-    TEST_ASSERT_OK(BinderRunWhole(), "a Tally of it all is written");
+    TEST_ASSERT(StandTipInMake(vol, 0, STAND_TIP_IN_MANY), "and files of long names after it, settled");
+    TEST_ASSERT(StandTipInParcel(vol, fid, 2u, &from, &blocks), "the file has a third Parcel");
+    TEST_ASSERT(StandTipInParcel(vol, fid, 1u, &from, &blocks) && blocks >= 4u, "the middle Parcel, its blocks");
+    TEST_ASSERT_OK(BinderRunWhole(vol), "a Tally of it all is written");
     /* What the Tally over the writes lays anew is theirs alone once the
      * nodes of a Tally-Quire Glean chose are laid again before it. */
-    TEST_ASSERT(StandBinderGleaned(), "and the Tallies Glean asks for after it");
-    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounts on it, a stitch of it settled");
+    TEST_ASSERT(StandBinderGleaned(vol), "and the Tallies Glean asks for after it");
+    TEST_ASSERT(StandStitchRemount(vol) && TagFSSettle(vol) == OK, "the volume mounts on it, a stitch of it settled");
     TallyKey lo = { fid, 0 }, hi = { fid, 1u + from + blocks };
-    StandTipInFilesOf(StandTipInStood(), lo, hi, &whole);
+    StandTipInFilesOf(StandTipInStood(vol), lo, hi, &whole);
     TestEvidence("nodes of FILES the Tally stood on holds", whole.nodes);
     TEST_ASSERT(whole.depth >= 1 && whole.nodes > 2u + whole.depth, "FILES takes leaves past the Parcel's");
     for (uint32_t k = 0; k < STAND_TIP_IN_WRITES; k++) {
         seed = seed * 6364136223846793005ull + 1442695040888963407ull;
         uint64_t at = from + ((seed >> 33) % (blocks / 2u)) * 2u;   /* a written block: the stride's */
-        TEST_ASSERT_EQ(StandFreshWrite(&m, fid, at * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 900u + k),
+        TEST_ASSERT_EQ(StandFreshWrite(vol, &m, fid, at * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 900u + k),
                        TAGFS_BLOCK_SIZE, "a block of the middle Parcel written over");
         if (k % STAND_TIP_IN_BATCH == STAND_TIP_IN_BATCH - 1u)
-            TEST_ASSERT_OK(TagFSSettle(), "the writes settle a batch at a time");
+            TEST_ASSERT_OK(TagFSSettle(vol), "the writes settle a batch at a time");
     }
-    TEST_ASSERT_OK(BinderRunWhole(), "a Tally is written over them");
-    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
-    StandTipInFilesOf(StandTipInStood(), lo, hi, &laid);
+    TEST_ASSERT_OK(BinderRunWhole(vol), "a Tally is written over them");
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts on it");
+    StandTipInFilesOf(StandTipInStood(vol), lo, hi, &laid);
     kprintf("[TESTS] stand_tip_in: FILES of %u node(s) and %llu level(s) above its leaves, %u laid anew over the "
             "writes, %u of them leaves the file's header and the Parcel lie in; %u node(s) before them\n",
             laid.nodes, (unsigned long long)laid.depth, laid.fresh, laid.meeting, whole.nodes);
@@ -196,7 +198,7 @@ static TestResult TestStandTipInParcel(void)
                 "theirs gives and the path above them (C23)");
     TEST_ASSERT(laid.nodes == whole.nodes || laid.nodes + 1u == whole.nodes || laid.nodes == whole.nodes + 1u,
                 "the tree as many nodes as before, one either way");
-    TEST_ASSERT(StandFreshHolds(&m, fid), "and the file reads every byte written");
+    TEST_ASSERT(StandFreshHolds(vol, &m, fid), "and the file reads every byte written");
 out:
     StandFreshModelLetGo(&m);
     STAND_BINDER_PUT_BACK(&b);
@@ -209,11 +211,11 @@ out:
 
 /* The block each Parcel of `fid`'s record begins at, in order: how many, at
  * most `most`. */
-static uint32_t StandTipInCut(uint64_t fid, uint64_t* at, uint32_t most)
+static uint32_t StandTipInCut(TagFSVolume* vol, uint64_t fid, uint64_t* at, uint32_t most)
 {
     uint32_t n = 0;
     uint64_t blocks = 0;
-    while (n < most && StandTipInParcel(fid, n, &at[n], &blocks))
+    while (n < most && StandTipInParcel(vol, fid, n, &at[n], &blocks))
         n++;
     return n;
 }
@@ -230,40 +232,41 @@ static uint32_t StandTipInCut(uint64_t fid, uint64_t* at, uint32_t most)
  */
 static TestResult TestStandTipInParcelsAsTheyLie(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     static StandBinder b;
     StandFreshModel    m;
     uint64_t           fid = 0, cut[16], back[16];
     uint64_t           even = (2u * STAND_TIP_IN_STRIDED + PARCEL_STRIPS_MOST - 1u) / PARCEL_STRIPS_MOST;
     uint32_t           n = 0, nback = 0;
-    const char*        aside = StandBinderAside(&b);
+    const char*        aside = StandBinderAside(vol, &b);
 
     memset(&m, 0, sizeof(m));
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
+    TEST_ASSERT(StandStitchRemount(vol) && TagFSSettle(vol) == OK, "the volume mounted afresh, a stitch of it settled");
     TEST_ASSERT(StandFreshModelMake(&m, 2u * STAND_TIP_IN_STRIDED * TAGFS_BLOCK_SIZE), "room for the file");
-    TEST_ASSERT_EQ(tagfs_create_file("tipin-cut.bin", NULL, 0, 0, &fid), 0, "a file is made");
-    TEST_ASSERT_OK(StandFreshSpan(&m, fid, 2u * STAND_TIP_IN_STRIDED * TAGFS_BLOCK_SIZE), "spanned over a hole");
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "tipin-cut.bin", NULL, 0, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_OK(StandFreshSpan(vol, &m, fid, 2u * STAND_TIP_IN_STRIDED * TAGFS_BLOCK_SIZE), "spanned over a hole");
     for (uint64_t k = 0; k < STAND_TIP_IN_STRIDED; k++)
-        TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 2u * k * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 70u + k),
+        TEST_ASSERT_EQ(StandFreshWrite(vol, &m, fid, 2u * k * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 70u + k),
                        TAGFS_BLOCK_SIZE, "every other block written: a Strip each, a hole between");
-    n = StandTipInCut(fid, cut, ARRAY_SIZE(cut));
+    n = StandTipInCut(vol, fid, cut, ARRAY_SIZE(cut));
     TestEvidence("Parcels the splices cut the file into", n);
     TEST_ASSERT(n > even, "the splices cut it into more Parcels than an even cut of its Strips gives");
-    TEST_ASSERT_OK(TagFSSettle(), "the writes settle");
-    TEST_ASSERT_OK(BinderRunWhole(), "a Tally of it is written");
-    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
-    nback = StandTipInCut(fid, back, ARRAY_SIZE(back));
+    TEST_ASSERT_OK(TagFSSettle(vol), "the writes settle");
+    TEST_ASSERT_OK(BinderRunWhole(vol), "a Tally of it is written");
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts on it");
+    nback = StandTipInCut(vol, fid, back, ARRAY_SIZE(back));
     TEST_ASSERT(nback == n && memcmp(cut, back, sizeof(uint64_t) * n) == 0,
                 "the mount holds the file in the Parcels its Tally laid, one for one");
     uint64_t at = (cut[n / 2u] + 1u) & ~1ull;   /* a written block of a Parcel in the middle */
-    TEST_ASSERT_EQ(StandFreshWrite(&m, fid, at * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 900u), TAGFS_BLOCK_SIZE,
+    TEST_ASSERT_EQ(StandFreshWrite(vol, &m, fid, at * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 900u), TAGFS_BLOCK_SIZE,
                    "a block of it written over");
-    TEST_ASSERT_OK(TagFSSettle(), "and settled");
-    TEST_ASSERT_OK(BinderRunWhole(), "the Tally after it is written: DogEar held every key the write changed");
-    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
-    TEST_ASSERT(StandFreshHolds(&m, fid), "and the file reads every byte written");
+    TEST_ASSERT_OK(TagFSSettle(vol), "and settled");
+    TEST_ASSERT_OK(BinderRunWhole(vol), "the Tally after it is written: DogEar held every key the write changed");
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts on it");
+    TEST_ASSERT(StandFreshHolds(vol, &m, fid), "and the file reads every byte written");
 out:
     StandFreshModelLetGo(&m);
     STAND_BINDER_PUT_BACK(&b);
@@ -278,9 +281,9 @@ out:
  * `ba` and `bb`, are the one node: every sector of each holds its sum where it
  * lies — the sum is seeded by the sector's address (§2.5), so the two copies
  * differ in it and only in it — and every byte past the sum is the other's. */
-static bool StandTipInCopiesOne(const uint8_t* a, uint64_t ba, const uint8_t* b, uint64_t bb)
+static bool StandTipInCopiesOne(TagFSVolume* vol, const uint8_t* a, uint64_t ba, const uint8_t* b, uint64_t bb)
 {
-    const uint8_t* uuid = tagfs_get_state()->uuid;
+    const uint8_t* uuid = vol->state.uuid;
     uint32_t       sum  = sizeof(((const BookSectorHead*)0)->crc32c);
     for (uint32_t k = 0; k < TAGFS_BLOCK_SECTORS; k++) {
         const uint8_t* sa = a + (uint64_t)k * BOOK_SECTOR_BYTES;
@@ -304,34 +307,35 @@ static bool StandTipInLeafAt(TallyKey lo, TallyPlace* out)
 
 static TestResult TestStandTipInHealsFiles(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     static StandBinder b;
     MountBookSaid      said;
     TallyPlace         leaf, again;
     bool               found = false;
-    const char*        aside = StandBinderAside(&b);
+    const char*        aside = StandBinderAside(vol, &b);
 
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
-    TEST_ASSERT(StandTipInMake(1000u, STAND_TIP_IN_MANY), "files enough for FILES to take three leaves");
-    TEST_ASSERT_OK(BinderRunWhole(), "a Tally of them written");
-    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
+    TEST_ASSERT(StandStitchRemount(vol) && TagFSSettle(vol) == OK, "the volume mounted afresh, a stitch of it settled");
+    TEST_ASSERT(StandTipInMake(vol, 1000u, STAND_TIP_IN_MANY), "files enough for FILES to take three leaves");
+    TEST_ASSERT_OK(BinderRunWhole(vol), "a Tally of them written");
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts on it");
     for (uint32_t i = 1; !found && TallyStandNodeWhere(TALLY_FILES, i, &leaf); i++)
         found = leaf.level == 0 && leaf.has_lo && leaf.has_hi;
     TEST_ASSERT(found && leaf.ptr.copies == 2, "a leaf of FILES between two others, two copies");
     TEST_ASSERT(StandBinderKeep(&b, leaf.ptr.block[0]), "its first copy's first block kept as found");
     memset(g_test_output, 0, TAGFS_BLOCK_SIZE);
     TEST_ASSERT(StandBinderWrite(&b, leaf.ptr.block[0], g_test_output), "and written over with zeros");
-    TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
-    MountBookStandSaid(&said);
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts again");
+    MountBookStandSaid(vol, &said);
     TEST_ASSERT(said.mended >= 1 && said.rotten == 0, "the leaf read through its second copy, its first to mend");
-    TEST_ASSERT(TagFSSettle() == OK && BinderRunWhole() == OK, "a stitch of this mount settles, a Tally is written");
-    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
-    MountBookStandSaid(&said);
+    TEST_ASSERT(TagFSSettle(vol) == OK && BinderRunWhole(vol) == OK, "a stitch of this mount settles, a Tally is written");
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts on it");
+    MountBookStandSaid(vol, &said);
     TEST_ASSERT_EQ(said.mended, 0, "every copy of every node holds (C24)");
     TEST_ASSERT(StandTipInLeafAt(leaf.lo, &again), "a leaf begins where the mended one began");
-    TEST_ASSERT(again.ptr.seq == StandTipInStood() && again.ptr.block[0] != leaf.ptr.block[0],
+    TEST_ASSERT(again.ptr.seq == StandTipInStood(vol) && again.ptr.block[0] != leaf.ptr.block[0],
                 "laid anew by the Tally, elsewhere: no keys of it changed, its copy did (§16.2 п.4)");
 out:
     STAND_BINDER_PUT_BACK(&b);
@@ -339,10 +343,10 @@ out:
 }
 
 /* The leaf of the reads' DIGESTS table that names `block`. */
-static bool StandTipInDigestLeaf(uint64_t block, TallyPlace* out)
+static bool StandTipInDigestLeaf(TagFSVolume* vol, uint64_t block, TallyPlace* out)
 {
     bool rot = false;
-    for (uint32_t i = 0; TallyDigestLeafAt(i, out, &rot); i++)
+    for (uint32_t i = 0; TallyDigestLeafAt(vol, i, out, &rot); i++)
         if (!rot && out->level == 0 && (!out->has_lo || out->lo.k1 <= block) && (!out->has_hi || block < out->hi.k1))
             return true;
     return false;
@@ -350,6 +354,7 @@ static bool StandTipInDigestLeaf(uint64_t block, TallyPlace* out)
 
 static TestResult TestStandTipInHealsDigests(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     static StandBinder b;
     static uint8_t     second[TAGFS_BLOCK_SIZE];
@@ -358,43 +363,43 @@ static TestResult TestStandTipInHealsDigests(void)
     FileRecord*        rec   = NULL;
     FileSpot           spot  = { 0, 0, 0 };
     uint64_t           fid   = 0;
-    const char*        aside = StandBinderAside(&b);
+    const char*        aside = StandBinderAside(vol, &b);
 
     memset(&m, 0, sizeof(m));
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
-    TEST_ASSERT_EQ(tagfs_create_file("tipin-digest.bin", NULL, 0, 0, &fid), 0, "a file for data is made");
+    TEST_ASSERT(StandStitchRemount(vol) && TagFSSettle(vol) == OK, "the volume mounted afresh, a stitch of it settled");
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "tipin-digest.bin", NULL, 0, 0, &fid), 0, "a file for data is made");
     TEST_ASSERT(StandFreshModelMake(&m, 4u * TAGFS_BLOCK_SIZE) &&
-                StandFreshWrite(&m, fid, 0, 3u * TAGFS_BLOCK_SIZE, 61) == 3 * TAGFS_BLOCK_SIZE, "and written");
-    TEST_ASSERT_OK(TagFSSettle(), "settled");
-    TEST_ASSERT_OK(BinderRunWhole(), "a Tally of it is written: its DIGESTS names the data");
-    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
-    rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+                StandFreshWrite(vol, &m, fid, 0, 3u * TAGFS_BLOCK_SIZE, 61) == 3 * TAGFS_BLOCK_SIZE, "and written");
+    TEST_ASSERT_OK(TagFSSettle(vol), "settled");
+    TEST_ASSERT_OK(BinderRunWhole(vol), "a Tally of it is written: its DIGESTS names the data");
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts on it");
+    rec = FileMapRecordHold(vol->state.files, fid, NULL);
     TEST_ASSERT(rec && FileRecordFind(rec, 0, &spot) && spot.block, "the data's first block");
-    TEST_ASSERT(StandTipInDigestLeaf(spot.block, &leaf) && leaf.ptr.copies == 2,
+    TEST_ASSERT(StandTipInDigestLeaf(vol, spot.block, &leaf) && leaf.ptr.copies == 2,
                 "the DIGESTS leaf that names it, two copies");
     TEST_ASSERT(StandBinderKeep(&b, leaf.ptr.block[0]), "its first copy's first block kept as found");
     memset(g_test_output, 0, TAGFS_BLOCK_SIZE);
     TEST_ASSERT(StandBinderWrite(&b, leaf.ptr.block[0], g_test_output), "and written over with zeros");
     FileRecordRelease(rec);
     rec = NULL;
-    TEST_ASSERT(StandStitchRemount(), "the volume mounts again: the leaves of its DIGESTS kept, none read");
-    tagfs_readahead_invalidate(spot.block);
-    TEST_ASSERT(StandFreshHolds(&m, fid), "the data reads back: its digest read through the leaf's second copy");
-    TEST_ASSERT(TagFSSettle() == OK && BinderRunWhole() == OK, "a stitch of this mount settles, a Tally is written");
-    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
-    TEST_ASSERT(StandTipInDigestLeaf(spot.block, &again), "a leaf of its DIGESTS names the block");
-    TEST_ASSERT(again.ptr.seq == StandTipInStood() && again.ptr.block[0] != leaf.ptr.block[0],
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts again: the leaves of its DIGESTS kept, none read");
+    tagfs_readahead_invalidate(vol, spot.block);
+    TEST_ASSERT(StandFreshHolds(vol, &m, fid), "the data reads back: its digest read through the leaf's second copy");
+    TEST_ASSERT(TagFSSettle(vol) == OK && BinderRunWhole(vol) == OK, "a stitch of this mount settles, a Tally is written");
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts on it");
+    TEST_ASSERT(StandTipInDigestLeaf(vol, spot.block, &again), "a leaf of its DIGESTS names the block");
+    TEST_ASSERT(again.ptr.seq == StandTipInStood(vol) && again.ptr.block[0] != leaf.ptr.block[0],
                 "laid anew by the Tally, elsewhere: the leaf read lazily was marked by its read (C24)");
     TEST_ASSERT(StandBinderRead(&b, again.ptr.block[0], g_test_output) && g_test_output[0] | g_test_output[1],
                 "its first copy is on the medium");
     TEST_ASSERT(again.ptr.copies == 2 && StandBinderRead(&b, again.ptr.block[1], second) &&
-                StandTipInCopiesOne(g_test_output, again.ptr.block[0], second, again.ptr.block[1]),
+                StandTipInCopiesOne(vol, g_test_output, again.ptr.block[0], second, again.ptr.block[1]),
                 "and its second, the same node: every sector of each holds at its own place, every byte past its "
                 "sum the other's — every copy holds after it (C24)");
-    tagfs_readahead_invalidate(spot.block);
-    TEST_ASSERT(StandFreshHolds(&m, fid), "and the data reads");
+    tagfs_readahead_invalidate(vol, spot.block);
+    TEST_ASSERT(StandFreshHolds(vol, &m, fid), "and the data reads");
 out:
     FileRecordRelease(rec);
     StandFreshModelLetGo(&m);
@@ -411,10 +416,10 @@ out:
 
 /* Every block the slots hold now — their Tallies' Quires and nodes, their
  * ribbons' Quires. */
-static uint64_t StandTipInHeld(void)
+static uint64_t StandTipInHeld(TagFSVolume* vol)
 {
     static Strip ground[1024];
-    uint32_t     n = BinderStandGround(ground, 1024u);
+    uint32_t     n = BinderStandGround(vol, ground, 1024u);
     uint64_t     blocks = 0;
     for (uint32_t i = 0; i < n && i < 1024u; i++)
         blocks += ground[i].count;
@@ -442,59 +447,60 @@ static uint64_t StandTipInHeld(void)
  */
 static TestResult TestStandTipInEmptied(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     static StandBinder b;
     StandFreshModel    m;
     char               name[80];
     uint64_t           first = 0, fid = 0, data = 0, free0 = 0, held0 = 0;
     VolumeTally        found, ringed, full, emptied;
-    const char*        aside = StandBinderAside(&b);
+    const char*        aside = StandBinderAside(vol, &b);
 
     memset(&m, 0, sizeof(m));
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
-    uint64_t q = RibbonCursorNow()->quire_blocks;
-    TEST_ASSERT(VolumeTallyTake(&found), "what is in use outside the book's own ground counted");
-    TEST_ASSERT_OK(StandBinderTallies(3u), "the ring filled with Tallies of the volume as found");
-    TEST_ASSERT(VolumeTallyTake(&ringed), "and counted again");
+    TEST_ASSERT(StandStitchRemount(vol) && TagFSSettle(vol) == OK, "the volume mounted afresh, a stitch of it settled");
+    uint64_t q = RibbonCursorNow(vol)->quire_blocks;
+    TEST_ASSERT(VolumeTallyTake(vol, &found), "what is in use outside the book's own ground counted");
+    TEST_ASSERT_OK(StandBinderTallies(vol, 3u), "the ring filled with Tallies of the volume as found");
+    TEST_ASSERT(VolumeTallyTake(vol, &ringed), "and counted again");
     TEST_ASSERT_EQ(ringed.held, found.held, "the ring filled leaves what is in use outside the book's own ground as "
                    "it was: a Quire of the Tallies the mount read no slot names any more goes back whole (§16.5 п.17)");
-    free0 = tagfs_get_state()->free_blocks;
-    held0 = StandTipInHeld();
+    free0 = vol->state.free_blocks;
+    held0 = StandTipInHeld(vol);
     TEST_ASSERT(held0 != UINT64_MAX, "the slots' ground counted");
     for (uint32_t i = 0; i < STAND_TIP_IN_FILLED; i++) {
         ksnprintf(name, sizeof(name), "tipin-fill-%05u.n", i);
-        TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, 0, &fid), 0, "a file is made");
+        TEST_ASSERT_EQ(tagfs_create_file(vol, name, NULL, 0, 0, &fid), 0, "a file is made");
         first = first ? first : fid;
         if (i % 1000u == 999u)
-            TEST_ASSERT_OK(TagFSSettle(), "the files settle a batch at a time");
+            TEST_ASSERT_OK(TagFSSettle(vol), "the files settle a batch at a time");
     }
-    TEST_ASSERT_EQ(tagfs_create_file("tipin-fill.bin", NULL, 0, 0, &data), 0, "a file for data is made");
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "tipin-fill.bin", NULL, 0, 0, &data), 0, "a file for data is made");
     TEST_ASSERT(StandFreshModelMake(&m, STAND_TIP_IN_FILL_MB * 1024u * 1024u), "room for its bytes");
     for (uint32_t k = 0; k < STAND_TIP_IN_FILL_MB * 256u; k += 64u)
-        TEST_ASSERT_EQ(StandFreshWrite(&m, data, (uint64_t)k * TAGFS_BLOCK_SIZE, 64u * TAGFS_BLOCK_SIZE, 300u + k),
+        TEST_ASSERT_EQ(StandFreshWrite(vol, &m, data, (uint64_t)k * TAGFS_BLOCK_SIZE, 64u * TAGFS_BLOCK_SIZE, 300u + k),
                        64 * TAGFS_BLOCK_SIZE, "its bytes written");
-    TEST_ASSERT_OK(StandBinderTallies(1u), "a Tally of them is written");
-    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounts on it, a stitch of it settled");
-    TEST_ASSERT(VolumeTallyTake(&full), "what is in use outside the book's own ground counted on the full volume");
+    TEST_ASSERT_OK(StandBinderTallies(vol, 1u), "a Tally of them is written");
+    TEST_ASSERT(StandStitchRemount(vol) && TagFSSettle(vol) == OK, "the volume mounts on it, a stitch of it settled");
+    TEST_ASSERT(VolumeTallyTake(vol, &full), "what is in use outside the book's own ground counted on the full volume");
     for (uint64_t f = first; f < first + STAND_TIP_IN_FILLED / 2u; f++) {
-        TEST_ASSERT_EQ(tagfs_delete_file(f, INK_UNWARRANTED), 0, "half the files given up");
+        TEST_ASSERT_EQ(tagfs_delete_file(vol, f, INK_UNWARRANTED), 0, "half the files given up");
         if ((f - first) % 1000u == 999u)
-            TEST_ASSERT_OK(TagFSSettle(), "the deletes settle a batch at a time");
+            TEST_ASSERT_OK(TagFSSettle(vol), "the deletes settle a batch at a time");
     }
-    TEST_ASSERT_OK(StandBinderTallies(1u), "a Tally laid in over the half given up");
+    TEST_ASSERT_OK(StandBinderTallies(vol, 1u), "a Tally laid in over the half given up");
     for (uint64_t f = first + STAND_TIP_IN_FILLED / 2u; f < first + STAND_TIP_IN_FILLED; f++) {
-        TEST_ASSERT_EQ(tagfs_delete_file(f, INK_UNWARRANTED), 0, "the other half given up");
+        TEST_ASSERT_EQ(tagfs_delete_file(vol, f, INK_UNWARRANTED), 0, "the other half given up");
         if ((f - first) % 1000u == 999u)
-            TEST_ASSERT_OK(TagFSSettle(), "the deletes settle a batch at a time");
+            TEST_ASSERT_OK(TagFSSettle(vol), "the deletes settle a batch at a time");
     }
-    TEST_ASSERT_EQ(tagfs_delete_file(data, INK_UNWARRANTED), 0, "and the data");
-    TEST_ASSERT_OK(TagFSSettle(), "every delete settled");
-    TEST_ASSERT_OK(SettleForRoom(), "room is asked for: the ribbon leaves the Quire the deletes lie in");
-    TEST_ASSERT_OK(StandBinderTallies(4u), "and Tallies of the emptied volume laid in over the whole ring");
-    uint64_t free1 = tagfs_get_state()->free_blocks;
-    uint64_t held1 = StandTipInHeld();
+    TEST_ASSERT_EQ(tagfs_delete_file(vol, data, INK_UNWARRANTED), 0, "and the data");
+    TEST_ASSERT_OK(TagFSSettle(vol), "every delete settled");
+    TEST_ASSERT_OK(SettleForRoom(vol), "room is asked for: the ribbon leaves the Quire the deletes lie in");
+    TEST_ASSERT_OK(StandBinderTallies(vol, 4u), "and Tallies of the emptied volume laid in over the whole ring");
+    uint64_t free1 = vol->state.free_blocks;
+    uint64_t held1 = StandTipInHeld(vol);
     TestEvidence("free blocks before the files and after them", free0);
     TestEvidence("free blocks after the files are given up", free1);
     TestEvidence("blocks the slots held before", held0);
@@ -503,7 +509,7 @@ static TestResult TestStandTipInEmptied(void)
     TEST_ASSERT(free1 + held1 + 2u * q >= free0 + held0,
                 "every block the test took is free again or held by the slots, but the ribbon's Quire and its "
                 "next_quire: no Quire of the Tallies is left neither (§16.5 п.17)");
-    TEST_ASSERT(VolumeTallyTake(&emptied), "what is in use outside the book's own ground counted again");
+    TEST_ASSERT(VolumeTallyTake(vol, &emptied), "what is in use outside the book's own ground counted again");
     TEST_ASSERT_EQ(emptied.held, full.held - STAND_TIP_IN_FILL_MB * 256u,
                    "and from the mount on the full volume what is in use outside the book's own ground falls by the "
                    "data's blocks exactly: a Quire of its Tallies no slot names any more is free or rests in Fallow, "
@@ -521,10 +527,10 @@ out:
 #define STAND_TIP_IN_QUIRED   16000u   /* files: a whole Tally of FILES past a Tally-Quire of 256 */
 
 /* Whether every block of every copy of `p` lies in ground a slot holds. */
-static bool StandTipInPlaceHeld(const TallyPlace* p, const Strip* ground, uint32_t n)
+static bool StandTipInPlaceHeld(TagFSVolume* vol, const TallyPlace* p, const Strip* ground, uint32_t n)
 {
     for (uint32_t k = 0; k < p->ptr.copies; k++)
-        for (uint64_t at = TallyPtrBlock(&p->ptr, k), end = at + p->ptr.sheets; at < end; at++) {
+        for (uint64_t at = TallyPtrBlock(vol, &p->ptr, k), end = at + p->ptr.sheets; at < end; at++) {
             bool held = false;
             for (uint32_t i = 0; !held && i < n; i++)
                 held = ground[i].start <= at && at < ground[i].start + ground[i].count;
@@ -544,11 +550,11 @@ typedef struct {
     uint64_t qhi;
 } StandTipInNamed;
 
-static void StandTipInNamedOne(StandTipInNamed* s, const TallyPlace* p, uint64_t seq, uint64_t q,
+static void StandTipInNamedOne(TagFSVolume* vol, StandTipInNamed* s, const TallyPlace* p, uint64_t seq, uint64_t q,
                                const Strip* ground, uint32_t n)
 {
-    uint64_t at = TallyPtrBlock(&p->ptr, 0) / q;
-    s->loose += !StandTipInPlaceHeld(p, ground, n);
+    uint64_t at = TallyPtrBlock(vol, &p->ptr, 0) / q;
+    s->loose += !StandTipInPlaceHeld(vol, p, ground, n);
     if (p->ptr.seq != seq)
         return;
     s->older++;
@@ -558,57 +564,58 @@ static void StandTipInNamedOne(StandTipInNamed* s, const TallyPlace* p, uint64_t
 
 /* Every node of FILES, TAGS and USE and every inner node of DIGESTS as the
  * Foliation holds them, and every DIGESTS leaf of the reads' table. */
-static void StandTipInNamedAll(StandTipInNamed* s, uint64_t seq, uint64_t q)
+static void StandTipInNamedAll(TagFSVolume* vol, StandTipInNamed* s, uint64_t seq, uint64_t q)
 {
     static const uint64_t trees[] = { TALLY_FILES, TALLY_TAGS, TALLY_USE, TALLY_DIGESTS };
     static Strip          ground[1024];
-    uint32_t              n = BinderStandGround(ground, 1024u);
+    uint32_t              n = BinderStandGround(vol, ground, 1024u);
     FoliationNode         f;
     TallyPlace            p;
     bool                  rot = false;
     n = n < 1024u ? n : 1024u;
     *s = (StandTipInNamed){ 0, 0, UINT64_MAX, 0 };
     for (uint32_t t = 0; t < sizeof(trees) / sizeof(trees[0]); t++)
-        for (uint32_t i = 0; FoliationStandNode(trees[t], i, &f); i++)
-            StandTipInNamedOne(s, &f.place, seq, q, ground, n);
-    for (uint32_t i = 0; TallyDigestLeafAt(i, &p, &rot); i++)
-        StandTipInNamedOne(s, &p, seq, q, ground, n);
+        for (uint32_t i = 0; FoliationStandNode(vol, trees[t], i, &f); i++)
+            StandTipInNamedOne(vol, s, &f.place, seq, q, ground, n);
+    for (uint32_t i = 0; TallyDigestLeafAt(vol, i, &p, &rot); i++)
+        StandTipInNamedOne(vol, s, &p, seq, q, ground, n);
 }
 
 static TestResult TestStandTipInQuiresHeld(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     static StandBinder b;
     char               name[80];
     uint64_t           fid = 0, seq = 0, q = 0;
     StandTipInNamed    named;
     FoliationNode      f;
-    const char*        aside = StandBinderAside(&b);
+    const char*        aside = StandBinderAside(vol, &b);
 
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
+    TEST_ASSERT(StandStitchRemount(vol) && TagFSSettle(vol) == OK, "the volume mounted afresh, a stitch of it settled");
     for (uint32_t i = 0; i < STAND_TIP_IN_QUIRED; i++) {
         ksnprintf(name, sizeof(name), "tipin-quire-%05u-of-a-name-long-enough-to-take-room.txt", i);
-        TEST_ASSERT_EQ(StandTipInCreate(name, &fid), 0, "a file is made");
+        TEST_ASSERT_EQ(StandTipInCreate(vol, name, &fid), 0, "a file is made");
     }
-    TEST_ASSERT(TagFSSettle() == OK && BinderRunWhole() == OK, "they settled, a Tally of them written");
-    for (uint32_t i = 0; FoliationStandNode(TALLY_FILES, i, &f); i++)
+    TEST_ASSERT(TagFSSettle(vol) == OK && BinderRunWhole(vol) == OK, "they settled, a Tally of them written");
+    for (uint32_t i = 0; FoliationStandNode(vol, TALLY_FILES, i, &f); i++)
         seq = f.place.ptr.seq > seq ? f.place.ptr.seq : seq;
-    q = RibbonCursorNow()->quire_blocks ? RibbonCursorNow()->quire_blocks : 1u;
-    for (uint32_t k = 0; k <= g_binder.ring; k++) {
+    q = RibbonCursorNow(vol)->quire_blocks ? RibbonCursorNow(vol)->quire_blocks : 1u;
+    for (uint32_t k = 0; k <= vol->binder.ring; k++) {
         bool laid = false;
         /* A stitch that ends on its Quire's last sector leaves no ribbon for a
          * Tally to go on from until the next stitch: one more file is then
          * made, and the Tally asked for again. */
         for (uint32_t again = 0; again < 2 && !laid; again++) {
             ksnprintf(name, sizeof(name), "tipin-quire-tail-%u-%u.txt", k, again);
-            TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, 0, &fid), 0, "a file more is made at the tail");
-            laid = TagFSSettle() == OK && BinderRunWhole() == OK;
+            TEST_ASSERT_EQ(tagfs_create_file(vol, name, NULL, 0, 0, &fid), 0, "a file more is made at the tail");
+            laid = TagFSSettle(vol) == OK && BinderRunWhole(vol) == OK;
         }
         TEST_ASSERT(laid, "a Tally laid in over it");
     }
-    StandTipInNamedAll(&named, seq, q);
+    StandTipInNamedAll(vol, &named, seq, q);
     TestEvidence("nodes the first Tally laid that the last names as they lie", named.older);
     TestEvidence("Tally-Quires copy 1 of them spans", named.qhi >= named.qlo ? named.qhi - named.qlo + 1u : 0);
     TEST_ASSERT(named.older > 0 && named.qhi > named.qlo, "the last Tally names nodes the first laid, over more "
@@ -630,11 +637,11 @@ out:
 #define STAND_TIP_IN_PAST_STEP  64u      /* ... so many a write, until one lies past the rotten leaf */
 
 /* The last leaf of the reads' DIGESTS table: the one with no upper key. */
-static bool StandTipInDigestLast(TallyPlace* out)
+static bool StandTipInDigestLast(TagFSVolume* vol, TallyPlace* out)
 {
     TallyPlace p;
     bool       rot = false, found = false;
-    for (uint32_t i = 0; TallyDigestLeafAt(i, &p, &rot); i++)
+    for (uint32_t i = 0; TallyDigestLeafAt(vol, i, &p, &rot); i++)
         if (p.level == 0 && !p.has_hi) {
             *out  = p;
             found = true;
@@ -654,24 +661,24 @@ typedef struct {
  * past `end`. Each run is looked for before it is asked of the map, so no take
  * that finds none gives the files' windows back (BlockMapTakeQuire). False
  * when memory or the map refused. */
-static bool StandTipInHoldBelow(StandTipInHold* h, uint64_t end, uint64_t room)
+static bool StandTipInHoldBelow(TagFSVolume* vol, StandTipInHold* h, uint64_t end, uint64_t room)
 {
-    uint64_t keep = EndpaperDataKeeps(false) + room, data = g_book.frame.data_block, at = 0, got = 0;
+    uint64_t keep = EndpaperDataKeeps(vol, false) + room, data = vol->book.frame.data_block, at = 0, got = 0;
     for (uint64_t w = BLOCK_MAP_TAKE_MOST; w > 0;) {
-        TagFSLockTake(&tagfs_get_state()->lock);
-        bool below = BlockMapDerivedRunFree(data, w, 0, &at) && at + w <= end;
-        TagFSLockDrop(&tagfs_get_state()->lock);
+        TagFSLockTake(&vol->state.lock);
+        bool below = BlockMapDerivedRunFree(vol, data, w, 0, &at) && at + w <= end;
+        TagFSLockDrop(&vol->state.lock);
         if (!below) {
             w /= 2u;
             continue;
         }
-        error_t rc = BlockMapTakeQuire(GROUND_HELD, w, 1u, keep, data, at, &got);
+        error_t rc = BlockMapTakeQuire(vol, GROUND_HELD, w, 1u, keep, data, at, &got);
         if (rc == ERR_TAGFS_NO_SPACE) {     /* past the reserve: a shorter run may still be held */
             w /= 2u;
             continue;
         }
         if (rc == OK && (got + w > end || !BinderListRoom((void**)&h->runs, h->n, &h->cap, sizeof(Strip)))) {
-            (void)BlockMapDerivedGiveAs(GROUND_HELD, 0, got, w);
+            (void)BlockMapDerivedGiveAs(vol, GROUND_HELD, 0, got, w);
             return false;
         }
         if (rc != OK)
@@ -681,10 +688,10 @@ static bool StandTipInHoldBelow(StandTipInHold* h, uint64_t end, uint64_t room)
     return true;
 }
 
-static void StandTipInHoldBack(StandTipInHold* h)
+static void StandTipInHoldBack(TagFSVolume* vol, StandTipInHold* h)
 {
     for (uint64_t i = 0; i < h->n; i++)
-        (void)BlockMapDerivedGiveAs(GROUND_HELD, 0, h->runs[i].start, h->runs[i].count);
+        (void)BlockMapDerivedGiveAs(vol, GROUND_HELD, 0, h->runs[i].start, h->runs[i].count);
     kfree(h->runs);
     memset(h, 0, sizeof(*h));
 }
@@ -693,9 +700,9 @@ static void StandTipInHoldBack(StandTipInHold* h)
  * (*past), and how many of those an element of the reads' DIGESTS names
  * (*named) — not a rotten range read unchecked (TallyDigestFind). False when
  * its record is not held. */
-static bool StandTipInNamedPast(uint64_t fid, uint64_t blocks, uint64_t key, uint64_t* named, uint64_t* past)
+static bool StandTipInNamedPast(TagFSVolume* vol, uint64_t fid, uint64_t blocks, uint64_t key, uint64_t* named, uint64_t* past)
 {
-    FileRecord* rec  = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    FileRecord* rec  = FileMapRecordHold(vol->state.files, fid, NULL);
     FileSpot    spot = { 0, 0, 0 };
     *named = *past = 0;
     if (!rec)
@@ -706,7 +713,7 @@ static bool StandTipInNamedPast(uint64_t fid, uint64_t blocks, uint64_t key, uin
         if (!FileRecordFind(rec, i, &spot) || spot.kind != STRIP_DATA || spot.block <= key)
             continue;
         (*past)++;
-        *named += TallyDigestFind(spot.block, &digest, &refused) == TALLY_DIGEST_NAMED;
+        *named += TallyDigestFind(vol, spot.block, &digest, &refused) == TALLY_DIGEST_NAMED;
     }
     FileRecordRelease(rec);
     return true;
@@ -726,6 +733,7 @@ static bool StandTipInNamedPast(uint64_t fid, uint64_t blocks, uint64_t key, uin
  */
 static TestResult TestStandTipInRottenPast(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     static StandBinder b;
     StandFreshModel    data, past;
@@ -735,35 +743,35 @@ static TestResult TestStandTipInRottenPast(void)
     FileSpot           spot  = { 0, 0, 0 };
     uint64_t           fid = 0, pfid = 0, at = 0, named = 0, past_key = 0;
     bool               beyond = false;
-    const char*        aside = StandBinderAside(&b);
+    const char*        aside = StandBinderAside(vol, &b);
 
     memset(&data, 0, sizeof(data));
     memset(&past, 0, sizeof(past));
     memset(&last, 0, sizeof(last));
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
-    TEST_ASSERT_EQ(tagfs_create_file("tipin-rot-data.bin", NULL, 0, 0, &fid), 0, "a file for data is made");
+    TEST_ASSERT(StandStitchRemount(vol) && TagFSSettle(vol) == OK, "the volume mounted afresh, a stitch of it settled");
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "tipin-rot-data.bin", NULL, 0, 0, &fid), 0, "a file for data is made");
     TEST_ASSERT(StandFreshModelMake(&data, (uint64_t)STAND_TIP_IN_DATA_MB << 20) &&
-                StandFreshWrite(&data, fid, 0, STAND_TIP_IN_DATA_MB << 20, 71) == (int)(STAND_TIP_IN_DATA_MB << 20),
+                StandFreshWrite(vol, &data, fid, 0, STAND_TIP_IN_DATA_MB << 20, 71) == (int)(STAND_TIP_IN_DATA_MB << 20),
                 "and written: DIGESTS takes leaves");
-    TEST_ASSERT(TagFSSettle() == OK && BinderRunWhole() == OK, "settled, a Tally of it written");
-    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
-    TEST_ASSERT(StandTipInDigestLast(&last) && last.has_lo && last.ptr.copies == 2,
+    TEST_ASSERT(TagFSSettle(vol) == OK && BinderRunWhole(vol) == OK, "settled, a Tally of it written");
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts on it");
+    TEST_ASSERT(StandTipInDigestLast(vol, &last) && last.has_lo && last.ptr.copies == 2,
                 "the last leaf of DIGESTS, from a key of its own and to none, two copies");
     TEST_ASSERT(StandBinderKeep(&b, last.ptr.block[0]), "its first copy's first block kept as found");
     memset(g_test_output, 0, TAGFS_BLOCK_SIZE);
     TEST_ASSERT(StandBinderWrite(&b, last.ptr.block[0], g_test_output) &&
                 StandBinderWrite(&b, last.ptr.block[1], g_test_output), "both its copies written over with zeros");
-    TEST_ASSERT(StandStitchRemount(), "the volume mounts again: the leaf rots when a read reaches it");
-    TEST_ASSERT_EQ(tagfs_create_file("tipin-rot-past.bin", NULL, 0, 0, &pfid), 0, "a file is made after");
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts again: the leaf rots when a read reaches it");
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "tipin-rot-past.bin", NULL, 0, 0, &pfid), 0, "a file is made after");
     TEST_ASSERT(StandFreshModelMake(&past, (uint64_t)STAND_TIP_IN_PAST_MOST * TAGFS_BLOCK_SIZE), "its model");
-    TEST_ASSERT(StandTipInHoldBelow(&held, last.lo.k1 + 1u, STAND_TIP_IN_PAST_MOST),
+    TEST_ASSERT(StandTipInHoldBelow(vol, &held, last.lo.k1 + 1u, STAND_TIP_IN_PAST_MOST),
                 "the free ground up to the rotten leaf's first key held while it is written");
     for (at = 0; !beyond && at < STAND_TIP_IN_PAST_MOST; at += STAND_TIP_IN_PAST_STEP) {
-        TEST_ASSERT(StandFreshWrite(&past, pfid, at * TAGFS_BLOCK_SIZE, STAND_TIP_IN_PAST_STEP * TAGFS_BLOCK_SIZE,
+        TEST_ASSERT(StandFreshWrite(vol, &past, pfid, at * TAGFS_BLOCK_SIZE, STAND_TIP_IN_PAST_STEP * TAGFS_BLOCK_SIZE,
                                     73) == (int)(STAND_TIP_IN_PAST_STEP * TAGFS_BLOCK_SIZE), "written on");
-        rec = FileMapRecordHold(tagfs_get_state()->files, pfid, NULL);
+        rec = FileMapRecordHold(vol->state.files, pfid, NULL);
         TEST_ASSERT(rec && FileRecordFind(rec, at + STAND_TIP_IN_PAST_STEP - 1u, &spot) && spot.block,
                     "the last block written");
         beyond = spot.block > last.lo.k1;
@@ -772,18 +780,18 @@ static TestResult TestStandTipInRottenPast(void)
     }
     TestEvidence("blocks written until one lay past the rotten leaf's first", at);
     TEST_ASSERT(beyond, "a block of it lies past the rotten leaf's first key");
-    StandTipInHoldBack(&held);
-    TEST_ASSERT(TagFSSettle() == OK && BinderRunWhole() == OK, "a stitch of this mount settles, a Tally is written");
-    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
-    TEST_ASSERT(StandTipInNamedPast(pfid, at, last.lo.k1, &named, &past_key) && past_key > 0,
+    StandTipInHoldBack(vol, &held);
+    TEST_ASSERT(TagFSSettle(vol) == OK && BinderRunWhole(vol) == OK, "a stitch of this mount settles, a Tally is written");
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts on it");
+    TEST_ASSERT(StandTipInNamedPast(vol, pfid, at, last.lo.k1, &named, &past_key) && past_key > 0,
                 "its blocks past the rotten leaf's first key, found again");
     TEST_ASSERT_EQ(named, past_key, "and the Tally's DIGESTS names every one: laid past the rotten leaf, which "
                    "stands at its first key alone — none left out with its range, read unchecked (BinderKeptCovers)");
-    TEST_ASSERT(StandFreshHolds(&past, pfid), "every block of it reads: what was born past the rotten leaf is laid "
+    TEST_ASSERT(StandFreshHolds(vol, &past, pfid), "every block of it reads: what was born past the rotten leaf is laid "
                 "past it, the leaf named as it lies (§16.4 п.5)");
 out:
     FileRecordRelease(rec);
-    StandTipInHoldBack(&held);
+    StandTipInHoldBack(vol, &held);
     StandFreshModelLetGo(&past);
     StandFreshModelLetGo(&data);
     STAND_BINDER_PUT_BACK(&b);

@@ -5,6 +5,7 @@
 #include "../block_map/block_map_derived.h"
 #include "dog_ear.h"
 #include "foliation.h"
+#include "tagfs_volume.h"
 
 /*
  * What the slots of the Spine hold (binder.h, FALLOW_BY_SPINE, §3.4, M-7):
@@ -21,8 +22,6 @@
  * by the holder in words of their own: each slot's own ground (`own`, which
  * lives as long as the mount), the due and the reason none may be begun.
  */
-
-BinderBook g_binder;
 
 // ----------------------------------------------------------------------------
 // Lists
@@ -76,76 +75,76 @@ void BinderSlotLetGo(SlotGround* s)
  * registry and its Use Context gone before the book is (tagfs.c,
  * tagfs_clear_the_ground), and what a leaf keeps live is asked of them
  * (binder_live.c). */
-void BinderMountReset(void)
+void BinderMountReset(TagFSVolume* vol)
 {
-    g_binder.up = false;
-    BinderStopped(ERR_DEVICE_NOT_READY);
-    DogEarLetGo();
-    FoliationLetGo();
-    BinderProofLetGo();
-    BinderGleanLetGo();
-    EscheatLetGo();
-    for (uint32_t i = 0; i < g_binder.ring; i++)
-        BinderSlotLetGo(&g_binder.slot[i]);
-    kfree(g_binder.slot);
-    kfree(g_binder.own);
-    kfree(g_binder.chain);
-    kfree(g_binder.rot);
-    kfree(g_binder.held);
-    memset(&g_binder, 0, sizeof(g_binder));
-    BirthsLetGo();
-    EndpaperForget();
+    vol->binder.up = false;
+    BinderStopped(vol, ERR_DEVICE_NOT_READY);
+    DogEarLetGo(vol);
+    FoliationLetGo(vol);
+    BinderProofLetGo(vol);
+    BinderGleanLetGo(vol);
+    EscheatLetGo(vol);
+    for (uint32_t i = 0; i < vol->binder.ring; i++)
+        BinderSlotLetGo(&vol->binder.slot[i]);
+    kfree(vol->binder.slot);
+    kfree(vol->binder.own);
+    kfree(vol->binder.chain);
+    kfree(vol->binder.rot);
+    kfree(vol->binder.held);
+    memset(&vol->binder, 0, sizeof(vol->binder));
+    BirthsLetGo(vol);
+    EndpaperForget(vol);
 }
 
-error_t BinderSlotsMake(uint32_t ring)
+error_t BinderSlotsMake(TagFSVolume* vol, uint32_t ring)
 {
-    g_binder.slot = kmalloc(sizeof(SlotGround) * (ring ? ring : 1u));
-    g_binder.own  = kmalloc(sizeof(uint64_t) * (ring ? ring : 1u));
-    if (!g_binder.slot || !g_binder.own) {
-        kfree(g_binder.slot);
-        kfree(g_binder.own);
-        g_binder.slot = NULL;
-        g_binder.own  = NULL;
+    vol->binder.slot = kmalloc(sizeof(SlotGround) * (ring ? ring : 1u));
+    vol->binder.own  = kmalloc(sizeof(uint64_t) * (ring ? ring : 1u));
+    if (!vol->binder.slot || !vol->binder.own) {
+        kfree(vol->binder.slot);
+        kfree(vol->binder.own);
+        vol->binder.slot = NULL;
+        vol->binder.own  = NULL;
         return ERR_NO_MEMORY;
     }
-    memset(g_binder.slot, 0, sizeof(SlotGround) * (ring ? ring : 1u));
-    memset(g_binder.own, 0, sizeof(uint64_t) * (ring ? ring : 1u));
+    memset(vol->binder.slot, 0, sizeof(SlotGround) * (ring ? ring : 1u));
+    memset(vol->binder.own, 0, sizeof(uint64_t) * (ring ? ring : 1u));
     for (uint32_t i = 0; i < ring; i++)
-        g_binder.slot[i].chain_from = UINT64_MAX;
-    g_binder.ring = ring;
+        vol->binder.slot[i].chain_from = UINT64_MAX;
+    vol->binder.ring = ring;
     return OK;
 }
 
-error_t BinderSlotHolds(uint32_t index, uint64_t seq, uint64_t tally_seq, uint64_t stitch_seq)
+error_t BinderSlotHolds(TagFSVolume* vol, uint32_t index, uint64_t seq, uint64_t tally_seq, uint64_t stitch_seq)
 {
-    if (index >= g_binder.ring)
+    if (index >= vol->binder.ring)
         return ERR_INVALID_ARGUMENT;
-    SlotGround* s = &g_binder.slot[index];
+    SlotGround* s = &vol->binder.slot[index];
     s->holds = true;
     s->seq   = seq;
     s->tally = tally_seq;
     s->slice = stitch_seq;
-    if (index + 1u > g_binder.nslots)
-        g_binder.nslots = index + 1u;
+    if (index + 1u > vol->binder.nslots)
+        vol->binder.nslots = index + 1u;
     return OK;
 }
 
-error_t BinderSlotNode(uint32_t index, uint64_t start, uint64_t count, uint64_t birth)
+error_t BinderSlotNode(TagFSVolume* vol, uint32_t index, uint64_t start, uint64_t count, uint64_t birth)
 {
-    if (index >= g_binder.ring)
+    if (index >= vol->binder.ring)
         return ERR_INVALID_ARGUMENT;
-    SlotGround* s = &g_binder.slot[index];
+    SlotGround* s = &vol->binder.slot[index];
     if (!BinderListRoom32((void**)&s->ground, s->nground, &s->capground, sizeof(Strip)))
         return ERR_NO_MEMORY;
     s->ground[s->nground++] = (Strip){ .start = start, .count = (uint32_t)count, .kind = STRIP_DATA, .birth = birth };
     return OK;
 }
 
-error_t BinderSlotRibbon(uint32_t index, const RibbonQuire* q)
+error_t BinderSlotRibbon(TagFSVolume* vol, uint32_t index, const RibbonQuire* q)
 {
-    if (index >= g_binder.ring)
+    if (index >= vol->binder.ring)
         return ERR_INVALID_ARGUMENT;
-    SlotGround* s = &g_binder.slot[index];
+    SlotGround* s = &vol->binder.slot[index];
     for (uint32_t i = 0; i < s->nextra; i++)
         if (RibbonQuireSame(&s->extra[i], q))
             return OK;
@@ -155,29 +154,29 @@ error_t BinderSlotRibbon(uint32_t index, const RibbonQuire* q)
     return OK;
 }
 
-error_t BinderRotten(uint64_t tree, const TallyPlace* at)
+error_t BinderRotten(TagFSVolume* vol, uint64_t tree, const TallyPlace* at)
 {
-    if (!BinderListRoom32((void**)&g_binder.rot, g_binder.nrot, &g_binder.caprot, sizeof(BinderKept)))
+    if (!BinderListRoom32((void**)&vol->binder.rot, vol->binder.nrot, &vol->binder.caprot, sizeof(BinderKept)))
         return ERR_NO_MEMORY;
-    uint32_t i = g_binder.nrot++;
+    uint32_t i = vol->binder.nrot++;
     /* In the order of their tree, then of their keys: the walk of each tree
      * meets them in key order, and the trees in theirs. */
-    while (i > 0 && (g_binder.rot[i - 1u].tree > tree ||
-                     (g_binder.rot[i - 1u].tree == tree && at->has_lo &&
-                      (!g_binder.rot[i - 1u].at.has_lo || g_binder.rot[i - 1u].at.lo.k1 > at->lo.k1 ||
-                       (g_binder.rot[i - 1u].at.lo.k1 == at->lo.k1 && g_binder.rot[i - 1u].at.lo.k2 > at->lo.k2))))) {
-        g_binder.rot[i] = g_binder.rot[i - 1u];
+    while (i > 0 && (vol->binder.rot[i - 1u].tree > tree ||
+                     (vol->binder.rot[i - 1u].tree == tree && at->has_lo &&
+                      (!vol->binder.rot[i - 1u].at.has_lo || vol->binder.rot[i - 1u].at.lo.k1 > at->lo.k1 ||
+                       (vol->binder.rot[i - 1u].at.lo.k1 == at->lo.k1 && vol->binder.rot[i - 1u].at.lo.k2 > at->lo.k2))))) {
+        vol->binder.rot[i] = vol->binder.rot[i - 1u];
         i--;
     }
-    g_binder.rot[i] = (BinderKept){ .tree = tree, .at = *at, .rotten = true };
+    vol->binder.rot[i] = (BinderKept){ .tree = tree, .at = *at, .rotten = true };
     return OK;
 }
 
-error_t BinderHeldRun(uint64_t start, uint64_t count)
+error_t BinderHeldRun(TagFSVolume* vol, uint64_t start, uint64_t count)
 {
-    if (!BinderListRoom((void**)&g_binder.held, g_binder.nheld, &g_binder.capheld, sizeof(BinderGround)))
+    if (!BinderListRoom((void**)&vol->binder.held, vol->binder.nheld, &vol->binder.capheld, sizeof(BinderGround)))
         return ERR_NO_MEMORY;
-    g_binder.held[g_binder.nheld++] = (BinderGround){ start, count };
+    vol->binder.held[vol->binder.nheld++] = (BinderGround){ start, count };
     return OK;
 }
 
@@ -213,29 +212,29 @@ void BinderSlotSort(SlotGround* s)
     }
 }
 
-uint64_t BinderChainIndex(const RibbonQuire* q)
+uint64_t BinderChainIndex(TagFSVolume* vol, const RibbonQuire* q)
 {
-    for (uint64_t i = 0; i < g_binder.nchain; i++)
-        if (RibbonQuireSame(&g_binder.chain[i], q))
-            return g_binder.chain_base + i;
+    for (uint64_t i = 0; i < vol->binder.nchain; i++)
+        if (RibbonQuireSame(&vol->binder.chain[i], q))
+            return vol->binder.chain_base + i;
     return UINT64_MAX;
 }
 
 /* The slots not stood on: each Quire of their ribbons that lies on the chain
  * the slot stood on begins their hold of it; the others are their own. */
-static void SlotsOnChain(uint32_t stood)
+static void SlotsOnChain(TagFSVolume* vol, uint32_t stood)
 {
-    for (uint32_t i = 0; i < g_binder.nslots; i++) {
-        SlotGround* s = &g_binder.slot[i];
+    for (uint32_t i = 0; i < vol->binder.nslots; i++) {
+        SlotGround* s = &vol->binder.slot[i];
         uint32_t    kept = 0;
         BinderSlotSort(s);
         if (i == stood) {
             s->nextra     = 0;
-            s->chain_from = g_binder.chain_base;
+            s->chain_from = vol->binder.chain_base;
             continue;
         }
         for (uint32_t q = 0; q < s->nextra; q++) {
-            uint64_t at = BinderChainIndex(&s->extra[q]);
+            uint64_t at = BinderChainIndex(vol, &s->extra[q]);
             if (at == UINT64_MAX)
                 s->extra[kept++] = s->extra[q];
             else if (at < s->chain_from)
@@ -245,52 +244,52 @@ static void SlotsOnChain(uint32_t stood)
     }
 }
 
-void BinderMountStood(uint32_t index, uint64_t tally_blocks, uint64_t useful, uint64_t next_fid,
+void BinderMountStood(TagFSVolume* vol, uint32_t index, uint64_t tally_blocks, uint64_t useful, uint64_t next_fid,
                       uint64_t next_tag, uint64_t next_bookmark)
 {
-    SlotGround* s     = &g_binder.slot[index < g_binder.ring ? index : 0];
-    bool        short_ = g_book.binder_short;
+    SlotGround* s     = &vol->binder.slot[index < vol->binder.ring ? index : 0];
+    bool        short_ = vol->book.binder_short;
     /* The chain is the ribbon of the slot stood on, in its order; every
      * Quire given from here goes on it (BinderRibbonGiven). One the chain
      * cannot hold would be let go by no Tally, and the order of the rest
      * would be wrong: no Tally is written by this mount then. */
     for (uint32_t q = 0; !short_ && q < s->nextra; q++) {
-        if (!BinderListRoom((void**)&g_binder.chain, g_binder.nchain, &g_binder.capchain, sizeof(RibbonQuire)))
+        if (!BinderListRoom((void**)&vol->binder.chain, vol->binder.nchain, &vol->binder.capchain, sizeof(RibbonQuire)))
             short_ = true;
         else
-            g_binder.chain[g_binder.nchain++] = s->extra[q];
+            vol->binder.chain[vol->binder.nchain++] = s->extra[q];
     }
-    SlotsOnChain(index);
+    SlotsOnChain(vol, index);
     if (short_)
-        BinderNoTalliesFrom("memory would not hold what the Spine's slots hold for the writer of a Tally");
-    for (uint32_t i = 0; i < g_binder.ring; i++)
-        BinderSlotOwnPublish(i, 0);
-    g_binder.tally_blocks  = tally_blocks;
-    g_binder.cost_known    = 0;
-    g_binder.useful        = useful;
-    g_binder.seen_fid      = next_fid;
-    g_binder.seen_tag      = next_tag;
-    g_binder.seen_bookmark = next_bookmark;
-    g_binder.up            = true;
-    BinderWeigh();
+        BinderNoTalliesFrom(vol, "memory would not hold what the Spine's slots hold for the writer of a Tally");
+    for (uint32_t i = 0; i < vol->binder.ring; i++)
+        BinderSlotOwnPublish(vol, i, 0);
+    vol->binder.tally_blocks  = tally_blocks;
+    vol->binder.cost_known    = 0;
+    vol->binder.useful        = useful;
+    vol->binder.seen_fid      = next_fid;
+    vol->binder.seen_tag      = next_tag;
+    vol->binder.seen_bookmark = next_bookmark;
+    vol->binder.up            = true;
+    BinderWeigh(vol);
 }
 
-const char* BinderNoTallies(void)
+const char* BinderNoTallies(TagFSVolume* vol)
 {
-    return __atomic_load_n(&g_binder.no_tallies, __ATOMIC_ACQUIRE);
+    return __atomic_load_n(&vol->binder.no_tallies, __ATOMIC_ACQUIRE);
 }
 
-void BinderNoTalliesFrom(const char* why)
+void BinderNoTalliesFrom(TagFSVolume* vol, const char* why)
 {
     const char* none = NULL;
-    (void)__atomic_compare_exchange_n(&g_binder.no_tallies, &none, why, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    (void)__atomic_compare_exchange_n(&vol->binder.no_tallies, &none, why, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
 }
 
 // ----------------------------------------------------------------------------
 // What the ring lacks (BinderRingShort)
 // ----------------------------------------------------------------------------
 
-static uint64_t SlotOwn(uint32_t index, uint64_t q);
+static uint64_t SlotOwn(TagFSVolume* vol, uint32_t index, uint64_t q);
 
 /* A slot held unsure over one that held nothing (BinderSlotUnsure: its Tally
  * and the one that may stand in it the same) may hold the new Tally or none,
@@ -316,13 +315,13 @@ uint64_t BinderBarSlice(const SlotGround* slots, uint32_t n, uint64_t lag, uint6
     return slice;
 }
 
-void BinderBarPublish(uint64_t floor)
+void BinderBarPublish(TagFSVolume* vol, uint64_t floor)
 {
-    uint32_t n     = g_binder.nslots < g_binder.ring ? g_binder.nslots : g_binder.ring;
-    uint64_t slice = BinderBarSlice(g_binder.slot, n, FallowLag(), floor);
-    TagFSLockTake(&tagfs_get_state()->lock);
-    FallowNode* spent = FallowBarLift(slice);
-    TagFSLockDrop(&tagfs_get_state()->lock);
+    uint32_t n     = vol->binder.nslots < vol->binder.ring ? vol->binder.nslots : vol->binder.ring;
+    uint64_t slice = BinderBarSlice(vol->binder.slot, n, FallowLag(vol), floor);
+    TagFSLockTake(&vol->state.lock);
+    FallowNode* spent = FallowBarLift(vol, slice);
+    TagFSLockDrop(&vol->state.lock);
     FallowNodesFree(spent);
 }
 
@@ -330,45 +329,45 @@ void BinderBarPublish(uint64_t floor)
  * the chain but the one the ribbon stands in and its next_quire, or a slot
  * whose Tally took in an older stitch than the newest's — its own nodes and
  * the Tally-Quires they hold whole go once a Tally is written over it. */
-void BinderTurnGivesPublish(void)
+void BinderTurnGivesPublish(TagFSVolume* vol)
 {
-    const RibbonCursor* c      = RibbonCursorNow();
+    const RibbonCursor* c      = RibbonCursorNow(vol);
     uint64_t            newest = 0;
     bool                gives  = false;
-    for (uint64_t i = 0; c->up && i < g_binder.nchain && !gives; i++)
-        gives = !RibbonQuireSame(&g_binder.chain[i], &c->quire) && !RibbonQuireSame(&g_binder.chain[i], &c->next);
-    for (uint32_t i = 0; i < g_binder.nslots && i < g_binder.ring; i++)
-        if (g_binder.slot[i].holds && g_binder.slot[i].slice > newest)
-            newest = g_binder.slot[i].slice;
-    for (uint32_t i = 0; i < g_binder.nslots && i < g_binder.ring && !gives; i++)
-        gives = g_binder.slot[i].holds && g_binder.slot[i].slice < newest;
-    __atomic_store_n(&g_binder.turn_gives, gives ? 1u : 0u, __ATOMIC_RELEASE);
+    for (uint64_t i = 0; c->up && i < vol->binder.nchain && !gives; i++)
+        gives = !RibbonQuireSame(&vol->binder.chain[i], &c->quire) && !RibbonQuireSame(&vol->binder.chain[i], &c->next);
+    for (uint32_t i = 0; i < vol->binder.nslots && i < vol->binder.ring; i++)
+        if (vol->binder.slot[i].holds && vol->binder.slot[i].slice > newest)
+            newest = vol->binder.slot[i].slice;
+    for (uint32_t i = 0; i < vol->binder.nslots && i < vol->binder.ring && !gives; i++)
+        gives = vol->binder.slot[i].holds && vol->binder.slot[i].slice < newest;
+    __atomic_store_n(&vol->binder.turn_gives, gives ? 1u : 0u, __ATOMIC_RELEASE);
 }
 
 /* Slot `index`'s own as it stands: the whole Quires a Tally over it gives
  * back, what the Tally before it let go while it rests, and what a Tally
  * under way over it took. */
-static void SlotOwnSaid(uint32_t index)
+static void SlotOwnSaid(TagFSVolume* vol, uint32_t index)
 {
-    const SlotGround* s = &g_binder.slot[index];
-    uint64_t          q = RibbonCursorNow()->quire_blocks ? RibbonCursorNow()->quire_blocks : 1u;
-    __atomic_store_n(&g_binder.own[index], SlotOwn(index, q) + s->rest + s->under, __ATOMIC_RELEASE);
+    const SlotGround* s = &vol->binder.slot[index];
+    uint64_t          q = RibbonCursorNow(vol)->quire_blocks ? RibbonCursorNow(vol)->quire_blocks : 1u;
+    __atomic_store_n(&vol->binder.own[index], SlotOwn(vol, index, q) + s->rest + s->under, __ATOMIC_RELEASE);
 }
 
-void BinderSlotOwnPublish(uint32_t index, uint64_t more)
+void BinderSlotOwnPublish(TagFSVolume* vol, uint32_t index, uint64_t more)
 {
-    if (index >= g_binder.ring)
+    if (index >= vol->binder.ring)
         return;
-    g_binder.slot[index].under = more;
-    SlotOwnSaid(index);
-    BinderGroundHeldPublish();
+    vol->binder.slot[index].under = more;
+    SlotOwnSaid(vol, index);
+    BinderGroundHeldPublish(vol);
 }
 
-void BinderSlotsOwnPublish(void)
+void BinderSlotsOwnPublish(TagFSVolume* vol)
 {
-    for (uint32_t i = 0; i < g_binder.ring; i++)
-        SlotOwnSaid(i);
-    BinderGroundHeldPublish();
+    for (uint32_t i = 0; i < vol->binder.ring; i++)
+        SlotOwnSaid(vol, i);
+    BinderGroundHeldPublish(vol);
 }
 
 /*
@@ -386,12 +385,12 @@ void BinderSlotsOwnPublish(void)
  * measure taken between would count it twice. A rest a DONE finds still
  * resting is added to, never put over: its ground is no freer for it.
  */
-void BinderRestRipens(uint64_t resting_from)
+void BinderRestRipens(TagFSVolume* vol, uint64_t resting_from)
 {
-    for (uint32_t i = 0; i < g_binder.ring; i++) {
-        SlotGround* s = &g_binder.slot[i];
+    for (uint32_t i = 0; i < vol->binder.ring; i++) {
+        SlotGround* s = &vol->binder.slot[i];
         if (s->rest && s->rest_until < resting_from) {
-            __atomic_sub_fetch(&g_binder.own[i], s->rest, __ATOMIC_ACQ_REL);
+            __atomic_sub_fetch(&vol->binder.own[i], s->rest, __ATOMIC_ACQ_REL);
             s->rest = 0;
         }
     }
@@ -400,20 +399,20 @@ void BinderRestRipens(uint64_t resting_from)
 /* What each slot but `index` lacks of `tally` blocks, its own ground counted
  * in whole Quires of `quire` — the ground a Tally takes is (binder.c) — so the
  * reserve stays whole Quires. */
-uint64_t BinderRingShortBut(uint64_t tally, uint64_t quire, uint32_t index)
+uint64_t BinderRingShortBut(TagFSVolume* vol, uint64_t tally, uint64_t quire, uint32_t index)
 {
     uint64_t lacks = 0;
-    for (uint32_t i = 0; quire && i < g_binder.ring; i++) {
-        uint64_t own = __atomic_load_n(&g_binder.own[i], __ATOMIC_ACQUIRE) / quire * quire;
+    for (uint32_t i = 0; quire && i < vol->binder.ring; i++) {
+        uint64_t own = __atomic_load_n(&vol->binder.own[i], __ATOMIC_ACQUIRE) / quire * quire;
         if (i != index && own < tally)
             lacks += tally - own;
     }
     return lacks;
 }
 
-uint64_t BinderRingShort(uint64_t tally, uint64_t quire)
+uint64_t BinderRingShort(TagFSVolume* vol, uint64_t tally, uint64_t quire)
 {
-    return BinderRingShortBut(tally, quire, UINT32_MAX);
+    return BinderRingShortBut(vol, tally, quire, UINT32_MAX);
 }
 
 #ifdef CONFIG_VOLUME_TESTS
@@ -433,12 +432,12 @@ uint32_t BinderStandGiven(RibbonQuire* out, uint32_t room)
     return s_stand_given_n;
 }
 
-uint32_t BinderStandGround(Strip* out, uint32_t room)
+uint32_t BinderStandGround(TagFSVolume* vol, Strip* out, uint32_t room)
 {
     uint32_t n = 0;
     uint64_t from = UINT64_MAX;
-    for (uint32_t i = 0; i < g_binder.nslots; i++) {
-        const SlotGround* s = &g_binder.slot[i];
+    for (uint32_t i = 0; i < vol->binder.nslots; i++) {
+        const SlotGround* s = &vol->binder.slot[i];
         if (!s->holds)
             continue;
         for (uint32_t k = 0; k < s->nground; k++, n++)
@@ -452,39 +451,39 @@ uint32_t BinderStandGround(Strip* out, uint32_t room)
                 out[n] = (Strip){ .start = s->extra[k].block, .count = (uint32_t)s->extra[k].blocks, .kind = STRIP_DATA };
         from = s->chain_from < from ? s->chain_from : from;
     }
-    for (uint64_t at = from; from != UINT64_MAX && at < g_binder.chain_base + g_binder.nchain; at++, n++)
-        if (n < room && at >= g_binder.chain_base)
-            out[n] = (Strip){ .start = g_binder.chain[at - g_binder.chain_base].block,
-                              .count = (uint32_t)g_binder.chain[at - g_binder.chain_base].blocks, .kind = STRIP_DATA };
+    for (uint64_t at = from; from != UINT64_MAX && at < vol->binder.chain_base + vol->binder.nchain; at++, n++)
+        if (n < room && at >= vol->binder.chain_base)
+            out[n] = (Strip){ .start = vol->binder.chain[at - vol->binder.chain_base].block,
+                              .count = (uint32_t)vol->binder.chain[at - vol->binder.chain_base].blocks, .kind = STRIP_DATA };
     /* And what of the pair of Tally-Quires the next Tally goes on in no node
      * was laid in yet: the book's, no slot's. */
-    if (g_binder.pair_room > g_binder.pair_used) {
-        uint64_t used = g_binder.pair_used, left = g_binder.pair_room - used;
+    if (vol->binder.pair_room > vol->binder.pair_used) {
+        uint64_t used = vol->binder.pair_used, left = vol->binder.pair_room - used;
         for (uint32_t k = 0; k < 2u; k++, n++)
             if (n < room)
-                out[n] = (Strip){ .start = (k ? g_binder.pair_b : g_binder.pair_a) + used, .count = (uint32_t)left,
+                out[n] = (Strip){ .start = (k ? vol->binder.pair_b : vol->binder.pair_a) + used, .count = (uint32_t)left,
                                   .kind = STRIP_DATA };
     }
     return n;
 }
 #endif
 
-void BinderRibbonGiven(const RibbonQuire* q)
+void BinderRibbonGiven(TagFSVolume* vol, const RibbonQuire* q)
 {
 #ifdef CONFIG_VOLUME_TESTS
     if (s_stand_given_n < BINDER_STAND_GIVEN_MOST)
         s_stand_given[s_stand_given_n++] = *q;
 #endif
-    if (!g_binder.up || BinderChainIndex(q) != UINT64_MAX)
+    if (!vol->binder.up || BinderChainIndex(vol, q) != UINT64_MAX)
         return;
-    if (!BinderListRoom((void**)&g_binder.chain, g_binder.nchain, &g_binder.capchain, sizeof(RibbonQuire))) {
+    if (!BinderListRoom((void**)&vol->binder.chain, vol->binder.nchain, &vol->binder.capchain, sizeof(RibbonQuire))) {
         /* A Quire the chain cannot hold is never let go by a Tally: held for good. */
         kprintf("[TagFS] no memory to note the ribbon's Quire %llu+%llu for the Tallies — it is held until the "
                 "volume is mounted again\n", (unsigned long long)q->block, (unsigned long long)q->blocks);
         return;
     }
-    g_binder.chain[g_binder.nchain++] = *q;
-    BinderGroundHeldPublish();
+    vol->binder.chain[vol->binder.nchain++] = *q;
+    BinderGroundHeldPublish(vol);
 }
 
 // ----------------------------------------------------------------------------
@@ -525,28 +524,28 @@ static bool SlotNames(const SlotGround* s, uint64_t start, uint64_t end)
  * GroundQuiresHeld). What of the current pair a Tally may still be laid in
  * stays the pair's.
  */
-static bool SlotsHold(uint64_t start, uint64_t end)
+static bool SlotsHold(TagFSVolume* vol, uint64_t start, uint64_t end)
 {
-    for (uint32_t i = 0; i < g_binder.nslots; i++)
-        if (g_binder.slot[i].holds && SlotNames(&g_binder.slot[i], start, end))
+    for (uint32_t i = 0; i < vol->binder.nslots; i++)
+        if (vol->binder.slot[i].holds && SlotNames(&vol->binder.slot[i], start, end))
             return true;
     return false;
 }
 
 /* Whether the current pair may still lay a Tally in [start, end): past the
  * Quires its Tallies filled. */
-static bool PairHolds(uint64_t start, uint64_t end, uint64_t q)
+static bool PairHolds(TagFSVolume* vol, uint64_t start, uint64_t end, uint64_t q)
 {
-    if (!g_binder.pair_room)
+    if (!vol->binder.pair_room)
         return false;
-    uint64_t used = g_binder.pair_used / q * q;
-    return (start < g_binder.pair_a + g_binder.pair_room && g_binder.pair_a + used < end) ||
-           (start < g_binder.pair_b + g_binder.pair_room && g_binder.pair_b + used < end);
+    uint64_t used = vol->binder.pair_used / q * q;
+    return (start < vol->binder.pair_a + vol->binder.pair_room && vol->binder.pair_a + used < end) ||
+           (start < vol->binder.pair_b + vol->binder.pair_room && vol->binder.pair_b + used < end);
 }
 
-static bool QuireHeld(uint64_t start, uint64_t end, uint64_t q)
+static bool QuireHeld(TagFSVolume* vol, uint64_t start, uint64_t end, uint64_t q)
 {
-    return SlotsHold(start, end) || PairHolds(start, end, q);
+    return SlotsHold(vol, start, end) || PairHolds(vol, start, end, q);
 }
 
 /* The end of the Quire of the ribbon `q` (`n` of them) that `block` lies in,
@@ -559,18 +558,18 @@ static uint64_t RibbonQuirePast(const RibbonQuire* q, uint64_t n, uint64_t block
     return block;
 }
 
-uint64_t BinderOwnPast(uint64_t block)
+uint64_t BinderOwnPast(TagFSVolume* vol, uint64_t block)
 {
-    uint64_t q    = RibbonCursorNow()->quire_blocks;
+    uint64_t q    = RibbonCursorNow(vol)->quire_blocks;
     uint64_t cell = q ? block / q * q : 0;
-    if (!g_binder.up)
+    if (!vol->binder.up)
         return block;
-    if (q && QuireHeld(cell, cell + q, q))
+    if (q && QuireHeld(vol, cell, cell + q, q))
         return cell + q;
-    uint64_t past = RibbonQuirePast(g_binder.chain, g_binder.nchain, block);
-    for (uint32_t i = 0; past == block && i < g_binder.nslots; i++)
-        if (g_binder.slot[i].holds)
-            past = RibbonQuirePast(g_binder.slot[i].extra, g_binder.slot[i].nextra, block);
+    uint64_t past = RibbonQuirePast(vol->binder.chain, vol->binder.nchain, block);
+    for (uint32_t i = 0; past == block && i < vol->binder.nslots; i++)
+        if (vol->binder.slot[i].holds)
+            past = RibbonQuirePast(vol->binder.slot[i].extra, vol->binder.slot[i].nextra, block);
     return past;
 }
 
@@ -581,13 +580,13 @@ static uint64_t SlotTurn(const SlotGround* s)
     return s->holds && !s->unsure ? s->seq : 0;
 }
 
-uint32_t BinderSlotNext(void)
+uint32_t BinderSlotNext(TagFSVolume* vol)
 {
     uint32_t best  = 0;
     uint64_t least = UINT64_MAX;
-    for (uint32_t i = 0; i < g_binder.ring; i++) {
-        if (SlotTurn(&g_binder.slot[i]) < least) {
-            least = SlotTurn(&g_binder.slot[i]);
+    for (uint32_t i = 0; i < vol->binder.ring; i++) {
+        if (SlotTurn(&vol->binder.slot[i]) < least) {
+            least = SlotTurn(&vol->binder.slot[i]);
             best  = i;
         }
     }
@@ -600,15 +599,15 @@ uint32_t BinderSlotNext(void)
  * Tally later at the least, and by then the pair has moved on — its Quire the
  * slot's to give back (BinderPairLetGo) — or the Tally went on in that Quire
  * and names it, the last to go. */
-static bool QuireGoesWith(uint32_t index, uint64_t start, uint64_t end, uint64_t q)
+static bool QuireGoesWith(TagFSVolume* vol, uint32_t index, uint64_t start, uint64_t end, uint64_t q)
 {
-    uint64_t turn = SlotTurn(&g_binder.slot[index]);
-    for (uint32_t i = 0; i < g_binder.nslots; i++) {
-        const SlotGround* s = &g_binder.slot[i];
+    uint64_t turn = SlotTurn(&vol->binder.slot[index]);
+    for (uint32_t i = 0; i < vol->binder.nslots; i++) {
+        const SlotGround* s = &vol->binder.slot[i];
         if (i != index && s->holds && SlotTurn(s) >= turn && SlotNames(s, start, end))
             return false;
     }
-    return index != BinderSlotNext() || !PairHolds(start, end, q);
+    return index != BinderSlotNext(vol) || !PairHolds(vol, start, end, q);
 }
 
 /*
@@ -630,9 +629,9 @@ static bool QuireGoesWith(uint32_t index, uint64_t start, uint64_t end, uint64_t
  * (BinderSlotsOwnPublish). With the Quire the ribbon's cursor does not know
  * yet, a block a Quire — its nodes.
  */
-static uint64_t SlotOwn(uint32_t index, uint64_t q)
+static uint64_t SlotOwn(TagFSVolume* vol, uint32_t index, uint64_t q)
 {
-    const SlotGround* s    = &g_binder.slot[index];
+    const SlotGround* s    = &vol->binder.slot[index];
     uint64_t          own  = 0;
     uint64_t          past = 0;
     for (uint32_t i = 0, j = 0; s->holds && (i < s->nground || j < s->nquires);) {
@@ -642,7 +641,7 @@ static uint64_t SlotOwn(uint32_t index, uint64_t q)
             if (at < past)
                 continue;
             past = at + q;
-            if (QuireGoesWith(index, at, at + q, q))
+            if (QuireGoesWith(vol, index, at, at + q, q))
                 own += q;
         }
     }
@@ -650,31 +649,31 @@ static uint64_t SlotOwn(uint32_t index, uint64_t q)
 }
 
 /* Whether a Quire off the chain is another slot's too. */
-static bool ExtraHeld(const RibbonQuire* q)
+static bool ExtraHeld(TagFSVolume* vol, const RibbonQuire* q)
 {
-    for (uint32_t i = 0; i < g_binder.nslots; i++)
-        for (uint32_t k = 0; g_binder.slot[i].holds && k < g_binder.slot[i].nextra; k++)
-            if (RibbonQuireSame(&g_binder.slot[i].extra[k], q))
+    for (uint32_t i = 0; i < vol->binder.nslots; i++)
+        for (uint32_t k = 0; vol->binder.slot[i].holds && k < vol->binder.slot[i].nextra; k++)
+            if (RibbonQuireSame(&vol->binder.slot[i].extra[k], q))
                 return true;
     return false;
 }
 
 /* The least place on the chain a slot's ribbon begins at. */
-static uint64_t ChainHeldFrom(void)
+static uint64_t ChainHeldFrom(TagFSVolume* vol)
 {
     uint64_t from = UINT64_MAX;
-    for (uint32_t i = 0; i < g_binder.nslots; i++)
-        if (g_binder.slot[i].holds && g_binder.slot[i].chain_from < from)
-            from = g_binder.slot[i].chain_from;
+    for (uint32_t i = 0; i < vol->binder.nslots; i++)
+        if (vol->binder.slot[i].holds && vol->binder.slot[i].chain_from < from)
+            from = vol->binder.slot[i].chain_from;
     return from;
 }
 
 /* Whether [start, end) is a slot's own: one that holds names it and it goes
  * back with that slot (QuireGoesWith). */
-static bool QuireOwned(uint64_t start, uint64_t end, uint64_t q)
+static bool QuireOwned(TagFSVolume* vol, uint64_t start, uint64_t end, uint64_t q)
 {
-    for (uint32_t i = 0; i < g_binder.nslots && i < g_binder.ring; i++)
-        if (g_binder.slot[i].holds && SlotNames(&g_binder.slot[i], start, end) && QuireGoesWith(i, start, end, q))
+    for (uint32_t i = 0; i < vol->binder.nslots && i < vol->binder.ring; i++)
+        if (vol->binder.slot[i].holds && SlotNames(&vol->binder.slot[i], start, end) && QuireGoesWith(vol, i, start, end, q))
             return true;
     return false;
 }
@@ -682,18 +681,18 @@ static bool QuireOwned(uint64_t start, uint64_t end, uint64_t q)
 /* The Quires of the ribbon the slots hold: the chain from the least place a
  * slot's ribbon begins at — all of it while none holds — and those off it,
  * each once. */
-static uint64_t RibbonHeld(void)
+static uint64_t RibbonHeld(TagFSVolume* vol)
 {
-    uint64_t held = 0, from = ChainHeldFrom(), end = g_binder.chain_base + g_binder.nchain;
-    for (uint64_t at = from > g_binder.chain_base && from != UINT64_MAX ? from : g_binder.chain_base; at < end; at++)
-        held += g_binder.chain[at - g_binder.chain_base].blocks;
-    for (uint32_t i = 0; i < g_binder.nslots; i++) {
-        const SlotGround* s = &g_binder.slot[i];
+    uint64_t held = 0, from = ChainHeldFrom(vol), end = vol->binder.chain_base + vol->binder.nchain;
+    for (uint64_t at = from > vol->binder.chain_base && from != UINT64_MAX ? from : vol->binder.chain_base; at < end; at++)
+        held += vol->binder.chain[at - vol->binder.chain_base].blocks;
+    for (uint32_t i = 0; i < vol->binder.nslots; i++) {
+        const SlotGround* s = &vol->binder.slot[i];
         for (uint32_t k = 0; s->holds && k < s->nextra; k++) {
             bool before = false;
             for (uint32_t j = 0; j < i && !before; j++)
-                for (uint32_t e = 0; g_binder.slot[j].holds && e < g_binder.slot[j].nextra && !before; e++)
-                    before = RibbonQuireSame(&g_binder.slot[j].extra[e], &s->extra[k]);
+                for (uint32_t e = 0; vol->binder.slot[j].holds && e < vol->binder.slot[j].nextra && !before; e++)
+                    before = RibbonQuireSame(&vol->binder.slot[j].extra[e], &s->extra[k]);
             held += before ? 0 : s->extra[k].blocks;
         }
     }
@@ -716,26 +715,26 @@ static uint64_t RibbonHeld(void)
  * Published by the Settle's holder wherever one of them moves, read from any
  * core (BinderGroundHeld).
  */
-void BinderGroundHeldPublish(void)
+void BinderGroundHeldPublish(TagFSVolume* vol)
 {
-    uint64_t q    = RibbonCursorNow()->quire_blocks ? RibbonCursorNow()->quire_blocks : 1u;
-    uint64_t held = RibbonHeld();
-    for (uint32_t i = 0; i < g_binder.ring; i++) {
-        uint64_t own  = __atomic_load_n(&g_binder.own[i], __ATOMIC_ACQUIRE);
-        uint64_t past = g_binder.slot[i].rest + g_binder.slot[i].under;
+    uint64_t q    = RibbonCursorNow(vol)->quire_blocks ? RibbonCursorNow(vol)->quire_blocks : 1u;
+    uint64_t held = RibbonHeld(vol);
+    for (uint32_t i = 0; i < vol->binder.ring; i++) {
+        uint64_t own  = __atomic_load_n(&vol->binder.own[i], __ATOMIC_ACQUIRE);
+        uint64_t past = vol->binder.slot[i].rest + vol->binder.slot[i].under;
         held += own > past ? own - past : 0;
     }
-    for (uint32_t k = 0; g_binder.pair_room && k < 2u; k++) {
-        uint64_t base = k ? g_binder.pair_b : g_binder.pair_a;
-        for (uint64_t at = base / q * q; at < base + g_binder.pair_room; at += q)
-            held += QuireOwned(at, at + q, q) ? 0 : q;
+    for (uint32_t k = 0; vol->binder.pair_room && k < 2u; k++) {
+        uint64_t base = k ? vol->binder.pair_b : vol->binder.pair_a;
+        for (uint64_t at = base / q * q; at < base + vol->binder.pair_room; at += q)
+            held += QuireOwned(vol, at, at + q, q) ? 0 : q;
     }
-    __atomic_store_n(&g_binder.ground_held, held, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->binder.ground_held, held, __ATOMIC_RELEASE);
 }
 
-uint64_t BinderGroundHeld(void)
+uint64_t BinderGroundHeld(TagFSVolume* vol)
 {
-    return __atomic_load_n(&g_binder.ground_held, __ATOMIC_ACQUIRE);
+    return __atomic_load_n(&vol->binder.ground_held, __ATOMIC_ACQUIRE);
 }
 
 /* A run more into the list of what goes. */
@@ -750,7 +749,7 @@ static bool GoesPut(Strip** list, uint64_t* n, uint64_t* cap, uint64_t start, ui
 /* The Tally-Quires slot `old` named a node in that no slot holds now — its
  * nodes and its Quires walked as one list by first block, each Quire once —
  * into the list of what goes. False with no memory. */
-static bool QuiresGo(const SlotGround* old, uint64_t q, Strip** goes, uint64_t* ngoes, uint64_t* cap)
+static bool QuiresGo(TagFSVolume* vol, const SlotGround* old, uint64_t q, Strip** goes, uint64_t* ngoes, uint64_t* cap)
 {
     uint64_t past = 0;
     for (uint32_t i = 0, j = 0; i < old->nground || j < old->nquires;) {
@@ -758,7 +757,7 @@ static bool QuiresGo(const SlotGround* old, uint64_t q, Strip** goes, uint64_t* 
         const Strip* s    = node ? &old->ground[i++] : &old->quires[j++];
         uint64_t     end  = s->start + s->count;
         for (uint64_t at = s->start / q * q; at < end; at += q) {
-            if (at < past || QuireHeld(at, at + q, q))
+            if (at < past || QuireHeld(vol, at, at + q, q))
                 continue;
             past = at + q;
             if (!GoesPut(goes, ngoes, cap, at, q))
@@ -776,29 +775,29 @@ static bool QuiresGo(const SlotGround* old, uint64_t q, Strip** goes, uint64_t* 
  * `at` later on the ribbon than their end) — as runs, for Fallow. The chain
  * before every slot's ribbon let go of in memory. False with no memory.
  */
-static bool SlotGoes(const SlotGround* old, Strip** goes, uint64_t* n)
+static bool SlotGoes(TagFSVolume* vol, const SlotGround* old, Strip** goes, uint64_t* n)
 {
-    uint64_t cap = 0, held = ChainHeldFrom();
+    uint64_t cap = 0, held = ChainHeldFrom(vol);
     *goes = NULL;
     *n    = 0;
-    uint64_t q = RibbonCursorNow()->quire_blocks ? RibbonCursorNow()->quire_blocks : 1u;
-    if (!QuiresGo(old, q, goes, n, &cap))
+    uint64_t q = RibbonCursorNow(vol)->quire_blocks ? RibbonCursorNow(vol)->quire_blocks : 1u;
+    if (!QuiresGo(vol, old, q, goes, n, &cap))
         return false;
     for (uint32_t i = 0; i < old->nextra; i++)
-        if (!ExtraHeld(&old->extra[i]) && !GoesPut(goes, n, &cap, old->extra[i].block, old->extra[i].blocks))
+        if (!ExtraHeld(vol, &old->extra[i]) && !GoesPut(goes, n, &cap, old->extra[i].block, old->extra[i].blocks))
             return false;
-    for (uint64_t at = old->chain_from; at != UINT64_MAX && at < held && at < g_binder.chain_base + g_binder.nchain;
+    for (uint64_t at = old->chain_from; at != UINT64_MAX && at < held && at < vol->binder.chain_base + vol->binder.nchain;
          at++) {
-        const RibbonQuire* q = &g_binder.chain[at - g_binder.chain_base];
-        if (at >= g_binder.chain_base && !GoesPut(goes, n, &cap, q->block, q->blocks))
+        const RibbonQuire* q = &vol->binder.chain[at - vol->binder.chain_base];
+        if (at >= vol->binder.chain_base && !GoesPut(goes, n, &cap, q->block, q->blocks))
             return false;
     }
-    if (held != UINT64_MAX && held > g_binder.chain_base) {
-        uint64_t drop = held - g_binder.chain_base;
-        drop = drop < g_binder.nchain ? drop : g_binder.nchain;
-        memmove(g_binder.chain, g_binder.chain + drop, sizeof(RibbonQuire) * (g_binder.nchain - drop));
-        g_binder.nchain     -= drop;
-        g_binder.chain_base += drop;
+    if (held != UINT64_MAX && held > vol->binder.chain_base) {
+        uint64_t drop = held - vol->binder.chain_base;
+        drop = drop < vol->binder.nchain ? drop : vol->binder.nchain;
+        memmove(vol->binder.chain, vol->binder.chain + drop, sizeof(RibbonQuire) * (vol->binder.nchain - drop));
+        vol->binder.nchain     -= drop;
+        vol->binder.chain_base += drop;
     }
     return true;
 }
@@ -806,10 +805,10 @@ static bool SlotGoes(const SlotGround* old, Strip** goes, uint64_t* n)
 /* The runs `goes` (`n`) resting in Fallow for the lag's stitches
  * (FALLOW_BY_SPINE): their blocks. With no memory for its node, held until the
  * volume is mounted again — said. */
-static uint64_t GoesRest(Strip* goes, uint64_t n)
+static uint64_t GoesRest(TagFSVolume* vol, Strip* goes, uint64_t n)
 {
     uint64_t    blocks = 0;
-    FallowNode* node   = n && n <= UINT32_MAX ? FallowNodeMake(goes, (uint32_t)n, FALLOW_BY_SPINE, 0) : NULL;
+    FallowNode* node   = n && n <= UINT32_MAX ? FallowNodeMake(vol, goes, (uint32_t)n, FALLOW_BY_SPINE, 0) : NULL;
     for (uint64_t i = 0; i < n; i++)
         blocks += goes[i].count;
     if (n && !node) {
@@ -819,9 +818,9 @@ static uint64_t GoesRest(Strip* goes, uint64_t n)
     }
     if (!node)
         return 0;
-    TagFSLockTake(&tagfs_get_state()->lock);
-    FallowSpineAdd(node, SettledCycles());
-    TagFSLockDrop(&tagfs_get_state()->lock);
+    TagFSLockTake(&vol->state.lock);
+    FallowSpineAdd(vol, node, SettledCycles(vol));
+    TagFSLockDrop(&vol->state.lock);
     return blocks;
 }
 
@@ -834,39 +833,39 @@ static uint64_t GoesRest(Strip* goes, uint64_t n)
  * and goes back whole with the last of them (SlotGoes). Before the pair is
  * moved: it reads the pair it lets go.
  */
-void BinderPairLetGo(uint64_t q)
+void BinderPairLetGo(TagFSVolume* vol, uint64_t q)
 {
-    if (!g_binder.pair_room || !q)
+    if (!vol->binder.pair_room || !q)
         return;
-    uint64_t used = (g_binder.pair_used + q - 1u) / q * q, last = g_binder.pair_used / q * q;
+    uint64_t used = (vol->binder.pair_used + q - 1u) / q * q, last = vol->binder.pair_used / q * q;
     Strip    goes[2];
     uint64_t n = 0;
     for (uint32_t k = 0; k < 2u; k++) {
-        uint64_t base = k ? g_binder.pair_b : g_binder.pair_a;
-        if (used < g_binder.pair_room)
-            (void)BlockMapDerivedGiveAs(GROUND_TALLY, 0, base + used, g_binder.pair_room - used);
+        uint64_t base = k ? vol->binder.pair_b : vol->binder.pair_a;
+        if (used < vol->binder.pair_room)
+            (void)BlockMapDerivedGiveAs(vol, GROUND_TALLY, 0, base + used, vol->binder.pair_room - used);
         /* The Quire the last Tally ended inside, which SlotGoes left the pair
          * (QuireHeld) — one it filled was no longer the pair's to keep. */
-        if (last < used && !SlotsHold(base + last, base + used))
+        if (last < used && !SlotsHold(vol, base + last, base + used))
             goes[n++] = (Strip){ .start = base + last, .count = (uint32_t)q, .kind = STRIP_DATA };
     }
-    (void)GoesRest(goes, n);
+    (void)GoesRest(vol, goes, n);
 }
 
 /* What the slot `old` held that no slot holds now, resting in Fallow for the
  * lag's stitches (FALLOW_BY_SPINE): its blocks. With no memory for its node,
  * held until the volume is mounted again — said. */
-uint64_t BinderSlotGoes(const SlotGround* old)
+uint64_t BinderSlotGoes(TagFSVolume* vol, const SlotGround* old)
 {
     Strip*   goes = NULL;
     uint64_t n    = 0;
-    if (!SlotGoes(old, &goes, &n)) {
+    if (!SlotGoes(vol, old, &goes, &n)) {
         kfree(goes);
         kprintf("[TagFS] no memory to list the ground slot %llu's Tally held — what no slot holds now is held "
                 "until the volume is mounted again\n", (unsigned long long)old->seq);
         return 0;
     }
-    uint64_t blocks = GoesRest(goes, n);
+    uint64_t blocks = GoesRest(vol, goes, n);
     kfree(goes);
     return blocks;
 }

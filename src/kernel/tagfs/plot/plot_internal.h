@@ -21,7 +21,7 @@ error_t  PlotStake(Plot *p, uint64_t start, uint32_t count);
  * take of `more` blocks still to be asked — counted in the book's reserve
  * (endpaper_fact.h, EndpaperStakesSet) before the take is; 0 once the take
  * is had or refused. No TagFS lock held. */
-void     PlotStakesCount(Plot *p, uint64_t more);
+void     PlotStakesCount(TagFSVolume* vol, Plot *p, uint64_t more);
 
 /* Ground a record named, come to rest in Fallow once a record that no longer
  * names it is inked (TagFSInkPlot): OK or ERR_NO_MEMORY. */
@@ -36,11 +36,11 @@ uint32_t PlotStakeHolding(const Plot *p, uint64_t block);
 
 /* [start, start + count) no longer the file's: what of it this call staked
  * goes back now, what a record named comes to rest once the Ink is laid. */
-error_t  PlotLetGo(Plot *p, uint64_t start, uint32_t count);
+error_t  PlotLetGo(TagFSVolume* vol, Plot *p, uint64_t start, uint32_t count);
 
 /* Ground this call took given back to the derived map it came from: 0, or the
  * allocator's refusal negated. */
-int      PlotGiveBack(const Plot *p, uint64_t start, uint32_t count);
+int      PlotGiveBack(TagFSVolume* vol, const Plot *p, uint64_t start, uint32_t count);
 
 /*
  * PlotWindow (plot_window.c), the Plot of a book — `rec` held:
@@ -69,15 +69,15 @@ int      PlotGiveBack(const Plot *p, uint64_t start, uint32_t count);
  * file given up between two of its windows (InkBookPlotNext).
  */
 void     PlotWindowLoad(Plot *p, FileRecord *rec);
-void     PlotWindowLetGo(Plot *p);
+void     PlotWindowLetGo(TagFSVolume* vol, Plot *p);
 error_t  PlotWindowCover(Plot *p, uint64_t lo, uint64_t hi);
-error_t  PlotWindowBegin(Plot *p, uint64_t at, uint64_t bytes);
+error_t  PlotWindowBegin(TagFSVolume* vol, Plot *p, uint64_t at, uint64_t bytes);
 bool     PlotWindowStretchAt(const Plot *p, uint64_t pos, uint64_t left, uint32_t most, PlotStretch *out);
-error_t  PlotWindowEnd(Plot *p, uint64_t at, uint64_t done);
+error_t  PlotWindowEnd(TagFSVolume* vol, Plot *p, uint64_t at, uint64_t done);
 error_t  PlotWindowTrim(Plot *p, uint64_t keep_blocks);
-error_t  PlotWindowGrow(Plot *p, uint64_t size);
-error_t  PlotWindowRoomFor(const Plot *p, uint64_t end);
-error_t  PlotWindowRoomAsked(Plot *p);
+error_t  PlotWindowGrow(TagFSVolume* vol, Plot *p, uint64_t size);
+error_t  PlotWindowRoomFor(TagFSVolume* vol, const Plot *p, uint64_t end);
+error_t  PlotWindowRoomAsked(TagFSVolume* vol, Plot *p);
 
 /* A hole of `count` blocks after the file's last run (plot_window.c), and the
  * file's last block k — the bytes of it that are the file's `tail` (1..4096)
@@ -85,7 +85,7 @@ error_t  PlotWindowRoomAsked(Plot *p);
  * over it laid on that, zeros past the tail. OK, or the refusal of the ground,
  * the read, the write or the ribbon's room. */
 error_t  PlotAppendHole(Plot *p, uint64_t count);
-error_t  PlotWindowTail(Plot *p, uint64_t k, uint32_t tail);
+error_t  PlotWindowTail(TagFSVolume* vol, Plot *p, uint64_t k, uint32_t tail);
 
 /*
  * The Slip of a write (plot_slip.c):
@@ -101,7 +101,7 @@ error_t  PlotWindowTail(Plot *p, uint64_t k, uint32_t tail);
  *   PlotSlipMost    the bytes the Slip may take in its record at the most
  * and PlotSlipLetGo (plot.h), with the Plot or its Ink.
  */
-error_t  PlotSlipBegin(Plot *p, uint64_t at, uint64_t bytes, bool *chosen);
+error_t  PlotSlipBegin(TagFSVolume* vol, Plot *p, uint64_t at, uint64_t bytes, bool *chosen);
 error_t  PlotSlipWrite(Plot *p, uint64_t at, const PlotSource *src, uint64_t *out_done);
 uint64_t PlotSlipMost(const Plot *p);
 

@@ -8,6 +8,7 @@
 #include "../mount/tally_read.h"
 #include "../mount/ribbon.h"
 #include "../file_map/file_map.h"
+#include "tagfs_volume.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -34,30 +35,30 @@
 #define STAND_BOOK_COPY_ROUNDS   4u      /* rounds of the copy check's sweep the logger's lines go at the most */
 
 /* `n` files of a long name made from `from` on, settled. */
-static bool StandBookGleanMake(const char* stem, uint32_t n)
+static bool StandBookGleanMake(TagFSVolume* vol, const char* stem, uint32_t n)
 {
     char     name[96];
     uint64_t fid = 0;
     for (uint32_t i = 0; i < n; i++) {
         ksnprintf(name, sizeof(name), "%s-%05u-of-a-name-long-enough-to-fill-leaves.txt", stem, i);
-        if (tagfs_create_file(name, NULL, 0, 0, &fid) != 0)
+        if (tagfs_create_file(vol, name, NULL, 0, 0, &fid) != 0)
             return false;
     }
-    return TagFSSettle() == OK;
+    return TagFSSettle(vol) == OK;
 }
 
 /* One line more of the logger — a block of its own at `line` — settled, and
  * a Tally laid in over it with the lag's stitches past it. */
-static bool StandBookGleanLine(StandFreshModel* m, uint64_t fid, uint32_t line)
+static bool StandBookGleanLine(TagFSVolume* vol, StandFreshModel* m, uint64_t fid, uint32_t line)
 {
-    return StandFreshWrite(m, fid, (uint64_t)line * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 500u + line) ==
+    return StandFreshWrite(vol, m, fid, (uint64_t)line * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 500u + line) ==
                (int)TAGFS_BLOCK_SIZE &&
-           TagFSSettle() == OK && StandBinderTallies(1u) == OK;
+           TagFSSettle(vol) == OK && StandBinderTallies(vol, 1u) == OK;
 }
 
 /* The blocks every copy of every node of the Tally the next one is laid
  * against takes, in Sheets: the live nodes. */
-static uint64_t StandBookGleanLive(void)
+static uint64_t StandBookGleanLive(TagFSVolume* vol)
 {
     static const uint64_t trees[] = { TALLY_FILES, TALLY_TAGS, TALLY_USE, TALLY_DIGESTS };
     FoliationNode         f;
@@ -65,18 +66,18 @@ static uint64_t StandBookGleanLive(void)
     bool                  rot = false;
     uint64_t              live = 0;
     for (uint32_t t = 0; t < sizeof(trees) / sizeof(trees[0]); t++)
-        for (uint32_t i = 0; FoliationStandNode(trees[t], i, &f); i++)
+        for (uint32_t i = 0; FoliationStandNode(vol, trees[t], i, &f); i++)
             live += f.place.ptr.sheets * f.place.ptr.copies;
-    for (uint32_t i = 0; TallyDigestLeafAt(i, &p, &rot); i++)
+    for (uint32_t i = 0; TallyDigestLeafAt(vol, i, &p, &rot); i++)
         live += p.level == 0 && !rot ? p.ptr.sheets * p.ptr.copies : 0;
     return live;
 }
 
 /* Whether every block of the logger's first `lines` lies off the Quires
  * marked: a Tally-Quire goes back to the map whole, or not at all. */
-static bool StandBookGleanOff(uint64_t fid, uint32_t lines, const uint64_t* bit, uint64_t nquire, uint64_t q)
+static bool StandBookGleanOff(TagFSVolume* vol, uint64_t fid, uint32_t lines, const uint64_t* bit, uint64_t nquire, uint64_t q)
 {
-    FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    FileRecord* rec = FileMapRecordHold(vol->state.files, fid, NULL);
     FileSpot    spot;
     bool        off = rec != NULL;
     for (uint32_t i = 0; off && i < lines; i++) {
@@ -93,44 +94,45 @@ static bool StandBookGleanOff(uint64_t fid, uint32_t lines, const uint64_t* bit,
 
 static TestResult TestStandBookGleanQuires(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     static StandBinder b;
     StandFreshModel    m;
     uint64_t           fid = 0, q = 0, pair = 0, held = 0, live = 0, nquire = 0;
     uint64_t*          marks = NULL;
     uint32_t           lines = 0, moves = 0;
-    const char*        aside = StandBinderAside(&b);
+    const char*        aside = StandBinderAside(vol, &b);
 
     memset(&m, 0, sizeof(m));
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
-    TEST_ASSERT(StandBookGleanMake("glean", STAND_BOOK_GLEAN_FILES), "files whose nodes no line changes");
-    TEST_ASSERT_OK(BinderRunWhole(), "a Tally of them written");
-    TEST_ASSERT_EQ(tagfs_create_file("glean-logger.log", NULL, 0, 0, &fid), 0, "the logger's file is made");
+    TEST_ASSERT(StandStitchRemount(vol) && TagFSSettle(vol) == OK, "the volume mounted afresh, a stitch of it settled");
+    TEST_ASSERT(StandBookGleanMake(vol, "glean", STAND_BOOK_GLEAN_FILES), "files whose nodes no line changes");
+    TEST_ASSERT_OK(BinderRunWhole(vol), "a Tally of them written");
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "glean-logger.log", NULL, 0, 0, &fid), 0, "the logger's file is made");
     TEST_ASSERT(StandFreshModelMake(&m, (uint64_t)STAND_BOOK_GLEAN_MOST * TAGFS_BLOCK_SIZE), "room for its lines");
-    q    = RibbonCursorNow()->quire_blocks ? RibbonCursorNow()->quire_blocks : 1u;
-    pair = g_binder.pair_a;
+    q    = RibbonCursorNow(vol)->quire_blocks ? RibbonCursorNow(vol)->quire_blocks : 1u;
+    pair = vol->binder.pair_a;
     for (lines = 0; lines < STAND_BOOK_GLEAN_MOST && moves < STAND_BOOK_GLEAN_MOVES; lines++) {
-        TEST_ASSERT(StandBookGleanLine(&m, fid, lines), "a line written, settled, a Tally laid in over it");
-        moves += g_binder.pair_a != pair;
-        pair   = g_binder.pair_a;
+        TEST_ASSERT(StandBookGleanLine(vol, &m, fid, lines), "a line written, settled, a Tally laid in over it");
+        moves += vol->binder.pair_a != pair;
+        pair   = vol->binder.pair_a;
     }
     TestEvidence("the logger's Tallies", lines);
     TestEvidence("the pair of Tally-Quires moved on", moves);
     TEST_ASSERT(moves >= STAND_BOOK_GLEAN_MOVES, "the Tallies went through Tally-Quires");
-    TEST_ASSERT_OK(StandBinderTallies(g_binder.ring + 2u), "and the ring written over twice and more");
-    held = StandTallyQuires(q, &marks, &nquire);
-    live = StandBookGleanLive();
+    TEST_ASSERT_OK(StandBinderTallies(vol, vol->binder.ring + 2u), "and the ring written over twice and more");
+    held = StandTallyQuires(vol, q, &marks, &nquire);
+    live = StandBookGleanLive(vol);
     TestEvidence("blocks of the Tally-Quires the slots and the pair hold", held);
     TestEvidence("blocks the live nodes take, every copy", live);
-    TestEvidence("blocks the current pair takes", 2u * g_binder.pair_room);
+    TestEvidence("blocks the current pair takes", 2u * vol->binder.pair_room);
     TEST_ASSERT(held != UINT64_MAX, "the Tally-Quires counted");
-    TEST_ASSERT(held <= GLEAN_SLACK * live + 2u * g_binder.pair_room,
+    TEST_ASSERT(held <= GLEAN_SLACK * live + 2u * vol->binder.pair_room,
                 "the Tally-Quires stay within GLEAN_SLACK times the live nodes, and the current pair (§4.8)");
-    TEST_ASSERT(StandBookGleanOff(fid, lines, marks, nquire, q),
+    TEST_ASSERT(StandBookGleanOff(vol, fid, lines, marks, nquire, q),
                 "no line lies in a Tally-Quire a slot holds: a Quire goes back whole");
-    TEST_ASSERT(StandFreshHolds(&m, fid), "and the logger reads every line written");
+    TEST_ASSERT(StandFreshHolds(vol, &m, fid), "and the logger reads every line written");
 out:
     kfree(marks);
     StandFreshModelLetGo(&m);
@@ -143,10 +145,10 @@ out:
 // ----------------------------------------------------------------------------
 
 /* The leaf of FILES the Foliation holds whose keys begin at `lo`. */
-static bool StandBookGleanLeafAt(TallyKey lo, TallyPlace* out)
+static bool StandBookGleanLeafAt(TagFSVolume* vol, TallyKey lo, TallyPlace* out)
 {
     FoliationNode f;
-    for (uint32_t i = 0; FoliationStandNode(TALLY_FILES, i, &f); i++)
+    for (uint32_t i = 0; FoliationStandNode(vol, TALLY_FILES, i, &f); i++)
         if (f.place.level == 0 && f.place.has_lo && f.place.lo.k1 == lo.k1 && f.place.lo.k2 == lo.k2) {
             *out = f.place;
             return true;
@@ -155,24 +157,24 @@ static bool StandBookGleanLeafAt(TallyKey lo, TallyPlace* out)
 }
 
 /* The leaves of `tree` the Tally the next one is laid against holds. */
-static uint32_t StandBookGleanTreeLeaves(uint64_t tree)
+static uint32_t StandBookGleanTreeLeaves(TagFSVolume* vol, uint64_t tree)
 {
     FoliationNode f;
     uint32_t      n = 0;
-    for (uint32_t i = 0; FoliationStandNode(tree, i, &f); i++)
+    for (uint32_t i = 0; FoliationStandNode(vol, tree, i, &f); i++)
         n += f.place.level == 0;
     return n;
 }
 
 /* The leaves of every tree the Tally the next one is laid against holds: the
  * ring the copy check's sweep goes round (binder_proof.c). */
-static uint32_t StandBookGleanLeaves(void)
+static uint32_t StandBookGleanLeaves(TagFSVolume* vol)
 {
     TallyPlace p;
     bool       rot = false;
-    uint32_t   n   = StandBookGleanTreeLeaves(TALLY_FILES) + StandBookGleanTreeLeaves(TALLY_TAGS) +
-                     StandBookGleanTreeLeaves(TALLY_USE);
-    for (uint32_t i = 0; TallyDigestLeafAt(i, &p, &rot); i++)
+    uint32_t   n   = StandBookGleanTreeLeaves(vol, TALLY_FILES) + StandBookGleanTreeLeaves(vol, TALLY_TAGS) +
+                     StandBookGleanTreeLeaves(vol, TALLY_USE);
+    for (uint32_t i = 0; TallyDigestLeafAt(vol, i, &p, &rot); i++)
         n += p.level == 0;
     return n;
 }
@@ -190,10 +192,10 @@ static bool StandBookGleanWritten(const StandBinder* b, uint64_t block)
 
 /* Leaf `n` of FILES (0 the first) the Tally the next one is laid against
  * holds, by the Foliation — the Tally the Binder just wrote, no mount since. */
-static bool StandBookGleanLeafNth(uint32_t n, TallyPlace* out)
+static bool StandBookGleanLeafNth(TagFSVolume* vol, uint32_t n, TallyPlace* out)
 {
     FoliationNode f;
-    for (uint32_t i = 0; FoliationStandNode(TALLY_FILES, i, &f); i++)
+    for (uint32_t i = 0; FoliationStandNode(vol, TALLY_FILES, i, &f); i++)
         if (f.place.level == 0 && n-- == 0) {
             *out = f.place;
             return true;
@@ -202,9 +204,9 @@ static bool StandBookGleanLeafNth(uint32_t n, TallyPlace* out)
 }
 
 /* Whether leaf `p` of FILES begins at a file of the test's own `stem`. */
-static bool StandBookGleanOwn(const TallyPlace* p, const char* stem)
+static bool StandBookGleanOwn(TagFSVolume* vol, const TallyPlace* p, const char* stem)
 {
-    FileRecord* rec = p->has_lo ? FileMapRecordHold(tagfs_get_state()->files, p->lo.k1, NULL) : NULL;
+    FileRecord* rec = p->has_lo ? FileMapRecordHold(vol->state.files, p->lo.k1, NULL) : NULL;
     bool        own = rec && strncmp(rec->name, stem, strlen(stem)) == 0;
     FileRecordRelease(rec);
     return own;
@@ -216,19 +218,19 @@ static bool StandBookGleanOwn(const TallyPlace* p, const char* stem)
  * Tally. Files made since lie past every key the book held, so no node named
  * as it lies parts two leaves of them: a leaf the row runs on past was filled
  * until it was full (binder_nodes.c, LevelStep). */
-static bool StandBookGleanChosen(TallyPlace* leaf, TallyPlace* next)
+static bool StandBookGleanChosen(TagFSVolume* vol, TallyPlace* leaf, TallyPlace* next)
 {
-    uint32_t leaves = StandBookGleanTreeLeaves(TALLY_FILES);
-    return leaves >= 5u && StandBookGleanLeafNth(leaves - 4u, leaf) && StandBookGleanLeafNth(leaves - 3u, next) &&
-           StandBookGleanOwn(leaf, "proof-") && next->has_hi && leaf->ptr.copies == 2 &&
+    uint32_t leaves = StandBookGleanTreeLeaves(vol, TALLY_FILES);
+    return leaves >= 5u && StandBookGleanLeafNth(vol, leaves - 4u, leaf) && StandBookGleanLeafNth(vol, leaves - 3u, next) &&
+           StandBookGleanOwn(vol, leaf, "proof-") && next->has_hi && leaf->ptr.copies == 2 &&
            next->ptr.seq == leaf->ptr.seq;
 }
 
 /* The first block of the second copy of `leaf` written over with zeros. */
-static bool StandBookGleanSpoil(const StandBinder* b, const TallyPlace* leaf)
+static bool StandBookGleanSpoil(TagFSVolume* vol, const StandBinder* b, const TallyPlace* leaf)
 {
     memset(g_test_output, 0, TAGFS_BLOCK_SIZE);
-    return StandBinderWrite(b, TallyPtrBlock(&leaf->ptr, 1), g_test_output);
+    return StandBinderWrite(b, TallyPtrBlock(vol, &leaf->ptr, 1), g_test_output);
 }
 
 /* The Tallies a Glean asked for at the last Tally's DONE laid
@@ -240,24 +242,24 @@ static bool StandBookGleanSpoil(const StandBinder* b, const TallyPlace* leaf)
  * as the ring was found — the slots' ground as kept, a Quire taken since free
  * (StandBinderPutBack). False when a Tally was refused or one is owed still,
  * or the two leaves are not found again. */
-static bool StandBookGleanPast(const StandBinder* b, TallyPlace* leaf, TallyPlace* next)
+static bool StandBookGleanPast(TagFSVolume* vol, const StandBinder* b, TallyPlace* leaf, TallyPlace* next)
 {
     BinderStandSaid said;
     TallyPlace      now, past;
-    BinderStand(&said);
+    BinderStand(vol, &said);
     if (!said.demanded)
         return true;
-    if (!StandBinderGleaned())
+    if (!StandBinderGleaned(vol))
         return false;
-    if (StandBookGleanLeafAt(leaf->lo, &now) && now.ptr.seq == leaf->ptr.seq) {
-        if (!StandBookGleanLeafAt(next->lo, &past))
+    if (StandBookGleanLeafAt(vol, leaf->lo, &now) && now.ptr.seq == leaf->ptr.seq) {
+        if (!StandBookGleanLeafAt(vol, next->lo, &past))
             return false;
         *next = past;
         return true;
     }
     kprintf("[TESTS] stand_book_glean_copies: the Tallies a Glean asked for laid the spoiled leaf anew — the leaf "
             "is chosen again and spoiled again\n");
-    return StandBookGleanChosen(leaf, next) && StandBookGleanSpoil(b, leaf);
+    return StandBookGleanChosen(vol, leaf, next) && StandBookGleanSpoil(vol, b, leaf);
 }
 
 /*
@@ -291,6 +293,7 @@ static bool StandBookGleanPast(const StandBinder* b, TallyPlace* leaf, TallyPlac
  */
 static TestResult TestStandBookGleanCopies(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     static StandBinder b;
     StandFreshModel    m;
@@ -298,41 +301,41 @@ static TestResult TestStandBookGleanCopies(void)
     uint64_t           fid = 0;
     uint32_t           tallies = 0, round = 0;
     bool               laid = false;
-    const char*        aside = StandBinderAside(&b);
+    const char*        aside = StandBinderAside(vol, &b);
 
     memset(&m, 0, sizeof(m));
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(StandStitchRemount() && TagFSSettle() == OK, "the volume mounted afresh, a stitch of it settled");
-    TEST_ASSERT(StandBookGleanMake("proof", STAND_BOOK_COPY_FILES), "files enough for FILES to take five leaves");
-    TEST_ASSERT_OK(BinderRunWhole(), "a Tally of them written, their nodes in the pair of Tally-Quires the mount took");
-    TEST_ASSERT(StandBinderGleaned(), "the Tallies Glean asks for laid first");
-    TEST_ASSERT(StandBookGleanChosen(&leaf, &next),
+    TEST_ASSERT(StandStitchRemount(vol) && TagFSSettle(vol) == OK, "the volume mounted afresh, a stitch of it settled");
+    TEST_ASSERT(StandBookGleanMake(vol, "proof", STAND_BOOK_COPY_FILES), "files enough for FILES to take five leaves");
+    TEST_ASSERT_OK(BinderRunWhole(vol), "a Tally of them written, their nodes in the pair of Tally-Quires the mount took");
+    TEST_ASSERT(StandBinderGleaned(vol), "the Tallies Glean asks for laid first");
+    TEST_ASSERT(StandBookGleanChosen(vol, &leaf, &next),
                 "FILES holds a leaf of the test's own files four from its end, two copies, packed full: the one past "
                 "it laid with it");
-    TEST_ASSERT(StandBinderKeep(&b, TallyPtrBlock(&leaf.ptr, 1)), "its second copy's first block kept as found");
-    TEST_ASSERT(StandBookGleanSpoil(&b, &leaf),
+    TEST_ASSERT(StandBinderKeep(&b, TallyPtrBlock(vol, &leaf.ptr, 1)), "its second copy's first block kept as found");
+    TEST_ASSERT(StandBookGleanSpoil(vol, &b, &leaf),
                 "and written over with zeros: no Tally of the leaf reads it, and none writes it");
-    TEST_ASSERT_EQ(tagfs_create_file("proof-logger.log", NULL, 0, 0, &fid), 0, "a logger's file is made after them");
-    round = StandBookGleanLeaves() + 8u;
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "proof-logger.log", NULL, 0, 0, &fid), 0, "a logger's file is made after them");
+    round = StandBookGleanLeaves(vol) + 8u;
     TEST_ASSERT(StandFreshModelMake(&m, (uint64_t)STAND_BOOK_COPY_ROUNDS * round * TAGFS_BLOCK_SIZE),
                 "room for its lines");
     for (tallies = 0; !laid && tallies < STAND_BOOK_COPY_ROUNDS * round; tallies++) {
-        TEST_ASSERT(StandBookGleanPast(&b, &leaf, &next),
+        TEST_ASSERT(StandBookGleanPast(vol, &b, &leaf, &next),
                     "the Tallies a Glean asks for laid before the line, the leaf and the one past it found again");
-        TEST_ASSERT(StandBookGleanLine(&m, fid, tallies), "a line written, settled, a Tally laid in over it");
-        laid = StandBookGleanLeafAt(leaf.lo, &again) && again.ptr.seq != leaf.ptr.seq;
+        TEST_ASSERT(StandBookGleanLine(vol, &m, fid, tallies), "a line written, settled, a Tally laid in over it");
+        laid = StandBookGleanLeafAt(vol, leaf.lo, &again) && again.ptr.seq != leaf.ptr.seq;
     }
     TestEvidence("the leaves the Tally holds", round - 8u);
     TestEvidence("Tallies laid in until the leaf was laid anew", tallies);
     TEST_ASSERT(laid, "a Tally laid in read both copies of the leaf no line changed, and laid it anew (§16.5 п.18)");
-    TEST_ASSERT(StandBookGleanLeafAt(next.lo, &beside) && beside.ptr.seq == next.ptr.seq,
+    TEST_ASSERT(StandBookGleanLeafAt(vol, next.lo, &beside) && beside.ptr.seq == next.ptr.seq,
                 "and the clean leaf after it as it lay: the copy found wanting laid it, not Glean or a whole Tally");
-    TEST_ASSERT(again.ptr.copies == 2 && TallyPtrBlock(&again.ptr, 1) != TallyPtrBlock(&leaf.ptr, 1),
+    TEST_ASSERT(again.ptr.copies == 2 && TallyPtrBlock(vol, &again.ptr, 1) != TallyPtrBlock(vol, &leaf.ptr, 1),
                 "elsewhere: nothing is written in place (§2.5)");
-    TEST_ASSERT(StandBookGleanWritten(&b, TallyPtrBlock(&again.ptr, 0)) &&
-                StandBookGleanWritten(&b, TallyPtrBlock(&again.ptr, 1)), "both its new copies on the medium");
-    TEST_ASSERT(StandStitchRemount() && StandFreshHolds(&m, fid), "the volume mounts again, the logger reads");
+    TEST_ASSERT(StandBookGleanWritten(&b, TallyPtrBlock(vol, &again.ptr, 0)) &&
+                StandBookGleanWritten(&b, TallyPtrBlock(vol, &again.ptr, 1)), "both its new copies on the medium");
+    TEST_ASSERT(StandStitchRemount(vol) && StandFreshHolds(vol, &m, fid), "the volume mounts again, the logger reads");
 out:
     StandFreshModelLetGo(&m);
     STAND_BINDER_PUT_BACK(&b);

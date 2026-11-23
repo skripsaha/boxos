@@ -162,17 +162,17 @@ static error_t SpineSlotFrom(SpineSlot* s, BookUnit* u, error_t rc)
     return rc;
 }
 
-error_t SpineSlotJudge(SpineSlot* s)
+error_t SpineSlotJudge(TagFSVolume* vol, SpineSlot* s)
 {
     BookUnit u;
-    error_t  rc = BookUnitRead(s->block * VOLUME_BLOCK_SECTORS, VOLUME_BLOCK_SECTORS, BOOK_UNIT_SLOT, 0, &u);
+    error_t  rc = BookUnitRead(vol, s->block * VOLUME_BLOCK_SECTORS, VOLUME_BLOCK_SECTORS, BOOK_UNIT_SLOT, 0, &u);
     return SpineSlotFrom(s, &u, rc);
 }
 
-error_t SpineSlotJudgeSectors(SpineSlot* s, const uint8_t* sectors)
+error_t SpineSlotJudgeSectors(TagFSVolume* vol, SpineSlot* s, const uint8_t* sectors)
 {
     BookUnit u;
-    error_t  rc = BookUnitOf(s->block * VOLUME_BLOCK_SECTORS, VOLUME_BLOCK_SECTORS, BOOK_UNIT_SLOT, 0, sectors, &u);
+    error_t  rc = BookUnitOf(vol, s->block * VOLUME_BLOCK_SECTORS, VOLUME_BLOCK_SECTORS, BOOK_UNIT_SLOT, 0, sectors, &u);
     return SpineSlotFrom(s, &u, rc);
 }
 
@@ -218,7 +218,7 @@ static bool SpineKeep(SpineSlot** valid, uint32_t* n, const SpineSlot* s)
     return true;
 }
 
-error_t SpineRead(const VolumeFrame* frame, SpineSlot** out, uint32_t* count, char* what, size_t room)
+error_t SpineRead(TagFSVolume* vol, const VolumeFrame* frame, SpineSlot** out, uint32_t* count, char* what, size_t room)
 {
     SpineSlot* slot   = kmalloc(sizeof(SpineSlot));
     size_t     said   = 0;
@@ -232,7 +232,7 @@ error_t SpineRead(const VolumeFrame* frame, SpineSlot** out, uint32_t* count, ch
         memset(slot, 0, sizeof(*slot));
         slot->index = i;
         slot->block = frame->spine_block + (uint64_t)i * frame->spine_stride;
-        if ((rc = SpineSlotJudge(slot)) != OK)
+        if ((rc = SpineSlotJudge(vol, slot)) != OK)
             break;
         if (slot->state == SPINE_SLOT_TORN)
             kprintf("[TagFS] Spine slot %u at block %llu does not hold: %s — the book is read off "
@@ -248,7 +248,7 @@ error_t SpineRead(const VolumeFrame* frame, SpineSlot** out, uint32_t* count, ch
             rc = ERR_NO_MEMORY;
     }
     if (rc == OK && *count == 0 && unread) {
-        TagFSNoteReadRefused();
+        TagFSNoteReadRefused(vol);
         rc = ERR_READ_FAILED;
     }
     if (rc != OK) {

@@ -1,21 +1,19 @@
 #include "loose_leaves.h"
+#include "tagfs_volume.h"
 
-/* LooseLeaves (loose_leaves.h): one count, its writers one at a time. */
-static volatile uint64_t s_loose;
-
-uint64_t LooseLeaves(void)
+uint64_t LooseLeaves(TagFSVolume* vol)
 {
-    return __atomic_load_n(&s_loose, __ATOMIC_ACQUIRE);
+    return __atomic_load_n(&vol->loose_leaves.loose, __ATOMIC_ACQUIRE);
 }
 
-void LooseLeavesMounted(uint64_t n)
+void LooseLeavesMounted(TagFSVolume* vol, uint64_t n)
 {
-    __atomic_store_n(&s_loose, n, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->loose_leaves.loose, n, __ATOMIC_RELEASE);
 }
 
-void LooseLeavesSettled(const DocketTaken* t)
+void LooseLeavesSettled(TagFSVolume* vol, const DocketTaken* t)
 {
-    uint64_t n = __atomic_load_n(&s_loose, __ATOMIC_ACQUIRE);
+    uint64_t n = __atomic_load_n(&vol->loose_leaves.loose, __ATOMIC_ACQUIRE);
     for (const Jot* j = t->first; j; j = j->next[0]) {
         if (!j->carried)
             continue;
@@ -25,5 +23,5 @@ void LooseLeavesSettled(const DocketTaken* t)
         else if (was && !now && n > 0)
             n--;
     }
-    __atomic_store_n(&s_loose, n, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->loose_leaves.loose, n, __ATOMIC_RELEASE);
 }

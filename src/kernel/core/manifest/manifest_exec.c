@@ -36,7 +36,7 @@ static inline bool crate_index_in_range(uint16_t idx, uint16_t crate_count)
 static inline void ManifestNoteVolumeChange(uint64_t inked_before, const OpContext *ctx)
 {
     if (ctx && ctx->proc)
-        TagFSNoteInkerSince(ctx->proc, inked_before);
+        TagFSNoteInkerSince(TagFSHome(), ctx->proc, inked_before);
 }
 
 static error_t dispatch_op(const OpRegistration *reg,
@@ -67,7 +67,7 @@ static error_t dispatch_op(const OpRegistration *reg,
         return ERR_ACCESS_DENIED;
     }
 
-    uint64_t inked = TagFSInkedHere();
+    uint64_t inked = TagFSInkedHere(TagFSHome());
     int      rc    = reg->handler(op, crates, crate_count, ctx);
     ManifestNoteVolumeChange(inked, ctx);
     return rc;
@@ -242,7 +242,7 @@ error_t ManifestExecuteOnce(const void              *manifest_kp,
         }
 
         any_executed = true;
-        uint64_t inked = TagFSInkedHere();
+        uint64_t inked = TagFSInkedHere(TagFSHome());
         int      rc    = reg->handler(op, crates, crate_count, ctx);
         ManifestNoteVolumeChange(inked, ctx);
         if (rc != OK) {

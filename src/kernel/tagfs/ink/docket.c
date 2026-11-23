@@ -5,6 +5,7 @@
 #include "../settle/sewing.h"
 #include "../integrity/gloss.h"
 #include "../file_map/tail_slip.h"
+#include "tagfs_volume.h"
 
 /*
  * The Docket (docket.h): the Jots waiting for the next stitch, in a list by fid
@@ -18,9 +19,6 @@
  * volume's state lock.
  */
 
-static Jot*     s_head[JOT_LEVELS];
-static uint64_t s_count;
-static uint64_t s_takes;     /* the TAKEs the Docket has had, and the drops */
 
 /* The levels a Jot of `fid` stands in: one, and one more for each pair of
  * low bits of its hash that are both 0 — a quarter of the Jots of a level. */
@@ -97,29 +95,29 @@ JotKind JotMerged(JotKind older, JotKind newer)
 
 /* The Jot of `fid`, or NULL; and in before[l] the last Jot of level l below
  * it — NULL for the head. */
-static Jot* DocketFind(uint64_t fid, Jot** before)
+static Jot* DocketFind(TagFSVolume* vol, uint64_t fid, Jot** before)
 {
     Jot* at = NULL;
     for (uint32_t l = JOT_LEVELS; l-- > 0;) {
-        Jot* n = at ? at->next[l] : s_head[l];
+        Jot* n = at ? at->next[l] : vol->docket.head[l];
         while (n && n->fid < fid) {
             at = n;
             n  = n->next[l];
         }
         before[l] = at;
     }
-    Jot* n = at ? at->next[0] : s_head[0];
+    Jot* n = at ? at->next[0] : vol->docket.head[0];
     return n && n->fid == fid ? n : NULL;
 }
 
-static void DocketInsert(Jot* j, Jot* const* before)
+static void DocketInsert(TagFSVolume* vol, Jot* j, Jot* const* before)
 {
     for (uint32_t l = 0; l < j->levels; l++) {
-        Jot** link = before[l] ? &before[l]->next[l] : &s_head[l];
+        Jot** link = before[l] ? &before[l]->next[l] : &vol->docket.head[l];
         j->next[l] = *link;
         *link      = j;
     }
-    s_count++;
+    vol->docket.count++;
 }
 
 static void JotSpent(Jot* j, Jot** spent)
@@ -128,57 +126,57 @@ static void JotSpent(Jot* j, Jot** spent)
     *spent     = j;
 }
 
-void DocketPutLocked(Jot* j, Jot** spent)
+void DocketPutLocked(TagFSVolume* vol, Jot* j, Jot** spent)
 {
     Jot* before[JOT_LEVELS];
-    Jot* p = DocketFind(j->fid, before);
+    Jot* p = DocketFind(vol, j->fid, before);
     if (!p) {
-        DocketInsert(j, before);
-        EndpaperJotIn(j);
+        DocketInsert(vol, j, before);
+        EndpaperJotIn(vol, j);
         return;
     }
     /* The newest state is j's; the one it replaces leaves with j. */
     FileRecord* older = p->now;
-    EndpaperJotOut(p);
+    EndpaperJotOut(vol, p);
     p->kind = JotMerged(p->kind, j->kind);
     p->now  = j->now;
     j->now  = older;
-    EndpaperJotIn(p);
+    EndpaperJotIn(vol, p);
     JotSpent(j, spent);
 }
 
-void DocketTakeLocked(DocketTaken* out)
+void DocketTakeLocked(TagFSVolume* vol, DocketTaken* out)
 {
-    out->first = s_head[0];
-    out->count = s_count;
-    memset(s_head, 0, sizeof(s_head));
-    s_count = 0;
-    s_takes++;
-    EndpaperDocketTaken();
+    out->first = vol->docket.head[0];
+    out->count = vol->docket.count;
+    memset(vol->docket.head, 0, sizeof(vol->docket.head));
+    vol->docket.count = 0;
+    vol->docket.takes++;
+    EndpaperDocketTaken(vol);
 }
 
-void DocketBackLocked(DocketTaken* t, Jot** spent)
+void DocketBackLocked(TagFSVolume* vol, DocketTaken* t, Jot** spent)
 {
     Jot* before[JOT_LEVELS];
-    EndpaperDocketBack();
+    EndpaperDocketBack(vol);
     while (t->first) {
         Jot* o = t->first;
         t->first   = o->next[0];
         o->carried = false;
-        Jot* p = DocketFind(o->fid, before);
+        Jot* p = DocketFind(vol, o->fid, before);
         if (!p) {
             memset(o->next, 0, sizeof(Jot*) * o->levels);
-            DocketInsert(o, before);
+            DocketInsert(vol, o, before);
             continue;
         }
         /* What came since is newer: o's base stays, p's state. */
         FileRecord* base = o->was;
-        EndpaperJotOut(o);
-        EndpaperJotOut(p);
+        EndpaperJotOut(vol, o);
+        EndpaperJotOut(vol, p);
         p->kind = JotMerged(o->kind, p->kind);
         o->was  = p->was;
         p->was  = base;
-        EndpaperJotIn(p);
+        EndpaperJotIn(vol, p);
         JotSpent(o, spent);
     }
     t->count = 0;
@@ -194,19 +192,19 @@ void DocketSettled(DocketTaken* t, uint64_t seq)
     t->count = 0;
 }
 
-void DocketDropAll(void)
+void DocketDropAll(TagFSVolume* vol)
 {
-    JotsLetGo(s_head[0]);
-    memset(s_head, 0, sizeof(s_head));
-    s_count = 0;
-    s_takes++;
-    EndpaperDocketDropped();
+    JotsLetGo(vol->docket.head[0]);
+    memset(vol->docket.head, 0, sizeof(vol->docket.head));
+    vol->docket.count = 0;
+    vol->docket.takes++;
+    EndpaperDocketDropped(vol);
 }
 
-bool DocketBaseLacks(uint64_t fid, uint64_t k, uint64_t block)
+bool DocketBaseLacks(TagFSVolume* vol, uint64_t fid, uint64_t k, uint64_t block)
 {
     Jot*     before[JOT_LEVELS];
-    Jot*     j = DocketFind(fid, before);
+    Jot*     j = DocketFind(vol, fid, before);
     FileSpot spot;
     if (!j)
         return false;
@@ -215,16 +213,16 @@ bool DocketBaseLacks(uint64_t fid, uint64_t k, uint64_t block)
     return !FileRecordFind(j->was, k, &spot) || spot.kind != STRIP_DATA || spot.block != block;
 }
 
-uint64_t DocketTakes(void)
+uint64_t DocketTakes(TagFSVolume* vol)
 {
-    return s_takes;
+    return vol->docket.takes;
 }
 
-bool DocketWasFrom(uint64_t fid, uint64_t* at, FileRecord** was, FileRecord** now)
+bool DocketWasFrom(TagFSVolume* vol, uint64_t fid, uint64_t* at, FileRecord** was, FileRecord** now)
 {
     Jot* before[JOT_LEVELS];
-    (void)DocketFind(fid, before);
-    Jot* j = before[0] ? before[0]->next[0] : s_head[0];
+    (void)DocketFind(vol, fid, before);
+    Jot* j = before[0] ? before[0]->next[0] : vol->docket.head[0];
     if (!j)
         return false;
     *at  = j->fid;
@@ -239,7 +237,7 @@ bool DocketWasFrom(uint64_t fid, uint64_t* at, FileRecord** was, FileRecord** no
     return true;
 }
 
-error_t DocketBirths(const DocketTaken* t, uint64_t seq, uint64_t* fid_most)
+error_t DocketBirths(TagFSVolume* vol, const DocketTaken* t, uint64_t seq, uint64_t* fid_most)
 {
     error_t rc = OK;
     for (const Jot* j = t->first; j && rc == OK; j = j->next[0]) {
@@ -252,7 +250,7 @@ error_t DocketBirths(const DocketTaken* t, uint64_t seq, uint64_t* fid_most)
             Strip     s;
             StripWalkBegin(j->now, &w);
             while (rc == OK && StripWalkNextGround(&w, &s))
-                rc = s.kind == STRIP_SHARED ? BirthsSharedNoted(j->fid, &s, 1, seq) : BirthsNoted(&s, 1, seq);
+                rc = s.kind == STRIP_SHARED ? BirthsSharedNoted(vol, j->fid, &s, 1, seq) : BirthsNoted(vol, &s, 1, seq);
         } else if (j->nsplices) {
             /* A Shaped carried, whatever the Jot's kind: a Labeled after a
              * write merges to one (JotMerged) and still lays its Shaped
@@ -260,9 +258,9 @@ error_t DocketBirths(const DocketTaken* t, uint64_t seq, uint64_t* fid_most)
             uint64_t n = 0;
             for (uint64_t i = 0; i < j->nsplices; i++)
                 n += j->splices[i].ninsert;
-            rc = BirthsNoted(j->inserted, n, seq);
+            rc = BirthsNoted(vol, j->inserted, n, seq);
             if (rc == OK)
-                rc = BirthsSharedNoted(j->fid, j->inserted, n, seq);
+                rc = BirthsSharedNoted(vol, j->fid, j->inserted, n, seq);
         }
     }
     return rc;
@@ -502,7 +500,7 @@ static RibbonSlip JotSlipPut(const Jot* j, JotApart* a)
  * defect of the writer, said, and laid as no digest a block of data has. A
  * run SHARED is laid with its extension and no digest: its blocks are held to
  * the one digest their ground carries (§2.8). */
-static void JotRunPut(JotApart* a, const Strip* s, uint64_t fid)
+static void JotRunPut(TagFSVolume* vol, JotApart* a, const Strip* s, uint64_t fid)
 {
     TallyRun r = { .start = s->start, .count = s->count, .birth = 0, .hole = s->kind == STRIP_HOLE };
     if (s->kind == STRIP_SHARED)
@@ -510,7 +508,7 @@ static void JotRunPut(JotApart* a, const Strip* s, uint64_t fid)
     a->runs_bytes += RibbonRunPut(a->runs + a->runs_bytes, &r, &a->cursor);
     if (r.hole || s->kind == STRIP_SHARED)
         return;
-    if (!GlossCopy(s->start, s->count, a->digests + a->ndigests * 8u)) {
+    if (!GlossCopy(vol, s->start, s->count, a->digests + a->ndigests * 8u)) {
 #if CONFIG_STRICT
         panic("[TagFS] DEFECT: file %llu puts in blocks %llu..%llu whose digests the Gloss does not hold",
               (unsigned long long)fid, (unsigned long long)s->start, (unsigned long long)(s->start + s->count - 1u));
@@ -526,7 +524,7 @@ static void JotRunPut(JotApart* a, const Strip* s, uint64_t fid)
 /* A Born of the file as `now` holds it: its runs, the digest of every block of
  * them, and its tail's Slip — of a file born with its bytes in a hole, all of
  * them (§2.8). */
-static uint32_t JotBornPut(const Jot* j, uint8_t* body, uint32_t* scratch, uint8_t* ids, JotApart* a)
+static uint32_t JotBornPut(TagFSVolume* vol, const Jot* j, uint8_t* body, uint32_t* scratch, uint8_t* ids, JotApart* a)
 {
     const FileRecord* f = j->now;
     uint32_t          n = JotTagsRising(f, scratch);
@@ -534,7 +532,7 @@ static uint32_t JotBornPut(const Jot* j, uint8_t* body, uint32_t* scratch, uint8
     Strip             s;
     StripWalkBegin(f, &w);
     while (StripWalkNext(&w, &s))
-        JotRunPut(a, &s, j->fid);
+        JotRunPut(vol, a, &s, j->fid);
     RibbonBorn b = {
         .fid = j->fid, .flags = f->flags & ~(uint32_t)TAGFS_FILE_DELETED, .size = f->size, .created_ns = f->created_time,
         .modified_ns = f->modified_time, .name = (const uint8_t*)f->name, .name_len = f->name_len,
@@ -551,7 +549,7 @@ static uint32_t JotBornPut(const Jot* j, uint8_t* body, uint32_t* scratch, uint8
  * splices, each `at` from the end of the one before in the file as it stands
  * after it (§2.8), the digests of the blocks they put in, and the Slip of
  * its tail's change — the cycle's, never the whole tail (§16.5 п.13). */
-static uint32_t JotShapedPut(const Jot* j, uint64_t seq, uint8_t* body, JotApart* a)
+static uint32_t JotShapedPut(TagFSVolume* vol, const Jot* j, uint64_t seq, uint8_t* body, JotApart* a)
 {
     uint64_t end = 0;
     for (uint64_t i = 0; i < j->nsplices; i++) {
@@ -561,7 +559,7 @@ static uint32_t JotShapedPut(const Jot* j, uint64_t seq, uint8_t* body, JotApart
         a->runs_bytes += BookVarintPut(a->runs + a->runs_bytes, sp->ninsert);
         end = sp->at;
         for (uint64_t k = 0; k < sp->ninsert; k++) {
-            JotRunPut(a, &sp->insert[k], j->fid);
+            JotRunPut(vol, a, &sp->insert[k], j->fid);
             end += sp->insert[k].count;
         }
     }
@@ -649,12 +647,12 @@ static void JotRecordPut(uint8_t* out, uint32_t* at, uint32_t* starts, uint32_t*
 
 /* The records of a changed file: a Shaped of its data, then a Labeled of its
  * fields over the gen the Shaped gave it — the stitch's own seq (§3.7). */
-static void JotChangedPut(Jot* j, uint64_t seq, uint8_t* out, uint32_t* at, uint8_t* body, uint32_t* scratch,
+static void JotChangedPut(TagFSVolume* vol, Jot* j, uint64_t seq, uint8_t* out, uint32_t* at, uint8_t* body, uint32_t* scratch,
                           uint8_t* ids, JotApart* a, uint32_t* starts, uint32_t* n)
 {
     uint64_t base = seq - j->was->gen;
     if (JotShapes(j)) {
-        JotRecordPut(out, at, starts, n, RIBBON_SHAPED, body, JotShapedPut(j, seq, body, a));
+        JotRecordPut(out, at, starts, n, RIBBON_SHAPED, body, JotShapedPut(vol, j, seq, body, a));
         j->carried = true;
         base       = 0;
     }
@@ -665,7 +663,7 @@ static void JotChangedPut(Jot* j, uint64_t seq, uint8_t* out, uint32_t* at, uint
     }
 }
 
-error_t DocketLay(DocketTaken* t, uint64_t seq, uint32_t tags, uint8_t* out, uint32_t* at, uint8_t* body,
+error_t DocketLay(TagFSVolume* vol, DocketTaken* t, uint64_t seq, uint32_t tags, uint8_t* out, uint32_t* at, uint8_t* body,
                   uint32_t* starts, uint32_t* n, uint64_t* fresh)
 {
     uint64_t  room    = 0;
@@ -687,14 +685,14 @@ error_t DocketLay(DocketTaken* t, uint64_t seq, uint32_t tags, uint8_t* out, uin
         a.cursor     = 0;
         j->carried   = false;
         if (j->kind == JOT_BORN) {
-            JotRecordPut(out, at, starts, n, RIBBON_BORN, body, JotBornPut(j, body, scratch, ids, &a));
+            JotRecordPut(out, at, starts, n, RIBBON_BORN, body, JotBornPut(vol, j, body, scratch, ids, &a));
             j->carried = true;
             if (j->now->flags & TAGFS_FILE_DELETED) {
                 RibbonLabeled kept = { .fid = j->fid, .what = LABEL_KEEP, .keep_ns = j->now->keep_until };
                 JotRecordPut(out, at, starts, n, RIBBON_LABELED, body, RibbonLabeledBodyPut(body, &kept));
             }
         } else if (j->kind == JOT_LABELED || j->kind == JOT_SHAPED) {
-            JotChangedPut(j, seq, out, at, body, scratch, ids, &a, starts, n);
+            JotChangedPut(vol, j, seq, out, at, body, scratch, ids, &a, starts, n);
         } else if (j->kind == JOT_QUITCLAIM) {
             JotRecordPut(out, at, starts, n, RIBBON_QUITCLAIM, body,
                          RibbonQuitclaimBodyPut(body, j->fid, seq - j->was->gen));

@@ -17,6 +17,7 @@
 #include "process.h"
 #include "scheduler.h"      /* SCHEDULER_DEFAULT_TICK_HZ */
 #include "block_fail.h"
+#include "tagfs_volume.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -41,11 +42,11 @@ static uint64_t StandNowUs(void)
 }
 
 /* The file a test changes, given up and settled on the way out. */
-static void StandSettleLetGo(uint64_t file_id)
+static void StandSettleLetGo(TagFSVolume* vol, uint64_t file_id)
 {
     if (file_id) {
-        (void)tagfs_delete_file(file_id, INK_UNWARRANTED);
-        (void)TagFSSettle();
+        (void)tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
+        (void)TagFSSettle(vol);
     }
 }
 
@@ -57,29 +58,30 @@ static void StandSettleLetGo(uint64_t file_id)
  */
 static TestResult TestStandSettleWithoutAnchor(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict = TEST_PASS;
     uint64_t   file_id = 0;
 
-    SettleCadenceHold(false);
+    SettleCadenceHold(vol, false);
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x5Au);
-    TEST_ASSERT(StandMakeFile("settle_on_its_own", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+    TEST_ASSERT(StandMakeFile(vol, "settle_on_its_own", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a file is made and written, and nothing anchors it");
-    uint64_t gen   = InkedGen();
+    uint64_t gen   = InkedGen(vol);
     uint64_t began = StandNowUs();
-    while (SettledGen() < gen && StandNowUs() - began < 2u * SETTLE_WINDOW_US) {
+    while (SettledGen(vol) < gen && StandNowUs() - began < 2u * SETTLE_WINDOW_US) {
         SettleKnock();
         BatonPump(amp_get_core_index());
-        SettleServiceIfPending();
+        SettleServiceIfPending(vol);
         cpu_pause();
     }
     uint64_t took = StandNowUs() - began;
-    TEST_ASSERT(SettledGen() >= gen, "a cycle nobody asked for settled the change");
-    TEST_ASSERT(took <= SETTLE_WINDOW_US + SettleLastDUs(),
+    TEST_ASSERT(SettledGen(vol) >= gen, "a cycle nobody asked for settled the change");
+    TEST_ASSERT(took <= SETTLE_WINDOW_US + SettleLastDUs(vol),
                 "within the window and the cycle's own time on the medium");
     TestEvidence("microseconds from the write to its settling:", took);
 out:
-    SettleCadenceHold(true);
-    StandSettleLetGo(file_id);
+    SettleCadenceHold(vol, true);
+    StandSettleLetGo(vol, file_id);
     return verdict;
 }
 
@@ -94,9 +96,10 @@ typedef struct {
 
 static void StandSettleAnswered(SettleWaiter* w, error_t rc)
 {
+    TagFSVolume* vol = TagFSHome();
     StandSettleWaiter* s = (StandSettleWaiter*)w;
     s->rc       = rc;
-    s->cycle    = SettledCycles();
+    s->cycle    = SettledCycles(vol);
     s->answered = true;
 }
 
@@ -109,19 +112,20 @@ static void StandSettleAnswered(SettleWaiter* w, error_t rc)
  */
 static TestResult TestStandSettleIdleOwed(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict  = TEST_PASS;
     bool       one_core = g_amp.total_cores == 1;
 
-    SettleCadenceHold(false);
-    TEST_ASSERT_OK(TagFSSettle(), "the volume owes nothing to begin with");
-    TEST_ASSERT(!TagFSIdleOwed(), "with nothing owed, idle is owed no quantum");
-    SettleDemand(SETTLE_DEMAND_LEAVE);
-    TEST_ASSERT_EQ(TagFSIdleOwed(), one_core,
+    SettleCadenceHold(vol, false);
+    TEST_ASSERT_OK(TagFSSettle(vol), "the volume owes nothing to begin with");
+    TEST_ASSERT(!TagFSIdleOwed(vol), "with nothing owed, idle is owed no quantum");
+    SettleDemand(vol, SETTLE_DEMAND_LEAVE);
+    TEST_ASSERT_EQ(TagFSIdleOwed(vol), one_core,
                    "a demand makes idle the debtor on one core, and nowhere else");
-    TEST_ASSERT_OK(TagFSSettle(), "a cycle takes the demand up");
-    TEST_ASSERT(!TagFSIdleOwed(), "and idle is owed nothing after it");
+    TEST_ASSERT_OK(TagFSSettle(vol), "a cycle takes the demand up");
+    TEST_ASSERT(!TagFSIdleOwed(vol), "and idle is owed nothing after it");
 out:
-    SettleCadenceHold(true);
+    SettleCadenceHold(vol, true);
     return verdict;
 }
 
@@ -132,37 +136,38 @@ out:
  */
 static TestResult TestStandSettleWriteProtected(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult               verdict   = TEST_PASS;
     uint64_t                 file_id   = 0;
-    uint8_t                  seat      = tagfs_get_seat();
+    uint8_t                  seat      = tagfs_get_seat(vol);
     bool                     protected_ = false;
     InkReceipt               receipt;
     static StandSettleWaiter waiter;
 
     memset(&waiter, 0, sizeof(waiter));
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x3Cu);
-    TEST_ASSERT(StandMakeFile("settle_protected", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+    TEST_ASSERT(StandMakeFile(vol, "settle_protected", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a file is made and written");
-    SettleWaitLink(&waiter.w, InkedGen(), StandSettleAnswered);
+    SettleWaitLink(vol, &waiter.w, InkedGen(vol), StandSettleAnswered);
 
     BlockFailProtect(seat, true);
     protected_ = true;
-    TEST_ASSERT(TagFSSettle() != OK, "the cycle is refused by the protected medium");
-    TEST_ASSERT(TagFSReadOnly(), "and the volume takes no write from here");
+    TEST_ASSERT(TagFSSettle(vol) != OK, "the cycle is refused by the protected medium");
+    TEST_ASSERT(TagFSReadOnly(vol), "and the volume takes no write from here");
     TEST_ASSERT(waiter.answered, "the waiter is answered, not left waiting");
     TEST_ASSERT_EQ(waiter.rc, ERR_TAGFS_READ_ONLY, "with ERR_TAGFS_READ_ONLY");
-    TEST_ASSERT_EQ(InkQuitclaim(file_id, INK_UNWARRANTED, &receipt), ERR_TAGFS_READ_ONLY,
+    TEST_ASSERT_EQ(InkQuitclaim(vol, file_id, INK_UNWARRANTED, &receipt), ERR_TAGFS_READ_ONLY,
                    "an Ink is refused ERR_TAGFS_READ_ONLY");
-    TEST_ASSERT_EQ(SettleWaitNow(InkedGen() + 1u), ERR_TAGFS_READ_ONLY,
+    TEST_ASSERT_EQ(SettleWaitNow(vol, InkedGen(vol) + 1u), ERR_TAGFS_READ_ONLY,
                    "and so is a new wait for a cycle");
 out:
     if (protected_) {
         BlockFailProtect(seat, false);
-        InkReadOnlyLift();
+        InkReadOnlyLift(vol);
     }
     if (!waiter.answered)
-        (void)SettleWaitUnlink(&waiter.w);
-    StandSettleLetGo(file_id);
+        (void)SettleWaitUnlink(vol, &waiter.w);
+    StandSettleLetGo(vol, file_id);
     return verdict;
 }
 
@@ -173,11 +178,11 @@ out:
 /* One turn of the machine, done by hand: the knock the tick would give, the
  * batons left on this core, the service point — the committer's own on one
  * core; on more, a K-Core's, which the knock wakes to look again. */
-void StandSettleTurn(void)
+void StandSettleTurn(TagFSVolume* vol)
 {
     SettleKnock();
     BatonPump(amp_get_core_index());
-    SettleServiceIfPending();
+    SettleServiceIfPending(vol);
     cpu_pause();
 }
 
@@ -197,69 +202,70 @@ void StandSettleTurn(void)
  */
 static TestResult TestStandSettleStitchRefusalWaitsForTheBell(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult               verdict = TEST_PASS;
-    uint8_t                  seat    = tagfs_get_seat();
+    uint8_t                  seat    = tagfs_get_seat(vol);
     uint64_t                 file_id = 0;
     bool                     let_go  = false;
     static StandSettleWaiter waiter;
-    const char*              aside   = StandStepsAsideFor();
+    const char*              aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
 
     memset(&waiter, 0, sizeof(waiter));
-    TEST_ASSERT_OK(TagFSSettle(), "the volume owes nothing to begin with");
+    TEST_ASSERT_OK(TagFSSettle(vol), "the volume owes nothing to begin with");
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x6Du);
-    TEST_ASSERT(StandMakeFile("settle_stitch_refused", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+    TEST_ASSERT(StandMakeFile(vol, "settle_stitch_refused", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a file is made and written");
-    SettleWaitLink(&waiter.w, InkedGen(), StandSettleAnswered);
+    SettleWaitLink(vol, &waiter.w, InkedGen(vol), StandSettleAnswered);
 
     uint32_t rang = BoardroomSeatReadyGen(seat);
     TagFSStandSettleRefuses(ERR_DEVICE_NOT_READY);
     TagFSStandSettleRings(true);
-    TEST_ASSERT_EQ(TagFSSettleAsCadence(), ERR_DEVICE_NOT_READY,
+    TEST_ASSERT_EQ(TagFSSettleAsCadence(vol), ERR_DEVICE_NOT_READY,
                    "the cycle is refused as a medium that is not ready refuses it");
     TEST_ASSERT_EQ(BoardroomSeatReadyGen(seat), rang + 1u,
                    "its seat rang seat:ready just before the stitch's TAKE took its count");
     TEST_ASSERT(!waiter.answered, "the waiter stays in its Chit: no code of a step is its answer");
-    TEST_ASSERT(SettleParked(), "the cadence waits for the refusal's event");
+    TEST_ASSERT(SettleParked(vol), "the cadence waits for the refusal's event");
     BoardroomAttendIfPending();
-    TEST_ASSERT(SettleParked(), "and a bell rung before the cycle took its count, said after, "
+    TEST_ASSERT(SettleParked(vol), "and a bell rung before the cycle took its count, said after, "
                 "is not that event");
 
-    uint64_t steps = SettleStepsTaken();
-    SettleCadenceHold(false);
+    uint64_t steps = SettleStepsTaken(vol);
+    SettleCadenceHold(vol, false);
     let_go = true;
-    uint64_t watch = 2u * SettleLullUs() + 1000000ull / SCHEDULER_DEFAULT_TICK_HZ;
+    uint64_t watch = 2u * SettleLullUs(vol) + 1000000ull / SCHEDULER_DEFAULT_TICK_HZ;
     uint64_t began = StandNowUs();
     while (StandNowUs() - began < watch)
-        StandSettleTurn();
-    TestEvidence("steps of cycles begun before the event, of 0", SettleStepsTaken() - steps);
-    TEST_ASSERT_EQ(SettleStepsTaken(), steps, "the cadence began no second cycle before the event");
+        StandSettleTurn(vol);
+    TestEvidence("steps of cycles begun before the event, of 0", SettleStepsTaken(vol) - steps);
+    TEST_ASSERT_EQ(SettleStepsTaken(vol), steps, "the cadence began no second cycle before the event");
     TEST_ASSERT(!waiter.answered, "and the waiter is still in its Chit");
 
     /* Nightwatch's look, as the tick takes it a window later, and the look
      * after: a park its waiters have waited on longer than the window is said
      * once. No tick runs while the tests do. */
-    SettleWatchLook(StandNowUs() + SETTLE_WINDOW_US + 1u);
-    SettleWatchLook(StandNowUs() + SETTLE_WINDOW_US + 2u);
+    SettleWatchLook(vol, StandNowUs() + SETTLE_WINDOW_US + 1u);
+    SettleWatchLook(vol, StandNowUs() + SETTLE_WINDOW_US + 2u);
     BatonPump(amp_get_core_index());
 
     BoardroomNoteSeatReady(BoardroomSeatKind(seat), BoardroomSeatIndex(seat));
     BoardroomAttendIfPending();
-    TEST_ASSERT(!SettleParked(), "the seat says seat:ready, which lifts the park");
+    TEST_ASSERT(!SettleParked(vol), "the seat says seat:ready, which lifts the park");
     began = StandNowUs();
     while (!waiter.answered && StandNowUs() - began < 2u * SETTLE_WINDOW_US)
-        StandSettleTurn();
+        StandSettleTurn(vol);
     TEST_ASSERT(waiter.answered, "the next cycle answered the waiter");
     TEST_ASSERT_OK(waiter.rc, "with OK");
 out:
     TagFSStandSettleRefuses(OK);
     if (let_go)
-        SettleCadenceHold(true);
+        SettleCadenceHold(vol, true);
     if (!waiter.answered)
-        (void)SettleWaitUnlink(&waiter.w);
-    StandSettleLetGo(file_id);
+        (void)SettleWaitUnlink(vol, &waiter.w);
+    StandSettleLetGo(vol, file_id);
     return verdict;
 }
 
@@ -273,39 +279,40 @@ out:
  */
 static TestResult TestStandSettleStitchRingDuringTheCycle(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult               verdict = TEST_PASS;
-    uint8_t                  seat    = tagfs_get_seat();
+    uint8_t                  seat    = tagfs_get_seat(vol);
     uint64_t                 file_id = 0;
     static StandSettleWaiter waiter;
-    const char*              aside   = StandStepsAsideFor();
+    const char*              aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
 
     memset(&waiter, 0, sizeof(waiter));
-    TEST_ASSERT_OK(TagFSSettle(), "the volume owes nothing to begin with");
+    TEST_ASSERT_OK(TagFSSettle(vol), "the volume owes nothing to begin with");
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x7Du);
-    TEST_ASSERT(StandMakeFile("settle_stitch_rings", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+    TEST_ASSERT(StandMakeFile(vol, "settle_stitch_rings", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a file is made and written");
-    SettleWaitLink(&waiter.w, InkedGen(), StandSettleAnswered);
+    SettleWaitLink(vol, &waiter.w, InkedGen(vol), StandSettleAnswered);
 
     uint32_t rang = BoardroomSeatReadyGen(seat);
     TagFSStandSettleRefuses(ERR_DEVICE_NOT_READY);
     TagFSStandSettleRings(false);
-    TEST_ASSERT_EQ(TagFSSettleAsCadence(), ERR_DEVICE_NOT_READY,
+    TEST_ASSERT_EQ(TagFSSettleAsCadence(vol), ERR_DEVICE_NOT_READY,
                    "the cycle is refused as a medium that is not ready refuses it");
     TEST_ASSERT_EQ(BoardroomSeatReadyGen(seat), rang + 1u,
                    "and its seat rang seat:ready while it ran, after the stitch's TAKE");
     TEST_ASSERT(!waiter.answered, "the waiter stays in its Chit");
-    TEST_ASSERT(!SettleParked(), "the refusal parks on nothing: its event has come already");
-    TEST_ASSERT_OK(TagFSSettleAsCadence(), "the next cycle goes, and settles");
+    TEST_ASSERT(!SettleParked(vol), "the refusal parks on nothing: its event has come already");
+    TEST_ASSERT_OK(TagFSSettleAsCadence(vol), "the next cycle goes, and settles");
     TEST_ASSERT(waiter.answered, "and answers the waiter");
     TEST_ASSERT_OK(waiter.rc, "OK");
 out:
     TagFSStandSettleRefuses(OK);
     if (!waiter.answered)
-        (void)SettleWaitUnlink(&waiter.w);
-    StandSettleLetGo(file_id);
+        (void)SettleWaitUnlink(vol, &waiter.w);
+    StandSettleLetGo(vol, file_id);
     return verdict;
 }
 
@@ -325,44 +332,45 @@ out:
  */
 static TestResult TestStandSettleRefusalWaitsForItsOwnEvent(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult               verdict = TEST_PASS;
-    uint8_t                  seat    = tagfs_get_seat();
+    uint8_t                  seat    = tagfs_get_seat(vol);
     uint64_t                 file_id = 0;
     void*                    pages   = NULL;
     static StandSettleWaiter waiter;
 
     memset(&waiter, 0, sizeof(waiter));
-    TEST_ASSERT_OK(TagFSSettle(), "the volume owes nothing to begin with");
+    TEST_ASSERT_OK(TagFSSettle(vol), "the volume owes nothing to begin with");
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x1Fu);
-    TEST_ASSERT(StandMakeFile("settle_own_event", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+    TEST_ASSERT(StandMakeFile(vol, "settle_own_event", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a file is made and written");
-    SettleWaitLink(&waiter.w, InkedGen(), StandSettleAnswered);
+    SettleWaitLink(vol, &waiter.w, InkedGen(vol), StandSettleAnswered);
 
     pages = PmmTakeExact(STAND_SETTLE_HEAP_PAGES);
     TEST_ASSERT(pages != NULL, "the stand holds pages of the machine's");
     TagFSStandSettleRefuses(ERR_NO_MEMORY);
-    TEST_ASSERT_EQ(TagFSSettleAsCadence(), ERR_NO_MEMORY, "a cycle is refused for want of memory");
-    TEST_ASSERT(SettleParked(), "and waits");
+    TEST_ASSERT_EQ(TagFSSettleAsCadence(vol), ERR_NO_MEMORY, "a cycle is refused for want of memory");
+    TEST_ASSERT(SettleParked(vol), "and waits");
     BoardroomNoteSeatReady(BoardroomSeatKind(seat), BoardroomSeatIndex(seat));
     BoardroomAttendIfPending();
-    TEST_ASSERT(SettleParked(), "seat:ready is not what it waits for");
+    TEST_ASSERT(SettleParked(vol), "seat:ready is not what it waits for");
     PmmGiveExact(pages, STAND_SETTLE_HEAP_PAGES);
     pages = NULL;
-    TagFSHeapCameBack();
-    TEST_ASSERT(!SettleParked(), "the machine's memory coming back is");
+    TagFSHeapCameBack(vol);
+    TEST_ASSERT(!SettleParked(vol), "the machine's memory coming back is");
 
     TagFSStandSettleRefuses(ERR_WOULD_BLOCK);
-    TEST_ASSERT_EQ(TagFSSettleAsCadence(), ERR_WOULD_BLOCK,
+    TEST_ASSERT_EQ(TagFSSettleAsCadence(vol), ERR_WOULD_BLOCK,
                    "a cycle is refused with its ground on the way");
-    TEST_ASSERT(SettleParked(), "and waits");
+    TEST_ASSERT(SettleParked(vol), "and waits");
     BoardroomNoteSeatReady(BoardroomSeatKind(seat), BoardroomSeatIndex(seat));
     BoardroomAttendIfPending();
-    TEST_ASSERT(SettleParked(), "seat:ready is not what it waits for");
+    TEST_ASSERT(SettleParked(vol), "seat:ready is not what it waits for");
     TEST_ASSERT(!waiter.answered, "the waiter stays in its Chit through both");
-    SettleDemand(SETTLE_DEMAND_ROOM);
-    TEST_ASSERT(!SettleParked(), "room asked for is");
+    SettleDemand(vol, SETTLE_DEMAND_ROOM);
+    TEST_ASSERT(!SettleParked(vol), "room asked for is");
 
-    TEST_ASSERT_OK(TagFSSettleAsCadence(), "the next cycle settles");
+    TEST_ASSERT_OK(TagFSSettleAsCadence(vol), "the next cycle settles");
     TEST_ASSERT(waiter.answered, "and answers the waiter");
     TEST_ASSERT_OK(waiter.rc, "OK");
 out:
@@ -370,8 +378,8 @@ out:
     if (pages)
         PmmGiveExact(pages, STAND_SETTLE_HEAP_PAGES);
     if (!waiter.answered)
-        (void)SettleWaitUnlink(&waiter.w);
-    StandSettleLetGo(file_id);
+        (void)SettleWaitUnlink(vol, &waiter.w);
+    StandSettleLetGo(vol, file_id);
     return verdict;
 }
 
@@ -395,36 +403,37 @@ static process_t s_stand_writer;
  */
 static TestResult TestStandSettleReaderOwesNoLeave(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict = TEST_PASS;
     uint64_t   file_id = 0;
 
     memset(&s_stand_reader, 0, sizeof(s_stand_reader));
     memset(&s_stand_writer, 0, sizeof(s_stand_writer));
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x2Du);
-    TEST_ASSERT(StandMakeFile("settle_reader", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+    TEST_ASSERT(StandMakeFile(vol, "settle_reader", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a file is made and written");
-    TEST_ASSERT_OK(TagFSSettle(), "and settled: no demand stands");
-    TEST_ASSERT_EQ(StandWriteAt(file_id, 0, g_test_buffer, TAGFS_BLOCK_SIZE),
+    TEST_ASSERT_OK(TagFSSettle(vol), "and settled: no demand stands");
+    TEST_ASSERT_EQ(StandWriteAt(vol, file_id, 0, g_test_buffer, TAGFS_BLOCK_SIZE),
                    (int)TAGFS_BLOCK_SIZE, "a change nobody here made is inked");
-    TEST_ASSERT(InkedGen() > SettledGen(), "and waits for its cycle");
+    TEST_ASSERT(InkedGen(vol) > SettledGen(vol), "and waits for its cycle");
 
-    uint64_t inked = TagFSInkedHere();
-    TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, TAGFS_BLOCK_SIZE), (int)TAGFS_BLOCK_SIZE,
+    uint64_t inked = TagFSInkedHere(vol);
+    TEST_ASSERT_EQ(TestFileRead(vol, file_id, g_test_output, TAGFS_BLOCK_SIZE), (int)TAGFS_BLOCK_SIZE,
                    "a program's call reads the file");
-    TagFSNoteInkerSince(&s_stand_reader, inked);
-    TagFSInkerLeaves(&s_stand_reader);
-    TEST_ASSERT(!(TagFSStandSettleDemands() & SETTLE_DEMAND_LEAVE),
+    TagFSNoteInkerSince(vol, &s_stand_reader, inked);
+    TagFSInkerLeaves(vol, &s_stand_reader);
+    TEST_ASSERT(!(TagFSStandSettleDemands(vol) & SETTLE_DEMAND_LEAVE),
                 "the reader leaves, and demands no cycle");
 
-    inked = TagFSInkedHere();
-    TEST_ASSERT_EQ(StandWriteAt(file_id, 0, g_test_buffer, TAGFS_BLOCK_SIZE),
+    inked = TagFSInkedHere(vol);
+    TEST_ASSERT_EQ(StandWriteAt(vol, file_id, 0, g_test_buffer, TAGFS_BLOCK_SIZE),
                    (int)TAGFS_BLOCK_SIZE, "a program's call writes the file");
-    TagFSNoteInkerSince(&s_stand_writer, inked);
-    TagFSInkerLeaves(&s_stand_writer);
-    TEST_ASSERT(TagFSStandSettleDemands() & SETTLE_DEMAND_LEAVE,
+    TagFSNoteInkerSince(vol, &s_stand_writer, inked);
+    TagFSInkerLeaves(vol, &s_stand_writer);
+    TEST_ASSERT(TagFSStandSettleDemands(vol) & SETTLE_DEMAND_LEAVE,
                 "the writer leaves with its change unsettled, and demands the next cycle");
 out:
-    StandSettleLetGo(file_id);
+    StandSettleLetGo(vol, file_id);
     return verdict;
 }
 
@@ -471,21 +480,21 @@ out:
  * given back either way. True when it is up again. */
 #define STAND_SETTLE_MOUNT_MS  10000u
 
-static bool StandSettleRemount(void)
+static bool StandSettleRemount(TagFSVolume* vol)
 {
-    TagFSState* fs     = tagfs_get_state();
-    bool        let_go = TagFSStandLetGo();
+    TagFSState* fs     = &vol->state;
+    bool        let_go = TagFSStandLetGo(vol);
     if (let_go) {
         uint64_t bound = rdtsc() + cpu_ms_to_tsc(STAND_SETTLE_MOUNT_MS);
-        TagFSAttendArrival();
-        while (!(fs->initialized && TagFSStandMountIdle()) && rdtsc() < bound) {
+        TagFSAttendArrival(vol);
+        while (!(fs->initialized && TagFSStandMountIdle(vol)) && rdtsc() < bound) {
             BoardroomAttendIfPending();
-            TagFSServiceIfPending();
+            TagFSServiceIfPending(vol);
             BatonPump(amp_get_core_index());
             cpu_pause();
         }
     }
-    TagFSStandHoldAgain();
+    TagFSStandHoldAgain(vol);
     return let_go && fs->initialized;
 }
 
@@ -500,47 +509,48 @@ static bool StandSettleRemount(void)
  */
 static TestResult TestStandSettleRemountOwesItsOwn(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
     uint64_t    file_id = 0;
-    uint32_t    epoch   = tagfs_mount_epoch();
+    uint32_t    epoch   = tagfs_mount_epoch(vol);
     bool        let_go  = false;
-    const char* aside   = StandStepsAsideFor();
+    const char* aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
 
     memset(&s_stand_writer, 0, sizeof(s_stand_writer));
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x4Eu);
-    TEST_ASSERT(StandMakeFile("settle_remount", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+    TEST_ASSERT(StandMakeFile(vol, "settle_remount", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a file is made and written");
-    uint64_t inked = TagFSInkedHere();
-    TEST_ASSERT_EQ(StandWriteAt(file_id, 0, g_test_buffer, TAGFS_BLOCK_SIZE),
+    uint64_t inked = TagFSInkedHere(vol);
+    TEST_ASSERT_EQ(StandWriteAt(vol, file_id, 0, g_test_buffer, TAGFS_BLOCK_SIZE),
                    (int)TAGFS_BLOCK_SIZE, "a program's call writes it");
-    TagFSNoteInkerSince(&s_stand_writer, inked);
-    uint64_t gen_before = InkedGen();
+    TagFSNoteInkerSince(vol, &s_stand_writer, inked);
+    uint64_t gen_before = InkedGen(vol);
 
-    TEST_ASSERT(StandSettledBare(), "every change is on the medium, and nothing rests");
+    TEST_ASSERT(StandSettledBare(vol), "every change is on the medium, and nothing rests");
     let_go = true;
-    TEST_ASSERT(StandSettleRemount(), "the volume is let go of and MOUNTED again");
-    TEST_ASSERT_EQ(tagfs_mount_epoch(), epoch + 1u, "once");
-    TEST_ASSERT_EQ(SettleLastDUs(), 0, "and no cycle's cost on its medium carries over");
+    TEST_ASSERT(StandSettleRemount(vol), "the volume is let go of and MOUNTED again");
+    TEST_ASSERT_EQ(tagfs_mount_epoch(vol), epoch + 1u, "once");
+    TEST_ASSERT_EQ(SettleLastDUs(vol), 0, "and no cycle's cost on its medium carries over");
 
-    TagFSInkerLeaves(&s_stand_writer);
-    TEST_ASSERT(!(TagFSStandSettleDemands() & SETTLE_DEMAND_LEAVE),
+    TagFSInkerLeaves(vol, &s_stand_writer);
+    TEST_ASSERT(!(TagFSStandSettleDemands(vol) & SETTLE_DEMAND_LEAVE),
                 "the program's change of the mount before is not owed here");
-    inked = TagFSInkedHere();
-    TEST_ASSERT_EQ(StandWriteAt(file_id, 0, g_test_buffer, TAGFS_BLOCK_SIZE),
+    inked = TagFSInkedHere(vol);
+    TEST_ASSERT_EQ(StandWriteAt(vol, file_id, 0, g_test_buffer, TAGFS_BLOCK_SIZE),
                    (int)TAGFS_BLOCK_SIZE, "it writes the file on this mount");
-    TestEvidence("the gen of its change here, below the mount before's", InkedGen());
-    TEST_ASSERT(InkedGen() < gen_before, "with a gen below the one it wrote at before");
-    TagFSNoteInkerSince(&s_stand_writer, inked);
-    TagFSInkerLeaves(&s_stand_writer);
-    TEST_ASSERT(TagFSStandSettleDemands() & SETTLE_DEMAND_LEAVE,
+    TestEvidence("the gen of its change here, below the mount before's", InkedGen(vol));
+    TEST_ASSERT(InkedGen(vol) < gen_before, "with a gen below the one it wrote at before");
+    TagFSNoteInkerSince(vol, &s_stand_writer, inked);
+    TagFSInkerLeaves(vol, &s_stand_writer);
+    TEST_ASSERT(TagFSStandSettleDemands(vol) & SETTLE_DEMAND_LEAVE,
                 "and leaves with that change unsettled: the next cycle is demanded");
 out:
-    if (let_go && !tagfs_get_state()->initialized)
-        (void)StandSettleRemount();
-    StandSettleLetGo(file_id);
+    if (let_go && !vol->state.initialized)
+        (void)StandSettleRemount(vol);
+    StandSettleLetGo(vol, file_id);
     return verdict;
 }
 

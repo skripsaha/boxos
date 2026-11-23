@@ -4,6 +4,8 @@
 #include "block_map.h"
 #include "ground_owner.h"
 
+typedef struct TagFSVolume TagFSVolume;   /* volume/tagfs_volume.h */
+
 /*
  * The volume's block map — derived from its owners' names, never read off the
  * medium, never written to it.
@@ -36,7 +38,7 @@
 /* The map begun for [0, end): every window free, no page made. ERR_NO_MEMORY
  * when the heap will not hold the summary, ERR_OUT_OF_RANGE for more windows
  * than it counts — *what the refusal, with the numbers. */
-error_t  BlockMapDerivedBegin(uint64_t end, const char** what);
+error_t  BlockMapDerivedBegin(TagFSVolume* vol, uint64_t end, const char** what);
 
 /*
  * `count` blocks from `start` claimed by `owner` (`who` which one of its kind:
@@ -50,26 +52,26 @@ error_t  BlockMapDerivedBegin(uint64_t end, const char** what);
  * windows that would be mixed, for BlockMapDerivedBuilt to say, and the claim
  * is answered OK.
  */
-error_t  BlockMapDerivedClaim(GroundOwner owner, uint64_t who, uint64_t start, uint64_t count,
+error_t  BlockMapDerivedClaim(TagFSVolume* vol, GroundOwner owner, uint64_t who, uint64_t start, uint64_t count,
                               uint64_t* taken);
 
 /* The run let go by `owner`: a block of it free already is named as above,
  * *free how many. OK; ERR_NO_MEMORY, nothing changed, when a window it leaves
  * mixed gets no page. Once the map is up, a claim and a release are made
  * under the state lock, and their pages come from the stock made before it. */
-error_t  BlockMapDerivedRelease(GroundOwner owner, uint64_t who, uint64_t start, uint64_t count,
+error_t  BlockMapDerivedRelease(TagFSVolume* vol, GroundOwner owner, uint64_t who, uint64_t start, uint64_t count,
                                 uint64_t* free);
 
 /* With no TagFS lock held: the pages one run's change may want — a window at
  * each of its ends — made and kept for a change of the live map under the
  * state lock. OK, or ERR_NO_MEMORY. */
-error_t  BlockMapDerivedStock(void);
+error_t  BlockMapDerivedStock(TagFSVolume* vol);
 
 /* With no TagFS lock held, at a cycle's TAKE: `pages` pages held for the gives
  * Fallow makes at its DONE — those past it let go, and so are the pages earlier
  * changes let go under the lock — drawn on once the stock is spent. OK, or
  * ERR_NO_MEMORY with what the heap gave held. Nothing while the map is down. */
-error_t  BlockMapDerivedHold(uint32_t pages);
+error_t  BlockMapDerivedHold(TagFSVolume* vol, uint32_t pages);
 
 /*
  * A run of the book's own: a whole Quire for the ribbon, its
@@ -88,7 +90,7 @@ error_t  BlockMapDerivedHold(uint32_t pages);
  * a mount may stand on still names as a file's (fallow.h, FallowBarsRun) — a
  * Tally past it gives them; ERR_NO_MEMORY with no page for the map.
  */
-error_t  BlockMapTakeQuire(GroundOwner owner, uint64_t blocks, uint32_t align, uint64_t keep, uint64_t first,
+error_t  BlockMapTakeQuire(TagFSVolume* vol, GroundOwner owner, uint64_t blocks, uint32_t align, uint64_t keep, uint64_t first,
                            uint64_t from, uint64_t* start);
 
 /*
@@ -112,39 +114,39 @@ error_t  BlockMapTakeQuire(GroundOwner owner, uint64_t blocks, uint32_t align, u
  * BlockMapDerivedGiveAs the same for a run of any owner's — a Tally's run no
  * slot came to name.
  */
-bool     BlockMapDerivedRunFree(uint64_t from, uint64_t want, uint64_t fid, uint64_t* start);
-bool     BlockMapDerivedRunFreeBack(uint64_t lo, uint64_t hi, uint64_t want, uint64_t fid, uint64_t* start);
-uint64_t BlockMapDerivedFreeFrom(uint64_t block, uint64_t most, uint64_t fid);
-error_t  BlockMapDerivedTakeLocked(uint64_t fid, uint64_t start, uint64_t count);
-error_t  BlockMapDerivedGive(uint64_t fid, uint64_t start, uint64_t count);
-error_t  BlockMapDerivedGiveAs(GroundOwner owner, uint64_t who, uint64_t start, uint64_t count);
+bool     BlockMapDerivedRunFree(TagFSVolume* vol, uint64_t from, uint64_t want, uint64_t fid, uint64_t* start);
+bool     BlockMapDerivedRunFreeBack(TagFSVolume* vol, uint64_t lo, uint64_t hi, uint64_t want, uint64_t fid, uint64_t* start);
+uint64_t BlockMapDerivedFreeFrom(TagFSVolume* vol, uint64_t block, uint64_t most, uint64_t fid);
+error_t  BlockMapDerivedTakeLocked(TagFSVolume* vol, uint64_t fid, uint64_t start, uint64_t count);
+error_t  BlockMapDerivedGive(TagFSVolume* vol, uint64_t fid, uint64_t start, uint64_t count);
+error_t  BlockMapDerivedGiveAs(TagFSVolume* vol, GroundOwner owner, uint64_t who, uint64_t start, uint64_t count);
 
 /* The build ended: OK, the map up and its free count the volume's; or
  * ERR_NO_MEMORY, the map let go and *what the refusal, which names how many
  * mixed windows the heap would not hold. */
-error_t  BlockMapDerivedBuilt(const char** what);
+error_t  BlockMapDerivedBuilt(TagFSVolume* vol, const char** what);
 
-bool     BlockMapDerivedUp(void);
+bool     BlockMapDerivedUp(TagFSVolume* vol);
 
 /* Whether `block` is free: false past the map's end. */
-bool     BlockMapDerivedIsFree(uint64_t block);
+bool     BlockMapDerivedIsFree(TagFSVolume* vol, uint64_t block);
 
 /* Under the state lock: window `w` as it stands — the blocks of it the volume
  * has, how many of them no owner names, and its page (NULL for a window whole
  * free or whole taken), read while the lock is held. False past the last
  * window, or with no map up. */
-bool     BlockMapDerivedWindow(uint32_t w, uint32_t* blocks, uint32_t* free, const uint64_t** bits);
+bool     BlockMapDerivedWindow(TagFSVolume* vol, uint32_t w, uint32_t* blocks, uint32_t* free, const uint64_t** bits);
 
 /* The first block of [start, end) an owner — any — names: `end` when none
  * does, past the map's end none does; with the map down `start`, nothing
  * known. A look a few windows a hold of the state lock, taken here
  * (block_map_look.c): no TagFS lock held. What a Tally is reckoned to cost
  * asks it of a range of DIGESTS (settle/binder_live.c). */
-uint64_t BlockMapDerivedTakenFrom(uint64_t start, uint64_t end);
+uint64_t BlockMapDerivedTakenFrom(TagFSVolume* vol, uint64_t start, uint64_t end);
 
 /* The first run of at least `want` free blocks inside window `window`: true and
  * *start, or false when the window holds none. */
-bool     BlockMapDerivedRunIn(uint32_t window, uint32_t want, uint64_t* start);
+bool     BlockMapDerivedRunIn(TagFSVolume* vol, uint32_t window, uint32_t want, uint64_t* start);
 
 /*
  * The map widened to [0, end) for a volume that took the ground behind it
@@ -168,12 +170,12 @@ typedef struct {
     uint64_t* page;    /* the old last window's page, where it may want one */
 } BlockMapWidening;
 
-error_t  BlockMapDerivedWidenMake(uint64_t end, BlockMapWidening* w, const char** what);
-void     BlockMapDerivedWidenPut(BlockMapWidening* w);
+error_t  BlockMapDerivedWidenMake(TagFSVolume* vol, uint64_t end, BlockMapWidening* w, const char** what);
+void     BlockMapDerivedWidenPut(TagFSVolume* vol, BlockMapWidening* w);
 void     BlockMapDerivedWidenDrop(BlockMapWidening* w);
 
 /* Everything the map holds let go. */
-void     BlockMapDerivedLetGo(void);
+void     BlockMapDerivedLetGo(TagFSVolume* vol);
 
 #ifdef CONFIG_VOLUME_TESTS
 /* The next build's first page is asked of a heap that refuses it: HEAPFAIL
@@ -186,13 +188,27 @@ uint32_t BlockMapDerivedStandShort(void);
 /* The volume made small for the stand: the last free runs of the map claimed
  * until `leave` blocks are free — true when they are — and every run it took
  * let go of again. */
-bool     BlockMapDerivedStandShrink(uint64_t leave);
-void     BlockMapDerivedStandGrow(void);
+bool     BlockMapDerivedStandShrink(TagFSVolume* vol, uint64_t leave);
+void     BlockMapDerivedStandGrow(TagFSVolume* vol);
 
 /* Every window's summary held to its page — its free count, its longest run,
  * a window with no page whole free or whole taken — and the sum to the
  * volume's free count: true when all agree; *free and *mixed counted. */
-bool     BlockMapDerivedStandHolds(uint64_t* free, uint32_t* mixed);
+bool     BlockMapDerivedStandHolds(TagFSVolume* vol, uint64_t* free, uint32_t* mixed);
 #endif
+
+typedef struct {
+    uint32_t  free;          /* of the window's blocks the volume has, the ones no owner names */
+    uint32_t  longest;       /* the longest run of them */
+    uint64_t* bits;          /* a bit a block, set where taken — a mixed window's alone */
+} DerivedWindow;
+
+#define DERIVED_STOCK  2u    /* pages one run can want: the windows at its two ends */
+
+/* What one volume holds of block_map_derived.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    struct { bool up ; bool building ; bool short_of ; uint64_t end ; uint32_t windows ; uint64_t free ; DerivedWindow* win ; uint32_t named ; uint64_t unnamed ; uint64_t* stock [ DERIVED_STOCK ] ; uint64_t* loose ; uint64_t* held ; uint32_t nheld ; } map;
+    char words[224];
+} BlockMapDerivedState;
 
 #endif /* TAGFS_BLOCK_MAP_DERIVED_H */

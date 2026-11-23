@@ -210,6 +210,7 @@ out:
  * in its tier. */
 static TestResult test_use_context_walls(void)
 {
+    TagFSVolume* vol = TagFSHome();
     static const char said[] = "use:test:nobody-wears-this";
     TestResult verdict = TEST_PASS;
     UseList*   saved   = UseContextHold();
@@ -224,7 +225,7 @@ static TestResult test_use_context_walls(void)
     now = UseContextHold();
     TEST_ASSERT_EQ(UseListCount(now), 1, "one tag");
     TEST_ASSERT(use_spelled(now), "the context's tags spell");
-    TEST_ASSERT_OK(TagFSQueryPage(TagOwnerPerson(), s_spelled, 1, NULL, 0, 1, ids, ARRAY_SIZE(ids), true, &page),
+    TEST_ASSERT_OK(TagFSQueryPage(vol, TagOwnerPerson(), s_spelled, 1, NULL, 0, 1, ids, ARRAY_SIZE(ids), true, &page),
                    "the context's question is put to the volume");
     TEST_ASSERT_EQ(page.total, 0, "inside walls nobody has built, nothing is visible");
 
@@ -247,6 +248,7 @@ out:
  * first fits it half — the tag nobody wears is still half of what was said. */
 static TestResult test_use_context_narrows(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult    verdict   = TEST_PASS;
     UseList*      saved     = NULL;
     bool          taken     = false;
@@ -262,13 +264,13 @@ static TestResult test_use_context_narrows(void)
      * one, and its name is no tag. */
     uint64_t from = 1;
     do {
-        TEST_ASSERT_OK(TagFSListPage(from, first, 1, false, &page), "the volume's files are listed");
+        TEST_ASSERT_OK(TagFSListPage(vol, from, first, 1, false, &page), "the volume's files are listed");
         if (page.delivered == 0)
             break;
         if (have_meta)
             tagfs_metadata_free(&meta);
         have_meta = false;
-        TEST_ASSERT(tagfs_get_metadata(first[0], &meta) == 0, "a file's metadata");
+        TEST_ASSERT(tagfs_get_metadata(vol, first[0], &meta) == 0, "a file's metadata");
         have_meta = true;
         from = page.next;
     } while (meta.tag_count == 0 && from != 0);
@@ -282,7 +284,7 @@ static TestResult test_use_context_narrows(void)
     tagfs_metadata_free(&meta);
     have_meta = false;
 
-    size_t tag_len = tagfs_tag_text(tag_id, s_tag_text, sizeof(s_tag_text));
+    size_t tag_len = tagfs_tag_text(vol, tag_id, s_tag_text, sizeof(s_tag_text));
     TEST_ASSERT(tag_len > 0 && tag_len < sizeof(s_tag_text), "the tag has a name, whole");
 
     saved = UseContextHold();
@@ -291,15 +293,15 @@ static TestResult test_use_context_narrows(void)
     now = UseContextHold();
 
     TEST_ASSERT(use_spelled(now), "the context's tags spell");
-    TEST_ASSERT_OK(TagFSQueryPage(TagOwnerPerson(), s_spelled, UseListCount(now), NULL, 0, 1, s_inside,
+    TEST_ASSERT_OK(TagFSQueryPage(vol, TagOwnerPerson(), s_spelled, UseListCount(now), NULL, 0, 1, s_inside,
                                   ARRAY_SIZE(s_inside), true, &page),
                    "the context's question is put to the volume");
     uint32_t n_inside = page.total;
     TEST_ASSERT(n_inside >= 1, "the file that wears the tag is visible inside");
     for (uint32_t i = 0; i < page.delivered; i++)
-        TEST_ASSERT(tagfs_has_tag(s_inside[i], tag_id), "everything visible inside wears the tag");
+        TEST_ASSERT(tagfs_has_tag(vol, s_inside[i], tag_id), "everything visible inside wears the tag");
 
-    TEST_ASSERT_OK(TagFSListPage(1, s_everywhere, ARRAY_SIZE(s_everywhere), true, &page),
+    TEST_ASSERT_OK(TagFSListPage(vol, 1, s_everywhere, ARRAY_SIZE(s_everywhere), true, &page),
                    "the volume's files are listed");
     TEST_ASSERT(n_inside <= page.total, "inside is never more than everywhere");
 
@@ -355,10 +357,10 @@ static struct {
 
 /* What the volume held before the test is said to it again, as the word it
  * was; the held text is let go of. */
-static TestResult UseLedgerPutBack(TestResult verdict, UseText* before, uint64_t saying)
+static TestResult UseLedgerPutBack(TagFSVolume* vol, TestResult verdict, UseText* before, uint64_t saying)
 {
     bool    kept = false;
-    error_t rc   = tagfs_remember_use_context(before, saying, &kept);
+    error_t rc   = tagfs_remember_use_context(vol, before, saying, &kept);
     bool    had  = before != NULL;
     UseTextDrop(before);
     if (rc != OK || (had && !kept))
@@ -373,12 +375,13 @@ static TestResult UseLedgerPutBack(TestResult verdict, UseText* before, uint64_t
  * and a person's context was lost at the next boot. */
 static TestResult TestUseContextLongRemembered(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict  = TEST_PASS;
     bool       changed  = false;
     bool       kept     = false;
     size_t     said_len = 0;
     uint64_t   saying   = 0;
-    UseText*   before   = tagfs_recall_use_context(&saying);
+    UseText*   before   = tagfs_recall_use_context(vol, &saying);
     UseText*   text     = NULL;
     UseText*   back     = NULL;
 
@@ -390,8 +393,8 @@ static TestResult TestUseContextLongRemembered(void)
     TEST_ASSERT(text != NULL, "memory for the text said");
 
     changed = true;
-    error_t rc   = tagfs_remember_use_context(text, saying, &kept);
-    back         = tagfs_recall_use_context(NULL);
+    error_t rc   = tagfs_remember_use_context(vol, text, saying, &kept);
+    back         = tagfs_recall_use_context(vol, NULL);
     size_t  left = back ? back->bytes : 0;
     ksnprintf(s_ledger.words, sizeof(s_ledger.words),
               "of %u bytes said, the volume remembers", (unsigned)said_len);
@@ -409,7 +412,7 @@ out:
     UseTextDrop(text);
     UseTextDrop(back);
     if (changed)
-        verdict = UseLedgerPutBack(verdict, before, saying);
+        verdict = UseLedgerPutBack(vol, verdict, before, saying);
     else
         UseTextDrop(before);
     return verdict;

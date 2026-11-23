@@ -64,8 +64,9 @@ static inline void StandFlagsBack(uint64_t flags)
  * off. */
 static TestResult TestStandDmaWaitKeepsTheCallersInterrupts(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict = TEST_PASS;
-    uint8_t    seat    = tagfs_get_seat();
+    uint8_t    seat    = tagfs_get_seat(vol);
     uint8_t*   buffer  = NULL;
 
     if (BoardroomSeatKind(seat) != BOARD_ATA)
@@ -82,7 +83,7 @@ static TestResult TestStandDmaWaitKeepsTheCallersInterrupts(void)
     TEST_ASSERT(buffer != NULL, "a buffer for eight sectors, taken before interrupts go off");
 
     uint64_t flags  = StandFlagsOff();
-    int      read   = tagfs_volume_read(0, STAND_DMA_SECTORS, buffer);
+    int      read   = tagfs_volume_read(vol, 0, STAND_DMA_SECTORS, buffer);
     uint64_t during = StandFlagsNow();
     StandFlagsBack(flags);
     TEST_ASSERT_EQ(read, 0, "eight sectors of the volume are read with interrupts off");

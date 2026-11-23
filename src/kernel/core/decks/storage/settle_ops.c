@@ -106,14 +106,14 @@ static void AnchorPublish(uint64_t file_id, uint32_t pid)
         uint64_t now_us;
     } ev = { file_id, 2, {0}, 0 };
 
-    if (file_id != 0 && tagfs_enter()) {
+    if (file_id != 0 && tagfs_enter(TagFSHome())) {
         TagFSMetadata meta;
         memset(&meta, 0, sizeof(meta));
-        if (tagfs_get_metadata(file_id, &meta) == OK) {
+        if (tagfs_get_metadata(TagFSHome(), file_id, &meta) == OK) {
             StorageFileSays(&meta, &ev, sizeof(ev), pid);
             tagfs_metadata_free(&meta);
         }
-        tagfs_leave();
+        tagfs_leave(TagFSHome());
     }
     TouchTag full, bare;
     (void)TouchTagResolve("anchor", sizeof("anchor") - 1, &full, &bare);
@@ -150,7 +150,7 @@ static void SettleOpAnswered(SettleWaiter* w, error_t rc)
     error_t        answer = rc;
 
     if (s->kind == SETTLE_OP_USE) {
-        uint8_t kept = (rc == OK && UseMemoryKept(s->ticket, s->said)) ? 1u : 0u;
+        uint8_t kept = (rc == OK && UseMemoryKept(TagFSHome(), s->ticket, s->said)) ? 1u : 0u;
         UseTextDrop(s->said);
         if (s->out && vmm && vmm_user_buf_commit_out(vmm, (uintptr_t)s->out->addr, &kept, 1) == OK)
             s->out->size = 1;
@@ -216,7 +216,7 @@ static int SettleOpWaitFor(const OpContext *ctx, Crate *crates, uint64_t file_id
                            uint8_t kind, const char *holder)
 {
     uint32_t pid = ctx && ctx->proc ? ctx->proc->pid : 0;
-    error_t  now = SettleWaitNow(gen);
+    error_t  now = SettleWaitNow(TagFSHome(), gen);
     if (now != ERR_WOULD_BLOCK) {
         SettleOpSay(kind, file_id, pid, now);
         return (int)now;
@@ -225,7 +225,7 @@ static int SettleOpWaitFor(const OpContext *ctx, Crate *crates, uint64_t file_id
     /* A caller with no program to park — a kernel path through the deck —
      * may wait for the cycle itself. */
     if (!pid) {
-        error_t settled = TagFSSettle();
+        error_t settled = TagFSSettle(TagFSHome());
         SettleOpSay(kind, file_id, 0, settled);
         return (int)settled;
     }
@@ -233,7 +233,7 @@ static int SettleOpWaitFor(const OpContext *ctx, Crate *crates, uint64_t file_id
     SettleOpWait* s = SettleOpPark(ctx, crates, kind, file_id, holder);
     if (!s)
         return ERR_NO_MEMORY;
-    SettleWaitLink(&s->w, gen, SettleOpAnswered);
+    SettleWaitLink(TagFSHome(), &s->w, gen, SettleOpAnswered);
     return ERR_WOULD_BLOCK;
 }
 
@@ -241,11 +241,11 @@ int ObjAnchor(const ManifestOp *op, Crate *crates, uint16_t crate_count, const O
 {
     (void)crate_count;
     uint64_t file_id = op_file_id(op);
-    if (!tagfs_enter())
+    if (!tagfs_enter(TagFSHome()))
         return ERR_TAGFS_NOT_INITIALIZED;
-    int rc = SettleOpWaitFor(ctx, crates, file_id, InkedGen(), SETTLE_OP_ANCHOR,
+    int rc = SettleOpWaitFor(ctx, crates, file_id, InkedGen(TagFSHome()), SETTLE_OP_ANCHOR,
                              "storage.anchor");
-    tagfs_leave();
+    tagfs_leave(TagFSHome());
     return rc;
 }
 
@@ -255,7 +255,7 @@ int ObjEscheat(const ManifestOp *op, Crate *crates, uint16_t crate_count, const 
 {
     EscheatSaid said;
     (void)crate_count;
-    error_t rc = TagFSEscheat(StorageCallWarrant(ctx), &said);
+    error_t rc = TagFSEscheat(TagFSHome(), StorageCallWarrant(ctx), &said);
     if (rc == OK && op->out_crate != CRATE_INDEX_NONE)
         (void)crate_write(&crates[op->out_crate], ctx, &said, sizeof(said));
     return rc;
@@ -272,7 +272,7 @@ int ObjConjugate(const ManifestOp *op, Crate *crates, uint16_t crate_count, cons
     if (op->param_size < sizeof(ask))
         return ERR_INVALID_ARGUMENT;
     memcpy(&ask, op->params, sizeof(ask));
-    error_t rc = TagFSConjugate(StorageCallWarrant(ctx), &ask, &said);
+    error_t rc = TagFSConjugate(TagFSHome(), StorageCallWarrant(ctx), &ask, &said);
     if (rc == ERR_WOULD_BLOCK && said.why == CONJUGATE_REFUSED)
         return SettleOpForRoom(op, crates, crate_count, ctx, ask.fid);
     if (op->out_crate != CRATE_INDEX_NONE)
@@ -285,12 +285,12 @@ int ObjWriteSettled(const ManifestOp *op, Crate *crates, uint16_t crate_count,
 {
     (void)crate_count;
     uint64_t file_id = op_file_id(op);
-    if (!tagfs_enter())
+    if (!tagfs_enter(TagFSHome()))
         return ERR_TAGFS_NOT_INITIALIZED;
-    uint64_t gen = file_id ? InkGenOf(file_id) : InkedGen();
+    uint64_t gen = file_id ? InkGenOf(TagFSHome(), file_id) : InkedGen(TagFSHome());
     int rc = SettleOpWaitFor(ctx, crates, file_id, gen, SETTLE_OP_SETTLED,
                              "storage.write.settled");
-    tagfs_leave();
+    tagfs_leave(TagFSHome());
     return rc;
 }
 
@@ -304,32 +304,32 @@ static void SettleUseSayNow(Crate *out, const OpContext *ctx, bool kept)
 int SettleUseRemembered(UseText *said, uint64_t saying, const OpContext *ctx, Crate *crates,
                         Crate *out)
 {
-    if (!tagfs_enter()) {
+    if (!tagfs_enter(TagFSHome())) {
         SettleUseSayNow(out, ctx, false);
         return OK;
     }
 
     uint64_t ticket = 0;
-    UseSaid  told   = UseMemorySay(said, saying, &ticket);
+    UseSaid  told   = UseMemorySay(TagFSHome(), said, saying, &ticket);
     int      rc     = OK;
 
     if (told != USE_SAID_OWED) {
         SettleUseSayNow(out, ctx, told == USE_SAID_LANDED);
     } else if (!ctx || !ctx->proc) {
-        SettleUseSayNow(out, ctx, TagFSSettle() == OK && UseMemoryKept(ticket, said));
+        SettleUseSayNow(out, ctx, TagFSSettle(TagFSHome()) == OK && UseMemoryKept(TagFSHome(), ticket, said));
     } else {
         SettleOpWait* s = SettleOpPark(ctx, crates, SETTLE_OP_USE, 0, "system.use");
         if (s) {
             s->ticket = ticket;
             s->said   = UseTextHold(said);
             s->out    = out;
-            SettleWaitLinkCycle(&s->w, SettleOpAnswered);
+            SettleWaitLinkCycle(TagFSHome(), &s->w, SettleOpAnswered);
             rc = ERR_WOULD_BLOCK;
         } else {
             SettleUseSayNow(out, ctx, false);
         }
     }
-    tagfs_leave();
+    tagfs_leave(TagFSHome());
     return rc;
 }
 
@@ -377,10 +377,10 @@ static int SettleOpRoomInCall(const ManifestOp *op, Crate *crates, uint16_t crat
                               const OpContext *ctx)
 {
     for (;;) {
-        if (!tagfs_enter())
+        if (!tagfs_enter(TagFSHome()))
             return ERR_TAGFS_NOT_INITIALIZED;
-        error_t room = SettleForRoom();
-        tagfs_leave();
+        error_t room = SettleForRoom(TagFSHome());
+        tagfs_leave(TagFSHome());
         if (room != OK)
             return (int)room;
         bool again;
@@ -399,7 +399,7 @@ static void SettleOpRoomCame(SettleWaiter *w, error_t rc)
 {
     SettleOpWait* s = (SettleOpWait*)w;
     s->came = rc;
-    HelmReady(&s->service);
+    HelmReady(TagFSHome(), &s->service);
 }
 
 /* Linked for the next cycle's end, inside the volume's door: OK, or — with no
@@ -409,11 +409,11 @@ static void SettleOpRoomCame(SettleWaiter *w, error_t rc)
  * wait the moment it is linked: it is not touched again here. */
 static error_t SettleOpRoomLink(SettleOpWait *s)
 {
-    if (!tagfs_enter())
+    if (!tagfs_enter(TagFSHome()))
         return ERR_TAGFS_NOT_INITIALIZED;
-    SettleDemand(SETTLE_DEMAND_ROOM);
-    SettleWaitLinkCycle(&s->w, SettleOpRoomCame);
-    tagfs_leave();
+    SettleDemand(TagFSHome(), SETTLE_DEMAND_ROOM);
+    SettleWaitLinkCycle(TagFSHome(), &s->w, SettleOpRoomCame);
+    tagfs_leave(TagFSHome());
     return OK;
 }
 
@@ -435,11 +435,11 @@ static void SettleOpRoomAgain(HelmWaiter *service)
         ctx.crates_uaddr      = s->crates_uaddr;
         ctx.async_owns_crates = &owns;
 
-        uint64_t inked = TagFSInkedHere();
+        uint64_t inked = TagFSInkedHere(TagFSHome());
         rc = (error_t)SettleOpAskAgain(s->op, s->crates_kbuf, s->crate_count,
                                        s->target ? &ctx : NULL, &s->again);
         if (s->target)
-            TagFSNoteInkerSince(s->target, inked);
+            TagFSNoteInkerSince(TagFSHome(), s->target, inked);
         if (rc == ERR_WOULD_BLOCK && s->again) {
             rc = SettleOpRoomLink(s);
             if (rc == OK)

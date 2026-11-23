@@ -54,7 +54,7 @@
 
 typedef enum {
     LOCK_RANK_NONE   = 0,   /* never given: a lock nobody ranked is named */
-    LOCK_RANK_STATE  = 1,   /* g_state.lock */
+    LOCK_RANK_STATE  = 1,   /* vol->state.lock */
     LOCK_RANK_LEAF   = 2    /* while held, no other TagFS lock is taken */
 } LockRankLevel;
 

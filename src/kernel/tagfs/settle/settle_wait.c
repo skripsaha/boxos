@@ -2,6 +2,7 @@
 #include "../settle_cut/settle_cut.h"
 #include "boardroom.h"
 #include "pmm.h"
+#include "tagfs_volume.h"
 
 /*
  * The waiters of the Settle (settle.h): who is answered by which cycle, and
@@ -12,13 +13,6 @@
  * FIFO under a leaf lock; the answers are given after the lock is let go.
  */
 
-static TagFSLock          s_wait_lock = TAGFS_LOCK_INIT("settlewait", LOCK_RANK_LEAF);
-static SettleWaiter*      s_first;
-static SettleWaiter*      s_last;
-static volatile uint32_t  s_count;
-static volatile uint64_t  s_answered_upto;  /* a waiter for an Ink up to this is answered OK */
-static volatile uint64_t  s_ready_gen;      /* the volume's own rings: its book taken up */
-static uint64_t           s_ready_at_begin; /* the rings the cycle in flight began after */
 
 /*
  * ‼ A PARK IS A COUNT, NEVER A FLAG. What a refused cycle waits for is kept as
@@ -44,14 +38,12 @@ typedef enum {
 #define SETTLE_PARK_COUNT_SHIFT (SETTLE_PARK_KIND_BITS + SETTLE_PARK_SEAT_BITS)
 #define SETTLE_PARK_COUNT(c)   ((uint64_t)(c) & (~0ull >> SETTLE_PARK_COUNT_SHIFT))
 
-static volatile uint64_t  s_park;           /* count | seat | SettleParkKind */
-static volatile uint64_t  s_park_us;        /* when the park was decided */
 
-static void SettlePark(SettleParkKind kind, uint64_t count)
+static void SettlePark(TagFSVolume* vol, SettleParkKind kind, uint64_t count)
 {
-    uint64_t seat = tagfs_get_seat();
-    __atomic_store_n(&s_park_us, SettleNowUs(), __ATOMIC_RELAXED);
-    __atomic_store_n(&s_park,
+    uint64_t seat = tagfs_get_seat(vol);
+    __atomic_store_n(&vol->settle_wait.park_us, SettleNowUs(), __ATOMIC_RELAXED);
+    __atomic_store_n(&vol->settle_wait.park,
                      SETTLE_PARK_COUNT(count) << SETTLE_PARK_COUNT_SHIFT |
                          seat << SETTLE_PARK_SEAT_SHIFT | kind,
                      __ATOMIC_RELEASE);
@@ -64,10 +56,10 @@ static void SettlePark(SettleParkKind kind, uint64_t count)
  * so their sum moves exactly when either does. The announcement itself only
  * knocks: counted again, a bell said after a cycle's S0 that was rung before
  * it would lift the park of a refusal it never answered. */
-static uint64_t SettleRingsNow(void)
+static uint64_t SettleRingsNow(TagFSVolume* vol)
 {
-    return (uint64_t)BoardroomSeatReadyGen(tagfs_get_seat()) +
-           __atomic_load_n(&s_ready_gen, __ATOMIC_ACQUIRE);
+    return (uint64_t)BoardroomSeatReadyGen(tagfs_get_seat(vol)) +
+           __atomic_load_n(&vol->settle_wait.ready_gen, __ATOMIC_ACQUIRE);
 }
 
 /* The machine's pages, as the heap's reserve grows from them (kheap.h): the
@@ -80,39 +72,39 @@ static uint64_t SettleHeapNow(void)
 
 /* A park on the medium stands only in the seat it was decided in: a book
  * taken up in another seat is the event itself. */
-bool SettleParked(void)
+bool SettleParked(TagFSVolume* vol)
 {
-    uint64_t park  = __atomic_load_n(&s_park, __ATOMIC_ACQUIRE);
+    uint64_t park  = __atomic_load_n(&vol->settle_wait.park, __ATOMIC_ACQUIRE);
     uint64_t count = park >> SETTLE_PARK_COUNT_SHIFT;
     uint64_t seat  = (park >> SETTLE_PARK_SEAT_SHIFT) & ((1ull << SETTLE_PARK_SEAT_BITS) - 1u);
     switch ((SettleParkKind)(park & SETTLE_PARK_KIND_MASK)) {
     case SETTLE_PARK_SEAT:
-        return seat == tagfs_get_seat() && SETTLE_PARK_COUNT(SettleRingsNow()) == count;
+        return seat == tagfs_get_seat(vol) && SETTLE_PARK_COUNT(SettleRingsNow(vol)) == count;
     case SETTLE_PARK_HEAP:
         return SETTLE_PARK_COUNT(SettleHeapNow()) <= count;
     case SETTLE_PARK_ROOM:
-        return SETTLE_PARK_COUNT(CadenceRoomAsked()) == count;
+        return SETTLE_PARK_COUNT(CadenceRoomAsked(vol)) == count;
     default:
         return false;
     }
 }
 
-uint64_t SettleParkedSinceUs(void)
+uint64_t SettleParkedSinceUs(TagFSVolume* vol)
 {
-    return SettleParked() ? __atomic_load_n(&s_park_us, __ATOMIC_RELAXED) : 0;
+    return SettleParked(vol) ? __atomic_load_n(&vol->settle_wait.park_us, __ATOMIC_RELAXED) : 0;
 }
 
-void TagFSHeapCameBack(void)
+void TagFSHeapCameBack(TagFSVolume* vol)
 {
-    uint64_t park = __atomic_load_n(&s_park, __ATOMIC_ACQUIRE);
+    uint64_t park = __atomic_load_n(&vol->settle_wait.park, __ATOMIC_ACQUIRE);
     if ((park & SETTLE_PARK_KIND_MASK) == SETTLE_PARK_HEAP)
         SettleKnock();
 }
 
-void SettleParkSay(void)
+void SettleParkSay(TagFSVolume* vol)
 {
-    uint64_t    park  = __atomic_load_n(&s_park, __ATOMIC_ACQUIRE);
-    uint64_t    since = __atomic_load_n(&s_park_us, __ATOMIC_RELAXED);
+    uint64_t    park  = __atomic_load_n(&vol->settle_wait.park, __ATOMIC_ACQUIRE);
+    uint64_t    since = __atomic_load_n(&vol->settle_wait.park_us, __ATOMIC_RELAXED);
     uint64_t    now   = SettleNowUs();
     const char* event = "room to be asked for";
     if ((park & SETTLE_PARK_KIND_MASK) == SETTLE_PARK_SEAT)
@@ -122,14 +114,14 @@ void SettleParkSay(void)
     kprintf("[Nightwatch] SETTLE PARKED: %u waiter(s) of the volume wait for a cycle, and the "
             "cycle refused %llu ms ago waits for %s — no other event starts it (settled up to "
             "Ink %llu)\n",
-            (unsigned)__atomic_load_n(&s_count, __ATOMIC_ACQUIRE),
+            (unsigned)__atomic_load_n(&vol->settle_wait.count, __ATOMIC_ACQUIRE),
             (unsigned long long)(now > since ? (now - since) / 1000u : 0), event,
-            (unsigned long long)SettledGen());
+            (unsigned long long)SettledGen(vol));
 }
 
-bool SettleWaitersOwed(void)
+bool SettleWaitersOwed(TagFSVolume* vol)
 {
-    return __atomic_load_n(&s_count, __ATOMIC_ACQUIRE) != 0;
+    return __atomic_load_n(&vol->settle_wait.count, __ATOMIC_ACQUIRE) != 0;
 }
 
 /*
@@ -140,115 +132,115 @@ bool SettleWaitersOwed(void)
  * under its kept flush, and the cadence runs that one, empty if need be, at
  * once (a waiter is a demand).
  */
-static bool SettleMountKept(void)
+static bool SettleMountKept(TagFSVolume* vol)
 {
-    return SettledCycles() > 0;
+    return SettledCycles(vol) > 0;
 }
 
-error_t SettleWaitNow(uint64_t gen)
+error_t SettleWaitNow(TagFSVolume* vol, uint64_t gen)
 {
-    if (gen <= __atomic_load_n(&s_answered_upto, __ATOMIC_ACQUIRE) && SettleMountKept())
+    if (gen <= __atomic_load_n(&vol->settle_wait.answered_upto, __ATOMIC_ACQUIRE) && SettleMountKept(vol))
         return OK;
-    if (TagFSMediumLeft())
+    if (TagFSMediumLeft(vol))
         return ERR_DEVICE_NOT_READY;
-    if (TagFSReadOnly())
+    if (TagFSReadOnly(vol))
         return ERR_TAGFS_READ_ONLY;
     return ERR_WOULD_BLOCK;
 }
 
-static void SettleWaitAppend(SettleWaiter* w)
+static void SettleWaitAppend(TagFSVolume* vol, SettleWaiter* w)
 {
-    TagFSLockTake(&s_wait_lock);
-    if (s_last)
-        s_last->next = w;
+    TagFSLockTake(&vol->settle_wait.wait_lock);
+    if (vol->settle_wait.last)
+        vol->settle_wait.last->next = w;
     else
-        s_first = w;
-    s_last = w;
-    __atomic_add_fetch(&s_count, 1u, __ATOMIC_ACQ_REL);
-    TagFSLockDrop(&s_wait_lock);
+        vol->settle_wait.first = w;
+    vol->settle_wait.last = w;
+    __atomic_add_fetch(&vol->settle_wait.count, 1u, __ATOMIC_ACQ_REL);
+    TagFSLockDrop(&vol->settle_wait.wait_lock);
     SettleKnock();
 }
 
-void SettleWaitLink(SettleWaiter* w, uint64_t gen, void (*answer)(SettleWaiter* w, error_t rc))
+void SettleWaitLink(TagFSVolume* vol, SettleWaiter* w, uint64_t gen, void (*answer)(SettleWaiter* w, error_t rc))
 {
     w->next   = NULL;
     w->gen    = gen;
     w->cycle  = 0;
     w->answer = answer;
     SETTLE_CUT_ANCHORED(gen);       /* nothing at all unless SETTLECUT=<point> */
-    SettleWaitAppend(w);
+    SettleWaitAppend(vol, w);
 }
 
 /* A cycle in flight may have taken its S0 before the word was said, so it
  * does not count; the one after it does. In flight is looked at first: a cycle
  * that ends between the two looks is counted, and costs one more cycle, never
  * one too few. */
-void SettleWaitLinkCycle(SettleWaiter* w, void (*answer)(SettleWaiter* w, error_t rc))
+void SettleWaitLinkCycle(TagFSVolume* vol, SettleWaiter* w, void (*answer)(SettleWaiter* w, error_t rc))
 {
-    bool in_flight = SettleRunInFlight();
+    bool in_flight = SettleRunInFlight(vol);
     w->next   = NULL;
     w->gen    = 0;
-    w->cycle  = SettledCycles() + (in_flight ? 2u : 1u);
+    w->cycle  = SettledCycles(vol) + (in_flight ? 2u : 1u);
     w->answer = answer;
-    SettleWaitAppend(w);
+    SettleWaitAppend(vol, w);
 }
 
-bool SettleWaitUnlink(SettleWaiter* w)
+bool SettleWaitUnlink(TagFSVolume* vol, SettleWaiter* w)
 {
     bool found = false;
-    TagFSLockTake(&s_wait_lock);
+    TagFSLockTake(&vol->settle_wait.wait_lock);
     SettleWaiter* before = NULL;
-    for (SettleWaiter* at = s_first; at; before = at, at = at->next) {
+    for (SettleWaiter* at = vol->settle_wait.first; at; before = at, at = at->next) {
         if (at != w)
             continue;
         if (before)
             before->next = at->next;
         else
-            s_first = at->next;
-        if (s_last == at)
-            s_last = before;
+            vol->settle_wait.first = at->next;
+        if (vol->settle_wait.last == at)
+            vol->settle_wait.last = before;
         at->next = NULL;
-        __atomic_sub_fetch(&s_count, 1u, __ATOMIC_ACQ_REL);
+        __atomic_sub_fetch(&vol->settle_wait.count, 1u, __ATOMIC_ACQ_REL);
         found = true;
         break;
     }
-    TagFSLockDrop(&s_wait_lock);
+    TagFSLockDrop(&vol->settle_wait.wait_lock);
     return found;
 }
 
 /* Whether a waiter is answered OK already. */
-static bool SettleWaiterAnswered(const SettleWaiter* w, uint64_t upto)
+static bool SettleWaiterAnswered(TagFSVolume* vol, const SettleWaiter* w, uint64_t upto)
 {
-    return w->cycle ? SettledCycles() >= w->cycle : w->gen <= upto && SettleMountKept();
+    return w->cycle ? SettledCycles(vol) >= w->cycle : w->gen <= upto && SettleMountKept(vol);
 }
 
-uint64_t SettleWaitersCloseUpto(void)
+uint64_t SettleWaitersCloseUpto(TagFSVolume* vol)
 {
     uint64_t upto = 0;
-    if (!SettleWaitersOwed())
+    if (!SettleWaitersOwed(vol))
         return 0;
-    TagFSLockTake(&s_wait_lock);
-    for (SettleWaiter* w = s_first; w; w = w->next)
+    TagFSLockTake(&vol->settle_wait.wait_lock);
+    for (SettleWaiter* w = vol->settle_wait.first; w; w = w->next)
         if (w->gen > upto)
             upto = w->gen;
-    TagFSLockDrop(&s_wait_lock);
+    TagFSLockDrop(&vol->settle_wait.wait_lock);
     return upto;
 }
 
 /* The waiters `all` or those answered OK already, out of the list: their
  * answers are given by the caller, with no lock held. */
-static SettleWaiter* SettleWaitersTake(bool all)
+static SettleWaiter* SettleWaitersTake(TagFSVolume* vol, bool all)
 {
-    uint64_t      upto  = __atomic_load_n(&s_answered_upto, __ATOMIC_ACQUIRE);
+    uint64_t      upto  = __atomic_load_n(&vol->settle_wait.answered_upto, __ATOMIC_ACQUIRE);
     SettleWaiter* taken = NULL;
     SettleWaiter* end   = NULL;
 
-    TagFSLockTake(&s_wait_lock);
-    SettleWaiter** at = &s_first;
-    s_last = NULL;
+    TagFSLockTake(&vol->settle_wait.wait_lock);
+    SettleWaiter** at = &vol->settle_wait.first;
+    vol->settle_wait.last = NULL;
     while (*at) {
         SettleWaiter* w = *at;
-        if (all || SettleWaiterAnswered(w, upto)) {
+        if (all || SettleWaiterAnswered(vol, w, upto)) {
             *at     = w->next;
             w->next = NULL;
             if (end)
@@ -256,52 +248,52 @@ static SettleWaiter* SettleWaitersTake(bool all)
             else
                 taken = w;
             end = w;
-            __atomic_sub_fetch(&s_count, 1u, __ATOMIC_ACQ_REL);
+            __atomic_sub_fetch(&vol->settle_wait.count, 1u, __ATOMIC_ACQ_REL);
             continue;
         }
-        s_last = w;
+        vol->settle_wait.last = w;
         at     = &w->next;
     }
-    TagFSLockDrop(&s_wait_lock);
+    TagFSLockDrop(&vol->settle_wait.wait_lock);
     return taken;
 }
 
 /* Each waiter answered: OK when its Ink is answered already, else `code`. */
-static void SettleWaitersAnswer(SettleWaiter* list, error_t code)
+static void SettleWaitersAnswer(TagFSVolume* vol, SettleWaiter* list, error_t code)
 {
-    uint64_t upto = __atomic_load_n(&s_answered_upto, __ATOMIC_ACQUIRE);
+    uint64_t upto = __atomic_load_n(&vol->settle_wait.answered_upto, __ATOMIC_ACQUIRE);
     while (list) {
         SettleWaiter* w = list;
         list = w->next;
         w->next = NULL;
-        w->answer(w, SettleWaiterAnswered(w, upto) ? OK : code);
+        w->answer(w, SettleWaiterAnswered(vol, w, upto) ? OK : code);
     }
 }
 
-void SettleWaitersSweep(void)
+void SettleWaitersSweep(TagFSVolume* vol)
 {
-    if (!SettleWaitersOwed())
+    if (!SettleWaitersOwed(vol))
         return;
-    SettleWaitersAnswer(SettleWaitersTake(false), OK);
+    SettleWaitersAnswer(vol, SettleWaitersTake(vol, false), OK);
 }
 
-void SettleWaitersAnswerAll(error_t code)
+void SettleWaitersAnswerAll(TagFSVolume* vol, error_t code)
 {
-    if (!SettleWaitersOwed())
+    if (!SettleWaitersOwed(vol))
         return;
-    SettleWaitersAnswer(SettleWaitersTake(true), code);
+    SettleWaitersAnswer(vol, SettleWaitersTake(vol, true), code);
 }
 
-void SettleWaitersRunBegins(void)
+void SettleWaitersRunBegins(TagFSVolume* vol)
 {
-    s_ready_at_begin = SettleRingsNow();
+    vol->settle_wait.ready_at_begin = SettleRingsNow(vol);
 }
 
-void SettleWaitersMountReset(void)
+void SettleWaitersMountReset(TagFSVolume* vol)
 {
-    SettleWaitersAnswerAll(ERR_DEVICE_NOT_READY);
-    __atomic_store_n(&s_answered_upto, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_park, (uint64_t)SETTLE_PARK_NONE, __ATOMIC_RELEASE);
+    SettleWaitersAnswerAll(vol, ERR_DEVICE_NOT_READY);
+    __atomic_store_n(&vol->settle_wait.answered_upto, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->settle_wait.park, (uint64_t)SETTLE_PARK_NONE, __ATOMIC_RELEASE);
 }
 
 /*
@@ -331,62 +323,68 @@ void SettleWaitersMountReset(void)
  * come before it; a settled cycle lifts whatever park stood. No attempt is
  * counted.
  */
-void SettleWaitersPark(error_t rc)
+void SettleWaitersPark(TagFSVolume* vol, error_t rc)
 {
     if (rc == OK) {
-        __atomic_store_n(&s_park, (uint64_t)SETTLE_PARK_NONE, __ATOMIC_RELEASE);
+        __atomic_store_n(&vol->settle_wait.park, (uint64_t)SETTLE_PARK_NONE, __ATOMIC_RELEASE);
         return;
     }
-    if (TagFSMediumLeft()) {
-        SettlePark(SETTLE_PARK_SEAT, s_ready_at_begin);
+    if (TagFSMediumLeft(vol)) {
+        SettlePark(vol, SETTLE_PARK_SEAT, vol->settle_wait.ready_at_begin);
         return;
     }
-    if (TagFSReadOnly()) {
-        __atomic_store_n(&s_park, (uint64_t)SETTLE_PARK_NONE, __ATOMIC_RELEASE);
+    if (TagFSReadOnly(vol)) {
+        __atomic_store_n(&vol->settle_wait.park, (uint64_t)SETTLE_PARK_NONE, __ATOMIC_RELEASE);
         return;
     }
     switch (rc) {
     case ERR_NO_MEMORY:
-        SettlePark(SETTLE_PARK_HEAP, SettleHeapNow());
+        SettlePark(vol, SETTLE_PARK_HEAP, SettleHeapNow());
         break;
     case ERR_TAGFS_NO_SPACE:
-        __atomic_store_n(&s_park, (uint64_t)SETTLE_PARK_NONE, __ATOMIC_RELEASE);
+        __atomic_store_n(&vol->settle_wait.park, (uint64_t)SETTLE_PARK_NONE, __ATOMIC_RELEASE);
         break;
     case ERR_WOULD_BLOCK:
-        SettlePark(SETTLE_PARK_ROOM, CadenceRoomAsked());
+        SettlePark(vol, SETTLE_PARK_ROOM, CadenceRoomAsked(vol));
         break;
     default:
-        SettlePark(SETTLE_PARK_SEAT, s_ready_at_begin);
+        SettlePark(vol, SETTLE_PARK_SEAT, vol->settle_wait.ready_at_begin);
         break;
     }
 }
 
-void SettleWaitersRunEnded(error_t rc, uint64_t target)
+void SettleWaitersRunEnded(TagFSVolume* vol, error_t rc, uint64_t target)
 {
     if (rc != OK) {
-        if (TagFSReadOnly() && !TagFSMediumLeft())
-            SettleWaitersAnswerAll(ERR_TAGFS_READ_ONLY);
+        if (TagFSReadOnly(vol) && !TagFSMediumLeft(vol))
+            SettleWaitersAnswerAll(vol, ERR_TAGFS_READ_ONLY);
         /* A book whose ribbon has no room for the cycle's stitch gets it
          * back only through a Tally and the lag of the slots it lets go of
          * (settle/binder.h): its waiters hear so rather than wait on an event
          * no park can name. */
         else if (rc == ERR_TAGFS_NO_SPACE)
-            SettleWaitersAnswerAll(ERR_TAGFS_NO_SPACE);
+            SettleWaitersAnswerAll(vol, ERR_TAGFS_NO_SPACE);
         return;
     }
     /* A stitch is never written again once it settled: everything up to its
      * target is answered. */
     uint64_t upto = target;
-    uint64_t seen = __atomic_load_n(&s_answered_upto, __ATOMIC_RELAXED);
+    uint64_t seen = __atomic_load_n(&vol->settle_wait.answered_upto, __ATOMIC_RELAXED);
     while (seen < upto &&
-           !__atomic_compare_exchange_n(&s_answered_upto, &seen, upto, false,
+           !__atomic_compare_exchange_n(&vol->settle_wait.answered_upto, &seen, upto, false,
                                         __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
         ;
-    SettleWaitersSweep();
+    SettleWaitersSweep(vol);
 }
 
-void SettleSeatReady(void)
+void SettleSeatReady(TagFSVolume* vol)
 {
-    __atomic_add_fetch(&s_ready_gen, 1u, __ATOMIC_ACQ_REL);
+    __atomic_add_fetch(&vol->settle_wait.ready_gen, 1u, __ATOMIC_ACQ_REL);
     SettleKnock();
+}
+
+/* The volume's settle_wait part as it begins: what was not nothing. */
+void SettleWaitVolumeBegin(TagFSVolume* vol)
+{
+    vol->settle_wait.wait_lock = (TagFSLock)TAGFS_LOCK_INIT("settlewait", LOCK_RANK_LEAF);
 }

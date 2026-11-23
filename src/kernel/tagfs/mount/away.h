@@ -52,35 +52,35 @@ typedef enum {
  * sits in its seat. AwayDepartures: how many times it has left this boot —
  * what a book's write that laid blocks before a departure and inks them after
  * it holds its blocks to (perambulation.h, AwayProofPlot). */
-void        AwayLeft(bool swapped);
-uint64_t    AwayDepartures(void);
+void        AwayLeft(TagFSVolume* vol, bool swapped);
+uint64_t    AwayDepartures(TagFSVolume* vol);
 
 /* Whether the Deed `head` lays the volume out as the held one is laid out:
  * its FRAME (§16.1 п.3). */
-bool        AwayDeedSame(const DeedCopy* head);
+bool        AwayDeedSame(TagFSVolume* vol, const DeedCopy* head);
 
 /* The book taken up, the volume's medium in `seat` again and its latch let
  * go of by the caller: said, the refused cycle free to run again and the
  * parked Helms handed on, here. */
-void        AwayTakeUp(uint8_t seat);
+void        AwayTakeUp(TagFSVolume* vol, uint8_t seat);
 
 /* The book given up, for `why`: said — with `seat`, where the medium or the
  * other volume is — and every waiter answered with the changes no cycle
  * settled, which is returned: ERR_TAGFS_NOT_LANDED for a book whose blocks
  * did not land, ERR_DEVICE_NOT_READY for any other. The volume is then the
  * caller's to let go of. */
-uint64_t    AwayGiveUp(AwayVerdict why, uint8_t seat);
+uint64_t    AwayGiveUp(TagFSVolume* vol, AwayVerdict why, uint8_t seat);
 
 /* Whether a book of the volume `uuid` was given up this boot because its
  * medium came back holding less than a flush it said it kept covered
  * (PerambulationSaid.lied): its mounts from then on hold the medium to have
  * lied. */
-bool        AwayLiedLearned(const uint8_t uuid[16]);
+bool        AwayLiedLearned(TagFSVolume* vol, const uint8_t uuid[16]);
 
 /* The furthest next file id and next tag id memory had reached when a book of
  * the volume `uuid` was given up — 0 for one never given up. Its mounts give
  * out no id below them, for the rest of the boot. */
-void        AwayNumbersKnown(const uint8_t uuid[16], uint64_t* next_file_id,
+void        AwayNumbersKnown(TagFSVolume* vol, const uint8_t uuid[16], uint64_t* next_file_id,
                              uint32_t* next_tag_id);
 
 #ifdef CONFIG_VOLUME_TESTS
@@ -93,8 +93,8 @@ void        AwayNumbersKnown(const uint8_t uuid[16], uint64_t* next_file_id,
  * mounted and its latch is let go of — the changes the answers called lost are
  * still held, and the next cycle settles them.
  */
-void        TagFSStandMediumLeaves(void);
-AwayVerdict TagFSStandMediumReturns(void);
+void        TagFSStandMediumLeaves(TagFSVolume* vol);
+AwayVerdict TagFSStandMediumReturns(TagFSVolume* vol);
 /* The medium leaves (TagFSStandMediumLeaves) once the next run of a file's
  * blocks has landed, before its writer hears so (run/run.c, TagFSWriteRun):
  * the departure a core attending the seat latches while a writer's command is
@@ -103,7 +103,7 @@ void        TagFSStandLeavesAfterRun(void);
 /* Every volume's medium remembered as one that lied this boot forgotten — the
  * stand's own volume is every test's, and a lie one test proved would mark
  * each mount after it: true when one was remembered. */
-bool        TagFSStandLiedForget(void);
+bool        TagFSStandLiedForget(TagFSVolume* vol);
 
 /*
  * And the stand's own take-down and mount, for the road a mount takes when the
@@ -132,15 +132,50 @@ typedef enum {
     STAND_MOUNT_HEAP_REFUSES
 } StandMountTurn;
 
-bool        TagFSStandLetGo(void);
-void        TagFSStandHoldAgain(void);
+bool        TagFSStandLetGo(TagFSVolume* vol);
+void        TagFSStandHoldAgain(TagFSVolume* vol);
 void        TagFSStandMountTurn(StandMountTurn turn, uint32_t nth);
-void        TagFSStandMountReadComes(void);
-void        TagFSStandMountRegistryLoads(void);
+void        TagFSStandMountReadComes(TagFSVolume* vol);
+void        TagFSStandMountRegistryLoads(TagFSVolume* vol);
 bool        TagFSStandMountTurnFired(void);
-bool        TagFSStandMountIdle(void);
-bool        TagFSStandMountOwed(void);
+bool        TagFSStandMountIdle(TagFSVolume* vol);
+bool        TagFSStandMountOwed(TagFSVolume* vol);
 void        TagFSStandMountCounts(uint32_t* attempts, uint32_t* resets);
 #endif
+
+/*
+ * ‼ WHAT A BOOK GIVEN UP LEAVES KNOWN, ONE ENTRY A VOLUME, FOR THE REST OF THE
+ * BOOT.
+ *
+ * The programs live on when a book is given up, holding the file ids and tag
+ * ids the volume's memory gave them — a create no cycle settled among them —
+ * while the next mount reads its numbers off the medium alone, which never
+ * saw those ids. Given out again, one program's id named another's file. So
+ * the ids memory had reached are remembered by the volume's UUID, and its
+ * mounts give out nothing below them (AwayNumbersKnown); and a volume whose
+ * medium came back holding less than a flush it said it kept covered is
+ * remembered the same way, so its mounts hold the medium to have lied
+ * (AwayLiedLearned) — every volume's, not only the last.
+ */
+typedef struct {
+    uint8_t  uuid[16];
+    uint64_t next_file_id;
+    uint32_t next_tag_id;
+    bool     lied;
+} AwayKnown;
+
+/* What one volume holds of away.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    volatile uint64_t departures;  /* the medium left, this boot: AwayLeft counts it */
+    /* The entries, under their own leaf lock: a book is given up where the medium
+     * is attended to and where the machine stops, and a mount reads them. The
+     * array grows with no lock held and is swapped in under it. */
+    TagFSLock known_lock;
+    AwayKnown* known;
+    uint32_t known_count;
+    uint32_t known_cap;
+} AwayState;
+
+void AwayVolumeBegin(TagFSVolume* vol);
 
 #endif /* TAGFS_MOUNT_AWAY_H */

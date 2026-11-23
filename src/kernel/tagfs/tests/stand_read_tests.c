@@ -38,16 +38,16 @@
 static ReadJobStandAnswer s_read_answer;
 
 /* Why this machine has no port road for a read, or NULL. */
-static const char* StandReadPortAside(uint8_t seat)
+static const char* StandReadPortAside(TagFSVolume* vol, uint8_t seat)
 {
     if (!ReadJobSeatRunsAsync(seat))
         return "a read on this seat stands in its call: one core, or a seat that answers "
                "only a read somebody stands over";
-    return StandStepsAsideFor();
+    return StandStepsAsideFor(vol);
 }
 
 /* The read job's answer, the machine turned by hand until it comes. */
-static bool StandReadAnswered(uint8_t seat)
+static bool StandReadAnswered(TagFSVolume* vol, uint8_t seat)
 {
     uint64_t bound = rdtsc() + cpu_ms_to_tsc(STAND_READ_BOUND_MS);
     for (;;) {
@@ -55,7 +55,7 @@ static bool StandReadAnswered(uint8_t seat)
             return true;
         if (rdtsc() >= bound)
             return false;
-        StandPortTurn(seat);
+        StandPortTurn(vol, seat);
         cpu_pause();
     }
 }
@@ -78,17 +78,17 @@ static int StandReadSubmit(TagFSFileHandle* handle, uint64_t file_id, uint64_t o
 }
 
 /* A file of `blocks` blocks of stream `stream` in one run on the medium. */
-static bool StandReadMakeRun(uint32_t blocks, uint32_t stream, uint64_t* file_id,
+static bool StandReadMakeRun(TagFSVolume* vol, uint32_t blocks, uint32_t stream, uint64_t* file_id,
                              uint64_t* first)
 {
     TestFillAt(g_test_buffer, blocks * TAGFS_BLOCK_SIZE, stream, 0);
-    if (!StandMakeFile("test_file", g_test_buffer, blocks * TAGFS_BLOCK_SIZE, file_id))
+    if (!StandMakeFile(vol, "test_file", g_test_buffer, blocks * TAGFS_BLOCK_SIZE, file_id))
         return false;
-    if (blocks > 1 && tagfs_defrag_file(*file_id) != OK)
+    if (blocks > 1 && tagfs_defrag_file(vol, *file_id) != OK)
         return false;
     for (uint32_t k = 0; k < blocks; k++) {
         uint64_t b = 0;
-        if (!StandBlockOf(*file_id, k, &b))
+        if (!StandBlockOf(vol, *file_id, k, &b))
             return false;
         if (k == 0)
             *first = b;
@@ -104,21 +104,22 @@ static bool StandReadMakeRun(uint32_t blocks, uint32_t stream, uint64_t* file_id
 
 static TestResult TestStandReadHoleRefused(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult       verdict = TEST_PASS;
     uint64_t         file_id = 0;
     uint64_t         first   = 0;
     TagFSFileHandle* handle  = NULL;
-    const char*      aside   = StandStepsAsideFor();
+    const char*      aside   = StandStepsAsideFor(vol);
     uint64_t         got     = 0;
 
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(StandReadMakeRun(2, 0x71, &file_id, &first), "a two-block file is made in one run");
-    handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
+    TEST_ASSERT(StandReadMakeRun(vol, 2, 0x71, &file_id, &first), "a two-block file is made in one run");
+    handle = tagfs_open(vol, file_id, TAGFS_HANDLE_READ);
     TEST_ASSERT(handle != NULL, "and opened to read");
     handle->file_size = STAND_READ_BLOCKS * TAGFS_BLOCK_SIZE;   /* the record says a block more */
 
-    error_t rc = tagfs_read(handle, g_test_output, STAND_READ_BLOCKS * TAGFS_BLOCK_SIZE, &got);
+    error_t rc = tagfs_read(vol, handle, g_test_output, STAND_READ_BLOCKS * TAGFS_BLOCK_SIZE, &got);
     TEST_ASSERT_EQ(rc, ERR_METADATA_CORRUPTED,
                    "a read into the block no extent covers is refused as corrupted metadata");
     TEST_ASSERT_EQ(got, 2 * TAGFS_BLOCK_SIZE, "with the two blocks before it landed");
@@ -126,41 +127,42 @@ static TestResult TestStandReadHoleRefused(void)
                    2 * TAGFS_BLOCK_SIZE, "as the file holds them");
     TEST_ASSERT_EQ(handle->offset, 2 * TAGFS_BLOCK_SIZE, "and the handle moved by them");
 out:
-    tagfs_close(handle);
+    tagfs_close(vol, handle);
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     return verdict;
 }
 
 static TestResult TestStandReadHoleRefusedThroughPort(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult       verdict = TEST_PASS;
-    uint8_t          seat    = tagfs_get_seat();
+    uint8_t          seat    = tagfs_get_seat(vol);
     uint64_t         file_id = 0;
     uint64_t         first   = 0;
     TagFSFileHandle* handle  = NULL;
-    const char*      aside   = StandReadPortAside(seat);
+    const char*      aside   = StandReadPortAside(vol, seat);
 
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(StandReadMakeRun(2, 0x72, &file_id, &first), "a two-block file is made in one run");
-    handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
+    TEST_ASSERT(StandReadMakeRun(vol, 2, 0x72, &file_id, &first), "a two-block file is made in one run");
+    handle = tagfs_open(vol, file_id, TAGFS_HANDLE_READ);
     TEST_ASSERT(handle != NULL, "and opened to read");
     handle->file_size = STAND_READ_BLOCKS * TAGFS_BLOCK_SIZE;
 
     int submit = StandReadSubmit(handle, file_id, 0, STAND_READ_BLOCKS * TAGFS_BLOCK_SIZE);
     TEST_ASSERT_EQ(submit, ERR_WOULD_BLOCK, "the read goes through the port");
     handle = NULL;                                   /* the job's, and closed by it */
-    TEST_ASSERT(StandReadAnswered(seat), "and is answered");
+    TEST_ASSERT(StandReadAnswered(vol, seat), "and is answered");
     TEST_ASSERT_EQ(s_read_answer.rc, ERR_METADATA_CORRUPTED,
                    "refused as corrupted metadata, as the read that stands answers it");
     TEST_ASSERT_EQ(s_read_answer.landed, 2 * TAGFS_BLOCK_SIZE, "with the two blocks before it landed");
     TEST_ASSERT_EQ(TestFirstDifference(g_test_output, g_test_buffer, 2 * TAGFS_BLOCK_SIZE),
                    2 * TAGFS_BLOCK_SIZE, "as the file holds them");
 out:
-    tagfs_close(handle);
+    tagfs_close(vol, handle);
     if (file_id && __atomic_load_n(&s_read_answer.answered, __ATOMIC_ACQUIRE))
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -176,67 +178,68 @@ out:
 
 static TestResult TestStandReadAheadReadsItsVersion(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult       verdict = TEST_PASS;
     uint64_t         file_id = 0;
     uint64_t         first   = 0, again = 0;
     TagFSFileHandle* handle  = NULL;
     TagFSFileHandle* later   = NULL;
-    const char*      aside   = StandStepsAsideFor();
+    const char*      aside   = StandStepsAsideFor(vol);
     uint8_t*         newer   = g_test_buffer + STAND_READ_BLOCKS * TAGFS_BLOCK_SIZE;
     uint64_t         got     = 0;
 
     if (aside)
         return test_steps_aside(aside);
-    if (TagFSRunBlocks() < STAND_READ_BLOCKS)
+    if (TagFSRunBlocks(vol) < STAND_READ_BLOCKS)
         return test_steps_aside("the medium hands over fewer than three blocks at a time, so "
                                 "no window holds the run this test fetches");
-    TEST_ASSERT(StandReadMakeRun(STAND_READ_BLOCKS, 0x76, &file_id, &first),
+    TEST_ASSERT(StandReadMakeRun(vol, STAND_READ_BLOCKS, 0x76, &file_id, &first),
                 "a three-block file is made in one run");
-    handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
+    handle = tagfs_open(vol, file_id, TAGFS_HANDLE_READ);
     TEST_ASSERT(handle != NULL, "and opened to read");
 
-    TEST_ASSERT_OK(tagfs_read(handle, g_test_output, 2 * TAGFS_BLOCK_SIZE, &got),
+    TEST_ASSERT_OK(tagfs_read(vol, handle, g_test_output, 2 * TAGFS_BLOCK_SIZE, &got),
                    "its first two blocks are read in one fetch");
-    TEST_ASSERT(ReadAheadServe(handle, first + 1) != NULL, "and the window holds the second");
+    TEST_ASSERT(ReadAheadServe(vol, handle, first + 1) != NULL, "and the window holds the second");
     TestFillAt(newer, TAGFS_BLOCK_SIZE, 0x77, TAGFS_BLOCK_SIZE);
-    TEST_ASSERT_EQ(StandWriteAt(file_id, TAGFS_BLOCK_SIZE, newer, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
+    TEST_ASSERT_EQ(StandWriteAt(vol, file_id, TAGFS_BLOCK_SIZE, newer, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
                    "the second block is written over whole");
-    TEST_ASSERT(StandBlockOf(file_id, 1, &again) && again != first + 1, "on fresh ground");
+    TEST_ASSERT(StandBlockOf(vol, file_id, 1, &again) && again != first + 1, "on fresh ground");
     handle->offset = 0;
-    TEST_ASSERT_OK(tagfs_read(handle, g_test_output, 2 * TAGFS_BLOCK_SIZE, &got),
+    TEST_ASSERT_OK(tagfs_read(vol, handle, g_test_output, 2 * TAGFS_BLOCK_SIZE, &got),
                    "the two blocks are read again through the handle opened before it");
     TEST_ASSERT_EQ(TestFirstDifference(g_test_output, g_test_buffer, 2 * TAGFS_BLOCK_SIZE),
                    2 * TAGFS_BLOCK_SIZE, "and are the version it opened");
 
     uint32_t count = STAND_READ_BLOCKS;
-    uint64_t gen   = ReadAheadBegin(handle, first, &count);
+    uint64_t gen   = ReadAheadBegin(vol, handle, first, &count);
     TEST_ASSERT(gen != 0 && count == STAND_READ_BLOCKS, "a fetch of the three is named");
-    TEST_ASSERT_OK(TagFSReadRun(first, count, ReadAheadBuffer(handle)),
+    TEST_ASSERT_OK(TagFSReadRun(vol, first, count, ReadAheadBuffer(handle)),
                    "and reads the medium before the write lands");
     TestFillAt(newer, TAGFS_BLOCK_SIZE, 0x78, 2 * TAGFS_BLOCK_SIZE);
-    TEST_ASSERT_EQ(StandWriteAt(file_id, 2 * TAGFS_BLOCK_SIZE, newer, TAGFS_BLOCK_SIZE),
+    TEST_ASSERT_EQ(StandWriteAt(vol, file_id, 2 * TAGFS_BLOCK_SIZE, newer, TAGFS_BLOCK_SIZE),
                    TAGFS_BLOCK_SIZE, "the third block is written over whole meanwhile");
-    (void)ReadAheadLand(handle, gen, count);
+    (void)ReadAheadLand(vol, handle, gen, count);
     handle->offset = 2 * TAGFS_BLOCK_SIZE;
-    TEST_ASSERT_OK(tagfs_read(handle, g_test_output, TAGFS_BLOCK_SIZE, &got),
+    TEST_ASSERT_OK(tagfs_read(vol, handle, g_test_output, TAGFS_BLOCK_SIZE, &got),
                    "the third block is read through the same handle");
     TEST_ASSERT_EQ(TestFirstDifference(g_test_output, g_test_buffer + 2 * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE),
                    TAGFS_BLOCK_SIZE, "and is its version's, the fetch that landed late or the medium alike");
 
-    later = tagfs_open(file_id, TAGFS_HANDLE_READ);
+    later = tagfs_open(vol, file_id, TAGFS_HANDLE_READ);
     TEST_ASSERT(later != NULL, "a handle opened after the writes");
     later->offset = TAGFS_BLOCK_SIZE;
-    TEST_ASSERT_OK(tagfs_read(later, g_test_output, 2 * TAGFS_BLOCK_SIZE, &got), "reads the two blocks");
+    TEST_ASSERT_OK(tagfs_read(vol, later, g_test_output, 2 * TAGFS_BLOCK_SIZE, &got), "reads the two blocks");
     TEST_ASSERT_EQ(TestFirstDifference(g_test_output + TAGFS_BLOCK_SIZE, newer, TAGFS_BLOCK_SIZE),
                    TAGFS_BLOCK_SIZE, "the third what its write left");
     TestFillAt(newer, TAGFS_BLOCK_SIZE, 0x77, TAGFS_BLOCK_SIZE);
     TEST_ASSERT_EQ(TestFirstDifference(g_test_output, newer, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
                    "and the second what its write left");
 out:
-    tagfs_close(later);
-    tagfs_close(handle);
+    tagfs_close(vol, later);
+    tagfs_close(vol, handle);
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -263,16 +266,17 @@ out:
 
 /* `bytes` laid on `block` of the medium by the Boardroom's door, behind every
  * digest's back. */
-static bool StandReadBlockPut(uint64_t block, const uint8_t* bytes)
+static bool StandReadBlockPut(TagFSVolume* vol, uint64_t block, const uint8_t* bytes)
 {
-    return BoardroomWrite(tagfs_get_seat(), tagfs_block_to_sector(block), TAGFS_BLOCK_SECTORS, bytes,
+    return BoardroomWrite(tagfs_get_seat(vol), tagfs_block_to_sector(vol, block), TAGFS_BLOCK_SECTORS, bytes,
                           NULL) == 0;
 }
 
 static TestResult TestStandReadRmwRefusesRot(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult       verdict = TEST_PASS;
-    uint8_t          seat    = tagfs_get_seat();
+    uint8_t          seat    = tagfs_get_seat(vol);
     uint64_t         file_id = 0;
     uint64_t         first   = 0, now = 0, got = 0;
     bool             rotten  = false;
@@ -280,50 +284,50 @@ static TestResult TestStandReadRmwRefusesRot(void)
     uint8_t*         rot     = g_test_buffer + TAGFS_BLOCK_SIZE;
     uint8_t*         whole   = g_test_buffer + 2 * TAGFS_BLOCK_SIZE;
     TagFSFileHandle* handle  = NULL;
-    const char*      aside   = StandStepsAsideFor();
+    const char*      aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
 
-    TEST_ASSERT(StandReadMakeRun(1, 0x76, &file_id, &first), "a one-block file is made");
-    TEST_ASSERT_OK(BoardroomRead(seat, tagfs_block_to_sector(first), TAGFS_BLOCK_SECTORS, was),
+    TEST_ASSERT(StandReadMakeRun(vol, 1, 0x76, &file_id, &first), "a one-block file is made");
+    TEST_ASSERT_OK(BoardroomRead(seat, tagfs_block_to_sector(vol, first), TAGFS_BLOCK_SECTORS, was),
                    "its block is read off the medium");
     memcpy(rot, was, TAGFS_BLOCK_SIZE);
     rot[100] ^= 0xFF;
-    TEST_ASSERT(StandReadBlockPut(first, rot), "and rots there, behind its digest's back");
+    TEST_ASSERT(StandReadBlockPut(vol, first, rot), "and rots there, behind its digest's back");
     rotten = true;
-    tagfs_readahead_invalidate(first);
-    handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
+    tagfs_readahead_invalidate(vol, first);
+    handle = tagfs_open(vol, file_id, TAGFS_HANDLE_READ);
     TEST_ASSERT(handle != NULL, "the file is opened to read");
-    TEST_ASSERT_EQ(tagfs_read(handle, g_test_output, TAGFS_BLOCK_SIZE, &got), ERR_CHECKSUM,
+    TEST_ASSERT_EQ(tagfs_read(vol, handle, g_test_output, TAGFS_BLOCK_SIZE, &got), ERR_CHECKSUM,
                    "a read of the block answers that it does not hold what was written");
-    tagfs_close(handle);
+    tagfs_close(vol, handle);
     handle = NULL;
 
-    TEST_ASSERT(StandWriteAt(file_id, 100, "sixteen bytes...", 16) < 0,
+    TEST_ASSERT(StandWriteAt(vol, file_id, 100, "sixteen bytes...", 16) < 0,
                 "sixteen bytes laid over the rotten block are refused");
     TestFillAt(whole, TAGFS_BLOCK_SIZE, 0x77, 0);
-    TEST_ASSERT_EQ(StandWriteAt(file_id, 0, whole, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
+    TEST_ASSERT_EQ(StandWriteAt(vol, file_id, 0, whole, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
                    "a write that covers the block whole is taken: it reads nothing of it");
-    TEST_ASSERT(StandBlockOf(file_id, 0, &now), "the file's block is found again");
+    TEST_ASSERT(StandBlockOf(vol, file_id, 0, &now), "the file's block is found again");
     if (now != first)
-        TEST_ASSERT(StandReadBlockPut(first, was), "the block the file left is given its own bytes back");
+        TEST_ASSERT(StandReadBlockPut(vol, first, was), "the block the file left is given its own bytes back");
     rotten = false;
-    TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
+    TEST_ASSERT_EQ(TestFileRead(vol, file_id, g_test_output, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
                    "and the file's block reads again");
     TEST_ASSERT_EQ(TestFirstDifference(g_test_output, whole, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
                    "holding what the whole write left");
 out:
-    tagfs_close(handle);
+    tagfs_close(vol, handle);
     if (rotten) {
-        if (!StandReadBlockPut(first, was))
+        if (!StandReadBlockPut(vol, first, was))
             verdict = TestFailedAt(__FILE__, __LINE__,
                                    "the rotten block would not take its bytes back — the medium and "
                                    "its digest disagree over it (block, 0)", first, 0);
-        tagfs_readahead_invalidate(first);
+        tagfs_readahead_invalidate(vol, first);
     }
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -375,20 +379,21 @@ static bool StandReadHoledLanded(const uint8_t* sink)
 }
 
 /* A read of block 0 counted, never refused: what a hole's start would ask. */
-static void StandReadHoleWatch(void)
+static void StandReadHoleWatch(TagFSVolume* vol)
 {
-    BlockFailArm(tagfs_get_seat(), BLOCK_FAIL_READ, tagfs_block_to_sector(0), TAGFS_BLOCK_SECTORS,
+    BlockFailArm(tagfs_get_seat(vol), BLOCK_FAIL_READ, tagfs_block_to_sector(vol, 0), TAGFS_BLOCK_SECTORS,
                  BLOCK_FAIL_NEVER);
 }
 
 static TestResult TestStandReadHoles(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult       verdict = TEST_PASS;
     uint64_t         file_id = 0, first = 0, got = 0;
     TagFSFileHandle* handle  = NULL;
     bool             armed   = false;
     uint8_t*         sink    = kmalloc(STAND_READ_HOLED_BLOCKS * TAGFS_BLOCK_SIZE);
-    const char*      aside   = StandStepsAsideFor();
+    const char*      aside   = StandStepsAsideFor(vol);
 
     if (aside) {
         kfree(sink);
@@ -396,13 +401,13 @@ static TestResult TestStandReadHoles(void)
     }
     TEST_ASSERT(sink != NULL, "room for the seven blocks");
     memset(sink, 0xA5, STAND_READ_HOLED_BLOCKS * TAGFS_BLOCK_SIZE);
-    TEST_ASSERT(StandReadMakeRun(2, 0x78, &file_id, &first), "a two-block file is made in one run");
-    handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
+    TEST_ASSERT(StandReadMakeRun(vol, 2, 0x78, &file_id, &first), "a two-block file is made in one run");
+    handle = tagfs_open(vol, file_id, TAGFS_HANDLE_READ);
     TEST_ASSERT(handle != NULL && StandReadHoled(handle, first),
                 "it is opened to read, its record holes around its run");
-    StandReadHoleWatch();
+    StandReadHoleWatch(vol);
     armed = true;
-    error_t rc = tagfs_read(handle, sink, STAND_READ_HOLED_BLOCKS * TAGFS_BLOCK_SIZE, &got);
+    error_t rc = tagfs_read(vol, handle, sink, STAND_READ_HOLED_BLOCKS * TAGFS_BLOCK_SIZE, &got);
     uint32_t asked = BlockFailSeen();
     BlockFailDisarm();
     armed = false;
@@ -413,22 +418,23 @@ static TestResult TestStandReadHoles(void)
 out:
     if (armed)
         BlockFailDisarm();
-    tagfs_close(handle);
+    tagfs_close(vol, handle);
     kfree(sink);
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     return verdict;
 }
 
 static TestResult TestStandReadHolesThroughPort(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult       verdict = TEST_PASS;
-    uint8_t          seat    = tagfs_get_seat();
+    uint8_t          seat    = tagfs_get_seat(vol);
     uint64_t         file_id = 0, first = 0;
     TagFSFileHandle* handle  = NULL;
     bool             armed   = false, submitted = false;
     uint8_t*         sink    = kmalloc(STAND_READ_HOLED_BLOCKS * TAGFS_BLOCK_SIZE);
-    const char*      aside   = StandReadPortAside(seat);
+    const char*      aside   = StandReadPortAside(vol, seat);
     ReadJobAsk       ask;
 
     memset(&ask, 0, sizeof(ask));
@@ -439,21 +445,21 @@ static TestResult TestStandReadHolesThroughPort(void)
     }
     TEST_ASSERT(sink != NULL, "room for the seven blocks");
     memset(sink, 0xA5, STAND_READ_HOLED_BLOCKS * TAGFS_BLOCK_SIZE);
-    TEST_ASSERT(StandReadMakeRun(2, 0x79, &file_id, &first), "a two-block file is made in one run");
-    handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
+    TEST_ASSERT(StandReadMakeRun(vol, 2, 0x79, &file_id, &first), "a two-block file is made in one run");
+    handle = tagfs_open(vol, file_id, TAGFS_HANDLE_READ);
     TEST_ASSERT(handle != NULL && StandReadHoled(handle, first),
                 "it is opened to read, its record holes around its run");
     ask.file_id     = file_id;
     ask.sink.kernel = sink;
     ask.sink.bytes  = STAND_READ_HOLED_BLOCKS * TAGFS_BLOCK_SIZE;
     ask.stand       = &s_read_answer;
-    StandReadHoleWatch();
+    StandReadHoleWatch(vol);
     armed = true;
     TEST_ASSERT_EQ(ReadJobSubmit(handle, &ask, NULL, NULL), ERR_WOULD_BLOCK,
                    "the read goes through the port");
     handle    = NULL;                                /* the job's, and closed by it */
     submitted = true;
-    TEST_ASSERT(StandReadAnswered(seat), "and is answered");
+    TEST_ASSERT(StandReadAnswered(vol, seat), "and is answered");
     uint32_t asked = BlockFailSeen();
     BlockFailDisarm();
     armed = false;
@@ -465,12 +471,12 @@ static TestResult TestStandReadHolesThroughPort(void)
 out:
     if (armed)
         BlockFailDisarm();
-    tagfs_close(handle);
+    tagfs_close(vol, handle);
     bool answered = __atomic_load_n(&s_read_answer.answered, __ATOMIC_ACQUIRE) != 0;
     if (!submitted || answered)
         kfree(sink);                                 /* a job unanswered still lands in it */
     if (file_id && (!submitted || answered))
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     return verdict;
 }
 

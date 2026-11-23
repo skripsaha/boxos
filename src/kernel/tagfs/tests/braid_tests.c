@@ -2,6 +2,7 @@
 #include "../tagfs.h"
 #include "../braid/braid.h"
 #include "boardroom.h"
+#include "tagfs_volume.h"
 
 // ============================================================================
 // Braid
@@ -23,10 +24,11 @@ static const uint8_t s_braid_seed[16] = { 'b', 'r', 'a', 'i', 'd', '-', 't', 'e'
 
 static TestResult test_braid_init(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict = TEST_PASS;
 
     memset(&s_braid, 0, sizeof(s_braid));
-    TEST_ASSERT(tagfs_get_state()->braid == NULL,
+    TEST_ASSERT(vol->state.braid == NULL,
                 "the mounted volume is assembled in no Braid, so none of its blocks is sent to one");
     TEST_ASSERT_OK(BraidInit(&s_braid, BraidModeMirror, s_braid_seed), "a braid of its own is begun");
     TEST_ASSERT_EQ(BraidInit(&s_braid, BraidModeMirror, s_braid_seed), ERR_ALREADY_INITIALIZED,

@@ -43,12 +43,12 @@ static char* StandUseList(const char* lead, const char* key, uint32_t count, siz
 }
 
 /* How many tags of the held list the volume has a number for. */
-static uint32_t StandUseNumbered(const UseList* l)
+static uint32_t StandUseNumbered(TagFSVolume* vol, const UseList* l)
 {
     uint32_t numbered = 0;
     for (uint32_t i = 0; i < UseListCount(l); i++) {
         TagSpelling tag = UseListTag(l, i);
-        if (TagFSLookupSpelling(&tag) != TAGFS_INVALID_TAG_ID)
+        if (TagFSLookupSpelling(vol, &tag) != TAGFS_INVALID_TAG_ID)
             numbered++;
     }
     return numbered;
@@ -79,6 +79,7 @@ static void StandUseRestore(UseList* saved)
  * and wrote each into its book. */
 static TestResult TestStandUseLooksUpOnly(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict = TEST_PASS;
     UseList*   saved   = UseContextHold();
     UseList*   now     = NULL;
@@ -92,7 +93,7 @@ static TestResult TestStandUseLooksUpOnly(void)
     TEST_ASSERT(UseListText(now)->bytes == len && memcmp(UseListText(now)->text, list, len) == 0,
                 "as said, in the order said");
 
-    uint32_t numbered = StandUseNumbered(now);
+    uint32_t numbered = StandUseNumbered(vol, now);
     TestEvidence("of a context of 10000 new tags, the volume numbered", numbered);
     if (numbered != 0)
         verdict = TEST_DEFECT;
@@ -165,6 +166,7 @@ static uint64_t StandUseAsk(const process_t* proc, uint32_t* out_fit)
  * cabin under an interrupts-off lock, at every scheduling decision. */
 static TestResult TestStandUseVerdictIsOneCompare(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
     UseList*    saved   = UseContextHold();
     cabin_t*    cabin   = NULL;
@@ -173,7 +175,7 @@ static TestResult TestStandUseVerdictIsOneCompare(void)
     size_t      len     = 0;
     uint32_t    fit     = 0;
     TagSpelling system  = TagSpellingOfKey("system");
-    uint32_t    id      = TagFSLookupSpelling(&system);
+    uint32_t    id      = TagFSLookupSpelling(vol, &system);
 
     TEST_ASSERT(id != TAGFS_INVALID_TAG_ID, "the volume knows the system tag");
     proc = StandUseStrand(id, &cabin);

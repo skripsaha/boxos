@@ -12,6 +12,7 @@
 #include "boardroom.h"
 #include "write_job.h"   /* WriteJobSeatRunsAsync — the road a program's write takes */
 #include "amp.h"
+#include "tagfs_volume.h"
 #ifdef CONFIG_VOLUME_TESTS
 #include "block_fail.h"
 #include "stand_tests.h"
@@ -137,7 +138,7 @@ uint32_t TestFirstDifference(const void* a, const void* b, uint32_t n)
     return n;
 }
 
-int TestHandleWrite(TagFSFileHandle* handle, const void* data, uint32_t bytes)
+int TestHandleWrite(TagFSVolume* vol, TagFSFileHandle* handle, const void* data, uint32_t bytes)
 {
     PlotSource source;
     uint64_t   written = 0;
@@ -145,32 +146,32 @@ int TestHandleWrite(TagFSFileHandle* handle, const void* data, uint32_t bytes)
     memset(&source, 0, sizeof(source));
     source.kernel = (const uint8_t*)data;
     source.bytes  = bytes;
-    return tagfs_write(handle, &source, &written) == OK ? (int)written : -1;
+    return tagfs_write(vol, handle, &source, &written) == OK ? (int)written : -1;
 }
 
-int TestHandleRead(TagFSFileHandle* handle, void* buffer, uint32_t capacity)
+int TestHandleRead(TagFSVolume* vol, TagFSFileHandle* handle, void* buffer, uint32_t capacity)
 {
     uint64_t got = 0;
-    return tagfs_read(handle, buffer, capacity, &got) == OK ? (int)got : -1;
+    return tagfs_read(vol, handle, buffer, capacity, &got) == OK ? (int)got : -1;
 }
 
-int TestFileWrite(uint64_t file_id, const void* data, uint32_t bytes)
+int TestFileWrite(TagFSVolume* vol, uint64_t file_id, const void* data, uint32_t bytes)
 {
-    TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
+    TagFSFileHandle* handle = tagfs_open(vol, file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
     if (!handle)
         return -1;
-    int written = TestHandleWrite(handle, data, bytes);
-    tagfs_close(handle);
+    int written = TestHandleWrite(vol, handle, data, bytes);
+    tagfs_close(vol, handle);
     return written;
 }
 
-int TestFileRead(uint64_t file_id, void* buffer, uint32_t capacity)
+int TestFileRead(TagFSVolume* vol, uint64_t file_id, void* buffer, uint32_t capacity)
 {
-    TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
+    TagFSFileHandle* handle = tagfs_open(vol, file_id, TAGFS_HANDLE_READ);
     if (!handle)
         return -1;
-    int got = TestHandleRead(handle, buffer, capacity);
-    tagfs_close(handle);
+    int got = TestHandleRead(vol, handle, buffer, capacity);
+    tagfs_close(vol, handle);
     return got;
 }
 
@@ -211,22 +212,22 @@ static bool StandTallyQuireMarked(const uint64_t* bit, uint64_t nquire, uint64_t
     return at < nquire && (bit[at / 64u] & (1ull << (at % 64u)));
 }
 
-uint64_t StandTallyQuires(uint64_t q, uint64_t** marks, uint64_t* nquire)
+uint64_t StandTallyQuires(TagFSVolume* vol, uint64_t q, uint64_t** marks, uint64_t* nquire)
 {
-    uint64_t n = (tagfs_get_state()->block_end + q - 1u) / q, blocks = 0;
+    uint64_t n = (vol->state.block_end + q - 1u) / q, blocks = 0;
     uint64_t* bit = kmalloc(sizeof(uint64_t) * (n / 64u + 1u));
     if (!bit)
         return UINT64_MAX;
     memset(bit, 0, sizeof(uint64_t) * (n / 64u + 1u));
-    for (uint32_t i = 0; i < g_binder.nslots; i++) {
-        const SlotGround* s = &g_binder.slot[i];
+    for (uint32_t i = 0; i < vol->binder.nslots; i++) {
+        const SlotGround* s = &vol->binder.slot[i];
         for (uint32_t k = 0; s->holds && k < s->nground; k++)
             StandTallyQuireMark(bit, n, q, s->ground[k].start, s->ground[k].count);
         for (uint32_t k = 0; s->holds && k < s->nquires; k++)
             StandTallyQuireMark(bit, n, q, s->quires[k].start, s->quires[k].count);
     }
-    StandTallyQuireMark(bit, n, q, g_binder.pair_a, g_binder.pair_room);
-    StandTallyQuireMark(bit, n, q, g_binder.pair_b, g_binder.pair_room);
+    StandTallyQuireMark(bit, n, q, vol->binder.pair_a, vol->binder.pair_room);
+    StandTallyQuireMark(bit, n, q, vol->binder.pair_b, vol->binder.pair_room);
     for (uint64_t at = 0; at < n; at++)
         blocks += StandTallyQuireMarked(bit, n, at) ? q : 0;
     *marks  = bit;
@@ -244,19 +245,19 @@ uint64_t StandTallyQuires(uint64_t q, uint64_t** marks, uint64_t* nquire)
  * on its atom, not on that grid (settle/ribbon.c), so it is no Quire of it.
  * What else BinderStandGround names lies in the Quires marked. False when the
  * heap will not hold them. */
-static bool BookOwnBlocks(uint64_t* own)
+static bool BookOwnBlocks(TagFSVolume* vol, uint64_t* own)
 {
-    const RibbonCursor* c      = RibbonCursorNow();
+    const RibbonCursor* c      = RibbonCursorNow(vol);
     uint64_t            q      = c->quire_blocks ? c->quire_blocks : 1u, nquire = 0;
     uint64_t*           marks  = NULL;
-    uint64_t            blocks = StandTallyQuires(q, &marks, &nquire);
-    uint32_t            room   = BinderStandGround(NULL, 0);
+    uint64_t            blocks = StandTallyQuires(vol, q, &marks, &nquire);
+    uint32_t            room   = BinderStandGround(vol, NULL, 0);
     Strip*              runs   = blocks != UINT64_MAX ? kmalloc(((uint64_t)room + 2u) * sizeof(Strip)) : NULL;
     if (!runs) {
         kfree(marks);
         return false;
     }
-    uint32_t n = BinderStandGround(runs, room);
+    uint32_t n = BinderStandGround(vol, runs, room);
     n          = n < room ? n : room;
     runs[n++]  = (Strip){ .start = c->quire.block, .count = (uint32_t)c->quire.blocks, .kind = STRIP_DATA };
     runs[n++]  = (Strip){ .start = c->next.block, .count = (uint32_t)c->next.blocks, .kind = STRIP_DATA };
@@ -283,9 +284,9 @@ static bool BookOwnBlocks(uint64_t* own)
 }
 #endif
 
-bool VolumeTallyTake(VolumeTally* tally)
+bool VolumeTallyTake(TagFSVolume* vol, VolumeTally* tally)
 {
-    TagFSState* fs = tagfs_get_state();
+    TagFSState* fs = &vol->state;
     if (!fs || !fs->initialized)
         return false;
 
@@ -303,16 +304,16 @@ bool VolumeTallyTake(VolumeTally* tally)
      * VOLUME_TESTS counts its files. */
     uint64_t own = 0;
 #ifdef CONFIG_VOLUME_TESTS
-    if (!BookOwnBlocks(&own))
+    if (!BookOwnBlocks(vol, &own))
         return false;
 #endif
     TagFSLockTake(&fs->lock);
     uint64_t used = fs->block_end - fs->free_blocks;
-    uint64_t rest = FallowBlocks();
+    uint64_t rest = FallowBlocks(vol);
     tally->files  = fs->total_files;
     TagFSLockDrop(&fs->lock);
     tally->held   = used - own - rest;
-    tally->cycles = SettledCycles();
+    tally->cycles = SettledCycles(vol);
     return true;
 }
 
@@ -332,10 +333,10 @@ static bool VolumeHeldRead(const VolumeTally* before, const VolumeTally* after)
 
 /* True when the test left the volume other than it found it — every
  * difference said, with both numbers. */
-static bool VolumeResidueSaid(const char* name, const VolumeTally* before)
+static bool VolumeResidueSaid(TagFSVolume* vol, const char* name, const VolumeTally* before)
 {
     VolumeTally after;
-    if (!VolumeTallyTake(&after)) {
+    if (!VolumeTallyTake(vol, &after)) {
         kprintf("[TESTS] %s failed: the volume could not be counted after it, "
                 "so what it left behind is unknown\n", name);
         return true;
@@ -466,9 +467,9 @@ static const TestSuite* const g_suites[] = { TEST_SUITES(TEST_SUITE_WALKED) };
  * program's write takes on this seat (WriteJobSeatRunsAsync): through the
  * port, parked on each answer, on an AHCI port or a USB disk with more than
  * one core. */
-static void TestSayWritePath(void)
+static void TestSayWritePath(TagFSVolume* vol)
 {
-    uint8_t seat = tagfs_get_seat();
+    uint8_t seat = tagfs_get_seat(vol);
     kprintf("[TESTS] the tests that write go through seat %u (%s), on the "
             "synchronous path — as a caller in the kernel, standing in its call; "
             "a program's write there, and the stand_port suite's and stand_run's "
@@ -492,10 +493,12 @@ static void TestSayWritePath(void)
 /* SEEKLAG=<us>: the volume's seat seeks before every read from the first test
  * that writes on (block_fail.h, BlockFailReadLag) — a medium that seeks, for
  * the tests to meet as it is. */
-static void TestSeekLag(void)
+static void TestSeekLag(TagFSVolume* vol)
 {
 #ifdef CONFIG_SEEKLAG_US
-    BlockFailReadLag(tagfs_get_seat(), CONFIG_SEEKLAG_US);
+    BlockFailReadLag(tagfs_get_seat(vol), CONFIG_SEEKLAG_US);
+#else
+    (void)vol;
 #endif
 }
 
@@ -514,17 +517,17 @@ static void TestSeekLag(void)
  * is a medium remembered as one that lied (TagFSStandLiedForget): the stand's
  * volume is every test's, and every mount after would hold it to have lied.
  */
-static bool TestLeftAFaultArmed(const TestCase* test)
+static bool TestLeftAFaultArmed(TagFSVolume* vol, const TestCase* test)
 {
 #ifdef CONFIG_VOLUME_TESTS
     bool block   = BlockFailDisarm();
     bool heap    = HeapFailDisarm();
     bool wall    = BinderStandNoRoomWait(false);
-    bool dedup   = !DedupHold(true);
-    bool lied    = TagFSStandLiedForget();
-    bool protect = BlockFailProtects(tagfs_get_seat());
+    bool dedup   = !DedupHold(vol, true);
+    bool lied    = TagFSStandLiedForget(vol);
+    bool protect = BlockFailProtects(tagfs_get_seat(vol));
     if (protect)
-        BlockFailProtect(tagfs_get_seat(), false);
+        BlockFailProtect(tagfs_get_seat(vol), false);
     if (!block && !heap && !wall && !dedup && !lied && !protect)
         return false;
 
@@ -551,6 +554,7 @@ static bool TestLeftAFaultArmed(const TestCase* test)
             "it\n", test->name, said);
     return true;
 #else
+    (void)vol;
     (void)test;
     return false;
 #endif
@@ -585,11 +589,11 @@ static bool TestLeftContextAside(const TestCase* test)
  * Without it the ribbon of a whole stand runs on past every Tally — measured:
  * 10393 stitches over 39 Quires, read whole by every mount after them.
  */
-static void TestTallyOwedLaid(const TestCase* test)
+static void TestTallyOwedLaid(TagFSVolume* vol, const TestCase* test)
 {
-    if (!BinderEngrossOwed())
+    if (!BinderEngrossOwed(vol))
         return;
-    error_t rc = BinderRunWhole();
+    error_t rc = BinderRunWhole(vol);
     if (rc != OK)
         kprintf("[TESTS] the Tally owed before %s was not laid (error %u): the test meets the ribbon as "
                 "it stands\n", test->name, (unsigned)rc);
@@ -608,24 +612,24 @@ static void TestTallyOwedLaid(const TestCase* test)
  * second boot of the stand met two such tails and 453 blocks resting, and 25
  * tests of room, Tallies and Slips failed on them.
  */
-static void TestBookTallied(void)
+static void TestBookTallied(TagFSVolume* vol)
 {
-    error_t rc = TagFSSettle();
+    error_t rc = TagFSSettle(vol);
     if (rc == OK)
-        rc = BinderRunWhole();
+        rc = BinderRunWhole(vol);
     if (rc != OK)
         kprintf("[TESTS] the Tally the tests that write begin on was not laid (error %u): they meet the book as it "
                 "stands\n", (unsigned)rc);
 }
 
-static void TestRun(const TestCase* test, uint32_t of, TestStats* stats)
+static void TestRun(TagFSVolume* vol, const TestCase* test, uint32_t of, TestStats* stats)
 {
     bool        guarded = test->reach == TEST_WRITES_TO_VOLUME;
     VolumeTally before;
 
     if (guarded)
-        TestTallyOwedLaid(test);
-    if (guarded && !VolumeTallyTake(&before)) {
+        TestTallyOwedLaid(vol, test);
+    if (guarded && !VolumeTallyTake(vol, &before)) {
         stats->total_failed++;
         kprintf("[TESTS] %s was not run: the volume could not be counted before "
                 "it, so nothing it left behind could have been seen\n", test->name);
@@ -646,13 +650,13 @@ static void TestRun(const TestCase* test, uint32_t of, TestStats* stats)
     if (g_volume_tests_allowed)
         kprintf("[TESTS] %u of %u: %s\n", stats->total_tests, of, test->name);
     TestResult seen = test->func();
-    bool left_armed = TestLeftAFaultArmed(test);
+    bool left_armed = TestLeftAFaultArmed(vol, test);
     bool left_aside = TestLeftContextAside(test);
 
     /* Residue first: a test that left the volume changed has failed, and
      * whatever it would otherwise have been judged — held included — is not
      * said, so a count of held lines never includes one that failed. */
-    if (guarded && VolumeResidueSaid(test->name, &before))
+    if (guarded && VolumeResidueSaid(vol, test->name, &before))
         stats->total_failed++;
     else if (left_armed || left_aside)
         stats->total_failed++;
@@ -675,7 +679,7 @@ void TagFS_TestsShutdown(void)
     g_tests_initialized = false;
 }
 
-error_t TagFS_RunAllTests(TestStats* stats)
+error_t TagFS_RunAllTests(TagFSVolume* vol, TestStats* stats)
 {
     if (!g_tests_initialized)
         return ERR_NOT_INITIALIZED;
@@ -697,10 +701,10 @@ error_t TagFS_RunAllTests(TestStats* stats)
      * door when a test lets the volume go and mounts it again, and the volume
      * waits for it to leave — nor the Retire service, for the same reason
      * (retire/retire.h). */
-    SettleCadenceHold(true);
-    (void)DedupHold(true);
-    (void)KeepHold(true);
-    (void)RetireHold(true);
+    SettleCadenceHold(vol, true);
+    (void)DedupHold(vol, true);
+    (void)KeepHold(vol, true);
+    (void)RetireHold(vol, true);
     for (uint32_t s = 0; s < ARRAY_SIZE(g_suites); s++) {
         const TestSuite* suite = g_suites[s];
         for (uint32_t i = 0; i < suite->count; i++) {
@@ -724,18 +728,18 @@ error_t TagFS_RunAllTests(TestStats* stats)
                 continue;
             }
             if (test->reach == TEST_WRITES_TO_VOLUME && !path_said) {
-                TestSayWritePath();
-                TestBookTallied();
-                TestSeekLag();
+                TestSayWritePath(vol);
+                TestBookTallied(vol);
+                TestSeekLag(vol);
                 path_said = true;
             }
-            TestRun(test, registered, stats);
+            TestRun(vol, test, registered, stats);
         }
     }
-    (void)RetireHold(false);
-    (void)KeepHold(false);
-    (void)DedupHold(false);
-    SettleCadenceHold(false);
+    (void)RetireHold(vol, false);
+    (void)KeepHold(vol, false);
+    (void)DedupHold(vol, false);
+    SettleCadenceHold(vol, false);
 
     /* Said with kprintf: "37 run, 35 passed" tells nobody which 37, and a
      * suite that quietly shrank is how a test stops covering anything. */
@@ -759,14 +763,15 @@ error_t TagFS_RunAllTests(TestStats* stats)
  * it does not fail the run. */
 error_t TagFS_RunTests(void)
 {
-    if (!tagfs_enter())
+    TagFSVolume* vol = TagFSHome();
+    if (!tagfs_enter(vol))
         return ERR_TAGFS_NOT_INITIALIZED;
     TestStats stats;
-    error_t   result = TagFS_RunAllTests(&stats);
+    error_t   result = TagFS_RunAllTests(vol, &stats);
     kprintf("[TESTS] TagFS: %u run, %u passed, %u failed, %u skipped, "
             "%u held under a caveat\n",
             stats.total_tests, stats.total_passed, stats.total_failed,
             stats.total_skipped, stats.total_held);
-    tagfs_leave();
+    tagfs_leave(vol);
     return result;
 }

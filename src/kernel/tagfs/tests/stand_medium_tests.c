@@ -16,6 +16,7 @@
 #include "atomics.h"
 #include "baton.h"
 #include "cpu_calibrate.h"
+#include "tagfs_volume.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -45,12 +46,12 @@
 #define STAND_BOOK_BOUND_MS 1000u
 
 /* Why the flush tests cannot be asked here, or NULL. */
-static const char* StandFlushAside(uint8_t seat)
+static const char* StandFlushAside(TagFSVolume* vol, uint8_t seat)
 {
     if (BoardroomSeatKind(seat) != BOARD_USB)
         return "the volume's medium is not a USB disk, and SYNCHRONIZE CACHE is a USB disk's "
                "command";
-    return StandStepsAsideFor();
+    return StandStepsAsideFor(vol);
 }
 
 /*
@@ -62,24 +63,25 @@ static const char* StandFlushAside(uint8_t seat)
  */
 static TestResult TestStandMediumNoMediumFlushRefused(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    uint8_t     seat    = tagfs_get_seat();
-    const char* aside   = StandFlushAside(seat);
+    uint8_t     seat    = tagfs_get_seat(vol);
+    const char* aside   = StandFlushAside(vol, seat);
 
     if (aside)
         return test_steps_aside(aside);
 
-    TEST_ASSERT_OK(tagfs_flush_cache(), "a flush the device carries out is kept");
-    uint64_t need = VolumeFlushNeed();
+    TEST_ASSERT_OK(tagfs_flush_cache(vol), "a flush the device carries out is kept");
+    uint64_t need = VolumeFlushNeed(vol);
     BlockFailArmFlushSense(seat, STAND_SENSE_NOT_READY, STAND_ASC_NO_MEDIUM, 0, 1);
-    error_t rc    = tagfs_flush_cache();
+    error_t rc    = tagfs_flush_cache(vol);
     bool    fired = BlockFailFired();
     BlockFailDisarm();
     TEST_ASSERT(fired, "the flush was answered MEDIUM NOT PRESENT");
     TestEvidence("the flush's answer to MEDIUM NOT PRESENT:", (uint64_t)rc);
     TEST_ASSERT(rc != OK, "and is refused, never success");
-    TEST_ASSERT(!VolumeFlushKept(need), "no write before it is called kept by it");
-    TEST_ASSERT_OK(tagfs_flush_cache(), "the next flush, answered by the device, is kept");
+    TEST_ASSERT(!VolumeFlushKept(vol, need), "no write before it is called kept by it");
+    TEST_ASSERT_OK(tagfs_flush_cache(vol), "the next flush, answered by the device, is kept");
 out:
     BlockFailDisarm();
     return verdict;
@@ -94,22 +96,23 @@ out:
  */
 static TestResult TestStandMediumSyncCacheRemembered(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    uint8_t     seat    = tagfs_get_seat();
+    uint8_t     seat    = tagfs_get_seat(vol);
     uint8_t     unit    = BoardroomSeatIndex(seat);
     bool        known   = false;
-    const char* aside   = StandFlushAside(seat);
+    const char* aside   = StandFlushAside(vol, seat);
 
     if (aside)
         return test_steps_aside(aside);
 
     BlockFailArmFlushSense(seat, STAND_SENSE_ILLEGAL_REQUEST, STAND_ASC_INVALID_OPCODE, 0, 1);
     known = true;
-    TEST_ASSERT_OK(tagfs_flush_cache(), "a device with no SYNCHRONIZE CACHE is taken at its word");
+    TEST_ASSERT_OK(tagfs_flush_cache(vol), "a device with no SYNCHRONIZE CACHE is taken at its word");
     TEST_ASSERT(BlockFailFired(), "its answer was ILLEGAL REQUEST");
 
     BlockFailArmFlushSense(seat, STAND_SENSE_NOT_READY, STAND_ASC_NO_MEDIUM, 0, 1);
-    TEST_ASSERT_OK(tagfs_flush_cache(),
+    TEST_ASSERT_OK(tagfs_flush_cache(vol),
                    "the next flush is not put to the device: its answer stands for the seating");
     TEST_ASSERT(BlockFailFired(), "though a NO MEDIUM was armed for it, and struck");
     BlockFailDisarm();
@@ -117,10 +120,10 @@ static TestResult TestStandMediumSyncCacheRemembered(void)
     xhci_msd_forget_flush_answer(unit);
     known = false;
     BlockFailArmFlushSense(seat, STAND_SENSE_NOT_READY, STAND_ASC_NO_MEDIUM, 0, 1);
-    TEST_ASSERT(tagfs_flush_cache() != OK,
+    TEST_ASSERT(tagfs_flush_cache(vol) != OK,
                 "forgotten, the device is asked again, and its NO MEDIUM refuses");
     BlockFailDisarm();
-    TEST_ASSERT_OK(tagfs_flush_cache(), "and a flush it carries out is kept");
+    TEST_ASSERT_OK(tagfs_flush_cache(vol), "and a flush it carries out is kept");
 out:
     BlockFailDisarm();
     if (known)
@@ -183,12 +186,12 @@ static void StandBookAnswered(SettleWaiter* w, error_t rc)
 
 /* The service point run here until `t` was handed the Helm or answered —
  * whichever core passes its own may run it first — bounded. */
-static bool StandBookTurnSettled(const StandBookTurn* t)
+static bool StandBookTurnSettled(TagFSVolume* vol, const StandBookTurn* t)
 {
     uint64_t bound = rdtsc() + cpu_ms_to_tsc(STAND_BOOK_BOUND_MS);
     uint8_t  me    = amp_get_core_index();
     for (;;) {
-        HelmRunReady();
+        HelmRunReady(vol);
         if (__atomic_load_n(&t->handed, __ATOMIC_ACQUIRE) ||
             __atomic_load_n(&t->gone, __ATOMIC_ACQUIRE))
             return true;
@@ -222,39 +225,39 @@ static const TagSpelling* StandBookTag(void)
     return &tag;
 }
 
-static TestResult StandBookOpen(StandBook* b, const char* name)
+static TestResult StandBookOpen(TagFSVolume* vol, StandBook* b, const char* name)
 {
     TestResult verdict = TEST_PASS;
     memset(b, 0, sizeof(*b));
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0xB0u);
-    TEST_ASSERT(StandMakeFile(name, g_test_buffer, TAGFS_BLOCK_SIZE, &b->file_id),
+    TEST_ASSERT(StandMakeFile(vol, name, g_test_buffer, TAGFS_BLOCK_SIZE, &b->file_id),
                 "a file is made and written");
-    TEST_ASSERT_OK(tagfs_add_tag_string(TagOwnerPerson(), b->file_id, StandBookTag()),
+    TEST_ASSERT_OK(tagfs_add_tag_string(vol, TagOwnerPerson(), b->file_id, StandBookTag()),
                    "it wears stand_book");
-    b->tag = TagRegistryLookup(tagfs_get_state()->registry, TagOwnerPerson(), StandBookTag());
-    TEST_ASSERT_OK(TagFSSettle(), "and a cycle settles it, every write it saw kept");
+    b->tag = TagRegistryLookup(vol->state.registry, TagOwnerPerson(), StandBookTag());
+    TEST_ASSERT_OK(TagFSSettle(vol), "and a cycle settles it, every write it saw kept");
 
-    b->holder  = tagfs_open(b->file_id, TAGFS_HANDLE_WRITE | TAGFS_HANDLE_APPEND);
-    b->waiting = tagfs_open(b->file_id, TAGFS_HANDLE_WRITE | TAGFS_HANDLE_APPEND);
+    b->holder  = tagfs_open(vol, b->file_id, TAGFS_HANDLE_WRITE | TAGFS_HANDLE_APPEND);
+    b->waiting = tagfs_open(vol, b->file_id, TAGFS_HANDLE_WRITE | TAGFS_HANDLE_APPEND);
     TEST_ASSERT(b->holder && b->waiting, "a holder and a waiter open it");
     memset(&s_holder, 0, sizeof(s_holder));
-    TEST_ASSERT(HelmAsk(b->holder->ofe, &s_holder), "the holder holds its Helm");
+    TEST_ASSERT(HelmAsk(vol, b->holder->ofe, &s_holder), "the holder holds its Helm");
     b->holding = true;
     StandBookTurnSet(&s_waiting);
-    bool mine = HelmAsk(b->waiting->ofe, &s_waiting.waiter);
+    bool mine = HelmAsk(vol, b->waiting->ofe, &s_waiting.waiter);
     b->queued = !mine;
     if (mine)
-        HelmLetGo(b->waiting->ofe, &s_waiting.waiter);
+        HelmLetGo(vol, b->waiting->ofe, &s_waiting.waiter);
     TEST_ASSERT(!mine, "and the waiter is queued");
 
-    TEST_ASSERT_EQ(tagfs_remove_tag(b->file_id, b->tag), 0,
+    TEST_ASSERT_EQ(tagfs_remove_tag(vol, b->file_id, b->tag), 0,
                    "stand_book comes off — a change that writes nothing");
-    b->gen       = InkedGen();
-    b->unsettled = InkedGen() - SettledGen();
+    b->gen       = InkedGen(vol);
+    b->unsettled = InkedGen(vol) - SettledGen(vol);
     TEST_ASSERT(b->unsettled > 0, "and no cycle settled it");
-    TEST_ASSERT_EQ(SettleWaitNow(b->gen), ERR_WOULD_BLOCK, "an anchor for it waits");
+    TEST_ASSERT_EQ(SettleWaitNow(vol, b->gen), ERR_WOULD_BLOCK, "an anchor for it waits");
     memset(&s_anchor, 0, sizeof(s_anchor));
-    SettleWaitLink(&s_anchor.w, b->gen, StandBookAnswered);
+    SettleWaitLink(vol, &s_anchor.w, b->gen, StandBookAnswered);
     b->anchored = true;
 out:
     return verdict;
@@ -262,25 +265,25 @@ out:
 
 /* The departure: the Helm's holder lets go with the medium away, and nothing
  * is handed on, answered, or settled while the book is held. */
-static TestResult StandBookLeaves(StandBook* b)
+static TestResult StandBookLeaves(TagFSVolume* vol, StandBook* b)
 {
     TestResult verdict = TEST_PASS;
     InkReceipt receipt;
 
-    TagFSStandMediumLeaves();
-    TEST_ASSERT(TagFSMediumLeft(), "the medium is said to have left");
-    TEST_ASSERT_EQ(InkFields(b->file_id, NULL, b->tag, TAGFS_INVALID_TAG_ID, &receipt),
+    TagFSStandMediumLeaves(vol);
+    TEST_ASSERT(TagFSMediumLeft(vol), "the medium is said to have left");
+    TEST_ASSERT_EQ(InkFields(vol, b->file_id, NULL, b->tag, TAGFS_INVALID_TAG_ID, &receipt),
                    ERR_DEVICE_NOT_READY, "a new Ink is refused ERR_DEVICE_NOT_READY");
-    HelmLetGo(b->holder->ofe, &s_holder);
+    HelmLetGo(vol, b->holder->ofe, &s_holder);
     b->holding = false;
-    HelmRunReady();
-    SettleServiceIfPending();
+    HelmRunReady(vol);
+    SettleServiceIfPending(vol);
     TEST_ASSERT(!s_waiting.handed && !s_waiting.gone,
                 "the holder let go and the waiter is neither handed the Helm nor answered");
     TEST_ASSERT(!s_anchor.answered, "and the anchor is not answered: both wait with the book");
 
     StandBookTurnSet(&s_late);
-    TEST_ASSERT(!HelmAsk(b->waiting->ofe, &s_late.waiter),
+    TEST_ASSERT(!HelmAsk(vol, b->waiting->ofe, &s_late.waiter),
                 "one who asks for the parked Helm now is not given it");
     TEST_ASSERT_EQ(s_late.gone, 1, "and is answered at once that the medium is away");
     TEST_ASSERT_EQ(s_late.lost, 0, "nothing of its own lost");
@@ -290,25 +293,25 @@ out:
 
 /* Whatever a test left: the latch let go of, the Helm and the anchor given
  * back, the file gone and settled. */
-static void StandBookClose(StandBook* b)
+static void StandBookClose(TagFSVolume* vol, StandBook* b)
 {
-    if (TagFSMediumLeft())
-        (void)TagFSStandMediumReturns();
+    if (TagFSMediumLeft(vol))
+        (void)TagFSStandMediumReturns(vol);
     if (b->holding)
-        HelmLetGo(b->holder->ofe, &s_holder);
-    if (b->queued && StandBookTurnSettled(&s_waiting)) {
+        HelmLetGo(vol, b->holder->ofe, &s_holder);
+    if (b->queued && StandBookTurnSettled(vol, &s_waiting)) {
         if (s_waiting.handed)
-            HelmLetGo(b->waiting->ofe, &s_waiting.waiter);
+            HelmLetGo(vol, b->waiting->ofe, &s_waiting.waiter);
     } else if (b->queued) {
         b->waiting = NULL;           /* still queued: its handle must outlive it */
     }
     if (b->anchored && !s_anchor.answered)
-        (void)SettleWaitUnlink(&s_anchor.w);
-    tagfs_close(b->holder);
-    tagfs_close(b->waiting);
+        (void)SettleWaitUnlink(vol, &s_anchor.w);
+    tagfs_close(vol, b->holder);
+    tagfs_close(vol, b->waiting);
     if (b->file_id)
-        (void)tagfs_delete_file(b->file_id, INK_UNWARRANTED);
-    (void)TagFSSettle();
+        (void)tagfs_delete_file(vol, b->file_id, INK_UNWARRANTED);
+    (void)TagFSSettle(vol);
 }
 
 /*
@@ -319,36 +322,37 @@ static void StandBookClose(StandBook* b)
  */
 static TestResult TestStandMediumBookTakenUp(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
     StandBook   b;
-    const char* aside   = StandStepsAsideFor();
+    const char* aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
 
-    verdict = StandBookOpen(&b, "book_taken_up");
+    verdict = StandBookOpen(vol, &b, "book_taken_up");
     if (verdict == TEST_PASS)
-        verdict = StandBookLeaves(&b);
+        verdict = StandBookLeaves(vol, &b);
     if (verdict != TEST_PASS)
         goto out;
 
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_AS_LEFT,
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(vol), AWAY_AS_LEFT,
                    "the medium came back as this kernel left it");
-    TEST_ASSERT(!TagFSMediumLeft(), "and the book is taken up");
-    TEST_ASSERT(StandBookTurnSettled(&s_waiting) && s_waiting.handed,
+    TEST_ASSERT(!TagFSMediumLeft(vol), "and the book is taken up");
+    TEST_ASSERT(StandBookTurnSettled(vol, &s_waiting) && s_waiting.handed,
                 "the waiter is handed the parked Helm");
     TEST_ASSERT_EQ(s_waiting.gone, 0, "and was never answered that the medium left");
-    HelmLetGo(b.waiting->ofe, &s_waiting.waiter);
+    HelmLetGo(vol, b.waiting->ofe, &s_waiting.waiter);
     b.queued = false;
 
-    TEST_ASSERT_OK(TagFSSettle(), "the next cycle, built from S0, settles");
+    TEST_ASSERT_OK(TagFSSettle(vol), "the next cycle, built from S0, settles");
     TEST_ASSERT(s_anchor.answered, "the anchor is answered");
     TEST_ASSERT_OK(s_anchor.rc, "with OK");
     TestEvidence("changes the book held across the departure", b.unsettled);
-    TEST_ASSERT(SettledGen() >= b.gen, "the change the book held is settled — none lost");
-    TEST_ASSERT(!tagfs_has_tag(b.file_id, b.tag), "and the file is as the change left it");
+    TEST_ASSERT(SettledGen(vol) >= b.gen, "the change the book held is settled — none lost");
+    TEST_ASSERT(!tagfs_has_tag(vol, b.file_id, b.tag), "and the file is as the change left it");
 out:
-    StandBookClose(&b);
+    StandBookClose(vol, &b);
     return verdict;
 }
 
@@ -398,12 +402,13 @@ static bool StandBellHeardAt(uint32_t want)
  */
 static TestResult TestStandMediumBellRingsOnce(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    uint8_t     seat    = tagfs_get_seat();
+    uint8_t     seat    = tagfs_get_seat(vol);
     TouchWatch* ear     = NULL;
     bool        armed   = false;
     TouchTag    full    = TOUCH_TAG_INVALID, bare = TOUCH_TAG_INVALID;
-    const char* aside   = StandStepsAsideFor();
+    const char* aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
@@ -462,49 +467,50 @@ out:
  */
 static TestResult TestStandMediumNeverLeftIsNoReturn(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult       verdict = TEST_PASS;
-    TagFSState*      fs      = tagfs_get_state();
-    uint32_t         epoch   = tagfs_mount_epoch();
+    TagFSState*      fs      = &vol->state;
+    uint32_t         epoch   = tagfs_mount_epoch(vol);
     uint64_t         file_id = 0;
     TagFSFileHandle* handle  = NULL;
     bool             mine    = false;
-    const char*      aside   = StandStepsAsideFor();
+    const char*      aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
 
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0xB4u);
-    TEST_ASSERT(StandMakeFile("never_left", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+    TEST_ASSERT(StandMakeFile(vol, "never_left", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a file is made and written");
-    TEST_ASSERT_OK(TagFSSettle(), "every change is on the medium");
-    handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE);
+    TEST_ASSERT_OK(TagFSSettle(vol), "every change is on the medium");
+    handle = tagfs_open(vol, file_id, TAGFS_HANDLE_WRITE);
     TEST_ASSERT(handle != NULL, "and the file is opened to be written");
 
-    TagFSStandMediumLeaves();
-    TEST_ASSERT(TagFSMediumLeft(), "the book opens, the medium carrying the volume still seated");
-    TEST_ASSERT_EQ(tagfs_volume_read(0, 1, g_test_output), ERR_DEVICE_NOT_READY,
+    TagFSStandMediumLeaves(vol);
+    TEST_ASSERT(TagFSMediumLeft(vol), "the book opens, the medium carrying the volume still seated");
+    TEST_ASSERT_EQ(tagfs_volume_read(vol, 0, 1, g_test_output), ERR_DEVICE_NOT_READY,
                    "a read of the volume is refused as the medium's departure, no medium's refusal");
     StandBookTurnSet(&s_late);
-    mine = HelmAsk(handle->ofe, &s_late.waiter);
+    mine = HelmAsk(vol, handle->ofe, &s_late.waiter);
     TEST_ASSERT(!mine, "the file's Helm, free, is not handed to a writer while the medium is away");
     TEST_ASSERT_EQ(s_late.gone, 1, "the writer is answered at once that the medium is away");
 
-    TagFSAttendArrival();
-    TEST_ASSERT(StandMountSettles(), "the room is searched for its return");
-    TEST_ASSERT(TagFSMediumLeft(),
+    TagFSAttendArrival(vol);
+    TEST_ASSERT(StandMountSettles(vol), "the room is searched for its return");
+    TEST_ASSERT(TagFSMediumLeft(vol),
                 "and no medium seated before the book opened is judged as it: the book stays open");
-    TEST_ASSERT(!TagFSStandMountOwed(), "nothing is owed: no seat refused");
-    TEST_ASSERT(fs->initialized && tagfs_mount_epoch() == epoch,
+    TEST_ASSERT(!TagFSStandMountOwed(vol), "nothing is owed: no seat refused");
+    TEST_ASSERT(fs->initialized && tagfs_mount_epoch(vol) == epoch,
                 "and the volume is the one up all along");
 out:
-    if (TagFSMediumLeft())
-        (void)TagFSStandMediumReturns();
+    if (TagFSMediumLeft(vol))
+        (void)TagFSStandMediumReturns(vol);
     if (mine)
-        HelmLetGo(handle->ofe, &s_late.waiter);
-    tagfs_close(handle);
+        HelmLetGo(vol, handle->ofe, &s_late.waiter);
+    tagfs_close(vol, handle);
     if (file_id)
-        (void)tagfs_delete_file(file_id, INK_UNWARRANTED);
-    (void)TagFSSettle();
+        (void)tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
+    (void)TagFSSettle(vol);
     return verdict;
 }
 
@@ -518,33 +524,34 @@ out:
  */
 static TestResult TestStandMediumTakenUpTakesWrites(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict    = TEST_PASS;
-    uint8_t     seat       = tagfs_get_seat();
+    uint8_t     seat       = tagfs_get_seat(vol);
     bool        protected_ = false;
-    const char* aside      = StandStepsAsideFor();
+    const char* aside      = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
 
-    TEST_ASSERT_OK(TagFSSettle(), "every change is on the medium");
+    TEST_ASSERT_OK(TagFSSettle(vol), "every change is on the medium");
     BlockFailProtect(seat, true);
     protected_ = true;
-    TagFSWriteRefused();
-    TEST_ASSERT(TagFSReadOnly(), "the medium refuses writes as protected, and the volume takes none");
+    TagFSWriteRefused(vol);
+    TEST_ASSERT(TagFSReadOnly(vol), "the medium refuses writes as protected, and the volume takes none");
     BlockFailProtect(seat, false);
     protected_ = false;
 
-    TagFSStandMediumLeaves();
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_AS_LEFT,
+    TagFSStandMediumLeaves(vol);
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(vol), AWAY_AS_LEFT,
                    "it leaves, and comes back as this kernel left it");
-    TEST_ASSERT(!TagFSReadOnly(), "and its book taken up, the volume takes changes again");
-    TEST_ASSERT_OK(TagFSSettle(), "and a cycle settles on it");
+    TEST_ASSERT(!TagFSReadOnly(vol), "and its book taken up, the volume takes changes again");
+    TEST_ASSERT_OK(TagFSSettle(vol), "and a cycle settles on it");
 out:
     if (protected_)
         BlockFailProtect(seat, false);
-    if (TagFSMediumLeft())
-        (void)TagFSStandMediumReturns();
-    InkReadOnlyLift();
+    if (TagFSMediumLeft(vol))
+        (void)TagFSStandMediumReturns(vol);
+    InkReadOnlyLift(vol);
     return verdict;
 }
 
@@ -603,29 +610,30 @@ static StandBookWait s_let_go_wait;
  */
 static TestResult TestStandMediumLetGoAnswersItsWaiters(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    uint8_t     seat    = tagfs_get_seat();
+    uint8_t     seat    = tagfs_get_seat(vol);
     bool        linked  = false;
     bool        let_go  = false;
-    const char* aside   = StandStepsAsideFor();
+    const char* aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
 
-    TEST_ASSERT(StandSettledBare(), "every change is on the medium, and nothing rests, before it goes");
+    TEST_ASSERT(StandSettledBare(vol), "every change is on the medium, and nothing rests, before it goes");
     memset(&s_let_go_wait, 0, sizeof(s_let_go_wait));
-    SettleWaitLink(&s_let_go_wait.w, InkedGen() + 1u, StandBookAnswered);
+    SettleWaitLink(vol, &s_let_go_wait.w, InkedGen(vol) + 1u, StandBookAnswered);
     linked = true;
     TEST_ASSERT(!s_let_go_wait.answered, "a waiter for a cycle of the volume waits");
     let_go = true;
-    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of, writing nothing");
+    TEST_ASSERT(TagFSStandLetGo(vol), "the volume is let go of, writing nothing");
     TEST_ASSERT(s_let_go_wait.answered, "and the waiter is answered as it goes, before any mount");
     TEST_ASSERT_EQ(s_let_go_wait.rc, ERR_DEVICE_NOT_READY, "with ERR_DEVICE_NOT_READY");
 out:
     if (linked && !s_let_go_wait.answered)
-        (void)SettleWaitUnlink(&s_let_go_wait.w);
+        (void)SettleWaitUnlink(vol, &s_let_go_wait.w);
     if (let_go)
-        StandMountClose(seat);
+        StandMountClose(vol, seat);
     return verdict;
 }
 

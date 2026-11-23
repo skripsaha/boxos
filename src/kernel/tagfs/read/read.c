@@ -87,23 +87,23 @@ error_t ReadLocate(const TagFSFileHandle *h, uint64_t k, FileSpot *out)
  * `*buf`, made at the first such read. Its bytes are checked against the
  * digest recorded when it was written either way: a block out of the window
  * came off the medium in a run nothing checked (CW-D8). */
-static error_t ReadStreamBlock(TagFSFileHandle *h, uint64_t block, uint32_t run, uint8_t **buf,
+static error_t ReadStreamBlock(TagFSVolume* vol, TagFSFileHandle *h, uint64_t block, uint32_t run, uint8_t **buf,
                                const uint8_t **out)
 {
-    const uint8_t *held = ReadAheadServe(h, block);
+    const uint8_t *held = ReadAheadServe(vol, h, block);
     if (!held && run > 1) {
-        ReadAheadFetch(h, block, run);
-        held = ReadAheadServe(h, block);
+        ReadAheadFetch(vol, h, block, run);
+        held = ReadAheadServe(vol, h, block);
     }
     if (held) {
-        if (!IntegrityVerify(block, held))
+        if (!IntegrityVerify(vol, block, held))
             return ERR_CHECKSUM;
         *out = held;
         return OK;
     }
     if (!*buf && !(*buf = kmalloc(TAGFS_BLOCK_SIZE)))
         return ERR_NO_MEMORY;
-    error_t rc = tagfs_read_block(block, *buf);
+    error_t rc = tagfs_read_block(vol, block, *buf);
     if (rc == OK)
         *out = *buf;
     return rc;
@@ -116,7 +116,7 @@ static error_t ReadStreamBlock(TagFSFileHandle *h, uint64_t block, uint32_t run,
  * reason as it is — the medium's, the digest's, the record's, the sink's —
  * and how many bytes landed before it; the handle moves by those.
  */
-error_t TagFSReadStream(TagFSFileHandle *h, const ReadSink *sink, uint64_t *out_read)
+error_t TagFSReadStream(TagFSVolume* vol, TagFSFileHandle *h, const ReadSink *sink, uint64_t *out_read)
 {
     uint64_t size = sink->bytes;
     *out_read = 0;
@@ -166,7 +166,7 @@ error_t TagFSReadStream(TagFSFileHandle *h, const ReadSink *sink, uint64_t *out_
         uint32_t run  = need > (uint64_t)spot.left + 1 ? spot.left + 1 : (uint32_t)need;
 
         const uint8_t *from = NULL;
-        rc = ReadStreamBlock(h, spot.block, run, &buf, &from);
+        rc = ReadStreamBlock(vol, h, spot.block, run, &buf, &from);
         if (rc == OK)
             rc = ReadSinkBlock(sink, done, h->rec, pos / TAGFS_BLOCK_SIZE, from, offset, chunk);
         if (rc != OK) {

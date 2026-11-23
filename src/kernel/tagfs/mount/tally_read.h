@@ -55,7 +55,7 @@ typedef struct {
 } TallyPtr;
 
 /* The block copy `k` of a pointer lies at, k < p->copies. */
-uint64_t TallyPtrBlock(const TallyPtr* p, uint32_t k);
+uint64_t TallyPtrBlock(TagFSVolume* vol, const TallyPtr* p, uint32_t k);
 
 /* Where a node lies in its tree: its pointer, its level, the count its parent
  * carries for it (its slot's SpineRoot, for a root), and the keys its parent's
@@ -92,31 +92,31 @@ typedef struct {
 
 /* The place of a tree's root, out of its slot's SpineRoot. OK, or
  * ERR_NO_MEMORY for no room for the copies past the two a place holds. */
-error_t TallyRootPlace(const SpineRoot* root, TallyPlace* out);
+error_t TallyRootPlace(TagFSVolume* vol, const SpineRoot* root, TallyPlace* out);
 
 /* Whether the root of `tree` reads in some copy, as a node of that tree and
  * of the level its slot names: OK, or ERR_TAGFS_CORRUPTED with why in `why`
  * (each copy's), or ERR_NO_MEMORY, or the medium's refusal. Nothing said. */
-error_t TallyRootReads(uint64_t tree, const SpineRoot* root, char* why, size_t room);
+error_t TallyRootReads(TagFSVolume* vol, uint64_t tree, const SpineRoot* root, char* why, size_t room);
 
 /* The tree walked from its root: its leaves read and handed over when
  * `leaves`, else named by their places alone. OK, or a refusal — the medium's,
  * memory's, or a callback's. A root that does not read here is a rotten
  * range of the whole tree: the mount asked TallyRootReads first. */
-error_t TallyRead(uint64_t tree, const SpineRoot* root, bool leaves, const TallySink* sink);
+error_t TallyRead(TagFSVolume* vol, uint64_t tree, const SpineRoot* root, bool leaves, const TallySink* sink);
 
 /* The leaf at `at` of `tree` read alone, from the first of its copies that
  * holds: its items handed to sink->item in key order and the copies before it
  * to sink->mend — or, no copy holding, the leaf handed to sink->rotten. OK, or
  * memory's, the medium's or a callback's refusal. Nothing said: the Binder's
  * self-check reads the Tally before the one it lays so (settle/binder_check.c). */
-error_t TallyLeafRead(uint64_t tree, const TallyPlace* at, const TallySink* sink);
+error_t TallyLeafRead(TagFSVolume* vol, uint64_t tree, const TallyPlace* at, const TallySink* sink);
 
 /* Whether copy `k` of the node at `p` holds — a whole SHEET unit of its seq,
  * parsed as a node in its range — *holds, and why not in `why`: OK, or
  * memory's or the medium's refusal. The Binder reads both copies of a leaf no
  * Tally lays again so (settle/binder_proof.c). */
-error_t TallyCopyHolds(const TallyPlace* p, uint32_t k, bool* holds, char* why, size_t room);
+error_t TallyCopyHolds(TagFSVolume* vol, const TallyPlace* p, uint32_t k, bool* holds, char* why, size_t room);
 
 /* A tree's name, as the book's lines say it. */
 const char* TallyTreeName(uint64_t tree);
@@ -127,7 +127,7 @@ const char* TallyTreeName(uint64_t tree);
  * — or, `rotten`, a range of the tree no copy of whose node reads, whose
  * blocks read unchecked (TallyRead's callbacks over DIGESTS). OK or
  * ERR_NO_MEMORY. */
-error_t TallyDigestsKeep(const TallyPlace* leaf, bool rotten);
+error_t TallyDigestsKeep(TagFSVolume* vol, const TallyPlace* leaf, bool rotten);
 
 /* Every block a DIGESTS leaf names, and every range of blocks a rotten leaf
  * — or an element of one that does not read — would have named, read now off
@@ -135,7 +135,7 @@ error_t TallyDigestsKeep(const TallyPlace* leaf, bool rotten);
  * `ctx`. Said for each leaf that rots. OK, or the refusal of a leaf that
  * could not be read — memory's or the medium's. The mount's, when a FILES
  * range rots (§16.1 п.5). */
-error_t TallyDigestsEach(void (*run)(void* ctx, uint64_t start, uint64_t count),
+error_t TallyDigestsEach(TagFSVolume* vol, void (*run)(void* ctx, uint64_t start, uint64_t count),
                          void (*rot)(void* ctx, uint64_t start, uint64_t count, bool to_end), void* ctx);
 
 /* What the Tally says of one block's digest (TallyDigestFind). */
@@ -149,7 +149,7 @@ typedef enum {
 } TallyDigestSays;
 
 /* The digest the Tally holds for `block`, in *digest when it is NAMED. */
-TallyDigestSays TallyDigestFind(uint64_t block, uint64_t* digest, error_t* refused);
+TallyDigestSays TallyDigestFind(TagFSVolume* vol, uint64_t block, uint64_t* digest, error_t* refused);
 
 /* The nodes of the DIGESTS the reads stand on that no copy of holds — a leaf
  * read now to know it, one already known so, an inner node the mount's walk
@@ -158,15 +158,15 @@ TallyDigestSays TallyDigestFind(uint64_t block, uint64_t* digest, error_t* refus
  * nodes a Tally names as they lie (§16.4 п.5, settle/binder.c), a leaf a turn
  * of the Settle's holder, with no TagFS lock held. OK, or the medium's,
  * memory's or the callback's refusal. */
-error_t TallyDigestsRottenNext(uint32_t* leaf, error_t (*rot)(void* ctx, const TallyPlace* at), void* ctx,
+error_t TallyDigestsRottenNext(TagFSVolume* vol, uint32_t* leaf, error_t (*rot)(void* ctx, const TallyPlace* at), void* ctx,
                                bool* done);
 
 /* The `index`-th leaf of the DIGESTS the reads stand on, in key order —
  * *rotten for a range of it no copy of whose node reads: false past the last;
  * and how many there are.
  * By the Settle's holder, who alone turns them (TallyDigestsTurn). */
-bool    TallyDigestLeafAt(uint32_t index, TallyPlace* out, bool* rotten);
-uint32_t TallyDigestLeaves(void);
+bool    TallyDigestLeafAt(TagFSVolume* vol, uint32_t index, TallyPlace* out, bool* rotten);
+uint32_t TallyDigestLeaves(TagFSVolume* vol);
 
 /* The leaf of the DIGESTS the reads stand on whose range holds `block` — or,
  * none holding it, the first whose range begins past it — read off the medium
@@ -180,13 +180,13 @@ uint32_t TallyDigestLeaves(void);
  * refusal. Dedup's walk of the book (dedup/dedup.h), from any core, inside
  * the door. */
 typedef void (*TallyDigestsRun)(void* ctx, uint64_t start, uint64_t n, const uint8_t* digests);
-error_t TallyDigestsFrom(uint64_t block, TallyDigestsRun run, void* ctx, uint64_t* next, uint64_t* sheets);
+error_t TallyDigestsFrom(TagFSVolume* vol, uint64_t block, TallyDigestsRun run, void* ctx, uint64_t* next, uint64_t* sheets);
 
 /* How many ranges of the DIGESTS the reads stand on are known to read in no
  * copy — a leaf, or an inner node's whole range — named so by the mount's
  * walk, or found so by a read since: each one Escheat lays anew of the data.
  * From any core: Escheat's answer (settle/escheat.c). */
-uint32_t TallyDigestsRotKnown(void);
+uint32_t TallyDigestsRotKnown(TagFSVolume* vol);
 
 /* The reads of a digest turned to a Tally this mount wrote: its DIGESTS
  * leaves `leaves`, in key order — `rotten` those named as they lie — in place
@@ -195,11 +195,11 @@ uint32_t TallyDigestsRotKnown(void);
  * entered it then is still in its leaf — the holder turns them at its next
  * turn rather than wait here. By the Settle's holder. OK, or ERR_NO_MEMORY
  * with the reads left where they were. */
-error_t TallyDigestsTurn(const TallyPlace* leaves, const bool* rotten, uint32_t n);
+error_t TallyDigestsTurn(TagFSVolume* vol, const TallyPlace* leaves, const bool* rotten, uint32_t n);
 
 /* The kept leaves, the leaves read and the copies of pointers past the two a
  * place holds, let go — the volume's let go of. */
-void    TallyDigestsLetGo(void);
+void    TallyDigestsLetGo(TagFSVolume* vol);
 
 #ifdef CONFIG_VOLUME_TESTS
 /* The `index`-th node of `tree` the mount's walk of the Tally it stands on

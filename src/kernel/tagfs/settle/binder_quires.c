@@ -1,4 +1,5 @@
 #include "binder_internal.h"
+#include "tagfs_volume.h"
 
 /*
  * ‼ A SLOT HOLDS EVERY TALLY-QUIRE ITS TALLY NAMES A NODE IN. A Tally laid in
@@ -24,10 +25,10 @@ typedef struct {
     uint64_t  q;
 } QuireMarks;
 
-static void PlaceMarked(QuireMarks* m, const TallyPlace* p)
+static void PlaceMarked(TagFSVolume* vol, QuireMarks* m, const TallyPlace* p)
 {
     for (uint32_t k = 0; k < p->ptr.copies; k++) {
-        uint64_t start = TallyPtrBlock(&p->ptr, k), end = start + (p->ptr.sheets ? p->ptr.sheets : 1u);
+        uint64_t start = TallyPtrBlock(vol, &p->ptr, k), end = start + (p->ptr.sheets ? p->ptr.sheets : 1u);
         for (uint64_t at = start / m->q; at < m->nquire && at * m->q < end; at++)
             m->bit[at / 64u] |= 1ull << (at % 64u);
     }
@@ -58,21 +59,21 @@ static uint32_t RunAt(uint64_t tree, const FoliationNode* run, uint32_t n, const
 /* Every node under kept node `k`, level by level: the inner ones the
  * Foliation's, the leaves the sift's — the Foliation's, or for DIGESTS the
  * reads' table's, a range no copy of whose node reads among them. */
-static void UnderMarked(QuireMarks* m, const BinderKept* k)
+static void UnderMarked(TagFSVolume* vol, QuireMarks* m, const BinderKept* k)
 {
     uint64_t   tree = k->tree;
     TallyPlace p;
     bool       rotten = false;
     for (uint64_t level = 1; level < k->at.level; level++) {
         uint32_t             n   = 0;
-        const FoliationNode* run = FoliationLevel(tree, level, &n);
+        const FoliationNode* run = FoliationLevel(vol, tree, level, &n);
         for (uint32_t i = run ? RunAt(tree, run, n, k) : n; i < n && StillUnder(tree, &run[i].place, k); i++)
-            PlaceMarked(m, &run[i].place);
+            PlaceMarked(vol, m, &run[i].place);
     }
-    uint32_t n = BinderSiftLeaves(tree);
-    for (uint32_t i = k->at.has_lo ? BinderSiftLeafOf(tree, n, k->at.lo) : 0;
-         i < n && BinderSiftLeafAt(tree, i, &p, &rotten) && StillUnder(tree, &p, k); i++)
-        PlaceMarked(m, &p);
+    uint32_t n = BinderSiftLeaves(vol, tree);
+    for (uint32_t i = k->at.has_lo ? BinderSiftLeafOf(vol, tree, n, k->at.lo) : 0;
+         i < n && BinderSiftLeafAt(vol, tree, i, &p, &rotten) && StillUnder(tree, &p, k); i++)
+        PlaceMarked(vol, m, &p);
 }
 
 /* The marks as runs of whole Quires, in order: `out` (room `room`), how many. */
@@ -95,21 +96,21 @@ static uint32_t MarksRun(const QuireMarks* m, Strip* out, uint32_t room)
     return n;
 }
 
-error_t BinderKeptQuires(BinderRun* r)
+error_t BinderKeptQuires(TagFSVolume* vol, BinderRun* r)
 {
     SlotGround* f = &r->fresh;
     QuireMarks  m;
-    m.q      = RibbonCursorNow()->quire_blocks ? RibbonCursorNow()->quire_blocks : 1u;
-    m.nquire = (tagfs_get_state()->block_end + m.q - 1u) / m.q;
+    m.q      = RibbonCursorNow(vol)->quire_blocks ? RibbonCursorNow(vol)->quire_blocks : 1u;
+    m.nquire = (vol->state.block_end + m.q - 1u) / m.q;
     if (r->nkept == 0)
         return OK;
     if (!(m.bit = kmalloc(sizeof(uint64_t) * (m.nquire / 64u + 1u))))
         return ERR_NO_MEMORY;
     memset(m.bit, 0, sizeof(uint64_t) * (m.nquire / 64u + 1u));
     for (uint32_t i = 0; i < r->nkept; i++) {
-        PlaceMarked(&m, &r->kept[i].at);
+        PlaceMarked(vol, &m, &r->kept[i].at);
         if (!r->kept[i].rotten && r->kept[i].at.level > 0)
-            UnderMarked(&m, &r->kept[i]);
+            UnderMarked(vol, &m, &r->kept[i]);
     }
     uint32_t n = MarksRun(&m, NULL, 0);
     if (n && !(f->quires = kmalloc(sizeof(Strip) * n))) {

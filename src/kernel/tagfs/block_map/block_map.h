@@ -5,6 +5,8 @@
 #include "../../core/error/error.h"
 #include "../lock_rank/lock_rank.h"
 
+typedef struct TagFSVolume TagFSVolume;   /* volume/tagfs_volume.h */
+
 /*
  * The block map — which blocks of the volume are taken — and the Allotment
  * that keeps a growing file's ground in hand.
@@ -42,7 +44,7 @@
  *
  * AllotmentRelease: the file's window, by a caller holding the state lock.
  */
-void    AllotmentRelease(uint64_t fid);
+void    AllotmentRelease(TagFSVolume* vol, uint64_t fid);
 
 /*
  * MapLock: the lock the windows — and the map — are read and changed under,
@@ -52,9 +54,9 @@ void    AllotmentRelease(uint64_t fid);
  * AllotmentDropAll: every window let go of with the volume, the door shut —
  * nothing given back, nothing written.
  */
-TagFSLock *MapLock(void);
-bool       AllotmentTakeBackLocked(uint64_t keep_fid);
-void       AllotmentDropAll(void);
+TagFSLock *MapLock(TagFSVolume* vol);
+bool       AllotmentTakeBackLocked(TagFSVolume* vol, uint64_t keep_fid);
+void       AllotmentDropAll(TagFSVolume* vol);
 
 /*
  * A file's data: a window lies on the derived map as free
@@ -86,11 +88,11 @@ void       AllotmentDropAll(void);
  * the first such ends. AllotmentBookTaken: the blocks a book's data was
  * handed since the volume came up.
  */
-error_t  AllotmentTakeBook(uint64_t fid, uint32_t want, uint64_t file_blocks, uint64_t hint, bool aside,
+error_t  AllotmentTakeBook(TagFSVolume* vol, uint64_t fid, uint32_t want, uint64_t file_blocks, uint64_t hint, bool aside,
                            uint64_t keep, bool own, uint64_t *start, uint32_t *got);
-error_t  AllotmentTakeBookRun(uint64_t fid, uint32_t want, uint64_t hint, uint64_t keep, uint64_t *start);
-bool     AllotmentOthersIn(uint64_t fid, uint64_t start, uint64_t count, uint64_t *past);
-uint64_t AllotmentBookTaken(void);
+error_t  AllotmentTakeBookRun(TagFSVolume* vol, uint64_t fid, uint32_t want, uint64_t hint, uint64_t keep, uint64_t *start);
+bool     AllotmentOthersIn(TagFSVolume* vol, uint64_t fid, uint64_t start, uint64_t count, uint64_t *past);
+uint64_t AllotmentBookTaken(TagFSVolume* vol);
 
 /*
  * The block a Slip promises (allotment.c): every file whose
@@ -116,15 +118,55 @@ uint64_t AllotmentBookTaken(void);
  * AllotmentFreeUnpromised: the free ground less what is promised — the free
  * a program is told.
  */
-uint64_t AllotmentPromised(void);
-uint64_t AllotmentBookMay(uint64_t free, uint64_t keep, bool own);
-bool     AllotmentPromise(uint64_t keep, uint32_t epoch);
-void     AllotmentPromiseLetGo(uint32_t epoch);
-uint64_t AllotmentFreeUnpromised(void);
+uint64_t AllotmentPromised(TagFSVolume* vol);
+uint64_t AllotmentBookMay(TagFSVolume* vol, uint64_t free, uint64_t keep, bool own);
+bool     AllotmentPromise(TagFSVolume* vol, uint64_t keep, uint32_t epoch);
+void     AllotmentPromiseLetGo(TagFSVolume* vol, uint32_t epoch);
+uint64_t AllotmentFreeUnpromised(TagFSVolume* vol);
 
 #ifdef CONFIG_VOLUME_TESTS
 /* The window file `fid` keeps in hand: false when it keeps none. */
-bool    AllotmentHeld(uint64_t fid, uint64_t *start, uint32_t *count);
+bool    AllotmentHeld(TagFSVolume* vol, uint64_t fid, uint64_t *start, uint32_t *count);
 #endif
+
+typedef struct {
+    uint64_t fid;
+    uint64_t start;
+    uint32_t count;
+} Allotment;
+
+/* What one volume holds of allotment.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    /* Sorted by start, and no two overlap. */
+    Allotment* allot;
+    uint32_t allot_len;
+    uint32_t allot_cap;
+    /* Every block a book's data was handed since the volume came up: the reserve
+     * the book keeps grows with them between two of its measures (endpaper.c). */
+    volatile uint64_t book_taken;
+    volatile uint8_t book_short_said;  /* the refusal said, until a take is had: any core, no lock */
+    /*
+     * ‼ A SLIP PROMISES ITS BLOCK. A write that rides a Slip takes no ground now,
+     * and its tail is laid in a block before the next Tally (Engross): given where
+     * no block is left for that, the Engross would find none, the Tally wait for it
+     * for ever and the ribbon grow. So every file whose record holds Slips keeps
+     * one block of the free ground promised to it — counted, never chosen
+     * (FileMapSlips) — and the Plot that gives a file its first Slip promises the
+     * block first (AllotmentPromise), only where a write of a block of data could
+     * have it: past what such a write leaves and every promise standing. Every
+     * take of the book's ground leaves the promises free — a write of data's
+     * (AllotmentBookMay), the ribbon's Quire and a Tally's (BlockMapTakeQuire) —
+     * but the take that lays the block a file's Slips lie over, which has that
+     * block as its own while one is free, whatever the book's reserve: the
+     * reserve's measure grows with no ground taken (a file born, a tag coined),
+     * and an Engross refused for it would leave the Tally that gives ground back
+     * waiting for ever — while the take, and the record without the Slips it is
+     * inked into, leave the free ground less the promised as it was. A Plot's
+     * promise is of its mounting, and a mounting begins with none: its files'
+     * promises are their records' (file_map.h).
+     */
+    uint64_t promises;  /* the Plots' promises not let go, of mounting allotment.promises_epoch */
+    volatile uint32_t promises_epoch;
+} AllotmentState;
 
 #endif /* TAGFS_BLOCK_MAP_H */

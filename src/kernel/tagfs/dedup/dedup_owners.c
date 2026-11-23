@@ -4,6 +4,7 @@
 #include "../ink/ink.h"
 #include "../mount/book_mount.h"
 #include "../tag_registry/tag_registry.h"
+#include "tagfs_volume.h"
 
 /*
  * Who names a block (dedup_internal.h): the live files walked in id order, a
@@ -54,10 +55,10 @@ error_t DedupOwnersBegin(DedupOwners* w, const DedupMember* m, uint64_t n)
 }
 
 /* What bars every block the file names, whatever its runs. */
-static uint32_t FileBars(const FileRecord* rec)
+static uint32_t FileBars(TagFSVolume* vol, const FileRecord* rec)
 {
-    if (InkFileKept(rec->flags) || rec->file_id == g_book.boot_fid ||
-        BookFileLocked(rec->file_id))
+    if (InkFileKept(rec->flags) || rec->file_id == vol->book.boot_fid ||
+        BookFileLocked(vol, rec->file_id))
         return DEDUP_BAR_ONTO | DEDUP_BAR_COPY;
     return 0;
 }
@@ -69,7 +70,7 @@ static uint32_t FileBars(const FileRecord* rec)
  * yet, or only a run SHARED where this is the DATA run. *touches whether the
  * file's runs touch BOOT, asked the first time a block of it is met (-1
  * before). */
-static void OwnersOfRun(DedupOwners* w, const FileRecord* rec, const Strip* s, uint64_t k, uint32_t bars,
+static void OwnersOfRun(TagFSVolume* vol, DedupOwners* w, const FileRecord* rec, const Strip* s, uint64_t k, uint32_t bars,
                         int* touches)
 {
     uint64_t lo = 0, hi = w->n;
@@ -85,10 +86,10 @@ static void OwnersOfRun(DedupOwners* w, const FileRecord* rec, const Strip* s, u
         uint64_t    at = k + (o->block - s->start);
         uint32_t    b  = bars;
         if (*touches < 0)
-            *touches = InkRecordTouchesBoot(rec) ? 1 : 0;
+            *touches = InkRecordTouchesBoot(vol, rec) ? 1 : 0;
         if (*touches || (s->kind == STRIP_DATA && TailSlipOn(rec, at)))
             b |= DEDUP_BAR_COPY;
-        if (InkTouchesBoot(s, 1))
+        if (InkTouchesBoot(vol, s, 1))
             b |= DEDUP_BAR_ONTO | DEDUP_BAR_COPY;
         o->bars |= b;
         if (o->kind == DEDUP_NO_OWNER || (o->kind == STRIP_SHARED && s->kind == STRIP_DATA)) {
@@ -101,9 +102,9 @@ static void OwnersOfRun(DedupOwners* w, const FileRecord* rec, const Strip* s, u
 }
 
 /* One live file's runs held to the blocks asked. */
-static void OwnersOfFile(DedupOwners* w, uint64_t fid)
+static void OwnersOfFile(TagFSVolume* vol, DedupOwners* w, uint64_t fid)
 {
-    FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    FileRecord* rec = FileMapRecordHold(vol->state.files, fid, NULL);
     StripWalk   walk;
     Strip       s;
     uint64_t    k       = 0;
@@ -111,29 +112,29 @@ static void OwnersOfFile(DedupOwners* w, uint64_t fid)
     if (!rec)
         return;
     if (rec->flags & TAGFS_FILE_ACTIVE) {
-        uint32_t bars = FileBars(rec);
+        uint32_t bars = FileBars(vol, rec);
         StripWalkBegin(rec, &walk);
         while (StripWalkNext(&walk, &s)) {
             if (StripOnGround(s.kind))
-                OwnersOfRun(w, rec, &s, k, bars, &touches);
+                OwnersOfRun(vol, w, rec, &s, k, bars, &touches);
             k += s.count;
         }
     }
     FileRecordRelease(rec);
 }
 
-bool DedupOwnersStep(DedupOwners* w, uint32_t files)
+bool DedupOwnersStep(TagFSVolume* vol, DedupOwners* w, uint32_t files)
 {
     uint64_t ids[DEDUP_OWNERS_LOOK];
     while (files > 0 && w->from != UINT64_MAX) {
-        uint32_t n = FileMapFiles(tagfs_get_state()->files, w->from, ids,
+        uint32_t n = FileMapFiles(vol->state.files, w->from, ids,
                                  files < DEDUP_OWNERS_LOOK ? files : DEDUP_OWNERS_LOOK);
         if (n == 0) {
             w->from = UINT64_MAX;
             break;
         }
         for (uint32_t i = 0; i < n; i++)
-            OwnersOfFile(w, ids[i]);
+            OwnersOfFile(vol, w, ids[i]);
         files  -= n;
         w->from = ids[n - 1u] == UINT64_MAX ? UINT64_MAX : ids[n - 1u] + 1u;
     }

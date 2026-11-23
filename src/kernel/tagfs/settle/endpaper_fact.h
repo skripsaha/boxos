@@ -87,11 +87,11 @@ void     EndpaperLaidTag(EndpaperLaid* l, uint64_t text);
  * With no TagFS lock held: TallyLaid and Grew take the state lock to change
  * what a reader takes.
  */
-void     EndpaperTallyBegun(uint64_t seq, uint64_t next_fid);
-void     EndpaperTallyLaid(const EndpaperLaid* l);
-void     EndpaperGrew(const DocketTaken* t, uint64_t seq);
-void     EndpaperStood(const EndpaperLaid* l, uint64_t seq, uint64_t next_fid);
-void     EndpaperForget(void);
+void     EndpaperTallyBegun(TagFSVolume* vol, uint64_t seq, uint64_t next_fid);
+void     EndpaperTallyLaid(TagFSVolume* vol, const EndpaperLaid* l);
+void     EndpaperGrew(TagFSVolume* vol, const DocketTaken* t, uint64_t seq);
+void     EndpaperStood(TagFSVolume* vol, const EndpaperLaid* l, uint64_t seq, uint64_t next_fid);
+void     EndpaperForget(TagFSVolume* vol);
 
 /*
  * What Ink laid in memory and no stitch settled yet — the Jots of the Docket
@@ -108,26 +108,26 @@ void     EndpaperForget(void);
  *   EndpaperDocketDropped every Jot let go
  * The stitch in flight is counted until EndpaperGrew counts it as settled.
  */
-void     EndpaperJotIn(const Jot* j);
-void     EndpaperJotOut(const Jot* j);
-void     EndpaperInked(const BookSplice* sp, uint64_t nsp);
-void     EndpaperDocketTaken(void);
-void     EndpaperDocketBack(void);
-void     EndpaperDocketDropped(void);
+void     EndpaperJotIn(TagFSVolume* vol, const Jot* j);
+void     EndpaperJotOut(TagFSVolume* vol, const Jot* j);
+void     EndpaperInked(TagFSVolume* vol, const BookSplice* sp, uint64_t nsp);
+void     EndpaperDocketTaken(TagFSVolume* vol);
+void     EndpaperDocketBack(TagFSVolume* vol);
+void     EndpaperDocketDropped(TagFSVolume* vol);
 
 /* What FILES, DIGESTS and TAGS of the next Tally take in one copy, by the
  * last Tally and the growth since, every change memory holds among it:
  * UINT64_MAX each when no Tally is known, or a node of the tree was named as
  * it lies. From any core with no TagFS lock held: the state lock is taken to
  * read what moved. */
-void     EndpaperFactMost(uint64_t* files, uint64_t* digests, uint64_t* tags);
+void     EndpaperFactMost(TagFSVolume* vol, uint64_t* files, uint64_t* digests, uint64_t* tags);
 
 /* Whether the measure carries growth memory holds past the last Tally —
  * settled since it or owed, or no Tally known and every item measured at its
  * widest — what the next Tally lays and measures to the block (binder.h,
  * BinderRoomWait); a Plot's Stakes are no such growth, no Tally lays them.
  * From any core, lock-free: published wherever it changes. */
-bool     EndpaperGrown(void);
+bool     EndpaperGrown(TagFSVolume* vol);
 
 /*
  * What a Plot's Ink may add to the next Tally while its Stakes stand
@@ -159,14 +159,45 @@ typedef struct {
     uint64_t digests_bytes;
 } EndpaperStakes;
 
-void     EndpaperStakesFile(EndpaperStakes* e, const FileRecord* rec, uint64_t fid, uint64_t runs, uint64_t blocks);
+void     EndpaperStakesFile(TagFSVolume* vol, EndpaperStakes* e, const FileRecord* rec, uint64_t fid, uint64_t runs, uint64_t blocks);
 void     EndpaperStakesRun(EndpaperStakes* e, uint64_t start, uint64_t count);
-void     EndpaperStakesSet(EndpaperStakes* held, const EndpaperStakes* now);
-void     EndpaperStakesGoneLocked(const EndpaperStakes* held);
+void     EndpaperStakesSet(TagFSVolume* vol, EndpaperStakes* held, const EndpaperStakes* now);
+void     EndpaperStakesGoneLocked(TagFSVolume* vol, const EndpaperStakes* held);
 
 /* What the Plots' Stakes add to the measure from above, in bytes of FILES and
  * of DIGESTS: read before the map is walked, so an Ink between the two is
  * counted twice, never missed. Any core, lock-free. */
-void     EndpaperStakesAbove(uint64_t* files_bytes, uint64_t* digests_bytes);
+void     EndpaperStakesAbove(TagFSVolume* vol, uint64_t* files_bytes, uint64_t* digests_bytes);
+
+/* The growth since a Tally of seq `seq`, or what is owed. */
+typedef struct {
+    bool     on;
+    uint64_t seq;          /* the Tally's: a file whose gen is past it changed since */
+    uint64_t fid;          /* past every file id it held */
+    uint64_t sites;        /* FILES: the places files it held changed at ... */
+    uint64_t bytes;        /* ... and their items, at the widest */
+    uint64_t tail;         /* FILES: the items of the files past `fid`, at the widest ... */
+    uint64_t tail_big;     /* ... and those longer than ENDPAPER_SMALL */
+    uint64_t long_blocks;  /* FILES: the nodes of items longer than a leaf's room */
+    uint64_t dsites;       /* DIGESTS: windows run into before its last leaf's first key ... */
+    uint64_t dtail;        /* ... at or past it ... */
+    uint64_t dbytes;       /* ... and their elements, at the widest */
+} EndpaperSince;
+
+/* What one volume holds of endpaper_fact.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    EndpaperLaid laid;  /* the Tally `endpaper_fact.since` counts from */
+    EndpaperSince since;  /* settled since the last Tally known */
+    EndpaperSince pending;  /* settled since the slice of the Tally under way */
+    EndpaperSince inked;  /* owed: the Docket's Jots and the data inked for them */
+    EndpaperSince sewing;  /* owed: the stitch in flight's */
+    EndpaperSince staked;  /* what the Plots' Stakes may add once inked */
+    uint32_t staked_epoch;  /* the mounting `endpaper_fact.staked` counts Plots of */
+    volatile uint64_t staked_files;  /* ... from above, in bytes of FILES */
+    volatile uint64_t staked_digests;  /* ... and of DIGESTS */
+    volatile uint8_t grown;  /* whether growth past the last Tally is held: published */
+} EndpaperFactState;
+
+void EndpaperFactVolumeBegin(TagFSVolume* vol);
 
 #endif /* TAGFS_SETTLE_ENDPAPER_FACT_H */

@@ -42,18 +42,25 @@ uint64_t KeepUntil(uint64_t term_seconds);
 /* The kept files whose term has passed at `now_ns`, each let go: how many went.
  * One the volume refuses to give up now — no room for the Quitclaim yet — is
  * left for the next look. Inside the door; the call takes it itself. */
-uint32_t KeepSweepNow(uint64_t now_ns);
+uint32_t KeepSweepNow(TagFSVolume* vol, uint64_t now_ns);
 
 /* The service: a sweep, at most one at a time and at most one a KEEP_LOOK_US. */
-void KeepServe(void);
+void KeepServe(TagFSVolume* vol);
 
 /* The stand's hold on the service: no look is begun while held, and a look
  * under way is waited out, so no caller of the service stands inside the door
  * when a test lets the volume go and mounts it again. Returns whether it was
  * held. */
-bool KeepHold(bool held);
+bool KeepHold(TagFSVolume* vol, bool held);
 
 /* A mount's start: the next look is the first thing the volume does. */
-void KeepMountReset(void);
+void KeepMountReset(TagFSVolume* vol);
+
+/* What one volume holds of keep.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    volatile uint32_t busy;
+    volatile uint32_t held;
+    volatile uint64_t next_us;
+} KeepState;
 
 #endif /* TAGFS_KEEP_H */

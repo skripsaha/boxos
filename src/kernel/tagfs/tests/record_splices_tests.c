@@ -54,7 +54,7 @@ static bool SplicesSame(const FileRecord* a, const FileRecord* b)
  * build `now` Strip for Strip. Their count in *nsp, the blocks of DATA they
  * put in in *data, and a copy of the first `room` of them in out[] (NULL: not
  * kept). False when they were not found, or do not build `now`. */
-static bool SplicesFound(const FileRecord* was, const FileRecord* now, uint64_t* nsp, uint64_t* data,
+static bool SplicesFound(TagFSVolume* vol, const FileRecord* was, const FileRecord* now, uint64_t* nsp, uint64_t* data,
                          BookSplice* out, Strip* ins, uint32_t room)
 {
     BookSplice* sp     = NULL;
@@ -62,7 +62,7 @@ static bool SplicesFound(const FileRecord* was, const FileRecord* now, uint64_t*
     FileRecord* built  = NULL;
     uint64_t    count = 0, k = 0;
     bool        held   = FileRecordSplices(was, now, &sp, &count, &strips) == OK &&
-                FileRecordSplice(was, sp, count, now->size, now->modified_time, &built, NULL, NULL) == OK &&
+                FileRecordSplice(vol, was, sp, count, now->size, now->modified_time, &built, NULL, NULL) == OK &&
                 SplicesSame(built, now);
     *nsp  = count;
     *data = 0;
@@ -83,6 +83,7 @@ static bool SplicesFound(const FileRecord* was, const FileRecord* now, uint64_t*
 
 static TestResult TestSplicesWrittenOver(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
     static const Strip was_s[] = { { 100, 10, STRIP_DATA, 7 }, { 500, 3, STRIP_DATA, 7 } };
     static const Strip now_s[] = { { 100, 5, STRIP_DATA, 7 }, { 900, 1, STRIP_DATA, 0 },
@@ -94,7 +95,7 @@ static TestResult TestSplicesWrittenOver(void)
     FileRecord* now = SplicesRecord(now_s, 4);
 
     TEST_ASSERT(was && now, "the two records are built");
-    TEST_ASSERT(SplicesFound(was, now, &nsp, &data, sp, ins, SPLICES_MOST),
+    TEST_ASSERT(SplicesFound(vol, was, now, &nsp, &data, sp, ins, SPLICES_MOST),
                 "the splices between them are found, and build the new one Strip for Strip");
     TestEvidence("blocks of data the change of block 5 puts in", data);
     TEST_ASSERT(nsp == 1 && sp[0].at == 5 && sp[0].remove == 1 && sp[0].ninsert == 1,
@@ -109,6 +110,7 @@ out:
 
 static TestResult TestSplicesCutInside(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
     static const Strip was_s[] = { { 100, 10, STRIP_DATA, 7 }, { 500, 3, STRIP_DATA, 7 } };
     static const Strip now_s[] = { { 100, 5, STRIP_DATA, 7 } };
@@ -123,10 +125,10 @@ static TestResult TestSplicesCutInside(void)
     FileRecord* hn  = SplicesRecord(hole_now, 2);
 
     TEST_ASSERT(was && now && hw && hn, "the records are built");
-    TEST_ASSERT(SplicesFound(was, now, &nsp, &data, sp, ins, SPLICES_MOST), "a cut inside a run is found");
+    TEST_ASSERT(SplicesFound(vol, was, now, &nsp, &data, sp, ins, SPLICES_MOST), "a cut inside a run is found");
     TEST_ASSERT(nsp == 1 && sp[0].at == 5 && sp[0].remove == 8 && sp[0].ninsert == 0 && data == 0,
                 "as its tail taken out, and nothing put in");
-    TEST_ASSERT(SplicesFound(hw, hn, &nsp, &data, sp, ins, SPLICES_MOST), "a cut into a hole is found");
+    TEST_ASSERT(SplicesFound(vol, hw, hn, &nsp, &data, sp, ins, SPLICES_MOST), "a cut into a hole is found");
     TEST_ASSERT(nsp == 1 && sp[0].at == 6 && sp[0].remove == 6 && sp[0].ninsert == 0,
                 "as the hole's tail taken out, and nothing put in");
 out:
@@ -139,6 +141,7 @@ out:
 
 static TestResult TestSplicesGrown(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
     static const Strip was_s[] = { { 100, 10, STRIP_DATA, 7 } };
     static const Strip now_s[] = { { 100, 10, STRIP_DATA, 7 }, { 110, 100, STRIP_DATA, 0 }, { 0, 3, STRIP_HOLE, 0 } };
@@ -153,10 +156,10 @@ static TestResult TestSplicesGrown(void)
     FileRecord* hn  = SplicesRecord(hole_now, 2);
 
     TEST_ASSERT(was && now && hw && hn, "the records are built");
-    TEST_ASSERT(SplicesFound(was, now, &nsp, &data, sp, ins, SPLICES_MOST), "a growth is found");
+    TEST_ASSERT(SplicesFound(vol, was, now, &nsp, &data, sp, ins, SPLICES_MOST), "a growth is found");
     TEST_ASSERT(nsp == 1 && sp[0].at == 10 && sp[0].remove == 0 && sp[0].ninsert == 2 && data == 100,
                 "as what it adds put in at the end, the run it goes on from kept");
-    TEST_ASSERT(SplicesFound(hw, hn, &nsp, &data, sp, ins, SPLICES_MOST), "a hole grown longer is found");
+    TEST_ASSERT(SplicesFound(vol, hw, hn, &nsp, &data, sp, ins, SPLICES_MOST), "a hole grown longer is found");
     TEST_ASSERT(nsp == 1 && sp[0].at == 2 && sp[0].ninsert == 1 && ins[0].kind == STRIP_HOLE && data == 0,
                 "as the longer hole put in, owning no ground");
 out:
@@ -181,14 +184,14 @@ static void SplicesManyRuns(Strip* out)
 /* SPLICES_WRITES blocks, each inside a Strip of its own, written over by
  * FileRecordSplice one after another from `rec`: the record at the end, or
  * NULL. */
-static FileRecord* SplicesWrittenOver(FileRecord* rec)
+static FileRecord* SplicesWrittenOver(TagFSVolume* vol, FileRecord* rec)
 {
     uint64_t k = 1;
     for (uint32_t i = 0; i < SPLICES_WRITES && rec; i++, k += 7u * 3u) {
         Strip       fresh = { .start = 800000u + i, .count = 1, .kind = STRIP_DATA };
         BookSplice  one   = { .at = k, .remove = 1, .ninsert = 1, .insert = &fresh };
         FileRecord* next  = NULL;
-        if (FileRecordSplice(rec, &one, 1, rec->size, rec->modified_time, &next, NULL, NULL) != OK)
+        if (FileRecordSplice(vol, rec, &one, 1, rec->size, rec->modified_time, &next, NULL, NULL) != OK)
             next = NULL;
         FileRecordRelease(rec);
         rec = next;
@@ -198,6 +201,7 @@ static FileRecord* SplicesWrittenOver(FileRecord* rec)
 
 static TestResult TestSplicesManyRuns(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
     static Strip runs[SPLICES_RUNS];
     uint64_t    nsp = 0, data = 0;
@@ -208,9 +212,9 @@ static TestResult TestSplicesManyRuns(void)
     was = SplicesRecord(runs, SPLICES_RUNS);
     now = SplicesRecord(runs, SPLICES_RUNS);
     TEST_ASSERT(was && now && was->strip_count == SPLICES_RUNS, "a file of six hundred runs is built");
-    now = SplicesWrittenOver(now);
+    now = SplicesWrittenOver(vol, now);
     TEST_ASSERT(now != NULL, "and 24 blocks of it, each inside a run, written over one by one");
-    TEST_ASSERT(SplicesFound(was, now, &nsp, &data, NULL, NULL, 0),
+    TEST_ASSERT(SplicesFound(vol, was, now, &nsp, &data, NULL, NULL, 0),
                 "the splices from the file before to the file after build it Strip for Strip");
     TestEvidence("blocks of data 24 blocks written over put in", data);
     TEST_ASSERT(nsp == SPLICES_WRITES && data == SPLICES_WRITES,

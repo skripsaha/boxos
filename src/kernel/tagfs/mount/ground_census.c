@@ -1,5 +1,6 @@
 #include "ground_census_internal.h"
 #include "../block_map/block_map_derived.h"
+#include "tagfs_volume.h"
 
 /*
  * The census (ground_census.h). The claims are a list of runs, sorted once by
@@ -13,62 +14,55 @@ static const bool g_owner_alone[GROUND_OWNER_KINDS] = {
 #undef GROUND_OWNER_ALONE
 };
 
-/* The mount's alone (the door is shut). */
-static GroundRun* s_runs;
-static uint32_t   s_count;
-static uint32_t   s_cap;
-static bool       s_refused;       /* a claim found no memory: the census decides nothing */
-static uint64_t   s_reach;         /* past the farthest block an owner but the far Deed names */
-static uint64_t   s_doubled;       /* blocks the census said two owners name */
 
-void GroundCensusBegin(void)
+void GroundCensusBegin(TagFSVolume* vol)
 {
-    GroundCensusEnd();
+    GroundCensusEnd(vol);
 }
 
 /* How far a claim reaches: all of the volume, its far Deed's block among them
  * — every block of it is some owner's (ground_owner.h). */
-static uint64_t ClaimEnd(void)
+static uint64_t ClaimEnd(TagFSVolume* vol)
 {
-    return tagfs_get_state()->volume_bytes / TAGFS_BLOCK_SIZE;
+    return vol->state.volume_bytes / TAGFS_BLOCK_SIZE;
 }
 
-static void GroundClaimAs(GroundOwner owner, uint64_t start, uint32_t count, uint64_t who, uint32_t namer)
+static void GroundClaimAs(TagFSVolume* vol, GroundOwner owner, uint64_t start, uint32_t count, uint64_t who, uint32_t namer)
 {
-    uint64_t run = ClaimEnd();
+    uint64_t run = ClaimEnd(vol);
     if (owner != GROUND_FAR_DEED)
-        GroundCensusNamed(start, count);
-    if (s_refused || count == 0 || start >= run || owner >= GROUND_OWNER_KINDS)
+        GroundCensusNamed(vol, start, count);
+    if (vol->ground_census.refused || count == 0 || start >= run || owner >= GROUND_OWNER_KINDS)
         return;
     if (count > run - start)
         count = (uint32_t)(run - start);
 
-    if (s_count == s_cap) {
-        uint32_t   cap  = s_cap ? s_cap * 2u : 64u;
+    if (vol->ground_census.count == vol->ground_census.cap) {
+        uint32_t   cap  = vol->ground_census.cap ? vol->ground_census.cap * 2u : 64u;
         GroundRun* more = kmalloc(sizeof(GroundRun) * cap);
         if (!more) {
             kprintf("[TagFS FSCK] no memory to hold the ground of %u owner run(s) — a book is "
-                    "not mounted on a census it could not take\n", s_count + 1);
-            s_refused = true;
+                    "not mounted on a census it could not take\n", vol->ground_census.count + 1);
+            vol->ground_census.refused = true;
             return;
         }
-        if (s_count)
-            memcpy(more, s_runs, sizeof(GroundRun) * s_count);
-        kfree(s_runs);
-        s_runs = more;
-        s_cap  = cap;
+        if (vol->ground_census.count)
+            memcpy(more, vol->ground_census.runs, sizeof(GroundRun) * vol->ground_census.count);
+        kfree(vol->ground_census.runs);
+        vol->ground_census.runs = more;
+        vol->ground_census.cap  = cap;
     }
-    s_runs[s_count++] = (GroundRun){ start, who, count, (uint32_t)owner, namer };
+    vol->ground_census.runs[vol->ground_census.count++] = (GroundRun){ start, who, count, (uint32_t)owner, namer };
 }
 
-void GroundClaim(GroundOwner owner, uint64_t start, uint32_t count, uint64_t who)
+void GroundClaim(TagFSVolume* vol, GroundOwner owner, uint64_t start, uint32_t count, uint64_t who)
 {
-    GroundClaimAs(owner, start, count, who, 0);
+    GroundClaimAs(vol, owner, start, count, who, 0);
 }
 
-void GroundClaimBySlot(GroundOwner owner, uint64_t start, uint32_t count, uint64_t who, uint32_t slot)
+void GroundClaimBySlot(TagFSVolume* vol, GroundOwner owner, uint64_t start, uint32_t count, uint64_t who, uint32_t slot)
 {
-    GroundClaimAs(owner, start, count, who, slot < UINT32_MAX ? slot + 1u : UINT32_MAX);
+    GroundClaimAs(vol, owner, start, count, who, slot < UINT32_MAX ? slot + 1u : UINT32_MAX);
 }
 
 /* Whether run a sorts after run b: by start — and `by_name`, then by the
@@ -88,32 +82,32 @@ static bool RunAfter(const GroundRun* a, const GroundRun* b, bool by_name)
 
 /* Heapsort: in place, and no deeper than one frame whatever the number of
  * runs. */
-static void RunSiftDown(uint32_t at, uint32_t n, bool by_name)
+static void RunSiftDown(TagFSVolume* vol, uint32_t at, uint32_t n, bool by_name)
 {
     for (;;) {
         uint32_t big = at, l = 2u * at + 1u, r = l + 1u;
-        if (l < n && RunAfter(&s_runs[l], &s_runs[big], by_name))
+        if (l < n && RunAfter(&vol->ground_census.runs[l], &vol->ground_census.runs[big], by_name))
             big = l;
-        if (r < n && RunAfter(&s_runs[r], &s_runs[big], by_name))
+        if (r < n && RunAfter(&vol->ground_census.runs[r], &vol->ground_census.runs[big], by_name))
             big = r;
         if (big == at)
             return;
-        GroundRun t  = s_runs[at];
-        s_runs[at]   = s_runs[big];
-        s_runs[big]  = t;
+        GroundRun t  = vol->ground_census.runs[at];
+        vol->ground_census.runs[at]   = vol->ground_census.runs[big];
+        vol->ground_census.runs[big]  = t;
         at           = big;
     }
 }
 
-static void RunsSort(bool by_name)
+static void RunsSort(TagFSVolume* vol, bool by_name)
 {
-    for (uint32_t i = s_count / 2u; i-- > 0; )
-        RunSiftDown(i, s_count, by_name);
-    for (uint32_t n = s_count; n > 1; n--) {
-        GroundRun t = s_runs[0];
-        s_runs[0]   = s_runs[n - 1];
-        s_runs[n - 1] = t;
-        RunSiftDown(0, n - 1, by_name);
+    for (uint32_t i = vol->ground_census.count / 2u; i-- > 0; )
+        RunSiftDown(vol, i, vol->ground_census.count, by_name);
+    for (uint32_t n = vol->ground_census.count; n > 1; n--) {
+        GroundRun t = vol->ground_census.runs[0];
+        vol->ground_census.runs[0]   = vol->ground_census.runs[n - 1];
+        vol->ground_census.runs[n - 1] = t;
+        RunSiftDown(vol, 0, n - 1, by_name);
     }
 }
 
@@ -128,28 +122,28 @@ static bool RunsOneNameOf(const GroundRun* a, const GroundRun* b)
  * times as the slot that gives it most — and as many times as no slot gives
  * it — the rest let go, in place (GroundCensusBook).
  */
-static void RunsOneName(void)
+static void RunsOneName(TagFSVolume* vol)
 {
     uint32_t kept = 0;
-    for (uint32_t i = 0; i < s_count; ) {
+    for (uint32_t i = 0; i < vol->ground_census.count; ) {
         uint32_t end = i, unnamed = 0, most = 0;
-        while (end < s_count && RunsOneNameOf(&s_runs[i], &s_runs[end]))
+        while (end < vol->ground_census.count && RunsOneNameOf(&vol->ground_census.runs[i], &vol->ground_census.runs[end]))
             end++;
         for (uint32_t j = i; j < end; ) {
             uint32_t k = j;
-            while (k < end && s_runs[k].namer == s_runs[j].namer)
+            while (k < end && vol->ground_census.runs[k].namer == vol->ground_census.runs[j].namer)
                 k++;
-            if (s_runs[j].namer == 0)
+            if (vol->ground_census.runs[j].namer == 0)
                 unnamed += k - j;
             else if (k - j > most)
                 most = k - j;
             j = k;
         }
         for (uint32_t j = 0; j < unnamed + most; j++)
-            s_runs[kept++] = s_runs[i + j];
+            vol->ground_census.runs[kept++] = vol->ground_census.runs[i + j];
         i = end;
     }
-    s_count = kept;
+    vol->ground_census.count = kept;
 }
 
 /* Whether an owner of kind `owner` is a file's — its DATA, or a run SHARED. */
@@ -177,20 +171,20 @@ static void RunSay(const GroundRun* r, char* out, size_t room)
  * furthest end an exclusive run before it reached. The first 32 are named and
  * the rest counted — the owner's bound for a list said at mount (09-27).
  */
-static void RunsSayDoubles(void)
+static void RunsSayDoubles(TagFSVolume* vol)
 {
     uint64_t reach = 0;
     uint32_t reach_run = 0, named = 0, more = 0;
     bool     have  = false;
     char     a[32], b[32];
 
-    for (uint32_t i = 0; i < s_count; i++) {
-        const GroundRun* r = &s_runs[i];
+    for (uint32_t i = 0; i < vol->ground_census.count; i++) {
+        const GroundRun* r = &vol->ground_census.runs[i];
         if (!g_owner_alone[r->owner])
             continue;
         if (have && r->start < reach) {
             if (named < 32u) {
-                RunSay(&s_runs[reach_run], a, sizeof(a));
+                RunSay(&vol->ground_census.runs[reach_run], a, sizeof(a));
                 RunSay(r, b, sizeof(b));
                 kprintf("[TagFS FSCK] data block %llu is named by %s and %s at once — the "
                         "medium kept less than a settled cycle said, deeper than the rest "
@@ -234,7 +228,7 @@ static bool MeetingSamePair(const GroundMeeting* a, const GroundMeeting* b)
            a->who[1] == b->who[1];
 }
 
-static void MeetingSay(const GroundMeeting* m, uint32_t* named, uint32_t* more)
+static void MeetingSay(TagFSVolume* vol, const GroundMeeting* m, uint32_t* named, uint32_t* more)
 {
     char a[32], b[32];
     if (*named >= 32u) {
@@ -242,7 +236,7 @@ static void MeetingSay(const GroundMeeting* m, uint32_t* named, uint32_t* more)
         return;
     }
     (*named)++;
-    s_doubled += m->end - m->start;
+    vol->ground_census.doubled += m->end - m->start;
     OwnerSay(m->owner[0], m->who[0], a, sizeof(a));
     OwnerSay(m->owner[1], m->who[1], b, sizeof(b));
     kprintf("[TagFS FSCK] data block %llu is named by %s and %s at once, %llu block(s) from it — the "
@@ -275,12 +269,12 @@ typedef struct {
     uint32_t       more;
 } GroundMeetings;
 
-static void MeetingJoined(GroundMeetings* g, GroundMeeting m)
+static void MeetingJoined(TagFSVolume* vol, GroundMeetings* g, GroundMeeting m)
 {
     uint32_t kept = 0, k;
     for (k = 0; k < g->nopen; k++) {
         if (g->open[k].end < m.start)
-            MeetingSay(&g->open[k], &g->named, &g->more);
+            MeetingSay(vol, &g->open[k], &g->named, &g->more);
         else
             g->open[kept++] = g->open[k];
     }
@@ -320,27 +314,27 @@ static void ReachMoved(GroundReach* r, uint32_t i, uint64_t end)
  * a slot, the front or the far Deed it is two owners of one block
  * (bookcensus.py _Sweep, GroundClaim.Allows). Room for one meeting a claim.
  */
-static void RunsSayDoublesBook(void)
+static void RunsSayDoublesBook(TagFSVolume* vol)
 {
-    GroundMeetings g  = { kmalloc(sizeof(GroundMeeting) * (s_count ? 2u * s_count : 1u)), 0, 0, 0 };
+    GroundMeetings g  = { kmalloc(sizeof(GroundMeeting) * (vol->ground_census.count ? 2u * vol->ground_census.count : 1u)), 0, 0, 0 };
     GroundReach    ex = { 0, 0, false }, other = { 0, 0, false }, shared = { 0, 0, false };
 
     if (!g.open) {
         kprintf("[TagFS FSCK] no memory to join the blocks two owners name into runs — each is named as "
                 "its run meets another\n");
-        RunsSayDoubles();
+        RunsSayDoubles(vol);
         return;
     }
-    for (uint32_t i = 0; i < s_count; i++) {
-        const GroundRun* r     = &s_runs[i];
+    for (uint32_t i = 0; i < vol->ground_census.count; i++) {
+        const GroundRun* r     = &vol->ground_census.runs[i];
         uint64_t         end   = r->start + r->count;
         bool             alone = g_owner_alone[r->owner], foreign = alone && r->owner != GROUND_FILE;
         if (alone && ex.have && r->start < ex.reach)
-            MeetingJoined(&g, MeetingOf(&s_runs[ex.run], r, ex.reach));
+            MeetingJoined(vol, &g, MeetingOf(&vol->ground_census.runs[ex.run], r, ex.reach));
         if (r->owner == GROUND_SHARED && other.have && r->start < other.reach)
-            MeetingJoined(&g, MeetingOf(&s_runs[other.run], r, other.reach));
+            MeetingJoined(vol, &g, MeetingOf(&vol->ground_census.runs[other.run], r, other.reach));
         if (foreign && shared.have && r->start < shared.reach)
-            MeetingJoined(&g, MeetingOf(&s_runs[shared.run], r, shared.reach));
+            MeetingJoined(vol, &g, MeetingOf(&vol->ground_census.runs[shared.run], r, shared.reach));
         if (alone)
             ReachMoved(&ex, i, end);
         if (foreign)
@@ -349,7 +343,7 @@ static void RunsSayDoublesBook(void)
             ReachMoved(&shared, i, end);
     }
     for (uint32_t k = 0; k < g.nopen; k++)
-        MeetingSay(&g.open[k], &g.named, &g.more);
+        MeetingSay(vol, &g.open[k], &g.named, &g.more);
     if (g.more)
         kprintf("[TagFS FSCK] and %u more run(s) of blocks named by two owners at once\n", g.more);
     kfree(g.open);
@@ -361,14 +355,14 @@ static void RunsSayDoublesBook(void)
  * no two overlapping, into a new array (*n of them): a run that meets the one
  * before is joined to it while the join still counts in a u32, and one that
  * overlaps begins where it ends. NULL with no memory. */
-static GroundRun* RunsMerged(GroundOwner want, GroundOwner apart, uint32_t* n)
+static GroundRun* RunsMerged(TagFSVolume* vol, GroundOwner want, GroundOwner apart, uint32_t* n)
 {
-    GroundRun* out = kmalloc(sizeof(GroundRun) * (s_count ? s_count : 1u));
+    GroundRun* out = kmalloc(sizeof(GroundRun) * (vol->ground_census.count ? vol->ground_census.count : 1u));
     *n = 0;
     if (!out)
         return NULL;
-    for (uint32_t i = 0; i < s_count; i++) {
-        const GroundRun* r    = &s_runs[i];
+    for (uint32_t i = 0; i < vol->ground_census.count; i++) {
+        const GroundRun* r    = &vol->ground_census.runs[i];
         uint64_t         from = r->start, end = r->start + r->count;
         if (want != GROUND_OWNER_KINDS ? r->owner != (uint32_t)want
                                        : (r->owner == GROUND_HELD || r->owner == (uint32_t)apart ||
@@ -393,15 +387,15 @@ static GroundRun* RunsMerged(GroundOwner want, GroundOwner apart, uint32_t* n)
 
 /* The claims of `owner` less every block an owner in `own` names, laid back
  * into the claims in place of the runs they were: the blocks left. */
-static uint64_t RunsLess(GroundOwner owner, const GroundRun* want, uint32_t nwant, const GroundRun* own,
+static uint64_t RunsLess(TagFSVolume* vol, GroundOwner owner, const GroundRun* want, uint32_t nwant, const GroundRun* own,
                          uint32_t nown)
 {
     uint32_t kept = 0, o = 0;
     uint64_t left = 0;
-    for (uint32_t i = 0; i < s_count; i++)
-        if (s_runs[i].owner != (uint32_t)owner)
-            s_runs[kept++] = s_runs[i];
-    s_count = kept;
+    for (uint32_t i = 0; i < vol->ground_census.count; i++)
+        if (vol->ground_census.runs[i].owner != (uint32_t)owner)
+            vol->ground_census.runs[kept++] = vol->ground_census.runs[i];
+    vol->ground_census.count = kept;
     for (uint32_t w = 0; w < nwant; w++) {
         uint64_t at = want[w].start, end = want[w].start + want[w].count;
         while (o < nown && own[o].start + own[o].count <= at)
@@ -409,7 +403,7 @@ static uint64_t RunsLess(GroundOwner owner, const GroundRun* want, uint32_t nwan
         for (uint32_t k = o; at < end; k++) {
             uint64_t stop = k < nown && own[k].start < end ? own[k].start : end;
             if (stop > at) {
-                s_runs[s_count++] = (GroundRun){ at, 0, (uint32_t)(stop - at), (uint32_t)owner, 0 };
+                vol->ground_census.runs[vol->ground_census.count++] = (GroundRun){ at, 0, (uint32_t)(stop - at), (uint32_t)owner, 0 };
                 left += stop - at;
             }
             if (k >= nown || own[k].start >= end)
@@ -423,65 +417,65 @@ static uint64_t RunsLess(GroundOwner owner, const GroundRun* want, uint32_t nwan
 /* The claims of `owner` — what may be someone's and is given to no one —
  * cut to the blocks no other owner names: those of every exclusive owner but
  * the held and `apart`. How many blocks are left in *left. ERR_NO_MEMORY. */
-static error_t RunsOwnerLess(GroundOwner owner, GroundOwner apart, uint64_t* left)
+static error_t RunsOwnerLess(TagFSVolume* vol, GroundOwner owner, GroundOwner apart, uint64_t* left)
 {
     uint32_t   nwant = 0, nown = 0;
     GroundRun* want;
     GroundRun* own;
-    RunsSort(false);
-    want = RunsMerged(owner, apart, &nwant);
-    own  = RunsMerged(GROUND_OWNER_KINDS, apart, &nown);
+    RunsSort(vol, false);
+    want = RunsMerged(vol, owner, apart, &nwant);
+    own  = RunsMerged(vol, GROUND_OWNER_KINDS, apart, &nown);
     /* A run left is cut at most once by each owned run, so the claims never
      * grow past the room they had: the runs out, their pieces in. */
-    if (want && own && s_count + nown > s_cap) {
-        GroundRun* more = kmalloc(sizeof(GroundRun) * (s_count + nown));
+    if (want && own && vol->ground_census.count + nown > vol->ground_census.cap) {
+        GroundRun* more = kmalloc(sizeof(GroundRun) * (vol->ground_census.count + nown));
         if (more) {
-            memcpy(more, s_runs, sizeof(GroundRun) * s_count);
-            kfree(s_runs);
-            s_runs = more;
-            s_cap  = s_count + nown;
+            memcpy(more, vol->ground_census.runs, sizeof(GroundRun) * vol->ground_census.count);
+            kfree(vol->ground_census.runs);
+            vol->ground_census.runs = more;
+            vol->ground_census.cap  = vol->ground_census.count + nown;
         }
     }
-    if (!want || !own || s_count + nown > s_cap) {
+    if (!want || !own || vol->ground_census.count + nown > vol->ground_census.cap) {
         kfree(want);
         kfree(own);
         kprintf("[TagFS FSCK] no memory to hold %u owner run(s) against each other — a book is not "
-                "mounted on a census it could not take\n", s_count);
+                "mounted on a census it could not take\n", vol->ground_census.count);
         return ERR_NO_MEMORY;
     }
-    *left = RunsLess(owner, want, nwant, own, nown);
+    *left = RunsLess(vol, owner, want, nwant, own, nown);
     kfree(want);
     kfree(own);
     return OK;
 }
 
-bool GroundClaimedBy(GroundOwner owner, uint64_t start, uint64_t count)
+bool GroundClaimedBy(TagFSVolume* vol, GroundOwner owner, uint64_t start, uint64_t count)
 {
-    for (uint32_t i = 0; i < s_count; i++)
-        if (s_runs[i].owner == (uint32_t)owner && s_runs[i].start < start + count &&
-            start < s_runs[i].start + s_runs[i].count)
+    for (uint32_t i = 0; i < vol->ground_census.count; i++)
+        if (vol->ground_census.runs[i].owner == (uint32_t)owner && vol->ground_census.runs[i].start < start + count &&
+            start < vol->ground_census.runs[i].start + vol->ground_census.runs[i].count)
             return true;
     return false;
 }
 
-uint64_t GroundClaimsOf(GroundOwner owner, Strip* out, uint64_t room)
+uint64_t GroundClaimsOf(TagFSVolume* vol, GroundOwner owner, Strip* out, uint64_t room)
 {
     uint64_t n = 0;
-    for (uint32_t i = 0; i < s_count; i++) {
-        if (s_runs[i].owner != (uint32_t)owner)
+    for (uint32_t i = 0; i < vol->ground_census.count; i++) {
+        if (vol->ground_census.runs[i].owner != (uint32_t)owner)
             continue;
         if (n < room)
-            out[n] = (Strip){ .start = s_runs[i].start, .count = s_runs[i].count, .kind = STRIP_DATA };
+            out[n] = (Strip){ .start = vol->ground_census.runs[i].start, .count = vol->ground_census.runs[i].count, .kind = STRIP_DATA };
         n++;
     }
     return n;
 }
 
 /* [from, end) laid into the block map under run `by`'s name. */
-static error_t RunsLay(const GroundRun* by, uint64_t from, uint64_t end)
+static error_t RunsLay(TagFSVolume* vol, const GroundRun* by, uint64_t from, uint64_t end)
 {
     uint64_t taken = 0;
-    error_t  rc    = BlockMapDerivedClaim((GroundOwner)by->owner, by->who, from, end - from, &taken);
+    error_t  rc    = BlockMapDerivedClaim(vol, (GroundOwner)by->owner, by->who, from, end - from, &taken);
 #if CONFIG_STRICT
     if (taken)
         panic("[TagFS] DEFECT: the census laid a claim into the block map over %llu block(s) a claim "
@@ -500,14 +494,14 @@ static error_t RunsLay(const GroundRun* by, uint64_t from, uint64_t end)
  * nothing at its build (the parts lie apart, and it begins free), so that
  * name is never said; STRICT stops at a build that would say one.
  */
-static error_t RunsDerive(const char** what)
+static error_t RunsDerive(TagFSVolume* vol, const char** what)
 {
-    error_t  rc    = BlockMapDerivedBegin(tagfs_get_state()->block_end, what);
+    error_t  rc    = BlockMapDerivedBegin(vol, vol->state.block_end, what);
     uint64_t reach = 0, from = 0, to = 0;
     uint32_t by    = 0;
-    for (uint32_t i = 0; rc == OK && i < s_count; i++) {
-        uint64_t start = s_runs[i].start > reach ? s_runs[i].start : reach;
-        uint64_t end   = s_runs[i].start + s_runs[i].count;
+    for (uint32_t i = 0; rc == OK && i < vol->ground_census.count; i++) {
+        uint64_t start = vol->ground_census.runs[i].start > reach ? vol->ground_census.runs[i].start : reach;
+        uint64_t end   = vol->ground_census.runs[i].start + vol->ground_census.runs[i].count;
         if (end <= start)
             continue;
         reach = end;
@@ -516,31 +510,31 @@ static error_t RunsDerive(const char** what)
             continue;
         }
         if (to)
-            rc = RunsLay(&s_runs[by], from, to);
+            rc = RunsLay(vol, &vol->ground_census.runs[by], from, to);
         by   = i;
         from = start;
         to   = end;
     }
     if (rc == OK && to)
-        rc = RunsLay(&s_runs[by], from, to);
+        rc = RunsLay(vol, &vol->ground_census.runs[by], from, to);
     if (rc == OK)
-        return BlockMapDerivedBuilt(what);
-    BlockMapDerivedLetGo();
+        return BlockMapDerivedBuilt(vol, what);
+    BlockMapDerivedLetGo(vol);
     return rc;
 }
 
 /* The Quires of `quire` blocks the Tallies' node claims lie in — on the grid
  * of the volume's blocks — those that meet joined, in order: *n of them, into
  * a new array; NULL with no memory. The claims sorted by their first block. */
-static GroundRun* TallyQuires(uint64_t quire, uint32_t* n)
+static GroundRun* TallyQuires(TagFSVolume* vol, uint64_t quire, uint32_t* n)
 {
-    GroundRun* out = kmalloc(sizeof(GroundRun) * (s_count ? s_count : 1u));
+    GroundRun* out = kmalloc(sizeof(GroundRun) * (vol->ground_census.count ? vol->ground_census.count : 1u));
     *n = 0;
-    for (uint32_t i = 0; out && i < s_count; i++) {
-        if (s_runs[i].owner != (uint32_t)GROUND_TALLY)
+    for (uint32_t i = 0; out && i < vol->ground_census.count; i++) {
+        if (vol->ground_census.runs[i].owner != (uint32_t)GROUND_TALLY)
             continue;
-        uint64_t from = s_runs[i].start / quire * quire;
-        uint64_t end  = (s_runs[i].start + s_runs[i].count + quire - 1u) / quire * quire;
+        uint64_t from = vol->ground_census.runs[i].start / quire * quire;
+        uint64_t end  = (vol->ground_census.runs[i].start + vol->ground_census.runs[i].count + quire - 1u) / quire * quire;
         GroundRun* last = *n ? &out[*n - 1u] : NULL;
         if (last && from <= last->start + last->who) {
             last->who = end > last->start + last->who ? end - last->start : last->who;
@@ -552,24 +546,24 @@ static GroundRun* TallyQuires(uint64_t quire, uint32_t* n)
 }
 
 /* The blocks of the Quires `q` (*nq, each run's length in its `who`) no claim
- * names, as runs into `gaps` (room for *nq + s_count): how many. */
-static uint32_t QuireGaps(const GroundRun* q, uint32_t nq, GroundRun* gaps)
+ * names, as runs into `gaps` (room for *nq + ground_census.count): how many. */
+static uint32_t QuireGaps(TagFSVolume* vol, const GroundRun* q, uint32_t nq, GroundRun* gaps)
 {
     uint32_t r = 0, n = 0;
     uint64_t reach = 0;
     for (uint32_t i = 0; i < nq; i++) {
         uint64_t at = q[i].start, end = q[i].start + q[i].who;
         while (at < end) {
-            while (r < s_count && s_runs[r].start <= at) {
-                if (s_runs[r].start + s_runs[r].count > reach)
-                    reach = s_runs[r].start + s_runs[r].count;
+            while (r < vol->ground_census.count && vol->ground_census.runs[r].start <= at) {
+                if (vol->ground_census.runs[r].start + vol->ground_census.runs[r].count > reach)
+                    reach = vol->ground_census.runs[r].start + vol->ground_census.runs[r].count;
                 r++;
             }
             if (reach > at) {
                 at = reach;
                 continue;
             }
-            uint64_t stop = r < s_count && s_runs[r].start < end ? s_runs[r].start : end;
+            uint64_t stop = r < vol->ground_census.count && vol->ground_census.runs[r].start < end ? vol->ground_census.runs[r].start : end;
             gaps[n++] = (GroundRun){ at, stop - at, 0, (uint32_t)GROUND_TALLY, 0 };
             at = stop;
         }
@@ -589,100 +583,100 @@ static uint32_t QuireGaps(const GroundRun* q, uint32_t nq, GroundRun* gaps)
  * (blklog_book.py). Before the cut of the fallow and the held: every name as
  * claimed. ERR_NO_MEMORY, said.
  */
-error_t GroundQuiresHeld(uint64_t quire)
+error_t GroundQuiresHeld(TagFSVolume* vol, uint64_t quire)
 {
     uint32_t nq = 0;
-    if (!quire || s_refused)
+    if (!quire || vol->ground_census.refused)
         return OK;
-    RunsSort(false);
-    GroundRun* q    = TallyQuires(quire, &nq);
-    GroundRun* gaps = q ? kmalloc(sizeof(GroundRun) * ((uint64_t)nq + s_count + 1u)) : NULL;
+    RunsSort(vol, false);
+    GroundRun* q    = TallyQuires(vol, quire, &nq);
+    GroundRun* gaps = q ? kmalloc(sizeof(GroundRun) * ((uint64_t)nq + vol->ground_census.count + 1u)) : NULL;
     if (!gaps) {
         kfree(q);
         kprintf("[TagFS FSCK] no memory to hold the Tallies' Quires whole — a book is not mounted on a census it "
                 "could not take\n");
         return ERR_NO_MEMORY;
     }
-    uint32_t n = QuireGaps(q, nq, gaps);
+    uint32_t n = QuireGaps(vol, q, nq, gaps);
     for (uint32_t i = 0; i < n; i++)
         for (uint64_t at = gaps[i].start, left = gaps[i].who; left;) {
             uint32_t c = left > UINT32_MAX ? UINT32_MAX : (uint32_t)left;
-            GroundClaimAs(GROUND_TALLY, at, c, 0, 0);
+            GroundClaimAs(vol, GROUND_TALLY, at, c, 0, 0);
             at   += c;
             left -= c;
         }
     kfree(q);
     kfree(gaps);
-    return s_refused ? ERR_NO_MEMORY : OK;
+    return vol->ground_census.refused ? ERR_NO_MEMORY : OK;
 }
 
-error_t GroundCensusBook(uint64_t* held, uint64_t* fallow, bool derive, const char** what)
+error_t GroundCensusBook(TagFSVolume* vol, uint64_t* held, uint64_t* fallow, bool derive, const char** what)
 {
     *held   = 0;
     *fallow = 0;
     *what   = "there is no memory to hold its census";
-    if (s_refused)
+    if (vol->ground_census.refused)
         return ERR_NO_MEMORY;
     /* How many name each block in common, counted before the cut below
      * takes from the held what a run SHARED names (ground_shares.c). */
-    error_t rc = GroundSharesCounted();
+    error_t rc = GroundSharesCounted(vol);
     if (rc != OK)
         return rc;
     /* The ground the ribbon let go is a name's only where no living owner is
      * (M-1), and what is held for a rot only where no owner at all is — the
      * fallow ground among them, a run SHARED among the owners (bookcensus.py
      * _Claims, Owned). */
-    rc = RunsOwnerLess(GROUND_FALLOW, GROUND_FALLOW, fallow);
+    rc = RunsOwnerLess(vol, GROUND_FALLOW, GROUND_FALLOW, fallow);
     if (rc == OK)
-        rc = RunsOwnerLess(GROUND_HELD, GROUND_HELD, held);
+        rc = RunsOwnerLess(vol, GROUND_HELD, GROUND_HELD, held);
     if (rc != OK)
         return rc;
-    RunsSort(true);
-    RunsOneName();
-    RunsSayDoublesBook();
-    return derive ? RunsDerive(what) : OK;
+    RunsSort(vol, true);
+    RunsOneName(vol);
+    RunsSayDoublesBook(vol);
+    return derive ? RunsDerive(vol, what) : OK;
 }
 
 #ifdef CONFIG_VOLUME_TESTS
-GroundOwner GroundClaimOf(uint64_t block)
+GroundOwner GroundClaimOf(TagFSVolume* vol, uint64_t block)
 {
-    for (uint32_t i = 0; i < s_count; i++)
-        if (block >= s_runs[i].start && block - s_runs[i].start < s_runs[i].count)
-            return (GroundOwner)s_runs[i].owner;
+    for (uint32_t i = 0; i < vol->ground_census.count; i++)
+        if (block >= vol->ground_census.runs[i].start && block - vol->ground_census.runs[i].start < vol->ground_census.runs[i].count)
+            return (GroundOwner)vol->ground_census.runs[i].owner;
     return GROUND_OWNER_KINDS;
 }
 #endif
 
-void GroundCensusNamed(uint64_t start, uint64_t count)
+void GroundCensusNamed(TagFSVolume* vol, uint64_t start, uint64_t count)
 {
     uint64_t end = start + count < start ? UINT64_MAX : start + count;
-    if (count && end > s_reach)
-        s_reach = end;
+    if (count && end > vol->ground_census.reach)
+        vol->ground_census.reach = end;
 }
 
-uint64_t GroundCensusReach(void)
+uint64_t GroundCensusReach(TagFSVolume* vol)
 {
-    return s_reach;
+    return vol->ground_census.reach;
 }
 
-uint64_t GroundCensusDoubled(void)
+uint64_t GroundCensusDoubled(TagFSVolume* vol)
 {
-    return s_doubled;
+    return vol->ground_census.doubled;
 }
 
-GroundRun* GroundCensusRuns(uint32_t* n)
+GroundRun* GroundCensusRuns(TagFSVolume* vol, uint32_t* n)
 {
-    *n = s_count;
-    return s_runs;
+    *n = vol->ground_census.count;
+    return vol->ground_census.runs;
 }
 
-void GroundCensusEnd(void)
+void GroundCensusEnd(TagFSVolume* vol)
 {
-    kfree(s_runs);
-    s_runs    = NULL;
-    s_count   = 0;
-    s_cap     = 0;
-    s_refused = false;
-    s_reach   = 0;
-    s_doubled = 0;
+    kfree(vol->ground_census.runs);
+    vol->ground_census.runs    = NULL;
+    vol->ground_census.count   = 0;
+    vol->ground_census.cap     = 0;
+    vol->ground_census.refused = false;
+    vol->ground_census.reach   = 0;
+    vol->ground_census.doubled = 0;
 }

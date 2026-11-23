@@ -31,13 +31,13 @@ static const char s_name[] = "keptfile.dat";
 
 /* Whether `fid` is among the files a question names: the live ones for
  * `kept` false, the deleted ones for true. */
-static bool StandKeepAmong(uint64_t fid, bool kept)
+static bool StandKeepAmong(TagFSVolume* vol, uint64_t fid, bool kept)
 {
     TagSpelling stem = { .key = s_stem, .key_len = sizeof(s_stem) - 1u };
     uint64_t    ids[STAND_KEEP_PAGE];
     TagFSPage   page;
-    error_t     rc = kept ? TagFSQueryKeptPage(TagOwnerPerson(), &stem, 1, NULL, 0, 1, ids, STAND_KEEP_PAGE, false, &page)
-                          : TagFSQueryPage(TagOwnerPerson(), &stem, 1, NULL, 0, 1, ids, STAND_KEEP_PAGE, false, &page);
+    error_t     rc = kept ? TagFSQueryKeptPage(vol, TagOwnerPerson(), &stem, 1, NULL, 0, 1, ids, STAND_KEEP_PAGE, false, &page)
+                          : TagFSQueryPage(vol, TagOwnerPerson(), &stem, 1, NULL, 0, 1, ids, STAND_KEEP_PAGE, false, &page);
     for (uint32_t i = 0; rc == OK && i < page.delivered; i++)
         if (ids[i] == fid)
             return true;
@@ -46,12 +46,12 @@ static bool StandKeepAmong(uint64_t fid, bool kept)
 
 /* Whether the volume lists `fid` among every file it has, as a question of no
  * tags does. */
-static bool StandKeepListed(uint64_t fid)
+static bool StandKeepListed(TagFSVolume* vol, uint64_t fid)
 {
     uint64_t  ids[STAND_KEEP_PAGE];
     uint64_t  from = 1;
     TagFSPage page;
-    while (TagFSListPage(from, ids, STAND_KEEP_PAGE, false, &page) == OK) {
+    while (TagFSListPage(vol, from, ids, STAND_KEEP_PAGE, false, &page) == OK) {
         for (uint32_t i = 0; i < page.delivered; i++)
             if (ids[i] == fid)
                 return true;
@@ -64,100 +64,105 @@ static bool StandKeepListed(uint64_t fid)
 
 static TestResult TestStandKeepHidesFromQueries(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
     uint64_t    fid = 0;
     TagFSMetadata md;
-    TEST_ASSERT(StandMakeTaggedFile(s_name, s_stem, "kept", 4, &fid), "a file is made");
-    TEST_ASSERT(StandKeepAmong(fid, false) && StandKeepListed(fid), "a live file is found by its tag and listed");
-    TEST_ASSERT(!StandKeepAmong(fid, true), "and the question for the deleted ones does not meet it");
-    TEST_ASSERT_EQ(tagfs_keep_file(fid, STAND_KEEP_TERM_S, INK_WARRANTED), 0, "the file is deleted for a term");
-    TEST_ASSERT(!StandKeepAmong(fid, false), "no query by its tag meets it");
-    TEST_ASSERT(!StandKeepListed(fid), "a question of no tags does not list it");
-    TEST_ASSERT(StandKeepAmong(fid, true), "the question for the deleted ones meets it");
-    TEST_ASSERT_EQ(tagfs_get_metadata(fid, &md), 0, "its record is there for whoever holds its id");
+    TEST_ASSERT(StandMakeTaggedFile(vol, s_name, s_stem, "kept", 4, &fid), "a file is made");
+    TEST_ASSERT(StandKeepAmong(vol, fid, false) && StandKeepListed(vol, fid), "a live file is found by its tag and listed");
+    TEST_ASSERT(!StandKeepAmong(vol, fid, true), "and the question for the deleted ones does not meet it");
+    TEST_ASSERT_EQ(tagfs_keep_file(vol, fid, STAND_KEEP_TERM_S, INK_WARRANTED), 0, "the file is deleted for a term");
+    TEST_ASSERT(!StandKeepAmong(vol, fid, false), "no query by its tag meets it");
+    TEST_ASSERT(!StandKeepListed(vol, fid), "a question of no tags does not list it");
+    TEST_ASSERT(StandKeepAmong(vol, fid, true), "the question for the deleted ones meets it");
+    TEST_ASSERT_EQ(tagfs_get_metadata(vol, fid, &md), 0, "its record is there for whoever holds its id");
     TEST_ASSERT((md.flags & TAGFS_FILE_DELETED) && md.keep_until > KeepNowNs() &&
                 md.keep_until <= KeepUntil(STAND_KEEP_TERM_S),
                 "and says it is deleted, kept until the term's end");
     tagfs_metadata_free(&md);
-    (void)tagfs_delete_file(fid, INK_WARRANTED);
+    (void)tagfs_delete_file(vol, fid, INK_WARRANTED);
 out:
     return verdict;
 }
 
 static TestResult TestStandKeepRestore(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult    verdict = TEST_PASS;
     uint64_t      fid = 0;
     TagFSMetadata md;
-    TEST_ASSERT(StandMakeTaggedFile(s_name, s_stem, "kept", 4, &fid), "a file is made");
-    TEST_ASSERT_EQ(tagfs_keep_file(fid, STAND_KEEP_TERM_S, INK_WARRANTED), 0, "the file is deleted for a term");
-    TEST_ASSERT(StandWriteAt(fid, 0, "gone", 4) < 4, "a write to a deleted file is refused");
-    TEST_ASSERT_EQ(tagfs_rename_file(fid, "keptfile.tmp"), -(int)ERR_FILE_NOT_FOUND, "and so is its rename");
-    TEST_ASSERT_EQ(tagfs_restore_file(fid, INK_WARRANTED), 0, "the file is brought back");
-    TEST_ASSERT(StandKeepAmong(fid, false) && !StandKeepAmong(fid, true), "queries find it again, the deleted ones' do not");
-    TEST_ASSERT_EQ(tagfs_get_metadata(fid, &md), 0, "its record is there");
+    TEST_ASSERT(StandMakeTaggedFile(vol, s_name, s_stem, "kept", 4, &fid), "a file is made");
+    TEST_ASSERT_EQ(tagfs_keep_file(vol, fid, STAND_KEEP_TERM_S, INK_WARRANTED), 0, "the file is deleted for a term");
+    TEST_ASSERT(StandWriteAt(vol, fid, 0, "gone", 4) < 4, "a write to a deleted file is refused");
+    TEST_ASSERT_EQ(tagfs_rename_file(vol, fid, "keptfile.tmp"), -(int)ERR_FILE_NOT_FOUND, "and so is its rename");
+    TEST_ASSERT_EQ(tagfs_restore_file(vol, fid, INK_WARRANTED), 0, "the file is brought back");
+    TEST_ASSERT(StandKeepAmong(vol, fid, false) && !StandKeepAmong(vol, fid, true), "queries find it again, the deleted ones' do not");
+    TEST_ASSERT_EQ(tagfs_get_metadata(vol, fid, &md), 0, "its record is there");
     TEST_ASSERT(!(md.flags & TAGFS_FILE_DELETED) && md.keep_until == 0, "and says nothing of a term");
     tagfs_metadata_free(&md);
-    TEST_ASSERT_EQ(tagfs_restore_file(fid, INK_WARRANTED), 0, "a file that is not deleted is restored as nothing");
-    TEST_ASSERT_EQ(StandWriteAt(fid, 0, "back", 4), 4, "and it is written again");
-    (void)tagfs_delete_file(fid, INK_WARRANTED);
+    TEST_ASSERT_EQ(tagfs_restore_file(vol, fid, INK_WARRANTED), 0, "a file that is not deleted is restored as nothing");
+    TEST_ASSERT_EQ(StandWriteAt(vol, fid, 0, "back", 4), 4, "and it is written again");
+    (void)tagfs_delete_file(vol, fid, INK_WARRANTED);
 out:
     return verdict;
 }
 
 static TestResult TestStandKeepTermEnds(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict = TEST_PASS;
     uint64_t   fid = 0;
-    TEST_ASSERT(StandMakeTaggedFile(s_name, s_stem, "kept", 4, &fid), "a file is made");
-    TEST_ASSERT_EQ(tagfs_keep_file(fid, STAND_KEEP_TERM_S, INK_WARRANTED), 0, "the file is deleted for a term");
-    TEST_ASSERT_EQ(KeepSweepNow(KeepNowNs()), 0u, "a sweep within the term lets nothing go");
-    TEST_ASSERT(StandKeepAmong(fid, true), "the file is kept");
-    TEST_ASSERT_EQ(tagfs_keep_file(fid, 2u * STAND_KEEP_TERM_S, INK_WARRANTED), 0, "deleted again, its term is moved");
-    TEST_ASSERT_EQ(KeepSweepNow(KeepNowNs() + (STAND_KEEP_TERM_S + 60u) * 1000000000ull), 0u,
+    TEST_ASSERT(StandMakeTaggedFile(vol, s_name, s_stem, "kept", 4, &fid), "a file is made");
+    TEST_ASSERT_EQ(tagfs_keep_file(vol, fid, STAND_KEEP_TERM_S, INK_WARRANTED), 0, "the file is deleted for a term");
+    TEST_ASSERT_EQ(KeepSweepNow(vol, KeepNowNs()), 0u, "a sweep within the term lets nothing go");
+    TEST_ASSERT(StandKeepAmong(vol, fid, true), "the file is kept");
+    TEST_ASSERT_EQ(tagfs_keep_file(vol, fid, 2u * STAND_KEEP_TERM_S, INK_WARRANTED), 0, "deleted again, its term is moved");
+    TEST_ASSERT_EQ(KeepSweepNow(vol, KeepNowNs() + (STAND_KEEP_TERM_S + 60u) * 1000000000ull), 0u,
                    "a sweep past the first term and within the second lets nothing go");
-    TEST_ASSERT_EQ(KeepSweepNow(KeepNowNs() + (2u * STAND_KEEP_TERM_S + 60u) * 1000000000ull), 1u,
+    TEST_ASSERT_EQ(KeepSweepNow(vol, KeepNowNs() + (2u * STAND_KEEP_TERM_S + 60u) * 1000000000ull), 1u,
                    "a sweep past the term lets the file go");
-    TEST_ASSERT(!StandKeepAmong(fid, true) && !StandKeepAmong(fid, false), "nothing meets it");
-    TEST_ASSERT_EQ(tagfs_restore_file(fid, INK_WARRANTED), -(int)ERR_FILE_NOT_FOUND, "and it cannot be brought back");
+    TEST_ASSERT(!StandKeepAmong(vol, fid, true) && !StandKeepAmong(vol, fid, false), "nothing meets it");
+    TEST_ASSERT_EQ(tagfs_restore_file(vol, fid, INK_WARRANTED), -(int)ERR_FILE_NOT_FOUND, "and it cannot be brought back");
 out:
     return verdict;
 }
 
 static TestResult TestStandKeepAtOnce(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult    verdict = TEST_PASS;
     uint64_t      fid = 0;
     TagFSMetadata md;
-    TEST_ASSERT(StandMakeTaggedFile(s_name, s_stem, "kept", 4, &fid), "a file is made");
-    TEST_ASSERT_EQ(tagfs_keep_file(fid, 0, INK_WARRANTED), 0, "a term of 0 gives the file up at once");
-    TEST_ASSERT(!StandKeepAmong(fid, true) && !StandKeepAmong(fid, false), "no question meets it");
-    TEST_ASSERT(tagfs_get_metadata(fid, &md) != 0, "and the volume holds no record of it");
+    TEST_ASSERT(StandMakeTaggedFile(vol, s_name, s_stem, "kept", 4, &fid), "a file is made");
+    TEST_ASSERT_EQ(tagfs_keep_file(vol, fid, 0, INK_WARRANTED), 0, "a term of 0 gives the file up at once");
+    TEST_ASSERT(!StandKeepAmong(vol, fid, true) && !StandKeepAmong(vol, fid, false), "no question meets it");
+    TEST_ASSERT(tagfs_get_metadata(vol, fid, &md) != 0, "and the volume holds no record of it");
 out:
     return verdict;
 }
 
 static TestResult TestStandKeepSurvivesAMount(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult    verdict = TEST_PASS;
     uint64_t      fid = 0, until = 0;
     TagFSMetadata md;
-    TEST_ASSERT(StandMakeTaggedFile(s_name, s_stem, "kept", 4, &fid), "a file is made");
-    TEST_ASSERT_EQ(tagfs_keep_file(fid, STAND_KEEP_TERM_S, INK_WARRANTED), 0, "the file is deleted for a term");
-    TEST_ASSERT_EQ(tagfs_get_metadata(fid, &md), 0, "its record is there");
+    TEST_ASSERT(StandMakeTaggedFile(vol, s_name, s_stem, "kept", 4, &fid), "a file is made");
+    TEST_ASSERT_EQ(tagfs_keep_file(vol, fid, STAND_KEEP_TERM_S, INK_WARRANTED), 0, "the file is deleted for a term");
+    TEST_ASSERT_EQ(tagfs_get_metadata(vol, fid, &md), 0, "its record is there");
     until = md.keep_until;
     tagfs_metadata_free(&md);
-    TEST_ASSERT_EQ(TagFSSettle(), OK, "the change is settled: the ribbon lays it");
-    TEST_ASSERT(StandStitchRemount(), "the volume is mounted afresh, its ribbon replayed");
-    TEST_ASSERT(!StandKeepAmong(fid, false) && StandKeepAmong(fid, true), "the file is still deleted for the mount that read it");
-    TEST_ASSERT_EQ(tagfs_get_metadata(fid, &md), 0, "its record is there");
+    TEST_ASSERT_EQ(TagFSSettle(vol), OK, "the change is settled: the ribbon lays it");
+    TEST_ASSERT(StandStitchRemount(vol), "the volume is mounted afresh, its ribbon replayed");
+    TEST_ASSERT(!StandKeepAmong(vol, fid, false) && StandKeepAmong(vol, fid, true), "the file is still deleted for the mount that read it");
+    TEST_ASSERT_EQ(tagfs_get_metadata(vol, fid, &md), 0, "its record is there");
     TEST_ASSERT((md.flags & TAGFS_FILE_DELETED) && md.keep_until == until, "with the same term");
     tagfs_metadata_free(&md);
-    TEST_ASSERT_EQ(KeepSweepNow(until + 1u), 1u, "a mount that comes after the term lets the file go");
-    TEST_ASSERT(!StandKeepAmong(fid, true), "nothing meets it");
-    TEST_ASSERT_EQ(TagFSSettle(), OK, "the Quitclaim is settled");
-    TEST_ASSERT(StandStitchRemount(), "and mounted afresh again");
-    TEST_ASSERT(!StandKeepAmong(fid, true) && !StandKeepAmong(fid, false), "the volume holds no file by that name");
+    TEST_ASSERT_EQ(KeepSweepNow(vol, until + 1u), 1u, "a mount that comes after the term lets the file go");
+    TEST_ASSERT(!StandKeepAmong(vol, fid, true), "nothing meets it");
+    TEST_ASSERT_EQ(TagFSSettle(vol), OK, "the Quitclaim is settled");
+    TEST_ASSERT(StandStitchRemount(vol), "and mounted afresh again");
+    TEST_ASSERT(!StandKeepAmong(vol, fid, true) && !StandKeepAmong(vol, fid, false), "the volume holds no file by that name");
 out:
     return verdict;
 }

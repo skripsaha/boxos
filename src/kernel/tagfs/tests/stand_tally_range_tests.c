@@ -8,6 +8,7 @@
 #include "../mount/tally_read.h"
 #include "../settle/binder.h"
 #include "block_fail.h"
+#include "tagfs_volume.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -26,10 +27,10 @@
  * when none. Not the lo key's own file: a separator stays where the file it
  * was cut at lay, and on a book whose files were given up since — every boot
  * of a stand past its first — that file may be gone. */
-static uint64_t StandTallyLeafFirstFile(const TallyPlace* leaf)
+static uint64_t StandTallyLeafFirstFile(TagFSVolume* vol, const TallyPlace* leaf)
 {
     uint64_t from = leaf->has_lo ? leaf->lo.k1 + (leaf->lo.k2 != 0 ? 1u : 0u) : 0, fid = 0;
-    if (FileMapFiles(tagfs_get_state()->files, from, &fid, 1) != 1)
+    if (FileMapFiles(vol->state.files, from, &fid, 1) != 1)
         return 0;
     if (leaf->has_hi && (fid > leaf->hi.k1 || (fid == leaf->hi.k1 && leaf->hi.k2 == 0)))
         return 0;
@@ -39,11 +40,11 @@ static uint64_t StandTallyLeafFirstFile(const TallyPlace* leaf)
 /* The least Tally a slot that holds may hold — either of an unsure slot's
  * two. A node laid by a Tally no later than it is one every slot names as it
  * lies: no slot holds another copy of its range. */
-static uint64_t StandTallyOldestHeld(void)
+static uint64_t StandTallyOldestHeld(TagFSVolume* vol)
 {
     uint64_t least = UINT64_MAX;
-    for (uint32_t i = 0; g_binder.slot && i < g_binder.nslots; i++) {
-        const SlotGround* s = &g_binder.slot[i];
+    for (uint32_t i = 0; vol->binder.slot && i < vol->binder.nslots; i++) {
+        const SlotGround* s = &vol->binder.slot[i];
         if (!s->holds)
             continue;
         if (s->tally < least)
@@ -63,14 +64,14 @@ static uint64_t StandTallyOldestHeld(void)
  * below the root holds a header memory has a file for: none on a one-leaf tree.
  * The nodes are the walk of the Tally the mount stands on (TallyStandNodeWhere).
  */
-static bool StandTallyLeafBelowRoot(TallyPlace* leaf, uint64_t* fid, bool* below)
+static bool StandTallyLeafBelowRoot(TagFSVolume* vol, TallyPlace* leaf, uint64_t* fid, bool* below)
 {
     TallyPlace n;
-    uint64_t   oldest = StandTallyOldestHeld();
+    uint64_t   oldest = StandTallyOldestHeld(vol);
     bool       found = false;
     *below = false;
     for (uint32_t i = 1; TallyStandNodeWhere(TALLY_FILES, i, &n); i++) {
-        uint64_t first = n.level == 0 ? StandTallyLeafFirstFile(&n) : 0;
+        uint64_t first = n.level == 0 ? StandTallyLeafFirstFile(vol, &n) : 0;
         *below = *below || first;
         if (first && n.ptr.seq <= oldest) {
             *leaf = n;
@@ -98,11 +99,12 @@ static bool StandTallyLeafBelowRoot(TallyPlace* leaf, uint64_t* fid, bool* below
  */
 TestResult TestStandTallyRottenLeafLocked(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     static StandBinder b;
-    uint8_t            seat    = tagfs_get_seat();
-    uint64_t           base    = tagfs_get_volume_base();
-    const char*        aside   = StandTallyAside();
+    uint8_t            seat    = tagfs_get_seat(vol);
+    uint64_t           base    = tagfs_get_volume_base(vol);
+    const char*        aside   = StandTallyAside(vol);
     TallyPlace         leaf;
     MountBookSaid      said;
     bool               down = false, below = false, found = false, kept = false;
@@ -112,60 +114,60 @@ TestResult TestStandTallyRottenLeafLocked(void)
 
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(StandStitchRemount(), "the volume mounted afresh: its walk names the newest Tally's nodes");
-    found = StandTallyLeafBelowRoot(&leaf, &fid, &below);
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounted afresh: its walk names the newest Tally's nodes");
+    found = StandTallyLeafBelowRoot(vol, &leaf, &fid, &below);
     if (!below)
         return test_steps_aside("no leaf below its FILES root holds a live file's header — the tree "
                                 "is one leaf, its root: no range lies below a root to rot (a book of "
                                 "more files has one — the stand's padded landing)");
-    if ((aside = StandBinderAside(&b)) != NULL)
+    if ((aside = StandBinderAside(vol, &b)) != NULL)
         return test_steps_aside(aside);
     kept = true;
     if (!found) {
-        TEST_ASSERT(StandBinderGleaned() && StandBinderTallies(g_binder.ring + 1u) == OK,
+        TEST_ASSERT(StandBinderGleaned(vol) && StandBinderTallies(vol, vol->binder.ring + 1u) == OK,
                     "a Glean's Tallies laid, then a Tally over each slot of the ring and one more, nothing changed");
-        TEST_ASSERT(StandStitchRemount(), "the volume mounted again past them");
-        found = StandTallyLeafBelowRoot(&leaf, &fid, &below);
+        TEST_ASSERT(StandStitchRemount(vol), "the volume mounted again past them");
+        found = StandTallyLeafBelowRoot(vol, &leaf, &fid, &below);
     }
     TEST_ASSERT(found, "a leaf below the root every slot names as it lies");
-    rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    rec = FileMapRecordHold(vol->state.files, fid, NULL);
     TEST_ASSERT(rec != NULL, "a live file whose header the leaf holds");
     FileRecordRelease(rec);
 
-    down = TagFSStandLetGo();
+    down = TagFSStandLetGo(vol);
     TEST_ASSERT(down, "the volume is let go of");
     sectors = leaf.ptr.sheets * TAGFS_BLOCK_SECTORS;
     BlockFailArmBadSectors(seat, base + leaf.ptr.block[0] * TAGFS_BLOCK_SECTORS, sectors);
     TEST_ASSERT(BlockFailAddBadSectors(seat, base + leaf.ptr.block[1] * TAGFS_BLOCK_SECTORS, sectors),
                 "both copies of the leaf will not read");
-    StandTallyArrive();
-    TagFSStandHoldAgain();
+    StandTallyArrive(vol);
+    TagFSStandHoldAgain(vol);
     down  = false;
     asked = BlockFailSeen();
 
-    TEST_ASSERT(tagfs_get_state()->initialized, "the volume mounts all the same");
+    TEST_ASSERT(vol->state.initialized, "the volume mounts all the same");
     TEST_ASSERT_EQ(asked, 2u * (1u + sectors), "each copy of the leaf asked of the medium once: its run, then "
                                                "each sector alone — no older slot that names the leaf where it lies "
                                                "reads it again");
-    MountBookStandSaid(&said);
+    MountBookStandSaid(vol, &said);
     TEST_ASSERT_EQ(said.rotten, 1, "with one rotten range of FILES");
     /* Its files are locked by the range itself (TagFSFileLocked asks it); the
      * mount's count of files locked by name (said.locked) holds only a file
      * the leaf's edge cuts, which an image whose rotten leaf opens on a
      * header has none of. */
-    TEST_ASSERT(TagFSFileLocked(fid), "whose files are locked, the leaf's first file among them");
-    TEST_ASSERT(tagfs_open(fid, TAGFS_HANDLE_READ) == NULL, "and no open of it is handed out");
+    TEST_ASSERT(TagFSFileLocked(vol, fid), "whose files are locked, the leaf's first file among them");
+    TEST_ASSERT(tagfs_open(vol, fid, TAGFS_HANDLE_READ) == NULL, "and no open of it is handed out");
     TEST_ASSERT(said.held > 0, "and the blocks they named are held");
 out:
     BlockFailDisarm();
-    if (!down && tagfs_get_state()->initialized)
-        TagFSStandLetGo();
-    StandTallyArrive();
-    MountBookStandSaid(&said);
-    if (said.rotten != 0 || TagFSFileLocked(fid))
+    if (!down && vol->state.initialized)
+        TagFSStandLetGo(vol);
+    StandTallyArrive(vol);
+    MountBookStandSaid(vol, &said);
+    if (said.rotten != 0 || TagFSFileLocked(vol, fid))
         verdict = TestFailedAt(__FILE__, __LINE__, "mounted with the sectors reading again, a range "
                                "is still rotten (rotten, 0)", said.rotten, 0);
-    StandTallyClose();
+    StandTallyClose(vol);
     if (kept)
         STAND_BINDER_PUT_BACK(&b);
     return verdict;

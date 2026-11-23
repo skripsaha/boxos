@@ -2,6 +2,7 @@
 #include "../helm/helm.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
+#include "tagfs_volume.h"
 
 /*
  * HOLDGROUND=on — a caller who is inside the volume when its medium leaves.
@@ -47,36 +48,36 @@ static TagFSFileHandle *g_hold_handle  = NULL;
 /* Is the entry this handle owns still the one the table hands out for its
  * file? A second entry for one file is a second Helm for one file, which is
  * two holders of its extents at once — and it leaves no trace of its own. */
-static bool hold_entry_still_listed(const TagFSFileHandle *handle, uint32_t *out_refs)
+static bool hold_entry_still_listed(TagFSVolume* vol, const TagFSFileHandle *handle, uint32_t *out_refs)
 {
-    return handle && ofe_listed(handle->ofe, out_refs);
+    return handle && ofe_listed(vol, handle->ofe, out_refs);
 }
 
 /* A file is held open from the moment the volume is first mounted, so that it
  * is a handle from the PREVIOUS mounting when the volume comes back. */
-void TagFSHoldGroundOpenFile(void)
+void TagFSHoldGroundOpenFile(TagFSVolume* vol)
 {
     if (g_hold_handle) {
         return;
     }
     uint64_t  ids[1];
     TagFSPage page;
-    if (TagFSListPage(1, ids, 1, false, &page) != OK || page.delivered == 0) {
+    if (TagFSListPage(vol, 1, ids, 1, false, &page) != OK || page.delivered == 0) {
         kprintf("[TagFS HOLDGROUND] this volume has no file to hold open\n");
         return;
     }
-    g_hold_handle = tagfs_open(ids[0], 0);
+    g_hold_handle = tagfs_open(vol, ids[0], 0);
     kprintf("[TagFS HOLDGROUND] holding file %llu open across whatever happens "
             "to the medium\n", (unsigned long long)ids[0]);
 }
 
 /* And a caller inside the volume at the moment its medium is noticed gone. */
-void TagFSHoldGroundTake(void)
+void TagFSHoldGroundTake(TagFSVolume* vol)
 {
     if (g_hold_inside) {
         return;
     }
-    if (!tagfs_enter()) {
+    if (!tagfs_enter(vol)) {
         return;                     /* already shut — nothing to demonstrate */
     }
     g_hold_inside = true;
@@ -89,61 +90,61 @@ void TagFSHoldGroundTake(void)
 /* Reached only once a return is waiting to be finished, which is what makes
  * this deterministic: the caller is inside when the volume comes back, every
  * time, rather than whenever a clock happens to land. */
-void TagFSHoldGroundRelease(void)
+void TagFSHoldGroundRelease(TagFSVolume* vol)
 {
     if (!g_hold_inside || (int64_t)(rdtsc() - g_hold_until) < 0) {
         return;
     }
     g_hold_inside = false;
-    tagfs_leave();
+    tagfs_leave(vol);
     kprintf("[TagFS HOLDGROUND] the caller has stepped out of the old volume\n");
 }
 
 /* And what the volume looks like to what was held across it. */
-void TagFSHoldGroundAfterReturn(void)
+void TagFSHoldGroundAfterReturn(TagFSVolume* vol)
 {
-    if (!g_hold_handle || !tagfs_get_state()->initialized) {
+    if (!g_hold_handle || !vol->state.initialized) {
         return;
     }
 
     uint8_t  probe[16];
     uint64_t got = 0;
-    error_t  rc  = tagfs_read(g_hold_handle, probe, sizeof(probe), &got);
+    error_t  rc  = tagfs_read(vol, g_hold_handle, probe, sizeof(probe), &got);
     kprintf("[TagFS HOLDGROUND] a read through the handle from before answered "
             "%u\n", (unsigned)rc);
 
     uint32_t refs = 0;
-    bool listed = hold_entry_still_listed(g_hold_handle, &refs);
+    bool listed = hold_entry_still_listed(vol, g_hold_handle, &refs);
     kprintf("[TagFS HOLDGROUND] the open-file entry that handle owns is %s the "
             "table, with %u reference(s)\n",
             listed ? "still in" : "NO LONGER in", refs);
 
-    TagFSFileHandle *again = tagfs_open(g_hold_handle->file_id, 0);
+    TagFSFileHandle *again = tagfs_open(vol, g_hold_handle->file_id, 0);
     if (again) {
         refs = 0;
-        listed = hold_entry_still_listed(g_hold_handle, &refs);
+        listed = hold_entry_still_listed(vol, g_hold_handle, &refs);
         kprintf("[TagFS HOLDGROUND] opening the same file again %s the same "
                 "entry, now with %u reference(s)\n",
                 (again->ofe == g_hold_handle->ofe) ? "found" : "made a SECOND",
                 refs);
-        tagfs_close(again);
+        tagfs_close(vol, again);
     }
 
-    tagfs_close(g_hold_handle);
+    tagfs_close(vol, g_hold_handle);
     g_hold_handle = NULL;
 }
 
 /* The book taken up: nothing is taken down, so the caller steps out now, and
  * the handle from before is asked what it reads. */
-void TagFSHoldGroundResumed(void)
+void TagFSHoldGroundResumed(TagFSVolume* vol)
 {
     if (g_hold_inside) {
         g_hold_inside = false;
-        tagfs_leave();
+        tagfs_leave(vol);
         kprintf("[TagFS HOLDGROUND] the volume's book was taken up — nothing is taken down, "
                 "and the caller steps out\n");
     }
-    TagFSHoldGroundAfterReturn();
+    TagFSHoldGroundAfterReturn(vol);
 }
 
 #endif  /* CONFIG_TAGFS_HOLD_GROUND */

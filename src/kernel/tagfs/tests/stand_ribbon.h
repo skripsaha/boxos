@@ -62,10 +62,10 @@ uint32_t            StandRibbonSew(StandRibbon* w, uint64_t block, uint64_t seq,
                                    const StandRibbonRecords* r, uint32_t write);
 StitchHead          StandRibbonHead(const StandRibbon* w, uint64_t seq, uint64_t prev_seq, uint32_t prev_clasp);
 bool                StandRibbonData(StandRibbon* w, uint64_t digests[2]);
-bool                StandRibbonLetGo(RibbonCursor* at);
-bool                StandRibbonPutBack(StandRibbon* w);
-const char*         StandRibbonAside(StandRibbon* w);
-bool                StandRibbonLive(uint64_t fid, FileRecord** out);
+bool                StandRibbonLetGo(TagFSVolume* vol, RibbonCursor* at);
+bool                StandRibbonPutBack(TagFSVolume* vol, StandRibbon* w);
+const char*         StandRibbonAside(TagFSVolume* vol, StandRibbon* w);
+bool                StandRibbonLive(TagFSVolume* vol, uint64_t fid, FileRecord** out);
 
 #endif /* CONFIG_VOLUME_TESTS */
 

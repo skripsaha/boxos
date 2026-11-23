@@ -1,4 +1,5 @@
 #include "binder_internal.h"
+#include "tagfs_volume.h"
 
 /*
  * TipIn's sifting of one tree of the Tally before (tip_in.h, TipInSift) at the
@@ -35,52 +36,52 @@ static bool PlaceSame(const TallyPlace* a, const TallyPlace* b)
 }
 
 /* Whether the mount found no copy of the node at `p` of `tree` to read. */
-static bool MountRotten(uint64_t tree, const TallyPlace* p)
+static bool MountRotten(TagFSVolume* vol, uint64_t tree, const TallyPlace* p)
 {
-    for (uint32_t i = 0; i < g_binder.nrot; i++)
-        if (g_binder.rot[i].tree == tree && PlaceSame(&g_binder.rot[i].at, p))
+    for (uint32_t i = 0; i < vol->binder.nrot; i++)
+        if (vol->binder.rot[i].tree == tree && PlaceSame(&vol->binder.rot[i].at, p))
             return true;
     return false;
 }
 
-uint32_t BinderSiftLeaves(uint64_t tree)
+uint32_t BinderSiftLeaves(TagFSVolume* vol, uint64_t tree)
 {
     uint32_t n = 0;
     if (tree == TALLY_DIGESTS)
-        return TallyDigestLeaves();
-    (void)FoliationLeaves(tree, &n);
+        return TallyDigestLeaves(vol);
+    (void)FoliationLeaves(vol, tree, &n);
     return n;
 }
 
-bool BinderSiftLeafAt(uint64_t tree, uint32_t i, TallyPlace* p, bool* rotten)
+bool BinderSiftLeafAt(TagFSVolume* vol, uint64_t tree, uint32_t i, TallyPlace* p, bool* rotten)
 {
     uint32_t             n = 0;
     const FoliationNode* f = NULL;
     if (tree == TALLY_DIGESTS)
-        return TallyDigestLeafAt(i, p, rotten);
-    f = FoliationLeaves(tree, &n);
+        return TallyDigestLeafAt(vol, i, p, rotten);
+    f = FoliationLeaves(vol, tree, &n);
     if (i >= n)
         return false;
     *p      = f[i].place;
-    *rotten = MountRotten(tree, p);
+    *rotten = MountRotten(vol, tree, p);
     return true;
 }
 
 /* The first leaf from the second on whose lower key is not below `key` — the
  * leaves past `n` when none is. */
-static uint32_t LeafFrom(uint64_t tree, uint32_t n, TallyKey key)
+static uint32_t LeafFrom(TagFSVolume* vol, uint64_t tree, uint32_t n, TallyKey key)
 {
-    return BinderSiftLeafFrom(tree, 1, n, key);
+    return BinderSiftLeafFrom(vol, tree, 1, n, key);
 }
 
-uint32_t BinderSiftLeafFrom(uint64_t tree, uint32_t from, uint32_t n, TallyKey key)
+uint32_t BinderSiftLeafFrom(TagFSVolume* vol, uint64_t tree, uint32_t from, uint32_t n, TallyKey key)
 {
     uint32_t   lo = from, hi = n;
     TallyPlace p;
     bool       rotten;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2u;
-        if (BinderSiftLeafAt(tree, mid, &p, &rotten) && p.has_lo && !TipInKeyLess(tree, p.lo, key))
+        if (BinderSiftLeafAt(vol, tree, mid, &p, &rotten) && p.has_lo && !TipInKeyLess(tree, p.lo, key))
             hi = mid;
         else
             lo = mid + 1u;
@@ -88,14 +89,14 @@ uint32_t BinderSiftLeafFrom(uint64_t tree, uint32_t from, uint32_t n, TallyKey k
     return lo < n ? lo : n;
 }
 
-uint32_t BinderSiftLeafOf(uint64_t tree, uint32_t n, TallyKey key)
+uint32_t BinderSiftLeafOf(TagFSVolume* vol, uint64_t tree, uint32_t n, TallyKey key)
 {
     uint32_t   lo = 1, hi = n;
     TallyPlace q;
     bool       rotten = false;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2u;
-        if (BinderSiftLeafAt(tree, mid, &q, &rotten) && (!q.has_lo || !TipInKeyLess(tree, key, q.lo)))
+        if (BinderSiftLeafAt(vol, tree, mid, &q, &rotten) && (!q.has_lo || !TipInKeyLess(tree, key, q.lo)))
             lo = mid + 1u;
         else
             hi = mid;
@@ -105,11 +106,11 @@ uint32_t BinderSiftLeafOf(uint64_t tree, uint32_t n, TallyKey key)
 
 /* Whether the node of DIGESTS at `p` reads in no copy: the place of the reads'
  * table its first key lies in is its range, at its own level, rotten. */
-static bool TableRotten(const TallyPlace* p, uint32_t n)
+static bool TableRotten(TagFSVolume* vol, const TallyPlace* p, uint32_t n)
 {
     TallyPlace q;
     bool       rotten = false;
-    if (n == 0 || !BinderSiftLeafAt(TALLY_DIGESTS, p->has_lo ? BinderSiftLeafOf(TALLY_DIGESTS, n, p->lo) : 0, &q,
+    if (n == 0 || !BinderSiftLeafAt(vol, TALLY_DIGESTS, p->has_lo ? BinderSiftLeafOf(vol, TALLY_DIGESTS, n, p->lo) : 0, &q,
                                     &rotten))
         return false;
     return rotten && q.level == p->level && (!q.has_hi || !p->has_lo || TipInKeyLess(TALLY_DIGESTS, p->lo, q.hi));
@@ -151,22 +152,22 @@ static void ParentsMarked(uint64_t tree, const FoliationNode* run, uint32_t n, c
 }
 
 /* The leaves [*from, *to) under the node of level 1 `j` of `run`. */
-static void ChildrenOf(uint64_t tree, uint32_t nleaf, const FoliationNode* run, uint32_t n, uint32_t j,
+static void ChildrenOf(TagFSVolume* vol, uint64_t tree, uint32_t nleaf, const FoliationNode* run, uint32_t n, uint32_t j,
                        uint32_t* from, uint32_t* to)
 {
-    *from = j == 0 || !run[j].place.has_lo ? 0 : LeafFrom(tree, nleaf, run[j].place.lo);
-    *to   = j + 1u == n || !run[j + 1u].place.has_lo ? nleaf : LeafFrom(tree, nleaf, run[j + 1u].place.lo);
+    *from = j == 0 || !run[j].place.has_lo ? 0 : LeafFrom(vol, tree, nleaf, run[j].place.lo);
+    *to   = j + 1u == n || !run[j + 1u].place.has_lo ? nleaf : LeafFrom(vol, tree, nleaf, run[j + 1u].place.lo);
 }
 
 /* One leaf more for the sift — a place of the reads' table above level 0 is
  * an inner node's range, never a leaf. A leaf a copy of which did not hold is
  * never marked: its range is in DogEar (book_ground.c, BookGroundMended;
  * tally_read.c, TallyDigestMended), which marks its parent. */
-static void LeafPut(BinderSift* s, uint32_t i)
+static void LeafPut(TagFSVolume* vol, BinderSift* s, uint32_t i)
 {
     TallyPlace p;
     bool       rotten = false;
-    if (!BinderSiftLeafAt(s->tree, i, &p, &rotten) || p.level != 0)
+    if (!BinderSiftLeafAt(vol, s->tree, i, &p, &rotten) || p.level != 0)
         return;
     s->leaf[s->n] = (TipInNode){ .place = p, .relay = false, .rotten = rotten };
     s->at[s->n++] = i;
@@ -174,12 +175,12 @@ static void LeafPut(BinderSift* s, uint32_t i)
 
 /* The leaves the sift is handed: the tree's first, then the children of every
  * parent marked, in key order — every leaf when the tree has no inner node. */
-static error_t LeavesGathered(BinderSift* s, uint32_t nleaf, const FoliationNode* run, uint32_t n,
+static error_t LeavesGathered(TagFSVolume* vol, BinderSift* s, uint32_t nleaf, const FoliationNode* run, uint32_t n,
                               const bool* mark)
 {
     uint32_t most = 1, from = 0, to = 0;
     for (uint32_t j = 0; j < n; j++) {
-        ChildrenOf(s->tree, nleaf, run, n, j, &from, &to);
+        ChildrenOf(vol, s->tree, nleaf, run, n, j, &from, &to);
         most += mark[j] ? to - from : 0;
     }
     if (n == 0)
@@ -191,44 +192,44 @@ static error_t LeavesGathered(BinderSift* s, uint32_t nleaf, const FoliationNode
         return ERR_NO_MEMORY;
     if (n == 0) {
         for (uint32_t i = 0; i < nleaf; i++)
-            LeafPut(s, i);
+            LeafPut(vol, s, i);
         return OK;
     }
     if (nleaf)
-        LeafPut(s, 0);
+        LeafPut(vol, s, 0);
     for (uint32_t j = 0; j < n; j++) {
         if (!mark[j])
             continue;
-        ChildrenOf(s->tree, nleaf, run, n, j, &from, &to);
+        ChildrenOf(vol, s->tree, nleaf, run, n, j, &from, &to);
         for (uint32_t i = from ? from : 1u; i < to; i++)
-            LeafPut(s, i);
+            LeafPut(vol, s, i);
     }
     return OK;
 }
 
 /* Every inner node of the tree, as the Foliation holds them after FoliationLevel
  * ordered them by level and key. */
-static error_t InnerGathered(BinderSift* s, uint32_t nleaf)
+static error_t InnerGathered(TagFSVolume* vol, BinderSift* s, uint32_t nleaf)
 {
     uint32_t             ni = 0;
-    const FoliationNode* fi = FoliationInner(s->tree, &ni);
+    const FoliationNode* fi = FoliationInner(vol, s->tree, &ni);
     s->inner = kmalloc(sizeof(TipInNode) * (ni ? ni : 1u));
     s->inf   = kmalloc(sizeof(TipInFate) * (ni ? ni : 1u));
     if (!s->inner || !s->inf)
         return ERR_NO_MEMORY;
     for (uint32_t j = 0; j < ni; j++)
         s->inner[j] = (TipInNode){ .place = fi[j].place, .relay = fi[j].relay,
-                                   .rotten = s->tree == TALLY_DIGESTS ? TableRotten(&fi[j].place, nleaf)
-                                                                      : MountRotten(s->tree, &fi[j].place) };
+                                   .rotten = s->tree == TALLY_DIGESTS ? TableRotten(vol, &fi[j].place, nleaf)
+                                                                      : MountRotten(vol, s->tree, &fi[j].place) };
     s->ninner = ni;
     return OK;
 }
 
-error_t BinderSiftTree(BinderSift* s, uint64_t tree)
+error_t BinderSiftTree(TagFSVolume* vol, BinderSift* s, uint64_t tree)
 {
-    uint32_t             n1 = 0, nspan = 0, nleaf = BinderSiftLeaves(tree);
-    const FoliationNode* run = FoliationLevel(tree, 1, &n1);
-    const DogEarSpan*    sp  = DogEarTakenSpans(tree, &nspan);
+    uint32_t             n1 = 0, nspan = 0, nleaf = BinderSiftLeaves(vol, tree);
+    const FoliationNode* run = FoliationLevel(vol, tree, 1, &n1);
+    const DogEarSpan*    sp  = DogEarTakenSpans(vol, tree, &nspan);
     bool*                mark = n1 ? kmalloc(sizeof(bool) * n1) : NULL;
     error_t              rc   = n1 && !mark ? ERR_NO_MEMORY : OK;
     memset(s, 0, sizeof(*s));
@@ -237,22 +238,22 @@ error_t BinderSiftTree(BinderSift* s, uint64_t tree)
         if (n1)
             memset(mark, 0, sizeof(bool) * n1);
         ParentsMarked(tree, run, n1, sp, nspan, mark);
-        rc = LeavesGathered(s, nleaf, run, n1, mark);
+        rc = LeavesGathered(vol, s, nleaf, run, n1, mark);
     }
     kfree(mark);
     if (rc == OK)
-        rc = InnerGathered(s, nleaf);
+        rc = InnerGathered(vol, s, nleaf);
     if (rc == OK)
-        rc = BinderSiftAgain(s);
+        rc = BinderSiftAgain(vol, s);
     if (rc != OK)
         BinderSiftLetGo(s);
     return rc;
 }
 
-error_t BinderSiftAgain(BinderSift* s)
+error_t BinderSiftAgain(TagFSVolume* vol, BinderSift* s)
 {
     uint32_t          nspan = 0;
-    const DogEarSpan* sp    = DogEarTakenSpans(s->tree, &nspan);
+    const DogEarSpan* sp    = DogEarTakenSpans(vol, s->tree, &nspan);
     return TipInSift(s->tree, s->leaf, s->n, s->inner, s->ninner, sp, nspan, s->lf, s->inf);
 }
 
@@ -269,14 +270,14 @@ static uint64_t NodeBlocks(const TallyPlace* p, uint32_t grid)
  * a Tally whose every leaf laid emptied is weighed — and, no cheaper laid in,
  * written whole — as before (binder_kept.c, BinderTipInTake). Asked once a
  * Tally, a leaf laid at a time, at its slice. */
-void BinderSiftCount(const BinderSift* s, uint32_t grid, TipInCount* c)
+void BinderSiftCount(TagFSVolume* vol, const BinderSift* s, uint32_t grid, TipInCount* c)
 {
     TallyPlace p;
     bool       rotten;
     uint64_t   whole = 0, empty = 0;
     for (uint32_t i = 0; i < s->n; i++) {
         uint64_t blocks = NodeBlocks(&s->leaf[i].place, grid);
-        if (s->lf[i] == TIP_IN_LAID && !BinderLeafLives(s->tree, &s->leaf[i].place, s->at[i] == 0, true))
+        if (s->lf[i] == TIP_IN_LAID && !BinderLeafLives(vol, s->tree, &s->leaf[i].place, s->at[i] == 0, true))
             empty += blocks;
         else if (s->lf[i] == TIP_IN_LAID || s->lf[i] == TIP_IN_MARGIN)
             c->tip += blocks;
@@ -285,7 +286,7 @@ void BinderSiftCount(const BinderSift* s, uint32_t grid, TipInCount* c)
         c->tip += s->inf[j] == TIP_IN_LAID ? NodeBlocks(&s->inner[j].place, grid) : 0;
         whole  += NodeBlocks(&s->inner[j].place, grid);
     }
-    for (uint32_t i = 0; BinderSiftLeafAt(s->tree, i, &p, &rotten); i++)
+    for (uint32_t i = 0; BinderSiftLeafAt(vol, s->tree, i, &p, &rotten); i++)
         whole += p.level == 0 ? NodeBlocks(&p, grid) : 0;
     c->whole  += whole - empty;
     c->sifted += whole;

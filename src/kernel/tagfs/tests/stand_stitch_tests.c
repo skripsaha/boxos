@@ -15,6 +15,7 @@
 #include "block_fail.h"
 #include "crypto.h"
 #include "kheap.h"
+#include "tagfs_volume.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -74,9 +75,9 @@ void StandStitchAnswered(SettleWaiter* w, error_t rc)
  * none does. A change that would not settle first is the test's failure, said
  * where it was met: the kit stands aside past it, and the runner judges it.
  */
-const char* StandStitchAside(StandStitch* s)
+const char* StandStitchAside(TagFSVolume* vol, StandStitch* s)
 {
-    const char* aside = StandStepsAsideFor();
+    const char* aside = StandStepsAsideFor(vol);
     if (aside)
         return aside;
     /* A change memory holds and no cycle settled — one a test before this one
@@ -84,16 +85,16 @@ const char* StandStitchAside(StandStitch* s)
      * put-back lays zeros past where the ribbon stood, and that change's
      * stitch sewn there would go with the test's, the file it gave up live
      * again at the next mount. */
-    error_t settled = InkedGen() != SettledGen() ? TagFSSettle() : OK;
+    error_t settled = InkedGen(vol) != SettledGen(vol) ? TagFSSettle(vol) : OK;
     if (settled != OK) {
         (void)TestFailedAt(__FILE__, __LINE__, "what memory holds settles before the ribbon is kept", settled, OK);
         return "what memory holds would not settle before the ribbon is kept";
     }
     memset(s, 0, sizeof(*s));
-    RibbonCursorStand(&s->at);
-    s->seat = tagfs_get_seat();
-    s->base = tagfs_get_volume_base();
-    memcpy(s->uuid, tagfs_get_state()->uuid, sizeof(s->uuid));
+    RibbonCursorStand(vol, &s->at);
+    s->seat = tagfs_get_seat(vol);
+    s->base = tagfs_get_volume_base(vol);
+    memcpy(s->uuid, vol->state.uuid, sizeof(s->uuid));
     if (!s->at.up)
         return "the writer has no cursor on the ribbon";
     if (!s_stitch_context) {
@@ -125,13 +126,13 @@ bool StandStitchContextBack(void)
  * service — leaves it not let go of, and the runner's hold on its door is
  * given back, so the put-back lets go of the hold the runner has, never of
  * that caller's. */
-bool StandStitchRemount(void)
+bool StandStitchRemount(TagFSVolume* vol)
 {
-    if (tagfs_get_state()->initialized && !StandRibbonLetGo(NULL)) {
-        TagFSStandHoldAgain();
+    if (vol->state.initialized && !StandRibbonLetGo(vol, NULL)) {
+        TagFSStandHoldAgain(vol);
         return false;
     }
-    return StandRibbonUp();
+    return StandRibbonUp(vol);
 }
 
 /* `blocks` blocks from `block` to zeros, past TagFS. */
@@ -169,10 +170,10 @@ static bool StandStitchZeroQuire(const StandStitch* s, const RibbonQuire* q)
  * ribbon stood before; false, and no zeros laid, when a caller is still inside
  * the volume at the bound — a cycle of its writer would sew past them.
  */
-bool StandStitchPutBack(const StandStitch* s)
+bool StandStitchPutBack(TagFSVolume* vol, const StandStitch* s)
 {
     RibbonCursor now;
-    bool         down = StandRibbonLetGo(&now), ok = down;
+    bool         down = StandRibbonLetGo(vol, &now), ok = down;
     if (down) {
         uint64_t first = s->at.quire.block + s->at.off / TAGFS_BLOCK_SECTORS;
         ok  = StandStitchZero(s, first, s->at.quire.block + s->at.quire.blocks - first);
@@ -185,16 +186,16 @@ bool StandStitchPutBack(const StandStitch* s)
     ok &= StandStitchContextBack();
     kprintf("[TESTS] stand_stitch: the ribbon is %s\n",
             down ? "put back as it was found" : "NOT put back — a caller stayed inside the volume");
-    StandRibbonArrive();
-    TagFSStandHoldAgain();
-    RibbonCursorStand(&now);
-    bool back = ok && tagfs_get_state()->initialized && now.up && now.last == s->at.last &&
+    StandRibbonArrive(vol);
+    TagFSStandHoldAgain(vol);
+    RibbonCursorStand(vol, &now);
+    bool back = ok && vol->state.initialized && now.up && now.last == s->at.last &&
                 RibbonQuireSame(&now.quire, &s->at.quire) && now.off == s->at.off;
     if (!back)
         kprintf("[TESTS] stand_stitch: put back — zeros %s, mounted %d, the ribbon at seq %llu, sector %llu of "
                 "Quire %llu; it stood at seq %llu, sector %llu of Quire %llu\n",
                 !down ? "not laid" : ok ? "laid" : "refused",
-                (int)tagfs_get_state()->initialized, (unsigned long long)now.last, (unsigned long long)now.off,
+                (int)vol->state.initialized, (unsigned long long)now.last, (unsigned long long)now.off,
                 (unsigned long long)now.quire.block, (unsigned long long)s->at.last,
                 (unsigned long long)s->at.off, (unsigned long long)s->at.quire.block);
     return back;
@@ -202,14 +203,14 @@ bool StandStitchPutBack(const StandStitch* s)
 
 /* The last stitch this mount sewed, read back off the medium with the
  * mount's own reader: *out the caller's to let go. */
-bool StandStitchRead(RibbonUnit** out)
+bool StandStitchRead(TagFSVolume* vol, RibbonUnit** out)
 {
     RibbonCursor c;
-    RibbonCursorStand(&c);
+    RibbonCursorStand(vol, &c);
     *out = NULL;
     if (!c.sewn_of)
         return false;
-    return RibbonUnitRead(&c.sewn, c.sewn_of, c.last, &c.sewn_hop, out) == OK && *out && (*out)->sound;
+    return RibbonUnitRead(vol, &c.sewn, c.sewn_of, c.last, &c.sewn_hop, out) == OK && *out && (*out)->sound;
 }
 
 /* Whether stitch `u` carries a record of `kind` whose body is `body`. */
@@ -230,15 +231,15 @@ static bool StandStitchCarries(const RibbonUnit* u, uint64_t kind, const uint8_t
  * told over this word at the next mount (UseContextRecall), where a mount on
  * the test's stitches takes up the word they carry, as on a volume that
  * remembered none. */
-error_t StandStitchSay(const char* text, size_t bytes, uint64_t k, bool* kept)
+error_t StandStitchSay(TagFSVolume* vol, const char* text, size_t bytes, uint64_t k, bool* kept)
 {
     uint64_t saying = 0;
     UseContextClear(NULL);
-    UseTextDrop(tagfs_recall_use_context(&saying));
+    UseTextDrop(tagfs_recall_use_context(vol, &saying));
     UseText* t = bytes ? UseTextMake(text, bytes) : NULL;
     if (bytes && !t)
         return ERR_NO_MEMORY;
-    error_t rc = tagfs_remember_use_context(t, saying + 1000u + k, kept);
+    error_t rc = tagfs_remember_use_context(vol, t, saying + 1000u + k, kept);
     UseTextDrop(t);
     return rc;
 }
@@ -249,41 +250,42 @@ error_t StandStitchSay(const char* text, size_t bytes, uint64_t k, bool* kept)
 
 static TestResult TestStandStitchAnswersAfterFlush(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult               verdict = TEST_PASS;
     StandStitch              s;
     RibbonCursor             now;
     MountBookSaid            said;
     static StandStitchWaiter waiter;
-    const char*              aside = StandStitchAside(&s);
+    const char*              aside = StandStitchAside(vol, &s);
 
     if (aside)
         return test_steps_aside(aside);
     memset(&waiter, 0, sizeof(waiter));
-    TEST_ASSERT(StandStitchRemount(), "the volume is mounted afresh");
-    uint64_t gen = InkedGen();
-    TEST_ASSERT_EQ(SettleWaitNow(gen), ERR_WOULD_BLOCK,
+    TEST_ASSERT(StandStitchRemount(vol), "the volume is mounted afresh");
+    uint64_t gen = InkedGen(vol);
+    TEST_ASSERT_EQ(SettleWaitNow(vol, gen), ERR_WOULD_BLOCK,
                    "right after the mount a wait is not answered by what the mount read (X2-3)");
-    SettleWaitLink(&waiter.w, gen, StandStitchAnswered);
-    SettleServiceIfPending();
+    SettleWaitLink(vol, &waiter.w, gen, StandStitchAnswered);
+    SettleServiceIfPending(vol);
     TEST_ASSERT(!waiter.answered, "the cadence held, nobody answers the waiter");
     BlockFailArm(s.seat, BLOCK_FAIL_WRITE, 0, 0, BLOCK_FAIL_NEVER);
-    TEST_ASSERT_OK(TagFSSettle(), "a cycle settles");
+    TEST_ASSERT_OK(TagFSSettle(vol), "a cycle settles");
     TEST_ASSERT(waiter.answered && waiter.rc == OK, "its DONE answers the waiter, OK");
-    RibbonCursorStand(&now);
+    RibbonCursorStand(vol, &now);
     TEST_ASSERT_EQ(now.last, s.at.given + 1u, "with a stitch of the seq past every one the book showed");
     TEST_ASSERT(now.sewn_flags & STITCH_DATA_FLUSHED, "which says DATA_FLUSHED: it names no fresh data");
     TEST_ASSERT(BlockFailSeen() >= 1 && BlockFailSeen() <= now.sewn_of / now.atom,
                 "laid in whole atoms, in as many writes as the seat takes them in");
     BlockFailDisarm();
-    TEST_ASSERT_OK(SettleWaitNow(gen), "and a wait for it now is answered at once");
-    TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
-    MountBookStandSaid(&said);
+    TEST_ASSERT_OK(SettleWaitNow(vol, gen), "and a wait for it now is answered at once");
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts again");
+    MountBookStandSaid(vol, &said);
     TEST_ASSERT_EQ(said.last, now.last, "its ribbon ends on the stitch the cycle sewed");
     TEST_ASSERT_EQ(said.ribbon[RIBBON_CODE_RIBBON_TORN] + said.ribbon[RIBBON_CODE_DEAD_BRANCH], 0,
                    "with nothing torn and no branch said");
 out:
     if (!waiter.answered)
-        (void)SettleWaitUnlink(&waiter.w);
+        (void)SettleWaitUnlink(vol, &waiter.w);
     BlockFailDisarm();
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
@@ -295,35 +297,36 @@ out:
 
 static TestResult TestStandStitchUseContext(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult    verdict = TEST_PASS;
     StandStitch   s;
     RibbonUnit*   u = NULL;
     bool          kept = false;
-    const char*   aside = StandStitchAside(&s);
+    const char*   aside = StandStitchAside(vol, &s);
     static const char said[] = "stitch,sewn";
     uint8_t       body[32];
 
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT_OK(StandStitchSay(said, sizeof(said) - 1u, 1, &kept), "a Use Context is said to the volume");
+    TEST_ASSERT_OK(StandStitchSay(vol, said, sizeof(said) - 1u, 1, &kept), "a Use Context is said to the volume");
     TEST_ASSERT(kept, "and the volume holds it");
-    TEST_ASSERT(StandStitchRead(&u), "the stitch its cycle sewed reads back whole");
+    TEST_ASSERT(StandStitchRead(vol, &u), "the stitch its cycle sewed reads back whole");
     uint32_t len = TallyUsePut(body, (const uint8_t*)said, sizeof(said) - 1u);
     TEST_ASSERT(StandStitchCarries(u, RIBBON_USE_CONTEXT, body, len), "and carries the word whole, as UseContext");
     RibbonUnitLetGo(u);
     u = NULL;
 
-    uint64_t cycles = SettledCycles();
+    uint64_t cycles = SettledCycles(vol);
     BlockFailArm(s.seat, BLOCK_FAIL_WRITE, 0, 0, BLOCK_FAIL_NEVER);
-    TEST_ASSERT_OK(StandStitchSay(said, sizeof(said) - 1u, 2, &kept), "the same word is said again");
+    TEST_ASSERT_OK(StandStitchSay(vol, said, sizeof(said) - 1u, 2, &kept), "the same word is said again");
     TEST_ASSERT(kept, "and the volume holds it");
     TEST_ASSERT_EQ(BlockFailSeen(), 0, "with not one write: what the book holds is not written again");
-    TEST_ASSERT_EQ(SettledCycles(), cycles, "and no cycle asked for it");
+    TEST_ASSERT_EQ(SettledCycles(vol), cycles, "and no cycle asked for it");
     BlockFailDisarm();
 
-    TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts again");
     uint64_t saying = 0;
-    UseText* back   = tagfs_recall_use_context(&saying);
+    UseText* back   = tagfs_recall_use_context(vol, &saying);
     bool     same   = back && back->bytes == sizeof(said) - 1u && memcmp(back->text, said, back->bytes) == 0;
     UseTextDrop(back);
     TEST_ASSERT(same, "and recalls the word the ribbon's last UseContext says, over the Tally's");
@@ -345,6 +348,7 @@ out:
 
 static TestResult TestStandStitchUseLaterWordStands(void)
 {
+    TagFSVolume* vol = TagFSHome();
     static const char quiet[] = "use:test:quiet";
     static const char night[] = "use:test:night,use:test:orders,use:test:north,use:test:long";
 
@@ -356,31 +360,31 @@ static TestResult TestStandStitchUseLaterWordStands(void)
     uint64_t    saying = 0;
     bool        kept   = false;
     uint8_t     body[128];
-    const char* aside  = StandStitchAside(&s);
+    const char* aside  = StandStitchAside(vol, &s);
 
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT_OK(StandStitchSay(night, sizeof(night) - 1u, 1, &kept), "the long word is told to the volume");
+    TEST_ASSERT_OK(StandStitchSay(vol, night, sizeof(night) - 1u, 1, &kept), "the long word is told to the volume");
     TEST_ASSERT(kept, "and the volume holds it");
-    UseTextDrop(tagfs_recall_use_context(&saying));
+    UseTextDrop(tagfs_recall_use_context(vol, &saying));
     early = UseTextMake(quiet, sizeof(quiet) - 1u);
     TEST_ASSERT(early != NULL, "room for the short word");
-    TEST_ASSERT_OK(tagfs_remember_use_context(early, saying - 1u, &kept),
+    TEST_ASSERT_OK(tagfs_remember_use_context(vol, early, saying - 1u, &kept),
                    "the short word, said before it, is remembered last");
     TEST_ASSERT(!kept, "and is not kept: the later saying stands");
-    back = tagfs_recall_use_context(NULL);
+    back = tagfs_recall_use_context(vol, NULL);
     TestEvidence("bytes the volume holds after the earlier, shorter word landed last", back ? back->bytes : 0);
     TEST_ASSERT(back && back->bytes == sizeof(night) - 1u && memcmp(back->text, night, back->bytes) == 0,
                 "the volume holds the long word, whole");
     UseTextDrop(back);
     back = NULL;
-    TEST_ASSERT(StandStitchRead(&u), "the last stitch reads back whole");
+    TEST_ASSERT(StandStitchRead(vol, &u), "the last stitch reads back whole");
     uint32_t len = TallyUsePut(body, (const uint8_t*)night, sizeof(night) - 1u);
     TEST_ASSERT(StandStitchCarries(u, RIBBON_USE_CONTEXT, body, len), "and carries the long word, as UseContext");
     RibbonUnitLetGo(u);
     u = NULL;
-    TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
-    back = tagfs_recall_use_context(NULL);
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts again");
+    back = tagfs_recall_use_context(vol, NULL);
     TEST_ASSERT(back && back->bytes == sizeof(night) - 1u && memcmp(back->text, night, back->bytes) == 0,
                 "and recalls the long word, whole");
 out:
@@ -397,14 +401,15 @@ out:
 
 static TestResult TestStandStitchCoined(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult   verdict = TEST_PASS;
     StandStitch  s;
     TagSpelling  tag;
-    TagRegistry* reg = tagfs_get_state()->registry;
+    TagRegistry* reg = vol->state.registry;
     RibbonUnit*  u   = NULL;
     uint32_t     tid = TAGFS_INVALID_TAG_ID;
     uint8_t      body[64];
-    const char*  aside = StandStitchAside(&s);
+    const char*  aside = StandStitchAside(vol, &s);
     static const char text[] = "stitch:coined";
 
     if (aside)
@@ -413,19 +418,19 @@ static TestResult TestStandStitchCoined(void)
     TEST_ASSERT_EQ(TagRegistryLookup(reg, TagOwnerPerson(), &tag), TAGFS_INVALID_TAG_ID, "the volume does not know it");
     TEST_ASSERT_OK(TagRegistryIntern(reg, TagOwnerPerson(), &tag, &tid), "it is given an id");
     BlockFailArm(s.seat, BLOCK_FAIL_WRITE, 0, 0, BLOCK_FAIL_NEVER);
-    TEST_ASSERT_OK(TagRegistryIdGiven(reg, tid), "the id is the registry's at once");
+    TEST_ASSERT_OK(TagRegistryIdGiven(vol, reg, tid), "the id is the registry's at once");
     TEST_ASSERT_EQ(BlockFailSeen(), 0, "with not one write: a book's registry is laid down by the cycle");
     BlockFailDisarm();
-    TEST_ASSERT_OK(TagFSSettle(), "a cycle settles");
-    TEST_ASSERT(StandStitchRead(&u), "its stitch reads back whole");
+    TEST_ASSERT_OK(TagFSSettle(vol), "a cycle settles");
+    TEST_ASSERT(StandStitchRead(vol, &u), "its stitch reads back whole");
     TallyTag t = { .flags = TALLY_TAG_HAS_VALUE, .key = (const uint8_t*)"stitch", .key_len = 6,
                    .value = (const uint8_t*)"coined", .value_len = 6 };
     uint32_t len = RibbonCoinedBodyPut(body, tid, &t);
     TEST_ASSERT(StandStitchCarries(u, RIBBON_COINED, body, len), "and carries the tag as Coined, its id and its text");
     RibbonUnitLetGo(u);
     u = NULL;
-    TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
-    reg = tagfs_get_state()->registry;
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts again");
+    reg = vol->state.registry;
     TEST_ASSERT_EQ(TagRegistryLookup(reg, TagOwnerPerson(), &tag), tid, "and knows the tag by the id it was given");
 out:
     RibbonUnitLetGo(u);
@@ -440,32 +445,33 @@ out:
 
 static TestResult TestStandStitchHaltClean(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult    verdict = TEST_PASS;
     StandStitch   s;
     RibbonCursor  now;
     MountBookSaid said;
     bool          shut = false;
-    const char*   aside = StandStitchAside(&s);
+    const char*   aside = StandStitchAside(vol, &s);
 
     if (aside)
         return test_steps_aside(aside);
-    TagFSStandShutForHalt(true);
+    TagFSStandShutForHalt(vol, true);
     shut = true;
-    TEST_ASSERT_OK(TagFSStandSettleForHalt(), "the halt's cycles settle");
-    TagFSStandShutForHalt(false);
+    TEST_ASSERT_OK(TagFSStandSettleForHalt(vol), "the halt's cycles settle");
+    TagFSStandShutForHalt(vol, false);
     shut = false;
-    RibbonCursorStand(&now);
+    RibbonCursorStand(vol, &now);
     TEST_ASSERT(now.last > s.at.last, "a stitch was sewn");
     TEST_ASSERT_EQ(now.sewn_flags & (STITCH_CLEAN | STITCH_DATA_FLUSHED), STITCH_CLEAN | STITCH_DATA_FLUSHED,
                    "and the last says CLEAN, and DATA_FLUSHED with it");
-    TEST_ASSERT_EQ(InkedGen(), SettledGen(), "every change settled");
-    TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
-    MountBookStandSaid(&said);
+    TEST_ASSERT_EQ(InkedGen(vol), SettledGen(vol), "every change settled");
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts again");
+    MountBookStandSaid(vol, &said);
     TEST_ASSERT_EQ(said.last, now.last, "on the halt's stitch");
     TEST_ASSERT(said.flags & STITCH_CLEAN, "which the mount reads CLEAN");
 out:
     if (shut)
-        TagFSStandShutForHalt(false);
+        TagFSStandShutForHalt(vol, false);
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
 }
@@ -477,25 +483,26 @@ out:
 /* The volume mounted again, and its ribbon held to a retry: ending on `last`,
  * in the Quire the test found named next, `pieces` the lines for the pieces
  * of a refused attempt, and no lie. */
-static bool StandStitchRetrySewn(const StandStitch* s, uint64_t last, uint32_t pieces)
+static bool StandStitchRetrySewn(TagFSVolume* vol, const StandStitch* s, uint64_t last, uint32_t pieces)
 {
     MountBookSaid said;
     RibbonCursor  now;
-    if (!StandStitchRemount())
+    if (!StandStitchRemount(vol))
         return false;
-    MountBookStandSaid(&said);
-    RibbonCursorStand(&now);
+    MountBookStandSaid(vol, &said);
+    RibbonCursorStand(vol, &now);
     return said.last == last && !said.lied && said.ribbon[RIBBON_CODE_DEAD_BRANCH] == pieces &&
            RibbonQuireSame(&now.quire, &s->at.next);
 }
 
 static TestResult TestStandStitchRetryAtom(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult               verdict = TEST_PASS;
     StandStitch              s;
     RibbonCursor             now;
     static StandStitchWaiter waiter;
-    const char*              aside = StandStitchAside(&s);
+    const char*              aside = StandStitchAside(vol, &s);
 
     if (aside)
         return test_steps_aside(aside);
@@ -504,20 +511,20 @@ static TestResult TestStandStitchRetryAtom(void)
     memset(&waiter, 0, sizeof(waiter));
     uint64_t vlba = s.at.quire.block * TAGFS_BLOCK_SECTORS + s.at.off;
     BlockFailArm(s.seat, BLOCK_FAIL_WRITE, s.base + vlba, s.at.atom, 1);
-    SettleWaitLink(&waiter.w, InkedGen(), StandStitchAnswered);
-    TEST_ASSERT_OK(TagFSSettle(), "the cycle settles");
+    SettleWaitLink(vol, &waiter.w, InkedGen(vol), StandStitchAnswered);
+    TEST_ASSERT_OK(TagFSSettle(vol), "the cycle settles");
     TEST_ASSERT(BlockFailFired(), "though the medium refused its stitch's first atom");
     TEST_ASSERT(waiter.answered && waiter.rc == OK, "and the waiter is answered OK");
-    RibbonCursorStand(&now);
+    RibbonCursorStand(vol, &now);
     TEST_ASSERT_EQ(now.last, s.at.given + 2u, "by a stitch of a new seq");
     TEST_ASSERT(RibbonQuireSame(&now.sewn.quire, &s.at.next) && now.sewn.off == 0,
                 "laid at the start of the next_quire");
     TEST_ASSERT_EQ(now.refused, 0, "and the refusals in a row are none once it settled");
     BlockFailDisarm();
-    TEST_ASSERT(StandStitchRetrySewn(&s, now.last, 0), "the mount takes the ribbon on there, and says no lie");
+    TEST_ASSERT(StandStitchRetrySewn(vol, &s, now.last, 0), "the mount takes the ribbon on there, and says no lie");
 out:
     if (!waiter.answered)
-        (void)SettleWaitUnlink(&waiter.w);
+        (void)SettleWaitUnlink(vol, &waiter.w);
     BlockFailDisarm();
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
@@ -525,24 +532,25 @@ out:
 
 static TestResult TestStandStitchRetryFlush(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult   verdict = TEST_PASS;
     StandStitch  s;
     RibbonCursor now;
-    const char*  aside = StandStitchAside(&s);
+    const char*  aside = StandStitchAside(vol, &s);
 
     if (aside)
         return test_steps_aside(aside);
     if (!s.at.next.blocks)
         return test_steps_aside("the ribbon names no next_quire to go on in");
     BlockFailArm(s.seat, BLOCK_FAIL_FLUSH, 0, 0, 1);
-    TEST_ASSERT_OK(TagFSSettle(), "the cycle settles");
+    TEST_ASSERT_OK(TagFSSettle(vol), "the cycle settles");
     TEST_ASSERT(BlockFailFired(), "though the medium refused the flush after its stitch");
-    RibbonCursorStand(&now);
+    RibbonCursorStand(vol, &now);
     TEST_ASSERT_EQ(now.last, s.at.given + 2u, "by a stitch of a new seq");
     TEST_ASSERT(RibbonQuireSame(&now.sewn.quire, &s.at.next) && now.sewn.off == 0,
                 "laid at the start of the next_quire");
     BlockFailDisarm();
-    TEST_ASSERT(StandStitchRetrySewn(&s, now.last, 1),
+    TEST_ASSERT(StandStitchRetrySewn(vol, &s, now.last, 1),
                 "the mount takes the larger seq, says the stitch the flush did not keep is the pieces of a retry, "
                 "and says no lie");
 out:
@@ -566,6 +574,7 @@ out:
  */
 static TestResult TestStandStitchUseForgotten(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult   verdict = TEST_PASS;
     StandStitch  s;
     RibbonCursor l;
@@ -573,27 +582,27 @@ static TestResult TestStandStitchUseForgotten(void)
     UseText*     held = NULL;
     bool         kept = false;
     uint8_t      body[16];
-    const char*  aside = StandStitchAside(&s);
+    const char*  aside = StandStitchAside(vol, &s);
     static const char said[] = "old,word";
 
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT_OK(StandStitchSay(said, sizeof(said) - 1u, 1, &kept), "a Use Context is said to the volume");
+    TEST_ASSERT_OK(StandStitchSay(vol, said, sizeof(said) - 1u, 1, &kept), "a Use Context is said to the volume");
     TEST_ASSERT(kept, "and the volume holds it");
-    RibbonCursorStand(&l);
+    RibbonCursorStand(vol, &l);
     uint64_t room = l.quire.blocks * TAGFS_BLOCK_SECTORS - l.off + l.next.blocks * TAGFS_BLOCK_SECTORS;
-    TEST_ASSERT_EQ(StandStitchSayFilling(room, 'n', 2, &kept), ERR_TAGFS_NO_SPACE,
+    TEST_ASSERT_EQ(StandStitchSayFilling(vol, room, 'n', 2, &kept), ERR_TAGFS_NO_SPACE,
                    "a word whose stitch would fill the rest of its Quire and all of the next is refused");
     TEST_ASSERT(!kept, "and not remembered");
-    held = tagfs_recall_use_context(NULL);
+    held = tagfs_recall_use_context(vol, NULL);
     TEST_ASSERT(held == NULL, "the volume forgets the word it held rather than remember one no longer said");
-    TEST_ASSERT(StandStitchRead(&u), "the stitch the refused word's cycle sewed reads back whole");
+    TEST_ASSERT(StandStitchRead(vol, &u), "the stitch the refused word's cycle sewed reads back whole");
     uint32_t len = TallyUsePut(body, NULL, 0);
     TEST_ASSERT(StandStitchCarries(u, RIBBON_USE_CONTEXT, body, len), "and carries an empty UseContext in its place");
     RibbonUnitLetGo(u);
     u = NULL;
-    TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
-    held = tagfs_recall_use_context(NULL);
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts again");
+    held = tagfs_recall_use_context(vol, NULL);
     TEST_ASSERT(held == NULL, "and recalls no word: the one it forgot does not come back");
 out:
     UseTextDrop(held);
@@ -608,13 +617,13 @@ out:
 // ----------------------------------------------------------------------------
 
 /* A word of `bytes` bytes of one letter, said to the volume as its `k`-th. */
-error_t StandStitchSayLong(uint64_t bytes, char letter, uint64_t k, bool* kept)
+error_t StandStitchSayLong(TagFSVolume* vol, uint64_t bytes, char letter, uint64_t k, bool* kept)
 {
     char* text = kmalloc(bytes);
     if (!text)
         return ERR_NO_MEMORY;
     memset(text, letter, bytes);
-    error_t rc = StandStitchSay(text, bytes, k, kept);
+    error_t rc = StandStitchSay(vol, text, bytes, k, kept);
     kfree(text);
     return rc;
 }
@@ -623,54 +632,55 @@ error_t StandStitchSayLong(uint64_t bytes, char letter, uint64_t k, bool* kept)
  * atoms — said to the volume as its `k`-th: a stitch's stream fills
  * BOOK_PAYLOAD_BYTES a sector, and its head, its UseContext's tag and length
  * and its Clasp take fewer than STAND_STITCH_SLACK bytes and more than none. */
-error_t StandStitchSayFilling(uint64_t sectors, char letter, uint64_t k, bool* kept)
+error_t StandStitchSayFilling(TagFSVolume* vol, uint64_t sectors, char letter, uint64_t k, bool* kept)
 {
-    return StandStitchSayLong(sectors * BOOK_PAYLOAD_BYTES - STAND_STITCH_SLACK, letter, k, kept);
+    return StandStitchSayLong(vol, sectors * BOOK_PAYLOAD_BYTES - STAND_STITCH_SLACK, letter, k, kept);
 }
 
 static TestResult TestStandStitchRefusedEverywhere(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult               verdict = TEST_PASS;
     StandStitch              s;
     MountBookSaid            said;
     static StandStitchWaiter waiter;
     bool                     kept  = true;
-    const char*              aside = StandStitchAside(&s);
+    const char*              aside = StandStitchAside(vol, &s);
 
     if (aside)
         return test_steps_aside(aside);
     memset(&waiter, 0, sizeof(waiter));
     uint64_t first = s.at.quire.block * TAGFS_BLOCK_SECTORS + s.at.off;
-    uint64_t data  = g_book.frame.data_block * TAGFS_BLOCK_SECTORS;
-    uint64_t end   = g_book.data_end * TAGFS_BLOCK_SECTORS;
+    uint64_t data  = vol->book.frame.data_block * TAGFS_BLOCK_SECTORS;
+    uint64_t end   = vol->book.data_end * TAGFS_BLOCK_SECTORS;
     BlockFailArmRefusedWrites(s.seat, s.base + first + s.at.atom, end - first - s.at.atom);
     TEST_ASSERT(BlockFailAddBadSectors(s.seat, s.base + data, first - data),
                 "every write past the ribbon's next atom, and before it, is refused");
-    SettleWaitLink(&waiter.w, InkedGen(), StandStitchAnswered);
+    SettleWaitLink(vol, &waiter.w, InkedGen(vol), StandStitchAnswered);
     /* Past the payload of one atom of the ribbon — a flash page on a removable
      * medium (§16.6 п.2) — so the stitch runs into the atom refused. */
-    error_t rc = StandStitchSayLong((uint64_t)s.at.atom * BOOK_PAYLOAD_BYTES + 16u, 'w', 3, &kept);
+    error_t rc = StandStitchSayLong(vol, (uint64_t)s.at.atom * BOOK_PAYLOAD_BYTES + 16u, 'w', 3, &kept);
     TEST_ASSERT_EQ(rc, ERR_TAGFS_READ_ONLY, "a word two atoms long is refused, once no Quire takes its stitch");
     TEST_ASSERT(!kept, "and the volume does not say it holds it");
-    TEST_ASSERT(TagFSReadOnly(), "the volume may only be read from here");
+    TEST_ASSERT(TagFSReadOnly(vol), "the volume may only be read from here");
     TEST_ASSERT(waiter.answered && waiter.rc == ERR_TAGFS_READ_ONLY, "and its waiter is told so, not answered OK");
-    TEST_ASSERT_EQ(SettleWaitNow(InkedGen() + 1u), ERR_TAGFS_READ_ONLY, "as is every wait after it");
+    TEST_ASSERT_EQ(SettleWaitNow(vol, InkedGen(vol) + 1u), ERR_TAGFS_READ_ONLY, "as is every wait after it");
     BlockFailArm(s.seat, BLOCK_FAIL_WRITE, 0, 0, BLOCK_FAIL_NEVER);
-    TEST_ASSERT_EQ(TagFSSettle(), ERR_TAGFS_READ_ONLY, "a cycle asked of it is refused before the Scribe");
-    TEST_ASSERT_EQ(TagFSStandSettleForHalt(), ERR_TAGFS_READ_ONLY, "and so are the halt's");
+    TEST_ASSERT_EQ(TagFSSettle(vol), ERR_TAGFS_READ_ONLY, "a cycle asked of it is refused before the Scribe");
+    TEST_ASSERT_EQ(TagFSStandSettleForHalt(vol), ERR_TAGFS_READ_ONLY, "and so are the halt's");
     TEST_ASSERT_EQ(BlockFailSeen(), 0, "and not one write reaches a medium the kernel said may only be read");
     BlockFailDisarm();
-    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of, as a machine cut off would leave it");
-    StandRibbonArrive();
-    TagFSStandHoldAgain();
-    TEST_ASSERT(tagfs_get_state()->initialized && !TagFSReadOnly(), "mounted again, it takes writes");
-    MountBookStandSaid(&said);
+    TEST_ASSERT(TagFSStandLetGo(vol), "the volume is let go of, as a machine cut off would leave it");
+    StandRibbonArrive(vol);
+    TagFSStandHoldAgain(vol);
+    TEST_ASSERT(vol->state.initialized && !TagFSReadOnly(vol), "mounted again, it takes writes");
+    MountBookStandSaid(vol, &said);
     TEST_ASSERT_EQ(said.last, s.at.last, "its ribbon ends where it stood: the refused stitch is not sewn on (m-1)");
     TEST_ASSERT_EQ(said.ribbon[RIBBON_CODE_RIBBON_TORN], 1, "and its one atom that landed is said, a torn tail");
     TEST_ASSERT(!said.lied, "with no lie said of the medium");
 out:
     if (!waiter.answered)
-        (void)SettleWaitUnlink(&waiter.w);
+        (void)SettleWaitUnlink(vol, &waiter.w);
     BlockFailDisarm();
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
@@ -696,81 +706,82 @@ out:
 #define STAND_STITCH_FALLOW_CYCLES  8u    /* cycles that give back what rests in Fallow, at the most */
 
 /* The blocks resting in Fallow, read under the state lock. */
-static uint64_t StandStitchFallow(void)
+static uint64_t StandStitchFallow(TagFSVolume* vol)
 {
-    TagFSState* fs = tagfs_get_state();
+    TagFSState* fs = &vol->state;
     TagFSLockTake(&fs->lock);
-    uint64_t blocks = FallowBlocks();
+    uint64_t blocks = FallowBlocks(vol);
     TagFSLockDrop(&fs->lock);
     return blocks;
 }
 
 static TestResult TestStandStitchRibbonRunsOut(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult               verdict = TEST_PASS;
     StandStitch              s;
     RibbonCursor             now;
     static StandStitchWaiter waiter;
-    TagFSState*              fs      = tagfs_get_state();
+    TagFSState*              fs      = &vol->state;
     bool                     kept    = false, held = false;
     error_t                  rc      = OK;
     uint64_t                 k       = 10;
-    const char*              aside   = StandStitchAside(&s);
+    const char*              aside   = StandStitchAside(vol, &s);
 
     if (aside)
         return test_steps_aside(aside);
     memset(&waiter, 0, sizeof(waiter));
     TEST_ASSERT(s.at.next.blocks, "the ribbon names its next_quire");
     uint64_t left = s.at.quire.blocks * TAGFS_BLOCK_SECTORS - s.at.off;
-    TEST_ASSERT_OK(StandStitchSayFilling(left, 'r', 1, &kept),
+    TEST_ASSERT_OK(StandStitchSayFilling(vol, left, 'r', 1, &kept),
                    "a word whose stitch fills the rest of its Quire is laid down");
-    RibbonCursorStand(&now);
+    RibbonCursorStand(vol, &now);
     TEST_ASSERT(!RibbonQuireSame(&now.quire, &s.at.quire), "the ribbon goes on past the Quire it stood in");
-    TEST_ASSERT_OK(StandStitchSay(NULL, 0, 2, &kept), "the word none is said");
+    TEST_ASSERT_OK(StandStitchSay(vol, NULL, 0, 2, &kept), "the word none is said");
     TEST_ASSERT(kept, "and the volume holds no word");
-    for (uint32_t c = 0; StandStitchFallow() && c < STAND_STITCH_FALLOW_CYCLES; c++)
-        TEST_ASSERT_OK(TagFSSettle(), "a cycle settles past what rests in Fallow");
-    TEST_ASSERT_EQ(StandStitchFallow(), 0, "nothing rests in Fallow: no ground comes back past the cut");
-    uint64_t keep = EndpaperKeeps(s.at.quire_blocks);
+    for (uint32_t c = 0; StandStitchFallow(vol) && c < STAND_STITCH_FALLOW_CYCLES; c++)
+        TEST_ASSERT_OK(TagFSSettle(vol), "a cycle settles past what rests in Fallow");
+    TEST_ASSERT_EQ(StandStitchFallow(vol), 0, "nothing rests in Fallow: no ground comes back past the cut");
+    uint64_t keep = EndpaperKeeps(vol, s.at.quire_blocks);
     TEST_ASSERT(keep >= 2u * s.at.quire_blocks, "the Tally's reserve is two copies of at least one Quire");
     TEST_ASSERT(fs->free_blocks > keep + s.at.quire_blocks, "the volume has more than that free");
-    TEST_ASSERT(BlockMapDerivedStandShrink(keep + s.at.quire_blocks - 1u),
+    TEST_ASSERT(BlockMapDerivedStandShrink(vol, keep + s.at.quire_blocks - 1u),
                 "its free ground is cut to a block short of one Quire past it: no next_quire is taken from it");
     held = true;
     for (; rc == OK && k < 10u + 3u * s.at.quire_blocks; k++)
-        rc = StandStitchSayLong(16u * TALLY_SHEET_PAYLOAD, (char)('a' + k % 26u), k, &kept);
+        rc = StandStitchSayLong(vol, 16u * TALLY_SHEET_PAYLOAD, (char)('a' + k % 26u), k, &kept);
     TEST_ASSERT_EQ(rc, ERR_TAGFS_NO_SPACE, "words are laid down until the ribbon runs out, said ERR_TAGFS_NO_SPACE");
-    RibbonCursorStand(&now);
+    RibbonCursorStand(vol, &now);
     TEST_ASSERT(now.out && !now.next.blocks, "and said aloud: the ribbon names no next_quire");
-    TEST_ASSERT(!SettleParked(), "and the cadence is not parked for room nothing on a book asks for");
+    TEST_ASSERT(!SettleParked(vol), "and the cadence is not parked for room nothing on a book asks for");
     uint64_t saying = 0, ticket = 0;
-    UseText* memory = tagfs_recall_use_context(&saying);
+    UseText* memory = tagfs_recall_use_context(vol, &saying);
     bool     forgot = memory == NULL;
     UseTextDrop(memory);
     TEST_ASSERT(forgot, "the word the ribbon refused left the volume holding none: the one it held is forgotten "
                 "(09-08)");
     UseText* word = UseTextMake("z", 1);
-    UseSaid  told = word ? UseMemorySay(word, saying + 1u, &ticket) : USE_SAID_SUPERSEDED;
+    UseSaid  told = word ? UseMemorySay(vol, word, saying + 1u, &ticket) : USE_SAID_SUPERSEDED;
     UseTextDrop(word);
     TEST_ASSERT_EQ(told, USE_SAID_OWED, "a word the volume does not hold is said, as a process's `use` says it");
-    SettleWaitLinkCycle(&waiter.w, StandStitchAnswered);
-    TEST_ASSERT_OK(TagFSSettleAsCadence(), "the cycle the cadence runs for its waiter lays its stitch without the "
+    SettleWaitLinkCycle(vol, &waiter.w, StandStitchAnswered);
+    TEST_ASSERT_OK(TagFSSettleAsCadence(vol), "the cycle the cadence runs for its waiter lays its stitch without the "
                    "word, in the rest kept");
     TEST_ASSERT(waiter.answered && waiter.rc == OK, "and the waiter is answered");
-    TEST_ASSERT(UseMemoryRefused(ticket), "the word is refused: no claim held room for it, and none comes");
-    RibbonCursorStand(&now);
+    TEST_ASSERT(UseMemoryRefused(vol, ticket), "the word is refused: no claim held room for it, and none comes");
+    RibbonCursorStand(vol, &now);
     TEST_ASSERT(now.out && !now.next.blocks, "the ribbon names no next_quire still");
     TEST_ASSERT(fs->free_blocks >= keep, "and the ground a Tally needs is left free");
-    memory = tagfs_recall_use_context(NULL);
-    rc     = StandStitchSay(memory ? memory->text : NULL, memory ? memory->bytes : 0, k + 1u, &kept);
+    memory = tagfs_recall_use_context(vol, NULL);
+    rc     = StandStitchSay(vol, memory ? memory->text : NULL, memory ? memory->bytes : 0, k + 1u, &kept);
     UseTextDrop(memory);
     TEST_ASSERT_OK(rc, "the word the volume holds, said again, is answered: it is what the volume holds");
-    TEST_ASSERT(kept && !TagFSReadOnly(), "and the volume holds it, still taking what its rest holds");
+    TEST_ASSERT(kept && !TagFSReadOnly(vol), "and the volume holds it, still taking what its rest holds");
 out:
     if (!waiter.answered)
-        (void)SettleWaitUnlink(&waiter.w);
+        (void)SettleWaitUnlink(vol, &waiter.w);
     if (held)
-        BlockMapDerivedStandGrow();
+        BlockMapDerivedStandGrow(vol);
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
 }
@@ -794,16 +805,17 @@ static uint64_t StandStitchTallyBlocks(void)
 
 static TestResult TestStandStitchTallyCost(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult   verdict = TEST_PASS;
     StandStitch  s;
-    TagRegistry* reg   = tagfs_get_state()->registry;
+    TagRegistry* reg   = vol->state.registry;
     char         text[160];
-    const char*  aside = StandStitchAside(&s);
+    const char*  aside = StandStitchAside(vol, &s);
 
     if (aside)
         return test_steps_aside(aside);
     uint64_t laid = StandStitchTallyBlocks();
-    uint64_t cost = TallyCostBlocks();
+    uint64_t cost = TallyCostBlocks(vol);
     TestEvidence("blocks of one copy of the Tally the mount stands on:", laid);
     TestEvidence("blocks the reserve measures the next Tally at:", cost);
     TEST_ASSERT(laid > 0 && cost >= laid, "the measure is never less than the Tally the maker laid");
@@ -816,10 +828,10 @@ static TestResult TestStandStitchTallyCost(void)
         TEST_ASSERT(TagSpell(text, sizeof(text) - 1u, &tag) == OK && TagRegistryIntern(reg, TagOwnerPerson(), &tag, &tid) == OK,
                     "tags are given ids");
     }
-    uint64_t more = TallyCostBlocks();
+    uint64_t more = TallyCostBlocks(vol);
     TestEvidence("and with 64 tags of 160 bytes more:", more);
     TEST_ASSERT(more > cost, "the measure grows with the tags the book holds");
-    TEST_ASSERT(EndpaperKeeps(s.at.quire_blocks) % s.at.quire_blocks == 0, "the reserve is whole Quires");
+    TEST_ASSERT(EndpaperKeeps(vol, s.at.quire_blocks) % s.at.quire_blocks == 0, "the reserve is whole Quires");
 out:
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
@@ -859,27 +871,28 @@ uint32_t StandStitchLayAt(const StandStitch* s, uint64_t flags, uint32_t of, con
 
 static TestResult TestStandStitchMediumLied(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult    verdict = TEST_PASS;
     StandStitch   s;
     RibbonCursor  now;
     MountBookSaid said;
-    const char*   aside = StandStitchAside(&s);
+    const char*   aside = StandStitchAside(vol, &s);
 
     if (aside)
         return test_steps_aside(aside);
     if (s.at.atom > STAND_STITCH_LAID_MOST)
         return test_steps_aside(STAND_STITCH_ATOM_LONG);
-    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of");
+    TEST_ASSERT(TagFSStandLetGo(vol), "the volume is let go of");
     /* An atom of the ribbon long, so the mount goes on at its end — a flash
      * page on a removable medium (§16.6 п.2). */
     TEST_ASSERT(StandStitchLayAt(&s, STITCH_DATA_FLUSHED | STITCH_MEDIUM_LIED, s.at.atom, &s.at.next) != 0,
                 "a stitch saying the medium lied is laid at the ribbon's end");
-    TEST_ASSERT(StandRibbonUp(), "the volume mounts on it");
-    MountBookStandSaid(&said);
+    TEST_ASSERT(StandRibbonUp(vol), "the volume mounts on it");
+    MountBookStandSaid(vol, &said);
     TEST_ASSERT(said.lied && said.last == s.at.given + 1u, "and says the medium lied");
-    TEST_ASSERT(!TagFSIsUnderGlass(), "a medium that lied is written all the same, and said to have lied");
-    TEST_ASSERT_OK(TagFSSettle(), "a cycle settles");
-    RibbonCursorStand(&now);
+    TEST_ASSERT(!TagFSIsUnderGlass(vol), "a medium that lied is written all the same, and said to have lied");
+    TEST_ASSERT_OK(TagFSSettle(vol), "a cycle settles");
+    RibbonCursorStand(vol, &now);
     TEST_ASSERT(now.sewn_flags & STITCH_MEDIUM_LIED, "and its stitch says MEDIUM_LIED in turn");
 out:
     STAND_STITCH_PUT_BACK(&s);
@@ -894,41 +907,42 @@ out:
 
 static TestResult TestStandStitchReplugKept(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult               verdict = TEST_PASS;
     StandStitch              s;
     static StandStitchWaiter waiter;
     uint64_t                 saying = 0, ticket = 0;
     bool                     away   = false;
-    const char*              aside  = StandStitchAside(&s);
+    const char*              aside  = StandStitchAside(vol, &s);
     static const char        word[] = "replug,kept";
 
     if (aside)
         return test_steps_aside(aside);
     memset(&waiter, 0, sizeof(waiter));
-    UseText* before = tagfs_recall_use_context(&saying);
+    UseText* before = tagfs_recall_use_context(vol, &saying);
     UseText* t      = UseTextMake(word, sizeof(word) - 1u);
     TEST_ASSERT(t != NULL, "a word is made");
-    TEST_ASSERT_EQ(UseMemorySay(t, saying + 2000u, &ticket), USE_SAID_OWED, "and said: a cycle owes it the medium");
-    SettleWaitLinkCycle(&waiter.w, StandStitchAnswered);
-    TagFSStandMediumLeaves();
+    TEST_ASSERT_EQ(UseMemorySay(vol, t, saying + 2000u, &ticket), USE_SAID_OWED, "and said: a cycle owes it the medium");
+    SettleWaitLinkCycle(vol, &waiter.w, StandStitchAnswered);
+    TagFSStandMediumLeaves(vol);
     away = true;
-    TEST_ASSERT_EQ(TagFSStandMediumReturns(), AWAY_AS_LEFT, "the medium leaves and comes back as it was left: "
+    TEST_ASSERT_EQ(TagFSStandMediumReturns(vol), AWAY_AS_LEFT, "the medium leaves and comes back as it was left: "
                    "its book is taken up");
     away = false;
     TEST_ASSERT(!waiter.answered, "the word's waiter is told nothing yet: no change is lost");
-    TEST_ASSERT_OK(TagFSSettle(), "the next cycle settles");
+    TEST_ASSERT_OK(TagFSSettle(vol), "the next cycle settles");
     TEST_ASSERT(waiter.answered && waiter.rc == OK, "and the word's waiter is answered OK by it");
-    TEST_ASSERT(StandStitchRemount(), "the volume is mounted again on what its medium holds");
-    UseText* back = tagfs_recall_use_context(NULL);
+    TEST_ASSERT(StandStitchRemount(vol), "the volume is mounted again on what its medium holds");
+    UseText* back = tagfs_recall_use_context(vol, NULL);
     TEST_ASSERT(UseTextSame(back, t), "and remembers the word its book was taken up with");
     UseTextDrop(back);
 out:
     UseTextDrop(t);
     UseTextDrop(before);
     if (away)
-        (void)TagFSStandMediumReturns();
+        (void)TagFSStandMediumReturns(vol);
     if (!waiter.answered)
-        (void)SettleWaitUnlink(&waiter.w);
+        (void)SettleWaitUnlink(vol, &waiter.w);
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
 }
@@ -939,12 +953,13 @@ out:
 
 static TestResult TestStandBlockFailRefusedWrites(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    uint8_t     seat    = tagfs_get_seat();
-    uint64_t    at      = tagfs_get_volume_base() + 64u;
+    uint8_t     seat    = tagfs_get_seat(vol);
+    uint64_t    at      = tagfs_get_volume_base(vol) + 64u;
     uint32_t    landed  = 0;
     uint8_t*    was     = g_test_buffer;
-    const char* aside   = StandStepsAsideFor();
+    const char* aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);

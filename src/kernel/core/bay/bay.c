@@ -120,9 +120,9 @@ void BayInit(void)
  * ───────────────────────────────────────────────────────────────────── */
 static uint32_t bay_resolve_tag(const char *tag, bool intern_if_missing)
 {
-    if (!intern_if_missing) return tagfs_tag_lookup(tag);
+    if (!intern_if_missing) return tagfs_tag_lookup(TagFSHome(), tag);
     uint32_t id;
-    return tagfs_tag_intern(tag, &id) == OK ? id : TAGFS_INVALID_TAG_ID;
+    return tagfs_tag_intern(TagFSHome(), tag, &id) == OK ? id : TAGFS_INVALID_TAG_ID;
 }
 
 /* ─────────────────────────────────────────────────────────────────────
@@ -794,9 +794,9 @@ error_t BayOpenInternal(struct process_t *proc,
              * destroyed via pmm_free in bay teardown which triggers
              * MemTagPmmFreed → region cleanup. The key:value goes whole,
              * however long: measured first, then copied at its length. */
-            size_t tag_len  = tagfs_tag_text(tag_id, NULL, 0);
+            size_t tag_len  = tagfs_tag_text(TagFSHome(), tag_id, NULL, 0);
             char  *tag_text = tag_len ? kmalloc(tag_len + 1) : NULL;
-            if (tag_text && tagfs_tag_text(tag_id, tag_text, tag_len + 1) == tag_len) {
+            if (tag_text && tagfs_tag_text(TagFSHome(), tag_id, tag_text, tag_len + 1) == tag_len) {
                 size_t pages_per_chunk =
                     (cs == BAY_HUGE_SIZE) ? BAY_HUGE_PAGES : 1;
                 for (uint32_t ci = 0; ci < cc; ci++) {

@@ -417,15 +417,15 @@ static bool UseSlotBind(UseList *l, uint32_t index, uint32_t id)
  */
 static void UseListBind(UseList *l)
 {
-    if (!l || !tagfs_enter()) return;
+    if (!l || !tagfs_enter(TagFSHome())) return;
     uint32_t bound = 0;
     for (uint32_t i = 0; i < l->count; i++) {
         if (__atomic_load_n(&l->ids[i], __ATOMIC_ACQUIRE) != TAGFS_INVALID_TAG_ID) continue;
         TagSpelling tag = UseListTag(l, i);
-        uint32_t    id  = TagFSLookupSpelling(&tag);
+        uint32_t    id  = TagFSLookupSpelling(TagFSHome(), &tag);
         if (id != TAGFS_INVALID_TAG_ID && UseSlotBind(l, i, id)) bound++;
     }
-    tagfs_leave();
+    tagfs_leave(TagFSHome());
     if (bound) UseContextChanged();
 }
 
@@ -750,9 +750,9 @@ void UseContextRemember(bool *remembered)
 
     /* Through the door, like every caller from outside the volume: the ground
      * may be clearing under a medium that just left. */
-    if (tagfs_enter()) {
-        (void)tagfs_remember_use_context(l ? l->said : NULL, said, &kept);
-        tagfs_leave();
+    if (tagfs_enter(TagFSHome())) {
+        (void)tagfs_remember_use_context(TagFSHome(), l ? l->said : NULL, said, &kept);
+        tagfs_leave(TagFSHome());
     }
     UseListDrop(l);
     if (remembered) *remembered = kept;
@@ -829,7 +829,7 @@ void UseContextRecall(void)
 
     if (!holds) {
         /* One take of what the volume remembers. */
-        UseText *memory = tagfs_recall_use_context(NULL);
+        UseText *memory = tagfs_recall_use_context(TagFSHome(), NULL);
         bool     done   = !memory || UseContextAdopt(memory, looked);
         UseTextDrop(memory);
         if (done) return;

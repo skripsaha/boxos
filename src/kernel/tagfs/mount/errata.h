@@ -4,6 +4,8 @@
 #include "ktypes.h"
 #include "error.h"
 
+typedef struct TagFSVolume TagFSVolume;   /* volume/tagfs_volume.h */
+
 /*
  * Errata — the mount's verdict, held in memory until the session's first
  * stitch lays it down.
@@ -40,17 +42,17 @@
  * stitch, each file once a stitch, the
  * files the mark is owed listed and the verdict said — ERR_NO_MEMORY, which
  * refuses the mount as any replay short of memory does. */
-error_t  ErrataAdd(uint64_t seq, uint64_t why, uint64_t fid);
-void     ErrataLeaves(uint64_t fid);
-error_t  ErrataClosed(void);
+error_t  ErrataAdd(TagFSVolume* vol, uint64_t seq, uint64_t why, uint64_t fid);
+void     ErrataLeaves(TagFSVolume* vol, uint64_t fid);
+error_t  ErrataClosed(TagFSVolume* vol);
 
 /* Whether a verdict is held: the session's first cycle owes it. */
-bool     ErrataHeld(void);
+bool     ErrataHeld(TagFSVolume* vol);
 
 /* The first cycle of the session asked for at once — the verdict laid down
  * without waiting for a Lull (§3.5): at the door's opening, and again by a
  * medium that came back as it was left with the verdict not yet laid. */
-void     ErrataAsk(void);
+void     ErrataAsk(TagFSVolume* vol);
 
 /* By the Settle's holder as its cycle begins, no lock held: each living file
  * the verdict rolls back marked so in its record (ink.h, InkUndone), so the
@@ -60,24 +62,24 @@ void     ErrataAsk(void);
  * window on), a volume that takes no change now — refuses the cycle, and the
  * next marks the rest: never left out. Only a file that can never take the
  * mark goes without, said by its id. */
-error_t  ErrataMarked(void);
+error_t  ErrataMarked(TagFSVolume* vol);
 
 /* The Undones the verdict lays: how many, their bytes at the most with their
  * heads, and the longest body. */
-uint32_t ErrataUndones(void);
-uint64_t ErrataBytes(void);
-uint64_t ErrataBodyMost(void);
+uint32_t ErrataUndones(TagFSVolume* vol);
+uint64_t ErrataBytes(TagFSVolume* vol);
+uint64_t ErrataBodyMost(TagFSVolume* vol);
 
 /* The Undones laid into the stream `out` from `at` for a stitch of seq `seq`,
  * each one's offset into starts[(*n)++] — `body` room for the longest: where
  * the stream goes on. */
-uint32_t ErrataLay(uint8_t* out, uint32_t at, uint64_t seq, uint8_t* body, uint32_t* starts, uint32_t* n);
+uint32_t ErrataLay(TagFSVolume* vol, uint8_t* out, uint32_t at, uint64_t seq, uint8_t* body, uint32_t* starts, uint32_t* n);
 
 /* The stitch of seq `seq` that carried the verdict settled: the verdict is
  * the book's now, and memory lets it go, said. */
-void     ErrataSettled(uint64_t seq);
+void     ErrataSettled(TagFSVolume* vol, uint64_t seq);
 
 /* The verdict let go of with the mount that built it (MountBookLetGo). */
-void     ErrataLetGo(void);
+void     ErrataLetGo(TagFSVolume* vol);
 
 #endif /* TAGFS_MOUNT_ERRATA_H */

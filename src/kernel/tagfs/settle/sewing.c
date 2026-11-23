@@ -21,6 +21,7 @@
 #include "kheap.h"
 #include "read_pace.h"
 #include "crypto.h"
+#include "tagfs_volume.h"
 
 /*
  * The Settle cycle (sewing.h): one stitch on the book's ribbon.
@@ -88,80 +89,20 @@
  * on (away.h).
  */
 
-typedef enum {
-    STITCH_STEP_TAKE = 0,
-    STITCH_STEP_BUILD,
-    STITCH_STEP_FIRST_FLUSH,
-    STITCH_STEP_STITCH,
-    STITCH_STEP_LAST_FLUSH,
-    STITCH_STEP_DONE,
-} StitchStep;
 
-typedef struct {
-    SettleWhy   why;
-    StitchStep  step;
-    uint64_t    target;       /* every Ink up to here */
-    uint64_t    cycle;
-    uint64_t    flags;        /* StitchHead's */
-    uint64_t    made_ns;
-    uint32_t    coined_lo;    /* the tags laid down as Coineds: [lo, hi) */
-    uint32_t    coined_hi;
-    bool        retires;      /* a tag the book has was retired by an Ink up to the target: a Coined RETIRED is owed */
-    bool        use_owed;     /* a word the person said is owed the medium */
-    UseText*    use;          /* that word, held; NULL says none */
-    uint64_t    use_ticket;
-    bool        use_out;      /* the word had no room on the ribbon: the stitch is laid without it */
-    bool        use_forgot;   /* ... and forgets the word the book held: an empty UseContext in its place */
-    DocketTaken jots;         /* the files' changes up to the target, by fid */
-    uint64_t    claimed;      /* the ribbon's bytes their Inks claimed, taken (RibbonClaimTaken) */
-    uint64_t    flight;       /* the sectors TAKE counted it in flight at the most (StitchFlight) */
-    uint64_t    data_need;    /* the flush that keeps every block the Inks up to the target wrote */
-    uint64_t    d_us;         /* the toll's measures, taken at S0: the last cycle's D, */
-    ReadPaceSeen pace;        /* and the pace the medium's reads were seen to keep */
-    bool        toll;         /* the stitch pays the flush of its data before its atoms */
-    uint64_t    fresh;        /* the blocks of fresh data the stitch names (Clasp.fresh) */
-    uint64_t    flush_us;     /* what the flush of its data took the medium: no part of D (§16.5 п.1) */
-    uint64_t    seq;          /* this attempt's */
-    uint32_t    clasp;
-    uint32_t    clasp_at;     /* where its Clasp lies in its stream: its crc is of every byte before */
-    RibbonTry*  laid;         /* the attempt, kept past its refusal or its cut (ribbon_left.c) */
-    uint8_t*    sectors;      /* the attempt sealed: `of` sectors, laid's */
-    uint32_t    of;
-    uint32_t    useful;       /* the bytes of its records, StitchHead to Clasp (§4.2) */
-    RibbonPlace at;           /* where it lies, and the Quire it runs on into */
-    RibbonQuire hop;
-    uint32_t    written;      /* its sectors on the medium so far */
-    const char* stage;
-} StitchSnap;
-
-static StitchSnap s_stitch;
-
-/* What the flush of its data took the medium in the last cycle that settled —
- * the cycle whose busy time the cadence keeps as D (cadence.c, s_d_us): the
- * Settle's holder's alone, written as that cycle ends and read as the next
- * one's S0 takes the toll's D. */
-static uint64_t s_settled_flush_us;
-
-/* No Quire took the write: the book takes none until the volume is mounted
- * again. */
-static volatile uint8_t s_book_refused;
-
-void StitchMountReset(void)
+void StitchMountReset(TagFSVolume* vol)
 {
-    __atomic_store_n(&s_book_refused, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->sewing.book_refused, 0u, __ATOMIC_RELEASE);
 }
 
-bool StitchBookRefused(void)
+bool StitchBookRefused(TagFSVolume* vol)
 {
-    return __atomic_load_n(&s_book_refused, __ATOMIC_ACQUIRE) != 0;
+    return __atomic_load_n(&vol->sewing.book_refused, __ATOMIC_ACQUIRE) != 0;
 }
 
-/* The core putting the verdict's tags on, + 1; 0 while none is. */
-static volatile uint32_t s_marking;
-
-bool StitchMarksVerdict(void)
+bool StitchMarksVerdict(TagFSVolume* vol)
 {
-    return __atomic_load_n(&s_marking, __ATOMIC_ACQUIRE) == (uint32_t)amp_get_core_index() + 1u;
+    return __atomic_load_n(&vol->sewing.marking, __ATOMIC_ACQUIRE) == (uint32_t)amp_get_core_index() + 1u;
 }
 
 // ----------------------------------------------------------------------------
@@ -178,11 +119,11 @@ bool StitchMarksVerdict(void)
  * more (§3.6) — a cycle with changes lays them where the ribbon stands, and the
  * asker's next round closes the Quire.
  */
-static void StitchCloseForRoom(StitchSnap* s, bool awaits)
+static void StitchCloseForRoom(TagFSVolume* vol, StitchSnap* s, bool awaits)
 {
     if (awaits && s->claimed == 0 && s->jots.count == 0 && !s->use_owed && s->coined_lo == s->coined_hi &&
-        !s->retires && RibbonCloseEarly())
-        RibbonNextGiven();
+        !s->retires && RibbonCloseEarly(vol))
+        RibbonNextGiven(vol);
 }
 
 /* The sectors the stitch TAKE took can take at the most: its claims — the
@@ -190,36 +131,36 @@ static void StitchCloseForRoom(StitchSnap* s, bool awaits)
  * of the mount's verdict, the Coineds of the tags given ids since the last
  * stitch settled — `coined` of them, `text` bytes of keys and values, every
  * one in its range — the word owed, and what every stitch carries. */
-static uint64_t StitchFlight(const StitchSnap* s, uint32_t coined, uint64_t text)
+static uint64_t StitchFlight(TagFSVolume* vol, const StitchSnap* s, uint32_t coined, uint64_t text)
 {
-    uint64_t bytes = STITCH_HEAD_MOST + STITCH_CLASP_MOST + s->claimed + ErrataBytes() +
+    uint64_t bytes = STITCH_HEAD_MOST + STITCH_CLASP_MOST + s->claimed + ErrataBytes(vol) +
                      (uint64_t)coined * STITCH_COINED_MOST + text;
     if (s->use_owed)
         bytes += STITCH_USE_MOST + (s->use ? s->use->bytes : 0u);
-    return RibbonStitchOf(bytes);
+    return RibbonStitchOf(vol, bytes);
 }
 
-static void StitchTake(StitchSnap* s)
+static void StitchTake(TagFSVolume* vol, StitchSnap* s)
 {
-    TagFSState* fs = tagfs_get_state();
+    TagFSState* fs = &vol->state;
     uint32_t    coined = 0;
     uint64_t    text   = 0;
 #ifdef CONFIG_VOLUME_TESTS
-    SettleStandRingsHere(true);
+    SettleStandRingsHere(vol, true);
 #endif
-    SettleWaitersRunBegins();
-    uint32_t demands = CadenceRunBegins();
+    SettleWaitersRunBegins(vol);
+    uint32_t demands = CadenceRunBegins(vol);
     bool     room    = s->why == SETTLE_FOR_ROOM || (demands & SETTLE_DEMAND_ROOM);
     TagFSLockTake(&fs->lock);
-    s->target    = InkedGen();
-    s->data_need = InkDataNeed();
-    s->cycle     = SettledCycles() + 1u;
-    s->flags     = (s->why == SETTLE_FOR_HALT && HelmOwed() == 0 ? STITCH_CLEAN : 0u) |
-                   (RibbonCursorLied() ? STITCH_MEDIUM_LIED : 0u);
-    s->use_owed  = UseMemoryStitchTake(&s->use, &s->use_ticket);
-    s->claimed   = RibbonClaimTaken();
-    bool awaits  = room && FallowAwaitsQuire();
-    DocketTakeLocked(&s->jots);
+    s->target    = InkedGen(vol);
+    s->data_need = InkDataNeed(vol);
+    s->cycle     = SettledCycles(vol) + 1u;
+    s->flags     = (s->why == SETTLE_FOR_HALT && HelmOwed(vol) == 0 ? STITCH_CLEAN : 0u) |
+                   (RibbonCursorLied(vol) ? STITCH_MEDIUM_LIED : 0u);
+    s->use_owed  = UseMemoryStitchTake(vol, &s->use, &s->use_ticket);
+    s->claimed   = RibbonClaimTaken(vol);
+    bool awaits  = room && FallowAwaitsQuire(vol);
+    DocketTakeLocked(vol, &s->jots);
     /* After the target: every tag a record up to it wears was given before
      * its Ink, so it is below the range's end; and what the registry holds
      * after the range holds every Coined in it. The registry's lock is a
@@ -228,22 +169,22 @@ static void StitchTake(StitchSnap* s)
     uint32_t retiring = 0, retired = 0;
     s->retires = TagRegistryRetiringNext(fs->registry, &retiring, s->coined_lo, s->target, &retired);
     TagRegistryCoinedHeld(fs->registry, &coined, &text);
-    s->flight = StitchFlight(s, coined, text);
-    RibbonFlightBegins(s->flight);
+    s->flight = StitchFlight(vol, s, coined, text);
+    RibbonFlightBegins(vol, s->flight);
     TagFSLockDrop(&fs->lock);
-    StitchCloseForRoom(s, awaits);
-    FallowGiveRoomHold(s->cycle);
+    StitchCloseForRoom(vol, s, awaits);
+    FallowGiveRoomHold(vol, s->cycle);
     /* The toll's D is the last settled cycle's less the flush of its own data
      * (§16.5 п.1), so a flush paid never spares the next cycle its own; the
      * cadence's D — the Lull, the medium's share, the small writer's measure —
      * is the whole of that cycle's time on the medium, the flush with it. */
-    uint64_t d = SettleLastDUs();
-    s->d_us    = d > s_settled_flush_us ? d - s_settled_flush_us : 0;
+    uint64_t d = SettleLastDUs(vol);
+    s->d_us    = d > vol->sewing.settled_flush_us ? d - vol->sewing.settled_flush_us : 0;
     ReadPaceTake(&s->pace);
     s->made_ns = rtc_get_unix64() * 1000000000ull;
     SETTLE_CUT_CYCLE(s->target);
 #ifdef CONFIG_VOLUME_TESTS
-    SettleStandRingsHere(false);
+    SettleStandRingsHere(vol, false);
 #endif
 }
 
@@ -263,14 +204,14 @@ static void StitchTake(StitchSnap* s)
  * stopping machine's halt refuses every change not begun; these are its own
  * cycle's, made before its snapshot, and pass (StitchMarksVerdict).
  */
-static error_t StitchMarked(StitchSnap* s)
+static error_t StitchMarked(TagFSVolume* vol, StitchSnap* s)
 {
-    if (!ErrataHeld())
+    if (!ErrataHeld(vol))
         return OK;
     KHeapScope was = KHeapScopeEnter(KHEAP_CHARGE_KERNEL, 0);
-    __atomic_store_n(&s_marking, (uint32_t)amp_get_core_index() + 1u, __ATOMIC_RELEASE);
-    error_t    rc  = ErrataMarked();
-    __atomic_store_n(&s_marking, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->sewing.marking, (uint32_t)amp_get_core_index() + 1u, __ATOMIC_RELEASE);
+    error_t    rc  = ErrataMarked(vol);
+    __atomic_store_n(&vol->sewing.marking, 0u, __ATOMIC_RELEASE);
     KHeapScopeLeave(was);
     if (rc != OK)
         s->stage = "the mark the mount's verdict owes its files";
@@ -308,9 +249,9 @@ typedef struct {
     uint32_t at;       /* the next place of the retirements the registry owes */
 } StitchCoinedWalk;
 
-static bool StitchCoinedNext(const StitchSnap* s, StitchCoinedWalk* walk, uint32_t* id, TallyTag* t)
+static bool StitchCoinedNext(TagFSVolume* vol, const StitchSnap* s, StitchCoinedWalk* walk, uint32_t* id, TallyTag* t)
 {
-    TagRegistry* reg = tagfs_get_state()->registry;
+    TagRegistry* reg = vol->state.registry;
     TagRolled    rolled;
     if (walk->id == 0)
         walk->id = s->coined_lo;
@@ -333,17 +274,17 @@ static bool StitchCoinedNext(const StitchSnap* s, StitchCoinedWalk* walk, uint32
  * none, the book's forgotten — when the book does not hold it already (§7: the
  * same text is written never again), and the files' — ERR_NO_MEMORY for no
  * room for how their runs changed. */
-static error_t StitchMeasure(StitchSnap* s, StitchLoad* l)
+static error_t StitchMeasure(TagFSVolume* vol, StitchSnap* s, StitchLoad* l)
 {
     memset(l, 0, sizeof(*l));
-    l->bytes   = STITCH_HEAD_MOST + STITCH_CLASP_MOST + ErrataBytes();
+    l->bytes   = STITCH_HEAD_MOST + STITCH_CLASP_MOST + ErrataBytes(vol);
     l->body    = STITCH_HEAD_MOST > STITCH_CLASP_MOST ? STITCH_HEAD_MOST : STITCH_CLASP_MOST;
-    l->body    = ErrataBodyMost() > l->body ? ErrataBodyMost() : l->body;
-    l->records = ErrataUndones();
+    l->body    = ErrataBodyMost(vol) > l->body ? ErrataBodyMost(vol) : l->body;
+    l->records = ErrataUndones(vol);
     StitchCoinedWalk walk = { 0 };
     uint32_t         id;
     TallyTag         t;
-    while (StitchCoinedNext(s, &walk, &id, &t)) {
+    while (StitchCoinedNext(vol, s, &walk, &id, &t)) {
         uint64_t body = STITCH_COINED_MOST - STITCH_RECORD_HEAD_MOST + TallyTagCarried(&t);
         l->coined++;
         l->records++;
@@ -352,7 +293,7 @@ static error_t StitchMeasure(StitchSnap* s, StitchLoad* l)
     }
     UseText* word = s->use_owed ? s->use : NULL;
     if (s->use_owed || s->use_forgot) {
-        UseText* memory = tagfs_recall_use_context(NULL);
+        UseText* memory = tagfs_recall_use_context(vol, NULL);
         l->use_written  = !UseTextSame(memory, word);
         UseTextDrop(memory);
     }
@@ -442,10 +383,10 @@ static void StitchFreshUnmeasured(StitchSnap* s, uint64_t measured)
  * records measured and the two around them, which `starts` holds. Its length
  * in *len, and the Clasp's sum in *clasp; ERR_NO_MEMORY for the room the
  * files' tags are put in order in. */
-static error_t StitchStream(StitchSnap* s, const StitchLoad* l, uint8_t* out, uint8_t* body, uint32_t* starts,
+static error_t StitchStream(TagFSVolume* vol, StitchSnap* s, const StitchLoad* l, uint8_t* out, uint8_t* body, uint32_t* starts,
                             uint32_t* nstarts, uint32_t* clasp, uint32_t* len)
 {
-    const RibbonCursor* c = RibbonCursorNow();
+    const RibbonCursor* c = RibbonCursorNow(vol);
     bool                came = c->came.blocks && (c->off == 0 || c->refused);
     StitchHead          h = { .flags = s->flags, .prev = c->last ? s->seq - c->last : 0, .prev_clasp = c->clasp,
                               .tally = s->seq - c->tally, .made_ns = s->made_ns, .next_block = c->next.block,
@@ -453,11 +394,11 @@ static error_t StitchStream(StitchSnap* s, const StitchLoad* l, uint8_t* out, ui
                               .from_blocks = came ? c->came.blocks : 0 };
     uint32_t n = 0, coined = 0, at = RibbonRecordPut(out, RIBBON_STITCH_HEAD, 0, body, StitchHeadBodyPut(body, &h));
     starts[n++] = 0;
-    at = ErrataLay(out, at, s->seq, body, starts, &n);
+    at = ErrataLay(vol, out, at, s->seq, body, starts, &n);
     StitchCoinedWalk walk = { 0 };
     uint32_t         id;
     TallyTag         t;
-    while (coined < l->coined && StitchCoinedNext(s, &walk, &id, &t)) {
+    while (coined < l->coined && StitchCoinedNext(vol, s, &walk, &id, &t)) {
         starts[n++] = at;
         at += RibbonRecordPut(out + at, RIBBON_COINED, 0, body, RibbonCoinedBodyPut(body, id, &t));
         coined++;
@@ -469,7 +410,7 @@ static error_t StitchStream(StitchSnap* s, const StitchLoad* l, uint8_t* out, ui
                                           l->use ? l->use->bytes : 0u));
     }
     s->fresh   = 0;
-    error_t rc = DocketLay(&s->jots, s->seq, l->jot_tags, out, &at, body, starts, &n, &s->fresh);
+    error_t rc = DocketLay(vol, &s->jots, s->seq, l->jot_tags, out, &at, body, starts, &n, &s->fresh);
     if (rc != OK)
         return rc;
     if (s->fresh != l->fresh)
@@ -514,7 +455,7 @@ static void StitchHeldToFlight(const StitchSnap* s)
  * this kernel's own to a return that finds it (ribbon_left.c); `past` when the
  * ribbon has gone on past it already (RibbonRetry). An attempt refused before
  * a sector of it was written is nothing on the medium. */
-static void StitchTryKept(StitchSnap* s, bool past)
+static void StitchTryKept(TagFSVolume* vol, StitchSnap* s, bool past)
 {
     if (!s->laid || s->step < STITCH_STEP_STITCH)
         return;
@@ -523,7 +464,7 @@ static void StitchTryKept(StitchSnap* s, bool past)
     s->laid->of   = s->of;
     s->laid->seq  = s->seq;
     s->laid->past = past;
-    RibbonTryLaid(s->laid);
+    RibbonTryLaid(vol, s->laid);
     s->laid = NULL;
     StitchSectorsLetGo(s);
 }
@@ -533,11 +474,11 @@ static void StitchTryKept(StitchSnap* s, bool past)
  * text is the one thing no claim held room for; an empty one — the word none,
  * or the book's forgotten — gives up what the book held, as a delete does, and
  * takes the room what frees takes (RibbonRoom's `promised`). */
-static error_t StitchLay(StitchSnap* s, bool* word)
+static error_t StitchLay(TagFSVolume* vol, StitchSnap* s, bool* word)
 {
     StitchLoad l;
     StitchSectorsLetGo(s);
-    error_t   measured = StitchMeasure(s, &l);
+    error_t   measured = StitchMeasure(vol, s, &l);
     *word = l.use_written;
     s->toll = StitchToll(s, l.runs, l.fresh);
     /* Judged again by each attempt with its toll, and kept in s->flags, so the
@@ -552,14 +493,14 @@ static error_t StitchLay(StitchSnap* s, bool* word)
     error_t   rc     = measured != OK ? measured : stream && body && starts ? OK : ERR_NO_MEMORY;
     uint32_t  len    = 0, nstarts = 0;
     if (rc == OK) {
-        s->seq = RibbonSeqNext();
-        rc     = StitchStream(s, &l, stream, body, starts, &nstarts, &s->clasp, &len);
+        s->seq = RibbonSeqNext(vol);
+        rc     = StitchStream(vol, s, &l, stream, body, starts, &nstarts, &s->clasp, &len);
     }
     if (rc == OK) {
         s->useful = len;
-        s->of     = (uint32_t)RibbonStitchOf(len);
+        s->of     = (uint32_t)RibbonStitchOf(vol, len);
         StitchHeldToFlight(s);
-        rc    = RibbonRoom(s->of, !l.use_written || !l.use || !l.use->bytes, &s->at, &s->hop);
+        rc    = RibbonRoom(vol, s->of, !l.use_written || !l.use || !l.use->bytes, &s->at, &s->hop);
     }
     if (rc == OK && !(s->laid = RibbonTryMake(s->of)))
         rc = ERR_NO_MEMORY;
@@ -567,7 +508,7 @@ static error_t StitchLay(StitchSnap* s, bool* word)
         s->sectors = s->laid->sectors;
         uint64_t left = s->at.quire.blocks * TAGFS_BLOCK_SECTORS - s->at.off;
         RibbonStitchSeal(s->sectors, stream, len, starts, nstarts, s->seq, RibbonPlaceVlba(&s->at), left,
-                         s->hop.block * TAGFS_BLOCK_SECTORS, s->of, tagfs_get_state()->uuid);
+                         s->hop.block * TAGFS_BLOCK_SECTORS, s->of, vol->state.uuid);
     } else {
         s->of = 0;
     }
@@ -594,10 +535,10 @@ static error_t StitchLay(StitchSnap* s, bool* word)
  * on the medium and in memory alike, said. Refused with no word aboard, the
  * cycle is: ERR_TAGFS_NO_SPACE, said by the ribbon.
  */
-static error_t StitchBuild(StitchSnap* s)
+static error_t StitchBuild(TagFSVolume* vol, StitchSnap* s)
 {
     bool    word = false;
-    error_t rc   = StitchLay(s, &word);
+    error_t rc   = StitchLay(vol, s, &word);
     if (rc != ERR_TAGFS_NO_SPACE || !word)
         return rc;
     uint64_t bytes = s->use ? s->use->bytes : 0u;
@@ -608,7 +549,7 @@ static error_t StitchBuild(StitchSnap* s)
         s->use_owed   = false;
         s->use_out    = true;
         s->use_forgot = true;
-        rc = StitchLay(s, &word);
+        rc = StitchLay(vol, s, &word);
         if (rc != ERR_TAGFS_NO_SPACE || !word)
             return rc;
     }
@@ -618,7 +559,7 @@ static error_t StitchBuild(StitchSnap* s)
     s->use_owed   = false;
     s->use_out    = true;
     s->use_forgot = false;
-    return StitchLay(s, &word);
+    return StitchLay(vol, s, &word);
 }
 
 // ----------------------------------------------------------------------------
@@ -628,9 +569,9 @@ static error_t StitchBuild(StitchSnap* s)
 /* The sector of a stitch its last atom of the ribbon begins at: a stitch ends
  * on one (RibbonStitchOf), and one begun inside a flash page, past an end a
  * writer of a smaller atom left, may be shorter than a page — all of it then. */
-static uint64_t StitchLastAtom(const StitchSnap* s)
+static uint64_t StitchLastAtom(TagFSVolume* vol, const StitchSnap* s)
 {
-    uint32_t atom = RibbonCursorNow()->atom;
+    uint32_t atom = RibbonCursorNow(vol)->atom;
     return s->of > atom ? s->of - atom : 0;
 }
 
@@ -638,12 +579,12 @@ static uint64_t StitchLastAtom(const StitchSnap* s)
  * the seat takes in one command, inside one Quire — and the last atom a write
  * of its own, so the cut that stops before it tears a stitch of more than one
  * atom (SETTLECUT `stitch`). Its first sector's address in *vlba. */
-static uint32_t StitchWindow(const StitchSnap* s, uint64_t* vlba)
+static uint32_t StitchWindow(TagFSVolume* vol, const StitchSnap* s, uint64_t* vlba)
 {
     uint64_t left  = s->at.quire.blocks * TAGFS_BLOCK_SECTORS - s->at.off;
-    uint64_t last  = StitchLastAtom(s);
+    uint64_t last  = StitchLastAtom(vol, s);
     uint64_t n     = s->of - s->written;
-    uint64_t most  = BoardroomSeatRun(tagfs_get_seat());
+    uint64_t most  = BoardroomSeatRun(tagfs_get_seat(vol));
     if (s->written < left) {
         *vlba = RibbonPlaceVlba(&s->at) + s->written;
         n     = n < left - s->written ? n : left - s->written;
@@ -656,19 +597,19 @@ static uint32_t StitchWindow(const StitchSnap* s, uint64_t* vlba)
 }
 
 /* One window of the stitch to the medium: *done once its last sector is. */
-static error_t StitchWrite(StitchSnap* s, bool* done)
+static error_t StitchWrite(TagFSVolume* vol, StitchSnap* s, bool* done)
 {
     uint64_t vlba = 0;
-    uint32_t n    = StitchWindow(s, &vlba);
-    if (s->written == 0 && ErrataHeld())
+    uint32_t n    = StitchWindow(vol, s, &vlba);
+    if (s->written == 0 && ErrataHeld(vol))
         SETTLE_CUT_AT(SETTLE_CUT_POINT_UNDONE);
 #ifdef CONFIG_TAGFS_SETTLE_CUT_POINT
     if (s->written == 0 && EngrossCarriedBy(s->target))
         SETTLE_CUT_AT(SETTLE_CUT_POINT_ENGROSS);
 #endif
-    if (s->written == StitchLastAtom(s))
+    if (s->written == StitchLastAtom(vol, s))
         SETTLE_CUT_AT(SETTLE_CUT_POINT_STITCH);
-    int rc = tagfs_volume_write(vlba, n, s->sectors + (uint64_t)s->written * BOOK_SECTOR_BYTES);
+    int rc = tagfs_volume_write(vol, vlba, n, s->sectors + (uint64_t)s->written * BOOK_SECTOR_BYTES);
     if (rc != 0)
         return rc == (int)ERR_DEVICE_NOT_READY ? ERR_DEVICE_NOT_READY
              : rc == (int)ERR_TAGFS_READ_ONLY  ? ERR_TAGFS_READ_ONLY : ERR_WRITE_FAILED;
@@ -679,10 +620,10 @@ static error_t StitchWrite(StitchSnap* s, bool* done)
 
 /* No Quire takes the write (M-6): the book takes none from here, said with the
  * refusals in a row and `nowhere`, why no reader would take a retry up. */
-static error_t StitchNowhere(const StitchSnap* s, const char* nowhere)
+static error_t StitchNowhere(TagFSVolume* vol, const StitchSnap* s, const char* nowhere)
 {
-    const RibbonCursor* c = RibbonCursorNow();
-    __atomic_store_n(&s_book_refused, 1u, __ATOMIC_RELEASE);
+    const RibbonCursor* c = RibbonCursorNow(vol);
+    __atomic_store_n(&vol->sewing.book_refused, 1u, __ATOMIC_RELEASE);
     kprintf("[TagFS] the book takes no write: %u refusal(s) in a row%s, the last of stitch %llu at %s — %s, so none "
             "is written: the volume may only be read from here (ERR_TAGFS_READ_ONLY)\n", c->refused - c->cut,
             c->cut ? " past an attempt its medium leaving cut short" : "", (unsigned long long)s->seq, s->stage,
@@ -695,21 +636,21 @@ static error_t StitchNowhere(const StitchSnap* s, const char* nowhere)
  * BUILD with the ribbon gone on in the next_quire the last stitch sewn names;
  * or the answer the cycle ends with — the medium's own when it left or takes
  * no write, and ERR_TAGFS_READ_ONLY where no reader would take a retry up. */
-static error_t StitchRefused(StitchSnap* s, error_t rc)
+static error_t StitchRefused(TagFSVolume* vol, StitchSnap* s, error_t rc)
 {
-    TagFSWriteRefused();
-    if (rc == ERR_NO_MEMORY || rc == ERR_DEVICE_NOT_READY || TagFSMediumLeft() || TagFSReadOnly())
+    TagFSWriteRefused(vol);
+    if (rc == ERR_NO_MEMORY || rc == ERR_DEVICE_NOT_READY || TagFSMediumLeft(vol) || TagFSReadOnly(vol))
         return rc;
-    const char* nowhere = RibbonRetry(&s->at, &s->hop, s->of, false);
-    StitchTryKept(s, nowhere == NULL);
+    const char* nowhere = RibbonRetry(vol, &s->at, &s->hop, s->of, false);
+    StitchTryKept(vol, s, nowhere == NULL);
     if (nowhere)
-        return StitchNowhere(s, nowhere);
-    if (RibbonCursorNow()->refused - RibbonCursorNow()->cut == 1u)
+        return StitchNowhere(vol, s, nowhere);
+    if (RibbonCursorNow(vol)->refused - RibbonCursorNow(vol)->cut == 1u)
         kprintf("[TagFS] the medium refused stitch %llu at %s (error %u): the cycle goes on with a new seq in the "
                 "next_quire, block %llu, at its sector %llu (M-6)\n", (unsigned long long)s->seq, s->stage,
-                (unsigned)rc, (unsigned long long)RibbonCursorNow()->quire.block,
-                (unsigned long long)RibbonCursorNow()->off);
-    RibbonNextGiven();
+                (unsigned)rc, (unsigned long long)RibbonCursorNow(vol)->quire.block,
+                (unsigned long long)RibbonCursorNow(vol)->off);
+    RibbonNextGiven(vol);
     s->step = STITCH_STEP_BUILD;
     return OK;
 }
@@ -727,34 +668,34 @@ void StitchStandLeaves(uint32_t sectors)
 /* The medium leaves here, once, where the stand armed it to: before the next
  * window of the stitch once `sectors` of it are written, or before its last
  * flush once all of them are. */
-static void StitchStandLeft(const StitchSnap* s)
+static void StitchStandLeft(TagFSVolume* vol, const StitchSnap* s)
 {
     uint32_t armed = __atomic_load_n(&s_stand_leaves, __ATOMIC_ACQUIRE);
     uint32_t at    = armed - 1u < s->of ? armed - 1u : s->of;
     if (armed && s->written >= at && __atomic_exchange_n(&s_stand_leaves, 0u, __ATOMIC_ACQ_REL))
-        TagFSStandMediumLeaves();
+        TagFSStandMediumLeaves(vol);
 }
-#define STITCH_STAND_LEFT(s) StitchStandLeft(s)
+#define STITCH_STAND_LEFT(vol, s) StitchStandLeft(vol, s)
 #else
-#define STITCH_STAND_LEFT(s) ((void)(s))
+#define STITCH_STAND_LEFT(vol, s) ((void)(vol), (void)(s))
 #endif
 
 // ----------------------------------------------------------------------------
 // The cycle
 // ----------------------------------------------------------------------------
 
-void StitchRunBegin(SettleWhy why)
+void StitchRunBegin(TagFSVolume* vol, SettleWhy why)
 {
-    StitchSectorsLetGo(&s_stitch);
-    UseTextDrop(s_stitch.use);
-    memset(&s_stitch, 0, sizeof(s_stitch));
-    s_stitch.why  = why;
-    s_stitch.step = STITCH_STEP_TAKE;
+    StitchSectorsLetGo(&vol->sewing.stitch);
+    UseTextDrop(vol->sewing.stitch.use);
+    memset(&vol->sewing.stitch, 0, sizeof(vol->sewing.stitch));
+    vol->sewing.stitch.why  = why;
+    vol->sewing.stitch.step = STITCH_STEP_TAKE;
 }
 
-error_t StitchRunStep(bool* done)
+error_t StitchRunStep(TagFSVolume* vol, bool* done)
 {
-    StitchSnap* s    = &s_stitch;
+    StitchSnap* s    = &vol->sewing.stitch;
     error_t     rc   = OK;
     bool        last = false;
     switch (s->step) {
@@ -765,11 +706,11 @@ error_t StitchRunStep(bool* done)
          * own ask refused (RibbonNextGivenAtMount) — would see every claim but
          * a freeing one refused, the cycle with them, and the next cycle's the
          * same, were it given only past them. */
-        RibbonNextGiven();
-        rc = StitchMarked(s);
+        RibbonNextGiven(vol);
+        rc = StitchMarked(vol, s);
         if (rc != OK)
             break;
-        StitchTake(s);
+        StitchTake(vol, s);
         s->step = STITCH_STEP_BUILD;
         break;
     case STITCH_STEP_BUILD:
@@ -778,36 +719,36 @@ error_t StitchRunStep(bool* done)
         if ((rc = SettleStandRefusalHere(OK)) != OK)
             break;
 #endif
-        rc       = StitchBuild(s);
+        rc       = StitchBuild(vol, s);
         if (rc == OK)
             s->step = s->toll ? STITCH_STEP_FIRST_FLUSH : STITCH_STEP_STITCH;
         else if (rc == ERR_TAGFS_READ_ONLY)
-            rc = StitchNowhere(s, "the attempts refused leave the next_quire the last stitch sewn names no room "
+            rc = StitchNowhere(vol, s, "the attempts refused leave the next_quire the last stitch sewn names no room "
                                   "for the retry");
         break;
     case STITCH_STEP_FIRST_FLUSH: {
         uint64_t t0 = SettleNowUs();
         s->stage    = "the flush of the data the stitch names";
-        rc           = VolumeFlushFor(s->data_need);
+        rc           = VolumeFlushFor(vol, s->data_need);
         s->flush_us += SettleNowUs() - t0;
         if (rc == OK)
             s->step = STITCH_STEP_STITCH;
         break;
     }
     case STITCH_STEP_STITCH:
-        STITCH_STAND_LEFT(s);
+        STITCH_STAND_LEFT(vol, s);
         s->stage = "the stitch";
-        rc       = StitchWrite(s, &last);
+        rc       = StitchWrite(vol, s, &last);
         if (rc == OK && last)
             s->step = STITCH_STEP_LAST_FLUSH;
         break;
     case STITCH_STEP_LAST_FLUSH:
-        STITCH_STAND_LEFT(s);
+        STITCH_STAND_LEFT(vol, s);
         if (!s->toll && s->fresh)
             SETTLE_CUT_AT(SETTLE_CUT_POINT_SPARED);
         SETTLE_CUT_AT(SETTLE_CUT_POINT_FLUSH);
         s->stage = "the flush after the stitch";
-        rc       = VolumeFlushFor(VolumeFlushNeed());
+        rc       = VolumeFlushFor(vol, VolumeFlushNeed(vol));
         if (rc == OK)
             s->step = STITCH_STEP_DONE;
         break;
@@ -815,26 +756,26 @@ error_t StitchRunStep(bool* done)
         break;
     }
     if (rc != OK && s->step >= STITCH_STEP_FIRST_FLUSH)
-        rc = StitchRefused(s, rc);
+        rc = StitchRefused(vol, s, rc);
     *done = rc != OK || s->step == STITCH_STEP_DONE;
     return rc;
 }
 
-bool StitchHoldStill(uint64_t* written)
+bool StitchHoldStill(TagFSVolume* vol, uint64_t* written)
 {
     for (;;) {
         uint64_t cover   = 0;
         error_t  refused = OK;
-        uint64_t ticket  = ScribeAsk(&g_settle_scribe);
-        switch (ScribeWait(&g_settle_scribe, ticket, &cover, &refused)) {
+        uint64_t ticket  = ScribeAsk(&vol->settle.scribe);
+        switch (ScribeWait(&vol->settle.scribe, ticket, &cover, &refused)) {
         case SCRIBE_MINE:
-            *written = __atomic_load_n(&g_settle_scribe.written, __ATOMIC_ACQUIRE);
+            *written = __atomic_load_n(&vol->settle.scribe.written, __ATOMIC_ACQUIRE);
             return true;
         case SCRIBE_SELF:
-            if (!SettleRunBetweenStepsHere())
+            if (!SettleRunBetweenStepsHere(vol))
                 return false;
-            while (SettleRunBetweenStepsHere())
-                SettleRunStepHere();
+            while (SettleRunBetweenStepsHere(vol))
+                SettleRunStepHere(vol);
             break;
         default:
             break;      /* a pass covered the ask: the hold is asked again */
@@ -842,44 +783,44 @@ bool StitchHoldStill(uint64_t* written)
     }
 }
 
-void StitchStillLetGo(uint64_t written)
+void StitchStillLetGo(TagFSVolume* vol, uint64_t written)
 {
-    ScribeGive(&g_settle_scribe, written, OK);
+    ScribeGive(&vol->settle.scribe, written, OK);
 }
 
-uint64_t StitchRunTarget(void)
+uint64_t StitchRunTarget(TagFSVolume* vol)
 {
-    return s_stitch.target;
+    return vol->sewing.stitch.target;
 }
 
-const char* StitchRunStage(void)
+const char* StitchRunStage(TagFSVolume* vol)
 {
-    return s_stitch.stage ? s_stitch.stage : "the stitch's snapshot";
+    return vol->sewing.stitch.stage ? vol->sewing.stitch.stage : "the stitch's snapshot";
 }
 
 /* The tags the settled stitch retired of those the book had, into DogEar —
  * before the registry lets them go from what it owes. */
-static void StitchRetiredDogEared(const StitchSnap* s)
+static void StitchRetiredDogEared(TagFSVolume* vol, const StitchSnap* s)
 {
-    TagRegistry* reg = tagfs_get_state()->registry;
+    TagRegistry* reg = vol->state.registry;
     uint32_t     at  = 0, id;
     while (s->retires && TagRegistryRetiringNext(reg, &at, s->coined_lo, s->target, &id))
-        DogEarPut(TALLY_TAGS, (TallyKey){ id, 0 }, (TallyKey){ id + 1u, 0 });
+        DogEarPut(vol, TALLY_TAGS, (TallyKey){ id, 0 }, (TallyKey){ id + 1u, 0 });
 }
 
 /* What the settled stitch changed of the book's trees, into DogEar (dog_ear.h):
  * every file it carried a record of, the tags it coined and retired, the Use
  * Context when it carried one or forgot the book's — what the next Tally lays
  * anew of the state it leaves. */
-static void StitchDogEared(const StitchSnap* s)
+static void StitchDogEared(TagFSVolume* vol, const StitchSnap* s)
 {
     for (const Jot* j = s->jots.first; j; j = j->next[0])
         if (j->carried)
-            DogEarFileChanged(j->fid, j->was, j->now, s->target);
+            DogEarFileChanged(vol, j->fid, j->was, j->now, s->target);
     if (s->coined_hi > s->coined_lo)
-        DogEarPut(TALLY_TAGS, (TallyKey){ s->coined_lo, 0 }, (TallyKey){ s->coined_hi, 0 });
+        DogEarPut(vol, TALLY_TAGS, (TallyKey){ s->coined_lo, 0 }, (TallyKey){ s->coined_hi, 0 });
     if (s->use_owed || s->use_forgot)
-        DogEarPut(TALLY_USE, (TallyKey){ 0, 0 }, (TallyKey){ 1, 0 });
+        DogEarPut(vol, TALLY_USE, (TallyKey){ 0, 0 }, (TallyKey){ 1, 0 });
 }
 
 /* DONE: the ribbon's cursor past the stitch — the room it leaves published
@@ -893,64 +834,64 @@ static void StitchDogEared(const StitchSnap* s)
  * ahead of need where it went on into one. Refused, the Docket it took is
  * given back under what came since, its claims with it. The flight ends
  * either way. */
-void StitchRunEnd(error_t rc)
+void StitchRunEnd(TagFSVolume* vol, error_t rc)
 {
-    StitchSnap* s     = &s_stitch;
-    TagFSState* fs    = tagfs_get_state();
+    StitchSnap* s     = &vol->sewing.stitch;
+    TagFSState* fs    = &vol->state;
     UseText*    gone  = NULL;
     Jot*        spent = NULL;
     FallowNode* nodes = NULL;
     if (rc != OK) {
         TagFSLockTake(&fs->lock);
-        DocketBackLocked(&s->jots, &spent);
-        RibbonClaimBack(s->claimed);
+        DocketBackLocked(vol, &s->jots, &spent);
+        RibbonClaimBack(vol, s->claimed);
         TagFSLockDrop(&fs->lock);
         JotsLetGo(spent);
         /* A volume that takes no write from here ends the Tally under way:
          * nothing of it is written past the refusal, its ground goes back. */
-        if (TagFSReadOnly() || TagFSMediumLeft())
-            BinderStopped(rc);
-        StitchTryKept(s, false);
+        if (TagFSReadOnly(vol) || TagFSMediumLeft(vol))
+            BinderStopped(vol, rc);
+        StitchTryKept(vol, s, false);
     } else {
-        uint64_t left = RibbonSewn(&s->at, &s->hop, s->of, s->seq, s->clasp, s->clasp_at, s->flags);
+        uint64_t left = RibbonSewn(vol, &s->at, &s->hop, s->of, s->seq, s->clasp, s->clasp_at, s->flags);
         TagFSLockTake(&fs->lock);
-        SettleSettledLocked(s->target, s->cycle, (s->flags & STITCH_CLEAN) != 0);
+        SettleSettledLocked(vol, s->target, s->cycle, (s->flags & STITCH_CLEAN) != 0);
         if (s->use_owed) {
-            gone   = UseMemoryStitchSettled(s->use, s->use_ticket);
+            gone   = UseMemoryStitchSettled(vol, s->use, s->use_ticket);
             s->use = NULL;
         } else if (s->use_out) {
-            gone = UseMemoryStitchRefused(s->use_ticket, s->use_forgot);
+            gone = UseMemoryStitchRefused(vol, s->use_ticket, s->use_forgot);
         }
-        FallowStitchSettled(s->target, s->seq, s->cycle);
-        FallowQuireLeft(left);
+        FallowStitchSettled(vol, s->target, s->seq, s->cycle);
+        FallowQuireLeft(vol, left);
         /* A slot's rest is let go in the hold its ground is given back in:
          * no measure between sees it twice, or the reserve without it. */
-        bool     held = BinderHoldsGround();
-        uint64_t ripe = held ? 0 : FallowRipen(s->cycle, &nodes);
+        bool     held = BinderHoldsGround(vol);
+        uint64_t ripe = held ? 0 : FallowRipen(vol, s->cycle, &nodes);
         if (!held)
-            BinderRestRipens(FallowSpineRipeFrom());
-        SettleGivenLocked(ripe);
+            BinderRestRipens(vol, FallowSpineRipeFrom(vol));
+        SettleGivenLocked(vol, ripe);
         TagFSLockDrop(&fs->lock);
         FallowNodesFree(nodes);
-        GlossTrim();
-        BirthsTrim();
-        StitchRetiredDogEared(s);
+        GlossTrim(vol);
+        BirthsTrim(vol);
+        StitchRetiredDogEared(vol, s);
         TagRegistryCoinedUpTo(fs->registry, s->coined_hi, s->target);
         uint64_t fid_most = 0;
-        error_t  births   = DocketBirths(&s->jots, s->seq, &fid_most);
-        StitchDogEared(s);
-        CommonholdSettled(s->target);   /* past DogEar: the blocks the stitch's Inks left with no owner, gone */
-        LooseLeavesSettled(&s->jots);
-        BinderStitchSettled(s->seq, s->useful, fid_most, births);
-        EndpaperGrew(&s->jots, s->seq);
+        error_t  births   = DocketBirths(vol, &s->jots, s->seq, &fid_most);
+        StitchDogEared(vol, s);
+        CommonholdSettled(vol, s->target);   /* past DogEar: the blocks the stitch's Inks left with no owner, gone */
+        LooseLeavesSettled(vol, &s->jots);
+        BinderStitchSettled(vol, s->seq, s->useful, fid_most, births);
+        EndpaperGrew(vol, &s->jots, s->seq);
         DocketSettled(&s->jots, s->seq);
-        ErrataSettled(s->seq);
-        s_settled_flush_us = s->flush_us;
-        RibbonNextGiven();
+        ErrataSettled(vol, s->seq);
+        vol->sewing.settled_flush_us = s->flush_us;
+        RibbonNextGiven(vol);
     }
     /* Past the Coineds the stitch laid and the next_quire asked: the room a
      * claim is judged by is the cursor's own from here (ribbon.c). */
-    RibbonFlightEnds();
+    RibbonFlightEnds(vol);
     UseTextDrop(gone);
     UseTextDrop(s->use);
     s->use = NULL;

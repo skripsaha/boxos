@@ -5,6 +5,7 @@
 #include "../mount/book_mount.h"
 #include "../settle/binder.h"
 #include "../settle/loose_leaves.h"
+#include "tagfs_volume.h"
 
 /*
  * Engross (engross.h): the service of the Helm that lays the tails a Tally
@@ -15,58 +16,21 @@
 #define ENGROSS_TURN   8u                      /* tails a service point tries before it gives its core back */
 #define ENGROSS_BATCH  32u                     /* file ids one look at the map takes */
 #define ENGROSS_LOOK   (4u * ENGROSS_BATCH)    /* files a service point looks at before it gives its core back */
-#define ENGROSS_KNOWN  16u                     /* refusals of a file's own the service keeps */
 
-/* A walk of the files from `from` on, and what it left: the files whose tail
- * stays in Slips — their Helm another's, the ribbon's room on its way, or a
- * refusal — and the first of those refused. */
-typedef struct {
-    uint64_t from;        /* the next file id; UINT64_MAX once the map has no more */
-    uint32_t left;
-    uint32_t refused;     /* of `left`, refused by anything but a held Helm or the ribbon's room: said */
-    uint32_t own;         /* of `refused`, refused for the file's own sake (EngrossActs): Escheat's to cut */
-    uint64_t first_fid;
-    error_t  first;
-    uint64_t act;         /* the asks of Escheat this walk cuts tails for — 0 for none (EscheatTailsActing) */
-    uint64_t reach;       /* the newest Ink whose record of a file the act reaches (EscheatTailsReach) */
-} EngrossWalkState;
-
-/* A refusal that is the file's own — its last block unreadable, a file the
- * mount locked — made to the record that Ink `gen` made, in mounting `epoch`:
- * tried again only once the record changes, so a rotten tail is neither read
- * nor said at every turn — or by the walk that answers an ask of Escheat. */
-typedef struct {
-    uint64_t fid;
-    uint64_t gen;
-    uint64_t epoch;
-    error_t  rc;
-} EngrossRefusal;
 
 static void EngrossTurn(HelmWaiter* w);
-static void EngrossListed(void);
+static void EngrossListed(TagFSVolume* vol);
 
-static HelmWaiter        s_service = { .run = EngrossTurn };
-static volatile uint32_t s_listed;
-static volatile uint64_t s_asked;      /* asks made: each EngrossAsked counts one */
-/* The tails the last walk that tried every tail left refused for their own
- * sake, read from any core (EngrossRefusedNow): */
-static volatile uint32_t s_owned;
-/* The service point's alone — one listing runs at a time (s_listed): */
-static uint64_t          s_pass;       /* the asks the walk under way answers */
-static EngrossWalkState  s_walk;
-static EngrossRefusal    s_known[ENGROSS_KNOWN];
-static uint32_t          s_known_next;
-static EngrossWalkState  s_said;       /* the last walk's leavings said */
 #ifdef CONFIG_TAGFS_SETTLE_CUT_POINT
 static volatile uint64_t s_inked;      /* the last Engross's Ink, 0 for none */
 #endif
 
 /* Whether the file's record keeps Slips over its last block now, *gen the Ink
  * that made the record. */
-static bool EngrossOwedBy(uint64_t fid, uint64_t* gen)
+static bool EngrossOwedBy(TagFSVolume* vol, uint64_t fid, uint64_t* gen)
 {
     RecordWhere where = { 0 };
-    FileRecord* rec   = FileMapRecordHold(tagfs_get_state()->files, fid, &where);
+    FileRecord* rec   = FileMapRecordHold(vol->state.files, fid, &where);
     bool        owed  = rec && rec->slip;
     FileRecordRelease(rec);
     *gen = where.gen;
@@ -78,10 +42,10 @@ static bool EngrossOwedBy(uint64_t fid, uint64_t* gen)
  * asks for, and reaches a file kept in the trash — a Tally waits for its tail
  * as for any (TAGFS_HANDLE_KEPT). NULL and *rc for one the mount locked
  * (ERR_TAGFS_CORRUPTED, as its open answers every caller) or no memory. */
-static TagFSFileHandle* EngrossOpen(uint64_t fid, error_t* rc)
+static TagFSFileHandle* EngrossOpen(TagFSVolume* vol, uint64_t fid, error_t* rc)
 {
-    TagFSFileHandle* h = tagfs_open(fid, TAGFS_HANDLE_WRITE | TAGFS_HANDLE_KEPT);
-    *rc = h ? OK : BookFileLocked(fid) ? ERR_TAGFS_CORRUPTED : ERR_NO_MEMORY;
+    TagFSFileHandle* h = tagfs_open(vol, fid, TAGFS_HANDLE_WRITE | TAGFS_HANDLE_KEPT);
+    *rc = h ? OK : BookFileLocked(vol, fid) ? ERR_TAGFS_CORRUPTED : ERR_NO_MEMORY;
     if (h)
         h->warrant = INK_WARRANTED;
     return h;
@@ -130,10 +94,10 @@ static bool EngrossActs(error_t rc)
  * it itself; the file the loader reads the kernel by is changed by no call
  * (ink.h InkGuardSays). OK when the tail was let go; the cut's refusal when it
  * may pass, the act standing for the walk after; else `why`. */
-static error_t EngrossEscheat(TagFSFileHandle* h, uint64_t fid, error_t why, uint64_t reach)
+static error_t EngrossEscheat(TagFSVolume* vol, TagFSFileHandle* h, uint64_t fid, error_t why, uint64_t reach)
 {
     RecordWhere where = { 0 };
-    FileRecord* rec   = FileMapRecordHold(tagfs_get_state()->files, fid, &where);
+    FileRecord* rec   = FileMapRecordHold(vol->state.files, fid, &where);
     uint64_t    size  = rec ? rec->size : 0;
     uint64_t    was   = 0;
     error_t     rc;
@@ -141,7 +105,7 @@ static error_t EngrossEscheat(TagFSFileHandle* h, uint64_t fid, error_t why, uin
     if (!rec || where.gen > reach)
         return why;
     uint64_t whole = size / TAGFS_BLOCK_SIZE * TAGFS_BLOCK_SIZE;
-    rc             = HelmSpan(h, whole, &was);
+    rc             = HelmSpan(vol, h, whole, &was);
     bool passes    = rc != OK && !EngrossActs(rc);
     if (rc == OK)
         kprintf("[TagFS] Escheat: fid %llu's tail of %llu byte(s) can never be laid in its block (error %u) — lost: "
@@ -152,7 +116,7 @@ static error_t EngrossEscheat(TagFSFileHandle* h, uint64_t fid, error_t why, uin
                 "be cut to its last whole block (error %u) — %s\n", (unsigned long long)fid, (unsigned)why,
                 (unsigned)rc, passes ? "the act stands for the walk after" : "the Tally waits for it still");
     if (rc == OK)
-        EscheatTailLost();
+        EscheatTailLost(vol);
     return rc == OK ? OK : passes ? rc : why;
 }
 
@@ -162,58 +126,58 @@ static error_t EngrossEscheat(TagFSFileHandle* h, uint64_t fid, error_t why, uin
  * the newest), a refusal of the file's own let go under that same hold
  * (EngrossEscheat): OK — and OK for a file with no tail left, or given up —
  * ERR_BUSY for a Helm another holds, or the refusal. */
-static error_t EngrossFile(uint64_t fid, bool act, uint64_t reach)
+static error_t EngrossFile(TagFSVolume* vol, uint64_t fid, bool act, uint64_t reach)
 {
     error_t          rc   = OK;
-    TagFSFileHandle* h    = EngrossOpen(fid, &rc);
+    TagFSFileHandle* h    = EngrossOpen(vol, fid, &rc);
     HelmWaiter       here = { 0 };
     bool             laid = false;
     if (!h)
         return rc;
-    rc = HelmTryNoted(h->ofe, &here) ? OK : ERR_BUSY;
+    rc = HelmTryNoted(vol, h->ofe, &here) ? OK : ERR_BUSY;
     if (rc == OK) {
-        rc = HelmEngross(h, &laid);
+        rc = HelmEngross(vol, h, &laid);
         if (act && EngrossActs(rc))
-            rc = EngrossEscheat(h, fid, rc, reach);
-        HelmLetGo(h->ofe, &here);
+            rc = EngrossEscheat(vol, h, fid, rc, reach);
+        HelmLetGo(vol, h->ofe, &here);
     }
-    tagfs_close(h);
+    tagfs_close(vol, h);
     return rc == ERR_FILE_NOT_FOUND ? OK : rc;
 }
 
-static const EngrossRefusal* EngrossKnownOf(uint64_t fid, uint64_t gen)
+static const EngrossRefusal* EngrossKnownOf(TagFSVolume* vol, uint64_t fid, uint64_t gen)
 {
-    uint64_t epoch = tagfs_mount_epoch();
+    uint64_t epoch = tagfs_mount_epoch(vol);
     for (uint32_t i = 0; i < ENGROSS_KNOWN; i++)
-        if (s_known[i].rc != OK && s_known[i].fid == fid && s_known[i].gen == gen && s_known[i].epoch == epoch)
-            return &s_known[i];
+        if (vol->engross.known[i].rc != OK && vol->engross.known[i].fid == fid && vol->engross.known[i].gen == gen && vol->engross.known[i].epoch == epoch)
+            return &vol->engross.known[i];
     return NULL;
 }
 
-uint32_t EngrossRefusedNow(void)
+uint32_t EngrossRefusedNow(TagFSVolume* vol)
 {
-    return __atomic_load_n(&s_owned, __ATOMIC_ACQUIRE);
+    return __atomic_load_n(&vol->engross.owned, __ATOMIC_ACQUIRE);
 }
 
-static void EngrossKnow(uint64_t fid, uint64_t gen, error_t rc)
+static void EngrossKnow(TagFSVolume* vol, uint64_t fid, uint64_t gen, error_t rc)
 {
-    s_known[s_known_next++ % ENGROSS_KNOWN] = (EngrossRefusal){ .fid = fid, .gen = gen,
-                                                                .epoch = tagfs_mount_epoch(), .rc = rc };
+    vol->engross.known[vol->engross.known_next++ % ENGROSS_KNOWN] = (EngrossRefusal){ .fid = fid, .gen = gen,
+                                                                .epoch = tagfs_mount_epoch(vol), .rc = rc };
 }
 
 /* One file of the walk: its tail tried when it has one — or, for the service
  * (`known`), passed over when the same record refused it before. OK, or
  * ERR_DEVICE_NOT_READY when the medium left. */
-static error_t EngrossOne(EngrossWalkState* w, uint64_t fid, bool known, uint32_t* tails)
+static error_t EngrossOne(TagFSVolume* vol, EngrossWalkState* w, uint64_t fid, bool known, uint32_t* tails)
 {
     uint64_t              gen = 0;
     const EngrossRefusal* was = NULL;
-    if (!EngrossOwedBy(fid, &gen))
+    if (!EngrossOwedBy(vol, fid, &gen))
         return OK;
     (*tails)--;
     bool act   = w->act != 0 && gen <= w->reach;
-    was        = known ? EngrossKnownOf(fid, gen) : NULL;
-    error_t rc = was && !act ? was->rc : EngrossFile(fid, act, w->reach);
+    was        = known ? EngrossKnownOf(vol, fid, gen) : NULL;
+    error_t rc = was && !act ? was->rc : EngrossFile(vol, fid, act, w->reach);
     if (rc == OK)
         return OK;
     w->left++;
@@ -228,7 +192,7 @@ static error_t EngrossOne(EngrossWalkState* w, uint64_t fid, bool known, uint32_
         w->first     = rc;
     }
     if (known && !was && !EngrossPasses(rc))
-        EngrossKnow(fid, gen, rc);
+        EngrossKnow(vol, fid, gen, rc);
     return OK;
 }
 
@@ -239,9 +203,9 @@ static error_t EngrossOne(EngrossWalkState* w, uint64_t fid, bool known, uint32_
  * past it. OK; ERR_DEVICE_NOT_READY, the walk stopped, when the medium left or
  * the volume takes no write a Tally could go on with.
  */
-static error_t EngrossWalk(EngrossWalkState* w, uint32_t tails, uint32_t looks, bool known)
+static error_t EngrossWalk(TagFSVolume* vol, EngrossWalkState* w, uint32_t tails, uint32_t looks, bool known)
 {
-    TagFSState* fs = tagfs_get_state();
+    TagFSState* fs = &vol->state;
     uint64_t    ids[ENGROSS_BATCH];
     while (tails > 0 && looks > 0 && w->from != UINT64_MAX) {
         /* The files with Slips alone, where the map keeps every one of
@@ -257,7 +221,7 @@ static error_t EngrossWalk(EngrossWalkState* w, uint32_t tails, uint32_t looks, 
         for (uint32_t i = 0; i < n && tails > 0; i++) {
             w->from = ids[i] + 1u;
             looks--;
-            error_t rc = BinderNoWrite() ? ERR_DEVICE_NOT_READY : EngrossOne(w, ids[i], known, &tails);
+            error_t rc = BinderNoWrite(vol) ? ERR_DEVICE_NOT_READY : EngrossOne(vol, w, ids[i], known, &tails);
             if (rc != OK)
                 return rc;
         }
@@ -277,26 +241,26 @@ static bool EngrossWalkTried(const EngrossWalkState* w)
 
 /* The tails a walk that tried every tail left refused for their own sake:
  * the word Escheat is asked on (EngrossRefusedNow), from either walk. */
-static void EngrossWalkOwned(const EngrossWalkState* w)
+static void EngrossWalkOwned(TagFSVolume* vol, const EngrossWalkState* w)
 {
-    __atomic_store_n(&s_owned, w->own, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->engross.owned, w->own, __ATOMIC_RELEASE);
 }
 
 /* Whether a Tally still waits for the tails. */
-static bool EngrossStillOwed(void)
+static bool EngrossStillOwed(TagFSVolume* vol)
 {
-    return BinderEngrossOwed() && LooseLeaves() > 0;
+    return BinderEngrossOwed(vol) && LooseLeaves(vol) > 0;
 }
 
 /* What a walk of the service left, said when it differs from the last said:
  * the Tally waits for each of those tails. */
-static void EngrossWalkSaid(const EngrossWalkState* w)
+static void EngrossWalkSaid(TagFSVolume* vol, const EngrossWalkState* w)
 {
-    if (w->refused == s_said.refused && w->first_fid == s_said.first_fid && w->first == s_said.first)
+    if (w->refused == vol->engross.said.refused && w->first_fid == vol->engross.said.first_fid && w->first == vol->engross.said.first)
         return;
-    s_said.refused   = w->refused;
-    s_said.first_fid = w->first_fid;
-    s_said.first     = w->first;
+    vol->engross.said.refused   = w->refused;
+    vol->engross.said.first_fid = w->first_fid;
+    vol->engross.said.first     = w->first;
     if (w->refused == 0)
         return;
     kprintf("[TagFS] %u file(s) keep their tail in Slips that would not be laid in a block — file %llu's first "
@@ -306,7 +270,7 @@ static void EngrossWalkSaid(const EngrossWalkState* w)
 
 /*
  * A turn of the service inside the volume's door: whether it is listed again.
- * A walk answers every ask made before it began (s_pass); a turn gives its
+ * A walk answers every ask made before it began (engross.pass); a turn gives its
  * core back after ENGROSS_TURN tails or ENGROSS_LOOK files, and is listed
  * again while the walk has files left and a Tally still waits — and once a
  * walk ended, again only for an ask made since it began. A Helm it found held
@@ -314,73 +278,73 @@ static void EngrossWalkSaid(const EngrossWalkState* w)
  * again at its DONE (BinderWeigh): the walk never waits on a look it took
  * once.
  */
-static bool EngrossTurnInside(void)
+static bool EngrossTurnInside(TagFSVolume* vol)
 {
-    if (!EngrossStillOwed() || EngrossWalk(&s_walk, ENGROSS_TURN, ENGROSS_LOOK, true) != OK)
+    if (!EngrossStillOwed(vol) || EngrossWalk(vol, &vol->engross.walk, ENGROSS_TURN, ENGROSS_LOOK, true) != OK)
         return false;
-    if (s_walk.from != UINT64_MAX)
-        return EngrossStillOwed();
-    if (EngrossWalkTried(&s_walk)) {
-        EscheatTailsWalked(s_walk.act);
-        EngrossWalkOwned(&s_walk);
+    if (vol->engross.walk.from != UINT64_MAX)
+        return EngrossStillOwed(vol);
+    if (EngrossWalkTried(&vol->engross.walk)) {
+        EscheatTailsWalked(vol, vol->engross.walk.act);
+        EngrossWalkOwned(vol, &vol->engross.walk);
     }
-    EngrossWalkSaid(&s_walk);
-    s_walk.from = 0;
-    return EngrossStillOwed() && __atomic_load_n(&s_asked, __ATOMIC_ACQUIRE) != s_pass;
+    EngrossWalkSaid(vol, &vol->engross.walk);
+    vol->engross.walk.from = 0;
+    return EngrossStillOwed(vol) && __atomic_load_n(&vol->engross.asked, __ATOMIC_ACQUIRE) != vol->engross.pass;
 }
 
 static void EngrossTurn(HelmWaiter* w)
 {
+    TagFSVolume* vol = container_of(w, TagFSVolume, engross.service);
     bool more = false;
-    (void)w;
-    if (s_walk.from == 0) {
-        s_walk = (EngrossWalkState){ .from = 0, .first = OK, .act = EscheatTailsActing() };
-        s_walk.reach = EscheatTailsReach();
-        s_pass       = __atomic_load_n(&s_asked, __ATOMIC_ACQUIRE);
+    if (vol->engross.walk.from == 0) {
+        vol->engross.walk = (EngrossWalkState){ .from = 0, .first = OK, .act = EscheatTailsActing(vol) };
+        vol->engross.walk.reach = EscheatTailsReach(vol);
+        vol->engross.pass       = __atomic_load_n(&vol->engross.asked, __ATOMIC_ACQUIRE);
     }
-    if (tagfs_enter()) {
-        more = EngrossTurnInside();
-        tagfs_leave();
+    if (tagfs_enter(vol)) {
+        more = EngrossTurnInside(vol);
+        tagfs_leave(vol);
     }
     if (more) {
-        HelmReady(&s_service);
+        HelmReady(vol, &vol->engross.service);
         return;
     }
-    uint64_t answered = s_pass;
-    s_walk.from = 0;
-    __atomic_store_n(&s_listed, 0u, __ATOMIC_RELEASE);
+    uint64_t answered = vol->engross.pass;
+    vol->engross.walk.from = 0;
+    __atomic_store_n(&vol->engross.listed, 0u, __ATOMIC_RELEASE);
     /* The second look: an ask made while this listing ended found it listed
      * and listed nothing (EngrossAsked); the walk it begins answers it. */
-    if (__atomic_load_n(&s_asked, __ATOMIC_ACQUIRE) != answered)
-        EngrossListed();
+    if (__atomic_load_n(&vol->engross.asked, __ATOMIC_ACQUIRE) != answered)
+        EngrossListed(vol);
 }
 
-static void EngrossListed(void)
+static void EngrossListed(TagFSVolume* vol)
 {
-    if (__atomic_exchange_n(&s_listed, 1u, __ATOMIC_ACQ_REL) == 0)
-        HelmReady(&s_service);
+    if (__atomic_exchange_n(&vol->engross.listed, 1u, __ATOMIC_ACQ_REL) == 0)
+        HelmReady(vol, &vol->engross.service);
 }
 
-void EngrossAsked(void)
+void EngrossAsked(TagFSVolume* vol)
 {
-    __atomic_add_fetch(&s_asked, 1u, __ATOMIC_ACQ_REL);
-    EngrossListed();
+    __atomic_add_fetch(&vol->engross.asked, 1u, __ATOMIC_ACQ_REL);
+    EngrossListed(vol);
 }
 
-error_t EngrossWhole(void)
+error_t EngrossWhole(TagFSVolume* vol)
 {
-    EngrossWalkState w  = { .from = 0, .first = OK, .act = EscheatTailsActing() };
+    EngrossWalkState w  = { .from = 0, .first = OK, .act = EscheatTailsActing(vol) };
     error_t          rc = OK;
-    w.reach = EscheatTailsReach();
+    w.reach = EscheatTailsReach(vol);
     while (rc == OK && w.from != UINT64_MAX)
-        rc = EngrossWalk(&w, UINT32_MAX, UINT32_MAX, false);
+        rc = EngrossWalk(vol, &w, UINT32_MAX, UINT32_MAX, false);
     if (rc == OK && EngrossWalkTried(&w)) {
         /* The tails it left refused are the ones Escheat may cut
          * (EngrossRefusedNow): the caller waits on the Tally those tails hold
          * back and may ask the act next, before the service — listed, not yet
          * run — walked at all. */
-        EscheatTailsWalked(w.act);
-        EngrossWalkOwned(&w);
+        EscheatTailsWalked(vol, w.act);
+        EngrossWalkOwned(vol, &w);
     }
     if (rc != OK || w.left == 0)
         return rc;
@@ -394,22 +358,22 @@ error_t EngrossWhole(void)
 }
 
 #ifdef CONFIG_VOLUME_TESTS
-error_t EngrossRoled(uint64_t fid, uint32_t role, InkReceipt* out)
+error_t EngrossRoled(TagFSVolume* vol, uint64_t fid, uint32_t role, InkReceipt* out)
 {
     error_t          rc   = OK;
-    TagFSFileHandle* h    = EngrossOpen(fid, &rc);
+    TagFSFileHandle* h    = EngrossOpen(vol, fid, &rc);
     HelmWaiter       here;
     bool             laid = false;
     if (!h)
         return rc;
-    rc = HelmTakeNow(h, &here);
+    rc = HelmTakeNow(vol, h, &here);
     if (rc == OK) {
-        rc = HelmEngross(h, &laid);     /* ERR_WOULD_BLOCK the caller's to wait out, as a tag's own Ink's */
+        rc = HelmEngross(vol, h, &laid);     /* ERR_WOULD_BLOCK the caller's to wait out, as a tag's own Ink's */
         if (rc == OK)
-            rc = InkRoleLaid(fid, role, out);
-        HelmLetGo(h->ofe, &here);
+            rc = InkRoleLaid(vol, fid, role, out);
+        HelmLetGo(vol, h->ofe, &here);
     }
-    tagfs_close(h);
+    tagfs_close(vol, h);
     return rc;
 }
 #endif
@@ -426,3 +390,9 @@ bool EngrossCarriedBy(uint64_t target)
     return gen != 0 && gen <= target;
 }
 #endif
+
+/* The volume's engross part as it begins: what was not nothing. */
+void EngrossVolumeBegin(TagFSVolume* vol)
+{
+    vol->engross.service = (HelmWaiter){ .run = EngrossTurn };
+}

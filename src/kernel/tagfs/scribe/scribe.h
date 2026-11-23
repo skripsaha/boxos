@@ -4,6 +4,8 @@
 #include "../../../lib/kernel/ktypes.h"
 #include "../../core/error/error.h"
 
+typedef struct TagFSVolume TagFSVolume;   /* volume/tagfs_volume.h */
+
 /*
  * Scribe — who writes a structure of the volume, and what is already durable.
  *
@@ -49,18 +51,18 @@
 // ============================================================================
 
 /* Taken by tagfs_flush_cache immediately before it asks the medium. */
-uint64_t VolumeFlushBegin(void);
+uint64_t VolumeFlushBegin(TagFSVolume* vol);
 
 /* The medium's answer to the flush carrying `ticket`. Only a flush the medium
  * kept moves the mark. */
-void     VolumeFlushEnd(uint64_t ticket, bool kept);
+void     VolumeFlushEnd(TagFSVolume* vol, uint64_t ticket, bool kept);
 
 /* Read AFTER a write's completion was observed: the smallest ticket whose
  * kept flush proves that write is on the medium. */
-uint64_t VolumeFlushNeed(void);
+uint64_t VolumeFlushNeed(TagFSVolume* vol);
 
 /* Has a flush carrying a ticket >= need been kept? */
-bool     VolumeFlushKept(uint64_t need);
+bool     VolumeFlushKept(TagFSVolume* vol, uint64_t need);
 
 /*
  * Make `need` durable: OK at once, with no word to the medium, when a kept
@@ -75,7 +77,7 @@ bool     VolumeFlushKept(uint64_t need);
  * the first to give the port back, so the answer that comes out of the medium
  * is always about the medium.
  */
-error_t  VolumeFlushFor(uint64_t need);
+error_t  VolumeFlushFor(TagFSVolume* vol, uint64_t need);
 
 /*
  * VolumeWriteSeen: after the completion of a write of the volume, on either
@@ -83,7 +85,7 @@ error_t  VolumeFlushFor(uint64_t need);
  * machine's drain sees by it that a step of a Settle cycle or a window of a
  * write still takes the medium's answers (system_halt.c).
  */
-void     VolumeWriteSeen(void);
+void     VolumeWriteSeen(TagFSVolume* vol);
 uint64_t VolumeWritesAnswered(void);
 
 // ============================================================================
@@ -193,5 +195,12 @@ bool       ScribeAnyHeldHere(void);
  * continuations when it stands on the drain core. */
 ScribeTurn ScribeWaitFor(const volatile uint32_t *holder, bool (*settled)(const void *ctx),
                          const void *ctx);
+
+/* What one volume holds of scribe.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    volatile uint64_t flush_asked;  /* tickets handed to flushes about to be issued */
+    volatile uint64_t flush_kept;  /* the highest ticket a kept flush carried */
+    volatile uint64_t writes_seen;  /* every write seen, this boot */
+} ScribeState;
 
 #endif /* TAGFS_SCRIBE_H */

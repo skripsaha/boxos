@@ -311,13 +311,13 @@ static bool TractStillHolds(TractHeld* h, const char* after)
 /* One splice applied to the record — its ground freed asked for — and by hand
  * to the list; the record before it let go, so every node and Parcel of the
  * new one is held by it alone. False when either refused. */
-static bool TractSpliced(TractHeld* h, uint64_t at, uint64_t remove, uint64_t ninsert)
+static bool TractSpliced(TagFSVolume* vol, TractHeld* h, uint64_t at, uint64_t remove, uint64_t ninsert)
 {
     BookSplice  sp   = { .at = at, .remove = remove, .ninsert = ninsert, .insert = h->put };
     FileRecord* next = NULL;
     kfree(h->freed);
     h->freed = NULL;
-    if (FileRecordSplice(h->rec, &sp, 1, 0, 0, &next, &h->freed, &h->nfreed) != OK)
+    if (FileRecordSplice(vol, h->rec, &sp, 1, 0, 0, &next, &h->freed, &h->nfreed) != OK)
         return false;
     FileRecordRelease(h->rec);
     h->rec = next;
@@ -359,7 +359,7 @@ static bool TractGrown(const Tract* root)
 /* The file grown by TRACT_TEST_BATCH Strips at a time at its end until its
  * Tract is grown (TractGrown), walked whole every TRACT_TEST_EVERY appends and
  * at the end. */
-static TestResult TractGrowTall(TractHeld* h)
+static TestResult TractGrowTall(TagFSVolume* vol, TractHeld* h)
 {
     TestResult verdict = TEST_PASS;
     uint64_t   k       = 0;
@@ -369,7 +369,7 @@ static TestResult TractGrowTall(TractHeld* h)
     for (n = 0; n < TRACT_TEST_APPENDS; n++) {
         for (uint32_t i = 0; i < TRACT_TEST_BATCH; i++)
             h->put[i] = TractTestStrip(k++);
-        TEST_ASSERT(TractSpliced(h, h->rec->blocks, 0, TRACT_TEST_BATCH), "an append is taken");
+        TEST_ASSERT(TractSpliced(vol, h, h->rec->blocks, 0, TRACT_TEST_BATCH), "an append is taken");
         if (n % TRACT_TEST_EVERY == 0)
             TEST_ASSERT(TractStillHolds(h, "an append"), "the growing Tract keeps its rules");
         if (TractGrown(h->rec->tract))
@@ -390,7 +390,7 @@ out:
  * kids. Then the root's last kid emptied but for its first leaf: one leaf is
  * fewer than a parent beside another names, so it is joined into the kid
  * before, and the root, left one kid, gives way to it. */
-static TestResult TractCutAcrossParents(TractHeld* h)
+static TestResult TractCutAcrossParents(TagFSVolume* vol, TractHeld* h)
 {
     TestResult   verdict = TEST_PASS;
     const Tract* root    = h->rec->tract;
@@ -399,7 +399,7 @@ static TestResult TractCutAcrossParents(TractHeld* h)
     uint64_t     start   = root->kid[root->count - 2u].end;
 
     TEST_ASSERT(leaf->count >= 2u, "the leaf names more than one Parcel");
-    TEST_ASSERT(TractSpliced(h, start, leaf->kid[leaf->count - 2u].end, 0),
+    TEST_ASSERT(TractSpliced(vol, h, start, leaf->kid[leaf->count - 2u].end, 0),
                 "every Parcel of the leaf but its last is taken out");
     TEST_ASSERT(TractStillHolds(h, "a leaf joined across parents"), "the Tract keeps its rules");
     root = h->rec->tract;
@@ -408,7 +408,7 @@ static TestResult TractCutAcrossParents(TractHeld* h)
 
     last  = root->kid[1].node;
     start = root->kid[0].end + last->kid[0].end;
-    TEST_ASSERT(TractSpliced(h, start, TractBlocks(last) - last->kid[0].end, 0),
+    TEST_ASSERT(TractSpliced(vol, h, start, TractBlocks(last) - last->kid[0].end, 0),
                 "every leaf of the root's last kid but its first is taken out");
     TEST_ASSERT(TractStillHolds(h, "a parent joined into the one before"), "the Tract keeps its rules");
     TEST_ASSERT_EQ(h->rec->tract->level, TRACT_TEST_TALL - 1u, "and the root gave way to its one kid");
@@ -419,12 +419,12 @@ out:
 /* TRACT_TEST_INSERT fresh Strips put inside one leaf — more Parcels than a
  * node names — then splices at random: small and large, taking out and
  * putting in, each walked whole after it. */
-static TestResult TractCutAtRandom(TractHeld* h)
+static TestResult TractCutAtRandom(TagFSVolume* vol, TractHeld* h)
 {
     TestResult verdict = TEST_PASS;
     for (uint32_t i = 0; i < TRACT_TEST_INSERT; i++)
         h->put[i] = TractFreshStrip(h);
-    TEST_ASSERT(TractSpliced(h, h->rec->blocks / 3u, 0, TRACT_TEST_INSERT),
+    TEST_ASSERT(TractSpliced(vol, h, h->rec->blocks / 3u, 0, TRACT_TEST_INSERT),
                 "more than a leaf's worth of Parcels put into one leaf");
     TEST_ASSERT(TractStillHolds(h, "the leaf divided"), "the Tract keeps its rules");
 
@@ -438,7 +438,7 @@ static TestResult TractCutAtRandom(TractHeld* h)
             remove = h->rec->blocks - at;
         for (uint64_t i = 0; i < put; i++)
             h->put[i] = TractFreshStrip(h);
-        TEST_ASSERT(TractSpliced(h, at, remove, put), "a splice at random is taken");
+        TEST_ASSERT(TractSpliced(vol, h, at, remove, put), "a splice at random is taken");
         TEST_ASSERT(TractStillHolds(h, "a splice at random"), "the Tract keeps its rules");
     }
 out:
@@ -447,15 +447,15 @@ out:
 
 /* The file cut back to its first five Strips — the root gives way level by
  * level down to the one leaf — and then to nothing: no Tract at all. */
-static TestResult TractCutAway(TractHeld* h)
+static TestResult TractCutAway(TagFSVolume* vol, TractHeld* h)
 {
     TestResult verdict = TEST_PASS;
     uint64_t   keep    = TractBlocksOf(h->ref.strip, 5u);
-    TEST_ASSERT(TractSpliced(h, keep, h->rec->blocks - keep, 0), "the file is cut to five Strips");
+    TEST_ASSERT(TractSpliced(vol, h, keep, h->rec->blocks - keep, 0), "the file is cut to five Strips");
     TEST_ASSERT(TractStillHolds(h, "the cut to five Strips"), "the Tract keeps its rules");
     TEST_ASSERT(h->rec->tract->level == 0 && h->rec->tract->count == 1u && h->rec->strip_count == 5u,
                 "one leaf naming one Parcel of five Strips is all there is");
-    TEST_ASSERT(TractSpliced(h, 0, h->rec->blocks, 0), "and cut to nothing");
+    TEST_ASSERT(TractSpliced(vol, h, 0, h->rec->blocks, 0), "and cut to nothing");
     TEST_ASSERT(TractStillHolds(h, "the cut to nothing"), "a record of no Strips");
     TEST_ASSERT(h->rec->tract == NULL, "names no Tract");
 out:
@@ -464,14 +464,15 @@ out:
 
 static TestResult TestTractTall(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict = TEST_PASS;
     TractHeld  h;
 
     TEST_ASSERT(TractTake(&h), "a record of no Strips, and room for what goes into it");
-    if ((verdict = TractGrowTall(&h)) == TEST_PASS &&
-        (verdict = TractCutAcrossParents(&h)) == TEST_PASS &&
-        (verdict = TractCutAtRandom(&h)) == TEST_PASS)
-        verdict = TractCutAway(&h);
+    if ((verdict = TractGrowTall(vol, &h)) == TEST_PASS &&
+        (verdict = TractCutAcrossParents(vol, &h)) == TEST_PASS &&
+        (verdict = TractCutAtRandom(vol, &h)) == TEST_PASS)
+        verdict = TractCutAway(vol, &h);
 out:
     TractLetGoAll(&h);
     return verdict;

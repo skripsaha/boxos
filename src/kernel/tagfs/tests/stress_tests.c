@@ -1,6 +1,7 @@
 #include "tests.h"
 #include "../tagfs.h"
 #include "../file_map/file_map.h"
+#include "tagfs_volume.h"
 
 // ============================================================================
 // Stress — many files, one large file
@@ -24,6 +25,7 @@ static uint64_t s_stress_ids[STRESS_FILE_COUNT];
  * read back as a pass. */
 static TestResult test_stress_many_files(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict    = TEST_PASS;
     uint32_t   tag_ids[2] = {1, 2};
     char       name[32];
@@ -32,19 +34,19 @@ static TestResult test_stress_many_files(void)
 
     for (uint32_t i = 0; i < STRESS_FILE_COUNT; i++) {
         ksnprintf(name, sizeof(name), "stress_file_%u", i);
-        TEST_ASSERT_EQ(tagfs_create_file(name, tag_ids, 2, 0, &s_stress_ids[i]), 0,
+        TEST_ASSERT_EQ(tagfs_create_file(vol, name, tag_ids, 2, 0, &s_stress_ids[i]), 0,
                        "tagfs_create_file should succeed");
     }
 
     for (uint32_t i = 0; i < STRESS_FILE_COUNT; i++) {
         TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, i + 1, 0);
-        TEST_ASSERT_EQ(TestFileWrite(s_stress_ids[i], g_test_buffer, TAGFS_BLOCK_SIZE),
+        TEST_ASSERT_EQ(TestFileWrite(vol, s_stress_ids[i], g_test_buffer, TAGFS_BLOCK_SIZE),
                        TAGFS_BLOCK_SIZE, "every file takes its block");
     }
 
     for (uint32_t i = 0; i < STRESS_FILE_COUNT; i++) {
         TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, i + 1, 0);
-        TEST_ASSERT_EQ(TestFileRead(s_stress_ids[i], g_test_output, 2 * TAGFS_BLOCK_SIZE),
+        TEST_ASSERT_EQ(TestFileRead(vol, s_stress_ids[i], g_test_output, 2 * TAGFS_BLOCK_SIZE),
                        TAGFS_BLOCK_SIZE, "every file reads back one block, and no more");
         uint32_t diff = TestFirstDifference(g_test_output, g_test_buffer, TAGFS_BLOCK_SIZE);
         TEST_ASSERT_EQ((uint64_t)i * TAGFS_BLOCK_SIZE + diff, (uint64_t)(i + 1) * TAGFS_BLOCK_SIZE,
@@ -54,7 +56,7 @@ static TestResult test_stress_many_files(void)
 out:
     for (uint32_t i = 0; i < STRESS_FILE_COUNT; i++)
         if (s_stress_ids[i])
-            tagfs_delete_file(s_stress_ids[i], INK_UNWARRANTED);
+            tagfs_delete_file(vol, s_stress_ids[i], INK_UNWARRANTED);
     return verdict;
 }
 
@@ -64,26 +66,27 @@ out:
  * check only the first. */
 static TestResult test_stress_large_file(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult       verdict    = TEST_PASS;
     uint64_t         file_id    = 0;
     uint32_t         tag_ids[1] = {1};
     TagFSFileHandle* handle     = NULL;
     FileRecord*      rec        = NULL;
 
-    TEST_ASSERT_EQ(tagfs_create_file("large_file", tag_ids, 1, 0, &file_id), 0,
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "large_file", tag_ids, 1, 0, &file_id), 0,
                    "tagfs_create_file should succeed");
 
-    handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
+    handle = tagfs_open(vol, file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
     TEST_ASSERT(handle != NULL, "tagfs_open should succeed");
     for (uint32_t at = 0; at < STRESS_LARGE_BYTES; at += TAGFS_BLOCK_SIZE) {
         TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x1A, at);
-        TEST_ASSERT_EQ(TestHandleWrite(handle, g_test_buffer, TAGFS_BLOCK_SIZE),
+        TEST_ASSERT_EQ(TestHandleWrite(vol, handle, g_test_buffer, TAGFS_BLOCK_SIZE),
                        TAGFS_BLOCK_SIZE, "every block of the file is written");
     }
-    tagfs_close(handle);
+    tagfs_close(vol, handle);
     handle = NULL;
 
-    rec = FileMapRecordHold(tagfs_get_state()->files, file_id, NULL);
+    rec = FileMapRecordHold(vol->state.files, file_id, NULL);
     TEST_ASSERT(rec != NULL, "the file's record is held");
     TEST_ASSERT_EQ(rec->size, STRESS_LARGE_BYTES, "the file is as long as what was written");
     TEST_ASSERT_EQ(rec->blocks, STRESS_LARGE_BYTES / TAGFS_BLOCK_SIZE,
@@ -91,24 +94,24 @@ static TestResult test_stress_large_file(void)
     FileRecordRelease(rec);
     rec = NULL;
 
-    handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
+    handle = tagfs_open(vol, file_id, TAGFS_HANDLE_READ);
     TEST_ASSERT(handle != NULL, "tagfs_open for read should succeed");
     for (uint32_t at = 0; at < STRESS_LARGE_BYTES; at += TAGFS_BLOCK_SIZE) {
         TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x1A, at);
-        TEST_ASSERT_EQ(TestHandleRead(handle, g_test_output, TAGFS_BLOCK_SIZE),
+        TEST_ASSERT_EQ(TestHandleRead(vol, handle, g_test_output, TAGFS_BLOCK_SIZE),
                        TAGFS_BLOCK_SIZE, "every block reads");
         uint32_t diff = TestFirstDifference(g_test_output, g_test_buffer, TAGFS_BLOCK_SIZE);
         TEST_ASSERT_EQ(at + diff, at + TAGFS_BLOCK_SIZE,
                        "every block holds its own bytes (first differing byte of the file)");
     }
-    TEST_ASSERT_EQ(TestHandleRead(handle, g_test_output, TAGFS_BLOCK_SIZE), 0,
+    TEST_ASSERT_EQ(TestHandleRead(vol, handle, g_test_output, TAGFS_BLOCK_SIZE), 0,
                    "and the file ends where the writing ended");
 out:
     FileRecordRelease(rec);
     if (handle)
-        tagfs_close(handle);
+        tagfs_close(vol, handle);
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     return verdict;
 }
 

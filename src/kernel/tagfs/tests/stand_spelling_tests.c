@@ -141,6 +141,7 @@ out:
  * value to the tag's full width are one tag, a byte more of either is not. */
 static TestResult TestStandLongKeyRefusedBeforeAllocation(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult   verdict = TEST_PASS;
     uint8_t      me      = amp_get_core_index();
     TagRegistry* scratch = NULL;
@@ -153,7 +154,7 @@ static TestResult TestStandLongKeyRefusedBeforeAllocation(void)
     TagSpelling spelled;
     TEST_ASSERT_EQ(TagSpell(s_long, STAND_LONG_BYTES, &spelled), ERR_TAGFS_TAG_TOO_LONG,
                    "the spelling refuses a 256-byte key");
-    TEST_ASSERT_EQ(tagfs_tag_intern(s_long, &id), ERR_TAGFS_TAG_TOO_LONG,
+    TEST_ASSERT_EQ(tagfs_tag_intern(vol, s_long, &id), ERR_TAGFS_TAG_TOO_LONG,
                    "and so does the volume's door");
 
     scratch = kmalloc(sizeof(TagRegistry));
@@ -241,13 +242,13 @@ out:
 
 /* A fresh "stand_aside:<k>" numbered past 63, its text left in `text`. A tag
  * is interned for good, so a stand volume carries a few more of them. */
-static bool StandHighTag(char* text, size_t text_size, uint32_t* out_id)
+static bool StandHighTag(TagFSVolume* vol, char* text, size_t text_size, uint32_t* out_id)
 {
     for (uint32_t k = 0; k < 2u * (TAGFS_MAX_TAG_ID + 1u); k++) {
         ksnprintf(text, text_size, "stand_aside:%u", k);
-        if (tagfs_tag_lookup(text) != TAGFS_INVALID_TAG_ID)
+        if (tagfs_tag_lookup(vol, text) != TAGFS_INVALID_TAG_ID)
             continue;
-        if (tagfs_tag_intern(text, out_id) != OK)
+        if (tagfs_tag_intern(vol, text, out_id) != OK)
             return false;
         if (*out_id >= 64)
             return true;
@@ -259,12 +260,12 @@ static bool StandInfoHasWhole(uint64_t file_id, const char* text);
 
 /* Whether a question of `count` spellings, `aside_count` of them set aside,
  * lists `file_id`: its page from that id on begins with it. */
-static bool StandListed(const TagSpelling* tags, uint32_t count, const TagSpelling* aside,
+static bool StandListed(TagFSVolume* vol, const TagSpelling* tags, uint32_t count, const TagSpelling* aside,
                         uint32_t aside_count, uint64_t file_id)
 {
     TagFSPage page;
     uint64_t  first = 0;
-    return TagFSQueryPage(TagOwnerPerson(), tags, count, aside, aside_count, file_id, &first, 1, false, &page) == OK &&
+    return TagFSQueryPage(vol, TagOwnerPerson(), tags, count, aside, aside_count, file_id, &first, 1, false, &page) == OK &&
            page.delivered == 1 && first == file_id;
 }
 
@@ -278,18 +279,19 @@ static bool StandListed(const TagSpelling* tags, uint32_t count, const TagSpelli
  * the tag said whole in what storage.getinfo answers. */
 static TestResult TestStandAsidePastTag63(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict  = TEST_PASS;
     uint64_t   files[3] = { 0, 0, 0 };
     uint32_t   high     = TAGFS_INVALID_TAG_ID;
     static const char* const names[3] = { "stand_aside_w", "stand_aside_n", "stand_aside_t" };
 
-    TEST_ASSERT(StandHighTag(s_aside_text, sizeof(s_aside_text), &high), "a tag numbered past 63");
+    TEST_ASSERT(StandHighTag(vol, s_aside_text, sizeof(s_aside_text), &high), "a tag numbered past 63");
     for (uint32_t i = 0; i < 3; i++)
-        TEST_ASSERT(StandMakeTaggedFile(names[i], names[i], NULL, 0, &files[i]),
+        TEST_ASSERT(StandMakeTaggedFile(vol, names[i], names[i], NULL, 0, &files[i]),
                     "a file of the test's own, wearing its name's key as a tag");
     const TagSpelling trashed = TagSpellingOfKey("trashed");
-    TEST_ASSERT_EQ(tagfs_add_tag(files[0], high), 0, "the first wears the tag");
-    TEST_ASSERT_OK(tagfs_add_tag_string(TagOwnerPerson(), files[2], &trashed), "the third wears trashed");
+    TEST_ASSERT_EQ(tagfs_add_tag(vol, files[0], high), 0, "the first wears the tag");
+    TEST_ASSERT_OK(tagfs_add_tag_string(vol, TagOwnerPerson(), files[2], &trashed), "the third wears trashed");
 
     TagSpelling named[3], aside;
     for (uint32_t i = 0; i < 3; i++)
@@ -297,11 +299,11 @@ static TestResult TestStandAsidePastTag63(void)
     TEST_ASSERT_OK(TagSpell(s_aside_text, strlen(s_aside_text), &aside), "the tag spells");
 
     uint32_t wrong = 0;
-    wrong += !StandListed(&named[0], 1, NULL, 0, files[0]);     /* nothing set aside: listed */
-    wrong += StandListed(&named[0], 1, &aside, 1, files[0]);    /* its tag set aside: left out */
-    wrong += StandListed(NULL, 0, &aside, 1, files[0]);         /* left out of every file too */
-    wrong += !StandListed(&named[1], 1, &aside, 1, files[1]);   /* one not wearing it: listed */
-    wrong += !StandListed(&named[2], 1, NULL, 0, files[2]);     /* trashed, set aside by no one */
+    wrong += !StandListed(vol, &named[0], 1, NULL, 0, files[0]);     /* nothing set aside: listed */
+    wrong += StandListed(vol, &named[0], 1, &aside, 1, files[0]);    /* its tag set aside: left out */
+    wrong += StandListed(vol, NULL, 0, &aside, 1, files[0]);         /* left out of every file too */
+    wrong += !StandListed(vol, &named[1], 1, &aside, 1, files[1]);   /* one not wearing it: listed */
+    wrong += !StandListed(vol, &named[2], 1, NULL, 0, files[2]);     /* trashed, set aside by no one */
     wrong += !StandInfoHasWhole(files[2], "trashed");
     TestEvidence("questions answered against the tags they set aside, or a trashed file left out "
                  "unasked", wrong);
@@ -310,7 +312,7 @@ static TestResult TestStandAsidePastTag63(void)
 out:
     for (uint32_t i = 0; i < 3; i++)
         if (files[i])
-            tagfs_delete_file(files[i], INK_UNWARRANTED);
+            tagfs_delete_file(vol, files[i], INK_UNWARRANTED);
     return verdict;
 }
 
@@ -324,11 +326,12 @@ out:
  * to refuse: stand_name_tests.c.) */
 static TestResult TestStandCreateRefusesWhatItCannotTag(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
     VolumeTally before, after;
     uint64_t    said    = 0;
 
-    TEST_ASSERT(VolumeTallyTake(&before), "the volume's files are counted");
+    TEST_ASSERT(VolumeTallyTake(vol, &before), "the volume's files are counted");
 
     uint8_t params[34] = { 0 };
     memcpy(params, "stand_spell_c", 13);
@@ -341,10 +344,10 @@ static TestResult TestStandCreateRefusesWhatItCannotTag(void)
     int deck = StandStorageOp(STORAGE_OBJ_CREATE, params, sizeof(params), s_text, len,
                               &created, sizeof(created), &said);
 
-    TEST_ASSERT(VolumeTallyTake(&after), "and counted again");
+    TEST_ASSERT(VolumeTallyTake(vol, &after), "and counted again");
     TestEvidence("files made with a tag they could not wear", after.files - before.files);
     if (deck == OK) {
-        if (said == sizeof(created)) tagfs_delete_file(created, INK_UNWARRANTED);
+        if (said == sizeof(created)) tagfs_delete_file(vol, created, INK_UNWARRANTED);
         verdict = TEST_DEFECT;
         goto out;
     }
@@ -395,19 +398,20 @@ static bool StandInfoHasWhole(uint64_t file_id, const char* text)
  * 300-byte value whole in its info, and unset takes exactly the tag off. */
 static TestResult TestStandTagSetWearsWhatItWasGiven(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict = TEST_PASS;
     uint64_t   file_id = 0;
     uint64_t   said    = 0;
     TagSpelling spelled;
 
-    TEST_ASSERT(StandMakeFile("stand_spell_s", NULL, 0, &file_id), "a file of the test's own");
+    TEST_ASSERT(StandMakeFile(vol, "stand_spell_s", NULL, 0, &file_id), "a file of the test's own");
     size_t   len  = StandTagText("stand_spell", 's', STAND_SET_VALUE);
     uint8_t  fid[9];           /* a program's file_id_t, and whose */
     memcpy(fid, &file_id, 8);
     fid[8] = STORAGE_TAGS_PERSON;
     int      set  = StandStorageOp(STORAGE_TAG_SET, fid, sizeof(fid), s_text, len, NULL, 0, &said);
-    uint32_t want = tagfs_tag_lookup(s_text);
-    bool     worn = want != TAGFS_INVALID_TAG_ID && tagfs_has_tag(file_id, want);
+    uint32_t want = tagfs_tag_lookup(vol, s_text);
+    bool     worn = want != TAGFS_INVALID_TAG_ID && tagfs_has_tag(vol, file_id, want);
     TestEvidence("tag adds of a 100-byte value that put some other tag on the file", set == OK && !worn);
     if (set == OK && !worn) {
         verdict = TEST_DEFECT;
@@ -419,16 +423,16 @@ static TestResult TestStandTagSetWearsWhatItWasGiven(void)
 
     TEST_ASSERT_OK(StandStorageOp(STORAGE_TAG_UNSET, fid, sizeof(fid), s_text, len, NULL, 0, &said),
                    "unset of the same text is taken");
-    TEST_ASSERT(!tagfs_has_tag(file_id, want), "and takes exactly that tag off");
+    TEST_ASSERT(!tagfs_has_tag(vol, file_id, want), "and takes exactly that tag off");
 
     len = StandTagText("stand_info", 'i', STAND_VALUE_BYTES);
     TEST_ASSERT_OK(TagSpell(s_text, len, &spelled), "a tag with a 300-byte value spells");
-    TEST_ASSERT_OK(tagfs_add_tag_string(TagOwnerPerson(), file_id, &spelled),
+    TEST_ASSERT_OK(tagfs_add_tag_string(vol, TagOwnerPerson(), file_id, &spelled),
                    "and is put on the file");
     TEST_ASSERT(StandInfoHasWhole(file_id, s_text), "and its info carries all 300 bytes of it");
 out:
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     return verdict;
 }
 

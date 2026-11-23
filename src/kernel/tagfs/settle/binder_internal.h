@@ -33,15 +33,15 @@
  * ERR_TAGFS_CORRUPTED. */
 bool        BinderKeyLess(uint64_t tree, TallyKey a, TallyKey b);
 bool        BinderKeptCovers(const BinderKept* r, TallyKey k);
-error_t     BinderLeafItemNext(BinderWork* w, BinderItem* it, bool* got);
-error_t     BinderInnerItemNext(BinderWork* w, BinderItem* it, bool* got);
+error_t     BinderLeafItemNext(TagFSVolume* vol, BinderWork* w, BinderItem* it, bool* got);
+error_t     BinderInnerItemNext(TagFSVolume* vol, BinderWork* w, BinderItem* it, bool* got);
 
 /* binder_items.c: the next DIGESTS element of ground `g` (`n` runs, in order)
  * from where `at` stands, its body in `buf` (BINDER_DIGEST_ITEM_BYTES) —
  * *got false at its end; OK, or a refusal of a DIGESTS leaf the Tally stood
  * on. */
 #define BINDER_DIGEST_ITEM_BYTES  (10u + 8u * (uint32_t)DIGEST_ITEM_MOST)
-error_t     BinderDigestsElement(BinderWork* w, const BinderGround* g, uint64_t n, BinderDigestAt* at, uint8_t* buf,
+error_t     BinderDigestsElement(TagFSVolume* vol, BinderWork* w, const BinderGround* g, uint64_t n, BinderDigestAt* at, uint8_t* buf,
                                  BinderItem* it, bool* got);
 
 /* A run of file ids [from, to) the slice takes: UINT64_MAX `to` for none. */
@@ -130,9 +130,9 @@ typedef struct {
  * ERR_NO_MEMORY; everything it holds let go; the ground DIGESTS speaks for,
  * every live file's and what the mount holds, in order of first block, the
  * runs that meet joined — OK or ERR_NO_MEMORY. */
-error_t     BinderSliceTake(BinderWork* w, const BinderFids* fids, uint32_t n);
+error_t     BinderSliceTake(TagFSVolume* vol, BinderWork* w, const BinderFids* fids, uint32_t n);
 void        BinderSliceLetGo(BinderWork* w);
-error_t     BinderGroundTake(BinderWork* w);
+error_t     BinderGroundTake(TagFSVolume* vol, BinderWork* w);
 
 /* binder_slice.c: runs of ground in order of their first block — a heap sort,
  * in place — those that meet or overlap joined: how many are left. */
@@ -148,13 +148,13 @@ uint64_t    BinderGroundJoined(BinderGround* g, uint64_t n);
  * `n`) whose lower key is not below `key` — `n` for none — and the one whose
  * range holds `key`, the last whose lower key is not past it; everything
  * let go. OK or ERR_NO_MEMORY, nothing held. */
-error_t     BinderSiftTree(BinderSift* s, uint64_t tree);
-error_t     BinderSiftAgain(BinderSift* s);
-void        BinderSiftCount(const BinderSift* s, uint32_t grid, TipInCount* c);
-uint32_t    BinderSiftLeaves(uint64_t tree);
-bool        BinderSiftLeafAt(uint64_t tree, uint32_t i, TallyPlace* p, bool* rotten);
-uint32_t    BinderSiftLeafFrom(uint64_t tree, uint32_t from, uint32_t n, TallyKey key);
-uint32_t    BinderSiftLeafOf(uint64_t tree, uint32_t n, TallyKey key);
+error_t     BinderSiftTree(TagFSVolume* vol, BinderSift* s, uint64_t tree);
+error_t     BinderSiftAgain(TagFSVolume* vol, BinderSift* s);
+void        BinderSiftCount(TagFSVolume* vol, const BinderSift* s, uint32_t grid, TipInCount* c);
+uint32_t    BinderSiftLeaves(TagFSVolume* vol, uint64_t tree);
+bool        BinderSiftLeafAt(TagFSVolume* vol, uint64_t tree, uint32_t i, TallyPlace* p, bool* rotten);
+uint32_t    BinderSiftLeafFrom(TagFSVolume* vol, uint64_t tree, uint32_t from, uint32_t n, TallyKey key);
+uint32_t    BinderSiftLeafOf(TagFSVolume* vol, uint64_t tree, uint32_t n, TallyKey key);
 void        BinderSiftLetGo(BinderSift* s);
 
 /* binder_digests.c: DIGESTS laid in — a leaf it lays or offers read, a turn
@@ -168,18 +168,18 @@ void        BinderSiftLetGo(BinderSift* s);
  * Tally before's under the nodes it names as they lie; the leaves under them
  * counted into the reserve's measure. OK, ERR_NO_MEMORY, or the medium's
  * refusal. */
-error_t     BinderDigestsReadNext(BinderRun* r, bool* done);
-error_t     BinderDigestsSifted(BinderRun* r);
-error_t     BinderDigestsHeld(BinderWork* w, const BinderItem* it, bool end);
-error_t     BinderDigestsTipTurn(const BinderWork* w);
-void        BinderDigestsKeptLaid(BinderWork* w);
+error_t     BinderDigestsReadNext(TagFSVolume* vol, BinderRun* r, bool* done);
+error_t     BinderDigestsSifted(TagFSVolume* vol, BinderRun* r);
+error_t     BinderDigestsHeld(TagFSVolume* vol, BinderWork* w, const BinderItem* it, bool end);
+error_t     BinderDigestsTipTurn(TagFSVolume* vol, const BinderWork* w);
+void        BinderDigestsKeptLaid(TagFSVolume* vol, BinderWork* w);
 void        BinderDigestsLetGo(BinderRun* r);
 
 /* binder_cost.c: the blocks of one copy of the leaves the keys DogEar holds
  * meet — each at what is left live in it — and of their path: what a Tally
  * laid in now would lay again; UINT64_MAX when what it would be laid against,
  * or what changed, is lost. */
-uint64_t    BinderTipInBlocks(void);
+uint64_t    BinderTipInBlocks(TagFSVolume* vol);
 
 /* binder_kept.c: the file ids a leaf of FILES holds keys of, [*from, *to):
  * from its lower key's — the tree's first leaf from none — to its upper
@@ -192,7 +192,7 @@ void        BinderLeafFids(const TallyPlace* p, bool first, uint64_t* from, uint
  * range open below — keeps a key of the state now (§16.6 п.6), weighed by the
  * ground the Tally under way took (`taken`) or by what moved since the last
  * slice. By the Settle's holder or the mount, no TagFS lock held. */
-bool        BinderLeafLives(uint64_t tree, const TallyPlace* p, bool first, bool taken);
+bool        BinderLeafLives(TagFSVolume* vol, uint64_t tree, const TallyPlace* p, bool first, bool taken);
 
 /* binder_kept.c: TipIn at the slice — the Tally laid in when Foliation knows
  * the Tally before and DogEar what changed since, each tree of FILES, TAGS and
@@ -209,16 +209,16 @@ bool        BinderLeafLives(uint64_t tree, const TallyPlace* p, bool first, bool
  * `level` or above stands; the tree's root, when it is named whole as it
  * lies. BinderKeptLaid: what the walk names as it lies counted into the
  * reserve's measure (w->laid), as the leaves it lays are. */
-error_t           BinderTipInTake(BinderRun* r);
-error_t           BinderSiftTaken(BinderRun* r, const BinderSift* s);
+error_t           BinderTipInTake(TagFSVolume* vol, BinderRun* r);
+error_t           BinderSiftTaken(TagFSVolume* vol, BinderRun* r, const BinderSift* s);
 
 /* binder_quires.c: the Tally-Quires the new slot holds for the nodes of the
  * Tally before its Tally names as they lie — made at TAKE. */
-error_t           BinderKeptQuires(BinderRun* r);
+error_t           BinderKeptQuires(TagFSVolume* vol, BinderRun* r);
 void              BinderKeptTreeBegin(BinderWork* w);
 void              BinderKeptLevelBegin(BinderWork* w);
 BinderKept*       BinderKeptAt(BinderWork* w, TallyKey key);
-void              BinderKeptLaid(BinderWork* w);
+void              BinderKeptLaid(TagFSVolume* vol, BinderWork* w);
 const BinderKept* BinderKeptBars(BinderWork* w, TallyKey key);
 bool              BinderKeptAbove(const BinderWork* w, uint64_t level);
 const BinderKept* BinderKeptRoot(const BinderWork* w);
@@ -230,9 +230,9 @@ const BinderKept* BinderKeptRoot(const BinderWork* w);
  * either Tally. */
 error_t     BinderKeptPut(BinderRun* r, const BinderKept* k);
 error_t     BinderRotOfDigests(void* ctx, const TallyPlace* at);
-error_t     BinderRotsTaken(BinderRun* r);
-error_t     BinderFreshGround(BinderRun* r);
-error_t     BinderTallyDone(BinderRun* r);
+error_t     BinderRotsTaken(TagFSVolume* vol, BinderRun* r);
+error_t     BinderFreshGround(TagFSVolume* vol, BinderRun* r);
+error_t     BinderTallyDone(TagFSVolume* vol, BinderRun* r);
 
 /* ‼ GLEAN_SLACK IS A POLICY, NOT A DERIVATION. How many times the blocks of
  * the live nodes the Tally-Quires may come to before Glean has the emptiest
@@ -250,17 +250,17 @@ error_t     BinderTallyDone(BinderRun* r);
  * Tally laid in laid, read at its DONE, a copy that does not hold putting its
  * leaf's keys into DogEar (§16.5 п.18); where the sweep stands and the Quire
  * Glean chose last, let go with the mount. The Settle's holder's, with no TagFS lock held. */
-void        BinderGleanAt(const BinderRun* r);
-void        BinderGleanDedup(const BinderRun* r);
-void        BinderGleanLetGo(void);
-void        BinderProofAt(const BinderRun* r);
-void        BinderProofLetGo(void);
+void        BinderGleanAt(TagFSVolume* vol, const BinderRun* r);
+void        BinderGleanDedup(TagFSVolume* vol, const BinderRun* r);
+void        BinderGleanLetGo(TagFSVolume* vol);
+void        BinderProofAt(TagFSVolume* vol, const BinderRun* r);
+void        BinderProofLetGo(TagFSVolume* vol);
 
 /* binder.c: the nodes of the Tally `r` laid in the pair of Tally-Quires the
  * Tallies go on in — its DONE, or its slot held as naming either Tally: the
  * next lays past them. */
-void        BinderPairUsed(const BinderRun* r);
-void        BinderSlotUnsure(BinderRun* r);
+void        BinderPairUsed(TagFSVolume* vol, const BinderRun* r);
+void        BinderSlotUnsure(TagFSVolume* vol, BinderRun* r);
 
 /* The Binder's self-check is built where a DEFECT is looked for: a STRICT
  * kernel, and the stand's. */
@@ -280,14 +280,100 @@ void        BinderSlotUnsure(BinderRun* r);
  * — and whether the walk stands so; the elements held to the Tally before by
  * the last check; its own let go. OK, or ERR_TAGFS_CORRUPTED for an element
  * changed outside DogEar: a DEFECT, said — a STRICT kernel stops there. */
-void     BinderCheckBegin(void);
-void     BinderCheckTurn(void);
-error_t  BinderCheckItem(const BinderWork* w, const BinderItem* it);
-bool     BinderCheckOwed(void);
-error_t  BinderCheckTreeEnd(const BinderWork* w, bool* more);
-bool     BinderCheckDraining(void);
-uint64_t BinderCheckHeld(void);
-void     BinderCheckLetGo(void);
+void     BinderCheckBegin(TagFSVolume* vol);
+void     BinderCheckTurn(TagFSVolume* vol);
+error_t  BinderCheckItem(TagFSVolume* vol, const BinderWork* w, const BinderItem* it);
+bool     BinderCheckOwed(TagFSVolume* vol);
+error_t  BinderCheckTreeEnd(TagFSVolume* vol, const BinderWork* w, bool* more);
+bool     BinderCheckDraining(TagFSVolume* vol);
+uint64_t BinderCheckHeld(TagFSVolume* vol);
+void     BinderCheckLetGo(TagFSVolume* vol);
 #endif
+
+/* Where the sweep goes on: the tree, and the least lower key of the next leaf
+ * it reads there — the tree's first leaf when it has none. */
+typedef struct {
+    uint32_t tree;
+    bool     has_from;
+    TallyKey from;
+    bool     begun;
+} ProofSweep;
+
+/* What one volume holds of binder_proof.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    ProofSweep proof;
+} BinderProofState;
+
+typedef struct BirthChunk BirthChunk;
+
+/* What one volume holds of births.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    BirthChunk** chunk;  /* in the order of their first runs */
+    uint32_t chunks;
+    uint32_t room;
+    BirthChunk* spent;  /* emptied under the state lock, not yet given the heap */
+} BirthsState;
+
+#if BINDER_CHECKS
+typedef struct {
+    TallyKey key;
+    uint32_t at;          /* its body in the leaf's bytes */
+    uint32_t len;
+} CheckOld;
+
+typedef struct {
+    bool       on;
+    bool       draining;    /* the tree's leaves are spent, the Tally before's still being read */
+    uint64_t   tree;
+    uint32_t   leaf;        /* the next leaf of the Tally before */
+    bool       loaded;      /* a leaf of it in hand */
+    bool       ended;       /* none left of the tree */
+    bool       rotten;      /* the leaf in hand reads in no copy */
+    TallyPlace at;
+    uint8_t*   bytes;       /* its elements' bodies, one after another */
+    uint32_t   len, cap;
+    CheckOld*  old;
+    uint32_t   n, capn, next;
+    uint8_t*   spell;       /* a Parcel of it spelled again */
+    uint32_t   spell_room;
+    uint64_t   held;        /* elements held to the Tally before */
+    bool       turn_read;   /* a leaf of it read this turn of the Settle's holder */
+    bool       owed;        /* the element in hand waits for the next turn's leaf */
+} BinderCheck;
+
+/* What one volume holds of binder_check.c (TagFSVolume, volume/tagfs_volume.h): its self-check. */
+#endif
+
+/* What one volume holds of binder_glean.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    /* The Quire the last Glean chose: chosen again, its nodes did not all leave it
+     * with the Tally it demanded — they are marked again, and no Tally more is
+     * demanded for it: the next one TALLY_SLACK owes takes them, so a Quire that
+     * will not empty never turns the Tallies over and over. The Settle's
+     * holder's. */
+    uint64_t glean_last;
+} BinderGleanState;
+
+typedef struct {
+    uint64_t fid;
+    uint64_t start;
+    uint64_t count;
+    uint64_t seq;
+} SharedBirth;
+
+/* What one volume holds of births_shared.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    SharedBirth* birth;
+    uint64_t n;
+    uint64_t cap;
+} BirthsSharedState;
+
+/* What one volume holds of binder.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    BinderRun run;
+    volatile uint8_t under_way;  /* binding.run.active, for the cores that are not the holder */
+} BinderState;
+
+void BinderGleanVolumeBegin(TagFSVolume* vol);
 
 #endif /* TAGFS_SETTLE_BINDER_INTERNAL_H */

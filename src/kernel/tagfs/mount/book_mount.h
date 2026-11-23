@@ -46,7 +46,7 @@
  * to its far Deed, and the verdicts the ground gives before a sector of the
  * book is read — a FRAME longer than this kernel's, a ground off the medium's
  * physical blocks (§1.2, §1.5): under glass. OK. */
-error_t MountBookGround(uint8_t seat, const DeedCopy* head, uint64_t ground_sectors);
+error_t MountBookGround(TagFSVolume* vol, uint8_t seat, const DeedCopy* head, uint64_t ground_sectors);
 
 /*
  * The volume takes the ground behind it: after its
@@ -59,20 +59,20 @@ error_t MountBookGround(uint8_t seat, const DeedCopy* head, uint64_t ground_sect
  * ended at the new far Deed. Said either way; nothing written unless all of
  * it can be (book_grow.c).
  */
-void    MountBookGrow(uint8_t seat);
+void    MountBookGrow(TagFSVolume* vol, uint8_t seat);
 
 /* The book read into memory (above). OK, or the refusal with *what saying it
  * in the words the mount's refusal line carries (tagfs.c, mount_refused):
  * none of the Spine's slots holds, none names a Tally that reads, something
  * is sewn past the Tally, or there is no memory. */
-error_t MountReadBook(const char** what);
+error_t MountReadBook(TagFSVolume* vol, const char** what);
 
 /* What the book promises its files, said once in plain words after the door —
  * under glass, that nothing of it is written. Then the volume MOUNTED. */
-void    MountBookPromise(void);
+void    MountBookPromise(TagFSVolume* vol);
 
 /* Everything the book's mount keeps, let go — the volume let go of. */
-void    MountBookLetGo(void);
+void    MountBookLetGo(TagFSVolume* vol);
 
 /*
  * Whether file `file_id` is one the mounted book holds and cannot read — its
@@ -87,13 +87,13 @@ void    MountBookLetGo(void);
  * TagFSFileLocked takes the door for its caller; BookFileLocked is for one
  * already inside it — tagfs_open, the mount.
  */
-bool    TagFSFileLocked(uint64_t file_id);
-bool    BookFileLocked(uint64_t file_id);
+bool    TagFSFileLocked(TagFSVolume* vol, uint64_t file_id);
+bool    BookFileLocked(TagFSVolume* vol, uint64_t file_id);
 
 /* Whether any file stands locked — one by name that Escheat did not let go,
  * or a rotten range of FILES: a card the volume cannot read, which may keep
  * anything. Inside the door, as BookFileLocked. */
-bool    BookAnyLocked(void);
+bool    BookAnyLocked(TagFSVolume* vol);
 
 /* What the mount of the book said, in numbers. */
 typedef struct {
@@ -116,11 +116,11 @@ typedef struct {
 } MountBookSaid;
 
 #ifdef CONFIG_VOLUME_TESTS
-void     MountBookStandSaid(MountBookSaid* out);
+void     MountBookStandSaid(TagFSVolume* vol, MountBookSaid* out);
 /* The print of the live files memory holds now, taken as the mount takes it
- * (BookFilesLaid) and claiming no ground: g_book's print is the last mount's,
+ * (BookFilesLaid) and claiming no ground: vol->book's print is the last mount's,
  * and a stitch since does not move it (book_ground.c). */
-uint32_t BookFilesStandPrint(void);
+uint32_t BookFilesStandPrint(TagFSVolume* vol);
 #endif
 
 // ----------------------------------------------------------------------------
@@ -267,19 +267,19 @@ extern BookMount g_book;
 
 /* The leaves of `tree` of the Tally stood on into memory (tally_leaves.c): OK,
  * or ERR_NO_MEMORY. */
-error_t TallyLeaves(uint64_t tree, const SpineRoot* root);
+error_t TallyLeaves(TagFSVolume* vol, uint64_t tree, const SpineRoot* root);
 
 /* The last file the FILES walk gathered, laid into memory or locked. */
-error_t BookFileClose(void);
+error_t BookFileClose(TagFSVolume* vol);
 /* The gathering's memory let go — its name, tags, Strips, cut and Parcels —
  * and the gathering emptied: by the walk at each file it closes, and by the
  * mount's let-go of a walk a refusal stopped mid-file (MountBookLetGo). */
 void    BookFileForget(BookFile* f);
 
-/* A rotten FILES range kept among the mount's (g_book.rot) and noted for
+/* A rotten FILES range kept among the mount's (vol->book.rot) and noted for
  * Facsimile to weigh once the walk is done (tally_leaves.c). OK or
  * ERR_NO_MEMORY. */
-error_t BookRangeRots(const TallyPlace* at, const char* why);
+error_t BookRangeRots(TagFSVolume* vol, const TallyPlace* at, const char* why);
 
 /* What Facsimile decides of a noted range (mount/facsimile.c):
  *   BookRangeRotsLaid  a FILES range no older slot stands in for — the
@@ -287,7 +287,7 @@ error_t BookRangeRots(const TallyPlace* at, const char* why);
  *   BookTagsRotLaid    the same of a range of another tree whose leaves hold
  *                      no file: said
  *   BookRangeTaken     a FILES range an older slot gives back, out of
- *                      g_book.rot — no open or record of it is locked by it;
+ *                      vol->book.rot — no open or record of it is locked by it;
  *                      BookRangeBack puts it back, the take undone
  *   BookAsideSettled   each file a rotten range reached, set aside as the
  *                      walk closed it: let go where `taken` says its fid is
@@ -299,20 +299,20 @@ error_t BookRangeRots(const TallyPlace* at, const char* why);
  *   BookFacsimileUnfit whether a file the take gathered did not stand, *why
  *                      the first — the slot does not stand in for the range
  *   BookFacsimileUndone  every file of fids [lo, hi) the take laid in let go */
-error_t BookRangeRotsLaid(const TallyPlace* at, const char* why);
-error_t BookTagsRotLaid(uint64_t tree, const TallyPlace* at, const char* why);
-void    BookRangeTaken(const TallyPlace* at);
-void    BookRangeBack(const TallyPlace* at);
-error_t BookAsideSettled(bool (*taken)(uint64_t fid));
-void    BookAsideLetGo(void);
-error_t BookFacsimileItem(uint64_t tree, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq);
-error_t BookFacsimileClose(void);
-bool    BookFacsimileUnfit(char* why, size_t room);
-void    BookFacsimileUndone(uint64_t lo, uint64_t hi);
+error_t BookRangeRotsLaid(TagFSVolume* vol, const TallyPlace* at, const char* why);
+error_t BookTagsRotLaid(TagFSVolume* vol, uint64_t tree, const TallyPlace* at, const char* why);
+void    BookRangeTaken(TagFSVolume* vol, const TallyPlace* at);
+void    BookRangeBack(TagFSVolume* vol, const TallyPlace* at);
+error_t BookAsideSettled(TagFSVolume* vol, bool (*taken)(uint64_t fid));
+void    BookAsideLetGo(TagFSVolume* vol);
+error_t BookFacsimileItem(TagFSVolume* vol, uint64_t tree, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq);
+error_t BookFacsimileClose(TagFSVolume* vol);
+bool    BookFacsimileUnfit(TagFSVolume* vol, char* why, size_t room);
+void    BookFacsimileUndone(TagFSVolume* vol, uint64_t lo, uint64_t hi);
 
 /* Whether every authoritative root slot `s` names reads (book_mount.c): OK,
  * ERR_TAGFS_CORRUPTED with why, or the medium's or memory's refusal. */
-error_t BookSlotReads(const SpineSlot* s, char* why, size_t room);
+error_t BookSlotReads(TagFSVolume* vol, const SpineSlot* s, char* why, size_t room);
 
 /* The census of the book (book_ground.c): every owner's claim the walk did not
  * make as it went, what rotted held, two owners of one block said, and the
@@ -320,7 +320,7 @@ error_t BookSlotReads(const SpineSlot* s, char* why, size_t room);
  * where a Tally names a bookmark, whose ground it does not see. OK, or
  * the refusal — memory's, the map's, or the medium's for a Tally it must see
  * — with what the mount's line says in *what. */
-error_t BookGroundCensus(const char** what);
+error_t BookGroundCensus(TagFSVolume* vol, const char** what);
 
 /* Every node of the Tally the mount stands on a walk reaches, every copy its
  * pointer names, claimed for the census as that slot names it, and noted in
@@ -333,39 +333,64 @@ void    BookGroundMended(void* ctx, uint64_t tree, const TallyPlace* at, uint32_
 
 /* A run of ground a locked file is known to name: what of it lies in the data
  * run held unless another owns it, all of it counted in the census's reach. */
-void    BookGroundHoldRun(uint64_t start, uint64_t count);
+void    BookGroundHoldRun(TagFSVolume* vol, uint64_t start, uint64_t count);
 
 /* Every live file's ground claimed for the census and the tags it wears
  * counted into the numbers given next — after the ribbon is replayed, the
  * map of live files is what the volume holds (book_ground.c). */
-void    BookFilesLaid(void);
+void    BookFilesLaid(TagFSVolume* vol);
 
 /* What of tag `tid` this kernel cannot carry on, said (§16.1 п.2, §6.4): true
  * when the registry can hold it (tally_leaves.c). */
-bool    BookTagHeld(uint64_t tid, const TallyTag* t);
+bool    BookTagHeld(TagFSVolume* vol, uint64_t tid, const TallyTag* t);
 
 /* A tag the registry cannot hold, set aside — its text copied, one it replaces
  * let go — and the tag set aside as `tid`, or NULL (tally_leaves.c). OK or
  * ERR_NO_MEMORY. */
-error_t         BookTagAsideNoted(uint64_t tid, const TallyTag* t);
-const TallyTag* BookTagAsideOf(uint64_t tid);
+error_t         BookTagAsideNoted(TagFSVolume* vol, uint64_t tid, const TallyTag* t);
+const TallyTag* BookTagAsideOf(TagFSVolume* vol, uint64_t tid);
 
 /* The Use Context recalled into memory (UseMemoryRecall), its print kept for
  * the line the mount gives of what memory holds (book_mount.c). */
-error_t BookUseRecalled(const uint8_t* text, uint64_t len);
+error_t BookUseRecalled(TagFSVolume* vol, const uint8_t* text, uint64_t len);
 
 /* Whether `fid` lies in a rotten range of FILES — its header lost with the
  * range — and no stitch gave birth to it anew (§4.5 п.3 (б)); and a fid a
  * stitch gave birth to, kept when such a range holds it — no other is asked
  * after (OK or ERR_NO_MEMORY). */
-bool    BookRotLocks(uint64_t fid);
-error_t BookBornNoted(uint64_t fid);
+bool    BookRotLocks(TagFSVolume* vol, uint64_t fid);
+error_t BookBornNoted(TagFSVolume* vol, uint64_t fid);
 
 /* A file of the map locked by the replay of the ribbon: said with `why`, out
  * of the map and its tags, its id never given again, its DATA ground held —
  * and the volume under glass: a Tally names no file it cannot name as it lay,
  * and a book no Tally is written of cannot go on (UnderGlass; volume-read's
  * bookmount.py says the same). OK or ERR_NO_MEMORY. */
-error_t BookFileLockLive(uint64_t fid, const char* why);
+error_t BookFileLockLive(TagFSVolume* vol, uint64_t fid, const char* why);
+
+/* What one volume holds of tally_leaves.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    /*
+     * ‼ A FILE A ROTTEN RANGE REACHES IS LOCKED ONLY ONCE NO OLDER SLOT STANDS IN
+     * FOR THE RANGE. What of it read — its header before the range, its Parcels
+     * past it — is set aside whole as the walk closes it; Facsimile (facsimile.c)
+     * weighs every range once the walk is done, and then each file set aside is
+     * either taken with a range an older slot gives back — the older slot's file,
+     * replayed, stands in its place — or locked as it always was (BookFileLock):
+     * the lock, its holds and what a Tally carries of it as it lay.
+     */
+    BookFile* aside;
+    uint32_t naside;
+    uint32_t capaside;
+    /* Why the older slot does not stand in for the range taken: a file of it
+     * that does not stand there either — the first said. */
+    char unfit[192];
+} TallyLeavesState;
+
+/* What one volume holds of book_mount.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    /* The refusal the mount's line carries, made here when it names numbers. */
+    char refusal[320];
+} BookMountState;
 
 #endif /* TAGFS_MOUNT_BOOK_MOUNT_H */

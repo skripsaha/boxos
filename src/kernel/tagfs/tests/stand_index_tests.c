@@ -4,6 +4,7 @@
 #include "../file_map/file_map.h"
 #include "op_registry.h"
 #include "boxos_decks.h"
+#include "tagfs_volume.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -122,15 +123,16 @@ static bool StandIndexPage(TagBitmapIndex* idx, const uint32_t* tags, uint32_t c
 
 /* `fid` out from under `tag` the way an Ink takes it out: under the volume's
  * state lock, which the index changes shape under alone. */
-static void StandIndexLeave(TagBitmapIndex* idx, uint32_t tag, uint64_t fid)
+static void StandIndexLeave(TagFSVolume* vol, TagBitmapIndex* idx, uint32_t tag, uint64_t fid)
 {
-    TagFSLockTake(&tagfs_get_state()->lock);
+    TagFSLockTake(&vol->state.lock);
     TagBitmapLeave(idx, tag, fid);
-    TagFSLockDrop(&tagfs_get_state()->lock);
+    TagFSLockDrop(&vol->state.lock);
 }
 
 static TestResult TestStandIndexWindowEdge(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult      verdict = TEST_PASS;
     TagBitmapIndex* idx     = tag_bitmap_create();
     uint32_t        tag     = 3;
@@ -167,17 +169,17 @@ static TestResult TestStandIndexWindowEdge(void)
     TEST_ASSERT(TagBitmapHas(idx, tag, 65536 + 2 * 4096) && !TagBitmapHas(idx, tag, 65539),
                 "the bitmap holds the members and only them");
     for (uint32_t i = 1; i <= 4096; i++)
-        StandIndexLeave(idx, tag, 65536 + 2 * i);
+        StandIndexLeave(vol, idx, tag, 65536 + 2 * i);
     TEST_ASSERT(TagBitmapBytes(idx) >= 8192, "the leaves allocated nothing: still a bitmap");
     TEST_ASSERT(!TagBitmapHas(idx, tag, 65536 + 2 * 4096), "but the members left it");
-    TagBitmapShrink(idx, &tagfs_get_state()->lock, &tag, 1, 65536 + 2 * 4096);
+    TagBitmapShrink(idx, &vol->state.lock, &tag, 1, 65536 + 2 * 4096);
     TEST_ASSERT(TagBitmapBytes(idx) < 8192, "the window is an array again after the last leave");
     TEST_ASSERT(StandIndexPage(idx, &tag, 1, 1, 8, &page), "a page of everything");
     TEST_ASSERT_EQ(page.delivered, ARRAY_SIZE(s_edge), "the six members are back to six");
     for (uint32_t i = 0; i < ARRAY_SIZE(s_edge); i++)
         TEST_ASSERT_EQ(s_page[i], s_edge[i], "each where it was, in order");
 
-    StandIndexLeave(idx, tag, 65536);
+    StandIndexLeave(vol, idx, tag, 65536);
     TEST_ASSERT(TagBitmapHas(idx, tag, 65535) && !TagBitmapHas(idx, tag, 65536) &&
                 TagBitmapHas(idx, tag, 65537), "and nothing on either side of it moved");
 out:
@@ -309,13 +311,13 @@ static int StandIndexDeckQuery(const char* text, uint32_t room, uint64_t* out_si
 }
 
 /* Every page of the question, walked: each id the next of ours, in order. */
-static bool StandIndexWalkQuery(const char* name, uint32_t made, uint32_t* out_seen)
+static bool StandIndexWalkQuery(TagFSVolume* vol, const char* name, uint32_t made, uint32_t* out_seen)
 {
     TagFSPage page;
     uint64_t  from = 1;
     uint32_t  seen = 0;
     do {
-        if (TagFSNamedPage(TagOwnerPerson(), name, strlen(name), NULL, 0, NULL, 0, from, s_page, STAND_INDEX_PAGE,
+        if (TagFSNamedPage(vol, TagOwnerPerson(), name, strlen(name), NULL, 0, NULL, 0, from, s_page, STAND_INDEX_PAGE,
                            seen == 0, &page) != OK)
             return false;
         if (seen == 0 && page.total != made)
@@ -332,14 +334,14 @@ static bool StandIndexWalkQuery(const char* name, uint32_t made, uint32_t* out_s
 }
 
 /* Every page of the list, walked: all of ours among the volume's, in order. */
-static bool StandIndexWalkList(uint32_t made, uint32_t* out_found)
+static bool StandIndexWalkList(TagFSVolume* vol, uint32_t made, uint32_t* out_found)
 {
     TagFSPage page;
     uint64_t  from  = 1;
     uint32_t  found = 0;
     uint64_t  last  = 0;
     do {
-        if (TagFSListPage(from, s_page, STAND_INDEX_PAGE, false, &page) != OK)
+        if (TagFSListPage(vol, from, s_page, STAND_INDEX_PAGE, false, &page) != OK)
             return false;
         for (uint32_t k = 0; k < page.delivered; k++) {
             if (s_page[k] <= last)
@@ -356,6 +358,7 @@ static bool StandIndexWalkList(uint32_t made, uint32_t* out_found)
 
 static TestResult TestStandIndexCursorPast1024(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
     uint32_t    made    = 0;
     uint32_t    seen    = 0;
@@ -364,14 +367,14 @@ static TestResult TestStandIndexCursorPast1024(void)
     const char* name    = "stand_index_many";
 
     for (; made < STAND_INDEX_MANY; made++)
-        TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, 0, &s_made[made]), 0,
+        TEST_ASSERT_EQ(tagfs_create_file(vol, name, NULL, 0, 0, &s_made[made]), 0,
                        "a file of the name is made");
 
-    TEST_ASSERT(StandIndexWalkQuery(name, made, &seen),
+    TEST_ASSERT(StandIndexWalkQuery(vol, name, made, &seen),
                 "the question's pages give every file of the name once, in id order, and "
                 "its first page counts them all");
     TEST_ASSERT_EQ(seen, STAND_INDEX_MANY, "all 1100 of them, past the 1024 a query once held");
-    TEST_ASSERT(StandIndexWalkList(made, &seen), "the list's pages rise through the volume");
+    TEST_ASSERT(StandIndexWalkList(vol, made, &seen), "the list's pages rise through the volume");
     TEST_ASSERT_EQ(seen, STAND_INDEX_MANY, "and carry every one of the 1100");
 
     TEST_ASSERT_OK(StandIndexDeckQuery(name, 16, &said), "storage.name.query with room for 16");
@@ -387,7 +390,7 @@ static TestResult TestStandIndexCursorPast1024(void)
         TEST_ASSERT_EQ(s_crate[1 + k], s_made[k], "each in id order, across the pieces it is written in");
 out:
     for (uint32_t k = 0; k < made; k++)
-        tagfs_delete_file(s_made[k], INK_UNWARRANTED);
+        tagfs_delete_file(vol, s_made[k], INK_UNWARRANTED);
     return verdict;
 }
 
@@ -426,17 +429,18 @@ static const char* StandGroupTag(uint32_t k, uint32_t v)
  * a tag is interned for good. */
 static TestResult TestStandRegistryKeyIdsAreCopies(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    TagFSState* fs      = tagfs_get_state();
+    TagFSState* fs      = &vol->state;
     TagIdList   copy    = { 0 };
     TagIdList   again   = { 0 };
     bool        ours    = true;
     uint32_t    k       = 0;
 
-    while (tagfs_tag_lookup(StandGroupTag(k, 0)) != TAGFS_INVALID_TAG_ID)
+    while (tagfs_tag_lookup(vol, StandGroupTag(k, 0)) != TAGFS_INVALID_TAG_ID)
         k++;
     for (uint32_t v = 0; v < STAND_GROUP_FIRST; v++)
-        TEST_ASSERT_OK(tagfs_tag_intern(StandGroupTag(k, v), &s_group_ids[v]),
+        TEST_ASSERT_OK(tagfs_tag_intern(vol, StandGroupTag(k, v), &s_group_ids[v]),
                        "a tag of a key no tag had is interned");
     TEST_ASSERT_OK(TagRegistryKeyIds(fs->registry, TagOwnerPerson(), s_group_key, strlen(s_group_key), &copy),
                    "the key's ids are asked for");
@@ -464,7 +468,7 @@ static TestResult TestStandRegistryKeyIdsAreCopies(void)
     kfree(again.ids);
     again.ids = NULL;
     for (uint32_t v = STAND_GROUP_FIRST; v < 2 * STAND_GROUP_FIRST; v++)
-        TEST_ASSERT_OK(tagfs_tag_intern(StandGroupTag(k, v), &s_group_ids[v]),
+        TEST_ASSERT_OK(tagfs_tag_intern(vol, StandGroupTag(k, v), &s_group_ids[v]),
                        "the key grows by nine more");
     TEST_ASSERT(copy.count == STAND_GROUP_FIRST &&
                 memcmp(copy.ids, s_group_ids, sizeof(uint32_t) * STAND_GROUP_FIRST) == 0,

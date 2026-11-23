@@ -48,27 +48,36 @@
  * a record that keeps a passport, the file holding a signed program now. A
  * passport's: no record keeps it, and no card stands unread that might
  * (BookAnyLocked). Inside the door. */
-bool RetireProgramGone(uint64_t owner);
+bool RetireProgramGone(TagFSVolume* vol, uint64_t owner);
 
 /* Something was given up: the next service point looks. From any context. */
-void RetireOwed(void);
+void RetireOwed(TagFSVolume* vol);
 
 /* Every program's tag whose program is gone retired, as far as the volume
  * takes it now: *retired how many tags were laid retired. OK, or the first
  * refusal that stopped the look — the ribbon's room (ERR_WOULD_BLOCK), the
  * volume's, ERR_NO_MEMORY — or ERR_BUSY when a file put a tag on meanwhile.
  * Inside the door; the call takes it itself. */
-error_t RetireSweepNow(uint32_t* retired);
+error_t RetireSweepNow(TagFSVolume* vol, uint32_t* retired);
 
 /* The service: a sweep when something is owed — and at most one at a time —
  * once a cycle settled after a refusal, and every RETIRE_LOOK_US besides. */
-void RetireServe(void);
+void RetireServe(TagFSVolume* vol);
 
 /* The stand's hold on the service: no look is begun while held, and one under
  * way is waited out. Returns whether it was held. */
-bool RetireHold(bool held);
+bool RetireHold(TagFSVolume* vol, bool held);
 
 /* A mount's start: the next look is the first thing the volume does. */
-void RetireMountReset(void);
+void RetireMountReset(TagFSVolume* vol);
+
+/* What one volume holds of retire.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    volatile uint32_t busy;
+    volatile uint32_t held;
+    volatile uint32_t owed;
+    volatile uint64_t next_us;
+    volatile uint64_t blocked_at;  /* the cycles settled when a look met a refusal */
+} RetireState;
 
 #endif /* TAGFS_RETIRE_H */

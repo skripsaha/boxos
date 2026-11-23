@@ -2,15 +2,12 @@
 #include "away.h"
 #include "crypto.h"
 #include "cpuid.h"
+#include "tagfs_volume.h"
 
 /*
  * Sectors of the book read and judged (book_unit.h).
  */
 
-/* Whether the crc32 instruction has been held to the book's table this boot,
- * and whether a want of memory to hold it was said. */
-static volatile uint32_t s_sums_judged;
-static volatile uint32_t s_sums_short;
 
 /*
  * ‼ THE INSTRUCTION IS HELD TO THE TABLE BEFORE IT JUDGES A BOOK. KCrc32c sums
@@ -27,16 +24,16 @@ static volatile uint32_t s_sums_short;
  * every core — the one way it moves (cpuid.c, cpu_intersect_features_ap) —
  * so every sum from then on is the table's.
  */
-static void BookSumsJudged(void)
+static void BookSumsJudged(TagFSVolume* vol)
 {
     static const uint8_t check[9] = { '1', '2', '3', '4', '5', '6', '7', '8', '9' };
 
-    if (__atomic_exchange_n(&s_sums_judged, 1u, __ATOMIC_ACQ_REL) || !g_cpu_caps.has_sse42)
+    if (__atomic_exchange_n(&vol->book_unit.sums_judged, 1u, __ATOMIC_ACQ_REL) || !g_cpu_caps.has_sse42)
         return;
     uint8_t* text = kmalloc(BOOK_SECTOR_BYTES);
     if (!text) {
-        __atomic_store_n(&s_sums_judged, 0u, __ATOMIC_RELEASE);
-        if (!__atomic_exchange_n(&s_sums_short, 1u, __ATOMIC_ACQ_REL))
+        __atomic_store_n(&vol->book_unit.sums_judged, 0u, __ATOMIC_RELEASE);
+        if (!__atomic_exchange_n(&vol->book_unit.sums_short, 1u, __ATOMIC_ACQ_REL))
             kprintf("[TagFS] the crc32 instruction is not yet held to the book's table: there is no "
                     "memory for a sector of its bytes — it is asked again before the next unit is "
                     "judged\n");
@@ -70,49 +67,40 @@ static uint8_t BookSectorJudged(const uint8_t* s, const uint8_t uuid[16], uint64
     return sum == h.crc32c ? BOOK_SECTOR_HOLDS : BOOK_SECTOR_LOOSE;
 }
 
-/* The largest seq a sector of the book read held at: the next seq is past
- * everything the mount saw hold, the torn tail and the direct scan among it —
- * every reader of a book reads through here, so nothing read is left out. The
- * mount reads it with its door shut; but the DIGESTS leaves a read of a block
- * opens after the mount (TallyDigestFind) read through here too, on any core
- * at once — so it only ever rises, by an atomic max, and no fold is lost to
- * another. */
-static uint64_t s_seq_seen;
-
-static void BookSeqFold(const BookUnit* u)
+static void BookSeqFold(TagFSVolume* vol, const BookUnit* u)
 {
     for (uint32_t k = 0; k < u->count; k++) {
         BookSectorHead h;
         if (u->state[k] != BOOK_SECTOR_HOLDS)
             continue;
         memcpy(&h, u->sectors + (uint64_t)k * BOOK_SECTOR_BYTES, sizeof(h));
-        uint64_t seen = __atomic_load_n(&s_seq_seen, __ATOMIC_RELAXED);
+        uint64_t seen = __atomic_load_n(&vol->book_unit.seq_seen, __ATOMIC_RELAXED);
         while (h.seq > seen &&
-               !__atomic_compare_exchange_n(&s_seq_seen, &seen, h.seq, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+               !__atomic_compare_exchange_n(&vol->book_unit.seq_seen, &seen, h.seq, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
             ;
     }
 }
 
-error_t BookUnitRefused(int rc)
+error_t BookUnitRefused(TagFSVolume* vol, int rc)
 {
-    TagFSNoteReadRefused();
+    TagFSNoteReadRefused(vol);
     return rc == (int)ERR_DEVICE_NOT_READY ? ERR_DEVICE_NOT_READY : ERR_READ_FAILED;
 }
 
 /* A run the medium could not read whole, read again a sector at a time: the
  * ones it cannot read named UNREAD, every other judged. */
-static error_t BookUnitBySector(BookUnit* u, const uint8_t uuid[16])
+static error_t BookUnitBySector(TagFSVolume* vol, BookUnit* u, const uint8_t uuid[16])
 {
     for (uint32_t k = 0; k < u->count; k++) {
         uint8_t* s  = u->sectors + (uint64_t)k * BOOK_SECTOR_BYTES;
-        int      rc = tagfs_volume_read(u->vlba + k, 1, s);
+        int      rc = tagfs_volume_read(vol, u->vlba + k, 1, s);
         if (rc == (int)ERR_BAD_SECTOR) {
             memset(s, 0, BOOK_SECTOR_BYTES);
             u->state[k] = BOOK_SECTOR_UNREAD;
             continue;
         }
         if (rc != 0)
-            return BookUnitRefused(rc);
+            return BookUnitRefused(vol, rc);
         u->state[k] = BookSectorJudged(s, uuid, u->vlba + k);
     }
     return OK;
@@ -170,7 +158,7 @@ static error_t BookUnitWholeOf(BookUnit* u, uint16_t kind, uint64_t seq)
  * read (§2.5); one that agrees begins a unit that long, and the want of
  * memory is real. *u holds that one sector.
  */
-static error_t BookUnitFirstSays(BookUnit* u, const uint8_t uuid[16], uint16_t kind, uint64_t seq)
+static error_t BookUnitFirstSays(TagFSVolume* vol, BookUnit* u, const uint8_t uuid[16], uint16_t kind, uint64_t seq)
 {
     BookSectorHead h;
     uint32_t       count = u->count;
@@ -182,9 +170,9 @@ static error_t BookUnitFirstSays(BookUnit* u, const uint8_t uuid[16], uint16_t k
     u->state   = kmalloc(1);
     if (!u->sectors || !u->state)
         return ERR_NO_MEMORY;
-    int rc = tagfs_volume_read(u->vlba, 1, u->sectors);
+    int rc = tagfs_volume_read(vol, u->vlba, 1, u->sectors);
     if (rc != 0 && rc != (int)ERR_BAD_SECTOR)
-        return BookUnitRefused(rc);
+        return BookUnitRefused(vol, rc);
     u->state[0] = rc ? BOOK_SECTOR_UNREAD : BookSectorJudged(u->sectors, uuid, u->vlba);
     memcpy(&h, u->sectors, sizeof(h));
     if (u->state[0] != BOOK_SECTOR_HOLDS)
@@ -197,9 +185,9 @@ static error_t BookUnitFirstSays(BookUnit* u, const uint8_t uuid[16], uint16_t k
     return OK;
 }
 
-error_t BookUnitRead(uint64_t vlba, uint32_t count, uint16_t kind, uint64_t seq, BookUnit* out)
+error_t BookUnitRead(TagFSVolume* vol, uint64_t vlba, uint32_t count, uint16_t kind, uint64_t seq, BookUnit* out)
 {
-    const uint8_t* uuid = tagfs_get_state()->uuid;
+    const uint8_t* uuid = vol->state.uuid;
 
     memset(out, 0, sizeof(*out));
     out->vlba  = vlba;
@@ -208,42 +196,42 @@ error_t BookUnitRead(uint64_t vlba, uint32_t count, uint16_t kind, uint64_t seq,
         ksnprintf(out->why, sizeof(out->why), "it names a unit of no sectors");
         return OK;
     }
-    BookSumsJudged();
+    BookSumsJudged(vol);
 #ifdef CONFIG_VOLUME_TESTS
-    TagFSStandMountReadComes();
+    TagFSStandMountReadComes(vol);
 #endif
     out->sectors = kmalloc((uint64_t)count * BOOK_SECTOR_BYTES);
     out->state   = kmalloc(count);
     if (!out->sectors || !out->state)
-        return kind == BOOK_UNIT_SHEET && count > 1 ? BookUnitFirstSays(out, uuid, kind, seq) : ERR_NO_MEMORY;
+        return kind == BOOK_UNIT_SHEET && count > 1 ? BookUnitFirstSays(vol, out, uuid, kind, seq) : ERR_NO_MEMORY;
 
-    int rc = tagfs_volume_read(vlba, count, out->sectors);
+    int rc = tagfs_volume_read(vol, vlba, count, out->sectors);
     if (rc == (int)ERR_BAD_SECTOR) {
-        error_t again = BookUnitBySector(out, uuid);
+        error_t again = BookUnitBySector(vol, out, uuid);
         if (again != OK)
             return again;
     } else if (rc != 0) {
-        return BookUnitRefused(rc);
+        return BookUnitRefused(vol, rc);
     } else {
         for (uint32_t k = 0; k < count; k++)
             out->state[k] = BookSectorJudged(out->sectors + (uint64_t)k * BOOK_SECTOR_BYTES, uuid,
                                              vlba + k);
     }
-    BookSeqFold(out);
+    BookSeqFold(vol, out);
     return BookUnitWholeOf(out, kind, seq);
 }
 
-error_t BookUnitOf(uint64_t vlba, uint32_t count, uint16_t kind, uint64_t seq, const uint8_t* sectors,
+error_t BookUnitOf(TagFSVolume* vol, uint64_t vlba, uint32_t count, uint16_t kind, uint64_t seq, const uint8_t* sectors,
                    BookUnit* out)
 {
-    const uint8_t* uuid = tagfs_get_state()->uuid;
+    const uint8_t* uuid = vol->state.uuid;
 
     memset(out, 0, sizeof(*out));
     out->vlba  = vlba;
     out->count = count;
-    BookSumsJudged();
+    BookSumsJudged(vol);
 #ifdef CONFIG_VOLUME_TESTS
-    TagFSStandMountReadComes();
+    TagFSStandMountReadComes(vol);
 #endif
     out->sectors = kmalloc((uint64_t)count * BOOK_SECTOR_BYTES);
     out->state   = kmalloc(count ? count : 1u);
@@ -255,22 +243,22 @@ error_t BookUnitOf(uint64_t vlba, uint32_t count, uint16_t kind, uint64_t seq, c
     return BookUnitWholeOf(out, kind, seq);
 }
 
-uint64_t BookSeqSeen(void)
+uint64_t BookSeqSeen(TagFSVolume* vol)
 {
-    return __atomic_load_n(&s_seq_seen, __ATOMIC_RELAXED);
+    return __atomic_load_n(&vol->book_unit.seq_seen, __ATOMIC_RELAXED);
 }
 
-void BookSeqGiven(uint64_t seq)
+void BookSeqGiven(TagFSVolume* vol, uint64_t seq)
 {
-    uint64_t seen = __atomic_load_n(&s_seq_seen, __ATOMIC_RELAXED);
+    uint64_t seen = __atomic_load_n(&vol->book_unit.seq_seen, __ATOMIC_RELAXED);
     while (seq > seen &&
-           !__atomic_compare_exchange_n(&s_seq_seen, &seen, seq, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+           !__atomic_compare_exchange_n(&vol->book_unit.seq_seen, &seen, seq, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
         ;
 }
 
-void BookSeqSeenForget(void)
+void BookSeqSeenForget(TagFSVolume* vol)
 {
-    __atomic_store_n(&s_seq_seen, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&vol->book_unit.seq_seen, 0, __ATOMIC_RELAXED);
 }
 
 void BookUnitLetGo(BookUnit* u)

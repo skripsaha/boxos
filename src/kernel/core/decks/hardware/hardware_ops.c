@@ -272,7 +272,7 @@ static int HwDiskFlush(const ManifestOp *op, Crate *crates, uint16_t crate_count
     (void)crates; (void)crate_count; (void)ctx;
     if (op->param_size < 1) return ERR_INVALID_ARGUMENT;
     (void)op->params[0];
-    return tagfs_flush_cache();
+    return tagfs_flush_cache(TagFSHome());
 }
 
 
@@ -533,11 +533,11 @@ void HardwareDeckUsbRecoverProof(void)
 
     if (__atomic_load_n(&done, __ATOMIC_ACQUIRE) != 0)   return;
     if (xhci_controller_count() == 0)                    return;
-    if (tagfs_get_seat() == BOARDROOM_NO_SEAT)           return;
+    if (tagfs_get_seat(TagFSHome()) == BOARDROOM_NO_SEAT)           return;
     if (__atomic_exchange_n(&done, 1u, __ATOMIC_ACQUIRE) != 0) return;
 
     kprintf("[USB RECOVER TEST] begin — a controller in service and a volume "
-            "on seat %u\n", tagfs_get_seat());
+            "on seat %u\n", tagfs_get_seat(TagFSHome()));
 
     const OpRegistration *reg =
         OpRegistryLookup(OP_KIND(HARDWARE_DECK_ID, HW_USB_RESET));

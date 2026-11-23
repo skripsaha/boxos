@@ -57,32 +57,32 @@ typedef struct {
  * the medium's refusal, counted. *out is the caller's to let go of
  * (BookUnitLetGo) on every answer.
  */
-error_t  BookUnitRead(uint64_t vlba, uint32_t count, uint16_t kind, uint64_t seq, BookUnit* out);
+error_t  BookUnitRead(TagFSVolume* vol, uint64_t vlba, uint32_t count, uint16_t kind, uint64_t seq, BookUnit* out);
 void     BookUnitLetGo(BookUnit* u);
 
 /* The same judgement of `count` sectors read already, `sectors` — zeros where
  * one would not read — by a reader past the volume's door (mount/
  * perambulation.c): nothing of them folded into the seqs seen. OK, or
  * ERR_NO_MEMORY; *out the caller's to let go of on every answer. */
-error_t  BookUnitOf(uint64_t vlba, uint32_t count, uint16_t kind, uint64_t seq, const uint8_t* sectors,
+error_t  BookUnitOf(TagFSVolume* vol, uint64_t vlba, uint32_t count, uint16_t kind, uint64_t seq, const uint8_t* sectors,
                    BookUnit* out);
 
 /* A refusal of the medium — tagfs_volume_read's `rc`, not ERR_BAD_SECTOR —
  * counted for the mount's road back (tagfs.c), and answered as what it is:
  * ERR_DEVICE_NOT_READY, or ERR_READ_FAILED. For a reader of the volume's
  * ground that reads it as no unit of the book (ribbon_verify.c). */
-error_t  BookUnitRefused(int rc);
+error_t  BookUnitRefused(TagFSVolume* vol, int rc);
 
 /* The largest seq a sector read through BookUnitRead held at since the mount
  * forgot it — what the next seq is given past. Read
  * by the mount, with its door shut; raised by every reader of the book on any
  * core, the mount's and the DIGESTS leaves a read of a block opens after it. */
-uint64_t BookSeqSeen(void);
-void     BookSeqSeenForget(void);
+uint64_t BookSeqSeen(TagFSVolume* vol);
+void     BookSeqSeenForget(TagFSVolume* vol);
 
 /* A seq the book's writer gave a unit (settle/ribbon.c), folded into the ones
  * seen: no reader or writer of the volume gives it again this mount. */
-void     BookSeqGiven(uint64_t seq);
+void     BookSeqGiven(TagFSVolume* vol, uint64_t seq);
 
 /* Whether every byte of the run is zero — a slot never written. */
 bool     BookUnitBlank(const BookUnit* u);
@@ -93,5 +93,21 @@ bool     BookUnitBlank(const BookUnit* u);
  * sector's lead is its records'. */
 uint32_t BookUnitLeadWrong(const BookUnit* u, const uint32_t* starts, uint32_t n, uint32_t* named,
                            uint32_t* given);
+
+/* What one volume holds of book_unit.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    /* Whether the crc32 instruction has been held to the book's table this boot,
+     * and whether a want of memory to hold it was said. */
+    volatile uint32_t sums_judged;
+    volatile uint32_t sums_short;
+    /* The largest seq a sector of the book read held at: the next seq is past
+     * everything the mount saw hold, the torn tail and the direct scan among it —
+     * every reader of a book reads through here, so nothing read is left out. The
+     * mount reads it with its door shut; but the DIGESTS leaves a read of a block
+     * opens after the mount (TallyDigestFind) read through here too, on any core
+     * at once — so it only ever rises, by an atomic max, and no fold is lost to
+     * another. */
+    uint64_t seq_seen;
+} BookUnitState;
 
 #endif /* TAGFS_MOUNT_BOOK_UNIT_H */

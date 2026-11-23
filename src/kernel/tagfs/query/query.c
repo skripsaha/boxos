@@ -3,6 +3,7 @@
 #include "../tag_registry/tag_registry.h"
 #include "boxos_decks.h"
 #include "klib.h"
+#include "tagfs_volume.h"
 
 /*
  * ‼ WHICH FILES THERE ARE, ASKED A PAGE AT A TIME.
@@ -64,10 +65,10 @@ static bool UnlessAdd(uint32_t** ids, uint32_t* count, uint32_t* room, uint32_t 
  * asker's to say; the volume leaves out only the files it keeps deleted
  * (TAGFS_FILE_DELETED), which `live` adds as the one set more, and which a
  * question for them alone (`live` false) does not. */
-static error_t QueryUnless(TagOwner owner, const TagSpelling* without, uint32_t without_count, bool live,
+static error_t QueryUnless(TagFSVolume* vol, TagOwner owner, const TagSpelling* without, uint32_t without_count, bool live,
                            uint32_t** ids, uint32_t* count)
 {
-    TagFSState* fs   = tagfs_get_state();
+    TagFSState* fs   = &vol->state;
     uint32_t    room = 0;
     *ids   = NULL;
     *count = 0;
@@ -108,10 +109,10 @@ static error_t QueryUnless(TagOwner owner, const TagSpelling* without, uint32_t 
  * the id the next create takes: the mount derives that id past every record
  * the book holds (book_mount.c), so no live file has an id the volume never
  * issued. */
-static void ListPageInside(const uint32_t* unless, uint32_t unless_count, uint64_t from, uint64_t* out,
+static void ListPageInside(TagFSVolume* vol, const uint32_t* unless, uint32_t unless_count, uint64_t from, uint64_t* out,
                            uint32_t room, bool want_total, TagFSPage* page)
 {
-    TagFSState* fs = tagfs_get_state();
+    TagFSState* fs = &vol->state;
     uint64_t    batch[QUERY_BATCH];
     uint64_t    at = from ? from : 1;
     uint32_t    n;
@@ -130,17 +131,17 @@ static void ListPageInside(const uint32_t* unless, uint32_t unless_count, uint64
     }
 }
 
-error_t TagFSListPage(uint64_t from, uint64_t* out, uint32_t room, bool want_total,
+error_t TagFSListPage(TagFSVolume* vol, uint64_t from, uint64_t* out, uint32_t room, bool want_total,
                       TagFSPage* page)
 {
     memset(page, 0, sizeof(*page));
     if (room && !out)
         return ERR_INVALID_ARGUMENT;
-    if (!tagfs_enter())
+    if (!tagfs_enter(vol))
         return ERR_TAGFS_NOT_INITIALIZED;
     const uint32_t aside = TAGFS_DELETED_MEMBERS;
-    ListPageInside(&aside, 1, from, out, room, want_total, page);
-    tagfs_leave();
+    ListPageInside(vol, &aside, 1, from, out, room, want_total, page);
+    tagfs_leave(vol);
     return OK;
 }
 
@@ -155,11 +156,11 @@ error_t TagFSListPage(uint64_t from, uint64_t* out, uint32_t room, bool want_tot
  * when the key's next tag outgrows it, and that can happen on another core
  * while the question is asked. The groups' ids are the caller's to kfree, as
  * many groups as *group_count says, whatever the answer. */
-static error_t QueryResolve(TagOwner owner, const TagSpelling* tags, uint32_t count, uint32_t* tag_ids,
+static error_t QueryResolve(TagFSVolume* vol, TagOwner owner, const TagSpelling* tags, uint32_t count, uint32_t* tag_ids,
                             uint32_t* tag_count, TagIdList* groups, uint32_t* group_count,
                             bool* wearable)
 {
-    TagFSState* fs = tagfs_get_state();
+    TagFSState* fs = &vol->state;
     *tag_count   = 0;
     *group_count = 0;
     *wearable    = false;
@@ -182,11 +183,11 @@ static error_t QueryResolve(TagOwner owner, const TagSpelling* tags, uint32_t co
     return OK;
 }
 
-static error_t QueryPageInside(TagOwner owner, const TagSpelling* tags, uint32_t count,
+static error_t QueryPageInside(TagFSVolume* vol, TagOwner owner, const TagSpelling* tags, uint32_t count,
                                const TagSpelling* without, uint32_t without_count, bool live, uint64_t from,
                                uint64_t* out, uint32_t room, bool want_total, TagFSPage* page)
 {
-    TagFSState* fs           = tagfs_get_state();
+    TagFSState* fs           = &vol->state;
     uint32_t    tag_count    = 0;
     uint32_t    group_count  = 0;
     uint32_t*   unless       = NULL;
@@ -200,17 +201,17 @@ static error_t QueryPageInside(TagOwner owner, const TagSpelling* tags, uint32_t
         rc = ERR_NO_MEMORY;
         goto out;
     }
-    rc = QueryResolve(owner, tags, count, tag_ids, &tag_count, groups, &group_count, &wearable);
+    rc = QueryResolve(vol, owner, tags, count, tag_ids, &tag_count, groups, &group_count, &wearable);
     if (rc != OK || !wearable)
         goto out;
     if (!live)
         tag_ids[tag_count++] = TAGFS_DELETED_MEMBERS;
-    rc = QueryUnless(owner, without, without_count, live, &unless, &unless_count);
+    rc = QueryUnless(vol, owner, without, without_count, live, &unless, &unless_count);
     if (rc != OK)
         goto out;
 
     if (live && count == 0)
-        ListPageInside(unless, unless_count, from, out, room, want_total, page);
+        ListPageInside(vol, unless, unless_count, from, out, room, want_total, page);
     else if (TagBitmapQueryPage(fs->bitmap_index, tag_ids, tag_count, groups, group_count,
                                 unless, unless_count, from, out, room, want_total, page) != 0)
         rc = ERR_TAGFS_NOT_INITIALIZED;
@@ -223,35 +224,35 @@ out:
     return rc;
 }
 
-static error_t QueryPageOf(TagOwner owner, const TagSpelling* tags, uint32_t count, const TagSpelling* without,
+static error_t QueryPageOf(TagFSVolume* vol, TagOwner owner, const TagSpelling* tags, uint32_t count, const TagSpelling* without,
                            uint32_t without_count, bool live, uint64_t from, uint64_t* out, uint32_t room,
                            bool want_total, TagFSPage* page)
 {
     if (live && count == 0 && without_count == 0)
-        return TagFSListPage(from, out, room, want_total, page);
+        return TagFSListPage(vol, from, out, room, want_total, page);
     memset(page, 0, sizeof(*page));
     if ((count && !tags) || (without_count && !without) || (room && !out))
         return ERR_INVALID_ARGUMENT;
-    if (!tagfs_enter())
+    if (!tagfs_enter(vol))
         return ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc = QueryPageInside(owner, tags, count, without, without_count, live, from, out, room, want_total,
+    error_t rc = QueryPageInside(vol, owner, tags, count, without, without_count, live, from, out, room, want_total,
                                  page);
-    tagfs_leave();
+    tagfs_leave(vol);
     return rc;
 }
 
-error_t TagFSQueryPage(TagOwner owner, const TagSpelling* tags, uint32_t count, const TagSpelling* without,
+error_t TagFSQueryPage(TagFSVolume* vol, TagOwner owner, const TagSpelling* tags, uint32_t count, const TagSpelling* without,
                        uint32_t without_count, uint64_t from, uint64_t* out, uint32_t room,
                        bool want_total, TagFSPage* page)
 {
-    return QueryPageOf(owner, tags, count, without, without_count, true, from, out, room, want_total, page);
+    return QueryPageOf(vol, owner, tags, count, without, without_count, true, from, out, room, want_total, page);
 }
 
-error_t TagFSQueryKeptPage(TagOwner owner, const TagSpelling* tags, uint32_t count, const TagSpelling* without,
+error_t TagFSQueryKeptPage(TagFSVolume* vol, TagOwner owner, const TagSpelling* tags, uint32_t count, const TagSpelling* without,
                            uint32_t without_count, uint64_t from, uint64_t* out, uint32_t room,
                            bool want_total, TagFSPage* page)
 {
-    return QueryPageOf(owner, tags, count, without, without_count, false, from, out, room, want_total, page);
+    return QueryPageOf(vol, owner, tags, count, without, without_count, false, from, out, room, want_total, page);
 }
 
 // ----------------------------------------------------------------------------
@@ -278,12 +279,12 @@ static bool WearsAsked(const TagFSState* fs, uint64_t fid, const uint32_t* tag_i
 
 /* The files the index names for the word, a batch at a time from `from` on,
  * each onto the page when it wears the asked tags and none of `unless`. */
-static void NamedPageInside(const char* word, size_t length, const uint32_t* tag_ids, uint32_t tag_count,
+static void NamedPageInside(TagFSVolume* vol, const char* word, size_t length, const uint32_t* tag_ids, uint32_t tag_count,
                             const TagIdList* groups, uint32_t group_count, const uint32_t* unless,
                             uint32_t unless_count, uint64_t from, uint64_t* out, uint32_t room,
                             bool want_total, TagFSPage* page)
 {
-    TagFSState* fs = tagfs_get_state();
+    TagFSState* fs = &vol->state;
     uint64_t    batch[QUERY_BATCH];
     uint64_t    at = from ? from : 1;
     uint64_t    next;
@@ -301,14 +302,14 @@ static void NamedPageInside(const char* word, size_t length, const uint32_t* tag
     } while (next != 0);
 }
 
-error_t TagFSNamedPage(TagOwner owner, const char* word, size_t length, const TagSpelling* tags, uint32_t count,
+error_t TagFSNamedPage(TagFSVolume* vol, TagOwner owner, const char* word, size_t length, const TagSpelling* tags, uint32_t count,
                        const TagSpelling* without, uint32_t without_count, uint64_t from, uint64_t* out,
                        uint32_t room, bool want_total, TagFSPage* page)
 {
     memset(page, 0, sizeof(*page));
     if (!word || length == 0 || (count && !tags) || (without_count && !without) || (room && !out))
         return ERR_INVALID_ARGUMENT;
-    if (!tagfs_enter())
+    if (!tagfs_enter(vol))
         return ERR_TAGFS_NOT_INITIALIZED;
 
     uint32_t    tag_count    = 0;
@@ -322,18 +323,18 @@ error_t TagFSNamedPage(TagOwner owner, const char* word, size_t length, const Ta
     if (!tag_ids || (count && !groups))
         rc = ERR_NO_MEMORY;
     else
-        rc = QueryResolve(owner, tags, count, tag_ids, &tag_count, groups, &group_count, &wearable);
+        rc = QueryResolve(vol, owner, tags, count, tag_ids, &tag_count, groups, &group_count, &wearable);
     if (rc == OK && wearable)
-        rc = QueryUnless(owner, without, without_count, false, &unless, &unless_count);
+        rc = QueryUnless(vol, owner, without, without_count, false, &unless, &unless_count);
     if (rc == OK && wearable)
-        NamedPageInside(word, length, tag_ids, tag_count, groups, group_count, unless, unless_count, from, out,
+        NamedPageInside(vol, word, length, tag_ids, tag_count, groups, group_count, unless, unless_count, from, out,
                         room, want_total, page);
     for (uint32_t g = 0; g < group_count; g++)
         kfree(groups[g].ids);
     kfree(tag_ids);
     kfree(groups);
     kfree(unless);
-    tagfs_leave();
+    tagfs_leave(vol);
     return rc;
 }
 
@@ -341,17 +342,17 @@ error_t TagFSNamedPage(TagOwner owner, const char* word, size_t length, const Ta
 // The files that begin with given bytes
 // ----------------------------------------------------------------------------
 
-error_t TagFSStartingWithPage(const uint8_t* bytes, uint32_t length, uint64_t from, uint64_t* out, uint32_t room,
+error_t TagFSStartingWithPage(TagFSVolume* vol, const uint8_t* bytes, uint32_t length, uint64_t from, uint64_t* out, uint32_t room,
                               bool want_total, TagFSPage* page)
 {
     memset(page, 0, sizeof(*page));
     if (!bytes || length == 0 || length > TAGFS_HEAD_MOST || (room && !out))
         return ERR_INVALID_ARGUMENT;
-    if (!tagfs_enter())
+    if (!tagfs_enter(vol))
         return ERR_TAGFS_NOT_INITIALIZED;
-    page->delivered = FileMapStartingWith(tagfs_get_state()->files, bytes, length, from, out, room, &page->next,
+    page->delivered = FileMapStartingWith(vol->state.files, bytes, length, from, out, room, &page->next,
                                           want_total ? &page->total : NULL);
-    tagfs_leave();
+    tagfs_leave(vol);
     return OK;
 }
 
@@ -361,7 +362,7 @@ error_t TagFSStartingWithPage(const uint8_t* bytes, uint32_t length, uint64_t fr
 
 /* One tag's STORAGE_TAG_LIST record after the `*used` bytes of `out`; false
  * when it does not fit the `room` left. */
-static bool TagRecordPut(uint8_t* out, uint32_t room, uint32_t* used, const TagSpelling* tag,
+static bool TagRecordPut(TagFSVolume* vol, uint8_t* out, uint32_t room, uint32_t* used, const TagSpelling* tag,
                          uint32_t files, bool system, TagOwner owner)
 {
     const uint64_t need = STORAGE_TAG_LISTED_HEAD + (uint64_t)tag->key_len + tag->value_len;
@@ -369,7 +370,7 @@ static bool TagRecordPut(uint8_t* out, uint32_t room, uint32_t* used, const TagS
         return false;
     uint8_t*       at        = out + *used;
     const uint16_t value_len = (uint16_t)tag->value_len;
-    const uint64_t whose     = TagOwnerWord(owner);
+    const uint64_t whose     = TagOwnerWord(vol, owner);
     memcpy(at, &files, sizeof(files));
     at[4] = system ? STORAGE_TAG_LISTED_SYSTEM : 0;
     at[5] = (uint8_t)tag->key_len;
@@ -389,7 +390,7 @@ static bool TagRecordPut(uint8_t* out, uint32_t room, uint32_t* used, const TagS
  * tags, a program's its own and those shown it. The registry's spellings are
  * its own and live while the volume is entered, so they are copied out before
  * it is left. */
-error_t TagFSTagPage(const TagView* view, const TagSpelling* within, uint32_t within_count, const TagSpelling* without,
+error_t TagFSTagPage(TagFSVolume* vol, const TagView* view, const TagSpelling* within, uint32_t within_count, const TagSpelling* without,
                      uint32_t without_count, uint32_t from, uint8_t* out, uint32_t room, uint32_t* used,
                      uint32_t* delivered, uint32_t* next)
 {
@@ -400,10 +401,10 @@ error_t TagFSTagPage(const TagView* view, const TagSpelling* within, uint32_t wi
         (view->all && (within_count || without_count)))
         return ERR_INVALID_ARGUMENT;
     const TagOwner owner = view->all ? TagOwnerPerson() : view->owner;   /* whose `within` and `without` are */
-    if (!tagfs_enter())
+    if (!tagfs_enter(vol))
         return ERR_TAGFS_NOT_INITIALIZED;
 
-    TagFSState* fs           = tagfs_get_state();
+    TagFSState* fs           = &vol->state;
     uint32_t    tag_count    = 0;
     uint32_t    group_count  = 0;
     uint32_t*   unless       = NULL;
@@ -418,10 +419,10 @@ error_t TagFSTagPage(const TagView* view, const TagSpelling* within, uint32_t wi
         rc = ERR_NO_MEMORY;
         goto out;
     }
-    rc = QueryResolve(owner, within, within_count, tag_ids, &tag_count, groups, &group_count, &wearable);
+    rc = QueryResolve(vol, owner, within, within_count, tag_ids, &tag_count, groups, &group_count, &wearable);
     if (rc != OK || !wearable)
         goto out;                       /* no file wears `within`: none wears a tag among them */
-    rc = QueryUnless(owner, without, without_count, true, &unless, &unless_count);
+    rc = QueryUnless(vol, owner, without, without_count, true, &unless, &unless_count);
     if (rc != OK)
         goto out;
 
@@ -443,7 +444,7 @@ error_t TagFSTagPage(const TagView* view, const TagSpelling* within, uint32_t wi
 
         bool system = false;
         (void)TagRegistrySpelling(fs->registry, id, &tag, &system, NULL);
-        if (!TagRecordPut(out, room, used, &tag, page.total, system, rolled.owner)) {
+        if (!TagRecordPut(vol, out, room, used, &tag, page.total, system, rolled.owner)) {
             *next = id;
             if (*delivered == 0)
                 rc = ERR_BUFFER_TOO_SMALL;
@@ -457,7 +458,7 @@ out:
     kfree(tag_ids);
     kfree(groups);
     kfree(unless);
-    tagfs_leave();
+    tagfs_leave(vol);
     return rc;
 }
 
@@ -512,9 +513,9 @@ void TagFSFragOfRecord(const FileRecord* rec, uint32_t* gaps, uint64_t* steps)
 #endif
 
 /* One file's record, out of the map of live files: every live file has one. */
-static void FragOfFile(FragCount* frag, uint64_t fid)
+static void FragOfFile(TagFSVolume* vol, FragCount* frag, uint64_t fid)
 {
-    FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    FileRecord* rec = FileMapRecordHold(vol->state.files, fid, NULL);
     if (!rec)
         return;
     FragAdd(frag, rec);
@@ -535,25 +536,26 @@ static void FragOfFile(FragCount* frag, uint64_t fid)
  */
 uint32_t tagfs_get_fragmentation_score(uint32_t* out_files, uint32_t* out_gaps)
 {
+    TagFSVolume* vol = TagFSHome();
     FragCount frag = { 0, 0, 0 };
     if (out_files)
         *out_files = 0;
     if (out_gaps)
         *out_gaps = 0;
-    if (!tagfs_enter())
+    if (!tagfs_enter(vol))
         return 0;
 
     uint64_t batch[QUERY_BATCH];
     uint64_t at = 1;
     uint32_t n;
-    while ((n = FileMapFiles(tagfs_get_state()->files, at, batch, QUERY_BATCH)) > 0) {
+    while ((n = FileMapFiles(vol->state.files, at, batch, QUERY_BATCH)) > 0) {
         for (uint32_t i = 0; i < n; i++)
-            FragOfFile(&frag, batch[i]);
+            FragOfFile(vol, &frag, batch[i]);
         if (batch[n - 1] == UINT64_MAX)
             break;
         at = batch[n - 1] + 1;
     }
-    tagfs_leave();
+    tagfs_leave(vol);
 
     if (out_files)
         *out_files = frag.files;

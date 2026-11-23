@@ -111,7 +111,7 @@ typedef struct {
  * the halt shut the volume, ERR_TAGFS_READ_ONLY) — asked here, before a byte of
  * the call moves — or ERR_NO_MEMORY. A holder of the file's Helm sets `helm`
  * after the load. */
-error_t  PlotLoad(Plot *p, uint64_t fid, InkWarrant warrant);
+error_t  PlotLoad(TagFSVolume* vol, Plot *p, uint64_t fid, InkWarrant warrant);
 
 /* The same for the volume's own change of a file — its tail laid in its block
  * (Engross), or cut by Escheat — which says nothing new of what the file
@@ -119,17 +119,17 @@ error_t  PlotLoad(Plot *p, uint64_t fid, InkWarrant warrant);
  * answers ERR_FILE_NOT_FOUND; every other guard is PlotLoad's. Asked by a
  * handle the volume opens for itself alone (TAGFS_HANDLE_KEPT), never by a
  * program's. */
-error_t  PlotLoadKept(Plot *p, uint64_t fid, InkWarrant warrant);
+error_t  PlotLoadKept(TagFSVolume* vol, Plot *p, uint64_t fid, InkWarrant warrant);
 
 /* Everything the Plot holds let go; every Stake still standing is given back
  * first (PlotPullStakes). Safe on a Plot PlotLoad refused. */
-void     PlotRelease(Plot *p);
+void     PlotRelease(TagFSVolume* vol, Plot *p);
 
 /* Every Stake given back to the allocator: the way out of a call that commits
  * nothing, or commits less than it took. A Plot of an earlier mounting gives
  * nothing back — its numbers name another volume's blocks now, and the ones it
  * took are the roll call's to find. */
-void     PlotPullStakes(Plot *p);
+void     PlotPullStakes(TagFSVolume* vol, Plot *p);
 
 /* Where block k of a file lies: true, *out_block, and in *out_left how many
  * of the run's blocks follow it. False when the runs do not reach block k. */
@@ -189,30 +189,30 @@ error_t  PlotAppendRun(Plot *p, uint64_t start, uint32_t count);
  * (at the size when `append`), ERR_TAGFS_BEYOND_SIZE past the size, and its
  * window opened for everything it covers (plot_window.c). Before any byte of
  * the write moves. */
-error_t  PlotBeginWrite(Plot *p, uint64_t offset, bool append, uint64_t bytes,
+error_t  PlotBeginWrite(TagFSVolume* vol, Plot *p, uint64_t offset, bool append, uint64_t bytes,
                         uint64_t *out_at);
 
 /* The write that began at `at` made ready to be the file's for the `done`
  * bytes of it that landed: the ground reserved past them cut off (CR-13) and
  * the size grown to their end. The caller inks the record (TagFSInkPlot). */
-error_t  PlotEndWrite(Plot *p, uint64_t at, uint64_t done);
+error_t  PlotEndWrite(TagFSVolume* vol, Plot *p, uint64_t at, uint64_t done);
 
 /* The runs cut to their first keep_blocks blocks. Staked ground cut off goes
  * back now; ground a record named comes to rest in Fallow once a record that
  * no longer names it is inked. */
-error_t  PlotTrimTo(Plot *p, uint64_t keep_blocks);
+error_t  PlotTrimTo(TagFSVolume* vol, Plot *p, uint64_t keep_blocks);
 
 /* Whether the volume could ever give the blocks [0, end) bytes need beyond
  * those the Plot names (plot_window.c, PlotWindowRoomFor). OK, or
  * ERR_TAGFS_NO_SPACE — said, with the numbers — when it could not. Asked
  * before a growth takes its first block, so one past what the volume has
  * takes none (Z07-5). Nothing is taken. */
-error_t  PlotRoomFor(const Plot *p, uint64_t end);
+error_t  PlotRoomFor(TagFSVolume* vol, const Plot *p, uint64_t end);
 
 /* The file grown to `size` with zeros (plot_window.c, PlotWindowGrow): a hole
  * past the old size, its last block laid again. The Plot's size is `size`
  * after OK. */
-error_t  PlotExtendZero(Plot *p, uint64_t size);
+error_t  PlotExtendZero(TagFSVolume* vol, Plot *p, uint64_t size);
 
 /*
  * PlotGather — a stretch of the file's own runs laid in one run (defrag).
@@ -262,9 +262,9 @@ typedef struct {
  * every stretch does: nothing of the file is a defrag's to move. */
 bool     PlotStretchScattered(const Plot *p, uint32_t *first, uint32_t *last);
 
-error_t  PlotGather(Plot *p, uint64_t hint);
-error_t  PlotGatherBegin(Plot *p, uint64_t hint, PlotGathering *g);
-error_t  PlotGatherStep(Plot *p, PlotGathering *g, bool *out_laid);
+error_t  PlotGather(TagFSVolume* vol, Plot *p, uint64_t hint);
+error_t  PlotGatherBegin(TagFSVolume* vol, Plot *p, uint64_t hint, PlotGathering *g);
+error_t  PlotGatherStep(TagFSVolume* vol, Plot *p, PlotGathering *g, bool *out_laid);
 
 /*
  * Where a write's bytes come from: the kernel's own memory, or a program's
@@ -297,7 +297,7 @@ error_t  PlotSourcePull(const PlotSource *src, uint64_t at, void *dst, uint32_t 
  * by the one read-modify-write rule. It stops at the first refusal in the
  * file's order — a read, the source's pages, a write — and *out_done is what
  * landed before it: the blocks of a stretch before a refused one are laid. */
-error_t  PlotWriteBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *out_done);
+error_t  PlotWriteBlocks(TagFSVolume* vol, Plot *p, uint64_t at, const PlotSource *src, uint64_t *out_done);
 
 /* `count` bytes at `bytes` that landed at the file's byte `at`: those of them
  * that lie under TAGFS_HEAD_MOST made the Plot's record of the file's first
@@ -327,7 +327,7 @@ error_t  PlotConveyance(const Plot *p, const FileRecord *cur, BookSplice **out, 
  * latched after the medium answered, before this call, is one since (the
  * Plot's `departed`). OK or ERR_NO_MEMORY. */
 error_t  PlotWindowWhole(Plot *p);
-error_t  PlotWindowLanded(Plot *p, uint64_t departed, uint64_t block, const uint8_t *data, uint32_t count);
+error_t  PlotWindowLanded(TagFSVolume* vol, Plot *p, uint64_t departed, uint64_t block, const uint8_t *data, uint32_t count);
 
 /* Engross (plot_slip.c): a file whose last block has Slips over it gets that
  * block laid again on fresh ground — its base, the Slips over it, zeros past
@@ -335,13 +335,13 @@ error_t  PlotWindowLanded(Plot *p, uint64_t departed, uint64_t block, const uint
  * lets the Slips go with the block they lay on. OK and nothing done for a file
  * with no Slip; or the refusal of the ground, the read, the write or the
  * ribbon's room. */
-error_t  PlotEngross(Plot *p, bool *laid);
+error_t  PlotEngross(TagFSVolume* vol, Plot *p, bool *laid);
 
 /* The Plot's Slip let go of (plot_slip.c), and the block it promised its
  * file's first Slip: by the Plot when it is let go, or the write lays no Slip;
  * by its Ink once the record it put holds the Slip, and the promise with it
  * (InkBookPlotNext). */
-void     PlotSlipLetGo(Plot *p);
+void     PlotSlipLetGo(TagFSVolume* vol, Plot *p);
 
 #ifdef CONFIG_VOLUME_TESTS
 /* The stand's measure that a write copies only the Strips around its change

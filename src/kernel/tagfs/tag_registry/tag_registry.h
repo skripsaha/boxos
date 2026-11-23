@@ -60,7 +60,7 @@ error_t      TagRegistryKeyIds(TagRegistry* reg, TagOwner owner, const char* key
                                TagIdList* out);
 /* Whether `id` is one the registry gave — OK, so a record may wear it; or
  * ERR_TAGFS_METADATA_ERROR, or ERR_TAGFS_READ_ONLY under glass. */
-error_t      TagRegistryIdGiven(TagRegistry* reg, uint32_t id);
+error_t      TagRegistryIdGiven(TagFSVolume* vol, TagRegistry* reg, uint32_t id);
 
 /* The mount's: no id below `next` is given out again, and every id below the
  * next one given is the book's — none is laid down as a Coined. */

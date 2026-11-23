@@ -6802,7 +6802,7 @@ grow_blind_on() {
     python3 - <<'EOF2'
 p = "src/kernel/tagfs/mount/book_mount.c"
 s = open(p).read()
-anchor = "    MountBookGrow(tagfs_get_seat());\n"
+anchor = "    MountBookGrow(vol, tagfs_get_seat(vol));\n"
 assert s.count(anchor) == 1, "grow mutation anchor missing"
 s = s.replace(anchor, "    (void)MountBookGrow;   /* logcheck mutation: the ground is left unclaimed */\n", 1)
 open(p, "w").write(s)
@@ -7997,7 +7997,7 @@ book_proofblind_on() {
     python3 - <<'EOF2'
 p = "src/kernel/tagfs/settle/binder_proof.c"
 s = open(p).read()
-anchor = "        error_t rc    = TallyCopyHolds(p, k, &holds, why, sizeof(why));\n"
+anchor = "        error_t rc    = TallyCopyHolds(vol, p, k, &holds, why, sizeof(why));\n"
 assert s.count(anchor) == 1, "copy check anchor missing"
 s = s.replace(anchor, "        error_t rc    = OK;    /* logcheck mutation: no copy is read */\n        holds         = true;\n", 1)
 open(p, "w").write(s)
@@ -8328,8 +8328,8 @@ edits = {
  ],
  "scribe": [
   ("src/kernel/tagfs/scribe/scribe.c",
-   "    if (!kept)\n        return;\n    uint64_t cur = __atomic_load_n(&g_flush_kept, __ATOMIC_RELAXED);\n",
-   "    (void)kept;   /* " + M + ": a refused flush moves the mark too */\n    uint64_t cur = __atomic_load_n(&g_flush_kept, __ATOMIC_RELAXED);\n"),
+   "    if (!kept)\n        return;\n    uint64_t cur = __atomic_load_n(&vol->scribe.flush_kept, __ATOMIC_RELAXED);\n",
+   "    (void)kept;   /* " + M + ": a refused flush moves the mark too */\n    uint64_t cur = __atomic_load_n(&vol->scribe.flush_kept, __ATOMIC_RELAXED);\n"),
   ("src/kernel/tagfs/scribe/scribe.c",
    "        __atomic_store_n(&s->written, cover, __ATOMIC_RELEASE);\n",
    "        __atomic_store_n(&s->written, __atomic_load_n(&s->asked, __ATOMIC_SEQ_CST),   /* " + M + ": a pass publishes every ask, not what it covered */\n"
@@ -8343,22 +8343,22 @@ edits = {
  ],
  "flushsum": [
   ("src/kernel/tagfs/scribe/scribe.c",
-   "    if (!kept)\n        return;\n    uint64_t cur = __atomic_load_n(&g_flush_kept, __ATOMIC_RELAXED);\n"
-   "    while (cur < ticket &&\n           !__atomic_compare_exchange_n(&g_flush_kept, &cur, ticket, false,\n"
+   "    if (!kept)\n        return;\n    uint64_t cur = __atomic_load_n(&vol->scribe.flush_kept, __ATOMIC_RELAXED);\n"
+   "    while (cur < ticket &&\n           !__atomic_compare_exchange_n(&vol->scribe.flush_kept, &cur, ticket, false,\n"
    "                                        __ATOMIC_RELEASE, __ATOMIC_RELAXED))\n        ;\n",
    "    (void)ticket;   /* " + M + ": a count of the flushes kept, raised as each answers */\n"
-   "    if (kept)\n        __atomic_add_fetch(&g_flush_kept, 1u, __ATOMIC_RELEASE);\n"),
+   "    if (kept)\n        __atomic_add_fetch(&vol->scribe.flush_kept, 1u, __ATOMIC_RELEASE);\n"),
   ("src/kernel/tagfs/scribe/scribe.c",
-   "    return __atomic_load_n(&g_flush_asked, __ATOMIC_SEQ_CST) + 1u;\n",
-   "    return __atomic_load_n(&g_flush_kept, __ATOMIC_SEQ_CST) + 1u;   /* " + M + ": the next flush kept is the one that covers */\n"),
+   "    return __atomic_load_n(&vol->scribe.flush_asked, __ATOMIC_SEQ_CST) + 1u;\n",
+   "    return __atomic_load_n(&vol->scribe.flush_kept, __ATOMIC_SEQ_CST) + 1u;   /* " + M + ": the next flush kept is the one that covers */\n"),
   ("src/kernel/tagfs/scribe/scribe.c",
    "    g_scribe_held[core][s->rank]--;\n    SchedulerLetGoHere();\n",
    "    g_scribe_held[core][s->rank]--;   /* " + M + ": the scheduler is never let go */\n"),
  ],
  "flushneed": [
   ("src/kernel/tagfs/scribe/scribe.c",
-   "    return __atomic_load_n(&g_flush_asked, __ATOMIC_SEQ_CST) + 1u;\n",
-   "    return __atomic_load_n(&g_flush_asked, __ATOMIC_SEQ_CST);   /* " + M + ": the need is the last flush begun */\n"),
+   "    return __atomic_load_n(&vol->scribe.flush_asked, __ATOMIC_SEQ_CST) + 1u;\n",
+   "    return __atomic_load_n(&vol->scribe.flush_asked, __ATOMIC_SEQ_CST);   /* " + M + ": the need is the last flush begun */\n"),
  ],
  "dmawait": [
   ("src/kernel/drivers/disk/ata_async.c",
@@ -8411,7 +8411,7 @@ stand_leak_on() {
 p = "src/kernel/tagfs/tests/core_tests.c"
 s = open(p).read()
 inc = "#include \"../tagfs.h\"\n"
-a = "    uint32_t   tag_ids[2] = {1, 2};\n\n    TEST_ASSERT_EQ(tagfs_create_file(\"test_file\", tag_ids, 2, 0, &file_id), 0,\n"
+a = "    uint32_t   tag_ids[2] = {1, 2};\n\n    TEST_ASSERT_EQ(tagfs_create_file(vol, \"test_file\", tag_ids, 2, 0, &file_id), 0,\n"
 assert s.count(inc) == 1 and s.count(a) == 1, "stand leak anchor missing"
 s = s.replace(inc, inc +
     "#include \"../block_map/block_map.h\"   /* logcheck mutation */\n"
@@ -8422,9 +8422,9 @@ open(p, "w").write(s.replace(a,
     "    uint32_t   tag_ids[2] = {1, 2};\n"
     "    uint64_t   leaked;   /* logcheck mutation: a block taken and never given back */\n"
     "\n"
-    "    TEST_ASSERT_EQ(AllotmentTakeBookRun(1ull << 62, 1, 0, EndpaperDataKeeps(false), &leaked), 0,\n"
+    "    TEST_ASSERT_EQ(AllotmentTakeBookRun(vol, 1ull << 62, 1, 0, EndpaperDataKeeps(vol, false), &leaked), 0,\n"
     "                   \"a block is taken\");\n"
-    "    TEST_ASSERT_EQ(tagfs_create_file(\"test_file\", tag_ids, 2, 0, &file_id), 0,\n", 1))
+    "    TEST_ASSERT_EQ(tagfs_create_file(vol, \"test_file\", tag_ids, 2, 0, &file_id), 0,\n", 1))
 EOF
     mut_done src/kernel/tagfs/tests/core_tests.c "logcheck mutation" 3
 }
@@ -9089,8 +9089,8 @@ quill_mutants_on() {
     python3 - <<'EOF2'
 for p, a, b in (
     ("src/kernel/tagfs/settle/sewing.c",
-     "    error_t rc   = StitchLay(s, &word);\n",
-     "    error_t rc   = s->use && s->use->bytes ? (word = true, ERR_TAGFS_NO_SPACE) : StitchLay(s, &word);   /* logcheck mutation: a word with bytes finds no room on the ribbon */\n"),
+     "    error_t rc   = StitchLay(vol, s, &word);\n",
+     "    error_t rc   = s->use && s->use->bytes ? (word = true, ERR_TAGFS_NO_SPACE) : StitchLay(vol, s, &word);   /* logcheck mutation: a word with bytes finds no room on the ribbon */\n"),
     ("src/userspace/apps/quilltest_throwaway.c", "        int drc = delete((file_id_t)fid);\n",
      "        int drc = (i % 1000u == 999u) ? 0 : delete((file_id_t)fid);   /* logcheck mutation: one in a thousand stays */\n"),
 ):
@@ -9278,7 +9278,7 @@ stackguard_block_on() {
     python3 - <<'EOF2'
 p = "src/kernel/tagfs/tagfs.c"
 s = open(p).read()
-anchor = "void tagfs_close(TagFSFileHandle *handle)\n{\n"
+anchor = "void tagfs_close(TagFSVolume* vol, TagFSFileHandle *handle)\n{\n"
 assert s.count(anchor) == 1, "stackguard tagfs_close anchor missing"
 s = s.replace(anchor, anchor +
     "    volatile uint8_t logcheck_scratch[TAGFS_BLOCK_SIZE];   /* logcheck mutation: a block on the stack */\n"
@@ -9558,7 +9558,7 @@ run_lockrankmut() {
     python3 - <<'EOF'
 p = "src/kernel/tagfs/tagfs.c"
 s = open(p).read()
-a = "static TagFSState g_state = { .lock = TAGFS_LOCK_INIT(\"state\", LOCK_RANK_STATE) };\n"
+a = "#include \"tagfs_volume.h\"\n"
 assert s.count(a) == 1, "lockrankmut: the bare-lock anchor is missing"
 open(p, "w").write(s.replace(a, a + "static spinlock_t g_lockrankmut_bare;   /* logcheck mutation: a TagFS lock with no rank */\n", 1))
 EOF
@@ -9734,9 +9734,9 @@ turnsmut_idle_on() {
     python3 - <<'EOF'
 p = "src/kernel/tagfs/settle/cadence.c"
 s = open(p).read()
-a = "    return HelmReadyListed() || SettleIdleOwed();\n"
+a = "    return HelmReadyListed(vol) || SettleIdleOwed(vol);\n"
 assert s.count(a) == 1, "turnsmut idle anchor missing"
-s = s.replace(a, "    return SettleIdleOwed();   /* logcheck mutation: idle owed the quantum for the Settle alone */\n", 1)
+s = s.replace(a, "    return SettleIdleOwed(vol);   /* logcheck mutation: idle owed the quantum for the Settle alone */\n", 1)
 open(p, "w").write(s)
 EOF
     mut_done src/kernel/tagfs/settle/cadence.c "logcheck mutation" 1

@@ -3,6 +3,7 @@
 #include "../mount/book_mount.h"
 #include "../tag_registry/tag_registry.h"
 #include "../integrity/gloss.h"
+#include "tagfs_volume.h"
 
 /*
  * The elements of a whole Tally's trees, as they come (binder_nodes.c): each
@@ -145,16 +146,16 @@ static error_t FileHeadItem(BinderWork* w, const BinderFile* f, BinderItem* it)
 /* A run's birth: its own, or — born of this mount's writing — the seq of the
  * stitch that put it in (births.c; a run SHARED of file `fid`'s own,
  * births_shared.c). 0 when nobody knows it. */
-static uint64_t RunBirth(uint64_t fid, const Strip* s)
+static uint64_t RunBirth(TagFSVolume* vol, uint64_t fid, const Strip* s)
 {
     if (s->birth)
         return s->birth;
-    return s->kind == STRIP_SHARED ? BirthsSharedOf(fid, s->start) : BirthsOf(s->start);
+    return s->kind == STRIP_SHARED ? BirthsSharedOf(vol, fid, s->start) : BirthsOf(vol, s->start);
 }
 
 /* The Parcel `strips` of file `f`, (fid, 1 + b) — b the file block it begins
  * at — counting none: its runs in the Tally's form, born where they were. */
-static error_t ParcelItem(BinderWork* w, const BinderFile* f, const Strip* strips, uint32_t n, BinderItem* it)
+static error_t ParcelItem(TagFSVolume* vol, BinderWork* w, const BinderFile* f, const Strip* strips, uint32_t n, BinderItem* it)
 {
     BinderItems* p = &w->items;
     uint64_t     cursor = 0, blocks = 0;
@@ -166,7 +167,7 @@ static error_t ParcelItem(BinderWork* w, const BinderFile* f, const Strip* strip
                        .hole = strips[i].kind == STRIP_HOLE, .ext_len = 0, .ext = NULL };
         if (strips[i].kind == STRIP_SHARED)
             r.ext = RibbonSharedList(&r.ext_len);
-        if (!r.hole && (r.birth = RunBirth(f->fid, &strips[i])) == 0) {
+        if (!r.hole && (r.birth = RunBirth(vol, f->fid, &strips[i])) == 0) {
             kprintf("[TagFS] DEFECT: the run of fid %llu at block %llu (%llu blocks) has no birth this mount "
                     "knows — no Tally is written over a birth it would make up\n", (unsigned long long)f->fid,
                     (unsigned long long)r.start, (unsigned long long)r.count);
@@ -240,10 +241,10 @@ static error_t KeptParcelItem(BinderWork* w, const BookKeptFile* k, uint32_t i, 
 
 /* The next item of the files locked by name, the one at p->kept: its header,
  * then its Parcels; *got false once it is done (the walk moves past it). */
-static error_t KeptNext(BinderWork* w, BinderItem* it, bool* got)
+static error_t KeptNext(TagFSVolume* vol, BinderWork* w, BinderItem* it, bool* got)
 {
     BinderItems*        p = &w->items;
-    const BookKeptFile* k = &g_book.kept[p->kept];
+    const BookKeptFile* k = &vol->book.kept[p->kept];
     *got = true;
     if (!p->kept_head) {
         p->kept_head = true;
@@ -263,11 +264,11 @@ static error_t KeptNext(BinderWork* w, BinderItem* it, bool* got)
  * them, in the order of their ids, the files the mount locked by name, as
  * what of them read lay: a file locked stays locked across a Tally (§16.4
  * п.5), its ground held. */
-static error_t FilesNext(BinderWork* w, BinderItem* it, bool* got)
+static error_t FilesNext(TagFSVolume* vol, BinderWork* w, BinderItem* it, bool* got)
 {
     BinderItems* p = &w->items;
     *got = false;
-    while (p->chunk || p->kept < g_book.nkept) {
+    while (p->chunk || p->kept < vol->book.nkept) {
         if (p->chunk && p->at == p->chunk->n) {
             p->chunk = p->chunk->next;
             p->at    = 0;
@@ -275,8 +276,8 @@ static error_t FilesNext(BinderWork* w, BinderItem* it, bool* got)
             continue;
         }
         const BinderFile* f = p->chunk ? &p->chunk->f[p->at] : NULL;
-        if (p->kept < g_book.nkept && !p->head && (!f || g_book.kept[p->kept].fid < f->fid)) {
-            error_t rc = KeptNext(w, it, got);
+        if (p->kept < vol->book.nkept && !p->head && (!f || vol->book.kept[p->kept].fid < f->fid)) {
+            error_t rc = KeptNext(vol, w, it, got);
             if (rc != OK || *got)
                 return rc;
             continue;
@@ -292,7 +293,7 @@ static error_t FilesNext(BinderWork* w, BinderItem* it, bool* got)
         uint32_t     n      = 0;
         if (StripWalkParcel(&p->walk, &strips, &n)) {
             *got = true;
-            return ParcelItem(w, f, strips, n, it);
+            return ParcelItem(vol, w, f, strips, n, it);
         }
         p->at++;
         p->head = false;
@@ -305,13 +306,13 @@ static error_t FilesNext(BinderWork* w, BinderItem* it, bool* got)
  * the self-check holds them to the Tally before. A margin's tags come out: the
  * measure takes it into a short row, or the walk skips it (binder_nodes.c,
  * LeafKept). */
-static error_t TagsNext(BinderWork* w, BinderItem* it, bool* got)
+static error_t TagsNext(TagFSVolume* vol, BinderWork* w, BinderItem* it, bool* got)
 {
     BinderItems* p = &w->items;
     TagRolled    rolled;
     uint32_t     id = 0;
     for (;;) {
-        *got = TagRoll(tagfs_get_state()->registry, p->tag, w->tag_hi, &rolled);
+        *got = TagRoll(vol->state.registry, p->tag, w->tag_hi, &rolled);
         if (!*got)
             return OK;
         id = rolled.id;
@@ -385,22 +386,22 @@ static bool DigestsRot(const BinderWork* w, BinderDigestAt* at, uint64_t block, 
 /* The digest of `block`: the Gloss's, or the Tally's — or, its leaf reading
  * in no copy under Escheat, its data's (escheat.c). *have false when none
  * names one; a refusal of the Tally's leaf, the medium's or memory's. */
-static error_t DigestOf(uint64_t block, uint64_t* digest, bool* have)
+static error_t DigestOf(TagFSVolume* vol, uint64_t block, uint64_t* digest, bool* have)
 {
     error_t refused = OK;
-    *have = GlossFind(block, digest);
+    *have = GlossFind(vol, block, digest);
     if (*have)
         return OK;
-    TallyDigestSays says = TallyDigestFind(block, digest, &refused);
+    TallyDigestSays says = TallyDigestFind(vol, block, digest, &refused);
     *have = says == TALLY_DIGEST_NAMED;
     if (says == TALLY_DIGEST_ROTTEN)
-        return EscheatDigestOf(block, digest, have);
+        return EscheatDigestOf(vol, block, digest, have);
     return says == TALLY_DIGEST_UNREAD ? refused : OK;
 }
 
 /* The next digested block of ground `g` (`n` runs) from where `at` stands, the
  * rotten ranges passed over: false at the end. */
-static error_t DigestsFirst(BinderWork* w, const BinderGround* g, uint64_t n, BinderDigestAt* at, uint64_t* block,
+static error_t DigestsFirst(TagFSVolume* vol, BinderWork* w, const BinderGround* g, uint64_t n, BinderDigestAt* at, uint64_t* block,
                             uint64_t* digest, bool* found)
 {
     *found = false;
@@ -419,7 +420,7 @@ static error_t DigestsFirst(BinderWork* w, const BinderGround* g, uint64_t n, Bi
             continue;
         }
         bool    have = false;
-        error_t rc   = DigestOf(at->next, digest, &have);
+        error_t rc   = DigestOf(vol, at->next, digest, &have);
         if (rc != OK || have) {
             *block = at->next++;
             *found = rc == OK;
@@ -430,11 +431,11 @@ static error_t DigestsFirst(BinderWork* w, const BinderGround* g, uint64_t n, Bi
     return OK;
 }
 
-error_t BinderDigestsElement(BinderWork* w, const BinderGround* g, uint64_t n, BinderDigestAt* at, uint8_t* buf,
+error_t BinderDigestsElement(TagFSVolume* vol, BinderWork* w, const BinderGround* g, uint64_t n, BinderDigestAt* at, uint8_t* buf,
                              BinderItem* it, bool* got)
 {
     uint64_t first = 0, digest = 0, past = 0, until = 0;
-    error_t  rc    = DigestsFirst(w, g, n, at, &first, &digest, got);
+    error_t  rc    = DigestsFirst(vol, w, g, n, at, &first, &digest, got);
     if (rc != OK || !*got)
         return rc;
     uint8_t* d = buf + 10u;
@@ -445,7 +446,7 @@ error_t BinderDigestsElement(BinderWork* w, const BinderGround* g, uint64_t n, B
     while (k < DIGEST_ITEM_MOST && at->next < run->start + run->count && at->next < until &&
            at->next / DIGEST_ITEM_MOST == first / DIGEST_ITEM_MOST) {
         bool have = false;
-        if ((rc = DigestOf(at->next, &digest, &have)) != OK)
+        if ((rc = DigestOf(vol, at->next, &digest, &have)) != OK)
             return rc;
         if (!have)
             break;
@@ -464,31 +465,31 @@ error_t BinderDigestsElement(BinderWork* w, const BinderGround* g, uint64_t n, B
  * kernel's Tally laid in walks every block of the state, and holds the
  * elements it walks in the ranges it lays and offers to the ones the ground
  * it lays in speaks for (binder_digests.c). */
-static error_t DigestsNext(BinderWork* w, BinderItem* it, bool* got)
+static error_t DigestsNext(TagFSVolume* vol, BinderWork* w, BinderItem* it, bool* got)
 {
     BinderItems* p = &w->items;
     if (!ItemRoom(p, BINDER_DIGEST_ITEM_BYTES))
         return ERR_NO_MEMORY;
-    error_t rc = BinderDigestsElement(w, w->ground, w->nground, &p->digest, p->buf, it, got);
+    error_t rc = BinderDigestsElement(vol, w, w->ground, w->nground, &p->digest, p->buf, it, got);
 #if BINDER_CHECKS
     if (rc == OK && w->tip && !w->measuring)
-        rc = BinderDigestsHeld(w, it, !*got);
+        rc = BinderDigestsHeld(vol, w, it, !*got);
 #endif
     return rc;
 }
 
 /* The next element of the tree's leaves: *got false at its end. */
-error_t BinderLeafItemNext(BinderWork* w, BinderItem* it, bool* got)
+error_t BinderLeafItemNext(TagFSVolume* vol, BinderWork* w, BinderItem* it, bool* got)
 {
     switch (w->tree) {
     case TALLY_FILES:
-        return FilesNext(w, it, got);
+        return FilesNext(vol, w, it, got);
     case TALLY_TAGS:
-        return TagsNext(w, it, got);
+        return TagsNext(vol, w, it, got);
     case TALLY_USE:
         return UseNext(w, it, got);
     case TALLY_DIGESTS:
-        return DigestsNext(w, it, got);
+        return DigestsNext(vol, w, it, got);
     default:
         *got = false;
         return OK;
@@ -518,7 +519,7 @@ static const BinderKept* KeptBelowNext(BinderWork* w)
 /* A node named as it lies, as the element of the level above it: its old
  * pointer, every copy, its old separator and count — and, laid for good,
  * everything under it carried into the draft of the Foliation as it was. */
-static error_t KeptItem(BinderWork* w, const BinderKept* r, BinderItem* it)
+static error_t KeptItem(TagFSVolume* vol, BinderWork* w, const BinderKept* r, BinderItem* it)
 {
     BinderItems* p = &w->items;
     uint64_t     blocks[BINDER_PTR_COPIES_MOST];
@@ -526,16 +527,16 @@ static error_t KeptItem(BinderWork* w, const BinderKept* r, BinderItem* it)
     if (r->at.ptr.copies > BINDER_PTR_COPIES_MOST)
         return ERR_TAGFS_CORRUPTED;
     for (uint32_t k = 0; k < r->at.ptr.copies; k++)
-        blocks[k] = TallyPtrBlock(&r->at.ptr, k);
+        blocks[k] = TallyPtrBlock(vol, &r->at.ptr, k);
     uint32_t plen = BookPtrPut(ptr, r->at.ptr.seq, r->at.ptr.sheets, blocks, r->at.ptr.copies);
     if (!ItemRoom(p, 12u + plen))
         return ERR_NO_MEMORY;
     *it = (BinderItem){ .key = KeptKey(r), .count = r->at.count, .body = p->buf,
                         .len = TallyInnerPut(p->buf, r->at.count, ptr, plen) };
     if (!w->measuring) {
-        FoliationDraftNode(w->tree, w->level - 1u, it->key, false, r->at.count, &r->at.ptr, r->items, r->text);
+        FoliationDraftNode(vol, w->tree, w->level - 1u, it->key, false, r->at.count, &r->at.ptr, r->items, r->text);
         if (r->at.level > 0)
-            FoliationDraftUnder(w->tree, &r->at);
+            FoliationDraftUnder(vol, w->tree, &r->at);
         w->named++;
     }
     w->kept_at++;
@@ -544,7 +545,7 @@ static error_t KeptItem(BinderWork* w, const BinderKept* r, BinderItem* it)
 
 /* The level below's next node, or node named as it lies, in key order — the
  * element that names it: its first key, the count it carries, its BookPtr. */
-error_t BinderInnerItemNext(BinderWork* w, BinderItem* it, bool* got)
+error_t BinderInnerItemNext(TagFSVolume* vol, BinderWork* w, BinderItem* it, bool* got)
 {
     BinderItems*       p   = &w->items;
     const BinderLevel* lv  = &w->lv[w->level - 1u];
@@ -557,9 +558,9 @@ error_t BinderInnerItemNext(BinderWork* w, BinderItem* it, bool* got)
     if (!*got)
         return OK;
     if (rot && (!kid || BinderKeyLess(w->tree, KeptKey(rot), kid->key)))
-        return KeptItem(w, rot, it);
-    blocks[0] = w->measuring ? g_book.data_end : kid->block[0];
-    blocks[1] = w->measuring ? g_book.data_end : kid->block[1];
+        return KeptItem(vol, w, rot, it);
+    blocks[0] = w->measuring ? vol->book.data_end : kid->block[0];
+    blocks[1] = w->measuring ? vol->book.data_end : kid->block[1];
     plen      = BookPtrPut(ptr, w->seq, kid->sheets, blocks, 2u);
     if (!ItemRoom(p, 12u + plen))
         return ERR_NO_MEMORY;
@@ -568,7 +569,7 @@ error_t BinderInnerItemNext(BinderWork* w, BinderItem* it, bool* got)
     if (!w->measuring) {
         TallyPtr laid = { .seq = w->seq, .sheets = kid->sheets, .copies = 2u, .more = 0,
                           .block = { blocks[0], blocks[1] } };
-        FoliationDraftNode(w->tree, w->level - 1u, kid->key, false, kid->count, &laid, kid->items, kid->text);
+        FoliationDraftNode(vol, w->tree, w->level - 1u, kid->key, false, kid->count, &laid, kid->items, kid->text);
     }
     w->kid_at++;
     return OK;

@@ -1,4 +1,5 @@
 #include "binder_internal.h"
+#include "tagfs_volume.h"
 
 /*
  * DIGESTS laid in among the nodes of the Tally before (TipIn): the leaves it
@@ -76,11 +77,12 @@ static error_t OldItem(void* ctx, TallyKey key, const uint8_t* body, uint32_t le
  * (tip_in.c, Touched; binder_done.c, GlossCaptured). */
 static error_t OldRotten(void* ctx, const TallyPlace* at, const char* why)
 {
+    TagFSVolume* vol = TagFSHome();
     OldRead* c = ctx;
     c->rotten  = true;
     kprintf("[TagFS] no copy of the DIGESTS leaf of blocks [%llu, %s%llu) reads (%s): Tally %llu names it as it "
             "lies\n", (unsigned long long)(at->has_lo ? at->lo.k1 : 0), at->has_hi ? "" : "the end, ",
-            (unsigned long long)(at->has_hi ? at->hi.k1 : tagfs_get_state()->block_end), why,
+            (unsigned long long)(at->has_hi ? at->hi.k1 : vol->state.block_end), why,
             (unsigned long long)c->r->w.seq);
     return OK;
 }
@@ -89,9 +91,10 @@ static error_t OldRotten(void* ctx, const TallyPlace* at, const char* why)
  * this one may name it as it lies, an offer the row did not take. */
 static void OldMended(void* ctx, uint64_t tree, const TallyPlace* at, uint32_t failed)
 {
+    TagFSVolume* vol = TagFSHome();
     (void)ctx;
     (void)failed;
-    DogEarMended(tree, at);
+    DogEarMended(vol, tree, at);
 }
 
 /* Whether sifted leaf `i` is laid or offered, reads as far as is known, and
@@ -102,7 +105,7 @@ static bool ReadWanted(const BinderRun* r, uint32_t i)
     return (s->lf[i] == TIP_IN_LAID || s->lf[i] == TIP_IN_MARGIN) && !s->leaf[i].rotten && r->dread[i] == 0;
 }
 
-error_t BinderDigestsReadNext(BinderRun* r, bool* done)
+error_t BinderDigestsReadNext(TagFSVolume* vol, BinderRun* r, bool* done)
 {
     BinderSift* s = &r->digests;
     *done = false;
@@ -120,7 +123,7 @@ error_t BinderDigestsReadNext(BinderRun* r, bool* done)
     uint32_t  i    = r->dread_at;
     OldRead   c    = { .r = r, .leaf = i };
     TallySink sink = { .ctx = &c, .item = OldItem, .rotten = OldRotten, .mend = OldMended };
-    error_t   rc   = TallyLeafRead(TALLY_DIGESTS, &s->leaf[i].place, &sink);
+    error_t   rc   = TallyLeafRead(vol, TALLY_DIGESTS, &s->leaf[i].place, &sink);
     if (rc != OK)
         return rc;
     r->dread[i] = c.rotten ? 2u : 1u;
@@ -128,7 +131,7 @@ error_t BinderDigestsReadNext(BinderRun* r, bool* done)
         return OK;
     s->leaf[i].rotten = true;
     r->dread_at       = 0;
-    return BinderSiftAgain(s);
+    return BinderSiftAgain(vol, s);
 }
 
 // ----------------------------------------------------------------------------
@@ -174,11 +177,11 @@ static error_t RangesLaid(BinderRun* r, BinderGround** out, uint64_t* n)
 
 /* The runs the elements of the leaves laid and offered name, less the ground
  * let go since, into `out` — in order, joined. */
-static error_t OldKept(BinderRun* r, BinderGround** out, uint64_t* n, uint64_t* cap)
+static error_t OldKept(TagFSVolume* vol, BinderRun* r, BinderGround** out, uint64_t* n, uint64_t* cap)
 {
     const BinderSift*   s    = &r->digests;
     uint64_t            ng   = 0, m = 0, mcap = 0, j = 0;
-    const BinderGround* gone = DogEarTakenGround(true, &ng);
+    const BinderGround* gone = DogEarTakenGround(vol, true, &ng);
     BinderGround*       old  = NULL;
     error_t             rc   = OK;
     for (uint64_t k = 0; rc == OK && k < r->nold; k++)
@@ -201,10 +204,10 @@ static error_t OldKept(BinderRun* r, BinderGround** out, uint64_t* n, uint64_t* 
 }
 
 /* The ground the files took since in ranges `rg` (`nr`, in order), into `out`. */
-static error_t BornIn(const BinderGround* rg, uint64_t nr, BinderGround** out, uint64_t* n, uint64_t* cap)
+static error_t BornIn(TagFSVolume* vol, const BinderGround* rg, uint64_t nr, BinderGround** out, uint64_t* n, uint64_t* cap)
 {
     uint64_t            nb = 0, j = 0;
-    const BinderGround* born = DogEarTakenGround(false, &nb);
+    const BinderGround* born = DogEarTakenGround(vol, false, &nb);
     error_t             rc   = OK;
     for (uint64_t i = 0; rc == OK && i < nb; i++) {
         while (j < nr && RunEnd(&rg[j]) <= born[i].start)
@@ -241,7 +244,7 @@ static error_t BornRanges(const BinderRun* r, const BinderGround* laid, uint64_t
 
 /* The ground laid in: its runs and the ranges it lays and offers — where the
  * Binder checks, held apart from the walk's ground of every live file. */
-static error_t GroundLaidIn(BinderRun* r)
+static error_t GroundLaidIn(TagFSVolume* vol, BinderRun* r)
 {
     BinderWork*   w = &r->w;
     BinderGround *laid = NULL, *born = NULL, *g = NULL;
@@ -258,9 +261,9 @@ static error_t GroundLaidIn(BinderRun* r)
     if (rc == OK)
         rc = BornRanges(r, laid, nl, !BINDER_CHECKS, &born, &nb);
     if (rc == OK)
-        rc = OldKept(r, &g, &n, &cap);
+        rc = OldKept(vol, r, &g, &n, &cap);
     if (rc == OK)
-        rc = BornIn(born, nb, &g, &n, &cap);
+        rc = BornIn(vol, born, nb, &g, &n, &cap);
     kfree(born);
     if (rc != OK) {
         kfree(laid);
@@ -283,11 +286,11 @@ static error_t GroundLaidIn(BinderRun* r)
     return OK;
 }
 
-error_t BinderDigestsSifted(BinderRun* r)
+error_t BinderDigestsSifted(TagFSVolume* vol, BinderRun* r)
 {
-    error_t rc = BinderSiftTaken(r, &r->digests);
+    error_t rc = BinderSiftTaken(vol, r, &r->digests);
     if (rc == OK)
-        rc = GroundLaidIn(r);
+        rc = GroundLaidIn(vol, r);
     BinderDigestsLetGo(r);
     return rc;
 }
@@ -310,25 +313,25 @@ void BinderDigestsLetGo(BinderRun* r)
 
 /* The places of the reads' table [*from, *to) a DIGESTS node named as it lies
  * holds — itself alone when it is a leaf, or reads in no copy. */
-static void KeptLeaves(const BinderKept* k, uint32_t n, uint32_t* from, uint32_t* to)
+static void KeptLeaves(TagFSVolume* vol, const BinderKept* k, uint32_t n, uint32_t* from, uint32_t* to)
 {
     if (k->rotten || k->at.level == 0) {
         *from = 0;
         *to   = 1;
         return;
     }
-    *from = k->at.has_lo && n ? BinderSiftLeafOf(TALLY_DIGESTS, n, k->at.lo) : 0;
-    *to   = k->at.has_hi ? BinderSiftLeafFrom(TALLY_DIGESTS, *from + 1u < n ? *from + 1u : n, n, k->at.hi) : n;
+    *from = k->at.has_lo && n ? BinderSiftLeafOf(vol, TALLY_DIGESTS, n, k->at.lo) : 0;
+    *to   = k->at.has_hi ? BinderSiftLeafFrom(vol, TALLY_DIGESTS, *from + 1u < n ? *from + 1u : n, n, k->at.hi) : n;
 }
 
 /* The `i`-th place a node named as it lies gives the reads' table: false for
  * a place past the table's end, which KeptLeaves never gives. */
-static bool KeptLeaf(const BinderKept* k, uint32_t i, TallyPlace* p, bool* rotten)
+static bool KeptLeaf(TagFSVolume* vol, const BinderKept* k, uint32_t i, TallyPlace* p, bool* rotten)
 {
     if (k->rotten || k->at.level == 0) {
         *p      = k->at;
         *rotten = k->rotten;
-    } else if (!BinderSiftLeafAt(TALLY_DIGESTS, i, p, rotten)) {
+    } else if (!BinderSiftLeafAt(vol, TALLY_DIGESTS, i, p, rotten)) {
         return false;
     }
     if (!p->has_lo)
@@ -352,12 +355,12 @@ static const BinderKept* KeptNext(const BinderWork* w, uint32_t* r)
  * their places, a range no copy of whose node reads too — among the leaves it
  * laid, in the order of their keys.
  */
-error_t BinderDigestsTipTurn(const BinderWork* w)
+error_t BinderDigestsTipTurn(TagFSVolume* vol, const BinderWork* w)
 {
-    uint32_t    nt = TallyDigestLeaves(), n = w->ndleaves, from = 0, to = 0, r = 0, k = 0, at = 0;
+    uint32_t    nt = TallyDigestLeaves(vol), n = w->ndleaves, from = 0, to = 0, r = 0, k = 0, at = 0;
     const BinderKept* kept;
     for (uint32_t i = 0; (kept = KeptNext(w, &i)) != NULL; i++) {
-        KeptLeaves(kept, nt, &from, &to);
+        KeptLeaves(vol, kept, nt, &from, &to);
         n += to - from;
     }
     TallyPlace* places = kmalloc(sizeof(TallyPlace) * (n ? n : 1u));
@@ -366,9 +369,9 @@ error_t BinderDigestsTipTurn(const BinderWork* w)
     while (rc == OK && at < n) {
         kept = KeptNext(w, &r);
         if (kept && (k == w->ndleaves || (kept->at.has_lo ? kept->at.lo.k1 : 0) < w->dleaves[k].key.k1)) {
-            KeptLeaves(kept, nt, &from, &to);
+            KeptLeaves(vol, kept, nt, &from, &to);
             for (uint32_t i = from; rc == OK && i < to && at < n; i++, at++)
-                if (!KeptLeaf(kept, i, &places[at], &rotten[at])) {
+                if (!KeptLeaf(vol, kept, i, &places[at], &rotten[at])) {
                     kprintf("[TagFS] DEFECT: the reads' DIGESTS table has no place %u under a node Tally %llu "
                             "names as it lies — the reads stay with the Tally before it and the Gloss\n", i,
                             (unsigned long long)w->seq);
@@ -387,16 +390,16 @@ error_t BinderDigestsTipTurn(const BinderWork* w)
     }
     if (rc == OK) {
         TipInLeavesClosed(places, n);
-        rc = TallyDigestsTurn(places, rotten, n);
+        rc = TallyDigestsTurn(vol, places, rotten, n);
     }
     kfree(places);
     kfree(rotten);
     return rc;
 }
 
-void BinderDigestsKeptLaid(BinderWork* w)
+void BinderDigestsKeptLaid(TagFSVolume* vol, BinderWork* w)
 {
-    uint32_t          nt = TallyDigestLeaves(), from = 0, to = 0;
+    uint32_t          nt = TallyDigestLeaves(vol), from = 0, to = 0;
     const BinderKept* kept;
     TallyPlace        p;
     bool              rotten = false;
@@ -405,8 +408,8 @@ void BinderDigestsKeptLaid(BinderWork* w)
             w->dsheets += kept->at.level == 0 ? kept->at.ptr.sheets : 0;
             continue;
         }
-        KeptLeaves(kept, nt, &from, &to);
-        for (uint32_t i = from; i < to && KeptLeaf(kept, i, &p, &rotten); i++) {
+        KeptLeaves(vol, kept, nt, &from, &to);
+        for (uint32_t i = from; i < to && KeptLeaf(vol, kept, i, &p, &rotten); i++) {
             w->dsheets += p.level == 0 ? p.ptr.sheets : 0;
             if (p.level == 0 && !rotten)
                 EndpaperLaidNode(&w->laid, TALLY_DIGESTS, 0, p.ptr.sheets, w->grid, p.lo.k1);
@@ -417,7 +420,7 @@ void BinderDigestsKeptLaid(BinderWork* w)
 }
 
 #if BINDER_CHECKS
-error_t BinderDigestsHeld(BinderWork* w, const BinderItem* it, bool end)
+error_t BinderDigestsHeld(TagFSVolume* vol, BinderWork* w, const BinderItem* it, bool end)
 {
     BinderItems* p   = &w->items;
     BinderItem   tip = { 0 };
@@ -428,7 +431,7 @@ error_t BinderDigestsHeld(BinderWork* w, const BinderItem* it, bool end)
         if (p->tip_range == w->ndranges || w->dranges[p->tip_range].start > it->key.k1)
             return OK;
     }
-    error_t rc = BinderDigestsElement(w, w->tground, w->ntground, &p->tip_at, p->tip_buf, &tip, &got);
+    error_t rc = BinderDigestsElement(vol, w, w->tground, w->ntground, &p->tip_at, p->tip_buf, &tip, &got);
     if (rc != OK || (end && !got))
         return rc;
     if (!end && got && tip.key.k1 == it->key.k1 && tip.len == it->len && memcmp(tip.body, it->body, it->len) == 0)

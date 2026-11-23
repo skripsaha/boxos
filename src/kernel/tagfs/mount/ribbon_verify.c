@@ -6,6 +6,7 @@
 #include "boardroom.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
+#include "tagfs_volume.h"
 
 /*
  * RibbonVerify — the data of the newest stitch held to its digests.
@@ -69,16 +70,16 @@ typedef struct {
 
 /* A block of fresh data held to digest `want`: *matches whether it reads and
  * matches. OK, or the medium's refusal. */
-static error_t RibbonBlockHeld(RibbonHeld* h, uint64_t block, uint64_t want, bool* matches)
+static error_t RibbonBlockHeld(TagFSVolume* vol, RibbonHeld* h, uint64_t block, uint64_t want, bool* matches)
 {
     *matches = false;
-    if (block > g_book.data_end)
+    if (block > vol->book.data_end)
         return OK;
-    int rc = tagfs_volume_read(block * TAGFS_BLOCK_SECTORS, TAGFS_BLOCK_SECTORS, h->window);
+    int rc = tagfs_volume_read(vol, block * TAGFS_BLOCK_SECTORS, TAGFS_BLOCK_SECTORS, h->window);
     if (rc == (int)ERR_BAD_SECTOR)
         return OK;
     if (rc != 0)
-        return BookUnitRefused(rc);
+        return BookUnitRefused(vol, rc);
     *matches = BoxHashIntegrity(h->window, TAGFS_BLOCK_SIZE, &h->ctx) == want;
     return OK;
 }
@@ -88,11 +89,11 @@ static error_t RibbonBlockHeld(RibbonHeld* h, uint64_t block, uint64_t want, boo
  * the medium would not give whole, a block a read, so the block that does not
  * read is the one found. h->bad the first that does not match. OK, or the
  * medium's refusal. */
-static error_t RibbonWindowHeld(RibbonHeld* h, uint64_t block, uint32_t n, uint64_t k)
+static error_t RibbonWindowHeld(TagFSVolume* vol, RibbonHeld* h, uint64_t block, uint32_t n, uint64_t k)
 {
-    int rc = block + n - 1u > g_book.data_end
+    int rc = block + n - 1u > vol->book.data_end
                  ? (int)ERR_BAD_SECTOR
-                 : tagfs_volume_read(block * TAGFS_BLOCK_SECTORS, n * TAGFS_BLOCK_SECTORS, h->window);
+                 : tagfs_volume_read(vol, block * TAGFS_BLOCK_SECTORS, n * TAGFS_BLOCK_SECTORS, h->window);
     for (uint32_t b = 0; b < n && h->bad == UINT64_MAX; b++) {
         bool    matches = false;
         error_t held    = OK;
@@ -100,9 +101,9 @@ static error_t RibbonWindowHeld(RibbonHeld* h, uint64_t block, uint32_t n, uint6
             matches = BoxHashIntegrity(h->window + (uint64_t)b * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, &h->ctx) ==
                       TallyDigestAt(h->digests, k + b);
         else if (rc == (int)ERR_BAD_SECTOR)
-            held = RibbonBlockHeld(h, block + b, TallyDigestAt(h->digests, k + b), &matches);
+            held = RibbonBlockHeld(vol, h, block + b, TallyDigestAt(h->digests, k + b), &matches);
         else
-            return BookUnitRefused(rc);
+            return BookUnitRefused(vol, rc);
         if (held != OK)
             return held;
         if (!matches)
@@ -114,7 +115,7 @@ static error_t RibbonWindowHeld(RibbonHeld* h, uint64_t block, uint32_t n, uint6
 /* The DATA runs not SHARED of a record's runs, read in order against its
  * digests until one does not match or the digests end — every fresh block
  * counted into `checked`. OK, or the medium's refusal. */
-static error_t RibbonRunsHeld(const uint8_t* runs, uint32_t bytes, uint64_t n, uint64_t cursor, uint64_t seq,
+static error_t RibbonRunsHeld(TagFSVolume* vol, const uint8_t* runs, uint32_t bytes, uint64_t n, uint64_t cursor, uint64_t seq,
                               RibbonHeld* h)
 {
     uint32_t at = 0;
@@ -128,10 +129,10 @@ static error_t RibbonRunsHeld(const uint8_t* runs, uint32_t bytes, uint64_t n, u
             take = fresh;
         for (uint64_t b = 0; b < take && h->bad == UINT64_MAX;) {
             uint32_t n  = take - b < h->blocks ? (uint32_t)(take - b) : h->blocks;
-            error_t  rc = RibbonWindowHeld(h, r.start + b, n, h->k + b);
+            error_t  rc = RibbonWindowHeld(vol, h, r.start + b, n, h->k + b);
             if (rc != OK)
                 return rc;
-            g_book.said.checked += n;
+            vol->book.said.checked += n;
             b += n;
         }
         h->k += take;
@@ -154,7 +155,7 @@ static error_t RibbonRunsHeld(const uint8_t* runs, uint32_t bytes, uint64_t n, u
  * So is a second record of a file this check rolled back in the same stitch:
  * its records there are passed over whole.
  */
-static error_t RibbonRecordLanded(RibbonWalk* w, const RibbonUnit* u, const RibbonRecord* r, RibbonSkipSet* undone,
+static error_t RibbonRecordLanded(TagFSVolume* vol, RibbonWalk* w, const RibbonUnit* u, const RibbonRecord* r, RibbonSkipSet* undone,
                                   RibbonHeld* h)
 {
     RibbonBorn     b;
@@ -175,19 +176,19 @@ static error_t RibbonRecordLanded(RibbonWalk* w, const RibbonUnit* u, const Ribb
     h->digests  = born ? b.digests : d.digests;
     h->ndigests = born ? b.ndigests : d.ndigests;
     if (born)
-        rc = RibbonRunsHeld(b.runs, b.runs_bytes, b.nruns, 0, u->seq, h);
+        rc = RibbonRunsHeld(vol, b.runs, b.runs_bytes, b.nruns, 0, u->seq, h);
     for (uint64_t i = 0; shaped && rc == OK && i < d.nsplice; i++) {
         RibbonSpliceNext(d.splices, d.splices_bytes, &at, &cursor, u->seq, &digests, &s);
-        rc = RibbonRunsHeld(s.runs, s.runs_bytes, s.ninsert, s.cursor, u->seq, h);
+        rc = RibbonRunsHeld(vol, s.runs, s.runs_bytes, s.ninsert, s.cursor, u->seq, h);
     }
     if (rc != OK || h->bad == UINT64_MAX)
         return rc;
     rc = RibbonSkipPut(undone, u->seq, fid);
     if (rc == OK)
-        rc = ErrataAdd(u->seq, UNDONE_NOT_LANDED, fid);
+        rc = ErrataAdd(vol, u->seq, UNDONE_NOT_LANDED, fid);
     bool torn = w->torn != NULL;
     w->lied |= torn;
-    RibbonSay(w, RIBBON_CODE_NOT_LANDED, "fid %llu's data in stitch %llu did not land (block %llu of %llu checked does "
+    RibbonSay(vol, w, RIBBON_CODE_NOT_LANDED, "fid %llu's data in stitch %llu did not land (block %llu of %llu checked does "
               "not match its digest): its record is rolled back by its splice — ERR_TAGFS_NOT_LANDED%s",
               (unsigned long long)fid, (unsigned long long)u->seq, (unsigned long long)h->bad,
               (unsigned long long)h->checked, torn ? "; a torn stitch lies after it, so the medium did not keep "
@@ -222,10 +223,10 @@ static void RibbonVerifyPriceSaid(const RibbonWalk* w, uint32_t n)
             (unsigned long long)blocks, n);
 }
 
-error_t RibbonVerify(RibbonWalk* w, RibbonSkipSet* undone)
+error_t RibbonVerify(TagFSVolume* vol, RibbonWalk* w, RibbonSkipSet* undone)
 {
     uint32_t    n      = w->nstitch < (w->lied ? 2u : 1u) ? w->nstitch : (w->lied ? 2u : 1u);
-    uint32_t    blocks = BoardroomSeatRun(tagfs_get_seat()) / TAGFS_BLOCK_SECTORS;
+    uint32_t    blocks = BoardroomSeatRun(tagfs_get_seat(vol)) / TAGFS_BLOCK_SECTORS;
     uint64_t    t0     = rdtsc();
     RibbonHeld* h      = kmalloc(sizeof(RibbonHeld));
     error_t     rc     = OK;
@@ -239,15 +240,15 @@ error_t RibbonVerify(RibbonWalk* w, RibbonSkipSet* undone)
     }
     if (w->lied)
         RibbonVerifyPriceSaid(w, n);
-    BoxHashInit(&h->ctx, tagfs_get_state()->uuid, 16);
+    BoxHashInit(&h->ctx, vol->state.uuid, 16);
     for (uint32_t s = w->nstitch - n; rc == OK && s < w->nstitch; s++) {
         const RibbonUnit* u       = w->stitch[s];
         bool              checked = RibbonChecked(w, u);
         for (uint32_t i = 0; rc == OK && checked && i < u->nrecords; i++)
-            rc = RibbonRecordLanded(w, u, &u->records[i], undone, h);
+            rc = RibbonRecordLanded(vol, w, u, &u->records[i], undone, h);
     }
     kfree(h->window);
     kfree(h);
-    g_book.said.check_us += cpu_tsc_to_us(rdtsc() - t0);
+    vol->book.said.check_us += cpu_tsc_to_us(rdtsc() - t0);
     return rc;
 }

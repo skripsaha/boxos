@@ -228,7 +228,7 @@ static void RibbonSectorJudged(RibbonUnit* u, uint32_t k, const uint8_t* raw, ui
 
 /* The unit's `of` sectors from `start` through `hop`, read a run at a time
  * and judged. */
-static error_t RibbonSectorsRead(RibbonUnit* u)
+static error_t RibbonSectorsRead(TagFSVolume* vol, RibbonUnit* u)
 {
     uint32_t k = 0;
     while (k < u->of) {
@@ -241,7 +241,7 @@ static error_t RibbonSectorsRead(RibbonUnit* u)
             n = (uint32_t)left;
         if (n > 256u)
             n = 256u;
-        error_t rc = BookUnitRead(RibbonPlaceVlba(&p), n, 0, 0, &run);
+        error_t rc = BookUnitRead(vol, RibbonPlaceVlba(&p), n, 0, 0, &run);
         for (uint32_t i = 0; rc == OK && i < n; i++)
             RibbonSectorJudged(u, k + i, run.sectors + (uint64_t)i * BOOK_SECTOR_BYTES, run.state[i]);
         BookUnitLetGo(&run);
@@ -254,7 +254,7 @@ static error_t RibbonSectorsRead(RibbonUnit* u)
 
 /* The unit's sectors read and judged, and its stream parsed whole or walked
  * in pieces. OK, ERR_NO_MEMORY, or the medium's refusal. */
-static error_t RibbonUnitFilled(RibbonUnit* u)
+static error_t RibbonUnitFilled(TagFSVolume* vol, RibbonUnit* u)
 {
     uint32_t of = u->of;
     u->size   = (uint32_t)((uint64_t)of * BOOK_PAYLOAD_BYTES);      /* RibbonShape: no more than 2^32 - 1 */
@@ -266,7 +266,7 @@ static error_t RibbonUnitFilled(RibbonUnit* u)
     u->present = u->valid + of;
     u->holds   = u->valid + 2u * (uint64_t)of;
     memset(u->stream, 0, u->size);
-    error_t rc = RibbonSectorsRead(u);
+    error_t rc = RibbonSectorsRead(vol, u);
     if (rc != OK)
         return rc;
     u->has_end = RibbonPlaceOn(&u->start, of, &u->hop, &u->end);
@@ -288,7 +288,7 @@ uint64_t RibbonUnitsReadStand(void)
 }
 #endif
 
-error_t RibbonUnitRead(const RibbonPlace* start, uint32_t of, uint64_t seq, const RibbonQuire* hop,
+error_t RibbonUnitRead(TagFSVolume* vol, const RibbonPlace* start, uint32_t of, uint64_t seq, const RibbonQuire* hop,
                        RibbonUnit** out)
 {
     RibbonUnit* u = kmalloc(sizeof(RibbonUnit));
@@ -305,7 +305,7 @@ error_t RibbonUnitRead(const RibbonPlace* start, uint32_t of, uint64_t seq, cons
     if (hop)
         u->hop = *hop;
     u->shape = RibbonShape(start->off, RibbonPlaceLeft(start), u->hop.blocks * VOLUME_BLOCK_SECTORS, of);
-    error_t rc = u->shape == RIBBON_SHAPE_KEPT ? RibbonUnitFilled(u) : OK;
+    error_t rc = u->shape == RIBBON_SHAPE_KEPT ? RibbonUnitFilled(vol, u) : OK;
     if (rc != OK) {
         RibbonUnitLetGo(u);
         return rc;
@@ -318,7 +318,7 @@ error_t RibbonUnitRead(const RibbonPlace* start, uint32_t of, uint64_t seq, cons
  * sector is a unit's first, and the Quire lies where one may (stitch.py Peek):
  * the unit's own word on where it runs on to — a word that would send the
  * reader off the volume's data run is not taken. */
-static bool RibbonPeek(const uint8_t* raw, RibbonQuire* next)
+static bool RibbonPeek(TagFSVolume* vol, const uint8_t* raw, RibbonQuire* next)
 {
     RibbonUnit     u;
     BookSectorHead h;
@@ -329,14 +329,14 @@ static bool RibbonPeek(const uint8_t* raw, RibbonQuire* next)
         return false;
     next->block  = u.head.next_block;
     next->blocks = u.head.next_blocks;
-    return RibbonQuireLies(next);
+    return RibbonQuireLies(vol, next);
 }
 
 /* The first sector from `place` through `hop` holding a stitch of seq past
  * `after`: true with its index `*j` and its head, read into `first` (one
  * sector) — false when the Quires hold none. OK, or the medium's or memory's
  * refusal. */
-static error_t RibbonLook(const RibbonPlace* place, const RibbonQuire* hop, uint64_t after, uint64_t* j,
+static error_t RibbonLook(TagFSVolume* vol, const RibbonPlace* place, const RibbonQuire* hop, uint64_t after, uint64_t* j,
                           BookSectorHead* head, uint8_t* first, bool* found)
 {
     uint64_t limit = RibbonPlaceLeft(place) + (hop ? hop->blocks * VOLUME_BLOCK_SECTORS : 0);
@@ -349,7 +349,7 @@ static error_t RibbonLook(const RibbonPlace* place, const RibbonQuire* hop, uint
         uint64_t n = RibbonPlaceLeft(&p);
         if (n > RIBBON_LOOK_SECTORS)
             n = RIBBON_LOOK_SECTORS;
-        error_t rc = BookUnitRead(RibbonPlaceVlba(&p), (uint32_t)n, 0, 0, &run);
+        error_t rc = BookUnitRead(vol, RibbonPlaceVlba(&p), (uint32_t)n, 0, 0, &run);
         for (uint32_t i = 0; rc == OK && i < n && !*found; i++) {
             const uint8_t* s = run.sectors + (uint64_t)i * BOOK_SECTOR_BYTES;
             memcpy(head, s, sizeof(*head));
@@ -367,7 +367,7 @@ static error_t RibbonLook(const RibbonPlace* place, const RibbonQuire* hop, uint
     return OK;
 }
 
-error_t RibbonUnitFind(const RibbonPlace* place, const RibbonQuire* hop, uint64_t after, RibbonUnit** out)
+error_t RibbonUnitFind(TagFSVolume* vol, const RibbonPlace* place, const RibbonQuire* hop, uint64_t after, RibbonUnit** out)
 {
     BookSectorHead head;
     RibbonQuire    own;
@@ -377,16 +377,16 @@ error_t RibbonUnitFind(const RibbonPlace* place, const RibbonQuire* hop, uint64_
     *out = NULL;
     if (!first)
         return ERR_NO_MEMORY;
-    error_t rc = RibbonLook(place, hop, after, &j, &head, first, &found);
+    error_t rc = RibbonLook(vol, place, hop, after, &j, &head, first, &found);
     if (rc == OK && found && head.at == j) {
-        bool peeked = j == 0 && RibbonPeek(first, &own);
-        rc = RibbonUnitRead(place, head.of, head.seq, peeked ? &own : hop, out);
+        bool peeked = j == 0 && RibbonPeek(vol, first, &own);
+        rc = RibbonUnitRead(vol, place, head.of, head.seq, peeked ? &own : hop, out);
     }
     kfree(first);
     return rc;
 }
 
-error_t RibbonUnitAhead(const RibbonPlace* place, uint64_t after, uint64_t* j, BookSectorHead* head, bool* found,
+error_t RibbonUnitAhead(TagFSVolume* vol, const RibbonPlace* place, uint64_t after, uint64_t* j, BookSectorHead* head, bool* found,
                         RibbonUnit** out)
 {
     RibbonQuire own;
@@ -395,17 +395,17 @@ error_t RibbonUnitAhead(const RibbonPlace* place, uint64_t after, uint64_t* j, B
     *found = false;
     if (!first)
         return ERR_NO_MEMORY;
-    error_t rc = RibbonLook(place, NULL, after, j, head, first, found);
+    error_t rc = RibbonLook(vol, place, NULL, after, j, head, first, found);
     if (rc == OK && *found && head->at == 0) {
         RibbonPlace at     = { place->quire, place->off + *j };
-        bool        peeked = RibbonPeek(first, &own);
-        rc = RibbonUnitRead(&at, head->of, head->seq, peeked ? &own : NULL, out);
+        bool        peeked = RibbonPeek(vol, first, &own);
+        rc = RibbonUnitRead(vol, &at, head->of, head->seq, peeked ? &own : NULL, out);
     }
     kfree(first);
     return rc;
 }
 
-error_t RibbonUnitHead(const RibbonPlace* place, const RibbonQuire* hop, uint64_t after, RibbonUnit* u,
+error_t RibbonUnitHead(TagFSVolume* vol, const RibbonPlace* place, const RibbonQuire* hop, uint64_t after, RibbonUnit* u,
                        bool* found)
 {
     BookUnit       run;
@@ -414,7 +414,7 @@ error_t RibbonUnitHead(const RibbonPlace* place, const RibbonQuire* hop, uint64_
     uint32_t       at = 0;
     *found = false;
     memset(u, 0, sizeof(*u));
-    error_t rc = BookUnitRead(RibbonPlaceVlba(place), 1, 0, 0, &run);
+    error_t rc = BookUnitRead(vol, RibbonPlaceVlba(place), 1, 0, 0, &run);
     if (rc == OK && run.state[0] == BOOK_SECTOR_HOLDS) {
         memcpy(&h, run.sectors, sizeof(h));
         u->start = *place;
@@ -422,7 +422,7 @@ error_t RibbonUnitHead(const RibbonPlace* place, const RibbonQuire* hop, uint64_
         u->of    = h.of;
         if (h.kind == BOOK_UNIT_STITCH && h.at == 0 && h.seq > after)
             *found = RibbonHeadRead(u, run.sectors + BOOK_HEAD_BYTES, BOOK_PAYLOAD_BYTES, &at);
-        if (*found && RibbonPeek(run.sectors, &own))
+        if (*found && RibbonPeek(vol, run.sectors, &own))
             u->hop = own;
         else if (*found && hop)
             u->hop = *hop;

@@ -14,6 +14,7 @@
 #include "../settle/settle.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
+#include "tagfs_volume.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -58,16 +59,16 @@ static void StandErrataShaped(StandRibbonRecords* r, uint64_t fid, uint64_t base
 }
 
 /* The block file `fid` holds first, or 0 when it is not live. */
-static uint64_t StandErrataBlock(uint64_t fid)
+static uint64_t StandErrataBlock(TagFSVolume* vol, uint64_t fid)
 {
     uint64_t block = 0;
-    return StandBlockOf(fid, 0, &block) ? block : 0;
+    return StandBlockOf(vol, fid, 0, &block) ? block : 0;
 }
 
 /* Whether file `fid`'s record bears the verdict's mark, TAGFS_FILE_UNDONE. */
-static bool StandErrataMarked(uint64_t fid)
+static bool StandErrataMarked(TagFSVolume* vol, uint64_t fid)
 {
-    FileRecord* rec  = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    FileRecord* rec  = FileMapRecordHold(vol->state.files, fid, NULL);
     bool        mark = rec && (rec->flags & TAGFS_FILE_UNDONE);
     if (rec)
         FileRecordRelease(rec);
@@ -100,14 +101,14 @@ static bool StandErrataUndoneAt(const RibbonUnit* u, uint32_t k, uint64_t* seq, 
 
 /* The session's first cycle, run by an asker: the block it lies on kept for
  * the put-back, and the stitch it sewed read back (*out, the caller's). */
-static bool StandErrataFirstCycle(StandRibbon* w, RibbonUnit** out)
+static bool StandErrataFirstCycle(TagFSVolume* vol, StandRibbon* w, RibbonUnit** out)
 {
     RibbonCursor c;
-    RibbonCursorStand(&c);
+    RibbonCursorStand(vol, &c);
     if (w->nlaid == STAND_RIBBON_LAID)
         return false;
     w->laid[w->nlaid++] = (c.quire.block + c.off / TAGFS_BLOCK_SECTORS) * TAGFS_BLOCK_SECTORS;
-    return TagFSSettle() == OK && StandStitchRead(out);
+    return TagFSSettle(vol) == OK && StandStitchRead(vol, out);
 }
 
 /* The one Undone a first stitch must carry: of `seq`, `why`, naming `fid`
@@ -132,20 +133,21 @@ static bool StandErrataCarries(const RibbonUnit* u, uint64_t seq, uint64_t why, 
  * Undone now, the newest stitch no longer the one undone. */
 static TestResult TestStandErrataNotLanded(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult          verdict = TEST_PASS;
     StandRibbon         w;
     StandRibbonRecords *r1 = StandRibbonFresh(0), *r2 = StandRibbonFresh(1);
     MountBookSaid       said;
     RibbonUnit*         u = NULL;
     uint64_t            digests[2];
-    const char*         aside = StandRibbonAside(&w);
+    const char*         aside = StandRibbonAside(vol, &w);
 
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandRibbonData(&w, digests), "two free blocks are written with a pattern");
     StandRibbonBorn(r1, w.fid, TAGFS_BLOCK_SIZE, w.free, 1, digests, 0, 0, 0);
     StandErrataShaped(r2, w.fid, 1, w.free + 1u, digests[1] ^ 1u);
-    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of");
+    TEST_ASSERT(TagFSStandLetGo(vol), "the volume is let go of");
     StitchHead h1 = StandRibbonHead(&w, w.top + 1u, w.seq, w.clasp);
     uint32_t   c1 = StandRibbonSew(&w, w.at, w.top + 1u, &h1, r1, VOLUME_BLOCK_SECTORS);
     StitchHead h2 = StandRibbonHead(&w, w.top + 2u, w.top + 1u, c1);
@@ -153,39 +155,39 @@ static TestResult TestStandErrataNotLanded(void)
     TEST_ASSERT(c1 && StandRibbonSew(&w, w.at + 1u, w.top + 2u, &h2, r2, VOLUME_BLOCK_SECTORS),
                 "a Born, and a Shaped sewn without its first flush whose data never landed, are laid");
     for (uint32_t pass = 0; pass < 2; pass++) {
-        TEST_ASSERT(StandRibbonUp(), "the volume mounts on them");
-        MountBookStandSaid(&said);
+        TEST_ASSERT(StandRibbonUp(vol), "the volume mounts on them");
+        MountBookStandSaid(vol, &said);
         TEST_ASSERT_EQ(said.ribbon[RIBBON_CODE_NOT_LANDED], 1, "the data that did not land is said");
-        TEST_ASSERT(!TagFSIsUnderGlass(), "and the volume is written on: the verdict is held in memory");
-        TEST_ASSERT_EQ(StandErrataBlock(w.fid), w.free, "the file stands as its Born left it");
-        TEST_ASSERT(!BlockMapDerivedIsFree(w.free + 1u), "the block the undone record put in is nobody's");
+        TEST_ASSERT(!TagFSIsUnderGlass(vol), "and the volume is written on: the verdict is held in memory");
+        TEST_ASSERT_EQ(StandErrataBlock(vol, w.fid), w.free, "the file stands as its Born left it");
+        TEST_ASSERT(!BlockMapDerivedIsFree(vol, w.free + 1u), "the block the undone record put in is nobody's");
         if (!pass)
-            TEST_ASSERT(TagFSStandLetGo(), "let go of before any cycle ran: the cut before the Undone settled");
+            TEST_ASSERT(TagFSStandLetGo(vol), "let go of before any cycle ran: the cut before the Undone settled");
     }
-    TEST_ASSERT(StandErrataFirstCycle(&w, &u), "the session's first cycle settles");
+    TEST_ASSERT(StandErrataFirstCycle(vol, &w, &u), "the session's first cycle settles");
     TEST_ASSERT(StandErrataCarries(u, w.top + 2u, UNDONE_NOT_LANDED, w.fid),
                 "its stitch carries the Undone of the stitch undone, why 1, first — before any Coined");
-    TEST_ASSERT(StandErrataMarked(w.fid), "and the file rolled back is marked so in its record");
+    TEST_ASSERT(StandErrataMarked(vol, w.fid), "and the file rolled back is marked so in its record");
     RibbonUnitLetGo(u);
     u = NULL;
-    TEST_ASSERT(TagFSStandLetGo() && StandRibbonUp(), "the volume mounts on the Undone");
-    MountBookStandSaid(&said);
+    TEST_ASSERT(TagFSStandLetGo(vol) && StandRibbonUp(vol), "the volume mounts on the Undone");
+    MountBookStandSaid(vol, &said);
     TEST_ASSERT(said.ribbon[RIBBON_CODE_UNDONE] == 1 && said.ribbon[RIBBON_CODE_NOT_LANDED] == 0,
                 "the Undone is the verdict now; no data is checked again");
-    TEST_ASSERT(!TagFSIsUnderGlass() && StandErrataBlock(w.fid) == w.free && StandErrataMarked(w.fid),
+    TEST_ASSERT(!TagFSIsUnderGlass(vol) && StandErrataBlock(vol, w.fid) == w.free && StandErrataMarked(vol, w.fid),
                 "the file stands where it stood, marked rolled back, the volume written on");
 out:
     RibbonUnitLetGo(u);
-    if (!StandRibbonPutBack(&w))
+    if (!StandRibbonPutBack(vol, &w))
         verdict = TestFailedAt(__FILE__, __LINE__, "what the test laid would not be put back (laid, 0)",
                                w.nlaid, 0);
     return verdict;
 }
 
 /* Whether a cycle holds the Settle — from its S0 to its Give. */
-static bool StandErrataCycling(void)
+static bool StandErrataCycling(TagFSVolume* vol)
 {
-    return __atomic_load_n(&g_settle_scribe.holder, __ATOMIC_ACQUIRE) != 0;
+    return __atomic_load_n(&vol->settle.scribe.holder, __ATOMIC_ACQUIRE) != 0;
 }
 
 /*
@@ -204,6 +206,7 @@ static bool StandErrataCycling(void)
  */
 static TestResult TestStandErrataAsked(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult          verdict = TEST_PASS;
     StandRibbon         w;
     StandRibbonRecords *r1 = StandRibbonFresh(0), *r2 = StandRibbonFresh(1);
@@ -211,50 +214,50 @@ static TestResult TestStandErrataAsked(void)
     RibbonUnit*         u = NULL;
     uint64_t            digests[2], until = 0;
     bool                let_go = false, began = false, moved = false;
-    const char*         aside = StandRibbonAside(&w);
+    const char*         aside = StandRibbonAside(vol, &w);
 
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandRibbonData(&w, digests), "two free blocks are written with a pattern");
     StandRibbonBorn(r1, w.fid, TAGFS_BLOCK_SIZE, w.free, 1, digests, 0, 0, 0);
     StandErrataShaped(r2, w.fid, 1, w.free + 1u, digests[1] ^ 1u);
-    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of");
+    TEST_ASSERT(TagFSStandLetGo(vol), "the volume is let go of");
     StitchHead h1 = StandRibbonHead(&w, w.top + 1u, w.seq, w.clasp);
     uint32_t   c1 = StandRibbonSew(&w, w.at, w.top + 1u, &h1, r1, VOLUME_BLOCK_SECTORS);
     StitchHead h2 = StandRibbonHead(&w, w.top + 2u, w.top + 1u, c1);
     h2.flags      = 0;
     TEST_ASSERT(c1 && StandRibbonSew(&w, w.at + 1u, w.top + 2u, &h2, r2, VOLUME_BLOCK_SECTORS),
                 "a Born, and a Shaped whose data never landed, are laid");
-    TEST_ASSERT(StandRibbonUp() && !TagFSIsUnderGlass(), "the volume mounts on them, holding a verdict");
-    RibbonCursorStand(&c);
+    TEST_ASSERT(StandRibbonUp(vol) && !TagFSIsUnderGlass(vol), "the volume mounts on them, holding a verdict");
+    RibbonCursorStand(vol, &c);
     TEST_ASSERT(w.nlaid < STAND_RIBBON_LAID, "room to put back the stitch the cadence lays");
     w.laid[w.nlaid++] = (c.quire.block + c.off / TAGFS_BLOCK_SECTORS) * TAGFS_BLOCK_SECTORS;
-    SettleCadenceHold(false);
+    SettleCadenceHold(vol, false);
     let_go = true;
     until  = rdtsc() + cpu_us_to_tsc(SETTLE_WINDOW_US / 2u);
     while (!began && !moved && rdtsc() < until) {
-        StandSettleTurn();
-        began = StandErrataCycling();
-        RibbonCursorStand(&now);
+        StandSettleTurn(vol);
+        began = StandErrataCycling(vol);
+        RibbonCursorStand(vol, &now);
         moved = now.quire.block != c.quire.block || now.off != c.off;
     }
-    SettleCadenceHold(true);
+    SettleCadenceHold(vol, true);
     let_go = false;
     TEST_ASSERT(began || moved, "the cadence began a cycle by itself, well inside the window");
     until = rdtsc() + cpu_us_to_tsc(SETTLE_WINDOW_US);
-    while (StandErrataCycling() && rdtsc() < until)
-        StandSettleTurn();
-    RibbonCursorStand(&now);
+    while (StandErrataCycling(vol) && rdtsc() < until)
+        StandSettleTurn(vol);
+    RibbonCursorStand(vol, &now);
     moved = now.quire.block != c.quire.block || now.off != c.off;
-    TEST_ASSERT(moved && !StandErrataCycling(), "and the cycle sewed a stitch and ended");
-    TEST_ASSERT(StandStitchRead(&u) && StandErrataCarries(u, w.top + 2u, UNDONE_NOT_LANDED, w.fid),
+    TEST_ASSERT(moved && !StandErrataCycling(vol), "and the cycle sewed a stitch and ended");
+    TEST_ASSERT(StandStitchRead(vol, &u) && StandErrataCarries(u, w.top + 2u, UNDONE_NOT_LANDED, w.fid),
                 "the session's first, carrying the verdict");
-    TEST_ASSERT(StandErrataMarked(w.fid), "and the file rolled back is marked so in its record");
+    TEST_ASSERT(StandErrataMarked(vol, w.fid), "and the file rolled back is marked so in its record");
 out:
     if (let_go)
-        SettleCadenceHold(true);
+        SettleCadenceHold(vol, true);
     RibbonUnitLetGo(u);
-    if (!StandRibbonPutBack(&w))
+    if (!StandRibbonPutBack(vol, &w))
         verdict = TestFailedAt(__FILE__, __LINE__, "what the test laid would not be put back (laid, 0)",
                                w.nlaid, 0);
     return verdict;
@@ -266,13 +269,14 @@ out:
 
 static TestResult TestStandErrataBornUndone(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult          verdict = TEST_PASS;
     StandRibbon         w;
     StandRibbonRecords *r1 = StandRibbonFresh(0), *r2 = StandRibbonFresh(1);
     MountBookSaid       said;
     RibbonUnit*         u = NULL;
     uint64_t            digests[2], fid = 0, wrong[1];
-    const char*         aside = StandRibbonAside(&w);
+    const char*         aside = StandRibbonAside(vol, &w);
 
     if (aside)
         return test_steps_aside(aside);
@@ -280,29 +284,29 @@ static TestResult TestStandErrataBornUndone(void)
     wrong[0] = digests[0] ^ 1u;
     StandRibbonEmpty(r1, w.fid);
     StandRibbonBorn(r2, w.fid + 1u, TAGFS_BLOCK_SIZE, w.free, 1, wrong, 0, 0, 0);
-    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of");
+    TEST_ASSERT(TagFSStandLetGo(vol), "the volume is let go of");
     StitchHead h1 = StandRibbonHead(&w, w.top + 1u, w.seq, w.clasp);
     uint32_t   c1 = StandRibbonSew(&w, w.at, w.top + 1u, &h1, r1, VOLUME_BLOCK_SECTORS);
     StitchHead h2 = StandRibbonHead(&w, w.top + 2u, w.top + 1u, c1);
     h2.flags      = 0;
     TEST_ASSERT(c1 && StandRibbonSew(&w, w.at + 1u, w.top + 2u, &h2, r2, VOLUME_BLOCK_SECTORS),
                 "an empty file, then a Born whose data never landed, are laid");
-    TEST_ASSERT(StandRibbonUp(), "the volume mounts on them");
-    MountBookStandSaid(&said);
+    TEST_ASSERT(StandRibbonUp(vol), "the volume mounts on them");
+    MountBookStandSaid(vol, &said);
     TEST_ASSERT_EQ(said.ribbon[RIBBON_CODE_NOT_LANDED], 1, "the data that did not land is said");
-    TEST_ASSERT(!TagFSIsUnderGlass(), "the volume is written on");
-    TEST_ASSERT(StandRibbonLive(w.fid, NULL) && !StandRibbonLive(w.fid + 1u, NULL),
+    TEST_ASSERT(!TagFSIsUnderGlass(vol), "the volume is written on");
+    TEST_ASSERT(StandRibbonLive(vol, w.fid, NULL) && !StandRibbonLive(vol, w.fid + 1u, NULL),
                 "the file born in the undone stitch does not exist — no empty shell of it either");
-    TEST_ASSERT(StandErrataFirstCycle(&w, &u), "the session's first cycle settles");
+    TEST_ASSERT(StandErrataFirstCycle(vol, &w, &u), "the session's first cycle settles");
     TEST_ASSERT(StandErrataCarries(u, w.top + 2u, UNDONE_NOT_LANDED, w.fid + 1u),
                 "its stitch carries the Undone of the Born, first");
     RibbonUnitLetGo(u);
     u = NULL;
-    TEST_ASSERT_EQ(tagfs_create_file("errata-after.bin", NULL, 0, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "errata-after.bin", NULL, 0, 0, &fid), 0, "a file is made");
     TEST_ASSERT(fid > w.fid + 1u, "with an id past the one burned: an id is never given twice");
 out:
     RibbonUnitLetGo(u);
-    if (!StandRibbonPutBack(&w))
+    if (!StandRibbonPutBack(vol, &w))
         verdict = TestFailedAt(__FILE__, __LINE__, "what the test laid would not be put back (laid, 0)",
                                w.nlaid, 0);
     return verdict;
@@ -314,6 +318,7 @@ out:
 
 static TestResult TestStandErrataRot(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult          verdict = TEST_PASS;
     StandRibbon         w;
     StandRibbonRecords *r1 = StandRibbonFresh(0), *r2 = StandRibbonFresh(1);
@@ -321,7 +326,7 @@ static TestResult TestStandErrataRot(void)
     RibbonUnit*         u = NULL;
     uint8_t             body[64];
     uint64_t            digests[2];
-    const char*         aside = StandRibbonAside(&w);
+    const char*         aside = StandRibbonAside(vol, &w);
 
     if (aside)
         return test_steps_aside(aside);
@@ -329,30 +334,30 @@ static TestResult TestStandErrataRot(void)
     StandRibbonBorn(r1, w.fid, TAGFS_BLOCK_SIZE, w.free, 1, digests, 0, 0, 0);
     RibbonLabeled l = { .fid = w.fid, .base = 5, .what = LABEL_NAME, .name = (const uint8_t*)"rot", .name_len = 3 };
     StandRibbonPut(r2, RIBBON_LABELED, body, RibbonLabeledBodyPut(body, &l));
-    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of");
+    TEST_ASSERT(TagFSStandLetGo(vol), "the volume is let go of");
     StitchHead h1 = StandRibbonHead(&w, w.top + 1u, w.seq, w.clasp);
     uint32_t   c1 = StandRibbonSew(&w, w.at, w.top + 1u, &h1, r1, VOLUME_BLOCK_SECTORS);
     StitchHead h2 = StandRibbonHead(&w, w.top + 2u, w.top + 1u, c1);
     TEST_ASSERT(c1 && StandRibbonSew(&w, w.at + 1u, w.top + 2u, &h2, r2, VOLUME_BLOCK_SECTORS),
                 "a Born, and a Labeled over a gen the file never had, are laid");
-    TEST_ASSERT(StandRibbonUp(), "the volume mounts on them");
-    MountBookStandSaid(&said);
+    TEST_ASSERT(StandRibbonUp(vol), "the volume mounts on them");
+    MountBookStandSaid(vol, &said);
     TEST_ASSERT_EQ(said.ribbon[RIBBON_CODE_BASE_MISMATCH], 1, "the record that does not fit is said");
-    TEST_ASSERT(!TagFSIsUnderGlass(), "and the volume is written on: the rule of rot is a verdict too");
-    TEST_ASSERT_EQ(StandErrataBlock(w.fid), w.free, "the file stays as it last matched");
-    TEST_ASSERT(StandErrataFirstCycle(&w, &u), "the session's first cycle settles");
+    TEST_ASSERT(!TagFSIsUnderGlass(vol), "and the volume is written on: the rule of rot is a verdict too");
+    TEST_ASSERT_EQ(StandErrataBlock(vol, w.fid), w.free, "the file stays as it last matched");
+    TEST_ASSERT(StandErrataFirstCycle(vol, &w, &u), "the session's first cycle settles");
     TEST_ASSERT(StandErrataCarries(u, w.top + 2u, UNDONE_ROT, w.fid), "its stitch carries the Undone, why 2, first");
-    TEST_ASSERT(StandErrataMarked(w.fid), "and the file is marked so in its record");
+    TEST_ASSERT(StandErrataMarked(vol, w.fid), "and the file is marked so in its record");
     RibbonUnitLetGo(u);
     u = NULL;
-    TEST_ASSERT(TagFSStandLetGo() && StandRibbonUp(), "the volume mounts on the Undone");
-    MountBookStandSaid(&said);
+    TEST_ASSERT(TagFSStandLetGo(vol) && StandRibbonUp(vol), "the volume mounts on the Undone");
+    MountBookStandSaid(vol, &said);
     TEST_ASSERT(said.ribbon[RIBBON_CODE_UNDONE] == 1 && said.ribbon[RIBBON_CODE_BASE_MISMATCH] == 0,
                 "the record undone is passed over, not held to its file again");
-    TEST_ASSERT(!TagFSIsUnderGlass() && StandErrataBlock(w.fid) == w.free, "and the file stands where it stood");
+    TEST_ASSERT(!TagFSIsUnderGlass(vol) && StandErrataBlock(vol, w.fid) == w.free, "and the file stands where it stood");
 out:
     RibbonUnitLetGo(u);
-    if (!StandRibbonPutBack(&w))
+    if (!StandRibbonPutBack(vol, &w))
         verdict = TestFailedAt(__FILE__, __LINE__, "what the test laid would not be put back (laid, 0)",
                                w.nlaid, 0);
     return verdict;
@@ -368,6 +373,7 @@ out:
  */
 static TestResult TestStandErrataRotLate(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult          verdict = TEST_PASS;
     StandRibbon         w;
     StandRibbonRecords *r1 = StandRibbonFresh(0), *r2 = StandRibbonFresh(1);
@@ -375,7 +381,7 @@ static TestResult TestStandErrataRotLate(void)
     RibbonUnit*         u = NULL;
     uint8_t             body[64], add[12];
     uint64_t            digests[2];
-    const char*         aside = StandRibbonAside(&w);
+    const char*         aside = StandRibbonAside(vol, &w);
 
     if (aside)
         return test_steps_aside(aside);
@@ -385,36 +391,36 @@ static TestResult TestStandErrataRotLate(void)
     RibbonLabeled l = { .fid = w.fid, .base = 0, .what = LABEL_TAGS, .nadd = 1, .add = add,
                         .add_bytes = BookVarintPut(add, (uint64_t)TAGFS_MAX_TAG_ID + 1u) };
     StandRibbonPut(r2, RIBBON_LABELED, body, RibbonLabeledBodyPut(body, &l));
-    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of");
+    TEST_ASSERT(TagFSStandLetGo(vol), "the volume is let go of");
     StitchHead h1 = StandRibbonHead(&w, w.top + 1u, w.seq, w.clasp);
     uint32_t   c1 = StandRibbonSew(&w, w.at, w.top + 1u, &h1, r1, VOLUME_BLOCK_SECTORS);
     StitchHead h2 = StandRibbonHead(&w, w.top + 2u, w.top + 1u, c1);
     TEST_ASSERT(c1 && StandRibbonSew(&w, w.at + 1u, w.top + 2u, &h2, r2, VOLUME_BLOCK_SECTORS),
                 "a Born, then a Shaped that fits and a Labeled wearing a tag nobody coined, are laid");
     for (uint32_t pass = 0; pass < 2; pass++) {
-        TEST_ASSERT(StandRibbonUp(), "the volume mounts on them");
-        MountBookStandSaid(&said);
+        TEST_ASSERT(StandRibbonUp(vol), "the volume mounts on them");
+        MountBookStandSaid(vol, &said);
         TEST_ASSERT_EQ(said.ribbon[RIBBON_CODE_BASE_MISMATCH], 1, "the Labeled that does not fit is said");
-        TEST_ASSERT(!TagFSIsUnderGlass(), "and the volume is written on");
-        TEST_ASSERT_EQ(StandErrataBlock(w.fid), w.free, "the file stands where the stitch found it: its Shaped is "
+        TEST_ASSERT(!TagFSIsUnderGlass(vol), "and the volume is written on");
+        TEST_ASSERT_EQ(StandErrataBlock(vol, w.fid), w.free, "the file stands where the stitch found it: its Shaped is "
                        "passed over with the Labeled");
-        TEST_ASSERT(!BlockMapDerivedIsFree(w.free + 1u), "the block the Shaped put in is nobody's");
+        TEST_ASSERT(!BlockMapDerivedIsFree(vol, w.free + 1u), "the block the Shaped put in is nobody's");
         if (!pass)
-            TEST_ASSERT(TagFSStandLetGo(), "let go of before any cycle ran");
+            TEST_ASSERT(TagFSStandLetGo(vol), "let go of before any cycle ran");
     }
-    TEST_ASSERT(StandErrataFirstCycle(&w, &u), "the session's first cycle settles");
+    TEST_ASSERT(StandErrataFirstCycle(vol, &w, &u), "the session's first cycle settles");
     TEST_ASSERT(StandErrataCarries(u, w.top + 2u, UNDONE_ROT, w.fid), "its stitch carries the Undone, why 2, first");
     RibbonUnitLetGo(u);
     u = NULL;
-    TEST_ASSERT(TagFSStandLetGo() && StandRibbonUp(), "the volume mounts on the Undone");
-    MountBookStandSaid(&said);
+    TEST_ASSERT(TagFSStandLetGo(vol) && StandRibbonUp(vol), "the volume mounts on the Undone");
+    MountBookStandSaid(vol, &said);
     TEST_ASSERT(said.ribbon[RIBBON_CODE_UNDONE] == 1 && said.ribbon[RIBBON_CODE_BASE_MISMATCH] == 0,
                 "both records of the file are passed over by the Undone");
-    TEST_ASSERT(!TagFSIsUnderGlass() && StandErrataBlock(w.fid) == w.free && StandErrataMarked(w.fid),
+    TEST_ASSERT(!TagFSIsUnderGlass(vol) && StandErrataBlock(vol, w.fid) == w.free && StandErrataMarked(vol, w.fid),
                 "and the file stands where the first mount left it, marked rolled back");
 out:
     RibbonUnitLetGo(u);
-    if (!StandRibbonPutBack(&w))
+    if (!StandRibbonPutBack(vol, &w))
         verdict = TestFailedAt(__FILE__, __LINE__, "what the test laid would not be put back (laid, 0)",
                                w.nlaid, 0);
     return verdict;
@@ -426,13 +432,14 @@ out:
 
 static TestResult TestStandErrataLiedTwo(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult          verdict = TEST_PASS;
     StandRibbon         w;
     StandRibbonRecords *r1 = StandRibbonFresh(0), *r2 = StandRibbonFresh(1);
     MountBookSaid       said;
     RibbonUnit*         u = NULL;
     uint64_t            digests[2], wrong[2], seq[2] = { 0, 0 }, why = 0, nfid = 0, fids[2];
-    const char*         aside = StandRibbonAside(&w);
+    const char*         aside = StandRibbonAside(vol, &w);
 
     if (aside)
         return test_steps_aside(aside);
@@ -441,7 +448,7 @@ static TestResult TestStandErrataLiedTwo(void)
     wrong[1] = digests[1] ^ 1u;
     StandRibbonBorn(r1, w.fid, TAGFS_BLOCK_SIZE, w.free, 1, wrong, 0, 0, 0);
     StandRibbonBorn(r2, w.fid + 1u, TAGFS_BLOCK_SIZE, w.free + 1u, 1, wrong + 1, 0, 0, 0);
-    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of");
+    TEST_ASSERT(TagFSStandLetGo(vol), "the volume is let go of");
     StitchHead h1 = StandRibbonHead(&w, w.top + 1u, w.seq, w.clasp);
     h1.flags     |= STITCH_MEDIUM_LIED;
     uint32_t   c1 = StandRibbonSew(&w, w.at, w.top + 1u, &h1, r1, VOLUME_BLOCK_SECTORS);
@@ -449,11 +456,11 @@ static TestResult TestStandErrataLiedTwo(void)
     h2.flags     |= STITCH_MEDIUM_LIED;
     TEST_ASSERT(c1 && StandRibbonSew(&w, w.at + 1u, w.top + 2u, &h2, r2, VOLUME_BLOCK_SECTORS),
                 "two Borns on a medium that lied, DATA_FLUSHED, neither one's data landed, are laid");
-    TEST_ASSERT(StandRibbonUp(), "the volume mounts on them");
-    TEST_ASSERT(!TagFSIsUnderGlass(), "the volume is written on");
-    TEST_ASSERT(!StandRibbonLive(w.fid, NULL) && !StandRibbonLive(w.fid + 1u, NULL),
+    TEST_ASSERT(StandRibbonUp(vol), "the volume mounts on them");
+    TEST_ASSERT(!TagFSIsUnderGlass(vol), "the volume is written on");
+    TEST_ASSERT(!StandRibbonLive(vol, w.fid, NULL) && !StandRibbonLive(vol, w.fid + 1u, NULL),
                 "neither file is born: a first flush lies as a last one does (M-2)");
-    TEST_ASSERT(StandErrataFirstCycle(&w, &u), "the session's first cycle settles");
+    TEST_ASSERT(StandErrataFirstCycle(vol, &w, &u), "the session's first cycle settles");
     TEST_ASSERT(StandErrataUndoneAt(u, 0, &seq[0], &why, fids, 2, &nfid) && why == UNDONE_NOT_LANDED &&
                 nfid == 1 && StandErrataUndoneAt(u, 1, &seq[1], &why, fids + 1, 1, &nfid) && nfid == 1,
                 "its stitch carries two Undones, first, one for each stitch undone");
@@ -463,14 +470,14 @@ static TestResult TestStandErrataLiedTwo(void)
     u = NULL;
     /* The stitch that laid them lies, MEDIUM_LIED, after the second undone:
      * the next mount holds the newest two again — that one among them. */
-    TEST_ASSERT(TagFSStandLetGo() && StandRibbonUp(), "the volume mounts on the Undones");
-    MountBookStandSaid(&said);
+    TEST_ASSERT(TagFSStandLetGo(vol) && StandRibbonUp(vol), "the volume mounts on the Undones");
+    MountBookStandSaid(vol, &said);
     TEST_ASSERT(said.ribbon[RIBBON_CODE_UNDONE] == 2 && said.ribbon[RIBBON_CODE_NOT_LANDED] == 0,
                 "the stitch an Undone names is not held again: no data said not landed, no verdict to lay twice");
-    TEST_ASSERT(!StandRibbonLive(w.fid, NULL) && !StandRibbonLive(w.fid + 1u, NULL), "and neither file is born");
+    TEST_ASSERT(!StandRibbonLive(vol, w.fid, NULL) && !StandRibbonLive(vol, w.fid + 1u, NULL), "and neither file is born");
 out:
     RibbonUnitLetGo(u);
-    if (!StandRibbonPutBack(&w))
+    if (!StandRibbonPutBack(vol, &w))
         verdict = TestFailedAt(__FILE__, __LINE__, "what the test laid would not be put back (laid, 0)",
                                w.nlaid, 0);
     return verdict;
@@ -482,34 +489,35 @@ out:
 
 static TestResult TestStandErrataWideFid(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult          verdict = TEST_PASS;
     StandRibbon         w;
     StandRibbonRecords *r1 = StandRibbonFresh(0), *r2 = StandRibbonFresh(1);
     RibbonUnit*         u = NULL;
     uint64_t            digests[2];
-    const char*         aside = StandRibbonAside(&w);
+    const char*         aside = StandRibbonAside(vol, &w);
 
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandRibbonData(&w, digests), "two free blocks are written with a pattern");
     StandRibbonBorn(r1, STAND_ERRATA_WIDE_FID, TAGFS_BLOCK_SIZE, w.free, 1, digests, 0, 0, 0);
     StandErrataShaped(r2, STAND_ERRATA_WIDE_FID, 1, w.free + 1u, digests[1] ^ 1u);
-    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of");
+    TEST_ASSERT(TagFSStandLetGo(vol), "the volume is let go of");
     StitchHead h1 = StandRibbonHead(&w, w.top + 1u, w.seq, w.clasp);
     uint32_t   c1 = StandRibbonSew(&w, w.at, w.top + 1u, &h1, r1, VOLUME_BLOCK_SECTORS);
     StitchHead h2 = StandRibbonHead(&w, w.top + 2u, w.top + 1u, c1);
     h2.flags      = 0;
     TEST_ASSERT(c1 && StandRibbonSew(&w, w.at + 1u, w.top + 2u, &h2, r2, VOLUME_BLOCK_SECTORS),
                 "a file of id 2^32 + 5 is born, and a Shaped of it whose data never landed laid");
-    TEST_ASSERT(StandRibbonUp(), "the volume mounts on them");
-    TEST_ASSERT(!TagFSIsUnderGlass() && StandErrataBlock(STAND_ERRATA_WIDE_FID) == w.free,
+    TEST_ASSERT(StandRibbonUp(vol), "the volume mounts on them");
+    TEST_ASSERT(!TagFSIsUnderGlass(vol) && StandErrataBlock(vol, STAND_ERRATA_WIDE_FID) == w.free,
                 "the file is rolled back, the volume written on");
-    TEST_ASSERT(StandErrataFirstCycle(&w, &u), "the session's first cycle settles");
+    TEST_ASSERT(StandErrataFirstCycle(vol, &w, &u), "the session's first cycle settles");
     TEST_ASSERT(StandErrataCarries(u, w.top + 2u, UNDONE_NOT_LANDED, STAND_ERRATA_WIDE_FID),
                 "its Undone names the file by all 64 bits of its id");
 out:
     RibbonUnitLetGo(u);
-    if (!StandRibbonPutBack(&w))
+    if (!StandRibbonPutBack(vol, &w))
         verdict = TestFailedAt(__FILE__, __LINE__, "what the test laid would not be put back (laid, 0)",
                                w.nlaid, 0);
     return verdict;
@@ -522,6 +530,7 @@ out:
  * room a window on, every cycle after the same. */
 static TestResult TestStandErrataNextRefused(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult          verdict = TEST_PASS;
     StandRibbon         w;
     StandRibbonRecords *r1 = StandRibbonFresh(0), *r2 = StandRibbonFresh(1);
@@ -530,14 +539,14 @@ static TestResult TestStandErrataNextRefused(void)
     RibbonCursor        c;
     uint64_t            digests[2];
     bool                armed = false;
-    const char*         aside = StandRibbonAside(&w);
+    const char*         aside = StandRibbonAside(vol, &w);
 
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandRibbonData(&w, digests), "two free blocks are written with a pattern");
     StandRibbonBorn(r1, w.fid, TAGFS_BLOCK_SIZE, w.free, 1, digests, 0, 0, 0);
     StandErrataShaped(r2, w.fid, 1, w.free + 1u, digests[1] ^ 1u);
-    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of");
+    TEST_ASSERT(TagFSStandLetGo(vol), "the volume is let go of");
     StitchHead h1 = StandRibbonHead(&w, w.top + 1u, w.seq, w.clasp);
     uint32_t   c1 = StandRibbonSew(&w, w.at, w.top + 1u, &h1, r1, VOLUME_BLOCK_SECTORS);
     StitchHead h2 = StandRibbonHead(&w, w.top + 2u, w.top + 1u, c1);
@@ -551,25 +560,25 @@ static TestResult TestStandErrataNextRefused(void)
                 "it, are laid");
     RibbonStandNextRefused(true);
     armed = true;
-    TEST_ASSERT(StandRibbonUp() && !TagFSIsUnderGlass(), "the volume mounts on them, written on");
+    TEST_ASSERT(StandRibbonUp(vol) && !TagFSIsUnderGlass(vol), "the volume mounts on them, written on");
     armed = RibbonStandNextRefused(false);
     TEST_ASSERT(!armed, "the mount asked the map for a next_quire, and the map refused it");
-    MountBookStandSaid(&said);
-    TEST_ASSERT(said.ribbon[RIBBON_CODE_NOT_LANDED] == 1 && ErrataHeld(),
+    MountBookStandSaid(vol, &said);
+    TEST_ASSERT(said.ribbon[RIBBON_CODE_NOT_LANDED] == 1 && ErrataHeld(vol),
                 "the data that did not land is said, and the verdict is held");
-    RibbonCursorStand(&c);
+    RibbonCursorStand(vol, &c);
     TEST_ASSERT(c.quire.block == w.next && !c.next.blocks,
                 "the ribbon stands in the Quire it went on into, with no next_quire past it");
-    TEST_ASSERT(StandErrataFirstCycle(&w, &u),
+    TEST_ASSERT(StandErrataFirstCycle(vol, &w, &u),
                 "the session's first cycle settles: it asks for a next_quire before the tag claims room past it");
     TEST_ASSERT(StandErrataCarries(u, w.top + 2u, UNDONE_NOT_LANDED, w.fid),
                 "its stitch carries the Undone of the stitch undone, first");
-    TEST_ASSERT(StandErrataMarked(w.fid), "and the file rolled back is marked so in its record");
+    TEST_ASSERT(StandErrataMarked(vol, w.fid), "and the file rolled back is marked so in its record");
 out:
     if (armed)
         (void)RibbonStandNextRefused(false);
     RibbonUnitLetGo(u);
-    if (!StandRibbonPutBack(&w))
+    if (!StandRibbonPutBack(vol, &w))
         verdict = TestFailedAt(__FILE__, __LINE__, "what the test laid would not be put back (laid, 0)",
                                w.nlaid, 0);
     return verdict;

@@ -70,10 +70,10 @@
 
 #define DEDUP_SERIES_LEAST  16u     /* blocks of a copy in a row the pass lays, and no fewer */
 
-void DedupGleanAt(uint64_t tally, uint64_t sheets);
-void DedupWeigh(void);
-bool DedupHold(bool held);
-void DedupLetGo(void);
+void DedupGleanAt(TagFSVolume* vol, uint64_t tally, uint64_t sheets);
+void DedupWeigh(TagFSVolume* vol);
+bool DedupHold(TagFSVolume* vol, bool held);
+void DedupLetGo(TagFSVolume* vol);
 
 /* What passes said, summed: the passes ended, the blocks they weighed, the
  * copies laid on an original that was itself written since the Tally before
@@ -96,7 +96,7 @@ typedef struct {
  * service points, a cycle settled for a pass that waits for the ribbon's room
  * — bounded; what the passes said since the last ask in *out. False when they
  * did not end within the bound. */
-bool DedupStandPassed(DedupSaid* out);
+bool DedupStandPassed(TagFSVolume* vol, DedupSaid* out);
 #endif
 
 #endif /* TAGFS_DEDUP_DEDUP_H */

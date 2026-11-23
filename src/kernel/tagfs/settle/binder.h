@@ -79,48 +79,48 @@ typedef enum {
  * volume takes writes and is not under glass. From any core, lock-free: it
  * reads only what the Settle's holder publishes (BinderWeigh) and flags kept
  * as atomics, never the slots' or the chain's memory, which the holder moves. */
-bool        BinderOwed(void);
+bool        BinderOwed(TagFSVolume* vol);
 
 /* Whether a Tally is owed and held back by nothing but the Slips the settled
  * state carries (LooseLeaves) — or by nothing at all: no write lays a new
  * Slip meanwhile (plot_slip.c), and the Helm's service lays each tail in its
  * block (helm/engross.h). From any core, lock-free, as BinderOwed. */
-bool        BinderEngrossOwed(void);
+bool        BinderEngrossOwed(TagFSVolume* vol);
 
 /* Whether the volume takes no write a Tally could go on with — only read,
  * under glass, refused by its book, its medium gone, or the machine halting:
  * flags kept as atomics, asked from any core. */
-bool        BinderNoWrite(void);
+bool        BinderNoWrite(TagFSVolume* vol);
 
 /* One step of the Tally, by the cadence's committer: the Settle's Scribe taken
  * as a pass of its own that answers no asker, the step run, the Scribe given
  * back. False when the Scribe was another's. With no TagFS lock held. */
-bool        BinderTurn(void);
+bool        BinderTurn(TagFSVolume* vol);
 
 /* A whole Tally written now by the caller, who may wait for it (the stand):
  * a step a turn of the Scribe, as the cadence would. OK, ERR_BUSY when none
  * may be begun — why said — or the step's refusal. */
-error_t     BinderRunWhole(void);
+error_t     BinderRunWhole(TagFSVolume* vol);
 
 /* The Tally a write short of room waits on (BinderRoomAwaited), written by
  * that write's own wait for room (settle.c, SettleForRoomBook) as
  * BinderRunWhole writes one — but never begun past the tails' Engross, which
  * is the Helm service's: ERR_WOULD_BLOCK, said by nothing, when none may be
  * begun now. */
-error_t     BinderRunAwaited(void);
+error_t     BinderRunAwaited(TagFSVolume* vol);
 
 /* The stitch `seq` settled carrying `useful` bytes of records, the highest
  * file id a record of it named `fid_most`, and the births of the runs it put
  * in noted — `births`, ERR_NO_MEMORY when memory would not keep them (and no
  * Tally is written by this mount from there) — at its S6, by the Settle's
  * holder with no lock: the useful bytes counted toward TALLY_SLACK. */
-void        BinderStitchSettled(uint64_t seq, uint64_t useful, uint64_t fid_most, error_t births);
+void        BinderStitchSettled(TagFSVolume* vol, uint64_t seq, uint64_t useful, uint64_t fid_most, error_t births);
 
 /* A Tally asked for: the ribbon could be given no next_quire
  * (SETTLE_DEMAND_TALLY). A write short of room asks cycles, not a Tally — one
  * takes a turn a node, and gives back only what the slot it is written over
  * held. From any context. */
-void        BinderDemanded(void);
+void        BinderDemanded(TagFSVolume* vol);
 
 /* A Tally asked for an act only a Tally carries out (Escheat), which nobody
  * waits on to ask again: demanded, and the committer woken to begin it — or,
@@ -130,57 +130,57 @@ void        BinderDemanded(void);
  * its Quire's last sector, and a refused Tally is tried again once a cycle
  * more settles. A demand alone woke no one, and with nobody writing no cycle
  * came: the act was asked and never laid. From any core, no TagFS lock held. */
-void        BinderTallyAsked(void);
+void        BinderTallyAsked(TagFSVolume* vol);
 
 /* A Quire given the ribbon, in its order (ribbon.c): the ribbon's ground the
  * slots hold from their `at` on. By the Settle's holder, or the mount. */
-void        BinderRibbonGiven(const RibbonQuire* q);
+void        BinderRibbonGiven(TagFSVolume* vol, const RibbonQuire* q);
 
 /* The volume stopped taking writes — the book refused a stitch, the volume
  * went read-only, its medium left: the Tally under way is ended there, its
  * ground going back as a refused step's does (a slot whose write began held
  * as naming either Tally). By the Settle's holder, with no lock held. */
-void        BinderStopped(error_t rc);
+void        BinderStopped(TagFSVolume* vol, error_t rc);
 
 /* Whether a Tally is under way: no ground goes back meanwhile (sewing.c holds
  * Fallow's gives) — the slice names blocks by the state it was taken of. */
-bool        BinderHoldsGround(void);
+bool        BinderHoldsGround(TagFSVolume* vol);
 
 /* The end of the book's own ground `block` lies in — a Tally-Quire a slot
  * holds or the pair holds, whole on the grid of the ribbon's Quire, or a
  * Quire of the ribbon, on the chain or a slot's off it — or `block` itself
  * where it is none of these. By the Settle's holder, who alone moves them. */
-uint64_t    BinderOwnPast(uint64_t block);
+uint64_t    BinderOwnPast(TagFSVolume* vol, uint64_t block);
 
 /* --- the mount, with the door shut ------------------------------------- */
 
 /* Everything the Binder keeps let go — the volume let go of, or mounted
  * afresh. */
-void        BinderMountReset(void);
+void        BinderMountReset(TagFSVolume* vol);
 
 /* Room for the Spine's ring of `ring` slots, as its FRAME names them — the
  * ring a volume's maker chose is the one its writer of a Tally keeps.
  * ERR_NO_MEMORY. */
-error_t     BinderSlotsMake(uint32_t ring);
+error_t     BinderSlotsMake(TagFSVolume* vol, uint32_t ring);
 
 /* What the mount read, for the Binder: slot `index` that holds, at `seq`,
  * naming the Tally `tally_seq` — every copy of every node it names (`start`,
  * `count` blocks, written at `birth`) and every Quire of its ribbon, in order.
  * ERR_NO_MEMORY. */
-error_t     BinderSlotHolds(uint32_t index, uint64_t seq, uint64_t tally_seq, uint64_t stitch_seq);
-error_t     BinderSlotNode(uint32_t index, uint64_t start, uint64_t count, uint64_t birth);
-error_t     BinderSlotRibbon(uint32_t index, const RibbonQuire* q);
+error_t     BinderSlotHolds(TagFSVolume* vol, uint32_t index, uint64_t seq, uint64_t tally_seq, uint64_t stitch_seq);
+error_t     BinderSlotNode(TagFSVolume* vol, uint32_t index, uint64_t start, uint64_t count, uint64_t birth);
+error_t     BinderSlotRibbon(TagFSVolume* vol, uint32_t index, const RibbonQuire* q);
 
 /* The mount stood on slot `index`: the blocks its Tally takes in one copy, the
  * useful bytes of the stitches it replayed past it, and the numbers the
  * medium has shown — what the Tally's slot never names less than. Why this
  * mount writes no Tally at all, when it is so, said here. */
-void        BinderMountStood(uint32_t index, uint64_t tally_blocks, uint64_t useful, uint64_t next_fid,
+void        BinderMountStood(TagFSVolume* vol, uint32_t index, uint64_t tally_blocks, uint64_t useful, uint64_t next_fid,
                              uint64_t next_tag, uint64_t next_bookmark);
 
 /* Why no Tally is written by this mount whatever is owed — memory would not
  * hold what the Tallies need — or NULL. */
-const char* BinderNoTallies(void);
+const char* BinderNoTallies(TagFSVolume* vol);
 
 /*
  * ‼ THE RING IS FILLED BEFORE IT GIVES ANYTHING BACK (§16.2 п.6, §1.4). A
@@ -195,7 +195,7 @@ const char* BinderNoTallies(void);
  * (EndpaperKeeps adds it). From any core, lock-free: each slot's own ground is
  * published by the Settle's holder.
  */
-uint64_t    BinderRingShort(uint64_t tally, uint64_t quire);
+uint64_t    BinderRingShort(TagFSVolume* vol, uint64_t tally, uint64_t quire);
 
 /*
  * ‼ A WRITE SHORT OF ROOM WAITS WHILE A TALLY GIVES GROUND BACK (§3.6: a
@@ -267,13 +267,13 @@ uint64_t    BinderRingShort(uint64_t tally, uint64_t quire);
  * for, or no Tally waited for and *why none may be (NULL: none was asked).
  * From any core, no TagFS lock held.
  */
-bool        BinderRoomWait(void);
-bool        BinderRibbonWait(bool barred);
-const char* BinderRoomMeasured(const char** why);
-bool        BinderRoomAwaited(void);
-void        BinderRoomTaken(void);
-void        BinderRoomEnded(void);
-void        BinderTurnGivesPublish(void);
+bool        BinderRoomWait(TagFSVolume* vol);
+bool        BinderRibbonWait(TagFSVolume* vol, bool barred);
+const char* BinderRoomMeasured(TagFSVolume* vol, const char** why);
+bool        BinderRoomAwaited(TagFSVolume* vol);
+void        BinderRoomTaken(TagFSVolume* vol);
+void        BinderRoomEnded(TagFSVolume* vol);
+void        BinderTurnGivesPublish(TagFSVolume* vol);
 
 /* The ground the book holds itself, in blocks: every Quire of the grid a slot
  * that holds names, the current pair's no slot counts its own, and the Quires
@@ -281,8 +281,8 @@ void        BinderTurnGivesPublish(void);
  * by the Settle's holder wherever one of them moves; read from any core, no
  * TagFS lock held: said beside what the book keeps when a write is refused at
  * a full volume's wall (allotment.c). */
-void        BinderGroundHeldPublish(void);
-uint64_t    BinderGroundHeld(void);
+void        BinderGroundHeldPublish(TagFSVolume* vol);
+uint64_t    BinderGroundHeld(TagFSVolume* vol);
 
 /*
  * The stitch the oldest Tally a mount may stand on took in, given to Fallow,
@@ -297,12 +297,12 @@ uint64_t    BinderGroundHeld(void);
  * and the next newest asked too. By the Settle's holder, or the mount, with no
  * TagFS lock held: at the mount and at each Tally's DONE.
  */
-void        BinderBarPublish(uint64_t floor);
+void        BinderBarPublish(TagFSVolume* vol, uint64_t floor);
 
 /* A node of the Tally stood on no copy of which holds — kept to be named by
  * every Tally after as it lies (§16.4 п.5): its tree, place, and level.
  * ERR_NO_MEMORY. */
-error_t     BinderRotten(uint64_t tree, const TallyPlace* at);
+error_t     BinderRotten(TagFSVolume* vol, uint64_t tree, const TallyPlace* at);
 
 /* --- births.c ------------------------------------------------------------ */
 
@@ -337,14 +337,14 @@ error_t     BinderRotten(uint64_t tree, const TallyPlace* at);
  *                      when none did
  *   BirthsSharedLetGo  all of it, with the volume (BirthsLetGo)
  */
-error_t     BirthsNoted(const Strip* strips, uint64_t count, uint64_t seq);
-uint64_t    BirthsOf(uint64_t block);
-void        BirthsForget(uint64_t start, uint64_t count);
-void        BirthsTrim(void);
-void        BirthsLetGo(void);
-error_t     BirthsSharedNoted(uint64_t fid, const Strip* strips, uint64_t count, uint64_t seq);
-uint64_t    BirthsSharedOf(uint64_t fid, uint64_t block);
-void        BirthsSharedLetGo(void);
+error_t     BirthsNoted(TagFSVolume* vol, const Strip* strips, uint64_t count, uint64_t seq);
+uint64_t    BirthsOf(TagFSVolume* vol, uint64_t block);
+void        BirthsForget(TagFSVolume* vol, uint64_t start, uint64_t count);
+void        BirthsTrim(TagFSVolume* vol);
+void        BirthsLetGo(TagFSVolume* vol);
+error_t     BirthsSharedNoted(TagFSVolume* vol, uint64_t fid, const Strip* strips, uint64_t count, uint64_t seq);
+uint64_t    BirthsSharedOf(TagFSVolume* vol, uint64_t fid, uint64_t block);
+void        BirthsSharedLetGo(TagFSVolume* vol);
 
 /* --- the Binder's own files (binder*.c) alone --------------------------- */
 
@@ -571,21 +571,21 @@ void        BinderSlotLetGo(SlotGround* s);
 /* binder_done.c: whether `unit`, the eight sectors read off slot `slot`, is
  * byte for byte a unit this kernel sealed into it since it was held unsure.
  * By the Settle's holder, or with the Settle held still (StitchHoldStill). */
-bool        BinderSlotSealed(uint32_t slot, const uint8_t* unit);
+bool        BinderSlotSealed(TagFSVolume* vol, uint32_t slot, const uint8_t* unit);
 void        BinderSlotSort(SlotGround* s);
-uint64_t    BinderChainIndex(const RibbonQuire* q);
-uint64_t    BinderSlotGoes(const SlotGround* old);
+uint64_t    BinderChainIndex(TagFSVolume* vol, const RibbonQuire* q);
+uint64_t    BinderSlotGoes(TagFSVolume* vol, const SlotGround* old);
 
 /* The slot the next Tally is written over: the one of the least seq, one that
  * holds nothing — or may hold either of two — least of all (§1.4). By the
  * Settle's holder. */
-uint32_t    BinderSlotNext(void);
+uint32_t    BinderSlotNext(TagFSVolume* vol);
 
 /* The stitch BinderBarPublish gives Fallow, of `n` slots `slots`: the least
  * slice of the `lag` newest that hold — one held unsure over nothing spends
  * no step — and `floor`. Memory alone. */
 uint64_t    BinderBarSlice(const SlotGround* slots, uint32_t n, uint64_t lag, uint64_t floor);
-void        BinderPairLetGo(uint64_t quire);
+void        BinderPairLetGo(TagFSVolume* vol, uint64_t quire);
 
 /* binder_slots.c: slot `index`'s own ground published, `more` blocks a Tally
  * under way took off the free for it added — BinderSlotsOwnPublish: every
@@ -597,15 +597,15 @@ void        BinderPairLetGo(uint64_t quire);
  * lacks of `tally` blocks, in whole Quires of `quire`; no Tally written by
  * this mount from here, for `why` (said by the caller). binder.c: BinderOwed's
  * words published again (BinderWeigh). */
-void        BinderSlotOwnPublish(uint32_t index, uint64_t more);
-void        BinderSlotsOwnPublish(void);
-void        BinderRestRipens(uint64_t resting_from);
-uint64_t    BinderRingShortBut(uint64_t tally, uint64_t quire, uint32_t index);
-void        BinderNoTalliesFrom(const char* why);
-void        BinderWeigh(void);
+void        BinderSlotOwnPublish(TagFSVolume* vol, uint32_t index, uint64_t more);
+void        BinderSlotsOwnPublish(TagFSVolume* vol);
+void        BinderRestRipens(TagFSVolume* vol, uint64_t resting_from);
+uint64_t    BinderRingShortBut(TagFSVolume* vol, uint64_t tally, uint64_t quire, uint32_t index);
+void        BinderNoTalliesFrom(TagFSVolume* vol, const char* why);
+void        BinderWeigh(TagFSVolume* vol);
 
 /* What the mount holds for what rotted, for DIGESTS (book_ground.c). */
-error_t     BinderHeldRun(uint64_t start, uint64_t count);
+error_t     BinderHeldRun(TagFSVolume* vol, uint64_t start, uint64_t count);
 
 /* What a Tally is written of, and where it is written to. */
 typedef struct {
@@ -670,8 +670,8 @@ typedef struct {
  * *done once every tree has its root; everything the walk holds let go. OK,
  * ERR_NO_MEMORY, the medium's refusal, or ERR_TAGFS_CORRUPTED for a run whose
  * birth nobody knows (said). */
-void        BinderNodesBegin(BinderWork* w);
-error_t     BinderNodeNext(BinderWork* w, bool* done);
+void        BinderNodesBegin(TagFSVolume* vol, BinderWork* w);
+error_t     BinderNodeNext(TagFSVolume* vol, BinderWork* w, bool* done);
 void        BinderNodesLetGo(BinderWork* w);
 
 /* binder_nodes.c: the reads of a digest turned to the DIGESTS the walk laid —
@@ -680,7 +680,7 @@ void        BinderNodesLetGo(BinderWork* w);
  * read is still in the table the turn takes (tally_read.h, TallyDigestsTurn);
  * ERR_NO_MEMORY, said: the reads stay on the Tally before, and the Gloss keeps
  * every digest. */
-error_t     BinderDigestsTurn(const BinderWork* w);
+error_t     BinderDigestsTurn(TagFSVolume* vol, const BinderWork* w);
 
 #ifdef CONFIG_VOLUME_TESTS
 /* The stand's hands on a Tally: written whole now (BinderRunWhole), stopped
@@ -718,14 +718,14 @@ typedef struct {
                               * out of the free count, kept for the next Tally to go on in */
     uint64_t checked;        /* elements of the last Tally its self-check held to the Tally before */
 } BinderStandSaid;
-void        BinderStand(BinderStandSaid* out);
+void        BinderStand(TagFSVolume* vol, BinderStandSaid* out);
 
 /* Every run of ground the book's Tallies and ribbon hold now — the slots'
  * Tallies' nodes and their ribbons' Quires, and what of the pair of
  * Tally-Quires the next Tally goes on in is not laid yet — into `out` (room
  * `room`): how many there are. What a test that writes Tallies keeps as it
  * found it, for they may give it back. */
-uint32_t    BinderStandGround(Strip* out, uint32_t room);
+uint32_t    BinderStandGround(TagFSVolume* vol, Strip* out, uint32_t room);
 
 /* Every Quire the ribbon was given since BinderStandGivenBegin, across the
  * mounts between — what a test that runs the ribbon through Quires puts back

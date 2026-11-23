@@ -2,6 +2,7 @@
 #include "ground_grow.h"
 #include "../block_map/block_map_derived.h"
 #include "boardroom.h"
+#include "tagfs_volume.h"
 
 /*
  * The volume taking the ground behind it (book_mount.h, MountBookGrow).
@@ -42,18 +43,18 @@
  */
 
 /* Why this volume takes none of the ground behind it, or NULL when it may. */
-static const char* BookGrowRefused(uint8_t seat, char* words, size_t room)
+static const char* BookGrowRefused(TagFSVolume* vol, uint8_t seat, char* words, size_t room)
 {
-    if (TagFSIsUnderGlass())
+    if (TagFSIsUnderGlass(vol))
         return "it may only be read (under glass), and a volume that may only be read writes no Deed";
     if (BoardroomSeatRefusesWrites(seat))
         return "its medium refuses writes as protected";
-    if (g_book.files_rot)
+    if (vol->book.files_rot)
         return "a rotten range of its FILES may name ground past its end, and no name that reads says it "
                "does not";
-    if (g_book.reach > g_book.data_end) {
+    if (vol->book.reach > vol->book.data_end) {
         ksnprintf(words, room, "its book names ground up to block %llu, past the far Deed's block %llu — that "
-                  "ground is not blank", (unsigned long long)g_book.reach - 1u, (unsigned long long)g_book.data_end);
+                  "ground is not blank", (unsigned long long)vol->book.reach - 1u, (unsigned long long)vol->book.data_end);
         return words;
     }
     return NULL;
@@ -62,11 +63,11 @@ static const char* BookGrowRefused(uint8_t seat, char* words, size_t room)
 /* The Deed at the head read again — it is what the growth amends, and the
  * mount let go of it once it stood — and held to the one it stood on. True,
  * *head the caller's to release. */
-static bool BookGrowHeadRead(uint8_t seat, DeedCopy* head)
+static bool BookGrowHeadRead(TagFSVolume* vol, uint8_t seat, DeedCopy* head)
 {
-    TagFSState*  fs     = tagfs_get_state();
-    MediumGround ground = { .start_sector = tagfs_get_volume_base(),
-                            .sectors      = g_book.ground,
+    TagFSState*  fs     = &vol->state;
+    MediumGround ground = { .start_sector = tagfs_get_volume_base(vol),
+                            .sectors      = vol->book.ground,
                             .origin       = GROUND_FROM_MBR,
                             .entry        = 0 };
     if (DeedReadHead(seat, &ground, head) != OK) {
@@ -76,7 +77,7 @@ static bool BookGrowHeadRead(uint8_t seat, DeedCopy* head)
     }
     if (memcmp(head->head.uuid, fs->uuid, 16) != 0 ||
         head->head.sectors != fs->volume_bytes / VOLUME_DEED_SECTOR_BYTES ||
-        head->head.tail_sector != g_book.data_end * VOLUME_BLOCK_SECTORS) {
+        head->head.tail_sector != vol->book.data_end * VOLUME_BLOCK_SECTORS) {
         kprintf("[TagFS] seat %u: the deed at the head of this volume is not the one this mount stood on — "
                 "nothing is taken\n", seat);
         DeedRelease(head);
@@ -87,12 +88,12 @@ static bool BookGrowHeadRead(uint8_t seat, DeedCopy* head)
 
 /* The far Deed and then the head written for a volume of `sectors` whose far
  * copy sits at `tail` — the prologue the only change. True once the head is. */
-static bool BookGrowDeedsWritten(uint8_t seat, uint64_t sectors, uint64_t tail)
+static bool BookGrowDeedsWritten(TagFSVolume* vol, uint8_t seat, uint64_t sectors, uint64_t tail)
 {
     DeedCopy head;
     DeedPen  pen;
     bool     written = false;
-    if (!BookGrowHeadRead(seat, &head))
+    if (!BookGrowHeadRead(vol, seat, &head))
         return false;
     uint8_t* keep = kmalloc(head.raw_bytes);
     if (!keep) {
@@ -106,38 +107,38 @@ static bool BookGrowDeedsWritten(uint8_t seat, uint64_t sectors, uint64_t tail)
         kprintf("[TagFS] seat %u: the deed at the head of this volume read and its pen would not take it — "
                 "nothing is taken\n", seat);
     else
-        written = GroundGrowDeedsWritten(seat, &head, &pen, keep, sectors, tail);
+        written = GroundGrowDeedsWritten(vol, seat, &head, &pen, keep, sectors, tail);
     kfree(keep);
     DeedRelease(&head);
     return written;
 }
 
-void MountBookGrow(uint8_t seat)
+void MountBookGrow(TagFSVolume* vol, uint8_t seat)
 {
-    TagFSState* fs   = tagfs_get_state();
+    TagFSState* fs   = &vol->state;
     uint64_t    have = fs->volume_bytes / VOLUME_DEED_SECTOR_BYTES;
     char        words[160];
     const char* why;
 
     /* A volume standing on its far copy alone is not grown: its head is gone,
      * and the head is the commit point. */
-    if (!g_book.on_head || !GroundGrowRoom(seat, g_book.ground, have))
+    if (!vol->book.on_head || !GroundGrowRoom(vol, seat, vol->book.ground, have))
         return;
-    if ((why = BookGrowRefused(seat, words, sizeof(words))) != NULL) {
+    if ((why = BookGrowRefused(vol, seat, words, sizeof(words))) != NULL) {
         kprintf("[TagFS] seat %u: this volume runs %llu sectors and the ground under it runs %llu — it takes "
-                "none of the rest: %s\n", seat, (unsigned long long)have, (unsigned long long)g_book.ground, why);
+                "none of the rest: %s\n", seat, (unsigned long long)have, (unsigned long long)vol->book.ground, why);
         return;
     }
 
     /* new_end > old_end: the ground runs more than a block past `have`
      * (GroundGrowRoom), and the old far Deed lies inside `have` (deed.c). */
-    uint64_t blocks   = g_book.ground / VOLUME_BLOCK_SECTORS;
+    uint64_t blocks   = vol->book.ground / VOLUME_BLOCK_SECTORS;
     uint64_t new_end  = blocks - 1u;                 /* the far Deed's block, as it is the last */
     uint64_t sectors  = blocks * VOLUME_BLOCK_SECTORS;
-    uint64_t old_end  = g_book.data_end;
+    uint64_t old_end  = vol->book.data_end;
     uint64_t old_tail = old_end * VOLUME_BLOCK_SECTORS;
     kprintf("[TagFS] seat %u: this volume runs %llu sectors and the ground under it runs %llu — it takes the "
-            "rest\n", seat, (unsigned long long)have, (unsigned long long)g_book.ground);
+            "rest\n", seat, (unsigned long long)have, (unsigned long long)vol->book.ground);
 
     /* The old far Deed is erased once the head commits — by a buffer taken
      * now, so a growth never commits to leave a Deed of the old length inside
@@ -150,26 +151,26 @@ void MountBookGrow(uint8_t seat)
                 seat);
         return;
     }
-    if (BlockMapDerivedWidenMake(new_end, &wide, &what) != OK) {
+    if (BlockMapDerivedWidenMake(vol, new_end, &wide, &what) != OK) {
         kprintf("[TagFS] seat %u: the ground is not taken — %s\n", seat, what);
         kfree(blank);
         return;
     }
-    if (!BookGrowDeedsWritten(seat, sectors, new_end * VOLUME_BLOCK_SECTORS)) {
+    if (!BookGrowDeedsWritten(vol, seat, sectors, new_end * VOLUME_BLOCK_SECTORS)) {
         BlockMapDerivedWidenDrop(&wide);
         kfree(blank);
         return;
     }
 
     /* Committed. What follows is memory, and the old far copy erased. */
-    BlockMapDerivedWidenPut(&wide);
-    g_book.data_end  = new_end;
+    BlockMapDerivedWidenPut(vol, &wide);
+    vol->book.data_end  = new_end;
     fs->block_end    = new_end;
     fs->volume_bytes = sectors * VOLUME_DEED_SECTOR_BYTES;
     kprintf("[TagFS] seat %u: the volume now runs %llu sectors; its data run is %llu blocks, %llu more than it "
             "had, and its far copy has moved to sector %llu\n", seat, (unsigned long long)sectors,
-            (unsigned long long)(new_end - g_book.frame.data_block), (unsigned long long)(new_end - old_end),
+            (unsigned long long)(new_end - vol->book.frame.data_block), (unsigned long long)(new_end - old_end),
             (unsigned long long)(new_end * VOLUME_BLOCK_SECTORS));
-    GroundGrowOldTailErased(seat, old_tail, blank);
+    GroundGrowOldTailErased(vol, seat, old_tail, blank);
     kfree(blank);
 }

@@ -982,7 +982,7 @@ void process_destroy(process_t *proc)
     TouchQueueDisarm(&proc->alarm_node);
 
     /* And a change of its own it left unsettled is not left to Lull. */
-    TagFSInkerLeaves(proc);
+    TagFSInkerLeaves(TagFSHome(), proc);
 
     ManifestReleaseAllForOwner(proc->pid);
 
@@ -1198,7 +1198,7 @@ error_t process_load_binary(process_t *proc, const ImageSource *source, const ch
      * far as the volume takes a change now; one it does not take leaves the
      * program none of its own tags until it does (TagFSHoldsProgram). */
     if (source->FileId)
-        (void)TagFSPassportLay(source->FileId, loaded.Passport);
+        (void)TagFSPassportLay(TagFSHome(), source->FileId, loaded.Passport);
     ci->program_file     = source->FileId;
     ci->image_base       = loaded.ImageBase;
     ci->parts_addr       = loaded.PartsVa;
@@ -1804,7 +1804,7 @@ bool process_has_tag(process_t *proc, const char *tag)
         return false;
     if (!TagSpellingIsPattern(&spelled))
     {
-        uint32_t tid = TagFSLookupSpelling(&spelled);
+        uint32_t tid = TagFSLookupSpelling(TagFSHome(), &spelled);
         if (tid == TAGFS_INVALID_TAG_ID)
             return false;
         return process_has_tag_id(proc, tid);
@@ -1887,7 +1887,7 @@ error_t process_add_tag(process_t *proc, const char *tag)
      * this tag and had none for it yet — so a strand tagged after `use` still
      * lands in the context tier. */
     uint32_t tid;
-    rc = TagFSInternSpelling(&spelled, &tid);
+    rc = TagFSInternSpelling(TagFSHome(), &spelled, &tid);
     if (rc != OK)
     {
         spin_unlock(&process_lock);
@@ -1924,7 +1924,7 @@ int process_remove_tag(process_t *proc, const char *tag)
     if (TagSpell(tag, strlen(tag), &spelled) != OK)
         return -1;
 
-    uint32_t tid = TagFSLookupSpelling(&spelled);
+    uint32_t tid = TagFSLookupSpelling(TagFSHome(), &spelled);
     if (tid == TAGFS_INVALID_TAG_ID)
         return 0;
 
@@ -2020,7 +2020,7 @@ static bool snapshot_append_tag(char *buffer, size_t buffer_size, size_t *pos,
         return false;
 
     size_t room = buffer_size - *pos - sep;
-    size_t len  = tagfs_tag_text(tag_id, buffer + *pos + sep, room);
+    size_t len  = tagfs_tag_text(TagFSHome(), tag_id, buffer + *pos + sep, room);
     if (len == 0)
         return true;                /* this volume has no such tag — skip it */
     if (len >= room)
@@ -2212,7 +2212,7 @@ void process_cleanup_deferred(void)
         debug_printf("[PROCESS] Deferred cleanup: freed %u processes\n", cleaned);
         /* Their memory is the machine's again — the event a Settle cycle,
          * and a mount, refused for want of it wait for. */
-        TagFSMemoryCameBack();
+        TagFSMemoryCameBack(TagFSHome());
     }
 }
 

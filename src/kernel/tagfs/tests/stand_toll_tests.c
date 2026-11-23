@@ -11,6 +11,7 @@
 #include "block_fail.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
+#include "tagfs_volume.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -41,10 +42,10 @@
 #define STAND_TOLL_FAST      (1ull << 50)
 
 /* The flushes the cycle an asker runs pays, counted. */
-static uint32_t StandTollFlushes(uint8_t seat, error_t* rc)
+static uint32_t StandTollFlushes(TagFSVolume* vol, uint8_t seat, error_t* rc)
 {
     BlockFailArm(seat, BLOCK_FAIL_FLUSH, 0, 0, BLOCK_FAIL_NEVER);
-    *rc = TagFSSettle();
+    *rc = TagFSSettle(vol);
     uint32_t seen = BlockFailSeen();
     BlockFailDisarm();
     return seen;
@@ -56,44 +57,45 @@ static uint32_t StandTollFlushes(uint8_t seat, error_t* rc)
  * naming none: one flush, DATA_FLUSHED — nothing to check. */
 static TestResult TestStandTollBothWays(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult      verdict = TEST_PASS;
     StandStitch     s;
     StandFreshModel m;
     MountBookSaid   said;
     error_t         rc = OK;
     uint64_t        fid = 0, flags = 0, fresh = 0;
-    const char*     aside = StandStitchAside(&s);
+    const char*     aside = StandStitchAside(vol, &s);
 
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, 4u * TAGFS_BLOCK_SIZE), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("toll.bin", NULL, 0, 0, &fid), 0, "a file is made on the book");
-    TEST_ASSERT_OK(TagFSSettle(), "and its Born settled: the last cycle's D is measured");
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "toll.bin", NULL, 0, 0, &fid), 0, "a file is made on the book");
+    TEST_ASSERT_OK(TagFSSettle(vol), "and its Born settled: the last cycle's D is measured");
     BlockFailReadPace(true, STAND_TOLL_FAST, 0);
-    TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, 2u * TAGFS_BLOCK_SIZE, 61), 2 * TAGFS_BLOCK_SIZE, "two blocks written");
-    TEST_ASSERT_EQ(StandTollFlushes(s.seat, &rc), 1, "a check cheaper than D: the cycle pays the one flush after "
+    TEST_ASSERT_EQ(StandFreshWrite(vol, &m, fid, 0, 2u * TAGFS_BLOCK_SIZE, 61), 2 * TAGFS_BLOCK_SIZE, "two blocks written");
+    TEST_ASSERT_EQ(StandTollFlushes(vol, s.seat, &rc), 1, "a check cheaper than D: the cycle pays the one flush after "
                    "its stitch");
     TEST_ASSERT_OK(rc, "and settles");
-    TEST_ASSERT(StandFreshLastStitch(&flags, &fresh) && !(flags & STITCH_DATA_FLUSHED) && fresh == 2,
+    TEST_ASSERT(StandFreshLastStitch(vol, &flags, &fresh) && !(flags & STITCH_DATA_FLUSHED) && fresh == 2,
                 "its stitch does not say DATA_FLUSHED, and its Clasp names the two fresh blocks");
     BlockFailReadPace(false, 0, 0);
-    TEST_ASSERT(StandStitchRemount() && StandFreshHolds(&m, fid), "mounted again, the file holds them");
-    MountBookStandSaid(&said);
+    TEST_ASSERT(StandStitchRemount(vol) && StandFreshHolds(vol, &m, fid), "mounted again, the file holds them");
+    MountBookStandSaid(vol, &said);
     TEST_ASSERT_EQ(said.checked, 2, "the mount read both back and held them to their digests");
-    TEST_ASSERT_EQ(tagfs_rename_file(fid, "toll-named.bin"), 0, "the file is renamed");
-    TEST_ASSERT_EQ(StandTollFlushes(s.seat, &rc), 1, "a stitch naming no fresh data pays the one flush");
-    TEST_ASSERT(rc == OK && StandFreshLastStitch(&flags, &fresh) && (flags & STITCH_DATA_FLUSHED) && fresh == 0,
+    TEST_ASSERT_EQ(tagfs_rename_file(vol, fid, "toll-named.bin"), 0, "the file is renamed");
+    TEST_ASSERT_EQ(StandTollFlushes(vol, s.seat, &rc), 1, "a stitch naming no fresh data pays the one flush");
+    TEST_ASSERT(rc == OK && StandFreshLastStitch(vol, &flags, &fresh) && (flags & STITCH_DATA_FLUSHED) && fresh == 0,
                 "and says DATA_FLUSHED: there is nothing to check");
     BlockFailReadPace(true, 1, 1000000u);
-    TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, TAGFS_BLOCK_SIZE, 62), TAGFS_BLOCK_SIZE, "block 0 is written over");
-    TEST_ASSERT_EQ(StandTollFlushes(s.seat, &rc), 2, "a check dearer than D: the data's flush, then the stitch's");
-    TEST_ASSERT(rc == OK && StandFreshLastStitch(&flags, &fresh) && (flags & STITCH_DATA_FLUSHED) && fresh == 1,
+    TEST_ASSERT_EQ(StandFreshWrite(vol, &m, fid, 0, TAGFS_BLOCK_SIZE, 62), TAGFS_BLOCK_SIZE, "block 0 is written over");
+    TEST_ASSERT_EQ(StandTollFlushes(vol, s.seat, &rc), 2, "a check dearer than D: the data's flush, then the stitch's");
+    TEST_ASSERT(rc == OK && StandFreshLastStitch(vol, &flags, &fresh) && (flags & STITCH_DATA_FLUSHED) && fresh == 1,
                 "and the stitch says DATA_FLUSHED");
     BlockFailReadPace(true, 0, 0);
-    TEST_ASSERT_EQ(StandFreshWrite(&m, fid, TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 63), TAGFS_BLOCK_SIZE,
+    TEST_ASSERT_EQ(StandFreshWrite(vol, &m, fid, TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 63), TAGFS_BLOCK_SIZE,
                    "block 1 is written over");
-    TEST_ASSERT_EQ(StandTollFlushes(s.seat, &rc), 2, "no pace known: the cycle pays both flushes");
-    TEST_ASSERT(rc == OK && StandFreshLastStitch(&flags, &fresh) && (flags & STITCH_DATA_FLUSHED),
+    TEST_ASSERT_EQ(StandTollFlushes(vol, s.seat, &rc), 2, "no pace known: the cycle pays both flushes");
+    TEST_ASSERT(rc == OK && StandFreshLastStitch(vol, &flags, &fresh) && (flags & STITCH_DATA_FLUSHED),
                 "and says DATA_FLUSHED");
 out:
     BlockFailReadPace(false, 0, 0);
@@ -119,6 +121,7 @@ out:
  */
 static TestResult TestStandTollCheckWithinD(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult      verdict = TEST_PASS;
     StandStitch     s;
     StandFreshModel m;
@@ -131,38 +134,38 @@ static TestResult TestStandTollCheckWithinD(void)
 #else
     uint32_t        lag = STAND_TOLL_LAG_US;
 #endif
-    const char*     aside = StandStitchAside(&s);
+    const char*     aside = StandStitchAside(vol, &s);
 
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, TAGFS_BLOCK_SIZE), "room for the file's bytes");
     BlockFailReadLag(s.seat, lag);
-    TEST_ASSERT(StandStitchRemount(), "the volume mounts on a medium that seeks");
-    TEST_ASSERT_EQ(tagfs_create_file("toll-seek.bin", NULL, 0, 0, &fid), 0, "a file is made");
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts on a medium that seeks");
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "toll-seek.bin", NULL, 0, 0, &fid), 0, "a file is made");
     for (uint32_t i = 0; i < STAND_TOLL_FILES; i++) {
         ksnprintf(name, sizeof(name), "toll-seek-%u.bin", i);
-        TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, 0, &other), 0, "and many more with it");
+        TEST_ASSERT_EQ(tagfs_create_file(vol, name, NULL, 0, 0, &other), 0, "and many more with it");
     }
-    TEST_ASSERT_OK(TagFSSettle(), "one cycle bears them all");
-    d    = SettleLastDUs();
+    TEST_ASSERT_OK(TagFSSettle(vol), "one cycle bears them all");
+    d    = SettleLastDUs(vol);
     seek = d * 2u / 3u < lag ? d * 2u / 3u : lag;
     TestEvidence("D of the cycle that bore them, us", d);
     TEST_ASSERT(seek > 0, "a cycle bearing many files costs a D a seek fits in");
     BlockFailReadLag(s.seat, (uint32_t)seek);
     BlockFailReadPace(true, STAND_TOLL_FAST, seek);
-    TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, TAGFS_BLOCK_SIZE, 64), TAGFS_BLOCK_SIZE, "a block is written");
-    TEST_ASSERT_OK(TagFSSettle(), "and settles");
-    TEST_ASSERT(StandFreshLastStitch(&flags, &fresh) && !(flags & STITCH_DATA_FLUSHED) && fresh == 1,
+    TEST_ASSERT_EQ(StandFreshWrite(vol, &m, fid, 0, TAGFS_BLOCK_SIZE, 64), TAGFS_BLOCK_SIZE, "a block is written");
+    TEST_ASSERT_OK(TagFSSettle(vol), "and settles");
+    TEST_ASSERT(StandFreshLastStitch(vol, &flags, &fresh) && !(flags & STITCH_DATA_FLUSHED) && fresh == 1,
                 "spared its flush: one seek and one block cost less than that D");
     BlockFailReadPace(false, 0, 0);
-    TEST_ASSERT(StandBlockOf(fid, 0, &block), "the block's ground read off its record");
+    TEST_ASSERT(StandBlockOf(vol, fid, 0, &block), "the block's ground read off its record");
     BlockFailArm(s.seat, BLOCK_FAIL_READ, s.base + block * TAGFS_BLOCK_SECTORS, TAGFS_BLOCK_SECTORS,
                  BLOCK_FAIL_NEVER);
-    up    = StandStitchRemount();
+    up    = StandStitchRemount(vol);
     reads = BlockFailSeen();
     BlockFailDisarm();
-    TEST_ASSERT(up && StandFreshHolds(&m, fid), "mounted again, the file holds the block");
-    MountBookStandSaid(&said);
+    TEST_ASSERT(up && StandFreshHolds(vol, &m, fid), "mounted again, the file holds the block");
+    MountBookStandSaid(vol, &said);
     TestEvidence("the mount's check of it, us", said.check_us);
     TEST_ASSERT_EQ(said.checked, 1, "the mount read back the one block the writer counted");
     cost = reads * seek + said.checked * TAGFS_BLOCK_SIZE * 1000000ull / STAND_TOLL_FAST;
@@ -199,47 +202,48 @@ out:
  */
 static TestResult TestStandTollWeighs(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult      verdict = TEST_PASS;
     StandStitch     s;
     StandFreshModel m = { 0 }, n = { 0 };
     error_t         rc = OK;
     uint64_t        fid = 0, other = 0, flags = 0, fresh = 0, d = 0, rate = 0;
-    const char*     aside = StandStitchAside(&s);
+    const char*     aside = StandStitchAside(vol, &s);
 
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, TAGFS_BLOCK_SIZE) && StandFreshModelMake(&n, TAGFS_BLOCK_SIZE),
                 "room for two files' bytes");
-    TEST_ASSERT(tagfs_create_file("toll-a.bin", NULL, 0, 0, &fid) == 0 &&
-                tagfs_create_file("toll-b.bin", NULL, 0, 0, &other) == 0, "two files are made");
-    TEST_ASSERT_OK(TagFSSettle(), "and settled with no fresh data: the toll's D is the whole of that cycle");
-    d = SettleLastDUs();
+    TEST_ASSERT(tagfs_create_file(vol, "toll-a.bin", NULL, 0, 0, &fid) == 0 &&
+                tagfs_create_file(vol, "toll-b.bin", NULL, 0, 0, &other) == 0, "two files are made");
+    TEST_ASSERT_OK(TagFSSettle(vol), "and settled with no fresh data: the toll's D is the whole of that cycle");
+    d = SettleLastDUs(vol);
     TEST_ASSERT(d > 0, "a cycle takes the medium some time");
     BlockFailReadPace(true, STAND_TOLL_FAST, d);
-    TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, TAGFS_BLOCK_SIZE, 71), TAGFS_BLOCK_SIZE, "one file's block written");
-    TEST_ASSERT_EQ(StandTollFlushes(s.seat, &rc), 1, "one run, a seek of D: within D — spared");
-    TEST_ASSERT(rc == OK && StandFreshLastStitch(&flags, &fresh) && !(flags & STITCH_DATA_FLUSHED) && fresh == 1,
+    TEST_ASSERT_EQ(StandFreshWrite(vol, &m, fid, 0, TAGFS_BLOCK_SIZE, 71), TAGFS_BLOCK_SIZE, "one file's block written");
+    TEST_ASSERT_EQ(StandTollFlushes(vol, s.seat, &rc), 1, "one run, a seek of D: within D — spared");
+    TEST_ASSERT(rc == OK && StandFreshLastStitch(vol, &flags, &fresh) && !(flags & STITCH_DATA_FLUSHED) && fresh == 1,
                 "and its stitch does not say DATA_FLUSHED");
-    d = SettleLastDUs();
+    d = SettleLastDUs(vol);
     BlockFailReadPace(true, STAND_TOLL_FAST, d);
-    TEST_ASSERT(StandFreshWrite(&m, fid, 0, TAGFS_BLOCK_SIZE, 72) == TAGFS_BLOCK_SIZE &&
-                StandFreshWrite(&n, other, 0, TAGFS_BLOCK_SIZE, 73) == TAGFS_BLOCK_SIZE, "both files' blocks written");
-    TEST_ASSERT_EQ(StandTollFlushes(s.seat, &rc), 2, "two runs, a seek of D each: past D — the data's flush paid");
-    TEST_ASSERT(rc == OK && StandFreshLastStitch(&flags, &fresh) && (flags & STITCH_DATA_FLUSHED) && fresh == 2,
+    TEST_ASSERT(StandFreshWrite(vol, &m, fid, 0, TAGFS_BLOCK_SIZE, 72) == TAGFS_BLOCK_SIZE &&
+                StandFreshWrite(vol, &n, other, 0, TAGFS_BLOCK_SIZE, 73) == TAGFS_BLOCK_SIZE, "both files' blocks written");
+    TEST_ASSERT_EQ(StandTollFlushes(vol, s.seat, &rc), 2, "two runs, a seek of D each: past D — the data's flush paid");
+    TEST_ASSERT(rc == OK && StandFreshLastStitch(vol, &flags, &fresh) && (flags & STITCH_DATA_FLUSHED) && fresh == 2,
                 "and its stitch says DATA_FLUSHED");
-    d = SettleLastDUs();
+    d = SettleLastDUs(vol);
     TestEvidence("the whole of the cycle that paid its data's flush, us", d);
     rate = ((uint64_t)TAGFS_BLOCK_SIZE * 1000000ull + d - 1u) / d;
     BlockFailReadPace(true, rate, 0);
-    TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, TAGFS_BLOCK_SIZE, 74), TAGFS_BLOCK_SIZE, "a block written");
-    TEST_ASSERT_EQ(StandTollFlushes(s.seat, &rc), 2, "its read takes that cycle's whole time: past its D, which is "
+    TEST_ASSERT_EQ(StandFreshWrite(vol, &m, fid, 0, TAGFS_BLOCK_SIZE, 74), TAGFS_BLOCK_SIZE, "a block written");
+    TEST_ASSERT_EQ(StandTollFlushes(vol, s.seat, &rc), 2, "its read takes that cycle's whole time: past its D, which is "
                    "that time less the flush of its data — paid");
-    TEST_ASSERT(rc == OK && StandFreshLastStitch(&flags, &fresh) && (flags & STITCH_DATA_FLUSHED),
+    TEST_ASSERT(rc == OK && StandFreshLastStitch(vol, &flags, &fresh) && (flags & STITCH_DATA_FLUSHED),
                 "and its stitch says DATA_FLUSHED");
     BlockFailReadPace(true, STAND_TOLL_FAST, 0);
-    TEST_ASSERT_EQ(StandFreshWrite(&n, other, 0, TAGFS_BLOCK_SIZE, 75), TAGFS_BLOCK_SIZE, "a block written");
-    TEST_ASSERT_OK(TagFSStandSettleForHalt(), "a stopping machine's last cycle settles it");
-    TEST_ASSERT(StandFreshLastStitch(&flags, &fresh) && (flags & STITCH_CLEAN) && (flags & STITCH_DATA_FLUSHED) &&
+    TEST_ASSERT_EQ(StandFreshWrite(vol, &n, other, 0, TAGFS_BLOCK_SIZE, 75), TAGFS_BLOCK_SIZE, "a block written");
+    TEST_ASSERT_OK(TagFSStandSettleForHalt(vol), "a stopping machine's last cycle settles it");
+    TEST_ASSERT(StandFreshLastStitch(vol, &flags, &fresh) && (flags & STITCH_CLEAN) && (flags & STITCH_DATA_FLUSHED) &&
                 fresh == 1, "its CLEAN stitch paid the flush of its data however cheap the check");
 out:
     BlockFailReadPace(false, 0, 0);
@@ -255,13 +259,13 @@ out:
 // ----------------------------------------------------------------------------
 
 /* The cadence let run for `us`: whether a cycle settled anything meanwhile. */
-static bool StandTollCycled(uint64_t us)
+static bool StandTollCycled(TagFSVolume* vol, uint64_t us)
 {
-    uint64_t settled = SettledGen();
+    uint64_t settled = SettledGen(vol);
     uint64_t until   = rdtsc() + cpu_us_to_tsc(us);
-    while (rdtsc() < until && SettledGen() == settled)
-        StandSettleTurn();
-    return SettledGen() != settled;
+    while (rdtsc() < until && SettledGen(vol) == settled)
+        StandSettleTurn(vol);
+    return SettledGen(vol) != settled;
 }
 
 /*
@@ -274,9 +278,9 @@ static bool StandTollCycled(uint64_t us)
  * lazy, and waits for the very window its check is bounded by. So the first
  * append comes past the horizon a frequent writer is judged by: the window.
  */
-static void StandTollPastFrequent(uint64_t fid)
+static void StandTollPastFrequent(TagFSVolume* vol, uint64_t fid)
 {
-    FileRecord* rec   = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    FileRecord* rec   = FileMapRecordHold(vol->state.files, fid, NULL);
     uint64_t    since = rec ? rec->small_append_us : 0;
     FileRecordRelease(rec);
     while (since && cpu_tsc_to_us(rdtsc()) - since <= SETTLE_WINDOW_US)
@@ -294,41 +298,42 @@ static void StandTollPastFrequent(uint64_t fid)
  */
 static TestResult TestStandTollWindowBook(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
     StandStitch s;
     uint64_t    fid = 0, lull = 0, size = 0;
     bool        let_go = false;
-    const char* aside  = StandStitchAside(&s);
+    const char* aside  = StandStitchAside(vol, &s);
 
     if (aside)
         return test_steps_aside(aside);
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x5Au);
-    TEST_ASSERT(StandMakeFile("toll-small-book", g_test_buffer, TAGFS_BLOCK_SIZE, &fid),
+    TEST_ASSERT(StandMakeFile(vol, "toll-small-book", g_test_buffer, TAGFS_BLOCK_SIZE, &fid),
                 "a file is made and written");
-    TEST_ASSERT_OK(TagFSSettle(), "and settled: the last cycle's D is measured");
-    lull = SettleLullUs();
+    TEST_ASSERT_OK(TagFSSettle(vol), "and settled: the last cycle's D is measured");
+    lull = SettleLullUs(vol);
     if (4u * lull >= SETTLE_WINDOW_US) {
         verdict = test_steps_aside("a Lull of this medium is not well inside the window");
         goto out;
     }
-    StandTollPastFrequent(fid);
-    SettleCadenceHold(false);
+    StandTollPastFrequent(vol, fid);
+    SettleCadenceHold(vol, false);
     let_go = true;
     size   = TAGFS_BLOCK_SIZE;
-    TEST_ASSERT_EQ(StandWriteAt(fid, size, g_test_buffer, 10), 10, "ten bytes are appended");
-    TEST_ASSERT(StandTollCycled(SETTLE_WINDOW_US), "and settled by the cadence");
+    TEST_ASSERT_EQ(StandWriteAt(vol, fid, size, g_test_buffer, 10), 10, "ten bytes are appended");
+    TEST_ASSERT(StandTollCycled(vol, SETTLE_WINDOW_US), "and settled by the cadence");
     size += 10u;
-    TEST_ASSERT_EQ(StandWriteAt(fid, size, g_test_buffer, 10), 10, "ten more at once: a frequent small writer");
+    TEST_ASSERT_EQ(StandWriteAt(vol, fid, size, g_test_buffer, 10), 10, "ten more at once: a frequent small writer");
     size += 10u;
-    TEST_ASSERT(!StandTollCycled(2u * lull), "whose change waits past a Lull");
-    TEST_ASSERT_EQ(StandWriteAt(fid, size, g_test_buffer, 10), 10, "ten more, past a Lull since the last");
-    TEST_ASSERT(!StandTollCycled(2u * lull), "its writer is lazy still: the window, not a Lull");
+    TEST_ASSERT(!StandTollCycled(vol, 2u * lull), "whose change waits past a Lull");
+    TEST_ASSERT_EQ(StandWriteAt(vol, fid, size, g_test_buffer, 10), 10, "ten more, past a Lull since the last");
+    TEST_ASSERT(!StandTollCycled(vol, 2u * lull), "its writer is lazy still: the window, not a Lull");
 out:
     if (let_go)
-        SettleCadenceHold(true);
+        SettleCadenceHold(vol, true);
     if (fid)
-        (void)tagfs_delete_file(fid, INK_UNWARRANTED);
-    (void)TagFSSettle();
+        (void)tagfs_delete_file(vol, fid, INK_UNWARRANTED);
+    (void)TagFSSettle(vol);
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
 }

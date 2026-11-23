@@ -3,8 +3,7 @@
 #include "../mount/tally_read.h"
 #include "gloss.h"
 #include "../../lib/kernel/klib.h"
-
-static uint32_t g_errors = 0;
+#include "tagfs_volume.h"
 
 /*
  * ‼ A BLOCK'S DIGEST IS THE BOOK'S. The digest a block was written with is the
@@ -27,7 +26,7 @@ static uint32_t g_errors = 0;
  * that would not answer — is said, and the block refused rather than given
  * unchecked.
  */
-bool IntegrityVerify(uint64_t block, const void *data)
+bool IntegrityVerify(TagFSVolume* vol, uint64_t block, const void *data)
 {
     uint64_t       stored  = 0;
     error_t        refused = OK;
@@ -35,14 +34,14 @@ bool IntegrityVerify(uint64_t block, const void *data)
 
     if (!data)
         return true;
-    if (GlossFind(block, &stored))
+    if (GlossFind(vol, block, &stored))
         goto named;
-    switch (TallyDigestFind(block, &stored, &refused)) {
+    switch (TallyDigestFind(vol, block, &stored, &refused)) {
     case TALLY_DIGEST_ROTTEN:
         return true;
     case TALLY_DIGEST_UNNAMED:
-        __atomic_fetch_add(&g_errors, 1, __ATOMIC_RELAXED);
-        IntegrityUndigestedName(block);
+        __atomic_fetch_add(&vol->integrity.errors, 1, __ATOMIC_RELAXED);
+        IntegrityUndigestedName(vol, block);
         return false;
     case TALLY_DIGEST_UNREAD:
         kprintf("[Integrity] block %llu cannot be held to its digest now: %s the DIGESTS leaf that names "
@@ -54,13 +53,13 @@ bool IntegrityVerify(uint64_t block, const void *data)
         break;
     }
 named:
-    BoxHashInit(&ctx, tagfs_get_state()->uuid, 16);
+    BoxHashInit(&ctx, vol->state.uuid, 16);
     uint64_t h = BoxHashIntegrity(data, TAGFS_BLOCK_SIZE, &ctx);
     if (h == stored)
         return true;
-    __atomic_fetch_add(&g_errors, 1, __ATOMIC_RELAXED);
-    IntegrityRotName(block, stored, h);
+    __atomic_fetch_add(&vol->integrity.errors, 1, __ATOMIC_RELAXED);
+    IntegrityRotName(vol, block, stored, h);
     return false;
 }
 
-uint32_t IntegrityErrorCount(void) { return g_errors; }
+uint32_t IntegrityErrorCount(TagFSVolume* vol) { return vol->integrity.errors; }

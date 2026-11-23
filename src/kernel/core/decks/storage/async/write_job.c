@@ -123,7 +123,7 @@ static const char *const wjob_holder[] = {
 static error_t wjob_window(WriteJob *j)
 {
     j->handle->offset = j->bytes_inked ? j->start_offset + j->bytes_inked : j->asked_offset;
-    error_t rc = HelmWriteWindow(j->handle, &j->source, &j->bytes_inked);
+    error_t rc = HelmWriteWindow(TagFSHome(), j->handle, &j->source, &j->bytes_inked);
     if (j->bytes_inked)
         j->start_offset = j->handle->offset - j->bytes_inked;
     j->final_size = j->handle->file_size;
@@ -135,7 +135,7 @@ static error_t wjob_window(WriteJob *j)
 static error_t wjob_span_window(WriteJob *j)
 {
     uint64_t found = UINT64_MAX;
-    error_t  rc    = HelmSpanWindow(j->handle, j->span_size, j->span_grow, &found, &j->ended);
+    error_t  rc    = HelmSpanWindow(TagFSHome(), j->handle, j->span_size, j->span_grow, &found, &j->ended);
     if (j->span_was == UINT64_MAX)
         j->span_was = found;
     j->final_size = j->handle->file_size;
@@ -149,7 +149,7 @@ static error_t wjob_work(WriteJob *j)
     case WRITE_JOB_SPAN:
         return wjob_span_window(j);
     case WRITE_JOB_DEFRAG:
-        return HelmDefragWindow(j->handle, &j->defrag, &j->ended);
+        return HelmDefragWindow(TagFSHome(), j->handle, &j->defrag, &j->ended);
     default:
         return wjob_window(j);
     }
@@ -169,7 +169,7 @@ static void wjob_room_came(SettleWaiter *w, error_t rc)
 {
     WriteJob *j = container_of(w, WriteJob, room);
     j->room_came = rc;
-    HelmReady(&j->helm);
+    HelmReady(TagFSHome(), &j->helm);
 }
 
 /* The volume is short of ground a Settle cycle gives back: its caller parked
@@ -182,8 +182,8 @@ static void wjob_wait_for_room(WriteJob *j)
 {
     if (!j->deferred)
         wjob_defer(j, j->ctx);
-    SettleDemand(SETTLE_DEMAND_ROOM);
-    SettleWaitLinkCycle(&j->room, wjob_room_came);
+    SettleDemand(TagFSHome(), SETTLE_DEMAND_ROOM);
+    SettleWaitLinkCycle(TagFSHome(), &j->room, wjob_room_came);
 }
 
 #ifdef CONFIG_VOLUME_TESTS
@@ -240,7 +240,7 @@ static int wjob_turn(WriteJob *j)
             wjob_wait_for_room(j);
             return ERR_WOULD_BLOCK;
         }
-        if (HelmRoomCameBack(&rc))
+        if (HelmRoomCameBack(TagFSHome(), &rc))
             continue;
         if (rc != OK || !wjob_windows_left(j))
             return wjob_finalize(j, rc);
@@ -253,7 +253,7 @@ static int wjob_turn(WriteJob *j)
         if (wjob_stand_holds(j))
             return ERR_WOULD_BLOCK;
 #endif
-        HelmReady(&j->helm);   /* the job is the service point's now: not touched again here */
+        HelmReady(TagFSHome(), &j->helm);   /* the job is the service point's now: not touched again here */
         return ERR_WOULD_BLOCK;
     }
 }
@@ -290,7 +290,7 @@ static void wjob_handed(HelmWaiter *w)
         wjob_to(j, W_ALLOC);
         wjob_continue(j);
     } else {
-        HelmReady(w);
+        HelmReady(TagFSHome(), w);
     }
 }
 
@@ -339,7 +339,7 @@ static void wjob_publish(const WriteJob *j)
 
     TagFSMetadata meta;
     memset(&meta, 0, sizeof(meta));
-    if (tagfs_get_metadata(j->file_id, &meta) != OK)
+    if (tagfs_get_metadata(TagFSHome(), j->file_id, &meta) != OK)
         return;
     struct {
         uint64_t file_id;
@@ -493,8 +493,8 @@ int wjob_finalize(WriteJob *j, error_t rc)
     if (written == 0)
         j->final_size = j->loaded ? j->plot.size_before : j->handle->file_size;
 
-    PlotRelease(&j->plot);
-    HelmDefragLetGo(&j->defrag);
+    PlotRelease(TagFSHome(), &j->plot);
+    HelmDefragLetGo(TagFSHome(), &j->defrag);
 #ifdef CONFIG_VOLUME_TESTS
     if (j->held)
         kprintf("[Storage] file %llu: the defrag the stand held went on and answered %u%s\n",
@@ -503,7 +503,7 @@ int wjob_finalize(WriteJob *j, error_t rc)
 #endif
     wjob_say_refused(j, rc);
     if (rc != OK && !j->medium_left)
-        TagFSWriteRefused();
+        TagFSWriteRefused(TagFSHome());
     /* A job that inked owes the file's newest record — its own last Ink, or a
      * name or tag inked over it since — against its program; one that inked
      * nothing owes nothing. Inside the door, which is let go of below. */
@@ -511,17 +511,17 @@ int wjob_finalize(WriteJob *j, error_t rc)
                : j->kind == WRITE_JOB_SPAN  ? wjob_span_changed(j)
                                             : rc == OK;
     if (j->target && inked)
-        TagFSNoteInker(j->target, TagFSInkPlace(InkGenOf(j->file_id)));
+        TagFSNoteInker(j->target, TagFSInkPlace(TagFSHome(), InkGenOf(TagFSHome(), j->file_id)));
     wjob_publish(j);
     if (j->kind == WRITE_JOB_WRITE)
-        TagFSDataCostWrite();
+        TagFSDataCostWrite(TagFSHome());
     if (j->holds_helm)
-        HelmLetGo(j->handle->ofe, &j->helm);
+        HelmLetGo(TagFSHome(), j->handle->ofe, &j->helm);
 
     if (j->dma_phys)
         pmm_free(j->dma_phys, j->dma_blocks);
-    tagfs_close(j->handle);
-    tagfs_leave();
+    tagfs_close(TagFSHome(), j->handle);
+    tagfs_leave(TagFSHome());
 
     int answer = OK;
     if (j->deferred)
@@ -569,10 +569,10 @@ static bool wjob_answered_later(const WriteJob *j)
  * a command's pages must be; a job that cannot have them is synchronous. */
 static void wjob_choose_async(WriteJob *j)
 {
-    uint8_t seat = tagfs_get_seat();
+    uint8_t seat = tagfs_get_seat(TagFSHome());
     if (j->kind != WRITE_JOB_WRITE || !wjob_answered_later(j) || !WriteJobSeatRunsAsync(seat))
         return;
-    uint32_t pages = TagFSRunBlocks();
+    uint32_t pages = TagFSRunBlocks(TagFSHome());
     j->dma_phys = pmm_alloc(pages, PHYS_TAG_DMA32);
     if (!j->dma_phys)
         return;
@@ -594,7 +594,7 @@ static error_t wjob_make(const WriteJobAsk *ask, Crate *crates, const OpContext 
         return ERR_NO_MEMORY;
     memset(j, 0, sizeof(*j));
 
-    j->handle = tagfs_open(ask->file_id, flags);
+    j->handle = tagfs_open(TagFSHome(), ask->file_id, flags);
     if (!j->handle) {
         kfree(j);
         return ERR_FILE_NOT_FOUND;
@@ -603,7 +603,7 @@ static error_t wjob_make(const WriteJobAsk *ask, Crate *crates, const OpContext 
     if (ctx && ctx->proc) {
         j->target = process_find_ref(ctx->proc->pid);
         if (!j->target) {
-            tagfs_close(j->handle);
+            tagfs_close(TagFSHome(), j->handle);
             kfree(j);
             return ERR_INVALID_ARGUMENT;
         }
@@ -658,7 +658,7 @@ int WriteJobSubmit(const WriteJobAsk *ask, Crate *crates, const OpContext *ctx)
 {
     if (!ask || (ask->kind == WRITE_JOB_WRITE && ask->source.bytes == 0))
         return ERR_INVALID_ARGUMENT;
-    if (!tagfs_enter()) {
+    if (!tagfs_enter(TagFSHome())) {
         return (ask->waybill && ctx)
                    ? storage_sync_ferry_finalize(ctx, crates, ERR_TAGFS_NOT_INITIALIZED, 0,
                                                  ask->waybill)
@@ -669,15 +669,15 @@ int WriteJobSubmit(const WriteJobAsk *ask, Crate *crates, const OpContext *ctx)
      * (TagFSShutForHalt): refused before a Helm is asked for, so the jobs the
      * halt waits for are only ever the ones begun before it. */
     WriteJob *j  = NULL;
-    error_t   rc = SettleHalting() ? ERR_DEVICE_NOT_READY : wjob_make(ask, crates, ctx, &j);
+    error_t   rc = SettleHalting(TagFSHome()) ? ERR_DEVICE_NOT_READY : wjob_make(ask, crates, ctx, &j);
     if (rc != OK) {
-        tagfs_leave();
+        tagfs_leave(TagFSHome());
         return (ask->waybill && ctx) ? storage_sync_ferry_finalize(ctx, crates, rc, 0, ask->waybill)
                                      : (int)rc;
     }
     OpenFileEntry *ofe = j->handle->ofe;
 
-    if (!j->async && HelmTry(ofe, &j->helm)) {
+    if (!j->async && HelmTry(TagFSHome(), ofe, &j->helm)) {
         j->holds_helm = true;
         return wjob_turn(j);
     }
@@ -690,7 +690,7 @@ int WriteJobSubmit(const WriteJobAsk *ask, Crate *crates, const OpContext *ctx)
     if (!j->deferred)
         wjob_defer(j, ctx);
     wjob_to(j, W_HELM_WAIT);
-    if (!HelmAsk(ofe, &j->helm))
+    if (!HelmAsk(TagFSHome(), ofe, &j->helm))
         return ERR_WOULD_BLOCK;   /* the job is the Helm's now, or answered: not touched again here */
 
     j->holds_helm = true;

@@ -35,7 +35,7 @@ uint8_t *PlotRunBuffer(uint32_t *most)
 /* Block i of the stretch staged in `into`: the rest of a first or last block
  * read or zeroed by the rule, and the write's bytes laid over it. OK, or why
  * the write stops at this block. */
-static error_t PlotStage(Plot *p, const PlotStretch *s, uint32_t i, const PlotSource *src,
+static error_t PlotStage(TagFSVolume* vol, Plot *p, const PlotStretch *s, uint32_t i, const PlotSource *src,
                          uint64_t from, uint8_t *into)
 {
     uint32_t off   = i == 0 ? s->head : 0;
@@ -47,7 +47,7 @@ static error_t PlotStage(Plot *p, const PlotStretch *s, uint32_t i, const PlotSo
         memset(into, 0, TAGFS_BLOCK_SIZE);
     } else if (fill == PLOT_FILL_READ) {
         uint64_t old = i == 0 ? s->from_first : s->from_last;
-        error_t  rc  = tagfs_read_block(old, into);
+        error_t  rc  = tagfs_read_block(vol, old, into);
         if (rc != OK) {
             kprintf("[TagFS] file %llu: block %llu answered %u to its read, so the %u byte(s) meant "
                     "for it are not laid over the rest of it — the write stops there\n",
@@ -72,13 +72,13 @@ static error_t PlotStage(Plot *p, const PlotStretch *s, uint32_t i, const PlotSo
 /* One stretch, staged in `buf` block by block and laid in one command: the
  * blocks before the first one that stopped it, or all of them. *out_laid: the
  * write's bytes that landed. */
-static error_t PlotLayStretch(Plot *p, const PlotStretch *s, const PlotSource *src,
+static error_t PlotLayStretch(TagFSVolume* vol, Plot *p, const PlotStretch *s, const PlotSource *src,
                               uint64_t from, uint8_t *buf, uint64_t *out_laid)
 {
     uint32_t staged = 0;
     error_t  stop   = OK;
     while (staged < s->count &&
-           (stop = PlotStage(p, s, staged, src, from,
+           (stop = PlotStage(vol, p, s, staged, src, from,
                              buf + (size_t)staged * TAGFS_BLOCK_SIZE)) == OK)
         staged++;
 
@@ -88,14 +88,14 @@ static error_t PlotLayStretch(Plot *p, const PlotStretch *s, const PlotSource *s
         /* The door's first question, asked before it: a medium already gone
          * is sent no command, and none is counted. One that leaves under the
          * command refuses it with the same answer, and that one went out. */
-        bool     sent     = !TagFSMediumGone();
-        uint64_t departed = AwayDepartures();
+        bool     sent     = !TagFSMediumGone(vol);
+        uint64_t departed = AwayDepartures(vol);
         uint64_t began    = rdtsc();
-        rc = TagFSWriteRun(s->block, staged, buf, &landed);
+        rc = TagFSWriteRun(vol, s->block, staged, buf, &landed);
         p->data_us += cpu_tsc_to_us(rdtsc() - began);
         if (sent)
-            TagFSDataCostLaid(staged);
-        error_t noted = PlotWindowLanded(p, departed, s->block, buf, landed);
+            TagFSDataCostLaid(vol, staged);
+        error_t noted = PlotWindowLanded(vol, p, departed, s->block, buf, landed);
         if (rc == OK && noted != OK) {
             landed = 0;      /* a block whose digest is not held is no block of the file's */
             rc     = noted;
@@ -111,9 +111,9 @@ static error_t PlotLayStretch(Plot *p, const PlotStretch *s, const PlotSource *s
 }
 
 /* The write's blocks laid stretch by stretch (PlotWriteBlocks). */
-static error_t PlotLayBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *out_done)
+static error_t PlotLayBlocks(TagFSVolume* vol, Plot *p, uint64_t at, const PlotSource *src, uint64_t *out_done)
 {
-    uint32_t most = TagFSRunBlocks();
+    uint32_t most = TagFSRunBlocks(vol);
     uint8_t *buf  = PlotRunBuffer(&most);
     uint64_t done = 0;
     error_t  rc   = OK;
@@ -132,7 +132,7 @@ static error_t PlotLayBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64
             break;
         }
         uint64_t laid = 0;
-        rc = PlotLayStretch(p, &s, src, done, buf, &laid);
+        rc = PlotLayStretch(vol, p, &s, src, done, buf, &laid);
         done += laid;
     }
     if (rc != OK)
@@ -143,7 +143,7 @@ static error_t PlotLayBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64
     /* What landed is the medium's only once a flush issued after it is kept:
      * the cycle that names these blocks issues it before the name. */
     if (done > 0)
-        p->data_need = VolumeFlushNeed();
+        p->data_need = VolumeFlushNeed(vol);
     *out_done = done;
     return rc;
 }
@@ -161,7 +161,7 @@ void PlotHeadLanded(Plot *p, uint64_t at, const uint8_t *bytes, uint64_t count)
  * read for the write either — and those of them that landed go into the
  * Plot's record of them (PlotHeadLanded): a file's first bytes change with the
  * write that changes them. */
-error_t PlotWriteBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *out_done)
+error_t PlotWriteBlocks(TagFSVolume* vol, Plot *p, uint64_t at, const PlotSource *src, uint64_t *out_done)
 {
     uint8_t  first[TAGFS_HEAD_MOST];
     uint64_t want = at < TAGFS_HEAD_MOST ? TAGFS_HEAD_MOST - at : 0;
@@ -172,19 +172,19 @@ error_t PlotWriteBlocks(Plot *p, uint64_t at, const PlotSource *src, uint64_t *o
     if (rc != OK)
         return rc;
     rc = p->slip ? PlotSlipWrite(p, at, src, out_done)    /* its bytes ride the stitch: no block moves */
-                 : PlotLayBlocks(p, at, src, out_done);
+                 : PlotLayBlocks(vol, p, at, src, out_done);
     PlotHeadLanded(p, at, first, *out_done < want ? *out_done : want);
     return rc;
 }
 
-error_t PlotExtendZero(Plot *p, uint64_t size)
+error_t PlotExtendZero(TagFSVolume* vol, Plot *p, uint64_t size)
 {
     if (size <= p->size)
         return OK;
-    return PlotWindowGrow(p, size);
+    return PlotWindowGrow(vol, p, size);
 }
 
-error_t PlotRoomFor(const Plot *p, uint64_t end)
+error_t PlotRoomFor(TagFSVolume* vol, const Plot *p, uint64_t end)
 {
-    return PlotWindowRoomFor(p, end);
+    return PlotWindowRoomFor(vol, p, end);
 }

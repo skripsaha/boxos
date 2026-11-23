@@ -3,6 +3,7 @@
 #include "../file_map/file_map.h"
 #include "../tag_registry/tag_registry.h"
 #include "../../core/use_context/use_context.h"
+#include "tagfs_volume.h"
 
 /*
  * The file operations every caller outside TagFS reaches — create, delete,
@@ -12,9 +13,9 @@
  * record ever wears a tag the registry on the medium does not define.
  */
 
-static TagRegistry* OpsRegistry(void)
+static TagRegistry* OpsRegistry(TagFSVolume* vol)
 {
-    return tagfs_get_state()->registry;
+    return vol->state.registry;
 }
 
 // ----------------------------------------------------------------------------
@@ -25,7 +26,7 @@ static TagRegistry* OpsRegistry(void)
  * the medium before the file wears it. The file's name is no tag among them:
  * it is a field of the card, found by the name index (file_map.h). *out is the
  * caller's to kfree. */
-static error_t CreateTags(const uint32_t* tag_ids, uint32_t tag_count, uint32_t** out, uint32_t* out_count)
+static error_t CreateTags(TagFSVolume* vol, const uint32_t* tag_ids, uint32_t tag_count, uint32_t** out, uint32_t* out_count)
 {
     uint32_t* tags = kmalloc(sizeof(uint32_t) * ((uint64_t)tag_count + 1u));
     uint32_t  n    = 0;
@@ -38,7 +39,7 @@ static error_t CreateTags(const uint32_t* tag_ids, uint32_t tag_count, uint32_t*
             dup = tags[j] == tid;
         if (dup)
             continue;
-        error_t rc = TagRegistryIdGiven(OpsRegistry(), tid);
+        error_t rc = TagRegistryIdGiven(vol, OpsRegistry(vol), tid);
         if (rc != OK) {
             kfree(tags);
             return rc;
@@ -50,118 +51,118 @@ static error_t CreateTags(const uint32_t* tag_ids, uint32_t tag_count, uint32_t*
     return OK;
 }
 
-static error_t CreateInside(const char* filename, const uint32_t* tag_ids, uint32_t tag_count, uint64_t made_by,
+static error_t CreateInside(TagFSVolume* vol, const char* filename, const uint32_t* tag_ids, uint32_t tag_count, uint64_t made_by,
                             uint64_t* out_file_id)
 {
     /* A volume under glass makes no file: the refusal comes before anything
      * is given out (tagfs.h). */
-    if (TagFSIsUnderGlass())
+    if (TagFSIsUnderGlass(vol))
         return ERR_TAGFS_READ_ONLY;
 
     uint32_t*  tags  = NULL;
     uint32_t   count = 0;
     InkReceipt receipt;
-    error_t    rc = CreateTags(tag_ids, tag_count, &tags, &count);
+    error_t    rc = CreateTags(vol, tag_ids, tag_count, &tags, &count);
     if (rc == OK)
-        rc = InkNew(filename, tags, count, made_by, out_file_id, &receipt);
+        rc = InkNew(vol, filename, tags, count, made_by, out_file_id, &receipt);
     kfree(tags);
     return rc;
 }
 
-int tagfs_create_file(const char* filename, const uint32_t* tag_ids, uint32_t tag_count, uint64_t made_by,
+int tagfs_create_file(TagFSVolume* vol, const char* filename, const uint32_t* tag_ids, uint32_t tag_count, uint64_t made_by,
                       uint64_t* out_file_id)
 {
     if (!filename || !out_file_id)
         return -(int)ERR_INVALID_ARGUMENT;
-    if (!tagfs_enter())
+    if (!tagfs_enter(vol))
         return -(int)ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc = CreateInside(filename, tag_ids, tag_count, made_by, out_file_id);
-    tagfs_leave();
+    error_t rc = CreateInside(vol, filename, tag_ids, tag_count, made_by, out_file_id);
+    tagfs_leave(vol);
     return rc == OK ? 0 : -(int)rc;
 }
 
-int tagfs_delete_file(uint64_t file_id, InkWarrant warrant)
+int tagfs_delete_file(TagFSVolume* vol, uint64_t file_id, InkWarrant warrant)
 {
-    if (!tagfs_enter())
-        return -(int)ERR_TAGFS_NOT_INITIALIZED;
-    InkReceipt receipt;
-    error_t    rc = InkQuitclaim(file_id, warrant, &receipt);
-    tagfs_leave();
-    return rc == OK ? 0 : -(int)rc;
-}
-
-int tagfs_keep_file(uint64_t file_id, uint64_t term_seconds, InkWarrant warrant)
-{
-    if (!tagfs_enter())
+    if (!tagfs_enter(vol))
         return -(int)ERR_TAGFS_NOT_INITIALIZED;
     InkReceipt receipt;
-    error_t    rc = term_seconds ? InkKeep(file_id, KeepUntil(term_seconds), warrant, &receipt)
-                                 : InkQuitclaim(file_id, warrant, &receipt);
-    tagfs_leave();
+    error_t    rc = InkQuitclaim(vol, file_id, warrant, &receipt);
+    tagfs_leave(vol);
     return rc == OK ? 0 : -(int)rc;
 }
 
-int tagfs_restore_file(uint64_t file_id, InkWarrant warrant)
+int tagfs_keep_file(TagFSVolume* vol, uint64_t file_id, uint64_t term_seconds, InkWarrant warrant)
 {
-    if (!tagfs_enter())
+    if (!tagfs_enter(vol))
+        return -(int)ERR_TAGFS_NOT_INITIALIZED;
+    InkReceipt receipt;
+    error_t    rc = term_seconds ? InkKeep(vol, file_id, KeepUntil(term_seconds), warrant, &receipt)
+                                 : InkQuitclaim(vol, file_id, warrant, &receipt);
+    tagfs_leave(vol);
+    return rc == OK ? 0 : -(int)rc;
+}
+
+int tagfs_restore_file(TagFSVolume* vol, uint64_t file_id, InkWarrant warrant)
+{
+    if (!tagfs_enter(vol))
         return -(int)ERR_TAGFS_NOT_INITIALIZED;
     InkReceipt  receipt;
-    FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, file_id, NULL);
+    FileRecord* rec = FileMapRecordHold(vol->state.files, file_id, NULL);
     error_t     rc  = !rec ? ERR_FILE_NOT_FOUND : OK;
     if (rc == OK && (rec->flags & TAGFS_FILE_DELETED) && rec->keep_until <= KeepNowNs())
         rc = ERR_FILE_NOT_FOUND;
     if (rec)
         FileRecordRelease(rec);
     if (rc == OK)
-        rc = InkKeep(file_id, 0, warrant, &receipt);
-    tagfs_leave();
+        rc = InkKeep(vol, file_id, 0, warrant, &receipt);
+    tagfs_leave(vol);
     return rc == OK ? 0 : -(int)rc;
 }
 
 /* A rename changes the name field of the card and nothing else: the file
  * wears the tags it wore. */
-int tagfs_rename_file(uint64_t file_id, const char* new_filename)
+int tagfs_rename_file(TagFSVolume* vol, uint64_t file_id, const char* new_filename)
 {
     if (!new_filename)
         return -(int)ERR_INVALID_ARGUMENT;
-    if (!tagfs_enter())
+    if (!tagfs_enter(vol))
         return -(int)ERR_TAGFS_NOT_INITIALIZED;
     InkReceipt receipt;
-    error_t    rc = InkFields(file_id, new_filename, TAGFS_INVALID_TAG_ID, TAGFS_INVALID_TAG_ID, &receipt);
-    tagfs_leave();
+    error_t    rc = InkFields(vol, file_id, new_filename, TAGFS_INVALID_TAG_ID, TAGFS_INVALID_TAG_ID, &receipt);
+    tagfs_leave(vol);
     return rc == OK ? 0 : -(int)rc;
 }
 
 /* A tag put on takes none off. */
-int tagfs_add_tag(uint64_t file_id, uint32_t tag_id)
+int tagfs_add_tag(TagFSVolume* vol, uint64_t file_id, uint32_t tag_id)
 {
-    if (!tagfs_enter())
+    if (!tagfs_enter(vol))
         return -(int)ERR_TAGFS_NOT_INITIALIZED;
     InkReceipt receipt;
     error_t    rc = tag_id == TAGFS_INVALID_TAG_ID ? ERR_TAGFS_INVALID_TAG
-                                                   : TagRegistryIdGiven(OpsRegistry(), tag_id);
+                                                   : TagRegistryIdGiven(vol, OpsRegistry(vol), tag_id);
     if (rc == OK)
-        rc = InkFields(file_id, NULL, tag_id, TAGFS_INVALID_TAG_ID, &receipt);
-    tagfs_leave();
+        rc = InkFields(vol, file_id, NULL, tag_id, TAGFS_INVALID_TAG_ID, &receipt);
+    tagfs_leave(vol);
     return rc == OK ? 0 : -(int)rc;
 }
 
-int tagfs_remove_tag(uint64_t file_id, uint32_t tag_id)
+int tagfs_remove_tag(TagFSVolume* vol, uint64_t file_id, uint32_t tag_id)
 {
-    if (!tagfs_enter())
+    if (!tagfs_enter(vol))
         return -(int)ERR_TAGFS_NOT_INITIALIZED;
     InkReceipt receipt;
-    error_t    rc = InkFields(file_id, NULL, TAGFS_INVALID_TAG_ID, tag_id, &receipt);
-    tagfs_leave();
+    error_t    rc = InkFields(vol, file_id, NULL, TAGFS_INVALID_TAG_ID, tag_id, &receipt);
+    tagfs_leave(vol);
     return rc == OK ? 0 : -(int)rc;
 }
 
-bool tagfs_has_tag(uint64_t file_id, uint32_t tag_id)
+bool tagfs_has_tag(TagFSVolume* vol, uint64_t file_id, uint32_t tag_id)
 {
-    if (!tagfs_enter())
+    if (!tagfs_enter(vol))
         return false;
-    bool has = TagBitmapHas(tagfs_get_state()->bitmap_index, tag_id, file_id);
-    tagfs_leave();
+    bool has = TagBitmapHas(vol->state.bitmap_index, tag_id, file_id);
+    tagfs_leave(vol);
     return has;
 }
 
@@ -169,34 +170,34 @@ bool tagfs_has_tag(uint64_t file_id, uint32_t tag_id)
  * behind the door: a volume read again between the two would number another
  * tag with it. Only the person's tags are words of the Use Context, so only
  * they are bound to it. */
-error_t tagfs_add_tag_string(TagOwner owner, uint64_t file_id, const TagSpelling* tag)
+error_t tagfs_add_tag_string(TagFSVolume* vol, TagOwner owner, uint64_t file_id, const TagSpelling* tag)
 {
-    if (!tagfs_enter())
+    if (!tagfs_enter(vol))
         return ERR_TAGFS_NOT_INITIALIZED;
     uint32_t tag_id;
     uint64_t held = 0;
-    error_t  rc   = InkBookRefuses(owner, tag, 1, &held);
+    error_t  rc   = InkBookRefuses(vol, owner, tag, 1, &held);
     if (rc == OK)
-        rc = TagRegistryIntern(OpsRegistry(), owner, tag, &tag_id);
-    InkBookHeldLetGo(held);
+        rc = TagRegistryIntern(OpsRegistry(vol), owner, tag, &tag_id);
+    InkBookHeldLetGo(vol, held);
     if (rc == OK) {
         if (owner.kind == TAG_OWNER_PERSON)
             UseContextBindTag(tag, tag_id);
-        int added = tagfs_add_tag(file_id, tag_id);
+        int added = tagfs_add_tag(vol, file_id, tag_id);
         rc        = added == 0 ? OK : (error_t)-added;
     }
-    tagfs_leave();
+    tagfs_leave(vol);
     return rc;
 }
 
 /* Whether the file's tag `tag_id` is what `owner`'s `tag` names: that exact
  * tag when it has a value, and any of `owner`'s tags of its key when it is
  * bare — never another owner's, whatever its text. */
-static bool TagNamedBy(uint32_t tag_id, TagOwner owner, const TagSpelling* tag)
+static bool TagNamedBy(TagFSVolume* vol, uint32_t tag_id, TagOwner owner, const TagSpelling* tag)
 {
     TagSpelling worn;
     TagOwner    whose;
-    if (!TagRegistrySpelling(OpsRegistry(), tag_id, &worn, NULL, &whose) || !TagOwnerSame(whose, owner))
+    if (!TagRegistrySpelling(OpsRegistry(vol), tag_id, &worn, NULL, &whose) || !TagOwnerSame(whose, owner))
         return false;
     if (worn.key_len != tag->key_len || memcmp(worn.key, tag->key, tag->key_len) != 0)
         return false;
@@ -212,21 +213,21 @@ static bool TagNamedBy(uint32_t tag_id, TagOwner owner, const TagSpelling* tag)
  * after the tail turned beneath the walk (another core's Ink, a cycle's close)
  * with no Spare to be had: the caller asks again once a cycle gave ground
  * back, and what the text names is then what is still on. */
-int tagfs_remove_tag_string(TagOwner owner, uint64_t file_id, const TagSpelling* tag)
+int tagfs_remove_tag_string(TagFSVolume* vol, TagOwner owner, uint64_t file_id, const TagSpelling* tag)
 {
-    if (!tagfs_enter())
+    if (!tagfs_enter(vol))
         return -(int)ERR_TAGFS_NOT_INITIALIZED;
 
     TagFSMetadata meta;
     memset(&meta, 0, sizeof(meta));
-    int answer = tagfs_get_metadata(file_id, &meta) == 0 ? -(int)ERR_TAGFS_TAG_NOT_FOUND
+    int answer = tagfs_get_metadata(vol, file_id, &meta) == 0 ? -(int)ERR_TAGFS_TAG_NOT_FOUND
                                                          : -(int)ERR_FILE_NOT_FOUND;
     uint32_t removed = 0;
     bool     room    = false;
     for (uint32_t i = 0; i < meta.tag_count && !room; i++) {
-        if (!TagNamedBy(meta.tag_ids[i], owner, tag))
+        if (!TagNamedBy(vol, meta.tag_ids[i], owner, tag))
             continue;
-        int rc = tagfs_remove_tag(file_id, meta.tag_ids[i]);
+        int rc = tagfs_remove_tag(vol, file_id, meta.tag_ids[i]);
         if (rc == 0)
             removed++;
         else if (rc == -(int)ERR_WOULD_BLOCK)
@@ -235,7 +236,7 @@ int tagfs_remove_tag_string(TagOwner owner, uint64_t file_id, const TagSpelling*
             answer = rc;
     }
     tagfs_metadata_free(&meta);
-    tagfs_leave();
+    tagfs_leave(vol);
     if (room)
         return -(int)ERR_WOULD_BLOCK;
     return removed > 0 ? 0 : answer;

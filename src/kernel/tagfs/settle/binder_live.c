@@ -6,6 +6,7 @@
 #include "../ink/docket.h"
 #include "../tag_registry/tag_registry.h"
 #include "../use_memory/use_memory.h"
+#include "tagfs_volume.h"
 
 /*
  * Whether a leaf of the Tally before keeps a key of the state now. A leaf a
@@ -55,14 +56,14 @@
  * file no change since names, the Docket's `was` of one changed since, none of
  * one born since; UINT64_MAX for none. A hold of the state lock a file born
  * since: the Docket and the map are asked in one. */
-static uint64_t SettledFileFrom(uint64_t from)
+static uint64_t SettledFileFrom(TagFSVolume* vol, uint64_t from)
 {
-    TagFSState* fs = tagfs_get_state();
+    TagFSState* fs = &vol->state;
     while (from != UINT64_MAX) {
         uint64_t    fid = UINT64_MAX, jot = UINT64_MAX;
         FileRecord* was = NULL;
         TagFSLockTake(&fs->lock);
-        bool changed = DocketWasFrom(from, &jot, &was, NULL);
+        bool changed = DocketWasFrom(vol, from, &jot, &was, NULL);
         if (FileMapFiles(fs->files, from, &fid, 1) != 1)
             fid = UINT64_MAX;
         TagFSLockDrop(&fs->lock);
@@ -75,24 +76,24 @@ static uint64_t SettledFileFrom(uint64_t from)
     return UINT64_MAX;
 }
 
-static bool FilesLive(const TallyPlace* p, bool first)
+static bool FilesLive(TagFSVolume* vol, const TallyPlace* p, bool first)
 {
     uint64_t from = 0, to = 0;
     BinderLeafFids(p, first, &from, &to);
-    return from < to && SettledFileFrom(from) < to;
+    return from < to && SettledFileFrom(vol, from) < to;
 }
 
-static bool TagsLive(const TallyPlace* p, bool first)
+static bool TagsLive(TagFSVolume* vol, const TallyPlace* p, bool first)
 {
     uint64_t    from = p->has_lo && !first ? p->lo.k1 : 0;
     uint64_t    to   = p->has_hi && p->hi.k1 < UINT32_MAX ? p->hi.k1 : UINT32_MAX;
     TagRolled   rolled;
-    return from < to && TagRoll(tagfs_get_state()->registry, (uint32_t)from, (uint32_t)to, &rolled);
+    return from < to && TagRoll(vol->state.registry, (uint32_t)from, (uint32_t)to, &rolled);
 }
 
-static bool UseLives(void)
+static bool UseLives(TagFSVolume* vol)
 {
-    UseText* u    = tagfs_recall_use_context(NULL);
+    UseText* u    = tagfs_recall_use_context(vol, NULL);
     bool     live = u && u->bytes;
     UseTextDrop(u);
     return live;
@@ -115,17 +116,17 @@ static uint64_t RunPast(const BinderGround* g, uint64_t n, uint64_t at)
 /* A block of [lo, stop) the map names that neither the book's own ground nor
  * a run resting in Fallow is — a live file's: what is left of what the map
  * names, past each of those in turn. */
-static bool FileTakenIn(uint64_t lo, uint64_t stop)
+static bool FileTakenIn(TagFSVolume* vol, uint64_t lo, uint64_t stop)
 {
     while (lo < stop) {
-        uint64_t b = BlockMapDerivedTakenFrom(lo, stop);
+        uint64_t b = BlockMapDerivedTakenFrom(vol, lo, stop);
         if (b >= stop)
             return false;
-        uint64_t past = BinderOwnPast(b);
+        uint64_t past = BinderOwnPast(vol, b);
         if (past == b) {
-            TagFSLockTake(&tagfs_get_state()->lock);
-            past = FallowRestsPast(b);
-            TagFSLockDrop(&tagfs_get_state()->lock);
+            TagFSLockTake(&vol->state.lock);
+            past = FallowRestsPast(vol, b);
+            TagFSLockDrop(&vol->state.lock);
         }
         if (past == b)
             return true;
@@ -137,14 +138,14 @@ static bool FileTakenIn(uint64_t lo, uint64_t stop)
 /* A block of [lo, hi) — of the data run, where a file's ground lies — born
  * since the slice, or a live file's in the map and not in a run of the ground
  * let go since: the map asked between those runs. */
-static bool GroundLive(const TallyPlace* p, bool first, bool taken)
+static bool GroundLive(TagFSVolume* vol, const TallyPlace* p, bool first, bool taken)
 {
     uint64_t            nb = 0, ng = 0;
     uint64_t            lo = p->has_lo && !first ? p->lo.k1 : 0, hi = p->has_hi ? p->hi.k1 : UINT64_MAX;
-    const BinderGround* born = taken ? DogEarTakenGround(false, &nb) : DogEarHeldGround(false, &nb);
-    const BinderGround* gone = taken ? DogEarTakenGround(true, &ng) : DogEarHeldGround(true, &ng);
-    lo = lo > g_book.frame.data_block ? lo : g_book.frame.data_block;
-    hi = hi < g_book.data_end ? hi : g_book.data_end;
+    const BinderGround* born = taken ? DogEarTakenGround(vol, false, &nb) : DogEarHeldGround(vol, false, &nb);
+    const BinderGround* gone = taken ? DogEarTakenGround(vol, true, &ng) : DogEarHeldGround(vol, true, &ng);
+    lo = lo > vol->book.frame.data_block ? lo : vol->book.frame.data_block;
+    hi = hi < vol->book.data_end ? hi : vol->book.data_end;
     if (lo >= hi)
         return false;
     uint64_t b = RunPast(born, nb, lo);
@@ -152,7 +153,7 @@ static bool GroundLive(const TallyPlace* p, bool first, bool taken)
         return true;
     for (uint64_t g = RunPast(gone, ng, lo); lo < hi; g++) {
         uint64_t stop = g < ng && gone[g].start < hi ? gone[g].start : hi;
-        if (lo < stop && FileTakenIn(lo, stop))
+        if (lo < stop && FileTakenIn(vol, lo, stop))
             return true;
         if (stop == hi)
             break;
@@ -161,17 +162,17 @@ static bool GroundLive(const TallyPlace* p, bool first, bool taken)
     return false;
 }
 
-bool BinderLeafLives(uint64_t tree, const TallyPlace* p, bool first, bool taken)
+bool BinderLeafLives(TagFSVolume* vol, uint64_t tree, const TallyPlace* p, bool first, bool taken)
 {
     switch (tree) {
     case TALLY_FILES:
-        return FilesLive(p, first);
+        return FilesLive(vol, p, first);
     case TALLY_TAGS:
-        return TagsLive(p, first);
+        return TagsLive(vol, p, first);
     case TALLY_USE:
-        return UseLives();
+        return UseLives(vol);
     case TALLY_DIGESTS:
-        return GroundLive(p, first, taken);
+        return GroundLive(vol, p, first, taken);
     default:
         return true;
     }

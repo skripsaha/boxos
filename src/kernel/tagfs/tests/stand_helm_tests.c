@@ -65,28 +65,30 @@ static HelmWaiter s_first;
 
 static void StandTurnHanded(HelmWaiter *w)
 {
+    TagFSVolume* vol = TagFSHome();
     StandTurn *t = container_of(w, StandTurn, waiter);
     __atomic_store_n(&t->handed, 1u, __ATOMIC_RELEASE);
-    HelmReady(w);
+    HelmReady(vol, w);
 }
 
 static void StandTurnRun(HelmWaiter *w)
 {
+    TagFSVolume* vol = TagFSHome();
     StandTurn *t = container_of(w, StandTurn, waiter);
     PlotSource src = { .kernel = t->data, .bytes = t->bytes };
     t->turns++;
     if (t->work == STAND_TURN_WRITE) {
-        t->rc = HelmWrite(t->handle, &src, &t->wrote);
+        t->rc = HelmWrite(vol, t->handle, &src, &t->wrote);
     } else if (t->work == STAND_TURN_WINDOWS) {
-        t->rc = HelmWriteWindow(t->handle, &src, &t->wrote);
+        t->rc = HelmWriteWindow(vol, t->handle, &src, &t->wrote);
         if (t->rc == OK && t->wrote < t->bytes) {
-            HelmReady(w);   /* the core given back: the next window at the next service point */
+            HelmReady(vol, w);   /* the core given back: the next window at the next service point */
             return;
         }
     } else {
-        t->rc = HelmDefrag(t->handle);
+        t->rc = HelmDefrag(vol, t->handle);
     }
-    HelmLetGo(t->handle->ofe, w);
+    HelmLetGo(vol, t->handle->ofe, w);
     __atomic_store_n(&t->done, 1u, __ATOMIC_RELEASE);
 }
 
@@ -119,12 +121,12 @@ static void StandTurnSet(StandTurnWork work, TagFSFileHandle *handle, const uint
 
 /* The service point run here, then a bounded wait for the turn to be done
  * wherever it ran. */
-static bool StandTurnDone(const StandTurn *t, uint32_t bound_ms)
+static bool StandTurnDone(TagFSVolume* vol, const StandTurn *t, uint32_t bound_ms)
 {
     uint64_t bound = rdtsc() + cpu_ms_to_tsc(bound_ms);
     uint8_t  me    = amp_get_core_index();
     for (;;) {
-        HelmRunReady();
+        HelmRunReady(vol);
         if (__atomic_load_n(&t->done, __ATOMIC_ACQUIRE))
             return true;
         if (rdtsc() >= bound)
@@ -134,19 +136,19 @@ static bool StandTurnDone(const StandTurn *t, uint32_t bound_ms)
     }
 }
 
-static bool StandTurnFinished(void)
+static bool StandTurnFinished(TagFSVolume* vol)
 {
-    return StandTurnDone(&s_turn, STAND_HELM_BOUND_MS);
+    return StandTurnDone(vol, &s_turn, STAND_HELM_BOUND_MS);
 }
 
 /* A test's way out with a turn in the FIFO: the first holder lets go, which
  * hands the turn the Helm, and the turn is run. False when it never finished —
  * its handle is then left open rather than freed under it. */
-static bool StandTurnDrained(bool holding_first, TagFSFileHandle *first_handle, bool asked)
+static bool StandTurnDrained(TagFSVolume* vol, bool holding_first, TagFSFileHandle *first_handle, bool asked)
 {
     if (holding_first)
-        HelmLetGo(first_handle->ofe, &s_first);
-    return !asked || StandTurnFinished();
+        HelmLetGo(vol, first_handle->ofe, &s_first);
+    return !asked || StandTurnFinished(vol);
 }
 
 // ----------------------------------------------------------------------------
@@ -163,6 +165,7 @@ static bool StandTurnDrained(bool holding_first, TagFSFileHandle *first_handle, 
 
 static TestResult TestStandHelmWritersTakeTurns(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult       verdict = TEST_PASS;
     uint64_t         file_id = 0;
     TagFSFileHandle *first   = NULL;
@@ -173,56 +176,56 @@ static TestResult TestStandHelmWritersTakeTurns(void)
     uint8_t         *made    = g_test_buffer;          /* block 0 */
     uint8_t         *by_one  = g_test_buffer + B;      /* block 1, the first writer's */
     uint8_t         *by_two  = g_test_buffer + 2 * B;  /* block 2, the second's */
-    const char      *aside   = StandStepsAsideFor();
+    const char      *aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
 
     TestFillAt(g_test_buffer, 3 * B, 0x4E1D0000u, 0);
-    TEST_ASSERT(StandMakeFile("test_file", made, B, &file_id), "a one-block file is made");
-    first  = tagfs_open(file_id, TAGFS_HANDLE_WRITE | TAGFS_HANDLE_APPEND);
-    second = tagfs_open(file_id, TAGFS_HANDLE_WRITE | TAGFS_HANDLE_APPEND);
+    TEST_ASSERT(StandMakeFile(vol, "test_file", made, B, &file_id), "a one-block file is made");
+    first  = tagfs_open(vol, file_id, TAGFS_HANDLE_WRITE | TAGFS_HANDLE_APPEND);
+    second = tagfs_open(vol, file_id, TAGFS_HANDLE_WRITE | TAGFS_HANDLE_APPEND);
     TEST_ASSERT(first && second, "two writers open it, each to append");
 
     memset(&s_first, 0, sizeof(s_first));
-    TEST_ASSERT(HelmAsk(first->ofe, &s_first), "the first is handed the file's Helm at once");
+    TEST_ASSERT(HelmAsk(vol, first->ofe, &s_first), "the first is handed the file's Helm at once");
     holding = true;
 
     StandTurnSet(STAND_TURN_WRITE, second, by_two, B);
     asked = true;
-    TEST_ASSERT(!HelmAsk(second->ofe, &s_turn.waiter),
+    TEST_ASSERT(!HelmAsk(vol, second->ofe, &s_turn.waiter),
                 "the second is queued behind the first, and its ask returns at once");
     TEST_ASSERT(!__atomic_load_n(&s_turn.handed, __ATOMIC_ACQUIRE),
                 "and nothing hands it the Helm while the first holds it");
 
     PlotSource one   = { .kernel = by_one, .bytes = B };
     uint64_t   wrote = 0;
-    TEST_ASSERT_OK(HelmWrite(first, &one, &wrote), "the first appends while it holds the Helm");
+    TEST_ASSERT_OK(HelmWrite(vol, first, &one, &wrote), "the first appends while it holds the Helm");
     TEST_ASSERT_EQ(wrote, B, "a whole block");
     TEST_ASSERT(!__atomic_load_n(&s_turn.handed, __ATOMIC_ACQUIRE),
                 "the second still waits: a write does not hand the Helm on");
 
-    HelmLetGo(first->ofe, &s_first);
+    HelmLetGo(vol, first->ofe, &s_first);
     holding = false;
     TEST_ASSERT(__atomic_load_n(&s_turn.handed, __ATOMIC_ACQUIRE),
                 "letting go hands the Helm to the one that waited");
-    TEST_ASSERT(StandTurnFinished(), "and its write runs at a service point");
+    TEST_ASSERT(StandTurnFinished(vol), "and its write runs at a service point");
     TEST_ASSERT_OK(s_turn.rc, "the second's append is answered OK");
     TEST_ASSERT_EQ(s_turn.wrote, B, "a whole block");
 
     uint64_t began = second->offset - s_turn.wrote;
     TestEvidence("offset the waiting writer's append began at, of the 8192 the first left", began);
     TEST_ASSERT_EQ(began, 2 * B, "it loaded the file as the first left it: no append is lost");
-    TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, 3 * B), 3 * B, "the file reads back whole");
+    TEST_ASSERT_EQ(TestFileRead(vol, file_id, g_test_output, 3 * B), 3 * B, "the file reads back whole");
     TEST_ASSERT_EQ(TestFirstDifference(g_test_output, g_test_buffer, 3 * B), 3 * B,
                    "its blocks in the order their writers held the Helm");
 out:
-    if (!StandTurnDrained(holding, first, asked))
+    if (!StandTurnDrained(vol, holding, first, asked))
         second = NULL;
-    tagfs_close(first);
-    tagfs_close(second);
+    tagfs_close(vol, first);
+    tagfs_close(vol, second);
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -242,49 +245,50 @@ out:
 
 static TestResult TestStandHelmDeleteKeepsReadersBlocks(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult       verdict = TEST_PASS;
     uint64_t         file_id = 0;
     uint64_t         block   = 0;
     TagFSFileHandle *reader  = NULL;
-    const char      *aside   = StandStepsAsideFor();
+    const char      *aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
 
     TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x4E1D0100u, 0);
-    TEST_ASSERT(StandMakeFile("test_file", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+    TEST_ASSERT(StandMakeFile(vol, "test_file", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a one-block file is made");
-    TEST_ASSERT(StandBlockOf(file_id, 0, &block), "its block is found");
-    reader = tagfs_open(file_id, TAGFS_HANDLE_READ);
+    TEST_ASSERT(StandBlockOf(vol, file_id, 0, &block), "its block is found");
+    reader = tagfs_open(vol, file_id, TAGFS_HANDLE_READ);
     TEST_ASSERT(reader, "a reader opens it");
 
-    TEST_ASSERT_EQ(tagfs_delete_file(file_id, INK_UNWARRANTED), 0, "the file is deleted under the reader");
+    TEST_ASSERT_EQ(tagfs_delete_file(vol, file_id, INK_UNWARRANTED), 0, "the file is deleted under the reader");
     file_id = 0;
     TEST_ASSERT(HelmVacated(reader->ofe), "and its Helm says the file was given up");
 
     uint64_t rested = 0;
-    for (uint64_t c = 0; c <= FallowLag() + 1; c++, rested++)
-        TEST_ASSERT_OK(TagFSSettle(), "a Settle cycle after the delete");
-    TEST_ASSERT(StandBookRoom() == OK,
+    for (uint64_t c = 0; c <= FallowLag(vol) + 1; c++, rested++)
+        TEST_ASSERT_OK(TagFSSettle(vol), "a Settle cycle after the delete");
+    TEST_ASSERT(StandBookRoom(vol) == OK,
                 "room is asked for: the ribbon leaves the Quire whose stitch gave the file up");
-    TEST_ASSERT(StandBlockInUse(block), "the reader's block still rests past the delete's cycles");
+    TEST_ASSERT(StandBlockInUse(vol, block), "the reader's block still rests past the delete's cycles");
     TestEvidence("cycles the deleted file's block rested while a reader had it open", rested);
 
-    TEST_ASSERT_EQ(TestHandleRead(reader, g_test_output, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
+    TEST_ASSERT_EQ(TestHandleRead(vol, reader, g_test_output, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
                    "the reader reads the file it opened");
     TEST_ASSERT_EQ(TestFirstDifference(g_test_output, g_test_buffer, TAGFS_BLOCK_SIZE),
                    TAGFS_BLOCK_SIZE, "byte for byte");
 
-    tagfs_close(reader);
+    tagfs_close(vol, reader);
     reader = NULL;
-    for (uint64_t c = 0; c <= FallowLag(); c++)
-        TEST_ASSERT_OK(TagFSSettle(), "a Settle cycle after the reader let go");
-    TEST_ASSERT(StandBookRoom() == OK, "room is asked for again");
-    TEST_ASSERT(!StandBlockInUse(block), "and the block goes back once the reader let go");
+    for (uint64_t c = 0; c <= FallowLag(vol); c++)
+        TEST_ASSERT_OK(TagFSSettle(vol), "a Settle cycle after the reader let go");
+    TEST_ASSERT(StandBookRoom(vol) == OK, "room is asked for again");
+    TEST_ASSERT(!StandBlockInUse(vol, block), "and the block goes back once the reader let go");
 out:
-    tagfs_close(reader);
+    tagfs_close(vol, reader);
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -306,21 +310,22 @@ out:
 // the Helm handed on.
 // ----------------------------------------------------------------------------
 
-static bool StandFileIsGone(uint64_t file_id)
+static bool StandFileIsGone(TagFSVolume* vol, uint64_t file_id)
 {
     TagFSMetadata meta;
     memset(&meta, 0, sizeof(meta));
-    if (tagfs_get_metadata(file_id, &meta) == 0) {
+    if (tagfs_get_metadata(vol, file_id, &meta) == 0) {
         tagfs_metadata_free(&meta);
         return false;
     }
-    TagFSFileHandle *again = tagfs_open(file_id, TAGFS_HANDLE_READ);
-    tagfs_close(again);
+    TagFSFileHandle *again = tagfs_open(vol, file_id, TAGFS_HANDLE_READ);
+    tagfs_close(vol, again);
     return again == NULL;
 }
 
 static TestResult TestStandHelmDefragBesideDelete(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult       verdict  = TEST_PASS;
     uint64_t         file_id  = 0;
     uint64_t         filler   = 0;
@@ -332,7 +337,7 @@ static TestResult TestStandHelmDefragBesideDelete(void)
     bool             loaded   = false;
     Plot             plot;
     const uint32_t   B        = TAGFS_BLOCK_SIZE;
-    const char      *aside    = StandStepsAsideFor();
+    const char      *aside    = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
@@ -340,73 +345,73 @@ static TestResult TestStandHelmDefragBesideDelete(void)
     /* Two blocks of the file with another file's between them, so a gather
      * has something to move where the allocator lays them that way. */
     TestFillAt(g_test_buffer, 3 * B, 0x4E1D0200u, 0);
-    TEST_ASSERT(StandMakeFile("test_file", g_test_buffer, B, &file_id), "a one-block file is made");
-    TEST_ASSERT(StandMakeFile("test_file", g_test_buffer + B, B, &filler), "and a filler after it");
-    TEST_ASSERT_EQ(StandWriteAt(file_id, B, g_test_buffer + 2 * B, B), (int)B,
+    TEST_ASSERT(StandMakeFile(vol, "test_file", g_test_buffer, B, &file_id), "a one-block file is made");
+    TEST_ASSERT(StandMakeFile(vol, "test_file", g_test_buffer + B, B, &filler), "and a filler after it");
+    TEST_ASSERT_EQ(StandWriteAt(vol, file_id, B, g_test_buffer + 2 * B, B), (int)B,
                    "the first grows by a block");
 
-    handle = tagfs_open(file_id, TAGFS_HANDLE_WRITE);
+    handle = tagfs_open(vol, file_id, TAGFS_HANDLE_WRITE);
     TEST_ASSERT(handle, "the defrag's handle opens");
     memset(&s_first, 0, sizeof(s_first));
-    TEST_ASSERT(HelmAsk(handle->ofe, &s_first), "and it holds the file's Helm");
+    TEST_ASSERT(HelmAsk(vol, handle->ofe, &s_first), "and it holds the file's Helm");
     holding = true;
 
-    TEST_ASSERT_OK(PlotLoad(&plot, file_id, INK_UNWARRANTED), "the defrag loads the record under the Helm");
+    TEST_ASSERT_OK(PlotLoad(vol, &plot, file_id, INK_UNWARRANTED), "the defrag loads the record under the Helm");
     loaded = true;
     uint64_t gathered = 0;
     if (plot.run_count > 1) {
-        TEST_ASSERT_OK(PlotGather(&plot, 0), "and gathers every extent into one run");
+        TEST_ASSERT_OK(PlotGather(vol, &plot, 0), "and gathers every extent into one run");
         gathered = 1;
     }
     TestEvidence("gathers the defrag had made when the delete landed", gathered);
 
-    TEST_ASSERT_EQ(tagfs_delete_file(file_id, INK_UNWARRANTED), 0,
+    TEST_ASSERT_EQ(tagfs_delete_file(vol, file_id, INK_UNWARRANTED), 0,
                    "the delete lands while the defrag holds the Helm, and waits for nothing");
     InkReceipt inked;
-    TEST_ASSERT_EQ(TagFSInkPlot(&plot, &inked), ERR_FILE_NOT_FOUND,
+    TEST_ASSERT_EQ(TagFSInkPlot(vol, &plot, &inked), ERR_FILE_NOT_FOUND,
                    "the defrag's Ink finds no file to lay its record over");
-    PlotRelease(&plot);
+    PlotRelease(vol, &plot);
     loaded = false;
-    HelmLetGo(handle->ofe, &s_first);
+    HelmLetGo(vol, handle->ofe, &s_first);
     holding = false;
-    tagfs_close(handle);
+    tagfs_close(vol, handle);
     handle = NULL;
-    TEST_ASSERT_OK(TagFSSettle(), "a Settle cycle after both");
-    TEST_ASSERT(StandFileIsGone(file_id), "and the file stays given up");
+    TEST_ASSERT_OK(TagFSSettle(vol), "a Settle cycle after both");
+    TEST_ASSERT(StandFileIsGone(vol, file_id), "and the file stays given up");
     file_id = 0;
 
     /* And the delete that lands while the defrag waits for the Helm. */
-    TEST_ASSERT(StandMakeFile("test_file", g_test_buffer, B, &queued), "another file is made");
-    handle  = tagfs_open(queued, TAGFS_HANDLE_WRITE);
-    waiting = tagfs_open(queued, TAGFS_HANDLE_WRITE);
+    TEST_ASSERT(StandMakeFile(vol, "test_file", g_test_buffer, B, &queued), "another file is made");
+    handle  = tagfs_open(vol, queued, TAGFS_HANDLE_WRITE);
+    waiting = tagfs_open(vol, queued, TAGFS_HANDLE_WRITE);
     TEST_ASSERT(handle && waiting, "a holder and a defrag open it");
     memset(&s_first, 0, sizeof(s_first));
-    TEST_ASSERT(HelmAsk(handle->ofe, &s_first), "the holder holds its Helm");
+    TEST_ASSERT(HelmAsk(vol, handle->ofe, &s_first), "the holder holds its Helm");
     holding = true;
     StandTurnSet(STAND_TURN_DEFRAG, waiting, NULL, 0);
     asked = true;
-    TEST_ASSERT(!HelmAsk(waiting->ofe, &s_turn.waiter), "the defrag waits for the Helm");
-    TEST_ASSERT_EQ(tagfs_delete_file(queued, INK_UNWARRANTED), 0, "the file is deleted while the defrag waits");
+    TEST_ASSERT(!HelmAsk(vol, waiting->ofe, &s_turn.waiter), "the defrag waits for the Helm");
+    TEST_ASSERT_EQ(tagfs_delete_file(vol, queued, INK_UNWARRANTED), 0, "the file is deleted while the defrag waits");
 
-    HelmLetGo(handle->ofe, &s_first);
+    HelmLetGo(vol, handle->ofe, &s_first);
     holding = false;
-    TEST_ASSERT(StandTurnFinished(), "the defrag is handed the Helm and runs");
+    TEST_ASSERT(StandTurnFinished(vol), "the defrag is handed the Helm and runs");
     TEST_ASSERT_EQ(s_turn.rc, ERR_FILE_NOT_FOUND, "and answers that the file is gone");
-    TEST_ASSERT(StandFileIsGone(queued), "which it stays");
+    TEST_ASSERT(StandFileIsGone(vol, queued), "which it stays");
     queued = 0;
 out:
     if (loaded)
-        PlotRelease(&plot);
-    if (!StandTurnDrained(holding, handle, asked))
+        PlotRelease(vol, &plot);
+    if (!StandTurnDrained(vol, holding, handle, asked))
         waiting = NULL;
-    tagfs_close(handle);
-    tagfs_close(waiting);
+    tagfs_close(vol, handle);
+    tagfs_close(vol, waiting);
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     if (queued)
-        tagfs_delete_file(queued, INK_UNWARRANTED);
+        tagfs_delete_file(vol, queued, INK_UNWARRANTED);
     if (filler)
-        tagfs_delete_file(filler, INK_UNWARRANTED);
+        tagfs_delete_file(vol, filler, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -424,6 +429,7 @@ out:
 
 static TestResult TestStandHelmWriteYieldsBetweenWindows(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult       verdict = TEST_PASS;
     uint64_t         file_id = 0;
     TagFSFileHandle *writer  = NULL;
@@ -431,9 +437,9 @@ static TestResult TestStandHelmWriteYieldsBetweenWindows(void)
     uint8_t         *back    = NULL;
     bool             asked   = false;
     const uint32_t   B       = TAGFS_BLOCK_SIZE;
-    const uint64_t   W       = HelmWindowBytes(0);
+    const uint64_t   W       = HelmWindowBytes(vol, 0);
     const uint32_t   bytes   = (uint32_t)(3 * W + B / 2);
-    const char      *aside   = StandStepsAsideFor();
+    const char      *aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
@@ -442,16 +448,16 @@ static TestResult TestStandHelmWriteYieldsBetweenWindows(void)
     back = kmalloc(B + bytes);
     TEST_ASSERT(data && back, "room for the file's bytes and for reading them back");
     TestFillAt(data, B + bytes, 0x4E1D0300u, 0);
-    TEST_ASSERT(StandMakeFile("test_file", data, B, &file_id), "a one-block file is made");
-    writer = tagfs_open(file_id, TAGFS_HANDLE_WRITE | TAGFS_HANDLE_APPEND);
+    TEST_ASSERT(StandMakeFile(vol, "test_file", data, B, &file_id), "a one-block file is made");
+    writer = tagfs_open(vol, file_id, TAGFS_HANDLE_WRITE | TAGFS_HANDLE_APPEND);
     TEST_ASSERT(writer, "a writer opens it to append");
 
-    uint64_t inked = InkedGen();
+    uint64_t inked = InkedGen(vol);
     StandTurnSetOn(&s_turn, STAND_TURN_WINDOWS, writer, data + B, bytes);
     asked = true;
-    TEST_ASSERT(HelmAsk(writer->ofe, &s_turn.waiter), "the writer holds the file's Helm");
-    HelmReady(&s_turn.waiter);
-    TEST_ASSERT(StandTurnDone(&s_turn, STAND_HELM_WINDOWS_BOUND_MS),
+    TEST_ASSERT(HelmAsk(vol, writer->ofe, &s_turn.waiter), "the writer holds the file's Helm");
+    HelmReady(vol, &s_turn.waiter);
+    TEST_ASSERT(StandTurnDone(vol, &s_turn, STAND_HELM_WINDOWS_BOUND_MS),
                 "its write runs to its end at service points");
     asked = false;
     TEST_ASSERT_OK(s_turn.rc, "and is answered OK");
@@ -460,17 +466,17 @@ static TestResult TestStandHelmWriteYieldsBetweenWindows(void)
     TestEvidence("turns a write of three windows and a half took at the service points",
                  s_turn.turns);
     TEST_ASSERT_EQ(s_turn.turns, 4, "one turn a window: the core was given back between two");
-    TEST_ASSERT(InkedGen() - inked >= 4, "and one Ink a window, each its own record");
-    TEST_ASSERT_EQ(TestFileRead(file_id, back, B + bytes), (int)(B + bytes),
+    TEST_ASSERT(InkedGen(vol) - inked >= 4, "and one Ink a window, each its own record");
+    TEST_ASSERT_EQ(TestFileRead(vol, file_id, back, B + bytes), (int)(B + bytes),
                    "the file reads back whole");
     TEST_ASSERT_EQ(TestFirstDifference(back, data, B + bytes), B + bytes,
                    "byte for byte, the windows where they belong");
 out:
-    if (asked && !StandTurnDone(&s_turn, STAND_HELM_WINDOWS_BOUND_MS))
+    if (asked && !StandTurnDone(vol, &s_turn, STAND_HELM_WINDOWS_BOUND_MS))
         writer = NULL;
-    tagfs_close(writer);
+    tagfs_close(vol, writer);
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     kfree(data);
     kfree(back);
     return verdict;
@@ -493,6 +499,7 @@ out:
 
 static TestResult TestStandHelmWriteRefusedPartWay(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult     verdict = TEST_PASS;
     uint64_t       file_id = 0;
     uint64_t       block   = 0;
@@ -501,11 +508,11 @@ static TestResult TestStandHelmWriteRefusedPartWay(void)
     uint8_t       *back    = NULL;
     bool           armed   = false;
     const uint32_t B       = TAGFS_BLOCK_SIZE;
-    const uint64_t W       = HelmWindowBytes(0);
+    const uint64_t W       = HelmWindowBytes(vol, 0);
     const uint32_t made    = (uint32_t)(W + B + B);   /* its last block whole */
     const uint32_t bytes   = (uint32_t)(W + B + 200);   /* ... and the write lays 200 over it */
     uint64_t       stats[2] = { UINT64_MAX, UINT64_MAX };
-    const char    *aside   = StandStepsAsideFor();
+    const char    *aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
@@ -516,9 +523,9 @@ static TestResult TestStandHelmWriteRefusedPartWay(void)
     TEST_ASSERT(old && data && back, "room for the file, the write and the read back");
     TestFillAt(old, made, 0x4E1D0400u, 0);
     TestFillAt(data, bytes, 0x4E1D0401u, 0);
-    TEST_ASSERT(StandMakeFile("test_file", old, made, &file_id),
+    TEST_ASSERT(StandMakeFile(vol, "test_file", old, made, &file_id),
                 "a file of a window and two whole blocks is made");
-    TEST_ASSERT(StandBlockOf(file_id, (uint32_t)(W / B) + 1, &block),
+    TEST_ASSERT(StandBlockOf(vol, file_id, (uint32_t)(W / B) + 1, &block),
                 "the block the second window lays 200 bytes over is found");
 
     Crate out = { .addr = (uint64_t)(uintptr_t)stats, .size = 0, .capacity = sizeof(stats) };
@@ -531,7 +538,7 @@ static TestResult TestStandHelmWriteRefusedPartWay(void)
     ask.offset        = 0;
     ask.out_crate     = &out;
 
-    BlockFailArm(tagfs_get_seat(), BLOCK_FAIL_READ, tagfs_block_to_sector(block),
+    BlockFailArm(tagfs_get_seat(vol), BLOCK_FAIL_READ, tagfs_block_to_sector(vol, block),
                  TAGFS_BLOCK_SECTORS, 1);
     armed = true;
     int answer = WriteJobSubmit(&ask, NULL, NULL);
@@ -546,7 +553,7 @@ static TestResult TestStandHelmWriteRefusedPartWay(void)
     TEST_ASSERT_EQ(stats[0], W + B, "the first window and the block before the refused one");
     TEST_ASSERT_EQ(stats[1], made, "and the size the file is, which the write did not reach");
 
-    TEST_ASSERT_EQ(TestFileRead(file_id, back, made), (int)made, "the file reads back");
+    TEST_ASSERT_EQ(TestFileRead(vol, file_id, back, made), (int)made, "the file reads back");
     TEST_ASSERT_EQ(TestFirstDifference(back, data, (uint32_t)(W + B)), (uint32_t)(W + B),
                    "holding the bytes answered as written");
     TEST_ASSERT_EQ(TestFirstDifference(back + W + B, old + W + B, made - (uint32_t)(W + B)),
@@ -555,7 +562,7 @@ out:
     if (armed)
         BlockFailDisarm();
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     kfree(old);
     kfree(data);
     kfree(back);
@@ -590,27 +597,28 @@ out:
 
 static TestResult TestStandHelmGuardedFileRefused(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict  = TEST_PASS;
     uint64_t    file_id  = 0;
     uint64_t    block    = 0;
     bool        armed    = false;
     uint64_t    stats[2] = { UINT64_MAX, UINT64_MAX };
-    const char *aside    = StandStepsAsideFor();
+    const char *aside    = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
 
-    if (!StandKeptFile(&file_id))
+    if (!StandKeptFile(vol, &file_id))
         return test_steps_aside("no file of this volume is kept in a role");
 
     TagFSMetadata meta;
     memset(&meta, 0, sizeof(meta));
-    TEST_ASSERT_EQ(tagfs_get_metadata(file_id, &meta), 0, "its record is read");
+    TEST_ASSERT_EQ(tagfs_get_metadata(vol, file_id, &meta), 0, "its record is read");
     uint64_t size = meta.size;
     tagfs_metadata_free(&meta);
-    TEST_ASSERT(size > 0 && StandBlockOf(file_id, 0, &block), "and its first block is found");
+    TEST_ASSERT(size > 0 && StandBlockOf(vol, file_id, 0, &block), "and its first block is found");
     uint32_t bytes = size < TAGFS_BLOCK_SIZE ? (uint32_t)size : TAGFS_BLOCK_SIZE;
-    TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, bytes), (int)bytes,
+    TEST_ASSERT_EQ(TestFileRead(vol, file_id, g_test_output, bytes), (int)bytes,
                    "the bytes it begins with are read");
 
     Crate out = { .addr = (uint64_t)(uintptr_t)stats, .size = 0, .capacity = sizeof(stats) };
@@ -623,7 +631,7 @@ static TestResult TestStandHelmGuardedFileRefused(void)
     ask.offset        = 0;
     ask.out_crate     = &out;
 
-    BlockFailArm(tagfs_get_seat(), BLOCK_FAIL_WRITE, tagfs_block_to_sector(block),
+    BlockFailArm(tagfs_get_seat(vol), BLOCK_FAIL_WRITE, tagfs_block_to_sector(vol, block),
                  TAGFS_BLOCK_SECTORS, BLOCK_FAIL_NEVER);
     armed = true;
     int answer = WriteJobSubmit(&ask, NULL, NULL);
@@ -636,7 +644,7 @@ static TestResult TestStandHelmGuardedFileRefused(void)
     TEST_ASSERT_EQ(stats[1], size, "and the size the file still is");
     TestEvidence("medium writes the refused write issued to the file's first block", seen);
     TEST_ASSERT_EQ(seen, 0, "refused before a byte moved: no write reached the file's block");
-    TEST_ASSERT_EQ(tagfs_span_file(file_id, size), ERR_PERMISSION_DENIED,
+    TEST_ASSERT_EQ(tagfs_span_file(vol, file_id, size), ERR_PERMISSION_DENIED,
                    "and a span of it is refused by the same guard");
 out:
     if (armed)

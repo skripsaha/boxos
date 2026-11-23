@@ -5,6 +5,7 @@
 #include "../block_map/block_map_derived.h"
 #include "../ink/fallow.h"
 #include "../tag_registry/tag_registry.h"
+#include "tagfs_volume.h"
 
 /*
  * Where the ribbon goes on (sewing.h): the writer's cursor past the last
@@ -20,66 +21,15 @@
  * reads it between two cycles, on the runner's core.
  */
 
-static RibbonCursor s_cursor;
 
-/*
- * What a change of a book may claim of the ribbon (RibbonClaim), published by
- * the Settle's holder each time the cursor or the stitch in flight moves, and
- * by the mount, and read under the state lock by Ink: the bytes of records the
- * next stitch can carry past the one in flight, and of a stitch of freeing
- * records alone; whether the ribbon may still be given a next_quire, and the
- * free count when the last ask for one was refused. A move that shrinks the
- * room publishes it before what it took is let go, so a claim is judged
- * against too little room, never too much.
- */
-static volatile uint64_t s_room_any;
-static volatile uint64_t s_room_frees;
-static volatile uint8_t  s_room_grows;
-static volatile uint64_t s_refused_free;
 
-/* The ribbon stands with no next_quire, its last ask refused past the reserve
- * — or answered with one found only on ground a Tally a mount may stand on
- * keeps from it (fallow.c, NodeBarred): published with the room. A change
- * short of room on the ribbon waited on a Tally for it, and no change that
- * does not free has been given room since (RibbonClaimSay, RibbonRoomFor):
- * the ribbon's shortfall is the volume's, not a change's, so any change given
- * room past it ends it. A change refused room on the ribbon, said until one
- * is given room (RibbonRefusedSaid). Any core, no lock; let go at mount. */
-static volatile uint8_t  s_room_refused;
-static volatile uint8_t  s_room_barred;
-static volatile uint8_t  s_room_waited;
-static volatile uint8_t  s_refused_said;
 
-/* The slice of the last Tally's DONE that asked the next_quire again, and how
- * many in a row took that same stitch in (RibbonNextAgain). By the Settle's
- * holder. */
-static uint64_t          s_again_slice;
-static uint32_t          s_again_turns;
 
-/* The bytes claimed by changes no stitch has taken, and those held for changes
- * in the making — a tag about to be given an id, a write's record while its
- * data moves (RibbonReserve): under the state lock. */
-static uint64_t          s_claimed;
-static uint64_t          s_reserved;
-
-/* The sectors the stitch in flight takes at the most; 0 with none. Set under
- * the state lock at TAKE, cleared by the Settle's holder at the cycle's end. */
-static volatile uint64_t s_flight;
-
-/* A stitch with no word aboard that the rest and the next_quire do not hold,
- * said once a mount. */
-static volatile uint8_t  s_long_said;
-
-/* A stitch that ends inside a flash page, said once a mount (RibbonPlaced);
- * the last Quire begun off a page gone on into, said once, its block + 1
- * (RibbonEnteredSaid). */
-static volatile uint8_t  s_inside_said;
-static volatile uint64_t s_entered_said;
 
 /* The medium's atom, sectors (§1.5): no write of the ribbon is smaller. */
-static uint32_t RibbonMediumAtom(void)
+static uint32_t RibbonMediumAtom(TagFSVolume* vol)
 {
-    return g_book.atom / BOOK_SECTOR_BYTES;
+    return vol->book.atom / BOOK_SECTOR_BYTES;
 }
 
 /* Whether `q` is laid on atoms of `atom` sectors: its first block and its
@@ -108,11 +58,11 @@ static uint64_t RibbonRoomBytes(uint64_t sectors)
  * the two atoms a stitch that runs on into it leaves; with none, a stitch of
  * freeing records only, an atom kept past it.
  */
-void RibbonRoomOf(const RibbonCursor* c, uint64_t flight, uint64_t* any, uint64_t* frees)
+void RibbonRoomOf(TagFSVolume* vol, const RibbonCursor* c, uint64_t flight, uint64_t* any, uint64_t* frees)
 {
     uint64_t left = c->up ? c->quire.blocks * TAGFS_BLOCK_SECTORS - c->off : 0;
     uint64_t next = c->up ? c->next.blocks * TAGFS_BLOCK_SECTORS : 0;
-    uint64_t at   = c->quire.block * TAGFS_BLOCK_SECTORS + c->off, m = RibbonMediumAtom();
+    uint64_t at   = c->quire.block * TAGFS_BLOCK_SECTORS + c->off, m = RibbonMediumAtom(vol);
     /* A stitch ends on an atom of the ribbon (RibbonStitchEnds): begun off
      * one, or in a Quire a writer of a smaller atom laid off one, it may take
      * up to that atom less the medium's past its length — that much less is
@@ -132,29 +82,29 @@ void RibbonRoomOf(const RibbonCursor* c, uint64_t flight, uint64_t* any, uint64_
         *frees = *any;
 }
 
-static void RibbonRoomPublish(void)
+static void RibbonRoomPublish(TagFSVolume* vol)
 {
-    const RibbonCursor* c      = &s_cursor;
-    uint64_t            flight = __atomic_load_n(&s_flight, __ATOMIC_ACQUIRE);
+    const RibbonCursor* c      = &vol->ribbon.cursor;
+    uint64_t            flight = __atomic_load_n(&vol->ribbon.flight, __ATOMIC_ACQUIRE);
     uint64_t            left   = c->up ? c->quire.blocks * TAGFS_BLOCK_SECTORS - c->off : 0;
     uint64_t            any = 0, frees = 0;
-    RibbonRoomOf(c, flight, &any, &frees);
-    __atomic_store_n(&s_room_any, RibbonRoomBytes(any), __ATOMIC_RELEASE);
-    __atomic_store_n(&s_room_frees, RibbonRoomBytes(frees), __ATOMIC_RELEASE);
-    __atomic_store_n(&s_room_grows, (uint8_t)(c->up && ((flight && flight >= left) || c->next.blocks ||
+    RibbonRoomOf(vol, c, flight, &any, &frees);
+    __atomic_store_n(&vol->ribbon.room_any, RibbonRoomBytes(any), __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->ribbon.room_frees, RibbonRoomBytes(frees), __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->ribbon.room_grows, (uint8_t)(c->up && ((flight && flight >= left) || c->next.blocks ||
                                                         c->taken != ERR_TAGFS_NO_SPACE)), __ATOMIC_RELEASE);
-    __atomic_store_n(&s_room_refused, (uint8_t)(c->up && !c->next.blocks && c->taken == ERR_TAGFS_NO_SPACE),
+    __atomic_store_n(&vol->ribbon.room_refused, (uint8_t)(c->up && !c->next.blocks && c->taken == ERR_TAGFS_NO_SPACE),
                      __ATOMIC_RELEASE);
-    __atomic_store_n(&s_room_barred, (uint8_t)(c->up && !c->next.blocks && c->taken == ERR_WOULD_BLOCK),
+    __atomic_store_n(&vol->ribbon.room_barred, (uint8_t)(c->up && !c->next.blocks && c->taken == ERR_WOULD_BLOCK),
                      __ATOMIC_RELEASE);
 }
 
 /* A Quire's blocks for this volume: the grain it was laid out in (§2.6 — the
  * maker's Quire), a whole number of atoms; the Quire the ribbon stands in
  * when the volume names no grain. */
-static uint64_t RibbonQuireBlocks(const RibbonQuire* now, uint32_t atom)
+static uint64_t RibbonQuireBlocks(TagFSVolume* vol, const RibbonQuire* now, uint32_t atom)
 {
-    uint64_t grain = tagfs_get_state()->geometry.grain_bytes / TAGFS_BLOCK_SIZE;
+    uint64_t grain = vol->state.geometry.grain_bytes / TAGFS_BLOCK_SIZE;
     uint64_t atoms = atom / TAGFS_BLOCK_SECTORS ? atom / TAGFS_BLOCK_SECTORS : 1u;
     if (grain == 0)
         grain = now->blocks;
@@ -166,16 +116,16 @@ static uint64_t RibbonQuireBlocks(const RibbonQuire* now, uint32_t atom)
  * mount took one on it, where none could be taken or a retry is taken up
  * there alone (M-6) — said once a Quire: the stitch laid at its start shares
  * a flash page with what lies before it. */
-static void RibbonEnteredSaid(const RibbonQuire* q)
+static void RibbonEnteredSaid(TagFSVolume* vol, const RibbonQuire* q)
 {
-    uint64_t pb = s_cursor.atom / TAGFS_BLOCK_SECTORS;
+    uint64_t pb = vol->ribbon.cursor.atom / TAGFS_BLOCK_SECTORS;
     if (!pb || !(q->block % pb) ||
-        __atomic_exchange_n(&s_entered_said, q->block + 1u, __ATOMIC_ACQ_REL) == q->block + 1u)
+        __atomic_exchange_n(&vol->ribbon.entered_said, q->block + 1u, __ATOMIC_ACQ_REL) == q->block + 1u)
         return;
     kprintf("[TagFS] the ribbon goes on into its Quire %llu+%llu, which a writer of a smaller atom took off a flash "
             "page of %u bytes: the stitch laid at its start shares a page with what lies before it, and ends on a "
             "page, every one after it begun on one (§16.6 п.2)\n", (unsigned long long)q->block,
-            (unsigned long long)q->blocks, s_cursor.atom * BOOK_SECTOR_BYTES);
+            (unsigned long long)q->blocks, vol->ribbon.cursor.atom * BOOK_SECTOR_BYTES);
 }
 
 /*
@@ -187,10 +137,10 @@ static void RibbonEnteredSaid(const RibbonQuire* q)
  * takes (RibbonNextGiven) — a retry, which the reader takes up there alone,
  * refused (RibbonRetry).
  */
-static const char* RibbonGoesOnAt(RibbonCursor* c, bool* hop)
+static const char* RibbonGoesOnAt(TagFSVolume* vol, RibbonCursor* c, bool* hop)
 {
     uint32_t way = RibbonGoesOn(c->quire.block, c->quire.blocks, c->off, c->next.block, c->next.blocks,
-                                RibbonMediumAtom(), c->atom);
+                                RibbonMediumAtom(vol), c->atom);
     *hop = (way & RIBBON_ON_NEXT) != 0;
     if (!way)
         return "neither where its ribbon ends nor the next_quire it names lies on the medium's atom — a writer of a "
@@ -202,22 +152,22 @@ static const char* RibbonGoesOnAt(RibbonCursor* c, bool* hop)
                 "first shares that page with the last one settled, and ends on a page, every one after it begun on "
                 "one (§16.2 п.11, §16.6 п.2)\n", (unsigned long long)c->off, (unsigned long long)c->quire.block,
                 (unsigned long long)c->quire.blocks, c->atom * BOOK_SECTOR_BYTES);
-    if (!*hop && c->next.blocks && !RibbonQuireOn(&c->next, RibbonMediumAtom())) {
+    if (!*hop && c->next.blocks && !RibbonQuireOn(&c->next, RibbonMediumAtom(vol))) {
         kprintf("[TagFS] the next_quire the ribbon names, %llu+%llu, lies off the medium's atom of %u bytes: no "
                 "stitch is written in it, and the next stitch names one taken in its stead (§1.5)\n",
                 (unsigned long long)c->next.block, (unsigned long long)c->next.blocks,
-                RibbonMediumAtom() * BOOK_SECTOR_BYTES);
+                RibbonMediumAtom(vol) * BOOK_SECTOR_BYTES);
         c->next = (RibbonQuire){ 0, 0 };
     }
     return NULL;
 }
 
-error_t RibbonCursorMount(const RibbonWalk* w, const char** glass)
+error_t RibbonCursorMount(TagFSVolume* vol, const RibbonWalk* w, const char** glass)
 {
-    RibbonCursor* c   = &s_cursor;
+    RibbonCursor* c   = &vol->ribbon.cursor;
     bool          hop = false;
     memset(c, 0, sizeof(*c));
-    __atomic_store_n(&s_entered_said, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->ribbon.entered_said, 0u, __ATOMIC_RELEASE);
     if (!w->has_end) {
         *glass = "its ribbon ends where the walk cannot say what comes next — no writer goes on from there";
         return ERR_TAGFS_READ_ONLY;
@@ -230,15 +180,15 @@ error_t RibbonCursorMount(const RibbonWalk* w, const char** glass)
     c->off   = w->end.off;
     c->next  = RibbonQuireSame(&w->end.quire, &w->quire) ? w->next : (RibbonQuire){ 0, 0 };
     c->came  = RibbonQuireSame(&w->end.quire, &w->quire) ? (RibbonQuire){ 0, 0 } : w->quire;
-    c->atom  = g_book.ribbon_atom / BOOK_SECTOR_BYTES;
+    c->atom  = vol->book.ribbon_atom / BOOK_SECTOR_BYTES;
     if (c->off >= c->quire.blocks * TAGFS_BLOCK_SECTORS && !c->next.blocks) {
         *glass = "its ribbon fills its last Quire, and names no next_quire to go on in";
         return ERR_TAGFS_READ_ONLY;
     }
-    if ((*glass = RibbonGoesOnAt(c, &hop)) != NULL)
+    if ((*glass = RibbonGoesOnAt(vol, c, &hop)) != NULL)
         return ERR_TAGFS_READ_ONLY;
     if (hop) {
-        RibbonEnteredSaid(&c->next);
+        RibbonEnteredSaid(vol, &c->next);
         c->came  = c->quire;
         c->quire = c->next;
         c->next  = (RibbonQuire){ 0, 0 };
@@ -255,57 +205,57 @@ error_t RibbonCursorMount(const RibbonWalk* w, const char** glass)
     c->last         = w->seq;
     c->clasp        = w->clasp;
     c->tally        = w->slot->head.tally_seq;
-    c->given        = BookSeqSeen();
-    c->quire_blocks = RibbonQuireBlocks(&c->quire, c->atom);
+    c->given        = BookSeqSeen(vol);
+    c->quire_blocks = RibbonQuireBlocks(vol, &c->quire, c->atom);
     c->quires       = w->nquires;
     c->lied         = w->lied;
     c->taken        = OK;
     c->up           = true;
-    s_claimed       = 0;
-    s_reserved      = 0;
-    __atomic_store_n(&s_flight, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_refused_free, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_long_said, 0u, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_inside_said, 0u, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_room_waited, 0u, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_refused_said, 0u, __ATOMIC_RELEASE);
-    RibbonLeftMount(w, c->lied, c->given);
-    RibbonRoomPublish();
+    vol->ribbon.claimed       = 0;
+    vol->ribbon.reserved      = 0;
+    __atomic_store_n(&vol->ribbon.flight, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->ribbon.refused_free, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->ribbon.long_said, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->ribbon.inside_said, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->ribbon.room_waited, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->ribbon.refused_said, 0u, __ATOMIC_RELEASE);
+    RibbonLeftMount(vol, w, c->lied, c->given);
+    RibbonRoomPublish(vol);
     return OK;
 }
 
-void RibbonCursorLetGo(void)
+void RibbonCursorLetGo(TagFSVolume* vol)
 {
-    RibbonLeftLetGo();
-    memset(&s_cursor, 0, sizeof(s_cursor));
-    s_claimed  = 0;
-    s_reserved = 0;
-    __atomic_store_n(&s_flight, 0, __ATOMIC_RELEASE);
-    RibbonRoomPublish();
+    RibbonLeftLetGo(vol);
+    memset(&vol->ribbon.cursor, 0, sizeof(vol->ribbon.cursor));
+    vol->ribbon.claimed  = 0;
+    vol->ribbon.reserved = 0;
+    __atomic_store_n(&vol->ribbon.flight, 0, __ATOMIC_RELEASE);
+    RibbonRoomPublish(vol);
 }
 
-bool RibbonCursorLied(void)
+bool RibbonCursorLied(TagFSVolume* vol)
 {
-    return s_cursor.lied;
+    return vol->ribbon.cursor.lied;
 }
 
-const RibbonCursor* RibbonCursorNow(void)
+const RibbonCursor* RibbonCursorNow(TagFSVolume* vol)
 {
-    return &s_cursor;
+    return &vol->ribbon.cursor;
 }
 
 #ifdef CONFIG_VOLUME_TESTS
-void RibbonCursorStand(RibbonCursor* out)
+void RibbonCursorStand(TagFSVolume* vol, RibbonCursor* out)
 {
-    *out = s_cursor;
+    *out = vol->ribbon.cursor;
 }
 
-void RibbonClaimsStand(uint64_t* claimed, uint64_t* reserved)
+void RibbonClaimsStand(TagFSVolume* vol, uint64_t* claimed, uint64_t* reserved)
 {
-    TagFSState* fs = tagfs_get_state();
+    TagFSState* fs = &vol->state;
     TagFSLockTake(&fs->lock);
-    *claimed  = s_claimed;
-    *reserved = s_reserved;
+    *claimed  = vol->ribbon.claimed;
+    *reserved = vol->ribbon.reserved;
     TagFSLockDrop(&fs->lock);
 }
 
@@ -322,12 +272,12 @@ bool RibbonStandMarksRefusing(void)
 }
 #endif
 
-uint64_t RibbonSeqNext(void)
+uint64_t RibbonSeqNext(TagFSVolume* vol)
 {
-    uint64_t seen = BookSeqSeen();
-    s_cursor.given = (s_cursor.given > seen ? s_cursor.given : seen) + 1u;
-    BookSeqGiven(s_cursor.given);
-    return s_cursor.given;
+    uint64_t seen = BookSeqSeen(vol);
+    vol->ribbon.cursor.given = (vol->ribbon.cursor.given > seen ? vol->ribbon.cursor.given : seen) + 1u;
+    BookSeqGiven(vol, vol->ribbon.cursor.given);
+    return vol->ribbon.cursor.given;
 }
 
 #ifdef CONFIG_VOLUME_TESTS
@@ -348,16 +298,16 @@ static bool RibbonNextWanted(const RibbonCursor* c)
 
 /* A Quire of the map for the next_quire, named by the cursor: OK, or the
  * map's refusal. */
-static error_t RibbonNextTake(RibbonCursor* c)
+static error_t RibbonNextTake(TagFSVolume* vol, RibbonCursor* c)
 {
     uint64_t start = 0;
 #ifdef CONFIG_VOLUME_TESTS
     if (__atomic_exchange_n(&s_stand_next_refused, false, __ATOMIC_ACQ_REL))
         return ERR_TAGFS_NO_SPACE;
 #endif
-    error_t rc = BlockMapTakeQuire(GROUND_RIBBON, c->quire_blocks,
+    error_t rc = BlockMapTakeQuire(vol, GROUND_RIBBON, c->quire_blocks,
                                    c->atom / TAGFS_BLOCK_SECTORS ? c->atom / TAGFS_BLOCK_SECTORS : 1u,
-                                   EndpaperKeeps(c->quire_blocks), g_book.frame.data_block,
+                                   EndpaperKeeps(vol, c->quire_blocks), vol->book.frame.data_block,
                                    c->quire.block + c->quire.blocks, &start);
     if (rc != OK)
         return rc;
@@ -367,7 +317,7 @@ static error_t RibbonNextTake(RibbonCursor* c)
                 (unsigned long long)c->next.block, (unsigned long long)c->next.blocks,
                 c->atom * BOOK_SECTOR_BYTES, (unsigned long long)start, (unsigned long long)c->quire_blocks);
     c->next = (RibbonQuire){ start, c->quire_blocks };
-    BinderRibbonGiven(&c->next);
+    BinderRibbonGiven(vol, &c->next);
     __atomic_store_n(&c->out, false, __ATOMIC_RELEASE);   /* the next run out is said again */
     return OK;
 }
@@ -392,36 +342,36 @@ static error_t RibbonNextTake(RibbonCursor* c)
  * be taken, its ground held until a Tally lets the ribbon's Quires before
  * the one it stands in go, as every Quire a stitch named.
  */
-static void RibbonNextAsk(bool ask)
+static void RibbonNextAsk(TagFSVolume* vol, bool ask)
 {
-    RibbonCursor* c = &s_cursor;
+    RibbonCursor* c = &vol->ribbon.cursor;
     if (!RibbonNextWanted(c))
         return;
-    c->taken = RibbonNextTake(c);
-    if (c->taken == ERR_WOULD_BLOCK && BinderNoTallies())
+    c->taken = RibbonNextTake(vol, c);
+    if (c->taken == ERR_WOULD_BLOCK && BinderNoTallies(vol))
         c->taken = ERR_TAGFS_NO_SPACE;   /* no Tally of this mount lifts the bar (fallow.c, NodeBarred) */
     if (c->taken != OK && !c->next.blocks) {
         /* A Tally gives the ribbon ground — the slots' Quires, the bar lifted
          * — never the heap a refusal of memory wanted: it would want it too. */
         if (ask && (c->taken == ERR_TAGFS_NO_SPACE || c->taken == ERR_WOULD_BLOCK))
-            SettleDemand(SETTLE_DEMAND_TALLY);
+            SettleDemand(vol, SETTLE_DEMAND_TALLY);
         if (c->taken == ERR_TAGFS_NO_SPACE)
-            __atomic_store_n(&s_refused_free, AllotmentFreeUnpromised(), __ATOMIC_RELEASE);
+            __atomic_store_n(&vol->ribbon.refused_free, AllotmentFreeUnpromised(vol), __ATOMIC_RELEASE);
     }
-    RibbonRoomPublish();
+    RibbonRoomPublish(vol);
 }
 
-void RibbonNextGiven(void)
+void RibbonNextGiven(TagFSVolume* vol)
 {
-    RibbonNextAsk(true);
+    RibbonNextAsk(vol, true);
 }
 
-void RibbonNextAgain(uint64_t slice)
+void RibbonNextAgain(TagFSVolume* vol, uint64_t slice)
 {
-    s_again_turns = slice == s_again_slice ? s_again_turns + 1u : 1u;
-    s_again_slice = slice;
-    if (!s_cursor.next.blocks)
-        RibbonNextAsk(s_again_turns < g_binder.ring);
+    vol->ribbon.again_turns = slice == vol->ribbon.again_slice ? vol->ribbon.again_turns + 1u : 1u;
+    vol->ribbon.again_slice = slice;
+    if (!vol->ribbon.cursor.next.blocks)
+        RibbonNextAsk(vol, vol->ribbon.again_turns < vol->binder.ring);
 }
 
 /*
@@ -436,17 +386,17 @@ void RibbonNextAgain(uint64_t slice)
  * Quire found only on ground a mount's Tally keeps from the ribbon
  * (ERR_WOULD_BLOCK, fallow.c NodeBarred) alike.
  */
-void RibbonNextGivenAtMount(void)
+void RibbonNextGivenAtMount(TagFSVolume* vol)
 {
-    RibbonCursor* c = &s_cursor;
-    if (RibbonNextWanted(c) && RibbonNextTake(c) == OK)
-        RibbonRoomPublish();
+    RibbonCursor* c = &vol->ribbon.cursor;
+    if (RibbonNextWanted(c) && RibbonNextTake(vol, c) == OK)
+        RibbonRoomPublish(vol);
 }
 
-void RibbonTallied(uint64_t tally, uint64_t taken)
+void RibbonTallied(TagFSVolume* vol, uint64_t tally, uint64_t taken)
 {
-    s_cursor.tally = tally;
-    RibbonLeftTallied(taken);
+    vol->ribbon.cursor.tally = tally;
+    RibbonLeftTallied(vol, taken);
 }
 
 /*
@@ -459,18 +409,18 @@ void RibbonTallied(uint64_t tally, uint64_t taken)
  * (RibbonRefusedSaid) — so this line says the ribbon's state, never the end of
  * a change's wait.
  */
-static void RibbonOutSaid(void)
+static void RibbonOutSaid(TagFSVolume* vol)
 {
-    RibbonCursor* c    = &s_cursor;
-    const char*   none = BinderNoTallies();
+    RibbonCursor* c    = &vol->ribbon.cursor;
+    const char*   none = BinderNoTallies(vol);
     if (__atomic_exchange_n(&c->out, true, __ATOMIC_ACQ_REL))
         return;
     kprintf("[TagFS] the ribbon has run out: %llu Quire(s) taken for it, %llu block(s) free, %llu kept for "
             "the Tallies and %llu promised to the tails Slips lie over — %s%s; until then %s, and the rest of its "
             "Quire is kept for what was claimed before and what gives ground up\n",
             (unsigned long long)__atomic_load_n(&c->quires, __ATOMIC_RELAXED),
-            (unsigned long long)__atomic_load_n(&tagfs_get_state()->free_blocks, __ATOMIC_ACQUIRE),
-            (unsigned long long)EndpaperKeeps(c->quire_blocks), (unsigned long long)AllotmentPromised(),
+            (unsigned long long)__atomic_load_n(&vol->state.free_blocks, __ATOMIC_ACQUIRE),
+            (unsigned long long)EndpaperKeeps(vol, c->quire_blocks), (unsigned long long)AllotmentPromised(vol),
             none ? "no Tally is written by this mount, so none of its Quires comes back before the volume is "
                    "mounted again: " : "a Tally is asked for to take its end in, and its Quires come back only once "
                    "the slots stop naming them",
@@ -495,11 +445,11 @@ static void RibbonOutSaid(void)
  * laid in its place — the volume forgetting the word it held, which gives up
  * as a delete does — is promised (sewing.c).
  */
-uint64_t RibbonStitchOf(uint64_t len)
+uint64_t RibbonStitchOf(TagFSVolume* vol, uint64_t len)
 {
-    const RibbonCursor* c    = &s_cursor;
+    const RibbonCursor* c    = &vol->ribbon.cursor;
     uint64_t            left = c->quire.blocks * TAGFS_BLOCK_SECTORS - c->off;
-    return RibbonStitchEnds(RibbonStitchSectors(len, RibbonMediumAtom()),
+    return RibbonStitchEnds(RibbonStitchSectors(len, RibbonMediumAtom(vol)),
                             c->quire.block * TAGFS_BLOCK_SECTORS + c->off, left,
                             c->next.blocks ? c->next.block * TAGFS_BLOCK_SECTORS : 0, c->atom);
 }
@@ -508,13 +458,13 @@ uint64_t RibbonStitchOf(uint64_t len)
  * said where it runs on into a Quire begun off a flash page, or ends inside
  * one short of its Quire's end (volume_ribbon.h, RibbonStitchEnds) — the
  * stitch after it shares that page. */
-static error_t RibbonPlaced(uint64_t of, uint64_t left)
+static error_t RibbonPlaced(TagFSVolume* vol, uint64_t of, uint64_t left)
 {
-    const RibbonCursor* c   = &s_cursor;
+    const RibbonCursor* c   = &vol->ribbon.cursor;
     uint64_t            end = c->quire.block * TAGFS_BLOCK_SECTORS + c->off + of;
     if (of > left)
-        RibbonEnteredSaid(&c->next);
-    else if (of < left && end % c->atom && !__atomic_exchange_n(&s_inside_said, 1u, __ATOMIC_ACQ_REL))
+        RibbonEnteredSaid(vol, &c->next);
+    else if (of < left && end % c->atom && !__atomic_exchange_n(&vol->ribbon.inside_said, 1u, __ATOMIC_ACQ_REL))
         kprintf("[TagFS] the ribbon's Quire %llu+%llu, which a writer of a smaller atom laid, ends inside a flash "
                 "page of %u bytes and no next_quire is given: a stitch of %llu sector(s) ends inside a page short of "
                 "it, and the stitch after it shares that page (§3.6, §16.6 п.2)\n",
@@ -523,9 +473,9 @@ static error_t RibbonPlaced(uint64_t of, uint64_t left)
     return OK;
 }
 
-error_t RibbonRoom(uint64_t of, bool promised, RibbonPlace* at, RibbonQuire* hop)
+error_t RibbonRoom(TagFSVolume* vol, uint64_t of, bool promised, RibbonPlace* at, RibbonQuire* hop)
 {
-    RibbonCursor* c    = &s_cursor;
+    RibbonCursor* c    = &vol->ribbon.cursor;
     uint64_t      left = c->quire.blocks * TAGFS_BLOCK_SECTORS - c->off;
     at->quire = c->quire;
     at->off   = c->off;
@@ -533,10 +483,10 @@ error_t RibbonRoom(uint64_t of, bool promised, RibbonPlace* at, RibbonQuire* hop
     if (c->next.blocks) {
         uint64_t most = left + c->next.blocks * TAGFS_BLOCK_SECTORS - 2u * c->atom;
         if (of <= left || of <= most)
-            return RibbonPlaced(of, left);
+            return RibbonPlaced(vol, of, left);
         if (c->refused)
             return ERR_TAGFS_READ_ONLY;
-        if (promised && !__atomic_exchange_n(&s_long_said, 1u, __ATOMIC_ACQ_REL))
+        if (promised && !__atomic_exchange_n(&vol->ribbon.long_said, 1u, __ATOMIC_ACQ_REL))
             kprintf("[TagFS] a stitch of %llu sector(s) runs on past the rest of its Quire into the next one and "
                     "would leave less of it than the two atoms kept for a stitch that takes nothing and the one "
                     "that gives its next_quire (%llu sector(s) at the most) — it is not begun (§2.7, §3.6): what "
@@ -553,10 +503,10 @@ error_t RibbonRoom(uint64_t of, bool promised, RibbonPlace* at, RibbonQuire* hop
      * kept for (§3.6): the ground it gives up is what a next_quire is taken
      * from again. */
     if ((promised || c->refused) && of + c->atom <= left)
-        return RibbonPlaced(of, left);
+        return RibbonPlaced(vol, of, left);
     if (c->refused)
         return ERR_TAGFS_READ_ONLY;
-    RibbonOutSaid();
+    RibbonOutSaid(vol);
     return ERR_TAGFS_NO_SPACE;
 }
 
@@ -566,10 +516,10 @@ error_t RibbonRoom(uint64_t of, bool promised, RibbonPlace* at, RibbonQuire* hop
  * (ribbon_collate.c): the Quire its last sector lies in, the next_quire forgot
  * when that is a Quire the walk had not ended in, and the one it names taken
  * unless it is the Quire it ends in. */
-uint64_t RibbonSewn(const RibbonPlace* at, const RibbonQuire* hop, uint32_t of, uint64_t seq, uint32_t clasp,
+uint64_t RibbonSewn(TagFSVolume* vol, const RibbonPlace* at, const RibbonQuire* hop, uint32_t of, uint64_t seq, uint32_t clasp,
                     uint32_t clasp_at, uint64_t flags)
 {
-    RibbonCursor* c     = &s_cursor;
+    RibbonCursor* c     = &vol->ribbon.cursor;
     uint64_t      left  = at->quire.blocks * TAGFS_BLOCK_SECTORS - at->off;
     RibbonQuire   last  = of <= left ? at->quire : *hop;
     uint64_t      bound = RibbonQuireSame(&at->quire, &c->ended) ? c->ended_from : seq;
@@ -578,7 +528,7 @@ uint64_t RibbonSewn(const RibbonPlace* at, const RibbonQuire* hop, uint32_t of, 
     c->clasp   = clasp;
     c->refused = 0;
     c->cut     = 0;
-    RibbonLeftSewn(&mark, c->lied);
+    RibbonLeftSewn(vol, &mark, c->lied);
 #ifdef CONFIG_VOLUME_TESTS
     c->sewn       = *at;
     c->sewn_hop   = *hop;
@@ -605,7 +555,7 @@ uint64_t RibbonSewn(const RibbonPlace* at, const RibbonQuire* hop, uint32_t of, 
     }
     if (c->off)
         c->came = (RibbonQuire){ 0, 0 };
-    RibbonRoomPublish();
+    RibbonRoomPublish(vol);
     return bound;
 }
 
@@ -624,16 +574,16 @@ uint64_t RibbonSewn(const RibbonPlace* at, const RibbonQuire* hop, uint32_t of, 
  * end: a retry anywhere else is a stitch the waiters were told is kept and the
  * next mount does not read.
  */
-const char* RibbonRetry(const RibbonPlace* at, const RibbonQuire* hop, uint32_t of, bool cut)
+const char* RibbonRetry(TagFSVolume* vol, const RibbonPlace* at, const RibbonQuire* hop, uint32_t of, bool cut)
 {
-    RibbonCursor* c = &s_cursor;
+    RibbonCursor* c = &vol->ribbon.cursor;
     RibbonPlace   end;
     uint64_t      off = 0;
     c->refused++;
     c->cut += cut ? 1u : 0u;
     if (!c->named.blocks)
         return "the last stitch sewn names no next_quire, where alone a reader takes a retry up";
-    if (!RibbonQuireOn(&c->named, RibbonMediumAtom()))
+    if (!RibbonQuireOn(&c->named, RibbonMediumAtom(vol)))
         return "the next_quire the last stitch sewn names, where alone a reader takes a retry up, lies off the "
                "medium's atom: a write there would rewrite the sectors beside it (§1.5)";
     if (RibbonPlaceOn(at, of, hop, &end) && RibbonQuireSame(&end.quire, &c->named))
@@ -645,11 +595,11 @@ const char* RibbonRetry(const RibbonPlace* at, const RibbonQuire* hop, uint32_t 
         __atomic_add_fetch(&c->quires, 1u, __ATOMIC_RELAXED);
     }
     if (off == 0)
-        RibbonEnteredSaid(&c->named);
+        RibbonEnteredSaid(vol, &c->named);
     c->came  = c->ended;
     c->quire = c->named;
     c->off   = off;
-    RibbonRoomPublish();
+    RibbonRoomPublish(vol);
     return NULL;
 }
 
@@ -664,19 +614,19 @@ const char* RibbonRetry(const RibbonPlace* at, const RibbonQuire* hop, uint32_t 
  * (FallowQuireLeft). Only where the last stitch names that next_quire and the
  * cursor stands in the Quire it ends in, with no retry under way.
  */
-bool RibbonCloseEarly(void)
+bool RibbonCloseEarly(TagFSVolume* vol)
 {
-    RibbonCursor* c = &s_cursor;
+    RibbonCursor* c = &vol->ribbon.cursor;
     if (!c->up || c->refused || !c->named.blocks || !RibbonQuireSame(&c->quire, &c->ended) ||
         !RibbonQuireSame(&c->named, &c->next))
         return false;
-    RibbonEnteredSaid(&c->named);
+    RibbonEnteredSaid(vol, &c->named);
     c->came  = c->ended;
     c->quire = c->named;
     c->next  = (RibbonQuire){ 0, 0 };
     c->off   = 0;
     __atomic_add_fetch(&c->quires, 1u, __ATOMIC_RELAXED);
-    RibbonRoomPublish();
+    RibbonRoomPublish(vol);
     return true;
 }
 
@@ -684,27 +634,27 @@ bool RibbonCloseEarly(void)
 // A change's room on the ribbon (P21)
 // ----------------------------------------------------------------------------
 
-void RibbonFlightBegins(uint64_t sectors)
+void RibbonFlightBegins(TagFSVolume* vol, uint64_t sectors)
 {
-    __atomic_store_n(&s_flight, sectors, __ATOMIC_RELEASE);
-    RibbonRoomPublish();
+    __atomic_store_n(&vol->ribbon.flight, sectors, __ATOMIC_RELEASE);
+    RibbonRoomPublish(vol);
 }
 
-void RibbonFlightEnds(void)
+void RibbonFlightEnds(TagFSVolume* vol)
 {
-    __atomic_store_n(&s_flight, 0, __ATOMIC_RELEASE);
-    RibbonRoomPublish();
+    __atomic_store_n(&vol->ribbon.flight, 0, __ATOMIC_RELEASE);
+    RibbonRoomPublish(vol);
 }
 
 /* The bytes no stitch has taken: the claims, what is held for tags about to
  * be given ids, and the Coineds of the tags given ids since the last stitch
  * settled — counted whoever gave them (tag_registry.h, TagRegistryCoinedHeld). */
-static uint64_t RibbonHeld(void)
+static uint64_t RibbonHeld(TagFSVolume* vol)
 {
     uint32_t coined = 0;
     uint64_t text   = 0;
-    TagRegistryCoinedHeld(tagfs_get_state()->registry, &coined, &text);
-    return s_claimed + s_reserved + (uint64_t)coined * STITCH_COINED_MOST + text;
+    TagRegistryCoinedHeld(vol->state.registry, &coined, &text);
+    return vol->ribbon.claimed + vol->ribbon.reserved + (uint64_t)coined * STITCH_COINED_MOST + text;
 }
 
 /*
@@ -721,72 +671,72 @@ static uint64_t RibbonHeld(void)
  * ground rests in a Quire the ribbon has left for no more than its lag. Else
  * nothing a cycle does makes room: ERR_TAGFS_NO_SPACE, at once.
  */
-static error_t RibbonRoomFor(uint64_t bytes, bool frees)
+static error_t RibbonRoomFor(TagFSVolume* vol, uint64_t bytes, bool frees)
 {
-    uint64_t room = __atomic_load_n(frees ? &s_room_frees : &s_room_any, __ATOMIC_ACQUIRE);
+    uint64_t room = __atomic_load_n(frees ? &vol->ribbon.room_frees : &vol->ribbon.room_any, __ATOMIC_ACQUIRE);
     uint64_t want = bytes ? bytes : STITCH_RECORD_HEAD_MOST;
-    uint64_t held = RibbonHeld();
+    uint64_t held = RibbonHeld(vol);
     if (room >= want && held <= room - want) {
         /* Room for a change that does not free is what a change short of it
          * waited on a Tally for: the shortfall ended, the next has its turn of
          * the ring again. A freeing one is given room in the rest kept for it
          * while the shortfall stands (RibbonRoomOf), and ends nothing. */
-        if (!frees && __atomic_load_n(&s_room_waited, __ATOMIC_ACQUIRE) &&
-            __atomic_exchange_n(&s_room_waited, 0u, __ATOMIC_ACQ_REL))
-            BinderRoomTaken();
+        if (!frees && __atomic_load_n(&vol->ribbon.room_waited, __ATOMIC_ACQUIRE) &&
+            __atomic_exchange_n(&vol->ribbon.room_waited, 0u, __ATOMIC_ACQ_REL))
+            BinderRoomTaken(vol);
         return OK;
     }
-    if (s_claimed || s_reserved || __atomic_load_n(&s_flight, __ATOMIC_ACQUIRE) ||
-        __atomic_load_n(&s_room_grows, __ATOMIC_ACQUIRE) ||
-        AllotmentFreeUnpromised() > __atomic_load_n(&s_refused_free, __ATOMIC_ACQUIRE) ||
-        FallowLeftBlocks())
+    if (vol->ribbon.claimed || vol->ribbon.reserved || __atomic_load_n(&vol->ribbon.flight, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&vol->ribbon.room_grows, __ATOMIC_ACQUIRE) ||
+        AllotmentFreeUnpromised(vol) > __atomic_load_n(&vol->ribbon.refused_free, __ATOMIC_ACQUIRE) ||
+        FallowLeftBlocks(vol))
         return ERR_WOULD_BLOCK;
     return ERR_TAGFS_NO_SPACE;
 }
 
-error_t RibbonClaim(uint64_t bytes, bool frees)
+error_t RibbonClaim(TagFSVolume* vol, uint64_t bytes, bool frees)
 {
-    error_t rc = RibbonRoomFor(bytes, frees);
+    error_t rc = RibbonRoomFor(vol, bytes, frees);
     if (rc == OK)
-        s_claimed += bytes;
+        vol->ribbon.claimed += bytes;
     return rc;
 }
 
-error_t RibbonReserve(uint64_t bytes)
+error_t RibbonReserve(TagFSVolume* vol, uint64_t bytes)
 {
-    error_t rc = RibbonRoomFor(bytes, false);
+    error_t rc = RibbonRoomFor(vol, bytes, false);
     if (rc == OK)
-        s_reserved += bytes;
+        vol->ribbon.reserved += bytes;
     return rc;
 }
 
-void RibbonReserveLetGo(uint64_t bytes)
+void RibbonReserveLetGo(TagFSVolume* vol, uint64_t bytes)
 {
-    s_reserved = s_reserved > bytes ? s_reserved - bytes : 0;
+    vol->ribbon.reserved = vol->ribbon.reserved > bytes ? vol->ribbon.reserved - bytes : 0;
 }
 
-error_t RibbonClaimHeld(uint64_t held, uint64_t bytes)
+error_t RibbonClaimHeld(TagFSVolume* vol, uint64_t held, uint64_t bytes)
 {
     if (bytes > held) {
-        error_t rc = RibbonRoomFor(bytes - held, false);
+        error_t rc = RibbonRoomFor(vol, bytes - held, false);
         if (rc != OK)
             return rc;
     }
-    s_reserved = s_reserved > held ? s_reserved - held : 0;
-    s_claimed += bytes;
+    vol->ribbon.reserved = vol->ribbon.reserved > held ? vol->ribbon.reserved - held : 0;
+    vol->ribbon.claimed += bytes;
     return OK;
 }
 
-uint64_t RibbonClaimTaken(void)
+uint64_t RibbonClaimTaken(TagFSVolume* vol)
 {
-    uint64_t taken = s_claimed;
-    s_claimed      = 0;
+    uint64_t taken = vol->ribbon.claimed;
+    vol->ribbon.claimed      = 0;
     return taken;
 }
 
-void RibbonClaimBack(uint64_t bytes)
+void RibbonClaimBack(TagFSVolume* vol, uint64_t bytes)
 {
-    s_claimed += bytes;
+    vol->ribbon.claimed += bytes;
 }
 
 /*
@@ -801,18 +751,18 @@ void RibbonClaimBack(uint64_t bytes)
  * Settle's stitch (RibbonOutSaid): its words are this change's, at the end of
  * this change's wait.
  */
-static void RibbonRefusedSaid(void)
+static void RibbonRefusedSaid(TagFSVolume* vol)
 {
     const char* why = NULL;
-    if (__atomic_exchange_n(&s_refused_said, 1u, __ATOMIC_ACQ_REL))
+    if (__atomic_exchange_n(&vol->ribbon.refused_said, 1u, __ATOMIC_ACQ_REL))
         return;
-    const char* measured = BinderRoomMeasured(&why);
+    const char* measured = BinderRoomMeasured(vol, &why);
     kprintf("[TagFS] no room on the ribbon for a change of the volume: %llu free, the book keeps %llu for its "
             "ribbon and its Tally and holds %llu itself in its Tallies and its ribbon, and %llu are promised to the "
             "tails Slips lie over — the reserve measured %s%s%s (ERR_TAGFS_NO_SPACE)\n",
-            (unsigned long long)__atomic_load_n(&tagfs_get_state()->free_blocks, __ATOMIC_ACQUIRE),
-            (unsigned long long)(EndpaperKeeps(s_cursor.quire_blocks) + s_cursor.quire_blocks),
-            (unsigned long long)BinderGroundHeld(), (unsigned long long)AllotmentPromised(), measured,
+            (unsigned long long)__atomic_load_n(&vol->state.free_blocks, __ATOMIC_ACQUIRE),
+            (unsigned long long)(EndpaperKeeps(vol, vol->ribbon.cursor.quire_blocks) + vol->ribbon.cursor.quire_blocks),
+            (unsigned long long)BinderGroundHeld(vol), (unsigned long long)AllotmentPromised(vol), measured,
             why ? ": " : "", why ? why : "");
 }
 
@@ -838,17 +788,17 @@ static void RibbonRefusedSaid(void)
  * once one waited gives the next shortfall its turn of the ring again
  * (RibbonRoomFor).
  */
-error_t RibbonClaimSay(error_t rc)
+error_t RibbonClaimSay(TagFSVolume* vol, error_t rc)
 {
-    bool barred  = rc == ERR_WOULD_BLOCK && __atomic_load_n(&s_room_barred, __ATOMIC_ACQUIRE);
-    bool refused = rc == ERR_TAGFS_NO_SPACE && __atomic_load_n(&s_room_refused, __ATOMIC_ACQUIRE);
-    if ((barred || refused) && BinderRibbonWait(barred)) {
-        __atomic_store_n(&s_room_waited, 1u, __ATOMIC_RELEASE);
+    bool barred  = rc == ERR_WOULD_BLOCK && __atomic_load_n(&vol->ribbon.room_barred, __ATOMIC_ACQUIRE);
+    bool refused = rc == ERR_TAGFS_NO_SPACE && __atomic_load_n(&vol->ribbon.room_refused, __ATOMIC_ACQUIRE);
+    if ((barred || refused) && BinderRibbonWait(vol, barred)) {
+        __atomic_store_n(&vol->ribbon.room_waited, 1u, __ATOMIC_RELEASE);
         return ERR_WOULD_BLOCK;
     }
-    if (rc == OK && __atomic_load_n(&s_refused_said, __ATOMIC_ACQUIRE))
-        __atomic_store_n(&s_refused_said, 0u, __ATOMIC_RELEASE);   /* the next refusal is said again */
+    if (rc == OK && __atomic_load_n(&vol->ribbon.refused_said, __ATOMIC_ACQUIRE))
+        __atomic_store_n(&vol->ribbon.refused_said, 0u, __ATOMIC_RELEASE);   /* the next refusal is said again */
     if (rc == ERR_TAGFS_NO_SPACE)
-        RibbonRefusedSaid();
+        RibbonRefusedSaid(vol);
     return rc;
 }

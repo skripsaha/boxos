@@ -5,6 +5,7 @@
 #include "../mount/away.h"
 #include "../mount/tally_read.h"
 #include "boardroom.h"
+#include "tagfs_volume.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -26,11 +27,11 @@ bool StandBinderWrite(const StandBinder* b, uint64_t block, const uint8_t* in)
 }
 
 /* The ring and the ground its slots hold kept as found: NULL, or why not. */
-static const char* StandBinderKeepRing(StandBinder* b)
+static const char* StandBinderKeepRing(TagFSVolume* vol, StandBinder* b)
 {
-    b->slots  = g_book.frame.spine_slots;
-    b->spine  = g_book.frame.spine_block;
-    b->stride = g_book.frame.spine_stride;
+    b->slots  = vol->book.frame.spine_slots;
+    b->spine  = vol->book.frame.spine_block;
+    b->stride = vol->book.frame.spine_stride;
     if (b->slots == 0 || b->slots > STAND_BINDER_SLOTS_MOST)
         return "the Spine's ring is not one the stand keeps";
     if (!(b->ring = kmalloc((uint64_t)b->slots * TAGFS_BLOCK_SIZE)))
@@ -39,7 +40,7 @@ static const char* StandBinderKeepRing(StandBinder* b)
         if (!StandBinderRead(b, b->spine + i * b->stride, b->ring + (uint64_t)i * TAGFS_BLOCK_SIZE))
             return "the ring would not be read";
     BinderStandGivenBegin();
-    uint32_t runs = BinderStandGround(NULL, 0);
+    uint32_t runs = BinderStandGround(vol, NULL, 0);
     b->ground     = kmalloc((uint64_t)(runs ? runs : 1u) * sizeof(Strip));
     b->held       = kmalloc((uint64_t)(runs ? runs : 1u) * sizeof(uint8_t*));
     if (!b->ground || !b->held)
@@ -48,7 +49,7 @@ static const char* StandBinderKeepRing(StandBinder* b)
     /* nground counts what `held` was made for, so it is set only once the
      * count is the one it was made by: the slots' ground grown between the
      * two asks would have the let-go walk past its end. */
-    if (BinderStandGround(b->ground, runs) != runs)
+    if (BinderStandGround(vol, b->ground, runs) != runs)
         return "the slots' ground changed while it was kept";
     b->nground = runs;
     for (uint32_t i = 0; i < b->nground; i++) {
@@ -66,11 +67,11 @@ static const char* StandBinderKeepRing(StandBinder* b)
  * that stands aside once the ribbon was kept lays nothing and puts nothing
  * back: what was taken to keep the ring is let go, and the runner gives the
  * machine back its Use Context (StandStitchContextBack). */
-const char* StandBinderAside(StandBinder* b)
+const char* StandBinderAside(TagFSVolume* vol, StandBinder* b)
 {
     memset(b, 0, sizeof(*b));
-    const char* aside = StandStitchAside(&b->s);
-    if (aside || !(aside = StandBinderKeepRing(b)))
+    const char* aside = StandStitchAside(vol, &b->s);
+    if (aside || !(aside = StandBinderKeepRing(vol, b)))
         return aside;
     for (uint32_t i = 0; b->held && i < b->nground; i++)
         kfree(b->held[i]);
@@ -110,11 +111,11 @@ static bool StandBinderGivenZeroed(const StandBinder* b)
 
 /* The volume let go of, the ring and the kept block written back as found,
  * the ribbon put back (StandStitchPutBack) and the volume mounted on it. */
-bool StandBinderPutBack(StandBinder* b)
+bool StandBinderPutBack(TagFSVolume* vol, StandBinder* b)
 {
     bool ok = true;
-    if (tagfs_get_state()->initialized)
-        TagFSStandLetGo();
+    if (vol->state.initialized)
+        TagFSStandLetGo(vol);
     ok &= StandBinderGivenZeroed(b);
     for (uint32_t i = 0; b->ring && i < b->slots; i++)
         ok &= StandBinderWrite(b, b->spine + i * b->stride, b->ring + (uint64_t)i * TAGFS_BLOCK_SIZE);
@@ -134,22 +135,22 @@ bool StandBinderPutBack(StandBinder* b)
     kfree(b->ring);
     kfree(b->kept);
     b->ring = b->kept = NULL;
-    return StandStitchPutBack(&b->s) && ok;
+    return StandStitchPutBack(vol, &b->s) && ok;
 }
 
 /* `n` Tallies in a row, the lag's stitches settled past each: OK, or the
  * first refusal. A Tally asked for where the last stitch ends on its Quire's
  * last sector is not begun until the next (binder.c, BinderMayNot): a cycle
  * settles one, and it is asked again. */
-error_t StandBinderTallies(uint32_t n)
+error_t StandBinderTallies(TagFSVolume* vol, uint32_t n)
 {
     error_t rc = OK;
     for (uint32_t t = 0; rc == OK && t < n; t++) {
-        rc = BinderRunWhole();
-        if (rc == ERR_BUSY && TagFSSettle() == OK)
-            rc = BinderRunWhole();
-        for (uint64_t l = 0; rc == OK && l <= FallowLag(); l++)
-            rc = TagFSSettle();
+        rc = BinderRunWhole(vol);
+        if (rc == ERR_BUSY && TagFSSettle(vol) == OK)
+            rc = BinderRunWhole(vol);
+        for (uint64_t l = 0; rc == OK && l <= FallowLag(vol); l++)
+            rc = TagFSSettle(vol);
     }
     return rc;
 }
@@ -159,14 +160,14 @@ error_t StandBinderTallies(uint32_t n)
  * nodes again, so a test that holds what a Tally lays anew, or every slot to
  * name a node as it lies, lets them go by first — one a slot of the ring at
  * the most. False when a Tally is refused or one is owed still. */
-bool StandBinderGleaned(void)
+bool StandBinderGleaned(TagFSVolume* vol)
 {
     BinderStandSaid said;
     error_t         rc = OK;
-    BinderStand(&said);
-    for (uint32_t t = 0; rc == OK && said.demanded && t < g_book.frame.spine_slots; t++) {
-        rc = StandBinderTallies(1u);
-        BinderStand(&said);
+    BinderStand(vol, &said);
+    for (uint32_t t = 0; rc == OK && said.demanded && t < vol->book.frame.spine_slots; t++) {
+        rc = StandBinderTallies(vol, 1u);
+        BinderStand(vol, &said);
     }
     return rc == OK && !said.demanded;
 }
@@ -181,7 +182,7 @@ bool StandBinderGleaned(void)
  * lay the nodes of a Quire it gleans anew, a Tally more for every other slot
  * of the ring, nothing changed between, names the leaves as they lie — every
  * slot then holds the range in the one node. */
-TestResult StandBinderRot(StandBinder* b, uint64_t* files)
+TestResult StandBinderRot(TagFSVolume* vol, StandBinder* b, uint64_t* files)
 {
     TestResult verdict = TEST_PASS;
     TallyPlace leaf;
@@ -191,15 +192,15 @@ TestResult StandBinderRot(StandBinder* b, uint64_t* files)
 
     for (uint32_t i = 0; i < STAND_BINDER_MANY; i++) {
         ksnprintf(name, sizeof(name), "bind-rot-%04u-of-a-name-long-enough.txt", i);
-        TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, 0, &fid), 0, "a file is made");
+        TEST_ASSERT_EQ(tagfs_create_file(vol, name, NULL, 0, 0, &fid), 0, "a file is made");
     }
-    TEST_ASSERT_OK(TagFSSettle(), "the files settled");
-    TEST_ASSERT_OK(BinderRunWhole(), "a Tally of them written");
-    TEST_ASSERT(StandBinderGleaned(), "and the Tallies Glean asks for after it");
-    TEST_ASSERT_OK(StandBinderTallies(g_book.frame.spine_slots - 1u),
+    TEST_ASSERT_OK(TagFSSettle(vol), "the files settled");
+    TEST_ASSERT_OK(BinderRunWhole(vol), "a Tally of them written");
+    TEST_ASSERT(StandBinderGleaned(vol), "and the Tallies Glean asks for after it");
+    TEST_ASSERT_OK(StandBinderTallies(vol, vol->book.frame.spine_slots - 1u),
                    "a Tally more for every other slot, each naming the leaves as they lie");
-    TEST_ASSERT(StandStitchRemount(), "the volume mounts on it");
-    *files = g_book.files;
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts on it");
+    *files = vol->book.files;
     for (uint32_t i = 1; !found && TallyStandNodeWhere(TALLY_FILES, i, &leaf); i++)
         found = leaf.level == 0 && leaf.has_lo && leaf.has_hi;
     TEST_ASSERT(found && leaf.ptr.copies == 2, "a leaf of FILES between two others, two copies");
@@ -207,7 +208,7 @@ TestResult StandBinderRot(StandBinder* b, uint64_t* files)
     memset(g_test_output, 0, TAGFS_BLOCK_SIZE);
     TEST_ASSERT(StandBinderWrite(b, leaf.ptr.block[0], g_test_output) &&
                 StandBinderWrite(b, leaf.ptr.block[1], g_test_output), "both its copies written over with zeros");
-    TEST_ASSERT(StandStitchRemount(), "the volume mounts again");
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts again");
 out:
     return verdict;
 }

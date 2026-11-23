@@ -7,7 +7,7 @@
  * Settle — the cycle that takes what was inked to the medium: one stitch on
  * the book's ribbon a cycle (sewing.h).
  *
- * One cycle at a time, held by the Settle's Scribe (g_settle_scribe, whose
+ * One cycle at a time, held by the Settle's Scribe (settle.scribe, whose
  * holder is the committer), and no TagFS lock across the medium:
  *
  *   TAKE         under the state lock, memory only: the target (every Ink so
@@ -40,7 +40,7 @@ extern Scribe g_settle_scribe;
  * it settled, or its refusal. A kernel path's own demand — the stand's, the
  * Use Context's — with no TagFS lock held; takes the volume's door itself. A program never waits
  * here: an anchor waits through its Chit (SettleWaitLink). */
-error_t  TagFSSettle(void);
+error_t  TagFSSettle(TagFSVolume* vol);
 
 /* The volume is short and Fallow rests blocks, or the ribbon is short of room:
  * cycles run until some come back — at most 2 + FallowLag() of them — for a
@@ -51,7 +51,7 @@ error_t  TagFSSettle(void);
  * wait for a cycle — under a TagFS lock, a Scribe or a baton continuation —
  * but the Settle's own holder between two steps of its cycle, which runs that
  * cycle to its end first. Inside the door. */
-error_t  SettleForRoom(void);
+error_t  SettleForRoom(TagFSVolume* vol);
 
 /*
  * The machine is stopping (RT-12): the last cycles, run by the halt itself
@@ -83,8 +83,8 @@ error_t  TagFSSettleForHalt(void);
  * clean seal, and reads as rot on the next mount; and changes nobody stops keep
  * the drain going for ever. Raised once, never lowered.
  */
-void     TagFSShutForHalt(void);
-bool     SettleHalting(void);
+void     TagFSShutForHalt(TagFSVolume* vol);
+bool     SettleHalting(TagFSVolume* vol);
 
 /* What the halt still owes the volume, read with no lock: Inks no cycle has
  * settled, whether a cycle is running on another core that still runs, and
@@ -93,34 +93,34 @@ bool     SettleHalting(void);
  * core, the halt's own too: a cycle that still takes them is going on,
  * however long it is. */
 void     SettleOwed(uint64_t* unsettled, bool* committer_busy, bool* sealed_clean);
-uint64_t SettleStepsTaken(void);
+uint64_t SettleStepsTaken(TagFSVolume* vol);
 
 /* Whether this core holds a cycle that stands between two of its steps: on a
  * machine of one K-Core the committer's, its cycles stepping between pockets,
  * found there by a halt that came in one. Nobody else steps it, and the halt's
  * own cycle runs it to its end first (SettleAskedFor). */
-bool     SettleRunBetweenStepsHere(void);
+bool     SettleRunBetweenStepsHere(TagFSVolume* vol);
 
 /* What the halt's last cycle answered — ERR_TAGFS_METADATA_ERROR when none
  * ran — and how many Inks no cycle has settled now. */
-error_t  SettleHaltAnswer(uint64_t* unsettled);
+error_t  SettleHaltAnswer(TagFSVolume* vol, uint64_t* unsettled);
 
 /* The settled gen and the settled cycles — for the stand. */
-uint64_t SettledGen(void);
-uint64_t SettledCycles(void);
+uint64_t SettledGen(TagFSVolume* vol);
+uint64_t SettledCycles(TagFSVolume* vol);
 
 #ifdef CONFIG_VOLUME_TESTS
 /* A cycle begun as the cadence begins one, and run to its end on this core: OK
  * once it settled, ERR_BUSY when another asker holds the Settle, or the
  * cycle's refusal. For the stand, whose runner holds the cadence. */
-error_t  TagFSSettleAsCadence(void);
+error_t  TagFSSettleAsCadence(TagFSVolume* vol);
 
 /* A cycle begun as the cadence begins one, on this core, and left standing
  * before its first step — this core then holds the Settle between two of its
  * steps, as a committer serving a pocket does: true, or false when another
  * asker holds it. The next cycle asked for on this core runs it to its end
  * first (TagFSSettle). For the stand. */
-bool     TagFSStandSettleBegin(void);
+bool     TagFSStandSettleBegin(TagFSVolume* vol);
 
 /* The next cycle's seat rings seat:ready once, as a driver's recovery would
  * while the cycle runs — noted, and said later by the room's pass: just before
@@ -135,21 +135,21 @@ void     TagFSStandSettleRefuses(error_t code);
 
 /* The demands standing for the next cycle (SettleDemandKind), read and left
  * as they are. For the stand. */
-uint32_t TagFSStandSettleDemands(void);
+uint32_t TagFSStandSettleDemands(TagFSVolume* vol);
 
 /* The cycles TagFSSettleForHalt runs, run here without stopping anything —
  * every later cycle is the stand's own again: OK once they settled, or the
  * refusal. For the stand, inside the door. */
-error_t  TagFSStandSettleForHalt(void);
+error_t  TagFSStandSettleForHalt(TagFSVolume* vol);
 
 /* The volume shut for a halt as TagFSShutForHalt shuts it — said nowhere —
  * and, for the stand alone, opened again (`shut` false). */
-void     TagFSStandShutForHalt(bool shut);
+void     TagFSStandShutForHalt(TagFSVolume* vol, bool shut);
 #endif
 
 /* A mount's first word: nothing settled yet, and no waiter of the volume that
  * went before it left unanswered. With the door shut. */
-void     SettleMountReset(void);
+void     SettleMountReset(TagFSVolume* vol);
 
 // ============================================================================
 // Cadence — what starts a cycle (cadence.c)
@@ -196,11 +196,11 @@ typedef enum {
 /* An Ink was made (after its lock was dropped): the window's clock starts for
  * it, and the committer is woken. `lazy`: a frequent small writer's — it does
  * not start a cycle by Lull. */
-void     SettleInked(uint64_t gen, bool lazy);
+void     SettleInked(TagFSVolume* vol, uint64_t gen, bool lazy);
 
 /* A demand: the next cycle begins at the committer's next service point, with
  * pockets waiting or not. */
-void     SettleDemand(uint32_t kinds);
+void     SettleDemand(TagFSVolume* vol, uint32_t kinds);
 
 /* The committer woken, to look again: a waiter linked, seat:ready, a medium
  * that turned out to take no write. From any context. */
@@ -211,30 +211,30 @@ void     SettleKnock(void);
  * While pockets wait on this core's queue, only the window run out or a demand
  * starts a cycle. On a core that is not the committer's, and runs no cycle, it
  * does nothing. */
-void     SettleServiceIfPending(void);
+void     SettleServiceIfPending(TagFSVolume* vol);
 
 /* Whether this core owes the Settle a turn of its loop before it sleeps: a step
  * of the cycle it runs, a cycle due, or one owed later that no Lull is armed
  * yet to wake it for. */
-bool     SettleStepOwedHere(void);
+bool     SettleStepOwedHere(TagFSVolume* vol);
 
 /* On one core: the idle context is owed the next quantum — a cycle in flight,
  * or the window run out, or a demand (RT-10). */
-bool     SettleIdleOwed(void);
+bool     SettleIdleOwed(TagFSVolume* vol);
 
 /* The volume's open book was taken up: a cycle refused by the medium that left
  * may run. Counted, never a flag (settle_wait.c). seat:ready of the volume's
  * seat is counted by the room where its bell is noted, and only knocks here. */
-void     SettleSeatReady(void);
+void     SettleSeatReady(TagFSVolume* vol);
 
 /* Nightwatch's look from the PIT tick (RT-11): `now_us`. A debt older than the
  * window that no committer took up, twice at looks a look apart, is said once
  * for the episode. */
-void     SettleWatchLook(uint64_t now_us);
+void     SettleWatchLook(TagFSVolume* vol, uint64_t now_us);
 
 /* The Lull now, and the last cycle's time on the medium — for the stand. */
-uint64_t SettleLullUs(void);
-uint64_t SettleLastDUs(void);
+uint64_t SettleLullUs(TagFSVolume* vol);
+uint64_t SettleLastDUs(TagFSVolume* vol);
 
 /* A hold on the cadence: while it stands no cycle begins on its own. The test
  * runner's — a test meets only the cycles it drives, and a fault it arms on
@@ -242,7 +242,7 @@ uint64_t SettleLastDUs(void);
  * go for their length — and a stopping machine's, for good, from the start of
  * its drain: the halt runs the volume's last cycles itself. Counted; a cycle
  * in flight runs to its end. */
-void     SettleCadenceHold(bool hold);
+void     SettleCadenceHold(TagFSVolume* vol, bool hold);
 
 /*
  * The writer (settle/sewing.c). StitchBookRefused: no Quire took a
@@ -252,8 +252,8 @@ void     SettleCadenceHold(bool hold);
  * before its cycle's snapshot — Inks of the cycle itself, which a stopping
  * machine's halt does not refuse (ink.c, InkVolumeBegins).
  */
-bool     StitchBookRefused(void);
-bool     StitchMarksVerdict(void);
+bool     StitchBookRefused(TagFSVolume* vol);
+bool     StitchMarksVerdict(TagFSVolume* vol);
 
 // ============================================================================
 // Waiting for a cycle through a Chit (settle_wait.c)
@@ -283,30 +283,30 @@ struct SettleWaiter {
 
 /* Whether a wait for Ink `gen` is needed: OK or a code when it is answered
  * already, ERR_WOULD_BLOCK when it is not. Inside the door. */
-error_t  SettleWaitNow(uint64_t gen);
+error_t  SettleWaitNow(TagFSVolume* vol, uint64_t gen);
 
 /* The waiter linked — after the program was parked and its Chit given — and
  * the committer knocked. Inside the door. */
-void     SettleWaitLink(SettleWaiter* w, uint64_t gen,
+void     SettleWaitLink(TagFSVolume* vol, SettleWaiter* w, uint64_t gen,
                         void (*answer)(SettleWaiter* w, error_t rc));
 
 /* A waiter for the next cycle whose TAKE comes after this call — what a word
  * said to the volume's memory waits for (the Use Context): answered when that
  * cycle settles, by the same rule. Inside the door. */
-void     SettleWaitLinkCycle(SettleWaiter* w, void (*answer)(SettleWaiter* w, error_t rc));
+void     SettleWaitLinkCycle(TagFSVolume* vol, SettleWaiter* w, void (*answer)(SettleWaiter* w, error_t rc));
 
 /* A waiter taken back unanswered — the stand's own, on its way out. True when
  * it was still linked. */
-bool     SettleWaitUnlink(SettleWaiter* w);
+bool     SettleWaitUnlink(TagFSVolume* vol, SettleWaiter* w);
 
 /* For the cycle and the cadence (settle.c, cadence.c). SettleParked: a
  * refused cycle's park stands — the event it waits for has not come — and the
  * cadence begins no cycle. */
-bool     SettleWaitersOwed(void);
-uint64_t SettleWaitersCloseUpto(void);
-void     SettleWaitersRunEnded(error_t rc, uint64_t target);
-void     SettleWaitersSweep(void);
-void     SettleWaitersAnswerAll(error_t code);
-bool     SettleParked(void);
+bool     SettleWaitersOwed(TagFSVolume* vol);
+uint64_t SettleWaitersCloseUpto(TagFSVolume* vol);
+void     SettleWaitersRunEnded(TagFSVolume* vol, error_t rc, uint64_t target);
+void     SettleWaitersSweep(TagFSVolume* vol);
+void     SettleWaitersAnswerAll(TagFSVolume* vol, error_t code);
+bool     SettleParked(TagFSVolume* vol);
 
 #endif /* TAGFS_SETTLE_H */

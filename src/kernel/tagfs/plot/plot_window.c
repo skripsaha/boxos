@@ -9,6 +9,7 @@
 #include "../run/run.h"
 #include "../file_map/tail_slip.h"
 #include "../mount/away.h"
+#include "tagfs_volume.h"
 
 /*
  * PlotWindow — the Plot (plot.h): fresh ground, and a window instead of a copy
@@ -69,14 +70,14 @@ void PlotWindowLoad(Plot *p, FileRecord *rec)
 /* The record, the plan and the digests let go — the two arrays whatever the
  * Plot still holds, a record or none — and the ribbon's room held for the
  * change, while the mounting it was held of stands. */
-void PlotWindowLetGo(Plot *p)
+void PlotWindowLetGo(TagFSVolume* vol, Plot *p)
 {
-    PlotSlipLetGo(p);
+    PlotSlipLetGo(vol, p);
     FileRecordRelease(p->rec);
     kfree(p->fresh);
     kfree(p->digests);
-    if (p->ribbon_held && p->mount_epoch == tagfs_mount_epoch())
-        InkBookHeldLetGo(p->ribbon_held);
+    if (p->ribbon_held && p->mount_epoch == tagfs_mount_epoch(vol))
+        InkBookHeldLetGo(vol, p->ribbon_held);
     p->rec         = NULL;
     p->fresh       = NULL;
     p->digests     = NULL;
@@ -269,12 +270,12 @@ static uint64_t PlotMayPast(uint64_t free, uint64_t keep, bool own)
     return (free > keep ? free - keep : 0) + (own ? 1u : 0u);
 }
 
-static uint32_t PlotTakeMost(uint32_t want, bool own)
+static uint32_t PlotTakeMost(TagFSVolume* vol, uint32_t want, bool own)
 {
-    uint64_t keep = EndpaperDataKeeps(false), free = AllotmentFreeUnpromised();
+    uint64_t keep = EndpaperDataKeeps(vol, false), free = AllotmentFreeUnpromised(vol);
     uint64_t may  = PlotMayPast(free, keep, own);
     if (may < want) {
-        uint64_t fresh = EndpaperDataKeeps(true);
+        uint64_t fresh = EndpaperDataKeeps(vol, true);
         if (fresh < keep)
             may = PlotMayPast(free, fresh, own);
     }
@@ -290,7 +291,7 @@ static uint32_t PlotTakeMost(uint32_t want, bool own)
  * a fresh one before it is refused (allotment.c). The block promised to the
  * file's Slips is the first run's to have, once.
  */
-static error_t PlotFreshTake(Plot *p, uint64_t k, uint64_t n, bool aside,
+static error_t PlotFreshTake(TagFSVolume* vol, Plot *p, uint64_t k, uint64_t n, bool aside,
                              error_t (*put)(Plot *, uint64_t, uint64_t, uint32_t))
 {
     bool own = PlotLaysPromised(p, k, n);
@@ -298,12 +299,12 @@ static error_t PlotFreshTake(Plot *p, uint64_t k, uint64_t n, bool aside,
         uint64_t start = 0;
         uint32_t got   = 0;
         uint32_t want  = n > BLOCK_MAP_TAKE_MOST ? BLOCK_MAP_TAKE_MOST : (uint32_t)n;
-        PlotStakesCount(p, PlotTakeMost(want, own));
-        error_t rc = AllotmentTakeBook(p->fid, want, p->blocks, PlotContinues(p, k), aside, EndpaperDataKeeps(false),
+        PlotStakesCount(vol, p, PlotTakeMost(vol, want, own));
+        error_t rc = AllotmentTakeBook(vol, p->fid, want, p->blocks, PlotContinues(p, k), aside, EndpaperDataKeeps(vol, false),
                                        own, &start, &got);
         if (rc == OK && (rc = PlotStake(p, start, got)) != OK)
-            (void)PlotGiveBack(p, start, got);
-        PlotStakesCount(p, 0);
+            (void)PlotGiveBack(vol, p, start, got);
+        PlotStakesCount(vol, p, 0);
         if (rc != OK)
             return rc;
         own = false;
@@ -339,14 +340,14 @@ static error_t PlotGrowPut(Plot *p, uint64_t k, uint64_t start, uint32_t count)
  * (Allotment 2), the last block apart and aside when the write leaves it
  * short of full — its version does not fill it — so the block that continues
  * the run stays free for the version that will (Allotment 1). */
-static error_t PlotFreshFor(Plot *p, uint64_t k, uint64_t n, bool short_last,
+static error_t PlotFreshFor(TagFSVolume* vol, Plot *p, uint64_t k, uint64_t n, bool short_last,
                             error_t (*put)(Plot *, uint64_t, uint64_t, uint32_t))
 {
     error_t rc = OK;
     if (n > (short_last ? 1u : 0u))
-        rc = PlotFreshTake(p, k, n - (short_last ? 1u : 0u), false, put);
+        rc = PlotFreshTake(vol, p, k, n - (short_last ? 1u : 0u), false, put);
     if (rc == OK && short_last)
-        rc = PlotFreshTake(p, k + n - 1u, 1, true, put);
+        rc = PlotFreshTake(vol, p, k + n - 1u, 1, true, put);
     return rc;
 }
 
@@ -376,25 +377,25 @@ static uint64_t PlotWindowRibbonMost(const Plot *p)
  * and the Ink takes the hold for its claim (RibbonClaimHeld) — or the Plot lets
  * it go (PlotWindowLetGo).
  */
-error_t PlotWindowRoomAsked(Plot *p)
+error_t PlotWindowRoomAsked(TagFSVolume* vol, Plot *p)
 {
-    TagFSState *fs   = tagfs_get_state();
+    TagFSState *fs   = &vol->state;
     uint64_t    most = PlotWindowRibbonMost(p);
     if (most <= p->ribbon_held)
         return OK;
     TagFSLockTake(&fs->lock);
-    error_t rc = RibbonReserve(most - p->ribbon_held);
+    error_t rc = RibbonReserve(vol, most - p->ribbon_held);
     if (rc == OK)
         p->ribbon_held = most;
     TagFSLockDrop(&fs->lock);
-    rc = RibbonClaimSay(rc);
+    rc = RibbonClaimSay(vol, rc);
     return rc;
 }
 
-error_t PlotWindowBegin(Plot *p, uint64_t at, uint64_t bytes)
+error_t PlotWindowBegin(TagFSVolume* vol, Plot *p, uint64_t at, uint64_t bytes)
 {
     bool    slipped = false;
-    error_t chose   = PlotSlipBegin(p, at, bytes, &slipped);
+    error_t chose   = PlotSlipBegin(vol, p, at, bytes, &slipped);
     if (chose != OK || slipped)
         return chose;
     uint64_t had   = p->blocks_before;
@@ -409,12 +410,12 @@ error_t PlotWindowBegin(Plot *p, uint64_t at, uint64_t bytes)
      * (§2.8 — they lie on the last block alone). */
     if (rc == OK && k0 >= had && had && TailSlipOn(p->rec, had - 1u) &&
         (rc = PlotWindowCover(p, had - 1u, had)) == OK)
-        rc = PlotWindowTail(p, had - 1u, PLOT_BLOCK);
+        rc = PlotWindowTail(vol, p, had - 1u, PLOT_BLOCK);
     if (rc == OK && k0 < over)
-        rc = PlotFreshFor(p, k0, over - k0, short_last && over == PlotWindowBlocksFor(size), PlotFreshPut);
+        rc = PlotFreshFor(vol, p, k0, over - k0, short_last && over == PlotWindowBlocksFor(size), PlotFreshPut);
     if (rc == OK && k1 > p->blocks)
-        rc = PlotFreshFor(p, p->blocks, k1 - p->blocks, short_last, PlotGrowPut);
-    return rc == OK ? PlotWindowRoomAsked(p) : rc;
+        rc = PlotFreshFor(vol, p, p->blocks, k1 - p->blocks, short_last, PlotGrowPut);
+    return rc == OK ? PlotWindowRoomAsked(vol, p) : rc;
 }
 
 /* The block the rest of block k is read from, and what is done with it: the
@@ -469,7 +470,7 @@ bool PlotWindowStretchAt(const Plot *p, uint64_t pos, uint64_t left, uint32_t mo
     return true;
 }
 
-error_t PlotWindowLanded(Plot *p, uint64_t departed, uint64_t block, const uint8_t *data, uint32_t count)
+error_t PlotWindowLanded(TagFSVolume* vol, Plot *p, uint64_t departed, uint64_t block, const uint8_t *data, uint32_t count)
 {
     BoxHashContext ctx;
     if (count == 0)
@@ -479,7 +480,7 @@ error_t PlotWindowLanded(Plot *p, uint64_t departed, uint64_t block, const uint8
         return ERR_NO_MEMORY;
     if (p->digest_count == 0)
         p->departed = departed;
-    BoxHashInit(&ctx, tagfs_get_state()->uuid, 16);
+    BoxHashInit(&ctx, vol->state.uuid, 16);
     for (uint32_t i = 0; i < count; i++)
         p->digests[p->digest_count++] =
             (PlotDigest){ block + i, BoxHashIntegrity(data + (size_t)i * PLOT_BLOCK, PLOT_BLOCK, &ctx) };
@@ -520,7 +521,7 @@ static void PlotFreshPieces(const Plot *p, uint64_t k, uint64_t n, Strip *out, u
  * runs lay, cut where they were cut, and the old ground let go — to rest in
  * Fallow once the Ink is laid (a Stake of this call's own goes back now).
  */
-static error_t PlotRestake(Plot *p, uint64_t k, uint64_t n)
+static error_t PlotRestake(TagFSVolume* vol, Plot *p, uint64_t k, uint64_t n)
 {
     uint64_t a = k - p->window_at, b = a + n, pos = 0;
     uint32_t m = 0;
@@ -547,7 +548,7 @@ static error_t PlotRestake(Plot *p, uint64_t k, uint64_t n)
         }
         uint64_t cut_lo = a > lo ? a : lo, cut_hi = b < hi ? b : hi;
         if (StripOnGround(r->kind))
-            rc = PlotLetGo(p, r->start + (cut_lo - lo), (uint32_t)(cut_hi - cut_lo));
+            rc = PlotLetGo(vol, p, r->start + (cut_lo - lo), (uint32_t)(cut_hi - cut_lo));
         if (hi > b)
             out[m++] = PlotPiece(r, b - lo, hi - b);
     }
@@ -565,7 +566,7 @@ static error_t PlotRestake(Plot *p, uint64_t k, uint64_t n)
 }
 
 /* The plan let go of: every run of it the file did not take goes back. */
-static void PlotFreshLetGo(Plot *p, uint64_t from)
+static void PlotFreshLetGo(TagFSVolume* vol, Plot *p, uint64_t from)
 {
     uint64_t base = p->fresh_at;
     for (uint32_t i = 0; i < p->fresh_count; i++) {
@@ -574,23 +575,23 @@ static void PlotFreshLetGo(Plot *p, uint64_t from)
         if (hi <= from)
             continue;
         uint64_t a = from > lo ? from : lo;
-        (void)PlotLetGo(p, p->fresh[i].start + (a - lo), (uint32_t)(hi - a));
+        (void)PlotLetGo(vol, p, p->fresh[i].start + (a - lo), (uint32_t)(hi - a));
     }
     p->fresh_count  = 0;
     p->fresh_blocks = 0;
 }
 
-error_t PlotWindowEnd(Plot *p, uint64_t at, uint64_t done)
+error_t PlotWindowEnd(TagFSVolume* vol, Plot *p, uint64_t at, uint64_t done)
 {
     uint64_t kdone = PlotWindowBlocksFor(at + done);
     uint64_t named = 0;
     error_t  rc    = OK;
     if (p->fresh_blocks && kdone > p->fresh_at) {
         named = kdone - p->fresh_at < p->fresh_blocks ? kdone - p->fresh_at : p->fresh_blocks;
-        rc    = PlotRestake(p, p->fresh_at, named);
+        rc    = PlotRestake(vol, p, p->fresh_at, named);
     }
     if (p->fresh_blocks)
-        PlotFreshLetGo(p, p->fresh_at + named);
+        PlotFreshLetGo(vol, p, p->fresh_at + named);
     return rc;
 }
 
@@ -631,36 +632,36 @@ error_t PlotAppendHole(Plot *p, uint64_t count)
  * it whole, or a tail its Slips leave (Engross): its base, the Slips over it,
  * zeros past the file's `tail` bytes of it — what lay past them there, a cut
  * tail or a previous owner's bytes, is not the file's. */
-error_t PlotWindowTail(Plot *p, uint64_t k, uint32_t tail)
+error_t PlotWindowTail(TagFSVolume* vol, Plot *p, uint64_t k, uint32_t tail)
 {
     FileSpot spot;
     uint8_t *buf = NULL;
     uint64_t block = 0, departed = 0;
     uint32_t landed = 0, left = 0;
-    error_t  rc = PlotFreshFor(p, k, 1, false, PlotFreshPut);
+    error_t  rc = PlotFreshFor(vol, p, k, 1, false, PlotFreshPut);
     if (rc == OK && (!PlotWindowSpot(p, k, &spot) || !PlotFreshSpot(p, k, &block, &left)))
         rc = ERR_TAGFS_EXTENT_ERROR;
     if (rc == OK)
-        rc = PlotWindowRoomAsked(p);
+        rc = PlotWindowRoomAsked(vol, p);
     if (rc == OK && !(buf = kmalloc(PLOT_BLOCK)))
         rc = ERR_NO_MEMORY;
     if (rc == OK && !StripOnGround(spot.kind))
         memset(buf, 0, PLOT_BLOCK);
-    else if (rc == OK && (rc = tagfs_read_block(spot.block, buf)) != OK)
+    else if (rc == OK && (rc = tagfs_read_block(vol, spot.block, buf)) != OK)
         kprintf("[TagFS] file %llu: its last block %llu answered %u to its read, so it is not laid again with "
                 "its %llu bytes\n", p->fid, (unsigned long long)spot.block, (unsigned)rc, (unsigned long long)p->size);
     if (rc == OK) {
         (void)TailSlipOver(p->rec, k, buf);
         memset(buf + tail, 0, PLOT_BLOCK - tail);
-        departed = AwayDepartures();
-        rc       = TagFSWriteRun(block, 1, buf, &landed);
+        departed = AwayDepartures(vol);
+        rc       = TagFSWriteRun(vol, block, 1, buf, &landed);
     }
     if (rc == OK)
-        rc = PlotWindowLanded(p, departed, block, buf, 1);
+        rc = PlotWindowLanded(vol, p, departed, block, buf, 1);
     if (rc == OK)
-        rc = PlotWindowEnd(p, (uint64_t)k * PLOT_BLOCK, PLOT_BLOCK);
+        rc = PlotWindowEnd(vol, p, (uint64_t)k * PLOT_BLOCK, PLOT_BLOCK);
     else if (p->fresh_blocks)
-        PlotFreshLetGo(p, p->fresh_at);
+        PlotFreshLetGo(vol, p, p->fresh_at);
     kfree(buf);
     return rc;
 }
@@ -681,7 +682,7 @@ static bool PlotWindowTailOwed(const Plot *p, uint64_t size)
     return p->size % PLOT_BLOCK && StripOnGround(spot.kind);
 }
 
-error_t PlotWindowGrow(Plot *p, uint64_t size)
+error_t PlotWindowGrow(TagFSVolume* vol, Plot *p, uint64_t size)
 {
     uint64_t had  = PlotWindowBlocksFor(p->size);
     uint32_t tail = (uint32_t)(p->size % PLOT_BLOCK);
@@ -689,36 +690,36 @@ error_t PlotWindowGrow(Plot *p, uint64_t size)
         return ERR_FILE_NOT_FOUND;
     error_t  rc   = PlotWindowCover(p, had ? had - 1u : 0, p->rec->blocks);
     if (rc == OK)
-        rc = PlotTrimTo(p, had);       /* ground past the size holds no byte of the file */
+        rc = PlotTrimTo(vol, p, had);       /* ground past the size holds no byte of the file */
     if (rc == OK && PlotWindowTailOwed(p, size))
-        rc = PlotWindowTail(p, had - 1u, tail ? tail : PLOT_BLOCK);
+        rc = PlotWindowTail(vol, p, had - 1u, tail ? tail : PLOT_BLOCK);
     if (rc == OK)
         rc = PlotAppendHole(p, PlotWindowBlocksFor(size) - p->blocks);
     if (rc == OK) {
         p->size      = size;
-        p->data_need = p->digest_count ? VolumeFlushNeed() : p->data_need;
+        p->data_need = p->digest_count ? VolumeFlushNeed(vol) : p->data_need;
     }
     return rc;
 }
 
-error_t PlotWindowRoomFor(const Plot *p, uint64_t end)
+error_t PlotWindowRoomFor(TagFSVolume* vol, const Plot *p, uint64_t end)
 {
     if (!p->rec)
         return ERR_FILE_NOT_FOUND;
     uint64_t need = end > p->size && PlotWindowTailOwed(p, end) ? 1u : 0u;
     if (need == 0)
         return OK;
-    TagFSState *fs   = tagfs_get_state();
-    uint64_t    keep = EndpaperDataKeeps(false);
+    TagFSState *fs   = &vol->state;
+    uint64_t    keep = EndpaperDataKeeps(vol, false);
     bool        own  = PlotLaysPromised(p, PlotWindowBlocksFor(p->size) - 1u, 1);
     TagFSLockTake(&fs->lock);
-    uint64_t may = AllotmentBookMay(fs->free_blocks + FallowBlocks(), keep, own);
+    uint64_t may = AllotmentBookMay(vol, fs->free_blocks + FallowBlocks(vol), keep, own);
     TagFSLockDrop(&fs->lock);
     if (may >= need)
         return OK;
     kprintf("[TagFS] file %llu: growing it to %llu bytes lays its last block again on fresh ground, and the volume "
             "has no block for it past the %llu its book keeps and the %llu promised to the tails Slips lie over — "
             "refused\n", p->fid, (unsigned long long)end, (unsigned long long)keep,
-            (unsigned long long)AllotmentPromised());
+            (unsigned long long)AllotmentPromised(vol));
     return ERR_TAGFS_NO_SPACE;
 }

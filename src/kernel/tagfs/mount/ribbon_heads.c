@@ -1,5 +1,6 @@
 #include "ribbon.h"
 #include "book_mount.h"
+#include "tagfs_volume.h"
 
 /*
  * RibbonQuiresOf — the Quires the ribbon of a slot not stood on runs through:
@@ -64,11 +65,11 @@ static bool RibbonHeadTakes(const RibbonWalk* w, const RibbonUnit* u, bool found
 
 /* The stitch whose first sector lies at `place`, its head read, *taken when
  * rules (а), (б) take it. */
-static error_t RibbonHeadAt(const RibbonWalk* w, const RibbonPlace* place, bool at_next, RibbonUnit* u,
+static error_t RibbonHeadAt(TagFSVolume* vol, const RibbonWalk* w, const RibbonPlace* place, bool at_next, RibbonUnit* u,
                             bool* taken)
 {
     bool    found = false;
-    error_t rc    = RibbonUnitHead(place, at_next ? NULL : &w->next, w->seq, u, &found);
+    error_t rc    = RibbonUnitHead(vol, place, at_next ? NULL : &w->next, w->seq, u, &found);
     *taken = rc == OK && RibbonHeadTakes(w, u, found, at_next);
     return rc;
 }
@@ -76,7 +77,7 @@ static error_t RibbonHeadAt(const RibbonWalk* w, const RibbonPlace* place, bool 
 /* `u` taken by its head: the walk's last stitch from here, its Quire the
  * walk's when it ended in another, its end the walk's, the next_quire it names
  * weighed. False with no memory. */
-static bool RibbonHeadTaken(RibbonWalk* w, const RibbonUnit* u)
+static bool RibbonHeadTaken(TagFSVolume* vol, RibbonWalk* w, const RibbonUnit* u)
 {
     RibbonPlace last;
     RibbonQuire next = { u->head.next_block, u->head.next_blocks };
@@ -90,7 +91,7 @@ static bool RibbonHeadTaken(RibbonWalk* w, const RibbonUnit* u)
             return false;
     }
     w->has_end = RibbonPlaceOn(&u->start, u->of, &u->hop, &w->end);
-    return RibbonNamed(w, &next, "a StitchHead");
+    return RibbonNamed(vol, w, &next, "a StitchHead");
 }
 
 /* The place `of` sectors on from `u`'s start, into its Quire's next. */
@@ -101,7 +102,7 @@ static bool RibbonHeadEnd(const RibbonUnit* u, RibbonPlace* end)
 
 /* Rule (б′) by heads: the first head in the next_quire that goes on from the
  * last stitch taken — in *u, *found. OK, or the medium's or memory's refusal. */
-static error_t RibbonHeadFurther(const RibbonWalk* w, RibbonUnit* u, bool* found)
+static error_t RibbonHeadFurther(TagFSVolume* vol, const RibbonWalk* w, RibbonUnit* u, bool* found)
 {
     uint64_t total = w->next.blocks * VOLUME_BLOCK_SECTORS, pos = 0;
     error_t  rc    = OK;
@@ -112,7 +113,7 @@ static error_t RibbonHeadFurther(const RibbonWalk* w, RibbonUnit* u, bool* found
         RibbonUnit*    whole = NULL;
         uint64_t       j     = 0;
         bool           any   = false;
-        if ((rc = RibbonUnitAhead(&p, w->seq, &j, &h, &any, &whole)) != OK || !any)
+        if ((rc = RibbonUnitAhead(vol, &p, w->seq, &j, &h, &any, &whole)) != OK || !any)
             break;
         if (whole && whole->head_read && RibbonHeadFollows(w, whole, true)) {
             memset(u, 0, sizeof(*u));
@@ -133,12 +134,12 @@ static error_t RibbonHeadFurther(const RibbonWalk* w, RibbonUnit* u, bool* found
  * goes on from the walk with a larger seq — a try refused that landed, and the
  * retry after it (§16.3 п.11) — that one in its place; `next` is room for the
  * head read. */
-static error_t RibbonHeadOn(const RibbonWalk* w, RibbonUnit* u, RibbonUnit* next)
+static error_t RibbonHeadOn(TagFSVolume* vol, const RibbonWalk* w, RibbonUnit* u, RibbonUnit* next)
 {
     error_t rc = OK;
     for (RibbonPlace end; rc == OK && RibbonHeadEnd(u, &end);) {
         bool taken = false;
-        if ((rc = RibbonHeadAt(w, &end, true, next, &taken)) != OK || !taken || next->seq <= u->seq)
+        if ((rc = RibbonHeadAt(vol, w, &end, true, next, &taken)) != OK || !taken || next->seq <= u->seq)
             break;
         *u = *next;
     }
@@ -156,7 +157,7 @@ static bool RibbonHeadNames(const RibbonUnit* u, const RibbonUnit* s)
  * read into *ahead (*found when one is there, read through *hop), or at the
  * start of the next_quire it names, read into `v` (ribbon_collate.c,
  * RibbonKept). */
-static error_t RibbonHeadKept(const RibbonWalk* w, const RibbonUnit* s, RibbonUnit* ahead, bool* found,
+static error_t RibbonHeadKept(TagFSVolume* vol, const RibbonWalk* w, const RibbonUnit* s, RibbonUnit* ahead, bool* found,
                               RibbonQuire* hop, bool* kept, RibbonUnit* v)
 {
     RibbonQuire own = { s->head.next_block, s->head.next_blocks };
@@ -168,13 +169,13 @@ static error_t RibbonHeadKept(const RibbonWalk* w, const RibbonUnit* s, RibbonUn
     if (!RibbonHeadEnd(s, &end))
         return OK;
     (void)RibbonPlaceOn(&s->start, s->of - 1u, &s->hop, &last);
-    *hop  = RibbonQuireLies(&own) ? own : RibbonQuireSame(&last.quire, &w->quire) ? w->next : *hop;
-    rc    = RibbonUnitHead(&end, hop->blocks ? hop : NULL, s->seq, ahead, found);
+    *hop  = RibbonQuireLies(vol, &own) ? own : RibbonQuireSame(&last.quire, &w->quire) ? w->next : *hop;
+    rc    = RibbonUnitHead(vol, &end, hop->blocks ? hop : NULL, s->seq, ahead, found);
     *kept = rc == OK && *found && RibbonHeadNames(ahead, s);
     if (rc == OK && !*kept && hop->blocks && !RibbonQuireSame(&end.quire, hop)) {
         RibbonPlace head  = { *hop, 0 };
         bool        there = false;
-        rc    = RibbonUnitHead(&head, NULL, s->seq, v, &there);
+        rc    = RibbonUnitHead(vol, &head, NULL, s->seq, v, &there);
         *kept = rc == OK && there && RibbonHeadNames(v, s);
     }
     return rc;
@@ -183,16 +184,16 @@ static error_t RibbonHeadKept(const RibbonWalk* w, const RibbonUnit* s, RibbonUn
 /* Rules (б) and (б′) by heads: the head at the next_quire's start that goes on
  * from the walk, else the first further in — and the latest try past it; `v`
  * is room for a head read past it. */
-static error_t RibbonHeadOnward(const RibbonWalk* w, RibbonUnit* u, bool* found, RibbonUnit* v)
+static error_t RibbonHeadOnward(TagFSVolume* vol, const RibbonWalk* w, RibbonUnit* u, bool* found, RibbonUnit* v)
 {
     RibbonPlace head = { w->next, 0 };
     error_t     rc   = OK;
     *found = false;
     if (!RibbonQuireSame(&w->end.quire, &w->next))
-        rc = RibbonHeadAt(w, &head, true, u, found);
+        rc = RibbonHeadAt(vol, w, &head, true, u, found);
     if (rc == OK && !*found)
-        rc = RibbonHeadFurther(w, u, found);
-    return rc == OK && *found ? RibbonHeadOn(w, u, v) : rc;
+        rc = RibbonHeadFurther(vol, w, u, found);
+    return rc == OK && *found ? RibbonHeadOn(vol, w, u, v) : rc;
 }
 
 /* The heads a step of the walk weighs — from the heap: four would not fit a
@@ -204,33 +205,33 @@ typedef struct {
     RibbonUnit spare;
 } RibbonHeads;
 
-error_t RibbonQuiresOf(const SpineSlot* slot, RibbonWalk** out)
+error_t RibbonQuiresOf(TagFSVolume* vol, const SpineSlot* slot, RibbonWalk** out)
 {
     RibbonWalk*  w  = NULL;
     RibbonHeads* h  = kmalloc(sizeof(RibbonHeads));
-    error_t      rc = h ? RibbonWalkBegun(slot, false, &w) : ERR_NO_MEMORY;
+    error_t      rc = h ? RibbonWalkBegun(vol, slot, false, &w) : ERR_NO_MEMORY;
     bool         cached = false, ahead_found = false;
     *out = w;
-    for (uint64_t hops = 0; rc == OK && w->has_end && hops <= g_book.data_end; hops++) {
+    for (uint64_t hops = 0; rc == OK && w->has_end && hops <= vol->book.data_end; hops++) {
         RibbonQuire hop = { 0, 0 };
         bool        a = false, b = false, kept = false;
         if (cached) {
             h->here = h->ahead;
             a       = RibbonHeadTakes(w, &h->here, ahead_found, false);
         } else {
-            rc = RibbonHeadAt(w, &w->end, false, &h->here, &a);
+            rc = RibbonHeadAt(vol, w, &w->end, false, &h->here, &a);
         }
         cached = false;
         if (rc == OK && a && w->next.blocks)
-            rc = RibbonHeadKept(w, &h->here, &h->ahead, &ahead_found, &hop, &kept, &h->spare);
+            rc = RibbonHeadKept(vol, w, &h->here, &h->ahead, &ahead_found, &hop, &kept, &h->spare);
         if (rc == OK && w->next.blocks && !kept)
-            rc = RibbonHeadOnward(w, &h->there, &b, &h->spare);
+            rc = RibbonHeadOnward(vol, w, &h->there, &b, &h->spare);
         if (rc != OK || (!a && !b))
             break;
         /* Both go on from the last: the larger seq is the retry, and the one
          * the ribbon goes on by (§16.3 п.11). */
         bool by_here = a && (!b || h->here.seq >= h->there.seq);
-        if (!RibbonHeadTaken(w, by_here ? &h->here : &h->there))
+        if (!RibbonHeadTaken(vol, w, by_here ? &h->here : &h->there))
             rc = ERR_NO_MEMORY;
         cached = by_here && hop.blocks && RibbonQuireSame(&hop, &w->next);
     }

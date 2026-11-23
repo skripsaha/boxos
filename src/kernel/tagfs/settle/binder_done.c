@@ -2,6 +2,7 @@
 #include "../integrity/gloss.h"
 #include "../ink/fallow.h"     /* FallowLag — the stitches the ground a slot let go rests */
 #include "escheat.h"
+#include "tagfs_volume.h"
 
 /*
  * A Tally's end (binder.c, TALLY_DONE): the nodes it names as they lie and the
@@ -35,7 +36,8 @@ error_t BinderKeptPut(BinderRun* r, const BinderKept* k)
 
 error_t BinderRotOfDigests(void* ctx, const TallyPlace* at)
 {
-    if (EscheatDigestsLaid(at))
+    TagFSVolume* vol = TagFSHome();
+    if (EscheatDigestsLaid(vol, at))
         return OK;     /* laid anew of the data under the act (escheat.c) */
     return BinderKeptPut((BinderRun*)ctx, &(BinderKept){ .tree = TALLY_DIGESTS, .at = *at, .rotten = true });
 }
@@ -44,12 +46,12 @@ error_t BinderRotOfDigests(void* ctx, const TallyPlace* at)
  * mount found no copy of them to read; the DIGESTS ones are weighed a leaf a
  * turn after the slice — a mount reads a DIGESTS leaf only when a block of it
  * is (§16.4 п.5). */
-error_t BinderRotsTaken(BinderRun* r)
+error_t BinderRotsTaken(TagFSVolume* vol, BinderRun* r)
 {
     error_t rc = OK;
-    for (uint32_t i = 0; rc == OK && i < g_binder.nrot; i++)
-        if (g_binder.rot[i].tree != TALLY_DIGESTS)
-            rc = BinderKeptPut(r, &g_binder.rot[i]);
+    for (uint32_t i = 0; rc == OK && i < vol->binder.nrot; i++)
+        if (vol->binder.rot[i].tree != TALLY_DIGESTS)
+            rc = BinderKeptPut(r, &vol->binder.rot[i]);
     return rc;
 }
 
@@ -57,14 +59,14 @@ error_t BinderRotsTaken(BinderRun* r)
  * Tally-Quires of every node it names as it lies, whole (binder_quires.c) —
  * made at TAKE, so nothing is asked of the heap once the slot is on the
  * medium. */
-error_t BinderFreshGround(BinderRun* r)
+error_t BinderFreshGround(TagFSVolume* vol, BinderRun* r)
 {
     SlotGround* f = &r->fresh;
     memset(f, 0, sizeof(*f));
     if (!(f->ground = kmalloc(sizeof(Strip) * 2u)))
         return ERR_NO_MEMORY;
     f->capground = 2u;
-    return BinderKeptQuires(r);
+    return BinderKeptQuires(vol, r);
 }
 
 static void FreshFill(BinderRun* r)
@@ -111,7 +113,7 @@ static void RotDigestsFrom(const BinderWork* w, uint32_t* from, uint64_t at, uin
  * digest, which the Tally does not name (fallow.h: a block goes back to the
  * allocator without waiting for a Tally). `born` (`nb`, in order) looked at
  * from `*j` on, the blocks only going up. */
-static void GlossForgetBut(TagFSLock* lock, uint64_t at, uint64_t end, const BinderGround* born, uint64_t nb,
+static void GlossForgetBut(TagFSVolume* vol, TagFSLock* lock, uint64_t at, uint64_t end, const BinderGround* born, uint64_t nb,
                            uint64_t* j)
 {
     while (*j < nb && born[*j].start + born[*j].count <= at)
@@ -120,7 +122,7 @@ static void GlossForgetBut(TagFSLock* lock, uint64_t at, uint64_t end, const Bin
         uint64_t stop = k < nb && born[k].start < end ? born[k].start : end;
         if (stop > at) {
             TagFSLockTake(lock);
-            GlossForget(at, stop - at);
+            GlossForget(vol, at, stop - at);
             TagFSLockDrop(lock);
         }
         if (k >= nb || born[k].start >= end)
@@ -140,24 +142,24 @@ static void GlossForgetBut(TagFSLock* lock, uint64_t at, uint64_t end, const Bin
  * said: past it they read unchecked, as the range's other blocks do, until it
  * is healed.
  */
-static void GlossCaptured(const BinderWork* w)
+static void GlossCaptured(TagFSVolume* vol, const BinderWork* w)
 {
-    TagFSLock*          lock = &tagfs_get_state()->lock;
+    TagFSLock*          lock = &vol->state.lock;
     uint64_t            kept = 0, nb = 0, j = 0;
     uint32_t            from = 0;
-    const BinderGround* born = DogEarHeldGround(false, &nb);
+    const BinderGround* born = DogEarHeldGround(vol, false, &nb);
     for (uint64_t i = 0; i < w->nground; i++) {
         uint64_t at = w->ground[i].start, end = at + w->ground[i].count;
         while (at < end) {
             uint64_t lo = end, hi = end;
             RotDigestsFrom(w, &from, at, end, &lo, &hi);
             if (lo > at)
-                GlossForgetBut(lock, at, lo, born, nb, &j);
+                GlossForgetBut(vol, lock, at, lo, born, nb, &j);
             kept += hi - lo;
             at    = hi;
         }
     }
-    GlossTrim();
+    GlossTrim(vol);
     if (kept)
         kprintf("[TagFS] %llu block(s) Tally %llu speaks for lie in a DIGESTS range it names as it lies, no copy "
                 "of which reads: the digests of those written since stay in memory while this mount lasts, and "
@@ -171,63 +173,63 @@ static void GlossCaptured(const BinderWork* w)
  * whole Tally's are the ones it laid; one laid in adds what the Foliation
  * keeps of the Tally before and the DIGESTS leaves the reads' table did, or —
  * the Foliation lost — the whole book before it, an upper bound. */
-static uint64_t BookBlocks(const BinderWork* w)
+static uint64_t BookBlocks(TagFSVolume* vol, const BinderWork* w)
 {
     if (!w->tip)
         return w->sheets;
-    if (FoliationLost())
-        return g_binder.tally_blocks + w->sheets;
-    return w->sheets + FoliationBlocksOlder(w->seq) + w->dsheets;
+    if (FoliationLost(vol))
+        return vol->binder.tally_blocks + w->sheets;
+    return w->sheets + FoliationBlocksOlder(vol, w->seq) + w->dsheets;
 }
 
-error_t BinderTallyDone(BinderRun* r)
+error_t BinderTallyDone(TagFSVolume* vol, BinderRun* r)
 {
     BinderWork* w   = &r->w;
-    SlotGround  old = g_binder.slot[r->slot];
+    SlotGround  old = vol->binder.slot[r->slot];
     FreshFill(r);
-    g_binder.slot[r->slot] = r->fresh;
+    vol->binder.slot[r->slot] = r->fresh;
     memset(&r->fresh, 0, sizeof(r->fresh));
-    if (r->slot + 1u > g_binder.nslots)
-        g_binder.nslots = r->slot + 1u;
+    if (r->slot + 1u > vol->binder.nslots)
+        vol->binder.nslots = r->slot + 1u;
     /* What the old Tally held rests in Fallow as the slot's own until Fallow
      * gives it back (BinderRestRipens): the reserve rises no sooner than the
      * free does. What an earlier DONE let go and Fallow holds still is added
      * to it, let go with the first of the two: a count let go before its
      * ground costs a write a wait on Fallow, one kept past it the ground twice. */
-    uint64_t gone = BinderSlotGoes(&old);
-    g_binder.slot[r->slot].rest       = old.rest + gone;
-    g_binder.slot[r->slot].rest_until = old.rest ? old.rest_until : SettledCycles() + FallowLag();
-    BinderSlotsOwnPublish();
+    uint64_t gone = BinderSlotGoes(vol, &old);
+    vol->binder.slot[r->slot].rest       = old.rest + gone;
+    vol->binder.slot[r->slot].rest_until = old.rest ? old.rest_until : SettledCycles(vol) + FallowLag(vol);
+    BinderSlotsOwnPublish(vol);
     BinderSlotLetGo(&old);
-    BinderGleanDedup(r);
-    if (r->captured && !DogEarHeldLost())
-        GlossCaptured(w);
+    BinderGleanDedup(vol, r);
+    if (r->captured && !DogEarHeldLost(vol))
+        GlossCaptured(vol, w);
     else if (r->captured)
         kprintf("[TagFS] DogEar lost the ground files took since Tally %llu's slice to a heap that refused it: the "
                 "Gloss keeps every digest it holds until the next Tally\n", (unsigned long long)w->seq);
-    DogEarTakenLetGo();
-    FoliationDraftDone(w->seq, r->captured);
-    RibbonTallied(w->seq, r->k);
-    BinderBarPublish(UINT64_MAX);
-    EndpaperTallyLaid(&w->laid);
-    BinderPairUsed(r);
-    BinderSlotsOwnPublish();    /* again past the pair it filled: a Quire it ended is the pair's no more */
-    g_binder.useful      -= g_binder.useful >= r->useful_at ? r->useful_at : g_binder.useful;
-    g_binder.tally_blocks = BookBlocks(w);
-    g_binder.cost_known   = 0;
-    g_binder.tallies++;
+    DogEarTakenLetGo(vol);
+    FoliationDraftDone(vol, w->seq, r->captured);
+    RibbonTallied(vol, w->seq, r->k);
+    BinderBarPublish(vol, UINT64_MAX);
+    EndpaperTallyLaid(vol, &w->laid);
+    BinderPairUsed(vol, r);
+    BinderSlotsOwnPublish(vol);    /* again past the pair it filled: a Quire it ended is the pair's no more */
+    vol->binder.useful      -= vol->binder.useful >= r->useful_at ? r->useful_at : vol->binder.useful;
+    vol->binder.tally_blocks = BookBlocks(vol, w);
+    vol->binder.cost_known   = 0;
+    vol->binder.tallies++;
     /* Asked past the measure this Tally made: the one before it, and all the
      * growth since, would refuse at a full volume's wall a Quire the exact one
      * gives — and ask a Tally more of the ribbon for it. */
-    RibbonNextAgain(r->k);
+    RibbonNextAgain(vol, r->k);
     kprintf("[TagFS] Tally %llu is written over slot %u: the state after stitch %llu, %llu node(s) laid in %llu "
             "block(s) a copy, %llu named as they lie%s; %llu block(s) no slot holds any more rest in Fallow%s\n",
             (unsigned long long)w->seq, r->slot, (unsigned long long)r->k, (unsigned long long)w->nodes,
             (unsigned long long)w->off, (unsigned long long)w->named, w->tip ? " (laid in)" : "",
             (unsigned long long)gone, w->dropped ? "; DIGESTS elements a rotten range covers left out" : "");
-    EscheatDone(w->seq);
-    BinderGleanAt(r);
-    BinderProofAt(r);
+    EscheatDone(vol, w->seq);
+    BinderGleanAt(vol, r);
+    BinderProofAt(vol, r);
     return OK;
 }
 
@@ -269,18 +271,18 @@ static bool QuiresJoined(SlotGround* s, const SlotGround* f)
  * slot holds the Quires the new Tally names a node in as it lies — so no Tally
  * is written by this mount again, and no Quire is given back until the volume
  * is mounted again. */
-void BinderSlotUnsure(BinderRun* r)
+void BinderSlotUnsure(TagFSVolume* vol, BinderRun* r)
 {
-    SlotGround* s = &g_binder.slot[r->slot];
+    SlotGround* s = &vol->binder.slot[r->slot];
     FreshFill(r);
-    BinderPairUsed(r);
+    BinderPairUsed(vol, r);
     uint32_t n    = s->nground + r->fresh.nground;
     Strip*   both = kmalloc(sizeof(Strip) * n);
     if (!both || !QuiresJoined(s, &r->fresh)) {
         kfree(both);
         kprintf("[TagFS] no memory to hold slot %u as naming either Tally — the new Tally's ground is held until "
                 "the volume is mounted again\n", r->slot);
-        BinderNoTalliesFrom("memory would not hold a slot that may name either of two Tallies");
+        BinderNoTalliesFrom(vol, "memory would not hold a slot that may name either of two Tallies");
         return;
     }
     if (s->nground)
@@ -305,17 +307,17 @@ void BinderSlotUnsure(BinderRun* r)
     }
     if (r->chain_at < s->chain_from)
         s->chain_from = r->chain_at;
-    if (r->slot + 1u > g_binder.nslots)
-        g_binder.nslots = r->slot + 1u;
-    BinderSlotOwnPublish(r->slot, 0);
-    BinderBarPublish(UINT64_MAX);
+    if (r->slot + 1u > vol->binder.nslots)
+        vol->binder.nslots = r->slot + 1u;
+    BinderSlotOwnPublish(vol, r->slot, 0);
+    BinderBarPublish(vol, UINT64_MAX);
 }
 
-bool BinderSlotSealed(uint32_t slot, const uint8_t* unit)
+bool BinderSlotSealed(TagFSVolume* vol, uint32_t slot, const uint8_t* unit)
 {
-    if (slot >= g_binder.ring || !g_binder.slot[slot].unsure)
+    if (slot >= vol->binder.ring || !vol->binder.slot[slot].unsure)
         return false;
-    for (const SlotSealed* u = g_binder.slot[slot].sealed; u; u = u->next)
+    for (const SlotSealed* u = vol->binder.slot[slot].sealed; u; u = u->next)
         if (memcmp(u->unit, unit, sizeof(u->unit)) == 0)
             return true;
     return false;

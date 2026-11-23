@@ -8,6 +8,7 @@
 #include "../block_map/block_map.h"
 #include "../settle/sewing.h"
 #include "../mount/away.h"   /* AwayDepartures — what a book's write is held to at its Ink */
+#include "tagfs_volume.h"
 
 /*
  * PlotGather — a stretch of a file's runs laid in one run of ground: a defrag
@@ -36,9 +37,9 @@
 /* B10, whatever the warrant: a warrant lets a call change a file the system
  * keeps, and never moves that file's blocks. Asked with the flags the file's
  * record carries and the runs the Plot names. */
-static error_t PlotGatherKept(const Plot *p, uint32_t flags)
+static error_t PlotGatherKept(TagFSVolume* vol, const Plot *p, uint32_t flags)
 {
-    if (!InkFileKept(flags) && !InkTouchesBoot(p->runs, p->run_count))
+    if (!InkFileKept(flags) && !InkTouchesBoot(vol, p->runs, p->run_count))
         return OK;
     kprintf("[TagFS] file %llu is one the system keeps — its record puts it in a role, or "
             "holds the kernel the Deed points the loader at — and its blocks are not "
@@ -118,21 +119,21 @@ static error_t PlotSplice(Plot *p, uint32_t first, uint32_t last, uint64_t start
  * derived map past the reserve it keeps, whole (AllotmentTakeBookRun), what
  * the run may add to the next Tally in the reserve before it is asked
  * (PlotStakesCount) — counted as a Stake once staked, none if refused. */
-static error_t PlotGatherTake(Plot *p, uint64_t blocks, uint64_t hint, uint64_t *start)
+static error_t PlotGatherTake(TagFSVolume* vol, Plot *p, uint64_t blocks, uint64_t hint, uint64_t *start)
 {
-    PlotStakesCount(p, blocks);
-    error_t rc = AllotmentTakeBookRun(p->fid, (uint32_t)blocks, hint, EndpaperDataKeeps(true), start);
+    PlotStakesCount(vol, p, blocks);
+    error_t rc = AllotmentTakeBookRun(vol, p->fid, (uint32_t)blocks, hint, EndpaperDataKeeps(vol, true), start);
     if (rc != OK)
-        PlotStakesCount(p, 0);
+        PlotStakesCount(vol, p, 0);
     return rc;
 }
 
-error_t PlotGatherBegin(Plot *p, uint64_t hint, PlotGathering *g)
+error_t PlotGatherBegin(TagFSVolume* vol, Plot *p, uint64_t hint, PlotGathering *g)
 {
     memset(g, 0, sizeof(*g));
     error_t rc = PlotWindowWhole(p);
     if (rc == OK)
-        rc = PlotGatherKept(p, p->meta.flags);
+        rc = PlotGatherKept(vol, p, p->meta.flags);
     if (rc != OK)
         return rc;
 
@@ -145,7 +146,7 @@ error_t PlotGatherBegin(Plot *p, uint64_t hint, PlotGathering *g)
     }
 
     uint64_t start = 0;
-    rc = PlotGatherTake(p, blocks, hint, &start);
+    rc = PlotGatherTake(vol, p, blocks, hint, &start);
     /* A take that waits — room on its way, a Tally that gives some back
      * (allotment.c, AllotmentBookShort) — is no refusal, and says none. */
     if (rc != OK && rc != ERR_WOULD_BLOCK)
@@ -156,13 +157,13 @@ error_t PlotGatherBegin(Plot *p, uint64_t hint, PlotGathering *g)
         return rc;
     rc = PlotStake(p, start, (uint32_t)blocks);
     if (rc != OK)
-        (void)PlotGiveBack(p, start, (uint32_t)blocks);
-    PlotStakesCount(p, 0);
+        (void)PlotGiveBack(vol, p, start, (uint32_t)blocks);
+    PlotStakesCount(vol, p, 0);
     if (rc != OK)
         return rc;
     /* The record the gather leaves is held its room on the ribbon before a
      * block is copied (P21); the run goes back with the Plot. */
-    if ((rc = PlotWindowRoomAsked(p)) != OK)
+    if ((rc = PlotWindowRoomAsked(vol, p)) != OK)
         return rc;
     g->first  = first;
     g->last   = last;
@@ -174,11 +175,11 @@ error_t PlotGatherBegin(Plot *p, uint64_t hint, PlotGathering *g)
 
 /* `n` blocks from `from` read into `buf`, each checked against its digest on
  * the way through: OK, or why they would not move to `to` — said. */
-static error_t PlotGatherRead(const Plot *p, uint64_t from, uint32_t n, uint8_t *buf, uint64_t to)
+static error_t PlotGatherRead(TagFSVolume* vol, const Plot *p, uint64_t from, uint32_t n, uint8_t *buf, uint64_t to)
 {
-    error_t rc = TagFSReadRun(from, n, buf);
+    error_t rc = TagFSReadRun(vol, from, n, buf);
     for (uint32_t j = 0; j < n && rc == OK; j++)
-        if (!IntegrityVerify(from + j, buf + (size_t)j * TAGFS_BLOCK_SIZE))
+        if (!IntegrityVerify(vol, from + j, buf + (size_t)j * TAGFS_BLOCK_SIZE))
             rc = ERR_CHECKSUM;
     if (rc != OK)
         kprintf("[TagFS] file %llu: blocks %llu..%llu would not move to %llu (error %u) — its "
@@ -190,9 +191,9 @@ static error_t PlotGatherRead(const Plot *p, uint64_t from, uint32_t n, uint8_t 
 /* The next window of the gather: the blocks after the last one copied, from
  * as many runs as it reaches, read one run's piece at a time and laid into
  * the run in one command. */
-static error_t PlotGatherWindow(Plot *p, PlotGathering *g)
+static error_t PlotGatherWindow(TagFSVolume* vol, Plot *p, PlotGathering *g)
 {
-    uint32_t most = TagFSRunBlocks();
+    uint32_t most = TagFSRunBlocks(vol);
     uint8_t *buf  = PlotRunBuffer(&most);
     if (!buf)
         return ERR_NO_MEMORY;
@@ -209,7 +210,7 @@ static error_t PlotGatherWindow(Plot *p, PlotGathering *g)
         if (e->kind == STRIP_HOLE)
             memset(buf + (size_t)filled * TAGFS_BLOCK_SIZE, 0, (size_t)n * TAGFS_BLOCK_SIZE);
         else
-            rc = PlotGatherRead(p, from, n, buf + (size_t)filled * TAGFS_BLOCK_SIZE, to + filled);
+            rc = PlotGatherRead(vol, p, from, n, buf + (size_t)filled * TAGFS_BLOCK_SIZE, to + filled);
         if (rc != OK)
             break;
         filled    += n;
@@ -227,10 +228,10 @@ static error_t PlotGatherWindow(Plot *p, PlotGathering *g)
         (void)TailSlipOver(p->rec, k + g->copied + j, buf + (size_t)j * TAGFS_BLOCK_SIZE);
     if (rc == OK && filled > 0) {
         uint32_t landed   = 0;
-        uint64_t departed = AwayDepartures();
-        rc = TagFSWriteRun(to, filled, buf, &landed);
+        uint64_t departed = AwayDepartures(vol);
+        rc = TagFSWriteRun(vol, to, filled, buf, &landed);
         if (rc == OK)
-            rc = PlotWindowLanded(p, departed, to, buf, filled);
+            rc = PlotWindowLanded(vol, p, departed, to, buf, filled);
         if (rc != OK)
             kprintf("[TagFS] file %llu: the gathered blocks would not be laid at %llu..%llu (error "
                     "%u) — its extents are left where they are\n", p->fid,
@@ -247,15 +248,15 @@ static error_t PlotGatherWindow(Plot *p, PlotGathering *g)
  * is now, since a role put on while the copy went on keeps the file's blocks
  * where they lie as much as one it held at the load, and the
  * Plot made to name the run. */
-static error_t PlotGatherLay(Plot *p, PlotGathering *g)
+static error_t PlotGatherLay(TagFSVolume* vol, Plot *p, PlotGathering *g)
 {
-    error_t rc = VolumeFlushFor(VolumeFlushNeed());
+    error_t rc = VolumeFlushFor(vol, VolumeFlushNeed(vol));
     if (rc != OK)
         return rc;
 
-    FileRecord *now = FileMapRecordHold(tagfs_get_state()->files, p->fid, NULL);
+    FileRecord *now = FileMapRecordHold(vol->state.files, p->fid, NULL);
     if (now) {
-        rc = PlotGatherKept(p, now->flags);
+        rc = PlotGatherKept(vol, p, now->flags);
         FileRecordRelease(now);
         if (rc != OK)
             return rc;
@@ -282,24 +283,24 @@ static error_t PlotGatherLay(Plot *p, PlotGathering *g)
     return OK;
 }
 
-error_t PlotGatherStep(Plot *p, PlotGathering *g, bool *out_laid)
+error_t PlotGatherStep(TagFSVolume* vol, Plot *p, PlotGathering *g, bool *out_laid)
 {
     error_t rc = OK;
     if (!g->laid) {
-        rc = PlotGatherWindow(p, g);
+        rc = PlotGatherWindow(vol, p, g);
         if (rc == OK && g->copied == g->blocks)
-            rc = PlotGatherLay(p, g);
+            rc = PlotGatherLay(vol, p, g);
     }
     *out_laid = g->laid;
     return rc;
 }
 
-error_t PlotGather(Plot *p, uint64_t hint)
+error_t PlotGather(TagFSVolume* vol, Plot *p, uint64_t hint)
 {
     PlotGathering g;
     bool          laid = false;
-    error_t       rc   = PlotGatherBegin(p, hint, &g);
+    error_t       rc   = PlotGatherBegin(vol, p, hint, &g);
     while (rc == OK && !laid)
-        rc = PlotGatherStep(p, &g, &laid);
+        rc = PlotGatherStep(vol, p, &g, &laid);
     return rc;
 }

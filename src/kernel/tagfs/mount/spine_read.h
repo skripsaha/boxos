@@ -52,8 +52,8 @@ typedef struct {
  * eight sectors read already, `sectors`, judged by the same rule — by the
  * judge of a medium that came back, which reads it past the volume's door
  * (mount/perambulation.c): OK or ERR_NO_MEMORY. */
-error_t SpineSlotJudge(SpineSlot* slot);
-error_t SpineSlotJudgeSectors(SpineSlot* slot, const uint8_t* sectors);
+error_t SpineSlotJudge(TagFSVolume* vol, SpineSlot* slot);
+error_t SpineSlotJudgeSectors(TagFSVolume* vol, SpineSlot* slot, const uint8_t* sectors);
 
 /* Every slot of the ring `frame` names: the VALID ones into a new array,
  * newest first (by seq; a tie by index) — *count of them — and every TORN one
@@ -64,7 +64,7 @@ error_t SpineSlotJudgeSectors(SpineSlot* slot, const uint8_t* sectors);
  * (ERR_READ_FAILED): that slot may be the one that holds, and a sector a
  * reset of the seat gives back is no verdict on the book — the mount is asked
  * again on the seat's answer (tagfs.c, mount_attempt). */
-error_t SpineRead(const VolumeFrame* frame, SpineSlot** out, uint32_t* count, char* what, size_t room);
+error_t SpineRead(TagFSVolume* vol, const VolumeFrame* frame, SpineSlot** out, uint32_t* count, char* what, size_t room);
 
 /* A slot's memory, and a run of them, let go. */
 void    SpineSlotLetGo(SpineSlot* slot);

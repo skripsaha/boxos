@@ -50,12 +50,12 @@ typedef struct {
 
 bool        StandBinderRead(const StandBinder* b, uint64_t block, uint8_t* out);
 bool        StandBinderWrite(const StandBinder* b, uint64_t block, const uint8_t* in);
-const char* StandBinderAside(StandBinder* b);
+const char* StandBinderAside(TagFSVolume* vol, StandBinder* b);
 bool        StandBinderKeep(StandBinder* b, uint64_t block);
-bool        StandBinderPutBack(StandBinder* b);
-error_t     StandBinderTallies(uint32_t n);
-bool        StandBinderGleaned(void);
-TestResult  StandBinderRot(StandBinder* b, uint64_t* files);
+bool        StandBinderPutBack(TagFSVolume* vol, StandBinder* b);
+error_t     StandBinderTallies(TagFSVolume* vol, uint32_t n);
+bool        StandBinderGleaned(TagFSVolume* vol);
+TestResult  StandBinderRot(TagFSVolume* vol, StandBinder* b, uint64_t* files);
 
 /* stand_tip_in_cost_tests.c: what the next Tally is reckoned to cost, held to
  * the rule counted by the test (§16.6 п.6), and a Tally under way when the
@@ -74,7 +74,7 @@ TestResult  TestStandBookRoomNextQuireClear(void);
 
 #define STAND_BINDER_PUT_BACK(b)                                                                           \
     do {                                                                                                   \
-        if (!StandBinderPutBack(b))                                                                        \
+        if (!StandBinderPutBack(vol, b))                                                                        \
             verdict = TestFailedAt(__FILE__, __LINE__, "the Spine and the ribbon would not be put back "  \
                                    "as they were found (last, 0)", (int64_t)(b)->s.at.last, 0);            \
     } while (0)

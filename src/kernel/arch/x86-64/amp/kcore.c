@@ -603,7 +603,7 @@ void kcore_run_loop(void)
          * reason as everything above: none of it can happen where it was
          * noticed, and on a multi-core machine this loop is where the cores
          * actually are. One atomic load a duty when there is nothing to do. */
-        TagFSServiceIfPending();
+        TagFSServiceIfPending(TagFSHome());
 
         /* And the Use Context's verdicts, when one went stale: the recount for
          * cabins that never enter the kernel. One load when none is owed. */

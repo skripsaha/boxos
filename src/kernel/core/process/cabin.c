@@ -91,7 +91,7 @@ static error_t cabin_wear_tags(cabin_t *cabin, const char *tags)
         /* The intern tells the user's context the number, if the context
          * names this tag and had none for it yet. */
         uint32_t tid;
-        rc = TagFSInternSpelling(&tag, &tid);
+        rc = TagFSInternSpelling(TagFSHome(), &tag, &tid);
         if (rc == ERR_TAGFS_NOT_INITIALIZED || rc == ERR_TAGFS_REGISTRY_FULL)
             continue;
         if (rc != OK)

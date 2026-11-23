@@ -153,7 +153,7 @@ bool    RibbonPlaceOn(const RibbonPlace* p, uint64_t k, const RibbonQuire* hop, 
  * run, begun on an atom. A Quire a slot or a unit's own StitchHead names is
  * read only then — no word of the medium sends a reader past the volume's
  * ground (ribbon_collate.c). */
-bool    RibbonQuireLies(const RibbonQuire* q);
+bool    RibbonQuireLies(TagFSVolume* vol, const RibbonQuire* q);
 
 static inline uint64_t RibbonPlaceVlba(const RibbonPlace* p)
 {
@@ -174,7 +174,7 @@ static inline bool RibbonQuireSame(const RibbonQuire* a, const RibbonQuire* b)
  * read and parsed: OK and *out (the caller's to let go), ERR_NO_MEMORY, or
  * the medium's refusal — *out NULL then. A unit no stitch is shaped like is
  * read not at all. */
-error_t RibbonUnitRead(const RibbonPlace* start, uint32_t of, uint64_t seq, const RibbonQuire* hop,
+error_t RibbonUnitRead(TagFSVolume* vol, const RibbonPlace* start, uint32_t of, uint64_t seq, const RibbonQuire* hop,
                        RibbonUnit** out);
 
 #ifdef CONFIG_VOLUME_TESTS
@@ -186,7 +186,7 @@ uint64_t RibbonUnitsReadStand(void);
 /* The unit of seq past `after` that begins at `place`, by the first sector
  * from there on through `hop` holding one (stitch.py FindUnit): *out NULL
  * when that sector belongs to a unit begun elsewhere, or there is none. */
-error_t RibbonUnitFind(const RibbonPlace* place, const RibbonQuire* hop, uint64_t after, RibbonUnit** out);
+error_t RibbonUnitFind(TagFSVolume* vol, const RibbonPlace* place, const RibbonQuire* hop, uint64_t after, RibbonUnit** out);
 
 /* The first sector from `place` to the end of its Quire holding a stitch of
  * seq past `after` (rule (б′), stitch_ribbon.py Ribbon._Further): *found, its
@@ -194,7 +194,7 @@ error_t RibbonUnitFind(const RibbonPlace* place, const RibbonQuire* hop, uint64_
  * sector of its unit, that unit read in *out, running on into the next_quire
  * its own StitchHead names where that lies where one may. OK, or the medium's
  * or memory's refusal. */
-error_t RibbonUnitAhead(const RibbonPlace* place, uint64_t after, uint64_t* j, BookSectorHead* head, bool* found,
+error_t RibbonUnitAhead(TagFSVolume* vol, const RibbonPlace* place, uint64_t after, uint64_t* j, BookSectorHead* head, bool* found,
                         RibbonUnit** out);
 
 /* The StitchHead of the stitch whose first sector lies at `place`, that one
@@ -203,7 +203,7 @@ error_t RibbonUnitAhead(const RibbonPlace* place, uint64_t after, uint64_t* j, B
  * `of`, head, and the Quire it runs on into (its own next_quire where that
  * lies where one may, else `hop`); nothing of its stream is kept. OK, or the
  * medium's or memory's refusal. */
-error_t RibbonUnitHead(const RibbonPlace* place, const RibbonQuire* hop, uint64_t after, RibbonUnit* u,
+error_t RibbonUnitHead(TagFSVolume* vol, const RibbonPlace* place, const RibbonQuire* hop, uint64_t after, RibbonUnit* u,
                        bool* found);
 
 void    RibbonUnitLetGo(RibbonUnit* u);
@@ -223,21 +223,21 @@ bool    RibbonUnitWhole(const RibbonUnit* u);
 /* Pass 1 from the slot the mount stands on (§4.5 п.5): its stitches sewn on,
  * its Quires, every line said and the direct scan made. OK and *out
  * (RibbonWalkLetGo), ERR_NO_MEMORY, or the medium's refusal. */
-error_t RibbonCollate(const SpineSlot* slot, RibbonWalk** out);
+error_t RibbonCollate(TagFSVolume* vol, const SpineSlot* slot, RibbonWalk** out);
 void    RibbonWalkLetGo(RibbonWalk* w);
 
 /* The ribbon from an older slot's `at` sewn on as pass 1 sews it, said to no
  * one and claiming nothing — the walk Facsimile replays a range's keys over
  * (facsimile.c). *out as RibbonCollate gives it; OK, ERR_NO_MEMORY, or the
  * medium's refusal. */
-error_t RibbonCollateOlder(const SpineSlot* slot, RibbonWalk** out);
+error_t RibbonCollateOlder(TagFSVolume* vol, const SpineSlot* slot, RibbonWalk** out);
 
 /* ribbon_scan.c ------------------------------------------------------------ */
 
 /* The direct scan (§2.2) past the end of the walk's chain: every unit there,
  * the torn tail, and what each branch is, said. OK, ERR_NO_MEMORY, or the
  * medium's refusal. */
-error_t RibbonScan(RibbonWalk* w);
+error_t RibbonScan(TagFSVolume* vol, RibbonWalk* w);
 
 /* ribbon_collate.c, the walk ------------------------------------------------ */
 
@@ -245,22 +245,22 @@ error_t RibbonScan(RibbonWalk* w);
  * or another — its Quire and the next_quire it names weighed; *out the walk
  * (the caller's to let go), with no end when the slot's ribbon does not lie
  * where one may. OK or ERR_NO_MEMORY. */
-error_t RibbonWalkBegun(const SpineSlot* slot, bool stood, RibbonWalk** out);
+error_t RibbonWalkBegun(TagFSVolume* vol, const SpineSlot* slot, bool stood, RibbonWalk** out);
 
 /* A Quire into the walk's list, once; and `q`, named by `who`, taken as the
  * next_quire when it may be (§3.7's table) — said when it may not. False with
  * no memory. */
 bool    RibbonQuireAdd(RibbonWalk* w, const RibbonQuire* q);
-bool    RibbonNamed(RibbonWalk* w, const RibbonQuire* q, const char* who);
+bool    RibbonNamed(TagFSVolume* vol, RibbonWalk* w, const RibbonQuire* q, const char* who);
 
 /* The Quires the ribbon of a slot not stood on runs through, by its
  * StitchHeads alone (ribbon_heads.c, §16.2 п.12): *out the walk, its
  * `quires` the answer. OK, ERR_NO_MEMORY, or the medium's refusal. */
-error_t RibbonQuiresOf(const SpineSlot* slot, RibbonWalk** out);
+error_t RibbonQuiresOf(TagFSVolume* vol, const SpineSlot* slot, RibbonWalk** out);
 
 /* A line of the ribbon, said by its code: `[TagFS] ribbon CODE: ...`, counted
  * into the walk's and the mount's numbers. */
-void    RibbonSay(RibbonWalk* w, RibbonCode code, const char* fmt, ...);
+void    RibbonSay(TagFSVolume* vol, RibbonWalk* w, RibbonCode code, const char* fmt, ...);
 
 /* The seqs of `units` — "4, 5" — into `out`, as the census writes them. */
 void    RibbonSeqsSaid(RibbonUnit* const* units, uint32_t n, char* out, size_t room);
@@ -294,13 +294,13 @@ bool    RibbonSkipHas(const RibbonSkipSet* set, uint64_t seq, uint64_t fid);
  * land put into `undone` (sorted) for that stitch, said, and into the verdict
  * the session's first stitch lays down (errata.h). OK, ERR_NO_MEMORY, or the
  * medium's refusal. */
-error_t RibbonVerify(RibbonWalk* w, RibbonSkipSet* undone);
+error_t RibbonVerify(TagFSVolume* vol, RibbonWalk* w, RibbonSkipSet* undone);
 
 /* Pass 2 (§4.5 п.5, §3.7): every stitch sewn on replayed into the memory every
  * format shares; the Undones gathered first, the data checked, the files a
  * replay leaves standing on others' ground locked. OK, or the refusal — no
  * memory, the medium's — with *what the mount's line. */
-error_t RibbonTranscribe(RibbonWalk* w, const char** what);
+error_t RibbonTranscribe(TagFSVolume* vol, RibbonWalk* w, const char** what);
 
 /* Facsimile's replay: the stitches of `w` to seq `upto` replayed as pass 2
  * replays them, but only their records of keys [lo, hi) of `tree` — FILES by
@@ -314,7 +314,7 @@ error_t RibbonTranscribe(RibbonWalk* w, const char** what);
  * Clasp, or its Undone would not hold — said as the mount's own replay says
  * it where it puts the volume under glass: the range is then not the state
  * at `upto` (facsimile.c, rule 4). OK, or memory's refusal. */
-error_t RibbonFacsimile(RibbonWalk* w, uint64_t tree, uint64_t lo, uint64_t hi, uint64_t upto, uint32_t* replayed,
+error_t RibbonFacsimile(TagFSVolume* vol, RibbonWalk* w, uint64_t tree, uint64_t lo, uint64_t hi, uint64_t upto, uint32_t* replayed,
                         char* passed, size_t room);
 
 /* Pass 2's own (ribbon_transcribe.c, ribbon_records.c) ---------------------- */
@@ -407,9 +407,9 @@ bool    RibbonListHas(const uint64_t* list, uint32_t n, uint64_t v);
  * stage's from here; NULL for gone), and DATA ground let go — `once` keeping
  * a run let go already from being let go twice. */
 void        RibbonRefuse(RibbonStage* st, const char* fmt, ...);
-FileRecord* RibbonFileNow(RibbonStage* st, uint64_t fid, bool* held);
+FileRecord* RibbonFileNow(TagFSVolume* vol, RibbonStage* st, uint64_t fid, bool* held);
 error_t     RibbonStagePut(RibbonStage* st, uint64_t fid, FileRecord* rec);
-error_t     RibbonStageFallow(RibbonStage* st, uint64_t start, uint64_t count, bool once);
+error_t     RibbonStageFallow(TagFSVolume* vol, RibbonStage* st, uint64_t start, uint64_t count, bool once);
 
 /* A file's flags past the 32 bits memory holds: kept by the stage, laid with
  * it (0 lets them go), and the whole of them for a record — the stage's
@@ -420,7 +420,7 @@ uint64_t    RibbonFlagsOf(const RibbonReplay* rp, const RibbonStage* st, const F
 /* A record through the rule of its kind into the stage (ribbon_records.c),
  * and the stitch's Clasp.fresh held to its records: OK, or ERR_NO_MEMORY —
  * a refusal is the stage's. */
-error_t     RibbonRecordApplied(RibbonReplay* rp, RibbonStage* st, const RibbonRecord* r);
+error_t     RibbonRecordApplied(TagFSVolume* vol, RibbonReplay* rp, RibbonStage* st, const RibbonRecord* r);
 /* Whether record `r` of `u` may be of a key Facsimile replays — a file's in
  * [lo, hi) of FILES, a tag's in [lo, hi) of TAGS — so its replay applies it:
  * its key among them, or not known — a body of a kind that names the tree's
@@ -433,5 +433,12 @@ void        RibbonFreshHeld(RibbonStage* st);
  * §2.7) — a record that does not read names none: false when their sum
  * passes 2^64 - 1, which no Clasp can say. */
 bool        RibbonFreshNamed(const RibbonUnit* u, uint64_t* named);
+
+/* What one volume holds of ribbon_collate.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    /* A line of the ribbon, made here before it is said (the door is shut and
+     * one core attends the mount). */
+    char line[640];
+} RibbonCollateState;
 
 #endif /* TAGFS_MOUNT_RIBBON_H */

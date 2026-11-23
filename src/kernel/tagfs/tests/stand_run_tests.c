@@ -3,13 +3,14 @@
 #include "../tagfs.h"
 #include "../run/run.h"     /* TagFSRunBlocks, TagFSDataCost — the seat's run, and the trace */
 #include "../file_map/file_map.h"  /* the file's record, its runs walked in it */
-#include "../mount/book_mount.h" /* a book's data run (g_book) */
+#include "../mount/book_mount.h" /* a book's data run (vol->book) */
 #include "../helm/helm.h"   /* HelmWindowBytes — the run a write lays in one command */
 #include "../block_map/block_map_derived.h" /* the run of free ground a book's write takes */
 #include "write_job.h"      /* WriteJobSubmit, and the stand's own answer record */
 #include "block_fail.h"     /* BLOCKFAIL — the commands counted at the door, and one refused */
 #include "atomics.h"
 #include "cpu_calibrate.h"
+#include "tagfs_volume.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -52,22 +53,22 @@ typedef struct {
 static WriteJobStandAnswer s_port_answer;
 
 /* Why the road cannot be walked on this machine, or NULL. */
-static const char *StandRunAside(bool port)
+static const char *StandRunAside(TagFSVolume* vol, bool port)
 {
-    return port ? StandPortAside(tagfs_get_seat()) : StandStepsAsideFor();
+    return port ? StandPortAside(vol, tagfs_get_seat(vol)) : StandStepsAsideFor(vol);
 }
 
 /* A file of a megabyte of zeros, laid by one span — one reservation, so the
  * volume gives it one run when it has one that long. */
-static bool StandRunMake(uint64_t *out_file_id)
+static bool StandRunMake(TagFSVolume* vol, uint64_t *out_file_id)
 {
     uint64_t file_id = 0;
 
     *out_file_id = 0;
-    if (tagfs_create_file("test_file", NULL, 0, 0, &file_id) != 0)
+    if (tagfs_create_file(vol, "test_file", NULL, 0, 0, &file_id) != 0)
         return false;
-    if (tagfs_span_file(file_id, STAND_RUN_BYTES) != OK) {
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+    if (tagfs_span_file(vol, file_id, STAND_RUN_BYTES) != OK) {
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
         return false;
     }
     *out_file_id = file_id;
@@ -77,7 +78,7 @@ static bool StandRunMake(uint64_t *out_file_id)
 /* Whether the file's megabyte lies in one run on the medium, read off its
  * record — never off the blocks, which would put them in a read-ahead window:
  * *out_first is the run's first block. */
-static bool StandRunLiesInOneRun(uint64_t file_id, uint64_t *out_first)
+static bool StandRunLiesInOneRun(TagFSVolume* vol, uint64_t file_id, uint64_t *out_first)
 {
     uint32_t  got = 0;
     uint64_t  end = 0;
@@ -85,9 +86,9 @@ static bool StandRunLiesInOneRun(uint64_t file_id, uint64_t *out_first)
     StripWalk walk;
     Strip     run;
 
-    if (!tagfs_enter())
+    if (!tagfs_enter(vol))
         return false;
-    FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, file_id, NULL);
+    FileRecord* rec = FileMapRecordHold(vol->state.files, file_id, NULL);
     if (rec) {
         StripWalkBegin(rec, &walk);
         while (got < STAND_RUN_BLOCKS && one && StripWalkNext(&walk, &run)) {
@@ -100,7 +101,7 @@ static bool StandRunLiesInOneRun(uint64_t file_id, uint64_t *out_first)
         }
     }
     FileRecordRelease(rec);
-    tagfs_leave();
+    tagfs_leave(vol);
     return one && got >= STAND_RUN_BLOCKS;
 }
 
@@ -109,7 +110,7 @@ static bool StandRunLiesInOneRun(uint64_t file_id, uint64_t *out_first)
  * record in place of the program it would park — and whether it answered.
  * *out_running: the job is still out, and still holds the file and takes its
  * bytes from `data`. */
-static bool StandRunWrite(bool port, uint64_t file_id, const uint8_t *data, uint32_t bytes,
+static bool StandRunWrite(TagFSVolume* vol, bool port, uint64_t file_id, const uint8_t *data, uint32_t bytes,
                           StandRunAnswer *out, bool *out_running)
 {
     uint64_t    stats[2] = { UINT64_MAX, UINT64_MAX };
@@ -145,7 +146,7 @@ static bool StandRunWrite(bool port, uint64_t file_id, const uint8_t *data, uint
             *out_running = true;
             return false;
         }
-        StandPortTurn(tagfs_get_seat());
+        StandPortTurn(vol, tagfs_get_seat(vol));
         cpu_pause();
     }
     out->rc           = s_port_answer.rc;
@@ -171,21 +172,21 @@ static bool StandRunWrite(bool port, uint64_t file_id, const uint8_t *data, uint
 // after the write.
 // ----------------------------------------------------------------------------
 
-static TestResult StandRunMegabyte(bool port)
+static TestResult StandRunMegabyte(TagFSVolume* vol, bool port)
 {
     TestResult     verdict = TEST_PASS;
-    uint8_t        seat    = tagfs_get_seat();
+    uint8_t        seat    = tagfs_get_seat(vol);
     uint64_t       file_id = 0;
     uint64_t       first   = 0;
     uint8_t       *data    = NULL;
     uint8_t       *back    = NULL;
     bool           armed   = false;
     bool           running = false;
-    const uint32_t N       = TagFSRunBlocks();
+    const uint32_t N       = TagFSRunBlocks(vol);
     const uint32_t want    = (STAND_RUN_BLOCKS + N - 1) / N;
     StandRunAnswer answer;
     TagFSDataCost  before, after;
-    const char    *aside   = StandRunAside(port);
+    const char    *aside   = StandRunAside(vol, port);
 
     if (aside)
         return test_steps_aside(aside);
@@ -194,8 +195,8 @@ static TestResult StandRunMegabyte(bool port)
     back = kmalloc(STAND_RUN_BYTES);
     TEST_ASSERT(data && back, "room for the megabyte and for reading it back");
     TestFillAt(data, STAND_RUN_BYTES, 0x4E1D0B00u + (port ? 1u : 0u), 0);
-    TEST_ASSERT(StandRunMake(&file_id), "a file of a megabyte is made by one span");
-    if (!StandRunLiesInOneRun(file_id, &first)) {
+    TEST_ASSERT(StandRunMake(vol, &file_id), "a file of a megabyte is made by one span");
+    if (!StandRunLiesInOneRun(vol, file_id, &first)) {
         verdict = test_steps_aside("the volume gave the megabyte more than one run, and a "
                                    "write across runs goes out a command a run");
         goto out;
@@ -203,12 +204,12 @@ static TestResult StandRunMegabyte(bool port)
     TEST_ASSERT(!port || WriteJobSeatRunsAsync(seat),
                 "a program's write on this seat goes through the port, as the path line said");
 
-    BlockFailArm(seat, BLOCK_FAIL_WRITE, tagfs_block_to_sector(g_book.frame.data_block),
-                 (g_book.data_end - g_book.frame.data_block) * TAGFS_BLOCK_SECTORS, BLOCK_FAIL_NEVER);
+    BlockFailArm(seat, BLOCK_FAIL_WRITE, tagfs_block_to_sector(vol, vol->book.frame.data_block),
+                 (vol->book.data_end - vol->book.frame.data_block) * TAGFS_BLOCK_SECTORS, BLOCK_FAIL_NEVER);
     armed = true;
-    TagFSDataCostTake(&before);
-    bool answered = StandRunWrite(port, file_id, data, STAND_RUN_BYTES, &answer, &running);
-    TagFSDataCostTake(&after);
+    TagFSDataCostTake(vol, &before);
+    bool answered = StandRunWrite(vol, port, file_id, data, STAND_RUN_BYTES, &answer, &running);
+    TagFSDataCostTake(vol, &after);
     uint32_t seen = BlockFailSeen();
     BlockFailDisarm();
     armed = false;
@@ -218,7 +219,7 @@ static TestResult StandRunMegabyte(bool port)
     TEST_ASSERT_OK(answer.rc, "the write is answered OK");
     TEST_ASSERT_EQ(answer.written, STAND_RUN_BYTES, "with every byte of it the file's");
     TEST_ASSERT_EQ(answer.size, STAND_RUN_BYTES, "and the size it was");
-    if (!StandRunLiesInOneRun(file_id, &first)) {
+    if (!StandRunLiesInOneRun(vol, file_id, &first)) {
         verdict = test_steps_aside("the book laid the megabyte's fresh ground in more than one run, and a "
                                    "write across runs goes out a command a run");
         goto out;
@@ -231,7 +232,7 @@ static TestResult StandRunMegabyte(bool port)
     TEST_ASSERT_EQ(after.bytes - before.bytes, STAND_RUN_BYTES, "... the megabyte's bytes");
     TEST_ASSERT_EQ(after.writes - before.writes, 1, "... and one write");
 
-    TEST_ASSERT_EQ(TestFileRead(file_id, back, STAND_RUN_BYTES), (int)STAND_RUN_BYTES,
+    TEST_ASSERT_EQ(TestFileRead(vol, file_id, back, STAND_RUN_BYTES), (int)STAND_RUN_BYTES,
                    "the file reads back, every block checked against its own digest");
     TEST_ASSERT_EQ(TestFirstDifference(back, data, STAND_RUN_BYTES), STAND_RUN_BYTES,
                    "byte for byte");
@@ -243,7 +244,7 @@ out:
     if (armed)
         BlockFailDisarm();
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     kfree(data);
     kfree(back);
     return verdict;
@@ -263,10 +264,10 @@ out:
 // record names.
 // ----------------------------------------------------------------------------
 
-static TestResult StandRunRefusedFresh(bool port)
+static TestResult StandRunRefusedFresh(TagFSVolume* vol, bool port)
 {
     TestResult     verdict = TEST_PASS;
-    uint8_t        seat    = tagfs_get_seat();
+    uint8_t        seat    = tagfs_get_seat(vol);
     uint64_t       file_id = 0;
     uint64_t       first   = 0, block = 0;
     uint8_t       *data    = NULL;
@@ -274,11 +275,11 @@ static TestResult StandRunRefusedFresh(bool port)
     bool           armed   = false;
     bool           running = false;
     const uint32_t B       = TAGFS_BLOCK_SIZE;
-    const uint32_t N       = (uint32_t)(HelmWindowBytes(0) / B);
+    const uint32_t N       = (uint32_t)(HelmWindowBytes(vol, 0) / B);
     const uint32_t k       = N / 2 + 1;   /* the refused block's place in the run, from 1 */
     const uint32_t kept    = (k - 1) * B;
     StandRunAnswer answer;
-    const char    *aside   = StandRunAside(port);
+    const char    *aside   = StandRunAside(vol, port);
 
     if (aside)
         return test_steps_aside(aside);
@@ -289,13 +290,13 @@ static TestResult StandRunRefusedFresh(bool port)
     back = kmalloc((uint64_t)N * B);
     TEST_ASSERT(data && back, "room for a window's worth and for reading it back");
     TestFillAt(data, N * B, 0x4E1D0E00u + (port ? 1u : 0u), 0);
-    TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, 0, &file_id), 0, "a file is made on the book");
-    TEST_ASSERT(BlockMapDerivedRunFree(0, N, file_id, &first),
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "test_file", NULL, 0, 0, &file_id), 0, "a file is made on the book");
+    TEST_ASSERT(BlockMapDerivedRunFree(vol, 0, N, file_id, &first),
                 "the first run of free ground a window's worth long is found: the write's to take");
 
-    BlockFailArm(seat, BLOCK_FAIL_WRITE, tagfs_block_to_sector(first + k - 1), TAGFS_BLOCK_SECTORS, 1);
+    BlockFailArm(seat, BLOCK_FAIL_WRITE, tagfs_block_to_sector(vol, first + k - 1), TAGFS_BLOCK_SECTORS, 1);
     armed = true;
-    bool     answered = StandRunWrite(port, file_id, data, N * B, &answer, &running);
+    bool     answered = StandRunWrite(vol, port, file_id, data, N * B, &answer, &running);
     bool     fired    = BlockFailFired();
     uint32_t seen     = BlockFailSeen();
     BlockFailDisarm();
@@ -309,13 +310,13 @@ static TestResult StandRunRefusedFresh(bool port)
     TestEvidence("blocks the refused write answered as landed", answer.written / B);
     TEST_ASSERT_EQ(answer.written, kept, "exactly the k-1 blocks of the run before the refused one");
     TEST_ASSERT_EQ(answer.size, kept, "and the file is as long as they are");
-    TEST_ASSERT(StandBlockOf(file_id, k - 2, &block) && block == first + k - 2,
+    TEST_ASSERT(StandBlockOf(vol, file_id, k - 2, &block) && block == first + k - 2,
                 "the last of them where the run was taken");
-    TEST_ASSERT_OK(TagFSSettle(), "a cycle settles them");
-    TEST_ASSERT_EQ(TestFileRead(file_id, back, kept), (int)kept,
+    TEST_ASSERT_OK(TagFSSettle(vol), "a cycle settles them");
+    TEST_ASSERT_EQ(TestFileRead(vol, file_id, back, kept), (int)kept,
                    "the file reads back, every block checked against its own digest");
     TEST_ASSERT_EQ(TestFirstDifference(back, data, kept), kept, "holding the blocks before the refused one");
-    TEST_ASSERT(!StandBlockOf(file_id, k - 1, &block), "and no record names the refused block or one after it");
+    TEST_ASSERT(!StandBlockOf(vol, file_id, k - 1, &block), "and no record names the refused block or one after it");
 out:
     if (running) {
         data    = NULL;
@@ -324,7 +325,7 @@ out:
     if (armed)
         BlockFailDisarm();
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     kfree(data);
     kfree(back);
     return verdict;
@@ -332,22 +333,26 @@ out:
 
 static TestResult TestStandRunRefusedFresh(void)
 {
-    return StandRunRefusedFresh(false);
+    TagFSVolume* vol = TagFSHome();
+    return StandRunRefusedFresh(vol, false);
 }
 
 static TestResult TestStandRunRefusedFreshThroughThePort(void)
 {
-    return StandRunRefusedFresh(true);
+    TagFSVolume* vol = TagFSHome();
+    return StandRunRefusedFresh(vol, true);
 }
 
 static TestResult TestStandRunMegabyteInSeatRuns(void)
 {
-    return StandRunMegabyte(false);
+    TagFSVolume* vol = TagFSHome();
+    return StandRunMegabyte(vol, false);
 }
 
 static TestResult TestStandRunMegabyteThroughThePort(void)
 {
-    return StandRunMegabyte(true);
+    TagFSVolume* vol = TagFSHome();
+    return StandRunMegabyte(vol, true);
 }
 
 static const TestCase g_stand_run_tests[] = {

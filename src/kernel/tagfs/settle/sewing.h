@@ -3,6 +3,9 @@
 
 #include "settle_internal.h"
 #include "../mount/ribbon.h"
+#include "../ink/docket.h"
+#include "read_pace.h"
+#include "use_context.h"
 
 /*
  * The Settle cycle: a stitch on the book's ribbon a cycle.
@@ -53,15 +56,15 @@
 /* The cycle's steps (sewing.c), for settle.c: begun with the door held and the
  * Scribe taken; one step a call — *done when it was the last, and the answer
  * — and its end, settled (OK) or refused. `why` is the cycle's reason. */
-void        StitchRunBegin(SettleWhy why);
-error_t     StitchRunStep(bool* done);
-void        StitchRunEnd(error_t rc);
-uint64_t    StitchRunTarget(void);
-const char* StitchRunStage(void);
+void        StitchRunBegin(TagFSVolume* vol, SettleWhy why);
+error_t     StitchRunStep(TagFSVolume* vol, bool* done);
+void        StitchRunEnd(TagFSVolume* vol, error_t rc);
+uint64_t    StitchRunTarget(TagFSVolume* vol);
+const char* StitchRunStage(TagFSVolume* vol);
 
 /* A mount's first word for the writer: the book takes writes again
  * (settle.c, SettleMountReset). */
-void        StitchMountReset(void);
+void        StitchMountReset(TagFSVolume* vol);
 
 /*
  * Where the ribbon goes on (ribbon.c), as the writer keeps it between its
@@ -106,17 +109,17 @@ typedef struct {
  * replayed): OK; or the reason the writer could not go on, for the glass —
  * a ribbon whose end the walk does not know, or whose last Clasp did not read.
  * Let go of with the volume. */
-error_t  RibbonCursorMount(const RibbonWalk* w, const char** glass);
-void     RibbonCursorLetGo(void);
+error_t  RibbonCursorMount(TagFSVolume* vol, const RibbonWalk* w, const char** glass);
+void     RibbonCursorLetGo(TagFSVolume* vol);
 
 /* Whether the volume's medium was shown to lie, as the next stitch will say. */
-bool     RibbonCursorLied(void);
+bool     RibbonCursorLied(TagFSVolume* vol);
 
 /* The mount's ask for a next_quire, with the door shut, past the free it says
  * (book_mount.c): one given where the cursor wants it and the map has one, a
  * refusal left to the first cycle's ask (RibbonNextGiven) with the cursor as
  * the mount laid it. */
-void     RibbonNextGivenAtMount(void);
+void     RibbonNextGivenAtMount(TagFSVolume* vol);
 
 /*
  * The cursor's moves, for the cycle's steps (sewing.c), by the Settle's
@@ -170,27 +173,27 @@ void     RibbonNextGivenAtMount(void);
  *                     one cut short by the medium leaving, which no refusal
  *                     of the medium's is said as (ribbon_left.c)
  */
-const RibbonCursor* RibbonCursorNow(void);
-uint64_t RibbonStitchOf(uint64_t len);
-uint64_t RibbonSeqNext(void);
-void     RibbonNextGiven(void);
+const RibbonCursor* RibbonCursorNow(TagFSVolume* vol);
+uint64_t RibbonStitchOf(TagFSVolume* vol, uint64_t len);
+uint64_t RibbonSeqNext(TagFSVolume* vol);
+void     RibbonNextGiven(TagFSVolume* vol);
 /* At a Tally's DONE that took in stitch `slice`, with no next_quire given: the
  * take again — the Tally may have lifted what kept the ribbon from ground
  * (fallow.c, NodeBarred) or let Quires go — and, none had, the next Tally of
  * the ring's turn asked, which lets the next slot's Quires go: until the ring
  * turned whole, as many Tallies in a row as it has slots taking in the same
  * stitch — past that a Tally gives nothing more until a stitch settles. */
-void     RibbonNextAgain(uint64_t slice);
-error_t  RibbonRoom(uint64_t of, bool promised, RibbonPlace* at, RibbonQuire* hop);
-uint64_t RibbonSewn(const RibbonPlace* at, const RibbonQuire* hop, uint32_t of, uint64_t seq, uint32_t clasp,
+void     RibbonNextAgain(TagFSVolume* vol, uint64_t slice);
+error_t  RibbonRoom(TagFSVolume* vol, uint64_t of, bool promised, RibbonPlace* at, RibbonQuire* hop);
+uint64_t RibbonSewn(TagFSVolume* vol, const RibbonPlace* at, const RibbonQuire* hop, uint32_t of, uint64_t seq, uint32_t clasp,
                     uint32_t clasp_at, uint64_t flags);
-const char* RibbonRetry(const RibbonPlace* at, const RibbonQuire* hop, uint32_t of, bool cut);
-bool     RibbonCloseEarly(void);
+const char* RibbonRetry(TagFSVolume* vol, const RibbonPlace* at, const RibbonQuire* hop, uint32_t of, bool cut);
+bool     RibbonCloseEarly(TagFSVolume* vol);
 
 /* A Tally of seq `tally` was written over the slot of the least seq
  * (binder_done.c), taking in every stitch up to `taken`: every stitch from
  * here is replayed over it. By the Settle's holder. */
-void     RibbonTallied(uint64_t tally, uint64_t taken);
+void     RibbonTallied(TagFSVolume* vol, uint64_t tally, uint64_t taken);
 
 /*
  * ‼ WHAT THIS KERNEL LEFT ON THE RIBBON IS KEPT FOR THE MEDIUM'S RETURN
@@ -257,20 +260,20 @@ struct RibbonTry {
     uint8_t     sectors[];
 };
 
-const BookLeftMark* RibbonLeftMarks(uint32_t* n, uint64_t* lacking, RibbonPlace* past, uint64_t* seen);
+const BookLeftMark* RibbonLeftMarks(TagFSVolume* vol, uint32_t* n, uint64_t* lacking, RibbonPlace* past, uint64_t* seen);
 RibbonTry*          RibbonTryMake(uint32_t of);
-void                RibbonTryLaid(RibbonTry* t);
-bool                RibbonTryOwns(uint64_t vlba, const uint8_t* sector, bool* newest);
-const char*         RibbonTryPast(void);
+void                RibbonTryLaid(TagFSVolume* vol, RibbonTry* t);
+bool                RibbonTryOwns(TagFSVolume* vol, uint64_t vlba, const uint8_t* sector, bool* newest);
+const char*         RibbonTryPast(TagFSVolume* vol);
 
 /* ribbon.c's own calls into ribbon_left.c: the marks a mount's walk leaves
  * (`lied`: every one), with the largest seq it saw (`seen`), one a stitch
  * settling adds — every try behind it let go — those a Tally took in let go,
  * and all of it with the volume. */
-void     RibbonLeftMount(const RibbonWalk* w, bool lied, uint64_t seen);
-void     RibbonLeftSewn(const BookLeftMark* m, bool lied);
-void     RibbonLeftTallied(uint64_t taken);
-void     RibbonLeftLetGo(void);
+void     RibbonLeftMount(TagFSVolume* vol, const RibbonWalk* w, bool lied, uint64_t seen);
+void     RibbonLeftSewn(TagFSVolume* vol, const BookLeftMark* m, bool lied);
+void     RibbonLeftTallied(TagFSVolume* vol, uint64_t taken);
+void     RibbonLeftLetGo(TagFSVolume* vol);
 
 /*
  * The Settle held still for the judge of a medium that came back (mount/
@@ -283,8 +286,8 @@ void     RibbonLeftLetGo(void);
  * and *written for StitchStillLetGo; false when this core holds the Scribe
  * beneath the caller in the middle of a step, which nothing here can end.
  */
-bool     StitchHoldStill(uint64_t* written);
-void     StitchStillLetGo(uint64_t written);
+bool     StitchHoldStill(TagFSVolume* vol, uint64_t* written);
+void     StitchStillLetGo(TagFSVolume* vol, uint64_t written);
 
 /*
  * ‼ A CHANGE OF A BOOK CLAIMS ITS ROOM ON THE RIBBON BEFORE IT IS MADE (§3.6,
@@ -336,20 +339,20 @@ void     StitchStillLetGo(uint64_t written);
  *                     `flight` sectors: the sectors a stitch carrying anything
  *                     may take (*any), and one of freeing records (*frees)
  */
-error_t  RibbonClaim(uint64_t bytes, bool frees);
-error_t  RibbonReserve(uint64_t bytes);
-void     RibbonReserveLetGo(uint64_t bytes);
-error_t  RibbonClaimHeld(uint64_t held, uint64_t bytes);
-uint64_t RibbonClaimTaken(void);
-void     RibbonClaimBack(uint64_t bytes);
-error_t  RibbonClaimSay(error_t rc);
-void     RibbonFlightBegins(uint64_t sectors);
-void     RibbonFlightEnds(void);
-void     RibbonRoomOf(const RibbonCursor* c, uint64_t flight, uint64_t* any, uint64_t* frees);
+error_t  RibbonClaim(TagFSVolume* vol, uint64_t bytes, bool frees);
+error_t  RibbonReserve(TagFSVolume* vol, uint64_t bytes);
+void     RibbonReserveLetGo(TagFSVolume* vol, uint64_t bytes);
+error_t  RibbonClaimHeld(TagFSVolume* vol, uint64_t held, uint64_t bytes);
+uint64_t RibbonClaimTaken(TagFSVolume* vol);
+void     RibbonClaimBack(TagFSVolume* vol, uint64_t bytes);
+error_t  RibbonClaimSay(TagFSVolume* vol, error_t rc);
+void     RibbonFlightBegins(TagFSVolume* vol, uint64_t sectors);
+void     RibbonFlightEnds(TagFSVolume* vol);
+void     RibbonRoomOf(TagFSVolume* vol, const RibbonCursor* c, uint64_t flight, uint64_t* any, uint64_t* frees);
 
 #ifdef CONFIG_VOLUME_TESTS
 /* The cursor as it stands, for the stand between two cycles. */
-void     RibbonCursorStand(RibbonCursor* out);
+void     RibbonCursorStand(TagFSVolume* vol, RibbonCursor* out);
 /* The next stitch's medium leaves (TagFSStandMediumLeaves) once `sectors` of
  * it are on the medium — UINT32_MAX: the whole of it, before its last flush —
  * so the cycle is refused there, as a hand pulling the medium out refuses it.
@@ -366,7 +369,7 @@ bool     RibbonStandMarksRefusing(void);
 bool     RibbonStandNextRefused(bool armed);
 /* The bytes claimed by changes no stitch has taken, and those held for changes
  * in the making (RibbonReserve), as they stand — for the stand. */
-void     RibbonClaimsStand(uint64_t* claimed, uint64_t* reserved);
+void     RibbonClaimsStand(TagFSVolume* vol, uint64_t* claimed, uint64_t* reserved);
 #endif
 
 /*
@@ -383,15 +386,139 @@ void     RibbonClaimsStand(uint64_t* claimed, uint64_t* reserved);
  * UINT64_MAX when none is kept).
  */
 #ifdef CONFIG_VOLUME_TESTS
-uint64_t TallyCostBlocks(void);
-uint64_t TallyKeptBlocks(void);
+uint64_t TallyCostBlocks(TagFSVolume* vol);
+uint64_t TallyKeptBlocks(TagFSVolume* vol);
 #endif
-uint64_t EndpaperKeeps(uint64_t quire_blocks);
+uint64_t EndpaperKeeps(TagFSVolume* vol, uint64_t quire_blocks);
 
 /* The free blocks a write of a file's data must leave (§3.6, §16.2 п.6): the
  * Tally's two copies, what the ring lacks of it, and a Quire of ribbon, by the
  * last measure and what data was handed since — measured afresh when
  * `afresh`. With no TagFS lock held; 0 before the ribbon's cursor is up. */
-uint64_t EndpaperDataKeeps(bool afresh);
+uint64_t EndpaperDataKeeps(TagFSVolume* vol, bool afresh);
+
+typedef enum {
+    STITCH_STEP_TAKE = 0,
+    STITCH_STEP_BUILD,
+    STITCH_STEP_FIRST_FLUSH,
+    STITCH_STEP_STITCH,
+    STITCH_STEP_LAST_FLUSH,
+    STITCH_STEP_DONE,
+} StitchStep;
+
+typedef struct {
+    SettleWhy   why;
+    StitchStep  step;
+    uint64_t    target;       /* every Ink up to here */
+    uint64_t    cycle;
+    uint64_t    flags;        /* StitchHead's */
+    uint64_t    made_ns;
+    uint32_t    coined_lo;    /* the tags laid down as Coineds: [lo, hi) */
+    uint32_t    coined_hi;
+    bool        retires;      /* a tag the book has was retired by an Ink up to the target: a Coined RETIRED is owed */
+    bool        use_owed;     /* a word the person said is owed the medium */
+    UseText*    use;          /* that word, held; NULL says none */
+    uint64_t    use_ticket;
+    bool        use_out;      /* the word had no room on the ribbon: the stitch is laid without it */
+    bool        use_forgot;   /* ... and forgets the word the book held: an empty UseContext in its place */
+    DocketTaken jots;         /* the files' changes up to the target, by fid */
+    uint64_t    claimed;      /* the ribbon's bytes their Inks claimed, taken (RibbonClaimTaken) */
+    uint64_t    flight;       /* the sectors TAKE counted it in flight at the most (StitchFlight) */
+    uint64_t    data_need;    /* the flush that keeps every block the Inks up to the target wrote */
+    uint64_t    d_us;         /* the toll's measures, taken at S0: the last cycle's D, */
+    ReadPaceSeen pace;        /* and the pace the medium's reads were seen to keep */
+    bool        toll;         /* the stitch pays the flush of its data before its atoms */
+    uint64_t    fresh;        /* the blocks of fresh data the stitch names (Clasp.fresh) */
+    uint64_t    flush_us;     /* what the flush of its data took the medium: no part of D (§16.5 п.1) */
+    uint64_t    seq;          /* this attempt's */
+    uint32_t    clasp;
+    uint32_t    clasp_at;     /* where its Clasp lies in its stream: its crc is of every byte before */
+    RibbonTry*  laid;         /* the attempt, kept past its refusal or its cut (ribbon_left.c) */
+    uint8_t*    sectors;      /* the attempt sealed: `of` sectors, laid's */
+    uint32_t    of;
+    uint32_t    useful;       /* the bytes of its records, StitchHead to Clasp (§4.2) */
+    RibbonPlace at;           /* where it lies, and the Quire it runs on into */
+    RibbonQuire hop;
+    uint32_t    written;      /* its sectors on the medium so far */
+    const char* stage;
+} StitchSnap;
+
+/* What one volume holds of sewing.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    StitchSnap stitch;
+    /* What the flush of its data took the medium in the last cycle that settled —
+     * the cycle whose busy time the cadence keeps as D (cadence.c, cadence.d_us): the
+     * Settle's holder's alone, written as that cycle ends and read as the next
+     * one's S0 takes the toll's D. */
+    uint64_t settled_flush_us;
+    /* No Quire took the write: the book takes none until the volume is mounted
+     * again. */
+    volatile uint8_t book_refused;
+    /* The core putting the verdict's tags on, + 1; 0 while none is. */
+    volatile uint32_t marking;
+} SewingState;
+
+/* What one volume holds of ribbon_left.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    BookLeftMark* marks;
+    uint32_t nmarks;
+    uint32_t capmarks;
+    uint64_t lacking;  /* the newest stitch to be held to whose mark this kernel lacks; 0 none */
+    uint64_t seen;  /* the largest seq the mount saw on the medium (BookSeqSeen) */
+    RibbonTry* tries;  /* newest first */
+    RibbonPlace past;  /* where the ribbon goes on past the last stitch sewn */
+} RibbonLeftState;
+
+/* What one volume holds of ribbon.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    RibbonCursor cursor;
+    /*
+     * What a change of a book may claim of the ribbon (RibbonClaim), published by
+     * the Settle's holder each time the cursor or the stitch in flight moves, and
+     * by the mount, and read under the state lock by Ink: the bytes of records the
+     * next stitch can carry past the one in flight, and of a stitch of freeing
+     * records alone; whether the ribbon may still be given a next_quire, and the
+     * free count when the last ask for one was refused. A move that shrinks the
+     * room publishes it before what it took is let go, so a claim is judged
+     * against too little room, never too much.
+     */
+    volatile uint64_t room_any;
+    volatile uint64_t room_frees;
+    volatile uint8_t room_grows;
+    volatile uint64_t refused_free;
+    /* The ribbon stands with no next_quire, its last ask refused past the reserve
+     * — or answered with one found only on ground a Tally a mount may stand on
+     * keeps from it (fallow.c, NodeBarred): published with the room. A change
+     * short of room on the ribbon waited on a Tally for it, and no change that
+     * does not free has been given room since (RibbonClaimSay, RibbonRoomFor):
+     * the ribbon's shortfall is the volume's, not a change's, so any change given
+     * room past it ends it. A change refused room on the ribbon, said until one
+     * is given room (RibbonRefusedSaid). Any core, no lock; let go at mount. */
+    volatile uint8_t room_refused;
+    volatile uint8_t room_barred;
+    volatile uint8_t room_waited;
+    volatile uint8_t refused_said;
+    /* The slice of the last Tally's DONE that asked the next_quire again, and how
+     * many in a row took that same stitch in (RibbonNextAgain). By the Settle's
+     * holder. */
+    uint64_t again_slice;
+    uint32_t again_turns;
+    /* The bytes claimed by changes no stitch has taken, and those held for changes
+     * in the making — a tag about to be given an id, a write's record while its
+     * data moves (RibbonReserve): under the state lock. */
+    uint64_t claimed;
+    uint64_t reserved;
+    /* The sectors the stitch in flight takes at the most; 0 with none. Set under
+     * the state lock at TAKE, cleared by the Settle's holder at the cycle's end. */
+    volatile uint64_t flight;
+    /* A stitch with no word aboard that the rest and the next_quire do not hold,
+     * said once a mount. */
+    volatile uint8_t long_said;
+    /* A stitch that ends inside a flash page, said once a mount (RibbonPlaced);
+     * the last Quire begun off a page gone on into, said once, its block + 1
+     * (RibbonEnteredSaid). */
+    volatile uint8_t inside_said;
+    volatile uint64_t entered_said;
+} RibbonState;
 
 #endif /* TAGFS_SETTLE_SEWING_H */

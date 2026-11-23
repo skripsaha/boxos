@@ -3,6 +3,8 @@
 
 #include "../tagfs.h"
 #include "../mount/tally_read.h"
+#include "binder.h"
+#include "../mount/book_mount.h"
 
 /*
  * Escheat — the act that lets go what a book can never give back. A FILES
@@ -78,22 +80,72 @@ typedef struct {
                               * no copy, laid anew of the data */
 } EscheatSaid;
 
-void    EscheatMounted(void);
-error_t TagFSEscheat(InkWarrant warrant, EscheatSaid* out);
+void    EscheatMounted(TagFSVolume* vol);
+error_t TagFSEscheat(TagFSVolume* vol, InkWarrant warrant, EscheatSaid* out);
 /* Whether the act is owed, the asks made — from any core; a tail the Helm's
  * service let go under it, counted (helm/engross.c, EngrossEscheat). */
-bool     EscheatOwed(void);
-uint64_t EscheatTailsActing(void);
-uint64_t EscheatTailsReach(void);
-void     EscheatTailsWalked(uint64_t asks);
-void     EscheatTailLost(void);
-void    EscheatTake(void);
-bool    EscheatTaken(void);
-bool    EscheatDigestsLaid(const TallyPlace* at);
-error_t EscheatDigestOf(uint64_t block, uint64_t* digest, bool* have);
-void    EscheatDone(uint64_t seq);
-bool    EscheatLost(uint64_t fid);
-void    EscheatTakenBack(void);
-void    EscheatLetGo(void);
+bool     EscheatOwed(TagFSVolume* vol);
+uint64_t EscheatTailsActing(TagFSVolume* vol);
+uint64_t EscheatTailsReach(TagFSVolume* vol);
+void     EscheatTailsWalked(TagFSVolume* vol, uint64_t asks);
+void     EscheatTailLost(TagFSVolume* vol);
+void    EscheatTake(TagFSVolume* vol);
+bool    EscheatTaken(TagFSVolume* vol);
+bool    EscheatDigestsLaid(TagFSVolume* vol, const TallyPlace* at);
+error_t EscheatDigestOf(TagFSVolume* vol, uint64_t block, uint64_t* digest, bool* have);
+void    EscheatDone(TagFSVolume* vol, uint64_t seq);
+bool    EscheatLost(TagFSVolume* vol, uint64_t fid);
+void    EscheatTakenBack(TagFSVolume* vol);
+void    EscheatLetGo(TagFSVolume* vol);
+
+/* The DIGESTS leaves the Tally under way lays anew of the data, by their
+ * ranges of blocks; the digests taken; the block read for one. */
+typedef struct {
+    uint64_t lo;
+    uint64_t hi;
+} EscheatBlocks;
+
+/* What one volume holds of escheat.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    volatile uint64_t asked;  /* asks made this mount: published */
+    volatile uint64_t answered;  /* of them, those a Tally answered */
+    volatile uint64_t walked;  /* of them, those a walk of the files cut the tails for */
+    volatile uint64_t reach;  /* the newest Ink an ask saw: no record made after it is the act's */
+    uint64_t cover;  /* the asks the Tally under way answers */
+    volatile uint64_t tails;  /* tails the Helm's service let go under the act */
+    bool taken;  /* the Tally under way took it: the Settle's holder's */
+    BinderKept* rot;
+    uint32_t nrot;
+    BookKeptFile* kept;
+    uint32_t nkept;
+    /* The held ground as the mount parted it: what stays held, what the act lets
+     * go; and the whole list the Tally under way took, given back if it is
+     * refused. */
+    BinderGround* stay;
+    uint64_t nstay;
+    BinderGround* free;
+    uint64_t nfree;
+    BinderGround* all;
+    uint64_t nall;
+    uint64_t capall;
+    bool parted;
+    /* What the act lets go, counted at the mount — read from any core, written
+     * before the volume opens. */
+    uint64_t ranges;
+    uint64_t files;
+    uint64_t blocks;
+    /* What a Tally let go: published once — vol->binder.rot gains a range only at
+     * the mount, so one Tally of a mount at most lets ranges go. */
+    volatile uint8_t gone;
+    BinderKept* lostrot;
+    uint32_t nlostrot;
+    uint64_t* lostfid;
+    uint32_t nlostfid;
+    EscheatBlocks* dig;
+    uint32_t ndig;
+    uint32_t capdig;
+    uint64_t digests;
+    uint8_t* block;
+} EscheatState;
 
 #endif /* TAGFS_SETTLE_ESCHEAT_H */

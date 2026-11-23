@@ -45,38 +45,48 @@ typedef struct {
 /* The nodes putting a digest of every block of `count` runs may want: OK, or
  * ERR_NO_MEMORY with what was had kept in *room for GlossRoomLetGo. With no
  * TagFS lock held. */
-error_t GlossRoomFor(const Strip* runs, uint32_t count, GlossRoom* room);
-void    GlossRoomLetGo(GlossRoom* room);
+error_t GlossRoomFor(TagFSVolume* vol, const Strip* runs, uint32_t count, GlossRoom* room);
+void    GlossRoomLetGo(TagFSVolume* vol, GlossRoom* room);
 
 /* The digest of `block` put in from `room`, over any the Gloss held for it.
  * Under the state lock or with the door shut; the room is enough by
  * GlossRoomFor's count. */
-void    GlossPut(GlossRoom* room, uint64_t block, uint64_t digest);
+void    GlossPut(TagFSVolume* vol, GlossRoom* room, uint64_t block, uint64_t digest);
 
 /* A digest the mount's replay met, in its order — the latest of a block
  * standing: OK, or ERR_NO_MEMORY. With no TagFS lock held. */
-error_t GlossNote(uint64_t block, uint64_t digest);
+error_t GlossNote(TagFSVolume* vol, uint64_t block, uint64_t digest);
 
 /* The digest the Gloss holds for `block`: false when it holds none. */
-bool    GlossFind(uint64_t block, uint64_t* digest);
+bool    GlossFind(TagFSVolume* vol, uint64_t block, uint64_t* digest);
 
 /* The digests of [start, start + count), little-endian, into `out`: false
  * when the Gloss lacks one of them. */
-bool    GlossCopy(uint64_t start, uint64_t count, uint8_t* out);
+bool    GlossCopy(TagFSVolume* vol, uint64_t start, uint64_t count, uint8_t* out);
 
 /* The digests of [start, start + count) taken out: the ground went back to the
  * allocator. Under the state lock. */
-void    GlossForget(uint64_t start, uint64_t count);
+void    GlossForget(TagFSVolume* vol, uint64_t start, uint64_t count);
 
 /* Spare nodes past the few kept freed: with no TagFS lock held. */
-void    GlossTrim(void);
+void    GlossTrim(TagFSVolume* vol);
 
 /* Every digest let go, and the spare nodes: with the volume. */
-void    GlossLetGo(void);
+void    GlossLetGo(TagFSVolume* vol);
 
 #ifdef CONFIG_VOLUME_TESTS
 /* The digests the Gloss holds. */
-uint64_t GlossStandCount(void);
+uint64_t GlossStandCount(TagFSVolume* vol);
 #endif
+
+typedef struct GlossNode GlossNode;
+
+/* What one volume holds of gloss.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    struct { GlossNode* root ; uint32_t height ; uint64_t entries ; GlossNode* spare ; uint32_t nspare ; bool short_said ; } gloss;
+    TagFSLock gloss_lock;
+} GlossState;
+
+void GlossVolumeBegin(TagFSVolume* vol);
 
 #endif /* TAGFS_INTEGRITY_GLOSS_H */

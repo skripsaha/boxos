@@ -964,12 +964,12 @@ void kernel_main(void)
     /* And whether the medium the volume landed on can be read with nobody
      * standing over the transfer — asked here, where the volume is known and
      * the answer is still cheap to act on. */
-    BoardroomProveUnattendedRead(tagfs_get_seat());
+    BoardroomProveUnattendedRead(tagfs_get_seat(TagFSHome()));
 
     /* And what every medium's own ground says it carries. Reads only — and not
      * the ground the volume above is standing on, which has just been read,
      * checked and described by the mount that took it up. */
-    DeedSurveyAll(tagfs_get_seat(), tagfs_get_volume_base());
+    DeedSurveyAll(tagfs_get_seat(TagFSHome()), tagfs_get_volume_base(TagFSHome()));
 
     debug_printf("[INIT] Storage Deck register (Manifest path)...\n");
     error_t storage_reg_err = StorageDeckRegister();

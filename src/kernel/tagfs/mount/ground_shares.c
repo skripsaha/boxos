@@ -94,14 +94,14 @@ typedef struct {
     error_t  rc;
 } SharePiece;
 
-static void PieceFound(SharePiece* p, uint64_t start, uint64_t end, uint32_t owners)
+static void PieceFound(TagFSVolume* vol, SharePiece* p, uint64_t start, uint64_t end, uint32_t owners)
 {
     if (p->count && p->start + p->count == start && p->owners == owners) {
         p->count += end - start;
         return;
     }
     if (p->count && p->rc == OK)
-        p->rc = CommonholdMountAdd(p->start, p->count, p->owners);
+        p->rc = CommonholdMountAdd(vol, p->start, p->count, p->owners);
     *p = (SharePiece){ start, end - start, owners, p->rc };
 }
 
@@ -122,12 +122,12 @@ static uint64_t EdgesOf(const GroundRun* runs, uint32_t n, const ShareSpan* s, u
     return k;
 }
 
-error_t GroundSharesCounted(void)
+error_t GroundSharesCounted(TagFSVolume* vol)
 {
     uint32_t   n    = 0;
     uint64_t   ns   = 0;
-    GroundRun* runs = GroundCensusRuns(&n);
-    CommonholdLetGoAll();
+    GroundRun* runs = GroundCensusRuns(vol, &n);
+    CommonholdLetGoAll(vol);
     ShareSpan* s    = SharesLaid(runs, n, &ns);
     ShareEdge* e    = s ? kmalloc(sizeof(ShareEdge) * 2u * (uint64_t)n) : NULL;
     if (!s && ns == 0)
@@ -144,12 +144,12 @@ error_t GroundSharesCounted(void)
     KSort(e, k, sizeof(ShareEdge), EdgeOrder, NULL);
     for (uint64_t i = 0; i < k; i++) {
         if (i && e[i].at > e[i - 1u].at && shared > 0)
-            PieceFound(&p, e[i - 1u].at, e[i].at, (uint32_t)(files + shared + (held > 0)));
+            PieceFound(vol, &p, e[i - 1u].at, e[i].at, (uint32_t)(files + shared + (held > 0)));
         int64_t* c = e[i].owner == GROUND_FILE ? &files : e[i].owner == GROUND_SHARED ? &shared : &held;
         *c += e[i].step;
     }
     if (p.count && p.rc == OK)
-        p.rc = CommonholdMountAdd(p.start, p.count, p.owners);
+        p.rc = CommonholdMountAdd(vol, p.start, p.count, p.owners);
     kfree(e);
     kfree(s);
     if (p.rc != OK)

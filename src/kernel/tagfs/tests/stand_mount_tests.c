@@ -14,6 +14,7 @@
 #include "atomics.h"
 #include "baton.h"
 #include "cpu_calibrate.h"
+#include "tagfs_volume.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -47,14 +48,14 @@
 /* The room's and the volume's service passes run here until the mount road
  * has nothing left to do, bounded — whichever core passes its own may do the
  * work first. */
-bool StandMountSettles(void)
+bool StandMountSettles(TagFSVolume* vol)
 {
     uint64_t bound = rdtsc() + cpu_ms_to_tsc(STAND_MOUNT_BOUND_MS);
     uint8_t  me    = amp_get_core_index();
     for (;;) {
         BoardroomAttendIfPending();
-        TagFSServiceIfPending();
-        if (TagFSStandMountIdle())
+        TagFSServiceIfPending(vol);
+        if (TagFSStandMountIdle(vol))
             return true;
         if (rdtsc() >= bound)
             return false;
@@ -77,27 +78,27 @@ bool StandMountSettles(void)
  * the ribbon's Quire closed early and the lag's stitches laid past it
  * (SettleForRoom) — once the cycles have settled what was let go.
  */
-error_t StandBookRoom(void)
+error_t StandBookRoom(TagFSVolume* vol)
 {
-    if (!tagfs_enter())
+    if (!tagfs_enter(vol))
         return ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc = SettleForRoom();
-    tagfs_leave();
+    error_t rc = SettleForRoom(vol);
+    tagfs_leave(vol);
     return rc;
 }
 
-bool StandSettledBare(void)
+bool StandSettledBare(TagFSVolume* vol)
 {
-    TagFSState* fs = tagfs_get_state();
+    TagFSState* fs = &vol->state;
     for (uint32_t cycle = 0; cycle < STAND_BARE_CYCLES; cycle++) {
-        if (TagFSSettle() != OK)
+        if (TagFSSettle(vol) != OK)
             return false;
         TagFSLockTake(&fs->lock);
-        uint64_t resting = FallowBlocks();
+        uint64_t resting = FallowBlocks(vol);
         TagFSLockDrop(&fs->lock);
         if (resting == 0)
-            return TagFSSettle() == OK;
-        if (cycle > 0 && StandBookRoom() != OK)
+            return TagFSSettle(vol) == OK;
+        if (cycle > 0 && StandBookRoom(vol) != OK)
             return false;
     }
     return false;
@@ -106,35 +107,35 @@ bool StandSettledBare(void)
 /* Whatever a mount test left: its turn taken down, BLOCKFAIL down, the volume
  * up again if it is not — the medium seated, and an arrival attended — and
  * the runner counted back in. */
-void StandMountClose(uint8_t seat)
+void StandMountClose(TagFSVolume* vol, uint8_t seat)
 {
     TagFSStandMountTurn(STAND_MOUNT_AS_IS, 0);
     BlockFailDisarm();
-    if (!tagfs_get_state()->initialized) {
+    if (!vol->state.initialized) {
         if (!BoardroomSeatOccupied(seat))
             (void)BoardroomInit();
-        TagFSAttendArrival();
-        (void)StandMountSettles();
+        TagFSAttendArrival(vol);
+        (void)StandMountSettles(vol);
     }
-    TagFSStandHoldAgain();
+    TagFSStandHoldAgain(vol);
 }
 
 /* The volume's data run, in sectors of its medium: the book's FRAME names it
  * — [frame.data_block, data_end), its Tally's nodes and its ribbon's Quires
  * among the files' blocks (book_mount.h). Taken while the volume is up. */
-static void StandDataRun(uint64_t* first, uint64_t* span)
+static void StandDataRun(TagFSVolume* vol, uint64_t* first, uint64_t* span)
 {
-    *first = tagfs_block_to_sector(g_book.frame.data_block);
-    *span  = (g_book.data_end - g_book.frame.data_block) * TAGFS_BLOCK_SECTORS;
+    *first = tagfs_block_to_sector(vol, vol->book.frame.data_block);
+    *span  = (vol->book.data_end - vol->book.frame.data_block) * TAGFS_BLOCK_SECTORS;
 }
 
 /* The metadata a mount reads first, in sectors of its medium, every copy of
  * it: the book's Spine — the ring of its slots. Taken while the volume is
  * up. */
-static void StandFirstMetadata(uint64_t* first, uint64_t* span)
+static void StandFirstMetadata(TagFSVolume* vol, uint64_t* first, uint64_t* span)
 {
-    *first = tagfs_block_to_sector(g_book.frame.spine_block);
-    *span  = (uint64_t)g_book.frame.spine_slots * g_book.frame.spine_stride * TAGFS_BLOCK_SECTORS;
+    *first = tagfs_block_to_sector(vol, vol->book.frame.spine_block);
+    *span  = (uint64_t)vol->book.frame.spine_slots * vol->book.frame.spine_stride * TAGFS_BLOCK_SECTORS;
 }
 
 /*
@@ -149,45 +150,46 @@ static void StandFirstMetadata(uint64_t* first, uint64_t* span)
  */
 TestResult TestStandMediumMountLosesItsSeat(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    TagFSState* fs      = tagfs_get_state();
-    uint8_t     seat    = tagfs_get_seat();
+    TagFSState* fs      = &vol->state;
+    uint8_t     seat    = tagfs_get_seat(vol);
     BoardKind   kind    = BoardroomSeatKind(seat);
     uint8_t     index   = BoardroomSeatIndex(seat);
-    uint32_t    epoch   = tagfs_mount_epoch();
+    uint32_t    epoch   = tagfs_mount_epoch(vol);
     bool        let_go  = false;
-    const char* aside   = StandStepsAsideFor();
+    const char* aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
 
-    TEST_ASSERT(StandSettledBare(), "every change is on the medium, and nothing rests, before it goes");
+    TEST_ASSERT(StandSettledBare(vol), "every change is on the medium, and nothing rests, before it goes");
     let_go = true;
-    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of, writing nothing");
+    TEST_ASSERT(TagFSStandLetGo(vol), "the volume is let go of, writing nothing");
     BoardroomNoteDeparture(kind, index);
     TEST_ASSERT(!BoardroomSeatOccupied(seat), "and its medium leaves the room");
 
     TagFSStandMountTurn(STAND_MOUNT_SEAT_EMPTIES, STAND_MOUNT_EMPTIES_AT);
     TEST_ASSERT_EQ(BoardroomInit(), 1, "the medium is seated again");
-    TEST_ASSERT(StandMountSettles(), "and its arrival is attended");
+    TEST_ASSERT(StandMountSettles(vol), "and its arrival is attended");
     TEST_ASSERT(TagFSStandMountTurnFired(),
                 "the seat emptied under the mount, in the middle of its reads");
     TEST_ASSERT(!fs->initialized, "the mount that lost its medium mounted nothing");
-    TEST_ASSERT(!TagFSMediumLeft(), "and opened no book: no volume was up to hold one");
-    TEST_ASSERT(!TagFSStandMountOwed(),
+    TEST_ASSERT(!TagFSMediumLeft(vol), "and opened no book: no volume was up to hold one");
+    TEST_ASSERT(!TagFSStandMountOwed(vol),
                 "and nothing waits for seat:ready: the medium's return is the arrival that asks");
     TagFSStandMountTurn(STAND_MOUNT_AS_IS, 0);
 
-    TagFSStandMediumLeaves();
-    TEST_ASSERT(TagFSMediumLeft(), "a book is left standing while no volume is up");
+    TagFSStandMediumLeaves(vol);
+    TEST_ASSERT(TagFSMediumLeft(vol), "a book is left standing while no volume is up");
     TEST_ASSERT_EQ(BoardroomInit(), 1, "the medium arrives again");
-    TEST_ASSERT(StandMountSettles(), "and its arrival is attended");
+    TEST_ASSERT(StandMountSettles(vol), "and its arrival is attended");
     TEST_ASSERT(fs->initialized, "and the volume is MOUNTED");
-    TEST_ASSERT_EQ(tagfs_mount_epoch(), epoch + 1u, "once");
-    TEST_ASSERT(!TagFSMediumLeft(), "and holds no book a volume before it left standing");
+    TEST_ASSERT_EQ(tagfs_mount_epoch(vol), epoch + 1u, "once");
+    TEST_ASSERT(!TagFSMediumLeft(vol), "and holds no book a volume before it left standing");
 out:
     if (let_go)
-        StandMountClose(seat);
+        StandMountClose(vol, seat);
     return verdict;
 }
 
@@ -214,24 +216,25 @@ static void StandMountCountedSince(uint32_t attempts0, uint32_t resets0, uint32_
  */
 TestResult TestStandMediumMountRingsInItsOwnBreath(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    TagFSState* fs      = tagfs_get_state();
-    uint8_t     seat    = tagfs_get_seat();
+    TagFSState* fs      = &vol->state;
+    uint8_t     seat    = tagfs_get_seat(vol);
     BoardKind   kind    = BoardroomSeatKind(seat);
     uint8_t     index   = BoardroomSeatIndex(seat);
-    uint32_t    epoch   = tagfs_mount_epoch();
+    uint32_t    epoch   = tagfs_mount_epoch(vol);
     uint64_t    first   = 0, span = 0;
     uint32_t    attempts0 = 0, resets0 = 0, attempts = 0, resets = 0;
     bool        let_go  = false;
-    const char* aside   = StandStepsAsideFor();
+    const char* aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
 
-    TEST_ASSERT(StandSettledBare(), "every change is on the medium, and nothing rests, before it goes");
-    StandDataRun(&first, &span);
+    TEST_ASSERT(StandSettledBare(vol), "every change is on the medium, and nothing rests, before it goes");
+    StandDataRun(vol, &first, &span);
     let_go = true;
-    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of, writing nothing");
+    TEST_ASSERT(TagFSStandLetGo(vol), "the volume is let go of, writing nothing");
     BoardroomNoteDeparture(kind, index);
     TEST_ASSERT(!BoardroomSeatOccupied(seat), "and its medium leaves the room");
 
@@ -239,7 +242,7 @@ TestResult TestStandMediumMountRingsInItsOwnBreath(void)
     BlockFailArm(seat, BLOCK_FAIL_READ, first, span, 1);
     TagFSStandMountTurn(STAND_MOUNT_SEAT_RINGS, 0);
     TEST_ASSERT_EQ(BoardroomInit(), 1, "the medium is seated again");
-    TEST_ASSERT(StandMountSettles(), "and its arrival is attended, and what it owes");
+    TEST_ASSERT(StandMountSettles(vol), "and its arrival is attended, and what it owes");
     TEST_ASSERT(BlockFailFired(), "the mount's first read of the volume's data was refused");
     TEST_ASSERT(TagFSStandMountTurnFired(),
                 "and the seat said seat:ready before the attempt had ended");
@@ -247,11 +250,11 @@ TestResult TestStandMediumMountRingsInItsOwnBreath(void)
     TEST_ASSERT_EQ(resets, 1u, "that bell asked nothing: the seat was reset once");
     TEST_ASSERT_EQ(attempts, 2u, "and its bell asked the mount again, once");
     TEST_ASSERT(fs->initialized, "the volume is MOUNTED");
-    TEST_ASSERT_EQ(tagfs_mount_epoch(), epoch + 1u, "once");
-    TEST_ASSERT(!TagFSStandMountOwed(), "and nothing is owed any more");
+    TEST_ASSERT_EQ(tagfs_mount_epoch(vol), epoch + 1u, "once");
+    TEST_ASSERT(!TagFSStandMountOwed(vol), "and nothing is owed any more");
 out:
     if (let_go)
-        StandMountClose(seat);
+        StandMountClose(vol, seat);
     return verdict;
 }
 
@@ -274,24 +277,25 @@ out:
  */
 TestResult TestStandMediumMountBadSectorWaits(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    TagFSState* fs      = tagfs_get_state();
-    uint8_t     seat    = tagfs_get_seat();
+    TagFSState* fs      = &vol->state;
+    uint8_t     seat    = tagfs_get_seat(vol);
     BoardKind   kind    = BoardroomSeatKind(seat);
     uint8_t     index   = BoardroomSeatIndex(seat);
-    uint32_t    epoch   = tagfs_mount_epoch();
+    uint32_t    epoch   = tagfs_mount_epoch(vol);
     uint64_t    first   = 0, span = 0;
     uint32_t    attempts0 = 0, resets0 = 0, attempts = 0, resets = 0;
     bool        let_go  = false;
-    const char* aside   = StandStepsAsideFor();
+    const char* aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
 
-    TEST_ASSERT(StandSettledBare(), "every change is on the medium, and nothing rests, before it goes");
-    StandFirstMetadata(&first, &span);
+    TEST_ASSERT(StandSettledBare(vol), "every change is on the medium, and nothing rests, before it goes");
+    StandFirstMetadata(vol, &first, &span);
     let_go = true;
-    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of, writing nothing");
+    TEST_ASSERT(TagFSStandLetGo(vol), "the volume is let go of, writing nothing");
     BoardroomNoteDeparture(kind, index);
     TEST_ASSERT(!BoardroomSeatOccupied(seat), "and its medium leaves the room");
 
@@ -299,17 +303,17 @@ TestResult TestStandMediumMountBadSectorWaits(void)
     BlockFailArmBadSectors(seat, first, span);
     TagFSStandMountTurn(STAND_MOUNT_SEAT_RINGS, 0);
     TEST_ASSERT_EQ(BoardroomInit(), 1, "the medium is seated again");
-    TEST_ASSERT(StandMountSettles(),
+    TEST_ASSERT(StandMountSettles(vol),
                 "its arrival is attended, and the mount road comes to rest with the error standing");
     TEST_ASSERT(TagFSStandMountTurnFired(), "the seat said seat:ready inside the attempts");
     StandMountCountedSince(attempts0, resets0, &attempts, &resets);
     TEST_ASSERT_EQ(resets, 1u, "the seat was reset once");
     TEST_ASSERT_EQ(attempts, 2u, "two attempts: the arrival's, and the one the reset's bell asked");
     TEST_ASSERT(!fs->initialized, "nothing is mounted");
-    TEST_ASSERT(TagFSStandMountOwed(), "and the mount is owed");
+    TEST_ASSERT(TagFSStandMountOwed(vol), "and the mount is owed");
 
     for (uint32_t turn = 0; turn < STAND_MOUNT_IDLE_TURNS; turn++)
-        TEST_ASSERT(StandMountSettles(), "every service pass after it comes to rest at once");
+        TEST_ASSERT(StandMountSettles(vol), "every service pass after it comes to rest at once");
     StandMountCountedSince(attempts0, resets0, &attempts, &resets);
     TEST_ASSERT_EQ(attempts, 2u, "and no attempt comes without a new event");
     TEST_ASSERT_EQ(resets, 1u, "nor a second reset");
@@ -317,15 +321,15 @@ TestResult TestStandMediumMountBadSectorWaits(void)
     BlockFailDisarm();
     TagFSStandMountTurn(STAND_MOUNT_AS_IS, 0);
     BoardroomNoteSeatReady(kind, index);
-    TEST_ASSERT(StandMountSettles(), "a bell after the attempt is attended");
+    TEST_ASSERT(StandMountSettles(vol), "a bell after the attempt is attended");
     StandMountCountedSince(attempts0, resets0, &attempts, &resets);
     TEST_ASSERT_EQ(attempts, 3u, "it asked the mount once more");
     TEST_ASSERT(fs->initialized, "and with the sectors whole, the volume is MOUNTED");
-    TEST_ASSERT_EQ(tagfs_mount_epoch(), epoch + 1u, "once");
-    TEST_ASSERT(!TagFSStandMountOwed(), "and nothing is owed any more");
+    TEST_ASSERT_EQ(tagfs_mount_epoch(vol), epoch + 1u, "once");
+    TEST_ASSERT(!TagFSStandMountOwed(vol), "and nothing is owed any more");
 out:
     if (let_go)
-        StandMountClose(seat);
+        StandMountClose(vol, seat);
     return verdict;
 }
 
@@ -339,38 +343,39 @@ out:
  */
 TestResult TestStandMediumMountResetsTheSeat(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    TagFSState* fs      = tagfs_get_state();
-    uint8_t     seat    = tagfs_get_seat();
+    TagFSState* fs      = &vol->state;
+    uint8_t     seat    = tagfs_get_seat(vol);
     BoardKind   kind    = BoardroomSeatKind(seat);
     uint8_t     index   = BoardroomSeatIndex(seat);
-    uint32_t    epoch   = tagfs_mount_epoch();
+    uint32_t    epoch   = tagfs_mount_epoch(vol);
     uint64_t    first   = 0, span = 0;
     bool        let_go  = false;
-    const char* aside   = StandStepsAsideFor();
+    const char* aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
 
-    TEST_ASSERT(StandSettledBare(), "every change is on the medium, and nothing rests, before it goes");
-    StandDataRun(&first, &span);
+    TEST_ASSERT(StandSettledBare(vol), "every change is on the medium, and nothing rests, before it goes");
+    StandDataRun(vol, &first, &span);
     let_go = true;
-    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of, writing nothing");
+    TEST_ASSERT(TagFSStandLetGo(vol), "the volume is let go of, writing nothing");
     BoardroomNoteDeparture(kind, index);
     TEST_ASSERT(!BoardroomSeatOccupied(seat), "and its medium leaves the room");
 
     uint32_t gen = BoardroomSeatReadyGen(seat);
     BlockFailArm(seat, BLOCK_FAIL_READ, first, span, 1);
     TEST_ASSERT_EQ(BoardroomInit(), 1, "the medium is seated again");
-    TEST_ASSERT(StandMountSettles(), "and its arrival is attended, and what it owes");
+    TEST_ASSERT(StandMountSettles(vol), "and its arrival is attended, and what it owes");
     TEST_ASSERT(BlockFailFired(), "the mount's first read of the volume's data was refused");
     TEST_ASSERT(BoardroomSeatReadyGen(seat) != gen, "the seat, reset, rang its bell");
     TEST_ASSERT(fs->initialized, "the mount went again on it, and the volume is MOUNTED");
-    TEST_ASSERT_EQ(tagfs_mount_epoch(), epoch + 1u, "once");
-    TEST_ASSERT(!TagFSStandMountOwed(), "and nothing is owed any more");
+    TEST_ASSERT_EQ(tagfs_mount_epoch(vol), epoch + 1u, "once");
+    TEST_ASSERT(!TagFSStandMountOwed(vol), "and nothing is owed any more");
 out:
     if (let_go)
-        StandMountClose(seat);
+        StandMountClose(vol, seat);
     return verdict;
 }
 
@@ -388,22 +393,23 @@ out:
  */
 TestResult TestStandMediumMountWaitsForMemory(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    TagFSState* fs      = tagfs_get_state();
-    uint8_t     seat    = tagfs_get_seat();
+    TagFSState* fs      = &vol->state;
+    uint8_t     seat    = tagfs_get_seat(vol);
     BoardKind   kind    = BoardroomSeatKind(seat);
     uint8_t     index   = BoardroomSeatIndex(seat);
-    uint32_t    epoch   = tagfs_mount_epoch();
+    uint32_t    epoch   = tagfs_mount_epoch(vol);
     bool        let_go  = false;
     void*       held    = NULL;
-    const char* aside   = StandStepsAsideFor();
+    const char* aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
 
-    TEST_ASSERT(StandSettledBare(), "every change is on the medium, and nothing rests, before it goes");
+    TEST_ASSERT(StandSettledBare(vol), "every change is on the medium, and nothing rests, before it goes");
     let_go = true;
-    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of, writing nothing");
+    TEST_ASSERT(TagFSStandLetGo(vol), "the volume is let go of, writing nothing");
     BoardroomNoteDeparture(kind, index);
     TEST_ASSERT(!BoardroomSeatOccupied(seat), "and its medium leaves the room");
 
@@ -411,26 +417,26 @@ TestResult TestStandMediumMountWaitsForMemory(void)
     TEST_ASSERT(held != NULL, "pages of the machine are held back");
     TagFSStandMountTurn(STAND_MOUNT_HEAP_REFUSES, 0);
     TEST_ASSERT_EQ(BoardroomInit(), 1, "the medium is seated again");
-    TEST_ASSERT(StandMountSettles(), "and its arrival is attended");
+    TEST_ASSERT(StandMountSettles(vol), "and its arrival is attended");
     TEST_ASSERT(TagFSStandMountTurnFired() && HeapFailFired(),
                 "the registry's load met a heap with nothing to give");
     HeapFailDisarm();
-    TEST_ASSERT(fs->initialized || TagFSStandMountOwed(),
+    TEST_ASSERT(fs->initialized || TagFSStandMountOwed(vol),
                 "and the mount is owed for it, not refused for what the volume holds");
 
     PmmGiveExact(held, STAND_HELD_PAGES);
     held = NULL;
-    TagFSMemoryCameBack();
-    TEST_ASSERT(StandMountSettles(), "the memory comes back, and what the mount owes is attended");
+    TagFSMemoryCameBack(vol);
+    TEST_ASSERT(StandMountSettles(vol), "the memory comes back, and what the mount owes is attended");
     TEST_ASSERT(fs->initialized, "the volume is MOUNTED");
-    TEST_ASSERT_EQ(tagfs_mount_epoch(), epoch + 1u, "once");
-    TEST_ASSERT(!TagFSStandMountOwed(), "and nothing is owed any more");
+    TEST_ASSERT_EQ(tagfs_mount_epoch(vol), epoch + 1u, "once");
+    TEST_ASSERT(!TagFSStandMountOwed(vol), "and nothing is owed any more");
 out:
     HeapFailDisarm();
     if (held)
         PmmGiveExact(held, STAND_HELD_PAGES);
     if (let_go)
-        StandMountClose(seat);
+        StandMountClose(vol, seat);
     return verdict;
 }
 

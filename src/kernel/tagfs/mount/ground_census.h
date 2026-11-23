@@ -19,17 +19,17 @@
  * The mount's alone: one core, the door shut, from Begin to End.
  */
 
-void    GroundCensusBegin(void);
+void    GroundCensusBegin(TagFSVolume* vol);
 
 /* `count` blocks from `start` are `owner`'s — `who` names which one of its
  * kind (a file id; 0 where the kind has one). Runs past the volume are cut to
  * it. Memory refused is remembered: the census then decides nothing. */
-void    GroundClaim(GroundOwner owner, uint64_t start, uint32_t count, uint64_t who);
+void    GroundClaim(TagFSVolume* vol, GroundOwner owner, uint64_t start, uint32_t count, uint64_t who);
 
 /* The same claim, made by a slot of the Spine — a node of the
  * Tally it names (`who` the node's seq), a Quire its ribbon goes on in (0):
  * one name two slots give alike is one owner (GroundCensusBook). */
-void    GroundClaimBySlot(GroundOwner owner, uint64_t start, uint32_t count, uint64_t who, uint32_t slot);
+void    GroundClaimBySlot(TagFSVolume* vol, GroundOwner owner, uint64_t start, uint32_t count, uint64_t who, uint32_t slot);
 
 /*
  * The census, which keeps no bitmap to hold the claims against: every block an
@@ -58,45 +58,45 @@ void    GroundClaimBySlot(GroundOwner owner, uint64_t start, uint32_t count, uin
  * read free what an owner the census does not see holds. OK; ERR_NO_MEMORY
  * with nothing held, or the map's refusal — *what says which.
  */
-error_t GroundCensusBook(uint64_t* held, uint64_t* fallow, bool derive, const char** what);
+error_t GroundCensusBook(TagFSVolume* vol, uint64_t* held, uint64_t* fallow, bool derive, const char** what);
 
 /* Every block of a Quire of `quire` blocks a Tally's node lies in that no
  * claim names claimed the Tallies' (Р-d3: a Tally-Quire held whole while one
  * node in it lives) — after every claim, before GroundCensusBook. OK, or
  * ERR_NO_MEMORY said. */
-error_t GroundQuiresHeld(uint64_t quire);
+error_t GroundQuiresHeld(TagFSVolume* vol, uint64_t quire);
 
 /* Whether a block of [start, start + count) is claimed already by `owner`. */
-bool    GroundClaimedBy(GroundOwner owner, uint64_t start, uint64_t count);
+bool    GroundClaimedBy(TagFSVolume* vol, GroundOwner owner, uint64_t start, uint64_t count);
 
 /* The claims of `owner` as they stand — after GroundCensusBook, the fallow and
  * the held cut to what it leaves them — into `out` as DATA Strips, `room` of
  * them at the most: how many there are. */
-uint64_t GroundClaimsOf(GroundOwner owner, Strip* out, uint64_t room);
+uint64_t GroundClaimsOf(TagFSVolume* vol, GroundOwner owner, Strip* out, uint64_t room);
 
 /* A run an owner names that its caller cuts to the volume before it claims
  * what is left — a locked file's run outside it, a held or fallow run
  * past it: counted in the reach as it is named, and claimed by no one. */
-void    GroundCensusNamed(uint64_t start, uint64_t count);
+void    GroundCensusNamed(TagFSVolume* vol, uint64_t start, uint64_t count);
 
 /* Past the farthest block any owner but the far Deed named since Begin — as
  * it named it, a claim before it is cut to the volume and a run told by
  * GroundCensusNamed alike — 0 when none did: the proof that the ground
  * behind the volume is no one's before it is taken (mount/book_grow.c). */
-uint64_t GroundCensusReach(void);
+uint64_t GroundCensusReach(TagFSVolume* vol);
 
 /* The blocks the census said two owners name (GroundCensusBook), since
  * Begin. */
-uint64_t GroundCensusDoubled(void);
+uint64_t GroundCensusDoubled(TagFSVolume* vol);
 
 /* The claims let go. */
-void    GroundCensusEnd(void);
+void    GroundCensusEnd(TagFSVolume* vol);
 
 #ifdef CONFIG_VOLUME_TESTS
 /* The owner of the first claim made on `block` since Begin, or
  * GROUND_OWNER_KINDS when none names it: the stand asks what one owner
  * claims, between a Begin and an End of its own, with no mount running. */
-GroundOwner GroundClaimOf(uint64_t block);
+GroundOwner GroundClaimOf(TagFSVolume* vol, uint64_t block);
 #endif
 
 #endif /* TAGFS_GROUND_CENSUS_H */

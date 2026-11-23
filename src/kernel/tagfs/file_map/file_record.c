@@ -294,7 +294,7 @@ static error_t SplicesApplied(const FileRecord* old, const BookSplice* sp, uint6
     return rc;
 }
 
-error_t FileRecordSplice(const FileRecord* old, const BookSplice* sp, uint64_t count,
+error_t FileRecordSplice(TagFSVolume* vol, const FileRecord* old, const BookSplice* sp, uint64_t count,
                          uint64_t size, uint64_t mtime, FileRecord** out,
                          Strip** freed, uint64_t* nfreed)
 {
@@ -336,7 +336,7 @@ error_t FileRecordSplice(const FileRecord* old, const BookSplice* sp, uint64_t c
     /* The Slips go on only by their one rule — the replay's and the Ink's
      * (tail_slip.h): a splice that changes the last block lets them go, and
      * the size cuts them. */
-    if (TailSlipKept(old, rec, count > 0) != OK) {
+    if (TailSlipKept(vol, old, rec, count > 0) != OK) {
         FileRecordRelease(rec);
         if (freed) {
             kfree(*freed);

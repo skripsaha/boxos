@@ -1,6 +1,7 @@
 #include "../tagfs.h"
 #include "crypto.h"
 #include "amp.h"
+#include "tagfs_volume.h"
 
 /*
  * UnderGlass (tagfs.h): the volume's book carries what this kernel's writer
@@ -19,34 +20,28 @@
  * past that each is said as it comes.
  */
 
-#define GLASS_SAID_MOST  64u
 
-static volatile uint8_t s_glass;
-static uint32_t         s_said[GLASS_SAID_MOST];
-static uint32_t         s_said_count;
-static volatile uint8_t s_door_said;     /* a write door reached under glass: said once a mount */
-
-void TagFSUnderGlass(const char* why)
+void TagFSUnderGlass(TagFSVolume* vol, const char* why)
 {
     if (!why) {
-        __atomic_store_n(&s_glass, 0u, __ATOMIC_RELEASE);
-        __atomic_store_n(&s_door_said, 0u, __ATOMIC_RELEASE);
-        s_said_count = 0;
+        __atomic_store_n(&vol->under_glass.glass, 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&vol->under_glass.door_said, 0u, __ATOMIC_RELEASE);
+        vol->under_glass.said_count = 0;
         return;
     }
-    __atomic_store_n(&s_glass, 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->under_glass.glass, 1u, __ATOMIC_RELEASE);
     uint32_t sum = KCrc32c((const uint8_t*)why, (uint32_t)strlen(why));
-    for (uint32_t i = 0; i < s_said_count; i++)
-        if (s_said[i] == sum)
+    for (uint32_t i = 0; i < vol->under_glass.said_count; i++)
+        if (vol->under_glass.said[i] == sum)
             return;
-    if (s_said_count < GLASS_SAID_MOST)
-        s_said[s_said_count++] = sum;
+    if (vol->under_glass.said_count < GLASS_SAID_MOST)
+        vol->under_glass.said[vol->under_glass.said_count++] = sum;
     kprintf("[TagFS] the volume may only be read: %s\n", why);
 }
 
-bool TagFSIsUnderGlass(void)
+bool TagFSIsUnderGlass(TagFSVolume* vol)
 {
-    return __atomic_load_n(&s_glass, __ATOMIC_ACQUIRE) != 0;
+    return __atomic_load_n(&vol->under_glass.glass, __ATOMIC_ACQUIRE) != 0;
 }
 
 /*
@@ -87,7 +82,7 @@ static bool GlassKnocked(const char* door)
 }
 #endif
 
-error_t TagFSGlassRefused(const char* door)
+error_t TagFSGlassRefused(TagFSVolume* vol, const char* door)
 {
 #ifdef CONFIG_VOLUME_TESTS
     if (GlassKnocked(door))
@@ -96,7 +91,7 @@ error_t TagFSGlassRefused(const char* door)
 #if CONFIG_STRICT
     panic("[TagFS] DEFECT: %s was asked to write a volume that stands under glass", door);
 #endif
-    if (!__atomic_exchange_n(&s_door_said, 1u, __ATOMIC_ACQ_REL))
+    if (!__atomic_exchange_n(&vol->under_glass.door_said, 1u, __ATOMIC_ACQ_REL))
         kprintf("[TagFS] DEFECT: %s was asked to write a volume that stands under glass — "
                 "refused before a byte (ERR_TAGFS_READ_ONLY)\n", door);
     return ERR_TAGFS_READ_ONLY;

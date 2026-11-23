@@ -24,28 +24,29 @@
  */
 static TestResult TestStandParityStitchHoldsNoLock(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult    verdict = TEST_PASS;
     uint64_t      file_id = 0;
     RibbonCursor  was, now;
     LockRankCount before, after;
 
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x5Au);
-    TEST_ASSERT_OK(TagFSSettle(), "what the tests before owe is settled first");
-    RibbonCursorStand(&was);
+    TEST_ASSERT_OK(TagFSSettle(vol), "what the tests before owe is settled first");
+    RibbonCursorStand(vol, &was);
     before = LockRankCountHere();
-    TEST_ASSERT(StandMakeFile("stand_parity_lock", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+    TEST_ASSERT(StandMakeFile(vol, "stand_parity_lock", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a file is made and written");
-    error_t settled = TagFSSettle();
+    error_t settled = TagFSSettle(vol);
     after = LockRankCountHere();
-    RibbonCursorStand(&now);
+    RibbonCursorStand(vol, &now);
     TEST_ASSERT_OK(settled, "its cycle settles");
     TEST_ASSERT(now.given > was.given, "and the ribbon's writer gave a stitch for it");
     TEST_ASSERT_EQ(after.Witnessed - before.Witnessed, 0,
                    "no door to the medium was passed holding a TagFS lock, by the write or by the cycle");
 out:
     if (file_id) {
-        (void)tagfs_delete_file(file_id, INK_UNWARRANTED);
-        (void)TagFSSettle();
+        (void)tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
+        (void)TagFSSettle(vol);
     }
     return verdict;
 }
@@ -65,31 +66,32 @@ out:
  */
 static TestResult TestStandParityFilesInTurn(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
     uint64_t    fid[STAND_PARITY_FILES] = { 0 };
     uint32_t    wrong = 0;
     uint32_t    bytes = STAND_PARITY_ROUNDS * STAND_PARITY_CHUNK;
     StandStitch s;
-    const char* aside = StandStitchAside(&s);
+    const char* aside = StandStitchAside(vol, &s);
 
     if (aside)
         return test_steps_aside(aside);
     for (uint32_t i = 0; i < STAND_PARITY_FILES; i++)
-        TEST_ASSERT_EQ(tagfs_create_file("stand_parity_turn", NULL, 0, 0, &fid[i]), 0, "sixteen files are made");
+        TEST_ASSERT_EQ(tagfs_create_file(vol, "stand_parity_turn", NULL, 0, 0, &fid[i]), 0, "sixteen files are made");
     for (uint32_t r = 0; r < STAND_PARITY_ROUNDS; r++) {
         if (r == STAND_PARITY_ROUNDS / 2)
-            TEST_ASSERT_OK(TagFSSettle(), "a cycle half way settles what they took");
+            TEST_ASSERT_OK(TagFSSettle(vol), "a cycle half way settles what they took");
         for (uint32_t i = 0; i < STAND_PARITY_FILES; i++) {
             TestFillAt(g_test_buffer, STAND_PARITY_CHUNK, fid[i], (uint64_t)r * STAND_PARITY_CHUNK);
-            TEST_ASSERT_EQ(StandWriteAt(fid[i], (uint64_t)r * STAND_PARITY_CHUNK, g_test_buffer, STAND_PARITY_CHUNK),
+            TEST_ASSERT_EQ(StandWriteAt(vol, fid[i], (uint64_t)r * STAND_PARITY_CHUNK, g_test_buffer, STAND_PARITY_CHUNK),
                            STAND_PARITY_CHUNK, "each file takes its append in turn");
         }
     }
-    TEST_ASSERT_OK(TagFSSettle(), "and a cycle after the last");
-    TEST_ASSERT(StandStitchRemount(), "the volume mounts again, the ribbon replayed");
+    TEST_ASSERT_OK(TagFSSettle(vol), "and a cycle after the last");
+    TEST_ASSERT(StandStitchRemount(vol), "the volume mounts again, the ribbon replayed");
     for (uint32_t i = 0; i < STAND_PARITY_FILES; i++) {
         TestFillAt(g_test_buffer, bytes, fid[i], 0);
-        if (TestFileRead(fid[i], g_test_output, sizeof(g_test_output)) != (int)bytes ||
+        if (TestFileRead(vol, fid[i], g_test_output, sizeof(g_test_output)) != (int)bytes ||
             TestFirstDifference(g_test_output, g_test_buffer, bytes) != bytes)
             wrong++;
     }

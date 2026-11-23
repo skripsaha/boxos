@@ -91,16 +91,16 @@ void  JotsLetGo(Jot* list);
 /* Under the state lock: `j` put in the Docket — merged into the file's Jot
  * waiting there, when there is one, and then `j` is spent — and the Jots spent
  * linked onto *spent for JotsLetGo after the lock. */
-void  DocketPutLocked(Jot* j, Jot** spent);
+void  DocketPutLocked(TagFSVolume* vol, Jot* j, Jot** spent);
 
 /* Under the state lock, with the target of the cycle: the Docket taken whole
  * into *out, and an empty one begun. */
-void  DocketTakeLocked(DocketTaken* out);
+void  DocketTakeLocked(TagFSVolume* vol, DocketTaken* out);
 
 /* Under the state lock: what a refused cycle took, given back — each Jot merged
  * under the file's Jot the Docket gained since, or put back as it was. *t is
  * emptied; the Jots spent linked onto *spent. */
-void  DocketBackLocked(DocketTaken* t, Jot** spent);
+void  DocketBackLocked(TagFSVolume* vol, DocketTaken* t, Jot** spent);
 
 /* Under the state lock: whether `block`, at the file's block k, is ground
  * written since the record the next stitch lays the file's change against —
@@ -109,8 +109,8 @@ void  DocketBackLocked(DocketTaken* t, Jot** spent);
  * the file. Such ground no stitch named, and a run of it may be grown: the
  * stitch puts it in whole, the appends one run (§3.7). The answer holds while
  * DocketTakes says the same — a TAKE makes what the Docket held the stitch's. */
-bool     DocketBaseLacks(uint64_t fid, uint64_t k, uint64_t block);
-uint64_t DocketTakes(void);
+bool     DocketBaseLacks(TagFSVolume* vol, uint64_t fid, uint64_t k, uint64_t block);
+uint64_t DocketTakes(TagFSVolume* vol);
 
 /* Under the state lock: the first Jot at or past `fid` — its fid in *at, and
  * in *was the file as the last stitch that named it left it, with a reference
@@ -121,13 +121,13 @@ uint64_t DocketTakes(void);
  * its newest change leaves it in *now as well — a reference the caller lets
  * go, NULL for a file given up: what a medium that came back is held to, the
  * data no stitch settled (mount/away_proof.c). */
-bool  DocketWasFrom(uint64_t fid, uint64_t* at, FileRecord** was, FileRecord** now);
+bool  DocketWasFrom(TagFSVolume* vol, uint64_t fid, uint64_t* at, FileRecord** was, FileRecord** now);
 
 /* By the Settle's holder with no lock, at the S6 of stitch `seq` built of *t,
  * before DocketSettled: the ground its records put in named as born at `seq`
  * (settle/births.c) — every run of a Born, the runs a Shaped put in — and the
  * highest file id it named raised into *fid_most. ERR_NO_MEMORY. */
-error_t DocketBirths(const DocketTaken* t, uint64_t seq, uint64_t* fid_most);
+error_t DocketBirths(TagFSVolume* vol, const DocketTaken* t, uint64_t seq, uint64_t* fid_most);
 
 /* By the Settle's holder with no lock, once the stitch of seq `seq` built of
  * *t settled: each file's record as the stitch leaves it given that seq — or,
@@ -152,7 +152,7 @@ void  DocketSettled(DocketTaken* t, uint64_t seq);
  * its tags are put in order in, and the runs and digests laid apart first. */
 error_t DocketMeasure(DocketTaken* t, uint64_t* records, uint64_t* bytes, uint64_t* body, uint32_t* tags,
                       uint64_t* runs, uint64_t* fresh);
-error_t DocketLay(DocketTaken* t, uint64_t seq, uint32_t tags, uint8_t* out, uint32_t* at, uint8_t* body,
+error_t DocketLay(TagFSVolume* vol, DocketTaken* t, uint64_t seq, uint32_t tags, uint8_t* out, uint32_t* at, uint8_t* body,
                   uint32_t* starts, uint32_t* n, uint64_t* fresh);
 
 /* The bytes a change of `kind` from `was` to `now` claims on the ribbon before
@@ -173,6 +173,13 @@ uint64_t DocketClaimOfShaped(uint64_t runs, uint64_t nsplice, uint64_t fresh, ui
 JotKind JotMerged(JotKind older, JotKind newer);
 
 /* The volume let go of, or mounted afresh: every Jot let go. With the door shut. */
-void  DocketDropAll(void);
+void  DocketDropAll(TagFSVolume* vol);
+
+/* What one volume holds of docket.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    Jot* head[JOT_LEVELS];
+    uint64_t count;
+    uint64_t takes;  /* the TAKEs the Docket has had, and the drops */
+} DocketState;
 
 #endif /* TAGFS_INK_DOCKET_H */

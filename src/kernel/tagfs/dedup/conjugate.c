@@ -9,6 +9,7 @@
 #include "../run/run.h"
 #include "../tag_registry/tag_registry.h"
 #include "../box_hash/box_hash.h"
+#include "tagfs_volume.h"
 
 /*
  * Conjugate (conjugate.h): the act asks every guard of the two files' records
@@ -212,11 +213,11 @@ static ConjugateWhy ConjugatePlanned(ConjugateAct* a)
 
 /* The guards the records answer before a block is read: KEPT, UNSHAPED (*at
  * the duplicate's block) or LAID. */
-static ConjugateWhy ConjugateGuards(ConjugateAct* a)
+static ConjugateWhy ConjugateGuards(TagFSVolume* vol, ConjugateAct* a)
 {
     const ConjugateAsk* ask = a->ask;
-    if (InkFileKept(a->dup->flags) || ask->fid == g_book.boot_fid ||
-        ask->onto == g_book.boot_fid || InkRecordTouchesBoot(a->dup))
+    if (InkFileKept(a->dup->flags) || ask->fid == vol->book.boot_fid ||
+        ask->onto == vol->book.boot_fid || InkRecordTouchesBoot(vol, a->dup))
         return CONJUGATE_KEPT;
     a->at = ask->at;
     if (ask->at > a->dup->blocks || ask->count > a->dup->blocks - ask->at || ask->onto_at > a->onto->blocks ||
@@ -233,12 +234,12 @@ static ConjugateWhy ConjugateGuards(ConjugateAct* a)
 /* The digest the book holds for `block` — the Gloss's for fresh data, the
  * Tally's else: LAID; UNDIGESTED where no element names it or its leaf reads
  * in no copy; REFUSED where the leaf could not be read now. */
-static ConjugateWhy ConjugateDigestOf(uint64_t block, uint64_t* digest, error_t* rc)
+static ConjugateWhy ConjugateDigestOf(TagFSVolume* vol, uint64_t block, uint64_t* digest, error_t* rc)
 {
     error_t refused = OK;
-    if (GlossFind(block, digest))
+    if (GlossFind(vol, block, digest))
         return CONJUGATE_LAID;
-    switch (TallyDigestFind(block, digest, &refused)) {
+    switch (TallyDigestFind(vol, block, digest, &refused)) {
     case TALLY_DIGEST_NAMED:
         return CONJUGATE_LAID;
     case TALLY_DIGEST_UNREAD:
@@ -251,15 +252,15 @@ static ConjugateWhy ConjugateDigestOf(uint64_t block, uint64_t* digest, error_t*
 
 /* Every pair held to its digests, no block read: LAID, or the first refusal
  * at the duplicate's block *at. */
-static ConjugateWhy ConjugateDigests(ConjugateAct* a)
+static ConjugateWhy ConjugateDigests(TagFSVolume* vol, ConjugateAct* a)
 {
     for (uint32_t i = 0; i < a->plan.npair; i++) {
         const ConjugatePair* p = &a->plan.pair[i];
         for (uint32_t k = 0; k < p->count; k++) {
             uint64_t     mine = 0, theirs = 0;
-            ConjugateWhy why  = ConjugateDigestOf(p->dup + k, &mine, &a->rc);
+            ConjugateWhy why  = ConjugateDigestOf(vol, p->dup + k, &mine, &a->rc);
             if (why == CONJUGATE_LAID)
-                why = ConjugateDigestOf(p->onto + k, &theirs, &a->rc);
+                why = ConjugateDigestOf(vol, p->onto + k, &theirs, &a->rc);
             if (why == CONJUGATE_LAID && mine != theirs)
                 why = CONJUGATE_DIFFERS;
             if (why != CONJUGATE_LAID) {
@@ -275,15 +276,15 @@ static ConjugateWhy ConjugateDigests(ConjugateAct* a)
  * `mine` and `theirs` and compared: LAID, COLLIDES where the bytes differ,
  * UNDIGESTED where the target's block does not hold its digest, REFUSED for
  * the medium's refusal — at the duplicate's block *at. */
-static ConjugateWhy ConjugateRead(ConjugateAct* a, const ConjugatePair* p, uint32_t from, uint32_t n, uint8_t* mine,
+static ConjugateWhy ConjugateRead(TagFSVolume* vol, ConjugateAct* a, const ConjugatePair* p, uint32_t from, uint32_t n, uint8_t* mine,
                                   uint8_t* theirs)
 {
     BoxHashContext ctx;
-    BoxHashInit(&ctx, tagfs_get_state()->uuid, 16);
+    BoxHashInit(&ctx, vol->state.uuid, 16);
     a->at = p->at + from;
-    a->rc = TagFSReadRun(p->dup + from, n, mine);
+    a->rc = TagFSReadRun(vol, p->dup + from, n, mine);
     if (a->rc == OK)
-        a->rc = TagFSReadRun(p->onto + from, n, theirs);
+        a->rc = TagFSReadRun(vol, p->onto + from, n, theirs);
     if (a->rc != OK)
         return CONJUGATE_REFUSED;
     for (uint32_t k = 0; k < n; k++) {
@@ -292,7 +293,7 @@ static ConjugateWhy ConjugateRead(ConjugateAct* a, const ConjugatePair* p, uint3
         a->at                 = p->at + from + k;
         if (memcmp(mine + (size_t)k * TAGFS_BLOCK_SIZE, b, TAGFS_BLOCK_SIZE) != 0)
             return CONJUGATE_COLLIDES;
-        ConjugateWhy why = ConjugateDigestOf(p->onto + from + k, &digest, &a->rc);
+        ConjugateWhy why = ConjugateDigestOf(vol, p->onto + from + k, &digest, &a->rc);
         if (why != CONJUGATE_LAID)
             return why;
         if (BoxHashIntegrity(b, TAGFS_BLOCK_SIZE, &ctx) != digest)
@@ -303,9 +304,9 @@ static ConjugateWhy ConjugateRead(ConjugateAct* a, const ConjugatePair* p, uint3
 
 /* Every pair read and compared byte for byte, as many blocks a command as the
  * seat takes on either side: LAID, or the first refusal. */
-static ConjugateWhy ConjugateBytes(ConjugateAct* a)
+static ConjugateWhy ConjugateBytes(TagFSVolume* vol, ConjugateAct* a)
 {
-    uint32_t     room   = TagFSRunBlocks();
+    uint32_t     room   = TagFSRunBlocks(vol);
     uint8_t*     mine   = kmalloc((size_t)room * TAGFS_BLOCK_SIZE);
     uint8_t*     theirs = kmalloc((size_t)room * TAGFS_BLOCK_SIZE);
     ConjugateWhy why    = mine && theirs ? CONJUGATE_LAID : CONJUGATE_REFUSED;
@@ -314,7 +315,7 @@ static ConjugateWhy ConjugateBytes(ConjugateAct* a)
         const ConjugatePair* p = &a->plan.pair[i];
         for (uint32_t from = 0; why == CONJUGATE_LAID && from < p->count; from += room) {
             uint32_t n = p->count - from < room ? p->count - from : room;
-            why        = ConjugateRead(a, p, from, n, mine, theirs);
+            why        = ConjugateRead(vol, a, p, from, n, mine, theirs);
         }
     }
     kfree(mine);
@@ -328,9 +329,9 @@ static ConjugateWhy ConjugateBytes(ConjugateAct* a)
 
 /* Under the duplicate's Helm: the records held, guarded, walked, compared and
  * handed to Ink. */
-static ConjugateWhy ConjugateHeld(ConjugateAct* a, ConjugateSaid* out)
+static ConjugateWhy ConjugateHeld(TagFSVolume* vol, ConjugateAct* a, ConjugateSaid* out)
 {
-    TagFSState*  fs  = tagfs_get_state();
+    TagFSState*  fs  = &vol->state;
     InkReceipt   got = { 0 };
     ConjugateWhy why = CONJUGATE_LAID;
     a->dup           = FileMapRecordHold(fs->files, a->ask->fid, &a->was);
@@ -339,15 +340,15 @@ static ConjugateWhy ConjugateHeld(ConjugateAct* a, ConjugateSaid* out)
         a->rc = ERR_FILE_NOT_FOUND;
         return CONJUGATE_REFUSED;
     }
-    why = ConjugateGuards(a);
+    why = ConjugateGuards(vol, a);
     if (why == CONJUGATE_LAID)
         why = ConjugatePlanned(a);
-    if (why == CONJUGATE_LAID && InkTouchesBoot(a->plan.onto, a->plan.nonto))
+    if (why == CONJUGATE_LAID && InkTouchesBoot(vol, a->plan.onto, a->plan.nonto))
         why = CONJUGATE_KEPT;
     if (why == CONJUGATE_LAID)
-        why = ConjugateDigests(a);
+        why = ConjugateDigests(vol, a);
     if (why == CONJUGATE_LAID)
-        why = ConjugateBytes(a);
+        why = ConjugateBytes(vol, a);
     if (why != CONJUGATE_LAID)
         return why;
 #ifdef CONFIG_VOLUME_TESTS
@@ -357,7 +358,7 @@ static ConjugateWhy ConjugateHeld(ConjugateAct* a, ConjugateSaid* out)
                          .count = a->ask->count, .dup = a->plan.dup, .ndup = a->plan.ndup,
                          .onto = a->plan.onto, .nonto = a->plan.nonto, .onto_fid = a->ask->onto,
                          .onto_gen = a->there.gen };
-    a->rc = InkConjugate(&c, &got);
+    a->rc = InkConjugate(vol, &c, &got);
     if (a->rc == ERR_BUSY || a->rc == ERR_FILE_NOT_FOUND)
         return CONJUGATE_CHANGED;
     if (a->rc != OK)
@@ -368,25 +369,25 @@ static ConjugateWhy ConjugateHeld(ConjugateAct* a, ConjugateSaid* out)
 
 /* The duplicate opened for the act's change and its Helm taken — a holder's
  * write is not waited for: OK, or the refusal. */
-static ConjugateWhy ConjugateOpened(ConjugateAct* a, ConjugateSaid* out)
+static ConjugateWhy ConjugateOpened(TagFSVolume* vol, ConjugateAct* a, ConjugateSaid* out)
 {
-    TagFSFileHandle* h    = tagfs_open(a->ask->fid, TAGFS_HANDLE_WRITE);
+    TagFSFileHandle* h    = tagfs_open(vol, a->ask->fid, TAGFS_HANDLE_WRITE);
     HelmWaiter       here = { 0 };
     ConjugateWhy     why  = CONJUGATE_REFUSED;
     if (!h) {
-        a->rc = BookFileLocked(a->ask->fid) ? ERR_TAGFS_CORRUPTED : ERR_FILE_NOT_FOUND;
+        a->rc = BookFileLocked(vol, a->ask->fid) ? ERR_TAGFS_CORRUPTED : ERR_FILE_NOT_FOUND;
         return why;
     }
     h->warrant = INK_WARRANTED;
-    a->rc      = HelmTakeNow(h, &here);
+    a->rc      = HelmTakeNow(vol, h, &here);
     if (a->rc == OK) {
-        why = ConjugateHeld(a, out);
-        HelmLetGo(h->ofe, &here);
+        why = ConjugateHeld(vol, a, out);
+        HelmLetGo(vol, h->ofe, &here);
     }
     FileRecordRelease(a->dup);
     FileRecordRelease(a->onto);
     ConjugatePlanLetGo(&a->plan);
-    tagfs_close(h);
+    tagfs_close(vol, h);
     return why;
 }
 
@@ -461,7 +462,7 @@ static void ConjugateSays(const ConjugateAsk* ask, const ConjugateSaid* said, er
 }
 
 /* The act, asked with `warrant`, said by its caller. */
-static error_t ConjugateAsked(InkWarrant warrant, const ConjugateAsk* ask, ConjugateSaid* out)
+static error_t ConjugateAsked(TagFSVolume* vol, InkWarrant warrant, const ConjugateAsk* ask, ConjugateSaid* out)
 {
     ConjugateAct a   = { .ask = ask, .at = ask->at, .rc = OK };
     ConjugateWhy why = CONJUGATE_REFUSED;
@@ -470,27 +471,27 @@ static error_t ConjugateAsked(InkWarrant warrant, const ConjugateAsk* ask, Conju
         why = CONJUGATE_UNWARRANTED;
     else if (!ConjugateAskHolds(ask))
         why = CONJUGATE_UNSHAPED;
-    else if (!tagfs_enter())
+    else if (!tagfs_enter(vol))
         a.rc = ERR_DEVICE_NOT_READY;
     else {
-        a.rc = InkVolumeBegins();
+        a.rc = InkVolumeBegins(vol);
         if (a.rc == OK)
-            why = ConjugateOpened(&a, out);
-        tagfs_leave();
+            why = ConjugateOpened(vol, &a, out);
+        tagfs_leave(vol);
     }
     out->why = why;
     out->at  = a.at;
     return ConjugateErrorOf(why, a.rc);
 }
 
-error_t TagFSConjugate(InkWarrant warrant, const ConjugateAsk* ask, ConjugateSaid* out)
+error_t TagFSConjugate(TagFSVolume* vol, InkWarrant warrant, const ConjugateAsk* ask, ConjugateSaid* out)
 {
-    error_t rc = ConjugateAsked(warrant, ask, out);
+    error_t rc = ConjugateAsked(vol, warrant, ask, out);
     ConjugateSays(ask, out, rc);
     return rc;
 }
 
-error_t ConjugateLay(const ConjugateAsk* ask, ConjugateSaid* out)
+error_t ConjugateLay(TagFSVolume* vol, const ConjugateAsk* ask, ConjugateSaid* out)
 {
-    return ConjugateAsked(INK_WARRANTED, ask, out);
+    return ConjugateAsked(vol, INK_WARRANTED, ask, out);
 }

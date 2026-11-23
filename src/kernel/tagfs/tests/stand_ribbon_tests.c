@@ -21,6 +21,7 @@
 #include "crypto.h"
 #include "atomics.h"
 #include "stand_ribbon.h"
+#include "tagfs_volume.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -64,13 +65,13 @@ StandRibbonRecords* StandRibbonFresh(uint32_t k)
 
 /* The volume's medium arriving again, attended until the mount road has
  * nothing left to do — mounted or refused — bounded. */
-void StandRibbonArrive(void)
+void StandRibbonArrive(TagFSVolume* vol)
 {
     uint64_t bound = rdtsc() + cpu_ms_to_tsc(STAND_RIBBON_MOUNT_MS);
-    TagFSAttendArrival();
-    while (!TagFSStandMountIdle() && rdtsc() < bound) {
+    TagFSAttendArrival(vol);
+    while (!TagFSStandMountIdle(vol) && rdtsc() < bound) {
         BoardroomAttendIfPending();
-        TagFSServiceIfPending();
+        TagFSServiceIfPending(vol);
         BatonPump(amp_get_core_index());
         cpu_pause();
     }
@@ -79,11 +80,11 @@ void StandRibbonArrive(void)
 /* The volume, let go of while the test laid its stitches, mounted again on
  * what the medium holds now and the runner counted back in: true when it
  * came up. */
-bool StandRibbonUp(void)
+bool StandRibbonUp(TagFSVolume* vol)
 {
-    StandRibbonArrive();
-    TagFSStandHoldAgain();
-    return tagfs_get_state()->initialized;
+    StandRibbonArrive(vol);
+    TagFSStandHoldAgain(vol);
+    return vol->state.initialized;
 }
 
 /*
@@ -99,26 +100,26 @@ bool StandRibbonUp(void)
  * either way, as TagFSStandLetGo lets it go; a volume already down is left as
  * it is. False when a caller is still inside at the bound.
  */
-bool StandRibbonLetGo(RibbonCursor* at)
+bool StandRibbonLetGo(TagFSVolume* vol, RibbonCursor* at)
 {
     uint64_t bound = rdtsc() + cpu_ms_to_tsc(STAND_RIBBON_MOUNT_MS);
     if (at)
-        RibbonCursorStand(at);
-    if (!tagfs_get_state()->initialized || TagFSStandLetGo())
+        RibbonCursorStand(vol, at);
+    if (!vol->state.initialized || TagFSStandLetGo(vol))
         return true;
     kprintf("[TESTS] stand_ribbon: a caller is still inside the volume — waited out before it is let go of\n");
     while (rdtsc() < bound) {
         BoardroomAttendIfPending();
-        TagFSServiceIfPending();
+        TagFSServiceIfPending(vol);
         BatonPump(amp_get_core_index());
         cpu_pause();
-        if (!tagfs_get_state()->initialized && TagFSStandMountIdle())
+        if (!vol->state.initialized && TagFSStandMountIdle(vol))
             return true;
-        if (!tagfs_enter())
+        if (!tagfs_enter(vol))
             continue;
         if (at)
-            RibbonCursorStand(at);
-        if (TagFSStandLetGo())
+            RibbonCursorStand(vol, at);
+        if (TagFSStandLetGo(vol))
             return true;
     }
     return false;
@@ -130,27 +131,27 @@ bool StandRibbonLetGo(RibbonCursor* at)
  * boot before this one left carries stitches of its own past the Tally — its
  * halt's, at least — and every mount sews them on and counts them with the
  * test's, so what the test laid is the mount's count above this one. */
-static bool StandRibbonBaseline(void)
+static bool StandRibbonBaseline(TagFSVolume* vol)
 {
-    if (!TagFSStandLetGo() || !StandRibbonUp())
+    if (!TagFSStandLetGo(vol) || !StandRibbonUp(vol))
         return false;
-    MountBookStandSaid(&s_ribbon_before);
-    return TagFSStandLetGo();
+    MountBookStandSaid(vol, &s_ribbon_before);
+    return TagFSStandLetGo(vol);
 }
 
 /* Where the ribbon goes on past its last stitch — the writer's cursor, which
  * stands past every stitch the kernel itself sewed since the Tally — and two
  * free blocks of the data run. */
-static bool StandRibbonWhere(StandRibbon* w)
+static bool StandRibbonWhere(TagFSVolume* vol, StandRibbon* w)
 {
     RibbonCursor c;
     memset(w, 0, sizeof(*w));
-    RibbonCursorStand(&c);
-    if (!g_book.stood || !c.up || c.off % TAGFS_BLOCK_SECTORS || (c.came.blocks && c.off == 0))
+    RibbonCursorStand(vol, &c);
+    if (!vol->book.stood || !c.up || c.off % TAGFS_BLOCK_SECTORS || (c.came.blocks && c.off == 0))
         return false;
-    w->seat         = tagfs_get_seat();
-    w->base         = tagfs_get_volume_base();
-    memcpy(w->uuid, tagfs_get_state()->uuid, 16);
+    w->seat         = tagfs_get_seat(vol);
+    w->base         = tagfs_get_volume_base(vol);
+    memcpy(w->uuid, vol->state.uuid, 16);
     w->quire        = c.quire.block;
     w->quire_blocks = c.quire.blocks;
     w->next         = c.next.block;
@@ -160,11 +161,11 @@ static bool StandRibbonWhere(StandRibbon* w)
     w->seq          = c.last;
     w->clasp        = c.clasp;
     w->top          = c.given;
-    w->fid          = g_book.next_fid;
-    uint32_t windows = (uint32_t)((tagfs_get_state()->block_end + BLOCK_MAP_WINDOW_BLOCKS - 1u) /
+    w->fid          = vol->book.next_fid;
+    uint32_t windows = (uint32_t)((vol->state.block_end + BLOCK_MAP_WINDOW_BLOCKS - 1u) /
                                   BLOCK_MAP_WINDOW_BLOCKS);
     for (uint32_t i = 0; i < windows; i++)
-        if (BlockMapDerivedRunIn(i, 2, &w->free))
+        if (BlockMapDerivedRunIn(vol, i, 2, &w->free))
             return w->at >= w->quire && w->at + 4u <= w->quire + w->quire_blocks && w->next_blocks;
     return false;
 }
@@ -291,49 +292,49 @@ static bool StandRibbonZeroAtom(const StandRibbon* w, uint64_t vlba)
  * when a sector would not take its bytes back or the volume did not come up,
  * and false, nothing put back, when a caller is still inside it at the bound —
  * a cycle of its writer would sew past the zeros. */
-bool StandRibbonPutBack(StandRibbon* w)
+bool StandRibbonPutBack(TagFSVolume* vol, StandRibbon* w)
 {
-    bool down = StandRibbonLetGo(NULL), ok = down;
+    bool down = StandRibbonLetGo(vol, NULL), ok = down;
     memset(s_ribbon_sectors, 0, sizeof(s_ribbon_sectors));
     for (uint32_t i = 0; down && i < w->nlaid; i++)
         ok &= StandRibbonZeroAtom(w, w->laid[i]);
     if (down && w->data)
         ok &= BoardroomWrite(w->seat, w->base + w->free * TAGFS_BLOCK_SECTORS, 2u * TAGFS_BLOCK_SECTORS,
                              s_ribbon_kept, NULL) == 0;
-    tagfs_readahead_invalidate(w->free);
-    tagfs_readahead_invalidate(w->free + 1u);
+    tagfs_readahead_invalidate(vol, w->free);
+    tagfs_readahead_invalidate(vol, w->free + 1u);
     if (w->nlaid)
         kprintf("[TESTS] stand_ribbon: what the test laid is %s\n",
                 down ? "put back" : "NOT put back — a caller stayed inside the volume");
-    StandRibbonArrive();
-    TagFSStandHoldAgain();
-    return ok && tagfs_get_state()->initialized;
+    StandRibbonArrive(vol);
+    TagFSStandHoldAgain(vol);
+    return ok && vol->state.initialized;
 }
 
 /* Why a test written for a book's ribbon stands aside here, or NULL. */
-const char* StandRibbonAside(StandRibbon* w)
+const char* StandRibbonAside(TagFSVolume* vol, StandRibbon* w)
 {
-    const char* aside = StandStepsAsideFor();
+    const char* aside = StandStepsAsideFor(vol);
     if (aside)
         return aside;
     /* A change memory holds and no cycle settled is settled first: the test
      * lets the volume go writing nothing, and puts back what it laid past
      * where the ribbon stood (StandStitchAside says why). One that would not
      * settle is the test's failure, said here. */
-    error_t settled = InkedGen() != SettledGen() ? TagFSSettle() : OK;
+    error_t settled = InkedGen(vol) != SettledGen(vol) ? TagFSSettle(vol) : OK;
     if (settled != OK) {
         (void)TestFailedAt(__FILE__, __LINE__, "what memory holds settles before the ribbon is kept", settled, OK);
         return "what memory holds would not settle before the ribbon is kept";
     }
-    if (!StandRibbonWhere(w))
+    if (!StandRibbonWhere(vol, w))
         return "the ribbon has no Quire with room past its end on a block, a next_quire and two free blocks";
     return NULL;
 }
 
 /* Whether file `fid` is live, and its record when `out` is asked for. */
-bool StandRibbonLive(uint64_t fid, FileRecord** out)
+bool StandRibbonLive(TagFSVolume* vol, uint64_t fid, FileRecord** out)
 {
-    FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    FileRecord* rec = FileMapRecordHold(vol->state.files, fid, NULL);
     if (out)
         *out = rec;
     else if (rec)
@@ -348,22 +349,22 @@ bool StandRibbonLive(uint64_t fid, FileRecord** out)
 
 /* A read of `bytes` from `offset` of the file through a handle of its own,
  * into g_test_output. */
-static error_t StandRibbonReadAt(uint64_t fid, uint64_t offset, uint32_t bytes)
+static error_t StandRibbonReadAt(TagFSVolume* vol, uint64_t fid, uint64_t offset, uint32_t bytes)
 {
-    TagFSFileHandle* h = tagfs_open(fid, TAGFS_HANDLE_READ);
+    TagFSFileHandle* h = tagfs_open(vol, fid, TAGFS_HANDLE_READ);
     uint64_t         got = 0;
     if (!h)
         return ERR_FILE_NOT_FOUND;
     h->offset  = offset;
-    error_t rc = tagfs_read(h, g_test_output, bytes, &got);
-    tagfs_close(h);
+    error_t rc = tagfs_read(vol, h, g_test_output, bytes, &got);
+    tagfs_close(vol, h);
     return rc == OK && got != bytes ? ERR_IO : rc;
 }
 
 /* The port's read of the file's first `bytes`, answered. */
-static error_t StandRibbonPortRead(uint64_t fid, uint32_t bytes)
+static error_t StandRibbonPortRead(TagFSVolume* vol, uint64_t fid, uint32_t bytes)
 {
-    TagFSFileHandle* h = tagfs_open(fid, TAGFS_HANDLE_READ);
+    TagFSFileHandle* h = tagfs_open(vol, fid, TAGFS_HANDLE_READ);
     ReadJobAsk       ask;
     if (!h)
         return ERR_FILE_NOT_FOUND;
@@ -374,12 +375,12 @@ static error_t StandRibbonPortRead(uint64_t fid, uint32_t bytes)
     ask.sink.bytes  = bytes;
     ask.stand       = &s_ribbon_answer;
     if (ReadJobSubmit(h, &ask, NULL, NULL) != ERR_WOULD_BLOCK) {
-        tagfs_close(h);
+        tagfs_close(vol, h);
         return ERR_BUSY;
     }
     uint64_t bound = rdtsc() + cpu_ms_to_tsc(STAND_RIBBON_MOUNT_MS);
     while (!__atomic_load_n(&s_ribbon_answer.answered, __ATOMIC_ACQUIRE) && rdtsc() < bound) {
-        StandPortTurn(tagfs_get_seat());
+        StandPortTurn(vol, tagfs_get_seat(vol));
         cpu_pause();
     }
     return __atomic_load_n(&s_ribbon_answer.answered, __ATOMIC_ACQUIRE) ? s_ribbon_answer.rc : ERR_TIMEOUT;
@@ -399,23 +400,23 @@ static void StandRibbonSlipped(void)
 /* Each of the three roads gives the file's bytes, the Slips laid on the last
  * block; `rc` what each must answer — OK, or ERR_CHECKSUM for a block that
  * does not hold its digest. */
-static TestResult StandRibbonThreeRoads(uint64_t fid, error_t rc)
+static TestResult StandRibbonThreeRoads(TagFSVolume* vol, uint64_t fid, error_t rc)
 {
     TestResult verdict = TEST_PASS;
-    TEST_ASSERT_EQ(StandRibbonReadAt(fid, TAGFS_BLOCK_SIZE + 400u, 500), rc, "a read of the last block alone");
+    TEST_ASSERT_EQ(StandRibbonReadAt(vol, fid, TAGFS_BLOCK_SIZE + 400u, 500), rc, "a read of the last block alone");
     if (rc == OK)
         TEST_ASSERT(!memcmp(g_test_output, s_ribbon_want + TAGFS_BLOCK_SIZE + 400u, 500),
                     "gives its bytes, the Slips over them");
-    TEST_ASSERT_EQ(StandRibbonReadAt(fid, 0, STAND_RIBBON_SIZE), rc, "a read of the run through the window");
+    TEST_ASSERT_EQ(StandRibbonReadAt(vol, fid, 0, STAND_RIBBON_SIZE), rc, "a read of the run through the window");
     if (rc == OK)
         TEST_ASSERT(!memcmp(g_test_output, s_ribbon_want, STAND_RIBBON_SIZE), "gives every byte of the file");
-    if (!ReadJobSeatRunsAsync(tagfs_get_seat())) {
+    if (!ReadJobSeatRunsAsync(tagfs_get_seat(vol))) {
         if (rc == OK)
             kprintf("[TESTS] stand_ribbon_slip_three_roads: the port's road stands aside — the volume's seat "
-                    "(%s) takes no read nobody stands over\n", BoardroomSeatName(tagfs_get_seat()));
+                    "(%s) takes no read nobody stands over\n", BoardroomSeatName(tagfs_get_seat(vol)));
         goto out;
     }
-    TEST_ASSERT_EQ(StandRibbonPortRead(fid, STAND_RIBBON_SIZE), rc, "the port's read");
+    TEST_ASSERT_EQ(StandRibbonPortRead(vol, fid, STAND_RIBBON_SIZE), rc, "the port's read");
     if (rc == OK)
         TEST_ASSERT(!memcmp(g_test_output, s_ribbon_want, STAND_RIBBON_SIZE), "gives every byte of the file");
 out:
@@ -424,6 +425,7 @@ out:
 
 static TestResult TestStandRibbonSlipThreeRoads(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     StandRibbon        w;
     StandRibbonRecords *r1 = StandRibbonFresh(0), *r2 = StandRibbonFresh(1);
@@ -431,7 +433,7 @@ static TestResult TestStandRibbonSlipThreeRoads(void)
     FileRecord*        rec = NULL;
     uint64_t           digests[2], digest = 0;
     uint8_t            body[64], tail[100];
-    const char*        aside = StandRibbonAside(&w);
+    const char*        aside = StandRibbonAside(vol, &w);
     uint8_t*           was = g_test_buffer;
 
     if (aside)
@@ -442,23 +444,23 @@ static TestResult TestStandRibbonSlipThreeRoads(void)
     RibbonShaped sh = { .fid = w.fid, .base = 1, .size = STAND_RIBBON_SIZE, .mtime_ns = 2,
                         .slip = { .off = 700, .len = 100, .bytes = tail } };
     StandRibbonPut(r2, RIBBON_SHAPED, body, RibbonShapedBodyPut(body, &sh));
-    TEST_ASSERT(StandRibbonBaseline(), "the volume, mounted on its ribbon as it stands and counted, is let go of");
+    TEST_ASSERT(StandRibbonBaseline(vol), "the volume, mounted on its ribbon as it stands and counted, is let go of");
     StitchHead h1 = StandRibbonHead(&w, w.top + 1u, w.seq, w.clasp);
     uint32_t   c1 = StandRibbonSew(&w, w.at, w.top + 1u, &h1, r1, VOLUME_BLOCK_SECTORS);
     StitchHead h2 = StandRibbonHead(&w, w.top + 2u, w.top + 1u, c1);
     TEST_ASSERT(c1 && StandRibbonSew(&w, w.at + 1u, w.top + 2u, &h2, r2, VOLUME_BLOCK_SECTORS),
                 "a Born of two fresh blocks and a Slip, then a Shaped laying a second Slip, are sewn");
-    TEST_ASSERT(StandRibbonUp(), "the volume mounts on them");
-    MountBookStandSaid(&said);
+    TEST_ASSERT(StandRibbonUp(vol), "the volume mounts on them");
+    MountBookStandSaid(vol, &said);
     TEST_ASSERT(said.sewn == s_ribbon_before.sewn + 2u && said.applied == s_ribbon_before.applied + 2u &&
                 said.last == w.top + 2u, "both stitches sewn on and applied");
-    TEST_ASSERT(StandRibbonLive(w.fid, &rec), "the file is born");
+    TEST_ASSERT(StandRibbonLive(vol, w.fid, &rec), "the file is born");
     bool slipped = rec->slip != NULL && rec->size == STAND_RIBBON_SIZE;
     FileRecordRelease(rec);
     TEST_ASSERT(slipped, "its last block carries the Slips");
-    TEST_ASSERT(GlossFind(w.free, &digest) && digest == digests[0], "its fresh block is held to its record's digest");
+    TEST_ASSERT(GlossFind(vol, w.free, &digest) && digest == digests[0], "its fresh block is held to its record's digest");
     StandRibbonSlipped();
-    verdict = StandRibbonThreeRoads(w.fid, OK);
+    verdict = StandRibbonThreeRoads(vol, w.fid, OK);
     if (verdict != TEST_PASS)
         goto out;
     TEST_ASSERT(BoardroomRead(w.seat, w.base + (w.free + 1u) * TAGFS_BLOCK_SECTORS, 1, was) == 0,
@@ -466,10 +468,10 @@ static TestResult TestStandRibbonSlipThreeRoads(void)
     was[17] ^= 0xA5;
     TEST_ASSERT(BoardroomWrite(w.seat, w.base + (w.free + 1u) * TAGFS_BLOCK_SECTORS, 1, was, NULL) == 0,
                 "and a byte of it outside the Slips rots");
-    tagfs_readahead_invalidate(w.free + 1u);
-    verdict = StandRibbonThreeRoads(w.fid, ERR_CHECKSUM);
+    tagfs_readahead_invalidate(vol, w.free + 1u);
+    verdict = StandRibbonThreeRoads(vol, w.fid, ERR_CHECKSUM);
 out:
-    if (!StandRibbonPutBack(&w))
+    if (!StandRibbonPutBack(vol, &w))
         verdict = TestFailedAt(__FILE__, __LINE__, "what the test laid would not be put back (laid, 0)",
                                w.nlaid, 0);
     return verdict;
@@ -491,38 +493,39 @@ void StandRibbonEmpty(StandRibbonRecords* r, uint64_t fid)
  * its id again. The mount writes nothing on the way (C12). */
 static TestResult TestStandRibbonTornTail(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     StandRibbon        w;
     StandRibbonRecords *r1 = StandRibbonFresh(0), *r2 = StandRibbonFresh(1);
     MountBookSaid      said;
-    const char*        aside = StandRibbonAside(&w);
+    const char*        aside = StandRibbonAside(vol, &w);
 
     if (aside)
         return test_steps_aside(aside);
     StandRibbonEmpty(r1, w.fid);
     StandRibbonEmpty(r2, w.fid + 1u);
-    TEST_ASSERT(StandRibbonBaseline(), "the volume, mounted on its ribbon as it stands and counted, is let go of");
+    TEST_ASSERT(StandRibbonBaseline(vol), "the volume, mounted on its ribbon as it stands and counted, is let go of");
     StitchHead h1 = StandRibbonHead(&w, w.top + 1u, w.seq, w.clasp);
     uint32_t   c1 = StandRibbonSew(&w, w.at, w.top + 1u, &h1, r1, VOLUME_BLOCK_SECTORS);
     StitchHead h2 = StandRibbonHead(&w, w.top + 2u, w.top + 1u, c1);
     TEST_ASSERT(c1 && StandRibbonSew(&w, w.at + 1u, w.top + 2u, &h2, r2, 4),
                 "a stitch, and the next torn to its first four sectors, are laid");
     BlockFailArm(w.seat, BLOCK_FAIL_WRITE, 0, 0, BLOCK_FAIL_NEVER);
-    StandRibbonArrive();
-    TagFSStandHoldAgain();
+    StandRibbonArrive(vol);
+    TagFSStandHoldAgain(vol);
     TEST_ASSERT_EQ(BlockFailSeen(), 0, "and the mount on them wrote nothing");
     BlockFailDisarm();
-    TEST_ASSERT(tagfs_get_state()->initialized, "the volume mounts");
-    MountBookStandSaid(&said);
+    TEST_ASSERT(vol->state.initialized, "the volume mounts");
+    MountBookStandSaid(vol, &said);
     TEST_ASSERT(said.sewn == s_ribbon_before.sewn + 1u && said.applied == s_ribbon_before.applied + 1u &&
                 said.last == w.top + 1u, "the ribbon ends on the first");
     TEST_ASSERT_EQ(said.ribbon[RIBBON_CODE_RIBBON_TORN], s_ribbon_before.ribbon[RIBBON_CODE_RIBBON_TORN] + 1u,
                    "the torn tail is said");
-    TEST_ASSERT(StandRibbonLive(w.fid, NULL) && !StandRibbonLive(w.fid + 1u, NULL), "one file born, not two");
-    TEST_ASSERT(g_book.next_fid >= w.fid + 2u, "and the torn one's id is not given again");
+    TEST_ASSERT(StandRibbonLive(vol, w.fid, NULL) && !StandRibbonLive(vol, w.fid + 1u, NULL), "one file born, not two");
+    TEST_ASSERT(vol->book.next_fid >= w.fid + 2u, "and the torn one's id is not given again");
 out:
     BlockFailDisarm();
-    if (!StandRibbonPutBack(&w))
+    if (!StandRibbonPutBack(vol, &w))
         verdict = TestFailedAt(__FILE__, __LINE__, "what the test laid would not be put back (laid, 0)",
                                w.nlaid, 0);
     return verdict;
@@ -534,17 +537,18 @@ out:
  * retry, M-6). */
 static TestResult TestStandRibbonNextQuire(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     StandRibbon        w;
     StandRibbonRecords *r1 = StandRibbonFresh(0), *r2 = StandRibbonFresh(1);
     MountBookSaid      said;
-    const char*        aside = StandRibbonAside(&w);
+    const char*        aside = StandRibbonAside(vol, &w);
 
     if (aside)
         return test_steps_aside(aside);
     StandRibbonEmpty(r1, w.fid);
     StandRibbonEmpty(r2, w.fid + 1u);
-    TEST_ASSERT(StandRibbonBaseline(), "the volume, mounted on its ribbon as it stands and counted, is let go of");
+    TEST_ASSERT(StandRibbonBaseline(vol), "the volume, mounted on its ribbon as it stands and counted, is let go of");
     StitchHead h1 = StandRibbonHead(&w, w.top + 1u, w.seq, w.clasp);
     uint32_t   c1 = StandRibbonSew(&w, w.at, w.top + 1u, &h1, r1, VOLUME_BLOCK_SECTORS);
     StitchHead h2 = StandRibbonHead(&w, w.top + 3u, w.top + 1u, c1);
@@ -552,13 +556,13 @@ static TestResult TestStandRibbonNextQuire(void)
     h2.from_blocks = w.quire_blocks;
     TEST_ASSERT(c1 && StandRibbonSew(&w, w.next, w.top + 3u, &h2, r2, VOLUME_BLOCK_SECTORS),
                 "a stitch, and one at the start of the next_quire naming it, are laid");
-    TEST_ASSERT(StandRibbonUp(), "the volume mounts on them");
-    MountBookStandSaid(&said);
+    TEST_ASSERT(StandRibbonUp(vol), "the volume mounts on them");
+    MountBookStandSaid(vol, &said);
     TEST_ASSERT(said.sewn == s_ribbon_before.sewn + 2u && said.applied == s_ribbon_before.applied + 2u &&
                 said.last == w.top + 3u, "both are sewn on, the second in the next Quire");
-    TEST_ASSERT(StandRibbonLive(w.fid, NULL) && StandRibbonLive(w.fid + 1u, NULL), "both files are born");
+    TEST_ASSERT(StandRibbonLive(vol, w.fid, NULL) && StandRibbonLive(vol, w.fid + 1u, NULL), "both files are born");
 out:
-    if (!StandRibbonPutBack(&w))
+    if (!StandRibbonPutBack(vol, &w))
         verdict = TestFailedAt(__FILE__, __LINE__, "what the test laid would not be put back (laid, 0)",
                                w.nlaid, 0);
     return verdict;
@@ -569,13 +573,14 @@ out:
  * replayed, the record the rotten sector cut is lost, said with its bytes. */
 static TestResult TestStandRibbonClosedDamaged(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     StandRibbon        w;
     StandRibbonRecords *r1 = StandRibbonFresh(0), *r2 = StandRibbonFresh(1), *r3 = StandRibbonFresh(2);
     MountBookSaid      said;
     uint8_t*           text = s_ribbon_body;
     uint8_t*           rot  = g_test_buffer;
-    const char*        aside = StandRibbonAside(&w);
+    const char*        aside = StandRibbonAside(vol, &w);
 
     if (aside)
         return test_steps_aside(aside);
@@ -584,7 +589,7 @@ static TestResult TestStandRibbonClosedDamaged(void)
     StandRibbonPut(r2, RIBBON_USE_CONTEXT, g_test_output, TallyUsePut(g_test_output, text, 1000));
     StandRibbonEmpty(r2, w.fid + 1u);
     StandRibbonEmpty(r3, w.fid + 2u);
-    TEST_ASSERT(StandRibbonBaseline(), "the volume, mounted on its ribbon as it stands and counted, is let go of");
+    TEST_ASSERT(StandRibbonBaseline(vol), "the volume, mounted on its ribbon as it stands and counted, is let go of");
     StitchHead h1 = StandRibbonHead(&w, w.top + 1u, w.seq, w.clasp);
     uint32_t   c1 = StandRibbonSew(&w, w.at, w.top + 1u, &h1, r1, VOLUME_BLOCK_SECTORS);
     StitchHead h2 = StandRibbonHead(&w, w.top + 2u, w.top + 1u, c1);
@@ -596,16 +601,16 @@ static TestResult TestStandRibbonClosedDamaged(void)
     TEST_ASSERT(BoardroomRead(w.seat, w.base + vlba, 1, rot) == 0, "the second's sector 1 is read");
     rot[300] ^= 0x5A;
     TEST_ASSERT(BoardroomWrite(w.seat, w.base + vlba, 1, rot, NULL) == 0, "and rots");
-    TEST_ASSERT(StandRibbonUp(), "the volume mounts on them");
-    MountBookStandSaid(&said);
+    TEST_ASSERT(StandRibbonUp(vol), "the volume mounts on them");
+    MountBookStandSaid(vol, &said);
     TEST_ASSERT(said.sewn == s_ribbon_before.sewn + 3u && said.applied == s_ribbon_before.applied + 3u &&
                 said.last == w.top + 3u, "all three are sewn on");
     TEST_ASSERT_EQ(said.ribbon[RIBBON_CODE_STITCH_TORN], s_ribbon_before.ribbon[RIBBON_CODE_STITCH_TORN] + 1u,
                    "the second said closed and damaged");
-    TEST_ASSERT(StandRibbonLive(w.fid + 1u, NULL), "the Born after the rotten sector, read by its lead, stands");
-    TEST_ASSERT(StandRibbonLive(w.fid, NULL) && StandRibbonLive(w.fid + 2u, NULL), "and the files around it");
+    TEST_ASSERT(StandRibbonLive(vol, w.fid + 1u, NULL), "the Born after the rotten sector, read by its lead, stands");
+    TEST_ASSERT(StandRibbonLive(vol, w.fid, NULL) && StandRibbonLive(vol, w.fid + 2u, NULL), "and the files around it");
 out:
-    if (!StandRibbonPutBack(&w))
+    if (!StandRibbonPutBack(vol, &w))
         verdict = TestFailedAt(__FILE__, __LINE__, "what the test laid would not be put back (laid, 0)",
                                w.nlaid, 0);
     return verdict;
@@ -616,32 +621,33 @@ out:
  * reads (H-2), said, and no lie. */
 static TestResult TestStandRibbonDeadBranch(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     StandRibbon        w;
     StandRibbonRecords *r1 = StandRibbonFresh(0), *r2 = StandRibbonFresh(1);
     MountBookSaid      said;
-    const char*        aside = StandRibbonAside(&w);
+    const char*        aside = StandRibbonAside(vol, &w);
 
     if (aside)
         return test_steps_aside(aside);
     StandRibbonEmpty(r1, w.fid);
     StandRibbonEmpty(r2, w.fid + 1u);
-    TEST_ASSERT(StandRibbonBaseline(), "the volume, mounted on its ribbon as it stands and counted, is let go of");
+    TEST_ASSERT(StandRibbonBaseline(vol), "the volume, mounted on its ribbon as it stands and counted, is let go of");
     StitchHead h1 = StandRibbonHead(&w, w.top + 1u, w.seq, w.clasp);
     uint32_t   c1 = StandRibbonSew(&w, w.at, w.top + 1u, &h1, r1, VOLUME_BLOCK_SECTORS);
     StitchHead h2 = StandRibbonHead(&w, w.top + 2u, w.top + 1u, c1 ^ 0xDEADBEEFu);
     TEST_ASSERT(c1 && StandRibbonSew(&w, w.at + 1u, w.top + 2u, &h2, r2, VOLUME_BLOCK_SECTORS),
                 "a stitch, and one naming it by a Clasp not its own, are laid");
-    TEST_ASSERT(StandRibbonUp(), "the volume mounts on them");
-    MountBookStandSaid(&said);
+    TEST_ASSERT(StandRibbonUp(vol), "the volume mounts on them");
+    MountBookStandSaid(vol, &said);
     TEST_ASSERT(said.sewn == s_ribbon_before.sewn + 1u && said.last == w.top + 1u, "the ribbon ends on the first");
     TEST_ASSERT_EQ(said.ribbon[RIBBON_CODE_CLASP_STRANGER], s_ribbon_before.ribbon[RIBBON_CODE_CLASP_STRANGER] + 1u,
                    "the second said a branch of another history");
     TEST_ASSERT(said.lied == s_ribbon_before.lied, "and no lie said of the medium the ribbon before it did not say");
-    TEST_ASSERT(!StandRibbonLive(w.fid + 1u, NULL), "its file is not born");
-    TEST_ASSERT(g_book.next_fid >= w.fid + 2u, "and its id is not given again");
+    TEST_ASSERT(!StandRibbonLive(vol, w.fid + 1u, NULL), "its file is not born");
+    TEST_ASSERT(vol->book.next_fid >= w.fid + 2u, "and its id is not given again");
 out:
-    if (!StandRibbonPutBack(&w))
+    if (!StandRibbonPutBack(vol, &w))
         verdict = TestFailedAt(__FILE__, __LINE__, "what the test laid would not be put back (laid, 0)",
                                w.nlaid, 0);
     return verdict;
@@ -652,6 +658,7 @@ out:
  * record put in lies fallow (§2.8, M-1), neither the file's nor free. */
 static TestResult TestStandRibbonUndone(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     StandRibbon        w;
     StandRibbonRecords *r1 = StandRibbonFresh(0), *r2 = StandRibbonFresh(1);
@@ -659,7 +666,7 @@ static TestResult TestStandRibbonUndone(void)
     uint64_t           digests[2];
     uint8_t            body[32];
     uint64_t           fid;
-    const char*        aside = StandRibbonAside(&w);
+    const char*        aside = StandRibbonAside(vol, &w);
 
     if (aside)
         return test_steps_aside(aside);
@@ -668,23 +675,23 @@ static TestResult TestStandRibbonUndone(void)
     StandRibbonEmpty(r1, w.fid + 1u);
     fid = w.fid;
     StandRibbonPut(r2, RIBBON_UNDONE, body, RibbonUndoneBodyPut(body, 1, UNDONE_NOT_LANDED, &fid, 1));
-    TEST_ASSERT(StandRibbonBaseline(), "the volume, mounted on its ribbon as it stands and counted, is let go of");
+    TEST_ASSERT(StandRibbonBaseline(vol), "the volume, mounted on its ribbon as it stands and counted, is let go of");
     StitchHead h1 = StandRibbonHead(&w, w.top + 1u, w.seq, w.clasp);
     uint32_t   c1 = StandRibbonSew(&w, w.at, w.top + 1u, &h1, r1, VOLUME_BLOCK_SECTORS);
     StitchHead h2 = StandRibbonHead(&w, w.top + 2u, w.top + 1u, c1);
     TEST_ASSERT(c1 && StandRibbonSew(&w, w.at + 1u, w.top + 2u, &h2, r2, VOLUME_BLOCK_SECTORS),
                 "two Borns, and an Undone of the first, are laid");
-    TEST_ASSERT(StandRibbonUp(), "the volume mounts on them");
-    MountBookStandSaid(&said);
+    TEST_ASSERT(StandRibbonUp(vol), "the volume mounts on them");
+    MountBookStandSaid(vol, &said);
     TEST_ASSERT(said.sewn == s_ribbon_before.sewn + 2u && said.applied == s_ribbon_before.applied + 2u,
                 "both stitches sewn on and applied");
     TEST_ASSERT_EQ(said.ribbon[RIBBON_CODE_UNDONE], s_ribbon_before.ribbon[RIBBON_CODE_UNDONE] + 1u, "the Undone said");
-    TEST_ASSERT(!StandRibbonLive(w.fid, NULL) && StandRibbonLive(w.fid + 1u, NULL),
+    TEST_ASSERT(!StandRibbonLive(vol, w.fid, NULL) && StandRibbonLive(vol, w.fid + 1u, NULL),
                 "the file it names is not born, the other is");
     TEST_ASSERT_EQ(said.fallow, s_ribbon_before.fallow + 1u, "and the block the undone record put in lies fallow");
-    TEST_ASSERT(!BlockMapDerivedIsFree(w.free), "neither a file's nor free");
+    TEST_ASSERT(!BlockMapDerivedIsFree(vol, w.free), "neither a file's nor free");
 out:
-    if (!StandRibbonPutBack(&w))
+    if (!StandRibbonPutBack(vol, &w))
         verdict = TestFailedAt(__FILE__, __LINE__, "what the test laid would not be put back (laid, 0)",
                                w.nlaid, 0);
     return verdict;
@@ -697,17 +704,18 @@ out:
  * written past it: the mount takes the book to read only at once. */
 static TestResult TestStandRibbonBootSlip(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult          verdict = TEST_PASS;
     StandRibbon         w;
     StandRibbonRecords* r    = StandRibbonFresh(0);
     FileRecord*         rec  = NULL;
-    uint64_t            boot = g_book.boot_fid, gen = 0, size = 0, mtime = 0;
+    uint64_t            boot = vol->book.boot_fid, gen = 0, size = 0, mtime = 0;
     uint8_t             body[96], tail[16];
-    const char*         aside = StandRibbonAside(&w);
+    const char*         aside = StandRibbonAside(vol, &w);
 
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(!TagFSIsUnderGlass() && boot && StandRibbonLive(boot, &rec),
+    TEST_ASSERT(!TagFSIsUnderGlass(vol) && boot && StandRibbonLive(vol, boot, &rec),
                 "the book is written on, and names the file the loader reads the kernel by");
     gen   = rec->gen;
     size  = rec->size;
@@ -716,24 +724,24 @@ static TestResult TestStandRibbonBootSlip(void)
     TEST_ASSERT(size > 0, "a file of bytes");
     uint64_t last = (size - 1u) / TAGFS_BLOCK_SIZE * TAGFS_BLOCK_SIZE;
     uint32_t n    = size - last < sizeof(tail) ? (uint32_t)(size - last) : (uint32_t)sizeof(tail);
-    TEST_ASSERT_OK(StandRibbonReadAt(boot, last, n), "the first bytes of its last block are read");
+    TEST_ASSERT_OK(StandRibbonReadAt(vol, boot, last, n), "the first bytes of its last block are read");
     memcpy(tail, g_test_output, n);
     RibbonShaped sh = { .fid = boot, .base = w.top + 1u - gen, .size = size, .mtime_ns = mtime,
                         .slip = { .off = 0, .len = n, .bytes = tail } };
     StandRibbonPut(r, RIBBON_SHAPED, body, RibbonShapedBodyPut(body, &sh));
-    TEST_ASSERT(StandRibbonBaseline(), "the volume, mounted on its ribbon as it stands and counted, is let go of");
+    TEST_ASSERT(StandRibbonBaseline(vol), "the volume, mounted on its ribbon as it stands and counted, is let go of");
     StitchHead h = StandRibbonHead(&w, w.top + 1u, w.seq, w.clasp);
     TEST_ASSERT(StandRibbonSew(&w, w.at, w.top + 1u, &h, r, VOLUME_BLOCK_SECTORS),
                 "a Shaped of it laying a Slip of those bytes on its last block is sewn");
-    TEST_ASSERT(StandRibbonUp(), "the volume mounts on it");
-    TEST_ASSERT(StandRibbonLive(boot, &rec), "the file stands");
+    TEST_ASSERT(StandRibbonUp(vol), "the volume mounts on it");
+    TEST_ASSERT(StandRibbonLive(vol, boot, &rec), "the file stands");
     bool slipped = rec->slip != NULL && rec->size == size;
     FileRecordRelease(rec);
     TEST_ASSERT(slipped, "its last block carries the Slip");
-    TEST_ASSERT(TagFSIsUnderGlass(), "and the book may only be read, from the mount on: no Tally is written past "
+    TEST_ASSERT(TagFSIsUnderGlass(vol), "and the book may only be read, from the mount on: no Tally is written past "
                 "a tail no call lays");
 out:
-    if (!StandRibbonPutBack(&w))
+    if (!StandRibbonPutBack(vol, &w))
         verdict = TestFailedAt(__FILE__, __LINE__, "what the test laid would not be put back (laid, 0)",
                                w.nlaid, 0);
     return verdict;
@@ -747,19 +755,20 @@ out:
  * cycle the ribbon names a next_quire and the change is taken. */
 static TestResult TestStandRibbonMountNextRefused(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     StandRibbon        w;
     StandRibbonRecords *r1 = StandRibbonFresh(0), *r2 = StandRibbonFresh(1);
     RibbonCursor       c;
     uint64_t           fid   = 0;
     bool               armed = false;
-    const char*        aside = StandRibbonAside(&w);
+    const char*        aside = StandRibbonAside(vol, &w);
 
     if (aside)
         return test_steps_aside(aside);
     StandRibbonEmpty(r1, w.fid);
     StandRibbonEmpty(r2, w.fid + 1u);
-    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of");
+    TEST_ASSERT(TagFSStandLetGo(vol), "the volume is let go of");
     StitchHead h1 = StandRibbonHead(&w, w.top + 1u, w.seq, w.clasp);
     uint32_t   c1 = StandRibbonSew(&w, w.at, w.top + 1u, &h1, r1, VOLUME_BLOCK_SECTORS);
     StitchHead h2 = StandRibbonHead(&w, w.top + 2u, w.top + 1u, c1);
@@ -771,24 +780,24 @@ static TestResult TestStandRibbonMountNextRefused(void)
                 "a stitch, and one at the start of the next_quire it names naming none past it, are laid");
     RibbonStandNextRefused(true);
     armed = true;
-    TEST_ASSERT(StandRibbonUp() && !TagFSIsUnderGlass(), "the volume mounts on them, written on");
+    TEST_ASSERT(StandRibbonUp(vol) && !TagFSIsUnderGlass(vol), "the volume mounts on them, written on");
     armed = RibbonStandNextRefused(false);
     TEST_ASSERT(!armed, "the mount asked the map for a next_quire, and the map refused it");
-    RibbonCursorStand(&c);
+    RibbonCursorStand(vol, &c);
     TEST_ASSERT(c.up && c.quire.block == w.next && !c.next.blocks,
                 "the ribbon stands in the Quire it went on into, with no next_quire past it");
-    TEST_ASSERT_EQ(tagfs_create_file("mount-next", NULL, 0, 0, &fid), -(int)ERR_WOULD_BLOCK,
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "mount-next", NULL, 0, 0, &fid), -(int)ERR_WOULD_BLOCK,
                    "a file asked for waits for a cycle: the room is still to grow, not refused for good");
     TEST_ASSERT(w.nlaid < STAND_RIBBON_LAID, "room to put back the stitch the cycle lays");
     w.laid[w.nlaid++] = (c.quire.block + c.off / TAGFS_BLOCK_SECTORS) * TAGFS_BLOCK_SECTORS;
-    TEST_ASSERT_OK(TagFSSettle(), "the cycle it waits for runs");
-    RibbonCursorStand(&c);
+    TEST_ASSERT_OK(TagFSSettle(vol), "the cycle it waits for runs");
+    RibbonCursorStand(vol, &c);
     TEST_ASSERT(c.next.blocks != 0, "and asks the map again: the ribbon names a next_quire");
-    TEST_ASSERT_EQ(tagfs_create_file("mount-next", NULL, 0, 0, &fid), 0, "the file asked for again is made");
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "mount-next", NULL, 0, 0, &fid), 0, "the file asked for again is made");
 out:
     if (armed)
         (void)RibbonStandNextRefused(false);
-    if (!StandRibbonPutBack(&w))
+    if (!StandRibbonPutBack(vol, &w))
         verdict = TestFailedAt(__FILE__, __LINE__, "what the test laid would not be put back (laid, 0)",
                                w.nlaid, 0);
     return verdict;

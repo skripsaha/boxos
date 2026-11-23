@@ -62,10 +62,10 @@ static error_t LeafFids(BinderRun* r, const TallyPlace* p, bool first)
  * is in the state, and one born past it is laid past it (BinderKeptCovers).
  * A rotten inner node's leaves are none of the sift's, so only the last one,
  * past every leaf, has a file past it to slice. */
-error_t BinderSiftTaken(BinderRun* r, const BinderSift* s)
+error_t BinderSiftTaken(TagFSVolume* vol, BinderRun* r, const BinderSift* s)
 {
     uint32_t             nf = 0;
-    const FoliationNode* fl = s->tree == TALLY_DIGESTS ? NULL : FoliationLeaves(s->tree, &nf);
+    const FoliationNode* fl = s->tree == TALLY_DIGESTS ? NULL : FoliationLeaves(vol, s->tree, &nf);
     error_t              rc = OK;
     if (s->n == 0 && s->ninner == 0)
         return s->tree == TALLY_FILES ? FidsPut(r, 0, UINT64_MAX) : OK;
@@ -92,13 +92,13 @@ error_t BinderSiftTaken(BinderRun* r, const BinderSift* s)
 
 /* The Tally written whole: every file, and only the nodes no copy of which
  * reads named as they lie. */
-static error_t WholeTaken(BinderRun* r)
+static error_t WholeTaken(TagFSVolume* vol, BinderRun* r)
 {
     r->w.tip = false;
     r->nkept = 0;
     r->nfids = 0;
     BinderDigestsLetGo(r);
-    error_t rc = BinderRotsTaken(r);
+    error_t rc = BinderRotsTaken(vol, r);
     return rc == OK ? FidsPut(r, s_every.from, s_every.to) : rc;
 }
 
@@ -113,27 +113,27 @@ static error_t WholeTaken(BinderRun* r)
  * DIGESTS is sifted here and held: the leaves it lays are read a turn each
  * before it is known which of them read (binder_digests.c).
  */
-error_t BinderTipInTake(BinderRun* r)
+error_t BinderTipInTake(TagFSVolume* vol, BinderRun* r)
 {
     static const uint64_t trees[] = { TALLY_FILES, TALLY_TAGS, TALLY_USE, TALLY_DIGESTS };
     TipInCount count = { 0, 0, 0 };
     error_t    rc    = OK;
-    if (FoliationLost() || DogEarTakenLost() || EscheatTaken())
-        return WholeTaken(r);
+    if (FoliationLost(vol) || DogEarTakenLost(vol) || EscheatTaken(vol))
+        return WholeTaken(vol, r);
     r->w.tip = true;
     for (uint32_t i = 0; rc == OK && i < sizeof(trees) / sizeof(trees[0]); i++) {
         BinderSift  one;
         BinderSift* s = trees[i] == TALLY_DIGESTS ? &r->digests : &one;
-        rc = BinderSiftTree(s, trees[i]);
+        rc = BinderSiftTree(vol, s, trees[i]);
         if (rc == OK)
-            BinderSiftCount(s, r->w.grid, &count);
+            BinderSiftCount(vol, s, r->w.grid, &count);
         if (rc == OK && s == &one)
-            rc = BinderSiftTaken(r, s);
+            rc = BinderSiftTaken(vol, r, s);
         if (s == &one)
             BinderSiftLetGo(s);
     }
     if (rc == OK && count.sifted && count.tip >= count.whole)
-        return WholeTaken(r);
+        return WholeTaken(vol, r);
 #if BINDER_CHECKS
     /* The self-check holds every element of the state to the Tally before:
      * its slice is every file (binder_check.c). */
@@ -243,7 +243,7 @@ static const BinderKept* KeptOver(const BinderWork* w, uint64_t tree, const Foli
  * lays are counted; a rotten node, whose leaves nobody knows, leaves its tree
  * to the measure from above.
  */
-void BinderKeptLaid(BinderWork* w)
+void BinderKeptLaid(TagFSVolume* vol, BinderWork* w)
 {
     static const uint64_t trees[] = { TALLY_FILES, TALLY_TAGS };
     for (uint32_t i = 0; i < w->nkept; i++)
@@ -256,7 +256,7 @@ void BinderKeptLaid(BinderWork* w)
             begin++;
         for (end = begin; end < w->nkept && w->kept[end].tree == trees[t];)
             end++;
-        const FoliationNode* leaf = begin < end ? FoliationLeaves(trees[t], &n) : NULL;
+        const FoliationNode* leaf = begin < end ? FoliationLeaves(vol, trees[t], &n) : NULL;
         for (uint32_t i = 0, j = begin; i < n; i++) {
             const BinderKept* k = KeptOver(w, trees[t], &leaf[i], &j, end);
             if (k && !k->taken && !k->rotten && TipInWithin(trees[t], &leaf[i].place, &k->at))
@@ -264,7 +264,7 @@ void BinderKeptLaid(BinderWork* w)
         }
     }
     if (w->tip)
-        BinderDigestsKeptLaid(w);
+        BinderDigestsKeptLaid(vol, w);
 }
 
 const BinderKept* BinderKeptRoot(const BinderWork* w)

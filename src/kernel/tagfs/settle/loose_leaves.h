@@ -20,14 +20,20 @@
  * any core.
  */
 
-uint64_t LooseLeaves(void);
+uint64_t LooseLeaves(TagFSVolume* vol);
 
 /* The mount's count: the files its replay leaves with Slips over their last
  * block. */
-void     LooseLeavesMounted(uint64_t n);
+void     LooseLeavesMounted(TagFSVolume* vol, uint64_t n);
 
 /* A stitch settled, carrying the Jots of `t`: each file it names now stands as
  * its Jot's `now`, no more as its `was`. With no lock held. */
-void     LooseLeavesSettled(const DocketTaken* t);
+void     LooseLeavesSettled(TagFSVolume* vol, const DocketTaken* t);
+
+/* What one volume holds of loose_leaves.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    /* LooseLeaves (loose_leaves.h): one count, its writers one at a time. */
+    volatile uint64_t loose;
+} LooseLeavesState;
 
 #endif /* TAGFS_LOOSE_LEAVES_H */

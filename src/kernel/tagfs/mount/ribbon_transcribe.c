@@ -7,6 +7,7 @@
 #include "../tag_registry/tag_registry.h"
 #include "../settle/dog_ear.h"
 #include "../settle/loose_leaves.h"
+#include "tagfs_volume.h"
 
 /*
  * RibbonTranscribe — pass 2 of the ribbon: every stitch pass 1 sewed on, in
@@ -198,17 +199,17 @@ static bool RibbonSeqSewn(const RibbonWalk* w, uint64_t seq)
 /* A stitch the replay does not apply, for `why`: the volume under glass — or,
  * of an older slot's ribbon (Facsimile), the slot does not stand in for the
  * range, the first such stitch kept in the mount's words for its line. */
-static void RibbonNotApplied(RibbonReplay* rp, const char* why)
+static void RibbonNotApplied(TagFSVolume* vol, RibbonReplay* rp, const char* why)
 {
     if (!rp->only)
-        TagFSUnderGlass(why);
+        TagFSUnderGlass(vol, why);
     else if (!rp->passed++)
         ksnprintf(rp->passed_why, sizeof(rp->passed_why), "%s", why);
 }
 
 /* One Undone of stitch `u`, the `i`-th record: its fids passed over in the
  * stitch it names, said — or the stitch not applied for it. */
-static error_t RibbonUndoneOne(RibbonReplay* rp, const RibbonUnit* u, uint32_t i)
+static error_t RibbonUndoneOne(TagFSVolume* vol, RibbonReplay* rp, const RibbonUnit* u, uint32_t i)
 {
     RibbonWalk*         w = rp->w;
     const RibbonRecord* r = &u->records[i];
@@ -218,7 +219,7 @@ static error_t RibbonUndoneOne(RibbonReplay* rp, const RibbonUnit* u, uint32_t i
     uint64_t            id = 0;
     if (RibbonUndoneGet(u->stream + r->body, r->len, &d, &used) == TALLY_BODY_BROKEN) {
         ksnprintf(why, sizeof(why), "stitch %llu carries an Undone that does not read", (unsigned long long)u->seq);
-        RibbonNotApplied(rp, why);
+        RibbonNotApplied(vol, rp, why);
         return RibbonListAdd(&rp->refused, &rp->nrefused, &rp->caprefused, u->seq) ? OK : ERR_NO_MEMORY;
     }
     bool after = false;
@@ -245,12 +246,12 @@ static error_t RibbonUndoneOne(RibbonReplay* rp, const RibbonUnit* u, uint32_t i
         }
         if (!d.nfid)
             ksnprintf(fids, sizeof(fids), "none");
-        RibbonSay(w, RIBBON_CODE_UNDONE, "stitch %llu's Undone passes over stitch %llu's records of fid(s) %s — %s "
+        RibbonSay(vol, w, RIBBON_CODE_UNDONE, "stitch %llu's Undone passes over stitch %llu's records of fid(s) %s — %s "
                   "(§2.8)", (unsigned long long)u->seq, (unsigned long long)(u->seq - d.seq_back), fids,
                   RibbonUndoneWhy(d.why, said, sizeof(said)));
         return OK;
     }
-    RibbonNotApplied(rp, why);
+    RibbonNotApplied(vol, rp, why);
     return RibbonListAdd(&rp->refused, &rp->nrefused, &rp->caprefused, u->seq) ? OK : ERR_NO_MEMORY;
 }
 
@@ -292,13 +293,13 @@ static RibbonStaged* RibbonStagedOf(RibbonStage* st, uint64_t fid)
 /* The file as the stitch leaves it so far — the stage's (borrowed; NULL when
  * the stitch quitclaimed it) or the mirror's, held, *held said so: the caller
  * lets a held one go. */
-FileRecord* RibbonFileNow(RibbonStage* st, uint64_t fid, bool* held)
+FileRecord* RibbonFileNow(TagFSVolume* vol, RibbonStage* st, uint64_t fid, bool* held)
 {
     RibbonStaged* s = RibbonStagedOf(st, fid);
     *held = false;
     if (s)
         return s->rec;
-    FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    FileRecord* rec = FileMapRecordHold(vol->state.files, fid, NULL);
     *held = rec != NULL;
     return rec;
 }
@@ -337,13 +338,13 @@ error_t RibbonStagePut(RibbonStage* st, uint64_t fid, FileRecord* rec)
  * over with a CODEC run of 2^62 blocks was laid as 2^30 Strips, and the mount
  * was refused for want of memory where it mounts with the file as it last
  * matched (census B48). */
-error_t RibbonStageFallow(RibbonStage* st, uint64_t start, uint64_t count, bool once)
+error_t RibbonStageFallow(TagFSVolume* vol, RibbonStage* st, uint64_t start, uint64_t count, bool once)
 {
     uint64_t end = start + count < start ? UINT64_MAX : start + count;
     if (count && end > st->reach)
         st->reach = end;
-    if (end > g_book.data_end + 1u)
-        end = g_book.data_end + 1u;
+    if (end > vol->book.data_end + 1u)
+        end = vol->book.data_end + 1u;
     count = start < end ? end - start : 0;
     for (uint64_t i = 0; once && i < st->nfallow; i++)
         if (st->fallow[i].start == start && st->fallow[i].count == count)
@@ -406,9 +407,9 @@ uint64_t RibbonFlagsOf(const RibbonReplay* rp, const RibbonStage* st, const File
 /* The tags `rec` wears that `other` does not — NULL wearing none — each out
  * of (`leave`) or into the tag index, and the set of the deleted files too
  * when `rec` is kept deleted and `other` is not. ERR_NO_MEMORY. */
-static error_t RibbonTagsMoved(const FileRecord* rec, const FileRecord* other, uint64_t fid, bool leave)
+static error_t RibbonTagsMoved(TagFSVolume* vol, const FileRecord* rec, const FileRecord* other, uint64_t fid, bool leave)
 {
-    TagFSState* fs = tagfs_get_state();
+    TagFSState* fs = &vol->state;
     for (uint32_t i = 0; rec && i < rec->tag_count; i++) {
         bool both = false;
         for (uint32_t k = 0; other && k < other->tag_count; k++)
@@ -432,17 +433,17 @@ static error_t RibbonTagsMoved(const FileRecord* rec, const FileRecord* other, u
 /* One file of the stage into the map of live files: its record put — the map
  * takes the stage's reference — or the file dropped; its tags moved in the
  * index; the file counted. */
-static error_t RibbonFileLaid(RibbonReplay* rp, RibbonStaged* s)
+static error_t RibbonFileLaid(TagFSVolume* vol, RibbonReplay* rp, RibbonStaged* s)
 {
-    TagFSState*  fs  = tagfs_get_state();
+    TagFSState*  fs  = &vol->state;
     FileRecord*  old = FileMapRecordHold(fs->files, s->fid, NULL);
     RecordWhere  where, was;
     FileMapStake stake = { .count = 0 };
-    error_t      rc    = RibbonTagsMoved(old, s->rec, s->fid, true);
+    error_t      rc    = RibbonTagsMoved(vol, old, s->rec, s->fid, true);
     memset(&where, 0, sizeof(where));
-    DogEarFileChanged(s->fid, old, s->rec, UINT64_MAX);    /* changed since the Tally the mount stands on */
+    DogEarFileChanged(vol, s->fid, old, s->rec, UINT64_MAX);    /* changed since the Tally the mount stands on */
     if (rc == OK)
-        rc = RibbonTagsMoved(s->rec, old, s->fid, false);
+        rc = RibbonTagsMoved(vol, s->rec, old, s->fid, false);
     if (rc == OK && s->rec) {
         rc = FileMapStakeFor(fs->files, s->fid, &stake);
         if (rc == OK)
@@ -451,10 +452,10 @@ static error_t RibbonFileLaid(RibbonReplay* rp, RibbonStaged* s)
             FileRecordRelease(s->rec);    /* no stake: the record is the stage's still, and let go here */
         FileMapStakeLetGo(&stake);
         s->rec = NULL;                    /* the map's, put or let go */
-        g_book.files += rc == OK && !old;
+        vol->book.files += rc == OK && !old;
     } else if (rc == OK) {
         FileMapDrop(fs->files, s->fid, &was);
-        g_book.files -= old != NULL;
+        vol->book.files -= old != NULL;
     }
     FileRecordRelease(old);
     if (rc == OK && !RibbonListAdd(&rp->touched, &rp->ntouched, &rp->captouched, s->fid))
@@ -465,49 +466,49 @@ static error_t RibbonFileLaid(RibbonReplay* rp, RibbonStaged* s)
 /* Everything the stage gathered laid into memory: the files, the tags it
  * coins into the registry, the Use Context, the ground it let go to the
  * mount's Fallow, the digests it carries into the Gloss. */
-static error_t RibbonStageLaid(RibbonReplay* rp, RibbonStage* st)
+static error_t RibbonStageLaid(TagFSVolume* vol, RibbonReplay* rp, RibbonStage* st)
 {
     error_t rc = OK;
     char    why[160];
     for (uint32_t i = 0; rc == OK && i < st->nfiles; i++)
-        rc = RibbonFileLaid(rp, &st->files[i]);
+        rc = RibbonFileLaid(vol, rp, &st->files[i]);
     for (uint32_t i = 0; rc == OK && i < st->ncoins; i++) {
         const TallyTag* t = &st->coins[i].tag;
-        DogEarPut(TALLY_TAGS, (TallyKey){ st->coins[i].id, 0 }, (TallyKey){ st->coins[i].id + 1u, 0 });
+        DogEarPut(vol, TALLY_TAGS, (TallyKey){ st->coins[i].id, 0 }, (TallyKey){ st->coins[i].id + 1u, 0 });
         if (!st->coins[i].held) {
-            rc = BookTagAsideNoted(st->coins[i].id, t);
+            rc = BookTagAsideNoted(vol, st->coins[i].id, t);
             continue;
         }
         if (t->flags & TALLY_TAG_RETIRED) {
-            rc = RegistryCoinRetired(tagfs_get_state()->registry, (uint32_t)st->coins[i].id);
+            rc = RegistryCoinRetired(vol->state.registry, (uint32_t)st->coins[i].id);
             continue;
         }
-        rc = RegistryCoin(tagfs_get_state()->registry, (uint32_t)st->coins[i].id,
+        rc = RegistryCoin(vol->state.registry, (uint32_t)st->coins[i].id,
                           (t->flags & TALLY_TAG_HAS_VALUE) ? TAGFS_TAG_FLAG_HAS_VALUE : 0, TagRegistryOwnerOf(t),
                           t->key, (uint8_t)t->key_len, t->value, (uint16_t)t->value_len);
         if (rc == ERR_ALREADY_EXISTS) {
             ksnprintf(why, sizeof(why), "tag id %llu's owner and text are another id's too, or its id another "
                       "tag's — the registry cannot hold the two at once", (unsigned long long)st->coins[i].id);
-            TagFSUnderGlass(why);
+            TagFSUnderGlass(vol, why);
             rc = OK;
         }
     }
     if (rp->only)
         return rc;      /* Facsimile's: the rest is the Tally's the mount stands on */
     if (st->use_set) {
-        DogEarPut(TALLY_USE, (TallyKey){ 0, 0 }, (TallyKey){ 1, 0 });
+        DogEarPut(vol, TALLY_USE, (TallyKey){ 0, 0 }, (TallyKey){ 1, 0 });
         rp->use_set = true;
         rp->use     = st->use;
         rp->use_len = st->use_len;
     }
     for (uint64_t i = 0; rc == OK && i < st->nfallow; i++) {
-        if (!RibbonGrow((void**)&g_book.fallow, g_book.nfallow, &g_book.capfallow, sizeof(Strip)))
+        if (!RibbonGrow((void**)&vol->book.fallow, vol->book.nfallow, &vol->book.capfallow, sizeof(Strip)))
             return ERR_NO_MEMORY;
-        g_book.fallow[g_book.nfallow++] = st->fallow[i];
+        vol->book.fallow[vol->book.nfallow++] = st->fallow[i];
     }
-    GroundCensusNamed(0, st->reach);    /* the reach alone: the census claims the Strips */
+    GroundCensusNamed(vol, 0, st->reach);    /* the reach alone: the census claims the Strips */
     for (uint64_t i = 0; rc == OK && i < st->ndigests; i++)
-        rc = GlossNote(st->digests[i].block, st->digests[i].digest);
+        rc = GlossNote(vol, st->digests[i].block, st->digests[i].digest);
     for (uint32_t i = 0; rc == OK && i < st->nhigh; i++)
         rc = RibbonHighInto(&rp->high, &rp->nhigh, &rp->caphigh, st->high[i].fid, st->high[i].high, false);
     return rc;
@@ -527,7 +528,7 @@ static void RibbonStageLetGo(RibbonStage* st)
 
 /* Stitch `u`'s records through their rules into a stage of their own: OK,
  * or ERR_NO_MEMORY. */
-static error_t RibbonStitchGathered(RibbonReplay* rp, const RibbonUnit* u, RibbonStage* st)
+static error_t RibbonStitchGathered(TagFSVolume* vol, RibbonReplay* rp, const RibbonUnit* u, RibbonStage* st)
 {
     error_t rc = OK;
     memset(st, 0, sizeof(*st));
@@ -537,7 +538,7 @@ static error_t RibbonStitchGathered(RibbonReplay* rp, const RibbonUnit* u, Ribbo
                      "kernel that knows more", u->longer);
     for (uint32_t i = 0; rc == OK && !st->refused[0] && i < u->nrecords; i++)
         if (!rp->only || RibbonRecordWithin(u, &u->records[i], rp->only, rp->only_lo, rp->only_hi))
-            rc = RibbonRecordApplied(rp, st, &u->records[i]);
+            rc = RibbonRecordApplied(vol, rp, st, &u->records[i]);
     if (rc == OK && !st->refused[0])
         RibbonFreshHeld(st);
     return rc;
@@ -559,7 +560,7 @@ static error_t RibbonStitchGathered(RibbonReplay* rp, const RibbonUnit* u, Ribbo
  * passes over one fid more, so it ends; the files' records of other fids are
  * gathered as they were.
  */
-static error_t RibbonStitchApplied(RibbonReplay* rp, const RibbonUnit* u)
+static error_t RibbonStitchApplied(TagFSVolume* vol, RibbonReplay* rp, const RibbonUnit* u)
 {
     RibbonStage* st = kmalloc(sizeof(RibbonStage));
     char         why[256];
@@ -567,18 +568,18 @@ static error_t RibbonStitchApplied(RibbonReplay* rp, const RibbonUnit* u)
     error_t      rc  = OK;
     if (!st)
         return ERR_NO_MEMORY;
-    rc = RibbonStitchGathered(rp, u, st);
+    rc = RibbonStitchGathered(vol, rp, u, st);
     while (rc == OK && st->rot && !st->refused[0]) {
         RibbonStageLetGo(st);
         rp->next = ext;                 /* the files a gathering let go noted no extension */
-        rc       = RibbonStitchGathered(rp, u, st);
+        rc       = RibbonStitchGathered(vol, rp, u, st);
     }
     if (rc == OK && st->refused[0]) {
         ksnprintf(why, sizeof(why), "stitch %llu is not applied: %s", (unsigned long long)u->seq, st->refused);
-        RibbonNotApplied(rp, why);
+        RibbonNotApplied(vol, rp, why);
     } else if (rc == OK) {
-        rc = RibbonStageLaid(rp, st);
-        g_book.said.applied += rc == OK && !rp->only;
+        rc = RibbonStageLaid(vol, rp, st);
+        vol->book.said.applied += rc == OK && !rp->only;
     }
     RibbonStageLetGo(st);
     kfree(st);
@@ -591,9 +592,9 @@ static error_t RibbonStitchApplied(RibbonReplay* rp, const RibbonUnit* u)
 
 /* The DATA ground of `fid` outside the data run, as the census writes it:
  * how many runs. */
-static uint32_t RibbonOutside(const FileRecord* rec, char* out, size_t room)
+static uint32_t RibbonOutside(TagFSVolume* vol, const FileRecord* rec, char* out, size_t room)
 {
-    uint64_t  lo = g_book.frame.data_block, hi = g_book.data_end;
+    uint64_t  lo = vol->book.frame.data_block, hi = vol->book.data_end;
     uint32_t  n  = 0;
     size_t    at = 0;
     StripWalk walk;
@@ -614,9 +615,9 @@ static uint32_t RibbonOutside(const FileRecord* rec, char* out, size_t room)
 /* Whether a DATA run of `rec` meets one of another live file's — a run
  * SHARED on either side names ground another may name too, and holds none
  * from the other (§8.2; bookmount.py _Settle, Owned). */
-static bool RibbonOnOthers(const FileRecord* rec)
+static bool RibbonOnOthers(TagFSVolume* vol, const FileRecord* rec)
 {
-    TagFSState* fs   = tagfs_get_state();
+    TagFSState* fs   = &vol->state;
     uint64_t    from = 0, ids[16];
     uint32_t    n;
     while ((n = FileMapFiles(fs->files, from, ids, 16)) > 0) {
@@ -646,9 +647,9 @@ static bool RibbonOnOthers(const FileRecord* rec)
  * wear — said, each file as it is: the retirement is laid only once no file
  * wears the tag (ink/ink_book.c), so a book that shows one has been damaged
  * since (bookmount.py _Settle). */
-static void RibbonRetiredWorn(RibbonWalk* w)
+static void RibbonRetiredWorn(TagFSVolume* vol, RibbonWalk* w)
 {
-    TagFSState* fs   = tagfs_get_state();
+    TagFSState* fs   = &vol->state;
     uint64_t    from = 0, ids[16];
     uint32_t    n;
     while ((n = FileMapFiles(fs->files, from, ids, 16)) > 0) {
@@ -666,7 +667,7 @@ static void RibbonRetiredWorn(RibbonWalk* w)
             if (!at)
                 continue;
             ksnprintf(worn + at, sizeof(worn) - at, "]");
-            RibbonSay(w, RIBBON_CODE_RETIRED_WORN, "fid %llu wears tag id(s) %s, RETIRED — no file wears a retired "
+            RibbonSay(vol, w, RIBBON_CODE_RETIRED_WORN, "fid %llu wears tag id(s) %s, RETIRED — no file wears a retired "
                       "id; the file stays as it is", (unsigned long long)ids[i], worn);
         }
         from = ids[n - 1] + 1;
@@ -674,42 +675,42 @@ static void RibbonRetiredWorn(RibbonWalk* w)
 }
 
 /* A file the replay changed that stands outside the data run: said, locked. */
-static error_t RibbonOutsideLocked(RibbonWalk* w, uint64_t fid)
+static error_t RibbonOutsideLocked(TagFSVolume* vol, RibbonWalk* w, uint64_t fid)
 {
     char        runs[200];
-    FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    FileRecord* rec = FileMapRecordHold(vol->state.files, fid, NULL);
     if (!rec)
         return OK;
-    uint32_t n = RibbonOutside(rec, runs, sizeof(runs));
+    uint32_t n = RibbonOutside(vol, rec, runs, sizeof(runs));
     FileRecordRelease(rec);
     if (!n)
         return OK;
-    RibbonSay(w, RIBBON_CODE_EXTENT_OUTSIDE, "fid %llu names blocks %s outside the data run [%llu, %llu) — it is "
-              "locked", (unsigned long long)fid, runs, (unsigned long long)g_book.frame.data_block,
-              (unsigned long long)g_book.data_end);
-    return BookFileLockLive(fid, "it names ground outside the data run");
+    RibbonSay(vol, w, RIBBON_CODE_EXTENT_OUTSIDE, "fid %llu names blocks %s outside the data run [%llu, %llu) — it is "
+              "locked", (unsigned long long)fid, runs, (unsigned long long)vol->book.frame.data_block,
+              (unsigned long long)vol->book.data_end);
+    return BookFileLockLive(vol, fid, "it names ground outside the data run");
 }
 
 /* What of a file the replay leaves standing this kernel cannot carry on: a
  * run with an extension but SHARED alone, flags past 32 bits. Slips on its last block it
  * carries on (§16.5 п.13) — counted, true, for the Tally that may not take
  * its slice before they are laid in a block (LooseLeaves). */
-static bool RibbonCarriedSaid(const RibbonReplay* rp, uint64_t fid)
+static bool RibbonCarriedSaid(TagFSVolume* vol, const RibbonReplay* rp, uint64_t fid)
 {
     char        why[192];
-    FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    FileRecord* rec = FileMapRecordHold(vol->state.files, fid, NULL);
     if (!rec)
         return false;
     bool slipped = rec->slip != NULL;
     if (RibbonListHas(rp->ext, rp->next, fid)) {
         ksnprintf(why, sizeof(why), "a run of fid %llu carries an extension this kernel cannot carry on (CODEC, "
                   "SHARED or COPY, §8)", (unsigned long long)fid);
-        TagFSUnderGlass(why);
+        TagFSUnderGlass(vol, why);
     }
     if (RibbonFlagsOf(rp, NULL, rec) >> 32) {
         ksnprintf(why, sizeof(why), "fid %llu carries flags past the 32 bits this kernel holds — written by a "
                   "kernel that knows more", (unsigned long long)fid);
-        TagFSUnderGlass(why);
+        TagFSUnderGlass(vol, why);
     }
     FileRecordRelease(rec);
     return slipped;
@@ -720,9 +721,9 @@ static bool RibbonCarriedSaid(const RibbonReplay* rp, uint64_t fid)
  * lays no Slip, so every one the mount holds is a file's the replay touched:
  * the Slips the Tally waits for (LooseLeaves) and the blocks promised are one
  * number here, and two is a DEFECT, said. */
-static void RibbonPromisesHeld(uint64_t loose)
+static void RibbonPromisesHeld(TagFSVolume* vol, uint64_t loose)
 {
-    uint64_t slips = FileMapSlips(tagfs_get_state()->files);
+    uint64_t slips = FileMapSlips(vol->state.files);
     if (slips == loose)
         return;
 #if CONFIG_STRICT
@@ -739,30 +740,30 @@ static void RibbonPromisesHeld(uint64_t loose)
  * owns), and no verdict of the mount's: a file locked is not rolled back, and
  * the next mount locks it again by the same rule; what this kernel cannot
  * carry on said. */
-static error_t RibbonSettled(RibbonReplay* rp)
+static error_t RibbonSettled(TagFSVolume* vol, RibbonReplay* rp)
 {
     error_t rc = OK;
     RibbonListSorted(rp->touched, &rp->ntouched);
     RibbonListSorted(rp->mismatched, &rp->nmismatched);
     RibbonListSorted(rp->ext, &rp->next);
-    RibbonRetiredWorn(rp->w);
+    RibbonRetiredWorn(vol, rp->w);
     for (uint32_t i = 0; rc == OK && i < rp->ntouched; i++)
-        rc = RibbonOutsideLocked(rp->w, rp->touched[i]);
+        rc = RibbonOutsideLocked(vol, rp->w, rp->touched[i]);
     for (uint32_t i = 0; rc == OK && i < rp->nmismatched; i++) {
-        FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, rp->mismatched[i], NULL);
-        bool        on  = rec && RibbonOnOthers(rec);
+        FileRecord* rec = FileMapRecordHold(vol->state.files, rp->mismatched[i], NULL);
+        bool        on  = rec && RibbonOnOthers(vol, rec);
         FileRecordRelease(rec);
         if (on) {
-            ErrataLeaves(rp->mismatched[i]);
-            rc = BookFileLockLive(rp->mismatched[i], "it is rolled back to blocks another file now holds (§3.9)");
+            ErrataLeaves(vol, rp->mismatched[i]);
+            rc = BookFileLockLive(vol, rp->mismatched[i], "it is rolled back to blocks another file now holds (§3.9)");
         }
     }
     uint64_t loose = 0;
     for (uint32_t i = 0; rc == OK && i < rp->ntouched; i++)
-        loose += RibbonCarriedSaid(rp, rp->touched[i]);
-    LooseLeavesMounted(loose);
+        loose += RibbonCarriedSaid(vol, rp, rp->touched[i]);
+    LooseLeavesMounted(vol, loose);
     if (rc == OK)
-        RibbonPromisesHeld(loose);
+        RibbonPromisesHeld(vol, loose);
     return rc;
 }
 
@@ -783,19 +784,19 @@ static void RibbonReplayLetGo(RibbonReplay* rp)
 
 /* Every stitch's Undones gathered (§2.8): the records they pass over, or the
  * stitch they stand in not applied. */
-static error_t RibbonUndones(RibbonReplay* rp)
+static error_t RibbonUndones(TagFSVolume* vol, RibbonReplay* rp)
 {
     error_t rc = OK;
     for (uint32_t s = 0; rc == OK && s < rp->w->nstitch; s++) {
         const RibbonUnit* u = rp->w->stitch[s];
         for (uint32_t i = 0; rc == OK && i < u->nrecords; i++)
             if (u->records[i].kind == RIBBON_UNDONE)
-                rc = RibbonUndoneOne(rp, u, i);
+                rc = RibbonUndoneOne(vol, rp, u, i);
     }
     return rc;
 }
 
-error_t RibbonTranscribe(RibbonWalk* w, const char** what)
+error_t RibbonTranscribe(TagFSVolume* vol, RibbonWalk* w, const char** what)
 {
     RibbonReplay* rp = kmalloc(sizeof(RibbonReplay));
     error_t       rc = rp ? OK : ERR_NO_MEMORY;
@@ -803,22 +804,22 @@ error_t RibbonTranscribe(RibbonWalk* w, const char** what)
     if (rp) {
         memset(rp, 0, sizeof(*rp));
         rp->w = w;
-        rc    = RibbonUndones(rp);
+        rc    = RibbonUndones(vol, rp);
     }
     if (rc == OK) {
         RibbonSkipSorted(&rp->undone);
-        rc   = RibbonVerify(w, &rp->undone);
+        rc   = RibbonVerify(vol, w, &rp->undone);
         read = rc == OK || rc == ERR_NO_MEMORY;
     }
     for (uint32_t s = 0; rc == OK && s < w->nstitch; s++)
         if (!RibbonListHas(rp->refused, rp->nrefused, w->stitch[s]->seq))
-            rc = RibbonStitchApplied(rp, w->stitch[s]);
+            rc = RibbonStitchApplied(vol, rp, w->stitch[s]);
     if (rc == OK && rp->use_set)
-        rc = BookUseRecalled(rp->use, rp->use_len);
+        rc = BookUseRecalled(vol, rp->use, rp->use_len);
     if (rc == OK)
-        rc = RibbonSettled(rp);
+        rc = RibbonSettled(vol, rp);
     if (rc == OK)
-        rc = ErrataClosed();
+        rc = ErrataClosed(vol);
     if (rp)
         RibbonReplayLetGo(rp);
     if (rc == ERR_NO_MEMORY)
@@ -830,7 +831,7 @@ error_t RibbonTranscribe(RibbonWalk* w, const char** what)
     return rc;
 }
 
-error_t RibbonFacsimile(RibbonWalk* w, uint64_t tree, uint64_t lo, uint64_t hi, uint64_t upto, uint32_t* replayed,
+error_t RibbonFacsimile(TagFSVolume* vol, RibbonWalk* w, uint64_t tree, uint64_t lo, uint64_t hi, uint64_t upto, uint32_t* replayed,
                         char* passed, size_t room)
 {
     RibbonReplay* rp = kmalloc(sizeof(RibbonReplay));
@@ -847,13 +848,13 @@ error_t RibbonFacsimile(RibbonWalk* w, uint64_t tree, uint64_t lo, uint64_t hi, 
     for (uint32_t s = 0; rc == OK && s < w->nstitch && w->stitch[s]->seq <= upto; s++)
         for (uint32_t i = 0; rc == OK && i < w->stitch[s]->nrecords; i++)
             if (w->stitch[s]->records[i].kind == RIBBON_UNDONE)
-                rc = RibbonUndoneOne(rp, w->stitch[s], i);
+                rc = RibbonUndoneOne(vol, rp, w->stitch[s], i);
     if (rc == OK)
         RibbonSkipSorted(&rp->undone);
     for (uint32_t s = 0; rc == OK && s < w->nstitch && w->stitch[s]->seq <= upto; s++) {
         if (RibbonListHas(rp->refused, rp->nrefused, w->stitch[s]->seq))
             continue;
-        rc = RibbonStitchApplied(rp, w->stitch[s]);
+        rc = RibbonStitchApplied(vol, rp, w->stitch[s]);
         *replayed += rc == OK;
     }
     if (rc == OK && rp->passed)

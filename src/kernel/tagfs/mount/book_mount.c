@@ -22,16 +22,12 @@
 #include "errata.h"
 #include "read_pace.h"
 #include "logbook.h"
+#include "tagfs_volume.h"
 
 /*
  * The volume's mount (book_mount.h): the ground, the Spine, the slot
  * stood on, the walk of its Tally, the census and the numbers given next.
  */
-
-BookMount g_book;
-
-/* The refusal the mount's line carries, made here when it names numbers. */
-static char s_refusal[320];
 
 // ----------------------------------------------------------------------------
 // The ground (§1.2, §1.5)
@@ -45,20 +41,20 @@ static char s_refusal[320];
  * on the medium's grid only where the ground begins on one; where it does not,
  * the atom stays the medium's, said.
  */
-static void BookRibbonAtom(uint8_t seat, uint64_t base, uint64_t first)
+static void BookRibbonAtom(TagFSVolume* vol, uint8_t seat, uint64_t base, uint64_t first)
 {
-    uint32_t page = BookRibbonAtomOf(g_book.atom, BoardroomSeatIsRemovable(seat));
-    g_book.ribbon_atom = g_book.atom;
-    if (page == g_book.atom)
+    uint32_t page = BookRibbonAtomOf(vol->book.atom, BoardroomSeatIsRemovable(seat));
+    vol->book.ribbon_atom = vol->book.atom;
+    if (page == vol->book.atom)
         return;
     if (!BookGroundOnAtom(base, first, page)) {
         kprintf("[TagFS] seat %u is a removable medium, and its ribbon keeps the medium's %u-byte atom: its ground "
                 "begins at sector %llu, off a flash page of %u bytes, and a cut while a stitch is written may spoil "
                 "the settled stitch beside it (§16.6 п.2) — lay the ground on a mebibyte\n",
-                seat, g_book.atom, (unsigned long long)base, page);
+                seat, vol->book.atom, (unsigned long long)base, page);
         return;
     }
-    g_book.ribbon_atom = page;
+    vol->book.ribbon_atom = page;
     kprintf("[TagFS] seat %u is a removable medium: its ribbon is written in atoms of a flash page, %u bytes — the "
             "Quires it takes laid on them, each stitch ending on one, so the one after it begins on a page of its "
             "own (§16.6 п.2)\n", seat, page);
@@ -82,53 +78,53 @@ static void BookRibbonAtom(uint8_t seat, uint64_t base, uint64_t first)
 STATIC_ASSERT(BOARDROOM_LOGICAL_MOST <= TAGFS_BLOCK_SIZE,
               "every atom of the book covers whole blocks of any medium the room seats");
 
-static void BookGroundAtom(uint8_t seat)
+static void BookGroundAtom(TagFSVolume* vol, uint8_t seat)
 {
     uint32_t physical = 0;
     uint64_t first    = 0;
-    uint64_t base     = tagfs_get_volume_base();
+    uint64_t base     = tagfs_get_volume_base(vol);
     uint32_t atom     = TAGFS_BLOCK_SIZE;
     char     words[224];
 
     BoardroomSeatGrid(seat, &physical, &first);
-    if (tagfs_get_state()->geometry.physical_bytes > atom)
-        atom = tagfs_get_state()->geometry.physical_bytes;
+    if (vol->state.geometry.physical_bytes > atom)
+        atom = vol->state.geometry.physical_bytes;
     if (physical > atom)
         atom = physical;
-    g_book.atom = atom;
+    vol->book.atom = atom;
     if (BookGroundOnAtom(base, first, atom)) {
-        BookRibbonAtom(seat, base, first);
+        BookRibbonAtom(vol, seat, base, first);
         return;
     }
-    g_book.ribbon_atom = atom;
+    vol->book.ribbon_atom = atom;
     ksnprintf(words, sizeof(words), "its ground begins at sector %llu, not on the medium's physical block "
               "of %u bytes, which begin at sector %llu: every write would rewrite its neighbours (§1.5) — "
               "repartition the medium", (unsigned long long)base, atom, (unsigned long long)first);
-    TagFSUnderGlass(words);
+    TagFSUnderGlass(vol, words);
 }
 
-error_t MountBookGround(uint8_t seat, const DeedCopy* head, uint64_t ground_sectors)
+error_t MountBookGround(TagFSVolume* vol, uint8_t seat, const DeedCopy* head, uint64_t ground_sectors)
 {
-    TagFSState* fs    = tagfs_get_state();
+    TagFSState* fs    = &vol->state;
     uint16_t    bytes = 0;
     const void* frame = DeedStamp(head, VOLUME_STAMP_FRAME, &bytes);
     char        words[160];
 
-    MountBookLetGo();
+    MountBookLetGo(vol);
     ReadPaceWatch(seat);                             /* the mount's own reads: the medium's first measure */
     fs->free_blocks = 0;                             /* the counts its block map and its Tally derive, */
     fs->total_files = 0;                             /* never a volume's mounted before */
-    memcpy(&g_book.frame, frame, sizeof(VolumeFrame));
-    g_book.data_end = head->head.tail_sector / VOLUME_BLOCK_SECTORS;
-    g_book.ground   = ground_sectors;
-    g_book.on_head  = head->head.role == VOLUME_DEED_ROLE_HEAD;
-    fs->block_end   = g_book.data_end;
+    memcpy(&vol->book.frame, frame, sizeof(VolumeFrame));
+    vol->book.data_end = head->head.tail_sector / VOLUME_BLOCK_SECTORS;
+    vol->book.ground   = ground_sectors;
+    vol->book.on_head  = head->head.role == VOLUME_DEED_ROLE_HEAD;
+    fs->block_end   = vol->book.data_end;
     if (bytes > sizeof(VolumeFrame)) {
         ksnprintf(words, sizeof(words), "its FRAME is %u bytes, longer than the %u this reader knows — "
                   "written by a kernel that knows more (§1.2)", bytes, (unsigned)sizeof(VolumeFrame));
-        TagFSUnderGlass(words);
+        TagFSUnderGlass(vol, words);
     }
-    BookGroundAtom(seat);
+    BookGroundAtom(vol, seat);
     return OK;
 }
 
@@ -136,7 +132,7 @@ error_t MountBookGround(uint8_t seat, const DeedCopy* head, uint64_t ground_sect
 // The slot stood on (§1.4, §4.5 п.2)
 // ----------------------------------------------------------------------------
 
-error_t BookSlotReads(const SpineSlot* s, char* why, size_t room)
+error_t BookSlotReads(TagFSVolume* vol, const SpineSlot* s, char* why, size_t room)
 {
     char* words = kmalloc(512);
     if (!words)
@@ -145,7 +141,7 @@ error_t BookSlotReads(const SpineSlot* s, char* why, size_t room)
     for (uint32_t i = 0; i < s->roots && rc == OK; i++) {
         if (!SpineTreeAuthoritative(&s->root[i]))
             continue;
-        rc = TallyRootReads(s->root[i].tree, &s->root[i], words, 512);
+        rc = TallyRootReads(vol, s->root[i].tree, &s->root[i], words, 512);
         if (rc == ERR_TAGFS_CORRUPTED)
             ksnprintf(why, room, "its %s root will not read — %s", TallyTreeName(s->root[i].tree), words);
     }
@@ -157,15 +153,15 @@ error_t BookSlotReads(const SpineSlot* s, char* why, size_t room)
  * the order every reader of a book tries them (spine_read.c, SpineKeep), and
  * the roots every reader holds them to (volume_spine.h, SpineTreeAuthoritative)
  * — each passed over said. OK, or the refusal. */
-static error_t BookStand(const char** what)
+static error_t BookStand(TagFSVolume* vol, const char** what)
 {
     char why[256];
-    for (uint32_t i = 0; i < g_book.nslots; i++) {
-        SpineSlot* s  = &g_book.slots[i];
-        error_t    rc = BookSlotReads(s, why, sizeof(why));
+    for (uint32_t i = 0; i < vol->book.nslots; i++) {
+        SpineSlot* s  = &vol->book.slots[i];
+        error_t    rc = BookSlotReads(vol, s, why, sizeof(why));
         if (rc == OK) {
-            g_book.stood      = s;
-            g_book.said.slot  = s->index;
+            vol->book.stood      = s;
+            vol->book.said.slot  = s->index;
             kprintf("[TagFS] the book stands on slot %u (seq %llu): its Tally of seq %llu, which took in the "
                     "ribbon to stitch seq %llu\n", s->index, (unsigned long long)s->seq,
                     (unsigned long long)s->head.tally_seq, (unsigned long long)s->head.stitch_seq);
@@ -185,13 +181,13 @@ static error_t BookStand(const char** what)
 
 /* The slot's own word against the volume: what it carries that this kernel
  * cannot carry on, and a lead its records do not give a sector. */
-static void BookSlotSaid(const SpineSlot* s)
+static void BookSlotSaid(TagFSVolume* vol, const SpineSlot* s)
 {
     for (uint32_t i = 0; i < s->nglass; i++)
-        TagFSUnderGlass(s->glass[i]);
+        TagFSUnderGlass(vol, s->glass[i]);
     if (s->shape[0]) {
         kprintf("[TagFS] the book is written against its own shape — %s\n", s->shape);
-        g_book.said.shapes++;
+        vol->book.said.shapes++;
     }
 }
 
@@ -205,47 +201,47 @@ static void BookSlotSaid(const SpineSlot* s)
  * goes on from there, under glass. A medium a book given up this boot found
  * lying (away.h, AwayLiedLearned) is held to have lied before pass 2 reads
  * the data of the newest stitches, as one its own ribbon shows lying is. */
-static error_t BookRibbon(const char** what)
+static error_t BookRibbon(TagFSVolume* vol, const char** what)
 {
     const char* glass = NULL;
-    error_t     rc    = RibbonCollate(g_book.stood, &g_book.ribbon);
+    error_t     rc    = RibbonCollate(vol, vol->book.stood, &vol->book.ribbon);
     if (rc != OK) {
         *what = rc == ERR_NO_MEMORY ? "there is no memory to read the ribbon past its Tally"
                                     : "its medium would not give up the ribbon past its Tally";
         return rc;
     }
-    RibbonWalk* w = g_book.ribbon;
-    if (!w->lied && AwayLiedLearned(tagfs_get_state()->uuid)) {
+    RibbonWalk* w = vol->book.ribbon;
+    if (!w->lied && AwayLiedLearned(vol, vol->state.uuid)) {
         w->lied = true;
         kprintf("[TagFS] this volume's medium came back this boot holding less than a flush it said it kept "
                 "covered (its book was given up then): it is held to have lied\n");
     }
-    rc = RibbonTranscribe(w, what);
+    rc = RibbonTranscribe(vol, w, what);
     if (rc != OK)
         return rc;
-    g_book.said.sewn  = w->nstitch;
+    vol->book.said.sewn  = w->nstitch;
     for (uint32_t i = 0; i < w->nstitch; i++)
-        g_book.ribbon_useful += w->stitch[i]->useful;
-    g_book.said.last  = w->nstitch ? w->stitch[w->nstitch - 1u]->seq : g_book.stood->head.stitch_seq;
-    g_book.said.lied  = w->lied;
-    g_book.said.flags = w->nstitch && w->stitch[w->nstitch - 1u]->head_read ? w->stitch[w->nstitch - 1u]->head.flags
+        vol->book.ribbon_useful += w->stitch[i]->useful;
+    vol->book.said.last  = w->nstitch ? w->stitch[w->nstitch - 1u]->seq : vol->book.stood->head.stitch_seq;
+    vol->book.said.lied  = w->lied;
+    vol->book.said.flags = w->nstitch && w->stitch[w->nstitch - 1u]->head_read ? w->stitch[w->nstitch - 1u]->head.flags
                                                                            : 0;
     kprintf("[TagFS] the ribbon past the Tally: %u stitch(es) sewn on, the last seq %llu, %u applied\n",
-            w->nstitch, (unsigned long long)g_book.said.last, g_book.said.applied);
-    if (g_book.said.flags & STITCH_CLEAN)
+            w->nstitch, (unsigned long long)vol->book.said.last, vol->book.said.applied);
+    if (vol->book.said.flags & STITCH_CLEAN)
         kprintf("[TagFS] the last stitch of the ribbon says CLEAN: the machine that sewed it stopped with no change "
                 "in flight\n");
     if (w->lied)
         kprintf("[TagFS] MEDIUM_LIED: this volume's medium has not kept what it confirmed — a Fallow lags two "
                 "stitches on it, and the newest two are held to their data at a mount (§3.9); every stitch this "
                 "kernel sews on it says so\n");
-    if (RibbonCursorMount(w, &glass) != OK)
-        TagFSUnderGlass(glass);
-    if (w->seen_fid > g_book.next_fid)
-        g_book.next_fid = w->seen_fid;
-    if (w->seen_tag > g_book.next_tag)
-        g_book.next_tag = w->seen_tag;
-    g_book.next_bookmark = w->seen_bookmark;
+    if (RibbonCursorMount(vol, w, &glass) != OK)
+        TagFSUnderGlass(vol, glass);
+    if (w->seen_fid > vol->book.next_fid)
+        vol->book.next_fid = w->seen_fid;
+    if (w->seen_tag > vol->book.next_tag)
+        vol->book.next_tag = w->seen_tag;
+    vol->book.next_bookmark = w->seen_bookmark;
     return OK;
 }
 
@@ -257,17 +253,19 @@ static error_t BookRibbon(const char** what)
  * blocks it covers, read when a block of it is (§8.1, TallyDigestFind). */
 static error_t BookDigestNode(void* ctx, const TallyPlace* at)
 {
+    TagFSVolume* vol = TagFSHome();
     BookGroundNode(ctx, at);
-    return at->level == 0 && at->ptr.copies ? TallyDigestsKeep(at, false) : OK;
+    return at->level == 0 && at->ptr.copies ? TallyDigestsKeep(vol, at, false) : OK;
 }
 
 static error_t BookDigestRot(void* ctx, const TallyPlace* at, const char* why)
 {
+    TagFSVolume* vol = TagFSHome();
     (void)ctx;
     (void)why;
     if (at->level > 0)
-        EndpaperLaidNode(&g_book.laid, TALLY_DIGESTS, at->level, 0, 1u, at->has_lo ? at->lo.k1 : 0);
-    return TallyDigestsKeep(at, true);
+        EndpaperLaidNode(&vol->book.laid, TALLY_DIGESTS, at->level, 0, 1u, at->has_lo ? at->lo.k1 : 0);
+    return TallyDigestsKeep(vol, at, true);
 }
 
 static error_t BookQuietRot(void* ctx, const TallyPlace* at, const char* why)
@@ -279,36 +277,36 @@ static error_t BookQuietRot(void* ctx, const TallyPlace* at, const char* why)
 }
 
 /* One root of the slot stood on, walked as its tree is read. */
-static error_t BookTree(const SpineRoot* root)
+static error_t BookTree(TagFSVolume* vol, const SpineRoot* root)
 {
     char      words[192];
     TallySink sink = { .ctx = NULL, .item = NULL, .node = BookGroundNode, .said = true,
-                       .mend = BookGroundMended, .shapes = &g_book.said.shapes };
+                       .mend = BookGroundMended, .shapes = &vol->book.said.shapes };
     bool derived = root->tree == TALLY_MAP || root->tree == TALLY_SHARED || (root->flags & TALLY_ROOT_DERIVED);
 
-    g_book.laid_tree = root->tree;
+    vol->book.laid_tree = root->tree;
 
     if (!derived && !SpineTreeAuthoritative(root)) {
         ksnprintf(words, sizeof(words), "slot %u names a tree of kind %llu this reader does not know, and "
-                  "not one to derive — written by a kernel that knows more", g_book.stood->index,
+                  "not one to derive — written by a kernel that knows more", vol->book.stood->index,
                   (unsigned long long)root->tree);
-        TagFSUnderGlass(words);
+        TagFSUnderGlass(vol, words);
     }
     if (!SpineTreeAuthoritative(root)) {
         sink.rotten = BookQuietRot;
         sink.said   = false;
-        return TallyRead(root->tree, root, false, &sink);
+        return TallyRead(vol, root->tree, root, false, &sink);
     }
     if ((root->tree == TALLY_BOOKMARKS || root->tree == TALLY_LIEN) && root->items) {
         ksnprintf(words, sizeof(words), "its %s tree is not empty — a bookmark this kernel cannot hold (§5)",
                   TallyTreeName(root->tree));
-        TagFSUnderGlass(words);
+        TagFSUnderGlass(vol, words);
     }
     if (root->tree != TALLY_DIGESTS)
-        return TallyLeaves(root->tree, root);
+        return TallyLeaves(vol, root->tree, root);
     sink.node   = BookDigestNode;
     sink.rotten = BookDigestRot;
-    return TallyRead(TALLY_DIGESTS, root, false, &sink);
+    return TallyRead(vol, TALLY_DIGESTS, root, false, &sink);
 }
 
 /* Every root of the slot stood on, in the order of its trees. A slot that
@@ -316,9 +314,9 @@ static error_t BookTree(const SpineRoot* root)
  * when there is none (§16.3 п.5) — and that, too, is what the medium
  * remembers: recalled, so a Remember of nothing is the nothing that settled
  * (§7). */
-static error_t BookWalk(const char** what)
+static error_t BookWalk(TagFSVolume* vol, const char** what)
 {
-    const SpineSlot* s    = g_book.stood;
+    const SpineSlot* s    = vol->book.stood;
     uint64_t         last = 0;
     bool             use  = false;
     error_t          rc   = OK;
@@ -331,10 +329,10 @@ static error_t BookWalk(const char** what)
             break;
         last = next->tree;
         use |= next->tree == TALLY_USE;
-        rc   = BookTree(next);
+        rc   = BookTree(vol, next);
     }
     if (rc == OK && !use)
-        rc = BookUseRecalled(NULL, 0);
+        rc = BookUseRecalled(vol, NULL, 0);
     if (rc != OK)
         *what = rc == ERR_NO_MEMORY ? "there is no memory to hold what its Tally names"
                                     : "its medium would not give up its Tally";
@@ -345,28 +343,28 @@ static error_t BookWalk(const char** what)
 // The numbers given next (§4.5 п.8)
 // ----------------------------------------------------------------------------
 
-static void BookBounds(void)
+static void BookBounds(TagFSVolume* vol)
 {
-    TagFSState*        fs = tagfs_get_state();
-    const SpineCounts* c  = &g_book.stood->counts;
+    TagFSState*        fs = &vol->state;
+    const SpineCounts* c  = &vol->book.stood->counts;
     uint64_t           known_file = 0;
     uint32_t           known_tag  = 0;
-    uint64_t           fid = g_book.next_fid > c->next_fid ? g_book.next_fid : c->next_fid;
-    uint64_t           tag = g_book.next_tag > c->next_tag ? g_book.next_tag : c->next_tag;
+    uint64_t           fid = vol->book.next_fid > c->next_fid ? vol->book.next_fid : c->next_fid;
+    uint64_t           tag = vol->book.next_tag > c->next_tag ? vol->book.next_tag : c->next_tag;
 
-    AwayNumbersKnown(fs->uuid, &known_file, &known_tag);
+    AwayNumbersKnown(vol, fs->uuid, &known_file, &known_tag);
     if (known_file > fid)
         fid = known_file;
     if (known_tag > tag)
         tag = known_tag;
-    uint64_t bookmark = g_book.next_bookmark > c->next_bookmark ? g_book.next_bookmark : c->next_bookmark;
+    uint64_t bookmark = vol->book.next_bookmark > c->next_bookmark ? vol->book.next_bookmark : c->next_bookmark;
     kprintf("[TagFS] the next file id %llu, tag id %llu, bookmark %llu, seq %llu — past every one the book "
             "names\n", (unsigned long long)fid, (unsigned long long)tag, (unsigned long long)bookmark,
-            (unsigned long long)(BookSeqSeen() + 1u));
-    g_book.next_fid         = fid;
-    g_book.next_tag         = tag;
-    g_book.next_bookmark    = bookmark;
-    fs->total_files         = g_book.files;
+            (unsigned long long)(BookSeqSeen(vol) + 1u));
+    vol->book.next_fid         = fid;
+    vol->book.next_tag         = tag;
+    vol->book.next_bookmark    = bookmark;
+    fs->total_files         = vol->book.files;
     TagRegistryNumbersFrom(fs->registry, tag > (uint64_t)TAGFS_MAX_TAG_ID + 1u ? TAGFS_MAX_TAG_ID + 1u
                                                                              : (uint32_t)tag);
 }
@@ -376,12 +374,12 @@ static void BookBounds(void)
 // ----------------------------------------------------------------------------
 
 /* What the mount fills: the registry, the map of live files, the tag index. */
-static error_t BookMemory(const char** what)
+static error_t BookMemory(TagFSVolume* vol, const char** what)
 {
-    TagFSState* fs = tagfs_get_state();
+    TagFSState* fs = &vol->state;
     fs->braid      = NULL;
 #ifdef CONFIG_VOLUME_TESTS
-    TagFSStandMountRegistryLoads();
+    TagFSStandMountRegistryLoads(vol);
 #endif
     fs->registry   = kmalloc(sizeof(TagRegistry));
     if (!fs->registry || tag_registry_init(fs->registry) != OK) {
@@ -400,21 +398,21 @@ static error_t BookMemory(const char** what)
 }
 
 /* The Spine read: every slot that holds, newest first. */
-static error_t BookSpine(const char** what)
+static error_t BookSpine(TagFSVolume* vol, const char** what)
 {
     char*   states = kmalloc(256);
-    error_t rc     = states ? SpineRead(&g_book.frame, &g_book.slots, &g_book.nslots, states, 256)
+    error_t rc     = states ? SpineRead(vol, &vol->book.frame, &vol->book.slots, &vol->book.nslots, states, 256)
                             : ERR_NO_MEMORY;
-    if (rc == OK && g_book.nslots == 0) {
-        ksnprintf(s_refusal, sizeof(s_refusal), "none of the %u slots of its Spine holds (%s) — the book is "
-                  "not read (ERR_TAGFS_CORRUPTED)", g_book.frame.spine_slots, states);
-        *what = s_refusal;
+    if (rc == OK && vol->book.nslots == 0) {
+        ksnprintf(vol->book_mount.refusal, sizeof(vol->book_mount.refusal), "none of the %u slots of its Spine holds (%s) — the book is "
+                  "not read (ERR_TAGFS_CORRUPTED)", vol->book.frame.spine_slots, states);
+        *what = vol->book_mount.refusal;
         rc    = ERR_TAGFS_CORRUPTED;
     } else if (rc == ERR_READ_FAILED && states[0]) {
-        ksnprintf(s_refusal, sizeof(s_refusal), "none of the %u slots of its Spine holds, and its medium would "
+        ksnprintf(vol->book_mount.refusal, sizeof(vol->book_mount.refusal), "none of the %u slots of its Spine holds, and its medium would "
                   "not read a sector of one (%s) — the medium's refusal, no verdict on the book: asked again "
-                  "when its seat answers", g_book.frame.spine_slots, states);
-        *what = s_refusal;
+                  "when its seat answers", vol->book.frame.spine_slots, states);
+        *what = vol->book_mount.refusal;
     } else if (rc != OK) {
         *what = rc == ERR_NO_MEMORY ? "there is no memory to read its Spine"
                                     : "its medium would not give up its Spine";
@@ -426,15 +424,15 @@ static error_t BookSpine(const char** what)
 /* What the slots hold, for the writer of a Tally (settle/binder.h): the ring
  * as its FRAME names it, and each slot that holds, by its seq and its
  * Tally's — their nodes and ribbons come with the census. */
-static error_t BookSlotsHeld(const char** what)
+static error_t BookSlotsHeld(TagFSVolume* vol, const char** what)
 {
-    if (BinderSlotsMake(g_book.frame.spine_slots) != OK) {
+    if (BinderSlotsMake(vol, vol->book.frame.spine_slots) != OK) {
         *what = "there is no memory for what the slots of its Spine hold";
         return ERR_NO_MEMORY;
     }
-    for (uint32_t i = 0; i < g_book.nslots; i++)
-        if (BinderSlotHolds(g_book.slots[i].index, g_book.slots[i].seq, g_book.slots[i].head.tally_seq,
-                            g_book.slots[i].head.stitch_seq) != OK) {
+    for (uint32_t i = 0; i < vol->book.nslots; i++)
+        if (BinderSlotHolds(vol, vol->book.slots[i].index, vol->book.slots[i].seq, vol->book.slots[i].head.tally_seq,
+                            vol->book.slots[i].head.stitch_seq) != OK) {
             *what = "its Spine read a slot past the ring its FRAME names";
             return ERR_TAGFS_CORRUPTED;
         }
@@ -447,82 +445,82 @@ static error_t BookSlotsHeld(const char** what)
  * yet — its door is not open — and a Plot of the one before promises it
  * nothing, so its promises are its records' alone (FileMapSlips): the count
  * bookcensus makes of the image. */
-static void BookFreeSaid(void)
+static void BookFreeSaid(TagFSVolume* vol)
 {
-    uint64_t data     = g_book.data_end - g_book.frame.data_block;
-    uint64_t free     = tagfs_get_state()->free_blocks;
-    uint64_t promised = FileMapSlips(tagfs_get_state()->files);
+    uint64_t data     = vol->book.data_end - vol->book.frame.data_block;
+    uint64_t free     = vol->state.free_blocks;
+    uint64_t promised = FileMapSlips(vol->state.files);
     free = free > promised ? free - promised : 0;
     if (promised == 0)
         kprintf("[TagFS] %llu data blocks, %llu free, %llu files\n", (unsigned long long)data,
-                (unsigned long long)free, (unsigned long long)g_book.files);
+                (unsigned long long)free, (unsigned long long)vol->book.files);
     else
         kprintf("[TagFS] %llu data blocks, %llu free, %llu files — and %llu block(s) promised, one to each file "
                 "whose tail a Slip lays, for the Engross that lays it there\n", (unsigned long long)data,
-                (unsigned long long)free, (unsigned long long)g_book.files, (unsigned long long)promised);
+                (unsigned long long)free, (unsigned long long)vol->book.files, (unsigned long long)promised);
 }
 
-error_t MountReadBook(const char** what)
+error_t MountReadBook(TagFSVolume* vol, const char** what)
 {
-    BookSeqSeenForget();
-    BinderMountReset();
-    FoxingBegin();
+    BookSeqSeenForget(vol);
+    BinderMountReset(vol);
+    FoxingBegin(vol);
     /* Rot is named from here on, each block once for this mount, on the
      * "integrity" tag of the kernel's Logbook: a rotten block is an occurrence
      * the kernel saw, never a name the volume's registry is given to carry
      * (logbook.h) — and so it is published under glass too. */
-    IntegrityRotBegin(TouchLogbookIntern("integrity"));
-    error_t rc = BookMemory(what);
+    IntegrityRotBegin(vol, TouchLogbookIntern("integrity"));
+    error_t rc = BookMemory(vol, what);
     if (rc == OK)
-        rc = BookSpine(what);
+        rc = BookSpine(vol, what);
     if (rc == OK)
-        rc = BookSlotsHeld(what);
+        rc = BookSlotsHeld(vol, what);
     if (rc == OK)
-        rc = BookStand(what);
+        rc = BookStand(vol, what);
     if (rc != OK) {
-        FoxingEnd();
+        FoxingEnd(vol);
         return rc;
     }
 
-    BookSlotSaid(g_book.stood);
-    GroundCensusBegin();
-    rc = BookWalk(what);
+    BookSlotSaid(vol, vol->book.stood);
+    GroundCensusBegin(vol);
+    rc = BookWalk(vol, what);
     if (rc == OK)
-        rc = MountFacsimile(what);
-    FacsimileLetGo();
+        rc = MountFacsimile(vol, what);
+    FacsimileLetGo(vol);
     if (rc == OK)
-        rc = BookRibbon(what);
+        rc = BookRibbon(vol, what);
     if (rc == OK) {
-        BookFilesLaid();
-        rc = BookGroundCensus(what);
+        BookFilesLaid(vol);
+        rc = BookGroundCensus(vol, what);
     }
-    RibbonWalkLetGo(g_book.ribbon);
-    g_book.ribbon = NULL;
-    GroundCensusEnd();
-    FoxingEnd();
+    RibbonWalkLetGo(vol->book.ribbon);
+    vol->book.ribbon = NULL;
+    GroundCensusEnd(vol);
+    FoxingEnd(vol);
     if (rc != OK)
         return rc;
-    if (g_book.bookmarked)
-        TagFSUnderGlass("a Tally of its book names a bookmark, whose ground this kernel does not derive — its "
+    if (vol->book.bookmarked)
+        TagFSUnderGlass(vol, "a Tally of its book names a bookmark, whose ground this kernel does not derive — its "
                         "writer takes no ground without the map of it");
-    BookBounds();
-    MountBookGrow(tagfs_get_seat());
-    BinderMountStood(g_book.stood->index, g_book.tally_blocks, g_book.ribbon_useful, g_book.next_fid,
-                     g_book.next_tag, g_book.next_bookmark);
+    BookBounds(vol);
+    MountBookGrow(vol, tagfs_get_seat(vol));
+    BinderMountStood(vol, vol->book.stood->index, vol->book.tally_blocks, vol->book.ribbon_useful, vol->book.next_fid,
+                     vol->book.next_tag, vol->book.next_bookmark);
     /* The leaves of FILES a Parcel's runs lie in, as the walk of the leaves
      * counted them into Foliation — every leaf when Foliation was lost. */
-    uint64_t run_leaves    = FoliationLeavesHolding(TALLY_FILES);
-    g_book.laid.run_leaves = run_leaves != UINT64_MAX ? run_leaves : g_book.laid.runs ? g_book.laid.files_leaves : 0;
-    BinderBarPublish(g_book.stood->head.stitch_seq);
-    EndpaperStood(&g_book.laid, g_book.stood->head.tally_seq, g_book.stood->counts.next_fid);
+    uint64_t run_leaves    = FoliationLeavesHolding(vol, TALLY_FILES);
+    vol->book.laid.run_leaves = run_leaves != UINT64_MAX ? run_leaves : vol->book.laid.runs ? vol->book.laid.files_leaves : 0;
+    BinderBarPublish(vol, vol->book.stood->head.stitch_seq);
+    EndpaperStood(vol, &vol->book.laid, vol->book.stood->head.tally_seq, vol->book.stood->counts.next_fid);
     kprintf("[TagFS] the book as memory holds it: its files print 0x%08X, its Use Context %llu byte(s) print "
-            "0x%08X\n", g_book.files_print, (unsigned long long)g_book.use_bytes, g_book.use_print);
-    if (g_book.bookmarked)
+            "0x%08X\n", vol->book.files_print, (unsigned long long)vol->book.use_bytes, vol->book.use_print);
+    if (vol->book.bookmarked)
         kprintf("[TagFS] %llu data blocks, free not counted, %llu files — a Tally of the book names a bookmark, "
                 "whose ground this kernel does not read: no block is counted free, and none is given\n",
-                (unsigned long long)(g_book.data_end - g_book.frame.data_block), (unsigned long long)g_book.files);
+                (unsigned long long)(vol->book.data_end - vol->book.frame.data_block), (unsigned long long)vol->book.files);
     else
-        BookFreeSaid();
+        BookFreeSaid(vol);
     /* A ribbon that goes on at the start of the next_quire it names
      * (RibbonGoesOnAt) stands in it with none given past it, and a change
      * claims room past a next_quire (RibbonRoomOf): without one every change
@@ -531,8 +529,8 @@ error_t MountReadBook(const char** what)
      * the free it says, which is the volume's as it lies (bookcensus.py). A
      * refusal is the first cycle's to ask again (RibbonNextGivenAtMount). A
      * book under glass takes no ground. */
-    if (!TagFSIsUnderGlass())
-        RibbonNextGivenAtMount();
+    if (!TagFSIsUnderGlass(vol))
+        RibbonNextGivenAtMount(vol);
     return OK;
 }
 
@@ -547,9 +545,9 @@ error_t MountReadBook(const char** what)
  * lost (§3.8, §16.5 п.10, perambulation.h). Under glass nothing is written,
  * and nothing waits: a medium that comes back is read again.
  */
-void MountBookPromise(void)
+void MountBookPromise(TagFSVolume* vol)
 {
-    if (TagFSIsUnderGlass()) {
+    if (TagFSIsUnderGlass(vol)) {
         kprintf("[TagFS] what this volume promises: it is read as its book holds it and nothing of it is "
                 "written — a change is refused (ERR_TAGFS_READ_ONLY); a medium that leaves and comes back "
                 "is read again from its book\n");
@@ -565,10 +563,10 @@ void MountBookPromise(void)
             "since the last kept flush read back as written — and read again from its book otherwise, what no "
             "stitch settled then lost (ERR_TAGFS_NOT_LANDED where a block did not land)\n",
             (unsigned long long)(SETTLE_WINDOW_US / 1000u));
-    if (BinderNoTallies())
+    if (BinderNoTallies(vol))
         kprintf("[TagFS] no Tally of the book is written by this mount: %s — the ribbon is read whole at the "
                 "next mount, none of its Quires comes back before it, and once they run out files, names, tags "
-                "and words are refused (ERR_TAGFS_NO_SPACE)\n", BinderNoTallies());
+                "and words are refused (ERR_TAGFS_NO_SPACE)\n", BinderNoTallies(vol));
     else
         kprintf("[TagFS] a whole Tally of the book is written once the ribbon past the newest slot holds as "
                 "many useful bytes as one costs (TALLY_SLACK %u), and when the ribbon runs out: the next mount "
@@ -580,110 +578,110 @@ void MountBookPromise(void)
 // Locked files, and letting go
 // ----------------------------------------------------------------------------
 
-bool BookFileLocked(uint64_t fid)
+bool BookFileLocked(TagFSVolume* vol, uint64_t fid)
 {
     /* A file Escheat let go is no file from its DONE on, as after the next
      * mount, whose Tally names it no more (settle/escheat.h). */
-    if (EscheatLost(fid))
+    if (EscheatLost(vol, fid))
         return false;
-    uint32_t lo = 0, hi = g_book.nlocked;
+    uint32_t lo = 0, hi = vol->book.nlocked;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2u;
-        if (g_book.locked[mid] == fid)
+        if (vol->book.locked[mid] == fid)
             return true;
-        if (g_book.locked[mid] < fid)
+        if (vol->book.locked[mid] < fid)
             lo = mid + 1u;
         else
             hi = mid;
     }
-    FileRecord* live = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    FileRecord* live = FileMapRecordHold(vol->state.files, fid, NULL);
     FileRecordRelease(live);
-    return !live && BookRotLocks(fid);
+    return !live && BookRotLocks(vol, fid);
 }
 
-bool BookAnyLocked(void)
+bool BookAnyLocked(TagFSVolume* vol)
 {
-    if (g_book.nrot)
+    if (vol->book.nrot)
         return true;
-    for (uint32_t i = 0; i < g_book.nlocked; i++)
-        if (!EscheatLost(g_book.locked[i]))
+    for (uint32_t i = 0; i < vol->book.nlocked; i++)
+        if (!EscheatLost(vol, vol->book.locked[i]))
             return true;
     return false;
 }
 
 /* Whether a rotten range of FILES holds `fid`. */
-static bool BookInRot(uint64_t fid)
+static bool BookInRot(TagFSVolume* vol, uint64_t fid)
 {
-    for (uint32_t i = 0; i < g_book.nrot; i++) {
-        const BookRotten* r = &g_book.rot[i];
+    for (uint32_t i = 0; i < vol->book.nrot; i++) {
+        const BookRotten* r = &vol->book.rot[i];
         if (fid >= r->lo.k1 && (!r->has_hi || fid < r->hi.k1 || (fid == r->hi.k1 && r->hi.k2 > 0)))
             return true;
     }
     return false;
 }
 
-bool BookRotLocks(uint64_t fid)
+bool BookRotLocks(TagFSVolume* vol, uint64_t fid)
 {
-    uint32_t lo = 0, hi = g_book.nborn;
+    uint32_t lo = 0, hi = vol->book.nborn;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2u;
-        if (g_book.born[mid] == fid)
+        if (vol->book.born[mid] == fid)
             return false;
-        if (g_book.born[mid] < fid)
+        if (vol->book.born[mid] < fid)
             lo = mid + 1u;
         else
             hi = mid;
     }
-    return BookInRot(fid);
+    return BookInRot(vol, fid);
 }
 
-error_t BookBornNoted(uint64_t fid)
+error_t BookBornNoted(TagFSVolume* vol, uint64_t fid)
 {
-    uint32_t lo = 0, hi = g_book.nborn;
-    if (!BookInRot(fid))
+    uint32_t lo = 0, hi = vol->book.nborn;
+    if (!BookInRot(vol, fid))
         return OK;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2u;
-        if (g_book.born[mid] < fid)
+        if (vol->book.born[mid] < fid)
             lo = mid + 1u;
         else
             hi = mid;
     }
-    if (lo < g_book.nborn && g_book.born[lo] == fid)
+    if (lo < vol->book.nborn && vol->book.born[lo] == fid)
         return OK;
-    if (g_book.nborn == g_book.capborn) {
-        uint32_t  cap  = g_book.capborn ? g_book.capborn * 2u : 16u;
+    if (vol->book.nborn == vol->book.capborn) {
+        uint32_t  cap  = vol->book.capborn ? vol->book.capborn * 2u : 16u;
         uint64_t* more = kmalloc(sizeof(uint64_t) * cap);
         if (!more)
             return ERR_NO_MEMORY;
-        if (g_book.nborn)
-            memcpy(more, g_book.born, sizeof(uint64_t) * g_book.nborn);
-        kfree(g_book.born);
-        g_book.born    = more;
-        g_book.capborn = cap;
+        if (vol->book.nborn)
+            memcpy(more, vol->book.born, sizeof(uint64_t) * vol->book.nborn);
+        kfree(vol->book.born);
+        vol->book.born    = more;
+        vol->book.capborn = cap;
     }
-    memmove(&g_book.born[lo + 1u], &g_book.born[lo], sizeof(uint64_t) * (g_book.nborn - lo));
-    g_book.born[lo] = fid;
-    g_book.nborn++;
+    memmove(&vol->book.born[lo + 1u], &vol->book.born[lo], sizeof(uint64_t) * (vol->book.nborn - lo));
+    vol->book.born[lo] = fid;
+    vol->book.nborn++;
     return OK;
 }
 
-error_t BookUseRecalled(const uint8_t* text, uint64_t len)
+error_t BookUseRecalled(TagFSVolume* vol, const uint8_t* text, uint64_t len)
 {
-    error_t rc = UseMemoryRecall(text, len);
+    error_t rc = UseMemoryRecall(vol, text, len);
     if (rc == OK) {
-        g_book.use_print = len ? KCrc32c(text, (uint32_t)len) : 0;
-        g_book.use_bytes = len;
+        vol->book.use_print = len ? KCrc32c(text, (uint32_t)len) : 0;
+        vol->book.use_bytes = len;
     }
     return rc;
 }
 
-bool TagFSFileLocked(uint64_t fid)
+bool TagFSFileLocked(TagFSVolume* vol, uint64_t fid)
 {
-    if (!tagfs_enter())
+    if (!tagfs_enter(vol))
         return false;
-    bool locked = BookFileLocked(fid);
-    tagfs_leave();
+    bool locked = BookFileLocked(vol, fid);
+    tagfs_leave(vol);
     return locked;
 }
 
@@ -701,35 +699,35 @@ void BookKeptLetGo(BookKeptFile* k)
     memset(k, 0, sizeof(*k));
 }
 
-void MountBookLetGo(void)
+void MountBookLetGo(TagFSVolume* vol)
 {
-    BookFileForget(&g_book.file);
-    SpineLetGo(g_book.slots, g_book.nslots);
-    kfree(g_book.rot);
-    kfree(g_book.locked);
-    for (uint32_t i = 0; i < g_book.nkept; i++)
-        BookKeptLetGo(&g_book.kept[i]);
-    kfree(g_book.kept);
-    kfree(g_book.fallow);
-    kfree(g_book.born);
-    for (uint32_t i = 0; i < g_book.naside; i++)
-        kfree(g_book.aside[i].text);
-    kfree(g_book.aside);
-    ErrataLetGo();
-    RibbonWalkLetGo(g_book.ribbon);
-    RibbonCursorLetGo();
-    BinderMountReset();
-    DedupLetGo();
-    GlossLetGo();
-    CommonholdLetGoAll();
-    TallyDigestsLetGo();
-    BlockMapDerivedLetGo();
-    memset(&g_book, 0, sizeof(g_book));
+    BookFileForget(&vol->book.file);
+    SpineLetGo(vol->book.slots, vol->book.nslots);
+    kfree(vol->book.rot);
+    kfree(vol->book.locked);
+    for (uint32_t i = 0; i < vol->book.nkept; i++)
+        BookKeptLetGo(&vol->book.kept[i]);
+    kfree(vol->book.kept);
+    kfree(vol->book.fallow);
+    kfree(vol->book.born);
+    for (uint32_t i = 0; i < vol->book.naside; i++)
+        kfree(vol->book.aside[i].text);
+    kfree(vol->book.aside);
+    ErrataLetGo(vol);
+    RibbonWalkLetGo(vol->book.ribbon);
+    RibbonCursorLetGo(vol);
+    BinderMountReset(vol);
+    DedupLetGo(vol);
+    GlossLetGo(vol);
+    CommonholdLetGoAll(vol);
+    TallyDigestsLetGo(vol);
+    BlockMapDerivedLetGo(vol);
+    memset(&vol->book, 0, sizeof(vol->book));
 }
 
 #ifdef CONFIG_VOLUME_TESTS
-void MountBookStandSaid(MountBookSaid* out)
+void MountBookStandSaid(TagFSVolume* vol, MountBookSaid* out)
 {
-    *out = g_book.said;
+    *out = vol->book.said;
 }
 #endif

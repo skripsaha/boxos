@@ -39,8 +39,8 @@
  * hold it — and in *out_saying (optional) which word it is, 0 for the medium's
  * own.
  */
-error_t  tagfs_remember_use_context(UseText *said, uint64_t saying, bool *remembered);
-UseText *tagfs_recall_use_context(uint64_t *out_saying);
+error_t  tagfs_remember_use_context(TagFSVolume* vol, UseText *said, uint64_t saying, bool *remembered);
+UseText *tagfs_recall_use_context(TagFSVolume* vol, uint64_t *out_saying);
 
 /* remember's first half, which never waits: the word said to the volume's
  * memory, and what the medium makes of it — a later word stands; the medium
@@ -53,14 +53,14 @@ typedef enum {
     USE_SAID_LANDED,
     USE_SAID_OWED,
 } UseSaid;
-UseSaid  UseMemorySay(UseText *said, uint64_t saying, uint64_t *ticket);
+UseSaid  UseMemorySay(TagFSVolume* vol, UseText *said, uint64_t saying, uint64_t *ticket);
 
 /* remember's second half, once a cycle that began after demand `ticket` has
  * settled: whether the volume now holds exactly `said` — false when it had no
  * room for it, or a later word stands; and whether demand `ticket` was the
  * last a stitch had no room for, and refused. With no TagFS lock held. */
-bool     UseMemoryKept(uint64_t ticket, const UseText *said);
-bool     UseMemoryRefused(uint64_t ticket);
+bool     UseMemoryKept(TagFSVolume* vol, uint64_t ticket, const UseText *said);
+bool     UseMemoryRefused(TagFSVolume* vol, uint64_t ticket);
 
 // ----------------------------------------------------------------------------
 // The Settle cycle's part (settle/sewing.c), by the Settle's holder
@@ -78,9 +78,9 @@ bool     UseMemoryRefused(uint64_t ticket);
  * UseContext in its place — the volume holds no word, the one it held handed
  * back to be dropped (the owner's rule, 09-08); without, it keeps that word,
  * and NULL is handed back. */
-bool     UseMemoryStitchTake(UseText **said, uint64_t *ticket);
-UseText *UseMemoryStitchSettled(UseText *said, uint64_t ticket);
-UseText *UseMemoryStitchRefused(uint64_t ticket, bool forgot);
+bool     UseMemoryStitchTake(TagFSVolume* vol, UseText **said, uint64_t *ticket);
+UseText *UseMemoryStitchSettled(TagFSVolume* vol, UseText *said, uint64_t ticket);
+UseText *UseMemoryStitchRefused(TagFSVolume* vol, uint64_t ticket, bool forgot);
 
 // ----------------------------------------------------------------------------
 // The mount (with the door shut)
@@ -89,10 +89,28 @@ UseText *UseMemoryStitchRefused(uint64_t ticket, bool forgot);
 /* The book's Use Context, as its Tally holds it: `len`
  * bytes of `text`, or none. It is the medium's memory, landed. OK, or
  * ERR_NO_MEMORY. */
-error_t  UseMemoryRecall(const uint8_t *text, uint64_t len);
+error_t  UseMemoryRecall(TagFSVolume* vol, const uint8_t *text, uint64_t len);
 
 /* The volume is let go of: everything held of its memory, with not one byte
  * written. */
-void     UseMemoryLetGo(void);
+void     UseMemoryLetGo(TagFSVolume* vol);
+
+/*
+ * The volume's memory of the Use Context, as the machine changes it (use_memory.h):
+ * the person's word handed over, and the stitch's part in carrying it.
+ *
+ * Under the state lock; the mount and the let-go change everything with the
+ * door shut.
+ */
+typedef struct {
+    UseText *said;       /* the latest word told to the volume; NULL says none */
+    uint64_t saying;     /* which word of the machine's it is; 0 for the medium's own */
+    uint64_t ticket;     /* moves with every demand */
+    bool     owed;       /* a cycle still owes `said` to the medium */
+    UseText *memory;     /* what the book holds; NULL with none, or not held */
+    bool     landed;     /* the book's word is known: recalled at the mount, or settled since */
+    uint64_t answered;   /* the last demand a cycle answered */
+    uint64_t refused;    /* the last demand a stitch had no room for: refused, not remembered */
+} UseMemoryState;
 
 #endif /* TAGFS_USE_MEMORY_H */

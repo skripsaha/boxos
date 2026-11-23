@@ -3,6 +3,7 @@
 #include "book_unit.h"
 #include "ground_census.h"
 #include "../file_map/file_map.h"
+#include "tagfs_volume.h"
 
 /*
  * RibbonCollate — pass 1 of the ribbon: from the `at` of a slot, the stitches
@@ -28,10 +29,6 @@
  * plants every rule and holds the two readers to one answer.
  */
 
-/* A line of the ribbon, made here before it is said (the door is shut and
- * one core attends the mount). */
-static char s_line[640];
-
 static const char* const g_ribbon_codes[RIBBON_CODES] = {
     [RIBBON_CODE_RIBBON_TORN]     = "RIBBON_TORN",
     [RIBBON_CODE_STITCH_TORN]     = "STITCH_TORN",
@@ -45,17 +42,17 @@ static const char* const g_ribbon_codes[RIBBON_CODES] = {
     [RIBBON_CODE_RETIRED_WORN]    = "RETIRED_WORN",
 };
 
-void RibbonSay(RibbonWalk* w, RibbonCode code, const char* fmt, ...)
+void RibbonSay(TagFSVolume* vol, RibbonWalk* w, RibbonCode code, const char* fmt, ...)
 {
     va_list ap;
     w->said[code]++;
     if (!w->stood)
         return;
-    g_book.said.ribbon[code]++;
+    vol->book.said.ribbon[code]++;
     va_start(ap, fmt);
-    kvsnprintf(s_line, sizeof(s_line), fmt, ap);
+    kvsnprintf(vol->ribbon_collate.line, sizeof(vol->ribbon_collate.line), fmt, ap);
     va_end(ap);
-    kprintf("[TagFS] ribbon %s: %s\n", g_ribbon_codes[code], s_line);
+    kprintf("[TagFS] ribbon %s: %s\n", g_ribbon_codes[code], vol->ribbon_collate.line);
 }
 
 void RibbonSeqsSaid(RibbonUnit* const* units, uint32_t n, char* out, size_t room)
@@ -113,10 +110,10 @@ bool RibbonQuireAdd(RibbonWalk* w, const RibbonQuire* q)
  * coarser block reads the Quires its writers laid, one rule with volume-read
  * (stitch.py Lies). The writer goes on in none off the medium's atom
  * (ribbon.c, RibbonGoesOnAt; §1.5). */
-bool RibbonQuireLies(const RibbonQuire* q)
+bool RibbonQuireLies(TagFSVolume* vol, const RibbonQuire* q)
 {
-    uint64_t lo = g_book.frame.data_block, hi = g_book.data_end;
-    uint64_t grid = BookAtomOf(tagfs_get_state()->geometry.physical_bytes, 0, 0) / TAGFS_BLOCK_SIZE;
+    uint64_t lo = vol->book.frame.data_block, hi = vol->book.data_end;
+    uint64_t grid = BookAtomOf(vol->state.geometry.physical_bytes, 0, 0) / TAGFS_BLOCK_SIZE;
     return q->blocks && q->block >= lo && q->block <= hi && q->blocks <= hi - q->block && !(q->block % grid);
 }
 
@@ -137,9 +134,9 @@ static int RibbonGroundOrder(const void* a, const void* b, void* ctx)
  * writer names one next_quire in every stitch of a Quire (M-5), and a ribbon
  * between two Tallies may carry many. False with no memory.
  */
-static bool RibbonGroundBuilt(RibbonWalk* w)
+static bool RibbonGroundBuilt(TagFSVolume* vol, RibbonWalk* w)
 {
-    TagFSState* fs   = tagfs_get_state();
+    TagFSState* fs   = &vol->state;
     uint64_t    from = 0, cap = 0, ids[16];
     uint32_t    n;
     if (w->ground_built)
@@ -191,15 +188,15 @@ static bool RibbonOnGround(const RibbonWalk* w, uint64_t start, uint64_t count)
  * run, on an atom, and past the Tally the mount stands on clear of the book
  * and of the files (§3.7's table) — said when it may not. The next_quire
  * already taken is not weighed again: a writer names it in every stitch. */
-bool RibbonNamed(RibbonWalk* w, const RibbonQuire* q, const char* who)
+bool RibbonNamed(TagFSVolume* vol, RibbonWalk* w, const RibbonQuire* q, const char* who)
 {
     if (!q->blocks || RibbonQuireSame(q, &w->quire) || RibbonQuireSame(q, &w->next))
         return true;
-    if (w->stood && RibbonQuireLies(q) && !RibbonGroundBuilt(w))
+    if (w->stood && RibbonQuireLies(vol, q) && !RibbonGroundBuilt(vol, w))
         return false;
-    if (!RibbonQuireLies(q) ||
-        (w->stood && (GroundClaimedBy(GROUND_TALLY, q->block, q->blocks) || RibbonOnGround(w, q->block, q->blocks)))) {
-        RibbonSay(w, RIBBON_CODE_RIBBON_TORN, "%s names Quire %llu+%llu as the ribbon's next, which lies outside "
+    if (!RibbonQuireLies(vol, q) ||
+        (w->stood && (GroundClaimedBy(vol, GROUND_TALLY, q->block, q->blocks) || RibbonOnGround(w, q->block, q->blocks)))) {
+        RibbonSay(vol, w, RIBBON_CODE_RIBBON_TORN, "%s names Quire %llu+%llu as the ribbon's next, which lies outside "
                   "the data run, off an atom, or on the book or a file — the ribbon is not taken past it there",
                   who, (unsigned long long)q->block, (unsigned long long)q->blocks);
         return true;
@@ -215,7 +212,7 @@ bool RibbonNamed(RibbonWalk* w, const RibbonQuire* q, const char* who)
 /* The leads a sound stitch's sectors name that its records do not give them
  * (§2.1, §16.3 п.4): said as RECORD_SHAPE — were a sector before them to rot,
  * the walk in pieces would be taken up in the wrong place. */
-static void RibbonLeadsSaid(RibbonWalk* w, const RibbonUnit* u)
+static void RibbonLeadsSaid(TagFSVolume* vol, RibbonWalk* w, const RibbonUnit* u)
 {
     char     sectors[96], named[96], given[96];
     size_t   a = 0, b = 0, c = 0;
@@ -238,7 +235,7 @@ static void RibbonLeadsSaid(RibbonWalk* w, const RibbonUnit* u)
         wrong++;
     }
     if (wrong)
-        RibbonSay(w, RIBBON_CODE_RECORD_SHAPE, "stitch %llu's sector(s) %s name lead(s) %s where its records "
+        RibbonSay(vol, w, RIBBON_CODE_RECORD_SHAPE, "stitch %llu's sector(s) %s name lead(s) %s where its records "
                   "begin at %s (§2.1) — were a sector before them to rot, its walk would be taken up in the "
                   "wrong place", (unsigned long long)u->seq, sectors, named, given);
 }
@@ -246,7 +243,7 @@ static void RibbonLeadsSaid(RibbonWalk* w, const RibbonUnit* u)
 /* `u` sewn on: the walk's last stitch from here, its Quire the walk's when it
  * ended in another, the next_quire its StitchHead names weighed. False with no
  * memory (the unit is the walk's either way). */
-static bool RibbonTake(RibbonWalk* w, RibbonUnit* u)
+static bool RibbonTake(TagFSVolume* vol, RibbonWalk* w, RibbonUnit* u)
 {
     RibbonPlace last;
     char        who[48];
@@ -279,12 +276,12 @@ static bool RibbonTake(RibbonWalk* w, RibbonUnit* u)
     if (u->head_read) {
         RibbonQuire next = { u->head.next_block, u->head.next_blocks };
         ksnprintf(who, sizeof(who), "stitch seq %llu", (unsigned long long)u->seq);
-        if (!RibbonNamed(w, &next, who))
+        if (!RibbonNamed(vol, w, &next, who))
             return false;
         w->lied |= (u->head.flags & STITCH_MEDIUM_LIED) != 0;
     }
     if (u->sound)
-        RibbonLeadsSaid(w, u);
+        RibbonLeadsSaid(vol, w, u);
     return true;
 }
 
@@ -311,7 +308,7 @@ static bool RibbonFollows(const RibbonWalk* w, const RibbonUnit* u, bool at_next
  * carries the same records of its cycle (§16.3 п.11, M-6) — and the other
  * said as the pieces of a retry: no lie, the medium kept a write it refused.
  * The one not taken is let go. */
-static RibbonUnit* RibbonRetried(RibbonWalk* w, RibbonUnit* here, RibbonUnit* there)
+static RibbonUnit* RibbonRetried(TagFSVolume* vol, RibbonWalk* w, RibbonUnit* here, RibbonUnit* there)
 {
     if (!here || !there || here->seq == there->seq) {
         if (here && there)
@@ -320,7 +317,7 @@ static RibbonUnit* RibbonRetried(RibbonWalk* w, RibbonUnit* here, RibbonUnit* th
     }
     RibbonUnit* take = here->seq > there->seq ? here : there;
     RibbonUnit* left = take == here ? there : here;
-    RibbonSay(w, RIBBON_CODE_DEAD_BRANCH, "stitch seq %llu at the end of the ribbon and seq %llu in its "
+    RibbonSay(vol, w, RIBBON_CODE_DEAD_BRANCH, "stitch seq %llu at the end of the ribbon and seq %llu in its "
               "next_quire are both whole and both name stitch %llu by its Clasp — a write the medium refused and "
               "kept, and its retry (M-6): seq %llu, the larger, is taken; seq %llu is the pieces of a retry and is "
               "not applied (§16.3, amendment 11)", (unsigned long long)here->seq, (unsigned long long)there->seq,
@@ -362,7 +359,7 @@ static void RibbonLostSaid(const RibbonUnit* u, char* out, size_t room)
  * whether it was; OK, or the medium's or memory's refusal. `u` stays the
  * caller's when it is not taken.
  */
-static error_t RibbonClosed(RibbonWalk* w, RibbonUnit* u, bool at_next, bool* closed)
+static error_t RibbonClosed(TagFSVolume* vol, RibbonWalk* w, RibbonUnit* u, bool at_next, bool* closed)
 {
     RibbonUnit* f = NULL;
     uint64_t    names = 0;
@@ -371,8 +368,8 @@ static error_t RibbonClosed(RibbonWalk* w, RibbonUnit* u, bool at_next, bool* cl
     if (!RibbonFollows(w, u, at_next) || !u->has_end)
         return OK;
     RibbonQuire own = { u->head.next_block, u->head.next_blocks };
-    RibbonQuire hop = u->head_read && RibbonQuireLies(&own) ? own : w->next;
-    error_t rc = RibbonUnitFind(&u->end, &hop, u->seq, &f);
+    RibbonQuire hop = u->head_read && RibbonQuireLies(vol, &own) ? own : w->next;
+    error_t rc = RibbonUnitFind(vol, &u->end, &hop, u->seq, &f);
     if (rc != OK || !f || !f->sound || !RibbonUnitNames(f, &names) || names != u->seq ||
         (u->clasp_read && f->head.prev_clasp != u->clasp.crc)) {
         RibbonUnitLetGo(f);
@@ -383,18 +380,18 @@ static error_t RibbonClosed(RibbonWalk* w, RibbonUnit* u, bool at_next, bool* cl
     uint32_t nforeign = RibbonForeign(u, foreign, sizeof(foreign));
     uint64_t seq = u->seq, bytes = u->lost;
     uint32_t of  = u->of;
-    if (!RibbonTake(w, u)) {
+    if (!RibbonTake(vol, w, u)) {
         RibbonUnitLetGo(f);
         return ERR_NO_MEMORY;
     }
     w->lied |= nforeign != 0;
-    RibbonSay(w, RIBBON_CODE_STITCH_TORN, "stitch %llu is closed and damaged: sector(s) %s of its %u will not read, "
+    RibbonSay(vol, w, RIBBON_CODE_STITCH_TORN, "stitch %llu is closed and damaged: sector(s) %s of its %u will not read, "
               "and %llu byte(s) of its records with them; what reads by `lead` is replayed (§3.9)%s%s%s",
               (unsigned long long)seq, lost, of, (unsigned long long)bytes,
               nforeign ? "; sector(s) " : "", nforeign ? foreign : "",
               nforeign ? " hold another unit's — a write out of order or a lie, and a later stitch landed: "
                          "MEDIUM_LIED" : "");
-    return RibbonTake(w, f) ? OK : ERR_NO_MEMORY;
+    return RibbonTake(vol, w, f) ? OK : ERR_NO_MEMORY;
 }
 
 /* `seq` into the list of what a walk passed over, once in a row. */
@@ -410,13 +407,13 @@ static void RibbonPassedAdd(char* out, size_t room, size_t* at, uint64_t* last, 
  * the last one taken, with a larger seq, lies right after it — a try refused
  * that landed, and the retry after it (§16.3 п.11) — that one in its place,
  * the one it replaces into the list passed. */
-static error_t RibbonFurtherOn(RibbonWalk* w, RibbonUnit** take, char* passed, size_t room, size_t* at,
+static error_t RibbonFurtherOn(TagFSVolume* vol, RibbonWalk* w, RibbonUnit** take, char* passed, size_t room, size_t* at,
                                uint64_t* last)
 {
     while (*take && (*take)->has_end) {
         RibbonUnit* f   = NULL;
         RibbonQuire own = { (*take)->head.next_block, (*take)->head.next_blocks };
-        error_t     rc  = RibbonUnitFind(&(*take)->end, RibbonQuireLies(&own) ? &own : NULL, (*take)->seq, &f);
+        error_t     rc  = RibbonUnitFind(vol, &(*take)->end, RibbonQuireLies(vol, &own) ? &own : NULL, (*take)->seq, &f);
         if (rc != OK || !f || !f->sound || !RibbonFollows(w, f, true)) {
             RibbonUnitLetGo(f);
             return rc;
@@ -441,7 +438,7 @@ static error_t RibbonFurtherOn(RibbonWalk* w, RibbonUnit** take, char* passed, s
  * there holds a stitch of a seq past the last one — then no unit begins at its
  * start either, and rule (в) need not look for one.
  */
-static error_t RibbonFurther(RibbonWalk* w, RibbonUnit** out, bool* blank)
+static error_t RibbonFurther(TagFSVolume* vol, RibbonWalk* w, RibbonUnit** out, bool* blank)
 {
     RibbonQuire n     = w->next;
     uint64_t    total = n.blocks * VOLUME_BLOCK_SECTORS, pos = 0, last = 0;
@@ -457,7 +454,7 @@ static error_t RibbonFurther(RibbonWalk* w, RibbonUnit** out, bool* blank)
         RibbonUnit*    u = NULL;
         uint64_t       j = 0;
         bool           found = false;
-        rc = RibbonUnitAhead(&p, w->seq, &j, &h, &found, &u);
+        rc = RibbonUnitAhead(vol, &p, w->seq, &j, &h, &found, &u);
         if (rc != OK || !found)
             break;
         *blank = false;
@@ -470,14 +467,14 @@ static error_t RibbonFurther(RibbonWalk* w, RibbonUnit** out, bool* blank)
         pos += j + (h.at < h.of ? (uint64_t)h.of - h.at : 1u);
     }
     if (rc == OK)
-        rc = RibbonFurtherOn(w, out, passed, sizeof(passed), &at, &last);
+        rc = RibbonFurtherOn(vol, w, out, passed, sizeof(passed), &at, &last);
     if (rc != OK) {
         RibbonUnitLetGo(*out);
         *out = NULL;
         return rc;
     }
     if (*out && (!RibbonQuireSame(&(*out)->start.quire, &n) || (*out)->start.off))
-        RibbonSay(w, RIBBON_CODE_DEAD_BRANCH, "no whole stitch at the start of the next_quire %llu+%llu names stitch "
+        RibbonSay(vol, w, RIBBON_CODE_DEAD_BRANCH, "no whole stitch at the start of the next_quire %llu+%llu names stitch "
                   "%llu and goes on from there: seq %s walked over to seq %llu at its sector %llu, which names it "
                   "and the Quire the first try came from — the pieces of a retry, not applied (§16.4 п.4)",
                   (unsigned long long)n.block, (unsigned long long)n.blocks, (unsigned long long)w->seq,
@@ -506,7 +503,7 @@ static bool RibbonNamesStitch(const RibbonUnit* u, const RibbonUnit* s)
  * takes `s` on through that Quire: every unit of the chain is read once
  * (stitch_ribbon.py Ribbon._Kept).
  */
-static error_t RibbonKept(const RibbonWalk* w, const RibbonUnit* s, bool* kept, RibbonUnit** ahead, RibbonQuire* hop)
+static error_t RibbonKept(TagFSVolume* vol, const RibbonWalk* w, const RibbonUnit* s, bool* kept, RibbonUnit** ahead, RibbonQuire* hop)
 {
     RibbonQuire own  = { s->head.next_block, s->head.next_blocks };
     RibbonQuire none = { 0, 0 };
@@ -519,12 +516,12 @@ static error_t RibbonKept(const RibbonWalk* w, const RibbonUnit* s, bool* kept, 
     if (!s->has_end)
         return OK;
     (void)RibbonPlaceOn(&s->start, s->of - 1u, &s->hop, &last);
-    *hop = RibbonQuireLies(&own) ? own : RibbonQuireSame(&last.quire, &w->quire) ? w->next : none;
-    rc    = RibbonUnitFind(&s->end, hop, s->seq, ahead);
+    *hop = RibbonQuireLies(vol, &own) ? own : RibbonQuireSame(&last.quire, &w->quire) ? w->next : none;
+    rc    = RibbonUnitFind(vol, &s->end, hop, s->seq, ahead);
     *kept = rc == OK && RibbonNamesStitch(*ahead, s);
     if (rc == OK && !*kept && hop->blocks && !RibbonQuireSame(&s->end.quire, hop)) {
         RibbonPlace head = { *hop, 0 };
-        rc    = RibbonUnitFind(&head, NULL, s->seq, &v);
+        rc    = RibbonUnitFind(vol, &head, NULL, s->seq, &v);
         *kept = rc == OK && RibbonNamesStitch(v, s);
         RibbonUnitLetGo(v);
     }
@@ -533,10 +530,10 @@ static error_t RibbonKept(const RibbonWalk* w, const RibbonUnit* s, bool* kept, 
 
 /* The unit rule (а) weighs: the one read at the end of the stitch last taken
  * while it was weighed, else looked for there now. */
-static error_t RibbonAt(RibbonWalk* w, RibbonUnit** u)
+static error_t RibbonAt(TagFSVolume* vol, RibbonWalk* w, RibbonUnit** u)
 {
     if (!w->ahead_read)
-        return RibbonUnitFind(&w->end, &w->next, w->seq, u);
+        return RibbonUnitFind(vol, &w->end, &w->next, w->seq, u);
     *u            = w->ahead;
     w->ahead      = NULL;
     w->ahead_read = false;
@@ -545,9 +542,9 @@ static error_t RibbonAt(RibbonWalk* w, RibbonUnit** u)
 
 /* `take` sewn on, and what was read past it kept for the next step when the
  * walk goes on through the Quire it was read through. */
-static error_t RibbonTakeOn(RibbonWalk* w, RibbonUnit* take, RibbonUnit* ahead, const RibbonQuire* hop, bool read)
+static error_t RibbonTakeOn(TagFSVolume* vol, RibbonWalk* w, RibbonUnit* take, RibbonUnit* ahead, const RibbonQuire* hop, bool read)
 {
-    if (!RibbonTake(w, take)) {
+    if (!RibbonTake(vol, w, take)) {
         RibbonUnitLetGo(ahead);
         return ERR_NO_MEMORY;
     }
@@ -561,31 +558,31 @@ static error_t RibbonTakeOn(RibbonWalk* w, RibbonUnit* take, RibbonUnit* ahead, 
 }
 
 /* One step of rules (а)–(в): *took whether a stitch was sewn on. */
-static error_t RibbonSewOne(RibbonWalk* w, bool* took)
+static error_t RibbonSewOne(TagFSVolume* vol, RibbonWalk* w, bool* took)
 {
     RibbonUnit *u = NULL, *v = NULL, *here = NULL, *there = NULL, *ahead = NULL;
     RibbonQuire hop  = { 0, 0 };
     bool        kept = false, read = false, blank = true;
-    error_t     rc   = RibbonAt(w, &u);
+    error_t     rc   = RibbonAt(vol, w, &u);
     *took = false;
     if (rc == OK)
         here = u && u->sound && RibbonFollows(w, u, false) ? u : NULL;
     if (rc == OK && here && w->next.blocks) {
-        rc   = RibbonKept(w, here, &kept, &ahead, &hop);
+        rc   = RibbonKept(vol, w, here, &kept, &ahead, &hop);
         read = rc == OK && here->has_end;
     }
     if (rc == OK && w->next.blocks && !kept)
-        rc = RibbonFurther(w, &there, &blank);
+        rc = RibbonFurther(vol, w, &there, &blank);
     if (rc == OK && !here && !there && !blank && !RibbonQuireSame(&w->end.quire, &w->next)) {
         RibbonPlace head = { w->next, 0 };
-        rc = RibbonUnitFind(&head, NULL, w->seq, &v);
+        rc = RibbonUnitFind(vol, &head, NULL, w->seq, &v);
     }
     if (rc == OK && (here || there)) {
-        RibbonUnit* take = RibbonRetried(w, here, there);
+        RibbonUnit* take = RibbonRetried(vol, w, here, there);
         if (u != here)
             RibbonUnitLetGo(u);
         *took = true;
-        return RibbonTakeOn(w, take, ahead, &hop, read && take == here);
+        return RibbonTakeOn(vol, w, take, ahead, &hop, read && take == here);
     }
     RibbonUnitLetGo(ahead);
     if (rc != OK) {
@@ -601,7 +598,7 @@ static error_t RibbonSewOne(RibbonWalk* w, bool* took)
         RibbonUnit* c = tried[i];
         if (!c || c->sound || c->shape != RIBBON_SHAPE_KEPT)
             continue;
-        rc = RibbonClosed(w, c, c == v, took);
+        rc = RibbonClosed(vol, w, c, c == v, took);
         if (*took)
             tried[i] = NULL;
     }
@@ -612,14 +609,14 @@ static error_t RibbonSewOne(RibbonWalk* w, bool* took)
 
 /* Rules (а)–(г) until none takes the next unit, bounded by the seq every
  * stitch raises and by the data run's length. */
-static error_t RibbonSew(RibbonWalk* w)
+static error_t RibbonSew(TagFSVolume* vol, RibbonWalk* w)
 {
     uint64_t hops = 0;
     bool     took = true;
     error_t  rc   = OK;
-    while (rc == OK && took && w->has_end && hops <= g_book.data_end) {
+    while (rc == OK && took && w->has_end && hops <= vol->book.data_end) {
         hops++;
-        rc = RibbonSewOne(w, &took);
+        rc = RibbonSewOne(vol, w, &took);
     }
     RibbonUnitLetGo(w->ahead);
     w->ahead      = NULL;
@@ -656,7 +653,7 @@ static void RibbonSeenOf(RibbonWalk* w, const RibbonUnit* u)
     }
 }
 
-error_t RibbonWalkBegun(const SpineSlot* slot, bool stood, RibbonWalk** out)
+error_t RibbonWalkBegun(TagFSVolume* vol, const SpineSlot* slot, bool stood, RibbonWalk** out)
 {
     const SpineRibbon* r = &slot->ribbon;
     char               who[48];
@@ -672,8 +669,8 @@ error_t RibbonWalkBegun(const SpineSlot* slot, bool stood, RibbonWalk** out)
     w->clasp       = slot->head.stitch_clasp;
     w->clasp_known = true;
     w->quire       = (RibbonQuire){ r->quire_block, r->quire_blocks };
-    if (!RibbonQuireLies(&w->quire) || r->at < r->quire_block || r->at - r->quire_block >= r->quire_blocks) {
-        RibbonSay(w, RIBBON_CODE_RIBBON_TORN, "slot %u puts the ribbon on at block %llu of the Quire %llu+%llu, "
+    if (!RibbonQuireLies(vol, &w->quire) || r->at < r->quire_block || r->at - r->quire_block >= r->quire_blocks) {
+        RibbonSay(vol, w, RIBBON_CODE_RIBBON_TORN, "slot %u puts the ribbon on at block %llu of the Quire %llu+%llu, "
                   "which does not hold it or lies outside the data run or off an atom — no stitch past its Tally "
                   "is read", slot->index, (unsigned long long)r->at, (unsigned long long)r->quire_block,
                   (unsigned long long)r->quire_blocks);
@@ -683,17 +680,17 @@ error_t RibbonWalkBegun(const SpineSlot* slot, bool stood, RibbonWalk** out)
     w->has_end = true;
     RibbonQuire next = { r->next_block, r->next_blocks };
     ksnprintf(who, sizeof(who), "slot %u's SpineRibbon", slot->index);
-    return RibbonQuireAdd(w, &w->quire) && RibbonNamed(w, &next, who) ? OK : ERR_NO_MEMORY;
+    return RibbonQuireAdd(w, &w->quire) && RibbonNamed(vol, w, &next, who) ? OK : ERR_NO_MEMORY;
 }
 
-error_t RibbonCollate(const SpineSlot* slot, RibbonWalk** out)
+error_t RibbonCollate(TagFSVolume* vol, const SpineSlot* slot, RibbonWalk** out)
 {
-    error_t     rc = RibbonWalkBegun(slot, true, out);
+    error_t     rc = RibbonWalkBegun(vol, slot, true, out);
     RibbonWalk* w  = *out;
     if (rc == OK)
-        rc = RibbonSew(w);
+        rc = RibbonSew(vol, w);
     if (rc == OK)
-        rc = RibbonScan(w);
+        rc = RibbonScan(vol, w);
     if (w) {
         kfree(w->ground);
         w->ground  = NULL;
@@ -709,12 +706,12 @@ error_t RibbonCollate(const SpineSlot* slot, RibbonWalk** out)
     return rc;
 }
 
-error_t RibbonCollateOlder(const SpineSlot* slot, RibbonWalk** out)
+error_t RibbonCollateOlder(TagFSVolume* vol, const SpineSlot* slot, RibbonWalk** out)
 {
-    error_t     rc = RibbonWalkBegun(slot, false, out);
+    error_t     rc = RibbonWalkBegun(vol, slot, false, out);
     RibbonWalk* w  = *out;
     if (rc == OK)
-        rc = RibbonSew(w);
+        rc = RibbonSew(vol, w);
     if (w) {
         kfree(w->ground);
         w->ground  = NULL;

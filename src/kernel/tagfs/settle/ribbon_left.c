@@ -1,5 +1,6 @@
 #include "sewing.h"
 #include "kheap.h"
+#include "tagfs_volume.h"
 
 /*
  * What this kernel left on the ribbon, kept for the medium's return (sewing.h,
@@ -24,32 +25,25 @@
  * (RibbonTryMake, by StitchLay), so keeping it asks for nothing more.
  */
 
-static BookLeftMark* s_marks;
-static uint32_t      s_nmarks;
-static uint32_t      s_capmarks;
-static uint64_t      s_lacking;        /* the newest stitch to be held to whose mark this kernel lacks; 0 none */
-static uint64_t      s_seen;           /* the largest seq the mount saw on the medium (BookSeqSeen) */
-static RibbonTry*    s_tries;          /* newest first */
-static RibbonPlace   s_past;           /* where the ribbon goes on past the last stitch sewn */
 
 /* Room for one more mark: false when the heap refused it. */
-static bool RibbonMarkRoom(void)
+static bool RibbonMarkRoom(TagFSVolume* vol)
 {
-    if (s_nmarks < s_capmarks)
+    if (vol->ribbon_left.nmarks < vol->ribbon_left.capmarks)
         return true;
 #ifdef CONFIG_VOLUME_TESTS
     if (RibbonStandMarksRefusing())
         return false;
 #endif
-    uint32_t      cap  = s_capmarks ? s_capmarks * 2u : 8u;
+    uint32_t      cap  = vol->ribbon_left.capmarks ? vol->ribbon_left.capmarks * 2u : 8u;
     BookLeftMark* more = kmalloc(sizeof(BookLeftMark) * cap);
     if (!more)
         return false;
-    if (s_nmarks)
-        memcpy(more, s_marks, sizeof(BookLeftMark) * s_nmarks);
-    kfree(s_marks);
-    s_marks    = more;
-    s_capmarks = cap;
+    if (vol->ribbon_left.nmarks)
+        memcpy(more, vol->ribbon_left.marks, sizeof(BookLeftMark) * vol->ribbon_left.nmarks);
+    kfree(vol->ribbon_left.marks);
+    vol->ribbon_left.marks    = more;
+    vol->ribbon_left.capmarks = cap;
     return true;
 }
 
@@ -61,91 +55,91 @@ static bool RibbonMarkRoom(void)
  * next stitch settling, or on a medium that lied a Tally taking the stitch
  * in — gives the book up, and the volume is read again.
  */
-static void RibbonMarkPut(const BookLeftMark* m, bool lied)
+static void RibbonMarkPut(TagFSVolume* vol, const BookLeftMark* m, bool lied)
 {
     if (!lied)
-        s_nmarks = 0;
-    if (RibbonMarkRoom()) {
-        s_marks[s_nmarks++] = *m;
+        vol->ribbon_left.nmarks = 0;
+    if (RibbonMarkRoom(vol)) {
+        vol->ribbon_left.marks[vol->ribbon_left.nmarks++] = *m;
         if (!lied)
-            s_lacking = 0;
+            vol->ribbon_left.lacking = 0;
         return;
     }
-    if (!s_lacking)
+    if (!vol->ribbon_left.lacking)
         kprintf("[TagFS] memory would not keep the place of stitch %llu, which a medium that leaves is held to "
                 "when it comes back: a return before %s gives its book up, and the volume is read again\n",
                 (unsigned long long)m->seq, lied ? "a Tally takes that stitch in" : "a stitch past it settles");
-    s_lacking = m->seq;
+    vol->ribbon_left.lacking = m->seq;
 }
 
-void RibbonLeftMount(const RibbonWalk* w, bool lied, uint64_t seen)
+void RibbonLeftMount(TagFSVolume* vol, const RibbonWalk* w, bool lied, uint64_t seen)
 {
-    RibbonLeftLetGo();
-    s_past = w->end;
-    s_seen = seen;
+    RibbonLeftLetGo(vol);
+    vol->ribbon_left.past = w->end;
+    vol->ribbon_left.seen = seen;
     for (uint32_t i = 0; i < w->nstitch; i++) {
         const RibbonUnit* u = w->stitch[i];
         if (!lied && i + 1u < w->nstitch)
             continue;
         if (!u->sound) {
-            s_lacking = u->seq;     /* read in pieces: no mark, nothing of it confirmed to this kernel */
+            vol->ribbon_left.lacking = u->seq;     /* read in pieces: no mark, nothing of it confirmed to this kernel */
             continue;
         }
         BookLeftMark m = { .at = u->start, .hop = u->hop, .of = u->of, .seq = u->seq, .clasp = u->clasp.crc,
                            .clasp_at = u->clasp_at };
-        RibbonMarkPut(&m, true);
+        RibbonMarkPut(vol, &m, true);
     }
 }
 
-static void RibbonTriesLetGo(void)
+static void RibbonTriesLetGo(TagFSVolume* vol)
 {
-    while (s_tries) {
-        RibbonTry* t = s_tries;
-        s_tries = t->next;
+    while (vol->ribbon_left.tries) {
+        RibbonTry* t = vol->ribbon_left.tries;
+        vol->ribbon_left.tries = t->next;
         kfree(t);
     }
 }
 
-void RibbonLeftSewn(const BookLeftMark* m, bool lied)
+void RibbonLeftSewn(TagFSVolume* vol, const BookLeftMark* m, bool lied)
 {
-    if (!RibbonPlaceOn(&m->at, m->of, &m->hop, &s_past)) {
+    if (!RibbonPlaceOn(&m->at, m->of, &m->hop, &vol->ribbon_left.past)) {
         RibbonQuire last = m->of <= RibbonPlaceLeft(&m->at) ? m->at.quire : m->hop;
-        s_past = (RibbonPlace){ .quire = last, .off = last.blocks * TAGFS_BLOCK_SECTORS };
+        vol->ribbon_left.past = (RibbonPlace){ .quire = last, .off = last.blocks * TAGFS_BLOCK_SECTORS };
     }
-    RibbonMarkPut(m, lied);
-    RibbonTriesLetGo();
+    RibbonMarkPut(vol, m, lied);
+    RibbonTriesLetGo(vol);
 }
 
-void RibbonLeftTallied(uint64_t taken)
+void RibbonLeftTallied(TagFSVolume* vol, uint64_t taken)
 {
     uint32_t keep = 0;
-    for (uint32_t i = 0; i < s_nmarks; i++)
-        if (s_marks[i].seq > taken)
-            s_marks[keep++] = s_marks[i];
-    s_nmarks = keep;
-    if (s_lacking <= taken)
-        s_lacking = 0;      /* the stitch lacking its mark lies behind the slot now, which holds it */
+    for (uint32_t i = 0; i < vol->ribbon_left.nmarks; i++)
+        if (vol->ribbon_left.marks[i].seq > taken)
+            vol->ribbon_left.marks[keep++] = vol->ribbon_left.marks[i];
+    vol->ribbon_left.nmarks = keep;
+    if (vol->ribbon_left.lacking <= taken)
+        vol->ribbon_left.lacking = 0;      /* the stitch lacking its mark lies behind the slot now, which holds it */
 }
 
-void RibbonLeftLetGo(void)
+void RibbonLeftLetGo(TagFSVolume* vol)
 {
-    RibbonTriesLetGo();
-    kfree(s_marks);
-    s_marks    = NULL;
-    s_nmarks   = 0;
-    s_capmarks = 0;
-    s_lacking  = 0;
-    s_seen     = 0;
-    s_past     = (RibbonPlace){ 0 };
+    RibbonTriesLetGo(vol);
+    kfree(vol->ribbon_left.marks);
+    vol->ribbon_left.marks    = NULL;
+    vol->ribbon_left.nmarks   = 0;
+    vol->ribbon_left.capmarks = 0;
+    vol->ribbon_left.lacking  = 0;
+    vol->ribbon_left.seen     = 0;
+    vol->ribbon_left.past     = (RibbonPlace){ 0 };
 }
 
-const BookLeftMark* RibbonLeftMarks(uint32_t* n, uint64_t* lacking, RibbonPlace* past, uint64_t* seen)
+const BookLeftMark* RibbonLeftMarks(TagFSVolume* vol, uint32_t* n, uint64_t* lacking, RibbonPlace* past, uint64_t* seen)
 {
-    *n       = s_nmarks;
-    *lacking = s_lacking;
-    *past    = s_past;
-    *seen    = s_seen;
-    return s_marks;
+    *n       = vol->ribbon_left.nmarks;
+    *lacking = vol->ribbon_left.lacking;
+    *past    = vol->ribbon_left.past;
+    *seen    = vol->ribbon_left.seen;
+    return vol->ribbon_left.marks;
 }
 
 RibbonTry* RibbonTryMake(uint32_t of)
@@ -156,15 +150,15 @@ RibbonTry* RibbonTryMake(uint32_t of)
     return t;
 }
 
-void RibbonTryLaid(RibbonTry* t)
+void RibbonTryLaid(TagFSVolume* vol, RibbonTry* t)
 {
-    t->next = s_tries;
-    s_tries = t;
+    t->next = vol->ribbon_left.tries;
+    vol->ribbon_left.tries = t;
 }
 
-bool RibbonTryOwns(uint64_t vlba, const uint8_t* sector, bool* newest)
+bool RibbonTryOwns(TagFSVolume* vol, uint64_t vlba, const uint8_t* sector, bool* newest)
 {
-    for (const RibbonTry* t = s_tries; t; t = t->next) {
+    for (const RibbonTry* t = vol->ribbon_left.tries; t; t = t->next) {
         uint64_t left  = RibbonPlaceLeft(&t->at);
         uint64_t first = RibbonPlaceVlba(&t->at);
         uint64_t k     = UINT64_MAX;
@@ -174,19 +168,19 @@ bool RibbonTryOwns(uint64_t vlba, const uint8_t* sector, bool* newest)
                  vlba - t->hop.block * TAGFS_BLOCK_SECTORS < t->of - left)
             k = left + (vlba - t->hop.block * TAGFS_BLOCK_SECTORS);
         if (k != UINT64_MAX && memcmp(sector, t->sectors + k * BOOK_SECTOR_BYTES, BOOK_SECTOR_BYTES) == 0) {
-            *newest = t == s_tries;
+            *newest = t == vol->ribbon_left.tries;
             return true;
         }
     }
     return false;
 }
 
-const char* RibbonTryPast(void)
+const char* RibbonTryPast(TagFSVolume* vol)
 {
-    RibbonTry* t = s_tries;
+    RibbonTry* t = vol->ribbon_left.tries;
     if (!t || t->past)
         return NULL;
-    const char* nowhere = RibbonRetry(&t->at, &t->hop, t->of, true);
+    const char* nowhere = RibbonRetry(vol, &t->at, &t->hop, t->of, true);
     t->past = nowhere == NULL;
     return nowhere;
 }

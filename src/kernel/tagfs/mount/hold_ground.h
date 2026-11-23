@@ -15,17 +15,17 @@
  *   Resumed      the open book taken up: the caller steps out, and the same.
  */
 #if CONFIG_TAGFS_HOLD_GROUND
-void TagFSHoldGroundOpenFile(void);
-void TagFSHoldGroundTake(void);
-void TagFSHoldGroundRelease(void);
-void TagFSHoldGroundAfterReturn(void);
-void TagFSHoldGroundResumed(void);
+void TagFSHoldGroundOpenFile(TagFSVolume* vol);
+void TagFSHoldGroundTake(TagFSVolume* vol);
+void TagFSHoldGroundRelease(TagFSVolume* vol);
+void TagFSHoldGroundAfterReturn(TagFSVolume* vol);
+void TagFSHoldGroundResumed(TagFSVolume* vol);
 #else
-#define TagFSHoldGroundOpenFile()    ((void)0)
-#define TagFSHoldGroundTake()        ((void)0)
-#define TagFSHoldGroundRelease()     ((void)0)
-#define TagFSHoldGroundAfterReturn() ((void)0)
-#define TagFSHoldGroundResumed()     ((void)0)
+#define TagFSHoldGroundOpenFile(vol)    ((void)(vol))
+#define TagFSHoldGroundTake(vol)        ((void)(vol))
+#define TagFSHoldGroundRelease(vol)     ((void)(vol))
+#define TagFSHoldGroundAfterReturn(vol) ((void)(vol))
+#define TagFSHoldGroundResumed(vol)     ((void)(vol))
 #endif
 
 #endif /* TAGFS_MOUNT_HOLD_GROUND_H */

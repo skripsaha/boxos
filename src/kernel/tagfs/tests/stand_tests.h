@@ -75,15 +75,15 @@
  * volume assembled in Braid has its every block taken by it (tagfs.c,
  * read_block and write_block), so a fault armed on a sector of the volume
  * would never meet the command. */
-const char* StandStepsAsideFor(void);
+const char* StandStepsAsideFor(TagFSVolume* vol);
 
 /* Why this machine has no port road for a program's read or write to walk —
  * one core, or a legacy channel — or NULL when it has one; and one turn of the
  * machine a job through the port continues in, done by hand before the
  * machine runs: the seat's answers brought in, the drain core's batons
  * pumped, the service point run (stand_port_tests.c). */
-const char* StandPortAside(uint8_t seat);
-void        StandPortTurn(uint8_t seat);
+const char* StandPortAside(TagFSVolume* vol, uint8_t seat);
+void        StandPortTurn(TagFSVolume* vol, uint8_t seat);
 
 /* Every Quire of the grid of `q` blocks a slot that holds names a node in —
  * its own nodes and the Quires its Tally names a node in as it lies — and the
@@ -91,23 +91,23 @@ void        StandPortTurn(uint8_t seat);
  * let go; *nquire bits): the blocks they take, a Quire whole — the Tallies'
  * ground as a mount's census holds it. UINT64_MAX with no
  * memory (tests.c). */
-uint64_t StandTallyQuires(uint64_t q, uint64_t** marks, uint64_t* nquire);
+uint64_t StandTallyQuires(TagFSVolume* vol, uint64_t q, uint64_t** marks, uint64_t* nquire);
 
 /* One turn of the machine a cycle of the Settle goes on in, done by hand: the
  * knock, the batons on this core, the service point (stand_settle_tests.c). */
-void StandSettleTurn(void);
+void StandSettleTurn(TagFSVolume* vol);
 
 /* A file of `bytes` bytes of `data`, created and written through the handle
  * API, named `name` and carrying no tag. False — with nothing left behind —
  * when either step did not answer in full. */
-bool StandMakeFile(const char* name, const void* data, uint32_t bytes, uint64_t* out_file_id);
+bool StandMakeFile(TagFSVolume* vol, const char* name, const void* data, uint32_t bytes, uint64_t* out_file_id);
 
 /* Whether the file's record says it was made by the program whose file is
  * `made_by` — 0: by none — the field and TAGFS_FILE_MADE_BY agreeing, as a
  * record always holds them. False too for a file the volume does not have. */
-bool StandMadeByIs(uint64_t file_id, uint64_t made_by);
+bool StandMadeByIs(TagFSVolume* vol, uint64_t file_id, uint64_t made_by);
 /* The same, the file wearing `tag` (interned for it) — none for NULL. */
-bool StandMakeTaggedFile(const char* name, const char* tag, const void* data, uint32_t bytes,
+bool StandMakeTaggedFile(TagFSVolume* vol, const char* name, const char* tag, const void* data, uint32_t bytes,
                          uint64_t* out_file_id);
 
 /* Whether the name index answers, for every word the name of a live file gives
@@ -115,26 +115,26 @@ bool StandMakeTaggedFile(const char* name, const char* tag, const void* data, ui
  * deleted, none let go, none twice — and holds exactly the links those files
  * give it (stand_name_tests.c). Every test that changes the files a volume
  * holds may end by asking. */
-bool StandNamesExact(void);
+bool StandNamesExact(TagFSVolume* vol);
 
 /* The file kept in `role` (TAGFS_FILE_ROLE_*; TAGFS_FILE_ROLE_ORDINARY lets it
  * go), as the image builder keeps a file — the stand's own way, since no call
  * a program makes puts a role on a file (helm/engross.h, EngrossRoled: the
  * tail laid in its block first, then InkRoleLaid). OK, or the refusal. */
-error_t StandKeepInRole(uint64_t file_id, uint32_t role);
+error_t StandKeepInRole(TagFSVolume* vol, uint64_t file_id, uint32_t role);
 
 /* The first file of the volume whose record keeps it in a role and names a
  * block — the image's own system files. False when there is none. */
-bool StandKeptFile(uint64_t* out_file_id);
+bool StandKeptFile(TagFSVolume* vol, uint64_t* out_file_id);
 
 /* The data-run block that holds the k-th block of the file, read off its
  * record — never off the block itself, which would put it in the read-ahead
  * cache a read fault must not be answered from. */
-bool StandBlockOf(uint64_t file_id, uint64_t k, uint64_t* out_block);
+bool StandBlockOf(TagFSVolume* vol, uint64_t file_id, uint64_t k, uint64_t* out_block);
 
 /* Write `bytes` at `offset` through a fresh handle; tagfs_write's answer, or
  * -1 when the file would not open. */
-int  StandWriteAt(uint64_t file_id, uint64_t offset, const void* data, uint32_t bytes);
+int  StandWriteAt(TagFSVolume* vol, uint64_t file_id, uint64_t offset, const void* data, uint32_t bytes);
 
 /* The commands BLOCKFAIL answered under the plan just let go (BlockFailSeen
  * keeps them past BlockFailDisarm, until the next plan), said by a test whose
@@ -146,7 +146,7 @@ void StandBlockFailRaced(const char* suite);
 /* Whether the volume calls a block taken: the map derived from its Tally and
  * ribbon — where a block that rests in Fallow is taken too, until the cycles
  * after it give it back. */
-bool StandBlockInUse(uint64_t block);
+bool StandBlockInUse(TagFSVolume* vol, uint64_t block);
 
 /* One storage-deck op asked as `ctx` asks it — NULL for a caller in the
  * kernel, which carries no warrant: the params after the op's head, `in` the
@@ -190,14 +190,14 @@ TestResult TestStandOpenJoinsTheWriters(void);
  * nothing rests in Fallow, and one more. StandMountClose: whatever a mount
  * test left taken down — its turn, BLOCKFAIL, the volume up again, the runner
  * counted back in. */
-bool       StandMountSettles(void);
-bool       StandSettledBare(void);
+bool       StandMountSettles(TagFSVolume* vol);
+bool       StandSettledBare(TagFSVolume* vol);
 
 /* Room asked for on a book, as a full volume asks it: the ribbon's Quire
  * closed early and the lag's stitches laid past it (SettleForRoom) — what a
  * book's Fallow waits for before it gives ground back. Its answer. */
-error_t    StandBookRoom(void);
-void       StandMountClose(uint8_t seat);
+error_t    StandBookRoom(TagFSVolume* vol);
+void       StandMountClose(TagFSVolume* vol, uint8_t seat);
 TestResult TestStandMediumMountLosesItsSeat(void);
 TestResult TestStandMediumMountRingsInItsOwnBreath(void);
 TestResult TestStandMediumMountBadSectorWaits(void);
@@ -209,17 +209,17 @@ TestResult TestStandMediumMountWaitsForMemory(void);
  * volume, let go of, mounted again on what the medium holds now and the
  * runner counted back in: true when it came up. A book's suites share them
  * (stand_stitch). */
-void       StandRibbonArrive(void);
-bool       StandRibbonUp(void);
+void       StandRibbonArrive(TagFSVolume* vol);
+bool       StandRibbonUp(TagFSVolume* vol);
 
 /* stand_tally_tests.c: why a test written for a book stands aside here, or
  * NULL; the volume's medium arriving again, attended until the mount road has
  * nothing left to do, bounded; and whatever a test left — the plan down, the
  * volume up again if it is not, and the runner counted back in, once. The
  * stand_tally suite's, shared with its case in stand_tally_range_tests.c. */
-const char* StandTallyAside(void);
-void        StandTallyArrive(void);
-void        StandTallyClose(void);
+const char* StandTallyAside(TagFSVolume* vol);
+void        StandTallyArrive(TagFSVolume* vol);
+void        StandTallyClose(TagFSVolume* vol);
 
 #endif /* CONFIG_VOLUME_TESTS */
 

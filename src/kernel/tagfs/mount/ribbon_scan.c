@@ -1,6 +1,7 @@
 #include "ribbon.h"
 #include "book_mount.h"
 #include "book_unit.h"
+#include "tagfs_volume.h"
 
 /*
  * RibbonScan — the direct scan past the end of the chain a slot's ribbon was
@@ -77,7 +78,7 @@ static void RibbonShapeSaid(const RibbonUnit* u, char* out, size_t room)
  * next_quire: each unit of a seq past the chain's that begins there, read
  * whole — the first sector of a seq that lies at or past its own `at` from
  * the end names where it begins. */
-static error_t RibbonScanUnits(RibbonWalk* w, uint32_t* cap)
+static error_t RibbonScanUnits(TagFSVolume* vol, RibbonWalk* w, uint32_t* cap)
 {
     uint64_t room = RibbonPlaceLeft(&w->end) + w->next.blocks * VOLUME_BLOCK_SECTORS;
     for (uint64_t i = 0; i < room;) {
@@ -86,7 +87,7 @@ static error_t RibbonScanUnits(RibbonWalk* w, uint32_t* cap)
         if (!RibbonPlaceOn(&w->end, i, &w->next, &p))
             break;
         uint64_t n  = RibbonPlaceLeft(&p) < 256u ? RibbonPlaceLeft(&p) : 256u;
-        error_t  rc = BookUnitRead(RibbonPlaceVlba(&p), (uint32_t)n, 0, 0, &run);
+        error_t  rc = BookUnitRead(vol, RibbonPlaceVlba(&p), (uint32_t)n, 0, 0, &run);
         for (uint32_t k = 0; rc == OK && k < n; k++) {
             BookSectorHead h;
             RibbonPlace    at;
@@ -96,7 +97,7 @@ static error_t RibbonScanUnits(RibbonWalk* w, uint32_t* cap)
                 i + k < h.at || RibbonPastOf(w, h.seq))
                 continue;
             RibbonPlaceOn(&w->end, i + k - h.at, &w->next, &at);
-            rc = RibbonUnitRead(&at, h.of, h.seq, &w->next, &u);
+            rc = RibbonUnitRead(vol, &at, h.of, h.seq, &w->next, &u);
             if (rc == OK && !RibbonPastAdd(w, u, cap))
                 rc = ERR_NO_MEMORY;
         }
@@ -110,7 +111,7 @@ static error_t RibbonScanUnits(RibbonWalk* w, uint32_t* cap)
 
 /* The units past the end no stitch is shaped like: said, and out of the
  * list — the ribbon is not taken past one, and its records are not read. */
-static void RibbonScanShapes(RibbonWalk* w)
+static void RibbonScanShapes(TagFSVolume* vol, RibbonWalk* w)
 {
     uint32_t kept = 0;
     char     why[96];
@@ -121,7 +122,7 @@ static void RibbonScanShapes(RibbonWalk* w)
             continue;
         }
         RibbonShapeSaid(u, why, sizeof(why));
-        RibbonSay(w, RIBBON_CODE_RECORD_SHAPE, "a unit of the ribbon at sector %llu, seq %llu, is %s: no stitch is "
+        RibbonSay(vol, w, RIBBON_CODE_RECORD_SHAPE, "a unit of the ribbon at sector %llu, seq %llu, is %s: no stitch is "
                   "so shaped (§1.5, §2.2) — the ribbon is not taken past it, and its records are not read",
                   (unsigned long long)RibbonPlaceVlba(&u->start), (unsigned long long)u->seq, why);
         RibbonUnitLetGo(u);
@@ -131,7 +132,7 @@ static void RibbonScanShapes(RibbonWalk* w)
 
 /* What the chain holds of stitch `seq` — one sewn on, or the one the Tally
  * took in: true, its Clasp in *clasp and whether it reads in *known. */
-static bool RibbonSewn(const RibbonWalk* w, uint64_t seq, uint32_t* clasp, bool* known)
+static bool WalkSewn(const RibbonWalk* w, uint64_t seq, uint32_t* clasp, bool* known)
 {
     if (seq == w->slot->head.stitch_seq) {
         *clasp = w->slot->head.stitch_clasp;
@@ -173,14 +174,14 @@ static RibbonUnit* RibbonLostNamer(const RibbonWalk* w, RibbonUnit* const* m, ui
  * Tally's or a slot's the Spine names; to + 1 when none. Found among the units
  * past the end and the slots, never seq by seq: a seq a medium names may lie
  * far past the end. */
-static uint64_t RibbonLostNotNext(const RibbonWalk* w, uint64_t from, uint64_t to)
+static uint64_t RibbonLostNotNext(TagFSVolume* vol, const RibbonWalk* w, uint64_t from, uint64_t to)
 {
     uint64_t next = to + 1u;
     for (uint32_t i = 0; i < w->npast; i++)
         if (w->past[i]->sound && w->past[i]->seq >= from && w->past[i]->seq < next)
             next = w->past[i]->seq;
-    for (uint32_t i = 0; i < g_book.nslots; i++) {
-        uint64_t seqs[2] = { g_book.slots[i].seq, g_book.slots[i].head.tally_seq };
+    for (uint32_t i = 0; i < vol->book.nslots; i++) {
+        uint64_t seqs[2] = { vol->book.slots[i].seq, vol->book.slots[i].head.tally_seq };
         for (uint32_t k = 0; k < 2u; k++)
             if (seqs[k] >= from && seqs[k] < next)
                 next = seqs[k];
@@ -203,7 +204,7 @@ static uint64_t RibbonLostNotNext(const RibbonWalk* w, uint64_t from, uint64_t t
  * the next would pass the largest named, never past it: a seq a medium names
  * may be the last one the counter has.
  */
-static uint64_t RibbonLostSeqs(const RibbonWalk* w, RibbonUnit* const* m, uint32_t nm, char* out, size_t room)
+static uint64_t RibbonLostSeqs(TagFSVolume* vol, const RibbonWalk* w, RibbonUnit* const* m, uint32_t nm, char* out, size_t room)
 {
     uint64_t top = 0, n = 0;
     size_t   at  = 0;
@@ -214,7 +215,7 @@ static uint64_t RibbonLostSeqs(const RibbonWalk* w, RibbonUnit* const* m, uint32
             top = x;
     }
     for (uint64_t lo = w->seq + 1u; top > w->seq && lo <= top;) {
-        uint64_t hi = RibbonLostNotNext(w, lo, top);
+        uint64_t hi = RibbonLostNotNext(vol, w, lo, top);
         if (hi > lo && at + 56u < room)
             at += (size_t)ksnprintf(out + at, room - at, hi - lo > 1u ? "%s%llu..%llu" : "%s%llu",
                                     at ? ", " : "", (unsigned long long)lo, (unsigned long long)(hi - 1u));
@@ -235,14 +236,14 @@ static uint64_t RibbonLostSeqs(const RibbonWalk* w, RibbonUnit* const* m, uint32
  * what settled is lost, at the most, with its seqs (RibbonLostSeqs), and says
  * the largest seq found past the end, which no seq given next repeats (§3.9,
  * C17). */
-static void RibbonLost(RibbonWalk* w, const RibbonUnit* r, const RibbonUnit* namer, RibbonUnit* const* m,
+static void RibbonLost(TagFSVolume* vol, RibbonWalk* w, const RibbonUnit* r, const RibbonUnit* namer, RibbonUnit* const* m,
                        uint32_t nm, const char* seqs)
 {
     uint64_t named = 0, x = 0, top = w->past[w->npast - 1u]->seq;
     char     lost[96];
-    uint64_t n = RibbonLostSeqs(w, m, nm, lost, sizeof(lost));
+    uint64_t n = RibbonLostSeqs(vol, w, m, nm, lost, sizeof(lost));
     if (r->sound && RibbonUnitNames(r, &named) && named > w->seq && !RibbonPastOf(w, named)) {
-        RibbonSay(w, RIBBON_CODE_DEAD_BRANCH, "the lie is proven: stitch seq %llu lies past the end of the ribbon "
+        RibbonSay(vol, w, RIBBON_CODE_DEAD_BRANCH, "the lie is proven: stitch seq %llu lies past the end of the ribbon "
                   "and names seq %llu, which the medium does not hold — a flush that lied, the cycles after it "
                   "written over a hole (FAST'13, H-2); what settled is lost: at most %llu stitch(es), seq %s; seq %s "
                   "are not applied, and no seq up to %llu, the largest found, is given again — MEDIUM_LIED",
@@ -251,7 +252,7 @@ static void RibbonLost(RibbonWalk* w, const RibbonUnit* r, const RibbonUnit* nam
         return;
     }
     RibbonUnitNames(namer, &x);
-    RibbonSay(w, RIBBON_CODE_DEAD_BRANCH, "what settled is lost: at most %llu stitch(es), seq %s — stitch seq %llu "
+    RibbonSay(vol, w, RIBBON_CODE_DEAD_BRANCH, "what settled is lost: at most %llu stitch(es), seq %s — stitch seq %llu "
               "names %llu, begun only after %llu had settled, and %llu %s (H-3); seq %s past the end of the ribbon "
               "are not applied, and no seq up to %llu, the largest found, is given again — MEDIUM_LIED",
               (unsigned long long)n, lost, (unsigned long long)namer->seq, (unsigned long long)x,
@@ -262,17 +263,17 @@ static void RibbonLost(RibbonWalk* w, const RibbonUnit* r, const RibbonUnit* nam
 /* The stitch right after the end, torn, and nothing past it naming it: a cut
  * while it was written — or, every sector of it there and some sum or its
  * Clasp not holding, a cut or rot, said loud (M-4). */
-static void RibbonTornSaid(RibbonWalk* w, const RibbonUnit* t)
+static void RibbonTornSaid(TagFSVolume* vol, RibbonWalk* w, const RibbonUnit* t)
 {
     uint32_t held = 0;
     for (uint32_t k = 0; k < t->of; k++)
         held += t->valid[k] ? 1u : 0u;
     if (RibbonUnitWhole(t))
-        RibbonSay(w, RIBBON_CODE_RIBBON_TORN, "the last cycle does not read whole: stitch seq %llu has all %u "
+        RibbonSay(vol, w, RIBBON_CODE_RIBBON_TORN, "the last cycle does not read whole: stitch seq %llu has all %u "
                   "sectors and its stream or its Clasp does not hold — a cut or rot (M-4)",
                   (unsigned long long)t->seq, t->of);
     else
-        RibbonSay(w, RIBBON_CODE_RIBBON_TORN, "the ribbon ends on stitch %llu; seq %llu past it is torn — %u of "
+        RibbonSay(vol, w, RIBBON_CODE_RIBBON_TORN, "the ribbon ends on stitch %llu; seq %llu past it is torn — %u of "
                   "its %u sectors hold, a cut while it was written; its numbers are not given again",
                   (unsigned long long)w->seq, (unsigned long long)t->seq, held, t->of);
 }
@@ -280,10 +281,10 @@ static void RibbonTornSaid(RibbonWalk* w, const RibbonUnit* t)
 /* A whole root past the end, naming a stitch of the chain by that stitch's
  * own Clasp: the end itself from where the ribbon does not go on, or one
  * before it — the ribbon forks (§16.3 п.10). Settled, not taken, no lie. */
-static void RibbonNamesChain(RibbonWalk* w, const RibbonUnit* r, uint64_t n, const char* seqs)
+static void RibbonNamesChain(TagFSVolume* vol, RibbonWalk* w, const RibbonUnit* r, uint64_t n, const char* seqs)
 {
     if (n == w->seq) {
-        RibbonSay(w, RIBBON_CODE_DEAD_BRANCH, "stitch seq %llu names the end of the ribbon, seq %llu, by its Clasp, "
+        RibbonSay(vol, w, RIBBON_CODE_DEAD_BRANCH, "stitch seq %llu names the end of the ribbon, seq %llu, by its Clasp, "
                   "and lies where the ribbon does not go on — not the first atom after it, nor the start of its "
                   "next_quire naming its Quire (§4.5, step 5): seq %s, settled, are not taken",
                   (unsigned long long)r->seq, (unsigned long long)w->seq, seqs);
@@ -296,7 +297,7 @@ static void RibbonNamesChain(RibbonWalk* w, const RibbonUnit* r, uint64_t n, con
             break;
         }
     }
-    RibbonSay(w, RIBBON_CODE_DEAD_BRANCH, "the ribbon forks at stitch %llu: seq %llu names it by its Clasp, as seq "
+    RibbonSay(vol, w, RIBBON_CODE_DEAD_BRANCH, "the ribbon forks at stitch %llu: seq %llu names it by its Clasp, as seq "
               "%llu of the ribbon does, and lies past the ribbon's end — seq %s, settled, are not taken (§16.3, "
               "amendment 10)",
               (unsigned long long)n, (unsigned long long)r->seq, (unsigned long long)after, seqs);
@@ -306,12 +307,12 @@ static void RibbonNamesChain(RibbonWalk* w, const RibbonUnit* r, uint64_t n, con
  * chain does not hold at or before its end, or — by a prev past its own seq —
  * no stitch at all: a dead branch of another history (H-2) — said, not sewn
  * on, no lie. */
-static void RibbonStranger(RibbonWalk* w, const RibbonUnit* r, uint64_t n, bool sewn, uint32_t clasp,
+static void RibbonStranger(TagFSVolume* vol, RibbonWalk* w, const RibbonUnit* r, uint64_t n, bool sewn, uint32_t clasp,
                            const char* seqs)
 {
     char how[64];
     if (r->head.prev > r->seq) {
-        RibbonSay(w, RIBBON_CODE_CLASP_STRANGER, "seq %s past the end of the ribbon: a dead branch of another "
+        RibbonSay(vol, w, RIBBON_CODE_CLASP_STRANGER, "seq %s past the end of the ribbon: a dead branch of another "
                   "history — stitch seq %llu names, by a prev of %llu past its own seq, no stitch this ribbon "
                   "does hold; it is not sewn on", seqs, (unsigned long long)r->seq,
                   (unsigned long long)r->head.prev);
@@ -321,20 +322,20 @@ static void RibbonStranger(RibbonWalk* w, const RibbonUnit* r, uint64_t n, bool 
         ksnprintf(how, sizeof(how), "a Clasp that is not its own (0x%08X, not 0x%08X)", r->head.prev_clasp, clasp);
     else
         ksnprintf(how, sizeof(how), "which this ribbon does not hold");
-    RibbonSay(w, RIBBON_CODE_CLASP_STRANGER, "seq %s past the end of the ribbon: a dead branch of another history — "
+    RibbonSay(vol, w, RIBBON_CODE_CLASP_STRANGER, "seq %s past the end of the ribbon: a dead branch of another history — "
               "stitch seq %llu names stitch %llu with %s; it is not sewn on", seqs, (unsigned long long)r->seq,
               (unsigned long long)n, how);
 }
 
 /* What one branch past the end is (§3.9's table, §16.3 п.10), said once, by
  * what its first unit `r` names and what its units name of each other. */
-static void RibbonBranch(RibbonWalk* w, RibbonUnit* r, RibbonUnit* const* m, uint32_t nm)
+static void RibbonBranch(TagFSVolume* vol, RibbonWalk* w, RibbonUnit* r, RibbonUnit* const* m, uint32_t nm)
 {
     char        seqs[160];
     uint64_t    n     = 0;
     uint32_t    clasp = 0;
     bool        known = false, has = RibbonUnitNames(r, &n), tail = w->torn && r->seq == w->torn->seq;
-    bool        sewn  = has && RibbonSewn(w, n, &clasp, &known);
+    bool        sewn  = has && WalkSewn(w, n, &clasp, &known);
     bool        ours  = sewn && (!known || r->head.prev_clasp == clasp);
     RibbonUnit* namer = RibbonLostNamer(w, m, nm);
     bool        below = r->head_read && r->head.prev > r->seq;
@@ -344,21 +345,21 @@ static void RibbonBranch(RibbonWalk* w, RibbonUnit* r, RibbonUnit* const* m, uin
             RibbonUnitLetGo(w->torn);
             w->torn = NULL;
         }
-        RibbonStranger(w, r, n, sewn, clasp, seqs);
+        RibbonStranger(vol, w, r, n, sewn, clasp, seqs);
     } else if (namer) {
         w->lied = true;
-        RibbonLost(w, r, namer, m, nm, seqs);
+        RibbonLost(vol, w, r, namer, m, nm, seqs);
     } else if (tail && (!has || n == w->seq)) {
-        RibbonTornSaid(w, w->torn);
+        RibbonTornSaid(vol, w, w->torn);
     } else if (!has) {
-        RibbonSay(w, RIBBON_CODE_DEAD_BRANCH, "past the end of the ribbon lie pieces of seq %s whose StitchHead does "
+        RibbonSay(vol, w, RIBBON_CODE_DEAD_BRANCH, "past the end of the ribbon lie pieces of seq %s whose StitchHead does "
                   "not read: a retry, or nothing known — no loss of what settled is shown", seqs);
     } else if (!r->sound) {
-        RibbonSay(w, RIBBON_CODE_DEAD_BRANCH, "past the end of the ribbon lie pieces of seq %s naming stitch %llu of "
+        RibbonSay(vol, w, RIBBON_CODE_DEAD_BRANCH, "past the end of the ribbon lie pieces of seq %s naming stitch %llu of "
                   "it: a retry cut while it was written — no loss of what settled is shown", seqs,
                   (unsigned long long)n);
     } else {
-        RibbonNamesChain(w, r, n, seqs);
+        RibbonNamesChain(vol, w, r, n, seqs);
     }
 }
 
@@ -366,7 +367,7 @@ static void RibbonBranch(RibbonWalk* w, RibbonUnit* r, RibbonUnit* const* m, uin
  * StitchHead names when that one lies past the end too (RibbonUnitNames names
  * only a seq below the namer's, so the join ends), and each branch judged by
  * its root in the order of its seq. */
-static error_t RibbonBranches(RibbonWalk* w)
+static error_t RibbonBranches(TagFSVolume* vol, RibbonWalk* w)
 {
     uint32_t     n       = w->npast ? w->npast : 1u;
     RibbonUnit** root    = kmalloc(sizeof(RibbonUnit*) * n);
@@ -389,7 +390,7 @@ static error_t RibbonBranches(RibbonWalk* w)
             if (root[i] == w->past[r])
                 members[nm++] = w->past[i];
         if (nm)
-            RibbonBranch(w, w->past[r], members, nm);
+            RibbonBranch(vol, w, w->past[r], members, nm);
     }
     kfree(root);
     kfree(members);
@@ -398,22 +399,22 @@ static error_t RibbonBranches(RibbonWalk* w)
 
 /* The direct scan (§2.2): every unit past the chain's end, the torn tail,
  * and what each branch there is. */
-error_t RibbonScan(RibbonWalk* w)
+error_t RibbonScan(TagFSVolume* vol, RibbonWalk* w)
 {
     RibbonUnit* tail = NULL;
     uint32_t    cap  = 0;
     if (!w->has_end)
         return OK;
-    error_t rc = RibbonScanUnits(w, &cap);
+    error_t rc = RibbonScanUnits(vol, w, &cap);
     if (rc != OK)
         return rc;
-    RibbonScanShapes(w);
-    rc = RibbonUnitFind(&w->end, &w->next, w->seq, &tail);
+    RibbonScanShapes(vol, w);
+    rc = RibbonUnitFind(vol, &w->end, &w->next, w->seq, &tail);
     if (rc != OK)
         return rc;
     if (tail && !tail->sound && tail->shape == RIBBON_SHAPE_KEPT)
         w->torn = tail;
     else
         RibbonUnitLetGo(tail);
-    return RibbonBranches(w);
+    return RibbonBranches(vol, w);
 }

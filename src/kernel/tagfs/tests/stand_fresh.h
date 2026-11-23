@@ -40,16 +40,16 @@ typedef struct {
 
 bool     StandFreshModelMake(StandFreshModel* m, uint64_t room);
 void     StandFreshModelLetGo(StandFreshModel* m);
-int      StandFreshWrite(StandFreshModel* m, uint64_t fid, uint64_t at, uint32_t bytes, uint64_t stream);
+int      StandFreshWrite(TagFSVolume* vol, StandFreshModel* m, uint64_t fid, uint64_t at, uint32_t bytes, uint64_t stream);
 /* The port's write of `bytes` of the model from `at` (WriteJob), the model
  * filled there first: the job's answer, or ERR_TIMEOUT. */
-error_t  StandFreshPortWrite(StandFreshModel* m, uint64_t fid, uint64_t at, uint32_t bytes);
-error_t  StandFreshSpan(StandFreshModel* m, uint64_t fid, uint64_t size);
-bool     StandFreshHolds(const StandFreshModel* m, uint64_t fid);
-uint32_t StandFreshPrint(uint64_t fid, uint64_t* runs);
-bool     StandFreshSettledAndBack(const StandFreshModel* m, uint64_t fid);
-bool     StandFreshLastStitch(uint64_t* flags, uint64_t* fresh);
-uint64_t StandFreshForcedRuns(uint64_t fid, bool tail);
+error_t  StandFreshPortWrite(TagFSVolume* vol, StandFreshModel* m, uint64_t fid, uint64_t at, uint32_t bytes);
+error_t  StandFreshSpan(TagFSVolume* vol, StandFreshModel* m, uint64_t fid, uint64_t size);
+bool     StandFreshHolds(TagFSVolume* vol, const StandFreshModel* m, uint64_t fid);
+uint32_t StandFreshPrint(TagFSVolume* vol, uint64_t fid, uint64_t* runs);
+bool     StandFreshSettledAndBack(TagFSVolume* vol, const StandFreshModel* m, uint64_t fid);
+bool     StandFreshLastStitch(TagFSVolume* vol, uint64_t* flags, uint64_t* fresh);
+uint64_t StandFreshForcedRuns(TagFSVolume* vol, uint64_t fid, bool tail);
 
 #endif /* CONFIG_VOLUME_TESTS */
 

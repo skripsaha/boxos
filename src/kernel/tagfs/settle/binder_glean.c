@@ -1,5 +1,6 @@
 #include "binder_internal.h"
 #include "../dedup/dedup.h"
+#include "tagfs_volume.h"
 
 /*
  * Glean of the Tally-Quires at a Tally's DONE.
@@ -28,13 +29,6 @@
  * The Settle's holder's, with no lock held: it reads only memory.
  */
 
-/* The Quire the last Glean chose: chosen again, its nodes did not all leave it
- * with the Tally it demanded — they are marked again, and no Tally more is
- * demanded for it: the next one TALLY_SLACK owes takes them, so a Quire that
- * will not empty never turns the Tallies over and over. The Settle's
- * holder's. */
-static uint64_t s_glean_last = UINT64_MAX;
-
 /* A Quire the newest slot names a node in outside the pair, and the blocks
  * of the live nodes in it — UINT64_MAX for one a rotten node lies in. */
 typedef struct {
@@ -49,16 +43,16 @@ typedef struct {
 } GleanSet;
 
 /* Whether [at, at + grid) lies in the current pair. */
-static bool GleanInPair(uint64_t at, uint64_t grid)
+static bool GleanInPair(TagFSVolume* vol, uint64_t at, uint64_t grid)
 {
-    return (at + grid > g_binder.pair_a && at < g_binder.pair_a + g_binder.pair_room) ||
-           (at + grid > g_binder.pair_b && at < g_binder.pair_b + g_binder.pair_room);
+    return (at + grid > vol->binder.pair_a && at < vol->binder.pair_a + vol->binder.pair_room) ||
+           (at + grid > vol->binder.pair_b && at < vol->binder.pair_b + vol->binder.pair_room);
 }
 
 /* The Quires slot `s` names a node in outside the pair — its own nodes and
  * the Quires of those it names as they lie, walked as one list by first block,
  * each Quire once — into `out` (room `room`): how many there are. */
-static uint32_t GleanQuiresOf(const SlotGround* s, uint64_t grid, GleanQuire* out, uint32_t room)
+static uint32_t GleanQuiresOf(TagFSVolume* vol, const SlotGround* s, uint64_t grid, GleanQuire* out, uint32_t room)
 {
     uint64_t past = 0;
     uint32_t n    = 0;
@@ -66,7 +60,7 @@ static uint32_t GleanQuiresOf(const SlotGround* s, uint64_t grid, GleanQuire* ou
         bool         node = j == s->nquires || (i < s->nground && s->ground[i].start <= s->quires[j].start);
         const Strip* r    = node ? &s->ground[i++] : &s->quires[j++];
         for (uint64_t at = r->start / grid * grid; at < r->start + r->count; at += grid) {
-            if (at < past || GleanInPair(at, grid))
+            if (at < past || GleanInPair(vol, at, grid))
                 continue;
             past = at + grid;
             if (out && n < room)
@@ -93,22 +87,22 @@ static GleanQuire* GleanQuireOf(GleanSet* set, uint64_t b)
 }
 
 /* Whether the mount found no copy of node `p` of `tree` to read. */
-static bool GleanRotten(uint64_t tree, const TallyPlace* p)
+static bool GleanRotten(TagFSVolume* vol, uint64_t tree, const TallyPlace* p)
 {
-    for (uint32_t i = 0; i < g_binder.nrot; i++)
-        if (g_binder.rot[i].tree == tree && g_binder.rot[i].at.level == p->level && p->ptr.copies &&
-            g_binder.rot[i].at.ptr.copies && g_binder.rot[i].at.ptr.block[0] == p->ptr.block[0])
+    for (uint32_t i = 0; i < vol->binder.nrot; i++)
+        if (vol->binder.rot[i].tree == tree && vol->binder.rot[i].at.level == p->level && p->ptr.copies &&
+            vol->binder.rot[i].at.ptr.copies && vol->binder.rot[i].at.ptr.block[0] == p->ptr.block[0])
             return true;
     return false;
 }
 
 /* Node `p` of `tree` counted into the Quires its copies lie in — or, `mark`,
  * marked to be laid again when one lies in `mark`. */
-static void GleanNode(GleanSet* set, const GleanQuire* mark, uint64_t tree, const TallyPlace* p, bool rotten)
+static void GleanNode(TagFSVolume* vol, GleanSet* set, const GleanQuire* mark, uint64_t tree, const TallyPlace* p, bool rotten)
 {
     bool in = false;
     for (uint32_t k = 0; k < p->ptr.copies; k++) {
-        GleanQuire* q = GleanQuireOf(set, TallyPtrBlock(&p->ptr, k));
+        GleanQuire* q = GleanQuireOf(set, TallyPtrBlock(vol, &p->ptr, k));
         if (!q)
             continue;
         in |= q == mark;
@@ -118,30 +112,30 @@ static void GleanNode(GleanSet* set, const GleanQuire* mark, uint64_t tree, cons
     if (!mark || !in)
         return;
     if (p->level == 0)
-        DogEarMended(tree, p);
+        DogEarMended(vol, tree, p);
     else
-        FoliationRelay(tree, p);
+        FoliationRelay(vol, tree, p);
 }
 
 /* Every node of the Tally the next is laid against — the Foliation's, and
  * the leaves of DIGESTS out of the reads' table — handed to GleanNode. */
-static void GleanWalk(GleanSet* set, const GleanQuire* mark)
+static void GleanWalk(TagFSVolume* vol, GleanSet* set, const GleanQuire* mark)
 {
     static const uint64_t trees[] = { TALLY_FILES, TALLY_TAGS, TALLY_USE, TALLY_DIGESTS };
     TallyPlace            p;
     bool                  rotten = false;
     for (uint32_t t = 0; t < sizeof(trees) / sizeof(trees[0]); t++) {
         uint32_t             nl = 0, ni = 0;
-        const FoliationNode* l  = trees[t] == TALLY_DIGESTS ? NULL : FoliationLeaves(trees[t], &nl);
-        const FoliationNode* in = FoliationInner(trees[t], &ni);
+        const FoliationNode* l  = trees[t] == TALLY_DIGESTS ? NULL : FoliationLeaves(vol, trees[t], &nl);
+        const FoliationNode* in = FoliationInner(vol, trees[t], &ni);
         for (uint32_t i = 0; i < nl; i++)
-            GleanNode(set, mark, trees[t], &l[i].place, GleanRotten(trees[t], &l[i].place));
+            GleanNode(vol, set, mark, trees[t], &l[i].place, GleanRotten(vol, trees[t], &l[i].place));
         for (uint32_t i = 0; i < ni; i++)
-            GleanNode(set, mark, trees[t], &in[i].place, GleanRotten(trees[t], &in[i].place));
+            GleanNode(vol, set, mark, trees[t], &in[i].place, GleanRotten(vol, trees[t], &in[i].place));
     }
-    for (uint32_t i = 0; TallyDigestLeafAt(i, &p, &rotten); i++)
+    for (uint32_t i = 0; TallyDigestLeafAt(vol, i, &p, &rotten); i++)
         if (p.level == 0)
-            GleanNode(set, mark, TALLY_DIGESTS, &p, rotten);
+            GleanNode(vol, set, mark, TALLY_DIGESTS, &p, rotten);
 }
 
 /* The emptiest Quire of the set no rotten node lies in, or NULL. */
@@ -154,14 +148,14 @@ static const GleanQuire* GleanChosen(const GleanSet* set)
     return best;
 }
 
-void BinderGleanAt(const BinderRun* r)
+void BinderGleanAt(TagFSVolume* vol, const BinderRun* r)
 {
-    const SlotGround* s    = &g_binder.slot[r->slot];
-    GleanSet          set  = { NULL, 0, RibbonCursorNow()->quire_blocks ? RibbonCursorNow()->quire_blocks : 1u };
-    uint64_t          live = 2u * g_binder.tally_blocks, pair = 2u * g_binder.pair_room;
-    if (FoliationLost() || !g_binder.pair_room)
+    const SlotGround* s    = &vol->binder.slot[r->slot];
+    GleanSet          set  = { NULL, 0, RibbonCursorNow(vol)->quire_blocks ? RibbonCursorNow(vol)->quire_blocks : 1u };
+    uint64_t          live = 2u * vol->binder.tally_blocks, pair = 2u * vol->binder.pair_room;
+    if (FoliationLost(vol) || !vol->binder.pair_room)
         return;
-    set.n = GleanQuiresOf(s, set.grid, NULL, 0);
+    set.n = GleanQuiresOf(vol, s, set.grid, NULL, 0);
     if (!set.n || (uint64_t)set.n * set.grid + pair < GLEAN_SLACK * live + pair)
         return;
     if (!(set.q = kmalloc(sizeof(GleanQuire) * set.n))) {
@@ -169,11 +163,11 @@ void BinderGleanAt(const BinderRun* r)
                 "gleaned this time\n", set.n, (unsigned long long)r->w.seq);
         return;
     }
-    set.n = GleanQuiresOf(s, set.grid, set.q, set.n);
-    GleanWalk(&set, NULL);
+    set.n = GleanQuiresOf(vol, s, set.grid, set.q, set.n);
+    GleanWalk(vol, &set, NULL);
     const GleanQuire* q = GleanChosen(&set);
-    if (q && q->start == s_glean_last) {
-        GleanWalk(&set, q);
+    if (q && q->start == vol->binder_glean.glean_last) {
+        GleanWalk(vol, &set, q);
     } else if (q) {
         kprintf("[TagFS] Glean: Tally %llu names a node in %llu block(s) of Tally-Quires past the pair, at least "
                 "%u times the %llu its live nodes take — the Quire at block %llu, %llu of its %llu "
@@ -181,10 +175,10 @@ void BinderGleanAt(const BinderRun* r)
                 (unsigned long long)(set.n * set.grid), (unsigned)GLEAN_SLACK, (unsigned long long)live,
                 (unsigned long long)q->start,
                 (unsigned long long)q->live, (unsigned long long)set.grid);
-        GleanWalk(&set, q);
-        BinderDemanded();
+        GleanWalk(vol, &set, q);
+        BinderDemanded(vol);
     }
-    s_glean_last = q ? q->start : UINT64_MAX;
+    vol->binder_glean.glean_last = q ? q->start : UINT64_MAX;
     kfree(set.q);
 }
 
@@ -197,12 +191,18 @@ void BinderGleanAt(const BinderRun* r)
  * the Gloss's until then, and the pass reads no leaf the Tally just laid to
  * learn them.
  */
-void BinderGleanDedup(const BinderRun* r)
+void BinderGleanDedup(TagFSVolume* vol, const BinderRun* r)
 {
-    DedupGleanAt(r->w.seq, r->w.sheets);
+    DedupGleanAt(vol, r->w.seq, r->w.sheets);
 }
 
-void BinderGleanLetGo(void)
+void BinderGleanLetGo(TagFSVolume* vol)
 {
-    s_glean_last = UINT64_MAX;
+    vol->binder_glean.glean_last = UINT64_MAX;
+}
+
+/* The volume's binder_glean part as it begins: what was not nothing. */
+void BinderGleanVolumeBegin(TagFSVolume* vol)
+{
+    vol->binder_glean.glean_last = UINT64_MAX;
 }

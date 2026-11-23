@@ -88,8 +88,8 @@ typedef struct {
     uint64_t why;       /* ConjugateWhy */
 } ConjugateSaid;
 
-error_t TagFSConjugate(InkWarrant warrant, const ConjugateAsk* ask, ConjugateSaid* out);
-error_t ConjugateLay(const ConjugateAsk* ask, ConjugateSaid* out);
+error_t TagFSConjugate(TagFSVolume* vol, InkWarrant warrant, const ConjugateAsk* ask, ConjugateSaid* out);
+error_t ConjugateLay(TagFSVolume* vol, const ConjugateAsk* ask, ConjugateSaid* out);
 
 #ifdef CONFIG_VOLUME_TESTS
 void    ConjugateStandBetween(void (*between)(void* ctx), void* ctx);

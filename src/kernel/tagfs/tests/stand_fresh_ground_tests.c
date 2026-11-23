@@ -6,6 +6,7 @@
 #include "../file_map/tract.h"
 #include "../block_map/block_map_derived.h"
 #include "../settle/binder.h"
+#include "tagfs_volume.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -30,9 +31,9 @@
 
 /* The volume's free blocks the data may never take: the Tally's two copies and
  * a Quire of ribbon. */
-static uint64_t StandFreshKept(const StandStitch* s)
+static uint64_t StandFreshKept(TagFSVolume* vol, const StandStitch* s)
 {
-    return EndpaperKeeps(s->at.quire_blocks) + s->at.quire_blocks;
+    return EndpaperKeeps(vol, s->at.quire_blocks) + s->at.quire_blocks;
 }
 
 // ----------------------------------------------------------------------------
@@ -50,7 +51,7 @@ static uint64_t StandFreshKept(const StandStitch* s)
  * free block at the take, and is one by the time the log is done. *named
  * false when the record does not name blocks k - 1 and k as ground — an
  * append's block missing from the log it was written into. */
-static bool StandFreshPassedAt(const FileRecord* rec, uint64_t fid, uint64_t k, bool* named)
+static bool StandFreshPassedAt(TagFSVolume* vol, const FileRecord* rec, uint64_t fid, uint64_t k, bool* named)
 {
     FileSpot before = { 0, 0, 0 }, at = { 0, 0, 0 };
     bool     passed = false;
@@ -58,9 +59,9 @@ static bool StandFreshPassedAt(const FileRecord* rec, uint64_t fid, uint64_t k, 
              (k == 0 || (FileRecordFind(rec, k - 1u, &before) && before.kind == STRIP_DATA));
     if (!*named || k == 0 || at.block == before.block + 1u)
         return false;
-    TagFSLockTake(&tagfs_get_state()->lock);
-    passed = BlockMapDerivedFreeFrom(before.block + 1u, 1u, fid) > 0;
-    TagFSLockDrop(&tagfs_get_state()->lock);
+    TagFSLockTake(&vol->state.lock);
+    passed = BlockMapDerivedFreeFrom(vol, before.block + 1u, 1u, fid) > 0;
+    TagFSLockDrop(&vol->state.lock);
     return passed;
 }
 
@@ -69,16 +70,16 @@ static bool StandFreshPassedAt(const FileRecord* rec, uint64_t fid, uint64_t k, 
  * name, or a cycle refused — said. Each block an append fills is judged where
  * it lands at once (StandFreshPassedAt): *passed counts those laid past a
  * free block. */
-static bool StandFreshAppends(StandFreshModel* m, uint64_t fid, uint32_t count, uint32_t bytes, uint64_t* passed)
+static bool StandFreshAppends(TagFSVolume* vol, StandFreshModel* m, uint64_t fid, uint32_t count, uint32_t bytes, uint64_t* passed)
 {
     for (uint32_t i = 0; i < count; i++) {
         uint64_t k = m->size / TAGFS_BLOCK_SIZE;
-        if (StandFreshWrite(m, fid, m->size, bytes, 100u + i) != (int)bytes)
+        if (StandFreshWrite(vol, m, fid, m->size, bytes, 100u + i) != (int)bytes)
             return false;
-        FileRecord* rec   = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+        FileRecord* rec   = FileMapRecordHold(vol->state.files, fid, NULL);
         bool        named = rec != NULL;
         while (named && k < m->size / TAGFS_BLOCK_SIZE) {
-            *passed += StandFreshPassedAt(rec, fid, k, &named);
+            *passed += StandFreshPassedAt(vol, rec, fid, k, &named);
             k += named ? 1u : 0u;      /* k stays on a block the record does not name, to be said */
         }
         FileRecordRelease(rec);
@@ -88,7 +89,7 @@ static bool StandFreshAppends(StandFreshModel* m, uint64_t fid, uint32_t count, 
                     (unsigned long long)(m->size / TAGFS_BLOCK_SIZE));
             return false;
         }
-        if (i % 100u == 99u && TagFSSettle() != OK)
+        if (i % 100u == 99u && TagFSSettle(vol) != OK)
             return false;
     }
     return true;
@@ -103,9 +104,9 @@ static bool StandFreshAppends(StandFreshModel* m, uint64_t fid, uint32_t count, 
  * free for the version that fills it. A window a take begins anew is sized to
  * the file (Allotment 2), so a hole shorter than it past that block is passed
  * over by the rule, not against it. */
-static uint64_t StandFreshRuns(uint64_t fid, bool tail, uint64_t* passed)
+static uint64_t StandFreshRuns(TagFSVolume* vol, uint64_t fid, bool tail, uint64_t* passed)
 {
-    FileRecord* rec  = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    FileRecord* rec  = FileMapRecordHold(vol->state.files, fid, NULL);
     uint64_t    runs = 0, end = 0, free = 0;
     StripWalk   walk;
     Strip       s;
@@ -114,9 +115,9 @@ static uint64_t StandFreshRuns(uint64_t fid, bool tail, uint64_t* passed)
     StripWalkBegin(rec, &walk);
     for (uint64_t k = 0; StripWalkNextGround(&walk, &s); k += s.count) {
         if (passed && runs && s.start != end && !(tail && k + s.count == rec->blocks)) {
-            TagFSLockTake(&tagfs_get_state()->lock);
-            free += BlockMapDerivedFreeFrom(end, 1u, fid) > 0;
-            TagFSLockDrop(&tagfs_get_state()->lock);
+            TagFSLockTake(&vol->state.lock);
+            free += BlockMapDerivedFreeFrom(vol, end, 1u, fid) > 0;
+            TagFSLockDrop(&vol->state.lock);
         }
         runs += !runs || s.start != end;
         end   = s.start + s.count;
@@ -136,9 +137,9 @@ static uint64_t StandFreshRuns(uint64_t fid, bool tail, uint64_t* passed)
 
 /* The runs as the ground stands now — judged before a cycle may give any back
  * since the writes took it: 0 when a break was not forced. */
-uint64_t StandFreshForcedRuns(uint64_t fid, bool tail)
+uint64_t StandFreshForcedRuns(TagFSVolume* vol, uint64_t fid, bool tail)
 {
-    uint64_t passed = 0, runs = StandFreshRuns(fid, tail, &passed);
+    uint64_t passed = 0, runs = StandFreshRuns(vol, fid, tail, &passed);
     return passed ? 0 : runs;
 }
 
@@ -147,9 +148,9 @@ uint64_t StandFreshForcedRuns(uint64_t fid, bool tail)
  * run a settled stitch named is never grown, so the next cycle's begin their
  * own — one more a run of ground the log lies in, and its unfilled last block
  * apart (`tail`). */
-static bool StandFreshLogStrips(uint64_t fid, uint64_t runs, bool tail)
+static bool StandFreshLogStrips(TagFSVolume* vol, uint64_t fid, uint64_t runs, bool tail)
 {
-    FileRecord* rec    = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    FileRecord* rec    = FileMapRecordHold(vol->state.files, fid, NULL);
     uint64_t    strips = rec ? rec->strip_count : ~0ull;
     FileRecordRelease(rec);
     TestEvidence("Strips the record of a log of a thousand appends holds", strips);
@@ -158,38 +159,39 @@ static bool StandFreshLogStrips(uint64_t fid, uint64_t runs, bool tail)
 
 static TestResult TestStandFreshAppendsKeepOneRun(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult      verdict = TEST_PASS;
     StandStitch     s;
     StandFreshModel m;
     uint64_t        fid = 0, runs = 0, passed = 0;
-    const char*     aside = StandStitchAside(&s);
+    const char*     aside = StandStitchAside(vol, &s);
 
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, (uint64_t)STAND_FRESH_APPENDS * TAGFS_BLOCK_SIZE), "room for the log's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("fresh-log.txt", NULL, 0, 0, &fid), 0, "a log is made on the book");
-    TEST_ASSERT(StandFreshAppends(&m, fid, STAND_FRESH_APPENDS, TAGFS_BLOCK_SIZE, &passed),
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "fresh-log.txt", NULL, 0, 0, &fid), 0, "a log is made on the book");
+    TEST_ASSERT(StandFreshAppends(vol, &m, fid, STAND_FRESH_APPENDS, TAGFS_BLOCK_SIZE, &passed),
                 "a thousand blocks are appended, each named by the log's record as it lands");
-    runs = StandFreshRuns(fid, false, NULL);
+    runs = StandFreshRuns(vol, fid, false, NULL);
     TestEvidence("runs of ground a log of a thousand appended blocks lies in", runs);
     TestEvidence("blocks laid off the run while the block that went on it was free", passed);
     TEST_ASSERT(runs >= 1 && passed == 0,
                 "and each block continued the run before it wherever that block was free as its take found the "
                 "ground — a run broken only by ground another owner holds");
-    TEST_ASSERT(StandFreshLogStrips(fid, runs, false), "and its record a Strip a cycle on each run, not one an append");
-    TEST_ASSERT(StandFreshSettledAndBack(&m, fid), "settled and mounted again, it reads them all");
-    TEST_ASSERT_EQ(tagfs_create_file("fresh-lines.txt", NULL, 0, 0, &fid), 0, "a second log is made");
+    TEST_ASSERT(StandFreshLogStrips(vol, fid, runs, false), "and its record a Strip a cycle on each run, not one an append");
+    TEST_ASSERT(StandFreshSettledAndBack(vol, &m, fid), "settled and mounted again, it reads them all");
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "fresh-lines.txt", NULL, 0, 0, &fid), 0, "a second log is made");
     m.size = 0;
-    TEST_ASSERT(StandFreshAppends(&m, fid, STAND_FRESH_APPENDS, 333u, &passed),
+    TEST_ASSERT(StandFreshAppends(vol, &m, fid, STAND_FRESH_APPENDS, 333u, &passed),
                 "a thousand lines of 333 bytes are appended, each block they fill named as it lands");
-    runs = StandFreshRuns(fid, true, NULL);
+    runs = StandFreshRuns(vol, fid, true, NULL);
     TestEvidence("runs of ground a log of a thousand appended lines lies in", runs);
     TestEvidence("blocks laid off the run while the block that went on it was free", passed);
     TEST_ASSERT(runs >= 1 && passed == 0,
                 "and the version that filled each block went on the block that continued the run, its unfilled "
                 "last block alone apart");
-    TEST_ASSERT(StandFreshLogStrips(fid, runs, true), "and its record a Strip a cycle on each run, not one an append");
-    TEST_ASSERT(StandFreshSettledAndBack(&m, fid), "settled and mounted again, it reads them all");
+    TEST_ASSERT(StandFreshLogStrips(vol, fid, runs, true), "and its record a Strip a cycle on each run, not one an append");
+    TEST_ASSERT(StandFreshSettledAndBack(vol, &m, fid), "settled and mounted again, it reads them all");
 out:
     StandFreshModelLetGo(&m);
     STAND_STITCH_PUT_BACK(&s);
@@ -200,26 +202,27 @@ out:
 
 static TestResult TestStandFreshOverwriteOneRun(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult      verdict = TEST_PASS;
     StandStitch     s;
     StandFreshModel m;
     uint64_t        fid = 0, first = 0, block = 0, old = 0;
-    const char*     aside = StandStitchAside(&s);
+    const char*     aside = StandStitchAside(vol, &s);
 
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, STAND_FRESH_SPAN_BLOCKS * TAGFS_BLOCK_SIZE), "room for the file's bytes");
-    TEST_ASSERT_EQ(tagfs_create_file("fresh-over.bin", NULL, 0, 0, &fid), 0, "a file is made on the book");
-    TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, STAND_FRESH_SPAN_BLOCKS * TAGFS_BLOCK_SIZE, 61),
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "fresh-over.bin", NULL, 0, 0, &fid), 0, "a file is made on the book");
+    TEST_ASSERT_EQ(StandFreshWrite(vol, &m, fid, 0, STAND_FRESH_SPAN_BLOCKS * TAGFS_BLOCK_SIZE, 61),
                    (int)(STAND_FRESH_SPAN_BLOCKS * TAGFS_BLOCK_SIZE), "64 blocks are written");
-    TEST_ASSERT(StandFreshSettledAndBack(&m, fid) && StandBlockOf(fid, 8, &old), "and settled");
-    TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 8u * TAGFS_BLOCK_SIZE, 32u * TAGFS_BLOCK_SIZE, 62),
+    TEST_ASSERT(StandFreshSettledAndBack(vol, &m, fid) && StandBlockOf(vol, fid, 8, &old), "and settled");
+    TEST_ASSERT_EQ(StandFreshWrite(vol, &m, fid, 8u * TAGFS_BLOCK_SIZE, 32u * TAGFS_BLOCK_SIZE, 62),
                    (int)(32u * TAGFS_BLOCK_SIZE), "blocks 8 to 39 are written over in one call");
-    TEST_ASSERT(StandBlockOf(fid, 8, &first) && first != old, "on fresh ground");
+    TEST_ASSERT(StandBlockOf(vol, fid, 8, &first) && first != old, "on fresh ground");
     for (uint64_t k = 9; k < 40; k++)
-        TEST_ASSERT(StandBlockOf(fid, k, &block) && block == first + (k - 8u),
+        TEST_ASSERT(StandBlockOf(vol, fid, k, &block) && block == first + (k - 8u),
                     "every one of them in the one new run the call took");
-    TEST_ASSERT(StandFreshSettledAndBack(&m, fid), "settled and mounted again, the file reads the new bytes");
+    TEST_ASSERT(StandFreshSettledAndBack(vol, &m, fid), "settled and mounted again, the file reads the new bytes");
 out:
     StandFreshModelLetGo(&m);
     STAND_STITCH_PUT_BACK(&s);
@@ -335,32 +338,33 @@ static uint64_t StandFreshBuiltMost(const FileRecord* rec)
 
 /* The file of STAND_FRESH_PARCEL_BLOCKS blocks, every STAND_FRESH_PARCEL_EVERY-th
  * written over so its runs are cut into more than three Parcels. */
-static bool StandFreshManyRuns(StandFreshModel* m, uint64_t fid)
+static bool StandFreshManyRuns(TagFSVolume* vol, StandFreshModel* m, uint64_t fid)
 {
-    if (StandFreshWrite(m, fid, 0, STAND_FRESH_PARCEL_BLOCKS * TAGFS_BLOCK_SIZE, 71) !=
+    if (StandFreshWrite(vol, m, fid, 0, STAND_FRESH_PARCEL_BLOCKS * TAGFS_BLOCK_SIZE, 71) !=
         (int)(STAND_FRESH_PARCEL_BLOCKS * TAGFS_BLOCK_SIZE))
         return false;
     for (uint32_t k = 0; k < STAND_FRESH_PARCEL_BLOCKS; k += STAND_FRESH_PARCEL_EVERY)
-        if (StandFreshWrite(m, fid, (uint64_t)k * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 72) != TAGFS_BLOCK_SIZE)
+        if (StandFreshWrite(vol, m, fid, (uint64_t)k * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 72) != TAGFS_BLOCK_SIZE)
             return false;
-    return TagFSSettle() == OK;
+    return TagFSSettle(vol) == OK;
 }
 
 static TestResult TestStandFreshParcelCopied(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult      verdict = TEST_PASS;
     StandStitch     s;
     StandFreshModel m;
     StandFreshBuilt most = { 0 };
-    TagFSState*     fs  = tagfs_get_state();
+    TagFSState*     fs  = &vol->state;
     uint64_t        fid = 0, window = 0, bound = 0, seed = 0x9E3779B97F4A7C15ull;
-    const char*     aside = StandStitchAside(&s);
+    const char*     aside = StandStitchAside(vol, &s);
 
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, (uint64_t)STAND_FRESH_PARCEL_BLOCKS * TAGFS_BLOCK_SIZE), "room for 32 MiB");
-    TEST_ASSERT_EQ(tagfs_create_file("fresh-parcels.bin", NULL, 0, 0, &fid), 0, "a file is made on the book");
-    TEST_ASSERT(StandFreshManyRuns(&m, fid), "32 MiB written, and one block of every sixteen written over");
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "fresh-parcels.bin", NULL, 0, 0, &fid), 0, "a file is made on the book");
+    TEST_ASSERT(StandFreshManyRuns(vol, &m, fid), "32 MiB written, and one block of every sixteen written over");
     FileRecord* rec = FileMapRecordHold(fs->files, fid, NULL);
     uint64_t    parcels = rec ? rec->strip_count / PARCEL_STRIPS_MOST : 0;
     bound = rec ? StandFreshBuiltMost(rec) : 0;
@@ -372,7 +376,7 @@ static TestResult TestStandFreshParcelCopied(void)
         uint64_t        k     = (seed >> 33) % STAND_FRESH_PARCEL_BLOCKS;
         FileRecord*     was   = FileMapRecordHold(fs->files, fid, NULL);
         StandFreshBuilt built = { 0 };
-        int             wrote = StandFreshWrite(&m, fid, k * TAGFS_BLOCK_SIZE + 100u, 200u, 73u + i);
+        int             wrote = StandFreshWrite(vol, &m, fid, k * TAGFS_BLOCK_SIZE + 100u, 200u, 73u + i);
         FileRecord*     now   = FileMapRecordHold(fs->files, fid, NULL);
         bool            held  = was && now && StandFreshCopied(was, now, &built);
         FileRecordRelease(was);
@@ -383,7 +387,7 @@ static TestResult TestStandFreshParcelCopied(void)
         most.parcels = built.parcels > most.parcels ? built.parcels : most.parcels;
         most.allocs  = built.allocs > most.allocs ? built.allocs : most.allocs;
         if (i % 100u == 99u)
-            TEST_ASSERT_OK(TagFSSettle(), "a cycle settles every hundred writes");
+            TEST_ASSERT_OK(TagFSSettle(vol), "a cycle settles every hundred writes");
     }
     window = PlotWindowMeasured();
     PlotWindowMeasure(0);
@@ -399,7 +403,7 @@ static TestResult TestStandFreshParcelCopied(void)
                 "and no write took more of the heap than those Strips and the record's head — its header and a "
                 "Tract node a level");
     TEST_ASSERT(window == 1u, "and a write inside one block copied into its window the one Strip that holds it");
-    TEST_ASSERT(StandFreshSettledAndBack(&m, fid), "settled and mounted again, the file reads every byte written");
+    TEST_ASSERT(StandFreshSettledAndBack(vol, &m, fid), "settled and mounted again, the file reads every byte written");
 out:
     PlotWindowMeasure(0);
     StandFreshModelLetGo(&m);
@@ -417,58 +421,59 @@ out:
 #define STAND_FRESH_FILL_MOST   64u
 
 /* STAND_FRESH_FILL_FILE blocks written into file `fid`: the write's answer. */
-static error_t StandFreshFill(uint64_t fid)
+static error_t StandFreshFill(TagFSVolume* vol, uint64_t fid)
 {
-    TagFSFileHandle* h       = tagfs_open(fid, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
+    TagFSFileHandle* h       = tagfs_open(vol, fid, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
     uint64_t         written = 0;
     PlotSource       src     = { .kernel = g_test_buffer, .bytes = sizeof(g_test_buffer) };
     error_t          rc      = h ? OK : ERR_FILE_NOT_FOUND;
     for (uint32_t b = 0; b < STAND_FRESH_FILL_FILE && rc == OK; b += sizeof(g_test_buffer) / TAGFS_BLOCK_SIZE)
-        rc = tagfs_write(h, &src, &written);
+        rc = tagfs_write(vol, h, &src, &written);
     if (h)
-        tagfs_close(h);
+        tagfs_close(vol, h);
     return rc;
 }
 
 static TestResult TestStandFreshFillAndEmpty(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
     StandStitch s;
-    TagFSState* fs     = tagfs_get_state();
+    TagFSState* fs     = &vol->state;
     uint64_t    fids[STAND_FRESH_FILL_MOST], kept, free, quires;
     uint32_t    made   = 0;
     error_t     rc     = OK;
     bool        shrunk = false;
-    const char* aside  = StandStitchAside(&s);
+    const char* aside  = StandStitchAside(vol, &s);
 
     if (aside)
         return test_steps_aside(aside);
-    kept = StandFreshKept(&s);
+    kept = StandFreshKept(vol, &s);
     (void)BinderStandNoRoomWait(true);
-    TEST_ASSERT(BlockMapDerivedStandShrink(kept + STAND_FRESH_FILL_ROOM), "the volume is cut to 96 blocks past its reserve");
+    TEST_ASSERT(BlockMapDerivedStandShrink(vol, kept + STAND_FRESH_FILL_ROOM), "the volume is cut to 96 blocks past its reserve");
     shrunk = true;
     free   = fs->free_blocks;
-    quires = __atomic_load_n(&RibbonCursorNow()->quires, __ATOMIC_ACQUIRE);
+    quires = __atomic_load_n(&RibbonCursorNow(vol)->quires, __ATOMIC_ACQUIRE);
     TestFillAt(g_test_buffer, sizeof(g_test_buffer), 81, 0);
     while (made < STAND_FRESH_FILL_MOST && rc == OK) {
-        TEST_ASSERT_EQ(tagfs_create_file("fresh-fill.bin", NULL, 0, 0, &fids[made]), 0, "a file is made");
-        rc = StandFreshFill(fids[made++]);
-        uint64_t went = __atomic_load_n(&RibbonCursorNow()->quires, __ATOMIC_ACQUIRE) - quires;
+        TEST_ASSERT_EQ(tagfs_create_file(vol, "fresh-fill.bin", NULL, 0, 0, &fids[made]), 0, "a file is made");
+        rc = StandFreshFill(vol, fids[made++]);
+        uint64_t went = __atomic_load_n(&RibbonCursorNow(vol)->quires, __ATOMIC_ACQUIRE) - quires;
         TEST_ASSERT(fs->free_blocks + went * s.at.quire_blocks >= kept,
                     "and the data leaves the book's reserve free — but the Quires the ribbon went on into, "
                     "which are what it is kept for");
     }
     TEST_ASSERT_EQ(rc, ERR_TAGFS_NO_SPACE, "filled, the volume refuses the next write: no space");
     for (uint32_t i = 0; i < made; i++)
-        TEST_ASSERT_EQ(tagfs_delete_file(fids[i], INK_UNWARRANTED), 0, "every file is given up");
-    TEST_ASSERT_OK(SettleForRoom(), "room is asked for");
-    quires = __atomic_load_n(&RibbonCursorNow()->quires, __ATOMIC_ACQUIRE) - quires;
+        TEST_ASSERT_EQ(tagfs_delete_file(vol, fids[i], INK_UNWARRANTED), 0, "every file is given up");
+    TEST_ASSERT_OK(SettleForRoom(vol), "room is asked for");
+    quires = __atomic_load_n(&RibbonCursorNow(vol)->quires, __ATOMIC_ACQUIRE) - quires;
     TEST_ASSERT(fs->free_blocks + quires * s.at.quire_blocks >= free,
                 "and the data's ground came back — all of it but the Quires the ribbon went on into");
 out:
     (void)BinderStandNoRoomWait(false);
     if (shrunk)
-        BlockMapDerivedStandGrow();
+        BlockMapDerivedStandGrow(vol);
     STAND_STITCH_PUT_BACK(&s);
     return verdict;
 }
@@ -481,11 +486,12 @@ out:
 
 static TestResult TestStandFreshBigWrite(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult      verdict = TEST_PASS;
     StandStitch     s;
     StandFreshModel m;
     uint64_t        fid = 0;
-    const char*     aside = StandStitchAside(&s);
+    const char*     aside = StandStitchAside(vol, &s);
 
     if (aside)
         return test_steps_aside(aside);
@@ -493,10 +499,10 @@ static TestResult TestStandFreshBigWrite(void)
         STAND_STITCH_PUT_BACK(&s);
         return test_steps_aside("the heap holds no 16 MiB for the write's bytes");
     }
-    TEST_ASSERT_EQ(tagfs_create_file("fresh-big.bin", NULL, 0, 0, &fid), 0, "a file is made on the book");
-    TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, STAND_FRESH_BIG_BYTES, 91), (int)STAND_FRESH_BIG_BYTES,
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "fresh-big.bin", NULL, 0, 0, &fid), 0, "a file is made on the book");
+    TEST_ASSERT_EQ(StandFreshWrite(vol, &m, fid, 0, STAND_FRESH_BIG_BYTES, 91), (int)STAND_FRESH_BIG_BYTES,
                    "16 MiB are written in one call");
-    TEST_ASSERT(StandFreshSettledAndBack(&m, fid), "settled and mounted again, every byte reads back");
+    TEST_ASSERT(StandFreshSettledAndBack(vol, &m, fid), "settled and mounted again, every byte reads back");
 out:
     StandFreshModelLetGo(&m);
     STAND_STITCH_PUT_BACK(&s);

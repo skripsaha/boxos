@@ -70,7 +70,7 @@ typedef struct {
  * the Helm can do — said), ERR_PERMISSION_DENIED, ERR_DEVICE_NOT_READY,
  * ERR_TAGFS_READ_ONLY, ERR_NO_MEMORY, or ERR_WOULD_BLOCK while the room its
  * stitch needs is on its way. */
-error_t TagFSInkPlot(Plot* p, InkReceipt* out);
+error_t TagFSInkPlot(TagFSVolume* vol, Plot* p, InkReceipt* out);
 
 /* A file's name and tags. `name` non-NULL renames it — the name is a field of
  * the file's card, and no tag moves with it. `add` goes on and `drop` comes
@@ -78,7 +78,7 @@ error_t TagFSInkPlot(Plot* p, InkReceipt* out);
  * key: a file's tags are its user's, and what the system keeps a file as is
  * its record's role (TAGFS_FILE_ROLE_*), which no tag puts on or takes off.
  * OK — a change that changes nothing is OK with no Ink — or the refusal. */
-error_t InkFields(uint64_t fid, const char* name, uint32_t add, uint32_t drop, InkReceipt* out);
+error_t InkFields(TagFSVolume* vol, uint64_t fid, const char* name, uint32_t add, uint32_t drop, InkReceipt* out);
 
 #ifdef CONFIG_VOLUME_TESTS
 /* The stand's way to keep a file in a role, as the image builder lays one
@@ -88,7 +88,7 @@ error_t InkFields(uint64_t fid, const char* name, uint32_t add, uint32_t drop, I
  * EngrossRoled), as the loader reads a file of a role by its blocks and no
  * write lays a Slip on one (plot_slip.c). No program asks it: the system has
  * no call that puts a role on a file the volume already holds. */
-error_t InkRoleLaid(uint64_t fid, uint32_t role, InkReceipt* out);
+error_t InkRoleLaid(TagFSVolume* vol, uint64_t fid, uint32_t role, InkReceipt* out);
 #endif
 
 /* A book's file rolled back by the mount's verdict (mount/errata.h): its
@@ -96,7 +96,7 @@ error_t InkRoleLaid(uint64_t fid, uint32_t role, InkReceipt* out);
  * they are — the system's own word on the file, never one of its tags. OK, and
  * OK with no Ink for one marked already, or the refusal an Ink of a file's
  * fields answers. */
-error_t InkUndone(uint64_t fid, InkReceipt* out);
+error_t InkUndone(TagFSVolume* vol, uint64_t fid, InkReceipt* out);
 
 /* A book's file deleted and kept — the record marked TAGFS_FILE_DELETED, the
  * time it is kept until, `until` (a book's nanoseconds), in the record beside
@@ -106,7 +106,7 @@ error_t InkUndone(uint64_t fid, InkReceipt* out);
  * the system keeps is not deleted without one. OK — and OK with no Ink for a
  * call that changes nothing — or the refusal. Only the system lets a kept file
  * go at its term (keep/keep.h): InkQuitclaim, as ever. */
-error_t InkKeep(uint64_t fid, uint64_t until, InkWarrant warrant, InkReceipt* out);
+error_t InkKeep(TagFSVolume* vol, uint64_t fid, uint64_t until, InkWarrant warrant, InkReceipt* out);
 
 /* The card of program file `fid` showing its tags to `reader` — a program's
  * file, or 0 for every program — put in the list it shows them to (`show`) or
@@ -118,7 +118,7 @@ error_t InkKeep(uint64_t fid, uint64_t until, InkWarrant warrant, InkReceipt* ou
  * (ERR_WOULD_BLOCK while it can come), ERR_NO_MEMORY. Who may ask it is the
  * caller's to judge: the program itself, or the volume's duty for a reader
  * that left (retire/retire.c). */
-error_t InkShown(uint64_t fid, uint64_t reader, bool show, InkReceipt* out);
+error_t InkShown(TagFSVolume* vol, uint64_t fid, uint64_t reader, bool show, InkReceipt* out);
 
 /* The passport of the signed program file `fid` holds laid on its record —
  * or, 0, taken off it: a program with no signature that holds — one Labeled
@@ -127,27 +127,27 @@ error_t InkShown(uint64_t fid, uint64_t reader, bool show, InkReceipt* out);
  * record as it is when it is the same. ERR_INVALID_ARGUMENT for a number that
  * is no passport (bit 63), ERR_FILE_NOT_FOUND for a file the volume has not;
  * a volume that takes no change answers as for any Ink. */
-error_t InkPassport(uint64_t fid, uint64_t passport, InkReceipt* out);
+error_t InkPassport(TagFSVolume* vol, uint64_t fid, uint64_t passport, InkReceipt* out);
 
 /* The `count` tags of `tags` taken off file `fid` — live or kept deleted — in
  * one Ink, those it wears; OK, and OK with no Ink for a file that wears none
  * of them, or the refusal: ERR_FILE_NOT_FOUND, the volume's, the ribbon's room
  * (ERR_WOULD_BLOCK while it can come), ERR_NO_MEMORY. */
-error_t InkTagsOff(uint64_t fid, const uint32_t* tags, uint32_t count, InkReceipt* out);
+error_t InkTagsOff(TagFSVolume* vol, uint64_t fid, const uint32_t* tags, uint32_t count, InkReceipt* out);
 
 /* The `count` tags of `tags` retired — closed already (TagRegistryRetire) and
  * worn by no file: each lies in a Coined RETIRED of the next stitch. OK, or
  * ERR_BUSY while a file wears one — the Ink that took it off is yet to come —
  * or the refusal of room for the Coineds (ERR_WOULD_BLOCK while it can come),
  * of the volume, or ERR_NO_MEMORY. Inside the door. */
-error_t InkTagsRetire(const uint32_t* tags, uint32_t count, InkReceipt* out);
+error_t InkTagsRetire(TagFSVolume* vol, const uint32_t* tags, uint32_t count, InkReceipt* out);
 
 /* A new file named `name`, wearing the `count` tags in `tags` (the name's
  * first, no two alike), made by the program whose file is `made_by` — 0 when
  * no program of the volume makes it. OK and its id, or the refusal with no
  * file made and no trace of one — the id it would have taken is taken by the
  * next. */
-error_t InkNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t made_by, uint64_t* out_fid,
+error_t InkNew(TagFSVolume* vol, const char* name, const uint32_t* tags, uint32_t count, uint64_t made_by, uint64_t* out_fid,
                InkReceipt* out);
 
 /* The file given up: a Quitclaim kept for the next stitch, its extents to
@@ -155,7 +155,7 @@ error_t InkNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t 
  * guard's among them, asked with `warrant` — and ERR_WOULD_BLOCK, nothing
  * changed, while the room for its Quitclaim is on its way: room a cycle gives
  * back. */
-error_t InkQuitclaim(uint64_t fid, InkWarrant warrant, InkReceipt* out);
+error_t InkQuitclaim(TagFSVolume* vol, uint64_t fid, InkWarrant warrant, InkReceipt* out);
 
 /*
  * Conjugate's Ink (ink_conjugate.c; the act is dedup/conjugate.h): book file
@@ -189,36 +189,36 @@ typedef struct {
     uint64_t          onto_gen;
 } InkConjugation;
 
-error_t InkConjugate(const InkConjugation* c, InkReceipt* out);
+error_t InkConjugate(TagFSVolume* vol, const InkConjugation* c, InkReceipt* out);
 
 /* Whether the volume takes a change not begun yet (ink.c): OK, or why not —
  * a medium that left, one that refuses writes, a stopping machine's halt. */
-error_t InkVolumeBegins(void);
+error_t InkVolumeBegins(TagFSVolume* vol);
 
 /* Under the state lock: the newest Ink's gen, and the flush need its data
  * holds — the one a cycle's first flush must be issued past. */
-uint64_t InkedGen(void);
-uint64_t InkDataNeed(void);
+uint64_t InkedGen(TagFSVolume* vol);
+uint64_t InkDataNeed(TagFSVolume* vol);
 
 /* The Ink that laid file `fid`'s newest record — every change the file has had
  * is in it — or the newest Ink of all for a file no longer in the map, whose
  * Quitclaim is among them. With no lock; inside the door. */
-uint64_t InkGenOf(uint64_t fid);
+uint64_t InkGenOf(TagFSVolume* vol, uint64_t fid);
 
 /* A mount's first word: no Ink yet, and no change waiting for a stitch of a
  * book read before it (docket.h) — and on a book, the ground its ribbon let go
  * laid to rest in Fallow (M-1). With the door shut. */
-void     InkMountReset(void);
+void     InkMountReset(TagFSVolume* vol);
 
 /* The volume let go of: what Ink keeps of it — Fallow's ground at rest and
  * the Docket's changes no stitch took — let go, nothing given back. With the
  * door shut. */
-void     InkDropAll(void);
+void     InkDropAll(TagFSVolume* vol);
 
 /* The volume takes changes again: its book taken up, the medium seated anew —
  * whether it refuses writes is the next refused write's to ask — or the stand
  * undoing a protected medium it armed itself (BlockFailProtect). */
-void     InkReadOnlyLift(void);
+void     InkReadOnlyLift(TagFSVolume* vol);
 
 /* Whether a book takes the change about to be made, asked before the `count`
  * tags of `owner`'s it brings are interned: refused by a volume that takes no change (read
@@ -229,8 +229,8 @@ void     InkReadOnlyLift(void);
  * has: OK holds those Coineds' bytes on the ribbon (*held) until the tags hold
  * their ids and the registry counts them, InkBookHeldLetGo letting the hold go
  * after the interning, inside the same stay behind the door. */
-error_t InkBookRefuses(TagOwner owner, const TagSpelling* tags, uint32_t count, uint64_t* held);
-void    InkBookHeldLetGo(uint64_t held);
+error_t InkBookRefuses(TagFSVolume* vol, TagOwner owner, const TagSpelling* tags, uint32_t count, uint64_t* held);
+void    InkBookHeldLetGo(TagFSVolume* vol, uint64_t held);
 
 /* The one guard of a change to a file (see above), asked with the flags the
  * file's record carries, the runs it names and the caller's warrant: OK,
@@ -239,7 +239,7 @@ void    InkBookHeldLetGo(uint64_t held);
  * it refused a write as protected, or ERR_PERMISSION_DENIED — said — for a file
  * the system keeps in a role and a caller with no warrant, and for the kernel
  * the loader reads by its blocks and any caller. */
-error_t  InkMayChange(uint64_t fid, uint32_t flags, const Strip* runs, uint32_t run_count,
+error_t  InkMayChange(TagFSVolume* vol, uint64_t fid, uint32_t flags, const Strip* runs, uint32_t run_count,
                       InkWarrant warrant);
 
 /* The guard's two questions on their own, for a mover of blocks that asks them
@@ -250,11 +250,11 @@ static inline bool InkFileKept(uint32_t flags)
 {
     return (flags & TAGFS_FILE_ROLE_MASK) != TAGFS_FILE_ROLE_ORDINARY;
 }
-bool     InkTouchesBoot(const Strip* runs, uint32_t count);
+bool     InkTouchesBoot(TagFSVolume* vol, const Strip* runs, uint32_t count);
 
 /* The second question asked of a file's record where it holds its runs —
  * walked, never laid flat, so a guard asks the heap nothing: whether any of
  * its DATA Strips holds a block of the kernel the Deed points the loader at. */
-bool     InkRecordTouchesBoot(const FileRecord* rec);
+bool     InkRecordTouchesBoot(TagFSVolume* vol, const FileRecord* rec);
 
 #endif /* TAGFS_INK_H */

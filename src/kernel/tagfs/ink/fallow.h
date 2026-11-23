@@ -47,7 +47,7 @@
  * the mount's census names (the design's addendum §3, "лаг Fallow 1 / 2"). */
 #define FALLOW_LAG      1u
 #define FALLOW_LIED_LAG 2u
-uint64_t    FallowLag(void);
+uint64_t    FallowLag(TagFSVolume* vol);
 
 typedef enum {
     FALLOW_BY_RECORD = 1,      /* a record of a stitch, known by the gen of the Ink that wrote it */
@@ -61,14 +61,14 @@ typedef struct FallowNode FallowNode;
  * the room the blocks of it more than one names may cut it into, and that room
  * asked of Commonhold too (FallowNodeCommonheld): NULL when there is no
  * memory. */
-FallowNode* FallowNodeMake(const Strip* runs, uint32_t count, FallowKind kind, uint64_t fid);
+FallowNode* FallowNodeMake(TagFSVolume* vol, const Strip* runs, uint32_t count, FallowKind kind, uint64_t fid);
 
 /* A node for the ground the record `rec` names, of its file — every Strip of
  * ground, walked where the record holds them (file_record.h,
  * StripWalkNextGround), never laid flat — taken with no TagFS lock held, its
  * room as FallowNodeMake's: OK, with *out NULL for a record that names no
  * ground; ERR_NO_MEMORY, nothing made. */
-error_t     FallowNodeOfRecord(const struct FileRecord* rec, FallowKind kind, FallowNode** out);
+error_t     FallowNodeOfRecord(TagFSVolume* vol, const struct FileRecord* rec, FallowKind kind, FallowNode** out);
 
 /*
  * ‼ A BLOCK MORE THAN ONE NAMES RESTS WHEN ITS LAST OWNER LETS IT GO
@@ -81,8 +81,8 @@ error_t     FallowNodeOfRecord(const struct FileRecord* rec, FallowKind kind, Fa
  * (FallowNodeCommonheld): a node left with none is added to nothing and let go
  * by its Ink.
  */
-bool        FallowNodeCommonRoom(const FallowNode* node);
-uint32_t    FallowNodeCommonheld(FallowNode* node, uint64_t gen);
+bool        FallowNodeCommonRoom(TagFSVolume* vol, const FallowNode* node);
+uint32_t    FallowNodeCommonheld(TagFSVolume* vol, FallowNode* node, uint64_t gen);
 
 /* A node that was never added, let go. */
 void        FallowNodeLetGo(FallowNode* node);
@@ -94,7 +94,7 @@ uint64_t    FallowNodeBlocks(const FallowNode* node);
 
 /* Under the state lock: the node's runs come to rest, freed by `gen` — the
  * Ink's gen. The node is Fallow's from here on. */
-void        FallowAdd(FallowNode* node, uint64_t gen);
+void        FallowAdd(TagFSVolume* vol, FallowNode* node, uint64_t gen);
 
 /* Under the state lock, at the end of the `cycle`-th settled stitch, by the
  * rule above: every node whose lag has come, whose stitch's Quire the ribbon
@@ -103,14 +103,14 @@ void        FallowAdd(FallowNode* node, uint64_t gen);
  * them rests on for the next cycle, said once until a cycle gives back all
  * that ripened. Answers the blocks given back; the nodes spent come back in
  * *spent, for FallowNodesFree after the lock. */
-uint64_t    FallowRipen(uint64_t cycle, FallowNode** spent);
+uint64_t    FallowRipen(TagFSVolume* vol, uint64_t cycle, FallowNode** spent);
 
 /* Under the state lock, at the DONE of stitch `seq`, the `cycle`-th
  * of this mount to settle, every Ink up to `target` in it: every record freer
  * up to `target` no stitch named yet is named by this one, and may go back
  * once FallowLag() stitches more settled — and the ribbon left its Quire. The
  * mount's nodes are named so by the last stitch it read, as cycle 0. */
-void        FallowStitchSettled(uint64_t target, uint64_t seq, uint64_t cycle);
+void        FallowStitchSettled(TagFSVolume* vol, uint64_t target, uint64_t seq, uint64_t cycle);
 
 /*
  * Under the state lock, at a Tally's DONE (settle/binder_done.c): ground no
@@ -122,18 +122,18 @@ void        FallowStitchSettled(uint64_t target, uint64_t seq, uint64_t cycle);
  * stitches more to settle after the `cycle`-th — with no Quire to leave and no
  * handle to wait for, and goes back with them.
  */
-void        FallowSpineAdd(FallowNode* node, uint64_t cycle);
+void        FallowSpineAdd(TagFSVolume* vol, FallowNode* node, uint64_t cycle);
 
 /* Under the state lock: the least cycle a node of that ground still resting
  * goes back at, UINT64_MAX for none — what a slot counts its own past its
  * DONE is free once no node of it, ripe by its cycle, rests (binder_slots.c,
  * BinderRestRipens). */
-uint64_t    FallowSpineRipeFrom(void);
+uint64_t    FallowSpineRipeFrom(TagFSVolume* vol);
 
 /* Under the state lock: the ribbon left the Quire the stitches before `seq`
  * lie in — `seq` is the first stitch begun past it, and it settled — so every
  * node a stitch before it named waits for its lag alone from here. */
-void        FallowQuireLeft(uint64_t seq);
+void        FallowQuireLeft(TagFSVolume* vol, uint64_t seq);
 
 /* Under the state lock: whether ground rests that a stitch named and only the
  * ribbon's leaving its Quire holds — what closing that Quire early gives back
@@ -141,8 +141,8 @@ void        FallowQuireLeft(uint64_t seq);
  * with their lag and nothing more — not those an open handle still views as
  * they were, which no cycle gives back before the handle closes (RibbonClaim
  * waits for room only where cycles bring it). */
-bool        FallowAwaitsQuire(void);
-uint64_t    FallowLeftBlocks(void);
+bool        FallowAwaitsQuire(TagFSVolume* vol);
+uint64_t    FallowLeftBlocks(TagFSVolume* vol);
 
 /* Under the state lock: the end of the run resting here that `block` lies in,
  * of a node whose freer settled — ground no settled state names any more, of
@@ -150,13 +150,13 @@ uint64_t    FallowLeftBlocks(void);
  * does: one whose freer is still unsettled names ground the state the last
  * settled stitch left still holds. What a Tally is reckoned to cost passes
  * over it in a range of DIGESTS (settle/binder_live.c). */
-uint64_t    FallowRestsPast(uint64_t block);
+uint64_t    FallowRestsPast(TagFSVolume* vol, uint64_t block);
 
 /* By the Settle's holder, with no TagFS lock held, at the TAKE of cycle
  * `cycle`: the pages the derived block map may want for the gives of every
  * node that may go back at the cycle's end, held (BlockMapDerivedHold), so
  * FallowRipen asks the heap for nothing. */
-void        FallowGiveRoomHold(uint64_t cycle);
+void        FallowGiveRoomHold(TagFSVolume* vol, uint64_t cycle);
 
 /* Under the state lock (fallow.c, NodeBarred): FallowBarsRun — whether
  * [start, start + count) meets ground a record's freer gave back that a Tally
@@ -166,8 +166,8 @@ void        FallowGiveRoomHold(uint64_t cycle);
  * took in, now stands (UINT64_MAX: none is known, nothing is kept from the
  * ribbon): what it no longer keeps from the ribbon, spent, to be freed with
  * no TagFS lock held (FallowNodesFree). */
-bool        FallowBarsRun(uint64_t start, uint64_t count, uint64_t* past);
-FallowNode* FallowBarLift(uint64_t slice);
+bool        FallowBarsRun(TagFSVolume* vol, uint64_t start, uint64_t count, uint64_t* past);
+FallowNode* FallowBarLift(TagFSVolume* vol, uint64_t slice);
 #ifdef CONFIG_VOLUME_TESTS
 /* For the stand: every free run kept from the ribbon as ground a freer named
  * by stitch `stitch` gave back — until a slice of `stitch` or past it stands
@@ -179,10 +179,25 @@ void        FallowStandBar(uint64_t stitch);
 void        FallowNodesFree(FallowNode* list);
 
 /* Under the state lock: how many blocks rest. */
-uint64_t    FallowBlocks(void);
+uint64_t    FallowBlocks(TagFSVolume* vol);
 
 /* The volume let go of: every node freed and nothing given back — what memory
  * held of the map is dropped with it. With the door shut. */
-void        FallowDropAll(void);
+void        FallowDropAll(TagFSVolume* vol);
+
+/* What one volume holds of fallow.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    /* Oldest first: nodes are added in the order their freers were made. */
+    FallowNode* head;
+    FallowNode* tail;
+    FallowNode* barred;  /* given back whole, its ground kept from the ribbon (FallowBarsRun) */
+    uint64_t bar_slice;  /* the stitch the oldest Tally a mount may stand on took in */
+    uint64_t blocks;
+    /* A cycle that could not give back all that ripened, for want of the derived
+     * map's pages: said once, until a cycle gives back all of it. */
+    bool held_said;
+} FallowState;
+
+void FallowVolumeBegin(TagFSVolume* vol);
 
 #endif /* TAGFS_FALLOW_H */

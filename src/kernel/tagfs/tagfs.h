@@ -1,6 +1,13 @@
 #ifndef TAGFS_H
 #define TAGFS_H
 
+/* A mounted volume, whole (volume/tagfs_volume.h): handed to every function
+ * that touches one. TagFSHome is the volume this kernel was booted from,
+ * begun by TagFSHomeBegin before anything of TagFS runs. */
+typedef struct TagFSVolume TagFSVolume;
+TagFSVolume* TagFSHome(void);
+void         TagFSHomeBegin(void);
+
 #include "../../lib/kernel/ktypes.h"
 #include "../../lib/kernel/klib.h"
 #include "tagfs_constants.h"
@@ -86,7 +93,7 @@ static inline bool TagOwnerSame(TagOwner a, TagOwner b)
 /* The owner as the deck's answers name it (boxos_decks.h): 0 the person, a
  * program the file it is named by (TagFSProgramCard) — who it is, while it is
  * no more on the volume and its tags not yet retired. */
-uint64_t TagOwnerWord(TagOwner owner);
+uint64_t TagOwnerWord(TagFSVolume* vol, TagOwner owner);
 
 /*
  * Whose tags a list lets in. One owner's (`all` false: `owner`), or every
@@ -238,7 +245,7 @@ typedef struct {
  * mounted; its book — FRAME, Spine and Tally — is the mount's (mount/
  * book_mount.h). `free_blocks` and `total_files` are what the book says of it
  * today, kept in step by every Ink and every claim of the block map; the next
- * file id is the book's own (g_book.next_fid).
+ * file id is the book's own (vol->book.next_fid).
  *
  * ‼ A BLOCK NUMBER IS A BLOCK OF THE VOLUME
  *
@@ -364,8 +371,8 @@ uint32_t        TagBitmapQueryHoldBound(uint32_t unless_count);
 // Main TagFS API
 // ----------------------------------------------------------------------------
 
-error_t  tagfs_init(void);
-uint8_t  tagfs_get_seat(void);       /* Boardroom seat the volume lives on */
+error_t  tagfs_init(TagFSVolume* vol);
+uint8_t  tagfs_get_seat(TagFSVolume* vol);       /* Boardroom seat the volume lives on */
 
 /*
  * ‼ THE DOOR. Step inside the mounted volume before touching anything it
@@ -383,16 +390,16 @@ uint8_t  tagfs_get_seat(void);       /* Boardroom seat the volume lives on */
  * one thing more is reachable from outside — a caller that wants to hold
  * something of the volume's across several calls.
  */
-bool     tagfs_enter(void);
-void     tagfs_leave(void);
+bool     tagfs_enter(TagFSVolume* vol);
+void     tagfs_leave(TagFSVolume* vol);
 
 /*
  * Which mounting of a volume this is. Bumped every time one is taken up, so
  * anything remembered across a re-read — a file handle, an async read in
  * flight — can be told that what it remembers is from a different volume.
  */
-uint32_t tagfs_mount_epoch(void);
-bool     tagfs_handle_is_of_this_mount(const TagFSFileHandle* handle);
+uint32_t tagfs_mount_epoch(TagFSVolume* vol);
+bool     tagfs_handle_is_of_this_mount(TagFSVolume* vol, const TagFSFileHandle* handle);
 
 /*
  * The service point, called from the guide loop and the idle loop — one atomic
@@ -401,7 +408,7 @@ bool     tagfs_handle_is_of_this_mount(const TagFSFileHandle* handle);
  * has been taken down, which leaves its memory alone until the last caller is
  * out, is finished.
  */
-void     TagFSServiceIfPending(void);
+void     TagFSServiceIfPending(TagFSVolume* vol);
 
 /*
  * The volume's share of the loops (settle/cadence.c). Whether this core's loop
@@ -411,7 +418,7 @@ void     TagFSServiceIfPending(void);
  * the scheduler from the tick, lock-free.
  */
 bool     TagFSStepOwedHere(void);
-bool     TagFSIdleOwed(void);
+bool     TagFSIdleOwed(TagFSVolume* vol);
 
 /* Nightwatch's look at the Settle, from the PIT tick (RT-11). */
 void     TagFSWatchLook(void);
@@ -429,21 +436,21 @@ void     TagFSWatchLook(void);
  * cycle settled, the next cycle is demanded rather than left to Lull.
  */
 struct process_t;
-uint64_t TagFSInkedHere(void);
-void     TagFSNoteInkerSince(struct process_t* proc, uint64_t inked_before);
-uint64_t TagFSInkPlace(uint64_t gen);
+uint64_t TagFSInkedHere(TagFSVolume* vol);
+void     TagFSNoteInkerSince(TagFSVolume* vol, struct process_t* proc, uint64_t inked_before);
+uint64_t TagFSInkPlace(TagFSVolume* vol, uint64_t gen);
 void     TagFSNoteInker(struct process_t* proc, uint64_t place);
-void     TagFSInkerLeaves(struct process_t* proc);
+void     TagFSInkerLeaves(TagFSVolume* vol, struct process_t* proc);
 
 /* Memory came back to the machine — a cabin's, torn down: a Settle cycle
  * refused for want of it is looked at again (settle/settle_wait.c). From any
  * context. */
-void     TagFSHeapCameBack(void);
+void     TagFSHeapCameBack(TagFSVolume* vol);
 
 /* The same event for everything on the volume's road that waits for it: the
  * Settle's cycle (TagFSHeapCameBack), and a mount the machine had no memory
  * for, whose service pass is knocked awake. From any context. */
-void     TagFSMemoryCameBack(void);
+void     TagFSMemoryCameBack(TagFSVolume* vol);
 
 /*
  * Where this volume's ground begins on that medium, in the medium's own
@@ -456,7 +463,7 @@ void     TagFSMemoryCameBack(void);
  * ground on every medium, and this is how it recognises the one that has
  * already been read, checked and described by the mount.
  */
-uint64_t tagfs_get_volume_base(void);
+uint64_t tagfs_get_volume_base(TagFSVolume* vol);
 
 /*
  * A medium has arrived somewhere in the Boardroom.
@@ -476,16 +483,16 @@ uint64_t tagfs_get_volume_base(void);
  */
 void     TagFSWatchSeats(void);
 
-void     TagFSAttendArrival(void);
+void     TagFSAttendArrival(TagFSVolume* vol);
 
 /* A read of the volume the medium refused — said by the mount's readers, so a
  * mount that fails on a medium that did not answer is asked again when the
  * seat answers (seat:ready), and one refused for what it holds is not. */
-void     TagFSNoteReadRefused(void);
+void     TagFSNoteReadRefused(TagFSVolume* vol);
 
 /* The medium under the volume may have left; ask now rather than at the next
  * read, because by then the seat can hold something else. */
-void     TagFSNoteMediumGone(void);
+void     TagFSNoteMediumGone(TagFSVolume* vol);
 
 /* Whether the medium under the mounted volume has left (RT-13): from then on no
  * Ink changes the volume — ERR_DEVICE_NOT_READY — nobody new waits in a Helm's
@@ -496,8 +503,8 @@ void     TagFSNoteMediumGone(void);
  * from — and latches a departure it finds: asked before every run of blocks
  * the mounted volume reads or writes (run/run.c), and by a caller whose medium
  * command was refused, who must tell a medium that left from one that failed. */
-bool     TagFSMediumLeft(void);
-bool     TagFSMediumGone(void);
+bool     TagFSMediumLeft(TagFSVolume* vol);
+bool     TagFSMediumGone(TagFSVolume* vol);
 
 /* Whether the mounted volume takes no write: its medium refused one as
  * protected (RT-18) — DATA PROTECT on USB, an ATA abort on AHCI — or the
@@ -507,8 +514,8 @@ bool     TagFSMediumGone(void);
  * taken up, the medium seated again and asked anew: TagFSWriteRefused asks
  * the seat after a write the medium refused, and latches it. Glass lasts
  * for the whole mount. */
-bool     TagFSReadOnly(void);
-void     TagFSWriteRefused(void);
+bool     TagFSReadOnly(TagFSVolume* vol);
+void     TagFSWriteRefused(TagFSVolume* vol);
 
 /* Said once, by whoever tried the boot mount, whether or not it succeeded.
  * Before it, an arriving medium belongs to the boot that is still happening. */
@@ -520,13 +527,13 @@ error_t tagfs_shutdown(void);
 /* Flush the volatile write cache of the disk that holds the TagFS volume
  * (routes to the probed AHCI port / ATA drive, not a hardcoded device). The
  * one place a flush ticket is taken and answered (scribe/scribe.h). */
-error_t  tagfs_flush_cache(void);
+error_t  tagfs_flush_cache(TagFSVolume* vol);
 
 /* Convert a TagFS logical block number to its absolute disk-sector LBA.
  * Used by the storage deck's reads and writes nobody stands over, which reach
  * the seat (BoardroomReadAsync, BoardroomWriteAsync) outside the block
  * helpers. */
-uint64_t tagfs_block_to_sector(uint64_t block);
+uint64_t tagfs_block_to_sector(TagFSVolume* vol, uint64_t block);
 
 /* There is no tagfs_format() here. A volume is made by the tool that lays it
  * out on ground it read from a partition table (tools/create_tagfs_ground.c),
@@ -548,7 +555,7 @@ uint64_t tagfs_block_to_sector(uint64_t block);
  * of the cabin that asked, CabinProgramFile — or 0 when none does (the
  * kernel itself, a program started from bytes): the file's record remembers
  * it for good (TAGFS_FILE_MADE_BY). */
-int  tagfs_create_file(const char* filename, const uint32_t* tag_ids, uint32_t tag_count, uint64_t made_by,
+int  tagfs_create_file(TagFSVolume* vol, const char* filename, const uint32_t* tag_ids, uint32_t tag_count, uint64_t made_by,
                        uint64_t* out_file_id);
 
 /* The file given up, or renamed — its old name's tag off, the new one's on.
@@ -556,7 +563,7 @@ int  tagfs_create_file(const char* filename, const uint32_t* tag_ids, uint32_t t
  * with the warrant (-ERR_PERMISSION_DENIED); the file holding the kernel the
  * Deed points the loader at is given up by nobody. A rename asks none: its
  * name's tag is a tag like any other. */
-int  tagfs_delete_file(uint64_t file_id, InkWarrant warrant);
+int  tagfs_delete_file(TagFSVolume* vol, uint64_t file_id, InkWarrant warrant);
 /* A file deleted for a term (keep/keep.h): kept `term_seconds` from now, no
  * query meeting it, and let go by the volume when the term ends — or, for a
  * term of 0, given up at once, as tagfs_delete_file does. The term is the
@@ -564,9 +571,9 @@ int  tagfs_delete_file(uint64_t file_id, InkWarrant warrant);
  * deleted only with the warrant, as it is given up. tagfs_restore_file brings a deleted file back
  * until its term ends (-ERR_FILE_NOT_FOUND after, or for a file the volume
  * does not hold), and is no change to a file that is not deleted. */
-int  tagfs_keep_file(uint64_t file_id, uint64_t term_seconds, InkWarrant warrant);
-int  tagfs_restore_file(uint64_t file_id, InkWarrant warrant);
-int  tagfs_rename_file(uint64_t file_id, const char* new_filename);
+int  tagfs_keep_file(TagFSVolume* vol, uint64_t file_id, uint64_t term_seconds, InkWarrant warrant);
+int  tagfs_restore_file(TagFSVolume* vol, uint64_t file_id, InkWarrant warrant);
+int  tagfs_rename_file(TagFSVolume* vol, uint64_t file_id, const char* new_filename);
 
 /*
  * The three changes of a file's extents — a write, span and defrag — are made
@@ -586,20 +593,20 @@ int  tagfs_rename_file(uint64_t file_id, const char* new_filename);
  * the first window changes nothing of the file, one part way keeps the windows
  * inked before it; a growth past every block the volume could give is refused
  * ERR_TAGFS_NO_SPACE before it takes one. */
-error_t tagfs_span_file(uint64_t file_id, uint64_t size);
+error_t tagfs_span_file(TagFSVolume* vol, uint64_t file_id, uint64_t size);
 
 /* A tag put on a file, or taken off: 0, or the Ink's refusal as -ERR_*. No
  * tag asks a warrant: a file's tags are its user's. */
-int  tagfs_add_tag(uint64_t file_id, uint32_t tag_id);
-int  tagfs_remove_tag(uint64_t file_id, uint32_t tag_id);
-bool tagfs_has_tag(uint64_t file_id, uint32_t tag_id);
+int  tagfs_add_tag(TagFSVolume* vol, uint64_t file_id, uint32_t tag_id);
+int  tagfs_remove_tag(TagFSVolume* vol, uint64_t file_id, uint32_t tag_id);
+bool tagfs_has_tag(TagFSVolume* vol, uint64_t file_id, uint32_t tag_id);
 
 /* `owner`'s tag a spelling names, interned and put on the file, both inside
  * one mounting of the volume: OK, or the real refusal — the registry's (the
  * tag too long, the registry full), or the Ink's: ERR_FILE_NOT_FOUND,
  * ERR_DEVICE_NOT_READY, ERR_TAGFS_READ_ONLY, ERR_NO_MEMORY;
  * ERR_TAGFS_NOT_INITIALIZED with no volume. */
-error_t tagfs_add_tag_string(TagOwner owner, uint64_t file_id, const TagSpelling* tag);
+error_t tagfs_add_tag_string(TagFSVolume* vol, TagOwner owner, uint64_t file_id, const TagSpelling* tag);
 /* What `owner`'s spelling names comes off the file: that tag when it has a
  * value, every tag of its key when it is bare — `owner`'s, never another's of
  * the same text. 0 once one of them came off, or a
@@ -607,7 +614,7 @@ error_t tagfs_add_tag_string(TagOwner owner, uint64_t file_id, const TagSpelling
  * -ERR_FILE_NOT_FOUND when there is no such file, or the first refusal of
  * taking one off — -ERR_DEVICE_NOT_READY, -ERR_TAGFS_READ_ONLY or
  * -ERR_NO_MEMORY. */
-int  tagfs_remove_tag_string(TagOwner owner, uint64_t file_id, const TagSpelling* tag);
+int  tagfs_remove_tag_string(TagFSVolume* vol, TagOwner owner, uint64_t file_id, const TagSpelling* tag);
 
 bool tagfs_key_is_reserved(const char *key, size_t key_len);
 
@@ -626,14 +633,14 @@ bool tagfs_key_is_reserved(const char *key, size_t key_len);
  * refusal: ERR_TAGFS_NOT_INITIALIZED with no volume, ERR_NO_MEMORY when the
  * question could not be put to the index.
  */
-error_t  TagFSQueryPage(TagOwner owner, const TagSpelling* tags, uint32_t count, const TagSpelling* without,
+error_t  TagFSQueryPage(TagFSVolume* vol, TagOwner owner, const TagSpelling* tags, uint32_t count, const TagSpelling* without,
                         uint32_t without_count, uint64_t from, uint64_t* out, uint32_t room,
                         bool want_total, TagFSPage* page);
-error_t  TagFSListPage(uint64_t from, uint64_t* out, uint32_t room, bool want_total,
+error_t  TagFSListPage(TagFSVolume* vol, uint64_t from, uint64_t* out, uint32_t room, bool want_total,
                        TagFSPage* page);
 /* The same question asked of the files kept deleted alone: those that wear all
  * of `tags` and none of `without`, a question of neither every one of them. */
-error_t  TagFSQueryKeptPage(TagOwner owner, const TagSpelling* tags, uint32_t count, const TagSpelling* without,
+error_t  TagFSQueryKeptPage(TagFSVolume* vol, TagOwner owner, const TagSpelling* tags, uint32_t count, const TagSpelling* without,
                             uint32_t without_count, uint64_t from, uint64_t* out, uint32_t room,
                             bool want_total, TagFSPage* page);
 /*
@@ -647,7 +654,7 @@ error_t  TagFSQueryKeptPage(TagOwner owner, const TagSpelling* tags, uint32_t co
  * kept deleted are not met. ERR_INVALID_ARGUMENT for a word of no bytes; the
  * rest as TagFSQueryPage.
  */
-error_t  TagFSNamedPage(TagOwner owner, const char* word, size_t length, const TagSpelling* tags, uint32_t count,
+error_t  TagFSNamedPage(TagFSVolume* vol, TagOwner owner, const char* word, size_t length, const TagSpelling* tags, uint32_t count,
                         const TagSpelling* without, uint32_t without_count, uint64_t from, uint64_t* out,
                         uint32_t room, bool want_total, TagFSPage* page);
 /* The live files whose first bytes begin with `bytes`, `length` of them (1 to
@@ -656,7 +663,7 @@ error_t  TagFSNamedPage(TagOwner owner, const char* word, size_t length, const T
  * TagFSQueryPage gives them; a file kept deleted is not met. No file's bytes
  * are read: the records answer. ERR_INVALID_ARGUMENT for no bytes or more
  * than a record keeps; ERR_TAGFS_NOT_INITIALIZED with no volume. */
-error_t  TagFSStartingWithPage(const uint8_t* bytes, uint32_t length, uint64_t from, uint64_t* out, uint32_t room,
+error_t  TagFSStartingWithPage(TagFSVolume* vol, const uint8_t* bytes, uint32_t length, uint64_t from, uint64_t* out, uint32_t room,
                                bool want_total, TagFSPage* page);
 /* The words a name answers to, as the name index takes them: the whole name
  * (lengths[0], its `length`) and, when the name has a dot with something
@@ -678,20 +685,20 @@ uint32_t TagFSNameWords(const char* name, size_t length, size_t lengths[2]);
  * OK, or the refusal: ERR_TAGFS_NOT_INITIALIZED with no volume, ERR_NO_MEMORY,
  * or ERR_BUFFER_TOO_SMALL when not even the first record fits.
  */
-error_t  TagFSTagPage(const TagView* view, const TagSpelling* within, uint32_t within_count,
+error_t  TagFSTagPage(TagFSVolume* vol, const TagView* view, const TagSpelling* within, uint32_t within_count,
                       const TagSpelling* without, uint32_t without_count, uint32_t from, uint8_t* out,
                       uint32_t room, uint32_t* used, uint32_t* delivered, uint32_t* next);
 /* The file id the next create takes — no id of this volume has reached it.
  * 0 when no volume is mounted. */
-uint64_t tagfs_file_ceiling(void);
+uint64_t tagfs_file_ceiling(TagFSVolume* vol);
 
 /* The file opened for one operation: NULL when it is not there, when it has
  * no record in memory, when it is locked (book_mount.h, TagFSFileLocked), or when the handle
  * or its place among the file's open handles could not be had. A handle
  * opened to read holds the record by reference; one opened only to write
  * holds none (TagFSFileHandle). */
-TagFSFileHandle* tagfs_open(uint64_t file_id, uint32_t flags);
-void             tagfs_close(TagFSFileHandle* handle);
+TagFSFileHandle* tagfs_open(TagFSVolume* vol, uint64_t file_id, uint32_t flags);
+void             tagfs_close(TagFSVolume* vol, TagFSFileHandle* handle);
 
 /* Up to `size` bytes from the handle's offset into the kernel's `buffer`: OK
  * and *out_read — 0 at or past the file's size — or the refusal with
@@ -700,13 +707,13 @@ void             tagfs_close(TagFSFileHandle* handle);
  * (ERR_DEVICE_NOT_READY), a block that does not hold what was written to it
  * (ERR_CHECKSUM), a part of the file inside its size that no extent covers
  * (ERR_METADATA_CORRUPTED). The offset moves by what landed. */
-error_t          tagfs_read(TagFSFileHandle* handle, void* buffer, uint64_t size,
+error_t          tagfs_read(TagFSVolume* vol, TagFSFileHandle* handle, void* buffer, uint64_t size,
                             uint64_t* out_read);
 
 /* The same read into wherever `sink` says — a program's pages, a block at a
  * time as the read reaches them (read/read.h) — up to the sink's room. */
 struct ReadSink;
-error_t          TagFSReadInto(TagFSFileHandle* handle, const struct ReadSink* sink,
+error_t          TagFSReadInto(TagFSVolume* vol, TagFSFileHandle* handle, const struct ReadSink* sink,
                                uint64_t* out_read);
 
 /* The source's bytes written at the handle's offset — at the file's size when
@@ -717,10 +724,10 @@ error_t          TagFSReadInto(TagFSFileHandle* handle, const struct ReadSink* s
  * kept when the medium stopped taking the rest. The offset moves by what was
  * written, and the handle's file_size is the size the write left. */
 struct PlotSource;
-error_t          tagfs_write(TagFSFileHandle* handle, const struct PlotSource* src,
+error_t          tagfs_write(TagFSVolume* vol, TagFSFileHandle* handle, const struct PlotSource* src,
                              uint64_t* out_written);
 
-int         tagfs_get_metadata(uint64_t file_id, TagFSMetadata* out);
+int         tagfs_get_metadata(TagFSVolume* vol, uint64_t file_id, TagFSMetadata* out);
 /* What tagfs_get_metadata filled in, let go. */
 void        tagfs_metadata_free(TagFSMetadata* meta);
 TagFSState* tagfs_get_state(void);
@@ -730,7 +737,7 @@ TagFSState* tagfs_get_state(void);
  * is left where it was. A file the system keeps — in a role by its record, or
  * holding the kernel the Deed points at — is not moved, warrant or none
  * (plot.h, PlotGather): ERR_PERMISSION_DENIED. */
-error_t  tagfs_defrag_file(uint64_t file_id);
+error_t  tagfs_defrag_file(TagFSVolume* vol, uint64_t file_id);
 /* How fragmented the volume's files are: the share, in percent, of the steps
  * from one of a file's blocks to its next that are a gap — the next run not
  * beginning where the one before it ends — rounded up, so one gap never reads
@@ -755,21 +762,21 @@ void     TagFSFragOfRecord(const struct FileRecord* rec, uint32_t* gaps, uint64_
  * what it gave does not match the digest the book holds for the block
  * (integrity/integrity.h, which names the block and publishes it); a write
  * ERR_DEVICE_NOT_READY, ERR_WRITE_FAILED, or ERR_TAGFS_READ_ONLY under glass. */
-error_t  tagfs_read_block(uint64_t block, void* buffer);
-error_t  tagfs_write_block(uint64_t block, const void* buffer);
+error_t  tagfs_read_block(TagFSVolume* vol, uint64_t block, void* buffer);
+error_t  tagfs_write_block(TagFSVolume* vol, uint64_t block, const void* buffer);
 
 /* `count` blocks from `first` on, in as few commands as the seat takes and
  * checked against nothing: for a reader that checks each block where it hands
  * it out — the read-ahead's fetch, a defrag's copy. A volume assembled in a
  * Braid gives them a block at a time. OK, ERR_DEVICE_NOT_READY or
  * ERR_READ_FAILED. */
-error_t  TagFSReadRun(uint64_t first, uint32_t count, void* buffer);
+error_t  TagFSReadRun(TagFSVolume* vol, uint64_t first, uint32_t count, void* buffer);
 
 /* A write landed on `block`: no read-ahead window hands out what it held
  * before (read-after-write). tagfs_write_block says so itself; a writer that
  * goes to the medium another way — the asynchronous WriteJob, the Use
  * Context's chain — says so after each block. */
-void     tagfs_readahead_invalidate(uint64_t block);
+void     tagfs_readahead_invalidate(TagFSVolume* vol, uint64_t block);
 
 /*
  * Read one sector run of the mounted volume, counted from the start of its
@@ -780,8 +787,8 @@ void     tagfs_readahead_invalidate(uint64_t block);
  * which is what makes "no absolute addresses inside a volume" an invariant
  * instead of a convention.
  */
-int      tagfs_volume_read (uint64_t vlba, uint32_t count, void* buffer);
-int      tagfs_volume_write(uint64_t vlba, uint32_t count, const void* buffer);
+int      tagfs_volume_read (TagFSVolume* vol, uint64_t vlba, uint32_t count, void* buffer);
+int      tagfs_volume_write(TagFSVolume* vol, uint64_t vlba, uint32_t count, const void* buffer);
 
 /*
  * Tags by name, for everything outside TagFS.
@@ -796,26 +803,26 @@ int      tagfs_volume_write(uint64_t vlba, uint32_t count, const void* buffer);
  * person's tags — the language Touch, the processes, Bay, Brook and the Use
  * Context share — and never a program's own (TagOwner).
  */
-uint32_t tagfs_tag_lookup(const char* tag);
-uint32_t TagFSLookupSpelling(const TagSpelling* tag);
+uint32_t tagfs_tag_lookup(TagFSVolume* vol, const char* tag);
+uint32_t TagFSLookupSpelling(TagFSVolume* vol, const TagSpelling* tag);
 
 /* The id, issued when the volume has none: OK, the spelling's or the
  * registry's refusal, or ERR_TAGFS_NOT_INITIALIZED when there is no volume. */
-error_t  tagfs_tag_intern(const char* tag, uint32_t* out_id);
-error_t  TagFSInternSpelling(const TagSpelling* tag, uint32_t* out_id);
+error_t  tagfs_tag_intern(TagFSVolume* vol, const char* tag, uint32_t* out_id);
+error_t  TagFSInternSpelling(TagFSVolume* vol, const TagSpelling* tag, uint32_t* out_id);
 
 /* The same for `owner`'s tag — a program's own, or the person's — for the
  * storage deck, which speaks for whichever its caller names (boxos_decks.h,
  * STORAGE_TAGS_*). The person's alone are words of the Use Context, and only
  * they are bound to it. */
-error_t  TagFSInternOwned(TagOwner owner, const TagSpelling* tag, uint32_t* out_id);
+error_t  TagFSInternOwned(TagFSVolume* vol, TagOwner owner, const TagSpelling* tag, uint32_t* out_id);
 
 /* The whole text of a tag id — "app:editor" — and its length. It is written
  * into `out` only when it fits whole, NUL and all, and `out` is left empty
  * otherwise, so a caller is never handed a shorter tag than the one it asked
  * for: a caller that must have it measures first (out NULL, size 0). 0 when
  * the volume has no such tag, or there is no volume. */
-size_t   tagfs_tag_text(uint32_t tag_id, char* out, size_t out_size);
+size_t   tagfs_tag_text(TagFSVolume* vol, uint32_t tag_id, char* out, size_t out_size);
 
 /* Whether program `owner` (TagOwner) is on the volume mounted, so that its
  * own tags are its: a signed program's passport while a file of it is — live,
@@ -833,15 +840,15 @@ bool     TagFSHoldsProgram(const uint8_t volume[16], uint64_t owner);
  * else the least kept deleted —; and every file of it, live or kept deleted,
  * rising: how many, the first `room` written to `out`. A program that is no
  * more on the volume has none: 0, as with no volume. */
-uint64_t TagFSProgramOf(uint64_t fid);
-uint64_t TagFSProgramCard(uint64_t owner);
-uint32_t TagFSProgramFiles(uint64_t owner, uint64_t* out, uint32_t room);
+uint64_t TagFSProgramOf(TagFSVolume* vol, uint64_t fid);
+uint64_t TagFSProgramCard(TagFSVolume* vol, uint64_t owner);
+uint32_t TagFSProgramFiles(TagFSVolume* vol, uint64_t owner, uint64_t* out, uint32_t room);
 
 /* The card of file `fid` laid with who the program it holds is, once one is
  * started from it: the passport its signature gives it, or 0 for a program
  * with no signature that holds — one Ink when the card says another, none
  * when it says the same (InkPassport). */
-error_t  TagFSPassportLay(uint64_t fid, uint64_t passport);
+error_t  TagFSPassportLay(TagFSVolume* vol, uint64_t fid, uint64_t passport);
 
 /* Whether tag `tag_id` is one of the person's (TagOwner): false for a
  * program's own, an id the volume has not, and with no volume. */
@@ -868,22 +875,22 @@ bool     TagFSTagIsPersons(uint32_t tag_id);
  * ERR_FILE_NOT_FOUND for a program, or a reader shown to, the volume has not,
  * and a program kept deleted, every file of it, that would show to one more;
  * the Ink's refusal; ERR_TAGFS_NOT_INITIALIZED with no volume. */
-error_t  TagFSShowTags(uint64_t program, uint64_t reader, bool show);
+error_t  TagFSShowTags(TagFSVolume* vol, uint64_t program, uint64_t reader, bool show);
 
 /* Whether `program` shows its tags to `reader` — by name, or to every
  * program. False for a program the volume has not, and with no volume. */
-bool     TagFSShows(uint64_t program, uint64_t reader);
+bool     TagFSShows(TagFSVolume* vol, uint64_t program, uint64_t reader);
 
 /* The programs that show their tags to `reader` — by name or to every
  * program, `reader` itself left out — a page at a time in the order of their
  * cards, from `from` on (TagFSPage). ERR_TAGFS_NOT_INITIALIZED with no volume. */
-error_t  TagFSShownToPage(uint64_t reader, uint64_t from, uint64_t* out, uint32_t room, bool want_total,
+error_t  TagFSShownToPage(TagFSVolume* vol, uint64_t reader, uint64_t from, uint64_t* out, uint32_t room, bool want_total,
                           TagFSPage* page);
 
 /* The programs `program` shows its tags to, rising, 0 first for every
  * program: *out the list — the caller's to kfree, NULL for none — *count how
  * many. ERR_FILE_NOT_FOUND for a program the volume has not, ERR_NO_MEMORY. */
-error_t  TagFSShownBy(uint64_t program, uint64_t** out, uint32_t* count);
+error_t  TagFSShownBy(TagFSVolume* vol, uint64_t program, uint64_t** out, uint32_t* count);
 
 /* Program `asker` asks program `owner` to show it its tags: a note the
  * kernel holds (show/show.h) until `owner` answers — TagFSShowTags of the
@@ -892,12 +899,12 @@ error_t  TagFSShownBy(uint64_t program, uint64_t** out, uint32_t* count);
  * its tags to the asker already. ERR_INVALID_ARGUMENT for program 0 or one
  * asking itself; ERR_FILE_NOT_FOUND for a program the volume has not;
  * ERR_NO_MEMORY. */
-error_t  TagFSAskToSee(uint64_t asker, uint64_t owner, bool* noted);
+error_t  TagFSAskToSee(TagFSVolume* vol, uint64_t asker, uint64_t owner, bool* noted);
 
 /* The programs that asked `owner` to show them its tags and are not answered
  * yet, a page at a time in the order of their cards (TagFSPage); OK, or
  * ERR_NO_MEMORY. */
-error_t  TagFSAsksPage(uint64_t owner, uint64_t from, uint64_t* out, uint32_t room, bool want_total,
+error_t  TagFSAsksPage(TagFSVolume* vol, uint64_t owner, uint64_t from, uint64_t* out, uint32_t room, bool want_total,
                        TagFSPage* page);
 
 /* Whether tag `tag_id` is one of the person's a pattern names
@@ -910,7 +917,7 @@ bool     TagFSTagMatches(uint32_t tag_id, const TagSpelling* pattern);
  * volume calls the tag its own, and whose it is (`owner` when not NULL) — no
  * copy, for a caller that is INSIDE THE DOOR (tagfs_enter) and reads them
  * before it leaves: the registry is freed only once the last caller is out. */
-bool     TagFSTagSpelling(uint32_t tag_id, TagSpelling* out, bool* is_system, TagOwner* owner);
+bool     TagFSTagSpelling(TagFSVolume* vol, uint32_t tag_id, TagSpelling* out, bool* is_system, TagOwner* owner);
 
 // Accessor Functions
 // ============================================================================

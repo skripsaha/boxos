@@ -4,12 +4,10 @@
 #include "../settle/settle_internal.h"
 #include "rtc.h"
 #include "atomics.h"
+#include "tagfs_volume.h"
 
 #define KEEP_PAGE  64u
 
-static volatile uint32_t s_busy;
-static volatile uint32_t s_held;
-static volatile uint64_t s_next_us;
 
 uint64_t KeepNowNs(void)
 {
@@ -24,9 +22,9 @@ uint64_t KeepUntil(uint64_t term_seconds)
     return now + term_seconds * 1000000000ull;
 }
 
-static bool KeepExpired(uint64_t fid, uint64_t now_ns)
+static bool KeepExpired(TagFSVolume* vol, uint64_t fid, uint64_t now_ns)
 {
-    FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, fid, NULL);
+    FileRecord* rec = FileMapRecordHold(vol->state.files, fid, NULL);
     if (!rec)
         return false;
     const bool due = (rec->flags & TAGFS_FILE_DELETED) && rec->keep_until <= now_ns;
@@ -34,18 +32,18 @@ static bool KeepExpired(uint64_t fid, uint64_t now_ns)
     return due;
 }
 
-uint32_t KeepSweepNow(uint64_t now_ns)
+uint32_t KeepSweepNow(TagFSVolume* vol, uint64_t now_ns)
 {
     uint64_t ids[KEEP_PAGE];
     uint64_t from    = 1;
     uint32_t let_go  = 0;
     for (;;) {
         TagFSPage page;
-        if (TagFSQueryKeptPage(TagOwnerPerson(), NULL, 0, NULL, 0, from, ids, KEEP_PAGE, false, &page) != OK)
+        if (TagFSQueryKeptPage(vol, TagOwnerPerson(), NULL, 0, NULL, 0, from, ids, KEEP_PAGE, false, &page) != OK)
             break;
         for (uint32_t i = 0; i < page.delivered; i++) {
             InkReceipt receipt;
-            if (KeepExpired(ids[i], now_ns) && InkQuitclaim(ids[i], INK_WARRANTED, &receipt) == OK)
+            if (KeepExpired(vol, ids[i], now_ns) && InkQuitclaim(vol, ids[i], INK_WARRANTED, &receipt) == OK)
                 let_go++;
         }
         if (!page.next)
@@ -57,30 +55,30 @@ uint32_t KeepSweepNow(uint64_t now_ns)
     return let_go;
 }
 
-void KeepServe(void)
+void KeepServe(TagFSVolume* vol)
 {
-    if (SettleNowUs() < __atomic_load_n(&s_next_us, __ATOMIC_ACQUIRE))
+    if (SettleNowUs() < __atomic_load_n(&vol->keep.next_us, __ATOMIC_ACQUIRE))
         return;
-    if (__atomic_exchange_n(&s_busy, 1u, __ATOMIC_ACQUIRE))
+    if (__atomic_exchange_n(&vol->keep.busy, 1u, __ATOMIC_ACQUIRE))
         return;
-    __atomic_store_n(&s_next_us, SettleNowUs() + KEEP_LOOK_US, __ATOMIC_RELEASE);
-    if (!__atomic_load_n(&s_held, __ATOMIC_ACQUIRE) && tagfs_enter()) {
-        (void)KeepSweepNow(KeepNowNs());
-        tagfs_leave();
+    __atomic_store_n(&vol->keep.next_us, SettleNowUs() + KEEP_LOOK_US, __ATOMIC_RELEASE);
+    if (!__atomic_load_n(&vol->keep.held, __ATOMIC_ACQUIRE) && tagfs_enter(vol)) {
+        (void)KeepSweepNow(vol, KeepNowNs());
+        tagfs_leave(vol);
     }
-    __atomic_store_n(&s_busy, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->keep.busy, 0u, __ATOMIC_RELEASE);
 }
 
-void KeepMountReset(void)
+void KeepMountReset(TagFSVolume* vol)
 {
-    __atomic_store_n(&s_next_us, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->keep.next_us, 0, __ATOMIC_RELEASE);
 }
 
-bool KeepHold(bool held)
+bool KeepHold(TagFSVolume* vol, bool held)
 {
-    bool was = __atomic_exchange_n(&s_held, held ? 1u : 0u, __ATOMIC_ACQ_REL) != 0;
+    bool was = __atomic_exchange_n(&vol->keep.held, held ? 1u : 0u, __ATOMIC_ACQ_REL) != 0;
     if (held)
-        while (__atomic_load_n(&s_busy, __ATOMIC_ACQUIRE))
+        while (__atomic_load_n(&vol->keep.busy, __ATOMIC_ACQUIRE))
             cpu_pause();
     return was;
 }

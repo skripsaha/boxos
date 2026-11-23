@@ -24,6 +24,7 @@
 #include "atomics.h"
 #include "touch.h"
 #include "logbook.h"
+#include "tagfs_volume.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -60,13 +61,13 @@
 
 /* The volume's medium arriving again, attended until the mount road has
  * nothing left to do — mounted or refused — bounded. */
-void StandTallyArrive(void)
+void StandTallyArrive(TagFSVolume* vol)
 {
     uint64_t bound = rdtsc() + cpu_ms_to_tsc(STAND_TALLY_MOUNT_MS);
-    TagFSAttendArrival();
-    while (!TagFSStandMountIdle() && rdtsc() < bound) {
+    TagFSAttendArrival(vol);
+    while (!TagFSStandMountIdle(vol) && rdtsc() < bound) {
         BoardroomAttendIfPending();
-        TagFSServiceIfPending();
+        TagFSServiceIfPending(vol);
         BatonPump(amp_get_core_index());
         cpu_pause();
     }
@@ -75,18 +76,18 @@ void StandTallyArrive(void)
 /* Whatever a test left: the plan down, the volume up again if it is not, and
  * the runner counted back in — once, here: a test that let the volume go and
  * met it again leaves the runner's hold to this. */
-void StandTallyClose(void)
+void StandTallyClose(TagFSVolume* vol)
 {
     BlockFailDisarm();
-    if (!tagfs_get_state()->initialized)
-        StandTallyArrive();
-    TagFSStandHoldAgain();
+    if (!vol->state.initialized)
+        StandTallyArrive(vol);
+    TagFSStandHoldAgain(vol);
 }
 
 /* Why a test written for a book stands aside here, or NULL. */
-const char* StandTallyAside(void)
+const char* StandTallyAside(TagFSVolume* vol)
 {
-    return StandStepsAsideFor();
+    return StandStepsAsideFor(vol);
 }
 
 /* What a mount found, folded into numbers two mounts of one volume share: how
@@ -97,9 +98,9 @@ typedef struct {
     uint64_t sum;
 } StandTallyState;
 
-static void StandTallyStateTake(StandTallyState* out)
+static void StandTallyStateTake(TagFSVolume* vol, StandTallyState* out)
 {
-    TagFSState* fs   = tagfs_get_state();
+    TagFSState* fs   = &vol->state;
     uint64_t    from = 0;
     uint64_t    ids[32];
     uint32_t    n;
@@ -165,7 +166,7 @@ static const char* StandTallyDigestSaid(TallyDigestSays says)
  * the Tally's answer for it — no element, no copy, or no read now and why —
  * before the claim fails.
  */
-static bool StandTallyDigested(const FileRecord* rec, StandTallyNamed* named)
+static bool StandTallyDigested(TagFSVolume* vol, const FileRecord* rec, StandTallyNamed* named)
 {
     StripWalk walk;
     Strip     run;
@@ -174,11 +175,11 @@ static bool StandTallyDigested(const FileRecord* rec, StandTallyNamed* named)
         for (uint64_t k = 0; k < run.count; k++) {
             uint64_t digest  = 0;
             error_t  refused = OK;
-            if (GlossFind(run.start + k, &digest)) {
+            if (GlossFind(vol, run.start + k, &digest)) {
                 named->gloss++;
                 continue;
             }
-            TallyDigestSays says = TallyDigestFind(run.start + k, &digest, &refused);
+            TallyDigestSays says = TallyDigestFind(vol, run.start + k, &digest, &refused);
             if (says == TALLY_DIGEST_NAMED) {
                 named->tally++;
                 continue;
@@ -194,47 +195,48 @@ static bool StandTallyDigested(const FileRecord* rec, StandTallyNamed* named)
 }
 
 /* The whole file read through a handle, a buffer at a time; its bytes. */
-static error_t StandTallyReadWhole(uint64_t fid, uint64_t* got)
+static error_t StandTallyReadWhole(TagFSVolume* vol, uint64_t fid, uint64_t* got)
 {
-    TagFSFileHandle* h = tagfs_open(fid, TAGFS_HANDLE_READ);
+    TagFSFileHandle* h = tagfs_open(vol, fid, TAGFS_HANDLE_READ);
     if (!h)
         return ERR_FILE_NOT_FOUND;
     error_t rc = OK;
     *got = 0;
     while (rc == OK && *got < h->file_size) {
         uint64_t n = 0;
-        rc = tagfs_read(h, g_test_output, sizeof(g_test_output), &n);
+        rc = tagfs_read(vol, h, g_test_output, sizeof(g_test_output), &n);
         if (rc == OK && n == 0)
             rc = ERR_IO;
         *got += n;
     }
-    tagfs_close(h);
+    tagfs_close(vol, h);
     return rc;
 }
 
 static TestResult TestStandTallyFilesReadWhole(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult      verdict = TEST_PASS;
-    TagFSState*     fs      = tagfs_get_state();
-    const char*     aside   = StandTallyAside();
+    TagFSState*     fs      = &vol->state;
+    const char*     aside   = StandTallyAside(vol);
     StandTallyNamed named   = { 0, 0 };
     uint64_t        from = 0, files = 0, ids[16];
     uint32_t        n;
 
     if (aside)
         return test_steps_aside(aside);
-    uint32_t errors = IntegrityErrorCount();
+    uint32_t errors = IntegrityErrorCount(vol);
     while ((n = FileMapFiles(fs->files, from, ids, 16)) > 0) {
         for (uint32_t i = 0; i < n; i++) {
             FileRecord* rec = FileMapRecordHold(fs->files, ids[i], NULL);
             TEST_ASSERT(rec != NULL, "every live file has its record");
-            bool     digested = StandTallyDigested(rec, &named);
+            bool     digested = StandTallyDigested(vol, rec, &named);
             uint64_t size     = rec->size;
             FileRecordRelease(rec);
             TEST_ASSERT(digested, "every block a live file names carries the digest it was written with — the "
                         "Gloss's, or the Tally's");
             uint64_t got = 0;
-            TEST_ASSERT_OK(StandTallyReadWhole(ids[i], &got), "the file reads, every block of it");
+            TEST_ASSERT_OK(StandTallyReadWhole(vol, ids[i], &got), "the file reads, every block of it");
             TEST_ASSERT_EQ(got, size, "to its last byte");
             files++;
         }
@@ -246,7 +248,7 @@ static TestResult TestStandTallyFilesReadWhole(void)
                 (unsigned long long)named.tally);
     TEST_ASSERT(files > 0, "the book holds files");
     TEST_ASSERT_EQ(files, FileMapCount(fs->files), "and the walk met every one the mount holds");
-    TEST_ASSERT_EQ(IntegrityErrorCount(), errors, "and no block read otherwise than its digest says");
+    TEST_ASSERT_EQ(IntegrityErrorCount(vol), errors, "and no block read otherwise than its digest says");
 out:
     return verdict;
 }
@@ -257,27 +259,28 @@ out:
 
 static TestResult TestStandTallyMountWritesNothing(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult      verdict = TEST_PASS;
-    uint8_t         seat    = tagfs_get_seat();
-    const char*     aside   = StandTallyAside();
+    uint8_t         seat    = tagfs_get_seat(vol);
+    const char*     aside   = StandTallyAside(vol);
     StandTallyState before, once, twice;
     bool            down    = false;
 
     if (aside)
         return test_steps_aside(aside);
-    StandTallyStateTake(&before);
+    StandTallyStateTake(vol, &before);
     BlockFailArm(seat, BLOCK_FAIL_WRITE, 0, 0, BLOCK_FAIL_NEVER);
     for (uint32_t m = 0; m < 2; m++) {
-        down = TagFSStandLetGo();
+        down = TagFSStandLetGo(vol);
         TEST_ASSERT(down, "the volume is let go of, writing nothing");
-        StandTallyArrive();
-        TagFSStandHoldAgain();
+        StandTallyArrive(vol);
+        TagFSStandHoldAgain(vol);
         down = false;
-        TEST_ASSERT(tagfs_get_state()->initialized, "and is mounted again off its book");
-        StandTallyStateTake(m ? &twice : &once);
+        TEST_ASSERT(vol->state.initialized, "and is mounted again off its book");
+        StandTallyStateTake(vol, m ? &twice : &once);
     }
     TEST_ASSERT_EQ(BlockFailSeen(), 0, "and not one write reached the medium across two mounts");
-    TEST_ASSERT(!TagFSIsUnderGlass(), "and the book is one this kernel's writer goes on: no glass over it");
+    TEST_ASSERT(!TagFSIsUnderGlass(vol), "and the book is one this kernel's writer goes on: no glass over it");
     TEST_ASSERT_EQ(once.files, before.files, "the first mount holds the files the boot's did");
     TEST_ASSERT_EQ(once.sum, before.sum, "the same files, by id, size and name");
     TEST_ASSERT_EQ(twice.files, once.files, "and the second the same");
@@ -285,10 +288,10 @@ static TestResult TestStandTallyMountWritesNothing(void)
     TEST_ASSERT_EQ(twice.sum, once.sum, "by id, size and name");
 out:
     if (down)
-        StandTallyArrive();
+        StandTallyArrive(vol);
     else
-        TagFSStandLetGo();
-    StandTallyClose();
+        TagFSStandLetGo(vol);
+    StandTallyClose(vol);
     return verdict;
 }
 
@@ -298,10 +301,11 @@ out:
 
 static TestResult TestStandTallyCopyOneRotten(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult     verdict = TEST_PASS;
-    uint8_t        seat    = tagfs_get_seat();
-    uint64_t       base    = tagfs_get_volume_base();
-    const char*    aside   = StandTallyAside();
+    uint8_t        seat    = tagfs_get_seat(vol);
+    uint64_t       base    = tagfs_get_volume_base(vol);
+    const char*    aside   = StandTallyAside(vol);
     TallyPlace root;
     MountBookSaid  said;
     StandTallyState before, after;
@@ -314,39 +318,39 @@ static TestResult TestStandTallyCopyOneRotten(void)
         return test_steps_aside(aside);
     TEST_ASSERT(TallyStandNodeWhere(TALLY_FILES, 0, &root), "the FILES root the mount read");
     TEST_ASSERT(root.ptr.copies >= 2, "is written in two copies");
-    StandTallyStateTake(&before);
+    StandTallyStateTake(vol, &before);
 
     vlba = root.ptr.block[0] * TAGFS_BLOCK_SECTORS + 3u;
-    TEST_ASSERT(TagFSStandLetGo(), "the volume is let go of");
+    TEST_ASSERT(TagFSStandLetGo(vol), "the volume is let go of");
     TEST_ASSERT(StandTallySector(seat, base, vlba, was, false), "a sector of the root's first copy is read");
     memcpy(rot, was, TAGFS_SECTOR_SIZE);
     rot[200] ^= 0x5A;
     TEST_ASSERT(StandTallySector(seat, base, vlba, rot, true), "and a byte of it rots on the medium");
     rotten = true;
-    StandTallyArrive();
-    TagFSStandHoldAgain();
+    StandTallyArrive(vol);
+    TagFSStandHoldAgain(vol);
 
-    TEST_ASSERT(tagfs_get_state()->initialized, "the volume mounts");
-    MountBookStandSaid(&said);
+    TEST_ASSERT(vol->state.initialized, "the volume mounts");
+    MountBookStandSaid(vol, &said);
     TEST_ASSERT_EQ(said.mended, 1, "and says one copy does not read, the second read in its place");
     TEST_ASSERT_EQ(said.rotten, 0, "and no range of it is lost");
-    StandTallyStateTake(&after);
+    StandTallyStateTake(vol, &after);
     TEST_ASSERT_EQ(after.files, before.files, "every file is there");
     TEST_ASSERT_EQ(after.sum, before.sum, "as it was");
 out:
     if (rotten) {
-        if (tagfs_get_state()->initialized)
-            TagFSStandLetGo();
+        if (vol->state.initialized)
+            TagFSStandLetGo(vol);
         if (!StandTallySector(seat, base, vlba, was, true))
             verdict = TestFailedAt(__FILE__, __LINE__, "the rotten sector would not take its bytes "
                                    "back (vlba, 0)", (int64_t)vlba, 0);
-        StandTallyArrive();
-        MountBookStandSaid(&said);
+        StandTallyArrive(vol);
+        MountBookStandSaid(vol, &said);
         if (said.mended != 0)
             verdict = TestFailedAt(__FILE__, __LINE__, "mounted on the sector put back, a copy still "
                                    "does not read (mended, 0)", said.mended, 0);
     }
-    StandTallyClose();
+    StandTallyClose(vol);
     return verdict;
 }
 
@@ -357,20 +361,21 @@ out:
 
 static TestResult TestStandTallyWritesRefused(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    uint8_t     seat    = tagfs_get_seat();
-    const char* aside   = StandTallyAside();
+    uint8_t     seat    = tagfs_get_seat(vol);
+    const char* aside   = StandTallyAside(vol);
     uint64_t    ids[1];
 
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(FileMapFiles(tagfs_get_state()->files, 0, ids, 1) == 1, "a live file to change");
+    TEST_ASSERT(FileMapFiles(vol->state.files, 0, ids, 1) == 1, "a live file to change");
     BlockFailArm(seat, BLOCK_FAIL_WRITE, 0, 0, BLOCK_FAIL_NEVER);
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x3C);
-    TEST_ASSERT_EQ(TestFileWrite(ids[0], g_test_buffer, TAGFS_BLOCK_SIZE), -1,
+    TEST_ASSERT_EQ(TestFileWrite(vol, ids[0], g_test_buffer, TAGFS_BLOCK_SIZE), -1,
                    "a file's bytes are not written");
     TEST_ASSERT_EQ(BlockFailSeen(), 0, "and not one write reached the medium");
-    TEST_ASSERT(!TagFSReadOnly(), "the volume is not read-only: its book takes files, names and memory "
+    TEST_ASSERT(!TagFSReadOnly(vol), "the volume is not read-only: its book takes files, names and memory "
                 "(stand_docket, stand_stitch)");
 out:
     BlockFailDisarm();
@@ -384,9 +389,9 @@ out:
 static ReadJobStandAnswer s_tally_answer;
 
 /* A live file of three blocks or more in one run, and its first block. */
-static bool StandTallyRunOfThree(uint64_t* fid, uint64_t* first)
+static bool StandTallyRunOfThree(TagFSVolume* vol, uint64_t* fid, uint64_t* first)
 {
-    TagFSState* fs   = tagfs_get_state();
+    TagFSState* fs   = &vol->state;
     uint64_t    from = 0, ids[16];
     uint32_t    n;
     while ((n = FileMapFiles(fs->files, from, ids, 16)) > 0) {
@@ -409,9 +414,9 @@ static bool StandTallyRunOfThree(uint64_t* fid, uint64_t* first)
 
 /* The port's read of the file's first three blocks, answered — into a sink
  * of zeros, so the bytes in it are the ones the job landed. */
-static error_t StandTallyPortRead(uint64_t fid)
+static error_t StandTallyPortRead(TagFSVolume* vol, uint64_t fid)
 {
-    TagFSFileHandle* h = tagfs_open(fid, TAGFS_HANDLE_READ);
+    TagFSFileHandle* h = tagfs_open(vol, fid, TAGFS_HANDLE_READ);
     ReadJobAsk       ask;
     if (!h)
         return ERR_FILE_NOT_FOUND;
@@ -423,36 +428,37 @@ static error_t StandTallyPortRead(uint64_t fid)
     ask.sink.bytes  = 3u * TAGFS_BLOCK_SIZE;
     ask.stand       = &s_tally_answer;
     if (ReadJobSubmit(h, &ask, NULL, NULL) != ERR_WOULD_BLOCK) {
-        tagfs_close(h);
+        tagfs_close(vol, h);
         return ERR_BUSY;
     }
     uint64_t bound = rdtsc() + cpu_ms_to_tsc(STAND_TALLY_MOUNT_MS);
     while (!__atomic_load_n(&s_tally_answer.answered, __ATOMIC_ACQUIRE) && rdtsc() < bound) {
-        StandPortTurn(tagfs_get_seat());
+        StandPortTurn(vol, tagfs_get_seat(vol));
         cpu_pause();
     }
     return __atomic_load_n(&s_tally_answer.answered, __ATOMIC_ACQUIRE) ? s_tally_answer.rc : ERR_TIMEOUT;
 }
 
 /* A read of `bytes` from `offset` of the file through a handle of its own. */
-static error_t StandTallyReadAt(uint64_t fid, uint64_t offset, uint32_t bytes)
+static error_t StandTallyReadAt(TagFSVolume* vol, uint64_t fid, uint64_t offset, uint32_t bytes)
 {
-    TagFSFileHandle* h = tagfs_open(fid, TAGFS_HANDLE_READ);
+    TagFSFileHandle* h = tagfs_open(vol, fid, TAGFS_HANDLE_READ);
     uint64_t         got = 0;
     if (!h)
         return ERR_FILE_NOT_FOUND;
     h->offset  = offset;
-    error_t rc = tagfs_read(h, g_test_output, bytes, &got);
-    tagfs_close(h);
+    error_t rc = tagfs_read(vol, h, g_test_output, bytes, &got);
+    tagfs_close(vol, h);
     return rc;
 }
 
 static TestResult TestStandTallyRotThreePaths(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    uint8_t     seat    = tagfs_get_seat();
-    uint64_t    base    = tagfs_get_volume_base();
-    const char* aside   = StandTallyAside();
+    uint8_t     seat    = tagfs_get_seat(vol);
+    uint64_t    base    = tagfs_get_volume_base(vol);
+    const char* aside   = StandTallyAside(vol);
     uint64_t    fid = 0, first = 0, vlba = 0;
     uint8_t*    was     = g_test_buffer;
     uint8_t*    rot     = g_test_buffer + TAGFS_SECTOR_SIZE;
@@ -461,8 +467,8 @@ static TestResult TestStandTallyRotThreePaths(void)
 
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(StandTallyRunOfThree(&fid, &first), "a file of three blocks in one run");
-    TEST_ASSERT_OK(StandTallyReadAt(fid, 0, TAGFS_BLOCK_SIZE), "its first block read as the file holds it");
+    TEST_ASSERT(StandTallyRunOfThree(vol, &fid, &first), "a file of three blocks in one run");
+    TEST_ASSERT_OK(StandTallyReadAt(vol, fid, 0, TAGFS_BLOCK_SIZE), "its first block read as the file holds it");
     memcpy(held, g_test_output, TAGFS_BLOCK_SIZE);
     vlba = (first + 1u) * TAGFS_BLOCK_SECTORS;
     TEST_ASSERT(StandTallySector(seat, base, vlba, was, false), "its second block is read");
@@ -470,16 +476,16 @@ static TestResult TestStandTallyRotThreePaths(void)
     rot[17] ^= 0xA5;
     TEST_ASSERT(StandTallySector(seat, base, vlba, rot, true), "and rots on the medium");
     rotten = true;
-    tagfs_readahead_invalidate(first + 1u);
+    tagfs_readahead_invalidate(vol, first + 1u);
 
-    uint32_t errors = IntegrityErrorCount();
-    TEST_ASSERT_EQ(StandTallyReadAt(fid, TAGFS_BLOCK_SIZE, 100), ERR_CHECKSUM,
+    uint32_t errors = IntegrityErrorCount(vol);
+    TEST_ASSERT_EQ(StandTallyReadAt(vol, fid, TAGFS_BLOCK_SIZE, 100), ERR_CHECKSUM,
                    "a read of that block alone answers that it does not hold what was written");
-    TEST_ASSERT_EQ(StandTallyReadAt(fid, 0, 3u * TAGFS_BLOCK_SIZE), ERR_CHECKSUM,
+    TEST_ASSERT_EQ(StandTallyReadAt(vol, fid, 0, 3u * TAGFS_BLOCK_SIZE), ERR_CHECKSUM,
                    "and a read of the run through the read-ahead window answers the same");
-    TEST_ASSERT(IntegrityErrorCount() > errors, "the rot is counted");
+    TEST_ASSERT(IntegrityErrorCount(vol) > errors, "the rot is counted");
     if (ReadJobSeatRunsAsync(seat)) {
-        TEST_ASSERT_EQ(StandTallyPortRead(fid), ERR_CHECKSUM, "and the port's read answers the same");
+        TEST_ASSERT_EQ(StandTallyPortRead(vol, fid), ERR_CHECKSUM, "and the port's read answers the same");
         TEST_ASSERT_EQ(s_tally_answer.landed, TAGFS_BLOCK_SIZE,
                        "with the block before it landed, and not one byte of the rotten one");
         TEST_ASSERT_EQ(TestFirstDifference(g_test_output, held, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
@@ -494,7 +500,7 @@ out:
         if (!StandTallySector(seat, base, vlba, was, true))
             verdict = TestFailedAt(__FILE__, __LINE__, "the rotten sector would not take its bytes "
                                    "back (vlba, 0)", (int64_t)vlba, 0);
-        tagfs_readahead_invalidate(first + 1u);
+        tagfs_readahead_invalidate(vol, first + 1u);
     }
     return verdict;
 }
@@ -538,10 +544,11 @@ static void StandTallyRotHeard(TouchTag tag_id, const void* payload, uint32_t pl
  */
 static TestResult TestStandTallyRotPublished(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    uint8_t     seat    = tagfs_get_seat();
-    uint64_t    base    = tagfs_get_volume_base();
-    const char* aside   = StandTallyAside();
+    uint8_t     seat    = tagfs_get_seat(vol);
+    uint64_t    base    = tagfs_get_volume_base(vol);
+    const char* aside   = StandTallyAside(vol);
     uint64_t    fid = 0, first = 0, vlba = 0;
     uint8_t*    was     = g_test_buffer;
     uint8_t*    rot     = g_test_buffer + TAGFS_SECTOR_SIZE;
@@ -551,7 +558,7 @@ static TestResult TestStandTallyRotPublished(void)
 
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(StandTallyRunOfThree(&fid, &first), "a file of three blocks in one run");
+    TEST_ASSERT(StandTallyRunOfThree(vol, &fid, &first), "a file of three blocks in one run");
     TEST_ASSERT_OK(TouchTagResolve("integrity", sizeof("integrity") - 1u, &full, &bare),
                    "the integrity tag is had by name, as a program asks for it");
     memset(&s_tally_rot_ear, 0, sizeof(s_tally_rot_ear));
@@ -565,13 +572,13 @@ static TestResult TestStandTallyRotPublished(void)
     rot[29] ^= 0x5A;
     TEST_ASSERT(StandTallySector(seat, base, vlba, rot, true), "and rots on the medium");
     rotten = true;
-    tagfs_readahead_invalidate(first + 2u);
+    tagfs_readahead_invalidate(vol, first + 2u);
 
-    TEST_ASSERT_EQ(StandTallyReadAt(fid, 2u * TAGFS_BLOCK_SIZE, 100), ERR_CHECKSUM,
+    TEST_ASSERT_EQ(StandTallyReadAt(vol, fid, 2u * TAGFS_BLOCK_SIZE, 100), ERR_CHECKSUM,
                    "a read of the rotten block is refused");
     TestEvidence("times the rotten block was published on the integrity tag, of 1", s_tally_rot_ear.heard);
     TEST_ASSERT_EQ(s_tally_rot_ear.heard, 1, "and the block is published on the integrity tag");
-    TEST_ASSERT_EQ(StandTallyReadAt(fid, 2u * TAGFS_BLOCK_SIZE, 100), ERR_CHECKSUM,
+    TEST_ASSERT_EQ(StandTallyReadAt(vol, fid, 2u * TAGFS_BLOCK_SIZE, 100), ERR_CHECKSUM,
                    "a read of it again is refused again");
     TEST_ASSERT_EQ(s_tally_rot_ear.heard, 1, "and not published again: this mount named it already");
     TEST_ASSERT(TouchTagIsKernel(bare), "the tag is the kernel's Logbook's, not a name of the book's registry");
@@ -582,7 +589,7 @@ out:
         if (!StandTallySector(seat, base, vlba, was, true))
             verdict = TestFailedAt(__FILE__, __LINE__, "the rotten sector would not take its bytes "
                                    "back (vlba, 0)", (int64_t)vlba, 0);
-        tagfs_readahead_invalidate(first + 2u);
+        tagfs_readahead_invalidate(vol, first + 2u);
     }
     return verdict;
 }
@@ -597,19 +604,20 @@ out:
  * (bookcensus.py _Digests: "a read of them answers ERR_CHECKSUM"). */
 static TestResult TestStandTallyUndigestedRefused(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    const char* aside   = StandTallyAside();
-    uint64_t    block   = g_book.data_end - 1u, digest = 0;
+    const char* aside   = StandTallyAside(vol);
+    uint64_t    block   = vol->book.data_end - 1u, digest = 0;
     error_t     refused = OK;
 
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT_EQ(TallyDigestFind(block, &digest, &refused), TALLY_DIGEST_UNNAMED,
+    TEST_ASSERT_EQ(TallyDigestFind(vol, block, &digest, &refused), TALLY_DIGEST_UNNAMED,
                    "the block before the far Deed carries no digest in the Tally");
-    uint32_t errors = IntegrityErrorCount();
+    uint32_t errors = IntegrityErrorCount(vol);
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x5A);
-    TEST_ASSERT(!IntegrityVerify(block, g_test_buffer), "a read of it is refused, never answered unchecked");
-    TEST_ASSERT(IntegrityErrorCount() > errors, "and counted as a block that does not hold");
+    TEST_ASSERT(!IntegrityVerify(vol, block, g_test_buffer), "a read of it is refused, never answered unchecked");
+    TEST_ASSERT(IntegrityErrorCount(vol) > errors, "and counted as a block that does not hold");
 out:
     return verdict;
 }
@@ -624,8 +632,9 @@ out:
  * sector (book_unit.c, BookUnitFirstSays). */
 static TestResult TestStandTallyLengthAsked(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    const char* aside   = StandTallyAside();
+    const char* aside   = StandTallyAside(vol);
     uint8_t     core    = amp_get_core_index();
     TallyPlace  root;
     BookUnit    u;
@@ -638,14 +647,14 @@ static TestResult TestStandTallyLengthAsked(void)
     uint64_t vlba  = root.ptr.block[0] * TAGFS_BLOCK_SECTORS;
     uint32_t count = (uint32_t)(root.ptr.sheets * TAGFS_BLOCK_SECTORS);
     HeapFailArm(core, 1);
-    error_t rc = BookUnitRead(vlba, count + TAGFS_BLOCK_SECTORS, BOOK_UNIT_SHEET, root.ptr.seq, &u);
+    error_t rc = BookUnitRead(vol, vlba, count + TAGFS_BLOCK_SECTORS, BOOK_UNIT_SHEET, root.ptr.seq, &u);
     held = true;
     HeapFailDisarm();
     TEST_ASSERT_EQ(rc, OK, "a Sheet more than the node, the heap refusing room for it, is answered");
     TEST_ASSERT(!u.whole, "as a copy that does not hold: its first sector begins a shorter unit");
     BookUnitLetGo(&u);
     HeapFailArm(core, 1);
-    rc = BookUnitRead(vlba, count, BOOK_UNIT_SHEET, root.ptr.seq, &u);
+    rc = BookUnitRead(vol, vlba, count, BOOK_UNIT_SHEET, root.ptr.seq, &u);
     HeapFailDisarm();
     TEST_ASSERT_EQ(rc, ERR_NO_MEMORY, "and the node's own length, the heap refusing it, is a want of memory");
 out:
@@ -662,28 +671,29 @@ out:
 
 static TestResult TestStandTallyLowerDoorsRefused(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    uint8_t     seat    = tagfs_get_seat();
-    const char* aside   = StandTallyAside();
-    uint64_t    block   = g_book.data_end - 1u;
+    uint8_t     seat    = tagfs_get_seat(vol);
+    const char* aside   = StandTallyAside(vol);
+    uint64_t    block   = vol->book.data_end - 1u;
     uint32_t    landed  = 0, knocks = TagFSGlassKnocks();
     bool        glassed = false;
 
     if (aside)
         return test_steps_aside(aside);
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, 0x6B);
-    if (!TagFSIsUnderGlass()) {
-        TagFSUnderGlass("the stand stands the volume under glass to knock at the doors below it, until it is "
+    if (!TagFSIsUnderGlass(vol)) {
+        TagFSUnderGlass(vol, "the stand stands the volume under glass to knock at the doors below it, until it is "
                         "mounted again");
         glassed = true;
     }
     BlockFailArm(seat, BLOCK_FAIL_WRITE, 0, 0, BLOCK_FAIL_NEVER);
     TagFSGlassKnocking(true);
-    TEST_ASSERT_EQ(tagfs_volume_write(block * TAGFS_BLOCK_SECTORS, 1, g_test_buffer), (int)ERR_TAGFS_READ_ONLY,
+    TEST_ASSERT_EQ(tagfs_volume_write(vol, block * TAGFS_BLOCK_SECTORS, 1, g_test_buffer), (int)ERR_TAGFS_READ_ONLY,
                    "the volume's sector door refuses");
-    TEST_ASSERT_EQ(tagfs_write_block(block, g_test_buffer), ERR_TAGFS_READ_ONLY,
+    TEST_ASSERT_EQ(tagfs_write_block(vol, block, g_test_buffer), ERR_TAGFS_READ_ONLY,
                    "the block door refuses");
-    TEST_ASSERT_EQ(TagFSWriteRun(block, 1, g_test_buffer, &landed), ERR_TAGFS_READ_ONLY,
+    TEST_ASSERT_EQ(TagFSWriteRun(vol, block, 1, g_test_buffer, &landed), ERR_TAGFS_READ_ONLY,
                    "the data run door refuses");
     TEST_ASSERT_EQ(landed, 0, "and lands nothing");
     TEST_ASSERT_EQ(WriteJobStandWriteDoor(block), ERR_TAGFS_READ_ONLY, "the port's write door refuses");
@@ -694,8 +704,8 @@ out:
     TagFSGlassKnocking(false);
     BlockFailDisarm();
     if (glassed) {
-        TagFSStandLetGo();
-        StandTallyClose();
+        TagFSStandLetGo(vol);
+        StandTallyClose(vol);
     }
     return verdict;
 }
@@ -707,36 +717,37 @@ out:
 
 static TestResult TestStandTallyMediumReturns(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult      verdict = TEST_PASS;
-    uint8_t         seat    = tagfs_get_seat();
-    const char*     aside   = StandTallyAside();
+    uint8_t         seat    = tagfs_get_seat(vol);
+    const char*     aside   = StandTallyAside(vol);
     StandTallyState before, after;
     bool            away = false;
 
     if (aside)
         return test_steps_aside(aside);
-    StandTallyStateTake(&before);
-    TagFSStandMediumLeaves();
+    StandTallyStateTake(vol, &before);
+    TagFSStandMediumLeaves(vol);
     away = true;
-    TEST_ASSERT(TagFSMediumLeft(), "the medium is said to have left");
+    TEST_ASSERT(TagFSMediumLeft(vol), "the medium is said to have left");
     BlockFailArm(seat, BLOCK_FAIL_READ, 0, 0, BLOCK_FAIL_NEVER);
-    AwayVerdict back = TagFSStandMediumReturns();
+    AwayVerdict back = TagFSStandMediumReturns(vol);
     away = false;
     TEST_ASSERT_EQ(back, AWAY_AS_LEFT, "its book is taken up: nothing changed it");
     TEST_ASSERT(BlockFailSeen() > 0, "judged by sectors read off the medium: its newest slot, the ribbon's end");
     BlockFailDisarm();
-    TEST_ASSERT(tagfs_get_state()->initialized &&
-                !TagFSMediumLeft(), "and the volume stands, its medium here again");
-    TEST_ASSERT(!TagFSIsUnderGlass(), "a book its writer goes on, as it was");
-    StandTallyStateTake(&after);
+    TEST_ASSERT(vol->state.initialized &&
+                !TagFSMediumLeft(vol), "and the volume stands, its medium here again");
+    TEST_ASSERT(!TagFSIsUnderGlass(vol), "a book its writer goes on, as it was");
+    StandTallyStateTake(vol, &after);
     TEST_ASSERT_EQ(after.files, before.files, "with the files it held");
     TEST_ASSERT_EQ(after.sum, before.sum, "the same, by id, size and name");
 out:
     BlockFailDisarm();
     if (away)
-        (void)TagFSStandMediumReturns();
-    TagFSStandLetGo();
-    StandTallyClose();
+        (void)TagFSStandMediumReturns(vol);
+    TagFSStandLetGo(vol);
+    StandTallyClose(vol);
     return verdict;
 }
 
@@ -747,15 +758,15 @@ out:
 // ----------------------------------------------------------------------------
 
 /* The volume's windows: the map covers [0, the far Deed's block). */
-static uint32_t StandTallyWindows(void)
+static uint32_t StandTallyWindows(TagFSVolume* vol)
 {
-    return (uint32_t)((tagfs_get_state()->block_end + BLOCK_MAP_WINDOW_BLOCKS - 1u) / BLOCK_MAP_WINDOW_BLOCKS);
+    return (uint32_t)((vol->state.block_end + BLOCK_MAP_WINDOW_BLOCKS - 1u) / BLOCK_MAP_WINDOW_BLOCKS);
 }
 
 /* Every block a live file names reads taken on the map; *blocks how many. */
-static bool StandTallyFilesTaken(uint64_t* blocks)
+static bool StandTallyFilesTaken(TagFSVolume* vol, uint64_t* blocks)
 {
-    TagFSState* fs   = tagfs_get_state();
+    TagFSState* fs   = &vol->state;
     uint64_t    from = 0, ids[16];
     uint32_t    n;
     while ((n = FileMapFiles(fs->files, from, ids, 16)) > 0) {
@@ -768,7 +779,7 @@ static bool StandTallyFilesTaken(uint64_t* blocks)
                 StripWalkBegin(rec, &walk);
                 while (taken && StripWalkNextGround(&walk, &run))
                     for (uint64_t k = 0; taken && k < run.count; k++, (*blocks)++)
-                        taken = !BlockMapDerivedIsFree(run.start + k);
+                        taken = !BlockMapDerivedIsFree(vol, run.start + k);
                 FileRecordRelease(rec);
             }
             if (!taken)
@@ -781,52 +792,53 @@ static bool StandTallyFilesTaken(uint64_t* blocks)
 
 /* The longest run window w holds, as BlockMapDerivedRunIn finds it: the most
  * `want` it answers, and where that run starts. */
-static uint32_t StandTallyLongest(uint32_t w, uint64_t* start)
+static uint32_t StandTallyLongest(TagFSVolume* vol, uint32_t w, uint64_t* start)
 {
     uint32_t lo = 0, hi = BLOCK_MAP_WINDOW_BLOCKS;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo + 1u) / 2u;
-        if (BlockMapDerivedRunIn(w, mid, start))
+        if (BlockMapDerivedRunIn(vol, w, mid, start))
             lo = mid;
         else
             hi = mid - 1u;
     }
     if (lo)
-        BlockMapDerivedRunIn(w, lo, start);
+        BlockMapDerivedRunIn(vol, w, lo, start);
     return lo;
 }
 
 static TestResult TestStandTallyMapHolds(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    TagFSState* fs      = tagfs_get_state();
-    const char* aside   = StandTallyAside();
+    TagFSState* fs      = &vol->state;
+    const char* aside   = StandTallyAside(vol);
     uint64_t    free = 0, blocks = 0, start = 0, base;
     uint32_t    mixed = 0, w, longest;
 
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(BlockMapDerivedUp(), "the book's block map is up, derived from its owners at the mount");
-    TEST_ASSERT(BlockMapDerivedStandHolds(&free, &mixed),
+    TEST_ASSERT(BlockMapDerivedUp(vol), "the book's block map is up, derived from its owners at the mount");
+    TEST_ASSERT(BlockMapDerivedStandHolds(vol, &free, &mixed),
                 "every window's summary holds to its page, and their sum to the volume's free count");
     TEST_ASSERT(free > 0 && mixed > 0, "the data run has free ground, and a window both free and taken");
-    TEST_ASSERT(StandTallyFilesTaken(&blocks), "every block a live file names reads taken");
+    TEST_ASSERT(StandTallyFilesTaken(vol, &blocks), "every block a live file names reads taken");
     TEST_ASSERT(blocks > 0, "and the files name blocks");
-    TEST_ASSERT(!BlockMapDerivedIsFree(0), "the Deed's block reads taken: the front's");
-    TEST_ASSERT(!BlockMapDerivedIsFree(fs->block_end), "and the far Deed's, past the map, is no free block");
-    for (w = 0; w < StandTallyWindows() && !BlockMapDerivedRunIn(w, 1, &start); w++)
+    TEST_ASSERT(!BlockMapDerivedIsFree(vol, 0), "the Deed's block reads taken: the front's");
+    TEST_ASSERT(!BlockMapDerivedIsFree(vol, fs->block_end), "and the far Deed's, past the map, is no free block");
+    for (w = 0; w < StandTallyWindows(vol) && !BlockMapDerivedRunIn(vol, w, 1, &start); w++)
         ;
-    TEST_ASSERT(w < StandTallyWindows(), "a window gives a free block");
+    TEST_ASSERT(w < StandTallyWindows(vol), "a window gives a free block");
     base = (uint64_t)w * BLOCK_MAP_WINDOW_BLOCKS;
-    TEST_ASSERT(BlockMapDerivedIsFree(start), "the block it gives is free");
-    TEST_ASSERT(start == base || !BlockMapDerivedIsFree(start - 1u), "and the first free one of its window");
-    longest = StandTallyLongest(w, &start);
-    TEST_ASSERT(longest > 0 && !BlockMapDerivedRunIn(w, longest + 1u, &start) &&
-                BlockMapDerivedRunIn(w, longest, &start), "its longest run is the most a run in it is asked for");
+    TEST_ASSERT(BlockMapDerivedIsFree(vol, start), "the block it gives is free");
+    TEST_ASSERT(start == base || !BlockMapDerivedIsFree(vol, start - 1u), "and the first free one of its window");
+    longest = StandTallyLongest(vol, w, &start);
+    TEST_ASSERT(longest > 0 && !BlockMapDerivedRunIn(vol, w, longest + 1u, &start) &&
+                BlockMapDerivedRunIn(vol, w, longest, &start), "its longest run is the most a run in it is asked for");
     for (uint32_t k = 0; k < longest; k++)
-        TEST_ASSERT(BlockMapDerivedIsFree(start + k), "every block of that run is free");
-    TEST_ASSERT(start == base || !BlockMapDerivedIsFree(start - 1u), "and the block before it is not");
-    TEST_ASSERT(start + longest == base + BLOCK_MAP_WINDOW_BLOCKS || !BlockMapDerivedIsFree(start + longest),
+        TEST_ASSERT(BlockMapDerivedIsFree(vol, start + k), "every block of that run is free");
+    TEST_ASSERT(start == base || !BlockMapDerivedIsFree(vol, start - 1u), "and the block before it is not");
+    TEST_ASSERT(start + longest == base + BLOCK_MAP_WINDOW_BLOCKS || !BlockMapDerivedIsFree(vol, start + longest),
                 "nor the block after it");
 out:
     return verdict;
@@ -838,9 +850,10 @@ out:
 
 static TestResult TestStandTallyMapClaimNamed(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    TagFSState* fs      = tagfs_get_state();
-    const char* aside   = StandTallyAside();
+    TagFSState* fs      = &vol->state;
+    const char* aside   = StandTallyAside(vol);
     uint64_t    before  = fs->free_blocks, start = 0, met = 0, free = 0;
     uint32_t    mixed = 0, w, k;
     bool        claimed = false;
@@ -850,76 +863,77 @@ static TestResult TestStandTallyMapClaimNamed(void)
     /* The map is the mount's, and nothing changes it while the volume stands
      * under glass: the stand claims on it from one core, and lets go of all
      * it claimed. */
-    for (w = 0; w < StandTallyWindows() && !BlockMapDerivedRunIn(w, 3, &start); w++)
+    for (w = 0; w < StandTallyWindows(vol) && !BlockMapDerivedRunIn(vol, w, 3, &start); w++)
         ;
-    TEST_ASSERT(w < StandTallyWindows(), "a window holds three free blocks in a row");
-    TEST_ASSERT_OK(BlockMapDerivedClaim(GROUND_FILE, STAND_TALLY_MAP_FID, start, 2, &met),
+    TEST_ASSERT(w < StandTallyWindows(vol), "a window holds three free blocks in a row");
+    TEST_ASSERT_OK(BlockMapDerivedClaim(vol, GROUND_FILE, STAND_TALLY_MAP_FID, start, 2, &met),
                    "two of them are claimed for a file");
     claimed = true;
     TEST_ASSERT_EQ(met, 0, "none of them was taken");
-    TEST_ASSERT(!BlockMapDerivedIsFree(start) && !BlockMapDerivedIsFree(start + 1u) &&
-                BlockMapDerivedIsFree(start + 2u), "the two read taken, the third free");
+    TEST_ASSERT(!BlockMapDerivedIsFree(vol, start) && !BlockMapDerivedIsFree(vol, start + 1u) &&
+                BlockMapDerivedIsFree(vol, start + 2u), "the two read taken, the third free");
     TEST_ASSERT_EQ(fs->free_blocks, before - 2u, "and the volume's free count is two less");
-    TEST_ASSERT_OK(BlockMapDerivedClaim(GROUND_TALLY, 1, start, 3, &met), "all three are claimed for a node");
+    TEST_ASSERT_OK(BlockMapDerivedClaim(vol, GROUND_TALLY, 1, start, 3, &met), "all three are claimed for a node");
     TEST_ASSERT_EQ(met, 2, "and the two the file names are met taken — two owners, named on the insertion");
-    TEST_ASSERT_OK(BlockMapDerivedRelease(GROUND_TALLY, 1, start, 3, &met), "the three are let go");
+    TEST_ASSERT_OK(BlockMapDerivedRelease(vol, GROUND_TALLY, 1, start, 3, &met), "the three are let go");
     claimed = false;
     TEST_ASSERT_EQ(met, 0, "none of them was free");
-    TEST_ASSERT_OK(BlockMapDerivedRelease(GROUND_FILE, STAND_TALLY_MAP_FID, start, 1, &met),
+    TEST_ASSERT_OK(BlockMapDerivedRelease(vol, GROUND_FILE, STAND_TALLY_MAP_FID, start, 1, &met),
                    "the first is let go again");
     TEST_ASSERT_EQ(met, 1, "and is met free already, named");
     /* Past the bound a list said at mount keeps, the rest are counted — and
      * the first of them says so then, not only when the map is let go (the
      * stand's judge holds the line said once, and the count at the remount). */
     for (k = 0; k < STAND_TALLY_MAP_PAST; k++) {
-        TEST_ASSERT_OK(BlockMapDerivedRelease(GROUND_FILE, STAND_TALLY_MAP_FID, start + 2u, 1, &met),
+        TEST_ASSERT_OK(BlockMapDerivedRelease(vol, GROUND_FILE, STAND_TALLY_MAP_FID, start + 2u, 1, &met),
                        "the third, free, is let go once more");
         TEST_ASSERT_EQ(met, 1, "and is met free already");
     }
     TEST_ASSERT_EQ(fs->free_blocks, before, "the volume's free count is what it was");
-    TEST_ASSERT(BlockMapDerivedStandHolds(&free, &mixed), "and every window's summary holds to its page");
+    TEST_ASSERT(BlockMapDerivedStandHolds(vol, &free, &mixed), "and every window's summary holds to its page");
 out:
     if (claimed)
-        BlockMapDerivedRelease(GROUND_TALLY, 1, start, 3, &met);
+        BlockMapDerivedRelease(vol, GROUND_TALLY, 1, start, 3, &met);
     return verdict;
 }
 
 static TestResult TestStandTallyMapShortOfMemory(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    const char* aside   = StandTallyAside();
+    const char* aside   = StandTallyAside(vol);
     uint64_t    free = 0, again = 0;
     uint32_t    mixed = 0, mixed_again = 0;
     bool        down = false;
 
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(BlockMapDerivedStandHolds(&free, &mixed) && mixed > 0,
+    TEST_ASSERT(BlockMapDerivedStandHolds(vol, &free, &mixed) && mixed > 0,
                 "the map holds a mixed window, whose page the heap may refuse");
     BlockMapDerivedStandRefuse(true);
-    down = TagFSStandLetGo();
+    down = TagFSStandLetGo(vol);
     TEST_ASSERT(down, "the volume is let go of");
-    StandTallyArrive();
+    StandTallyArrive(vol);
     HeapFailDisarm();
-    TEST_ASSERT(!tagfs_get_state()->initialized,
+    TEST_ASSERT(!vol->state.initialized,
                 "and its mount, the heap refusing the map its first page, refuses the volume out loud");
-    TEST_ASSERT(!BlockMapDerivedUp(), "leaving no map half made");
+    TEST_ASSERT(!BlockMapDerivedUp(vol), "leaving no map half made");
     TEST_ASSERT_EQ(BlockMapDerivedStandShort(), mixed, "the refusal names every mixed window the map wants");
-    StandTallyArrive();
-    TEST_ASSERT(tagfs_get_state()->initialized, "asked again, the volume is mounted");
-    TagFSStandHoldAgain();
+    StandTallyArrive(vol);
+    TEST_ASSERT(vol->state.initialized, "asked again, the volume is mounted");
+    TagFSStandHoldAgain(vol);
     down = false;
-    TEST_ASSERT(BlockMapDerivedStandHolds(&again, &mixed_again), "its map holds");
+    TEST_ASSERT(BlockMapDerivedStandHolds(vol, &again, &mixed_again), "its map holds");
     TEST_ASSERT_EQ(again, free, "with the free count it had");
     TEST_ASSERT_EQ(mixed_again, mixed, "and its mixed windows");
 out:
     BlockMapDerivedStandRefuse(false);
     HeapFailDisarm();
     if (down)
-        StandTallyArrive();
+        StandTallyArrive(vol);
     else
-        TagFSStandLetGo();
-    StandTallyClose();
+        TagFSStandLetGo(vol);
+    StandTallyClose(vol);
     return verdict;
 }
 
@@ -929,10 +943,11 @@ out:
 
 static TestResult TestStandBlockFailTwoRanges(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    uint8_t     seat    = tagfs_get_seat();
-    uint64_t    at      = tagfs_get_volume_base() + 64u;
-    const char* aside   = StandStepsAsideFor();
+    uint8_t     seat    = tagfs_get_seat(vol);
+    uint64_t    at      = tagfs_get_volume_base(vol) + 64u;
+    const char* aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);

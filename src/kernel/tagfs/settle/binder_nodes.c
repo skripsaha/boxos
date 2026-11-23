@@ -1,6 +1,7 @@
 #include "binder_internal.h"
 #include "../mount/book_mount.h"
 #include "boardroom.h"
+#include "tagfs_volume.h"
 
 /*
  * The nodes of a Tally (binder.h): every tree's elements in key order — of a
@@ -143,15 +144,15 @@ static bool FillLong(const BinderWork* w)
 
 /* One copy of the node sealed at `block` — every sector's sum seeded by its
  * address (§2.5) — and written, a window the seat takes at a time. */
-static error_t LayCopy(BinderWork* w, const uint8_t* stream, uint32_t len, uint64_t sheets, uint64_t block)
+static error_t LayCopy(TagFSVolume* vol, BinderWork* w, const uint8_t* stream, uint32_t len, uint64_t sheets, uint64_t block)
 {
     uint64_t sectors = sheets * TAGFS_BLOCK_SECTORS, vlba = block * TAGFS_BLOCK_SECTORS;
-    uint32_t most    = BoardroomSeatRun(tagfs_get_seat());
+    uint32_t most    = BoardroomSeatRun(tagfs_get_seat(vol));
     TallyUnitSeal(w->unit, stream, len, w->fill.starts, w->fill.n + 1u, BOOK_UNIT_SHEET, w->seq, vlba,
-                  (uint32_t)sectors, tagfs_get_state()->uuid);
+                  (uint32_t)sectors, vol->state.uuid);
     for (uint64_t at = 0; at < sectors;) {
         uint32_t n  = sectors - at < most ? (uint32_t)(sectors - at) : most;
-        int      rc = tagfs_volume_write(vlba + at, n, w->unit + at * BOOK_SECTOR_BYTES);
+        int      rc = tagfs_volume_write(vol, vlba + at, n, w->unit + at * BOOK_SECTOR_BYTES);
         if (rc != 0)
             return rc == (int)ERR_DEVICE_NOT_READY ? ERR_DEVICE_NOT_READY
                  : rc == (int)ERR_TAGFS_READ_ONLY  ? ERR_TAGFS_READ_ONLY : ERR_WRITE_FAILED;
@@ -184,7 +185,7 @@ static bool LevelPut(BinderLevel* lv, const BinderKid* kid)
  * at A, copy 2 at the same place at B — and named for the level above. With
  * `measuring`, nothing is written: the blocks are counted.
  */
-static error_t FillLay(BinderWork* w)
+static error_t FillLay(TagFSVolume* vol, BinderWork* w)
 {
     BinderFill* f    = &w->fill;
     NodeHead    h    = { .tree = w->tree, .level = w->level, .items = f->n, .first = f->first };
@@ -212,8 +213,8 @@ static error_t FillLay(BinderWork* w)
                 return ERR_NO_MEMORY;
             w->unit_room = sheets * TAGFS_BLOCK_SIZE;
         }
-        if ((rc = LayCopy(w, s, len, sheets, w->a + off)) == OK)
-            rc = LayCopy(w, s, len, sheets, w->b + off);
+        if ((rc = LayCopy(vol, w, s, len, sheets, w->a + off)) == OK)
+            rc = LayCopy(vol, w, s, len, sheets, w->b + off);
         if (rc != OK)
             return rc;
     }
@@ -298,18 +299,18 @@ static error_t LeafKept(BinderWork* w, TallyKey key, bool* skip)
  * *spent when the turn is — a node laid, or the self-check owed a leaf of the
  * Tally before the next turn reads, the element held for it; nothing laid and
  * nothing held, the level is done. */
-static error_t LevelStep(BinderWork* w, bool* spent)
+static error_t LevelStep(TagFSVolume* vol, BinderWork* w, bool* spent)
 {
     BinderItems* p = &w->items;
     *spent = false;
     for (;;) {
 #if BINDER_CHECKS
-        bool    fresh = !p->held || BinderCheckOwed();  /* not one held back from the node before, checked */
+        bool    fresh = !p->held || BinderCheckOwed(vol);  /* not one held back from the node before, checked */
 #endif
         bool    got   = p->held;
         error_t rc    = OK;
         if (!got)
-            rc = w->level == 0 ? BinderLeafItemNext(w, &p->item, &got) : BinderInnerItemNext(w, &p->item, &got);
+            rc = w->level == 0 ? BinderLeafItemNext(vol, w, &p->item, &got) : BinderInnerItemNext(vol, w, &p->item, &got);
         if (rc != OK)
             return rc;
         p->held = false;
@@ -319,9 +320,9 @@ static error_t LevelStep(BinderWork* w, bool* spent)
         if (w->level == 0 && (rc = LeafKept(w, p->item.key, &skip)) != OK)
             return rc;
 #if BINDER_CHECKS
-        if (w->level == 0 && fresh && !w->measuring && (rc = BinderCheckItem(w, &p->item)) != OK)
+        if (w->level == 0 && fresh && !w->measuring && (rc = BinderCheckItem(vol, w, &p->item)) != OK)
             return rc;
-        if (BinderCheckOwed()) {
+        if (BinderCheckOwed(vol)) {
             p->held = true;
             *spent  = true;
             return OK;
@@ -335,19 +336,19 @@ static error_t LevelStep(BinderWork* w, bool* spent)
         if ((bar && w->fill.n) || !FillTakes(w, &p->item)) {
             p->held = true;
             *spent  = true;
-            return FillLay(w);
+            return FillLay(vol, w);
         }
         if ((rc = FillAdd(w, &p->item)) != OK)
             return rc;
         if (FillLong(w)) {
             *spent = true;
-            return FillLay(w);
+            return FillLay(vol, w);
         }
     }
     if (w->fill.n == 0)
         return OK;
     *spent = true;
-    return FillLay(w);
+    return FillLay(vol, w);
 }
 
 static void LevelsLetGo(BinderWork* w)
@@ -429,14 +430,14 @@ static void DigestLeavesKept(BinderWork* w)
 /* The tree's root named as it lies, nothing under it changed: no node of the
  * tree laid — the draft of the Foliation takes it and everything under it as
  * they were. */
-static void TreeKeptWhole(BinderWork* w, const BinderKept* k)
+static void TreeKeptWhole(TagFSVolume* vol, BinderWork* w, const BinderKept* k)
 {
     w->root[w->tree] = (BinderRoot){ .laid = true, .level = k->at.level, .items = k->at.count, .ptr = k->at.ptr };
     if (w->measuring)
         return;
-    FoliationDraftNode(w->tree, k->at.level, k->at.has_lo ? k->at.lo : (TallyKey){ 0, 0 }, true, k->at.count,
+    FoliationDraftNode(vol, w->tree, k->at.level, k->at.has_lo ? k->at.lo : (TallyKey){ 0, 0 }, true, k->at.count,
                        &k->at.ptr, k->items, k->text);
-    FoliationDraftUnder(w->tree, &k->at);
+    FoliationDraftUnder(vol, w->tree, &k->at);
     w->named++;
 }
 
@@ -444,14 +445,14 @@ static void TreeKeptWhole(BinderWork* w, const BinderKept* k)
  * over: the walk begun at the next tree that lays a node, or ended. The
  * self-check walks such a tree's leaves all the same, laying none, to hold
  * every element of it to the Tally before (binder_check.c). */
-static void TreesOn(BinderWork* w, uint32_t tree)
+static void TreesOn(TagFSVolume* vol, BinderWork* w, uint32_t tree)
 {
     for (; tree; tree = TreeAfter(tree)) {
         TreeBegin(w, tree);
         const BinderKept* whole = BinderKeptRoot(w);
         if (!whole || (BINDER_CHECKS && !w->measuring))
             return;
-        TreeKeptWhole(w, whole);
+        TreeKeptWhole(vol, w, whole);
     }
     w->trees_done = true;
 }
@@ -474,14 +475,14 @@ static bool RowAgain(BinderWork* w)
 /* The level's elements spent: the root found — one node at this level and no
  * node named as it lies above it — or the next level begun; a tree of no node
  * at all leaves no root. Then the next tree. */
-static void LevelEnded(BinderWork* w)
+static void LevelEnded(TagFSVolume* vol, BinderWork* w)
 {
     const BinderLevel* lv = &w->lv[w->level];
     const BinderKept*  whole = w->level == 0 ? BinderKeptRoot(w) : NULL;
     bool               kept = BinderKeptAbove(w, w->level);
     if (whole) {
-        TreeKeptWhole(w, whole);
-        TreesOn(w, TreeAfter(w->tree));
+        TreeKeptWhole(vol, w, whole);
+        TreesOn(vol, w, TreeAfter(w->tree));
         return;
     }
     if (RowAgain(w))
@@ -494,17 +495,17 @@ static void LevelEnded(BinderWork* w)
                          .block = { kid->block[0], kid->block[1] } };
         w->root[w->tree] = (BinderRoot){ .laid = true, .level = w->level, .items = kid->count, .ptr = ptr };
         if (!w->measuring)
-            FoliationDraftNode(w->tree, w->level, kid->key, true, kid->count, &ptr, kid->items, kid->text);
+            FoliationDraftNode(vol, w->tree, w->level, kid->key, true, kid->count, &ptr, kid->items, kid->text);
     } else if ((lv->n || kept) && w->level + 1u < BINDER_LEVELS_MOST) {
         w->level++;
         w->kid_at = 0;
         BinderKeptLevelBegin(w);
         return;
     }
-    TreesOn(w, TreeAfter(w->tree));
+    TreesOn(vol, w, TreeAfter(w->tree));
 }
 
-void BinderNodesBegin(BinderWork* w)
+void BinderNodesBegin(TagFSVolume* vol, BinderWork* w)
 {
     kfree(w->dleaves);
     w->dleaves      = NULL;
@@ -519,48 +520,49 @@ void BinderNodesBegin(BinderWork* w)
     w->trees_done = false;
     memset(w->root, 0, sizeof(w->root));
     memset(&w->laid, 0, sizeof(w->laid));
-    BinderKeptLaid(w);
+    BinderKeptLaid(vol, w);
     if (!w->measuring) {
-        FoliationDraftBegin();
+        FoliationDraftBegin(vol);
 #if BINDER_CHECKS
-        BinderCheckBegin();
+        BinderCheckBegin(vol);
 #endif
     }
-    TreesOn(w, TreeAfter(0));
+    TreesOn(vol, w, TreeAfter(0));
 }
 
 /* A tree's leaves spent: what is left of the Tally before's under them held
  * to DogEar, a leaf of it a turn (binder_check.c) — *more while some is. */
-static error_t LeavesSpent(BinderWork* w, bool* more)
+static error_t LeavesSpent(TagFSVolume* vol, BinderWork* w, bool* more)
 {
     *more = false;
 #if BINDER_CHECKS
     if (w->level == 0 && !w->measuring)
-        return BinderCheckTreeEnd(w, more);
+        return BinderCheckTreeEnd(vol, w, more);
 #else
+    (void)vol;
     (void)w;
 #endif
     return OK;
 }
 
-error_t BinderNodeNext(BinderWork* w, bool* done)
+error_t BinderNodeNext(TagFSVolume* vol, BinderWork* w, bool* done)
 {
     *done = false;
 #if BINDER_CHECKS
-    BinderCheckTurn();
+    BinderCheckTurn(vol);
 #endif
     while (!w->trees_done) {
         bool    spent = false, more = false;
         error_t rc    = OK;
 #if BINDER_CHECKS
-        if (!(w->level == 0 && !w->measuring && BinderCheckDraining()))
+        if (!(w->level == 0 && !w->measuring && BinderCheckDraining(vol)))
 #endif
-            rc = LevelStep(w, &spent);
+            rc = LevelStep(vol, w, &spent);
         if (rc != OK || spent)
             return rc;
-        if ((rc = LeavesSpent(w, &more)) != OK || more)
+        if ((rc = LeavesSpent(vol, w, &more)) != OK || more)
             return rc;
-        LevelEnded(w);
+        LevelEnded(vol, w);
     }
     *done = true;
     return OK;
@@ -607,10 +609,10 @@ static void DigestPlace(const BinderWork* w, const BinderKid* kid, const BinderK
     p->lo       = kid->key;
 }
 
-error_t BinderDigestsTurn(const BinderWork* w)
+error_t BinderDigestsTurn(TagFSVolume* vol, const BinderWork* w)
 {
     if (w->tip) {
-        error_t tip = BinderDigestsTipTurn(w);
+        error_t tip = BinderDigestsTipTurn(vol, w);
         if (tip == ERR_NO_MEMORY)
             kprintf("[TagFS] no memory to turn the reads of a digest to Tally %llu's DIGESTS — they read the Tally "
                     "before it and the Gloss, which keeps every digest it holds\n", (unsigned long long)w->seq);
@@ -635,7 +637,7 @@ error_t BinderDigestsTurn(const BinderWork* w)
     }
     if (rc == OK) {
         TipInLeavesClosed(places, n);
-        rc = TallyDigestsTurn(places, rotten, n);
+        rc = TallyDigestsTurn(vol, places, rotten, n);
     }
     kfree(places);
     kfree(rotten);

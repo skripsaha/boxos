@@ -8,11 +8,12 @@
 #include "../box_hash/box_hash.h"
 #include "../retire/retire.h"
 #include "boardroom.h"
+#include "tagfs_volume.h"
 
 /*
  * Escheat (escheat.h). What the act lets go is the mount's: the rotten FILES
- * nodes (g_binder.rot), what of the files locked by name with them read
- * (g_book.kept) and the ground held for what rotted.
+ * nodes (vol->binder.rot), what of the files locked by name with them read
+ * (vol->book.kept) and the ground held for what rotted.
  *
  * ‼ THE ACT LETS GO ONLY THE GROUND OF WHAT IT LETS GO. The census holds alike
  * a block a rotten range may own and a block a file locked for another reason
@@ -31,9 +32,9 @@
  * the lists ever meets them half-moved. Asked from any core, the act is a
  * word published and a Tally demanded; what it answers is what the next Tally
  * lets go — the mount's counts while its ranges are still named
- * (g_binder.nrot), none of them once a Tally has let them go. An ask is
+ * (vol->binder.nrot), none of them once a Tally has let them go. An ask is
  * answered by the Tally that took it: one asked while the act's own Tally is
- * under way is owed to the next (s_asked, s_answered).
+ * under way is owed to the next (escheat.asked, escheat.answered).
  *
  * ‼ A DIGESTS LEAF NO COPY OF WHICH READS IS LAID ANEW OF THE DATA, AND ONLY
  * HERE (§16.5 п.19, Р-e2 (а)). Without the act the Tally names it as it lies
@@ -46,56 +47,9 @@
  * file names is not walked: it has no digest after the act, and is free.
  */
 
-static volatile uint64_t s_asked;     /* asks made this mount: published */
-static volatile uint64_t s_answered;  /* of them, those a Tally answered */
-static volatile uint64_t s_walked;    /* of them, those a walk of the files cut the tails for */
-static volatile uint64_t s_reach;     /* the newest Ink an ask saw: no record made after it is the act's */
-static uint64_t          s_cover;     /* the asks the Tally under way answers */
-static volatile uint64_t s_tails;     /* tails the Helm's service let go under the act */
-static bool              s_taken;     /* the Tally under way took it: the Settle's holder's */
-static BinderKept*       s_rot;
-static uint32_t          s_nrot;
-static BookKeptFile*     s_kept;
-static uint32_t          s_nkept;
 
-/* The held ground as the mount parted it: what stays held, what the act lets
- * go; and the whole list the Tally under way took, given back if it is
- * refused. */
-static BinderGround*     s_stay;
-static uint64_t          s_nstay;
-static BinderGround*     s_free;
-static uint64_t          s_nfree;
-static BinderGround*     s_all;
-static uint64_t          s_nall;
-static uint64_t          s_capall;
-static bool              s_parted;
 
-/* What the act lets go, counted at the mount — read from any core, written
- * before the volume opens. */
-static uint64_t          s_ranges;
-static uint64_t          s_files;
-static uint64_t          s_blocks;
 
-/* What a Tally let go: published once — g_binder.rot gains a range only at
- * the mount, so one Tally of a mount at most lets ranges go. */
-static volatile uint8_t  s_gone;
-static BinderKept*       s_lostrot;
-static uint32_t          s_nlostrot;
-static uint64_t*         s_lostfid;
-static uint32_t          s_nlostfid;
-
-/* The DIGESTS leaves the Tally under way lays anew of the data, by their
- * ranges of blocks; the digests taken; the block read for one. */
-typedef struct {
-    uint64_t lo;
-    uint64_t hi;
-} EscheatBlocks;
-
-static EscheatBlocks*   s_dig;
-static uint32_t         s_ndig;
-static uint32_t         s_capdig;
-static uint64_t         s_digests;
-static uint8_t*         s_block;
 
 /* Whether the keys of file `fid` meet rotten range `r`. */
 static bool FileMeets(uint64_t fid, const TallyPlace* r)
@@ -105,12 +59,12 @@ static bool FileMeets(uint64_t fid, const TallyPlace* r)
     return below && above;
 }
 
-/* Whether `fid` meets a range of the mount's rotten FILES (g_book.rot). */
-static bool FileInRot(uint64_t fid)
+/* Whether `fid` meets a range of the mount's rotten FILES (vol->book.rot). */
+static bool FileInRot(TagFSVolume* vol, uint64_t fid)
 {
-    for (uint32_t i = 0; i < g_book.nrot; i++) {
-        TallyPlace p = { .lo = g_book.rot[i].lo, .has_lo = true, .hi = g_book.rot[i].hi,
-                         .has_hi = g_book.rot[i].has_hi };
+    for (uint32_t i = 0; i < vol->book.nrot; i++) {
+        TallyPlace p = { .lo = vol->book.rot[i].lo, .has_lo = true, .hi = vol->book.rot[i].hi,
+                         .has_hi = vol->book.rot[i].has_hi };
         if (FileMeets(fid, &p))
             return true;
     }
@@ -121,10 +75,10 @@ static bool FileInRot(uint64_t fid)
  * Parcels in the range: a file the parent's count of the range does not
  * count, locked by name instead. A file whose header lies in the range is
  * counted there, whatever of it lies past. */
-static bool HeadBefore(uint64_t fid)
+static bool HeadBefore(TagFSVolume* vol, uint64_t fid)
 {
-    for (uint32_t i = 0; i < g_book.nrot; i++)
-        if (g_book.rot[i].lo.k1 == fid && g_book.rot[i].lo.k2 > 0)
+    for (uint32_t i = 0; i < vol->book.nrot; i++)
+        if (vol->book.rot[i].lo.k1 == fid && vol->book.rot[i].lo.k2 > 0)
             return true;
     return false;
 }
@@ -136,12 +90,12 @@ static bool HeadBefore(uint64_t fid)
 /* The DATA runs of every file locked by name the act does not let go, as its
  * Parcels lay — what every Tally carries of it — in order, those that meet
  * joined. False with no memory. */
-static bool KeptRuns(BinderGround** out, uint64_t* n)
+static bool KeptRuns(TagFSVolume* vol, BinderGround** out, uint64_t* n)
 {
     uint64_t cap = 0;
-    for (uint32_t i = 0; i < g_book.nkept; i++) {
-        const BookKeptFile* k = &g_book.kept[i];
-        for (uint32_t p = 0; !FileInRot(k->fid) && p < k->nparcels; p++) {
+    for (uint32_t i = 0; i < vol->book.nkept; i++) {
+        const BookKeptFile* k = &vol->book.kept[i];
+        for (uint32_t p = 0; !FileInRot(vol, k->fid) && p < k->nparcels; p++) {
             uint32_t in = 0;
             uint64_t runs = 0, from = 0;
             TallyTake(k->parcel_body[p], k->parcel_len[p], &in, &runs);
@@ -170,60 +124,60 @@ static bool RunPut(BinderGround** list, uint64_t* n, uint64_t* cap, uint64_t sta
 }
 
 /* The held ground (in order) parted against the kept runs `k` (in order,
- * joined): what they name to s_stay, the rest to s_free. False with no
+ * joined): what they name to escheat.stay, the rest to escheat.free. False with no
  * memory. */
-static bool HeldParted(const BinderGround* k, uint64_t nk)
+static bool HeldParted(TagFSVolume* vol, const BinderGround* k, uint64_t nk)
 {
     uint64_t capstay = 0, capfree = 0, j = 0;
-    for (uint64_t i = 0; i < g_binder.nheld; i++) {
-        uint64_t at = g_binder.held[i].start, end = at + g_binder.held[i].count;
+    for (uint64_t i = 0; i < vol->binder.nheld; i++) {
+        uint64_t at = vol->binder.held[i].start, end = at + vol->binder.held[i].count;
         while (at < end) {
             while (j < nk && k[j].start + k[j].count <= at)
                 j++;
             bool     in = j < nk && k[j].start <= at;
             uint64_t to = j == nk ? end : in ? k[j].start + k[j].count : k[j].start;
             to          = to < end ? to : end;
-            if (in ? !RunPut(&s_stay, &s_nstay, &capstay, at, to - at)
-                   : !RunPut(&s_free, &s_nfree, &capfree, at, to - at))
+            if (in ? !RunPut(&vol->escheat.stay, &vol->escheat.nstay, &capstay, at, to - at)
+                   : !RunPut(&vol->escheat.free, &vol->escheat.nfree, &capfree, at, to - at))
                 return false;
-            s_blocks += in ? 0 : to - at;
+            vol->escheat.blocks += in ? 0 : to - at;
             at = to;
         }
     }
     return true;
 }
 
-static void PartedLetGo(void)
+static void PartedLetGo(TagFSVolume* vol)
 {
-    kfree(s_stay);
-    kfree(s_free);
-    s_stay   = NULL;
-    s_free   = NULL;
-    s_nstay  = s_nfree = 0;
-    s_parted = false;
+    kfree(vol->escheat.stay);
+    kfree(vol->escheat.free);
+    vol->escheat.stay   = NULL;
+    vol->escheat.free   = NULL;
+    vol->escheat.nstay  = vol->escheat.nfree = 0;
+    vol->escheat.parted = false;
 }
 
-void EscheatMounted(void)
+void EscheatMounted(TagFSVolume* vol)
 {
     BinderGround* k  = NULL;
     uint64_t      nk = 0;
-    s_ranges = g_binder.nrot;
-    s_files  = 0;
-    s_blocks = 0;
-    for (uint32_t i = 0; i < g_binder.nrot; i++)
-        s_files += g_binder.rot[i].at.count;
-    for (uint32_t i = 0; i < g_book.nkept; i++)
-        s_files += FileInRot(g_book.kept[i].fid) && HeadBefore(g_book.kept[i].fid) ? 1u : 0u;
-    if (g_binder.nrot == 0) {
-        s_parted = true;    /* nothing rotted: every held block is a locked file's, and stays */
+    vol->escheat.ranges = vol->binder.nrot;
+    vol->escheat.files  = 0;
+    vol->escheat.blocks = 0;
+    for (uint32_t i = 0; i < vol->binder.nrot; i++)
+        vol->escheat.files += vol->binder.rot[i].at.count;
+    for (uint32_t i = 0; i < vol->book.nkept; i++)
+        vol->escheat.files += FileInRot(vol, vol->book.kept[i].fid) && HeadBefore(vol, vol->book.kept[i].fid) ? 1u : 0u;
+    if (vol->binder.nrot == 0) {
+        vol->escheat.parted = true;    /* nothing rotted: every held block is a locked file's, and stays */
         return;
     }
-    g_binder.nheld = g_binder.nheld ? BinderGroundJoined(g_binder.held, g_binder.nheld) : 0;
-    s_parted       = KeptRuns(&k, &nk) && HeldParted(k, nk);
+    vol->binder.nheld = vol->binder.nheld ? BinderGroundJoined(vol->binder.held, vol->binder.nheld) : 0;
+    vol->escheat.parted       = KeptRuns(vol, &k, &nk) && HeldParted(vol, k, nk);
     kfree(k);
-    if (!s_parted) {
-        PartedLetGo();
-        s_blocks = 0;
+    if (!vol->escheat.parted) {
+        PartedLetGo(vol);
+        vol->escheat.blocks = 0;
         kprintf("[TagFS] no memory to part the ground held for its rotten ranges from the ground of the files "
                 "locked for another reason — Escheat is refused to this mount\n");
     }
@@ -235,45 +189,45 @@ void EscheatMounted(void)
 
 /* The act's reach grown to `gen`, never back: of two asks made at once, the
  * newer's stands. */
-static void EscheatReachTo(uint64_t gen)
+static void EscheatReachTo(TagFSVolume* vol, uint64_t gen)
 {
-    uint64_t was = __atomic_load_n(&s_reach, __ATOMIC_ACQUIRE);
-    while (gen > was && !__atomic_compare_exchange_n(&s_reach, &was, gen, false, __ATOMIC_ACQ_REL,
+    uint64_t was = __atomic_load_n(&vol->escheat.reach, __ATOMIC_ACQUIRE);
+    while (gen > was && !__atomic_compare_exchange_n(&vol->escheat.reach, &was, gen, false, __ATOMIC_ACQ_REL,
                                                      __ATOMIC_ACQUIRE))
         ;
 }
 
-error_t TagFSEscheat(InkWarrant warrant, EscheatSaid* out)
+error_t TagFSEscheat(TagFSVolume* vol, InkWarrant warrant, EscheatSaid* out)
 {
     memset(out, 0, sizeof(*out));
     if (warrant != INK_WARRANTED) {
         kprintf("[TagFS] Escheat refused: the cabin asking wears neither system nor god\n");
         return ERR_PERMISSION_DENIED;
     }
-    if (!tagfs_enter())
+    if (!tagfs_enter(vol))
         return ERR_DEVICE_NOT_READY;
-    uint64_t tails  = EngrossRefusedNow();
-    uint64_t leaves = TallyDigestsRotKnown();
-    bool     ranges = __atomic_load_n(&g_binder.nrot, __ATOMIC_ACQUIRE) != 0;
+    uint64_t tails  = EngrossRefusedNow(vol);
+    uint64_t leaves = TallyDigestsRotKnown(vol);
+    bool     ranges = __atomic_load_n(&vol->binder.nrot, __ATOMIC_ACQUIRE) != 0;
     error_t  rc     = OK;
-    if (!g_book.stood)
+    if (!vol->book.stood)
         rc = ERR_UNSUPPORTED;
-    else if (BinderNoWrite())
+    else if (BinderNoWrite(vol))
         rc = ERR_TAGFS_READ_ONLY;
-    else if (ranges && !s_parted)
+    else if (ranges && !vol->escheat.parted)
         rc = ERR_NO_MEMORY;
     else if (!ranges && tails == 0 && leaves == 0)
         rc = ERR_OBJECT_NOT_FOUND;
     if (rc == OK) {
         out->tails         = tails;
         out->digest_ranges = leaves;
-        out->ranges        = ranges ? s_ranges : 0;
-        out->files         = ranges ? s_files : 0;
-        out->blocks        = ranges ? s_blocks : 0;
-        EscheatReachTo(InkedGen());     /* before the ask is counted: a walk that sees the ask sees its reach */
-        __atomic_add_fetch(&s_asked, 1u, __ATOMIC_ACQ_REL);
-        BinderTallyAsked();
-        EngrossAsked();
+        out->ranges        = ranges ? vol->escheat.ranges : 0;
+        out->files         = ranges ? vol->escheat.files : 0;
+        out->blocks        = ranges ? vol->escheat.blocks : 0;
+        EscheatReachTo(vol, InkedGen(vol));     /* before the ask is counted: a walk that sees the ask sees its reach */
+        __atomic_add_fetch(&vol->escheat.asked, 1u, __ATOMIC_ACQ_REL);
+        BinderTallyAsked(vol);
+        EngrossAsked(vol);
         kprintf("[TagFS] Escheat asked by a cabin wearing system or god: %llu rotten range(s) of FILES, %llu "
                 "file(s) declared lost and %llu held block(s) let go by the next Tally, written whole, which lays "
                 "%llu DIGESTS range(s) known to read in no copy anew of the data; %llu tail(s) that can never be laid "
@@ -281,37 +235,37 @@ error_t TagFSEscheat(InkWarrant warrant, EscheatSaid* out)
                 (unsigned long long)out->blocks, (unsigned long long)out->digest_ranges,
                 (unsigned long long)out->tails);
     }
-    tagfs_leave();
+    tagfs_leave(vol);
     return rc;
 }
 
-bool EscheatOwed(void)
+bool EscheatOwed(TagFSVolume* vol)
 {
-    return __atomic_load_n(&s_asked, __ATOMIC_ACQUIRE) != __atomic_load_n(&s_answered, __ATOMIC_ACQUIRE);
+    return __atomic_load_n(&vol->escheat.asked, __ATOMIC_ACQUIRE) != __atomic_load_n(&vol->escheat.answered, __ATOMIC_ACQUIRE);
 }
 
-uint64_t EscheatTailsActing(void)
+uint64_t EscheatTailsActing(TagFSVolume* vol)
 {
-    uint64_t asks = __atomic_load_n(&s_asked, __ATOMIC_ACQUIRE);
-    return asks > __atomic_load_n(&s_walked, __ATOMIC_ACQUIRE) ? asks : 0;
+    uint64_t asks = __atomic_load_n(&vol->escheat.asked, __ATOMIC_ACQUIRE);
+    return asks > __atomic_load_n(&vol->escheat.walked, __ATOMIC_ACQUIRE) ? asks : 0;
 }
 
-uint64_t EscheatTailsReach(void)
+uint64_t EscheatTailsReach(TagFSVolume* vol)
 {
-    return __atomic_load_n(&s_reach, __ATOMIC_ACQUIRE);
+    return __atomic_load_n(&vol->escheat.reach, __ATOMIC_ACQUIRE);
 }
 
-void EscheatTailsWalked(uint64_t asks)
+void EscheatTailsWalked(TagFSVolume* vol, uint64_t asks)
 {
-    uint64_t was = __atomic_load_n(&s_walked, __ATOMIC_ACQUIRE);
-    while (asks > was && !__atomic_compare_exchange_n(&s_walked, &was, asks, false, __ATOMIC_ACQ_REL,
+    uint64_t was = __atomic_load_n(&vol->escheat.walked, __ATOMIC_ACQUIRE);
+    while (asks > was && !__atomic_compare_exchange_n(&vol->escheat.walked, &was, asks, false, __ATOMIC_ACQ_REL,
                                                       __ATOMIC_ACQUIRE))
         ;
 }
 
-void EscheatTailLost(void)
+void EscheatTailLost(TagFSVolume* vol)
 {
-    __atomic_add_fetch(&s_tails, 1u, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&vol->escheat.tails, 1u, __ATOMIC_RELAXED);
 }
 
 // ----------------------------------------------------------------------------
@@ -321,32 +275,32 @@ void EscheatTailLost(void)
 /* The rotten FILES nodes and the files locked by name with them moved out of
  * the mount's lists — the lists keep their room, so a refusal puts them back
  * with no memory asked. False with no memory: nothing moved. */
-static bool EscheatMoved(void)
+static bool EscheatMoved(TagFSVolume* vol)
 {
     uint32_t nkept = 0;
-    for (uint32_t i = 0; i < g_book.nkept; i++)
-        nkept += FileInRot(g_book.kept[i].fid) ? 1u : 0u;
-    s_rot  = kmalloc(sizeof(BinderKept) * g_binder.nrot);
-    s_kept = nkept ? kmalloc(sizeof(BookKeptFile) * nkept) : NULL;
-    if (!s_rot || (nkept && !s_kept)) {
-        kfree(s_rot);
-        kfree(s_kept);
-        s_rot  = NULL;
-        s_kept = NULL;
+    for (uint32_t i = 0; i < vol->book.nkept; i++)
+        nkept += FileInRot(vol, vol->book.kept[i].fid) ? 1u : 0u;
+    vol->escheat.rot  = kmalloc(sizeof(BinderKept) * vol->binder.nrot);
+    vol->escheat.kept = nkept ? kmalloc(sizeof(BookKeptFile) * nkept) : NULL;
+    if (!vol->escheat.rot || (nkept && !vol->escheat.kept)) {
+        kfree(vol->escheat.rot);
+        kfree(vol->escheat.kept);
+        vol->escheat.rot  = NULL;
+        vol->escheat.kept = NULL;
         return false;
     }
-    memcpy(s_rot, g_binder.rot, sizeof(BinderKept) * g_binder.nrot);
-    s_nrot        = g_binder.nrot;
-    g_binder.nrot = 0;
-    s_nkept       = 0;
+    memcpy(vol->escheat.rot, vol->binder.rot, sizeof(BinderKept) * vol->binder.nrot);
+    vol->escheat.nrot        = vol->binder.nrot;
+    vol->binder.nrot = 0;
+    vol->escheat.nkept       = 0;
     uint32_t left = 0;
-    for (uint32_t i = 0; i < g_book.nkept; i++) {
-        if (FileInRot(g_book.kept[i].fid))
-            s_kept[s_nkept++] = g_book.kept[i];
+    for (uint32_t i = 0; i < vol->book.nkept; i++) {
+        if (FileInRot(vol, vol->book.kept[i].fid))
+            vol->escheat.kept[vol->escheat.nkept++] = vol->book.kept[i];
         else
-            g_book.kept[left++] = g_book.kept[i];
+            vol->book.kept[left++] = vol->book.kept[i];
     }
-    g_book.nkept = left;
+    vol->book.nkept = left;
     return true;
 }
 
@@ -358,72 +312,72 @@ static bool EscheatMoved(void)
  * go in its window begins an element of its own (DogEarGroundChanged), a key
  * the Tally before never had — one the self-check, where it is built
  * (binder_internal.h, BINDER_CHECKS), would meet outside DogEar. */
-static void EscheatKeys(void)
+static void EscheatKeys(TagFSVolume* vol)
 {
-    for (uint32_t i = 0; i < s_nrot; i++)
-        DogEarPut(TALLY_FILES, s_rot[i].at.has_lo ? s_rot[i].at.lo : (TallyKey){ 0, 0 },
-                  s_rot[i].at.has_hi ? s_rot[i].at.hi : DOG_EAR_END);
-    for (uint32_t i = 0; i < s_nkept; i++)
-        DogEarPut(TALLY_FILES, (TallyKey){ s_kept[i].fid, 0 }, (TallyKey){ s_kept[i].fid + 1u, 0 });
-    for (uint64_t i = 0; i < s_nfree; i++)
-        DogEarGroundChanged(s_free[i].start, s_free[i].count);
+    for (uint32_t i = 0; i < vol->escheat.nrot; i++)
+        DogEarPut(vol, TALLY_FILES, vol->escheat.rot[i].at.has_lo ? vol->escheat.rot[i].at.lo : (TallyKey){ 0, 0 },
+                  vol->escheat.rot[i].at.has_hi ? vol->escheat.rot[i].at.hi : DOG_EAR_END);
+    for (uint32_t i = 0; i < vol->escheat.nkept; i++)
+        DogEarPut(vol, TALLY_FILES, (TallyKey){ vol->escheat.kept[i].fid, 0 }, (TallyKey){ vol->escheat.kept[i].fid + 1u, 0 });
+    for (uint64_t i = 0; i < vol->escheat.nfree; i++)
+        DogEarGroundChanged(vol, vol->escheat.free[i].start, vol->escheat.free[i].count);
 }
 
-void EscheatTake(void)
+void EscheatTake(TagFSVolume* vol)
 {
-    if (!EscheatOwed() || s_taken)
+    if (!EscheatOwed(vol) || vol->escheat.taken)
         return;
-    s_cover = __atomic_load_n(&s_asked, __ATOMIC_ACQUIRE);
-    EscheatTailsWalked(s_cover);    /* a Tally begins with no Slip left: no tail is the act's any more */
-    if (g_binder.nrot == 0 && TallyDigestsRotKnown() == 0) {
+    vol->escheat.cover = __atomic_load_n(&vol->escheat.asked, __ATOMIC_ACQUIRE);
+    EscheatTailsWalked(vol, vol->escheat.cover);    /* a Tally begins with no Slip left: no tail is the act's any more */
+    if (vol->binder.nrot == 0 && TallyDigestsRotKnown(vol) == 0) {
         /* No range to let go: the tails were the act's whole — with no Slip
          * left this Tally could be begun, and its DONE says the act. */
-        __atomic_store_n(&s_answered, s_cover, __ATOMIC_RELEASE);
+        __atomic_store_n(&vol->escheat.answered, vol->escheat.cover, __ATOMIC_RELEASE);
         return;
     }
-    if (g_binder.nrot && !EscheatMoved()) {
+    if (vol->binder.nrot && !EscheatMoved(vol)) {
         kprintf("[TagFS] Escheat: no memory to take the rotten ranges out of the mount's lists — the Tally names "
                 "them as they lie, and the next one owes the act\n");
         return;
     }
-    if (s_nrot) {
+    if (vol->escheat.nrot) {
         /* What stays held is the Tallies' from here: every one digests it. */
-        s_all            = g_binder.held;
-        s_nall           = g_binder.nheld;
-        s_capall         = g_binder.capheld;
-        g_binder.held    = s_stay;
-        g_binder.nheld   = s_nstay;
-        g_binder.capheld = s_nstay;
-        s_stay           = NULL;
-        s_nstay          = 0;
+        vol->escheat.all            = vol->binder.held;
+        vol->escheat.nall           = vol->binder.nheld;
+        vol->escheat.capall         = vol->binder.capheld;
+        vol->binder.held    = vol->escheat.stay;
+        vol->binder.nheld   = vol->escheat.nstay;
+        vol->binder.capheld = vol->escheat.nstay;
+        vol->escheat.stay           = NULL;
+        vol->escheat.nstay          = 0;
     }
-    EscheatKeys();
-    s_taken = true;
+    EscheatKeys(vol);
+    vol->escheat.taken = true;
 }
 
-bool EscheatTaken(void)
+bool EscheatTaken(TagFSVolume* vol)
 {
-    return s_taken;
+    return vol->escheat.taken;
 }
 
 /* The ground let go resting in Fallow for the lag's stitches
  * (FALLOW_BY_SPINE, as a slot's ground no slot names does, binder_slots.c):
  * its blocks. */
-static uint64_t EscheatRest(void)
+static uint64_t EscheatRest(TagFSVolume* vol)
 {
     uint64_t n = 0, blocks = 0;
-    for (uint64_t i = 0; i < s_nfree; i++)
-        n += (s_free[i].count + UINT32_MAX - 1u) / UINT32_MAX;
+    for (uint64_t i = 0; i < vol->escheat.nfree; i++)
+        n += (vol->escheat.free[i].count + UINT32_MAX - 1u) / UINT32_MAX;
     Strip* runs = n && n <= UINT32_MAX ? kmalloc(sizeof(Strip) * n) : NULL;
-    for (uint64_t i = 0, k = 0; runs && i < s_nfree; i++)
-        for (uint64_t at = s_free[i].start, left = s_free[i].count; left;) {
+    for (uint64_t i = 0, k = 0; runs && i < vol->escheat.nfree; i++)
+        for (uint64_t at = vol->escheat.free[i].start, left = vol->escheat.free[i].count; left;) {
             uint32_t c = left > UINT32_MAX ? UINT32_MAX : (uint32_t)left;
             runs[k++]  = (Strip){ .start = at, .count = c, .kind = STRIP_DATA };
             at += c;
             left -= c;
             blocks += c;
         }
-    FallowNode* node = runs ? FallowNodeMake(runs, (uint32_t)n, FALLOW_BY_SPINE, 0) : NULL;
+    FallowNode* node = runs ? FallowNodeMake(vol, runs, (uint32_t)n, FALLOW_BY_SPINE, 0) : NULL;
     kfree(runs);
     if (n && !node) {
         kprintf("[TagFS] Escheat: no memory to rest the held ground in Fallow — it is held until the volume is "
@@ -431,33 +385,33 @@ static uint64_t EscheatRest(void)
         return 0;
     }
     if (node) {
-        TagFSLockTake(&tagfs_get_state()->lock);
-        FallowSpineAdd(node, SettledCycles());
-        TagFSLockDrop(&tagfs_get_state()->lock);
+        TagFSLockTake(&vol->state.lock);
+        FallowSpineAdd(vol, node, SettledCycles(vol));
+        TagFSLockDrop(&vol->state.lock);
     }
     return blocks;
 }
 
-bool EscheatDigestsLaid(const TallyPlace* at)
+bool EscheatDigestsLaid(TagFSVolume* vol, const TallyPlace* at)
 {
     char hi[24];
-    if (!s_taken)
+    if (!vol->escheat.taken)
         return false;
-    if (s_ndig == s_capdig) {
-        uint32_t       cap  = s_capdig ? s_capdig * 2u : 8u;
+    if (vol->escheat.ndig == vol->escheat.capdig) {
+        uint32_t       cap  = vol->escheat.capdig ? vol->escheat.capdig * 2u : 8u;
         EscheatBlocks* more = kmalloc(sizeof(EscheatBlocks) * cap);
         if (!more) {
             kprintf("[TagFS] Escheat: no memory to note a DIGESTS leaf that reads in no copy — the Tally names it "
                     "as it lies, and its blocks read unchecked until the act is asked again\n");
             return false;
         }
-        if (s_ndig)
-            memcpy(more, s_dig, sizeof(EscheatBlocks) * s_ndig);
-        kfree(s_dig);
-        s_dig    = more;
-        s_capdig = cap;
+        if (vol->escheat.ndig)
+            memcpy(more, vol->escheat.dig, sizeof(EscheatBlocks) * vol->escheat.ndig);
+        kfree(vol->escheat.dig);
+        vol->escheat.dig    = more;
+        vol->escheat.capdig = cap;
     }
-    s_dig[s_ndig++] = (EscheatBlocks){ at->has_lo ? at->lo.k1 : 0, at->has_hi ? at->hi.k1 : UINT64_MAX };
+    vol->escheat.dig[vol->escheat.ndig++] = (EscheatBlocks){ at->has_lo ? at->lo.k1 : 0, at->has_hi ? at->hi.k1 : UINT64_MAX };
     if (at->has_hi)
         ksnprintf(hi, sizeof(hi), "%llu", (unsigned long long)at->hi.k1);
     else
@@ -468,19 +422,19 @@ bool EscheatDigestsLaid(const TallyPlace* at)
     return true;
 }
 
-error_t EscheatDigestOf(uint64_t block, uint64_t* digest, bool* have)
+error_t EscheatDigestOf(TagFSVolume* vol, uint64_t block, uint64_t* digest, bool* have)
 {
     BoxHashContext ctx;
     bool           in = false;
     *have = false;
-    for (uint32_t i = 0; s_taken && !in && i < s_ndig; i++)
-        in = s_dig[i].lo <= block && block < s_dig[i].hi;
+    for (uint32_t i = 0; vol->escheat.taken && !in && i < vol->escheat.ndig; i++)
+        in = vol->escheat.dig[i].lo <= block && block < vol->escheat.dig[i].hi;
     if (!in)
         return OK;
-    if (!s_block && !(s_block = kmalloc(TAGFS_BLOCK_SIZE)))
+    if (!vol->escheat.block && !(vol->escheat.block = kmalloc(TAGFS_BLOCK_SIZE)))
         return ERR_NO_MEMORY;
-    int rc = BoardroomRead(tagfs_get_seat(), tagfs_get_volume_base() + block * TAGFS_BLOCK_SECTORS,
-                           TAGFS_BLOCK_SECTORS, s_block);
+    int rc = BoardroomRead(tagfs_get_seat(vol), tagfs_get_volume_base(vol) + block * TAGFS_BLOCK_SECTORS,
+                           TAGFS_BLOCK_SECTORS, vol->escheat.block);
     if (rc == (int)ERR_BAD_SECTOR) {
         kprintf("[TagFS] Escheat: block %llu, whose DIGESTS leaf is laid anew, does not read — the Tally names no "
                 "digest of it, and a read of it is refused\n", (unsigned long long)block);
@@ -488,12 +442,12 @@ error_t EscheatDigestOf(uint64_t block, uint64_t* digest, bool* have)
     }
     if (rc != 0)
         return ERR_READ_FAILED;
-    BoxHashInit(&ctx, tagfs_get_state()->uuid, 16);
-    *digest   = BoxHashIntegrity(s_block, TAGFS_BLOCK_SIZE, &ctx);
-    error_t g = GlossNote(block, *digest);
+    BoxHashInit(&ctx, vol->state.uuid, 16);
+    *digest   = BoxHashIntegrity(vol->escheat.block, TAGFS_BLOCK_SIZE, &ctx);
+    error_t g = GlossNote(vol, block, *digest);
     if (g != OK)
         return g;
-    s_digests++;
+    vol->escheat.digests++;
     *have = true;
     return OK;
 }
@@ -503,164 +457,164 @@ error_t EscheatDigestOf(uint64_t block, uint64_t* digest, bool* have)
 // ----------------------------------------------------------------------------
 
 /* The DIGESTS leaves laid anew let go of. */
-static void EscheatDigestsLetGo(void)
+static void EscheatDigestsLetGo(TagFSVolume* vol)
 {
-    kfree(s_dig);
-    kfree(s_block);
-    s_dig     = NULL;
-    s_block   = NULL;
-    s_ndig    = s_capdig = 0;
-    s_digests = 0;
+    kfree(vol->escheat.dig);
+    kfree(vol->escheat.block);
+    vol->escheat.dig     = NULL;
+    vol->escheat.block   = NULL;
+    vol->escheat.ndig    = vol->escheat.capdig = 0;
+    vol->escheat.digests = 0;
 }
 
 /* What the act let go, kept for the rest of the mount: an open of a file it
  * lost answers that no such file is, as it does after the next mount — not
  * that the file is locked (BookFileLocked). */
-static void EscheatLostKept(void)
+static void EscheatLostKept(TagFSVolume* vol)
 {
-    uint64_t* fids = s_nkept ? kmalloc(sizeof(uint64_t) * s_nkept) : NULL;
-    if (s_nkept && !fids) {
+    uint64_t* fids = vol->escheat.nkept ? kmalloc(sizeof(uint64_t) * vol->escheat.nkept) : NULL;
+    if (vol->escheat.nkept && !fids) {
         kprintf("[TagFS] Escheat: no memory to keep the ids it lost — an open of one is refused as a locked "
                 "file's until the volume is mounted again\n");
         return;
     }
-    for (uint32_t i = 0; i < s_nkept; i++)
-        fids[i] = s_kept[i].fid;
-    s_lostfid  = fids;
-    s_nlostfid = s_nkept;
-    s_lostrot  = s_rot;
-    s_nlostrot = s_nrot;
-    s_rot      = NULL;
-    s_nrot     = 0;
-    __atomic_store_n(&s_gone, 1u, __ATOMIC_RELEASE);
-    RetireOwed();       /* a program it lost leaves its tags owed (retire/retire.h) */
+    for (uint32_t i = 0; i < vol->escheat.nkept; i++)
+        fids[i] = vol->escheat.kept[i].fid;
+    vol->escheat.lostfid  = fids;
+    vol->escheat.nlostfid = vol->escheat.nkept;
+    vol->escheat.lostrot  = vol->escheat.rot;
+    vol->escheat.nlostrot = vol->escheat.nrot;
+    vol->escheat.rot      = NULL;
+    vol->escheat.nrot     = 0;
+    __atomic_store_n(&vol->escheat.gone, 1u, __ATOMIC_RELEASE);
+    RetireOwed(vol);       /* a program it lost leaves its tags owed (retire/retire.h) */
 }
 
 /* What the Tally under way took let go — the files lost and the whole held
  * list it replaced; what is kept of them is EscheatLostKept's. */
-static void EscheatSpent(void)
+static void EscheatSpent(TagFSVolume* vol)
 {
-    EscheatDigestsLetGo();
-    for (uint32_t i = 0; i < s_nkept; i++)
-        BookKeptLetGo(&s_kept[i]);
-    kfree(s_rot);
-    kfree(s_kept);
-    kfree(s_all);
-    kfree(s_free);
-    s_rot   = NULL;
-    s_kept  = NULL;
-    s_all   = NULL;
-    s_free  = NULL;
-    s_nrot  = s_nkept = 0;
-    s_nall  = s_capall = s_nfree = 0;
-    s_taken = false;
+    EscheatDigestsLetGo(vol);
+    for (uint32_t i = 0; i < vol->escheat.nkept; i++)
+        BookKeptLetGo(&vol->escheat.kept[i]);
+    kfree(vol->escheat.rot);
+    kfree(vol->escheat.kept);
+    kfree(vol->escheat.all);
+    kfree(vol->escheat.free);
+    vol->escheat.rot   = NULL;
+    vol->escheat.kept  = NULL;
+    vol->escheat.all   = NULL;
+    vol->escheat.free  = NULL;
+    vol->escheat.nrot  = vol->escheat.nkept = 0;
+    vol->escheat.nall  = vol->escheat.capall = vol->escheat.nfree = 0;
+    vol->escheat.taken = false;
 }
 
-void EscheatDone(uint64_t seq)
+void EscheatDone(TagFSVolume* vol, uint64_t seq)
 {
     uint64_t files = 0;
-    if (!s_taken) {
-        uint64_t tails = __atomic_exchange_n(&s_tails, 0u, __ATOMIC_ACQ_REL);
+    if (!vol->escheat.taken) {
+        uint64_t tails = __atomic_exchange_n(&vol->escheat.tails, 0u, __ATOMIC_ACQ_REL);
         if (tails)
             kprintf("[TagFS] Escheat laid by Tally %llu: 0 range(s) no Tally names, 0 file(s) lost, 0 held "
                     "block(s) rest in Fallow for the lag; %llu tail(s) lost\n", (unsigned long long)seq,
                     (unsigned long long)tails);
         return;
     }
-    for (uint32_t i = 0; i < s_nrot; i++) {
+    for (uint32_t i = 0; i < vol->escheat.nrot; i++) {
         char hi[24];
-        files += s_rot[i].at.count;
-        if (s_rot[i].at.has_hi)
-            ksnprintf(hi, sizeof(hi), "%llu", (unsigned long long)s_rot[i].at.hi.k1);
+        files += vol->escheat.rot[i].at.count;
+        if (vol->escheat.rot[i].at.has_hi)
+            ksnprintf(hi, sizeof(hi), "%llu", (unsigned long long)vol->escheat.rot[i].at.hi.k1);
         else
             ksnprintf(hi, sizeof(hi), "the end");
         kprintf("[TagFS] Escheat: the FILES range fid [%llu, %s) no Tally names any more — its %llu file(s) are "
-                "lost, their ids never given again\n", (unsigned long long)(s_rot[i].at.has_lo ? s_rot[i].at.lo.k1 : 0),
-                hi, (unsigned long long)s_rot[i].at.count);
+                "lost, their ids never given again\n", (unsigned long long)(vol->escheat.rot[i].at.has_lo ? vol->escheat.rot[i].at.lo.k1 : 0),
+                hi, (unsigned long long)vol->escheat.rot[i].at.count);
     }
-    for (uint32_t i = 0; i < s_nkept; i++) {
+    for (uint32_t i = 0; i < vol->escheat.nkept; i++) {
         kprintf("[TagFS] Escheat: fid %llu, locked by name with a range let go, is lost\n",
-                (unsigned long long)s_kept[i].fid);
-        files += HeadBefore(s_kept[i].fid) ? 1u : 0u;
+                (unsigned long long)vol->escheat.kept[i].fid);
+        files += HeadBefore(vol, vol->escheat.kept[i].fid) ? 1u : 0u;
     }
-    uint64_t blocks = EscheatRest();
+    uint64_t blocks = EscheatRest(vol);
     kprintf("[TagFS] Escheat laid by Tally %llu: %u range(s) no Tally names, %llu file(s) lost, %llu held "
             "block(s) rest in Fallow for the lag; %u DIGESTS leaf(s) laid anew of the data, %llu digest(s) taken; "
-            "%llu tail(s) lost\n", (unsigned long long)seq, s_nrot, (unsigned long long)files,
-            (unsigned long long)blocks, s_ndig, (unsigned long long)s_digests,
-            (unsigned long long)__atomic_exchange_n(&s_tails, 0u, __ATOMIC_ACQ_REL));
-    if (s_nrot || s_nkept)
-        EscheatLostKept();
-    EscheatSpent();
-    __atomic_store_n(&s_answered, s_cover, __ATOMIC_RELEASE);
+            "%llu tail(s) lost\n", (unsigned long long)seq, vol->escheat.nrot, (unsigned long long)files,
+            (unsigned long long)blocks, vol->escheat.ndig, (unsigned long long)vol->escheat.digests,
+            (unsigned long long)__atomic_exchange_n(&vol->escheat.tails, 0u, __ATOMIC_ACQ_REL));
+    if (vol->escheat.nrot || vol->escheat.nkept)
+        EscheatLostKept(vol);
+    EscheatSpent(vol);
+    __atomic_store_n(&vol->escheat.answered, vol->escheat.cover, __ATOMIC_RELEASE);
 }
 
-bool EscheatLost(uint64_t fid)
+bool EscheatLost(TagFSVolume* vol, uint64_t fid)
 {
-    if (!__atomic_load_n(&s_gone, __ATOMIC_ACQUIRE))
+    if (!__atomic_load_n(&vol->escheat.gone, __ATOMIC_ACQUIRE))
         return false;
-    for (uint32_t i = 0; i < s_nlostrot; i++)
-        if (FileMeets(fid, &s_lostrot[i].at))
+    for (uint32_t i = 0; i < vol->escheat.nlostrot; i++)
+        if (FileMeets(fid, &vol->escheat.lostrot[i].at))
             return true;
-    for (uint32_t i = 0; i < s_nlostfid; i++)
-        if (s_lostfid[i] == fid)
+    for (uint32_t i = 0; i < vol->escheat.nlostfid; i++)
+        if (vol->escheat.lostfid[i] == fid)
             return true;
     return false;
 }
 
 /* Kept file `k` back among the mount's, in order of fid — the list kept its
  * room. */
-static void KeptBack(const BookKeptFile* k)
+static void KeptBack(TagFSVolume* vol, const BookKeptFile* k)
 {
-    uint32_t i = g_book.nkept++;
-    while (i > 0 && g_book.kept[i - 1u].fid > k->fid) {
-        g_book.kept[i] = g_book.kept[i - 1u];
+    uint32_t i = vol->book.nkept++;
+    while (i > 0 && vol->book.kept[i - 1u].fid > k->fid) {
+        vol->book.kept[i] = vol->book.kept[i - 1u];
         i--;
     }
-    g_book.kept[i] = *k;
+    vol->book.kept[i] = *k;
 }
 
-void EscheatTakenBack(void)
+void EscheatTakenBack(TagFSVolume* vol)
 {
-    if (!s_taken)
+    if (!vol->escheat.taken)
         return;
-    for (uint32_t i = 0; i < s_nrot; i++)
-        (void)BinderRotten(s_rot[i].tree, &s_rot[i].at);   /* into the room it kept: no memory asked */
-    for (uint32_t i = 0; i < s_nkept; i++)
-        KeptBack(&s_kept[i]);
-    if (s_nrot) {
-        s_stay           = g_binder.held;
-        s_nstay          = g_binder.nheld;
-        g_binder.held    = s_all;
-        g_binder.nheld   = s_nall;
-        g_binder.capheld = s_capall;
-        s_all            = NULL;
-        s_nall           = s_capall = 0;
+    for (uint32_t i = 0; i < vol->escheat.nrot; i++)
+        (void)BinderRotten(vol, vol->escheat.rot[i].tree, &vol->escheat.rot[i].at);   /* into the room it kept: no memory asked */
+    for (uint32_t i = 0; i < vol->escheat.nkept; i++)
+        KeptBack(vol, &vol->escheat.kept[i]);
+    if (vol->escheat.nrot) {
+        vol->escheat.stay           = vol->binder.held;
+        vol->escheat.nstay          = vol->binder.nheld;
+        vol->binder.held    = vol->escheat.all;
+        vol->binder.nheld   = vol->escheat.nall;
+        vol->binder.capheld = vol->escheat.capall;
+        vol->escheat.all            = NULL;
+        vol->escheat.nall           = vol->escheat.capall = 0;
     }
-    EscheatDigestsLetGo();
-    kfree(s_rot);
-    kfree(s_kept);
-    s_rot   = NULL;
-    s_kept  = NULL;
-    s_nrot  = s_nkept = 0;
-    s_taken = false;
+    EscheatDigestsLetGo(vol);
+    kfree(vol->escheat.rot);
+    kfree(vol->escheat.kept);
+    vol->escheat.rot   = NULL;
+    vol->escheat.kept  = NULL;
+    vol->escheat.nrot  = vol->escheat.nkept = 0;
+    vol->escheat.taken = false;
 }
 
-void EscheatLetGo(void)
+void EscheatLetGo(TagFSVolume* vol)
 {
-    __atomic_store_n(&s_gone, 0u, __ATOMIC_RELEASE);
-    EscheatSpent();
-    PartedLetGo();
-    kfree(s_lostrot);
-    kfree(s_lostfid);
-    s_lostrot  = NULL;
-    s_lostfid  = NULL;
-    s_nlostrot = s_nlostfid = 0;
-    s_ranges   = s_files = s_blocks = 0;
-    __atomic_store_n(&s_tails, 0u, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_asked, 0u, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_answered, 0u, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_walked, 0u, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_reach, 0u, __ATOMIC_RELEASE);
-    s_cover = 0;
+    __atomic_store_n(&vol->escheat.gone, 0u, __ATOMIC_RELEASE);
+    EscheatSpent(vol);
+    PartedLetGo(vol);
+    kfree(vol->escheat.lostrot);
+    kfree(vol->escheat.lostfid);
+    vol->escheat.lostrot  = NULL;
+    vol->escheat.lostfid  = NULL;
+    vol->escheat.nlostrot = vol->escheat.nlostfid = 0;
+    vol->escheat.ranges   = vol->escheat.files = vol->escheat.blocks = 0;
+    __atomic_store_n(&vol->escheat.tails, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->escheat.asked, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->escheat.answered, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->escheat.walked, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->escheat.reach, 0u, __ATOMIC_RELEASE);
+    vol->escheat.cover = 0;
 }

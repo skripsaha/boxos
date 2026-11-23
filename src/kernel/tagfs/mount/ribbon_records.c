@@ -4,6 +4,7 @@
 #include "../file_map/file_map.h"
 #include "../file_map/tail_slip.h"
 #include "../tag_registry/tag_registry.h"
+#include "tagfs_volume.h"
 
 /*
  * The rules a record of the ribbon is replayed by, one function a kind, for
@@ -22,7 +23,7 @@ static const char* const g_kind_names[RIBBON_KINDS_KNOWN + 1u] = {
 /* A record's runs walked again — the cursor from *cursor — each DATA run not
  * SHARED handed its blocks' digests in order (Gloss), and every DATA run, when
  * `fallow`, let go: the ground of a record an Undone passes over (§2.8). */
-static error_t RibbonRunsSeen(RibbonStage* st, const uint8_t* runs, uint32_t bytes, uint64_t n, uint64_t* cursor,
+static error_t RibbonRunsSeen(TagFSVolume* vol, RibbonStage* st, const uint8_t* runs, uint32_t bytes, uint64_t n, uint64_t* cursor,
                               const uint8_t* digests, uint64_t ndigests, uint64_t* k, bool fallow)
 {
     uint32_t at = 0;
@@ -31,7 +32,7 @@ static error_t RibbonRunsSeen(RibbonStage* st, const uint8_t* runs, uint32_t byt
         RibbonRunGet(runs, bytes, &at, cursor, st->u->seq, &r);
         if (r.hole)
             continue;
-        if (fallow && RibbonStageFallow(st, r.start, r.count, true) != OK)
+        if (fallow && RibbonStageFallow(vol, st, r.start, r.count, true) != OK)
             return ERR_NO_MEMORY;
         for (uint64_t b = 0; !fallow && RibbonRunFresh(&r) && b < r.count && *k < ndigests; b++) {
             if (!RibbonGrow((void**)&st->digests, st->ndigests, &st->capdigests, sizeof(RibbonDigest)))
@@ -102,21 +103,21 @@ static error_t RibbonStrips(const uint8_t* runs, uint32_t bytes, uint64_t n, uin
  * — the file where the stitch found it; and the roll-back a verdict the
  * session's first stitch lays down as an Undone of the stitch, why 2
  * (errata.h). */
-static error_t RibbonMismatch(RibbonReplay* rp, RibbonStage* st, uint64_t kind, uint64_t fid, const char* fmt, ...)
+static error_t RibbonMismatch(TagFSVolume* vol, RibbonReplay* rp, RibbonStage* st, uint64_t kind, uint64_t fid, const char* fmt, ...)
 {
     char    why[192];
     va_list ap;
     va_start(ap, fmt);
     kvsnprintf(why, sizeof(why), fmt, ap);
     va_end(ap);
-    RibbonSay(rp->w, RIBBON_CODE_BASE_MISMATCH, "stitch %llu's %s of fid %llu does not fit the file: %s — the file "
+    RibbonSay(vol, rp->w, RIBBON_CODE_BASE_MISMATCH, "stitch %llu's %s of fid %llu does not fit the file: %s — the file "
               "stays as it last matched (§3.9, the rule of rot)", (unsigned long long)st->u->seq,
               g_kind_names[kind], (unsigned long long)fid, why);
     st->rot = true;
     if (!RibbonListAdd(&rp->mismatched, &rp->nmismatched, &rp->capmismatched, fid) ||
         RibbonSkipPut(&rp->undone, st->u->seq, fid) != OK)
         return ERR_NO_MEMORY;
-    return ErrataAdd(st->u->seq, UNDONE_ROT, fid);
+    return ErrataAdd(vol, st->u->seq, UNDONE_ROT, fid);
 }
 
 /* Whether a body read as its kind is read: refused, said, when it does not
@@ -133,14 +134,14 @@ static bool RibbonBodyTaken(RibbonStage* st, uint64_t kind, int got, uint32_t le
 }
 
 /* Whether `fid` is locked by name, by the Tally or the mount. */
-static bool RibbonLockedByName(uint64_t fid)
+static bool RibbonLockedByName(TagFSVolume* vol, uint64_t fid)
 {
-    uint32_t lo = 0, hi = g_book.nlocked;
+    uint32_t lo = 0, hi = vol->book.nlocked;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2u;
-        if (g_book.locked[mid] == fid)
+        if (vol->book.locked[mid] == fid)
             return true;
-        if (g_book.locked[mid] < fid)
+        if (vol->book.locked[mid] < fid)
             lo = mid + 1u;
         else
             hi = mid;
@@ -151,14 +152,14 @@ static bool RibbonLockedByName(uint64_t fid)
 /* Is `fid` locked for the ribbon: by name, or as a file of a rotten FILES
  * range no Born gave birth to anew (§4.5 п.3 (б)) — its records stay with the
  * range (bookmount.py _Locked). */
-static bool RibbonLocked(RibbonStage* st, uint64_t fid)
+static bool RibbonLocked(TagFSVolume* vol, RibbonStage* st, uint64_t fid)
 {
     bool        held;
-    FileRecord* now  = RibbonFileNow(st, fid, &held);
+    FileRecord* now  = RibbonFileNow(vol, st, fid, &held);
     bool        live = now != NULL;
     if (held)
         FileRecordRelease(now);
-    return RibbonLockedByName(fid) || (!live && BookRotLocks(fid));
+    return RibbonLockedByName(vol, fid) || (!live && BookRotLocks(vol, fid));
 }
 
 /* Whether tag `id` is one a record may wear: coined earlier in the stitch,
@@ -166,20 +167,20 @@ static bool RibbonLocked(RibbonStage* st, uint64_t fid)
  * registry cannot hold is a tag all the same (bookmount.py keeps every one
  * TAGS and a Coined name, BookTagAsideOf) — and not retired, which is an id
  * and no tag. */
-static bool RibbonTagKnown(RibbonStage* st, uint64_t id)
+static bool RibbonTagKnown(TagFSVolume* vol, RibbonStage* st, uint64_t id)
 {
     TagSpelling sp;
     for (uint32_t i = 0; i < st->ncoins; i++)
         if (st->coins[i].id == id)
             return !(st->coins[i].tag.flags & TALLY_TAG_RETIRED);
     return (id <= TAGFS_MAX_TAG_ID &&
-            TagRegistrySpelling(tagfs_get_state()->registry, (uint32_t)id, &sp, NULL, NULL)) ||
-           BookTagAsideOf(id) != NULL;
+            TagRegistrySpelling(vol->state.registry, (uint32_t)id, &sp, NULL, NULL)) ||
+           BookTagAsideOf(vol, id) != NULL;
 }
 
 /* The tags of a rising list that are not known, as the census writes them —
  * empty when every one is. */
-static void RibbonTagsUnknown(RibbonStage* st, const uint8_t* ids, uint32_t bytes, uint64_t n, char* out,
+static void RibbonTagsUnknown(TagFSVolume* vol, RibbonStage* st, const uint8_t* ids, uint32_t bytes, uint64_t n, char* out,
                               size_t room)
 {
     uint32_t at = 0;
@@ -188,7 +189,7 @@ static void RibbonTagsUnknown(RibbonStage* st, const uint8_t* ids, uint32_t byte
     out[0] = '\0';
     for (uint64_t k = 0; k < n; k++) {
         TallyIdNext(ids, bytes, &at, &id, k == 0);
-        if (!RibbonTagKnown(st, id) && w + 24u < room)
+        if (!RibbonTagKnown(vol, st, id) && w + 24u < room)
             w += (size_t)ksnprintf(out + w, room - w, w ? ", %llu" : "[%llu", (unsigned long long)id);
     }
     if (w && w + 2u < room)
@@ -226,12 +227,12 @@ static uint64_t RibbonBlocksOf(uint64_t size)
 /* What a new record of a file must hold before it stands — its blocks held to
  * its size before it was built (RibbonBornApplied, RibbonSplices): its Slip
  * inside its last block. *fits false — said — when not. */
-static error_t RibbonRecordFits(RibbonReplay* rp, RibbonStage* st, uint64_t kind, FileRecord* rec,
+static error_t RibbonRecordFits(TagFSVolume* vol, RibbonReplay* rp, RibbonStage* st, uint64_t kind, FileRecord* rec,
                                 const RibbonSlip* slip, bool* fits)
 {
     error_t rc = RibbonSlipLaid(rec, slip, fits);
     if (rc == OK && !*fits)
-        rc = RibbonMismatch(rp, st, kind, rec->file_id, "its Slip of %llu bytes at %llu does not lie inside the "
+        rc = RibbonMismatch(vol, rp, st, kind, rec->file_id, "its Slip of %llu bytes at %llu does not lie inside the "
                             "last block of %llu bytes", (unsigned long long)slip->len,
                             (unsigned long long)slip->off, (unsigned long long)rec->size);
     return rc;
@@ -294,13 +295,13 @@ static FileRecord* RibbonBornRecord(RibbonStage* st, const RibbonBorn* b, uint64
 
 /* The Born's digests staged for its blocks, its ext noted, and the file put
  * into the stage — when it holds its size and its Slip. */
-static error_t RibbonBornStands(RibbonReplay* rp, RibbonStage* st, const RibbonBorn* b, FileRecord* rec)
+static error_t RibbonBornStands(TagFSVolume* vol, RibbonReplay* rp, RibbonStage* st, const RibbonBorn* b, FileRecord* rec)
 {
     bool     fits = false;
     uint64_t cursor = 0, k = 0;
-    error_t  rc = RibbonRecordFits(rp, st, RIBBON_BORN, rec, &b->slip, &fits);
+    error_t  rc = RibbonRecordFits(vol, rp, st, RIBBON_BORN, rec, &b->slip, &fits);
     if (rc == OK && fits)
-        rc = RibbonRunsSeen(st, b->runs, b->runs_bytes, b->nruns, &cursor, b->digests, b->ndigests, &k, false);
+        rc = RibbonRunsSeen(vol, st, b->runs, b->runs_bytes, b->nruns, &cursor, b->digests, b->ndigests, &k, false);
     if (rc == OK && fits && RibbonRunsExt(b->runs, b->runs_bytes, b->nruns, 0, st->u->seq) &&
         !RibbonListAdd(&rp->ext, &rp->next, &rp->capext, b->fid))
         rc = ERR_NO_MEMORY;
@@ -313,7 +314,7 @@ static error_t RibbonBornStands(RibbonReplay* rp, RibbonStage* st, const RibbonB
 
 /* Born (§2.8, §3.7): a file that does not exist, ACTIVE, wearing tags the
  * volume knows. */
-static error_t RibbonBornApplied(RibbonReplay* rp, RibbonStage* st, const RibbonRecord* r)
+static error_t RibbonBornApplied(TagFSVolume* vol, RibbonReplay* rp, RibbonStage* st, const RibbonRecord* r)
 {
     RibbonBorn  b;
     uint32_t    used = 0;
@@ -324,11 +325,11 @@ static error_t RibbonBornApplied(RibbonReplay* rp, RibbonStage* st, const Ribbon
                          used))
         return OK;
     if (RibbonSkipHas(&rp->undone, seq, b.fid))
-        return RibbonRunsSeen(st, b.runs, b.runs_bytes, b.nruns, &cursor, NULL, 0, &k, true);
-    FileRecord* now = RibbonFileNow(st, b.fid, &held);
+        return RibbonRunsSeen(vol, st, b.runs, b.runs_bytes, b.nruns, &cursor, NULL, 0, &k, true);
+    FileRecord* now = RibbonFileNow(vol, st, b.fid, &held);
     if (held)
         FileRecordRelease(now);
-    if (now || RibbonLockedByName(b.fid)) {
+    if (now || RibbonLockedByName(vol, b.fid)) {
         RibbonRefuse(st, "its Born gives birth to fid %llu, which exists", (unsigned long long)b.fid);
         return OK;
     }
@@ -337,21 +338,21 @@ static error_t RibbonBornApplied(RibbonReplay* rp, RibbonStage* st, const Ribbon
                      (unsigned long long)b.fid);
         return OK;
     }
-    error_t rc = BookBornNoted(b.fid);
+    error_t rc = BookBornNoted(vol, b.fid);
     if (rc != OK)
         return rc;
-    RibbonTagsUnknown(st, b.tags, b.tags_bytes, b.ntags, unknown, sizeof(unknown));
+    RibbonTagsUnknown(vol, st, b.tags, b.tags_bytes, b.ntags, unknown, sizeof(unknown));
     if (unknown[0])
-        return RibbonMismatch(rp, st, RIBBON_BORN, b.fid, "it wears tag id(s) %s that no Coined or TAGS names or that are "
+        return RibbonMismatch(vol, rp, st, RIBBON_BORN, b.fid, "it wears tag id(s) %s that no Coined or TAGS names or that are "
                               "RETIRED", unknown);
     /* Before a Strip is counted or an array of them asked for: a hole of
      * 2^62 blocks is a record that does not fit, not a want of memory. */
     if (b.blocks != RibbonBlocksOf(b.size))
-        return RibbonMismatch(rp, st, RIBBON_BORN, b.fid, "its runs cover %llu blocks and its %llu bytes need %llu",
+        return RibbonMismatch(vol, rp, st, RIBBON_BORN, b.fid, "its runs cover %llu blocks and its %llu bytes need %llu",
                               (unsigned long long)b.blocks, (unsigned long long)b.size,
                               (unsigned long long)RibbonBlocksOf(b.size));
     FileRecord* rec = RibbonBornRecord(st, &b, seq);
-    return rec ? RibbonBornStands(rp, st, &b, rec) : ERR_NO_MEMORY;
+    return rec ? RibbonBornStands(vol, rp, st, &b, rec) : ERR_NO_MEMORY;
 }
 
 /* Whether a Shaped's splices fit a file of `blocks`: each takes out blocks
@@ -426,7 +427,7 @@ static error_t RibbonSplices(const RibbonShaped* d, uint64_t seq, uint64_t block
 
 /* The Shaped applied to `now`: the new record, the ground it lets go to the
  * stage's Fallow — NULL with *fits false when a splice does not fit. */
-static error_t RibbonShapedRecord(RibbonStage* st, const RibbonShaped* d, const FileRecord* now, FileRecord** out,
+static error_t RibbonShapedRecord(TagFSVolume* vol, RibbonStage* st, const RibbonShaped* d, const FileRecord* now, FileRecord** out,
                                   bool* fits, char* why, size_t room)
 {
     BookSplice* sp     = kmalloc(sizeof(BookSplice) * (d->nsplice ? d->nsplice : 1u));
@@ -438,9 +439,9 @@ static error_t RibbonShapedRecord(RibbonStage* st, const RibbonShaped* d, const 
         return ERR_NO_MEMORY;
     error_t rc = RibbonSplices(d, st->u->seq, now->blocks, sp, &strips, fits, why, room);
     if (rc == OK && *fits)
-        rc = FileRecordSplice(now, sp, d->nsplice, d->size, d->mtime_ns, out, &freed, &nfreed);
+        rc = FileRecordSplice(vol, now, sp, d->nsplice, d->size, d->mtime_ns, out, &freed, &nfreed);
     for (uint64_t i = 0; rc == OK && i < nfreed; i++)
-        rc = RibbonStageFallow(st, freed[i].start, freed[i].count, false);
+        rc = RibbonStageFallow(vol, st, freed[i].start, freed[i].count, false);
     kfree(freed);
     kfree(strips);
     kfree(sp);
@@ -454,11 +455,11 @@ static error_t RibbonShapedRecord(RibbonStage* st, const RibbonShaped* d, const 
 /* The file `fid` as the stitch leaves it so far, held to the record's base:
  * *now the file (a reference the caller lets go), or NULL — said — when the
  * file does not stand at the gen the base names. */
-static error_t RibbonBased(RibbonReplay* rp, RibbonStage* st, uint64_t kind, uint64_t fid, uint64_t base,
+static error_t RibbonBased(TagFSVolume* vol, RibbonReplay* rp, RibbonStage* st, uint64_t kind, uint64_t fid, uint64_t base,
                            FileRecord** now)
 {
     bool        held;
-    FileRecord* rec = RibbonFileNow(st, fid, &held);
+    FileRecord* rec = RibbonFileNow(vol, st, fid, &held);
     uint64_t    seq = st->u->seq;
     *now = NULL;
     if (rec && base <= seq && rec->gen == seq - base) {
@@ -474,13 +475,13 @@ static error_t RibbonBased(RibbonReplay* rp, RibbonStage* st, uint64_t kind, uin
         ksnprintf(stands, sizeof(stands), "nothing");
     if (held)
         FileRecordRelease(rec);
-    return RibbonMismatch(rp, st, kind, fid, "its base names the file at %lld and the file stands at %s",
+    return RibbonMismatch(vol, rp, st, kind, fid, "its base names the file at %lld and the file stands at %s",
                           (long long)(seq - base), stands);
 }
 
 /* The Shaped's digests staged for the blocks its splices put in, its ext
  * noted, and the file put into the stage. */
-static error_t RibbonShapedStands(RibbonReplay* rp, RibbonStage* st, const RibbonShaped* d, FileRecord* rec)
+static error_t RibbonShapedStands(TagFSVolume* vol, RibbonReplay* rp, RibbonStage* st, const RibbonShaped* d, FileRecord* rec)
 {
     RibbonSplice s;
     uint32_t     at = 0;
@@ -490,7 +491,7 @@ static error_t RibbonShapedStands(RibbonReplay* rp, RibbonStage* st, const Ribbo
         RibbonSpliceNext(d->splices, d->splices_bytes, &at, &cursor, seq, &digests, &s);
         uint64_t c = s.cursor;
         ext |= RibbonRunsExt(s.runs, s.runs_bytes, s.ninsert, s.cursor, seq);
-        if (RibbonRunsSeen(st, s.runs, s.runs_bytes, s.ninsert, &c, d->digests, d->ndigests, &k, false) != OK) {
+        if (RibbonRunsSeen(vol, st, s.runs, s.runs_bytes, s.ninsert, &c, d->digests, d->ndigests, &k, false) != OK) {
             FileRecordRelease(rec);
             return ERR_NO_MEMORY;
         }
@@ -507,7 +508,7 @@ static error_t RibbonShapedStands(RibbonReplay* rp, RibbonStage* st, const Ribbo
  * by their one rule, the Ink's (FileRecordSplice, TailSlipKept): a splice that
  * changes the last block lets them go (§16.3 п.7), the size cuts them (§16.5
  * п.13). */
-static error_t RibbonShapedApplied(RibbonReplay* rp, RibbonStage* st, const RibbonRecord* r)
+static error_t RibbonShapedApplied(TagFSVolume* vol, RibbonReplay* rp, RibbonStage* st, const RibbonRecord* r)
 {
     RibbonShaped d;
     FileRecord * now = NULL, *rec = NULL;
@@ -524,35 +525,35 @@ static error_t RibbonShapedApplied(RibbonReplay* rp, RibbonStage* st, const Ribb
         for (uint64_t i = 0; i < d.nsplice; i++) {
             RibbonSpliceNext(d.splices, d.splices_bytes, &at, &cursor, seq, &digests, &s);
             uint64_t c = s.cursor;
-            if (RibbonRunsSeen(st, s.runs, s.runs_bytes, s.ninsert, &c, NULL, 0, &k, true) != OK)
+            if (RibbonRunsSeen(vol, st, s.runs, s.runs_bytes, s.ninsert, &c, NULL, 0, &k, true) != OK)
                 return ERR_NO_MEMORY;
         }
         return OK;
     }
-    if (RibbonLocked(st, d.fid))
+    if (RibbonLocked(vol, st, d.fid))
         return OK;
-    error_t rc = RibbonBased(rp, st, RIBBON_SHAPED, d.fid, d.base, &now);
+    error_t rc = RibbonBased(vol, rp, st, RIBBON_SHAPED, d.fid, d.base, &now);
     if (rc != OK || !now)
         return rc;
-    rc = RibbonShapedRecord(st, &d, now, &rec, &fits, why, sizeof(why));
+    rc = RibbonShapedRecord(vol, st, &d, now, &rec, &fits, why, sizeof(why));
     FileRecordRelease(now);
     if (rc != OK)
         return rc;
     if (!fits)
-        return RibbonMismatch(rp, st, RIBBON_SHAPED, d.fid, "%s", why);
+        return RibbonMismatch(vol, rp, st, RIBBON_SHAPED, d.fid, "%s", why);
     rec->gen = seq;
-    rc = RibbonRecordFits(rp, st, RIBBON_SHAPED, rec, &d.slip, &fits);
+    rc = RibbonRecordFits(vol, rp, st, RIBBON_SHAPED, rec, &d.slip, &fits);
     if (rc != OK || !fits) {
         FileRecordRelease(rec);
         return rc;
     }
-    return RibbonShapedStands(rp, st, &d, rec);
+    return RibbonShapedStands(vol, rp, st, &d, rec);
 }
 
 /* The tags a Labeled leaves on `now` into `out` (room for now's and every one
  * it adds): rising, those taken off gone. *fits false — said — when it puts
  * on a tag worn, takes off one not worn, or puts on one not known. */
-static error_t RibbonLabelTags(RibbonReplay* rp, RibbonStage* st, const RibbonLabeled* d, const FileRecord* now,
+static error_t RibbonLabelTags(TagFSVolume* vol, RibbonReplay* rp, RibbonStage* st, const RibbonLabeled* d, const FileRecord* now,
                                uint32_t* out, uint32_t* n, bool* fits)
 {
     uint32_t at = 0;
@@ -592,17 +593,17 @@ static error_t RibbonLabelTags(RibbonReplay* rp, RibbonStage* st, const RibbonLa
         *n    = kept;
     }
     if (!*fits)
-        return RibbonMismatch(rp, st, RIBBON_LABELED, d->fid, "it puts on a tag already worn or takes off one "
+        return RibbonMismatch(vol, rp, st, RIBBON_LABELED, d->fid, "it puts on a tag already worn or takes off one "
                               "not worn");
-    RibbonTagsUnknown(st, d->add, d->add_bytes, d->nadd, unknown, sizeof(unknown));
+    RibbonTagsUnknown(vol, st, d->add, d->add_bytes, d->nadd, unknown, sizeof(unknown));
     *fits = !unknown[0];
-    return *fits ? OK : RibbonMismatch(rp, st, RIBBON_LABELED, d->fid, "it wears tag id(s) %s that no Coined or "
+    return *fits ? OK : RibbonMismatch(vol, rp, st, RIBBON_LABELED, d->fid, "it wears tag id(s) %s that no Coined or "
                                        "TAGS names or that are RETIRED", unknown);
 }
 
 /* The Labeled applied to `now`: its name, flags, tags, term, the programs it
  * shows its tags to and its first bytes. */
-static error_t RibbonLabelRecord(RibbonReplay* rp, RibbonStage* st, const RibbonLabeled* d, const FileRecord* now)
+static error_t RibbonLabelRecord(TagFSVolume* vol, RibbonReplay* rp, RibbonStage* st, const RibbonLabeled* d, const FileRecord* now)
 {
     uint64_t  flags  = RibbonFlagsOf(rp, st, now);
     uint64_t  keep   = now->keep_until;
@@ -635,7 +636,7 @@ static error_t RibbonLabelRecord(RibbonReplay* rp, RibbonStage* st, const Ribbon
     else if (rc == OK && nshown)
         memcpy(shown, now->shown_to, sizeof(uint64_t) * nshown);
     if (rc == OK && (d->what & LABEL_TAGS))
-        rc = RibbonLabelTags(rp, st, d, now, tags, &n, &fits);
+        rc = RibbonLabelTags(vol, rp, st, d, now, tags, &n, &fits);
     else if (rc == OK)
         for (uint32_t i = 0; i < now->tag_count; i++)
             tags[n++] = now->tags[i];
@@ -666,7 +667,7 @@ static error_t RibbonLabelRecord(RibbonReplay* rp, RibbonStage* st, const Ribbon
 
 /* Labeled (§2.8, §3.7): the file at its base; the tags it puts on known and
  * not worn, those it takes off worn; ACTIVE kept. Its mtime does not move. */
-static error_t RibbonLabeledApplied(RibbonReplay* rp, RibbonStage* st, const RibbonRecord* r)
+static error_t RibbonLabeledApplied(TagFSVolume* vol, RibbonReplay* rp, RibbonStage* st, const RibbonRecord* r)
 {
     RibbonLabeled d;
     FileRecord*   now  = NULL;
@@ -674,12 +675,12 @@ static error_t RibbonLabeledApplied(RibbonReplay* rp, RibbonStage* st, const Rib
     if (!RibbonBodyTaken(st, RIBBON_LABELED, RibbonLabeledGet(st->u->stream + r->body, r->len, &d, &used), r->len,
                          used))
         return OK;
-    if (RibbonSkipHas(&rp->undone, st->u->seq, d.fid) || RibbonLocked(st, d.fid))
+    if (RibbonSkipHas(&rp->undone, st->u->seq, d.fid) || RibbonLocked(vol, st, d.fid))
         return OK;
-    error_t rc = RibbonBased(rp, st, RIBBON_LABELED, d.fid, d.base, &now);
+    error_t rc = RibbonBased(vol, rp, st, RIBBON_LABELED, d.fid, d.base, &now);
     if (rc != OK || !now)
         return rc;
-    rc = RibbonLabelRecord(rp, st, &d, now);
+    rc = RibbonLabelRecord(vol, rp, st, &d, now);
     FileRecordRelease(now);
     return rc;
 }
@@ -689,7 +690,7 @@ static error_t RibbonLabeledApplied(RibbonReplay* rp, RibbonStage* st, const Rib
  * which the census keeps for any owner left naming it (ground_census.c,
  * RunsOwnerLess), so it lies fallow once, when the last has gone (§8.2). Its
  * id is never given again. */
-static error_t RibbonQuitclaimApplied(RibbonReplay* rp, RibbonStage* st, const RibbonRecord* r)
+static error_t RibbonQuitclaimApplied(TagFSVolume* vol, RibbonReplay* rp, RibbonStage* st, const RibbonRecord* r)
 {
     uint64_t    fid = 0, base = 0;
     uint32_t    used = 0;
@@ -699,14 +700,14 @@ static error_t RibbonQuitclaimApplied(RibbonReplay* rp, RibbonStage* st, const R
     if (!RibbonBodyTaken(st, RIBBON_QUITCLAIM, RibbonQuitclaimGet(st->u->stream + r->body, r->len, &fid, &base,
                                                                    &used), r->len, used))
         return OK;
-    if (RibbonSkipHas(&rp->undone, st->u->seq, fid) || RibbonLocked(st, fid))
+    if (RibbonSkipHas(&rp->undone, st->u->seq, fid) || RibbonLocked(vol, st, fid))
         return OK;
-    error_t rc = RibbonBased(rp, st, RIBBON_QUITCLAIM, fid, base, &now);
+    error_t rc = RibbonBased(vol, rp, st, RIBBON_QUITCLAIM, fid, base, &now);
     if (rc != OK || !now)
         return rc;
     StripWalkBegin(now, &walk);
     while (rc == OK && StripWalkNextGround(&walk, &run))
-        rc = RibbonStageFallow(st, run.start, run.count, false);
+        rc = RibbonStageFallow(vol, st, run.start, run.count, false);
     FileRecordRelease(now);
     return rc == OK ? RibbonStagePut(st, fid, NULL) : rc;
 }
@@ -758,7 +759,7 @@ static error_t RibbonCoinStage(RibbonStage* st, uint64_t id, const TallyTag* t, 
  * the records after it. A Coined RETIRED retires the id, whatever it was —
  * and an id retired is given no more: a Coined naming it a tag refuses the
  * stitch. */
-static error_t RibbonCoinedApplied(RibbonStage* st, const RibbonRecord* r)
+static error_t RibbonCoinedApplied(TagFSVolume* vol, RibbonStage* st, const RibbonRecord* r)
 {
     TallyTag        t, registered;
     const TallyTag* have = NULL;
@@ -769,12 +770,12 @@ static error_t RibbonCoinedApplied(RibbonStage* st, const RibbonRecord* r)
     if (!RibbonBodyTaken(st, RIBBON_COINED, RibbonCoinedGet(st->u->stream + r->body, r->len, &id, &t, &used),
                          r->len, used))
         return OK;
-    bool         held   = BookTagHeld(id, &t);
+    bool         held   = BookTagHeld(vol, id, &t);
     RibbonCoin*  staged = RibbonCoinStaged(st, id);
     if (t.flags & TALLY_TAG_RETIRED)
         return RibbonCoinStage(st, id, &t, held);
     bool retired = staged ? (staged->tag.flags & TALLY_TAG_RETIRED) != 0
-                          : id <= TAGFS_MAX_TAG_ID && TagRegistryRetiredId(tagfs_get_state()->registry, (uint32_t)id);
+                          : id <= TAGFS_MAX_TAG_ID && TagRegistryRetiredId(vol->state.registry, (uint32_t)id);
     if (retired) {
         RibbonRefuse(st, "its Coined gives id %llu to '%.*s' of %s, which the volume has RETIRED — an id is given "
                      "no more", (unsigned long long)id, (int)t.key_len, (const char*)t.key,
@@ -784,13 +785,13 @@ static error_t RibbonCoinedApplied(RibbonStage* st, const RibbonRecord* r)
     if (staged)
         have = &staged->tag;
     bool known = !have && id <= TAGFS_MAX_TAG_ID &&
-                 TagRegistrySpelling(tagfs_get_state()->registry, (uint32_t)id, &sp, NULL, &owner);
+                 TagRegistrySpelling(vol->state.registry, (uint32_t)id, &sp, NULL, &owner);
     if (known) {
         registered = TagRegistryBookForm(&sp, owner);
         have       = &registered;
     }
     if (!have)
-        have = BookTagAsideOf(id);
+        have = BookTagAsideOf(vol, id);
     if (have && !RibbonTagSame(have, &t)) {
         RibbonRefuse(st, "its Coined gives id %llu to '%.*s' of %s, which the volume knows as another tag",
                      (unsigned long long)id, (int)t.key_len, (const char*)t.key,
@@ -813,7 +814,7 @@ static bool RibbonKindUnknown(uint64_t kind)
 /* A record of the stitch through the rule of its kind (bookmount.py _Record):
  * a kind this reader does not know stepped over when it may be, and the
  * stitch refused when it may not. */
-error_t RibbonRecordApplied(RibbonReplay* rp, RibbonStage* st, const RibbonRecord* r)
+error_t RibbonRecordApplied(TagFSVolume* vol, RibbonReplay* rp, RibbonStage* st, const RibbonRecord* r)
 {
     uint64_t       id = 0, n = 0;
     uint32_t       used = 0;
@@ -827,11 +828,11 @@ error_t RibbonRecordApplied(RibbonReplay* rp, RibbonStage* st, const RibbonRecor
     }
     const uint8_t* b = st->u->stream + r->body;
     switch (r->kind) {
-    case RIBBON_BORN:      return RibbonBornApplied(rp, st, r);
-    case RIBBON_SHAPED:    return RibbonShapedApplied(rp, st, r);
-    case RIBBON_LABELED:   return RibbonLabeledApplied(rp, st, r);
-    case RIBBON_QUITCLAIM: return RibbonQuitclaimApplied(rp, st, r);
-    case RIBBON_COINED:    return RibbonCoinedApplied(st, r);
+    case RIBBON_BORN:      return RibbonBornApplied(vol, rp, st, r);
+    case RIBBON_SHAPED:    return RibbonShapedApplied(vol, rp, st, r);
+    case RIBBON_LABELED:   return RibbonLabeledApplied(vol, rp, st, r);
+    case RIBBON_QUITCLAIM: return RibbonQuitclaimApplied(vol, rp, st, r);
+    case RIBBON_COINED:    return RibbonCoinedApplied(vol, st, r);
     case RIBBON_UNDONE: {
         RibbonUndone d;
         RibbonBodyTaken(st, RIBBON_UNDONE, RibbonUndoneGet(b, r->len, &d, &used), r->len, used);
@@ -853,7 +854,7 @@ error_t RibbonRecordApplied(RibbonReplay* rp, RibbonStage* st, const RibbonRecor
             return OK;
         ksnprintf(why, sizeof(why), "stitch %llu carries a %s — a bookmark this kernel cannot hold (§5)",
                   (unsigned long long)st->u->seq, g_kind_names[r->kind]);
-        TagFSUnderGlass(why);
+        TagFSUnderGlass(vol, why);
         return OK;
     }
     }

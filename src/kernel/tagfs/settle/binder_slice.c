@@ -2,6 +2,7 @@
 #include "../file_map/file_map.h"
 #include "../ink/docket.h"
 #include "../use_memory/use_memory.h"
+#include "tagfs_volume.h"
 
 /*
  * The slice a Tally is written of (binder.c, TALLY_TAKE): every live file's
@@ -20,13 +21,13 @@
  * state lock: each as the last settled stitch left it — the Docket's `was`
  * for one changed since (none for one born since), the map's record for the
  * rest. False once there is no file left below `to`. */
-static bool SliceBatch(BinderWork* w, BinderFiles* c, uint64_t* from, uint64_t to)
+static bool SliceBatch(TagFSVolume* vol, BinderWork* w, BinderFiles* c, uint64_t* from, uint64_t to)
 {
-    FileMap*    map = tagfs_get_state()->files;
+    FileMap*    map = vol->state.files;
     uint64_t    ids[BINDER_SLICE_BATCH], jot = 0;
     FileRecord* was = NULL;
     uint32_t    n   = FileMapFiles(map, *from, ids, BINDER_SLICE_BATCH), i = 0;
-    bool        d   = DocketWasFrom(*from, &jot, &was, NULL);
+    bool        d   = DocketWasFrom(vol, *from, &jot, &was, NULL);
     for (uint32_t taken = 0; taken < BINDER_SLICE_BATCH;) {
         uint64_t m = i < n ? ids[i] : UINT64_MAX, j = d ? jot : UINT64_MAX;
         uint64_t f = m < j ? m : j;
@@ -38,7 +39,7 @@ static bool SliceBatch(BinderWork* w, BinderFiles* c, uint64_t* from, uint64_t t
         if (j == f) {
             rec = was;
             was = NULL;
-            d   = DocketWasFrom(f + 1u, &jot, &was, NULL);
+            d   = DocketWasFrom(vol, f + 1u, &jot, &was, NULL);
         } else {
             rec = FileMapRecordHold(map, f, NULL);
         }
@@ -59,9 +60,9 @@ static bool SliceBatch(BinderWork* w, BinderFiles* c, uint64_t* from, uint64_t t
 /* The live files of the state after the last settled stitch whose ids lie in
  * `fids`, a batch at a time, the state lock let go between: no stitch settles
  * meanwhile — this is one step of the Settle's holder. OK or ERR_NO_MEMORY. */
-error_t BinderSliceTake(BinderWork* w, const BinderFids* fids, uint32_t n)
+error_t BinderSliceTake(TagFSVolume* vol, BinderWork* w, const BinderFids* fids, uint32_t n)
 {
-    TagFSLock*   lock = &tagfs_get_state()->lock;
+    TagFSLock*   lock = &vol->state.lock;
     BinderFiles* tail = NULL;
     for (uint32_t r = 0; r < n; r++) {
         uint64_t from = fids[r].from;
@@ -79,7 +80,7 @@ error_t BinderSliceTake(BinderWork* w, const BinderFids* fids, uint32_t n)
                 tail = c;
             }
             TagFSLockTake(lock);
-            more = SliceBatch(w, tail, &from, fids[r].to);
+            more = SliceBatch(vol, w, tail, &from, fids[r].to);
             TagFSLockDrop(lock);
         }
     }
@@ -171,7 +172,7 @@ static error_t ChunkGround(BinderWork* w, const BinderFiles* c, uint64_t* cap)
  * meet joined; a Tally laid in makes its own once the leaves it lays are read
  * (binder_digests.c), and takes this one only where it checks — its slice is
  * every file then. OK or ERR_NO_MEMORY. */
-error_t BinderGroundTake(BinderWork* w)
+error_t BinderGroundTake(TagFSVolume* vol, BinderWork* w)
 {
     uint64_t cap = 0;
     error_t  rc  = OK;
@@ -181,10 +182,10 @@ error_t BinderGroundTake(BinderWork* w)
         rc = ChunkGround(w, c, &cap);
     if (rc != OK)
         return rc;
-    for (uint64_t i = 0; i < g_binder.nheld; i++) {
+    for (uint64_t i = 0; i < vol->binder.nheld; i++) {
         if (!BinderListRoom((void**)&w->ground, w->nground, &cap, sizeof(BinderGround)))
             return ERR_NO_MEMORY;
-        w->ground[w->nground++] = g_binder.held[i];
+        w->ground[w->nground++] = vol->binder.held[i];
     }
     w->nground = BinderGroundJoined(w->ground, w->nground);
     return OK;

@@ -79,11 +79,12 @@ static int WidthDeckInfo(uint64_t fid)
  */
 static TestResult TestWidthDeckCarriesWideFid(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict = TEST_PASS;
     uint64_t   live    = 0;
     TagFSPage  page;
 
-    TEST_ASSERT_OK(TagFSListPage(1, &live, 1, false, &page), "the volume is asked for a file");
+    TEST_ASSERT_OK(TagFSListPage(vol, 1, &live, 1, false, &page), "the volume is asked for a file");
     TEST_ASSERT(page.delivered == 1 && live != 0 && live <= UINT32_MAX,
                 "and names one, its id within 32 bits");
     TEST_ASSERT_EQ(WidthDeckInfo(live), ERR_BUFFER_TOO_SMALL, "the deck finds that file by its id");

@@ -50,9 +50,9 @@ static void StandRoadsteadAnswered(uint8_t index, uint8_t slot, error_t status, 
 }
 
 /* The AHCI port under the volume, or a reason there is none to ask. */
-static const char* StandRoadsteadPort(uint8_t* out_port)
+static const char* StandRoadsteadPort(TagFSVolume* vol, uint8_t* out_port)
 {
-    uint8_t seat = tagfs_get_seat();
+    uint8_t seat = tagfs_get_seat(vol);
     if (BoardroomSeatKind(seat) != BOARD_AHCI)
         return "the volume's seat is not an AHCI port";
     *out_port = BoardroomSeatIndex(seat);
@@ -144,12 +144,13 @@ static uint32_t StandRoadsteadNarrow(uint8_t port)
  * attended read brought. */
 static TestResult TestStandRoadsteadOneSlotTwoReads(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    uint8_t     seat    = tagfs_get_seat();
+    uint8_t     seat    = tagfs_get_seat(vol);
     uint8_t     port    = 0;
     uint32_t    had     = 0;
     int         held    = -1;
-    const char* none    = StandRoadsteadPort(&port);
+    const char* none    = StandRoadsteadPort(vol, &port);
 
     if (none)
         return test_steps_aside(none);
@@ -196,12 +197,13 @@ out:
  * the bytes the attended read brought. */
 static TestResult TestStandRoadsteadReadWaitsForTheDoor(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    uint8_t     seat    = tagfs_get_seat();
+    uint8_t     seat    = tagfs_get_seat(vol);
     uint8_t     port    = 0;
     uint8_t     slot    = 0;
     bool        door    = false;
-    const char* none    = StandRoadsteadPort(&port);
+    const char* none    = StandRoadsteadPort(vol, &port);
 
     if (none)
         return test_steps_aside(none);
@@ -286,11 +288,12 @@ out:
  */
 static TestResult TestStandRoadsteadRefusalRingsOnce(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    uint8_t     seat    = tagfs_get_seat();
+    uint8_t     seat    = tagfs_get_seat(vol);
     uint8_t     port    = 0;
     bool        armed   = false;
-    const char* none    = StandRoadsteadPort(&port);
+    const char* none    = StandRoadsteadPort(vol, &port);
 
     if (none)
         return test_steps_aside(none);

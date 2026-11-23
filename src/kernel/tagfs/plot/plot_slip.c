@@ -7,6 +7,7 @@
 #include "../settle/binder.h"
 #include "../settle/sewing.h"
 #include "../block_map/block_map.h"
+#include "tagfs_volume.h"
 
 /*
  * A write that rides a Slip — the Plot (plot_window.c) choosing, at its Begin,
@@ -54,44 +55,44 @@
  * write past a block left for an Engross before each Tally on the medium
  * whose command is smallest. A window past the first is a part of a write
  * that began in a block before it, which does not lie in the last alone. */
-static bool PlotSlipBarred(const Plot *p)
+static bool PlotSlipBarred(TagFSVolume* vol, const Plot *p)
 {
-    return !p->rec || p->part || p->fid == g_book.boot_fid || InkFileKept(p->meta.flags) ||
-           BinderEngrossOwed();
+    return !p->rec || p->part || p->fid == vol->book.boot_fid || InkFileKept(p->meta.flags) ||
+           BinderEngrossOwed(vol);
 }
 
 /* The block the tail of a file whose record holds no Slips yet will be laid in,
  * promised — afresh before it is refused, as a take of data's measure is
  * (plot_window.c, PlotFreshTake): whether it is. */
-static bool PlotSlipPromise(Plot *p)
+static bool PlotSlipPromise(TagFSVolume* vol, Plot *p)
 {
     if (p->rec->slip || p->promised)
         return true;
-    p->promised = AllotmentPromise(EndpaperDataKeeps(false), p->mount_epoch) ||
-                  AllotmentPromise(EndpaperDataKeeps(true), p->mount_epoch);
+    p->promised = AllotmentPromise(vol, EndpaperDataKeeps(vol, false), p->mount_epoch) ||
+                  AllotmentPromise(vol, EndpaperDataKeeps(vol, true), p->mount_epoch);
     return p->promised;
 }
 
-error_t PlotSlipBegin(Plot *p, uint64_t at, uint64_t bytes, bool *chosen)
+error_t PlotSlipBegin(TagFSVolume* vol, Plot *p, uint64_t at, uint64_t bytes, bool *chosen)
 {
     uint64_t size = at + bytes > p->size ? at + bytes : p->size;
     uint64_t k    = at / PLOT_BLOCK;
     uint32_t off  = (uint32_t)(at % PLOT_BLOCK);
     *chosen = false;
-    if (bytes == 0 || size % PLOT_BLOCK == 0 || k != (size - 1u) / PLOT_BLOCK || PlotSlipBarred(p))
+    if (bytes == 0 || size % PLOT_BLOCK == 0 || k != (size - 1u) / PLOT_BLOCK || PlotSlipBarred(vol, p))
         return OK;
     if (k >= p->blocks_before && p->blocks_before && TailSlipOn(p->rec, p->blocks_before - 1u))
         return OK;      /* the full block the Slips lie over goes into a block first (PlotWindowBegin) */
     const TailSlip *under = TailSlipOn(p->rec, k) ? p->rec->slip : NULL;
-    if (!TailSlipJoins(under, off, (uint32_t)bytes) || !PlotSlipPromise(p))
+    if (!TailSlipJoins(under, off, (uint32_t)bytes) || !PlotSlipPromise(vol, p))
         return OK;
     TailSlip *slip = TailSlipBlank();
     if (!slip) {
-        PlotSlipLetGo(p);
+        PlotSlipLetGo(vol, p);
         kprintf("[TagFS] file %llu: the heap has no room for the Slip of its %llu byte(s) at %llu — they are laid "
                 "as a block, and a Tally is asked: it lays every tail in a block and lets their memory go\n",
                 p->fid, (unsigned long long)bytes, (unsigned long long)at);
-        BinderDemanded();
+        BinderDemanded(vol);
         return OK;
     }
     error_t rc = OK;
@@ -109,7 +110,7 @@ error_t PlotSlipBegin(Plot *p, uint64_t at, uint64_t bytes, bool *chosen)
     p->slip_off = off;
     p->slip_len = (uint32_t)bytes;
     *chosen     = true;
-    return PlotWindowRoomAsked(p);
+    return PlotWindowRoomAsked(vol, p);
 }
 
 error_t PlotSlipWrite(Plot *p, uint64_t at, const PlotSource *src, uint64_t *out_done)
@@ -132,11 +133,11 @@ error_t PlotSlipWrite(Plot *p, uint64_t at, const PlotSource *src, uint64_t *out
     return OK;
 }
 
-void PlotSlipLetGo(Plot *p)
+void PlotSlipLetGo(TagFSVolume* vol, Plot *p)
 {
     TailSlipLetGo(p->slip);
     if (p->promised)
-        AllotmentPromiseLetGo(p->mount_epoch);
+        AllotmentPromiseLetGo(vol, p->mount_epoch);
     p->slip     = NULL;
     p->slip_off = 0;
     p->slip_len = 0;
@@ -156,7 +157,7 @@ uint64_t PlotSlipMost(const Plot *p)
     return b - a;
 }
 
-error_t PlotEngross(Plot *p, bool *laid)
+error_t PlotEngross(TagFSVolume* vol, Plot *p, bool *laid)
 {
     *laid = false;
     if (!p->rec || !p->size || !TailSlipOn(p->rec, (p->size - 1u) / PLOT_BLOCK))
@@ -164,9 +165,9 @@ error_t PlotEngross(Plot *p, bool *laid)
     uint64_t k    = (p->size - 1u) / PLOT_BLOCK;
     error_t  rc   = PlotWindowCover(p, k, p->rec->blocks);
     if (rc == OK)
-        rc = PlotWindowTail(p, k, (uint32_t)(p->size - k * PLOT_BLOCK));
+        rc = PlotWindowTail(vol, p, k, (uint32_t)(p->size - k * PLOT_BLOCK));
     if (rc == OK) {
-        p->data_need = VolumeFlushNeed();
+        p->data_need = VolumeFlushNeed(vol);
         *laid        = true;
 #ifdef CONFIG_TAGFS_SETTLE_CUT_POINT
         p->engross = true;

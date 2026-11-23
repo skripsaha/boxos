@@ -232,7 +232,7 @@ static int SysBroadcast(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     /* Resolve the tag to its registry id once, outside the process-list
      * lock — sys_proc_has_tag's string/wildcard path would re-acquire
      * process_lock through process_snapshot_tags and self-deadlock. */
-    uint32_t tid = TagFSLookupSpelling(&tag);
+    uint32_t tid = TagFSLookupSpelling(TagFSHome(), &tag);
     if (tid == TAGFS_INVALID_TAG_ID) return ERR_ROUTE_NO_SUBSCRIBERS;
 
     /* Phase 1: snapshot matching pids under process_list_lock so the
@@ -382,7 +382,7 @@ static error_t AskCarrier(const ManifestOp *op, const process_t *asker, process_
     error_t spelled = TagSpell((const char *)op->params, op->param_size, &tag);
     if (spelled != OK) return spelled;
 
-    uint32_t tid = TagFSLookupSpelling(&tag);
+    uint32_t tid = TagFSLookupSpelling(TagFSHome(), &tag);
     if (tid == TAGFS_INVALID_TAG_ID) return ERR_ROUTE_NO_SUBSCRIBERS;
 
     uint32_t pid = 0, carriers = 0;
@@ -1264,7 +1264,7 @@ static int SysProcCrew(const ManifestOp *op, Crate *crates, uint16_t crate_count
      * re-enters process_lock through process_snapshot_tags and would
      * self-deadlock (the same rule SysBroadcast keeps). An unknown tag is
      * nobody wearing it, not a failure — the answer is an honest zero. */
-    uint32_t tid = TagFSLookupSpelling(&tag);
+    uint32_t tid = TagFSLookupSpelling(TagFSHome(), &tag);
     if (tid != TAGFS_INVALID_TAG_ID) {
         /* Phase 1: the pids, under the list lock, counted then made room for
          * then filled — never a fixed tray that silently drops the last one. */
@@ -1481,15 +1481,15 @@ static int SysProcExec(const ManifestOp *op, Crate *crates, uint16_t crate_count
 static bool SysExecCandidate(uint64_t file_id)
 {
     TagFSMetadata meta;
-    if (tagfs_get_metadata(file_id, &meta) != 0) return false;
+    if (tagfs_get_metadata(TagFSHome(), file_id, &meta) != 0) return false;
 
     bool program = false;
     if ((meta.flags & TAGFS_FILE_ACTIVE) && !(meta.flags & TAGFS_FILE_DELETED) && meta.size != 0) {
-        TagFSFileHandle *fh = tagfs_open(file_id, TAGFS_HANDLE_READ);
+        TagFSFileHandle *fh = tagfs_open(TagFSHome(), file_id, TAGFS_HANDLE_READ);
         if (fh) {
             ImageSource source = { meta.size, fh, NULL, file_id };
             program = ImageIsProgram(&source, meta.filename);
-            tagfs_close(fh);
+            tagfs_close(TagFSHome(), fh);
         }
     }
     tagfs_metadata_free(&meta);
@@ -1519,7 +1519,7 @@ static int SysProcExecNamed(const ManifestOp *op, Crate *crates, const OpContext
     uint64_t          from       = 1;
     uint64_t          found_id   = 0;
     do {
-        error_t asked = TagFSNamedPage(TagOwnerPerson(), name, name_len, NULL, 0, NULL, 0, from, page_ids,
+        error_t asked = TagFSNamedPage(TagFSHome(), TagOwnerPerson(), name, name_len, NULL, 0, NULL, 0, from, page_ids,
                                        ARRAY_SIZE(page_ids), false, &page);
         if (asked == ERR_TAGFS_NOT_INITIALIZED) return ERR_FILE_NOT_FOUND;
         if (asked != OK) return asked;
@@ -1590,12 +1590,12 @@ static int SysProcExecImage(const ManifestOp *op, Crate *crates, const OpContext
 
     /* The file is read where the loader asks: a box only as far as starting
      * it needs, an image of another kind whole (image_load.h). */
-    TagFSFileHandle *fh = tagfs_open(found_id, TAGFS_HANDLE_READ);
+    TagFSFileHandle *fh = tagfs_open(TagFSHome(), found_id, TAGFS_HANDLE_READ);
     if (!fh) return ERR_SPAWN_FAILED;
 
     process_t *new_proc = process_create(child_tags);
     if (!new_proc) {
-        tagfs_close(fh);
+        tagfs_close(TagFSHome(), fh);
         return ERR_SPAWN_FAILED;
     }
     new_proc->cabin->spawner_pid = ctx->proc->pid;
@@ -1603,7 +1603,7 @@ static int SysProcExecImage(const ManifestOp *op, Crate *crates, const OpContext
 
     ImageSource source = { file_size, fh, NULL, found_id };
     error_t     load   = process_load_binary(new_proc, &source, meta->filename);
-    tagfs_close(fh);
+    tagfs_close(TagFSHome(), fh);
     if (load != OK) {
         process_destroy(new_proc);
         return load;
@@ -1664,7 +1664,7 @@ static int SysProcExecFound(const ManifestOp *op, Crate *crates, const OpContext
                             const uint8_t *luggage, uint32_t luggage_len)
 {
     TagFSMetadata meta;
-    if (tagfs_get_metadata(found_id, &meta) != 0) return ERR_FILE_NOT_FOUND;
+    if (tagfs_get_metadata(TagFSHome(), found_id, &meta) != 0) return ERR_FILE_NOT_FOUND;
 
     char *keys = ProgramKeys(meta.filename, meta.flags);
     if (!keys) {
@@ -2206,10 +2206,10 @@ static int SysResources(const ManifestOp *op, Crate *crates, uint16_t crate_coun
     SystemResources res;
     memset(&res, 0, sizeof(res));
 
-    if (tagfs_enter()) {
+    if (tagfs_enter(TagFSHome())) {
         TagFSState *fs = tagfs_get_state();
-        bool counted = BlockMapDerivedUp();
-        uint64_t free_bytes = counted ? AllotmentFreeUnpromised() * (uint64_t)VOLUME_BLOCK_BYTES : 0;
+        bool counted = BlockMapDerivedUp(TagFSHome());
+        uint64_t free_bytes = counted ? AllotmentFreeUnpromised(TagFSHome()) * (uint64_t)VOLUME_BLOCK_BYTES : 0;
         uint64_t total_bytes = fs->volume_bytes;
         if (free_bytes > total_bytes) free_bytes = total_bytes;
         memcpy(res.volume_name, fs->volume_name, sizeof(res.volume_name));
@@ -2219,7 +2219,7 @@ static int SysResources(const ManifestOp *op, Crate *crates, uint16_t crate_coun
         memcpy(res.volume_uuid, fs->uuid, sizeof(res.volume_uuid));
         res.volume_total_bytes  = total_bytes;
         res.volume_used_bytes   = counted ? total_bytes - free_bytes : 0;
-        tagfs_leave();
+        tagfs_leave(TagFSHome());
     }
 
     /* The App Cores as their scheduler counts them, and each K-Core as its

@@ -6,6 +6,7 @@
 #include "../helm/engross.h"
 #include "../mount/perambulation.h"
 #include "../retire/retire.h"
+#include "tagfs_volume.h"
 
 /*
  * The second half of an Ink (ink_internal.h): the writer's half of BookPut.
@@ -48,60 +49,60 @@
  * registry closes a tag before the files are cleared of it, and a retirement
  * is laid only under this lock with none wearing it (InkBookRetireLocked), so
  * no record laid under it wears a tag once retired. */
-static error_t InkBookWearable(const uint32_t* tags, uint32_t count)
+static error_t InkBookWearable(TagFSVolume* vol, const uint32_t* tags, uint32_t count)
 {
     for (uint32_t i = 0; i < count; i++)
-        if (TagRegistryRetiredId(InkState()->registry, tags[i]))
+        if (TagRegistryRetiredId(vol->state.registry, tags[i]))
             return ERR_TAGFS_INVALID_TAG;
     return OK;
 }
 
-static error_t InkBookFieldsLocked(uint64_t fid, const RecordWhere* was, const InkFieldsPlan* f, uint32_t add,
+static error_t InkBookFieldsLocked(TagFSVolume* vol, uint64_t fid, const RecordWhere* was, const InkFieldsPlan* f, uint32_t add,
                                    FileRecord** rec, Jot* j, TagBitmapStake* stake, uint64_t claim, Jot** spent,
                                    InkReceipt* out)
 {
-    TagFSState* fs = InkState();
-    error_t     rc = InkVolumeTakes();
+    TagFSState* fs = &vol->state;
+    error_t     rc = InkVolumeTakes(vol);
     if (rc != OK)
         return rc;
     RecordWhere now;
     FileRecord* still = FileMapRecordHold(fs->files, fid, &now);
     if (!still)
         return ERR_FILE_NOT_FOUND;
-    if (f->adds && (rc = InkBookWearable(&add, 1)) != OK) {
+    if (f->adds && (rc = InkBookWearable(vol, &add, 1)) != OK) {
         FileRecordRelease(still);
         return rc;
     }
     if (now.gen != was->gen || (f->adds && !TagBitmapStakeCovers(fs->bitmap_index, &add, 1, fid, stake)))
         rc = INK_AGAIN;
     else
-        rc = RibbonClaim(claim, false);
+        rc = RibbonClaim(vol, claim, false);
     if (rc != OK) {
         FileRecordRelease(still);    /* the map holds it: nothing freed here */
         return rc;
     }
-    uint64_t     gen   = InkGenNextLocked();
+    uint64_t     gen   = InkGenNextLocked(vol);
     RecordWhere  where = { .gen = gen, .shape = now.shape }, gone;
     FileMapStake none  = { .count = 0 };
     (void)FileMapRecordPut(fs->files, fid, *rec, &where, &none, &gone);
     *rec   = NULL;
     j->was = still;
     j->now = FileMapRecordHold(fs->files, fid, NULL);
-    DocketPutLocked(j, spent);
+    DocketPutLocked(vol, j, spent);
     if (f->adds)
         TagBitmapAddCovered(fs->bitmap_index, &add, 1, fid);
     for (uint32_t i = 0; i < f->drops; i++)
         TagBitmapLeave(fs->bitmap_index, f->dropped[i], fid);
-    InkGenLaidLocked(gen);
+    InkGenLaidLocked(vol, gen);
     out->gen = gen;
     return OK;
 }
 
-error_t InkBookFields(uint64_t fid, FileRecord* cur, const RecordWhere* was, const InkFieldsPlan* f,
+error_t InkBookFields(TagFSVolume* vol, uint64_t fid, FileRecord* cur, const RecordWhere* was, const InkFieldsPlan* f,
                       const char* name, uint32_t add, uint32_t flags, uint64_t keep_until,
                       InkReceipt* out)
 {
-    TagFSState*     fs    = InkState();
+    TagFSState*     fs    = &vol->state;
     TagBitmapStake* stake = NULL;
     Jot*            spent = NULL;
     FileRecord*     rec   = FileRecordRelabel(cur, name, f->tags, f->count, f->shown, f->shown_count, flags,
@@ -115,12 +116,12 @@ error_t InkBookFields(uint64_t fid, FileRecord* cur, const RecordWhere* was, con
     if (rc == OK) {
         uint64_t claim = DocketClaimOf(JOT_LABELED, cur, rec);
         TagFSLockTake(&fs->lock);
-        rc = InkBookFieldsLocked(fid, was, f, add, &rec, j, stake, claim, &spent, out);
+        rc = InkBookFieldsLocked(vol, fid, was, f, add, &rec, j, stake, claim, &spent, out);
         TagFSLockDrop(&fs->lock);
-        rc = RibbonClaimSay(rc);
+        rc = RibbonClaimSay(vol, rc);
     }
     if (rc == OK) {
-        SettleInked(out->gen, false);
+        SettleInked(vol, out->gen, false);
         TagBitmapShrink(fs->bitmap_index, &fs->lock, f->dropped, f->drops, fid);
     } else {
         JotsLetGo(j);
@@ -135,10 +136,10 @@ error_t InkBookFields(uint64_t fid, FileRecord* cur, const RecordWhere* was, con
  * takes it up to its target lays each one's Coined RETIRED. Only once no file
  * wears one — asked under the lock every record that puts a tag on is laid
  * under — so none ever wears a tag the book holds retired. */
-static error_t InkBookRetireLocked(const uint32_t* tags, uint32_t count, InkReceipt* out)
+static error_t InkBookRetireLocked(TagFSVolume* vol, const uint32_t* tags, uint32_t count, InkReceipt* out)
 {
-    TagFSState* fs = InkState();
-    error_t     rc = InkVolumeTakes();
+    TagFSState* fs = &vol->state;
+    error_t     rc = InkVolumeTakes(vol);
     if (rc != OK)
         return rc;
     for (uint32_t i = 0; i < count; i++) {
@@ -149,22 +150,22 @@ static error_t InkBookRetireLocked(const uint32_t* tags, uint32_t count, InkRece
         if (page.delivered)
             return ERR_BUSY;
     }
-    uint64_t gen = InkGenNextLocked();
+    uint64_t gen = InkGenNextLocked(vol);
     for (uint32_t i = 0; i < count && rc == OK; i++)
         rc = TagRegistryRetireAt(fs->registry, tags[i], gen);
-    InkGenLaidLocked(gen);
+    InkGenLaidLocked(vol, gen);
     out->gen = gen;
     return rc;
 }
 
-error_t InkBookRetire(const uint32_t* tags, uint32_t count, InkReceipt* out)
+error_t InkBookRetire(TagFSVolume* vol, const uint32_t* tags, uint32_t count, InkReceipt* out)
 {
-    TagFSState* fs = InkState();
+    TagFSState* fs = &vol->state;
     TagFSLockTake(&fs->lock);
-    error_t rc = InkBookRetireLocked(tags, count, out);
+    error_t rc = InkBookRetireLocked(vol, tags, count, out);
     TagFSLockDrop(&fs->lock);
     if (rc == OK)
-        SettleInked(out->gen, false);
+        SettleInked(vol, out->gen, false);
     return rc;
 }
 
@@ -172,35 +173,35 @@ error_t InkBookRetire(const uint32_t* tags, uint32_t count, InkReceipt* out)
 // A new file
 // ----------------------------------------------------------------------------
 
-static error_t InkBookNewLocked(const uint32_t* tags, uint32_t count, FileRecord** rec, Jot* j, InkNewStakes* st,
+static error_t InkBookNewLocked(TagFSVolume* vol, const uint32_t* tags, uint32_t count, FileRecord** rec, Jot* j, InkNewStakes* st,
                                 uint64_t claim, Jot** spent, uint64_t* out_fid, InkReceipt* out)
 {
-    TagFSState* fs  = InkState();
-    uint64_t    fid = g_book.next_fid;
-    error_t     rc  = InkVolumeTakes();
+    TagFSState* fs  = &vol->state;
+    uint64_t    fid = vol->book.next_fid;
+    error_t     rc  = InkVolumeTakes(vol);
     if (rc != OK)
         return rc;
     if (fid > INK_BOOK_FID_MOST)
         return ERR_TAGFS_FID_EXHAUSTED;
-    if ((rc = InkBookWearable(tags, count)) != OK)
+    if ((rc = InkBookWearable(vol, tags, count)) != OK)
         return rc;
     if (FileMapNodesToAdd(fs->files, fid) > st->map.count ||
         !TagBitmapStakeCovers(fs->bitmap_index, tags, count, fid, st->index))
         return INK_AGAIN;
-    if ((rc = RibbonClaim(claim, false)) != OK)
+    if ((rc = RibbonClaim(vol, claim, false)) != OK)
         return rc;
     (*rec)->file_id = fid;
-    uint64_t    gen   = InkGenNextLocked();
+    uint64_t    gen   = InkGenNextLocked(vol);
     RecordWhere where = { .gen = gen, .shape = gen }, gone;
     (void)FileMapRecordPut(fs->files, fid, *rec, &where, &st->map, &gone);
     *rec   = NULL;
     j->fid = fid;
     j->now = FileMapRecordHold(fs->files, fid, NULL);
-    DocketPutLocked(j, spent);
+    DocketPutLocked(vol, j, spent);
     TagBitmapAddCovered(fs->bitmap_index, tags, count, fid);
-    g_book.next_fid = fid + 1u;
+    vol->book.next_fid = fid + 1u;
     fs->total_files++;
-    InkGenLaidLocked(gen);
+    InkGenLaidLocked(vol, gen);
     *out_fid = fid;
     out->gen = gen;
     return OK;
@@ -211,10 +212,10 @@ static error_t InkBookNewLocked(const uint32_t* tags, uint32_t count, FileRecord
  * for the id the lock showed, and taken again when another create took it.
  * `made_by` is the file of the program that makes it, 0 for none: it is in the
  * record from its birth, and in the Born that carries it. */
-error_t InkBookNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t made_by, uint64_t* out_fid,
+error_t InkBookNew(TagFSVolume* vol, const char* name, const uint32_t* tags, uint32_t count, uint64_t made_by, uint64_t* out_fid,
                    InkReceipt* out)
 {
-    TagFSState*   fs   = InkState();
+    TagFSState*   fs   = &vol->state;
     uint64_t      now  = rtc_get_unix64() * 1000000000ull;
     TagFSMetadata meta = { .flags = TAGFS_FILE_ACTIVE, .created_time = now, .modified_time = now,
                            .filename = (char*)name, .tag_ids = (uint32_t*)tags, .tag_count = count,
@@ -226,7 +227,7 @@ error_t InkBookNew(const char* name, const uint32_t* tags, uint32_t count, uint6
         InkNewStakes st    = { .map = { .count = 0 }, .index = NULL };
         Jot*         spent = NULL;
         TagFSLockTake(&fs->lock);
-        uint64_t fid = g_book.next_fid;
+        uint64_t fid = vol->book.next_fid;
         TagFSLockDrop(&fs->lock);
         Jot* j = JotMake(JOT_BORN, fid, NULL, NULL);
         rc     = j ? FileMapStakeFor(fs->files, fid, &st.map) : ERR_NO_MEMORY;
@@ -234,12 +235,12 @@ error_t InkBookNew(const char* name, const uint32_t* tags, uint32_t count, uint6
             rc = TagBitmapStakeFor(fs->bitmap_index, tags, count, fid, &st.index);
         if (rc == OK) {
             TagFSLockTake(&fs->lock);
-            rc = InkBookNewLocked(tags, count, &rec, j, &st, claim, &spent, out_fid, out);
+            rc = InkBookNewLocked(vol, tags, count, &rec, j, &st, claim, &spent, out_fid, out);
             TagFSLockDrop(&fs->lock);
-            rc = RibbonClaimSay(rc);
+            rc = RibbonClaimSay(vol, rc);
         }
         if (rc == OK)
-            SettleInked(out->gen, false);
+            SettleInked(vol, out->gen, false);
         else
             JotsLetGo(j);
         JotsLetGo(spent);
@@ -257,61 +258,61 @@ error_t InkBookNew(const char* name, const uint32_t* tags, uint32_t count, uint6
 // A file given up
 // ----------------------------------------------------------------------------
 
-static error_t InkBookQuitclaimLocked(uint64_t fid, const RecordWhere* was, const FileRecord* cur,
+static error_t InkBookQuitclaimLocked(TagFSVolume* vol, uint64_t fid, const RecordWhere* was, const FileRecord* cur,
                                       FallowNode** fallow, Jot* j, Jot** spent, InkReceipt* out)
 {
-    TagFSState* fs = InkState();
-    error_t     rc = InkVolumeTakes();
+    TagFSState* fs = &vol->state;
+    error_t     rc = InkVolumeTakes(vol);
     if (rc != OK)
         return rc;
     RecordWhere now, gone;
     FileRecord* still = FileMapRecordHold(fs->files, fid, &now);
     if (!still)
         return ERR_FILE_NOT_FOUND;
-    if (now.gen != was->gen || (*fallow && !FallowNodeCommonRoom(*fallow)))
+    if (now.gen != was->gen || (*fallow && !FallowNodeCommonRoom(vol, *fallow)))
         rc = INK_AGAIN;
     else
-        rc = RibbonClaim(DocketClaimOf(JOT_QUITCLAIM, cur, NULL), true);
+        rc = RibbonClaim(vol, DocketClaimOf(JOT_QUITCLAIM, cur, NULL), true);
     if (rc != OK) {
         FileRecordRelease(still);
         return rc;
     }
-    uint64_t gen = InkGenNextLocked();
+    uint64_t gen = InkGenNextLocked(vol);
     FileMapDrop(fs->files, fid, &gone);
     j->was = still;
-    DocketPutLocked(j, spent);
+    DocketPutLocked(vol, j, spent);
     for (uint32_t i = 0; i < cur->tag_count; i++)
         TagBitmapLeave(fs->bitmap_index, cur->tags[i], fid);
     if (cur->flags & TAGFS_FILE_DELETED)
         TagBitmapLeave(fs->bitmap_index, TAGFS_DELETED_MEMBERS, fid);
-    if (*fallow && FallowNodeCommonheld(*fallow, gen)) {
-        FallowAdd(*fallow, gen);
+    if (*fallow && FallowNodeCommonheld(vol, *fallow, gen)) {
+        FallowAdd(vol, *fallow, gen);
         *fallow = NULL;
     }
-    AllotmentRelease(fid);
+    AllotmentRelease(vol, fid);
     if (fs->total_files > 0)
         fs->total_files--;
-    InkGenLaidLocked(gen);
+    InkGenLaidLocked(vol, gen);
     out->gen = gen;
     return OK;
 }
 
-error_t InkBookQuitclaim(uint64_t fid, const RecordWhere* was, const FileRecord* cur, FallowNode* fallow,
+error_t InkBookQuitclaim(TagFSVolume* vol, uint64_t fid, const RecordWhere* was, const FileRecord* cur, FallowNode* fallow,
                          InkReceipt* out)
 {
-    TagFSState* fs    = InkState();
+    TagFSState* fs    = &vol->state;
     Jot*        spent = NULL;
     Jot*        j     = JotMake(JOT_QUITCLAIM, fid, NULL, NULL);
     error_t     rc    = j ? OK : ERR_NO_MEMORY;
     if (rc == OK) {
         TagFSLockTake(&fs->lock);
-        rc = InkBookQuitclaimLocked(fid, was, cur, &fallow, j, &spent, out);
+        rc = InkBookQuitclaimLocked(vol, fid, was, cur, &fallow, j, &spent, out);
         TagFSLockDrop(&fs->lock);
-        rc = RibbonClaimSay(rc);
+        rc = RibbonClaimSay(vol, rc);
     }
     if (rc == OK) {
-        SettleInked(out->gen, false);
-        RetireOwed();
+        SettleInked(vol, out->gen, false);
+        RetireOwed(vol);
         TagBitmapShrink(fs->bitmap_index, &fs->lock, cur->tags, cur->tag_count, fid);
         if (cur->flags & TAGFS_FILE_DELETED) {
             const uint32_t members = TAGFS_DELETED_MEMBERS;
@@ -401,9 +402,9 @@ typedef struct {
     uint64_t    claim;
 } InkBookWork;
 
-static void InkBookWorkLetGo(InkBookWork* w)
+static void InkBookWorkLetGo(TagFSVolume* vol, InkBookWork* w)
 {
-    GlossRoomLetGo(&w->gloss);
+    GlossRoomLetGo(vol, &w->gloss);
     FileRecordRelease(w->rec);
     FallowNodeLetGo(w->fallow);
     kfree(w->joined);
@@ -425,7 +426,7 @@ static void InkBookWorkLetGo(InkBookWork* w)
  * that ground the stitch's: the Ink, under its lock, finds the Docket's TAKEs
  * moved and goes round, and the next look grows nothing.
  */
-static error_t InkBookPlotJoin(const Plot* p, const FileRecord* cur, InkBookWork* w)
+static error_t InkBookPlotJoin(TagFSVolume* vol, const Plot* p, const FileRecord* cur, InkBookWork* w)
 {
     StripWalk w_at;
     Strip     last;
@@ -438,10 +439,10 @@ static error_t InkBookPlotJoin(const Plot* p, const FileRecord* cur, InkBookWork
         last.start + last.count != in->start || last.birth != 0 || in->birth != 0 ||
         (uint64_t)last.count + in->count > UINT32_MAX)
         return OK;
-    TagFSLockTake(&InkState()->lock);
-    bool lacks = DocketBaseLacks(p->fid, begins, last.start);
-    w->takes   = DocketTakes();
-    TagFSLockDrop(&InkState()->lock);
+    TagFSLockTake(&vol->state.lock);
+    bool lacks = DocketBaseLacks(vol, p->fid, begins, last.start);
+    w->takes   = DocketTakes(vol);
+    TagFSLockDrop(&vol->state.lock);
     if (!lacks)
         return OK;
     if (!(w->joined = kmalloc(sizeof(Strip) * w->sp[0].ninsert)))
@@ -492,7 +493,7 @@ static bool InkBookFreedAgrees(const Plot* p, Strip* freed, uint64_t nfreed)
  * node is made of the DATA ground the old record names and the new one does
  * not, as the mount's replay of the same Shaped frees it, and nothing else.
  */
-static error_t InkBookPlotBuilt(const Plot* p, const FileRecord* cur, InkBookWork* w)
+static error_t InkBookPlotBuilt(TagFSVolume* vol, const Plot* p, const FileRecord* cur, InkBookWork* w)
 {
     Strip*   freed  = NULL;
     Strip*   written = NULL;
@@ -500,9 +501,9 @@ static error_t InkBookPlotBuilt(const Plot* p, const FileRecord* cur, InkBookWor
     uint32_t nwritten = 0;
     error_t  rc     = PlotConveyance(p, cur, &w->sp, &w->nsp);
     if (rc == OK)
-        rc = InkBookPlotJoin(p, cur, w);
+        rc = InkBookPlotJoin(vol, p, cur, w);
     if (rc == OK)
-        rc = FileRecordSplice(cur, w->sp, w->nsp, p->size, rtc_get_unix64() * 1000000000ull, &w->rec, &freed,
+        rc = FileRecordSplice(vol, cur, w->sp, w->nsp, p->size, rtc_get_unix64() * 1000000000ull, &w->rec, &freed,
                               &nfreed);
     if (rc == OK) {
         InkBookPlotFolded(p, w->rec);
@@ -520,10 +521,10 @@ static error_t InkBookPlotBuilt(const Plot* p, const FileRecord* cur, InkBookWor
 #endif
     if (rc == OK && nfreed > UINT32_MAX)
         rc = ERR_NO_MEMORY;
-    if (rc == OK && nfreed && !(w->fallow = FallowNodeMake(freed, (uint32_t)nfreed, FALLOW_BY_RECORD, p->fid)))
+    if (rc == OK && nfreed && !(w->fallow = FallowNodeMake(vol, freed, (uint32_t)nfreed, FALLOW_BY_RECORD, p->fid)))
         rc = ERR_NO_MEMORY;
     if (rc == OK && (rc = InkBookWritten(p, &written, &nwritten)) == OK)
-        rc = GlossRoomFor(written, nwritten, &w->gloss);
+        rc = GlossRoomFor(vol, written, nwritten, &w->gloss);
     if (rc == OK)
         w->claim = InkBookPlotClaim(p, w->sp, w->nsp, cur, w->rec);
     kfree(freed);
@@ -533,89 +534,89 @@ static error_t InkBookPlotBuilt(const Plot* p, const FileRecord* cur, InkBookWor
 
 /* The room the Plot holds on the ribbon for its record: none past a mounting
  * it was not held of. */
-static uint64_t InkBookPlotHeld(const Plot* p)
+static uint64_t InkBookPlotHeld(TagFSVolume* vol, const Plot* p)
 {
-    return p->mount_epoch == tagfs_mount_epoch() ? p->ribbon_held : 0;
+    return p->mount_epoch == tagfs_mount_epoch(vol) ? p->ribbon_held : 0;
 }
 
-static error_t InkBookPlotLocked(const Plot* p, const RecordWhere* was, InkBookWork* w, Jot* j, Jot** spent,
+static error_t InkBookPlotLocked(TagFSVolume* vol, const Plot* p, const RecordWhere* was, InkBookWork* w, Jot* j, Jot** spent,
                                  uint64_t departed, InkReceipt* out)
 {
-    TagFSState* fs = InkState();
-    error_t     rc = InkVolumeTakes();
+    TagFSState* fs = &vol->state;
+    error_t     rc = InkVolumeTakes(vol);
     if (rc != OK)
         return rc;
-    if (AwayDepartures() != departed)
+    if (AwayDepartures(vol) != departed)
         return INK_AGAIN;           /* the medium left and came back since its blocks were held: again */
     RecordWhere now, gone;
     FileRecord* still = FileMapRecordHold(fs->files, p->fid, &now);
     if (!still)
         return ERR_FILE_NOT_FOUND;
-    if (now.gen != was->gen || (w->joined && DocketTakes() != w->takes) ||
-        (w->fallow && !FallowNodeCommonRoom(w->fallow)))
+    if (now.gen != was->gen || (w->joined && DocketTakes(vol) != w->takes) ||
+        (w->fallow && !FallowNodeCommonRoom(vol, w->fallow)))
         rc = INK_AGAIN;
     else
-        rc = RibbonClaimHeld(InkBookPlotHeld(p), w->claim);
+        rc = RibbonClaimHeld(vol, InkBookPlotHeld(vol, p), w->claim);
     if (rc != OK) {
         FileRecordRelease(still);   /* the map holds it: nothing freed here */
         return rc;
     }
-    uint64_t     gen   = InkGenNextLocked();
+    uint64_t     gen   = InkGenNextLocked(vol);
     RecordWhere  where = { .gen = gen, .shape = gen };
     FileMapStake none  = { .count = 0 };
     (void)FileMapRecordPut(fs->files, p->fid, w->rec, &where, &none, &gone);
     w->rec = NULL;
     j->was = still;
     j->now = FileMapRecordHold(fs->files, p->fid, NULL);
-    DocketPutLocked(j, spent);
-    EndpaperInked(w->sp, w->nsp);
-    EndpaperStakesGoneLocked(&p->stakes_counted);   /* its Jot and windows count them now */
+    DocketPutLocked(vol, j, spent);
+    EndpaperInked(vol, w->sp, w->nsp);
+    EndpaperStakesGoneLocked(vol, &p->stakes_counted);   /* its Jot and windows count them now */
     for (uint32_t i = 0; i < p->digest_count; i++)
-        GlossPut(&w->gloss, p->digests[i].block, p->digests[i].digest);
-    if (w->fallow && FallowNodeCommonheld(w->fallow, gen)) {
-        FallowAdd(w->fallow, gen);
+        GlossPut(vol, &w->gloss, p->digests[i].block, p->digests[i].digest);
+    if (w->fallow && FallowNodeCommonheld(vol, w->fallow, gen)) {
+        FallowAdd(vol, w->fallow, gen);
         w->fallow = NULL;
     }
-    InkDataNeedRaiseLocked(p->data_need);
+    InkDataNeedRaiseLocked(vol, p->data_need);
 #ifdef CONFIG_TAGFS_SETTLE_CUT_POINT
     if (p->engross)
         EngrossInked(gen);  /* before the lock goes: the cycle whose snapshot takes `gen` sees it */
 #endif
-    InkGenLaidLocked(gen);
+    InkGenLaidLocked(vol, gen);
     out->gen = gen;
     return OK;
 }
 
-error_t InkBookPlot(const Plot* p, const FileRecord* cur, const RecordWhere* was, uint64_t small_us,
+error_t InkBookPlot(TagFSVolume* vol, const Plot* p, const FileRecord* cur, const RecordWhere* was, uint64_t small_us,
                     InkReceipt* out)
 {
     InkBookWork w        = { 0 };
     Jot*        spent    = NULL;
     Jot*        j        = NULL;
     uint64_t    departed = 0;
-    error_t     rc       = AwayProofPlot(p, &departed);
+    error_t     rc       = AwayProofPlot(vol, p, &departed);
     if (rc == OK)
-        rc = InkBookPlotBuilt(p, cur, &w);
+        rc = InkBookPlotBuilt(vol, p, cur, &w);
     if (rc == OK && !(j = JotMake(JOT_SHAPED, p->fid, NULL, NULL)))
         rc = ERR_NO_MEMORY;
     if (rc == OK) {
         w.rec->small_append_us = small_us;
-        TagFSLockTake(&InkState()->lock);
-        rc = InkBookPlotLocked(p, was, &w, j, &spent, departed, out);
-        TagFSLockDrop(&InkState()->lock);
-        rc = RibbonClaimSay(rc);
+        TagFSLockTake(&vol->state.lock);
+        rc = InkBookPlotLocked(vol, p, was, &w, j, &spent, departed, out);
+        TagFSLockDrop(&vol->state.lock);
+        rc = RibbonClaimSay(vol, rc);
     }
     if (rc != OK)
         JotsLetGo(j);
     JotsLetGo(spent);
-    InkBookWorkLetGo(&w);
+    InkBookWorkLetGo(vol, &w);
     return rc;
 }
 
-void InkBookPlotNext(Plot* p)
+void InkBookPlotNext(TagFSVolume* vol, Plot* p)
 {
     FileRecordRelease(p->rec);
-    p->rec          = FileMapRecordHold(InkState()->files, p->fid, NULL);
+    p->rec          = FileMapRecordHold(vol->state.files, p->fid, NULL);
     p->run_count    = 0;
     p->windowed     = false;
     p->window_was   = 0;
@@ -624,5 +625,5 @@ void InkBookPlotNext(Plot* p)
     p->blocks_before = p->blocks;
     p->digest_count = 0;
     p->ribbon_held  = 0;    /* the Ink took the hold for its claim */
-    PlotSlipLetGo(p);       /* the record holds the write's Slip now, and the block promised to it */
+    PlotSlipLetGo(vol, p);       /* the record holds the write's Slip now, and the block promised to it */
 }

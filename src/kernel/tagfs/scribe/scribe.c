@@ -9,58 +9,56 @@
 #include "system_halt.h"
 #include "kheap.h"
 #include "vmm.h"
+#include "tagfs_volume.h"
 
 // ----------------------------------------------------------------------------
 // Flush tickets
 // ----------------------------------------------------------------------------
 
-static volatile uint64_t g_flush_asked;   /* tickets handed to flushes about to be issued */
-static volatile uint64_t g_flush_kept;    /* the highest ticket a kept flush carried */
 
-uint64_t VolumeFlushBegin(void)
+uint64_t VolumeFlushBegin(TagFSVolume* vol)
 {
-    return __atomic_add_fetch(&g_flush_asked, 1u, __ATOMIC_SEQ_CST);
+    return __atomic_add_fetch(&vol->scribe.flush_asked, 1u, __ATOMIC_SEQ_CST);
 }
 
 /* Two flushes may answer in either order; the mark is the highest kept. */
-void VolumeFlushEnd(uint64_t ticket, bool kept)
+void VolumeFlushEnd(TagFSVolume* vol, uint64_t ticket, bool kept)
 {
     if (!kept)
         return;
-    uint64_t cur = __atomic_load_n(&g_flush_kept, __ATOMIC_RELAXED);
+    uint64_t cur = __atomic_load_n(&vol->scribe.flush_kept, __ATOMIC_RELAXED);
     while (cur < ticket &&
-           !__atomic_compare_exchange_n(&g_flush_kept, &cur, ticket, false,
+           !__atomic_compare_exchange_n(&vol->scribe.flush_kept, &cur, ticket, false,
                                         __ATOMIC_RELEASE, __ATOMIC_RELAXED))
         ;
 }
 
-uint64_t VolumeFlushNeed(void)
+uint64_t VolumeFlushNeed(TagFSVolume* vol)
 {
-    return __atomic_load_n(&g_flush_asked, __ATOMIC_SEQ_CST) + 1u;
+    return __atomic_load_n(&vol->scribe.flush_asked, __ATOMIC_SEQ_CST) + 1u;
 }
 
-bool VolumeFlushKept(uint64_t need)
+bool VolumeFlushKept(TagFSVolume* vol, uint64_t need)
 {
-    return __atomic_load_n(&g_flush_kept, __ATOMIC_ACQUIRE) >= need;
+    return __atomic_load_n(&vol->scribe.flush_kept, __ATOMIC_ACQUIRE) >= need;
 }
 
-error_t VolumeFlushFor(uint64_t need)
+error_t VolumeFlushFor(TagFSVolume* vol, uint64_t need)
 {
-    if (VolumeFlushKept(need))
+    if (VolumeFlushKept(vol, need))
         return OK;
-    return tagfs_flush_cache();
+    return tagfs_flush_cache(vol);
 }
 
-static volatile uint64_t g_writes_seen;   /* every write seen, this boot */
-
-void VolumeWriteSeen(void)
+void VolumeWriteSeen(TagFSVolume* vol)
 {
-    __atomic_add_fetch(&g_writes_seen, 1u, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&vol->scribe.writes_seen, 1u, __ATOMIC_RELEASE);
 }
 
 uint64_t VolumeWritesAnswered(void)
 {
-    return __atomic_load_n(&g_writes_seen, __ATOMIC_ACQUIRE);
+    TagFSVolume* vol = TagFSHome();
+    return __atomic_load_n(&vol->scribe.writes_seen, __ATOMIC_ACQUIRE);
 }
 
 // ----------------------------------------------------------------------------

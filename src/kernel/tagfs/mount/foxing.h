@@ -2,6 +2,7 @@
 #define TAGFS_MOUNT_FOXING_H
 
 #include "../tagfs.h"
+#include "book_unit.h"
 
 /*
  * Foxing — the copies of the book's Tally nodes a mount found spoiled, kept
@@ -42,9 +43,24 @@
  *   FoxingEnd    the reading ended, whatever its end: everything kept let go
  */
 
-void FoxingBegin(void);
-bool FoxingSays(uint64_t block, uint64_t sheets, uint64_t seq, char* why, size_t room);
-void FoxingNoted(uint64_t block, uint64_t sheets, uint64_t seq, const char* why);
-void FoxingEnd(void);
+void FoxingBegin(TagFSVolume* vol);
+bool FoxingSays(TagFSVolume* vol, uint64_t block, uint64_t sheets, uint64_t seq, char* why, size_t room);
+void FoxingNoted(TagFSVolume* vol, uint64_t block, uint64_t sheets, uint64_t seq, const char* why);
+void FoxingEnd(TagFSVolume* vol);
+
+typedef struct {
+    uint64_t block;
+    uint64_t sheets;
+    uint64_t seq;
+    char     why[sizeof(((BookUnit*)0)->why)];
+} FoxingSpot;
+
+/* What one volume holds of foxing.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    FoxingSpot* spots;
+    uint32_t nspots;
+    uint32_t capspots;
+    bool reading;
+} FoxingState;
 
 #endif /* TAGFS_MOUNT_FOXING_H */

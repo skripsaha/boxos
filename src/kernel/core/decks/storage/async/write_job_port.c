@@ -51,7 +51,7 @@ static void wjob_block_complete(uint8_t port, uint8_t slot, error_t status, void
 void wjob_continue(WriteJob *j)
 {
     if (j->resumes_at_service)
-        HelmReady(&j->helm);
+        HelmReady(TagFSHome(), &j->helm);
     else
         BatonPass(&j->cq_node);
 }
@@ -72,7 +72,7 @@ static uint8_t *wjob_page(const WriteJob *j, uint32_t i)
  * book up (mount/away.h). Answers whether the pump goes on. */
 static bool wjob_stop(WriteJob *j, error_t cause)
 {
-    if (cause == ERR_DEVICE_NOT_READY || TagFSMediumGone()) {
+    if (cause == ERR_DEVICE_NOT_READY || TagFSMediumGone(TagFSHome())) {
         wjob_finalize(j, ERR_DEVICE_NOT_READY);
         return false;
     }
@@ -92,8 +92,8 @@ static error_t wjob_load(WriteJob *j)
 {
     if (HelmVacated(j->handle->ofe))
         return ERR_FILE_NOT_FOUND;
-    HelmViewTake(j->handle);   /* it views the file from this load on (HelmWriteWindow's rule) */
-    error_t rc = PlotLoad(&j->plot, j->file_id, j->handle->warrant);
+    HelmViewTake(TagFSHome(), j->handle);   /* it views the file from this load on (HelmWriteWindow's rule) */
+    error_t rc = PlotLoad(TagFSHome(), &j->plot, j->file_id, j->handle->warrant);
     j->loaded = rc == OK;
     if (rc == OK) {
         j->plot.helm    = &j->handle->ofe->helm;
@@ -109,12 +109,12 @@ static error_t wjob_load(WriteJob *j)
  * landed of it with that ground. */
 static void wjob_to_service(WriteJob *j)
 {
-    PlotRelease(&j->plot);
+    PlotRelease(TagFSHome(), &j->plot);
     j->loaded     = false;
     j->bytes_done = j->bytes_inked;
     j->stopped    = OK;
     j->async      = false;
-    HelmReady(&j->helm);
+    HelmReady(TagFSHome(), &j->helm);
 }
 
 /* A window that rides a Slip (plot_slip.c): its bytes taken out of the
@@ -129,7 +129,7 @@ static bool WriteJobSlip(WriteJob *j, uint64_t at, uint64_t window)
         part.kernel += j->bytes_inked;
     else
         part.user += (uintptr_t)j->bytes_inked;
-    error_t rc = PlotWriteBlocks(&j->plot, at, &part, &done);
+    error_t rc = PlotWriteBlocks(TagFSHome(), &j->plot, at, &part, &done);
     if (rc != OK) {
         wjob_finalize(j, rc);
         return false;
@@ -151,11 +151,11 @@ static bool w_alloc(WriteJob *j)
     uint64_t window = 0;
     if (rc == OK) {
         uint64_t left = j->source.bytes - j->bytes_inked;
-        window = HelmWindowBytes(at);
+        window = HelmWindowBytes(TagFSHome(), at);
         if (window > left)
             window = left;
         j->plot.part = j->bytes_inked > 0;   /* a window past the write's first rides no Slip (plot_slip.c) */
-        rc = PlotBeginWrite(&j->plot, at, false, window, &at);
+        rc = PlotBeginWrite(TagFSHome(), &j->plot, at, false, window, &at);
     }
     if (rc == OK && j->plot.slip)
         return WriteJobSlip(j, at, window);
@@ -232,13 +232,13 @@ static bool w_locate(WriteJob *j)
 static error_t wjob_submit(WriteJob *j, bool write, uint64_t block, uint32_t blocks,
                            uint32_t page, RoadsteadAnswered answered)
 {
-    if (TagFSMediumGone())
+    if (TagFSMediumGone(TagFSHome()))
         return ERR_DEVICE_NOT_READY;
-    if (write && TagFSIsUnderGlass())
-        return TagFSGlassRefused("the port's write");
+    if (write && TagFSIsUnderGlass(TagFSHome()))
+        return TagFSGlassRefused(TagFSHome(), "the port's write");
 
-    uint8_t  seat    = tagfs_get_seat();
-    uint64_t lba     = tagfs_block_to_sector(block);
+    uint8_t  seat    = tagfs_get_seat(TagFSHome());
+    uint64_t lba     = tagfs_block_to_sector(TagFSHome(), block);
     void    *dma     = (uint8_t *)j->dma_phys + (size_t)page * TAGFS_BLOCK_SIZE;
     uint32_t sectors = blocks * TAGFS_BLOCK_SECTORS;
     return write ? BoardroomWriteAsync(seat, lba, sectors, dma, answered, j, &j->berth)
@@ -275,7 +275,7 @@ static bool w_read_done(WriteJob *j)
     uint32_t i     = j->st_reading;
     uint64_t block = WriteJobReadFrom(j);
     error_t  why   = j->if_status;
-    if (why == OK && !IntegrityVerify(block, wjob_page(j, i)))
+    if (why == OK && !IntegrityVerify(TagFSHome(), block, wjob_page(j, i)))
         why = ERR_CHECKSUM;
 
     j->st_reads &= (uint8_t)~(i == 0 ? WJOB_READ_FIRST : WJOB_READ_LAST);
@@ -328,11 +328,11 @@ static bool w_block_submit(WriteJob *j)
 {
     uint32_t staged = j->st_staged;
     j->if_submit_tsc = rdtsc();
-    j->if_departed   = AwayDepartures();
+    j->if_departed   = AwayDepartures(TagFSHome());
     error_t err = wjob_submit(j, true, j->st.block, staged, 0, wjob_block_complete);
     if (err != OK)
         return wjob_stop(j, err);
-    TagFSDataCostLaid(staged);
+    TagFSDataCostLaid(TagFSHome(), staged);
     return false;  /* parked until the answer */
 }
 
@@ -348,8 +348,8 @@ static bool w_block_done(WriteJob *j)
     if (landed > staged)
         landed = staged;
     for (uint32_t i = 0; i < landed; i++) {
-        tagfs_readahead_invalidate(j->st.block + i);
-        if (PlotWindowLanded(&j->plot, j->if_departed, j->st.block + i, wjob_page(j, i), 1) != OK) {
+        tagfs_readahead_invalidate(TagFSHome(), j->st.block + i);
+        if (PlotWindowLanded(TagFSHome(), &j->plot, j->if_departed, j->st.block + i, wjob_page(j, i), 1) != OK) {
             landed = i;      /* a block whose digest is not kept is no block of the file's */
             if (j->if_status == OK)
                 j->if_status = ERR_NO_MEMORY;
@@ -357,7 +357,7 @@ static bool w_block_done(WriteJob *j)
         }
     }
     if (landed)
-        VolumeWriteSeen();
+        VolumeWriteSeen(TagFSHome());
     /* The file's first block, laid whole — the old bytes around the write read
      * into it, the Slips over it laid on — gives the file's first bytes. */
     if (landed && j->st.k == 0)
@@ -384,8 +384,8 @@ static bool w_block_done(WriteJob *j)
  * ground reserved past them cut off. */
 static bool w_log_meta(WriteJob *j)
 {
-    j->plot.data_need = j->plot.slip ? 0 : VolumeFlushNeed();   /* a Slip's bytes ride the stitch */
-    error_t rc = PlotEndWrite(&j->plot, j->start_offset + j->bytes_inked,
+    j->plot.data_need = j->plot.slip ? 0 : VolumeFlushNeed(TagFSHome());   /* a Slip's bytes ride the stitch */
+    error_t rc = PlotEndWrite(TagFSHome(), &j->plot, j->start_offset + j->bytes_inked,
                               j->bytes_done - j->bytes_inked);
     if (rc != OK) {
         wjob_finalize(j, rc);
@@ -403,7 +403,7 @@ static bool w_log_meta(WriteJob *j)
 static bool w_ink(WriteJob *j)
 {
     InkReceipt inked;
-    error_t    rc = TagFSInkPlot(&j->plot, &inked);
+    error_t    rc = TagFSInkPlot(TagFSHome(), &j->plot, &inked);
     if (rc == ERR_WOULD_BLOCK) {
         wjob_to_service(j);
         return false;

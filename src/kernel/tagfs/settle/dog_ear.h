@@ -46,7 +46,7 @@ typedef struct {
 #define DOG_EAR_END ((TallyKey){ UINT64_MAX, UINT64_MAX })
 
 /* The keys [lo, hi) of `tree` changed. */
-void     DogEarPut(uint64_t tree, TallyKey lo, TallyKey hi);
+void     DogEarPut(TagFSVolume* vol, uint64_t tree, TallyKey lo, TallyKey hi);
 
 /* File `fid` changed from `was` to `now` — NULL for a file born, or given up:
  * its header and every Parcel of either record not shared with the other at
@@ -56,15 +56,15 @@ void     DogEarPut(uint64_t tree, TallyKey lo, TallyKey hi);
  * the slice of Ink `slice`, the last its stitch carries (ink/commonhold.h): a
  * block in common keeps its digest while an owner lives. By the Settle's
  * holder or the mount (`slice` UINT64_MAX), with no TagFS lock. */
-void     DogEarFileChanged(uint64_t fid, const FileRecord* was, const FileRecord* now, uint64_t slice);
+void     DogEarFileChanged(TagFSVolume* vol, uint64_t fid, const FileRecord* was, const FileRecord* now, uint64_t slice);
 
 /* The mount's, its census counted (ground_shares.c): every block in common
  * an owner holds born, and not gone — the replay before the count put it gone
  * where one owner of it let it go. */
-void     DogEarCommonheld(void);
+void     DogEarCommonheld(TagFSVolume* vol);
 
 /* The leaf at `at` of `tree`, a copy of which did not hold: its range. */
-void     DogEarMended(uint64_t tree, const TallyPlace* at);
+void     DogEarMended(TagFSVolume* vol, uint64_t tree, const TallyPlace* at);
 
 /* Ground [start, start + count) whose digests changed with no record of a
  * file to say so — the held ground Escheat lets go: every window of
@@ -73,19 +73,19 @@ void     DogEarMended(uint64_t tree, const TallyPlace* at);
  * ground let go out of the middle of one leaves the blocks past it in the
  * window an element of their own, keyed by the first of them — a key the
  * Tally before never had, and none of the ground's own. With no TagFS lock. */
-void     DogEarGroundChanged(uint64_t start, uint64_t count);
+void     DogEarGroundChanged(TagFSVolume* vol, uint64_t start, uint64_t count);
 
 /* TALLY_TAKE: every span held taken by the Tally; refused, given back under
  * what came since; its DONE, let go. Whether the Tally under way took `key` of
  * `tree` changed — every key, when what it took was lost — the spans of `tree`
  * it took, in key order (*n of them), and whether it took a loss. By the
  * Settle's holder. */
-void     DogEarTake(void);
-void     DogEarTakenBack(void);
-void     DogEarTakenLetGo(void);
-bool     DogEarTakenHolds(uint64_t tree, TallyKey key);
-const DogEarSpan* DogEarTakenSpans(uint64_t tree, uint32_t* n);
-bool     DogEarTakenLost(void);
+void     DogEarTake(TagFSVolume* vol);
+void     DogEarTakenBack(TagFSVolume* vol);
+void     DogEarTakenLetGo(TagFSVolume* vol);
+bool     DogEarTakenHolds(TagFSVolume* vol, uint64_t tree, TallyKey key);
+const DogEarSpan* DogEarTakenSpans(TagFSVolume* vol, uint64_t tree, uint32_t* n);
+bool     DogEarTakenLost(TagFSVolume* vol);
 
 /* The ground the live files took since the slice before the one the Tally
  * under way took and hold (`gone` false), or held at that slice and let go
@@ -95,7 +95,7 @@ bool     DogEarTakenLost(void);
  * in among the leaves of the Tally before lays anew of them (§16.5 п.16).
  * Refused, given back under what moved since as one change. By the Settle's
  * holder. */
-const BinderGround* DogEarTakenGround(bool gone, uint64_t* n);
+const BinderGround* DogEarTakenGround(TagFSVolume* vol, bool gone, uint64_t* n);
 
 /* The ground the live files took since the last slice and hold (`gone`
  * false), or held at it and let go since (`gone`) — runs in order, *n of
@@ -103,31 +103,77 @@ const BinderGround* DogEarTakenGround(bool gone, uint64_t* n);
  * digests of the first in the Gloss, which alone holds them, though the slice
  * it laid named the block (binder_done.c); what the next is reckoned to cost
  * weighs a leaf of DIGESTS by both (binder_live.c). By the Settle's holder. */
-const BinderGround* DogEarHeldGround(bool gone, uint64_t* n);
+const BinderGround* DogEarHeldGround(TagFSVolume* vol, bool gone, uint64_t* n);
 
 /* How many changes put in since the volume was mounted may have left a leaf
  * with no key of the state in it: a file given up, ground of one let go that
  * may leave a leaf of DIGESTS with none — not where the file, or a file that
  * took ground since the slice, still holds a block of the leaf — a Use
  * Context said. From any core. */
-uint64_t DogEarGoneCount(void);
+uint64_t DogEarGoneCount(TagFSVolume* vol);
 
 /* The spans of `tree` held since the last slice from the `from`-th on, into
  * `out` (room `room`): how many — a few at a hold of the lock, so a span put
  * meanwhile may be passed over until the next look; and whether what is held
  * was lost. By the Settle's holder (binder_cost.c). */
-uint32_t DogEarHeldSpans(uint64_t tree, uint32_t from, DogEarSpan* out, uint32_t room);
-bool     DogEarHeldLost(void);
+uint32_t DogEarHeldSpans(TagFSVolume* vol, uint64_t tree, uint32_t from, DogEarSpan* out, uint32_t room);
+bool     DogEarHeldLost(TagFSVolume* vol);
 
 /* Everything DogEar holds let go — a mount begun, the volume let go of. */
-void     DogEarLetGo(void);
+void     DogEarLetGo(TagFSVolume* vol);
 
 #ifdef CONFIG_VOLUME_TESTS
 /* The spans of `tree` held since the last slice — or, `taken`, the ones the
  * Tally under way took — into `out` (room `room`): how many there are. Whether
  * that set was lost. */
-uint32_t DogEarStand(uint64_t tree, bool taken, DogEarSpan* out, uint32_t room);
-bool     DogEarStandLost(bool taken);
+uint32_t DogEarStand(TagFSVolume* vol, uint64_t tree, bool taken, DogEarSpan* out, uint32_t room);
+bool     DogEarStandLost(TagFSVolume* vol, bool taken);
 #endif
+
+typedef struct {
+    DogEarSpan* span;
+    uint32_t    n;
+    uint32_t    cap;
+} DogEarTree;
+
+/* The ground the live files took (born) and let go (gone) since a slice, a
+ * block exactly — runs in order, none meeting — held since the last slice and
+ * taken by the Tally under way; put by a change of a file alone, so the
+ * Settle's holder's and the mount's: no lock. */
+typedef struct {
+    BinderGround* run;
+    uint64_t      n;
+    uint64_t      cap;
+} DogEarGround;
+
+#define DOG_EAR_TREES  4u
+
+typedef struct {
+    DogEarTree tree[DOG_EAR_TREES];
+    bool       lost;
+} DogEarSet;
+
+typedef struct {
+    DogEarGround born;
+    DogEarGround gone;
+} DogEarDelta;
+
+/* What one volume holds of dog_ear.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    TagFSLock lock;
+    DogEarSet held;  /* under dog_ear.lock */
+    DogEarSet taken;  /* the Settle's holder's alone */
+    DogEarDelta delta_held;
+    DogEarDelta delta_taken;
+    /* The changes put in since the volume was mounted that may have left a leaf
+     * with no key of the state in it — a file given up, ground let go that may
+     * leave a leaf of DIGESTS with none (LeafMayEmpty), a Use Context said: what
+     * a Tally is reckoned to cost may be less after one (settle/binder.c,
+     * TallyDue). Counted from any core; none once DogEar is let go of — a mount
+     * begun, the volume let go of. */
+    uint64_t gone;
+} DogEarState;
+
+void DogEarVolumeBegin(TagFSVolume* vol);
 
 #endif /* TAGFS_SETTLE_DOG_EAR_H */

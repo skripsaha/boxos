@@ -1,5 +1,6 @@
 #include "tally_read_internal.h"
 #include "foxing.h"
+#include "tagfs_volume.h"
 
 /*
  * The Tally, walked (tally_read.h). Every node is read into memory the heap
@@ -113,23 +114,23 @@ static uint32_t TallyCopiesNamed(const TallyCopiesSaid* said)
  * ERR_NO_MEMORY, or the medium's refusal. A copy past the volume's last block
  * holds nothing a medium could; one the mount reading its book found spoiled
  * already is not asked of the medium again (foxing.h). */
-static error_t TallyCopyRead(const TallyPlace* p, uint32_t k, TallyNode* n, char* why, size_t room)
+static error_t TallyCopyRead(TagFSVolume* vol, const TallyPlace* p, uint32_t k, TallyNode* n, char* why, size_t room)
 {
-    uint64_t end   = tagfs_get_state()->block_end;
-    uint64_t block = TallyPtrBlock(&p->ptr, k);
+    uint64_t end   = vol->state.block_end;
+    uint64_t block = TallyPtrBlock(vol, &p->ptr, k);
     error_t  rc    = ERR_TAGFS_CORRUPTED;
     memset(n, 0, sizeof(*n));
     if (block >= end || p->ptr.sheets > end - block) {
         ksnprintf(why, room, "it names blocks past the volume's end");
         return rc;
     }
-    if (FoxingSays(block, p->ptr.sheets, p->ptr.seq, why, room))
+    if (FoxingSays(vol, block, p->ptr.sheets, p->ptr.seq, why, room))
         return rc;
-    rc = BookUnitRead(block * VOLUME_BLOCK_SECTORS, (uint32_t)(p->ptr.sheets * VOLUME_BLOCK_SECTORS),
+    rc = BookUnitRead(vol, block * VOLUME_BLOCK_SECTORS, (uint32_t)(p->ptr.sheets * VOLUME_BLOCK_SECTORS),
                       BOOK_UNIT_SHEET, p->ptr.seq, &n->unit);
     if (rc == OK && !n->unit.whole) {
         ksnprintf(why, room, "%s", n->unit.why);
-        FoxingNoted(block, p->ptr.sheets, p->ptr.seq, n->unit.why);
+        FoxingNoted(vol, block, p->ptr.sheets, p->ptr.seq, n->unit.why);
         rc = ERR_TAGFS_CORRUPTED;
     } else if (rc == OK) {
         rc = TallyNodeParse(p, n, why, room);
@@ -144,12 +145,12 @@ static error_t TallyCopyRead(const TallyPlace* p, uint32_t k, TallyNode* n, char
  * with n->unit.whole when one held, the copies before it in *said; OK with it
  * false when none did; ERR_NO_MEMORY, or the medium's refusal.
  */
-error_t TallyNodeRead(const TallyPlace* p, TallyNode* n, TallyCopiesSaid* said)
+error_t TallyNodeRead(TagFSVolume* vol, const TallyPlace* p, TallyNode* n, TallyCopiesSaid* said)
 {
     memset(said, 0, sizeof(*said));
     for (uint32_t k = 0; k < p->ptr.copies; k++) {
         char*   why = said->why[said->failed < TALLY_COPIES_SAID ? said->failed : TALLY_COPIES_SAID];
-        error_t rc  = TallyCopyRead(p, k, n, why, sizeof(said->why[0]));
+        error_t rc  = TallyCopyRead(vol, p, k, n, why, sizeof(said->why[0]));
         if (rc == OK)
             return OK;
         if (rc != ERR_TAGFS_CORRUPTED)
@@ -160,10 +161,10 @@ error_t TallyNodeRead(const TallyPlace* p, TallyNode* n, TallyCopiesSaid* said)
     return OK;
 }
 
-error_t TallyCopyHolds(const TallyPlace* p, uint32_t k, bool* holds, char* why, size_t room)
+error_t TallyCopyHolds(TagFSVolume* vol, const TallyPlace* p, uint32_t k, bool* holds, char* why, size_t room)
 {
     TallyNode* n  = kmalloc(sizeof(TallyNode));
-    error_t    rc = n ? TallyCopyRead(p, k, n, why, room) : ERR_NO_MEMORY;
+    error_t    rc = n ? TallyCopyRead(vol, p, k, n, why, room) : ERR_NO_MEMORY;
     *holds = rc == OK;
     if (rc == OK)
         TallyNodeLetGo(n);
@@ -185,24 +186,24 @@ void TallyCopiesWords(const TallyCopiesSaid* said, char* out, size_t room)
 }
 
 /* The blocks of a node's copies, "a/b", as its lines name it. */
-static void TallyBlocksSay(const TallyPtr* p, char* out, size_t room)
+static void TallyBlocksSay(TagFSVolume* vol, const TallyPtr* p, char* out, size_t room)
 {
     size_t at = 0;
     out[0] = '\0';
     for (uint32_t k = 0; k < p->copies && at + 1u < room; k++)
-        at += ksnprintf(out + at, room - at, "%s%llu", k ? "/" : "", (unsigned long long)TallyPtrBlock(p, k));
+        at += ksnprintf(out + at, room - at, "%s%llu", k ? "/" : "", (unsigned long long)TallyPtrBlock(vol, p, k));
 }
 
-error_t TallyRootReads(uint64_t tree, const SpineRoot* root, char* why, size_t room)
+error_t TallyRootReads(TagFSVolume* vol, uint64_t tree, const SpineRoot* root, char* why, size_t room)
 {
     TallyPlace    p;
     TallyReading* r = kmalloc(sizeof(TallyReading));
     if (!r)
         return ERR_NO_MEMORY;
     memset(&r->node, 0, sizeof(r->node));
-    error_t rc = TallyRootPlace(root, &p);
+    error_t rc = TallyRootPlace(vol, root, &p);
     if (rc == OK)
-        rc = TallyNodeRead(&p, &r->node, &r->said);
+        rc = TallyNodeRead(vol, &p, &r->node, &r->said);
     if (rc == OK && !r->node.unit.whole) {
         TallyCopiesWords(&r->said, why, room);
         rc = ERR_TAGFS_CORRUPTED;
@@ -269,10 +270,10 @@ static void TallyCountSay(const TallySink* sink, uint64_t tree, const TallyPlace
 
 /* What a node read says beside its items: the copies before it that did not
  * hold, a NodeHead longer than known, a lead its records do not give a sector. */
-static void TallyNodeSaid(const TallySink* sink, uint64_t tree, const TallyPlace* p, const TallyReading* r)
+static void TallyNodeSaid(TagFSVolume* vol, const TallySink* sink, uint64_t tree, const TallyPlace* p, const TallyReading* r)
 {
     char words[224], blocks[96];
-    TallyBlocksSay(&p->ptr, blocks, sizeof(blocks));
+    TallyBlocksSay(vol, &p->ptr, blocks, sizeof(blocks));
     uint32_t one_by_one = TallyCopiesNamed(&r->said);
     for (uint32_t k = 0; k < one_by_one; k++)
         kprintf("[TagFS] the %s node of level %llu at blocks %s: copy %u does not hold — %s; copy %u is "
@@ -287,7 +288,7 @@ static void TallyNodeSaid(const TallySink* sink, uint64_t tree, const TallyPlace
     if (r->node.head_longer) {
         ksnprintf(words, sizeof(words), "a NodeHead is %u byte(s) longer than this reader knows — written "
                   "by a kernel that knows more", r->node.head_longer);
-        TagFSUnderGlass(words);
+        TagFSUnderGlass(vol, words);
     }
     uint32_t named = 0, given = 0;
     uint32_t k = BookUnitLeadWrong(&r->node.unit, r->node.starts, r->node.nstarts, &named, &given);
@@ -325,7 +326,7 @@ static error_t TallyLeafItems(uint64_t tree, const TallyPlace* p, const TallyRea
  * leaves the child with no copies: a rotten range the walk hands on when it
  * comes to it, in its turn among the keys. OK with *read when the pointer
  * read; ERR_NO_MEMORY for no room for its copies past two. */
-static error_t TallyKid(uint64_t tree, const TallyPlace* p, TallyKey key, const uint8_t* b, uint32_t len,
+static error_t TallyKid(TagFSVolume* vol, uint64_t tree, const TallyPlace* p, TallyKey key, const uint8_t* b, uint32_t len,
                         const TallySink* sink, TallyPlace* kid, bool* read)
 {
     BookPtr  ptr;
@@ -348,10 +349,10 @@ static error_t TallyKid(uint64_t tree, const TallyPlace* p, TallyKey key, const 
         known += BookPtrGet(b + known, len - known, &again);
         ksnprintf(words, sizeof(words), "an inner item of %s is %u byte(s) longer than this reader knows — "
                   "written by a kernel that knows more", TallyTreeName(tree), len - known);
-        TagFSUnderGlass(words);
+        TagFSUnderGlass(vol, words);
     }
     kid->count = count;
-    return TallyPtrOf(&ptr, &kid->ptr);
+    return TallyPtrOf(vol, &ptr, &kid->ptr);
 }
 
 /*
@@ -360,7 +361,7 @@ static error_t TallyKid(uint64_t tree, const TallyPlace* p, TallyKey key, const 
  * the parent's own end (tally.py TreeRead._Kids). The count the node carries
  * is held to theirs only when every pointer read.
  */
-static error_t TallyInnerKids(uint64_t tree, const TallyPlace* p, const TallyReading* r,
+static error_t TallyInnerKids(TagFSVolume* vol, uint64_t tree, const TallyPlace* p, const TallyReading* r,
                               const TallySink* sink, TallyStack* st)
 {
     const uint8_t* s     = r->node.unit.stream;
@@ -379,7 +380,7 @@ static error_t TallyInnerKids(uint64_t tree, const TallyPlace* p, const TallyRea
             st->at[st->n - 1u].has_hi = true;
         }
         bool read = false;
-        if (TallyKid(tree, p, key, s + body, len, sink, &kid, &read) != OK)
+        if (TallyKid(vol, tree, p, key, s + body, len, sink, &kid, &read) != OK)
             return ERR_NO_MEMORY;
         if (read)
             under += kid.count;
@@ -401,7 +402,7 @@ static error_t TallyInnerKids(uint64_t tree, const TallyPlace* p, const TallyRea
 
 /* One place of the walk: the node read and handed on, or the range it names
  * rotten. `root` the tree's own root, which the mount asked about first. */
-static error_t TallyVisit(uint64_t tree, const TallyPlace* p, bool leaves, const TallySink* sink,
+static error_t TallyVisit(TagFSVolume* vol, uint64_t tree, const TallyPlace* p, bool leaves, const TallySink* sink,
                           TallyStack* st, TallyReading* r)
 {
     char*   why = r->words;
@@ -416,7 +417,7 @@ static error_t TallyVisit(uint64_t tree, const TallyPlace* p, bool leaves, const
     if (leaves)
         TallyStandKeep(tree, p);
 #endif
-    if ((rc = TallyNodeRead(p, &r->node, &r->said)) != OK)
+    if ((rc = TallyNodeRead(vol, p, &r->node, &r->said)) != OK)
         return rc;
     if (!r->node.unit.whole) {
         TallyCopiesWords(&r->said, why, sizeof(r->words));
@@ -427,14 +428,14 @@ static error_t TallyVisit(uint64_t tree, const TallyPlace* p, bool leaves, const
         rc = sink->rotten(sink->ctx, p, why);
     } else {
         if (sink->said)
-            TallyNodeSaid(sink, tree, p, r);
-        rc = p->level == 0 ? TallyLeafItems(tree, p, r, sink) : TallyInnerKids(tree, p, r, sink, st);
+            TallyNodeSaid(vol, sink, tree, p, r);
+        rc = p->level == 0 ? TallyLeafItems(tree, p, r, sink) : TallyInnerKids(vol, tree, p, r, sink, st);
     }
     TallyNodeLetGo(&r->node);
     return rc;
 }
 
-error_t TallyLeafRead(uint64_t tree, const TallyPlace* at, const TallySink* sink)
+error_t TallyLeafRead(TagFSVolume* vol, uint64_t tree, const TallyPlace* at, const TallySink* sink)
 {
     TallyReading* r = kmalloc(sizeof(TallyReading));
     error_t       rc;
@@ -444,7 +445,7 @@ error_t TallyLeafRead(uint64_t tree, const TallyPlace* at, const TallySink* sink
         kfree(r);
         return sink->rotten(sink->ctx, at, "its pointer: it does not read");
     }
-    if ((rc = TallyNodeRead(at, &r->node, &r->said)) == OK) {
+    if ((rc = TallyNodeRead(vol, at, &r->node, &r->said)) == OK) {
         if (!r->node.unit.whole || r->node.head.tree != tree || r->node.head.level != 0) {
             TallyCopiesWords(&r->said, r->words, sizeof(r->words));
             rc = sink->rotten(sink->ctx, at, r->words);
@@ -459,7 +460,7 @@ error_t TallyLeafRead(uint64_t tree, const TallyPlace* at, const TallySink* sink
     return rc;
 }
 
-error_t TallyRead(uint64_t tree, const SpineRoot* root, bool leaves, const TallySink* sink)
+error_t TallyRead(TagFSVolume* vol, uint64_t tree, const SpineRoot* root, bool leaves, const TallySink* sink)
 {
     TallyStack    st = { NULL, 0, 0 };
     TallyPlace    p;
@@ -467,12 +468,12 @@ error_t TallyRead(uint64_t tree, const SpineRoot* root, bool leaves, const Tally
     error_t       rc = r ? OK : ERR_NO_MEMORY;
 
     if (rc == OK)
-        rc = TallyRootPlace(root, &p);
+        rc = TallyRootPlace(vol, root, &p);
     if (rc == OK && !TallyPush(&st, &p))
         rc = ERR_NO_MEMORY;
     while (rc == OK && st.n > 0) {
         p  = st.at[--st.n];
-        rc = TallyVisit(tree, &p, leaves, sink, &st, r);
+        rc = TallyVisit(vol, tree, &p, leaves, sink, &st, r);
     }
     kfree(st.at);
     kfree(r);

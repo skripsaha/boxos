@@ -103,7 +103,7 @@ static uint32_t TailCut(const FileRecord* rec, uint64_t k)
     return (uint32_t)(rec->size - k * TAGFS_BLOCK_SIZE);
 }
 
-error_t TailSlipKept(const FileRecord* old, FileRecord* rec, bool spliced)
+error_t TailSlipKept(TagFSVolume* vol, const FileRecord* old, FileRecord* rec, bool spliced)
 {
     uint64_t        k = 0, block = 0;
     const TailSlip* under = TailUnder(old, rec, spliced, &k, &block);
@@ -124,7 +124,7 @@ error_t TailSlipKept(const FileRecord* old, FileRecord* rec, bool spliced)
          * block and lets the memory of their Slips go. */
         kprintf("[TagFS] file %llu: the heap has no room to cut its Slips to its size of %llu — the change is "
                 "refused, and a Tally is asked\n", (unsigned long long)rec->file_id, (unsigned long long)rec->size);
-        BinderDemanded();
+        BinderDemanded(vol);
         return ERR_NO_MEMORY;
     }
     for (uint32_t i = cut; i < TAGFS_BLOCK_SIZE; i++)

@@ -46,7 +46,7 @@ static WriteJobStandAnswer s_answer;
 /* Why this machine has no port road for a program's write to walk: one core,
  * where the program stands in its call and no K-Core pumps, or a legacy
  * channel, which has no completion to be told about. NULL when it has one. */
-const char* StandPortAside(uint8_t seat)
+const char* StandPortAside(TagFSVolume* vol, uint8_t seat)
 {
     if (g_amp.total_cores <= 1)
         return "one core: a program's write stands in its call there, and no K-Core would "
@@ -55,13 +55,13 @@ const char* StandPortAside(uint8_t seat)
     if (kind != BOARD_AHCI && kind != BOARD_USB)
         return "the volume's seat is a legacy channel, whose processor moves every byte: "
                "no write goes through a port there";
-    return StandStepsAsideFor();
+    return StandStepsAsideFor(vol);
 }
 
 /* One turn of the machine the job continues in: the seat's answers brought in,
  * the drain core's batons pumped (an AHCI job's steps, a USB command's), and
  * the service point run (a USB job's steps). */
-void StandPortTurn(uint8_t seat)
+void StandPortTurn(TagFSVolume* vol, uint8_t seat)
 {
     switch (BoardroomSeatKind(seat)) {
     case BOARD_AHCI:
@@ -75,10 +75,10 @@ void StandPortTurn(uint8_t seat)
         break;
     }
     BatonPump(amp_get_core_index());
-    HelmRunReady();
+    HelmRunReady(vol);
 }
 
-static bool StandPortAnswered(uint8_t seat, uint32_t bound_ms)
+static bool StandPortAnswered(TagFSVolume* vol, uint8_t seat, uint32_t bound_ms)
 {
     uint64_t bound = rdtsc() + cpu_ms_to_tsc(bound_ms);
     for (;;) {
@@ -86,7 +86,7 @@ static bool StandPortAnswered(uint8_t seat, uint32_t bound_ms)
             return true;
         if (rdtsc() >= bound)
             return false;
-        StandPortTurn(seat);
+        StandPortTurn(vol, seat);
         cpu_pause();
     }
 }
@@ -132,18 +132,19 @@ static bool StandPortTaken(int submit)
 
 static TestResult TestStandPortWriteGoesThroughThePort(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult     verdict = TEST_PASS;
-    uint8_t        seat    = tagfs_get_seat();
+    uint8_t        seat    = tagfs_get_seat(vol);
     uint64_t       file_id = 0;
     uint8_t*       data    = NULL;
     uint8_t*       expect  = NULL;
     uint8_t*       back    = NULL;
     bool           asked   = false;
     const uint32_t half    = TAGFS_BLOCK_SIZE / 2;
-    const uint64_t W       = HelmWindowBytes(0);
+    const uint64_t W       = HelmWindowBytes(vol, 0);
     const uint32_t bytes   = (uint32_t)(2 * W);   /* windows of W - half, W and half */
     const uint32_t size    = half + bytes;
-    const char*    aside   = StandPortAside(seat);
+    const char*    aside   = StandPortAside(vol, seat);
 
     if (aside)
         return test_steps_aside(aside);
@@ -155,32 +156,32 @@ static TestResult TestStandPortWriteGoesThroughThePort(void)
     TestFillAt(expect, half, 0x4E1D0700u, 0);
     TestFillAt(data, bytes, 0x4E1D0701u, 0);
     memcpy(expect + half, data, bytes);
-    TEST_ASSERT(StandMakeFile("test_file", expect, half, &file_id), "a half-block file is made");
+    TEST_ASSERT(StandMakeFile(vol, "test_file", expect, half, &file_id), "a half-block file is made");
 
     TEST_ASSERT(WriteJobSeatRunsAsync(seat),
                 "a program's write on this seat goes through the port, as the path line said");
 
-    uint64_t inked = InkedGen();
+    uint64_t inked = InkedGen(vol);
     asked = StandPortTaken(StandPortSubmit(file_id, data, bytes, 0, true));
     TEST_ASSERT(asked, "the job is taken, its answer to come");
-    TEST_ASSERT(StandPortAnswered(seat, STAND_PORT_BOUND_MS), "and it answers");
+    TEST_ASSERT(StandPortAnswered(vol, seat, STAND_PORT_BOUND_MS), "and it answers");
     asked = false;
     TEST_ASSERT(s_answer.through_port, "its blocks went through the port to its end");
     TEST_ASSERT_OK(s_answer.rc, "the write is answered OK");
     TEST_ASSERT_EQ(s_answer.written, bytes, "with every byte of it the file's");
     TEST_ASSERT_EQ(s_answer.size, size, "and the size it grew to");
-    TestEvidence("Inks the write of three windows made", InkedGen() - inked);
-    TEST_ASSERT(InkedGen() - inked >= 3, "one Ink a window, each its own record");
-    TEST_ASSERT_EQ(TestFileRead(file_id, back, size), (int)size, "the file reads back");
+    TestEvidence("Inks the write of three windows made", InkedGen(vol) - inked);
+    TEST_ASSERT(InkedGen(vol) - inked >= 3, "one Ink a window, each its own record");
+    TEST_ASSERT_EQ(TestFileRead(vol, file_id, back, size), (int)size, "the file reads back");
     TEST_ASSERT_EQ(TestFirstDifference(back, expect, size), size,
                    "its first half-block kept, and the write laid after it");
 out:
-    if (asked && !StandPortAnswered(seat, STAND_PORT_BOUND_MS)) {
+    if (asked && !StandPortAnswered(vol, seat, STAND_PORT_BOUND_MS)) {
         data    = NULL;   /* the job may still take its bytes from here: left to it */
         file_id = 0;      /* ... and it holds the file's Helm */
     }
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     kfree(data);
     kfree(expect);
     kfree(back);

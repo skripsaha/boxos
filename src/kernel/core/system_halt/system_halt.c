@@ -162,8 +162,8 @@ static void halt_async_work_owed(HaltWorkOwed *owed)
     bool busy = false;
     SettleOwed(&owed->Unsettled, &busy, &owed->Clean);
     owed->Committer = busy ? 1u : 0u;
-    owed->Helm      = HelmOwed();
-    owed->Steps     = SettleStepsTaken();
+    owed->Helm      = HelmOwed(TagFSHome());
+    owed->Steps     = SettleStepsTaken(TagFSHome());
     owed->Writes    = VolumeWritesAnswered();
 
     owed->Total = owed->Baton + owed->Ahci + owed->Unsettled + owed->Committer + owed->Helm;
@@ -403,9 +403,9 @@ static void halt_drain_async_writes(void)
      * cadence began after them would seal the volume unclean and stamp a
      * Spare nothing names, and one begun meanwhile would hold the drain. And
      * no change begins: the work owed is what was begun before this line. */
-    SettleCadenceHold(true);
-    TagFSShutForHalt();
-    if (SettleRunBetweenStepsHere())
+    SettleCadenceHold(TagFSHome(), true);
+    TagFSShutForHalt(TagFSHome());
+    if (SettleRunBetweenStepsHere(TagFSHome()))
         kprintf("[HALT] a Settle cycle stands between its steps on this core — the halt's own cycle runs it "
                 "to its end first\n");
 
@@ -432,7 +432,7 @@ static void halt_drain_async_writes(void)
         /* And the Helm work handed to a service point: this core is standing
          * in the drain, not at its loop's service point, and on a machine with
          * one K-Core no other core would ever run it. */
-        HelmRunReady();
+        HelmRunReady(TagFSHome());
 
         HaltWorkOwed owed;
         halt_async_work_owed(&owed);
@@ -855,13 +855,13 @@ static void halt_sync_storage(void)
      * another ("did what was written reach the platter?"). A machine that
      * failed the first and passed the second is not a machine that synced.
      */
-    bool    glass    = TagFSIsUnderGlass();
+    bool    glass    = TagFSIsUnderGlass(TagFSHome());
     error_t recorded = tagfs_shutdown();
     if (recorded != OK) {
         kprintf("[HALT] ‼ THE VOLUME ON SEAT %u (%s) DID NOT WRITE ITS RECORDS "
                 "(error %u) — what follows flushes a medium that was not given "
                 "them\n",
-                tagfs_get_seat(), BoardroomSeatName(tagfs_get_seat()),
+                tagfs_get_seat(TagFSHome()), BoardroomSeatName(tagfs_get_seat(TagFSHome())),
                 (unsigned)recorded);
     }
 
@@ -870,20 +870,20 @@ static void halt_sync_storage(void)
      * waiters were told then). There is no medium here to commit, and asking
      * the flush anyway answered with the alarm for a volume this machine never
      * wrote. */
-    if (tagfs_get_seat() == BOARDROOM_NO_SEAT) {
+    if (tagfs_get_seat(TagFSHome()) == BOARDROOM_NO_SEAT) {
         kprintf("[HALT] no volume is named on this machine — there is no "
                 "medium to make durable\n");
         return;
     }
 
     if (glass && recorded == OK) {
-        TagFSGlassHaltSaid(tagfs_get_seat());
+        TagFSGlassHaltSaid(tagfs_get_seat(TagFSHome()));
         return;
     }
 
     kprintf("[HALT] Flushing disk cache...\n");
 
-    error_t flushed = tagfs_flush_cache();
+    error_t flushed = tagfs_flush_cache(TagFSHome());
 
     if (flushed == OK && recorded == OK) {
         kprintf("[HALT] Storage sync complete\n");
@@ -895,7 +895,7 @@ static void halt_sync_storage(void)
          * which is about a flush that failed. */
         kprintf("[HALT] the medium on seat %u took what it was given, and the "
                 "volume's own records were not part of it\n",
-                tagfs_get_seat());
+                tagfs_get_seat(TagFSHome()));
         return;
     }
 
@@ -903,7 +903,7 @@ static void halt_sync_storage(void)
             "(error %u) — everything committed to it since its last "
             "successful flush may not be there when this machine comes "
             "back\n",
-            tagfs_get_seat(), BoardroomSeatName(tagfs_get_seat()),
+            tagfs_get_seat(TagFSHome()), BoardroomSeatName(tagfs_get_seat(TagFSHome())),
             (unsigned)flushed);
 }
 

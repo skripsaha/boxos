@@ -6,33 +6,29 @@
 #include "../settle/settle_internal.h"
 #include "../tag_registry/tag_registry.h"
 #include "atomics.h"
+#include "tagfs_volume.h"
 
 #define RETIRE_PAGE         64u
 #define RETIRE_NOT_BLOCKED  UINT64_MAX
 
-static volatile uint32_t s_busy;
-static volatile uint32_t s_held;
-static volatile uint32_t s_owed;
-static volatile uint64_t s_next_us;
-static volatile uint64_t s_blocked_at;   /* the cycles settled when a look met a refusal */
 
-void RetireOwed(void)
+void RetireOwed(TagFSVolume* vol)
 {
-    __atomic_store_n(&s_owed, 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->retire.owed, 1u, __ATOMIC_RELEASE);
 }
 
-bool RetireProgramGone(uint64_t owner)
+bool RetireProgramGone(TagFSVolume* vol, uint64_t owner)
 {
-    return FileMapProgramFiles(tagfs_get_state()->files, owner, NULL, 0, NULL) == 0 &&
-           !(owner & TAGFS_PASSPORT_BIT ? BookAnyLocked() : BookFileLocked(owner));
+    return FileMapProgramFiles(vol->state.files, owner, NULL, 0, NULL) == 0 &&
+           !(owner & TAGFS_PASSPORT_BIT ? BookAnyLocked(vol) : BookFileLocked(vol, owner));
 }
 
 /* Every file that wears one of `ids`, each given one Ink that takes them all
  * off it — a page of files a time, from the least id on: a file that left the
  * index since was given up, and needs none. */
-static error_t RetireFilesClear(const uint32_t* ids, uint32_t count)
+static error_t RetireFilesClear(TagFSVolume* vol, const uint32_t* ids, uint32_t count)
 {
-    TagFSState* fs = tagfs_get_state();
+    TagFSState* fs = &vol->state;
     uint64_t    files[RETIRE_PAGE];
     for (uint32_t i = 0; i < count; i++) {
         uint64_t from = 0;
@@ -43,7 +39,7 @@ static error_t RetireFilesClear(const uint32_t* ids, uint32_t count)
                 return ERR_TAGFS_NOT_INITIALIZED;
             for (uint32_t k = 0; k < page.delivered; k++) {
                 InkReceipt receipt;
-                error_t    rc = InkTagsOff(files[k], ids, count, &receipt);
+                error_t    rc = InkTagsOff(vol, files[k], ids, count, &receipt);
                 if (rc != OK && rc != ERR_FILE_NOT_FOUND)
                     return rc;
             }
@@ -54,17 +50,17 @@ static error_t RetireFilesClear(const uint32_t* ids, uint32_t count)
 }
 
 /* One program's tags `ids`, `count` of them, taken off every file and retired. */
-static error_t RetireProgram(const uint32_t* ids, uint32_t count)
+static error_t RetireProgram(TagFSVolume* vol, const uint32_t* ids, uint32_t count)
 {
-    TagRegistry* reg = tagfs_get_state()->registry;
+    TagRegistry* reg = vol->state.registry;
     error_t      rc  = OK;
     InkReceipt   receipt;
     for (uint32_t i = 0; rc == OK && i < count; i++)
         rc = TagRegistryRetire(reg, ids[i]);
     if (rc == OK)
-        rc = RetireFilesClear(ids, count);
+        rc = RetireFilesClear(vol, ids, count);
     if (rc == OK)
-        rc = InkTagsRetire(ids, count, &receipt);
+        rc = InkTagsRetire(vol, ids, count, &receipt);
     return rc;
 }
 
@@ -72,9 +68,9 @@ static error_t RetireProgram(const uint32_t* ids, uint32_t count)
  * their tags to it (FileRecord.shown_to): one Ink a reader a list, the files
  * that show asked of the map's list of them — of every file when it is short
  * of room. A list whose program left went with its card. */
-static error_t RetireReaders(void)
+static error_t RetireReaders(TagFSVolume* vol)
 {
-    FileMap* map = tagfs_get_state()->files;
+    FileMap* map = vol->state.files;
     uint64_t files[RETIRE_PAGE];
     for (uint64_t from = 0;;) {
         uint32_t n = FileMapShowing(map, from, files, RETIRE_PAGE);
@@ -87,8 +83,8 @@ static error_t RetireReaders(void)
             error_t     rc  = OK;
             for (uint32_t i = 0; rc == OK && rec && i < rec->shown_count; i++) {
                 InkReceipt receipt;
-                if (rec->shown_to[i] && RetireProgramGone(rec->shown_to[i]))
-                    rc = InkShown(files[k], rec->shown_to[i], false, &receipt);
+                if (rec->shown_to[i] && RetireProgramGone(vol, rec->shown_to[i]))
+                    rc = InkShown(vol, files[k], rec->shown_to[i], false, &receipt);
             }
             FileRecordRelease(rec);
             if (rc != OK && rc != ERR_FILE_NOT_FOUND)
@@ -108,11 +104,11 @@ static int RetireByProgram(const void* a, const void* b, void* ctx)
     return x->id < y->id ? -1 : x->id > y->id;
 }
 
-static error_t RetireSweep(uint32_t* retired)
+static error_t RetireSweep(TagFSVolume* vol, uint32_t* retired)
 {
     TagProgramTag* tags  = NULL;
     uint32_t       count = 0;
-    error_t        rc    = TagRegistryProgramTags(tagfs_get_state()->registry, &tags, &count);
+    error_t        rc    = TagRegistryProgramTags(vol->state.registry, &tags, &count);
     uint32_t*      ids   = rc == OK && count ? kmalloc(sizeof(uint32_t) * count) : NULL;
     if (rc == OK && count && !ids)
         rc = ERR_NO_MEMORY;
@@ -124,79 +120,79 @@ static error_t RetireSweep(uint32_t* retired)
     for (uint32_t from = 0, to; rc == OK && from < count; from = to) {
         for (to = from; to < count && tags[to].owner == tags[from].owner;)
             to++;
-        if (!RetireProgramGone(tags[from].owner))
+        if (!RetireProgramGone(vol, tags[from].owner))
             continue;
-        rc = RetireProgram(&ids[from], to - from);
+        rc = RetireProgram(vol, &ids[from], to - from);
         if (rc == OK)
             *retired += to - from;
     }
     kfree(ids);
     kfree(tags);
     if (rc == OK)
-        rc = RetireReaders();
+        rc = RetireReaders(vol);
     if (rc == OK)
-        rc = ShowAsksForgetGone();
+        rc = ShowAsksForgetGone(vol);
     return rc;
 }
 
-error_t RetireSweepNow(uint32_t* retired)
+error_t RetireSweepNow(TagFSVolume* vol, uint32_t* retired)
 {
     *retired = 0;
-    if (!tagfs_enter())
+    if (!tagfs_enter(vol))
         return ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc = RetireSweep(retired);
-    tagfs_leave();
+    error_t rc = RetireSweep(vol, retired);
+    tagfs_leave(vol);
     return rc;
 }
 
 /* Whether a look is due: the periodic one, or one owed that a refusal does
  * not hold back — it waits for a cycle that settled since, which gave room
  * back or let a medium come to rest. */
-static bool RetireDue(void)
+static bool RetireDue(TagFSVolume* vol)
 {
-    if (SettleNowUs() >= __atomic_load_n(&s_next_us, __ATOMIC_ACQUIRE))
+    if (SettleNowUs() >= __atomic_load_n(&vol->retire.next_us, __ATOMIC_ACQUIRE))
         return true;
-    if (!__atomic_load_n(&s_owed, __ATOMIC_ACQUIRE))
+    if (!__atomic_load_n(&vol->retire.owed, __ATOMIC_ACQUIRE))
         return false;
-    uint64_t at = __atomic_load_n(&s_blocked_at, __ATOMIC_ACQUIRE);
-    return at == RETIRE_NOT_BLOCKED || SettledCycles() > at;
+    uint64_t at = __atomic_load_n(&vol->retire.blocked_at, __ATOMIC_ACQUIRE);
+    return at == RETIRE_NOT_BLOCKED || SettledCycles(vol) > at;
 }
 
-void RetireServe(void)
+void RetireServe(TagFSVolume* vol)
 {
-    if (!RetireDue())
+    if (!RetireDue(vol))
         return;
-    if (__atomic_exchange_n(&s_busy, 1u, __ATOMIC_ACQUIRE))
+    if (__atomic_exchange_n(&vol->retire.busy, 1u, __ATOMIC_ACQUIRE))
         return;
-    __atomic_store_n(&s_next_us, SettleNowUs() + RETIRE_LOOK_US, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_owed, 0u, __ATOMIC_RELEASE);
-    if (!__atomic_load_n(&s_held, __ATOMIC_ACQUIRE)) {
+    __atomic_store_n(&vol->retire.next_us, SettleNowUs() + RETIRE_LOOK_US, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->retire.owed, 0u, __ATOMIC_RELEASE);
+    if (!__atomic_load_n(&vol->retire.held, __ATOMIC_ACQUIRE)) {
         uint32_t retired = 0;
-        error_t  rc      = RetireSweepNow(&retired);
+        error_t  rc      = RetireSweepNow(vol, &retired);
         if (retired)
             kprintf("[TagFS] %u tag(s) of programs that left retired\n", retired);
         if (rc != OK && rc != ERR_TAGFS_NOT_INITIALIZED) {
-            __atomic_store_n(&s_blocked_at, SettledCycles(), __ATOMIC_RELEASE);
-            RetireOwed();
+            __atomic_store_n(&vol->retire.blocked_at, SettledCycles(vol), __ATOMIC_RELEASE);
+            RetireOwed(vol);
         } else {
-            __atomic_store_n(&s_blocked_at, RETIRE_NOT_BLOCKED, __ATOMIC_RELEASE);
+            __atomic_store_n(&vol->retire.blocked_at, RETIRE_NOT_BLOCKED, __ATOMIC_RELEASE);
         }
     }
-    __atomic_store_n(&s_busy, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->retire.busy, 0u, __ATOMIC_RELEASE);
 }
 
-void RetireMountReset(void)
+void RetireMountReset(TagFSVolume* vol)
 {
-    __atomic_store_n(&s_next_us, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_blocked_at, RETIRE_NOT_BLOCKED, __ATOMIC_RELEASE);
-    RetireOwed();
+    __atomic_store_n(&vol->retire.next_us, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->retire.blocked_at, RETIRE_NOT_BLOCKED, __ATOMIC_RELEASE);
+    RetireOwed(vol);
 }
 
-bool RetireHold(bool held)
+bool RetireHold(TagFSVolume* vol, bool held)
 {
-    bool was = __atomic_exchange_n(&s_held, held ? 1u : 0u, __ATOMIC_ACQ_REL) != 0;
+    bool was = __atomic_exchange_n(&vol->retire.held, held ? 1u : 0u, __ATOMIC_ACQ_REL) != 0;
     if (held)
-        while (__atomic_load_n(&s_busy, __ATOMIC_ACQUIRE))
+        while (__atomic_load_n(&vol->retire.busy, __ATOMIC_ACQUIRE))
             cpu_pause();
     return was;
 }

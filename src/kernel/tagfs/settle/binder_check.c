@@ -1,4 +1,5 @@
 #include "binder_internal.h"
+#include "tagfs_volume.h"
 
 #if BINDER_CHECKS
 
@@ -44,37 +45,10 @@
  * Tally lays, DogEar least of all.
  */
 
-typedef struct {
-    TallyKey key;
-    uint32_t at;          /* its body in the leaf's bytes */
-    uint32_t len;
-} CheckOld;
 
-typedef struct {
-    bool       on;
-    bool       draining;    /* the tree's leaves are spent, the Tally before's still being read */
-    uint64_t   tree;
-    uint32_t   leaf;        /* the next leaf of the Tally before */
-    bool       loaded;      /* a leaf of it in hand */
-    bool       ended;       /* none left of the tree */
-    bool       rotten;      /* the leaf in hand reads in no copy */
-    TallyPlace at;
-    uint8_t*   bytes;       /* its elements' bodies, one after another */
-    uint32_t   len, cap;
-    CheckOld*  old;
-    uint32_t   n, capn, next;
-    uint8_t*   spell;       /* a Parcel of it spelled again */
-    uint32_t   spell_room;
-    uint64_t   held;        /* elements held to the Tally before */
-    bool       turn_read;   /* a leaf of it read this turn of the Settle's holder */
-    bool       owed;        /* the element in hand waits for the next turn's leaf */
-} BinderCheck;
-
-static BinderCheck s_check;
-
-static void CheckAside(const char* why)
+static void CheckAside(TagFSVolume* vol, const char* why)
 {
-    s_check.on = false;
+    vol->binder_check.on = false;
     kprintf("[TagFS] the Tally's self-check stands aside: %s\n", why);
 }
 
@@ -147,14 +121,14 @@ static void CheckOldMended(void* ctx, uint64_t tree, const TallyPlace* at, uint3
 /* The next leaf of the tree's in hand — read now, the turn's one read, unless
  * the reads know its range rotten — or none left. False with the check stood
  * aside. */
-static bool CheckLoad(void)
+static bool CheckLoad(TagFSVolume* vol)
 {
-    BinderCheck* c   = &s_check;
+    BinderCheck* c   = &vol->binder_check;
     bool         rot = false;
     c->n = c->next = c->len = 0;
     c->rotten = false;
-    c->loaded = c->tree == TALLY_DIGESTS ? TallyDigestLeafAt(c->leaf, &c->at, &rot)
-                                         : FoliationLeafAt(c->tree, c->leaf, &c->at);
+    c->loaded = c->tree == TALLY_DIGESTS ? TallyDigestLeafAt(vol, c->leaf, &c->at, &rot)
+                                         : FoliationLeafAt(vol, c->tree, c->leaf, &c->at);
     c->ended  = !c->loaded;
     if (!c->loaded)
         return true;
@@ -166,17 +140,17 @@ static bool CheckLoad(void)
     c->turn_read = true;
     TallySink sink = { .ctx = c, .item = CheckOldItem, .rotten = CheckOldRotten, .mend = CheckOldMended,
                        .said = false };
-    error_t   rc   = TallyLeafRead(c->tree, &c->at, &sink);
+    error_t   rc   = TallyLeafRead(vol, c->tree, &c->at, &sink);
     if (rc != OK)
-        CheckAside(rc == ERR_NO_MEMORY ? "no memory to read a leaf of the Tally before"
+        CheckAside(vol, rc == ERR_NO_MEMORY ? "no memory to read a leaf of the Tally before"
                                        : "the medium would not give up a leaf of the Tally before");
     return rc == OK;
 }
 
 /* The cursor begun on `tree`'s leaves. */
-static void CheckTree(uint64_t tree)
+static void CheckTree(TagFSVolume* vol, uint64_t tree)
 {
-    BinderCheck* c = &s_check;
+    BinderCheck* c = &vol->binder_check;
     c->tree   = tree;
     c->leaf   = 0;
     c->loaded = c->ended = c->rotten = c->draining = false;
@@ -190,9 +164,9 @@ static void CheckTree(uint64_t tree)
 /* The Parcel `b` of `len` bytes, in a node of `seq`, spelled again in a node
  * of `seq_new` into the check's room, its length in *out: OK; ERR_NO_MEMORY
  * when memory refuses the room, ERR_TAGFS_CORRUPTED when it does not read. */
-static error_t ParcelRespelled(const uint8_t* b, uint32_t len, uint64_t seq, uint64_t seq_new, uint32_t* out)
+static error_t ParcelRespelled(TagFSVolume* vol, const uint8_t* b, uint32_t len, uint64_t seq, uint64_t seq_new, uint32_t* out)
 {
-    BinderCheck* c  = &s_check;
+    BinderCheck* c  = &vol->binder_check;
     uint32_t     at = 0, put = 0;
     uint64_t     n = 0, from = 0, to = 0;
     if (!TallyTake(b, len, &at, &n) || n > len)
@@ -222,15 +196,15 @@ static error_t ParcelRespelled(const uint8_t* b, uint32_t len, uint64_t seq, uin
  * A Parcel of the Tally before that does not read again is passed over, said
  * — the mount read it or this kernel laid it, so it is no question of
  * DogEar's; memory refusing the room to spell it stands the check aside. */
-static error_t CheckHeldTo(const BinderWork* w, const BinderItem* it, const CheckOld* o)
+static error_t CheckHeldTo(TagFSVolume* vol, const BinderWork* w, const BinderItem* it, const CheckOld* o)
 {
-    BinderCheck*   c   = &s_check;
+    BinderCheck*   c   = &vol->binder_check;
     const uint8_t* old = c->bytes + o->at;
     uint32_t       len = o->len;
     if (w->tree == TALLY_FILES && it->key.k2 != 0) {
-        error_t rc = ParcelRespelled(old, o->len, c->at.ptr.seq, w->seq, &len);
+        error_t rc = ParcelRespelled(vol, old, o->len, c->at.ptr.seq, w->seq, &len);
         if (rc == ERR_NO_MEMORY) {
-            CheckAside("no memory to spell a Parcel of the Tally before again");
+            CheckAside(vol, "no memory to spell a Parcel of the Tally before again");
             return OK;
         }
         if (rc != OK) {
@@ -248,125 +222,125 @@ static error_t CheckHeldTo(const BinderWork* w, const BinderItem* it, const Chec
 }
 
 /* An element of the Tally before that this one does not hold. */
-static error_t CheckGone(const BinderWork* w, TallyKey key)
+static error_t CheckGone(TagFSVolume* vol, const BinderWork* w, TallyKey key)
 {
-    return DogEarTakenHolds(w->tree, key) ? OK : CheckDefect(w, key, "is in the Tally before and not in this one");
+    return DogEarTakenHolds(vol, w->tree, key) ? OK : CheckDefect(w, key, "is in the Tally before and not in this one");
 }
 
 /* The rest of the leaf in hand: elements this Tally does not hold. */
-static error_t CheckLeafRest(const BinderWork* w)
+static error_t CheckLeafRest(TagFSVolume* vol, const BinderWork* w)
 {
-    BinderCheck* c  = &s_check;
+    BinderCheck* c  = &vol->binder_check;
     error_t      rc = OK;
     while (rc == OK && !c->rotten && c->next < c->n)
-        rc = CheckGone(w, c->old[c->next++].key);
+        rc = CheckGone(vol, w, c->old[c->next++].key);
     c->loaded = false;
     return rc;
 }
 
 /* `it` against the leaf in hand, whose range holds its key. */
-static error_t CheckInLeaf(const BinderWork* w, const BinderItem* it)
+static error_t CheckInLeaf(TagFSVolume* vol, const BinderWork* w, const BinderItem* it)
 {
-    BinderCheck* c  = &s_check;
+    BinderCheck* c  = &vol->binder_check;
     error_t      rc = OK;
     while (rc == OK && c->next < c->n && BinderKeyLess(w->tree, c->old[c->next].key, it->key))
-        rc = CheckGone(w, c->old[c->next++].key);
+        rc = CheckGone(vol, w, c->old[c->next++].key);
     if (rc != OK)
         return rc;
-    bool eared = DogEarTakenHolds(w->tree, it->key);
+    bool eared = DogEarTakenHolds(vol, w->tree, it->key);
     if (c->next < c->n && !BinderKeyLess(w->tree, it->key, c->old[c->next].key)) {
         const CheckOld* o = &c->old[c->next++];
-        return eared ? OK : CheckHeldTo(w, it, o);
+        return eared ? OK : CheckHeldTo(vol, w, it, o);
     }
     return eared ? OK : CheckDefect(w, it->key, "is not in the Tally before");
 }
 
-void BinderCheckBegin(void)
+void BinderCheckBegin(TagFSVolume* vol)
 {
-    BinderCheckLetGo();
-    s_check.held = 0;
-    s_check.on   = true;
-    CheckTree(0);
-    if (FoliationLost())
-        CheckAside(FoliationLost());
-    else if (DogEarTakenLost())
-        CheckAside("DogEar was lost, and every key is held changed");
+    BinderCheckLetGo(vol);
+    vol->binder_check.held = 0;
+    vol->binder_check.on   = true;
+    CheckTree(vol, 0);
+    if (FoliationLost(vol))
+        CheckAside(vol, FoliationLost(vol));
+    else if (DogEarTakenLost(vol))
+        CheckAside(vol, "DogEar was lost, and every key is held changed");
 }
 
-error_t BinderCheckItem(const BinderWork* w, const BinderItem* it)
+error_t BinderCheckItem(TagFSVolume* vol, const BinderWork* w, const BinderItem* it)
 {
-    BinderCheck* c = &s_check;
+    BinderCheck* c = &vol->binder_check;
     c->owed = false;
     if (c->on && c->tree != w->tree)
-        CheckTree(w->tree);
+        CheckTree(vol, w->tree);
     while (c->on) {
         if (!c->loaded && !c->ended) {
             if (c->turn_read) {
                 c->owed = true;
                 return OK;
             }
-            if (!CheckLoad())
+            if (!CheckLoad(vol))
                 return OK;
         }
         if (c->ended)
-            return DogEarTakenHolds(w->tree, it->key) ? OK : CheckDefect(w, it->key, "is not in the Tally before");
+            return DogEarTakenHolds(vol, w->tree, it->key) ? OK : CheckDefect(w, it->key, "is not in the Tally before");
         if (c->at.has_hi && !BinderKeyLess(w->tree, it->key, c->at.hi)) {
-            error_t rc = CheckLeafRest(w);
+            error_t rc = CheckLeafRest(vol, w);
             if (rc != OK)
                 return rc;
             continue;
         }
         if (c->at.has_lo && BinderKeyLess(w->tree, it->key, c->at.lo))
-            return DogEarTakenHolds(w->tree, it->key) ? OK : CheckDefect(w, it->key, "is not in the Tally before");
-        return c->rotten ? OK : CheckInLeaf(w, it);
+            return DogEarTakenHolds(vol, w->tree, it->key) ? OK : CheckDefect(w, it->key, "is not in the Tally before");
+        return c->rotten ? OK : CheckInLeaf(vol, w, it);
     }
     return OK;
 }
 
-bool BinderCheckOwed(void)
+bool BinderCheckOwed(TagFSVolume* vol)
 {
-    return s_check.on && s_check.owed;
+    return vol->binder_check.on && vol->binder_check.owed;
 }
 
-error_t BinderCheckTreeEnd(const BinderWork* w, bool* more)
+error_t BinderCheckTreeEnd(TagFSVolume* vol, const BinderWork* w, bool* more)
 {
-    BinderCheck* c = &s_check;
+    BinderCheck* c = &vol->binder_check;
     *more = false;
     if (c->on && c->tree != w->tree)
-        CheckTree(w->tree);
+        CheckTree(vol, w->tree);
     if (!c->on)
         return OK;
-    error_t rc = c->loaded ? CheckLeafRest(w) : OK;
-    if (rc != OK || c->ended || (!c->turn_read && !CheckLoad()))
+    error_t rc = c->loaded ? CheckLeafRest(vol, w) : OK;
+    if (rc != OK || c->ended || (!c->turn_read && !CheckLoad(vol)))
         return rc;
     *more       = !c->ended;
     c->draining = *more;
     return OK;
 }
 
-void BinderCheckTurn(void)
+void BinderCheckTurn(TagFSVolume* vol)
 {
-    s_check.turn_read = false;
+    vol->binder_check.turn_read = false;
 }
 
-bool BinderCheckDraining(void)
+bool BinderCheckDraining(TagFSVolume* vol)
 {
-    return s_check.on && s_check.draining;
+    return vol->binder_check.on && vol->binder_check.draining;
 }
 
-uint64_t BinderCheckHeld(void)
+uint64_t BinderCheckHeld(TagFSVolume* vol)
 {
-    return s_check.held;
+    return vol->binder_check.held;
 }
 
-void BinderCheckLetGo(void)
+void BinderCheckLetGo(TagFSVolume* vol)
 {
-    uint64_t held = s_check.held;
-    kfree(s_check.bytes);
-    kfree(s_check.old);
-    kfree(s_check.spell);
-    memset(&s_check, 0, sizeof(s_check));
-    s_check.held = held;
+    uint64_t held = vol->binder_check.held;
+    kfree(vol->binder_check.bytes);
+    kfree(vol->binder_check.old);
+    kfree(vol->binder_check.spell);
+    memset(&vol->binder_check, 0, sizeof(vol->binder_check));
+    vol->binder_check.held = held;
 }
 
 #endif /* BINDER_CHECKS */

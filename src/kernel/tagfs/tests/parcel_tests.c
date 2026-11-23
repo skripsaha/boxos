@@ -7,6 +7,7 @@
 #include "../ink/ink.h"
 #include "../ink/fallow.h"
 #include "../mount/ground_census.h"
+#include "tagfs_volume.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -275,7 +276,7 @@ static uint64_t ParcelAt(const ParcelHeld* h, uint32_t i)
 /* `count` splices applied to h->rec into h->next and by hand to h->file into
  * h->want (h->took the ground the hand took out): whether the new record holds
  * what the hand made, Strip for Strip. False too when the splice was refused. */
-static bool ParcelSpliced(ParcelHeld* h, const BookSplice* sp, uint64_t count)
+static bool ParcelSpliced(TagFSVolume* vol, ParcelHeld* h, const BookSplice* sp, uint64_t count)
 {
     memcpy(h->work, h->file, sizeof(Strip) * h->nfile);
     uint32_t nwork = h->nfile;
@@ -290,7 +291,7 @@ static bool ParcelSpliced(ParcelHeld* h, const BookSplice* sp, uint64_t count)
     kfree(h->freed);
     h->next  = NULL;
     h->freed = NULL;
-    return FileRecordSplice(h->rec, sp, count, h->rec->size, 7, &h->next, &h->freed,
+    return FileRecordSplice(vol, h->rec, sp, count, h->rec->size, 7, &h->next, &h->freed,
                             &h->nfreed) == OK &&
            ParcelHolds(h->next, h->want, h->nwant);
 }
@@ -389,6 +390,7 @@ out:
  * out. */
 static TestResult TestParcelSpliceAcross(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict = TEST_PASS;
     ParcelHeld h;
     Strip      put[3];
@@ -400,7 +402,7 @@ static TestResult TestParcelSpliceAcross(void)
     ParcelStrips(put, 3, 0, PARCEL_FRESH_BLOCK);
     BookSplice sp = { .at = ParcelAt(&h, edge - 2u), .ninsert = 3, .insert = put,
                       .remove = ParcelAt(&h, edge + 2u) - ParcelAt(&h, edge - 2u) };
-    TEST_ASSERT(ParcelSpliced(&h, &sp, 1), "the record holds what the splice by hand made");
+    TEST_ASSERT(ParcelSpliced(vol, &h, &sp, 1), "the record holds what the splice by hand made");
     TEST_ASSERT(ParcelsInBounds(h.next, h.heap), "every Parcel within its bounds");
     TEST_ASSERT(ParcelBuilt(h.next, h.rec, h.heap, &built) != UINT64_MAX, "the Parcels counted");
     TEST_ASSERT_EQ(built, 2, "the two Parcels it crossed built anew, the other six shared");
@@ -414,6 +416,7 @@ out:
  * is cut into Parcels within it, and the runs are the hand's. */
 static TestResult TestParcelSpliceDivides(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict = TEST_PASS;
     ParcelHeld h;
     Strip*     put     = kmalloc(sizeof(Strip) * 200u);
@@ -422,7 +425,7 @@ static TestResult TestParcelSpliceDivides(void)
     TEST_ASSERT(ParcelFile(&h, PARCEL_FILE_STRIPS, 0) != NULL, "the file of 1000 Strips is built");
     ParcelStrips(put, 200u, 9u, PARCEL_FRESH_BLOCK);
     BookSplice sp = { .at = ParcelAt(&h, 300u), .remove = 0, .ninsert = 200u, .insert = put };
-    TEST_ASSERT(ParcelSpliced(&h, &sp, 1), "the record holds what the splice by hand made");
+    TEST_ASSERT(ParcelSpliced(vol, &h, &sp, 1), "the record holds what the splice by hand made");
     TEST_ASSERT(ParcelsInBounds(h.next, h.heap), "no Parcel past 128 Strips, none below 32");
     TEST_ASSERT_EQ(h.nfreed, 0, "and a splice that took nothing out frees nothing");
 out:
@@ -436,6 +439,7 @@ out:
  * for k. */
 static TestResult TestParcelSpliceK(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict = TEST_PASS;
     ParcelHeld h;
     Strip      put[6];
@@ -452,7 +456,7 @@ static TestResult TestParcelSpliceK(void)
         sp[i] = (BookSplice){ .at = ParcelAt(&h, s), .ninsert = 2, .insert = &put[2 * i],
                               .remove = (uint64_t)h.file[s].count + h.file[s + 1].count };
     }
-    TEST_ASSERT(ParcelSpliced(&h, sp, 3), "the record holds what the three splices by hand made");
+    TEST_ASSERT(ParcelSpliced(vol, &h, sp, 3), "the record holds what the three splices by hand made");
     TEST_ASSERT(ParcelBuilt(h.next, h.rec, h.heap, &built) != UINT64_MAX, "the Parcels counted");
     TEST_ASSERT_EQ(built, 3, "the three Parcels touched built anew, the other five shared");
     TEST_ASSERT(ParcelSameGround(h.freed, h.nfreed, h.took, h.ntook), "it frees what it took out");
@@ -466,6 +470,7 @@ out:
  * DATA ground cut off — never a hole, which owns none. */
 static TestResult TestParcelTruncate(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict = TEST_PASS;
     ParcelHeld h;
     uint32_t   s = 125u * 6u + 10u;
@@ -477,7 +482,7 @@ static TestResult TestParcelTruncate(void)
     TEST_ASSERT(s < h.nfile, "a DATA Strip of two blocks or more to cut inside");
     BookSplice sp = { .at = ParcelAt(&h, s) + 1u, .ninsert = 0, .insert = NULL };
     sp.remove = h.rec->blocks - sp.at;
-    TEST_ASSERT(ParcelSpliced(&h, &sp, 1), "the record holds what the cut by hand made");
+    TEST_ASSERT(ParcelSpliced(vol, &h, &sp, 1), "the record holds what the cut by hand made");
     TEST_ASSERT_EQ(h.next->blocks, sp.at, "and ends where the cut is");
     TEST_ASSERT(ParcelsInBounds(h.next, h.heap), "every Parcel within its bounds");
     for (uint64_t i = 0; i < h.nfreed; i++)
@@ -493,6 +498,7 @@ out:
  * joined to a neighbour, and every Parcel stays within its bounds. */
 static TestResult TestParcelJoins(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict = TEST_PASS;
     ParcelHeld h;
 
@@ -500,7 +506,7 @@ static TestResult TestParcelJoins(void)
     TEST_ASSERT(ParcelFile(&h, PARCEL_FILE_STRIPS, 0) != NULL, "the file of 1000 Strips is built");
     BookSplice sp = { .at = ParcelAt(&h, 130u), .ninsert = 0, .insert = NULL,
                       .remove = ParcelAt(&h, 240u) - ParcelAt(&h, 130u) };
-    TEST_ASSERT(ParcelSpliced(&h, &sp, 1), "the record holds what the splice by hand made");
+    TEST_ASSERT(ParcelSpliced(vol, &h, &sp, 1), "the record holds what the splice by hand made");
     TEST_ASSERT(ParcelsInBounds(h.next, h.heap), "the 15 left are joined, no Parcel below 32");
 out:
     ParcelHeldLetGo(&h);
@@ -512,6 +518,7 @@ out:
  * only a hole frees nothing. */
 static TestResult TestParcelGroundMoves(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict = TEST_PASS;
     ParcelHeld h;
     Strip      fresh;
@@ -530,12 +537,12 @@ static TestResult TestParcelGroundMoves(void)
                           .ninsert = 1, .insert = &fresh };
     sp[1] = (BookSplice){ .at = ParcelAt(&h, 600u), .remove = h.file[600].count,
                           .ninsert = 1, .insert = &moved };
-    TEST_ASSERT(ParcelSpliced(&h, sp, 2), "the record holds what the two splices by hand made");
+    TEST_ASSERT(ParcelSpliced(vol, &h, sp, 2), "the record holds what the two splices by hand made");
     TEST_ASSERT(ParcelSameGround(h.freed, h.nfreed, &gone, 1),
                 "only Strip 600's ground is freed — Strip 100's is named again further on");
 
     sp[0] = (BookSplice){ .at = ParcelAt(&h, 6u), .remove = h.file[6].count, .ninsert = 0 };
-    TEST_ASSERT(ParcelSpliced(&h, sp, 1), "a hole taken out");
+    TEST_ASSERT(ParcelSpliced(vol, &h, sp, 1), "a hole taken out");
     TEST_ASSERT_EQ(h.nfreed, 0, "frees nothing");
 out:
     ParcelHeldLetGo(&h);
@@ -577,8 +584,9 @@ static FileRecord* ParcelHoled(uint32_t from, uint32_t count)
  * ground that ended there — over 10 steps. */
 static TestResult TestParcelHoleOwnsNothing(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    TagFSState* fs      = tagfs_get_state();
+    TagFSState* fs      = &vol->state;
     VolumeBoot  boot    = fs->boot;
     FileRecord* rec     = ParcelHoled(0, ARRAY_SIZE(s_parcel_holed));
     FileRecord* holes   = ParcelHoled(1, 1);
@@ -601,30 +609,30 @@ static TestResult TestParcelHoleOwnsNothing(void)
     }
     TEST_ASSERT(!StripWalkNextGround(&walk, &run) && n == 3, "three of them, and no hole");
 
-    TEST_ASSERT_OK(FallowNodeOfRecord(rec, FALLOW_BY_RECORD, &node), "a Fallow node of the record");
+    TEST_ASSERT_OK(FallowNodeOfRecord(vol, rec, FALLOW_BY_RECORD, &node), "a Fallow node of the record");
     TEST_ASSERT_EQ(FallowNodeBlocks(node), 11, "holds the record's 11 blocks of ground");
-    TEST_ASSERT_OK(FallowNodeOfRecord(holes, FALLOW_BY_RECORD, &none), "a record of a hole alone");
+    TEST_ASSERT_OK(FallowNodeOfRecord(vol, holes, FALLOW_BY_RECORD, &none), "a record of a hole alone");
     TEST_ASSERT(none == NULL, "gives back no ground");
 
     fs->boot.kernel_blocks = 1;
     fs->boot.kernel_block  = 200u;
-    TEST_ASSERT(!InkRecordTouchesBoot(rec), "the Deed at the hole's start finds no kernel in it");
-    TEST_ASSERT(!InkTouchesBoot(&s_parcel_holed[1], 1), "nor in the hole laid flat, as a Plot's runs are");
+    TEST_ASSERT(!InkRecordTouchesBoot(vol, rec), "the Deed at the hole's start finds no kernel in it");
+    TEST_ASSERT(!InkTouchesBoot(vol, &s_parcel_holed[1], 1), "nor in the hole laid flat, as a Plot's runs are");
     fs->boot.kernel_block  = 107u;
-    TEST_ASSERT(InkRecordTouchesBoot(rec), "at a block of its ground, the kernel");
-    TEST_ASSERT(InkTouchesBoot(&s_parcel_holed[2], 1), "and in that ground laid flat");
+    TEST_ASSERT(InkRecordTouchesBoot(vol, rec), "at a block of its ground, the kernel");
+    TEST_ASSERT(InkTouchesBoot(vol, &s_parcel_holed[2], 1), "and in that ground laid flat");
     fs->boot = boot;
 
-    GroundCensusBegin();
+    GroundCensusBegin(vol);
     census = true;
     StripWalkBegin(rec, &walk);
     while (StripWalkNextGround(&walk, &run))
-        GroundClaim(GROUND_FILE, run.start, run.count, 9);
+        GroundClaim(vol, GROUND_FILE, run.start, run.count, 9);
     for (uint64_t b = 100; b < 109; b++)
-        TEST_ASSERT_EQ(GroundClaimOf(b), GROUND_FILE, "the census claims the ground as the file's");
-    TEST_ASSERT_EQ(GroundClaimOf(301), GROUND_FILE, "all of it");
-    TEST_ASSERT_EQ(GroundClaimOf(200), GROUND_OWNER_KINDS, "and nothing at a hole's start");
-    TEST_ASSERT_EQ(GroundClaimOf(0), GROUND_OWNER_KINDS, "at either hole's");
+        TEST_ASSERT_EQ(GroundClaimOf(vol, b), GROUND_FILE, "the census claims the ground as the file's");
+    TEST_ASSERT_EQ(GroundClaimOf(vol, 301), GROUND_FILE, "all of it");
+    TEST_ASSERT_EQ(GroundClaimOf(vol, 200), GROUND_OWNER_KINDS, "and nothing at a hole's start");
+    TEST_ASSERT_EQ(GroundClaimOf(vol, 0), GROUND_OWNER_KINDS, "at either hole's");
 
     TagFSFragOfRecord(rec, &gaps, &steps);
     TEST_ASSERT_EQ(gaps, 1, "one gap — to 300; the ground past the hole begins where it ended");
@@ -632,7 +640,7 @@ static TestResult TestParcelHoleOwnsNothing(void)
 out:
     fs->boot = boot;
     if (census)
-        GroundCensusEnd();
+        GroundCensusEnd(vol);
     FallowNodeLetGo(node);
     FallowNodeLetGo(none);
     FileRecordRelease(rec);
@@ -647,7 +655,7 @@ out:
 /* The Plot's runs `runs` conveyed from h->rec (PlotConveyance) and the
  * splices applied: whether the new record holds the runs Strip for Strip and
  * frees the ground `expect` names, with the number of splices in *count. */
-static bool ParcelConveyed(ParcelHeld* h, Strip* runs, uint32_t nruns, Strip* expect,
+static bool ParcelConveyed(TagFSVolume* vol, ParcelHeld* h, Strip* runs, uint32_t nruns, Strip* expect,
                            uint64_t nexpect, uint64_t* count)
 {
     Plot        p;
@@ -664,7 +672,7 @@ static bool ParcelConveyed(ParcelHeld* h, Strip* runs, uint32_t nruns, Strip* ex
     h->next  = NULL;
     h->freed = NULL;
     bool same = PlotConveyance(&p, h->rec, &sp, count) == OK &&
-                FileRecordSplice(h->rec, sp, *count, h->rec->size, 7, &h->next, &h->freed,
+                FileRecordSplice(vol, h->rec, sp, *count, h->rec->size, 7, &h->next, &h->freed,
                                  &h->nfreed) == OK &&
                 ParcelHolds(h->next, runs, nruns) &&
                 ParcelSameGround(h->freed, h->nfreed, expect, nexpect);
@@ -697,6 +705,7 @@ static uint32_t ParcelGathered(ParcelHeld* h, uint32_t from, uint32_t to)
  * Plot's runs Strip for Strip, freeing exactly the ground they let go. */
 static TestResult TestParcelConveyance(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict = TEST_PASS;
     ParcelHeld h;
     uint64_t   count   = 0;
@@ -706,11 +715,11 @@ static TestResult TestParcelConveyance(void)
     TEST_ASSERT(ParcelFile(&h, PARCEL_FILE_STRIPS, 0) != NULL, "the file of 1000 Strips is built");
 
     memcpy(h.work, h.file, sizeof(Strip) * h.nfile);
-    TEST_ASSERT(ParcelConveyed(&h, h.work, h.nfile, NULL, 0, &count) && count == 0,
+    TEST_ASSERT(ParcelConveyed(vol, &h, h.work, h.nfile, NULL, 0, &count) && count == 0,
                 "runs as they were convey nothing");
 
     ParcelStrips(&h.work[h.nfile], 2, 0, PARCEL_FRESH_BLOCK);
-    TEST_ASSERT(ParcelConveyed(&h, h.work, h.nfile + 2u, NULL, 0, &count) && count == 1,
+    TEST_ASSERT(ParcelConveyed(vol, &h, h.work, h.nfile + 2u, NULL, 0, &count) && count == 1,
                 "two Strips at the end: one splice, nothing freed");
 
     for (n = 900u; h.file[n].count < 2u; n++)
@@ -721,16 +730,16 @@ static TestResult TestParcelConveyance(void)
         h.took[h.ntook++] = h.file[i];
     memcpy(h.work, h.file, sizeof(Strip) * h.nfile);
     h.work[n].count = 1;
-    TEST_ASSERT(ParcelConveyed(&h, h.work, n + 1u, h.took, h.ntook, &count) && count == 1,
+    TEST_ASSERT(ParcelConveyed(vol, &h, h.work, n + 1u, h.took, h.ntook, &count) && count == 1,
                 "a cut inside a Strip: one splice, the ground cut off freed");
 
     n = ParcelGathered(&h, 100u, 110u);
-    TEST_ASSERT(ParcelConveyed(&h, h.work, n, h.took, h.ntook, &count) && count == 1,
+    TEST_ASSERT(ParcelConveyed(vol, &h, h.work, n, h.took, h.ntook, &count) && count == 1,
                 "ten Strips gathered into one: one splice, their ground freed");
 
     n = ParcelGathered(&h, 100u, 110u);
     ParcelStrips(&h.work[n], 2, 0, PARCEL_FRESH_BLOCK + 64u);
-    TEST_ASSERT(ParcelConveyed(&h, h.work, n + 2u, h.took, h.ntook, &count) && count == 2,
+    TEST_ASSERT(ParcelConveyed(vol, &h, h.work, n + 2u, h.took, h.ntook, &count) && count == 2,
                 "a gather and an append: two splices");
 
     memcpy(h.work, h.file, sizeof(Strip) * h.nfile);
@@ -739,7 +748,7 @@ static TestResult TestParcelConveyance(void)
     memmove(&h.work[n + 1u], &h.work[n], sizeof(Strip) * (h.nfile - n));
     h.work[n]      = ParcelPiece(&h.file[n], 0, 1);
     h.work[n + 1u] = ParcelPiece(&h.file[n], 1, h.file[n].count - 1u);
-    TEST_ASSERT(ParcelConveyed(&h, h.work, h.nfile + 1u, NULL, 0, &count) && count == 1,
+    TEST_ASSERT(ParcelConveyed(vol, &h, h.work, h.nfile + 1u, NULL, 0, &count) && count == 1,
                 "a Strip split in two where it lay: one splice — the record keeps the Strips as "
                 "they are given — and nothing freed");
 out:
@@ -753,6 +762,7 @@ out:
  * of the file made (24 bytes a run, 24000 here). */
 static TestResult TestParcelCopyBytes(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict = TEST_PASS;
     ParcelHeld h;
     uint64_t   count   = 0;
@@ -764,7 +774,7 @@ static TestResult TestParcelCopyBytes(void)
     memcpy(h.work, h.file, sizeof(Strip) * h.nfile);
     h.work[500].start = PARCEL_FRESH_BLOCK;
     h.took[0]         = h.file[500];
-    TEST_ASSERT(ParcelConveyed(&h, h.work, h.nfile, h.took, 1, &count) && count == 1,
+    TEST_ASSERT(ParcelConveyed(vol, &h, h.work, h.nfile, h.took, 1, &count) && count == 1,
                 "one run written over onto fresh ground: one splice, its old ground freed");
     bytes = ParcelBuilt(h.next, h.rec, h.heap, &built);
     TestEvidence("bytes the change built", bytes);
@@ -791,6 +801,7 @@ static uint64_t ParcelLog2(uint64_t n)
  * walk from the first run at every run's end would take ~n^2/2. */
 static TestResult TestParcelReadSteps(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult      verdict = TEST_PASS;
     ParcelHeld      h;
     uint8_t*        sink_at = kmalloc(PARCEL_READ_SINK);
@@ -808,7 +819,7 @@ static TestResult TestParcelReadSteps(void)
         ReadSink sink = { .kernel = sink_at, .bytes = PARCEL_READ_SINK };
         uint64_t got  = 0;
         memset(sink_at, 0xA5, PARCEL_READ_SINK);
-        TEST_ASSERT_OK(TagFSReadStream(&hd, &sink, &got), "a read of holes is answered");
+        TEST_ASSERT_OK(TagFSReadStream(vol, &hd, &sink, &got), "a read of holes is answered");
         TEST_ASSERT(got > 0, "and moves");
         for (uint64_t i = 0; i < got; i++)
             TEST_ASSERT_EQ(sink_at[i], 0, "a hole reads as zeros");

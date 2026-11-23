@@ -22,7 +22,7 @@
 
 /* The blocks the volume's seat takes in one command: its answer, not a number
  * chosen here, and at least one. */
-uint32_t TagFSRunBlocks(void);
+uint32_t TagFSRunBlocks(TagFSVolume* vol);
 
 /* `count` blocks from `first` on, out of `buffer`, in as few commands as the
  * seat takes: OK, ERR_DEVICE_NOT_READY once the medium left — asked before a
@@ -32,7 +32,7 @@ uint32_t TagFSRunBlocks(void);
  * what the medium says the refused one kept (BoardroomWrite) — and every block
  * that landed has its digest recorded and no read-ahead window hands out what
  * it held. A volume assembled in a Braid takes its blocks one at a time. */
-error_t  TagFSWriteRun(uint64_t first, uint32_t count, const void *buffer, uint32_t *out_landed);
+error_t  TagFSWriteRun(TagFSVolume* vol, uint64_t first, uint32_t count, const void *buffer, uint32_t *out_landed);
 
 /*
  * What the files' own bytes cost the medium since the machine started, for
@@ -50,11 +50,16 @@ typedef struct {
 
 /* A run of `blocks` blocks of a file sent to the medium, counted at its issue
  * — a refused one among them — as the commands the seat takes it in. */
-void TagFSDataCostLaid(uint32_t blocks);
+void TagFSDataCostLaid(TagFSVolume* vol, uint32_t blocks);
 /* A write of a file was answered, whatever the answer. */
-void TagFSDataCostWrite(void);
-void TagFSDataCostTake(TagFSDataCost *out);
+void TagFSDataCostWrite(TagFSVolume* vol);
+void TagFSDataCostTake(TagFSVolume* vol, TagFSDataCost *out);
 /* One line: the cost so far, and what it comes to a write and a megabyte. */
 void TagFSDataCostSay(void);
+
+/* What one volume holds of run.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    TagFSDataCost cost;
+} RunState;
 
 #endif /* TAGFS_RUN_H */

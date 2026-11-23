@@ -22,15 +22,15 @@
  * medium lifts it: it is a verdict on the book, not on the medium. It is part
  * of what TagFSReadOnly (tagfs.h) answers.
  */
-void     TagFSUnderGlass(const char *why);
-bool     TagFSIsUnderGlass(void);
+void     TagFSUnderGlass(TagFSVolume* vol, const char *why);
+bool     TagFSIsUnderGlass(TagFSVolume* vol);
 
 /* A door that writes the medium — a block of metadata, a run of data, the
  * port's write — asked to write a volume under glass: a defect of the road
  * that reached it, which every road shuts before (TagFSReadOnly). Said once
  * a mount and stopped at in a STRICT kernel; ERR_TAGFS_READ_ONLY, before a
  * byte. `door` names it. */
-error_t  TagFSGlassRefused(const char *door);
+error_t  TagFSGlassRefused(TagFSVolume* vol, const char *door);
 
 /* The halt's word on a volume that stood under glass and wrote its records:
  * this kernel gave it no write — its book holds what this kernel could not
@@ -51,5 +51,15 @@ void     TagFSGlassHaltSaid(uint8_t seat);
 void     TagFSGlassKnocking(bool on);
 uint32_t TagFSGlassKnocks(void);
 #endif
+
+#define GLASS_SAID_MOST  64u
+
+/* What one volume holds of under_glass.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    volatile uint8_t glass;
+    uint32_t said[GLASS_SAID_MOST];
+    uint32_t said_count;
+    volatile uint8_t door_said;  /* a write door reached under glass: said once a mount */
+} UnderGlassState;
 
 #endif /* TAGFS_MOUNT_UNDER_GLASS_H */

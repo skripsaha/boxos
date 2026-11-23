@@ -8,7 +8,7 @@
  * census's proof and the block map are book_grow.c's.
  */
 
-bool GroundGrowRoom(uint8_t seat, uint64_t ground_sectors, uint64_t have)
+bool GroundGrowRoom(TagFSVolume* vol, uint8_t seat, uint64_t ground_sectors, uint64_t have)
 {
     /* Not a byte of room, or not a whole block of it: nothing to take, and it
      * is said, because "checked and there is nothing" and "never checked" have
@@ -37,17 +37,17 @@ bool GroundGrowRoom(uint8_t seat, uint64_t ground_sectors, uint64_t have)
                 "ground is there\n", seat);
         return false;
     }
-    if (tagfs_get_volume_base() + ground_sectors > medium) {
+    if (tagfs_get_volume_base(vol) + ground_sectors > medium) {
         kprintf("[TagFS] seat %u: the ground behind this volume ends at sector "
                 "%llu and the medium ends at %llu — nothing is taken\n", seat,
-                (unsigned long long)(tagfs_get_volume_base() + ground_sectors),
+                (unsigned long long)(tagfs_get_volume_base(vol) + ground_sectors),
                 (unsigned long long)medium);
         return false;
     }
     return true;
 }
 
-bool GroundGrowDeedsWritten(uint8_t seat, DeedCopy *head, DeedPen *pen, const uint8_t *keep,
+bool GroundGrowDeedsWritten(TagFSVolume* vol, uint8_t seat, DeedCopy *head, DeedPen *pen, const uint8_t *keep,
                             uint64_t new_sectors, uint64_t new_tail)
 {
     DeedPenSetGround(pen, new_sectors, new_tail);
@@ -57,14 +57,14 @@ bool GroundGrowDeedsWritten(uint8_t seat, DeedCopy *head, DeedPen *pen, const ui
     DeedPenSeal(pen);
 
     bool far_end_took_it =
-        tagfs_volume_write(new_tail, DEED_PEN_SECTORS, head->raw) == 0 &&
+        tagfs_volume_write(vol, new_tail, DEED_PEN_SECTORS, head->raw) == 0 &&
         BoardroomFlush(seat) == 0;
 
     if (far_end_took_it) {
         /* Read it back off the medium. This is the one live proof that the
          * ground the partition table claims really is there and answers — a
          * table can lie, a device that returns the bytes cannot. */
-        MediumGround grown_ground = { .start_sector = tagfs_get_volume_base(),
+        MediumGround grown_ground = { .start_sector = tagfs_get_volume_base(vol),
                                       .sectors      = new_sectors,
                                       .origin       = GROUND_FROM_MBR,
                                       .entry        = 0 };
@@ -91,7 +91,7 @@ bool GroundGrowDeedsWritten(uint8_t seat, DeedCopy *head, DeedPen *pen, const ui
     DeedPenSetRole(pen, VOLUME_DEED_ROLE_HEAD);
     DeedPenSeal(pen);
 
-    if (tagfs_volume_write(0, DEED_PEN_SECTORS, head->raw) != 0 ||
+    if (tagfs_volume_write(vol, 0, DEED_PEN_SECTORS, head->raw) != 0 ||
         BoardroomFlush(seat) != 0) {
         memcpy(head->raw, keep, head->raw_bytes);
         kprintf("[TagFS] seat %u: the deed at the head would not be written — "
@@ -102,7 +102,7 @@ bool GroundGrowDeedsWritten(uint8_t seat, DeedCopy *head, DeedPen *pen, const ui
     return true;
 }
 
-void GroundGrowOldTailErased(uint8_t seat, uint64_t old_tail, uint8_t *blank)
+void GroundGrowOldTailErased(TagFSVolume* vol, uint8_t seat, uint64_t old_tail, uint8_t *blank)
 {
     /*
      * ‼ THE OLD FAR COPY IS ERASED, AND THAT IS SAFETY AND NOT TIDINESS.
@@ -116,7 +116,7 @@ void GroundGrowOldTailErased(uint8_t seat, uint64_t old_tail, uint8_t *blank)
      * an old data run: block numbers handed out over files.
      */
     memset(blank, 0, DEED_PEN_BYTES);
-    if (tagfs_volume_write(old_tail, DEED_PEN_SECTORS, blank) == 0) {
+    if (tagfs_volume_write(vol, old_tail, DEED_PEN_SECTORS, blank) == 0) {
         kprintf("[TagFS] seat %u: the deed that used to sit at sector %llu "
                 "is inside the data run now and has been erased\n",
                 seat, (unsigned long long)old_tail);

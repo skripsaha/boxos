@@ -1,4 +1,5 @@
 #include "gloss.h"
+#include "tagfs_volume.h"
 
 /*
  * Gloss (gloss.h): a tree of the volume's blocks, GLOSS_FAN slots a node, six
@@ -13,24 +14,12 @@
 #define GLOSS_HEIGHT     11u    /* 6 * 11 = 66 bits: every u64 block */
 #define GLOSS_SPARE_MOST 64u    /* spare nodes kept past a trim */
 
-typedef struct GlossNode GlossNode;
 struct GlossNode {
     uint64_t present;              /* a bit a slot that holds */
     uint32_t level;                /* 0: its slots are digests */
     uint32_t count;                /* slots that hold */
     uint64_t slot[GLOSS_FAN];      /* a digest at level 0, else a GlossNode*; slot[0] chains a spare */
 };
-
-static struct {
-    GlossNode* root;
-    uint32_t   height;
-    uint64_t   entries;
-    GlossNode* spare;
-    uint32_t   nspare;
-    bool       short_said;
-} s_gloss;
-
-static TagFSLock s_gloss_lock = TAGFS_LOCK_INIT("gloss", LOCK_RANK_LEAF);
 
 static uint32_t GlossIndex(uint64_t block, uint32_t level)
 {
@@ -47,9 +36,9 @@ static uint32_t GlossHeightFor(uint64_t block)
     return h;
 }
 
-static bool GlossCovers(uint64_t block)
+static bool GlossCovers(TagFSVolume* vol, uint64_t block)
 {
-    return s_gloss.root && (s_gloss.height >= GLOSS_HEIGHT || (block >> (GLOSS_SHIFT * s_gloss.height)) == 0);
+    return vol->gloss.gloss.root && (vol->gloss.gloss.height >= GLOSS_HEIGHT || (block >> (GLOSS_SHIFT * vol->gloss.gloss.height)) == 0);
 }
 
 // ----------------------------------------------------------------------------
@@ -79,7 +68,7 @@ static uint64_t GlossNodesFor(uint64_t start, uint64_t count)
     return nodes;
 }
 
-error_t GlossRoomFor(const Strip* runs, uint32_t count, GlossRoom* room)
+error_t GlossRoomFor(TagFSVolume* vol, const Strip* runs, uint32_t count, GlossRoom* room)
 {
     uint64_t need = 0;
     room->nodes = NULL;
@@ -87,16 +76,16 @@ error_t GlossRoomFor(const Strip* runs, uint32_t count, GlossRoom* room)
     for (uint32_t i = 0; i < count; i++)
         if (runs[i].kind == STRIP_DATA && runs[i].count)
             need += GlossNodesFor(runs[i].start, runs[i].count);
-    TagFSLockTake(&s_gloss_lock);
-    while (room->count < need && s_gloss.spare) {
-        GlossNode* n = s_gloss.spare;
-        s_gloss.spare = (GlossNode*)(uintptr_t)n->slot[0];
-        s_gloss.nspare--;
+    TagFSLockTake(&vol->gloss.gloss_lock);
+    while (room->count < need && vol->gloss.gloss.spare) {
+        GlossNode* n = vol->gloss.gloss.spare;
+        vol->gloss.gloss.spare = (GlossNode*)(uintptr_t)n->slot[0];
+        vol->gloss.gloss.nspare--;
         n->slot[0]  = (uint64_t)(uintptr_t)room->nodes;
         room->nodes = n;
         room->count++;
     }
-    TagFSLockDrop(&s_gloss_lock);
+    TagFSLockDrop(&vol->gloss.gloss_lock);
     while (room->count < need) {
         GlossNode* n = kmalloc(sizeof(GlossNode));
         if (!n)
@@ -108,36 +97,36 @@ error_t GlossRoomFor(const Strip* runs, uint32_t count, GlossRoom* room)
     return OK;
 }
 
-void GlossRoomLetGo(GlossRoom* room)
+void GlossRoomLetGo(TagFSVolume* vol, GlossRoom* room)
 {
     GlossNode* n = room->nodes;
-    TagFSLockTake(&s_gloss_lock);
+    TagFSLockTake(&vol->gloss.gloss_lock);
     while (n) {
         GlossNode* next = (GlossNode*)(uintptr_t)n->slot[0];
-        n->slot[0]      = (uint64_t)(uintptr_t)s_gloss.spare;
-        s_gloss.spare   = n;
-        s_gloss.nspare++;
+        n->slot[0]      = (uint64_t)(uintptr_t)vol->gloss.gloss.spare;
+        vol->gloss.gloss.spare   = n;
+        vol->gloss.gloss.nspare++;
         n = next;
     }
-    TagFSLockDrop(&s_gloss_lock);
+    TagFSLockDrop(&vol->gloss.gloss_lock);
     room->nodes = NULL;
     room->count = 0;
-    GlossTrim();
+    GlossTrim(vol);
 }
 
 /* A node of `level` from the room, empty; NULL — said once, a defect in a
  * STRICT kernel — when the room is short of the count it was made for. */
-static GlossNode* GlossNodeTaken(GlossRoom* room, uint32_t level)
+static GlossNode* GlossNodeTaken(TagFSVolume* vol, GlossRoom* room, uint32_t level)
 {
     GlossNode* n = room->nodes;
     if (!n) {
 #if CONFIG_STRICT
         panic("[Gloss] DEFECT: a digest was put in with no node left of the room made for it");
 #endif
-        if (!s_gloss.short_said)
+        if (!vol->gloss.gloss.short_said)
             kprintf("[Gloss] DEFECT: a digest was put in with no node left of the room made for it — the block "
                     "it names is refused ERR_CHECKSUM when read\n");
-        s_gloss.short_said = true;
+        vol->gloss.gloss.short_said = true;
         return NULL;
     }
     room->nodes = (GlossNode*)(uintptr_t)n->slot[0];
@@ -152,35 +141,35 @@ static GlossNode* GlossNodeTaken(GlossRoom* room, uint32_t level)
 // ----------------------------------------------------------------------------
 
 /* The tree grown to cover `block`: false when the room was short. */
-static bool GlossGrow(GlossRoom* room, uint64_t block)
+static bool GlossGrow(TagFSVolume* vol, GlossRoom* room, uint64_t block)
 {
-    if (!s_gloss.root) {
+    if (!vol->gloss.gloss.root) {
         uint32_t height = GlossHeightFor(block);
-        if (!(s_gloss.root = GlossNodeTaken(room, height - 1u)))
+        if (!(vol->gloss.gloss.root = GlossNodeTaken(vol, room, height - 1u)))
             return false;
-        s_gloss.height = height;
+        vol->gloss.gloss.height = height;
     }
-    while (!GlossCovers(block)) {
-        GlossNode* up = GlossNodeTaken(room, s_gloss.height);
+    while (!GlossCovers(vol, block)) {
+        GlossNode* up = GlossNodeTaken(vol, room, vol->gloss.gloss.height);
         if (!up)
             return false;
-        up->slot[0]  = (uint64_t)(uintptr_t)s_gloss.root;
+        up->slot[0]  = (uint64_t)(uintptr_t)vol->gloss.gloss.root;
         up->present  = 1u;
         up->count    = 1u;
-        s_gloss.root = up;
-        s_gloss.height++;
+        vol->gloss.gloss.root = up;
+        vol->gloss.gloss.height++;
     }
     return true;
 }
 
-void GlossPut(GlossRoom* room, uint64_t block, uint64_t digest)
+void GlossPut(TagFSVolume* vol, GlossRoom* room, uint64_t block, uint64_t digest)
 {
-    TagFSLockTake(&s_gloss_lock);
-    GlossNode* n = GlossGrow(room, block) ? s_gloss.root : NULL;
-    for (uint32_t l = s_gloss.height - 1u; n && l > 0; l--) {
+    TagFSLockTake(&vol->gloss.gloss_lock);
+    GlossNode* n = GlossGrow(vol, room, block) ? vol->gloss.gloss.root : NULL;
+    for (uint32_t l = vol->gloss.gloss.height - 1u; n && l > 0; l--) {
         uint32_t i = GlossIndex(block, l);
         if (!(n->present & (1ull << i))) {
-            GlossNode* kid = GlossNodeTaken(room, l - 1u);
+            GlossNode* kid = GlossNodeTaken(vol, room, l - 1u);
             if (!kid) {
                 n = NULL;
                 break;
@@ -196,55 +185,55 @@ void GlossPut(GlossRoom* room, uint64_t block, uint64_t digest)
         if (!(n->present & (1ull << i))) {
             n->present |= 1ull << i;
             n->count++;
-            s_gloss.entries++;
+            vol->gloss.gloss.entries++;
         }
         n->slot[i] = digest;
     }
-    TagFSLockDrop(&s_gloss_lock);
+    TagFSLockDrop(&vol->gloss.gloss_lock);
 }
 
-error_t GlossNote(uint64_t block, uint64_t digest)
+error_t GlossNote(TagFSVolume* vol, uint64_t block, uint64_t digest)
 {
     Strip     one  = { .start = block, .count = 1, .kind = STRIP_DATA };
     GlossRoom room;
-    error_t   rc = GlossRoomFor(&one, 1, &room);
+    error_t   rc = GlossRoomFor(vol, &one, 1, &room);
     if (rc == OK)
-        GlossPut(&room, block, digest);
-    GlossRoomLetGo(&room);
+        GlossPut(vol, &room, block, digest);
+    GlossRoomLetGo(vol, &room);
     return rc;
 }
 
 /* Under the lock: the leaf holding `block`, or NULL. */
-static const GlossNode* GlossLeafLocked(uint64_t block)
+static const GlossNode* GlossLeafLocked(TagFSVolume* vol, uint64_t block)
 {
-    const GlossNode* n = GlossCovers(block) ? s_gloss.root : NULL;
-    for (uint32_t l = s_gloss.height - 1u; n && l > 0; l--) {
+    const GlossNode* n = GlossCovers(vol, block) ? vol->gloss.gloss.root : NULL;
+    for (uint32_t l = vol->gloss.gloss.height - 1u; n && l > 0; l--) {
         uint32_t i = GlossIndex(block, l);
         n = n->present & (1ull << i) ? (const GlossNode*)(uintptr_t)n->slot[i] : NULL;
     }
     return n;
 }
 
-bool GlossFind(uint64_t block, uint64_t* digest)
+bool GlossFind(TagFSVolume* vol, uint64_t block, uint64_t* digest)
 {
-    TagFSLockTake(&s_gloss_lock);
-    const GlossNode* leaf = GlossLeafLocked(block);
+    TagFSLockTake(&vol->gloss.gloss_lock);
+    const GlossNode* leaf = GlossLeafLocked(vol, block);
     uint32_t         i    = GlossIndex(block, 0);
     bool             held = leaf && (leaf->present & (1ull << i));
     if (held)
         *digest = leaf->slot[i];
-    TagFSLockDrop(&s_gloss_lock);
+    TagFSLockDrop(&vol->gloss.gloss_lock);
     return held;
 }
 
-bool GlossCopy(uint64_t start, uint64_t count, uint8_t* out)
+bool GlossCopy(TagFSVolume* vol, uint64_t start, uint64_t count, uint8_t* out)
 {
     for (uint64_t b = start; b < start + count;) {
         uint64_t stop = (b | (GLOSS_FAN - 1u)) + 1u;
         if (stop > start + count)
             stop = start + count;
-        TagFSLockTake(&s_gloss_lock);
-        const GlossNode* leaf = GlossLeafLocked(b);
+        TagFSLockTake(&vol->gloss.gloss_lock);
+        const GlossNode* leaf = GlossLeafLocked(vol, b);
         bool             held = leaf != NULL;
         for (; held && b < stop; b++, out += 8) {
             uint32_t i = GlossIndex(b, 0);
@@ -252,7 +241,7 @@ bool GlossCopy(uint64_t start, uint64_t count, uint8_t* out)
             if (held)
                 memcpy(out, &leaf->slot[i], 8);
         }
-        TagFSLockDrop(&s_gloss_lock);
+        TagFSLockDrop(&vol->gloss.gloss_lock);
         if (!held)
             return false;
     }
@@ -264,21 +253,21 @@ bool GlossCopy(uint64_t start, uint64_t count, uint8_t* out)
 // ----------------------------------------------------------------------------
 
 /* Under the lock: `n` emptied, kept spare. */
-static void GlossSpareLocked(GlossNode* n)
+static void GlossSpareLocked(TagFSVolume* vol, GlossNode* n)
 {
-    n->slot[0]    = (uint64_t)(uintptr_t)s_gloss.spare;
-    s_gloss.spare = n;
-    s_gloss.nspare++;
+    n->slot[0]    = (uint64_t)(uintptr_t)vol->gloss.gloss.spare;
+    vol->gloss.gloss.spare = n;
+    vol->gloss.gloss.nspare++;
 }
 
 /* Under the lock: the digest of `block` taken out, and every node it leaves
  * empty with it. The blocks past `block` the walk found no node for: *skip. */
-static void GlossForgetOneLocked(uint64_t block, uint64_t* skip)
+static void GlossForgetOneLocked(TagFSVolume* vol, uint64_t block, uint64_t* skip)
 {
     GlossNode* path[GLOSS_HEIGHT];
     uint32_t   at[GLOSS_HEIGHT];
-    GlossNode* n = s_gloss.root;
-    uint32_t   l = s_gloss.height - 1u;
+    GlossNode* n = vol->gloss.gloss.root;
+    uint32_t   l = vol->gloss.gloss.height - 1u;
     *skip = 1;
     for (;; l--) {
         uint32_t i = GlossIndex(block, l);
@@ -293,46 +282,46 @@ static void GlossForgetOneLocked(uint64_t block, uint64_t* skip)
             break;
         n = (GlossNode*)(uintptr_t)n->slot[i];
     }
-    for (l = 0; l < s_gloss.height; l++) {
+    for (l = 0; l < vol->gloss.gloss.height; l++) {
         n = path[l];
         n->present &= ~(1ull << at[l]);
         n->count--;
         if (l == 0)
-            s_gloss.entries--;
+            vol->gloss.gloss.entries--;
         if (n->count != 0)
             return;
-        GlossSpareLocked(n);
+        GlossSpareLocked(vol, n);
     }
-    s_gloss.root   = NULL;
-    s_gloss.height = 0;
+    vol->gloss.gloss.root   = NULL;
+    vol->gloss.gloss.height = 0;
 }
 
-void GlossForget(uint64_t start, uint64_t count)
+void GlossForget(TagFSVolume* vol, uint64_t start, uint64_t count)
 {
-    TagFSLockTake(&s_gloss_lock);
-    for (uint64_t b = start; b < start + count && s_gloss.root;) {
+    TagFSLockTake(&vol->gloss.gloss_lock);
+    for (uint64_t b = start; b < start + count && vol->gloss.gloss.root;) {
         uint64_t skip = 1;
-        if (GlossCovers(b))
-            GlossForgetOneLocked(b, &skip);
+        if (GlossCovers(vol, b))
+            GlossForgetOneLocked(vol, b, &skip);
         else
             break;
         b = skip > start + count - b ? start + count : b + skip;
     }
-    TagFSLockDrop(&s_gloss_lock);
+    TagFSLockDrop(&vol->gloss.gloss_lock);
 }
 
-void GlossTrim(void)
+void GlossTrim(TagFSVolume* vol)
 {
     GlossNode* gone = NULL;
-    TagFSLockTake(&s_gloss_lock);
-    while (s_gloss.nspare > GLOSS_SPARE_MOST) {
-        GlossNode* n  = s_gloss.spare;
-        s_gloss.spare = (GlossNode*)(uintptr_t)n->slot[0];
-        s_gloss.nspare--;
+    TagFSLockTake(&vol->gloss.gloss_lock);
+    while (vol->gloss.gloss.nspare > GLOSS_SPARE_MOST) {
+        GlossNode* n  = vol->gloss.gloss.spare;
+        vol->gloss.gloss.spare = (GlossNode*)(uintptr_t)n->slot[0];
+        vol->gloss.gloss.nspare--;
         n->slot[0] = (uint64_t)(uintptr_t)gone;
         gone       = n;
     }
-    TagFSLockDrop(&s_gloss_lock);
+    TagFSLockDrop(&vol->gloss.gloss_lock);
     while (gone) {
         GlossNode* next = (GlossNode*)(uintptr_t)gone->slot[0];
         kfree(gone);
@@ -340,16 +329,16 @@ void GlossTrim(void)
     }
 }
 
-void GlossLetGo(void)
+void GlossLetGo(TagFSVolume* vol)
 {
     GlossNode* path[GLOSS_HEIGHT];
     uint32_t   at[GLOSS_HEIGHT];
     uint32_t   depth = 0;
-    TagFSLockTake(&s_gloss_lock);
-    GlossNode* root  = s_gloss.root;
-    GlossNode* spare = s_gloss.spare;
-    memset(&s_gloss, 0, sizeof(s_gloss));
-    TagFSLockDrop(&s_gloss_lock);
+    TagFSLockTake(&vol->gloss.gloss_lock);
+    GlossNode* root  = vol->gloss.gloss.root;
+    GlossNode* spare = vol->gloss.gloss.spare;
+    memset(&vol->gloss.gloss, 0, sizeof(vol->gloss.gloss));
+    TagFSLockDrop(&vol->gloss.gloss_lock);
     if (root) {
         path[0] = root;
         at[0]   = 0;
@@ -377,11 +366,17 @@ void GlossLetGo(void)
 }
 
 #ifdef CONFIG_VOLUME_TESTS
-uint64_t GlossStandCount(void)
+uint64_t GlossStandCount(TagFSVolume* vol)
 {
-    TagFSLockTake(&s_gloss_lock);
-    uint64_t n = s_gloss.entries;
-    TagFSLockDrop(&s_gloss_lock);
+    TagFSLockTake(&vol->gloss.gloss_lock);
+    uint64_t n = vol->gloss.gloss.entries;
+    TagFSLockDrop(&vol->gloss.gloss_lock);
     return n;
 }
 #endif
+
+/* The volume's gloss part as it begins: what was not nothing. */
+void GlossVolumeBegin(TagFSVolume* vol)
+{
+    vol->gloss.gloss_lock = (TagFSLock)TAGFS_LOCK_INIT("gloss", LOCK_RANK_LEAF);
+}

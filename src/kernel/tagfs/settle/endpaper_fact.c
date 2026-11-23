@@ -4,6 +4,7 @@
 #include "../mount/book_mount.h"
 #include "../mount/book_unit.h"
 #include "../tag_registry/tag_registry.h"
+#include "tagfs_volume.h"
 
 /*
  * ‼ THE NEXT TALLY BY WHAT THE LAST ONE TOOK. A measure from above of a whole
@@ -126,31 +127,6 @@
 #define ENDPAPER_HUGE      (1ull << 40)   /* counts past this are not counts: no measure by the last Tally */
 #define ENDPAPER_TAKES_OUT UINT64_MAX     /* the factor of a count taken out: minus one, modulo 2^64 */
 
-/* The growth since a Tally of seq `seq`, or what is owed. */
-typedef struct {
-    bool     on;
-    uint64_t seq;          /* the Tally's: a file whose gen is past it changed since */
-    uint64_t fid;          /* past every file id it held */
-    uint64_t sites;        /* FILES: the places files it held changed at ... */
-    uint64_t bytes;        /* ... and their items, at the widest */
-    uint64_t tail;         /* FILES: the items of the files past `fid`, at the widest ... */
-    uint64_t tail_big;     /* ... and those longer than ENDPAPER_SMALL */
-    uint64_t long_blocks;  /* FILES: the nodes of items longer than a leaf's room */
-    uint64_t dsites;       /* DIGESTS: windows run into before its last leaf's first key ... */
-    uint64_t dtail;        /* ... at or past it ... */
-    uint64_t dbytes;       /* ... and their elements, at the widest */
-} EndpaperSince;
-
-static EndpaperLaid  s_laid;                       /* the Tally `s_since` counts from */
-static EndpaperSince s_since;                      /* settled since the last Tally known */
-static EndpaperSince s_pending;                    /* settled since the slice of the Tally under way */
-static EndpaperSince s_inked   = { .on = true };   /* owed: the Docket's Jots and the data inked for them */
-static EndpaperSince s_sewing  = { .on = true };   /* owed: the stitch in flight's */
-static EndpaperSince s_staked  = { .on = true };   /* what the Plots' Stakes may add once inked */
-static uint32_t      s_staked_epoch;               /* the mounting `s_staked` counts Plots of */
-static volatile uint64_t s_staked_files;           /* ... from above, in bytes of FILES */
-static volatile uint64_t s_staked_digests;         /* ... and of DIGESTS */
-static volatile uint8_t  s_grown;                  /* whether growth past the last Tally is held: published */
 
 static bool SinceGrown(const EndpaperSince* a)
 {
@@ -160,20 +136,20 @@ static bool SinceGrown(const EndpaperSince* a)
 /* Whether what settled since the last Tally or is owed holds growth a Tally
  * would lay to the block — or no Tally is known: published under the state
  * lock wherever either changes, read lock-free (EndpaperGrown). */
-static void SinceSaid(void)
+static void SinceSaid(TagFSVolume* vol)
 {
-    bool grown = !s_since.on || SinceGrown(&s_since) || SinceGrown(&s_inked) || SinceGrown(&s_sewing);
-    __atomic_store_n(&s_grown, grown ? 1u : 0u, __ATOMIC_RELEASE);
+    bool grown = !vol->endpaper_fact.since.on || SinceGrown(&vol->endpaper_fact.since) || SinceGrown(&vol->endpaper_fact.inked) || SinceGrown(&vol->endpaper_fact.sewing);
+    __atomic_store_n(&vol->endpaper_fact.grown, grown ? 1u : 0u, __ATOMIC_RELEASE);
 }
 
-bool EndpaperGrown(void)
+bool EndpaperGrown(TagFSVolume* vol)
 {
-    return __atomic_load_n(&s_grown, __ATOMIC_ACQUIRE) != 0;
+    return __atomic_load_n(&vol->endpaper_fact.grown, __ATOMIC_ACQUIRE) != 0;
 }
 
-static uint64_t FactGrid(void)
+static uint64_t FactGrid(TagFSVolume* vol)
 {
-    return g_book.atom > TAGFS_BLOCK_SIZE ? g_book.atom / TAGFS_BLOCK_SIZE : 1u;
+    return vol->book.atom > TAGFS_BLOCK_SIZE ? vol->book.atom / TAGFS_BLOCK_SIZE : 1u;
 }
 
 void EndpaperLaidNode(EndpaperLaid* l, uint64_t tree, uint64_t level, uint64_t sheets, uint64_t grid,
@@ -331,11 +307,11 @@ static void SinceGround(EndpaperSince* a, uint64_t start, uint64_t count, uint64
     }
 }
 
-static void SinceStrip(EndpaperSince* since, EndpaperSince* pending, const Strip* s)
+static void SinceStrip(TagFSVolume* vol, EndpaperSince* since, EndpaperSince* pending, const Strip* s)
 {
     if (s->kind != STRIP_DATA)
         return;
-    SinceGround(since, s->start, s->count, s_laid.digests_last);
+    SinceGround(since, s->start, s->count, vol->endpaper_fact.laid.digests_last);
     SinceGround(pending, s->start, s->count, UINT64_MAX);    /* its last leaf is not laid yet */
 }
 
@@ -343,12 +319,12 @@ static void SinceStrip(EndpaperSince* since, EndpaperSince* pending, const Strip
  * to take it out — counted from its records alone, so taken out as it was put
  * in: its file's items whole, the gen at its widest (no stitch gave it yet); a
  * file born since a stitch last settled in the tail, any other a place. */
-static void OwedJot(EndpaperSince* a, const Jot* j, uint64_t k)
+static void OwedJot(TagFSVolume* vol, EndpaperSince* a, const Jot* j, uint64_t k)
 {
     EndpaperItems it;
     if (!j->now)
         return;
-    FileItems(j->now, j->fid, UINT64_MAX, FactGrid(), &it);
+    FileItems(j->now, j->fid, UINT64_MAX, FactGrid(vol), &it);
     a->long_blocks += k * it.long_blocks;
     if (!j->was) {
         a->tail     += k * it.bytes;
@@ -371,46 +347,46 @@ static void OwedAdd(EndpaperSince* to, const EndpaperSince* from)
     to->dbytes      += from->dbytes;
 }
 
-void EndpaperJotIn(const Jot* j)
+void EndpaperJotIn(TagFSVolume* vol, const Jot* j)
 {
-    OwedJot(&s_inked, j, 1u);
-    SinceSaid();
+    OwedJot(vol, &vol->endpaper_fact.inked, j, 1u);
+    SinceSaid(vol);
 }
 
-void EndpaperJotOut(const Jot* j)
+void EndpaperJotOut(TagFSVolume* vol, const Jot* j)
 {
-    OwedJot(&s_inked, j, ENDPAPER_TAKES_OUT);
-    SinceSaid();
+    OwedJot(vol, &vol->endpaper_fact.inked, j, ENDPAPER_TAKES_OUT);
+    SinceSaid(vol);
 }
 
 /* Each window the Strips put in lie in, a place: wherever the next Tally's
  * last leaf begins, a place before it is the more. */
-void EndpaperInked(const BookSplice* sp, uint64_t nsp)
+void EndpaperInked(TagFSVolume* vol, const BookSplice* sp, uint64_t nsp)
 {
     for (uint64_t i = 0; i < nsp; i++)
         for (uint64_t k = 0; k < sp[i].ninsert; k++)
             if (sp[i].insert[k].kind == STRIP_DATA)
-                SinceGround(&s_inked, sp[i].insert[k].start, sp[i].insert[k].count, UINT64_MAX);
-    SinceSaid();
+                SinceGround(&vol->endpaper_fact.inked, sp[i].insert[k].start, sp[i].insert[k].count, UINT64_MAX);
+    SinceSaid(vol);
 }
 
-void EndpaperDocketTaken(void)
+void EndpaperDocketTaken(TagFSVolume* vol)
 {
-    OwedAdd(&s_sewing, &s_inked);
-    s_inked = (EndpaperSince){ .on = true };
+    OwedAdd(&vol->endpaper_fact.sewing, &vol->endpaper_fact.inked);
+    vol->endpaper_fact.inked = (EndpaperSince){ .on = true };
 }
 
-void EndpaperDocketBack(void)
+void EndpaperDocketBack(TagFSVolume* vol)
 {
-    OwedAdd(&s_inked, &s_sewing);
-    s_sewing = (EndpaperSince){ .on = true };
+    OwedAdd(&vol->endpaper_fact.inked, &vol->endpaper_fact.sewing);
+    vol->endpaper_fact.sewing = (EndpaperSince){ .on = true };
 }
 
-void EndpaperDocketDropped(void)
+void EndpaperDocketDropped(TagFSVolume* vol)
 {
-    s_inked  = (EndpaperSince){ .on = true };
-    s_sewing = (EndpaperSince){ .on = true };
-    SinceSaid();
+    vol->endpaper_fact.inked  = (EndpaperSince){ .on = true };
+    vol->endpaper_fact.sewing = (EndpaperSince){ .on = true };
+    SinceSaid(vol);
 }
 
 // ----------------------------------------------------------------------------
@@ -440,21 +416,21 @@ void EndpaperDocketDropped(void)
  * hold of the state lock that counts its Jot and what it put in (ink_book.c);
  * a Plot that gives its Stakes back, with them.
  */
-static void StakesCount(const EndpaperStakes* e, uint64_t k)
+static void StakesCount(TagFSVolume* vol, const EndpaperStakes* e, uint64_t k)
 {
-    s_staked.sites       += k * e->sites;
-    s_staked.bytes       += k * e->bytes;
-    s_staked.long_blocks += k * e->long_blocks;
-    s_staked.dsites      += k * e->dsites;
-    s_staked.dbytes      += k * e->dbytes;
-    __atomic_add_fetch(&s_staked_files, k * e->files_bytes, __ATOMIC_RELEASE);
-    __atomic_add_fetch(&s_staked_digests, k * e->digests_bytes, __ATOMIC_RELEASE);
+    vol->endpaper_fact.staked.sites       += k * e->sites;
+    vol->endpaper_fact.staked.bytes       += k * e->bytes;
+    vol->endpaper_fact.staked.long_blocks += k * e->long_blocks;
+    vol->endpaper_fact.staked.dsites      += k * e->dsites;
+    vol->endpaper_fact.staked.dbytes      += k * e->dbytes;
+    __atomic_add_fetch(&vol->endpaper_fact.staked_files, k * e->files_bytes, __ATOMIC_RELEASE);
+    __atomic_add_fetch(&vol->endpaper_fact.staked_digests, k * e->digests_bytes, __ATOMIC_RELEASE);
 }
 
-void EndpaperStakesFile(EndpaperStakes* e, const FileRecord* rec, uint64_t fid, uint64_t runs, uint64_t blocks)
+void EndpaperStakesFile(TagFSVolume* vol, EndpaperStakes* e, const FileRecord* rec, uint64_t fid, uint64_t runs, uint64_t blocks)
 {
     EndpaperItems it;
-    FileItemsAs(rec, fid, UINT64_MAX, FactGrid(), runs, blocks, &it);
+    FileItemsAs(rec, fid, UINT64_MAX, FactGrid(vol), runs, blocks, &it);
     memset(e, 0, sizeof(*e));
     e->sites       = 1u;
     e->bytes       = it.bytes + TALLY_KEY_MOST;
@@ -479,39 +455,39 @@ void EndpaperStakesRun(EndpaperStakes* e, uint64_t start, uint64_t count)
     e->digests_bytes += (4u + windows) * (TALLY_ITEM_HEAD_MOST + TALLY_DIGEST_HEAD_MOST) + 8u * count;
 }
 
-void EndpaperStakesGoneLocked(const EndpaperStakes* held)
+void EndpaperStakesGoneLocked(TagFSVolume* vol, const EndpaperStakes* held)
 {
-    if (held->epoch && held->epoch == s_staked_epoch)
-        StakesCount(held, ENDPAPER_TAKES_OUT);
+    if (held->epoch && held->epoch == vol->endpaper_fact.staked_epoch)
+        StakesCount(vol, held, ENDPAPER_TAKES_OUT);
 }
 
-void EndpaperStakesSet(EndpaperStakes* held, const EndpaperStakes* now)
+void EndpaperStakesSet(TagFSVolume* vol, EndpaperStakes* held, const EndpaperStakes* now)
 {
-    TagFSLock* lock  = &tagfs_get_state()->lock;
-    uint32_t   epoch = tagfs_mount_epoch();
+    TagFSLock* lock  = &vol->state.lock;
+    uint32_t   epoch = tagfs_mount_epoch(vol);
     TagFSLockTake(lock);
-    EndpaperStakesGoneLocked(held);
+    EndpaperStakesGoneLocked(vol, held);
     memset(held, 0, sizeof(*held));
-    if (now && epoch && s_staked_epoch != epoch) {
+    if (now && epoch && vol->endpaper_fact.staked_epoch != epoch) {
         /* The first Plot of a mounting counts from none: a Plot of the one
          * before is counted in no measure of this one. */
-        s_staked       = (EndpaperSince){ .on = true };
-        s_staked_epoch = epoch;
-        __atomic_store_n(&s_staked_files, 0, __ATOMIC_RELEASE);
-        __atomic_store_n(&s_staked_digests, 0, __ATOMIC_RELEASE);
+        vol->endpaper_fact.staked       = (EndpaperSince){ .on = true };
+        vol->endpaper_fact.staked_epoch = epoch;
+        __atomic_store_n(&vol->endpaper_fact.staked_files, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&vol->endpaper_fact.staked_digests, 0, __ATOMIC_RELEASE);
     }
     if (now && epoch) {
         *held       = *now;
         held->epoch = epoch;
-        StakesCount(held, 1u);
+        StakesCount(vol, held, 1u);
     }
     TagFSLockDrop(lock);
 }
 
-void EndpaperStakesAbove(uint64_t* files_bytes, uint64_t* digests_bytes)
+void EndpaperStakesAbove(TagFSVolume* vol, uint64_t* files_bytes, uint64_t* digests_bytes)
 {
-    *files_bytes   = __atomic_load_n(&s_staked_files, __ATOMIC_ACQUIRE);
-    *digests_bytes = __atomic_load_n(&s_staked_digests, __ATOMIC_ACQUIRE);
+    *files_bytes   = __atomic_load_n(&vol->endpaper_fact.staked_files, __ATOMIC_ACQUIRE);
+    *digests_bytes = __atomic_load_n(&vol->endpaper_fact.staked_digests, __ATOMIC_ACQUIRE);
 }
 
 // ----------------------------------------------------------------------------
@@ -603,17 +579,17 @@ static uint64_t TagsMost(const EndpaperView* v, uint64_t tags, uint64_t text)
     return l->tags_blocks + (more + sheets) * v->grid + EndpaperInnerBlocks(l->tags_leaves + more, v->grid);
 }
 
-void EndpaperFactMost(uint64_t* files, uint64_t* digests, uint64_t* tags)
+void EndpaperFactMost(TagFSVolume* vol, uint64_t* files, uint64_t* digests, uint64_t* tags)
 {
-    TagFSLock*   lock = &tagfs_get_state()->lock;
+    TagFSLock*   lock = &vol->state.lock;
     EndpaperView v;
     uint64_t     ntags = 0, text = 0;
     TagFSLockTake(lock);
-    v.laid  = s_laid;
-    v.since = s_since;
-    v.owed  = s_inked;
-    OwedAdd(&v.owed, &s_sewing);
-    OwedAdd(&v.owed, &s_staked);
+    v.laid  = vol->endpaper_fact.laid;
+    v.since = vol->endpaper_fact.since;
+    v.owed  = vol->endpaper_fact.inked;
+    OwedAdd(&v.owed, &vol->endpaper_fact.sewing);
+    OwedAdd(&v.owed, &vol->endpaper_fact.staked);
     TagFSLockDrop(lock);
     *files = *digests = *tags = UINT64_MAX;
     if (!v.since.on || SinceHuge(&v.since) || SinceHuge(&v.owed) || v.laid.runs >= ENDPAPER_HUGE ||
@@ -622,15 +598,15 @@ void EndpaperFactMost(uint64_t* files, uint64_t* digests, uint64_t* tags)
     /* The next Tally's seq is past every one given, and past the tries the
      * medium may refuse before a stitch settles — at most one a sector of the
      * next_quire (§16.4 п.4). */
-    uint64_t last = BookSeqSeen() + RibbonCursorNow()->quire_blocks * TAGFS_BLOCK_SECTORS;
+    uint64_t last = BookSeqSeen(vol) + RibbonCursorNow(vol)->quire_blocks * TAGFS_BLOCK_SECTORS;
     v.seqs = last >= v.since.seq ? last + 1u - v.since.seq : 1u;
-    v.grid = FactGrid();
+    v.grid = FactGrid(vol);
     if (!(v.laid.rot & (1u << TALLY_FILES)))
         *files = FilesMost(&v);
     if (!(v.laid.rot & (1u << TALLY_DIGESTS)))
         *digests = DigestsMost(&v);
-    if (!(v.laid.rot & (1u << TALLY_TAGS)) && tagfs_get_state()->registry) {
-        TagRegistryTextBytes(tagfs_get_state()->registry, &ntags, &text);
+    if (!(v.laid.rot & (1u << TALLY_TAGS)) && vol->state.registry) {
+        TagRegistryTextBytes(vol->state.registry, &ntags, &text);
         if (ntags < ENDPAPER_HUGE && text < ENDPAPER_HUGE)
             *tags = TagsMost(&v, ntags, text);
     }
@@ -640,107 +616,115 @@ void EndpaperFactMost(uint64_t* files, uint64_t* digests, uint64_t* tags)
 // What moved
 // ----------------------------------------------------------------------------
 
-void EndpaperTallyBegun(uint64_t seq, uint64_t next_fid)
+void EndpaperTallyBegun(TagFSVolume* vol, uint64_t seq, uint64_t next_fid)
 {
-    s_pending = (EndpaperSince){ .on = true, .seq = seq, .fid = next_fid };
+    vol->endpaper_fact.pending = (EndpaperSince){ .on = true, .seq = seq, .fid = next_fid };
 }
 
-void EndpaperTallyLaid(const EndpaperLaid* l)
+void EndpaperTallyLaid(TagFSVolume* vol, const EndpaperLaid* l)
 {
-    TagFSLock* lock = &tagfs_get_state()->lock;
-    if (l && s_pending.on) {
+    TagFSLock* lock = &vol->state.lock;
+    if (l && vol->endpaper_fact.pending.on) {
         TagFSLockTake(lock);
-        s_laid  = *l;
-        s_since = s_pending;
-        SinceSaid();
+        vol->endpaper_fact.laid  = *l;
+        vol->endpaper_fact.since = vol->endpaper_fact.pending;
+        SinceSaid(vol);
         TagFSLockDrop(lock);
     }
-    memset(&s_pending, 0, sizeof(s_pending));
+    memset(&vol->endpaper_fact.pending, 0, sizeof(vol->endpaper_fact.pending));
 }
 
 /* The ground a settled Jot's records put in: every run of a Born, the runs
  * the splices of a Shaped put in — a Jot of any kind with splices carries one
  * (docket.c, JotChangedPut). */
-static void GrewGround(const Jot* j, EndpaperSince* since, EndpaperSince* pending)
+static void GrewGround(TagFSVolume* vol, const Jot* j, EndpaperSince* since, EndpaperSince* pending)
 {
     if (j->kind == JOT_BORN && j->now) {
         StripWalk w;
         Strip     s;
         StripWalkBegin(j->now, &w);
         while (StripWalkNextGround(&w, &s))
-            SinceStrip(since, pending, &s);
+            SinceStrip(vol, since, pending, &s);
         return;
     }
     uint64_t n = 0;
     for (uint64_t i = 0; i < j->nsplices; i++)
         n += j->splices[i].ninsert;
     for (uint64_t i = 0; i < n; i++)
-        SinceStrip(since, pending, &j->inserted[i]);
+        SinceStrip(vol, since, pending, &j->inserted[i]);
 }
 
-void EndpaperGrew(const DocketTaken* t, uint64_t seq)
+void EndpaperGrew(TagFSVolume* vol, const DocketTaken* t, uint64_t seq)
 {
-    TagFSLock*    lock    = &tagfs_get_state()->lock;
-    EndpaperSince since   = s_since;
-    uint64_t      grid    = FactGrid();
+    TagFSLock*    lock    = &vol->state.lock;
+    EndpaperSince since   = vol->endpaper_fact.since;
+    uint64_t      grid    = FactGrid(vol);
     for (const Jot* j = t->first; j; j = j->next[0]) {
         if (!j->carried)
             continue;       /* nothing of the file differs: what it was counted at stands */
         uint64_t was_gen = j->was ? __atomic_load_n(&j->was->gen, __ATOMIC_RELAXED) : 0;
         SinceFile(&since, j->fid, j->was, was_gen, j->now, seq, grid);
-        SinceFile(&s_pending, j->fid, j->was, was_gen, j->now, seq, grid);
-        GrewGround(j, &since, &s_pending);
+        SinceFile(&vol->endpaper_fact.pending, j->fid, j->was, was_gen, j->now, seq, grid);
+        GrewGround(vol, j, &since, &vol->endpaper_fact.pending);
     }
     TagFSLockTake(lock);
-    s_since  = since;
-    s_sewing = (EndpaperSince){ .on = true };
-    SinceSaid();
+    vol->endpaper_fact.since  = since;
+    vol->endpaper_fact.sewing = (EndpaperSince){ .on = true };
+    SinceSaid(vol);
     TagFSLockDrop(lock);
 }
 
 /* A file the mount replayed a stitch of past the Tally: in whole, and the
  * ground its stitches put in. */
-static void StoodFile(uint64_t fid, const FileRecord* rec, uint64_t grid)
+static void StoodFile(TagFSVolume* vol, uint64_t fid, const FileRecord* rec, uint64_t grid)
 {
     StripWalk w;
     Strip     s;
-    SinceFile(&s_since, fid, NULL, 0, rec, rec->gen, grid);
+    SinceFile(&vol->endpaper_fact.since, fid, NULL, 0, rec, rec->gen, grid);
     StripWalkBegin(rec, &w);
     while (StripWalkNextGround(&w, &s))
-        if (s.kind == STRIP_DATA && s.birth > s_since.seq)     /* a run SHARED lays no element of DIGESTS */
-            SinceGround(&s_since, s.start, s.count, s_laid.digests_last);
+        if (s.kind == STRIP_DATA && s.birth > vol->endpaper_fact.since.seq)     /* a run SHARED lays no element of DIGESTS */
+            SinceGround(&vol->endpaper_fact.since, s.start, s.count, vol->endpaper_fact.laid.digests_last);
 }
 
-void EndpaperStood(const EndpaperLaid* l, uint64_t seq, uint64_t next_fid)
+void EndpaperStood(TagFSVolume* vol, const EndpaperLaid* l, uint64_t seq, uint64_t next_fid)
 {
-    FileMap* map  = tagfs_get_state()->files;
-    uint64_t grid = FactGrid(), from = 0, ids[32];
+    FileMap* map  = vol->state.files;
+    uint64_t grid = FactGrid(vol), from = 0, ids[32];
     uint32_t n;
-    s_laid    = *l;
-    s_since   = (EndpaperSince){ .on = true, .seq = seq, .fid = next_fid };
-    memset(&s_pending, 0, sizeof(s_pending));
-    EndpaperDocketDropped();
+    vol->endpaper_fact.laid    = *l;
+    vol->endpaper_fact.since   = (EndpaperSince){ .on = true, .seq = seq, .fid = next_fid };
+    memset(&vol->endpaper_fact.pending, 0, sizeof(vol->endpaper_fact.pending));
+    EndpaperDocketDropped(vol);
     while (map && (n = FileMapFiles(map, from, ids, 32)) > 0) {
         for (uint32_t i = 0; i < n; i++) {
             FileRecord* rec = FileMapRecordHold(map, ids[i], NULL);
             if (rec && __atomic_load_n(&rec->gen, __ATOMIC_RELAXED) > seq)
-                StoodFile(ids[i], rec, grid);
+                StoodFile(vol, ids[i], rec, grid);
             if (rec)
                 FileRecordRelease(rec);
         }
         from = ids[n - 1] + 1u;
     }
-    SinceSaid();
+    SinceSaid(vol);
 }
 
-void EndpaperForget(void)
+void EndpaperForget(TagFSVolume* vol)
 {
-    memset(&s_laid, 0, sizeof(s_laid));
-    memset(&s_since, 0, sizeof(s_since));
-    memset(&s_pending, 0, sizeof(s_pending));
-    s_staked       = (EndpaperSince){ .on = true };
-    s_staked_epoch = 0;
-    __atomic_store_n(&s_staked_files, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_staked_digests, 0, __ATOMIC_RELEASE);
-    EndpaperDocketDropped();
+    memset(&vol->endpaper_fact.laid, 0, sizeof(vol->endpaper_fact.laid));
+    memset(&vol->endpaper_fact.since, 0, sizeof(vol->endpaper_fact.since));
+    memset(&vol->endpaper_fact.pending, 0, sizeof(vol->endpaper_fact.pending));
+    vol->endpaper_fact.staked       = (EndpaperSince){ .on = true };
+    vol->endpaper_fact.staked_epoch = 0;
+    __atomic_store_n(&vol->endpaper_fact.staked_files, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->endpaper_fact.staked_digests, 0, __ATOMIC_RELEASE);
+    EndpaperDocketDropped(vol);
+}
+
+/* The volume's endpaper_fact part as it begins: what was not nothing. */
+void EndpaperFactVolumeBegin(TagFSVolume* vol)
+{
+    vol->endpaper_fact.inked = (EndpaperSince){ .on = true };
+    vol->endpaper_fact.sewing = (EndpaperSince){ .on = true };
+    vol->endpaper_fact.staked = (EndpaperSince){ .on = true };
 }

@@ -56,7 +56,7 @@ bool            TailSlipOn(const FileRecord* rec, uint64_t k);
  * to a reference of its own — a new TailSlip only where the cut takes a byte.
  * OK, or ERR_NO_MEMORY with rec->slip NULL.
  */
-error_t         TailSlipKept(const FileRecord* old, FileRecord* rec, bool spliced);
+error_t         TailSlipKept(TagFSVolume* vol, const FileRecord* old, FileRecord* rec, bool spliced);
 
 /* The span the Slips cover, from the first byte they cover to the last:
  * [*lo, *lo + the answer), 0 for none. */

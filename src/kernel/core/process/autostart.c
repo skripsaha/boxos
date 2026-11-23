@@ -84,12 +84,12 @@ static uint64_t autostart_find(const char *name)
     TagFSPage page;
     uint64_t  from = 1;
     do {
-        if (TagFSNamedPage(TagOwnerPerson(), name, strlen(name), NULL, 0, NULL, 0, from, file_ids,
+        if (TagFSNamedPage(TagFSHome(), TagOwnerPerson(), name, strlen(name), NULL, 0, NULL, 0, from, file_ids,
                            ARRAY_SIZE(file_ids), false, &page) != OK)
             return 0;
         for (uint32_t i = 0; i < page.delivered; i++) {
             TagFSMetadata meta;
-            if (tagfs_get_metadata(file_ids[i], &meta) != 0) continue;
+            if (tagfs_get_metadata(TagFSHome(), file_ids[i], &meta) != 0) continue;
             bool found = (meta.flags & TAGFS_FILE_ACTIVE) && !(meta.flags & TAGFS_FILE_DELETED) &&
                          strcmp(meta.filename, name) == 0;
             tagfs_metadata_free(&meta);
@@ -116,7 +116,7 @@ static process_t *autostart_launch_one(uint64_t file_id, TagFSMetadata *meta,
 
     /* The file is read where the loader asks: a box only as far as starting
      * it needs, an image of another kind whole (image_load.h). */
-    TagFSFileHandle *fh = tagfs_open(file_id, TAGFS_HANDLE_READ);
+    TagFSFileHandle *fh = tagfs_open(TagFSHome(), file_id, TAGFS_HANDLE_READ);
     if (!fh) {
         kprintf("[AUTOSTART] Skip '%s': tagfs_open failed\n", meta->filename);
         return NULL;
@@ -124,14 +124,14 @@ static process_t *autostart_launch_one(uint64_t file_id, TagFSMetadata *meta,
 
     process_t *proc = process_create(tags);
     if (!proc) {
-        tagfs_close(fh);
+        tagfs_close(TagFSHome(), fh);
         kprintf("[AUTOSTART] Skip '%s': process_create failed\n", meta->filename);
         return NULL;
     }
 
     ImageSource source      = { file_size, fh, NULL, file_id };
     int         load_result = process_load_binary(proc, &source, meta->filename);
-    tagfs_close(fh);
+    tagfs_close(TagFSHome(), fh);
     if (load_result != 0) {
         process_destroy(proc);
         kprintf("[AUTOSTART] Skip '%s': load_binary failed (%d)\n",
@@ -207,7 +207,7 @@ static void AutostartLetRun(AutostartHeld *held)
 static process_t *autostart_consider(uint64_t file_id, bool again)
 {
     TagFSMetadata meta;
-    if (tagfs_get_metadata(file_id, &meta) != 0) return NULL;
+    if (tagfs_get_metadata(TagFSHome(), file_id, &meta) != 0) return NULL;
     if (!(meta.flags & TAGFS_FILE_ACTIVE) || (meta.flags & TAGFS_FILE_DELETED)) {
         tagfs_metadata_free(&meta);
         return NULL;

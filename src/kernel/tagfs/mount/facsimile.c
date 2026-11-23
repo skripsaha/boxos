@@ -2,6 +2,7 @@
 #include "book_mount.h"
 #include "ribbon.h"
 #include "../settle/dog_ear.h"
+#include "tagfs_volume.h"
 
 /*
  * Facsimile (facsimile.h). The walk of the Tally stood on notes each rotten
@@ -60,16 +61,6 @@
  * (book_ground.c, BookGroundOlder).
  */
 
-typedef struct {
-    uint64_t   tree;
-    TallyPlace at;
-    bool       taken;
-    char       why[160];
-} FacsimileRange;
-
-static FacsimileRange* s_ranges;
-static uint32_t        s_nranges;
-static uint32_t        s_capranges;
 
 /* Ranges first..last of one tree whose keys reach into each other, and the
  * keys [lo, hi) of k1 they reach together (UINT64_MAX: to the tree's end). */
@@ -107,20 +98,20 @@ typedef struct {
     uint64_t    capheld;
 } FacsimileLook;
 
-error_t FacsimileRotNoted(uint64_t tree, const TallyPlace* at, const char* why)
+error_t FacsimileRotNoted(TagFSVolume* vol, uint64_t tree, const TallyPlace* at, const char* why)
 {
-    if (s_nranges == s_capranges) {
-        uint32_t        cap  = s_capranges ? s_capranges * 2u : 4u;
+    if (vol->facsimile.nranges == vol->facsimile.capranges) {
+        uint32_t        cap  = vol->facsimile.capranges ? vol->facsimile.capranges * 2u : 4u;
         FacsimileRange* more = kmalloc(sizeof(FacsimileRange) * cap);
         if (!more)
             return ERR_NO_MEMORY;
-        if (s_nranges)
-            memcpy(more, s_ranges, sizeof(FacsimileRange) * s_nranges);
-        kfree(s_ranges);
-        s_ranges    = more;
-        s_capranges = cap;
+        if (vol->facsimile.nranges)
+            memcpy(more, vol->facsimile.ranges, sizeof(FacsimileRange) * vol->facsimile.nranges);
+        kfree(vol->facsimile.ranges);
+        vol->facsimile.ranges    = more;
+        vol->facsimile.capranges = cap;
     }
-    FacsimileRange* r = &s_ranges[s_nranges++];
+    FacsimileRange* r = &vol->facsimile.ranges[vol->facsimile.nranges++];
     r->tree  = tree;
     r->at    = *at;
     r->taken = false;
@@ -142,14 +133,14 @@ static void RangeKeys(const FacsimileRange* r, uint64_t* lo, uint64_t* hi)
 /* The group that begins at range `first`: the walk noted a tree's ranges one
  * after another in key order, so ranges that reach into each other stand
  * side by side. The index past it. */
-static uint32_t GroupFrom(uint32_t first, FacsimileGroup* g)
+static uint32_t GroupFrom(TagFSVolume* vol, uint32_t first, FacsimileGroup* g)
 {
-    g->tree  = s_ranges[first].tree;
+    g->tree  = vol->facsimile.ranges[first].tree;
     g->first = g->last = first;
-    RangeKeys(&s_ranges[first], &g->lo, &g->hi);
-    for (uint32_t j = first + 1u; j < s_nranges && s_ranges[j].tree == g->tree; j++) {
+    RangeKeys(&vol->facsimile.ranges[first], &g->lo, &g->hi);
+    for (uint32_t j = first + 1u; j < vol->facsimile.nranges && vol->facsimile.ranges[j].tree == g->tree; j++) {
         uint64_t lo, hi;
-        RangeKeys(&s_ranges[j], &lo, &hi);
+        RangeKeys(&vol->facsimile.ranges[j], &lo, &hi);
         if (lo >= g->hi)
             break;
         g->last = j;
@@ -241,20 +232,20 @@ static const SpineRoot* RootOf(const SpineSlot* s, uint64_t tree)
 /* Rules 1 and 2 of slot `s` for the keys `l` looks at: *holds, with the
  * elements of those keys kept in `l`. OK, or memory's or the medium's
  * refusal. */
-static error_t LookHolds(const SpineSlot* s, FacsimileLook* l, bool* holds)
+static error_t LookHolds(TagFSVolume* vol, const SpineSlot* s, FacsimileLook* l, bool* holds)
 {
     char             why[256];
     const SpineRoot* root = RootOf(s, l->tree);
     TallySink        walk = { .ctx = l, .rotten = LookRotten, .node = LookNode };
     TallySink        leaf = { .ctx = l, .item = LookItem, .rotten = LookRotten };
-    error_t          rc   = BookSlotReads(s, why, sizeof(why));
+    error_t          rc   = BookSlotReads(vol, s, why, sizeof(why));
     *holds = false;
     if (rc == ERR_TAGFS_CORRUPTED)
         return OK;
     if (rc == OK && root)
-        rc = TallyRead(l->tree, root, false, &walk);
+        rc = TallyRead(vol, l->tree, root, false, &walk);
     for (uint32_t i = 0; rc == OK && !l->rotten && i < l->nleaf; i++)
-        rc = TallyLeafRead(l->tree, &l->leaf[i], &leaf);
+        rc = TallyLeafRead(vol, l->tree, &l->leaf[i], &leaf);
     *holds = rc == OK && !l->rotten;
     return rc;
 }
@@ -269,22 +260,22 @@ static bool RibbonReaches(const RibbonWalk* w, uint64_t k)
 }
 
 /* The elements the look kept laid into memory, in their order. */
-static error_t LookLaid(const FacsimileLook* l)
+static error_t LookLaid(TagFSVolume* vol, const FacsimileLook* l)
 {
     error_t rc = OK;
     for (uint64_t at = 0; rc == OK && at < l->nheld;) {
         const FacsimileHeld* h = (const FacsimileHeld*)(l->held + at);
-        rc = BookFacsimileItem(l->tree, h->key, (const uint8_t*)(h + 1), h->len, h->seq);
+        rc = BookFacsimileItem(vol, l->tree, h->key, (const uint8_t*)(h + 1), h->len, h->seq);
         at += HeldRoom(h->len);
     }
-    return rc == OK && l->tree == TALLY_FILES ? BookFacsimileClose() : rc;
+    return rc == OK && l->tree == TALLY_FILES ? BookFacsimileClose(vol) : rc;
 }
 
 /* Group `g` laid in from slot `s` failed rule 4 for `why`: a FILES group laid
  * out again, the next slot weighed; a TAGS group under glass (above). Out of
  * line: its sentence would stand on FacsimileTake's frame, from which the
  * replay goes down the ribbon's records. */
-static __attribute__((noinline)) void FacsimileUnfit(const FacsimileGroup* g, const SpineSlot* s, const char* why,
+static __attribute__((noinline)) void FacsimileUnfit(TagFSVolume* vol, const FacsimileGroup* g, const SpineSlot* s, const char* why,
                                                      bool* done)
 {
     char words[576], hi[24];
@@ -293,9 +284,9 @@ static __attribute__((noinline)) void FacsimileUnfit(const FacsimileGroup* g, co
     else
         ksnprintf(hi, sizeof(hi), "%llu", (unsigned long long)g->hi);
     if (g->tree == TALLY_FILES) {
-        BookFacsimileUndone(g->lo, g->hi);
+        BookFacsimileUndone(vol, g->lo, g->hi);
         for (uint32_t i = g->first; i <= g->last; i++)
-            BookRangeBack(&s_ranges[i].at);
+            BookRangeBack(vol, &vol->facsimile.ranges[i].at);
         kprintf("[TagFS] slot %u (seq %llu) does not stand in for the rotten FILES keys [%llu, %s): %s — laid out "
                 "again\n", s->index, (unsigned long long)s->head.tally_seq, (unsigned long long)g->lo, hi, why);
         return;
@@ -303,33 +294,33 @@ static __attribute__((noinline)) void FacsimileUnfit(const FacsimileGroup* g, co
     ksnprintf(words, sizeof(words), "the rotten %s keys [%llu, %s) taken from slot %u: %s — what the take coined "
               "is not laid out again, and no Tally is written of a state that is not the one the Tally stood on "
               "holds", TallyTreeName(g->tree), (unsigned long long)g->lo, hi, s->index, why);
-    TagFSUnderGlass(words);
+    TagFSUnderGlass(vol, words);
     *done = true;
 }
 
 /* Group `g` given back by slot `s`, whose look is `l`, its ribbon `w` (NULL:
  * the slot's Tally took in stitch `k` itself) — or rule 4 found against it.
  * *done once the group is settled. */
-static error_t FacsimileTake(const FacsimileGroup* g, const SpineSlot* s, FacsimileLook* l, RibbonWalk* w,
+static error_t FacsimileTake(TagFSVolume* vol, const FacsimileGroup* g, const SpineSlot* s, FacsimileLook* l, RibbonWalk* w,
                              uint64_t k, bool* done)
 {
     char     why[352] = "";
     uint32_t replayed = 0;
     error_t  rc;
     for (uint32_t i = g->first; g->tree == TALLY_FILES && i <= g->last; i++)
-        BookRangeTaken(&s_ranges[i].at);    /* no record the replay applies is locked by it */
-    rc = LookLaid(l);
-    if (rc == OK && !(g->tree == TALLY_FILES && BookFacsimileUnfit(why, sizeof(why))) && w)
-        rc = RibbonFacsimile(w, g->tree, l->lo, l->hi, k, &replayed, why, sizeof(why));
+        BookRangeTaken(vol, &vol->facsimile.ranges[i].at);    /* no record the replay applies is locked by it */
+    rc = LookLaid(vol, l);
+    if (rc == OK && !(g->tree == TALLY_FILES && BookFacsimileUnfit(vol, why, sizeof(why))) && w)
+        rc = RibbonFacsimile(vol, w, g->tree, l->lo, l->hi, k, &replayed, why, sizeof(why));
     if (rc != OK)
         return rc;
     if (why[0]) {
-        FacsimileUnfit(g, s, why, done);
+        FacsimileUnfit(vol, g, s, why, done);
         return OK;
     }
-    DogEarPut(g->tree, (TallyKey){ g->lo, 0 }, g->hi == UINT64_MAX ? DOG_EAR_END : (TallyKey){ g->hi, 0 });
+    DogEarPut(vol, g->tree, (TallyKey){ g->lo, 0 }, g->hi == UINT64_MAX ? DOG_EAR_END : (TallyKey){ g->hi, 0 });
     for (uint32_t i = g->first; i <= g->last; i++) {
-        FacsimileRange* r = &s_ranges[i];
+        FacsimileRange* r = &vol->facsimile.ranges[i];
         char            hi[24];
         r->taken = true;
         if (r->at.has_hi)
@@ -347,19 +338,19 @@ static error_t FacsimileTake(const FacsimileGroup* g, const SpineSlot* s, Facsim
 
 /* Group `g` weighed against slot `s`: given back when the slot holds for it.
  * OK, or memory's or the medium's refusal. */
-static error_t FacsimileFrom(const FacsimileGroup* g, const SpineSlot* s, bool* done)
+static error_t FacsimileFrom(TagFSVolume* vol, const FacsimileGroup* g, const SpineSlot* s, bool* done)
 {
-    uint64_t      k     = g_book.stood->head.stitch_seq;
+    uint64_t      k     = vol->book.stood->head.stitch_seq;
     FacsimileLook l     = { .tree = g->tree, .lo = g->lo, .hi = g->hi };
     RibbonWalk*   w     = NULL;
     bool          holds = false;
-    error_t       rc    = LookHolds(s, &l, &holds);
+    error_t       rc    = LookHolds(vol, s, &l, &holds);
     if (rc == OK && holds && s->head.stitch_seq != k) {
-        rc    = RibbonCollateOlder(s, &w);
+        rc    = RibbonCollateOlder(vol, s, &w);
         holds = rc == OK && RibbonReaches(w, k);
     }
     if (rc == OK && holds)
-        rc = FacsimileTake(g, s, &l, w, k, done);
+        rc = FacsimileTake(vol, g, s, &l, w, k, done);
     RibbonWalkLetGo(w);
     kfree(l.leaf);
     kfree(l.held);
@@ -368,15 +359,15 @@ static error_t FacsimileFrom(const FacsimileGroup* g, const SpineSlot* s, bool* 
 
 /* Group `g` weighed against every slot before the one stood on, newest
  * first, until one gives it back. */
-static error_t FacsimileGroupWeighed(const FacsimileGroup* g)
+static error_t FacsimileGroupWeighed(TagFSVolume* vol, const FacsimileGroup* g)
 {
-    const SpineSlot* stood = g_book.stood;
+    const SpineSlot* stood = vol->book.stood;
     bool             done  = false;
     error_t          rc    = OK;
-    for (uint32_t i = 0; rc == OK && !done && i < g_book.nslots; i++) {
-        const SpineSlot* s = &g_book.slots[i];
+    for (uint32_t i = 0; rc == OK && !done && i < vol->book.nslots; i++) {
+        const SpineSlot* s = &vol->book.slots[i];
         if (s->seq < stood->seq && s->head.stitch_seq <= stood->head.stitch_seq)
-            rc = FacsimileFrom(g, s, &done);
+            rc = FacsimileFrom(vol, g, s, &done);
     }
     return rc;
 }
@@ -384,35 +375,36 @@ static error_t FacsimileGroupWeighed(const FacsimileGroup* g)
 /* Whether a FILES range given back reaches into `fid`. */
 static bool FacsimileTakes(uint64_t fid)
 {
-    for (uint32_t i = 0; i < s_nranges; i++) {
+    TagFSVolume* vol = TagFSHome();
+    for (uint32_t i = 0; i < vol->facsimile.nranges; i++) {
         uint64_t lo, hi;
-        if (s_ranges[i].tree != TALLY_FILES || !s_ranges[i].taken)
+        if (vol->facsimile.ranges[i].tree != TALLY_FILES || !vol->facsimile.ranges[i].taken)
             continue;
-        RangeKeys(&s_ranges[i], &lo, &hi);
+        RangeKeys(&vol->facsimile.ranges[i], &lo, &hi);
         if (fid >= lo && fid < hi)
             return true;
     }
     return false;
 }
 
-error_t MountFacsimile(const char** what)
+error_t MountFacsimile(TagFSVolume* vol, const char** what)
 {
     static const uint64_t order[] = { TALLY_TAGS, TALLY_FILES };
     error_t               rc      = OK;
     for (uint32_t t = 0; t < 2u; t++)
-        for (uint32_t i = 0; rc == OK && i < s_nranges;) {
+        for (uint32_t i = 0; rc == OK && i < vol->facsimile.nranges;) {
             FacsimileGroup g;
-            uint32_t       next = GroupFrom(i, &g);
+            uint32_t       next = GroupFrom(vol, i, &g);
             if (g.tree == order[t])
-                rc = FacsimileGroupWeighed(&g);
+                rc = FacsimileGroupWeighed(vol, &g);
             i = next;
         }
     if (rc == OK)
-        rc = BookAsideSettled(FacsimileTakes);
-    for (uint32_t i = 0; rc == OK && i < s_nranges; i++) {
-        const FacsimileRange* r = &s_ranges[i];
+        rc = BookAsideSettled(vol, FacsimileTakes);
+    for (uint32_t i = 0; rc == OK && i < vol->facsimile.nranges; i++) {
+        const FacsimileRange* r = &vol->facsimile.ranges[i];
         if (!r->taken)
-            rc = r->tree == TALLY_FILES ? BookRangeRotsLaid(&r->at, r->why) : BookTagsRotLaid(r->tree, &r->at, r->why);
+            rc = r->tree == TALLY_FILES ? BookRangeRotsLaid(vol, &r->at, r->why) : BookTagsRotLaid(vol, r->tree, &r->at, r->why);
     }
     if (rc != OK)
         *what = rc == ERR_NO_MEMORY ? "there is no memory to weigh its rotten ranges against the slots before"
@@ -420,10 +412,10 @@ error_t MountFacsimile(const char** what)
     return rc;
 }
 
-void FacsimileLetGo(void)
+void FacsimileLetGo(TagFSVolume* vol)
 {
-    BookAsideLetGo();
-    kfree(s_ranges);
-    s_ranges  = NULL;
-    s_nranges = s_capranges = 0;
+    BookAsideLetGo(vol);
+    kfree(vol->facsimile.ranges);
+    vol->facsimile.ranges  = NULL;
+    vol->facsimile.nranges = vol->facsimile.capranges = 0;
 }

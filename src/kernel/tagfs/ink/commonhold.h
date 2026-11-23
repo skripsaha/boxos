@@ -50,17 +50,17 @@ typedef struct {
 
 /* Before any lock: room in Commonhold for `more` runs past those it holds.
  * ERR_NO_MEMORY. */
-error_t  CommonholdRoomFor(uint64_t more);
+error_t  CommonholdRoomFor(TagFSVolume* vol, uint64_t more);
 
 /* The runs `runs` (`n` Strips, ground and holes) may be cut into past their
  * number by blocks of them more than one names (*pieces), and the runs
  * Commonhold may be cut into past its own (*splits) by one change letting go
  * of all of them — as Commonhold stands now. */
-void     CommonholdCuts(const Strip* runs, uint64_t n, uint64_t* pieces, uint64_t* splits);
+void     CommonholdCuts(TagFSVolume* vol, const Strip* runs, uint64_t n, uint64_t* pieces, uint64_t* splits);
 
 /* Whether Commonhold has room now for a change that cuts it into `splits`
  * runs more — under the TagFS lock, before the change is put in. */
-bool     CommonholdRoomHolds(uint64_t splits);
+bool     CommonholdRoomHolds(TagFSVolume* vol, uint64_t splits);
 
 /* Under the TagFS lock, room held (CommonholdRoomHolds): one owner less on
  * every block of [start, start + count) a run of `kind` stops naming, by Ink
@@ -69,32 +69,45 @@ bool     CommonholdRoomHolds(uint64_t splits);
  * it. A run SHARED on a block not here is a DEFECT of the writer that put it
  * in: said, and its block kept rather than let go under another name. */
 typedef void (*CommonholdFreedFn)(void* ctx, uint64_t start, uint64_t count);
-void     CommonholdLetGoLocked(uint64_t start, uint64_t count, uint32_t kind, uint64_t gen, CommonholdFreedFn freed,
+void     CommonholdLetGoLocked(TagFSVolume* vol, uint64_t start, uint64_t count, uint32_t kind, uint64_t gen, CommonholdFreedFn freed,
                                void* ctx);
 
 /* Under the TagFS lock, room held: one owner more on every block of [start,
  * start + count) — a run SHARED put on it, beside the one DATA run that names
  * a block not here yet. */
-void     CommonholdShareLocked(uint64_t start, uint64_t count);
+void     CommonholdShareLocked(TagFSVolume* vol, uint64_t start, uint64_t count);
 
 /* How many name `block` — 0 when it is not here (one owner, or none). */
-uint32_t CommonholdOwners(uint64_t block);
+uint32_t CommonholdOwners(TagFSVolume* vol, uint64_t block);
 
 /* The first run of blocks from *at, before `end`, that an owner held at the
  * slice of Ink `slice` — one here now, or let go by an Ink past it: [*lo, *hi),
  * and *at past it. False when none is. */
-bool     CommonholdOwnedAt(uint64_t* at, uint64_t end, uint64_t slice, uint64_t* lo, uint64_t* hi);
+bool     CommonholdOwnedAt(TagFSVolume* vol, uint64_t* at, uint64_t end, uint64_t slice, uint64_t* lo, uint64_t* hi);
 
 /* The stitch that carries every Ink up to `slice` settled, its DogEar told:
  * the runs those Inks left with no owner let go of, and a change's DEFECT
  * noted under the lock said, with no lock held. */
-void     CommonholdSettled(uint64_t slice);
+void     CommonholdSettled(TagFSVolume* vol, uint64_t slice);
 
 /* The mount's, the door shut: every run let go; a run of a block in common
  * added past the last (in order, none meeting) — ERR_NO_MEMORY; the runs held,
  * read only, *n of them. */
-void            CommonholdLetGoAll(void);
-error_t         CommonholdMountAdd(uint64_t start, uint64_t count, uint32_t owners);
-const CommonRun* CommonholdRuns(uint64_t* n);
+void            CommonholdLetGoAll(TagFSVolume* vol);
+error_t         CommonholdMountAdd(TagFSVolume* vol, uint64_t start, uint64_t count, uint32_t owners);
+const CommonRun* CommonholdRuns(TagFSVolume* vol, uint64_t* n);
+
+/* What one volume holds of commonhold.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    TagFSLock lock;
+    CommonRun* run;  /* under commonhold.lock */
+    uint64_t n;
+    uint64_t cap;
+    uint64_t wrong_at;  /* blocks let go that no count holds, said with no lock held */
+    uint64_t wrong_count;
+    bool wrong_said;
+} CommonholdState;
+
+void CommonholdVolumeBegin(TagFSVolume* vol);
 
 #endif /* TAGFS_COMMONHOLD_H */

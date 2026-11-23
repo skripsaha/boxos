@@ -38,45 +38,45 @@ typedef struct {
 
 /* The mount: a node of `tree` of the Tally of `seq` it stands on, at `at` —
  * or one of them a copy of which did not hold, laid again by the next Tally. */
-void        FoliationNoted(uint64_t tree, const TallyPlace* at, uint64_t seq);
-void        FoliationRelay(uint64_t tree, const TallyPlace* at);
+void        FoliationNoted(TagFSVolume* vol, uint64_t tree, const TallyPlace* at, uint64_t seq);
+void        FoliationRelay(TagFSVolume* vol, uint64_t tree, const TallyPlace* at);
 
 /* The mount: what the leaf of `tree` it noted last holds more — `items` runs
  * of a Parcel of FILES or tags of TAGS, `text` bytes of their keys and values
  * — as its walk reads the leaf (the reserve's measure by the Tally before,
  * endpaper_fact.h, counts the leaves a Tally laid in names as they lie). */
-void        FoliationLeafHolds(uint64_t tree, uint64_t items, uint64_t text);
+void        FoliationLeafHolds(TagFSVolume* vol, uint64_t tree, uint64_t items, uint64_t text);
 
 /* The leaves of `tree` of that Tally holding anything FoliationLeafHolds
  * counted — of FILES, the leaves a Parcel's runs lie in: UINT64_MAX while
  * Foliation is lost. */
-uint64_t    FoliationLeavesHolding(uint64_t tree);
+uint64_t    FoliationLeavesHolding(TagFSVolume* vol, uint64_t tree);
 
 /* Why the Tally the next one is laid against is not known, or NULL. */
-const char* FoliationLost(void);
+const char* FoliationLost(TagFSVolume* vol);
 
 /* The `index`-th leaf of `tree` of that Tally, in key order — FILES, TAGS or
  * USE: false past its last. */
-bool        FoliationLeafAt(uint64_t tree, uint32_t index, TallyPlace* out);
+bool        FoliationLeafAt(TagFSVolume* vol, uint64_t tree, uint32_t index, TallyPlace* out);
 
 /* The nodes of `tree` of that Tally — its leaves in key order, its inner
  * nodes in the order they came — *n of them; NULL for none. */
-const FoliationNode* FoliationLeaves(uint64_t tree, uint32_t* n);
-const FoliationNode* FoliationInner(uint64_t tree, uint32_t* n);
+const FoliationNode* FoliationLeaves(TagFSVolume* vol, uint64_t tree, uint32_t* n);
+const FoliationNode* FoliationInner(TagFSVolume* vol, uint64_t tree, uint32_t* n);
 
 /* The inner nodes of `tree` at `level` (>= 1) of that Tally, in key order — *n
  * of them; NULL for none. The inner nodes FoliationInner gives are then in
  * order of level and key. */
-const FoliationNode* FoliationLevel(uint64_t tree, uint64_t level, uint32_t* n);
+const FoliationNode* FoliationLevel(TagFSVolume* vol, uint64_t tree, uint64_t level, uint32_t* n);
 
 /* The Sheets of one copy of every node of FILES, TAGS and USE and every inner
  * node of DIGESTS that Tally holds not sealed at `seq`: what of its book the
  * Tally of `seq` named as it lay — counted as a mount counts its book
  * (book_ground.c, BookGroundNodeOf), Sheets and no atom. */
-uint64_t    FoliationBlocksOlder(uint64_t seq);
+uint64_t    FoliationBlocksOlder(TagFSVolume* vol, uint64_t seq);
 
 /* Everything Foliation holds let go — a mount begun, the volume let go of. */
-void        FoliationLetGo(void);
+void        FoliationLetGo(TagFSVolume* vol);
 
 /* The Tally under way, by the Settle's holder: its draft begun; a node of
  * `tree` at `level` it names — its first key `key` and the count it carries,
@@ -86,17 +86,38 @@ void        FoliationLetGo(void);
  * lies has `root` named so too); at its DONE the draft the Foliation —
  * `digests` when the reads were turned to its DIGESTS; refused, the draft let
  * go. */
-void        FoliationDraftBegin(void);
-void        FoliationDraftNode(uint64_t tree, uint64_t level, TallyKey key, bool root, uint64_t count,
+void        FoliationDraftBegin(TagFSVolume* vol);
+void        FoliationDraftNode(TagFSVolume* vol, uint64_t tree, uint64_t level, TallyKey key, bool root, uint64_t count,
                                const TallyPtr* ptr, uint64_t items, uint64_t text);
-void        FoliationDraftUnder(uint64_t tree, const TallyPlace* top);
-void        FoliationDraftDone(uint64_t seq, bool digests);
-void        FoliationDraftLetGo(void);
+void        FoliationDraftUnder(TagFSVolume* vol, uint64_t tree, const TallyPlace* top);
+void        FoliationDraftDone(TagFSVolume* vol, uint64_t seq, bool digests);
+void        FoliationDraftLetGo(TagFSVolume* vol);
 
 #ifdef CONFIG_VOLUME_TESTS
 /* The `index`-th node of `tree` Foliation holds — its leaves first, in key
  * order, then the inner nodes in the order they came: false past its last. */
-bool        FoliationStandNode(uint64_t tree, uint32_t index, FoliationNode* out);
+bool        FoliationStandNode(TagFSVolume* vol, uint64_t tree, uint32_t index, FoliationNode* out);
 #endif
+
+typedef struct {
+    FoliationNode* node;
+    uint32_t       n;
+    uint32_t       cap;
+} FoliationList;
+
+#define FOLIATION_TREES  4u
+
+typedef struct {
+    FoliationList leaf[FOLIATION_TREES];
+    FoliationList inner[FOLIATION_TREES];
+    bool          ordered[FOLIATION_TREES];   /* its inner nodes by level and key (FoliationLevel) */
+    const char*   lost;      /* why it is not known, or NULL */
+} FoliationBook;
+
+/* What one volume holds of foliation.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    FoliationBook book;
+    FoliationBook draft;
+} FoliationState;
 
 #endif /* TAGFS_SETTLE_FOLIATION_H */

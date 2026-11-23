@@ -665,9 +665,9 @@ void tag_registry_mark_system(TagRegistry* reg, uint32_t tag_id) {
  * it does not hold yet is one no record of it may wear, and neither is a tag
  * retired. Called with no TagFS lock held.
  */
-error_t TagRegistryIdGiven(TagRegistry* reg, uint32_t id) {
+error_t TagRegistryIdGiven(TagFSVolume* vol, TagRegistry* reg, uint32_t id) {
     if (!reg) return ERR_NULL_POINTER;
-    if (TagFSIsUnderGlass()) return ERR_TAGFS_READ_ONLY;
+    if (TagFSIsUnderGlass(vol)) return ERR_TAGFS_READ_ONLY;
     TagFSLockTake(&reg->lock);
     const TagRegistryEntry* entry = RegistryById(reg->by_id, reg->bucket_count, id);
     bool given   = id < reg->next_id;

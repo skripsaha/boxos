@@ -36,9 +36,9 @@ static void StorageAskSaid(uint64_t owner, const OpContext *ctx)
     TouchTag full, bare;
     if (TouchTagResolve(s_tags_asked, sizeof(s_tags_asked) - 1u, &full, &bare) != OK)
         return;
-    uint32_t  want  = TagFSProgramFiles(owner, NULL, 0);
+    uint32_t  want  = TagFSProgramFiles(TagFSHome(), owner, NULL, 0);
     uint64_t *files = want ? kmalloc(sizeof(uint64_t) * want) : NULL;
-    uint32_t  n     = files ? TagFSProgramFiles(owner, files, want) : 0;
+    uint32_t  n     = files ? TagFSProgramFiles(TagFSHome(), owner, files, want) : 0;
     for (uint32_t i = 0; i < n && i < want; i++)
         TouchPublishPair(full, bare, &files[i], sizeof(files[i]), ctx && ctx->proc ? ctx->proc->pid : 0,
                          TOUCH_FLAG_TAGFS);
@@ -61,9 +61,9 @@ int ObjTagShow(const ManifestOp *op, Crate *crates, uint16_t crate_count, const 
     if (!self)
         return ERR_TAGFS_NO_OWN_TAGS;
     if (act != STORAGE_ASK_TO_SEE)
-        return TagFSShowTags(self, program, act == STORAGE_SHOW_TO);
+        return TagFSShowTags(TagFSHome(), self, program, act == STORAGE_SHOW_TO);
     bool    noted = false;
-    error_t rc    = TagFSAskToSee(self, program, &noted);
+    error_t rc    = TagFSAskToSee(TagFSHome(), self, program, &noted);
     if (rc == OK && noted)
         StorageAskSaid(program, ctx);
     return rc;
@@ -84,8 +84,8 @@ static error_t ShownPager(const void *ask, uint64_t from, uint64_t *out, uint32_
                           TagFSPage *page)
 {
     const ShownAsk *a = ask;
-    return a->which == STORAGE_SHOWN_TO_ME ? TagFSShownToPage(a->self, from, out, room, want_total, page)
-                                           : TagFSAsksPage(a->self, from, out, room, want_total, page);
+    return a->which == STORAGE_SHOWN_TO_ME ? TagFSShownToPage(TagFSHome(), a->self, from, out, room, want_total, page)
+                                           : TagFSAsksPage(TagFSHome(), a->self, from, out, room, want_total, page);
 }
 
 /* STORAGE_TAG_SHOWN  params: [u8 which][u64 program][u64 from] — out_crate
@@ -117,7 +117,7 @@ int ObjTagShown(const ManifestOp *op, Crate *crates, uint16_t crate_count, const
         /* A program's own list, whole: from `from` on, as the others page. */
         uint64_t *all   = NULL;
         uint32_t  count = 0;
-        rc = TagFSShownBy(program, &all, &count);
+        rc = TagFSShownBy(TagFSHome(), program, &all, &count);
         uint32_t at = 0;
         while (rc == OK && at < count && all[at] < from)
             at++;

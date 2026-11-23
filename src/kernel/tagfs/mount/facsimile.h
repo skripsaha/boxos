@@ -40,8 +40,22 @@
  *   FacsimileLetGo     the ranges noted, and the files set aside, let go
  */
 
-error_t FacsimileRotNoted(uint64_t tree, const TallyPlace* at, const char* why);
-error_t MountFacsimile(const char** what);
-void    FacsimileLetGo(void);
+error_t FacsimileRotNoted(TagFSVolume* vol, uint64_t tree, const TallyPlace* at, const char* why);
+error_t MountFacsimile(TagFSVolume* vol, const char** what);
+void    FacsimileLetGo(TagFSVolume* vol);
+
+typedef struct {
+    uint64_t   tree;
+    TallyPlace at;
+    bool       taken;
+    char       why[160];
+} FacsimileRange;
+
+/* What one volume holds of facsimile.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    FacsimileRange* ranges;
+    uint32_t nranges;
+    uint32_t capranges;
+} FacsimileState;
 
 #endif /* TAGFS_MOUNT_FACSIMILE_H */

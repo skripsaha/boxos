@@ -6,6 +6,7 @@
 #include "boardroom.h"
 #include "atomics.h"
 #include "cpu_calibrate.h"
+#include "tagfs_volume.h"
 
 /*
  * The halves of every Ink (ink.h): the record built with no lock held, then
@@ -13,34 +14,31 @@
  * can refuse. The counters below move under that lock alone.
  */
 
-static uint64_t s_inked_gen;     /* the newest Ink's */
-static uint64_t s_data_need;     /* the flush need the newest data an Ink named holds */
-static volatile uint8_t s_read_only;   /* the medium refused a write as protected */
 
-uint64_t InkedGen(void)
+uint64_t InkedGen(TagFSVolume* vol)
 {
-    return __atomic_load_n(&s_inked_gen, __ATOMIC_ACQUIRE);
+    return __atomic_load_n(&vol->ink.inked_gen, __ATOMIC_ACQUIRE);
 }
 
-uint64_t InkDataNeed(void)
+uint64_t InkDataNeed(TagFSVolume* vol)
 {
-    return s_data_need;
+    return vol->ink.data_need;
 }
 
-uint64_t InkGenNextLocked(void)
+uint64_t InkGenNextLocked(TagFSVolume* vol)
 {
-    return s_inked_gen + 1u;
+    return vol->ink.inked_gen + 1u;
 }
 
-void InkGenLaidLocked(uint64_t gen)
+void InkGenLaidLocked(TagFSVolume* vol, uint64_t gen)
 {
-    __atomic_store_n(&s_inked_gen, gen, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->ink.inked_gen, gen, __ATOMIC_RELEASE);
 }
 
-void InkDataNeedRaiseLocked(uint64_t need)
+void InkDataNeedRaiseLocked(TagFSVolume* vol, uint64_t need)
 {
-    if (need > s_data_need)
-        s_data_need = need;
+    if (need > vol->ink.data_need)
+        vol->ink.data_need = need;
 }
 
 /*
@@ -55,76 +53,76 @@ void InkDataNeedRaiseLocked(uint64_t need)
  * of this mount settled. With no memory to hold it, it stays out of the
  * allocator until the next mount, said.
  */
-static void InkMountFallow(void)
+static void InkMountFallow(TagFSVolume* vol)
 {
-    const RibbonCursor* c    = RibbonCursorNow();
-    uint64_t            left = g_book.nfallow;
+    const RibbonCursor* c    = RibbonCursorNow(vol);
+    uint64_t            left = vol->book.nfallow;
     if (!c->up)
         return;
-    for (const Strip* runs = g_book.fallow; left;) {
+    for (const Strip* runs = vol->book.fallow; left;) {
         uint32_t    n    = left > UINT32_MAX ? UINT32_MAX : (uint32_t)left;
-        FallowNode* node = FallowNodeMake(runs, n, FALLOW_BY_RECORD, 0);
+        FallowNode* node = FallowNodeMake(vol, runs, n, FALLOW_BY_RECORD, 0);
         if (!node) {
             kprintf("[TagFS] there is no memory to rest the ground the ribbon let go in Fallow: %llu run(s) of it "
                     "stay out of the allocator until the volume is mounted again\n", (unsigned long long)left);
             return;
         }
-        TagFSLockTake(&InkState()->lock);
-        FallowAdd(node, 0);
-        FallowStitchSettled(0, c->last, 0);
-        TagFSLockDrop(&InkState()->lock);
+        TagFSLockTake(&vol->state.lock);
+        FallowAdd(vol, node, 0);
+        FallowStitchSettled(vol, 0, c->last, 0);
+        TagFSLockDrop(&vol->state.lock);
         runs += n;
         left -= n;
     }
 }
 
-void InkMountReset(void)
+void InkMountReset(TagFSVolume* vol)
 {
-    __atomic_store_n(&s_inked_gen, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&s_read_only, 0u, __ATOMIC_RELEASE);
-    s_data_need = 0;
-    DocketDropAll();
-    if (!TagFSIsUnderGlass())
-        InkMountFallow();
+    __atomic_store_n(&vol->ink.inked_gen, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->ink.read_only, 0u, __ATOMIC_RELEASE);
+    vol->ink.data_need = 0;
+    DocketDropAll(vol);
+    if (!TagFSIsUnderGlass(vol))
+        InkMountFallow(vol);
 }
 
-void InkDropAll(void)
+void InkDropAll(TagFSVolume* vol)
 {
-    FallowDropAll();
-    DocketDropAll();
+    FallowDropAll(vol);
+    DocketDropAll(vol);
 }
 
-bool TagFSReadOnly(void)
+bool TagFSReadOnly(TagFSVolume* vol)
 {
-    return __atomic_load_n(&s_read_only, __ATOMIC_ACQUIRE) != 0 || TagFSIsUnderGlass() || StitchBookRefused();
+    return __atomic_load_n(&vol->ink.read_only, __ATOMIC_ACQUIRE) != 0 || TagFSIsUnderGlass(vol) || StitchBookRefused(vol);
 }
 
-void InkReadOnlyLift(void)
+void InkReadOnlyLift(TagFSVolume* vol)
 {
-    __atomic_store_n(&s_read_only, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&vol->ink.read_only, 0u, __ATOMIC_RELEASE);
 }
 
 /* Asked after any write the medium refused: a refusal the seat calls
  * protection is final for this seating of the medium, and said once. */
-void TagFSWriteRefused(void)
+void TagFSWriteRefused(TagFSVolume* vol)
 {
-    if (!BoardroomSeatRefusesWrites(tagfs_get_seat()))
+    if (!BoardroomSeatRefusesWrites(tagfs_get_seat(vol)))
         return;
-    if (__atomic_exchange_n(&s_read_only, 1u, __ATOMIC_ACQ_REL))
+    if (__atomic_exchange_n(&vol->ink.read_only, 1u, __ATOMIC_ACQ_REL))
         return;
     kprintf("[TagFS] the medium under the volume refuses writes as protected — the volume "
             "takes no change from here on (ERR_TAGFS_READ_ONLY), and %llu change(s) no cycle "
             "settled stay unwritten\n",
-            (unsigned long long)(InkedGen() - SettledGen()));
+            (unsigned long long)(InkedGen(vol) - SettledGen(vol)));
     SettleKnock();
 }
 
-uint64_t InkGenOf(uint64_t fid)
+uint64_t InkGenOf(TagFSVolume* vol, uint64_t fid)
 {
     RecordWhere where;
-    FileRecord* rec = FileMapRecordHold(InkState()->files, fid, &where);
+    FileRecord* rec = FileMapRecordHold(vol->state.files, fid, &where);
     if (!rec)
-        return InkedGen();
+        return InkedGen(vol);
     FileRecordRelease(rec);
     return where.gen;
 }
@@ -135,9 +133,9 @@ uint64_t InkGenOf(uint64_t fid)
 
 /* The kernel's blocks as a record names them — [*first, *end) — or false when
  * the Deed points the loader at none of them. */
-static bool InkBootSpan(uint64_t* first, uint64_t* end)
+static bool InkBootSpan(TagFSVolume* vol, uint64_t* first, uint64_t* end)
 {
-    TagFSState* fs = InkState();
+    TagFSState* fs = &vol->state;
     if (!fs->boot.kernel_blocks)
         return false;
     *first = fs->boot.kernel_block;
@@ -145,10 +143,10 @@ static bool InkBootSpan(uint64_t* first, uint64_t* end)
     return true;
 }
 
-bool InkTouchesBoot(const Strip* runs, uint32_t count)
+bool InkTouchesBoot(TagFSVolume* vol, const Strip* runs, uint32_t count)
 {
     uint64_t first = 0, end = 0;
-    if (!InkBootSpan(&first, &end))
+    if (!InkBootSpan(vol, &first, &end))
         return false;
     for (uint32_t i = 0; i < count; i++) {
         uint64_t a = runs[i].start, b = a + runs[i].count;
@@ -158,12 +156,12 @@ bool InkTouchesBoot(const Strip* runs, uint32_t count)
     return false;
 }
 
-bool InkRecordTouchesBoot(const FileRecord* rec)
+bool InkRecordTouchesBoot(TagFSVolume* vol, const FileRecord* rec)
 {
     uint64_t  first = 0, end = 0;
     StripWalk walk;
     Strip     run;
-    if (!InkBootSpan(&first, &end))
+    if (!InkBootSpan(vol, &first, &end))
         return false;
     StripWalkBegin(rec, &walk);
     while (StripWalkNextGround(&walk, &run))
@@ -175,11 +173,11 @@ bool InkRecordTouchesBoot(const FileRecord* rec)
 /* Whether the volume takes a change at all: asked in the first half, and again
  * under the state lock where the Ink is laid, so an Ink built while the medium
  * left or refused a write as protected is not laid after it (RT-13). */
-error_t InkVolumeTakes(void)
+error_t InkVolumeTakes(TagFSVolume* vol)
 {
-    if (TagFSMediumLeft())
+    if (TagFSMediumLeft(vol))
         return ERR_DEVICE_NOT_READY;
-    if (TagFSReadOnly())
+    if (TagFSReadOnly(vol))
         return ERR_TAGFS_READ_ONLY;
     return OK;
 }
@@ -190,11 +188,11 @@ error_t InkVolumeTakes(void)
  * already stand in place. The mark a mount's verdict owes its files is made by
  * the cycle itself before its snapshot, on the core that holds it — on that
  * cycle's books, a halt's too (sewing.c, StitchMarked). */
-error_t InkVolumeBegins(void)
+error_t InkVolumeBegins(TagFSVolume* vol)
 {
-    if (SettleHalting() && !StitchMarksVerdict())
+    if (SettleHalting(vol) && !StitchMarksVerdict(vol))
         return ERR_DEVICE_NOT_READY;
-    return InkVolumeTakes();
+    return InkVolumeTakes(vol);
 }
 
 /* The ribbon is asked too whether the Coineds of the tags a change brings
@@ -202,23 +200,23 @@ error_t InkVolumeBegins(void)
  * bringing none new, whether a record would (RibbonClaim, nothing claimed): a
  * create, a name or a tag refused there interns nothing for the next stitch to
  * lay down as a Coined, and every tag interned has its Coined's room. */
-static error_t InkBookReserves(uint64_t bytes, uint64_t* held)
+static error_t InkBookReserves(TagFSVolume* vol, uint64_t bytes, uint64_t* held)
 {
-    TagFSState* fs = InkState();
+    TagFSState* fs = &vol->state;
     TagFSLockTake(&fs->lock);
-    error_t rc = bytes ? RibbonReserve(bytes) : RibbonClaim(0, false);
+    error_t rc = bytes ? RibbonReserve(vol, bytes) : RibbonClaim(vol, 0, false);
     TagFSLockDrop(&fs->lock);
-    rc = RibbonClaimSay(rc);
+    rc = RibbonClaimSay(vol, rc);
     *held = rc == OK ? bytes : 0;
     return rc;
 }
 
-error_t InkBookRefuses(TagOwner owner, const TagSpelling* tags, uint32_t count, uint64_t* held)
+error_t InkBookRefuses(TagFSVolume* vol, TagOwner owner, const TagSpelling* tags, uint32_t count, uint64_t* held)
 {
-    TagFSState* fs    = InkState();
+    TagFSState* fs    = &vol->state;
     uint64_t    bytes = 0;
     *held = 0;
-    error_t rc = InkVolumeBegins();
+    error_t rc = InkVolumeBegins(vol);
     if (rc != OK)
         return rc;
     for (uint32_t i = 0; i < count; i++) {
@@ -227,24 +225,24 @@ error_t InkBookRefuses(TagOwner owner, const TagSpelling* tags, uint32_t count, 
         TallyTag t = TagRegistryBookForm(&tags[i], owner);
         bytes += STITCH_COINED_MOST + TallyTagCarried(&t);
     }
-    return InkBookReserves(bytes, held);
+    return InkBookReserves(vol, bytes, held);
 }
 
-void InkBookHeldLetGo(uint64_t held)
+void InkBookHeldLetGo(TagFSVolume* vol, uint64_t held)
 {
     if (!held)
         return;
-    TagFSLockTake(&InkState()->lock);
-    RibbonReserveLetGo(held);
-    TagFSLockDrop(&InkState()->lock);
+    TagFSLockTake(&vol->state.lock);
+    RibbonReserveLetGo(vol, held);
+    TagFSLockDrop(&vol->state.lock);
 }
 
 /* The guard's answer, `boot` the answer to whether the change touches the
  * kernel's blocks: those are refused to every call; a file the system keeps
  * in a role (its record's flags, never its tags), to a call with no warrant. */
-error_t InkGuardSays(uint64_t fid, bool boot, uint32_t flags, InkWarrant warrant)
+error_t InkGuardSays(TagFSVolume* vol, uint64_t fid, bool boot, uint32_t flags, InkWarrant warrant)
 {
-    error_t rc = InkVolumeTakes();
+    error_t rc = InkVolumeTakes(vol);
     if (rc != OK)
         return rc;
     if (boot || (warrant != INK_WARRANTED && InkFileKept(flags))) {
@@ -265,21 +263,21 @@ error_t InkGuardSays(uint64_t fid, bool boot, uint32_t flags, InkWarrant warrant
  * file's runs, not all of them: the file the loader reads the kernel by is
  * known by its id, named when the mount laid every file's ground
  * (book_ground.c, BookFilesLaid). */
-static error_t InkGuard(uint64_t fid, uint32_t flags, const Strip* runs, uint32_t run_count,
+static error_t InkGuard(TagFSVolume* vol, uint64_t fid, uint32_t flags, const Strip* runs, uint32_t run_count,
                         const Strip* freed, uint32_t freed_count, InkWarrant warrant)
 {
-    bool boot = fid == g_book.boot_fid ||
-                InkTouchesBoot(runs, run_count) || InkTouchesBoot(freed, freed_count);
-    return InkGuardSays(fid, boot, flags, warrant);
+    bool boot = fid == vol->book.boot_fid ||
+                InkTouchesBoot(vol, runs, run_count) || InkTouchesBoot(vol, freed, freed_count);
+    return InkGuardSays(vol, fid, boot, flags, warrant);
 }
 
-error_t InkMayChange(uint64_t fid, uint32_t flags, const Strip* runs, uint32_t run_count,
+error_t InkMayChange(TagFSVolume* vol, uint64_t fid, uint32_t flags, const Strip* runs, uint32_t run_count,
                      InkWarrant warrant)
 {
-    error_t rc = InkVolumeBegins();
+    error_t rc = InkVolumeBegins(vol);
     if (rc != OK)
         return rc;
-    return InkGuard(fid, flags, runs, run_count, NULL, 0, warrant);
+    return InkGuard(vol, fid, flags, runs, run_count, NULL, 0, warrant);
 }
 
 // ----------------------------------------------------------------------------
@@ -309,9 +307,9 @@ bool InkGoesRound(const error_t* rc)
  * writes. `small` says whether this one is
  * such an append, for the next to ask.
  */
-static bool InkPlotLazy(const Plot* p, const FileRecord* cur, uint64_t now_us, bool* small)
+static bool InkPlotLazy(TagFSVolume* vol, const Plot* p, const FileRecord* cur, uint64_t now_us, bool* small)
 {
-    uint64_t d = SettleLastDUs();
+    uint64_t d = SettleLastDUs(vol);
     *small = p->size > p->size_before && d != 0 && p->data_us < d;
     return *small && cur->small_append_us != 0 && now_us > cur->small_append_us &&
            now_us - cur->small_append_us < SETTLE_WINDOW_US;
@@ -321,9 +319,9 @@ static bool InkPlotLazy(const Plot* p, const FileRecord* cur, uint64_t now_us, b
  * was loaded with: a file that came to be kept in a role after the load had
  * its bytes laid already, and refusing the record now would take back its
  * size, not its bytes. */
-error_t TagFSInkPlot(Plot* p, InkReceipt* out)
+error_t TagFSInkPlot(TagFSVolume* vol, Plot* p, InkReceipt* out)
 {
-    error_t rc = InkGuard(p->fid, p->meta.flags, p->runs, p->run_count,
+    error_t rc = InkGuard(vol, p->fid, p->meta.flags, p->runs, p->run_count,
                           p->freed, p->freed_count, p->warrant);
     if (rc != OK)
         return rc;
@@ -334,7 +332,7 @@ error_t TagFSInkPlot(Plot* p, InkReceipt* out)
     bool     lazy   = false;
     for (;;) {
         RecordWhere was;
-        FileRecord* cur = FileMapRecordHold(InkState()->files, p->fid, &was);
+        FileRecord* cur = FileMapRecordHold(vol->state.files, p->fid, &was);
         if (!cur) {
             rc = ERR_FILE_NOT_FOUND;
             break;
@@ -348,8 +346,8 @@ error_t TagFSInkPlot(Plot* p, InkReceipt* out)
             break;
         }
         bool small = false;
-        lazy = InkPlotLazy(p, cur, now_us, &small);
-        rc   = InkBookPlot(p, cur, &was, small ? now_us : 0, out);
+        lazy = InkPlotLazy(vol, p, cur, now_us, &small);
+        rc   = InkBookPlot(vol, p, cur, &was, small ? now_us : 0, out);
         FileRecordRelease(cur);
         if (rc == OK || !InkGoesRound(&rc))
             break;
@@ -365,8 +363,8 @@ error_t TagFSInkPlot(Plot* p, InkReceipt* out)
     p->shape         = out->gen;
     p->data_need     = 0;
     p->data_us       = 0;
-    InkBookPlotNext(p);
-    SettleInked(out->gen, lazy);
+    InkBookPlotNext(vol, p);
+    SettleInked(vol, out->gen, lazy);
     return OK;
 }
 
@@ -419,17 +417,17 @@ static bool InkFieldsTags(const FileRecord* cur, uint32_t add, const uint32_t* d
 
 /* One round of InkFields: OK, a final refusal, or INK_AGAIN / ERR_WOULD_BLOCK.
  * `role` is the one the record is to be kept in, or INK_ROLE_AS_IS. */
-static error_t InkFieldsOnce(uint64_t fid, const char* name, uint32_t add, uint32_t drop,
+static error_t InkFieldsOnce(TagFSVolume* vol, uint64_t fid, const char* name, uint32_t add, uint32_t drop,
                              uint32_t role, InkReceipt* out)
 {
-    TagFSState* fs = InkState();
+    TagFSState* fs = &vol->state;
     RecordWhere was;
     FileRecord* cur = FileMapRecordHold(fs->files, fid, &was);
     if (!cur)
         return ERR_FILE_NOT_FOUND;
 
     InkFieldsPlan f;
-    error_t       rc = InkVolumeBegins();
+    error_t       rc = InkVolumeBegins(vol);
     if (rc == OK && (cur->flags & TAGFS_FILE_DELETED))
         rc = ERR_FILE_NOT_FOUND;
     if (!InkFieldsTags(cur, add, &drop, drop != TAGFS_INVALID_TAG_ID ? 1u : 0u, &f)) {
@@ -441,58 +439,58 @@ static error_t InkFieldsOnce(uint64_t fid, const char* name, uint32_t add, uint3
         rc       = drop != TAGFS_INVALID_TAG_ID ? ERR_TAGFS_TAG_NOT_FOUND : OK;
         out->gen = was.gen;
     } else if (rc == OK) {
-        rc = InkBookFields(fid, cur, &was, &f, name ? name : cur->name, add, flags, cur->keep_until, out);
+        rc = InkBookFields(vol, fid, cur, &was, &f, name ? name : cur->name, add, flags, cur->keep_until, out);
     }
     kfree(f.tags);
     FileRecordRelease(cur);
     return rc;
 }
 
-error_t InkFields(uint64_t fid, const char* name, uint32_t add, uint32_t drop, InkReceipt* out)
+error_t InkFields(TagFSVolume* vol, uint64_t fid, const char* name, uint32_t add, uint32_t drop, InkReceipt* out)
 {
     error_t rc;
     do {
-        rc = InkFieldsOnce(fid, name, add, drop, INK_ROLE_AS_IS, out);
+        rc = InkFieldsOnce(vol, fid, name, add, drop, INK_ROLE_AS_IS, out);
     } while (rc != OK && InkGoesRound(&rc));
     return rc;
 }
 
 #ifdef CONFIG_VOLUME_TESTS
-error_t InkRoleLaid(uint64_t fid, uint32_t role, InkReceipt* out)
+error_t InkRoleLaid(TagFSVolume* vol, uint64_t fid, uint32_t role, InkReceipt* out)
 {
     error_t rc;
     do {
-        rc = InkFieldsOnce(fid, NULL, TAGFS_INVALID_TAG_ID, TAGFS_INVALID_TAG_ID, role, out);
+        rc = InkFieldsOnce(vol, fid, NULL, TAGFS_INVALID_TAG_ID, TAGFS_INVALID_TAG_ID, role, out);
     } while (rc != OK && InkGoesRound(&rc));
     return rc;
 }
 #endif
 
-static error_t InkUndoneOnce(uint64_t fid, InkReceipt* out)
+static error_t InkUndoneOnce(TagFSVolume* vol, uint64_t fid, InkReceipt* out)
 {
     RecordWhere   was;
     InkFieldsPlan f = { 0 };
-    FileRecord*   cur = FileMapRecordHold(InkState()->files, fid, &was);
+    FileRecord*   cur = FileMapRecordHold(vol->state.files, fid, &was);
     if (!cur)
         return ERR_FILE_NOT_FOUND;
-    error_t rc = InkVolumeBegins();
+    error_t rc = InkVolumeBegins(vol);
     if (rc == OK && (cur->flags & TAGFS_FILE_UNDONE))
         out->gen = was.gen;
     else if (rc == OK && !InkFieldsTags(cur, TAGFS_INVALID_TAG_ID, NULL, 0, &f))
         rc = ERR_NO_MEMORY;
     else if (rc == OK)
-        rc = InkBookFields(fid, cur, &was, &f, cur->name, TAGFS_INVALID_TAG_ID, cur->flags | TAGFS_FILE_UNDONE,
+        rc = InkBookFields(vol, fid, cur, &was, &f, cur->name, TAGFS_INVALID_TAG_ID, cur->flags | TAGFS_FILE_UNDONE,
                            cur->keep_until, out);
     kfree(f.tags);
     FileRecordRelease(cur);
     return rc;
 }
 
-error_t InkUndone(uint64_t fid, InkReceipt* out)
+error_t InkUndone(TagFSVolume* vol, uint64_t fid, InkReceipt* out)
 {
     error_t rc;
     do {
-        rc = InkUndoneOnce(fid, out);
+        rc = InkUndoneOnce(vol, fid, out);
     } while (rc != OK && InkGoesRound(&rc));
     return rc;
 }
@@ -500,45 +498,45 @@ error_t InkUndone(uint64_t fid, InkReceipt* out)
 /* One round of InkTagsOff. A file kept deleted is one too: a program that
  * left takes its tags off the files it kept (retire/retire.c), whatever state
  * those are in. */
-static error_t InkTagsOffOnce(uint64_t fid, const uint32_t* tags, uint32_t count, InkReceipt* out)
+static error_t InkTagsOffOnce(TagFSVolume* vol, uint64_t fid, const uint32_t* tags, uint32_t count, InkReceipt* out)
 {
     RecordWhere   was;
     InkFieldsPlan f   = { 0 };
-    FileRecord*   cur = FileMapRecordHold(InkState()->files, fid, &was);
+    FileRecord*   cur = FileMapRecordHold(vol->state.files, fid, &was);
     if (!cur)
         return ERR_FILE_NOT_FOUND;
-    error_t rc = InkVolumeBegins();
+    error_t rc = InkVolumeBegins(vol);
     if (rc == OK && !InkFieldsTags(cur, TAGFS_INVALID_TAG_ID, tags, count, &f))
         rc = ERR_NO_MEMORY;
     if (rc == OK && f.drops == 0)
         out->gen = was.gen;
     else if (rc == OK)
-        rc = InkBookFields(fid, cur, &was, &f, cur->name, TAGFS_INVALID_TAG_ID, cur->flags, cur->keep_until, out);
+        rc = InkBookFields(vol, fid, cur, &was, &f, cur->name, TAGFS_INVALID_TAG_ID, cur->flags, cur->keep_until, out);
     kfree(f.tags);
     FileRecordRelease(cur);
     return rc;
 }
 
-error_t InkTagsOff(uint64_t fid, const uint32_t* tags, uint32_t count, InkReceipt* out)
+error_t InkTagsOff(TagFSVolume* vol, uint64_t fid, const uint32_t* tags, uint32_t count, InkReceipt* out)
 {
     error_t rc;
     do {
-        rc = InkTagsOffOnce(fid, tags, count, out);
+        rc = InkTagsOffOnce(vol, fid, tags, count, out);
     } while (rc != OK && InkGoesRound(&rc));
     return rc;
 }
 
-error_t InkTagsRetire(const uint32_t* tags, uint32_t count, InkReceipt* out)
+error_t InkTagsRetire(TagFSVolume* vol, const uint32_t* tags, uint32_t count, InkReceipt* out)
 {
     uint64_t held = 0;
-    error_t  rc   = InkVolumeBegins();
+    error_t  rc   = InkVolumeBegins(vol);
     if (rc == OK)
-        rc = InkBookReserves((uint64_t)count * STITCH_COINED_MOST, &held);
+        rc = InkBookReserves(vol, (uint64_t)count * STITCH_COINED_MOST, &held);
     if (rc == OK)
-        rc = TagRegistryRetireRoom(InkState()->registry, count);
+        rc = TagRegistryRetireRoom(vol->state.registry, count);
     if (rc == OK)
-        rc = InkBookRetire(tags, count, out);
-    InkBookHeldLetGo(held);
+        rc = InkBookRetire(vol, tags, count, out);
+    InkBookHeldLetGo(vol, held);
     return rc;
 }
 
@@ -549,18 +547,18 @@ error_t InkTagsRetire(const uint32_t* tags, uint32_t count, InkReceipt* out)
  * lets it go in the same locked step as the record (InkBookFieldsLocked, a tag
  * added or dropped). A call that changes nothing is OK with no Ink.
  */
-static error_t InkKeepOnce(uint64_t fid, uint64_t until, InkWarrant warrant, InkReceipt* out)
+static error_t InkKeepOnce(TagFSVolume* vol, uint64_t fid, uint64_t until, InkWarrant warrant, InkReceipt* out)
 {
     RecordWhere   was;
     InkFieldsPlan f = { 0 };
-    FileRecord*   cur = FileMapRecordHold(InkState()->files, fid, &was);
+    FileRecord*   cur = FileMapRecordHold(vol->state.files, fid, &was);
     if (!cur)
         return ERR_FILE_NOT_FOUND;
     bool     kept  = cur->flags & TAGFS_FILE_DELETED;
     uint32_t flags = until ? cur->flags | TAGFS_FILE_DELETED : cur->flags & ~(uint32_t)TAGFS_FILE_DELETED;
-    error_t  rc    = InkVolumeBegins();
+    error_t  rc    = InkVolumeBegins(vol);
     if (rc == OK)
-        rc = InkGuardSays(fid, InkRecordTouchesBoot(cur), cur->flags, warrant);
+        rc = InkGuardSays(vol, fid, InkRecordTouchesBoot(vol, cur), cur->flags, warrant);
     if (rc != OK)
         goto out;
     if (kept == (until != 0) && cur->keep_until == until) {
@@ -575,18 +573,18 @@ static error_t InkKeepOnce(uint64_t fid, uint64_t until, InkWarrant warrant, Ink
         f.adds = true;
     else if (!until)
         f.dropped[f.drops++] = TAGFS_DELETED_MEMBERS;
-    rc = InkBookFields(fid, cur, &was, &f, cur->name, TAGFS_DELETED_MEMBERS, flags, until, out);
+    rc = InkBookFields(vol, fid, cur, &was, &f, cur->name, TAGFS_DELETED_MEMBERS, flags, until, out);
 out:
     kfree(f.tags);
     FileRecordRelease(cur);
     return rc;
 }
 
-error_t InkKeep(uint64_t fid, uint64_t until, InkWarrant warrant, InkReceipt* out)
+error_t InkKeep(TagFSVolume* vol, uint64_t fid, uint64_t until, InkWarrant warrant, InkReceipt* out)
 {
     error_t rc;
     do {
-        rc = InkKeepOnce(fid, until, warrant, out);
+        rc = InkKeepOnce(vol, fid, until, warrant, out);
     } while (rc != OK && InkGoesRound(&rc));
     return rc;
 }
@@ -623,15 +621,15 @@ static bool InkShowsTo(const FileRecord* cur, uint64_t reader)
 }
 
 /* One round of InkShown. */
-static error_t InkShownOnce(uint64_t fid, uint64_t reader, bool show, InkReceipt* out)
+static error_t InkShownOnce(TagFSVolume* vol, uint64_t fid, uint64_t reader, bool show, InkReceipt* out)
 {
     RecordWhere   was;
     InkFieldsPlan f    = { 0 };
     uint64_t*     list = NULL;
-    FileRecord*   cur  = FileMapRecordHold(InkState()->files, fid, &was);
+    FileRecord*   cur  = FileMapRecordHold(vol->state.files, fid, &was);
     if (!cur)
         return ERR_FILE_NOT_FOUND;
-    error_t rc = InkVolumeBegins();
+    error_t rc = InkVolumeBegins(vol);
     if (rc == OK && InkShowsTo(cur, reader) == show) {
         out->gen = was.gen;
     } else if (rc == OK) {
@@ -641,7 +639,7 @@ static error_t InkShownOnce(uint64_t fid, uint64_t reader, bool show, InkReceipt
         } else {
             f.shown_count = InkShownList(cur, reader, show, list);
             f.shown       = list;
-            rc = InkBookFields(fid, cur, &was, &f, cur->name, TAGFS_INVALID_TAG_ID, cur->flags, cur->keep_until, out);
+            rc = InkBookFields(vol, fid, cur, &was, &f, cur->name, TAGFS_INVALID_TAG_ID, cur->flags, cur->keep_until, out);
         }
     }
     kfree(list);
@@ -650,35 +648,35 @@ static error_t InkShownOnce(uint64_t fid, uint64_t reader, bool show, InkReceipt
     return rc;
 }
 
-error_t InkShown(uint64_t fid, uint64_t reader, bool show, InkReceipt* out)
+error_t InkShown(TagFSVolume* vol, uint64_t fid, uint64_t reader, bool show, InkReceipt* out)
 {
     error_t rc;
     do {
-        rc = InkShownOnce(fid, reader, show, out);
+        rc = InkShownOnce(vol, fid, reader, show, out);
     } while (rc != OK && InkGoesRound(&rc));
     return rc;
 }
 
 /* Another card of the program `passport` than `fid`'s, held — the one it is
  * named by when that is not `fid` — or NULL when no other keeps it. */
-static FileRecord* InkOtherCarrier(uint64_t fid, uint64_t passport)
+static FileRecord* InkOtherCarrier(TagFSVolume* vol, uint64_t fid, uint64_t passport)
 {
     uint64_t files[2], card = 0;
-    uint32_t n = passport ? FileMapProgramFiles(InkState()->files, passport, files, 2, &card) : 0;
+    uint32_t n = passport ? FileMapProgramFiles(vol->state.files, passport, files, 2, &card) : 0;
     uint64_t other = card != fid ? card : (n > 1 ? files[files[0] == fid ? 1 : 0] : 0);
-    return other ? FileMapRecordHold(InkState()->files, other, NULL) : NULL;
+    return other ? FileMapRecordHold(vol->state.files, other, NULL) : NULL;
 }
 
 /* One round of InkPassport. */
-static error_t InkPassportOnce(uint64_t fid, uint64_t passport, InkReceipt* out)
+static error_t InkPassportOnce(TagFSVolume* vol, uint64_t fid, uint64_t passport, InkReceipt* out)
 {
     RecordWhere   was;
     InkFieldsPlan f     = { 0 };
-    FileRecord*   cur   = FileMapRecordHold(InkState()->files, fid, &was);
+    FileRecord*   cur   = FileMapRecordHold(vol->state.files, fid, &was);
     FileRecord*   other = NULL;
     if (!cur)
         return ERR_FILE_NOT_FOUND;
-    error_t rc = InkVolumeBegins();
+    error_t rc = InkVolumeBegins(vol);
     if (rc == OK && cur->passport == passport) {
         out->gen = was.gen;
     } else if (rc == OK) {
@@ -688,11 +686,11 @@ static error_t InkPassportOnce(uint64_t fid, uint64_t passport, InkReceipt* out)
             /* Whom the program shows its tags to is the program's, not the
              * file's: the card takes the list another card of it holds, or
              * none — the list of the program it held went with it. */
-            other         = InkOtherCarrier(fid, passport);
+            other         = InkOtherCarrier(vol, fid, passport);
             f.shown       = other ? other->shown_to : NULL;
             f.shown_count = other ? other->shown_count : 0;
             f.passport    = passport;
-            rc = InkBookFields(fid, cur, &was, &f, cur->name, TAGFS_INVALID_TAG_ID, cur->flags, cur->keep_until, out);
+            rc = InkBookFields(vol, fid, cur, &was, &f, cur->name, TAGFS_INVALID_TAG_ID, cur->flags, cur->keep_until, out);
         }
     }
     kfree(f.tags);
@@ -701,16 +699,16 @@ static error_t InkPassportOnce(uint64_t fid, uint64_t passport, InkReceipt* out)
     return rc;
 }
 
-error_t InkPassport(uint64_t fid, uint64_t passport, InkReceipt* out)
+error_t InkPassport(TagFSVolume* vol, uint64_t fid, uint64_t passport, InkReceipt* out)
 {
     if (passport && !(passport & TAGFS_PASSPORT_BIT))
         return ERR_INVALID_ARGUMENT;
     error_t rc;
     do {
-        rc = InkPassportOnce(fid, passport, out);
+        rc = InkPassportOnce(vol, fid, passport, out);
     } while (rc != OK && InkGoesRound(&rc));
     if (rc == OK)
-        RetireOwed();    /* the program the card named may have left with it */
+        RetireOwed(vol);    /* the program the card named may have left with it */
     return rc;
 }
 
@@ -718,13 +716,13 @@ error_t InkPassport(uint64_t fid, uint64_t passport, InkReceipt* out)
 // A new file
 // ----------------------------------------------------------------------------
 
-error_t InkNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t made_by, uint64_t* out_fid,
+error_t InkNew(TagFSVolume* vol, const char* name, const uint32_t* tags, uint32_t count, uint64_t made_by, uint64_t* out_fid,
                InkReceipt* out)
 {
-    error_t rc = InkVolumeBegins();
+    error_t rc = InkVolumeBegins(vol);
     if (rc != OK)
         return rc;
-    return InkBookNew(name, tags, count, made_by, out_fid, out);
+    return InkBookNew(vol, name, tags, count, made_by, out_fid, out);
 }
 
 // ----------------------------------------------------------------------------
@@ -732,9 +730,9 @@ error_t InkNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t 
 // ----------------------------------------------------------------------------
 
 /* One round of InkQuitclaim. */
-static error_t InkQuitclaimOnce(uint64_t fid, InkWarrant warrant, InkReceipt* out)
+static error_t InkQuitclaimOnce(TagFSVolume* vol, uint64_t fid, InkWarrant warrant, InkReceipt* out)
 {
-    TagFSState* fs = InkState();
+    TagFSState* fs = &vol->state;
     RecordWhere was;
     FileRecord* cur = FileMapRecordHold(fs->files, fid, &was);
     if (!cur)
@@ -745,26 +743,26 @@ static error_t InkQuitclaimOnce(uint64_t fid, InkWarrant warrant, InkReceipt* ou
      * asked for anything, and a heap with nothing left turns neither refusal
      * into another. The ground let go is walked the same way. */
     FallowNode* fallow = NULL;
-    error_t     rc     = InkVolumeBegins();
+    error_t     rc     = InkVolumeBegins(vol);
     if (rc == OK)
-        rc = InkGuardSays(fid, InkRecordTouchesBoot(cur), cur->flags, warrant);
+        rc = InkGuardSays(vol, fid, InkRecordTouchesBoot(vol, cur), cur->flags, warrant);
     if (rc == OK)
-        rc = FallowNodeOfRecord(cur, FALLOW_BY_RECORD, &fallow);
+        rc = FallowNodeOfRecord(vol, cur, FALLOW_BY_RECORD, &fallow);
     if (rc == OK)
-        rc = InkBookQuitclaim(fid, &was, cur, fallow, out);
+        rc = InkBookQuitclaim(vol, fid, &was, cur, fallow, out);
     FileRecordRelease(cur);
     return rc;
 }
 
 /* A holder of the file's Helm is not waited for: the file is vacated, and the
  * holder answers ERR_FILE_NOT_FOUND at its own Ink, its Stakes given back. */
-error_t InkQuitclaim(uint64_t fid, InkWarrant warrant, InkReceipt* out)
+error_t InkQuitclaim(TagFSVolume* vol, uint64_t fid, InkWarrant warrant, InkReceipt* out)
 {
     error_t rc;
     do {
-        rc = InkQuitclaimOnce(fid, warrant, out);
+        rc = InkQuitclaimOnce(vol, fid, warrant, out);
     } while (rc != OK && InkGoesRound(&rc));
     if (rc == OK)
-        HelmVacate(fid);
+        HelmVacate(vol, fid);
     return rc;
 }

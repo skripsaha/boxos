@@ -185,9 +185,9 @@ void BrookInit(void)
  * ───────────────────────────────────────────────────────────────────── */
 static uint32_t brook_resolve_tag(const char *tag, bool intern_if_missing)
 {
-    if (!intern_if_missing) return tagfs_tag_lookup(tag);
+    if (!intern_if_missing) return tagfs_tag_lookup(TagFSHome(), tag);
     uint32_t id;
-    return tagfs_tag_intern(tag, &id) == OK ? id : TAGFS_INVALID_TAG_ID;
+    return tagfs_tag_intern(TagFSHome(), tag, &id) == OK ? id : TAGFS_INVALID_TAG_ID;
 }
 
 /* ─────────────────────────────────────────────────────────────────────
@@ -876,9 +876,9 @@ error_t BrookOpenInternal(struct process_t *proc,
              * so the streaming buffers are queryable via tag algebra. The
              * key:value goes whole, however long: measured first, then
              * copied at its length. */
-            size_t tag_len  = tagfs_tag_text(tag_id, NULL, 0);
+            size_t tag_len  = tagfs_tag_text(TagFSHome(), tag_id, NULL, 0);
             char  *tag_text = tag_len ? kmalloc(tag_len + 1) : NULL;
-            if (tag_text && tagfs_tag_text(tag_id, tag_text, tag_len + 1) == tag_len) {
+            if (tag_text && tagfs_tag_text(TagFSHome(), tag_id, tag_text, tag_len + 1) == tag_len) {
                 MemTagApplyByPhys(fresh->header_phys, 1, tag_text);
                 MemTagApplyByPhys(fresh->header_phys, 1, "purpose:brook");
                 MemTagApplyByPhys(fresh->header_phys, 1, "purpose:brook-header");

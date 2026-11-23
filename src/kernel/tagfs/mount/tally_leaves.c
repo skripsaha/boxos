@@ -9,6 +9,7 @@
 #include "../tag_spelling/tag_spelling.h"
 #include "../use_memory/use_memory.h"
 #include "facsimile.h"
+#include "tagfs_volume.h"
 
 /*
  * The leaves of the Tally the mount stands on, into the memory a mount fills
@@ -27,14 +28,14 @@
 
 /* What a body this reader read to its known end leaves over, said: written by
  * a kernel that knows more (§2.3, M-8). */
-static void LeavesLonger(const char* what, uint32_t left)
+static void LeavesLonger(TagFSVolume* vol, const char* what, uint32_t left)
 {
     char words[192];
     if (left == 0)
         return;
     ksnprintf(words, sizeof(words), "%s is %u byte(s) longer than this reader knows — written by a "
               "kernel that knows more", what, left);
-    TagFSUnderGlass(words);
+    TagFSUnderGlass(vol, words);
 }
 
 // ----------------------------------------------------------------------------
@@ -92,7 +93,7 @@ static uint32_t BookHeadKnown(const TallyFileHead* h)
 
 /* The header of `f->fid` into the gathering: its name and its tags copied out
  * of the node, which is let go of after its leaf. */
-static error_t BookFileHead(BookFile* f, const uint8_t* body, uint32_t len)
+static error_t BookFileHead(TagFSVolume* vol, BookFile* f, const uint8_t* body, uint32_t len)
 {
     TallyFileHead h;
     char          what[64];
@@ -103,7 +104,7 @@ static error_t BookFileHead(BookFile* f, const uint8_t* body, uint32_t len)
     }
     ksnprintf(what, sizeof(what), "the FILES header of fid %llu", (unsigned long long)f->fid);
     if (got == TALLY_BODY_LONGER)
-        LeavesLonger(what, len - BookHeadKnown(&h));
+        LeavesLonger(vol, what, len - BookHeadKnown(&h));
 
     f->meta.filename = kmalloc(h.name_len + 1u);
     f->meta.tag_ids  = kmalloc(sizeof(uint32_t) * (h.ntags ? h.ntags : 1u));
@@ -125,7 +126,7 @@ static error_t BookFileHead(BookFile* f, const uint8_t* body, uint32_t len)
             char words[160];
             ksnprintf(words, sizeof(words), "fid %llu wears tag id %llu, past the last this kernel gives",
                       (unsigned long long)f->fid, (unsigned long long)id);
-            TagFSUnderGlass(words);
+            TagFSUnderGlass(vol, words);
             continue;
         }
         f->meta.tag_ids[f->meta.tag_count++] = (uint32_t)id;
@@ -193,16 +194,16 @@ static bool BookFileCut(BookFile* f, uint32_t n)
  * while the file's Parcels have covered no more than its bytes need — of a
  * file locked, a hole names no ground and is not kept. So what is laid is
  * bounded by the volume and by the file, never by a number a run carries. */
-static bool BookFileRun(BookFile* f, const TallyRun* r)
+static bool BookFileRun(TagFSVolume* vol, BookFile* f, const TallyRun* r)
 {
     uint64_t start = r->start, end = r->start + r->count;
     if (r->hole && f->why[0])
         return true;
     if (!r->hole) {
-        uint64_t lo = g_book.frame.data_block, hi = g_book.data_end;
+        uint64_t lo = vol->book.frame.data_block, hi = vol->book.data_end;
         if (start < lo || end > hi) {
             BookFileBroken(f, "it names ground outside the data run");
-            GroundCensusNamed(r->start, r->count);
+            GroundCensusNamed(vol, r->start, r->count);
         }
         start = start < lo ? lo : start;
         end   = end > hi ? hi : end;
@@ -310,7 +311,7 @@ static bool BookParcelReads(const uint8_t* body, uint32_t len, uint64_t seq, uin
  * still names the ground they name, which is held (tally.py _Files, `known`).
  * A Parcel that takes the file past the blocks its bytes need is said so the
  * moment it does, before its runs are laid (BookFileRun). */
-static error_t BookFileParcel(BookFile* f, uint64_t first, const uint8_t* body, uint32_t len, uint64_t seq)
+static error_t BookFileParcel(TagFSVolume* vol, BookFile* f, uint64_t first, const uint8_t* body, uint32_t len, uint64_t seq)
 {
     uint32_t at = 0;
     uint64_t n = 0, cursor = 0, blocks = 0;
@@ -336,14 +337,14 @@ static error_t BookFileParcel(BookFile* f, uint64_t first, const uint8_t* body, 
         BookFileBroken(f, words);
     }
     TallyTake(body, len, &at, &n);
-    g_book.laid.runs += n;
-    FoliationLeafHolds(TALLY_FILES, n, 0);
+    vol->book.laid.runs += n;
+    FoliationLeafHolds(vol, TALLY_FILES, n, 0);
     uint32_t from = f->nstrips;
     for (uint64_t i = 0; i < n; i++) {
         TallyRun r;
         TallyRunGet(body, len, &at, &cursor, seq, &r);
         f->ext |= RibbonRunCarried(&r) == RUN_CARRIED_NOT;
-        if (!BookFileRun(f, &r))
+        if (!BookFileRun(vol, f, &r))
             return ERR_NO_MEMORY;
     }
     if (f->nstrips > from && !BookFileCut(f, f->nstrips - from))
@@ -354,17 +355,17 @@ static error_t BookFileParcel(BookFile* f, uint64_t first, const uint8_t* body, 
     }
     f->covered = covered;
     ksnprintf(words, sizeof(words), "a Parcel of fid %llu", (unsigned long long)f->fid);
-    LeavesLonger(words, len - at);
+    LeavesLonger(vol, words, len - at);
     return OK;
 }
 
 /* Whether the last rotten range said reaches into `fid`'s keys from before
  * them — it ends inside them. */
-static bool BookRotReaches(uint64_t fid)
+static bool BookRotReaches(TagFSVolume* vol, uint64_t fid)
 {
-    if (g_book.nrot == 0)
+    if (vol->book.nrot == 0)
         return false;
-    const BookRotten* r = &g_book.rot[g_book.nrot - 1u];
+    const BookRotten* r = &vol->book.rot[vol->book.nrot - 1u];
     return !r->has_hi || (r->hi.k1 == fid && r->hi.k2 > 0);
 }
 
@@ -389,26 +390,26 @@ static const char* BookFileJudged(BookFile* f, char* words, size_t room)
 
 /* `fid` kept by name among the locked, in their order, and said: no open of
  * it is given, its id is not given again. ERR_NO_MEMORY. */
-static error_t BookLockedByName(uint64_t fid, const char* why)
+static error_t BookLockedByName(TagFSVolume* vol, uint64_t fid, const char* why)
 {
-    if (g_book.nlocked == g_book.caplocked) {
-        uint32_t  cap  = g_book.caplocked ? g_book.caplocked * 2u : 16u;
+    if (vol->book.nlocked == vol->book.caplocked) {
+        uint32_t  cap  = vol->book.caplocked ? vol->book.caplocked * 2u : 16u;
         uint64_t* more = kmalloc(sizeof(uint64_t) * cap);
         if (!more)
             return ERR_NO_MEMORY;
-        if (g_book.nlocked)
-            memcpy(more, g_book.locked, sizeof(uint64_t) * g_book.nlocked);
-        kfree(g_book.locked);
-        g_book.locked    = more;
-        g_book.caplocked = cap;
+        if (vol->book.nlocked)
+            memcpy(more, vol->book.locked, sizeof(uint64_t) * vol->book.nlocked);
+        kfree(vol->book.locked);
+        vol->book.locked    = more;
+        vol->book.caplocked = cap;
     }
-    uint32_t at = g_book.nlocked++;
-    while (at > 0 && g_book.locked[at - 1u] > fid) {
-        g_book.locked[at] = g_book.locked[at - 1u];
+    uint32_t at = vol->book.nlocked++;
+    while (at > 0 && vol->book.locked[at - 1u] > fid) {
+        vol->book.locked[at] = vol->book.locked[at - 1u];
         at--;
     }
-    g_book.locked[at] = fid;
-    g_book.said.locked++;
+    vol->book.locked[at] = fid;
+    vol->book.said.locked++;
     kprintf("[TagFS] fid %llu is locked: %s — no open of it is given, its id is not given again, and "
             "the blocks it names are held\n", (unsigned long long)fid, why);
     return OK;
@@ -419,28 +420,28 @@ static error_t BookLockedByName(uint64_t fid, const char* why)
  * Where memory would not keep them — its Parcels as they lay, or a place in the
  * list — the mount goes on, and no Tally is written by it: a Tally names a
  * file locked by name as it lay or not at all. Said. */
-static void BookFileKept(BookFile* f)
+static void BookFileKept(TagFSVolume* vol, BookFile* f)
 {
     static const char lost[] = "memory would not keep what of a file locked by name read, which a Tally carries "
                                "as it lay";
     BookKeptFile*     more   = NULL;
-    uint32_t          cap    = g_book.capkept ? g_book.capkept * 2u : 8u;
-    if (!f->parcels_lost && g_book.nkept == g_book.capkept && !(more = kmalloc(sizeof(BookKeptFile) * cap)))
+    uint32_t          cap    = vol->book.capkept ? vol->book.capkept * 2u : 8u;
+    if (!f->parcels_lost && vol->book.nkept == vol->book.capkept && !(more = kmalloc(sizeof(BookKeptFile) * cap)))
         f->parcels_lost = true;
     if (f->parcels_lost) {
-        if (!BinderNoTallies())
+        if (!BinderNoTallies(vol))
             kprintf("[TagFS] fid %llu: %s — no Tally is written by this mount\n", (unsigned long long)f->fid, lost);
-        BinderNoTalliesFrom(lost);
+        BinderNoTalliesFrom(vol, lost);
         return;
     }
     if (more) {
-        if (g_book.nkept)
-            memcpy(more, g_book.kept, sizeof(BookKeptFile) * g_book.nkept);
-        kfree(g_book.kept);
-        g_book.kept    = more;
-        g_book.capkept = cap;
+        if (vol->book.nkept)
+            memcpy(more, vol->book.kept, sizeof(BookKeptFile) * vol->book.nkept);
+        kfree(vol->book.kept);
+        vol->book.kept    = more;
+        vol->book.capkept = cap;
     }
-    g_book.kept[g_book.nkept++] = (BookKeptFile){ .fid = f->fid, .head = f->head, .meta = f->meta, .gen = f->gen,
+    vol->book.kept[vol->book.nkept++] = (BookKeptFile){ .fid = f->fid, .head = f->head, .meta = f->meta, .gen = f->gen,
                                                   .parcel_b = f->parcel_b, .parcel_body = f->parcel_body,
                                                   .parcel_len = f->parcel_len, .parcel_seq = f->parcel_seq,
                                                   .nparcels = f->nparcels };
@@ -456,20 +457,20 @@ static void BookFileKept(BookFile* f)
 
 /* A file the book holds and cannot read: said, kept by name for every open of
  * it to be refused, and what of its ground it is known to name held. */
-static error_t BookFileLock(BookFile* f, const char* why)
+static error_t BookFileLock(TagFSVolume* vol, BookFile* f, const char* why)
 {
-    error_t rc = BookLockedByName(f->fid, why);
+    error_t rc = BookLockedByName(vol, f->fid, why);
     for (uint32_t i = 0; rc == OK && i < f->nstrips; i++)
         if (StripOnGround(f->strips[i].kind))
-            BookGroundHoldRun(f->strips[i].start, f->strips[i].count);
+            BookGroundHoldRun(vol, f->strips[i].start, f->strips[i].count);
     if (rc == OK)
-        BookFileKept(f);
+        BookFileKept(vol, f);
     return rc;
 }
 
-error_t BookFileLockLive(uint64_t fid, const char* why)
+error_t BookFileLockLive(TagFSVolume* vol, uint64_t fid, const char* why)
 {
-    TagFSState* fs  = tagfs_get_state();
+    TagFSState* fs  = &vol->state;
     RecordWhere was;
     FileRecord* rec = FileMapRecordHold(fs->files, fid, NULL);
     StripWalk   walk;
@@ -477,13 +478,13 @@ error_t BookFileLockLive(uint64_t fid, const char* why)
     if (!rec)
         return OK;
     char    glass[192];
-    error_t rc = BookLockedByName(fid, why);
+    error_t rc = BookLockedByName(vol, fid, why);
     ksnprintf(glass, sizeof(glass), "fid %llu is locked by the replay of the ribbon — no Tally names a file it "
               "cannot name as it lay, and a book no Tally is written of cannot go on", (unsigned long long)fid);
-    TagFSUnderGlass(glass);
+    TagFSUnderGlass(vol, glass);
     StripWalkBegin(rec, &walk);
     while (rc == OK && StripWalkNextGround(&walk, &run))
-        BookGroundHoldRun(run.start, run.count);
+        BookGroundHoldRun(vol, run.start, run.count);
     for (uint32_t t = 0; rc == OK && t < rec->tag_count; t++)
         TagBitmapLeave(fs->bitmap_index, rec->tags[t], fid);
     if (rec->flags & TAGFS_FILE_DELETED)
@@ -491,16 +492,16 @@ error_t BookFileLockLive(uint64_t fid, const char* why)
     FileRecordRelease(rec);
     if (rc == OK) {
         FileMapDrop(fs->files, fid, &was);
-        g_book.files--;
+        vol->book.files--;
     }
     return rc;
 }
 
 /* A file that stands, into the map of live files, its tags into the index,
  * its ground into the census. */
-static error_t BookFileLive(BookFile* f)
+static error_t BookFileLive(TagFSVolume* vol, BookFile* f)
 {
-    TagFSState* fs = tagfs_get_state();
+    TagFSState* fs = &vol->state;
     bool recut = false;
     f->meta.extents      = f->strips;
     f->meta.extent_count = f->nstrips;
@@ -508,7 +509,7 @@ static error_t BookFileLive(BookFile* f)
     if (!rec)
         return ERR_NO_MEMORY;
     if (recut)   /* memory holds it otherwise than the Tally: the next Tally lays its Parcels anew */
-        DogEarPut(TALLY_FILES, (TallyKey){ f->fid, 1 }, (TallyKey){ f->fid + 1u, 0 });
+        DogEarPut(vol, TALLY_FILES, (TallyKey){ f->fid, 1 }, (TallyKey){ f->fid + 1u, 0 });
     rec->gen = f->gen;
     RecordWhere  where, was;
     FileMapStake stake = { .count = 0 };
@@ -526,35 +527,35 @@ static error_t BookFileLive(BookFile* f)
     if (f->ext) {
         ksnprintf(words, sizeof(words), "a run of fid %llu carries an extension this kernel cannot carry "
                   "on (CODEC, SHARED or COPY, §8)", (unsigned long long)f->fid);
-        TagFSUnderGlass(words);
+        TagFSUnderGlass(vol, words);
     }
     if (f->wide) {
         /* Its flags' unknown bits are a newer writer's, carried byte for
          * byte by any writer (§2.3) — and memory holds 32 of them. */
         ksnprintf(words, sizeof(words), "fid %llu carries flags past the 32 bits this kernel holds — "
                   "written by a kernel that knows more", (unsigned long long)f->fid);
-        TagFSUnderGlass(words);
+        TagFSUnderGlass(vol, words);
     }
-    g_book.files++;
+    vol->book.files++;
     return OK;
 }
 
-static error_t BookFileAside(BookFile* f);
+static error_t BookFileAside(TagFSVolume* vol, BookFile* f);
 static error_t LeavesTag(void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq);
 
-error_t BookFileClose(void)
+error_t BookFileClose(TagFSVolume* vol)
 {
-    BookFile* f = &g_book.file;
+    BookFile* f = &vol->book.file;
     char      words[160];
     error_t   rc = OK;
     if (!f->open)
         return OK;
-    if (f->fid + 1u > g_book.next_fid)
-        g_book.next_fid = f->fid + 1u;
+    if (f->fid + 1u > vol->book.next_fid)
+        vol->book.next_fid = f->fid + 1u;
     if (f->rotten)
-        return BookFileAside(f);
+        return BookFileAside(vol, f);
     const char* why = BookFileJudged(f, words, sizeof(words));
-    rc = why ? BookFileLock(f, why) : BookFileLive(f);
+    rc = why ? BookFileLock(vol, f, why) : BookFileLive(vol, f);
     BookFileForget(f);
     return rc;
 }
@@ -563,93 +564,77 @@ error_t BookFileClose(void)
 // A rotten range's files, judged once every range is (mount/facsimile.c)
 // ----------------------------------------------------------------------------
 
-/*
- * ‼ A FILE A ROTTEN RANGE REACHES IS LOCKED ONLY ONCE NO OLDER SLOT STANDS IN
- * FOR THE RANGE. What of it read — its header before the range, its Parcels
- * past it — is set aside whole as the walk closes it; Facsimile (facsimile.c)
- * weighs every range once the walk is done, and then each file set aside is
- * either taken with a range an older slot gives back — the older slot's file,
- * replayed, stands in its place — or locked as it always was (BookFileLock):
- * the lock, its holds and what a Tally carries of it as it lay.
- */
-static BookFile* s_aside;
-static uint32_t  s_naside;
-static uint32_t  s_capaside;
 
-/* Why the older slot does not stand in for the range taken: a file of it
- * that does not stand there either — the first said. */
-static char s_unfit[192];
-
-static error_t BookFileAside(BookFile* f)
+static error_t BookFileAside(TagFSVolume* vol, BookFile* f)
 {
-    if (s_naside == s_capaside) {
-        uint32_t  cap  = s_capaside ? s_capaside * 2u : 4u;
+    if (vol->tally_leaves.naside == vol->tally_leaves.capaside) {
+        uint32_t  cap  = vol->tally_leaves.capaside ? vol->tally_leaves.capaside * 2u : 4u;
         BookFile* more = kmalloc(sizeof(BookFile) * cap);
         if (!more) {
             BookFileForget(f);
             return ERR_NO_MEMORY;
         }
-        if (s_naside)
-            memcpy(more, s_aside, sizeof(BookFile) * s_naside);
-        kfree(s_aside);
-        s_aside    = more;
-        s_capaside = cap;
+        if (vol->tally_leaves.naside)
+            memcpy(more, vol->tally_leaves.aside, sizeof(BookFile) * vol->tally_leaves.naside);
+        kfree(vol->tally_leaves.aside);
+        vol->tally_leaves.aside    = more;
+        vol->tally_leaves.capaside = cap;
     }
-    s_aside[s_naside++] = *f;
+    vol->tally_leaves.aside[vol->tally_leaves.naside++] = *f;
     memset(f, 0, sizeof(*f));
     return OK;
 }
 
-error_t BookAsideSettled(bool (*taken)(uint64_t fid))
+error_t BookAsideSettled(TagFSVolume* vol, bool (*taken)(uint64_t fid))
 {
     error_t rc = OK;
-    for (uint32_t i = 0; i < s_naside; i++) {
-        BookFile* f = &s_aside[i];
+    for (uint32_t i = 0; i < vol->tally_leaves.naside; i++) {
+        BookFile* f = &vol->tally_leaves.aside[i];
         if (rc == OK && !taken(f->fid))
-            rc = BookFileLock(f, "it lies in a rotten range of FILES");
+            rc = BookFileLock(vol, f, "it lies in a rotten range of FILES");
         BookFileForget(f);
     }
-    BookAsideLetGo();
+    BookAsideLetGo(vol);
     return rc;
 }
 
-void BookAsideLetGo(void)
+void BookAsideLetGo(TagFSVolume* vol)
 {
-    for (uint32_t i = 0; i < s_naside; i++)
-        BookFileForget(&s_aside[i]);
-    kfree(s_aside);
-    s_aside    = NULL;
-    s_naside   = s_capaside = 0;
-    s_unfit[0] = '\0';
+    for (uint32_t i = 0; i < vol->tally_leaves.naside; i++)
+        BookFileForget(&vol->tally_leaves.aside[i]);
+    kfree(vol->tally_leaves.aside);
+    vol->tally_leaves.aside    = NULL;
+    vol->tally_leaves.naside   = vol->tally_leaves.capaside = 0;
+    vol->tally_leaves.unfit[0] = '\0';
 }
 
 // ----------------------------------------------------------------------------
 // The leaves of an older slot's Tally a range is taken from (Facsimile)
 // ----------------------------------------------------------------------------
 
-error_t BookFacsimileClose(void)
+error_t BookFacsimileClose(TagFSVolume* vol)
 {
-    BookFile* f = &g_book.file;
+    BookFile* f = &vol->book.file;
     char      words[160];
     error_t   rc = OK;
     if (!f->open)
         return OK;
     const char* why = BookFileJudged(f, words, sizeof(words));
-    if (why && !s_unfit[0])
-        ksnprintf(s_unfit, sizeof(s_unfit), "fid %llu does not stand in its Tally either (%s)",
+    if (why && !vol->tally_leaves.unfit[0])
+        ksnprintf(vol->tally_leaves.unfit, sizeof(vol->tally_leaves.unfit), "fid %llu does not stand in its Tally either (%s)",
                   (unsigned long long)f->fid, why);
     else if (!why)
-        rc = BookFileLive(f);
+        rc = BookFileLive(vol, f);
     BookFileForget(f);
     return rc;
 }
 
-bool BookFacsimileUnfit(char* why, size_t room)
+bool BookFacsimileUnfit(TagFSVolume* vol, char* why, size_t room)
 {
-    bool unfit = s_unfit[0] != '\0';
+    bool unfit = vol->tally_leaves.unfit[0] != '\0';
     if (unfit)
-        ksnprintf(why, room, "%s", s_unfit);
-    s_unfit[0] = '\0';
+        ksnprintf(why, room, "%s", vol->tally_leaves.unfit);
+    vol->tally_leaves.unfit[0] = '\0';
     return unfit;
 }
 
@@ -659,11 +644,11 @@ bool BookFacsimileUnfit(char* why, size_t room)
  * (BookFileClose), so each is the take's, its items' or its replay's. Nothing
  * else of them stands yet: their ground goes to the census only once every
  * range is weighed and the ribbon replayed (BookFilesLaid), and a Born of the
- * range noted no fid while the range was out of g_book.rot (BookBornNoted).
+ * range noted no fid while the range was out of vol->book.rot (BookBornNoted).
  */
-void BookFacsimileUndone(uint64_t lo, uint64_t hi)
+void BookFacsimileUndone(TagFSVolume* vol, uint64_t lo, uint64_t hi)
 {
-    TagFSState* fs = tagfs_get_state();
+    TagFSState* fs = &vol->state;
     uint64_t    ids[32];
     uint32_t    n;
     while (lo < hi && (n = FileMapFiles(fs->files, lo, ids, 32u)) > 0) {
@@ -678,19 +663,19 @@ void BookFacsimileUndone(uint64_t lo, uint64_t hi)
                 TagBitmapLeave(fs->bitmap_index, TAGFS_DELETED_MEMBERS, ids[i]);
             FileRecordRelease(rec);
             FileMapDrop(fs->files, ids[i], &was);
-            g_book.files--;
+            vol->book.files--;
         }
         lo = ids[n - 1u] < hi ? ids[n - 1u] + 1u : hi;
     }
 }
 
-error_t BookFacsimileItem(uint64_t tree, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
+error_t BookFacsimileItem(TagFSVolume* vol, uint64_t tree, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
 {
-    BookFile* f = &g_book.file;
+    BookFile* f = &vol->book.file;
     if (tree == TALLY_TAGS)
         return LeavesTag(NULL, key, body, len, seq);
     if (f->open && key.k1 != f->fid) {
-        error_t rc = BookFacsimileClose();
+        error_t rc = BookFacsimileClose(vol);
         if (rc != OK)
             return rc;
     }
@@ -698,25 +683,26 @@ error_t BookFacsimileItem(uint64_t tree, TallyKey key, const uint8_t* body, uint
         f->open = true;
         f->fid  = key.k1;
     }
-    return key.k2 == 0 ? BookFileHead(f, body, len) : BookFileParcel(f, key.k2 - 1u, body, len, seq);
+    return key.k2 == 0 ? BookFileHead(vol, f, body, len) : BookFileParcel(vol, f, key.k2 - 1u, body, len, seq);
 }
 
 /* A FILES item: (fid, 0) the header, (fid, 1 + b) the Parcel from block b. */
 static error_t LeavesFile(void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
 {
-    BookFile* f = &g_book.file;
+    TagFSVolume* vol = TagFSHome();
+    BookFile* f = &vol->book.file;
     (void)ctx;
     if (f->open && key.k1 != f->fid) {
-        error_t rc = BookFileClose();
+        error_t rc = BookFileClose(vol);
         if (rc != OK)
             return rc;
     }
     if (!f->open) {
         f->open   = true;
         f->fid    = key.k1;
-        f->rotten = BookRotReaches(key.k1);
+        f->rotten = BookRotReaches(vol, key.k1);
     }
-    return key.k2 == 0 ? BookFileHead(f, body, len) : BookFileParcel(f, key.k2 - 1u, body, len, seq);
+    return key.k2 == 0 ? BookFileHead(vol, f, body, len) : BookFileParcel(vol, f, key.k2 - 1u, body, len, seq);
 }
 
 /* The keys of a FILES range, as its line says them — fid/part, which the
@@ -729,56 +715,56 @@ static void BookKeySay(const TallyKey* k, bool has, char* out, size_t room)
         ksnprintf(out, room, "the end");
 }
 
-error_t BookRangeRots(const TallyPlace* at, const char* why)
+error_t BookRangeRots(TagFSVolume* vol, const TallyPlace* at, const char* why)
 {
-    if (g_book.nrot == g_book.caprot) {
-        uint32_t    cap  = g_book.caprot ? g_book.caprot * 2u : 8u;
+    if (vol->book.nrot == vol->book.caprot) {
+        uint32_t    cap  = vol->book.caprot ? vol->book.caprot * 2u : 8u;
         BookRotten* more = kmalloc(sizeof(BookRotten) * cap);
         if (!more)
             return ERR_NO_MEMORY;
-        if (g_book.nrot)
-            memcpy(more, g_book.rot, sizeof(BookRotten) * g_book.nrot);
-        kfree(g_book.rot);
-        g_book.rot    = more;
-        g_book.caprot = cap;
+        if (vol->book.nrot)
+            memcpy(more, vol->book.rot, sizeof(BookRotten) * vol->book.nrot);
+        kfree(vol->book.rot);
+        vol->book.rot    = more;
+        vol->book.caprot = cap;
     }
-    g_book.rot[g_book.nrot++] = (BookRotten){ at->lo, at->hi, at->has_hi, at->count };
-    if (g_book.file.open && at->has_lo && at->lo.k1 == g_book.file.fid)
-        g_book.file.rotten = true;
-    return FacsimileRotNoted(TALLY_FILES, at, why);
+    vol->book.rot[vol->book.nrot++] = (BookRotten){ at->lo, at->hi, at->has_hi, at->count };
+    if (vol->book.file.open && at->has_lo && at->lo.k1 == vol->book.file.fid)
+        vol->book.file.rotten = true;
+    return FacsimileRotNoted(vol, TALLY_FILES, at, why);
 }
 
-void BookRangeTaken(const TallyPlace* at)
+void BookRangeTaken(TagFSVolume* vol, const TallyPlace* at)
 {
-    for (uint32_t i = 0; i < g_book.nrot; i++) {
-        const BookRotten* r = &g_book.rot[i];
+    for (uint32_t i = 0; i < vol->book.nrot; i++) {
+        const BookRotten* r = &vol->book.rot[i];
         if (r->lo.k1 == at->lo.k1 && r->lo.k2 == at->lo.k2 && r->has_hi == at->has_hi &&
             (!r->has_hi || (r->hi.k1 == at->hi.k1 && r->hi.k2 == at->hi.k2))) {
-            memmove(&g_book.rot[i], &g_book.rot[i + 1u], sizeof(BookRotten) * (g_book.nrot - i - 1u));
-            g_book.nrot--;
+            memmove(&vol->book.rot[i], &vol->book.rot[i + 1u], sizeof(BookRotten) * (vol->book.nrot - i - 1u));
+            vol->book.nrot--;
             return;
         }
     }
 }
 
-void BookRangeBack(const TallyPlace* at)
+void BookRangeBack(TagFSVolume* vol, const TallyPlace* at)
 {
-    uint32_t i = g_book.nrot++;       /* BookRangeTaken kept the room */
-    while (i > 0 && (g_book.rot[i - 1u].lo.k1 > at->lo.k1 ||
-                     (g_book.rot[i - 1u].lo.k1 == at->lo.k1 && g_book.rot[i - 1u].lo.k2 > at->lo.k2))) {
-        g_book.rot[i] = g_book.rot[i - 1u];
+    uint32_t i = vol->book.nrot++;       /* BookRangeTaken kept the room */
+    while (i > 0 && (vol->book.rot[i - 1u].lo.k1 > at->lo.k1 ||
+                     (vol->book.rot[i - 1u].lo.k1 == at->lo.k1 && vol->book.rot[i - 1u].lo.k2 > at->lo.k2))) {
+        vol->book.rot[i] = vol->book.rot[i - 1u];
         i--;
     }
-    g_book.rot[i] = (BookRotten){ at->lo, at->hi, at->has_hi, at->count };
+    vol->book.rot[i] = (BookRotten){ at->lo, at->hi, at->has_hi, at->count };
 }
 
-error_t BookRangeRotsLaid(const TallyPlace* at, const char* why)
+error_t BookRangeRotsLaid(TagFSVolume* vol, const TallyPlace* at, const char* why)
 {
     char lo[48], hi[48];
-    if (BinderRotten(TALLY_FILES, at) != OK)
+    if (BinderRotten(vol, TALLY_FILES, at) != OK)
         return ERR_NO_MEMORY;
-    g_book.files_rot = true;
-    g_book.said.rotten++;
+    vol->book.files_rot = true;
+    vol->book.said.rotten++;
     BookKeySay(&at->lo, at->has_lo, lo, sizeof(lo));
     BookKeySay(&at->hi, at->has_hi, hi, sizeof(hi));
     kprintf("[TagFS] rotten range fid [%s, %s): %llu file(s) locked — the FILES range rots in every copy "
@@ -797,33 +783,33 @@ typedef struct {
     bool     use_seen;
 } LeavesWalk;
 
-bool BookTagHeld(uint64_t tid, const TallyTag* t)
+bool BookTagHeld(TagFSVolume* vol, uint64_t tid, const TallyTag* t)
 {
     char words[192];
     bool held = true;
     if (tid > TAGFS_MAX_TAG_ID) {
         ksnprintf(words, sizeof(words), "tag id %llu is past 2^31 - 2, the last this kernel gives",
                   (unsigned long long)tid);
-        TagFSUnderGlass(words);
+        TagFSUnderGlass(vol, words);
         held = false;
     }
     if (t->key_len > TAG_KEY_WIDTH || t->key_len + t->value_len > TAG_TEXT_WIDTH - 1u) {
         ksnprintf(words, sizeof(words), "tag id %llu's text (%llu + %llu bytes) is wider than this kernel "
                   "holds a tag (tag_spelling.h)", (unsigned long long)tid, (unsigned long long)t->key_len,
                   (unsigned long long)t->value_len);
-        TagFSUnderGlass(words);
+        TagFSUnderGlass(vol, words);
         held = false;
     }
     return held;
 }
 
 /* Where tag `tid` lies among those set aside, or would. */
-static uint32_t BookTagAsideAt(uint64_t tid)
+static uint32_t BookTagAsideAt(TagFSVolume* vol, uint64_t tid)
 {
-    uint32_t lo = 0, hi = g_book.naside;
+    uint32_t lo = 0, hi = vol->book.naside;
     while (lo < hi) {
         uint32_t mid = lo + (hi - lo) / 2u;
-        if (g_book.aside[mid].id < tid)
+        if (vol->book.aside[mid].id < tid)
             lo = mid + 1u;
         else
             hi = mid;
@@ -831,41 +817,42 @@ static uint32_t BookTagAsideAt(uint64_t tid)
     return lo;
 }
 
-const TallyTag* BookTagAsideOf(uint64_t tid)
+const TallyTag* BookTagAsideOf(TagFSVolume* vol, uint64_t tid)
 {
-    uint32_t at = BookTagAsideAt(tid);
-    return at < g_book.naside && g_book.aside[at].id == tid ? &g_book.aside[at].tag : NULL;
+    uint32_t at = BookTagAsideAt(vol, tid);
+    return at < vol->book.naside && vol->book.aside[at].id == tid ? &vol->book.aside[at].tag : NULL;
 }
 
-error_t BookTagAsideNoted(uint64_t tid, const TallyTag* t)
+error_t BookTagAsideNoted(TagFSVolume* vol, uint64_t tid, const TallyTag* t)
 {
-    uint32_t at   = BookTagAsideAt(tid);
-    bool     has  = at < g_book.naside && g_book.aside[at].id == tid;
-    uint64_t cap  = g_book.capaside;
+    uint32_t at   = BookTagAsideAt(vol, tid);
+    bool     has  = at < vol->book.naside && vol->book.aside[at].id == tid;
+    uint64_t cap  = vol->book.capaside;
     uint8_t* text = kmalloc(t->key_len + t->value_len + 1u);
-    if (!text || (!has && !RibbonGrow((void**)&g_book.aside, g_book.naside, &cap, sizeof(BookTagAside)))) {
+    if (!text || (!has && !RibbonGrow((void**)&vol->book.aside, vol->book.naside, &cap, sizeof(BookTagAside)))) {
         kfree(text);
         return ERR_NO_MEMORY;
     }
-    g_book.capaside = (uint32_t)cap;
+    vol->book.capaside = (uint32_t)cap;
     if (has) {
-        kfree(g_book.aside[at].text);
+        kfree(vol->book.aside[at].text);
     } else {
-        memmove(&g_book.aside[at + 1u], &g_book.aside[at], sizeof(BookTagAside) * (g_book.naside - at));
-        g_book.naside++;
+        memmove(&vol->book.aside[at + 1u], &vol->book.aside[at], sizeof(BookTagAside) * (vol->book.naside - at));
+        vol->book.naside++;
     }
     if (t->key_len)
         memcpy(text, t->key, t->key_len);
     if (t->value_len)
         memcpy(text + t->key_len, t->value, t->value_len);
-    g_book.aside[at] = (BookTagAside){ .id = tid, .tag = *t, .text = text };
-    g_book.aside[at].tag.key   = text;
-    g_book.aside[at].tag.value = text + t->key_len;
+    vol->book.aside[at] = (BookTagAside){ .id = tid, .tag = *t, .text = text };
+    vol->book.aside[at].tag.key   = text;
+    vol->book.aside[at].tag.value = text + t->key_len;
     return OK;
 }
 
 static error_t LeavesTag(void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
 {
+    TagFSVolume* vol = TagFSHome();
     TallyTag t;
     char     words[160];
     (void)ctx;
@@ -873,35 +860,35 @@ static error_t LeavesTag(void* ctx, TallyKey key, const uint8_t* body, uint32_t 
     int got = TallyTagGet(body, len, &t);
     if (got == TALLY_BODY_BROKEN) {
         ksnprintf(words, sizeof(words), "the TAGS element of id %llu does not read", (unsigned long long)key.k1);
-        TagFSUnderGlass(words);
+        TagFSUnderGlass(vol, words);
         return OK;
     }
     ksnprintf(words, sizeof(words), "the TAGS element of id %llu", (unsigned long long)key.k1);
     if (got == TALLY_BODY_LONGER)
-        LeavesLonger(words, len - TallyTagBytes(&t));
-    if (key.k1 + 1u > g_book.next_tag)
-        g_book.next_tag = key.k1 + 1u;
-    if (!BookTagHeld(key.k1, &t))
-        return BookTagAsideNoted(key.k1, &t);
+        LeavesLonger(vol, words, len - TallyTagBytes(&t));
+    if (key.k1 + 1u > vol->book.next_tag)
+        vol->book.next_tag = key.k1 + 1u;
+    if (!BookTagHeld(vol, key.k1, &t))
+        return BookTagAsideNoted(vol, key.k1, &t);
     /* A retired id is an element of the tree as a tag is — one item, its text
      * none — and is counted as the Tally's writer counted it (binder_items.c,
      * TagsNext): the measures of the tree the mount stands on are the ones
      * its writer laid. */
     error_t rc = (t.flags & TALLY_TAG_RETIRED)
-                     ? RegistryCoinRetired(tagfs_get_state()->registry, (uint32_t)key.k1)
-                     : RegistryCoin(tagfs_get_state()->registry, (uint32_t)key.k1,
+                     ? RegistryCoinRetired(vol->state.registry, (uint32_t)key.k1)
+                     : RegistryCoin(vol->state.registry, (uint32_t)key.k1,
                                     (t.flags & TALLY_TAG_HAS_VALUE) ? TAGFS_TAG_FLAG_HAS_VALUE : 0,
                                     TagRegistryOwnerOf(&t), t.key, (uint8_t)t.key_len, t.value,
                                     (uint16_t)t.value_len);
     if (rc == ERR_ALREADY_EXISTS) {
         ksnprintf(words, sizeof(words), "tag id %llu's owner and text are another id's too, or its id "
                   "another tag's — the registry cannot hold the two at once", (unsigned long long)key.k1);
-        TagFSUnderGlass(words);
+        TagFSUnderGlass(vol, words);
         return OK;
     }
     if (rc == OK) {
-        EndpaperLaidTag(&g_book.laid, TallyTagCarried(&t));
-        FoliationLeafHolds(TALLY_TAGS, 1u, TallyTagCarried(&t));
+        EndpaperLaidTag(&vol->book.laid, TallyTagCarried(&t));
+        FoliationLeafHolds(vol, TALLY_TAGS, 1u, TallyTagCarried(&t));
     }
     return rc;
 }
@@ -909,6 +896,7 @@ static error_t LeavesTag(void* ctx, TallyKey key, const uint8_t* body, uint32_t 
 /* The Use Context: the tree's one element, key 0. */
 static error_t LeavesUse(void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
 {
+    TagFSVolume* vol = TagFSHome();
     const uint8_t* text = NULL;
     uint64_t       n    = 0;
     LeavesWalk*    walk = (LeavesWalk*)ctx;
@@ -919,12 +907,12 @@ static error_t LeavesUse(void* ctx, TallyKey key, const uint8_t* body, uint32_t 
     walk->use_seen = true;
     int got = TallyUseGet(body, len, &text, &n);
     if (got == TALLY_BODY_BROKEN) {
-        TagFSUnderGlass("the USE element does not read");
+        TagFSUnderGlass(vol, "the USE element does not read");
         return OK;
     }
     if (got == TALLY_BODY_LONGER)
-        LeavesLonger("the USE element", len - (TallyVarintBytes(n) + (uint32_t)n));
-    return BookUseRecalled(text, n);
+        LeavesLonger(vol, "the USE element", len - (TallyVarintBytes(n) + (uint32_t)n));
+    return BookUseRecalled(vol, text, n);
 }
 
 static error_t LeavesNone(void* ctx, TallyKey key, const uint8_t* body, uint32_t len, uint64_t seq)
@@ -941,20 +929,21 @@ static error_t LeavesNone(void* ctx, TallyKey key, const uint8_t* body, uint32_t
  * it. */
 static error_t LeavesRot(void* ctx, const TallyPlace* at, const char* why)
 {
+    TagFSVolume* vol = TagFSHome();
     uint64_t tree = ((const LeavesWalk*)ctx)->tree;
     if (at->level > 0)
-        EndpaperLaidNode(&g_book.laid, tree, at->level, 0, 1u, at->has_lo ? at->lo.k1 : 0);
+        EndpaperLaidNode(&vol->book.laid, tree, at->level, 0, 1u, at->has_lo ? at->lo.k1 : 0);
     if (tree == TALLY_FILES)
-        return BookRangeRots(at, why);
+        return BookRangeRots(vol, at, why);
     if (tree == TALLY_TAGS)
-        return FacsimileRotNoted(TALLY_TAGS, at, why);
-    return BookTagsRotLaid(tree, at, why);
+        return FacsimileRotNoted(vol, TALLY_TAGS, at, why);
+    return BookTagsRotLaid(vol, tree, at, why);
 }
 
-error_t BookTagsRotLaid(uint64_t tree, const TallyPlace* at, const char* why)
+error_t BookTagsRotLaid(TagFSVolume* vol, uint64_t tree, const TallyPlace* at, const char* why)
 {
     char lo[48], hi[48];
-    g_book.said.rotten++;
+    vol->book.said.rotten++;
     ksnprintf(lo, sizeof(lo), "%llu", (unsigned long long)(at->has_lo ? at->lo.k1 : 0));
     if (at->has_hi)
         ksnprintf(hi, sizeof(hi), "%llu", (unsigned long long)at->hi.k1);
@@ -968,7 +957,7 @@ error_t BookTagsRotLaid(uint64_t tree, const TallyPlace* at, const char* why)
     return OK;
 }
 
-error_t TallyLeaves(uint64_t tree, const SpineRoot* root)
+error_t TallyLeaves(TagFSVolume* vol, uint64_t tree, const SpineRoot* root)
 {
     LeavesWalk walk = { tree, false };
     TallySink  sink = {
@@ -980,12 +969,12 @@ error_t TallyLeaves(uint64_t tree, const SpineRoot* root)
         .node   = BookGroundNode,
         .said   = true,
         .mend   = BookGroundMended,
-        .shapes = &g_book.said.shapes,
+        .shapes = &vol->book.said.shapes,
     };
-    error_t rc = TallyRead(tree, root, true, &sink);
+    error_t rc = TallyRead(vol, tree, root, true, &sink);
     if (rc == OK && tree == TALLY_FILES)
-        rc = BookFileClose();
+        rc = BookFileClose(vol);
     if (rc == OK && tree == TALLY_USE && !walk.use_seen)
-        rc = BookUseRecalled(NULL, 0);
+        rc = BookUseRecalled(vol, NULL, 0);
     return rc;
 }

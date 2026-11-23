@@ -3,6 +3,7 @@
 #include "../ink/ink.h"
 #include "../block_map/block_map_derived.h"
 #include "pmm.h"
+#include "tagfs_volume.h"
 
 /*
  * The Plot of one call: loaded from the file's record in the map of live
@@ -40,15 +41,15 @@ bool PlotRoom(void **array, uint32_t *room, uint32_t have, uint64_t need, size_t
     return true;
 }
 
-static error_t PlotLoadAs(Plot *p, uint64_t fid, InkWarrant warrant, bool kept)
+static error_t PlotLoadAs(TagFSVolume* vol, Plot *p, uint64_t fid, InkWarrant warrant, bool kept)
 {
     memset(p, 0, sizeof(*p));
     p->fid         = fid;
-    p->mount_epoch = tagfs_mount_epoch();
+    p->mount_epoch = tagfs_mount_epoch(vol);
     p->warrant     = warrant;
 
     RecordWhere where;
-    FileRecord *rec = FileMapRecordHold(tagfs_get_state()->files, fid, &where);
+    FileRecord *rec = FileMapRecordHold(vol->state.files, fid, &where);
     if (!rec)
         return ERR_FILE_NOT_FOUND;
     p->shape = where.shape;
@@ -78,49 +79,49 @@ static error_t PlotLoadAs(Plot *p, uint64_t fid, InkWarrant warrant, bool kept)
      * id (ink.c). */
     if ((p->meta.flags & TAGFS_FILE_DELETED) && !kept)
         return ERR_FILE_NOT_FOUND;
-    return InkMayChange(fid, p->meta.flags, p->runs, p->run_count, warrant);
+    return InkMayChange(vol, fid, p->meta.flags, p->runs, p->run_count, warrant);
 }
 
-error_t PlotLoad(Plot *p, uint64_t fid, InkWarrant warrant)
+error_t PlotLoad(TagFSVolume* vol, Plot *p, uint64_t fid, InkWarrant warrant)
 {
-    return PlotLoadAs(p, fid, warrant, false);
+    return PlotLoadAs(vol, p, fid, warrant, false);
 }
 
-error_t PlotLoadKept(Plot *p, uint64_t fid, InkWarrant warrant)
+error_t PlotLoadKept(TagFSVolume* vol, Plot *p, uint64_t fid, InkWarrant warrant)
 {
-    return PlotLoadAs(p, fid, warrant, true);
+    return PlotLoadAs(vol, p, fid, warrant, true);
 }
 
-int PlotGiveBack(const Plot *p, uint64_t start, uint32_t count)
+int PlotGiveBack(TagFSVolume* vol, const Plot *p, uint64_t start, uint32_t count)
 {
-    return -(int)BlockMapDerivedGive(p->fid, start, count);
+    return -(int)BlockMapDerivedGive(vol, p->fid, start, count);
 }
 
-void PlotPullStakes(Plot *p)
+void PlotPullStakes(TagFSVolume* vol, Plot *p)
 {
-    if (p->stake_count && p->mount_epoch != tagfs_mount_epoch()) {
+    if (p->stake_count && p->mount_epoch != tagfs_mount_epoch(vol)) {
         kprintf("[TagFS] file %llu: the volume was mounted again while %u run(s) were staked "
                 "for it — they are not given back to a mounting they were never taken from\n",
                 p->fid, p->stake_count);
         p->stake_count = 0;
-        PlotStakesCount(p, 0);
+        PlotStakesCount(vol, p, 0);
         return;
     }
     for (uint32_t i = 0; i < p->stake_count; i++) {
-        int given = PlotGiveBack(p, p->stakes[i].start, p->stakes[i].count);
+        int given = PlotGiveBack(vol, p, p->stakes[i].start, p->stakes[i].count);
         if (given != 0)
             kprintf("[TagFS] file %llu: %u block(s) at %llu were taken for it and named by no "
                     "record, and would not go back (error %d)\n", p->fid,
                     p->stakes[i].count, (unsigned long long)p->stakes[i].start, -given);
     }
     p->stake_count = 0;
-    PlotStakesCount(p, 0);
+    PlotStakesCount(vol, p, 0);
 }
 
-void PlotRelease(Plot *p)
+void PlotRelease(TagFSVolume* vol, Plot *p)
 {
-    PlotPullStakes(p);
-    PlotWindowLetGo(p);
+    PlotPullStakes(vol, p);
+    PlotWindowLetGo(vol, p);
     kfree(p->runs);
     kfree(p->stakes);
     kfree(p->freed);
@@ -220,7 +221,7 @@ error_t PlotStake(Plot *p, uint64_t start, uint32_t count)
 /* The record the Ink lays at the most: every run of the file, and two more a
  * Stake — a write into a run splits it about the new one — on the blocks it
  * names and the Stakes'. */
-void PlotStakesCount(Plot *p, uint64_t more)
+void PlotStakesCount(TagFSVolume* vol, Plot *p, uint64_t more)
 {
     EndpaperStakes now;
     uint64_t       stakes = p->stake_count + (more ? 1u : 0u);
@@ -230,14 +231,14 @@ void PlotStakesCount(Plot *p, uint64_t more)
         blocks += p->stakes[i].count;
     if (stakes == 0) {
         if (p->stakes_counted.epoch)
-            EndpaperStakesSet(&p->stakes_counted, NULL);
+            EndpaperStakesSet(vol, &p->stakes_counted, NULL);
         return;
     }
-    EndpaperStakesFile(&now, p->rec, p->fid, runs, blocks);
+    EndpaperStakesFile(vol, &now, p->rec, p->fid, runs, blocks);
     for (uint32_t i = 0; i < p->stake_count; i++)
         EndpaperStakesRun(&now, p->stakes[i].start, p->stakes[i].count);
     EndpaperStakesRun(&now, UINT64_MAX, more);
-    EndpaperStakesSet(&p->stakes_counted, &now);
+    EndpaperStakesSet(vol, &p->stakes_counted, &now);
 }
 
 error_t PlotLetGoLater(Plot *p, uint64_t start, uint32_t count)
@@ -265,7 +266,7 @@ uint32_t PlotStakeHolding(const Plot *p, uint64_t block)
  * goes back now — no record ever named it; what a record named comes to rest
  * in Fallow once a record that no longer names it is inked.
  */
-error_t PlotLetGo(Plot *p, uint64_t start, uint32_t count)
+error_t PlotLetGo(TagFSVolume* vol, Plot *p, uint64_t start, uint32_t count)
 {
     while (count > 0) {
         uint32_t i = PlotStakeHolding(p, start);
@@ -304,7 +305,7 @@ error_t PlotLetGo(Plot *p, uint64_t start, uint32_t count)
         if (s->count == 0)
             p->stakes[i] = p->stakes[--p->stake_count];
 
-        int given = PlotGiveBack(p, start, n);
+        int given = PlotGiveBack(vol, p, start, n);
         if (given != 0)
             kprintf("[TagFS] file %llu: %u block(s) at %llu it took and no longer needs would not "
                     "go back (error %d)\n", p->fid, n, (unsigned long long)start, -given);
@@ -314,7 +315,7 @@ error_t PlotLetGo(Plot *p, uint64_t start, uint32_t count)
     return OK;
 }
 
-error_t PlotTrimTo(Plot *p, uint64_t keep_blocks)
+error_t PlotTrimTo(TagFSVolume* vol, Plot *p, uint64_t keep_blocks)
 {
     if (p->blocks > keep_blocks) {
         error_t rc = PlotWindowTrim(p, keep_blocks);
@@ -328,7 +329,7 @@ error_t PlotTrimTo(Plot *p, uint64_t keep_blocks)
         /* A hole owns no ground — its start names no block — so a cut into
          * one lets nothing go (plot_window.c, PlotRestake, passes it over
          * alike). */
-        error_t  rc   = StripOnGround(last->kind) ? PlotLetGo(p, last->start + last->count - cut, cut) : OK;
+        error_t  rc   = StripOnGround(last->kind) ? PlotLetGo(vol, p, last->start + last->count - cut, cut) : OK;
         if (rc != OK)
             return rc;
         last = &p->runs[p->run_count - 1];
@@ -340,23 +341,23 @@ error_t PlotTrimTo(Plot *p, uint64_t keep_blocks)
     return OK;
 }
 
-error_t PlotBeginWrite(Plot *p, uint64_t offset, bool append, uint64_t bytes, uint64_t *out_at)
+error_t PlotBeginWrite(TagFSVolume* vol, Plot *p, uint64_t offset, bool append, uint64_t bytes, uint64_t *out_at)
 {
     uint64_t at = append ? p->size : offset;
     if (at > p->size)
         return ERR_TAGFS_BEYOND_SIZE;
     if (bytes > UINT64_MAX - at)
         return ERR_INVALID_ARGUMENT;
-    error_t rc = PlotWindowBegin(p, at, bytes);
+    error_t rc = PlotWindowBegin(vol, p, at, bytes);
     if (rc != OK)
         return rc;
     *out_at = at;
     return OK;
 }
 
-error_t PlotEndWrite(Plot *p, uint64_t at, uint64_t done)
+error_t PlotEndWrite(TagFSVolume* vol, Plot *p, uint64_t at, uint64_t done)
 {
-    error_t rc = PlotWindowEnd(p, at, done);
+    error_t rc = PlotWindowEnd(vol, p, at, done);
     if (rc != OK)
         return rc;
     uint64_t end  = at + done;
@@ -365,7 +366,7 @@ error_t PlotEndWrite(Plot *p, uint64_t at, uint64_t done)
         keep = p->blocks_before;
     if (end > p->size)
         p->size = end;
-    return PlotTrimTo(p, keep);
+    return PlotTrimTo(vol, p, keep);
 }
 
 error_t PlotSourceBringIn(const PlotSource *src)

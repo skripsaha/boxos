@@ -17,6 +17,7 @@
 #include "cpu_calibrate.h"
 #include "op_registry.h"
 #include "boxos_decks.h"
+#include "tagfs_volume.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -40,61 +41,61 @@
 // (tests.c, TestLeftAFaultArmed).
 // ============================================================================
 
-const char* StandStepsAsideFor(void)
+const char* StandStepsAsideFor(TagFSVolume* vol)
 {
-    if (tagfs_get_state()->braid)
+    if (vol->state.braid)
         return "the volume is assembled in Braid, which takes every block of it, so a "
                "fault armed on the volume's own sectors would never meet its command";
     return NULL;
 }
 
-bool StandMakeFile(const char* name, const void* data, uint32_t bytes, uint64_t* out_file_id)
+bool StandMakeFile(TagFSVolume* vol, const char* name, const void* data, uint32_t bytes, uint64_t* out_file_id)
 {
-    return StandMakeTaggedFile(name, NULL, data, bytes, out_file_id);
+    return StandMakeTaggedFile(vol, name, NULL, data, bytes, out_file_id);
 }
 
-bool StandMakeTaggedFile(const char* name, const char* tag, const void* data, uint32_t bytes,
+bool StandMakeTaggedFile(TagFSVolume* vol, const char* name, const char* tag, const void* data, uint32_t bytes,
                          uint64_t* out_file_id)
 {
     uint64_t file_id = 0;
     uint32_t tag_id  = TAGFS_INVALID_TAG_ID;
 
     *out_file_id = 0;
-    if (tag && tagfs_tag_intern(tag, &tag_id) != OK)
+    if (tag && tagfs_tag_intern(vol, tag, &tag_id) != OK)
         return false;
-    if (tagfs_create_file(name, tag ? &tag_id : NULL, tag ? 1 : 0, 0, &file_id) != 0)
+    if (tagfs_create_file(vol, name, tag ? &tag_id : NULL, tag ? 1 : 0, 0, &file_id) != 0)
         return false;
-    if (bytes > 0 && TestFileWrite(file_id, data, bytes) != (int)bytes) {
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+    if (bytes > 0 && TestFileWrite(vol, file_id, data, bytes) != (int)bytes) {
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
         return false;
     }
     *out_file_id = file_id;
     return true;
 }
 
-bool StandMadeByIs(uint64_t file_id, uint64_t made_by)
+bool StandMadeByIs(TagFSVolume* vol, uint64_t file_id, uint64_t made_by)
 {
     TagFSMetadata md;
-    if (tagfs_get_metadata(file_id, &md) != 0)
+    if (tagfs_get_metadata(vol, file_id, &md) != 0)
         return false;
     bool is = md.made_by == made_by && ((md.flags & TAGFS_FILE_MADE_BY) != 0) == (made_by != 0);
     tagfs_metadata_free(&md);
     return is;
 }
 
-error_t StandKeepInRole(uint64_t file_id, uint32_t role)
+error_t StandKeepInRole(TagFSVolume* vol, uint64_t file_id, uint32_t role)
 {
     InkReceipt receipt;
-    if (!tagfs_enter())
+    if (!tagfs_enter(vol))
         return ERR_TAGFS_NOT_INITIALIZED;
-    error_t rc = EngrossRoled(file_id, role, &receipt);
-    tagfs_leave();
+    error_t rc = EngrossRoled(vol, file_id, role, &receipt);
+    tagfs_leave(vol);
     return rc;
 }
 
-bool StandKeptFile(uint64_t* out_file_id)
+bool StandKeptFile(TagFSVolume* vol, uint64_t* out_file_id)
 {
-    TagFSState* fs   = tagfs_get_state();
+    TagFSState* fs   = &vol->state;
     uint64_t    from = 0, ids[16];
     uint32_t    n;
     while ((n = FileMapFiles(fs->files, from, ids, 16)) > 0) {
@@ -112,28 +113,28 @@ bool StandKeptFile(uint64_t* out_file_id)
     return false;
 }
 
-bool StandBlockOf(uint64_t file_id, uint64_t k, uint64_t* out_block)
+bool StandBlockOf(TagFSVolume* vol, uint64_t file_id, uint64_t k, uint64_t* out_block)
 {
     FileSpot spot;
-    if (!tagfs_enter())
+    if (!tagfs_enter(vol))
         return false;
-    FileRecord* rec   = FileMapRecordHold(tagfs_get_state()->files, file_id, NULL);
+    FileRecord* rec   = FileMapRecordHold(vol->state.files, file_id, NULL);
     bool        found = rec && FileRecordFind(rec, k, &spot) && StripOnGround(spot.kind);
     if (found)
         *out_block = spot.block;
     FileRecordRelease(rec);
-    tagfs_leave();
+    tagfs_leave(vol);
     return found;
 }
 
-int StandWriteAt(uint64_t file_id, uint64_t offset, const void* data, uint32_t bytes)
+int StandWriteAt(TagFSVolume* vol, uint64_t file_id, uint64_t offset, const void* data, uint32_t bytes)
 {
-    TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
+    TagFSFileHandle* handle = tagfs_open(vol, file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
     if (!handle)
         return -1;
     handle->offset = offset;
-    int written = TestHandleWrite(handle, data, bytes);
-    tagfs_close(handle);
+    int written = TestHandleWrite(vol, handle, data, bytes);
+    tagfs_close(vol, handle);
     return written;
 }
 
@@ -143,9 +144,9 @@ void StandBlockFailRaced(const char* suite)
             "the test made between them\n", suite, BlockFailSeen());
 }
 
-bool StandBlockInUse(uint64_t block)
+bool StandBlockInUse(TagFSVolume* vol, uint64_t block)
 {
-    return !BlockMapDerivedIsFree(block);
+    return !BlockMapDerivedIsFree(vol, block);
 }
 
 /* Room for the widest params a program lays: a write's, a ferry's waybill after it. */
@@ -219,54 +220,55 @@ int StandDeckAnswer(uint16_t opcode, const void* params, uint16_t param_size, co
  * the block itself, nor of the file. */
 static TestResult TestStandBlockFailReadsTheNth(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    uint8_t     seat    = tagfs_get_seat();
+    uint8_t     seat    = tagfs_get_seat(vol);
     uint64_t    file_id = 0;
     uint64_t    first   = 0;
     uint64_t    middle  = 0;
     bool        armed   = false;
-    const char* aside   = StandStepsAsideFor();
+    const char* aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
 
     TestFillAt(g_test_buffer, 3 * TAGFS_BLOCK_SIZE, 0x51, 0);
-    TEST_ASSERT(StandMakeFile("test_file", g_test_buffer, 3 * TAGFS_BLOCK_SIZE, &file_id),
+    TEST_ASSERT(StandMakeFile(vol, "test_file", g_test_buffer, 3 * TAGFS_BLOCK_SIZE, &file_id),
                 "a three-block file is made");
-    TEST_ASSERT(StandBlockOf(file_id, 0, &first), "its first block is found");
-    TEST_ASSERT(StandBlockOf(file_id, 1, &middle), "and its middle block");
+    TEST_ASSERT(StandBlockOf(vol, file_id, 0, &first), "its first block is found");
+    TEST_ASSERT(StandBlockOf(vol, file_id, 1, &middle), "and its middle block");
 
-    BlockFailArm(seat, BLOCK_FAIL_READ, tagfs_block_to_sector(middle), TAGFS_BLOCK_SECTORS, 2);
+    BlockFailArm(seat, BLOCK_FAIL_READ, tagfs_block_to_sector(vol, middle), TAGFS_BLOCK_SECTORS, 2);
     armed = true;
 
-    TEST_ASSERT_OK(tagfs_read_block(first, g_test_output), "the block before it is read");
+    TEST_ASSERT_OK(tagfs_read_block(vol, first, g_test_output), "the block before it is read");
     TEST_ASSERT_EQ(BlockFailSeen(), 0, "and meets no plan — the plan names another block");
-    TEST_ASSERT_OK(tagfs_read_block(middle, g_test_output), "the first read of the block is served");
+    TEST_ASSERT_OK(tagfs_read_block(vol, middle, g_test_output), "the first read of the block is served");
     TEST_ASSERT_EQ(BlockFailSeen(), 1, "and met the plan once, at the block it names");
     TEST_ASSERT(!BlockFailFired(), "without being refused — it was the first, not the second");
 
-    TEST_ASSERT(tagfs_read_block(middle, g_test_output) != OK, "the second read is refused");
+    TEST_ASSERT(tagfs_read_block(vol, middle, g_test_output) != OK, "the second read is refused");
     TEST_ASSERT_EQ(BlockFailSeen(), 2, "at the second meeting");
     TEST_ASSERT(BlockFailFired(), "and the plan says it fired");
 
-    TEST_ASSERT_OK(BoardroomWrite(seat, tagfs_block_to_sector(middle), TAGFS_BLOCK_SECTORS,
+    TEST_ASSERT_OK(BoardroomWrite(seat, tagfs_block_to_sector(vol, middle), TAGFS_BLOCK_SECTORS,
                                   g_test_buffer + TAGFS_BLOCK_SIZE, NULL),
                    "the block is written again as it holds, by the Boardroom's door");
     TEST_ASSERT_EQ(BlockFailSeen(), 2, "a write is not a read, and is not counted");
     TestFillAt(g_test_buffer + TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 0x52, TAGFS_BLOCK_SIZE);
-    TEST_ASSERT_EQ(StandWriteAt(file_id, TAGFS_BLOCK_SIZE, g_test_buffer + TAGFS_BLOCK_SIZE,
+    TEST_ASSERT_EQ(StandWriteAt(vol, file_id, TAGFS_BLOCK_SIZE, g_test_buffer + TAGFS_BLOCK_SIZE,
                                 TAGFS_BLOCK_SIZE),
                    TAGFS_BLOCK_SIZE, "the middle block is overwritten whole");
     TEST_ASSERT_EQ(BlockFailSeen(), 2, "and the file's overwrite is not counted either");
 
-    TEST_ASSERT_OK(tagfs_read_block(middle, g_test_output),
+    TEST_ASSERT_OK(tagfs_read_block(vol, middle, g_test_output),
                    "the third read is served — the plan refuses once");
     TEST_ASSERT_EQ(BlockFailSeen(), 3, "and it was still counted");
 
     TEST_ASSERT(BlockFailDisarm(), "the plan stood until it was taken down");
     armed = false;
-    TEST_ASSERT_OK(tagfs_read_block(middle, g_test_output), "the block is read with the plan down");
-    TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, 3 * TAGFS_BLOCK_SIZE), 3 * TAGFS_BLOCK_SIZE,
+    TEST_ASSERT_OK(tagfs_read_block(vol, middle, g_test_output), "the block is read with the plan down");
+    TEST_ASSERT_EQ(TestFileRead(vol, file_id, g_test_output, 3 * TAGFS_BLOCK_SIZE), 3 * TAGFS_BLOCK_SIZE,
                    "and so is the file, whole");
     TEST_ASSERT_EQ(BlockFailSeen(), 3, "and meets no plan");
     TEST_ASSERT_EQ(TestFirstDifference(g_test_output, g_test_buffer, 3 * TAGFS_BLOCK_SIZE),
@@ -275,7 +277,7 @@ out:
     if (armed)
         BlockFailDisarm();
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -291,26 +293,27 @@ out:
  * BLOCKFAIL's. */
 static TestResult TestStandBlockFailWriteNeverLands(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    uint8_t     seat    = tagfs_get_seat();
+    uint8_t     seat    = tagfs_get_seat(vol);
     uint64_t    file_id = 0;
     uint64_t    block   = 0;
     uint32_t    landed  = 0;
     bool        armed   = false;
-    const char* aside   = StandStepsAsideFor();
+    const char* aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
 
     TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x53, 0);
-    TEST_ASSERT(StandMakeFile("test_file", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+    TEST_ASSERT(StandMakeFile(vol, "test_file", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a one-block file is made");
-    TEST_ASSERT(StandBlockOf(file_id, 0, &block), "its block is found");
+    TEST_ASSERT(StandBlockOf(vol, file_id, 0, &block), "its block is found");
 
     TestFillAt(g_test_output, TAGFS_BLOCK_SIZE, 0x54, 0);
-    BlockFailArm(seat, BLOCK_FAIL_WRITE, tagfs_block_to_sector(block), TAGFS_BLOCK_SECTORS, 1);
+    BlockFailArm(seat, BLOCK_FAIL_WRITE, tagfs_block_to_sector(vol, block), TAGFS_BLOCK_SECTORS, 1);
     armed = true;
-    int wrote = BoardroomWrite(seat, tagfs_block_to_sector(block), TAGFS_BLOCK_SECTORS, g_test_output,
+    int wrote = BoardroomWrite(seat, tagfs_block_to_sector(vol, block), TAGFS_BLOCK_SECTORS, g_test_output,
                                &landed);
     bool fired = BlockFailFired();
     uint32_t seen = BlockFailSeen();
@@ -321,32 +324,33 @@ static TestResult TestStandBlockFailWriteNeverLands(void)
     TEST_ASSERT_EQ(seen, 1, "and the only one that met the plan");
     TEST_ASSERT(wrote != 0, "the Boardroom answers the refusal");
     TEST_ASSERT_EQ(landed, 0, "and counts no sector of it landed");
-    TEST_ASSERT_OK(BoardroomRead(seat, tagfs_block_to_sector(block), TAGFS_BLOCK_SECTORS,
+    TEST_ASSERT_OK(BoardroomRead(seat, tagfs_block_to_sector(vol, block), TAGFS_BLOCK_SECTORS,
                                  g_test_output), "the block is read off the medium");
     TEST_ASSERT_EQ(TestFirstDifference(g_test_output, g_test_buffer, TAGFS_BLOCK_SIZE),
                    TAGFS_BLOCK_SIZE, "holding what it held — nothing of the refused write landed");
-    TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
+    TEST_ASSERT_EQ(TestFileRead(vol, file_id, g_test_output, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
                    "and the file reads back under the digest of what it held");
 out:
     if (armed)
         BlockFailDisarm();
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     return verdict;
 }
 
 /* The flush: the second of three is refused, the other two are taken. */
 static TestResult TestStandBlockFailFlushRefused(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict = TEST_PASS;
     bool       armed   = false;
 
-    BlockFailArm(tagfs_get_seat(), BLOCK_FAIL_FLUSH, 0, 0, 2);
+    BlockFailArm(tagfs_get_seat(vol), BLOCK_FAIL_FLUSH, 0, 0, 2);
     armed = true;
-    TEST_ASSERT_OK(tagfs_flush_cache(), "the first flush is taken");
-    TEST_ASSERT(tagfs_flush_cache() != OK, "the second is refused");
+    TEST_ASSERT_OK(tagfs_flush_cache(vol), "the first flush is taken");
+    TEST_ASSERT(tagfs_flush_cache(vol) != OK, "the second is refused");
     TEST_ASSERT(BlockFailFired(), "by the plan");
-    TEST_ASSERT_OK(tagfs_flush_cache(), "the third is taken again");
+    TEST_ASSERT_OK(tagfs_flush_cache(vol), "the third is taken again");
     TEST_ASSERT_EQ(BlockFailSeen(), 3, "and all three met the plan");
 out:
     if (armed)
@@ -378,14 +382,15 @@ static void StandAsyncAnswered(uint8_t index, uint8_t slot, error_t status, void
  * answered through the callback with ERR_IO, the page never touched. */
 static TestResult TestStandBlockFailAsyncRead(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    uint8_t     seat    = tagfs_get_seat();
+    uint8_t     seat    = tagfs_get_seat(vol);
     uint64_t    file_id = 0;
     uint64_t    block   = 0;
     void*       dma     = NULL;
     bool        armed   = false;
     bool        issued  = false;
-    const char* aside   = StandStepsAsideFor();
+    const char* aside   = StandStepsAsideFor(vol);
 
     if (!BoardroomSeatCanReadAsync(seat))
         return test_steps_aside("the volume's seat answers only a read somebody stands "
@@ -394,9 +399,9 @@ static TestResult TestStandBlockFailAsyncRead(void)
         return test_steps_aside(aside);
 
     TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x55, 0);
-    TEST_ASSERT(StandMakeFile("test_file", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+    TEST_ASSERT(StandMakeFile(vol, "test_file", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a one-block file is made");
-    TEST_ASSERT(StandBlockOf(file_id, 0, &block), "its block is found");
+    TEST_ASSERT(StandBlockOf(vol, file_id, 0, &block), "its block is found");
 
     dma = pmm_alloc_zero(1, PHYS_TAG_DMA32);
     TEST_ASSERT(dma != NULL, "a page the medium could read into");
@@ -406,7 +411,7 @@ static TestResult TestStandBlockFailAsyncRead(void)
 
     s_async_answer.calls  = 0;
     s_async_answer.status = OK;
-    uint64_t sector = tagfs_block_to_sector(block);
+    uint64_t sector = tagfs_block_to_sector(vol, block);
     BlockFailArm(seat, BLOCK_FAIL_READ, sector, TAGFS_BLOCK_SECTORS, 1);
     armed = true;
     error_t sub = BoardroomReadAsync(seat, sector, TAGFS_BLOCK_SECTORS, dma,
@@ -433,7 +438,7 @@ out:
     if (dma && !issued)
         pmm_free(dma, 1);
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -582,6 +587,7 @@ static inline void StandInterruptsBack(uint64_t flags)
  * and the place is named once, not once per read. */
 static TestResult TestStandLockRankNamesTheMedium(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult    verdict   = TEST_PASS;
     bool          held      = false;
     uint32_t      witnessed = s_proof.Witnessed;
@@ -591,7 +597,7 @@ static TestResult TestStandLockRankNamesTheMedium(void)
 
     before = LockRankCountHere();
     flags = StandInterruptsOff();
-    rc = tagfs_volume_read(0, 1, g_test_output);
+    rc = tagfs_volume_read(vol, 0, 1, g_test_output);
     StandInterruptsBack(flags);
     after = LockRankCountHere();
     TEST_ASSERT_EQ(rc, 0, "sector 0 of the volume is read holding no TagFS lock");
@@ -603,10 +609,10 @@ static TestResult TestStandLockRankNamesTheMedium(void)
     TagFSLockTake(&s_proof);
     held = true;
     TEST_ASSERT(LockRankHeldHere(&s_proof), "the test's lock is held here once taken");
-    rc = tagfs_volume_read(0, 1, g_test_output);
+    rc = tagfs_volume_read(vol, 0, 1, g_test_output);
     first = LockRankCountHere();
     if (rc == 0)
-        rc = tagfs_volume_read(0, 1, g_test_output);
+        rc = tagfs_volume_read(vol, 0, 1, g_test_output);
     TagFSLockDrop(&s_proof);
     held = false;
     after = LockRankCountHere();
@@ -679,36 +685,37 @@ out:
  * without a word to the medium. */
 static TestResult TestStandFlushTicket(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict = TEST_PASS;
-    uint8_t    seat    = tagfs_get_seat();
+    uint8_t    seat    = tagfs_get_seat(vol);
     bool       armed   = false;
     uint64_t   need, ticket;
     int        said;
 
-    need = VolumeFlushNeed();
-    TEST_ASSERT_OK(tagfs_flush_cache(), "a flush asked for after the need was read is taken");
-    TEST_ASSERT(VolumeFlushKept(need), "and is kept for that need");
+    need = VolumeFlushNeed(vol);
+    TEST_ASSERT_OK(tagfs_flush_cache(vol), "a flush asked for after the need was read is taken");
+    TEST_ASSERT(VolumeFlushKept(vol, need), "and is kept for that need");
 
-    ticket = VolumeFlushBegin();
-    need = VolumeFlushNeed();
+    ticket = VolumeFlushBegin(vol);
+    need = VolumeFlushNeed(vol);
     said = BoardroomFlush(seat);
-    VolumeFlushEnd(ticket, said == 0);
+    VolumeFlushEnd(vol, ticket, said == 0);
     TEST_ASSERT_EQ(said, 0, "the flush begun before the need was read is taken by the medium");
-    TEST_ASSERT(!VolumeFlushKept(need), "and proves nothing about that need");
+    TEST_ASSERT(!VolumeFlushKept(vol, need), "and proves nothing about that need");
 
     BlockFailArm(seat, BLOCK_FAIL_FLUSH, 0, 0, 1);
     armed = true;
-    TEST_ASSERT(tagfs_flush_cache() != OK, "a flush the medium refuses");
+    TEST_ASSERT(tagfs_flush_cache(vol) != OK, "a flush the medium refuses");
     TEST_ASSERT(BlockFailFired(), "refused by the plan");
-    TEST_ASSERT(!VolumeFlushKept(need), "keeps nothing");
+    TEST_ASSERT(!VolumeFlushKept(vol, need), "keeps nothing");
     TEST_ASSERT(BlockFailDisarm(), "the plan stood until it was taken down");
     armed = false;
-    TEST_ASSERT_OK(VolumeFlushFor(need), "asked for again, the need is flushed");
-    TEST_ASSERT(VolumeFlushKept(need), "and kept");
+    TEST_ASSERT_OK(VolumeFlushFor(vol, need), "asked for again, the need is flushed");
+    TEST_ASSERT(VolumeFlushKept(vol, need), "and kept");
 
     BlockFailArm(seat, BLOCK_FAIL_FLUSH, 0, 0, 1);
     armed = true;
-    TEST_ASSERT_OK(VolumeFlushFor(need), "a need already kept is answered at once");
+    TEST_ASSERT_OK(VolumeFlushFor(vol, need), "a need already kept is answered at once");
     TEST_ASSERT_EQ(BlockFailSeen(), 0, "without a word to the medium");
 out:
     if (armed)

@@ -1,6 +1,7 @@
 #include "foliation.h"
 #include "binder.h"
 #include "tip_in.h"
+#include "tagfs_volume.h"
 
 /*
  * Foliation (foliation.h): each tree's nodes in two lists — its leaves in key
@@ -11,23 +12,7 @@
  * stands in its list.
  */
 
-#define FOLIATION_TREES  4u
 
-typedef struct {
-    FoliationNode* node;
-    uint32_t       n;
-    uint32_t       cap;
-} FoliationList;
-
-typedef struct {
-    FoliationList leaf[FOLIATION_TREES];
-    FoliationList inner[FOLIATION_TREES];
-    bool          ordered[FOLIATION_TREES];   /* its inner nodes by level and key (FoliationLevel) */
-    const char*   lost;      /* why it is not known, or NULL */
-} FoliationBook;
-
-static FoliationBook s_book;
-static FoliationBook s_draft;
 
 static const char s_no_memory[] = "memory would not keep its nodes";
 static const char s_unturned[]  = "the reads of a digest were not turned to its DIGESTS — they stand on a Tally "
@@ -91,33 +76,33 @@ static void BookLost(FoliationBook* b, const char* why)
 }
 
 /* The Foliation lost: said, and a Tally demanded — once a loss. */
-static void Lost(const char* why, uint64_t seq)
+static void Lost(TagFSVolume* vol, const char* why, uint64_t seq)
 {
-    bool said = s_book.lost != NULL;
-    BookLost(&s_book, why);
+    bool said = vol->foliation.book.lost != NULL;
+    BookLost(&vol->foliation.book, why);
     if (said)
         return;
     kprintf("[TagFS] the index of Tally %llu is not known (Foliation): %s — a Tally is demanded, and the next is "
             "written whole\n", (unsigned long long)seq, why);
-    BinderDemanded();
+    BinderDemanded(vol);
 }
 
-void FoliationNoted(uint64_t tree, const TallyPlace* at, uint64_t seq)
+void FoliationNoted(TagFSVolume* vol, uint64_t tree, const TallyPlace* at, uint64_t seq)
 {
     uint32_t t = TreeAt(tree);
-    if (t == UINT32_MAX || s_book.lost || (tree == TALLY_DIGESTS && at->level == 0))
+    if (t == UINT32_MAX || vol->foliation.book.lost || (tree == TALLY_DIGESTS && at->level == 0))
         return;
-    s_book.ordered[t] = false;
-    if (!ListPut(at->level == 0 ? &s_book.leaf[t] : &s_book.inner[t], at))
-        Lost(s_no_memory, seq);
+    vol->foliation.book.ordered[t] = false;
+    if (!ListPut(at->level == 0 ? &vol->foliation.book.leaf[t] : &vol->foliation.book.inner[t], at))
+        Lost(vol, s_no_memory, seq);
 }
 
-void FoliationRelay(uint64_t tree, const TallyPlace* at)
+void FoliationRelay(TagFSVolume* vol, uint64_t tree, const TallyPlace* at)
 {
     uint32_t t = TreeAt(tree);
-    if (t == UINT32_MAX || s_book.lost)
+    if (t == UINT32_MAX || vol->foliation.book.lost)
         return;
-    FoliationList* l = at->level == 0 ? &s_book.leaf[t] : &s_book.inner[t];
+    FoliationList* l = at->level == 0 ? &vol->foliation.book.leaf[t] : &vol->foliation.book.inner[t];
     for (uint32_t i = l->n; i > 0; i--) {
         const TallyPlace* p = &l->node[i - 1u].place;
         if (p->level == at->level && p->ptr.seq == at->ptr.seq && p->ptr.copies && at->ptr.copies &&
@@ -128,79 +113,79 @@ void FoliationRelay(uint64_t tree, const TallyPlace* at)
     }
 }
 
-void FoliationLeafHolds(uint64_t tree, uint64_t items, uint64_t text)
+void FoliationLeafHolds(TagFSVolume* vol, uint64_t tree, uint64_t items, uint64_t text)
 {
     uint32_t t = TreeAt(tree);
-    if (t == UINT32_MAX || s_book.lost || s_book.leaf[t].n == 0)
+    if (t == UINT32_MAX || vol->foliation.book.lost || vol->foliation.book.leaf[t].n == 0)
         return;
-    s_book.leaf[t].node[s_book.leaf[t].n - 1u].items += items;
-    s_book.leaf[t].node[s_book.leaf[t].n - 1u].text  += text;
+    vol->foliation.book.leaf[t].node[vol->foliation.book.leaf[t].n - 1u].items += items;
+    vol->foliation.book.leaf[t].node[vol->foliation.book.leaf[t].n - 1u].text  += text;
 }
 
-uint64_t FoliationLeavesHolding(uint64_t tree)
+uint64_t FoliationLeavesHolding(TagFSVolume* vol, uint64_t tree)
 {
     uint32_t t    = TreeAt(tree);
     uint64_t held = 0;
-    if (s_book.lost)
+    if (vol->foliation.book.lost)
         return UINT64_MAX;
-    for (uint32_t i = 0; t != UINT32_MAX && i < s_book.leaf[t].n; i++)
-        held += s_book.leaf[t].node[i].items != 0;
+    for (uint32_t i = 0; t != UINT32_MAX && i < vol->foliation.book.leaf[t].n; i++)
+        held += vol->foliation.book.leaf[t].node[i].items != 0;
     return held;
 }
 
-const char* FoliationLost(void)
+const char* FoliationLost(TagFSVolume* vol)
 {
-    return s_book.lost;
+    return vol->foliation.book.lost;
 }
 
-bool FoliationLeafAt(uint64_t tree, uint32_t index, TallyPlace* out)
+bool FoliationLeafAt(TagFSVolume* vol, uint64_t tree, uint32_t index, TallyPlace* out)
 {
     uint32_t t = TreeAt(tree);
-    if (t == UINT32_MAX || index >= s_book.leaf[t].n)
+    if (t == UINT32_MAX || index >= vol->foliation.book.leaf[t].n)
         return false;
-    *out = s_book.leaf[t].node[index].place;
+    *out = vol->foliation.book.leaf[t].node[index].place;
     return true;
 }
 
-const FoliationNode* FoliationLeaves(uint64_t tree, uint32_t* n)
+const FoliationNode* FoliationLeaves(TagFSVolume* vol, uint64_t tree, uint32_t* n)
 {
     uint32_t t = TreeAt(tree);
-    *n = t == UINT32_MAX || s_book.lost ? 0 : s_book.leaf[t].n;
-    return *n ? s_book.leaf[t].node : NULL;
+    *n = t == UINT32_MAX || vol->foliation.book.lost ? 0 : vol->foliation.book.leaf[t].n;
+    return *n ? vol->foliation.book.leaf[t].node : NULL;
 }
 
-const FoliationNode* FoliationInner(uint64_t tree, uint32_t* n)
+const FoliationNode* FoliationInner(TagFSVolume* vol, uint64_t tree, uint32_t* n)
 {
     uint32_t t = TreeAt(tree);
-    *n = t == UINT32_MAX || s_book.lost ? 0 : s_book.inner[t].n;
-    return *n ? s_book.inner[t].node : NULL;
+    *n = t == UINT32_MAX || vol->foliation.book.lost ? 0 : vol->foliation.book.inner[t].n;
+    return *n ? vol->foliation.book.inner[t].node : NULL;
 }
 
-uint64_t FoliationBlocksOlder(uint64_t seq)
+uint64_t FoliationBlocksOlder(TagFSVolume* vol, uint64_t seq)
 {
     uint64_t blocks = 0;
-    for (uint32_t t = 0; !s_book.lost && t < FOLIATION_TREES; t++) {
-        for (uint32_t i = 0; i < s_book.leaf[t].n; i++)
-            blocks += s_book.leaf[t].node[i].place.ptr.seq != seq ? s_book.leaf[t].node[i].place.ptr.sheets : 0;
-        for (uint32_t i = 0; i < s_book.inner[t].n; i++)
-            blocks += s_book.inner[t].node[i].place.ptr.seq != seq ? s_book.inner[t].node[i].place.ptr.sheets : 0;
+    for (uint32_t t = 0; !vol->foliation.book.lost && t < FOLIATION_TREES; t++) {
+        for (uint32_t i = 0; i < vol->foliation.book.leaf[t].n; i++)
+            blocks += vol->foliation.book.leaf[t].node[i].place.ptr.seq != seq ? vol->foliation.book.leaf[t].node[i].place.ptr.sheets : 0;
+        for (uint32_t i = 0; i < vol->foliation.book.inner[t].n; i++)
+            blocks += vol->foliation.book.inner[t].node[i].place.ptr.seq != seq ? vol->foliation.book.inner[t].node[i].place.ptr.sheets : 0;
     }
     return blocks;
 }
 
-void FoliationLetGo(void)
+void FoliationLetGo(TagFSVolume* vol)
 {
-    BookLetGo(&s_book);
-    BookLetGo(&s_draft);
+    BookLetGo(&vol->foliation.book);
+    BookLetGo(&vol->foliation.draft);
 }
 
 // ----------------------------------------------------------------------------
 // The draft of the Tally under way
 // ----------------------------------------------------------------------------
 
-void FoliationDraftBegin(void)
+void FoliationDraftBegin(TagFSVolume* vol)
 {
-    BookLetGo(&s_draft);
+    BookLetGo(&vol->foliation.draft);
 }
 
 /*
@@ -210,13 +195,13 @@ void FoliationDraftBegin(void)
  * with no end for the last; the root, from nowhere to nowhere. A level's nodes
  * come in key order, a level at a time, so the one before is closed here.
  */
-void FoliationDraftNode(uint64_t tree, uint64_t level, TallyKey key, bool root, uint64_t count,
+void FoliationDraftNode(TagFSVolume* vol, uint64_t tree, uint64_t level, TallyKey key, bool root, uint64_t count,
                         const TallyPtr* ptr, uint64_t items, uint64_t text)
 {
     uint32_t t = TreeAt(tree);
-    if (t == UINT32_MAX || s_draft.lost || (tree == TALLY_DIGESTS && level == 0))
+    if (t == UINT32_MAX || vol->foliation.draft.lost || (tree == TALLY_DIGESTS && level == 0))
         return;
-    FoliationList* l = level == 0 ? &s_draft.leaf[t] : &s_draft.inner[t];
+    FoliationList* l = level == 0 ? &vol->foliation.draft.leaf[t] : &vol->foliation.draft.inner[t];
     TallyPlace     p;
     memset(&p, 0, sizeof(p));
     p.ptr    = *ptr;
@@ -229,7 +214,7 @@ void FoliationDraftNode(uint64_t tree, uint64_t level, TallyKey key, bool root, 
         l->node[l->n - 1u].place.has_hi = true;
     }
     if (!ListPutNode(l, &(FoliationNode){ .place = p, .relay = false, .items = items, .text = text }))
-        BookLost(&s_draft, s_no_memory);
+        BookLost(&vol->foliation.draft, s_no_memory);
 }
 
 /* The first node of `run` (`n`, in key order) that may lie inside `top`: the
@@ -258,30 +243,30 @@ static bool UnderPast(uint64_t tree, const TallyPlace* p, const TallyPlace* top)
 /* Every node of the Foliation under `top`, by halving each level's nodes in
  * key order to the first of them — a Tally names hundreds of nodes as they
  * lie over a Foliation of a volume's, each looked at under its own range. */
-void FoliationDraftUnder(uint64_t tree, const TallyPlace* top)
+void FoliationDraftUnder(TagFSVolume* vol, uint64_t tree, const TallyPlace* top)
 {
     uint32_t t = TreeAt(tree);
-    if (t == UINT32_MAX || s_draft.lost)
+    if (t == UINT32_MAX || vol->foliation.draft.lost)
         return;
-    if (s_book.lost) {
-        BookLost(&s_draft, s_book.lost);
+    if (vol->foliation.book.lost) {
+        BookLost(&vol->foliation.draft, vol->foliation.book.lost);
         return;
     }
-    const FoliationList* leaf = &s_book.leaf[t];
+    const FoliationList* leaf = &vol->foliation.book.leaf[t];
     for (uint32_t i = top->level ? UnderFrom(tree, leaf->node, leaf->n, top) : leaf->n;
-         i < leaf->n && !s_draft.lost && !UnderPast(tree, &leaf->node[i].place, top); i++)
+         i < leaf->n && !vol->foliation.draft.lost && !UnderPast(tree, &leaf->node[i].place, top); i++)
         if (TipInWithin(tree, &leaf->node[i].place, top) &&
-            !ListPutNode(&s_draft.leaf[t], &(FoliationNode){ .place = leaf->node[i].place,
+            !ListPutNode(&vol->foliation.draft.leaf[t], &(FoliationNode){ .place = leaf->node[i].place,
                                                              .items = leaf->node[i].items,
                                                              .text  = leaf->node[i].text }))
-            BookLost(&s_draft, s_no_memory);
-    for (uint64_t level = 1; level < top->level && !s_draft.lost; level++) {
+            BookLost(&vol->foliation.draft, s_no_memory);
+    for (uint64_t level = 1; level < top->level && !vol->foliation.draft.lost; level++) {
         uint32_t             n   = 0;
-        const FoliationNode* run = FoliationLevel(tree, level, &n);
+        const FoliationNode* run = FoliationLevel(vol, tree, level, &n);
         for (uint32_t i = run ? UnderFrom(tree, run, n, top) : 0;
-             i < n && !s_draft.lost && !UnderPast(tree, &run[i].place, top); i++)
-            if (TipInWithin(tree, &run[i].place, top) && !ListPut(&s_draft.inner[t], &run[i].place))
-                BookLost(&s_draft, s_no_memory);
+             i < n && !vol->foliation.draft.lost && !UnderPast(tree, &run[i].place, top); i++)
+            if (TipInWithin(tree, &run[i].place, top) && !ListPut(&vol->foliation.draft.inner[t], &run[i].place))
+                BookLost(&vol->foliation.draft, s_no_memory);
     }
 }
 
@@ -394,44 +379,44 @@ static void PlacesClosed(uint64_t tree, FoliationList* leaf, FoliationList* inne
 
 static const uint64_t s_trees[FOLIATION_TREES] = { TALLY_FILES, TALLY_TAGS, TALLY_USE, TALLY_DIGESTS };
 
-void FoliationDraftDone(uint64_t seq, bool digests)
+void FoliationDraftDone(TagFSVolume* vol, uint64_t seq, bool digests)
 {
-    for (uint32_t t = 0; !s_draft.lost && t < FOLIATION_TREES; t++) {
-        NodesOrdered(s_trees[t], &s_draft.leaf[t]);
-        PlacesClosed(s_trees[t], &s_draft.leaf[t], &s_draft.inner[t]);
-        s_draft.ordered[t] = true;
+    for (uint32_t t = 0; !vol->foliation.draft.lost && t < FOLIATION_TREES; t++) {
+        NodesOrdered(s_trees[t], &vol->foliation.draft.leaf[t]);
+        PlacesClosed(s_trees[t], &vol->foliation.draft.leaf[t], &vol->foliation.draft.inner[t]);
+        vol->foliation.draft.ordered[t] = true;
     }
-    if (!s_draft.lost && !digests)
-        BookLost(&s_draft, s_unturned);
-    if (s_draft.lost) {
-        const char* why = s_draft.lost;
-        BookLetGo(&s_draft);
-        Lost(why, seq);
+    if (!vol->foliation.draft.lost && !digests)
+        BookLost(&vol->foliation.draft, s_unturned);
+    if (vol->foliation.draft.lost) {
+        const char* why = vol->foliation.draft.lost;
+        BookLetGo(&vol->foliation.draft);
+        Lost(vol, why, seq);
         return;
     }
-    BookLetGo(&s_book);
-    s_book = s_draft;
-    memset(&s_draft, 0, sizeof(s_draft));
+    BookLetGo(&vol->foliation.book);
+    vol->foliation.book = vol->foliation.draft;
+    memset(&vol->foliation.draft, 0, sizeof(vol->foliation.draft));
 }
 
-void FoliationDraftLetGo(void)
+void FoliationDraftLetGo(TagFSVolume* vol)
 {
-    BookLetGo(&s_draft);
+    BookLetGo(&vol->foliation.draft);
 }
 
 /* The mount's inner nodes come depth first, as its walk reaches them; a level's
  * own lie in key order among them, but apart. Sorted the first time a level is
  * asked for, they lie a level a run — a draft's already do. */
-const FoliationNode* FoliationLevel(uint64_t tree, uint64_t level, uint32_t* n)
+const FoliationNode* FoliationLevel(TagFSVolume* vol, uint64_t tree, uint64_t level, uint32_t* n)
 {
     uint32_t t = TreeAt(tree);
     *n = 0;
-    if (t == UINT32_MAX || s_book.lost || level == 0)
+    if (t == UINT32_MAX || vol->foliation.book.lost || level == 0)
         return NULL;
-    FoliationList* l = &s_book.inner[t];
-    if (!s_book.ordered[t]) {
+    FoliationList* l = &vol->foliation.book.inner[t];
+    if (!vol->foliation.book.ordered[t]) {
         NodesOrdered(tree, l);
-        s_book.ordered[t] = true;
+        vol->foliation.book.ordered[t] = true;
     }
     uint32_t lo = 0, hi = l->n;
     while (lo < hi) {
@@ -449,19 +434,19 @@ const FoliationNode* FoliationLevel(uint64_t tree, uint64_t level, uint32_t* n)
 }
 
 #ifdef CONFIG_VOLUME_TESTS
-bool FoliationStandNode(uint64_t tree, uint32_t index, FoliationNode* out)
+bool FoliationStandNode(TagFSVolume* vol, uint64_t tree, uint32_t index, FoliationNode* out)
 {
     uint32_t t = TreeAt(tree);
     if (t == UINT32_MAX)
         return false;
-    if (index < s_book.leaf[t].n) {
-        *out = s_book.leaf[t].node[index];
+    if (index < vol->foliation.book.leaf[t].n) {
+        *out = vol->foliation.book.leaf[t].node[index];
         return true;
     }
-    index -= s_book.leaf[t].n;
-    if (index >= s_book.inner[t].n)
+    index -= vol->foliation.book.leaf[t].n;
+    if (index >= vol->foliation.book.inner[t].n)
         return false;
-    *out = s_book.inner[t].node[index];
+    *out = vol->foliation.book.inner[t].node[index];
     return true;
 }
 #endif

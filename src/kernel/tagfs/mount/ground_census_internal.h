@@ -19,13 +19,24 @@ typedef struct {
 
 /* The claims as they stand, in no order the caller may rely on: *n of them.
  * The mount's alone. */
-GroundRun* GroundCensusRuns(uint32_t* n);
+GroundRun* GroundCensusRuns(TagFSVolume* vol, uint32_t* n);
 
 /* Commonhold built anew from the claims (ink/commonhold.h): every block a run
  * SHARED names, owned by every file's run that names it — DATA or SHARED —
  * and, one owner for all of them, by what is held there for a rotten range or
  * a locked file. Before the census cuts the held to what no name owns. OK, or
  * ERR_NO_MEMORY said. */
-error_t    GroundSharesCounted(void);
+error_t    GroundSharesCounted(TagFSVolume* vol);
+
+/* What one volume holds of ground_census.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    /* The mount's alone (the door is shut). */
+    GroundRun* runs;
+    uint32_t count;
+    uint32_t cap;
+    bool refused;  /* a claim found no memory: the census decides nothing */
+    uint64_t reach;  /* past the farthest block an owner but the far Deed names */
+    uint64_t doubled;  /* blocks the census said two owners name */
+} GroundCensusState;
 
 #endif /* TAGFS_GROUND_CENSUS_INTERNAL_H */

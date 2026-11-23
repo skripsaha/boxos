@@ -165,7 +165,7 @@ void CrossingLand(void)
         Done("the pass names a slot outside the crossings");
         return;
     }
-    g_crossing.seat = tagfs_get_seat();
+    g_crossing.seat = tagfs_get_seat(TagFSHome());
     if (!BoardroomSeatOccupied(g_crossing.seat)) {
         Done("the medium the volume stood on is gone");
         return;

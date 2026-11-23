@@ -5,6 +5,7 @@
 #include "../file_map/file_map.h"    /* the file's record, its blocks counted in it */
 #include "../ink/ink.h"              /* InkedGen — one Ink a window */
 #include "boxos_decks.h"              /* the deck's span and its flag */
+#include "tagfs_volume.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -20,10 +21,10 @@
 
 /* One write of `bytes` of the test buffer at `offset`, through a fresh handle:
  * the write's answer, and in *out_wrote the bytes it counted. */
-static error_t StandPlotWriteAt(uint64_t file_id, uint64_t offset, uint32_t bytes,
+static error_t StandPlotWriteAt(TagFSVolume* vol, uint64_t file_id, uint64_t offset, uint32_t bytes,
                                 uint64_t* out_wrote)
 {
-    TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
+    TagFSFileHandle* handle = tagfs_open(vol, file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
     PlotSource       source;
 
     *out_wrote = 0;
@@ -33,18 +34,18 @@ static error_t StandPlotWriteAt(uint64_t file_id, uint64_t offset, uint32_t byte
     source.kernel  = g_test_buffer;
     source.bytes   = bytes;
     handle->offset = offset;
-    error_t rc = tagfs_write(handle, &source, out_wrote);
-    tagfs_close(handle);
+    error_t rc = tagfs_write(vol, handle, &source, out_wrote);
+    tagfs_close(vol, handle);
     return rc;
 }
 
 /* The file's size and the blocks its record names. */
-static bool StandPlotShape(uint64_t file_id, uint64_t* out_size, uint64_t* out_blocks,
+static bool StandPlotShape(TagFSVolume* vol, uint64_t file_id, uint64_t* out_size, uint64_t* out_blocks,
                            uint32_t* out_extents)
 {
-    if (!tagfs_enter())
+    if (!tagfs_enter(vol))
         return false;
-    FileRecord* rec = FileMapRecordHold(tagfs_get_state()->files, file_id, NULL);
+    FileRecord* rec = FileMapRecordHold(vol->state.files, file_id, NULL);
     if (rec) {
         *out_size   = rec->size;
         *out_blocks = rec->blocks;
@@ -53,7 +54,7 @@ static bool StandPlotShape(uint64_t file_id, uint64_t* out_size, uint64_t* out_b
     }
     bool held = rec != NULL;
     FileRecordRelease(rec);
-    tagfs_leave();
+    tagfs_leave(vol);
     return held;
 }
 
@@ -65,6 +66,7 @@ static bool StandPlotShape(uint64_t file_id, uint64_t* out_size, uint64_t* out_b
  */
 static TestResult TestStandPlotBeyondSizeRefused(void)
 {
+    TagFSVolume* vol = TagFSHome();
     static const uint64_t past[2] = {
         TAGFS_BLOCK_SIZE + 1u,
         TAGFS_BLOCK_SIZE + 0xFFFFull * TAGFS_BLOCK_SIZE,
@@ -75,7 +77,7 @@ static TestResult TestStandPlotBeyondSizeRefused(void)
     uint32_t    taken   = 0;
     VolumeTally before;
     VolumeTally after;
-    const char* aside   = StandStepsAsideFor();
+    const char* aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
@@ -83,13 +85,13 @@ static TestResult TestStandPlotBeyondSizeRefused(void)
     memset(&before, 0, sizeof(before));
     memset(&after, 0, sizeof(after));
     TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x70, 0);
-    TEST_ASSERT(StandMakeFile("test_file", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+    TEST_ASSERT(StandMakeFile(vol, "test_file", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a one-block file is made");
-    TEST_ASSERT(VolumeTallyTake(&before), "the volume is counted");
+    TEST_ASSERT(VolumeTallyTake(vol, &before), "the volume is counted");
 
     for (uint32_t i = 0; i < ARRAY_SIZE(past); i++) {
         uint64_t wrote = 0;
-        error_t  rc    = StandPlotWriteAt(file_id, past[i], 1, &wrote);
+        error_t  rc    = StandPlotWriteAt(vol, file_id, past[i], 1, &wrote);
         if (rc == OK || wrote != 0) {
             taken++;
             continue;
@@ -103,17 +105,17 @@ static TestResult TestStandPlotBeyondSizeRefused(void)
         goto out;
     }
 
-    TEST_ASSERT(VolumeTallyTake(&after), "the volume is counted again");
+    TEST_ASSERT(VolumeTallyTake(vol, &after), "the volume is counted again");
     TEST_ASSERT_EQ(after.held, before.held, "and not a block was taken for either write");
-    TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, 2 * TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
+    TEST_ASSERT_EQ(TestFileRead(vol, file_id, g_test_output, 2 * TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
                    "the file is as long as it was");
     TEST_ASSERT_EQ(TestFirstDifference(g_test_output, g_test_buffer, TAGFS_BLOCK_SIZE),
                    TAGFS_BLOCK_SIZE, "and holds what it held");
-    TEST_ASSERT_EQ(StandWriteAt(file_id, TAGFS_BLOCK_SIZE, g_test_buffer, 10), 10,
+    TEST_ASSERT_EQ(StandWriteAt(vol, file_id, TAGFS_BLOCK_SIZE, g_test_buffer, 10), 10,
                    "a write that begins at the size grows the file");
 out:
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -136,6 +138,7 @@ static uint32_t StandPlotExtentCeiling(uint64_t blocks)
  */
 static TestResult TestStandPlotRunMerges(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult       verdict  = TEST_PASS;
     uint64_t         file_id  = 0;
     TagFSFileHandle* handle   = NULL;
@@ -143,24 +146,24 @@ static TestResult TestStandPlotRunMerges(void)
     uint64_t         size     = 0;
     uint64_t         blocks   = 0;
     uint32_t         extents  = 0;
-    const char*      aside    = StandStepsAsideFor();
+    const char*      aside    = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
 
-    TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, 0, &file_id), 0, "a file is created");
-    handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "test_file", NULL, 0, 0, &file_id), 0, "a file is created");
+    handle = tagfs_open(vol, file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
     TEST_ASSERT(handle != NULL, "and opened");
     for (uint64_t at = 0; at < STAND_PLOT_RUN_BYTES; at += TAGFS_BLOCK_SIZE) {
         TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x71, at);
-        if (TestHandleWrite(handle, g_test_buffer, TAGFS_BLOCK_SIZE) != (int)TAGFS_BLOCK_SIZE)
+        if (TestHandleWrite(vol, handle, g_test_buffer, TAGFS_BLOCK_SIZE) != (int)TAGFS_BLOCK_SIZE)
             break;
         accepted += TAGFS_BLOCK_SIZE;
     }
-    tagfs_close(handle);
+    tagfs_close(vol, handle);
     handle = NULL;
 
-    TEST_ASSERT(StandPlotShape(file_id, &size, &blocks, &extents), "the file's record reads");
+    TEST_ASSERT(StandPlotShape(vol, file_id, &size, &blocks, &extents), "the file's record reads");
     TestEvidence("extents the record names for the blocks written in a row", extents);
     if (accepted < STAND_PLOT_RUN_BYTES || extents > StandPlotExtentCeiling(blocks)) {
         verdict = TEST_DEFECT;
@@ -170,11 +173,11 @@ static TestResult TestStandPlotRunMerges(void)
     TEST_ASSERT_EQ(blocks, STAND_PLOT_RUN_BYTES / TAGFS_BLOCK_SIZE,
                    "and names a block for every 4 KiB of it");
 
-    handle = tagfs_open(file_id, TAGFS_HANDLE_READ);
+    handle = tagfs_open(vol, file_id, TAGFS_HANDLE_READ);
     TEST_ASSERT(handle != NULL, "it opens to be read");
     for (uint64_t at = 0; at < STAND_PLOT_RUN_BYTES; at += TAGFS_BLOCK_SIZE) {
         TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x71, at);
-        TEST_ASSERT_EQ(TestHandleRead(handle, g_test_output, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
+        TEST_ASSERT_EQ(TestHandleRead(vol, handle, g_test_output, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
                        "every block reads");
         TEST_ASSERT_EQ(at + TestFirstDifference(g_test_output, g_test_buffer, TAGFS_BLOCK_SIZE),
                        at + TAGFS_BLOCK_SIZE,
@@ -182,9 +185,9 @@ static TestResult TestStandPlotRunMerges(void)
     }
 out:
     if (handle)
-        tagfs_close(handle);
+        tagfs_close(vol, handle);
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -217,6 +220,7 @@ static int StandPlotDeckSpan(uint64_t file_id, uint64_t size, uint32_t flags)
  */
 static TestResult TestStandPlotSpanGrowsOnly(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult     verdict = TEST_PASS;
     uint64_t       file_id = 0;
     uint64_t       wrote   = 0, size = 0, blocks = 0;
@@ -224,7 +228,7 @@ static TestResult TestStandPlotSpanGrowsOnly(void)
     uint8_t*       expect  = NULL;
     uint8_t*       back    = NULL;
     const uint32_t made    = 100, at = 200, mine = 4, theirs = 300, grown = 1000;
-    const char*    aside   = StandStepsAsideFor();
+    const char*    aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
@@ -234,38 +238,38 @@ static TestResult TestStandPlotSpanGrowsOnly(void)
     TEST_ASSERT(expect && back, "room for what the file should hold and for reading it back");
     memset(expect, 0, grown);
     TestFillAt(expect, made + theirs, 0x79, 0);
-    TEST_ASSERT(StandMakeFile("test_file", expect, made, &file_id), "a file of 100 bytes is made");
+    TEST_ASSERT(StandMakeFile(vol, "test_file", expect, made, &file_id), "a file of 100 bytes is made");
 
     TestFillAt(g_test_buffer, mine, 0x7A, 0);
-    TEST_ASSERT_EQ(StandPlotWriteAt(file_id, at, mine, &wrote), ERR_TAGFS_BEYOND_SIZE,
+    TEST_ASSERT_EQ(StandPlotWriteAt(vol, file_id, at, mine, &wrote), ERR_TAGFS_BEYOND_SIZE,
                    "one writer's write at 200 is refused as beginning past the size");
-    TEST_ASSERT_EQ(StandWriteAt(file_id, made, expect + made, theirs), (int)theirs,
+    TEST_ASSERT_EQ(StandWriteAt(vol, file_id, made, expect + made, theirs), (int)theirs,
                    "another writer grows the file to 400 meanwhile");
     TEST_ASSERT_EQ(StandPlotDeckSpan(file_id, at, STORAGE_SPAN_GROW << 1), ERR_INVALID_ARGUMENT,
                    "the deck refuses a span flag it does not know");
     TEST_ASSERT_OK(StandPlotDeckSpan(file_id, at, STORAGE_SPAN_GROW),
                    "the first writer spans it to 200 through the deck, growing only");
-    TEST_ASSERT(StandPlotShape(file_id, &size, &blocks, NULL), "the record reads");
+    TEST_ASSERT(StandPlotShape(vol, file_id, &size, &blocks, NULL), "the record reads");
     cut = size < made + theirs ? made + theirs - size : 0;
     TestEvidence("bytes another writer had added that the span cut off", cut);
     if (cut) {
         verdict = TEST_DEFECT;
         goto out;
     }
-    TEST_ASSERT_OK(StandPlotWriteAt(file_id, at, mine, &wrote), "and writes its bytes at 200");
+    TEST_ASSERT_OK(StandPlotWriteAt(vol, file_id, at, mine, &wrote), "and writes its bytes at 200");
     memcpy(expect + at, g_test_buffer, mine);
-    TEST_ASSERT_EQ(TestFileRead(file_id, back, grown), (int)(made + theirs),
+    TEST_ASSERT_EQ(TestFileRead(vol, file_id, back, grown), (int)(made + theirs),
                    "the file is 400 bytes still");
     TEST_ASSERT_EQ(TestFirstDifference(back, expect, made + theirs), made + theirs,
                    "the other writer's bytes are the file's, the first's laid over four of them");
 
     TEST_ASSERT_OK(StandPlotDeckSpan(file_id, grown, STORAGE_SPAN_GROW),
                    "a span to 1000, growing only, of a shorter file");
-    TEST_ASSERT_EQ(TestFileRead(file_id, back, grown), (int)grown, "grows it to 1000 bytes");
+    TEST_ASSERT_EQ(TestFileRead(vol, file_id, back, grown), (int)grown, "grows it to 1000 bytes");
     TEST_ASSERT_EQ(TestFirstDifference(back, expect, grown), grown, "zeros after the 400");
 out:
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     kfree(expect);
     kfree(back);
     return verdict;

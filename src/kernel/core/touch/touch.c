@@ -169,12 +169,12 @@ error_t TouchTagResolve(const char *tag, size_t len, TouchTag *out_full, TouchTa
      * a subscriber must not be handed an id for a shorter or other name. */
     TagSpelling bare = { spelled.key, NULL, spelled.key_len, 0 };
     uint32_t    id;
-    rc = TagFSInternSpelling(&bare, &id);
+    rc = TagFSInternSpelling(TagFSHome(), &bare, &id);
     if (rc != OK) return rc;
     *out_bare = (TouchTag)id;
 
     if (spelled.value && !TagSpellingIsWildcard(&spelled)) {
-        rc = TagFSInternSpelling(&spelled, &id);
+        rc = TagFSInternSpelling(TagFSHome(), &spelled, &id);
         if (rc != OK) return rc;
         *out_full = (TouchTag)id;
     }

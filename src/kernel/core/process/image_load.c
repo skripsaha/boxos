@@ -38,7 +38,7 @@ error_t ImageSourceRead(const ImageSource *source, uint64_t offset, void *into, 
 
     uint64_t got = 0;
     source->File->offset = offset;
-    error_t rd = tagfs_read(source->File, into, count, &got);
+    error_t rd = tagfs_read(TagFSHome(), source->File, into, count, &got);
     if (rd != OK || got != count) {
         kprintf("[IMAGE] '%s' is not started: %llu of its %llu bytes at %llu came back (error %u) — "
                 "an image that is not all here is not started\n", name, (unsigned long long)got,

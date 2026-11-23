@@ -1,5 +1,6 @@
 #include "block_map_derived.h"
 #include "../tagfs.h"
+#include "tagfs_volume.h"
 
 /*
  * A look at the derived map from outside its changes (block_map_derived.h,
@@ -26,9 +27,9 @@ static uint32_t BitsFirstIn(const uint64_t* bits, uint32_t from, uint32_t to)
     return to;
 }
 
-uint64_t BlockMapDerivedTakenFrom(uint64_t start, uint64_t end)
+uint64_t BlockMapDerivedTakenFrom(TagFSVolume* vol, uint64_t start, uint64_t end)
 {
-    TagFSLock* lock  = &tagfs_get_state()->lock;
+    TagFSLock* lock  = &vol->state.lock;
     uint64_t   at    = start, first = end;
     bool       known = true;
     while (known && first == end && at < end) {
@@ -38,8 +39,8 @@ uint64_t BlockMapDerivedTakenFrom(uint64_t start, uint64_t end)
             uint32_t        w    = at_w < UINT32_MAX ? (uint32_t)at_w : UINT32_MAX, blocks = 0, free = 0;
             const uint64_t* bits = NULL;
             uint64_t        base = at_w * BLOCK_MAP_WINDOW_BLOCKS;
-            if (!BlockMapDerivedWindow(w, &blocks, &free, &bits) || base + blocks <= at) {
-                known = BlockMapDerivedUp();       /* past the map's end no owner names a block */
+            if (!BlockMapDerivedWindow(vol, w, &blocks, &free, &bits) || base + blocks <= at) {
+                known = BlockMapDerivedUp(vol);       /* past the map's end no owner names a block */
                 at    = end;
                 break;
             }

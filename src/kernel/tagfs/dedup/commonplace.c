@@ -1,4 +1,5 @@
 #include "dedup_internal.h"
+#include "tagfs_volume.h"
 
 /*
  * Commonplace (dedup_internal.h): the blocks written since a Tally, one array
@@ -10,8 +11,6 @@
  * what it holds and no more.
  */
 
-static CommonplaceEntry* s_entry;
-static uint64_t          s_n;
 
 static int EntryOrder(const void* a, const void* b, void* ctx)
 {
@@ -52,12 +51,12 @@ static bool InHolds(const CommonplaceEntry* in, uint64_t n, uint64_t block)
 }
 
 /* The first entry whose digest is not below `digest`. */
-static uint64_t DigestFrom(uint64_t digest)
+static uint64_t DigestFrom(TagFSVolume* vol, uint64_t digest)
 {
-    uint64_t lo = 0, hi = s_n;
+    uint64_t lo = 0, hi = vol->commonplace.n;
     while (lo < hi) {
         uint64_t mid = lo + (hi - lo) / 2u;
-        if (s_entry[mid].digest < digest)
+        if (vol->commonplace.entry[mid].digest < digest)
             lo = mid + 1u;
         else
             hi = mid;
@@ -71,12 +70,12 @@ static uint64_t DigestFrom(uint64_t digest)
  * a block no file names — and one on a block that comes in again is the
  * block's old digest: the new entry stands in its place.
  */
-error_t CommonplaceTake(CommonplaceEntry* in, uint64_t n, const BinderGround* gone, uint64_t ngone,
+error_t CommonplaceTake(TagFSVolume* vol, CommonplaceEntry* in, uint64_t n, const BinderGround* gone, uint64_t ngone,
                         uint64_t since)
 {
     uint64_t live = 0, k = 0;
-    for (uint64_t i = 0; i < s_n; i++) {
-        CommonplaceEntry* e = &s_entry[i];
+    for (uint64_t i = 0; i < vol->commonplace.n; i++) {
+        CommonplaceEntry* e = &vol->commonplace.entry[i];
         if (GroundHolds(gone, ngone, e->block) || InHolds(in, n, e->block))
             e->mark |= COMMONPLACE_GONE;
         live += !(e->mark & COMMONPLACE_GONE);
@@ -92,74 +91,74 @@ error_t CommonplaceTake(CommonplaceEntry* in, uint64_t n, const BinderGround* go
         in[j].mark  = 0;
     }
     KSort(in, n, sizeof(CommonplaceEntry), EntryOrder, NULL);
-    for (uint64_t i = 0, j = 0; i < s_n || j < n;) {
-        if (i < s_n && (s_entry[i].mark & COMMONPLACE_GONE)) {
+    for (uint64_t i = 0, j = 0; i < vol->commonplace.n || j < n;) {
+        if (i < vol->commonplace.n && (vol->commonplace.entry[i].mark & COMMONPLACE_GONE)) {
             i++;
             continue;
         }
-        bool mine = j == n || (i < s_n && EntryOrder(&s_entry[i], &in[j], NULL) < 0);
-        all[k++]  = mine ? s_entry[i++] : in[j++];
+        bool mine = j == n || (i < vol->commonplace.n && EntryOrder(&vol->commonplace.entry[i], &in[j], NULL) < 0);
+        all[k++]  = mine ? vol->commonplace.entry[i++] : in[j++];
     }
-    kfree(s_entry);
-    s_entry = all;
-    s_n     = k;
+    kfree(vol->commonplace.entry);
+    vol->commonplace.entry = all;
+    vol->commonplace.n     = k;
     return OK;
 }
 
-CommonplaceEntry* CommonplaceGroup(uint64_t digest, uint64_t* count)
+CommonplaceEntry* CommonplaceGroup(TagFSVolume* vol, uint64_t digest, uint64_t* count)
 {
-    uint64_t lo = DigestFrom(digest), hi = lo;
-    while (hi < s_n && s_entry[hi].digest == digest)
+    uint64_t lo = DigestFrom(vol, digest), hi = lo;
+    while (hi < vol->commonplace.n && vol->commonplace.entry[hi].digest == digest)
         hi++;
     *count = hi - lo;
-    return hi > lo ? &s_entry[lo] : NULL;
+    return hi > lo ? &vol->commonplace.entry[lo] : NULL;
 }
 
-CommonplaceEntry* CommonplaceAt(uint64_t i)
+CommonplaceEntry* CommonplaceAt(TagFSVolume* vol, uint64_t i)
 {
-    return &s_entry[i];
+    return &vol->commonplace.entry[i];
 }
 
-uint64_t CommonplaceCount(void)
+uint64_t CommonplaceCount(TagFSVolume* vol)
 {
-    return s_n;
+    return vol->commonplace.n;
 }
 
-void CommonplaceStrike(uint64_t digest, uint64_t block)
+void CommonplaceStrike(TagFSVolume* vol, uint64_t digest, uint64_t block)
 {
-    for (uint64_t i = DigestFrom(digest); i < s_n && s_entry[i].digest == digest; i++)
-        if (s_entry[i].block == block)
-            s_entry[i].mark |= COMMONPLACE_GONE;
+    for (uint64_t i = DigestFrom(vol, digest); i < vol->commonplace.n && vol->commonplace.entry[i].digest == digest; i++)
+        if (vol->commonplace.entry[i].block == block)
+            vol->commonplace.entry[i].mark |= COMMONPLACE_GONE;
 }
 
-void CommonplaceKeep(uint64_t digest, uint64_t block, uint64_t since)
+void CommonplaceKeep(TagFSVolume* vol, uint64_t digest, uint64_t block, uint64_t since)
 {
-    for (uint64_t i = DigestFrom(digest); i < s_n && s_entry[i].digest == digest; i++)
-        if (s_entry[i].block == block)
-            s_entry[i].since = since;
+    for (uint64_t i = DigestFrom(vol, digest); i < vol->commonplace.n && vol->commonplace.entry[i].digest == digest; i++)
+        if (vol->commonplace.entry[i].block == block)
+            vol->commonplace.entry[i].since = since;
 }
 
-void CommonplaceRetire(uint64_t walked, uint64_t lap)
+void CommonplaceRetire(TagFSVolume* vol, uint64_t walked, uint64_t lap)
 {
     uint64_t k = 0;
-    for (uint64_t i = 0; i < s_n; i++) {
-        CommonplaceEntry e = s_entry[i];
+    for (uint64_t i = 0; i < vol->commonplace.n; i++) {
+        CommonplaceEntry e = vol->commonplace.entry[i];
         if ((e.mark & COMMONPLACE_GONE) || walked - e.since >= lap)
             continue;
         e.fresh      = 0;
         e.mark       = 0;
-        s_entry[k++] = e;
+        vol->commonplace.entry[k++] = e;
     }
-    s_n = k;
+    vol->commonplace.n = k;
     if (k == 0) {
-        kfree(s_entry);
-        s_entry = NULL;
+        kfree(vol->commonplace.entry);
+        vol->commonplace.entry = NULL;
     }
 }
 
-void CommonplaceLetGo(void)
+void CommonplaceLetGo(TagFSVolume* vol)
 {
-    kfree(s_entry);
-    s_entry = NULL;
-    s_n     = 0;
+    kfree(vol->commonplace.entry);
+    vol->commonplace.entry = NULL;
+    vol->commonplace.n     = 0;
 }

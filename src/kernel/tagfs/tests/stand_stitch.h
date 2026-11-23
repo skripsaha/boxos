@@ -58,13 +58,13 @@ typedef struct {
 } StandStitchWaiter;
 
 void        StandStitchAnswered(SettleWaiter* w, error_t rc);
-const char* StandStitchAside(StandStitch* s);
+const char* StandStitchAside(TagFSVolume* vol, StandStitch* s);
 bool        StandStitchContextBack(void);
-bool        StandStitchRemount(void);
-bool        StandStitchPutBack(const StandStitch* s);
-error_t     StandStitchSay(const char* text, size_t bytes, uint64_t k, bool* kept);
-error_t     StandStitchSayLong(uint64_t bytes, char letter, uint64_t k, bool* kept);
-error_t     StandStitchSayFilling(uint64_t sectors, char letter, uint64_t k, bool* kept);
+bool        StandStitchRemount(TagFSVolume* vol);
+bool        StandStitchPutBack(TagFSVolume* vol, const StandStitch* s);
+error_t     StandStitchSay(TagFSVolume* vol, const char* text, size_t bytes, uint64_t k, bool* kept);
+error_t     StandStitchSayLong(TagFSVolume* vol, uint64_t bytes, char letter, uint64_t k, bool* kept);
+error_t     StandStitchSayFilling(TagFSVolume* vol, uint64_t sectors, char letter, uint64_t k, bool* kept);
 uint32_t    StandStitchLayEmpty(const StandStitch* s, uint64_t flags);
 uint32_t    StandStitchLayAt(const StandStitch* s, uint64_t flags, uint32_t of, const RibbonQuire* next);
 
@@ -78,11 +78,11 @@ uint32_t    StandStitchLayAt(const StandStitch* s, uint64_t flags, uint32_t of, 
 /* The bytes a stitch's head, its UseContext's tag and length and its Clasp
  * take, and more. */
 #define STAND_STITCH_SLACK  200u
-bool        StandStitchRead(RibbonUnit** out);
+bool        StandStitchRead(TagFSVolume* vol, RibbonUnit** out);
 
 #define STAND_STITCH_PUT_BACK(s)                                                                       \
     do {                                                                                               \
-        if (!StandStitchPutBack(s))                                                                    \
+        if (!StandStitchPutBack(vol, s))                                                                    \
             verdict = TestFailedAt(__FILE__, __LINE__, "the ribbon would not be put back as it was "  \
                                    "found (last, 0)", (int64_t)(s)->at.last, 0);                       \
     } while (0)

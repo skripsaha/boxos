@@ -50,31 +50,32 @@
  * anywhere else fails it rather than passing it. */
 TestResult TestStandRmwReadRefused(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult  verdict = TEST_PASS;
-    uint8_t     seat    = tagfs_get_seat();
+    uint8_t     seat    = tagfs_get_seat(vol);
     uint64_t    file_id = 0;
     uint64_t    block   = 0;
     bool        armed   = false;
-    const char* aside   = StandStepsAsideFor();
+    const char* aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
 
     fill_pattern(g_test_buffer, TAGFS_BLOCK_SIZE, STAND_RMW_WAS);
-    TEST_ASSERT(StandMakeFile("test_file", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+    TEST_ASSERT(StandMakeFile(vol, "test_file", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a one-block file of 0x5A is made");
-    TEST_ASSERT(StandBlockOf(file_id, 0, &block), "its block is found");
+    TEST_ASSERT(StandBlockOf(vol, file_id, 0, &block), "its block is found");
 
     fill_pattern(g_test_output, STAND_RMW_BYTES, STAND_RMW_NEW);
-    BlockFailArm(seat, BLOCK_FAIL_READ, tagfs_block_to_sector(block), TAGFS_BLOCK_SECTORS, 1);
+    BlockFailArm(seat, BLOCK_FAIL_READ, tagfs_block_to_sector(vol, block), TAGFS_BLOCK_SECTORS, 1);
     armed = true;
-    int wrote = StandWriteAt(file_id, STAND_RMW_AT, g_test_output, STAND_RMW_BYTES);
+    int wrote = StandWriteAt(vol, file_id, STAND_RMW_AT, g_test_output, STAND_RMW_BYTES);
     bool fired = BlockFailFired();
     BlockFailDisarm();
     armed = false;
     TEST_ASSERT(fired, "the read-modify-write's read of the block was the read refused");
 
-    TEST_ASSERT_EQ(TestFileRead(file_id, g_test_output, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
+    TEST_ASSERT_EQ(TestFileRead(vol, file_id, g_test_output, TAGFS_BLOCK_SIZE), TAGFS_BLOCK_SIZE,
                    "the block reads back");
     uint32_t changed = 0;
     uint32_t zeroed  = 0;
@@ -99,7 +100,7 @@ out:
     if (armed)
         BlockFailDisarm();
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -110,12 +111,12 @@ out:
 /* Does the name index count this file id among those called `name`? Asked of
  * the volume itself, so neither a Use Context nor a tag a question sets aside
  * can stand between the question and the answer. */
-static bool StandNameFinds(const char* name, uint64_t file_id)
+static bool StandNameFinds(TagFSVolume* vol, const char* name, uint64_t file_id)
 {
     uint64_t  ids[16];
     uint64_t  from = 1;
     TagFSPage page;
-    while (TagFSNamedPage(TagOwnerPerson(), name, strlen(name), NULL, 0, NULL, 0, from, ids, 16, false, &page) == OK) {
+    while (TagFSNamedPage(vol, TagOwnerPerson(), name, strlen(name), NULL, 0, NULL, 0, from, ids, 16, false, &page) == OK) {
         for (uint32_t i = 0; i < page.delivered; i++)
             if (ids[i] == file_id)
                 return true;
@@ -126,12 +127,12 @@ static bool StandNameFinds(const char* name, uint64_t file_id)
     return false;
 }
 
-static bool StandVolumeNames(uint64_t file_id)
+static bool StandVolumeNames(TagFSVolume* vol, uint64_t file_id)
 {
     TagFSMetadata meta;
 
     memset(&meta, 0, sizeof(meta));
-    if (tagfs_get_metadata(file_id, &meta) != 0)
+    if (tagfs_get_metadata(vol, file_id, &meta) != 0)
         return false;
     tagfs_metadata_free(&meta);
     return true;
@@ -144,23 +145,23 @@ static bool StandVolumeNames(uint64_t file_id)
  * The file a create made is deleted on every path out, and by the id the
  * create answered — `id` is only the one it should have taken, and may be
  * another creator's. A refused create that left a record behind is failed. */
-static TestResult StandCreateOnce(uint32_t n, bool* fired, bool* whole)
+static TestResult StandCreateOnce(TagFSVolume* vol, uint32_t n, bool* fired, bool* whole)
 {
     TestResult verdict = TEST_PASS;
-    uint64_t   id      = tagfs_file_ceiling();      /* the id this create takes */
+    uint64_t   id      = tagfs_file_ceiling(vol);      /* the id this create takes */
     uint64_t   made    = 0;
     uint64_t   owned   = 0;                         /* made, until it is deleted */
     bool       armed   = false;
 
     HeapFailArm(amp_get_core_index(), n);
     armed = true;
-    int rc = tagfs_create_file("test_file", NULL, 0, 0, &made);
+    int rc = tagfs_create_file(vol, "test_file", NULL, 0, 0, &made);
     *fired = HeapFailFired();
     HeapFailDisarm();
     armed = false;
 
-    bool named = StandVolumeNames(id);
-    bool found = StandNameFinds("test_file", id);
+    bool named = StandVolumeNames(vol, id);
+    bool found = StandNameFinds(vol, "test_file", id);
     if (rc != 0) {
         TEST_ASSERT(!named, "a refused create leaves no record behind");
         *whole = !found;
@@ -169,20 +170,21 @@ static TestResult StandCreateOnce(uint32_t n, bool* fired, bool* whole)
 
     owned = made;
     TEST_ASSERT_EQ(made, id, "a create takes the next id");
-    TEST_ASSERT_EQ(tagfs_delete_file(made, INK_UNWARRANTED), 0, "the file a create made can be deleted");
+    TEST_ASSERT_EQ(tagfs_delete_file(vol, made, INK_UNWARRANTED), 0, "the file a create made can be deleted");
     owned = 0;
-    bool lingers = StandNameFinds("test_file", made);
+    bool lingers = StandNameFinds(vol, "test_file", made);
     *whole = named && found && !lingers;
 out:
     if (armed)
         HeapFailDisarm();
     if (owned)
-        tagfs_delete_file(owned, INK_UNWARRANTED);
+        tagfs_delete_file(vol, owned, INK_UNWARRANTED);
     return verdict;
 }
 
 TestResult TestStandCreateAllOrNothing(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult verdict   = TEST_PASS;
     uint64_t   file_id   = 0;
     uint32_t   refused   = 0;
@@ -195,14 +197,14 @@ TestResult TestStandCreateAllOrNothing(void)
      * map that was full is split by it and stays split, and what the name
      * index needs for one more file is taken and given back by each create
      * alike (file_map/). */
-    TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, 0, &file_id), 0, "a create before the sweep is made");
-    TEST_ASSERT_EQ(tagfs_delete_file(file_id, INK_UNWARRANTED), 0, "and its file is deleted");
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "test_file", NULL, 0, 0, &file_id), 0, "a create before the sweep is made");
+    TEST_ASSERT_EQ(tagfs_delete_file(vol, file_id, INK_UNWARRANTED), 0, "and its file is deleted");
     file_id = 0;
 
     for (uint32_t n = 1; n <= STAND_SWEEP_MAX; n++) {
         bool fired = false;
         bool whole = true;
-        TestResult once = StandCreateOnce(n, &fired, &whole);
+        TestResult once = StandCreateOnce(vol, n, &fired, &whole);
         if (once != TEST_PASS) {
             verdict = once;
             goto out;
@@ -226,7 +228,7 @@ TestResult TestStandCreateAllOrNothing(void)
     TestEvidence("creates whole or refused whole, allocations refused", refused);
 out:
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -247,7 +249,7 @@ typedef struct {
  * leaves nothing of any write in use. A block it did leave is named by no
  * record and cannot be found to be given back: the sweep counts it, and the
  * runner's guard fails the test for it as well. */
-static TestResult StandWriteOnce(uint32_t n, StandWriteSweep* sweep, bool* fired)
+static TestResult StandWriteOnce(TagFSVolume* vol, uint32_t n, StandWriteSweep* sweep, bool* fired)
 {
     TestResult       verdict = TEST_PASS;
     uint64_t         file_id = 0;
@@ -258,25 +260,25 @@ static TestResult StandWriteOnce(uint32_t n, StandWriteSweep* sweep, bool* fired
 
     memset(&before, 0, sizeof(before));
     memset(&after, 0, sizeof(after));
-    TEST_ASSERT_EQ(tagfs_create_file("test_file", NULL, 0, 0, &file_id), 0,
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "test_file", NULL, 0, 0, &file_id), 0,
                    "a file to write into is created");
-    handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
+    handle = tagfs_open(vol, file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
     TEST_ASSERT(handle != NULL, "and opened");
-    TEST_ASSERT(VolumeTallyTake(&before), "the volume is counted before the write");
+    TEST_ASSERT(VolumeTallyTake(vol, &before), "the volume is counted before the write");
 
     TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x5C, 0);
     HeapFailArm(amp_get_core_index(), n);
     armed = true;
-    int wrote = TestHandleWrite(handle, g_test_buffer, TAGFS_BLOCK_SIZE);
+    int wrote = TestHandleWrite(vol, handle, g_test_buffer, TAGFS_BLOCK_SIZE);
     *fired = HeapFailFired();
     HeapFailDisarm();
     armed = false;
 
-    tagfs_close(handle);
+    tagfs_close(vol, handle);
     handle = NULL;
-    TEST_ASSERT_EQ(tagfs_delete_file(file_id, INK_UNWARRANTED), 0, "the file is deleted");
+    TEST_ASSERT_EQ(tagfs_delete_file(vol, file_id, INK_UNWARRANTED), 0, "the file is deleted");
     file_id = 0;
-    TEST_ASSERT(VolumeTallyTake(&after), "the volume is counted after the delete");
+    TEST_ASSERT(VolumeTallyTake(vol, &after), "the volume is counted after the delete");
     TEST_ASSERT(after.held >= before.held,
                 "the delete gave back no block that was not in use before the write");
     uint64_t left = after.held - before.held;
@@ -294,17 +296,17 @@ out:
     if (armed)
         HeapFailDisarm();
     if (handle)
-        tagfs_close(handle);
+        tagfs_close(vol, handle);
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     return verdict;
 }
 
-static TestResult StandWriteSweepRun(StandWriteSweep* sweep)
+static TestResult StandWriteSweepRun(TagFSVolume* vol, StandWriteSweep* sweep)
 {
     TestResult  verdict = TEST_PASS;
     bool        swept   = false;
-    const char* aside   = StandStepsAsideFor();
+    const char* aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
@@ -312,7 +314,7 @@ static TestResult StandWriteSweepRun(StandWriteSweep* sweep)
     memset(sweep, 0, sizeof(*sweep));
     for (uint32_t n = 1; n <= STAND_SWEEP_MAX && !swept; n++) {
         bool fired = false;
-        TestResult once = StandWriteOnce(n, sweep, &fired);
+        TestResult once = StandWriteOnce(vol, n, sweep, &fired);
         if (once != TEST_PASS)
             return once;
         swept = !fired;
@@ -324,8 +326,9 @@ out:
 
 TestResult TestStandWriteReturnsItsGround(void)
 {
+    TagFSVolume* vol = TagFSHome();
     StandWriteSweep sweep;
-    TestResult      swept = StandWriteSweepRun(&sweep);
+    TestResult      swept = StandWriteSweepRun(vol, &sweep);
 
     if (swept != TEST_PASS)
         return swept;
@@ -335,8 +338,9 @@ TestResult TestStandWriteReturnsItsGround(void)
 
 TestResult TestStandWriteAllOrRefusal(void)
 {
+    TagFSVolume* vol = TagFSHome();
     StandWriteSweep sweep;
-    TestResult      swept = StandWriteSweepRun(&sweep);
+    TestResult      swept = StandWriteSweepRun(vol, &sweep);
 
     if (swept != TEST_PASS)
         return swept;
@@ -364,27 +368,27 @@ typedef struct {
     uint32_t alone_at;      /* the first with no open-file entry */
 } StandOpenSweep;
 
-static TestResult StandOpenSweepRun(StandOpenSweep* sweep)
+static TestResult StandOpenSweepRun(TagFSVolume* vol, StandOpenSweep* sweep)
 {
     TestResult  verdict = TEST_PASS;
     uint8_t     me      = amp_get_core_index();
     uint64_t    file_id = 0;
     bool        armed   = false;
     bool        swept   = false;
-    const char* aside   = StandStepsAsideFor();
+    const char* aside   = StandStepsAsideFor(vol);
 
     if (aside)
         return test_steps_aside(aside);
 
     memset(sweep, 0, sizeof(*sweep));
     TestFillAt(g_test_buffer, TAGFS_BLOCK_SIZE, 0x5E, 0);
-    TEST_ASSERT(StandMakeFile("test_file", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
+    TEST_ASSERT(StandMakeFile(vol, "test_file", g_test_buffer, TAGFS_BLOCK_SIZE, &file_id),
                 "a one-block file is made");
 
     for (uint32_t n = 1; n <= STAND_SWEEP_MAX && !swept; n++) {
         HeapFailArm(me, n);
         armed = true;
-        TagFSFileHandle* handle = tagfs_open(file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
+        TagFSFileHandle* handle = tagfs_open(vol, file_id, TAGFS_HANDLE_READ | TAGFS_HANDLE_WRITE);
         bool fired = HeapFailFired();
         HeapFailDisarm();
         armed = false;
@@ -392,7 +396,7 @@ static TestResult StandOpenSweepRun(StandOpenSweep* sweep)
         bool hollow  = handle && !handle->rec;
         bool emptied = handle && handle->file_size != TAGFS_BLOCK_SIZE;
         bool alone   = handle && !handle->ofe;
-        tagfs_close(handle);
+        tagfs_close(vol, handle);
 
         if (!fired) {
             swept = true;
@@ -413,14 +417,15 @@ out:
     if (armed)
         HeapFailDisarm();
     if (file_id)
-        tagfs_delete_file(file_id, INK_UNWARRANTED);
+        tagfs_delete_file(vol, file_id, INK_UNWARRANTED);
     return verdict;
 }
 
 TestResult TestStandOpenHoldsWhatItNames(void)
 {
+    TagFSVolume* vol = TagFSHome();
     StandOpenSweep sweep;
-    TestResult     swept = StandOpenSweepRun(&sweep);
+    TestResult     swept = StandOpenSweepRun(vol, &sweep);
 
     if (swept != TEST_PASS)
         return swept;
@@ -435,8 +440,9 @@ TestResult TestStandOpenHoldsWhatItNames(void)
 
 TestResult TestStandOpenRefusesUnreadMetadata(void)
 {
+    TagFSVolume* vol = TagFSHome();
     StandOpenSweep sweep;
-    TestResult     swept = StandOpenSweepRun(&sweep);
+    TestResult     swept = StandOpenSweepRun(vol, &sweep);
 
     if (swept != TEST_PASS)
         return swept;
@@ -450,8 +456,9 @@ TestResult TestStandOpenRefusesUnreadMetadata(void)
 
 TestResult TestStandOpenJoinsTheWriters(void)
 {
+    TagFSVolume* vol = TagFSHome();
     StandOpenSweep sweep;
-    TestResult     swept = StandOpenSweepRun(&sweep);
+    TestResult     swept = StandOpenSweepRun(vol, &sweep);
 
     if (swept != TEST_PASS)
         return swept;

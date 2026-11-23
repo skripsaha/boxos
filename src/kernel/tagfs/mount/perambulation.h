@@ -94,14 +94,14 @@ typedef struct {
 /* The verdict on the volume found on `seat` from `base` — `same` whether its
  * Deed lays it out as the one held (AwayDeedSame): a FRAME of another layout
  * is another volume's book, AWAY_OTHER with nothing read. */
-AwayVerdict              Perambulation(uint8_t seat, uint64_t base, bool same);
-const PerambulationSaid* PerambulationLast(void);
+AwayVerdict              Perambulation(TagFSVolume* vol, uint8_t seat, uint64_t base, bool same);
+const PerambulationSaid* PerambulationLast(TagFSVolume* vol);
 
 /* away_proof.c: the Docket's blocks of data no stitch settled, each one the
  * Gloss names, read back off `seat` from `base` and held to its digest — the
  * blocks read in *proved, those not holding in *missed. OK, ERR_NO_MEMORY, or
  * the medium's refusal (ERR_READ_FAILED). With no TagFS lock held. */
-error_t AwayProof(uint8_t seat, uint64_t base, uint64_t* proved, uint64_t* missed);
+error_t AwayProof(TagFSVolume* vol, uint8_t seat, uint64_t base, uint64_t* proved, uint64_t* missed);
 
 /* A book's write about to be inked, with no TagFS lock held: when the medium
  * left since the write of its first block was sent (AwayDepartures, taken
@@ -110,6 +110,14 @@ error_t AwayProof(uint8_t seat, uint64_t base, uint64_t* proved, uint64_t* misse
  * digest it was written with. OK, and *departed the departures it holds at —
  * the Ink laid only if none came since; ERR_TAGFS_NOT_LANDED, said, for
  * blocks that do not hold; or the door's refusal. */
-error_t AwayProofPlot(const Plot* p, uint64_t* departed);
+error_t AwayProofPlot(TagFSVolume* vol, const Plot* p, uint64_t* departed);
+
+/* What one volume holds of perambulation.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    PerambulationSaid said;
+    char why[200];
+    bool refused;
+    uint64_t unreadable;  /* sectors the medium said it cannot read, left zeros */
+} PerambulationState;
 
 #endif /* TAGFS_MOUNT_PERAMBULATION_H */

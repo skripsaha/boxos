@@ -78,22 +78,22 @@ struct ReadAheadWindow;
 
 /* The block, when the handle's window holds it: its bytes, which stay the
  * window's until the handle's next fetch. NULL when it does not. */
-const uint8_t *ReadAheadServe(TagFSFileHandle *h, uint64_t block);
+const uint8_t *ReadAheadServe(TagFSVolume* vol, TagFSFileHandle *h, uint64_t block);
 
 /* The handle's next `count` blocks from `first` on, fetched into its window in
  * one command — as many of them as the window holds. Nothing is said when the
  * window cannot be had or the medium refuses: the read goes on block by block,
  * and a block that will not come is that read's answer. */
-void    ReadAheadFetch(TagFSFileHandle *h, uint64_t first, uint32_t count);
+void    ReadAheadFetch(TagFSVolume* vol, TagFSFileHandle *h, uint64_t first, uint32_t count);
 
 /* The handle's window let go of (tagfs_close). */
-void    ReadAheadLetGo(TagFSFileHandle *h);
+void    ReadAheadLetGo(TagFSVolume* vol, TagFSFileHandle *h);
 
 /* A write landed on `block` (tagfs_readahead_invalidate). */
-void    ReadAheadForgetBlock(uint64_t block);
+void    ReadAheadForgetBlock(TagFSVolume* vol, uint64_t block);
 
 /* Every window emptied: what they hold are copies of a medium that left. */
-void    ReadAheadForgetAll(void);
+void    ReadAheadForgetAll(TagFSVolume* vol);
 
 /* A fetch in its two halves, for ReadAheadFetch and for the stand that proves
  * a late fetch is dropped: Begin makes the handle's window (when it has none)
@@ -102,12 +102,20 @@ void    ReadAheadForgetAll(void);
  * window could not be had; Land keeps the `fetched` blocks now in its buffer
  * only when no write has landed on the run since Begin, and answers whether it
  * kept them. Between the two the run's bytes are read into ReadAheadBuffer(h). */
-uint64_t ReadAheadBegin(TagFSFileHandle *h, uint64_t first, uint32_t *count);
+uint64_t ReadAheadBegin(TagFSVolume* vol, TagFSFileHandle *h, uint64_t first, uint32_t *count);
 uint8_t *ReadAheadBuffer(TagFSFileHandle *h);
-bool     ReadAheadLand(TagFSFileHandle *h, uint64_t gen, uint32_t fetched);
+bool     ReadAheadLand(TagFSVolume* vol, TagFSFileHandle *h, uint64_t gen, uint32_t fetched);
 
 /* The read of a handle into a sink (tagfs_read, TagFSReadInto), inside the
  * volume's door: see tagfs.h. */
-error_t TagFSReadStream(TagFSFileHandle *h, const ReadSink *sink, uint64_t *out_read);
+error_t TagFSReadStream(TagFSVolume* vol, TagFSFileHandle *h, const ReadSink *sink, uint64_t *out_read);
+
+/* What one volume holds of read_ahead.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    struct ReadAheadWindow* windows;
+    TagFSLock windows_lock;
+} ReadAheadState;
+
+void ReadAheadVolumeBegin(TagFSVolume* vol);
 
 #endif /* TAGFS_READ_H */

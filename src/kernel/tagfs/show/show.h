@@ -13,10 +13,28 @@
  */
 
 /* Every note forgotten: a mount's start (settle.c). */
-void    ShowMountReset(void);
+void    ShowMountReset(TagFSVolume* vol);
 
 /* The notes of every program that left — the one asked or the one asking —
  * forgotten (retire/retire.c). OK, or ERR_NO_MEMORY. Inside the door. */
-error_t ShowAsksForgetGone(void);
+error_t ShowAsksForgetGone(TagFSVolume* vol);
+
+/* One ask: `asker` asked `owner` to show it its tags. */
+typedef struct {
+    uint64_t owner;
+    uint64_t asker;
+} ShowAsk;
+
+/* What one volume holds of show.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    /* The notes, rising by owner and then by asker — a leaf lock: no other TagFS
+     * lock is taken while it is held. */
+    TagFSLock asks_lock;
+    ShowAsk* asks;
+    uint32_t asks_count;
+    uint32_t asks_room;
+} ShowState;
+
+void ShowVolumeBegin(TagFSVolume* vol);
 
 #endif /* TAGFS_SHOW_H */

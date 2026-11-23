@@ -238,7 +238,7 @@ void        FileRecordHeadSet(FileRecord* rec, const uint8_t* head, uint32_t len
  * nobody else sees — made `passport` (bit 63 set), TAGFS_FILE_PASSPORT on. */
 void        FileRecordPassportSet(FileRecord* rec, uint64_t passport);
 
-error_t     FileRecordSplice(const FileRecord* old, const BookSplice* sp, uint64_t count,
+error_t     FileRecordSplice(TagFSVolume* vol, const FileRecord* old, const BookSplice* sp, uint64_t count,
                              uint64_t size, uint64_t mtime, FileRecord** out,
                              Strip** freed, uint64_t* nfreed);
 

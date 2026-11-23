@@ -26,23 +26,18 @@
  * no longer covers. Never an answer. */
 #define INK_AGAIN ((error_t)0xFFFFFFFFu)
 
-static inline TagFSState* InkState(void)
-{
-    return tagfs_get_state();
-}
-
 /* Under the state lock: the gen the next Ink takes; an Ink laid at `gen`; a
  * flush need its data holds. */
-uint64_t InkGenNextLocked(void);
-void     InkGenLaidLocked(uint64_t gen);
-void     InkDataNeedRaiseLocked(uint64_t need);
+uint64_t InkGenNextLocked(TagFSVolume* vol);
+void     InkGenLaidLocked(TagFSVolume* vol, uint64_t gen);
+void     InkDataNeedRaiseLocked(TagFSVolume* vol, uint64_t need);
 
 /* Whether the volume takes a change at all, asked in both halves (whether it
  * takes one not begun yet, asked in the first, is ink.h's InkVolumeBegins).
  * And the guard's answer for a file's change, `boot` whether it touches the
  * kernel's blocks (ink.h). */
-error_t  InkVolumeTakes(void);
-error_t  InkGuardSays(uint64_t fid, bool boot, uint32_t flags, InkWarrant warrant);
+error_t  InkVolumeTakes(TagFSVolume* vol);
+error_t  InkGuardSays(TagFSVolume* vol, uint64_t fid, bool boot, uint32_t flags, InkWarrant warrant);
 
 /* What a change of a file's fields does to its tags, the programs it shows
  * its tags to after it and its passport (ink.c): the record's own unless the
@@ -77,16 +72,16 @@ bool     InkGoesRound(const error_t* rc);
  * receipt, or the refusal with nothing changed — INK_AGAIN when the file
  * changed between the halves.
  */
-error_t  InkBookFields(uint64_t fid, FileRecord* cur, const RecordWhere* was, const InkFieldsPlan* f,
+error_t  InkBookFields(TagFSVolume* vol, uint64_t fid, FileRecord* cur, const RecordWhere* was, const InkFieldsPlan* f,
                        const char* name, uint32_t add, uint32_t flags, uint64_t keep_until,
                        InkReceipt* out);
 /* The tags `count` of them retired, once no file wears one: a gen of their
  * own, no record (the registry owes the book a Coined RETIRED of each, which
  * the stitch that takes the gen lays). ERR_BUSY when a file wears one still. */
-error_t  InkBookRetire(const uint32_t* tags, uint32_t count, InkReceipt* out);
-error_t  InkBookNew(const char* name, const uint32_t* tags, uint32_t count, uint64_t made_by, uint64_t* out_fid,
+error_t  InkBookRetire(TagFSVolume* vol, const uint32_t* tags, uint32_t count, InkReceipt* out);
+error_t  InkBookNew(TagFSVolume* vol, const char* name, const uint32_t* tags, uint32_t count, uint64_t made_by, uint64_t* out_fid,
                     InkReceipt* out);
-error_t  InkBookQuitclaim(uint64_t fid, const RecordWhere* was, const FileRecord* cur, FallowNode* fallow,
+error_t  InkBookQuitclaim(TagFSVolume* vol, uint64_t fid, const RecordWhere* was, const FileRecord* cur, FallowNode* fallow,
                           InkReceipt* out);
 
 /* A Plot's change of a file (TagFSInkPlot): its window spliced into
@@ -97,8 +92,15 @@ error_t  InkBookQuitclaim(uint64_t fid, const RecordWhere* was, const FileRecord
  * to go on from the record it inked — held afresh, its window empty — as a
  * write's next window does; a file given up since leaves it no record, and
  * its next window is refused ERR_FILE_NOT_FOUND (plot_internal.h). */
-error_t  InkBookPlot(const Plot* p, const FileRecord* cur, const RecordWhere* was, uint64_t small_us,
+error_t  InkBookPlot(TagFSVolume* vol, const Plot* p, const FileRecord* cur, const RecordWhere* was, uint64_t small_us,
                      InkReceipt* out);
-void     InkBookPlotNext(Plot* p);
+void     InkBookPlotNext(TagFSVolume* vol, Plot* p);
+
+/* What one volume holds of ink.c (TagFSVolume, volume/tagfs_volume.h). */
+typedef struct {
+    uint64_t inked_gen;  /* the newest Ink's */
+    uint64_t data_need;  /* the flush need the newest data an Ink named holds */
+    volatile uint8_t read_only;  /* the medium refused a write as protected */
+} InkState;
 
 #endif /* TAGFS_INK_INTERNAL_H */

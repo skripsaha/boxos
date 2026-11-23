@@ -15,6 +15,7 @@
 #include "stand_tests.h"
 #include "write_job.h"
 #include "cpu_calibrate.h"
+#include "tagfs_volume.h"
 
 #ifdef CONFIG_VOLUME_TESTS
 
@@ -67,6 +68,7 @@
 
 static TestResult TestStandBookRoomGatherOneRun(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult       verdict = TEST_PASS;
     StandFreshModel  m;
     TagFSFileHandle* handle  = NULL;
@@ -77,51 +79,51 @@ static TestResult TestStandBookRoomGatherOneRun(void)
     uint32_t         window = 0, turns = 0;
     error_t          rc = OK;
     const uint32_t   bytes = STAND_BOOK_ROOM_GATHER * TAGFS_BLOCK_SIZE;
-    const char*      aside = StandStepsAsideFor();
+    const char*      aside = StandStepsAsideFor(vol);
     memset(&m, 0, sizeof(m));
     memset(&d, 0, sizeof(d));
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, bytes), "room for the file");
-    TEST_ASSERT_EQ(tagfs_create_file("book-gather.bin", NULL, 0, 0, &fid), 0, "a file is made");
-    TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, bytes, 0x31u), (int)bytes, "written whole");
-    TEST_ASSERT_OK(TagFSSettle(), "and settled");
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "book-gather.bin", NULL, 0, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(StandFreshWrite(vol, &m, fid, 0, bytes, 0x31u), (int)bytes, "written whole");
+    TEST_ASSERT_OK(TagFSSettle(vol), "and settled");
     for (uint32_t k = 1; k < STAND_BOOK_ROOM_GATHER; k += 2u)
-        TEST_ASSERT_EQ(StandFreshWrite(&m, fid, (uint64_t)k * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 0x40u + k),
+        TEST_ASSERT_EQ(StandFreshWrite(vol, &m, fid, (uint64_t)k * TAGFS_BLOCK_SIZE, TAGFS_BLOCK_SIZE, 0x40u + k),
                        TAGFS_BLOCK_SIZE, "every other block written over");
-    TagFSLockTake(&tagfs_get_state()->lock);
-    AllotmentRelease(fid);
-    TagFSLockDrop(&tagfs_get_state()->lock);
-    TEST_ASSERT(!AllotmentHeld(fid, &start, &window), "the window the versions left in hand is let go");
-    TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, TAGFS_BLOCK_SIZE, 0x40u), TAGFS_BLOCK_SIZE,
+    TagFSLockTake(&vol->state.lock);
+    AllotmentRelease(vol, fid);
+    TagFSLockDrop(&vol->state.lock);
+    TEST_ASSERT(!AllotmentHeld(vol, fid, &start, &window), "the window the versions left in hand is let go");
+    TEST_ASSERT_EQ(StandFreshWrite(vol, &m, fid, 0, TAGFS_BLOCK_SIZE, 0x40u), TAGFS_BLOCK_SIZE,
                    "and the first block written over");
-    TEST_ASSERT_OK(TagFSSettle(), "and settled");
-    TEST_ASSERT(StandFreshPrint(fid, &runs) && runs > 1u, "the file lies in many runs");
+    TEST_ASSERT_OK(TagFSSettle(vol), "and settled");
+    TEST_ASSERT(StandFreshPrint(vol, fid, &runs) && runs > 1u, "the file lies in many runs");
     TestEvidence("runs the file lies in", runs);
-    TEST_ASSERT(AllotmentHeld(fid, &start, &window) && window < STAND_BOOK_ROOM_GATHER,
+    TEST_ASSERT(AllotmentHeld(vol, fid, &start, &window) && window < STAND_BOOK_ROOM_GATHER,
                 "and keeps a window in hand shorter than it is");
     TestEvidence("blocks of the window the file keeps", window);
 
-    handle = tagfs_open(fid, TAGFS_HANDLE_WRITE);
+    handle = tagfs_open(vol, fid, TAGFS_HANDLE_WRITE);
     TEST_ASSERT(handle, "a handle opens it to write");
-    TEST_ASSERT_OK(HelmTakeNow(handle, &here), "and holds its Helm, as the defrag's job does");
+    TEST_ASSERT_OK(HelmTakeNow(vol, handle, &here), "and holds its Helm, as the defrag's job does");
     holding = true;
-    while (!ended && turns++ <= STAND_BOOK_ROOM_GATHER && (rc = HelmDefragWindow(handle, &d, &ended)) == OK)
+    while (!ended && turns++ <= STAND_BOOK_ROOM_GATHER && (rc = HelmDefragWindow(vol, handle, &d, &ended)) == OK)
         ;
-    HelmDefragLetGo(&d);
-    HelmLetGo(handle->ofe, &here);
+    HelmDefragLetGo(vol, &d);
+    HelmLetGo(vol, handle->ofe, &here);
     holding = false;
     TEST_ASSERT_OK(rc, "every window of the defrag is taken: the run it gathers into is handed whole");
     TEST_ASSERT(ended, "the defrag ends");
-    TEST_ASSERT(StandFreshPrint(fid, &runs) && runs == 1u, "the file lies in one run");
-    TEST_ASSERT(StandFreshHolds(&m, fid), "and reads back whole");
+    TEST_ASSERT(StandFreshPrint(vol, fid, &runs) && runs == 1u, "the file lies in one run");
+    TEST_ASSERT(StandFreshHolds(vol, &m, fid), "and reads back whole");
 out:
-    HelmDefragLetGo(&d);
+    HelmDefragLetGo(vol, &d);
     if (holding)
-        HelmLetGo(handle->ofe, &here);
-    tagfs_close(handle);
+        HelmLetGo(vol, handle->ofe, &here);
+    tagfs_close(vol, handle);
     if (fid)
-        (void)tagfs_delete_file(fid, INK_UNWARRANTED);
+        (void)tagfs_delete_file(vol, fid, INK_UNWARRANTED);
     StandFreshModelLetGo(&m);
     return verdict;
 }
@@ -139,27 +141,27 @@ static WriteJobStandAnswer s_room_answer;
  * every other block written over on fresh ground, the window the versions
  * left let go and the first block written over, settled. Its runs in *runs;
  * *fid is the caller's to give up whatever the answer. */
-static bool StandBookRoomScattered(StandFreshModel* m, const char* name, uint64_t* fid, uint64_t* runs)
+static bool StandBookRoomScattered(TagFSVolume* vol, StandFreshModel* m, const char* name, uint64_t* fid, uint64_t* runs)
 {
     const uint32_t B = TAGFS_BLOCK_SIZE;
     uint64_t       start = 0;
     uint32_t       window = 0;
-    if (tagfs_create_file(name, NULL, 0, 0, fid) != 0)
+    if (tagfs_create_file(vol, name, NULL, 0, 0, fid) != 0)
         return false;
-    if (StandFreshWrite(m, *fid, 0, STAND_BOOK_ROOM_GATHER * B, 0x31u) != (int)(STAND_BOOK_ROOM_GATHER * B) ||
-        TagFSSettle() != OK)
+    if (StandFreshWrite(vol, m, *fid, 0, STAND_BOOK_ROOM_GATHER * B, 0x31u) != (int)(STAND_BOOK_ROOM_GATHER * B) ||
+        TagFSSettle(vol) != OK)
         return false;
     for (uint32_t k = 1; k < STAND_BOOK_ROOM_GATHER; k += 2u)
-        if (StandFreshWrite(m, *fid, (uint64_t)k * B, B, 0x40u + k) != (int)B)
+        if (StandFreshWrite(vol, m, *fid, (uint64_t)k * B, B, 0x40u + k) != (int)B)
             return false;
-    TagFSLockTake(&tagfs_get_state()->lock);
-    AllotmentRelease(*fid);
-    TagFSLockDrop(&tagfs_get_state()->lock);
-    if (AllotmentHeld(*fid, &start, &window))
+    TagFSLockTake(&vol->state.lock);
+    AllotmentRelease(vol, *fid);
+    TagFSLockDrop(&vol->state.lock);
+    if (AllotmentHeld(vol, *fid, &start, &window))
         return false;
-    if (StandFreshWrite(m, *fid, 0, B, 0x40u) != (int)B || TagFSSettle() != OK)
+    if (StandFreshWrite(vol, m, *fid, 0, B, 0x40u) != (int)B || TagFSSettle(vol) != OK)
         return false;
-    return StandFreshPrint(*fid, runs) && *runs > 1u;
+    return StandFreshPrint(vol, *fid, runs) && *runs > 1u;
 }
 
 /* A defrag of the file asked as the deck asks it, with `warrant`, by a caller
@@ -176,14 +178,14 @@ static int StandBookRoomDefrag(uint64_t fid, InkWarrant warrant)
 
 /* The machine turned by hand until the job answered the stand's record — its
  * windows run at the service point here or on another core — or the bound. */
-static bool StandBookRoomAnswered(void)
+static bool StandBookRoomAnswered(TagFSVolume* vol)
 {
-    uint8_t  seat  = tagfs_get_seat();
+    uint8_t  seat  = tagfs_get_seat(vol);
     uint64_t bound = rdtsc() + cpu_ms_to_tsc(STAND_BOOK_ROOM_JOB_MS);
     while (!__atomic_load_n(&s_room_answer.answered, __ATOMIC_ACQUIRE)) {
         if (rdtsc() >= bound)
             return false;
-        StandPortTurn(seat);
+        StandPortTurn(vol, seat);
         cpu_pause();
     }
     return true;
@@ -196,17 +198,18 @@ static bool StandBookRoomAnswered(void)
  */
 static TestResult TestStandBookRoomDefragGivesTheCoreBack(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult      verdict = TEST_PASS;
     StandFreshModel m;
     WriteJobAsk     ask;
     uint64_t        fid = 0, runs = 0;
     bool            pending = false;
-    const char*     aside   = StandStepsAsideFor();
+    const char*     aside   = StandStepsAsideFor(vol);
     memset(&m, 0, sizeof(m));
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, STAND_BOOK_ROOM_GATHER * TAGFS_BLOCK_SIZE), "room for the file");
-    TEST_ASSERT(StandBookRoomScattered(&m, "book-defrag-job.bin", &fid, &runs), "a file lies in many runs");
+    TEST_ASSERT(StandBookRoomScattered(vol, &m, "book-defrag-job.bin", &fid, &runs), "a file lies in many runs");
     TestEvidence("runs the file lies in", runs);
 
     memset(&ask, 0, sizeof(ask));
@@ -217,16 +220,16 @@ static TestResult TestStandBookRoomDefragGivesTheCoreBack(void)
     int asked   = WriteJobSubmit(&ask, NULL, NULL);
     pending     = asked == ERR_WOULD_BLOCK;
     TEST_ASSERT_EQ(asked, ERR_WOULD_BLOCK, "its defrag gave its core back after its first window");
-    TEST_ASSERT(StandBookRoomAnswered(), "and is answered where the machine turns");
+    TEST_ASSERT(StandBookRoomAnswered(vol), "and is answered where the machine turns");
     pending = false;
     TEST_ASSERT_OK(s_room_answer.rc, "OK");
-    TEST_ASSERT(StandFreshPrint(fid, &runs) && runs == 1u, "the file lies in one run");
-    TEST_ASSERT(StandFreshHolds(&m, fid), "and reads back whole");
+    TEST_ASSERT(StandFreshPrint(vol, fid, &runs) && runs == 1u, "the file lies in one run");
+    TEST_ASSERT(StandFreshHolds(vol, &m, fid), "and reads back whole");
 out:
-    if (pending && !StandBookRoomAnswered())
+    if (pending && !StandBookRoomAnswered(vol))
         fid = 0;          /* the job still holds the file's Helm: the file is left to it */
     if (fid)
-        (void)tagfs_delete_file(fid, INK_UNWARRANTED);
+        (void)tagfs_delete_file(vol, fid, INK_UNWARRANTED);
     StandFreshModelLetGo(&m);
     return verdict;
 }
@@ -241,30 +244,31 @@ out:
  */
 static TestResult TestStandBookRoomKeptFileNotGathered(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult      verdict = TEST_PASS;
     StandFreshModel m;
     uint64_t        fid = 0, runs = 0, now = 0;
-    const char*     aside = StandStepsAsideFor();
+    const char*     aside = StandStepsAsideFor(vol);
     memset(&m, 0, sizeof(m));
     if (aside)
         return test_steps_aside(aside);
     TEST_ASSERT(StandFreshModelMake(&m, STAND_BOOK_ROOM_GATHER * TAGFS_BLOCK_SIZE), "room for the file");
-    TEST_ASSERT(StandBookRoomScattered(&m, "book-kept.bin", &fid, &runs), "a file lies in many runs");
-    TEST_ASSERT_OK(StandKeepInRole(fid, TAGFS_FILE_ROLE_SYSTEM), "it is kept in the system's role");
+    TEST_ASSERT(StandBookRoomScattered(vol, &m, "book-kept.bin", &fid, &runs), "a file lies in many runs");
+    TEST_ASSERT_OK(StandKeepInRole(vol, fid, TAGFS_FILE_ROLE_SYSTEM), "it is kept in the system's role");
 
     TEST_ASSERT_EQ(StandBookRoomDefrag(fid, INK_UNWARRANTED), ERR_PERMISSION_DENIED,
                    "a defrag with no warrant is refused");
     TEST_ASSERT_EQ(StandBookRoomDefrag(fid, INK_WARRANTED), ERR_PERMISSION_DENIED,
                    "and one with the warrant: its blocks are not moved");
-    TEST_ASSERT(StandFreshPrint(fid, &now) && now == runs, "the file lies in the runs it lay in");
+    TEST_ASSERT(StandFreshPrint(vol, fid, &now) && now == runs, "the file lies in the runs it lay in");
 
-    TEST_ASSERT_OK(StandKeepInRole(fid, TAGFS_FILE_ROLE_ORDINARY), "the role is let go");
+    TEST_ASSERT_OK(StandKeepInRole(vol, fid, TAGFS_FILE_ROLE_ORDINARY), "the role is let go");
     TEST_ASSERT_OK(StandBookRoomDefrag(fid, INK_UNWARRANTED), "and the same defrag is taken");
-    TEST_ASSERT(StandFreshPrint(fid, &now) && now == 1u, "the file lies in one run");
-    TEST_ASSERT(StandFreshHolds(&m, fid), "and reads back whole");
+    TEST_ASSERT(StandFreshPrint(vol, fid, &now) && now == 1u, "the file lies in one run");
+    TEST_ASSERT(StandFreshHolds(vol, &m, fid), "and reads back whole");
 out:
     if (fid)
-        (void)tagfs_delete_file(fid, INK_WARRANTED);
+        (void)tagfs_delete_file(vol, fid, INK_WARRANTED);
     StandFreshModelLetGo(&m);
     return verdict;
 }
@@ -284,6 +288,7 @@ out:
 
 static TestResult TestStandBookRoomStakesCounted(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     static StandBinder b;
     static HelmWaiter  helm;
@@ -293,50 +298,50 @@ static TestResult TestStandBookRoomStakesCounted(void)
     InkReceipt         inked;
     uint64_t           fid = 0, at = 0, done = 0, staked = 0, after = 0;
     bool               holding = false, loaded = false;
-    const char*        aside   = StandBinderAside(&b);
+    const char*        aside   = StandBinderAside(vol, &b);
 
     if (aside)
         return test_steps_aside(aside);
     memset(g_test_buffer, 0x5A, src.bytes);
-    TEST_ASSERT(StandMakeFile("book-room-staked.bin", g_test_buffer, TAGFS_BLOCK_SIZE, &fid),
+    TEST_ASSERT(StandMakeFile(vol, "book-room-staked.bin", g_test_buffer, TAGFS_BLOCK_SIZE, &fid),
                 "a file of one block is made");
-    TEST_ASSERT_OK(StandBinderTallies(1), "and a Tally takes it in, the lag's stitches settled past it");
-    handle = tagfs_open(fid, TAGFS_HANDLE_WRITE | TAGFS_HANDLE_APPEND);
+    TEST_ASSERT_OK(StandBinderTallies(vol, 1), "and a Tally takes it in, the lag's stitches settled past it");
+    handle = tagfs_open(vol, fid, TAGFS_HANDLE_WRITE | TAGFS_HANDLE_APPEND);
     TEST_ASSERT(handle, "the writer's handle opens");
     memset(&helm, 0, sizeof(helm));
-    TEST_ASSERT(HelmAsk(handle->ofe, &helm), "and it holds the file's Helm");
+    TEST_ASSERT(HelmAsk(vol, handle->ofe, &helm), "and it holds the file's Helm");
     holding = true;
-    TEST_ASSERT_OK(PlotLoad(&plot, fid, INK_UNWARRANTED), "the write loads the record");
+    TEST_ASSERT_OK(PlotLoad(vol, &plot, fid, INK_UNWARRANTED), "the write loads the record");
     loaded    = true;
     plot.helm = &handle->ofe->helm;
-    TEST_ASSERT_OK(PlotBeginWrite(&plot, plot.size, false, src.bytes, &at), "and takes the ground it grows by");
-    staked = TallyCostBlocks();
-    TEST_ASSERT_OK(PlotWriteBlocks(&plot, at, &src, &done), "its blocks land");
-    TEST_ASSERT_OK(PlotEndWrite(&plot, at, done), "the write is made ready to be the file's");
-    TEST_ASSERT_OK(TagFSInkPlot(&plot, &inked), "and inked");
-    after = TallyCostBlocks();
+    TEST_ASSERT_OK(PlotBeginWrite(vol, &plot, plot.size, false, src.bytes, &at), "and takes the ground it grows by");
+    staked = TallyCostBlocks(vol);
+    TEST_ASSERT_OK(PlotWriteBlocks(vol, &plot, at, &src, &done), "its blocks land");
+    TEST_ASSERT_OK(PlotEndWrite(vol, &plot, at, done), "the write is made ready to be the file's");
+    TEST_ASSERT_OK(TagFSInkPlot(vol, &plot, &inked), "and inked");
+    after = TallyCostBlocks(vol);
     TestEvidence("blocks of the next Tally measured while the write's ground was staked", staked);
     TestEvidence("... and once it was inked", after);
     TEST_ASSERT(staked >= after, "the measure taken while the write's ground was staked holds what its Ink added");
 out:
     if (loaded)
-        PlotRelease(&plot);
+        PlotRelease(vol, &plot);
     if (holding)
-        HelmLetGo(handle->ofe, &helm);
-    tagfs_close(handle);
+        HelmLetGo(vol, handle->ofe, &helm);
+    tagfs_close(vol, handle);
     if (fid)
-        (void)tagfs_delete_file(fid, INK_UNWARRANTED);
+        (void)tagfs_delete_file(vol, fid, INK_UNWARRANTED);
     STAND_BINDER_PUT_BACK(&b);
     return verdict;
 }
 
 /* The slot the next Tally is written over: the one of the least seq — every
  * one holds, the ring filled (binder_slots.c, BinderSlotNext). */
-static uint32_t StandBookRoomLeast(void)
+static uint32_t StandBookRoomLeast(TagFSVolume* vol)
 {
     uint32_t least = 0;
-    for (uint32_t i = 1; i < g_binder.ring; i++)
-        if (g_binder.slot[i].seq < g_binder.slot[least].seq)
+    for (uint32_t i = 1; i < vol->binder.ring; i++)
+        if (vol->binder.slot[i].seq < vol->binder.slot[least].seq)
             least = i;
     return least;
 }
@@ -353,36 +358,37 @@ static uint32_t StandBookRoomLeast(void)
  */
 static TestResult TestStandBookRoomOwnWhole(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     static StandBinder b;
     uint64_t           q = 0, was = 0, fallow = 0, rests = 0, held = 0;
     uint32_t           r = 0;
-    const char*        aside = StandBinderAside(&b);
+    const char*        aside = StandBinderAside(vol, &b);
 
     if (aside)
         return test_steps_aside(aside);
-    q = RibbonCursorNow()->quire_blocks;
+    q = RibbonCursorNow(vol)->quire_blocks;
     TEST_ASSERT(q > 0, "the ribbon stands in a Quire");
-    TEST_ASSERT_OK(StandBinderTallies(g_binder.ring + 1u), "the ring is filled, a Tally over every slot");
-    for (uint32_t i = 0; i < g_binder.ring; i++)
-        TEST_ASSERT_EQ(__atomic_load_n(&g_binder.own[i], __ATOMIC_ACQUIRE) % q, 0,
+    TEST_ASSERT_OK(StandBinderTallies(vol, vol->binder.ring + 1u), "the ring is filled, a Tally over every slot");
+    for (uint32_t i = 0; i < vol->binder.ring; i++)
+        TEST_ASSERT_EQ(__atomic_load_n(&vol->binder.own[i], __ATOMIC_ACQUIRE) % q, 0,
                        "each slot's own ground is counted in whole Quires, as a Tally over it gives it back");
-    r      = StandBookRoomLeast();
-    was    = __atomic_load_n(&g_binder.own[r], __ATOMIC_ACQUIRE);
-    fallow = FallowBlocks();
-    TEST_ASSERT_OK(BinderRunWhole(), "a Tally is written over the slot of the least seq");
-    rests = FallowBlocks() > fallow ? FallowBlocks() - fallow : 0;
-    held  = __atomic_load_n(&g_binder.own[r], __ATOMIC_ACQUIRE);
-    TEST_ASSERT(FallowBlocks() >= fallow, "the DONE gave nothing back before its lag");
+    r      = StandBookRoomLeast(vol);
+    was    = __atomic_load_n(&vol->binder.own[r], __ATOMIC_ACQUIRE);
+    fallow = FallowBlocks(vol);
+    TEST_ASSERT_OK(BinderRunWhole(vol), "a Tally is written over the slot of the least seq");
+    rests = FallowBlocks(vol) > fallow ? FallowBlocks(vol) - fallow : 0;
+    held  = __atomic_load_n(&vol->binder.own[r], __ATOMIC_ACQUIRE);
+    TEST_ASSERT(FallowBlocks(vol) >= fallow, "the DONE gave nothing back before its lag");
     TestEvidence("blocks the slot counted its own", was);
     TestEvidence("blocks its Tally let go to Fallow", rests);
     TEST_ASSERT(rests >= was, "what the slot counted its own went back whole");
     TEST_ASSERT(held >= was, "and while it rests in Fallow the slot counts it its own still: the reserve rises no "
                              "sooner than the free");
-    for (uint64_t l = 0; l <= FallowLag(); l++)
-        TEST_ASSERT_OK(TagFSSettle(), "the lag's stitches settle");
-    TEST_ASSERT(FallowBlocks() <= fallow, "and Fallow gives it back");
-    TEST_ASSERT(rests == 0 || __atomic_load_n(&g_binder.own[r], __ATOMIC_ACQUIRE) < held,
+    for (uint64_t l = 0; l <= FallowLag(vol); l++)
+        TEST_ASSERT_OK(TagFSSettle(vol), "the lag's stitches settle");
+    TEST_ASSERT(FallowBlocks(vol) <= fallow, "and Fallow gives it back");
+    TEST_ASSERT(rests == 0 || __atomic_load_n(&vol->binder.own[r], __ATOMIC_ACQUIRE) < held,
                 "and the slot's count goes with it");
 out:
     STAND_BINDER_PUT_BACK(&b);
@@ -409,81 +415,82 @@ out:
 /* The volume mounted afresh — no Tally under way, every turn of the ring a
  * wait of the mounting before spent let go — and the lag's stitches settled
  * past it, what the mount found the ribbon let go given back. */
-static bool StandBookRoomQuiet(void)
+static bool StandBookRoomQuiet(TagFSVolume* vol)
 {
-    if (!StandStitchRemount())
+    if (!StandStitchRemount(vol))
         return false;
-    for (uint64_t l = 0; l <= FallowLag() + 1u; l++)
-        if (TagFSSettle() != OK)
+    for (uint64_t l = 0; l <= FallowLag(vol) + 1u; l++)
+        if (TagFSSettle(vol) != OK)
             return false;
     return true;
 }
 
 /* Every free block past the book's fresh reserve promised: how many more. */
-static uint64_t StandBookRoomPromiseAll(uint32_t epoch)
+static uint64_t StandBookRoomPromiseAll(TagFSVolume* vol, uint32_t epoch)
 {
-    uint64_t n = 0, keep = EndpaperDataKeeps(true);
-    while (AllotmentPromise(keep, epoch))
+    uint64_t n = 0, keep = EndpaperDataKeeps(vol, true);
+    while (AllotmentPromise(vol, keep, epoch))
         n++;
     return n;
 }
 
 static TestResult TestStandBookRoomTallyGivesRoom(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     static StandBinder b;
     StandFreshModel    m;
     uint64_t           fid = 0, promised = 0, start = 0, before = 0, q = 0;
     uint32_t           got = 0, epoch = 0, rounds = 0, bytes = 0;
     error_t            rc    = OK;
-    const char*        aside = StandBinderAside(&b);
+    const char*        aside = StandBinderAside(vol, &b);
 
     memset(&m, 0, sizeof(m));
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(StandBookRoomQuiet(), "the volume mounted afresh, the lag's stitches settled past it");
-    q     = RibbonCursorNow()->quire_blocks;
-    epoch = tagfs_mount_epoch();
+    TEST_ASSERT(StandBookRoomQuiet(vol), "the volume mounted afresh, the lag's stitches settled past it");
+    q     = RibbonCursorNow(vol)->quire_blocks;
+    epoch = tagfs_mount_epoch(vol);
     bytes = (uint32_t)(2u * q * TAGFS_BLOCK_SIZE);
     TEST_ASSERT(StandFreshModelMake(&m, bytes), "room for the file");
-    TEST_ASSERT_EQ(tagfs_create_file("book-room-t.bin", NULL, 0, 0, &fid), 0, "a file is made");
-    TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, bytes, 0xA5u), (int)bytes, "two Quires of it written");
-    TEST_ASSERT_OK(TagFSSettle(), "and settled past the newest Tally");
-    before   = TallyCostBlocks();
-    promised = StandBookRoomPromiseAll(epoch);
-    rc       = AllotmentTakeBook(fid, 1u, 1u, 0, false, EndpaperDataKeeps(false), false, &start, &got);
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "book-room-t.bin", NULL, 0, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(StandFreshWrite(vol, &m, fid, 0, bytes, 0xA5u), (int)bytes, "two Quires of it written");
+    TEST_ASSERT_OK(TagFSSettle(vol), "and settled past the newest Tally");
+    before   = TallyCostBlocks(vol);
+    promised = StandBookRoomPromiseAll(vol, epoch);
+    rc       = AllotmentTakeBook(vol, fid, 1u, 1u, 0, false, EndpaperDataKeeps(vol, false), false, &start, &got);
     TEST_ASSERT_EQ(rc, ERR_WOULD_BLOCK, "a block of the file's data, every other free one promised: the take waits on "
                                         "the Tally that measures the file to the block");
     /* The ribbon on its Quire's last sector waits a stitch for the Tally to be
      * begun, and a cycle that closes a Quire early may rest a Quire in
      * Fallow: as many waits as those take, each its own event. */
     for (rounds = 0; rc == ERR_WOULD_BLOCK && rounds < STAND_BOOK_ROOM_ROUNDS; rounds++) {
-        TEST_ASSERT_OK(SettleForRoom(), "its wait for room ends");
-        if (TallyCostBlocks() < before)
+        TEST_ASSERT_OK(SettleForRoom(vol), "its wait for room ends");
+        if (TallyCostBlocks(vol) < before)
             break;
-        promised += StandBookRoomPromiseAll(epoch);
-        rc = AllotmentTakeBook(fid, 1u, 1u, 0, false, EndpaperDataKeeps(false), false, &start, &got);
+        promised += StandBookRoomPromiseAll(vol, epoch);
+        rc = AllotmentTakeBook(vol, fid, 1u, 1u, 0, false, EndpaperDataKeeps(vol, false), false, &start, &got);
     }
-    TEST_ASSERT(TallyCostBlocks() < before, "its wait for room writes that Tally, and the next Tally is measured "
+    TEST_ASSERT(TallyCostBlocks(vol) < before, "its wait for room writes that Tally, and the next Tally is measured "
                                             "less than the file past the last was");
     for (rounds = 0; rounds < STAND_BOOK_ROOM_ROUNDS; rounds++) {
-        promised += StandBookRoomPromiseAll(epoch);
-        rc = AllotmentTakeBook(fid, 1u, 1u, 0, false, EndpaperDataKeeps(false), false, &start, &got);
+        promised += StandBookRoomPromiseAll(vol, epoch);
+        rc = AllotmentTakeBook(vol, fid, 1u, 1u, 0, false, EndpaperDataKeeps(vol, false), false, &start, &got);
         if (rc != ERR_WOULD_BLOCK && rc != OK)
             break;
         if (rc == OK)
-            (void)BlockMapDerivedGive(fid, start, got);
+            (void)BlockMapDerivedGive(vol, fid, start, got);
         else
-            TEST_ASSERT_OK(SettleForRoom(), "each wait for room ends");
+            TEST_ASSERT_OK(SettleForRoom(vol), "each wait for room ends");
     }
     TestEvidence("rounds a take short of room waited", rounds);
     TEST_ASSERT_EQ(rc, ERR_TAGFS_NO_SPACE, "nothing let come back to data, the take is refused no-space once the "
                                            "ring has turned — never waits for ever");
 out:
     for (; promised > 0; promised--)
-        AllotmentPromiseLetGo(epoch);
+        AllotmentPromiseLetGo(vol, epoch);
     if (fid)
-        (void)tagfs_delete_file(fid, INK_UNWARRANTED);
+        (void)tagfs_delete_file(vol, fid, INK_UNWARRANTED);
     StandFreshModelLetGo(&m);
     STAND_BINDER_PUT_BACK(&b);
     return verdict;
@@ -491,12 +498,12 @@ out:
 
 /* A Tally begun by a step of the test's own, and under way: the ribbon on
  * its Quire's last sector lets none begin until a stitch more. */
-static bool StandBookRoomBegun(void)
+static bool StandBookRoomBegun(TagFSVolume* vol)
 {
     for (uint32_t i = 0; i < 3u; i++) {
-        if (BinderTurn() && BinderHoldsGround())
+        if (BinderTurn(vol) && BinderHoldsGround(vol))
             return true;
-        if (TagFSSettle() != OK)
+        if (TagFSSettle(vol) != OK)
             return false;
     }
     return false;
@@ -522,67 +529,68 @@ static bool StandBookRoomBegun(void)
  * run on into a Quire it had not entered: within a turn of the ring every slot
  * stands in a Quire of its own, and the one written over lets its Quire go.
  */
-static bool StandBookRoomQuireOn(uint64_t k)
+static bool StandBookRoomQuireOn(TagFSVolume* vol, uint64_t k)
 {
     RibbonCursor c;
     bool         kept = false;
-    RibbonCursorStand(&c);
+    RibbonCursorStand(vol, &c);
     uint64_t was = c.quire.block, half = c.quire_blocks * TAGFS_BLOCK_SECTORS / 2u;
     for (uint32_t i = 0; i < 3u && c.quire.block == was; i++) {
-        if (StandStitchSayFilling(half, (char)('a' + (k + i) % 26u), k + i, &kept) != OK)
+        if (StandStitchSayFilling(vol, half, (char)('a' + (k + i) % 26u), k + i, &kept) != OK)
             return false;
-        RibbonCursorStand(&c);
+        RibbonCursorStand(vol, &c);
     }
     return c.quire.block != was;
 }
 
 static TestResult TestStandBookRoomRestUnderTally(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     static StandBinder b;
     uint64_t           rested = 0, fallow = 0, held = 0;
     uint32_t           r = 0;
     bool               under = false;
     error_t            rc = OK;
-    const char*        aside = StandBinderAside(&b);
+    const char*        aside = StandBinderAside(vol, &b);
 
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT_OK(TagFSSettle(), "a stitch of this mount settles: a Tally may begin");
-    for (uint32_t t = 0; t <= g_binder.ring && rested <= fallow; t++) {
+    TEST_ASSERT_OK(TagFSSettle(vol), "a stitch of this mount settles: a Tally may begin");
+    for (uint32_t t = 0; t <= vol->binder.ring && rested <= fallow; t++) {
         bool holds;
-        TEST_ASSERT(StandBookRoomQuireOn(400u + 4u * t), "the ribbon is run on into a Quire it had not entered");
-        r      = BinderSlotNext();
-        holds  = g_binder.slot[r].holds;
-        fallow = FallowBlocks();
-        if ((rc = BinderRunWhole()) == ERR_BUSY && TagFSSettle() == OK) {
-            fallow = FallowBlocks();    /* the cycle a Tally waited on may have given ground back */
-            rc     = BinderRunWhole();
+        TEST_ASSERT(StandBookRoomQuireOn(vol, 400u + 4u * t), "the ribbon is run on into a Quire it had not entered");
+        r      = BinderSlotNext(vol);
+        holds  = vol->binder.slot[r].holds;
+        fallow = FallowBlocks(vol);
+        if ((rc = BinderRunWhole(vol)) == ERR_BUSY && TagFSSettle(vol) == OK) {
+            fallow = FallowBlocks(vol);    /* the cycle a Tally waited on may have given ground back */
+            rc     = BinderRunWhole(vol);
         }
         TEST_ASSERT_OK(rc, "a Tally is written over the slot the ring writes next");
-        rested = holds ? FallowBlocks() : fallow;
+        rested = holds ? FallowBlocks(vol) : fallow;
     }
     TEST_ASSERT(rested > fallow, "within a turn of the ring a Tally's DONE lets the Quire of the ribbon only the "
                                  "slot it wrote over named go to Fallow");
-    held = __atomic_load_n(&g_binder.own[r], __ATOMIC_ACQUIRE);
+    held = __atomic_load_n(&vol->binder.own[r], __ATOMIC_ACQUIRE);
     TestEvidence("blocks its Tally let go to Fallow", rested - fallow);
-    TEST_ASSERT(StandBookRoomBegun(), "the next Tally is begun at once, and is under way");
+    TEST_ASSERT(StandBookRoomBegun(vol), "the next Tally is begun at once, and is under way");
     under = true;
-    for (uint64_t l = 0; l <= FallowLag() + 1u; l++) {
-        TEST_ASSERT_OK(TagFSSettle(), "a stitch of the lag settles while it is under way");
-        TEST_ASSERT(FallowBlocks() >= rested, "and Fallow gives nothing back while a Tally is under way");
-        TEST_ASSERT(__atomic_load_n(&g_binder.own[r], __ATOMIC_ACQUIRE) >= held,
+    for (uint64_t l = 0; l <= FallowLag(vol) + 1u; l++) {
+        TEST_ASSERT_OK(TagFSSettle(vol), "a stitch of the lag settles while it is under way");
+        TEST_ASSERT(FallowBlocks(vol) >= rested, "and Fallow gives nothing back while a Tally is under way");
+        TEST_ASSERT(__atomic_load_n(&vol->binder.own[r], __ATOMIC_ACQUIRE) >= held,
                     "so the slot counts what it let go its own still: the reserve rises no sooner than the free");
     }
-    TEST_ASSERT_OK(BinderRunWhole(), "the Tally under way ends");
+    TEST_ASSERT_OK(BinderRunWhole(vol), "the Tally under way ends");
     under = false;
-    for (uint64_t l = 0; l <= FallowLag() + 1u; l++)
-        TEST_ASSERT_OK(TagFSSettle(), "the lag's stitches settle past it");
-    TEST_ASSERT(FallowBlocks() < rested, "and Fallow gives the ground back");
-    TEST_ASSERT(__atomic_load_n(&g_binder.own[r], __ATOMIC_ACQUIRE) < held, "and the slot's count goes with it");
+    for (uint64_t l = 0; l <= FallowLag(vol) + 1u; l++)
+        TEST_ASSERT_OK(TagFSSettle(vol), "the lag's stitches settle past it");
+    TEST_ASSERT(FallowBlocks(vol) < rested, "and Fallow gives the ground back");
+    TEST_ASSERT(__atomic_load_n(&vol->binder.own[r], __ATOMIC_ACQUIRE) < held, "and the slot's count goes with it");
 out:
     if (under)
-        (void)BinderRunWhole();
+        (void)BinderRunWhole(vol);
     STAND_BINDER_PUT_BACK(&b);
     return verdict;
 }
@@ -603,6 +611,7 @@ out:
  */
 static TestResult TestStandBookRoomWaitBounded(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     static StandBinder b;
     StandFreshModel    m;
@@ -610,34 +619,34 @@ static TestResult TestStandBookRoomWaitBounded(void)
     uint32_t           got = 0, epoch = 0, rounds = 0, waited = 0, rested = 0, bytes = 0;
     error_t            rc     = OK;
     bool               under  = false, fallow = false;
-    const char*        aside  = StandBinderAside(&b);
+    const char*        aside  = StandBinderAside(vol, &b);
 
     memset(&m, 0, sizeof(m));
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(StandBookRoomQuiet(), "the volume mounted afresh, the lag's stitches settled past it");
-    q     = RibbonCursorNow()->quire_blocks;
-    epoch = tagfs_mount_epoch();
+    TEST_ASSERT(StandBookRoomQuiet(vol), "the volume mounted afresh, the lag's stitches settled past it");
+    q     = RibbonCursorNow(vol)->quire_blocks;
+    epoch = tagfs_mount_epoch(vol);
     bytes = (uint32_t)(q * TAGFS_BLOCK_SIZE);
     TEST_ASSERT(StandFreshModelMake(&m, bytes), "room for the file");
-    TEST_ASSERT_EQ(tagfs_create_file("book-room-w.bin", NULL, 0, 0, &fid), 0, "a file is made");
-    TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, bytes, 0x5Au), (int)bytes, "a Quire of it written");
-    TEST_ASSERT_OK(TagFSSettle(), "and settled");
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "book-room-w.bin", NULL, 0, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(StandFreshWrite(vol, &m, fid, 0, bytes, 0x5Au), (int)bytes, "a Quire of it written");
+    TEST_ASSERT_OK(TagFSSettle(vol), "and settled");
     for (rounds = 0; rounds < STAND_BOOK_ROOM_ROUNDS; rounds++) {
-        for (uint64_t l = 0; l <= FallowLag() + 1u; l++)
-            TEST_ASSERT_OK(TagFSSettle(), "the lag's stitches settle, what the last Tally let go given back");
-        promised += StandBookRoomPromiseAll(epoch);
-        TEST_ASSERT(StandBookRoomBegun(), "a Tally is begun before the ask, and is under way");
+        for (uint64_t l = 0; l <= FallowLag(vol) + 1u; l++)
+            TEST_ASSERT_OK(TagFSSettle(vol), "the lag's stitches settle, what the last Tally let go given back");
+        promised += StandBookRoomPromiseAll(vol, epoch);
+        TEST_ASSERT(StandBookRoomBegun(vol), "a Tally is begun before the ask, and is under way");
         under  = true;
-        fallow = FallowBlocks() > 0;
-        rc     = AllotmentTakeBook(fid, 1u, 1u, 0, false, EndpaperDataKeeps(false), false, &start, &got);
+        fallow = FallowBlocks(vol) > 0;
+        rc     = AllotmentTakeBook(vol, fid, 1u, 1u, 0, false, EndpaperDataKeeps(vol, false), false, &start, &got);
         if (rc == OK)
-            (void)BlockMapDerivedGive(fid, start, got);
+            (void)BlockMapDerivedGive(vol, fid, start, got);
         if (rc != ERR_WOULD_BLOCK && rc != OK)
             break;
         waited += rc == ERR_WOULD_BLOCK && !fallow ? 1u : 0u;
         rested += rc == ERR_WOULD_BLOCK && fallow ? 1u : 0u;
-        TEST_ASSERT_OK(BinderRunWhole(), "the Tally under way ends");
+        TEST_ASSERT_OK(BinderRunWhole(vol), "the Tally under way ends");
         under = false;
     }
     TestEvidence("asks a take short of room waited on a Tally under way", waited);
@@ -645,14 +654,14 @@ static TestResult TestStandBookRoomWaitBounded(void)
     TEST_ASSERT(waited > 0, "a block of data, every other free one promised: the take waits on the Tally under way");
     TEST_ASSERT_EQ(rc, ERR_TAGFS_NO_SPACE, "and is refused no-space once the ring has turned, a Tally under way at "
                                            "every ask — never held for as long as Tallies are begun");
-    TEST_ASSERT(waited <= g_binder.ring, "a turn of the ring at the most");
+    TEST_ASSERT(waited <= vol->binder.ring, "a turn of the ring at the most");
 out:
     if (under)
-        (void)BinderRunWhole();
+        (void)BinderRunWhole(vol);
     for (; promised > 0; promised--)
-        AllotmentPromiseLetGo(epoch);
+        AllotmentPromiseLetGo(vol, epoch);
     if (fid)
-        (void)tagfs_delete_file(fid, INK_UNWARRANTED);
+        (void)tagfs_delete_file(vol, fid, INK_UNWARRANTED);
     StandFreshModelLetGo(&m);
     STAND_BINDER_PUT_BACK(&b);
     return verdict;
@@ -660,21 +669,21 @@ out:
 
 /* A file of a block made, settled and given up past the newest Tally: its
  * ground rests until the ribbon leaves the Quire its Quitclaim lies in. */
-static TestResult StandBookRoomGivenUp(StandFreshModel* m, const char* name)
+static TestResult StandBookRoomGivenUp(TagFSVolume* vol, StandFreshModel* m, const char* name)
 {
     TestResult verdict = TEST_PASS;
     uint64_t   fid     = 0;
     TEST_ASSERT(StandFreshModelMake(m, TAGFS_BLOCK_SIZE), "room for the file");
-    TEST_ASSERT_EQ(tagfs_create_file(name, NULL, 0, 0, &fid), 0, "a file is made");
-    TEST_ASSERT_EQ(StandFreshWrite(m, fid, 0, TAGFS_BLOCK_SIZE, 0x3Cu), (int)TAGFS_BLOCK_SIZE,
+    TEST_ASSERT_EQ(tagfs_create_file(vol, name, NULL, 0, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(StandFreshWrite(vol, m, fid, 0, TAGFS_BLOCK_SIZE, 0x3Cu), (int)TAGFS_BLOCK_SIZE,
                    "a block of it written");
-    TEST_ASSERT_OK(TagFSSettle(), "and settled");
-    TEST_ASSERT_EQ(tagfs_delete_file(fid, INK_UNWARRANTED), 0, "it is given up");
+    TEST_ASSERT_OK(TagFSSettle(vol), "and settled");
+    TEST_ASSERT_EQ(tagfs_delete_file(vol, fid, INK_UNWARRANTED), 0, "it is given up");
     fid = 0;
-    TEST_ASSERT_OK(TagFSSettle(), "its Quitclaim settles past the newest Tally");
+    TEST_ASSERT_OK(TagFSSettle(vol), "its Quitclaim settles past the newest Tally");
 out:
     if (fid)
-        (void)tagfs_delete_file(fid, INK_UNWARRANTED);
+        (void)tagfs_delete_file(vol, fid, INK_UNWARRANTED);
     return verdict;
 }
 
@@ -695,6 +704,7 @@ out:
  */
 static TestResult TestStandBookRoomBarWaitsTally(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     static StandBinder b;
     StandFreshModel    m;
@@ -703,39 +713,39 @@ static TestResult TestStandBookRoomBarWaitsTally(void)
     uint32_t           waits = 0;
     bool               armed = false;
     int                rc    = 0;
-    const char*        aside = StandBinderAside(&b);
+    const char*        aside = StandBinderAside(vol, &b);
 
     memset(&m, 0, sizeof(m));
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(StandBookRoomQuiet(), "the volume mounted afresh, the lag's stitches settled past it");
-    TEST_ASSERT(StandBookRoomGivenUp(&m, "book-room-x.bin") == TEST_PASS, "a file is given up");
-    FallowStandBar(RibbonCursorNow()->last);
+    TEST_ASSERT(StandBookRoomQuiet(vol), "the volume mounted afresh, the lag's stitches settled past it");
+    TEST_ASSERT(StandBookRoomGivenUp(vol, &m, "book-room-x.bin") == TEST_PASS, "a file is given up");
+    FallowStandBar(RibbonCursorNow(vol)->last);
     armed = true;
-    TEST_ASSERT_OK(SettleForRoom(), "room is asked for, closing the Quire early");
-    RibbonCursorStand(&c);
+    TEST_ASSERT_OK(SettleForRoom(vol), "room is asked for, closing the Quire early");
+    RibbonCursorStand(vol, &c);
     TEST_ASSERT(!c.next.blocks && c.taken == ERR_WOULD_BLOCK,
                 "the ribbon stands in its next_quire with none past it: every free Quire lies on ground kept from it");
-    tallies = g_binder.tallies;
+    tallies = vol->binder.tallies;
     last    = c.last;
-    rc      = tagfs_create_file("book-room-y.bin", NULL, 0, 0, &made);
+    rc      = tagfs_create_file(vol, "book-room-y.bin", NULL, 0, 0, &made);
     TEST_ASSERT_EQ(rc, -(int)ERR_WOULD_BLOCK, "a file asked for waits for room on the ribbon");
-    for (waits = 0; rc == -(int)ERR_WOULD_BLOCK && waits < g_binder.ring; waits++) {
-        TEST_ASSERT_OK(SettleForRoom(), "its wait for room ends");
-        rc = tagfs_create_file("book-room-y.bin", NULL, 0, 0, &made);
+    for (waits = 0; rc == -(int)ERR_WOULD_BLOCK && waits < vol->binder.ring; waits++) {
+        TEST_ASSERT_OK(SettleForRoom(vol), "its wait for room ends");
+        rc = tagfs_create_file(vol, "book-room-y.bin", NULL, 0, 0, &made);
     }
     TestEvidence("waits for room the file asked for took", waits);
-    TEST_ASSERT(g_binder.tallies > tallies, "its wait for room writes the Tally past the delete");
+    TEST_ASSERT(vol->binder.tallies > tallies, "its wait for room writes the Tally past the delete");
     TEST_ASSERT_EQ(rc, 0, "and the file asked for again is made: the bar lifted, the ribbon names a next_quire");
-    RibbonCursorStand(&c);
+    RibbonCursorStand(vol, &c);
     TestEvidence("stitches the waits laid", c.last - last);
-    TEST_ASSERT(c.last - last <= (uint64_t)waits * (FallowLag() + 2u),
+    TEST_ASSERT(c.last - last <= (uint64_t)waits * (FallowLag(vol) + 2u),
                 "each wait laid no more stitches than the lag's — never the Quire's rest a cycle at a time");
 out:
     if (armed)
         FallowStandBar(0);
     if (made && rc == 0)
-        (void)tagfs_delete_file(made, INK_UNWARRANTED);
+        (void)tagfs_delete_file(vol, made, INK_UNWARRANTED);
     StandFreshModelLetGo(&m);
     STAND_BINDER_PUT_BACK(&b);
     return verdict;
@@ -747,25 +757,25 @@ out:
  * hold, no stitch in flight, so no cycle makes room on it (ribbon.c,
  * RibbonRoomFor) and a change short of room is refused at once but for a
  * Tally. */
-static TestResult StandBookRoomRibbonShut(uint32_t epoch, uint64_t* promised)
+static TestResult StandBookRoomRibbonShut(TagFSVolume* vol, uint32_t epoch, uint64_t* promised)
 {
     TestResult   verdict = TEST_PASS;
     RibbonCursor c;
-    uint64_t     q = RibbonCursorNow()->quire_blocks, left = 0, claimed = 0, reserved = 0;
+    uint64_t     q = RibbonCursorNow(vol)->quire_blocks, left = 0, claimed = 0, reserved = 0;
     bool         kept = false;
-    while (AllotmentPromise(EndpaperKeeps(q), epoch))
+    while (AllotmentPromise(vol, EndpaperKeeps(vol, q), epoch))
         (*promised)++;
-    RibbonCursorStand(&c);
+    RibbonCursorStand(vol, &c);
     left = c.quire.blocks * TAGFS_BLOCK_SECTORS - c.off;
     TEST_ASSERT(left > 2u * c.atom && c.next.blocks, "the ribbon has more than two atoms of its Quire, and a next");
-    TEST_ASSERT_OK(StandStitchSayFilling(left - 2u * c.atom, 'u', 80, &kept), "a word leaves two atoms of it");
-    TEST_ASSERT_OK(StandStitchSayFilling(4u * c.atom, 'v', 81, &kept),
+    TEST_ASSERT_OK(StandStitchSayFilling(vol, left - 2u * c.atom, 'u', 80, &kept), "a word leaves two atoms of it");
+    TEST_ASSERT_OK(StandStitchSayFilling(vol, 4u * c.atom, 'v', 81, &kept),
                    "a word four atoms long runs on into the next_quire and settles");
-    RibbonCursorStand(&c);
-    RibbonClaimsStand(&claimed, &reserved);
+    RibbonCursorStand(vol, &c);
+    RibbonClaimsStand(vol, &claimed, &reserved);
     TEST_ASSERT(!c.next.blocks && c.taken == ERR_TAGFS_NO_SPACE,
                 "every free block past the Tallies' reserve promised: no next_quire past it, refused past the reserve");
-    TEST_ASSERT(FallowLeftBlocks() == 0 && claimed == 0 && reserved == 0,
+    TEST_ASSERT(FallowLeftBlocks(vol) == 0 && claimed == 0 && reserved == 0,
                 "nothing rests in a Quire the ribbon left and no room is claimed or held: no cycle makes room");
 out:
     return verdict;
@@ -784,41 +794,42 @@ out:
  */
 static TestResult TestStandBookRoomRibbonWaitsUnderWay(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     static StandBinder b;
     uint64_t           made = 0, promised = 0;
     uint32_t           epoch = 0;
     bool               under = false;
     int                rc    = 0;
-    const char*        aside = StandBinderAside(&b);
+    const char*        aside = StandBinderAside(vol, &b);
 
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(StandBookRoomQuiet(), "the volume mounted afresh, the lag's stitches settled past it");
-    TEST_ASSERT(StandBookRoomBegun(), "a Tally is begun, and is under way");
+    TEST_ASSERT(StandBookRoomQuiet(vol), "the volume mounted afresh, the lag's stitches settled past it");
+    TEST_ASSERT(StandBookRoomBegun(vol), "a Tally is begun, and is under way");
     under = true;
-    epoch = tagfs_mount_epoch();
-    TEST_ASSERT(StandBookRoomRibbonShut(epoch, &promised) == TEST_PASS, "the ribbon is shut past the reserve");
-    rc = tagfs_create_file("book-room-v.bin", NULL, 0, 0, &made);
+    epoch = tagfs_mount_epoch(vol);
+    TEST_ASSERT(StandBookRoomRibbonShut(vol, epoch, &promised) == TEST_PASS, "the ribbon is shut past the reserve");
+    rc = tagfs_create_file(vol, "book-room-v.bin", NULL, 0, 0, &made);
     TEST_ASSERT_EQ(rc, -(int)ERR_WOULD_BLOCK, "a file asked for waits on the Tally under way, not refused at once");
-    TEST_ASSERT_OK(SettleForRoom(), "its wait for room ends");
-    under = BinderHoldsGround();
+    TEST_ASSERT_OK(SettleForRoom(vol), "its wait for room ends");
+    under = BinderHoldsGround(vol);
     TEST_ASSERT(!under, "and ends the Tally under way");
-    for (uint32_t waits = 0; rc == -(int)ERR_WOULD_BLOCK && waits <= g_binder.ring; waits++) {
-        rc = tagfs_create_file("book-room-v.bin", NULL, 0, 0, &made);
+    for (uint32_t waits = 0; rc == -(int)ERR_WOULD_BLOCK && waits <= vol->binder.ring; waits++) {
+        rc = tagfs_create_file(vol, "book-room-v.bin", NULL, 0, 0, &made);
         if (rc == -(int)ERR_WOULD_BLOCK)
-            TEST_ASSERT_OK(SettleForRoom(), "each wait for room ends");
+            TEST_ASSERT_OK(SettleForRoom(vol), "each wait for room ends");
     }
     TEST_ASSERT(rc == 0 || rc == -(int)ERR_TAGFS_NO_SPACE,
                 "with no Tally under way the file is answered: made with what the Tally gave back, or refused "
                 "no-space — never waiting for ever");
 out:
     if (under)
-        (void)BinderRunWhole();
+        (void)BinderRunWhole(vol);
     for (; promised > 0; promised--)
-        AllotmentPromiseLetGo(epoch);
+        AllotmentPromiseLetGo(vol, epoch);
     if (made && rc == 0)
-        (void)tagfs_delete_file(made, INK_UNWARRANTED);
+        (void)tagfs_delete_file(vol, made, INK_UNWARRANTED);
     STAND_BINDER_PUT_BACK(&b);
     return verdict;
 }
@@ -826,10 +837,10 @@ out:
 /* Whether the reserve a refusal met was measured to the block or a turn of the
  * ring was waited for (binder.h, BinderRoomMeasured): not from above with no
  * Tally waited for. */
-static bool StandBookRoomMeasuredBy(void)
+static bool StandBookRoomMeasuredBy(TagFSVolume* vol)
 {
     const char* why      = NULL;
-    const char* measured = BinderRoomMeasured(&why);
+    const char* measured = BinderRoomMeasured(vol, &why);
     return strcmp(measured, "to the block by its last Tally") == 0 ||
            strcmp(measured, "from above past its last Tally, a turn of the ring waited for") == 0;
 }
@@ -851,51 +862,52 @@ static bool StandBookRoomMeasuredBy(void)
  */
 static TestResult TestStandBookRoomRibbonWaitsGrown(void)
 {
+    TagFSVolume* vol = TagFSHome();
     TestResult         verdict = TEST_PASS;
     static StandBinder b;
     StandFreshModel    m;
     uint64_t           fid = 0, made = 0, promised = 0, tallies = 0;
     uint32_t           epoch = 0, waits = 0;
     int                rc    = 0;
-    const char*        aside = StandBinderAside(&b);
+    const char*        aside = StandBinderAside(vol, &b);
 
     memset(&m, 0, sizeof(m));
     if (aside)
         return test_steps_aside(aside);
-    TEST_ASSERT(StandBookRoomQuiet(), "the volume mounted afresh, the lag's stitches settled past it");
+    TEST_ASSERT(StandBookRoomQuiet(vol), "the volume mounted afresh, the lag's stitches settled past it");
     TEST_ASSERT(StandFreshModelMake(&m, TAGFS_BLOCK_SIZE), "room for the file");
-    TEST_ASSERT_EQ(tagfs_create_file("book-room-g.bin", NULL, 0, 0, &fid), 0, "a file is made");
-    TEST_ASSERT_EQ(StandFreshWrite(&m, fid, 0, TAGFS_BLOCK_SIZE, 0x6Bu), (int)TAGFS_BLOCK_SIZE,
+    TEST_ASSERT_EQ(tagfs_create_file(vol, "book-room-g.bin", NULL, 0, 0, &fid), 0, "a file is made");
+    TEST_ASSERT_EQ(StandFreshWrite(vol, &m, fid, 0, TAGFS_BLOCK_SIZE, 0x6Bu), (int)TAGFS_BLOCK_SIZE,
                    "a block of it written");
-    TEST_ASSERT_OK(TagFSSettle(), "and settled past the newest Tally");
-    epoch = tagfs_mount_epoch();
-    TEST_ASSERT(StandBookRoomRibbonShut(epoch, &promised) == TEST_PASS, "the ribbon is shut past the reserve");
-    TEST_ASSERT(EndpaperGrown() && !BinderHoldsGround(),
+    TEST_ASSERT_OK(TagFSSettle(vol), "and settled past the newest Tally");
+    epoch = tagfs_mount_epoch(vol);
+    TEST_ASSERT(StandBookRoomRibbonShut(vol, epoch, &promised) == TEST_PASS, "the ribbon is shut past the reserve");
+    TEST_ASSERT(EndpaperGrown(vol) && !BinderHoldsGround(vol),
                 "the reserve is measured from above past the newest Tally, and no Tally is under way");
-    tallies = g_binder.tallies;
-    rc      = tagfs_create_file("book-room-h.bin", NULL, 0, 0, &made);
+    tallies = vol->binder.tallies;
+    rc      = tagfs_create_file(vol, "book-room-h.bin", NULL, 0, 0, &made);
     TEST_ASSERT_EQ(rc, -(int)ERR_WOULD_BLOCK,
                    "a file asked for waits on the Tally that makes the measure exact, not refused at once");
-    TEST_ASSERT(BinderRoomAwaited(), "that Tally asked of its own wait for room");
-    TEST_ASSERT_OK(SettleForRoom(), "its wait for room ends");
-    TEST_ASSERT(g_binder.tallies > tallies, "and writes the Tally");
-    for (waits = 0; rc == -(int)ERR_WOULD_BLOCK && waits <= g_binder.ring; waits++) {
-        rc = tagfs_create_file("book-room-h.bin", NULL, 0, 0, &made);
+    TEST_ASSERT(BinderRoomAwaited(vol), "that Tally asked of its own wait for room");
+    TEST_ASSERT_OK(SettleForRoom(vol), "its wait for room ends");
+    TEST_ASSERT(vol->binder.tallies > tallies, "and writes the Tally");
+    for (waits = 0; rc == -(int)ERR_WOULD_BLOCK && waits <= vol->binder.ring; waits++) {
+        rc = tagfs_create_file(vol, "book-room-h.bin", NULL, 0, 0, &made);
         if (rc == -(int)ERR_WOULD_BLOCK)
-            TEST_ASSERT_OK(SettleForRoom(), "each wait for room ends");
+            TEST_ASSERT_OK(SettleForRoom(vol), "each wait for room ends");
     }
     TestEvidence("asks of the file past its first wait", waits);
-    TEST_ASSERT(rc == 0 || (rc == -(int)ERR_TAGFS_NO_SPACE && StandBookRoomMeasuredBy()),
+    TEST_ASSERT(rc == 0 || (rc == -(int)ERR_TAGFS_NO_SPACE && StandBookRoomMeasuredBy(vol)),
                 "answered within a turn of the ring: made, or refused no-space by a reserve measured to the block "
                 "or a turn of the ring waited for — never from above with no Tally waited for");
-    TEST_ASSERT(!BinderRoomAwaited(), "and no Tally is left asked for");
+    TEST_ASSERT(!BinderRoomAwaited(vol), "and no Tally is left asked for");
 out:
     for (; promised > 0; promised--)
-        AllotmentPromiseLetGo(epoch);
+        AllotmentPromiseLetGo(vol, epoch);
     if (made && rc == 0)
-        (void)tagfs_delete_file(made, INK_UNWARRANTED);
+        (void)tagfs_delete_file(vol, made, INK_UNWARRANTED);
     if (fid)
-        (void)tagfs_delete_file(fid, INK_UNWARRANTED);
+        (void)tagfs_delete_file(vol, fid, INK_UNWARRANTED);
     StandFreshModelLetGo(&m);
     STAND_BINDER_PUT_BACK(&b);
     return verdict;

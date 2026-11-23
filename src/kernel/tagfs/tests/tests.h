@@ -224,7 +224,7 @@ typedef struct {
     uint64_t cycles;   /* cycles settled when it was taken (SettledCycles) */
 } VolumeTally;
 
-bool VolumeTallyTake(VolumeTally* tally);
+bool VolumeTallyTake(TagFSVolume* vol, VolumeTally* tally);
 
 /* Why a test that ran decided not to run. Returns TEST_SKIP. */
 TestResult test_steps_aside(const char* why);
@@ -240,14 +240,14 @@ uint32_t TestFirstDifference(const void* a, const void* b, uint32_t n);
 /* One write or read through an open handle, from or into the kernel's own
  * memory: the byte count tagfs_write / tagfs_read answered, or -1 when it
  * answered a refusal. The handle's offset moves by what moved. */
-int TestHandleWrite(TagFSFileHandle* handle, const void* data, uint32_t bytes);
-int TestHandleRead(TagFSFileHandle* handle, void* buffer, uint32_t capacity);
+int TestHandleWrite(TagFSVolume* vol, TagFSFileHandle* handle, const void* data, uint32_t bytes);
+int TestHandleRead(TagFSVolume* vol, TagFSFileHandle* handle, void* buffer, uint32_t capacity);
 
 /* A whole file written in one call through a fresh handle, and read back the
  * same way: as TestHandleWrite / TestHandleRead answer, or -1 when the file
  * would not open. The handle is closed on every path. */
-int TestFileWrite(uint64_t file_id, const void* data, uint32_t bytes);
-int TestFileRead(uint64_t file_id, void* buffer, uint32_t capacity);
+int TestFileWrite(TagFSVolume* vol, uint64_t file_id, const void* data, uint32_t bytes);
+int TestFileRead(TagFSVolume* vol, uint64_t file_id, void* buffer, uint32_t capacity);
 
 /* The book suite's volume, 00 01 .. 0F, and its golden slot's stream
  * (volume_tally.h, TALLY_GOLDEN_SLOT_CRC) into `stream`, where its seven
@@ -273,6 +273,6 @@ error_t TagFS_TestsInit(void);
 void TagFS_TestsShutdown(void);
 
 /* OK exactly when nothing failed. A held caveat is not a failure. */
-error_t TagFS_RunAllTests(TestStats* stats);
+error_t TagFS_RunAllTests(TagFSVolume* vol, TestStats* stats);
 
 #endif // TAGFS_TEST_H

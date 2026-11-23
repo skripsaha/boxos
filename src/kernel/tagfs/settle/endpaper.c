@@ -7,6 +7,7 @@
 #include "../tag_spelling/tag_spelling.h"
 #include "../block_map/block_map.h"
 #include "endpaper_fact.h"
+#include "tagfs_volume.h"
 
 /*
  * The book's reserve (sewing.h): what a whole Tally of the volume as memory
@@ -110,9 +111,9 @@ static void TallyFileCost(const FileRecord* rec, TallyTreeCost* files, TallyTree
 }
 
 /* Every live file of the mirror, a batch of ids at a time. */
-static void TallyFilesCost(TallyTreeCost* files, TallyTreeCost* digests)
+static void TallyFilesCost(TagFSVolume* vol, TallyTreeCost* files, TallyTreeCost* digests)
 {
-    FileMap* map  = tagfs_get_state()->files;
+    FileMap* map  = vol->state.files;
     uint64_t from = 0, ids[32];
     uint32_t n;
     while (map && (n = FileMapFiles(map, from, ids, 32)) > 0) {
@@ -127,34 +128,26 @@ static void TallyFilesCost(TallyTreeCost* files, TallyTreeCost* digests)
     }
 }
 
-/* The measure from above of each tree of a whole Tally, in blocks of one
- * copy. */
-typedef struct {
-    uint64_t files;
-    uint64_t tags;
-    uint64_t use;
-    uint64_t digests;
-} TallyCostParts;
 
-static void TallyCostOf(TallyCostParts* out)
+static void TallyCostOf(TagFSVolume* vol, TallyCostParts* out)
 {
     TallyTreeCost files = { 0 }, tags = { 0 }, use = { 0 }, digests = { 0 };
-    uint64_t      atom  = g_book.atom > TAGFS_BLOCK_SIZE ? g_book.atom / TAGFS_BLOCK_SIZE : 1u;
+    uint64_t      atom  = vol->book.atom > TAGFS_BLOCK_SIZE ? vol->book.atom / TAGFS_BLOCK_SIZE : 1u;
     uint64_t      ntags = 0, text = 0;
 
     /* The Plots' Stakes first, the map after: a Stake inked between the two
      * is counted twice, never missed (endpaper_fact.h). */
-    EndpaperStakesAbove(&files.bytes, &digests.bytes);
-    TallyFilesCost(&files, &digests);
-    if (tagfs_get_state()->registry)
-        TagRegistryTextBytes(tagfs_get_state()->registry, &ntags, &text);
+    EndpaperStakesAbove(vol, &files.bytes, &digests.bytes);
+    TallyFilesCost(vol, &files, &digests);
+    if (vol->state.registry)
+        TagRegistryTextBytes(vol->state.registry, &ntags, &text);
     /* The registry counts its tags and their text, not each one's: every tag
      * at its whole length — more than a long one's one byte past a room — and
      * as many long ones as the text holds more than TALLY_LONG_TAG_TEXT bytes
      * a tag of. */
     tags.bytes  = ntags * (TALLY_ITEM_HEAD_MOST + TALLY_TAG_BODY_MOST) + text;
     tags.sheets = text / (TALLY_LONG_TAG_TEXT + 1u) * TALLY_LONG_TAG_SHEETS;
-    UseText* memory = tagfs_recall_use_context(NULL);
+    UseText* memory = tagfs_recall_use_context(vol, NULL);
     if (memory && memory->bytes)
         TallyItemCost(&use, TALLY_USE_BODY_MOST + memory->bytes);
     UseTextDrop(memory);
@@ -173,20 +166,20 @@ static uint64_t TallyLess(uint64_t a, uint64_t b)
  * TAGS and DIGESTS by the last Tally and the growth since — every change
  * memory holds among it (endpaper_fact.c) — where that is known and less;
  * both are bounds of it from above. */
-static uint64_t TallyNextOf(const TallyCostParts* above)
+static uint64_t TallyNextOf(TagFSVolume* vol, const TallyCostParts* above)
 {
     uint64_t files = 0, digests = 0, tags = 0;
-    EndpaperFactMost(&files, &digests, &tags);
+    EndpaperFactMost(vol, &files, &digests, &tags);
     return TallyLess(files, above->files) + TallyLess(tags, above->tags) + above->use +
            TallyLess(digests, above->digests);
 }
 
 #ifdef CONFIG_VOLUME_TESTS
-uint64_t TallyCostBlocks(void)
+uint64_t TallyCostBlocks(TagFSVolume* vol)
 {
     TallyCostParts p;
-    TallyCostOf(&p);
-    return TallyNextOf(&p);
+    TallyCostOf(vol, &p);
+    return TallyNextOf(vol, &p);
 }
 #endif
 
@@ -214,11 +207,6 @@ uint64_t TallyCostBlocks(void)
 #define TALLY_DATA_FILES_MOST   (TALLY_RUN_MOST + TALLY_ITEM_HEAD_MOST + TALLY_PARCEL_HEAD_MOST)
 #define TALLY_DATA_DIGESTS_MOST (8u + 2u * (TALLY_ITEM_HEAD_MOST + TALLY_DIGEST_HEAD_MOST))
 
-static TallyCostParts    s_kept_above;     /* the last measure from above, in blocks */
-static volatile uint64_t s_kept_from;      /* the data handed when the measure before it began */
-static volatile uint64_t s_kept_began;     /* ... and when this one began */
-static volatile uint32_t s_kept_epoch;     /* the mounting they are of; 0 for none */
-static volatile uint32_t s_kept_turn;      /* odd while a measure is being kept */
 
 /*
  * ‼ A KEPT MEASURE IS ONE PAIR, NEVER TWO HALVES. The ribbon measures when it is
@@ -231,79 +219,79 @@ static volatile uint32_t s_kept_turn;      /* odd while a measure is being kept 
  * with the data handed when the one kept before it began, or when it began
  * itself, whichever came first.
  */
-uint64_t EndpaperKeeps(uint64_t quire_blocks)
+uint64_t EndpaperKeeps(TagFSVolume* vol, uint64_t quire_blocks)
 {
     if (quire_blocks == 0)
         return 0;
     TallyCostParts above;
-    uint32_t       epoch = tagfs_mount_epoch();
-    uint64_t       began = AllotmentBookTaken();
-    TallyCostOf(&above);
-    uint64_t cost = TallyNextOf(&above);
-    uint32_t turn = __atomic_load_n(&s_kept_turn, __ATOMIC_ACQUIRE);
+    uint32_t       epoch = tagfs_mount_epoch(vol);
+    uint64_t       began = AllotmentBookTaken(vol);
+    TallyCostOf(vol, &above);
+    uint64_t cost = TallyNextOf(vol, &above);
+    uint32_t turn = __atomic_load_n(&vol->endpaper.kept_turn, __ATOMIC_ACQUIRE);
     if (!(turn & 1u) &&
-        __atomic_compare_exchange_n(&s_kept_turn, &turn, turn + 1u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
-        uint64_t before = s_kept_epoch == epoch ? s_kept_began : began;
-        s_kept_above = above;
-        s_kept_from  = before < began ? before : began;
-        s_kept_began = before > began ? before : began;
-        s_kept_epoch = epoch;
-        __atomic_store_n(&s_kept_turn, turn + 2u, __ATOMIC_RELEASE);
+        __atomic_compare_exchange_n(&vol->endpaper.kept_turn, &turn, turn + 1u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+        uint64_t before = vol->endpaper.kept_epoch == epoch ? vol->endpaper.kept_began : began;
+        vol->endpaper.kept_above = above;
+        vol->endpaper.kept_from  = before < began ? before : began;
+        vol->endpaper.kept_began = before > began ? before : began;
+        vol->endpaper.kept_epoch = epoch;
+        __atomic_store_n(&vol->endpaper.kept_turn, turn + 2u, __ATOMIC_RELEASE);
     }
     uint64_t tally = 2u * ((cost + quire_blocks - 1u) / quire_blocks) * quire_blocks;
-    return tally + BinderRingShort(tally, quire_blocks);
+    return tally + BinderRingShort(vol, tally, quire_blocks);
 }
 
 /* The kept measure of this mounting, whole: false when there is none, or one
  * was being kept as it was read. */
-static bool EndpaperKept(TallyCostParts* above, uint64_t* from)
+static bool EndpaperKept(TagFSVolume* vol, TallyCostParts* above, uint64_t* from)
 {
-    uint32_t turn = __atomic_load_n(&s_kept_turn, __ATOMIC_ACQUIRE);
+    uint32_t turn = __atomic_load_n(&vol->endpaper.kept_turn, __ATOMIC_ACQUIRE);
     if (turn & 1u)
         return false;
-    bool ours = s_kept_epoch == tagfs_mount_epoch();
-    *above    = s_kept_above;
-    *from     = s_kept_from;
+    bool ours = vol->endpaper.kept_epoch == tagfs_mount_epoch(vol);
+    *above    = vol->endpaper.kept_above;
+    *from     = vol->endpaper.kept_from;
     __atomic_thread_fence(__ATOMIC_ACQUIRE);
-    return ours && __atomic_load_n(&s_kept_turn, __ATOMIC_RELAXED) == turn;
+    return ours && __atomic_load_n(&vol->endpaper.kept_turn, __ATOMIC_RELAXED) == turn;
 }
 
 /* The next Tally by the kept measure, the data handed since it and what the
  * Plots' Stakes may add now — a take counted before it is asked, which no
  * measure kept before it holds (endpaper_fact.c): false when there is none
  * whole. */
-static bool EndpaperKeptCost(uint64_t* cost)
+static bool EndpaperKeptCost(TagFSVolume* vol, uint64_t* cost)
 {
     TallyCostParts above;
     uint64_t       from = 0, staked = 0, sdigests = 0;
-    EndpaperStakesAbove(&staked, &sdigests);
-    if (!EndpaperKept(&above, &from))
+    EndpaperStakesAbove(vol, &staked, &sdigests);
+    if (!EndpaperKept(vol, &above, &from))
         return false;
-    uint64_t      since = AllotmentBookTaken() - from;
-    uint64_t      atom  = g_book.atom > TAGFS_BLOCK_SIZE ? g_book.atom / TAGFS_BLOCK_SIZE : 1u;
+    uint64_t      since = AllotmentBookTaken(vol) - from;
+    uint64_t      atom  = vol->book.atom > TAGFS_BLOCK_SIZE ? vol->book.atom / TAGFS_BLOCK_SIZE : 1u;
     TallyTreeCost files   = { since * TALLY_DATA_FILES_MOST + staked, 0 };
     TallyTreeCost digests = { since * TALLY_DATA_DIGESTS_MOST + sdigests, 0 };
     above.files   += TallyTreeBlocks(&files, atom);
     above.digests += TallyTreeBlocks(&digests, atom);
-    *cost = TallyNextOf(&above);
+    *cost = TallyNextOf(vol, &above);
     return true;
 }
 
 #ifdef CONFIG_VOLUME_TESTS
-uint64_t TallyKeptBlocks(void)
+uint64_t TallyKeptBlocks(TagFSVolume* vol)
 {
     uint64_t cost = UINT64_MAX;
-    return EndpaperKeptCost(&cost) ? cost : UINT64_MAX;
+    return EndpaperKeptCost(vol, &cost) ? cost : UINT64_MAX;
 }
 #endif
 
-uint64_t EndpaperDataKeeps(bool afresh)
+uint64_t EndpaperDataKeeps(TagFSVolume* vol, bool afresh)
 {
-    uint64_t q = RibbonCursorNow()->quire_blocks, cost = 0;
+    uint64_t q = RibbonCursorNow(vol)->quire_blocks, cost = 0;
     if (q == 0)
         return 0;
-    if (afresh || !EndpaperKeptCost(&cost))
-        return EndpaperKeeps(q) + q;
+    if (afresh || !EndpaperKeptCost(vol, &cost))
+        return EndpaperKeeps(vol, q) + q;
     uint64_t tally = 2u * ((cost + q - 1u) / q) * q;
-    return tally + BinderRingShort(tally, q) + q;
+    return tally + BinderRingShort(vol, tally, q) + q;
 }
