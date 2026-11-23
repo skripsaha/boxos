@@ -53,6 +53,7 @@ typedef enum {
     ERR_STREAM_CLOSED = 204,
     ERR_BAD_SECTOR = 205,
     ERR_IO_CANCELLED = 206,
+    ERR_UNALIGNED = 207,
 
     // Filesystem Errors (300-399)
     ERR_FILE_NOT_FOUND = 300,

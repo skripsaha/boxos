@@ -98,7 +98,8 @@ EFI_STATUS ReadSectors(uint64_t vlba, uint32_t count_512, void *buffer);
 /* The same medium counted from its first sector, not the volume's: MediumRead;
  * one 4 KiB slot written at a 4 KiB-aligned sector and flushed
  * (MediumWriteSlot) — EFI_WRITE_PROTECTED from a medium that refuses writes,
- * EFI_UNSUPPORTED from one whose blocks are neither 512 nor 4096 bytes; and
+ * EFI_UNSUPPORTED from one whose blocks are no whole number of 512-byte
+ * sectors up to 4096 bytes; and
  * whether the MBR names every partition at `end` or past it (MediumFrontFree,
  * 0 for a GPT's protective table). */
 EFI_STATUS MediumRead(uint64_t lba_512, uint32_t count_512, void *buffer);

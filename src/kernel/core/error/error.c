@@ -71,6 +71,8 @@ const char* ErrorString(error_t err) {
             return "Bad disk sector";
         case ERR_IO_CANCELLED:
             return "I/O request cancelled";
+        case ERR_UNALIGNED:
+            return "Not whole blocks of the medium";
 
         case ERR_FILE_NOT_FOUND:
             return "File not found";

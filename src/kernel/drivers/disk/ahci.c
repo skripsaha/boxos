@@ -572,6 +572,13 @@ error_t ahci_build_io(uint8_t port_num, uint8_t slot, uint64_t lba,
     if (!ahci_ctrl.s64a_support && ((uintptr_t)buffer_phys >> 32)) {
         return ERR_INVALID_ADDRESS;
     }
+    /* The room's 512-byte sectors in, the drive's own blocks out: 4096 on a
+     * 4Kn drive. The room hands over whole blocks only (boardroom.h); the
+     * bytes moved are the same either way. */
+    const uint32_t per = port->logical_sector_size / 512u;
+    if (lba % per != 0 || sector_count % per != 0) return ERR_UNALIGNED;
+    const uint64_t blocks = lba / per;
+    const uint16_t count  = (uint16_t)(sector_count / per);
 
     ahci_cmd_header_t* cmdheader = (ahci_cmd_header_t*)port->clb_virt;
     cmdheader[slot].cfl   = sizeof(fis_reg_h2d_t) / sizeof(uint32_t);
@@ -594,12 +601,12 @@ error_t ahci_build_io(uint8_t port_num, uint8_t slot, uint64_t lba,
     cmdfis->c        = 1;
     cmdfis->device   = (1 << 6);   // LBA mode
 
-    cmdfis->lba0 = (lba >>  0) & 0xFF;
-    cmdfis->lba1 = (lba >>  8) & 0xFF;
-    cmdfis->lba2 = (lba >> 16) & 0xFF;
-    cmdfis->lba3 = (lba >> 24) & 0xFF;
-    cmdfis->lba4 = (lba >> 32) & 0xFF;
-    cmdfis->lba5 = (lba >> 40) & 0xFF;
+    cmdfis->lba0 = (blocks >>  0) & 0xFF;
+    cmdfis->lba1 = (blocks >>  8) & 0xFF;
+    cmdfis->lba2 = (blocks >> 16) & 0xFF;
+    cmdfis->lba3 = (blocks >> 24) & 0xFF;
+    cmdfis->lba4 = (blocks >> 32) & 0xFF;
+    cmdfis->lba5 = (blocks >> 40) & 0xFF;
 
     if (port->ncq) {
         /* FPDMA QUEUED: sector count goes in the features field, the NCQ TAG
@@ -607,16 +614,16 @@ error_t ahci_build_io(uint8_t port_num, uint8_t slot, uint64_t lba,
          * FIS) — NOT PxCI, which clears once the FIS is merely sent. */
         cmdfis->command  = write ? ATA_CMD_WRITE_FPDMA_QUEUED
                                  : ATA_CMD_READ_FPDMA_QUEUED;
-        cmdfis->featurel = sector_count & 0xFF;
-        cmdfis->featureh = (sector_count >> 8) & 0xFF;
+        cmdfis->featurel = count & 0xFF;
+        cmdfis->featureh = (count >> 8) & 0xFF;
         cmdfis->countl   = (uint8_t)(slot << 3);
         cmdfis->counth   = 0;
     } else {
         /* READ/WRITE DMA EXT: sector count in the count field; completion is
          * signalled by PxCI clearing. Only one may be outstanding per port. */
         cmdfis->command  = write ? ATA_CMD_WRITE_DMA_EXT : ATA_CMD_READ_DMA_EXT;
-        cmdfis->countl   = sector_count & 0xFF;
-        cmdfis->counth   = (sector_count >> 8) & 0xFF;
+        cmdfis->countl   = count & 0xFF;
+        cmdfis->counth   = (count >> 8) & 0xFF;
     }
 
     return OK;
@@ -1268,30 +1275,11 @@ static int ahci_port_init(uint8_t port_num) {
     ahci_id_string(id, 10, 10, port->serial);
     ahci_id_string(id, 23,  4, port->firmware);
 
-    /* Logical sector size: IDENTIFY word 106 is valid when bit 14 is set and
-     * bit 15 clear; bit 12 then says words 117-118 carry the logical sector
-     * size in 16-bit words. Otherwise the logical sector is 256 words. */
-    uint32_t logical = 512;
-    if ((id[106] & (1u << 14)) && !(id[106] & (1u << 15)) && (id[106] & (1u << 12))) {
-        uint32_t words = (uint32_t)id[117] | ((uint32_t)id[118] << 16);
-        if (words >= 256) {
-            logical = words * 2u;
-        }
-    }
-    port->logical_sector_size = logical;
-
-    /* And the physical one. Same word: bit 13 says the drive has more than one
-     * logical sector per physical, and bits 3:0 are the exponent — one
-     * physical block holds 2^N logical ones (ATA8-ACS §7.16.7.74). This is
-     * what a 512e drive uses to say "I am addressed in 512 and built from
-     * 4096", which nothing in this kernel asked until now. */
-    port->physical_sector_size = logical;
-    if ((id[106] & (1u << 14)) && !(id[106] & (1u << 15)) && (id[106] & (1u << 13))) {
-        uint32_t exponent = id[106] & 0x0Fu;
-        if (exponent < 16 && logical <= (0xFFFFFFFFu >> exponent)) {
-            port->physical_sector_size = logical << exponent;
-        }
-    }
+    /* What it is addressed in and built from (ata_identify.h) — a 512e drive
+     * says 512 and 4096, a 4Kn drive 4096 and 4096. */
+    uint32_t logical = AtaIdentifyLogicalBytes(id);
+    port->logical_sector_size  = logical;
+    port->physical_sector_size = AtaIdentifyPhysicalBytes(id, logical);
     port->first_aligned = AtaIdentifyFirstAligned(id, logical, port->physical_sector_size);
 
     port->lba48 = (id[83] & (1u << 10)) != 0;
@@ -1319,19 +1307,19 @@ static int ahci_port_init(uint8_t port_num) {
     bool dev_ncq = (id[76] != 0x0000 && id[76] != 0xFFFF) && (id[76] & (1u << 8));
     port->ncq = ahci_ctrl.ncq_support && dev_ncq;
 
-    /* The storage stack (TagFS, block layer) is built on 512-byte sectors.
-     * A 4Kn drive would silently corrupt every LBA computation — refuse the
-     * port loudly instead. 512e drives (512 logical / 4096 physical) report
-     * logical 512 and work unchanged. */
-    if (port->logical_sector_size != 512) {
-        /* Said with kprintf, not debug_printf. This removes a disk from the
-         * machine, and debug_printf compiles to nothing in a shipped build —
-         * so the comment above promised "loudly" while the operator saw a
-         * board that simply had no disk on it and no reason given. Every
-         * refusal below is on the same rule. */
-        kprintf("[AHCI] port %u: %u-byte logical sectors, and this stack is "
-                "built on 512 — not using it\n",
-                port_num, port->logical_sector_size);
+    /* A drive addressed in larger blocks than the room's 512-byte sectors —
+     * 4096 on a 4Kn drive — is seated with them and spoken to in them
+     * (ahci_build_io); one whose block is no whole number of sectors, or
+     * larger than the room seats (the 520- and 528-byte blocks of array
+     * drives), cannot be, and the port is left, loudly. Said with kprintf,
+     * not debug_printf: this removes a disk from the machine, and
+     * debug_printf compiles to nothing in a shipped build — the operator
+     * would see a board with no disk on it and no reason given. Every
+     * refusal below is on the same rule. */
+    if (port->logical_sector_size % 512u != 0 || port->logical_sector_size > BOARDROOM_LOGICAL_MOST) {
+        kprintf("[AHCI] port %u: %u-byte logical blocks — a disk is seated in whole "
+                "512-byte sectors up to %u bytes a block — not using it\n",
+                port_num, port->logical_sector_size, BOARDROOM_LOGICAL_MOST);
         goto fail_free;
     }
 

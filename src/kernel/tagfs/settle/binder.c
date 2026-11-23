@@ -268,17 +268,37 @@ static error_t SlotSectorsWrite(uint64_t vlba, uint32_t first, uint32_t n, const
 }
 
 /*
- * The slot written over: its stream sealed at a seq past the Tally's, in two
- * halves of its eight sectors — the cut a SETTLECUT `slot` makes between them
- * leaves it torn (C9), as the stand's tear leaves it with only its first
- * `tear` sectors. From the first sector issued, the slot may hold either
- * Tally (slot_begun) — the new one as sealed here, kept in r->sealed until the
+ * Where the slot's write is torn on purpose: nowhere in a machine's own life —
+ * a slot is one block of the volume, written whole, which a medium addressed
+ * in 4096-byte blocks takes as one and any other may tear wherever it tears.
+ * The stand tears it after its first `s_stand_tear` sectors, and a kernel
+ * built to stop inside a slot (SETTLECUT `slot`) after its first half (C9):
+ * the reader is held to the tears a medium could make, whichever way the
+ * slot was written.
+ */
+static uint32_t SlotTornAt(void)
+{
+#ifdef CONFIG_VOLUME_TESTS
+    if (s_stand_tear)
+        return s_stand_tear;
+#endif
+#ifdef CONFIG_TAGFS_SETTLE_CUT_POINT
+    if (CONFIG_TAGFS_SETTLE_CUT_POINT == SETTLE_CUT_POINT_SLOT)
+        return TAGFS_BLOCK_SECTORS / 2u;
+#endif
+    return TAGFS_BLOCK_SECTORS;
+}
+
+/*
+ * The slot written over: its stream sealed at a seq past the Tally's, whole
+ * (SlotTornAt). From the first sector issued, the slot may hold either Tally
+ * (slot_begun) — the new one as sealed here, kept in r->sealed until the
  * Tally ends, and by the slot itself when it is held unsure.
  */
 static error_t TallySlotWrite(BinderRun* r)
 {
     uint8_t* stream = kmalloc(TALLY_SHEET_PAYLOAD);
-    uint32_t starts[TALLY_SHARED + 6u], n = 0, half = TAGFS_BLOCK_SECTORS / 2u;
+    uint32_t starts[TALLY_SHARED + 6u], n = 0, half = SlotTornAt();
     r->sealed       = kmalloc(sizeof(SlotSealed));
     error_t  rc     = stream && r->sealed ? OK : ERR_NO_MEMORY;
     if (rc == OK) {
@@ -291,10 +311,6 @@ static error_t TallySlotWrite(BinderRun* r)
         r->slot_seq    = RibbonSeqNext();
         TallyUnitSeal(unit, stream, len, starts, n, BOOK_UNIT_SLOT, r->slot_seq, vlba, TAGFS_BLOCK_SECTORS,
                       tagfs_get_state()->uuid);
-#ifdef CONFIG_VOLUME_TESTS
-        if (s_stand_tear)
-            half = s_stand_tear;
-#endif
         r->slot_begun = true;
         rc = SlotSectorsWrite(vlba, 0, half, unit);
 #ifdef CONFIG_VOLUME_TESTS
@@ -304,7 +320,7 @@ static error_t TallySlotWrite(BinderRun* r)
         SETTLE_CUT_CYCLE(r->target);
         if (rc == OK)
             SETTLE_CUT_AT(SETTLE_CUT_POINT_SLOT);
-        if (rc == OK)
+        if (rc == OK && half < TAGFS_BLOCK_SECTORS)
             rc = SlotSectorsWrite(vlba, half, TAGFS_BLOCK_SECTORS - half, unit);
     }
     kfree(stream);

@@ -190,6 +190,9 @@ void ata_print_device_info(const ATADevice* device);
  * a SET FEATURES "set transfer mode" (also reused by ata_negotiate_pio
  * in ata.c). Both expect the caller to have already selected the drive
  * and to be holding any required channel-wide serialisation. */
+/* The room's 512-byte sectors one of the drive's blocks holds: 1, or 8 on 4Kn. */
+uint32_t ata_block_sectors(uint8_t drive_idx);
+
 int  ata_program_lba(uint8_t drive_idx, uint64_t lba, uint16_t count,
                      uint8_t cmd28, uint8_t cmd48);
 int  ata_set_xfer_mode(uint8_t drive_idx, uint8_t mode_byte);

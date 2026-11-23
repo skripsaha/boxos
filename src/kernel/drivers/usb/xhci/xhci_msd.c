@@ -1612,26 +1612,23 @@ static int msd_attach_held(xhci_controller_t* ctrl, xhci_device_slot_t* slot)
     msd_read_identity(u);
 
     /*
-     * A device whose blocks are larger than a sector is addressed in its own
-     * units and translated here, rather than refused.
-     *
-     * Refusing was honest while nothing did the translation, and it meant a
-     * 4096-byte-sector drive was a drive BoxOS could not boot from. What it
-     * needs is arithmetic and, for a write that does not land on a block
-     * boundary, the read-modify-write below — which is not an optimisation to
-     * be skipped but the only way to change part of a block on a device that
-     * will only accept whole ones.
+     * A device whose blocks are larger than a sector — 4096 on a 4Kn stick or
+     * enclosure — is addressed in its own units and translated here, rather
+     * than refused: arithmetic, and nothing else. The room hands a driver
+     * whole blocks only (boardroom.h), so no write here ever reads a block to
+     * change part of it.
      *
      * What cannot be translated is a block that is not a whole number of
-     * sectors, or one larger than the buffer everything moves through. Both
-     * are said out loud rather than guessed at.
+     * sectors, or one larger than the room seats (BOARDROOM_LOGICAL_MOST) —
+     * the 520- and 528-byte blocks of some arrays, or anything past 4096.
+     * Both are said out loud rather than guessed at.
      */
     if (u->block_bytes < XHCI_MSD_SECTOR_BYTES ||
         (u->block_bytes % XHCI_MSD_SECTOR_BYTES) != 0 ||
-        u->block_bytes > MSD_BOUNCE_BYTES) {
-        kprintf("[USB disk %u] %s: %u-byte blocks, which this kernel cannot "
-                "express in %u-byte sectors — not using it\n",
-                u->number, u->name, u->block_bytes, XHCI_MSD_SECTOR_BYTES);
+        u->block_bytes > BOARDROOM_LOGICAL_MOST) {
+        kprintf("[USB disk %u] %s: %u-byte blocks — a medium is seated in whole "
+                "%u-byte sectors up to %u bytes a block — not using it\n",
+                u->number, u->name, u->block_bytes, XHCI_MSD_SECTOR_BYTES, BOARDROOM_LOGICAL_MOST);
         xhci_msd_release(slot);
         return -1;
     }
@@ -1820,6 +1817,16 @@ uint64_t xhci_msd_unit_sectors(uint8_t unit)
 /* What this unit is built from, in bytes — the answer READ CAPACITY(16) gives
  * and almost every flash device gives differently from what it is addressed
  * in. Zero when the device would not say, which is a fact and not a failure. */
+uint32_t xhci_msd_unit_logical_bytes(uint8_t unit)
+{
+    if (!g_units_lock_ready) return 0;
+    spin_lock(&g_units_lock);
+    XhciMsdUnit* u = msd_find_locked(unit);
+    uint32_t bytes = (u && u->ready) ? u->block_bytes : 0;
+    spin_unlock(&g_units_lock);
+    return bytes;
+}
+
 uint32_t xhci_msd_unit_physical_bytes(uint8_t unit)
 {
     if (!g_units_lock_ready) return 0;
@@ -1957,53 +1964,44 @@ static int msd_rw(uint8_t unit, uint64_t lba, uint32_t count,
         return -1;
     }
 
-    const uint32_t per_sector  = u->per_sector;          /* sectors per block */
-    const uint32_t block_bytes = u->block_bytes;
-    /* Whole blocks per pass, so a pass never has to split one. */
-    const uint32_t blocks_per_pass = MSD_BOUNCE_BYTES / block_bytes;
-
+    /* Whole blocks only: the room cuts every request to them (boardroom.h),
+     * and a run that is not is a caller of this driver gone round the room. */
+    const uint32_t per_sector = u->per_sector;          /* sectors per block */
+    if (lba % per_sector != 0 || count % per_sector != 0) {
+        kprintf("[USB disk %u] sectors %llu..%llu are not whole %u-byte blocks — "
+                "not issued\n", unit, (unsigned long long)lba,
+                (unsigned long long)(lba + count - 1), u->block_bytes);
+        msd_give_back(u);
+        return -1;
+    }
+    /* As many whole blocks a pass as the bounce holds, through which every
+     * byte moves: the caller's buffer is no page the device can reach. */
+    const uint32_t blocks_per_pass = MSD_BOUNCE_BYTES / u->block_bytes;
     uint8_t* caller = (uint8_t*)buffer;
     int result = 0;
-
     msd_gate_enter(u, BERTH_ONE);
-
     while (count > 0) {
-        uint64_t block     = lba / per_sector;
-        uint32_t head      = (uint32_t)(lba % per_sector);   /* sectors in */
-        uint32_t room      = (blocks_per_pass * per_sector) - head;
-        uint32_t chunk     = (count > room) ? room : count;  /* sectors */
-        uint32_t nblocks   = (head + chunk + per_sector - 1) / per_sector;
-        uint32_t bytes     = nblocks * block_bytes;
-        uint32_t head_bytes = head * XHCI_MSD_SECTOR_BYTES;
-        uint32_t chunk_bytes = chunk * XHCI_MSD_SECTOR_BYTES;
-
-        bool whole = (head == 0) && ((chunk % per_sector) == 0);
-
-        /* A write that does not cover the blocks it touches has to read them
-         * first; a read always reads. */
-        if (!write || !whole) {
-            int read = msd_run_blocks(u, block, nblocks, bytes, false);
-            if (read != 0) {
-                result = write ? -1 : read;
-                break;
-            }
-        }
-
+        uint64_t block   = lba / per_sector;
+        uint32_t nblocks = count / per_sector < blocks_per_pass ? count / per_sector : blocks_per_pass;
+        uint32_t bytes   = nblocks * u->block_bytes;
         if (write) {
-            memcpy((uint8_t*)u->bounce_virt + head_bytes, caller, chunk_bytes);
+            memcpy(u->bounce_virt, caller, bytes);
             if (msd_run_blocks(u, block, nblocks, bytes, true) != 0) {
                 result = -1;
                 break;
             }
         } else {
-            memcpy(caller, (uint8_t*)u->bounce_virt + head_bytes, chunk_bytes);
+            int read = msd_run_blocks(u, block, nblocks, bytes, false);
+            if (read != 0) {
+                result = read;
+                break;
+            }
+            memcpy(caller, u->bounce_virt, bytes);
         }
-
-        caller += chunk_bytes;
-        lba    += chunk;
-        count  -= chunk;
+        caller += bytes;
+        lba    += (uint64_t)nblocks * per_sector;
+        count  -= nblocks * per_sector;
     }
-
     msd_gate_leave(u);
     msd_give_back(u);
     msd_stand_done(write ? "a write it stood over on a USB disk"

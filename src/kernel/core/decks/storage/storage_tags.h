@@ -22,6 +22,22 @@ int ObjGetInfo(const ManifestOp *op, Crate *crates, uint16_t crate_count, const 
 int ObjTagShow(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx);
 int ObjTagShown(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx);
 
+/* One page of a list a deck answer gives: up to `room` ids from `from` on
+ * into `out`, and how many there are when `want_total` (TagFSPage) — of the
+ * list `ask` names. */
+typedef error_t (*StoragePager)(const void *ask, uint64_t from, uint64_t *out, uint32_t room, bool want_total,
+                                TagFSPage *page);
+
+/* The list `pager` pages, from `from` on, written into `out` after its 8-byte
+ * header, `piece_room` ids at a time through `piece`: hdr[0] how many went in,
+ * hdr[1] how many there are — counted by the first page, which is asked
+ * whatever the room, so a caller with room for none is told how many; never
+ * less than what went in, a member come while the pages are taken delivered
+ * too. The one way every list of the deck is answered. OK, or the pager's or
+ * the crate's refusal. */
+error_t StorageAnswerPages(StoragePager pager, const void *ask, uint64_t from, const Crate *out,
+                           const OpContext *ctx, uint64_t *piece, uint32_t piece_room, uint32_t hdr[2]);
+
 /* The caller's program on the volume mounted — who it is (TagOwner), while
  * it is on the volume (TagFSHoldsProgram) — or 0 for none. */
 uint64_t StorageReader(const OpContext *ctx);

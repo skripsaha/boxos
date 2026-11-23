@@ -504,58 +504,80 @@ static error_t storage_crate_text(const ManifestOp *op, Crate *crates, const OpC
     return OK;
 }
 
+error_t StorageAnswerPages(StoragePager pager, const void *ask, uint64_t from, const Crate *out,
+                           const OpContext *ctx, uint64_t *piece, uint32_t piece_room, uint32_t hdr[2])
+{
+    uint64_t room_ids = (out->capacity - 8) / sizeof(uint64_t);
+    uint32_t most     = room_ids > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)room_ids;
+    error_t  rc       = OK;
+    for (bool first = true; rc == OK; first = false) {
+        uint32_t  room = most - hdr[0] < piece_room ? most - hdr[0] : piece_room;
+        TagFSPage page;
+        rc = pager(ask, from, piece, room, first, &page);
+        if (rc != OK)
+            break;
+        if (first)
+            hdr[1] = page.total;
+        if (page.delivered)
+            rc = (error_t)crate_out_commit_at(out, ctx, 8 + (uint64_t)hdr[0] * sizeof(uint64_t), piece,
+                                              (uint64_t)page.delivered * sizeof(uint64_t));
+        hdr[0] += page.delivered;
+        if (!page.next || hdr[0] == most)
+            break;
+        from = page.next;
+    }
+    if (hdr[1] < hdr[0])
+        hdr[1] = hdr[0];
+    return rc;
+}
+
 /* The ids a query answer moves from the index to the caller's crate at a time. */
 #define STORAGE_QUERY_PIECE 512u
+
+/* A question of storage.query or storage.name.query, as one page of it is
+ * asked of the index (StorageQueryPager). */
+typedef struct {
+    TagOwner           owner;
+    const TagSpelling *tags;
+    uint32_t           count;
+    const TagSpelling *without;
+    uint32_t           without_count;
+    bool               kept;
+    const char        *word;
+    size_t             word_len;
+} StorageQueryAsk;
+
+static error_t StorageQueryPager(const void *ask, uint64_t from, uint64_t *out, uint32_t room, bool want_total,
+                                 TagFSPage *page)
+{
+    const StorageQueryAsk *q = ask;
+    if (q->word)
+        return TagFSNamedPage(q->owner, q->word, q->word_len, q->tags, q->count, q->without, q->without_count, from,
+                              out, room, want_total, page);
+    if (q->kept)
+        return TagFSQueryKeptPage(q->owner, q->tags, q->count, q->without, q->without_count, from, out, room,
+                                  want_total, page);
+    return TagFSQueryPage(q->owner, q->tags, q->count, q->without, q->without_count, from, out, room, want_total,
+                          page);
+}
 
 /*
  * The files `tags` match (every file, for none) — or, with a `word`, those of
  * them that are called it (TagFSNamedPage) — written into the out crate
- * after its 8-byte header a piece at a time, straight from the index's pages:
- * the kernel holds one piece and never the whole answer, and the crate is
- * given as many ids as it has room for, each the u64 the index holds. hdr[0]
- * is how many went in, hdr[1] how many match — counted by the first page, and
- * never less than what went in, since a file made while the pages are taken
- * is delivered too.
+ * after its 8-byte header a piece at a time, straight from the index's pages
+ * (StorageAnswerPages): the kernel holds one piece and never the whole
+ * answer, and the crate is given as many ids as it has room for, each the u64
+ * the index holds.
  */
 static error_t storage_query_into(TagOwner owner, const TagSpelling *tags, uint32_t count,
                                   const TagSpelling *without, uint32_t without_count, bool kept, const char *word,
                                   size_t word_len, const Crate *out, const OpContext *ctx, uint32_t hdr[2])
 {
-    uint64_t room_ids = (out->capacity - 8) / sizeof(uint64_t);
-    uint32_t most     = room_ids > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)room_ids;
-    uint64_t *piece   = kmalloc(STORAGE_QUERY_PIECE * sizeof(uint64_t));
+    const StorageQueryAsk ask   = { owner, tags, count, without, without_count, kept, word, word_len };
+    uint64_t             *piece = kmalloc(STORAGE_QUERY_PIECE * sizeof(uint64_t));
     if (!piece) return ERR_NO_MEMORY;
-
-    error_t  rc    = OK;
-    uint64_t from  = 1;
-    bool     first = true;
-    for (;;) {
-        uint32_t  room = most - hdr[0] < STORAGE_QUERY_PIECE ? most - hdr[0] : STORAGE_QUERY_PIECE;
-        TagFSPage page;
-        if (word)
-            rc = TagFSNamedPage(owner, word, word_len, tags, count, without, without_count, from, piece, room, first,
-                                &page);
-        else if (kept)
-            rc = TagFSQueryKeptPage(owner, tags, count, without, without_count, from, piece, room, first, &page);
-        else
-            rc = TagFSQueryPage(owner, tags, count, without, without_count, from, piece, room, first, &page);
-        if (rc != OK) break;
-        if (first) hdr[1] = page.total;
-        first = false;
-        if (page.delivered > 0) {
-            int wrc = crate_out_commit_at(out, ctx, 8 + (uint64_t)hdr[0] * sizeof(uint64_t),
-                                          piece, (uint64_t)page.delivered * sizeof(uint64_t));
-            if (wrc != OK) {
-                rc = (error_t)wrc;
-                break;
-            }
-            hdr[0] += page.delivered;
-        }
-        if (page.next == 0 || hdr[0] == most) break;
-        from = page.next;
-    }
+    error_t rc = StorageAnswerPages(StorageQueryPager, &ask, 1, out, ctx, piece, STORAGE_QUERY_PIECE, hdr);
     kfree(piece);
-    if (hdr[1] < hdr[0]) hdr[1] = hdr[0];
     return rc;
 }
 

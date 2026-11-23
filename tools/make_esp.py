@@ -22,8 +22,13 @@ BPB layout (at sector 0):
   Root cluster (cluster 2) immediately after FAT2
   File data in subsequent clusters
 
+The FAT's sector is the medium's block: 512 bytes, or 4096 on an image laid
+out for a 4Kn medium (--sector 4096) — firmware and every other system read
+an ESP whose BytesPerSector is its disk's logical block, and the smallest
+valid FAT32 of 4096-byte sectors is some 260 MB, as on every 4Kn disk.
+
 Usage:
-  python3 tools/make_esp.py <input.efi> <output.img>
+  python3 tools/make_esp.py <input.efi> <output.img> [hidden_sectors] [--sector 512|4096]
 """
 import struct
 import sys
@@ -32,47 +37,42 @@ import sys
 #
 # FAT32 requires ≥ 65,525 data clusters (per FAT specification §3.5).
 # UEFI firmware validates this; images with fewer clusters are rejected as
-# FAT16 or refused outright.
-#
-# Minimum valid FAT32 sizes by cluster size:
-#   512-byte clusters (1 sector): ~33 MB minimum
-#   2 KB clusters (4 sectors):   ~130 MB minimum
-#   4 KB clusters (8 sectors):   ~257 MB minimum
-#
-# We use 512-byte clusters for the smallest valid FAT32 image.  Cluster
-# fragmentation is irrelevant for a read-only ESP with only a few KB of files.
-#
-SECTOR_SIZE          = 512
-SECTORS_PER_CLUSTER  = 1       # 512-byte clusters → minimum valid FAT32 ~33 MB
-RESERVED_SECTORS     = 32      # FAT32 standard (BPB + FSInfo + backup)
-NUM_FATS             = 2
-ROOT_CLUSTER         = 2       # FAT32: root dir is a cluster chain
+# FAT16 or refused outright. One sector a cluster keeps the image the smallest
+# FAT32 there is in its sector — about 33 MB of 512-byte sectors, 260 MB of
+# 4096-byte ones; fragmentation is irrelevant for a read-only ESP of a few
+# files.
+SECTORS_PER_CLUSTER = 1
+RESERVED_SECTORS    = 32       # FAT32 standard (BPB + FSInfo + backup)
+NUM_FATS            = 2
+ROOT_CLUSTER        = 2        # FAT32: root dir is a cluster chain
+MIN_DATA_CLUSTERS   = 70000    # FAT32 minimum is 65525: overshot for safety
+FSINFO_BYTES        = 512      # the FSInfo structure, at the head of its sector
 
-# FAT32 minimum: 65525 data clusters.  We overshoot to 70000 for safety.
-MIN_DATA_CLUSTERS = 70000
-# Estimate FAT size for MIN_DATA_CLUSTERS (iterate once to converge)
-_fat_entries = MIN_DATA_CLUSTERS + 2
-_fat_sectors = (_fat_entries * 4 + SECTOR_SIZE - 1) // SECTOR_SIZE
-IMAGE_SECTORS = RESERVED_SECTORS + NUM_FATS * _fat_sectors + MIN_DATA_CLUSTERS * SECTORS_PER_CLUSTER
 
-# Recompute with actual IMAGE_SECTORS to be exact
-FAT_ENTRIES    = (IMAGE_SECTORS - RESERVED_SECTORS) // SECTORS_PER_CLUSTER + 2
-FAT_SECTORS    = (FAT_ENTRIES * 4 + SECTOR_SIZE - 1) // SECTOR_SIZE
-DATA_START     = RESERVED_SECTORS + NUM_FATS * FAT_SECTORS
-TOTAL_CLUSTERS = (IMAGE_SECTORS - DATA_START) // SECTORS_PER_CLUSTER
-IMAGE_SIZE     = IMAGE_SECTORS * SECTOR_SIZE
-CLUSTER_SIZE   = SECTOR_SIZE * SECTORS_PER_CLUSTER
+class Fat32:
+    """The layout of a FAT32 of `sector` bytes a sector."""
 
-assert TOTAL_CLUSTERS >= 65525, \
-    f"FAT32 requires ≥65525 data clusters, got {TOTAL_CLUSTERS}"
+    def __init__(self, sector):
+        if sector % 512 or not 512 <= sector <= 4096:
+            raise ValueError("a FAT's sector is a whole number of 512-byte sectors up to 4096, not %d" % sector)
+        self.sector = sector
+        fat_sectors = ((MIN_DATA_CLUSTERS + 2) * 4 + sector - 1) // sector
+        self.image_sectors = RESERVED_SECTORS + NUM_FATS * fat_sectors + MIN_DATA_CLUSTERS * SECTORS_PER_CLUSTER
+        entries = (self.image_sectors - RESERVED_SECTORS) // SECTORS_PER_CLUSTER + 2
+        self.fat_sectors = (entries * 4 + sector - 1) // sector
+        self.data_start = RESERVED_SECTORS + NUM_FATS * self.fat_sectors
+        self.total_clusters = (self.image_sectors - self.data_start) // SECTORS_PER_CLUSTER
+        self.image_size = self.image_sectors * sector
+        self.cluster_size = sector * SECTORS_PER_CLUSTER
+        assert self.total_clusters >= 65525, \
+            f"FAT32 requires ≥65525 data clusters, got {self.total_clusters}"
+
+    def cluster_offset(self, clust):
+        return (self.data_start + (clust - 2) * SECTORS_PER_CLUSTER) * self.sector
 
 
 def align_up(v, a):
     return (v + a - 1) & ~(a - 1)
-
-
-def cluster_offset(clust):
-    return (DATA_START + (clust - 2) * SECTORS_PER_CLUSTER) * SECTOR_SIZE
 
 
 def make_short_name(base, ext):
@@ -99,12 +99,13 @@ ATTR_DIRECTORY  = 0x10
 ATTR_ARCHIVE    = 0x20
 
 
-def build_fat32(efi_path: str, out_path: str, hidden_sectors=0):
+def build_fat32(efi_path: str, out_path: str, hidden_sectors=0, sector=512):
+    g = Fat32(sector)
     efi_data    = open(efi_path, 'rb').read()
     startup_nsh = b'@echo -off\r\n\\EFI\\BOOT\\BOOTX64.EFI\r\n'
 
     def file_clusters(size):
-        return max(1, align_up(size, CLUSTER_SIZE) // CLUSTER_SIZE)
+        return max(1, align_up(size, g.cluster_size) // g.cluster_size)
 
     # Cluster allocation (after ROOT_CLUSTER=2 which holds root dir)
     clust_efi_dir    = 3   # EFI/ directory
@@ -114,10 +115,10 @@ def build_fat32(efi_path: str, out_path: str, hidden_sectors=0):
     clust_nsh        = clust_efi_file + efi_clust_count   # startup.nsh
 
     # ── FAT32 BPB ────────────────────────────────────────────────────────────
-    bpb = bytearray(SECTOR_SIZE)
+    bpb = bytearray(g.sector)
     bpb[0:3]  = b'\xEB\x58\x90'                       # jmp + nop
     bpb[3:11] = b'BOXOS   '                            # OEM name
-    struct.pack_into('<H', bpb,  11, SECTOR_SIZE)       # BytesPerSector
+    struct.pack_into('<H', bpb,  11, g.sector)          # BytesPerSector
     bpb[13]   = SECTORS_PER_CLUSTER                     # SectorsPerCluster
     struct.pack_into('<H', bpb,  14, RESERVED_SECTORS)  # ReservedSectors
     bpb[16]   = NUM_FATS                                # NumFATs
@@ -127,15 +128,16 @@ def build_fat32(efi_path: str, out_path: str, hidden_sectors=0):
     struct.pack_into('<H', bpb,  22, 0)                 # SectorsPerFAT16 (0 for FAT32)
     struct.pack_into('<H', bpb,  24, 63)                # SectorsPerTrack
     struct.pack_into('<H', bpb,  26, 255)               # NumHeads
-    # HiddenSectors — sectors preceding the partition that holds this volume.
-    # Zero is right for a standalone image and wrong the moment the same bytes
-    # are embedded in a partitioned disk, which is what the hybrid BoxOS image
-    # does: the FAT specification defines this field as the partition's offset,
-    # and firmware that consults it computes every absolute address from it.
+    # HiddenSectors — sectors preceding the partition that holds this volume,
+    # in this FAT's sectors. Zero is right for a standalone image and wrong the
+    # moment the same bytes are embedded in a partitioned disk, which is what
+    # the hybrid BoxOS image does: the FAT specification defines this field as
+    # the partition's offset, and firmware that consults it computes every
+    # absolute address from it.
     struct.pack_into('<I', bpb,  28, hidden_sectors)     # HiddenSectors
-    struct.pack_into('<I', bpb,  32, IMAGE_SECTORS)     # TotalSectors32 ← critical
+    struct.pack_into('<I', bpb,  32, g.image_sectors)   # TotalSectors32 ← critical
     # FAT32 extended BPB (starts at offset 36)
-    struct.pack_into('<I', bpb,  36, FAT_SECTORS)       # SectorsPerFAT32
+    struct.pack_into('<I', bpb,  36, g.fat_sectors)     # SectorsPerFAT32
     struct.pack_into('<H', bpb,  40, 0)                 # ExtFlags
     struct.pack_into('<H', bpb,  42, 0)                 # FSVersion (0.0)
     struct.pack_into('<I', bpb,  44, ROOT_CLUSTER)      # RootCluster
@@ -146,28 +148,21 @@ def build_fat32(efi_path: str, out_path: str, hidden_sectors=0):
     struct.pack_into('<I', bpb,  67, 0xB0320033)        # VolumeID
     bpb[71:82]  = b'BOXOS ESP  '                        # VolumeLabel
     bpb[82:90]  = b'FAT32   '                           # FSType
-    bpb[510] = 0x55
+    bpb[510] = 0x55                                     # the signature is at 510, whatever the sector
     bpb[511] = 0xAA
 
-    # ── FSInfo sector (sector 1) ──────────────────────────────────────────────
-    fsinfo = bytearray(SECTOR_SIZE)
+    # ── FSInfo (sector 1): its structure at the head of the sector, the trail
+    # signature 0xAA550000 closing the structure's 512 bytes ─────────────────
+    fsinfo = bytearray(g.sector)
     struct.pack_into('<I', fsinfo,   0, 0x41615252)    # LeadSig
     struct.pack_into('<I', fsinfo, 484, 0x61417272)    # StrucSig
-    struct.pack_into('<I', fsinfo, 488, TOTAL_CLUSTERS - clust_nsh)  # FreeCount
+    # FreeCount: clusters 2 to clust_nsh are taken, every other data cluster free
+    struct.pack_into('<I', fsinfo, 488, g.total_clusters - (clust_nsh - 1))
     struct.pack_into('<I', fsinfo, 492, clust_nsh + 1) # NextFree
-    struct.pack_into('<I', fsinfo, 508, 0xAA550000)    # TrailSig (note: big-endian stored)
-    # Correct trail signature: 0x000055AA at offset 508 little-endian
-    struct.pack_into('<I', fsinfo, 508, 0xAA550000)
-    # Actually spec says 0xAA550000 — Microsoft SDK says value is 0xAA55
-    # stored at offset 510, which makes bpb bytes [510]=0x55 [511]=0xAA
-    # For FSInfo sector the trail signature at 508 is 0xAA550000:
-    fsinfo[508] = 0x00
-    fsinfo[509] = 0x00
-    fsinfo[510] = 0x55
-    fsinfo[511] = 0xAA
+    struct.pack_into('<I', fsinfo, FSINFO_BYTES - 4, 0xAA550000)       # TrailSig
 
     # ── FAT32 table ───────────────────────────────────────────────────────────
-    fat_bytes = FAT_SECTORS * SECTOR_SIZE
+    fat_bytes = g.fat_sectors * g.sector
     fat = bytearray(fat_bytes)
     struct.pack_into('<I', fat,  0, 0x0FFFFFF8)   # cluster 0: media descriptor
     struct.pack_into('<I', fat,  4, 0x0FFFFFFF)   # cluster 1: end-of-chain
@@ -185,30 +180,28 @@ def build_fat32(efi_path: str, out_path: str, hidden_sectors=0):
     struct.pack_into('<I', fat, clust_nsh * 4, 0x0FFFFFFF)
 
     # ── Directory: root cluster (cluster 2) ───────────────────────────────────
-    root_dir = bytearray(CLUSTER_SIZE)
-    # Volume label entry
+    root_dir = bytearray(g.cluster_size)
     vol_entry = bytearray(32)
     vol_entry[0:11] = b'BOXOS ESP  '
     vol_entry[11]   = ATTR_VOLUME_ID
     root_dir[0:32]  = vol_entry
-    # EFI/ subdirectory entry
     root_dir[32:64] = dir_entry(make_short_name('EFI', '   '),
                                 ATTR_DIRECTORY, clust_efi_dir, 0, is_dir=True)
-    # STARTUP.NSH file entry
     root_dir[64:96] = dir_entry(make_short_name('STARTUP', 'NSH'),
                                 ATTR_ARCHIVE, clust_nsh, len(startup_nsh))
 
     # ── Directory: EFI/ cluster ───────────────────────────────────────────────
-    efi_dir = bytearray(CLUSTER_SIZE)
+    efi_dir = bytearray(g.cluster_size)
     efi_dir[0:32]  = dir_entry(make_short_name('.', '  '),
                                 ATTR_DIRECTORY, clust_efi_dir, 0, is_dir=True)
+    # '..' of a directory in the root names cluster 0, not the root's own (FAT §6.1)
     efi_dir[32:64] = dir_entry(make_short_name('..', '  '),
-                                ATTR_DIRECTORY, ROOT_CLUSTER, 0, is_dir=True)
+                                ATTR_DIRECTORY, 0, 0, is_dir=True)
     efi_dir[64:96] = dir_entry(make_short_name('BOOT', '   '),
                                 ATTR_DIRECTORY, clust_boot_dir, 0, is_dir=True)
 
     # ── Directory: EFI/BOOT/ cluster ─────────────────────────────────────────
-    boot_dir = bytearray(CLUSTER_SIZE)
+    boot_dir = bytearray(g.cluster_size)
     boot_dir[0:32]  = dir_entry(make_short_name('.', '  '),
                                  ATTR_DIRECTORY, clust_boot_dir, 0, is_dir=True)
     boot_dir[32:64] = dir_entry(make_short_name('..', '  '),
@@ -217,64 +210,46 @@ def build_fat32(efi_path: str, out_path: str, hidden_sectors=0):
                                  ATTR_ARCHIVE, clust_efi_file, len(efi_data))
 
     # ── Assemble image ────────────────────────────────────────────────────────
-    image = bytearray(IMAGE_SIZE)
-
-    # BPB at sector 0
-    image[0:SECTOR_SIZE] = bpb
-
-    # FSInfo at sector 1
-    image[SECTOR_SIZE : 2*SECTOR_SIZE] = fsinfo
-
-    # Backup boot sector at sector 6
-    image[6*SECTOR_SIZE : 7*SECTOR_SIZE] = bpb
-
-    # FAT1
-    fat1_off = RESERVED_SECTORS * SECTOR_SIZE
-    image[fat1_off : fat1_off + fat_bytes] = fat
-
-    # FAT2 mirror
+    image = bytearray(g.image_size)
+    image[0:g.sector] = bpb                                   # BPB at sector 0
+    image[g.sector:2 * g.sector] = fsinfo                     # FSInfo at sector 1
+    image[6 * g.sector:7 * g.sector] = bpb                    # backup boot sector at 6
+    fat1_off = RESERVED_SECTORS * g.sector
+    image[fat1_off:fat1_off + fat_bytes] = fat                # FAT1
     fat2_off = fat1_off + fat_bytes
-    image[fat2_off : fat2_off + fat_bytes] = fat
-
-    # Root directory (cluster 2)
-    image[cluster_offset(ROOT_CLUSTER) : cluster_offset(ROOT_CLUSTER) + CLUSTER_SIZE] = root_dir
-
-    # EFI/ directory (cluster 3)
-    image[cluster_offset(clust_efi_dir) : cluster_offset(clust_efi_dir) + CLUSTER_SIZE] = efi_dir
-
-    # EFI/BOOT/ directory (cluster 4)
-    image[cluster_offset(clust_boot_dir) : cluster_offset(clust_boot_dir) + CLUSTER_SIZE] = boot_dir
-
-    # BOOTX64.EFI data (clusters 5..)
-    efi_dest = cluster_offset(clust_efi_file)
-    image[efi_dest : efi_dest + len(efi_data)] = efi_data
-
-    # startup.nsh data
-    nsh_dest = cluster_offset(clust_nsh)
-    image[nsh_dest : nsh_dest + len(startup_nsh)] = startup_nsh
+    image[fat2_off:fat2_off + fat_bytes] = fat                # FAT2 mirror
+    for clust, data in ((ROOT_CLUSTER, root_dir), (clust_efi_dir, efi_dir), (clust_boot_dir, boot_dir),
+                        (clust_efi_file, efi_data), (clust_nsh, startup_nsh)):
+        at = g.cluster_offset(clust)
+        image[at:at + len(data)] = data
 
     open(out_path, 'wb').write(bytes(image))
 
-    print(f"  {out_path}: {IMAGE_SIZE // (1024*1024)} MB FAT32 ESP")
-    print(f"    TotalSectors32 = {IMAGE_SECTORS}  (BPB offset 32)")
-    print(f"    FAT sectors    = {FAT_SECTORS} × 2")
-    print(f"    DataStart      = sector {DATA_START}")
+    print(f"  {out_path}: {g.image_size // (1024*1024)} MB FAT32 ESP of {g.sector}-byte sectors")
+    print(f"    TotalSectors32 = {g.image_sectors}  (BPB offset 32)")
+    print(f"    FAT sectors    = {g.fat_sectors} × 2")
+    print(f"    DataStart      = sector {g.data_start}")
     print(f"    BOOTX64.EFI    = {len(efi_data)} bytes, {efi_clust_count} cluster(s)")
     print(f"    startup.nsh    = {len(startup_nsh)} bytes")
 
 
 if __name__ == '__main__':
-    if len(sys.argv) not in (3, 4):
-        print(f"Usage: {sys.argv[0]} <input.efi> <output.img> [hidden_sectors]",
+    args = sys.argv[1:]
+    sector = 512
+    if '--sector' in args:
+        at = args.index('--sector')
+        sector = int(args[at + 1], 0)
+        del args[at:at + 2]
+    if len(args) not in (2, 3):
+        print(f"Usage: {sys.argv[0]} <input.efi> <output.img> [hidden_sectors] [--sector 512|4096]",
               file=sys.stderr)
-        print("  hidden_sectors — the LBA this volume will start at once it is",
+        print("  hidden_sectors — where this volume will start once it is embedded in a",
               file=sys.stderr)
-        print("                   embedded in a partition (0 for a standalone image)",
+        print("                   partition, in its own sectors (0 for a standalone image)",
               file=sys.stderr)
         sys.exit(1)
     try:
-        build_fat32(sys.argv[1], sys.argv[2],
-                    int(sys.argv[3], 0) if len(sys.argv) == 4 else 0)
+        build_fat32(args[0], args[1], int(args[2], 0) if len(args) == 3 else 0, sector)
     except Exception as exc:
         import traceback; traceback.print_exc()
         print(f"Error: {exc}", file=sys.stderr)

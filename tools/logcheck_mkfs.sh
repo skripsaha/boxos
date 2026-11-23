@@ -53,7 +53,7 @@ MKFS_CLEAN="check: consistent — 0 damage, 0 leak, 0 note"
 #                        box says, and the kernel is the file --kernel names
 mkfs_py() {
     python3 - "$@" <<'PY'
-import binascii, hashlib, os, struct, subprocess, sys, uuid
+import binascii, collections, hashlib, os, struct, subprocess, sys, uuid
 sys.dont_write_bytecode = True
 sys.path.insert(0, "tools")
 from volumeread import binder, medium, ondisk
@@ -189,16 +189,19 @@ def Leg(leg, a):
     elif leg == "ground":
         Ground(a[0], int(a[1]))
     elif leg == "files":
+        # A volume may hold files called alike — the scenes of every look are
+        # four called boot.scene — so the files are held as a multiset of
+        # (name, bytes), the one on the volume against the one laid.
         c = BookCensus(medium.Medium(a[0]))
-        have = {fs.name.decode("utf-8", "replace"): c.Sha256(fid) for fid, fs in c.mount.files.items()}
+        have = collections.Counter((fs.name.decode("utf-8", "replace"), c.Sha256(fid))
+                                   for fid, fs in c.mount.files.items())
         laid = open(a[1]).read().split("\n")[:-1][0::2]
-        want = {}
+        want = collections.Counter()
         for path in laid:
             with open(path, "rb") as f:
-                want[os.path.basename(path)] = hashlib.sha256(f.read()).hexdigest()
-        differ = sorted(n for n in set(have) | set(want) if have.get(n) != want.get(n))
-        differ += ["two sources named alike"] if len(want) != len(laid) else []
-        print("MKFS files=%u same=%u differ=%s" % (len(laid), len(laid) - len(differ), differ[:5] or "none"))
+                want[(os.path.basename(path), hashlib.sha256(f.read()).hexdigest())] += 1
+        differ = sorted({n for n, _ in (have - want) + (want - have)})
+        print("MKFS files=%u same=%u differ=%s" % (len(laid), sum((have & want).values()), differ[:5] or "none"))
     elif leg == "formula":
         c = BookCensus(medium.Medium(a[0]))
         p, g = binder.ReadPlan(c.mount.tally), c.g

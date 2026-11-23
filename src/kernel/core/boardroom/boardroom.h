@@ -27,10 +27,17 @@ typedef enum {
     BOARD_USB               /* a mass storage device on the USB bus */
 } BoardKind;
 
-/* Sectors are 512 bytes here, everywhere, on every kind of seat. A medium that
- * addresses itself differently is refused by whoever knows about it rather
- * than translated silently. */
+/* Sectors are 512 bytes here, everywhere, on every kind of seat: the room's
+ * ruler, not a statement about any medium. A medium addressed in larger
+ * blocks — 4096 on a 4Kn disk — is seated with its block's size
+ * (BoardroomSeatLogicalBytes), and every write and every read nobody stands
+ * over covers whole blocks of it or is refused (ERR_UNALIGNED): nothing in
+ * the machine reads a block to patch part of it. A read standing over the
+ * medium may begin or end inside a block; the room reads the block whole.
+ * A block larger than BOARDROOM_LOGICAL_MOST, or not a whole number of the
+ * room's sectors, is no seat: its driver says so and leaves it. */
 #define BOARDROOM_SECTOR_BYTES 512
+#define BOARDROOM_LOGICAL_MOST 4096
 
 /* Call the room to order: find every medium, and let the USB bus finish saying
  * what is on it first. Safe to call more than once; later calls pick up media
@@ -214,7 +221,7 @@ uint32_t    BoardroomSeatSeating(uint8_t seat);
 
 /*
  * What the medium in this seat is BUILT from, in bytes, as opposed to what it
- * is addressed in — which is always 512 here, on every kind of seat.
+ * is addressed in (BoardroomSeatLogicalBytes).
  *
  * Almost every flash device made is addressed in 512-byte blocks and built
  * from 4096-byte ones. A volume laid out on the finer grid works and costs
@@ -226,6 +233,11 @@ uint32_t    BoardroomSeatSeating(uint8_t seat);
  * Zero means the medium would not say, which is an answer and not a failure.
  */
 uint32_t BoardroomSeatPhysicalBytes(uint8_t seat);
+
+/* What the medium in this seat is ADDRESSED in, in bytes — its logical block:
+ * 512, or 4096 on a 4Kn medium; 0 for an empty seat. A partition table on it
+ * counts in these blocks (ground.c), and every write to it covers whole ones. */
+uint32_t BoardroomSeatLogicalBytes(uint8_t seat);
 
 /*
  * The grid a write to this seat's medium is cut to, in one answer: its

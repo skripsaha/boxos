@@ -10,6 +10,9 @@ whether it landed.
                             newest first, a line each; exit 1 when the front
                             carries no head
 
+--block N: the block the image's medium is addressed in (4096 for a 4Kn
+medium, 512 by default) — its partition table counts in it.
+
 The numbers of the layout are read out of boxos_crossings.h, and the two
 records are held to the sizes it asserts, so nothing here is a second copy of
 what the loader and the kernel read.
@@ -54,15 +57,16 @@ def sound(raw, packer, magic):
     return zlib.crc32(raw[:12] + b"\0\0\0\0" + raw[16:packer.size]) & 0xFFFFFFFF == crc
 
 
-def front_free(medium, end):
-    """The MBR names every partition at `end` or past it, and is no GPT's."""
+def front_free(medium, end, block):
+    """The MBR names every partition at `end` or past it, and is no GPT's —
+    its entries in the medium's blocks of `block` bytes."""
     medium.seek(0)
     mbr = medium.read(512)
     if len(mbr) < 512 or mbr[510:512] != b"\x55\xaa":
         return "it carries no MBR"
     for i in range(4):
         entry = mbr[446 + 16 * i: 462 + 16 * i]
-        kind, start = entry[4], struct.unpack_from("<I", entry, 8)[0]
+        kind, start = entry[4], struct.unpack_from("<I", entry, 8)[0] * (block // 512)
         if kind == 0xEE:
             return "its partition table is a GPT's"
         if kind and start < end:
@@ -70,9 +74,9 @@ def front_free(medium, end):
     return None
 
 
-def lay(path, n):
+def lay(path, n, block):
     with open(path, "r+b") as medium:
-        why = front_free(medium, n["CROSSINGS_FRONT_END"])
+        why = front_free(medium, n["CROSSINGS_FRONT_END"], block)
         if why:
             sys.exit(f"crossings: {path}: no crossings laid — {why}")
         head = HEAD.pack(n["CROSSINGS_HEAD_MAGIC"], HEAD.size, 0, n["CROSSINGS_SLOTS"],
@@ -117,11 +121,16 @@ def read(path, n):
 
 
 def main(argv):
-    if len(argv) != 3 or argv[1] not in ("lay", "read"):
+    block = 512
+    if "--block" in argv:
+        at = argv.index("--block")
+        block = int(argv[at + 1], 0)
+        argv = argv[:at] + argv[at + 2:]
+    if len(argv) != 3 or argv[1] not in ("lay", "read") or block % 512 or not 512 <= block <= 4096:
         sys.exit(__doc__)
     n = layout()
     if argv[1] == "lay":
-        lay(argv[2], n)
+        lay(argv[2], n, block)
         return 0
     return read(argv[2], n)
 

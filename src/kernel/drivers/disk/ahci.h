@@ -548,7 +548,7 @@ typedef struct {
      * an exception to the rule above but the reason the rule needs a second
      * mechanism — ahci_port_take_whole — which ahci_flush_cache_sync uses
      * instead of drawing one slot beside live NCQ tags. */
-    uint32_t  logical_sector_size;     // bytes; only 512 is supported by the stack
+    uint32_t  logical_sector_size;     // bytes: 512, or 4096 on a 4Kn drive (ahci_build_io speaks it)
     /* What the drive is BUILT from, as opposed to what it is addressed in.
      * A 512e disk is addressed in 512-byte sectors and made of 4096-byte
      * ones, and a volume laid out on the finer grid costs the drive a read

@@ -941,6 +941,44 @@ out:
     return verdict;
 }
 
+/*
+ * What an ATA drive is addressed in and built from, out of IDENTIFY word 106
+ * and words 117-118 (ata_identify.h) — the one reading both disk drivers seat
+ * a drive by, and the only proof of a SATA 4Kn drive this machine can give:
+ * QEMU's IDE and AHCI disks are addressed in 512 alone. A drive that says
+ * nothing is 512 of 512; a 512e drive 512 of 4096; a 4Kn drive 4096 of 4096,
+ * and one built of 16 KiB blocks 4096 of 16384, its first aligned block — word
+ * 209's offset in logical blocks — said in the room's 512-byte sectors.
+ */
+static TestResult TestAtaBlockSizes(void)
+{
+    TestResult verdict = TEST_PASS;
+    uint16_t  *id      = (uint16_t *)g_test_buffer;
+
+    memset(id, 0, 512);
+    TEST_ASSERT(AtaIdentifyLogicalBytes(id) == 512 && AtaIdentifyPhysicalBytes(id, 512) == 512,
+                "a word 106 left unset: 512 of 512");
+    id[106] = 0x6003;
+    TEST_ASSERT(AtaIdentifyLogicalBytes(id) == 512 && AtaIdentifyPhysicalBytes(id, 512) == 4096,
+                "512e: addressed in 512, built of 4096");
+    id[106] = 0x5000;
+    id[117] = 2048;
+    TEST_ASSERT(AtaIdentifyLogicalBytes(id) == 4096 && AtaIdentifyPhysicalBytes(id, 4096) == 4096,
+                "4Kn: 2048 words a block, 4096 of 4096");
+    id[106] = 0x7002;
+    id[209] = 0x4001;
+    TEST_ASSERT(AtaIdentifyPhysicalBytes(id, 4096) == 16384, "4Kn built of four blocks: 16384");
+    TEST_ASSERT_EQ(AtaIdentifyFirstAligned(id, 4096, 16384), 24, "offset 1 of four 4096-byte blocks: sector 24");
+    id[106] = 0xD000;
+    TEST_ASSERT(AtaIdentifyLogicalBytes(id) == 512 && AtaIdentifyPhysicalBytes(id, 512) == 512,
+                "bit 15 set: word 106 says nothing");
+    id[106] = 0x5000;
+    id[117] = 128;
+    TEST_ASSERT_EQ(AtaIdentifyLogicalBytes(id), 512, "fewer than 256 words is no block a drive means");
+out:
+    return verdict;
+}
+
 static const TestCase g_book_tests[] = {
     { .name = "crc32c_vectors", .func = TestCrc32cVectors, .reach = TEST_READS_ONLY },
     { .name = "varint_edges",   .func = TestVarintEdges,   .reach = TEST_READS_ONLY },
@@ -958,6 +996,7 @@ static const TestCase g_book_tests[] = {
     { .name = "golden_slot",    .func = TestGoldenSlot,    .reach = TEST_READS_ONLY },
     { .name = "spine_circle",   .func = TestSpineCircle,   .reach = TEST_READS_ONLY },
     { .name = "ata_first_aligned", .func = TestAtaFirstAligned, .reach = TEST_READS_ONLY },
+    { .name = "ata_block_sizes", .func = TestAtaBlockSizes, .reach = TEST_READS_ONLY },
 };
 
 const TestSuite g_book_suite = {

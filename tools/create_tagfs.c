@@ -15,7 +15,7 @@
  * This file is the modes and nothing else; what each of them writes is in the
  * files create_tagfs.h names.
  *
- * Usage: create_tagfs [--kernel <file>] <disk_image> [<file> <tags>] ...
+ * Usage: create_tagfs [--block <bytes>] [--kernel <file>] <disk_image> [<file> <tags>] ...
  *        create_tagfs --ground [--kernel <file>] [<file> <tags>] ...
  *        create_tagfs --frame-only [--kernel <file>] <disk_image> [<file> <tags>] ...
  *
@@ -32,7 +32,7 @@
 
 static int Usage(const char* self)
 {
-    fprintf(stderr, "Usage: %s [--kernel <file>] <disk_image> [<file> <tags>] ...\n", self);
+    fprintf(stderr, "Usage: %s [--block <bytes>] [--kernel <file>] <disk_image> [<file> <tags>] ...\n", self);
     fprintf(stderr, "       %s --ground [--kernel <file>] [<file> <tags>] ...\n", self);
     fprintf(stderr, "       %s --frame-only [--kernel <file>] <disk_image> [<file> <tags>] ...\n", self);
     fprintf(stderr, "\n");
@@ -43,6 +43,26 @@ static int Usage(const char* self)
     fprintf(stderr, "user's words; what the system keeps a file as is its role:\n");
     fprintf(stderr, "the kernel is the file --kernel names (the one the Deed\n");
     fprintf(stderr, "points a loader at), a program says its own in its box.\n");
+    fprintf(stderr, "--block is the block the image's medium is addressed in\n");
+    fprintf(stderr, "(4096 for a 4Kn medium, 512 by default): its partition\n");
+    fprintf(stderr, "table counts in it.\n");
+    return 1;
+}
+
+/* The option --block <bytes> first, taken out of the arguments when it is
+ * there: the block the image's medium is addressed in. False for a block no
+ * medium is seated with. */
+static int BlockOptionTake(int* argc, char* argv[])
+{
+    if (*argc < 2 || strcmp(argv[1], "--block") != 0) return 1;
+    if (*argc < 3) return 0;
+    char* end = NULL;
+    unsigned long block = strtoul(argv[2], &end, 0);
+    if (!end || *end || block % TAGFS_SECTOR_BYTES || block < TAGFS_SECTOR_BYTES || block > TAGFS_BLOCK_SIZE)
+        return 0;
+    g_medium_block = (uint32_t)block;
+    for (int i = 1; i + 2 < *argc + 1; i++) argv[i] = argv[i + 2];
+    *argc -= 2;
     return 1;
 }
 
@@ -60,6 +80,7 @@ static int KernelOptionTake(int* argc, char* argv[], int at)
 }
 
 int main(int argc, char* argv[]) {
+    if (!BlockOptionTake(&argc, argv)) return Usage(argv[0]);
     /* --ground answers a question about a file list and touches no medium. */
     if (argc >= 2 && strcmp(argv[1], "--ground") == 0) {
         if (!KernelOptionTake(&argc, argv, 2) || (argc - 2) % 2 != 0) return Usage(argv[0]);

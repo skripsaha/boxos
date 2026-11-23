@@ -65,44 +65,62 @@ static const uint8_t g_deed_magic[8] = {
 };
 
 
-/* Read 512-byte logical sectors straight off a device, with no volume in the
- * picture — the partition table, and the probe that follows it. Handles a
- * device whose physical block size is not 512. */
+/* The block a device is addressed in, in bytes — 512, or 4096 on a 4Kn
+ * medium — or 0 for one this loader cannot speak to: a block that is no whole
+ * number of 512-byte sectors, or larger than 4096, as the kernel's room leaves
+ * them (BOARDROOM_LOGICAL_MOST). */
+static uint32_t MediumBlockBytes(const EFI_BLOCK_IO_PROTOCOL *bio)
+{
+    uint32_t bsz = bio && bio->media && bio->media->block_size ? bio->media->block_size : 512u;
+    return bsz % 512u == 0 && bsz <= 4096u ? bsz : 0;
+}
+
+/* Whether `buffer` is one read_blocks takes as it is: on the medium's IoAlign
+ * — 0 or 1 any, else a power of two (EFI_BLOCK_IO_MEDIA, UEFI 2.10 §13.9). */
+static int MediumTakesBuffer(const EFI_BLOCK_IO_PROTOCOL *bio, const void *buffer)
+{
+    uint32_t align = bio->media->io_align;
+    return align <= 1u || ((uintptr_t)buffer & (align - 1u)) == 0;
+}
+
+/*
+ * Read 512-byte sectors straight off a device, with no volume in the picture —
+ * the partition table, the probe that follows it, and the volume's own
+ * blocks. Counted in 512-byte sectors whatever the device is addressed in; the
+ * device is asked for whole blocks of its own only. The blocks the request
+ * covers whole go straight into the caller's buffer in one call when the
+ * buffer is on the medium's IoAlign; a block it covers only part of — at
+ * either end, on a medium of blocks larger than a sector — and any block
+ * whose buffer is off the alignment go through one of the loader's own, on
+ * the 4096 any medium BoxOS meets asks of a buffer at the most.
+ */
 static EFI_STATUS ReadMediumSectors(EFI_BLOCK_IO_PROTOCOL *bio,
                                     uint64_t lba_512, uint32_t count_512,
                                     void *buffer)
 {
+    static uint8_t bounce[4096] __attribute__((aligned(4096)));
     if (!bio || !bio->media) return EFI_NOT_READY;
-    uint32_t bsz = bio->media->block_size;
-    if (bsz == 0) bsz = 512;
+    uint32_t bsz = MediumBlockBytes(bio);
+    if (bsz == 0) return EFI_UNSUPPORTED;
 
-    if (bsz == 512) {
-        return bio->read_blocks(bio, bio->media->media_id, (EFI_LBA)lba_512,
-                                (UINTN)count_512 * 512, buffer);
-    }
-
-    /* A whole physical block bounced through here, aligned to the 4096 every
-     * medium BoxOS meets asks of a buffer at the most (EFI_BLOCK_IO_MEDIA
-     * IoAlign, UEFI 2.10 §13.9: 0 or 1 any, else a power of two) — read_blocks
-     * refuses a buffer off its IoAlign with EFI_INVALID_PARAMETER. */
-    static uint8_t align_buf[8192] __attribute__((aligned(4096)));
-    if (bsz > sizeof(align_buf)) return EFI_UNSUPPORTED;
-
-    uint8_t *out = (uint8_t *)buffer;
-    uint64_t byte_off = lba_512 * 512ULL;
-    uint32_t left = count_512 * 512;
-
-    while (left > 0) {
-        uint64_t phys = byte_off / bsz;
-        uint32_t off  = (uint32_t)(byte_off % bsz);
-        uint32_t can  = bsz - off;
-        if (can > left) can = left;
-
-        EFI_STATUS st = bio->read_blocks(bio, bio->media->media_id,
-                                         (EFI_LBA)phys, bsz, align_buf);
+    const uint32_t per = bsz / 512u;
+    uint8_t       *out = (uint8_t *)buffer;
+    while (count_512 > 0) {
+        uint64_t block = lba_512 / per;
+        uint32_t head  = (uint32_t)(lba_512 % per);
+        uint32_t whole = head ? 0 : count_512 / per;
+        EFI_STATUS st;
+        if (whole && MediumTakesBuffer(bio, out)) {
+            st = bio->read_blocks(bio, bio->media->media_id, (EFI_LBA)block, (UINTN)whole * bsz, out);
+            if (EFI_ERROR(st)) return st;
+            out += (uint64_t)whole * bsz; lba_512 += (uint64_t)whole * per; count_512 -= whole * per;
+            continue;
+        }
+        uint32_t take = per - head < count_512 ? per - head : count_512;
+        st = bio->read_blocks(bio, bio->media->media_id, (EFI_LBA)block, bsz, bounce);
         if (EFI_ERROR(st)) return st;
-        MemCopy(out, align_buf + off, can);
-        out += can; byte_off += can; left -= can;
+        MemCopy(out, bounce + (uint64_t)head * 512u, (uint64_t)take * 512u);
+        out += (uint64_t)take * 512u; lba_512 += take; count_512 -= take;
     }
     return EFI_SUCCESS;
 }
@@ -155,6 +173,11 @@ static int DeedAt(EFI_BLOCK_IO_PROTOCOL *bio, uint64_t lba, uint32_t want_role,
 static int FindGroundOn(EFI_BLOCK_IO_PROTOCOL *bio, uint8_t *deed_out,
                         uint64_t *out_start, uint64_t *out_sectors)
 {
+    /* Every number of a table is in the medium's own blocks — 4096 bytes on
+     * a 4Kn medium — and is multiplied into 512-byte sectors here. */
+    const uint32_t bsz = MediumBlockBytes(bio);
+    if (bsz == 0) return 0;
+    const uint64_t ratio = bsz / 512u;
     static uint8_t sector0[512];
     if (EFI_ERROR(ReadMediumSectors(bio, 0, 1, sector0))) return 0;
     if (sector0[510] != 0x55 || sector0[511] != 0xAA)     return 0;
@@ -170,8 +193,8 @@ static int FindGroundOn(EFI_BLOCK_IO_PROTOCOL *bio, uint8_t *deed_out,
             const uint8_t *e = sector0 + MBR_TABLE_OFFSET + i * MBR_ENTRY_BYTES;
             if (e[MBR_ENTRY_TYPE] != MBR_TYPE_BOXOS) continue;
 
-            uint64_t start = Le32(e + MBR_ENTRY_START_LBA);
-            uint64_t count = Le32(e + MBR_ENTRY_SECTORS);
+            uint64_t start = Le32(e + MBR_ENTRY_START_LBA) * ratio;
+            uint64_t count = Le32(e + MBR_ENTRY_SECTORS) * ratio;
             if (count < 8) continue;
 
             if (DeedAt(bio, start, VOLUME_DEED_ROLE_HEAD, deed_out)) {
@@ -190,17 +213,17 @@ static int FindGroundOn(EFI_BLOCK_IO_PROTOCOL *bio, uint8_t *deed_out,
 
     /* GPT. Both checksums, because a header that passes its own sum can still
      * point at an entry array that was interrupted mid-write. */
-    static uint8_t header[512];
-    if (EFI_ERROR(ReadMediumSectors(bio, GPT_HEADER_LBA, 1, header))) return 0;
+    static uint8_t header[4096];
+    if (EFI_ERROR(ReadMediumSectors(bio, GPT_HEADER_LBA * ratio, (uint32_t)ratio, header))) return 0;
 
     const char sig[8] = { 'E','F','I',' ','P','A','R','T' };
     for (int i = 0; i < 8; i++)
         if (header[i] != (uint8_t)sig[i]) return 0;
 
     uint32_t header_bytes = Le32(header + GPT_HEADER_SIZE_OFFSET);
-    if (header_bytes < GPT_HEADER_MIN_BYTES || header_bytes > 512) return 0;
+    if (header_bytes < GPT_HEADER_MIN_BYTES || header_bytes > bsz) return 0;
 
-    static uint8_t hprobe[512];
+    static uint8_t hprobe[4096];
     MemCopy(hprobe, header, header_bytes);
     MemZero(hprobe + GPT_HEADER_CRC_OFFSET, 4);
     if (Crc32(hprobe, header_bytes) != Le32(header + GPT_HEADER_CRC_OFFSET)) {
@@ -208,7 +231,7 @@ static int FindGroundOn(EFI_BLOCK_IO_PROTOCOL *bio, uint8_t *deed_out,
         return 0;
     }
 
-    uint64_t entry_lba   = Le64(header + GPT_ENTRY_LBA_OFFSET);
+    uint64_t entry_lba   = Le64(header + GPT_ENTRY_LBA_OFFSET) * ratio;
     uint32_t entry_count = Le32(header + GPT_ENTRY_COUNT_OFFSET);
     uint32_t entry_bytes = Le32(header + GPT_ENTRY_BYTES_OFFSET);
     if (entry_bytes < GPT_ENTRY_MIN_BYTES || entry_count == 0 ||
@@ -234,8 +257,9 @@ static int FindGroundOn(EFI_BLOCK_IO_PROTOCOL *bio, uint8_t *deed_out,
 
         uint64_t first = Le64(e + GPT_ENTRY_FIRST_OFFSET);
         uint64_t last  = Le64(e + GPT_ENTRY_LAST_OFFSET);
-        if (last < first || (last - first + 1) < 8) continue;
-        uint64_t count = last - first + 1;
+        if (last < first || (last - first + 1) * ratio < 8) continue;
+        uint64_t count = (last - first + 1) * ratio;
+        first *= ratio;
 
         if (DeedAt(bio, first, VOLUME_DEED_ROLE_HEAD, deed_out)) {
             *out_start = first; *out_sectors = count; return 1;
@@ -425,8 +449,8 @@ EFI_STATUS MediumWriteSlot(uint64_t lba_512, const void *slot)
 
     if (!g_block_io || !g_block_io->media) return EFI_NOT_READY;
     if (g_block_io->media->read_only) return EFI_WRITE_PROTECTED;
-    uint32_t bsz = g_block_io->media->block_size ? g_block_io->media->block_size : 512u;
-    if ((bsz != 512u && bsz != 4096u) || (lba_512 * 512u) % bsz) return EFI_UNSUPPORTED;
+    uint32_t bsz = MediumBlockBytes(g_block_io);
+    if (bsz == 0 || (lba_512 * 512u) % bsz) return EFI_UNSUPPORTED;
 
     MemCopy(aligned, slot, sizeof(aligned));
     EFI_STATUS st = g_block_io->write_blocks(g_block_io, g_block_io->media->media_id,
@@ -443,11 +467,13 @@ int MediumFrontFree(uint64_t end)
 {
     static uint8_t mbr[512] __attribute__((aligned(4096)));
 
-    if (EFI_ERROR(MediumRead(0, 1, mbr)) || mbr[510] != 0x55 || mbr[511] != 0xAA) return 0;
+    const uint32_t bsz = g_block_io ? MediumBlockBytes(g_block_io) : 0;
+    if (bsz == 0 || EFI_ERROR(MediumRead(0, 1, mbr)) || mbr[510] != 0x55 || mbr[511] != 0xAA) return 0;
     for (uint32_t i = 0; i < MBR_ENTRY_COUNT; i++) {
         const uint8_t *e = mbr + MBR_TABLE_OFFSET + i * MBR_ENTRY_BYTES;
         if (e[MBR_ENTRY_TYPE] == 0) continue;
-        if (e[MBR_ENTRY_TYPE] == MBR_TYPE_PROTECTIVE || Le32(e + MBR_ENTRY_START_LBA) < end) return 0;
+        if (e[MBR_ENTRY_TYPE] == MBR_TYPE_PROTECTIVE ||
+            (uint64_t)Le32(e + MBR_ENTRY_START_LBA) * (bsz / 512u) < end) return 0;
     }
     return 1;
 }

@@ -72,6 +72,22 @@ int ObjTagShow(const ManifestOp *op, Crate *crates, uint16_t crate_count, const 
 /* The ids a list answer moves to the caller's crate at a time. */
 #define STORAGE_SHOWN_ANSWER_PIECE 64u
 
+/* A list of tag.shown a program asks of its own, as one page of it is asked
+ * of the volume (ShownPager): the programs that show it theirs, or that asked
+ * it to. */
+typedef struct {
+    uint64_t self;
+    uint8_t  which;
+} ShownAsk;
+
+static error_t ShownPager(const void *ask, uint64_t from, uint64_t *out, uint32_t room, bool want_total,
+                          TagFSPage *page)
+{
+    const ShownAsk *a = ask;
+    return a->which == STORAGE_SHOWN_TO_ME ? TagFSShownToPage(a->self, from, out, room, want_total, page)
+                                           : TagFSAsksPage(a->self, from, out, room, want_total, page);
+}
+
 /* STORAGE_TAG_SHOWN  params: [u8 which][u64 program][u64 from] — out_crate
  *                    [u32 delivered][u32 total][u64 ids[delivered]]. */
 int ObjTagShown(const ManifestOp *op, Crate *crates, uint16_t crate_count, const OpContext *ctx)
@@ -111,27 +127,8 @@ int ObjTagShown(const ManifestOp *op, Crate *crates, uint16_t crate_count, const
             rc = (error_t)crate_out_commit_at(out, ctx, 8, all + at, (uint64_t)hdr[0] * sizeof(uint64_t));
         kfree(all);
     } else {
-        /* Asked once whatever the room, as storage.query is: a caller with
-         * room for none asks how many there are. */
-        for (bool first = true; rc == OK; first = false) {
-            uint32_t  room = most - hdr[0] < STORAGE_SHOWN_ANSWER_PIECE ? most - hdr[0] : STORAGE_SHOWN_ANSWER_PIECE;
-            TagFSPage page;
-            rc = which == STORAGE_SHOWN_TO_ME ? TagFSShownToPage(self, from, piece, room, first, &page)
-                                              : TagFSAsksPage(self, from, piece, room, first, &page);
-            if (rc != OK)
-                break;
-            if (first)
-                hdr[1] = page.total;
-            if (page.delivered)
-                rc = (error_t)crate_out_commit_at(out, ctx, 8 + (uint64_t)hdr[0] * sizeof(uint64_t), piece,
-                                                  (uint64_t)page.delivered * sizeof(uint64_t));
-            hdr[0] += page.delivered;
-            if (!page.next || hdr[0] == most)
-                break;
-            from = page.next;
-        }
-        if (hdr[1] < hdr[0])
-            hdr[1] = hdr[0];
+        const ShownAsk ask = { self, which };
+        rc = StorageAnswerPages(ShownPager, &ask, from, out, ctx, piece, STORAGE_SHOWN_ANSWER_PIECE, hdr);
     }
     if (rc != OK) return rc;
 

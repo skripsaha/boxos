@@ -54,6 +54,7 @@ bool        xhci_msd_unit_present(uint8_t unit);
 uint32_t    xhci_msd_unit_max_run(uint8_t unit);
 
 uint64_t    xhci_msd_unit_sectors(uint8_t unit);
+uint32_t    xhci_msd_unit_logical_bytes(uint8_t unit);   /* its own block: 512, or 4096 on 4Kn */
 uint32_t    xhci_msd_unit_physical_bytes(uint8_t unit);
 uint64_t    xhci_msd_unit_first_aligned(uint8_t unit);
 /* Whether the unit refused a write with DATA PROTECT (sense key 7): it takes

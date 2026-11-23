@@ -370,6 +370,19 @@ static int ObjSpan(const ManifestOp *op,
 /* The ids a head question moves to the caller's crate at a time. */
 #define STORAGE_HEAD_PIECE 64u
 
+/* A head question, as one page of it is asked of the volume (HeadPager). */
+typedef struct {
+    const uint8_t *bytes;
+    uint32_t       length;
+} HeadAsk;
+
+static error_t HeadPager(const void *ask, uint64_t from, uint64_t *out, uint32_t room, bool want_total,
+                         TagFSPage *page)
+{
+    const HeadAsk *h = ask;
+    return TagFSStartingWithPage(h->bytes, h->length, from, out, room, want_total, page);
+}
+
 /* STORAGE_HEAD_QUERY  in_crate: the bytes a file begins with, 1 to
  *                     STORAGE_HEAD_MOST of them; out_crate: [u32 delivered]
  *                     [u32 total][u64 file_ids[delivered]], as storage.query's.
@@ -388,33 +401,12 @@ static int ObjHeadQuery(const ManifestOp *op, Crate *crates, uint16_t crate_coun
 
     uint8_t *bytes = crate_in_buf(in, ctx);
     if (!bytes) return ERR_INVALID_ADDRESS;
-    uint64_t room_ids = (out->capacity - 8) / sizeof(uint64_t);
-    uint32_t most     = room_ids > 0xFFFFFFFFull ? 0xFFFFFFFFu : (uint32_t)room_ids;
-    uint64_t piece[STORAGE_HEAD_PIECE];
-    uint32_t hdr[2]   = { 0, 0 };   /* delivered, total */
-    uint64_t from     = 1;
-    error_t  rc       = OK;
-    /* Asked once whatever the room, as storage.query is: a caller with room
-     * for none asks how many there are. */
-    for (bool first = true; rc == OK; first = false) {
-        uint32_t  room = most - hdr[0] < STORAGE_HEAD_PIECE ? most - hdr[0] : STORAGE_HEAD_PIECE;
-        TagFSPage page;
-        rc = TagFSStartingWithPage(bytes, (uint32_t)in->size, from, piece, room, first, &page);
-        if (rc != OK)
-            break;
-        if (first)
-            hdr[1] = page.total;
-        if (page.delivered)
-            rc = (error_t)crate_out_commit_at(out, ctx, 8 + (uint64_t)hdr[0] * sizeof(uint64_t), piece,
-                                              (uint64_t)page.delivered * sizeof(uint64_t));
-        hdr[0] += page.delivered;
-        if (!page.next || hdr[0] == most)
-            break;
-        from = page.next;
-    }
+    uint64_t      piece[STORAGE_HEAD_PIECE];
+    uint32_t      hdr[2] = { 0, 0 };   /* delivered, total */
+    const HeadAsk ask    = { bytes, (uint32_t)in->size };
+    error_t       rc     = StorageAnswerPages(HeadPager, &ask, 1, out, ctx, piece, STORAGE_HEAD_PIECE, hdr);
     crate_buf_free(bytes);
     if (rc != OK) return rc;
-    if (hdr[1] < hdr[0]) hdr[1] = hdr[0];
     int crc = crate_out_commit_at(out, ctx, 0, hdr, sizeof(hdr));
     if (crc != OK) return crc;
     out->size = sizeof(hdr) + (uint64_t)hdr[0] * sizeof(uint64_t);

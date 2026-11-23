@@ -210,7 +210,9 @@ out:
 }
 
 /* The deck's head question, and what obj.getinfo says of a file: asked as the
- * kernel asks it, its crates its own memory. */
+ * kernel asks it, its crates its own memory — with room for none and for one
+ * too, through the one paging every list of the deck is answered by
+ * (StorageAnswerPages): storage.query's and tag.shown's as well. */
 static TestResult TestStandHeadDeck(void)
 {
     static uint8_t answer[256];
