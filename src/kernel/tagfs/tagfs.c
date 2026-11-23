@@ -2431,11 +2431,10 @@ size_t tagfs_tag_text(TagFSVolume* vol, uint32_t tag_id, char *out, size_t out_s
 
 bool TagFSHoldsProgram(const uint8_t volume[16], uint64_t owner)
 {
-    TagFSVolume* vol = TagFSHome();
-    if (!volume || owner == 0 || !tagfs_enter(vol))
+    TagFSVolume* vol = volume ? TagFSVolumeOfUuid(volume) : NULL;
+    if (!vol || owner == 0 || !tagfs_enter(vol))
         return false;
-    bool here  = (owner & TAGFS_PASSPORT_BIT) || memcmp(volume, vol->state.uuid, sizeof(vol->state.uuid)) == 0;
-    bool holds = here && FileMapProgramFiles(vol->state.files, owner, NULL, 0, NULL) > 0;
+    bool holds = FileMapProgramFiles(vol->state.files, owner, NULL, 0, NULL) > 0;
     tagfs_leave(vol);
     return holds;
 }
@@ -2490,7 +2489,7 @@ error_t TagFSPassportLay(TagFSVolume* vol, uint64_t fid, uint64_t passport)
 
 bool TagFSTagIsPersons(uint32_t tag_id)
 {
-    TagFSVolume* vol = TagFSHome();
+    TagFSVolume* vol = TagFSHome();   /* the machine's language */
     if (!tagfs_enter(vol))
         return false;
     TagSpelling tag;
@@ -2502,7 +2501,7 @@ bool TagFSTagIsPersons(uint32_t tag_id)
 
 bool TagFSTagMatches(uint32_t tag_id, const TagSpelling *pattern)
 {
-    TagFSVolume* vol = TagFSHome();
+    TagFSVolume* vol = TagFSHome();   /* the machine's language */
     if (!tagfs_enter(vol))
         return false;
     TagSpelling tag;

@@ -846,11 +846,12 @@ error_t  TagFSInternOwned(TagFSVolume* vol, TagOwner owner, const TagSpelling* t
  * the volume has no such tag, or there is no volume. */
 size_t   tagfs_tag_text(TagFSVolume* vol, uint32_t tag_id, char* out, size_t out_size);
 
-/* Whether program `owner` (TagOwner) is on the volume mounted, so that its
- * own tags are its: a signed program's passport while a file of it is — live,
- * or kept deleted; a program named by its file while the volume is the one
- * `volume` names (its Deed's uuid) and holds that file, holding no signed
- * program since. False with no volume. */
+/* Whether program `owner` (TagOwner) is on the volume of the house `volume`
+ * names (its Deed's uuid) — the one the program was started from — so that
+ * its own tags are its: a signed program's passport while a file of it is
+ * there, live or kept deleted; a program named by its file while the volume
+ * holds that file, holding no signed program since. False when the house
+ * holds no such volume, or it is not mounted. */
 bool     TagFSHoldsProgram(const uint8_t volume[16], uint64_t owner);
 
 /* Who a program is, as its own tags are owned (TagOwner): a signed program
@@ -872,8 +873,10 @@ uint32_t TagFSProgramFiles(TagFSVolume* vol, uint64_t owner, uint64_t* out, uint
  * when it says the same (InkPassport). */
 error_t  TagFSPassportLay(TagFSVolume* vol, uint64_t fid, uint64_t passport);
 
-/* Whether tag `tag_id` is one of the person's (TagOwner): false for a
- * program's own, an id the volume has not, and with no volume. */
+/* Whether tag `tag_id` of the home volume is one of the person's
+ * (TagOwner): false for a program's own, an id the volume has not, and with
+ * no volume. The home volume's tag ids are the machine's language — what the
+ * processes, Touch and the Use Context speak. */
 bool     TagFSTagIsPersons(uint32_t tag_id);
 
 /*
@@ -929,9 +932,10 @@ error_t  TagFSAskToSee(TagFSVolume* vol, uint64_t asker, uint64_t owner, bool* n
 error_t  TagFSAsksPage(TagFSVolume* vol, uint64_t owner, uint64_t from, uint64_t* out, uint32_t room, bool want_total,
                        TagFSPage* page);
 
-/* Whether tag `tag_id` is one of the person's a pattern names
- * (TagPatternMatches), read in place in the volume's registry: a pattern is
- * spoken in the person's tags, and a program's own is never one it names. */
+/* Whether tag `tag_id` of the home volume — the machine's language, as a
+ * process wears its tags — is one of the person's a pattern names
+ * (TagPatternMatches), read in place in its registry: a pattern is spoken in
+ * the person's tags, and a program's own is never one it names. */
 bool     TagFSTagMatches(uint32_t tag_id, const TagSpelling* pattern);
 
 
